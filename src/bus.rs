@@ -225,6 +225,11 @@ pub struct Bus {
     /// The program waits for a swap the frame rate cap holds back
     /// (`exec::held`).
     pub hold: Option<Hold>,
+    /// What to tell the user on the screen, a title over details, for the
+    /// frontend to show.
+    pub notices: Vec<(String, String)>,
+    /// The program last told it lacks Glide's DOS overlay (`overlay`).
+    pub glide_hint: Option<u16>,
     /// A booted system's IDE channels, primary and secondary, with its
     /// hard disks and CD-ROM drive.
     pub ide: [Option<crate::ide::Channel>; 2],
@@ -423,6 +428,8 @@ impl Bus {
             pci: crate::pci::Pci::default(),
             voodoo: None,
             hold: None,
+            notices: Vec::new(),
+            glide_hint: None,
             ide: [None, None],
             ide_faked: false,
             search_handles: std::collections::HashMap::new(),

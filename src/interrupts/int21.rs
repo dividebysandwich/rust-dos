@@ -1390,6 +1390,8 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                         cpu.set_cpu_flag(CpuFlags::CF, false);
                     }
                     Err(code) => {
+                        // DOS/4GW looks for a DLL along the PATH so.
+                        crate::voodoo::overlay::looked_for(cpu, &filename);
                         cpu.set_ax(code as u16);
                         cpu.set_cpu_flag(CpuFlags::CF, true);
                     }

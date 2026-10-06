@@ -13,6 +13,7 @@ mod cheats;
 mod dialog;
 mod draw;
 mod games;
+mod glide;
 mod help;
 mod image;
 mod launch;
@@ -382,7 +383,7 @@ impl Page {
                 &[Scale, Fullscreen, Aspect, Vrr, Filter, Shader, CrtCurvature, CrtGlow, Monochrome, Composite, CompositeEra]
             }
             Page::Emulator => &[
-                Cycles, Core, Fpu, Cpu, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, VoodooMsaa, VoodooFpsCap, Memsize, Ems, Umb, DosHigh, Dpmi,
+                Cycles, Core, Fpu, Cpu, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, VoodooMsaa, VoodooFpsCap, VoodooOverlay, Memsize, Ems, Umb, DosHigh, Dpmi,
                 DosVersion, IdeHardDisks, BootCdrom, HardDiskSpeed, FloppyDiskSpeed, Joystick,
                 Deadzone, MouseAutocapture, MouseCaptureMessages, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, RecordShader, Autoexec,
                 ShellSuggestions, ShellColors, SaveShellHistory,
@@ -523,6 +524,8 @@ enum Item {
     VoodooScale,
     VoodooMsaa,
     VoodooFpsCap,
+    /// Fetch Glide's DOS overlay (GLIDE2X.OVL).
+    VoodooOverlay,
     Memsize,
     /// Expanded memory and upper memory blocks.
     Ems,
@@ -835,6 +838,7 @@ impl Item {
             VoodooScale => "3dfx OpenGL size",
             VoodooMsaa => "3dfx antialiasing",
             VoodooFpsCap => "3dfx frame rate cap",
+            VoodooOverlay => "  Download Glide's DOS overlay...",
             Ems => "Expanded memory (EMS)",
             Umb => "Upper memory (UMB)",
             DosHigh => "DOS high",
@@ -940,7 +944,7 @@ impl Item {
             Item::SoundFont => soundfonts(frontend),
             Item::Mt32Roms | Item::Mt32Model => mt32(frontend),
             Item::Sc55Roms | Item::Sc55Model => frontend.host_files,
-            Item::Sc55Download => frontend.window && cfg!(all(feature = "sdl", not(target_arch = "wasm32"))),
+            Item::Sc55Download | Item::VoodooOverlay => frontend.window && cfg!(all(feature = "sdl", not(target_arch = "wasm32"))),
             // The ROM is a host file; the program downloads it.
             Item::Awe32Rom => frontend.host_files,
             Item::Awe32Download => frontend.window && cfg!(all(feature = "sdl", not(target_arch = "wasm32"))),
@@ -985,6 +989,8 @@ impl Item {
             Item::Sc55Roms | Item::Sc55Model => s.sound.midisynth == MidiSynth::Sc55,
             // Until there are ROMs.
             Item::Sc55Download => s.sound.midisynth == MidiSynth::Sc55 && sc55_found(s).is_none(),
+            // Until it is there.
+            Item::VoodooOverlay => s.voodoo.enabled && crate::voodoo::overlay::find().is_none(),
             Item::VoodooScale | Item::VoodooMsaa => s.voodoo.enabled && s.voodoo.renderer == crate::voodoo::Renderer::OpenGl,
             Item::Relay => s.network.online,
             Item::SerialIrq(n) => s.serial.ports[n as usize] != crate::serial::PortType::Off,
@@ -1008,7 +1014,7 @@ impl Item {
                 Applies::Now
             }
             Cycles | Core | Fpu | Dpmi | DosVersion | IdeHardDisks | BootCdrom | KeyboardLayout | MouseAutocapture | MouseCaptureMessages | ShellSuggestions | ShellColors | SaveShellHistory | Rewind | RewindMemory
-            | VoodooRenderer | VoodooScale | VoodooMsaa | VoodooFpsCap => Applies::Now,
+            | VoodooRenderer | VoodooScale | VoodooMsaa | VoodooFpsCap | VoodooOverlay => Applies::Now,
             Monochrome => Applies::NowAndAtPrompt,
             HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise | Volume(_) | CaptureDir | RecordUi
             | RecordShader => Applies::Now,
@@ -1033,7 +1039,7 @@ impl Item {
             }
             Item::ModemListen => Input::Text,
             Item::SoundFont | Item::Mt32Roms | Item::Awe32Rom | Item::Sc55Roms | Item::VrScene => Input::File,
-            Item::Autoexec | Item::Rooms | Item::Awe32Download | Item::Sc55Download => Input::Link,
+            Item::Autoexec | Item::Rooms | Item::Awe32Download | Item::Sc55Download | Item::VoodooOverlay => Input::Link,
             _ => Input::Choice,
         }
     }
@@ -1182,7 +1188,7 @@ impl Item {
                 ("auto", None) => "auto".to_string(),
                 (model, _) => crate::sc55::rom::Romset::by_name(model).map_or(model.to_string(), |r| r.display_name()),
             },
-            Sc55Download => String::new(),
+            Sc55Download | VoodooOverlay => String::new(),
             MidiPort if s.sound.midiport.is_empty() => "the first".to_string(),
             MidiPort => s.sound.midiport.clone(),
             HardDiskSpeed => s.disk.hard_disk_speed.describe(DiskClass::HardDisk),
@@ -1425,7 +1431,7 @@ impl Item {
             // Slid, typed, picked from the host's files or edited, and a
             // row of several, whose fields have their own.
             Cycles | CrtCurvature | CrtGlow | Memsize | Volume(_) | ReverbMix | ChorusMix | Deadzone | UltraDir
-            | SoundFont | Mt32Roms | Awe32Rom | Awe32Download | Sc55Roms | Sc55Download | CaptureDir | Autoexec | SbPorts | GusPorts | MacAddr
+            | SoundFont | Mt32Roms | Awe32Rom | Awe32Download | Sc55Roms | Sc55Download | VoodooOverlay | CaptureDir | Autoexec | SbPorts | GusPorts | MacAddr
             | Rooms | Relay | Player | VrScene | VrScreenGlow
             | Lan | LanHost | Room | Password | ModemListen => Vec::new(),
         }
@@ -1718,6 +1724,10 @@ pub struct ConfigUi {
     /// download once the user agreed to it.
     confirm_sc55: Option<&'static crate::sc55::rom::Romset>,
     sc55_download: Option<std::sync::mpsc::Receiver<Result<PathBuf, String>>>,
+    /// The question before Glide's DOS overlay is downloaded, and the
+    /// download going on.
+    confirm_glide: bool,
+    glide_download: Option<std::sync::mpsc::Receiver<Result<PathBuf, String>>>,
     /// The selected setting's value being typed, or picked from a list.
     edit: Option<TextField>,
     popup: Option<Popup>,
@@ -1857,6 +1867,8 @@ impl ConfigUi {
             awe32_download: None,
             confirm_sc55: None,
             sc55_download: None,
+            confirm_glide: false,
+            glide_download: None,
         }
     }
 
@@ -1879,6 +1891,7 @@ impl ConfigUi {
         self.poll_achievements(host);
         self.poll_awe32_download(host);
         self.poll_sc55_download(host);
+        self.poll_glide_download(host);
     }
 
     /// Download the AWE32's ROM on a thread of its own, into rust-dos's
@@ -1985,6 +1998,7 @@ impl ConfigUi {
         self.chooser = None;
         self.confirm_delete = None;
         self.confirm_sc55 = None;
+        self.confirm_glide = false;
         self.cheats.edit = None;
         self.achievements.edit = None;
         self.cheats.refresh(host);
@@ -2227,6 +2241,7 @@ impl ConfigUi {
             self.scroll = 0;
             self.confirm_delete = None;
             self.confirm_sc55 = None;
+            self.confirm_glide = false;
         }
     }
 
@@ -2261,6 +2276,9 @@ impl ConfigUi {
         }
         if self.confirm_sc55.is_some() {
             return self.sc55_confirm_key(key);
+        }
+        if self.confirm_glide {
+            return self.glide_confirm_key(key);
         }
         if let Some(row) = Self::navigate(key, self.row, self.row_count(), self.visible) {
             self.select(row);
@@ -2326,6 +2344,7 @@ impl ConfigUi {
             (UiKey::Enter, Input::Link) if item == Item::Rooms => self.open_rooms(),
             (UiKey::Enter, Input::Link) if item == Item::Awe32Download => self.download_awe32_rom(),
             (UiKey::Enter, Input::Link) if item == Item::Sc55Download => self.ask_sc55_download(),
+            (UiKey::Enter, Input::Link) if item == Item::VoodooOverlay => self.ask_glide_download(),
             (UiKey::Enter, Input::Link) => self.open_autoexec(host),
             (UiKey::Delete | UiKey::Backspace, _) if item.clear(&mut self.settings) => self.changed(item, host),
             _ => {}
@@ -2878,6 +2897,8 @@ impl ConfigUi {
             self.draw_rooms(&mut g, content.clone());
         } else if self.confirm_sc55.is_some() {
             self.draw_sc55_question(&mut g, content.clone());
+        } else if self.confirm_glide {
+            self.draw_glide_question(&mut g, content.clone());
         } else if self.page == Page::Drives {
             self.draw_drives(&mut g, content.clone());
         } else if self.page == Page::Games {
@@ -3545,7 +3566,7 @@ impl ConfigUi {
             self.room_hints()
         } else if self.confirm_delete.is_some() {
             vec![("Enter", if self.confirm_reset { "Reset" } else { "Delete" }, Enter), ("Esc", "Keep", Esc)]
-        } else if self.confirm_sc55.is_some() {
+        } else if self.confirm_sc55.is_some() || self.confirm_glide {
             vec![("Enter", "Download", Enter), ("Esc", "Cancel", Esc)]
         } else if self.page == Page::States {
             vec![

@@ -866,6 +866,13 @@ impl DiskController {
         self.sft_dirty = u128::MAX;
     }
 
+    /// Put a file on Z:, where programs find it on the PATH.
+    pub fn add_virtual_file(&mut self, name: &str, bytes: Vec<u8>) {
+        if let Some(Storage::Tree { files, .. }) = self.drives[DRIVE_Z as usize].as_mut().map(|d| &mut d.storage) {
+            files.insert(name, bytes);
+        }
+    }
+
     fn memory_drive(files: MemFs, label: &str) -> Drive {
         Drive {
             kind: DriveKind::Virtual,

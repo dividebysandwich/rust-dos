@@ -1460,6 +1460,19 @@ card's gamma table, which games set brighter than DOSBox-X shows them.
   the game) and run under a DOS extender such as DOS/4GW, which maps the
   card's memory. Tomb Raider's 3dfx patch (`3DPATCH\3DFX\TOMB.EXE` on the
   Tomb Raider Gold CD) runs with `voodoo=true` and `cpu=pentium`.
+  Games made for the Voodoo Rush and later boards load Glide from
+  `GLIDE2X.OVL` (Tomb Raider's Rush patch, `3DPATCH\VOORUSH\TOMB.EXE`),
+  and the one of 3dfx's Voodoo Graphics driver drives this card whatever
+  board they were made for. It is 3dfx's and doesn't come with rust-dos:
+  the settings window's Emulator page downloads it, after asking, from the
+  driver (3.01.00) the Internet Archive keeps, into rust-dos's
+  configuration directory, and Z: has it from then on, where they find it
+  on the PATH (one beside the game comes first). A game that looks for it
+  while it is missing says so on the screen. Such a game runs without
+  rust-dos's DPMI host: the overlay is a DOS/4G DLL whose start-up only
+  works with DOS/4GW as its own host, at level 0. Its accesses to the
+  Pentium II's memory type range registers, which it marks for 3dfx's
+  Windows driver to catch, do nothing.
 * **Windows 95** [booted from a disk image](#booting-a-disk-image) finds
   the card as a "PCI Multimedia Video Device", which needs no driver:
   games bring `glide2x.dll`, or install 3dfx's Glide runtime (and with it

@@ -25,6 +25,7 @@ pub mod backlog;
 pub mod lfb;
 pub mod mem;
 pub mod mirror;
+pub mod overlay;
 pub mod raster;
 pub mod register;
 pub mod regs;

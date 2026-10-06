@@ -314,6 +314,7 @@ impl Item {
             VoodooScale => "voodoo-scale",
             VoodooMsaa => "voodoo-msaa",
             VoodooFpsCap => "voodoo-fps-cap",
+            VoodooOverlay => "voodoo-overlay",
             Memsize => "memsize",
             Ems => "ems",
             Umb => "umb",

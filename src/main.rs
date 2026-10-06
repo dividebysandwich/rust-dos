@@ -574,6 +574,10 @@ fn main() -> Result<(), String> {
             cpu.bus.log_string(&format!("[VR] {}", note));
             osd.show(note);
         }
+        // And the machine.
+        for (title, detail) in std::mem::take(&mut cpu.bus.notices) {
+            osd.notify(title, detail, true);
+        }
         let frame_start = std::time::Instant::now();
         if let Some((start, times)) = last_frame {
             stats.record(&cpu.bus, rust_dos::stats::FrameTimes { wall: frame_start - start, ..times });
@@ -2303,6 +2307,8 @@ impl Host for MainHost<'_, '_> {
         self.cpu.bus.idle_hint = new.idle_hint;
         // Programs look for the host as they start.
         self.cpu.bus.dpmi.enabled = new.dpmi;
+        // Glide's DOS overlay, once downloaded.
+        rust_dos::voodoo::overlay::provide(&mut self.cpu.bus);
         self.cpu.bus.ide_hard_disks = new.ide_hard_disks;
         self.cpu.bus.boot_cdrom = new.boot_cdrom;
         if new.dos_version != old.dos_version {
