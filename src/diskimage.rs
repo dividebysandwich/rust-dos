@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use crate::disk::DriveKind;
 use crate::diskdelta::Delta;
+use crate::vhd::Vhd;
 
 pub const SECTOR_SIZE: usize = 512;
 
@@ -111,6 +112,9 @@ pub fn detect(path: &Path, requested: DriveKind) -> Result<ImageKind, String> {
     let len = file.len().map_err(|e| e.to_string())?;
     let mut boot = [0u8; SECTOR_SIZE];
     let boot = file.read_exact(&mut boot).is_ok().then_some(&boot[..]);
+    if crate::vhd::is_vhd(&file) {
+        return Ok(ImageKind::HardDisk);
+    }
     if let Some(kind) = kind_by_contents(len, boot) {
         return Ok(kind);
     }
@@ -148,7 +152,7 @@ fn kind_by_name(path: &Path, requested: DriveKind) -> Option<ImageKind> {
     if requested == DriveKind::Floppy || matches!(ext.as_str(), "vfd" | "flp" | "360" | "720" | "1200" | "1440") {
         return Some(ImageKind::Floppy);
     }
-    None
+    (ext == "vhd").then_some(ImageKind::HardDisk)
 }
 
 /// The kind of an image of `len` bytes that starts with `boot`, if its size
@@ -364,9 +368,60 @@ impl From<Vec<u8>> for MemoryImage {
     }
 }
 
+/// An image file: its bytes are the disk's, or it is a VHD image of one.
+pub(crate) enum ImageFile {
+    Raw(File),
+    Vhd(Box<Vhd>),
+}
+
+impl ImageFile {
+    pub(crate) fn new(file: File) -> Result<Self, String> {
+        match crate::vhd::is_vhd(&file) {
+            true => Vhd::open(file).map(|vhd| ImageFile::Vhd(Box::new(vhd))),
+            false => Ok(ImageFile::Raw(file)),
+        }
+    }
+
+    /// The disk's size.
+    pub(crate) fn len(&self) -> std::io::Result<u64> {
+        match self {
+            ImageFile::Raw(file) => file.len(),
+            ImageFile::Vhd(vhd) => Ok(vhd.len()),
+        }
+    }
+
+    /// The geometry the image file says the disk has, if it says one.
+    pub(crate) fn geometry(&self) -> Option<Chs> {
+        match self {
+            ImageFile::Raw(_) => None,
+            ImageFile::Vhd(vhd) => vhd.geometry(),
+        }
+    }
+
+    pub(crate) fn read_at(&self, at: u64, buf: &mut [u8]) -> std::io::Result<()> {
+        match self {
+            ImageFile::Raw(file) => {
+                let mut file = file;
+                file.seek(SeekFrom::Start(at)).and_then(|_| file.read_exact(buf))
+            }
+            ImageFile::Vhd(vhd) => vhd.read_at(at, buf),
+        }
+    }
+
+    fn write_at(&self, at: u64, data: &[u8]) -> std::io::Result<()> {
+        match self {
+            ImageFile::Raw(file) => {
+                let mut file = file;
+                file.seek(SeekFrom::Start(at)).and_then(|_| file.write_all(data))
+            }
+            ImageFile::Vhd(vhd) => vhd.write_at(at, data),
+        }
+    }
+}
+
 /// Where the sectors of a disk image are.
 enum Backing {
-    File(File),
+    File(ImageFile),
     /// In memory, and which `CHUNK`s were written since `take_written`
     /// last looked.
     Memory { data: RefCell<MemoryImage>, written: RefCell<Vec<bool>> },
@@ -442,6 +497,7 @@ impl DiskImage {
                 Err(_) => (File::open(path).map_err(error)?, false),
             }
         };
+        let file = ImageFile::new(file).map_err(|e| format!("{}: {}", path.display(), e))?;
         let len = file.len().map_err(error)?;
         Self::new(path, Backing::File(file), len, floppy, geometry, writable)
     }
@@ -552,7 +608,12 @@ impl DiskImage {
         } else {
             let mut boot = [0u8; SECTOR_SIZE];
             disk.read_at(0, &mut boot).map_err(|e| format!("{}: {}", path.display(), e))?;
-            (geometry.unwrap_or_else(|| hard_disk_geometry(&boot, sectors)), 0)
+            let stated = match &disk.backing {
+                Backing::File(file) => file.geometry(),
+                Backing::Delta(delta) => delta.base_geometry(),
+                Backing::Memory { .. } => None,
+            };
+            (geometry.unwrap_or_else(|| hard_disk_geometry(&boot, sectors, stated)), 0)
         };
         if geometry.heads == 0 || geometry.sectors == 0 || geometry.cylinders == 0 {
             return Err("Invalid disk geometry".to_string());
@@ -641,10 +702,7 @@ impl DiskImage {
 
     fn read_at(&self, at: u64, buf: &mut [u8]) -> std::io::Result<()> {
         match &self.backing {
-            Backing::File(file) => {
-                let mut file = file;
-                file.seek(SeekFrom::Start(at)).and_then(|_| file.read_exact(buf))
-            }
+            Backing::File(file) => file.read_at(at, buf),
             Backing::Memory { data, .. } => match data.borrow().read_at(at, buf) {
                 true => Ok(()),
                 false => Err(std::io::ErrorKind::UnexpectedEof.into()),
@@ -735,7 +793,7 @@ impl DiskImage {
         let error = |e: std::io::Error| format!("{}: {}", dest.display(), e);
         let partial = dest.with_extension("partial");
         match &self.backing {
-            Backing::File(_) => {
+            Backing::File(ImageFile::Raw(_)) => {
                 hostfs::copy(&self.path, &partial).map_err(error)?;
             }
             Backing::Memory { data, .. } => {
@@ -751,21 +809,22 @@ impl DiskImage {
                 }
                 out.set_len(data.len()).map_err(error)?;
             }
-            Backing::Delta(delta) => {
+            Backing::Delta(_) | Backing::File(ImageFile::Vhd(_)) => {
                 // The disk as the machine sees it, holes for zeros.
+                let len = self.sectors * SECTOR_SIZE as u64;
                 let mut out = File::create(&partial).map_err(error)?;
                 let mut buf = vec![0u8; CHUNK];
                 let mut at = 0;
-                while at < delta.len() {
-                    let n = (delta.len() - at).min(CHUNK as u64) as usize;
-                    delta.read_at(at, &mut buf[..n]).map_err(error)?;
+                while at < len {
+                    let n = (len - at).min(CHUNK as u64) as usize;
+                    self.read_at(at, &mut buf[..n]).map_err(error)?;
                     if buf[..n].iter().any(|&b| b != 0) {
                         out.seek(SeekFrom::Start(at)).map_err(error)?;
                         out.write_all(&buf[..n]).map_err(error)?;
                     }
                     at += n as u64;
                 }
-                out.set_len(delta.len()).map_err(error)?;
+                out.set_len(len).map_err(error)?;
             }
         }
         std::fs::rename(&partial, dest).map_err(error)
@@ -781,12 +840,12 @@ impl DiskImage {
         }
         self.generation.set(self.generation.get() + 1);
         match &self.backing {
-            Backing::File(file) => {
+            Backing::File(ImageFile::Raw(file)) => {
                 let mut file = file;
                 file.seek(SeekFrom::Start(0)).map_err(error)?;
                 std::io::copy(&mut source, &mut file).map_err(error)?;
             }
-            Backing::Memory { .. } | Backing::Delta(_) => {
+            Backing::Memory { .. } | Backing::Delta(_) | Backing::File(ImageFile::Vhd(_)) => {
                 // Into a delta only what differs, or it would get all of
                 // the disk.
                 let delta = matches!(self.backing, Backing::Delta(_));
@@ -839,12 +898,7 @@ impl DiskImage {
     fn write_at(&self, at: u64, data: &[u8]) -> Result<(), u8> {
         self.generation.set(self.generation.get() + 1);
         match &self.backing {
-            Backing::File(file) => {
-                let mut file = file;
-                file.seek(SeekFrom::Start(at))
-                    .and_then(|_| file.write_all(data))
-                    .map_err(|_| STATUS_CONTROLLER_FAILURE)
-            }
+            Backing::File(file) => file.write_at(at, data).map_err(|_| STATUS_CONTROLLER_FAILURE),
             Backing::Memory { data: image, written } => {
                 if !image.borrow_mut().write_at(at, data) {
                     return Err(STATUS_SECTOR_NOT_FOUND);
@@ -879,9 +933,11 @@ impl DiskImage {
 }
 
 /// A hard disk's geometry from its first sector: the heads and sectors
-/// per track its partitions end on, or its boot sector's, or 16 heads of
-/// 63 sectors. The cylinders are what the image holds.
-fn hard_disk_geometry(boot: &[u8], sectors: u64) -> Chs {
+/// per track its partitions end on, or its boot sector's, or what the
+/// image file states, or 16 heads of 63 sectors. The cylinders are what
+/// the image holds.
+fn hard_disk_geometry(boot: &[u8], sectors: u64, stated: Option<Chs>) -> Chs {
+    let default = stated.map_or((16, 63), |chs| (chs.heads, chs.sectors));
     let (heads, per_track) = match (Bpb::parse(boot), partitions(boot, sectors)) {
         (Some(bpb), _) if bpb.heads > 0 && (1..=63).contains(&bpb.sectors_per_track) => {
             (bpb.heads as u32, bpb.sectors_per_track as u32)
@@ -889,8 +945,8 @@ fn hard_disk_geometry(boot: &[u8], sectors: u64) -> Chs {
         (_, Some(parts)) => parts
             .iter()
             .find(|p| (1..=63).contains(&p.end_sectors) && p.end_heads > 1)
-            .map_or((16, 63), |p| (p.end_heads, p.end_sectors)),
-        _ => (16, 63),
+            .map_or(default, |p| (p.end_heads, p.end_sectors)),
+        _ => default,
     };
     let cylinders = (sectors / (heads as u64 * per_track as u64)).clamp(1, u32::MAX as u64) as u32;
     Chs { cylinders, heads, sectors: per_track }

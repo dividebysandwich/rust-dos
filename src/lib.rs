@@ -97,6 +97,7 @@ pub mod sound;
 pub mod stats;
 pub mod time_commands;
 pub mod timer;
+pub mod vhd;
 pub mod video;
 pub mod voodoo;
 pub mod vr;

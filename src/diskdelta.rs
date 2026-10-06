@@ -13,6 +13,7 @@
 //! map, so a file cut short where it was being written loses that write
 //! and nothing else.
 
+use crate::diskimage::{Chs, ImageFile};
 use crate::hostfs::{self, File, OpenOptions};
 use sha2::{Digest, Sha256};
 use std::cell::{Cell, RefCell};
@@ -28,7 +29,7 @@ const HASHED_START: u64 = 1 << 20;
 const HASHED_END: u64 = 64 << 10;
 
 pub struct Delta {
-    base: File,
+    base: ImageFile,
     len: u64,
     path: PathBuf,
     /// What tells the image the delta was made over from another: its
@@ -63,6 +64,7 @@ impl Delta {
     /// over this one since changed, is refused.
     pub fn open(base: &Path, path: &Path, read_only: bool) -> Result<Delta, String> {
         let base_file = File::open(base).map_err(|e| error(base, e))?;
+        let base_file = ImageFile::new(base_file).map_err(|e| format!("{}: {}", base.display(), e))?;
         let len = base_file.len().map_err(|e| error(base, e))?;
         let id = identity(&base_file, len).map_err(|e| error(base, e))?;
         let blocks_in_image = len.div_ceil(BLOCK as u64) as usize;
@@ -143,6 +145,11 @@ impl Delta {
         HEADER + (self.map.borrow().len() as u64 * 4).next_multiple_of(512)
     }
 
+    /// The geometry the image file states, if it states one.
+    pub fn base_geometry(&self) -> Option<Chs> {
+        self.base.geometry()
+    }
+
     /// The image's size.
     pub fn len(&self) -> u64 {
         self.len
@@ -176,7 +183,7 @@ impl Delta {
             let n = (BLOCK - offset).min(buf.len() - done);
             let part = &mut buf[done..done + n];
             match (map[index], file.as_ref()) {
-                (0, _) | (_, None) => read_exact_at(&self.base, pos, part)?,
+                (0, _) | (_, None) => self.base.read_at(pos, part)?,
                 (block, Some(file)) => read_exact_at(file, data + (block as u64 - 1) * BLOCK as u64 + offset as u64, part)?,
             }
             done += n;
@@ -218,7 +225,7 @@ impl Delta {
         if !whole {
             let at = index as u64 * BLOCK as u64;
             let n = (self.len - at).min(BLOCK as u64) as usize;
-            read_exact_at(&self.base, at, &mut contents[..n])?;
+            self.base.read_at(at, &mut contents[..n])?;
         }
         let block = self.blocks.get() + 1;
         let file = self.file.borrow();
@@ -256,15 +263,15 @@ impl Delta {
 /// What tells an image from another, or from itself after it changed where
 /// it is most likely to: its size, its first MB (the partition table, boot
 /// sector and FATs of most disks) and its last 64 KB.
-fn identity(base: &File, len: u64) -> std::io::Result<[u8; 32]> {
+fn identity(base: &ImageFile, len: u64) -> std::io::Result<[u8; 32]> {
     let mut hash = Sha256::new();
     hash.update(len.to_le_bytes());
     let mut start = vec![0u8; len.min(HASHED_START) as usize];
-    read_exact_at(base, 0, &mut start)?;
+    base.read_at(0, &mut start)?;
     hash.update(&start);
     let end_at = len.saturating_sub(HASHED_END).max(start.len() as u64);
     let mut end = vec![0u8; (len - end_at) as usize];
-    read_exact_at(base, end_at, &mut end)?;
+    base.read_at(end_at, &mut end)?;
     hash.update(&end);
     Ok(hash.finalize().into())
 }
@@ -318,6 +325,19 @@ mod tests {
         let again = Delta::open(&base, &path, true).unwrap();
         assert_eq!(read(&again, 0, expected.len()), expected);
         assert!(again.write_at(0, &[0; 512]).is_err(), "read-only");
+    }
+
+    #[test]
+    fn a_delta_goes_over_a_dynamic_vhd() {
+        let dir = scratch("vhd");
+        let base = dir.join("disk.vhd");
+        std::fs::write(&base, crate::vhd::make_dynamic(4 << 20, 2 << 20)).unwrap();
+        let before = std::fs::read(&base).unwrap();
+        let delta = Delta::open(&base, &dir.join("disk.vhd.rdelta"), false).unwrap();
+        assert_eq!(delta.len(), 4 << 20);
+        delta.write_at(3 << 20, &[0x77; 512]).unwrap();
+        assert_eq!(read(&delta, (3 << 20) - 512, 1024), [[0u8; 512], [0x77; 512]].concat());
+        assert_eq!(std::fs::read(&base).unwrap(), before, "the image is as it was");
     }
 
     #[test]

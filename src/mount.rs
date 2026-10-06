@@ -61,7 +61,7 @@ IMGMOUNT is the same command.\r
 
 /// The extensions of disk and CD images.
 const IMAGE_EXTENSIONS: &[&str] =
-    &["img", "ima", "vfd", "flp", "dsk", "360", "720", "1200", "1440", "iso", "cue", "bin", "gog", "ins", "inst"];
+    &["img", "ima", "vfd", "flp", "dsk", "360", "720", "1200", "1440", "iso", "cue", "bin", "gog", "ins", "inst", "vhd"];
 
 /// Whether a path is a disk or CD image's, by its extension.
 pub(crate) fn is_image_name(path: &Path) -> bool {
@@ -414,6 +414,11 @@ fn mount_spec(drive: u8, args: Arguments, paths: &PathContext) -> Result<MountSp
         }
     }
     let path = images.remove(0);
+    if drive_number(drive).is_some()
+        && let Some(e) = crate::os_images::not_a_disk(first, &path)
+    {
+        return Err(e);
+    }
     opts.more_images = images;
     Ok(MountSpec { drive, path, opts })
 }
