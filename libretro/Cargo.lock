@@ -1242,6 +1242,7 @@ name = "rust-dos-libretro"
 version = "1.4.0"
 dependencies = [
  "rust-dos",
+ "zip",
 ]
 
 [[package]]

@@ -731,7 +731,7 @@ pub fn variant_profile(dir: &Path, text: &str, variant: &str) -> Result<String, 
 
 /// How packages are imported: a profile made by an older import is made
 /// again, with what the newer one reads (DOS.YML's keys, say).
-const IMPORT_VERSION: u32 = 2;
+const IMPORT_VERSION: u32 = 3;
 
 /// What a package's profile is made from, fingerprinted: its own
 /// rust-dos.conf, a DOSBox configuration in it or beside it, and its

@@ -63,6 +63,15 @@ pub fn import(texts: &[&str], bases: &[PathBuf], name: &str, home: Option<&Path>
 /// as C: before its commands: they start on it rather than on Z:, and may
 /// move it (REMOUNT C D) and mount another C: in its place.
 pub fn import_in(texts: &[&str], bases: &[PathBuf], name: &str, home: Option<&Path>, c_root: Option<&Path>) -> Imported {
+    // rust-dos's own section, which DOSBox leaves alone: the operating
+    // system to start the game in, once the drives are known.
+    let os = texts.iter().flat_map(|t| parse(t).values).rfind(|(s, k, _)| s == "rust-dos" && k == "os").map(|(_, _, v)| v);
+    let with_os = |mut imported: Imported, c_root: Option<&Path>| {
+        if let Some(os) = &os {
+            boot_os(&mut imported, os, c_root);
+        }
+        imported
+    };
     let imported = import_from(texts, bases, name, home, None);
     let remounts = || {
         texts.iter().flat_map(|t| parse(t).autoexec).any(|line| {
@@ -72,13 +81,13 @@ pub fn import_in(texts: &[&str], bases: &[PathBuf], name: &str, home: Option<&Pa
     };
     match c_root {
         Some(root) if !imported.drives.iter().any(|d| d.drive == crate::disk::DRIVE_C) || remounts() => {
-            let mut imported = import_from(texts, bases, name, home, Some(root));
+            let mut imported = with_os(import_from(texts, bases, name, home, Some(root)), Some(root));
             if imported.drives.iter().any(|d| d.drive == crate::disk::DRIVE_C && d.path == root) {
                 imported.autoexec.insert(0, "C:".to_string());
             }
             imported
         }
-        _ => imported,
+        _ => with_os(imported, None),
     }
 }
 
@@ -160,35 +169,50 @@ fn import_from(texts: &[&str], bases: &[PathBuf], name: &str, home: Option<&Path
         }
         autoexec_line(&mut imported, line, bases, home, &mut roots);
     }
-    // rust-dos's own section, which DOSBox leaves alone: the operating
-    // system to start the game in.
-    let os = confs.iter().flat_map(|c| &c.values).rfind(|(s, k, _)| s == "rust-dos" && k == "os");
-    if let Some((_, _, name)) = os {
-        boot_os(&mut imported, name, c_root);
-    }
     imported.drop_invalid();
     imported
 }
 
 /// The game in the operating system `name` (`os_images`), as the Boot OS
 /// core option has it: the system's image as the first hard disk, booted,
-/// and the game on D: (a disk of the booted system), unless the commands
-/// moved it. The commands before the boot would run in no system: the
-/// image's drives stay, the rest goes.
+/// and the game on D: (a disk of the booted system), or the second hard
+/// disk when the game is an archive of a hard disk image, unless the
+/// commands moved it. The commands before the boot would run in no system:
+/// the image's drives stay, the rest goes.
+///
+/// A system of files (an archive or folder) isn't booted: it is C:, the
+/// game is on D:, and the commands run there.
 fn boot_os(imported: &mut Imported, name: &str, c_root: Option<&Path>) {
-    let Some(image) = crate::os_images::find(name) else {
+    use crate::disk::{numbered_drive, DRIVE_C};
+    let Some(os) = crate::os_images::find(name) else {
         imported.warnings.push(format!("[rust-dos] os={}: there is no OS image called that", name));
         return;
     };
-    if let Some(root) = c_root
-        && !imported.drives.iter().any(|d| d.drive == 3)
-        && let Some(game) = imported.drives.iter_mut().find(|d| d.drive == crate::disk::DRIVE_C && d.path == root)
-    {
-        game.drive = 3;
+    let game = c_root.and_then(|root| imported.drives.iter().position(|d| d.drive == DRIVE_C && d.path == root));
+    let taken = |imported: &Imported, drive: u8| imported.drives.iter().any(|d| d.drive == drive);
+    if crate::os_images::holds_files(&os) {
+        if let Some(game) = game.filter(|_| !taken(imported, DRIVE_C + 1)) {
+            imported.drives[game].drive = DRIVE_C + 1;
+            imported.autoexec.insert(0, "D:".to_string());
+        }
+        if taken(imported, DRIVE_C) {
+            imported.warnings.push(format!("[rust-dos] os={}: C: is taken by the configuration's own drive", name));
+            return;
+        }
+        imported.drives.push(crate::mount::MountSpec { drive: DRIVE_C, path: os, opts: Default::default() });
+        return;
     }
-    let disk = crate::disk::numbered_drive(2);
+    if let (Some(game), Some(root)) = (game, c_root) {
+        let disk = numbered_drive(3);
+        if crate::disk::archive_hard_disk(root).is_some() && !taken(imported, disk) {
+            imported.drives[game].drive = disk;
+        } else if !taken(imported, DRIVE_C + 1) {
+            imported.drives[game].drive = DRIVE_C + 1;
+        }
+    }
+    let disk = numbered_drive(2);
     imported.drives.retain(|d| d.drive != disk);
-    imported.drives.push(crate::mount::MountSpec { drive: disk, path: image, opts: Default::default() });
+    imported.drives.push(crate::mount::MountSpec { drive: disk, path: os, opts: Default::default() });
     let dropped: Vec<String> = imported.autoexec.drain(..).filter(|l| !l.trim_start_matches('@').to_ascii_lowercase().starts_with("boot")).collect();
     if !dropped.is_empty() {
         imported.warnings.push(format!("[rust-dos] os={}: these commands don't run in it: {}", name, dropped.join("; ")));
@@ -882,6 +906,52 @@ mod tests {
         assert_eq!(imported.warnings.len(), 1, "{:?}", imported.warnings);
         let imported = import_in(&["[rust-dos]\nos=nothing\n"], std::slice::from_ref(&dir), "x", None, Some(&game));
         assert!(imported.warnings[0].contains("nothing"), "{:?}", imported.warnings);
+    }
+
+    /// A game that is an archive of a hard disk image is the booted
+    /// system's second hard disk, not files on a disk made of them.
+    #[test]
+    fn a_game_s_hard_disk_image_is_the_second_disk() {
+        let dir = scratch("package-os-disk");
+        let os = dir.join("os");
+        fs::create_dir_all(&os).unwrap();
+        fs::write(os.join("Win95Test.vhd"), "").unwrap();
+        crate::os_images::add_search_dir(os.clone());
+        let game = dir.join("store.dosz");
+        let vhd = crate::vhd::make_dynamic(8 << 20, 2 << 20);
+        fs::write(&game, crate::archive::zip::tests::zip(&[("STORE.VHD", &vhd, true)])).unwrap();
+        let conf = "[rust-dos]\nos=win95test\n";
+        let imported = import_in(&[conf], std::slice::from_ref(&dir), "x", None, Some(&game));
+        let drive = |d| imported.drives.iter().find(|s| s.drive == d).map(|s| s.path.clone());
+        assert_eq!(drive(crate::disk::numbered_drive(3)), Some(game.clone()));
+        assert_eq!(drive(crate::disk::numbered_drive(2)), Some(os.join("Win95Test.vhd")));
+        assert_eq!(drive(3), None);
+        assert_eq!(imported.autoexec, ["BOOT -l C"]);
+    }
+
+    /// A system of files in the OS folder is C:, with the game on D:,
+    /// and the commands run in it.
+    #[test]
+    fn a_game_can_ask_for_a_system_of_files() {
+        let dir = scratch("package-os-files");
+        let os = dir.join("os");
+        fs::create_dir_all(&os).unwrap();
+        fs::write(os.join("Win311Test.dosz"), "").unwrap();
+        crate::os_images::add_search_dir(os.clone());
+        let game = dir.join("game.dosz");
+        let conf = "[rust-dos]\nos=win311test\n[autoexec]\nC:\\WINDOWS.BAT D:\\GAME.EXE\n";
+        let imported = import_in(&[conf], std::slice::from_ref(&dir), "x", None, Some(&game));
+        let drive = |d| imported.drives.iter().find(|s| s.drive == d).map(|s| s.path.clone());
+        assert_eq!(drive(crate::disk::DRIVE_C), Some(os.join("Win311Test.dosz")));
+        assert_eq!(drive(3), Some(game.clone()), "the game is D:");
+        assert_eq!(drive(crate::disk::numbered_drive(2)), None);
+        assert_eq!(imported.autoexec, ["D:", "C:\\WINDOWS.BAT D:\\GAME.EXE"]);
+        assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);
+        // A configuration of its own C: keeps it.
+        let conf = "[rust-dos]\nos=win311test\n[autoexec]\nmount c sub\n";
+        let imported = import_in(&[conf], std::slice::from_ref(&dir), "x", None, Some(&game));
+        assert_eq!(imported.drives.len(), 1);
+        assert!(imported.warnings[0].contains("C: is taken"), "{:?}", imported.warnings);
     }
 
     /// REMOUNT C D, with an operating system booted from C:.

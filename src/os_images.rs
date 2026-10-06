@@ -3,12 +3,17 @@
 //! profile puts
 //! the image's changes in its own delta file (`games::overlay_drives`), so
 //! one install serves every game unchanged.
+//!
+//! An archive or folder there is a system of files to run on the DOS of
+//! rust-dos rather than to boot, Windows 3.1 say: a game that asks for it
+//! has it as C: and is on D: (`holds_files`).
 
 use crate::hostfs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-/// The images' extensions, in the order a name is looked for.
-const EXTENSIONS: [&str; 3] = ["img", "vhd", "ima"];
+/// The images' extensions, then the archives', in the order a name is
+/// looked for. A folder of the name comes last.
+const EXTENSIONS: [&str; 6] = ["img", "vhd", "ima", "dosz", "zip", "7z"];
 
 static SEARCH_DIRS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
 
@@ -18,6 +23,19 @@ pub fn add_search_dir(dir: PathBuf) {
     if !dirs.contains(&dir) {
         dirs.push(dir);
     }
+}
+
+/// Whether the system at `path` is files to run rather than a disk to
+/// boot: an archive or a folder.
+pub fn holds_files(path: &Path) -> bool {
+    crate::archive::is_archive_name(path) || hostfs::is_dir(path)
+}
+
+/// Why `word`, found as `path`, can't be booted or be a disk by number:
+/// it names a system of files.
+pub fn not_a_disk(word: &str, path: &Path) -> Option<String> {
+    (holds_files(path) && find(word).as_deref() == Some(path))
+        .then(|| format!("{} is a system of files, for C:, not a disk to boot", word.to_ascii_uppercase()))
 }
 
 /// The folders the images are in: the frontend's, then `os` in rust-dos's
@@ -40,16 +58,19 @@ fn find_in(dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
     }
     let lower = name.to_ascii_lowercase();
     let images = list_in(dirs);
-    let named = |ext: Option<&str>| {
-        images.iter().find(|(stem, path)| {
-            let file_ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase());
-            match ext {
-                Some(ext) => *stem == lower && file_ext.as_deref() == Some(ext),
-                None => path.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(name)),
-            }
-        })
-    };
-    named(None).or_else(|| EXTENSIONS.iter().find_map(|ext| named(Some(ext)))).map(|(_, path)| path.clone())
+    let folder = || images.iter().find(|(n, path)| *n == lower && hostfs::is_dir(path));
+    let file = |path: &PathBuf| !hostfs::is_dir(path);
+    let named = |ext: Option<&str>| images.iter().filter(|(_, path)| file(path)).find(|(stem, path)| {
+        let file_ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase());
+        match ext {
+            Some(ext) => *stem == lower && file_ext.as_deref() == Some(ext),
+            None => path.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(name)),
+        }
+    });
+    named(None)
+        .or_else(|| EXTENSIONS.iter().find_map(|ext| named(Some(ext))))
+        .or_else(folder)
+        .map(|(_, path)| path.clone())
 }
 
 /// The images there are, by name in lower case, the first folder's where
@@ -64,9 +85,14 @@ fn list_in(dirs: &[PathBuf]) -> Vec<(String, PathBuf)> {
         let mut found: Vec<(String, PathBuf)> = hostfs::read_dir(dir)
             .into_iter()
             .flatten()
-            .filter(|e| !e.is_dir)
-            .filter(|e| e.path.extension().is_some_and(|x| EXTENSIONS.iter().any(|ext| x.eq_ignore_ascii_case(ext))))
-            .filter_map(|e| Some((e.path.file_stem()?.to_string_lossy().to_ascii_lowercase(), e.path)))
+            .filter_map(|e| {
+                let name = e.path.file_name()?.to_string_lossy().to_ascii_lowercase();
+                if e.is_dir {
+                    return (!name.starts_with('.')).then_some((name, e.path));
+                }
+                e.path.extension().is_some_and(|x| EXTENSIONS.iter().any(|ext| x.eq_ignore_ascii_case(ext))).then_some(())?;
+                Some((e.path.file_stem()?.to_string_lossy().to_ascii_lowercase(), e.path))
+            })
             .collect();
         found.sort();
         images.extend(found);
@@ -97,5 +123,26 @@ mod tests {
         assert_eq!(find_in(&dirs, "dos/win95"), None, "a path isn't a name");
         let names: Vec<String> = list_in(&dirs).into_iter().map(|(name, _)| name).collect();
         assert_eq!(names, ["win98se", "win95", "win98se"]);
+    }
+
+    #[test]
+    fn archives_and_folders_are_systems_of_files() {
+        let root = PathBuf::from("target/test_os_files");
+        let _ = std::fs::remove_dir_all(&root);
+        let os = root.join("os");
+        std::fs::create_dir_all(os.join("WFW311")).unwrap();
+        std::fs::create_dir_all(os.join("both")).unwrap();
+        std::fs::write(os.join("Win311.dosz"), b"").unwrap();
+        std::fs::write(os.join("Win311.dosc"), b"").unwrap();
+        std::fs::write(os.join("both.zip"), b"").unwrap();
+        std::fs::write(os.join("both.img"), b"").unwrap();
+        let dirs = [os.clone()];
+        assert_eq!(find_in(&dirs, "win311"), Some(os.join("Win311.dosz")));
+        assert_eq!(find_in(&dirs, "wfw311"), Some(os.join("WFW311")));
+        assert_eq!(find_in(&dirs, "both"), Some(os.join("both.img")), "an image first");
+        assert!(holds_files(&os.join("Win311.dosz")) && holds_files(&os.join("WFW311")));
+        assert!(!holds_files(&os.join("both.img")));
+        let names: Vec<String> = list_in(&dirs).into_iter().map(|(name, _)| name).collect();
+        assert_eq!(names, ["both", "both", "both", "wfw311", "win311"]);
     }
 }

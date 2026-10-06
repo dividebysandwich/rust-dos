@@ -287,6 +287,19 @@ left as it is: what the system writes, the game's install included, goes
 to a delta file in the game's saves folder. Commands that would run
 before the boot are left out (the log says which).
 
+A package that holds only a hard disk image (a `.vhd` or `.img`, with no
+programs beside it) is the booted system's second hard disk instead of a
+disk made of its files: Windows sees the image's own partition as D:, and
+what it writes there goes to a delta file in the saves folder too, so the
+package can sit on a read-only share.
+
+The name can also be an archive (`.dosz`, `.zip`, `.7z`) or a folder in
+the OS folder, an installed Windows 3.1 say: a system of files that runs
+on rust-dos's DOS rather than a disk to boot. It is C:, the package is D:,
+and the commands run there, starting on D: (`WIN D:\GAME.EXE`). What the
+system writes goes to the game's saves folder, as the package's changes
+do.
+
 ### Saves and the write overlay
 
 The package is never written to. Anything the game writes, renames or

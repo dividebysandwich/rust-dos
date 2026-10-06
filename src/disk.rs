@@ -80,6 +80,25 @@ pub fn drive_number(drive: u8) -> Option<u8> {
 
 /// A drive as MOUNT and `[drives]` name it: "C", or "2" for a disk
 /// mounted by number.
+/// The hard disk image the archive `path` holds, to mount instead of its
+/// files (`archive_image`): a .vhd, or an image bigger than a floppy and
+/// not a CD's. None for an archive of files.
+pub fn archive_hard_disk(path: &Path) -> Option<String> {
+    use crate::overlay::Lower;
+    if !hostfs::is_file(path) || !crate::archive::is_archive_name(path) {
+        return None;
+    }
+    let stack = crate::archive::open_variant(path, None).ok()?;
+    let image = archive_image(&stack.files())?;
+    let ext = image.rsplit_once('.').map(|(_, x)| x.to_ascii_lowercase()).unwrap_or_default();
+    let disk = match ext.as_str() {
+        "vhd" => true,
+        "img" | "ima" | "dsk" => stack.metadata(&image).is_ok_and(|m| m.len > 2_949_120),
+        _ => false,
+    };
+    disk.then_some(image)
+}
+
 /// The disk or CD image an archive holds, of its files (paths from its
 /// root), to mount instead of the files: its one CUE sheet, or its one
 /// image. None if there are programs beside it.
@@ -3501,6 +3520,27 @@ mod tests {
         let mut sector = [0u8; 512];
         disk.bios_image(numbered_drive(0)).unwrap().read(10, &mut sector).unwrap();
         assert_eq!(sector, [0xAB; 512]);
+    }
+
+    #[test]
+    fn an_archive_of_a_vhd_mounts_the_vhd() {
+        let base = scratch("archive_vhd");
+        fs::create_dir_all(base.join("c")).unwrap();
+        let vhd = crate::vhd::make_dynamic(8 << 20, 2 << 20);
+        let zip = crate::archive::zip::tests::zip(&[("STORE.VHD", &vhd, true)]);
+        fs::write(base.join("store.dosz"), &zip).unwrap();
+        assert_eq!(archive_hard_disk(&base.join("store.dosz")), Some("STORE.VHD".to_string()));
+        let mut disk = DiskController::new(base.join("c"));
+        let opts = MountOptions { overlay: Some(base.join("saves")), ..MountOptions::default() };
+        disk.mount(numbered_drive(3), &base.join("store.dosz"), opts, false).unwrap();
+        let image = disk.bios_image(numbered_drive(3)).unwrap();
+        assert_eq!(image.sectors(), (8 << 20) / 512);
+        image.write(5000, &[0xCD; 512]).unwrap();
+        assert!(base.join("saves/STORE.VHD.rdelta").exists());
+        assert_eq!(fs::read(base.join("store.dosz")).unwrap(), zip);
+        let mut sector = [0u8; 512];
+        image.read(5000, &mut sector).unwrap();
+        assert_eq!(sector, [0xCD; 512]);
     }
 
     /// An image copied out whole into the folder for an archive's changes,

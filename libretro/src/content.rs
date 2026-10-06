@@ -333,21 +333,36 @@ fn packaged(dirs: &Dirs, package: &Path, plan: &mut Plan) -> Result<(), String> 
 
 /// The game `game` (a folder or an archive) as D: of the OS image `os`
 /// booted as the first hard disk: D: is
-/// the booted system's second disk (`shared_disk`). The image's changes,
-/// and the archive's, go in the game's saves folder.
+/// the booted system's second disk (`shared_disk`), or an archive's hard
+/// disk image is. The image's changes, and the archive's, go in the
+/// game's saves folder. An OS of files (an archive or folder) is C: of
+/// rust-dos's DOS instead, with the game on D:.
 fn booted_os(os: &str, game: &Path, dirs: &Dirs, plan: &mut Plan) -> Result<(), String> {
     let image = rust_dos::os_images::find(os).ok_or_else(|| format!("There is no OS image called {}", os))?;
     let stem = game.file_stem().or_else(|| game.file_name()).map_or("game".into(), |n| n.to_string_lossy().into_owned());
     let saves = dirs.saves().join(games::slug(&stem, &[]));
-    // As a hard disk image given as content is booted (`images`).
-    let (disk, d) = (numbered_drive(2), DRIVE_C + 1);
     plan.c_root = dirs.drive_c();
-    for (drive, path) in [(disk, image.clone()), (d, game.to_path_buf())] {
+    let files = rust_dos::os_images::holds_files(&image);
+    // As a hard disk image given as content is booted (`images`).
+    let (os_drive, d) = match files {
+        true => (DRIVE_C, DRIVE_C + 1),
+        false if rust_dos::disk::archive_hard_disk(game).is_some() => (numbered_drive(2), numbered_drive(3)),
+        false => (numbered_drive(2), DRIVE_C + 1),
+    };
+    for (drive, path) in [(os_drive, image.clone()), (d, game.to_path_buf())] {
         let opts = MountOptions { overlay: Some(saves.join(drive_key(drive))), ..MountOptions::default() };
         plan.mounts.push(MountSpec { drive, path, opts });
     }
-    plan.commands.push("BOOT -l C".to_string());
-    plan.notes.push(format!("Booting {} with {} as D:", image.display(), game.display()));
+    match files {
+        true => {
+            plan.commands.push("D:".to_string());
+            plan.notes.push(format!("{} on C: with {} as D:", image.display(), game.display()));
+        }
+        false => {
+            plan.commands.push("BOOT -l C".to_string());
+            plan.notes.push(format!("Booting {} with {} as D:", image.display(), game.display()));
+        }
+    }
     Ok(())
 }
 
@@ -446,6 +461,26 @@ mod tests {
         assert!(configured.mounts.is_empty());
         fs::remove_file(dir.join("Game.conf")).unwrap();
         assert!(super::plan(Some(&dir.join("Game")), &dirs, false, Some("nothing")).is_err());
+
+        // A game that is a hard disk image in an archive is the second
+        // hard disk.
+        let vhd = rust_dos::diskimage::DiskImage::blank_hard_disk("STORE.IMG", 8 << 20, None).unwrap();
+        vhd.copy_to(&dir.join("STORE.IMG")).unwrap();
+        let mut zip = zip::ZipWriter::new(fs::File::create(dir.join("store.zip")).unwrap());
+        zip.start_file("STORE.IMG", zip::write::SimpleFileOptions::default()).unwrap();
+        std::io::Write::write_all(&mut zip, &fs::read(dir.join("STORE.IMG")).unwrap()).unwrap();
+        zip.finish().unwrap();
+        let plan = super::plan(Some(&dir.join("store.zip")), &dirs, false, Some("win98")).unwrap();
+        let shown: Vec<u8> = plan.mounts.iter().map(|m| m.drive).collect();
+        assert_eq!(shown, [numbered_drive(2), numbered_drive(3)]);
+
+        // An OS of files is C:, and nothing is booted.
+        fs::create_dir_all(os.join("Win311")).unwrap();
+        let plan = super::plan(Some(&dir.join("Game")), &dirs, false, Some("win311")).unwrap();
+        let shown: Vec<(u8, &Path)> = plan.mounts.iter().map(|m| (m.drive, m.path.as_path())).collect();
+        assert_eq!(shown, [(DRIVE_C, os.join("Win311").as_path()), (3, dir.join("Game").as_path())]);
+        assert_eq!(plan.mounts[0].opts.overlay, Some(saves.join("C")));
+        assert_eq!(plan.commands, ["D:"]);
     }
 
     #[test]

@@ -939,7 +939,7 @@ impl ShellCommand for MountCommand {
 
 pub const REMOUNT_USAGE: &str = concat!(
     "Moves a mounted drive to another letter, or\r\n",
-    "mounts an operating system's hard disk image by its name.\r\n",
+    "mounts an operating system by its name.\r\n",
     "\r\n",
     "REMOUNT from to\r\n",
     "REMOUNT os-name to\r\n",
@@ -947,6 +947,8 @@ pub const REMOUNT_USAGE: &str = concat!(
     "  REMOUNT C D        the game on C: becomes D:, and C: is left empty\r\n",
     "  REMOUNT WIN98SE C  C: is WIN98SE.IMG (or .VHD) from the OS images\r\n",
     "                     folder; BOOT -l C starts it\r\n",
+    "  REMOUNT WIN311 C   C: is WIN311.DOSZ (or .ZIP, or a folder), a\r\n",
+    "                     system of files that runs on this DOS\r\n",
 );
 
 /// REMOUNT from to, or REMOUNT os-name to
@@ -1049,7 +1051,8 @@ fn print_os_images(cpu: &mut Cpu) {
     }
     print_string(cpu, "\r\nOS images:\r\n");
     for (name, path) in images {
-        print_string(cpu, &format!("  {:<12} {}\r\n", name.to_ascii_uppercase(), display_host_path(&path)));
+        let files = if crate::os_images::holds_files(&path) { " (files, for C:)" } else { "" };
+        print_string(cpu, &format!("  {:<12} {}{}\r\n", name.to_ascii_uppercase(), display_host_path(&path), files));
     }
 }
 

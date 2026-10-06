@@ -129,6 +129,11 @@ fn mount_as(cpu: &mut Cpu, drive: u8, images: &[String]) -> Result<(), String> {
         MountCmd::Mount(spec) => spec,
         _ => return Err("BOOT needs disk images".to_string()),
     };
+    if let [word] = images
+        && let Some(e) = crate::os_images::not_a_disk(word, &spec.path)
+    {
+        return Err(e);
+    }
     let replace = spec.path.is_file() && cpu.bus.disk.drive_kind(drive) != Some(DriveKind::Virtual);
     cpu.bus.mount_drive(spec.drive, &spec.path, spec.opts, replace).map(|_| ())
 }

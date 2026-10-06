@@ -1275,6 +1275,18 @@ profile, whose drives keep their changes apart (`overlay=true`), each game
 gets the image's changes in its own delta file, and the image stays as it
 was installed.
 
+VHD images can be fixed or dynamic (growing as they are written);
+differencing VHDs, which hold another image's changes, can't be mounted.
+A `.vhd` mounts like any other hard disk image, and a zip or `.dosz` that
+holds one mounts it.
+
+An archive (`.dosz`, `.zip`, `.7z`) or a folder in the `os` folder is a
+system of files rather than a disk image, Windows 3.1 say, which runs on
+rust-dos's DOS: `REMOUNT WIN311 C` mounts `win311.dosz` as C:, and a game
+package's `os=win311` puts the system on C: and the game on D:. An image
+of the same name comes before it. It can't be booted or mounted by
+number.
+
 `REMOUNT C D` moves a drive to another letter: the game on C: becomes D:, the shared disk of a system booted from an
 image then mounted on C: (see below). C: is left empty in its place.
 
