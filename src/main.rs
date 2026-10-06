@@ -2810,7 +2810,7 @@ fn create_cpu(args: &Args, config: &config::Config, memory_mb: usize) -> Cpu {
     cpu
 }
 
-/// Create the log file in the per-user configuration directory, replacing
+/// Create the log file in rust-dos's own directory (`config::user_dir`), replacing
 /// the previous run's. The emulator runs without one if that fails.
 fn open_log_file() -> Option<rust_dos::log::LogFile> {
     let path = rust_dos::log::default_path()?;

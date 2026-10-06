@@ -30,7 +30,10 @@ finds, and never merges files:
    rust-dos exits with an error.
 2. `rust-dos.conf` in the current working directory.
 3. `rust-dos.conf` in the directory holding the rust-dos executable. Put one
-   there to make a portable install that leaves the user profile alone.
+   there to make a portable install that leaves the user profile alone: its
+   configuration directory is then the executable's, which gets the log,
+   the shell history, the downloaded ROMs and the other files below that
+   go to the configuration directory.
 4. `rust-dos.conf` in the per-user configuration directory:
 
    | Platform | Directory |
@@ -626,8 +629,8 @@ The DOS prompt's line editor (see [the prompt](README.md#the-prompt)).
   `true` (the default) or `false`.
 * `colors` colors the prompt and the line typed at it: `true` (the
   default) or `false`.
-* `save_history` keeps the history in `shell_history.txt` in the per-user
-  folder (the libretro core: in its save folder), so it is there after a
+* `save_history` keeps the history in `shell_history.txt` in rust-dos's
+  configuration directory (the libretro core: in its save folder), so it is there after a
   restart: `true` (the default) or `false`. A line that begins with a
   space is never kept.
 * `history_size` is how many lines are kept, 1 to 100000 (1000 by
@@ -1263,8 +1266,8 @@ as new hardware and asks to restart; after that, **System Properties** →
 ### Operating systems by name
 
 Hard disk images of installed systems in the `os` folder of rust-dos's
-configuration folder (`~/.config/rust-dos/os` on Linux; the libretro core's
-`system/rust-dos/os`) can be named
+configuration folder (`~/.config/rust-dos/os` on Linux, `os` beside the
+executable in a portable install; the libretro core's `system/rust-dos/os`) can be named
 without their path or extension: `IMGMOUNT C WIN98SE` mounts `win98se.img`
 (or `.vhd`) where no file of that name is in the folder MOUNT starts from,
 and so does `REMOUNT WIN98SE C`. `REMOUNT` alone lists them. In a game
