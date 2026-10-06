@@ -1745,6 +1745,9 @@ and the machine sees neither it nor these keys:
 
 ### Scenes from Blender
 
+[docs/vr.md](docs/vr.md) is the full guide to building rooms: the screen,
+the speakers, the PC's lights, materials, exporting and checking a room.
+
 A scene is a glTF 2.0 file. In Blender, File > Export > glTF 2.0:
 
 * Format **glTF Binary (.glb)**, or glTF Separate with its files beside it.
