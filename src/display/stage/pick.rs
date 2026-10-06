@@ -42,6 +42,12 @@ fn hit_triangle(origin: Vec3, dir: Vec3, [a, b, c]: [Vec3; 3]) -> Option<(f32, f
 /// The point of the picture (0 to 1 across and down) the ray meets first
 /// on the screen, if it meets it.
 pub fn pick(screen: &Screen, origin: Vec3, dir: Vec3) -> Option<Vec2> {
+    pick_hit(screen, origin, dir).map(|(_, uv)| uv)
+}
+
+/// `pick`, with how far along the ray (in its direction's lengths) the
+/// screen is.
+pub fn pick_hit(screen: &Screen, origin: Vec3, dir: Vec3) -> Option<(f32, Vec2)> {
     let mut best: Option<(f32, Vec2)> = None;
     for &[(a, ta), (b, tb), (c, tc)] in &screen.triangles {
         if let Some((t, u, v)) = hit_triangle(origin, dir, [a, b, c])
@@ -50,7 +56,7 @@ pub fn pick(screen: &Screen, origin: Vec3, dir: Vec3) -> Option<Vec2> {
             best = Some((t, ta * (1.0 - u - v) + tb * u + tc * v));
         }
     }
-    best.map(|(_, uv)| uv)
+    best
 }
 
 #[cfg(test)]

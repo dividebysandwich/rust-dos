@@ -484,6 +484,13 @@
 # The scene: a glTF file (.glb or .gltf) exported from Blender, with the
 # mesh the picture goes on named "screen". Empty for the built-in room.
 #scene=
+# What a headset's controllers do: both (the hand pointing at the screen
+# is the mouse, trigger and grip its buttons; the sticks and other buttons
+# a gamepad), pointer or gamepad.
+#controllers=both
+# The sound comes from the screen's sides (or the scene's speaker_left and
+# speaker_right) as you turn and move.
+#spatial_audio=true
 
 [drives]
 # Mount host directories, or floppy, hard disk or CD images, as DOS drives

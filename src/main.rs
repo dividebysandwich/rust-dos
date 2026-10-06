@@ -130,8 +130,15 @@ struct Args {
     relay_password: Option<String>,
 }
 
-/// The SDL sound device, where the mixed output goes.
-struct SdlAudio(sdl2::audio::AudioQueue<i16>);
+/// The SDL sound device, where the mixed output goes, through the 3D
+/// scene's mix of the channels for where the viewer is (`mix`, which the
+/// main loop sets), from the one of the last samples (`mixed`).
+struct SdlAudio {
+    queue: sdl2::audio::AudioQueue<i16>,
+    mix: std::rc::Rc<std::cell::Cell<display::audio_mix::Mix>>,
+    mixed: display::audio_mix::Mix,
+    buffer: Vec<i16>,
+}
 
 /// The sound device, playing.
 fn open_audio(sdl_context: &sdl2::Sdl) -> Result<sdl2::audio::AudioQueue<i16>, String> {
@@ -148,17 +155,24 @@ fn open_audio(sdl_context: &sdl2::Sdl) -> Result<sdl2::audio::AudioQueue<i16>, S
 
 impl audio::AudioOutput for SdlAudio {
     fn queued_frames(&self) -> usize {
-        self.0.size() as usize / 4
+        self.queue.size() as usize / 4
     }
 
     fn queue(&mut self, samples: &[i16]) -> Result<(), String> {
-        self.0.queue_audio(samples)
+        use display::audio_mix::{IDENTITY, apply};
+        let mix = self.mix.get();
+        if mix == IDENTITY && self.mixed == IDENTITY {
+            return self.queue.queue_audio(samples);
+        }
+        apply(samples, self.mixed, mix, &mut self.buffer);
+        self.mixed = mix;
+        self.queue.queue_audio(&self.buffer)
     }
 
     /// The device takes its buffer from the queue at once; 20 ms more is
     /// for a video frame that comes late.
     fn target_frames(&self) -> usize {
-        self.0.spec().samples as usize + self.0.spec().freq as usize / 50
+        self.queue.spec().samples as usize + self.queue.spec().freq as usize / 50
     }
 }
 
@@ -247,8 +261,11 @@ fn main() -> Result<(), String> {
     // SDL2 Setup
     // OpenXR's runtimes take an OpenGL context of GLX's, which SDL makes
     // under X11 (XWayland on a Wayland desktop) and not under Wayland.
-    if cfg!(target_os = "linux") && settings.vr.mode == rust_dos::vr::VrMode::Headset {
-        sdl2::hint::set_with_priority("SDL_VIDEODRIVER", "x11", &sdl2::hint::Hint::Override);
+    if settings.vr.mode == rust_dos::vr::VrMode::Headset {
+        if cfg!(target_os = "linux") {
+            sdl2::hint::set_with_priority("SDL_VIDEODRIVER", "x11", &sdl2::hint::Hint::Override);
+        }
+        display::before_headset();
     }
     let sdl_context = sdl2::init()?;
     let video_subsystem = sdl_context.video()?;
@@ -291,8 +308,14 @@ fn main() -> Result<(), String> {
     for warning in cpu.bus.start_lan() {
         config_warning(&mut cpu, &warning);
     }
+    // How the sound's channels mix for the viewer in the 3D scene.
+    let audio_mix = std::rc::Rc::new(std::cell::Cell::new(display::audio_mix::IDENTITY));
     match audio_device {
-        Ok(device) => cpu.bus.audio_device = Some(Box::new(SdlAudio(device))),
+        Ok(queue) => {
+            let mix = audio_mix.clone();
+            let output = SdlAudio { queue, mix, mixed: display::audio_mix::IDENTITY, buffer: Vec::new() };
+            cpu.bus.audio_device = Some(Box::new(output));
+        }
         Err(e) => {
             eprintln!("[AUDIO] No sound device, so no sound: {}", e);
             cpu.bus.log_string(&format!("[AUDIO] No sound device, so no sound: {}", e));
@@ -518,6 +541,14 @@ fn main() -> Result<(), String> {
     let mut stats = rust_dos::stats::Stats::new();
     let mut last_frame: Option<(std::time::Instant, rust_dos::stats::FrameTimes)> = None;
 
+    // What the VR headset's controllers did last: where the laser met the
+    // screen, the mouse's buttons it held, and its menu button's presses.
+    let mut vr_pointer: Option<(i32, i32)> = None;
+    let mut vr_buttons = [false; 2];
+    let mut vr_menu = 0u32;
+    // Until when the scene's PC shows its hard disk and floppy lights.
+    let mut hdd_light = std::time::Instant::now();
+    let mut floppy_light = std::time::Instant::now();
     // The mouse held in SDL's relative mode while Ctrl+Shift fly the 3D
     // scene's camera, and the start of the last frame's flight.
     let mut steering_mouse = false;
@@ -538,13 +569,11 @@ fn main() -> Result<(), String> {
 
     // Main Loop
     'running: loop {
-        // A VR headset showing the scene paces the frames: its runtime says
-        // when to start the next.
+        // What the VR headset's thread has to say.
         for note in display.poll_headset() {
             cpu.bus.log_string(&format!("[VR] {}", note));
             osd.show(note);
         }
-        let headset_frame = display.wait_headset();
         let frame_start = std::time::Instant::now();
         if let Some((start, times)) = last_frame {
             stats.record(&cpu.bus, rust_dos::stats::FrameTimes { wall: frame_start - start, ..times });
@@ -1142,6 +1171,51 @@ fn main() -> Result<(), String> {
             }
         }
 
+        // The VR headset's controllers: the menu button opens and closes
+        // the settings window; the laser is the mouse where it meets the
+        // screen, and clicks in the settings window; the rest is a gamepad.
+        let mut vr_pad: Option<rust_dos::padmap::PadSnapshot> = None;
+        match display.vr_input() {
+            Some(vr) => {
+                for _ in vr_menu..vr.menu_presses {
+                    toggle_ui!();
+                }
+                vr_menu = vr.menu_presses;
+                if ui.is_open() {
+                    if vr.buttons[0]
+                        && !vr_buttons[0]
+                        && let Some((fx, fy)) = vr.pointer
+                    {
+                        ui.click(fx, fy, &mut host!());
+                    }
+                } else if !paused {
+                    if let Some(at) = vr.pointer
+                        && vr.pointer != vr_pointer
+                    {
+                        let (vx, vy) = video::overlay::frame_to_mouse(&cpu.bus, &cached_frame, at);
+                        cpu.bus.mouse.set_position(vx, vy);
+                    }
+                    for (button, (&now, &before)) in vr.buttons.iter().zip(&vr_buttons).enumerate() {
+                        if now && !before {
+                            cpu.bus.mouse.button_down(button);
+                        } else if before && !now {
+                            cpu.bus.mouse.button_up(button);
+                        }
+                    }
+                }
+                vr_pointer = vr.pointer;
+                vr_buttons = vr.buttons;
+                vr_pad = vr.pad;
+            }
+            None => {
+                for (button, held) in vr_buttons.iter_mut().enumerate() {
+                    if std::mem::take(held) {
+                        cpu.bus.mouse.button_up(button);
+                    }
+                }
+            }
+        }
+
         // The mouse in relative mode while flying, so that it doesn't stop
         // at the window's edges; Q and E move the camera down and up while
         // held.
@@ -1281,13 +1355,15 @@ fn main() -> Result<(), String> {
             padmap = mapping.map(rust_dos::padmap::PadMapper::new);
         }
         let mut wheel_view: Option<rust_dos::padmap::WheelView> = None;
+        // A VR headset's controllers, while they are a gamepad, are the
+        // first pad, before the host's.
+        let first_pad = vr_pad.or_else(|| controllers.first().map(pad_snapshot));
         for slot in 0..2 {
             if slot == 0
                 && let Some(mapper) = &mut padmap
             {
-                match controllers.first() {
-                    Some(pad) if !waiting && !ui.is_open() => {
-                        let snapshot = pad_snapshot(pad);
+                match first_pad {
+                    Some(snapshot) if !waiting && !ui.is_open() => {
                         if snapshot.inputs() != 0
                             && let Some(mut input) = autoinput.take()
                         {
@@ -1300,14 +1376,18 @@ fn main() -> Result<(), String> {
                 cpu.bus.joystick.set_pad(0, mapper.joystick());
                 continue;
             }
-            let pad = controllers.get(slot).map(|pad| if waiting { joystick::PadState::default() } else { pad_state(pad) });
+            let pad = match (slot, vr_pad) {
+                (0, Some(vr)) => Some(rust_dos::vr::joystick(&vr)),
+                _ => controllers.get(slot).map(pad_state),
+            };
+            let pad = pad.map(|pad| if waiting { joystick::PadState::default() } else { pad });
             cpu.bus.joystick.set_pad(slot, pad);
         }
         // With a variable refresh rate, each frame runs to a vertical
         // retrace of the machine's display and is shown when it is due,
         // so the window refreshes at the machine's rate, where the host's
         // display goes that fast.
-        let refresh = (settings.vrr && !waiting && headset_frame.is_none())
+        let refresh = (settings.vrr && !waiting)
             .then(|| cpu.bus.refresh_timing())
             .filter(|timing| display.shows_hz(timing.hz()));
         let batch_end = if waiting {
@@ -1317,9 +1397,6 @@ fn main() -> Result<(), String> {
         } else {
             pacer.batch_end(&cpu.bus.clock, batch_start)
         };
-        if let Some(period) = headset_frame {
-            pacer.set_frame_period(period);
-        }
         cpu.bus.start_batch(batch_end);
         let batch_icount = cpu.bus.clock.icount;
         let batch_stalled = cpu.bus.clock.stalled;
@@ -1352,6 +1429,30 @@ fn main() -> Result<(), String> {
         }
         dbg.end_batch(&cpu);
         let translated = cpu.dynrec.counts().executed.saturating_sub(batch_translated);
+
+        // The scene's PC lights its lights as the machine's would: the hard
+        // disk's and the floppy's while they are read or written (and a
+        // little after, to be seen), the turbo light while the CPU is fast.
+        // The sound comes from where the scene's speakers are.
+        if display.every_frame() {
+            let now = std::time::Instant::now();
+            let active = std::mem::take(&mut cpu.bus.drives_active);
+            for drive in (0..32u8).filter(|&d| active & 1 << d != 0) {
+                match cpu.bus.disk.drive_kind(drive) {
+                    Some(disk::DriveKind::Floppy) => floppy_light = now + Duration::from_millis(120),
+                    Some(disk::DriveKind::CdRom | disk::DriveKind::Virtual) => {}
+                    _ => hdd_light = now + Duration::from_millis(120),
+                }
+            }
+            display.set_leds(rust_dos::vr::Leds {
+                power: true,
+                turbo: cpu.bus.clock.cycles_per_ms() > rust_dos::vr::TURBO_CYCLES,
+                hdd: now < hdd_light,
+                floppy: now < floppy_light,
+            });
+        }
+        let mix = display.audio_mix().filter(|_| settings.vr.spatial_audio);
+        audio_mix.set(mix.unwrap_or(display::audio_mix::IDENTITY));
 
         // Rewind: its states start over for another game or other
         // hardware, and go when it is turned off; a state is taken every
@@ -1693,7 +1794,7 @@ fn main() -> Result<(), String> {
         }
         // Waiting for the deadline of a frame paced to the retrace is
         // neither the frame's work nor time the CPU could have had.
-        let waited = if headset_frame.is_some() { Duration::ZERO } else { pacer.wait_to_present(&cpu.bus.clock) };
+        let waited = pacer.wait_to_present(&cpu.bus.clock);
         if still {
             dbg.count_frame();
             // The 3D scene is drawn every frame: the viewer moves.
@@ -1722,9 +1823,7 @@ fn main() -> Result<(), String> {
                 code_bytes: code.code_bytes,
             },
         ));
-        if headset_frame.is_none() {
-            pacer.wait_for_next_frame();
-        }
+        pacer.wait_for_next_frame();
     }
 
     // The page in the printer comes out, and the job's files are written.
@@ -2182,6 +2281,9 @@ impl Host for MainHost<'_, '_> {
         let shown = |s: &Settings| (s.scale, s.fullscreen, s.aspect, s.filter, s.shader, s.crt, s.monochrome);
         if shown(new) != shown(&old) {
             self.display.apply(new)?;
+        }
+        if new.vr != old.vr {
+            self.display.apply_vr(&new.vr);
         }
         if new.cycles != old.cycles {
             self.pacer.set_speed(new.cycles);

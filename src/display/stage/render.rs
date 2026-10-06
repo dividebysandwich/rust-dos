@@ -2,7 +2,7 @@
 //! each view drawn multisampled into a target of its own, from which it is
 //! copied to the window or a headset's eye.
 
-use super::scene::{Alpha, Scene, Shading};
+use super::scene::{Alpha, Leds, Scene, Shading};
 use crate::video::shader::Glsl;
 use glam::{Mat4, Vec3};
 use glow::HasContext;
@@ -32,6 +32,16 @@ impl View {
     fn eye(&self) -> Vec3 {
         self.view.inverse().transform_point3(Vec3::ZERO)
     }
+}
+
+/// A box drawn over the scene in a colour of its own, unlit: a
+/// controller, or its beam. The model matrix takes the unit cube (-0.5 to
+/// 0.5) where it goes.
+#[derive(Clone, Copy, Debug)]
+pub struct Extra {
+    pub model: Mat4,
+    /// Linear RGB, and alpha.
+    pub color: [f32; 4],
 }
 
 /// What a view is drawn into: its size, the colour format (RGBA8, or
@@ -65,6 +75,8 @@ pub struct Gpu {
     /// For the sky's triangle, made from the vertex number.
     empty: glow::VertexArray,
     meshes: Vec<GpuMesh>,
+    /// The unit cube the extras are drawn with.
+    cube: GpuMesh,
     /// The scene's pictures, by their index.
     textures: Vec<glow::Texture>,
     target: Option<Target>,
@@ -145,8 +157,9 @@ impl Gpu {
             .then(|| unsafe { gl.get_parameter_f32(MAX_TEXTURE_MAX_ANISOTROPY) }.min(16.0));
         // SAFETY: see `GlScreen`.
         let empty = unsafe { gl.create_vertex_array()? };
+        let cube = upload_mesh(gl, &super::scene::unit_cube())?;
         let mut gpu =
-            Gpu { lit, sky, empty, meshes: Vec::new(), textures: Vec::new(), target: None, anisotropy };
+            Gpu { lit, sky, empty, meshes: Vec::new(), cube, textures: Vec::new(), target: None, anisotropy };
         gpu.upload(gl, scene)?;
         Ok(gpu)
     }
@@ -178,35 +191,9 @@ impl Gpu {
                 self.set_anisotropy(gl);
                 self.textures.push(texture);
             }
-            for mesh in &scene.meshes {
-                let vertices: Vec<u8> = mesh
-                    .vertices
-                    .iter()
-                    .flat_map(|v| v.position.into_iter().chain(v.normal).chain(v.uv))
-                    .flat_map(f32::to_ne_bytes)
-                    .collect();
-                let indices: Vec<u8> = mesh.indices.iter().flat_map(|i| i.to_ne_bytes()).collect();
-                let vao = gl.create_vertex_array()?;
-                gl.bind_vertex_array(Some(vao));
-                let vbo = gl.create_buffer()?;
-                gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
-                gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, &vertices, glow::STATIC_DRAW);
-                let ebo = gl.create_buffer()?;
-                gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(ebo));
-                gl.buffer_data_u8_slice(glow::ELEMENT_ARRAY_BUFFER, &indices, glow::STATIC_DRAW);
-                let stride = 8 * 4;
-                for (index, size, offset) in [(0, 3, 0), (1, 3, 12), (2, 2, 24)] {
-                    gl.enable_vertex_attrib_array(index);
-                    gl.vertex_attrib_pointer_f32(index, size, glow::FLOAT, false, stride, offset);
-                }
-                gl.bind_vertex_array(None);
-                gl.bind_buffer(glow::ARRAY_BUFFER, None);
-                self.meshes.push(GpuMesh {
-                    vao,
-                    count: mesh.indices.len() as i32,
-                    material: mesh.material,
-                });
-            }
+        }
+        for mesh in &scene.meshes {
+            self.meshes.push(upload_mesh(gl, mesh)?);
         }
         Ok(())
     }
@@ -231,8 +218,9 @@ impl Gpu {
     }
 
     /// Draw `scene` as `view` sees it into the target for `format`, with
-    /// `screen` the picture on the screen. `encode` writes sRGB values
-    /// (for the window); else linear light, which an sRGB target encodes.
+    /// `screen` the picture on the screen, the PC's lights as `leds` and
+    /// `extras` over it all. An sRGB target is written linear light, which
+    /// it encodes; another sRGB values.
     pub fn render(
         &mut self,
         gl: &glow::Context,
@@ -240,6 +228,8 @@ impl Gpu {
         view: &View,
         format: Format,
         screen: Option<glow::Texture>,
+        leds: Leds,
+        extras: &[Extra],
     ) -> Result<(), String> {
         let (lit, sky, empty) = (self.lit, self.sky, self.empty);
         let target = self.target(gl, format)?;
@@ -282,6 +272,8 @@ impl Gpu {
             gl.use_program(Some(lit));
             let vp = view.view_projection();
             gl.uniform_matrix_4_f32_slice(u(lit, "u_view_projection").as_ref(), false, &vp.to_cols_array());
+            let model = u(lit, "u_model");
+            gl.uniform_matrix_4_f32_slice(model.as_ref(), false, &Mat4::IDENTITY.to_cols_array());
             gl.uniform_3_f32_slice(u(lit, "u_sun").as_ref(), &scene.sun.to_array());
             gl.uniform_1_i32(u(lit, "u_sky").as_ref(), scene.sky as i32);
             gl.uniform_1_i32(u(lit, "u_encode").as_ref(), encode);
@@ -352,7 +344,8 @@ impl Gpu {
                     };
                     gl.uniform_1_i32(shading.as_ref(), kind);
                     gl.uniform_4_f32_slice(base_color.as_ref(), &material.base_color);
-                    gl.uniform_3_f32_slice(emissive.as_ref(), &material.emissive);
+                    let glow = if material.led.is_none_or(|led| super::scene::lit(leds, led)) { 1.0 } else { 0.0 };
+                    gl.uniform_3_f32_slice(emissive.as_ref(), &material.emissive.map(|c| c * glow));
                     let cut = match material.alpha {
                         Alpha::Mask(cut) => cut,
                         _ => -1.0,
@@ -382,6 +375,20 @@ impl Gpu {
                 }
             }
 
+            // The extras, unlit, seen through where they are.
+            gl.uniform_1_i32(shading.as_ref(), 1);
+            gl.uniform_3_f32_slice(emissive.as_ref(), &[0.0; 3]);
+            gl.uniform_1_f32(cutoff.as_ref(), -1.0);
+            gl.uniform_1_i32(has_base.as_ref(), 0);
+            gl.uniform_1_i32(has_emissive.as_ref(), 0);
+            gl.disable(glow::CULL_FACE);
+            gl.bind_vertex_array(Some(self.cube.vao));
+            for extra in extras {
+                gl.uniform_matrix_4_f32_slice(model.as_ref(), false, &extra.model.to_cols_array());
+                gl.uniform_4_f32_slice(base_color.as_ref(), &extra.color);
+                gl.draw_elements(glow::TRIANGLES, self.cube.count, glow::UNSIGNED_INT, 0);
+            }
+
             // The samples resolved into the texture.
             gl.disable(glow::FRAMEBUFFER_SRGB);
             gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(framebuffer));
@@ -406,6 +413,36 @@ impl Gpu {
             gl.blit_framebuffer(0, 0, sw, sh, x, y, x + w, y + h, glow::COLOR_BUFFER_BIT, filter);
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
         }
+    }
+}
+
+/// A mesh's vertices and indices in buffers of OpenGL's.
+fn upload_mesh(gl: &glow::Context, mesh: &super::scene::Mesh) -> Result<GpuMesh, String> {
+    let vertices: Vec<u8> = mesh
+        .vertices
+        .iter()
+        .flat_map(|v| v.position.into_iter().chain(v.normal).chain(v.uv))
+        .flat_map(f32::to_ne_bytes)
+        .collect();
+    let indices: Vec<u8> = mesh.indices.iter().flat_map(|i| i.to_ne_bytes()).collect();
+    // SAFETY: see `GlScreen`.
+    unsafe {
+        let vao = gl.create_vertex_array()?;
+        gl.bind_vertex_array(Some(vao));
+        let vbo = gl.create_buffer()?;
+        gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
+        gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, &vertices, glow::STATIC_DRAW);
+        let ebo = gl.create_buffer()?;
+        gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(ebo));
+        gl.buffer_data_u8_slice(glow::ELEMENT_ARRAY_BUFFER, &indices, glow::STATIC_DRAW);
+        let stride = 8 * 4;
+        for (index, size, offset) in [(0, 3, 0), (1, 3, 12), (2, 2, 24)] {
+            gl.enable_vertex_attrib_array(index);
+            gl.vertex_attrib_pointer_f32(index, size, glow::FLOAT, false, stride, offset);
+        }
+        gl.bind_vertex_array(None);
+        gl.bind_buffer(glow::ARRAY_BUFFER, None);
+        Ok(GpuMesh { vao, count: mesh.indices.len() as i32, material: mesh.material })
     }
 }
 

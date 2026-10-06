@@ -48,6 +48,48 @@ pub enum Shading {
     Floor,
 }
 
+/// A light on the PC's front, lit as the emulated PC's would be.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Led {
+    Power,
+    /// Lit while the CPU runs fast (`Leds::turbo`).
+    Turbo,
+    /// Lit while a hard disk is read or written.
+    Hdd,
+    /// Lit while a floppy disk is.
+    Floppy,
+}
+
+impl Led {
+    /// A light by its mesh's name (`led_hdd`) or custom property's value
+    /// (`hdd`).
+    fn parse(name: &str) -> Option<Self> {
+        let name = name.trim().to_ascii_lowercase();
+        let name = name.strip_prefix("led_").unwrap_or(&name);
+        // Blender adds .001 to copies' names.
+        let name = name.split('.').next().unwrap_or(name);
+        match name {
+            "power" => Some(Led::Power),
+            "turbo" => Some(Led::Turbo),
+            "hdd" | "disk" | "harddisk" => Some(Led::Hdd),
+            "floppy" | "fdd" => Some(Led::Floppy),
+            _ => None,
+        }
+    }
+}
+
+pub use rust_dos::vr::Leds;
+
+/// Whether the light is lit.
+pub fn lit(leds: Leds, led: Led) -> bool {
+    match led {
+        Led::Power => leds.power,
+        Led::Turbo => leds.turbo,
+        Led::Hdd => leds.hdd,
+        Led::Floppy => leds.floppy,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Alpha {
     Opaque,
@@ -67,6 +109,8 @@ pub struct Material {
     pub shading: Shading,
     pub double_sided: bool,
     pub alpha: Alpha,
+    /// The PC's light this is, glowing with `emissive` only while lit.
+    pub led: Option<Led>,
 }
 
 impl Material {
@@ -79,6 +123,16 @@ impl Material {
             shading,
             double_sided: false,
             alpha: Alpha::Opaque,
+            led: None,
+        }
+    }
+
+    /// A light of the PC's, glowing `color` when lit.
+    fn led(led: Led, color: [f32; 3]) -> Self {
+        Material {
+            emissive: color.map(|c| c * 1.6),
+            led: Some(led),
+            ..Material::plain(color.map(|c| c * 0.15), Shading::Lit)
         }
     }
 }
@@ -114,6 +168,8 @@ pub struct Screen {
     pub center: Vec3,
     pub normal: Vec3,
     pub size: Vec2,
+    /// The picture's left to right, on the surface.
+    pub right: Vec3,
 }
 
 impl Screen {
@@ -125,6 +181,7 @@ impl Screen {
     /// Work out the middle, the facing and the size from the triangles.
     fn measure(&mut self) {
         let (mut area, mut center, mut normal, mut size) = (0.0, Vec3::ZERO, Vec3::ZERO, Vec2::ZERO);
+        let mut right = Vec3::ZERO;
         for &[(p0, t0), (p1, t1), (p2, t2)] in &self.triangles {
             let cross = (p1 - p0).cross(p2 - p0);
             let a = cross.length() * 0.5;
@@ -142,12 +199,14 @@ impl Screen {
                 let dpdu = (e1 * d2.y - e2 * d1.y) / det;
                 let dpdv = (e2 * d1.x - e1 * d2.x) / det;
                 size += Vec2::new(dpdu.length(), dpdv.length()) * a;
+                right += dpdu * a;
             }
         }
         if area > 0.0 {
             self.center = center / area;
             self.normal = normal.normalize_or_zero();
             self.size = size / area;
+            self.right = right.normalize_or(Vec3::X);
         }
     }
 }
@@ -185,6 +244,9 @@ pub struct Scene {
     pub sun: Vec3,
     /// What the lit colours are multiplied by.
     pub exposure: f32,
+    /// Where the left and right channels' sound comes from: the scene's
+    /// `speaker_left` and `speaker_right`, else the screen's sides.
+    pub speakers: [Vec3; 2],
 }
 
 /// The sunset sky's sun: low, ahead and to the left.
@@ -220,6 +282,13 @@ impl Scene {
             Material::plain(srgb(0x1a1c20), Shading::Floor),
             Material::plain([1.0; 3], Shading::Screen),
             Material::plain(srgb(0x101114), Shading::Lit),
+            // The PC: its case, its front's slots and its lights.
+            Material::plain(srgb(0x2c2d31), Shading::Lit),
+            Material::plain(srgb(0x0b0b0d), Shading::Lit),
+            Material::led(Led::Power, [0.1, 1.0, 0.15]),
+            Material::led(Led::Turbo, [1.0, 0.65, 0.05]),
+            Material::led(Led::Hdd, [1.0, 0.12, 0.05]),
+            Material::led(Led::Floppy, [0.1, 1.0, 0.15]),
         ];
         let mut meshes = Vec::new();
         // The floor, so big that its edges are lost in the haze.
@@ -252,6 +321,23 @@ impl Scene {
         // A thin dark slab behind it, its frame.
         let bezel = center + Vec3::new(0.0, 0.0, -0.035);
         meshes.push(cuboid(bezel, Vec3::new(w + 0.08, h + 0.08, 0.06), 2));
+        // A small tower floating beside it, its front to the viewer: two
+        // drive bays, a floppy drive with its light, and the power, turbo
+        // and hard disk lights.
+        let tower = Vec3::new(1.2, 1.0, -2.4);
+        let (tw, th, td) = (0.2, 0.44, 0.42);
+        meshes.push(cuboid(tower, Vec3::new(tw, th, td), 3));
+        let front = tower.z + td / 2.0;
+        let on_front = |x: f32, y: f32| Vec3::new(tower.x + x, tower.y + y, front);
+        for (y, height) in [(0.17, 0.045), (0.115, 0.045)] {
+            meshes.push(cuboid(on_front(0.0, y), Vec3::new(0.16, height, 0.004), 4));
+        }
+        meshes.push(cuboid(on_front(0.0, 0.06), Vec3::new(0.11, 0.028, 0.004), 4));
+        meshes.push(cuboid(on_front(0.045, 0.052), Vec3::new(0.008, 0.005, 0.008), 8));
+        for (i, material) in [5, 6, 7].into_iter().enumerate() {
+            let x = -0.05 + i as f32 * 0.025;
+            meshes.push(cuboid(on_front(x, 0.0), Vec3::new(0.008, 0.008, 0.008), material));
+        }
         let mut scene = Scene {
             meshes,
             materials,
@@ -263,12 +349,21 @@ impl Scene {
             sky: true,
             sun: sunset_sun(),
             exposure: 1.0,
+            speakers: [Vec3::ZERO; 2],
         };
         let (sun, ambient) = sunset_lights();
         scene.lights.push(sun);
         scene.ambient = ambient;
         scene.collect_screen();
+        scene.speakers = scene.screen_speakers();
         scene
+    }
+
+    /// The screen's left and right sides, where its sound comes from if
+    /// the scene has no speakers.
+    fn screen_speakers(&self) -> [Vec3; 2] {
+        let half = self.screen.right * self.screen.size.x / 2.0;
+        [self.screen.center - half, self.screen.center + half]
     }
 
     /// The screen's triangles, from the meshes of the screen's material.
@@ -346,6 +441,7 @@ impl Scene {
                         gltf::material::AlphaMode::Mask => Alpha::Mask(m.alpha_cutoff().unwrap_or(0.5)),
                         gltf::material::AlphaMode::Blend => Alpha::Blend,
                     },
+                    led: None,
                 }
             })
             .collect();
@@ -367,8 +463,17 @@ impl Scene {
             sky: extra(scene.extras(), "rustdos_sky").is_none_or(truthy),
             sun: sunset_sun(),
             exposure: extra(scene.extras(), "rustdos_exposure").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32,
+            speakers: [Vec3::ZERO; 2],
         };
-        let mut walk = Walk { buffers: &buffers, default_material, screen_material, spawn: None, camera: None };
+        let mut walk = Walk {
+            buffers: &buffers,
+            default_material,
+            screen_material,
+            spawn: None,
+            camera: None,
+            speakers: [None; 2],
+            leds: Vec::new(),
+        };
         for node in scene.nodes() {
             walk.node(&mut loaded, node, Mat4::IDENTITY, false)?;
         }
@@ -388,6 +493,20 @@ impl Scene {
             loaded.ambient = ambient * 0.5;
         }
         loaded.collect_screen();
+        let sides = loaded.screen_speakers();
+        loaded.speakers = [walk.speakers[0].unwrap_or(sides[0]), walk.speakers[1].unwrap_or(sides[1])];
+        // A light's own copy of its material, lit or not apart from the
+        // rest using it.
+        for (mesh, led) in walk.leds {
+            let mut material = loaded.materials[loaded.meshes[mesh].material].clone();
+            if material.emissive == [0.0; 3] && material.emissive_texture.is_none() {
+                let [r, g, b, _] = material.base_color;
+                material.emissive = [r * 1.6, g * 1.6, b * 1.6];
+            }
+            material.led = Some(led);
+            loaded.meshes[mesh].material = loaded.materials.len();
+            loaded.materials.push(material);
+        }
         Ok(loaded)
     }
 }
@@ -401,6 +520,10 @@ struct Walk<'a> {
     /// starts.
     spawn: Option<Spawn>,
     camera: Option<Spawn>,
+    /// The empties called `speaker_left` and `speaker_right`.
+    speakers: [Option<Vec3>; 2],
+    /// The meshes that are the PC's lights, by their index.
+    leds: Vec<(usize, Led)>,
 }
 
 /// The lights of a scene are at most this many; the shader has room for
@@ -413,6 +536,11 @@ impl Walk<'_> {
         let named = |name: Option<&str>, wanted: &str| name.is_some_and(|n| n.eq_ignore_ascii_case(wanted));
         if named(node.name(), "spawn") {
             self.spawn = Some(Spawn::from_matrix(world));
+        }
+        for (i, side) in ["speaker_left", "speaker_right"].into_iter().enumerate() {
+            if node.name().is_some_and(|n| n.split('.').next().unwrap_or(n).eq_ignore_ascii_case(side)) {
+                self.speakers[i] = Some(world.transform_point3(Vec3::ZERO));
+            }
         }
         if node.camera().is_some() && self.camera.is_none() {
             self.camera = Some(Spawn::from_matrix(world));
@@ -439,6 +567,10 @@ impl Walk<'_> {
             || named(node.name(), "screen")
             || extra(node.extras(), "rustdos_screen").is_some_and(truthy)
             || node.mesh().is_some_and(|m| named(m.name(), "screen") || extra(m.extras(), "rustdos_screen").is_some_and(truthy));
+        let led = extra(node.extras(), "rustdos_led")
+            .and_then(|v| v.as_str().and_then(Led::parse))
+            .or_else(|| node.name().filter(|n| n.to_ascii_lowercase().starts_with("led_")).and_then(Led::parse))
+            .or_else(|| node.mesh().and_then(|m| m.name()).filter(|n| n.to_ascii_lowercase().starts_with("led_")).and_then(Led::parse));
         if let Some(mesh) = node.mesh() {
             let normals = Mat3::from_mat4(world).inverse().transpose();
             for primitive in mesh.primitives() {
@@ -481,6 +613,9 @@ impl Walk<'_> {
                 } else {
                     primitive.material().index().unwrap_or(self.default_material)
                 };
+                if let Some(led) = led.filter(|_| !screen) {
+                    self.leds.push((scene.meshes.len(), led));
+                }
                 scene.meshes.push(Mesh { vertices, indices, material });
             }
         }
@@ -502,6 +637,11 @@ fn smooth_normals(positions: &[Vec3], indices: &[u32]) -> Vec<Vec3> {
         }
     }
     normals.into_iter().map(|n| n.normalize_or(Vec3::Y)).collect()
+}
+
+/// The cube from -0.5 to 0.5, which the extras are drawn with.
+pub fn unit_cube() -> Mesh {
+    cuboid(Vec3::ZERO, Vec3::ONE, 0)
 }
 
 /// A box of `size` around `center`, in the material.
@@ -633,6 +773,11 @@ mod tests {
         // It faces the viewer, who looks at it.
         assert!(room.screen.normal.z > 0.99);
         assert!(room.screen.center.z < room.spawn.position.z);
+        // Its sound comes from its sides; the tower has its four lights.
+        assert!(room.speakers[0].x < -0.7 && room.speakers[1].x > 0.7);
+        for led in [Led::Power, Led::Turbo, Led::Hdd, Led::Floppy] {
+            assert!(room.meshes.iter().any(|m| room.materials[m.material].led == Some(led)), "{:?}", led);
+        }
     }
 
     #[test]
@@ -671,11 +816,13 @@ mod tests {
             r#"{{
             "asset": {{"version": "2.0"}},
             "scene": 0,
-            "scenes": [{{"nodes": [0, 2]}}],
+            "scenes": [{{"nodes": [0, 2, 3, 4]}}],
             "nodes": [
                 {{"name": "Monitor", "translation": [0, 2, -3], "children": [1]}},
                 {{"name": "Screen", "mesh": 0}},
-                {{"name": "spawn", "translation": [0, 1.5, 0], "rotation": [0, {s}, 0, {s}]}}
+                {{"name": "spawn", "translation": [0, 1.5, 0], "rotation": [0, {s}, 0, {s}]}},
+                {{"name": "speaker_left.001", "translation": [-2, 1, -3]}},
+                {{"name": "Light", "mesh": 0, "extras": {{"rustdos_led": "hdd"}}, "translation": [5, 0, 0]}}
             ],
             "meshes": [{{"primitives": [{{"attributes": {{"POSITION": 0, "TEXCOORD_0": 1}}, "indices": 2}}]}}],
             "buffers": [{{"byteLength": {len}, "uri": "data:application/octet-stream;base64,{data}"}}],
@@ -706,6 +853,14 @@ mod tests {
         assert!((scene.spawn.yaw - std::f32::consts::FRAC_PI_2).abs() < 1e-4, "{}", scene.spawn.yaw);
         // Without lights of its own, the sunset lights it.
         assert_eq!(scene.lights.len(), 1);
+        // The left speaker is the scene's, the right the screen's side.
+        assert!((scene.speakers[0] - Vec3::new(-2.0, 1.0, -3.0)).length() < 1e-4);
+        assert!((scene.speakers[1] - Vec3::new(1.0, 2.0, -3.0)).length() < 1e-4, "{:?}", scene.speakers);
+        // The light has a material of its own, which glows.
+        let led = &scene.materials[scene.meshes[1].material];
+        assert_eq!(led.led, Some(Led::Hdd));
+        assert!(led.emissive[0] > 0.0);
+        assert_eq!(scene.materials[scene.meshes[0].material].led, None);
     }
 
     #[test]

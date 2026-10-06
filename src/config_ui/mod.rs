@@ -334,10 +334,11 @@ enum Page {
     Serial,
     Cheats,
     Achievements,
+    Vr,
     Stats,
 }
 
-const PAGES: [Page; 12] = [
+const PAGES: [Page; 13] = [
     Page::Games,
     Page::States,
     Page::Drives,
@@ -349,6 +350,7 @@ const PAGES: [Page; 12] = [
     Page::Serial,
     Page::Cheats,
     Page::Achievements,
+    Page::Vr,
     Page::Stats,
 ];
 
@@ -366,6 +368,7 @@ impl Page {
             Page::States => "States",
             Page::Cheats => "Cheats",
             Page::Achievements => "Achievements",
+            Page::Vr => "VR",
             Page::Stats => "Stats",
         }
     }
@@ -374,6 +377,7 @@ impl Page {
         use Item::*;
         match self {
             Page::Drives | Page::Games | Page::States | Page::Cheats | Page::Achievements | Page::Stats => &[],
+            Page::Vr => &[VrMode, VrScene, VrControllers, VrSpatialAudio],
             Page::Display => {
                 &[Scale, Fullscreen, Aspect, Vrr, Filter, Shader, CrtCurvature, CrtGlow, Monochrome, Composite, CompositeEra]
             }
@@ -483,6 +487,12 @@ enum Item {
     /// Frames shown when the machine's are due, for a display with a
     /// variable refresh rate.
     Vrr,
+    /// The picture in a 3D scene, the scene, what a headset's controllers
+    /// do and whether the sound follows the viewer.
+    VrMode,
+    VrScene,
+    VrControllers,
+    VrSpatialAudio,
     Filter,
     Shader,
     /// How far the CRT look's tube bends and how much it glows, shown
@@ -784,6 +794,10 @@ impl Item {
             Fullscreen => "Fullscreen",
             Aspect => "4:3 aspect correction",
             Vrr => "Variable refresh rate",
+            VrMode => "3D scene",
+            VrScene => "Scene",
+            VrControllers => "Headset controllers",
+            VrSpatialAudio => "Sound from the screen",
             Filter => "Scaling filter",
             Shader => "CRT shader",
             CrtCurvature => "  Curvature",
@@ -893,6 +907,10 @@ impl Item {
     fn available(self, frontend: Frontend) -> bool {
         match self {
             Item::Scale | Item::Fullscreen | Item::Vrr => frontend.window,
+            // The window's OpenGL draws the scene.
+            Item::VrMode | Item::VrScene | Item::VrControllers | Item::VrSpatialAudio => {
+                frontend.window && cfg!(feature = "vr")
+            }
             Item::SoundFont => soundfonts(frontend),
             Item::Mt32Roms | Item::Mt32Model => mt32(frontend),
             Item::Sc55Roms | Item::Sc55Model => frontend.host_files,
@@ -927,6 +945,8 @@ impl Item {
     fn shown(self, s: &Settings) -> bool {
         match self {
             Item::CrtCurvature | Item::CrtGlow => s.shader == crate::video::shader::Shader::Crt,
+            Item::VrScene | Item::VrSpatialAudio => s.vr.mode != crate::vr::VrMode::Off,
+            Item::VrControllers => s.vr.mode == crate::vr::VrMode::Headset,
             Item::ReverbMix => s.mixer.reverb != ReverbPreset::Off,
             Item::ChorusMix => s.mixer.chorus != ChorusPreset::Off,
             Item::RewindMemory => s.rewind,
@@ -966,7 +986,8 @@ impl Item {
             | RecordShader => Applies::Now,
             Joystick | Deadzone | SpeakerFilter | SbFilter | Reverb | Chorus | ReverbMix | ChorusMix => Applies::Now,
             Rooms => Applies::Now,
-            Memsize | Autoexec | Lan | LanHost => Applies::NextStart,
+            Memsize | Autoexec | Lan | LanHost | VrMode | VrScene => Applies::NextStart,
+            VrControllers | VrSpatialAudio => Applies::Now,
             _ => Applies::AtPrompt,
         }
     }
@@ -981,7 +1002,7 @@ impl Item {
                 Input::Text
             }
             Item::ModemListen => Input::Text,
-            Item::SoundFont | Item::Mt32Roms | Item::Awe32Rom | Item::Sc55Roms => Input::File,
+            Item::SoundFont | Item::Mt32Roms | Item::Awe32Rom | Item::Sc55Roms | Item::VrScene => Input::File,
             Item::Autoexec | Item::Rooms | Item::Awe32Download | Item::Sc55Download => Input::Link,
             _ => Input::Choice,
         }
@@ -995,6 +1016,15 @@ impl Item {
             Fullscreen => on_off(s.fullscreen),
             Aspect => on_off(s.aspect),
             Vrr => on_off(s.vrr),
+            VrMode => match s.vr.mode {
+                crate::vr::VrMode::Off => "off",
+                crate::vr::VrMode::Desktop => "in the window",
+                crate::vr::VrMode::Headset => "in a VR headset",
+            }
+            .to_string(),
+            VrScene => s.vr.scene.as_deref().map_or("the test room".to_string(), |p| contract_home(p, home)),
+            VrControllers => s.vr.controllers.describe().to_string(),
+            VrSpatialAudio => on_off(s.vr.spatial_audio),
             Filter => match s.filter {
                 crate::config::Filter::Nearest => "nearest (sharp)",
                 crate::config::Filter::Linear => "linear (smooth)",
@@ -1205,6 +1235,9 @@ impl Item {
             Fullscreen => on_off(|s, on| s.fullscreen = on),
             Aspect => on_off(|s, on| s.aspect = on),
             Vrr => on_off(|s, on| s.vrr = on),
+            VrMode => each(s, crate::vr::VrMode::ALL, |s, mode| s.vr.mode = mode),
+            VrControllers => each(s, crate::vr::VrControllers::ALL, |s, c| s.vr.controllers = c),
+            VrSpatialAudio => on_off(|s, on| s.vr.spatial_audio = on),
             Filter => each(s, [crate::config::Filter::Nearest, crate::config::Filter::Linear], |s, f| s.filter = f),
             Shader => each(s, crate::video::shader::Shader::ALL, |s, shader| s.shader = shader),
             Monochrome => each(s, crate::video::mono::Monochrome::ALL, |s, mono| s.monochrome = mono),
@@ -1345,7 +1378,7 @@ impl Item {
             // row of several, whose fields have their own.
             Cycles | CrtCurvature | CrtGlow | Memsize | Volume(_) | ReverbMix | ChorusMix | Deadzone | UltraDir
             | SoundFont | Mt32Roms | Awe32Rom | Awe32Download | Sc55Roms | Sc55Download | CaptureDir | Autoexec | SbPorts | GusPorts | MacAddr
-            | Rooms | Relay | Player
+            | Rooms | Relay | Player | VrScene
             | Lan | LanHost | Room | Password | ModemListen => Vec::new(),
         }
     }
@@ -1476,6 +1509,7 @@ impl Item {
         match self {
             Item::UltraDir => s.sound.gus.ultradir.take().is_some(),
             Item::SoundFont => s.sound.soundfont.take().is_some(),
+            Item::VrScene => s.vr.scene.take().is_some(),
             Item::Mt32Roms => s.sound.mt32roms.take().is_some(),
             Item::Sc55Roms => s.sound.sc55roms.take().is_some(),
             Item::Awe32Rom => s.sound.awe32rom.take().is_some(),
@@ -1525,6 +1559,8 @@ impl Item {
 pub(super) enum Pick {
     MountPath,
     SoundFont,
+    /// The 3D scene, a glTF file.
+    VrScene,
     /// The directory with the MT-32's ROMs.
     Mt32Roms,
     /// The AWE32's ROM file.
@@ -2227,6 +2263,7 @@ impl ConfigUi {
             (UiKey::Enter, Input::File) if item == Item::Mt32Roms => self.open_browser(Pick::Mt32Roms),
             (UiKey::Enter, Input::File) if item == Item::Awe32Rom => self.open_browser(Pick::Awe32Rom),
             (UiKey::Enter, Input::File) if item == Item::Sc55Roms => self.open_browser(Pick::Sc55Roms),
+            (UiKey::Enter, Input::File) if item == Item::VrScene => self.open_browser(Pick::VrScene),
             (UiKey::Enter, Input::File) => self.open_browser(Pick::SoundFont),
             (UiKey::Enter, Input::Link) if item == Item::Rooms => self.open_rooms(),
             (UiKey::Enter, Input::Link) if item == Item::Awe32Download => self.download_awe32_rom(),
@@ -2588,6 +2625,12 @@ impl ConfigUi {
                 false,
                 SOUNDFONTS,
             ),
+            Pick::VrScene => (
+                "Pick a 3D scene exported from Blender (.glb, .gltf)",
+                self.settings.vr.scene.as_deref().map(|p| p.display().to_string()).unwrap_or_default(),
+                false,
+                &["glb", "gltf"][..],
+            ),
             Pick::Mt32Roms => (
                 "Pick the directory with the MT-32's ROMs",
                 self.settings.sound.mt32roms.as_deref().map(|p| p.display().to_string()).unwrap_or_default(),
@@ -2675,6 +2718,10 @@ impl ConfigUi {
                     Pick::SoundFont => {
                         self.settings.sound.soundfont = Some(path);
                         self.changed(Item::SoundFont, host);
+                    }
+                    Pick::VrScene => {
+                        self.settings.vr.scene = Some(path);
+                        self.changed(Item::VrScene, host);
                     }
                     Pick::Awe32Rom => match crate::awe32::rom::load(&path) {
                         Ok(_) => {

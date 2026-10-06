@@ -1,36 +1,51 @@
 //! The picture on a screen in a 3D scene (`[vr]`): the window shows the
 //! scene through a camera flown with the mouse (`mode=desktop`), or a VR
-//! headset shows it through OpenXR and the window the left eye's view
-//! (`mode=headset`).
+//! headset shows it through OpenXR, on a thread of its own, and the window
+//! the left eye's view (`mode=headset`).
 //!
 //! The picture is drawn through the look into a texture with mipmaps
-//! whenever it changes (`ScreenTarget`), which the scene's screen shows;
-//! the scene itself is drawn every frame, since the viewer moves.
+//! whenever it changes (`ScreenTarget`, three of them for the headset's
+//! thread to read one while the next is drawn), which the scene's screen
+//! shows; the scene itself is drawn every frame, since the viewer moves.
+//! The PC in the scene has its lights lit as the machine's would be, the
+//! sound comes from the screen's sides, and the headset's controllers
+//! point at the screen as the mouse and are a gamepad.
 
 mod camera;
+mod controls;
+#[cfg(xr)]
+mod headset;
 mod pick;
 mod render;
 mod scene;
+mod spatial;
 #[cfg(xr)]
 mod xr;
 
 use crate::video::shader::Glsl;
 use camera::FlyCamera;
+pub use controls::VrInput;
+use super::audio_mix::Mix;
 use glam::{Mat4, Vec2};
 use glow::HasContext;
 use render::{Format, Gpu, ScreenTarget, View};
 use rust_dos::vr::{VrMode, VrSettings};
 use scene::Scene;
+use rust_dos::vr::Leds;
+use std::sync::Arc;
 
 pub struct Stage {
-    scene: Scene,
+    scene: Arc<Scene>,
     gpu: Gpu,
-    screen: ScreenTarget,
-    /// Whether the screen has a picture yet.
-    has_picture: bool,
+    /// The screen's pictures: the newest finished, and the one being
+    /// drawn into while the headset reads another.
+    screens: Vec<ScreenTarget>,
+    latest: Option<usize>,
+    drawing: usize,
     camera: FlyCamera,
+    leds: Leds,
     #[cfg(xr)]
-    xr: Option<xr::Xr>,
+    headset: Option<headset::Headset>,
     /// What the window showed last: the view's view-projection and where
     /// it was in the drawable (x, y from the top, width, height), for the
     /// mouse.
@@ -40,12 +55,25 @@ pub struct Stage {
 /// Width and height.
 type Size = (u32, u32);
 
+/// What has to be done before SDL starts for a headset to work.
+pub fn before_sdl() {
+    #[cfg(xr)]
+    headset::before_sdl();
+}
+
 impl Stage {
     /// The scene of `settings`, or the test room, ready to draw; and why
     /// the scene or the headset the settings ask for isn't there, if it
-    /// isn't. A headset draws with the OpenGL context current, the
-    /// window's.
-    pub fn new(gl: &glow::Context, glsl: Glsl, settings: &VrSettings) -> Result<(Self, Vec<String>), String> {
+    /// isn't. The headset's thread gets a context sharing `main`'s, the
+    /// window's, textures.
+    #[cfg_attr(not(xr), allow(unused_variables))]
+    pub fn new(
+        gl: &glow::Context,
+        glsl: Glsl,
+        settings: &VrSettings,
+        window: &sdl2::video::Window,
+        main: &sdl2::video::GLContext,
+    ) -> Result<(Self, Vec<String>), String> {
         let mut notes = Vec::new();
         let scene = match &settings.scene {
             Some(path) => Scene::load(path).unwrap_or_else(|e| {
@@ -54,23 +82,38 @@ impl Stage {
             }),
             None => Scene::test_room(),
         };
+        let scene = Arc::new(scene);
         let gpu = Gpu::new(gl, glsl, &scene)?;
-        let screen = ScreenTarget::new(gl)?;
-        // SAFETY: see `GlScreen`.
-        unsafe { gl.bind_texture(glow::TEXTURE_2D, Some(screen.texture)) };
-        gpu.set_anisotropy(gl);
+        let mut screens = Vec::new();
+        for _ in 0..3 {
+            let screen = ScreenTarget::new(gl)?;
+            // SAFETY: see `GlScreen`.
+            unsafe { gl.bind_texture(glow::TEXTURE_2D, Some(screen.texture)) };
+            gpu.set_anisotropy(gl);
+            screens.push(screen);
+        }
         let camera = FlyCamera::at(scene.spawn);
         #[allow(unused_mut)]
-        let mut stage =
-            Stage { scene, gpu, screen, has_picture: false, camera, #[cfg(xr)] xr: None, shown: None };
+        let mut stage = Stage {
+            scene,
+            gpu,
+            screens,
+            latest: None,
+            drawing: 0,
+            camera,
+            leds: Leds::default(),
+            #[cfg(xr)]
+            headset: None,
+            shown: None,
+        };
         if settings.mode == VrMode::Headset {
             #[cfg(xr)]
-            match xr::Xr::new(gl) {
-                Ok(xr) => {
-                    notes.push(format!("[VR] {}", xr.describe()));
-                    stage.xr = Some(xr);
+            {
+                let textures = [stage.screens[0].texture, stage.screens[1].texture, stage.screens[2].texture];
+                match headset::Headset::start(window, main, glsl, stage.scene.clone(), textures, settings.controllers) {
+                    Ok(headset) => stage.headset = Some(headset),
+                    Err(e) => notes.push(format!("[VR] No headset ({}); the scene is shown in the window", e)),
                 }
-                Err(e) => notes.push(format!("[VR] No headset ({}); the scene is shown in the window", e)),
             }
             #[cfg(not(xr))]
             notes.push("[VR] This build has no OpenXR; the scene is shown in the window".to_string());
@@ -87,62 +130,49 @@ impl Stage {
         (width, height)
     }
 
-    /// Bind the screen's framebuffer at `size` to draw the picture into.
-    /// False if it can't be.
+    /// Bind a screen's framebuffer at `size` to draw the picture into: one
+    /// neither the newest nor the headset's. False if it can't be.
     pub fn begin_screen(&mut self, gl: &glow::Context, size: Size) -> bool {
-        self.screen.resize(gl, size)
+        #[cfg(xr)]
+        let in_use = self.headset.as_ref().and_then(|h| h.screen_in_use());
+        #[cfg(not(xr))]
+        let in_use: Option<usize> = None;
+        self.drawing = (0..self.screens.len()).find(|&i| Some(i) != self.latest && Some(i) != in_use).unwrap_or(0);
+        self.screens[self.drawing].resize(gl, size)
     }
 
     /// The picture is drawn into the screen.
     pub fn end_screen(&mut self, gl: &glow::Context) {
-        self.screen.finish(gl);
-        self.has_picture = true;
+        self.screens[self.drawing].finish(gl);
+        self.latest = Some(self.drawing);
+        #[cfg(xr)]
+        if let Some(headset) = &self.headset {
+            headset.publish_screen(gl, self.drawing);
+        }
     }
 
-    /// Draw the scene for the window, whose drawable is `drawable` big, and
-    /// for the headset if it is running. The window is to be swapped
-    /// after.
+    /// Draw the scene for the window, whose drawable is `drawable` big:
+    /// the headset's left eye while it shows the scene, else the window's
+    /// camera's view. The window is to be swapped after.
     pub fn render(&mut self, gl: &glow::Context, drawable: Size) {
-        let screen = self.has_picture.then_some(self.screen.texture);
-        #[cfg(xr)]
-        if let Some(xr) = &mut self.xr
-            && xr.frame_pending()
-        {
-            let (gpu, scene) = (&mut self.gpu, &self.scene);
-            let mut mirror = None;
-            let result = xr.render(gl, scene.spawn, |eye, view, size, srgb, framebuffer| {
-                let format = Format { size, srgb };
-                if let Err(e) = gpu.render(gl, scene, &view, format, screen) {
-                    eprintln!("[VR] {}", e);
-                    return;
-                }
-                let full = (0, 0, size.0 as i32, size.1 as i32);
-                gpu.copy_to(gl, Some(framebuffer), full);
-                // The left eye's view in the window too.
-                if eye == 0 {
-                    let (x, y, w, h) = super::letterbox(drawable, size);
-                    clear_window(gl, drawable);
-                    let bottom = drawable.1 as i32 - y as i32 - h as i32;
-                    gpu.copy_to(gl, None, (x as i32, bottom, w as i32, h as i32));
-                    mirror = Some((view.view_projection(), (x as f32, y as f32, w as f32, h as f32)));
-                }
-            });
-            match result {
-                Ok(true) => {
-                    self.shown = mirror;
-                    return;
-                }
-                Ok(false) => {}
-                Err(e) => eprintln!("[VR] {}", e),
-            }
-        }
         if drawable.0 == 0 || drawable.1 == 0 {
             return;
         }
+        #[cfg(xr)]
+        if let Some(headset) = &mut self.headset
+            && headset.running()
+        {
+            if let Some(shown) = headset.draw_mirror(gl, drawable) {
+                self.shown = Some(shown);
+            }
+            // (Until its first frame, the window keeps what it had.)
+            return;
+        }
+        let screen = self.latest.map(|i| self.screens[i].texture);
         let aspect = drawable.0 as f32 / drawable.1 as f32;
         let view = View { view: self.camera.view(), projection: self.camera.projection(aspect) };
         let format = Format { size: drawable, srgb: false };
-        if let Err(e) = self.gpu.render(gl, &self.scene, &view, format, screen) {
+        if let Err(e) = self.gpu.render(gl, &self.scene, &view, format, screen, self.leds, &[]) {
             eprintln!("[VR] {}", e);
             clear_window(gl, drawable);
             return;
@@ -171,40 +201,70 @@ impl Stage {
     pub fn recenter(&mut self) {
         self.camera = FlyCamera::at(self.scene.spawn);
         #[cfg(xr)]
-        if let Some(xr) = &mut self.xr {
-            xr.recenter();
+        if let Some(headset) = &self.headset {
+            headset.recenter();
         }
     }
 
     /// Whether a headset is attached, running or not.
     pub fn has_headset(&self) -> bool {
         #[cfg(xr)]
-        return self.xr.is_some();
+        return self.headset.is_some();
         #[cfg(not(xr))]
         false
     }
 
-    /// Handle the headset's events; what happened worth saying.
+    /// What the headset's thread has to say; once it is over, the window
+    /// shows the scene.
     pub fn poll(&mut self) -> Vec<String> {
         #[cfg(xr)]
-        if let Some(xr) = &mut self.xr {
-            let (notes, lost) = xr.poll();
-            if lost {
-                self.xr = None;
+        if let Some(headset) = &self.headset {
+            let (notes, ended) = headset.poll();
+            if ended {
+                self.headset = None;
             }
             return notes;
         }
         Vec::new()
     }
 
-    /// Wait for the headset's next frame, if it is showing the scene: then
-    /// the headset paces the frames, each the period returned.
-    pub fn wait_frame(&mut self) -> Option<std::time::Duration> {
+    /// The PC's lights, as the machine's are.
+    pub fn set_leds(&mut self, leds: Leds) {
+        self.leds = leds;
         #[cfg(xr)]
-        if let Some(xr) = &mut self.xr {
-            return xr.wait_frame();
+        if let Some(headset) = &self.headset {
+            headset.set_leds(leds);
         }
+    }
+
+    /// Take on the `[vr]` settings that change while it runs.
+    #[cfg_attr(not(xr), allow(unused_variables))]
+    pub fn apply(&mut self, settings: &VrSettings) {
+        #[cfg(xr)]
+        if let Some(headset) = &self.headset {
+            headset.set_controllers(settings.controllers);
+        }
+    }
+
+    /// The controllers' input, while the headset shows the scene.
+    pub fn input(&self) -> Option<VrInput> {
+        #[cfg(xr)]
+        return self.headset.as_ref().and_then(|h| h.input()).map(|(input, _)| input);
+        #[cfg(not(xr))]
         None
+    }
+
+    /// How the sound's channels mix for the listener: the headset's head
+    /// while it shows the scene, else the window's camera.
+    pub fn audio_mix(&self) -> Mix {
+        #[cfg(xr)]
+        let head = self.headset.as_ref().and_then(|h| h.input()).and_then(|(_, head)| head);
+        #[cfg(not(xr))]
+        let head: Option<Mat4> = None;
+        let listener = head.unwrap_or_else(|| self.camera.view().inverse());
+        let spawn = self.scene.spawn;
+        let start = Mat4::from_translation(spawn.position) * Mat4::from_rotation_y(spawn.yaw);
+        spatial::mix(listener, start, self.scene.speakers)
     }
 }
 

@@ -10,6 +10,7 @@ mod gl;
 #[cfg(not(feature = "gl"))]
 #[path = "display/nogl.rs"]
 mod gl;
+pub mod audio_mix;
 #[cfg(feature = "vr")]
 mod stage;
 #[cfg(feature = "gl")]
@@ -543,6 +544,27 @@ impl<'a> Display<'a> {
     }
 }
 
+/// What has to be done before SDL starts for a VR headset to work: Xlib
+/// made safe for the headset's thread.
+pub fn before_headset() {
+    #[cfg(feature = "vr")]
+    stage::before_sdl();
+}
+
+/// What a VR headset's controllers do to the machine at a frame.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct VrControl {
+    /// The frame pixel the laser points at, if it is on the screen.
+    pub pointer: Option<(i32, i32)>,
+    /// The mouse's left and right buttons.
+    pub buttons: [bool; 2],
+    /// The controllers as a gamepad, while they are one.
+    pub pad: Option<rust_dos::padmap::PadSnapshot>,
+    /// The menu button's presses so far: each opens or closes the
+    /// settings window.
+    pub menu_presses: u32,
+}
+
 /// The 3D scene (`[vr]`).
 #[cfg(feature = "vr")]
 impl Display<'_> {
@@ -614,10 +636,41 @@ impl Display<'_> {
         self.stage_mut().map(|stage| stage.poll()).unwrap_or_default()
     }
 
-    /// Wait for the headset's next frame, if it shows the scene: then it
-    /// paces the frames, each the period returned.
-    pub fn wait_headset(&mut self) -> Option<std::time::Duration> {
-        self.stage_mut().and_then(|stage| stage.wait_frame())
+    /// The PC's lights in the scene, as the machine's are.
+    pub fn set_leds(&mut self, leds: rust_dos::vr::Leds) {
+        if let Some(stage) = self.stage_mut() {
+            stage.set_leds(leds);
+        }
+    }
+
+    /// Take on the `[vr]` settings that change while it runs.
+    pub fn apply_vr(&mut self, settings: &rust_dos::vr::VrSettings) {
+        if let Some(stage) = self.stage_mut() {
+            stage.apply(settings);
+        }
+    }
+
+    /// What the headset's controllers do, while it shows the scene.
+    pub fn vr_input(&self) -> Option<VrControl> {
+        let Output::Gl(gl) = &self.out else { return None };
+        let stage = gl.stage()?;
+        let input = stage.input()?;
+        let display = display_size(self.frame.0, self.frame.1, self.aspect);
+        let pointer = input.pointer.map(|uv| {
+            let texture = stage.screen_size(display);
+            let flat = CrtSettings { curvature: 0, ..self.crt };
+            screen_to_frame((uv.x, uv.y), texture, display, self.frame, (gl.active(), flat))
+        });
+        Some(VrControl { pointer, buttons: input.buttons, pad: input.pad, menu_presses: input.menu_presses })
+    }
+
+    /// How the sound's channels mix for where the viewer is in the scene,
+    /// if it is shown.
+    pub fn audio_mix(&self) -> Option<audio_mix::Mix> {
+        match &self.out {
+            Output::Gl(gl) => gl.stage().map(|stage| stage.audio_mix()),
+            Output::Sdl { .. } => None,
+        }
     }
 
     /// Draw the 3D scene again with the picture as it was: the viewer may
@@ -631,6 +684,18 @@ impl Display<'_> {
 
 #[cfg(not(feature = "vr"))]
 impl Display<'_> {
+    pub fn set_leds(&mut self, _leds: rust_dos::vr::Leds) {}
+
+    pub fn apply_vr(&mut self, _settings: &rust_dos::vr::VrSettings) {}
+
+    pub fn vr_input(&self) -> Option<VrControl> {
+        None
+    }
+
+    pub fn audio_mix(&self) -> Option<audio_mix::Mix> {
+        None
+    }
+
     pub fn open_stage(&mut self, _settings: &rust_dos::vr::VrSettings) -> Vec<String> {
         vec!["[VR] This build has no 3D scene (the vr feature)".to_string()]
     }
@@ -657,9 +722,6 @@ impl Display<'_> {
         Vec::new()
     }
 
-    pub fn wait_headset(&mut self) -> Option<std::time::Duration> {
-        None
-    }
 
     pub fn refresh_stage(&mut self) {}
 }

@@ -655,7 +655,14 @@ The picture on a screen in a 3D scene (see [3D scene and VR](#3d-scene-and-vr)).
   left eye's view in the window). It takes effect at the next start.
 * `scene`: the scene, a glTF file (`.glb`, or `.gltf` with its files)
   exported from Blender, relative to the configuration file's folder.
-  Empty for the built-in room.
+  Empty for the built-in room. It takes effect at the next start.
+* `controllers`: what a headset's controllers do: `both` (the default: the
+  pointing hand is the mouse, the rest a gamepad), `pointer` or `gamepad`.
+  See [VR headsets](#vr-headsets).
+* `spatial_audio`: the sound comes from the screen's sides, or the scene's
+  speakers, as the viewer turns and moves: `true` (the default) or `false`.
+
+The settings window's VR page has them all.
 
 ### `[drives]`
 
@@ -1699,8 +1706,20 @@ With `[vr] mode=desktop` (or `--vr-desktop`), the window shows the picture
 on a screen in a 3D scene instead of filling it. With `mode=headset` (or
 `--vr`), a VR headset shows the scene through OpenXR (SteamVR, Monado), and
 the window shows the left eye's view. With no `scene`, the scene is a room
-with the screen floating ahead, a dark floor and a dark blue sky with an
-orange sunset.
+with the screen floating ahead and a small PC tower beside it, a dark floor
+and a dark blue sky with an orange sunset.
+
+The PC's lights are the machine's: the power light, the turbo light while
+the CPU runs faster than 1000 instructions a millisecond (an XT's or a slow
+AT's speed is below it), the hard disk light while a hard disk's files or
+sectors are read or written, and the floppy drive's light while a floppy's
+are.
+
+With `spatial_audio` on, the left and right channels come from the
+screen's left and right sides: turn your head (or the window's camera) and
+the sound turns with the room; come closer and it gets louder. From where
+the scene starts it sounds exactly as without the scene. It adds no delay
+to the sound.
 
 The picture goes on the screen through the [CRT shader](#crt-shaders), but
 flat: the screen has its own shape. It is drawn at twice its size (1024 to
@@ -1754,6 +1773,12 @@ Optionally:
   KHR_materials_unlit) shows its colour as it is, for baked lighting.
 * The scene's custom property `rustdos_sky` set to false leaves out the
   sunset sky and its haze, for a closed room.
+* Meshes named `led_power`, `led_turbo`, `led_hdd` and `led_floppy` (or
+  with the custom property `rustdos_led` set to `power`, `turbo`, `hdd` or
+  `floppy`) are the PC's lights: they glow in their material's emissive
+  colour (or else its base colour) while lit, and not while dark.
+* Empties named `speaker_left` and `speaker_right` are where the sound's
+  channels come from, instead of the screen's sides.
 
 A scene that can't be read, or has no screen, gives the test room
 instead, and the log says why.
@@ -1770,12 +1795,37 @@ Wayland desktop. Without a loader, runtime or headset, the scene is shown
 in the window and the log says why.
 
 The headset's own seated space is used: the eyes are where the scene's
-`spawn` is when the runtime last centred its view. Ctrl+Shift+Home centres
-it again where you are and look. The headset paces the frames (90 Hz and
-the like) while it shows the scene; the machine still runs at its own
-speed, so its own frame rate, 70 Hz for VGA, judders a little against
-the headset's. Keyboard and mouse input go to the window, which has to keep
-the focus.
+`spawn` is when the runtime last centred its view. Ctrl+Shift+Home, or the
+controllers' menu button held for a second, centres it again where you are
+and look.
+
+The headset is drawn on a thread of its own, at the headset's rate (90 Hz
+and the like), with the newest picture the machine finished: a long
+moment of the machine's (a program loading, the recompiler at work)
+doesn't make the headset miss frames, and the view follows your head
+whatever the machine does. The window shows the left eye's view at the
+window's own rate. The machine's own frame rate, 70 Hz for VGA, judders a
+little against the headset's.
+
+The controllers (Index, Touch, Vive, Windows Mixed Reality and any that
+SteamVR maps to them; SteamVR's controller binding settings change them)
+with `controllers=both`:
+
+| Control | What it does |
+|---|---|
+| Trigger, on the hand last pulled with | Points a laser; where it meets the screen is the mouse, the trigger its left button |
+| Grip, on the pointing hand | The mouse's right button |
+| Thumbsticks (Vive: trackpads) | The joystick's two sticks |
+| A / B (right), X / Y (left) | The joystick's buttons A, B, X, Y |
+| The other hand's trigger and grip | The right trigger is button A, the right grip B, the left trigger X, the left grip Y |
+| Menu (Index: left thumbstick click) | Opens and closes the settings window, which the laser clicks in; held a second, centres the view |
+
+The controllers are the first gamepad, so a game's [gamepad
+mapping](#gamepad-mappings) maps them too: the grips are its shoulder
+buttons and the triggers its triggers. With `controllers=pointer` they only
+point and click; with `gamepad` both hands are the gamepad, triggers and
+grips included. Keyboard and mouse input go to the window, which has to
+keep the focus.
 
 ## Command-line options
 

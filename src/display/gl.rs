@@ -73,6 +73,15 @@ pub struct GlScreen {
     flat: bool,
 }
 
+/// The scene goes first: the headset's thread draws with a context of the
+/// window's.
+#[cfg(feature = "vr")]
+impl Drop for GlScreen {
+    fn drop(&mut self) {
+        drop(self.stage.take());
+    }
+}
+
 /// A picture to draw through the look away from the window, and the
 /// framebuffer it is drawn into and read back from.
 struct Capture {
@@ -499,7 +508,7 @@ impl GlScreen {
     /// worth saying about it: the scene or headset that can't be had.
     #[cfg(feature = "vr")]
     pub fn open_stage(&mut self, settings: &rust_dos::vr::VrSettings) -> Result<Vec<String>, String> {
-        let (stage, notes) = super::stage::Stage::new(&self.gl, self.glsl, settings)?;
+        let (stage, notes) = super::stage::Stage::new(&self.gl, self.glsl, settings, &self.window, &self._context)?;
         self.stage = Some(Box::new(stage));
         Ok(notes)
     }

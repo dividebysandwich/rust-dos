@@ -1,11 +1,12 @@
 //! A VR headset through OpenXR (SteamVR, Monado): a session drawing with
-//! the window's OpenGL context, a swapchain for each eye, and the frames,
-//! which the headset paces while it shows the scene.
+//! the OpenGL context current on the headset's thread, a swapchain for each
+//! eye, the frames, which the headset paces, and the controllers.
 
 use super::camera::fov_projection;
+use super::controls::{Hand, Tracking};
 use super::render::View;
 use super::scene::Spawn;
-use glam::{Mat4, Quat, Vec3};
+use glam::{Mat4, Quat, Vec2, Vec3};
 use glow::HasContext;
 use openxr as xr;
 
@@ -18,9 +19,27 @@ struct Eye {
     size: (u32, u32),
 }
 
+/// The controllers' actions, for both hands.
+struct Controls {
+    set: xr::ActionSet,
+    /// (Kept with the spaces made of it.)
+    _aim: xr::Action<xr::Posef>,
+    select: xr::Action<bool>,
+    squeeze: xr::Action<bool>,
+    stick: xr::Action<xr::Vector2f>,
+    primary: xr::Action<bool>,
+    secondary: xr::Action<bool>,
+    menu: xr::Action<bool>,
+    /// /user/hand/left and /user/hand/right.
+    hands: [xr::Path; 2],
+    /// Where each hand points from, its -Z the way.
+    spaces: Vec<xr::Space>,
+}
+
 pub struct Xr {
     // Dropped first: what belongs to the session, then the session, then
     // the instance.
+    controls: Option<Controls>,
     eyes: Vec<Eye>,
     space: xr::Space,
     head: xr::Space,
@@ -140,6 +159,13 @@ impl Xr {
         let head = session
             .create_reference_space(xr::ReferenceSpaceType::VIEW, xr::Posef::IDENTITY)
             .map_err(err("the headset's space"))?;
+        let controls = match make_controls(&instance, &session) {
+            Ok(controls) => Some(controls),
+            Err(e) => {
+                eprintln!("[VR] No controllers: {}", e);
+                None
+            }
+        };
         let size = eyes.first().map_or((0, 0), |e| e.size);
         let description = format!(
             "{} through {} {}: {}x{} an eye, {}",
@@ -151,6 +177,7 @@ impl Xr {
             if srgb { "sRGB" } else { "linear RGBA8" }
         );
         Ok(Xr {
+            controls,
             eyes,
             space,
             head,
@@ -219,27 +246,31 @@ impl Xr {
         (notes, lost)
     }
 
-    /// Wait until the headset wants the next frame, if it is showing the
-    /// scene; then the frame is to be drawn (`render`).
-    /// The frame's period is returned.
-    pub fn wait_frame(&mut self) -> Option<std::time::Duration> {
-        if !self.running {
-            return None;
-        }
-        if self.pending.is_none() {
-            match self.waiter.wait() {
-                Ok(state) => self.pending = Some(state),
-                Err(e) => {
-                    eprintln!("[VR] Waiting for the headset: {}", e);
-                    return None;
-                }
-            }
-        }
-        self.pending.map(|state| state.predicted_display_period.into())
+    pub fn running(&self) -> bool {
+        self.running
     }
 
-    pub fn frame_pending(&self) -> bool {
-        self.pending.is_some()
+    /// The size of an eye's image, and whether it is sRGB.
+    pub fn eye_format(&self) -> ((u32, u32), bool) {
+        (self.eyes.first().map_or((0, 0), |e| e.size), self.srgb)
+    }
+
+    /// Wait until the headset wants the next frame, if it is showing the
+    /// scene; then it is to be begun, tracked and drawn.
+    pub fn wait_frame(&mut self) -> bool {
+        if !self.running {
+            return false;
+        }
+        match self.waiter.wait() {
+            Ok(state) => {
+                self.pending = Some(state);
+                true
+            }
+            Err(e) => {
+                eprintln!("[VR] Waiting for the headset: {}", e);
+                false
+            }
+        }
     }
 
     /// Centre the view where the head is and looks at the next frame.
@@ -247,28 +278,81 @@ impl Xr {
         self.recenter = true;
     }
 
-    /// Draw the frame waited for: `draw` gets each eye's number, view,
-    /// size, whether its images are sRGB, and the framebuffer to draw it
-    /// into. The scene's `spawn` is where the space's origin is. False if
-    /// the headset didn't want this frame drawn.
-    pub fn render(
-        &mut self,
-        _gl: &glow::Context,
-        spawn: Spawn,
-        mut draw: impl FnMut(usize, View, (u32, u32), bool, glow::Framebuffer),
-    ) -> Result<bool, String> {
-        let Some(state) = self.pending.take() else { return Ok(false) };
-        let time = state.predicted_display_time;
+    /// Start the frame waited for.
+    pub fn begin(&mut self) -> Result<(), String> {
+        let Some(state) = self.pending else { return Err("no frame waited for".into()) };
         self.stream.begin().map_err(err("the headset's frame"))?;
         if std::mem::take(&mut self.recenter) {
-            self.center(time);
+            self.center(state.predicted_display_time);
         }
+        Ok(())
+    }
+
+    /// Where the space's origin is in the scene: at the scene's `spawn`,
+    /// turned its way.
+    fn world(spawn: Spawn) -> Mat4 {
+        Mat4::from_translation(spawn.position) * Mat4::from_rotation_y(spawn.yaw)
+    }
+
+    /// The head and the controllers at the frame's time.
+    pub fn track(&mut self, spawn: Spawn) -> Tracking {
+        let mut tracking = Tracking::default();
+        let Some(state) = self.pending else { return tracking };
+        let time = state.predicted_display_time;
+        let world = Self::world(spawn);
+        let valid = xr::SpaceLocationFlags::POSITION_VALID | xr::SpaceLocationFlags::ORIENTATION_VALID;
+        if let Ok(head) = self.head.locate(&self.space, time)
+            && head.location_flags.contains(valid)
+        {
+            tracking.head = Some(world * pose_matrix(head.pose));
+        }
+        let Some(controls) = &self.controls else { return tracking };
+        if self.session.sync_actions(&[xr::ActiveActionSet::new(&controls.set)]).is_err() {
+            return tracking;
+        }
+        for (i, (&path, space)) in controls.hands.iter().zip(&controls.spaces).enumerate() {
+            let Ok(location) = space.locate(&self.space, time) else { continue };
+            if !location.location_flags.contains(valid) {
+                continue;
+            }
+            let held = |action: &xr::Action<bool>| {
+                action.state(&self.session, path).is_ok_and(|s| s.is_active && s.current_state)
+            };
+            let stick = controls
+                .stick
+                .state(&self.session, path)
+                .ok()
+                .filter(|s| s.is_active)
+                .map_or(Vec2::ZERO, |s| Vec2::new(s.current_state.x, s.current_state.y));
+            tracking.hands[i] = Some(Hand {
+                aim: world * pose_matrix(location.pose),
+                select: held(&controls.select),
+                squeeze: held(&controls.squeeze),
+                primary: held(&controls.primary),
+                secondary: held(&controls.secondary),
+                menu: held(&controls.menu),
+                stick,
+            });
+        }
+        tracking
+    }
+
+    /// Draw the frame begun: `draw` gets each eye's number, view, size,
+    /// whether its images are sRGB, and the framebuffer to draw it into.
+    /// The scene's `spawn` is where the space's origin is.
+    pub fn draw(
+        &mut self,
+        spawn: Spawn,
+        mut draw: impl FnMut(usize, View, (u32, u32), bool, glow::Framebuffer),
+    ) -> Result<(), String> {
+        let Some(state) = self.pending.take() else { return Ok(()) };
+        let time = state.predicted_display_time;
         if !state.should_render {
             self.stream.end(time, self.blend, &[]).map_err(err("the headset's frame"))?;
-            return Ok(false);
+            return Ok(());
         }
         let (_, views) = self.session.locate_views(VIEW, time, &self.space).map_err(err("the headset's views"))?;
-        let world = Mat4::from_translation(spawn.position) * Mat4::from_rotation_y(spawn.yaw);
+        let world = Self::world(spawn);
         for (index, (view, eye)) in views.iter().zip(&mut self.eyes).enumerate() {
             let image = eye.swapchain.acquire_image().map_err(err("the headset's image"))?;
             eye.swapchain.wait_image(xr::Duration::INFINITE).map_err(err("the headset's image"))?;
@@ -295,7 +379,7 @@ impl Xr {
             .collect();
         let layer = xr::CompositionLayerProjection::new().space(&self.space).views(&projection_views);
         self.stream.end(time, self.blend, &[&layer]).map_err(err("the headset's frame"))?;
-        Ok(true)
+        Ok(())
     }
 
     /// Move the space so that its origin is where the head is at `time`,
@@ -324,6 +408,119 @@ impl Xr {
             Err(e) => eprintln!("[VR] Recentring: {}", e),
         }
     }
+}
+
+/// What a controller's input is bound to.
+#[derive(Clone, Copy)]
+enum Control {
+    Aim,
+    Select,
+    Squeeze,
+    Stick,
+    Primary,
+    Secondary,
+    Menu,
+}
+
+/// The suggested bindings of the controllers OpenXR runtimes know, by
+/// their interaction profile: the control, the hand ("left", "right" or
+/// both) and the input's path under /user/hand/<hand>/input/. SteamVR lets
+/// the player change them.
+const PROFILES: &[(&str, &[(Control, &str, &str)])] = &[
+    (
+        "/interaction_profiles/khr/simple_controller",
+        &[(Control::Aim, "", "aim/pose"), (Control::Select, "", "select/click"), (Control::Menu, "", "menu/click")],
+    ),
+    (
+        "/interaction_profiles/valve/index_controller",
+        &[
+            (Control::Aim, "", "aim/pose"),
+            (Control::Select, "", "trigger/click"),
+            (Control::Squeeze, "", "squeeze/value"),
+            (Control::Stick, "", "thumbstick"),
+            (Control::Primary, "", "a/click"),
+            (Control::Secondary, "", "b/click"),
+            (Control::Menu, "left", "thumbstick/click"),
+        ],
+    ),
+    (
+        "/interaction_profiles/oculus/touch_controller",
+        &[
+            (Control::Aim, "", "aim/pose"),
+            (Control::Select, "", "trigger/value"),
+            (Control::Squeeze, "", "squeeze/value"),
+            (Control::Stick, "", "thumbstick"),
+            (Control::Primary, "left", "x/click"),
+            (Control::Secondary, "left", "y/click"),
+            (Control::Primary, "right", "a/click"),
+            (Control::Secondary, "right", "b/click"),
+            (Control::Menu, "left", "menu/click"),
+        ],
+    ),
+    (
+        "/interaction_profiles/htc/vive_controller",
+        &[
+            (Control::Aim, "", "aim/pose"),
+            (Control::Select, "", "trigger/click"),
+            (Control::Squeeze, "", "squeeze/click"),
+            (Control::Stick, "", "trackpad"),
+            (Control::Menu, "", "menu/click"),
+        ],
+    ),
+    (
+        "/interaction_profiles/microsoft/motion_controller",
+        &[
+            (Control::Aim, "", "aim/pose"),
+            (Control::Select, "", "trigger/value"),
+            (Control::Squeeze, "", "squeeze/click"),
+            (Control::Stick, "", "thumbstick"),
+            (Control::Menu, "", "menu/click"),
+        ],
+    ),
+];
+
+/// The controllers' actions, their bindings for the controllers OpenXR
+/// knows, and where the hands point from.
+fn make_controls(instance: &xr::Instance, session: &xr::Session<xr::OpenGL>) -> Result<Controls, String> {
+    let path = |p: &str| instance.string_to_path(p).map_err(err("OpenXR"));
+    let hands = [path("/user/hand/left")?, path("/user/hand/right")?];
+    let set = instance.create_action_set("rustdos", "Rust-DOS", 0).map_err(err("the controllers"))?;
+    let made = err("the controllers");
+    let aim = set.create_action::<xr::Posef>("aim", "Point", &hands).map_err(&made)?;
+    let select = set.create_action::<bool>("select", "Click (mouse left) / fire", &hands).map_err(&made)?;
+    let squeeze = set.create_action::<bool>("squeeze", "Mouse right / second button", &hands).map_err(&made)?;
+    let stick = set.create_action::<xr::Vector2f>("stick", "Joystick", &hands).map_err(&made)?;
+    let primary = set.create_action::<bool>("primary", "Joystick button A / X", &hands).map_err(&made)?;
+    let secondary = set.create_action::<bool>("secondary", "Joystick button B / Y", &hands).map_err(&made)?;
+    let menu = set.create_action::<bool>("menu", "Settings window", &hands).map_err(&made)?;
+    for (profile, inputs) in PROFILES {
+        let mut bindings = Vec::new();
+        for &(control, hand, input) in *inputs {
+            for side in ["left", "right"].into_iter().filter(|side| hand.is_empty() || hand == *side) {
+                let at = path(&format!("/user/hand/{}/input/{}", side, input))?;
+                bindings.push(match control {
+                    Control::Aim => xr::Binding::new(&aim, at),
+                    Control::Select => xr::Binding::new(&select, at),
+                    Control::Squeeze => xr::Binding::new(&squeeze, at),
+                    Control::Stick => xr::Binding::new(&stick, at),
+                    Control::Primary => xr::Binding::new(&primary, at),
+                    Control::Secondary => xr::Binding::new(&secondary, at),
+                    Control::Menu => xr::Binding::new(&menu, at),
+                });
+            }
+        }
+        // A runtime without the profile refuses it, and the rest still
+        // count.
+        if let Err(e) = instance.suggest_interaction_profile_bindings(path(profile)?, &bindings) {
+            eprintln!("[VR] {}: {}", profile, e);
+        }
+    }
+    session.attach_action_sets(&[&set]).map_err(&made)?;
+    let mut spaces = Vec::new();
+    for &hand in &hands {
+        spaces.push(aim.create_space(session, hand, xr::Posef::IDENTITY).map_err(&made)?);
+    }
+    Ok(Controls { set, _aim: aim, select, squeeze, stick, primary, secondary, menu, hands, spaces })
 }
 
 fn pose_matrix(pose: xr::Posef) -> Mat4 {

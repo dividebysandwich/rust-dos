@@ -11,7 +11,7 @@ use super::draw::{self, Rgb};
 use super::{Item, Page, Pick};
 use crate::mixer::Channel;
 
-const FILES: [&str; 7] = [
+const FILES: [&str; 8] = [
     include_str!("help/display.md"),
     include_str!("help/emulator.md"),
     include_str!("help/sound.md"),
@@ -19,6 +19,7 @@ const FILES: [&str; 7] = [
     include_str!("help/network.md"),
     include_str!("help/serial.md"),
     include_str!("help/pages.md"),
+    include_str!("help/vr.md"),
 ];
 
 /// A topic of the help: its title, and its text in Markdown.
@@ -288,6 +289,10 @@ impl Item {
             Fullscreen => "fullscreen",
             Aspect => "aspect",
             Vrr => "vrr",
+            VrMode => "vr-mode",
+            VrScene => "vr-scene",
+            VrControllers => "vr-controllers",
+            VrSpatialAudio => "vr-spatial-audio",
             Filter => "filter",
             Shader => "shader",
             CrtCurvature => "crt-curvature",
@@ -394,6 +399,7 @@ impl Page {
             Page::States => "states",
             Page::Cheats => "cheats",
             Page::Achievements => "achievements",
+            Page::Vr => "vr",
             Page::Stats => "stats",
             _ => return None,
         })
@@ -406,6 +412,7 @@ impl Pick {
         match self {
             Pick::MountPath => "mount",
             Pick::SoundFont => "soundfont",
+            Pick::VrScene => "vr-scene",
             Pick::Mt32Roms => "mt32-roms",
             Pick::Awe32Rom => "awe32-rom",
             Pick::Sc55Roms => "sc55-roms",
