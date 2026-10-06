@@ -283,8 +283,8 @@ Other things to keep in mind:
 
 Pick the file in any of these ways:
 
-- **Settings window:** Ctrl+F12, the **VR** tab. Set *3D scene* to *in the
-  window* or *in a VR headset*, and pick the file under *Scene* (Delete
+- **Settings window:** Ctrl+F12, the **VR** tab. Set *3D scene* to *3d in 2d
+  window* or *VR headset*, and pick the file under *Scene* (Delete
   goes back to the test room). Save with F2. The scene loads at the
   **next start**.
 - **Configuration file:** in `rust-dos.conf` (relative paths are from the

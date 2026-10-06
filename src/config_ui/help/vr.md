@@ -13,9 +13,9 @@ start or centre the headset's view.
 Where the picture is shown:
 
 - **off**: it fills the window, as usual.
-- **in the window**: on a screen in the 3D scene, seen through a camera.
-- **in a VR headset**: in the headset, with the left eye's view in the
-  window. Without a headset, the scene shows in the window.
+- **3d in 2d window**: renders the 3d scene on your physical 2d monitor.
+- **VR headset**: render in a connected VR headset, desktop shows left eye
+view. Without a headset, the scene shows in the window.
 
 Takes effect the next time Rust-DOS starts, or with `--vr` and
 `--vr-desktop` on the command line.
@@ -34,10 +34,10 @@ up as the PC's lights do, and empties named `speaker_left` and
 
 How the DOS picture fills the scene's screen:
 
-- **as the scene says**: the scene's choice (its screen's
+- **defined by scene**: the scene's choice (its screen's
   `rustdos_screen_fit` property); without one, the picture keeps its
   shape.
-- **keep its shape**: the picture keeps its proportions, with black bars
+- **fit**: the picture keeps its proportions, with black bars
   where the screen is wider or taller than it.
 - **stretch to fill**: the picture covers the whole screen, as a CRT's
   width and height knobs turned up would.

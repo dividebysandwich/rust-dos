@@ -1039,8 +1039,8 @@ impl Item {
             Vrr => on_off(s.vrr),
             VrMode => match s.vr.mode {
                 crate::vr::VrMode::Off => "off",
-                crate::vr::VrMode::Desktop => "in the window",
-                crate::vr::VrMode::Headset => "in a VR headset",
+                crate::vr::VrMode::Desktop => "3d in 2d window",
+                crate::vr::VrMode::Headset => "VR headset",
             }
             .to_string(),
             VrScene => s.vr.scene.as_deref().map_or("the test room".to_string(), |p| contract_home(p, home)),

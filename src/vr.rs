@@ -156,8 +156,8 @@ impl ScreenFit {
 
     pub fn describe(self) -> &'static str {
         match self {
-            ScreenFit::Auto => "as the scene says",
-            ScreenFit::Fit => "keep its shape",
+            ScreenFit::Auto => "defined by scene",
+            ScreenFit::Fit => "fit",
             ScreenFit::Stretch => "stretch to fill",
         }
     }
