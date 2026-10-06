@@ -129,6 +129,55 @@ impl VrControllers {
     }
 }
 
+/// How the picture fills the scene's screen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ScreenFit {
+    /// As the scene says (its `rustdos_screen_fit` property), keeping the
+    /// picture's shape if it doesn't.
+    #[default]
+    Auto,
+    /// The picture keeps its shape, with bars where the screen is wider or
+    /// taller.
+    Fit,
+    /// The picture is stretched over the whole screen.
+    Stretch,
+}
+
+impl ScreenFit {
+    pub const ALL: [ScreenFit; 3] = [ScreenFit::Auto, ScreenFit::Fit, ScreenFit::Stretch];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ScreenFit::Auto => "auto",
+            ScreenFit::Fit => "fit",
+            ScreenFit::Stretch => "stretch",
+        }
+    }
+
+    pub fn describe(self) -> &'static str {
+        match self {
+            ScreenFit::Auto => "as the scene says",
+            ScreenFit::Fit => "keep its shape",
+            ScreenFit::Stretch => "stretch to fill",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        let value = value.trim();
+        Self::ALL.into_iter().find(|f| f.name().eq_ignore_ascii_case(value))
+    }
+
+    /// Whether the picture is stretched, for a scene that asks for it
+    /// (`scene_stretches`) or not.
+    pub fn stretches(self, scene_stretches: bool) -> bool {
+        match self {
+            ScreenFit::Auto => scene_stretches,
+            ScreenFit::Fit => false,
+            ScreenFit::Stretch => true,
+        }
+    }
+}
+
 /// The `[vr]` settings.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VrSettings {
@@ -141,11 +190,18 @@ pub struct VrSettings {
     /// The sound comes from the screen's sides (or the scene's speakers)
     /// as the viewer turns and moves.
     pub spatial_audio: bool,
+    pub screen_fit: ScreenFit,
 }
 
 impl Default for VrSettings {
     fn default() -> Self {
-        VrSettings { mode: VrMode::Off, scene: None, controllers: VrControllers::Both, spatial_audio: true }
+        VrSettings {
+            mode: VrMode::Off,
+            scene: None,
+            controllers: VrControllers::Both,
+            spatial_audio: true,
+            screen_fit: ScreenFit::Auto,
+        }
     }
 }
 
@@ -173,6 +229,10 @@ impl VrSettings {
                     _ => return Err(format!("invalid spatial_audio '{}' (true or false)", value)),
                 }
             }
+            "screen_fit" => {
+                self.screen_fit = ScreenFit::parse(value)
+                    .ok_or_else(|| format!("invalid screen_fit '{}' (auto, fit or stretch)", value))?;
+            }
             _ => return Err(format!("unknown setting '{}'", key)),
         }
         Ok(())
@@ -184,6 +244,7 @@ impl VrSettings {
             ("scene", self.scene.as_ref().map(|path| path.display().to_string())),
             ("controllers", Some(self.controllers.name().to_string())),
             ("spatial_audio", Some(self.spatial_audio.to_string())),
+            ("screen_fit", Some(self.screen_fit.name().to_string())),
         ]
     }
 }
@@ -199,6 +260,9 @@ mod tests {
         s.set("scene", "rooms/den.glb", Path::new("/cfg")).unwrap();
         s.set("controllers", "Pointer", Path::new("/cfg")).unwrap();
         s.set("spatial_audio", "off", Path::new("/cfg")).unwrap();
+        s.set("screen_fit", "Stretch", Path::new("/cfg")).unwrap();
+        assert_eq!(s.screen_fit, ScreenFit::Stretch);
+        assert!(s.set("screen_fit", "zoom", Path::new("/cfg")).is_err());
         assert_eq!(s.controllers, VrControllers::Pointer);
         assert!(!s.spatial_audio);
         assert_eq!(s.mode, VrMode::Desktop);

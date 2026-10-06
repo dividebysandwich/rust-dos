@@ -170,6 +170,9 @@ pub struct Screen {
     pub size: Vec2,
     /// The picture's left to right, on the surface.
     pub right: Vec3,
+    /// The scene asks for the picture to be stretched over the whole
+    /// screen (`rustdos_screen_fit` = `stretch`), not kept in its shape.
+    pub stretch: bool,
 }
 
 impl Screen {
@@ -475,6 +478,7 @@ impl Scene {
             camera: None,
             speakers: [None; 2],
             leds: Vec::new(),
+            screen_stretch: false,
         };
         for node in scene.nodes() {
             walk.node(&mut loaded, node, Mat4::IDENTITY, false)?;
@@ -495,6 +499,7 @@ impl Scene {
             loaded.ambient = ambient * 0.5;
         }
         loaded.collect_screen();
+        loaded.screen.stretch = walk.screen_stretch;
         let sides = loaded.screen_speakers();
         loaded.speakers = [walk.speakers[0].unwrap_or(sides[0]), walk.speakers[1].unwrap_or(sides[1])];
         // A light's own copy of its material, lit or not apart from the
@@ -526,6 +531,8 @@ struct Walk<'a> {
     speakers: [Option<Vec3>; 2],
     /// The meshes that are the PC's lights, by their index.
     leds: Vec<(usize, Led)>,
+    /// A screen's `rustdos_screen_fit` is `stretch`.
+    screen_stretch: bool,
 }
 
 /// The lights of a scene are at most this many; the shader has room for
@@ -569,6 +576,13 @@ impl Walk<'_> {
             || named(node.name(), "screen")
             || extra(node.extras(), "rustdos_screen").is_some_and(truthy)
             || node.mesh().is_some_and(|m| named(m.name(), "screen") || extra(m.extras(), "rustdos_screen").is_some_and(truthy));
+        if screen {
+            let fit = extra(node.extras(), "rustdos_screen_fit")
+                .or_else(|| node.mesh().and_then(|m| extra(m.extras(), "rustdos_screen_fit")));
+            if let Some(fit) = fit.as_ref().and_then(|v| v.as_str()) {
+                self.screen_stretch = fit.trim().eq_ignore_ascii_case("stretch");
+            }
+        }
         let led = extra(node.extras(), "rustdos_led")
             .and_then(|v| v.as_str().and_then(Led::parse))
             .or_else(|| node.name().filter(|n| n.to_ascii_lowercase().starts_with("led_")).and_then(Led::parse))
@@ -863,6 +877,18 @@ mod tests {
         assert_eq!(led.led, Some(Led::Hdd));
         assert!(led.emissive[0] > 0.0);
         assert_eq!(scene.materials[scene.meshes[0].material].led, None);
+        assert!(!scene.screen.stretch);
+    }
+
+    #[test]
+    fn gltf_screens_can_ask_to_be_filled() {
+        let text = quad_gltf().replace(
+            r#"{"name": "Screen", "mesh": 0}"#,
+            r#"{"name": "Screen", "mesh": 0, "extras": {"rustdos_screen_fit": "Stretch"}}"#,
+        );
+        assert_ne!(text, quad_gltf());
+        let scene = Scene::from_gltf(text.as_bytes(), Path::new(".")).unwrap();
+        assert!(scene.screen.stretch);
     }
 
     #[test]

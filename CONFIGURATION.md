@@ -661,6 +661,11 @@ The picture on a screen in a 3D scene (see [3D scene and VR](#3d-scene-and-vr)).
   See [VR headsets](#vr-headsets).
 * `spatial_audio`: the sound comes from the screen's sides, or the scene's
   speakers, as the viewer turns and moves: `true` (the default) or `false`.
+* `screen_fit`: how the picture fills the scene's screen: `auto` (the
+  default: as the scene's `rustdos_screen_fit` property says, keeping the
+  picture's shape without one), `fit` (keep the picture's shape, with black
+  bars where the screen's shape differs) or `stretch` (cover the whole
+  screen).
 
 The settings window's VR page has them all.
 

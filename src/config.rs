@@ -2518,6 +2518,7 @@ mod tests {
                 scene: Some(PathBuf::from("/home/u/rooms/den.glb")),
                 controllers: crate::vr::VrControllers::Gamepad,
                 spatial_audio: false,
+                screen_fit: crate::vr::ScreenFit::Stretch,
             },
         }
     }
@@ -2696,7 +2697,7 @@ mod tests {
         assert!(saved.contains("\nroom=lobby\n\n[serial]\nserial1=mouse\n"), "{}", saved);
         assert!(saved.contains("\nmodemtelnet=off\n\n[printer]\noutput=pdf\n"), "{}", saved);
         assert!(saved.contains("\ntimeout=3000\n\n[achievements]\nenabled=false\nhardcore=false\n\n[shell]\nautosuggest=true\n"), "{}", saved);
-        assert!(saved.contains("\nsuggestion_color=darkgray\n\n[vr]\nmode=off\ncontrollers=both\nspatial_audio=true\n\n[autoexec]\nDIR\n"), "{}", saved);
+        assert!(saved.contains("\nsuggestion_color=darkgray\n\n[vr]\nmode=off\ncontrollers=both\nspatial_audio=true\nscreen_fit=auto\n\n[autoexec]\nDIR\n"), "{}", saved);
         let config = parse(&saved, Path::new("/cfg"), Some(home));
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
         assert_eq!(Settings::from_config(&config), Settings { cycles: CpuSpeed::Max, ..settings.clone() });

@@ -93,6 +93,12 @@ file without one is rejected, and the test room is shown instead.
   (say 40 × 30 cm) fills edge to edge. The screen's shape is measured from
   its size and its UVs, so stretched UVs make it look wider or narrower than
   it is.
+- **Filling a screen that isn't 4:3:** many monitor models' glass is a
+  little taller or wider than the picture. To stretch the picture over the
+  whole screen instead, as a CRT's width and height knobs would, give the
+  screen object (or its mesh) the custom property `rustdos_screen_fit` with
+  the text `stretch`. Players can override it with the `screen_fit` setting
+  (the VR page's *Picture on the screen*).
 - **Its own material is ignored:** the screen always shows the picture,
   lit by nothing (it glows). It is visible from both sides. Put the monitor
   case, bezel and so on in **separate objects**.

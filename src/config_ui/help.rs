@@ -293,6 +293,7 @@ impl Item {
             VrScene => "vr-scene",
             VrControllers => "vr-controllers",
             VrSpatialAudio => "vr-spatial-audio",
+            VrScreenFit => "vr-screen-fit",
             Filter => "filter",
             Shader => "shader",
             CrtCurvature => "crt-curvature",

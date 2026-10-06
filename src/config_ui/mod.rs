@@ -377,7 +377,7 @@ impl Page {
         use Item::*;
         match self {
             Page::Drives | Page::Games | Page::States | Page::Cheats | Page::Achievements | Page::Stats => &[],
-            Page::Vr => &[VrMode, VrScene, VrControllers, VrSpatialAudio],
+            Page::Vr => &[VrMode, VrScene, VrScreenFit, VrControllers, VrSpatialAudio],
             Page::Display => {
                 &[Scale, Fullscreen, Aspect, Vrr, Filter, Shader, CrtCurvature, CrtGlow, Monochrome, Composite, CompositeEra]
             }
@@ -493,6 +493,7 @@ enum Item {
     VrScene,
     VrControllers,
     VrSpatialAudio,
+    VrScreenFit,
     Filter,
     Shader,
     /// How far the CRT look's tube bends and how much it glows, shown
@@ -798,6 +799,7 @@ impl Item {
             VrScene => "Scene",
             VrControllers => "Headset controllers",
             VrSpatialAudio => "Sound from the screen",
+            VrScreenFit => "Picture on the screen",
             Filter => "Scaling filter",
             Shader => "CRT shader",
             CrtCurvature => "  Curvature",
@@ -908,7 +910,7 @@ impl Item {
         match self {
             Item::Scale | Item::Fullscreen | Item::Vrr => frontend.window,
             // The window's OpenGL draws the scene.
-            Item::VrMode | Item::VrScene | Item::VrControllers | Item::VrSpatialAudio => {
+            Item::VrMode | Item::VrScene | Item::VrControllers | Item::VrSpatialAudio | Item::VrScreenFit => {
                 frontend.window && cfg!(feature = "vr")
             }
             Item::SoundFont => soundfonts(frontend),
@@ -945,7 +947,7 @@ impl Item {
     fn shown(self, s: &Settings) -> bool {
         match self {
             Item::CrtCurvature | Item::CrtGlow => s.shader == crate::video::shader::Shader::Crt,
-            Item::VrScene | Item::VrSpatialAudio => s.vr.mode != crate::vr::VrMode::Off,
+            Item::VrScene | Item::VrSpatialAudio | Item::VrScreenFit => s.vr.mode != crate::vr::VrMode::Off,
             Item::VrControllers => s.vr.mode == crate::vr::VrMode::Headset,
             Item::ReverbMix => s.mixer.reverb != ReverbPreset::Off,
             Item::ChorusMix => s.mixer.chorus != ChorusPreset::Off,
@@ -987,7 +989,7 @@ impl Item {
             Joystick | Deadzone | SpeakerFilter | SbFilter | Reverb | Chorus | ReverbMix | ChorusMix => Applies::Now,
             Rooms => Applies::Now,
             Memsize | Autoexec | Lan | LanHost | VrMode | VrScene => Applies::NextStart,
-            VrControllers | VrSpatialAudio => Applies::Now,
+            VrControllers | VrSpatialAudio | VrScreenFit => Applies::Now,
             _ => Applies::AtPrompt,
         }
     }
@@ -1025,6 +1027,7 @@ impl Item {
             VrScene => s.vr.scene.as_deref().map_or("the test room".to_string(), |p| contract_home(p, home)),
             VrControllers => s.vr.controllers.describe().to_string(),
             VrSpatialAudio => on_off(s.vr.spatial_audio),
+            VrScreenFit => s.vr.screen_fit.describe().to_string(),
             Filter => match s.filter {
                 crate::config::Filter::Nearest => "nearest (sharp)",
                 crate::config::Filter::Linear => "linear (smooth)",
@@ -1238,6 +1241,7 @@ impl Item {
             VrMode => each(s, crate::vr::VrMode::ALL, |s, mode| s.vr.mode = mode),
             VrControllers => each(s, crate::vr::VrControllers::ALL, |s, c| s.vr.controllers = c),
             VrSpatialAudio => on_off(|s, on| s.vr.spatial_audio = on),
+            VrScreenFit => each(s, crate::vr::ScreenFit::ALL, |s, fit| s.vr.screen_fit = fit),
             Filter => each(s, [crate::config::Filter::Nearest, crate::config::Filter::Linear], |s, f| s.filter = f),
             Shader => each(s, crate::video::shader::Shader::ALL, |s, shader| s.shader = shader),
             Monochrome => each(s, crate::video::mono::Monochrome::ALL, |s, mono| s.monochrome = mono),

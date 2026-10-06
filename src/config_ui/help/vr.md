@@ -30,6 +30,18 @@ Meshes named `led_power`, `led_turbo`, `led_hdd` and `led_floppy` light
 up as the PC's lights do, and empties named `speaker_left` and
 `speaker_right` are where the sound comes from.
 
+# Picture on the screen {#vr-screen-fit}
+
+How the DOS picture fills the scene's screen:
+
+- **as the scene says**: the scene's choice (its screen's
+  `rustdos_screen_fit` property); without one, the picture keeps its
+  shape.
+- **keep its shape**: the picture keeps its proportions, with black bars
+  where the screen is wider or taller than it.
+- **stretch to fill**: the picture covers the whole screen, as a CRT's
+  width and height knobs turned up would.
+
 # Headset controllers {#vr-controllers}
 
 What a VR headset's controllers do:

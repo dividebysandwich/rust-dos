@@ -29,7 +29,7 @@ use super::audio_mix::Mix;
 use glam::{Mat4, Vec2};
 use glow::HasContext;
 use render::{Format, Gpu, ScreenTarget, View};
-use rust_dos::vr::{VrMode, VrSettings};
+use rust_dos::vr::{ScreenFit, VrMode, VrSettings};
 use scene::Scene;
 use rust_dos::vr::Leds;
 use std::sync::Arc;
@@ -50,6 +50,8 @@ pub struct Stage {
     /// it was in the drawable (x, y from the top, width, height), for the
     /// mouse.
     shown: Option<(Mat4, (f32, f32, f32, f32))>,
+    /// How the picture fills the screen (the `screen_fit` setting).
+    fit: ScreenFit,
 }
 
 /// Width and height.
@@ -105,6 +107,7 @@ impl Stage {
             #[cfg(xr)]
             headset: None,
             shown: None,
+            fit: settings.screen_fit,
         };
         if settings.mode == VrMode::Headset {
             #[cfg(xr)]
@@ -123,10 +126,17 @@ impl Stage {
 
     /// The size the picture is drawn at for the screen, for a picture of
     /// `display` proportions: twice it, so that scanlines and masks keep
-    /// their shape, but from 1024 to 2048 across, in the screen's shape.
+    /// their shape, but from 1024 to 2048 across. It has the screen's shape,
+    /// so the picture keeps its own, letterboxed; stretched, it has the
+    /// picture's, and the screen's UVs stretch it over the whole surface.
     pub fn screen_size(&self, display: Size) -> Size {
         let width = (display.0 * 2).clamp(1024, 2048);
-        let height = (width as f32 / self.scene.screen.aspect()).round().clamp(1.0, 4096.0) as u32;
+        let aspect = if self.fit.stretches(self.scene.screen.stretch) {
+            display.0.max(1) as f32 / display.1.max(1) as f32
+        } else {
+            self.scene.screen.aspect()
+        };
+        let height = (width as f32 / aspect).round().clamp(1.0, 4096.0) as u32;
         (width, height)
     }
 
@@ -238,8 +248,8 @@ impl Stage {
     }
 
     /// Take on the `[vr]` settings that change while it runs.
-    #[cfg_attr(not(xr), allow(unused_variables))]
     pub fn apply(&mut self, settings: &VrSettings) {
+        self.fit = settings.screen_fit;
         #[cfg(xr)]
         if let Some(headset) = &self.headset {
             headset.set_controllers(settings.controllers);
