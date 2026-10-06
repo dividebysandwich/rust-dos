@@ -49,9 +49,6 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   as hard disks whose changes come back, or as CDs
 * **Display:** CRT shaders (scanlines, aperture grille, curved shadow mask)
   and monochrome monitors (white, amber, green)
-* **3D scene and VR:** the picture on a screen in a scene made in Blender,
-  in the window with a camera to fly or in a VR headset through OpenXR
-  (SteamVR, Monado) ([more](CONFIGURATION.md#3d-scene-and-vr))
 * **Settings window** (Ctrl+F12) that changes most settings without a
   restart, the display adapter included, and saves them to the configuration
   file
@@ -82,6 +79,10 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   a file of what the program sent
 * Runs in a **[web browser](#running-in-a-browser)** as WebAssembly
 * A web-based **[debugger](#debug--remote-control-server)** and HTTP API
+* **VR support**: Model your childhood bedroom in Blender and play your favorite
+  DOS games in an OpenXR VR headset or in 2D mode  ([more](CONFIGURATION.md#3d-scene-and-vr))
+
+<img width="1280" height="720" alt="image" src="https://github.com/user-attachments/assets/e9330c8a-ba96-4568-a0d9-183aad3a38ef" />
 
 ## Getting started
 
