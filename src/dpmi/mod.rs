@@ -348,6 +348,9 @@ const F_DOS: u8 = 4;
 pub struct Dpmi {
     /// Whether programs find the host (the `dpmi` setting).
     pub enabled: bool,
+    /// The program (its PSP) that doesn't find it, as it brings a DOS
+    /// extender that must be its own host (`passes_over`).
+    pub passed_over: Option<u16>,
     /// The host's block (GDT, IDT, TSS, level 0 stack), while it has
     /// clients.
     host: Option<u32>,
@@ -367,6 +370,7 @@ impl Default for Dpmi {
     fn default() -> Self {
         Dpmi {
             enabled: true,
+            passed_over: None,
             host: None,
             clients: Vec::new(),
             frames: Vec::new(),
@@ -389,7 +393,7 @@ impl Dpmi {
 
     /// No clients: as after a program ends. The setting stays.
     pub fn reset(&mut self) {
-        *self = Dpmi { enabled: self.enabled, ..Dpmi::default() };
+        *self = Dpmi { enabled: self.enabled, passed_over: self.passed_over, ..Dpmi::default() };
     }
 
     /// Whether a client is running.
@@ -455,6 +459,9 @@ pub fn installation_check(cpu: &mut Cpu) -> bool {
     if !cpu.bus.dpmi.enabled || cpu.v86() || cpu.bus.boot.is_some() {
         return false;
     }
+    if cpu.bus.dpmi.passed_over == Some(cpu.current_psp) {
+        return false;
+    }
     // (Again, for a state saved before the host was in the ROM.)
     install_rom(&mut cpu.bus);
     cpu.set_ax(0);
@@ -467,6 +474,21 @@ pub fn installation_check(cpu: &mut Cpu) -> bool {
     cpu.set_es(ROM_SEG);
     cpu.set_di(ENTRY);
     true
+}
+
+/// Whether the program in `bytes` is to run without the host: one that
+/// loads Glide's DOS overlay (GLIDE2X.OVL) as a DOS/4G DLL, with DOS/4GW's
+/// loader (`LINEXE_LOADMODULE`), as Tomb Raider's Voodoo Rush version
+/// does. The overlay's run-time library takes its selectors as DOS/4GW
+/// sets them up as its own host, at level 0, and aborts the load under
+/// another host, as under Windows; with none, DOS/4GW is its own. (Bound
+/// DOS/4GW has the loader too, so it takes the overlay's name as well.)
+pub fn passes_over(bytes: &[u8]) -> bool {
+    const LOADER: &[u8] = b"LINEXE_LOADMODULE";
+    const OVERLAY: &[u8] = b"glide2x";
+    bytes.starts_with(b"MZ")
+        && bytes.windows(LOADER.len()).any(|w| w == LOADER)
+        && bytes.windows(OVERLAY.len()).any(|w| w.eq_ignore_ascii_case(OVERLAY))
 }
 
 /// Whether the trap `kind` at the processor's CS:EIP is one the host takes
@@ -1593,4 +1615,20 @@ crate::state_fields!(Client {
 });
 crate::state_fields!(Callback { client, proc_sel, proc_off, struct_sel, struct_off });
 crate::state_fields!(Frame { kind, client, ctx, vector, sel, off, rm_sp, lpms, base });
-crate::state_fields!(Dpmi { host, clients, frames, callbacks, hooks, a20, next_id, next_handle } skip { enabled });
+crate::state_fields!(Dpmi { host, clients, frames, callbacks, hooks, a20, next_id, next_handle } skip { enabled, passed_over });
+
+#[cfg(test)]
+mod tests {
+    use super::passes_over;
+
+    #[test]
+    fn programs_loading_glides_overlay_bring_their_own_host() {
+        let program = |parts: &[&[u8]]| [&b"MZ"[..]].iter().chain(parts).flat_map(|p| p.iter().copied()).collect::<Vec<u8>>();
+        assert!(passes_over(&program(&[b"..LINEXE_LOADMODULE..", b"\0glide2x\0"])));
+        assert!(passes_over(&program(&[b"GLIDE2X.OVL", b"LINEXE_LOADMODULE"])));
+        // Bound DOS/4GW alone, or Glide linked in.
+        assert!(!passes_over(&program(&[b"LINEXE_LOADMODULE"])));
+        assert!(!passes_over(&program(&[b"glide2x"])));
+        assert!(!passes_over(b"glide2x LINEXE_LOADMODULE"));
+    }
+}
