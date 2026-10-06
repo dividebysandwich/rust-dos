@@ -203,7 +203,9 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   prompt. `voodoo_renderer` is what draws the card's picture in the
   window: `software` (the default, rust-dos's own rasterizer) or `opengl`,
   which draws it again at `voodoo_scale` (1 to 4, 2 by default) times the
-  card's resolution (see [3dfx Voodoo Graphics](#3dfx-voodoo-graphics));
+  card's resolution (see [3dfx Voodoo Graphics](#3dfx-voodoo-graphics))
+  and with `voodoo_msaa` (`off`, the default, `2`, `4` or `8`) samples a
+  pixel of multisampled antialiasing;
   without OpenGL 3 (in the browser, or with SDL's dummy video driver) the
   software rasterizer's picture shows. Both change at once.
 * `capture_dir` is the folder screenshots and recordings go in:
@@ -1474,7 +1476,10 @@ With `voodoo_renderer=opengl` the window shows the card's picture drawn
 again with OpenGL, at `voodoo_scale` times the card's resolution: the same
 triangles through the same pixel pipeline (textures, fog, blending, the
 depth buffer and the gamma table), with sharper edges and textures and 8
-bits a colour without the card's dithering. What games write into the
+bits a colour without the card's dithering. `voodoo_msaa` smooths the
+triangles' edges with multisampling (as many samples as the graphics
+card has, at most); antialiasing forced in the graphics driver's control
+panel doesn't reach the framebuffer objects it draws into. What games write into the
 frame buffer themselves (menus, movies) stays at the card's resolution.
 The software rasterizer keeps the card's memory, which games read back
 and save states keep, but it only draws what can still be seen there:

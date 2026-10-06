@@ -148,11 +148,13 @@ pub struct Config {
     /// The display adapter (`machine`).
     pub machine: Option<Adapter>,
     /// The 3dfx card (`voodoo`), its memory (`voodoo_memory`), what draws
-    /// for it (`voodoo_renderer`) and at what size (`voodoo_scale`).
+    /// for it (`voodoo_renderer`), at what size (`voodoo_scale`) and with
+    /// how many samples a pixel (`voodoo_msaa`).
     pub voodoo: Option<bool>,
     pub voodoo_memory: Option<crate::voodoo::Board>,
     pub voodoo_renderer: Option<crate::voodoo::Renderer>,
     pub voodoo_scale: Option<u32>,
+    pub voodoo_msaa: Option<u32>,
     /// Where screenshots and recordings go (`capture_dir`), and whether
     /// they show the settings window and the performance overlay
     /// (`record_ui`) and the CRT shader (`record_shader`).
@@ -851,6 +853,11 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Ok(n) if (1..=4).contains(&n) => config.voodoo_scale = Some(n),
                             _ => warn(format!("invalid voodoo_scale '{}' (1 to 4)", value)),
                         },
+                        "voodoo_msaa" => match value.to_ascii_lowercase().as_str() {
+                            "off" | "1" => config.voodoo_msaa = Some(1),
+                            "2" | "4" | "8" => config.voodoo_msaa = value.parse().ok(),
+                            _ => warn(format!("invalid voodoo_msaa '{}' (off, 2, 4 or 8)", value)),
+                        },
                         "monochrome" => match Monochrome::parse(value) {
                             Some(mono) => config.monochrome = Some(mono),
                             None => warn(format!("invalid monochrome '{}' (off, white, amber or green)", value)),
@@ -1373,6 +1380,7 @@ impl Settings {
                 board: config.voodoo_memory.unwrap_or(default.voodoo.board),
                 renderer: config.voodoo_renderer.unwrap_or(default.voodoo.renderer),
                 scale: config.voodoo_scale.unwrap_or(default.voodoo.scale),
+                msaa: config.voodoo_msaa.unwrap_or(default.voodoo.msaa),
             },
             capture_dir: config.capture_dir.clone().unwrap_or(default.capture_dir),
             record_ui: config.record_ui.unwrap_or(default.record_ui),
@@ -1436,6 +1444,10 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Emulator, "voodoo_memory", Some(settings.voodoo.board.megabytes().to_string())),
         (Emulator, "voodoo_renderer", Some(settings.voodoo.renderer.name().to_string())),
         (Emulator, "voodoo_scale", Some(settings.voodoo.scale.to_string())),
+        (Emulator, "voodoo_msaa", Some(match settings.voodoo.msaa {
+            1 => "off".to_string(),
+            n => n.to_string(),
+        })),
         (Emulator, "capture_dir", Some(contract_home(&settings.capture_dir, home))),
         (Emulator, "record_ui", yes_no(settings.record_ui)),
         (Emulator, "record_shader", yes_no(settings.record_shader)),
@@ -2460,6 +2472,7 @@ mod tests {
                 board: crate::voodoo::Board::Standard,
                 renderer: crate::voodoo::Renderer::OpenGl,
                 scale: 3,
+                msaa: 4,
             },
             capture_dir: PathBuf::from("/home/u/dos captures"),
             record_ui: true,

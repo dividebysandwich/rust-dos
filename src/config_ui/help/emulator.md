@@ -110,6 +110,14 @@ How many times the Voodoo's resolution OpenGL draws at: **2x** turns
 640x480 into 1280x960. Higher is sharper and takes more of your
 graphics card.
 
+# 3dfx antialiasing {#voodoo-msaa}
+
+Smooths the jagged edges of the 3dfx picture drawn with OpenGL by
+multisampling (MSAA): **2x**, **4x** or **8x** samples a pixel, more
+being smoother and taking more of your graphics card. It adds to *3dfx
+OpenGL size*. Antialiasing forced in your graphics driver's control panel
+doesn't reach these pictures; this setting does.
+
 # Memory {#memsize}
 
 The PC's RAM. **16 MB** runs nearly every DOS game. Windows 95 and a few

@@ -312,6 +312,7 @@ impl Item {
             VoodooMemory => "voodoo-memory",
             VoodooRenderer => "voodoo-renderer",
             VoodooScale => "voodoo-scale",
+            VoodooMsaa => "voodoo-msaa",
             Memsize => "memsize",
             Ems => "ems",
             Umb => "umb",

@@ -5,7 +5,8 @@
 //! texture, the triangles go through the card's pixel pipeline in a shader
 //! (voodoo/triangle.frag) with OpenGL's depth test and blending, and the
 //! front buffer through the card's gamma table is the picture the window
-//! shows. The software rasterizer's memory stays what screenshots,
+//! shows. With `voodoo_msaa`, the buffers are multisampled and resolved
+//! into their textures before they are shown. The software rasterizer's memory stays what screenshots,
 //! recordings and the debugger see, and what the game reads back; it only
 //! draws what those can still see (`rust_dos::voodoo::backlog`).
 
@@ -45,10 +46,53 @@ impl Program {
     }
 }
 
-/// A colour buffer: its texture and the framebuffer object drawing into it.
+/// A colour buffer: its texture and the framebuffer object drawing into
+/// it, or with multisampling, the one with the samples that is resolved
+/// into it.
 struct Target {
     fbo: glow::Framebuffer,
     color: glow::Texture,
+    samples: Option<(glow::Framebuffer, glow::Renderbuffer)>,
+}
+
+impl Target {
+    /// The framebuffer to draw into.
+    fn draw_fbo(&self) -> glow::Framebuffer {
+        self.samples.map_or(self.fbo, |(fbo, _)| fbo)
+    }
+
+    /// Resolve the samples into the texture.
+    fn resolve(&self, gl: &glow::Context, (w, h): (i32, i32)) {
+        let Some((samples, _)) = self.samples else { return };
+        // SAFETY: see `VoodooGl`.
+        unsafe {
+            gl.disable(glow::SCISSOR_TEST);
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(samples));
+            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(self.fbo));
+            gl.blit_framebuffer(0, 0, w, h, 0, 0, w, h, glow::COLOR_BUFFER_BIT, glow::NEAREST);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        }
+    }
+
+    fn delete(self, gl: &glow::Context) {
+        // SAFETY: see `VoodooGl`.
+        unsafe {
+            gl.delete_framebuffer(self.fbo);
+            gl.delete_texture(self.color);
+            if let Some((fbo, buffer)) = self.samples {
+                gl.delete_framebuffer(fbo);
+                gl.delete_renderbuffer(buffer);
+            }
+        }
+    }
+}
+
+/// The depth buffer the colour buffers share: a texture, or with
+/// multisampling a renderbuffer of samples.
+#[derive(Clone, Copy)]
+enum Depth {
+    Texture(glow::Texture),
+    Samples(glow::Renderbuffer),
 }
 
 /// Pixels frame buffer writes left, waiting to go into a buffer: RGBA of
@@ -70,13 +114,15 @@ struct GlTexture {
 // keeps current.
 pub struct VoodooGl {
     scale: u32,
+    /// Samples a pixel with multisampling, or 1.
+    samples: u32,
     /// The buffers' size in the card's pixels.
     width: u32,
     height: u32,
     /// The colour buffers by word offset in the card's memory, and the
     /// depth texture they share if the card has an auxiliary buffer.
     targets: HashMap<u32, Target>,
-    depth: Option<glow::Texture>,
+    depth: Option<Depth>,
     /// Frame buffer writes waiting: a colour buffer's, or with None the
     /// auxiliary buffer's.
     staging: HashMap<Option<u32>, Staging>,
@@ -101,7 +147,9 @@ pub struct VoodooGl {
 }
 
 impl VoodooGl {
-    pub fn new(gl: &glow::Context, glsl: Glsl, scale: u32) -> Result<Self, String> {
+    /// Draw at `scale` times the card's size with `samples` a pixel (as
+    /// many as OpenGL has at most).
+    pub fn new(gl: &glow::Context, glsl: Glsl, scale: u32, samples: u32) -> Result<Self, String> {
         if glsl == Glsl::Es300 {
             return Err("OpenGL ES has no noperspective interpolation".to_string());
         }
@@ -139,8 +187,10 @@ impl VoodooGl {
             let quad_vao = gl.create_vertex_array()?;
             let staging_texture = texture(gl, glow::NEAREST)?;
             let lut = texture(gl, glow::NEAREST)?;
+            let samples = samples.clamp(1, gl.get_parameter_i32(glow::MAX_SAMPLES).max(1) as u32);
             Ok(Self {
                 scale: scale.max(1),
+                samples,
                 width: 0,
                 height: 0,
                 targets: HashMap::new(),
@@ -168,6 +218,11 @@ impl VoodooGl {
         self.scale
     }
 
+    /// The samples a pixel asked for, which OpenGL may have fewer of.
+    pub fn samples(&self) -> u32 {
+        self.samples
+    }
+
     /// Give everything back to OpenGL.
     pub fn destroy(mut self, gl: &glow::Context) {
         self.drop_targets(gl);
@@ -177,8 +232,7 @@ impl VoodooGl {
                 gl.delete_texture(t.texture);
             }
             if let Some((target, _)) = self.composite.take() {
-                gl.delete_framebuffer(target.fbo);
-                gl.delete_texture(target.color);
+                target.delete(gl);
             }
             gl.delete_texture(self.staging_texture);
             gl.delete_texture(self.lut);
@@ -195,11 +249,12 @@ impl VoodooGl {
         // SAFETY: see `VoodooGl`.
         unsafe {
             for (_, target) in self.targets.drain() {
-                gl.delete_framebuffer(target.fbo);
-                gl.delete_texture(target.color);
+                target.delete(gl);
             }
-            if let Some(depth) = self.depth.take() {
-                gl.delete_texture(depth);
+            match self.depth.take() {
+                Some(Depth::Texture(depth)) => gl.delete_texture(depth),
+                Some(Depth::Samples(depth)) => gl.delete_renderbuffer(depth),
+                None => {}
             }
         }
     }
@@ -250,6 +305,14 @@ impl VoodooGl {
         // SAFETY: see `VoodooGl`.
         unsafe {
             self.depth = layout.aux.and_then(|_| {
+                if self.samples > 1 {
+                    let depth = gl.create_renderbuffer().ok()?;
+                    gl.bind_renderbuffer(glow::RENDERBUFFER, Some(depth));
+                    let samples = self.samples as i32;
+                    gl.renderbuffer_storage_multisample(glow::RENDERBUFFER, samples, glow::DEPTH_COMPONENT24, w, h);
+                    gl.bind_renderbuffer(glow::RENDERBUFFER, None);
+                    return Some(Depth::Samples(depth));
+                }
                 let depth = texture(gl, glow::NEAREST).ok()?;
                 gl.tex_image_2d(
                     glow::TEXTURE_2D,
@@ -262,7 +325,7 @@ impl VoodooGl {
                     glow::UNSIGNED_INT,
                     glow::PixelUnpackData::Slice(None),
                 );
-                Some(depth)
+                Some(Depth::Texture(depth))
             });
             gl.disable(glow::SCISSOR_TEST);
             gl.color_mask(true, true, true, true);
@@ -271,7 +334,7 @@ impl VoodooGl {
                 if self.targets.contains_key(&offs) {
                     continue;
                 }
-                if let Ok(target) = target(gl, (w, h), self.depth) {
+                if let Ok(target) = target(gl, (w, h), self.samples, self.depth) {
                     gl.clear_color(0.0, 0.0, 0.0, 1.0);
                     gl.clear_depth_f64(1.0);
                     gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
@@ -338,8 +401,8 @@ impl VoodooGl {
         let w = self.width;
         let scale = self.scale;
         let fbo = match key {
-            Some(offs) => self.targets.get(&offs).map(|t| t.fbo),
-            None => self.depth.and(self.targets.values().next().map(|t| t.fbo)),
+            Some(offs) => self.targets.get(&offs).map(Target::draw_fbo),
+            None => self.depth.and(self.targets.values().next().map(Target::draw_fbo)),
         };
         let Some(staging) = self.staging.get_mut(&key) else { return };
         let Some([x0, x1, y0, y1]) = staging.dirty.take() else { return };
@@ -431,7 +494,7 @@ impl VoodooGl {
         let p = &self.triangle;
         // SAFETY: see `VoodooGl`.
         unsafe {
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target.fbo));
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target.draw_fbo()));
             gl.viewport(0, 0, w, h);
             self.clip(gl, s.clip);
             if has_depth && (depth_test || depth_write) {
@@ -552,7 +615,7 @@ impl VoodooGl {
             self.clip(gl, Some([l, r, t, b]));
             let target = self.targets.get(&fill.dest).or_else(|| self.targets.values().next());
             let Some(target) = target else { return };
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target.fbo));
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target.draw_fbo()));
             if let Some(color) = fill.color {
                 gl.color_mask(true, true, true, false);
                 let c = |shift: u32| ((color >> shift) & 0xFF) as f32 / 255.0;
@@ -577,17 +640,18 @@ impl VoodooGl {
     /// they differ from `base` (the settings window, messages): a texture
     /// and its size, or None if the card shows nothing.
     pub fn composite(&mut self, gl: &glow::Context, screen: &Frame, base: &Frame) -> Option<(glow::Texture, (u32, u32))> {
-        let front = self.targets.get(&self.front?)?.color;
         let (w, h) = self.scaled();
+        let front = self.targets.get(&self.front?)?;
+        front.resolve(gl, (w, h));
+        let front = front.color;
         let size = (w as u32, h as u32);
         // SAFETY: see `VoodooGl`.
         unsafe {
             if self.composite.as_ref().is_none_or(|(_, s)| *s != size) {
                 if let Some((old, _)) = self.composite.take() {
-                    gl.delete_framebuffer(old.fbo);
-                    gl.delete_texture(old.color);
+                    old.delete(gl);
                 }
-                self.composite = Some((target(gl, size_i32(size), None).ok()?, size));
+                self.composite = Some((target(gl, size_i32(size), 1, None).ok()?, size));
             }
             if self.lut_of != Some(self.clut) {
                 let table = lut(&self.clut);
@@ -730,8 +794,9 @@ fn texture(gl: &glow::Context, filter: u32) -> Result<glow::Texture, String> {
     }
 }
 
-/// A colour buffer of `size` with `depth` attached, its framebuffer bound.
-fn target(gl: &glow::Context, (w, h): (i32, i32), depth: Option<glow::Texture>) -> Result<Target, String> {
+/// A colour buffer of `size` with `samples` a pixel and `depth` attached,
+/// the framebuffer to draw into bound.
+fn target(gl: &glow::Context, (w, h): (i32, i32), samples: u32, depth: Option<Depth>) -> Result<Target, String> {
     // SAFETY: see `VoodooGl`.
     unsafe {
         let color = texture(gl, glow::NEAREST)?;
@@ -740,18 +805,34 @@ fn target(gl: &glow::Context, (w, h): (i32, i32), depth: Option<glow::Texture>) 
         let fbo = gl.create_framebuffer()?;
         gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
         gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(color), 0);
-        if depth.is_some() {
-            gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::DEPTH_ATTACHMENT, glow::TEXTURE_2D, depth, 0);
+        let mut target = Target { fbo, color, samples: None };
+        if samples > 1 {
+            let buffer = gl.create_renderbuffer()?;
+            gl.bind_renderbuffer(glow::RENDERBUFFER, Some(buffer));
+            gl.renderbuffer_storage_multisample(glow::RENDERBUFFER, samples as i32, glow::RGBA8, w, h);
+            gl.bind_renderbuffer(glow::RENDERBUFFER, None);
+            let fbo = gl.create_framebuffer()?;
+            target.samples = Some((fbo, buffer));
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+            gl.framebuffer_renderbuffer(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::RENDERBUFFER, Some(buffer));
+        }
+        match depth {
+            Some(Depth::Texture(depth)) => {
+                gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::DEPTH_ATTACHMENT, glow::TEXTURE_2D, Some(depth), 0)
+            }
+            Some(Depth::Samples(depth)) => {
+                gl.framebuffer_renderbuffer(glow::FRAMEBUFFER, glow::DEPTH_ATTACHMENT, glow::RENDERBUFFER, Some(depth))
+            }
+            None => {}
         }
         let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
         if status != glow::FRAMEBUFFER_COMPLETE {
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-            gl.delete_framebuffer(fbo);
-            gl.delete_texture(color);
+            target.delete(gl);
             return Err(format!("the framebuffer is incomplete ({:04X}h)", status));
         }
         gl.viewport(0, 0, w, h);
-        Ok(Target { fbo, color })
+        Ok(target)
     }
 }
 

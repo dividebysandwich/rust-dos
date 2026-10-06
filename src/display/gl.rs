@@ -329,9 +329,9 @@ impl GlScreen {
         self.voodoo_failed.as_deref()
     }
 
-    /// The scale the 3dfx card is drawn at, if it is.
-    pub fn voodoo_scale(&self) -> Option<u32> {
-        self.voodoo.as_ref().map(|v| v.scale())
+    /// The scale and samples a pixel the 3dfx card is drawn with, if it is.
+    pub fn voodoo_scale(&self) -> Option<(u32, u32)> {
+        self.voodoo.as_ref().map(|v| (v.scale(), v.samples()))
     }
 
     /// Stop drawing the 3dfx card.
@@ -341,17 +341,23 @@ impl GlScreen {
         }
     }
 
-    /// Draw what the 3dfx card recorded, at `scale` times its size. The
-    /// error says why OpenGL can't; whether the picture may have changed.
-    pub fn run_voodoo(&mut self, recording: rust_dos::voodoo::mirror::Frame, scale: u32) -> Result<bool, String> {
-        if self.voodoo.as_ref().is_some_and(|v| v.scale() != scale) {
+    /// Draw what the 3dfx card recorded, at `scale` times its size with
+    /// `samples` a pixel. The error says why OpenGL can't; whether the
+    /// picture may have changed.
+    pub fn run_voodoo(
+        &mut self,
+        recording: rust_dos::voodoo::mirror::Frame,
+        scale: u32,
+        samples: u32,
+    ) -> Result<bool, String> {
+        if self.voodoo_scale().is_some_and(|now| now != (scale, samples)) {
             self.drop_voodoo();
         }
         if self.voodoo.is_none() {
             if let Some(problem) = &self.voodoo_failed {
                 return Err(problem.clone());
             }
-            match VoodooGl::new(&self.gl, self.glsl, scale) {
+            match VoodooGl::new(&self.gl, self.glsl, scale, samples) {
                 Ok(voodoo) => self.voodoo = Some(voodoo),
                 Err(e) => {
                     eprintln!("[DISPLAY] {}", e);

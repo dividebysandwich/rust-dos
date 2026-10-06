@@ -136,11 +136,13 @@ pub struct VoodooSettings {
     pub renderer: Renderer,
     /// How many times the native size OpenGL draws at.
     pub scale: u32,
+    /// The samples a pixel OpenGL's multisampling takes, 1 for none.
+    pub msaa: u32,
 }
 
 impl Default for VoodooSettings {
     fn default() -> Self {
-        Self { enabled: false, board: Board::Max, renderer: Renderer::Software, scale: 2 }
+        Self { enabled: false, board: Board::Max, renderer: Renderer::Software, scale: 2, msaa: 1 }
     }
 }
 

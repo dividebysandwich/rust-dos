@@ -341,9 +341,9 @@ impl<'a> Display<'a> {
                     gl.drop_voodoo();
                     gl.voodoo_problem().filter(|_| want).map(str::to_string)
                 } else {
-                    // A new card or a new scale: start again from its
-                    // memory.
-                    if !card.mirror_attached() || gl.voodoo_scale() != Some(settings.scale) {
+                    // A new card, scale or multisampling: start again
+                    // from its memory.
+                    if !card.mirror_attached() || gl.voodoo_scale() != Some((settings.scale, settings.msaa)) {
                         card.set_mirror(false);
                         card.set_mirror(true);
                         gl.drop_voodoo();
@@ -351,7 +351,7 @@ impl<'a> Display<'a> {
                     }
                     let Some(recording) = card.take_mirror() else { return false };
                     let shown = recording.output && recording.front.is_some();
-                    match gl.run_voodoo(recording, settings.scale) {
+                    match gl.run_voodoo(recording, settings.scale, settings.msaa) {
                         Ok(changed) => {
                             // The frame `present` gets does not change with
                             // the card's picture, which the software

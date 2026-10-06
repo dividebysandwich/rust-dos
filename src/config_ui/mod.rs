@@ -382,7 +382,7 @@ impl Page {
                 &[Scale, Fullscreen, Aspect, Vrr, Filter, Shader, CrtCurvature, CrtGlow, Monochrome, Composite, CompositeEra]
             }
             Page::Emulator => &[
-                Cycles, Core, Fpu, Cpu, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, Memsize, Ems, Umb, DosHigh, Dpmi,
+                Cycles, Core, Fpu, Cpu, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, VoodooMsaa, Memsize, Ems, Umb, DosHigh, Dpmi,
                 DosVersion, IdeHardDisks, BootCdrom, HardDiskSpeed, FloppyDiskSpeed, Joystick,
                 Deadzone, MouseAutocapture, MouseCaptureMessages, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, RecordShader, Autoexec,
                 ShellSuggestions, ShellColors, SaveShellHistory,
@@ -521,6 +521,7 @@ enum Item {
     VoodooMemory,
     VoodooRenderer,
     VoodooScale,
+    VoodooMsaa,
     Memsize,
     /// Expanded memory and upper memory blocks.
     Ems,
@@ -826,6 +827,7 @@ impl Item {
             VoodooMemory => "3dfx memory",
             VoodooRenderer => "3dfx drawn by",
             VoodooScale => "3dfx OpenGL size",
+            VoodooMsaa => "3dfx antialiasing",
             Ems => "Expanded memory (EMS)",
             Umb => "Upper memory (UMB)",
             DosHigh => "DOS high",
@@ -940,7 +942,7 @@ impl Item {
             Item::CaptureDir | Item::RecordUi | Item::RecordShader => frontend.host_files,
             Item::Core => crate::dynrec::AVAILABLE,
             // The browser draws with the emulator's own rasterizer only.
-            Item::VoodooRenderer | Item::VoodooScale => frontend.window,
+            Item::VoodooRenderer | Item::VoodooScale | Item::VoodooMsaa => frontend.window,
             // A thread of its own packs rewind's states.
             Item::Rewind | Item::RewindMemory => frontend.window,
             // The browser has no sockets for a LAN.
@@ -976,7 +978,7 @@ impl Item {
             Item::Sc55Roms | Item::Sc55Model => s.sound.midisynth == MidiSynth::Sc55,
             // Until there are ROMs.
             Item::Sc55Download => s.sound.midisynth == MidiSynth::Sc55 && sc55_found(s).is_none(),
-            Item::VoodooScale => s.voodoo.enabled && s.voodoo.renderer == crate::voodoo::Renderer::OpenGl,
+            Item::VoodooScale | Item::VoodooMsaa => s.voodoo.enabled && s.voodoo.renderer == crate::voodoo::Renderer::OpenGl,
             Item::Relay => s.network.online,
             Item::SerialIrq(n) => s.serial.ports[n as usize] != crate::serial::PortType::Off,
             Item::MouseType => s.serial.ports.contains(&crate::serial::PortType::Mouse),
@@ -999,7 +1001,7 @@ impl Item {
                 Applies::Now
             }
             Cycles | Core | Fpu | Dpmi | DosVersion | IdeHardDisks | BootCdrom | KeyboardLayout | MouseAutocapture | MouseCaptureMessages | ShellSuggestions | ShellColors | SaveShellHistory | Rewind | RewindMemory
-            | VoodooRenderer | VoodooScale => Applies::Now,
+            | VoodooRenderer | VoodooScale | VoodooMsaa => Applies::Now,
             Monochrome => Applies::NowAndAtPrompt,
             HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise | Volume(_) | CaptureDir | RecordUi
             | RecordShader => Applies::Now,
@@ -1089,6 +1091,10 @@ impl Item {
                 crate::voodoo::Renderer::OpenGl => "OpenGL".to_string(),
             },
             VoodooScale => format!("{}x", s.voodoo.scale),
+            VoodooMsaa => match s.voodoo.msaa {
+                1 => "Off".to_string(),
+                n => format!("{}x MSAA", n),
+            },
             Ems => on_off(s.ems),
             Umb => on_off(s.umb),
             DosHigh => on_off(s.dos_high),
@@ -1287,6 +1293,7 @@ impl Item {
                 s.voodoo.renderer = r
             }),
             VoodooScale => each(s, [1, 2, 3, 4], |s, scale| s.voodoo.scale = scale),
+            VoodooMsaa => each(s, [1, 2, 4, 8], |s, samples| s.voodoo.msaa = samples),
             Ems => on_off(|s, on| s.ems = on),
             Umb => on_off(|s, on| s.umb = on),
             DosHigh => on_off(|s, on| s.dos_high = on),
