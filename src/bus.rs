@@ -45,6 +45,15 @@ pub(crate) const IRQ_READY_OFFSET: usize = std::mem::offset_of!(Bus, irq_ready);
 /// mode and back take.
 const IDLE_SLICE_TICKS: u64 = 60;
 
+/// A program waiting, as at a HLT, until PIT tick `until`: the code it
+/// runs stays where it was (`at`, CS and EIP, from when the loop first
+/// sees it), while interrupts come and their handlers run.
+#[derive(Clone, Copy, Debug)]
+pub struct Hold {
+    pub until: u64,
+    pub at: Option<(u16, u32)>,
+}
+
 pub struct Bus {
     ram: Vec<u8>, // System RAM, allocated once
     pub video_mode: VideoMode, // Current State
@@ -213,6 +222,9 @@ pub struct Bus {
     pub pci: crate::pci::Pci,
     /// The 3dfx Voodoo Graphics card, if there is one.
     pub voodoo: Option<crate::voodoo::Voodoo>,
+    /// The program waits for a swap the frame rate cap holds back
+    /// (`exec::held`).
+    pub hold: Option<Hold>,
     /// A booted system's IDE channels, primary and secondary, with its
     /// hard disks and CD-ROM drive.
     pub ide: [Option<crate::ide::Channel>; 2],
@@ -410,6 +422,7 @@ impl Bus {
             attribute_reset: Default::default(),
             pci: crate::pci::Pci::default(),
             voodoo: None,
+            hold: None,
             ide: [None, None],
             ide_faked: false,
             search_handles: std::collections::HashMap::new(),

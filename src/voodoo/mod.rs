@@ -138,11 +138,13 @@ pub struct VoodooSettings {
     pub scale: u32,
     /// The samples a pixel OpenGL's multisampling takes, 1 for none.
     pub msaa: u32,
+    /// The most frames a second programs may show on the card, if capped.
+    pub fps_cap: Option<u32>,
 }
 
 impl Default for VoodooSettings {
     fn default() -> Self {
-        Self { enabled: false, board: Board::Max, renderer: Renderer::Software, scale: 2, msaa: 1 }
+        Self { enabled: false, board: Board::Max, renderer: Renderer::Software, scale: 2, msaa: 1, fps_cap: None }
     }
 }
 
@@ -168,6 +170,9 @@ pub struct Effect {
     /// The FIFO is full behind a pending swap: the CPU waits until PIT
     /// tick `stall_to`.
     pub stall_to: Option<u64>,
+    /// A swap waits for its turn under the frame rate cap: the program
+    /// waits until PIT tick `hold_to`, interrupts going on (`Bus::hold`).
+    pub hold_to: Option<u64>,
 }
 
 /// A swap waiting for the vertical retrace it is due at: the retrace's
@@ -345,6 +350,13 @@ pub struct Voodoo {
     pub swaps: VecDeque<PendingSwap>,
     last_swap: u64,
     fifo_writes: u32,
+    /// The most frames a second the program may show (`voodoo_fps_cap`),
+    /// the time of the last swap it let through, in ns, and a swap
+    /// waiting for its turn: its swapbufferCMD and when it is due, in PIT
+    /// ticks.
+    fps_cap: Option<u32>,
+    capped_at: u64,
+    deferred: Option<(u32, u64)>,
     /// The picture changed since the display last looked, or the card
     /// took or gave back the monitor.
     display_dirty: bool,
@@ -423,6 +435,9 @@ impl Voodoo {
             swaps: VecDeque::new(),
             last_swap: 0,
             fifo_writes: 0,
+            fps_cap: None,
+            capped_at: 0,
+            deferred: None,
             display_dirty: true,
             showing: false,
             swapped: 0,
@@ -464,6 +479,8 @@ impl Voodoo {
         self.swaps.clear();
         self.last_swap = 0;
         self.fifo_writes = 0;
+        self.capped_at = 0;
+        self.deferred = None;
         self.fbi.frontbuf = 0;
         self.fbi.backbuf = 1;
         self.fbi.width = 640;
@@ -950,10 +967,44 @@ impl Voodoo {
         (ns as u128 * PIT_HZ as u128).div_ceil(1_000_000_000) as u64
     }
 
+    /// The frame rate cap (`voodoo_fps_cap`): None for none.
+    pub fn set_fps_cap(&mut self, fps: Option<u32>) {
+        self.fps_cap = fps.filter(|&fps| fps > 0);
+    }
+
+    /// The steady timing the frame rate cap shows frames at, if there is
+    /// a cap: a retrace at every multiple of its frame time, which capped
+    /// swaps happen at.
+    pub fn cap_timing(&self) -> Option<CrtTiming> {
+        let fps = self.fps_cap?;
+        let frame = (1_000_000_000 / fps as u64) as u32;
+        Some(CrtTiming { line_ns: frame, hdisplay_ns: frame, total: 1, display: 1, retrace_start: 0, retrace_end: 1 })
+    }
+
     /// swapbufferCMD: the buffers swap now; with bit 0, the swap also
     /// stays pending until the retrace it waits for, `bits 8:1` retraces
-    /// after the last swap and at least the next.
+    /// after the last swap and at least the next. Under a frame rate cap,
+    /// a swap waits for the first of the cap's frame times a frame after
+    /// the last, and the program waits with it (`Effect::hold_to`), so
+    /// frames come at an even pace when it could draw them faster.
     pub(crate) fn swap(&mut self, data: u32, now: Now, effect: &mut Effect) {
+        if let Some(cap) = self.cap_timing() {
+            let frame = cap.frame_ns();
+            let earliest = if self.capped_at == 0 { now.ns } else { now.ns.max(self.capped_at + frame) };
+            let at = earliest.div_ceil(frame) * frame;
+            self.capped_at = at;
+            let due = (at as u128 * PIT_HZ as u128).div_ceil(1_000_000_000) as u64;
+            if due > now.ticks {
+                self.deferred = Some((data, due));
+                effect.hold_to = Some(due);
+                effect.reschedule = true;
+                return;
+            }
+        }
+        self.swap_now(data, now, effect);
+    }
+
+    fn swap_now(&mut self, data: u32, now: Now, effect: &mut Effect) {
         self.rotate_buffers();
         let current = self.retraces(now.ns);
         if data & 1 == 0 {
@@ -987,13 +1038,28 @@ impl Voodoo {
     }
 
     /// When the card next needs attention: its oldest pending swap's
-    /// retrace.
+    /// retrace, or the turn of a swap the frame rate cap holds back.
     pub fn next_event(&self) -> Option<u64> {
-        self.swaps.front().map(|s| s.due)
+        let pending = self.swaps.front().map(|s| s.due);
+        let deferred = self.deferred.map(|(_, due)| due);
+        pending.into_iter().chain(deferred).min()
     }
 
-    /// Retire the swaps whose retraces came.
-    pub fn service(&mut self, ticks: u64) {
+    /// When the swap the frame rate cap holds back is due, if one is.
+    pub fn deferred_swap(&self) -> Option<u64> {
+        self.deferred.map(|(_, due)| due)
+    }
+
+    /// Make the swap the frame rate cap held back when its turn came, and
+    /// retire the swaps whose retraces came.
+    pub fn service(&mut self, now: Now) {
+        if let Some((data, due)) = self.deferred
+            && due <= now.ticks
+        {
+            self.deferred = None;
+            self.swap_now(data, now, &mut Effect::default());
+        }
+        let ticks = now.ticks;
         while let Some(front) = self.swaps.front().copied() {
             if front.due > ticks {
                 break;
@@ -1007,7 +1073,7 @@ impl Voodoo {
     /// A write that goes through the FIFO: behind a pending swap it waits
     /// there, and a full FIFO stalls the CPU until the swap is done.
     fn fifo_write(&mut self, now: Now, effect: &mut Effect) {
-        self.service(now.ticks);
+        self.service(now);
         let Some(front) = self.swaps.front() else { return };
         self.fifo_writes += 1;
         let capacity = if self.fbi.fifo_size > 0 { self.fbi.fifo_size } else { 64 };
@@ -1260,6 +1326,13 @@ impl State for Voodoo {
         self.swaps.save(w);
         self.last_swap.save(w);
         self.fifo_writes.save(w);
+        // Added later, at the end, where a state without them ends: the
+        // swap the frame rate cap holds back.
+        let (data, due) = self.deferred.unwrap_or_default();
+        self.deferred.is_some().save(w);
+        data.save(w);
+        due.save(w);
+        self.capped_at.save(w);
     }
 
     fn load(&mut self, r: &mut Reader) -> Result<()> {
@@ -1294,6 +1367,15 @@ impl State for Voodoo {
         self.swaps.load(r)?;
         self.last_swap.load(r)?;
         self.fifo_writes.load(r)?;
+        let (mut deferred, mut data, mut due) = (false, 0u32, 0u64);
+        self.capped_at = 0;
+        if !r.is_empty() {
+            deferred.load(r)?;
+            data.load(r)?;
+            due.load(r)?;
+            self.capped_at.load(r)?;
+        }
+        self.deferred = deferred.then_some((data, due));
         self.after_load();
         Ok(())
     }

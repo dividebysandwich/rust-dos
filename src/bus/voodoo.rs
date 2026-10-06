@@ -3,7 +3,7 @@
 //! time its writes take when its FIFO is full, its swaps' retraces among
 //! the timer events, and putting it in or taking it out.
 
-use super::Bus;
+use super::{Bus, Hold};
 use crate::voodoo::{Board, Effect, Now, Voodoo, WINDOW};
 
 impl Bus {
@@ -113,6 +113,15 @@ impl Bus {
     }
 
     fn voodoo_write(&mut self, offset: u32, value: u32, mask: u32) {
+        // A write behind a swap the frame rate cap holds back (the rest of
+        // the code the program ran before it was held) waits for the swap.
+        if let Some(due) = self.voodoo.as_ref().and_then(|v| v.deferred_swap()) {
+            self.clock.stall_to(due);
+            let now = self.voodoo_now();
+            if let Some(v) = &mut self.voodoo {
+                v.service(now);
+            }
+        }
         let now = self.voodoo_now();
         let Some(v) = &mut self.voodoo else { return };
         let effect = v.write(offset, value, mask, now);
@@ -120,13 +129,20 @@ impl Bus {
     }
 
     /// Carry out what a write asked for: the CPU waiting for a full FIFO,
-    /// a swap's retrace among the timer events.
+    /// a swap's retrace among the timer events, the program held until a
+    /// swap's turn under the frame rate cap.
     fn voodoo_effect(&mut self, effect: Effect) {
         if let Some(to) = effect.stall_to {
             self.clock.stall_to(to);
+            let now = self.voodoo_now();
             if let Some(v) = &mut self.voodoo {
-                v.service(self.clock.now_ticks());
+                v.service(now);
             }
+        }
+        if let Some(to) = effect.hold_to {
+            self.hold = Some(Hold { until: to, at: None });
+            // Out of the code running, to the loop that holds it.
+            self.clock.deadline = self.clock.icount;
         }
         if effect.reschedule || effect.stall_to.is_some() {
             self.clock.schedule(self.next_event());
@@ -147,10 +163,25 @@ impl Bus {
 
     /// Retire the swaps whose retraces came.
     pub(crate) fn voodoo_service(&mut self) {
-        let now = self.clock.now_ticks();
+        let now = self.voodoo_now();
         if let Some(v) = &mut self.voodoo {
             v.service(now);
         }
+    }
+
+    /// The frame rate cap of the 3dfx card's swaps (`voodoo_fps_cap`).
+    pub fn set_voodoo_fps_cap(&mut self, fps: Option<u32>) {
+        if let Some(v) = &mut self.voodoo {
+            v.set_fps_cap(fps);
+        }
+    }
+
+    /// The timing the window shows the 3dfx card's frames at with a
+    /// variable refresh rate: the frame rate cap's, when the card drives
+    /// the monitor and the cap is below its refresh rate.
+    pub fn voodoo_cap_timing(&self) -> Option<crate::video::crt::CrtTiming> {
+        let v = self.voodoo.as_ref().filter(|v| v.output())?;
+        v.cap_timing().filter(|cap| cap.hz() < v.refresh_hz())
     }
 
     /// For the debugger's status: what the 3dfx card is doing.

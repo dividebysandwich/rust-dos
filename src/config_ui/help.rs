@@ -313,6 +313,7 @@ impl Item {
             VoodooRenderer => "voodoo-renderer",
             VoodooScale => "voodoo-scale",
             VoodooMsaa => "voodoo-msaa",
+            VoodooFpsCap => "voodoo-fps-cap",
             Memsize => "memsize",
             Ems => "ems",
             Umb => "umb",

@@ -118,6 +118,17 @@ being smoother and taking more of your graphics card. It adds to *3dfx
 OpenGL size*. Antialiasing forced in your graphics driver's control panel
 doesn't reach these pictures; this setting does.
 
+# 3dfx frame rate cap {#voodoo-fps-cap}
+
+The most frames a second a game may show on the 3dfx card. A game that
+could draw faster waits for each frame's turn, so its frames come at an
+even pace: smoother than slowing the whole PC down with the CPU speed.
+Interrupts, sound and the game's clock go on while it waits.
+
+Pick a rate the game reaches everywhere: a frame that comes late waits
+for the next turn. **30** or **60** suit a 60 Hz display; with
+*Variable refresh rate* on, the window refreshes at the cap.
+
 # Memory {#memsize}
 
 The PC's RAM. **16 MB** runs nearly every DOS game. Windows 95 and a few

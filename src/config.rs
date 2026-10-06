@@ -149,12 +149,14 @@ pub struct Config {
     pub machine: Option<Adapter>,
     /// The 3dfx card (`voodoo`), its memory (`voodoo_memory`), what draws
     /// for it (`voodoo_renderer`), at what size (`voodoo_scale`) and with
-    /// how many samples a pixel (`voodoo_msaa`).
+    /// how many samples a pixel (`voodoo_msaa`), and the most frames a
+    /// second programs may show on it (`voodoo_fps_cap`, 0 for no cap).
     pub voodoo: Option<bool>,
     pub voodoo_memory: Option<crate::voodoo::Board>,
     pub voodoo_renderer: Option<crate::voodoo::Renderer>,
     pub voodoo_scale: Option<u32>,
     pub voodoo_msaa: Option<u32>,
+    pub voodoo_fps_cap: Option<u32>,
     /// Where screenshots and recordings go (`capture_dir`), and whether
     /// they show the settings window and the performance overlay
     /// (`record_ui`) and the CRT shader (`record_shader`).
@@ -858,6 +860,13 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             "2" | "4" | "8" => config.voodoo_msaa = value.parse().ok(),
                             _ => warn(format!("invalid voodoo_msaa '{}' (off, 2, 4 or 8)", value)),
                         },
+                        "voodoo_fps_cap" => match value.to_ascii_lowercase().as_str() {
+                            "off" | "0" => config.voodoo_fps_cap = Some(0),
+                            _ => match value.parse::<u32>() {
+                                Ok(n) if (10..=240).contains(&n) => config.voodoo_fps_cap = Some(n),
+                                _ => warn(format!("invalid voodoo_fps_cap '{}' (off, or 10 to 240)", value)),
+                            },
+                        },
                         "monochrome" => match Monochrome::parse(value) {
                             Some(mono) => config.monochrome = Some(mono),
                             None => warn(format!("invalid monochrome '{}' (off, white, amber or green)", value)),
@@ -1381,6 +1390,7 @@ impl Settings {
                 renderer: config.voodoo_renderer.unwrap_or(default.voodoo.renderer),
                 scale: config.voodoo_scale.unwrap_or(default.voodoo.scale),
                 msaa: config.voodoo_msaa.unwrap_or(default.voodoo.msaa),
+                fps_cap: config.voodoo_fps_cap.map_or(default.voodoo.fps_cap, |n| (n > 0).then_some(n)),
             },
             capture_dir: config.capture_dir.clone().unwrap_or(default.capture_dir),
             record_ui: config.record_ui.unwrap_or(default.record_ui),
@@ -1448,6 +1458,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
             1 => "off".to_string(),
             n => n.to_string(),
         })),
+        (Emulator, "voodoo_fps_cap", Some(settings.voodoo.fps_cap.map_or("off".to_string(), |n| n.to_string()))),
         (Emulator, "capture_dir", Some(contract_home(&settings.capture_dir, home))),
         (Emulator, "record_ui", yes_no(settings.record_ui)),
         (Emulator, "record_shader", yes_no(settings.record_shader)),
@@ -2473,6 +2484,7 @@ mod tests {
                 renderer: crate::voodoo::Renderer::OpenGl,
                 scale: 3,
                 msaa: 4,
+                fps_cap: Some(30),
             },
             capture_dir: PathBuf::from("/home/u/dos captures"),
             record_ui: true,

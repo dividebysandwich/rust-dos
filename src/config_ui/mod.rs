@@ -382,7 +382,7 @@ impl Page {
                 &[Scale, Fullscreen, Aspect, Vrr, Filter, Shader, CrtCurvature, CrtGlow, Monochrome, Composite, CompositeEra]
             }
             Page::Emulator => &[
-                Cycles, Core, Fpu, Cpu, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, VoodooMsaa, Memsize, Ems, Umb, DosHigh, Dpmi,
+                Cycles, Core, Fpu, Cpu, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, VoodooMsaa, VoodooFpsCap, Memsize, Ems, Umb, DosHigh, Dpmi,
                 DosVersion, IdeHardDisks, BootCdrom, HardDiskSpeed, FloppyDiskSpeed, Joystick,
                 Deadzone, MouseAutocapture, MouseCaptureMessages, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, RecordShader, Autoexec,
                 ShellSuggestions, ShellColors, SaveShellHistory,
@@ -522,6 +522,7 @@ enum Item {
     VoodooRenderer,
     VoodooScale,
     VoodooMsaa,
+    VoodooFpsCap,
     Memsize,
     /// Expanded memory and upper memory blocks.
     Ems,
@@ -660,6 +661,11 @@ fn cycle<T: PartialEq + Clone>(values: &[T], current: &T, dir: isize) -> T {
 }
 
 /// `s` with each of `values` put in by `set`, in turn.
+/// The 3dfx frame rate caps to pick from: none, and the rates games ran
+/// at and that divide common refresh rates evenly.
+const FPS_CAPS: [Option<u32>; 13] =
+    [None, Some(20), Some(24), Some(25), Some(30), Some(35), Some(40), Some(45), Some(48), Some(50), Some(60), Some(72), Some(120)];
+
 fn each<T>(s: &Settings, values: impl IntoIterator<Item = T>, set: impl Fn(&mut Settings, T)) -> Vec<Settings> {
     values
         .into_iter()
@@ -828,6 +834,7 @@ impl Item {
             VoodooRenderer => "3dfx drawn by",
             VoodooScale => "3dfx OpenGL size",
             VoodooMsaa => "3dfx antialiasing",
+            VoodooFpsCap => "3dfx frame rate cap",
             Ems => "Expanded memory (EMS)",
             Umb => "Upper memory (UMB)",
             DosHigh => "DOS high",
@@ -971,7 +978,7 @@ impl Item {
             Item::ReverbMix => s.mixer.reverb != ReverbPreset::Off,
             Item::ChorusMix => s.mixer.chorus != ChorusPreset::Off,
             Item::RewindMemory => s.rewind,
-            Item::VoodooMemory | Item::VoodooRenderer => s.voodoo.enabled,
+            Item::VoodooMemory | Item::VoodooRenderer | Item::VoodooFpsCap => s.voodoo.enabled,
             Item::Awe32Rom | Item::Awe32Ram => awe32(s),
             // Until there is a ROM.
             Item::Awe32Download => awe32(s) && crate::awe32::rom::find(s.sound.awe32rom.as_deref()).is_none(),
@@ -1001,7 +1008,7 @@ impl Item {
                 Applies::Now
             }
             Cycles | Core | Fpu | Dpmi | DosVersion | IdeHardDisks | BootCdrom | KeyboardLayout | MouseAutocapture | MouseCaptureMessages | ShellSuggestions | ShellColors | SaveShellHistory | Rewind | RewindMemory
-            | VoodooRenderer | VoodooScale | VoodooMsaa => Applies::Now,
+            | VoodooRenderer | VoodooScale | VoodooMsaa | VoodooFpsCap => Applies::Now,
             Monochrome => Applies::NowAndAtPrompt,
             HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise | Volume(_) | CaptureDir | RecordUi
             | RecordShader => Applies::Now,
@@ -1094,6 +1101,10 @@ impl Item {
             VoodooMsaa => match s.voodoo.msaa {
                 1 => "Off".to_string(),
                 n => format!("{}x MSAA", n),
+            },
+            VoodooFpsCap => match s.voodoo.fps_cap {
+                None => "Off".to_string(),
+                Some(n) => format!("{} fps", n),
             },
             Ems => on_off(s.ems),
             Umb => on_off(s.umb),
@@ -1294,6 +1305,7 @@ impl Item {
             }),
             VoodooScale => each(s, [1, 2, 3, 4], |s, scale| s.voodoo.scale = scale),
             VoodooMsaa => each(s, [1, 2, 4, 8], |s, samples| s.voodoo.msaa = samples),
+            VoodooFpsCap => each(s, FPS_CAPS, |s, fps| s.voodoo.fps_cap = fps),
             Ems => on_off(|s, on| s.ems = on),
             Umb => on_off(|s, on| s.umb = on),
             DosHigh => on_off(|s, on| s.dos_high = on),

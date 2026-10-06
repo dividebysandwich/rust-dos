@@ -727,6 +727,40 @@ fn its_swaps_are_the_frames_drawn_while_it_shows() {
 }
 
 #[test]
+fn the_frame_rate_cap_holds_swaps_to_its_frame_times() {
+    let mut bus = bus(Board::Standard);
+    init(&mut bus);
+    bus.set_voodoo_fps_cap(Some(20));
+    let front = |bus: &Bus| r(bus, STATUS) >> 10 & 3;
+    // The first swap waits for the next 50 ms mark, and the program with it.
+    wait_ms(&mut bus, 10.0);
+    w(&mut bus, SWAPBUFFER_CMD, 0);
+    assert_eq!(front(&bus), 0, "not swapped yet");
+    let hold = bus.hold.expect("the program waits");
+    let due_ms = |ticks: u64| ticks as f64 * 1000.0 / 1_193_182.0;
+    assert!((due_ms(hold.until) - 50.0).abs() < 0.01, "due at {} ms", due_ms(hold.until));
+    wait_ms(&mut bus, 41.0);
+    assert_eq!(front(&bus), 1, "swapped at its time");
+    // A swap soon after waits a whole frame; one later than a frame, for
+    // the next mark.
+    w(&mut bus, SWAPBUFFER_CMD, 0);
+    assert!((due_ms(bus.hold.unwrap().until) - 100.0).abs() < 0.01);
+    wait_ms(&mut bus, 50.0);
+    assert_eq!(front(&bus), 0);
+    wait_ms(&mut bus, 70.0);
+    w(&mut bus, SWAPBUFFER_CMD, 0);
+    assert!((due_ms(bus.hold.unwrap().until) - 200.0).abs() < 0.01);
+    // A write behind the held swap waits for it.
+    w(&mut bus, COLOR0, 0);
+    assert_eq!(front(&bus), 1);
+    assert!(bus.clock.now_ns() >= 200_000_000);
+    // Without the cap, swaps happen at once.
+    bus.set_voodoo_fps_cap(None);
+    w(&mut bus, SWAPBUFFER_CMD, 0);
+    assert_eq!(front(&bus), 0);
+}
+
+#[test]
 fn a_full_fifo_waits_for_the_swap() {
     let mut bus = bus(Board::Standard);
     init(&mut bus);

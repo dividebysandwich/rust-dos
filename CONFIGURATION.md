@@ -206,6 +206,9 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   card's resolution (see [3dfx Voodoo Graphics](#3dfx-voodoo-graphics))
   and with `voodoo_msaa` (`off`, the default, `2`, `4` or `8`) samples a
   pixel of multisampled antialiasing;
+  `voodoo_fps_cap` (`off`, the default, or 10 to 240) is the most frames a
+  second games may show on the card (see
+  [3dfx Voodoo Graphics](#3dfx-voodoo-graphics));
   without OpenGL 3 (in the browser, or with SDL's dummy video driver) the
   software rasterizer's picture shows. Both change at once.
 * `capture_dir` is the folder screenshots and recordings go in:
@@ -1471,6 +1474,17 @@ triangles are drawn on up to four threads of their own: rust-dos keeps
 running the game meanwhile, and the picture is the same however many
 there are. Save states and rewind keep the card with everything in its
 memory.
+
+`voodoo_fps_cap` caps the frames a second games show on the card, for an
+even pace without lowering `cycles`: a swap waits for the first multiple
+of the cap's frame time (1/30 s at 30) at least a frame after the last
+one, and the program waits with it, as at a HLT, while interrupts and
+their handlers go on, so its clock, music and sound keep time. A frame
+that comes later than its turn waits for the next one, so pick a rate the
+game keeps up everywhere. With `vrr=true`, while the card shows its
+picture and the cap is below its 60 Hz, the window refreshes at the cap's
+frame times. It doesn't apply to VGA games, whose frames come at the
+display's retraces they wait for.
 
 With `voodoo_renderer=opengl` the window shows the card's picture drawn
 again with OpenGL, at `voodoo_scale` times the card's resolution: the same

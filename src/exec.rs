@@ -215,6 +215,10 @@ fn run<const HOT: bool, const DYN: bool>(cpu: &mut Cpu, fetch: &mut Fetch, hook:
             continue;
         }
 
+        if cpu.bus.hold.is_some() && held(cpu) {
+            continue;
+        }
+
         // Fast check first: the shell rarely has anything to do. It hands
         // over command lines from its own code (at SHELL_SEGMENT), and batch
         // lines wait while a program started from the batch file runs, so
@@ -258,6 +262,27 @@ fn run<const HOT: bool, const DYN: bool>(cpu: &mut Cpu, fetch: &mut Fetch, hook:
             return reason;
         }
     }
+}
+
+/// While a program waits for its swap's turn under the 3dfx frame rate
+/// cap (`Bus::hold`): where it is held, time goes on to the next event,
+/// as at a HLT, and the interrupts that come run their handlers. True if
+/// it waited.
+#[cold]
+fn held(cpu: &mut Cpu) -> bool {
+    let Some(mut hold) = cpu.bus.hold else { return false };
+    let waiting = cpu.bus.voodoo.as_ref().and_then(|v| v.deferred_swap()).is_some();
+    if !waiting || cpu.bus.clock.now_ticks() >= hold.until {
+        cpu.bus.hold = None;
+        return false;
+    }
+    let here = (cpu.cs(), cpu.eip());
+    if *hold.at.get_or_insert(here) != here {
+        return false;
+    }
+    cpu.bus.hold = Some(hold);
+    cpu.bus.clock.skip_to_deadline();
+    true
 }
 
 impl Cpu {
