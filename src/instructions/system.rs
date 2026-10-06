@@ -285,16 +285,31 @@ pub fn rdtsc(cpu: &mut Cpu) -> CpuResult {
     Ok(())
 }
 
+/// What Glide puts in EBX for its model-specific register accesses.
+const GLIDE_MSR_MARK: u32 = 0xDEAD_CAFE;
+
 /// RDMSR and WRMSR (Pentium): the model-specific register ECX names into
 /// or from EDX:EAX, at level 0. A Pentium has the machine check address
 /// and type (0 and 1, which read 0, as nothing checks the machine), the
 /// time stamp counter (10h) and the performance monitoring control and
-/// counters (11h to 13h, which don't count); any other raises #GP(0).
+/// counters (11h to 13h, which don't count); any other raises #GP(0),
+/// except with EBX DEADCAFEh: 3dfx's Glide marks its accesses to the
+/// memory type range registers so (a Pentium II's, for write-combining),
+/// for its Windows driver to catch the fault where there are none, and
+/// its DOS overlay (GLIDE2X.OVL) relies on that; they read 0 and write
+/// nothing.
 pub fn msr(cpu: &mut Cpu, write: bool) -> CpuResult {
     require_pentium(cpu)?;
     require_cpl0(cpu)?;
     let msr = cpu.ecx();
     if !matches!(msr, 0x00 | 0x01 | 0x10..=0x13) {
+        if cpu.ebx() == GLIDE_MSR_MARK {
+            if !write {
+                cpu.set_eax(0);
+                cpu.set_edx(0);
+            }
+            return Ok(());
+        }
         return Err(Fault::gp(0));
     }
     if write {
