@@ -491,6 +491,13 @@
 # The sound comes from the screen's sides (or the scene's speaker_left and
 # speaker_right) as you turn and move.
 #spatial_audio=true
+# How much of the scene's lighting is worked out: high (soft shadows, the
+# screen's light in patches of the picture's colours, light bouncing around
+# the room), medium, or low (hard shadows, no bounced light).
+#quality=high
+# How brightly the screen lights the room, in percent of what the scene
+# says (0 to 400).
+#screen_glow=100
 
 [drives]
 # Mount host directories, or floppy, hard disk or CD images, as DOS drives

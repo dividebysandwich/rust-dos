@@ -13,11 +13,13 @@
 
 mod camera;
 mod controls;
+mod gi;
 #[cfg(xr)]
 mod headset;
 mod pick;
 mod render;
 mod scene;
+mod shadow;
 mod spatial;
 #[cfg(xr)]
 mod xr;
@@ -41,6 +43,8 @@ pub struct Stage {
     /// drawn into while the headset reads another.
     screens: Vec<ScreenTarget>,
     latest: Option<usize>,
+    /// The newest picture's light isn't taken yet (`Gpu::prepare`).
+    fresh: bool,
     drawing: usize,
     camera: FlyCamera,
     leds: Leds,
@@ -85,7 +89,8 @@ impl Stage {
             None => Scene::test_room(),
         };
         let scene = Arc::new(scene);
-        let gpu = Gpu::new(gl, glsl, &scene)?;
+        let mut gpu = Gpu::new(gl, glsl, &scene, settings.quality)?;
+        gpu.set_glow(glow_of(settings));
         let mut screens = Vec::new();
         for _ in 0..3 {
             let screen = ScreenTarget::new(gl)?;
@@ -101,6 +106,7 @@ impl Stage {
             gpu,
             screens,
             latest: None,
+            fresh: false,
             drawing: 0,
             camera,
             leds: Leds::default(),
@@ -113,7 +119,7 @@ impl Stage {
             #[cfg(xr)]
             {
                 let textures = [stage.screens[0].texture, stage.screens[1].texture, stage.screens[2].texture];
-                match headset::Headset::start(window, main, glsl, stage.scene.clone(), textures, settings.controllers) {
+                match headset::Headset::start(window, main, glsl, stage.scene.clone(), textures, settings) {
                     Ok(headset) => stage.headset = Some(headset),
                     Err(e) => notes.push(format!("[VR] No headset ({}); the scene is shown in the window", e)),
                 }
@@ -155,6 +161,7 @@ impl Stage {
     pub fn end_screen(&mut self, gl: &glow::Context) {
         self.screens[self.drawing].finish(gl);
         self.latest = Some(self.drawing);
+        self.fresh = true;
         #[cfg(xr)]
         if let Some(headset) = &self.headset {
             headset.publish_screen(gl, self.drawing);
@@ -179,6 +186,9 @@ impl Stage {
             return;
         }
         let screen = self.latest.map(|i| self.screens[i].texture);
+        if let Some(texture) = screen.filter(|_| std::mem::take(&mut self.fresh)) {
+            self.gpu.prepare(gl, texture);
+        }
         let aspect = drawable.0 as f32 / drawable.1 as f32;
         let view = View { view: self.camera.view(), projection: self.camera.projection(aspect) };
         let format = Format { size: drawable, srgb: false };
@@ -250,9 +260,11 @@ impl Stage {
     /// Take on the `[vr]` settings that change while it runs.
     pub fn apply(&mut self, settings: &VrSettings) {
         self.fit = settings.screen_fit;
+        self.gpu.set_glow(glow_of(settings));
         #[cfg(xr)]
         if let Some(headset) = &self.headset {
             headset.set_controllers(settings.controllers);
+            headset.set_glow(glow_of(settings));
         }
     }
 
@@ -276,6 +288,11 @@ impl Stage {
         let start = Mat4::from_translation(spawn.position) * Mat4::from_rotation_y(spawn.yaw);
         spatial::mix(listener, start, self.scene.speakers)
     }
+}
+
+/// How brightly the screen lights the scene, times what the scene says.
+fn glow_of(settings: &VrSettings) -> f32 {
+    settings.screen_glow as f32 / 100.0
 }
 
 /// Black over the whole window, for the bars around the headset's view.

@@ -114,6 +114,14 @@ pub struct Material {
 }
 
 impl Material {
+    /// Whether it casts shadows: not if it is seen through, or is a light
+    /// or a backdrop (black, and glowing).
+    pub fn casts_shadow(&self) -> bool {
+        let black = self.base_color[..3] == [0.0; 3];
+        let glows = self.emissive != [0.0; 3] || self.emissive_texture.is_some();
+        self.alpha != Alpha::Blend && self.shading != Shading::Screen && !(black && glows)
+    }
+
     fn plain(color: [f32; 3], shading: Shading) -> Self {
         Material {
             base_color: [color[0], color[1], color[2], 1.0],
@@ -155,6 +163,9 @@ pub struct Light {
     pub position: Vec3,
     /// Where the light shines to.
     pub direction: Vec3,
+    /// Whether what is in its way casts a shadow (the light's
+    /// `rustdos_shadow` custom property).
+    pub shadow: bool,
 }
 
 /// The surface the emulated picture is shown on.
@@ -179,6 +190,18 @@ impl Screen {
     /// Width by height, as the picture is stretched over it.
     pub fn aspect(&self) -> f32 {
         if self.size.y > 0.0 { self.size.x / self.size.y } else { 4.0 / 3.0 }
+    }
+
+    /// The picture's bottom to top, on the surface.
+    pub fn up(&self) -> Vec3 {
+        self.normal.cross(self.right).normalize_or(Vec3::Y)
+    }
+
+    /// The picture's top left corner and its whole width and height going
+    /// right and down, as vectors.
+    pub fn frame(&self) -> (Vec3, Vec3, Vec3) {
+        let (across, down) = (self.right * self.size.x, -self.up() * self.size.y);
+        (self.center - (across + down) / 2.0, across, down)
     }
 
     /// Work out the middle, the facing and the size from the triangles.
@@ -250,7 +273,27 @@ pub struct Scene {
     /// Where the left and right channels' sound comes from: the scene's
     /// `speaker_left` and `speaker_right`, else the screen's sides.
     pub speakers: [Vec3; 2],
+    /// Whether the lights cast shadows (`rustdos_shadows`) and the light
+    /// bouncing around the room is worked out (`rustdos_gi`).
+    pub shadows: bool,
+    pub gi: bool,
+    /// How brightly the screen lights the room, 1 as bright as the picture
+    /// is (`rustdos_screen_glow`).
+    pub screen_glow: f32,
+    /// A hash of where the scene came from, for keeping what is worked out
+    /// for it (`gi::Probes::key`).
+    pub source: u64,
+    /// The light bounced around it, once the first view of it works it
+    /// out: shared by the window's and the headset's.
+    pub probes: std::sync::OnceLock<Option<super::gi::Probes>>,
 }
+
+/// How far from the screen and the viewer's start the lighting is worked
+/// out in detail, in metres.
+const FOCUS: f32 = 12.0;
+
+/// How brightly the screen lights the room, unless the scene says.
+const SCREEN_GLOW: f32 = 5.0;
 
 /// The sunset sky's sun: low, ahead and to the left.
 fn sunset_sun() -> Vec3 {
@@ -264,6 +307,7 @@ fn sunset_lights() -> (Light, Vec3) {
         color: Vec3::new(1.0, 0.5, 0.22) * 1.6,
         position: Vec3::ZERO,
         direction: -sunset_sun(),
+        shadow: true,
     };
     (sun, Vec3::new(0.035, 0.045, 0.09))
 }
@@ -353,6 +397,11 @@ impl Scene {
             sun: sunset_sun(),
             exposure: 1.0,
             speakers: [Vec3::ZERO; 2],
+            shadows: true,
+            gi: true,
+            screen_glow: SCREEN_GLOW,
+            source: hash(b"the test room"),
+            probes: std::sync::OnceLock::new(),
         };
         let (sun, ambient) = sunset_lights();
         scene.lights.push(sun);
@@ -360,6 +409,23 @@ impl Scene {
         scene.collect_screen();
         scene.speakers = scene.screen_speakers();
         scene
+    }
+
+    /// The box around the meshes, cut down to `FOCUS` around the screen
+    /// and the viewer's start: what shadows and bounced light cover.
+    pub fn focus_bounds(&self) -> (Vec3, Vec3) {
+        let (mut low, mut high) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+        for mesh in self.meshes.iter().filter(|m| self.materials[m.material].casts_shadow()) {
+            for v in &mesh.vertices {
+                let p = Vec3::from(v.position);
+                low = low.min(p);
+                high = high.max(p);
+            }
+        }
+        let middle = (self.screen.center + self.spawn.position) / 2.0;
+        let reach = FOCUS + (self.screen.center - self.spawn.position).length() / 2.0;
+        let (low, high) = (low.max(middle - reach), high.min(middle + reach));
+        if low.cmple(high).all() { (low, high) } else { (middle - 1.0, middle + 1.0) }
     }
 
     /// The screen's left and right sides, where its sound comes from if
@@ -469,6 +535,13 @@ impl Scene {
             sun: sunset_sun(),
             exposure: extra(scene.extras(), "rustdos_exposure").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32,
             speakers: [Vec3::ZERO; 2],
+            shadows: extra(scene.extras(), "rustdos_shadows").is_none_or(truthy),
+            gi: extra(scene.extras(), "rustdos_gi").is_none_or(truthy),
+            screen_glow: extra(scene.extras(), "rustdos_screen_glow")
+                .and_then(|v| v.as_f64())
+                .map_or(SCREEN_GLOW, |g| g.max(0.0) as f32),
+            source: hash(bytes),
+            probes: std::sync::OnceLock::new(),
         };
         let mut walk = Walk {
             buffers: &buffers,
@@ -570,6 +643,7 @@ impl Walk<'_> {
                 color,
                 position: world.transform_point3(Vec3::ZERO),
                 direction: world.transform_vector3(Vec3::NEG_Z).normalize_or(Vec3::NEG_Y),
+                shadow: extra(node.extras(), "rustdos_shadow").or_else(|| extra(light.extras(), "rustdos_shadow")).is_none_or(truthy),
             });
         }
         let screen = in_screen
@@ -682,6 +756,14 @@ fn cuboid(center: Vec3, size: Vec3, material: usize) -> Mesh {
         }
     }
     Mesh { vertices, indices, material }
+}
+
+/// A hash of some bytes, to tell scenes apart.
+fn hash(bytes: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut h);
+    h.finish()
 }
 
 /// A key of a glTF object's `extras` (Blender's custom properties).

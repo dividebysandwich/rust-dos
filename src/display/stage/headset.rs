@@ -18,7 +18,7 @@ use super::xr::Xr;
 use crate::video::shader::Glsl;
 use glam::Mat4;
 use glow::HasContext;
-use rust_dos::vr::VrControllers;
+use rust_dos::vr::{VrControllers, VrQuality, VrSettings};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -95,6 +95,8 @@ struct State {
     screen: Ring<Fence, ()>,
     leds: Leds,
     controllers: VrControllers,
+    /// How brightly the screen lights the scene (`Gpu::set_glow`).
+    glow: f32,
     recenter: bool,
     // From the headset.
     /// The left eye's view, with its view-projection.
@@ -150,21 +152,22 @@ impl Headset {
         glsl: Glsl,
         scene: Arc<Scene>,
         screens: [glow::Texture; 3],
-        controllers: VrControllers,
+        settings: &VrSettings,
     ) -> Result<Self, String> {
+        let (controllers, quality, glow) = (settings.controllers, settings.quality, settings.screen_glow as f32 / 100.0);
         let attr = window.subsystem().gl_attr();
         attr.set_share_with_current_context(true);
         let context = window.gl_create_context();
         attr.set_share_with_current_context(false);
         let context = context?;
         window.gl_make_current(main)?;
-        let shared = Arc::new(Shared { state: Mutex::new(State { controllers, ..State::default() }), stop: AtomicBool::new(false) });
+        let shared = Arc::new(Shared { state: Mutex::new(State { controllers, glow, ..State::default() }), stop: AtomicBool::new(false) });
         // SAFETY: the context outlives the thread (`Headset::drop`).
         let (raw_window, raw_context) = (Raw(window.raw().cast()), Raw(unsafe { context.raw() }));
         let thread_shared = shared.clone();
         let thread = std::thread::Builder::new()
             .name("vr-headset".into())
-            .spawn(move || run(thread_shared, raw_window, raw_context, glsl, scene, screens))
+            .spawn(move || run(thread_shared, raw_window, raw_context, glsl, scene, screens, quality))
             .map_err(|e| e.to_string())?;
         Ok(Headset { shared, thread: Some(thread), context: Some(context), mirror_framebuffers: Vec::new() })
     }
@@ -195,6 +198,10 @@ impl Headset {
 
     pub fn set_controllers(&self, controllers: VrControllers) {
         self.shared.lock().controllers = controllers;
+    }
+
+    pub fn set_glow(&self, glow: f32) {
+        self.shared.lock().glow = glow;
     }
 
     pub fn recenter(&self) {
@@ -272,7 +279,15 @@ impl Drop for Headset {
 }
 
 /// The headset's thread.
-fn run(shared: Arc<Shared>, window: Raw, context: Raw, glsl: Glsl, scene: Arc<Scene>, screens: [glow::Texture; 3]) {
+fn run(
+    shared: Arc<Shared>,
+    window: Raw,
+    context: Raw,
+    glsl: Glsl,
+    scene: Arc<Scene>,
+    screens: [glow::Texture; 3],
+    quality: VrQuality,
+) {
     // SAFETY: the window and the context are alive until the thread ends
     // (see `Headset::drop`), and the context is current nowhere else.
     let made = unsafe { sdl2::sys::SDL_GL_MakeCurrent(window.0.cast(), context.0) };
@@ -286,7 +301,7 @@ fn run(shared: Arc<Shared>, window: Raw, context: Raw, glsl: Glsl, scene: Arc<Sc
                 sdl2::sys::SDL_GL_GetProcAddress(name.as_ptr()) as *const _
             })
         };
-        if let Err(e) = session(&shared, &gl, glsl, &scene, screens) {
+        if let Err(e) = session(&shared, &gl, glsl, &scene, screens, quality) {
             shared.note(e);
         }
         // SAFETY: as above.
@@ -301,8 +316,15 @@ fn run(shared: Arc<Shared>, window: Raw, context: Raw, glsl: Glsl, scene: Arc<Sc
 }
 
 /// The headset's session, until it ends or the main thread stops it.
-fn session(shared: &Shared, gl: &glow::Context, glsl: Glsl, scene: &Scene, screens: [glow::Texture; 3]) -> Result<(), String> {
-    let mut gpu = Gpu::new(gl, glsl, scene)?;
+fn session(
+    shared: &Shared,
+    gl: &glow::Context,
+    glsl: Glsl,
+    scene: &Scene,
+    screens: [glow::Texture; 3],
+    quality: VrQuality,
+) -> Result<(), String> {
+    let mut gpu = Gpu::new(gl, glsl, scene, quality)?;
     let mut xr = Xr::new(gl).map_err(|e| format!("No headset ({}); the scene is shown in the window", e))?;
     shared.note(xr.describe().to_string());
     // The window's view of the left eye, at half its size.
@@ -347,11 +369,12 @@ fn session(shared: &Shared, gl: &glow::Context, glsl: Glsl, scene: &Scene, scree
             std::thread::sleep(std::time::Duration::from_millis(20));
             continue;
         }
-        let (taken, leds, mode, recenter, mirror_index) = {
+        let (taken, leds, mode, recenter, mirror_index, glow) = {
             let mut state = shared.lock();
             let taken = state.screen.take();
-            (taken, state.leds, state.controllers, std::mem::take(&mut state.recenter), state.mirror.free())
+            (taken, state.leds, state.controllers, std::mem::take(&mut state.recenter), state.mirror.free(), state.glow)
         };
+        gpu.set_glow(glow);
         if let Some((index, fence, ())) = taken {
             if let Some(Fence(fence)) = fence {
                 // SAFETY: see `GlScreen`.
@@ -361,6 +384,7 @@ fn session(shared: &Shared, gl: &glow::Context, glsl: Glsl, scene: &Scene, scree
                 }
             }
             screen = Some(index);
+            gpu.prepare(gl, screens[index]);
         }
         if recenter {
             xr.recenter();

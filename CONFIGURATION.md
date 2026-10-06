@@ -669,6 +669,14 @@ The picture on a screen in a 3D scene (see [3D scene and VR](#3d-scene-and-vr)).
   picture's shape without one), `fit` (keep the picture's shape, with black
   bars where the screen's shape differs) or `stretch` (cover the whole
   screen).
+* `quality`: how much of the scene's lighting is worked out: `high` (the
+  default: soft shadows, the screen's light in twelve patches of the
+  picture's colours, and light bouncing around the room), `medium` (four
+  patches, a little less soft) or `low` (hard shadows, the screen's light in
+  one colour, no bounced light), for slow graphics chips. It takes effect at
+  the next start.
+* `screen_glow`: how brightly the screen lights the room, in percent of what
+  the scene says, 0 to 400 (the default 100). 0 turns its light off.
 
 The settings window's VR page has them all.
 
@@ -1744,8 +1752,18 @@ to the sound.
 The picture goes on the screen through the [CRT shader](#crt-shaders), but
 flat: the screen has its own shape. It is drawn at twice its size (1024 to
 2048 pixels across) with smaller copies for the distance, so that scanlines
-and masks don't shimmer as the view moves, and its average colour lights
-what is in front of it. 3dfx pictures drawn with OpenGL go on it too.
+and masks don't shimmer as the view moves. Its light falls on what is in
+front of it as a CRT's does in a dark room: the parts of the picture light
+the room in their colours, a bright picture lights the keyboard and the
+desk, a dark one leaves them dark, and things in front of the screen cast
+soft shadows. 3dfx pictures drawn with OpenGL go on it too.
+
+The scene's lights and the screen cast shadows, and the light bounces
+around the room once or twice, the way a sunlit patch on a wall lights
+the rest of it. The bounced light is worked out when the scene loads, the
+first time in a second or so, and kept in `vr-cache` in the configuration
+directory for the next start. The `quality` setting chooses how much of
+this is done.
 
 The keyboard and the mouse work as without the scene. The mouse points at
 the screen through the camera: where the pointer is over the screen is

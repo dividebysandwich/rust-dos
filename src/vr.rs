@@ -178,6 +178,48 @@ impl ScreenFit {
     }
 }
 
+/// How much of the 3D scene's lighting is worked out: shadows, the
+/// screen's light in patches of the picture's colours, and the light
+/// bouncing around the scene.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VrQuality {
+    /// Hard shadows, the screen's light in one colour, no bounced light.
+    Low,
+    /// Soft shadows, the screen's light in four patches, bounced light.
+    Medium,
+    /// Softer shadows, the screen's light in twelve patches, bounced light.
+    #[default]
+    High,
+}
+
+impl VrQuality {
+    pub const ALL: [VrQuality; 3] = [VrQuality::Low, VrQuality::Medium, VrQuality::High];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            VrQuality::Low => "low",
+            VrQuality::Medium => "medium",
+            VrQuality::High => "high",
+        }
+    }
+
+    pub fn describe(self) -> &'static str {
+        match self {
+            VrQuality::Low => "low: hard shadows, no bounced light",
+            VrQuality::Medium => "medium",
+            VrQuality::High => "high: soft shadows, bounced light",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        let value = value.trim();
+        Self::ALL.into_iter().find(|q| q.name().eq_ignore_ascii_case(value))
+    }
+}
+
+/// `screen_glow`'s range, in percent.
+pub const SCREEN_GLOW_MAX: u32 = 400;
+
 /// The `[vr]` settings.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VrSettings {
@@ -191,6 +233,10 @@ pub struct VrSettings {
     /// as the viewer turns and moves.
     pub spatial_audio: bool,
     pub screen_fit: ScreenFit,
+    pub quality: VrQuality,
+    /// How brightly the screen lights the scene, in percent of what the
+    /// scene says.
+    pub screen_glow: u32,
 }
 
 impl Default for VrSettings {
@@ -201,6 +247,8 @@ impl Default for VrSettings {
             controllers: VrControllers::Both,
             spatial_audio: true,
             screen_fit: ScreenFit::Auto,
+            quality: VrQuality::High,
+            screen_glow: 100,
         }
     }
 }
@@ -233,6 +281,19 @@ impl VrSettings {
                 self.screen_fit = ScreenFit::parse(value)
                     .ok_or_else(|| format!("invalid screen_fit '{}' (auto, fit or stretch)", value))?;
             }
+            "quality" => {
+                self.quality = VrQuality::parse(value)
+                    .ok_or_else(|| format!("invalid quality '{}' (low, medium or high)", value))?;
+            }
+            "screen_glow" => {
+                self.screen_glow = value
+                    .trim()
+                    .trim_end_matches('%')
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|g| *g <= SCREEN_GLOW_MAX)
+                    .ok_or_else(|| format!("invalid screen_glow '{}' (0 to {} percent)", value, SCREEN_GLOW_MAX))?;
+            }
             _ => return Err(format!("unknown setting '{}'", key)),
         }
         Ok(())
@@ -245,6 +306,8 @@ impl VrSettings {
             ("controllers", Some(self.controllers.name().to_string())),
             ("spatial_audio", Some(self.spatial_audio.to_string())),
             ("screen_fit", Some(self.screen_fit.name().to_string())),
+            ("quality", Some(self.quality.name().to_string())),
+            ("screen_glow", Some(self.screen_glow.to_string())),
         ]
     }
 }
@@ -263,6 +326,11 @@ mod tests {
         s.set("screen_fit", "Stretch", Path::new("/cfg")).unwrap();
         assert_eq!(s.screen_fit, ScreenFit::Stretch);
         assert!(s.set("screen_fit", "zoom", Path::new("/cfg")).is_err());
+        s.set("quality", "Medium", Path::new("/cfg")).unwrap();
+        s.set("screen_glow", "250%", Path::new("/cfg")).unwrap();
+        assert_eq!((s.quality, s.screen_glow), (VrQuality::Medium, 250));
+        assert!(s.set("screen_glow", "401", Path::new("/cfg")).is_err());
+        assert!(s.set("quality", "ultra", Path::new("/cfg")).is_err());
         assert_eq!(s.controllers, VrControllers::Pointer);
         assert!(!s.spatial_audio);
         assert_eq!(s.mode, VrMode::Desktop);

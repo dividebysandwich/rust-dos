@@ -377,7 +377,7 @@ impl Page {
         use Item::*;
         match self {
             Page::Drives | Page::Games | Page::States | Page::Cheats | Page::Achievements | Page::Stats => &[],
-            Page::Vr => &[VrMode, VrScene, VrScreenFit, VrControllers, VrSpatialAudio],
+            Page::Vr => &[VrMode, VrScene, VrScreenFit, VrQuality, VrScreenGlow, VrControllers, VrSpatialAudio],
             Page::Display => {
                 &[Scale, Fullscreen, Aspect, Vrr, Filter, Shader, CrtCurvature, CrtGlow, Monochrome, Composite, CompositeEra]
             }
@@ -494,6 +494,10 @@ enum Item {
     VrControllers,
     VrSpatialAudio,
     VrScreenFit,
+    /// How much of the scene's lighting is worked out, and how brightly
+    /// the screen lights it.
+    VrQuality,
+    VrScreenGlow,
     Filter,
     Shader,
     /// How far the CRT look's tube bends and how much it glows, shown
@@ -709,6 +713,9 @@ fn bar(text: String, value: u16, max: u16, unit: u16) -> String {
     format!("{} {}{}", text, "■".repeat(full), "·".repeat(cells - full))
 }
 
+/// The screen's light's slider steps by this many percent.
+const SCREEN_GLOW_UNIT: u16 = 25;
+
 /// A percentage's bar, a square for every 10%.
 fn percent_bar(percent: u16, max: u16) -> String {
     bar(format!("{:>3}%", percent), percent, max, 10)
@@ -800,6 +807,8 @@ impl Item {
             VrControllers => "Headset controllers",
             VrSpatialAudio => "Sound from the screen",
             VrScreenFit => "Picture on the screen",
+            VrQuality => "Lighting",
+            VrScreenGlow => "Light from the screen",
             Filter => "Scaling filter",
             Shader => "CRT shader",
             CrtCurvature => "  Curvature",
@@ -910,7 +919,13 @@ impl Item {
         match self {
             Item::Scale | Item::Fullscreen | Item::Vrr => frontend.window,
             // The window's OpenGL draws the scene.
-            Item::VrMode | Item::VrScene | Item::VrControllers | Item::VrSpatialAudio | Item::VrScreenFit => {
+            Item::VrMode
+            | Item::VrScene
+            | Item::VrControllers
+            | Item::VrSpatialAudio
+            | Item::VrScreenFit
+            | Item::VrQuality
+            | Item::VrScreenGlow => {
                 frontend.window && cfg!(feature = "vr")
             }
             Item::SoundFont => soundfonts(frontend),
@@ -947,7 +962,9 @@ impl Item {
     fn shown(self, s: &Settings) -> bool {
         match self {
             Item::CrtCurvature | Item::CrtGlow => s.shader == crate::video::shader::Shader::Crt,
-            Item::VrScene | Item::VrSpatialAudio | Item::VrScreenFit => s.vr.mode != crate::vr::VrMode::Off,
+            Item::VrScene | Item::VrSpatialAudio | Item::VrScreenFit | Item::VrQuality | Item::VrScreenGlow => {
+                s.vr.mode != crate::vr::VrMode::Off
+            }
             Item::VrControllers => s.vr.mode == crate::vr::VrMode::Headset,
             Item::ReverbMix => s.mixer.reverb != ReverbPreset::Off,
             Item::ChorusMix => s.mixer.chorus != ChorusPreset::Off,
@@ -988,15 +1005,17 @@ impl Item {
             | RecordShader => Applies::Now,
             Joystick | Deadzone | SpeakerFilter | SbFilter | Reverb | Chorus | ReverbMix | ChorusMix => Applies::Now,
             Rooms => Applies::Now,
-            Memsize | Autoexec | Lan | LanHost | VrMode | VrScene => Applies::NextStart,
-            VrControllers | VrSpatialAudio | VrScreenFit => Applies::Now,
+            Memsize | Autoexec | Lan | LanHost | VrMode | VrScene | VrQuality => Applies::NextStart,
+            VrControllers | VrSpatialAudio | VrScreenFit | VrScreenGlow => Applies::Now,
             _ => Applies::AtPrompt,
         }
     }
 
     fn input(self) -> Input {
         match self {
-            Item::Volume(_) | Item::ReverbMix | Item::ChorusMix | Item::CrtCurvature | Item::CrtGlow => Input::Slider,
+            Item::Volume(_) | Item::ReverbMix | Item::ChorusMix | Item::CrtCurvature | Item::CrtGlow | Item::VrScreenGlow => {
+                Input::Slider
+            }
             Item::Memsize | Item::Deadzone => Input::Slider,
             Item::Cycles => Input::Presets,
             Item::UltraDir | Item::CaptureDir => Input::Text,
@@ -1028,6 +1047,11 @@ impl Item {
             VrControllers => s.vr.controllers.describe().to_string(),
             VrSpatialAudio => on_off(s.vr.spatial_audio),
             VrScreenFit => s.vr.screen_fit.describe().to_string(),
+            VrQuality => s.vr.quality.describe().to_string(),
+            VrScreenGlow => {
+                let glow = s.vr.screen_glow.min(crate::vr::SCREEN_GLOW_MAX) as u16;
+                bar(format!("{:>3}%", glow), glow, crate::vr::SCREEN_GLOW_MAX as u16, SCREEN_GLOW_UNIT)
+            }
             Filter => match s.filter {
                 crate::config::Filter::Nearest => "nearest (sharp)",
                 crate::config::Filter::Linear => "linear (smooth)",
@@ -1242,6 +1266,7 @@ impl Item {
             VrControllers => each(s, crate::vr::VrControllers::ALL, |s, c| s.vr.controllers = c),
             VrSpatialAudio => on_off(|s, on| s.vr.spatial_audio = on),
             VrScreenFit => each(s, crate::vr::ScreenFit::ALL, |s, fit| s.vr.screen_fit = fit),
+            VrQuality => each(s, crate::vr::VrQuality::ALL, |s, q| s.vr.quality = q),
             Filter => each(s, [crate::config::Filter::Nearest, crate::config::Filter::Linear], |s, f| s.filter = f),
             Shader => each(s, crate::video::shader::Shader::ALL, |s, shader| s.shader = shader),
             Monochrome => each(s, crate::video::mono::Monochrome::ALL, |s, mono| s.monochrome = mono),
@@ -1382,7 +1407,7 @@ impl Item {
             // row of several, whose fields have their own.
             Cycles | CrtCurvature | CrtGlow | Memsize | Volume(_) | ReverbMix | ChorusMix | Deadzone | UltraDir
             | SoundFont | Mt32Roms | Awe32Rom | Awe32Download | Sc55Roms | Sc55Download | CaptureDir | Autoexec | SbPorts | GusPorts | MacAddr
-            | Rooms | Relay | Player | VrScene
+            | Rooms | Relay | Player | VrScene | VrScreenGlow
             | Lan | LanHost | Room | Password | ModemListen => Vec::new(),
         }
     }
@@ -1413,6 +1438,10 @@ impl Item {
             RewindMemory => s.rewind_memory = step_number(&REWIND_MEMORY, s.rewind_memory, dir),
             CrtCurvature => s.crt.curvature = step_units(s.crt.curvature, dir, 10, MAX_AMOUNT),
             CrtGlow => s.crt.glow = step_units(s.crt.glow, dir, 10, MAX_AMOUNT),
+            VrScreenGlow => {
+                let max = crate::vr::SCREEN_GLOW_MAX as u16;
+                s.vr.screen_glow = step_units(s.vr.screen_glow.min(max as u32) as u16, dir, SCREEN_GLOW_UNIT, max) as u32;
+            }
             Memsize => {
                 let steps: Vec<usize> = memsizes(s.cpu).collect();
                 s.memsize = step_number(&steps, s.memsize, dir);
@@ -1459,6 +1488,7 @@ impl Item {
             Item::Deadzone => s.joystick.deadzone.to_string(),
             Item::CrtCurvature => s.crt.curvature.to_string(),
             Item::CrtGlow => s.crt.glow.to_string(),
+            Item::VrScreenGlow => s.vr.screen_glow.to_string(),
             Item::ReverbMix => s.mixer.reverb_mix.to_string(),
             Item::ChorusMix => s.mixer.chorus_mix.to_string(),
             Item::MacAddr => s.network.mac.map_or(String::new(), |mac| mac.to_string()),
@@ -1491,6 +1521,7 @@ impl Item {
             Item::Deadzone => s.joystick.deadzone = crate::joystick::parse_deadzone(text)?,
             Item::CrtCurvature => s.crt.curvature = parse_amount(text).ok_or("The curvature goes from 0 to 100%")?,
             Item::CrtGlow => s.crt.glow = parse_amount(text).ok_or("The glow goes from 0 to 100%")?,
+            Item::VrScreenGlow => s.vr.set("screen_glow", text, std::path::Path::new(""))?,
             Item::ReverbMix => s.mixer.reverb_mix = crate::mixer::parse_mix(text)?,
             Item::ChorusMix => s.mixer.chorus_mix = crate::mixer::parse_mix(text)?,
             Item::MacAddr if text.is_empty() => s.network.mac = None,
@@ -1542,6 +1573,10 @@ impl Item {
             Item::CrtGlow => {
                 let default = CrtSettings::default().glow;
                 std::mem::replace(&mut s.crt.glow, default) != default
+            }
+            Item::VrScreenGlow => {
+                let default = crate::vr::VrSettings::default().screen_glow;
+                std::mem::replace(&mut s.vr.screen_glow, default) != default
             }
             Item::ReverbMix => std::mem::replace(&mut s.mixer.reverb_mix, DEFAULT_MIX) != DEFAULT_MIX,
             Item::ChorusMix => std::mem::replace(&mut s.mixer.chorus_mix, DEFAULT_MIX) != DEFAULT_MIX,

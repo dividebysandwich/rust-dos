@@ -107,9 +107,14 @@ file without one is rejected, and the test room is shown instead.
   to an empty instead if you want them to move together.
 - **The mouse and the laser** point at the screen through its triangles,
   so a curved screen gets accurate pointing.
-- **Glow:** the screen's average colour lights what is in front of it (the
-  desk, the keyboard), as a CRT does in a dark room. Surfaces behind the
-  screen's front side aren't lit by it.
+- **Glow:** the screen lights what is in front of it (the desk, the
+  keyboard, the insides of the bezel) as a CRT does in a dark room, as a
+  rectangle of light in patches of the picture's colours: a blue sky at the
+  top of the picture lights the ceiling blue. Surfaces behind the screen's
+  front side aren't lit by it, and things in front of it cast soft
+  shadows. A scene custom property `rustdos_screen_glow` (a number, 5 by
+  default) sets how bright the light is; players can change it with the
+  `screen_glow` setting.
 
 The CRT look chosen in the settings (scanlines, aperture grille, shadow
 mask) is drawn onto the screen, but without the tube's curve. If you want
@@ -215,8 +220,24 @@ Textures must be **PNG or JPEG**, which is what Blender exports.
   fade into it. For a **closed room**, or one with its own skybox mesh,
   turn it off with a scene custom property `rustdos_sky` set to `0` or
   `False`. Outside the room it is then night-dark.
-- Shadows aren't drawn. Model the floor and walls with the light you want
-  in mind, or bake it.
+- **Shadows:** the lights cast shadows: through a window, a spot or sun
+  light makes a window-shaped patch with the frame's shadow in it. Up to
+  **4** lights cast shadows, the first in the file. To keep a light from
+  casting them (a fill light, say), give the light object the custom
+  property `rustdos_shadow` set to `0` or `False`; for none at all, the
+  scene custom property `rustdos_shadows`. Glass and other see-through
+  (Blend) materials, and black glowing surfaces (a sky backdrop outside the
+  window), cast none.
+- **Bounced light:** light falling on a surface lights the rest of the room
+  in its colour, twice over: the sunlit patch on the wall warms the room,
+  the screen's light reaches the walls beside it. Rust-DOS works it out when
+  the room loads, by looking around from points on a grid about 40 cm
+  apart over the room, and keeps it for the next start. Make sure the room
+  is closed where it should be dark: light comes in through gaps in the
+  walls. The scene custom property `rustdos_gi` set to `0` turns it off,
+  for scenes with their lighting baked in.
+- Fake light (an emissive "sunbeam" patch on a wall) isn't needed any more
+  for light the scene's lights already give; it would double it.
 
 ## Exporting from Blender
 

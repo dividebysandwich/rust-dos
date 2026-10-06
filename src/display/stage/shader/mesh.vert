@@ -11,6 +11,8 @@ uniform mat4 u_model;
 out vec3 v_world;
 out vec3 v_normal;
 out vec2 v_uv;
+// The same depth in the depth program and the lit one.
+invariant gl_Position;
 
 void main() {
     vec4 world = u_model * vec4(a_position, 1.0);

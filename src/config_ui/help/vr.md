@@ -42,6 +42,27 @@ How the DOS picture fills the scene's screen:
 - **stretch to fill**: the picture covers the whole screen, as a CRT's
   width and height knobs turned up would.
 
+# Lighting {#vr-quality}
+
+How much of the scene's lighting is worked out:
+
+- **high**: soft shadows, the screen lighting the room in twelve patches
+  of the picture's colours, and the light bouncing around the room.
+- **medium**: the same with four patches and shadows a little less soft.
+- **low**: hard shadows, the screen's light in one colour, and no
+  bounced light, for slow graphics chips.
+
+The bounced light is worked out when the scene loads, the first time in
+a second or so, and kept in `vr-cache` in Rust-DOS's folder for the next.
+It takes effect at the next start.
+
+# Light from the screen {#vr-screen-glow}
+
+How brightly the screen lights the room, in percent of what the scene
+says (its `rustdos_screen_glow` property). 0% turns its light off. A
+bright picture lights the keyboard and the desk, a dark one leaves them
+in the dark, and the room takes on the colours of the picture's parts.
+
 # Headset controllers {#vr-controllers}
 
 What a VR headset's controllers do:
