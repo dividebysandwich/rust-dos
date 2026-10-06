@@ -86,7 +86,7 @@ ureq = { version = "3", default-features = false, features = ["rustls"], optiona
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies.gltf]
 version = "1.4"
 default-features = false
-features = ["names", "utils", "extras", "KHR_lights_punctual", "KHR_materials_unlit"]
+features = ["names", "utils", "extras", "KHR_lights_punctual", "KHR_materials_unlit", "KHR_materials_emissive_strength"]
 optional = true
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies.glam]
 version = "0.30"

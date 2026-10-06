@@ -27,6 +27,31 @@ special is simply drawn.
 5. Run `rust-dos --vr-desktop --vr-scene myroom.glb` and look around (hold
    Ctrl+Shift and move the mouse).
 
+## Starting from the test room
+
+[`assets/vr/test-room.blend`](../assets/vr/test-room.blend) is the built-in
+test room as a Blender scene, ready to change. It has the screen, the
+`spawn`, the two speakers, the tower with its four lights, the materials,
+and a `README` text block with the export settings.
+[`assets/vr/test-room.glb`](../assets/vr/test-room.glb) is its export.
+Loaded with `--vr-scene`, it looks the same as the built-in room, apart
+from the floor's grid: here it is a texture, which fades a little sooner in
+the distance than the built-in room's.
+
+In the `.blend`, the **Viewport only** collection (a sun lamp in the
+built-in sunset's direction, a camera at the spawn, a blue world) is there
+to make Blender's viewport look like the room. Export with **Punctual
+Lights off** to have Rust-DOS light the room with its own sunset, as the
+built-in room is. With them on, the sun lamp lights it instead, with less
+of the sky's light.
+
+`assets/vr/make_test_room.py` builds both files from scratch, from the same
+numbers as the built-in room:
+
+```sh
+blender --background --factory-startup --python assets/vr/make_test_room.py
+```
+
 ## The names Rust-DOS looks for
 
 | Object in Blender | Kind | What it does |
@@ -149,9 +174,9 @@ How they look:
 Rust-DOS draws a simple version of Blender's Principled BSDF:
 
 - **Base Color** and its image texture.
-- **Emission** colour and its image texture (glowing parts, lamps, the
-  power light). glTF caps emission at 1, so very bright glows look the same
-  as fully bright ones.
+- **Emission** colour, strength and image texture (glowing parts, lamps,
+  the power light). A strength above 1 makes it brighter, up to a soft
+  white-out.
 - **Alpha**: Blend (see-through glass, smoke) and Clip / Alpha Mask
   (leaves, grilles).
 - **Backface Culling** off (double-sided) or on.

@@ -432,7 +432,9 @@ impl Scene {
                 Material {
                     base_color: pbr.base_color_factor(),
                     base_texture: texture(pbr.base_color_texture()),
-                    emissive: m.emissive_factor(),
+                    // Blender's emission strength above 1 comes as
+                    // KHR_materials_emissive_strength.
+                    emissive: m.emissive_factor().map(|c| c * m.emissive_strength().unwrap_or(1.0)),
                     emissive_texture: texture(m.emissive_texture()),
                     shading: if m.unlit() { Shading::Unlit } else { Shading::Lit },
                     double_sided: m.double_sided(),
@@ -861,6 +863,36 @@ mod tests {
         assert_eq!(led.led, Some(Led::Hdd));
         assert!(led.emissive[0] > 0.0);
         assert_eq!(scene.materials[scene.meshes[0].material].led, None);
+    }
+
+    #[test]
+    fn the_blender_test_room_is_the_built_in_one() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/vr/test-room.glb");
+        let blend = Scene::load(&path).unwrap_or_else(|e| panic!("{}", e));
+        let built = Scene::test_room();
+        assert_eq!(blend.meshes.len(), built.meshes.len());
+        let near = |a: Vec3, b: Vec3| (a - b).length() < 1e-4;
+        assert!(near(blend.screen.center, built.screen.center), "{:?}", blend.screen.center);
+        assert!(near(blend.screen.normal, built.screen.normal));
+        assert!(near(blend.screen.right, built.screen.right));
+        assert!((blend.screen.size - built.screen.size).length() < 1e-4);
+        assert!(near(blend.spawn.position, built.spawn.position) && blend.spawn.yaw.abs() < 1e-4);
+        assert!(near(blend.speakers[0], built.speakers[0]) && near(blend.speakers[1], built.speakers[1]));
+        // Lit by the same sunset, under the same sky.
+        assert_eq!(blend.lights, built.lights);
+        assert_eq!(blend.ambient, built.ambient);
+        assert!(blend.sky && blend.exposure == 1.0);
+        // The same lights on the tower, as bright.
+        for led in [Led::Power, Led::Turbo, Led::Hdd, Led::Floppy] {
+            let find = |scene: &Scene| {
+                let m = scene.meshes.iter().find(|m| scene.materials[m.material].led == Some(led)).expect("the light");
+                let center = m.vertices.iter().map(|v| Vec3::from(v.position)).sum::<Vec3>() / m.vertices.len() as f32;
+                (center, scene.materials[m.material].emissive)
+            };
+            let ((a, ea), (b, eb)) = (find(&blend), find(&built));
+            assert!(near(a, b), "{:?}: {:?} {:?}", led, a, b);
+            assert!(ea.iter().zip(eb).all(|(x, y)| (x - y).abs() < 1e-4), "{:?}: {:?} {:?}", led, ea, eb);
+        }
     }
 
     #[test]
