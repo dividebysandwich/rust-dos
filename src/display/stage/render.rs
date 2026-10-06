@@ -17,17 +17,25 @@ const SKY_FRAG: &str = include_str!("shader/sky.frag");
 const SHADOW_FRAG: &str = include_str!("shader/shadow.frag");
 const GRID_FRAG: &str = include_str!("shader/grid.frag");
 const GI_UPDATE_FRAG: &str = include_str!("shader/gi_update.frag");
+const AO_FRAG: &str = include_str!("shader/ao.frag");
+const AO_BLUR_FRAG: &str = include_str!("shader/ao_blur.frag");
 
 /// What `quality` works out: the screen's light as the picture's colours
 /// in how many patches across and down, how many samples soften a shadow's
-/// edge, and whether the light bouncing around is worked out.
-fn lighting(quality: VrQuality) -> ((i32, i32), u32, bool) {
+/// edge, whether the light bouncing around is worked out, and how many
+/// samples the ambient occlusion takes at each pixel (none: none of it).
+fn lighting(quality: VrQuality) -> ((i32, i32), u32, bool, u32) {
     match quality {
-        VrQuality::Low => ((1, 1), 1, false),
-        VrQuality::Medium => ((2, 2), 6, true),
-        VrQuality::High => ((4, 3), 12, true),
+        VrQuality::Low => ((1, 1), 1, false, 0),
+        VrQuality::Medium => ((2, 2), 6, true, 8),
+        VrQuality::High => ((4, 3), 12, true, 12),
     }
 }
+
+/// How far around occluders darken the light from all around, in metres,
+/// and how much.
+const AO_RADIUS: f32 = 0.4;
+const AO_STRENGTH: f32 = 0.5;
 
 /// How much of the screen's light each new picture brings: a little of
 /// the ones before stays, so that flicker doesn't strobe the room.
@@ -162,6 +170,81 @@ impl Timing {
     }
 }
 
+/// The ambient occlusion: its programs, and what it is drawn into for
+/// views of the size it was last.
+struct Ao {
+    estimate: glow::Program,
+    blur: glow::Program,
+    target: Option<AoTarget>,
+}
+
+/// At half a view's size: its depth, and the occlusion and its blur
+/// across, each with its framebuffer.
+struct AoTarget {
+    size: (i32, i32),
+    depth: glow::Texture,
+    depth_framebuffer: glow::Framebuffer,
+    pictures: [glow::Texture; 2],
+    framebuffers: [glow::Framebuffer; 2],
+}
+
+impl AoTarget {
+    fn new(gl: &glow::Context, size: (i32, i32)) -> Result<Self, String> {
+        let (w, h) = size;
+        // SAFETY: see `GlScreen`.
+        unsafe {
+            let texture = |format: u32, kind: u32, value: u32| -> Result<glow::Texture, String> {
+                let t = gl.create_texture()?;
+                gl.bind_texture(glow::TEXTURE_2D, Some(t));
+                let none = glow::PixelUnpackData::Slice(None);
+                gl.tex_image_2d(glow::TEXTURE_2D, 0, format as i32, w, h, 0, kind, value, none);
+                let filter = if kind == glow::DEPTH_COMPONENT { glow::NEAREST } else { glow::LINEAR };
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, filter as i32);
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, filter as i32);
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+                Ok(t)
+            };
+            let depth = texture(glow::DEPTH_COMPONENT24, glow::DEPTH_COMPONENT, glow::UNSIGNED_INT)?;
+            let pictures = [texture(glow::R8, glow::RED, glow::UNSIGNED_BYTE)?, texture(glow::R8, glow::RED, glow::UNSIGNED_BYTE)?];
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            let depth_framebuffer = gl.create_framebuffer()?;
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(depth_framebuffer));
+            gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::DEPTH_ATTACHMENT, glow::TEXTURE_2D, Some(depth), 0);
+            gl.draw_buffer(glow::NONE);
+            gl.read_buffer(glow::NONE);
+            let mut complete = gl.check_framebuffer_status(glow::FRAMEBUFFER) == glow::FRAMEBUFFER_COMPLETE;
+            let mut framebuffers = Vec::new();
+            for picture in pictures {
+                let framebuffer = gl.create_framebuffer()?;
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
+                gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(picture), 0);
+                complete &= gl.check_framebuffer_status(glow::FRAMEBUFFER) == glow::FRAMEBUFFER_COMPLETE;
+                framebuffers.push(framebuffer);
+            }
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            let target = AoTarget { size, depth, depth_framebuffer, pictures, framebuffers: [framebuffers[0], framebuffers[1]] };
+            if !complete {
+                target.delete(gl);
+                return Err("OpenGL can't draw the ambient occlusion".into());
+            }
+            Ok(target)
+        }
+    }
+
+    fn delete(&self, gl: &glow::Context) {
+        // SAFETY: see `GlScreen`.
+        unsafe {
+            gl.delete_framebuffer(self.depth_framebuffer);
+            gl.delete_texture(self.depth);
+            for (framebuffer, picture) in self.framebuffers.iter().zip(&self.pictures) {
+                gl.delete_framebuffer(*framebuffer);
+                gl.delete_texture(*picture);
+            }
+        }
+    }
+}
+
 /// Where a program's material uniforms are.
 struct MaterialLocations {
     shading: Option<glow::UniformLocation>,
@@ -205,6 +288,7 @@ pub struct Gpu {
     shadows: Option<Shadows>,
     grid: Grid,
     gi: Option<Gi>,
+    ao: Option<Ao>,
     /// How long the views take the graphics chip, with RUST_DOS_VR_TIMING
     /// set.
     timing: Option<Timing>,
@@ -278,7 +362,7 @@ fn uniform(gl: &glow::Context, program: glow::Program, name: &str) -> Option<glo
 impl Gpu {
     /// Compile the programs and upload `scene`.
     pub fn new(gl: &glow::Context, glsl: Glsl, scene: &Scene, quality: VrQuality) -> Result<Self, String> {
-        let (grid_size, taps, bounce) = lighting(quality);
+        let (grid_size, taps, bounce, ao_samples) = lighting(quality);
         if glsl == Glsl::Es300 {
             return Err("the 3D view needs desktop OpenGL, not OpenGL ES".into());
         }
@@ -286,11 +370,12 @@ impl Gpu {
         let layers = lights.iter().map(|(_, c)| c.layers().len()).sum::<usize>()
             + screen.as_ref().map_or(0, |c| c.layers().len());
         let defines = format!(
-            "#define SHADOW_LAYERS {}\n#define SHADOW_TAPS {}\n#define GRID_W {}\n#define GRID_H {}\n",
+            "#define SHADOW_LAYERS {}\n#define SHADOW_TAPS {}\n#define GRID_W {}\n#define GRID_H {}\n#define AO_SAMPLES {}\n",
             layers.max(1),
             taps,
             grid_size.0,
-            grid_size.1
+            grid_size.1,
+            ao_samples.max(1)
         );
         let mut programs = Vec::new();
         for (vertex, fragment, name) in [
@@ -311,6 +396,24 @@ impl Gpu {
             }
         }
         let [lit, sky, depth, grid_program] = programs[..] else { unreachable!() };
+        let ao = if ao_samples > 0 && scene.ao {
+            let estimate = link(gl, glsl, &defines, FULLSCREEN_VERT, AO_FRAG, "ambient occlusion");
+            let blur = link(gl, glsl, &defines, FULLSCREEN_VERT, AO_BLUR_FRAG, "ambient occlusion's blur");
+            match (estimate, blur) {
+                (Ok(estimate), Ok(blur)) => Some(Ao { estimate, blur, target: None }),
+                (estimate, blur) => {
+                    for program in [&estimate, &blur].into_iter().flatten() {
+                        // SAFETY: see `GlScreen`.
+                        unsafe { gl.delete_program(*program) };
+                    }
+                    let problem = estimate.err().or(blur.err()).unwrap_or_default();
+                    eprintln!("[VR] The ambient occlusion is left out: {}", problem);
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let anisotropy = gl
             .supported_extensions()
             .iter()
@@ -329,6 +432,7 @@ impl Gpu {
             shadows: None,
             grid,
             gi: None,
+            ao,
             timing: std::env::var_os("RUST_DOS_VR_TIMING").and_then(|_| Timing::new(gl)),
             glow: 1.0,
             empty,
@@ -586,6 +690,80 @@ impl Gpu {
             gl.active_texture(glow::TEXTURE2);
             gl.bind_texture(glow::TEXTURE_2D, screen);
         }
+    }
+
+    /// The ambient occlusion of `view`, `size` big, at half that: None
+    /// without it.
+    fn draw_ao(&mut self, gl: &glow::Context, scene: &Scene, view: &View, size: (u32, u32)) -> Option<glow::Texture> {
+        let half = (((size.0 / 2).max(1)) as i32, ((size.1 / 2).max(1)) as i32);
+        let ao = self.ao.as_mut()?;
+        if ao.target.as_ref().is_some_and(|t| t.size != half) {
+            ao.target.take().expect("the target").delete(gl);
+        }
+        if ao.target.is_none() {
+            match AoTarget::new(gl, half) {
+                Ok(target) => ao.target = Some(target),
+                Err(e) => {
+                    eprintln!("[VR] The ambient occlusion is left out: {}", e);
+                    self.ao = None;
+                    return None;
+                }
+            }
+        }
+        let (estimate, blur) = (ao.estimate, ao.blur);
+        let target = ao.target.as_ref().expect("the target");
+        let (depth, depth_framebuffer, pictures, framebuffers) = (target.depth, target.depth_framebuffer, target.pictures, target.framebuffers);
+        let (w, h) = half;
+        // SAFETY: see `GlScreen`.
+        unsafe {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(depth_framebuffer));
+            gl.viewport(0, 0, w, h);
+            gl.disable(glow::SCISSOR_TEST);
+            gl.disable(glow::BLEND);
+            gl.disable(glow::FRAMEBUFFER_SRGB);
+            gl.enable(glow::DEPTH_TEST);
+            gl.depth_func(glow::LESS);
+            gl.depth_mask(true);
+            gl.clear_depth_f32(1.0);
+            gl.clear(glow::DEPTH_BUFFER_BIT);
+            self.draw_depth(gl, scene, &view.view_projection());
+            gl.disable(glow::DEPTH_TEST);
+            gl.disable(glow::CULL_FACE);
+            gl.bind_vertex_array(Some(self.empty));
+            gl.active_texture(glow::TEXTURE1);
+            gl.bind_texture(glow::TEXTURE_2D, Some(depth));
+            let inverse = view.projection.inverse().to_cols_array();
+
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffers[0]));
+            gl.use_program(Some(estimate));
+            let u = |name: &str| uniform(gl, estimate, name);
+            gl.uniform_1_i32(u("u_depth").as_ref(), 1);
+            gl.uniform_matrix_4_f32_slice(u("u_projection").as_ref(), false, &view.projection.to_cols_array());
+            gl.uniform_matrix_4_f32_slice(u("u_inverse_projection").as_ref(), false, &inverse);
+            gl.uniform_2_f32_slice(u("u_size").as_ref(), &[w as f32, h as f32]);
+            gl.uniform_1_f32(u("u_radius").as_ref(), AO_RADIUS);
+            gl.uniform_1_f32(u("u_strength").as_ref(), AO_STRENGTH);
+            gl.draw_arrays(glow::TRIANGLES, 0, 3);
+
+            // Across into the second picture, then down back into the first.
+            gl.use_program(Some(blur));
+            let u = |name: &str| uniform(gl, blur, name);
+            gl.uniform_1_i32(u("u_ao").as_ref(), 0);
+            gl.uniform_1_i32(u("u_depth").as_ref(), 1);
+            gl.uniform_matrix_4_f32_slice(u("u_inverse_projection").as_ref(), false, &inverse);
+            gl.uniform_2_f32_slice(u("u_size").as_ref(), &[w as f32, h as f32]);
+            gl.active_texture(glow::TEXTURE0);
+            for (from, to, step) in [(0, 1, [1.0 / w as f32, 0.0]), (1, 0, [0.0, 1.0 / h as f32])] {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffers[to]));
+                gl.bind_texture(glow::TEXTURE_2D, Some(pictures[from]));
+                gl.uniform_2_f32_slice(u("u_step").as_ref(), &step);
+                gl.draw_arrays(glow::TRIANGLES, 0, 3);
+            }
+            gl.active_texture(glow::TEXTURE1);
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            restore(gl);
+        }
+        Some(pictures[0])
     }
 
     /// Draw the depth of the opaque meshes as `view_projection` sees
@@ -950,6 +1128,7 @@ impl Gpu {
             timing.begin(gl);
         }
         self.update_gi(gl, scene);
+        let ao = self.draw_ao(gl, scene, view, format.size);
         let (lit, sky, empty) = (self.lit, self.sky, self.empty);
         let target = self.target(gl, format)?;
         let (framebuffer, resolve) = (target.framebuffer, target.resolve);
@@ -1002,6 +1181,12 @@ impl Gpu {
             self.bind_lighting(gl, lit, scene, screen, format.srgb);
             gl.uniform_3_f32_slice(u(lit, "u_eye").as_ref(), &view.eye().to_array());
             gl.uniform_1_f32(u(lit, "u_fog").as_ref(), if scene.sky { 0.02 } else { 0.0 });
+            let has_ao = u(lit, "u_has_ao");
+            gl.uniform_1_i32(has_ao.as_ref(), ao.is_some() as i32);
+            gl.uniform_1_i32(u(lit, "u_ao").as_ref(), 6);
+            gl.uniform_2_f32_slice(u(lit, "u_view_size").as_ref(), &[w as f32, h as f32]);
+            gl.active_texture(glow::TEXTURE6);
+            gl.bind_texture(glow::TEXTURE_2D, ao);
 
             let locations = MaterialLocations::of(gl, lit);
             let MaterialLocations { shading, base_color, has_base, emissive, has_emissive, cutoff } = &locations;
@@ -1010,6 +1195,7 @@ impl Gpu {
                 if blended {
                     gl.enable(glow::BLEND);
                     gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+                    gl.uniform_1_i32(has_ao.as_ref(), 0);
                 }
                 for mesh in &self.meshes {
                     let material = &scene.materials[mesh.material];
@@ -1115,6 +1301,8 @@ fn restore(gl: &glow::Context) {
         gl.depth_mask(true);
         gl.bind_vertex_array(None);
         gl.use_program(None);
+        gl.active_texture(glow::TEXTURE6);
+        gl.bind_texture(glow::TEXTURE_2D, None);
         gl.active_texture(glow::TEXTURE5);
         gl.bind_texture(glow::TEXTURE_3D, None);
         gl.active_texture(glow::TEXTURE4);

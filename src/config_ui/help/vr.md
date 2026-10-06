@@ -47,10 +47,11 @@ How the DOS picture fills the scene's screen:
 How much of the scene's lighting is worked out:
 
 - **high**: soft shadows, the screen lighting the room in twelve patches
-  of the picture's colours, and the light bouncing around the room.
+  of the picture's colours, the light bouncing around the room, and
+  corners and gaps darkened (ambient occlusion).
 - **medium**: the same with four patches and shadows a little less soft.
 - **low**: hard shadows, the screen's light in one colour, and no
-  bounced light, for slow graphics chips.
+  bounced light or ambient occlusion, for slow graphics chips.
 
 The bounced light is worked out when the scene loads, the first time in
 a second or so, and kept in `vr-cache` in Rust-DOS's folder for the next.

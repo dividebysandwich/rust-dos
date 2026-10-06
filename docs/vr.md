@@ -236,6 +236,12 @@ Textures must be **PNG or JPEG**, which is what Blender exports.
   is closed where it should be dark: light comes in through gaps in the
   walls. The scene custom property `rustdos_gi` set to `0` turns it off,
   for scenes with their lighting baked in.
+- **Ambient occlusion:** corners, the gap under a monitor, the floor around
+  a chair's legs get less of the light from all around (the room's fill
+  and the bounced light), as they do in a real room. It is worked out from
+  what each view sees, so it needs nothing from the scene. The scene
+  custom property `rustdos_ao` set to `0` turns it off, for scenes with it
+  baked into their textures.
 - Fake light (an emissive "sunbeam" patch on a wall) isn't needed any more
   for light the scene's lights already give; it would double it.
 

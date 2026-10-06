@@ -493,7 +493,8 @@
 #spatial_audio=true
 # How much of the scene's lighting is worked out: high (soft shadows, the
 # screen's light in patches of the picture's colours, light bouncing around
-# the room), medium, or low (hard shadows, no bounced light).
+# the room, darker corners and gaps), medium, or low (hard shadows, no
+# bounced light, no darkened corners).
 #quality=high
 # How brightly the screen lights the room, in percent of what the scene
 # says (0 to 400).

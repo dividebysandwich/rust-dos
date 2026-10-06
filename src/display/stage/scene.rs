@@ -277,6 +277,9 @@ pub struct Scene {
     /// bouncing around the room is worked out (`rustdos_gi`).
     pub shadows: bool,
     pub gi: bool,
+    /// Whether nearby things darken the light from all around
+    /// (`rustdos_ao`).
+    pub ao: bool,
     /// How brightly the screen lights the room, 1 as bright as the picture
     /// is (`rustdos_screen_glow`).
     pub screen_glow: f32,
@@ -399,6 +402,7 @@ impl Scene {
             speakers: [Vec3::ZERO; 2],
             shadows: true,
             gi: true,
+            ao: true,
             screen_glow: SCREEN_GLOW,
             source: hash(b"the test room"),
             probes: std::sync::OnceLock::new(),
@@ -537,6 +541,7 @@ impl Scene {
             speakers: [Vec3::ZERO; 2],
             shadows: extra(scene.extras(), "rustdos_shadows").is_none_or(truthy),
             gi: extra(scene.extras(), "rustdos_gi").is_none_or(truthy),
+            ao: extra(scene.extras(), "rustdos_ao").is_none_or(truthy),
             screen_glow: extra(scene.extras(), "rustdos_screen_glow")
                 .and_then(|v| v.as_f64())
                 .map_or(SCREEN_GLOW, |g| g.max(0.0) as f32),

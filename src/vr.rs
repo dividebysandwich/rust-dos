@@ -183,11 +183,14 @@ impl ScreenFit {
 /// bouncing around the scene.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum VrQuality {
-    /// Hard shadows, the screen's light in one colour, no bounced light.
+    /// Hard shadows, the screen's light in one colour, no bounced light or
+    /// ambient occlusion.
     Low,
-    /// Soft shadows, the screen's light in four patches, bounced light.
+    /// Soft shadows, the screen's light in four patches, bounced light,
+    /// ambient occlusion.
     Medium,
-    /// Softer shadows, the screen's light in twelve patches, bounced light.
+    /// Softer shadows, the screen's light in twelve patches, bounced
+    /// light, finer ambient occlusion.
     #[default]
     High,
 }

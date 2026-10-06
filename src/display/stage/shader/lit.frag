@@ -80,6 +80,13 @@ uniform int u_glow_shadow;
 // its alpha how much the probes there count, the colours times it. The
 // first probe's place, how far apart they are, and how many.
 uniform int u_has_gi;
+
+// The ambient occlusion over the view (ao.frag), for the light from all
+// around: the ambient's and the bounced light. Not for surfaces seen
+// through, which aren't in it.
+uniform sampler2D u_ao;
+uniform int u_has_ao;
+uniform vec2 u_view_size;
 uniform sampler3D u_gi;
 uniform vec3 u_gi_low;
 uniform vec3 u_gi_step;
@@ -306,6 +313,11 @@ void main() {
             vec4 bounced = gi_light(v_world, n);
             light = mix(light, bounced.rgb, bounced.a);
         }
+#ifndef BAKE
+        if (u_has_ao == 1) {
+            light *= texture(u_ao, gl_FragCoord.xy / u_view_size).r;
+        }
+#endif
         for (int i = 0; i < 8; i++) {
             if (i >= u_lights) {
                 break;

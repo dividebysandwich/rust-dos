@@ -671,9 +671,10 @@ The picture on a screen in a 3D scene (see [3D scene and VR](#3d-scene-and-vr)).
   screen).
 * `quality`: how much of the scene's lighting is worked out: `high` (the
   default: soft shadows, the screen's light in twelve patches of the
-  picture's colours, and light bouncing around the room), `medium` (four
-  patches, a little less soft) or `low` (hard shadows, the screen's light in
-  one colour, no bounced light), for slow graphics chips. It takes effect at
+  picture's colours, light bouncing around the room, and ambient occlusion
+  darkening corners and gaps), `medium` (four patches, a little less soft)
+  or `low` (hard shadows, the screen's light in one colour, no bounced light
+  or ambient occlusion), for slow graphics chips. It takes effect at
   the next start.
 * `screen_glow`: how brightly the screen lights the room, in percent of what
   the scene says, 0 to 400 (the default 100). 0 turns its light off.
@@ -1758,7 +1759,8 @@ the room in their colours, a bright picture lights the keyboard and the
 desk, a dark one leaves them dark, and things in front of the screen cast
 soft shadows. 3dfx pictures drawn with OpenGL go on it too.
 
-The scene's lights and the screen cast shadows, and the light bounces
+The scene's lights and the screen cast shadows, corners and gaps get less
+of the light from all around (ambient occlusion), and the light bounces
 around the room once or twice, the way a sunlit patch on a wall lights
 the rest of it. The bounced light is worked out when the scene loads, the
 first time in a second or so, and kept in `vr-cache` in the configuration
