@@ -20,7 +20,7 @@ const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 1;
 const AWE_VERSION: u16 = 1;
 const VIRGE_VERSION: u16 = 1;
-const VERITE_VERSION: u16 = 1;
+const VERITE_VERSION: u16 = 2;
 const ET4000_VERSION: u16 = 1;
 const SHARED_VERSION: u16 = 1;
 

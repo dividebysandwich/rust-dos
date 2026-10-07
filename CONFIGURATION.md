@@ -1570,12 +1570,25 @@ and shows the buffer the game flips to. Its VESA modes are the Super VGA's.
   executable renamed so the 2D one stays) runs with `cpu=pentium` and
   `memsize=32`.
 
+* **vQuake** (Rendition's port of Quake; 1.07 beta 5 with its `spd3d.uc`,
+  or 1.08 beta 1, copied into the Quake folder) runs with `dpmi=false`,
+  `cpu=pentium` and `memsize=32`, and `-nocdaudio` unless the CD is
+  mounted. It brings its own DPMI host, CWSDPMI, which it needs: its
+  copy of Rendition's library finds the physical addresses for DMA by
+  walking the processor's page tables, which the built-in host doesn't
+  use.
+
 The commands are RRedline's (its Programming Guide documents them for
-programmers); their encoding in the FIFO comes from DOSBox's Rendition
-fork (dosbox-staging-rendition) and from what the game sends. RReady,
-the wrapper that fork passes them to, isn't used. Commands the game doesn't
-send aren't there yet: Z buffering, fog, bilinear filtering and textures
-with alpha among them.
+programmers); their encoding in the FIFO comes from Rendition's library
+itself, which Tomb Raider's Vérité executable links whole, from DOSBox's
+Rendition fork (dosbox-staging-rendition), and from what the games send.
+RReady, the wrapper that fork passes them to, isn't used. Rust-DOS draws
+Z-buffered, bilinear-filtered textures in all of RRedline's formats
+(332, 8-bit intensity and alpha, 565, 4444, 1555, 8888 and 4-bit
+paletted), with their alpha blended, and vQuake's own commands: Quake's
+spans with perspective, its 8-bit pictures through a colour table, and
+particles. Fog follows the Programming Guide, but its commands are
+guessed: no game on hand uses it.
 
 ## PowerVR PCX2
 

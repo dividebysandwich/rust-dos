@@ -139,3 +139,108 @@ fn state_round_trips() {
     assert!(other.bus.verite.running);
     assert_eq!(other.bus.verite.draw.dst_base, 0x1234);
 }
+
+#[test]
+fn the_z_buffer_hides_what_is_behind() {
+    let mut cpu = started();
+    let (base, z) = (0x11008, 0x20_0000);
+    // The Z buffer installed and cleared to the farthest; less passes.
+    fifo(&mut cpu, &[0x000D, z, 1280, 1280, 32, 0xFFFF_FFFF]);
+    fifo(&mut cpu, &[0x1004, base, 0x143B, 0x51, 0x1231, 0, 0x1010, z, 0x183C, 0x51, 0x1643, 1, 0x1844, 1]);
+    // A near red triangle and a far blue one over it, as KXYZ.
+    let triangle = |k: u32, depth: u32| {
+        let mut words = vec![0x0012_0018];
+        for (x, y) in [(0, 0), (32, 0), (0, 32)] {
+            words.extend_from_slice(&[k, x << 16, y << 16, depth << 16]);
+        }
+        words
+    };
+    fifo(&mut cpu, &triangle(0xFF0000, 100));
+    fifo(&mut cpu, &triangle(0x0000FF, 200));
+    assert_eq!(pixel(&cpu, base, 4, 4), 0xF800, "the far one is hidden");
+    assert_eq!(pixel(&cpu, z, 4, 4), 100, "the near one's depth");
+    fifo(&mut cpu, &triangle(0x0000FF, 50));
+    assert_eq!(pixel(&cpu, base, 4, 4), 0x001F, "a nearer one is drawn");
+}
+
+#[test]
+fn four_bit_textures_look_up_their_palette() {
+    let mut cpu = started();
+    let (base, texture) = (0x11008, 0x20_0000);
+    // Texel 5 everywhere; entry 5 is green.
+    fifo(&mut cpu, &[0x000D, texture, 128, 128, 16, 0x5555_5555]);
+    let mut palette = [0u32; 8];
+    palette[2] = 0x07E0; // entries 4 and 5: the low half is the odd one
+    let mut words = vec![0x1004, base, 0x143B, 0x51, 0x1231, 1, 0x4000, texture, 0x00, 0x000F_000F, 0x10000, 0x10000];
+    words.extend_from_slice(&[0x1030, 8, 0x7020]);
+    words.extend_from_slice(&palette);
+    words.extend_from_slice(&[0x0002_0018]);
+    for (x, y) in [(0, 0), (16, 0), (0, 16)] {
+        words.extend_from_slice(&[x << 16, y << 16, x << 16, y << 16]);
+    }
+    fifo(&mut cpu, &words);
+    assert_eq!(pixel(&cpu, base, 2, 2), 0x07E0);
+}
+
+/// A table or texture of 16-bit entries put into memory with MEM_WRITE,
+/// two to a word with the first in the high half (vQuake's order).
+fn mem_write(cpu: &mut Cpu, at: u32, entries: &[u16]) {
+    let mut words = vec![0x0009, at, 2 * entries.len() as u32];
+    words.extend(entries.chunks(2).map(|p| (p[0] as u32) << 16 | p.get(1).copied().unwrap_or(0) as u32));
+    fifo(cpu, &words);
+}
+
+#[test]
+fn mem_write_puts_the_high_half_first() {
+    let mut cpu = started();
+    mem_write(&mut cpu, 0x20_0000, &[0x1111, 0x2222, 0x3333]);
+    assert_eq!(pixel(&cpu, 0x20_0000, 0, 0), 0x1111);
+    assert_eq!(pixel(&cpu, 0x20_0000, 1, 0), 0x2222);
+    assert_eq!(pixel(&cpu, 0x20_0000, 2, 0), 0x3333);
+}
+
+#[test]
+fn lookup_turns_indices_into_colours() {
+    let mut cpu = started();
+    let (base, table) = (0x11008, 0x20_0000);
+    mem_write(&mut cpu, table, &[0x0000, 0xF800, 0x07E0, 0x001F]);
+    // The table as a 256x1 texture, then 3x2 indices at 4, 5, each line
+    // padded to a word.
+    fifo(&mut cpu, &[0x1004, base, 0x143B, 0x51, 0x4000, table, 0x01, 0x0000_00FF, 0x0100_0000, 0x10000]);
+    fifo(&mut cpu, &[0x002A, 4 << 16 | 5, 3 << 16 | 2, 0xAA03_0201, 0xAA02_0103]);
+    assert_eq!(pixel(&cpu, base, 4, 5), 0xF800);
+    assert_eq!(pixel(&cpu, base, 5, 5), 0x07E0);
+    assert_eq!(pixel(&cpu, base, 6, 5), 0x001F);
+    assert_eq!(pixel(&cpu, base, 4, 6), 0x001F, "the second line, after the padding");
+    assert_eq!(pixel(&cpu, base, 7, 5), 0, "nothing past the width");
+}
+
+#[test]
+fn spans_are_textured_with_perspective_and_keep_their_depth() {
+    let mut cpu = started();
+    let (base, texture, z) = (0x11008, 0x20_0000, 0x30_0000);
+    // Red then blue, 2x1, U times 2; depths written.
+    mem_write(&mut cpu, texture, &[0xF800, 0x001F]);
+    fifo(&mut cpu, &[0x1004, base, 0x143B, 0x51, 0x1231, 1, 0x1010, z, 0x183C, 0x51, 0x1643, 0, 0x1844, 1]);
+    fifo(&mut cpu, &[0x4000, texture, 0x20, 0x0000_0001, 0x20000, 0x10000]);
+    // S/Z a quarter more a pixel, 1/Z 1: U 0, 0.5, 1, 1.5 over 4 pixels.
+    fifo(&mut cpu, &[0x0027, 0x4000, 0, 0, 0, 10 << 16 | 3, 4, 0, 0, 0x10000, 100 << 16, 0x8000_0000]);
+    let row: Vec<u16> = (10..14).map(|x| pixel(&cpu, base, x, 3)).collect();
+    assert_eq!(row, [0xF800, 0xF800, 0x001F, 0x001F]);
+    assert_eq!(pixel(&cpu, base, 14, 3), 0, "4 pixels");
+    assert_eq!(pixel(&cpu, z, 11, 3), 100);
+}
+
+#[test]
+fn particles_are_z_buffered_squares() {
+    let mut cpu = started();
+    let (base, z) = (0x11008, 0x30_0000);
+    // Quake's depths: nearer is greater, and mode 6 draws what is as near
+    // or nearer.
+    fifo(&mut cpu, &[0x000D, z, 1280, 1280, 32, 0x0032_0032]);
+    fifo(&mut cpu, &[0x1004, base, 0x143B, 0x51, 0x1010, z, 0x183C, 0x51, 0x1643, 6, 0x1844, 0]);
+    fifo(&mut cpu, &[0x0025, 2, 2 << 16 | 2, 2 << 16 | 2, 60 << 16, 0x00FF_0000, 8 << 16 | 2, 2 << 16 | 2, 40 << 16, 0x00FF_0000]);
+    assert_eq!(pixel(&cpu, base, 3, 3), 0xF800, "nearer than 50");
+    assert_eq!(pixel(&cpu, base, 4, 3), 0, "2 wide");
+    assert_eq!(pixel(&cpu, base, 8, 2), 0, "farther than 50");
+}

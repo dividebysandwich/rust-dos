@@ -175,6 +175,28 @@ impl Verite {
                     Some(&count) => header + item * count as usize,
                     None => break,
                 },
+                cmd::Length::Rect => match (self.fifo.get(at + 3), self.fifo.get(at + 4)) {
+                    (Some(&bytes), Some(&lines)) => cmd::rect_words(bytes, lines),
+                    _ => break,
+                },
+                cmd::Length::Spans => {
+                    let mut end = at + 5;
+                    while self.fifo.get(end).is_some_and(|&w| w & 0x8000_0000 == 0) {
+                        end += 6;
+                    }
+                    if end >= self.fifo.len() {
+                        break;
+                    }
+                    end + 1 - at
+                }
+                cmd::Length::Write => match self.fifo.get(at + 2) {
+                    Some(&bytes) => 3 + bytes.div_ceil(4) as usize,
+                    None => break,
+                },
+                cmd::Length::Bytes => match self.fifo.get(at + 2) {
+                    Some(&size) => cmd::bytes_words(size),
+                    None => break,
+                },
                 cmd::Length::Unknown => {
                     // Lost: skip the word, as the stream can't be followed.
                     self.trace(|| format!("command {:08X} not known", word));
@@ -213,8 +235,8 @@ impl Verite {
             0x4000 => {
                 d.tex_base = words[1];
                 d.tex_stride = draw::stride(words[2]);
-                d.tex_mask_u = words[3] & 0xFFFF;
-                d.tex_mask_v = words[3] >> 16;
+                d.tex_last_u = words[3] & 0xFFFF;
+                d.tex_last_v = words[3] >> 16;
                 d.scale_u = words[4];
                 d.scale_v = words[5];
             }
@@ -232,7 +254,31 @@ impl Verite {
             0x1241 => d.blend_src = arg,
             0x1442 => d.blend_dst = arg,
             0x2055 => d.alpha = arg >> 16 & 0xFF,
+            // The default red, green and blue, 16.16 of 0-255.
+            0x2054 => d.fg = d.fg & !0xFF_0000 | (arg >> 16 & 0xFF) << 16,
+            0x2056 => d.fg = d.fg & !0xFF00 | (arg >> 16 & 0xFF) << 8,
+            0x2058 => d.fg = d.fg & !0xFF | arg >> 16 & 0xFF,
             0x3013 => d.fg = arg,
+            0x1006 => d.dst_format = arg,
+            0x1030 => d.src_format = arg,
+            0x16B7 => d.src_bgr = arg != 0,
+            // The 4-bit formats' 16 entries, two a word, the first high.
+            0x7020 => {
+                d.palette = words[1..9].iter().flat_map(|&w| [w >> 16, w & 0xFFFF]).collect();
+            }
+            0x13B2 => d.filter = arg != 0,
+            0x602A => d.s_offset = arg,
+            0x602B => d.t_offset = arg,
+            0x1CCC => d.dst_read = arg == 0,
+            0x1015 => d.dst_colour = arg,
+            0x1010 => d.z_base = arg,
+            0x183C => d.z_stride = draw::stride(arg),
+            0x1643 => d.z_mode = arg & 7,
+            0x1844 => d.z_write = arg != 0,
+            0x205A => d.z = arg,
+            0xAA47 => d.fog = arg != 0,
+            0x1016 => d.fog_colour = arg,
+            0x205B => d.fog_default = arg,
             cmd::op::TRIANGLE | cmd::op::TRIFAN | cmd::op::TRISTRIP => {
                 if let Some(fields) = cmd::vertex_fields(vtype) {
                     let size = fields.len();
@@ -262,14 +308,46 @@ impl Verite {
                 d.bitblt(vram, words[1], words[2], words[3]);
                 fx.drawn = true;
             }
-            // Words into memory: address, count, the words.
+            // Bytes into memory: address, how many, the bytes. The RISC
+            // stores a word's high half first as the host sees 16-bit
+            // memory (vQuake sends its 16-bit colour tables half-swapped
+            // by DMA, mode 3, for them to land in order).
             cmd::op::MEM_WRITE => {
-                for (k, word) in words[3..].iter().enumerate() {
-                    let at = (words[1] as usize + 4 * k) % vram.len();
-                    if at + 4 <= vram.len() {
-                        vram[at..at + 4].copy_from_slice(&word.to_le_bytes());
+                let bytes = words[3..].iter().flat_map(|w| w.rotate_left(16).to_le_bytes()).take(words[2] as usize);
+                for (k, byte) in bytes.enumerate() {
+                    let at = (words[1] as usize + k) % vram.len();
+                    vram[at] = byte;
+                }
+                fx.drawn = true;
+            }
+            // A block into memory: base, bytes a line, bytes and lines,
+            // then each line's bytes, padded to words.
+            cmd::op::MEM_WRITE_RECT => {
+                let (base, stride, bytes, lines) = (words[1], words[2], words[3] as usize, words[4]);
+                let per_line = bytes.div_ceil(4);
+                for line in 0..lines as usize {
+                    let data = words[5 + line * per_line..][..per_line].iter().flat_map(|w| w.to_le_bytes());
+                    let start = base.wrapping_add(line as u32 * stride) as usize;
+                    for (i, byte) in data.take(bytes).enumerate() {
+                        let at = (start + i) % vram.len();
+                        vram[at] = byte;
                     }
                 }
+                fx.drawn = true;
+            }
+            cmd::op::PARTICLES => {
+                for particle in words[2..].as_chunks::<4>().0 {
+                    d.particle(vram, particle);
+                }
+                fx.drawn = true;
+            }
+            cmd::op::QSPAN => {
+                d.spans(vram, &words[1..5], &words[5..words.len() - 1]);
+                fx.drawn = true;
+            }
+            cmd::op::LOOKUP => {
+                let bytes: Vec<u8> = words[3..].iter().flat_map(|w| w.to_le_bytes()).collect();
+                d.lookup(vram, words[1], words[2], &bytes);
                 fx.drawn = true;
             }
             cmd::op::DISPLAY => fx.display = Some(words[1]),
@@ -286,7 +364,12 @@ impl Verite {
                 }
                 fx.drawn = true;
             }
-            _ => {}
+            // What isn't carried out yet, once, for the trace.
+            _ => {
+                if self.seen[&(opcode, vtype)] == 1 {
+                    self.trace(|| format!("command {:08X} not carried out: {:08X?}", words[0], &words[1..]));
+                }
+            }
         }
     }
 
