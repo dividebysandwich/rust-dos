@@ -4,6 +4,8 @@
 //! there knows them (BUS_00&DEV_00&FUNC_00 and BUS_00&DEV_01&FUNC_00):
 //!
 //! * device 0: the 3dfx Voodoo Graphics (`voodoo`), when there is one;
+//! * device 1 instead: the Rendition Vérité V1000 of `svga_verite`, BAR0
+//!   its memory (the VESA linear frame buffer), BAR1 its ports;
 //! * device 2: the PowerVR PCX2 (`powervr`), when there is one;
 //! * device 1: the S3 Trio64 of `machine=svga_s3` (PCI\VEN_5333&DEV_8811),
 //!   or the ViRGE (DEV_5631) or ViRGE/VX (DEV_883D) of `svga_s3virge` and
@@ -44,6 +46,7 @@ crate::state_fields!(Pci { address, command });
 enum Target {
     Voodoo,
     S3,
+    Verite,
     PowerVr,
 }
 
@@ -51,7 +54,7 @@ impl Bus {
     /// Whether the machine has a PCI bus: an S3, a 3dfx or a PowerVR
     /// card on it.
     pub fn pci_present(&self) -> bool {
-        self.s3() || self.voodoo.is_some() || self.powervr.is_some()
+        self.s3() || self.verite() || self.voodoo.is_some() || self.powervr.is_some()
     }
 
     /// The card and register the address latch selects, if it is enabled
@@ -65,6 +68,7 @@ impl Bus {
         let target = match device {
             VOODOO_DEVICE if self.voodoo.is_some() => Target::Voodoo,
             S3_DEVICE if self.s3() => Target::S3,
+            S3_DEVICE if self.verite() => Target::Verite,
             POWERVR_DEVICE if self.powervr.is_some() => Target::PowerVr,
             _ => return None,
         };
@@ -106,6 +110,7 @@ impl Bus {
             Some((Target::S3, reg)) => self.s3_config(reg + (port & 3) as u8),
             Some((Target::Voodoo, reg)) => self.voodoo.as_ref().map_or(0xFF, |v| v.config_read(reg + (port & 3) as u8)),
             Some((Target::PowerVr, reg)) => self.powervr.as_ref().map_or(0xFF, |p| p.config_read(reg + (port & 3) as u8)),
+            Some((Target::Verite, reg)) => self.verite.config_read(reg + (port & 3) as u8, self.vbe.lfb_base.unwrap_or(0)),
             None => 0xFF,
         }
     }
@@ -122,6 +127,10 @@ impl Bus {
             {
                 self.voodoo_moved();
             }
+            return;
+        }
+        if target == Target::Verite {
+            self.verite.config_write(reg, value);
             return;
         }
         if target == Target::PowerVr {

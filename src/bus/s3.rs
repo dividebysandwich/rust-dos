@@ -281,6 +281,12 @@ impl Bus {
             self.engine_write(port, value, len);
             return;
         }
+        // The Vérité's FIFO takes a word at once.
+        if let Some(reg) = self.verite_port(port) {
+            self.log_port(port, value, len, true);
+            self.verite_write(reg, value, len);
+            return;
+        }
         // The AWE32's EMU8000 is accessed a word at a time.
         if self.awe_claims(port) {
             self.log_port(port, value, len, true);
@@ -308,6 +314,11 @@ impl Bus {
         }
         if self.s3() && is_engine_port(port) {
             let value = self.engine_read(port, len);
+            self.log_port(port, value, len, false);
+            return value;
+        }
+        if let Some(reg) = self.verite_port(port) {
+            let value = self.verite_read(reg, len);
             self.log_port(port, value, len, false);
             return value;
         }

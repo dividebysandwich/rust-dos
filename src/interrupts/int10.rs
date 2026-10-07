@@ -1494,6 +1494,7 @@ pub fn handle(cpu: &mut Cpu) {
 
         // AH = 4Fh: VESA BIOS Extensions
         0x4F => super::vbe::handle(cpu),
+        0x15 if cpu.bus.verite() => crate::bus::verite_bios(cpu),
 
         // AH = 0Ch: Write Graphics Pixel, in any standard graphics mode
         // AL = Color Value (bit 7: XOR it with the pixel's)
@@ -1522,9 +1523,17 @@ pub fn handle(cpu: &mut Cpu) {
             // Not sure what this is used for
         }
 
-        _ => cpu
-            .bus
-            .log_string(&format!("[BIOS] Unhandled INT 10h AH={:02X}", cpu.get_ah())),
+        _ => {
+            let line = format!(
+                "[BIOS] Unhandled INT 10h AH={:02X} (AX={:04X} BX={:04X} CX={:04X} DX={:04X})",
+                cpu.get_ah(),
+                cpu.ax(),
+                cpu.bx(),
+                cpu.cx(),
+                cpu.dx()
+            );
+            cpu.bus.log_string(&line)
+        }
     }
 }
 

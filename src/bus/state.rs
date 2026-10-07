@@ -20,6 +20,7 @@ const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 1;
 const AWE_VERSION: u16 = 1;
 const VIRGE_VERSION: u16 = 1;
+const VERITE_VERSION: u16 = 1;
 const ET4000_VERSION: u16 = 1;
 const SHARED_VERSION: u16 = 1;
 
@@ -88,6 +89,7 @@ impl Bus {
             vbe,
             s3_engine,
             virge,
+            verite,
             retraces,
             last_flip,
             gate_array_shadow,
@@ -188,6 +190,10 @@ impl Bus {
         // did.
         if vga.adapter.is_virge() {
             w.section(b"VIRG", VIRGE_VERSION, |w| virge.save(w));
+        }
+        // The Vérité's registers and FIFO, only on one, likewise.
+        if vga.adapter.is_verite() {
+            w.section(b"VRTE", VERITE_VERSION, |w| verite.save(w));
         }
         // The ET4000's registers, only on one, likewise.
         if vga.adapter.is_et4000() {
@@ -320,6 +326,7 @@ impl Bus {
             vbe,
             s3_engine,
             virge,
+            verite,
             retraces,
             last_flip,
             gate_array_shadow,
@@ -415,6 +422,10 @@ impl Bus {
         *virge = Default::default();
         if r.next_is(b"VIRG") {
             virge.load(&mut r.section(b"VIRG", VIRGE_VERSION)?)?;
+        }
+        verite.reset();
+        if r.next_is(b"VRTE") {
+            verite.load(&mut r.section(b"VRTE", VERITE_VERSION)?)?;
         }
         vga.et4000 = Default::default();
         if r.next_is(b"ET4K") {

@@ -224,6 +224,12 @@ pub fn install(bus: &mut Bus, setup: VideoSetup) {
     // the ROM for.
     let tseng: &[u8; 32] = if setup.adapter.is_et4000() { b"Tseng Laboratories, Inc. ET4000\0" } else { &[0; 32] };
     bus.write_rom(0xC0050, tseng);
+    // The Vérité's board description, for its BIOS's AX=158Dh.
+    if setup.adapter.is_verite() {
+        let (segment, offset) = crate::verite::BOARD_DATA;
+        let data = crate::verite::board_data(super::vbe::VRAM_SIZE as u32);
+        bus.write_rom(((segment as usize) << 4) + offset as usize, &data);
+    }
     bus.vbe.lfb_base = if s3 || setup.adapter.is_et4000() { None } else { Some(super::vbe::LFB_BASE as u32) };
     install_fonts(bus);
 }

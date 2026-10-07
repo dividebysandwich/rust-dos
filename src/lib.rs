@@ -98,6 +98,7 @@ pub mod sound;
 pub mod stats;
 pub mod time_commands;
 pub mod timer;
+pub mod verite;
 pub mod vhd;
 pub mod video;
 pub mod voodoo;

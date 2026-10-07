@@ -14,7 +14,10 @@ mod printer;
 mod serial;
 mod state;
 mod powervr;
+mod verite;
 mod voodoo;
+
+pub use verite::bios as verite_bios;
 
 pub trait Device {
     /// Return the set of I/O ports this device owns.
@@ -214,6 +217,8 @@ pub struct Bus {
     /// The S3 ViRGE's own 2D and 3D engines and streams processor, on
     /// `Adapter::S3Virge` and `S3VirgeVx`.
     pub virge: crate::video::s3::virge::Virge,
+    /// The Rendition Vérité's registers and FIFO, on `Adapter::Verite`.
+    pub verite: crate::verite::Verite,
     /// A memory-mapped read of Input Status 1 (a ViRGE's 83DAh) happened,
     /// whose reset of the attribute flip-flop is done at the next port
     /// access, as memory reads can't change the machine.
@@ -429,6 +434,7 @@ impl Bus {
             vbe: crate::video::vbe::Vbe::new(),
             s3_engine: crate::video::s3::engine::Engine::new(),
             virge: Default::default(),
+            verite: Default::default(),
             attribute_reset: Default::default(),
             pci: crate::pci::Pci::default(),
             voodoo: None,
@@ -2441,6 +2447,10 @@ impl Bus {
         if self.attribute_reset.take() {
             self.vga.attribute_flip_flop = false;
         }
+        if let Some(reg) = self.verite_port(port) {
+            self.verite_write(reg, value as u32, 1);
+            return;
+        }
         match port {
             // A booted system's IDE channels.
             p if self.ide_claims(p) => self.ide_write(p, value),
@@ -2785,6 +2795,9 @@ impl Bus {
     fn read_port(&mut self, port: u16) -> u8 {
         if self.attribute_reset.take() {
             self.vga.attribute_flip_flop = false;
+        }
+        if let Some(reg) = self.verite_port(port) {
+            return self.verite_read(reg, 1) as u8;
         }
         match port {
             p if self.ide_claims(p) => self.ide_read(p),
