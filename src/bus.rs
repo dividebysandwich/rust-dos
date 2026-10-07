@@ -13,6 +13,7 @@ mod net;
 mod printer;
 mod serial;
 mod state;
+mod powervr;
 mod voodoo;
 
 pub trait Device {
@@ -222,6 +223,10 @@ pub struct Bus {
     pub pci: crate::pci::Pci,
     /// The 3dfx Voodoo Graphics card, if there is one.
     pub voodoo: Option<crate::voodoo::Voodoo>,
+    /// The PowerVR card, if there is one.
+    pub powervr: Option<crate::powervr::PowerVr>,
+    /// The interrupt request the PowerVR card has up.
+    powervr_line: Option<u8>,
     /// The program waits for a swap the frame rate cap holds back
     /// (`exec::held`).
     pub hold: Option<Hold>,
@@ -427,6 +432,8 @@ impl Bus {
             attribute_reset: Default::default(),
             pci: crate::pci::Pci::default(),
             voodoo: None,
+            powervr: None,
+            powervr_line: None,
             hold: None,
             notices: Vec::new(),
             glide_hint: None,
@@ -552,6 +559,7 @@ impl Bus {
         self.fill_ram(0..0x500, 0);
         self.pic = crate::pic::Pic::new();
         self.reset_voodoo();
+        self.reset_powervr();
         self.detach_ide();
         self.disk.drop_boot_cds();
         self.cmos.set_hard_disks(&[]);
@@ -1289,6 +1297,9 @@ impl Bus {
         if let Some(offset) = self.vbe.lfb_offset(addr, 1) {
             return self.vbe.vram[offset];
         }
+        if let Some(at) = self.powervr_at(addr) {
+            return self.powervr_read(at, 1) as u8;
+        }
         if addr >= 0xFFFE_0000 {
             // The top 128 KB of the address space mirror the BIOS ROM area
             // (E0000h-FFFFFh), where a 386 fetches its first instruction
@@ -1453,6 +1464,9 @@ impl Bus {
         if self.voodoo_at(addr).is_some() {
             self.voodoo_write_8();
         }
+        if let Some(at) = self.powervr_at(addr) {
+            self.powervr_write(at, value as u32, 1);
+        }
         false
     }
 
@@ -1532,6 +1546,12 @@ impl Bus {
             self.voodoo_write_16(offset, value);
             return true;
         }
+        if addr & 3 != 3
+            && let Some(at) = self.powervr_at(addr)
+        {
+            self.powervr_write(at, value as u32, 2);
+            return false;
+        }
         // Low byte
         let d1 = self.write_8(addr, (value & 0xFF) as u8);
         // High byte
@@ -1562,6 +1582,11 @@ impl Bus {
         }
         if let Some(offset) = self.voodoo_at(addr) {
             return self.voodoo_read_16(offset);
+        }
+        if addr & 3 != 3
+            && let Some(at) = self.powervr_at(addr)
+        {
+            return self.powervr_read(at, 2) as u16;
         }
         let low = self.read_8(addr) as u16;
         let high = self.read_8(addr + 1) as u16;
@@ -1594,6 +1619,11 @@ impl Bus {
         if let Some(offset) = self.voodoo_at(addr) {
             return self.voodoo_read_32(offset);
         }
+        if addr & 3 == 0
+            && let Some(at) = self.powervr_at(addr)
+        {
+            return self.powervr_read(at, 4);
+        }
         let low = self.read_16(addr) as u32;
         let high = self.read_16(addr + 2) as u32;
         (high << 16) | low
@@ -1624,6 +1654,12 @@ impl Bus {
         }
         if let Some(offset) = self.voodoo_at(addr) {
             self.voodoo_write_32(offset, value);
+            return;
+        }
+        if addr & 3 == 0
+            && let Some(at) = self.powervr_at(addr)
+        {
+            self.powervr_write(at, value, 4);
             return;
         }
         self.write_16(addr, (value & 0xFFFF) as u16);

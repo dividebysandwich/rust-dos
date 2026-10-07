@@ -1295,6 +1295,14 @@ impl DebugHub {
                         (None, Some(p)) if cpu.bus.voodoo_at(p).is_some() => {
                             len.min(rust_dos::voodoo::WINDOW as usize - cpu.bus.voodoo_at(p).unwrap_or(0) as usize)
                         }
+                        // A PowerVR card's window, up to its end.
+                        (None, Some(p)) if let Some((window, offset)) = cpu.bus.powervr_at(p) => {
+                            let size = match window {
+                                rust_dos::powervr::Window::Registers => rust_dos::powervr::REGISTER_WINDOW,
+                                rust_dos::powervr::Window::Textures => rust_dos::powervr::TEXTURE_MEMORY,
+                            };
+                            len.min((size - offset) as usize)
+                        }
                         (None, p) => len.min(cpu.bus.ram().len().saturating_sub(p.unwrap_or(0))),
                     };
                     let data = a.read(cpu, len);
@@ -1538,6 +1546,7 @@ impl DebugHub {
                 // An S3's extended CRTC registers (30h-6Fh, a row of 16
                 // each) and its hardware cursor.
                 "voodoo": cpu.bus.voodoo_status(),
+                "powervr": cpu.bus.powervr_status(),
                 "s3": cpu.bus.vga.adapter.is_s3().then(|| {
                     let s3 = &cpu.bus.vga.s3;
                     json!({

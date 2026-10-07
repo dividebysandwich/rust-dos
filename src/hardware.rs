@@ -17,6 +17,8 @@ pub struct Hardware {
     pub memory: (bool, bool, bool),
     /// The 3dfx card.
     pub voodoo: Option<crate::voodoo::Board>,
+    /// The PowerVR card.
+    pub powervr: Option<crate::powervr::Chip>,
     /// The IPX driver and the LAN.
     pub network: crate::net::NetSettings,
     /// The serial ports.
@@ -39,6 +41,7 @@ pub fn configure(cpu: &mut Cpu, settings: &Settings, host_layout: &'static crate
     crate::video::bios::install(&mut cpu.bus, settings.video_setup());
     cpu.bus.configure_voodoo(settings.voodoo.board());
     crate::voodoo::overlay::provide(&mut cpu.bus);
+    cpu.bus.configure_powervr(settings.powervr);
     cpu.bus.set_disk_settings(settings.disk);
     cpu.bus.set_mixer(settings.mixer);
     cpu.bus.set_joystick(settings.joystick);
@@ -67,6 +70,7 @@ impl Hardware {
             video: settings.video_setup(),
             memory: (settings.ems, settings.umb, settings.dos_high),
             voodoo: settings.voodoo.board(),
+            powervr: settings.powervr,
             network: settings.network.clone(),
             serial: settings.serial.clone(),
             printer: (settings.printer.clone(), settings.capture_dir.clone()),
@@ -93,6 +97,7 @@ impl Hardware {
                 board: self.voodoo.unwrap_or(settings.voodoo.board),
                 ..settings.voodoo
             },
+            powervr: self.powervr,
             network: self.network.clone(),
             serial: self.serial.clone(),
             printer: self.printer.0.clone(),
@@ -132,6 +137,13 @@ impl Hardware {
                 None => cpu.bus.log_string("[CONFIG] No 3dfx card"),
             }
             cpu.bus.configure_voodoo(voodoo);
+        }
+        if settings.powervr != self.powervr {
+            match settings.powervr {
+                Some(chip) => cpu.bus.log_string(&format!("[CONFIG] A PowerVR {}", chip.name().to_ascii_uppercase())),
+                None => cpu.bus.log_string("[CONFIG] No PowerVR card"),
+            }
+            cpu.bus.configure_powervr(settings.powervr);
         }
         if (settings.ems, settings.umb, settings.dos_high) != self.memory {
             let on_off = |on| if on { "on" } else { "off" };

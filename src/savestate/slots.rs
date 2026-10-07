@@ -114,6 +114,7 @@ fn with_machine(base: &Settings, from: &Settings) -> Settings {
     Settings {
         machine: from.machine,
         voodoo: crate::voodoo::VoodooSettings { enabled: from.voodoo.enabled, board: from.voodoo.board, ..base.voodoo },
+        powervr: from.powervr,
         monochrome: from.monochrome,
         cycles: from.cycles,
         cpu: from.cpu,

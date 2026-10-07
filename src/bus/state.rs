@@ -13,6 +13,7 @@ const VIDEO_VERSION: u16 = 2;
 const SOUND_VERSION: u16 = 3;
 const DOS_VERSION: u16 = 6;
 const VOODOO_VERSION: u16 = 1;
+const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 2;
 const DPMI_VERSION: u16 = 2;
 const NET_VERSION: u16 = 2;
@@ -38,6 +39,8 @@ impl Bus {
             boot,
             pci,
             voodoo,
+            powervr,
+            powervr_line,
             hold: _,
             notices: _,
             glide_hint: _,
@@ -229,6 +232,13 @@ impl Bus {
         if let Some(voodoo) = voodoo {
             w.section(b"3DFX", VOODOO_VERSION, |w| voodoo.save(w));
         }
+        // A PowerVR card, likewise.
+        if let Some(powervr) = powervr {
+            w.section(b"PVR ", POWERVR_VERSION, |w| {
+                powervr.save(w);
+                powervr_line.save(w);
+            });
+        }
         // A booted system's IDE channels, likewise.
         if ide.iter().any(Option::is_some) {
             w.section(b"IDE ", IDE_VERSION, |w| ide.save(w));
@@ -261,6 +271,8 @@ impl Bus {
             boot,
             pci,
             voodoo,
+            powervr,
+            powervr_line,
             hold: _,
             notices: _,
             glide_hint: _,
@@ -444,6 +456,16 @@ impl Bus {
             (false, None) => {}
             (true, None) => return Err(StateError::Mismatch("it has a 3dfx card and this machine hasn't".into())),
             (false, Some(_)) => return Err(StateError::Mismatch("this machine has a 3dfx card and it hasn't".into())),
+        }
+        match (r.next_is(b"PVR "), powervr) {
+            (true, Some(powervr)) => {
+                let mut section = r.section(b"PVR ", POWERVR_VERSION)?;
+                powervr.load(&mut section)?;
+                powervr_line.load(&mut section)?;
+            }
+            (false, None) => {}
+            (true, None) => return Err(StateError::Mismatch("it has a PowerVR card and this machine hasn't".into())),
+            (false, Some(_)) => return Err(StateError::Mismatch("this machine has a PowerVR card and it hasn't".into())),
         }
         // The IDE channels come and go with the booted system.
         *ide = [None, None];

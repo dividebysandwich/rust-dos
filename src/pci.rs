@@ -4,6 +4,7 @@
 //! there knows them (BUS_00&DEV_00&FUNC_00 and BUS_00&DEV_01&FUNC_00):
 //!
 //! * device 0: the 3dfx Voodoo Graphics (`voodoo`), when there is one;
+//! * device 2: the PowerVR PCX2 (`powervr`), when there is one;
 //! * device 1: the S3 Trio64 of `machine=svga_s3` (PCI\VEN_5333&DEV_8811),
 //!   or the ViRGE (DEV_5631) or ViRGE/VX (DEV_883D) of `svga_s3virge` and
 //!   `svga_s3virgevx`, whose BAR0 is the chip's linear frame buffer
@@ -18,6 +19,7 @@ use iced_x86::Register;
 /// Where the cards are.
 const VOODOO_DEVICE: u32 = 0;
 const S3_DEVICE: u32 = 1;
+const POWERVR_DEVICE: u32 = 2;
 
 /// The configuration address latch (CF8h).
 #[derive(Clone, Debug)]
@@ -42,12 +44,14 @@ crate::state_fields!(Pci { address, command });
 enum Target {
     Voodoo,
     S3,
+    PowerVr,
 }
 
 impl Bus {
-    /// Whether the machine has a PCI bus: an S3 or a 3dfx card on it.
+    /// Whether the machine has a PCI bus: an S3, a 3dfx or a PowerVR
+    /// card on it.
     pub fn pci_present(&self) -> bool {
-        self.s3() || self.voodoo.is_some()
+        self.s3() || self.voodoo.is_some() || self.powervr.is_some()
     }
 
     /// The card and register the address latch selects, if it is enabled
@@ -61,6 +65,7 @@ impl Bus {
         let target = match device {
             VOODOO_DEVICE if self.voodoo.is_some() => Target::Voodoo,
             S3_DEVICE if self.s3() => Target::S3,
+            POWERVR_DEVICE if self.powervr.is_some() => Target::PowerVr,
             _ => return None,
         };
         Some((target, a as u8 & 0xFC))
@@ -100,6 +105,7 @@ impl Bus {
         match self.pci_target() {
             Some((Target::S3, reg)) => self.s3_config(reg + (port & 3) as u8),
             Some((Target::Voodoo, reg)) => self.voodoo.as_ref().map_or(0xFF, |v| v.config_read(reg + (port & 3) as u8)),
+            Some((Target::PowerVr, reg)) => self.powervr.as_ref().map_or(0xFF, |p| p.config_read(reg + (port & 3) as u8)),
             None => 0xFF,
         }
     }
@@ -115,6 +121,12 @@ impl Bus {
                 && v.config_write(reg, value)
             {
                 self.voodoo_moved();
+            }
+            return;
+        }
+        if target == Target::PowerVr {
+            if let Some(p) = &mut self.powervr {
+                p.config_write(reg, value);
             }
             return;
         }

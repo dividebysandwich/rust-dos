@@ -84,6 +84,7 @@ pub mod padmap;
 pub mod pci;
 pub mod pic;
 pub mod pnpbios;
+pub mod powervr;
 pub mod printer;
 pub mod recorder;
 pub mod savestate;
