@@ -27,8 +27,9 @@ pub struct DrawState {
     pub tex_mask_v: u32,
     pub scale_u: u32,
     pub scale_v: u32,
-    /// How pixels get their colour (1231h): 0 the vertices' colour, 1 the
-    /// texture's, 3 the texture's times the intensity.
+    /// How pixels get their colour (1231h, RRedline's VL_SetSrcFunc): 0 the
+    /// vertices' colour, 1 the texture's, 3 the texture's times the
+    /// vertices' colour or intensity.
     pub src_mode: u32,
     /// Texture clamping (17BEh, 183Fh) to the largest U and V (1038h,
     /// 1839h).
@@ -227,11 +228,18 @@ impl DrawState {
                         continue;
                     }
                     (r, g, bl) = from565(texel);
+                    // Modulated by the vertices' colour, or intensity.
                     if self.src_mode == 3 {
-                        let i = lerp(|v| v.i) / 255.0;
-                        r *= i;
-                        g *= i;
-                        bl *= i;
+                        if a.has_colour {
+                            r *= lerp(|v| v.r) / 255.0;
+                            g *= lerp(|v| v.g) / 255.0;
+                            bl *= lerp(|v| v.b) / 255.0;
+                        } else {
+                            let i = lerp(|v| v.i) / 255.0;
+                            r *= i;
+                            g *= i;
+                            bl *= i;
+                        }
                     }
                 } else if a.has_colour {
                     (r, g, bl) = (lerp(|v| v.r), lerp(|v| v.g), lerp(|v| v.b));
