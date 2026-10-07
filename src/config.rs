@@ -157,8 +157,10 @@ pub struct Config {
     pub voodoo_scale: Option<u32>,
     pub voodoo_msaa: Option<u32>,
     pub voodoo_fps_cap: Option<u32>,
-    /// The PowerVR card (`powervr`): its chip, or None for no card.
+    /// The PowerVR card (`powervr`): its chip, or None for no card; and
+    /// its texture filtering (`powervr_filter`).
     pub powervr: Option<Option<crate::powervr::Chip>>,
+    pub powervr_filter: Option<crate::powervr::tsp::Filter>,
     /// Where screenshots and recordings go (`capture_dir`), and whether
     /// they show the settings window and the performance overlay
     /// (`record_ui`) and the CRT shader (`record_shader`).
@@ -849,6 +851,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Some(chip) => config.powervr = Some(chip),
                             None => warn(format!("invalid powervr '{}' (off or pcx2)", value)),
                         },
+                        "powervr_filter" => match crate::powervr::tsp::Filter::parse(value) {
+                            Some(filter) => config.powervr_filter = Some(filter),
+                            None => warn(format!("invalid powervr_filter '{}' (auto, point or bilinear)", value)),
+                        },
                         "voodoo_memory" => match crate::voodoo::Board::parse(value) {
                             Some(board) => config.voodoo_memory = Some(board),
                             None => warn(format!("invalid voodoo_memory '{}' (4 or 12)", value)),
@@ -1244,8 +1250,9 @@ pub struct Settings {
     pub machine: Adapter,
     /// The 3dfx card.
     pub voodoo: crate::voodoo::VoodooSettings,
-    /// The PowerVR card, if there is one.
+    /// The PowerVR card, if there is one, and how it filters textures.
     pub powervr: Option<crate::powervr::Chip>,
+    pub powervr_filter: crate::powervr::tsp::Filter,
     /// Where screenshots and recordings go; relative to the working
     /// directory.
     pub capture_dir: PathBuf,
@@ -1325,6 +1332,7 @@ impl Default for Settings {
             machine: Adapter::Svga,
             voodoo: Default::default(),
             powervr: None,
+            powervr_filter: Default::default(),
             capture_dir: PathBuf::from("capture"),
             record_ui: false,
             record_shader: false,
@@ -1402,6 +1410,7 @@ impl Settings {
                 fps_cap: config.voodoo_fps_cap.map_or(default.voodoo.fps_cap, |n| (n > 0).then_some(n)),
             },
             powervr: config.powervr.unwrap_or(default.powervr),
+            powervr_filter: config.powervr_filter.unwrap_or(default.powervr_filter),
             capture_dir: config.capture_dir.clone().unwrap_or(default.capture_dir),
             record_ui: config.record_ui.unwrap_or(default.record_ui),
             record_shader: config.record_shader.unwrap_or(default.record_shader),
@@ -1470,6 +1479,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         })),
         (Emulator, "voodoo_fps_cap", Some(settings.voodoo.fps_cap.map_or("off".to_string(), |n| n.to_string()))),
         (Emulator, "powervr", Some(settings.powervr.map_or("off", |chip| chip.name()).to_string())),
+        (Emulator, "powervr_filter", Some(settings.powervr_filter.name().to_string())),
         (Emulator, "capture_dir", Some(contract_home(&settings.capture_dir, home))),
         (Emulator, "record_ui", yes_no(settings.record_ui)),
         (Emulator, "record_shader", yes_no(settings.record_shader)),
@@ -2498,6 +2508,7 @@ mod tests {
                 fps_cap: Some(30),
             },
             powervr: Some(crate::powervr::Chip::Pcx2),
+            powervr_filter: crate::powervr::tsp::Filter::Point,
             capture_dir: PathBuf::from("/home/u/dos captures"),
             record_ui: true,
             record_shader: true,

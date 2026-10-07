@@ -26,6 +26,19 @@ fn cfg_write(bus: &mut Bus, device: u32, reg: u32, value: u32) {
     bus.io_write_wide(0xCFC, value, 4);
 }
 
+/// Let `ms` milliseconds of emulated time pass (at 1000 instructions a
+/// millisecond).
+fn wait_ms(bus: &mut Bus, ms: f64) {
+    let target = bus.clock.icount + (ms * 1000.0) as u64;
+    while bus.clock.icount < target {
+        let step = (target - bus.clock.icount).min(10);
+        bus.clock.icount += step;
+        if bus.clock.icount >= bus.clock.deadline {
+            bus.service_timers();
+        }
+    }
+}
+
 fn w(bus: &mut Bus, reg: usize, value: u32) {
     bus.write_32(REGS + 4 * reg, value);
 }
@@ -91,6 +104,7 @@ fn a_render_ends_and_the_reset_pulse_clears_its_status() {
     w(&mut bus, regs::SOFTRESET, 1);
     w(&mut bus, regs::SOFTRESET, 0);
     w(&mut bus, regs::STARTRENDER, 0);
+    wait_ms(&mut bus, 1.0);
     assert_ne!(r(&bus, regs::INTSTATUS) & regs::END_OF_RENDER, 0);
     w(&mut bus, regs::SOFTRESET, 1);
     assert_eq!(r(&bus, regs::INTSTATUS) & regs::END_OF_RENDER, 0);
@@ -101,6 +115,7 @@ fn the_end_of_a_render_interrupts_when_unmasked() {
     let mut bus = bus();
     w(&mut bus, regs::INTMASK, regs::END_OF_RENDER);
     w(&mut bus, regs::STARTRENDER, 0);
+    wait_ms(&mut bus, 1.0);
     assert!(bus.pic.busy(11), "IRQ 11 requested");
 }
 
@@ -133,7 +148,13 @@ fn renders_a_snapshot() {
     let shader = rust_dos::powervr::tsp::Shader::default();
     let start = std::time::Instant::now();
     let rendered = rust_dos::powervr::render::render(&regs, &tex, rust_dos::powervr::render::Memory { ram: &ram }, &shader);
-    eprintln!("{} tiles, {} plane-pixels, {:?}", rendered.tiles.len(), rendered.work, start.elapsed());
+    eprintln!(
+        "{} tiles, {} ISP and {} TSP clocks, {:?}",
+        rendered.tiles.len(),
+        rendered.isp_clocks,
+        rendered.tsp_clocks,
+        start.elapsed()
+    );
     let (w, h) = (640usize, 480usize);
     let mut rgb = vec![0u8; w * h * 3];
     for tile in &rendered.tiles {
@@ -180,7 +201,13 @@ impl Scene {
         self.pointers.push(addr | (planes.len() as u32) << 19);
     }
 
+    /// Render the scene and wait for the render to end.
     fn render(self, bus: &mut Bus) {
+        self.start(bus);
+        wait_ms(bus, 1.0);
+    }
+
+    fn start(self, bus: &mut Bus) {
         for page in 0..128 {
             w(bus, regs::TLB + page, (PARAMS >> 12) + 4 * page as u32);
         }
@@ -277,4 +304,19 @@ fn a_translucent_pass_draws_in_front_of_the_opaque_one() {
     // apply: the triangle covers what is under it.
     assert_eq!(pixel(&bus, 8, 8), 0xF800);
     assert_eq!(pixel(&bus, 2, 2), 0x001F);
+}
+
+#[test]
+fn a_render_takes_the_time_its_planes_and_pixels_take() {
+    let mut bus = bus();
+    flat(&mut bus, 4, (0, 0, 255));
+    flat(&mut bus, 6, (255, 0, 0));
+    triangle_scene(0.5).start(&mut bus);
+    assert_eq!(r(&bus, regs::INTSTATUS) & regs::END_OF_RENDER, 0, "under way");
+    // 32 lines of 6 planes for the ISP, 1024 pixels for the TSP, at
+    // 66 MHz: about 16 microseconds.
+    wait_ms(&mut bus, 0.01);
+    assert_eq!(r(&bus, regs::INTSTATUS) & regs::END_OF_RENDER, 0, "still under way");
+    wait_ms(&mut bus, 0.02);
+    assert_ne!(r(&bus, regs::INTSTATUS) & regs::END_OF_RENDER, 0, "done");
 }

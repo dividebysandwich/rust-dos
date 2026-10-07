@@ -317,6 +317,8 @@ impl Item {
             VoodooMsaa => "voodoo-msaa",
             VoodooFpsCap => "voodoo-fps-cap",
             VoodooOverlay => "voodoo-overlay",
+            PowerVr => "powervr",
+            PowerVrFilter => "powervr-filter",
             Memsize => "memsize",
             Ems => "ems",
             Umb => "umb",

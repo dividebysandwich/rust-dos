@@ -143,6 +143,26 @@ its GLIDE2X.OVL in Rust-DOS's configuration directory. It is then on
 **Z:**, where games find it on the PATH. A GLIDE2X.OVL in the game's own
 folder comes first. A game that looks for it while it is missing says so.
 
+# PowerVR PCX2 {#powervr}
+
+Adds a PowerVR PCX2 3D card, the chip of the Matrox m3D and VideoLogic
+Apocalypse 3Dx, for games with a PowerVR version, such as Tomb Raider's
+PowerVR patch (`3DPATCH\PWRVR\TOMBPCX2.EXE` on the Tomb Raider Gold
+CD). The card has no picture of its own: it draws into the VGA card's
+memory, so it works with any *Display adapter* with a VESA BIOS.
+
+Set *Processor* to **Pentium** and *Memory* to **32 MB**: Tomb Raider's
+PowerVR version wants 20 MB free. Takes effect at the DOS prompt.
+
+# PowerVR filtering {#powervr-filter}
+
+How the PowerVR card smooths textures:
+
+- **As the game sets it**: the card's own bilinear filtering, which most
+  games turn on.
+- **Point**: blocky texels, as with filtering off.
+- **Bilinear**: smoothed, even where the game turns filtering off.
+
 # Memory {#memsize}
 
 The PC's RAM. **16 MB** runs nearly every DOS game. Windows 95 and a few

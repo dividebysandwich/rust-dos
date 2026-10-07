@@ -31,6 +31,8 @@ pub const INITIAL_REGISTERS: u32 = 0xD100_0000;
 pub const INITIAL_TEXTURES: u32 = 0xD140_0000;
 /// The interrupt line the BIOS routed the card's INTA# to.
 pub const IRQ: u8 = 11;
+/// The chip's clock, which its ISP and TSP run at.
+const CLOCK_HZ: u64 = 66_000_000;
 
 /// The chips.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -139,6 +141,8 @@ pub struct PowerVr {
     renders: u32,
     /// A render the bus has to carry out.
     started: bool,
+    /// When the render under way ends, in PIT ticks.
+    end_at: Option<u64>,
     /// How the host shades.
     pub shader: tsp::Shader,
     /// Lines for the emulator's log.
@@ -162,6 +166,7 @@ impl PowerVr {
             textures: vec![0; TEXTURE_MEMORY as usize],
             renders: 0,
             started: false,
+            end_at: None,
             shader: tsp::Shader::default(),
             log: Vec::new(),
             trace: RefCell::new(None),
@@ -296,6 +301,9 @@ impl PowerVr {
 
     /// A render starts.
     fn start_render(&mut self) {
+        if self.end_at.take().is_some() {
+            self.regs[regs::INTSTATUS] |= regs::END_OF_RENDER;
+        }
         self.renders += 1;
         self.started = true;
         if let Some(t) = self.trace.get_mut().as_mut() {
@@ -314,9 +322,28 @@ impl PowerVr {
         render::render(&self.regs, &self.textures, render::Memory { ram }, &self.shader)
     }
 
-    /// The render is done.
-    pub fn finish_render(&mut self) {
-        self.regs[regs::INTSTATUS] |= regs::END_OF_RENDER;
+    /// The render took the chip `rendered`'s clocks from `now` (PIT
+    /// ticks): the ISP's and the TSP's, which work at once.
+    pub fn rendering(&mut self, rendered: &render::Rendered, now: u64) {
+        let clocks = rendered.isp_clocks.max(rendered.tsp_clocks);
+        self.end_at = Some(now + clocks * crate::timer::PIT_HZ / CLOCK_HZ);
+    }
+
+    /// When the render under way ends.
+    pub fn next_event(&self) -> Option<u64> {
+        self.end_at
+    }
+
+    /// End the render, if its time came. True if it did.
+    pub fn service(&mut self, now: u64) -> bool {
+        match self.end_at {
+            Some(at) if at <= now => {
+                self.end_at = None;
+                self.regs[regs::INTSTATUS] |= regs::END_OF_RENDER;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Where finished pixels go: the frame buffer's physical address, the
@@ -429,6 +456,7 @@ impl State for PowerVr {
         self.regs.save(w);
         self.pci.save(w);
         self.renders.save(w);
+        self.end_at.save(w);
     }
 
     fn load(&mut self, r: &mut Reader) -> Result<()> {
@@ -448,6 +476,7 @@ impl State for PowerVr {
         }
         self.pci.load(r)?;
         self.renders.load(r)?;
+        self.end_at.load(r)?;
         Ok(())
     }
 }

@@ -30,7 +30,9 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   whose 3D engine draws Direct3D in Windows 95, Hercules, the Tandy 1000's and IBM PCjr's 16-colour
   modes, and a [3dfx Voodoo Graphics](CONFIGURATION.md#3dfx-voodoo-graphics)
   for Glide games in DOS and Windows 95, drawn by Rust-DOS or again by
-  OpenGL at up to four times its resolution
+  OpenGL at up to four times its resolution, and a
+  [PowerVR PCX2](CONFIGURATION.md#powervr-pcx2) (Matrox m3D) for DOS games'
+  PowerVR versions
 * **Sound:** Sound Blaster 16, Pro 2 and 2.0 with OPL3 FM music, Gravis
   Ultrasound with a built-in patch set, General MIDI through a SoundFont,
   the Ultrasound patches, a Roland MT-32 (via munt), a Roland Sound Canvas

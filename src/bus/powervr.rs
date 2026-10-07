@@ -102,8 +102,24 @@ impl Bus {
                 self.powervr_store(at as usize, &row);
             }
         }
+        let now = self.clock.now_ticks();
         if let Some(p) = &mut self.powervr {
-            p.finish_render();
+            p.rendering(&rendered, now);
+        }
+        self.clock.schedule(self.next_event());
+    }
+
+    pub(crate) fn powervr_next_event(&self) -> Option<u64> {
+        self.powervr.as_ref().and_then(|p| p.next_event())
+    }
+
+    /// End the render whose time came.
+    pub(crate) fn powervr_service(&mut self) {
+        let now = self.clock.now_ticks();
+        if let Some(p) = &mut self.powervr
+            && p.service(now)
+        {
+            self.sync_powervr_irq();
         }
     }
 
@@ -159,6 +175,13 @@ impl Bus {
         let lines = self.powervr.as_mut().map(|p| std::mem::take(&mut p.log)).unwrap_or_default();
         for line in lines {
             self.log_string(&line);
+        }
+    }
+
+    /// How the PowerVR card filters textures (`powervr_filter`).
+    pub fn set_powervr_filter(&mut self, filter: crate::powervr::tsp::Filter) {
+        if let Some(p) = &mut self.powervr {
+            p.shader.filter = filter;
         }
     }
 

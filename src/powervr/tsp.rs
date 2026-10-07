@@ -37,6 +37,25 @@ pub enum Filter {
     Bilinear,
 }
 
+impl Filter {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Filter::Auto),
+            "point" | "nearest" => Some(Filter::Point),
+            "bilinear" => Some(Filter::Bilinear),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Filter::Auto => "auto",
+            Filter::Point => "point",
+            Filter::Bilinear => "bilinear",
+        }
+    }
+}
+
 /// How the host shades.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Shader {

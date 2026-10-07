@@ -393,7 +393,7 @@ impl Page {
                 &[Scale, Fullscreen, Aspect, Vrr, Filter, Shader, CrtCurvature, CrtGlow, Monochrome, Composite, CompositeEra]
             }
             Page::Emulator => &[
-                Cycles, Core, Fpu, Cpu, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, VoodooMsaa, VoodooFpsCap, VoodooOverlay, Memsize, Ems, Umb, DosHigh, Dpmi,
+                Cycles, Core, Fpu, Cpu, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, VoodooMsaa, VoodooFpsCap, VoodooOverlay, PowerVr, PowerVrFilter, Memsize, Ems, Umb, DosHigh, Dpmi,
                 DosVersion, IdeHardDisks, BootCdrom, HardDiskSpeed, FloppyDiskSpeed, Joystick,
                 Deadzone, MouseAutocapture, MouseCaptureMessages, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, RecordShader, Autoexec,
                 ShellSuggestions, ShellColors, SaveShellHistory,
@@ -544,6 +544,8 @@ enum Item {
     VoodooFpsCap,
     /// Fetch Glide's DOS overlay (GLIDE2X.OVL).
     VoodooOverlay,
+    PowerVr,
+    PowerVrFilter,
     Memsize,
     /// Expanded memory and upper memory blocks.
     Ems,
@@ -863,6 +865,8 @@ impl Item {
             VoodooMsaa => "3dfx antialiasing",
             VoodooFpsCap => "3dfx frame rate cap",
             VoodooOverlay => "  Download Glide's DOS overlay...",
+            PowerVr => "PowerVR PCX2",
+            PowerVrFilter => "PowerVR filtering",
             Ems => "Expanded memory (EMS)",
             Umb => "Upper memory (UMB)",
             DosHigh => "DOS high",
@@ -1011,6 +1015,7 @@ impl Item {
             Item::ChorusMix => s.mixer.chorus != ChorusPreset::Off,
             Item::RewindMemory => s.rewind,
             Item::VoodooMemory | Item::VoodooRenderer | Item::VoodooFpsCap => s.voodoo.enabled,
+            Item::PowerVrFilter => s.powervr.is_some(),
             Item::Awe32Rom | Item::Awe32Ram => awe32(s),
             // Until there is a ROM.
             Item::Awe32Download => awe32(s) && crate::awe32::rom::find(s.sound.awe32rom.as_deref()).is_none(),
@@ -1042,7 +1047,7 @@ impl Item {
                 Applies::Now
             }
             Cycles | Core | Fpu | Dpmi | DosVersion | IdeHardDisks | BootCdrom | KeyboardLayout | MouseAutocapture | MouseCaptureMessages | ShellSuggestions | ShellColors | SaveShellHistory | Rewind | RewindMemory
-            | VoodooRenderer | VoodooScale | VoodooMsaa | VoodooFpsCap | VoodooOverlay => Applies::Now,
+            | VoodooRenderer | VoodooScale | VoodooMsaa | VoodooFpsCap | VoodooOverlay | PowerVrFilter => Applies::Now,
             Monochrome => Applies::NowAndAtPrompt,
             HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise | Volume(_) | CaptureDir | RecordUi
             | RecordShader => Applies::Now,
@@ -1149,6 +1154,13 @@ impl Item {
                 None => "Off".to_string(),
                 Some(n) => format!("{} fps", n),
             },
+            PowerVr => on_off(s.powervr.is_some()),
+            PowerVrFilter => match s.powervr_filter {
+                crate::powervr::tsp::Filter::Auto => "As the game sets it",
+                crate::powervr::tsp::Filter::Point => "Point (blocky)",
+                crate::powervr::tsp::Filter::Bilinear => "Bilinear (smooth)",
+            }
+            .to_string(),
             Ems => on_off(s.ems),
             Umb => on_off(s.umb),
             DosHigh => on_off(s.dos_high),
@@ -1349,6 +1361,11 @@ impl Item {
             VoodooScale => each(s, [1, 2, 3, 4], |s, scale| s.voodoo.scale = scale),
             VoodooMsaa => each(s, [1, 2, 4, 8], |s, samples| s.voodoo.msaa = samples),
             VoodooFpsCap => each(s, FPS_CAPS, |s, fps| s.voodoo.fps_cap = fps),
+            PowerVr => on_off(|s, on| s.powervr = on.then_some(crate::powervr::Chip::Pcx2)),
+            PowerVrFilter => {
+                use crate::powervr::tsp::Filter;
+                each(s, [Filter::Auto, Filter::Point, Filter::Bilinear], |s, filter| s.powervr_filter = filter)
+            }
             Ems => on_off(|s, on| s.ems = on),
             Umb => on_off(|s, on| s.umb = on),
             DosHigh => on_off(|s, on| s.dos_high = on),

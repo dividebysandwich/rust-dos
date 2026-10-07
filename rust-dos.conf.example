@@ -114,6 +114,12 @@
 # resolution. Screenshots show the software picture either way.
 #voodoo_renderer=software
 #voodoo_scale=2
+# A PowerVR PCX2 (Matrox m3D) for games with a PowerVR version: off or
+# pcx2. It draws into the display adapter's VESA frame buffer. Changes
+# take effect at the DOS prompt. How it filters textures: auto (as the
+# game sets it), point or bilinear.
+#powervr=off
+#powervr_filter=auto
 # Where screenshots (Ctrl+F5) and sound (Ctrl+F6), video (Ctrl+F7) and
 # animation (PrintScreen) recordings go: a folder, relative to the
 # directory rust-dos started in.

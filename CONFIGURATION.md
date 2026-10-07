@@ -211,6 +211,12 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   [3dfx Voodoo Graphics](#3dfx-voodoo-graphics));
   without OpenGL 3 (in the browser, or with SDL's dummy video driver) the
   software rasterizer's picture shows. Both change at once.
+* `powervr=pcx2` adds a PowerVR PCX2 3D card (Matrox m3D, VideoLogic
+  Apocalypse 3Dx) beside the display adapter, for games with a PowerVR
+  version (see [PowerVR PCX2](#powervr-pcx2)); `off` is the default. It
+  takes effect at the DOS prompt. `powervr_filter` is how it filters
+  textures: `auto` (the default, as the game sets the card), `point` or
+  `bilinear`; it changes at once.
 * `capture_dir` is the folder screenshots and recordings go in:
   `capture` (the default) in the directory rust-dos started in, or a
   path of your own. Screenshots (Ctrl+F5, in the settings window too)
@@ -1533,6 +1539,47 @@ card's pixel counters, until a game reads them: from then on everything
 is drawn and counted (`RUST_DOS_VOODOO_PRUNE=0` in the environment draws
 everything from the start). The CRT shaders draw their scanlines over the
 bigger picture.
+
+## PowerVR PCX2
+
+`powervr=pcx2` in `[emulator]` puts a PowerVR PCX2 in the machine, NEC's
+3D chip on the Matrox m3D and VideoLogic Apocalypse 3Dx boards, for the
+DOS games that came in PowerVR versions:
+
+```ini
+[emulator]
+powervr=pcx2
+cpu=pentium
+memsize=32
+```
+
+Unlike a 3dfx card, the PCX2 has no picture of its own. Games give it the
+scene as planes and lists of the objects in each 32x32 tile, in the PC's
+own memory, and their textures in its 4 MB; it works out which surface
+each pixel shows (with hidden surfaces removed before anything is
+textured, and translucent surfaces sorted by the card), textures and
+shades the tile, and writes the finished pixels over the PCI bus into the
+VGA card's VESA linear frame buffer. So the picture comes through the
+display adapter: any `machine` with a VESA BIOS will do, screenshots and
+recordings show it, and nothing else in the window changes.
+
+The card is on the PCI bus as device 2 (vendor 1033h, device 0046h), its
+registers at D1000000h (BAR0) and its texture memory at D1400000h (BAR1),
+INTA# on IRQ 11. A render takes the time the chip's 66 MHz ISP and TSP
+would take, then sets its end-of-render status (and interrupts, for
+games that unmask it); the tiles are drawn on as many threads as the
+host has, and the picture is the same however many there are. Save
+states and rewind keep the card with its texture memory.
+
+* **Tomb Raider**'s PowerVR patch (`3DPATCH\PWRVR\TOMBPCX2.EXE` on the Tomb
+  Raider Gold CD, copied into the game's folder) runs with `cpu=pentium`
+  and `memsize=32` (it wants 20 MB free), under its DOS/4GW. It finds a
+  VESA 2.0 BIOS, so it doesn't run UniVBE. F1 and F2 change the
+  resolution, F3 shows it and the frame rate.
+
+How the card draws follows Imagination's own driver sources and simulator
+of the chip, which they released under the MIT licence
+(github.com/powervr-graphics/PowerVR-Series1).
 
 ## Playing over a LAN
 

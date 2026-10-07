@@ -79,12 +79,13 @@ pub struct Tile {
     pub pixels: Vec<u32>,
 }
 
-/// A render's result: its tiles, and how much work they were.
+/// A render's result: its tiles, and the clocks the chip's two halves
+/// took: the ISP a plane a line of a tile, the TSP a pixel it shades.
 #[derive(Default)]
 pub struct Rendered {
     pub tiles: Vec<Tile>,
-    /// Planes times the pixels they covered, for the time the render takes.
-    pub work: u64,
+    pub isp_clocks: u64,
+    pub tsp_clocks: u64,
 }
 
 /// Render the scene the registers describe.
@@ -93,7 +94,9 @@ pub fn render(registers: &[u32], textures: &[u8], mem: Memory, shader: &Shader) 
     tlb.copy_from_slice(&registers[regs::TLB..regs::TLB + PAGES]);
     let params = Params { tlb, mem };
     let tsp = Tsp::new(registers, textures, shader);
-    let mut rendered = Rendered::default();
+    // The tiles and their planes first, then the tiles rendered, each by
+    // itself, so on as many threads as there are.
+    let mut tiles: Vec<(u32, std::ops::Range<usize>)> = Vec::new();
     let mut planes = Vec::new();
     // The list: a tile header, then pointers to the tile's objects; links
     // continue it elsewhere.
@@ -106,7 +109,7 @@ pub fn render(registers: &[u32], textures: &[u8], mem: Memory, shader: &Shader) 
             break;
         }
         let header = word;
-        planes.clear();
+        let first_plane = planes.len();
         let mut last = false;
         loop {
             at = at.wrapping_add(4);
@@ -130,13 +133,50 @@ pub fn render(registers: &[u32], textures: &[u8], mem: Memory, shader: &Shader) 
                 break;
             }
         }
-        let tile = render_tile(header, &planes, &tsp, &mut rendered.work);
-        rendered.tiles.push(tile);
+        tiles.push((header, first_plane..planes.len()));
         if last {
             break;
         }
     }
-    rendered
+    let threads = threads().min(tiles.len()).max(1);
+    let render_some = |k: usize| -> Vec<(usize, Tile, u64)> {
+        (k..tiles.len())
+            .step_by(threads)
+            .map(|i| {
+                let (header, range) = &tiles[i];
+                let mut shaded = 0;
+                let tile = render_tile(*header, &planes[range.clone()], &tsp, &mut shaded);
+                (i, tile, shaded)
+            })
+            .collect()
+    };
+    let isp_clocks = tiles.iter().map(|(header, range)| range.len() as u64 * ((header >> 5 & 0x3FF) as u64 + 1)).sum();
+    let mut done: Vec<(usize, Tile, u64)> = if threads == 1 {
+        render_some(0)
+    } else {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (1..threads).map(|k| scope.spawn(move || render_some(k))).collect();
+            let mut all = render_some(0);
+            for handle in handles {
+                all.extend(handle.join().expect("a PowerVR render thread"));
+            }
+            all
+        })
+    };
+    done.sort_unstable_by_key(|(i, _, _)| *i);
+    Rendered {
+        isp_clocks,
+        tsp_clocks: done.iter().map(|(_, _, shaded)| shaded).sum(),
+        tiles: done.into_iter().map(|(_, tile, _)| tile).collect(),
+    }
+}
+
+/// The threads a render uses.
+fn threads() -> usize {
+    #[cfg(target_arch = "wasm32")]
+    return 1;
+    #[cfg(not(target_arch = "wasm32"))]
+    std::thread::available_parallelism().map_or(1, |n| n.get().min(8))
 }
 
 /// The planes an object pointer points to.
@@ -311,6 +351,44 @@ impl Cells {
     /// `SurfProcess` for every cell: the plane with depth `depth(i)` at
     /// cell i, under `control`.
     fn process(&mut self, control: Control, tag: u32, depth: impl Fn(usize) -> f32) {
+        // The common cases on their own, for speed: an edge, and an
+        // object's first plane.
+        if !control.clear_u_id && control.test_shad == TestShad::Nop {
+            match (control.i_load, control.u_load) {
+                (LoadI::Further, LoadU::Nop) if control.perpendicular => {
+                    for i in 0..self.i_depth.len() {
+                        let c = depth(i);
+                        if c < 0.0 {
+                            self.i_depth[i] = c;
+                            self.i_id[i] = tag;
+                            self.i_visible[i] = control.visible;
+                            self.i_forward[i] = true;
+                        }
+                    }
+                    return;
+                }
+                (LoadI::Load, LoadU::Closer | LoadU::Load) if control.mux_u => {
+                    let always = control.u_load == LoadU::Load;
+                    for i in 0..self.i_depth.len() {
+                        let c = depth(i);
+                        let i_visible = self.i_visible[i];
+                        if always || (self.i_depth[i] >= self.u_depth[i] && i_visible) || !self.u_visible[i] {
+                            self.u_visible[i] = i_visible;
+                            self.u_shadow[i] = false;
+                            self.shad_temp[i] = false;
+                            self.u_depth[i] = self.i_depth[i];
+                            self.u_id[i] = self.i_id[i];
+                        }
+                        self.i_visible[i] = control.visible;
+                        self.i_forward[i] = true;
+                        self.i_depth[i] = c;
+                        self.i_id[i] = tag;
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
         for i in 0..self.i_depth.len() {
             let c = depth(i);
             if control.clear_u_id {
@@ -368,8 +446,9 @@ impl Cells {
     }
 }
 
-/// A tile: its planes through the cells, and what they find shaded.
-fn render_tile(header: u32, planes: &[Plane], tsp: &Tsp, work: &mut u64) -> Tile {
+/// A tile: its planes through the cells, and what they find shaded,
+/// counting the pixels shaded into `shaded`.
+fn render_tile(header: u32, planes: &[Plane], tsp: &Tsp, shaded: &mut u64) -> Tile {
     let width = ((header & 0x1F) + 1) * CELLS as u32;
     let height = (header >> 5 & 0x3FF) + 1;
     let x0 = (header >> 15 & 0x1F) * CELLS as u32;
@@ -392,23 +471,46 @@ fn render_tile(header: u32, planes: &[Plane], tsp: &Tsp, work: &mut u64) -> Tile
         let (control, next) = expand(plane.instr, objects == 2 && first, previous);
         previous = next;
         let (a, b, c) = (plane.a, plane.b, plane.c);
+        // An edge everything in the tile is inside of changes nothing. (A
+        // plane's least value over the tile is at a corner; the margin
+        // covers the rounding of the pixels between.)
+        if control.perpendicular
+            && control.i_load == LoadI::Further
+            && control.u_load == LoadU::Nop
+            && control.test_shad == TestShad::Nop
+            && !control.clear_u_id
+        {
+            let (x1, y1) = ((x0 + width - 1) as f32, (y0 + height - 1) as f32);
+            let (x0, y0) = (x0 as f32, y0 as f32);
+            let margin = (a.abs() * x1 + b.abs() * y1 + c.abs()) * 1e-5;
+            let least = [a * x0 + b * y0, a * x1 + b * y0, a * x0 + b * y1, a * x1 + b * y1]
+                .into_iter()
+                .fold(f32::INFINITY, f32::min)
+                + c;
+            if least > margin {
+                continue;
+            }
+        }
         cells.process(control, plane.tag, |i| a * xs[i] + b * ys[i] + c);
-        *work += (w * h) as u64;
         if plane.instr == instr::BEGIN_TRANS {
-            shade(&cells, tsp, x0, y0, w, &mut pixels);
+            *shaded += shade(&cells, tsp, x0, y0, w, &mut pixels);
         }
     }
-    shade(&cells, tsp, x0, y0, w, &mut pixels);
+    *shaded += shade(&cells, tsp, x0, y0, w, &mut pixels);
     Tile { x: x0, y: y0, width, height, pixels }
 }
 
-/// The TSP: the surfaces the cells hold, shaded into the tile.
-fn shade(cells: &Cells, tsp: &Tsp, x0: u32, y0: u32, w: usize, pixels: &mut [u32]) {
+/// The TSP: the surfaces the cells hold, shaded into the tile. Returns
+/// the pixels it shaded.
+fn shade(cells: &Cells, tsp: &Tsp, x0: u32, y0: u32, w: usize, pixels: &mut [u32]) -> u64 {
+    let mut shaded = 0;
     for (i, pixel) in pixels.iter_mut().enumerate() {
         let tag = cells.u_id[i];
         if tag != 0 {
             let (x, y) = (x0 as i32 + (i % w) as i32, y0 as i32 + (i / w) as i32);
             *pixel = tsp.shade(x, y, tag, cells.u_depth[i], cells.u_shadow[i], *pixel);
+            shaded += 1;
         }
     }
+    shaded
 }

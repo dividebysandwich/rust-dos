@@ -1724,6 +1724,7 @@ impl Bus {
             sb,
             gus,
             self.voodoo_next_event(),
+            self.powervr_next_event(),
             self.ide_next_event(),
             self.net_next_event(),
             self.serial_next_event(),
@@ -1755,6 +1756,9 @@ impl Bus {
         }
         if self.voodoo_next_event().is_some_and(|t| t <= now) {
             self.voodoo_service();
+        }
+        if self.powervr_next_event().is_some_and(|t| t <= now) {
+            self.powervr_service();
         }
         if self.ide_next_event().is_some_and(|t| t <= now) {
             self.ide_service();
