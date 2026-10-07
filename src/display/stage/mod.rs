@@ -33,8 +33,10 @@ use glow::HasContext;
 use render::{Format, Gpu, ScreenTarget, View};
 use rust_dos::vr::{ScreenFit, VrMode, VrSettings};
 use scene::Scene;
-use rust_dos::vr::Leds;
+use rust_dos::vr::{Leds, VrQuality};
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::mpsc::{Receiver, TryRecvError};
 
 pub struct Stage {
     scene: Arc<Scene>,
@@ -56,6 +58,14 @@ pub struct Stage {
     shown: Option<(Mat4, (f32, f32, f32, f32))>,
     /// How the picture fills the screen (the `screen_fit` setting).
     fit: ScreenFit,
+    /// What the scene's programs are made for and with.
+    glsl: Glsl,
+    quality: VrQuality,
+    glow: f32,
+    /// The scene file shown (None: the test room), and the one being read
+    /// on a thread of its own to take its place.
+    scene_path: Option<PathBuf>,
+    loading: Option<(Option<PathBuf>, Receiver<Result<Scene, String>>)>,
 }
 
 /// Width and height.
@@ -81,13 +91,10 @@ impl Stage {
         main: &sdl2::video::GLContext,
     ) -> Result<(Self, Vec<String>), String> {
         let mut notes = Vec::new();
-        let scene = match &settings.scene {
-            Some(path) => Scene::load(path).unwrap_or_else(|e| {
-                notes.push(format!("[VR] The scene can't be shown ({}); the test room is", e));
-                Scene::test_room()
-            }),
-            None => Scene::test_room(),
-        };
+        let scene = load(settings.scene.as_deref()).unwrap_or_else(|e| {
+            notes.push(format!("[VR] The scene can't be shown ({}); the test room is", e));
+            Scene::test_room()
+        });
         let scene = Arc::new(scene);
         let mut gpu = Gpu::new(gl, glsl, &scene, settings.quality)?;
         gpu.set_glow(glow_of(settings));
@@ -114,6 +121,11 @@ impl Stage {
             headset: None,
             shown: None,
             fit: settings.screen_fit,
+            glsl,
+            quality: settings.quality,
+            glow: glow_of(settings),
+            scene_path: settings.scene.clone(),
+            loading: None,
         };
         if settings.mode == VrMode::Headset {
             #[cfg(xr)]
@@ -234,18 +246,74 @@ impl Stage {
         false
     }
 
-    /// What the headset's thread has to say; once it is over, the window
-    /// shows the scene.
-    pub fn poll(&mut self) -> Vec<String> {
+    /// What the headset's thread has to say (once it is over, the window
+    /// shows the scene), and a scene read since, which takes the place of
+    /// the one shown, with `gl` current.
+    pub fn poll(&mut self, gl: &glow::Context) -> Vec<String> {
+        let mut notes = self.poll_scene(gl);
         #[cfg(xr)]
         if let Some(headset) = &self.headset {
-            let (notes, ended) = headset.poll();
+            let (said, ended) = headset.poll();
             if ended {
                 self.headset = None;
             }
-            return notes;
+            notes.extend(said);
         }
-        Vec::new()
+        notes
+    }
+
+    /// Read the scene `path` (None: the test room) on a thread of its own,
+    /// to show once it is read.
+    fn switch_scene(&mut self, path: Option<PathBuf>) {
+        let wanted = self.loading.as_ref().map_or(&self.scene_path, |(path, _)| path);
+        if *wanted == path {
+            return;
+        }
+        let (done, result) = std::sync::mpsc::channel();
+        let reading = path.clone();
+        let spawned = std::thread::Builder::new().name("vr-scene".into()).spawn(move || {
+            let _ = done.send(load(reading.as_deref()));
+        });
+        // (Without a thread, the scene stays.)
+        if spawned.is_ok() {
+            self.loading = Some((path, result));
+        }
+    }
+
+    /// The scene read, in place of the one shown: in the window, and in
+    /// the headset. Kept if it can't be drawn.
+    fn poll_scene(&mut self, gl: &glow::Context) -> Vec<String> {
+        let Some((path, result)) = &self.loading else { return Vec::new() };
+        let read = match result.try_recv() {
+            Ok(read) => read,
+            Err(TryRecvError::Empty) => return Vec::new(),
+            Err(TryRecvError::Disconnected) => Err("reading it stopped".to_string()),
+        };
+        let path = path.clone();
+        self.loading = None;
+        let scene = match read.and_then(|scene| Ok((Gpu::new(gl, self.glsl, &scene, self.quality)?, scene))) {
+            Ok((gpu, scene)) => {
+                std::mem::replace(&mut self.gpu, gpu).delete(gl);
+                self.gpu.set_glow(self.glow);
+                Arc::new(scene)
+            }
+            Err(e) => {
+                // Tried again when it is chosen again.
+                self.scene_path = path;
+                return vec![format!("The scene can't be shown: {}", e)];
+            }
+        };
+        self.scene_path = path;
+        self.scene = scene.clone();
+        self.camera = FlyCamera::at(scene.spawn);
+        self.fresh = self.latest.is_some();
+        self.shown = None;
+        #[cfg(xr)]
+        if let Some(headset) = &self.headset {
+            headset.set_scene(scene);
+        }
+        let name = self.scene_path.as_deref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
+        vec![format!("Showing {}", name.as_deref().unwrap_or("the test room"))]
     }
 
     /// The PC's lights, as the machine's are.
@@ -260,7 +328,9 @@ impl Stage {
     /// Take on the `[vr]` settings that change while it runs.
     pub fn apply(&mut self, settings: &VrSettings) {
         self.fit = settings.screen_fit;
-        self.gpu.set_glow(glow_of(settings));
+        self.glow = glow_of(settings);
+        self.gpu.set_glow(self.glow);
+        self.switch_scene(settings.scene.clone());
         #[cfg(xr)]
         if let Some(headset) = &self.headset {
             headset.set_controllers(settings.controllers);
@@ -288,6 +358,14 @@ impl Stage {
         let spawn = self.scene.spawn;
         let start = Mat4::from_translation(spawn.position) * Mat4::from_rotation_y(spawn.yaw);
         spatial::mix(listener, start, self.scene.speakers)
+    }
+}
+
+/// The scene of the file `path`, or the test room.
+fn load(path: Option<&std::path::Path>) -> Result<Scene, String> {
+    match path {
+        Some(path) => Scene::load(path),
+        None => Ok(Scene::test_room()),
     }
 }
 

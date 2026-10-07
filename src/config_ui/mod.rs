@@ -22,6 +22,7 @@ pub mod osd;
 mod perf;
 mod rooms;
 mod sc55;
+mod scenes;
 mod states;
 pub mod wheel;
 
@@ -33,6 +34,7 @@ pub use draw::cp437;
 use games::{GameDialog, GameField};
 use image::{ImageDialog, ImageField};
 use rooms::{RoomBrowser, RoomButton, RoomField};
+use scenes::SceneList;
 pub use manual::Layer;
 pub use states::SlotView;
 
@@ -1046,8 +1048,8 @@ impl Item {
             | RecordShader => Applies::Now,
             Joystick | Deadzone | SpeakerFilter | SbFilter | Reverb | Chorus | ReverbMix | ChorusMix => Applies::Now,
             Rooms => Applies::Now,
-            Memsize | Autoexec | Lan | LanHost | VrMode | VrScene | VrQuality => Applies::NextStart,
-            VrControllers | VrSpatialAudio | VrScreenFit | VrScreenGlow | VrCenter | VrSceneScale | VrSeat(_) | VrSeatTurn => {
+            Memsize | Autoexec | Lan | LanHost | VrMode | VrQuality => Applies::NextStart,
+            VrScene | VrControllers | VrSpatialAudio | VrScreenFit | VrScreenGlow | VrCenter | VrSceneScale | VrSeat(_) | VrSeatTurn => {
                 Applies::Now
             }
             _ => Applies::AtPrompt,
@@ -1748,6 +1750,8 @@ enum Target {
     RoomButton(RoomButton),
     /// The room browser's tab of the rooms online (or on this network).
     RoomsOnline(bool),
+    /// A line of the VR page's scene list.
+    SceneRow(usize),
     /// A value of the popup list, and the rest of it.
     PopupRow(usize),
     Popup,
@@ -1850,6 +1854,11 @@ pub struct ConfigUi {
     autoexec: Option<AutoexecEditor>,
     /// The LAN's rooms being browsed.
     rooms: Option<RoomBrowser>,
+    /// The VR scenes to choose from, rust-dos.com's list of them once
+    /// asked for, and the one downloading (scenes.rs).
+    scenes: Option<SceneList>,
+    scene_catalog: scenes::Catalog,
+    scene_download: Option<scenes::SceneDownload>,
     /// The help shown over everything (F1).
     help: Option<help::HelpView>,
 }
@@ -1923,6 +1932,9 @@ impl ConfigUi {
             pictures: Vec::new(),
             autoexec: None,
             rooms: None,
+            scenes: None,
+            scene_catalog: scenes::Catalog::default(),
+            scene_download: None,
             help: None,
             awe32_download: None,
             confirm_sc55: None,
@@ -1952,6 +1964,7 @@ impl ConfigUi {
         self.poll_awe32_download(host);
         self.poll_sc55_download(host);
         self.poll_glide_download(host);
+        self.poll_scenes(host);
     }
 
     /// Download the AWE32's ROM on a thread of its own, into rust-dos's
@@ -2052,6 +2065,7 @@ impl ConfigUi {
         self.game_dialog = None;
         self.autoexec = None;
         self.rooms = None;
+        self.scenes = None;
         self.help = None;
         self.put_away_manual();
         self.manual = None;
@@ -2150,6 +2164,8 @@ impl ConfigUi {
             self.autoexec_key(key, host);
         } else if self.rooms.is_some() {
             self.rooms_key(key, host);
+        } else if self.scenes.is_some() {
+            self.scenes_key(key, host);
         } else if self.cheats.edit.is_some() {
             self.cheats_edit_key(key, host);
         } else if self.achievements.edit.is_some() {
@@ -2216,6 +2232,7 @@ impl ConfigUi {
                     && self.game_dialog.is_none()
                     && self.autoexec.is_none()
                     && self.rooms.is_none()
+                    && self.scenes.is_none()
                 {
                     self.edit = None;
                     self.cheats.edit = None;
@@ -2284,6 +2301,7 @@ impl ConfigUi {
             Target::RoomRow(_) | Target::RoomField(_) | Target::RoomButton(_) | Target::RoomsOnline(_) => {
                 self.room_clicked(target, host)
             }
+            Target::SceneRow(_) => self.scene_clicked(target, host),
             Target::PopupRow(i) => {
                 if let Some(popup) = &mut self.popup {
                     popup.selected = i;
@@ -2399,7 +2417,7 @@ impl ConfigUi {
             (UiKey::Enter, Input::File) if item == Item::Mt32Roms => self.open_browser(Pick::Mt32Roms),
             (UiKey::Enter, Input::File) if item == Item::Awe32Rom => self.open_browser(Pick::Awe32Rom),
             (UiKey::Enter, Input::File) if item == Item::Sc55Roms => self.open_browser(Pick::Sc55Roms),
-            (UiKey::Enter, Input::File) if item == Item::VrScene => self.open_browser(Pick::VrScene),
+            (UiKey::Enter, Input::File) if item == Item::VrScene => self.open_scenes(),
             (UiKey::Enter, Input::File) => self.open_browser(Pick::SoundFont),
             (UiKey::Enter, Input::Link) if item == Item::Rooms => self.open_rooms(),
             (UiKey::Enter, Input::Link) if item == Item::Awe32Download => self.download_awe32_rom(),
@@ -2959,6 +2977,8 @@ impl ConfigUi {
             self.draw_autoexec(&mut g, content.clone());
         } else if self.rooms.is_some() {
             self.draw_rooms(&mut g, content.clone());
+        } else if self.scenes.is_some() {
+            self.draw_scenes(&mut g, content.clone());
         } else if self.confirm_sc55.is_some() {
             self.draw_sc55_question(&mut g, content.clone());
         } else if self.confirm_glide {
@@ -3513,6 +3533,8 @@ impl ConfigUi {
             Some("autoexec")
         } else if self.rooms.is_some() {
             Some("rooms")
+        } else if self.scenes.is_some() {
+            Some("vr-scenes")
         } else {
             self.page.help().or_else(|| self.item().map(Item::help))
         }
@@ -3628,6 +3650,8 @@ impl ConfigUi {
             vec![("F2", "Save", Save), ("Esc", "Cancel", Esc)]
         } else if self.rooms.is_some() {
             self.room_hints()
+        } else if self.scenes.is_some() {
+            self.scene_hints()
         } else if self.confirm_delete.is_some() {
             vec![("Enter", if self.confirm_reset { "Reset" } else { "Delete" }, Enter), ("Esc", "Keep", Esc)]
         } else if self.confirm_sc55.is_some() || self.confirm_glide {

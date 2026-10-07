@@ -83,6 +83,8 @@ pub struct Format {
 
 struct GpuMesh {
     vao: glow::VertexArray,
+    /// Its vertices and indices, deleted with it.
+    buffers: [glow::Buffer; 2],
     count: i32,
     material: usize,
 }
@@ -360,6 +362,52 @@ fn uniform(gl: &glow::Context, program: glow::Program, name: &str) -> Option<glo
 }
 
 impl Gpu {
+    /// Delete everything it made, for another scene's: `gl` is the
+    /// context it was made with, current.
+    pub fn delete(self, gl: &glow::Context) {
+        // SAFETY: see `GlScreen`.
+        unsafe {
+            for program in [self.lit, self.sky, self.depth, self.grid_program] {
+                gl.delete_program(program);
+            }
+            if let Some(shadows) = self.shadows {
+                gl.delete_texture(shadows.texture);
+            }
+            gl.delete_framebuffer(self.grid.framebuffer);
+            gl.delete_texture(self.grid.texture);
+            if let Some(gi) = self.gi {
+                delete_gi(gl, gi);
+            }
+            if let Some(ao) = self.ao {
+                gl.delete_program(ao.estimate);
+                gl.delete_program(ao.blur);
+                if let Some(target) = ao.target {
+                    target.delete(gl);
+                }
+            }
+            if let Some(timing) = self.timing {
+                gl.delete_query(timing.query);
+            }
+            gl.delete_vertex_array(self.empty);
+            for mesh in self.meshes.into_iter().chain([self.cube]) {
+                gl.delete_vertex_array(mesh.vao);
+                for buffer in mesh.buffers {
+                    gl.delete_buffer(buffer);
+                }
+            }
+            for texture in self.textures {
+                gl.delete_texture(texture);
+            }
+            if let Some(target) = self.target {
+                gl.delete_framebuffer(target.framebuffer);
+                gl.delete_framebuffer(target.resolve);
+                gl.delete_renderbuffer(target.color);
+                gl.delete_renderbuffer(target.depth);
+                gl.delete_texture(target.resolved);
+            }
+        }
+    }
+
     /// Compile the programs and upload `scene`.
     pub fn new(gl: &glow::Context, glsl: Glsl, scene: &Scene, quality: VrQuality) -> Result<Self, String> {
         let (grid_size, taps, bounce, ao_samples) = lighting(quality);
@@ -1285,7 +1333,7 @@ fn upload_mesh(gl: &glow::Context, mesh: &super::scene::Mesh) -> Result<GpuMesh,
         }
         gl.bind_vertex_array(None);
         gl.bind_buffer(glow::ARRAY_BUFFER, None);
-        Ok(GpuMesh { vao, count: mesh.indices.len() as i32, material: mesh.material })
+        Ok(GpuMesh { vao, buffers: [vbo, ebo], count: mesh.indices.len() as i32, material: mesh.material })
     }
 }
 

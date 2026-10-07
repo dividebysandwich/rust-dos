@@ -519,6 +519,16 @@ impl GlScreen {
         Ok(notes)
     }
 
+    /// The 3D scene's news: the headset's, and a scene read since, which
+    /// takes the place of the one shown.
+    #[cfg(feature = "vr")]
+    pub fn poll_stage(&mut self) -> Vec<String> {
+        match &mut self.stage {
+            Some(stage) => stage.poll(&self.gl),
+            None => Vec::new(),
+        }
+    }
+
     #[cfg(feature = "vr")]
     pub fn stage(&self) -> Option<&super::stage::Stage> {
         self.stage.as_deref()

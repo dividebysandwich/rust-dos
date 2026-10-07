@@ -633,7 +633,10 @@ impl Display<'_> {
 
     /// The headset's events; what is worth saying.
     pub fn poll_headset(&mut self) -> Vec<String> {
-        self.stage_mut().map(|stage| stage.poll()).unwrap_or_default()
+        match &mut self.out {
+            Output::Gl(gl) => gl.poll_stage(),
+            Output::Sdl { .. } => Vec::new(),
+        }
     }
 
     /// The PC's lights in the scene, as the machine's are.

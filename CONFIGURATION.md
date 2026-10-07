@@ -663,7 +663,10 @@ The picture on a screen in a 3D scene (see [3D scene and VR](#3d-scene-and-vr)).
   left eye's view in the window). It takes effect at the next start.
 * `scene`: the scene, a glTF file (`.glb`, or `.gltf` with its files)
   exported from Blender, relative to the configuration file's folder.
-  Empty for the built-in room. It takes effect at the next start.
+  Empty for the built-in room. Changed in the settings window, it shows at
+  once. The VR page's *Scene* lists the scenes downloaded and, when asked,
+  those [rust-dos.com](https://rust-dos.com/vr/scenes.json) lists, which
+  Enter downloads into `vr-scenes` in rust-dos's own directory.
 * `controllers`: what a headset's controllers do: `both` (the default: the
   pointing hand is the mouse, the rest a gamepad), `pointer` or `gamepad`.
   See [VR headsets](#vr-headsets).

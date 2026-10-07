@@ -2098,7 +2098,7 @@ fn the_room_this_instance_hosts_shows_who_is_in_it() {
 
 #[test]
 fn every_setting_page_and_dialog_has_help() {
-    let mut used = vec!["mount", "new-image", "new-game", "autoexec", "rooms", "manuals"];
+    let mut used = vec!["mount", "new-image", "new-game", "autoexec", "rooms", "vr-scenes", "manuals"];
     for page in PAGES {
         used.extend(page.help());
         for &item in page.items() {
@@ -2272,4 +2272,56 @@ fn a_game_with_launch_configurations_is_started_as_chosen() {
     ui.show_launch("game", &host);
     ui.key(UiKey::Esc, &mut host);
     assert!(host.variants.is_empty() && !ui.is_open());
+}
+
+#[test]
+fn the_scene_list_asks_rust_dos_com_only_when_told() {
+    let mut host = FakeHost::new();
+    let mut ui = opened(&host);
+    use UiKey::*;
+    ui.settings.vr.mode = crate::vr::VrMode::Headset;
+    ui.settings.vr.scene = Some("/rooms/den.glb".into());
+    ui.show_page(Page::Vr);
+    let Some(row) = ui.items().iter().position(|&i| i == Item::VrScene) else {
+        // A frontend without a window has no scene.
+        assert!(!ui.frontend.window);
+        return;
+    };
+    ui.row = row;
+
+    // Enter opens the list, and asks no one.
+    ui.key(Enter, &mut host);
+    assert!(ui.scenes.is_some() && ui.browser.is_none());
+    assert!(matches!(ui.scene_catalog, scenes::Catalog::NotAsked));
+    let mut frame = Frame::new(1024, 768);
+    ui.draw(&mut frame);
+    assert!(ui.hits.iter().any(|h| matches!(h.target, Target::SceneRow(_))));
+
+    // The scenes rust-dos.com lists, as if asked: the one this rust-dos is
+    // too old for says so, and Enter on it downloads nothing.
+    let scene = |id: &str, requires: &str| -> crate::vr_scenes::SceneInfo {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "name": format!("Room {}", id), "requires": requires, "scene": "room.glb",
+            "files": [{ "path": "room.glb", "url": "https://example.com/room.glb", "size": 2_500_000,
+                        "sha256": "bb7ca6c0348d47c862857888c2024d4351df63b73eb5c94e04847c9c85bb7c16" }],
+        }))
+        .unwrap()
+    };
+    ui.scene_catalog = scenes::Catalog::Got(Ok(vec![scene("future", "999.0")]));
+    ui.draw(&mut frame);
+    keys(&mut ui, &mut host, &[End, Enter]);
+    assert!(ui.scene_download.is_none());
+    assert!(ui.status.as_ref().is_some_and(|s| s.text.contains("needs Rust-DOS 999.0")), "{:?}", ui.status.as_ref().map(|s| &s.text));
+
+    // Home is the test room, which Enter chooses, closing the list.
+    keys(&mut ui, &mut host, &[Home, Enter]);
+    assert!(ui.scenes.is_none() && ui.settings.vr.scene.is_none());
+
+    // Browse picks a file as before.
+    keys(&mut ui, &mut host, &[Enter]);
+    let lines = ui.scene_lines(ui.scenes.as_ref().unwrap());
+    let browse = lines.iter().position(|l| *l == scenes::Line::Browse).unwrap();
+    ui.scenes.as_mut().unwrap().selected = browse;
+    ui.key(Enter, &mut host);
+    assert!(ui.scenes.is_none() && ui.browser.is_some());
 }

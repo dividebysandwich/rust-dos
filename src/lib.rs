@@ -101,4 +101,5 @@ pub mod vhd;
 pub mod video;
 pub mod voodoo;
 pub mod vr;
+pub mod vr_scenes;
 pub mod xms;

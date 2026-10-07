@@ -165,6 +165,8 @@ struct State {
     /// How brightly the screen lights the scene (`Gpu::set_glow`).
     glow: f32,
     placement: Placement,
+    /// A scene to show instead, once the thread takes it.
+    scene: Option<Arc<Scene>>,
     recenter: bool,
     // From the headset.
     /// The left eye's view, with its view-projection.
@@ -312,6 +314,11 @@ impl Headset {
         self.shared.lock().controllers = controllers;
     }
 
+    /// Show `scene` from now on.
+    pub fn set_scene(&self, scene: Arc<Scene>) {
+        self.shared.lock().scene = Some(scene);
+    }
+
     pub fn set_placement(&self, placement: Placement) {
         self.shared.lock().placement = placement;
     }
@@ -436,7 +443,7 @@ fn run(
                 sdl2::sys::SDL_GL_GetProcAddress(name.as_ptr()) as *const _
             })
         };
-        if let Err(e) = session(&shared, &gl, glsl, &scene, screens, quality) {
+        if let Err(e) = session(&shared, &gl, glsl, scene, screens, quality) {
             shared.note(e);
         }
         // SAFETY: as above.
@@ -455,11 +462,11 @@ fn session(
     shared: &Shared,
     gl: &glow::Context,
     glsl: Glsl,
-    scene: &Scene,
+    mut scene: Arc<Scene>,
     screens: [glow::Texture; 3],
     quality: VrQuality,
 ) -> Result<(), String> {
-    let mut gpu = Gpu::new(gl, glsl, scene, quality)?;
+    let mut gpu = Gpu::new(gl, glsl, &scene, quality)?;
     let mut xr = Xr::new(gl).map_err(|e| format!("No headset ({}); the scene is shown in the window", e))?;
     shared.note(xr.describe().to_string());
     // The window's view of the left eye, at half its size.
@@ -492,6 +499,21 @@ fn session(
     let mut controllers = Controllers::default();
     let mut screen: Option<usize> = None;
     while !shared.stop.load(Ordering::Relaxed) {
+        // Another scene, with the screen's picture lighting it: the old one
+        // stays if it can't be drawn.
+        let next = shared.lock().scene.take();
+        if let Some(next) = next {
+            match Gpu::new(gl, glsl, &next, quality) {
+                Ok(made) => {
+                    std::mem::replace(&mut gpu, made).delete(gl);
+                    if let Some(index) = screen {
+                        gpu.prepare(gl, screens[index]);
+                    }
+                    scene = next;
+                }
+                Err(e) => shared.note(format!("The headset can't show the scene: {}", e)),
+            }
+        }
         let (notes, lost) = xr.poll();
         for note in notes {
             shared.note(note);
@@ -551,7 +573,7 @@ fn session(
         let picture = screen.map(|i| screens[i]);
         let mut left = None;
         let drawn = xr.draw(world, |eye, view, eye_size, srgb, framebuffer| {
-            if let Err(e) = gpu.render(gl, scene, &view, Format { size: eye_size, srgb }, picture, leds, &extras) {
+            if let Err(e) = gpu.render(gl, &scene, &view, Format { size: eye_size, srgb }, picture, leds, &extras) {
                 eprintln!("[VR] {}", e);
                 return;
             }

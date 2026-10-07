@@ -289,9 +289,10 @@ Other things to keep in mind:
 Pick the file in any of these ways:
 
 - **Settings window:** Ctrl+F12, the **VR** tab. Set *3D scene* to *3d in 2d
-  window* or *VR headset*, and pick the file under *Scene* (Delete
-  goes back to the test room). Save with F2. The scene loads at the
-  **next start**.
+  window* or *VR headset* (that takes effect at the next start). Enter on
+  *Scene* opens the list of scenes: pick *Browse for a scene file* and
+  your file. It shows at once, and F2 keeps it. Delete on *Scene* goes
+  back to the test room.
 - **Configuration file:** in `rust-dos.conf` (relative paths are from the
   file's folder):
 
@@ -314,6 +315,42 @@ A room that can't be loaded (a missing file, a picture that isn't PNG or
 JPEG, no screen) is replaced by the test room. The reason is printed in the
 terminal and written to the [log file](../README.md#log-file)
 (`Rust-DOS.log`), on a line starting with `[VR]`.
+
+## Sharing a room
+
+The settings window's scene list offers the rooms listed in
+[`vr/scenes.json`](https://rust-dos.com/vr/scenes.json) on rust-dos.com,
+for players to download with Enter. To have yours listed, put its files
+where they can be downloaded over HTTPS at a fixed address (a GitHub
+repository's files at a commit, or a release), and ask for an entry in the
+website's repository, `rust-dos-site`:
+
+```json
+{
+  "id": "myroom",
+  "name": "My room",
+  "version": "1",
+  "author": "you",
+  "description": "What the player sees, in a sentence or two.",
+  "license": "CC BY 4.0",
+  "homepage": "https://github.com/you/myroom",
+  "requires": "1.4.0",
+  "scene": "myroom.glb",
+  "files": [
+    { "path": "myroom.glb", "url": "https://...", "size": 1234567, "sha256": "..." }
+  ]
+}
+```
+
+- `id` is the folder the room is downloaded into: lowercase letters,
+  digits, `-` and `_`.
+- `scene` is the file Rust-DOS loads. A `.gltf` lists its `.bin` and
+  pictures in `files` too, with their paths beside it; a credits file can
+  come along the same way.
+- `size` (in bytes) and `sha256` are checked for every file, so a room
+  that doesn't match isn't kept.
+- A new `version` shows players an update.
+- `requires` is the oldest Rust-DOS the room works with.
 
 ## Checking a room
 

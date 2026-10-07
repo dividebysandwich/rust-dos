@@ -23,12 +23,28 @@ Takes effect the next time Rust-DOS starts, or with `--vr` and
 # Scene {#vr-scene}
 
 The 3D scene the screen is in: a glTF file (`.glb` or `.gltf`) exported
-from Blender, whose mesh named `screen` shows the picture. **Delete**
-goes back to the built-in test room.
+from Blender, whose mesh named `screen` shows the picture. **Enter** opens
+the list of scenes: the built-in test room, those downloaded from
+rust-dos.com, and a file of your own. **Delete** goes back to the test
+room.
 
 Meshes named `led_power`, `led_turbo`, `led_hdd` and `led_floppy` light
 up as the PC's lights do, and empties named `speaker_left` and
 `speaker_right` are where the sound comes from.
+
+# Choose a scene {#vr-scenes}
+
+**On this computer**: the test room and the scenes downloaded. **Enter**
+chooses one, **Delete** deletes a downloaded one. *Browse for a scene
+file* picks a `.glb` or `.gltf` of your own.
+
+**On rust-dos.com**: *Show the scenes rust-dos.com has* asks the website
+for its list; nothing is asked before. **Enter** on a scene downloads it
+(its size is beside it), checks every file, and chooses it. *update*
+means a newer one is there.
+
+Scenes are kept in `vr-scenes` in Rust-DOS's folder. The scene chosen
+shows at once, in the window and the headset; **F2** keeps it.
 
 # Picture on the screen {#vr-screen-fit}
 
