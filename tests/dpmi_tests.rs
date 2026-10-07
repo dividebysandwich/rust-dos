@@ -152,6 +152,15 @@ fn services_program(bits32: bool) -> Vec<u8> {
         a.jc(fail)?;
         a.mov(word_ptr(R + 14), ax)?;
         a.mov(word_ptr(R + 16), bx)?;
+        // The coprocessor, as DJGPP's startup asks, and emulation off.
+        a.mov(ax, 0x0E00)?;
+        a.int(0x31)?;
+        a.jc(fail)?;
+        a.mov(word_ptr(R + 42), ax)?;
+        a.mov(ax, 0x0E01)?;
+        a.mov(bx, 1)?;
+        a.int(0x31)?;
+        a.jc(fail)?;
         // A descriptor with DS's base and a 64 KB limit, read through.
         step(a, 11)?;
         a.xor(ax, ax)?;
@@ -439,6 +448,8 @@ fn check_services(bits32: bool) {
     assert_eq!(w(R + 12) & 7, 7);
     // DPMI 0.90 of a 32-bit host that goes to real mode.
     assert_eq!((w(R + 14), w(R + 16) & 3), (0x005A, 3));
+    // A coprocessor, enabled for the client and not emulated.
+    assert_eq!(w(R + 42) & 0x0F, 0x05);
     assert_eq!(w(R + 18) & 7, 7);
     assert_eq!(w(R + 20), MAGIC_VALUE);
     let linear = (w(R + 24) as usize) << 16 | w(R + 22) as usize;

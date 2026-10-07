@@ -449,6 +449,11 @@ fn service(cpu: &mut Cpu, ctx: &mut Context, function: u16) -> Result {
         // Debug watchpoints: none to set, so none to clear.
         0x0B00 => return Err(HANDLE_UNAVAILABLE),
         0x0B01..=0x0B03 => return Err(INVALID_HANDLE),
+        // The coprocessor (DPMI 1.0, which DJGPP's startup asks for): one
+        // is there and enabled for the client (MP), none emulated, a 387
+        // or the processor's own; setting emulation off is all there is.
+        0x0E00 => ctx.set_reg16(EAX, 0x0005 | (cpu.model.family().clamp(3, 4) as u16) << 4),
+        0x0E01 if ctx.reg16(EBX) & 2 == 0 => {}
         _ => return Err(UNSUPPORTED),
     }
     Ok(())
