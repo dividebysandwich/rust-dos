@@ -145,7 +145,9 @@ fn renders_a_snapshot() {
     let read = |ext: &str| std::fs::read(format!("{}.{}", base, ext)).unwrap();
     let regs: Vec<u32> = read("regs").chunks(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
     let (tex, ram) = (read("tex"), read("ram"));
-    let shader = rust_dos::powervr::tsp::Shader::default();
+    // RUST_DOS_POWERVR_FILTER=point or bilinear overrides the game's.
+    let filter = std::env::var("RUST_DOS_POWERVR_FILTER").ok().and_then(|f| rust_dos::powervr::tsp::Filter::parse(&f));
+    let shader = rust_dos::powervr::tsp::Shader { filter: filter.unwrap_or_default() };
     let start = std::time::Instant::now();
     let rendered = rust_dos::powervr::render::render(&regs, &tex, rust_dos::powervr::render::Memory { ram: &ram }, &shader);
     eprintln!(

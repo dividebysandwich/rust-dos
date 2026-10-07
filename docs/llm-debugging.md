@@ -333,7 +333,8 @@ outside the VESA linear frame buffer.
 
 `RUST_DOS_POWERVR_TRACE=<dir>` in the environment writes every access to
 the card into `<dir>/trace.txt`, and the registers, texture memory and
-the machine's RAM at the first four renders and every thousandth as
+the machine's RAM at the first four renders and every thousandth (every
+`RUST_DOS_POWERVR_TRACE_EVERY`th) as
 `render-N.regs`, `.tex` and `.ram`. `RUST_DOS_POWERVR_SNAPSHOT=<dir>/render-N
 cargo test --release --test powervr_tests -- --ignored renders_a_snapshot`
 renders one into `render-N.png`, and prints the time it took.

@@ -155,6 +155,8 @@ pub struct PowerVr {
 struct Trace {
     dir: std::path::PathBuf,
     out: std::io::BufWriter<std::fs::File>,
+    /// Snapshots of every this many renders (`RUST_DOS_POWERVR_TRACE_EVERY`).
+    every: u32,
 }
 
 impl PowerVr {
@@ -175,7 +177,10 @@ impl PowerVr {
         if let Ok(dir) = std::env::var("RUST_DOS_POWERVR_TRACE") {
             let dir = std::path::PathBuf::from(dir);
             match std::fs::create_dir_all(&dir).and_then(|_| std::fs::File::create(dir.join("trace.txt"))) {
-                Ok(file) => *card.trace.get_mut() = Some(Trace { dir, out: std::io::BufWriter::new(file) }),
+                Ok(file) => {
+                    let every = std::env::var("RUST_DOS_POWERVR_TRACE_EVERY").ok().and_then(|n| n.parse().ok()).unwrap_or(1000);
+                    *card.trace.get_mut() = Some(Trace { dir, out: std::io::BufWriter::new(file), every: u32::max(every, 1) });
+                }
                 Err(e) => card.log.push(format!("[PVR] Can't trace into {}: {}", dir.display(), e)),
             }
         }
@@ -374,11 +379,12 @@ impl PowerVr {
     }
 
     /// The number of the render that just started, if the trace wants
-    /// a snapshot of it: the first ones, and every 1000th.
+    /// a snapshot of it: the first ones, and every 1000th (or as many as
+    /// `RUST_DOS_POWERVR_TRACE_EVERY` says).
     pub fn snapshot_wanted(&self) -> Option<(std::path::PathBuf, u32)> {
         let trace = self.trace.borrow();
         let n = self.renders;
-        trace.as_ref().filter(|_| n <= 4 || n.is_multiple_of(1000)).map(|t| (t.dir.clone(), n))
+        trace.as_ref().filter(|t| n <= 4 || n.is_multiple_of(t.every)).map(|t| (t.dir.clone(), n))
     }
 
     // --- Texture memory ---
