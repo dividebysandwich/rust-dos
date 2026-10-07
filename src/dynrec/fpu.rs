@@ -155,7 +155,7 @@ pub fn translate(instr: &Instruction, fast: bool, u: &mut Vec<Uop>) -> bool {
             }
             u.push(Uop::FGet { x: X1, i: 0 });
             let (num, den) = if reversed { (X0, X1) } else { (X1, X0) };
-            u.push(Uop::FDiv { i: 0, num, den, ze: reversed });
+            u.push(Uop::FDiv { i: 0, num, den });
         }
         Fadd_m64fp | Fsub_m64fp | Fsubr_m64fp => {
             let kind = match instr.code() {
@@ -320,7 +320,7 @@ pub fn translate(instr: &Instruction, fast: bool, u: &mut Vec<Uop>) -> bool {
             }
             u.push(Uop::FGet { x: X1, i: 0 });
             let (num, den) = if reversed { (X0, X1) } else { (X1, X0) };
-            u.push(Uop::FDiv { i: 0, num, den, ze: reversed });
+            u.push(Uop::FDiv { i: 0, num, den });
         }
         Fdiv_st0_sti | Fdiv_sti_st0 | Fdivr_st0_sti | Fdivr_sti_st0 | Fdivp_sti_st0 | Fdivrp_sti_st0 => {
             let pop = matches!(instr.code(), Fdivp_sti_st0 | Fdivrp_sti_st0);
@@ -332,7 +332,7 @@ pub fn translate(instr: &Instruction, fast: bool, u: &mut Vec<Uop>) -> bool {
             u.push(Uop::FGet { x: X0, i: dst });
             u.push(Uop::FGet { x: X1, i: src });
             let (num, den) = if reversed { (X1, X0) } else { (X0, X1) };
-            u.push(Uop::FDiv { i: dst, num, den, ze: reversed });
+            u.push(Uop::FDiv { i: dst, num, den });
             if pop {
                 u.push(Uop::FPop { n: 1 });
             }

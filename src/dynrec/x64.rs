@@ -1970,27 +1970,9 @@ impl Gen<'_> {
             Uop::FMul { a, b } => dynasm!(self.ops ; .arch x64 ; mulsd Rx(a.0), Rx(b.0)),
             Uop::FAdd { a, b, sub: false } => dynasm!(self.ops ; .arch x64 ; addsd Rx(a.0), Rx(b.0)),
             Uop::FAdd { a, b, sub: true } => dynasm!(self.ops ; .arch x64 ; subsd Rx(a.0), Rx(b.0)),
-            Uop::FDiv { i, num, den, ze } => {
+            Uop::FDiv { i, num, den } => {
                 dynasm!(self.ops
                     ; .arch x64
-                    ; xorpd xmm2, xmm2
-                    ; ucomisd Rx(den.0), xmm2
-                    ; jne >fdiv_go
-                    ; jp >fdiv_go
-                );
-                self.save_for_call();
-                dynasm!(self.ops
-                    ; .arch x64
-                    ; mov edx, i as i32 | (ze as i32) << 8
-                    ; mov rsi, r12
-                    ; mov rdi, rbx
-                    ; call QWORD [r12 + CTX_FPU + 24]
-                );
-                self.restore_after_call();
-                dynasm!(self.ops
-                    ; .arch x64
-                    ; jmp >fdiv_done
-                    ; fdiv_go:
                     ; movsd xmm2, Rx(num.0)
                     ; divsd xmm2, Rx(den.0)
                 );
@@ -2000,8 +1982,23 @@ impl Gen<'_> {
                     ; .arch x64
                     ; movsd QWORD [rbx + rax * 8 + FPU_F64], xmm2
                     ; mov BYTE [rbx + rax + FPU_STALE], 1
-                    ; fdiv_done:
+                    // A division by 0 (not a NaN, which compares unordered)
+                    // is finished by the handler.
+                    ; xorpd xmm2, xmm2
+                    ; ucomisd Rx(den.0), xmm2
+                    ; jne >fdiv_done
+                    ; jp >fdiv_done
                 );
+                self.save_for_call();
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; mov edx, i as i32
+                    ; mov rsi, r12
+                    ; mov rdi, rbx
+                    ; call QWORD [r12 + CTX_FPU + 24]
+                );
+                self.restore_after_call();
+                dynasm!(self.ops ; .arch x64 ; fdiv_done:);
             }
             Uop::FAddSt { dst, a, b, sub } => {
                 self.fpu_addsub([a, b, dst], sub, None);

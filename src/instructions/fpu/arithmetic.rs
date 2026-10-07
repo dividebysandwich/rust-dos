@@ -74,23 +74,27 @@ fn real_operand(cpu: &mut Cpu, instr: &Instruction) -> Option<f64> {
     }
 }
 
-/// ST(i) = dividend / divisor as doubles, or what a division by 0 leaves
-/// (`divided_by_zero`, with ZE for the reversed divisions).
-fn divide(cpu: &mut Cpu, i: usize, dividend: f64, divisor: f64, reversed: bool) {
-    if divisor != 0.0 {
-        cpu.fpu_set_f64(i, dividend / divisor);
-    } else {
-        divided_by_zero(cpu, i, reversed);
+/// ST(i) = dividend / divisor as doubles; a division by 0 then as
+/// `divided_by_zero` finishes it.
+fn divide(cpu: &mut Cpu, i: usize, dividend: f64, divisor: f64) {
+    cpu.fpu_set_f64(i, dividend / divisor);
+    if divisor == 0.0 {
+        divided_by_zero(cpu, i);
     }
 }
 
-/// The quotient of a division by 0: ST(i) is the real indefinite, and
-/// the reversed divisions set ZE as well.
-pub fn divided_by_zero(cpu: &mut Cpu, i: usize, ze: bool) {
-    let mut v = F80::new();
-    v.set_real_indefinite();
-    cpu.fpu_set(i, v);
-    if ze {
+/// A division by 0 whose quotient as doubles divide (±infinity, or a NaN
+/// for 0/0) is in ST(i), finished as a 387 with its exceptions masked
+/// does: x/0 is the infinity, with ZE; 0/0 the real indefinite, with IE.
+/// (DJGPP's startup tells a 387 from a 287 by 1/0's sign.)
+pub fn divided_by_zero(cpu: &mut Cpu, i: usize) {
+    let quotient = cpu.fpu_get(i);
+    if quotient.is_nan() {
+        let mut v = F80::new();
+        v.set_real_indefinite();
+        cpu.fpu_set(i, v);
+        cpu.set_fpu_flag(FpuFlags::IE, true);
+    } else {
         cpu.set_fpu_flag(FpuFlags::ZE, true);
     }
 }
@@ -155,13 +159,7 @@ pub fn fimul(cpu: &mut Cpu, instr: &Instruction) {
 pub fn fidiv(cpu: &mut Cpu, instr: &Instruction) {
     let addr = calculate_addr(cpu, instr);
     let val = cpu.load_int_to_f80(addr, instr.memory_size()).get_f64();
-    let mut st0 = cpu.fpu_get(0);
-    if val != 0.0 {
-        st0.set_f64(st0.get_f64() / val);
-    } else {
-        st0.set_f64(f64::INFINITY);
-    }
-    cpu.fpu_set(0, st0);
+    divide(cpu, 0, cpu.fpu_get_f64(0), val);
 }
 
 // FIDIVR: Reverse Integer Divide
@@ -169,14 +167,7 @@ pub fn fidiv(cpu: &mut Cpu, instr: &Instruction) {
 pub fn fidivr(cpu: &mut Cpu, instr: &Instruction) {
     let addr = calculate_addr(cpu, instr);
     let val = cpu.load_int_to_f80(addr, instr.memory_size()).get_f64();
-    let mut st0 = cpu.fpu_get(0);
-    let st0_f = st0.get_f64();
-    if st0_f != 0.0 {
-        st0.set_f64(val / st0_f);
-    } else {
-        st0.set_real_indefinite();
-    }
-    cpu.fpu_set(0, st0);
+    divide(cpu, 0, val, cpu.fpu_get_f64(0));
 }
 
 // FADD: Add Real
@@ -309,18 +300,18 @@ pub fn fmulp(cpu: &mut Cpu, instr: &Instruction) {
 pub fn fdiv(cpu: &mut Cpu, instr: &Instruction) {
     if instr.op0_kind() == OpKind::Memory {
         let divisor = canon_f64(real_operand(cpu, instr).unwrap_or(0.0));
-        divide(cpu, 0, cpu.fpu_get_f64(0), divisor, false);
+        divide(cpu, 0, cpu.fpu_get_f64(0), divisor);
     } else {
         let dst_idx = (instr.op0_register().number() - Register::ST0.number()) as usize;
         let src_idx = (instr.op1_register().number() - Register::ST0.number()) as usize;
-        divide(cpu, dst_idx, cpu.fpu_get_f64(dst_idx), cpu.fpu_get_f64(src_idx), false);
+        divide(cpu, dst_idx, cpu.fpu_get_f64(dst_idx), cpu.fpu_get_f64(src_idx));
     }
 }
 
 // FDIVP: Divide and Pop
 pub fn fdivp(cpu: &mut Cpu, instr: &Instruction) {
     let idx = get_pop_dst_index(instr);
-    divide(cpu, idx, cpu.fpu_get_f64(idx), cpu.fpu_get_f64(0), false);
+    divide(cpu, idx, cpu.fpu_get_f64(idx), cpu.fpu_get_f64(0));
     cpu.fpu_drop();
 }
 
@@ -329,13 +320,13 @@ pub fn fdivr(cpu: &mut Cpu, instr: &Instruction) {
     if instr.op0_kind() == OpKind::Memory {
         // FDIVR [mem] -> ST(0) = [mem] / ST(0)
         let val = canon_f64(real_operand(cpu, instr).unwrap_or(1.0));
-        divide(cpu, 0, val, cpu.fpu_get_f64(0), true);
+        divide(cpu, 0, val, cpu.fpu_get_f64(0));
     } else {
         let dst_idx = (instr.op0_register().number() - Register::ST0.number()) as usize;
         let src_idx = (instr.op1_register().number() - Register::ST0.number()) as usize;
         // FDIVR ST(0), ST(i) -> ST(0) = ST(i) / ST(0)
         // FDIVR ST(i), ST(0) -> ST(i) = ST(0) / ST(i)
-        divide(cpu, dst_idx, cpu.fpu_get_f64(src_idx), cpu.fpu_get_f64(dst_idx), true);
+        divide(cpu, dst_idx, cpu.fpu_get_f64(src_idx), cpu.fpu_get_f64(dst_idx));
     }
 }
 
@@ -343,7 +334,7 @@ pub fn fdivr(cpu: &mut Cpu, instr: &Instruction) {
 // ST(i) = ST(0) / ST(i); Pop ST(0)
 pub fn fdivrp(cpu: &mut Cpu, instr: &Instruction) {
     let idx = get_pop_dst_index(instr);
-    divide(cpu, idx, cpu.fpu_get_f64(0), cpu.fpu_get_f64(idx), true);
+    divide(cpu, idx, cpu.fpu_get_f64(0), cpu.fpu_get_f64(idx));
     cpu.fpu_drop();
 }
 

@@ -2067,29 +2067,27 @@ impl Gen<'_> {
             Uop::FMul { a, b } => dynasm!(self.ops ; .arch aarch64 ; fmul D(d(a)), D(d(a)), D(d(b))),
             Uop::FAdd { a, b, sub: false } => dynasm!(self.ops ; .arch aarch64 ; fadd D(d(a)), D(d(a)), D(d(b))),
             Uop::FAdd { a, b, sub: true } => dynasm!(self.ops ; .arch aarch64 ; fsub D(d(a)), D(d(a)), D(d(b))),
-            Uop::FDiv { i, num, den, ze } => {
+            Uop::FDiv { i, num, den } => {
+                dynasm!(self.ops ; .arch aarch64 ; fdiv d16, D(d(num)), D(d(den)));
+                self.fpu_canon(16);
+                self.fpu_phys(1, i);
+                self.fpu_store(1, 16);
                 // A division by 0 (not a NaN, which compares unordered) is
-                // the handler's.
+                // finished by the handler.
                 dynasm!(self.ops
                     ; .arch aarch64
                     ; fcmp D(d(den)), 0.0
-                    ; b.ne >fdiv_go
+                    ; b.ne >fdiv_done
                     ; mov x0, x19
                     ; mov x1, x20
                 );
-                self.mov32(2, i as u32 | (ze as u32) << 8);
+                self.mov32(2, i as u32);
                 dynasm!(self.ops
                     ; .arch aarch64
                     ; ldr x16, [x20, (CTX_FPU + 24) as u32]
                     ; blr x16
-                    ; b >fdiv_done
-                    ; fdiv_go:
-                    ; fdiv d16, D(d(num)), D(d(den))
+                    ; fdiv_done:
                 );
-                self.fpu_canon(16);
-                self.fpu_phys(1, i);
-                self.fpu_store(1, 16);
-                dynasm!(self.ops ; .arch aarch64 ; fdiv_done:);
             }
             Uop::FAddSt { dst, a, b, sub } => {
                 self.fpu_addsub([a, b, dst], sub);

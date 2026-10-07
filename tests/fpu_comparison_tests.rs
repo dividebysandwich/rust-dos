@@ -169,3 +169,15 @@ fn test_nan_unordered_compare() {
     assert!(cpu.get_fpu_flag(FpuFlags::C2));
     assert!(cpu.get_fpu_flag(FpuFlags::C3));
 }
+#[test]
+fn djgpp_finds_a_387() {
+    // DJGPP's _detect_80387: 1/0 is +inf (zero divide masked), and +inf
+    // isn't -inf, as a 287 would say with its projective infinity.
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    for code in [[0xDB, 0xE3], [0xD9, 0xE8], [0xD9, 0xEE], [0xDE, 0xF9], [0xD9, 0xC0], [0xD9, 0xE0], [0xDE, 0xD9]] {
+        testrunners::run_fpu_code(&mut cpu, &code);
+    }
+    let flags = cpu.get_fpu_flags();
+    assert!(!flags.contains(FpuFlags::C3), "+inf and -inf are not equal: {:?}", flags);
+    assert!(!flags.contains(FpuFlags::C2), "nor unordered: {:?}", flags);
+}

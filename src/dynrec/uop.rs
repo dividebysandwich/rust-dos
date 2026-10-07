@@ -291,9 +291,9 @@ pub enum Uop {
     FMul { a: X, b: X },
     /// a += b, or -= with `sub` (fast mode's `arithmetic::sum`).
     FAdd { a: X, b: X, sub: bool },
-    /// ST(i) = num / den, or with a divisor of 0 the real indefinite, and
-    /// ZE set with `ze` (`fpu::arithmetic::divided_by_zero`).
-    FDiv { i: u8, num: X, den: X, ze: bool },
+    /// ST(i) = num / den, a divisor of 0 then finished by
+    /// `fpu::arithmetic::divided_by_zero`.
+    FDiv { i: u8, num: X, den: X },
     /// ST(dst) = ST(a) + ST(b), or - with `sub`, as their 80 bits add
     /// (`fpu::arithmetic::addsub_st`).
     FAddSt { dst: u8, a: u8, b: u8, sub: bool },

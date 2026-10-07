@@ -922,11 +922,9 @@ jit_fn! {
 }
 
 jit_fn! {
-    /// `Uop::FDiv` by 0: `desc` is the register, and ze << 8.
+    /// `Uop::FDiv` by 0, its quotient stored: `desc` is the register.
     fn jit_fpu_div_zero(cpu: *mut Cpu, ctx: *mut JitCtx, desc: u32) -> u32 {
-        fpu_helper(cpu, ctx, |cpu| {
-            crate::instructions::fpu::arithmetic::divided_by_zero(cpu, (desc & 7) as usize, desc >> 8 & 1 != 0)
-        });
+        fpu_helper(cpu, ctx, |cpu| crate::instructions::fpu::arithmetic::divided_by_zero(cpu, (desc & 7) as usize));
         0
     }
 }
