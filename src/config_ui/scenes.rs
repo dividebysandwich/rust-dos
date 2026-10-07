@@ -436,9 +436,9 @@ impl ConfigUi {
     /// Where a scene chosen shows.
     fn shown_now(&self) -> &'static str {
         if self.settings.vr.mode == crate::vr::VrMode::Off {
-            "active: This scene is currently being rendered"
+            "chosen (F2 keeps it)"
         } else {
-            "shown (F2 keeps it)"
+            "active: This scene is currently being rendered"
         }
     }
 }

@@ -17,8 +17,10 @@ Where the picture is shown:
 - **VR headset**: render in a connected VR headset, desktop shows left eye
 view. Without a headset, the scene shows in the window.
 
-Takes effect the next time Rust-DOS starts, or with `--vr` and
-`--vr-desktop` on the command line.
+Takes effect at once; `--vr` and `--vr-desktop` choose it on the command
+line. On Linux a headset needs X11, which Rust-DOS picks only when it
+starts with the headset on: turned on later under Wayland, keep it with
+**F2** and start Rust-DOS again.
 
 # Scene {#vr-scene}
 
@@ -71,7 +73,7 @@ How much of the scene's lighting is worked out:
 
 The bounced light is worked out when the scene loads, the first time in
 a second or so, and kept in `vr-cache` in Rust-DOS's folder for the next.
-It takes effect at the next start.
+It takes effect at once.
 
 # Light from the screen {#vr-screen-glow}
 

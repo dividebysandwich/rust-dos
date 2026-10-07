@@ -1048,8 +1048,8 @@ impl Item {
             | RecordShader => Applies::Now,
             Joystick | Deadzone | SpeakerFilter | SbFilter | Reverb | Chorus | ReverbMix | ChorusMix => Applies::Now,
             Rooms => Applies::Now,
-            Memsize | Autoexec | Lan | LanHost | VrMode | VrQuality => Applies::NextStart,
-            VrScene | VrControllers | VrSpatialAudio | VrScreenFit | VrScreenGlow | VrCenter | VrSceneScale | VrSeat(_) | VrSeatTurn => {
+            Memsize | Autoexec | Lan | LanHost => Applies::NextStart,
+            VrMode | VrQuality | VrScene | VrControllers | VrSpatialAudio | VrScreenFit | VrScreenGlow | VrCenter | VrSceneScale | VrSeat(_) | VrSeatTurn => {
                 Applies::Now
             }
             _ => Applies::AtPrompt,

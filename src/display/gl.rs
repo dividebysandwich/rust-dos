@@ -519,6 +519,22 @@ impl GlScreen {
         Ok(notes)
     }
 
+    /// Take on the `[vr]` settings: the scene shown, closed with `mode`
+    /// off, or changed. What is worth saying about it.
+    #[cfg(feature = "vr")]
+    pub fn apply_stage(&mut self, settings: &rust_dos::vr::VrSettings) -> Vec<String> {
+        if settings.mode == rust_dos::vr::VrMode::Off {
+            if let Some(stage) = self.stage.take() {
+                stage.close(&self.gl);
+            }
+            return Vec::new();
+        }
+        match &mut self.stage {
+            Some(stage) => stage.apply(&self.gl, settings, &self.window, &self._context),
+            None => self.open_stage(settings).unwrap_or_else(|e| vec![format!("[VR] No 3D scene: {}", e)]),
+        }
+    }
+
     /// The 3D scene's news: the headset's, and a scene read since, which
     /// takes the place of the one shown.
     #[cfg(feature = "vr")]

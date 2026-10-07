@@ -60,6 +60,8 @@ pub struct Stage {
     fit: ScreenFit,
     /// What the scene's programs are made for and with.
     glsl: Glsl,
+    /// Where the scene is shown: in the window, or in a headset as well.
+    mode: VrMode,
     quality: VrQuality,
     glow: f32,
     /// The scene file shown (None: the test room), and the one being read
@@ -122,24 +124,60 @@ impl Stage {
             shown: None,
             fit: settings.screen_fit,
             glsl,
+            mode: settings.mode,
             quality: settings.quality,
             glow: glow_of(settings),
             scene_path: settings.scene.clone(),
             loading: None,
         };
         if settings.mode == VrMode::Headset {
-            #[cfg(xr)]
-            {
-                let textures = [stage.screens[0].texture, stage.screens[1].texture, stage.screens[2].texture];
-                match headset::Headset::start(window, main, glsl, stage.scene.clone(), textures, settings) {
-                    Ok(headset) => stage.headset = Some(headset),
-                    Err(e) => notes.push(format!("[VR] No headset ({}); the scene is shown in the window", e)),
-                }
-            }
-            #[cfg(not(xr))]
-            notes.push("[VR] This build has no OpenXR; the scene is shown in the window".to_string());
+            notes.extend(stage.start_headset(settings, window, main));
         }
         Ok((stage, notes))
+    }
+
+    /// Show the scene in a headset too; why it isn't, if it can't be.
+    #[cfg_attr(not(xr), allow(unused_variables))]
+    fn start_headset(
+        &mut self,
+        settings: &VrSettings,
+        window: &sdl2::video::Window,
+        main: &sdl2::video::GLContext,
+    ) -> Option<String> {
+        #[cfg(xr)]
+        {
+            let textures = [self.screens[0].texture, self.screens[1].texture, self.screens[2].texture];
+            match headset::Headset::start(window, main, self.glsl, self.scene.clone(), textures, settings) {
+                Ok(headset) => {
+                    self.headset = Some(headset);
+                    None
+                }
+                Err(e) => Some(format!("[VR] No headset ({}); the scene is shown in the window", e)),
+            }
+        }
+        #[cfg(not(xr))]
+        Some("[VR] This build has no OpenXR; the scene is shown in the window".to_string())
+    }
+
+    /// The headset's session over, and the window showing the scene
+    /// through its own camera, with `gl` current.
+    #[cfg_attr(not(xr), allow(unused_variables))]
+    fn stop_headset(&mut self, gl: &glow::Context) {
+        #[cfg(xr)]
+        if let Some(headset) = self.headset.take() {
+            headset.close(gl);
+            self.shown = None;
+        }
+    }
+
+    /// Delete everything it made, the headset's session ended first, with
+    /// `gl` current. (A scene still being read is let go of.)
+    pub fn close(mut self, gl: &glow::Context) {
+        self.stop_headset(gl);
+        self.gpu.delete(gl);
+        for screen in self.screens {
+            screen.delete(gl);
+        }
     }
 
     /// The size the picture is drawn at for the screen, for a picture of
@@ -325,8 +363,38 @@ impl Stage {
         }
     }
 
-    /// Take on the `[vr]` settings that change while it runs.
-    pub fn apply(&mut self, settings: &VrSettings) {
+    /// Take on the `[vr]` settings but for `mode` off, which closes it: the
+    /// headset started or stopped, and the lighting worked out again at
+    /// another quality, in the window and the headset. What is worth
+    /// saying about it.
+    pub fn apply(
+        &mut self,
+        gl: &glow::Context,
+        settings: &VrSettings,
+        window: &sdl2::video::Window,
+        main: &sdl2::video::GLContext,
+    ) -> Vec<String> {
+        let mut notes = Vec::new();
+        let mut restart = false;
+        if settings.quality != self.quality {
+            match Gpu::new(gl, self.glsl, &self.scene, settings.quality) {
+                Ok(gpu) => {
+                    std::mem::replace(&mut self.gpu, gpu).delete(gl);
+                    self.quality = settings.quality;
+                    self.fresh = self.latest.is_some();
+                    // The headset's thread lights with its own, made as it starts.
+                    restart = self.has_headset();
+                }
+                Err(e) => notes.push(format!("[VR] The lighting can't be changed: {}", e)),
+            }
+        }
+        if settings.mode != self.mode || restart {
+            self.stop_headset(gl);
+            if settings.mode == VrMode::Headset {
+                notes.extend(self.start_headset(settings, window, main));
+            }
+            self.mode = settings.mode;
+        }
         self.fit = settings.screen_fit;
         self.glow = glow_of(settings);
         self.gpu.set_glow(self.glow);
@@ -337,6 +405,7 @@ impl Stage {
             headset.set_glow(glow_of(settings));
             headset.set_placement(headset::Placement::of(settings));
         }
+        notes
     }
 
     /// The controllers' input, while the headset shows the scene.

@@ -646,10 +646,16 @@ impl Display<'_> {
         }
     }
 
-    /// Take on the `[vr]` settings that change while it runs.
-    pub fn apply_vr(&mut self, settings: &rust_dos::vr::VrSettings) {
-        if let Some(stage) = self.stage_mut() {
-            stage.apply(settings);
+    /// Take on the `[vr]` settings: the scene shown or not, in the window
+    /// or a headset, as `mode` says. What is worth saying about it.
+    pub fn apply_vr(&mut self, settings: &rust_dos::vr::VrSettings) -> Vec<String> {
+        self.redraw = true;
+        match &mut self.out {
+            Output::Gl(gl) => gl.apply_stage(settings),
+            Output::Sdl { .. } if settings.mode != rust_dos::vr::VrMode::Off => {
+                vec!["[VR] The 3D scene needs OpenGL 3, which isn't available here".to_string()]
+            }
+            Output::Sdl { .. } => Vec::new(),
         }
     }
 
@@ -689,7 +695,13 @@ impl Display<'_> {
 impl Display<'_> {
     pub fn set_leds(&mut self, _leds: rust_dos::vr::Leds) {}
 
-    pub fn apply_vr(&mut self, _settings: &rust_dos::vr::VrSettings) {}
+    pub fn apply_vr(&mut self, settings: &rust_dos::vr::VrSettings) -> Vec<String> {
+        if settings.mode == rust_dos::vr::VrMode::Off {
+            Vec::new()
+        } else {
+            self.open_stage(settings)
+        }
+    }
 
     pub fn vr_input(&self) -> Option<VrControl> {
         None

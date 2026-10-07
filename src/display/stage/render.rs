@@ -1550,6 +1550,15 @@ impl ScreenTarget {
             gl.generate_mipmap(glow::TEXTURE_2D);
         }
     }
+
+    /// Delete the texture and the framebuffer, with `gl` current.
+    pub fn delete(self, gl: &glow::Context) {
+        // SAFETY: see `GlScreen`.
+        unsafe {
+            gl.delete_framebuffer(self.framebuffer);
+            gl.delete_texture(self.texture);
+        }
+    }
 }
 
 #[cfg(test)]

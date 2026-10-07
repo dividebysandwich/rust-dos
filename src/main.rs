@@ -260,13 +260,13 @@ fn main() -> Result<(), String> {
 
     // SDL2 Setup
     // OpenXR's runtimes take an OpenGL context of GLX's, which SDL makes
-    // under X11 (XWayland on a Wayland desktop) and not under Wayland.
-    if settings.vr.mode == rust_dos::vr::VrMode::Headset {
-        if cfg!(target_os = "linux") {
-            sdl2::hint::set_with_priority("SDL_VIDEODRIVER", "x11", &sdl2::hint::Hint::Override);
-        }
-        display::before_headset();
+    // under X11 (XWayland on a Wayland desktop) and not under Wayland. Xlib
+    // is made ready for the headset's thread either way, for a headset
+    // turned on in the settings later.
+    if settings.vr.mode == rust_dos::vr::VrMode::Headset && cfg!(target_os = "linux") {
+        sdl2::hint::set_with_priority("SDL_VIDEODRIVER", "x11", &sdl2::hint::Hint::Override);
     }
+    display::before_headset();
     let sdl_context = sdl2::init()?;
     let video_subsystem = sdl_context.video()?;
     // Without a sound device (as in a virtual machine without a sound
@@ -2288,8 +2288,14 @@ impl Host for MainHost<'_, '_> {
         if shown(new) != shown(&old) {
             self.display.apply(new)?;
         }
+        // The 3D scene opened, closed or changed; the first of what it has
+        // to say is shown, unless the machine has more to say.
+        let mut vr_note = None;
         if new.vr != old.vr {
-            self.display.apply_vr(&new.vr);
+            for note in self.display.apply_vr(&new.vr) {
+                self.cpu.bus.log_string(&note);
+                vr_note.get_or_insert_with(|| note.trim_start_matches("[VR] ").to_string());
+            }
         }
         if new.cycles != old.cycles {
             self.pacer.set_speed(new.cycles);
@@ -2336,7 +2342,7 @@ impl Host for MainHost<'_, '_> {
             rust_dos::cmdline::configure(self.cpu, &new.shell);
         }
         if !self.machine.differs(new) {
-            return Ok(None);
+            return Ok(vr_note);
         }
         if !self.cpu.shell_idle() {
             return Ok(Some(config_ui::pending_note(self.machine.video, new).to_string()));

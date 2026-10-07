@@ -228,9 +228,15 @@ impl Headset {
         settings: &VrSettings,
     ) -> Result<Self, String> {
         let (controllers, quality, glow) = (settings.controllers, settings.quality, settings.screen_glow as f32 / 100.0);
+        let video = window.subsystem();
+        // OpenXR takes GLX's contexts, which SDL makes under X11 only, and
+        // picks it as it starts (`main`).
+        #[cfg(target_os = "linux")]
+        if video.current_video_driver() != "x11" {
+            return Err("it needs X11: press F2 to keep the setting and start Rust-DOS again".into());
+        }
         // A window of its own, with the same pixel format as the main
         // window's (the same attributes), never shown.
-        let video = window.subsystem();
         let hidden = video.window("Rust-DOS headset", 64, 64).opengl().hidden().build().map_err(|e| e.to_string())?;
         let attr = video.gl_attr();
         window.gl_make_current(main)?;
@@ -391,6 +397,17 @@ impl Headset {
             gl.blit_framebuffer(0, 0, sw, sh, rect.0, rect.1, rect.2, rect.3, glow::COLOR_BUFFER_BIT, glow::LINEAR);
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
             Some((view_projection, (x as f32, y as f32, w as f32, h as f32)))
+        }
+    }
+}
+
+impl Headset {
+    /// End the session and the thread, and delete the main thread's
+    /// framebuffers of the mirror, with `gl` current.
+    pub fn close(mut self, gl: &glow::Context) {
+        for framebuffer in std::mem::take(&mut self.mirror_framebuffers) {
+            // SAFETY: see `GlScreen`.
+            unsafe { gl.delete_framebuffer(framebuffer) };
         }
     }
 }
