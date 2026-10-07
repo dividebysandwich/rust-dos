@@ -46,6 +46,9 @@ pub fn before_sdl() {
     }
 }
 
+/// The OpenGL versions the headset's context is asked for, newest first.
+const NEWER_GL: [(u8, u8); 4] = [(4, 6), (4, 5), (4, 3), (4, 0)];
+
 /// A GPU fence, which the other thread's context waits for.
 pub struct Fence(glow::Fence);
 
@@ -188,8 +191,24 @@ impl Headset {
         let hidden = video.window("Rust-DOS headset", 64, 64).opengl().hidden().build().map_err(|e| e.to_string())?;
         let attr = video.gl_attr();
         window.gl_make_current(main)?;
+        // The newest OpenGL there is, in the window's profile: OpenXR
+        // runtimes want more than the window's 3.2 (SteamVR 4.3), and
+        // call what they want of it whether the context has it or not.
+        let version = attr.context_version();
         attr.set_share_with_current_context(true);
-        let context = hidden.gl_create_context();
+        let mut context = Err(String::new());
+        for newer in NEWER_GL {
+            attr.set_context_version(newer.0, newer.1);
+            context = hidden.gl_create_context();
+            if context.is_ok() {
+                break;
+            }
+        }
+        if context.is_err() {
+            attr.set_context_version(version.0, version.1);
+            context = hidden.gl_create_context();
+        }
+        attr.set_context_version(version.0, version.1);
         attr.set_share_with_current_context(false);
         // (Making it made it current here.)
         window.gl_make_current(main)?;

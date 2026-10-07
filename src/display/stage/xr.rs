@@ -106,8 +106,19 @@ impl Xr {
         let runtime = instance.properties().map_err(err("OpenXR"))?;
         let system = instance.system(xr::FormFactor::HEAD_MOUNTED_DISPLAY).map_err(err("no headset"))?;
         let system_name = instance.system_properties(system).map(|p| p.system_name).unwrap_or_default();
-        // Asking is required before a session, whatever the answer.
-        let _ = instance.graphics_requirements::<xr::OpenGL>(system).map_err(err("OpenXR"))?;
+        // Asking is required before a session. Under the runtime's least
+        // OpenGL, it calls what the context doesn't have, and crashes.
+        let least = instance.graphics_requirements::<xr::OpenGL>(system).map_err(err("OpenXR"))?.min_api_version_supported;
+        let version = gl.version();
+        if (version.major, version.minor) < (least.major() as u32, least.minor() as u32) {
+            return Err(format!(
+                "the OpenXR runtime needs OpenGL {}.{}, and there is {}.{}",
+                least.major(),
+                least.minor(),
+                version.major,
+                version.minor
+            ));
+        }
         let (info, library) = native::binding()?;
         // SAFETY: the handles are the context current on this thread, which
         // outlives the session (the window's).
