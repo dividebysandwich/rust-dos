@@ -16,6 +16,13 @@ name = "rust-dos"
 path = "src/main.rs"
 required-features = ["sdl"]
 
+# The .deb (cargo-deb, in the release workflow): its dependencies are what
+# the programs link; the OpenXR loader, which rust-dos loads for VR
+# headsets (--vr), is recommended.
+[package.metadata.deb]
+depends = "$auto"
+recommends = "libopenxr-loader1"
+
 [dependencies]
 iced-x86 = "1.21.0"
 font8x8 = "0.3.1"

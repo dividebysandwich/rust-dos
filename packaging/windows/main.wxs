@@ -2,12 +2,15 @@
 <!-- Built by the release workflow (WiX 5):
      wix build packaging/windows/main.wxs -arch x64 \
          -d Version=<cargo version> -d BinDir=target/release \
-         -d SdlDir=SDL2/lib/x64 -d MuntDir=mt32emu -o <out>.msi
+         -d SdlDir=SDL2/lib/x64 -d MuntDir=mt32emu -d OpenXrDir=openxr \
+         -o <out>.msi
 
      rust-dos.exe links SDL2 dynamically, so SDL2.dll is installed beside
      it, and munt's MT-32 emulation, mt32emu-2.dll, which it loads for
-     midisynth=mt32, with the library's licence (LGPL 2.1). The LAN relay,
-     rust-dos-relay.exe, needs neither. -->
+     midisynth=mt32, with the library's licence (LGPL 2.1), and the Khronos
+     OpenXR loader, openxr_loader.dll, which it loads for VR headsets, with
+     its licence (Apache 2.0). The LAN relay, rust-dos-relay.exe, needs none
+     of them. -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
     <Package Name="rust-dos"
              Manufacturer="dividebysandwich"
@@ -36,6 +39,10 @@
                 <Component Id="MuntDll" Guid="3962CD19-6D47-4ED2-B1A1-86AD0B2F3577">
                     <File Id="Mt32EmuDll" Source="$(var.MuntDir)/mt32emu-2.dll" KeyPath="yes" />
                     <File Id="Mt32EmuLicense" Source="$(var.MuntDir)/mt32emu-LICENSE.txt" />
+                </Component>
+                <Component Id="OpenXrDll" Guid="5B0E7C3A-9F41-4D2E-8C6B-2A7D1E94F318">
+                    <File Id="OpenXrLoaderDll" Source="$(var.OpenXrDir)/openxr_loader.dll" KeyPath="yes" />
+                    <File Id="OpenXrLicense" Source="$(var.OpenXrDir)/openxr-LICENSE.txt" />
                 </Component>
                 <Component Id="Docs" Guid="6F2EB829-9BFC-4A1D-946B-D20FCC688BC9">
                     <File Id="LicenseTxt" Source="LICENSE" Name="LICENSE.txt" KeyPath="yes" />
@@ -68,6 +75,7 @@
             <ComponentRef Id="RelayExe" />
             <ComponentRef Id="SdlDll" />
             <ComponentRef Id="MuntDll" />
+            <ComponentRef Id="OpenXrDll" />
             <ComponentRef Id="Docs" />
             <ComponentRef Id="PathEnv" />
             <ComponentRef Id="StartMenuShortcut" />

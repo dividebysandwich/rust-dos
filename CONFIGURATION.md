@@ -1861,9 +1861,11 @@ instead, and the log says why.
 ### VR headsets
 
 The headset is driven through OpenXR, which needs the OpenXR loader: on
-Linux, your distribution's `openxr` package (`libopenxr_loader.so.1`); on
-Windows, `openxr_loader.dll` beside `rust-dos.exe` (from the Khronos
-OpenXR SDK's releases). The active runtime (SteamVR, Monado, ...) draws
+Linux, your distribution's `openxr` package (`libopenxr_loader.so.1`,
+`libopenxr-loader1` on Debian and Ubuntu, which the `.deb` recommends); on
+Windows, `openxr_loader.dll` beside `rust-dos.exe`, which the `.msi` and the
+`.zip` have (built yourself, take it from the Khronos OpenXR SDK's
+releases). The active runtime (SteamVR, Monado, ...) draws
 with the window's OpenGL context. On Linux that has to be X11's (GLX), so
 with `--vr` rust-dos opens its window through X11, under XWayland on a
 Wayland desktop. Without a loader, runtime or headset, the scene is shown
