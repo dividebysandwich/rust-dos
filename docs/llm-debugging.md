@@ -339,6 +339,18 @@ the machine's RAM at the first four renders and every thousandth (every
 cargo test --release --test powervr_tests -- --ignored renders_a_snapshot`
 renders one into `render-N.png`, and prints the time it took.
 
+### Rendition Vérité games
+
+With `machine=svga_verite`, `/api/status` → `video.verite` shows the
+card: `running` (the microcode started through INT 10h AX=1583h),
+`fifo` (words waiting for a whole command) and `output` (answers the game
+hasn't read), `commands` (each opcode/vertex type seen and how often) and
+the drawing state (`draw`: destination, texture, source and blend modes).
+A game that gives up at start says "Could not open Verite" with its
+library's error code. `RUST_DOS_VERITE_TRACE=<dir>` writes every access
+to the card's ports, BIOS call, DMA block and FIFO word to
+`<dir>/trace.txt`.
+
 ### CPU speed (`cycles=auto`)
 
 `POST /api/speed {"cycles":"auto"}` changes the speed as the settings

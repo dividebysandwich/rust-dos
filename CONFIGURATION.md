@@ -159,7 +159,9 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   it), `svga_s3virge` and `svga_s3virgevx` (an S3 ViRGE or ViRGE/VX on
   the PCI bus: the Trio64's registers with the ViRGE's own 2D engine, 3D
   engine and streams processor, which Windows 95's Direct3D uses through
-  S3's driver; see [Direct3D](#direct3d-on-an-s3-virge)), `svga_et4000`
+  S3's driver; see [Direct3D](#direct3d-on-an-s3-virge)), `svga_verite`
+  (a Rendition Vérité V1000 with 4 MB on the PCI bus, for DOS games'
+  Vérité versions; see [Rendition Vérité](#rendition-vérité)), `svga_et4000`
   (a Tseng Labs ET4000AX with 1 MB and a Sierra HiColor DAC, see below),
   `vga` (an IBM VGA, without VESA modes),
   `ega` (an IBM EGA with an Enhanced Color Display: 16 of 64 colours at
@@ -1539,6 +1541,41 @@ card's pixel counters, until a game reads them: from then on everything
 is drawn and counted (`RUST_DOS_VOODOO_PRUNE=0` in the environment draws
 everything from the start). The CRT shaders draw their scanlines over the
 bigger picture.
+
+## Rendition Vérité
+
+`machine=svga_verite` makes the display adapter a Rendition Vérité V1000
+with 4 MB, for the DOS games that came in Vérité versions:
+
+```ini
+[emulator]
+machine=svga_verite
+cpu=pentium
+memsize=32
+```
+
+The Vérité is a VGA with a RISC processor that runs microcode the game
+loads into its memory: Rendition's DOS library (RRedline, "Speedy3D")
+finds the card through the BIOS (INT 10h AX=158Dh describes the board)
+and the PCI bus, loads the microcode, starts the processor, and sends it
+drawing commands through the FIFO at the card's ports or by DMA from lists
+in the PC's memory. Rust-DOS doesn't run the microcode: it carries out the
+commands as Rendition's Speedy3D microcode does (fans and strips of
+textured, lit, blended triangles; fills, copies and lines; showing a
+buffer), into the card's memory, which is the VESA linear frame buffer,
+and shows the buffer the game flips to. Its VESA modes are the Super VGA's.
+
+* **Tomb Raider**'s Vérité patch (`3DPATCH\RENDVRT` on the Tomb Raider Gold
+  CD: `Tomb.exe` and `spd3d.uc`, copied into the game's folder, the
+  executable renamed so the 2D one stays) runs with `cpu=pentium` and
+  `memsize=32`.
+
+The commands are RRedline's (its Programming Guide documents them for
+programmers); their encoding in the FIFO comes from DOSBox's Rendition
+fork (dosbox-staging-rendition) and from what the game sends. RReady,
+the wrapper that fork passes them to, isn't used. Commands the game doesn't
+send aren't there yet: Z buffering, fog, bilinear filtering and textures
+with alpha among them.
 
 ## PowerVR PCX2
 

@@ -91,6 +91,7 @@
 #   svga_s3  an S3 Trio64 on the PCI bus, for booted systems' drivers
 #   svga_s3virge, svga_s3virgevx  an S3 ViRGE or ViRGE/VX on the PCI bus,
 #         with its 3D engine, for Direct3D in a booted Windows 95
+#   svga_verite  a Rendition Vérité V1000, for DOS games' Vérité versions
 #   svga_et4000  a Tseng ET4000AX with 1 MB and a Sierra HiColor DAC:
 #         Tseng's modes, 32K and 64K colours, VBE 1.2 without a linear
 #         frame buffer

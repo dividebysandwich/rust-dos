@@ -31,8 +31,9 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   modes, and a [3dfx Voodoo Graphics](CONFIGURATION.md#3dfx-voodoo-graphics)
   for Glide games in DOS and Windows 95, drawn by Rust-DOS or again by
   OpenGL at up to four times its resolution, and a
-  [PowerVR PCX2](CONFIGURATION.md#powervr-pcx2) (Matrox m3D) for DOS games'
-  PowerVR versions
+  [PowerVR PCX2](CONFIGURATION.md#powervr-pcx2) (Matrox m3D) and a
+  [Rendition Vérité](CONFIGURATION.md#rendition-vérité) for DOS games'
+  PowerVR and Vérité versions
 * **Sound:** Sound Blaster 16, Pro 2 and 2.0 with OPL3 FM music, Gravis
   Ultrasound with a built-in patch set, General MIDI through a SoundFont,
   the Ultrasound patches, a Roland MT-32 (via munt), a Roland Sound Canvas

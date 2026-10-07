@@ -75,6 +75,8 @@ The display card games find, which decides the graphics they choose:
   image.
 - **S3 ViRGE (3D)**, **S3 ViRGE/VX (3D)**: for Direct3D games in
   Windows 95, with S3's driver installed there.
+- **Rendition Vérité (3D)**: for DOS games' Vérité versions, such as
+  Tomb Raider's (`3DPATCH\RENDVRT` on the Tomb Raider Gold CD).
 - **VGA**, **EGA**, **CGA**, **Hercules**: older cards, for games that
   misbehave on newer ones, or to see a game's EGA or CGA graphics.
 - **Tandy 1000**, **IBM PCjr**: the home computers some 1980s Sierra games have

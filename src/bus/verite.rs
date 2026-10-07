@@ -26,7 +26,7 @@ impl Bus {
 
     pub(crate) fn verite_write(&mut self, reg: u8, value: u32, len: u8) {
         self.verite.write(reg, value, len);
-        self.verite.execute();
+        self.verite_execute();
         // The DMA list pointer's last byte starts the DMA.
         if reg <= regs::DMACMDPTR + 3 && reg + len > regs::DMACMDPTR + 3 {
             self.verite_dma();
@@ -61,8 +61,20 @@ impl Bus {
             }
             at += 8;
         }
-        self.verite.execute();
+        self.verite_execute();
         self.verite.flush_trace();
+    }
+
+    /// Carry out the commands waiting in the FIFO.
+    fn verite_execute(&mut self) {
+        let fx = self.verite.execute(&mut self.vbe.vram);
+        if let Some(address) = fx.display {
+            self.vbe.start = address;
+            self.note_display_start();
+        }
+        if fx.drawn || fx.display.is_some() {
+            self.vga.mark_dirty_full();
+        }
     }
 
     fn verite_log(&mut self) {

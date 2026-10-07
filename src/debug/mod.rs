@@ -1547,6 +1547,7 @@ impl DebugHub {
                 // each) and its hardware cursor.
                 "voodoo": cpu.bus.voodoo_status(),
                 "powervr": cpu.bus.powervr_status(),
+                "verite": cpu.bus.verite().then(|| cpu.bus.verite.describe()),
                 "s3": cpu.bus.vga.adapter.is_s3().then(|| {
                     let s3 = &cpu.bus.vga.s3;
                     json!({
