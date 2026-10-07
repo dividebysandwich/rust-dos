@@ -118,3 +118,163 @@ fn state_round_trips() {
     assert_eq!(r(&other, regs::PACKMODE), 0x12);
     assert_eq!(other.read_32(TEXTURES + 0x3F_FFFC), 0xCAFE_F00D);
 }
+
+/// Render a snapshot `RUST_DOS_POWERVR_TRACE` took (`render-N.regs`,
+/// `.tex`, `.ram`) into `render-N.png` beside it:
+/// `RUST_DOS_POWERVR_SNAPSHOT=dir/render-500 cargo test --release
+/// --test powervr_tests -- --ignored snapshot`.
+#[test]
+#[ignore]
+fn renders_a_snapshot() {
+    let Ok(base) = std::env::var("RUST_DOS_POWERVR_SNAPSHOT") else { return };
+    let read = |ext: &str| std::fs::read(format!("{}.{}", base, ext)).unwrap();
+    let regs: Vec<u32> = read("regs").chunks(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    let (tex, ram) = (read("tex"), read("ram"));
+    let shader = rust_dos::powervr::tsp::Shader::default();
+    let start = std::time::Instant::now();
+    let rendered = rust_dos::powervr::render::render(&regs, &tex, rust_dos::powervr::render::Memory { ram: &ram }, &shader);
+    eprintln!("{} tiles, {} plane-pixels, {:?}", rendered.tiles.len(), rendered.work, start.elapsed());
+    let (w, h) = (640usize, 480usize);
+    let mut rgb = vec![0u8; w * h * 3];
+    for tile in &rendered.tiles {
+        for y in 0..tile.height as usize {
+            for x in 0..tile.width as usize {
+                let (px, py) = (tile.x as usize + x, tile.y as usize + y);
+                if px < w && py < h {
+                    let c = tile.pixels[y * tile.width as usize + x];
+                    rgb[(py * w + px) * 3..][..3].copy_from_slice(&[(c >> 16) as u8, (c >> 8) as u8, c as u8]);
+                }
+            }
+        }
+    }
+    let file = std::fs::File::create(format!("{}.png", base)).unwrap();
+    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), w as u32, h as u32);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.write_header().unwrap().write_image_data(&rgb).unwrap();
+}
+
+/// Where the tests put the parameter space, and the frame buffer.
+const PARAMS: u32 = 0x20_0000;
+const FRAME: u32 = 0x30_0000;
+
+/// A scene the way the driver lays one out: the TLB over `PARAMS`, the
+/// planes at byte 100h of the parameter space, a one-tile object list at
+/// 1000h, TSP records in the texture memory; a 32x32 frame buffer in RAM,
+/// 565.
+struct Scene {
+    planes: Vec<[u32; 4]>,
+    pointers: Vec<u32>,
+}
+
+impl Scene {
+    fn new() -> Self {
+        Self { planes: Vec::new(), pointers: Vec::new() }
+    }
+
+    /// An object of these planes (A, B, C, instruction, tag).
+    fn object(&mut self, planes: &[(f32, f32, f32, u32, u32)]) {
+        let addr = (0x100 + 16 * self.planes.len() as u32) >> 2;
+        for &(a, b, c, instr, tag) in planes {
+            self.planes.push([a.to_bits(), b.to_bits(), c.to_bits(), instr | tag << 4]);
+        }
+        self.pointers.push(addr | (planes.len() as u32) << 19);
+    }
+
+    fn render(self, bus: &mut Bus) {
+        for page in 0..128 {
+            w(bus, regs::TLB + page, (PARAMS >> 12) + 4 * page as u32);
+        }
+        for (i, plane) in self.planes.iter().enumerate() {
+            for (j, word) in plane.iter().enumerate() {
+                bus.write_32((PARAMS + 0x100 + 16 * i as u32 + 4 * j as u32) as usize, *word);
+            }
+        }
+        // One 32x32 tile at 0, 0.
+        bus.write_32((PARAMS + 0x1000) as usize, 0x4000_0000 | 31 << 5);
+        let n = self.pointers.len();
+        for (i, p) in self.pointers.iter().enumerate() {
+            let last = if i + 1 == n { 0x8000_0000 } else { 0 };
+            bus.write_32((PARAMS + 0x1004 + 4 * i as u32) as usize, p | last);
+        }
+        w(bus, regs::OBJECT_OFFSET, 0x1000 | 1);
+        w(bus, regs::PACKMODE, 2);
+        w(bus, regs::SOFADDR, FRAME);
+        w(bus, regs::LSTRIDE, 64);
+        w(bus, regs::SOFTRESET, 1);
+        w(bus, regs::SOFTRESET, 0);
+        w(bus, regs::STARTRENDER, 0);
+    }
+}
+
+/// A flat-shaded, unfogged TSP record for tag `tag`.
+fn flat(bus: &mut Bus, tag: u32, (r, g, b): (u32, u32, u32)) {
+    let at = TEXTURES + 8 * tag as usize;
+    bus.write_32(at, 0x2000_0000 | r);
+    bus.write_32(at + 4, g << 24 | b << 16);
+}
+
+fn pixel(bus: &Bus, x: usize, y: usize) -> u16 {
+    bus.read_16(FRAME as usize + y * 64 + x * 2)
+}
+
+/// The background, a triangle with corners 4,4, 28,4 and 4,28 in front
+/// of it, and the plane that ends the list.
+fn triangle_scene(depth: f32) -> Scene {
+    let mut scene = Scene::new();
+    scene.object(&[(0.0, 0.0, 0.0, 8, 4)]);
+    scene.object(&[
+        (0.0, 0.0, depth, 8, 6),
+        (1.0, 0.0, -4.0, 2, 0),
+        (0.0, 1.0, -4.0, 2, 0),
+        (-1.0, -1.0, 32.0, 2, 0),
+    ]);
+    scene.object(&[(0.0, 0.0, -1.0, 8, 0)]);
+    scene
+}
+
+#[test]
+fn a_flat_triangle_over_the_background() {
+    let mut bus = bus();
+    flat(&mut bus, 4, (0, 0, 255));
+    flat(&mut bus, 6, (255, 0, 0));
+    triangle_scene(0.5).render(&mut bus);
+    assert_ne!(r(&bus, regs::INTSTATUS) & regs::END_OF_RENDER, 0, "the render ended");
+    assert_eq!(pixel(&bus, 8, 8), 0xF800, "the triangle, red");
+    assert_eq!(pixel(&bus, 2, 2), 0x001F, "the background, blue");
+    assert_eq!(pixel(&bus, 30, 30), 0x001F, "past the long edge");
+}
+
+#[test]
+fn a_triangle_behind_the_background_is_hidden() {
+    let mut bus = bus();
+    flat(&mut bus, 4, (0, 0, 255));
+    flat(&mut bus, 6, (255, 0, 0));
+    triangle_scene(-0.5).render(&mut bus);
+    assert_eq!(pixel(&bus, 8, 8), 0x001F);
+}
+
+#[test]
+fn a_translucent_pass_draws_in_front_of_the_opaque_one() {
+    let mut bus = bus();
+    flat(&mut bus, 4, (0, 0, 248));
+    // Red, translucent, global translucency 8 of 16.
+    let at = TEXTURES + 8 * 6;
+    bus.write_32(at, 0x2000_0000 | 0x400 | 8 << 13 | 248);
+    bus.write_32(at + 4, 0);
+    let mut scene = Scene::new();
+    scene.object(&[(0.0, 0.0, 0.0, 8, 4)]);
+    // A translucent pass: its start, then the triangle.
+    scene.object(&[(0.0, 0.0, 0.0, 0xF, 0), (0.0, 0.0, 0.0, 6, 0)]);
+    scene.object(&[
+        (0.0, 0.0, 0.5, 8, 6),
+        (1.0, 0.0, -4.0, 2, 0),
+        (0.0, 1.0, -4.0, 2, 0),
+        (-1.0, -1.0, 32.0, 2, 0),
+    ]);
+    scene.object(&[(0.0, 0.0, -1.0, 8, 0)]);
+    scene.render(&mut bus);
+    // Untextured, so the alpha is 0 and global translucency doesn't
+    // apply: the triangle covers what is under it.
+    assert_eq!(pixel(&bus, 8, 8), 0xF800);
+    assert_eq!(pixel(&bus, 2, 2), 0x001F);
+}

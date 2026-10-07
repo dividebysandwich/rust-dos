@@ -4,6 +4,9 @@
 use super::Bus;
 use crate::powervr::{Chip, PowerVr, Window};
 
+/// The 4x4 ordered dither the card adds before dropping bits, 0-7.
+const DITHER: [[u32; 4]; 4] = [[0, 4, 1, 5], [6, 2, 7, 3], [1, 5, 0, 4], [7, 3, 6, 2]];
+
 impl Bus {
     /// Put in the PowerVR card `chip` (None: take it out). A card already
     /// there of the same kind stays as it is.
@@ -57,18 +60,63 @@ impl Bus {
             Window::Registers => {
                 let shift = 8 * (offset & 3);
                 let mask = if len == 4 { u32::MAX } else { ((1 << (8 * len)) - 1) << shift };
-                let renders = p.renders();
                 if p.write_register(offset & !3, value << shift, mask) {
-                    if p.renders() != renders
-                        && let Some((dir, n)) = p.snapshot_wanted()
-                    {
-                        self.powervr_snapshot(&dir, n);
+                    if p.take_start() {
+                        self.powervr_render();
                     }
                     self.sync_powervr_irq();
                 }
             }
         }
         self.powervr_log();
+    }
+
+    /// Carry out the render the card started, writing its pixels to the
+    /// frame buffer.
+    fn powervr_render(&mut self) {
+        let Some(p) = &self.powervr else { return };
+        if let Some((dir, n)) = p.snapshot_wanted() {
+            self.powervr_snapshot(&dir, n);
+        }
+        let Some(p) = &self.powervr else { return };
+        let rendered = p.render(&self.ram);
+        let out = p.output();
+        let bytes = out.format.bytes();
+        let mut row = Vec::new();
+        for tile in &rendered.tiles {
+            for y in 0..tile.height {
+                let line = tile.y + y;
+                let first = tile.x.max(out.columns.start);
+                let end = (tile.x + tile.width).min(out.columns.end);
+                if first >= end {
+                    continue;
+                }
+                row.clear();
+                for x in first..end {
+                    let rgb = tile.pixels[(y * tile.width + x - tile.x) as usize];
+                    let bias = if out.dither { DITHER[(line & 3) as usize][(x & 3) as usize] } else { 0 };
+                    let packed = out.format.pack(rgb, bias);
+                    row.extend_from_slice(&packed.to_le_bytes()[..bytes as usize]);
+                }
+                let at = out.address.wrapping_add(line * out.stride).wrapping_add(first * bytes);
+                self.powervr_store(at as usize, &row);
+            }
+        }
+        if let Some(p) = &mut self.powervr {
+            p.finish_render();
+        }
+    }
+
+    /// Bytes the card writes to the machine's memory, by bus mastering:
+    /// most often the VGA's linear frame buffer.
+    fn powervr_store(&mut self, addr: usize, bytes: &[u8]) {
+        if let Some(offset) = self.vbe.lfb_offset(addr, bytes.len()) {
+            self.write_vram(offset, bytes);
+        } else {
+            for (i, &b) in bytes.iter().enumerate() {
+                self.write_8(addr + i, b);
+            }
+        }
     }
 
     /// For the trace: the card's registers and texture memory and the

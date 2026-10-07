@@ -15,6 +15,8 @@
 //! registers, BAR1 its texture memory.
 
 pub mod regs;
+pub mod render;
+pub mod tsp;
 
 use crate::savestate::{Reader, Result, State, StateError, Writer};
 use std::cell::RefCell;
@@ -86,13 +88,59 @@ impl Default for PciConfig {
     }
 }
 
+/// The frame buffer's pixel formats (PACKMODE).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PixelFormat {
+    Rgb32,
+    Rgb24,
+    Rgb565,
+    Rgb555,
+}
+
+impl PixelFormat {
+    pub fn bytes(self) -> u32 {
+        match self {
+            PixelFormat::Rgb32 => 4,
+            PixelFormat::Rgb24 => 3,
+            PixelFormat::Rgb565 | PixelFormat::Rgb555 => 2,
+        }
+    }
+
+    /// A pixel (0xRRGGBB) packed, with the 4x4 ordered dither's `bias`
+    /// (0-7, added before dropping bits) if dithering.
+    pub fn pack(self, rgb: u32, bias: u32) -> u32 {
+        let channel = |shift: u32, bits: u32| {
+            let c = (rgb >> shift & 0xFF) + (bias >> (bits - 5));
+            c.min(255) >> (8 - bits)
+        };
+        match self {
+            PixelFormat::Rgb32 | PixelFormat::Rgb24 => rgb,
+            PixelFormat::Rgb565 => channel(16, 5) << 11 | channel(8, 6) << 5 | channel(0, 5),
+            PixelFormat::Rgb555 => channel(16, 5) << 10 | channel(8, 5) << 5 | channel(0, 5),
+        }
+    }
+}
+
+/// Where and how a render's pixels go.
+pub struct Output {
+    pub address: u32,
+    pub stride: u32,
+    pub format: PixelFormat,
+    pub dither: bool,
+    pub columns: std::ops::Range<u32>,
+}
+
 pub struct PowerVr {
     pub chip: Chip,
     pci: PciConfig,
     regs: Vec<u32>,
     textures: Vec<u8>,
-    /// Renders started, for the trace.
+    /// Renders started.
     renders: u32,
+    /// A render the bus has to carry out.
+    started: bool,
+    /// How the host shades.
+    pub shader: tsp::Shader,
     /// Lines for the emulator's log.
     pub log: Vec<String>,
     /// `RUST_DOS_POWERVR_TRACE`: every access, written to `trace.txt` in
@@ -113,6 +161,8 @@ impl PowerVr {
             regs: vec![0; regs::COUNT],
             textures: vec![0; TEXTURE_MEMORY as usize],
             renders: 0,
+            started: false,
+            shader: tsp::Shader::default(),
             log: Vec::new(),
             trace: RefCell::new(None),
         };
@@ -244,13 +294,51 @@ impl PowerVr {
         false
     }
 
-    /// A render starts. Until the renderer exists, it ends at once.
+    /// A render starts.
     fn start_render(&mut self) {
         self.renders += 1;
+        self.started = true;
         if let Some(t) = self.trace.get_mut().as_mut() {
             let _ = t.out.flush();
         }
+    }
+
+    /// The render started, if one was: the bus carries it out, then calls
+    /// `finish_render`.
+    pub fn take_start(&mut self) -> bool {
+        std::mem::take(&mut self.started)
+    }
+
+    /// Render the scene from `ram`, the machine's memory.
+    pub fn render(&self, ram: &[u8]) -> render::Rendered {
+        render::render(&self.regs, &self.textures, render::Memory { ram }, &self.shader)
+    }
+
+    /// The render is done.
+    pub fn finish_render(&mut self) {
         self.regs[regs::INTSTATUS] |= regs::END_OF_RENDER;
+    }
+
+    /// Where finished pixels go: the frame buffer's physical address, the
+    /// bytes a line, the bytes a pixel, whether to dither, and the
+    /// columns XCLIP lets through.
+    pub fn output(&self) -> Output {
+        let pack = self.regs[regs::PACKMODE];
+        let xclip = self.regs[regs::XCLIP];
+        let left = if xclip & 1 << 12 != 0 { xclip & 0x7FF } else { 0 };
+        let right = if xclip & 1 << 28 != 0 { xclip >> 16 & 0x7FF } else { u32::MAX };
+        Output {
+            address: self.regs[regs::SOFADDR],
+            stride: self.regs[regs::LSTRIDE],
+            format: match pack & 3 {
+                0 => PixelFormat::Rgb32,
+                1 => PixelFormat::Rgb24,
+                2 => PixelFormat::Rgb565,
+                _ => PixelFormat::Rgb555,
+            },
+            dither: pack & 0x10 != 0,
+            columns: left..right,
+        }
     }
 
     /// The renders started.
