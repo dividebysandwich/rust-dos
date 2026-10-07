@@ -174,6 +174,36 @@ fn mixer_reports_the_configured_resources() {
 }
 
 #[test]
+fn sb16_driver_selects_its_resources_in_the_mixer() {
+    // Windows 95's driver writes those Device Manager gives it, whatever
+    // the card was set to, and tests the interrupt and DMA on them.
+    let mut bus = bus_with(SbConfig { irq: 5, dma8: 3, dma16: 7, ..SbConfig::default() });
+    reset_dsp(&mut bus);
+    bus.io_write(0x224, 0x80);
+    bus.io_write(0x225, 0x04);
+    assert_eq!(bus.io_read(0x225), 0x04);
+    bus.io_write(0x224, 0x81);
+    bus.io_write(0x225, 0x22);
+    assert_eq!(bus.io_read(0x225), 0x22);
+    dsp_write(&mut bus, 0xF2);
+    assert_eq!(bus.pic_pending_irq(), Some(7));
+    bus.io_read(0x22E);
+    assert_eq!(bus.pic_pending_irq(), None);
+
+    // An 8-bit transfer goes over DMA 1 now.
+    bus.load_bytes(0x20000, &[0x80; 100]);
+    program_dma1(&mut bus, 0x20000, 100, false);
+    dsp_write(&mut bus, 0x40);
+    dsp_write(&mut bus, 156);
+    dsp_write(&mut bus, 0x14);
+    dsp_write(&mut bus, 99);
+    dsp_write(&mut bus, 0);
+    wait_ms(&mut bus, 11.0);
+    assert_eq!(dma1_count(&mut bus), 0xFFFF, "DMA 1 reached terminal count");
+    assert_eq!(bus.pic_pending_irq(), Some(7));
+}
+
+#[test]
 fn older_cards_take_sb16_only_commands_without_parameters() {
     for (model, major) in [(SbModel::Sb2, 2), (SbModel::SbPro2, 3)] {
         let mut bus = bus_with(SbConfig { model, ..SbConfig::default() });

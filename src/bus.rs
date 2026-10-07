@@ -2238,7 +2238,7 @@ impl Bus {
     /// The Sound Blaster's IRQ and whether its 8-bit and 16-bit interrupts
     /// wait for the driver.
     fn sb_irq_now(&self) -> (Option<u8>, bool, bool) {
-        self.sb.as_ref().map_or((None, false, false), |sb| (Some(sb.config.irq), sb.irq8, sb.irq16))
+        self.sb.as_ref().map_or((None, false, false), |sb| (sb.irq, sb.irq8, sb.irq16))
     }
 
     /// Drive the Sound Blaster's interrupt request, edge-triggered as the
@@ -2305,7 +2305,7 @@ impl Bus {
     pub fn pic_drop(&mut self, irq: u8) {
         self.pic.lower(irq);
         if let Some(sb) = &mut self.sb
-            && sb.config.irq == irq
+            && sb.irq == Some(irq)
         {
             sb.irq8 = false;
             sb.irq16 = false;

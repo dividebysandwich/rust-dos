@@ -183,6 +183,13 @@ pub struct SoundBlaster {
     asp_regs: [u8; 256],
     /// The SB16's 8051 microcontroller's memory (commands F9h and FAh).
     mem8051: [u8; 256],
+    /// The IRQ and DMA channels the card uses now: the configured ones
+    /// until a driver selects others in the SB16's mixer (80h and 81h), as
+    /// Windows 95's driver does with those Device Manager gives it. None
+    /// when it selects none.
+    pub irq: Option<u8>,
+    dma8: Option<u8>,
+    dma16: Option<u8>,
 }
 
 /// Frames `out` keeps at most (about a second), for when nobody drains it.
@@ -217,6 +224,9 @@ impl SoundBlaster {
             asp_mode: 0,
             asp_regs: [0; 256],
             mem8051: [0; 256],
+            irq: Some(config.irq),
+            dma8: Some(config.dma8),
+            dma16: Some(config.dma16),
         };
         sb.reset_mixer();
         sb
@@ -277,9 +287,11 @@ impl SoundBlaster {
         (level(CD_L) * level(MASTER_L), level(CD_R) * level(MASTER_R))
     }
 
-    /// DMA channel of a transfer.
-    fn channel(&self, bits16: bool) -> usize {
-        if bits16 && self.config.model.is_sb16() { self.config.dma16 as usize } else { self.config.dma8 as usize }
+    /// DMA channel of a transfer. An SB16 with no 16-bit channel selected
+    /// moves 16-bit data over its 8-bit one.
+    fn channel(&self, bits16: bool) -> Option<usize> {
+        let high = if bits16 && self.config.model.is_sb16() { self.dma16 } else { None };
+        high.or(self.dma8).map(usize::from)
     }
 
     /// Run the DSP up to emulated time `now` (PIT ticks): play the DMA
@@ -317,11 +329,12 @@ impl SoundBlaster {
             let Some(mut t) = self.transfer else { break };
             // The DSP waits while its DMA channel is masked, as a real one
             // waits for its request to be answered: no data, no IRQ. HMI's
-            // setup finds the card's channel by trying each one.
-            if !dma.ready(ch) {
+            // setup finds the card's channel by trying each one. So does one
+            // with no channel selected.
+            let Some(ch) = ch.filter(|&ch| dma.ready(ch)) else {
                 self.frac = 0;
                 break;
-            }
+            };
             let mut k = (units.min(t.remaining as u64) as usize).min(buf.len() / unit_bytes);
             if t.input {
                 dma.transfer_skip(ch, k);
@@ -457,9 +470,19 @@ impl SoundBlaster {
                 self.mixer[l as usize] = (value & 0xF0) | 0x08;
                 self.mixer[r as usize] = (value << 4) | 0x08;
             }
-            // SB16 interrupt and DMA setup: read-only here; the card's
-            // resources come from the configuration.
-            0x80..=0x82 => {}
+            // SB16 interrupt and DMA setup, a bit per line or channel.
+            0x80 => {
+                self.irq = [(0x01, 9), (0x02, 5), (0x04, 7), (0x08, 10)]
+                    .into_iter()
+                    .find(|&(bit, _)| value & bit != 0)
+                    // The bus's IRQ 2 is the AT's IRQ 9; keep a configured 2.
+                    .map(|(_, irq)| if irq == 9 && self.config.irq == 2 { 2 } else { irq });
+            }
+            0x81 => {
+                self.dma8 = [(0x01, 0), (0x02, 1), (0x08, 3)].into_iter().find(|&(bit, _)| value & bit != 0).map(|(_, ch)| ch);
+                self.dma16 = [(0x20, 5), (0x40, 6), (0x80, 7)].into_iter().find(|&(bit, _)| value & bit != 0).map(|(_, ch)| ch);
+            }
+            0x82 => {}
             _ => self.mixer[reg as usize] = value,
         }
     }
@@ -473,24 +496,24 @@ impl SoundBlaster {
             // keeps them for an SB16.
             (_, 0x00) => 0x00,
             (m, _) if !m.is_sb16() && !PRO_REGS.contains(&reg) => 0x0A,
-            (m, 0x80) if m.is_sb16() => match self.config.irq {
-                2 | 9 => 1,
-                5 => 2,
-                7 => 4,
-                10 => 8,
+            (m, 0x80) if m.is_sb16() => match self.irq {
+                Some(2 | 9) => 1,
+                Some(5) => 2,
+                Some(7) => 4,
+                Some(10) => 8,
                 _ => 0,
             },
             (m, 0x81) if m.is_sb16() => {
-                let low = match self.config.dma8 {
-                    0 => 1,
-                    1 => 2,
-                    3 => 8,
+                let low = match self.dma8 {
+                    Some(0) => 1,
+                    Some(1) => 2,
+                    Some(3) => 8,
                     _ => 0,
                 };
-                let high = match self.config.dma16 {
-                    5 => 0x20,
-                    6 => 0x40,
-                    7 => 0x80,
+                let high = match self.dma16 {
+                    Some(5) => 0x20,
+                    Some(6) => 0x40,
+                    Some(7) => 0x80,
                     _ => 0,
                 };
                 low | high
@@ -680,7 +703,7 @@ crate::state_fields!(Transfer { bits16, stereo, signed, auto_init, input, block,
 crate::state_fields!(SoundBlaster {
     reset_stage, in_command, params, params_needed, read_buf, test_reg, speaker_on, tc_rate, sb16_rate,
     block_size, transfer, silence, irq8, irq16, last_ticks, frac, dac, out, out_rate, pending_left,
-    mixer_index, mixer, asp_mode, asp_regs, mem8051,
+    mixer_index, mixer, asp_mode, asp_regs, mem8051, irq, dma8, dma16,
 } skip {
     config,
 });
