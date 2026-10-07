@@ -499,6 +499,16 @@
 # How brightly the screen lights the room, in percent of what the scene
 # says (0 to 400).
 #screen_glow=100
+# Fine-tuning where you sit in a headset. How big the scene looks, in
+# percent (50 to 200; above 100 it is bigger and you smaller).
+#scene_scale=100
+# Where the seat is from the scene's spawn, in cm (-100 to 100): to the
+# right, up and closer to the screen; and how far it is turned to the left,
+# in degrees (-180 to 180).
+#seat_right=0
+#seat_up=0
+#seat_forward=0
+#seat_turn=0
 
 [drives]
 # Mount host directories, or floppy, hard disk or CD images, as DOS drives

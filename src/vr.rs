@@ -223,6 +223,16 @@ impl VrQuality {
 /// `screen_glow`'s range, in percent.
 pub const SCREEN_GLOW_MAX: u32 = 400;
 
+/// `scene_scale`'s range, in percent.
+pub const SCENE_SCALE_MIN: u32 = 50;
+pub const SCENE_SCALE_MAX: u32 = 200;
+/// How far the seat moves each way from the scene's `spawn`, in cm.
+pub const SEAT_SHIFT_MAX: i32 = 100;
+/// How far the seat turns each way, in degrees.
+pub const SEAT_TURN_MAX: i32 = 180;
+/// The settings of the seat's shift, in the order of `VrSettings::seat`.
+pub const SEAT_AXES: [&str; 3] = ["seat_right", "seat_up", "seat_forward"];
+
 /// The `[vr]` settings.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VrSettings {
@@ -240,6 +250,15 @@ pub struct VrSettings {
     /// How brightly the screen lights the scene, in percent of what the
     /// scene says.
     pub screen_glow: u32,
+    /// How big the scene looks in the headset, in percent: above 100 it
+    /// is bigger and the viewer smaller.
+    pub scene_scale: u32,
+    /// Where the headset's seat is from the scene's `spawn`, in cm to the
+    /// right, up and ahead (as the spawn faces).
+    pub seat: [i32; 3],
+    /// How far the seat is turned from the spawn's way, in degrees to the
+    /// left.
+    pub seat_turn: i32,
 }
 
 impl Default for VrSettings {
@@ -252,6 +271,9 @@ impl Default for VrSettings {
             screen_fit: ScreenFit::Auto,
             quality: VrQuality::High,
             screen_glow: 100,
+            scene_scale: 100,
+            seat: [0; 3],
+            seat_turn: 0,
         }
     }
 }
@@ -297,6 +319,27 @@ impl VrSettings {
                     .filter(|g| *g <= SCREEN_GLOW_MAX)
                     .ok_or_else(|| format!("invalid screen_glow '{}' (0 to {} percent)", value, SCREEN_GLOW_MAX))?;
             }
+            "scene_scale" => {
+                self.scene_scale = value
+                    .trim()
+                    .trim_end_matches('%')
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|s| (SCENE_SCALE_MIN..=SCENE_SCALE_MAX).contains(s))
+                    .ok_or_else(|| {
+                        format!("invalid scene_scale '{}' ({} to {} percent)", value, SCENE_SCALE_MIN, SCENE_SCALE_MAX)
+                    })?;
+            }
+            key @ ("seat_right" | "seat_up" | "seat_forward") => {
+                let axis = SEAT_AXES.iter().position(|&a| a == key).unwrap_or(0);
+                self.seat[axis] = parse_signed(value, "cm", SEAT_SHIFT_MAX)
+                    .ok_or_else(|| format!("invalid {} '{}' (-{} to {} cm)", key, value, SEAT_SHIFT_MAX, SEAT_SHIFT_MAX))?;
+            }
+            "seat_turn" => {
+                self.seat_turn = parse_signed(value, "°", SEAT_TURN_MAX).ok_or_else(|| {
+                    format!("invalid seat_turn '{}' (-{} to {} degrees)", value, SEAT_TURN_MAX, SEAT_TURN_MAX)
+                })?;
+            }
             _ => return Err(format!("unknown setting '{}'", key)),
         }
         Ok(())
@@ -311,8 +354,18 @@ impl VrSettings {
             ("screen_fit", Some(self.screen_fit.name().to_string())),
             ("quality", Some(self.quality.name().to_string())),
             ("screen_glow", Some(self.screen_glow.to_string())),
+            ("scene_scale", Some(self.scene_scale.to_string())),
+            (SEAT_AXES[0], Some(self.seat[0].to_string())),
+            (SEAT_AXES[1], Some(self.seat[1].to_string())),
+            (SEAT_AXES[2], Some(self.seat[2].to_string())),
+            ("seat_turn", Some(self.seat_turn.to_string())),
         ]
     }
+}
+
+/// A whole number from -`max` to `max`, with `unit` after it or not.
+fn parse_signed(value: &str, unit: &str, max: i32) -> Option<i32> {
+    value.trim().trim_end_matches(unit).trim().parse::<i32>().ok().filter(|n| n.abs() <= max)
 }
 
 #[cfg(test)]
@@ -334,6 +387,15 @@ mod tests {
         assert_eq!((s.quality, s.screen_glow), (VrQuality::Medium, 250));
         assert!(s.set("screen_glow", "401", Path::new("/cfg")).is_err());
         assert!(s.set("quality", "ultra", Path::new("/cfg")).is_err());
+        s.set("scene_scale", "110%", Path::new("/cfg")).unwrap();
+        s.set("seat_right", "-5", Path::new("/cfg")).unwrap();
+        s.set("seat_up", "3 cm", Path::new("/cfg")).unwrap();
+        s.set("seat_forward", "12", Path::new("/cfg")).unwrap();
+        s.set("seat_turn", "-15", Path::new("/cfg")).unwrap();
+        assert_eq!((s.scene_scale, s.seat, s.seat_turn), (110, [-5, 3, 12], -15));
+        assert!(s.set("scene_scale", "20", Path::new("/cfg")).is_err());
+        assert!(s.set("seat_up", "101", Path::new("/cfg")).is_err());
+        assert!(s.set("seat_turn", "181", Path::new("/cfg")).is_err());
         assert_eq!(s.controllers, VrControllers::Pointer);
         assert!(!s.spatial_audio);
         assert_eq!(s.mode, VrMode::Desktop);

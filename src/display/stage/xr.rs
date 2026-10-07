@@ -5,7 +5,6 @@
 use super::camera::fov_projection;
 use super::controls::{Hand, Tracking};
 use super::render::View;
-use super::scene::Spawn;
 use glam::{Mat4, Quat, Vec2, Vec3};
 use glow::HasContext;
 use openxr as xr;
@@ -58,7 +57,12 @@ pub struct Xr {
     running: bool,
     /// The frame waited for and not drawn yet.
     pending: Option<xr::FrameState>,
+    /// The view is to be centred on the head at the next frame it is
+    /// tracked: asked for, or the session's first focus (where the runtime's
+    /// own centre is, the player seldom is).
     recenter: bool,
+    /// The session has had the focus.
+    focused: bool,
     events: xr::EventDataBuffer,
     description: String,
     /// Why the session can't go on, after a call failed in a way that
@@ -212,6 +216,7 @@ impl Xr {
             running: false,
             pending: None,
             recenter: false,
+            focused: false,
             events: xr::EventDataBuffer::new(),
             description,
             failed: None,
@@ -250,6 +255,10 @@ impl Xr {
                         }
                         Err(e) => notes.push(format!("The headset can't start: {}", e)),
                     },
+                    xr::SessionState::FOCUSED if !self.focused => {
+                        self.focused = true;
+                        self.recenter = true;
+                    }
                     xr::SessionState::STOPPING => {
                         let _ = self.session.end();
                         self.running = false;
@@ -322,29 +331,22 @@ impl Xr {
             self.pending = None;
             return Err(self.fail("beginning the headset's frame", e));
         }
-        if std::mem::take(&mut self.recenter) {
-            self.center(state.predicted_display_time);
+        if self.recenter && self.center(state.predicted_display_time) {
+            self.recenter = false;
         }
         Ok(())
     }
 
-    /// Where the space's origin is in the scene: at the scene's `spawn`,
-    /// turned its way.
-    fn world(spawn: Spawn) -> Mat4 {
-        Mat4::from_translation(spawn.position) * Mat4::from_rotation_y(spawn.yaw)
-    }
-
     /// The head and the controllers at the frame's time.
-    pub fn track(&mut self, spawn: Spawn) -> Tracking {
+    pub fn track(&mut self, world: Mat4) -> Tracking {
         let mut tracking = Tracking::default();
         let Some(state) = self.pending else { return tracking };
         let time = state.predicted_display_time;
-        let world = Self::world(spawn);
         let valid = xr::SpaceLocationFlags::POSITION_VALID | xr::SpaceLocationFlags::ORIENTATION_VALID;
         if let Ok(head) = self.head.locate(&self.space, time)
             && head.location_flags.contains(valid)
         {
-            tracking.head = Some(world * pose_matrix(head.pose));
+            tracking.head = Some(rigid(world * pose_matrix(head.pose)));
         }
         let Some(controls) = &self.controls else { return tracking };
         if self.session.sync_actions(&[xr::ActiveActionSet::new(&controls.set)]).is_err() {
@@ -365,7 +367,7 @@ impl Xr {
                 .filter(|s| s.is_active)
                 .map_or(Vec2::ZERO, |s| Vec2::new(s.current_state.x, s.current_state.y));
             tracking.hands[i] = Some(Hand {
-                aim: world * pose_matrix(location.pose),
+                aim: rigid(world * pose_matrix(location.pose)),
                 select: held(&controls.select),
                 squeeze: held(&controls.squeeze),
                 primary: held(&controls.primary),
@@ -379,16 +381,16 @@ impl Xr {
 
     /// Draw the frame begun: `draw` gets each eye's number, view, size,
     /// whether its images are sRGB, and the framebuffer to draw it into.
-    /// The scene's `spawn` is where the space's origin is. The frame is
+    /// `world` is where the space is in the scene. The frame is
     /// ended whatever fails, with nothing in it if the eyes aren't drawn.
     pub fn draw(
         &mut self,
-        spawn: Spawn,
+        world: Mat4,
         draw: impl FnMut(usize, View, (u32, u32), bool, glow::Framebuffer),
     ) -> Result<(), String> {
         let Some(state) = self.pending.take() else { return Ok(()) };
         let time = state.predicted_display_time;
-        let drawn = if state.should_render { self.draw_eyes(time, spawn, draw).map(Some) } else { Ok(None) };
+        let drawn = if state.should_render { self.draw_eyes(time, world, draw).map(Some) } else { Ok(None) };
         let failed = drawn.as_ref().err().map(|&(what, e)| self.fail(what, e));
         let ended = match drawn.ok().flatten() {
             Some(views) => {
@@ -422,14 +424,13 @@ impl Xr {
     fn draw_eyes(
         &mut self,
         time: xr::Time,
-        spawn: Spawn,
+        world: Mat4,
         mut draw: impl FnMut(usize, View, (u32, u32), bool, glow::Framebuffer),
     ) -> Result<Vec<xr::View>, (&'static str, xr::sys::Result)> {
         let (_, views) = self.session.locate_views(VIEW, time, &self.space).map_err(|e| ("the headset's views", e))?;
         if views.len() < self.eyes.len() {
             return Err(("the headset's views", xr::sys::Result::ERROR_VALIDATION_FAILURE));
         }
-        let world = Self::world(spawn);
         for (index, (view, eye)) in views.iter().zip(&mut self.eyes).enumerate() {
             let image = eye.swapchain.acquire_image().map_err(|e| ("acquiring the headset's image", e))?;
             if let Err(e) = eye.swapchain.wait_image(xr::Duration::INFINITE) {
@@ -450,12 +451,12 @@ impl Xr {
     }
 
     /// Move the space so that its origin is where the head is at `time`,
-    /// facing where it faces (level).
-    fn center(&mut self, time: xr::Time) {
-        let Ok(location) = self.head.locate(&self.space, time) else { return };
+    /// facing where it faces (level). False while the head isn't tracked.
+    fn center(&mut self, time: xr::Time) -> bool {
+        let Ok(location) = self.head.locate(&self.space, time) else { return false };
         let valid = xr::SpaceLocationFlags::POSITION_VALID | xr::SpaceLocationFlags::ORIENTATION_VALID;
         if !location.location_flags.contains(valid) {
-            return;
+            return false;
         }
         // The head in the runtime's LOCAL space: through the space's pose.
         let head = pose_matrix(self.space_pose) * pose_matrix(location.pose);
@@ -474,7 +475,15 @@ impl Xr {
             }
             Err(e) => eprintln!("[VR] Recentring: {}", e),
         }
+        true
     }
+}
+
+/// A pose in the scene through a `world` that may scale: where it is and
+/// which way it turns, unscaled, for the hands' beams and the ears.
+fn rigid(pose: Mat4) -> Mat4 {
+    let (_, rotation, position) = pose.to_scale_rotation_translation();
+    Mat4::from_rotation_translation(rotation, position)
 }
 
 /// What a controller's input is bound to.

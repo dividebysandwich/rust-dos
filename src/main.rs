@@ -609,7 +609,7 @@ fn main() -> Result<(), String> {
                 {
                     if keycode == Keycode::Home && !repeat {
                         display.recenter();
-                        osd.show(if display.has_headset() { "View centred" } else { "Camera back at the start" });
+                        osd.show(if display.has_headset() { "View centered" } else { "Camera back at the start" });
                     }
                 }
                 // Losing the keyboard lets go of what it held.
@@ -2378,6 +2378,14 @@ impl Host for MainHost<'_, '_> {
 
     fn reinsert(&mut self, drive: u8) -> Result<String, String> {
         self.cpu.bus.reinsert_cd(drive)
+    }
+
+    fn center_vr(&mut self) -> Result<String, String> {
+        if !self.display.has_headset() {
+            return Err("No VR headset shows the scene".to_string());
+        }
+        self.display.recenter();
+        Ok("View centered where your head is".to_string())
     }
 
     fn boot(&mut self, drive: u8) -> Result<String, String> {

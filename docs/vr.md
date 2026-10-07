@@ -132,8 +132,13 @@ when the room loads.
   headset only the turn counts: your real head decides the tilt.
 - Put it at **eye height**. For a seated room, about 1.1 to 1.2 m above the
   floor, half a metre or so in front of the desk's edge. In a headset, the
-  spawn is where your head is when the headset's view was last centred
-  (Ctrl+Shift+Home, or holding the controller's menu button for a second).
+  spawn is where your head is when the headset's view was last centered:
+  when it first shows the scene, and with Ctrl+Shift+Home, the
+  controller's menu button held for a second, or **Center the view where
+  you sit now** on the settings window's VR page. Players fine-tune it
+  there too, in cm and degrees, and the scene's scale (`seat_right`,
+  `seat_up`, `seat_forward`, `seat_turn`, `scene_scale`), so a spawn a few
+  centimetres off is easy to live with, but get it close.
 - **Without a `spawn`**, the first camera in the scene is used. Without
   either, you start 1.2 m above the origin looking along +Y.
 

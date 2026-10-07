@@ -265,6 +265,7 @@ impl Stage {
         if let Some(headset) = &self.headset {
             headset.set_controllers(settings.controllers);
             headset.set_glow(glow_of(settings));
+            headset.set_placement(headset::Placement::of(settings));
         }
     }
 

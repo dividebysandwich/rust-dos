@@ -6,7 +6,7 @@ you fly around, or in a VR headset (SteamVR, Monado) through OpenXR.
 Hold **Ctrl+Shift** and move the mouse to look around in the window's
 scene; drag with the left button to slide, use the wheel to move ahead and
 back, **Q** and **E** to go down and up, and **Home** to go back to the
-start or centre the headset's view.
+start or center the headset's view.
 
 # 3D scene {#vr-mode}
 
@@ -76,7 +76,29 @@ What a VR headset's controllers do:
 - **gamepad**: no laser; both hands are the joystick.
 
 The menu button opens and closes the settings window, which the laser
-clicks in; held for a second, it centres the view.
+clicks in; held for a second, it centers the view.
+
+# Center the view {#vr-center}
+
+Puts your eyes where the scene's seat is (its `spawn`), facing the
+screen, from where your head is now. Sit as you play and press **Enter**.
+
+The view centers itself when the headset first shows the scene; this,
+**Ctrl+Shift+Home** and the controllers' menu button held for a second
+center it again.
+
+# Scene scale and seat {#vr-seat}
+
+Fine-tune where you sit in the scene, in small steps with **Left** and
+**Right**, or type a number with **Enter**. **Delete** puts one back.
+
+- **Scene scale**: how big the room looks, 50 to 200%. Above 100% it
+  is bigger and you smaller.
+- **Seat to the right**, **higher**, **closer to the screen**: moves you
+  from the scene's seat, in cm (-100 to 100).
+- **Seat turned to the left**: turns you, in degrees (-180 to 180).
+
+They take effect at once, and are kept with the other settings.
 
 # Sound from the screen {#vr-spatial-audio}
 

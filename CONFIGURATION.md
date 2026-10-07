@@ -683,8 +683,17 @@ The picture on a screen in a 3D scene (see [3D scene and VR](#3d-scene-and-vr)).
   the next start.
 * `screen_glow`: how brightly the screen lights the room, in percent of what
   the scene says, 0 to 400 (the default 100). 0 turns its light off.
+* `scene_scale`: how big the scene looks in a headset, in percent, 50 to
+  200 (the default 100). Above 100 the room is bigger and you smaller.
+* `seat_right`, `seat_up`, `seat_forward`: where you sit in a headset from
+  the scene's `spawn`, in cm, -100 to 100 (the default 0): to the right,
+  higher and closer to the screen, as the spawn faces.
+* `seat_turn`: how far you are turned to the left of the spawn's way, in
+  degrees, -180 to 180 (the default 0).
 
-The settings window's VR page has them all.
+The settings window's VR page has them all, and a **Center the view where
+you sit now** button. Its Left and Right keys step the scale by 1%, the seat
+by 1 cm and the turn by 1°, which take effect at once.
 
 ### `[drives]`
 
@@ -1813,7 +1822,7 @@ and the machine sees neither it nor these keys:
 | Dragging with the left button | Slide sideways and up and down |
 | Dragging with the right button, or the wheel | Move ahead and back |
 | Q / E (held) | Move down / up |
-| Home | Back to where the scene starts; with a headset, centre its view where you look |
+| Home | Back to where the scene starts; with a headset, center its view where you look |
 
 ### Scenes from Blender
 
@@ -1871,10 +1880,11 @@ with `--vr` rust-dos opens its window through X11, under XWayland on a
 Wayland desktop. Without a loader, runtime or headset, the scene is shown
 in the window and the log says why.
 
-The headset's own seated space is used: the eyes are where the scene's
-`spawn` is when the runtime last centred its view. Ctrl+Shift+Home, or the
-controllers' menu button held for a second, centres it again where you are
-and look.
+The eyes start where the scene's `spawn` is: the view is centered on your
+head the first time the headset shows the scene. Ctrl+Shift+Home, the
+controllers' menu button held for a second, or **Center the view where you
+sit now** on the settings window's VR page centers it again where you are
+and look. The `scene_scale`, `seat_*` settings fine-tune it from there.
 
 The headset is drawn on a thread of its own, at the headset's rate (90 Hz
 and the like), with the newest picture the machine finished: a long
@@ -1895,7 +1905,7 @@ with `controllers=both`:
 | Thumbsticks (Vive: trackpads) | The joystick's two sticks |
 | A / B (right), X / Y (left) | The joystick's buttons A, B, X, Y |
 | The other hand's trigger and grip | The right trigger is button A, the right grip B, the left trigger X, the left grip Y |
-| Menu (Index: left thumbstick click) | Opens and closes the settings window, which the laser clicks in; held a second, centres the view |
+| Menu (Index: left thumbstick click) | Opens and closes the settings window, which the laser clicks in; held a second, centers the view |
 
 The controllers are the first gamepad, so a game's [gamepad
 mapping](#gamepad-mappings) maps them too: the grips are its shoulder

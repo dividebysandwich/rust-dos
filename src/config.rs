@@ -2574,6 +2574,9 @@ mod tests {
                 screen_fit: crate::vr::ScreenFit::Stretch,
                 quality: crate::vr::VrQuality::Medium,
                 screen_glow: 150,
+                scene_scale: 104,
+                seat: [-3, 2, 7],
+                seat_turn: -5,
             },
         }
     }
@@ -2752,7 +2755,7 @@ mod tests {
         assert!(saved.contains("\nroom=lobby\n\n[serial]\nserial1=mouse\n"), "{}", saved);
         assert!(saved.contains("\nmodemtelnet=off\n\n[printer]\noutput=pdf\n"), "{}", saved);
         assert!(saved.contains("\ntimeout=3000\n\n[achievements]\nenabled=false\nhardcore=false\n\n[shell]\nautosuggest=true\n"), "{}", saved);
-        assert!(saved.contains("\nsuggestion_color=darkgray\n\n[vr]\nmode=off\ncontrollers=both\nspatial_audio=true\nscreen_fit=auto\nquality=high\nscreen_glow=100\n\n[autoexec]\nDIR\n"), "{}", saved);
+        assert!(saved.contains("\nsuggestion_color=darkgray\n\n[vr]\nmode=off\ncontrollers=both\nspatial_audio=true\nscreen_fit=auto\nquality=high\nscreen_glow=100\nscene_scale=100\nseat_right=0\nseat_up=0\nseat_forward=0\nseat_turn=0\n\n[autoexec]\nDIR\n"), "{}", saved);
         let config = parse(&saved, Path::new("/cfg"), Some(home));
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
         assert_eq!(Settings::from_config(&config), Settings { cycles: CpuSpeed::Max, ..settings.clone() });

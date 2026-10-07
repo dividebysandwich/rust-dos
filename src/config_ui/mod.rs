@@ -114,6 +114,11 @@ pub trait Host {
     fn drives(&self) -> Vec<DriveInfo>;
     /// Save the settings and the drives to the configuration file.
     fn save(&mut self, settings: &Settings) -> Result<(), String>;
+    /// Center the VR headset's view where the head is now, as
+    /// Ctrl+Shift+Home does. Returns what to tell the user.
+    fn center_vr(&mut self) -> Result<String, String> {
+        Err("No VR headset shows the scene".to_string())
+    }
     /// Boot the system on `drive`'s disk image now, as BOOT -l does.
     /// Returns what to tell the user.
     fn boot(&mut self, drive: u8) -> Result<String, String> {
@@ -378,7 +383,10 @@ impl Page {
         use Item::*;
         match self {
             Page::Drives | Page::Games | Page::States | Page::Cheats | Page::Achievements | Page::Stats => &[],
-            Page::Vr => &[VrMode, VrScene, VrScreenFit, VrQuality, VrScreenGlow, VrControllers, VrSpatialAudio],
+            Page::Vr => &[
+                VrMode, VrScene, VrScreenFit, VrQuality, VrScreenGlow, VrControllers, VrSpatialAudio, VrCenter,
+                VrSceneScale, VrSeat(0), VrSeat(1), VrSeat(2), VrSeatTurn,
+            ],
             Page::Display => {
                 &[Scale, Fullscreen, Aspect, Vrr, Filter, Shader, CrtCurvature, CrtGlow, Monochrome, Composite, CompositeEra]
             }
@@ -499,6 +507,14 @@ enum Item {
     /// the screen lights it.
     VrQuality,
     VrScreenGlow,
+    /// Center the headset's view where the head is now.
+    VrCenter,
+    /// How big the scene looks in the headset, and where its seat is from
+    /// the scene's spawn: shifted right, up and ahead (`VrSettings::seat`'s
+    /// axis), and turned.
+    VrSceneScale,
+    VrSeat(u8),
+    VrSeatTurn,
     Filter,
     Shader,
     /// How far the CRT look's tube bends and how much it glows, shown
@@ -819,6 +835,12 @@ impl Item {
             VrScreenFit => "Picture on the screen",
             VrQuality => "Lighting",
             VrScreenGlow => "Light from the screen",
+            VrCenter => "  Center the view where you sit now",
+            VrSceneScale => "Scene scale",
+            VrSeat(0) => "  Seat to the right",
+            VrSeat(1) => "  Seat higher",
+            VrSeat(_) => "  Seat closer to the screen",
+            VrSeatTurn => "  Seat turned to the left",
             Filter => "Scaling filter",
             Shader => "CRT shader",
             CrtCurvature => "  Curvature",
@@ -938,9 +960,11 @@ impl Item {
             | Item::VrSpatialAudio
             | Item::VrScreenFit
             | Item::VrQuality
-            | Item::VrScreenGlow => {
-                frontend.window && cfg!(feature = "vr")
-            }
+            | Item::VrScreenGlow
+            | Item::VrCenter
+            | Item::VrSceneScale
+            | Item::VrSeat(_)
+            | Item::VrSeatTurn => frontend.window && cfg!(feature = "vr"),
             Item::SoundFont => soundfonts(frontend),
             Item::Mt32Roms | Item::Mt32Model => mt32(frontend),
             Item::Sc55Roms | Item::Sc55Model => frontend.host_files,
@@ -978,7 +1002,9 @@ impl Item {
             Item::VrScene | Item::VrSpatialAudio | Item::VrScreenFit | Item::VrQuality | Item::VrScreenGlow => {
                 s.vr.mode != crate::vr::VrMode::Off
             }
-            Item::VrControllers => s.vr.mode == crate::vr::VrMode::Headset,
+            Item::VrControllers | Item::VrCenter | Item::VrSceneScale | Item::VrSeat(_) | Item::VrSeatTurn => {
+                s.vr.mode == crate::vr::VrMode::Headset
+            }
             Item::ReverbMix => s.mixer.reverb != ReverbPreset::Off,
             Item::ChorusMix => s.mixer.chorus != ChorusPreset::Off,
             Item::RewindMemory => s.rewind,
@@ -1021,7 +1047,9 @@ impl Item {
             Joystick | Deadzone | SpeakerFilter | SbFilter | Reverb | Chorus | ReverbMix | ChorusMix => Applies::Now,
             Rooms => Applies::Now,
             Memsize | Autoexec | Lan | LanHost | VrMode | VrScene | VrQuality => Applies::NextStart,
-            VrControllers | VrSpatialAudio | VrScreenFit | VrScreenGlow => Applies::Now,
+            VrControllers | VrSpatialAudio | VrScreenFit | VrScreenGlow | VrCenter | VrSceneScale | VrSeat(_) | VrSeatTurn => {
+                Applies::Now
+            }
             _ => Applies::AtPrompt,
         }
     }
@@ -1032,6 +1060,7 @@ impl Item {
                 Input::Slider
             }
             Item::Memsize | Item::Deadzone => Input::Slider,
+            Item::VrSceneScale | Item::VrSeat(_) | Item::VrSeatTurn => Input::Slider,
             Item::Cycles => Input::Presets,
             Item::UltraDir | Item::CaptureDir => Input::Text,
             Item::MacAddr | Item::Relay | Item::Player | Item::Lan | Item::LanHost | Item::Room | Item::Password => {
@@ -1039,7 +1068,9 @@ impl Item {
             }
             Item::ModemListen => Input::Text,
             Item::SoundFont | Item::Mt32Roms | Item::Awe32Rom | Item::Sc55Roms | Item::VrScene => Input::File,
-            Item::Autoexec | Item::Rooms | Item::Awe32Download | Item::Sc55Download | Item::VoodooOverlay => Input::Link,
+            Item::Autoexec | Item::Rooms | Item::Awe32Download | Item::Sc55Download | Item::VoodooOverlay | Item::VrCenter => {
+                Input::Link
+            }
             _ => Input::Choice,
         }
     }
@@ -1067,6 +1098,10 @@ impl Item {
                 let glow = s.vr.screen_glow.min(crate::vr::SCREEN_GLOW_MAX) as u16;
                 bar(format!("{:>3}%", glow), glow, crate::vr::SCREEN_GLOW_MAX as u16, SCREEN_GLOW_UNIT)
             }
+            VrCenter => String::new(),
+            VrSceneScale => format!("{}%", s.vr.scene_scale),
+            VrSeat(axis) => format!("{:+} cm", s.vr.seat[axis as usize]),
+            VrSeatTurn => format!("{:+}°", s.vr.seat_turn),
             Filter => match s.filter {
                 crate::config::Filter::Nearest => "nearest (sharp)",
                 crate::config::Filter::Linear => "linear (smooth)",
@@ -1432,7 +1467,7 @@ impl Item {
             // row of several, whose fields have their own.
             Cycles | CrtCurvature | CrtGlow | Memsize | Volume(_) | ReverbMix | ChorusMix | Deadzone | UltraDir
             | SoundFont | Mt32Roms | Awe32Rom | Awe32Download | Sc55Roms | Sc55Download | VoodooOverlay | CaptureDir | Autoexec | SbPorts | GusPorts | MacAddr
-            | Rooms | Relay | Player | VrScene | VrScreenGlow
+            | Rooms | Relay | Player | VrScene | VrScreenGlow | VrCenter | VrSceneScale | VrSeat(_) | VrSeatTurn
             | Lan | LanHost | Room | Password | ModemListen => Vec::new(),
         }
     }
@@ -1466,6 +1501,19 @@ impl Item {
             VrScreenGlow => {
                 let max = crate::vr::SCREEN_GLOW_MAX as u16;
                 s.vr.screen_glow = step_units(s.vr.screen_glow.min(max as u32) as u16, dir, SCREEN_GLOW_UNIT, max) as u32;
+            }
+            VrSceneScale => {
+                let (min, max) = (crate::vr::SCENE_SCALE_MIN as isize, crate::vr::SCENE_SCALE_MAX as isize);
+                s.vr.scene_scale = (s.vr.scene_scale as isize + dir).clamp(min, max) as u32;
+            }
+            VrSeat(axis) => {
+                let max = crate::vr::SEAT_SHIFT_MAX;
+                let seat = &mut s.vr.seat[axis as usize];
+                *seat = (*seat + dir as i32).clamp(-max, max);
+            }
+            VrSeatTurn => {
+                let max = crate::vr::SEAT_TURN_MAX;
+                s.vr.seat_turn = (s.vr.seat_turn + dir as i32).clamp(-max, max);
             }
             Memsize => {
                 let steps: Vec<usize> = memsizes(s.cpu).collect();
@@ -1514,6 +1562,9 @@ impl Item {
             Item::CrtCurvature => s.crt.curvature.to_string(),
             Item::CrtGlow => s.crt.glow.to_string(),
             Item::VrScreenGlow => s.vr.screen_glow.to_string(),
+            Item::VrSceneScale => s.vr.scene_scale.to_string(),
+            Item::VrSeat(axis) => s.vr.seat[axis as usize].to_string(),
+            Item::VrSeatTurn => s.vr.seat_turn.to_string(),
             Item::ReverbMix => s.mixer.reverb_mix.to_string(),
             Item::ChorusMix => s.mixer.chorus_mix.to_string(),
             Item::MacAddr => s.network.mac.map_or(String::new(), |mac| mac.to_string()),
@@ -1547,6 +1598,9 @@ impl Item {
             Item::CrtCurvature => s.crt.curvature = parse_amount(text).ok_or("The curvature goes from 0 to 100%")?,
             Item::CrtGlow => s.crt.glow = parse_amount(text).ok_or("The glow goes from 0 to 100%")?,
             Item::VrScreenGlow => s.vr.set("screen_glow", text, std::path::Path::new(""))?,
+            Item::VrSceneScale => s.vr.set("scene_scale", text, std::path::Path::new(""))?,
+            Item::VrSeat(axis) => s.vr.set(crate::vr::SEAT_AXES[axis as usize], text, std::path::Path::new(""))?,
+            Item::VrSeatTurn => s.vr.set("seat_turn", text, std::path::Path::new(""))?,
             Item::ReverbMix => s.mixer.reverb_mix = crate::mixer::parse_mix(text)?,
             Item::ChorusMix => s.mixer.chorus_mix = crate::mixer::parse_mix(text)?,
             Item::MacAddr if text.is_empty() => s.network.mac = None,
@@ -1603,6 +1657,12 @@ impl Item {
                 let default = crate::vr::VrSettings::default().screen_glow;
                 std::mem::replace(&mut s.vr.screen_glow, default) != default
             }
+            Item::VrSceneScale => {
+                let default = crate::vr::VrSettings::default().scene_scale;
+                std::mem::replace(&mut s.vr.scene_scale, default) != default
+            }
+            Item::VrSeat(axis) => std::mem::take(&mut s.vr.seat[axis as usize]) != 0,
+            Item::VrSeatTurn => std::mem::take(&mut s.vr.seat_turn) != 0,
             Item::ReverbMix => std::mem::replace(&mut s.mixer.reverb_mix, DEFAULT_MIX) != DEFAULT_MIX,
             Item::ChorusMix => std::mem::replace(&mut s.mixer.chorus_mix, DEFAULT_MIX) != DEFAULT_MIX,
             Item::MacAddr => s.network.mac.take().is_some(),
@@ -2345,6 +2405,10 @@ impl ConfigUi {
             (UiKey::Enter, Input::Link) if item == Item::Awe32Download => self.download_awe32_rom(),
             (UiKey::Enter, Input::Link) if item == Item::Sc55Download => self.ask_sc55_download(),
             (UiKey::Enter, Input::Link) if item == Item::VoodooOverlay => self.ask_glide_download(),
+            (UiKey::Enter, Input::Link) if item == Item::VrCenter => match host.center_vr() {
+                Ok(message) => self.info(message),
+                Err(e) => self.error(e),
+            },
             (UiKey::Enter, Input::Link) => self.open_autoexec(host),
             (UiKey::Delete | UiKey::Backspace, _) if item.clear(&mut self.settings) => self.changed(item, host),
             _ => {}

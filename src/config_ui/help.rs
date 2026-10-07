@@ -296,6 +296,8 @@ impl Item {
             VrScreenFit => "vr-screen-fit",
             VrQuality => "vr-quality",
             VrScreenGlow => "vr-screen-glow",
+            VrCenter => "vr-center",
+            VrSceneScale | VrSeat(_) | VrSeatTurn => "vr-seat",
             Filter => "filter",
             Shader => "shader",
             CrtCurvature => "crt-curvature",

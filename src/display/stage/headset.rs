@@ -19,10 +19,10 @@
 
 use super::controls::{Controllers, VrInput};
 use super::render::{Format, Gpu};
-use super::scene::{Leds, Scene};
+use super::scene::{Leds, Scene, Spawn};
 use super::xr::Xr;
 use crate::video::shader::Glsl;
-use glam::Mat4;
+use glam::{Mat4, Vec3};
 use glow::HasContext;
 use rust_dos::vr::{VrControllers, VrQuality, VrSettings};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -43,6 +43,46 @@ pub fn before_sdl() {
             // Xlib stays loaded for SDL.
             std::mem::forget(xlib);
         }
+    }
+}
+
+/// Where the headset's space is in the scene, from the settings' seat
+/// and scale (`VrSettings`): its origin, where the view is centred, is at
+/// the scene's `spawn` and the seat's shift, turned the spawn's way and
+/// the seat's turn, and its metres are the scale's fraction of the scene's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Placement {
+    /// Metres right, up and back of the spawn, as it faces.
+    shift: Vec3,
+    /// Radians to the left.
+    turn: f32,
+    /// How many times bigger the scene looks.
+    scale: f32,
+}
+
+impl Default for Placement {
+    fn default() -> Self {
+        Placement::of(&VrSettings::default())
+    }
+}
+
+impl Placement {
+    pub fn of(settings: &VrSettings) -> Self {
+        let [right, up, forward] = settings.seat.map(|cm| cm as f32 / 100.0);
+        Placement {
+            shift: Vec3::new(right, up, -forward),
+            turn: (settings.seat_turn as f32).to_radians(),
+            scale: settings.scene_scale.max(1) as f32 / 100.0,
+        }
+    }
+
+    /// The space's matrix in the scene of `spawn`.
+    pub fn world(self, spawn: Spawn) -> Mat4 {
+        Mat4::from_translation(spawn.position)
+            * Mat4::from_rotation_y(spawn.yaw)
+            * Mat4::from_translation(self.shift)
+            * Mat4::from_rotation_y(self.turn)
+            * Mat4::from_scale(Vec3::splat(1.0 / self.scale))
     }
 }
 
@@ -124,6 +164,7 @@ struct State {
     controllers: VrControllers,
     /// How brightly the screen lights the scene (`Gpu::set_glow`).
     glow: f32,
+    placement: Placement,
     recenter: bool,
     // From the headset.
     /// The left eye's view, with its view-projection.
@@ -213,7 +254,7 @@ impl Headset {
         // (Making it made it current here.)
         window.gl_make_current(main)?;
         let context = context?;
-        let shared = Arc::new(Shared { state: Mutex::new(State { controllers, glow, ..State::default() }), stop: AtomicBool::new(false) });
+        let shared = Arc::new(Shared { state: Mutex::new(State { controllers, glow, placement: Placement::of(settings), ..State::default() }), stop: AtomicBool::new(false) });
         // SAFETY: the context outlives the thread (`Headset::drop`).
         let (raw_window, raw_context) = (Raw(hidden.raw().cast()), Raw(unsafe { context.raw() }));
         let thread_shared = shared.clone();
@@ -269,6 +310,10 @@ impl Headset {
 
     pub fn set_controllers(&self, controllers: VrControllers) {
         self.shared.lock().controllers = controllers;
+    }
+
+    pub fn set_placement(&self, placement: Placement) {
+        self.shared.lock().placement = placement;
     }
 
     pub fn set_glow(&self, glow: f32) {
@@ -459,7 +504,7 @@ fn session(
             std::thread::sleep(std::time::Duration::from_millis(20));
             continue;
         }
-        let (taken, leds, mode, recenter, mirror_index, mirror_released, glow) = {
+        let (taken, leds, mode, recenter, mirror_index, mirror_released, glow, placement) = {
             let mut state = shared.lock();
             let (taken, stale) = state.screen.take(|| release(gl));
             if let Some(Fence(stale)) = stale {
@@ -467,7 +512,7 @@ fn session(
                 unsafe { gl.delete_sync(stale) };
             }
             let (mirror_index, mirror_released) = (state.mirror.free(), state.mirror.released());
-            (taken, state.leds, state.controllers, std::mem::take(&mut state.recenter), mirror_index, mirror_released, state.glow)
+            (taken, state.leds, state.controllers, std::mem::take(&mut state.recenter), mirror_index, mirror_released, state.glow, state.placement)
         };
         if let Some(Fence(fence)) = mirror_released {
             // SAFETY: see `GlScreen`: the window's reads of the mirror's
@@ -497,14 +542,15 @@ fn session(
             eprintln!("[VR] {}", e);
             continue;
         }
-        let tracking = xr.track(scene.spawn);
+        let world = placement.world(scene.spawn);
+        let tracking = xr.track(world);
         let (input, extras, hold) = controllers.update(mode, &tracking, &scene.screen, std::time::Instant::now());
         if hold {
             xr.recenter();
         }
         let picture = screen.map(|i| screens[i]);
         let mut left = None;
-        let drawn = xr.draw(scene.spawn, |eye, view, eye_size, srgb, framebuffer| {
+        let drawn = xr.draw(world, |eye, view, eye_size, srgb, framebuffer| {
             if let Err(e) = gpu.render(gl, scene, &view, Format { size: eye_size, srgb }, picture, leds, &extras) {
                 eprintln!("[VR] {}", e);
                 return;
@@ -541,6 +587,24 @@ fn session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_seat_moves_and_turns_as_the_spawn_faces() {
+        // A spawn turned to the left (looking along -X).
+        let spawn = Spawn { position: Vec3::new(1.0, 1.2, 0.0), yaw: std::f32::consts::FRAC_PI_2, pitch: 0.0 };
+        let at = |settings: &VrSettings| Placement::of(settings).world(spawn);
+        let near = |a: Vec3, b: Vec3| (a - b).length() < 1e-5;
+        assert!(near(at(&VrSettings::default()).transform_point3(Vec3::ZERO), spawn.position));
+        // Closer to the screen is ahead (-X); to the right, -Z; up, +Y.
+        let seat = VrSettings { seat: [10, 20, 30], ..VrSettings::default() };
+        assert!(near(at(&seat).transform_point3(Vec3::ZERO), Vec3::new(1.0 - 0.3, 1.4, -0.1)));
+        // Turned a quarter more to the left, ahead is +Z.
+        let turned = VrSettings { seat_turn: 90, ..VrSettings::default() };
+        assert!(near(at(&turned).transform_vector3(Vec3::NEG_Z), Vec3::Z));
+        // At 200%, a real metre is half a metre of the scene, from the seat.
+        let big = VrSettings { scene_scale: 200, ..VrSettings::default() };
+        assert!(near(at(&big).transform_point3(Vec3::new(0.0, 1.0, 0.0)), spawn.position + Vec3::new(0.0, 0.5, 0.0)));
+    }
 
     #[test]
     fn rings_never_draw_over_what_is_read_or_newest() {

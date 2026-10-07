@@ -248,7 +248,7 @@ from the history. The history is kept between sessions. The
 | Ctrl+F6 | Start and stop recording the sound (WAV) |
 | Ctrl+F7 | Start and stop recording video with sound (AVI) |
 | PrintScreen | Start and stop recording an animation (GIF) |
-| Ctrl+Shift + mouse, Q, E, Home | In the [3D scene](CONFIGURATION.md#3d-scene-and-vr): fly its camera, and centre a VR headset's view |
+| Ctrl+Shift + mouse, Q, E, Home | In the [3D scene](CONFIGURATION.md#3d-scene-and-vr): fly its camera, and center a VR headset's view |
 
 Screenshots and recordings go in `capture_dir` (`capture` in the directory
 Rust-DOS started in).
