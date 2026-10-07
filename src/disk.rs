@@ -1840,6 +1840,19 @@ impl DiskController {
         self.current_drive
     }
 
+    /// Return to the fresh-session working directories after a running
+    /// program is closed: every mounted drive at its root, and C: current.
+    pub fn reset_current_directories(&mut self) {
+        for drive in self.drives.iter_mut().flatten() {
+            drive.current_dir.clear();
+        }
+        self.current_drive = if self.is_mounted(DRIVE_C) {
+            DRIVE_C
+        } else {
+            self.drives.iter().position(Option::is_some).unwrap_or(DRIVE_C as usize) as u8
+        };
+    }
+
     // ========================================================================
     // PATH RESOLUTION
     // ========================================================================
@@ -3277,6 +3290,24 @@ mod tests {
         assert!(resolved.ends_with("DATA/f.txt"));
         assert_eq!(disk.qualify_directory("D:*.*").as_deref(), Some("D:\\DATA"));
         assert_eq!(disk.qualify_directory("\\*.*").as_deref(), Some("C:\\"));
+    }
+
+    #[test]
+    fn closing_a_program_resets_every_drive_to_its_root_and_c() {
+        let base = scratch("reset_cwd");
+        fs::create_dir_all(base.join("c/GAMES")).unwrap();
+        fs::create_dir_all(base.join("d/DATA")).unwrap();
+        let mut disk = DiskController::new(base.join("c"));
+        disk.mount(3, &base.join("d"), MountOptions::default(), false).unwrap();
+        assert!(disk.set_current_directory("GAMES"));
+        assert!(disk.set_current_directory("D:\\DATA"));
+        disk.set_current_drive(3);
+
+        disk.reset_current_directories();
+
+        assert_eq!(disk.get_current_drive(), DRIVE_C);
+        assert_eq!(disk.get_current_directory_of(DRIVE_C).as_deref(), Some(""));
+        assert_eq!(disk.get_current_directory_of(3).as_deref(), Some(""));
     }
 
     #[test]

@@ -105,6 +105,10 @@ impl ConfigUi {
                 self.game_dialog = Some(GameDialog::new(&host.current_directory()));
             }
             (UiKey::Enter, Some(game)) if self.show_launch(&game.id, host) => {}
+            (UiKey::Enter, Some(game)) if host.program_running() => {
+                self.status = None;
+                self.confirm_game_launch(&game.id);
+            }
             (UiKey::Enter, Some(game)) => match host.launch_game(&game.id) {
                 Ok(message) => {
                     self.close();

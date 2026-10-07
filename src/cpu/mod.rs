@@ -784,6 +784,21 @@ impl Cpu {
         false
     }
 
+    /// Stop the running program for the shell to be loaded again, with
+    /// the commands queued for it dropped. `load_shell` frees its memory,
+    /// files, vectors and extended memory, as for a program that crashed.
+    pub fn close_program(&mut self) {
+        self.batch.clear();
+        self.pending_command = None;
+        self.shell_wait = None;
+        self.bus.disk.reset_current_directories();
+        // A program closed in the middle may have left the Voodoo card
+        // driving the monitor, or the PowerVR one rendering.
+        self.bus.reset_voodoo();
+        self.bus.reset_powervr();
+        self.state = CpuState::RebootShell;
+    }
+
     /// Where the PSP at segment `psp` is in physical memory, through the
     /// page tables of the machine that runs: in Windows' 386 enhanced mode
     /// the processes of different virtual machines can have their PSPs at
@@ -1240,6 +1255,10 @@ impl Cpu {
     }
 
     pub fn load_shell(&mut self) {
+        // A shell reload always starts outside any DOS process. Normally
+        // termination restored this to the shell's PSP; frontends that
+        // explicitly close a running process have no parent context to do so.
+        self.current_psp = 0;
         // Windows' keyboard ends with it.
         crate::bios::windows_keyboard(&mut self.bus, false);
         // A system booted from a disk turned the machine off: DOS starts
@@ -2031,5 +2050,25 @@ impl Cpu {
 
 
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cpu;
+    use crate::voodoo::{regs::FBI_INIT0, Board};
+
+    #[test]
+    fn closing_program_resets_voodoo_output() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.bus.configure_voodoo(Some(Board::Max));
+        let voodoo = cpu.bus.voodoo.as_mut().unwrap();
+        voodoo.pci.clock_enabled = true;
+        voodoo.reg[FBI_INIT0] |= 1;
+        assert!(voodoo.output());
+
+        cpu.close_program();
+
+        assert!(!cpu.bus.voodoo.as_ref().unwrap().output());
     }
 }

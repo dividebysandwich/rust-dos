@@ -36,12 +36,17 @@ pub struct Machine {
     pub game: Option<ActiveGame>,
     /// A game whose ways to start the settings window is to offer.
     pub choose: Option<String>,
+    /// A game requested while a DOS program is running.
+    pub confirm_launch: Option<String>,
     /// The settings and drives as rust-dos.conf has them, which saving
     /// writes the changes from.
     pub saved: Settings,
     pub saved_drives: BTreeMap<u8, MountSpec>,
     /// Messages for the frontend to show.
     pub notices: Vec<String>,
+    /// A host request closed the running program, so frontend-held input
+    /// sequences must be released too.
+    pub program_closed: bool,
 }
 
 /// The drives the configuration file can hold, by letter: mounts of host
@@ -302,9 +307,14 @@ impl Host for Machine {
         self.game.as_ref().map(|g| g.id.clone())
     }
 
+    fn program_running(&self) -> bool {
+        !self.cpu.shell_idle() || self.cpu.batch.is_active() || self.cpu.shell_wait.is_some()
+    }
+
     fn launch_game(&mut self, id: &str) -> Result<String, String> {
-        if !self.cpu.shell_idle() || self.cpu.batch.is_active() || self.cpu.shell_wait.is_some() {
-            return Err("A program is running: quit it to launch a game".to_string());
+        if self.program_running() {
+            self.confirm_launch = Some(id.to_string());
+            return Ok("Choose whether to close the running program".to_string());
         }
         let (text, dir) = self.game_profile(id)?;
         // One with launch configurations: the window offers them.
@@ -313,6 +323,31 @@ impl Host for Machine {
             return Ok(format!("Choose how to start {}", choices.name));
         }
         self.start_game(id, &text, &dir)
+    }
+
+    fn close_program(&mut self) {
+        self.program_closed = true;
+        self.confirm_launch = None;
+        rust_dos::keyboard::release_all(&mut self.cpu.bus);
+        self.cpu.bus.joystick.set_pad(0, None);
+        if let Some(previous) = self.game.take() {
+            self.end_game(previous);
+        }
+        self.cpu.close_program();
+        self.cpu.load_shell();
+    }
+
+    fn launch_variant(&mut self, id: &str, variant: Option<&str>, tool: bool) -> Result<String, String> {
+        let (text, dir) = self.game_profile(id)?;
+        let text = match variant {
+            Some(variant) => games::variant_profile(&dir, &text, variant)?,
+            None => text,
+        };
+        let message = self.start_game(id, &text, &dir)?;
+        if let Some(game) = self.game.as_mut() {
+            game.choose_after = tool;
+        }
+        Ok(message)
     }
 
     fn game_pad(&self, id: &str) -> Vec<(String, String)> {
@@ -324,22 +359,6 @@ impl Host for Machine {
     fn launch_choices(&self, id: &str) -> Option<games::LaunchChoices> {
         let (text, dir) = self.game_profile(id).ok()?;
         games::launch_choices(&dir, &text)
-    }
-
-    fn launch_variant(&mut self, id: &str, variant: Option<&str>, tool: bool) -> Result<String, String> {
-        if !self.cpu.shell_idle() || self.cpu.batch.is_active() || self.cpu.shell_wait.is_some() {
-            return Err("A program is running: quit it to launch a game".to_string());
-        }
-        let (text, dir) = self.game_profile(id)?;
-        let text = match variant {
-            Some(variant) => games::variant_profile(&dir, &text, variant)?,
-            None => text,
-        };
-        let message = self.start_game(id, &text, &dir)?;
-        if let Some(game) = self.game.as_mut() {
-            game.choose_after = tool;
-        }
-        Ok(message)
     }
 
     fn create_game(&mut self, new: &NewGame, settings: &Settings) -> Result<String, String> {

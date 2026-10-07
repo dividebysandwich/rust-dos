@@ -25,6 +25,15 @@ pub(super) struct Chooser {
     row: usize,
 }
 
+/// A game launch waiting for confirmation to close the running program.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct PendingLaunch {
+    pub id: String,
+    pub variant: Option<String>,
+    pub tool: bool,
+    pub variant_selected: bool,
+}
+
 impl Chooser {
     fn new(id: &str, choices: LaunchChoices) -> Self {
         let mut rows = vec![Row::Start];
@@ -85,6 +94,10 @@ impl ConfigUi {
             UiKey::Enter => {
                 let (variant, tool) = chooser.chosen();
                 let id = chooser.id.clone();
+                if host.program_running() {
+                    self.confirm_launch(&id, variant, tool);
+                    return;
+                }
                 match host.launch_variant(&id, variant.as_deref(), tool) {
                     Ok(message) => {
                         self.chooser = None;

@@ -229,8 +229,10 @@ impl Core {
                 profile: plan.profile.clone(),
                 game: None,
                 choose: None,
+                confirm_launch: None,
                 saved_drives,
                 notices: Vec::new(),
+                program_closed: false,
             },
             content,
             disk: DiskControl { drive: plan.disk_drive, ..DiskControl::default() },
@@ -408,13 +410,12 @@ impl Core {
     /// What the machine asked for while it ran: the settings window, a
     /// changed mixer, a game ended, changed hardware, and turning off.
     fn after_batch(&mut self, cb: &Callbacks) {
-        let m = &mut self.m;
         // DOSCONFIG asks for the settings window.
-        if std::mem::take(&mut m.cpu.bus.config_ui_requested) && !self.ui.is_open() {
+        if std::mem::take(&mut self.m.cpu.bus.config_ui_requested) && !self.ui.is_open() {
             self.toggle_settings();
         }
-        let m = &mut self.m;
         // MIXER changed the mixer: the settings have it, to show and save.
+        let m = &mut self.m;
         if std::mem::take(&mut m.cpu.bus.mixer_changed) {
             m.settings.mixer = m.cpu.bus.mixer.settings();
             self.ui.sync_mixer(m.settings.mixer);
@@ -435,8 +436,18 @@ impl Core {
             m.end_game(ended);
             m.notices.push(format!("{} has ended", name));
         }
+        let confirm_launch = m.confirm_launch.take();
+        let choose = m.choose.take();
+        // A game launched while a program runs: the window asks whether
+        // to close it.
+        if let Some(id) = confirm_launch {
+            if !self.ui.is_open() {
+                self.toggle_settings();
+            }
+            self.ui.confirm_game_launch(&id);
+        }
         // A game launched with ways to start it: the window offers them.
-        if let Some(id) = m.choose.take() {
+        if let Some(id) = choose {
             if !self.ui.is_open() {
                 self.toggle_settings();
             }
@@ -640,6 +651,7 @@ impl Core {
                 && let Some(key) = keys::ui_key(e.keycode, character, ctrl, shift)
             {
                 self.ui.key(key, &mut self.m);
+                self.finish_program_close();
             }
             return;
         }
@@ -658,6 +670,21 @@ impl Core {
         } else if let Some((scan, extended)) = self.held.remove(&e.keycode) {
             keyboard::key_event(bus, scan, extended, false, None);
         }
+    }
+
+    /// Release frontend input sequences immediately after Y closes a
+    /// running program, before the next frame can advance the new game.
+    fn finish_program_close(&mut self) {
+        if !std::mem::take(&mut self.m.program_closed) {
+            return;
+        }
+        if let Some(mut input) = self.autoinput.take() {
+            input.stop(&mut self.m.cpu);
+        }
+        if let Some(mut mapper) = self.padmap.take() {
+            mapper.release(&mut self.m.cpu.bus);
+        }
+        self.m.cpu.bus.joystick.set_pad(0, None);
     }
 
     /// Let go of every key and button, so no game is left with Ctrl or a

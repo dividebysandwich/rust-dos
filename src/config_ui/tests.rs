@@ -38,6 +38,8 @@ struct FakeHost {
     /// The game with launch configurations, and those launched.
     choices: Option<crate::games::LaunchChoices>,
     variants: Vec<(String, Option<String>, bool)>,
+    running: bool,
+    closed_programs: usize,
     reset: Vec<String>,
     /// The games' manuals.
     manuals: Vec<crate::manuals::Manual>,
@@ -85,6 +87,8 @@ impl FakeHost {
             launched: vec![],
             choices: None,
             variants: vec![],
+            running: false,
+            closed_programs: 0,
             reset: vec![],
             manuals: vec![],
             created: vec![],
@@ -183,8 +187,18 @@ impl Host for FakeHost {
         self.launched.last().cloned()
     }
 
+    fn program_running(&self) -> bool {
+        self.running
+    }
+
+    fn close_program(&mut self) {
+        self.closed_programs += 1;
+        self.running = false;
+    }
+
     fn launch_game(&mut self, id: &str) -> Result<String, String> {
         self.launched.push(id.to_string());
+        self.running = true;
         Ok(format!("Starting {}", id))
     }
 
@@ -194,6 +208,7 @@ impl Host for FakeHost {
 
     fn launch_variant(&mut self, id: &str, variant: Option<&str>, tool: bool) -> Result<String, String> {
         self.variants.push((id.to_string(), variant.map(str::to_string), tool));
+        self.running = true;
         Ok(format!("Starting {}", id))
     }
 
@@ -2256,22 +2271,83 @@ fn a_game_with_launch_configurations_is_started_as_chosen() {
     // The default: the first row, the categories as they are.
     ui.key(UiKey::Enter, &mut host);
     assert_eq!(host.variants.pop(), Some(("game".into(), None, false)));
+    host.running = false;
     assert!(!ui.is_open());
     // MIDI and English.
     let mut ui = opened(&host);
     ui.show_launch("game", &host);
     keys(&mut ui, &mut host, &[UiKey::Down, UiKey::Right, UiKey::Enter]);
     assert_eq!(host.variants.pop(), Some(("game".into(), Some("MIDI + English".into()), false)));
+    host.running = false;
     // The setup program, a tool.
     let mut ui = opened(&host);
     ui.show_launch("game", &host);
     keys(&mut ui, &mut host, &[UiKey::End, UiKey::Enter]);
     assert_eq!(host.variants.pop(), Some(("game".into(), Some("Setup".into()), true)));
+    host.running = false;
     // Esc launches nothing.
     let mut ui = opened(&host);
     ui.show_launch("game", &host);
     ui.key(UiKey::Esc, &mut host);
     assert!(host.variants.is_empty() && !ui.is_open());
+}
+
+#[test]
+fn launching_while_a_program_runs_asks_y_or_n() {
+    let mut host = FakeHost::new();
+    host.games.push(GameEntry { id: "game".into(), name: "Game".into(), command: "GAME".into() });
+    host.running = true;
+    let mut ui = opened(&host);
+    ui.show_page(Page::Games);
+
+    ui.key(UiKey::Enter, &mut host);
+    assert!(ui.awaiting_launch_confirmation());
+    assert_eq!(ui.confirm_launch.as_ref().map(|pending| pending.id.as_str()), Some("game"));
+    assert!(host.launched.is_empty());
+    ui.key(UiKey::Char('n'), &mut host);
+    assert!(!ui.awaiting_launch_confirmation());
+    assert_eq!(host.closed_programs, 0);
+    assert!(host.launched.is_empty());
+    assert!(ui.is_open());
+
+    ui.key(UiKey::Enter, &mut host);
+    ui.key(UiKey::Char('Y'), &mut host);
+    assert_eq!(host.closed_programs, 1);
+    assert_eq!(host.launched, ["game"]);
+    assert!(!ui.is_open());
+    assert_eq!(ui.take_notice().as_deref(), Some("Starting game"));
+}
+
+#[test]
+fn launch_configuration_confirmation_keeps_the_selected_variant() {
+    let mut host = FakeHost::new();
+    host.running = true;
+    let dirs = vec!["Default".to_string(), "Setup".to_string()];
+    host.choices = Some(crate::games::LaunchChoices {
+        name: "Game".into(),
+        variants: crate::archive::Variants::new(&dirs),
+        tools: vec!["Setup".into()],
+    });
+    let mut ui = opened(&host);
+    assert!(ui.show_launch("game", &host));
+    keys(&mut ui, &mut host, &[UiKey::End, UiKey::Enter]);
+    assert!(ui.awaiting_launch_confirmation());
+    ui.key(UiKey::Char('y'), &mut host);
+    assert_eq!(host.closed_programs, 1);
+    assert_eq!(host.variants, [("game".into(), Some("Setup".into()), true)]);
+}
+
+#[test]
+fn dropping_a_game_while_a_program_runs_opens_the_confirmation() {
+    let mut host = FakeHost::new();
+    host.running = true;
+    let mut ui = opened(&host);
+    ui.confirm_game_launch("game");
+    assert!(ui.awaiting_launch_confirmation());
+    assert_eq!(ui.confirm_launch.as_ref().map(|pending| pending.id.as_str()), Some("game"));
+    ui.key(UiKey::Char('y'), &mut host);
+    assert_eq!(host.closed_programs, 1);
+    assert_eq!(host.launched, ["game"]);
 }
 
 #[test]

@@ -627,8 +627,21 @@ impl Machine {
     pub fn launch_game(&mut self, query: &str) -> Result<(), JsError> {
         let entries: Vec<GameEntry> = self.games.iter().map(|(id, text)| games::entry(id, text)).collect();
         let id = games::find(&entries, query).map(|g| g.id.clone()).ok_or_else(|| JsError::new(&format!("No game called {}", query)))?;
-        let message = self.with_ui(|_, host| host.start_game(&id)).map_err(|e| JsError::new(&e))?;
-        self.osd.show(message);
+        let message = self.with_ui(|ui, host| {
+            if host.program_running() {
+                if !ui.is_open() {
+                    let settings = host.settings.clone();
+                    ui.open(&settings, None, &*host);
+                }
+                ui.confirm_game_launch(&id);
+                Ok(None)
+            } else {
+                host.start_game(&id).map(Some)
+            }
+        }).map_err(|e: String| JsError::new(&e))?;
+        if let Some(message) = message {
+            self.osd.show(message);
+        }
         Ok(())
     }
 
@@ -995,6 +1008,7 @@ impl Machine {
             states: &mut self.states,
             slot: &mut self.slot,
             picture: &self.picture,
+            held: &mut self.held,
         };
         action(&mut self.ui, &mut host)
     }
@@ -1075,6 +1089,7 @@ struct PageHost<'m> {
     states: &'m mut BTreeMap<String, Vec<u8>>,
     slot: &'m mut u8,
     picture: &'m Frame,
+    held: &'m mut HashMap<String, PcKey>,
 }
 
 impl PageHost<'_> {
@@ -1297,10 +1312,22 @@ impl Host for PageHost<'_> {
         self.game.as_ref().map(|g| g.id.clone())
     }
 
-    fn launch_game(&mut self, id: &str) -> Result<String, String> {
-        if !self.cpu.shell_idle() || self.cpu.batch.is_active() || self.cpu.shell_wait.is_some() {
-            return Err("A program is running: quit it to launch a game".to_string());
+    fn program_running(&self) -> bool {
+        !self.cpu.shell_idle() || self.cpu.batch.is_active() || self.cpu.shell_wait.is_some()
+    }
+
+    fn close_program(&mut self) {
+        for key in self.held.drain().map(|(_, key)| key) {
+            keyboard::key_event(&mut self.cpu.bus, key.scan, key.extended, false, None);
         }
+        if let Some(previous) = self.game.take() {
+            self.end_game(previous);
+        }
+        self.cpu.close_program();
+        self.cpu.load_shell();
+    }
+
+    fn launch_game(&mut self, id: &str) -> Result<String, String> {
         self.start_game(id)
     }
 

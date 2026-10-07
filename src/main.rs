@@ -397,6 +397,8 @@ fn main() -> Result<(), String> {
     let mut game: Option<ActiveGame> = None;
     // A game whose ways to start are to be offered (launch.rs).
     let mut choose: Option<String> = None;
+    // A game requested outside the settings window while DOS is busy.
+    let mut confirm_launch: Option<String> = None;
     // The keys the game's profile presses as it starts, and whether they
     // turned on fast forward to get through a wait.
     let mut autoinput: Option<rust_dos::autoinput::AutoInput> = None;
@@ -500,6 +502,10 @@ fn main() -> Result<(), String> {
                 saved: &mut saved,
                 game: &mut game,
                 choose: &mut choose,
+                confirm_launch: &mut confirm_launch,
+                autoinput: &mut autoinput,
+                autoinput_fast: &mut autoinput_fast,
+                padmap: &mut padmap,
                 states: &states_root,
                 picture: &cached_frame,
                 state_done: &state_done,
@@ -1027,6 +1033,12 @@ fn main() -> Result<(), String> {
                 // A file or folder dropped onto the window.
                 Event::DropFile { filename, .. } => {
                     let message = host!().dropped(std::path::Path::new(&filename));
+                    if let Some(id) = confirm_launch.take() {
+                        if !ui.is_open() {
+                            toggle_ui!();
+                        }
+                        ui.confirm_game_launch(&id);
+                    }
                     if ui.is_open() {
                         ui.drives_changed(&host!(), &message);
                     }
@@ -2011,6 +2023,10 @@ struct MainHost<'m, 'd> {
     game: &'m mut Option<ActiveGame>,
     /// A game whose ways to start the window is to offer.
     choose: &'m mut Option<String>,
+    confirm_launch: &'m mut Option<String>,
+    autoinput: &'m mut Option<rust_dos::autoinput::AutoInput>,
+    autoinput_fast: &'m mut bool,
+    padmap: &'m mut Option<rust_dos::padmap::PadMapper>,
     /// The save states: their folder, the picture the machine shows, for
     /// theirs, and where the thread writing one says it is done.
     states: &'m Option<PathBuf>,
@@ -2464,9 +2480,34 @@ impl Host for MainHost<'_, '_> {
         self.game.as_ref().map(|g| g.id.clone())
     }
 
+    fn program_running(&self) -> bool {
+        !self.cpu.shell_idle() || self.cpu.batch.is_active() || self.cpu.shell_wait.is_some()
+    }
+
+    fn close_program(&mut self) {
+        if let Some(mut mapper) = self.padmap.take() {
+            mapper.release(&mut self.cpu.bus);
+        }
+        if let Some(mut input) = self.autoinput.take() {
+            input.stop(self.cpu);
+        }
+        if std::mem::take(self.autoinput_fast) {
+            self.pacer.set_fast_forward(false, &self.cpu.bus.clock, std::time::Instant::now());
+            self.cpu.bus.mixer.fast_forward = false;
+        }
+        if let Some(previous) = self.game.take() {
+            self.end_game(previous);
+        }
+        keyboard::release_all(&mut self.cpu.bus);
+        self.cpu.close_program();
+        self.cpu.load_shell();
+    }
+
     fn launch_game(&mut self, id: &str) -> Result<String, String> {
-        if !self.cpu.shell_idle() || self.cpu.batch.is_active() || self.cpu.shell_wait.is_some() {
-            return Err("A program is running: quit it to launch a game".to_string());
+        // The window asks whether to close the program running first.
+        if self.program_running() {
+            *self.confirm_launch = Some(id.to_string());
+            return Ok("Choose whether to close the running program".to_string());
         }
         let (text, dir) = self.game_profile(id)?;
         // One with launch configurations: the window offers them.
@@ -2489,9 +2530,6 @@ impl Host for MainHost<'_, '_> {
     }
 
     fn launch_variant(&mut self, id: &str, variant: Option<&str>, tool: bool) -> Result<String, String> {
-        if !self.cpu.shell_idle() || self.cpu.batch.is_active() || self.cpu.shell_wait.is_some() {
-            return Err("A program is running: quit it to launch a game".to_string());
-        }
         let (text, dir) = self.game_profile(id)?;
         let text = match variant {
             Some(variant) => games::variant_profile(&dir, &text, variant)?,

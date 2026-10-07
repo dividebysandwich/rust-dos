@@ -165,6 +165,14 @@ pub trait Host {
     fn active_game(&self) -> Option<String> {
         None
     }
+    /// Whether a DOS program is running instead of waiting at the prompt.
+    /// `launch_game` and `launch_variant` still start it; the settings
+    /// window asks first and calls `close_program` if the user agrees.
+    fn program_running(&self) -> bool {
+        false
+    }
+    /// Close the running program, returning the machine to its DOS shell.
+    fn close_program(&mut self) {}
     /// Launch the game `id` at the prompt: its settings, its drives and the
     /// commands that start it. Returns what to tell the user.
     fn launch_game(&mut self, id: &str) -> Result<String, String> {
@@ -1841,6 +1849,8 @@ pub struct ConfigUi {
     manual: Option<manual::ManualView>,
     /// The ways to start a game being launched (launch.rs).
     chooser: Option<launch::Chooser>,
+    /// A game launch awaiting confirmation to close the running program.
+    confirm_launch: Option<launch::PendingLaunch>,
     /// Where the manuals were left, for opening them there again.
     manual_places: manual::Places,
     pixel_scale: (f32, f32),
@@ -1933,6 +1943,7 @@ impl ConfigUi {
             notice: None,
             manual: None,
             chooser: None,
+            confirm_launch: None,
             manual_places: manual::Places::default(),
             pixel_scale: (1.0, 1.0),
             layered: false,
@@ -1970,7 +1981,7 @@ impl ConfigUi {
     /// Stats page, which shows it running, unless a manual is open over
     /// them.
     pub fn pauses_machine(&self) -> bool {
-        self.open && (self.manual.is_some() || self.chooser.is_some() || !matches!(self.page, Page::Mixer | Page::Stats))
+        self.open && (self.manual.is_some() || self.chooser.is_some() || self.confirm_launch.is_some() || !matches!(self.page, Page::Mixer | Page::Stats))
     }
 
     /// What the window keeps up to date while it is open, for the frontend
@@ -2087,6 +2098,7 @@ impl ConfigUi {
         self.put_away_manual();
         self.manual = None;
         self.chooser = None;
+        self.confirm_launch = None;
         self.confirm_delete = None;
         self.confirm_sc55 = None;
         self.confirm_glide = false;
@@ -2112,7 +2124,56 @@ impl ConfigUi {
         self.put_away_manual();
         self.manual = None;
         self.chooser = None;
+        self.confirm_launch = None;
         self.layer = None;
+    }
+
+    /// Ask before launching `id` would close the program currently running.
+    pub fn confirm_launch(&mut self, id: &str, variant: Option<String>, tool: bool) {
+        self.confirm_launch_request(id, variant, tool, true);
+    }
+
+    fn confirm_launch_request(&mut self, id: &str, variant: Option<String>, tool: bool, variant_selected: bool) {
+        self.chooser = None;
+        self.status = None;
+        self.confirm_launch = Some(launch::PendingLaunch { id: id.to_string(), variant, tool, variant_selected });
+    }
+
+    /// Ask before a game launch without a selected variant would close the
+    /// program currently running.
+    pub fn confirm_game_launch(&mut self, id: &str) {
+        self.confirm_launch_request(id, None, false, false);
+    }
+
+    /// Whether a Y/N launch confirmation is waiting for input.
+    pub fn awaiting_launch_confirmation(&self) -> bool {
+        self.confirm_launch.is_some()
+    }
+
+    fn confirm_launch_key(&mut self, key: UiKey, host: &mut dyn Host) {
+        match key {
+            UiKey::Enter | UiKey::Char('y' | 'Y') => {
+                let Some(pending) = self.confirm_launch.take() else { return };
+                host.close_program();
+                let launch = if pending.variant_selected && host.launch_choices(&pending.id).is_some() {
+                    host.launch_variant(&pending.id, pending.variant.as_deref(), pending.tool)
+                } else {
+                    host.launch_game(&pending.id)
+                };
+                match launch {
+                    Ok(message) => {
+                        self.close();
+                        self.notice = Some(message);
+                    }
+                    Err(e) => self.error(e),
+                }
+            }
+            UiKey::Char('n' | 'N') | UiKey::Esc => {
+                self.confirm_launch = None;
+                self.status = None;
+            }
+            _ => {}
+        }
     }
 
     fn row_count(&self) -> usize {
@@ -2165,6 +2226,8 @@ impl ConfigUi {
             self.toggle_help();
         } else if self.help.is_some() {
             self.help_key(key);
+        } else if self.confirm_launch.is_some() {
+            self.confirm_launch_key(key, host);
         } else if self.chooser.is_some() {
             self.chooser_key(key, host);
         } else if self.browser.is_some() {
@@ -3000,6 +3063,12 @@ impl ConfigUi {
             self.draw_sc55_question(&mut g, content.clone());
         } else if self.confirm_glide {
             self.draw_glide_question(&mut g, content.clone());
+        } else if self.confirm_launch.is_some() {
+            if let Some(pending) = &self.confirm_launch {
+                let name = self.games.iter().find(|game| game.id == pending.id).map_or(pending.id.as_str(), |game| game.name.as_str());
+                g.text_to(3, content.start + 2, &fit(&format!("Close the running program and start {}?", name), cols - 6), draw::BRIGHT, cols - 3);
+                g.text_to(3, content.start + 4, "Enter or Y: close it and start    Esc or N: keep it running", draw::DIM, cols - 3);
+            }
         } else if self.page == Page::Drives {
             self.draw_drives(&mut g, content.clone());
         } else if self.page == Page::Games {
@@ -3669,6 +3738,8 @@ impl ConfigUi {
             self.room_hints()
         } else if self.scenes.is_some() {
             self.scene_hints()
+        } else if self.confirm_launch.is_some() {
+            vec![("Enter", "Close and start", Enter), ("Esc", "Keep running", Esc)]
         } else if self.confirm_delete.is_some() {
             vec![("Enter", if self.confirm_reset { "Reset" } else { "Delete" }, Enter), ("Esc", "Keep", Esc)]
         } else if self.confirm_sc55.is_some() || self.confirm_glide {
