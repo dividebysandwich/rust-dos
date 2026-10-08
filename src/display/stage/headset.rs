@@ -536,6 +536,7 @@ fn session(
             shared.note(note);
         }
         if lost {
+            xr.close(gl);
             return Ok(());
         }
         shared.lock().running = xr.running();
@@ -620,6 +621,7 @@ fn session(
         state.input = input;
         state.head = tracking.head;
     }
+    xr.close(gl);
     Ok(())
 }
 
