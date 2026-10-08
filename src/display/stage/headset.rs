@@ -69,6 +69,42 @@ pub fn before_sdl(settings: &VrSettings) {
     }
 }
 
+/// Write what the OpenXR runtime and OpenGL offer the headset
+/// (`--vr-probe`), with a context made as the headset's thread's is, on a
+/// hidden window.
+pub fn probe(video: &sdl2::VideoSubsystem, settings: &VrSettings) {
+    let attr = video.gl_attr();
+    attr.set_context_profile(sdl2::video::GLProfile::Core);
+    let made = video.window("Rust-DOS VR probe", 64, 64).opengl().hidden().build().map_err(|e| e.to_string()).and_then(|window| {
+        let mut context = Err(String::new());
+        for newer in NEWER_GL.into_iter().chain([(3, 2)]) {
+            attr.set_context_version(newer.0, newer.1);
+            context = window.gl_create_context();
+            if context.is_ok() {
+                break;
+            }
+        }
+        Ok((context?, window))
+    });
+    let (context, window) = match made {
+        Ok(made) => made,
+        Err(e) => {
+            println!("No OpenGL context for the probe: {}", e);
+            return;
+        }
+    };
+    if let Err(e) = window.gl_make_current(&context) {
+        println!("No OpenGL context for the probe: {}", e);
+        return;
+    }
+    // SAFETY: the context just made current.
+    let gl = unsafe { glow::Context::from_loader_function(|name| video.gl_get_proc_address(name).cast()) };
+    super::xr::probe::run(&gl, video.current_video_driver(), settings);
+    // (The context goes before its window.)
+    drop(context);
+    drop(window);
+}
+
 /// Where the headset's space is in the scene, from the settings' seat
 /// and scale (`VrSettings`): its origin, where the view is centred, is at
 /// the scene's `spawn` and the seat's shift, turned the spawn's way and

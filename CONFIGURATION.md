@@ -701,6 +701,15 @@ The picture on a screen in a 3D scene (see [3D scene and VR](#3d-scene-and-vr)).
   higher and closer to the screen, as the spawn faces.
 * `seat_turn`: how far you are turned to the left of the spawn's way, in
   degrees, -180 to 180 (the default 0).
+* `resolution`: the headset's eye images, in percent of the size its
+  runtime recommends, 30 to 150 (the default 100). Lower it for a headset's
+  own slower graphics chip. It takes effect at once.
+* `graphics`: how the headset's pictures get to the OpenXR runtime: `auto`
+  (the default: OpenGL as the window's context allows, then Vulkan), `gl`
+  (OpenGL through GLX, or WGL on Windows), `egl` (OpenGL through EGL,
+  `XR_MNDX_egl_enable`, as Monado takes it) or `vulkan` (the pictures drawn
+  with OpenGL and copied with Vulkan, for a runtime that takes Vulkan only).
+  See [VR headsets](#vr-headsets). It takes effect at the next start.
 
 The settings window's VR page has them all, and a **Center the view where
 you sit now** button. Its Left and Right keys step the scale by 1%, the seat
@@ -1975,10 +1984,31 @@ Linux, your distribution's `openxr` package (`libopenxr_loader.so.1`,
 Windows, `openxr_loader.dll` beside `rust-dos.exe`, which the `.msi` and the
 `.zip` have (built yourself, take it from the Khronos OpenXR SDK's
 releases). The active runtime (SteamVR, Monado, ...) draws
-with the window's OpenGL context. On Linux that has to be X11's (GLX), so
-with `--vr` rust-dos opens its window through X11, under XWayland on a
-Wayland desktop. Without a loader, runtime or headset, the scene is shown
-in the window and the log says why.
+with the window's OpenGL context, in one of three ways (`[vr] graphics`):
+
+* OpenGL through GLX (X11) on Linux and WGL on Windows, which SteamVR
+  takes. With `--vr` and a runtime that takes it, rust-dos opens its window
+  through X11, under XWayland on a Wayland desktop.
+* OpenGL through EGL (`XR_MNDX_egl_enable`), which Monado takes, under
+  Wayland too, or under X11 told to make EGL contexts.
+* Vulkan (`XR_KHR_vulkan_enable2`), for a runtime that takes Vulkan only:
+  each eye is still drawn with OpenGL, into an image Vulkan shares
+  (`GL_EXT_memory_object_fd`), then copied into the runtime's. OpenGL and
+  Vulkan must use the same graphics card and driver.
+
+`auto` asks the runtime as rust-dos starts and tries what it offers in
+that order; if one fails, the next is tried. Without a loader, runtime or
+headset, the scene is shown in the window and the log says why.
+
+What happened goes to `vr.log` in rust-dos's own directory (the run before
+is kept as `vr.log.1`): what the runtime offers and which way was taken,
+the eye size, the session's states, the controllers the runtime reports
+(their interaction profiles), and every 10 seconds how the frames keep up
+with the headset (late frames, time spent drawing). `--vr-probe` writes
+what the runtime and OpenGL offer to `vr-probe.log` and the console, makes
+a session each way it can, and quits: the first thing to run on a new
+headset. Hands tracked without controllers point and pinch to click where
+the runtime has `XR_EXT_hand_interaction` (not on Windows).
 
 The eyes start where the scene's `spawn` is: the view is centered on your
 head the first time the headset shows the scene. Ctrl+Shift+Home, the
@@ -2031,6 +2061,9 @@ that run; the settings window saves only what you change in it. `rust-dos
 | `--vr` | Show the picture in a 3D scene in a VR headset ([`[vr]`](#vr) `mode=headset`) |
 | `--vr-desktop` | Show the picture in a 3D scene in the window (`mode=desktop`) |
 | `--vr-scene FILE` | The 3D scene, a glTF file from Blender (`scene`); on its own it means `--vr-desktop` |
+| `--vr-graphics API` | How the headset's pictures get to OpenXR: `auto`, `gl`, `egl` or `vulkan` (`graphics`) |
+| `--vr-resolution PERCENT` | The headset's eye images in percent of the recommended size, 30 to 150 (`resolution`) |
+| `--vr-probe` | Write what the OpenXR runtime and OpenGL offer a headset to `vr-probe.log` and quit (with `--vr`, start after) |
 | `--cycles N\|max\|auto` | The CPU speed (`cycles`) |
 | `--core auto\|dynamic\|normal` | What runs the instructions (`core`) |
 | `--game NAME` | Launch a [game profile](#game-profiles) at startup, by its file name or its name |

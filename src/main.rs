@@ -289,9 +289,20 @@ fn main() -> Result<(), String> {
     // context (GLX's under X11, or EGL's), and Xlib is made ready for the
     // headset's thread either way, for a headset turned on in the settings
     // later.
-    display::before_headset(&settings.vr);
+    // (A probe of the headset asks SDL for what a headset would.)
+    let mut headset = settings.vr.clone();
+    if args.vr_probe {
+        headset.mode = rust_dos::vr::VrMode::Headset;
+    }
+    display::before_headset(&headset);
     let sdl_context = sdl2::init()?;
     let video_subsystem = sdl_context.video()?;
+    if args.vr_probe {
+        display::vr_probe(&video_subsystem, &settings.vr);
+        if !args.vr {
+            return Ok(());
+        }
+    }
     // Without a sound device (as in a virtual machine without a sound
     // card) the emulator runs silent.
     let audio_device = open_audio(&sdl_context);

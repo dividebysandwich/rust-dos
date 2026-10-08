@@ -395,7 +395,7 @@ impl Page {
             Page::Drives | Page::Games | Page::States | Page::Cheats | Page::Achievements | Page::Stats => &[],
             Page::Vr => &[
                 VrMode, VrScene, VrScreenFit, VrQuality, VrScreenGlow, VrControllers, VrSpatialAudio, VrCenter,
-                VrSceneScale, VrSeat(0), VrSeat(1), VrSeat(2), VrSeatTurn,
+                VrSceneScale, VrSeat(0), VrSeat(1), VrSeat(2), VrSeatTurn, VrResolution, VrGraphics,
             ],
             Page::Display => {
                 &[Scale, Fullscreen, Aspect, Vrr, Filter, Shader, CrtCurvature, CrtGlow, Monochrome, Composite, CompositeEra]
@@ -525,6 +525,11 @@ enum Item {
     VrSceneScale,
     VrSeat(u8),
     VrSeatTurn,
+    /// The headset's eye images, in percent of the size its runtime
+    /// recommends.
+    VrResolution,
+    /// How the headset's pictures get to its runtime (GLX, EGL, Vulkan).
+    VrGraphics,
     Filter,
     Shader,
     /// How far the CRT look's tube bends and how much it glows, shown
@@ -853,6 +858,8 @@ impl Item {
             VrSeat(1) => "  Seat higher",
             VrSeat(_) => "  Seat closer to the screen",
             VrSeatTurn => "  Seat turned to the left",
+            VrResolution => "Headset resolution",
+            VrGraphics => "Headset graphics",
             Filter => "Scaling filter",
             Shader => "CRT shader",
             CrtCurvature => "  Curvature",
@@ -978,7 +985,9 @@ impl Item {
             | Item::VrCenter
             | Item::VrSceneScale
             | Item::VrSeat(_)
-            | Item::VrSeatTurn => frontend.window && cfg!(feature = "vr"),
+            | Item::VrSeatTurn
+            | Item::VrResolution
+            | Item::VrGraphics => frontend.window && cfg!(feature = "vr"),
             Item::SoundFont => soundfonts(frontend),
             Item::Mt32Roms | Item::Mt32Model => mt32(frontend),
             Item::Sc55Roms | Item::Sc55Model => frontend.host_files,
@@ -1016,9 +1025,13 @@ impl Item {
             Item::VrScene | Item::VrSpatialAudio | Item::VrScreenFit | Item::VrQuality | Item::VrScreenGlow => {
                 s.vr.mode != crate::vr::VrMode::Off
             }
-            Item::VrControllers | Item::VrCenter | Item::VrSceneScale | Item::VrSeat(_) | Item::VrSeatTurn => {
-                s.vr.mode == crate::vr::VrMode::Headset
-            }
+            Item::VrControllers
+            | Item::VrCenter
+            | Item::VrSceneScale
+            | Item::VrSeat(_)
+            | Item::VrSeatTurn
+            | Item::VrResolution
+            | Item::VrGraphics => s.vr.mode == crate::vr::VrMode::Headset,
             Item::ReverbMix => s.mixer.reverb != ReverbPreset::Off,
             Item::ChorusMix => s.mixer.chorus != ChorusPreset::Off,
             Item::RewindMemory => s.rewind,
@@ -1062,9 +1075,12 @@ impl Item {
             Joystick | Deadzone | SpeakerFilter | SbFilter | Reverb | Chorus | ReverbMix | ChorusMix => Applies::Now,
             Rooms => Applies::Now,
             Memsize | Autoexec | Lan | LanHost => Applies::NextStart,
-            VrMode | VrQuality | VrScene | VrControllers | VrSpatialAudio | VrScreenFit | VrScreenGlow | VrCenter | VrSceneScale | VrSeat(_) | VrSeatTurn => {
+            VrMode | VrQuality | VrScene | VrControllers | VrSpatialAudio | VrScreenFit | VrScreenGlow | VrCenter | VrSceneScale | VrSeat(_) | VrSeatTurn | VrResolution => {
                 Applies::Now
             }
+            // SDL makes the window's context as the headset needs it as it
+            // starts.
+            VrGraphics => Applies::NextStart,
             _ => Applies::AtPrompt,
         }
     }
@@ -1075,7 +1091,7 @@ impl Item {
                 Input::Slider
             }
             Item::Memsize | Item::Deadzone => Input::Slider,
-            Item::VrSceneScale | Item::VrSeat(_) | Item::VrSeatTurn => Input::Slider,
+            Item::VrSceneScale | Item::VrSeat(_) | Item::VrSeatTurn | Item::VrResolution => Input::Slider,
             Item::Cycles => Input::Presets,
             Item::UltraDir | Item::CaptureDir => Input::Text,
             Item::MacAddr | Item::Relay | Item::Player | Item::Lan | Item::LanHost | Item::Room | Item::Password => {
@@ -1117,6 +1133,8 @@ impl Item {
             VrSceneScale => format!("{}%", s.vr.scene_scale),
             VrSeat(axis) => format!("{:+} cm", s.vr.seat[axis as usize]),
             VrSeatTurn => format!("{:+}°", s.vr.seat_turn),
+            VrResolution => format!("{}%", s.vr.resolution),
+            VrGraphics => s.vr.graphics.describe().to_string(),
             Filter => match s.filter {
                 crate::config::Filter::Nearest => "nearest (sharp)",
                 crate::config::Filter::Linear => "linear (smooth)",
@@ -1347,6 +1365,7 @@ impl Item {
             VrSpatialAudio => on_off(|s, on| s.vr.spatial_audio = on),
             VrScreenFit => each(s, crate::vr::ScreenFit::ALL, |s, fit| s.vr.screen_fit = fit),
             VrQuality => each(s, crate::vr::VrQuality::ALL, |s, q| s.vr.quality = q),
+            VrGraphics => each(s, crate::vr::VrGraphics::ALL, |s, g| s.vr.graphics = g),
             Filter => each(s, [crate::config::Filter::Nearest, crate::config::Filter::Linear], |s, f| s.filter = f),
             Shader => each(s, crate::video::shader::Shader::ALL, |s, shader| s.shader = shader),
             Monochrome => each(s, crate::video::mono::Monochrome::ALL, |s, mono| s.monochrome = mono),
@@ -1494,7 +1513,7 @@ impl Item {
             // row of several, whose fields have their own.
             Cycles | CrtCurvature | CrtGlow | Memsize | Volume(_) | ReverbMix | ChorusMix | Deadzone | UltraDir
             | SoundFont | Mt32Roms | Awe32Rom | Awe32Download | Sc55Roms | Sc55Download | VoodooOverlay | CaptureDir | Autoexec | SbPorts | GusPorts | MacAddr
-            | Rooms | Relay | Player | VrScene | VrScreenGlow | VrCenter | VrSceneScale | VrSeat(_) | VrSeatTurn
+            | Rooms | Relay | Player | VrScene | VrScreenGlow | VrCenter | VrSceneScale | VrSeat(_) | VrSeatTurn | VrResolution
             | Lan | LanHost | Room | Password | ModemListen => Vec::new(),
         }
     }
@@ -1541,6 +1560,13 @@ impl Item {
             VrSeatTurn => {
                 let max = crate::vr::SEAT_TURN_MAX;
                 s.vr.seat_turn = (s.vr.seat_turn + dir as i32).clamp(-max, max);
+            }
+            VrResolution => {
+                let (min, max) = (crate::vr::RESOLUTION_MIN as isize, crate::vr::RESOLUTION_MAX as isize);
+                // To the next ten that way, from wherever it was typed.
+                let r = s.vr.resolution as isize;
+                let next = if dir > 0 { (r / 10 + 1) * 10 } else { (r - 1) / 10 * 10 };
+                s.vr.resolution = next.clamp(min, max) as u32;
             }
             Memsize => {
                 let steps: Vec<usize> = memsizes(s.cpu).collect();
@@ -1592,6 +1618,7 @@ impl Item {
             Item::VrSceneScale => s.vr.scene_scale.to_string(),
             Item::VrSeat(axis) => s.vr.seat[axis as usize].to_string(),
             Item::VrSeatTurn => s.vr.seat_turn.to_string(),
+            Item::VrResolution => s.vr.resolution.to_string(),
             Item::ReverbMix => s.mixer.reverb_mix.to_string(),
             Item::ChorusMix => s.mixer.chorus_mix.to_string(),
             Item::MacAddr => s.network.mac.map_or(String::new(), |mac| mac.to_string()),
@@ -1628,6 +1655,7 @@ impl Item {
             Item::VrSceneScale => s.vr.set("scene_scale", text, std::path::Path::new(""))?,
             Item::VrSeat(axis) => s.vr.set(crate::vr::SEAT_AXES[axis as usize], text, std::path::Path::new(""))?,
             Item::VrSeatTurn => s.vr.set("seat_turn", text, std::path::Path::new(""))?,
+            Item::VrResolution => s.vr.set("resolution", text, std::path::Path::new(""))?,
             Item::ReverbMix => s.mixer.reverb_mix = crate::mixer::parse_mix(text)?,
             Item::ChorusMix => s.mixer.chorus_mix = crate::mixer::parse_mix(text)?,
             Item::MacAddr if text.is_empty() => s.network.mac = None,
@@ -1690,6 +1718,10 @@ impl Item {
             }
             Item::VrSeat(axis) => std::mem::take(&mut s.vr.seat[axis as usize]) != 0,
             Item::VrSeatTurn => std::mem::take(&mut s.vr.seat_turn) != 0,
+            Item::VrResolution => {
+                let default = crate::vr::VrSettings::default().resolution;
+                std::mem::replace(&mut s.vr.resolution, default) != default
+            }
             Item::ReverbMix => std::mem::replace(&mut s.mixer.reverb_mix, DEFAULT_MIX) != DEFAULT_MIX,
             Item::ChorusMix => std::mem::replace(&mut s.mixer.chorus_mix, DEFAULT_MIX) != DEFAULT_MIX,
             Item::MacAddr => s.network.mac.take().is_some(),

@@ -958,6 +958,33 @@ fn vrr_turns_on_at_once() {
 }
 
 #[test]
+fn the_headset_s_resolution_steps_in_tens_and_its_graphics_apply_at_the_next_start() {
+    let mut host = FakeHost::new();
+    let mut ui = opened(&host);
+    ui.settings.vr.mode = crate::vr::VrMode::Headset;
+    ui.show_page(Page::Vr);
+    ui.row = ui.items().iter().position(|&i| i == Item::VrResolution).unwrap();
+    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("100%"));
+    keys(&mut ui, &mut host, &[UiKey::Left, UiKey::Left]);
+    assert_eq!(host.applied.last().unwrap().vr.resolution, 80);
+    // From a number typed, to the next ten; never below the least.
+    ui.settings.vr.resolution = 75;
+    keys(&mut ui, &mut host, &[UiKey::Left]);
+    assert_eq!(ui.settings.vr.resolution, 70);
+    keys(&mut ui, &mut host, &[UiKey::Left; 8]);
+    assert_eq!(ui.settings.vr.resolution, crate::vr::RESOLUTION_MIN);
+    assert_eq!(Item::VrResolution.applies(), Applies::Now);
+    ui.row = ui.items().iter().position(|&i| i == Item::VrGraphics).unwrap();
+    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("automatic"));
+    pick(&mut ui, &mut host, "Vulkan bridge");
+    assert_eq!(ui.settings.vr.graphics, crate::vr::VrGraphics::Vulkan);
+    assert_eq!(Item::VrGraphics.applies(), Applies::NextStart);
+    // Only with a headset.
+    ui.settings.vr.mode = crate::vr::VrMode::Desktop;
+    assert!(!Item::VrGraphics.shown(&ui.settings) && !Item::VrResolution.shown(&ui.settings));
+}
+
+#[test]
 fn the_shell_s_suggestions_colors_and_history_turn_off_at_once() {
     let mut host = FakeHost::new();
     let mut ui = opened(&host);

@@ -10,6 +10,7 @@ mod gl_frames;
 mod gl_interop;
 pub mod log;
 mod native;
+pub mod probe;
 mod profiles;
 #[cfg(target_os = "linux")]
 mod vulkan;

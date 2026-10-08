@@ -83,6 +83,16 @@ pub fn before_sdl(settings: &VrSettings) {
     headset::before_sdl(settings);
 }
 
+/// Write what the OpenXR runtime and OpenGL offer a headset (`--vr-probe`),
+/// with an OpenGL context of its own, as the headset's thread has.
+#[cfg_attr(not(xr), allow(unused_variables))]
+pub fn probe(video: &sdl2::VideoSubsystem, settings: &VrSettings) {
+    #[cfg(xr)]
+    headset::probe(video, settings);
+    #[cfg(not(xr))]
+    println!("This build has no OpenXR");
+}
+
 impl Stage {
     /// The scene of `settings`, or the test room, ready to draw; and why
     /// the scene or the headset the settings ask for isn't there, if it

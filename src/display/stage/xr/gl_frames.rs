@@ -31,6 +31,8 @@ pub struct GlFrames<G: GlGraphics> {
     stream: xr::FrameStream<G>,
     /// The eyes' swapchains encode linear light as sRGB themselves.
     srgb: bool,
+    /// The formats the session offered.
+    formats: Vec<u32>,
 }
 
 /// The format of the eyes' images out of the session's `formats`, and
@@ -90,11 +92,15 @@ impl<G: GlGraphics> GlFrames<G> {
             }
             eyes.push(Eye { swapchain, framebuffers, size: (width, height), acquired: None });
         }
-        Ok(GlFrames { eyes, stream, srgb })
+        Ok(GlFrames { eyes, stream, srgb, formats })
     }
 
     pub fn eye_format(&self) -> ((u32, u32), bool) {
         (self.eyes.first().map_or((0, 0), |e| e.size), self.srgb)
+    }
+
+    pub fn formats(&self) -> &[u32] {
+        &self.formats
     }
 
     pub fn eyes(&self) -> usize {

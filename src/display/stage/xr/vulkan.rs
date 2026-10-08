@@ -64,6 +64,8 @@ pub struct Bridge {
     fence: vk::Fence,
     srgb: bool,
     interop: Interop,
+    /// The formats the session offered.
+    formats: Vec<u32>,
 }
 
 /// The swapchains' format out of the session's `formats`: whether it is
@@ -212,6 +214,7 @@ pub fn open(
         fence: vk::Fence::null(),
         srgb,
         interop,
+        formats,
     };
     // SAFETY: the device's own objects, made and destroyed with it
     // (`Bridge`'s drop).
@@ -511,6 +514,10 @@ impl Bridge {
 
     pub fn eye_format(&self) -> ((u32, u32), bool) {
         (self.eyes.first().map_or((0, 0), |e| e.size), self.srgb)
+    }
+
+    pub fn formats(&self) -> &[u32] {
+        &self.formats
     }
 
     pub fn eyes(&self) -> usize {

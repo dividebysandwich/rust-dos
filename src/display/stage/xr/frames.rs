@@ -34,6 +34,18 @@ impl Frames {
         each!(self, frames => frames.eye_format())
     }
 
+    /// The formats the session offered, and whether they are Vulkan's
+    /// (else OpenGL's).
+    pub fn formats(&self) -> (&[u32], bool) {
+        match self {
+            Frames::Gl(frames) => (frames.formats(), false),
+            #[cfg(target_os = "linux")]
+            Frames::Egl(frames) => (frames.formats(), false),
+            #[cfg(target_os = "linux")]
+            Frames::Vulkan(bridge) => (bridge.formats(), true),
+        }
+    }
+
     pub fn eyes(&self) -> usize {
         each!(self, frames => frames.eyes())
     }

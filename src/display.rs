@@ -553,6 +553,16 @@ pub fn before_headset(vr: &rust_dos::vr::VrSettings) {
     stage::before_sdl(vr);
 }
 
+/// Write what the OpenXR runtime and OpenGL offer a VR headset to the
+/// console and vr-probe.log (`--vr-probe`).
+#[cfg_attr(not(feature = "vr"), allow(unused_variables))]
+pub fn vr_probe(video: &sdl2::VideoSubsystem, vr: &rust_dos::vr::VrSettings) {
+    #[cfg(feature = "vr")]
+    stage::probe(video, vr);
+    #[cfg(not(feature = "vr"))]
+    println!("This build has no VR");
+}
+
 /// What a VR headset's controllers do to the machine at a frame.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct VrControl {

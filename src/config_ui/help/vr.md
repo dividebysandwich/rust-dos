@@ -18,9 +18,9 @@ Where the picture is shown:
 view. Without a headset, the scene shows in the window.
 
 Takes effect at once; `--vr` and `--vr-desktop` choose it on the command
-line. On Linux a headset needs X11, which Rust-DOS picks only when it
-starts with the headset on: turned on later under Wayland, keep it with
-**F2** and start Rust-DOS again.
+line. On Linux, Rust-DOS asks the headset's runtime as it starts how it
+draws (**Headset graphics**): turned on later, a headset that needs
+another kind of window keeps the setting with **F2** and starts again.
 
 # Scene {#vr-scene}
 
@@ -117,6 +117,32 @@ Fine-tune where you sit in the scene, in small steps with **Left** and
 - **Seat turned to the left**: turns you, in degrees (-180 to 180).
 
 They take effect at once, and are kept with the other settings.
+
+# Headset resolution {#vr-resolution}
+
+How sharp the headset's picture is: the size of each eye's image in
+percent of what the headset's runtime recommends, 30 to 150%. Lower it
+when the headset stutters (on a standalone headset's own graphics, say);
+raise it for a sharper picture on a fast graphics card. **Left** and
+**Right** step in tens; **Enter** types a number. The headset starts again
+with it at once.
+
+# Headset graphics {#vr-graphics}
+
+How the headset's pictures get to its OpenXR runtime:
+
+- **automatic**: whatever the runtime takes, OpenGL first.
+- **OpenGL (GLX/WGL)**: as SteamVR takes it. On Linux it needs X11
+  (XWayland on a Wayland desktop).
+- **OpenGL through EGL**: as Monado takes it, under Wayland too.
+- **Vulkan bridge**: for a runtime that takes Vulkan only. The scene is
+  still drawn with OpenGL, then copied with Vulkan; both must run on the
+  same graphics card.
+
+Takes effect when Rust-DOS starts again (keep it with **F2**);
+`--vr-graphics` chooses it on the command line. `vr.log` in Rust-DOS's
+folder says which was used, and `--vr-probe` writes what the headset's
+runtime offers to `vr-probe.log`.
 
 # Sound from the screen {#vr-spatial-audio}
 

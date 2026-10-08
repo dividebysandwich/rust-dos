@@ -298,6 +298,8 @@ impl Item {
             VrScreenGlow => "vr-screen-glow",
             VrCenter => "vr-center",
             VrSceneScale | VrSeat(_) | VrSeatTurn => "vr-seat",
+            VrResolution => "vr-resolution",
+            VrGraphics => "vr-graphics",
             Filter => "filter",
             Shader => "shader",
             CrtCurvature => "crt-curvature",
