@@ -35,6 +35,7 @@ pub mod dsp;
 pub mod edit;
 pub mod dynrec;
 pub mod ems;
+pub mod env_inject;
 pub mod exec;
 pub mod f80;
 pub mod fat;

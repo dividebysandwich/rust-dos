@@ -159,6 +159,8 @@ pub struct Config {
     pub voodoo_msaa: Option<u32>,
     pub voodoo_anisotropy: Option<u32>,
     pub voodoo_fps_cap: Option<u32>,
+    /// The gamma Glide applies to the guest, or off.
+    pub voodoo_gamma: Option<Option<f32>>,
     /// The PowerVR card (`powervr`): its chip, or None for no card; and
     /// its texture filtering (`powervr_filter`).
     pub powervr: Option<Option<crate::powervr::Chip>>,
@@ -886,6 +888,13 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                                 _ => warn(format!("invalid voodoo_fps_cap '{}' (off, or 10 to 240)", value)),
                             },
                         },
+                        "voodoo_gamma" => match value.to_ascii_lowercase().as_str() {
+                            "off" => config.voodoo_gamma = Some(None),
+                            _ => match value.parse::<f32>() {
+                                Ok(g) if (0.1..=2.0).contains(&g) => config.voodoo_gamma = Some(Some(g)),
+                                _ => warn(format!("invalid voodoo_gamma '{}' (off, or 0.1 to 2)", value)),
+                            },
+                        },
                         "monochrome" => match Monochrome::parse(value) {
                             Some(mono) => config.monochrome = Some(mono),
                             None => warn(format!("invalid monochrome '{}' (off, white, amber or green)", value)),
@@ -1416,6 +1425,7 @@ impl Settings {
                 msaa: config.voodoo_msaa.unwrap_or(default.voodoo.msaa),
                 anisotropy: config.voodoo_anisotropy.unwrap_or(default.voodoo.anisotropy),
                 fps_cap: config.voodoo_fps_cap.map_or(default.voodoo.fps_cap, |n| (n > 0).then_some(n)),
+                gamma: config.voodoo_gamma.unwrap_or(default.voodoo.gamma),
             },
             powervr: config.powervr.unwrap_or(default.powervr),
             powervr_filter: config.powervr_filter.unwrap_or(default.powervr_filter),
@@ -1490,6 +1500,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
             n => n.to_string(),
         })),
         (Emulator, "voodoo_fps_cap", Some(settings.voodoo.fps_cap.map_or("off".to_string(), |n| n.to_string()))),
+        (Emulator, "voodoo_gamma", Some(settings.voodoo.gamma.map_or("off".to_string(), |g| g.to_string()))),
         (Emulator, "powervr", Some(settings.powervr.map_or("off", |chip| chip.name()).to_string())),
         (Emulator, "powervr_filter", Some(settings.powervr_filter.name().to_string())),
         (Emulator, "capture_dir", Some(contract_home(&settings.capture_dir, home))),
@@ -2519,6 +2530,7 @@ mod tests {
                 msaa: 4,
                 anisotropy: 8,
                 fps_cap: Some(30),
+                gamma: Some(1.5),
             },
             powervr: Some(crate::powervr::Chip::Pcx2),
             powervr_filter: crate::powervr::tsp::Filter::Point,

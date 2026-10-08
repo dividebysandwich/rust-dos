@@ -61,8 +61,11 @@ crate::state_fields!(Cpu {
 } skip {
     // Saved in sections of its own.
     bus,
-    // Set from the configuration, which a state carries in its header.
-    model, core, string_bulk, fpu_fast,
+    // Set from the configuration, which a state carries in its header. The
+    // variables the settings put in the environment are saved with the
+    // environment; the injector keeps its list, and one the loaded
+    // environment has with another value counts as the guest's.
+    model, core, string_bulk, fpu_fast, env_injector,
     // Caches, emptied after a load.
     tlb, decode_cache, dynrec, seg_loads,
     // The host's: the lines typed at the prompt stay the user's, and the

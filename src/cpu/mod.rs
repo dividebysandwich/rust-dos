@@ -362,6 +362,8 @@ pub struct Cpu {
     /// The master environment (SET, PATH), in order. Programs started from
     /// the shell get a copy.
     pub environment: Vec<(String, String)>,
+    /// The variables the settings keep in the environment.
+    pub env_injector: crate::env_inject::EnvInjector,
     pub current_psp: u16,
     pub heap_pointer: u16,
     /// MCB segment where memory above the TSRs kept resident from the shell
@@ -550,6 +552,7 @@ impl Cpu {
             stdin_redirect: None,
             batch: crate::batch::Batch::default(),
             environment: default_environment(),
+            env_injector: Default::default(),
             fpu_stack: crate::f80::FpuRegs::default(),
             fpu_top: 0,
             fpu_flags: FpuFlags::from_bits_truncate(0x0000),
@@ -1564,6 +1567,7 @@ impl Cpu {
             // in the shell's environment area. (EXEC gives a child its own
             // copy of the parent's environment.)
             let path = self.program_path(filename);
+            self.apply_env_rules();
             let mut block = self.environment_block(&path);
             let layout = crate::dos_data::layout(&self.bus);
             if block.len() > layout.environment_bytes() {
@@ -1621,6 +1625,22 @@ impl Cpu {
             (None, true) => {}
         }
         true
+    }
+
+    /// Replace the settings' variables and bring them into the environment.
+    pub fn set_env_rules(&mut self, rules: Vec<crate::env_inject::Rule>) {
+        self.env_injector.set_rules(rules);
+        self.apply_env_rules();
+    }
+
+    /// Bring the settings' variables into the environment, unless the guest set them.
+    pub fn apply_env_rules(&mut self) {
+        let mut injector = std::mem::take(&mut self.env_injector);
+        let fit = injector.apply(self);
+        self.env_injector = injector;
+        if !fit {
+            self.bus.log_string("[ENV] The environment is out of space for the settings' variables");
+        }
     }
 
     /// Lay DOS's tables out packed below the first MCB, as DOS=HIGH has

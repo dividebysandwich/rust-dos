@@ -137,6 +137,13 @@ Pick a rate the game reaches everywhere: a frame that comes late waits
 for the next turn. **30** or **60** suit a 60 Hz display; with
 *Variable refresh rate* on, the window refreshes at the cap.
 
+# 3dfx gamma {#voodoo-gamma}
+
+The gamma Glide gives the game's 3dfx picture, as the environment
+variables **SST_RGAMMA**, **SST_GGAMMA** and **SST_BGAMMA**: **Off**
+leaves it to the game. A variable you set yourself, with **SET**, is
+yours and stays as you set it. Takes effect at the DOS prompt.
+
 # Glide's DOS overlay {#voodoo-overlay}
 
 Games made for the Voodoo Rush and later 3dfx boards, such as Tomb

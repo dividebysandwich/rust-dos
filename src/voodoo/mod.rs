@@ -130,7 +130,7 @@ impl Renderer {
 
 /// The `voodoo` settings: whether there is a card, which board, and how
 /// the host draws for it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VoodooSettings {
     pub enabled: bool,
     pub board: Board,
@@ -143,11 +143,13 @@ pub struct VoodooSettings {
     pub anisotropy: u32,
     /// The most frames a second programs may show on the card, if capped.
     pub fps_cap: Option<u32>,
+    /// Glide's gamma factor for the guest's SST_*GAMMA variables, if set.
+    pub gamma: Option<f32>,
 }
 
 impl Default for VoodooSettings {
     fn default() -> Self {
-        Self { enabled: false, board: Board::Max, renderer: Renderer::Software, scale: 2, msaa: 1, anisotropy: 1, fps_cap: None }
+        Self { enabled: false, board: Board::Max, renderer: Renderer::Software, scale: 2, msaa: 1, anisotropy: 1, fps_cap: None, gamma: None }
     }
 }
 
@@ -155,6 +157,12 @@ impl VoodooSettings {
     /// The card the machine has, if any.
     pub fn board(&self) -> Option<Board> {
         self.enabled.then_some(self.board)
+    }
+
+    /// The guest variables Glide reads its gamma from, empty without the card.
+    pub fn environment(&self) -> Vec<crate::env_inject::Rule> {
+        let gamma = self.gamma.filter(|_| self.enabled).map(|g| g.to_string());
+        ["SST_RGAMMA", "SST_GGAMMA", "SST_BGAMMA"].into_iter().map(|name| (name, gamma.clone())).collect()
     }
 }
 

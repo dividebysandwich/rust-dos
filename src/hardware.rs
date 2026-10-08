@@ -17,6 +17,8 @@ pub struct Hardware {
     pub memory: (bool, bool, bool),
     /// The 3dfx card.
     pub voodoo: Option<crate::voodoo::Board>,
+    /// The 3dfx card's gamma for Glide.
+    pub gamma: Option<f32>,
     /// The PowerVR card.
     pub powervr: Option<crate::powervr::Chip>,
     /// The IPX driver and the LAN.
@@ -40,6 +42,7 @@ pub fn configure(cpu: &mut Cpu, settings: &Settings, host_layout: &'static crate
     cpu.bus.idle_hint = settings.idle_hint;
     crate::video::bios::install(&mut cpu.bus, settings.video_setup());
     cpu.bus.configure_voodoo(settings.voodoo.board());
+    cpu.set_env_rules(settings.voodoo.environment());
     crate::voodoo::overlay::provide(&mut cpu.bus);
     cpu.bus.configure_powervr(settings.powervr);
     cpu.bus.set_disk_settings(settings.disk);
@@ -70,6 +73,7 @@ impl Hardware {
             video: settings.video_setup(),
             memory: (settings.ems, settings.umb, settings.dos_high),
             voodoo: settings.voodoo.board(),
+            gamma: settings.voodoo.gamma,
             powervr: settings.powervr,
             network: settings.network.clone(),
             serial: settings.serial.clone(),
@@ -95,6 +99,7 @@ impl Hardware {
             voodoo: crate::voodoo::VoodooSettings {
                 enabled: self.voodoo.is_some(),
                 board: self.voodoo.unwrap_or(settings.voodoo.board),
+                gamma: self.gamma,
                 ..settings.voodoo
             },
             powervr: self.powervr,
@@ -137,6 +142,9 @@ impl Hardware {
                 None => cpu.bus.log_string("[CONFIG] No 3dfx card"),
             }
             cpu.bus.configure_voodoo(voodoo);
+        }
+        if voodoo != self.voodoo || settings.voodoo.gamma != self.gamma {
+            cpu.set_env_rules(settings.voodoo.environment());
         }
         if settings.powervr != self.powervr {
             match settings.powervr {

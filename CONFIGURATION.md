@@ -212,6 +212,8 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   `voodoo_fps_cap` (`off`, the default, or 10 to 240) is the most frames a
   second games may show on the card (see
   [3dfx Voodoo Graphics](#3dfx-voodoo-graphics));
+  `voodoo_gamma` (`off`, the default, or 0.1 to 2) is the gamma Glide
+  gives the card's picture (see [3dfx gamma](#3dfx-gamma));
   without OpenGL 3 (in the browser, or with SDL's dummy video driver) the
   software rasterizer's picture shows. Both change at once.
 * `powervr=pcx2` adds a PowerVR PCX2 3D card (Matrox m3D, VideoLogic
@@ -1528,6 +1530,13 @@ game keeps up everywhere. With `vrr=true`, while the card shows its
 picture and the cap is below its 60 Hz, the window refreshes at the cap's
 frame times. It doesn't apply to VGA games, whose frames come at the
 display's retraces they wait for.
+
+`voodoo_gamma` sets Glide's gamma through the environment variables
+`SST_RGAMMA`, `SST_GGAMMA` and `SST_BGAMMA`, all three to the value. They
+are put into the guest's environment while the card is on and the guest
+hasn't set them; a variable the guest sets or changes is the guest's from
+then on, and only the variables rust-dos put in are taken out again when
+the setting goes off or changes. Changes take effect at the DOS prompt.
 
 With `voodoo_renderer=opengl` the window shows the card's picture drawn
 again with OpenGL, at `voodoo_scale` times the card's resolution: the same

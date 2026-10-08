@@ -402,7 +402,7 @@ impl Page {
             }
             Page::Emulator => &[
                 Cycles, Core, Fpu, Cpu, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, VoodooMsaa,
-                VoodooAnisotropy, VoodooFpsCap, VoodooOverlay, PowerVr, PowerVrFilter, Memsize, Ems, Umb, DosHigh, Dpmi,
+                VoodooAnisotropy, VoodooFpsCap, VoodooGamma, VoodooOverlay, PowerVr, PowerVrFilter, Memsize, Ems, Umb, DosHigh, Dpmi,
                 DosVersion, IdeHardDisks, BootCdrom, HardDiskSpeed, FloppyDiskSpeed, Joystick,
                 Deadzone, MouseAutocapture, MouseCaptureMessages, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, RecordShader, Autoexec,
                 ShellSuggestions, ShellColors, SaveShellHistory,
@@ -557,6 +557,7 @@ enum Item {
     VoodooMsaa,
     VoodooAnisotropy,
     VoodooFpsCap,
+    VoodooGamma,
     /// Fetch Glide's DOS overlay (GLIDE2X.OVL).
     VoodooOverlay,
     PowerVr,
@@ -703,6 +704,11 @@ fn cycle<T: PartialEq + Clone>(values: &[T], current: &T, dir: isize) -> T {
 /// at and that divide common refresh rates evenly.
 const FPS_CAPS: [Option<u32>; 13] =
     [None, Some(20), Some(24), Some(25), Some(30), Some(35), Some(40), Some(45), Some(48), Some(50), Some(60), Some(72), Some(120)];
+
+/// The 3dfx gammas to pick from: none, then 0.1 to 2.0 in steps of 0.1.
+fn gammas() -> impl Iterator<Item = Option<f32>> {
+    std::iter::once(None).chain((1..=20).map(|tenths| Some(tenths as f32 / 10.0)))
+}
 
 fn each<T>(s: &Settings, values: impl IntoIterator<Item = T>, set: impl Fn(&mut Settings, T)) -> Vec<Settings> {
     values
@@ -882,6 +888,7 @@ impl Item {
             VoodooMsaa => "3dfx antialiasing",
             VoodooAnisotropy => "3dfx anisotropic filtering",
             VoodooFpsCap => "3dfx frame rate cap",
+            VoodooGamma => "3dfx gamma",
             VoodooOverlay => "  Download Glide's DOS overlay...",
             PowerVr => "PowerVR PCX2",
             PowerVrFilter => "PowerVR filtering",
@@ -1038,7 +1045,7 @@ impl Item {
             Item::ReverbMix => s.mixer.reverb != ReverbPreset::Off,
             Item::ChorusMix => s.mixer.chorus != ChorusPreset::Off,
             Item::RewindMemory => s.rewind,
-            Item::VoodooMemory | Item::VoodooRenderer | Item::VoodooFpsCap => s.voodoo.enabled,
+            Item::VoodooMemory | Item::VoodooRenderer | Item::VoodooFpsCap | Item::VoodooGamma => s.voodoo.enabled,
             Item::PowerVrFilter => s.powervr.is_some(),
             Item::Awe32Rom | Item::Awe32Ram => awe32(s),
             // Until there is a ROM.
@@ -1188,6 +1195,10 @@ impl Item {
             VoodooFpsCap => match s.voodoo.fps_cap {
                 None => "Off".to_string(),
                 Some(n) => format!("{} fps", n),
+            },
+            VoodooGamma => match s.voodoo.gamma {
+                None => "Off".to_string(),
+                Some(g) => format!("{}", g),
             },
             PowerVr => on_off(s.powervr.is_some()),
             PowerVrFilter => match s.powervr_filter {
@@ -1398,6 +1409,7 @@ impl Item {
             VoodooMsaa => each(s, [1, 2, 4, 8], |s, samples| s.voodoo.msaa = samples),
             VoodooAnisotropy => each(s, [1, 2, 4, 8, 16], |s, n| s.voodoo.anisotropy = n),
             VoodooFpsCap => each(s, FPS_CAPS, |s, fps| s.voodoo.fps_cap = fps),
+            VoodooGamma => each(s, gammas(), |s, gamma| s.voodoo.gamma = gamma),
             PowerVr => on_off(|s, on| s.powervr = on.then_some(crate::powervr::Chip::Pcx2)),
             PowerVrFilter => {
                 use crate::powervr::tsp::Filter;

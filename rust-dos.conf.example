@@ -117,6 +117,10 @@
 #voodoo_scale=2
 # Texture anisotropy for the OpenGL Voodoo renderer: off, 2, 4, 8 or 16.
 #voodoo_anisotropy=off
+# The gamma Glide applies to the 3dfx picture, as the environment variables
+# SST_RGAMMA, SST_GGAMMA and SST_BGAMMA: off, or a factor from 0.1 to 2. A
+# variable the guest sets itself wins.
+#voodoo_gamma=off
 # A PowerVR PCX2 (Matrox m3D) for games with a PowerVR version: off or
 # pcx2. It draws into the display adapter's VESA frame buffer. Changes
 # take effect at the DOS prompt. How it filters textures: auto (as the
