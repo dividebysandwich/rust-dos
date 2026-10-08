@@ -202,7 +202,15 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   `voodoo_memory` is `12` (the default: 4 MB of frame buffer and two
   texture units with 4 MB each, as DOSBox-X's card has) or `4` (a retail
   board: 2 MB and one texture unit with 2 MB). Both take effect at the DOS
-  prompt. `voodoo_renderer` is what draws the card's picture in the
+  prompt. `voodoo_texture_sampling` is `default` (preserves the game's
+  filtering) or `unfiltered` (nearest-neighbour sampling). With supported
+  OpenGL anisotropy enabled, `unfiltered` also blends between mip levels
+  and allows anisotropic filtering to reduce shimmer, which may soften
+  textures; magnification stays nearest-neighbour. With anisotropy off,
+  or with software rendering, sampling stays strictly nearest-neighbour.
+  It works with both renderers and changes immediately; mip levels,
+  wrapping and clamping still follow the game.
+  `voodoo_renderer` is what draws the card's picture in the
   window: `software` (the default, rust-dos's own rasterizer) or `opengl`,
   which draws it again at `voodoo_scale` (1 to 4, 2 by default) times the
   card's resolution (see [3dfx Voodoo Graphics](#3dfx-voodoo-graphics)),

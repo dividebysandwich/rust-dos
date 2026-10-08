@@ -402,7 +402,7 @@ impl Page {
             }
             Page::Emulator => &[
                 Cycles, Core, Fpu, Cpu, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, VoodooScaleShader, VoodooMsaa,
-                VoodooAnisotropy, VoodooFpsCap, VoodooGamma, VoodooOverlay, PowerVr, PowerVrFilter, Memsize, Ems, Umb, DosHigh, Dpmi,
+                VoodooAnisotropy, VoodooTextureSampling, VoodooFpsCap, VoodooGamma, VoodooOverlay, PowerVr, PowerVrFilter, Memsize, Ems, Umb, DosHigh, Dpmi,
                 DosVersion, IdeHardDisks, BootCdrom, HardDiskSpeed, FloppyDiskSpeed, Joystick,
                 Deadzone, MouseAutocapture, MouseCaptureMessages, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, RecordShader, Autoexec,
                 ShellSuggestions, ShellColors, SaveShellHistory,
@@ -557,6 +557,7 @@ enum Item {
     VoodooScaleShader,
     VoodooMsaa,
     VoodooAnisotropy,
+    VoodooTextureSampling,
     VoodooFpsCap,
     VoodooGamma,
     /// Fetch Glide's DOS overlay (GLIDE2X.OVL).
@@ -889,6 +890,7 @@ impl Item {
             VoodooScaleShader => "  Sized for the CRT look",
             VoodooMsaa => "3dfx antialiasing",
             VoodooAnisotropy => "3dfx anisotropic filtering",
+            VoodooTextureSampling => "3dfx texture sampling",
             VoodooFpsCap => "3dfx frame rate cap",
             VoodooGamma => "3dfx gamma",
             VoodooOverlay => "  Download Glide's DOS overlay...",
@@ -1049,7 +1051,7 @@ impl Item {
             Item::ReverbMix => s.mixer.reverb != ReverbPreset::Off,
             Item::ChorusMix => s.mixer.chorus != ChorusPreset::Off,
             Item::RewindMemory => s.rewind,
-            Item::VoodooMemory | Item::VoodooRenderer | Item::VoodooFpsCap | Item::VoodooGamma => s.voodoo.enabled,
+            Item::VoodooMemory | Item::VoodooRenderer | Item::VoodooTextureSampling | Item::VoodooFpsCap | Item::VoodooGamma => s.voodoo.enabled,
             Item::PowerVrFilter => s.powervr.is_some(),
             Item::Awe32Rom | Item::Awe32Ram => awe32(s),
             // Until there is a ROM.
@@ -1088,7 +1090,7 @@ impl Item {
                 Applies::Now
             }
             Cycles | Core | Fpu | Dpmi | DosVersion | IdeHardDisks | BootCdrom | KeyboardLayout | MouseAutocapture | MouseCaptureMessages | ShellSuggestions | ShellColors | SaveShellHistory | Rewind | RewindMemory
-            | VoodooRenderer | VoodooScale | VoodooScaleShader | VoodooMsaa | VoodooAnisotropy | VoodooFpsCap | VoodooOverlay | PowerVrFilter => Applies::Now,
+            | VoodooRenderer | VoodooScale | VoodooScaleShader | VoodooMsaa | VoodooTextureSampling | VoodooAnisotropy | VoodooFpsCap | VoodooOverlay | PowerVrFilter => Applies::Now,
             Monochrome => Applies::NowAndAtPrompt,
             HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise | Volume(_) | CaptureDir | RecordUi
             | RecordShader => Applies::Now,
@@ -1192,6 +1194,11 @@ impl Item {
                 crate::voodoo::Renderer::OpenGl => "OpenGL".to_string(),
             },
             VoodooScale => format!("{}x", s.voodoo.scale),
+            VoodooTextureSampling => match s.voodoo.texture_sampling {
+                crate::voodoo::TextureSampling::Default => "Default",
+                crate::voodoo::TextureSampling::Unfiltered => "Unfiltered",
+            }
+            .to_string(),
             VoodooScaleShader => on_off(s.voodoo.scale_shader),
             VoodooMsaa => match s.voodoo.msaa {
                 1 => "Off".to_string(),
@@ -1415,6 +1422,12 @@ impl Item {
                 s.voodoo.renderer = r
             }),
             VoodooScale => each(s, [1, 2, 3, 4], |s, scale| s.voodoo.scale = scale),
+            VoodooTextureSampling => {
+                use crate::voodoo::TextureSampling;
+                each(s, [TextureSampling::Default, TextureSampling::Unfiltered], |s, sampling| {
+                    s.voodoo.texture_sampling = sampling
+                })
+            }
             VoodooScaleShader => on_off(|s, on| s.voodoo.scale_shader = on),
             VoodooMsaa => each(s, [1, 2, 4, 8], |s, samples| s.voodoo.msaa = samples),
             VoodooAnisotropy => each(s, [1, 2, 4, 8, 16], |s, n| s.voodoo.anisotropy = n),

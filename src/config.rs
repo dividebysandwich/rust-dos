@@ -155,6 +155,7 @@ pub struct Config {
     pub voodoo: Option<bool>,
     pub voodoo_memory: Option<crate::voodoo::Board>,
     pub voodoo_renderer: Option<crate::voodoo::Renderer>,
+    pub voodoo_texture_sampling: Option<crate::voodoo::TextureSampling>,
     pub voodoo_scale: Option<u32>,
     /// Whether the CRT look's lines follow `voodoo_scale`
     /// (`voodoo_scale_shader`).
@@ -870,6 +871,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Some(renderer) => config.voodoo_renderer = Some(renderer),
                             None => warn(format!("invalid voodoo_renderer '{}' (software or opengl)", value)),
                         },
+                        "voodoo_texture_sampling" => match crate::voodoo::TextureSampling::parse(value) {
+                            Some(sampling) => config.voodoo_texture_sampling = Some(sampling),
+                            None => warn(format!("invalid voodoo_texture_sampling '{}' (default or unfiltered)", value)),
+                        },
                         "voodoo_scale" => match value.parse::<u32>() {
                             Ok(n) if (1..=4).contains(&n) => config.voodoo_scale = Some(n),
                             _ => warn(format!("invalid voodoo_scale '{}' (1 to 4)", value)),
@@ -1436,6 +1441,7 @@ impl Settings {
                 enabled: config.voodoo.unwrap_or(default.voodoo.enabled),
                 board: config.voodoo_memory.unwrap_or(default.voodoo.board),
                 renderer: config.voodoo_renderer.unwrap_or(default.voodoo.renderer),
+                texture_sampling: config.voodoo_texture_sampling.unwrap_or(default.voodoo.texture_sampling),
                 scale: config.voodoo_scale.unwrap_or(default.voodoo.scale),
                 scale_shader: config.voodoo_scale_shader.unwrap_or(default.voodoo.scale_shader),
                 msaa: config.voodoo_msaa.unwrap_or(default.voodoo.msaa),
@@ -1506,6 +1512,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Emulator, "voodoo", yes_no(settings.voodoo.enabled)),
         (Emulator, "voodoo_memory", Some(settings.voodoo.board.megabytes().to_string())),
         (Emulator, "voodoo_renderer", Some(settings.voodoo.renderer.name().to_string())),
+        (Emulator, "voodoo_texture_sampling", Some(settings.voodoo.texture_sampling.name().to_string())),
         (Emulator, "voodoo_scale", Some(settings.voodoo.scale.to_string())),
         (Emulator, "voodoo_scale_shader", yes_no(settings.voodoo.scale_shader)),
         (Emulator, "voodoo_msaa", Some(match settings.voodoo.msaa {
@@ -2543,6 +2550,7 @@ mod tests {
                 enabled: true,
                 board: crate::voodoo::Board::Standard,
                 renderer: crate::voodoo::Renderer::OpenGl,
+                texture_sampling: crate::voodoo::TextureSampling::Unfiltered,
                 scale: 3,
                 scale_shader: false,
                 msaa: 4,
@@ -2671,6 +2679,34 @@ mod tests {
     }
 
     #[test]
+    fn voodoo_anisotropy_defaults_to_off_and_respects_overrides() {
+        assert_eq!(Settings::default().voodoo.anisotropy, 1);
+        for (text, expected) in [
+            ("[emulator]\n", 1),
+            ("[emulator]\nvoodoo_anisotropy=off\n", 1),
+            ("[emulator]\nvoodoo_anisotropy=4\n", 4),
+        ] {
+            let config = parse(text, Path::new("."), None);
+            assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+            assert_eq!(Settings::from_config(&config).voodoo.anisotropy, expected);
+        }
+    }
+
+    #[test]
+    fn voodoo_texture_sampling_parsing_and_default() {
+        use crate::voodoo::TextureSampling;
+        assert_eq!(Settings::default().voodoo.texture_sampling, TextureSampling::Default);
+        for (value, expected) in [("default", TextureSampling::Default), ("Unfiltered", TextureSampling::Unfiltered)] {
+            let config = parse(&format!("[emulator]\nvoodoo_texture_sampling={}\n", value), Path::new("."), None);
+            assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+            assert_eq!(Settings::from_config(&config).voodoo.texture_sampling, expected);
+        }
+        let config = parse("[emulator]\nvoodoo_texture_sampling=invalid\n", Path::new("."), None);
+        assert_eq!(config.warnings.len(), 1);
+        assert_eq!(Settings::from_config(&config).voodoo.texture_sampling, TextureSampling::Default);
+    }
+
+    #[test]
     fn saved_settings_parse_back() {
         let home = Path::new("/home/u");
         let settings = changed_settings();
@@ -2690,6 +2726,7 @@ mod tests {
         assert!(text.contains("#shader=none\nshader=crt\n"), "{}", text);
         assert!(text.contains("#monochrome=off\nmonochrome=green\n"), "{}", text);
         assert!(text.contains("#machine=svga\nmachine=vga\n"), "{}", text);
+        assert!(text.contains("#voodoo_texture_sampling=default\nvoodoo_texture_sampling=unfiltered\n"), "{}", text);
         assert!(text.contains("#capture_dir=capture\ncapture_dir=~/dos captures\n"), "{}", text);
         assert!(text.contains("#record_ui=false\nrecord_ui=true\n"), "{}", text);
         assert!(text.contains("#record_shader=false\nrecord_shader=true\n"), "{}", text);

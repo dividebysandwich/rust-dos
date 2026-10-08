@@ -558,6 +558,38 @@ fn bilinear_textures_blend_neighbours() {
 }
 
 #[test]
+fn unfiltered_sampling_overrides_bilinear_and_can_be_restored() {
+    use rust_dos::voodoo::TextureSampling;
+    let draw = |bus: &mut Bus| {
+        // Halfway between neighbouring texel centres, so bilinear and
+        // nearest-neighbour sampling produce different colours.
+        w(bus, START_S, 32 << 18);
+        triangle(bus, [(0.0, 0.0), (8.0, 0.0), (0.0, 8.0)]);
+        triangle(bus, [(8.0, 0.0), (8.0, 8.0), (0.0, 8.0)]);
+        pixel(bus, 0, 2, 2)
+    };
+    for board in [Board::Standard, Board::Max] {
+        let mut bus = bus(board);
+        init(&mut bus);
+        textured_square(&mut bus, 10, false, |x, y| if (x + y) % 2 == 0 { 0xFFFF } else { 0 });
+        let point = draw(&mut bus);
+        // textureMode is write-only on the card's bus interface.
+        let mode = bus.voodoo.as_ref().unwrap().reg[0x100 + TEXTURE_MODE as usize / 4] | 6;
+        w(&mut bus, TEXTURE_MODE, mode);
+        let filtered = draw(&mut bus);
+        assert_ne!(filtered, point, "{:?}: subtexel sampling must blend", board);
+        assert_ne!(filtered, 0);
+        assert_ne!(filtered, 0xFFFF);
+
+        bus.set_voodoo_texture_sampling(TextureSampling::Unfiltered);
+        assert_eq!(draw(&mut bus), point, "{:?}: forced point sampling", board);
+        assert_eq!(bus.voodoo.as_ref().unwrap().reg[0x100 + TEXTURE_MODE as usize / 4], mode, "the guest's filter bits stay intact");
+        bus.set_voodoo_texture_sampling(TextureSampling::Default);
+        assert_eq!(draw(&mut bus), filtered, "{:?}: restore game filtering", board);
+    }
+}
+
+#[test]
 fn the_tmus_hand_out_their_configuration() {
     // trexInit1 bit 18: TMU 0's "texels" are its configuration, which is
     // how Glide counts texture units. Two TMUs: D1h.
@@ -1206,6 +1238,33 @@ fn the_opengl_renderer_gets_the_textures_as_the_card_reads_them() {
     assert_eq!(again.len(), 1);
     assert_eq!(again[0].id, decoded[0].id);
     assert_eq!(again[0].levels[0].argb[0], 0xFFFF_FFFF);
+}
+
+#[test]
+fn texture_sampling_changes_reach_both_opengl_texture_units() {
+    use rust_dos::voodoo::TextureSampling;
+    use rust_dos::voodoo::mirror::Command;
+    let mut bus = bus(Board::Max);
+    init(&mut bus);
+    bus.voodoo.as_mut().unwrap().set_mirror(true);
+    take_mirror(&mut bus);
+    textured_square(&mut bus, 10, true, |x, y| if (x + y) % 2 == 0 { 0xFFFF } else { 0 });
+    take_mirror(&mut bus);
+    let guest_mode = bus.voodoo.as_ref().unwrap().reg[0x100 + TEXTURE_MODE as usize / 4];
+    for sampling in [TextureSampling::Default, TextureSampling::Unfiltered, TextureSampling::Default] {
+        bus.set_voodoo_texture_sampling(sampling);
+        triangle(&mut bus, [(0.0, 0.0), (8.0, 0.0), (0.0, 8.0)]);
+        let frame = take_mirror(&mut bus);
+        assert!(!frame.commands.iter().any(|c| matches!(c, Command::Texture(_))), "reuse decoded textures");
+        let draw = frame.commands.iter().find_map(|c| if let Command::Draw(d) = c { Some(d) } else { None }).unwrap();
+        let unfiltered = sampling == TextureSampling::Unfiltered;
+        for unit in &draw.state.tmu {
+            let unit = unit.expect("both TMUs are active");
+            assert_eq!(unit.mode, guest_mode & if unfiltered { !6 } else { !0 });
+            assert_eq!(unit.unfiltered, unfiltered, "OpenGL must distinguish forced point sampling");
+        }
+        assert_eq!(bus.voodoo.as_ref().unwrap().reg[0x100 + TEXTURE_MODE as usize / 4], guest_mode);
+    }
 }
 
 #[test]

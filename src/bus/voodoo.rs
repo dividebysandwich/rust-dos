@@ -169,6 +169,13 @@ impl Bus {
         }
     }
 
+    /// Texture sampling for both the software and mirrored OpenGL draws.
+    pub fn set_voodoo_texture_sampling(&mut self, sampling: crate::voodoo::TextureSampling) {
+        if let Some(v) = &mut self.voodoo {
+            v.set_texture_sampling(sampling);
+        }
+    }
+
     /// The frame rate cap of the 3dfx card's swaps (`voodoo_fps_cap`).
     pub fn set_voodoo_fps_cap(&mut self, fps: Option<u32>) {
         if let Some(v) = &mut self.voodoo {

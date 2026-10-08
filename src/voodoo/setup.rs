@@ -37,11 +37,13 @@ impl Voodoo {
                 return None;
             }
             let t = &self.tmu[unit];
-            let mode = reg[t.base + TEXTURE_MODE];
+            let unfiltered = self.texture_sampling == super::TextureSampling::Unfiltered;
+            let mode = reg[t.base + TEXTURE_MODE] & if unfiltered { !6 } else { !0 };
             Some(TmuRaster {
                 ram: t.ram.clone(),
                 mask: t.mask,
                 mode,
+                unfiltered,
                 lodmin: t.lodmin,
                 lodmax: t.lodmax,
                 lodbias: t.lodbias,

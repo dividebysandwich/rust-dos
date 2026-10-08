@@ -1434,6 +1434,7 @@ fn main() -> Result<(), String> {
             cpu.bus.joystick.set_pad(slot, pad);
         }
         cpu.bus.set_voodoo_fps_cap(settings.voodoo.fps_cap);
+        cpu.bus.set_voodoo_texture_sampling(settings.voodoo.texture_sampling);
         cpu.bus.set_powervr_filter(settings.powervr_filter);
         // With a variable refresh rate, each frame runs to a vertical
         // retrace of the machine's display and is shown when it is due,

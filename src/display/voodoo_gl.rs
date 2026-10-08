@@ -105,11 +105,29 @@ struct Staging {
     dirty: Option<[u32; 4]>,
 }
 
+/// Unfiltered texels can still blend mip levels when supported anisotropy
+/// is enabled, while magnification remains nearest-neighbour.
+fn sampling_filters(mode: u32, unfiltered: bool, anisotropy: Option<f32>) -> (u32, u32) {
+    if unfiltered {
+        let min = if anisotropy.is_some_and(|n| n > 1.0) {
+            glow::NEAREST_MIPMAP_LINEAR
+        } else {
+            glow::NEAREST_MIPMAP_NEAREST
+        };
+        (min, glow::NEAREST)
+    } else {
+        let min = if mode & 2 != 0 { glow::LINEAR_MIPMAP_NEAREST } else { glow::NEAREST_MIPMAP_NEAREST };
+        let mag = if mode & 4 != 0 { glow::LINEAR } else { glow::NEAREST };
+        (min, mag)
+    }
+}
+
 /// A texture of the card's, and the sampling it was last set up for.
 struct GlTexture {
     texture: glow::Texture,
     params: Option<[u32; 4]>,
     lod: Option<[f32; 2]>,
+    anisotropy: Option<f32>,
 }
 
 // Every `unsafe` below is a call into OpenGL on the context `GlScreen`
@@ -474,14 +492,7 @@ impl VoodooGl {
     fn upload(&mut self, gl: &glow::Context, texture: &Texture) {
         if !self.textures.contains_key(&texture.id) {
             let Ok(t) = self::texture(gl, glow::NEAREST) else { return };
-            if let Some(anisotropy) = self.texture_anisotropy {
-                // SAFETY: see `VoodooGl`.
-                unsafe {
-                    gl.bind_texture(glow::TEXTURE_2D, Some(t));
-                    gl.tex_parameter_f32(glow::TEXTURE_2D, TEXTURE_MAX_ANISOTROPY, anisotropy);
-                }
-            }
-            self.textures.insert(texture.id, GlTexture { texture: t, params: None, lod: None });
+            self.textures.insert(texture.id, GlTexture { texture: t, params: None, lod: None, anisotropy: None });
         }
         let Some(entry) = self.textures.get_mut(&texture.id) else { return };
         // SAFETY: see `VoodooGl`.
@@ -581,9 +592,14 @@ impl VoodooGl {
                 units |= 1 << unit;
                 gl.active_texture(glow::TEXTURE1 + unit as u32);
                 gl.bind_texture(glow::TEXTURE_2D, Some(texture.texture));
+                if let Some(anisotropy) = self.texture_anisotropy {
+                    if texture.anisotropy != Some(anisotropy) {
+                        gl.tex_parameter_f32(glow::TEXTURE_2D, TEXTURE_MAX_ANISOTROPY, anisotropy);
+                        texture.anisotropy = Some(anisotropy);
+                    }
+                }
                 let wrap = |clamp: bool| if clamp { glow::CLAMP_TO_EDGE } else { glow::REPEAT };
-                let min = if t.mode & 2 != 0 { glow::LINEAR_MIPMAP_NEAREST } else { glow::NEAREST_MIPMAP_NEAREST };
-                let mag = if t.mode & 4 != 0 { glow::LINEAR } else { glow::NEAREST };
+                let (min, mag) = sampling_filters(t.mode, t.unfiltered, self.texture_anisotropy);
                 let params = [wrap(t.mode & 0x40 != 0), wrap(t.mode & 0x80 != 0), min, mag];
                 if texture.params != Some(params) {
                     let names = [glow::TEXTURE_WRAP_S, glow::TEXTURE_WRAP_T, glow::TEXTURE_MIN_FILTER, glow::TEXTURE_MAG_FILTER];
@@ -923,5 +939,36 @@ fn compile(
             }
         }
         Ok(Program { program, uniforms: found })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sampling_filters;
+
+    #[test]
+    fn unfiltered_blends_mip_levels_only_with_supported_anisotropy() {
+        for mode in [0, 2, 4, 6] {
+            for anisotropy in [None, Some(1.0)] {
+                assert_eq!(sampling_filters(mode, true, anisotropy), (glow::NEAREST_MIPMAP_NEAREST, glow::NEAREST));
+            }
+            for anisotropy in [2.0, 4.0, 8.0, 16.0] {
+                assert_eq!(sampling_filters(mode, true, Some(anisotropy)), (glow::NEAREST_MIPMAP_LINEAR, glow::NEAREST));
+            }
+        }
+    }
+
+    #[test]
+    fn default_sampling_keeps_the_games_filters() {
+        for anisotropy in [None, Some(1.0), Some(16.0)] {
+            for (mode, min, mag) in [
+                (0, glow::NEAREST_MIPMAP_NEAREST, glow::NEAREST),
+                (2, glow::LINEAR_MIPMAP_NEAREST, glow::NEAREST),
+                (4, glow::NEAREST_MIPMAP_NEAREST, glow::LINEAR),
+                (6, glow::LINEAR_MIPMAP_NEAREST, glow::LINEAR),
+            ] {
+                assert_eq!(sampling_filters(mode, false, anisotropy), (min, mag));
+            }
+        }
     }
 }

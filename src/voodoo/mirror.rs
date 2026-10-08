@@ -31,6 +31,9 @@ pub struct TexUnit {
     /// The texture (`Command::Texture`).
     pub texture: u32,
     pub mode: u32,
+    /// The host requested point sampling; OpenGL may still blend mip levels
+    /// when anisotropic filtering is enabled.
+    pub unfiltered: bool,
     /// The size of level 0 in texels, which S and T count in.
     pub width: u32,
     pub height: u32,
@@ -441,6 +444,7 @@ impl Mirror {
         let unit_info = |id: u32| TexUnit {
             texture: id,
             mode: t.mode,
+            unfiltered: t.unfiltered,
             width: t.wmask as u32 + 1,
             height: t.hmask as u32 + 1,
             first_level: first,

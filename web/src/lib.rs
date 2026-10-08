@@ -1227,6 +1227,7 @@ impl Host for PageHost<'_> {
         if new.composite != old.composite {
             self.cpu.bus.vga.set_composite(new.composite);
         }
+        self.cpu.bus.set_voodoo_texture_sampling(new.voodoo.texture_sampling);
         if !self.hardware.differs(new) {
             return Ok(None);
         }

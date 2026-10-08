@@ -45,6 +45,8 @@ pub struct TmuRaster {
     pub ram: Vram,
     pub mask: u32,
     pub mode: u32,
+    /// Let OpenGL distinguish forced point sampling from the game's choice.
+    pub unfiltered: bool,
     pub lodmin: i32,
     pub lodmax: i32,
     pub lodbias: i32,

@@ -114,6 +114,12 @@
 # opengl, which draws it again at voodoo_scale (1 to 4) times the card's
 # resolution. Screenshots show the software picture either way.
 #voodoo_renderer=software
+# Texture sampling for both renderers: default (as the game sets it) or
+# unfiltered (nearest-neighbour). With OpenGL anisotropy enabled, unfiltered
+# also blends mip levels and allows anisotropic filtering to reduce shimmer;
+# magnification stays nearest-neighbour. Software stays strictly unfiltered.
+# Changes take effect immediately.
+#voodoo_texture_sampling=default
 #voodoo_scale=2
 # Whether the CRT look sizes its scanlines for voodoo_scale: true or false.
 # Only the CRT look uses it, and only above 1x.

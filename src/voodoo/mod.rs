@@ -128,6 +128,31 @@ impl Renderer {
     }
 }
 
+/// Whether textures use the game's filters or always fetch one texel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TextureSampling {
+    #[default]
+    Default,
+    Unfiltered,
+}
+
+impl TextureSampling {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "default" => Some(Self::Default),
+            "unfiltered" => Some(Self::Unfiltered),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Unfiltered => "unfiltered",
+        }
+    }
+}
+
 /// The `voodoo` settings: whether there is a card, which board, and how
 /// the host draws for it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -135,6 +160,7 @@ pub struct VoodooSettings {
     pub enabled: bool,
     pub board: Board,
     pub renderer: Renderer,
+    pub texture_sampling: TextureSampling,
     /// How many times the native size OpenGL draws at.
     pub scale: u32,
     /// Whether the CRT look's lines follow `scale`, so they stay as thin
@@ -152,7 +178,7 @@ pub struct VoodooSettings {
 
 impl Default for VoodooSettings {
     fn default() -> Self {
-        Self { enabled: false, board: Board::Max, renderer: Renderer::Software, scale: 2, scale_shader: true, msaa: 1, anisotropy: 1, fps_cap: None, gamma: None }
+        Self { enabled: false, board: Board::Max, renderer: Renderer::Software, texture_sampling: TextureSampling::Default, scale: 2, scale_shader: true, msaa: 1, anisotropy: 1, fps_cap: None, gamma: None }
     }
 }
 
@@ -345,6 +371,8 @@ impl Default for PciConfig {
 /// The card.
 pub struct Voodoo {
     pub board: Board,
+    /// A host rendering preference, not a guest register or saved state.
+    texture_sampling: TextureSampling,
     chipmask: u32,
     tmu_config: u32,
     /// The registers: the FBI's at 0, TMU 0's at 100h, TMU 1's at 200h.
@@ -435,6 +463,7 @@ impl Voodoo {
         let units = board.texture_units();
         let mut v = Self {
             board,
+            texture_sampling: TextureSampling::Default,
             chipmask: if units == 2 { 0x07 } else { 0x03 },
             tmu_config: if units == 2 { 0xD1 } else { 0x11 },
             reg: Box::new([0; 0x400]),
@@ -475,6 +504,11 @@ impl Voodoo {
         };
         v.reset();
         v
+    }
+
+    /// Change sampling for subsequent draws without altering guest registers.
+    pub fn set_texture_sampling(&mut self, sampling: TextureSampling) {
+        self.texture_sampling = sampling;
     }
 
     /// A PCI reset: the power-on registers, the monitor given back to the

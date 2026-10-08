@@ -131,7 +131,23 @@ doesn't reach these pictures; this setting does.
 
 Sharpens textures viewed at an angle with anisotropic filtering: **Off**,
 **2x**, **4x**, **8x** or **16x**. It takes effect only when the OpenGL
-driver supports it.
+driver supports it. With *3dfx texture sampling* set to **Unfiltered**,
+also blends between mip levels to reduce shimmer, while keeping
+nearest-neighbour magnification.
+
+# 3dfx texture sampling {#voodoo-texture-sampling}
+
+- **Default**: keeps the game's texture filtering and, with OpenGL, your
+  anisotropic filtering setting.
+- **Unfiltered**: nearest-neighbour sampling for sharp, blocky texels,
+  without bilinear filtering. With supported OpenGL anisotropic filtering
+  enabled, also blends between mip levels and allows anisotropic filtering
+  to reduce distant and angled texture shimmer. This may soften textures;
+  magnification remains nearest-neighbour. With anisotropy **Off**, or
+  with **Rust-DOS**, sampling stays strictly nearest-neighbour.
+
+Works with both **Rust-DOS** and **OpenGL** and takes effect immediately.
+Mip levels, texture wrapping and clamping still follow the game.
 
 # 3dfx frame rate cap {#voodoo-fps-cap}
 
