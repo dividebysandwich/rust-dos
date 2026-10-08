@@ -60,7 +60,7 @@ impl GlScreen {
         match *self {}
     }
 
-    pub fn voodoo_scale(&self) -> Option<(u32, u32)> {
+    pub fn voodoo_scale(&self) -> Option<(u32, u32, u32)> {
         match *self {}
     }
 
@@ -68,7 +68,13 @@ impl GlScreen {
         match *self {}
     }
 
-    pub fn run_voodoo(&mut self, _recording: rust_dos::voodoo::mirror::Frame, _scale: u32, _samples: u32) -> Result<bool, String> {
+    pub fn run_voodoo(
+        &mut self,
+        _recording: rust_dos::voodoo::mirror::Frame,
+        _scale: u32,
+        _samples: u32,
+        _anisotropy: u32,
+    ) -> Result<bool, String> {
         match *self {}
     }
 

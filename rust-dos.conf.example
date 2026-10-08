@@ -115,6 +115,8 @@
 # resolution. Screenshots show the software picture either way.
 #voodoo_renderer=software
 #voodoo_scale=2
+# Texture anisotropy for the OpenGL Voodoo renderer: off, 2, 4, 8 or 16.
+#voodoo_anisotropy=off
 # A PowerVR PCX2 (Matrox m3D) for games with a PowerVR version: off or
 # pcx2. It draws into the display adapter's VESA frame buffer. Changes
 # take effect at the DOS prompt. How it filters textures: auto (as the

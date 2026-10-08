@@ -33,6 +33,8 @@ const QUAD_UNIFORMS: &[&str] = &["u_rect", "u_size", "u_scale"];
 /// The card's depth functions as OpenGL's.
 const DEPTH_FUNCS: [u32; 8] =
     [glow::NEVER, glow::LESS, glow::EQUAL, glow::LEQUAL, glow::GREATER, glow::NOTEQUAL, glow::GEQUAL, glow::ALWAYS];
+const TEXTURE_MAX_ANISOTROPY: u32 = 0x84FE;
+const MAX_TEXTURE_MAX_ANISOTROPY: u32 = 0x84FF;
 
 /// A linked program and its uniforms.
 struct Program {
@@ -116,6 +118,10 @@ pub struct VoodooGl {
     scale: u32,
     /// Samples a pixel with multisampling, or 1.
     samples: u32,
+    /// The requested anisotropy factor.
+    anisotropy: u32,
+    /// The effective factor when the OpenGL extension is available.
+    texture_anisotropy: Option<f32>,
     /// The buffers' size in the card's pixels.
     width: u32,
     height: u32,
@@ -148,8 +154,14 @@ pub struct VoodooGl {
 
 impl VoodooGl {
     /// Draw at `scale` times the card's size with `samples` a pixel (as
-    /// many as OpenGL has at most).
-    pub fn new(gl: &glow::Context, glsl: Glsl, scale: u32, samples: u32) -> Result<Self, String> {
+    /// many as OpenGL has at most), and the requested texture anisotropy.
+    pub fn new(
+        gl: &glow::Context,
+        glsl: Glsl,
+        scale: u32,
+        samples: u32,
+        anisotropy: u32,
+    ) -> Result<Self, String> {
         if glsl == Glsl::Es300 {
             return Err("OpenGL ES has no noperspective interpolation".to_string());
         }
@@ -188,9 +200,20 @@ impl VoodooGl {
             let staging_texture = texture(gl, glow::NEAREST)?;
             let lut = texture(gl, glow::NEAREST)?;
             let samples = samples.clamp(1, gl.get_parameter_i32(glow::MAX_SAMPLES).max(1) as u32);
+            let extensions = gl.supported_extensions();
+            let texture_anisotropy = (anisotropy > 1
+                && extensions
+                    .iter()
+                    .any(|e| e == "GL_EXT_texture_filter_anisotropic" || e == "GL_ARB_texture_filter_anisotropic"))
+            .then(|| {
+                // SAFETY: see `VoodooGl`.
+                (anisotropy as f32).min(gl.get_parameter_f32(MAX_TEXTURE_MAX_ANISOTROPY))
+            });
             Ok(Self {
                 scale: scale.max(1),
                 samples,
+                anisotropy,
+                texture_anisotropy,
                 width: 0,
                 height: 0,
                 targets: HashMap::new(),
@@ -221,6 +244,10 @@ impl VoodooGl {
     /// The samples a pixel asked for, which OpenGL may have fewer of.
     pub fn samples(&self) -> u32 {
         self.samples
+    }
+
+    pub fn anisotropy(&self) -> u32 {
+        self.anisotropy
     }
 
     /// Give everything back to OpenGL.
@@ -447,6 +474,13 @@ impl VoodooGl {
     fn upload(&mut self, gl: &glow::Context, texture: &Texture) {
         if !self.textures.contains_key(&texture.id) {
             let Ok(t) = self::texture(gl, glow::NEAREST) else { return };
+            if let Some(anisotropy) = self.texture_anisotropy {
+                // SAFETY: see `VoodooGl`.
+                unsafe {
+                    gl.bind_texture(glow::TEXTURE_2D, Some(t));
+                    gl.tex_parameter_f32(glow::TEXTURE_2D, TEXTURE_MAX_ANISOTROPY, anisotropy);
+                }
+            }
             self.textures.insert(texture.id, GlTexture { texture: t, params: None, lod: None });
         }
         let Some(entry) = self.textures.get_mut(&texture.id) else { return };

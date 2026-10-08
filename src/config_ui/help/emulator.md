@@ -120,6 +120,12 @@ being smoother and taking more of your graphics card. It adds to *3dfx
 OpenGL size*. Antialiasing forced in your graphics driver's control panel
 doesn't reach these pictures; this setting does.
 
+# 3dfx anisotropic filtering {#voodoo-anisotropy}
+
+Sharpens textures viewed at an angle with anisotropic filtering: **Off**,
+**2x**, **4x**, **8x** or **16x**. It takes effect only when the OpenGL
+driver supports it.
+
 # 3dfx frame rate cap {#voodoo-fps-cap}
 
 The most frames a second a game may show on the 3dfx card. A game that

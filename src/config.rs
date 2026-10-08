@@ -149,13 +149,15 @@ pub struct Config {
     pub machine: Option<Adapter>,
     /// The 3dfx card (`voodoo`), its memory (`voodoo_memory`), what draws
     /// for it (`voodoo_renderer`), at what size (`voodoo_scale`) and with
-    /// how many samples a pixel (`voodoo_msaa`), and the most frames a
-    /// second programs may show on it (`voodoo_fps_cap`, 0 for no cap).
+    /// how many samples a pixel (`voodoo_msaa`), texture anisotropy
+    /// (`voodoo_anisotropy`), and the most frames a second programs may show
+    /// on it (`voodoo_fps_cap`, 0 for no cap).
     pub voodoo: Option<bool>,
     pub voodoo_memory: Option<crate::voodoo::Board>,
     pub voodoo_renderer: Option<crate::voodoo::Renderer>,
     pub voodoo_scale: Option<u32>,
     pub voodoo_msaa: Option<u32>,
+    pub voodoo_anisotropy: Option<u32>,
     pub voodoo_fps_cap: Option<u32>,
     /// The PowerVR card (`powervr`): its chip, or None for no card; and
     /// its texture filtering (`powervr_filter`).
@@ -872,6 +874,11 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             "2" | "4" | "8" => config.voodoo_msaa = value.parse().ok(),
                             _ => warn(format!("invalid voodoo_msaa '{}' (off, 2, 4 or 8)", value)),
                         },
+                        "voodoo_anisotropy" => match value.to_ascii_lowercase().as_str() {
+                            "off" | "1" => config.voodoo_anisotropy = Some(1),
+                            "2" | "4" | "8" | "16" => config.voodoo_anisotropy = value.parse().ok(),
+                            _ => warn(format!("invalid voodoo_anisotropy '{}' (off, 2, 4, 8 or 16)", value)),
+                        },
                         "voodoo_fps_cap" => match value.to_ascii_lowercase().as_str() {
                             "off" | "0" => config.voodoo_fps_cap = Some(0),
                             _ => match value.parse::<u32>() {
@@ -1407,6 +1414,7 @@ impl Settings {
                 renderer: config.voodoo_renderer.unwrap_or(default.voodoo.renderer),
                 scale: config.voodoo_scale.unwrap_or(default.voodoo.scale),
                 msaa: config.voodoo_msaa.unwrap_or(default.voodoo.msaa),
+                anisotropy: config.voodoo_anisotropy.unwrap_or(default.voodoo.anisotropy),
                 fps_cap: config.voodoo_fps_cap.map_or(default.voodoo.fps_cap, |n| (n > 0).then_some(n)),
             },
             powervr: config.powervr.unwrap_or(default.powervr),
@@ -1474,6 +1482,10 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Emulator, "voodoo_renderer", Some(settings.voodoo.renderer.name().to_string())),
         (Emulator, "voodoo_scale", Some(settings.voodoo.scale.to_string())),
         (Emulator, "voodoo_msaa", Some(match settings.voodoo.msaa {
+            1 => "off".to_string(),
+            n => n.to_string(),
+        })),
+        (Emulator, "voodoo_anisotropy", Some(match settings.voodoo.anisotropy {
             1 => "off".to_string(),
             n => n.to_string(),
         })),
@@ -2505,6 +2517,7 @@ mod tests {
                 renderer: crate::voodoo::Renderer::OpenGl,
                 scale: 3,
                 msaa: 4,
+                anisotropy: 8,
                 fps_cap: Some(30),
             },
             powervr: Some(crate::powervr::Chip::Pcx2),

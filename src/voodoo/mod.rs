@@ -139,13 +139,15 @@ pub struct VoodooSettings {
     pub scale: u32,
     /// The samples a pixel OpenGL's multisampling takes, 1 for none.
     pub msaa: u32,
+    /// The texture anisotropy OpenGL uses, 1 for none.
+    pub anisotropy: u32,
     /// The most frames a second programs may show on the card, if capped.
     pub fps_cap: Option<u32>,
 }
 
 impl Default for VoodooSettings {
     fn default() -> Self {
-        Self { enabled: false, board: Board::Max, renderer: Renderer::Software, scale: 2, msaa: 1, fps_cap: None }
+        Self { enabled: false, board: Board::Max, renderer: Renderer::Software, scale: 2, msaa: 1, anisotropy: 1, fps_cap: None }
     }
 }
 

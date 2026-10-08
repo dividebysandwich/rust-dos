@@ -401,7 +401,8 @@ impl Page {
                 &[Scale, Fullscreen, Aspect, Vrr, Filter, Shader, CrtCurvature, CrtGlow, Monochrome, Composite, CompositeEra]
             }
             Page::Emulator => &[
-                Cycles, Core, Fpu, Cpu, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, VoodooMsaa, VoodooFpsCap, VoodooOverlay, PowerVr, PowerVrFilter, Memsize, Ems, Umb, DosHigh, Dpmi,
+                Cycles, Core, Fpu, Cpu, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, VoodooMsaa,
+                VoodooAnisotropy, VoodooFpsCap, VoodooOverlay, PowerVr, PowerVrFilter, Memsize, Ems, Umb, DosHigh, Dpmi,
                 DosVersion, IdeHardDisks, BootCdrom, HardDiskSpeed, FloppyDiskSpeed, Joystick,
                 Deadzone, MouseAutocapture, MouseCaptureMessages, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, RecordShader, Autoexec,
                 ShellSuggestions, ShellColors, SaveShellHistory,
@@ -554,6 +555,7 @@ enum Item {
     VoodooRenderer,
     VoodooScale,
     VoodooMsaa,
+    VoodooAnisotropy,
     VoodooFpsCap,
     /// Fetch Glide's DOS overlay (GLIDE2X.OVL).
     VoodooOverlay,
@@ -878,6 +880,7 @@ impl Item {
             VoodooRenderer => "3dfx drawn by",
             VoodooScale => "3dfx OpenGL size",
             VoodooMsaa => "3dfx antialiasing",
+            VoodooAnisotropy => "3dfx anisotropic filtering",
             VoodooFpsCap => "3dfx frame rate cap",
             VoodooOverlay => "  Download Glide's DOS overlay...",
             PowerVr => "PowerVR PCX2",
@@ -1000,7 +1003,7 @@ impl Item {
             Item::CaptureDir | Item::RecordUi | Item::RecordShader => frontend.host_files,
             Item::Core => crate::dynrec::AVAILABLE,
             // The browser draws with the emulator's own rasterizer only.
-            Item::VoodooRenderer | Item::VoodooScale | Item::VoodooMsaa => frontend.window,
+            Item::VoodooRenderer | Item::VoodooScale | Item::VoodooMsaa | Item::VoodooAnisotropy => frontend.window,
             // A thread of its own packs rewind's states.
             Item::Rewind | Item::RewindMemory => frontend.window,
             // The browser has no sockets for a LAN.
@@ -1045,7 +1048,9 @@ impl Item {
             Item::Sc55Download => s.sound.midisynth == MidiSynth::Sc55 && sc55_found(s).is_none(),
             // Until it is there.
             Item::VoodooOverlay => s.voodoo.enabled && crate::voodoo::overlay::find().is_none(),
-            Item::VoodooScale | Item::VoodooMsaa => s.voodoo.enabled && s.voodoo.renderer == crate::voodoo::Renderer::OpenGl,
+            Item::VoodooScale | Item::VoodooMsaa | Item::VoodooAnisotropy => {
+                s.voodoo.enabled && s.voodoo.renderer == crate::voodoo::Renderer::OpenGl
+            }
             Item::Relay => s.network.online,
             Item::SerialIrq(n) => s.serial.ports[n as usize] != crate::serial::PortType::Off,
             Item::MouseType => s.serial.ports.contains(&crate::serial::PortType::Mouse),
@@ -1068,7 +1073,7 @@ impl Item {
                 Applies::Now
             }
             Cycles | Core | Fpu | Dpmi | DosVersion | IdeHardDisks | BootCdrom | KeyboardLayout | MouseAutocapture | MouseCaptureMessages | ShellSuggestions | ShellColors | SaveShellHistory | Rewind | RewindMemory
-            | VoodooRenderer | VoodooScale | VoodooMsaa | VoodooFpsCap | VoodooOverlay | PowerVrFilter => Applies::Now,
+            | VoodooRenderer | VoodooScale | VoodooMsaa | VoodooAnisotropy | VoodooFpsCap | VoodooOverlay | PowerVrFilter => Applies::Now,
             Monochrome => Applies::NowAndAtPrompt,
             HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise | Volume(_) | CaptureDir | RecordUi
             | RecordShader => Applies::Now,
@@ -1175,6 +1180,10 @@ impl Item {
             VoodooMsaa => match s.voodoo.msaa {
                 1 => "Off".to_string(),
                 n => format!("{}x MSAA", n),
+            },
+            VoodooAnisotropy => match s.voodoo.anisotropy {
+                1 => "Off".to_string(),
+                n => format!("{}x anisotropic", n),
             },
             VoodooFpsCap => match s.voodoo.fps_cap {
                 None => "Off".to_string(),
@@ -1387,6 +1396,7 @@ impl Item {
             }),
             VoodooScale => each(s, [1, 2, 3, 4], |s, scale| s.voodoo.scale = scale),
             VoodooMsaa => each(s, [1, 2, 4, 8], |s, samples| s.voodoo.msaa = samples),
+            VoodooAnisotropy => each(s, [1, 2, 4, 8, 16], |s, n| s.voodoo.anisotropy = n),
             VoodooFpsCap => each(s, FPS_CAPS, |s, fps| s.voodoo.fps_cap = fps),
             PowerVr => on_off(|s, on| s.powervr = on.then_some(crate::powervr::Chip::Pcx2)),
             PowerVrFilter => {

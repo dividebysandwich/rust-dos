@@ -207,7 +207,8 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   which draws it again at `voodoo_scale` (1 to 4, 2 by default) times the
   card's resolution (see [3dfx Voodoo Graphics](#3dfx-voodoo-graphics))
   and with `voodoo_msaa` (`off`, the default, `2`, `4` or `8`) samples a
-  pixel of multisampled antialiasing;
+  pixel of multisampled antialiasing and `voodoo_anisotropy` (`off`, the
+  default, `2`, `4`, `8` or `16`) filters textures at oblique angles;
   `voodoo_fps_cap` (`off`, the default, or 10 to 240) is the most frames a
   second games may show on the card (see
   [3dfx Voodoo Graphics](#3dfx-voodoo-graphics));
@@ -1537,6 +1538,8 @@ triangles' edges with multisampling (as many samples as the graphics
 card has, at most); antialiasing forced in the graphics driver's control
 panel doesn't reach the framebuffer objects it draws into. What games write into the
 frame buffer themselves (menus, movies) stays at the card's resolution.
+`voodoo_anisotropy` sharpens textures viewed at an angle, where the OpenGL
+driver supports anisotropic filtering.
 The software rasterizer keeps the card's memory, which games read back
 and save states keep, but it only draws what can still be seen there:
 until something reads the memory, the drawing waits, and what a later
