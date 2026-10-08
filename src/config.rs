@@ -1405,6 +1405,14 @@ impl Settings {
         VideoSetup { adapter: self.machine, mono_monitor }
     }
 
+    /// The guest environment variables every setting asks for. A name two
+    /// settings give takes the value of the later one.
+    pub fn environment(&self) -> Vec<crate::env_inject::Rule> {
+        let mut rules = Vec::new();
+        rules.extend(self.voodoo.environment());
+        rules
+    }
+
     pub fn from_config(config: &Config) -> Self {
         let default = Self::default();
         Self {

@@ -19,6 +19,8 @@ pub struct Hardware {
     pub voodoo: Option<crate::voodoo::Board>,
     /// The 3dfx card's gamma for Glide.
     pub gamma: Option<f32>,
+    /// The guest environment variables the settings ask for.
+    pub env: Vec<crate::env_inject::Rule>,
     /// The PowerVR card.
     pub powervr: Option<crate::powervr::Chip>,
     /// The IPX driver and the LAN.
@@ -42,7 +44,7 @@ pub fn configure(cpu: &mut Cpu, settings: &Settings, host_layout: &'static crate
     cpu.bus.idle_hint = settings.idle_hint;
     crate::video::bios::install(&mut cpu.bus, settings.video_setup());
     cpu.bus.configure_voodoo(settings.voodoo.board());
-    cpu.set_env_rules(settings.voodoo.environment());
+    cpu.set_env_rules(settings.environment());
     crate::voodoo::overlay::provide(&mut cpu.bus);
     cpu.bus.configure_powervr(settings.powervr);
     cpu.bus.set_disk_settings(settings.disk);
@@ -74,6 +76,7 @@ impl Hardware {
             memory: (settings.ems, settings.umb, settings.dos_high),
             voodoo: settings.voodoo.board(),
             gamma: settings.voodoo.gamma,
+            env: settings.environment(),
             powervr: settings.powervr,
             network: settings.network.clone(),
             serial: settings.serial.clone(),
@@ -143,8 +146,9 @@ impl Hardware {
             }
             cpu.bus.configure_voodoo(voodoo);
         }
-        if voodoo != self.voodoo || settings.voodoo.gamma != self.gamma {
-            cpu.set_env_rules(settings.voodoo.environment());
+        let env = settings.environment();
+        if env != self.env {
+            cpu.set_env_rules(env);
         }
         if settings.powervr != self.powervr {
             match settings.powervr {

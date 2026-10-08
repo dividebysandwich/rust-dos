@@ -2,6 +2,7 @@
 //! has set them itself.
 
 use crate::cpu::Cpu;
+use crate::savestate::{Reader, Result, State, Writer};
 
 /// A variable a setting wants: its name, and its value, or None for none.
 pub type Rule = (&'static str, Option<String>);
@@ -24,12 +25,14 @@ impl GuestEnvironment for Cpu {
 }
 
 /// Brings the rules' variables into the environment. A variable the guest
-/// sets or changes is the guest's from then on.
+/// sets, changes or removes is the guest's from then on.
 #[derive(Debug, Default)]
 pub struct EnvInjector {
     rules: Vec<Rule>,
     /// The variables injected, with the values they were given.
     injected: Vec<(String, String)>,
+    /// The variables the guest has taken over; the injector leaves them alone.
+    guest: Vec<String>,
 }
 
 impl EnvInjector {
@@ -37,9 +40,21 @@ impl EnvInjector {
         self.rules = rules;
     }
 
+    /// Forget what was put in and taken over.
+    pub fn forget(&mut self) {
+        self.injected.clear();
+        self.guest.clear();
+    }
+
     /// Bring the environment in line with the rules; false if a variable didn't fit.
     pub fn apply<E: GuestEnvironment + ?Sized>(&mut self, env: &mut E) -> bool {
-        self.injected.retain(|(name, value)| env.get(name) == Some(value.as_str()));
+        for (name, value) in std::mem::take(&mut self.injected) {
+            if env.get(&name) == Some(value.as_str()) {
+                self.injected.push((name, value));
+            } else {
+                self.take_over(name);
+            }
+        }
         let stale: Vec<String> = self
             .injected
             .iter()
@@ -59,6 +74,16 @@ impl EnvInjector {
         fit
     }
 
+    fn is_guest(&self, name: &str) -> bool {
+        self.guest.iter().any(|g| g.eq_ignore_ascii_case(name))
+    }
+
+    fn take_over(&mut self, name: String) {
+        if !self.is_guest(&name) {
+            self.guest.push(name);
+        }
+    }
+
     fn inject<E: GuestEnvironment + ?Sized>(&mut self, env: &mut E, name: &str, value: &str) -> bool {
         match self.injected.iter().position(|(n, _)| n.eq_ignore_ascii_case(name)) {
             Some(i) => {
@@ -71,7 +96,7 @@ impl EnvInjector {
                 self.injected[i].1 = value.to_string();
                 true
             }
-            None if env.get(name).is_some() => true,
+            None if self.is_guest(name) || env.get(name).is_some() => true,
             None => {
                 if !env.set(name, value) {
                     return false;
@@ -90,6 +115,19 @@ impl EnvInjector {
             }
             None => true,
         }
+    }
+}
+
+/// The record only: the rules come from the settings, not the state.
+impl State for EnvInjector {
+    fn save(&self, w: &mut Writer) {
+        self.injected.save(w);
+        self.guest.save(w);
+    }
+
+    fn load(&mut self, r: &mut Reader) -> Result<()> {
+        self.injected.load(r)?;
+        self.guest.load(r)
     }
 }
 
@@ -134,6 +172,24 @@ mod tests {
     }
 
     #[test]
+    fn a_loaded_record_keeps_the_guest_s_variables() {
+        let mut env = Env::default();
+        let mut before = injector(Some("1.5"));
+        before.apply(&mut env);
+        env.set("SST_GGAMMA", "2");
+        before.apply(&mut env);
+        let mut w = Writer::new();
+        before.save(&mut w);
+
+        let mut loaded = injector(None);
+        loaded.load(&mut Reader::new(&w.buf)).unwrap();
+        let mut restored = Env { vars: env.vars.clone(), ..Default::default() };
+        assert!(loaded.apply(&mut restored));
+        assert_eq!(restored.get("SST_GGAMMA"), Some("2"));
+        assert_eq!(restored.get("SST_RGAMMA"), None);
+    }
+
+    #[test]
     fn absent_variables_are_injected() {
         let mut env = Env::default();
         assert!(injector(Some("1.5")).apply(&mut env));
@@ -162,13 +218,25 @@ mod tests {
     }
 
     #[test]
-    fn a_variable_the_guest_removed_comes_back() {
+    fn a_variable_the_guest_removed_stays_removed() {
         let mut env = Env::default();
         let mut injector = injector(Some("1.5"));
         injector.apply(&mut env);
         env.set("SST_RGAMMA", "");
         injector.apply(&mut env);
-        assert_eq!(env.get("SST_RGAMMA"), Some("1.5"));
+        assert_eq!(env.get("SST_RGAMMA"), None);
+    }
+
+    #[test]
+    fn a_guest_value_survives_a_changed_setting() {
+        let mut env = Env::default();
+        let mut injector = injector(Some("1.5"));
+        injector.apply(&mut env);
+        env.set("SST_RGAMMA", "2");
+        injector.set_rules(gamma(Some("3")));
+        injector.apply(&mut env);
+        assert_eq!(env.get("SST_RGAMMA"), Some("2"));
+        assert_eq!(env.get("SST_GGAMMA"), Some("3"));
     }
 
     #[test]

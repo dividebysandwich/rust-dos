@@ -6,12 +6,14 @@ use crate::cpu::Cpu;
 use std::sync::OnceLock;
 
 const CPU_VERSION: u16 = 3;
+const ENV_VERSION: u16 = 1;
 
 /// The machine's state, between batches.
 pub fn save(cpu: &Cpu) -> Vec<u8> {
     let mut w = Writer::new();
     cpu.bus.save_state(&mut w);
     w.section(b"CPU ", CPU_VERSION, |w| cpu.save(w));
+    w.section(b"ENV ", ENV_VERSION, |w| cpu.env_injector.save(w));
     w.buf
 }
 
@@ -26,6 +28,10 @@ pub fn load(cpu: &mut Cpu, data: &[u8]) -> Result<()> {
     if loaded.is_err() {
         load_sections(cpu, &before).expect("the state the machine was in loads back");
     }
+    if loaded.is_ok() {
+        // The settings' variables, whatever the state's environment has.
+        cpu.apply_env_rules();
+    }
     cpu.forget_caches();
     cpu.bus.after_load();
     for path in loaded.as_ref().map_or(&[][..], Vec::as_slice) {
@@ -38,6 +44,12 @@ fn load_sections(cpu: &mut Cpu, data: &[u8]) -> Result<Vec<String>> {
     let mut r = Reader::new(data);
     let lost = cpu.bus.load_state(&mut r)?;
     cpu.load(&mut r.section(b"CPU ", CPU_VERSION)?)?;
+    // A state from before the record was saved has none: its variables count as the guest's.
+    if r.next_is(b"ENV ") {
+        cpu.env_injector.load(&mut r.section(b"ENV ", ENV_VERSION)?)?;
+    } else {
+        cpu.env_injector.forget();
+    }
     Ok(lost)
 }
 
