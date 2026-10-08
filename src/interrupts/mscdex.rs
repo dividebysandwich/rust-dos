@@ -353,7 +353,8 @@ fn image_request(cpu: &mut Cpu, drive: u8, image: &Rc<CdImage>, req: usize) -> u
                 start,
                 count
             ));
-            if count == 0 {
+            // Like DOSBox, a play starting in a data track does nothing (and isn't busy).
+            if count == 0 || image.track_at(start).is_some_and(|t| !t.is_audio()) {
                 cpu.bus.cdaudio.stop_drive(drive);
             } else {
                 cpu.bus.cdaudio.play(drive, image.clone(), start, count);
