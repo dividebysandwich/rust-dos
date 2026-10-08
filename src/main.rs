@@ -2099,7 +2099,7 @@ impl MainHost<'_, '_> {
         if let Some(previous) = self.game.take() {
             self.end_game(previous);
         }
-        let base = self.settings.clone();
+        let base = self.saved.settings.clone();
         let mut prepared = games::prepare(id, &base, text, dir, rust_dos::hostdirs::home_dir().as_deref())?;
         for warning in &prepared.warnings {
             config_warning(self.cpu, &format!("games/{}.conf: {}", id, warning));

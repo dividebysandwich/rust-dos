@@ -96,7 +96,7 @@ impl Machine {
         if let Some(previous) = self.game.take() {
             self.end_game(previous);
         }
-        let base = self.settings.clone();
+        let (base, _) = self.base_settings();
         let mut prepared = games::prepare(id, &base, text, dir, content::home().as_deref())?;
         for warning in &prepared.warnings {
             self.warn(&format!("{}.conf: {}", id, warning));
