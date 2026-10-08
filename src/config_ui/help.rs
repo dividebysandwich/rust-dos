@@ -316,6 +316,7 @@ impl Item {
             VoodooMemory => "voodoo-memory",
             VoodooRenderer => "voodoo-renderer",
             VoodooScale => "voodoo-scale",
+            VoodooScaleShader => "voodoo-scale-shader",
             VoodooMsaa => "voodoo-msaa",
             VoodooAnisotropy => "voodoo-anisotropy",
             VoodooFpsCap => "voodoo-fps-cap",

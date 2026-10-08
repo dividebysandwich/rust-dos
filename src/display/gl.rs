@@ -25,6 +25,7 @@ struct Program {
     mask: Option<glow::UniformLocation>,
     curvature: Option<glow::UniformLocation>,
     glow: Option<glow::UniformLocation>,
+    line: Option<glow::UniformLocation>,
 }
 
 // Every `unsafe` below is a call into OpenGL, whose context `open` makes
@@ -52,6 +53,9 @@ pub struct GlScreen {
     mask: f32,
     /// The CRT look's own settings.
     crt: CrtSettings,
+    /// Whether the CRT look's lines follow the 3dfx card's scale, or stay
+    /// at the card's own size.
+    scale_lines: bool,
     /// The scaling filter without a look.
     filter: Filter,
     renderer: String,
@@ -183,6 +187,7 @@ impl GlScreen {
             active: Shader::None,
             mask: 1.0,
             crt: CrtSettings::default(),
+            scale_lines: true,
             filter: Filter::Nearest,
             renderer,
             voodoo: None,
@@ -263,6 +268,11 @@ impl GlScreen {
         self.crt = crt;
     }
 
+    /// Whether the CRT look's lines follow the 3dfx card's scale.
+    pub fn set_scale_lines(&mut self, on: bool) {
+        self.scale_lines = on;
+    }
+
     /// Show `frame`, letterboxed at `display` proportions, of which `rows`
     /// changed since the last.
     pub fn present(&mut self, frame: &Frame, rows: std::ops::Range<usize>, display: (u32, u32), layer: Option<&Layer>) {
@@ -321,7 +331,7 @@ impl GlScreen {
                 gl.generate_mipmap(glow::TEXTURE_2D);
             }
         }
-        self.draw(self.texture, size, display, layer);
+        self.draw(self.texture, size, display, layer, 1.0);
     }
 
     /// Whether the 3dfx card can be drawn with OpenGL here, or why not.
@@ -376,6 +386,7 @@ impl GlScreen {
     pub fn present_voodoo(&mut self, screen: &Frame, base: &Frame, display: (u32, u32)) -> bool {
         let Some(voodoo) = &mut self.voodoo else { return false };
         let Some((texture, size)) = voodoo.composite(&self.gl, screen, base) else { return false };
+        let line = shader::line_scale(Some(voodoo.scale()).filter(|_| self.scale_lines));
         // SAFETY: see `GlScreen`.
         unsafe {
             self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
@@ -384,20 +395,21 @@ impl GlScreen {
                 self.gl.generate_mipmap(glow::TEXTURE_2D);
             }
         }
-        self.draw(texture, size, display, None);
+        self.draw(texture, size, display, None, line);
         true
     }
 
     /// Draw `texture`, a picture of `size` pixels, into the window with the
     /// look, letterboxed at `display` proportions, and show it. With the 3D
-    /// scene, it goes on the scene's screen instead.
-    fn draw(&mut self, texture: glow::Texture, size: (u32, u32), display: (u32, u32), layer: Option<&Layer>) {
+    /// scene, it goes on the scene's screen instead. `line` is the texels a
+    /// CRT line spans (`u_line`).
+    fn draw(&mut self, texture: glow::Texture, size: (u32, u32), display: (u32, u32), layer: Option<&Layer>, line: f32) {
         #[cfg(feature = "vr")]
         if let Some(stage) = &mut self.stage {
             let target = stage.screen_size(display);
             if stage.begin_screen(&self.gl, target) {
                 self.flat = true;
-                self.compose(texture, size, display, layer, target);
+                self.compose(texture, size, display, layer, target, line);
                 self.flat = false;
                 if let Some(stage) = &mut self.stage {
                     stage.end_screen(&self.gl);
@@ -409,13 +421,13 @@ impl GlScreen {
             return;
         }
         let drawable = self.window.drawable_size();
-        self.compose(texture, size, display, layer, drawable);
+        self.compose(texture, size, display, layer, drawable, line);
         self.window.gl_swap_window();
     }
 
     /// Draw `texture` as `draw` does into the framebuffer bound, of
     /// `(dw, dh)` pixels.
-    fn compose(&mut self, texture: glow::Texture, size: (u32, u32), display: (u32, u32), layer: Option<&Layer>, (dw, dh): (u32, u32)) {
+    fn compose(&mut self, texture: glow::Texture, size: (u32, u32), display: (u32, u32), layer: Option<&Layer>, (dw, dh): (u32, u32), line: f32) {
         let gl = &self.gl;
         // SAFETY: see `GlScreen`.
         unsafe {
@@ -426,7 +438,7 @@ impl GlScreen {
         if dw > 0 && dh > 0 {
             let (x, y, w, h) = super::letterbox((dw, dh), display);
             // OpenGL counts rows from the bottom.
-            self.draw_look(texture, size, (x as i32, (dh - y - h) as i32, w, h));
+            self.draw_look(texture, size, (x as i32, (dh - y - h) as i32, w, h), line);
             if let Some(layer) = layer {
                 let (sx, sy) = (w as f32 / size.0.max(1) as f32, h as f32 / size.1.max(1) as f32);
                 let (lx, ly, lw, lh) = layer.rect;
@@ -490,7 +502,7 @@ impl GlScreen {
 
     /// Draw `texture`, a picture of `size` pixels, with the look into the
     /// `x, y, width, height` of the framebuffer bound (y from the bottom).
-    fn draw_look(&self, texture: glow::Texture, size: (u32, u32), (x, y, w, h): (i32, i32, u32, u32)) {
+    fn draw_look(&self, texture: glow::Texture, size: (u32, u32), (x, y, w, h): (i32, i32, u32, u32), line: f32) {
         let gl = &self.gl;
         // `select` compiled the active look.
         let Some(Ok(program)) = self.programs.get(&self.active) else { return };
@@ -504,6 +516,7 @@ impl GlScreen {
             let [cx, cy] = if self.flat { [0.0, 0.0] } else { self.active.curvature(self.crt) };
             gl.uniform_2_f32(program.curvature.as_ref(), cx, cy);
             gl.uniform_1_f32(program.glow.as_ref(), self.active.glow(self.crt));
+            gl.uniform_1_f32(program.line.as_ref(), line);
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(texture));
             gl.bind_vertex_array(Some(self.vao));
@@ -618,7 +631,7 @@ impl GlScreen {
             }
             let complete = gl.check_framebuffer_status(glow::FRAMEBUFFER) == glow::FRAMEBUFFER_COMPLETE;
             if complete {
-                self.draw_look(capture.source, (frame.width, frame.height), (0, 0, w, h));
+                self.draw_look(capture.source, (frame.width, frame.height), (0, 0, w, h), 1.0);
                 gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
                 let pixels = glow::PixelPackData::Slice(Some(&mut capture.rgba));
                 gl.read_pixels(0, 0, w as i32, h as i32, glow::RGBA, glow::UNSIGNED_BYTE, pixels);
@@ -712,6 +725,7 @@ fn compile(gl: &glow::Context, glsl: Glsl, shader: Shader) -> Result<Program, St
             mask: gl.get_uniform_location(program, "u_mask"),
             curvature: gl.get_uniform_location(program, "u_curvature"),
             glow: gl.get_uniform_location(program, "u_glow"),
+            line: gl.get_uniform_location(program, "u_line"),
         })
     }
 }

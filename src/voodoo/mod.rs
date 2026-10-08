@@ -137,6 +137,9 @@ pub struct VoodooSettings {
     pub renderer: Renderer,
     /// How many times the native size OpenGL draws at.
     pub scale: u32,
+    /// Whether the CRT look's lines follow `scale`, so they stay as thin
+    /// as the card's own lines.
+    pub scale_shader: bool,
     /// The samples a pixel OpenGL's multisampling takes, 1 for none.
     pub msaa: u32,
     /// The texture anisotropy OpenGL uses, 1 for none.
@@ -149,7 +152,7 @@ pub struct VoodooSettings {
 
 impl Default for VoodooSettings {
     fn default() -> Self {
-        Self { enabled: false, board: Board::Max, renderer: Renderer::Software, scale: 2, msaa: 1, anisotropy: 1, fps_cap: None, gamma: None }
+        Self { enabled: false, board: Board::Max, renderer: Renderer::Software, scale: 2, scale_shader: true, msaa: 1, anisotropy: 1, fps_cap: None, gamma: None }
     }
 }
 

@@ -156,6 +156,9 @@ pub struct Config {
     pub voodoo_memory: Option<crate::voodoo::Board>,
     pub voodoo_renderer: Option<crate::voodoo::Renderer>,
     pub voodoo_scale: Option<u32>,
+    /// Whether the CRT look's lines follow `voodoo_scale`
+    /// (`voodoo_scale_shader`).
+    pub voodoo_scale_shader: Option<bool>,
     pub voodoo_msaa: Option<u32>,
     pub voodoo_anisotropy: Option<u32>,
     pub voodoo_fps_cap: Option<u32>,
@@ -871,6 +874,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Ok(n) if (1..=4).contains(&n) => config.voodoo_scale = Some(n),
                             _ => warn(format!("invalid voodoo_scale '{}' (1 to 4)", value)),
                         },
+                        "voodoo_scale_shader" => match parse_bool(value) {
+                            Some(on) => config.voodoo_scale_shader = Some(on),
+                            None => warn(format!("invalid voodoo_scale_shader '{}' (true or false)", value)),
+                        },
                         "voodoo_msaa" => match value.to_ascii_lowercase().as_str() {
                             "off" | "1" => config.voodoo_msaa = Some(1),
                             "2" | "4" | "8" => config.voodoo_msaa = value.parse().ok(),
@@ -1422,6 +1429,7 @@ impl Settings {
                 board: config.voodoo_memory.unwrap_or(default.voodoo.board),
                 renderer: config.voodoo_renderer.unwrap_or(default.voodoo.renderer),
                 scale: config.voodoo_scale.unwrap_or(default.voodoo.scale),
+                scale_shader: config.voodoo_scale_shader.unwrap_or(default.voodoo.scale_shader),
                 msaa: config.voodoo_msaa.unwrap_or(default.voodoo.msaa),
                 anisotropy: config.voodoo_anisotropy.unwrap_or(default.voodoo.anisotropy),
                 fps_cap: config.voodoo_fps_cap.map_or(default.voodoo.fps_cap, |n| (n > 0).then_some(n)),
@@ -1491,6 +1499,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Emulator, "voodoo_memory", Some(settings.voodoo.board.megabytes().to_string())),
         (Emulator, "voodoo_renderer", Some(settings.voodoo.renderer.name().to_string())),
         (Emulator, "voodoo_scale", Some(settings.voodoo.scale.to_string())),
+        (Emulator, "voodoo_scale_shader", yes_no(settings.voodoo.scale_shader)),
         (Emulator, "voodoo_msaa", Some(match settings.voodoo.msaa {
             1 => "off".to_string(),
             n => n.to_string(),
@@ -2527,6 +2536,7 @@ mod tests {
                 board: crate::voodoo::Board::Standard,
                 renderer: crate::voodoo::Renderer::OpenGl,
                 scale: 3,
+                scale_shader: false,
                 msaa: 4,
                 anisotropy: 8,
                 fps_cap: Some(30),

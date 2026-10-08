@@ -401,7 +401,7 @@ impl Page {
                 &[Scale, Fullscreen, Aspect, Vrr, Filter, Shader, CrtCurvature, CrtGlow, Monochrome, Composite, CompositeEra]
             }
             Page::Emulator => &[
-                Cycles, Core, Fpu, Cpu, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, VoodooMsaa,
+                Cycles, Core, Fpu, Cpu, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, VoodooScaleShader, VoodooMsaa,
                 VoodooAnisotropy, VoodooFpsCap, VoodooGamma, VoodooOverlay, PowerVr, PowerVrFilter, Memsize, Ems, Umb, DosHigh, Dpmi,
                 DosVersion, IdeHardDisks, BootCdrom, HardDiskSpeed, FloppyDiskSpeed, Joystick,
                 Deadzone, MouseAutocapture, MouseCaptureMessages, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, RecordShader, Autoexec,
@@ -554,6 +554,7 @@ enum Item {
     VoodooMemory,
     VoodooRenderer,
     VoodooScale,
+    VoodooScaleShader,
     VoodooMsaa,
     VoodooAnisotropy,
     VoodooFpsCap,
@@ -885,6 +886,7 @@ impl Item {
             VoodooMemory => "3dfx memory",
             VoodooRenderer => "3dfx drawn by",
             VoodooScale => "3dfx OpenGL size",
+            VoodooScaleShader => "  Sized for the CRT look",
             VoodooMsaa => "3dfx antialiasing",
             VoodooAnisotropy => "3dfx anisotropic filtering",
             VoodooFpsCap => "3dfx frame rate cap",
@@ -1010,7 +1012,9 @@ impl Item {
             Item::CaptureDir | Item::RecordUi | Item::RecordShader => frontend.host_files,
             Item::Core => crate::dynrec::AVAILABLE,
             // The browser draws with the emulator's own rasterizer only.
-            Item::VoodooRenderer | Item::VoodooScale | Item::VoodooMsaa | Item::VoodooAnisotropy => frontend.window,
+            Item::VoodooRenderer | Item::VoodooScale | Item::VoodooScaleShader | Item::VoodooMsaa | Item::VoodooAnisotropy => {
+                frontend.window
+            }
             // A thread of its own packs rewind's states.
             Item::Rewind | Item::RewindMemory => frontend.window,
             // The browser has no sockets for a LAN.
@@ -1058,6 +1062,10 @@ impl Item {
             Item::VoodooScale | Item::VoodooMsaa | Item::VoodooAnisotropy => {
                 s.voodoo.enabled && s.voodoo.renderer == crate::voodoo::Renderer::OpenGl
             }
+            // At 1x the lines are the card's own, whatever the look.
+            Item::VoodooScaleShader => {
+                s.voodoo.enabled && s.voodoo.renderer == crate::voodoo::Renderer::OpenGl && s.voodoo.scale > 1
+            }
             Item::Relay => s.network.online,
             Item::SerialIrq(n) => s.serial.ports[n as usize] != crate::serial::PortType::Off,
             Item::MouseType => s.serial.ports.contains(&crate::serial::PortType::Mouse),
@@ -1080,7 +1088,7 @@ impl Item {
                 Applies::Now
             }
             Cycles | Core | Fpu | Dpmi | DosVersion | IdeHardDisks | BootCdrom | KeyboardLayout | MouseAutocapture | MouseCaptureMessages | ShellSuggestions | ShellColors | SaveShellHistory | Rewind | RewindMemory
-            | VoodooRenderer | VoodooScale | VoodooMsaa | VoodooAnisotropy | VoodooFpsCap | VoodooOverlay | PowerVrFilter => Applies::Now,
+            | VoodooRenderer | VoodooScale | VoodooScaleShader | VoodooMsaa | VoodooAnisotropy | VoodooFpsCap | VoodooOverlay | PowerVrFilter => Applies::Now,
             Monochrome => Applies::NowAndAtPrompt,
             HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise | Volume(_) | CaptureDir | RecordUi
             | RecordShader => Applies::Now,
@@ -1184,6 +1192,7 @@ impl Item {
                 crate::voodoo::Renderer::OpenGl => "OpenGL".to_string(),
             },
             VoodooScale => format!("{}x", s.voodoo.scale),
+            VoodooScaleShader => on_off(s.voodoo.scale_shader),
             VoodooMsaa => match s.voodoo.msaa {
                 1 => "Off".to_string(),
                 n => format!("{}x MSAA", n),
@@ -1406,6 +1415,7 @@ impl Item {
                 s.voodoo.renderer = r
             }),
             VoodooScale => each(s, [1, 2, 3, 4], |s, scale| s.voodoo.scale = scale),
+            VoodooScaleShader => on_off(|s, on| s.voodoo.scale_shader = on),
             VoodooMsaa => each(s, [1, 2, 4, 8], |s, samples| s.voodoo.msaa = samples),
             VoodooAnisotropy => each(s, [1, 2, 4, 8, 16], |s, n| s.voodoo.anisotropy = n),
             VoodooFpsCap => each(s, FPS_CAPS, |s, fps| s.voodoo.fps_cap = fps),

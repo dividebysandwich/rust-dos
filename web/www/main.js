@@ -460,6 +460,7 @@ function makeGlScreen() {
       mask: gl.getUniformLocation(program, 'u_mask'),
       curvature: gl.getUniformLocation(program, 'u_curvature'),
       glow: gl.getUniformLocation(program, 'u_glow'),
+      line: gl.getUniformLocation(program, 'u_line'),
     };
   }
 
@@ -540,6 +541,7 @@ function makeGlScreen() {
       gl.uniform1f(entry.mask, mono ? 0 : 1);
       gl.uniform2f(entry.curvature, curvature[0], curvature[1]);
       gl.uniform1f(entry.glow, glow);
+      gl.uniform1f(entry.line, 1);
       gl.bindVertexArray(vao);
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, texture);

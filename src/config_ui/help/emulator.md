@@ -112,6 +112,13 @@ How many times the Voodoo's resolution OpenGL draws at: **2x** turns
 640x480 into 1280x960. Higher is sharper and takes more of your
 graphics card.
 
+# 3dfx OpenGL size in the CRT look {#voodoo-scale-shader}
+
+With *3dfx OpenGL size* above 1x, **On** keeps the CRT look's scanlines,
+mask and glow sized for the card's own lines, as at 1x. **Off** gives a
+scanline to every pixel of the bigger picture, so the lines are finer.
+Only the CRT looks use it, and it isn't shown at 1x.
+
 # 3dfx antialiasing {#voodoo-msaa}
 
 Smooths the jagged edges of the 3dfx picture drawn with OpenGL by

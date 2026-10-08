@@ -2,7 +2,7 @@
 //   MASK           0 none, 1 aperture grille, 2 slot mask
 //   CURVED         1 for a tube that bends and has rounded corners, else 0
 //   BEAM_MIN/MAX   the beam's width (sigma, in scanlines) at black and white
-//   EDGE           how wide the step between two pixels is, in frame pixels
+//   EDGE           how wide the step between two pixels is, in card pixels
 //   MASK_STRENGTH  how much of the light the mask takes, 0 to 1
 //   SLOT_GAP       the light left in the gaps of the slot mask
 //   OVERSCAN       how much of the picture the bezel covers
@@ -22,6 +22,8 @@ uniform float u_mask;
 uniform vec2 u_curvature;
 // How much light spreads around bright parts.
 uniform float u_glow;
+// Texels a card pixel spans: the 3dfx's OpenGL size, else 1.
+uniform float u_line;
 
 in vec2 v_uv;
 out vec4 o_color;
@@ -37,20 +39,30 @@ vec3 encode(vec3 c) {
     return pow(clamp(c, 0.0, 1.0), vec3(1.0 / 2.2));
 }
 
-// A frame pixel; black above and below the frame.
-vec3 texel(float x, float row) {
-    if (row < 0.0 || row >= u_source.y) {
-        return vec3(0.0);
-    }
-    return decode(texelFetch(u_frame, ivec2(int(clamp(x, 0.0, u_source.x - 1.0)), int(row)), 0).rgb);
+float texels() {
+    return max(u_line, 1.0);
 }
 
-// A frame row at x: sharp steps between its pixels, EDGE frame pixels wide
+vec2 card() {
+    return u_source / texels();
+}
+
+// The frame's texel at x (in texels) of card row `row`; black above and below the frame.
+vec3 texel(float x, float row) {
+    if (row < 0.0 || row >= card().y) {
+        return vec3(0.0);
+    }
+    vec2 p = floor(vec2(clamp(x, 0.0, u_source.x - 1.0), (row + 0.5) * texels()));
+    return decode(texelFetch(u_frame, ivec2(p), 0).rgb);
+}
+
+// A card row at x: sharp steps between its pixels, EDGE card pixels wide
 // but never less than a screen pixel.
 vec3 row_at(float row, float x) {
-    float fx = x - 0.5;
+    float s = texels();
+    float fx = x * s - 0.5;
     float x0 = floor(fx);
-    float w = max(EDGE, u_source.x / u_output.x);
+    float w = max(EDGE, card().x / u_output.x) * s;
     float t = clamp((fx - x0 - 0.5) / w + 0.5, 0.0, 1.0);
     return mix(texel(x0, row), texel(x0 + 1.0, row), t);
 }
@@ -67,7 +79,7 @@ vec3 beam(float d, vec3 c, float blur) {
     return c * (s / w) * exp(-0.5 * z * z);
 }
 
-// The scanlines at pos, in frame pixels: the line there and its
+// The scanlines at pos, in card pixels: the line there and its
 // neighbours. The lines are moved by half a screen pixel so that at a whole
 // number of screen pixels per line one of them is the line's middle;
 // otherwise at 2x both would be halfway to the dark gap. Between whole
@@ -75,7 +87,7 @@ vec3 beam(float d, vec3 c, float blur) {
 // waves, which the pixels' blur keeps faint. With fewer than two screen
 // pixels per line they fade to the plain picture.
 vec3 scanlines(vec2 pos) {
-    float rows_per_pixel = u_source.y / u_output.y;
+    float rows_per_pixel = card().y / u_output.y;
     float y = pos.y - 0.5 * rows_per_pixel;
     float n = floor(y + 0.5);
     float d = y - n;
@@ -100,7 +112,7 @@ vec3 scanlines(vec2 pos) {
 // brightness, and fades out where a frame pixel is less than two screen
 // pixels wide, too small for it.
 vec3 mask(vec2 f) {
-    float pixels = u_output.x / u_source.x;
+    float pixels = u_output.x / card().x;
     float s = MASK_STRENGTH * u_mask * smoothstep(1.25, 2.0, pixels);
     float w = max(1.0, floor(pixels / 3.0 + 0.5));
     int x = int(f.x / w);
@@ -121,14 +133,14 @@ vec3 mask(vec2 f) {
 #endif
 
 // The light bright parts spread around them: a small mipmap of the frame,
-// eight frame pixels a texel, blurred once more with a 3x3 tent.
+// eight card pixels a texel, blurred once more with a 3x3 tent.
 vec3 glow(vec2 t) {
-    vec2 r = 8.0 / u_source;
+    vec2 r = 8.0 / card();
     vec3 g = vec3(0.0);
     for (int y = -1; y <= 1; y++) {
         for (int x = -1; x <= 1; x++) {
             float weight = (x == 0 ? 2.0 : 1.0) * (y == 0 ? 2.0 : 1.0);
-            g += weight * decode(textureLod(u_frame, t + vec2(float(x), float(y)) * r, 3.0).rgb);
+            g += weight * decode(textureLod(u_frame, t + vec2(float(x), float(y)) * r, 3.0 + log2(texels())).rgb);
         }
     }
     return g / 16.0;
@@ -150,7 +162,7 @@ void main() {
     vec2 t = v_uv;
     float shade = 1.0;
 #endif
-    vec3 light = scanlines(t * u_source);
+    vec3 light = scanlines(t * card());
 #if MASK != 0
     light *= mask(gl_FragCoord.xy);
 #endif

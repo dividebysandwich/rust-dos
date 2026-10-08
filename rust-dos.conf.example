@@ -115,6 +115,9 @@
 # resolution. Screenshots show the software picture either way.
 #voodoo_renderer=software
 #voodoo_scale=2
+# Whether the CRT look sizes its scanlines for voodoo_scale: true or false.
+# Only the CRT look uses it, and only above 1x.
+#voodoo_scale_shader=true
 # Texture anisotropy for the OpenGL Voodoo renderer: off, 2, 4, 8 or 16.
 #voodoo_anisotropy=off
 # The gamma Glide applies to the 3dfx picture, as the environment variables

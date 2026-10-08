@@ -52,6 +52,10 @@ impl GlScreen {
         match *self {}
     }
 
+    pub fn set_scale_lines(&mut self, _on: bool) {
+        match *self {}
+    }
+
     pub fn present(&mut self, _frame: &Frame, _rows: std::ops::Range<usize>, _display: (u32, u32), _layer: Option<&Layer>) {
         match *self {}
     }

@@ -205,8 +205,12 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   prompt. `voodoo_renderer` is what draws the card's picture in the
   window: `software` (the default, rust-dos's own rasterizer) or `opengl`,
   which draws it again at `voodoo_scale` (1 to 4, 2 by default) times the
-  card's resolution (see [3dfx Voodoo Graphics](#3dfx-voodoo-graphics))
-  and with `voodoo_msaa` (`off`, the default, `2`, `4` or `8`) samples a
+  card's resolution (see [3dfx Voodoo Graphics](#3dfx-voodoo-graphics)),
+  with `voodoo_scale_shader` (`true`, the default, or `false`) whether the
+  CRT looks keep one scanline per line of the card's resolution (`false`
+  gives a line per pixel of the bigger picture, finer lines; it matters
+  only above 1x and with a CRT look),
+  with `voodoo_msaa` (`off`, the default, `2`, `4` or `8`) samples a
   pixel of multisampled antialiasing and `voodoo_anisotropy` (`off`, the
   default, `2`, `4`, `8` or `16`) filters textures at oblique angles;
   `voodoo_fps_cap` (`off`, the default, or 10 to 240) is the most frames a

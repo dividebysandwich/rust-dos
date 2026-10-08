@@ -239,10 +239,11 @@ const CRT: &str = include_str!("shader/crt.glsl");
 /// The vertex and fragment shader of a look. They take the frame as the
 /// texture `u_frame`; the CRT looks also take the frame's size in pixels
 /// as `u_source`, the picture's on the screen as `u_output`, whether the
-/// tube has a colour mask as `u_mask` (1 or 0, for a monochrome tube), how
-/// far it bends as `u_curvature` (`Shader::curvature`) and how much it
-/// glows as `u_glow` (`Shader::glow`), and read a mipmap of the frame. The
-/// fragment shader writes `o_color`.
+/// tube has a colour mask as `u_mask` (1 or 0, for a monochrome tube),
+/// how far it bends as `u_curvature` (`Shader::curvature`), how much it
+/// glows as `u_glow` (`Shader::glow`) and the texels a CRT line spans as
+/// `u_line` (`line_scale`), and read a mipmap of the frame. The fragment
+/// shader writes `o_color`.
 pub fn sources(shader: Shader, glsl: Glsl) -> (String, String) {
     let preamble = glsl.preamble();
     let fragment = match shader.look() {
@@ -250,6 +251,11 @@ pub fn sources(shader: Shader, glsl: Glsl) -> (String, String) {
         Some(look) => format!("{}{}{}", preamble, look.defines(), CRT),
     };
     (format!("{}{}", preamble, VERTEX), fragment)
+}
+
+/// Texels of the frame per CRT line (`u_line`): the 3dfx OpenGL size when its picture is drawn, else 1.
+pub fn line_scale(voodoo_scale: Option<u32>) -> f32 {
+    voodoo_scale.unwrap_or(1) as f32
 }
 
 /// Whether a look reads the frame's mipmap, which has to be made after
@@ -332,6 +338,7 @@ mod tests {
         let (_, curved) = sources(Shader::Crt, Glsl::Gl150);
         assert!(curved.contains("uniform vec2 u_curvature;") && curved.contains("u_curvature * c.yx * c.yx"));
         assert!(curved.contains("uniform float u_glow;") && curved.contains("u_glow * glow(t)"));
+        assert!(curved.contains("uniform float u_line;"));
         assert!(curved.contains("#define CURVED 1\n") && curved.contains("#define MASK 2\n"));
         assert!(curved.contains("uniform float u_mask;") && curved.contains("MASK_STRENGTH * u_mask"));
         let (_, flat) = sources(Shader::Scanlines, Glsl::Gl150);
@@ -345,6 +352,12 @@ mod tests {
         assert_eq!(Glsl::for_gl(2, 1, false), None);
         assert_eq!(Glsl::for_gl(3, 0, true), Some(Glsl::Es300));
         assert_eq!(Glsl::for_gl(2, 0, true), None);
+    }
+
+    #[test]
+    fn lines_span_the_voodoo_size() {
+        assert_eq!(line_scale(None), 1.0);
+        assert_eq!(line_scale(Some(3)), 3.0);
     }
 
     /// Every shader in every dialect compiles, where glslang's validator is

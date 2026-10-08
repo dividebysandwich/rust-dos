@@ -151,6 +151,7 @@ impl<'a> Display<'a> {
                 }
                 gl.set_color_mask(settings.monochrome == Monochrome::Off);
                 gl.set_crt(settings.crt);
+                gl.set_scale_lines(settings.voodoo.scale_shader);
                 let renderer = gl.renderer().to_string();
                 (Output::Gl(Box::new(gl)), renderer)
             }
@@ -271,6 +272,7 @@ impl<'a> Display<'a> {
         if let Output::Gl(gl) = &mut self.out {
             gl.set_color_mask(settings.monochrome == Monochrome::Off);
             gl.set_crt(settings.crt);
+            gl.set_scale_lines(settings.voodoo.scale_shader);
         }
         if (settings.shader, settings.filter) != (self.shader, self.filter) {
             let new_shader = settings.shader != self.shader;
