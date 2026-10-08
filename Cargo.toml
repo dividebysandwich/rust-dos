@@ -104,6 +104,11 @@ optional = true
 [target.'cfg(any(windows, target_os = "linux"))'.dependencies]
 openxr = { version = "0.22", default-features = false, features = ["loaded"], optional = true }
 
+# Vulkan, loaded when an OpenXR runtime takes Vulkan only: the headset's
+# pictures, drawn with OpenGL, are copied into the runtime's images.
+[target.'cfg(target_os = "linux")'.dependencies]
+ash = { version = "0.38", default-features = false, features = ["loaded", "std"], optional = true }
+
 # The dynamic recompiler's code generator and its executable memory
 # (src/dynrec).
 [target.'cfg(any(target_arch = "x86_64", target_arch = "aarch64"))'.dependencies]
@@ -128,7 +133,7 @@ gl = ["sdl", "dep:glow"]
 # The picture on a screen in a 3D scene: in a window with a camera to fly
 # (--vr-desktop), or in a VR headset through OpenXR (--vr, on Linux and
 # Windows).
-vr = ["gl", "dep:gltf", "dep:glam", "dep:openxr", "dep:jpeg-decoder"]
+vr = ["gl", "dep:gltf", "dep:glam", "dep:openxr", "dep:ash", "dep:jpeg-decoder"]
 midi = ["dep:rustysynth"]
 # CD audio tracks in Ogg Vorbis, FLAC or MP3 files.
 cdaudio = ["dep:symphonia"]

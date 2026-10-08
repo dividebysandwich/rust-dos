@@ -2,6 +2,25 @@
 //! with too: GLX's on Linux, WGL's on Windows.
 
 pub use imp::binding;
+use rust_dos::vr::ContextKind;
+
+/// The kind of the OpenGL context current on this thread.
+pub fn current_kind() -> ContextKind {
+    #[cfg(windows)]
+    return ContextKind::Wgl;
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: as in `binding`.
+        let glx = unsafe {
+            libloading::Library::new("libGL.so.1").ok().is_some_and(|library| {
+                library
+                    .get::<unsafe extern "C" fn() -> *mut std::ffi::c_void>(b"glXGetCurrentContext\0")
+                    .is_ok_and(|context| !context().is_null())
+            })
+        };
+        if glx || !super::egl::is_current() { ContextKind::Glx } else { ContextKind::Egl }
+    }
+}
 
 #[cfg(target_os = "linux")]
 mod imp {

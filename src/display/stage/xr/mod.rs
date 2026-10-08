@@ -2,10 +2,17 @@
 //! the OpenGL context current on the headset's thread, a swapchain for each
 //! eye, the frames, which the headset paces, and the controllers.
 
+#[cfg(target_os = "linux")]
+mod egl;
 mod frames;
 mod gl_frames;
+#[cfg(target_os = "linux")]
+mod gl_interop;
+pub mod log;
 mod native;
 mod profiles;
+#[cfg(target_os = "linux")]
+mod vulkan;
 
 use super::camera::fov_projection;
 use super::controls::{Hand, Tracking};
@@ -15,7 +22,11 @@ use gl_frames::GlFrames;
 use glam::{Mat4, Quat, Vec2, Vec3};
 use glow::HasContext;
 use openxr as xr;
-use profiles::{Control, PROFILES};
+use log::FrameStats;
+use profiles::Control;
+use rust_dos::vr::{Binding, Offered, VrGraphics};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 const VIEW: xr::ViewConfigurationType = xr::ViewConfigurationType::PRIMARY_STEREO;
 
@@ -46,9 +57,9 @@ pub struct Xr {
     head: xr::Space,
     waiter: xr::FrameWaiter,
     session: xr::Session<xr::AnyGraphics>,
+    /// What the session draws with that outlives it.
+    _keep: Keep,
     instance: xr::Instance,
-    /// The library OpenGL's native handles came from, kept loaded.
-    _gl: libloading::Library,
     /// Where the space is in the runtime's own LOCAL space: moved by
     /// recentring.
     space_pose: xr::Posef,
@@ -67,6 +78,68 @@ pub struct Xr {
     /// Why the session can't go on, after a call failed in a way that
     /// ends it (`poll` says so).
     failed: Option<String>,
+    stats: FrameStats,
+    /// When the frame being drawn was begun.
+    begun: Option<Instant>,
+}
+
+/// What the session is made with: how the headset's pictures get to the
+/// runtime, and their size.
+pub struct XrOptions {
+    pub graphics: VrGraphics,
+    /// The eyes' images, in percent of the size the runtime recommends.
+    pub resolution: u32,
+}
+
+/// What a session draws with that is to outlive it.
+enum Keep {
+    /// The library the window's OpenGL handles came from, kept loaded.
+    Library(#[allow(dead_code)] libloading::Library),
+    /// Vulkan's device and instance, for the Vulkan bridge.
+    #[cfg(target_os = "linux")]
+    Vulkan(#[allow(dead_code)] Box<vulkan::Device>),
+}
+
+/// A session made with one of the bindings.
+struct Opened {
+    session: xr::Session<xr::AnyGraphics>,
+    waiter: xr::FrameWaiter,
+    frames: Frames,
+    keep: Keep,
+}
+
+/// The OpenXR loader, loaded once and kept: whether the runtime's library
+/// is there doesn't change while the program runs.
+fn entry() -> Result<&'static xr::Entry, String> {
+    static ENTRY: OnceLock<Result<xr::Entry, String>> = OnceLock::new();
+    ENTRY
+        .get_or_init(|| {
+            // SAFETY: the loader is the Khronos one, or one that conforms.
+            unsafe { xr::Entry::load(&()) }.map_err(|e| {
+                format!(
+                    "the OpenXR loader can't be loaded ({}): install your system's openxr package, \
+                     or put openxr_loader.dll beside rust-dos.exe",
+                    e
+                )
+            })
+        })
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
+fn offered_of(set: &xr::ExtensionSet) -> Offered {
+    Offered {
+        opengl: set.khr_opengl_enable,
+        egl: set.mndx_egl_enable,
+        vulkan: set.khr_vulkan_enable2,
+        hand_interaction: set.ext_hand_interaction,
+    }
+}
+
+/// What the OpenXR runtime offers to draw with, asked before SDL starts
+/// (which it may need to be told of).
+pub fn offered() -> Result<Offered, String> {
+    entry()?.enumerate_extensions().map(|set| offered_of(&set)).map_err(err("no OpenXR runtime"))
 }
 
 /// An OpenXR error as text.
@@ -82,22 +155,38 @@ fn ends_session(e: xr::sys::Result) -> bool {
 
 impl Xr {
     /// Talk to the OpenXR runtime and start a session on its headset,
-    /// drawn with the OpenGL context current on this thread.
-    pub fn new(gl: &glow::Context) -> Result<Self, String> {
-        // SAFETY: the loader is the Khronos one, or one that conforms.
-        let entry = unsafe { xr::Entry::load(&()) }.map_err(|e| {
-            format!(
-                "the OpenXR loader can't be loaded ({}): install your system's openxr package, \
-                 or put openxr_loader.dll beside rust-dos.exe",
-                e
-            )
-        })?;
+    /// drawn with the OpenGL context current on this thread: through the
+    /// first of the bindings `options` and the runtime allow that works.
+    pub fn new(gl: &glow::Context, options: &XrOptions) -> Result<Self, String> {
+        let entry = entry()?;
         let available = entry.enumerate_extensions().map_err(err("no OpenXR runtime"))?;
-        if !available.khr_opengl_enable {
-            return Err("the OpenXR runtime can't draw with OpenGL".into());
-        }
+        let offered = offered_of(&available);
+        let kind = native::current_kind();
+        let bindings = rust_dos::vr::candidates(options.graphics, offered, kind)?;
+        let names: Vec<&str> = bindings.iter().map(|b| b.name()).collect();
+        log::line(format!(
+            "The runtime offers {}; the window's context is {:?}; graphics={} tries {}",
+            offered.describe(),
+            kind,
+            options.graphics.name(),
+            names.join(", then ")
+        ));
         let mut extensions = xr::ExtensionSet::default();
-        extensions.khr_opengl_enable = true;
+        for binding in &bindings {
+            match binding {
+                Binding::Wgl | Binding::Glx => extensions.khr_opengl_enable = true,
+                Binding::Egl => {
+                    extensions.khr_opengl_enable = true;
+                    extensions.mndx_egl_enable = true;
+                }
+                Binding::Vulkan => extensions.khr_vulkan_enable2 = true,
+            }
+        }
+        // (Windows asks for what it always did.)
+        #[cfg(not(windows))]
+        {
+            extensions.ext_hand_interaction = available.ext_hand_interaction;
+        }
         let app = xr::ApplicationInfo {
             application_name: "Rust-DOS",
             application_version: 0,
@@ -109,53 +198,72 @@ impl Xr {
         let runtime = instance.properties().map_err(err("OpenXR"))?;
         let system = instance.system(xr::FormFactor::HEAD_MOUNTED_DISPLAY).map_err(err("no headset"))?;
         let system_name = instance.system_properties(system).map(|p| p.system_name).unwrap_or_default();
-        // Asking is required before a session. Under the runtime's least
-        // OpenGL, it calls what the context doesn't have, and crashes.
-        let least = instance.graphics_requirements::<xr::OpenGL>(system).map_err(err("OpenXR"))?.min_api_version_supported;
-        let version = gl.version();
-        if (version.major, version.minor) < (least.major() as u32, least.minor() as u32) {
-            return Err(format!(
-                "the OpenXR runtime needs OpenGL {}.{}, and there is {}.{}",
-                least.major(),
-                least.minor(),
-                version.major,
-                version.minor
-            ));
-        }
-        let (info, library) = native::binding()?;
-        // SAFETY: the handles are the context current on this thread, which
-        // outlives the session (the window's).
-        let (session, waiter, stream) =
-            unsafe { instance.create_session::<xr::OpenGL>(system, &info) }.map_err(err("the headset's session"))?;
         let blend = instance
             .enumerate_environment_blend_modes(system, VIEW)
             .ok()
             .and_then(|modes| modes.first().copied())
             .unwrap_or(xr::EnvironmentBlendMode::OPAQUE);
         let views = instance.enumerate_view_configuration_views(system, VIEW).map_err(err("the headset's views"))?;
-        let sizes: Vec<_> =
-            views.iter().map(|view| (view.recommended_image_rect_width, view.recommended_image_rect_height)).collect();
-        let frames = Frames::Gl(GlFrames::new(gl, &session, stream, &sizes)?);
-        let session = session.into_any_graphics();
+        let sizes: Vec<_> = views
+            .iter()
+            .map(|view| {
+                rust_dos::vr::eye_size(
+                    (view.recommended_image_rect_width, view.recommended_image_rect_height),
+                    (view.max_image_rect_width, view.max_image_rect_height),
+                    options.resolution,
+                )
+            })
+            .collect();
+        if let Some(view) = views.first() {
+            log::line(format!(
+                "{} through {} {}: {}x{} an eye recommended, {}x{} at most; {}%",
+                if system_name.is_empty() { "A headset" } else { &system_name },
+                runtime.runtime_name,
+                runtime.runtime_version,
+                view.recommended_image_rect_width,
+                view.recommended_image_rect_height,
+                view.max_image_rect_width,
+                view.max_image_rect_height,
+                options.resolution
+            ));
+        }
+        let mut failures = Vec::new();
+        let mut opened = None;
+        for &binding in &bindings {
+            match open(binding, gl, &instance, system, &sizes) {
+                Ok(made) => {
+                    opened = Some((binding, made));
+                    break;
+                }
+                Err(e) => {
+                    log::line(format!("{} can't be used: {}", binding.name(), e));
+                    failures.push(format!("{}: {}", binding.name(), e));
+                }
+            }
+        }
+        let Some((binding, Opened { session, waiter, frames, keep })) = opened else {
+            return Err(failures.join("; "));
+        };
         let space = session
             .create_reference_space(xr::ReferenceSpaceType::LOCAL, xr::Posef::IDENTITY)
             .map_err(err("the headset's space"))?;
         let head = session
             .create_reference_space(xr::ReferenceSpaceType::VIEW, xr::Posef::IDENTITY)
             .map_err(err("the headset's space"))?;
-        let controls = match make_controls(&instance, &session) {
+        let controls = match make_controls(&instance, &session, extensions.ext_hand_interaction) {
             Ok(controls) => Some(controls),
             Err(e) => {
-                eprintln!("[VR] No controllers: {}", e);
+                log::line(format!("No controllers: {}", e));
                 None
             }
         };
         let ((width, height), srgb) = frames.eye_format();
         let description = format!(
-            "{} through {} {}: {}x{} an eye, {}",
+            "{} through {} {} ({}): {}x{} an eye, {}",
             if system_name.is_empty() { "A headset" } else { &system_name },
             runtime.runtime_name,
             runtime.runtime_version,
+            binding.name(),
             width,
             height,
             if srgb { "sRGB" } else { "linear RGBA8" }
@@ -167,8 +275,8 @@ impl Xr {
             head,
             waiter,
             session,
+            _keep: keep,
             instance,
-            _gl: library,
             space_pose: xr::Posef::IDENTITY,
             blend,
             running: false,
@@ -178,6 +286,8 @@ impl Xr {
             events: xr::EventDataBuffer::new(),
             description,
             failed: None,
+            stats: FrameStats::default(),
+            begun: None,
         })
     }
 
@@ -195,8 +305,10 @@ impl Xr {
             return (notes, true);
         }
         let mut lost = false;
+        // (Taken out while its events are read.)
+        let mut events = std::mem::replace(&mut self.events, xr::EventDataBuffer::new());
         loop {
-            let event = match self.instance.poll_event(&mut self.events) {
+            let event = match self.instance.poll_event(&mut events) {
                 Ok(Some(event)) => event,
                 Ok(None) => break,
                 Err(e) => {
@@ -205,38 +317,64 @@ impl Xr {
                 }
             };
             match event {
-                xr::Event::SessionStateChanged(change) => match change.state() {
-                    xr::SessionState::READY => match self.session.begin(VIEW) {
-                        Ok(_) => {
-                            self.running = true;
-                            notes.push("The headset shows the scene".to_string());
-                        }
-                        Err(e) => notes.push(format!("The headset can't start: {}", e)),
-                    },
-                    xr::SessionState::FOCUSED if !self.focused => {
-                        self.focused = true;
-                        self.recenter = true;
-                    }
-                    xr::SessionState::STOPPING => {
-                        let _ = self.session.end();
-                        self.running = false;
-                        self.pending = None;
-                        notes.push("The headset stopped; the window shows the scene".to_string());
-                    }
-                    xr::SessionState::EXITING | xr::SessionState::LOSS_PENDING => {
-                        self.running = false;
-                        lost = true;
-                    }
-                    _ => {}
-                },
+                xr::Event::SessionStateChanged(change) => {
+                    log::line(format!("The session is {:?}", change.state()));
+                    self.session_state(change.state(), &mut notes, &mut lost);
+                }
+                xr::Event::InteractionProfileChanged(_) => self.log_profiles(),
                 xr::Event::InstanceLossPending(_) => lost = true,
                 _ => {}
             }
         }
+        self.events = events;
         if lost {
             notes.push("The headset is gone; the window shows the scene".to_string());
         }
         (notes, lost)
+    }
+
+    /// The session went into `state`.
+    fn session_state(&mut self, state: xr::SessionState, notes: &mut Vec<String>, lost: &mut bool) {
+        match state {
+            xr::SessionState::READY => match self.session.begin(VIEW) {
+                Ok(_) => {
+                    self.running = true;
+                    notes.push("The headset shows the scene".to_string());
+                }
+                Err(e) => notes.push(format!("The headset can't start: {}", e)),
+            },
+            xr::SessionState::FOCUSED if !self.focused => {
+                self.focused = true;
+                self.recenter = true;
+            }
+            xr::SessionState::STOPPING => {
+                let _ = self.session.end();
+                self.running = false;
+                self.pending = None;
+                notes.push("The headset stopped; the window shows the scene".to_string());
+            }
+            xr::SessionState::EXITING | xr::SessionState::LOSS_PENDING => {
+                self.running = false;
+                *lost = true;
+            }
+            _ => {}
+        }
+    }
+
+    /// Say which controllers (interaction profiles) the hands are, as the
+    /// runtime has them now: how a headset's own controllers are found out.
+    fn log_profiles(&self) {
+        let Some(controls) = &self.controls else { return };
+        let mut said = Vec::new();
+        for (side, &hand) in ["left", "right"].iter().zip(&controls.hands) {
+            let profile = match self.session.current_interaction_profile(hand) {
+                Ok(path) if path == xr::Path::NULL => "none".to_string(),
+                Ok(path) => self.instance.path_to_string(path).unwrap_or_else(|e| e.to_string()),
+                Err(e) => e.to_string(),
+            };
+            said.push(format!("{}={}", side, profile));
+        }
+        log::line(format!("Controllers: {}", said.join(" ")));
     }
 
     pub fn running(&self) -> bool {
@@ -262,6 +400,11 @@ impl Xr {
         }
         match self.waiter.wait() {
             Ok(state) => {
+                let period = Duration::from_nanos(state.predicted_display_period.as_nanos().max(0) as u64);
+                self.stats.waited(Instant::now(), period, state.should_render);
+                if let Some(line) = self.stats.report(Instant::now()) {
+                    log::line(line);
+                }
                 self.pending = Some(state);
                 true
             }
@@ -295,6 +438,7 @@ impl Xr {
             self.pending = None;
             return Err(self.fail("beginning the headset's frame", e));
         }
+        self.begun = Some(Instant::now());
         if self.recenter && self.center(state.predicted_display_time) {
             self.recenter = false;
         }
@@ -349,15 +493,19 @@ impl Xr {
     /// ended whatever fails, with nothing in it if the eyes aren't drawn.
     pub fn draw(
         &mut self,
+        gl: &glow::Context,
         world: Mat4,
         draw: impl FnMut(usize, View, (u32, u32), bool, glow::Framebuffer),
     ) -> Result<(), String> {
         let Some(state) = self.pending.take() else { return Ok(()) };
         let time = state.predicted_display_time;
-        let drawn = if state.should_render { self.draw_eyes(time, world, draw).map(Some) } else { Ok(None) };
+        let drawn = if state.should_render { self.draw_eyes(gl, time, world, draw).map(Some) } else { Ok(None) };
         let failed = drawn.as_ref().err().map(|&(what, e)| self.fail(what, e));
         let views = drawn.ok().flatten();
         let ended = self.frames.end(time, self.blend, &self.space, views.as_deref());
+        if let Some(begun) = self.begun.take() {
+            self.stats.worked(begun.elapsed());
+        }
         if let Err(e) = ended {
             let text = self.fail("ending the headset's frame", e);
             return Err(failed.unwrap_or(text));
@@ -369,6 +517,7 @@ impl Xr {
     /// what failed. An image acquired is released whatever fails after.
     fn draw_eyes(
         &mut self,
+        gl: &glow::Context,
         time: xr::Time,
         world: Mat4,
         mut draw: impl FnMut(usize, View, (u32, u32), bool, glow::Framebuffer),
@@ -386,7 +535,7 @@ impl Xr {
                 projection: fov_projection(fov.angle_left, fov.angle_right, fov.angle_up, fov.angle_down),
             };
             draw(index, eye_view, size, srgb, framebuffer);
-            self.frames.release(index)?;
+            self.frames.release(gl, index)?;
         }
         Ok(views)
     }
@@ -414,7 +563,7 @@ impl Xr {
                 self.space = space;
                 self.space_pose = pose;
             }
-            Err(e) => eprintln!("[VR] Recentring: {}", e),
+            Err(e) => log::line(format!("Recentring: {}", e)),
         }
         true
     }
@@ -429,7 +578,11 @@ fn rigid(pose: Mat4) -> Mat4 {
 
 /// The controllers' actions, their bindings for the controllers OpenXR
 /// knows, and where the hands point from.
-fn make_controls(instance: &xr::Instance, session: &xr::Session<xr::AnyGraphics>) -> Result<Controls, String> {
+fn make_controls(
+    instance: &xr::Instance,
+    session: &xr::Session<xr::AnyGraphics>,
+    hand_interaction: bool,
+) -> Result<Controls, String> {
     let path = |p: &str| instance.string_to_path(p).map_err(err("OpenXR"));
     let hands = [path("/user/hand/left")?, path("/user/hand/right")?];
     let set = instance.create_action_set("rustdos", "Rust-DOS", 0).map_err(err("the controllers"))?;
@@ -441,9 +594,9 @@ fn make_controls(instance: &xr::Instance, session: &xr::Session<xr::AnyGraphics>
     let primary = set.create_action::<bool>("primary", "Joystick button A / X", &hands).map_err(&made)?;
     let secondary = set.create_action::<bool>("secondary", "Joystick button B / Y", &hands).map_err(&made)?;
     let menu = set.create_action::<bool>("menu", "Settings window", &hands).map_err(&made)?;
-    for (profile, inputs) in PROFILES {
+    for (profile, inputs) in profiles::profiles(hand_interaction) {
         let mut bindings = Vec::new();
-        for &(control, hand, input) in *inputs {
+        for &(control, hand, input) in inputs {
             for side in ["left", "right"].into_iter().filter(|side| hand.is_empty() || hand == *side) {
                 let at = path(&format!("/user/hand/{}/input/{}", side, input))?;
                 bindings.push(match control {
@@ -460,7 +613,7 @@ fn make_controls(instance: &xr::Instance, session: &xr::Session<xr::AnyGraphics>
         // A runtime without the profile refuses it, and the rest still
         // count.
         if let Err(e) = instance.suggest_interaction_profile_bindings(path(profile)?, &bindings) {
-            eprintln!("[VR] {}: {}", profile, e);
+            log::line(format!("{}: {}", profile, e));
         }
     }
     session.attach_action_sets(&[&set]).map_err(&made)?;
@@ -475,4 +628,65 @@ fn pose_matrix(pose: xr::Posef) -> Mat4 {
     let o = pose.orientation;
     let p = pose.position;
     Mat4::from_rotation_translation(Quat::from_xyzw(o.x, o.y, o.z, o.w).normalize(), Vec3::new(p.x, p.y, p.z))
+}
+
+/// A session made with `binding`, its eyes' images `sizes` big.
+fn open(
+    binding: Binding,
+    gl: &glow::Context,
+    instance: &xr::Instance,
+    system: xr::SystemId,
+    sizes: &[(u32, u32)],
+) -> Result<Opened, String> {
+    match binding {
+        Binding::Wgl | Binding::Glx => {
+            check_gl::<xr::OpenGL>(gl, instance, system)?;
+            let (info, library) = native::binding()?;
+            // SAFETY: the handles are the context current on this thread,
+            // which outlives the session (the window's).
+            let (session, waiter, stream) =
+                unsafe { instance.create_session::<xr::OpenGL>(system, &info) }.map_err(err("the headset's session"))?;
+            let frames = Frames::Gl(GlFrames::new(gl, &session, stream, sizes)?);
+            Ok(Opened { session: session.into_any_graphics(), waiter, frames, keep: Keep::Library(library) })
+        }
+        #[cfg(target_os = "linux")]
+        Binding::Egl => {
+            check_gl::<egl::Egl>(gl, instance, system)?;
+            let (info, library) = egl::current()?;
+            // SAFETY: as above.
+            let (session, waiter, stream) =
+                unsafe { instance.create_session::<egl::Egl>(system, &info) }.map_err(err("the headset's session"))?;
+            let frames = Frames::Egl(GlFrames::new(gl, &session, stream, sizes)?);
+            Ok(Opened { session: session.into_any_graphics(), waiter, frames, keep: Keep::Library(library) })
+        }
+        #[cfg(target_os = "linux")]
+        Binding::Vulkan => {
+            let (session, waiter, bridge, device) = vulkan::open(gl, instance, system, sizes)?;
+            Ok(Opened { session, waiter, frames: Frames::Vulkan(Box::new(bridge)), keep: Keep::Vulkan(Box::new(device)) })
+        }
+        #[cfg(not(target_os = "linux"))]
+        _ => Err("not on this system".into()),
+    }
+}
+
+/// Whether the context has the OpenGL the runtime needs. Asking is
+/// required before a session; under the runtime's least OpenGL, it calls
+/// what the context doesn't have, and crashes.
+fn check_gl<G: xr::Graphics<Requirements = xr::opengl::Requirements>>(
+    gl: &glow::Context,
+    instance: &xr::Instance,
+    system: xr::SystemId,
+) -> Result<(), String> {
+    let least = instance.graphics_requirements::<G>(system).map_err(err("OpenXR"))?.min_api_version_supported;
+    let version = gl.version();
+    if (version.major, version.minor) < (least.major() as u32, least.minor() as u32) {
+        return Err(format!(
+            "the OpenXR runtime needs OpenGL {}.{}, and there is {}.{}",
+            least.major(),
+            least.minor(),
+            version.major,
+            version.minor
+        ));
+    }
+    Ok(())
 }

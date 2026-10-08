@@ -404,11 +404,11 @@ pub fn candidates(wanted: VrGraphics, offered: Offered, kind: ContextKind) -> Re
     })
 }
 
-/// An eye's image size: `percent` of the runtime's `recommended`, even,
-/// and from 16 pixels to the runtime's `max`.
+/// An eye's image size: `percent` of the runtime's `recommended` (even,
+/// if it is scaled), from 16 pixels to the runtime's `max`.
 pub fn eye_size(recommended: (u32, u32), max: (u32, u32), percent: u32) -> (u32, u32) {
     let scale = |n: u32, max: u32| {
-        let scaled = (n as u64 * percent as u64 / 100) as u32 & !1;
+        let scaled = if percent == 100 { n } else { (n as u64 * percent as u64 / 100) as u32 & !1 };
         let max = if max == 0 { u32::MAX } else { max };
         scaled.clamp(16.min(max), max)
     };
@@ -692,7 +692,8 @@ mod tests {
     fn eye_sizes_scale_evenly_within_the_runtime_limits() {
         assert_eq!(eye_size((2016, 2240), (4096, 4096), 100), (2016, 2240));
         assert_eq!(eye_size((2016, 2240), (4096, 4096), 70), (1410, 1568));
-        assert_eq!(eye_size((1001, 999), (0, 0), 100), (1000, 998));
+        assert_eq!(eye_size((1001, 999), (0, 0), 100), (1001, 999));
+        assert_eq!(eye_size((1001, 999), (0, 0), 50), (500, 498));
         assert_eq!(eye_size((2016, 2240), (2500, 2500), 150), (2500, 2500));
         assert_eq!(eye_size((20, 20), (4096, 4096), 30), (16, 16));
     }

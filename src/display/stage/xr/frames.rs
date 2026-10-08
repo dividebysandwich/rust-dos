@@ -1,45 +1,60 @@
 //! The eyes' swapchains and the frames of the session, whatever it draws
 //! with: each eye is drawn with OpenGL into a framebuffer either way.
 
-use super::gl_frames::GlFrames;
+use super::gl_frames::{Acquired, Failure, GlFrames};
 use openxr as xr;
 
 pub enum Frames {
     /// OpenGL through GLX or WGL.
     Gl(GlFrames<xr::OpenGL>),
+    /// OpenGL through EGL.
+    #[cfg(target_os = "linux")]
+    Egl(GlFrames<super::egl::Egl>),
+    /// OpenGL into images Vulkan copies into the runtime's.
+    #[cfg(target_os = "linux")]
+    Vulkan(Box<super::vulkan::Bridge>),
+}
+
+/// The same call on whichever frames there are.
+macro_rules! each {
+    ($frames:expr, $f:ident => $call:expr) => {
+        match $frames {
+            Frames::Gl($f) => $call,
+            #[cfg(target_os = "linux")]
+            Frames::Egl($f) => $call,
+            #[cfg(target_os = "linux")]
+            Frames::Vulkan($f) => $call,
+        }
+    };
 }
 
 impl Frames {
     /// The size of an eye's image, and whether it is sRGB.
     pub fn eye_format(&self) -> ((u32, u32), bool) {
-        match self {
-            Frames::Gl(frames) => frames.eye_format(),
-        }
+        each!(self, frames => frames.eye_format())
     }
 
     pub fn eyes(&self) -> usize {
-        match self {
-            Frames::Gl(frames) => frames.eyes(),
-        }
+        each!(self, frames => frames.eyes())
     }
 
     pub fn begin(&mut self) -> xr::Result<()> {
-        match self {
-            Frames::Gl(frames) => frames.begin(),
-        }
+        each!(self, frames => frames.begin())
     }
 
     /// The framebuffer to draw eye `index` into, and its size.
-    pub fn acquire(&mut self, index: usize) -> Result<(glow::Framebuffer, (u32, u32)), (&'static str, xr::sys::Result)> {
-        match self {
-            Frames::Gl(frames) => frames.acquire(index),
-        }
+    pub fn acquire(&mut self, index: usize) -> Acquired {
+        each!(self, frames => frames.acquire(index))
     }
 
-    /// Eye `index` is drawn.
-    pub fn release(&mut self, index: usize) -> Result<(), (&'static str, xr::sys::Result)> {
+    /// Eye `index` is drawn, with `gl`.
+    pub fn release(&mut self, gl: &glow::Context, index: usize) -> Result<(), Failure> {
         match self {
             Frames::Gl(frames) => frames.release(index),
+            #[cfg(target_os = "linux")]
+            Frames::Egl(frames) => frames.release(index),
+            #[cfg(target_os = "linux")]
+            Frames::Vulkan(bridge) => bridge.release(gl, index),
         }
     }
 
@@ -51,15 +66,11 @@ impl Frames {
         space: &xr::Space,
         views: Option<&[xr::View]>,
     ) -> xr::Result<()> {
-        match self {
-            Frames::Gl(frames) => frames.end(time, blend, space, views),
-        }
+        each!(self, frames => frames.end(time, blend, space, views))
     }
 
     /// Delete what was made with `gl`, current.
     pub fn delete(&mut self, gl: &glow::Context) {
-        match self {
-            Frames::Gl(frames) => frames.delete(gl),
-        }
+        each!(self, frames => frames.delete(gl))
     }
 }

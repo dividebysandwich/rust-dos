@@ -67,6 +67,21 @@ struct Args {
     #[arg(long, value_name = "FILE")]
     vr_scene: Option<std::path::PathBuf>,
 
+    /// How the headset's pictures get to the OpenXR runtime: auto, gl
+    /// (GLX/WGL), egl or vulkan [default: the config file's [vr] graphics]
+    #[arg(long, value_name = "API", value_parser = parse_vr_graphics)]
+    vr_graphics: Option<rust_dos::vr::VrGraphics>,
+
+    /// The headset's eye images, in percent of the size its runtime
+    /// recommends (30 to 150) [default: the config file's [vr] resolution]
+    #[arg(long, value_name = "PERCENT", value_parser = clap::value_parser!(u32).range(30..=150))]
+    vr_resolution: Option<u32>,
+
+    /// Write what the OpenXR runtime and OpenGL offer the headset to
+    /// vr-probe.log in Rust-DOS's folder and the console, then quit
+    #[arg(long)]
+    vr_probe: bool,
+
     /// Root directory for Drive C: [default: the config file's C:, or "."]
     #[arg(short, long)]
     dir: Option<String>,
@@ -189,6 +204,11 @@ struct Saved {
     drives: BTreeMap<u8, MountSpec>,
 }
 
+/// `--vr-graphics`'s value.
+fn parse_vr_graphics(value: &str) -> Result<rust_dos::vr::VrGraphics, String> {
+    rust_dos::vr::VrGraphics::parse(value).ok_or_else(|| "auto, gl, egl or vulkan".to_string())
+}
+
 fn main() -> Result<(), String> {
     let args = Args::parse();
     if let Some(port) = args.relay {
@@ -212,6 +232,12 @@ fn main() -> Result<(), String> {
         settings.vr.mode = rust_dos::vr::VrMode::Headset;
     } else if args.vr_desktop {
         settings.vr.mode = rust_dos::vr::VrMode::Desktop;
+    }
+    if let Some(graphics) = args.vr_graphics {
+        settings.vr.graphics = graphics;
+    }
+    if let Some(resolution) = args.vr_resolution {
+        settings.vr.resolution = resolution;
     }
     if let Some(scene) = &args.vr_scene {
         settings.vr.scene = Some(scene.clone());
@@ -259,14 +285,11 @@ fn main() -> Result<(), String> {
     let mut recorder = ScreenRecorder::new(15);
 
     // SDL2 Setup
-    // OpenXR's runtimes take an OpenGL context of GLX's, which SDL makes
-    // under X11 (XWayland on a Wayland desktop) and not under Wayland. Xlib
-    // is made ready for the headset's thread either way, for a headset
-    // turned on in the settings later.
-    if settings.vr.mode == rust_dos::vr::VrMode::Headset && cfg!(target_os = "linux") {
-        sdl2::hint::set_with_priority("SDL_VIDEODRIVER", "x11", &sdl2::hint::Hint::Override);
-    }
-    display::before_headset();
+    // SDL is told what the headset's session needs of the window's OpenGL
+    // context (GLX's under X11, or EGL's), and Xlib is made ready for the
+    // headset's thread either way, for a headset turned on in the settings
+    // later.
+    display::before_headset(&settings.vr);
     let sdl_context = sdl2::init()?;
     let video_subsystem = sdl_context.video()?;
     // Without a sound device (as in a virtual machine without a sound

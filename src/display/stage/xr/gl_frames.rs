@@ -11,6 +11,12 @@ pub trait GlGraphics: xr::Graphics<Format = u32, SwapchainImage = u32> {}
 
 impl<G: xr::Graphics<Format = u32, SwapchainImage = u32>> GlGraphics for G {}
 
+/// An eye's image acquired: its framebuffer and size; or what failed.
+pub type Acquired = Result<(glow::Framebuffer, (u32, u32)), Failure>;
+
+/// What failed, and how.
+pub type Failure = (&'static str, xr::sys::Result);
+
 struct Eye<G: GlGraphics> {
     swapchain: xr::Swapchain<G>,
     /// A framebuffer for each of the swapchain's images.
@@ -101,7 +107,7 @@ impl<G: GlGraphics> GlFrames<G> {
 
     /// Acquire an image of eye `index` and wait for it: its framebuffer,
     /// and its size.
-    pub fn acquire(&mut self, index: usize) -> Result<(glow::Framebuffer, (u32, u32)), (&'static str, xr::sys::Result)> {
+    pub fn acquire(&mut self, index: usize) -> Acquired {
         let eye = &mut self.eyes[index];
         let image = eye.swapchain.acquire_image().map_err(|e| ("acquiring the headset's image", e))?;
         if let Err(e) = eye.swapchain.wait_image(xr::Duration::INFINITE) {
@@ -119,7 +125,7 @@ impl<G: GlGraphics> GlFrames<G> {
     }
 
     /// Release the image of eye `index` acquired, drawn.
-    pub fn release(&mut self, index: usize) -> Result<(), (&'static str, xr::sys::Result)> {
+    pub fn release(&mut self, index: usize) -> Result<(), Failure> {
         let eye = &mut self.eyes[index];
         if eye.acquired.take().is_none() {
             return Ok(());

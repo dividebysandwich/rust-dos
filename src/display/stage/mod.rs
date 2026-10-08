@@ -33,7 +33,7 @@ use glow::HasContext;
 use render::{Format, Gpu, ScreenTarget, View};
 use rust_dos::vr::{ScreenFit, VrMode, VrSettings};
 use scene::Scene;
-use rust_dos::vr::{Leds, VrQuality};
+use rust_dos::vr::{Leds, VrGraphics, VrQuality};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError};
@@ -63,6 +63,9 @@ pub struct Stage {
     /// Where the scene is shown: in the window, or in a headset as well.
     mode: VrMode,
     quality: VrQuality,
+    /// How the headset's session draws, and its eyes' resolution, which it
+    /// is started again for.
+    headset_options: (VrGraphics, u32),
     glow: f32,
     /// The scene file shown (None: the test room), and the one being read
     /// on a thread of its own to take its place.
@@ -74,9 +77,10 @@ pub struct Stage {
 type Size = (u32, u32);
 
 /// What has to be done before SDL starts for a headset to work.
-pub fn before_sdl() {
+#[cfg_attr(not(xr), allow(unused_variables))]
+pub fn before_sdl(settings: &VrSettings) {
     #[cfg(xr)]
-    headset::before_sdl();
+    headset::before_sdl(settings);
 }
 
 impl Stage {
@@ -126,6 +130,7 @@ impl Stage {
             glsl,
             mode: settings.mode,
             quality: settings.quality,
+            headset_options: (settings.graphics, settings.resolution),
             glow: glow_of(settings),
             scene_path: settings.scene.clone(),
             loading: None,
@@ -387,6 +392,10 @@ impl Stage {
                 }
                 Err(e) => notes.push(format!("[VR] The lighting can't be changed: {}", e)),
             }
+        }
+        if (settings.graphics, settings.resolution) != self.headset_options {
+            self.headset_options = (settings.graphics, settings.resolution);
+            restart |= self.has_headset();
         }
         if settings.mode != self.mode || restart {
             self.stop_headset(gl);

@@ -20,7 +20,7 @@
 use super::controls::{Controllers, VrInput};
 use super::render::{Format, Gpu};
 use super::scene::{Leds, Scene, Spawn};
-use super::xr::Xr;
+use super::xr::{Xr, XrOptions, log};
 use crate::video::shader::Glsl;
 use glam::{Mat4, Vec3};
 use glow::HasContext;
@@ -30,8 +30,31 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 /// Make Xlib safe for the headset's thread's OpenGL, before SDL opens the
-/// display: its GLX calls go through the window's X connection too.
-pub fn before_sdl() {
+/// display: its GLX calls go through the window's X connection too. With
+/// the headset on, tell SDL to make the window's context the kind the
+/// session will draw with (`startup_hints`), as the runtime offers.
+#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+pub fn before_sdl(settings: &VrSettings) {
+    #[cfg(target_os = "linux")]
+    if settings.mode == rust_dos::vr::VrMode::Headset {
+        use rust_dos::vr::{Platform, VrGraphics, startup_hints};
+        // (graphics=gl needs nothing asked: X11 it is.)
+        let offered = match settings.graphics {
+            VrGraphics::Gl => None,
+            _ => super::xr::offered().inspect_err(|e| log::line(format!("Before starting: {}", e))).ok(),
+        };
+        let x11 = std::env::var_os("DISPLAY").is_some_and(|d| !d.is_empty());
+        let hints = startup_hints(settings.graphics, offered, Platform::Linux { x11 });
+        if let Some(offered) = offered {
+            log::line(format!("Before starting, the runtime offers {}; SDL is told {:?}", offered.describe(), hints));
+        }
+        if hints.force_x11 {
+            sdl2::hint::set_with_priority("SDL_VIDEODRIVER", "x11", &sdl2::hint::Hint::Override);
+        }
+        if hints.force_egl {
+            sdl2::hint::set_with_priority("SDL_VIDEO_X11_FORCE_EGL", "1", &sdl2::hint::Hint::Override);
+        }
+    }
     #[cfg(target_os = "linux")]
     // SAFETY: XInitThreads takes nothing, and comes before any other Xlib
     // call of the program's (SDL's come after).
@@ -190,7 +213,9 @@ impl Shared {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Say `note` in the window, and in the log.
     fn note(&self, note: String) {
+        log::line(&note);
         self.lock().notes.push(note);
     }
 }
@@ -228,13 +253,11 @@ impl Headset {
         settings: &VrSettings,
     ) -> Result<Self, String> {
         let (controllers, quality, glow) = (settings.controllers, settings.quality, settings.screen_glow as f32 / 100.0);
+        let options = XrOptions { graphics: settings.graphics, resolution: settings.resolution };
         let video = window.subsystem();
-        // OpenXR takes GLX's contexts, which SDL makes under X11 only, and
-        // picks it as it starts (`main`).
-        #[cfg(target_os = "linux")]
-        if video.current_video_driver() != "x11" {
-            return Err("it needs X11: press F2 to keep the setting and start Rust-DOS again".into());
-        }
+        // (Which bindings the window's context allows is found out on the
+        // thread, `Xr::new`: GLX under X11, EGL under Wayland or forced.)
+        log::line(format!("SDL's video driver is {}", video.current_video_driver()));
         // A window of its own, with the same pixel format as the main
         // window's (the same attributes), never shown.
         let hidden = video.window("Rust-DOS headset", 64, 64).opengl().hidden().build().map_err(|e| e.to_string())?;
@@ -268,7 +291,7 @@ impl Headset {
         let thread_shared = shared.clone();
         let thread = std::thread::Builder::new()
             .name("vr-headset".into())
-            .spawn(move || run(thread_shared, raw_window, raw_context, glsl, scene, screens, quality))
+            .spawn(move || run(thread_shared, raw_window, raw_context, glsl, scene, screens, quality, options))
             .map_err(|e| e.to_string())?;
         Ok(Headset {
             shared,
@@ -438,6 +461,7 @@ impl Drop for Headset {
 }
 
 /// The headset's thread.
+#[allow(clippy::too_many_arguments)]
 fn run(
     shared: Arc<Shared>,
     window: Raw,
@@ -446,6 +470,7 @@ fn run(
     scene: Arc<Scene>,
     screens: [glow::Texture; 3],
     quality: VrQuality,
+    options: XrOptions,
 ) {
     // SAFETY: the window and the context are alive until the thread ends
     // (see `Headset::drop`), and the context is current nowhere else.
@@ -460,7 +485,7 @@ fn run(
                 sdl2::sys::SDL_GL_GetProcAddress(name.as_ptr()) as *const _
             })
         };
-        if let Err(e) = session(&shared, &gl, glsl, scene, screens, quality) {
+        if let Err(e) = session(&shared, &gl, glsl, scene, screens, quality, &options) {
             shared.note(e);
         }
         // SAFETY: as above.
@@ -482,9 +507,10 @@ fn session(
     mut scene: Arc<Scene>,
     screens: [glow::Texture; 3],
     quality: VrQuality,
+    options: &XrOptions,
 ) -> Result<(), String> {
     let mut gpu = Gpu::new(gl, glsl, &scene, quality)?;
-    let mut xr = Xr::new(gl).map_err(|e| format!("No headset ({}); the scene is shown in the window", e))?;
+    let mut xr = Xr::new(gl, options).map_err(|e| format!("No headset ({}); the scene is shown in the window", e))?;
     shared.note(xr.describe().to_string());
     // The window's view of the left eye, at half its size.
     let ((ew, eh), srgb) = xr.eye_format();
@@ -579,7 +605,7 @@ fn session(
         }
         if let Err(e) = xr.begin() {
             // (A failure the session can't go on from ends it at `poll`.)
-            eprintln!("[VR] {}", e);
+            log::line(e);
             continue;
         }
         let world = placement.world(scene.spawn);
@@ -590,9 +616,9 @@ fn session(
         }
         let picture = screen.map(|i| screens[i]);
         let mut left = None;
-        let drawn = xr.draw(world, |eye, view, eye_size, srgb, framebuffer| {
+        let drawn = xr.draw(gl, world, |eye, view, eye_size, srgb, framebuffer| {
             if let Err(e) = gpu.render(gl, &scene, &view, Format { size: eye_size, srgb }, picture, leds, &extras) {
-                eprintln!("[VR] {}", e);
+                log::line(e);
                 return;
             }
             gpu.copy_to(gl, Some(framebuffer), (0, 0, eye_size.0 as i32, eye_size.1 as i32));
@@ -609,7 +635,7 @@ fn session(
             }
         });
         if let Err(e) = drawn {
-            eprintln!("[VR] {}", e);
+            log::line(e);
         }
         let mut state = shared.lock();
         if let Some((fence, view_projection)) = left

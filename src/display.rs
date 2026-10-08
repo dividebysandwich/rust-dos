@@ -545,10 +545,12 @@ impl<'a> Display<'a> {
 }
 
 /// What has to be done before SDL starts for a VR headset to work: Xlib
-/// made safe for the headset's thread.
-pub fn before_headset() {
+/// made safe for the headset's thread, and SDL told what the headset's
+/// session needs of the window's OpenGL context.
+#[cfg_attr(not(feature = "vr"), allow(unused_variables))]
+pub fn before_headset(vr: &rust_dos::vr::VrSettings) {
     #[cfg(feature = "vr")]
-    stage::before_sdl();
+    stage::before_sdl(vr);
 }
 
 /// What a VR headset's controllers do to the machine at a frame.
