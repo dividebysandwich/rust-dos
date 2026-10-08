@@ -220,6 +220,205 @@ impl VrQuality {
     }
 }
 
+/// How the headset's pictures get to the OpenXR runtime.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VrGraphics {
+    /// Whichever the runtime takes (`candidates`).
+    #[default]
+    Auto,
+    /// OpenGL through GLX (Linux, under X11) or WGL (Windows).
+    Gl,
+    /// OpenGL through EGL (XR_MNDX_egl_enable): under Wayland, as Monado
+    /// takes it.
+    Egl,
+    /// Vulkan, the pictures drawn with OpenGL into images Vulkan copies
+    /// into the runtime's: for a runtime that takes Vulkan only.
+    Vulkan,
+}
+
+impl VrGraphics {
+    pub const ALL: [VrGraphics; 4] = [VrGraphics::Auto, VrGraphics::Gl, VrGraphics::Egl, VrGraphics::Vulkan];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            VrGraphics::Auto => "auto",
+            VrGraphics::Gl => "gl",
+            VrGraphics::Egl => "egl",
+            VrGraphics::Vulkan => "vulkan",
+        }
+    }
+
+    pub fn describe(self) -> &'static str {
+        match self {
+            VrGraphics::Auto => "automatic",
+            VrGraphics::Gl => "OpenGL (GLX/WGL)",
+            VrGraphics::Egl => "OpenGL through EGL",
+            VrGraphics::Vulkan => "Vulkan bridge",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        let value = value.trim();
+        Self::ALL.into_iter().find(|g| g.name().eq_ignore_ascii_case(value))
+    }
+}
+
+/// What the OpenXR runtime offers of what the headset can draw with.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Offered {
+    /// XR_KHR_opengl_enable.
+    pub opengl: bool,
+    /// XR_MNDX_egl_enable.
+    pub egl: bool,
+    /// XR_KHR_vulkan_enable2.
+    pub vulkan: bool,
+    /// XR_EXT_hand_interaction.
+    pub hand_interaction: bool,
+}
+
+impl Offered {
+    /// As text, for when none of it will do.
+    pub fn describe(self) -> String {
+        let names: Vec<&str> = [
+            (self.opengl, "XR_KHR_opengl_enable"),
+            (self.egl, "XR_MNDX_egl_enable"),
+            (self.vulkan, "XR_KHR_vulkan_enable2"),
+        ]
+        .into_iter()
+        .filter_map(|(on, name)| on.then_some(name))
+        .collect();
+        if names.is_empty() { "none of OpenGL, EGL or Vulkan".to_string() } else { names.join(", ") }
+    }
+}
+
+/// Where the program runs, for the choice of how the headset draws.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Platform {
+    Windows,
+    /// Linux: whether there is an X server (DISPLAY) to draw through.
+    Linux { x11: bool },
+}
+
+/// The kind of OpenGL context the window has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContextKind {
+    Wgl,
+    Glx,
+    Egl,
+}
+
+/// How the headset's session is made: what it is given to draw with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Binding {
+    Wgl,
+    Glx,
+    Egl,
+    Vulkan,
+}
+
+impl Binding {
+    pub fn name(self) -> &'static str {
+        match self {
+            Binding::Wgl => "OpenGL (WGL)",
+            Binding::Glx => "OpenGL (GLX)",
+            Binding::Egl => "OpenGL (EGL)",
+            Binding::Vulkan => "Vulkan bridge",
+        }
+    }
+}
+
+/// What SDL is told before it starts, for the headset to be drawn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SdlHints {
+    /// SDL_VIDEODRIVER=x11: GLX contexts are X11's.
+    pub force_x11: bool,
+    /// SDL_VIDEO_X11_FORCE_EGL=1: EGL contexts under X11 too.
+    pub force_egl: bool,
+}
+
+/// What SDL is to be told, before it starts, for `wanted` with what the
+/// runtime `offered` (None: no runtime to ask, which draws with GLX as it
+/// always did).
+pub fn startup_hints(wanted: VrGraphics, offered: Option<Offered>, platform: Platform) -> SdlHints {
+    let Platform::Linux { x11 } = platform else { return SdlHints::default() };
+    let glx = SdlHints { force_x11: true, force_egl: false };
+    let egl = SdlHints { force_x11: false, force_egl: true };
+    match (wanted, offered) {
+        (VrGraphics::Gl, _) | (VrGraphics::Auto, None) => glx,
+        (VrGraphics::Egl, _) => egl,
+        (VrGraphics::Vulkan, _) => SdlHints::default(),
+        (VrGraphics::Auto, Some(offered)) => {
+            if offered.opengl && x11 {
+                glx
+            } else if offered.egl {
+                egl
+            } else {
+                SdlHints::default()
+            }
+        }
+    }
+}
+
+/// The ways to make the headset's session, in the order to try them, for
+/// `wanted` with what the runtime `offered` and the window's context of
+/// `kind`; or why there is none.
+pub fn candidates(wanted: VrGraphics, offered: Offered, kind: ContextKind) -> Result<Vec<Binding>, String> {
+    // Windows draws with WGL, as it always did.
+    if kind == ContextKind::Wgl {
+        return if offered.opengl {
+            Ok(vec![Binding::Wgl])
+        } else {
+            Err(format!("the OpenXR runtime can't draw with OpenGL (it offers {})", offered.describe()))
+        };
+    }
+    let glx = (kind == ContextKind::Glx && offered.opengl).then_some(Binding::Glx);
+    let egl = (kind == ContextKind::Egl && offered.egl && offered.opengl).then_some(Binding::Egl);
+    let vulkan = offered.vulkan.then_some(Binding::Vulkan);
+    let list: Vec<Binding> = match wanted {
+        VrGraphics::Auto => [glx, egl, vulkan].into_iter().flatten().collect(),
+        VrGraphics::Gl => glx.into_iter().collect(),
+        VrGraphics::Egl => egl.into_iter().collect(),
+        VrGraphics::Vulkan => vulkan.into_iter().collect(),
+    };
+    if !list.is_empty() {
+        return Ok(list);
+    }
+    let context = match kind {
+        ContextKind::Glx => "GLX",
+        ContextKind::Egl => "EGL",
+        ContextKind::Wgl => "WGL",
+    };
+    Err(match wanted {
+        VrGraphics::Gl if kind == ContextKind::Egl => {
+            "graphics=gl needs X11: press F2 to keep the setting and start Rust-DOS again".to_string()
+        }
+        VrGraphics::Egl if kind != ContextKind::Egl => {
+            "graphics=egl needs an EGL context: press F2 to keep the setting and start Rust-DOS again".to_string()
+        }
+        _ => format!(
+            "graphics={} can't be drawn with the window's {} context (the OpenXR runtime offers {})",
+            wanted.name(),
+            context,
+            offered.describe()
+        ),
+    })
+}
+
+/// An eye's image size: `percent` of the runtime's `recommended`, even,
+/// and from 16 pixels to the runtime's `max`.
+pub fn eye_size(recommended: (u32, u32), max: (u32, u32), percent: u32) -> (u32, u32) {
+    let scale = |n: u32, max: u32| {
+        let scaled = (n as u64 * percent as u64 / 100) as u32 & !1;
+        let max = if max == 0 { u32::MAX } else { max };
+        scaled.clamp(16.min(max), max)
+    };
+    (scale(recommended.0, max.0), scale(recommended.1, max.1))
+}
+
+/// `resolution`'s range, in percent.
+pub const RESOLUTION_MIN: u32 = 30;
+pub const RESOLUTION_MAX: u32 = 150;
+
 /// `screen_glow`'s range, in percent.
 pub const SCREEN_GLOW_MAX: u32 = 400;
 
@@ -259,6 +458,10 @@ pub struct VrSettings {
     /// How far the seat is turned from the spawn's way, in degrees to the
     /// left.
     pub seat_turn: i32,
+    /// How the headset's pictures get to the OpenXR runtime.
+    pub graphics: VrGraphics,
+    /// The eyes' images, in percent of the size the runtime recommends.
+    pub resolution: u32,
 }
 
 impl Default for VrSettings {
@@ -274,6 +477,8 @@ impl Default for VrSettings {
             scene_scale: 100,
             seat: [0; 3],
             seat_turn: 0,
+            graphics: VrGraphics::Auto,
+            resolution: 100,
         }
     }
 }
@@ -340,6 +545,21 @@ impl VrSettings {
                     format!("invalid seat_turn '{}' (-{} to {} degrees)", value, SEAT_TURN_MAX, SEAT_TURN_MAX)
                 })?;
             }
+            "graphics" => {
+                self.graphics = VrGraphics::parse(value)
+                    .ok_or_else(|| format!("invalid graphics '{}' (auto, gl, egl or vulkan)", value))?;
+            }
+            "resolution" => {
+                self.resolution = value
+                    .trim()
+                    .trim_end_matches('%')
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|r| (RESOLUTION_MIN..=RESOLUTION_MAX).contains(r))
+                    .ok_or_else(|| {
+                        format!("invalid resolution '{}' ({} to {} percent)", value, RESOLUTION_MIN, RESOLUTION_MAX)
+                    })?;
+            }
             _ => return Err(format!("unknown setting '{}'", key)),
         }
         Ok(())
@@ -359,6 +579,8 @@ impl VrSettings {
             (SEAT_AXES[1], Some(self.seat[1].to_string())),
             (SEAT_AXES[2], Some(self.seat[2].to_string())),
             ("seat_turn", Some(self.seat_turn.to_string())),
+            ("graphics", Some(self.graphics.name().to_string())),
+            ("resolution", Some(self.resolution.to_string())),
         ]
     }
 }
@@ -396,6 +618,12 @@ mod tests {
         assert!(s.set("scene_scale", "20", Path::new("/cfg")).is_err());
         assert!(s.set("seat_up", "101", Path::new("/cfg")).is_err());
         assert!(s.set("seat_turn", "181", Path::new("/cfg")).is_err());
+        s.set("graphics", "EGL", Path::new("/cfg")).unwrap();
+        s.set("resolution", "70%", Path::new("/cfg")).unwrap();
+        assert_eq!((s.graphics, s.resolution), (VrGraphics::Egl, 70));
+        assert!(s.set("graphics", "d3d", Path::new("/cfg")).is_err());
+        assert!(s.set("resolution", "29", Path::new("/cfg")).is_err());
+        assert!(s.set("resolution", "151", Path::new("/cfg")).is_err());
         assert_eq!(s.controllers, VrControllers::Pointer);
         assert!(!s.spatial_audio);
         assert_eq!(s.mode, VrMode::Desktop);
@@ -407,5 +635,65 @@ mod tests {
             again.set(key, &value.unwrap(), Path::new("/elsewhere")).unwrap();
         }
         assert_eq!(again, s);
+    }
+
+    const ALL: Offered = Offered { opengl: true, egl: true, vulkan: true, hand_interaction: false };
+    const GL_ONLY: Offered = Offered { opengl: true, egl: false, vulkan: false, hand_interaction: false };
+    const VK_ONLY: Offered = Offered { opengl: false, egl: false, vulkan: true, hand_interaction: false };
+
+    #[test]
+    fn windows_always_draws_with_wgl() {
+        for wanted in VrGraphics::ALL {
+            assert_eq!(startup_hints(wanted, Some(ALL), Platform::Windows), SdlHints::default());
+            assert_eq!(candidates(wanted, ALL, ContextKind::Wgl), Ok(vec![Binding::Wgl]));
+        }
+        assert!(candidates(VrGraphics::Auto, VK_ONLY, ContextKind::Wgl).is_err());
+    }
+
+    #[test]
+    fn sdl_is_told_what_the_binding_needs() {
+        let linux = Platform::Linux { x11: true };
+        let glx = SdlHints { force_x11: true, force_egl: false };
+        let egl = SdlHints { force_x11: false, force_egl: true };
+        // Without a runtime to ask, and for SteamVR, as before: X11.
+        assert_eq!(startup_hints(VrGraphics::Auto, None, linux), glx);
+        assert_eq!(startup_hints(VrGraphics::Auto, Some(GL_ONLY), linux), glx);
+        assert_eq!(startup_hints(VrGraphics::Auto, Some(ALL), linux), glx);
+        assert_eq!(startup_hints(VrGraphics::Gl, Some(VK_ONLY), linux), glx);
+        assert_eq!(startup_hints(VrGraphics::Egl, Some(ALL), linux), egl);
+        assert_eq!(startup_hints(VrGraphics::Vulkan, Some(ALL), linux), SdlHints::default());
+        assert_eq!(startup_hints(VrGraphics::Auto, Some(VK_ONLY), linux), SdlHints::default());
+        // No X server: EGL if the runtime takes it.
+        let wayland = Platform::Linux { x11: false };
+        assert_eq!(startup_hints(VrGraphics::Auto, Some(ALL), wayland), egl);
+        assert_eq!(startup_hints(VrGraphics::Auto, Some(GL_ONLY), wayland), SdlHints::default());
+    }
+
+    #[test]
+    fn bindings_are_tried_in_order() {
+        use Binding::*;
+        assert_eq!(candidates(VrGraphics::Auto, ALL, ContextKind::Glx), Ok(vec![Glx, Vulkan]));
+        assert_eq!(candidates(VrGraphics::Auto, ALL, ContextKind::Egl), Ok(vec![Egl, Vulkan]));
+        assert_eq!(candidates(VrGraphics::Auto, GL_ONLY, ContextKind::Glx), Ok(vec![Glx]));
+        assert_eq!(candidates(VrGraphics::Auto, VK_ONLY, ContextKind::Egl), Ok(vec![Vulkan]));
+        assert_eq!(candidates(VrGraphics::Gl, ALL, ContextKind::Glx), Ok(vec![Glx]));
+        assert_eq!(candidates(VrGraphics::Egl, ALL, ContextKind::Egl), Ok(vec![Egl]));
+        assert_eq!(candidates(VrGraphics::Vulkan, ALL, ContextKind::Glx), Ok(vec![Vulkan]));
+        // What the window's context or the runtime can't do.
+        assert!(candidates(VrGraphics::Gl, ALL, ContextKind::Egl).unwrap_err().contains("X11"));
+        assert!(candidates(VrGraphics::Egl, ALL, ContextKind::Glx).unwrap_err().contains("EGL context"));
+        assert!(candidates(VrGraphics::Auto, GL_ONLY, ContextKind::Egl).is_err());
+        assert!(candidates(VrGraphics::Vulkan, GL_ONLY, ContextKind::Glx).unwrap_err().contains("XR_KHR_opengl_enable"));
+        let none = Offered::default();
+        assert!(candidates(VrGraphics::Auto, none, ContextKind::Glx).unwrap_err().contains("none of"));
+    }
+
+    #[test]
+    fn eye_sizes_scale_evenly_within_the_runtime_limits() {
+        assert_eq!(eye_size((2016, 2240), (4096, 4096), 100), (2016, 2240));
+        assert_eq!(eye_size((2016, 2240), (4096, 4096), 70), (1410, 1568));
+        assert_eq!(eye_size((1001, 999), (0, 0), 100), (1000, 998));
+        assert_eq!(eye_size((2016, 2240), (2500, 2500), 150), (2500, 2500));
+        assert_eq!(eye_size((20, 20), (4096, 4096), 30), (16, 16));
     }
 }
