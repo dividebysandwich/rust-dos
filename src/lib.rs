@@ -21,6 +21,7 @@ pub mod command_com;
 pub mod config;
 pub mod config_ui;
 pub mod cpu;
+pub mod d86f;
 pub mod disk;
 pub mod diskdelta;
 pub mod diskimage;

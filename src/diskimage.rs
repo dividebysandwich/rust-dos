@@ -2,8 +2,9 @@
 //! other, as the BIOS reads them by cylinder, head and sector (INT 13h) and
 //! the FAT driver reads them by number.
 //!
-//! A floppy's geometry comes from the image size, as DOSBox has it; a hard
-//! disk's from the mount options, its partition table or boot sector.
+//! A floppy's geometry comes from the image size, as DOSBox has it, or
+//! from the tracks of an 86F image; a hard disk's from the mount options,
+//! its partition table or boot sector.
 
 use std::cell::{Cell, Ref, RefCell};
 use crate::hostfs::{self, File, OpenOptions};
@@ -12,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 use crate::disk::DriveKind;
 use crate::diskdelta::Delta;
+use crate::d86f::D86f;
 use crate::vhd::Vhd;
 
 pub const SECTOR_SIZE: usize = 512;
@@ -20,6 +22,7 @@ pub const SECTOR_SIZE: usize = 512;
 pub const STATUS_BAD_COMMAND: u8 = 0x01;
 pub const STATUS_WRITE_PROTECTED: u8 = 0x03;
 pub const STATUS_SECTOR_NOT_FOUND: u8 = 0x04;
+pub const STATUS_CRC_ERROR: u8 = 0x10;
 pub const STATUS_CONTROLLER_FAILURE: u8 = 0x20;
 
 /// Cylinders, heads and sectors per track.
@@ -101,7 +104,8 @@ pub enum ImageKind {
 /// What kind of image `path` is. `requested` is the drive type the mount
 /// asked for: CD-ROM and floppy force theirs, a hard disk (the default)
 /// leaves it to the file. Like DOSBox, .iso, .cue and .bin are CDs, .vfd and
-/// .flp floppies, and other images are floppies if their size is a floppy's.
+/// .flp floppies (and 86F images), and other images are floppies if their
+/// size is a floppy's.
 /// The rest are hard disks when they start with a partition table or a boot
 /// sector, and CDs when they hold an ISO 9660 volume.
 pub fn detect(path: &Path, requested: DriveKind) -> Result<ImageKind, String> {
@@ -114,6 +118,9 @@ pub fn detect(path: &Path, requested: DriveKind) -> Result<ImageKind, String> {
     let boot = file.read_exact(&mut boot).is_ok().then_some(&boot[..]);
     if crate::vhd::is_vhd(&file) {
         return Ok(ImageKind::HardDisk);
+    }
+    if boot.is_some_and(crate::d86f::is_86f) {
+        return Ok(ImageKind::Floppy);
     }
     if let Some(kind) = kind_by_contents(len, boot) {
         return Ok(kind);
@@ -131,6 +138,9 @@ pub fn detect_memory(name: &str, data: &MemoryImage, requested: DriveKind) -> Re
     }
     let mut boot = [0u8; SECTOR_SIZE];
     let boot = data.read_at(0, &mut boot).then_some(&boot[..]);
+    if is_86f_memory(data) {
+        return Ok(ImageKind::Floppy);
+    }
     if let Some(kind) = kind_by_contents(data.len(), boot) {
         return Ok(kind);
     }
@@ -149,10 +159,16 @@ fn kind_by_name(path: &Path, requested: DriveKind) -> Option<ImageKind> {
     if requested == DriveKind::CdRom || matches!(ext.as_str(), "iso" | "cue" | "bin" | "gog" | "ins" | "inst") {
         return Some(ImageKind::Cd);
     }
-    if requested == DriveKind::Floppy || matches!(ext.as_str(), "vfd" | "flp" | "360" | "720" | "1200" | "1440") {
+    if requested == DriveKind::Floppy || matches!(ext.as_str(), "vfd" | "flp" | "360" | "720" | "1200" | "1440" | "86f") {
         return Some(ImageKind::Floppy);
     }
     (ext == "vhd").then_some(ImageKind::HardDisk)
+}
+
+/// Whether the image held in memory is an 86F image.
+fn is_86f_memory(data: &MemoryImage) -> bool {
+    let mut magic = [0u8; 4];
+    data.read_at(0, &mut magic) && crate::d86f::is_86f(&magic)
 }
 
 /// The kind of an image of `len` bytes that starts with `boot`, if its size
@@ -368,17 +384,48 @@ impl From<Vec<u8>> for MemoryImage {
     }
 }
 
-/// An image file: its bytes are the disk's, or it is a VHD image of one.
+/// An image file: its bytes are the disk's, or it is a VHD or 86F image
+/// of one.
 pub(crate) enum ImageFile {
     Raw(File),
     Vhd(Box<Vhd>),
+    D86f(Box<D86f>),
 }
 
 impl ImageFile {
     pub(crate) fn new(file: File) -> Result<Self, String> {
+        let mut magic = [0u8; 4];
+        let is_86f = {
+            let mut f = &file;
+            f.seek(SeekFrom::Start(0)).and_then(|_| f.read_exact(&mut magic)).is_ok() && crate::d86f::is_86f(&magic)
+        };
+        if is_86f {
+            return D86f::open(file).map(|image| ImageFile::D86f(Box::new(image)));
+        }
         match crate::vhd::is_vhd(&file) {
             true => Vhd::open(file).map(|vhd| ImageFile::Vhd(Box::new(vhd))),
             false => Ok(ImageFile::Raw(file)),
+        }
+    }
+
+    /// The geometry an 86F image's tracks give the floppy in it.
+    pub(crate) fn floppy_geometry(&self) -> Option<Chs> {
+        match self {
+            ImageFile::D86f(image) => Some(image.geometry()),
+            _ => None,
+        }
+    }
+
+    /// Whether the image says the disk is write-protected.
+    pub(crate) fn write_protected(&self) -> bool {
+        matches!(self, ImageFile::D86f(image) if image.write_protected())
+    }
+
+    /// What reading sector `lba` reports, if it doesn't read cleanly.
+    fn sector_status(&self, lba: u64) -> Option<u8> {
+        match self {
+            ImageFile::D86f(image) => image.sector_status(lba),
+            _ => None,
         }
     }
 
@@ -387,6 +434,7 @@ impl ImageFile {
         match self {
             ImageFile::Raw(file) => file.len(),
             ImageFile::Vhd(vhd) => Ok(vhd.len()),
+            ImageFile::D86f(image) => Ok(image.len()),
         }
     }
 
@@ -395,6 +443,7 @@ impl ImageFile {
         match self {
             ImageFile::Raw(_) => None,
             ImageFile::Vhd(vhd) => vhd.geometry(),
+            ImageFile::D86f(image) => Some(image.geometry()),
         }
     }
 
@@ -405,6 +454,7 @@ impl ImageFile {
                 file.seek(SeekFrom::Start(at)).and_then(|_| file.read_exact(buf))
             }
             ImageFile::Vhd(vhd) => vhd.read_at(at, buf),
+            ImageFile::D86f(image) => image.read_at(at, buf),
         }
     }
 
@@ -415,6 +465,7 @@ impl ImageFile {
                 file.seek(SeekFrom::Start(at)).and_then(|_| file.write_all(data))
             }
             ImageFile::Vhd(vhd) => vhd.write_at(at, data),
+            ImageFile::D86f(image) => image.write_at(at, data),
         }
     }
 }
@@ -499,6 +550,7 @@ impl DiskImage {
         };
         let file = ImageFile::new(file).map_err(|e| format!("{}: {}", path.display(), e))?;
         let len = file.len().map_err(error)?;
+        let writable = writable && !file.write_protected();
         Self::new(path, Backing::File(file), len, floppy, geometry, writable)
     }
 
@@ -527,6 +579,19 @@ impl DiskImage {
         geometry: Option<Chs>,
         read_only: bool,
     ) -> Result<Self, String> {
+        // An 86F image's sectors, which stay in memory.
+        let (data, geometry, read_only) = match is_86f_memory(&data) {
+            true => {
+                let mut bytes = vec![0u8; data.len() as usize];
+                data.read_at(0, &mut bytes);
+                let image = D86f::parse(&bytes).map_err(|e| format!("{}: {}", name, e))?;
+                let mut flat = vec![0u8; image.len() as usize];
+                image.read_at(0, &mut flat).map_err(|e| format!("{}: {}", name, e))?;
+                let protected = image.write_protected();
+                (MemoryImage::from(flat), geometry.or(Some(image.geometry())), read_only || protected)
+            }
+            false => (data, geometry, read_only),
+        };
         let len = data.len();
         let written = RefCell::new(vec![false; data.chunk_count()]);
         let backing = Backing::Memory { data: RefCell::new(data), written };
@@ -600,7 +665,12 @@ impl DiskImage {
             replacement: RefCell::new(None),
         };
         let (geometry, bios_type) = if floppy {
-            match geometry {
+            let stated = match &disk.backing {
+                Backing::File(file) => file.floppy_geometry(),
+                Backing::Delta(delta) => delta.base_floppy_geometry(),
+                Backing::Memory { .. } => None,
+            };
+            match geometry.or(stated) {
                 Some(chs) => (chs, floppy_type_of(chs)),
                 None => floppy_geometry(len)
                     .ok_or_else(|| format!("{} is not the size of a floppy disk image", path.display()))?,
@@ -695,9 +765,18 @@ impl DiskImage {
     }
 
     /// Read `buf.len()` bytes from sector `lba` on.
+    /// A sector that doesn't read cleanly (an 86F image's) is an error
+    /// with what was read in `buf` all the same, as a BIOS has it.
     pub fn read(&self, lba: u64, buf: &mut [u8]) -> Result<(), u8> {
         self.check(lba, buf.len())?;
-        self.read_at(lba * SECTOR_SIZE as u64, buf).map_err(|_| STATUS_CONTROLLER_FAILURE)
+        self.read_at(lba * SECTOR_SIZE as u64, buf).map_err(|_| STATUS_CONTROLLER_FAILURE)?;
+        match &self.backing {
+            Backing::File(file) => {
+                let count = buf.len().div_ceil(SECTOR_SIZE) as u64;
+                (lba..lba + count).find_map(|sector| file.sector_status(sector)).map_or(Ok(()), Err)
+            }
+            _ => Ok(()),
+        }
     }
 
     fn read_at(&self, at: u64, buf: &mut [u8]) -> std::io::Result<()> {
@@ -809,7 +888,7 @@ impl DiskImage {
                 }
                 out.set_len(data.len()).map_err(error)?;
             }
-            Backing::Delta(_) | Backing::File(ImageFile::Vhd(_)) => {
+            Backing::Delta(_) | Backing::File(ImageFile::Vhd(_) | ImageFile::D86f(_)) => {
                 // The disk as the machine sees it, holes for zeros.
                 let len = self.sectors * SECTOR_SIZE as u64;
                 let mut out = File::create(&partial).map_err(error)?;
@@ -845,7 +924,7 @@ impl DiskImage {
                 file.seek(SeekFrom::Start(0)).map_err(error)?;
                 std::io::copy(&mut source, &mut file).map_err(error)?;
             }
-            Backing::Memory { .. } | Backing::Delta(_) | Backing::File(ImageFile::Vhd(_)) => {
+            Backing::Memory { .. } | Backing::Delta(_) | Backing::File(ImageFile::Vhd(_) | ImageFile::D86f(_)) => {
                 // Into a delta only what differs, or it would get all of
                 // the disk.
                 let delta = matches!(self.backing, Backing::Delta(_));
@@ -1158,6 +1237,61 @@ mod tests {
 
         let junk = scratch("junk.img", &vec![0x11u8; 100_000]);
         assert!(detect(&junk, DriveKind::HardDisk).is_err());
+    }
+
+    #[test]
+    fn floppies_in_86f_images() {
+        use crate::d86f::{encode, EncodeOptions};
+        let chs = Chs { cylinders: 80, heads: 2, sectors: 9 };
+        let flat: Vec<u8> = (0..chs.total() as usize * SECTOR_SIZE).map(|i| (i / SECTOR_SIZE) as u8 ^ i as u8).collect();
+        let mut bytes = encode(&flat, chs, EncodeOptions::default());
+        // Damage the data field of the last sector of cylinder 0, head 0.
+        let field = crate::d86f::D86f::parse(&bytes).unwrap().data_field_at(8).unwrap();
+        bytes[field + 64] ^= 0x04;
+        let mut sector = [0u8; SECTOR_SIZE];
+
+        let path = scratch("disk.dat", &bytes);
+        assert_eq!(detect(&path, DriveKind::HardDisk), Ok(ImageKind::Floppy));
+        assert_eq!(detect(Path::new("x.86f"), DriveKind::HardDisk), Ok(ImageKind::Floppy));
+        let image = DiskImage::open(&path, true, None, false).unwrap();
+        assert_eq!((image.geometry(), image.bios_type(), image.writable()), (chs, 3, true));
+        let mut buf = vec![0u8; 9 * 512];
+        assert_eq!(image.read(0, &mut buf), Err(STATUS_CRC_ERROR));
+        assert_eq!(buf[..8 * 512], flat[..8 * 512]);
+        assert_eq!(image.read(9, &mut buf), Ok(()));
+        assert_eq!(buf[..], flat[9 * 512..18 * 512]);
+
+        // Writes go into the image, and mend the sector.
+        image.write(8, &[0xAB; 512]).unwrap();
+        image.write(100, &[0xCD; 1024]).unwrap();
+        drop(image);
+        let image = DiskImage::open(&path, true, None, false).unwrap();
+        assert_eq!(image.read(0, &mut buf), Ok(()));
+        assert_eq!(buf[8 * 512..], [0xAB; 512]);
+        let mut two = [0u8; 1024];
+        image.read(100, &mut two).unwrap();
+        assert_eq!(two, [0xCD; 1024]);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), bytes.len() as u64);
+
+        // Over a delta, and held in memory.
+        let delta = std::env::temp_dir().join(format!("rust-dos-diskimage-{}", std::process::id())).join("disk.rdelta");
+        let over = DiskImage::open_delta(&path, &delta, true, None, false).unwrap();
+        assert_eq!(over.geometry(), chs);
+        over.write(5, &[0xEE; 512]).unwrap();
+        over.read(5, &mut sector).unwrap();
+        assert_eq!(sector, [0xEE; 512]);
+        let memory = DiskImage::from_memory("disk.86f", MemoryImage::from(std::fs::read(&path).unwrap()), true, None, false).unwrap();
+        assert_eq!((memory.geometry(), memory.sectors()), (chs, chs.total()));
+        memory.read(100, &mut two).unwrap();
+        assert_eq!(two, [0xCD; 1024]);
+        let data = MemoryImage::from(std::fs::read(&path).unwrap());
+        assert_eq!(detect_memory("disk.dat", &data, DriveKind::HardDisk), Ok(ImageKind::Floppy));
+
+        // The write-protect flag.
+        let protected = scratch("protected.86f", &encode(&flat, chs, EncodeOptions { write_protect: true, ..Default::default() }));
+        let image = DiskImage::open(&protected, true, None, false).unwrap();
+        assert!(!image.writable());
+        assert_eq!(image.write(0, &[0; 512]), Err(STATUS_WRITE_PROTECTED));
     }
 
     #[test]

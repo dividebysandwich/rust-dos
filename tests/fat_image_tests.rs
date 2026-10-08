@@ -812,3 +812,35 @@ fn fat32_drives_through_dos() {
     assert!(!cf(&cpu), "{:04X}", cpu.ax());
     assert_eq!(&buffer(&cpu, SECTOR)[0x52..0x5A], b"FAT32   ");
 }
+
+#[test]
+fn floppies_in_86f_images() {
+    use rust_dos::d86f::{encode, EncodeOptions};
+    use rust_dos::diskimage::Chs;
+    let dir = fatimage::scratch("86f");
+    let flat = fs::read(floppy_with_files(&dir)).unwrap();
+    let chs = Chs { cylinders: 80, heads: 2, sectors: 18 };
+    let opts = EncodeOptions { surface: true, ..Default::default() };
+    let image = fatimage::write(&dir, "GAME.86F", &encode(&flat, chs, opts));
+    let mut cpu = cpu(&dir);
+    mount(&mut cpu, DRIVE_A, &image);
+    assert_eq!(cpu.bus.disk.volume_label(DRIVE_A).as_deref(), Some("GAMEDISK"));
+    assert_eq!(find_all(&mut cpu, "A:\\*.*", 0x16), ["EMPTY", "README.TXT", "GAMES"]);
+    assert_eq!(read_file(&mut cpu, "a:\\games\\doom.exe"), pattern(3000, 1));
+
+    // The BIOS has the geometry of its tracks and their sectors.
+    assert_eq!(int13(&mut cpu, 0x08, 0, 0, 0, 0, 0), (false, 0));
+    assert_eq!((cpu.get_reg8(Register::CH), cpu.get_reg8(Register::CL), cpu.get_reg8(Register::DH)), (79, 18, 1));
+    assert_eq!(int13(&mut cpu, 0x02, 0, 2, 0, 1, 17), (false, 0));
+    assert_eq!(buffer(&cpu, 2 * SECTOR), &flat[34 * SECTOR..36 * SECTOR]);
+
+    // A file written goes into the 86F image, which stays one.
+    let data = pattern(20_000, 7);
+    let handle = create(&mut cpu, "A:\\SAVE.DAT").unwrap();
+    assert_eq!(write(&mut cpu, handle, &data), Ok(20_000));
+    close(&mut cpu, handle);
+    let mut cpu = self::cpu(&dir);
+    mount(&mut cpu, DRIVE_A, &image);
+    assert_eq!(read_file(&mut cpu, "A:\\SAVE.DAT"), data);
+    assert_eq!(&fs::read(&image).unwrap()[..4], b"86BF");
+}

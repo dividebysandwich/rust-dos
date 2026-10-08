@@ -20,7 +20,7 @@ use std::rc::Rc;
 
 use crate::cpu::{Cpu, CpuFlags};
 use crate::disk::{DriveKind, FLOPPY_DRIVES};
-use crate::diskimage::{DiskImage, SECTOR_SIZE, STATUS_BAD_COMMAND, STATUS_SECTOR_NOT_FOUND};
+use crate::diskimage::{DiskImage, SECTOR_SIZE, STATUS_BAD_COMMAND, STATUS_CRC_ERROR, STATUS_SECTOR_NOT_FOUND};
 use iced_x86::Register;
 
 /// BIOS data area: status of the last floppy and hard disk operations.
@@ -132,11 +132,13 @@ fn move_sectors(cpu: &mut Cpu, disk: &DiskImage, lba: u64, count: usize, buffer:
         }
         disk.write(lba, &data)
     } else {
-        disk.read(lba, &mut data)?;
-        if !verify {
+        // A CRC error still hands over what was read, as the controller
+        // does.
+        let result = disk.read(lba, &mut data);
+        if !verify && matches!(result, Ok(()) | Err(STATUS_CRC_ERROR)) {
             cpu.bus.guest_write_bytes(buffer, &data);
         }
-        Ok(())
+        result
     }
 }
 

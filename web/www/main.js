@@ -1486,7 +1486,7 @@ function freeDrive() {
 /// drive, a floppy in A: and a hard disk in the next free drive.
 async function insertImage(file, drive) {
   const cd = /\.iso$/i.test(file.name);
-  const floppy = !cd && Machine.is_floppy_size(file.size);
+  const floppy = !cd && (/\.86f$/i.test(file.name) || Machine.is_floppy_size(file.size));
   if (drive === undefined) {
     const cdDrive = drives().find((d) => d.kind === 'cdrom');
     drive = cd && cdDrive ? cdDrive.drive : floppy ? DRIVE_A : freeDrive();
@@ -1749,7 +1749,9 @@ function fillDrivesDialog() {
     const actions = row.insertCell();
     actions.className = 'actions-cell';
     if (drive.size && machine.image_size(drive.drive)) {
-      const name = drive.drive === DRIVE_C ? 'rust-dos-C.img' : drive.image || `${drive.letter}.img`;
+      // An 86F image is held as its sectors, which download as an .img.
+      const image = drive.image && drive.image.replace(/\.86f$/i, '.img');
+      const name = drive.drive === DRIVE_C ? 'rust-dos-C.img' : image || `${drive.letter}.img`;
       actions.append(button('Download', () => download(drive.drive, name)));
     }
     if (drive.drive !== DRIVE_C) {

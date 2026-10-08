@@ -5,8 +5,8 @@
 //! `MOUNT drive path [path ...] [options]`, with the options anywhere on
 //! the line. The path is a host directory, a zip or 7z archive (`archive`),
 //! or a disk or CD image (.img,
-//! .ima, .vfd, .flp, .dsk, .360, .720, .1200, .1440, .iso, .cue, .bin,
-//! .gog, .ins) on the host or on a mounted drive (C:\GAME\CD.CUE), whose
+//! .ima, .vfd, .flp, .dsk, .360, .720, .1200, .1440, .86f, .iso, .cue,
+//! .bin, .gog, .ins) on the host or on a mounted drive (C:\GAME\CD.CUE), whose
 //! type is found from the image unless `-t` gives it. Several images, or a
 //! wildcard that matches several (disk*.img), make a list that Ctrl+F4
 //! steps through. A: and B: are floppies whatever the type says. `IMGMOUNT`
@@ -61,7 +61,7 @@ IMGMOUNT is the same command.\r
 
 /// The extensions of disk and CD images.
 const IMAGE_EXTENSIONS: &[&str] =
-    &["img", "ima", "vfd", "flp", "dsk", "360", "720", "1200", "1440", "iso", "cue", "bin", "gog", "ins", "inst", "vhd"];
+    &["img", "ima", "vfd", "flp", "dsk", "360", "720", "1200", "1440", "86f", "iso", "cue", "bin", "gog", "ins", "inst", "vhd"];
 
 /// Whether a path is a disk or CD image's, by its extension.
 pub(crate) fn is_image_name(path: &Path) -> bool {
@@ -742,6 +742,7 @@ mod tests {
         assert!(mount("e x.img -fs none", cwd).is_err());
         assert!(mount("d x.img -t zip", cwd).is_err());
         assert!(is_image_name(Path::new("GAME.GOG")) && is_image_name(Path::new("disk.1440")));
+        assert!(is_image_name(Path::new("DISK1.86F")));
     }
 
     #[test]

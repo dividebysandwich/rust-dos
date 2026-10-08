@@ -150,6 +150,11 @@ impl Delta {
         self.base.geometry()
     }
 
+    /// The floppy geometry the image file states, if it states one.
+    pub fn base_floppy_geometry(&self) -> Option<Chs> {
+        self.base.floppy_geometry()
+    }
+
     /// The image's size.
     pub fn len(&self) -> u64 {
         self.len

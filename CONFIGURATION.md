@@ -1188,6 +1188,19 @@ table or boot sector; where it can't, `-chs C,H,S` (or DOSBox's
 and an image file that can't be written, or `-ro`, makes a write-protected
 disk. `MOUNT C hdd.img` puts a hard disk image in place of C:'s directory.
 
+86Box's 86F floppy images (`.86f`, found by their contents whatever their
+name) mount like the others. They hold each track's FM or MFM bit cells,
+which are decoded into the disk's 512-byte sectors, the geometry coming
+from the tracks. A sector written is encoded back into its track in the
+file, so the image stays an 86F image (in memory, as from an archive or the
+web page, the changes stay with its sectors, and it downloads as an
+`.img`). A sector whose data doesn't match its CRC reads with INT 13h's
+CRC error (10h) and a missing one isn't found (04h), as a real drive
+reports them; there is no floppy controller, so copy protections that
+depend on its timing or on sectors of other sizes don't see them, and weak
+bits read the same each time. The image's write-protect flag
+write-protects the disk.
+
 The BIOS sees the images as disks: INT 13h reads and writes their sectors by
 cylinder, head and sector and reports their real geometry, and DOS's absolute
 disk read and write (INT 25h/26h) reach the sectors of the volume. Programs

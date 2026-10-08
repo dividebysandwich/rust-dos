@@ -542,9 +542,9 @@
 # drives are read-only and visible to programs through MSCDEX, and -ro makes
 # any drive read-only. -label sets the volume label (up to 11 characters).
 # A: and B: are always floppy drives.
-# Disk images (.img, .ima, .vfd, .flp, .dsk) hold a FAT12 or FAT16 file
-# system that programs can read and write, also sector by sector through
-# the BIOS (INT 13h) and DOS (INT 25h/26h). An image the size of a floppy
+# Disk images (.img, .ima, .vfd, .flp, .dsk, 86Box's .86f) hold a FAT12
+# or FAT16 file system that programs can read and write, also sector by
+# sector through the BIOS (INT 13h) and DOS (INT 25h/26h). An image the size of a floppy
 # disk is a floppy, others are hard disks with a partition table; -chs
 # gives a hard disk image's geometry where it can't be found from the
 # image. CD images are .cue, .iso and .bin files.

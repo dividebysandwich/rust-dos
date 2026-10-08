@@ -995,8 +995,9 @@ DRIVES
   PUT    /api/drive/D {"path":"/home/me/dos/cd","type":"cdrom","label":"GAMECD"}
                    mount or replace a drive; type floppy|hdd|cdrom, optional
                    "read_only":true. The path is a directory or a disk or CD
-                   image (.img, .ima, .vfd, .flp, .dsk, .cue, .iso, .bin);
-                   an image's type is found from the image unless given.
+                   image (.img, .ima, .vfd, .flp, .dsk, .86f, .cue, .iso,
+                   .bin); an image's type is found from the image unless
+                   given.
                    "images":["disk2.img",...] adds images to step through.
                    Replacing closes that drive's open files; with no options
                    a remount keeps the drive's type and label.
