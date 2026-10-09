@@ -603,7 +603,7 @@ impl Bus {
             opts.kind = DriveKind::CdRom;
         }
         let mounted = self.mount_with(drive, |disk| disk.mount(drive, path, opts, replace));
-        for note in std::mem::take(&mut self.disk.notes) {
+        for note in std::mem::take(&mut self.disk.notes).into_iter().chain(crate::diskdelta::take_notes()) {
             self.log_string(&format!("[DISK] {}", note));
         }
         let mounted = mounted?;

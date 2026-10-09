@@ -167,6 +167,33 @@ pub struct Prepared {
     pub variants: bool,
     /// Problems in the profile.
     pub warnings: Vec<String>,
+    /// Its saves folder, held while it plays (`overlay_drives`).
+    pub saves_lock: Option<SavesLock>,
+}
+
+/// A game's saves folder held by the one rust-dos that plays it: two
+/// playing it at once would each write its changes over the other's.
+/// The system lets go of it when the game ends, or the program does.
+#[derive(Clone, Debug)]
+pub struct SavesLock(#[allow(dead_code)] std::sync::Arc<std::fs::File>);
+
+/// Hold the saves folder `saves` (`SavesLock`), or say why not: another
+/// rust-dos plays the game. Where locks can't be had (a frontend's
+/// storage, a file system without them), the folder isn't held.
+fn lock_saves(saves: &Path) -> Result<Option<SavesLock>, String> {
+    if hostfs::is_foreign(saves) || std::fs::create_dir_all(saves).is_err() {
+        return Ok(None);
+    }
+    let Ok(file) = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(saves.join(".lock")) else {
+        return Ok(None);
+    };
+    match file.try_lock() {
+        Ok(()) => Ok(Some(SavesLock(std::sync::Arc::new(file)))),
+        Err(std::fs::TryLockError::WouldBlock) => {
+            Err(format!("the game is being played already, by another Rust-DOS, which writes its changes in {}", saves.display()))
+        }
+        Err(std::fs::TryLockError::Error(_)) => Ok(None),
+    }
 }
 
 /// The profile `text` (of the game `id`) over the settings `base`: what it
@@ -191,6 +218,7 @@ pub fn prepare(id: &str, base: &Settings, text: &str, dir: &Path, home: Option<&
         pad: own.game_pad,
         variants: own.game_variants,
         warnings: own.warnings,
+        saves_lock: None,
     })
 }
 
@@ -203,9 +231,11 @@ pub fn saves_dir(games: &Path) -> PathBuf {
 /// The folder for its changes in the game's saves (`saves`/`id`) for each
 /// of the profile's own drives that is an archive, and with `overlay=`
 /// each that is a host directory or disk image, unless it has one or is
-/// read-only.
-pub fn overlay_drives(prepared: &mut Prepared, id: &str, saves: &Path) {
+/// read-only. The saves are held while the game plays (`SavesLock`): an
+/// error if another rust-dos plays it.
+pub fn overlay_drives(prepared: &mut Prepared, id: &str, saves: &Path) -> Result<(), String> {
     let saves = saves.join(id);
+    let mut overlaid = false;
     for spec in &mut prepared.drives {
         let opts = &mut spec.opts;
         let archive = crate::archive::is_archive_name(&spec.path) && hostfs::is_file(&spec.path);
@@ -216,7 +246,12 @@ pub fn overlay_drives(prepared: &mut Prepared, id: &str, saves: &Path) {
             continue;
         }
         opts.overlay = Some(saves.join(crate::disk::drive_key(spec.drive)));
+        overlaid = true;
     }
+    if overlaid {
+        prepared.saves_lock = lock_saves(&saves)?;
+    }
+    Ok(())
 }
 
 /// Take the game `id` back to how it was installed: its folder in the
@@ -839,6 +874,8 @@ pub struct ActiveGame {
     /// It is a tool of the game's (its setup program, say): when it ends,
     /// the ways to start the game are offered again.
     pub choose_after: bool,
+    /// Its saves folder, held while it plays.
+    pub saves_lock: Option<SavesLock>,
 }
 
 /// What each drive has mounted (None: nothing, or a drive held in
@@ -1003,6 +1040,14 @@ mod tests {
         let prepared = prepare(&id, &Settings::default(), &text, &games, None).unwrap();
         assert_eq!(prepared.drives.iter().find(|d| d.drive == 4).unwrap().path, archive);
         assert_eq!(prepared.autoexec, ["E:", "QUEST.EXE"]);
+        // One rust-dos at a time plays it.
+        let mut first = prepare(&id, &Settings::default(), &text, &games, None).unwrap();
+        overlay_drives(&mut first, &id, &saves_dir(&games)).unwrap();
+        assert!(first.saves_lock.is_some());
+        let mut second = prepare(&id, &Settings::default(), &text, &games, None).unwrap();
+        assert!(overlay_drives(&mut second, &id, &saves_dir(&games)).unwrap_err().contains("played already"));
+        drop(first);
+        overlay_drives(&mut second, &id, &saves_dir(&games)).unwrap();
     }
 
     #[test]
@@ -1030,7 +1075,7 @@ mod tests {
         // Its changes go to its saves.
         let mut prepared = prepared;
         assert!(prepared.overlay);
-        overlay_drives(&mut prepared, &id, &saves_dir(&games));
+        overlay_drives(&mut prepared, &id, &saves_dir(&games)).unwrap();
         let saves = dir.join("saves/commander-keen");
         assert_eq!(prepared.drives[0].opts.overlay.as_deref(), Some(saves.join("C").as_path()));
         std::fs::create_dir_all(saves.join("C")).unwrap();
@@ -1233,6 +1278,7 @@ mod tests {
             input: None,
             pad: None,
             choose_after: false,
+            saves_lock: None,
         };
         cpu.queue_batch_lines(["X"]);
         assert!(!game.done(&cpu));

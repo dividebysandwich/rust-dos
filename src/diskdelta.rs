@@ -28,6 +28,13 @@ const HEADER: u64 = 512;
 const HASHED_START: u64 = 1 << 20;
 const HASHED_END: u64 = 64 << 10;
 
+/// Why a delta file can't be opened: it is another disk's changes (or no
+/// changes at all), or something else went wrong.
+enum Mismatch {
+    Changes(String),
+    Other(String),
+}
+
 pub struct Delta {
     base: ImageFile,
     len: u64,
@@ -41,6 +48,18 @@ pub struct Delta {
     map: RefCell<Vec<u32>>,
     /// The blocks in the file.
     blocks: Cell<u32>,
+}
+
+thread_local! {
+    /// What `Delta::open` did that the user should hear of, for the
+    /// drive's mount to tell (`take_notes`).
+    static NOTES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// What opening deltas did since this was last called: the deltas set
+/// aside, as they were of another disk.
+pub fn take_notes() -> Vec<String> {
+    NOTES.with(|notes| std::mem::take(&mut *notes.borrow_mut()))
 }
 
 fn error(path: &Path, e: std::io::Error) -> String {
@@ -61,12 +80,35 @@ fn write_all_at(mut file: &File, at: u64, data: &[u8]) -> std::io::Result<()> {
 impl Delta {
     /// The image `base` under the delta file `path`, which is made at the
     /// first write if it isn't there. A delta made over another image, or
-    /// over this one since changed, is refused.
+    /// over this one since changed (a game's package, or the system it
+    /// runs in, put in anew), is set aside beside it as
+    /// `<name>.stale-<time>`, and the disk starts as the image has it; read
+    /// only, it is refused.
     pub fn open(base: &Path, path: &Path, read_only: bool) -> Result<Delta, String> {
-        let base_file = File::open(base).map_err(|e| error(base, e))?;
-        let base_file = ImageFile::new(base_file, base).map_err(|e| format!("{}: {}", base.display(), e))?;
-        let len = base_file.len().map_err(|e| error(base, e))?;
-        let id = identity(&base_file, len).map_err(|e| error(base, e))?;
+        match Self::open_as_is(base, path, read_only) {
+            Err(Mismatch::Other(e)) => Err(e),
+            Err(Mismatch::Changes(e)) if read_only => Err(e),
+            Err(Mismatch::Changes(e)) => {
+                let time = crate::hosttime::now().format("%Y%m%d-%H%M%S");
+                let mut aside = path.as_os_str().to_owned();
+                aside.push(format!(".stale-{}", time));
+                let aside = PathBuf::from(aside);
+                hostfs::rename(path, &aside).map_err(|io| format!("{} (and it can't be set aside: {})", e, io))?;
+                NOTES.with(|notes| notes.borrow_mut().push(format!("{}; it is set aside as {}", e, aside.display())));
+                Self::open_as_is(base, path, read_only).map_err(|m| match m {
+                    Mismatch::Changes(e) | Mismatch::Other(e) => e,
+                })
+            }
+            Ok(delta) => Ok(delta),
+        }
+    }
+
+    fn open_as_is(base: &Path, path: &Path, read_only: bool) -> Result<Delta, Mismatch> {
+        let other = Mismatch::Other;
+        let base_file = File::open(base).map_err(|e| other(error(base, e)))?;
+        let base_file = ImageFile::new(base_file, base).map_err(|e| other(format!("{}: {}", base.display(), e)))?;
+        let len = base_file.len().map_err(|e| other(error(base, e)))?;
+        let id = identity(&base_file, len).map_err(|e| other(error(base, e)))?;
         let blocks_in_image = len.div_ceil(BLOCK as u64) as usize;
         let mut delta = Delta {
             base: base_file,
@@ -87,7 +129,7 @@ impl Delta {
                 delta.writable = false;
                 File::open(path)
             })
-            .map_err(|e| error(path, e))?;
+            .map_err(|e| other(error(path, e)))?;
             delta.load(&file, base)?;
             *delta.file.borrow_mut() = Some(file);
         }
@@ -95,24 +137,25 @@ impl Delta {
     }
 
     /// The header and map of `file`, if it is a delta over this image.
-    fn load(&mut self, file: &File, base: &Path) -> Result<(), String> {
+    fn load(&mut self, file: &File, base: &Path) -> Result<(), Mismatch> {
+        let other = Mismatch::Other;
         let mut header = [0u8; HEADER as usize];
-        read_exact_at(file, 0, &mut header).map_err(|e| error(&self.path, e))?;
+        read_exact_at(file, 0, &mut header).map_err(|e| Mismatch::Changes(error(&self.path, e)))?;
         let u32_at = |at: usize| u32::from_le_bytes(header[at..at + 4].try_into().unwrap());
         if &header[..8] != MAGIC || u32_at(8) != VERSION || u32_at(12) as usize != BLOCK {
-            return Err(format!("{} is not a disk image's changes", self.path.display()));
+            return Err(Mismatch::Changes(format!("{} is not a disk image's changes", self.path.display())));
         }
         let len = u64::from_le_bytes(header[16..24].try_into().unwrap());
         if len != self.len || header[24..56] != self.id {
-            return Err(format!(
+            return Err(Mismatch::Changes(format!(
                 "{} holds the changes of another disk than {}, or of the disk before it changed",
                 self.path.display(),
                 base.display()
-            ));
+            )));
         }
         let mut raw = vec![0u8; self.map.borrow().len() * 4];
-        read_exact_at(file, HEADER, &mut raw).map_err(|e| error(&self.path, e))?;
-        let file_len = file.len().map_err(|e| error(&self.path, e))?;
+        read_exact_at(file, HEADER, &mut raw).map_err(|e| other(error(&self.path, e)))?;
+        let file_len = file.len().map_err(|e| other(error(&self.path, e)))?;
         let data = self.data_start();
         let mut map = self.map.borrow_mut();
         let mut blocks = 0;
@@ -132,7 +175,7 @@ impl Delta {
         // once it is given out again.
         if self.writable {
             for index in lost {
-                write_all_at(file, HEADER + index as u64 * 4, &[0; 4]).map_err(|e| error(&self.path, e))?;
+                write_all_at(file, HEADER + index as u64 * 4, &[0; 4]).map_err(|e| other(error(&self.path, e)))?;
             }
         }
         self.blocks.set(blocks);
@@ -346,7 +389,7 @@ mod tests {
     }
 
     #[test]
-    fn a_delta_over_another_image_is_refused() {
+    fn a_delta_over_another_image_is_set_aside() {
         let dir = scratch("other");
         let base = image(&dir, 2 * BLOCK);
         let path = dir.join("C.rdelta");
@@ -354,9 +397,18 @@ mod tests {
         let mut changed = std::fs::read(&base).unwrap();
         changed[100] ^= 0xFF;
         std::fs::write(&base, changed).unwrap();
-        assert!(Delta::open(&base, &path, false).is_err());
+        assert!(Delta::open(&base, &path, true).is_err());
+        // Set aside, never lost: the disk is the image's again.
+        take_notes();
+        let delta = Delta::open(&base, &path, false).unwrap();
+        assert_eq!(delta.blocks(), 0);
+        assert!(!path.exists());
+        let notes = take_notes();
+        assert!(notes.len() == 1 && notes[0].contains("set aside"), "{:?}", notes);
+        let aside: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("C.rdelta.stale-")).collect();
+        assert_eq!(aside.len(), 1);
         std::fs::write(&path, b"not a delta").unwrap();
-        assert!(Delta::open(&base, &path, false).is_err());
+        assert!(Delta::open(&base, &path, true).is_err());
     }
 
     #[test]

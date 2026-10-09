@@ -101,7 +101,7 @@ impl Machine {
         for warning in &prepared.warnings {
             self.warn(&format!("{}.conf: {}", id, warning));
         }
-        games::overlay_drives(&mut prepared, id, &self.dirs.saves());
+        games::overlay_drives(&mut prepared, id, &self.dirs.saves())?;
         let settings = content::frontend_settings(prepared.settings);
         if let Err(e) = self.apply(&settings) {
             self.warn(&e);
@@ -124,7 +124,7 @@ impl Machine {
         for warning in warnings {
             self.warn(&format!("{}.conf: {}", id, warning));
         }
-        self.game = Some(ActiveGame { id: id.to_string(), name: prepared.name, base, saved: settings, replaced, programs_before, input, pad, choose_after: false });
+        self.game = Some(ActiveGame { id: id.to_string(), name: prepared.name, base, saved: settings, replaced, programs_before, input, pad, choose_after: false, saves_lock: prepared.saves_lock });
         Ok(message)
     }
 

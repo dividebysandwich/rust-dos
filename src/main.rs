@@ -2116,7 +2116,7 @@ impl MainHost<'_, '_> {
             config_warning(self.cpu, &format!("games/{}.conf: {}", id, warning));
         }
         if let Some(saves) = self.saved.file.as_deref().and_then(|f| games_dir(Some(f))).map(|g| games::saves_dir(&g)) {
-            games::overlay_drives(&mut prepared, id, &saves);
+            games::overlay_drives(&mut prepared, id, &saves)?;
         }
         if let Err(e) = self.apply(&prepared.settings) {
             config_warning(self.cpu, &e);
@@ -2151,7 +2151,7 @@ impl MainHost<'_, '_> {
             config_warning(self.cpu, &format!("games/{}.conf: {}", id, warning));
         }
         *self.game =
-            Some(ActiveGame { id: id.to_string(), name: prepared.name, base, saved: prepared.settings, replaced, programs_before, input, pad, choose_after: false });
+            Some(ActiveGame { id: id.to_string(), name: prepared.name, base, saved: prepared.settings, replaced, programs_before, input, pad, choose_after: false, saves_lock: prepared.saves_lock });
         Ok(message)
     }
 
