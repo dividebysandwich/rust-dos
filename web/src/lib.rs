@@ -1171,6 +1171,7 @@ impl PageHost<'_> {
             input: None,
             pad: None,
             choose_after: false,
+            saves_lock: None,
         });
         Ok(message)
     }

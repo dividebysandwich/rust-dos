@@ -414,10 +414,10 @@ mod tests {
         let disk = rust_dos::diskimage::DiskImage::blank_hard_disk("Win98.img", 8 << 20, None).unwrap();
         disk.copy_to(&os.join("Win98.img")).unwrap();
         add_os_dirs(&dirs.system);
-        let os = fs::canonicalize(&os).unwrap();
         fs::create_dir_all(dir.join("Game")).unwrap();
         fs::write(dir.join("Game/GAME.EXE"), "MZ").unwrap();
-        let game = fs::canonicalize(dir.join("Game")).unwrap();
+        // As profiles have a package's path: without Windows' `\\?\`.
+        let game = PathBuf::from(rust_dos::mount::display_host_path(&fs::canonicalize(dir.join("Game")).unwrap()));
         // Its profile's drives and commands.
         let made = |plan: Plan| {
             let profile = plan.profile.expect("a profile");
