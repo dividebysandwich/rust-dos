@@ -1634,6 +1634,8 @@ impl Gpu {
             gl.uniform_1_f32(u(lit, "u_fog").as_ref(), if scene.sky { 0.02 } else { 0.0 });
             let has_ao = u(lit, "u_has_ao");
             gl.uniform_1_i32(has_ao.as_ref(), ao.is_some() as i32);
+            let see_through = u(lit, "u_see_through");
+            gl.uniform_1_i32(see_through.as_ref(), 0);
             gl.uniform_1_i32(u(lit, "u_ao").as_ref(), 6);
             gl.uniform_2_f32_slice(u(lit, "u_view_size").as_ref(), &[w as f32, h as f32]);
             gl.active_texture(glow::TEXTURE6);
@@ -1657,6 +1659,9 @@ impl Gpu {
                     gl.enable(glow::BLEND);
                     gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
                     gl.uniform_1_i32(has_ao.as_ref(), 0);
+                    // What is seen through is lit more cheaply: it is over
+                    // other surfaces, often many and large.
+                    gl.uniform_1_i32(see_through.as_ref(), 1);
                 }
                 if blended {
                     gl.depth_mask(false);

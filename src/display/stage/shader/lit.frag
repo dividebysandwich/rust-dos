@@ -90,6 +90,9 @@ uniform sampler2DArray u_ao;
 uniform sampler2D u_ao;
 #endif
 uniform int u_has_ao;
+// A see-through mesh, lit more cheaply: no shadows, and the screen's light
+// as one light of the whole picture's colour.
+uniform int u_see_through;
 uniform vec2 u_view_size;
 uniform sampler3D u_gi;
 uniform vec3 u_gi_low;
@@ -200,6 +203,18 @@ void patch_factors(vec3 p, vec3 n, out float f[PATCHES]) {
     }
 }
 
+// The screen's light at `p` as one small flat light of the whole
+// picture's colour: all but exact far away, and cheap anywhere (no more
+// than a whole hemisphere's worth close by).
+vec3 screen_light_one(vec3 p, vec3 n) {
+    vec3 to = u_glow_origin + (u_glow_across + u_glow_down) * 0.5 - p;
+    float d2 = dot(to, to);
+    vec3 l = to * inversesqrt(d2);
+    float area = length(u_glow_across) * length(u_glow_down) / 3.14159265;
+    float f = area * max(dot(n, l), 0.0) * max(-dot(u_glow_basis[2], l), 0.0) / d2;
+    return texelFetch(u_glow_grid, ivec2(GRID_W, 0), 0).rgb * min(f, 1.0);
+}
+
 // The light the screen gives `p`: each patch's colour times its factor.
 // Far away, as one small flat light of the whole picture's colour.
 vec3 screen_light(vec3 p, vec3 n) {
@@ -208,10 +223,7 @@ vec3 screen_light(vec3 p, vec3 n) {
     float d2 = dot(to, to);
     float diagonal = length(u_glow_across + u_glow_down);
     if (d2 > 9.0 * diagonal * diagonal) {
-        vec3 l = to * inversesqrt(d2);
-        float area = length(u_glow_across) * length(u_glow_down) / 3.14159265;
-        float f = area * max(dot(n, l), 0.0) * max(-dot(u_glow_basis[2], l), 0.0) / d2;
-        return texelFetch(u_glow_grid, ivec2(GRID_W, 0), 0).rgb * f;
+        return screen_light_one(p, n);
     }
     bool far = far_from_screen(p);
     vec3 sum = vec3(0.0);
@@ -351,6 +363,9 @@ void main() {
 #ifdef LEAVE_OUT_SHADOWS
             shadow.x = -1;
 #endif
+            if (u_see_through == 1) {
+                shadow.x = -1;
+            }
             if (lambert > 0.0 && shadow.x >= 0) {
                 int layer = shadow.y == 1 ? shadow.x + cube_face(-l) : shadow.x;
                 lambert *= shadow_layer(layer, v_world, n, dist, 1.5);
@@ -384,13 +399,17 @@ void main() {
         return;
 #elif !defined(LEAVE_OUT_SCREEN)
         if (u_has_screen == 1 && u_glow > 0.0 && before_screen(v_world)) {
-            vec3 glow = screen_light(v_world, n);
-            if (dot(glow, vec3(1.0)) > 0.0) {
+            if (u_see_through == 1) {
+                light += screen_light_one(v_world, n) * u_glow;
+            } else {
+                vec3 glow = screen_light(v_world, n);
+                if (dot(glow, vec3(1.0)) > 0.0) {
 #ifdef LEAVE_OUT_SHADOWS
-                light += glow * u_glow;
+                    light += glow * u_glow;
 #else
-                light += glow * u_glow * screen_shadow(v_world, n);
+                    light += glow * u_glow * screen_shadow(v_world, n);
 #endif
+                }
             }
         }
 #endif
