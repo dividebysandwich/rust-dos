@@ -601,9 +601,6 @@ fn session(
             None => "not foveated".to_string(),
         }
     ));
-    if let Ok(parts) = std::env::var("RUST_DOS_VR_LEAVE_OUT") {
-        log::line(format!("Left out of the views, to time them: {}", parts));
-    }
     let mut gpu = Gpu::new(gl, glsl, &scene, look.quality, gpu_options)?;
     // The window's view of the left eye, at half its size.
     let ((ew, eh), srgb) = xr.eye_format();
@@ -635,9 +632,7 @@ fn session(
     let mut controllers = Controllers::default();
     let mut screen: Option<usize> = None;
     let mut reported = std::time::Instant::now();
-    let dump_prefix = std::env::var("RUST_DOS_VR_DUMP").ok();
     let mut failed: Option<String> = None;
-    let mut frame = 0u32;
     while !shared.stop.load(Ordering::Relaxed) {
         // Another scene, with the screen's picture lighting it: the old one
         // stays if it can't be drawn.
@@ -742,23 +737,12 @@ fn session(
                 }
             }
             gpu.mark(gl, Pass::Copy);
-            if frame == DUMP_FRAME
-                && let Some(prefix) = &dump_prefix
-            {
-                for i in 0..views.len() {
-                    let layer = target.layered.then_some(i as i32);
-                    if let Some(read) = gpu.read_framebuffer(gl, target.texture, layer) {
-                        dump(gl, read, target.area, &format!("{}-{}.ppm", prefix, target.first + i));
-                    }
-                }
-            }
             // The eyes' commands on their way before their image is
             // released.
             // SAFETY: see `GlScreen`.
             unsafe { gl.flush() };
         });
         gpu.frame_end();
-        frame += 1;
         if let Err(e) = drawn {
             log::line(e);
         }
@@ -796,33 +780,6 @@ fn session(
 
 /// How often the part of the eyes' images drawn may change.
 const ADAPT_EVERY: std::time::Duration = std::time::Duration::from_millis(500);
-
-/// The frame whose eyes RUST_DOS_VR_DUMP writes.
-const DUMP_FRAME: u32 = 300;
-
-/// Write the picture in `framebuffer`, `size` big, to `path` as a PPM: the
-/// eyes as drawn, to compare the ways of drawing them (RUST_DOS_VR_DUMP=
-/// the files' prefix).
-fn dump(gl: &glow::Context, framebuffer: glow::Framebuffer, size: (u32, u32), path: &str) {
-    let (w, h) = (size.0 as usize, size.1 as usize);
-    let mut pixels = vec![0u8; w * h * 4];
-    // SAFETY: see `GlScreen`.
-    unsafe {
-        gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(framebuffer));
-        gl.read_buffer(glow::COLOR_ATTACHMENT0);
-        let out = glow::PixelPackData::Slice(Some(&mut pixels));
-        gl.read_pixels(0, 0, w as i32, h as i32, glow::RGBA, glow::UNSIGNED_BYTE, out);
-        gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
-    }
-    let mut ppm = format!("P6\n{} {}\n255\n", w, h).into_bytes();
-    for row in pixels.chunks(w * 4).rev() {
-        ppm.extend(row.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
-    }
-    match std::fs::write(path, ppm) {
-        Ok(()) => log::line(format!("Wrote {}", path)),
-        Err(e) => log::line(format!("Can't write {}: {}", path, e)),
-    }
-}
 
 #[cfg(test)]
 mod tests {

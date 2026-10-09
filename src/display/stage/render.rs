@@ -536,8 +536,6 @@ pub struct Gpu {
     image_framebuffers: std::collections::HashMap<(u32, bool, bool), glow::Framebuffer>,
     read_framebuffers: std::collections::HashMap<(u32, i32), glow::Framebuffer>,
     image_depth: Option<ImageDepth>,
-    /// What RUST_DOS_VR_LEAVE_OUT leaves out (`LEAVE_OUT`).
-    leave_out: Vec<&'static str>,
     /// The wrap each of `textures` was last set to (repeat or not).
     wraps: std::cell::RefCell<Vec<Option<bool>>>,
     shadows: Option<Shadows>,
@@ -557,18 +555,6 @@ pub struct Gpu {
     textures: Vec<glow::Texture>,
     target: Option<Target>,
     anisotropy: Option<f32>,
-}
-
-/// What `RUST_DOS_VR_LEAVE_OUT` can leave out of the views (a list, by
-/// commas), to find out on a headset what takes its graphics chip the time:
-/// the shader's parts by define, the blended meshes and the depth pass
-/// before the colours by `Gpu::leave_out`.
-const LEAVE_OUT: [&str; 8] = ["lighting", "gi", "shadows", "screen", "textures", "blend", "prepass", "ao"];
-
-/// The parts of the views `RUST_DOS_VR_LEAVE_OUT` names.
-fn left_out() -> Vec<&'static str> {
-    let wanted = std::env::var("RUST_DOS_VR_LEAVE_OUT").unwrap_or_default().to_ascii_lowercase();
-    LEAVE_OUT.into_iter().filter(|part| wanted.split(',').any(|w| w.trim() == *part)).collect()
 }
 
 /// The defines of the programs drawing one view at a time.
@@ -702,9 +688,7 @@ impl Gpu {
     /// Compile the programs and upload `scene`, to draw as `options` say.
     pub fn new(gl: &glow::Context, glsl: Glsl, scene: &Scene, quality: VrQuality, options: Options) -> Result<Self, String> {
         let (grid_size, taps, bounce, ao_samples) = lighting(quality);
-        let leave_out = left_out();
         let ao_samples = match options.ambient_occlusion {
-            _ if leave_out.contains(&"ao") => 0,
             Some(false) => 0,
             Some(true) if ao_samples == 0 => 8,
             _ => ao_samples,
@@ -727,11 +711,7 @@ impl Gpu {
             ao_samples.max(1)
         );
         // The views' programs draw both at once with `multiview`.
-        let left: String = leave_out.iter().map(|part| format!("#define LEAVE_OUT_{}\n", part.to_ascii_uppercase())).collect();
-        if !leave_out.is_empty() {
-            eprintln!("[VR] Left out of the views, to time them: {}", leave_out.join(", "));
-        }
-        let view_defines = format!("{}{}{}", if multiview.is_some() { TWO_VIEWS } else { ONE_VIEW }, defines, left);
+        let view_defines = format!("{}{}", if multiview.is_some() { TWO_VIEWS } else { ONE_VIEW }, defines);
         let defines = format!("{}{}", ONE_VIEW, defines);
         let sky_defines = format!("{}#define FAR 1\n", view_defines);
         let mut programs = Vec::new();
@@ -794,7 +774,6 @@ impl Gpu {
             image_framebuffers: Default::default(),
             read_framebuffers: Default::default(),
             image_depth: None,
-            leave_out,
             wraps: Default::default(),
             shadows: None,
             grid,
@@ -1616,15 +1595,11 @@ impl Gpu {
             // are in front.
             gl.enable(glow::DEPTH_TEST);
             gl.depth_func(glow::LESS);
-            if self.leave_out.contains(&"prepass") {
-                gl.depth_func(glow::LEQUAL);
-            } else {
-                gl.color_mask(false, false, false, false);
-                self.draw_depth(gl, scene, &vps);
-                gl.color_mask(true, true, true, true);
-                gl.depth_mask(false);
-                gl.depth_func(glow::LEQUAL);
-            }
+            gl.color_mask(false, false, false, false);
+            self.draw_depth(gl, scene, &vps);
+            gl.color_mask(true, true, true, true);
+            gl.depth_mask(false);
+            gl.depth_func(glow::LEQUAL);
             gl.use_program(Some(lit));
             gl.uniform_matrix_4_f32_slice(u(lit, "u_view_projection").as_ref(), false, &vp_floats);
             let model = u(lit, "u_model");
@@ -1668,7 +1643,7 @@ impl Gpu {
                 }
                 for mesh in &self.meshes {
                     let material = &scene.materials[mesh.material];
-                    if (material.alpha == Alpha::Blend) != blended || (blended && self.leave_out.contains(&"blend")) {
+                    if (material.alpha == Alpha::Blend) != blended {
                         continue;
                     }
                     let glow = material.led.is_none_or(|led| super::scene::lit(leds, led));

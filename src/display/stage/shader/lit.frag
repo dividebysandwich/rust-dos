@@ -276,11 +276,9 @@ vec4 gi_light(vec3 p, vec3 n) {
 
 void main() {
     vec4 base = u_base_color;
-#ifndef LEAVE_OUT_TEXTURES
     if (u_has_base == 1) {
         base *= texture(u_base, v_uv);
     }
-#endif
     if (u_cutoff >= 0.0 && base.a < u_cutoff) {
         discard;
     }
@@ -327,13 +325,10 @@ void main() {
         // The sky lights from above more than from below, unless the
         // probes know better.
         vec3 light = u_ambient * (0.65 + 0.35 * n.y);
-#ifndef LEAVE_OUT_LIGHTING
-#ifndef LEAVE_OUT_GI
         if (u_has_gi == 1) {
             vec4 bounced = gi_light(v_world, n);
             light = mix(light, bounced.rgb, bounced.a);
         }
-#endif
 #ifndef BAKE
         if (u_has_ao == 1) {
             light *= AO_AT(u_ao, gl_FragCoord.xy / u_view_size).r;
@@ -360,9 +355,6 @@ void main() {
             }
             float lambert = max(dot(n, l), 0.0) * att;
             ivec2 shadow = u_light_shadow[i];
-#ifdef LEAVE_OUT_SHADOWS
-            shadow.x = -1;
-#endif
             if (u_see_through == 1) {
                 shadow.x = -1;
             }
@@ -397,22 +389,17 @@ void main() {
         o_bake3 = group[1];
         o_bake4 = group[2];
         return;
-#elif !defined(LEAVE_OUT_SCREEN)
+#else
         if (u_has_screen == 1 && u_glow > 0.0 && before_screen(v_world)) {
             if (u_see_through == 1) {
                 light += screen_light_one(v_world, n) * u_glow;
             } else {
                 vec3 glow = screen_light(v_world, n);
                 if (dot(glow, vec3(1.0)) > 0.0) {
-#ifdef LEAVE_OUT_SHADOWS
-                    light += glow * u_glow;
-#else
                     light += glow * u_glow * screen_shadow(v_world, n);
-#endif
                 }
             }
         }
-#endif
 #endif
         color = albedo * light + emissive;
     }
