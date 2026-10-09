@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// The extensions of the disk and CD images a drive can show.
-pub const IMAGES: &[&str] = &["cue", "iso", "bin", "img", "ima", "vfd", "flp", "dsk", "86f", "ins", "inst", "gog"];
+pub const IMAGES: &[&str] = crate::mount::IMAGE_EXTENSIONS;
 pub const SOUNDFONTS: &[&str] = &["sf2"];
 pub const MT32_ROMS: &[&str] = &["rom", "bin"];
 
@@ -212,7 +212,7 @@ mod tests {
         for d in ["games/doom", "Images", ".hidden"] {
             fs::create_dir_all(dir.join(d)).unwrap();
         }
-        for f in ["b.CUE", "a.iso", "notes.txt", "Images/x.bin"] {
+        for f in ["b.CUE", "a.iso", "c.vhd", "notes.txt", "Images/x.bin"] {
             fs::write(dir.join(f), b"").unwrap();
         }
         dir
@@ -226,8 +226,8 @@ mod tests {
     fn lists_directories_then_wanted_files() {
         let dir = scratch("list");
         let mut b = Browser::new("t", &dir, true, IMAGES);
-        assert_eq!(names(&b), ["..", "games", "Images", "a.iso", "b.CUE"]);
-        assert_eq!(b.rows(), 6);
+        assert_eq!(names(&b), ["..", "games", "Images", "a.iso", "b.CUE", "c.vhd"]);
+        assert_eq!(b.rows(), 7);
 
         // Use this directory
         assert_eq!(b.activate(), Ok(Some(dir.clone())));

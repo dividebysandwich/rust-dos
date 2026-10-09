@@ -60,7 +60,7 @@ IMGMOUNT is the same command.\r
 ";
 
 /// The extensions of disk and CD images.
-const IMAGE_EXTENSIONS: &[&str] =
+pub(crate) const IMAGE_EXTENSIONS: &[&str] =
     &["img", "ima", "vfd", "flp", "dsk", "360", "720", "1200", "1440", "86f", "iso", "cue", "bin", "gog", "ins", "inst", "vhd"];
 
 /// Whether a path is a disk or CD image's, by its extension.
