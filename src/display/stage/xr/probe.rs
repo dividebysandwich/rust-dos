@@ -93,7 +93,15 @@ pub fn run(gl: &glow::Context, sdl_driver: &str, settings: &VrSettings) {
         report.line(format!("GLSL: {}", gl.get_parameter_string(glow::SHADING_LANGUAGE_VERSION)));
     }
     let extensions = gl.supported_extensions();
-    for wanted in ["GL_EXT_memory_object", "GL_EXT_memory_object_fd", "GL_EXT_semaphore", "GL_EXT_semaphore_fd"] {
+    for wanted in [
+        "GL_EXT_memory_object",
+        "GL_EXT_memory_object_fd",
+        "GL_EXT_semaphore",
+        "GL_EXT_semaphore_fd",
+        "GL_OVR_multiview2",
+        "GL_EXT_multisampled_render_to_texture",
+        "GL_OVR_multiview_multisampled_render_to_texture",
+    ] {
         report.line(format!("{}: {}", wanted, if extensions.contains(wanted) { "yes" } else { "no" }));
     }
     #[cfg(target_os = "linux")]

@@ -30,7 +30,7 @@ pub use controls::VrInput;
 use super::audio_mix::Mix;
 use glam::{Mat4, Vec2};
 use glow::HasContext;
-use render::{Format, Gpu, ScreenTarget, View};
+use render::{Format, Gpu, Pass, ScreenTarget, View};
 use rust_dos::vr::{ScreenFit, VrMode, VrSettings};
 use scene::Scene;
 use rust_dos::vr::{Leds, VrGraphics, VrQuality};
@@ -71,6 +71,13 @@ pub struct Stage {
     /// on a thread of its own to take its place.
     scene_path: Option<PathBuf>,
     loading: Option<(Option<PathBuf>, Receiver<Result<Scene, String>>)>,
+    /// When the window's frame times were last said (RUST_DOS_VR_TIMING).
+    timing_since: std::time::Instant,
+}
+
+/// Whether the window's frames are timed: with RUST_DOS_VR_TIMING set.
+fn window_timed() -> bool {
+    std::env::var_os("RUST_DOS_VR_TIMING").is_some()
 }
 
 /// Width and height.
@@ -112,7 +119,7 @@ impl Stage {
             Scene::test_room()
         });
         let scene = Arc::new(scene);
-        let mut gpu = Gpu::new(gl, glsl, &scene, settings.quality)?;
+        let mut gpu = Gpu::new(gl, glsl, &scene, settings.quality, window_timed())?;
         gpu.set_glow(glow_of(settings));
         let mut screens = Vec::new();
         for _ in 0..3 {
@@ -144,6 +151,7 @@ impl Stage {
             glow: glow_of(settings),
             scene_path: settings.scene.clone(),
             loading: None,
+            timing_since: std::time::Instant::now(),
         };
         if settings.mode == VrMode::Headset {
             notes.extend(stage.start_headset(settings, window, main));
@@ -251,8 +259,9 @@ impl Stage {
             return;
         }
         let screen = self.latest.map(|i| self.screens[i].texture);
+        self.gpu.frame_start(gl);
         if let Some(texture) = screen.filter(|_| std::mem::take(&mut self.fresh)) {
-            self.gpu.prepare(gl, texture);
+            self.gpu.prepare(gl, &self.scene, texture);
         }
         let aspect = drawable.0 as f32 / drawable.1 as f32;
         let view = View { view: self.camera.view(), projection: self.camera.projection(aspect) };
@@ -263,6 +272,14 @@ impl Stage {
             return;
         }
         self.gpu.copy_to(gl, None, (0, 0, drawable.0 as i32, drawable.1 as i32));
+        self.gpu.mark(gl, Pass::Copy);
+        self.gpu.frame_end();
+        if self.timing_since.elapsed().as_secs() >= 3 {
+            self.timing_since = std::time::Instant::now();
+            if let Some(line) = self.gpu.timing_report() {
+                eprintln!("[VR] {}", line);
+            }
+        }
         self.shown = Some((view.view_projection(), (0.0, 0.0, drawable.0 as f32, drawable.1 as f32)));
     }
 
@@ -344,7 +361,7 @@ impl Stage {
         };
         let path = path.clone();
         self.loading = None;
-        let scene = match read.and_then(|scene| Ok((Gpu::new(gl, self.glsl, &scene, self.quality)?, scene))) {
+        let scene = match read.and_then(|scene| Ok((Gpu::new(gl, self.glsl, &scene, self.quality, window_timed())?, scene))) {
             Ok((gpu, scene)) => {
                 std::mem::replace(&mut self.gpu, gpu).delete(gl);
                 self.gpu.set_glow(self.glow);
@@ -392,7 +409,7 @@ impl Stage {
         let mut notes = Vec::new();
         let mut restart = false;
         if settings.quality != self.quality {
-            match Gpu::new(gl, self.glsl, &self.scene, settings.quality) {
+            match Gpu::new(gl, self.glsl, &self.scene, settings.quality, window_timed()) {
                 Ok(gpu) => {
                     std::mem::replace(&mut self.gpu, gpu).delete(gl);
                     self.quality = settings.quality;

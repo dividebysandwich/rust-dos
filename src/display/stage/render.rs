@@ -125,49 +125,174 @@ struct Gi {
     stale: bool,
 }
 
-/// How long the views take the graphics chip, by a timer query around
-/// every one drawn while none is in flight, averaged and printed every few
-/// seconds.
-struct Timing {
-    query: glow::Query,
-    /// A view is being timed, and whether it has ended.
-    running: Option<bool>,
-    nanoseconds: u64,
-    views: u32,
-    since: std::time::Instant,
+/// What the context offers that the views can be drawn faster with.
+#[derive(Clone, Debug, Default)]
+pub struct Features {
+    pub renderer: String,
+    /// Both eyes in one pass (GL_OVR_multiview2).
+    pub multiview: bool,
+    /// Multisampled into a texture with the samples resolved on the chip
+    /// (GL_EXT_multisampled_render_to_texture).
+    pub msrtt: bool,
+    /// Both at once (GL_OVR_multiview_multisampled_render_to_texture).
+    pub multiview_msrtt: bool,
 }
 
-impl Timing {
-    fn new(gl: &glow::Context) -> Option<Self> {
-        // SAFETY: see `GlScreen`.
-        let query = unsafe { gl.create_query() }.ok()?;
-        Some(Timing { query, running: None, nanoseconds: 0, views: 0, since: std::time::Instant::now() })
-    }
-
-    fn begin(&mut self, gl: &glow::Context) {
-        // SAFETY: see `GlScreen`.
-        unsafe {
-            if self.running == Some(true) && gl.get_query_parameter_u32(self.query, glow::QUERY_RESULT_AVAILABLE) != 0 {
-                self.nanoseconds += gl.get_query_parameter_u32(self.query, glow::QUERY_RESULT) as u64;
-                self.views += 1;
-                self.running = None;
-            }
-            if self.since.elapsed().as_secs() >= 3 && self.views > 0 {
-                eprintln!("[VR] A view takes the graphics chip {:.2} ms", self.nanoseconds as f64 / self.views as f64 / 1e6);
-                (self.nanoseconds, self.views, self.since) = (0, 0, std::time::Instant::now());
-            }
-            if self.running.is_none() {
-                gl.begin_query(glow::TIME_ELAPSED, self.query);
-                self.running = Some(false);
-            }
+impl Features {
+    pub fn of(gl: &glow::Context) -> Self {
+        let has = |name: &str| gl.supported_extensions().contains(name);
+        Features {
+            // SAFETY: see `GlScreen`.
+            renderer: unsafe { gl.get_parameter_string(glow::RENDERER) },
+            multiview: has("GL_OVR_multiview2"),
+            msrtt: has("GL_EXT_multisampled_render_to_texture"),
+            multiview_msrtt: has("GL_OVR_multiview_multisampled_render_to_texture"),
         }
     }
 
-    fn end(&mut self, gl: &glow::Context) {
-        if self.running == Some(false) {
+    pub fn describe(&self) -> String {
+        let yes = |b: bool| if b { "yes" } else { "no" };
+        format!(
+            "OpenGL on {}: single-pass stereo {}, multisampling on the chip {}, both {}",
+            self.renderer,
+            yes(self.multiview),
+            yes(self.msrtt),
+            yes(self.multiview_msrtt)
+        )
+    }
+}
+
+/// What the graphics chip's time between two timestamps of a frame went
+/// to, as `Clock` counts it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pass {
+    /// The screen's light and the light bounced around, for a new picture.
+    Light,
+    /// The ambient occlusion.
+    Ao,
+    /// The scene: sky, depth, lit meshes, and the samples resolved.
+    Scene,
+    /// Copies into the headset's images and the window's mirror.
+    Copy,
+}
+
+impl Pass {
+    const ALL: [Pass; 4] = [Pass::Light, Pass::Ao, Pass::Scene, Pass::Copy];
+
+    fn name(self) -> &'static str {
+        match self {
+            Pass::Light => "light",
+            Pass::Ao => "occlusion",
+            Pass::Scene => "scene",
+            Pass::Copy => "copies",
+        }
+    }
+}
+
+/// How long frames take the graphics chip, in all and by pass: timestamps
+/// between the passes (never inside one, which a tiling chip would have to
+/// split), read back a few frames later, when they are there.
+struct Clock {
+    /// The frame being drawn: its first timestamp, and each pass's last.
+    current: Vec<(glow::Query, Option<Pass>)>,
+    /// Frames drawn whose timestamps aren't read yet, oldest first.
+    pending: std::collections::VecDeque<Vec<(glow::Query, Option<Pass>)>>,
+    free: Vec<glow::Query>,
+    /// Milliseconds by pass, and frames, since the last report.
+    sums: [f64; 4],
+    total: f64,
+    frames: u32,
+    /// The newest frame read's milliseconds in all.
+    latest: Option<f32>,
+}
+
+impl Clock {
+    /// Frames in flight at most; more go untimed.
+    const IN_FLIGHT: usize = 4;
+
+    fn new() -> Self {
+        Clock { current: Vec::new(), pending: Default::default(), free: Vec::new(), sums: [0.0; 4], total: 0.0, frames: 0, latest: None }
+    }
+
+    fn stamp(&mut self, gl: &glow::Context, pass: Option<Pass>) {
+        // SAFETY: see `GlScreen`.
+        let query = self.free.pop().or_else(|| unsafe { gl.create_query() }.ok());
+        if let Some(query) = query {
             // SAFETY: see `GlScreen`.
-            unsafe { gl.end_query(glow::TIME_ELAPSED) };
-            self.running = Some(true);
+            unsafe { gl.query_counter(query, glow::TIMESTAMP) };
+            self.current.push((query, pass));
+        }
+    }
+
+    fn start(&mut self, gl: &glow::Context) {
+        self.read(gl);
+        self.free.extend(self.current.drain(..).map(|(q, _)| q));
+        if self.pending.len() < Self::IN_FLIGHT {
+            self.stamp(gl, None);
+        }
+    }
+
+    /// `pass` ends now, if a frame is being timed.
+    fn mark(&mut self, gl: &glow::Context, pass: Pass) {
+        if !self.current.is_empty() {
+            self.stamp(gl, Some(pass));
+        }
+    }
+
+    fn end(&mut self) {
+        if self.current.len() > 1 {
+            self.pending.push_back(std::mem::take(&mut self.current));
+        }
+    }
+
+    /// Count the frames whose timestamps are there.
+    fn read(&mut self, gl: &glow::Context) {
+        while let Some(frame) = self.pending.front() {
+            let &(last, _) = frame.last().expect("a frame's timestamps");
+            // SAFETY: see `GlScreen`.
+            if unsafe { gl.get_query_parameter_u32(last, glow::QUERY_RESULT_AVAILABLE) } == 0 {
+                break;
+            }
+            let frame = self.pending.pop_front().expect("the frame");
+            // SAFETY: see `GlScreen`.
+            let times: Vec<u64> = frame.iter().map(|&(q, _)| unsafe { gl.get_query_parameter_u64(q, glow::QUERY_RESULT) }).collect();
+            for (pair, &(_, pass)) in times.windows(2).zip(&frame[1..]) {
+                let ms = pair[1].saturating_sub(pair[0]) as f64 / 1e6;
+                if let Some(at) = Pass::ALL.iter().position(|&p| Some(p) == pass) {
+                    self.sums[at] += ms;
+                }
+            }
+            let total = times[times.len() - 1].saturating_sub(times[0]) as f64 / 1e6;
+            self.total += total;
+            self.frames += 1;
+            self.latest = Some(total as f32);
+            self.free.extend(frame.into_iter().map(|(q, _)| q));
+        }
+    }
+
+    /// The frames' average since the last report, by pass; counted again
+    /// from here.
+    fn report(&mut self) -> Option<String> {
+        if self.frames == 0 {
+            return None;
+        }
+        let n = self.frames as f64;
+        let passes: Vec<String> = Pass::ALL
+            .iter()
+            .zip(self.sums)
+            .filter(|(_, ms)| *ms > 0.0)
+            .map(|(pass, ms)| format!("{} {:.2}", pass.name(), ms / n))
+            .collect();
+        let line = format!("The graphics chip takes {:.2} ms a frame ({})", self.total / n, passes.join(", "));
+        (self.sums, self.total, self.frames) = ([0.0; 4], 0.0, 0);
+        Some(line)
+    }
+
+    fn delete(self, gl: &glow::Context) {
+        let queries = self.current.into_iter().chain(self.pending.into_iter().flatten()).map(|(q, _)| q);
+        for query in queries.chain(self.free) {
+            // SAFETY: see `GlScreen`.
+            unsafe { gl.delete_query(query) };
         }
     }
 }
@@ -291,9 +416,8 @@ pub struct Gpu {
     grid: Grid,
     gi: Option<Gi>,
     ao: Option<Ao>,
-    /// How long the views take the graphics chip, with RUST_DOS_VR_TIMING
-    /// set.
-    timing: Option<Timing>,
+    /// How long frames take the graphics chip, where they are timed.
+    clock: Option<Clock>,
     /// How brightly the screen lights the room, times the scene's.
     glow: f32,
     /// For the sky's triangle, made from the vertex number.
@@ -385,8 +509,8 @@ impl Gpu {
                     target.delete(gl);
                 }
             }
-            if let Some(timing) = self.timing {
-                gl.delete_query(timing.query);
+            if let Some(clock) = self.clock {
+                clock.delete(gl);
             }
             gl.delete_vertex_array(self.empty);
             for mesh in self.meshes.into_iter().chain([self.cube]) {
@@ -408,8 +532,9 @@ impl Gpu {
         }
     }
 
-    /// Compile the programs and upload `scene`.
-    pub fn new(gl: &glow::Context, glsl: Glsl, scene: &Scene, quality: VrQuality) -> Result<Self, String> {
+    /// Compile the programs and upload `scene`; `timed`, frames are timed
+    /// (`frame_start`).
+    pub fn new(gl: &glow::Context, glsl: Glsl, scene: &Scene, quality: VrQuality, timed: bool) -> Result<Self, String> {
         let (grid_size, taps, bounce, ao_samples) = lighting(quality);
         if glsl == Glsl::Es300 {
             return Err("the 3D view needs desktop OpenGL, not OpenGL ES".into());
@@ -481,7 +606,7 @@ impl Gpu {
             grid,
             gi: None,
             ao,
-            timing: std::env::var_os("RUST_DOS_VR_TIMING").and_then(|_| Timing::new(gl)),
+            clock: timed.then(Clock::new),
             glow: 1.0,
             empty,
             meshes: Vec::new(),
@@ -617,9 +742,10 @@ impl Gpu {
         }
     }
 
-    /// Take the light the screen gives from its new picture `screen`: once
-    /// for each picture, before the views are drawn.
-    pub fn prepare(&mut self, gl: &glow::Context, screen: glow::Texture) {
+    /// Take the light the screen gives from its new picture `screen`, and
+    /// the light it bounces around `scene`: once for each picture, before
+    /// the views are drawn.
+    pub fn prepare(&mut self, gl: &glow::Context, scene: &Scene, screen: glow::Texture) {
         let program = self.grid_program;
         let take = if self.grid.empty { 1.0 } else { GRID_TAKE };
         // SAFETY: see `GlScreen`.
@@ -647,6 +773,34 @@ impl Gpu {
         if let Some(gi) = &mut self.gi {
             gi.stale = true;
         }
+        self.update_gi(gl, scene);
+        self.mark(gl, Pass::Light);
+    }
+
+    /// A frame begins, to be timed if frames are.
+    pub fn frame_start(&mut self, gl: &glow::Context) {
+        if let Some(clock) = &mut self.clock {
+            clock.start(gl);
+        }
+    }
+
+    /// `pass` of the frame ends.
+    pub fn mark(&mut self, gl: &glow::Context, pass: Pass) {
+        if let Some(clock) = &mut self.clock {
+            clock.mark(gl, pass);
+        }
+    }
+
+    /// The frame is drawn.
+    pub fn frame_end(&mut self) {
+        if let Some(clock) = &mut self.clock {
+            clock.end();
+        }
+    }
+
+    /// The frames' times since the last report, in a line.
+    pub fn timing_report(&mut self) -> Option<String> {
+        self.clock.as_mut()?.report()
     }
 
     /// Set the lighting's uniforms of `program` (the scene's or the bake's)
@@ -1172,11 +1326,12 @@ impl Gpu {
         leds: Leds,
         extras: &[Extra],
     ) -> Result<(), String> {
-        if let Some(timing) = &mut self.timing {
-            timing.begin(gl);
-        }
+        // (After a change of the screen's brightness.)
         self.update_gi(gl, scene);
         let ao = self.draw_ao(gl, scene, view, format.size);
+        if ao.is_some() {
+            self.mark(gl, Pass::Ao);
+        }
         let (lit, sky, empty) = (self.lit, self.sky, self.empty);
         let target = self.target(gl, format)?;
         let (framebuffer, resolve) = (target.framebuffer, target.resolve);
@@ -1284,9 +1439,7 @@ impl Gpu {
             gl.blit_framebuffer(0, 0, w, h, 0, 0, w, h, glow::COLOR_BUFFER_BIT, glow::NEAREST);
             restore(gl);
         }
-        if let Some(timing) = &mut self.timing {
-            timing.end(gl);
-        }
+        self.mark(gl, Pass::Scene);
         Ok(())
     }
 

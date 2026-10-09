@@ -66,6 +66,9 @@ pub struct Bridge {
     interop: Interop,
     /// The formats the session offered.
     formats: Vec<u32>,
+    /// The eyes drawn whose images aren't copied yet: all are copied at
+    /// once after the last, with one wait.
+    drawn: Vec<usize>,
 }
 
 /// The swapchains' format out of the session's `formats`: whether it is
@@ -215,6 +218,7 @@ pub fn open(
         srgb,
         interop,
         formats,
+        drawn: Vec::new(),
     };
     // SAFETY: the device's own objects, made and destroyed with it
     // (`Bridge`'s drop).
@@ -465,8 +469,12 @@ impl Bridge {
 
     /// Submit `commands` and wait for them.
     fn submit(&self, commands: vk::CommandBuffer) -> Result<(), vk::Result> {
-        let buffers = [commands];
-        let submit = vk::SubmitInfo::default().command_buffers(&buffers);
+        self.submit_all(&[commands])
+    }
+
+    /// Submit `buffers` together and wait for them.
+    fn submit_all(&self, buffers: &[vk::CommandBuffer]) -> Result<(), vk::Result> {
+        let submit = vk::SubmitInfo::default().command_buffers(buffers);
         // SAFETY: the device's own objects; the queue is used by this thread
         // only, between the runtime's calls.
         unsafe {
@@ -548,16 +556,42 @@ impl Bridge {
         }
     }
 
-    /// Eye `index` is drawn, with `gl`: OpenGL finishes, Vulkan copies it
-    /// into the runtime's image, which is released.
+    /// Eye `index` is drawn, with `gl`: after the last eye, OpenGL
+    /// finishes, Vulkan copies them into the runtime's images, which are
+    /// released.
     pub fn release(&mut self, gl: &glow::Context, index: usize) -> Result<(), Failure> {
-        let Some(image) = self.eyes[index].acquired.take() else { return Ok(()) };
+        if self.eyes[index].acquired.is_none() {
+            return Ok(());
+        }
+        if !self.drawn.contains(&index) {
+            self.drawn.push(index);
+        }
+        if self.drawn.len() < self.eyes.len() {
+            return Ok(());
+        }
+        self.copy_drawn(gl)
+    }
+
+    /// Copy the eyes drawn into the runtime's images and release them.
+    pub fn copy_drawn(&mut self, gl: &glow::Context) -> Result<(), Failure> {
+        let drawn = std::mem::take(&mut self.drawn);
+        if drawn.is_empty() {
+            return Ok(());
+        }
         // SAFETY: see `GlScreen`.
         unsafe { gl.finish() };
-        let copied = self.submit(self.eyes[index].copies[image]);
-        let released = self.eyes[index].swapchain.release_image().map_err(|e| ("releasing the headset's image", e));
+        let buffers: Vec<_> = drawn.iter().filter_map(|&i| self.eyes[i].acquired.map(|image| self.eyes[i].copies[image])).collect();
+        let copied = self.submit_all(&buffers);
+        let mut released = Ok(());
+        for &i in &drawn {
+            if self.eyes[i].acquired.take().is_some()
+                && let Err(e) = self.eyes[i].swapchain.release_image()
+            {
+                released = Err(("releasing the headset's image", e));
+            }
+        }
         if let Err(e) = copied {
-            super::log::line(format!("Copying the eye into the headset's image: {}", e));
+            super::log::line(format!("Copying the eyes into the headset's images: {}", e));
             return Err(("copying into the headset's image", xr::sys::Result::ERROR_RUNTIME_FAILURE));
         }
         released

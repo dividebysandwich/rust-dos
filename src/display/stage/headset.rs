@@ -18,7 +18,7 @@
 //! reallocates a texture the other could be using.
 
 use super::controls::{Controllers, VrInput};
-use super::render::{Format, Gpu};
+use super::render::{Features, Format, Gpu, Pass};
 use super::scene::{Leds, Scene, Spawn};
 use super::xr::{Xr, XrOptions, log};
 use crate::video::shader::Glsl;
@@ -545,9 +545,10 @@ fn session(
     quality: VrQuality,
     options: &XrOptions,
 ) -> Result<(), String> {
-    let mut gpu = Gpu::new(gl, glsl, &scene, quality)?;
+    let mut gpu = Gpu::new(gl, glsl, &scene, quality, true)?;
     let mut xr = Xr::new(gl, options).map_err(|e| format!("No headset ({}); the scene is shown in the window", e))?;
     shared.note(xr.describe().to_string());
+    log::line(Features::of(gl).describe());
     // The window's view of the left eye, at half its size.
     let ((ew, eh), srgb) = xr.eye_format();
     let size = ((ew / 2).max(1), (eh / 2).max(1));
@@ -577,16 +578,19 @@ fn session(
     }
     let mut controllers = Controllers::default();
     let mut screen: Option<usize> = None;
+    let mut reported = std::time::Instant::now();
+    let dump_prefix = std::env::var("RUST_DOS_VR_DUMP").ok();
+    let mut frame = 0u32;
     while !shared.stop.load(Ordering::Relaxed) {
         // Another scene, with the screen's picture lighting it: the old one
         // stays if it can't be drawn.
         let next = shared.lock().scene.take();
         if let Some(next) = next {
-            match Gpu::new(gl, glsl, &next, quality) {
+            match Gpu::new(gl, glsl, &next, quality, true) {
                 Ok(made) => {
                     std::mem::replace(&mut gpu, made).delete(gl);
                     if let Some(index) = screen {
-                        gpu.prepare(gl, screens[index]);
+                        gpu.prepare(gl, &next, screens[index]);
                     }
                     scene = next;
                 }
@@ -625,6 +629,7 @@ fn session(
             }
         }
         gpu.set_glow(glow);
+        gpu.frame_start(gl);
         if let Some((index, fence, ())) = taken {
             if let Some(Fence(fence)) = fence {
                 // SAFETY: see `GlScreen`.
@@ -634,7 +639,7 @@ fn session(
                 }
             }
             screen = Some(index);
-            gpu.prepare(gl, screens[index]);
+            gpu.prepare(gl, &scene, screens[index]);
         }
         if recenter {
             xr.recenter();
@@ -662,16 +667,30 @@ fn session(
                 let (w, h) = (size.0 as i32, size.1 as i32);
                 gpu.copy_to(gl, Some(mirror[mirror_index].1), (0, 0, w, h));
                 // SAFETY: see `GlScreen`.
-                unsafe {
-                    if let Ok(fence) = gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0) {
-                        gl.flush();
-                        left = Some((fence, view.view_projection()));
-                    }
+                if let Ok(fence) = unsafe { gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0) } {
+                    left = Some((fence, view.view_projection()));
                 }
             }
+            gpu.mark(gl, Pass::Copy);
+            if frame == DUMP_FRAME
+                && let Some(prefix) = &dump_prefix
+            {
+                dump(gl, framebuffer, eye_size, &format!("{}-{}.ppm", prefix, eye));
+            }
+            // Each eye's commands on their way before its image is released.
+            // SAFETY: see `GlScreen`.
+            unsafe { gl.flush() };
         });
+        gpu.frame_end();
+        frame += 1;
         if let Err(e) = drawn {
             log::line(e);
+        }
+        if reported.elapsed() >= log::FrameStats::PERIOD {
+            reported = std::time::Instant::now();
+            if let Some(line) = gpu.timing_report() {
+                log::line(line);
+            }
         }
         let mut state = shared.lock();
         if let Some((fence, view_projection)) = left
@@ -685,6 +704,33 @@ fn session(
     }
     xr.close(gl);
     Ok(())
+}
+
+/// The frame whose eyes RUST_DOS_VR_DUMP writes.
+const DUMP_FRAME: u32 = 300;
+
+/// Write the picture in `framebuffer`, `size` big, to `path` as a PPM: the
+/// eyes as drawn, to compare the ways of drawing them (RUST_DOS_VR_DUMP=
+/// the files' prefix).
+fn dump(gl: &glow::Context, framebuffer: glow::Framebuffer, size: (u32, u32), path: &str) {
+    let (w, h) = (size.0 as usize, size.1 as usize);
+    let mut pixels = vec![0u8; w * h * 4];
+    // SAFETY: see `GlScreen`.
+    unsafe {
+        gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(framebuffer));
+        gl.read_buffer(glow::COLOR_ATTACHMENT0);
+        let out = glow::PixelPackData::Slice(Some(&mut pixels));
+        gl.read_pixels(0, 0, w as i32, h as i32, glow::RGBA, glow::UNSIGNED_BYTE, out);
+        gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+    }
+    let mut ppm = format!("P6\n{} {}\n255\n", w, h).into_bytes();
+    for row in pixels.chunks(w * 4).rev() {
+        ppm.extend(row.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
+    }
+    match std::fs::write(path, ppm) {
+        Ok(()) => log::line(format!("Wrote {}", path)),
+        Err(e) => log::line(format!("Can't write {}: {}", path, e)),
+    }
 }
 
 #[cfg(test)]

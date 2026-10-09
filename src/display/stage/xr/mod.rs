@@ -517,6 +517,8 @@ impl Xr {
         let Some(state) = self.pending.take() else { return Ok(()) };
         let time = state.predicted_display_time;
         let drawn = if state.should_render { self.draw_eyes(gl, time, world, draw).map(Some) } else { Ok(None) };
+        let flushed = self.frames.flush(gl);
+        let drawn = drawn.and_then(|views| flushed.map(|()| views));
         let failed = drawn.as_ref().err().map(|&(what, e)| self.fail(what, e));
         let views = drawn.ok().flatten();
         let ended = self.frames.end(time, self.blend, &self.space, views.as_deref());

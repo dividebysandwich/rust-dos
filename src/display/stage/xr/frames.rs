@@ -70,6 +70,19 @@ impl Frames {
         }
     }
 
+    /// Send on what the eyes drawn so far still hold back, with `gl`:
+    /// before a frame is ended, whether all its eyes were drawn or not.
+    pub fn flush(&mut self, gl: &glow::Context) -> Result<(), Failure> {
+        match self {
+            #[cfg(target_os = "linux")]
+            Frames::Vulkan(bridge) => bridge.copy_drawn(gl),
+            _ => {
+                let _ = gl;
+                Ok(())
+            }
+        }
+    }
+
     /// End the frame: the eyes drawn from `views`, or nothing.
     pub fn end(
         &mut self,
