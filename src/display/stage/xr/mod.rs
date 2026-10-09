@@ -74,6 +74,8 @@ pub struct Xr {
     recenter: bool,
     /// The session has had the focus.
     focused: bool,
+    /// The eyes' views have been logged.
+    views_logged: bool,
     events: xr::EventDataBuffer,
     description: String,
     /// Why the session can't go on, after a call failed in a way that
@@ -297,6 +299,7 @@ impl Xr {
             pending: None,
             recenter: false,
             focused: false,
+            views_logged: false,
             events: xr::EventDataBuffer::new(),
             description,
             failed: None,
@@ -539,6 +542,28 @@ impl Xr {
         let (_, views) = self.session.locate_views(VIEW, time, &self.space).map_err(|e| ("the headset's views", e))?;
         if views.len() < self.frames.eyes() {
             return Err(("the headset's views", xr::sys::Result::ERROR_VALIDATION_FAILURE));
+        }
+        if !self.views_logged {
+            self.views_logged = true;
+            for (index, view) in views.iter().enumerate() {
+                let (f, o, p) = (view.fov, view.pose.orientation, view.pose.position);
+                log::line(format!(
+                    "Eye {}: field of view left {:.1} right {:.1} up {:.1} down {:.1} degrees; \
+                     orientation {:.3} {:.3} {:.3} {:.3}, position {:.3} {:.3} {:.3}",
+                    index,
+                    f.angle_left.to_degrees(),
+                    f.angle_right.to_degrees(),
+                    f.angle_up.to_degrees(),
+                    f.angle_down.to_degrees(),
+                    o.x,
+                    o.y,
+                    o.z,
+                    o.w,
+                    p.x,
+                    p.y,
+                    p.z
+                ));
+            }
         }
         let (_, srgb) = self.frames.eye_format();
         for (index, view) in views.iter().take(self.frames.eyes()).enumerate() {
