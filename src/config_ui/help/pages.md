@@ -13,8 +13,8 @@ mounted as **C:**, with the game in it.
 
 A drive marked *boot* boots when Rust-DOS starts, in place of DOS: set
 it with *Auto-boot* under **Enter**. One marked *ovl* keeps its folder or
-archive as it is, its changes in the folder *Changes to* under **Enter**
-names.
+archive or disk image as it is, its changes in the folder *Write to*
+under **Enter** names.
 
 A system booted from an image, such as Windows 95, sees disks, not your
 folders. A folder on D: or later marked *share* becomes one of its hard
@@ -36,7 +36,8 @@ several images.
 - **Drive**: the letter DOS sees it as. **C:** for the game's folder,
   **D:** for its CD, **A:** for floppies.
 - **Path**: a folder, a zip or 7z archive, or an image file: a CD
-  (`.cue`, `.iso`, `.bin`), a floppy or a hard disk image (`.img`).
+  (`.cue`, `.iso`, `.bin`), a floppy or a hard disk image (`.img`,
+  `.vhd`).
   *Browse...* picks one. On Windows the buttons over its list, or
   **Left** and **Right**, go to the other drives.
 - **Type**: **cdrom** for a game CD, so the game finds its disc;
@@ -44,8 +45,12 @@ several images.
 - **Label**: the volume name. Some games check their CD's label; leave it
   empty to use the image's own.
 - **Read-only**: keeps programs from changing the files.
-- **Write to**: it set, any changes are written to this location; 
-  delete the folder to undo it all.
+- **IDE slot**: where a system booted from an image, such as Windows 95,
+  finds a hard disk or CD-ROM drive: the primary or secondary channel's
+  master or slave. *first free* suits most.
+- **Write to**: if set, any changes are written to this folder and the
+  folder, archive or image stays as it is (an image's changes go to
+  `<image>.rdelta` there); delete the folder to undo it all.
 - **Auto-boot**: for a floppy or hard disk image, boot from it when
   Rust-DOS starts instead of starting DOS. Only one drive boots; **F2**
   saves it.
@@ -62,6 +67,9 @@ wants to save to.
 - **File**: where the image goes on your computer.
 - **Type**: a floppy size, or a hard disk.
 - **Size**: a hard disk's size in MB.
+- **Format**: a hard disk's file: a raw image, or a VHD (as Virtual PC
+  and Hyper-V make them) that grows as it is written (*dynamic*) or takes
+  its whole size at once (*fixed*).
 - **Mount as**: the drive letter it gets.
 
 # Games {#games}

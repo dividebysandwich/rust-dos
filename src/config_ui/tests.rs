@@ -1487,6 +1487,23 @@ fn the_drives_page_makes_and_mounts_new_disk_images() {
     assert_eq!(host.mounts.last().map(|(spec, _)| (spec.drive, spec.opts.kind)), Some((3, DriveKind::HardDisk)));
     assert!(ui.image_dialog.is_none());
 
+    // A dynamic VHD, named for its format, which grows as it is written.
+    keys(&mut ui, &mut host, &[End, Enter]);
+    let dialog = ui.image_dialog.as_mut().unwrap();
+    dialog.path = TextField::new(&dir.join("hdd.img").display().to_string());
+    dialog.kind = crate::makeimg::PRESETS.len();
+    dialog.focus = ImageField::Format;
+    keys(&mut ui, &mut host, &[Right]);
+    let dialog = ui.image_dialog.as_mut().unwrap();
+    let vhd = dir.join("hdd.vhd");
+    assert_eq!((dialog.format_name(), dialog.path.text()), ("Dynamic VHD (.vhd, grows)", vhd.display().to_string()));
+    dialog.mount = Some(4);
+    ui.draw(&mut frame);
+    keys(&mut ui, &mut host, &[Enter]);
+    assert!(status(&ui).0.ends_with("hdd.vhd has been made and mounted as E:"), "{:?}", status(&ui));
+    assert!(crate::vhd::is_vhd(&crate::hostfs::File::open(&vhd).unwrap()));
+    assert!(std::fs::metadata(&vhd).unwrap().len() < 8 << 20);
+
     // The browser doesn't offer it: it has no host files.
     let mut browser = ConfigUi::for_frontend(Frontend { window: false, host_files: false });
     browser.open(&Settings::default(), None, &host);

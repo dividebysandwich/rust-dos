@@ -788,14 +788,20 @@ Esc closes it.
   CD image (Ins), change or
   swap the one a drive shows (Enter; this is how to change discs in the
   middle of a game), or unmount it (Del). **Browse...** picks directories
-  and images from the host. **Create a disk image...** makes a new, empty
-  floppy or hard disk image, as [MAKEIMG](#new-disk-images) does, and
-  mounts it on the drive picked (a floppy on A: or B:, where free). B (or
+  and images, VHDs among them, from the host. **Create a disk image...**
+  makes a new, empty floppy or hard disk image, as
+  [MAKEIMG](#new-disk-images) does, and mounts it on the drive picked (a
+  floppy on A: or B:, where free); a hard disk's **Format** makes it a raw
+  image or a dynamic (growing) or fixed VHD. B (or
   the mount dialog's **Boot**) [boots](#booting-a-disk-image) the disk
   image of the selected drive now, and the dialog's **Auto-boot** has it
-  boot whenever Rust-DOS starts, once saved (F2). Its **Changes to** is a
-  folder for a directory's or archive's changes, which leave it as it is
-  ([`-overlay`](#mounting-drives)); such a drive is marked *ovl*.
+  boot whenever Rust-DOS starts, once saved (F2). Its **Write to** is a
+  folder for the changes of a directory, an archive or a disk image
+  (`<image>.rdelta` there), which leave it as it is
+  ([`-overlay`](#mounting-drives)); such a drive is marked *ovl*. Its
+  **IDE slot** puts a hard disk or CD-ROM drive on the IDE channel a
+  booted system finds it on ([`-ide`](#booting-a-disk-image)); the first free one
+  otherwise.
 * **Display:** the scale, fullscreen, 4:3 aspect correction, variable
   refresh rate (VRR), the scaling filter, the CRT shader and the monochrome monitor.
 * **Emulator:** the CPU speed, the processor, the video card, the memory
@@ -1369,7 +1375,8 @@ was installed.
 VHD images can be fixed or dynamic (growing as they are written);
 differencing VHDs, which hold another image's changes, can't be mounted.
 A `.vhd` mounts like any other hard disk image, and a zip or `.dosz` that
-holds one mounts it.
+holds one mounts it. The settings window's Drives page makes new ones
+(**Create a disk image...**, **Format**).
 
 An archive (`.dosz`, `.zip`, `.7z`) or a folder in the `os` folder is a
 system of files rather than a disk image, Windows 3.1 say, which runs on

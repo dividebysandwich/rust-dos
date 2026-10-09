@@ -1,13 +1,13 @@
 //! The Drives page's dialog for making a new disk image, as MAKEIMG does
 //! (makeimg.rs), and mounting it: where it goes, the kind of disk (a
-//! floppy format, a hard disk of a preset size or of any size), its label
-//! and the drive to mount it on.
+//! floppy format, a hard disk of a preset size or of any size), a hard
+//! disk's file format (raw or VHD), its label and the drive to mount it on.
 
 use super::dialog::TextField;
 use super::draw::{self, Grid};
 use super::{ConfigUi, Hit, Host, Target, UiKey, fit};
 use crate::disk::{DRIVE_Z, DriveInfo, DriveKind, FLOPPY_DRIVES, LASTDRIVE, MountOptions, drive_letter};
-use crate::makeimg::{self, ImageSpec, PRESETS, Plan};
+use crate::makeimg::{self, Format, ImageSpec, PRESETS, Plan};
 use crate::mount::{MountSpec, contract_home, expand_host_path};
 use std::path::{Path, PathBuf};
 
@@ -19,6 +19,8 @@ pub enum ImageField {
     Kind,
     /// The size in MB, of a hard disk of any size.
     Size,
+    /// A hard disk's file format: raw or VHD.
+    Format,
     Label,
     Mount,
     Create,
@@ -37,6 +39,13 @@ pub enum ImageEvent {
 /// The kind of disk first offered: a 1.44 MB floppy.
 const FIRST_KIND: &str = "fd_1440kb";
 
+/// The file formats a hard disk image is made in, and what they are called.
+const FORMATS: [(Format, &str); 3] = [
+    (Format::Raw, "Raw image (.img)"),
+    (Format::VhdDynamic, "Dynamic VHD (.vhd, grows)"),
+    (Format::VhdFixed, "Fixed VHD (.vhd)"),
+];
+
 pub struct ImageDialog {
     pub path: TextField,
     /// Whether the path is still the one the dialog made up, whose name
@@ -45,6 +54,8 @@ pub struct ImageDialog {
     /// A disk type of `PRESETS`, or past them a hard disk of `size` MB.
     pub kind: usize,
     pub size: TextField,
+    /// A hard disk's file format; a floppy is raw.
+    format: Format,
     pub label: TextField,
     /// The drive to mount the image on, whether the user picked it, and
     /// the drives free.
@@ -64,6 +75,7 @@ impl ImageDialog {
             made_up: true,
             kind,
             size: TextField::new("500"),
+            format: Format::Raw,
             label: TextField::default(),
             mount: None,
             mount_picked: false,
@@ -83,6 +95,23 @@ impl ImageDialog {
         self.preset().is_some_and(|p| p.floppy)
     }
 
+    /// The file format the image is made in.
+    pub fn format(&self) -> Format {
+        if self.floppy() { Format::Raw } else { self.format }
+    }
+
+    pub fn format_name(&self) -> &'static str {
+        FORMATS.iter().find(|(f, _)| *f == self.format()).map_or("", |(_, name)| name)
+    }
+
+    /// A hard disk's file named .vhd is made a VHD.
+    fn follow_extension(&mut self) {
+        let vhd = Path::new(self.path.text().trim()).extension().is_some_and(|e| e.eq_ignore_ascii_case("vhd"));
+        if vhd && self.format == Format::Raw {
+            self.format = Format::VhdDynamic;
+        }
+    }
+
     /// What the kind of disk is called.
     pub fn kind_name(&self) -> &'static str {
         self.preset().map_or("Hard disk of any size", |p| p.description)
@@ -91,8 +120,9 @@ impl ImageDialog {
     /// A made-up file name in `dir` for the kind of disk, one no file has.
     fn name_in(&mut self, dir: &Path, home: Option<&Path>) {
         let stem = if self.floppy() { "floppy" } else { "hdd" };
+        let ext = if self.format() == Format::Raw { "img" } else { "vhd" };
         let path = (1..)
-            .map(|n| dir.join(if n == 1 { format!("{}.img", stem) } else { format!("{}{}.img", stem, n) }))
+            .map(|n| dir.join(if n == 1 { format!("{}.{}", stem, ext) } else { format!("{}{}.{}", stem, n, ext) }))
             .find(|p| !p.exists())
             .unwrap_or_default();
         self.path = TextField::new(&contract_home(&path, home));
@@ -122,6 +152,9 @@ impl ImageDialog {
         if self.preset().is_none() {
             fields.push(Size);
         }
+        if !self.floppy() {
+            fields.push(Format);
+        }
         fields.extend([Label, Mount, Create, Cancel]);
         fields
     }
@@ -132,8 +165,8 @@ impl ImageDialog {
         self.focus = fields[(at + step).rem_euclid(fields.len() as isize) as usize];
     }
 
-    /// Step the kind of disk or the drive left or right. `dir` is where a
-    /// made-up file name goes.
+    /// Step the kind of disk, the file format or the drive left or right.
+    /// `dir` is where a made-up file name goes.
     pub fn step(&mut self, field: ImageField, step: isize, dir: &Path, home: Option<&Path>) {
         match field {
             ImageField::Kind => {
@@ -146,6 +179,13 @@ impl ImageDialog {
                     if !self.mount_picked || !self.letters().contains(&self.mount) {
                         self.mount = self.default_mount();
                     }
+                }
+            }
+            ImageField::Format if !self.floppy() => {
+                let at = FORMATS.iter().position(|(f, _)| *f == self.format).unwrap_or(0) as isize;
+                self.format = FORMATS[(at + step).rem_euclid(FORMATS.len() as isize) as usize].0;
+                if self.made_up {
+                    self.name_in(dir, home);
                 }
             }
             ImageField::Mount => {
@@ -176,6 +216,7 @@ impl ImageDialog {
         {
             if self.focus == ImageField::Path {
                 self.made_up = false;
+                self.follow_extension();
             }
             return ImageEvent::None;
         }
@@ -215,6 +256,7 @@ impl ImageDialog {
         } else {
             self.path = TextField::new(&contract_home(path, home));
             self.made_up = false;
+            self.follow_extension();
         }
         self.focus = ImageField::Create;
     }
@@ -278,7 +320,7 @@ impl ConfigUi {
             Ok(plan) => plan,
             Err(e) => return self.error(e),
         };
-        if let Err(e) = makeimg::write(&path, &plan, false) {
+        if let Err(e) = makeimg::write_as(&path, &plan, dialog.format(), false) {
             return self.error(e);
         }
         let (mount, floppy) = (dialog.mount, dialog.floppy());
@@ -316,6 +358,7 @@ impl ConfigUi {
                 ImageField::Path => "File",
                 ImageField::Kind => "Type",
                 ImageField::Size => "Size (MB)",
+                ImageField::Format => "Format",
                 ImageField::Label => "Label",
                 ImageField::Mount => "Mount as",
                 _ => "",
@@ -350,6 +393,7 @@ impl ConfigUi {
                 _ => {
                     let text = match field {
                         ImageField::Kind => dialog.kind_name().to_string(),
+                        ImageField::Format => dialog.format_name().to_string(),
                         _ => dialog.mount.map_or("no".to_string(), |d| format!("{}:", drive_letter(d))),
                     };
                     let width = text.chars().count() + 4;
@@ -398,7 +442,7 @@ impl ConfigUi {
         dialog.focus = field;
         match field {
             ImageField::Browse | ImageField::Create | ImageField::Cancel => self.key(UiKey::Enter, host),
-            ImageField::Kind | ImageField::Mount if again => self.key(UiKey::Right, host),
+            ImageField::Kind | ImageField::Format | ImageField::Mount if again => self.key(UiKey::Right, host),
             _ => {}
         }
     }
@@ -462,5 +506,38 @@ mod tests {
         assert!(d.floppy() && d.path.text().ends_with(".imgx"));
         d.picked(&dir, None);
         assert_eq!((d.path.text(), d.focus), (dir.join("hdd.imgx").display().to_string(), ImageField::Create));
+    }
+
+    #[test]
+    fn hard_disks_are_made_raw_or_as_vhds() {
+        let dir = std::env::temp_dir().join(format!("rust-dos-image-dialog-vhd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut d = ImageDialog::new(&[drive(25)], &dir, None);
+        assert!(!d.fields().contains(&ImageField::Format), "a floppy is raw");
+        d.kind = PRESETS.len();
+        assert_eq!(d.fields()[3..5], [ImageField::Size, ImageField::Format]);
+        assert_eq!((d.format(), d.format_name()), (Format::Raw, "Raw image (.img)"));
+        // The made-up name follows the format.
+        d.step(ImageField::Format, -1, &dir, None);
+        assert_eq!(d.format(), Format::VhdFixed);
+        assert_eq!(d.path.text(), dir.join("hdd.vhd").display().to_string());
+        d.step(ImageField::Format, 1, &dir, None);
+        assert!(d.path.text().ends_with("hdd.img"));
+        // A floppy is raw whatever was picked, and keeps its name.
+        d.format = Format::VhdDynamic;
+        d.step(ImageField::Kind, 1, &dir, None);
+        assert!(d.floppy());
+        assert_eq!(d.format(), Format::Raw);
+        assert!(d.path.text().ends_with("floppy.img"));
+        // A hard disk's file typed or picked as .vhd is made a VHD.
+        d.step(ImageField::Kind, -1, &dir, None);
+        d.format = Format::Raw;
+        d.focus = ImageField::Path;
+        d.path = TextField::new("/x/win98.vh");
+        d.key(UiKey::Char('d'), &dir, None);
+        assert_eq!(d.format(), Format::VhdDynamic);
+        d.format = Format::Raw;
+        d.picked(Path::new("/x/dos.VHD"), None);
+        assert_eq!(d.format(), Format::VhdDynamic);
     }
 }
