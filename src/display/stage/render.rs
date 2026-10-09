@@ -1246,6 +1246,9 @@ impl Gpu {
     /// and 1; glowing if `glow`.
     fn bind_material(&self, gl: &glow::Context, at: &MaterialLocations, material: &super::scene::Material, glow: bool) {
         let kind = match material.shading {
+            // Black, lit is only its own glow: no lighting to work out
+            // (glowing panes in front of a sky, say).
+            Shading::Lit if material.base_color[..3] == [0.0; 3] => 1,
             Shading::Lit => 0,
             Shading::Unlit => 1,
             Shading::Screen => 2,
