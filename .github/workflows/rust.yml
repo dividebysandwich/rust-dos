@@ -137,7 +137,7 @@ jobs:
         run: |
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            git ca-certificates curl zstd build-essential pkg-config libsdl2-dev libasound2-dev
+            git ca-certificates curl zstd build-essential cmake pkg-config libsdl2-dev libasound2-dev
 
       - uses: actions/checkout@v7
 
@@ -218,6 +218,28 @@ jobs:
           cp openxr-sdk/x64/bin/openxr_loader.dll openxr/
           cp openxr-sdk/share/doc/openxr/LICENSE openxr/openxr-LICENSE.txt
 
+      # The Linux tarballs ship libopenxr_loader.so.1 beside rust-dos with
+      # its licence (Apache 2.0), for systems without the openxr package or
+      # that can't install it (SteamOS); rust-dos looks for it there when the
+      # system has none. Built from Khronos's OpenXR-SDK, whose sources are
+      # pregenerated: Khronos publishes no Linux build, and building in the
+      # -compat container keeps it to glibc 2.35. The .deb leaves it out and
+      # recommends the distribution's package.
+      - name: Build the OpenXR loader (Linux)
+        if: runner.os == 'Linux'
+        env:
+          OPENXR_VERSION: 1.1.63
+        run: |
+          curl -fsSL -o openxr.tar.gz "https://github.com/KhronosGroup/OpenXR-SDK/archive/refs/tags/release-$OPENXR_VERSION.tar.gz"
+          tar xzf openxr.tar.gz
+          cmake -S "OpenXR-SDK-release-$OPENXR_VERSION" -B openxr-build -DCMAKE_BUILD_TYPE=Release \
+            -DDYNAMIC_LOADER=ON -DBUILD_TESTS=OFF -DBUILD_API_LAYERS=OFF -DBUILD_WITH_SYSTEM_JSONCPP=OFF
+          cmake --build openxr-build --parallel
+          mkdir -p openxr
+          cp -L openxr-build/src/loader/libopenxr_loader.so.1 openxr/
+          strip openxr/libopenxr_loader.so.1
+          cp "OpenXR-SDK-release-$OPENXR_VERSION/LICENSE" openxr/openxr-LICENSE.txt
+
       - uses: dtolnay/rust-toolchain@stable
         if: ${{ !matrix.win7 }}
       - uses: dtolnay/rust-toolchain@nightly
@@ -252,7 +274,7 @@ jobs:
             echo "::warning::rust-dos-relay links SDL2 or ALSA"
           fi
           mkdir -p out stage/rust-dos
-          cp target/release/rust-dos target/release/rust-dos-relay README.md CONFIGURATION.md LICENSE stage/rust-dos/
+          cp target/release/rust-dos target/release/rust-dos-relay openxr/* README.md CONFIGURATION.md LICENSE stage/rust-dos/
           tar czf "out/$PKG.tar.gz" -C stage rust-dos
           cargo install cargo-deb --locked
           cargo deb --no-build -o "out/$PKG.deb"
@@ -549,8 +571,8 @@ jobs:
             ARM boards such as a Raspberry Pi (`aarch64`). The tarball needs
             SDL2 and ALSA (`libsdl2-2.0-0` and `libasound2` on Debian and
             Ubuntu); the `.deb` declares them. For the MT-32, install munt's
-            library (`libmt32emu2`); for VR headsets, the OpenXR loader
-            (`libopenxr-loader1`), which the `.deb` recommends.
+            library (`libmt32emu2`). For VR headsets, the tarball has the
+            OpenXR loader; the `.deb` recommends `libopenxr-loader1`.
             Take the **`-compat`** file if the regular one refuses to start
             with ``version `GLIBC_2.39' not found``, as it does on Ubuntu 22.04,
             Linux Mint 21, Debian 12 and Raspberry Pi OS (bookworm). It is

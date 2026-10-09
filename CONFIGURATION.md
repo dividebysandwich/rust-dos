@@ -2019,7 +2019,8 @@ instead, and the log says why.
 
 The headset is driven through OpenXR, which needs the OpenXR loader: on
 Linux, your distribution's `openxr` package (`libopenxr_loader.so.1`,
-`libopenxr-loader1` on Debian and Ubuntu, which the `.deb` recommends); on
+`libopenxr-loader1` on Debian and Ubuntu, which the `.deb` recommends), or
+else the `libopenxr_loader.so.1` beside `rust-dos`, which the `.tar.gz` has; on
 Windows, `openxr_loader.dll` beside `rust-dos.exe`, which the `.msi` and the
 `.zip` have (built yourself, take it from the Khronos OpenXR SDK's
 releases). The active runtime (SteamVR, Monado, ...) draws

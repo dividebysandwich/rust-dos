@@ -116,11 +116,24 @@ fn entry() -> Result<&'static xr::Entry, String> {
     ENTRY
         .get_or_init(|| {
             // SAFETY: the loader is the Khronos one, or one that conforms.
-            unsafe { xr::Entry::load(&()) }.map_err(|e| {
+            let loaded = unsafe { xr::Entry::load(&()) };
+            // Else the one the Linux tarballs ship beside rust-dos, which
+            // the dynamic loader doesn't look for there.
+            #[cfg(target_os = "linux")]
+            let loaded = loaded.or_else(|e| {
+                let beside = std::env::current_exe().ok().and_then(|exe| Some(exe.parent()?.join("libopenxr_loader.so.1")));
+                match beside {
+                    // SAFETY: as above.
+                    Some(path) if path.is_file() => unsafe { xr::Entry::load_from(&path, &()) },
+                    _ => Err(e),
+                }
+            });
+            loaded.map_err(|e| {
                 format!(
                     "the OpenXR loader can't be loaded ({}): install your system's openxr package, \
-                     or put openxr_loader.dll beside rust-dos.exe",
-                    e
+                     or put {} beside rust-dos",
+                    e,
+                    if cfg!(windows) { "openxr_loader.dll" } else { "libopenxr_loader.so.1" }
                 )
             })
         })
