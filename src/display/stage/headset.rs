@@ -38,6 +38,8 @@ pub fn before_sdl(settings: &VrSettings) {
     #[cfg(target_os = "linux")]
     if settings.mode == rust_dos::vr::VrMode::Headset {
         use rust_dos::vr::{Platform, VrGraphics, startup_hints};
+        // Before SDL's context (Zink's Vulkan instance) and the runtime.
+        super::foveation::enable(settings);
         // (graphics=gl needs nothing asked: X11 it is.)
         let offered = match settings.graphics {
             VrGraphics::Gl => None,
@@ -552,7 +554,8 @@ fn session(
         _ => rust_dos::vr::mobile_gpu(&features.renderer),
     };
     let look = settings.look(mobile);
-    let resolution = settings.headset_resolution(mobile);
+    let foveation = super::foveation::active();
+    let resolution = settings.headset_resolution(mobile, foveation.is_some());
     let samples = look.samples;
     // Both eyes in one pass where OpenGL can (and multisample them, if
     // they are); RUST_DOS_VR_MULTIVIEW=0 draws them one by one, to compare.
@@ -582,7 +585,7 @@ fn session(
     xr.set_percent(percent);
     let mut adapted = std::time::Instant::now();
     log::line(format!(
-        "{}; lighting {}, ambient occlusion {}, {} samples a pixel, {}; {}",
+        "{}; lighting {}, ambient occlusion {}, {} samples a pixel, {}; {}; {}",
         if mobile { "A standalone headset's graphics chip" } else { "A PC's graphics chip" },
         look.quality.name(),
         look.ambient_occlusion.map_or("as the lighting", |on| if on { "on" } else { "off" }),
@@ -591,7 +594,12 @@ fn session(
             Some((min, max, _)) => format!("eyes {}% of the recommended size, drawn at {} to {}% of that", resolution.percent, min, max),
             None => format!("eyes {}% of the recommended size", resolution.percent),
         },
-        if gpu_options.multiview.is_some() { "both eyes drawn at once" } else { "the eyes drawn one by one" }
+        if gpu_options.multiview.is_some() { "both eyes drawn at once" } else { "the eyes drawn one by one" },
+        match foveation {
+            Some(level) if features.renderer.to_ascii_lowercase().contains("zink") => format!("foveated {} (Valve's layer)", level.name()),
+            Some(level) => format!("foveation {} asked of Valve's layer, which reaches OpenGL only through Zink", level.name()),
+            None => "not foveated".to_string(),
+        }
     ));
     if let Ok(parts) = std::env::var("RUST_DOS_VR_LEAVE_OUT") {
         log::line(format!("Left out of the views, to time them: {}", parts));

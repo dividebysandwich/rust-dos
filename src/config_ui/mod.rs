@@ -395,7 +395,7 @@ impl Page {
             Page::Drives | Page::Games | Page::States | Page::Cheats | Page::Achievements | Page::Stats => &[],
             Page::Vr => &[
                 VrMode, VrScene, VrScreenFit, VrQuality, VrAmbientOcclusion, VrMsaa, VrScreenGlow, VrControllers, VrSpatialAudio,
-                VrCenter, VrSceneScale, VrSeat(0), VrSeat(1), VrSeat(2), VrSeatTurn, VrResolution, VrRefresh, VrGraphics,
+                VrCenter, VrSceneScale, VrSeat(0), VrSeat(1), VrSeat(2), VrSeatTurn, VrResolution, VrFoveation, VrRefresh, VrGraphics,
             ],
             Page::Display => {
                 &[Scale, Fullscreen, Aspect, Vrr, Filter, Shader, CrtCurvature, CrtGlow, Monochrome, Composite, CompositeEra]
@@ -533,6 +533,7 @@ enum Item {
     /// The headset's eye images, in percent of the size its runtime
     /// recommends, and its refresh rate.
     VrResolution,
+    VrFoveation,
     VrRefresh,
     /// How the headset's pictures get to its runtime (GLX, EGL, Vulkan).
     VrGraphics,
@@ -876,6 +877,7 @@ impl Item {
             VrSeat(_) => "  Seat closer to the screen",
             VrSeatTurn => "  Seat turned to the left",
             VrResolution => "Headset resolution",
+            VrFoveation => "Foveated rendering",
             VrRefresh => "Headset refresh rate",
             VrGraphics => "Headset graphics",
             Filter => "Scaling filter",
@@ -1011,6 +1013,7 @@ impl Item {
             | Item::VrSeat(_)
             | Item::VrSeatTurn
             | Item::VrResolution
+            | Item::VrFoveation
             | Item::VrRefresh
             | Item::VrGraphics => frontend.window && cfg!(feature = "vr"),
             Item::SoundFont => soundfonts(frontend),
@@ -1064,6 +1067,7 @@ impl Item {
             | Item::VrSeat(_)
             | Item::VrSeatTurn
             | Item::VrResolution
+            | Item::VrFoveation
             | Item::VrRefresh
             | Item::VrGraphics => s.vr.mode == crate::vr::VrMode::Headset,
             Item::ReverbMix => s.mixer.reverb != ReverbPreset::Off,
@@ -1119,7 +1123,7 @@ impl Item {
             | VrCenter | VrSceneScale | VrSeat(_) | VrSeatTurn | VrResolution | VrRefresh => Applies::Now,
             // SDL makes the window's context as the headset needs it as it
             // starts.
-            VrGraphics => Applies::NextStart,
+            VrGraphics | VrFoveation => Applies::NextStart,
             _ => Applies::AtPrompt,
         }
     }
@@ -1187,6 +1191,7 @@ impl Item {
                 Some(hz) => format!("{} Hz", hz),
                 None => "auto: 72 Hz on a standalone headset".to_string(),
             },
+            VrFoveation => s.vr.foveation.describe().to_string(),
             VrGraphics => s.vr.graphics.describe().to_string(),
             Filter => match s.filter {
                 crate::config::Filter::Nearest => "nearest (sharp)",
@@ -1435,6 +1440,7 @@ impl Item {
             VrAmbientOcclusion => each(s, crate::vr::VrSwitch::ALL, |s, ao| s.vr.ambient_occlusion = ao),
             VrMsaa => each(s, crate::vr::VrMsaa::ALL, |s, msaa| s.vr.msaa = msaa),
             VrRefresh => each(s, std::iter::once(None).chain(crate::vr::REFRESH_RATES.map(Some)), |s, hz| s.vr.refresh = hz),
+            VrFoveation => each(s, crate::vr::VrFoveation::ALL, |s, f| s.vr.foveation = f),
             VrGraphics => each(s, crate::vr::VrGraphics::ALL, |s, g| s.vr.graphics = g),
             Filter => each(s, [crate::config::Filter::Nearest, crate::config::Filter::Linear], |s, f| s.filter = f),
             Shader => each(s, crate::video::shader::Shader::ALL, |s, shader| s.shader = shader),

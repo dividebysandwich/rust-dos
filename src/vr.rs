@@ -317,6 +317,103 @@ impl VrMsaa {
     }
 }
 
+/// How much coarser the edges of a headset's view are drawn than where the
+/// eyes look: through Valve's own fragment density map layer, which the
+/// Steam Frame has, reaching OpenGL through Zink (`fdm_env`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VrFoveation {
+    /// Medium where Valve's layer is installed.
+    #[default]
+    Auto,
+    Off,
+    Low,
+    Medium,
+    High,
+}
+
+impl VrFoveation {
+    pub const ALL: [VrFoveation; 5] =
+        [VrFoveation::Auto, VrFoveation::Off, VrFoveation::Low, VrFoveation::Medium, VrFoveation::High];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            VrFoveation::Auto => "auto",
+            VrFoveation::Off => "off",
+            VrFoveation::Low => "low",
+            VrFoveation::Medium => "medium",
+            VrFoveation::High => "high",
+        }
+    }
+
+    pub fn describe(self) -> &'static str {
+        match self {
+            VrFoveation::Auto => "auto: medium on a Steam Frame",
+            VrFoveation::Off => "off",
+            VrFoveation::Low => "low",
+            VrFoveation::Medium => "medium",
+            VrFoveation::High => "high",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|f| value.trim().eq_ignore_ascii_case(f.name()))
+    }
+
+    /// The level asked of Valve's layer, where it is installed
+    /// (`layer_found`): None for none.
+    pub fn level(self, layer_found: bool) -> Option<VrFoveation> {
+        match self {
+            _ if !layer_found => None,
+            VrFoveation::Off => None,
+            VrFoveation::Auto => Some(VrFoveation::Medium),
+            level => Some(level),
+        }
+    }
+}
+
+/// Valve's Vulkan layers that foveate render passes the size of the
+/// headset's images, eye-tracked, as Steam turns them on for its games.
+pub const FDM_LAYERS: &str = "VK_LAYER_VALVE_rpo:VK_LAYER_VALVE_fdm_injection";
+
+/// What Valve's layers are told by Steam: they are turned off by it.
+pub const FDM_DISABLE: &str = "DISABLE_VULKAN_FDM_INJECTION_LAYER";
+
+/// The environment to set for Valve's layers to foveate at `level` (None:
+/// nothing), with `existing` the environment as it is: what is set already
+/// (as Steam sets it for its games) is kept, the layers go after the
+/// Vulkan layers asked for already, and nothing is set where the layers
+/// are turned off. `extra` (RUST_DOS_VR_FDM_ENV's "K=V;K=V") replaces or
+/// adds variables, to try others on the headset.
+pub fn fdm_env(level: Option<VrFoveation>, existing: impl Fn(&str) -> Option<String>, extra: &str) -> Vec<(String, String)> {
+    let Some(level) = level else { return Vec::new() };
+    if existing(FDM_DISABLE).is_some_and(|v| !v.is_empty() && v != "0") {
+        return Vec::new();
+    }
+    let mut env: Vec<(String, String)> = Vec::new();
+    let layers = match existing("VK_INSTANCE_LAYERS").filter(|l| !l.is_empty()) {
+        Some(asked) if asked.contains("VK_LAYER_VALVE_fdm_injection") => None,
+        Some(asked) => Some(format!("{}:{}", asked, FDM_LAYERS)),
+        None => Some(FDM_LAYERS.to_string()),
+    };
+    if let Some(layers) = layers {
+        env.push(("VK_INSTANCE_LAYERS".into(), layers));
+    }
+    // (The layers' OpenXR half, the same library, tells their Vulkan half
+    // the swapchains' size: FDM_SWAPCHAIN_SIZE is for Steam's containers.)
+    for (key, value) in [("FDM_DEBUG", "enable"), ("FOVE_LEVEL", level.name())] {
+        if existing(key).is_none() {
+            env.push((key.into(), value.into()));
+        }
+    }
+    for pair in extra.split(';').filter(|p| !p.trim().is_empty()) {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        let key = key.trim().to_string();
+        env.retain(|(k, _)| *k != key);
+        env.push((key, value.trim().to_string()));
+    }
+    env
+}
+
 /// Whether the graphics chip `renderer` (OpenGL's GL_RENDERER) is a phone's
 /// or a standalone headset's, which `auto` settings go easier on.
 pub fn mobile_gpu(renderer: &str) -> bool {
@@ -653,6 +750,8 @@ pub struct VrSettings {
     /// None (`auto`): the runtime's own, or on a standalone headset the
     /// lowest from 72 Hz.
     pub refresh: Option<u32>,
+    /// The edges of the view drawn coarser than where the eyes look.
+    pub foveation: VrFoveation,
 }
 
 impl Default for VrSettings {
@@ -673,6 +772,7 @@ impl Default for VrSettings {
             ambient_occlusion: VrSwitch::Auto,
             msaa: VrMsaa::Auto,
             refresh: None,
+            foveation: VrFoveation::Auto,
         }
     }
 }
@@ -715,6 +815,10 @@ impl VrSettings {
             }
             "msaa" => {
                 self.msaa = VrMsaa::parse(value).ok_or_else(|| format!("invalid msaa '{}' (auto, off, 2 or 4)", value))?;
+            }
+            "foveation" => {
+                self.foveation = VrFoveation::parse(value)
+                    .ok_or_else(|| format!("invalid foveation '{}' (auto, off, low, medium or high)", value))?;
             }
             "refresh" => {
                 let value = value.trim();
@@ -807,6 +911,7 @@ impl VrSettings {
             ("ambient_occlusion", Some(self.ambient_occlusion.name().to_string())),
             ("msaa", Some(self.msaa.name().to_string())),
             ("refresh", Some(self.refresh.map_or("auto".to_string(), |hz| hz.to_string()))),
+            ("foveation", Some(self.foveation.name().to_string())),
         ]
     }
 
@@ -836,13 +941,17 @@ impl VrSettings {
     }
 
     /// What the headset's eyes are drawn at, on a `mobile` graphics chip
-    /// or not: a resolution set is kept; `auto` makes the images the size
-    /// the runtime recommends, all of it drawn, or on a mobile chip as much
-    /// as there is time for.
-    pub fn headset_resolution(&self, mobile: bool) -> VrResolution {
+    /// or not, `foveated` or not: a resolution set is kept; `auto` makes the
+    /// images the size the runtime recommends, all of it drawn, or on a
+    /// mobile chip as much as there is time for. Foveated, all of it is
+    /// drawn: the density map is laid over the whole image, and a part of
+    /// it would put the eyes' sharp middle elsewhere.
+    pub fn headset_resolution(&self, mobile: bool, foveated: bool) -> VrResolution {
         match self.resolution {
             Some(percent) => VrResolution { percent, adaptive: None },
-            None if mobile => VrResolution { percent: 100, adaptive: Some((ADAPTIVE_MIN, 100, ADAPTIVE_START)) },
+            None if mobile && !foveated => {
+                VrResolution { percent: 100, adaptive: Some((ADAPTIVE_MIN, 100, ADAPTIVE_START)) }
+            }
             None => VrResolution { percent: 100, adaptive: None },
         }
     }
@@ -913,8 +1022,10 @@ mod tests {
         assert!(!mobile_gpu("AMD Radeon 8060S Graphics (radeonsi, strix_halo)"));
         assert_eq!(s.look(false), VrLook { quality: VrQuality::High, ambient_occlusion: None, samples: 4 });
         assert_eq!(s.look(true), VrLook { quality: VrQuality::Medium, ambient_occlusion: Some(false), samples: 2 });
-        assert_eq!(s.headset_resolution(false), VrResolution { percent: 100, adaptive: None });
-        assert_eq!(s.headset_resolution(true).adaptive, Some((ADAPTIVE_MIN, 100, ADAPTIVE_START)));
+        assert_eq!(s.headset_resolution(false, false), VrResolution { percent: 100, adaptive: None });
+        assert_eq!(s.headset_resolution(true, false).adaptive, Some((ADAPTIVE_MIN, 100, ADAPTIVE_START)));
+        // Foveated, all of the images is drawn.
+        assert_eq!(s.headset_resolution(true, true), VrResolution { percent: 100, adaptive: None });
         // What is set is kept, on any chip.
         let set = VrSettings {
             quality: VrQuality::High,
@@ -924,7 +1035,40 @@ mod tests {
             ..VrSettings::default()
         };
         assert_eq!(set.look(true), VrLook { quality: VrQuality::High, ambient_occlusion: Some(true), samples: 4 });
-        assert_eq!(set.headset_resolution(true), VrResolution { percent: 70, adaptive: None });
+        assert_eq!(set.headset_resolution(true, false), VrResolution { percent: 70, adaptive: None });
+        assert_eq!(set.headset_resolution(true, true), VrResolution { percent: 70, adaptive: None });
+    }
+
+    #[test]
+    fn foveation_sets_what_steam_would_and_keeps_what_is_set() {
+        let none = |_: &str| None;
+        assert_eq!(VrFoveation::Auto.level(false), None);
+        assert_eq!(VrFoveation::Off.level(true), None);
+        assert_eq!(VrFoveation::Auto.level(true), Some(VrFoveation::Medium));
+        assert_eq!(VrFoveation::parse(" HIGH "), Some(VrFoveation::High));
+        assert!(fdm_env(None, none, "").is_empty());
+        let pairs = |list: &[(&str, &str)]| list.iter().map(|&(k, v)| (k.to_string(), v.to_string())).collect::<Vec<_>>();
+        assert_eq!(
+            fdm_env(Some(VrFoveation::Medium), none, ""),
+            pairs(&[("VK_INSTANCE_LAYERS", FDM_LAYERS), ("FDM_DEBUG", "enable"), ("FOVE_LEVEL", "medium")])
+        );
+        // Layers asked for already come first; a level set is kept.
+        let some = |key: &str| match key {
+            "VK_INSTANCE_LAYERS" => Some("VK_LAYER_MESA_overlay".to_string()),
+            "FOVE_LEVEL" => Some("low".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            fdm_env(Some(VrFoveation::High), some, ""),
+            pairs(&[("VK_INSTANCE_LAYERS", &format!("VK_LAYER_MESA_overlay:{}", FDM_LAYERS)), ("FDM_DEBUG", "enable")])
+        );
+        // Turned off, nothing; RUST_DOS_VR_FDM_ENV replaces and adds.
+        let off = |key: &str| (key == FDM_DISABLE).then(|| "1".to_string());
+        assert!(fdm_env(Some(VrFoveation::Low), off, "").is_empty());
+        assert_eq!(
+            fdm_env(Some(VrFoveation::Low), none, "FDM_DEBUG=enable,disable_offsets; X = 1")[1..],
+            pairs(&[("FOVE_LEVEL", "low"), ("FDM_DEBUG", "enable,disable_offsets"), ("X", "1")])[..]
+        );
     }
 
     #[test]

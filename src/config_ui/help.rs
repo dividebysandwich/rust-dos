@@ -301,6 +301,7 @@ impl Item {
             VrCenter => "vr-center",
             VrSceneScale | VrSeat(_) | VrSeatTurn => "vr-seat",
             VrResolution => "vr-resolution",
+            VrFoveation => "vr-foveation",
             VrRefresh => "vr-refresh",
             VrGraphics => "vr-graphics",
             Filter => "filter",

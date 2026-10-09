@@ -13,6 +13,8 @@
 
 mod camera;
 mod controls;
+#[cfg(xr)]
+mod foveation;
 mod gi;
 #[cfg(xr)]
 mod headset;

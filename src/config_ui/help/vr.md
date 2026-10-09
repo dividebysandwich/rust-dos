@@ -146,6 +146,20 @@ once.
 own graphics chip, as much of it (from half up) as there is time for at
 the headset's rate, a little less when it is busy and more when it isn't.
 
+# Foveated rendering {#vr-foveation}
+
+Draws the edges of the view coarser than where your eyes look, which
+follows your gaze, so the graphics chip has more time for the rest. It
+uses Valve's own foveation, which only the Steam Frame has. It does
+nothing elsewhere.
+
+- **auto**: medium on a Steam Frame.
+- **low**, **medium** or **high**: how much coarser the edges get.
+- **off**: all of the view is drawn sharp.
+
+While it is on, all of the eyes' images are drawn (**auto** headset
+resolution doesn't adapt). It takes effect at the next start.
+
 # Headset refresh rate {#vr-refresh}
 
 How many times a second the headset shows a picture, where its runtime

@@ -112,6 +112,26 @@ pub fn run(gl: &glow::Context, sdl_driver: &str, settings: &VrSettings) {
         report.line(format!("UUIDs: device {}, driver {}", hex(&device), hex(&driver)));
     }
 
+    report.section("Foveation");
+    // SAFETY: the context is current.
+    let zink = unsafe { gl.get_parameter_string(glow::RENDERER) }.to_ascii_lowercase().contains("zink");
+    let manifest = super::super::foveation::manifest();
+    report.line(format!(
+        "[vr] foveation={}; Valve's density map layer: {}",
+        settings.foveation.name(),
+        manifest.map_or("not installed".to_string(), |path| path.display().to_string())
+    ));
+    for name in ["VK_INSTANCE_LAYERS", "FDM_DEBUG", "FOVE_LEVEL", "FDM_SWAPCHAIN_SIZE", rust_dos::vr::FDM_DISABLE] {
+        if let Ok(value) = std::env::var(name) {
+            report.line(format!("{}={}", name, value));
+        }
+    }
+    report.line(match super::super::foveation::active() {
+        Some(level) if zink => format!("The eyes are foveated {}: OpenGL is Zink, which the layer reaches", level.name()),
+        Some(_) => "Asked for, but OpenGL isn't Zink, which the layer would reach it through".to_string(),
+        None => "The eyes aren't foveated".to_string(),
+    });
+
     report.section("OpenXR loader and runtime");
     for name in ["XR_RUNTIME_JSON", "XR_LOADER_DEBUG"] {
         if let Some(value) = std::env::var_os(name) {

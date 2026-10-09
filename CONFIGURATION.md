@@ -728,6 +728,13 @@ The picture on a screen in a 3D scene (see [3D scene and VR](#3d-scene-and-vr)).
   the graphics chip has time for at the headset's rate (the runtime
   scales it up to fill the view). A number keeps the size it says. It takes
   effect at once.
+* `foveation`: draws the edges of a headset's view coarser than where the
+  eyes look, following the gaze: `auto` (the default: `medium` where Valve's
+  foveation layer is installed, as on the Steam Frame), `off`, `low`,
+  `medium` or `high`. It uses Valve's own layers
+  (`VK_LAYER_VALVE_fdm_injection`), which reach OpenGL through Zink. It does
+  nothing elsewhere. While it is on, `resolution=auto` draws all of the eye
+  images. It takes effect at the next start.
 * `refresh`: the headset's refresh rate in Hz, the runtime's nearest to
   it, or `auto` (the default: the runtime's own, or on a standalone headset
   the lowest from 72 Hz, for more time for each frame). Only where the
