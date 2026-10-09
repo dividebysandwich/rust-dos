@@ -250,30 +250,78 @@ impl Vhd {
     }
 }
 
-/// The footer of a VHD image of a disk of `len` bytes of `kind`, its
-/// checksum filled in.
-#[cfg(test)]
+/// The geometry a VHD's footer gives a disk of `sectors` sectors, as the
+/// specification works it out (Virtual PC's): at most 65535 cylinders, 16
+/// heads and 255 sectors per track.
+fn footer_geometry(sectors: u64) -> (u16, u8, u8) {
+    let total = sectors.min(65535 * 16 * 255);
+    let (mut per_track, mut heads, mut cylinders_times_heads);
+    if total >= 65535 * 16 * 63 {
+        (per_track, heads) = (255, 16);
+        cylinders_times_heads = total / per_track;
+    } else {
+        per_track = 17;
+        cylinders_times_heads = total / per_track;
+        heads = cylinders_times_heads.div_ceil(1024).max(4);
+        if cylinders_times_heads >= heads * 1024 || heads > 16 {
+            (per_track, heads) = (31, 16);
+            cylinders_times_heads = total / per_track;
+        }
+        if cylinders_times_heads >= heads * 1024 {
+            (per_track, heads) = (63, 16);
+            cylinders_times_heads = total / per_track;
+        }
+    }
+    ((cylinders_times_heads / heads) as u16, heads as u8, per_track as u8)
+}
+
+/// The one's complement of the sum of `bytes`, which VHD checksums are.
+fn checksum(bytes: &[u8]) -> [u8; 4] {
+    (!bytes.iter().map(|&b| b as u32).fold(0u32, u32::wrapping_add)).to_be_bytes()
+}
+
+/// The footer of a VHD image of a disk of `len` bytes of `kind`, made
+/// now by Rust-DOS, its checksum filled in.
 pub(crate) fn make_footer(len: u64, kind: u32, header_at: u64) -> [u8; 512] {
+    use std::hash::{BuildHasher, Hasher};
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    // Seconds since 2000-01-01.
+    let time = now.as_secs().saturating_sub(946_684_800) as u32;
     let mut f = [0u8; 512];
     f[..8].copy_from_slice(COOKIE);
     f[8..12].copy_from_slice(&2u32.to_be_bytes());
     f[12..16].copy_from_slice(&0x0001_0000u32.to_be_bytes());
     f[16..24].copy_from_slice(&header_at.to_be_bytes());
+    f[24..28].copy_from_slice(&time.to_be_bytes());
+    f[28..32].copy_from_slice(b"rdos");
+    f[32..36].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+    f[36..40].copy_from_slice(b"Wi2k");
     f[40..48].copy_from_slice(&len.to_be_bytes());
     f[48..56].copy_from_slice(&len.to_be_bytes());
-    let cylinders = (len / 512 / 16 / 63) as u16;
+    let (cylinders, heads, sectors) = footer_geometry(len / SECTOR);
     f[56..58].copy_from_slice(&cylinders.to_be_bytes());
-    f[58] = 16;
-    f[59] = 63;
+    f[58] = heads;
+    f[59] = sectors;
     f[60..64].copy_from_slice(&kind.to_be_bytes());
-    let sum: u32 = f.iter().map(|&b| b as u32).sum();
-    f[64..68].copy_from_slice(&(!sum).to_be_bytes());
+    // A unique id, from hashers seeded at random.
+    for half in f[68..84].chunks_mut(8) {
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u128(now.as_nanos());
+        half.copy_from_slice(&hasher.finish().to_be_bytes());
+    }
+    let sum = checksum(&f);
+    f[64..68].copy_from_slice(&sum);
     f
+}
+
+/// The footer of a fixed VHD image of a disk of `len` bytes, which goes
+/// after its sectors.
+pub(crate) fn fixed_footer(len: u64) -> [u8; 512] {
+    make_footer(len, FIXED, u64::MAX)
 }
 
 /// A dynamic VHD image of a disk of `len` bytes in blocks of `block`
 /// bytes, with nothing written.
-#[cfg(test)]
 pub(crate) fn make_dynamic(len: u64, block: u32) -> Vec<u8> {
     let entries = len.div_ceil(block as u64) as u32;
     let footer = make_footer(len, DYNAMIC, 512);
@@ -285,6 +333,8 @@ pub(crate) fn make_dynamic(len: u64, block: u32) -> Vec<u8> {
     header[24..28].copy_from_slice(&0x0001_0000u32.to_be_bytes());
     header[28..32].copy_from_slice(&entries.to_be_bytes());
     header[32..36].copy_from_slice(&block.to_be_bytes());
+    let sum = checksum(&header);
+    header[36..40].copy_from_slice(&sum);
     out.extend_from_slice(&header);
     let table_len = (entries as usize * 4).next_multiple_of(512);
     out.extend(std::iter::repeat_n(0xFFu8, table_len));
@@ -345,6 +395,19 @@ mod tests {
         // The footer is at the end again.
         let data = std::fs::read(&path).unwrap();
         assert_eq!(&data[data.len() - 512..data.len() - 504], COOKIE);
+    }
+
+    #[test]
+    fn footers_have_virtual_pcs_geometry_and_checksum() {
+        // As qemu-img makes them, but for its rounding the size up to whole
+        // cylinders.
+        for (mb, chs) in [(20, (602, 4, 17)), (500, (1015, 16, 63)), (40 << 10, (20560, 16, 255)), (200 << 10, (65535, 16, 255))] {
+            assert_eq!(footer_geometry(mb << 11), chs, "{} MB", mb);
+        }
+        let f = make_footer(500 << 20, FIXED, u64::MAX);
+        let sum = !f.iter().enumerate().filter(|(i, _)| !(64..68).contains(i)).map(|(_, &b)| b as u32).sum::<u32>();
+        assert_eq!(be32(&f, 64), sum);
+        assert_ne!(f[68..84], make_footer(500 << 20, FIXED, u64::MAX)[68..84], "ids are unique");
     }
 
     #[test]

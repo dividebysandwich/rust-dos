@@ -507,9 +507,29 @@ fn fat_start(v: &Volume) -> [u8; SECTOR_SIZE] {
     s
 }
 
+/// The kind of file an image is made as.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Format {
+    /// The disk's sectors, as they are.
+    #[default]
+    Raw,
+    /// A Virtual PC image the size of the disk (`vhd.rs`).
+    VhdFixed,
+    /// A Virtual PC image that grows as the disk is written.
+    VhdDynamic,
+}
+
+/// The blocks a dynamic VHD grows by, as Virtual PC makes them.
+const VHD_BLOCK: u32 = 2 << 20;
+
 /// Make the image `plan` lays out at `path`. An existing file is an error
 /// unless `overwrite`.
 pub fn write(path: &Path, plan: &Plan, overwrite: bool) -> Result<(), String> {
+    write_as(path, plan, Format::Raw, overwrite)
+}
+
+/// `write`, as a file of `format`.
+pub fn write_as(path: &Path, plan: &Plan, format: Format, overwrite: bool) -> Result<(), String> {
     let shown = path.display();
     let mut options = OpenOptions::new();
     options.write(true);
@@ -523,12 +543,34 @@ pub fn write(path: &Path, plan: &Plan, overwrite: bool) -> Result<(), String> {
         _ => format!("Cannot open file {} for writing: {}", shown, e),
     })?;
     let full = |e: std::io::Error| format!("Disk full or cannot allocate image size: {}", e);
-    file.set_len(plan.bytes).map_err(full)?;
+    match format {
+        Format::Raw | Format::VhdFixed => {
+            file.set_len(plan.bytes).map_err(full)?;
+            lay_out(plan, |sector, bytes| {
+                file.seek(SeekFrom::Start(sector * SECTOR))?;
+                file.write_all(bytes)
+            })
+            .map_err(full)?;
+            if format == Format::VhdFixed {
+                file.seek(SeekFrom::Start(plan.bytes)).map_err(full)?;
+                file.write_all(&crate::vhd::fixed_footer(plan.bytes)).map_err(full)?;
+            }
+        }
+        Format::VhdDynamic => {
+            file.write_all(&crate::vhd::make_dynamic(plan.bytes, VHD_BLOCK)).map_err(full)?;
+            drop(file);
+            let file = crate::hostfs::OpenOptions::new().read(true).write(true).open(path).map_err(full)?;
+            let vhd = crate::vhd::Vhd::open(file)?;
+            lay_out(plan, |sector, bytes| vhd.write_at(sector * SECTOR, bytes)).map_err(full)?;
+        }
+    }
+    Ok(())
+}
+
+/// Hand `put` the sectors of the image `plan` lays out that aren't zeros:
+/// where they go and what they hold.
+fn lay_out(plan: &Plan, mut put: impl FnMut(u64, &[u8]) -> std::io::Result<()>) -> std::io::Result<()> {
     let Some(v) = &plan.volume else { return Ok(()) };
-    let mut put = |sector: u64, bytes: &[u8]| -> Result<(), String> {
-        file.seek(SeekFrom::Start(sector * SECTOR)).map_err(full)?;
-        file.write_all(bytes).map_err(full)
-    };
     if !plan.floppy {
         put(0, &master_boot_record(plan, v))?;
     }
@@ -660,6 +702,42 @@ mod tests {
             volume.put_file(&["README.TXT"], b"hello", 0, 0).unwrap();
             assert!(volume.find(&["README.TXT"]).is_ok(), "{}", name);
             assert_eq!(volume.free_clusters() as u64, v.clusters - root - 1, "{}", name);
+        }
+    }
+
+    /// A VHD holds the disk a raw image would, and a dynamic one only the
+    /// blocks with sectors written.
+    #[test]
+    fn vhd_images_hold_the_same_disk() {
+        let spec = ImageSpec { size_mb: Some(500), label: Some("VHD".into()), ..Default::default() };
+        let plan = plan(&spec).unwrap();
+        let raw = scratch("same.img");
+        write(&raw, &plan, true).unwrap();
+        let raw = DiskImage::open(&raw, false, None, false).unwrap();
+        for (name, format) in [("fixed.vhd", Format::VhdFixed), ("dynamic.vhd", Format::VhdDynamic)] {
+            let path = scratch(name);
+            write_as(&path, &plan, format, false).unwrap();
+            assert!(write_as(&path, &plan, format, false).unwrap_err().contains("already exists"));
+            let len = std::fs::metadata(&path).unwrap().len();
+            match format {
+                Format::VhdFixed => assert_eq!(len, plan.bytes + 512),
+                _ => assert!(len < 8 << 20, "{} bytes", len),
+            }
+            assert!(crate::vhd::is_vhd(&crate::hostfs::File::open(&path).unwrap()), "{}", name);
+            let image = DiskImage::open(&path, false, None, false).unwrap();
+            assert_eq!((image.sectors(), image.geometry()), (raw.sectors(), raw.geometry()), "{}", name);
+            for sector in [0, plan.volume.as_ref().unwrap().start, plan.volume.as_ref().unwrap().start + 1] {
+                let (mut a, mut b) = ([0u8; SECTOR_SIZE], [0u8; SECTOR_SIZE]);
+                raw.read(sector, &mut a).unwrap();
+                image.read(sector, &mut b).unwrap();
+                assert_eq!(a, b, "{} sector {}", name, sector);
+            }
+            let (start, sectors) = image.fat_volume().unwrap();
+            let volume = FatVolume::open(std::rc::Rc::new(image), start, sectors).unwrap();
+            assert_eq!(volume.label().as_deref(), Some("VHD"));
+            volume.put_file(&["README.TXT"], b"hello", 0, 0).unwrap();
+            assert!(volume.find(&["README.TXT"]).is_ok(), "{}", name);
+            std::fs::remove_file(&path).unwrap();
         }
     }
 
