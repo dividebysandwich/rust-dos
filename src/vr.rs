@@ -183,6 +183,10 @@ impl ScreenFit {
 /// bouncing around the scene.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum VrQuality {
+    /// High, or medium on a standalone headset's graphics chip
+    /// (`mobile_gpu`).
+    #[default]
+    Auto,
     /// Hard shadows, the screen's light in one colour, no bounced light or
     /// ambient occlusion.
     Low,
@@ -191,15 +195,15 @@ pub enum VrQuality {
     Medium,
     /// Softer shadows, the screen's light in twelve patches, bounced
     /// light, finer ambient occlusion.
-    #[default]
     High,
 }
 
 impl VrQuality {
-    pub const ALL: [VrQuality; 3] = [VrQuality::Low, VrQuality::Medium, VrQuality::High];
+    pub const ALL: [VrQuality; 4] = [VrQuality::Auto, VrQuality::Low, VrQuality::Medium, VrQuality::High];
 
     pub fn name(self) -> &'static str {
         match self {
+            VrQuality::Auto => "auto",
             VrQuality::Low => "low",
             VrQuality::Medium => "medium",
             VrQuality::High => "high",
@@ -208,15 +212,176 @@ impl VrQuality {
 
     pub fn describe(self) -> &'static str {
         match self {
+            VrQuality::Auto => "auto: high, medium on a standalone headset",
             VrQuality::Low => "low: hard shadows, no bounced light",
             VrQuality::Medium => "medium",
             VrQuality::High => "high: soft shadows, bounced light",
         }
     }
 
+    /// What `Auto` is on a `mobile` graphics chip or not.
+    pub fn resolve(self, mobile: bool) -> Self {
+        match self {
+            VrQuality::Auto if mobile => VrQuality::Medium,
+            VrQuality::Auto => VrQuality::High,
+            quality => quality,
+        }
+    }
+
     pub fn parse(value: &str) -> Option<Self> {
         let value = value.trim();
         Self::ALL.into_iter().find(|q| q.name().eq_ignore_ascii_case(value))
+    }
+}
+
+/// A setting worked out from the graphics chip unless it is set.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VrSwitch {
+    #[default]
+    Auto,
+    On,
+    Off,
+}
+
+impl VrSwitch {
+    pub const ALL: [VrSwitch; 3] = [VrSwitch::Auto, VrSwitch::On, VrSwitch::Off];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            VrSwitch::Auto => "auto",
+            VrSwitch::On => "on",
+            VrSwitch::Off => "off",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(VrSwitch::Auto),
+            "on" | "true" | "yes" | "1" => Some(VrSwitch::On),
+            "off" | "false" | "no" | "0" => Some(VrSwitch::Off),
+            _ => None,
+        }
+    }
+}
+
+/// How many samples a pixel of the 3D view takes, for smooth edges.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VrMsaa {
+    /// Four, or two on a standalone headset's graphics chip.
+    #[default]
+    Auto,
+    Off,
+    Two,
+    Four,
+}
+
+impl VrMsaa {
+    pub const ALL: [VrMsaa; 4] = [VrMsaa::Auto, VrMsaa::Off, VrMsaa::Two, VrMsaa::Four];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            VrMsaa::Auto => "auto",
+            VrMsaa::Off => "off",
+            VrMsaa::Two => "2",
+            VrMsaa::Four => "4",
+        }
+    }
+
+    pub fn describe(self) -> &'static str {
+        match self {
+            VrMsaa::Auto => "auto: 4x, 2x on a standalone headset",
+            VrMsaa::Off => "off",
+            VrMsaa::Two => "2x",
+            VrMsaa::Four => "4x",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().trim_end_matches(['x', 'X']).to_ascii_lowercase().as_str() {
+            "auto" => Some(VrMsaa::Auto),
+            "off" | "0" | "1" => Some(VrMsaa::Off),
+            "2" => Some(VrMsaa::Two),
+            "4" => Some(VrMsaa::Four),
+            _ => None,
+        }
+    }
+
+    /// The samples, on a `mobile` graphics chip or not.
+    pub fn samples(self, mobile: bool) -> u32 {
+        match self {
+            VrMsaa::Auto if mobile => 2,
+            VrMsaa::Auto | VrMsaa::Four => 4,
+            VrMsaa::Two => 2,
+            VrMsaa::Off => 0,
+        }
+    }
+}
+
+/// Whether the graphics chip `renderer` (OpenGL's GL_RENDERER) is a phone's
+/// or a standalone headset's, which `auto` settings go easier on.
+pub fn mobile_gpu(renderer: &str) -> bool {
+    let renderer = renderer.to_ascii_lowercase();
+    ["adreno", "turnip", "mali", "powervr", "immortalis", "xclipse", "tegra"].iter().any(|chip| renderer.contains(chip))
+}
+
+/// How the 3D view is drawn: the settings' `auto`s worked out for a
+/// `mobile` graphics chip or not (`VrSettings::look`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VrLook {
+    pub quality: VrQuality,
+    /// The ambient occlusion: None as `quality` has it.
+    pub ambient_occlusion: Option<bool>,
+    pub samples: u32,
+}
+
+/// What a headset's eyes are drawn at (`VrSettings::headset_resolution`):
+/// their images' size in percent of what the runtime recommends, and if
+/// the part drawn adapts, its least and most percent of that, and where it
+/// starts (else all of it is drawn).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VrResolution {
+    pub percent: u32,
+    pub adaptive: Option<(u32, u32, u32)>,
+}
+
+/// The adaptive resolution's least percent, and where it starts.
+pub const ADAPTIVE_MIN: u32 = 50;
+pub const ADAPTIVE_START: u32 = 80;
+
+/// The drawn part's next percent, from `percent`, for frames taking the
+/// graphics chip `gpu_ms` with the headset showing one every `period_ms`:
+/// lower when they take over 85% of it, higher when a step up would still
+/// leave a quarter free; from `min` to `max`, in steps of 5.
+pub fn adapt(percent: u32, gpu_ms: f32, period_ms: f32, (min, max): (u32, u32)) -> u32 {
+    if gpu_ms <= 0.0 || period_ms <= 0.0 {
+        return percent;
+    }
+    // The time goes with the pixels drawn: the percent squared.
+    let at = |p: u32| gpu_ms * (p as f32 / percent.max(1) as f32).powi(2);
+    let next = if gpu_ms > period_ms * 0.85 {
+        let fits = (percent as f32 * (period_ms * 0.75 / gpu_ms).sqrt()) as u32 / 5 * 5;
+        fits.min(percent.saturating_sub(5))
+    } else if at(percent + 5) < period_ms * 0.75 {
+        percent + 5
+    } else {
+        percent
+    };
+    next.clamp(min, max)
+}
+
+/// `refresh`'s choices in the settings window, in Hz (the runtime's
+/// nearest is taken).
+pub const REFRESH_RATES: [u32; 5] = [72, 80, 90, 120, 144];
+
+/// Which of the refresh rates a runtime `offered` to ask for, with the
+/// `refresh` setting, on a `mobile` graphics chip or not: the nearest to
+/// the one set; for `auto`, the lowest from 72 Hz on a mobile chip (more
+/// time for each frame), else none (as the runtime has it).
+pub fn pick_refresh(refresh: Option<u32>, mobile: bool, offered: &[f32]) -> Option<f32> {
+    match refresh {
+        Some(hz) => offered.iter().copied().min_by(|a, b| (a - hz as f32).abs().total_cmp(&(b - hz as f32).abs())),
+        None if mobile => offered.iter().copied().filter(|&hz| hz >= 71.5).min_by(f32::total_cmp),
+        None => None,
     }
 }
 
@@ -427,6 +592,10 @@ pub fn area(size: (u32, u32), percent: u32) -> (u32, u32) {
     (scale(size.0), scale(size.1))
 }
 
+/// `refresh`'s range, in Hz.
+pub const REFRESH_MIN: u32 = 30;
+pub const REFRESH_MAX: u32 = 240;
+
 /// `resolution`'s range, in percent.
 pub const RESOLUTION_MIN: u32 = 30;
 pub const RESOLUTION_MAX: u32 = 150;
@@ -472,8 +641,18 @@ pub struct VrSettings {
     pub seat_turn: i32,
     /// How the headset's pictures get to the OpenXR runtime.
     pub graphics: VrGraphics,
-    /// The eyes' images, in percent of the size the runtime recommends.
-    pub resolution: u32,
+    /// The eyes' images, in percent of the size the runtime recommends;
+    /// None (`auto`): all of it, with the part drawn adapting to the time
+    /// there is on a standalone headset.
+    pub resolution: Option<u32>,
+    /// The ambient occlusion: `auto` as `quality` has it, but not on a
+    /// standalone headset.
+    pub ambient_occlusion: VrSwitch,
+    pub msaa: VrMsaa,
+    /// The headset's refresh rate to ask for, in Hz (the runtime's nearest);
+    /// None (`auto`): the runtime's own, or on a standalone headset the
+    /// lowest from 72 Hz.
+    pub refresh: Option<u32>,
 }
 
 impl Default for VrSettings {
@@ -484,13 +663,16 @@ impl Default for VrSettings {
             controllers: VrControllers::Both,
             spatial_audio: true,
             screen_fit: ScreenFit::Auto,
-            quality: VrQuality::High,
+            quality: VrQuality::Auto,
             screen_glow: 100,
             scene_scale: 100,
             seat: [0; 3],
             seat_turn: 0,
             graphics: VrGraphics::Auto,
-            resolution: 100,
+            resolution: None,
+            ambient_occlusion: VrSwitch::Auto,
+            msaa: VrMsaa::Auto,
+            refresh: None,
         }
     }
 }
@@ -525,7 +707,33 @@ impl VrSettings {
             }
             "quality" => {
                 self.quality = VrQuality::parse(value)
-                    .ok_or_else(|| format!("invalid quality '{}' (low, medium or high)", value))?;
+                    .ok_or_else(|| format!("invalid quality '{}' (auto, low, medium or high)", value))?;
+            }
+            "ambient_occlusion" => {
+                self.ambient_occlusion = VrSwitch::parse(value)
+                    .ok_or_else(|| format!("invalid ambient_occlusion '{}' (auto, on or off)", value))?;
+            }
+            "msaa" => {
+                self.msaa = VrMsaa::parse(value).ok_or_else(|| format!("invalid msaa '{}' (auto, off, 2 or 4)", value))?;
+            }
+            "refresh" => {
+                let value = value.trim();
+                self.refresh = if value.eq_ignore_ascii_case("auto") {
+                    None
+                } else {
+                    Some(
+                        value
+                            .trim_end_matches("Hz")
+                            .trim_end_matches("hz")
+                            .trim()
+                            .parse::<u32>()
+                            .ok()
+                            .filter(|hz| (REFRESH_MIN..=REFRESH_MAX).contains(hz))
+                            .ok_or_else(|| {
+                                format!("invalid refresh '{}' (auto, or {} to {} Hz)", value, REFRESH_MIN, REFRESH_MAX)
+                            })?,
+                    )
+                };
             }
             "screen_glow" => {
                 self.screen_glow = value
@@ -561,16 +769,19 @@ impl VrSettings {
                 self.graphics = VrGraphics::parse(value)
                     .ok_or_else(|| format!("invalid graphics '{}' (auto, gl, egl or vulkan)", value))?;
             }
+            "resolution" if value.trim().eq_ignore_ascii_case("auto") => self.resolution = None,
             "resolution" => {
-                self.resolution = value
-                    .trim()
-                    .trim_end_matches('%')
-                    .parse::<u32>()
-                    .ok()
-                    .filter(|r| (RESOLUTION_MIN..=RESOLUTION_MAX).contains(r))
-                    .ok_or_else(|| {
-                        format!("invalid resolution '{}' ({} to {} percent)", value, RESOLUTION_MIN, RESOLUTION_MAX)
-                    })?;
+                self.resolution = Some(
+                    value
+                        .trim()
+                        .trim_end_matches('%')
+                        .parse::<u32>()
+                        .ok()
+                        .filter(|r| (RESOLUTION_MIN..=RESOLUTION_MAX).contains(r))
+                        .ok_or_else(|| {
+                            format!("invalid resolution '{}' (auto, or {} to {} percent)", value, RESOLUTION_MIN, RESOLUTION_MAX)
+                        })?,
+                );
             }
             _ => return Err(format!("unknown setting '{}'", key)),
         }
@@ -592,8 +803,37 @@ impl VrSettings {
             (SEAT_AXES[2], Some(self.seat[2].to_string())),
             ("seat_turn", Some(self.seat_turn.to_string())),
             ("graphics", Some(self.graphics.name().to_string())),
-            ("resolution", Some(self.resolution.to_string())),
+            ("resolution", Some(self.resolution.map_or("auto".to_string(), |r| r.to_string()))),
+            ("ambient_occlusion", Some(self.ambient_occlusion.name().to_string())),
+            ("msaa", Some(self.msaa.name().to_string())),
+            ("refresh", Some(self.refresh.map_or("auto".to_string(), |hz| hz.to_string()))),
         ]
+    }
+
+    /// How the 3D view is drawn on a `mobile` graphics chip or not.
+    pub fn look(&self, mobile: bool) -> VrLook {
+        VrLook {
+            quality: self.quality.resolve(mobile),
+            ambient_occlusion: match self.ambient_occlusion {
+                VrSwitch::Auto if mobile => Some(false),
+                VrSwitch::Auto => None,
+                VrSwitch::On => Some(true),
+                VrSwitch::Off => Some(false),
+            },
+            samples: self.msaa.samples(mobile),
+        }
+    }
+
+    /// What the headset's eyes are drawn at, on a `mobile` graphics chip
+    /// or not: a resolution set is kept; `auto` makes the images the size
+    /// the runtime recommends, all of it drawn, or on a mobile chip as much
+    /// as there is time for.
+    pub fn headset_resolution(&self, mobile: bool) -> VrResolution {
+        match self.resolution {
+            Some(percent) => VrResolution { percent, adaptive: None },
+            None if mobile => VrResolution { percent: 100, adaptive: Some((ADAPTIVE_MIN, 100, ADAPTIVE_START)) },
+            None => VrResolution { percent: 100, adaptive: None },
+        }
     }
 }
 
@@ -632,7 +872,13 @@ mod tests {
         assert!(s.set("seat_turn", "181", Path::new("/cfg")).is_err());
         s.set("graphics", "EGL", Path::new("/cfg")).unwrap();
         s.set("resolution", "70%", Path::new("/cfg")).unwrap();
-        assert_eq!((s.graphics, s.resolution), (VrGraphics::Egl, 70));
+        assert_eq!((s.graphics, s.resolution), (VrGraphics::Egl, Some(70)));
+        s.set("ambient_occlusion", "Off", Path::new("/cfg")).unwrap();
+        s.set("msaa", "2x", Path::new("/cfg")).unwrap();
+        s.set("refresh", "90 Hz", Path::new("/cfg")).unwrap();
+        assert_eq!((s.ambient_occlusion, s.msaa, s.refresh), (VrSwitch::Off, VrMsaa::Two, Some(90)));
+        assert!(s.set("msaa", "8", Path::new("/cfg")).is_err());
+        assert!(s.set("refresh", "500", Path::new("/cfg")).is_err());
         assert!(s.set("graphics", "d3d", Path::new("/cfg")).is_err());
         assert!(s.set("resolution", "29", Path::new("/cfg")).is_err());
         assert!(s.set("resolution", "151", Path::new("/cfg")).is_err());
@@ -647,6 +893,54 @@ mod tests {
             again.set(key, &value.unwrap(), Path::new("/elsewhere")).unwrap();
         }
         assert_eq!(again, s);
+    }
+
+    #[test]
+    fn auto_goes_easier_on_a_standalone_headset() {
+        let s = VrSettings::default();
+        assert!(mobile_gpu("Turnip Adreno (TM) 750") && mobile_gpu("zink Vulkan 1.4(Turnip Adreno (TM) 750 (MESA_TURNIP))"));
+        assert!(!mobile_gpu("AMD Radeon 8060S Graphics (radeonsi, strix_halo)"));
+        assert_eq!(s.look(false), VrLook { quality: VrQuality::High, ambient_occlusion: None, samples: 4 });
+        assert_eq!(s.look(true), VrLook { quality: VrQuality::Medium, ambient_occlusion: Some(false), samples: 2 });
+        assert_eq!(s.headset_resolution(false), VrResolution { percent: 100, adaptive: None });
+        assert_eq!(s.headset_resolution(true).adaptive, Some((ADAPTIVE_MIN, 100, ADAPTIVE_START)));
+        // What is set is kept, on any chip.
+        let set = VrSettings {
+            quality: VrQuality::High,
+            ambient_occlusion: VrSwitch::On,
+            msaa: VrMsaa::Four,
+            resolution: Some(70),
+            ..VrSettings::default()
+        };
+        assert_eq!(set.look(true), VrLook { quality: VrQuality::High, ambient_occlusion: Some(true), samples: 4 });
+        assert_eq!(set.headset_resolution(true), VrResolution { percent: 70, adaptive: None });
+    }
+
+    #[test]
+    fn the_drawn_part_adapts_to_the_time_there_is() {
+        let range = (50, 100);
+        // 11.1 ms a frame (90 Hz): 12 ms is too long, to what fits in 75%.
+        assert_eq!(adapt(100, 12.0, 11.1, range), 80);
+        // Just over 85%: down to what fits in 75%, a step at least.
+        assert_eq!(adapt(80, 9.6, 11.1, range), 70);
+        assert_eq!(adapt(80, 9.44, 11.1, range), 75);
+        // Plenty of time: a step up; little to spare: kept.
+        assert_eq!(adapt(70, 5.0, 11.1, range), 75);
+        assert_eq!(adapt(75, 8.0, 11.1, range), 75);
+        // Within the range.
+        assert_eq!(adapt(55, 30.0, 11.1, range), 50);
+        assert_eq!(adapt(100, 1.0, 11.1, range), 100);
+    }
+
+    #[test]
+    fn refresh_rates_are_picked_from_those_offered() {
+        let offered = [72.0, 90.0, 120.0, 144.0];
+        assert_eq!(pick_refresh(None, false, &offered), None);
+        assert_eq!(pick_refresh(None, true, &offered), Some(72.0));
+        assert_eq!(pick_refresh(None, true, &[60.0, 90.0]), Some(90.0));
+        assert_eq!(pick_refresh(Some(80), false, &offered), Some(72.0));
+        assert_eq!(pick_refresh(Some(100), true, &offered), Some(90.0));
+        assert_eq!(pick_refresh(Some(90), true, &[]), None);
     }
 
     const ALL: Offered = Offered { opengl: true, egl: true, vulkan: true, hand_interaction: false };

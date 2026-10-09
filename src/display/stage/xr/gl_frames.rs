@@ -3,6 +3,7 @@
 //! headset's thread, drawn into through a framebuffer each.
 
 use super::err;
+use glow::HasContext;
 use openxr as xr;
 
 /// A graphics binding whose swapchain images are OpenGL textures.
@@ -50,8 +51,16 @@ pub fn pick_format(formats: &[u32]) -> Result<(u32, bool), String> {
 
 impl<G: GlGraphics> GlFrames<G> {
     /// A swapchain for each of the eyes, `sizes` big; or with `layered`,
-    /// one of a layer for each, where the eyes are the same size.
-    pub fn new(session: &xr::Session<G>, stream: xr::FrameStream<G>, sizes: &[(u32, u32)], layered: bool) -> Result<Self, String> {
+    /// one of a layer for each, where the eyes are the same size. Whether
+    /// `gl` can draw into their images is found out here, where another
+    /// binding can still be tried.
+    pub fn new(
+        gl: &glow::Context,
+        session: &xr::Session<G>,
+        stream: xr::FrameStream<G>,
+        sizes: &[(u32, u32)],
+        layered: bool,
+    ) -> Result<Self, String> {
         let formats = session.enumerate_swapchain_formats().map_err(err("the headset's formats"))?;
         let (format, srgb) = pick_format(&formats)?;
         let layered = layered && sizes.len() == 2 && sizes[0] == sizes[1];
@@ -76,6 +85,24 @@ impl<G: GlGraphics> GlFrames<G> {
                 .into_iter()
                 .map(|image| std::num::NonZeroU32::new(image).map(glow::NativeTexture).ok_or("an empty swapchain image"))
                 .collect::<Result<Vec<_>, _>>()?;
+            for &texture in &images {
+                // SAFETY: see `GlScreen`.
+                unsafe {
+                    let framebuffer = gl.create_framebuffer()?;
+                    gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
+                    if array_size > 1 {
+                        gl.framebuffer_texture_layer(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, Some(texture), 0, 0);
+                    } else {
+                        gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(texture), 0);
+                    }
+                    let complete = gl.check_framebuffer_status(glow::FRAMEBUFFER) == glow::FRAMEBUFFER_COMPLETE;
+                    gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                    gl.delete_framebuffer(framebuffer);
+                    if !complete {
+                        return Err("OpenGL can't draw into the headset's images".into());
+                    }
+                }
+            }
             eyes.push(Eye { swapchain, images, size: (width, height), acquired: None });
         }
         Ok(GlFrames { eyes, layered, stream, srgb, formats })

@@ -2652,7 +2652,10 @@ mod tests {
                 seat: [-3, 2, 7],
                 seat_turn: -5,
                 graphics: crate::vr::VrGraphics::Vulkan,
-                resolution: 80,
+                resolution: Some(80),
+                ambient_occlusion: crate::vr::VrSwitch::Off,
+                msaa: crate::vr::VrMsaa::Two,
+                refresh: Some(90),
             },
         }
     }
@@ -2860,7 +2863,7 @@ mod tests {
         assert!(saved.contains("\nroom=lobby\n\n[serial]\nserial1=mouse\n"), "{}", saved);
         assert!(saved.contains("\nmodemtelnet=off\n\n[printer]\noutput=pdf\n"), "{}", saved);
         assert!(saved.contains("\ntimeout=3000\n\n[achievements]\nenabled=false\nhardcore=false\n\n[shell]\nautosuggest=true\n"), "{}", saved);
-        assert!(saved.contains("\nsuggestion_color=darkgray\n\n[vr]\nmode=off\ncontrollers=both\nspatial_audio=true\nscreen_fit=auto\nquality=high\nscreen_glow=100\nscene_scale=100\nseat_right=0\nseat_up=0\nseat_forward=0\nseat_turn=0\ngraphics=auto\nresolution=100\n\n[autoexec]\nDIR\n"), "{}", saved);
+        assert!(saved.contains("\nsuggestion_color=darkgray\n\n[vr]\nmode=off\ncontrollers=both\nspatial_audio=true\nscreen_fit=auto\nquality=auto\nscreen_glow=100\nscene_scale=100\nseat_right=0\nseat_up=0\nseat_forward=0\nseat_turn=0\ngraphics=auto\nresolution=auto\nambient_occlusion=auto\nmsaa=auto\nrefresh=auto\n\n[autoexec]\nDIR\n"), "{}", saved);
         let config = parse(&saved, Path::new("/cfg"), Some(home));
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
         assert_eq!(Settings::from_config(&config), Settings { cycles: CpuSpeed::Max, ..settings.clone() });

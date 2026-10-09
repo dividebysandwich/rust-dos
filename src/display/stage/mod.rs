@@ -33,7 +33,7 @@ use glow::HasContext;
 use render::{Dest, Format, Gpu, Options, Pass, ScreenTarget, View};
 use rust_dos::vr::{ScreenFit, VrMode, VrSettings};
 use scene::Scene;
-use rust_dos::vr::{Leds, VrGraphics, VrQuality};
+use rust_dos::vr::{Leds, VrGraphics, VrLook};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError};
@@ -62,10 +62,13 @@ pub struct Stage {
     glsl: Glsl,
     /// Where the scene is shown: in the window, or in a headset as well.
     mode: VrMode,
-    quality: VrQuality,
-    /// How the headset's session draws, and its eyes' resolution, which it
-    /// is started again for.
-    headset_options: (VrGraphics, u32),
+    /// The settings the window's view is drawn with, worked out for its
+    /// graphics chip (`mobile`).
+    look: VrLook,
+    mobile: bool,
+    /// How the headset's session draws, its eyes' resolution and its
+    /// refresh rate, which it is started again for.
+    headset_options: (VrGraphics, Option<u32>, Option<u32>),
     glow: f32,
     /// The scene file shown (None: the test room), and the one being read
     /// on a thread of its own to take its place.
@@ -75,9 +78,15 @@ pub struct Stage {
     timing_since: std::time::Instant,
 }
 
-/// How the window's view is drawn: timed with RUST_DOS_VR_TIMING set.
-fn window_options() -> Options {
-    Options { timed: std::env::var_os("RUST_DOS_VR_TIMING").is_some(), samples: 4, multiview: None }
+/// How the window's view is drawn, as `look` says: timed with
+/// RUST_DOS_VR_TIMING set.
+fn window_options(look: VrLook) -> Options {
+    Options {
+        timed: std::env::var_os("RUST_DOS_VR_TIMING").is_some(),
+        samples: look.samples,
+        multiview: None,
+        ambient_occlusion: look.ambient_occlusion,
+    }
 }
 
 /// Width and height.
@@ -119,7 +128,9 @@ impl Stage {
             Scene::test_room()
         });
         let scene = Arc::new(scene);
-        let mut gpu = Gpu::new(gl, glsl, &scene, settings.quality, window_options())?;
+        let mobile = rust_dos::vr::mobile_gpu(&render::Features::of(gl).renderer);
+        let look = settings.look(mobile);
+        let mut gpu = Gpu::new(gl, glsl, &scene, look.quality, window_options(look))?;
         gpu.set_glow(glow_of(settings));
         let mut screens = Vec::new();
         for _ in 0..3 {
@@ -146,8 +157,9 @@ impl Stage {
             fit: settings.screen_fit,
             glsl,
             mode: settings.mode,
-            quality: settings.quality,
-            headset_options: (settings.graphics, settings.resolution),
+            look,
+            mobile,
+            headset_options: (settings.graphics, settings.resolution, settings.refresh),
             glow: glow_of(settings),
             scene_path: settings.scene.clone(),
             loading: None,
@@ -361,7 +373,7 @@ impl Stage {
         };
         let path = path.clone();
         self.loading = None;
-        let scene = match read.and_then(|scene| Ok((Gpu::new(gl, self.glsl, &scene, self.quality, window_options())?, scene))) {
+        let scene = match read.and_then(|scene| Ok((Gpu::new(gl, self.glsl, &scene, self.look.quality, window_options(self.look))?, scene))) {
             Ok((gpu, scene)) => {
                 std::mem::replace(&mut self.gpu, gpu).delete(gl);
                 self.gpu.set_glow(self.glow);
@@ -408,11 +420,12 @@ impl Stage {
     ) -> Vec<String> {
         let mut notes = Vec::new();
         let mut restart = false;
-        if settings.quality != self.quality {
-            match Gpu::new(gl, self.glsl, &self.scene, settings.quality, window_options()) {
+        let look = settings.look(self.mobile);
+        if look != self.look {
+            match Gpu::new(gl, self.glsl, &self.scene, look.quality, window_options(look)) {
                 Ok(gpu) => {
                     std::mem::replace(&mut self.gpu, gpu).delete(gl);
-                    self.quality = settings.quality;
+                    self.look = look;
                     self.fresh = self.latest.is_some();
                     // The headset's thread lights with its own, made as it starts.
                     restart = self.has_headset();
@@ -420,8 +433,8 @@ impl Stage {
                 Err(e) => notes.push(format!("[VR] The lighting can't be changed: {}", e)),
             }
         }
-        if (settings.graphics, settings.resolution) != self.headset_options {
-            self.headset_options = (settings.graphics, settings.resolution);
+        if (settings.graphics, settings.resolution, settings.refresh) != self.headset_options {
+            self.headset_options = (settings.graphics, settings.resolution, settings.refresh);
             restart |= self.has_headset();
         }
         if settings.mode != self.mode || restart {

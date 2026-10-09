@@ -29,7 +29,7 @@ fn lighting(quality: VrQuality) -> ((i32, i32), u32, bool, u32) {
     match quality {
         VrQuality::Low => ((1, 1), 1, false, 0),
         VrQuality::Medium => ((2, 2), 6, true, 8),
-        VrQuality::High => ((4, 3), 12, true, 12),
+        VrQuality::High | VrQuality::Auto => ((4, 3), 12, true, 12),
     }
 }
 
@@ -112,6 +112,8 @@ pub struct Options {
     /// Both eyes in one pass, into the layers of a headset's image: with
     /// samples, only where `Multiview::multisamples`.
     pub multiview: Option<Multiview>,
+    /// The ambient occlusion on or off: None as the quality has it.
+    pub ambient_occlusion: Option<bool>,
 }
 
 /// Where a view is drawn.
@@ -288,8 +290,8 @@ struct Clock {
     sums: [f64; 4],
     total: f64,
     frames: u32,
-    /// The newest frame read's milliseconds in all.
-    latest: Option<f32>,
+    /// Milliseconds in all and frames since `recent` was last asked.
+    recent: (f64, u32),
 }
 
 impl Clock {
@@ -297,7 +299,7 @@ impl Clock {
     const IN_FLIGHT: usize = 4;
 
     fn new() -> Self {
-        Clock { current: Vec::new(), pending: Default::default(), free: Vec::new(), sums: [0.0; 4], total: 0.0, frames: 0, latest: None }
+        Clock { current: Vec::new(), pending: Default::default(), free: Vec::new(), sums: [0.0; 4], total: 0.0, frames: 0, recent: (0.0, 0) }
     }
 
     fn stamp(&mut self, gl: &glow::Context, pass: Option<Pass>) {
@@ -351,7 +353,8 @@ impl Clock {
             let total = times[times.len() - 1].saturating_sub(times[0]) as f64 / 1e6;
             self.total += total;
             self.frames += 1;
-            self.latest = Some(total as f32);
+            self.recent.0 += total;
+            self.recent.1 += 1;
             self.free.extend(frame.into_iter().map(|(q, _)| q));
         }
     }
@@ -685,6 +688,11 @@ impl Gpu {
     /// Compile the programs and upload `scene`, to draw as `options` say.
     pub fn new(gl: &glow::Context, glsl: Glsl, scene: &Scene, quality: VrQuality, options: Options) -> Result<Self, String> {
         let (grid_size, taps, bounce, ao_samples) = lighting(quality);
+        let ao_samples = match options.ambient_occlusion {
+            Some(false) => 0,
+            Some(true) if ao_samples == 0 => 8,
+            _ => ao_samples,
+        };
         // Both views at once multisampled only where OpenGL can.
         let multiview = options.multiview;
         let samples = if multiview.is_some_and(|m| !m.multisamples()) { 0 } else { options.samples.min(4) as i32 };
@@ -966,6 +974,14 @@ impl Gpu {
     /// The frames' times since the last report, in a line.
     pub fn timing_report(&mut self) -> Option<String> {
         self.clock.as_mut()?.report()
+    }
+
+    /// The frames' average milliseconds on the graphics chip since the
+    /// last time this was asked, if any were timed.
+    pub fn recent_frame_time(&mut self) -> Option<f32> {
+        let clock = self.clock.as_mut()?;
+        let (ms, frames) = std::mem::take(&mut clock.recent);
+        (frames > 0).then(|| (ms / frames as f64) as f32)
     }
 
     /// Set the lighting's uniforms of `program` (the scene's or the bake's)

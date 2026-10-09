@@ -80,7 +80,8 @@ pub fn run(gl: &glow::Context, sdl_driver: &str, settings: &VrSettings) {
         std::env::consts::OS,
         std::env::consts::ARCH
     ));
-    report.line(format!("[vr] graphics={} resolution={}%", settings.graphics.name(), settings.resolution));
+    let resolution = settings.resolution.map_or("auto".to_string(), |r| format!("{}%", r));
+    report.line(format!("[vr] graphics={} resolution={}", settings.graphics.name(), resolution));
 
     report.section("OpenGL");
     let kind = native::current_kind();
@@ -221,7 +222,7 @@ pub fn run(gl: &glow::Context, sdl_driver: &str, settings: &VrSettings) {
                 sizes.push(rust_dos::vr::eye_size(
                     (v.recommended_image_rect_width, v.recommended_image_rect_height),
                     (v.max_image_rect_width, v.max_image_rect_height),
-                    settings.resolution,
+                    settings.resolution.unwrap_or(100),
                 ));
             }
         }

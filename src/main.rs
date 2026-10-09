@@ -237,7 +237,7 @@ fn main() -> Result<(), String> {
         settings.vr.graphics = graphics;
     }
     if let Some(resolution) = args.vr_resolution {
-        settings.vr.resolution = resolution;
+        settings.vr.resolution = Some(resolution);
     }
     if let Some(scene) = &args.vr_scene {
         settings.vr.scene = Some(scene.clone());

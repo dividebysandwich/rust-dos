@@ -101,6 +101,8 @@ pub struct Xr {
     /// (`set_percent`); the area the last frame drew.
     percent: u32,
     area: (u32, u32),
+    /// The headset's frame period, as of the last frame waited for.
+    period: Duration,
 }
 
 /// What the session is made with: how the headset's pictures get to the
@@ -112,6 +114,11 @@ pub struct XrOptions {
     pub resolution: u32,
     /// Both eyes in the layers of one swapchain, where the binding allows.
     pub layered: bool,
+    /// The refresh rate to ask for, in Hz: None as `mobile` has it
+    /// (`rust_dos::vr::pick_refresh`).
+    pub refresh: Option<u32>,
+    /// The graphics chip is a standalone headset's.
+    pub mobile: bool,
 }
 
 /// What a session draws with that is to outlive it.
@@ -223,6 +230,9 @@ impl Xr {
         {
             extensions.ext_hand_interaction = available.ext_hand_interaction;
         }
+        // The refresh rate, where one is to be asked for.
+        extensions.fb_display_refresh_rate =
+            available.fb_display_refresh_rate && (options.refresh.is_some() || options.mobile);
         let app = xr::ApplicationInfo {
             application_name: "Rust-DOS",
             application_version: 0,
@@ -280,6 +290,9 @@ impl Xr {
         let Some((binding, Opened { session, waiter, frames, keep })) = opened else {
             return Err(failures.join("; "));
         };
+        if extensions.fb_display_refresh_rate {
+            refresh_rate(&session, options);
+        }
         let space = session
             .create_reference_space(xr::ReferenceSpaceType::LOCAL, xr::Posef::IDENTITY)
             .map_err(err("the headset's space"))?;
@@ -327,6 +340,7 @@ impl Xr {
             begun: None,
             percent: 100,
             area: (width, height),
+            period: Duration::ZERO,
         })
     }
 
@@ -430,6 +444,23 @@ impl Xr {
         self.frames.layered()
     }
 
+    /// Whether less than the whole of the eyes' images can be drawn.
+    pub fn partial(&self) -> bool {
+        self.frames.partial()
+    }
+
+    /// Draw `percent` of the eyes' images across and down from the next
+    /// frame on (where `partial`).
+    pub fn set_percent(&mut self, percent: u32) {
+        self.percent = percent.clamp(1, 100);
+    }
+
+    /// How long the headset shows each frame, in milliseconds, as the
+    /// runtime last said.
+    pub fn period_ms(&self) -> f32 {
+        self.period.as_secs_f32() * 1000.0
+    }
+
 
     /// Delete what the session's swapchains were drawn through, with `gl`,
     /// the context it was made with, current.
@@ -446,6 +477,7 @@ impl Xr {
         match self.waiter.wait() {
             Ok(state) => {
                 let period = Duration::from_nanos(state.predicted_display_period.as_nanos().max(0) as u64);
+                self.period = period;
                 self.stats.waited(Instant::now(), period, state.should_render);
                 if let Some(line) = self.stats.report(Instant::now()) {
                     log::line(line);
@@ -703,6 +735,24 @@ fn make_controls(
     Ok(Controls { set, _aim: aim, select, squeeze, stick, primary, secondary, menu, hands, spaces })
 }
 
+/// Ask for the refresh rate `options` want, out of those the session's
+/// headset offers (XR_FB_display_refresh_rate, enabled).
+fn refresh_rate(session: &xr::Session<xr::AnyGraphics>, options: &XrOptions) {
+    let offered = match session.enumerate_display_refresh_rates() {
+        Ok(offered) => offered,
+        Err(e) => return log::line(format!("The headset's refresh rates: {}", e)),
+    };
+    let now = session.get_display_refresh_rate().map_or("?".to_string(), |hz| format!("{}", hz));
+    let list: Vec<String> = offered.iter().map(|hz| format!("{}", hz)).collect();
+    let Some(wanted) = rust_dos::vr::pick_refresh(options.refresh, options.mobile, &offered) else {
+        return log::line(format!("The headset refreshes at {} Hz (it offers {})", now, list.join(", ")));
+    };
+    match session.request_display_refresh_rate(wanted) {
+        Ok(()) => log::line(format!("The headset is asked for {} Hz, from {} Hz (it offers {})", wanted, now, list.join(", "))),
+        Err(e) => log::line(format!("The headset can't refresh at {} Hz: {}", wanted, e)),
+    }
+}
+
 fn pose_matrix(pose: xr::Posef) -> Mat4 {
     let o = pose.orientation;
     let p = pose.position;
@@ -728,7 +778,7 @@ fn open(
             // which outlives the session (the window's).
             let (session, waiter, stream) =
                 unsafe { instance.create_session::<xr::OpenGL>(system, &info) }.map_err(err("the headset's session"))?;
-            let frames = Frames::Gl(GlFrames::new(&session, stream, sizes, layered)?);
+            let frames = Frames::Gl(GlFrames::new(gl, &session, stream, sizes, layered)?);
             Ok(Opened { session: session.into_any_graphics(), waiter, frames, keep: Keep::Library(library) })
         }
         #[cfg(target_os = "linux")]
@@ -738,7 +788,7 @@ fn open(
             // SAFETY: as above.
             let (session, waiter, stream) =
                 unsafe { instance.create_session::<egl::Egl>(system, &info) }.map_err(err("the headset's session"))?;
-            let frames = Frames::Egl(GlFrames::new(&session, stream, sizes, layered)?);
+            let frames = Frames::Egl(GlFrames::new(gl, &session, stream, sizes, layered)?);
             Ok(Opened { session: session.into_any_graphics(), waiter, frames, keep: Keep::Library(library) })
         }
         #[cfg(target_os = "linux")]

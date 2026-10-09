@@ -394,8 +394,8 @@ impl Page {
         match self {
             Page::Drives | Page::Games | Page::States | Page::Cheats | Page::Achievements | Page::Stats => &[],
             Page::Vr => &[
-                VrMode, VrScene, VrScreenFit, VrQuality, VrScreenGlow, VrControllers, VrSpatialAudio, VrCenter,
-                VrSceneScale, VrSeat(0), VrSeat(1), VrSeat(2), VrSeatTurn, VrResolution, VrGraphics,
+                VrMode, VrScene, VrScreenFit, VrQuality, VrAmbientOcclusion, VrMsaa, VrScreenGlow, VrControllers, VrSpatialAudio,
+                VrCenter, VrSceneScale, VrSeat(0), VrSeat(1), VrSeat(2), VrSeatTurn, VrResolution, VrRefresh, VrGraphics,
             ],
             Page::Display => {
                 &[Scale, Fullscreen, Aspect, Vrr, Filter, Shader, CrtCurvature, CrtGlow, Monochrome, Composite, CompositeEra]
@@ -517,6 +517,10 @@ enum Item {
     /// How much of the scene's lighting is worked out, and how brightly
     /// the screen lights it.
     VrQuality,
+    /// The ambient occlusion, and the samples a pixel takes for smooth
+    /// edges.
+    VrAmbientOcclusion,
+    VrMsaa,
     VrScreenGlow,
     /// Center the headset's view where the head is now.
     VrCenter,
@@ -527,8 +531,9 @@ enum Item {
     VrSeat(u8),
     VrSeatTurn,
     /// The headset's eye images, in percent of the size its runtime
-    /// recommends.
+    /// recommends, and its refresh rate.
     VrResolution,
+    VrRefresh,
     /// How the headset's pictures get to its runtime (GLX, EGL, Vulkan).
     VrGraphics,
     Filter,
@@ -861,6 +866,8 @@ impl Item {
             VrSpatialAudio => "Sound from the screen",
             VrScreenFit => "Picture on the screen",
             VrQuality => "Lighting",
+            VrAmbientOcclusion => "  Ambient occlusion",
+            VrMsaa => "Antialiasing",
             VrScreenGlow => "Light from the screen",
             VrCenter => "  Center the view where you sit now",
             VrSceneScale => "Scene scale",
@@ -869,6 +876,7 @@ impl Item {
             VrSeat(_) => "  Seat closer to the screen",
             VrSeatTurn => "  Seat turned to the left",
             VrResolution => "Headset resolution",
+            VrRefresh => "Headset refresh rate",
             VrGraphics => "Headset graphics",
             Filter => "Scaling filter",
             Shader => "CRT shader",
@@ -995,12 +1003,15 @@ impl Item {
             | Item::VrSpatialAudio
             | Item::VrScreenFit
             | Item::VrQuality
+            | Item::VrAmbientOcclusion
+            | Item::VrMsaa
             | Item::VrScreenGlow
             | Item::VrCenter
             | Item::VrSceneScale
             | Item::VrSeat(_)
             | Item::VrSeatTurn
             | Item::VrResolution
+            | Item::VrRefresh
             | Item::VrGraphics => frontend.window && cfg!(feature = "vr"),
             Item::SoundFont => soundfonts(frontend),
             Item::Mt32Roms | Item::Mt32Model => mt32(frontend),
@@ -1038,7 +1049,13 @@ impl Item {
     fn shown(self, s: &Settings) -> bool {
         match self {
             Item::CrtCurvature | Item::CrtGlow => s.shader == crate::video::shader::Shader::Crt,
-            Item::VrScene | Item::VrSpatialAudio | Item::VrScreenFit | Item::VrQuality | Item::VrScreenGlow => {
+            Item::VrScene
+            | Item::VrSpatialAudio
+            | Item::VrScreenFit
+            | Item::VrQuality
+            | Item::VrAmbientOcclusion
+            | Item::VrMsaa
+            | Item::VrScreenGlow => {
                 s.vr.mode != crate::vr::VrMode::Off
             }
             Item::VrControllers
@@ -1047,6 +1064,7 @@ impl Item {
             | Item::VrSeat(_)
             | Item::VrSeatTurn
             | Item::VrResolution
+            | Item::VrRefresh
             | Item::VrGraphics => s.vr.mode == crate::vr::VrMode::Headset,
             Item::ReverbMix => s.mixer.reverb != ReverbPreset::Off,
             Item::ChorusMix => s.mixer.chorus != ChorusPreset::Off,
@@ -1097,9 +1115,8 @@ impl Item {
             Joystick | Deadzone | SpeakerFilter | SbFilter | Reverb | Chorus | ReverbMix | ChorusMix => Applies::Now,
             Rooms => Applies::Now,
             Memsize | Autoexec | Lan | LanHost => Applies::NextStart,
-            VrMode | VrQuality | VrScene | VrControllers | VrSpatialAudio | VrScreenFit | VrScreenGlow | VrCenter | VrSceneScale | VrSeat(_) | VrSeatTurn | VrResolution => {
-                Applies::Now
-            }
+            VrMode | VrQuality | VrAmbientOcclusion | VrMsaa | VrScene | VrControllers | VrSpatialAudio | VrScreenFit | VrScreenGlow
+            | VrCenter | VrSceneScale | VrSeat(_) | VrSeatTurn | VrResolution | VrRefresh => Applies::Now,
             // SDL makes the window's context as the headset needs it as it
             // starts.
             VrGraphics => Applies::NextStart,
@@ -1147,6 +1164,13 @@ impl Item {
             VrSpatialAudio => on_off(s.vr.spatial_audio),
             VrScreenFit => s.vr.screen_fit.describe().to_string(),
             VrQuality => s.vr.quality.describe().to_string(),
+            VrAmbientOcclusion => match s.vr.ambient_occlusion {
+                crate::vr::VrSwitch::Auto => "auto: as the lighting, off on a standalone headset",
+                crate::vr::VrSwitch::On => "on",
+                crate::vr::VrSwitch::Off => "off",
+            }
+            .to_string(),
+            VrMsaa => s.vr.msaa.describe().to_string(),
             VrScreenGlow => {
                 let glow = s.vr.screen_glow.min(crate::vr::SCREEN_GLOW_MAX) as u16;
                 bar(format!("{:>3}%", glow), glow, crate::vr::SCREEN_GLOW_MAX as u16, SCREEN_GLOW_UNIT)
@@ -1155,7 +1179,14 @@ impl Item {
             VrSceneScale => format!("{}%", s.vr.scene_scale),
             VrSeat(axis) => format!("{:+} cm", s.vr.seat[axis as usize]),
             VrSeatTurn => format!("{:+}°", s.vr.seat_turn),
-            VrResolution => format!("{}%", s.vr.resolution),
+            VrResolution => match s.vr.resolution {
+                Some(percent) => format!("{}%", percent),
+                None => "auto: adapts on a standalone headset".to_string(),
+            },
+            VrRefresh => match s.vr.refresh {
+                Some(hz) => format!("{} Hz", hz),
+                None => "auto: 72 Hz on a standalone headset".to_string(),
+            },
             VrGraphics => s.vr.graphics.describe().to_string(),
             Filter => match s.filter {
                 crate::config::Filter::Nearest => "nearest (sharp)",
@@ -1401,6 +1432,9 @@ impl Item {
             VrSpatialAudio => on_off(|s, on| s.vr.spatial_audio = on),
             VrScreenFit => each(s, crate::vr::ScreenFit::ALL, |s, fit| s.vr.screen_fit = fit),
             VrQuality => each(s, crate::vr::VrQuality::ALL, |s, q| s.vr.quality = q),
+            VrAmbientOcclusion => each(s, crate::vr::VrSwitch::ALL, |s, ao| s.vr.ambient_occlusion = ao),
+            VrMsaa => each(s, crate::vr::VrMsaa::ALL, |s, msaa| s.vr.msaa = msaa),
+            VrRefresh => each(s, std::iter::once(None).chain(crate::vr::REFRESH_RATES.map(Some)), |s, hz| s.vr.refresh = hz),
             VrGraphics => each(s, crate::vr::VrGraphics::ALL, |s, g| s.vr.graphics = g),
             Filter => each(s, [crate::config::Filter::Nearest, crate::config::Filter::Linear], |s, f| s.filter = f),
             Shader => each(s, crate::video::shader::Shader::ALL, |s, shader| s.shader = shader),
@@ -1608,10 +1642,11 @@ impl Item {
             }
             VrResolution => {
                 let (min, max) = (crate::vr::RESOLUTION_MIN as isize, crate::vr::RESOLUTION_MAX as isize);
-                // To the next ten that way, from wherever it was typed.
-                let r = s.vr.resolution as isize;
+                // To the next ten that way, from wherever it was typed (or
+                // from 100% for auto, which Delete puts back).
+                let r = s.vr.resolution.unwrap_or(100) as isize;
                 let next = if dir > 0 { (r / 10 + 1) * 10 } else { (r - 1) / 10 * 10 };
-                s.vr.resolution = next.clamp(min, max) as u32;
+                s.vr.resolution = Some(next.clamp(min, max) as u32);
             }
             Memsize => {
                 let steps: Vec<usize> = memsizes(s.cpu).collect();
@@ -1663,7 +1698,7 @@ impl Item {
             Item::VrSceneScale => s.vr.scene_scale.to_string(),
             Item::VrSeat(axis) => s.vr.seat[axis as usize].to_string(),
             Item::VrSeatTurn => s.vr.seat_turn.to_string(),
-            Item::VrResolution => s.vr.resolution.to_string(),
+            Item::VrResolution => s.vr.resolution.map_or("auto".to_string(), |r| r.to_string()),
             Item::ReverbMix => s.mixer.reverb_mix.to_string(),
             Item::ChorusMix => s.mixer.chorus_mix.to_string(),
             Item::MacAddr => s.network.mac.map_or(String::new(), |mac| mac.to_string()),

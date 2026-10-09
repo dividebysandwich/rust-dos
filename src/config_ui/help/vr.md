@@ -64,6 +64,7 @@ How the DOS picture fills the scene's screen:
 
 How much of the scene's lighting is worked out:
 
+- **auto**: high, or medium on a standalone headset's own graphics chip.
 - **high**: soft shadows, the screen lighting the room in twelve patches
   of the picture's colours, the light bouncing around the room, and
   corners and gaps darkened (ambient occlusion).
@@ -74,6 +75,20 @@ How much of the scene's lighting is worked out:
 The bounced light is worked out when the scene loads, the first time in
 a second or so, and kept in `vr-cache` in Rust-DOS's folder for the next.
 It takes effect at once.
+
+# Ambient occlusion {#vr-ambient-occlusion}
+
+Corners and gaps darkened, as they get less of the light from all
+around. It takes the graphics chip a pass of its own.
+
+- **auto**: as the lighting has it, but off on a standalone headset.
+- **on** or **off**, whatever the lighting.
+
+# Antialiasing {#vr-msaa}
+
+How many samples each pixel of the scene takes, for smooth edges: **4x**,
+**2x** or **off**. **auto** is 4x, or 2x on a standalone headset. Each
+sample more costs the graphics chip a little more.
 
 # Light from the screen {#vr-screen-glow}
 
@@ -122,10 +137,21 @@ They take effect at once, and are kept with the other settings.
 
 How sharp the headset's picture is: the size of each eye's image in
 percent of what the headset's runtime recommends, 30 to 150%. Lower it
-when the headset stutters (on a standalone headset's own graphics, say);
-raise it for a sharper picture on a fast graphics card. **Left** and
-**Right** step in tens; **Enter** types a number. The headset starts again
-with it at once.
+when the headset stutters; raise it for a sharper picture on a fast
+graphics card. **Left** and **Right** step in tens; **Enter** types a
+number; **Delete** puts back **auto**. The headset starts again with it at
+once.
+
+**auto** draws the size the runtime recommends; on a standalone headset's
+own graphics chip, as much of it (from half up) as there is time for at
+the headset's rate, a little less when it is busy and more when it isn't.
+
+# Headset refresh rate {#vr-refresh}
+
+How many times a second the headset shows a picture, where its runtime
+lets programs choose: the nearest it offers to the one picked. **auto**
+leaves the runtime's own, or on a standalone headset takes the lowest from
+72 Hz, which leaves the graphics chip the most time for each picture.
 
 # Headset graphics {#vr-graphics}
 

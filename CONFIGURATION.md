@@ -700,13 +700,19 @@ The picture on a screen in a 3D scene (see [3D scene and VR](#3d-scene-and-vr)).
   picture's shape without one), `fit` (keep the picture's shape, with black
   bars where the screen's shape differs) or `stretch` (cover the whole
   screen).
-* `quality`: how much of the scene's lighting is worked out: `high` (the
-  default: soft shadows, the screen's light in twelve patches of the
+* `quality`: how much of the scene's lighting is worked out: `auto` (the
+  default: `high`, or `medium` on a standalone headset's own graphics
+  chip), `high` (soft shadows, the screen's light in twelve patches of the
   picture's colours, light bouncing around the room, and ambient occlusion
   darkening corners and gaps), `medium` (four patches, a little less soft)
   or `low` (hard shadows, the screen's light in one colour, no bounced light
-  or ambient occlusion), for slow graphics chips. It takes effect at
-  the next start.
+  or ambient occlusion), for slow graphics chips. It takes effect at once.
+* `ambient_occlusion`: the darkening of corners and gaps: `auto` (the
+  default: as `quality` has it, but off on a standalone headset), `on` or
+  `off`. It takes the graphics chip a pass of its own.
+* `msaa`: how many samples each pixel of the scene takes, for smooth
+  edges: `auto` (the default: 4, or 2 on a standalone headset), `off`, `2`
+  or `4`.
 * `screen_glow`: how brightly the screen lights the room, in percent of what
   the scene says, 0 to 400 (the default 100). 0 turns its light off.
 * `scene_scale`: how big the scene looks in a headset, in percent, 50 to
@@ -717,8 +723,15 @@ The picture on a screen in a 3D scene (see [3D scene and VR](#3d-scene-and-vr)).
 * `seat_turn`: how far you are turned to the left of the spawn's way, in
   degrees, -180 to 180 (the default 0).
 * `resolution`: the headset's eye images, in percent of the size its
-  runtime recommends, 30 to 150 (the default 100). Lower it for a headset's
-  own slower graphics chip. It takes effect at once.
+  runtime recommends, 30 to 150, or `auto` (the default): the recommended
+  size, and on a standalone headset as much of it drawn, from half up, as
+  the graphics chip has time for at the headset's rate (the runtime
+  scales it up to fill the view). A number keeps the size it says. It takes
+  effect at once.
+* `refresh`: the headset's refresh rate in Hz, the runtime's nearest to
+  it, or `auto` (the default: the runtime's own, or on a standalone headset
+  the lowest from 72 Hz, for more time for each frame). Only where the
+  runtime offers `XR_FB_display_refresh_rate`.
 * `graphics`: how the headset's pictures get to the OpenXR runtime: `auto`
   (the default: OpenGL as the window's context allows, then Vulkan), `gl`
   (OpenGL through GLX, or WGL on Windows), `egl` (OpenGL through EGL,
@@ -2049,6 +2062,17 @@ what the runtime and OpenGL offer to `vr-probe.log` and the console, makes
 a session each way it can, and quits: the first thing to run on a new
 headset. Hands tracked without controllers point and pinch to click where
 the runtime has `XR_EXT_hand_interaction` (not on Windows).
+
+Where OpenGL can draw both eyes in one pass (`GL_OVR_multiview2`, as Mesa
+has it, Zink on a Steam Frame included), the scene is drawn once for both,
+straight into the headset's images; elsewhere one eye at a time. On a
+standalone headset's own graphics chip (Adreno, Mali and the like), the
+`auto` settings go easier on it: medium lighting, no ambient occlusion,
+2x multisampling, 72 Hz, and as much of each eye's image drawn as there is
+time for (see `[vr] resolution`). `vr.log` says which, and every 10
+seconds how long the graphics chip takes for a frame, by pass. A standalone
+headset runs rust-dos on its own desktop or as a Steam shortcut; started
+over SSH without one, rust-dos refuses to take the headset's display.
 
 The eyes start where the scene's `spawn` is: the view is centered on your
 head the first time the headset shows the scene. Ctrl+Shift+Home, the

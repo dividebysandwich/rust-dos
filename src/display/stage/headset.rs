@@ -24,7 +24,7 @@ use super::xr::{Xr, XrOptions, log};
 use crate::video::shader::Glsl;
 use glam::{Mat4, Vec3};
 use glow::HasContext;
-use rust_dos::vr::{VrControllers, VrQuality, VrSettings};
+use rust_dos::vr::{VrControllers, VrSettings};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -288,8 +288,8 @@ impl Headset {
         screens: [glow::Texture; 3],
         settings: &VrSettings,
     ) -> Result<Self, String> {
-        let (controllers, quality, glow) = (settings.controllers, settings.quality, settings.screen_glow as f32 / 100.0);
-        let options = XrOptions { graphics: settings.graphics, resolution: settings.resolution, layered: false };
+        let (controllers, glow) = (settings.controllers, settings.screen_glow as f32 / 100.0);
+        let settings = settings.clone();
         let video = window.subsystem();
         // (Which bindings the window's context allows is found out on the
         // thread, `Xr::new`: GLX under X11, EGL under Wayland or forced.)
@@ -321,13 +321,13 @@ impl Headset {
         // (Making it made it current here.)
         window.gl_make_current(main)?;
         let context = context?;
-        let shared = Arc::new(Shared { state: Mutex::new(State { controllers, glow, placement: Placement::of(settings), ..State::default() }), stop: AtomicBool::new(false) });
+        let shared = Arc::new(Shared { state: Mutex::new(State { controllers, glow, placement: Placement::of(&settings), ..State::default() }), stop: AtomicBool::new(false) });
         // SAFETY: the context outlives the thread (`Headset::drop`).
         let (raw_window, raw_context) = (Raw(hidden.raw().cast()), Raw(unsafe { context.raw() }));
         let thread_shared = shared.clone();
         let thread = std::thread::Builder::new()
             .name("vr-headset".into())
-            .spawn(move || run(thread_shared, raw_window, raw_context, glsl, scene, screens, quality, options))
+            .spawn(move || run(thread_shared, raw_window, raw_context, glsl, scene, screens, settings))
             .map_err(|e| e.to_string())?;
         Ok(Headset {
             shared,
@@ -505,8 +505,7 @@ fn run(
     glsl: Glsl,
     scene: Arc<Scene>,
     screens: [glow::Texture; 3],
-    quality: VrQuality,
-    options: XrOptions,
+    settings: VrSettings,
 ) {
     // SAFETY: the window and the context are alive until the thread ends
     // (see `Headset::drop`), and the context is current nowhere else.
@@ -521,7 +520,7 @@ fn run(
                 sdl2::sys::SDL_GL_GetProcAddress(name.as_ptr()) as *const _
             })
         };
-        if let Err(e) = session(&shared, &gl, glsl, scene, screens, quality, &options) {
+        if let Err(e) = session(&shared, &gl, glsl, scene, screens, &settings) {
             shared.note(e);
         }
         // SAFETY: as above.
@@ -542,11 +541,19 @@ fn session(
     glsl: Glsl,
     mut scene: Arc<Scene>,
     screens: [glow::Texture; 3],
-    quality: VrQuality,
-    options: &XrOptions,
+    settings: &VrSettings,
 ) -> Result<(), String> {
     let features = Features::of(gl);
-    let samples = 4;
+    // A standalone headset's own graphics chip is gone easier on
+    // (RUST_DOS_VR_STANDALONE=1 or 0 says whether it is one, to compare).
+    let mobile = match std::env::var("RUST_DOS_VR_STANDALONE").as_deref() {
+        Ok("1") => true,
+        Ok("0") => false,
+        _ => rust_dos::vr::mobile_gpu(&features.renderer),
+    };
+    let look = settings.look(mobile);
+    let resolution = settings.headset_resolution(mobile);
+    let samples = look.samples;
     // Both eyes in one pass where OpenGL can (and multisample them, if
     // they are); RUST_DOS_VR_MULTIVIEW=0 draws them one by one, to compare.
     let multiview = Multiview::load(&features, |name| {
@@ -556,13 +563,37 @@ fn session(
     })
     .filter(|m| samples == 0 || m.multisamples())
     .filter(|_| std::env::var("RUST_DOS_VR_MULTIVIEW").map_or(true, |v| v != "0"));
-    let options = XrOptions { layered: multiview.is_some(), ..options.clone() };
+    let options = XrOptions {
+        graphics: settings.graphics,
+        resolution: resolution.percent,
+        layered: multiview.is_some(),
+        refresh: settings.refresh,
+        mobile,
+    };
     let mut xr = Xr::new(gl, &options).map_err(|e| format!("No headset ({}); the scene is shown in the window", e))?;
     shared.note(xr.describe().to_string());
     log::line(features.describe());
-    let gpu_options = Options { timed: true, samples, multiview: multiview.filter(|_| xr.layered()) };
-    log::line(if gpu_options.multiview.is_some() { "Both eyes are drawn at once" } else { "The eyes are drawn one by one" });
-    let mut gpu = Gpu::new(gl, glsl, &scene, quality, gpu_options)?;
+    let gpu_options =
+        Options { timed: true, samples, multiview: multiview.filter(|_| xr.layered()), ambient_occlusion: look.ambient_occlusion };
+    // As much of the eyes' images drawn as there is time for, where it
+    // adapts (and the images can be drawn in part).
+    let adaptive = resolution.adaptive.filter(|_| xr.partial());
+    let mut percent = adaptive.map_or(100, |(_, _, start)| start);
+    xr.set_percent(percent);
+    let mut adapted = std::time::Instant::now();
+    log::line(format!(
+        "{}; lighting {}, ambient occlusion {}, {} samples a pixel, {}; {}",
+        if mobile { "A standalone headset's graphics chip" } else { "A PC's graphics chip" },
+        look.quality.name(),
+        look.ambient_occlusion.map_or("as the lighting", |on| if on { "on" } else { "off" }),
+        samples.max(1),
+        match adaptive {
+            Some((min, max, _)) => format!("eyes {}% of the recommended size, drawn at {} to {}% of that", resolution.percent, min, max),
+            None => format!("eyes {}% of the recommended size", resolution.percent),
+        },
+        if gpu_options.multiview.is_some() { "both eyes drawn at once" } else { "the eyes drawn one by one" }
+    ));
+    let mut gpu = Gpu::new(gl, glsl, &scene, look.quality, gpu_options)?;
     // The window's view of the left eye, at half its size.
     let ((ew, eh), srgb) = xr.eye_format();
     let size = ((ew / 2).max(1), (eh / 2).max(1));
@@ -594,13 +625,14 @@ fn session(
     let mut screen: Option<usize> = None;
     let mut reported = std::time::Instant::now();
     let dump_prefix = std::env::var("RUST_DOS_VR_DUMP").ok();
+    let mut failed: Option<String> = None;
     let mut frame = 0u32;
     while !shared.stop.load(Ordering::Relaxed) {
         // Another scene, with the screen's picture lighting it: the old one
         // stays if it can't be drawn.
         let next = shared.lock().scene.take();
         if let Some(next) = next {
-            match Gpu::new(gl, glsl, &next, quality, gpu_options) {
+            match Gpu::new(gl, glsl, &next, look.quality, gpu_options) {
                 Ok(made) => {
                     std::mem::replace(&mut gpu, made).delete(gl);
                     if let Some(index) = screen {
@@ -675,7 +707,11 @@ fn session(
             let format = Format { size: target.size, srgb: target.srgb };
             let dest = Dest::Image { texture: target.texture, format, layered: target.layered };
             if let Err(e) = gpu.render(gl, &scene, views, dest, target.area, picture, leds, &extras) {
-                log::line(e);
+                // (Once, not every frame.)
+                if failed.as_ref() != Some(&e) {
+                    log::line(&e);
+                    failed = Some(e);
+                }
                 return;
             }
             let (aw, ah) = (target.area.0 as i32, target.area.1 as i32);
@@ -715,10 +751,22 @@ fn session(
         if let Err(e) = drawn {
             log::line(e);
         }
+        if let Some((min, max, _)) = adaptive
+            && adapted.elapsed() >= ADAPT_EVERY
+        {
+            adapted = std::time::Instant::now();
+            if let Some(ms) = gpu.recent_frame_time() {
+                percent = rust_dos::vr::adapt(percent, ms, xr.period_ms(), (min, max));
+                xr.set_percent(percent);
+            }
+        }
         if reported.elapsed() >= log::FrameStats::PERIOD {
             reported = std::time::Instant::now();
             if let Some(line) = gpu.timing_report() {
-                log::line(line);
+                match adaptive {
+                    Some(_) => log::line(format!("{}; the eyes drawn at {}%", line, percent)),
+                    None => log::line(line),
+                }
             }
         }
         let mut state = shared.lock();
@@ -734,6 +782,9 @@ fn session(
     xr.close(gl);
     Ok(())
 }
+
+/// How often the part of the eyes' images drawn may change.
+const ADAPT_EVERY: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// The frame whose eyes RUST_DOS_VR_DUMP writes.
 const DUMP_FRAME: u32 = 300;
