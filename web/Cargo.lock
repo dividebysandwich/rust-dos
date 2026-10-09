@@ -793,7 +793,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "ab_glyph",
  "base64",
@@ -827,7 +827,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-web"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "console_error_panic_hook",
  "rust-dos",

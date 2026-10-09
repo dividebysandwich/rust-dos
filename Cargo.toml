@@ -4,7 +4,7 @@ description = "An x86 DOS emulator written in Rust"
 authors = ["dividebysandwich"]
 repository = "https://github.com/dividebysandwich/rust-dos"
 license = "GPL-2.0-or-later"
-version = "1.4.0"
+version = "1.5.0"
 edition = "2024"
 # `cargo run` runs the emulator, not the relay (src/bin).
 default-run = "rust-dos"
