@@ -64,7 +64,7 @@ impl Delta {
     /// over this one since changed, is refused.
     pub fn open(base: &Path, path: &Path, read_only: bool) -> Result<Delta, String> {
         let base_file = File::open(base).map_err(|e| error(base, e))?;
-        let base_file = ImageFile::new(base_file).map_err(|e| format!("{}: {}", base.display(), e))?;
+        let base_file = ImageFile::new(base_file, base).map_err(|e| format!("{}: {}", base.display(), e))?;
         let len = base_file.len().map_err(|e| error(base, e))?;
         let id = identity(&base_file, len).map_err(|e| error(base, e))?;
         let blocks_in_image = len.div_ceil(BLOCK as u64) as usize;

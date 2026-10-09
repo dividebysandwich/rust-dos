@@ -392,8 +392,35 @@ pub(crate) enum ImageFile {
     D86f(Box<D86f>),
 }
 
+/// The image at `path`, read only, with a differencing VHD's parent: a
+/// file, an image in an archive (`win98.dosz/WIN98.VHD`), or the hard disk
+/// image an archive holds (`disk::archive_hard_disk`). An image in an
+/// archive is served by a layer of its own, which must be kept while the
+/// image is open.
+pub(crate) fn open_read_only(path: &Path) -> Result<(ImageFile, Option<crate::hostfs::Layer>), String> {
+    let error = |e: std::io::Error| format!("{}: {}", path.display(), e);
+    let inside = match crate::archive::is_archive_name(path) && crate::hostfs::is_file(path) {
+        true => Some((path.to_path_buf(), crate::disk::archive_hard_disk(path).ok_or("not a hard disk image")?)),
+        false if crate::hostfs::exists(path) => None,
+        false => crate::archive::split(path),
+    };
+    let Some((archive, inner)) = inside else {
+        let file = File::open(path).map_err(error)?;
+        return Ok((ImageFile::new(file, path)?, None));
+    };
+    let archive = crate::hostfs::canonicalize(&archive).map_err(error)?;
+    let stack = crate::archive::open(&archive)?;
+    let overlay = crate::overlay::Overlay::new(Box::new(stack), None).map_err(error)?;
+    #[allow(clippy::arc_with_non_send_sync)]
+    let layer = crate::hostfs::add_layer(std::sync::Arc::new(overlay));
+    let inner = layer.root().join(inner);
+    let file = File::open(&inner).map_err(error)?;
+    Ok((ImageFile::new(file, &inner)?, Some(layer)))
+}
+
 impl ImageFile {
-    pub(crate) fn new(file: File) -> Result<Self, String> {
+    /// The image in `file`, which is at `path`.
+    pub(crate) fn new(file: File, path: &Path) -> Result<Self, String> {
         let mut magic = [0u8; 4];
         let is_86f = {
             let mut f = &file;
@@ -403,7 +430,7 @@ impl ImageFile {
             return D86f::open(file).map(|image| ImageFile::D86f(Box::new(image)));
         }
         match crate::vhd::is_vhd(&file) {
-            true => Vhd::open(file).map(|vhd| ImageFile::Vhd(Box::new(vhd))),
+            true => Vhd::open_at(file, Some(path)).map(|vhd| ImageFile::Vhd(Box::new(vhd))),
             false => Ok(ImageFile::Raw(file)),
         }
     }
@@ -548,7 +575,7 @@ impl DiskImage {
                 Err(_) => (File::open(path).map_err(error)?, false),
             }
         };
-        let file = ImageFile::new(file).map_err(|e| format!("{}: {}", path.display(), e))?;
+        let file = ImageFile::new(file, path).map_err(|e| format!("{}: {}", path.display(), e))?;
         let len = file.len().map_err(error)?;
         let writable = writable && !file.write_protected();
         Self::new(path, Backing::File(file), len, floppy, geometry, writable)

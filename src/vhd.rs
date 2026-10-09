@@ -11,13 +11,18 @@
 //! that were written, then their data. A block written for the first time
 //! goes where the footer was, and the footer after it.
 //!
-//! Differencing images, which keep a parent's changes, aren't read.
+//! A differencing image is a dynamic one that holds the changes to
+//! another image, its parent: what its blocks and bitmaps don't have is
+//! the parent's. Its header names the parent and has the id from the
+//! parent's footer, which is how the parent is found and checked
+//! (`find_parent`).
 
 use crate::diskimage::Chs;
 use crate::hostfs::File;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 
 const FOOTER: u64 = 512;
 const COOKIE: &[u8; 8] = b"conectix";
@@ -73,38 +78,66 @@ struct Dynamic {
     footer: [u8; FOOTER as usize],
 }
 
+/// The image a differencing image holds the changes to.
+struct Parent {
+    image: Box<crate::diskimage::ImageFile>,
+    /// What serves the parent's file while it is open, when it is in an
+    /// archive.
+    _layer: Option<crate::hostfs::Layer>,
+}
+
 pub struct Vhd {
     file: File,
     len: u64,
     geometry: Option<Chs>,
     dynamic: Option<Dynamic>,
+    /// The footer's unique id, which a differencing image over this one
+    /// has in its header.
+    id: [u8; 16],
+    parent: Option<Parent>,
 }
 
 #[allow(clippy::len_without_is_empty)]
 impl Vhd {
-    /// The image in `file`, which is only written to by `write_at`.
+    /// The image in `file`, which is only written to by `write_at`. A
+    /// differencing image needs to know where it is (`open_at`).
     pub fn open(file: File) -> Result<Vhd, String> {
+        Self::open_at(file, None)
+    }
+
+    /// The image in `file`, which is at `path`: a differencing image's
+    /// parent is looked for beside it (`find_parent`).
+    pub fn open_at(file: File, path: Option<&Path>) -> Result<Vhd, String> {
         let file_len = file.len().map_err(|e| e.to_string())?;
         let footer = footer(&file, file_len).ok_or("not a VHD image")?;
         let len = be64(&footer, 48);
         let (c, h, s) = (u16::from_be_bytes([footer[56], footer[57]]), footer[58], footer[59]);
         let geometry = (c > 0 && (1..=16).contains(&h) && (1..=63).contains(&s))
             .then_some(Chs { cylinders: c as u32, heads: h as u32, sectors: s as u32 });
-        let dynamic = match be32(&footer, 60) {
+        let id = footer[68..84].try_into().unwrap();
+        let (dynamic, parent) = match be32(&footer, 60) {
             FIXED => {
                 if len > file_len - FOOTER.min(file_len) {
                     return Err("the VHD image is cut short".into());
                 }
-                None
+                (None, None)
             }
-            DYNAMIC => Some(Self::dynamic(&file, &footer, file_len, len)?),
-            DIFFERENCING => return Err("differencing VHD images (a parent's changes) aren't supported".into()),
+            DYNAMIC => (Some(Self::dynamic(&file, &footer, file_len, len)?.0), None),
+            DIFFERENCING => {
+                let (dynamic, header) = Self::dynamic(&file, &footer, file_len, len)?;
+                let parent = find_parent(&file, &header, path)?;
+                let parent_len = parent.image.len().map_err(|e| e.to_string())?;
+                if parent_len != len {
+                    return Err(format!("its parent is a disk of {} bytes, not {}", parent_len, len));
+                }
+                (Some(dynamic), Some(parent))
+            }
             kind => return Err(format!("a VHD image of unknown type {}", kind)),
         };
-        Ok(Vhd { file, len, geometry, dynamic })
+        Ok(Vhd { file, len, geometry, dynamic, id, parent })
     }
 
-    fn dynamic(file: &File, footer: &[u8; FOOTER as usize], file_len: u64, len: u64) -> Result<Dynamic, String> {
+    fn dynamic(file: &File, footer: &[u8; FOOTER as usize], file_len: u64, len: u64) -> Result<(Dynamic, [u8; 1024]), String> {
         let error = |e: std::io::Error| e.to_string();
         let mut header = [0u8; 1024];
         read_exact_at(file, be64(footer, 16), &mut header).map_err(error)?;
@@ -125,7 +158,8 @@ impl Vhd {
             Ok(()) if &cookie == COOKIE && file_len.is_multiple_of(SECTOR) => file_len - FOOTER,
             _ => file_len.next_multiple_of(SECTOR),
         };
-        Ok(Dynamic { table_at, block_size, table: RefCell::new(table), bitmaps: Default::default(), end: Cell::new(end), footer: *footer })
+        let dynamic = Dynamic { table_at, block_size, table: RefCell::new(table), bitmaps: Default::default(), end: Cell::new(end), footer: *footer };
+        Ok((dynamic, header))
     }
 
     /// The disk's size.
@@ -152,23 +186,37 @@ impl Vhd {
             let n = ((d.block_size - offset) as usize).min(buf.len() - done);
             let part = &mut buf[done..done + n];
             match d.table.borrow()[index] {
-                UNUSED => part.fill(0),
+                UNUSED => self.unwritten(pos, part)?,
                 block => {
                     read_exact_at(&self.file, self.data_at(d, block) + offset, part)?;
-                    self.with_bitmap(d, index, block, |bitmap| {
-                        // Sectors never written read as zeros.
-                        for (i, chunk) in part.chunks_mut(SECTOR as usize).enumerate() {
-                            let sector = (offset / SECTOR) as usize + i;
-                            if bitmap[sector / 8] & (0x80 >> (sector % 8)) == 0 {
-                                chunk.fill(0);
-                            }
+                    let bitmap = self.with_bitmap(d, index, block, |bitmap| bitmap.clone())?;
+                    // The sectors never written: zeros, or the parent's.
+                    let mut i = 0;
+                    while i < n {
+                        let sector = ((offset + i as u64) / SECTOR) as usize;
+                        let end = (((sector as u64 + 1) * SECTOR - offset) as usize).min(n);
+                        if bitmap[sector / 8] & (0x80 >> (sector % 8)) == 0 {
+                            self.unwritten(pos + i as u64, &mut part[i..end])?;
                         }
-                    })?;
+                        i = end;
+                    }
                 }
             }
             done += n;
         }
         Ok(())
+    }
+
+    /// What the disk has at `at` where the image never wrote: zeros, or
+    /// a differencing image's parent's.
+    fn unwritten(&self, at: u64, buf: &mut [u8]) -> std::io::Result<()> {
+        match &self.parent {
+            Some(parent) => parent.image.read_at(at, buf),
+            None => {
+                buf.fill(0);
+                Ok(())
+            }
+        }
     }
 
     pub fn write_at(&self, at: u64, data: &[u8]) -> std::io::Result<()> {
@@ -178,6 +226,16 @@ impl Vhd {
         let Some(d) = &self.dynamic else {
             return write_all_at(&self.file, at, data);
         };
+        // A sector written in part is written whole, with the rest of it
+        // what the parent has, as the sector is the image's once written.
+        if self.parent.is_some() && (!at.is_multiple_of(SECTOR) || !(data.len() as u64).is_multiple_of(SECTOR)) {
+            let start = at - at % SECTOR;
+            let end = (at + data.len() as u64).next_multiple_of(SECTOR).min(self.len);
+            let mut whole = vec![0u8; (end - start) as usize];
+            self.read_at(start, &mut whole)?;
+            whole[(at - start) as usize..][..data.len()].copy_from_slice(data);
+            return self.write_at(start, &whole);
+        }
         let mut done = 0;
         while done < data.len() {
             let pos = at + done as u64;
@@ -248,6 +306,86 @@ impl Vhd {
         d.end.set(at + size);
         Ok(block)
     }
+}
+
+/// The file names a differencing image's header gives its parent: its
+/// name, then the last part of each path its locators hold.
+fn parent_names(file: &File, header: &[u8; 1024]) -> Vec<String> {
+    let utf16 = |bytes: &[u8], big: bool| -> String {
+        let units: Vec<u16> = bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| if big { u16::from_be_bytes(*b) } else { u16::from_le_bytes(*b) })
+            .take_while(|&u| u != 0)
+            .collect();
+        String::from_utf16_lossy(&units)
+    };
+    let mut names = vec![utf16(&header[64..576], true)];
+    for entry in header[576..768].chunks(24) {
+        let (code, len, at) = (&entry[..4], be32(entry, 8) as usize, be64(entry, 16));
+        let mut data = vec![0u8; len.min(4096)];
+        if len == 0 || read_exact_at(file, at, &mut data).is_err() {
+            continue;
+        }
+        let path = match code {
+            b"W2ku" | b"W2ru" => utf16(&data, false),
+            b"MacX" => String::from_utf8_lossy(&data).trim_end_matches('\0').to_string(),
+            _ => continue,
+        };
+        names.push(path.rsplit(['/', '\\']).next().unwrap_or("").to_string());
+    }
+    let mut unique: Vec<String> = Vec::new();
+    for name in names {
+        if !name.is_empty() && !unique.iter().any(|n| n.eq_ignore_ascii_case(&name)) {
+            unique.push(name);
+        }
+    }
+    unique
+}
+
+/// The parent of the differencing image in `file`, at `path`, whose
+/// dynamic disk header is `header`: by the names it gives it, beside it,
+/// then in the OS images folders (`os_images`), and any VHD there with
+/// the id it has. A parent whose id isn't that one is another disk, or
+/// the disk since changed, and is refused.
+fn find_parent(file: &File, header: &[u8; 1024], path: Option<&Path>) -> Result<Parent, String> {
+    let wanted: [u8; 16] = header[40..56].try_into().unwrap();
+    let names = parent_names(file, header);
+    let shown = names.first().cloned().unwrap_or_else(|| "its parent".to_string());
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    for name in &names {
+        if let Some(dir) = path.and_then(Path::parent) {
+            candidates.push(dir.join(name));
+        }
+        let stem = name.rsplit_once('.').map_or(name.as_str(), |(stem, _)| stem);
+        candidates.extend(crate::os_images::find(name).or_else(|| crate::os_images::find(stem)));
+    }
+    for dir in crate::os_images::dirs() {
+        let vhds = crate::hostfs::read_dir(&dir).into_iter().flatten().filter(|e| {
+            !e.is_dir && e.path.extension().is_some_and(|x| x.eq_ignore_ascii_case("vhd"))
+        });
+        candidates.extend(vhds.map(|e| e.path));
+    }
+    let mut other = None;
+    for candidate in candidates {
+        if path.is_some_and(|p| p == candidate) || !(crate::hostfs::exists(&candidate) || crate::archive::split(&candidate).is_some()) {
+            continue;
+        }
+        let Ok((image, layer)) = crate::diskimage::open_read_only(&candidate) else { continue };
+        match &image {
+            crate::diskimage::ImageFile::Vhd(vhd) if vhd.id == wanted => {
+                return Ok(Parent { image: Box::new(image), _layer: layer });
+            }
+            _ => {
+                other.get_or_insert(candidate);
+            }
+        }
+    }
+    Err(match other {
+        Some(found) => format!("it holds the changes to another {} than {}, or to that disk before it changed", shown, found.display()),
+        None => format!("it holds the changes to {}, which isn't beside it or in the OS images folder", shown),
+    })
 }
 
 /// The geometry a VHD's footer gives a disk of `sectors` sectors, as the
@@ -323,8 +461,26 @@ pub(crate) fn fixed_footer(len: u64) -> [u8; 512] {
 /// A dynamic VHD image of a disk of `len` bytes in blocks of `block`
 /// bytes, with nothing written.
 pub(crate) fn make_dynamic(len: u64, block: u32) -> Vec<u8> {
+    make_sparse(len, block, None)
+}
+
+/// A differencing VHD image over the parent called `parent_name` whose
+/// footer's id is `parent_id`, of a disk of `len` bytes in blocks of
+/// `block` bytes, with nothing changed.
+#[cfg(test)]
+pub(crate) fn make_differencing(len: u64, block: u32, parent_id: [u8; 16], parent_name: &str) -> Vec<u8> {
+    make_sparse(len, block, Some((parent_id, parent_name)))
+}
+
+/// The id in the footer of the VHD image `data`.
+#[cfg(test)]
+pub(crate) fn image_id(data: &[u8]) -> [u8; 16] {
+    data[68..84].try_into().unwrap()
+}
+
+fn make_sparse(len: u64, block: u32, parent: Option<([u8; 16], &str)>) -> Vec<u8> {
     let entries = len.div_ceil(block as u64) as u32;
-    let footer = make_footer(len, DYNAMIC, 512);
+    let footer = make_footer(len, if parent.is_some() { DIFFERENCING } else { DYNAMIC }, 512);
     let mut out = footer.to_vec();
     let mut header = [0u8; 1024];
     header[..8].copy_from_slice(DYNAMIC_COOKIE);
@@ -333,6 +489,12 @@ pub(crate) fn make_dynamic(len: u64, block: u32) -> Vec<u8> {
     header[24..28].copy_from_slice(&0x0001_0000u32.to_be_bytes());
     header[28..32].copy_from_slice(&entries.to_be_bytes());
     header[32..36].copy_from_slice(&block.to_be_bytes());
+    if let Some((id, name)) = parent {
+        header[40..56].copy_from_slice(&id);
+        for (i, unit) in name.encode_utf16().take(256).enumerate() {
+            header[64 + i * 2..66 + i * 2].copy_from_slice(&unit.to_be_bytes());
+        }
+    }
     let sum = checksum(&header);
     header[36..40].copy_from_slice(&sum);
     out.extend_from_slice(&header);
@@ -410,12 +572,62 @@ mod tests {
         assert_ne!(f[68..84], make_footer(500 << 20, FIXED, u64::MAX)[68..84], "ids are unique");
     }
 
+    /// A parent of 4 MiB whose sector n holds n, and a differencing image
+    /// over it called `child.vhd` beside it.
+    fn parent_and_child(name: &str) -> (PathBuf, PathBuf) {
+        let parent = scratch(name, &make_dynamic(4 << 20, 1 << 20)).with_file_name("parent.vhd");
+        std::fs::rename(parent.with_file_name("disk.vhd"), &parent).unwrap();
+        let vhd = open(&parent);
+        for sector in 0..(4 << 20) / 512u64 {
+            vhd.write_at(sector * 512, &[sector as u8; 512]).unwrap();
+        }
+        drop(vhd);
+        let id = image_id(&std::fs::read(&parent).unwrap());
+        let child = parent.with_file_name("child.vhd");
+        std::fs::write(&child, make_differencing(4 << 20, 1 << 20, id, "parent.vhd")).unwrap();
+        (parent, child)
+    }
+
+    fn open_child(path: &std::path::Path) -> Result<Vhd, String> {
+        let file = crate::hostfs::OpenOptions::new().read(true).write(true).open(path).unwrap();
+        Vhd::open_at(file, Some(path))
+    }
+
     #[test]
-    fn a_differencing_image_is_refused() {
-        let mut data = vec![0u8; 4096];
-        data.extend_from_slice(&make_footer(4096, DIFFERENCING, 0));
-        let path = scratch("differencing", &data);
-        let file = crate::hostfs::File::open(&path).unwrap();
-        assert!(Vhd::open(file).err().unwrap().contains("differencing"));
+    fn a_differencing_image_reads_its_parent_where_it_has_nothing() {
+        let (parent, child) = parent_and_child("differencing");
+        let vhd = open_child(&child).unwrap();
+        let mut buf = vec![0u8; 1024];
+        vhd.read_at(7 * 512, &mut buf).unwrap();
+        assert!(buf[..512].iter().all(|&b| b == 7) && buf[512..].iter().all(|&b| b == 8));
+        // Part of a sector: the rest of it stays the parent's.
+        vhd.write_at(9 * 512 + 100, &[0xEE; 10]).unwrap();
+        vhd.write_at(20 * 512, &[0xDD; 512]).unwrap();
+        drop(vhd);
+        let parent_before = std::fs::read(&parent).unwrap();
+        let vhd = open_child(&child).unwrap();
+        let mut sector = [0u8; 512];
+        vhd.read_at(9 * 512, &mut sector).unwrap();
+        assert!(sector[..100].iter().all(|&b| b == 9) && sector[100..110].iter().all(|&b| b == 0xEE));
+        assert!(sector[110..].iter().all(|&b| b == 9));
+        vhd.read_at(20 * 512, &mut sector).unwrap();
+        assert!(sector.iter().all(|&b| b == 0xDD));
+        // In the same block, sectors it didn't write are the parent's.
+        vhd.read_at(21 * 512, &mut sector).unwrap();
+        assert!(sector.iter().all(|&b| b == 21));
+        assert_eq!(std::fs::read(&parent).unwrap(), parent_before, "the parent isn't written");
+    }
+
+    #[test]
+    fn a_differencing_image_needs_its_own_parent() {
+        let (parent, child) = parent_and_child("differencing-other");
+        // Another disk of the name.
+        std::fs::write(&parent, make_dynamic(4 << 20, 1 << 20)).unwrap();
+        assert!(open_child(&child).err().unwrap().contains("another parent.vhd"));
+        std::fs::remove_file(&parent).unwrap();
+        assert!(open_child(&child).err().unwrap().contains("isn't beside it"));
+        // Without knowing where it is, it can't look beside it.
+        let file = crate::hostfs::File::open(&child).unwrap();
+        assert!(Vhd::open(file).is_err());
     }
 }
