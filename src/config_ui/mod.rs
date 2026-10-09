@@ -3648,8 +3648,11 @@ impl ConfigUi {
             put(g, Field::Overlay, top + 7, "Write to", &text_field(&dialog.overlay, top + 7, cols));
             put(g, Field::OverlayBrowse, top + 8, "", &button("[ Browse... ]", top + 8, value_col));
             if top + 8 < bottom {
-                let hint = "(empty = write to mounted image)";
-                g.text_to(value_col + 15, top + 8, &fit(hint, end.saturating_sub(value_col + 15)), draw::DIM, end);
+                let hint = match dialog.delta_name() {
+                    Some(name) if !dialog.overlay.text().trim().is_empty() => format!("(changes go to {} there)", name),
+                    _ => "(empty = write to mounted image)".to_string(),
+                };
+                g.text_to(value_col + 15, top + 8, &fit(&hint, end.saturating_sub(value_col + 15)), draw::DIM, end);
             }
         }
         if buttons.contains(&Field::BootFlag) {

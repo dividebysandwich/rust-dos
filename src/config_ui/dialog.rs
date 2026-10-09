@@ -326,6 +326,14 @@ impl MountDialog {
         self.focus = Field::Mount;
     }
 
+    /// The name of the file a disk image's changes go to in the "Write
+    /// to" folder (`<image>.rdelta`), if the path is an image's.
+    pub fn delta_name(&self) -> Option<String> {
+        let path = PathBuf::from(self.path.text().trim());
+        let name = path.file_name()?.to_string_lossy().into_owned();
+        crate::mount::is_image_name(&path).then(|| format!("{}.rdelta", name))
+    }
+
     /// The mount the dialog asks for. Relative paths are taken from `cwd`,
     /// as MOUNT does.
     pub fn spec(&self, cwd: &Path, home: Option<&Path>) -> Result<MountSpec, String> {
@@ -348,9 +356,6 @@ impl MountDialog {
         if overlay.is_some() {
             if self.read_only {
                 return Err("A read-only drive has no changes to keep apart: leave \"Write to\" empty".to_string());
-            }
-            if path.is_file() && !crate::archive::is_archive_name(&path) {
-                return Err("Only a directory or a zip or 7z archive keeps its changes apart".to_string());
             }
             if overlay.as_deref() == Some(path.as_path()) {
                 return Err("The changes need a folder of their own".to_string());
@@ -547,6 +552,12 @@ mod tests {
         d.kind = DriveKind::HardDisk;
         d.overlay = TextField::default();
         assert_eq!(d.spec(Path::new("/w"), None).unwrap().opts.overlay, None);
+        assert_eq!(d.delta_name(), None);
+        // A disk image's go to <image>.rdelta there, and it stays as it is.
+        d.path = TextField::new("/w/win95.vhd");
+        d.overlay = TextField::new("saves");
+        assert_eq!(d.spec(Path::new("/w"), None).unwrap().opts.overlay, Some(PathBuf::from("/w/saves")));
+        assert_eq!(d.delta_name().as_deref(), Some("win95.vhd.rdelta"));
         d.focus = Field::OverlayBrowse;
         assert_eq!(d.key(UiKey::Enter), Event::BrowseOverlay);
     }
