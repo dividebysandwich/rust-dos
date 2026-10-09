@@ -66,6 +66,20 @@ pub fn is_vhd(file: &File) -> bool {
     file.len().is_ok_and(|len| len >= FOOTER && footer(file, len).is_some())
 }
 
+/// The id in the footer of the VHD image in `file`, and for a
+/// differencing image the id of its parent's, which it holds the changes
+/// to.
+pub fn ids(file: &File) -> Option<([u8; 16], Option<[u8; 16]>)> {
+    let footer = footer(file, file.len().ok()?)?;
+    let id = footer[68..84].try_into().unwrap();
+    if be32(&footer, 60) != DIFFERENCING {
+        return Some((id, None));
+    }
+    let mut header = [0u8; 56];
+    read_exact_at(file, be64(&footer, 16), &mut header).ok()?;
+    Some((id, Some(header[40..56].try_into().unwrap())))
+}
+
 struct Dynamic {
     /// Where the table is in the file.
     table_at: u64,
@@ -361,6 +375,8 @@ fn find_parent(file: &File, header: &[u8; 1024], path: Option<&Path>) -> Result<
         let stem = name.rsplit_once('.').map_or(name.as_str(), |(stem, _)| stem);
         candidates.extend(crate::os_images::find(name).or_else(|| crate::os_images::find(stem)));
     }
+    // Those of its name, then any with its parent's id.
+    let named = candidates.len();
     for dir in crate::os_images::dirs() {
         let vhds = crate::hostfs::read_dir(&dir).into_iter().flatten().filter(|e| {
             !e.is_dir && e.path.extension().is_some_and(|x| x.eq_ignore_ascii_case("vhd"))
@@ -368,7 +384,7 @@ fn find_parent(file: &File, header: &[u8; 1024], path: Option<&Path>) -> Result<
         candidates.extend(vhds.map(|e| e.path));
     }
     let mut other = None;
-    for candidate in candidates {
+    for (i, candidate) in candidates.into_iter().enumerate() {
         if path.is_some_and(|p| p == candidate) || !(crate::hostfs::exists(&candidate) || crate::archive::split(&candidate).is_some()) {
             continue;
         }
@@ -377,9 +393,10 @@ fn find_parent(file: &File, header: &[u8; 1024], path: Option<&Path>) -> Result<
             crate::diskimage::ImageFile::Vhd(vhd) if vhd.id == wanted => {
                 return Ok(Parent { image: Box::new(image), _layer: layer });
             }
-            _ => {
+            _ if i < named => {
                 other.get_or_insert(candidate);
             }
+            _ => {}
         }
     }
     Err(match other {

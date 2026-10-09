@@ -58,21 +58,23 @@ pub fn import(texts: &[&str], bases: &[PathBuf], name: &str, home: Option<&Path>
     import_in(texts, bases, name, home, None)
 }
 
+/// The operating system the DOSBox configuration `text` asks for, in
+/// rust-dos's own section (`[rust-dos] os=`).
+pub fn conf_os(text: &str) -> Option<String> {
+    parse(text).values.into_iter().rfind(|(s, k, _)| s == "rust-dos" && k == "os").map(|(_, _, v)| v)
+}
+
 /// `import`, with `c_root` as C: if the configuration mounts no C: of its
 /// own or moves it with REMOUNT, as a game's .dosz, zip or folder has it
 /// as C: before its commands: they start on it rather than on Z:, and may
-/// move it (REMOUNT C D) and mount another C: in its place.
+/// move it (REMOUNT C D) and mount another C: in its place. The drives of
+/// its `automount` folder come with it (`arrange`).
 pub fn import_in(texts: &[&str], bases: &[PathBuf], name: &str, home: Option<&Path>, c_root: Option<&Path>) -> Imported {
     // rust-dos's own section, which DOSBox leaves alone: the operating
     // system to start the game in, once the drives are known.
     let os = texts.iter().flat_map(|t| parse(t).values).rfind(|(s, k, _)| s == "rust-dos" && k == "os").map(|(_, _, v)| v);
-    let with_os = |mut imported: Imported, c_root: Option<&Path>| {
-        if let Some(os) = &os {
-            boot_os(&mut imported, os, c_root);
-        }
-        imported
-    };
-    let imported = import_from(texts, bases, name, home, None);
+    let scan = c_root.map(crate::automount::scan).unwrap_or_default();
+    let mut imported = import_from(texts, bases, name, home, None);
     let remounts = || {
         texts.iter().flat_map(|t| parse(t).autoexec).any(|line| {
             let verb = line.trim_start_matches('@').split_whitespace().next().unwrap_or("").to_ascii_lowercase();
@@ -81,13 +83,70 @@ pub fn import_in(texts: &[&str], bases: &[PathBuf], name: &str, home: Option<&Pa
     };
     match c_root {
         Some(root) if !imported.drives.iter().any(|d| d.drive == crate::disk::DRIVE_C) || remounts() => {
-            let mut imported = with_os(import_from(texts, bases, name, home, Some(root)), Some(root));
-            if imported.drives.iter().any(|d| d.drive == crate::disk::DRIVE_C && d.path == root) {
+            let mut imported = import_from(texts, bases, name, home, Some(root));
+            arrange(&mut imported, Some(root), &scan, os.as_deref());
+            // The package's C:, or its folder's.
+            let package_c = |d: &crate::mount::MountSpec| d.path == root || scan.mount(crate::disk::DRIVE_C).is_some_and(|m| m.paths[0] == d.path);
+            if imported.drives.iter().any(|d| d.drive == crate::disk::DRIVE_C && package_c(d)) {
                 imported.autoexec.insert(0, "C:".to_string());
             }
             imported
         }
-        _ => with_os(imported, None),
+        _ => {
+            arrange(&mut imported, c_root, &scan, os.as_deref());
+            imported
+        }
+    }
+}
+
+/// A game package's `automount` folder (`scan`, of the package at `root`)
+/// and the system `os` it runs in (`boot_os`), around the drives and
+/// commands of its configuration (`imported`). The folder's drives go
+/// first, but not where the configuration mounts its own; with a C:
+/// there, the package itself isn't one.
+pub fn arrange(imported: &mut Imported, root: Option<&Path>, scan: &crate::automount::Scan, os: Option<&str>) {
+    use crate::disk::{DRIVE_C, drive_letter};
+    imported.warnings.extend(scan.warnings.iter().cloned());
+    if scan.mount(DRIVE_C).is_some()
+        && let Some(i) = root.and_then(|root| imported.drives.iter().position(|d| d.drive == DRIVE_C && d.path == root))
+    {
+        imported.drives.remove(i);
+    }
+    let mut ahead = Vec::new();
+    for mount in &scan.mounts {
+        match imported.drives.iter().any(|d| d.drive == mount.drive) {
+            true => imported.warnings.push(format!(
+                "{} is left out: the configuration mounts {}: itself",
+                shown(&mount.paths[0]),
+                drive_letter(mount.drive)
+            )),
+            false => ahead.push(mount.spec()),
+        }
+    }
+    imported.drives.splice(0..0, ahead);
+    if let Some(os) = os {
+        boot_os(imported, os, root, scan);
+    }
+}
+
+/// A path in a package's `automount` folder as the warnings show it.
+fn shown(path: &Path) -> String {
+    let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    format!("{}/{}", crate::automount::FOLDER, name)
+}
+
+/// Whether the image at `child` is a differencing VHD image of the
+/// changes to the image at `system`: a game's install in the system, as
+/// its package's `automount/c.vhd`.
+fn changes_to(child: &Path, system: &Path) -> Result<(), String> {
+    let (file, _, _layer) = crate::diskimage::open_file_read_only(child)?;
+    let Some((_, Some(parent))) = crate::vhd::ids(&file) else {
+        return Err("it isn't a differencing VHD image, the changes to the system's".to_string());
+    };
+    let (file, _, _layer) = crate::diskimage::open_file_read_only(system)?;
+    match crate::vhd::ids(&file) {
+        Some((id, _)) if id == parent => Ok(()),
+        _ => Err(format!("it holds the changes to another disk than {}", system.display())),
     }
 }
 
@@ -173,27 +232,52 @@ fn import_from(texts: &[&str], bases: &[PathBuf], name: &str, home: Option<&Path
     imported
 }
 
-/// The game in the operating system `name` (`os_images`), as the Boot OS
-/// core option has it: the system's image as the first hard disk, booted,
-/// and the game on D: (a disk of the booted system), or the second hard
-/// disk when the game is an archive of a hard disk image, unless the
-/// commands moved it. The commands before the boot would run in no system:
-/// the image's drives stay, the rest goes.
+/// The game in the operating system `name`, its package's own
+/// (`automount::Scan::system`) or one of the OS images folder's
+/// (`os_images`), as the Boot OS core option has it: the system's image
+/// as the first hard disk, booted, with the changes to it the package's
+/// `automount/c.vhd` holds, if there is one. The package (at `root`) is
+/// D: (a disk of the booted system), or the second hard disk when it is
+/// an archive of a hard disk image, unless the commands moved it; a hard
+/// disk image of its automount folder is the second hard disk first. The
+/// commands before the boot would run in no system: the image's drives
+/// stay, the rest goes.
 ///
 /// A system of files (an archive or folder) isn't booted: it is C:, the
-/// game is on D:, and the commands run there.
-fn boot_os(imported: &mut Imported, name: &str, c_root: Option<&Path>) {
-    use crate::disk::{numbered_drive, DRIVE_C};
-    let Some(os) = crate::os_images::find(name) else {
-        imported.warnings.push(format!("[rust-dos] os={}: there is no OS image called that", name));
-        return;
+/// game is on D: (or the first letter free after it), and the commands
+/// run there.
+fn boot_os(imported: &mut Imported, name: &str, root: Option<&Path>, scan: &crate::automount::Scan) {
+    use crate::automount::Kind;
+    use crate::disk::{DRIVE_C, DRIVE_Z, drive_letter, numbered_drive};
+    let os = match (scan.system(name), crate::os_images::find(name)) {
+        (Some(own), Some(other)) => {
+            imported.warnings.push(format!("[rust-dos] os={}: the package's own is used, not {}", name, other.display()));
+            own
+        }
+        (Some(os), None) | (None, Some(os)) => os,
+        (None, None) => {
+            imported.warnings.push(format!("[rust-dos] os={}: there is no OS image called that", name));
+            return;
+        }
     };
-    let game = c_root.and_then(|root| imported.drives.iter().position(|d| d.drive == DRIVE_C && d.path == root));
     let taken = |imported: &Imported, drive: u8| imported.drives.iter().any(|d| d.drive == drive);
-    if crate::os_images::holds_files(&os) {
-        if let Some(game) = game.filter(|_| !taken(imported, DRIVE_C + 1)) {
-            imported.drives[game].drive = DRIVE_C + 1;
-            imported.autoexec.insert(0, "D:".to_string());
+    let free_letter = |imported: &Imported| (DRIVE_C + 1..DRIVE_Z).find(|&d| !taken(imported, d));
+    let game = |imported: &Imported| root.and_then(|root| imported.drives.iter().position(|d| d.drive == DRIVE_C && d.path == root));
+    // A drive of the automount folder, where it is still.
+    let from_folder = |imported: &Imported, drive: u8| {
+        let mount = scan.mount(drive)?;
+        imported.drives.iter().position(|d| d.drive == drive && d.path == mount.paths[0])
+    };
+    if scan.holds_files(&os) {
+        if let Some(i) = from_folder(imported, DRIVE_C) {
+            let c = imported.drives.remove(i);
+            imported.warnings.push(format!("{} is left out: the system {} is C:", shown(&c.path), name));
+        }
+        if let Some(game) = game(imported)
+            && let Some(letter) = free_letter(imported)
+        {
+            imported.drives[game].drive = letter;
+            imported.autoexec.insert(0, format!("{}:", drive_letter(letter)));
         }
         if taken(imported, DRIVE_C) {
             imported.warnings.push(format!("[rust-dos] os={}: C: is taken by the configuration's own drive", name));
@@ -202,17 +286,37 @@ fn boot_os(imported: &mut Imported, name: &str, c_root: Option<&Path>) {
         imported.drives.push(crate::mount::MountSpec { drive: DRIVE_C, path: os, opts: Default::default() });
         return;
     }
-    if let (Some(game), Some(root)) = (game, c_root) {
-        let disk = numbered_drive(3);
-        if crate::disk::archive_hard_disk(root).is_some() && !taken(imported, disk) {
-            imported.drives[game].drive = disk;
-        } else if !taken(imported, DRIVE_C + 1) {
-            imported.drives[game].drive = DRIVE_C + 1;
+    // The disk booted: the system's, or the package's changes to it.
+    let mut disk = os.clone();
+    if let Some(i) = from_folder(imported, DRIVE_C) {
+        let child = imported.drives.remove(i).path;
+        match changes_to(&child, &os) {
+            Ok(()) => disk = child,
+            Err(e) => imported.warnings.push(format!("{} is left out: {}", shown(&child), e)),
         }
     }
-    let disk = numbered_drive(2);
-    imported.drives.retain(|d| d.drive != disk);
-    imported.drives.push(crate::mount::MountSpec { drive: disk, path: os, opts: Default::default() });
+    let second = numbered_drive(3);
+    imported.drives.retain(|d| d.drive != numbered_drive(2));
+    // The folder's hard disk images: the first the second hard disk, the
+    // others nothing the booted system has.
+    for mount in scan.mounts.iter().filter(|m| m.kind == Kind::HardDisk && m.drive != DRIVE_C) {
+        let Some(i) = from_folder(imported, mount.drive) else { continue };
+        match taken(imported, second) {
+            false => imported.drives[i].drive = second,
+            true => {
+                let left = imported.drives.remove(i);
+                imported.warnings.push(format!("{} is left out: the booted system has two hard disks", shown(&left.path)));
+            }
+        }
+    }
+    if let (Some(game), Some(root)) = (game(imported), root) {
+        if crate::disk::archive_hard_disk(root).is_some() && !taken(imported, second) {
+            imported.drives[game].drive = second;
+        } else if let Some(letter) = free_letter(imported) {
+            imported.drives[game].drive = letter;
+        }
+    }
+    imported.drives.push(crate::mount::MountSpec { drive: numbered_drive(2), path: disk, opts: Default::default() });
     let dropped: Vec<String> = imported.autoexec.drain(..).filter(|l| !l.trim_start_matches('@').to_ascii_lowercase().starts_with("boot")).collect();
     if !dropped.is_empty() {
         imported.warnings.push(format!("[rust-dos] os={}: these commands don't run in it: {}", name, dropped.join("; ")));
@@ -974,5 +1078,99 @@ mod tests {
         // A drive that isn't there.
         let imported = import_in(&["[autoexec]\nremount f g\n"], &bases, "x", None, Some(&game));
         assert_eq!(imported.warnings.len(), 1, "{:?}", imported.warnings);
+    }
+
+    /// A package's automount folder: its drives by their names, and its
+    /// C: in place of the package's.
+    #[test]
+    fn a_package_s_automount_folder_mounts_its_drives() {
+        use crate::disk::{DRIVE_C, DriveKind};
+        let dir = scratch("automount");
+        let game = dir.join("game");
+        let folder = game.join("automount");
+        fs::create_dir_all(folder.join("e.hd")).unwrap();
+        fs::write(folder.join("c.img"), vec![0u8; 4 << 20]).unwrap();
+        fs::write(folder.join("d[DISC 1].iso"), "").unwrap();
+        fs::write(folder.join("d.iso2"), "").unwrap();
+        let imported = import_in(&["[autoexec]\ngame.exe\n"], std::slice::from_ref(&game), "x", None, Some(&game));
+        let drive = |d| imported.drives.iter().find(|s| s.drive == d).cloned();
+        assert_eq!(drive(DRIVE_C).unwrap().path, folder.join("c.img"));
+        assert!(!imported.drives.iter().any(|d| d.path == game), "the package isn't a drive: {:?}", imported.drives);
+        let d = drive(3).unwrap();
+        assert_eq!(d.path, folder.join("d[DISC 1].iso"));
+        assert_eq!((d.opts.kind, d.opts.label.as_deref()), (DriveKind::CdRom, Some("DISC 1")));
+        assert_eq!(d.opts.more_images, [folder.join("d.iso2")]);
+        assert_eq!(drive(4).unwrap().path, folder.join("e.hd"));
+        assert_eq!(imported.autoexec, ["C:", "game.exe"]);
+        assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);
+        // The configuration's own D: stays.
+        let imported = import_in(&["[autoexec]\nmount d .\n"], std::slice::from_ref(&game), "x", None, Some(&game));
+        assert_eq!(imported.drives.iter().find(|s| s.drive == 3).unwrap().path, game);
+        assert!(imported.warnings[0].contains("mounts D: itself"), "{:?}", imported.warnings);
+    }
+
+    /// A game installed in a system: the package's c.vhd, the changes to
+    /// the system's disk, is booted, the system's image under it.
+    #[test]
+    fn a_package_s_c_vhd_is_its_changes_to_the_system() {
+        use crate::disk::numbered_drive;
+        let dir = scratch("automount-os");
+        let os = dir.join("os");
+        fs::create_dir_all(&os).unwrap();
+        let system = crate::vhd::make_dynamic(4 << 20, 1 << 20);
+        fs::write(os.join("Win98Auto.vhd"), &system).unwrap();
+        crate::os_images::add_search_dir(os.clone());
+        let game = dir.join("game");
+        let folder = game.join("AUTOMOUNT");
+        fs::create_dir_all(&folder).unwrap();
+        let child = crate::vhd::make_differencing(4 << 20, 1 << 20, crate::vhd::image_id(&system), "Win98Auto.vhd");
+        fs::write(folder.join("C.VHD"), &child).unwrap();
+        fs::write(folder.join("D.VHD"), crate::vhd::make_dynamic(4 << 20, 1 << 20)).unwrap();
+        fs::write(folder.join("E.ISO"), "").unwrap();
+        let conf = "[rust-dos]\nos=win98auto\n";
+        let imported = import_in(&[conf], std::slice::from_ref(&game), "x", None, Some(&game));
+        let drive = |d| imported.drives.iter().find(|s| s.drive == d).map(|s| s.path.clone());
+        assert_eq!(drive(numbered_drive(2)), Some(folder.join("C.VHD")));
+        assert_eq!(drive(numbered_drive(3)), Some(folder.join("D.VHD")));
+        assert_eq!(drive(4), Some(folder.join("E.ISO")));
+        assert_eq!(drive(2), None);
+        assert!(!imported.drives.iter().any(|d| d.path == game), "{:?}", imported.drives);
+        assert_eq!(imported.autoexec, ["BOOT -l C"]);
+        assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);
+        // Changes to another disk are left out, and the system is booted.
+        fs::write(os.join("Win98Auto.vhd"), crate::vhd::make_dynamic(4 << 20, 1 << 20)).unwrap();
+        let imported = import_in(&[conf], std::slice::from_ref(&game), "x", None, Some(&game));
+        let drive = |d| imported.drives.iter().find(|s| s.drive == d).map(|s| s.path.clone());
+        assert_eq!(drive(numbered_drive(2)), Some(os.join("Win98Auto.vhd")));
+        assert!(imported.warnings.iter().any(|w| w.contains("C.VHD is left out")), "{:?}", imported.warnings);
+        // The package's own system, over the OS folder's.
+        fs::write(folder.join("win98auto.img"), vec![0u8; 4 << 20]).unwrap();
+        let imported = import_in(&[conf], std::slice::from_ref(&game), "x", None, Some(&game));
+        let drive = |d| imported.drives.iter().find(|s| s.drive == d).map(|s| s.path.clone());
+        assert_eq!(drive(numbered_drive(2)), Some(folder.join("win98auto.img")));
+        assert!(imported.warnings.iter().any(|w| w.contains("the package's own is used")), "{:?}", imported.warnings);
+    }
+
+    /// A system of files in a .dosz's automount folder is C:, the package
+    /// on the first letter its drives leave.
+    #[test]
+    fn a_package_can_hold_its_system_of_files() {
+        use crate::disk::DRIVE_C;
+        let dir = scratch("automount-files");
+        let game = dir.join("game.dosz");
+        let zip = crate::archive::zip::tests::zip(&[
+            ("GAME.EXE", b"MZ", false),
+            ("automount/win31/WIN.COM", b"", false),
+            ("automount/d.iso", b"", false),
+        ]);
+        fs::write(&game, zip).unwrap();
+        let conf = "[rust-dos]\nos=win31\n[autoexec]\nwin game.exe\n";
+        let imported = import_in(&[conf], std::slice::from_ref(&dir), "x", None, Some(&game));
+        let drive = |d| imported.drives.iter().find(|s| s.drive == d).map(|s| s.path.clone());
+        assert_eq!(drive(DRIVE_C), Some(game.join("automount/win31")));
+        assert_eq!(drive(3), Some(game.join("automount/d.iso")));
+        assert_eq!(drive(4), Some(game.clone()));
+        assert_eq!(imported.autoexec, ["E:", "win game.exe"]);
+        assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);
     }
 }

@@ -518,12 +518,18 @@ fn game_value(text: &str, key: &str) -> Option<String> {
 /// the one. Returns the profile's id and name, and what of a DOSBox
 /// configuration didn't come across.
 pub fn add_package(dir: &Path, package: &Path) -> Result<(String, String, Vec<String>), String> {
+    add_package_in(dir, package, None)
+}
+
+/// `add_package`, the game running in the operating system `os` (as
+/// `[rust-dos] os=` has it) when its package doesn't name one.
+pub fn add_package_in(dir: &Path, package: &Path, os: Option<&str>) -> Result<(String, String, Vec<String>), String> {
     let package = hostfs::canonicalize(package).map_err(|e| format!("{}: {}", package.display(), e))?;
     // Without Windows' `\\?\`, as the profile has it, or it isn't found again.
     let package = PathBuf::from(crate::mount::display_host_path(&package));
     let profiles = list(dir);
     let is_archive = !hostfs::is_dir(&package);
-    let source = package_source(&package, is_archive);
+    let source = package_source(&package, is_archive, os);
     let made_before = profiles.iter().find(|(_, text)| {
         // On C:, or where its configuration's REMOUNT moved it.
         config::parse(text, dir, None).drives.iter().any(|d| d.path.starts_with(&package))
@@ -537,7 +543,7 @@ pub fn add_package(dir: &Path, package: &Path) -> Result<(String, String, Vec<St
         Some((entry, _)) => Some(entry.id.clone()),
         None => None,
     };
-    let (text, name, warnings) = package_profile(&package, &source, None)?;
+    let (text, name, warnings) = package_profile(&package, &source, None, os)?;
     // Its profile made before, or neither a profile nor a folder there
     // already.
     let id = remade.unwrap_or_else(|| {
@@ -557,9 +563,11 @@ pub fn add_package(dir: &Path, package: &Path) -> Result<(String, String, Vec<St
 
 /// The profile of the package at `package` (its path as the profiles
 /// have it), made from `source` (`package_source`), with its .dosc's
-/// launch configuration `variant` over it, or the default: its text, the
-/// game's name, and what of its configuration didn't come across.
-fn package_profile(package: &Path, source: &str, variant: Option<&str>) -> Result<(String, String, Vec<String>), String> {
+/// launch configuration `variant` over it, or the default, in the
+/// operating system `os` if it names none: its text, the game's name, and
+/// what of its configuration didn't come across. The drives of its
+/// `automount` folder are the profile's too (`import::dosbox::arrange`).
+fn package_profile(package: &Path, source: &str, variant: Option<&str>, os: Option<&str>) -> Result<(String, String, Vec<String>), String> {
     let package = package.to_path_buf();
     let is_archive = !hostfs::is_dir(&package);
     let variants = if is_archive { crate::archive::variants(&package) } else { Vec::new() };
@@ -593,8 +601,15 @@ fn package_profile(package: &Path, source: &str, variant: Option<&str>) -> Resul
     // commands over those.
     let yml = if own.is_empty() && is_archive { crate::archive::dos_yml(&package, variant) } else { Vec::new() };
     let yml = (!yml.is_empty()).then(|| crate::import::dos_yml::import(&yml, &package, &name));
-    let dosbox_conf = if own.is_empty() { package_dosbox_conf(&package) } else { None }
-        .map(|text| crate::import::dosbox::import_in(&[&text], &bases, &name, None, Some(&package)));
+    let os = conf.game_os.clone().or_else(|| os.map(str::to_string));
+    let dosbox_conf = if own.is_empty() { package_dosbox_conf(&package) } else { None }.map(|mut text| {
+        if let Some(os) = os.as_ref().filter(|_| crate::import::dosbox::conf_os(&text).is_none()) {
+            text.push_str(&format!("\n[rust-dos]\nos={}\n", os));
+        }
+        crate::import::dosbox::import_in(&[&text], &bases, &name, None, Some(&package))
+    });
+    // A DOSBox configuration's drives come with the automount folder's.
+    let arranged = dosbox_conf.is_some();
     let dosbox = match (yml, dosbox_conf) {
         (Some(mut yml), Some(over)) => {
             yml.merge(over);
@@ -608,6 +623,29 @@ fn package_profile(package: &Path, source: &str, variant: Option<&str>) -> Resul
         if imported.autoexec.iter().any(|l| !l.eq_ignore_ascii_case("C:")) {
             conf.autoexec = imported.autoexec.clone();
         }
+    }
+    let mut warnings = dosbox.as_ref().map(|d| d.warnings.clone()).unwrap_or_default();
+    if !arranged {
+        // The package on C:, and the automount folder's drives and the
+        // system around it; the one program there is runs on the
+        // package's drive.
+        let mut setup = crate::import::Imported { drives: conf.drives.clone(), autoexec: conf.autoexec.clone(), ..Default::default() };
+        if !setup.drives.iter().any(|d| d.drive == crate::disk::DRIVE_C || d.path == package) {
+            setup.drives.insert(0, MountSpec { drive: crate::disk::DRIVE_C, path: package.clone(), opts: Default::default() });
+        }
+        let scan = crate::automount::scan(&package);
+        crate::import::dosbox::arrange(&mut setup, Some(&package), &scan, os.as_deref());
+        if conf.autoexec.is_empty() && !setup.autoexec.iter().any(|l| l.starts_with("BOOT")) {
+            let lettered = |d: &&MountSpec| d.drive < crate::disk::LASTDRIVE;
+            setup.autoexec = match setup.drives.iter().filter(lettered).find(|d| d.path == package) {
+                Some(d) => std::iter::once(format!("{}:", crate::disk::drive_letter(d.drive))).chain(crate::archive::start_program(&files)).collect(),
+                None if setup.drives.iter().filter(lettered).any(|d| d.drive == crate::disk::DRIVE_C) => vec!["C:".to_string()],
+                None => Vec::new(),
+            };
+        }
+        conf.drives = setup.drives;
+        conf.autoexec = setup.autoexec;
+        warnings.extend(setup.warnings);
     }
     let mut text = format!("[game]\nname={}\nsource={}\n", name, source);
     text.push_str(&format!("overlay={}\n", game_value(&own, "overlay").unwrap_or_else(|| "true".to_string())));
@@ -623,6 +661,9 @@ fn package_profile(package: &Path, source: &str, variant: Option<&str>) -> Resul
     }
     if !variants.is_empty() && variant.is_none() {
         text.push_str("variants=true\n");
+    }
+    if let Some(os) = &os {
+        text.push_str(&format!("os={}\n", os));
     }
     if let Some(input) = dosbox.as_ref().and_then(|d| d.input.as_ref()).or(conf.game_input.as_ref()) {
         text.push_str(&format!("input={}\n", input));
@@ -641,9 +682,6 @@ fn package_profile(package: &Path, source: &str, variant: Option<&str>) -> Resul
         text.push('\n');
     }
     let mut drives = conf.drives.clone();
-    if !drives.iter().any(|d| d.drive == crate::disk::DRIVE_C || d.path == package) {
-        drives.insert(0, MountSpec { drive: crate::disk::DRIVE_C, path: package.clone(), opts: Default::default() });
-    }
     // The package's drive with the launch configuration's files over it.
     for spec in drives.iter_mut().filter(|d| d.path == package) {
         spec.opts.variant = variant.map(str::to_string);
@@ -661,7 +699,11 @@ fn package_profile(package: &Path, source: &str, variant: Option<&str>) -> Resul
     }
     text.push_str("\n[autoexec]\n");
     let autoexec = if conf.autoexec.is_empty() {
-        std::iter::once("C:".to_string()).chain(crate::archive::start_program(&files)).collect()
+        // The program runs on the package's C:, not on the automount
+        // folder's.
+        let on_c = drives.iter().any(|d| d.drive == crate::disk::DRIVE_C && d.path == package);
+        let program = crate::archive::start_program(&files).filter(|_| on_c);
+        std::iter::once("C:".to_string()).chain(program).collect()
     } else {
         conf.autoexec.clone()
     };
@@ -669,7 +711,7 @@ fn package_profile(package: &Path, source: &str, variant: Option<&str>) -> Resul
         text.push_str(&line);
         text.push('\n');
     }
-    Ok((text, name, dosbox.map(|d| d.warnings).unwrap_or_default()))
+    Ok((text, name, warnings))
 }
 
 /// The ways a game can start, from its package's launch configurations.
@@ -726,23 +768,24 @@ pub fn variant_profile(dir: &Path, text: &str, variant: &str) -> Result<String, 
     let own = config::parse(text, dir, None);
     let package = variant_package(&own).ok_or("the game's package has no launch configurations")?;
     let source = own.game_source.clone().unwrap_or_default();
-    Ok(package_profile(package, &source, Some(variant))?.0)
+    Ok(package_profile(package, &source, Some(variant), own.game_os.as_deref())?.0)
 }
 
 /// How packages are imported: a profile made by an older import is made
 /// again, with what the newer one reads (DOS.YML's keys, say).
-const IMPORT_VERSION: u32 = 3;
+const IMPORT_VERSION: u32 = 4;
 
 /// What a package's profile is made from, fingerprinted: its own
-/// rust-dos.conf, a DOSBox configuration in it or beside it, and its
-/// DOS.YML files (its .dosc's too). A profile with another `source` is
-/// made again.
-fn package_source(package: &Path, is_archive: bool) -> String {
+/// rust-dos.conf, a DOSBox configuration in it or beside it, its DOS.YML
+/// files (its .dosc's too), what its automount folder holds, and the
+/// operating system `os` it is to run in if it names none. A profile with
+/// another `source` is made again.
+fn package_source(package: &Path, is_archive: bool, os: Option<&str>) -> String {
     use sha2::{Digest, Sha256};
     let own = package_entry(package, PACKAGE_CONF).and_then(|name| read_package_file(&package.join(name)).ok());
     let mut hasher = Sha256::new();
     hasher.update(IMPORT_VERSION.to_le_bytes());
-    for part in [own.clone(), package_dosbox_conf(package)] {
+    for part in [own.clone(), package_dosbox_conf(package), Some(crate::automount::listing(package)), os.map(str::to_string)] {
         hasher.update(part.unwrap_or_default().as_bytes());
         hasher.update([0]);
     }
@@ -927,6 +970,39 @@ mod tests {
         assert_eq!(find(&games, "KEEN4").map(|g| g.name.as_str()), Some("Commander Keen 4"));
         assert_eq!(find(&games, "commander keen 4").map(|g| g.id.as_str()), Some("keen4"));
         assert!(find(&games, "doom").is_none());
+    }
+
+    /// A package without a configuration: its automount folder's drives,
+    /// and the system it is to run in, as the Boot OS core option asks.
+    #[test]
+    fn a_package_s_automount_folder_and_system_go_in_its_profile() {
+        let dir = std::path::PathBuf::from("target/test_games_automount");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("os")).unwrap();
+        let archive = dir.join("Quest.dosz");
+        let data = crate::archive::zip::tests::zip(&[("QUEST.EXE", b"MZ", false), ("automount/d.iso", b"", false), ("automount/d1.iso", b"", false)]);
+        std::fs::write(&archive, data).unwrap();
+        let games = dir.join("games");
+        let (id, _, warnings) = add_package(&games, &archive).unwrap();
+        assert!(warnings.is_empty(), "{:?}", warnings);
+        let text = std::fs::read_to_string(games.join(format!("{}.conf", id))).unwrap();
+        let prepared = prepare(&id, &Settings::default(), &text, &games, None).unwrap();
+        let archive = std::fs::canonicalize(&archive).unwrap();
+        let d = prepared.drives.iter().find(|d| d.drive == 3).unwrap();
+        assert_eq!(d.path, archive.join("automount/d.iso"));
+        assert_eq!(d.opts.more_images, [archive.join("automount/d1.iso")]);
+        assert_eq!(prepared.autoexec, ["C:", "QUEST.EXE"]);
+        // In a system of files, which is C:; the package is the letter
+        // after the disc's.
+        std::fs::create_dir_all(dir.join("os/AutoDos")).unwrap();
+        crate::os_images::add_search_dir(std::fs::canonicalize(dir.join("os")).unwrap());
+        let (again, _, _) = add_package_in(&games, &archive, Some("autodos")).unwrap();
+        assert_eq!(again, id, "made again under its id");
+        let text = std::fs::read_to_string(games.join(format!("{}.conf", id))).unwrap();
+        assert!(text.contains("\nos=autodos\n"), "{}", text);
+        let prepared = prepare(&id, &Settings::default(), &text, &games, None).unwrap();
+        assert_eq!(prepared.drives.iter().find(|d| d.drive == 4).unwrap().path, archive);
+        assert_eq!(prepared.autoexec, ["E:", "QUEST.EXE"]);
     }
 
     #[test]

@@ -283,7 +283,7 @@ pub fn plan(content: Option<&Path>, dirs: &Dirs, boot: bool, boot_os: Option<&st
             plan.profile = Some(imported(dirs, &source)?);
         }
         DropAction::MountFolder(_) | DropAction::Package(_) if let Some(os) = boot_os.filter(|_| !games::package_has_conf(&path)) => {
-            booted_os(os, &path, dirs, &mut plan)?;
+            packaged(dirs, &path, Some(os), &mut plan)?;
         }
         DropAction::ImportGame(_) | DropAction::MountFolder(_) => {
             plan.c_root = path.clone();
@@ -301,7 +301,7 @@ pub fn plan(content: Option<&Path>, dirs: &Dirs, boot: bool, boot_os: Option<&st
             let name = program.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
             plan.commands.extend(["C:".to_string(), "CD \\".to_string(), name]);
         }
-        DropAction::Package(package) => packaged(dirs, &package, &mut plan)?,
+        DropAction::Package(package) => packaged(dirs, &package, None, &mut plan)?,
         DropAction::Disc(image) | DropAction::Floppy(image) | DropAction::HardDisk(image) => {
             images(vec![image], boot, dirs, &mut plan)?;
         }
@@ -312,9 +312,10 @@ pub fn plan(content: Option<&Path>, dirs: &Dirs, boot: bool, boot_os: Option<&st
 
 /// A game's package (a zip, .dosz or 7z archive, or a folder with a
 /// rust-dos.conf): a game with the package as C:, its profile made the
-/// first time and found after (`games::add_package`). An archive unpacked
-/// into the games folder before is played from there.
-fn packaged(dirs: &Dirs, package: &Path, plan: &mut Plan) -> Result<(), String> {
+/// first time and found after (`games::add_package_in`), in the OS image
+/// `os` if the package names none. An archive unpacked into the games
+/// folder before is played from there.
+fn packaged(dirs: &Dirs, package: &Path, os: Option<&str>, plan: &mut Plan) -> Result<(), String> {
     let games_dir = dirs.games();
     let stem = package.file_stem().map_or("Game".into(), |n| n.to_string_lossy().into_owned());
     let unpacked = games_dir.join(games::slug(&stem, &[]));
@@ -322,46 +323,13 @@ fn packaged(dirs: &Dirs, package: &Path, plan: &mut Plan) -> Result<(), String> 
         plan.c_root = unpacked.clone();
         unpacked.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned())
     } else {
-        games::add_package(&games_dir, package)?.0
+        let (id, _, warnings) = games::add_package_in(&games_dir, package, os)?;
+        plan.notes.extend(warnings);
+        id
     };
     let file = games_dir.join(format!("{}.conf", id));
     if let Ok(text) = fs::read_to_string(&file) {
         plan.profile = Some(Profile { id, text, dir: games_dir, file });
-    }
-    Ok(())
-}
-
-/// The game `game` (a folder or an archive) as D: of the OS image `os`
-/// booted as the first hard disk: D: is
-/// the booted system's second disk (`shared_disk`), or an archive's hard
-/// disk image is. The image's changes, and the archive's, go in the
-/// game's saves folder. An OS of files (an archive or folder) is C: of
-/// rust-dos's DOS instead, with the game on D:.
-fn booted_os(os: &str, game: &Path, dirs: &Dirs, plan: &mut Plan) -> Result<(), String> {
-    let image = rust_dos::os_images::find(os).ok_or_else(|| format!("There is no OS image called {}", os))?;
-    let stem = game.file_stem().or_else(|| game.file_name()).map_or("game".into(), |n| n.to_string_lossy().into_owned());
-    let saves = dirs.saves().join(games::slug(&stem, &[]));
-    plan.c_root = dirs.drive_c();
-    let files = rust_dos::os_images::holds_files(&image);
-    // As a hard disk image given as content is booted (`images`).
-    let (os_drive, d) = match files {
-        true => (DRIVE_C, DRIVE_C + 1),
-        false if rust_dos::disk::archive_hard_disk(game).is_some() => (numbered_drive(2), numbered_drive(3)),
-        false => (numbered_drive(2), DRIVE_C + 1),
-    };
-    for (drive, path) in [(os_drive, image.clone()), (d, game.to_path_buf())] {
-        let opts = MountOptions { overlay: Some(saves.join(drive_key(drive))), ..MountOptions::default() };
-        plan.mounts.push(MountSpec { drive, path, opts });
-    }
-    match files {
-        true => {
-            plan.commands.push("D:".to_string());
-            plan.notes.push(format!("{} on C: with {} as D:", image.display(), game.display()));
-        }
-        false => {
-            plan.commands.push("BOOT -l C".to_string());
-            plan.notes.push(format!("Booting {} with {} as D:", image.display(), game.display()));
-        }
     }
     Ok(())
 }
@@ -446,21 +414,29 @@ mod tests {
         let disk = rust_dos::diskimage::DiskImage::blank_hard_disk("Win98.img", 8 << 20, None).unwrap();
         disk.copy_to(&os.join("Win98.img")).unwrap();
         add_os_dirs(&dirs.system);
+        let os = fs::canonicalize(&os).unwrap();
         fs::create_dir_all(dir.join("Game")).unwrap();
         fs::write(dir.join("Game/GAME.EXE"), "MZ").unwrap();
-        let plan = plan(Some(&dir.join("Game")), &dirs, false, Some("win98")).unwrap();
-        let shown: Vec<(u8, &Path)> = plan.mounts.iter().map(|m| (m.drive, m.path.as_path())).collect();
-        assert_eq!(shown, [(numbered_drive(2), os.join("Win98.img").as_path()), (3, dir.join("Game").as_path())]);
-        let saves = dirs.saves().join(games::slug("Game", &[]));
-        assert_eq!(plan.mounts[0].opts.overlay, Some(saves.join("2")), "the OS stays as it is");
-        assert_eq!(plan.commands, ["BOOT -l C"]);
+        let game = fs::canonicalize(dir.join("Game")).unwrap();
+        // Its profile's drives and commands.
+        let made = |plan: Plan| {
+            let profile = plan.profile.expect("a profile");
+            let conf = rust_dos::config::parse(&profile.text, &profile.dir, None);
+            let drives: Vec<(u8, PathBuf)> = conf.drives.iter().map(|d| (d.drive, d.path.clone())).collect();
+            (drives, conf.autoexec, profile.text)
+        };
+        let (drives, commands, text) = made(plan(Some(&dir.join("Game")), &dirs, false, Some("win98")).unwrap());
+        assert_eq!(drives, [(3, game.clone()), (numbered_drive(2), os.join("Win98.img"))]);
+        assert_eq!(commands, ["BOOT -l C"]);
+        assert!(text.contains("overlay=true"), "the OS stays as it is: {}", text);
         // One with a configuration runs as that says.
         fs::write(dir.join("Game.conf"), "[dosbox]\nmachine=vga\n[autoexec]\ngame\n").unwrap();
         let configured = super::plan(Some(&dir.join("Game")), &dirs, false, Some("win98")).unwrap();
         assert!(configured.commands.is_empty(), "{:?}", configured.commands);
         assert!(configured.mounts.is_empty());
         fs::remove_file(dir.join("Game.conf")).unwrap();
-        assert!(super::plan(Some(&dir.join("Game")), &dirs, false, Some("nothing")).is_err());
+        let unknown = super::plan(Some(&dir.join("Game")), &dirs, false, Some("nothing")).unwrap();
+        assert!(unknown.notes.iter().any(|n| n.contains("nothing")), "{:?}", unknown.notes);
 
         // A game that is a hard disk image in an archive is the second
         // hard disk.
@@ -470,17 +446,15 @@ mod tests {
         zip.start_file("STORE.IMG", zip::write::SimpleFileOptions::default()).unwrap();
         std::io::Write::write_all(&mut zip, &fs::read(dir.join("STORE.IMG")).unwrap()).unwrap();
         zip.finish().unwrap();
-        let plan = super::plan(Some(&dir.join("store.zip")), &dirs, false, Some("win98")).unwrap();
-        let shown: Vec<u8> = plan.mounts.iter().map(|m| m.drive).collect();
-        assert_eq!(shown, [numbered_drive(2), numbered_drive(3)]);
+        let (drives, _, _) = made(super::plan(Some(&dir.join("store.zip")), &dirs, false, Some("win98")).unwrap());
+        let shown: Vec<u8> = drives.iter().map(|d| d.0).collect();
+        assert_eq!(shown, [numbered_drive(3), numbered_drive(2)]);
 
         // An OS of files is C:, and nothing is booted.
         fs::create_dir_all(os.join("Win311")).unwrap();
-        let plan = super::plan(Some(&dir.join("Game")), &dirs, false, Some("win311")).unwrap();
-        let shown: Vec<(u8, &Path)> = plan.mounts.iter().map(|m| (m.drive, m.path.as_path())).collect();
-        assert_eq!(shown, [(DRIVE_C, os.join("Win311").as_path()), (3, dir.join("Game").as_path())]);
-        assert_eq!(plan.mounts[0].opts.overlay, Some(saves.join("C")));
-        assert_eq!(plan.commands, ["D:"]);
+        let (drives, commands, _) = made(super::plan(Some(&dir.join("Game")), &dirs, false, Some("win311")).unwrap());
+        assert_eq!(drives, [(3, game.clone()), (DRIVE_C, os.join("Win311"))]);
+        assert_eq!(commands, ["D:", "GAME.EXE"]);
     }
 
     #[test]

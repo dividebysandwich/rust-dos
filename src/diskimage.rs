@@ -392,12 +392,12 @@ pub(crate) enum ImageFile {
     D86f(Box<D86f>),
 }
 
-/// The image at `path`, read only, with a differencing VHD's parent: a
-/// file, an image in an archive (`win98.dosz/WIN98.VHD`), or the hard disk
-/// image an archive holds (`disk::archive_hard_disk`). An image in an
+/// The file of the image at `path`, read only: a file, an image in an
+/// archive (`win98.dosz/WIN98.VHD`), or the hard disk image an archive
+/// holds (`disk::archive_hard_disk`), and where it is. An image in an
 /// archive is served by a layer of its own, which must be kept while the
-/// image is open.
-pub(crate) fn open_read_only(path: &Path) -> Result<(ImageFile, Option<crate::hostfs::Layer>), String> {
+/// file is open.
+pub(crate) fn open_file_read_only(path: &Path) -> Result<(File, PathBuf, Option<crate::hostfs::Layer>), String> {
     let error = |e: std::io::Error| format!("{}: {}", path.display(), e);
     let inside = match crate::archive::is_archive_name(path) && crate::hostfs::is_file(path) {
         true => Some((path.to_path_buf(), crate::disk::archive_hard_disk(path).ok_or("not a hard disk image")?)),
@@ -405,8 +405,7 @@ pub(crate) fn open_read_only(path: &Path) -> Result<(ImageFile, Option<crate::ho
         false => crate::archive::split(path),
     };
     let Some((archive, inner)) = inside else {
-        let file = File::open(path).map_err(error)?;
-        return Ok((ImageFile::new(file, path)?, None));
+        return Ok((File::open(path).map_err(error)?, path.to_path_buf(), None));
     };
     let archive = crate::hostfs::canonicalize(&archive).map_err(error)?;
     let stack = crate::archive::open(&archive)?;
@@ -414,8 +413,14 @@ pub(crate) fn open_read_only(path: &Path) -> Result<(ImageFile, Option<crate::ho
     #[allow(clippy::arc_with_non_send_sync)]
     let layer = crate::hostfs::add_layer(std::sync::Arc::new(overlay));
     let inner = layer.root().join(inner);
-    let file = File::open(&inner).map_err(error)?;
-    Ok((ImageFile::new(file, &inner)?, Some(layer)))
+    Ok((File::open(&inner).map_err(error)?, inner, Some(layer)))
+}
+
+/// The image at `path` (`open_file_read_only`), with a differencing VHD's
+/// parent, and the layer that serves it from an archive.
+pub(crate) fn open_read_only(path: &Path) -> Result<(ImageFile, Option<crate::hostfs::Layer>), String> {
+    let (file, at, layer) = open_file_read_only(path)?;
+    Ok((ImageFile::new(file, &at)?, layer))
 }
 
 impl ImageFile {

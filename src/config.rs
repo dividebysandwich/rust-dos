@@ -260,6 +260,9 @@ pub struct Config {
     /// Whether the game's package has launch configurations to choose
     /// from as it starts (`[game]`'s `variants`).
     pub game_variants: bool,
+    /// The operating system a game's package runs in (`[game]`'s `os`,
+    /// see `games::add_package_in`).
+    pub game_os: Option<String>,
     /// A game profile's `[gamepad]` lines, as written (padmap.rs reads
     /// them).
     pub game_pad: Vec<(String, String)>,
@@ -1062,6 +1065,8 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         "manual" => {}
                         "source" if !value.is_empty() => config.game_source = Some(value.to_string()),
                         "input" if !value.is_empty() => config.game_input = Some(value.to_string()),
+                        "os" if !value.is_empty() => config.game_os = Some(value.to_string()),
+                        "os" => {}
                         "input" => {}
                         "variants" => match parse_bool(value) {
                             Some(on) => config.game_variants = on,

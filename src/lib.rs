@@ -4,6 +4,7 @@ pub mod archive;
 pub mod asm16;
 pub mod audio;
 pub mod autoinput;
+pub mod automount;
 pub mod autospeed;
 pub mod awe32;
 pub mod batch;
