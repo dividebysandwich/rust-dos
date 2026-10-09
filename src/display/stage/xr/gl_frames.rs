@@ -3,7 +3,6 @@
 //! headset's thread, drawn into through a framebuffer each.
 
 use super::err;
-use glow::HasContext;
 use openxr as xr;
 
 /// A graphics binding whose swapchain images are OpenGL textures.
@@ -11,23 +10,25 @@ pub trait GlGraphics: xr::Graphics<Format = u32, SwapchainImage = u32> {}
 
 impl<G: xr::Graphics<Format = u32, SwapchainImage = u32>> GlGraphics for G {}
 
-/// An eye's image acquired: its framebuffer and size; or what failed.
-pub type Acquired = Result<(glow::Framebuffer, (u32, u32)), Failure>;
+/// An eye's image acquired: its texture and size; or what failed.
+pub type Acquired = Result<(glow::Texture, (u32, u32)), Failure>;
 
 /// What failed, and how.
 pub type Failure = (&'static str, xr::sys::Result);
 
 struct Eye<G: GlGraphics> {
     swapchain: xr::Swapchain<G>,
-    /// A framebuffer for each of the swapchain's images.
-    framebuffers: Vec<glow::Framebuffer>,
+    /// The swapchain's images.
+    images: Vec<glow::Texture>,
     size: (u32, u32),
     /// The image acquired, between `acquire` and `release`.
     acquired: Option<usize>,
 }
 
 pub struct GlFrames<G: GlGraphics> {
+    /// A swapchain for each eye, or one of two layers for both.
     eyes: Vec<Eye<G>>,
+    layered: bool,
     stream: xr::FrameStream<G>,
     /// The eyes' swapchains encode linear light as sRGB themselves.
     srgb: bool,
@@ -48,18 +49,15 @@ pub fn pick_format(formats: &[u32]) -> Result<(u32, bool), String> {
 }
 
 impl<G: GlGraphics> GlFrames<G> {
-    /// A swapchain for each of the eyes, `sizes` big, with a framebuffer
-    /// for each of its images.
-    pub fn new(
-        gl: &glow::Context,
-        session: &xr::Session<G>,
-        stream: xr::FrameStream<G>,
-        sizes: &[(u32, u32)],
-    ) -> Result<Self, String> {
+    /// A swapchain for each of the eyes, `sizes` big; or with `layered`,
+    /// one of a layer for each, where the eyes are the same size.
+    pub fn new(session: &xr::Session<G>, stream: xr::FrameStream<G>, sizes: &[(u32, u32)], layered: bool) -> Result<Self, String> {
         let formats = session.enumerate_swapchain_formats().map_err(err("the headset's formats"))?;
         let (format, srgb) = pick_format(&formats)?;
+        let layered = layered && sizes.len() == 2 && sizes[0] == sizes[1];
+        let chains: Vec<((u32, u32), u32)> = if layered { vec![(sizes[0], 2)] } else { sizes.iter().map(|&s| (s, 1)).collect() };
         let mut eyes = Vec::new();
-        for &(width, height) in sizes {
+        for ((width, height), array_size) in chains {
             let swapchain = session
                 .create_swapchain(&xr::SwapchainCreateInfo {
                     create_flags: xr::SwapchainCreateFlags::EMPTY,
@@ -69,30 +67,18 @@ impl<G: GlGraphics> GlFrames<G> {
                     width,
                     height,
                     face_count: 1,
-                    array_size: 1,
+                    array_size,
                     mip_count: 1,
                 })
                 .map_err(err("the headset's swapchain"))?;
             let images = swapchain.enumerate_images().map_err(err("the headset's swapchain"))?;
-            let mut framebuffers = Vec::new();
-            for image in images {
-                let texture = std::num::NonZeroU32::new(image).map(glow::NativeTexture).ok_or("an empty swapchain image")?;
-                // SAFETY: see `GlScreen`.
-                unsafe {
-                    let framebuffer = gl.create_framebuffer()?;
-                    gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
-                    gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(texture), 0);
-                    let complete = gl.check_framebuffer_status(glow::FRAMEBUFFER) == glow::FRAMEBUFFER_COMPLETE;
-                    gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-                    if !complete {
-                        return Err("OpenGL can't draw into the headset's images".into());
-                    }
-                    framebuffers.push(framebuffer);
-                }
-            }
-            eyes.push(Eye { swapchain, framebuffers, size: (width, height), acquired: None });
+            let images = images
+                .into_iter()
+                .map(|image| std::num::NonZeroU32::new(image).map(glow::NativeTexture).ok_or("an empty swapchain image"))
+                .collect::<Result<Vec<_>, _>>()?;
+            eyes.push(Eye { swapchain, images, size: (width, height), acquired: None });
         }
-        Ok(GlFrames { eyes, stream, srgb, formats })
+        Ok(GlFrames { eyes, layered, stream, srgb, formats })
     }
 
     pub fn eye_format(&self) -> ((u32, u32), bool) {
@@ -103,15 +89,20 @@ impl<G: GlGraphics> GlFrames<G> {
         &self.formats
     }
 
+    /// The swapchains: one for both eyes if `layered`.
     pub fn eyes(&self) -> usize {
         self.eyes.len()
+    }
+
+    pub fn layered(&self) -> bool {
+        self.layered
     }
 
     pub fn begin(&mut self) -> xr::Result<()> {
         self.stream.begin().map(|_| ())
     }
 
-    /// Acquire an image of eye `index` and wait for it: its framebuffer,
+    /// Acquire an image of swapchain `index` and wait for it: its texture,
     /// and its size.
     pub fn acquire(&mut self, index: usize) -> Acquired {
         let eye = &mut self.eyes[index];
@@ -121,8 +112,8 @@ impl<G: GlGraphics> GlFrames<G> {
             return Err(("waiting for the headset's image", e));
         }
         eye.acquired = Some(image as usize);
-        match eye.framebuffers.get(image as usize) {
-            Some(&framebuffer) => Ok((framebuffer, eye.size)),
+        match eye.images.get(image as usize) {
+            Some(&texture) => Ok((texture, eye.size)),
             None => {
                 let _ = self.release(index);
                 Err(("the headset's image", xr::sys::Result::ERROR_VALIDATION_FAILURE))
@@ -130,7 +121,7 @@ impl<G: GlGraphics> GlFrames<G> {
         }
     }
 
-    /// Release the image of eye `index` acquired, drawn.
+    /// Release the image of swapchain `index` acquired, drawn.
     pub fn release(&mut self, index: usize) -> Result<(), Failure> {
         let eye = &mut self.eyes[index];
         if eye.acquired.take().is_none() {
@@ -139,41 +130,39 @@ impl<G: GlGraphics> GlFrames<G> {
         eye.swapchain.release_image().map_err(|e| ("releasing the headset's image", e))
     }
 
-    /// End the frame: the eyes drawn from `views`, or nothing.
+    /// End the frame: the eyes drawn from `views`, `area` of their images
+    /// from the bottom left; or nothing.
     pub fn end(
         &mut self,
         time: xr::Time,
         blend: xr::EnvironmentBlendMode,
         space: &xr::Space,
         views: Option<&[xr::View]>,
+        area: (u32, u32),
     ) -> xr::Result<()> {
         let Some(views) = views else { return self.stream.end(time, blend, &[]) };
+        let layered = self.layered;
         let projection_views: Vec<_> = views
             .iter()
-            .zip(&self.eyes)
-            .map(|(view, eye)| {
+            .enumerate()
+            .filter_map(|(i, view)| {
+                let (eye, layer) = if layered { (self.eyes.first()?, i as u32) } else { (self.eyes.get(i)?, 0) };
                 let rect = xr::Rect2Di {
                     offset: xr::Offset2Di { x: 0, y: 0 },
-                    extent: xr::Extent2Di { width: eye.size.0 as i32, height: eye.size.1 as i32 },
+                    extent: xr::Extent2Di { width: area.0.min(eye.size.0) as i32, height: area.1.min(eye.size.1) as i32 },
                 };
-                xr::CompositionLayerProjectionView::new().pose(view.pose).fov(view.fov).sub_image(
-                    xr::SwapchainSubImage::new().swapchain(&eye.swapchain).image_array_index(0).image_rect(rect),
-                )
+                Some(xr::CompositionLayerProjectionView::new().pose(view.pose).fov(view.fov).sub_image(
+                    xr::SwapchainSubImage::new().swapchain(&eye.swapchain).image_array_index(layer).image_rect(rect),
+                ))
             })
             .collect();
         let layer = xr::CompositionLayerProjection::new().space(space).views(&projection_views);
         self.stream.end(time, blend, &[&layer])
     }
 
-    /// Delete the framebuffers, with `gl` current.
-    pub fn delete(&mut self, gl: &glow::Context) {
-        for eye in &mut self.eyes {
-            for framebuffer in eye.framebuffers.drain(..) {
-                // SAFETY: see `GlScreen`.
-                unsafe { gl.delete_framebuffer(framebuffer) };
-            }
-        }
-    }
+    /// Nothing of OpenGL's to delete: the runtime's textures go with the
+    /// swapchains.
+    pub fn delete(&mut self, _gl: &glow::Context) {}
 }
 
 #[cfg(test)]

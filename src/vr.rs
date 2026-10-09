@@ -415,6 +415,18 @@ pub fn eye_size(recommended: (u32, u32), max: (u32, u32), percent: u32) -> (u32,
     (scale(recommended.0, max.0), scale(recommended.1, max.1))
 }
 
+/// The part of an eye's image `size` big drawn at `percent` of it across
+/// and down: even, from 16 pixels to the whole.
+pub fn area(size: (u32, u32), percent: u32) -> (u32, u32) {
+    let scale = |n: u32| {
+        if percent >= 100 {
+            return n;
+        }
+        ((n as u64 * percent as u64 / 100) as u32 & !1).clamp(16.min(n), n)
+    };
+    (scale(size.0), scale(size.1))
+}
+
 /// `resolution`'s range, in percent.
 pub const RESOLUTION_MIN: u32 = 30;
 pub const RESOLUTION_MAX: u32 = 150;

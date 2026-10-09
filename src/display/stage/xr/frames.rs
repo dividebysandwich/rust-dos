@@ -46,15 +46,37 @@ impl Frames {
         }
     }
 
+    /// The swapchains: one for both eyes if `layered`.
     pub fn eyes(&self) -> usize {
         each!(self, frames => frames.eyes())
+    }
+
+    /// Both eyes are the layers of one swapchain's images.
+    pub fn layered(&self) -> bool {
+        match self {
+            Frames::Gl(frames) => frames.layered(),
+            #[cfg(target_os = "linux")]
+            Frames::Egl(frames) => frames.layered(),
+            #[cfg(target_os = "linux")]
+            Frames::Vulkan(_) => false,
+        }
+    }
+
+    /// Less than the whole of the images can be drawn (`end`'s area).
+    pub fn partial(&self) -> bool {
+        match self {
+            #[cfg(target_os = "linux")]
+            Frames::Vulkan(_) => false,
+            _ => true,
+        }
     }
 
     pub fn begin(&mut self) -> xr::Result<()> {
         each!(self, frames => frames.begin())
     }
 
-    /// The framebuffer to draw eye `index` into, and its size.
+    /// The texture to draw swapchain `index`'s eye (or eyes) into, and
+    /// its size.
     pub fn acquire(&mut self, index: usize) -> Acquired {
         each!(self, frames => frames.acquire(index))
     }
@@ -83,15 +105,23 @@ impl Frames {
         }
     }
 
-    /// End the frame: the eyes drawn from `views`, or nothing.
+    /// End the frame: the eyes drawn from `views`, `area` of their images
+    /// (where `partial`), or nothing.
     pub fn end(
         &mut self,
         time: xr::Time,
         blend: xr::EnvironmentBlendMode,
         space: &xr::Space,
         views: Option<&[xr::View]>,
+        area: (u32, u32),
     ) -> xr::Result<()> {
-        each!(self, frames => frames.end(time, blend, space, views))
+        match self {
+            Frames::Gl(frames) => frames.end(time, blend, space, views, area),
+            #[cfg(target_os = "linux")]
+            Frames::Egl(frames) => frames.end(time, blend, space, views, area),
+            #[cfg(target_os = "linux")]
+            Frames::Vulkan(bridge) => bridge.end(time, blend, space, views),
+        }
     }
 
     /// Delete what was made with `gl`, current.

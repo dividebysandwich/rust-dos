@@ -18,7 +18,7 @@
 //! reallocates a texture the other could be using.
 
 use super::controls::{Controllers, VrInput};
-use super::render::{Features, Format, Gpu, Pass};
+use super::render::{Dest, Features, Format, Gpu, Multiview, Options, Pass};
 use super::scene::{Leds, Scene, Spawn};
 use super::xr::{Xr, XrOptions, log};
 use crate::video::shader::Glsl;
@@ -289,7 +289,7 @@ impl Headset {
         settings: &VrSettings,
     ) -> Result<Self, String> {
         let (controllers, quality, glow) = (settings.controllers, settings.quality, settings.screen_glow as f32 / 100.0);
-        let options = XrOptions { graphics: settings.graphics, resolution: settings.resolution };
+        let options = XrOptions { graphics: settings.graphics, resolution: settings.resolution, layered: false };
         let video = window.subsystem();
         // (Which bindings the window's context allows is found out on the
         // thread, `Xr::new`: GLX under X11, EGL under Wayland or forced.)
@@ -545,10 +545,24 @@ fn session(
     quality: VrQuality,
     options: &XrOptions,
 ) -> Result<(), String> {
-    let mut gpu = Gpu::new(gl, glsl, &scene, quality, true)?;
-    let mut xr = Xr::new(gl, options).map_err(|e| format!("No headset ({}); the scene is shown in the window", e))?;
+    let features = Features::of(gl);
+    let samples = 4;
+    // Both eyes in one pass where OpenGL can (and multisample them, if
+    // they are); RUST_DOS_VR_MULTIVIEW=0 draws them one by one, to compare.
+    let multiview = Multiview::load(&features, |name| {
+        let name = std::ffi::CString::new(name).unwrap_or_default();
+        // SAFETY: this thread's context is current.
+        unsafe { sdl2::sys::SDL_GL_GetProcAddress(name.as_ptr()) as *const _ }
+    })
+    .filter(|m| samples == 0 || m.multisamples())
+    .filter(|_| std::env::var("RUST_DOS_VR_MULTIVIEW").map_or(true, |v| v != "0"));
+    let options = XrOptions { layered: multiview.is_some(), ..options.clone() };
+    let mut xr = Xr::new(gl, &options).map_err(|e| format!("No headset ({}); the scene is shown in the window", e))?;
     shared.note(xr.describe().to_string());
-    log::line(Features::of(gl).describe());
+    log::line(features.describe());
+    let gpu_options = Options { timed: true, samples, multiview: multiview.filter(|_| xr.layered()) };
+    log::line(if gpu_options.multiview.is_some() { "Both eyes are drawn at once" } else { "The eyes are drawn one by one" });
+    let mut gpu = Gpu::new(gl, glsl, &scene, quality, gpu_options)?;
     // The window's view of the left eye, at half its size.
     let ((ew, eh), srgb) = xr.eye_format();
     let size = ((ew / 2).max(1), (eh / 2).max(1));
@@ -586,7 +600,7 @@ fn session(
         // stays if it can't be drawn.
         let next = shared.lock().scene.take();
         if let Some(next) = next {
-            match Gpu::new(gl, glsl, &next, quality, true) {
+            match Gpu::new(gl, glsl, &next, quality, gpu_options) {
                 Ok(made) => {
                     std::mem::replace(&mut gpu, made).delete(gl);
                     if let Some(index) = screen {
@@ -657,27 +671,42 @@ fn session(
         }
         let picture = screen.map(|i| screens[i]);
         let mut left = None;
-        let drawn = xr.draw(gl, world, |eye, view, eye_size, srgb, framebuffer| {
-            if let Err(e) = gpu.render(gl, &scene, &view, Format { size: eye_size, srgb }, picture, leds, &extras) {
+        let drawn = xr.draw(gl, world, |target, views| {
+            let format = Format { size: target.size, srgb: target.srgb };
+            let dest = Dest::Image { texture: target.texture, format, layered: target.layered };
+            if let Err(e) = gpu.render(gl, &scene, views, dest, target.area, picture, leds, &extras) {
                 log::line(e);
                 return;
             }
-            gpu.copy_to(gl, Some(framebuffer), (0, 0, eye_size.0 as i32, eye_size.1 as i32));
-            if eye == 0 {
+            let (aw, ah) = (target.area.0 as i32, target.area.1 as i32);
+            if target.first == 0
+                && let Some(read) = gpu.read_framebuffer(gl, target.texture, target.layered.then_some(0))
+            {
                 let (w, h) = (size.0 as i32, size.1 as i32);
-                gpu.copy_to(gl, Some(mirror[mirror_index].1), (0, 0, w, h));
                 // SAFETY: see `GlScreen`.
-                if let Ok(fence) = unsafe { gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0) } {
-                    left = Some((fence, view.view_projection()));
+                unsafe {
+                    gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(read));
+                    gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(mirror[mirror_index].1));
+                    gl.blit_framebuffer(0, 0, aw, ah, 0, 0, w, h, glow::COLOR_BUFFER_BIT, glow::LINEAR);
+                    gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                    if let Ok(fence) = gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0) {
+                        left = Some((fence, views[0].view_projection()));
+                    }
                 }
             }
             gpu.mark(gl, Pass::Copy);
             if frame == DUMP_FRAME
                 && let Some(prefix) = &dump_prefix
             {
-                dump(gl, framebuffer, eye_size, &format!("{}-{}.ppm", prefix, eye));
+                for i in 0..views.len() {
+                    let layer = target.layered.then_some(i as i32);
+                    if let Some(read) = gpu.read_framebuffer(gl, target.texture, layer) {
+                        dump(gl, read, target.area, &format!("{}-{}.ppm", prefix, target.first + i));
+                    }
+                }
             }
-            // Each eye's commands on their way before its image is released.
+            // The eyes' commands on their way before their image is
+            // released.
             // SAFETY: see `GlScreen`.
             unsafe { gl.flush() };
         });

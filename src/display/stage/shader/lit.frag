@@ -34,7 +34,7 @@ uniform float u_cutoff;
 
 uniform vec3 u_ambient;
 uniform float u_exposure;
-uniform vec3 u_eye;
+uniform vec3 u_eye[VIEWS];
 uniform float u_fog;
 uniform int u_lights;
 // xyz the position, w the kind: 0 directional, 1 point, 2 spot.
@@ -84,7 +84,11 @@ uniform int u_has_gi;
 // The ambient occlusion over the view (ao.frag), for the light from all
 // around: the ambient's and the bounced light. Not for surfaces seen
 // through, which aren't in it.
+#if VIEWS > 1
+uniform sampler2DArray u_ao;
+#else
 uniform sampler2D u_ao;
+#endif
 uniform int u_has_ao;
 uniform vec2 u_view_size;
 uniform sampler3D u_gi;
@@ -302,7 +306,7 @@ void main() {
             // Lines a metre apart, thin at any distance, fading away.
             vec2 g = v_world.xz;
             vec2 a = abs(fract(g - 0.5) - 0.5) / max(fwidth(g), vec2(1e-4));
-            float line = (1.0 - min(min(a.x, a.y), 1.0)) * exp(-length(v_world.xz - u_eye.xz) * 0.08);
+            float line = (1.0 - min(min(a.x, a.y), 1.0)) * exp(-length(v_world.xz - u_eye[VIEW].xz) * 0.08);
             albedo = mix(albedo, vec3(0.05, 0.07, 0.12), line * 0.8);
             emissive += vec3(0.003, 0.006, 0.014) * line;
         }
@@ -315,7 +319,7 @@ void main() {
         }
 #ifndef BAKE
         if (u_has_ao == 1) {
-            light *= texture(u_ao, gl_FragCoord.xy / u_view_size).r;
+            light *= AO_AT(u_ao, gl_FragCoord.xy / u_view_size).r;
         }
 #endif
         for (int i = 0; i < 8; i++) {
@@ -381,7 +385,7 @@ void main() {
         color = albedo * light + emissive;
     }
     color = tone(color * u_exposure);
-    float dist = length(v_world - u_eye);
-    color = mix(color, tone(sky_color(v_world - u_eye)), 1.0 - exp(-dist * u_fog));
+    float dist = length(v_world - u_eye[VIEW]);
+    color = mix(color, tone(sky_color(v_world - u_eye[VIEW])), 1.0 - exp(-dist * u_fog));
     o_color = finish(color, base.a);
 }

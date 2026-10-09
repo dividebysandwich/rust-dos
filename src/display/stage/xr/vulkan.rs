@@ -536,8 +536,8 @@ impl Bridge {
         self.stream.begin().map(|_| ())
     }
 
-    /// Acquire an image of eye `index` and wait for it: the framebuffer of
-    /// the image OpenGL draws into, and its size.
+    /// Acquire an image of eye `index` and wait for it: the texture of the
+    /// image OpenGL draws into, and its size.
     pub fn acquire(&mut self, index: usize) -> Acquired {
         let eye = &mut self.eyes[index];
         let image = eye.swapchain.acquire_image().map_err(|e| ("acquiring the headset's image", e))?;
@@ -546,8 +546,8 @@ impl Bridge {
             return Err(("waiting for the headset's image", e));
         }
         eye.acquired = Some(image as usize);
-        match eye.framebuffer {
-            Some(framebuffer) if (image as usize) < eye.copies.len() => Ok((framebuffer, eye.size)),
+        match eye.texture {
+            Some(texture) if (image as usize) < eye.copies.len() => Ok((texture, eye.size)),
             _ => {
                 let _ = eye.swapchain.release_image();
                 eye.acquired = None;
@@ -597,7 +597,8 @@ impl Bridge {
         released
     }
 
-    /// End the frame: the eyes drawn from `views`, or nothing.
+    /// End the frame: the eyes drawn from `views`, or nothing. (Their
+    /// images are drawn whole: the copies are recorded so.)
     pub fn end(
         &mut self,
         time: xr::Time,

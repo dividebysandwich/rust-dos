@@ -30,7 +30,7 @@ pub use controls::VrInput;
 use super::audio_mix::Mix;
 use glam::{Mat4, Vec2};
 use glow::HasContext;
-use render::{Format, Gpu, Pass, ScreenTarget, View};
+use render::{Dest, Format, Gpu, Options, Pass, ScreenTarget, View};
 use rust_dos::vr::{ScreenFit, VrMode, VrSettings};
 use scene::Scene;
 use rust_dos::vr::{Leds, VrGraphics, VrQuality};
@@ -75,9 +75,9 @@ pub struct Stage {
     timing_since: std::time::Instant,
 }
 
-/// Whether the window's frames are timed: with RUST_DOS_VR_TIMING set.
-fn window_timed() -> bool {
-    std::env::var_os("RUST_DOS_VR_TIMING").is_some()
+/// How the window's view is drawn: timed with RUST_DOS_VR_TIMING set.
+fn window_options() -> Options {
+    Options { timed: std::env::var_os("RUST_DOS_VR_TIMING").is_some(), samples: 4, multiview: None }
 }
 
 /// Width and height.
@@ -119,7 +119,7 @@ impl Stage {
             Scene::test_room()
         });
         let scene = Arc::new(scene);
-        let mut gpu = Gpu::new(gl, glsl, &scene, settings.quality, window_timed())?;
+        let mut gpu = Gpu::new(gl, glsl, &scene, settings.quality, window_options())?;
         gpu.set_glow(glow_of(settings));
         let mut screens = Vec::new();
         for _ in 0..3 {
@@ -266,7 +266,7 @@ impl Stage {
         let aspect = drawable.0 as f32 / drawable.1 as f32;
         let view = View { view: self.camera.view(), projection: self.camera.projection(aspect) };
         let format = Format { size: drawable, srgb: false };
-        if let Err(e) = self.gpu.render(gl, &self.scene, &view, format, screen, self.leds, &[]) {
+        if let Err(e) = self.gpu.render(gl, &self.scene, &[view], Dest::Own(format), drawable, screen, self.leds, &[]) {
             eprintln!("[VR] {}", e);
             clear_window(gl, drawable);
             return;
@@ -361,7 +361,7 @@ impl Stage {
         };
         let path = path.clone();
         self.loading = None;
-        let scene = match read.and_then(|scene| Ok((Gpu::new(gl, self.glsl, &scene, self.quality, window_timed())?, scene))) {
+        let scene = match read.and_then(|scene| Ok((Gpu::new(gl, self.glsl, &scene, self.quality, window_options())?, scene))) {
             Ok((gpu, scene)) => {
                 std::mem::replace(&mut self.gpu, gpu).delete(gl);
                 self.gpu.set_glow(self.glow);
@@ -409,7 +409,7 @@ impl Stage {
         let mut notes = Vec::new();
         let mut restart = false;
         if settings.quality != self.quality {
-            match Gpu::new(gl, self.glsl, &self.scene, settings.quality, window_timed()) {
+            match Gpu::new(gl, self.glsl, &self.scene, settings.quality, window_options()) {
                 Ok(gpu) => {
                     std::mem::replace(&mut self.gpu, gpu).delete(gl);
                     self.quality = settings.quality;

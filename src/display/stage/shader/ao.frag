@@ -6,9 +6,13 @@
 
 out vec4 o_color;
 
+#if VIEWS > 1
+uniform sampler2DArray u_depth;
+#else
 uniform sampler2D u_depth;
-uniform mat4 u_projection;
-uniform mat4 u_inverse_projection;
+#endif
+uniform mat4 u_projection[VIEWS];
+uniform mat4 u_inverse_projection[VIEWS];
 uniform vec2 u_size;
 // How far around occluders count, in metres, and how much they darken.
 uniform float u_radius;
@@ -16,15 +20,15 @@ uniform float u_strength;
 
 // The point seen at `uv`, in the view's space.
 vec3 seen(vec2 uv) {
-    float d = texture(u_depth, uv).r;
-    vec4 p = u_inverse_projection * vec4(vec3(uv, d) * 2.0 - 1.0, 1.0);
+    float d = AO_AT(u_depth, uv).r;
+    vec4 p = u_inverse_projection[VIEW] * vec4(vec3(uv, d) * 2.0 - 1.0, 1.0);
     return p.xyz / p.w;
 }
 
 void main() {
     vec2 texel = 1.0 / u_size;
     vec2 uv = gl_FragCoord.xy * texel;
-    if (texture(u_depth, uv).r >= 1.0) {
+    if (AO_AT(u_depth, uv).r >= 1.0) {
         o_color = vec4(1.0);
         return;
     }
@@ -41,7 +45,8 @@ void main() {
     // The radius on the picture, and the spiral's turn at this pixel.
     // Kept to a little of the view, so that the samples stay close
     // together in memory, which keeps them fast.
-    vec2 reach = u_radius * vec2(u_projection[0][0], u_projection[1][1]) * 0.5 / max(-p.z, 0.05);
+    mat4 projection = u_projection[VIEW];
+    vec2 reach = u_radius * vec2(projection[0][0], projection[1][1]) * 0.5 / max(-p.z, 0.05);
     reach *= min(1.0, 0.06 / max(reach.x, reach.y));
     float turn = 6.2831853 * fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
     float radius2 = u_radius * u_radius;

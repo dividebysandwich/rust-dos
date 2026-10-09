@@ -265,7 +265,7 @@ pub fn run(gl: &glow::Context, sdl_driver: &str, settings: &VrSettings) {
             report.line(format!("{}: not offered", binding.name()));
             continue;
         }
-        match open(binding, gl, &instance, system, &sizes) {
+        match open(binding, gl, &instance, system, &sizes, false) {
             Ok(Opened { session, waiter, mut frames, keep }) => {
                 let ((w, h), srgb) = frames.eye_format();
                 let (formats, vulkan) = frames.formats();

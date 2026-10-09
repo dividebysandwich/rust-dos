@@ -1,6 +1,7 @@
 //! The scene drawn with OpenGL: its meshes and pictures uploaded once, and
 //! each view drawn multisampled into a target of its own, from which it is
-//! copied to the window or a headset's eye.
+//! copied to the window, or straight into a headset's image: both eyes at
+//! once where OpenGL draws to two layers in one pass (GL_OVR_multiview2).
 
 use super::scene::{Alpha, Leds, Scene, Shading};
 use super::gi;
@@ -40,11 +41,96 @@ const AO_STRENGTH: f32 = 0.5;
 /// How much of the screen's light each new picture brings: a little of
 /// the ones before stays, so that flicker doesn't strobe the room.
 const GRID_TAKE: f32 = 0.7;
-const FULLSCREEN_VERT: &str = include_str!("../../video/shader/vertex.glsl");
+const FULLSCREEN_VERT: &str = include_str!("shader/fullscreen.vert");
 
 /// GL_TEXTURE_MAX_ANISOTROPY(_EXT) and its limit.
 const TEXTURE_MAX_ANISOTROPY: u32 = 0x84FE;
 const MAX_TEXTURE_MAX_ANISOTROPY: u32 = 0x84FF;
+
+/// GL_OVR_multiview's calls, which glow doesn't have: a texture's two
+/// layers attached for both views at once, multisampled with the samples
+/// resolved on the chip where OpenGL can
+/// (GL_OVR_multiview_multisampled_render_to_texture).
+#[derive(Clone, Copy)]
+pub struct Multiview {
+    texture: unsafe extern "system" fn(u32, u32, u32, i32, i32, i32),
+    multisample: Option<unsafe extern "system" fn(u32, u32, u32, i32, i32, i32, i32)>,
+}
+
+impl Multiview {
+    /// The calls, through `get` (OpenGL's addresses by name), where
+    /// `features` has them.
+    pub fn load(features: &Features, mut get: impl FnMut(&str) -> *const std::ffi::c_void) -> Option<Self> {
+        if !features.multiview {
+            return None;
+        }
+        let texture = get("glFramebufferTextureMultiviewOVR");
+        if texture.is_null() {
+            return None;
+        }
+        let multisample = if features.multiview_msrtt { get("glFramebufferTextureMultisampleMultiviewOVR") } else { std::ptr::null() };
+        // SAFETY: the extensions' entry points, with their signatures.
+        unsafe {
+            Some(Multiview {
+                texture: std::mem::transmute::<*const std::ffi::c_void, unsafe extern "system" fn(u32, u32, u32, i32, i32, i32)>(texture),
+                multisample: (!multisample.is_null()).then(|| {
+                    std::mem::transmute::<*const std::ffi::c_void, unsafe extern "system" fn(u32, u32, u32, i32, i32, i32, i32)>(multisample)
+                }),
+            })
+        }
+    }
+
+    /// Whether views can be multisampled.
+    pub fn multisamples(&self) -> bool {
+        self.multisample.is_some()
+    }
+
+    /// Attach layers 0 and 1 of `texture` (a 2D array) to the framebuffer
+    /// bound, `samples` deep if more than none.
+    ///
+    /// # Safety
+    /// A framebuffer is bound, and `texture` has two layers.
+    unsafe fn attach(&self, attachment: u32, texture: glow::Texture, samples: i32) {
+        let name = texture.0.get();
+        // SAFETY: as the caller says.
+        unsafe {
+            match self.multisample {
+                Some(multisample) if samples > 0 => multisample(glow::FRAMEBUFFER, attachment, name, 0, samples, 0, 2),
+                _ => (self.texture)(glow::FRAMEBUFFER, attachment, name, 0, 0, 2),
+            }
+        }
+    }
+}
+
+/// How a `Gpu` draws.
+#[derive(Clone, Copy, Default)]
+pub struct Options {
+    /// Frames are timed (`frame_start`).
+    pub timed: bool,
+    /// Samples a pixel at most, for the edges: 0, 2 or 4.
+    pub samples: u32,
+    /// Both eyes in one pass, into the layers of a headset's image: with
+    /// samples, only where `Multiview::multisamples`.
+    pub multiview: Option<Multiview>,
+}
+
+/// Where a view is drawn.
+#[derive(Clone, Copy, Debug)]
+pub enum Dest {
+    /// A target of the `Gpu`'s own, which `copy_to` copies from.
+    Own(Format),
+    /// A headset's image, `texture`: a 2D texture, or with `layered` a 2D
+    /// array whose layers 0 and 1 are the two views.
+    Image { texture: glow::Texture, format: Format, layered: bool },
+}
+
+impl Dest {
+    fn format(&self) -> Format {
+        match *self {
+            Dest::Own(format) | Dest::Image { format, .. } => format,
+        }
+    }
+}
 
 /// Where a view is seen from.
 #[derive(Clone, Copy, Debug)]
@@ -140,7 +226,7 @@ pub struct Features {
 
 impl Features {
     pub fn of(gl: &glow::Context) -> Self {
-        let has = |name: &str| gl.supported_extensions().contains(name);
+        let has = |name: &'static str| gl.supported_extensions().contains(name);
         Features {
             // SAFETY: see `GlScreen`.
             renderer: unsafe { gl.get_parameter_string(glow::RENDERER) },
@@ -306,9 +392,12 @@ struct Ao {
 }
 
 /// At half a view's size: its depth, and the occlusion and its blur
-/// across, each with its framebuffer.
+/// across, each with its framebuffer; 2D arrays of both views' with
+/// `Multiview`.
 struct AoTarget {
     size: (i32, i32),
+    /// TEXTURE_2D, or TEXTURE_2D_ARRAY for both views.
+    kind: u32,
     depth: glow::Texture,
     depth_framebuffer: glow::Framebuffer,
     pictures: [glow::Texture; 2],
@@ -316,28 +405,38 @@ struct AoTarget {
 }
 
 impl AoTarget {
-    fn new(gl: &glow::Context, size: (i32, i32)) -> Result<Self, String> {
+    fn new(gl: &glow::Context, size: (i32, i32), multiview: Option<&Multiview>) -> Result<Self, String> {
         let (w, h) = size;
-        // SAFETY: see `GlScreen`.
+        let kind = if multiview.is_some() { glow::TEXTURE_2D_ARRAY } else { glow::TEXTURE_2D };
+        // SAFETY: see `GlScreen`; with `Multiview`, the textures have two
+        // layers.
         unsafe {
-            let texture = |format: u32, kind: u32, value: u32| -> Result<glow::Texture, String> {
+            let texture = |format: u32, kind_of: u32, value: u32| -> Result<glow::Texture, String> {
                 let t = gl.create_texture()?;
-                gl.bind_texture(glow::TEXTURE_2D, Some(t));
+                gl.bind_texture(kind, Some(t));
                 let none = glow::PixelUnpackData::Slice(None);
-                gl.tex_image_2d(glow::TEXTURE_2D, 0, format as i32, w, h, 0, kind, value, none);
-                let filter = if kind == glow::DEPTH_COMPONENT { glow::NEAREST } else { glow::LINEAR };
-                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, filter as i32);
-                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, filter as i32);
-                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+                if multiview.is_some() {
+                    gl.tex_image_3d(kind, 0, format as i32, w, h, 2, 0, kind_of, value, none);
+                } else {
+                    gl.tex_image_2d(kind, 0, format as i32, w, h, 0, kind_of, value, none);
+                }
+                let filter = if kind_of == glow::DEPTH_COMPONENT { glow::NEAREST } else { glow::LINEAR };
+                gl.tex_parameter_i32(kind, glow::TEXTURE_MIN_FILTER, filter as i32);
+                gl.tex_parameter_i32(kind, glow::TEXTURE_MAG_FILTER, filter as i32);
+                gl.tex_parameter_i32(kind, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+                gl.tex_parameter_i32(kind, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
                 Ok(t)
+            };
+            let attach = |attachment: u32, texture: glow::Texture| match multiview {
+                Some(multiview) => multiview.attach(attachment, texture, 0),
+                None => gl.framebuffer_texture_2d(glow::FRAMEBUFFER, attachment, glow::TEXTURE_2D, Some(texture), 0),
             };
             let depth = texture(glow::DEPTH_COMPONENT24, glow::DEPTH_COMPONENT, glow::UNSIGNED_INT)?;
             let pictures = [texture(glow::R8, glow::RED, glow::UNSIGNED_BYTE)?, texture(glow::R8, glow::RED, glow::UNSIGNED_BYTE)?];
-            gl.bind_texture(glow::TEXTURE_2D, None);
+            gl.bind_texture(kind, None);
             let depth_framebuffer = gl.create_framebuffer()?;
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(depth_framebuffer));
-            gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::DEPTH_ATTACHMENT, glow::TEXTURE_2D, Some(depth), 0);
+            attach(glow::DEPTH_ATTACHMENT, depth);
             gl.draw_buffer(glow::NONE);
             gl.read_buffer(glow::NONE);
             let mut complete = gl.check_framebuffer_status(glow::FRAMEBUFFER) == glow::FRAMEBUFFER_COMPLETE;
@@ -345,12 +444,12 @@ impl AoTarget {
             for picture in pictures {
                 let framebuffer = gl.create_framebuffer()?;
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
-                gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(picture), 0);
+                attach(glow::COLOR_ATTACHMENT0, picture);
                 complete &= gl.check_framebuffer_status(glow::FRAMEBUFFER) == glow::FRAMEBUFFER_COMPLETE;
                 framebuffers.push(framebuffer);
             }
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-            let target = AoTarget { size, depth, depth_framebuffer, pictures, framebuffers: [framebuffers[0], framebuffers[1]] };
+            let target = AoTarget { size, kind, depth, depth_framebuffer, pictures, framebuffers: [framebuffers[0], framebuffers[1]] };
             if !complete {
                 target.delete(gl);
                 return Err("OpenGL can't draw the ambient occlusion".into());
@@ -384,7 +483,7 @@ struct MaterialLocations {
 
 impl MaterialLocations {
     fn of(gl: &glow::Context, program: glow::Program) -> Self {
-        let u = |name: &str| uniform(gl, program, name);
+        let u = |name: &'static str| uniform(gl, program, name);
         MaterialLocations {
             shading: u("u_shading"),
             base_color: u("u_base_color"),
@@ -405,13 +504,37 @@ struct Grid {
     empty: bool,
 }
 
+/// A depth buffer for drawing straight into headset's images: a 2D array
+/// texture for both views, or a renderbuffer for one.
+struct ImageDepth {
+    size: (u32, u32),
+    layered: bool,
+    texture: Option<glow::Texture>,
+    renderbuffer: Option<glow::Renderbuffer>,
+}
+
 pub struct Gpu {
     lit: glow::Program,
     sky: glow::Program,
-    /// Only the depth, of what is in front: for the shadows, and first in
-    /// each view, so that the lit program works out each pixel once.
+    /// Only the depth, of what is in front: first in each view, so that
+    /// the lit program works out each pixel once.
     depth: glow::Program,
+    /// The same for the shadows, seen from one light at a time.
+    shadow: glow::Program,
     grid_program: glow::Program,
+    /// The views drawn at once: 2 with `multiview`, else 1.
+    views: usize,
+    multiview: Option<Multiview>,
+    /// Samples a pixel at most.
+    samples: i32,
+    /// Framebuffers drawing into headset's images, by the texture, whether
+    /// both layers, and whether with `image_depth`; and reading one of
+    /// their layers (-1: a 2D texture).
+    image_framebuffers: std::collections::HashMap<(u32, bool, bool), glow::Framebuffer>,
+    read_framebuffers: std::collections::HashMap<(u32, i32), glow::Framebuffer>,
+    image_depth: Option<ImageDepth>,
+    /// The wrap each of `textures` was last set to (repeat or not).
+    wraps: std::cell::RefCell<Vec<Option<bool>>>,
     shadows: Option<Shadows>,
     grid: Grid,
     gi: Option<Gi>,
@@ -431,16 +554,26 @@ pub struct Gpu {
     anisotropy: Option<f32>,
 }
 
+/// The defines of the programs drawing one view at a time.
+const ONE_VIEW: &str = "#define VIEWS 1\n#define VIEW 0\n#define AO_AT(s, uv) texture(s, uv)\n";
+
+/// The defines of those drawing both at once, into a texture's layers.
+const TWO_VIEWS: &str = "#extension GL_OVR_multiview2 : require\n#define VIEWS 2\n#define VIEW int(gl_ViewID_OVR)\n\
+                         #define AO_AT(s, uv) texture(s, vec3(uv, float(VIEW)))\n";
+
 /// A program of the scene's, with `defines` before its shaders.
 fn link(gl: &glow::Context, glsl: Glsl, defines: &str, vertex: &str, fragment: &str, name: &str) -> Result<glow::Program, String> {
     let preamble = glsl.preamble();
+    let views = if defines.contains("GL_OVR_multiview2") { "layout(num_views = 2) in;\n" } else { "" };
     let sources = [
-        (glow::VERTEX_SHADER, format!("{}{}{}", preamble, defines, vertex)),
+        (glow::VERTEX_SHADER, format!("{}{}{}{}", preamble, defines, views, vertex)),
         (glow::FRAGMENT_SHADER, format!("{}{}{}{}", preamble, defines, COMMON, fragment)),
     ];
     // SAFETY: see `GlScreen`: the window's context is current.
     unsafe {
         let program = gl.create_program()?;
+        // (A name used before, by a program deleted since.)
+        LOCATIONS.with(|l| l.borrow_mut().retain(|&(p, _), _| p != program.0.get()));
         let mut stages = Vec::new();
         let mut problem = None;
         for (kind, source) in sources {
@@ -479,10 +612,21 @@ fn link(gl: &glow::Context, glsl: Glsl, defines: &str, vertex: &str, fragment: &
     }
 }
 
-/// Set a uniform of the program in use by name.
-fn uniform(gl: &glow::Context, program: glow::Program, name: &str) -> Option<glow::UniformLocation> {
-    // SAFETY: see `GlScreen`.
-    unsafe { gl.get_uniform_location(program, name) }
+thread_local! {
+    /// The uniforms' locations asked for, by program and name: asking
+    /// OpenGL by name for each, every frame, is slow on some drivers.
+    static LOCATIONS: std::cell::RefCell<std::collections::HashMap<(u32, &'static str), Option<glow::UniformLocation>>> =
+        Default::default();
+}
+
+/// Where a uniform of `program` is, by name.
+fn uniform(gl: &glow::Context, program: glow::Program, name: &'static str) -> Option<glow::UniformLocation> {
+    LOCATIONS.with(|l| {
+        *l.borrow_mut()
+            .entry((program.0.get(), name))
+            // SAFETY: see `GlScreen`.
+            .or_insert_with(|| unsafe { gl.get_uniform_location(program, name) })
+    })
 }
 
 impl Gpu {
@@ -491,8 +635,14 @@ impl Gpu {
     pub fn delete(self, gl: &glow::Context) {
         // SAFETY: see `GlScreen`.
         unsafe {
-            for program in [self.lit, self.sky, self.depth, self.grid_program] {
+            for program in [self.lit, self.sky, self.depth, self.shadow, self.grid_program] {
                 gl.delete_program(program);
+            }
+            for framebuffer in self.image_framebuffers.into_values().chain(self.read_framebuffers.into_values()) {
+                gl.delete_framebuffer(framebuffer);
+            }
+            if let Some(depth) = self.image_depth {
+                delete_image_depth(gl, depth);
             }
             if let Some(shadows) = self.shadows {
                 gl.delete_texture(shadows.texture);
@@ -532,10 +682,12 @@ impl Gpu {
         }
     }
 
-    /// Compile the programs and upload `scene`; `timed`, frames are timed
-    /// (`frame_start`).
-    pub fn new(gl: &glow::Context, glsl: Glsl, scene: &Scene, quality: VrQuality, timed: bool) -> Result<Self, String> {
+    /// Compile the programs and upload `scene`, to draw as `options` say.
+    pub fn new(gl: &glow::Context, glsl: Glsl, scene: &Scene, quality: VrQuality, options: Options) -> Result<Self, String> {
         let (grid_size, taps, bounce, ao_samples) = lighting(quality);
+        // Both views at once multisampled only where OpenGL can.
+        let multiview = options.multiview;
+        let samples = if multiview.is_some_and(|m| !m.multisamples()) { 0 } else { options.samples.min(4) as i32 };
         if glsl == Glsl::Es300 {
             return Err("the 3D view needs desktop OpenGL, not OpenGL ES".into());
         }
@@ -550,14 +702,19 @@ impl Gpu {
             grid_size.1,
             ao_samples.max(1)
         );
+        // The views' programs draw both at once with `multiview`.
+        let view_defines = format!("{}{}", if multiview.is_some() { TWO_VIEWS } else { ONE_VIEW }, defines);
+        let defines = format!("{}{}", ONE_VIEW, defines);
+        let sky_defines = format!("{}#define FAR 1\n", view_defines);
         let mut programs = Vec::new();
-        for (vertex, fragment, name) in [
-            (MESH_VERT, LIT_FRAG, "scene"),
-            (FULLSCREEN_VERT, SKY_FRAG, "sky"),
-            (MESH_VERT, SHADOW_FRAG, "shadow"),
-            (FULLSCREEN_VERT, GRID_FRAG, "screen light"),
+        for (defines, vertex, fragment, name) in [
+            (&view_defines, MESH_VERT, LIT_FRAG, "scene"),
+            (&sky_defines, FULLSCREEN_VERT, SKY_FRAG, "sky"),
+            (&view_defines, MESH_VERT, SHADOW_FRAG, "depth"),
+            (&defines, MESH_VERT, SHADOW_FRAG, "shadow"),
+            (&defines, FULLSCREEN_VERT, GRID_FRAG, "screen light"),
         ] {
-            match link(gl, glsl, &defines, vertex, fragment, name) {
+            match link(gl, glsl, defines, vertex, fragment, name) {
                 Ok(program) => programs.push(program),
                 Err(e) => {
                     for program in programs {
@@ -568,10 +725,10 @@ impl Gpu {
                 }
             }
         }
-        let [lit, sky, depth, grid_program] = programs[..] else { unreachable!() };
+        let [lit, sky, depth, shadow, grid_program] = programs[..] else { unreachable!() };
         let ao = if ao_samples > 0 && scene.ao {
-            let estimate = link(gl, glsl, &defines, FULLSCREEN_VERT, AO_FRAG, "ambient occlusion");
-            let blur = link(gl, glsl, &defines, FULLSCREEN_VERT, AO_BLUR_FRAG, "ambient occlusion's blur");
+            let estimate = link(gl, glsl, &view_defines, FULLSCREEN_VERT, AO_FRAG, "ambient occlusion");
+            let blur = link(gl, glsl, &view_defines, FULLSCREEN_VERT, AO_BLUR_FRAG, "ambient occlusion's blur");
             match (estimate, blur) {
                 (Ok(estimate), Ok(blur)) => Some(Ao { estimate, blur, target: None }),
                 (estimate, blur) => {
@@ -601,12 +758,20 @@ impl Gpu {
             lit,
             sky,
             depth,
+            shadow,
             grid_program,
+            views: if multiview.is_some() { 2 } else { 1 },
+            multiview,
+            samples,
+            image_framebuffers: Default::default(),
+            read_framebuffers: Default::default(),
+            image_depth: None,
+            wraps: Default::default(),
             shadows: None,
             grid,
             gi: None,
             ao,
-            clock: timed.then(Clock::new),
+            clock: options.timed.then(Clock::new),
             glow: 1.0,
             empty,
             meshes: Vec::new(),
@@ -617,7 +782,7 @@ impl Gpu {
         };
         gpu.upload(gl, scene)?;
         if layers > 0 {
-            gpu.shadows = Some(gpu.bake_shadows(gl, scene, depth, &lights, screen.as_ref())?);
+            gpu.shadows = Some(gpu.bake_shadows(gl, scene, shadow, &lights, screen.as_ref())?);
         }
         if scene.gi && bounce {
             let probes = scene.probes.get_or_init(|| {
@@ -661,7 +826,7 @@ impl Gpu {
         };
         // Finer when there are few.
         let size: u32 = if layers.len() <= 8 { 2048 } else { 1024 };
-        let u = |name: &str| uniform(gl, program, name);
+        let u = |name: &'static str| uniform(gl, program, name);
         // SAFETY: see `GlScreen`.
         unsafe {
             let texture = gl.create_texture()?;
@@ -807,7 +972,7 @@ impl Gpu {
     /// in use, and bind its textures, for `scene` with `screen` showing on
     /// its screen. `srgb`: the target encodes linear light itself.
     fn bind_lighting(&self, gl: &glow::Context, program: glow::Program, scene: &Scene, screen: Option<glow::Texture>, srgb: bool) {
-        let u = |name: &str| uniform(gl, program, name);
+        let u = |name: &'static str| uniform(gl, program, name);
         // SAFETY: see `GlScreen`.
         unsafe {
             gl.uniform_3_f32_slice(u("u_sun").as_ref(), &scene.sun.to_array());
@@ -894,16 +1059,17 @@ impl Gpu {
         }
     }
 
-    /// The ambient occlusion of `view`, `size` big, at half that: None
+    /// The ambient occlusion of `views`, `size` big, at half that: None
     /// without it.
-    fn draw_ao(&mut self, gl: &glow::Context, scene: &Scene, view: &View, size: (u32, u32)) -> Option<glow::Texture> {
+    fn draw_ao(&mut self, gl: &glow::Context, scene: &Scene, views: &[View], size: (u32, u32)) -> Option<glow::Texture> {
         let half = (((size.0 / 2).max(1)) as i32, ((size.1 / 2).max(1)) as i32);
+        let multiview = self.multiview;
         let ao = self.ao.as_mut()?;
         if ao.target.as_ref().is_some_and(|t| t.size != half) {
             ao.target.take().expect("the target").delete(gl);
         }
         if ao.target.is_none() {
-            match AoTarget::new(gl, half) {
+            match AoTarget::new(gl, half, multiview.as_ref()) {
                 Ok(target) => ao.target = Some(target),
                 Err(e) => {
                     eprintln!("[VR] The ambient occlusion is left out: {}", e);
@@ -914,8 +1080,12 @@ impl Gpu {
         }
         let (estimate, blur) = (ao.estimate, ao.blur);
         let target = ao.target.as_ref().expect("the target");
-        let (depth, depth_framebuffer, pictures, framebuffers) = (target.depth, target.depth_framebuffer, target.pictures, target.framebuffers);
+        let (kind, depth, depth_framebuffer, pictures, framebuffers) =
+            (target.kind, target.depth, target.depth_framebuffer, target.pictures, target.framebuffers);
         let (w, h) = half;
+        let projections: Vec<f32> = views.iter().flat_map(|v| v.projection.to_cols_array()).collect();
+        let inverses: Vec<f32> = views.iter().flat_map(|v| v.projection.inverse().to_cols_array()).collect();
+        let vps: Vec<Mat4> = views.iter().map(View::view_projection).collect();
         // SAFETY: see `GlScreen`.
         unsafe {
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(depth_framebuffer));
@@ -928,20 +1098,21 @@ impl Gpu {
             gl.depth_mask(true);
             gl.clear_depth_f32(1.0);
             gl.clear(glow::DEPTH_BUFFER_BIT);
-            self.draw_depth(gl, scene, &view.view_projection());
+            self.draw_depth(gl, scene, &vps);
             gl.disable(glow::DEPTH_TEST);
             gl.disable(glow::CULL_FACE);
             gl.bind_vertex_array(Some(self.empty));
             gl.active_texture(glow::TEXTURE1);
-            gl.bind_texture(glow::TEXTURE_2D, Some(depth));
-            let inverse = view.projection.inverse().to_cols_array();
+            gl.bind_texture(kind, Some(depth));
 
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffers[0]));
+            // (All of it drawn over: nothing to load.)
+            gl.invalidate_framebuffer(glow::FRAMEBUFFER, &[glow::COLOR_ATTACHMENT0]);
             gl.use_program(Some(estimate));
-            let u = |name: &str| uniform(gl, estimate, name);
+            let u = |name: &'static str| uniform(gl, estimate, name);
             gl.uniform_1_i32(u("u_depth").as_ref(), 1);
-            gl.uniform_matrix_4_f32_slice(u("u_projection").as_ref(), false, &view.projection.to_cols_array());
-            gl.uniform_matrix_4_f32_slice(u("u_inverse_projection").as_ref(), false, &inverse);
+            gl.uniform_matrix_4_f32_slice(u("u_projection").as_ref(), false, &projections);
+            gl.uniform_matrix_4_f32_slice(u("u_inverse_projection").as_ref(), false, &inverses);
             gl.uniform_2_f32_slice(u("u_size").as_ref(), &[w as f32, h as f32]);
             gl.uniform_1_f32(u("u_radius").as_ref(), AO_RADIUS);
             gl.uniform_1_f32(u("u_strength").as_ref(), AO_STRENGTH);
@@ -949,34 +1120,43 @@ impl Gpu {
 
             // Across into the second picture, then down back into the first.
             gl.use_program(Some(blur));
-            let u = |name: &str| uniform(gl, blur, name);
+            let u = |name: &'static str| uniform(gl, blur, name);
             gl.uniform_1_i32(u("u_ao").as_ref(), 0);
             gl.uniform_1_i32(u("u_depth").as_ref(), 1);
-            gl.uniform_matrix_4_f32_slice(u("u_inverse_projection").as_ref(), false, &inverse);
+            gl.uniform_matrix_4_f32_slice(u("u_inverse_projection").as_ref(), false, &inverses);
             gl.uniform_2_f32_slice(u("u_size").as_ref(), &[w as f32, h as f32]);
             gl.active_texture(glow::TEXTURE0);
             for (from, to, step) in [(0, 1, [1.0 / w as f32, 0.0]), (1, 0, [0.0, 1.0 / h as f32])] {
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffers[to]));
-                gl.bind_texture(glow::TEXTURE_2D, Some(pictures[from]));
+                gl.invalidate_framebuffer(glow::FRAMEBUFFER, &[glow::COLOR_ATTACHMENT0]);
+                gl.bind_texture(kind, Some(pictures[from]));
                 gl.uniform_2_f32_slice(u("u_step").as_ref(), &step);
                 gl.draw_arrays(glow::TRIANGLES, 0, 3);
             }
+            // What is left to read is the first picture.
+            for framebuffer in [depth_framebuffer, framebuffers[1]] {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
+                let attachment = if framebuffer == depth_framebuffer { glow::DEPTH_ATTACHMENT } else { glow::COLOR_ATTACHMENT0 };
+                gl.invalidate_framebuffer(glow::FRAMEBUFFER, &[attachment]);
+            }
+            gl.bind_texture(kind, None);
             gl.active_texture(glow::TEXTURE1);
-            gl.bind_texture(glow::TEXTURE_2D, None);
+            gl.bind_texture(kind, None);
             restore(gl);
         }
         Some(pictures[0])
     }
 
-    /// Draw the depth of the opaque meshes as `view_projection` sees
-    /// them.
-    fn draw_depth(&self, gl: &glow::Context, scene: &Scene, view_projection: &Mat4) {
+    /// Draw the depth of the opaque meshes as `view_projections` see them
+    /// (one, or both views').
+    fn draw_depth(&self, gl: &glow::Context, scene: &Scene, view_projections: &[Mat4]) {
         let program = self.depth;
-        let u = |name: &str| uniform(gl, program, name);
+        let u = |name: &'static str| uniform(gl, program, name);
+        let matrices: Vec<f32> = view_projections.iter().flat_map(|m| m.to_cols_array()).collect();
         // SAFETY: see `GlScreen`.
         unsafe {
             gl.use_program(Some(program));
-            gl.uniform_matrix_4_f32_slice(u("u_view_projection").as_ref(), false, &view_projection.to_cols_array());
+            gl.uniform_matrix_4_f32_slice(u("u_view_projection").as_ref(), false, &matrices);
             gl.uniform_matrix_4_f32_slice(u("u_model").as_ref(), false, &Mat4::IDENTITY.to_cols_array());
             gl.uniform_1_i32(u("u_base").as_ref(), 0);
             let (base_color, has_base, cutoff) = (u("u_base_color"), u("u_has_base"), u("u_cutoff"));
@@ -1046,14 +1226,18 @@ impl Gpu {
             };
             gl.uniform_1_f32(at.cutoff.as_ref(), cut);
             for (unit, texture, flag) in [(0, material.base_texture, &at.has_base), (1, material.emissive_texture, &at.has_emissive)] {
-                let bound = texture.and_then(|t| Some((self.textures.get(t.image).copied()?, t.repeat)));
+                let bound = texture.and_then(|t| Some((self.textures.get(t.image).copied()?, t.repeat, t.image)));
                 gl.uniform_1_i32(flag.as_ref(), bound.is_some() as i32);
                 gl.active_texture(glow::TEXTURE0 + unit);
-                gl.bind_texture(glow::TEXTURE_2D, bound.map(|(t, _)| t));
-                if let Some((_, repeat)) = bound {
+                gl.bind_texture(glow::TEXTURE_2D, bound.map(|(t, _, _)| t));
+                // (Set again only when another material wraps it otherwise.)
+                if let Some((_, repeat, image)) = bound
+                    && self.wraps.borrow()[image] != Some(repeat)
+                {
                     let wrap = if repeat { glow::REPEAT } else { glow::CLAMP_TO_EDGE } as i32;
                     gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, wrap);
                     gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, wrap);
+                    self.wraps.borrow_mut()[image] = Some(repeat);
                 }
             }
         }
@@ -1226,7 +1410,7 @@ impl Gpu {
         gi.stale = false;
         let program = gi.program;
         let [nx, ny, nz] = gi.layout.count.map(|c| c as i32);
-        let u = |name: &str| uniform(gl, program, name);
+        let u = |name: &'static str| uniform(gl, program, name);
         // SAFETY: see `GlScreen`.
         unsafe {
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(gi.framebuffer));
@@ -1285,6 +1469,7 @@ impl Gpu {
                 gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
                 self.set_anisotropy(gl);
                 self.textures.push(texture);
+                self.wraps.get_mut().push(None);
             }
         }
         for mesh in &scene.meshes {
@@ -1307,37 +1492,71 @@ impl Gpu {
             }
         }
         if self.target.is_none() {
-            self.target = Some(make_target(gl, format)?);
+            self.target = Some(make_target(gl, format, self.samples)?);
         }
         Ok(self.target.as_ref().expect("the target"))
     }
 
-    /// Draw `scene` as `view` sees it into the target for `format`, with
-    /// `screen` the picture on the screen, the PC's lights as `leds` and
-    /// `extras` over it all. An sRGB target is written linear light, which
-    /// it encodes; another sRGB values.
+    /// Draw `scene` as `views` see it (one, or both with `Multiview`) into
+    /// `dest`, its `area` from the bottom left (the whole, or less to draw
+    /// less), with `screen` the picture on the screen, the PC's lights as
+    /// `leds` and `extras` over it all. An sRGB target is written linear
+    /// light, which it encodes; another sRGB values.
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
         gl: &glow::Context,
         scene: &Scene,
-        view: &View,
-        format: Format,
+        views: &[View],
+        dest: Dest,
+        area: (u32, u32),
         screen: Option<glow::Texture>,
         leds: Leds,
         extras: &[Extra],
     ) -> Result<(), String> {
+        let format = dest.format();
+        let layered = matches!(dest, Dest::Image { layered: true, .. });
+        if views.len() != self.views || layered != (self.views == 2) {
+            return Err(format!("{} views can't be drawn into {:?} by a renderer of {}", views.len(), dest, self.views));
+        }
         // (After a change of the screen's brightness.)
         self.update_gi(gl, scene);
-        let ao = self.draw_ao(gl, scene, view, format.size);
+        let ao = self.draw_ao(gl, scene, views, area);
         if ao.is_some() {
             self.mark(gl, Pass::Ao);
         }
+        // Where the samples are drawn; where they are resolved into after,
+        // if elsewhere; and what of them isn't needed after.
+        let (framebuffer, resolve, done): (_, _, &[u32]) = match dest {
+            Dest::Own(format) => {
+                let target = self.target(gl, format)?;
+                (target.framebuffer, Some(target.resolve), &[glow::COLOR_ATTACHMENT0, glow::DEPTH_ATTACHMENT])
+            }
+            Dest::Image { texture, format, layered } if layered || self.samples == 0 => {
+                (self.image_framebuffer(gl, texture, format.size, layered, true)?, None, &[glow::DEPTH_ATTACHMENT])
+            }
+            Dest::Image { texture, format, .. } => {
+                let into = self.image_framebuffer(gl, texture, format.size, false, false)?;
+                let target = self.target(gl, format)?;
+                (target.framebuffer, Some(into), &[glow::COLOR_ATTACHMENT0, glow::DEPTH_ATTACHMENT])
+            }
+        };
         let (lit, sky, empty) = (self.lit, self.sky, self.empty);
-        let target = self.target(gl, format)?;
-        let (framebuffer, resolve) = (target.framebuffer, target.resolve);
-        let (w, h) = (format.size.0 as i32, format.size.1 as i32);
+        let (w, h) = (area.0 as i32, area.1 as i32);
         let encode = !format.srgb as i32;
-        let u = |program, name: &str| uniform(gl, program, name);
+        let u = |program, name: &'static str| uniform(gl, program, name);
+        let vps: Vec<Mat4> = views.iter().map(View::view_projection).collect();
+        let vp_floats: Vec<f32> = vps.iter().flat_map(|m| m.to_cols_array()).collect();
+        let eyes: Vec<f32> = views.iter().flat_map(|v| v.eye().to_array()).collect();
+        let sky_inverses: Vec<f32> = views
+            .iter()
+            .flat_map(|view| {
+                let mut rotation = view.view;
+                rotation.w_axis = glam::Vec4::W;
+                (view.projection * rotation).inverse().to_cols_array()
+            })
+            .collect();
+        let ao_kind = if self.views == 2 { glow::TEXTURE_2D_ARRAY } else { glow::TEXTURE_2D };
         // SAFETY: see `GlScreen`.
         unsafe {
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
@@ -1353,49 +1572,44 @@ impl Gpu {
             gl.clear_depth_f32(1.0);
             gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
 
-            // The sky, at no distance: everything goes over it.
-            gl.disable(glow::DEPTH_TEST);
-            gl.disable(glow::CULL_FACE);
-            gl.use_program(Some(sky));
-            let mut rotation = view.view;
-            rotation.w_axis = glam::Vec4::W;
-            let inverse = (view.projection * rotation).inverse();
-            gl.uniform_matrix_4_f32_slice(u(sky, "u_inverse").as_ref(), false, &inverse.to_cols_array());
-            gl.uniform_3_f32_slice(u(sky, "u_sun").as_ref(), &scene.sun.to_array());
-            gl.uniform_1_i32(u(sky, "u_sky").as_ref(), scene.sky as i32);
-            gl.uniform_1_i32(u(sky, "u_encode").as_ref(), encode);
-            gl.bind_vertex_array(Some(empty));
-            gl.draw_arrays(glow::TRIANGLES, 0, 3);
-
             // The depth of the opaque meshes, then their colour where they
             // are in front.
-            let vp = view.view_projection();
             gl.enable(glow::DEPTH_TEST);
             gl.depth_func(glow::LESS);
             gl.color_mask(false, false, false, false);
-            self.draw_depth(gl, scene, &vp);
+            self.draw_depth(gl, scene, &vps);
             gl.color_mask(true, true, true, true);
             gl.depth_mask(false);
             gl.depth_func(glow::LEQUAL);
             gl.use_program(Some(lit));
-            gl.uniform_matrix_4_f32_slice(u(lit, "u_view_projection").as_ref(), false, &vp.to_cols_array());
+            gl.uniform_matrix_4_f32_slice(u(lit, "u_view_projection").as_ref(), false, &vp_floats);
             let model = u(lit, "u_model");
             gl.uniform_matrix_4_f32_slice(model.as_ref(), false, &Mat4::IDENTITY.to_cols_array());
             self.bind_lighting(gl, lit, scene, screen, format.srgb);
-            gl.uniform_3_f32_slice(u(lit, "u_eye").as_ref(), &view.eye().to_array());
+            gl.uniform_3_f32_slice(u(lit, "u_eye").as_ref(), &eyes);
             gl.uniform_1_f32(u(lit, "u_fog").as_ref(), if scene.sky { 0.02 } else { 0.0 });
             let has_ao = u(lit, "u_has_ao");
             gl.uniform_1_i32(has_ao.as_ref(), ao.is_some() as i32);
             gl.uniform_1_i32(u(lit, "u_ao").as_ref(), 6);
             gl.uniform_2_f32_slice(u(lit, "u_view_size").as_ref(), &[w as f32, h as f32]);
             gl.active_texture(glow::TEXTURE6);
-            gl.bind_texture(glow::TEXTURE_2D, ao);
+            gl.bind_texture(ao_kind, ao);
 
             let locations = MaterialLocations::of(gl, lit);
             let MaterialLocations { shading, base_color, has_base, emissive, has_emissive, cutoff } = &locations;
-            // The opaque meshes, then those seen through.
+            // The opaque meshes, then the sky where there are none, then
+            // those seen through.
             for blended in [false, true] {
                 if blended {
+                    gl.disable(glow::CULL_FACE);
+                    gl.use_program(Some(sky));
+                    gl.uniform_matrix_4_f32_slice(u(sky, "u_inverse").as_ref(), false, &sky_inverses);
+                    gl.uniform_3_f32_slice(u(sky, "u_sun").as_ref(), &scene.sun.to_array());
+                    gl.uniform_1_i32(u(sky, "u_sky").as_ref(), scene.sky as i32);
+                    gl.uniform_1_i32(u(sky, "u_encode").as_ref(), encode);
+                    gl.bind_vertex_array(Some(empty));
+                    gl.draw_arrays(glow::TRIANGLES, 0, 3);
+                    gl.use_program(Some(lit));
                     gl.enable(glow::BLEND);
                     gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
                     gl.uniform_1_i32(has_ao.as_ref(), 0);
@@ -1432,15 +1646,94 @@ impl Gpu {
                 gl.draw_elements(glow::TRIANGLES, self.cube.count, glow::UNSIGNED_INT, 0);
             }
 
-            // The samples resolved into the texture.
+            // The samples resolved, where they aren't on the chip; then
+            // what isn't needed any more is left unwritten.
             gl.disable(glow::FRAMEBUFFER_SRGB);
-            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(framebuffer));
-            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(resolve));
-            gl.blit_framebuffer(0, 0, w, h, 0, 0, w, h, glow::COLOR_BUFFER_BIT, glow::NEAREST);
+            if let Some(resolve) = resolve {
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(framebuffer));
+                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(resolve));
+                gl.blit_framebuffer(0, 0, w, h, 0, 0, w, h, glow::COLOR_BUFFER_BIT, glow::NEAREST);
+            }
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
+            gl.invalidate_framebuffer(glow::FRAMEBUFFER, done);
+            gl.active_texture(glow::TEXTURE6);
+            gl.bind_texture(ao_kind, None);
             restore(gl);
         }
         self.mark(gl, Pass::Scene);
         Ok(())
+    }
+
+    /// A framebuffer drawing into the headset's image `texture`, `size`
+    /// big: both layers of it with `layered`, with a depth buffer of the
+    /// `Gpu`'s with `depth`; made once.
+    fn image_framebuffer(&mut self, gl: &glow::Context, texture: glow::Texture, size: (u32, u32), layered: bool, depth: bool) -> Result<glow::Framebuffer, String> {
+        if depth && self.image_depth.as_ref().is_none_or(|d| d.size != size || d.layered != layered) {
+            if let Some(old) = self.image_depth.take() {
+                delete_image_depth(gl, old);
+            }
+            // The framebuffers with the old one go too.
+            let stale: Vec<_> = self.image_framebuffers.keys().filter(|k| k.2).copied().collect();
+            for key in stale {
+                if let Some(framebuffer) = self.image_framebuffers.remove(&key) {
+                    // SAFETY: see `GlScreen`.
+                    unsafe { gl.delete_framebuffer(framebuffer) };
+                }
+            }
+            self.image_depth = Some(make_image_depth(gl, size, layered)?);
+        }
+        let key = (texture.0.get(), layered, depth);
+        if let Some(&framebuffer) = self.image_framebuffers.get(&key) {
+            return Ok(framebuffer);
+        }
+        let samples = self.samples;
+        // SAFETY: see `GlScreen`; layered images and depth have two layers.
+        unsafe {
+            let framebuffer = gl.create_framebuffer()?;
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
+            match (layered, &self.multiview) {
+                (true, Some(multiview)) => multiview.attach(glow::COLOR_ATTACHMENT0, texture, samples),
+                (true, None) => return Err("drawing both eyes at once needs GL_OVR_multiview2".into()),
+                (false, _) => gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(texture), 0),
+            }
+            if depth {
+                let image_depth = self.image_depth.as_ref().expect("the depth");
+                match (image_depth.texture, image_depth.renderbuffer, &self.multiview) {
+                    (Some(depth), _, Some(multiview)) => multiview.attach(glow::DEPTH_ATTACHMENT, depth, samples),
+                    (_, Some(depth), _) => gl.framebuffer_renderbuffer(glow::FRAMEBUFFER, glow::DEPTH_ATTACHMENT, glow::RENDERBUFFER, Some(depth)),
+                    _ => {}
+                }
+            }
+            let complete = gl.check_framebuffer_status(glow::FRAMEBUFFER) == glow::FRAMEBUFFER_COMPLETE;
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            if !complete {
+                gl.delete_framebuffer(framebuffer);
+                return Err("OpenGL can't draw into the headset's images".into());
+            }
+            self.image_framebuffers.insert(key, framebuffer);
+            Ok(framebuffer)
+        }
+    }
+
+    /// A framebuffer reading `texture` (a 2D texture), or its `layer` (of a
+    /// 2D array); made once.
+    pub fn read_framebuffer(&mut self, gl: &glow::Context, texture: glow::Texture, layer: Option<i32>) -> Option<glow::Framebuffer> {
+        let key = (texture.0.get(), layer.unwrap_or(-1));
+        if let Some(&framebuffer) = self.read_framebuffers.get(&key) {
+            return Some(framebuffer);
+        }
+        // SAFETY: see `GlScreen`.
+        unsafe {
+            let framebuffer = gl.create_framebuffer().ok()?;
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
+            match layer {
+                Some(layer) => gl.framebuffer_texture_layer(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, Some(texture), 0, layer),
+                None => gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(texture), 0),
+            }
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            self.read_framebuffers.insert(key, framebuffer);
+            Some(framebuffer)
+        }
     }
 
     /// Copy the last view drawn into the `x, y, width, height` of
@@ -1504,6 +1797,7 @@ fn restore(gl: &glow::Context) {
         gl.use_program(None);
         gl.active_texture(glow::TEXTURE6);
         gl.bind_texture(glow::TEXTURE_2D, None);
+        gl.bind_texture(glow::TEXTURE_2D_ARRAY, None);
         gl.active_texture(glow::TEXTURE5);
         gl.bind_texture(glow::TEXTURE_3D, None);
         gl.active_texture(glow::TEXTURE4);
@@ -1604,7 +1898,46 @@ fn make_grid(gl: &glow::Context, size: (i32, i32)) -> Result<Grid, String> {
     }
 }
 
-fn make_target(gl: &glow::Context, format: Format) -> Result<Target, String> {
+/// The depth buffer for drawing into headset's images `size` big, both
+/// layers with `layered`.
+fn make_image_depth(gl: &glow::Context, size: (u32, u32), layered: bool) -> Result<ImageDepth, String> {
+    let (w, h) = (size.0 as i32, size.1 as i32);
+    // SAFETY: see `GlScreen`.
+    unsafe {
+        if layered {
+            let texture = gl.create_texture()?;
+            gl.bind_texture(glow::TEXTURE_2D_ARRAY, Some(texture));
+            let none = glow::PixelUnpackData::Slice(None);
+            gl.tex_image_3d(glow::TEXTURE_2D_ARRAY, 0, glow::DEPTH_COMPONENT24 as i32, w, h, 2, 0, glow::DEPTH_COMPONENT, glow::UNSIGNED_INT, none);
+            gl.tex_parameter_i32(glow::TEXTURE_2D_ARRAY, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D_ARRAY, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
+            gl.bind_texture(glow::TEXTURE_2D_ARRAY, None);
+            Ok(ImageDepth { size, layered, texture: Some(texture), renderbuffer: None })
+        } else {
+            let renderbuffer = gl.create_renderbuffer()?;
+            gl.bind_renderbuffer(glow::RENDERBUFFER, Some(renderbuffer));
+            gl.renderbuffer_storage(glow::RENDERBUFFER, glow::DEPTH_COMPONENT24, w, h);
+            gl.bind_renderbuffer(glow::RENDERBUFFER, None);
+            Ok(ImageDepth { size, layered, texture: None, renderbuffer: Some(renderbuffer) })
+        }
+    }
+}
+
+fn delete_image_depth(gl: &glow::Context, depth: ImageDepth) {
+    // SAFETY: see `GlScreen`.
+    unsafe {
+        if let Some(texture) = depth.texture {
+            gl.delete_texture(texture);
+        }
+        if let Some(renderbuffer) = depth.renderbuffer {
+            gl.delete_renderbuffer(renderbuffer);
+        }
+    }
+}
+
+/// The multisampled target for `format`, `wanted` samples deep if OpenGL
+/// can (else as deep as it can, or not at all).
+fn make_target(gl: &glow::Context, format: Format, wanted: i32) -> Result<Target, String> {
     let color_format = if format.srgb { glow::SRGB8_ALPHA8 } else { glow::RGBA8 };
     let (w, h) = (format.size.0 as i32, format.size.1 as i32);
     // SAFETY: see `GlScreen`.
@@ -1613,7 +1946,7 @@ fn make_target(gl: &glow::Context, format: Format) -> Result<Target, String> {
         let framebuffer = gl.create_framebuffer()?;
         let color = gl.create_renderbuffer()?;
         let depth = gl.create_renderbuffer()?;
-        let mut samples = most.clamp(0, 4);
+        let mut samples = most.clamp(0, wanted.max(0));
         loop {
             gl.bind_renderbuffer(glow::RENDERBUFFER, Some(color));
             gl.renderbuffer_storage_multisample(glow::RENDERBUFFER, samples, color_format, w, h);

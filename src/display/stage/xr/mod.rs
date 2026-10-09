@@ -31,6 +31,19 @@ use std::time::{Duration, Instant};
 
 const VIEW: xr::ViewConfigurationType = xr::ViewConfigurationType::PRIMARY_STEREO;
 
+/// What eyes are drawn into: a swapchain's image, `texture`, `size` big,
+/// of which `area` from the bottom left is shown; sRGB or not. It holds
+/// both eyes' views in its layers 0 and 1 if `layered`, else eye
+/// `first`'s.
+pub struct EyeTarget {
+    pub first: usize,
+    pub texture: glow::Texture,
+    pub layered: bool,
+    pub size: (u32, u32),
+    pub area: (u32, u32),
+    pub srgb: bool,
+}
+
 /// The controllers' actions, for both hands.
 struct Controls {
     set: xr::ActionSet,
@@ -84,14 +97,21 @@ pub struct Xr {
     stats: FrameStats,
     /// When the frame being drawn was begun.
     begun: Option<Instant>,
+    /// How much of the eyes' images is drawn, in percent across and down
+    /// (`set_percent`); the area the last frame drew.
+    percent: u32,
+    area: (u32, u32),
 }
 
 /// What the session is made with: how the headset's pictures get to the
 /// runtime, and their size.
+#[derive(Clone)]
 pub struct XrOptions {
     pub graphics: VrGraphics,
     /// The eyes' images, in percent of the size the runtime recommends.
     pub resolution: u32,
+    /// Both eyes in the layers of one swapchain, where the binding allows.
+    pub layered: bool,
 }
 
 /// What a session draws with that is to outlive it.
@@ -246,7 +266,7 @@ impl Xr {
         let mut failures = Vec::new();
         let mut opened = None;
         for &binding in &bindings {
-            match open(binding, gl, &instance, system, &sizes) {
+            match open(binding, gl, &instance, system, &sizes, options.layered) {
                 Ok(made) => {
                     opened = Some((binding, made));
                     break;
@@ -305,6 +325,8 @@ impl Xr {
             failed: None,
             stats: FrameStats::default(),
             begun: None,
+            percent: 100,
+            area: (width, height),
         })
     }
 
@@ -402,6 +424,12 @@ impl Xr {
     pub fn eye_format(&self) -> ((u32, u32), bool) {
         self.frames.eye_format()
     }
+
+    /// Both eyes are drawn at once, into the layers of one image.
+    pub fn layered(&self) -> bool {
+        self.frames.layered()
+    }
+
 
     /// Delete what the session's swapchains were drawn through, with `gl`,
     /// the context it was made with, current.
@@ -508,12 +536,7 @@ impl Xr {
     /// whether its images are sRGB, and the framebuffer to draw it into.
     /// `world` is where the space is in the scene. The frame is
     /// ended whatever fails, with nothing in it if the eyes aren't drawn.
-    pub fn draw(
-        &mut self,
-        gl: &glow::Context,
-        world: Mat4,
-        draw: impl FnMut(usize, View, (u32, u32), bool, glow::Framebuffer),
-    ) -> Result<(), String> {
+    pub fn draw(&mut self, gl: &glow::Context, world: Mat4, draw: impl FnMut(&EyeTarget, &[View])) -> Result<(), String> {
         let Some(state) = self.pending.take() else { return Ok(()) };
         let time = state.predicted_display_time;
         let drawn = if state.should_render { self.draw_eyes(gl, time, world, draw).map(Some) } else { Ok(None) };
@@ -521,7 +544,7 @@ impl Xr {
         let drawn = drawn.and_then(|views| flushed.map(|()| views));
         let failed = drawn.as_ref().err().map(|&(what, e)| self.fail(what, e));
         let views = drawn.ok().flatten();
-        let ended = self.frames.end(time, self.blend, &self.space, views.as_deref());
+        let ended = self.frames.end(time, self.blend, &self.space, views.as_deref(), self.area);
         if let Some(begun) = self.begun.take() {
             self.stats.worked(begun.elapsed());
         }
@@ -532,17 +555,20 @@ impl Xr {
         failed.map_or(Ok(()), Err)
     }
 
-    /// Draw each eye into an image of its swapchain: the views drawn, or
-    /// what failed. An image acquired is released whatever fails after.
+    /// Draw the eyes into an image of their swapchains (or of the one for
+    /// both): the views drawn, or what failed. An image acquired is
+    /// released whatever fails after.
     fn draw_eyes(
         &mut self,
         gl: &glow::Context,
         time: xr::Time,
         world: Mat4,
-        mut draw: impl FnMut(usize, View, (u32, u32), bool, glow::Framebuffer),
+        mut draw: impl FnMut(&EyeTarget, &[View]),
     ) -> Result<Vec<xr::View>, (&'static str, xr::sys::Result)> {
         let (_, views) = self.session.locate_views(VIEW, time, &self.space).map_err(|e| ("the headset's views", e))?;
-        if views.len() < self.frames.eyes() {
+        let layered = self.frames.layered();
+        let eyes = if layered { 2 } else { self.frames.eyes() };
+        if views.len() < eyes {
             return Err(("the headset's views", xr::sys::Result::ERROR_VALIDATION_FAILURE));
         }
         if !self.views_logged {
@@ -567,16 +593,28 @@ impl Xr {
                 ));
             }
         }
-        let (_, srgb) = self.frames.eye_format();
-        for (index, view) in views.iter().take(self.frames.eyes()).enumerate() {
-            let (framebuffer, size) = self.frames.acquire(index)?;
-            let fov = view.fov;
-            let eye_view = View {
-                view: (world * pose_matrix(view.pose)).inverse(),
-                projection: fov_projection(fov.angle_left, fov.angle_right, fov.angle_up, fov.angle_down),
-            };
-            draw(index, eye_view, size, srgb, framebuffer);
-            self.frames.release(gl, index)?;
+        let eye_views: Vec<View> = views
+            .iter()
+            .take(eyes)
+            .map(|view| {
+                let fov = view.fov;
+                View {
+                    view: (world * pose_matrix(view.pose)).inverse(),
+                    projection: fov_projection(fov.angle_left, fov.angle_right, fov.angle_up, fov.angle_down),
+                }
+            })
+            .collect();
+        let ((width, height), srgb) = self.frames.eye_format();
+        self.area = if self.frames.partial() { rust_dos::vr::area((width, height), self.percent) } else { (width, height) };
+        let area = self.area;
+        // One swapchain for both eyes, or one for each.
+        let chains: Vec<(usize, std::ops::Range<usize>)> =
+            if layered { vec![(0, 0..2)] } else { (0..eyes).map(|i| (i, i..i + 1)).collect() };
+        for (chain, range) in chains {
+            let (texture, size) = self.frames.acquire(chain)?;
+            let target = EyeTarget { first: range.start, texture, layered, size, area, srgb };
+            draw(&target, &eye_views[range]);
+            self.frames.release(gl, chain)?;
         }
         Ok(views)
     }
@@ -671,13 +709,16 @@ fn pose_matrix(pose: xr::Posef) -> Mat4 {
     Mat4::from_rotation_translation(Quat::from_xyzw(o.x, o.y, o.z, o.w).normalize(), Vec3::new(p.x, p.y, p.z))
 }
 
-/// A session made with `binding`, its eyes' images `sizes` big.
+/// A session made with `binding`, its eyes' images `sizes` big: the
+/// layers of one swapchain's with `layered`, where OpenGL draws into the
+/// runtime's images itself.
 fn open(
     binding: Binding,
     gl: &glow::Context,
     instance: &xr::Instance,
     system: xr::SystemId,
     sizes: &[(u32, u32)],
+    layered: bool,
 ) -> Result<Opened, String> {
     match binding {
         Binding::Wgl | Binding::Glx => {
@@ -687,7 +728,7 @@ fn open(
             // which outlives the session (the window's).
             let (session, waiter, stream) =
                 unsafe { instance.create_session::<xr::OpenGL>(system, &info) }.map_err(err("the headset's session"))?;
-            let frames = Frames::Gl(GlFrames::new(gl, &session, stream, sizes)?);
+            let frames = Frames::Gl(GlFrames::new(&session, stream, sizes, layered)?);
             Ok(Opened { session: session.into_any_graphics(), waiter, frames, keep: Keep::Library(library) })
         }
         #[cfg(target_os = "linux")]
@@ -697,7 +738,7 @@ fn open(
             // SAFETY: as above.
             let (session, waiter, stream) =
                 unsafe { instance.create_session::<egl::Egl>(system, &info) }.map_err(err("the headset's session"))?;
-            let frames = Frames::Egl(GlFrames::new(gl, &session, stream, sizes)?);
+            let frames = Frames::Egl(GlFrames::new(&session, stream, sizes, layered)?);
             Ok(Opened { session: session.into_any_graphics(), waiter, frames, keep: Keep::Library(library) })
         }
         #[cfg(target_os = "linux")]
