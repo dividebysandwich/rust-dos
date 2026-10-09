@@ -4,6 +4,7 @@
 use super::UiKey;
 use crate::disk::{DRIVE_C, DRIVE_Z, DriveInfo, DriveKind, FLOPPY_DRIVES, LASTDRIVE, MountOptions, drive_letter};
 use crate::diskimage::{self, Chs, ImageKind};
+use crate::ide::{ChannelId, IdeSlot};
 use crate::mount::{MountSpec, contract_home, expand_host_path};
 use std::path::{Path, PathBuf};
 
@@ -68,6 +69,8 @@ pub enum Field {
     Kind,
     Label,
     ReadOnly,
+    /// The IDE slot a booted system finds a hard disk or CD-ROM drive on.
+    Ide,
     /// The folder the drive's changes go to (`-overlay`), and the button
     /// that picks it.
     Overlay,
@@ -82,6 +85,14 @@ pub enum Field {
 }
 
 const KINDS: [DriveKind; 3] = [DriveKind::HardDisk, DriveKind::Floppy, DriveKind::CdRom];
+
+/// The IDE slots to pick from, after none (the first free one).
+const IDE_SLOTS: [IdeSlot; 4] = [
+    IdeSlot::new(ChannelId::Primary, false),
+    IdeSlot::new(ChannelId::Primary, true),
+    IdeSlot::new(ChannelId::Secondary, false),
+    IdeSlot::new(ChannelId::Secondary, true),
+];
 
 /// What a key did in the dialog.
 #[derive(Debug, PartialEq, Eq)]
@@ -118,9 +129,11 @@ pub struct MountDialog {
     original: String,
     more_images: Vec<PathBuf>,
     geometry: Option<Chs>,
-    /// Its IDE slot for a booted system, and whether a host directory is
-    /// shared with one, which stay too.
-    ide: Option<crate::ide::IdeSlot>,
+    /// The IDE slot a booted system finds the drive on: None for the
+    /// first free one.
+    pub ide: Option<IdeSlot>,
+    /// Whether a host directory is shared with a booted system, which
+    /// stays too.
     share: Option<bool>,
     /// The mount it changes.
     current: Option<MountSpec>,
@@ -197,6 +210,16 @@ impl MountDialog {
         self.kind != DriveKind::CdRom
     }
 
+    /// Floppies aren't on the IDE channels.
+    pub fn can_ide(&self) -> bool {
+        self.kind != DriveKind::Floppy
+    }
+
+    /// "the primary master", or the first free slot's.
+    pub fn ide_name(&self) -> String {
+        self.ide.map_or_else(|| "first free".to_string(), IdeSlot::describe)
+    }
+
     /// Only disk images boot, and a CD image doesn't.
     pub fn can_boot(&self) -> bool {
         self.kind != DriveKind::CdRom
@@ -222,6 +245,9 @@ impl MountDialog {
             fields.push(Kind);
         }
         fields.extend([Label, ReadOnly]);
+        if self.can_ide() {
+            fields.push(Ide);
+        }
         if self.can_overlay() {
             fields.extend([Overlay, OverlayBrowse]);
         }
@@ -265,6 +291,11 @@ impl MountDialog {
                 self.kind = KINDS[(at + dir).rem_euclid(KINDS.len() as isize) as usize];
             }
             Field::ReadOnly => self.read_only = !self.read_only,
+            Field::Ide => {
+                let at = self.ide.and_then(|slot| IDE_SLOTS.iter().position(|&s| s == slot)).map_or(0, |i| i as isize + 1);
+                let at = (at + dir).rem_euclid(IDE_SLOTS.len() as isize + 1) as usize;
+                self.ide = at.checked_sub(1).map(|i| IDE_SLOTS[i]);
+            }
             Field::BootFlag => self.boot = !self.boot,
             _ => {}
         }
@@ -372,7 +403,7 @@ impl MountDialog {
                 more_images: if unchanged { self.more_images.clone() } else { Vec::new() },
                 geometry: if unchanged { self.geometry } else { None },
                 overlay,
-                ide: self.ide,
+                ide: self.ide.filter(|_| self.can_ide()),
                 boot,
                 share: self.share,
                 variant: None,
@@ -560,6 +591,27 @@ mod tests {
         assert_eq!(d.delta_name().as_deref(), Some("win95.vhd.rdelta"));
         d.focus = Field::OverlayBrowse;
         assert_eq!(d.key(UiKey::Enter), Event::BrowseOverlay);
+    }
+
+    #[test]
+    fn hard_disks_and_cds_take_an_ide_slot() {
+        let mut info = drive(3, DriveKind::HardDisk);
+        info.mount.as_mut().unwrap().opts.ide = IdeSlot::parse("2s");
+        let mut d = MountDialog::change(&info, None);
+        assert_eq!(d.ide_name(), "the secondary slave");
+        assert!(d.fields().contains(&Field::Ide));
+        d.focus = Field::Ide;
+        d.key(UiKey::Right);
+        assert_eq!((d.ide, d.ide_name().as_str()), (None, "first free"));
+        d.key(UiKey::Right);
+        assert_eq!(d.spec(Path::new("/"), None).unwrap().opts.ide, IdeSlot::parse("1m"));
+        d.key(UiKey::Left);
+        d.key(UiKey::Left);
+        assert_eq!(d.ide, IdeSlot::parse("2s"));
+        // A floppy has none.
+        d.kind = DriveKind::Floppy;
+        assert!(!d.fields().contains(&Field::Ide));
+        assert_eq!(d.spec(Path::new("/"), None).unwrap().opts.ide, None);
     }
 
     #[test]

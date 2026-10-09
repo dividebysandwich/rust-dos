@@ -2471,7 +2471,7 @@ impl ConfigUi {
                     dialog.focus = field;
                     match field {
                         Field::Browse | Field::Mount | Field::Boot | Field::Unmount | Field::Cancel => self.key(UiKey::Enter, host),
-                        Field::Drive | Field::Kind | Field::ReadOnly | Field::BootFlag if again => dialog.step(field, 1),
+                        Field::Drive | Field::Kind | Field::ReadOnly | Field::Ide | Field::BootFlag if again => dialog.step(field, 1),
                         _ => {}
                     }
                 }
@@ -3644,22 +3644,29 @@ impl ConfigUi {
             g.text(value_col + 14, top + 5, "(default empty)", draw::DIM);
         }
         let buttons = dialog.fields();
+        if buttons.contains(&Field::Ide) {
+            put(g, Field::Ide, top + 7, "IDE slot", &choice(dialog.ide_name(), top + 7, true));
+            if top + 7 < bottom {
+                let col = value_col + dialog.ide_name().chars().count() + 5;
+                g.text_to(col, top + 7, &fit("(for a booted system)", end.saturating_sub(col)), draw::DIM, end);
+            }
+        }
         if buttons.contains(&Field::Overlay) {
-            put(g, Field::Overlay, top + 7, "Write to", &text_field(&dialog.overlay, top + 7, cols));
-            put(g, Field::OverlayBrowse, top + 8, "", &button("[ Browse... ]", top + 8, value_col));
-            if top + 8 < bottom {
+            put(g, Field::Overlay, top + 8, "Write to", &text_field(&dialog.overlay, top + 8, cols));
+            put(g, Field::OverlayBrowse, top + 9, "", &button("[ Browse... ]", top + 9, value_col));
+            if top + 9 < bottom {
                 let hint = match dialog.delta_name() {
                     Some(name) if !dialog.overlay.text().trim().is_empty() => format!("(changes go to {} there)", name),
                     _ => "(empty = write to mounted image)".to_string(),
                 };
-                g.text_to(value_col + 15, top + 8, &fit(&hint, end.saturating_sub(value_col + 15)), draw::DIM, end);
+                g.text_to(value_col + 15, top + 9, &fit(&hint, end.saturating_sub(value_col + 15)), draw::DIM, end);
             }
         }
         if buttons.contains(&Field::BootFlag) {
             let boot = if dialog.boot { "yes" } else { "no" }.to_string();
-            put(g, Field::BootFlag, top + 9, "Auto-boot", &choice(boot, top + 9, true));
-            if top + 9 < bottom {
-                g.text(value_col + 10, top + 9, "(disk images only)", draw::DIM);
+            put(g, Field::BootFlag, top + 10, "Auto-boot", &choice(boot, top + 10, true));
+            if top + 10 < bottom {
+                g.text(value_col + 10, top + 10, "(disk images only)", draw::DIM);
             }
         }
         let mut col = value_col;
@@ -3670,7 +3677,7 @@ impl ConfigUi {
             (Field::Cancel, "[ Cancel ]"),
         ] {
             if buttons.contains(&field) {
-                put(g, field, top + 11, "", &button(text, top + 11, col));
+                put(g, field, top + 12, "", &button(text, top + 12, col));
                 col += text.len() + 2;
             }
         }
