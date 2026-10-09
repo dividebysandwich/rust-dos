@@ -297,6 +297,16 @@ fn main() -> Result<(), String> {
     display::before_headset(&headset);
     let sdl_context = sdl2::init()?;
     let video_subsystem = sdl_context.video()?;
+    // Without a desktop session (started over SSH, say) SDL draws on the
+    // display itself: a standalone headset's own, taken from its
+    // compositor, which doesn't get it back when Rust-DOS quits.
+    if headset.mode == rust_dos::vr::VrMode::Headset && video_subsystem.current_video_driver().eq_ignore_ascii_case("kmsdrm") {
+        return Err("A VR headset needs a desktop session, and there is none here (no WAYLAND_DISPLAY or DISPLAY, \
+                    as over SSH): SDL would take the display itself, a standalone headset's own away from its \
+                    compositor. Start Rust-DOS in the desktop or as a Steam shortcut, or set WAYLAND_DISPLAY \
+                    (desktop mode, often wayland-0) or DISPLAY (Steam's gaming mode, :0) to the session's."
+            .into());
+    }
     if args.vr_probe {
         display::vr_probe(&video_subsystem, &settings.vr);
         if !args.vr {
