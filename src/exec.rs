@@ -1240,6 +1240,11 @@ fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
         cpu.bus.observe.opaque();
     }
     let trap = (cpu.cs(), cpu.eip());
+    // An own-host extender can reflect mouse polls with IF clear throughout
+    // the real-mode call. Deliver at the completed poll's return address,
+    // never at this trap (which would run the service a second time).
+    let mouse_poll =
+        kind == 0x38 && vector == 0x33 && matches!(cpu.ax(), 0x0003 | 0x0005 | 0x0006 | 0x000B);
     // With paging on (under Windows, whose virtual machines have memory of
     // their own), the service reaches memory through the page tables, and
     // runs again once the system has put a page it found missing there.
@@ -1279,6 +1284,13 @@ fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
                 crate::diskio::begin_wait(cpu, vector, disk_time);
             } else {
                 crate::interrupts::return_from_hle(cpu, vector);
+                if mouse_poll && !cpu.pe() && !cpu.get_cpu_flag(CpuFlags::IF) {
+                    // A synchronous driver call, not a PIC IRQ: no EOI. With
+                    // IF set the usual path delivers it. The trampoline
+                    // preserves the poll's results, and its busy byte guards
+                    // polls made by the callback.
+                    crate::mouse::deliver_callback(cpu);
+                }
             }
         }
         0x3B => crate::dpmi::service(cpu, vector),

@@ -207,6 +207,15 @@ pub fn handle(cpu: &mut Cpu) {
             cpu.set_dx(50); // double-speed threshold
         }
 
+        0x0020 => {
+            // Enable the driver without resetting its position, ranges or
+            // event handler. Some games enable it without calling AX=0000h.
+            // Descent II expects FFFFh here, as returned by DOSBox Staging's
+            // modern driver, or it abandons mouse initialization entirely.
+            cpu.bus.mouse.installed = true;
+            cpu.set_ax(0xFFFF);
+        }
+
         0x0024 => {
             // Get driver version, type and IRQ.
             // BX = version (high byte major, low byte minor) -> 8.20

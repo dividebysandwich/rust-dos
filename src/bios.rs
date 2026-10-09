@@ -138,9 +138,14 @@ fn write_rom(bus: &mut Bus, offset: u16, code: &[u8]) {
 }
 
 /// The vector table the BIOS sets up: service traps, the timer and IRQ
-/// handlers, and an IRET for everything else. Entries are segment:offset.
+/// handlers, and an IRET for everything else except unused user vectors.
+/// Entries are segment:offset.
 pub fn default_ivt() -> [u32; 256] {
     let mut ivt = [far(IRET_HANDLER); 256];
+    // DOS/4GW allocates an unused vector for its real-mode mouse callback
+    // translator. It requires a null vector, not a pointer to an IRET.
+    // Leave the same user-vector range available as DOSBox Staging.
+    ivt[0x60..=0x65].fill(0);
     for irq in 0x0A..=0x0F {
         ivt[irq] = far(MASTER_EOI_HANDLER);
     }

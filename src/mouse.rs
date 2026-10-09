@@ -82,7 +82,7 @@ pub const BUTTON_RIGHT: u8 = 0x02;
 pub const BUTTON_MIDDLE: u8 = 0x04;
 
 pub struct MouseState {
-    /// True once the driver has been "detected" by software (INT 33h AX=0000h).
+    /// True once software resets or enables the driver (INT 33h AX=0000h/0020h).
     pub installed: bool,
     /// Balanced show/hide counter. Cursor is drawn when this is 0.
     pub hide_counter: i32,
@@ -399,7 +399,8 @@ pub fn install_callback_stub(bus: &mut crate::bus::Bus) {
     let d = (CALLBACK_DATA - 0xF0000) as u16;
     let [b0, b1] = d.to_le_bytes();
     let at = |off: u16| (d + off).to_le_bytes();
-    let mut code = vec![0x1E, 0x06, 0x55, 0x57, 0x56, 0x52, 0x51, 0x53, 0x50]; // push ds..ax
+    // Extender callback thunks may use 32-bit registers even in real mode.
+    let mut code = vec![0x1E, 0x06, 0x66, 0x60]; // push ds; push es; pushad
     code.extend([0x2E, 0xA1, b0, b1]); // mov ax,cs:[d]
     for (modrm, off) in [(0x1E, 2), (0x0E, 4), (0x16, 6), (0x36, 8), (0x3E, 10)] {
         code.extend([0x2E, 0x8B, modrm]); // mov bx/cx/dx/si/di,cs:[d+off]
@@ -407,7 +408,7 @@ pub fn install_callback_stub(bus: &mut crate::bus::Bus) {
     }
     code.extend([0x2E, 0xFF, 0x1E]); // call far cs:[d+12]
     code.extend(at(12));
-    code.extend([0x58, 0x5B, 0x59, 0x5A, 0x5E, 0x5F, 0x5D, 0x07, 0x1F]); // pop ax..ds
+    code.extend([0x66, 0x61, 0x07, 0x1F]); // popad; pop es; pop ds
     code.extend([0xFE, 0x39, crate::bios::SERVICE_MOUSE_CALLBACK_DONE]); // not busy
     code.extend([0xCF]); // iret
     bus.write_rom(CALLBACK_STUB, &code);
@@ -428,11 +429,14 @@ pub fn clear_callback_busy(bus: &mut crate::bus::Bus) {
 /// "driver" invokes on the events in its mask. Many Microsoft-mouse
 /// compatible games expect button presses to arrive this way rather than
 /// via polling AH=03 or AH=05. When an event in the mask is pending, a
-/// handler is installed and not still running, enter the ROM stub like the
-/// driver's IRQ handler: it saves the registers and CALL FARs the handler,
-/// which returns with RETF. The caller checks IF first. Returns true when
+/// handler is installed and not still running, enter the ROM stub in real
+/// mode only: it saves the registers and CALL FARs the handler, which
+/// returns with RETF. The caller controls IF gating. Returns true when
 /// the handler was entered.
 pub fn deliver_callback(cpu: &mut crate::cpu::Cpu) -> bool {
+    if cpu.pe() {
+        return false;
+    }
     let mouse = &cpu.bus.mouse;
     let fire = mouse.pending_callback_events & mouse.callback_mask;
     if fire == 0 || (mouse.callback_cs == 0 && mouse.callback_ip == 0) || callback_busy(&cpu.bus) {
