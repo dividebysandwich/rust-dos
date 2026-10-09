@@ -151,6 +151,7 @@ jobs:
           CARGO_VERSION=$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -n1)
           {
             echo "CARGO_VERSION=$CARGO_VERSION"
+            echo "RELEASE_VERSION=$RELEASE_VERSION"
             echo "PKG=rust-dos-$RELEASE_VERSION-${{ matrix.label }}"
           } >> "$GITHUB_ENV"
 
@@ -278,6 +279,61 @@ jobs:
           tar czf "out/$PKG.tar.gz" -C stage rust-dos
           cargo install cargo-deb --locked
           cargo deb --no-build -o "out/$PKG.deb"
+
+      # An AppImage per architecture, from the -compat builds so it runs on
+      # glibc 2.35 and later: one file to download, mark executable and run,
+      # for SteamOS (the Steam Deck, the Steam Frame) and other systems where
+      # unpacking a tarball in a terminal is a chore. It has the OpenXR loader
+      # beside rust-dos, as the tarball does, and SDL2 as a fallback for
+      # systems without one (packaging/linux/AppRun): built from source with
+      # every backend loaded at run time, as Ubuntu's links sndio and others
+      # that most systems lack. Its update information lets AppImageUpdate
+      # and Gear Lever fetch the latest release's file.
+      - name: Package (AppImage)
+        if: matrix.container
+        env:
+          SDL_VERSION: 2.32.10
+          APPIMAGETOOL_VERSION: 1.9.1
+          APPIMAGE_RUNTIME_VERSION: "20251108"
+        run: |
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxfixes-dev \
+            libxkbcommon-dev libwayland-dev wayland-protocols libdecor-0-dev libegl-dev libgl-dev \
+            libgbm-dev libdrm-dev libpulse-dev libpipewire-0.3-dev libdbus-1-dev libudev-dev
+          curl -fsSL -o sdl.tar.gz "https://github.com/libsdl-org/SDL/releases/download/release-$SDL_VERSION/SDL2-$SDL_VERSION.tar.gz"
+          tar xzf sdl.tar.gz
+          cmake -S "SDL2-$SDL_VERSION" -B sdl-build -DCMAKE_BUILD_TYPE=Release -DSDL_STATIC=OFF -DSDL_TEST=OFF
+          cmake --build sdl-build --parallel
+
+          ARCH=$(uname -m)
+          APPDIR=AppDir
+          mkdir -p $APPDIR/usr/bin $APPDIR/usr/lib/fallback $APPDIR/usr/share/applications \
+            $APPDIR/usr/share/icons/hicolor/scalable/apps $APPDIR/usr/share/doc/rust-dos
+          cp target/release/rust-dos openxr/libopenxr_loader.so.1 $APPDIR/usr/bin/
+          cp -L sdl-build/libSDL2-2.0.so.0 $APPDIR/usr/lib/fallback/
+          strip $APPDIR/usr/lib/fallback/libSDL2-2.0.so.0
+          echo "SDL2 fallback needs:"
+          ldd $APPDIR/usr/lib/fallback/libSDL2-2.0.so.0
+          cp packaging/linux/AppRun $APPDIR/
+          cp packaging/linux/rust-dos.desktop $APPDIR/
+          cp packaging/linux/rust-dos.desktop $APPDIR/usr/share/applications/
+          cp packaging/linux/rust-dos.svg $APPDIR/
+          cp packaging/linux/rust-dos.svg $APPDIR/usr/share/icons/hicolor/scalable/apps/
+          ln -s rust-dos.svg $APPDIR/.DirIcon
+          cp README.md CONFIGURATION.md LICENSE openxr/openxr-LICENSE.txt "SDL2-$SDL_VERSION/LICENSE.txt" \
+            $APPDIR/usr/share/doc/rust-dos/
+          mv $APPDIR/usr/share/doc/rust-dos/LICENSE.txt $APPDIR/usr/share/doc/rust-dos/SDL2-LICENSE.txt
+
+          curl -fsSL -o appimagetool "https://github.com/AppImage/appimagetool/releases/download/$APPIMAGETOOL_VERSION/appimagetool-$ARCH.AppImage"
+          curl -fsSL -o runtime "https://github.com/AppImage/type2-runtime/releases/download/$APPIMAGE_RUNTIME_VERSION/runtime-$ARCH"
+          chmod +x appimagetool
+          # The container has no FUSE to mount appimagetool with.
+          APPIMAGE_EXTRACT_AND_RUN=1 ARCH=$ARCH ./appimagetool --no-appstream --runtime-file runtime \
+            -u "gh-releases-zsync|${GITHUB_REPOSITORY%/*}|${GITHUB_REPOSITORY#*/}|latest|rust-dos-*-$ARCH.AppImage.zsync" \
+            $APPDIR "out/rust-dos-$RELEASE_VERSION-$ARCH.AppImage"
+          # appimagetool writes the .zsync in the working directory.
+          mv rust-dos-*.AppImage.zsync out/
+          ls -l out
 
       - name: Package (Windows)
         if: runner.os == 'Windows' && !matrix.win7
@@ -577,6 +633,17 @@ jobs:
             with ``version `GLIBC_2.39' not found``, as it does on Ubuntu 22.04,
             Linux Mint 21, Debian 12 and Raspberry Pi OS (bookworm). It is
             built against glibc 2.35 and runs on old and new distributions.
+          - **Steam Deck, Steam Frame and other SteamOS or Linux desktops**:
+            the `.AppImage` for the CPU (`x86_64` for the Deck and PCs,
+            `aarch64` for the Frame and ARM machines) is rust-dos in one file
+            with the OpenXR loader for VR. Download it, mark it executable
+            (in Dolphin: *Properties → Permissions → Is executable*) and
+            double-click it; or install it with Gear Lever from the
+            software centre, which adds it to the application menu and keeps
+            it updated. To start it from Steam's game mode, add it in desktop
+            mode with Steam's *Games → Add a Non-Steam Game to My Library*
+            (*Browse* to the file), or, once Gear Lever has put it in the
+            application menu, right-click it there and choose *Add to Steam*.
           - **Browser**: the `-web.zip` is a web site that runs rust-dos in the
             browser. Put its files on a web server; see *Running in a browser*
             in the README.

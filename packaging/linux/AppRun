@@ -1,0 +1,11 @@
+#!/bin/sh
+# The AppImage's entry point. rust-dos uses the system's SDL2, as the
+# tarball does (on SteamOS and others that is the one people tested, often
+# sdl2-compat over SDL3); only where the system has none does it take the
+# one in usr/lib/fallback, which loads its video and sound backends from the
+# system as they are found.
+HERE="$(dirname "$(readlink -f "$0")")"
+if ! command -v ldd > /dev/null 2>&1 || ldd "$HERE/usr/bin/rust-dos" 2> /dev/null | grep -q 'libSDL2-2.0.so.0 => not found'; then
+    export LD_LIBRARY_PATH="$HERE/usr/lib/fallback${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+exec "$HERE/usr/bin/rust-dos" "$@"
