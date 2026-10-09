@@ -810,6 +810,17 @@ impl VrSettings {
         ]
     }
 
+    /// Settings read from a file saved before `auto`, which wrote the
+    /// defaults of then: `high` and 100% are `auto` (the same on a PC).
+    pub fn from_before_auto(&mut self) {
+        if self.quality == VrQuality::High {
+            self.quality = VrQuality::Auto;
+        }
+        if self.resolution == Some(100) {
+            self.resolution = None;
+        }
+    }
+
     /// How the 3D view is drawn on a `mobile` graphics chip or not.
     pub fn look(&self, mobile: bool) -> VrLook {
         VrLook {

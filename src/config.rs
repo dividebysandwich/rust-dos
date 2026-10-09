@@ -770,6 +770,8 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
     let mut config = Config::default();
     let mut warnings = Vec::new();
     let mut section = Section::None;
+    // A [vr] section of the settings before `auto` (without `msaa`).
+    let mut vr_before_auto = true;
 
     for (index, raw) in text.lines().enumerate() {
         let mut warn = |msg: String| warnings.push(format!("line {}: {}", index + 1, msg));
@@ -1126,6 +1128,7 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                 }
 
                 if section == Section::Vr {
+                    vr_before_auto &= !key.eq_ignore_ascii_case("msaa");
                     if let Err(e) = config.vr.set(key, value, base_dir) {
                         warn(e);
                     }
@@ -1190,6 +1193,9 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
     let cpu = config.cpu.unwrap_or(Settings::default().cpu);
     if let Some(mb) = config.memsize.filter(|&mb| mb > cpu.max_memsize()) {
         warnings.push(format!("memsize {} MB is more than a {} takes: {} MB", mb, cpu.describe(), cpu.max_memsize()));
+    }
+    if vr_before_auto {
+        config.vr.from_before_auto();
     }
     config.warnings = warnings;
     config
@@ -2014,6 +2020,16 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn vr_settings_saved_before_auto_are_auto() {
+        let old = parse("[vr]\nquality=high\nresolution=100\n", Path::new("/cfg"), None);
+        assert_eq!((old.vr.quality, old.vr.resolution), (crate::vr::VrQuality::Auto, None));
+        let set = parse("[vr]\nquality=low\nresolution=70\n", Path::new("/cfg"), None);
+        assert_eq!((set.vr.quality, set.vr.resolution), (crate::vr::VrQuality::Low, Some(70)));
+        let new = parse("[vr]\nquality=high\nresolution=100\nmsaa=auto\n", Path::new("/cfg"), None);
+        assert_eq!((new.vr.quality, new.vr.resolution), (crate::vr::VrQuality::High, Some(100)));
     }
 
     #[test]

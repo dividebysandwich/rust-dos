@@ -101,7 +101,8 @@ pub struct Xr {
     /// (`set_percent`); the area the last frame drew.
     percent: u32,
     area: (u32, u32),
-    /// The headset's frame period, as of the last frame waited for.
+    /// The headset's shortest frame period yet: its own rate, which the
+    /// runtime stretches while frames are late.
     period: Duration,
 }
 
@@ -455,8 +456,9 @@ impl Xr {
         self.percent = percent.clamp(1, 100);
     }
 
-    /// How long the headset shows each frame, in milliseconds, as the
-    /// runtime last said.
+    /// How long the headset shows each frame at its own rate, in
+    /// milliseconds: the shortest period the runtime has said (it says
+    /// longer ones while frames are late).
     pub fn period_ms(&self) -> f32 {
         self.period.as_secs_f32() * 1000.0
     }
@@ -477,7 +479,9 @@ impl Xr {
         match self.waiter.wait() {
             Ok(state) => {
                 let period = Duration::from_nanos(state.predicted_display_period.as_nanos().max(0) as u64);
-                self.period = period;
+                if !period.is_zero() && (self.period.is_zero() || period < self.period) {
+                    self.period = period;
+                }
                 self.stats.waited(Instant::now(), period, state.should_render);
                 if let Some(line) = self.stats.report(Instant::now()) {
                     log::line(line);

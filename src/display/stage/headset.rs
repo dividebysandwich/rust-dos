@@ -593,6 +593,9 @@ fn session(
         },
         if gpu_options.multiview.is_some() { "both eyes drawn at once" } else { "the eyes drawn one by one" }
     ));
+    if let Ok(parts) = std::env::var("RUST_DOS_VR_LEAVE_OUT") {
+        log::line(format!("Left out of the views, to time them: {}", parts));
+    }
     let mut gpu = Gpu::new(gl, glsl, &scene, look.quality, gpu_options)?;
     // The window's view of the left eye, at half its size.
     let ((ew, eh), srgb) = xr.eye_format();
