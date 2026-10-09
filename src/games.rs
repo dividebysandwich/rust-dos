@@ -229,7 +229,7 @@ pub fn saves_dir(games: &Path) -> PathBuf {
 }
 
 /// The folder for its changes in the game's saves (`saves`/`id`) for each
-/// of the profile's own drives that is an archive, and with `overlay=`
+/// of the profile's own drives that is an archive or in one, and with `overlay=`
 /// each that is a host directory or disk image, unless it has one or is
 /// read-only. The saves are held while the game plays (`SavesLock`): an
 /// error if another rust-dos plays it.
@@ -238,7 +238,9 @@ pub fn overlay_drives(prepared: &mut Prepared, id: &str, saves: &Path) -> Result
     let mut overlaid = false;
     for spec in &mut prepared.drives {
         let opts = &mut spec.opts;
-        let archive = crate::archive::is_archive_name(&spec.path) && hostfs::is_file(&spec.path);
+        // An archive, or a folder or image in one (`game.dosz/automount/c.vhd`).
+        let archive = (crate::archive::is_archive_name(&spec.path) && hostfs::is_file(&spec.path))
+            || (!hostfs::exists(&spec.path) && crate::archive::split(&spec.path).is_some());
         let folder = prepared.overlay && hostfs::is_dir(&spec.path);
         // A disk image's changes go to a delta file there (`diskdelta`).
         let image = prepared.overlay && !archive && hostfs::is_file(&spec.path);
