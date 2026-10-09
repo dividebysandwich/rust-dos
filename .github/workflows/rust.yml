@@ -299,7 +299,7 @@ jobs:
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxfixes-dev \
             libxkbcommon-dev libwayland-dev wayland-protocols libdecor-0-dev libegl-dev libgl-dev \
-            libgbm-dev libdrm-dev libpulse-dev libpipewire-0.3-dev libdbus-1-dev libudev-dev
+            libgbm-dev libdrm-dev libpulse-dev libpipewire-0.3-dev libdbus-1-dev libudev-dev file
           curl -fsSL -o sdl.tar.gz "https://github.com/libsdl-org/SDL/releases/download/release-$SDL_VERSION/SDL2-$SDL_VERSION.tar.gz"
           tar xzf sdl.tar.gz
           cmake -S "SDL2-$SDL_VERSION" -B sdl-build -DCMAKE_BUILD_TYPE=Release -DSDL_STATIC=OFF -DSDL_TEST=OFF
