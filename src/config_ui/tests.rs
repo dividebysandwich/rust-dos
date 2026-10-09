@@ -652,6 +652,38 @@ fn drives_mount_and_unmount() {
 }
 
 #[test]
+fn images_mount_as_bios_disks() {
+    let mut host = FakeHost::new();
+    let mut ui = opened(&host);
+    ui.show_page(Page::Drives);
+    use UiKey::*;
+    // Ins, then Drive: left past B: and A: to the BIOS disks, 3 then 2.
+    ui.key(Insert, &mut host);
+    ui.text("/os/win98.vhd", &mut host);
+    let dialog = ui.dialog.as_mut().unwrap();
+    dialog.focus = Field::Drive;
+    keys(&mut ui, &mut host, &[Left, Left, Left, Left, Enter]);
+    let disk = crate::disk::numbered_drive(2);
+    let (spec, _) = host.mounts.last().unwrap().clone();
+    assert_eq!((spec.drive, spec.opts.kind), (disk, DriveKind::HardDisk));
+    assert_eq!(status(&ui).0, "BIOS disk 2 (80h) is mounted as hdd /os/win98.vhd");
+    // Listed after the lettered drives, by number, with its unit.
+    assert_eq!(ui.drives.last().map(|d| d.drive), Some(disk));
+    assert_eq!(ui.drives[ui.row].drive, disk, "the new disk is selected");
+    assert_eq!(ui.drive_flags(&ui.drives[ui.row]), "80h");
+    let mut frame = Frame::new(640, 400);
+    ui.draw(&mut frame);
+    // Enter changes it as itself; Del unmounts it.
+    ui.key(Enter, &mut host);
+    assert_eq!(ui.dialog.as_ref().unwrap().title(), "Change BIOS disk 2 (80h)");
+    ui.draw(&mut frame);
+    ui.key(Esc, &mut host);
+    ui.key(Delete, &mut host);
+    assert_eq!(host.unmounts, [disk]);
+    assert_eq!(status(&ui).0, "BIOS disk 2 (80h) has been unmounted");
+}
+
+#[test]
 fn the_file_picker_has_a_button_for_each_drive() {
     let dir = std::path::absolute("target/test_config_ui/drive_buttons").unwrap();
     let _ = std::fs::remove_dir_all(&dir);

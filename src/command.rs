@@ -901,7 +901,7 @@ impl ShellCommand for MountCommand {
             Ok(MountCmd::List) => {
                 print_string(cpu, "Drive Type    Label       Host path\r\n");
                 let disk = &cpu.bus.disk;
-                for info in disk.mounted_drives().into_iter().chain(disk.numbered_drives()) {
+                for info in disk.all_drives() {
                     let host = match info.root.as_ref().or(info.image.as_ref()) {
                         Some(path) => display_host_path(path),
                         None => "(built-in)".to_string(),

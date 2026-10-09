@@ -54,7 +54,7 @@ pub struct Machine {
 pub fn mounted_drives(cpu: &Cpu) -> BTreeMap<u8, MountSpec> {
     cpu.bus
         .disk
-        .mounted_drives()
+        .all_drives()
         .into_iter()
         .filter(|info| info.kind != DriveKind::Virtual)
         .filter_map(|info| info.mount.map(|spec| (info.drive, spec)))
@@ -234,8 +234,8 @@ impl Host for Machine {
 
     fn mount(&mut self, spec: MountSpec, replace: bool) -> Result<PathBuf, String> {
         self.cpu.bus.log_string(&format!(
-            "[CONFIG] Settings window: mount {}: {}",
-            disk::drive_letter(spec.drive),
+            "[CONFIG] Settings window: mount {} {}",
+            disk::drive_name(spec.drive),
             spec.path.display()
         ));
         self.cpu.bus.mount_drive(spec.drive, &spec.path, spec.opts, replace)
@@ -246,7 +246,7 @@ impl Host for Machine {
     }
 
     fn drives(&self) -> Vec<DriveInfo> {
-        self.cpu.bus.disk.mounted_drives()
+        self.cpu.bus.disk.all_drives()
     }
 
     fn boot(&mut self, drive: u8) -> Result<String, String> {
@@ -266,7 +266,7 @@ impl Host for Machine {
             return Ok(());
         }
         let current = mounted_drives(&self.cpu);
-        let changes: Vec<config::DriveChange> = (0..disk::LASTDRIVE)
+        let changes: Vec<config::DriveChange> = (0..disk::DRIVE_SLOTS)
             .filter(|d| self.saved_drives.get(d) != current.get(d))
             .map(|d| (d, current.get(&d).cloned()))
             .collect();

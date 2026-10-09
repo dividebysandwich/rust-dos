@@ -2,11 +2,37 @@
 //! and booting from it.
 
 use super::UiKey;
-use crate::disk::{DRIVE_C, DRIVE_Z, DriveInfo, DriveKind, FLOPPY_DRIVES, LASTDRIVE, MountOptions, drive_letter};
+use crate::disk::{
+    DRIVE_C, DRIVE_SLOTS, DRIVE_Z, DriveInfo, DriveKind, FLOPPY_DRIVES, LASTDRIVE, MountOptions, drive_letter, drive_number,
+    numbered_unit,
+};
 use crate::diskimage::{self, Chs, ImageKind};
 use crate::ide::{ChannelId, IdeSlot};
 use crate::mount::{MountSpec, contract_home, expand_host_path};
 use std::path::{Path, PathBuf};
+
+/// A drive as messages start with it: "Drive C:", or "BIOS disk 2 (80h)"
+/// for a disk mounted by number, which DOS has no letter for.
+pub fn drive_title(drive: u8) -> String {
+    match drive_number(drive) {
+        Some(number) => format!("BIOS disk {} ({:02X}h)", number, numbered_unit(number)),
+        None => format!("Drive {}:", drive_letter(drive)),
+    }
+}
+
+/// A drive as a choice shows it: "C:", or "2 = BIOS disk 80h".
+pub fn drive_choice(drive: u8) -> String {
+    match drive_number(drive) {
+        Some(number) => format!("{} = BIOS disk {:02X}h", number, numbered_unit(number)),
+        None => format!("{}:", drive_letter(drive)),
+    }
+}
+
+/// The drive table's places a new drive can take with `drives` mounted:
+/// the letters but Z:, then the BIOS disk numbers.
+pub fn free_drives(drives: &[DriveInfo]) -> Vec<u8> {
+    (0..DRIVE_SLOTS).filter(|&d| d != DRIVE_Z && !drives.iter().any(|i| i.drive == d)).collect()
+}
 
 /// A line of text being edited.
 #[derive(Clone, Debug, Default)]
@@ -140,12 +166,11 @@ pub struct MountDialog {
 }
 
 impl MountDialog {
-    /// A dialog for a new drive, on the first free letter from D:. None if
-    /// every letter is taken.
+    /// A dialog for a new drive, on the first free letter from D:, else
+    /// any free letter or BIOS disk number. None if every one is taken.
     pub fn new_drive(drives: &[DriveInfo]) -> Option<Self> {
-        let free: Vec<u8> =
-            (0..LASTDRIVE).filter(|&d| d != DRIVE_Z && !drives.iter().any(|i| i.drive == d)).collect();
-        let drive = free.iter().copied().find(|&d| d >= 3).or_else(|| free.first().copied())?;
+        let free = free_drives(drives);
+        let drive = free.iter().copied().find(|&d| (3..LASTDRIVE).contains(&d)).or_else(|| free.first().copied())?;
         Some(Self {
             existing: false,
             drive,
@@ -197,12 +222,19 @@ impl MountDialog {
     }
 
     fn default_kind(drive: u8) -> DriveKind {
-        if drive < FLOPPY_DRIVES { DriveKind::Floppy } else { DriveKind::HardDisk }
+        let number = drive_number(drive).unwrap_or(drive);
+        if number < FLOPPY_DRIVES { DriveKind::Floppy } else { DriveKind::HardDisk }
     }
 
-    /// A: and B: are always floppies.
+    /// A disk mounted by number: the BIOS's alone, without a DOS drive.
+    pub fn numbered(&self) -> bool {
+        drive_number(self.drive).is_some()
+    }
+
+    /// A: and B: are always floppies; the BIOS disks 0 and 1 are floppies
+    /// and 2 and 3 hard disks.
     pub fn kind_fixed(&self) -> bool {
-        self.drive < FLOPPY_DRIVES
+        self.drive < FLOPPY_DRIVES || self.numbered()
     }
 
     /// A CD-ROM drive has nothing written to it to keep apart.
@@ -227,7 +259,7 @@ impl MountDialog {
 
     pub fn title(&self) -> String {
         if self.existing {
-            format!("Change drive {}:", drive_letter(self.drive))
+            format!("Change {}", drive_title(self.drive).replacen("Drive", "drive", 1))
         } else {
             "Mount a drive".to_string()
         }
@@ -244,7 +276,10 @@ impl MountDialog {
         if !self.kind_fixed() {
             fields.push(Kind);
         }
-        fields.extend([Label, ReadOnly]);
+        if !self.numbered() {
+            fields.push(Label);
+        }
+        fields.push(ReadOnly);
         if self.can_ide() {
             fields.push(Ide);
         }
@@ -282,7 +317,7 @@ impl MountDialog {
                 let was_fixed = self.kind_fixed();
                 let at = self.free.iter().position(|&d| d == self.drive).unwrap_or(0) as isize;
                 self.drive = self.free[(at + dir).rem_euclid(self.free.len() as isize) as usize];
-                if self.kind_fixed() != was_fixed {
+                if self.kind_fixed() || was_fixed {
                     self.kind = Self::default_kind(self.drive);
                 }
             }
@@ -379,6 +414,10 @@ impl MountDialog {
             return Err("The configuration file can't hold a '\"'".to_string());
         }
         let path = expand_host_path(raw, cwd, home);
+        if self.numbered() && path.is_dir() {
+            return Err("A BIOS disk takes a floppy or hard disk image, not a directory".to_string());
+        }
+        let label = if self.numbered() { String::new() } else { label };
         let boot = self.boot && self.can_boot();
         if boot && path.is_dir() {
             return Err("Only a disk image can boot".to_string());
@@ -467,7 +506,11 @@ mod tests {
         assert_eq!(d.drive, 1);
         d.key(UiKey::Left);
         d.key(UiKey::Left);
-        // Past A: to Y:, skipping Z:
+        // Past A: to the BIOS disks, then to Y:, skipping Z:
+        assert_eq!(d.drive, crate::disk::numbered_drive(3));
+        for _ in 0..4 {
+            d.key(UiKey::Left);
+        }
         assert_eq!(d.drive, 24);
 
         d.focus = Field::Path;
@@ -612,6 +655,44 @@ mod tests {
         d.kind = DriveKind::Floppy;
         assert!(!d.fields().contains(&Field::Ide));
         assert_eq!(d.spec(Path::new("/"), None).unwrap().opts.ide, None);
+    }
+
+    #[test]
+    fn bios_disks_take_images_of_their_kind() {
+        use crate::disk::numbered_drive;
+        let drives = [drive(2, DriveKind::HardDisk), drive(25, DriveKind::Virtual), drive(numbered_drive(2), DriveKind::HardDisk)];
+        let mut d = MountDialog::new_drive(&drives).unwrap();
+        assert_eq!(d.drive, 3, "letters come first");
+        d.focus = Field::Drive;
+        d.key(UiKey::Left);
+        d.key(UiKey::Left);
+        d.key(UiKey::Left);
+        // 2 is taken: 3, the hard disk 81h.
+        assert_eq!((d.drive, d.kind, d.numbered()), (numbered_drive(3), DriveKind::HardDisk, true));
+        assert_eq!((drive_choice(d.drive).as_str(), drive_title(d.drive).as_str()), ("3 = BIOS disk 81h", "BIOS disk 3 (81h)"));
+        assert!(d.kind_fixed());
+        let fields = d.fields();
+        assert!(!fields.contains(&Field::Label) && !fields.contains(&Field::Kind));
+        assert!(fields.contains(&Field::Ide) && fields.contains(&Field::Overlay) && fields.contains(&Field::BootFlag));
+        // A floppy number is a floppy.
+        d.key(UiKey::Left);
+        d.key(UiKey::Left);
+        assert_eq!((d.drive, d.kind), (numbered_drive(0), DriveKind::Floppy));
+        assert!(!d.fields().contains(&Field::Ide));
+        // An image, not a directory; it has no label.
+        d.path = TextField::new("/");
+        assert!(d.spec(Path::new("/"), None).unwrap_err().contains("not a directory"));
+        d.path = TextField::new("/x/boot.img");
+        d.label = TextField::new("GAME");
+        let spec = d.spec(Path::new("/"), None).unwrap();
+        assert_eq!((spec.drive, spec.opts.kind, spec.opts.label), (numbered_drive(0), DriveKind::Floppy, None));
+        // Back on the letters, the type can be picked again.
+        d.key(UiKey::Left);
+        assert_eq!((d.drive, d.kind, d.kind_fixed()), (24, DriveKind::HardDisk, false));
+        // A mounted one is changed as itself.
+        let c = MountDialog::change(&drives[2], None);
+        assert_eq!(c.title(), "Change BIOS disk 2 (80h)");
+        assert_eq!(MountDialog::change(&drives[0], None).title(), "Change drive C:");
     }
 
     #[test]

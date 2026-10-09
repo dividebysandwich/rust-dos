@@ -2005,9 +2005,8 @@ fn ivt_json(cpu: &Cpu) -> Value {
 fn drives_json(cpu: &Cpu) -> Value {
     let disk = &cpu.bus.disk;
     let drives: Map<String, Value> = disk
-        .mounted_drives()
+        .all_drives()
         .into_iter()
-        .chain(disk.numbered_drives())
         .map(|info| {
             let entry = json!({
                 "type": info.kind.name(),

@@ -11,7 +11,7 @@ use crate::config::Settings;
 use crate::config_ui::osd::Osd;
 use crate::config_ui::{ConfigUi, Host, UiKey};
 use crate::cpu::{CoreMode, Cpu};
-use crate::disk::{DriveInfo, DriveKind, LASTDRIVE};
+use crate::disk::{DRIVE_SLOTS, DriveInfo, DriveKind, LASTDRIVE};
 use crate::display::Display;
 use crate::mount::{MountCmd, MountSpec};
 use crate::capture::avi::VideoRecorder;
@@ -1942,7 +1942,7 @@ fn speed_message(speed: CpuSpeed) -> String {
 fn mounted_drives(cpu: &Cpu) -> BTreeMap<u8, MountSpec> {
     cpu.bus
         .disk
-        .mounted_drives()
+        .all_drives()
         .into_iter()
         .filter(|info| info.kind != DriveKind::Virtual)
         .filter_map(|info| info.mount.map(|spec| (info.drive, spec)))
@@ -1987,7 +1987,7 @@ fn drive_changes(cpu: &Cpu, saved: &Saved) -> Vec<config::DriveChange> {
         a.drive == b.drive && std::fs::canonicalize(&a.path).ok() == std::fs::canonicalize(&b.path).ok()
     };
     let mut changes = Vec::new();
-    for drive in 0..LASTDRIVE {
+    for drive in 0..DRIVE_SLOTS {
         let (before, now) = (saved.drives.get(&drive), current.get(&drive));
         match now {
             _ if before == now => {}
@@ -2417,8 +2417,8 @@ impl Host for MainHost<'_, '_> {
 
     fn mount(&mut self, spec: MountSpec, replace: bool) -> Result<PathBuf, String> {
         self.cpu.bus.log_string(&format!(
-            "[CONFIG] Settings window: mount {}: {}",
-            disk::drive_letter(spec.drive),
+            "[CONFIG] Settings window: mount {} {}",
+            disk::drive_name(spec.drive),
             spec.path.display()
         ));
         self.cpu.bus.mount_drive(spec.drive, &spec.path, spec.opts, replace)
@@ -2429,7 +2429,7 @@ impl Host for MainHost<'_, '_> {
     }
 
     fn drives(&self) -> Vec<DriveInfo> {
-        self.cpu.bus.disk.mounted_drives()
+        self.cpu.bus.disk.all_drives()
     }
 
     fn booted(&self) -> Option<config_ui::BootView> {

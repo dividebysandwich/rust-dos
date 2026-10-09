@@ -2786,6 +2786,20 @@ mod tests {
     }
 
     #[test]
+    fn disks_mounted_by_number_are_saved_by_number() {
+        use crate::disk::numbered_drive;
+        let settings = Settings::default();
+        let spec = |drive, path: &str| Some(MountSpec { drive, path: path.into(), opts: Default::default() });
+        let text = "[drives]\nC=/c\n";
+        let added = update_text(text, &settings, &settings, &[(numbered_drive(2), spec(numbered_drive(2), "/os.vhd"))], None);
+        assert_eq!(added, "[drives]\nC=/c\n2=/os.vhd\n");
+        let changed = update_text(&added, &settings, &settings, &[(numbered_drive(2), spec(numbered_drive(2), "/w98.vhd"))], None);
+        assert_eq!(changed, "[drives]\nC=/c\n2=/w98.vhd\n");
+        assert_eq!(update_text(&changed, &settings, &settings, &[(numbered_drive(2), None)], None), text);
+        assert_eq!(parse(&changed, Path::new("/cfg"), None).drives[1].drive, numbered_drive(2));
+    }
+
+    #[test]
     fn the_autoexec_section_is_edited_as_written() {
         let text = "\u{FEFF}[emulator]\r\nscale=2\r\n[AUTOEXEC]\r\n# mine\r\nMOUNT D ~/d\r\n\r\nD:\r\n\r\n[sound]\r\nopl=opl3\r\n[autoexec]\r\nDIR\r\n";
         assert_eq!(autoexec_lines(text), ["# mine", "MOUNT D ~/d", "", "D:", "DIR"]);

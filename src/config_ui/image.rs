@@ -6,7 +6,7 @@
 use super::dialog::TextField;
 use super::draw::{self, Grid};
 use super::{ConfigUi, Hit, Host, Target, UiKey, fit};
-use crate::disk::{DRIVE_Z, DriveInfo, DriveKind, FLOPPY_DRIVES, LASTDRIVE, MountOptions, drive_letter};
+use crate::disk::{DriveInfo, DriveKind, FLOPPY_DRIVES, LASTDRIVE, MountOptions, drive_letter, drive_number};
 use crate::makeimg::{self, Format, ImageSpec, PRESETS, Plan};
 use crate::mount::{MountSpec, contract_home, expand_host_path};
 use std::path::{Path, PathBuf};
@@ -68,7 +68,7 @@ pub struct ImageDialog {
 impl ImageDialog {
     /// A dialog for an image in `dir`, with `drives` mounted.
     pub fn new(drives: &[DriveInfo], dir: &Path, home: Option<&Path>) -> Self {
-        let free = (0..LASTDRIVE).filter(|&d| d != DRIVE_Z && !drives.iter().any(|i| i.drive == d)).collect();
+        let free = super::dialog::free_drives(drives);
         let kind = PRESETS.iter().position(|p| p.name == FIRST_KIND).unwrap_or(0);
         let mut dialog = Self {
             path: TextField::default(),
@@ -130,19 +130,24 @@ impl ImageDialog {
     }
 
     /// The drives the image can be mounted on: none, or one free, but a
-    /// hard disk not on A: and B:.
+    /// hard disk not on A: and B:; or a BIOS disk number of its kind, 0
+    /// and 1 for a floppy, 2 and 3 for a hard disk.
     fn letters(&self) -> Vec<Option<u8>> {
         let floppy = self.floppy();
+        let fits = |d: u8| match drive_number(d) {
+            Some(number) => (number < FLOPPY_DRIVES) == floppy,
+            None => floppy || d >= FLOPPY_DRIVES,
+        };
         let mut letters = vec![None];
-        letters.extend(self.free.iter().filter(|&&d| floppy || d >= FLOPPY_DRIVES).map(|&d| Some(d)));
+        letters.extend(self.free.iter().copied().filter(|&d| fits(d)).map(Some));
         letters
     }
 
-    /// A floppy's drive is A: or B:, else the first free from D:, as a
-    /// hard disk's.
+    /// A floppy's drive is A: or B:, else the first free letter from D:,
+    /// as a hard disk's.
     fn default_mount(&self) -> Option<u8> {
         let floppies = self.free.iter().copied().find(|&d| self.floppy() && d < FLOPPY_DRIVES);
-        floppies.or_else(|| self.free.iter().copied().find(|&d| d >= 3))
+        floppies.or_else(|| self.free.iter().copied().find(|&d| (3..LASTDRIVE).contains(&d)))
     }
 
     /// The controls that take the focus.
@@ -333,7 +338,11 @@ impl ConfigUi {
         match host.mount(spec, false) {
             Ok(_) => {
                 self.refresh_drives(host, Some(drive));
-                self.info(format!("{} has been made and mounted as {}:", shown, drive_letter(drive)));
+                let on = match drive_number(drive) {
+                    Some(_) => super::dialog::drive_title(drive),
+                    None => format!("{}:", drive_letter(drive)),
+                };
+                self.info(format!("{} has been made and mounted as {}", shown, on));
             }
             Err(e) => self.error(format!("{} has been made, but can't be mounted: {}", shown, e)),
         }
@@ -394,7 +403,7 @@ impl ConfigUi {
                     let text = match field {
                         ImageField::Kind => dialog.kind_name().to_string(),
                         ImageField::Format => dialog.format_name().to_string(),
-                        _ => dialog.mount.map_or("no".to_string(), |d| format!("{}:", drive_letter(d))),
+                        _ => dialog.mount.map_or("no".to_string(), super::dialog::drive_choice),
                     };
                     let width = text.chars().count() + 4;
                     if focused {
@@ -488,8 +497,16 @@ mod tests {
         // A hard disk isn't offered A:.
         d.step(ImageField::Mount, -1, &dir, None);
         assert_eq!(d.mount, None);
+        // Nor the BIOS's floppy disks 0 and 1, but its hard disks 2 and 3.
+        use crate::disk::numbered_drive;
+        d.step(ImageField::Mount, -1, &dir, None);
+        assert_eq!(d.mount, Some(numbered_drive(3)));
+        d.step(ImageField::Mount, -1, &dir, None);
+        assert_eq!(d.mount, Some(numbered_drive(2)));
         d.step(ImageField::Mount, -1, &dir, None);
         assert_eq!(d.mount, Some(24));
+        let floppy = ImageDialog::new(&drives, &dir, None);
+        assert!(floppy.letters().contains(&Some(numbered_drive(1))) && !floppy.letters().contains(&Some(numbered_drive(2))));
 
         // Any size: the size is typed.
         d.kind = PRESETS.len();

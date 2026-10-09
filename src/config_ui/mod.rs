@@ -42,7 +42,7 @@ use crate::games::{GameEntry, NewGame};
 
 use crate::config::{MidiSynth, Settings};
 use crate::cpu::{CoreMode, CpuModel};
-use crate::disk::{DRIVE_C, DriveInfo, DriveKind, drive_letter};
+use crate::disk::{DRIVE_C, DriveInfo, DriveKind, drive_letter, drive_number, numbered_unit};
 use crate::diskio::{DiskClass, DiskSpeed, NoiseMode};
 use crate::joystick::{JoystickType, MAX_DEADZONE};
 use crate::mixer::{CHANNELS, Channel, ChorusPreset, DEFAULT_MIX, MAX_LEVEL, MAX_MIX, ReverbPreset};
@@ -2751,7 +2751,7 @@ impl ConfigUi {
             (UiKey::Enter, None) if self.row == self.drives.len() + 1 => self.open_image_dialog(),
             (UiKey::Insert, _) | (UiKey::Enter, None) => self.new_drive(host),
             (UiKey::Enter, Some(info)) if info.kind == DriveKind::Virtual => {
-                self.info(format!("Drive {}: is built into Rust-DOS", info.letter()));
+                self.info(format!("{} is built into Rust-DOS", dialog::drive_title(info.drive)));
             }
             (UiKey::Enter, Some(info)) if !self.frontend.host_files => self.choose_image(Some(info.drive), host),
             (UiKey::Enter, Some(info)) => {
@@ -2759,12 +2759,12 @@ impl ConfigUi {
                 self.dialog = Some(MountDialog::change(&info, self.home.as_deref()));
             }
             (UiKey::Delete, Some(info)) if info.kind == DriveKind::Virtual || info.drive == DRIVE_C => {
-                self.error(format!("Drive {}: can't be unmounted", info.letter()));
+                self.error(format!("{} can't be unmounted", dialog::drive_title(info.drive)));
             }
             (UiKey::Delete, Some(info)) => self.unmount(info.drive, host),
             (UiKey::Char('b' | 'B'), Some(info)) if bootable(&info) => self.boot(info.drive, host),
             (UiKey::Char('b' | 'B'), Some(info)) => {
-                self.error(format!("Drive {}: can't be booted: it isn't a disk image", info.letter()));
+                self.error(format!("{} can't be booted: it isn't a disk image", dialog::drive_title(info.drive)));
             }
             (UiKey::Char('s' | 'S'), Some(info)) if self.shared_unit(info.drive).is_some() => {
                 match host.sync_shared(info.drive) {
@@ -2799,6 +2799,10 @@ impl ConfigUi {
     /// or is read-only, and what a booted system has of it, or will have.
     fn drive_flags(&self, info: &DriveInfo) -> String {
         let mut flags = Vec::new();
+        // A disk mounted by number is the BIOS's unit.
+        if let Some(number) = drive_number(info.drive) {
+            flags.push(format!("{:02X}h", numbered_unit(number)));
+        }
         if info.mount.as_ref().is_some_and(|m| m.opts.boot) {
             flags.push("boot".to_string());
         }
@@ -2892,7 +2896,7 @@ impl ConfigUi {
             Ok(()) => {
                 self.dialog = None;
                 self.refresh_drives(host, None);
-                self.info(format!("Drive {}: has been unmounted", drive_letter(drive)));
+                self.info(format!("{} has been unmounted", dialog::drive_title(drive)));
             }
             Err(e) => self.error(e),
         }
@@ -2933,9 +2937,9 @@ impl ConfigUi {
                     self.dialog = None;
                     self.refresh_drives(host, Some(drive));
                     if boots {
-                        format!("Drive {}: boots when Rust-DOS starts; F2 saves it", drive_letter(drive))
+                        format!("{} boots when Rust-DOS starts; F2 saves it", dialog::drive_title(drive))
                     } else {
-                        format!("Drive {}: doesn't boot at startup any more; F2 saves it", drive_letter(drive))
+                        format!("{} doesn't boot at startup any more; F2 saves it", dialog::drive_title(drive))
                     }
                 } else {
                     match host.mount(spec, replace) {
@@ -2946,7 +2950,7 @@ impl ConfigUi {
                             let shown = contract_home(&path, self.home.as_deref());
                             let boot = if boots { ", booting at startup once saved (F2)" } else { "" };
                             let note = self.booted_note(drive);
-                            format!("Drive {}: is mounted as {} {}{}{}", drive_letter(drive), kind, shown, boot, note)
+                            format!("{} is mounted as {} {}{}{}", dialog::drive_title(drive), kind, shown, boot, note)
                         }
                         Err(e) => return self.error(e),
                     }
@@ -3338,7 +3342,7 @@ impl ConfigUi {
             };
             let builtin = info.kind == DriveKind::Virtual;
             let (fg, dim) = if builtin { (draw::DIM, draw::DIM) } else { (draw::TEXT, draw::BRIGHT) };
-            g.text(2, row, &format!("{}:", info.letter()), dim);
+            g.text(2, row, &info.name(), dim);
             g.text(6, row, info.kind.name(), fg);
             let mut path = match info.image.as_ref().or(info.root.as_ref()) {
                 Some(path) => contract_home(path, self.home.as_deref()),
@@ -3623,8 +3627,14 @@ impl ConfigUi {
                 (value_col, width)
             }
         };
-        let letter = format!("{}:", drive_letter(dialog.drive));
+        let letter = dialog::drive_choice(dialog.drive);
+        let letter_width = letter.chars().count();
         put(g, Field::Drive, top + 1, "Drive", &choice(letter, top + 1, !dialog.existing));
+        if dialog.numbered() && top + 1 < bottom {
+            let col = value_col + letter_width + 5;
+            g.text_to(col, top + 1, &fit("(no DOS drive letter)", end.saturating_sub(col)), draw::DIM, end);
+        }
+        let buttons = dialog.fields();
         put(g, Field::Path, top + 2, "Path", &text_field(&dialog.path, top + 2, cols));
         let button = |text: &'static str, row: usize, col: usize| {
             move |g: &mut Grid, focused: bool| {
@@ -3637,13 +3647,14 @@ impl ConfigUi {
         };
         put(g, Field::Browse, top + 3, "", &button("[ Browse... ]", top + 3, value_col));
         put(g, Field::Kind, top + 4, "Type", &choice(dialog.kind.name().to_string(), top + 4, !dialog.kind_fixed()));
-        put(g, Field::Label, top + 5, "Label", &text_field(&dialog.label, top + 5, 12));
+        if buttons.contains(&Field::Label) {
+            put(g, Field::Label, top + 5, "Label", &text_field(&dialog.label, top + 5, 12));
+            if top + 5 < bottom {
+                g.text(value_col + 14, top + 5, "(default empty)", draw::DIM);
+            }
+        }
         let ro = if dialog.read_only { "yes" } else { "no" }.to_string();
         put(g, Field::ReadOnly, top + 6, "Read-only", &choice(ro, top + 6, true));
-        if top + 5 < bottom {
-            g.text(value_col + 14, top + 5, "(default empty)", draw::DIM);
-        }
-        let buttons = dialog.fields();
         if buttons.contains(&Field::Ide) {
             put(g, Field::Ide, top + 7, "IDE slot", &choice(dialog.ide_name(), top + 7, true));
             if top + 7 < bottom {

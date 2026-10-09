@@ -801,7 +801,11 @@ Esc closes it.
   ([`-overlay`](#mounting-drives)); such a drive is marked *ovl*. Its
   **IDE slot** puts a hard disk or CD-ROM drive on the IDE channel a
   booted system finds it on ([`-ide`](#booting-a-disk-image)); the first free one
-  otherwise.
+  otherwise. Past the letters, its **Drive** offers the BIOS disk numbers
+  0 to 3 (`[drives]` `2=win98.vhd`): an image only the BIOS has, for
+  booting, without a DOS drive. They are listed after the lettered drives
+  with their BIOS unit (*00h*, *01h*, *80h*, *81h*), and **Create a disk
+  image...** can mount a new image on one of its kind.
 * **Display:** the scale, fullscreen, 4:3 aspect correction, variable
   refresh rate (VRR), the scaling filter, the CRT shader and the monochrome monitor.
 * **Emulator:** the CPU speed, the processor, the video card, the memory

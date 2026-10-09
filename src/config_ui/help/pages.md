@@ -34,7 +34,10 @@ several images.
 # Mount a drive {#mount}
 
 - **Drive**: the letter DOS sees it as. **C:** for the game's folder,
-  **D:** for its CD, **A:** for floppies.
+  **D:** for its CD, **A:** for floppies. Past the letters are the BIOS
+  disks **0** and **1** (floppies 00h and 01h) and **2** and **3** (hard
+  disks 80h and 81h): an image there has no DOS drive, but a system
+  booted from the disks finds it, as with `IMGMOUNT 2 disk.img`.
 - **Path**: a folder, a zip or 7z archive, or an image file: a CD
   (`.cue`, `.iso`, `.bin`), a floppy or a hard disk image (`.img`,
   `.vhd`).
@@ -42,8 +45,8 @@ several images.
   **Left** and **Right**, go to the other drives.
 - **Type**: **cdrom** for a game CD, so the game finds its disc;
   **floppy** for floppy disks; **hdd** for the rest.
-- **Label**: the volume name. Some games check their CD's label; leave it
-  empty to use the image's own.
+- **Label**: the volume name (not for a BIOS disk). Some games check
+  their CD's label; leave it empty to use the image's own.
 - **Read-only**: keeps programs from changing the files.
 - **IDE slot**: where a system booted from an image, such as Windows 95,
   finds a hard disk or CD-ROM drive: the primary or secondary channel's

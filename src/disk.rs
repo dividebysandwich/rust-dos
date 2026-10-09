@@ -73,6 +73,12 @@ pub const fn numbered_drive(number: u8) -> u8 {
     LASTDRIVE + number
 }
 
+/// The BIOS unit of the disk mounted as `number`: 00h and 01h for the
+/// floppies 0 and 1, 80h and 81h for the hard disks 2 and 3.
+pub const fn numbered_unit(number: u8) -> u8 {
+    if number < FLOPPY_DRIVES { number } else { 0x80 + number - FLOPPY_DRIVES }
+}
+
 /// The number of a disk mounted by number, None for a lettered drive.
 pub fn drive_number(drive: u8) -> Option<u8> {
     (LASTDRIVE..DRIVE_SLOTS).contains(&drive).then(|| drive - LASTDRIVE)
@@ -1710,6 +1716,11 @@ impl DiskController {
     /// The disks mounted by number, which only the BIOS has.
     pub fn numbered_drives(&self) -> Vec<DriveInfo> {
         (LASTDRIVE..DRIVE_SLOTS).filter_map(|d| self.drive_info(d)).collect()
+    }
+
+    /// The lettered drives, then the disks mounted by number.
+    pub fn all_drives(&self) -> Vec<DriveInfo> {
+        (0..DRIVE_SLOTS).filter_map(|d| self.drive_info(d)).collect()
     }
 
     /// Floppy drives the BIOS reports: one for A:, two for B: even with A:
