@@ -205,7 +205,9 @@ START
   `overlay=false` makes a folder package writable in place; see [saves
   and the write overlay](#saves-and-the-write-overlay). `achievements=`
   is the [RetroAchievements](CONFIGURATION.md#retroachievements) hash;
-  for a zip, Rust-DOS adds it by itself.
+  for a zip, Rust-DOS adds it by itself. `os=win98se` runs the game in an
+  operating system, as `[rust-dos] os=` does for a DOSBox configuration
+  (see [an operating system](#an-operating-system)).
 * **Settings sections** (`[emulator]`, `[sound]`, `[joystick]` and the
   rest) are the game's settings, applied over yours while it runs. List
   only what the game needs; [CONFIGURATION.md](CONFIGURATION.md) has every
@@ -269,8 +271,10 @@ combination (`[MIDI + German]`) are options to choose with Left and Right
 on the game's row. A tool's end offers the choice again, its changes kept
 with the game's.
 
-**An operating system.** A `[rust-dos]` section, which other emulators
-leave alone, can name an installed operating system for the game:
+### An operating system
+
+A `[rust-dos]` section, which other emulators leave alone, can name an
+installed operating system for the game:
 
 ```
 [rust-dos]
@@ -280,7 +284,8 @@ os=win98se
 ...
 ```
 
-The system's hard disk image (`win98se.img` or `.vhd` from the OS images
+The system's hard disk image (`win98se.img` or `.vhd` from the package's
+[automount folder](#the-automount-folder), or else from the OS images
 folder, see [Operating systems by name](CONFIGURATION.md#operating-systems-by-name))
 is booted as the first hard disk and the package is its D:. The image is
 left as it is: what the system writes, the game's install included, goes
@@ -295,10 +300,79 @@ package can sit on a read-only share.
 
 The name can also be an archive (`.dosz`, `.zip`, `.7z`) or a folder in
 the OS folder, an installed Windows 3.1 say: a system of files that runs
-on rust-dos's DOS rather than a disk to boot. It is C:, the package is D:,
+on rust-dos's DOS rather than a disk to boot. It is C:, the package is D:
+(or the first letter after it that the automount folder leaves free),
 and the commands run there, starting on D: (`WIN D:\GAME.EXE`). What the
 system writes goes to the game's saves folder, as the package's changes
 do.
+
+A package without a configuration of its own runs in the system the
+libretro core's **Boot OS** option names, in the same way.
+
+**A game installed in the system.** A game that has to be installed into
+Windows can ship its install as `automount/c.vhd`: a *differencing* VHD,
+which holds only the sectors the install changed and names the system's
+image as its parent. Rust-DOS boots `c.vhd`, reading every sector it
+doesn't hold from the system's image. The image stays as it is, and
+everyone keeps their own copy of the system: the package carries only the
+game's part.
+
+To make one, convert the installed system's image to a VHD if it isn't one
+(`qemu-img convert -O vpc -o subformat=dynamic,force_size=on win98se.img
+win98se.vhd`), put it in the OS images folder, and make the differencing
+image over it:
+
+```
+VBoxManage createmedium disk --filename c.vhd --diffparent win98se.vhd --format VHD
+```
+
+Then install the game into it: mount `c.vhd` by its host path at the
+Rust-DOS prompt while no game runs, so that it is written in place
+(`IMGMOUNT E /home/me/c.vhd`), or boot it (`IMGMOUNT 2 /home/me/c.vhd`,
+then `BOOT -l C`) to install a Windows game.
+Windows Disk Management and Hyper-V make differencing VHDs too.
+
+The parent is found by the name `c.vhd` gives it: beside `c.vhd`, then in
+the OS images folders, then any VHD there with the id `c.vhd` records for
+its parent. A parent with another id (a different install of the same
+system, or the same one changed since) is refused: the sectors `c.vhd`
+holds would not fit it. A `c.vhd` that isn't the changes to the system
+`os=` names is left out with a warning, and the system boots on its own.
+
+### The automount folder
+
+A folder called `automount` at the package's root holds disks that are
+mounted by their names, before the configuration's commands run. Only
+the entries at its top count:
+
+| Name | Drive |
+|---|---|
+| `c.vhd`, `c.img` | C:, a hard disk image. With `os=`, the changes to that system ([above](#an-operating-system)) |
+| `d.vhd`, `e.img` | A hard disk image on that letter |
+| `d.cue`, `d.iso`, `d.bin` | A CD-ROM drive with that disc |
+| `d1.iso`, `d2.cue` | More discs in the same drive, in order of the number; Ctrl+F4 changes the disc |
+| `d/`, `e1/` | A folder as a CD |
+| `e.hd/` | A folder as a hard drive |
+| `a.img`, `a1.img`, `b.ima` | Floppies in A: and B:, Ctrl+F4 changing them |
+| `d[GAME CD].iso` | A label in brackets is the drive's volume label |
+
+The number can also follow the extension, as in `d.iso1`. A CUE sheet's
+track files (`d.bin` beside `d.cue`) belong to its disc. Everything else
+in the folder (`win98se.vhd`, a `win311` folder, a `.dosz`) is a system
+that `os=` can name; the package's own system comes before one of that
+name in the OS images folder.
+
+- With a C: in the folder, the package itself is no drive: it only holds
+  the folder. Without one, the package is C:, as always.
+- A letter has one kind of drive. A disc that is a folder can't be one of
+  several discs; it is left out when there are images on the letter.
+- A drive the configuration mounts itself (`IMGMOUNT D ...`) stays, and
+  the folder's drive on that letter is left out.
+- In a booted system, the first other hard disk image is the second hard
+  disk; the machine has two, so further ones are left out. Discs stay CDs.
+- `.chd` images aren't read yet.
+
+The log lists what was left out and why.
 
 ### Saves and the write overlay
 
@@ -315,6 +389,16 @@ its changes go to `<image name>.rdelta` in that folder, a block at a time.
 For a folder package, `overlay=false` in `[game]` lets the game write into
 the folder itself. An archive can't be written to, so its changes always go
 to the saves folder.
+
+A delta file only fits the image it was made over. When the image
+changes (a new version of the package, a system in the OS images folder
+installed again, another system named in `os=`), the delta is renamed to
+`<image name>.rdelta.stale-<date>` and the game starts from the image as it
+is now; the log says so. Nothing is deleted, so a delta set aside by
+mistake can be renamed back.
+
+One Rust-DOS at a time plays a game: a second one that launches it while
+the first plays is refused, as both would write into its saves folder.
 
 ## Building a package
 

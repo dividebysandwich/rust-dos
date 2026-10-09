@@ -78,7 +78,9 @@ its action wheel included.
 `system/rust-dos/os/`. The core
 option **Boot OS** (*System*) lists them: with one chosen, a zip, `.dosz` or
 folder without a configuration of its own starts that system from its image
-(`BOOT -l C`), with the game as its second disk, D:. Each game keeps the
+(`BOOT -l C`), with the game as its second disk, D:. The game gets a profile
+as any package does, with the drives of its
+[`automount` folder](../GAME-PACKAGES.md#the-automount-folder). Each game keeps the
 image's changes in its own delta file in `saves/rust-dos/saves/<name>`, so the
 image stays as it was installed and one install serves every game. At the
 prompt, `REMOUNT WIN98SE C` (or `IMGMOUNT C WIN98SE`) mounts an image by its

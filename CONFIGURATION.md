@@ -1376,8 +1376,11 @@ profile, whose drives keep their changes apart (`overlay=true`), each game
 gets the image's changes in its own delta file, and the image stays as it
 was installed.
 
-VHD images can be fixed or dynamic (growing as they are written);
-differencing VHDs, which hold another image's changes, can't be mounted.
+VHD images can be fixed, dynamic (growing as they are written) or
+differencing: the changes to another VHD, its parent, which is looked for
+by the name the image gives it, beside it and then in the `os` folder
+(see [an operating system](GAME-PACKAGES.md#an-operating-system) for
+packages that ship a game's install this way).
 A `.vhd` mounts like any other hard disk image, and a zip or `.dosz` that
 holds one mounts it. The settings window's Drives page makes new ones
 (**Create a disk image...**, **Format**).
