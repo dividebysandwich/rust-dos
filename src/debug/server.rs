@@ -1092,24 +1092,27 @@ DRIVES
 SAVE STATES
   POST   /api/state/save {"path":"/tmp/keen.state"}  save the machine to a file
   POST   /api/state/load {"path":"/tmp/keen.state"}  load one: its hardware
-                   settings, then the machine (the same memsize only).
-                   Breakpoints and watchpoints stay. "differences" lists
-                   the settings and media (drives, folders, images) the
-                   state has otherwise than this machine, if any.
-                   A failed load changes nothing ("unchanged":true).
-                   Replies have the state's header, "format" and
-                   "emulator" (this version).
-                   With "strict_match":true both are done only while paused
-                   with no step or run pending (409), a save also not
-                   while queued input is still typed, and a load is refused
-                   (409, "differences") unless the state's hardware
-                   settings and media match. It clears breakpoints,
+                   settings, then the machine and its drives (the same
+                   memsize only). Breakpoints and watchpoints stay.
+                   "differences" lists the hardware settings, drives,
+                   folders, images and deterministic start time that
+                   differed from this machine's, if any. A failed load
+                   (400) changes nothing ("loaded":false, "unchanged":true).
+                   Replies have "saved"/"loaded", the state's "header"
+                   (with its "media"), "format" and "emulator" (this
+                   version).
+                   "strict_match":true on either: only while paused with
+                   no step or run pending, and for a save no queued input
+                   left to type (409 {"error","paused"} otherwise). A load
+                   is refused (409, "differences", nothing loaded) unless
+                   the state's hardware settings, media and deterministic
+                   start time match this machine's. It clears breakpoints,
                    watchpoints, break_on stops, run-to targets, queued
-                   input, held keys and an until_ms ("debugger_reset") and
-                   answers waiting requests with 409.
-                   With --deterministic a load is taken only while paused
-                   (409 otherwise), and a state of another start time or
-                   saved outside the mode differs ("deterministic").
+                   input, held keys and an until_ms, answers waiting
+                   requests with 409, stays paused, and lists what it
+                   cleared in "debugger_reset".
+                   With --deterministic any load is taken only while
+                   paused (409 otherwise).
 
 SPEED
   POST   /api/speed {"cycles":"auto"}   the CPU speed, as `cycles` takes it
