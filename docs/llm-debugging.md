@@ -395,8 +395,8 @@ curl -s $J -XPOST -d '{"until_ms":8000}' $H/api/control/resume
   are taken only while the machine is paused or the settings window is
   open, which takes its input at once (HTTP 409 otherwise). Input is delivered at fixed points in emulated time, every 10
   ms, from the time the machine resumes: one scan code per point, and
-  `wait` and `hold_ms` count emulated milliseconds. Send it with
-  `?wait=false`, as the reply waits for its delivery.
+  `wait` and `hold_ms` count emulated milliseconds. While the machine is
+  paused the reply comes at once, as if `?wait=false` had been passed.
 - **Stopping at a time:** `resume {"until_ms":N}` pauses when emulated time
   reaches N ms since power-on, with `"reason":"time"`. Compare runs there:
   `/api/status` has `icount` and `activity.emulated_ns`, and

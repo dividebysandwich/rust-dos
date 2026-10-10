@@ -1566,7 +1566,10 @@ impl DebugHub {
                     }
                 }
                 self.input.extend(low);
-                if wait {
+                // Paused in deterministic mode, the input is delivered only
+                // once the machine resumes: waiting for it would only time out.
+                let held = self.deterministic.is_some() && self.paused && !self.divert;
+                if wait && !held {
                     self.input.push_back(LowInput::Notify(req.reply));
                     return;
                 }
@@ -3268,6 +3271,8 @@ mod tests {
     fn deterministic_mode_takes_input_only_while_paused() {
         let (mut cpu, mut hub, _mode) = deterministic_machine("refuse");
         assert!(reply(&mut cpu, &mut hub, typed("x")).is_ok(), "paused at the start");
+        let waited = Cmd::Input { events: vec![InputEvent::Type { text: "y".into(), delay_ms: None }], wait: true };
+        assert!(reply(&mut cpu, &mut hub, waited).is_ok(), "answered at once while paused, not when delivered");
         reply(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }).unwrap();
         assert_eq!(reply(&mut cpu, &mut hub, typed("x")).unwrap_err().0, 409);
         let run = Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: false };
