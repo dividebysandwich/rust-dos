@@ -1016,7 +1016,7 @@ EXECUTION CONTROL
                              started a program ({"program":{name,entry,psp}}), or
                              with stop_at_entry once paused at its first instruction
                              (reason "program_start"); 422 if it started none
-  POST /api/control/reboot_shell                     kill the running program
+  POST /api/control/reboot_shell                     kill the running program and its batch file
   POST /api/control/reboot                           reset the machine, as Ctrl+Alt+Del
   GET  /api/control/wait?timeout_ms=30000            block until the emulator pauses
   GET  /api/registers        PUT /api/registers {"ax":"1234","flags":"0202"}

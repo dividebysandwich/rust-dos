@@ -24,7 +24,7 @@ use serde_json::{Map, Value, json};
 use tokio::sync::{broadcast, oneshot};
 
 use crate::config_ui::UiKey;
-use crate::cpu::{Cpu, CpuFlags, CpuState};
+use crate::cpu::{Cpu, CpuFlags};
 use crate::disk::{DriveKind, MountOptions, drive_letter};
 use crate::keyboard;
 use rust_dos::keylayout::Layout;
@@ -523,6 +523,8 @@ pub struct DebugHub {
     ui_pointer: (i32, i32),
     /// Ctrl+F12 came in: open or close the settings window.
     hotkey: bool,
+    /// reboot_shell closed the program: the front end releases its part.
+    closed_program: bool,
     /// Save states to save or load, for the front end.
     state_requests: Vec<StateRequest>,
     speed_requests: Vec<SpeedRequest>,
@@ -614,6 +616,7 @@ impl DebugHub {
             ui_input: Vec::new(),
             ui_pointer: (0, 0),
             hotkey: false,
+            closed_program: false,
             state_requests: Vec::new(),
             speed_requests: Vec::new(),
             remote_mods: 0,
@@ -1215,6 +1218,13 @@ impl DebugHub {
         std::mem::take(&mut self.hotkey)
     }
 
+    /// Whether reboot_shell closed the program since the last call. The
+    /// front end then stops its pad mapper, autoinput and game, as the
+    /// settings window's close does.
+    pub fn take_closed_program(&mut self) -> bool {
+        std::mem::take(&mut self.closed_program)
+    }
+
     /// The save states remote clients asked to save or load.
     pub fn take_state_requests(&mut self) -> Vec<StateRequest> {
         std::mem::take(&mut self.state_requests)
@@ -1409,7 +1419,12 @@ impl DebugHub {
                 }
             }
             Cmd::RebootShell => {
-                cpu.state = CpuState::RebootShell;
+                // As the settings window's close does: the batch file and
+                // commands queued go too, or their next line (often EXIT)
+                // would run. The front end does the rest (take_closed_program).
+                self.release_keys(cpu);
+                cpu.close_program();
+                self.closed_program = true;
                 self.resume();
                 Reply::Json(json!({"ok": true}))
             }
@@ -2448,7 +2463,7 @@ fn net_json(cpu: &Cpu) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::{Cmd, DebugHub, LowInput, Reply, Request, TraceQuery, keys_for_char, step_over_len};
-    use crate::cpu::Cpu;
+    use crate::cpu::{Cpu, CpuState};
     use crate::exec::{self, StopReason};
     use rust_dos::keylayout::Layout;
     use serde_json::Value;
@@ -2729,6 +2744,32 @@ mod tests {
         answer(&mut cpu, &mut hub, rx, 50).unwrap();
         let rx = send(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true });
         assert_eq!(answer(&mut cpu, &mut hub, rx, 0).unwrap_err().0, 409, "a program is running");
+    }
+
+    #[test]
+    fn reboot_shell_drops_the_batch_file_too() {
+        let (mut cpu, mut hub) = (Cpu::new(".".into()), DebugHub::disabled());
+        cpu.load_shell();
+        cpu.queue_batch_lines(["GAME.EXE", "EXIT"]);
+        let reply = handle(&mut cpu, &mut hub, Cmd::RebootShell);
+        assert!(matches!(reply, Reply::Json(_)));
+        assert_eq!(cpu.state, CpuState::RebootShell);
+        assert!(hub.take_closed_program(), "the front end releases its part");
+        // Run the shell's reload and what would come after it: without the
+        // fix, the batch's EXIT runs and asks to turn the machine off.
+        let mut reloaded = false;
+        for _ in 0..200 {
+            let end = cpu.bus.clock.icount + 1000;
+            cpu.bus.start_batch(end);
+            match exec::run_batch(&mut cpu, &mut exec::NoHook, false) {
+                StopReason::ShellReloaded => reloaded = true,
+                StopReason::Exit => panic!("EXIT ran after the reload"),
+                _ => {}
+            }
+        }
+        assert!(reloaded, "the shell reloads");
+        assert!(!cpu.bus.exit_requested);
+        assert!(!cpu.batch.is_active(), "EXIT must not run after the reload");
     }
 
     /// The scan codes of the keys going down to type `c`.
