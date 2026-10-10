@@ -387,7 +387,9 @@ access rights.
   21h a client doesn't handle itself goes to DOS through the host, which
   copies its buffers through a transfer buffer at the start of the
   client's private data (the "MS-DOS" extensions of INT 2Fh AX=168Ah, as
-  Windows has them); DOS's log lines show what DOS got. The log's
+  Windows has them); DOS's log lines show what DOS got. The video BIOS
+  functions with a pointer in ES (palettes, DAC blocks, fonts, AH=13h's
+  string, AX=1B00h) go down the same way. The log's
   `[DPMI]` lines say when a client enters and ends, INT 31h functions it
   doesn't have, and why it ended a program (`DPMI host: exception 0Dh
   ...` on the screen too): an exception the program didn't handle. `--no-config`
