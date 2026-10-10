@@ -1,6 +1,8 @@
 use rust_dos::cpu::{Cpu, CpuFlags, CpuState};
+use std::cell::RefCell;
 use std::fs;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 /// Fresh directory with the given files under target/.
 fn scratch(name: &str, files: &[(&str, &[u8])]) -> PathBuf {
@@ -210,26 +212,80 @@ fn com_program_returning_to_psp_offset_0_terminates() {
     assert_eq!(cpu.state, CpuState::RebootShell);
 }
 
+/// The `Restore Failed` lines `cpu` logs from now on.
+fn restore_failures(cpu: &mut Cpu) -> Rc<RefCell<Vec<String>>> {
+    let failures = Rc::new(RefCell::new(Vec::new()));
+    let log = failures.clone();
+    cpu.bus.log_hook = Some(Box::new(move |line: &str| {
+        if line.contains("Restore Failed") {
+            log.borrow_mut().push(line.to_string());
+        }
+    }));
+    failures
+}
+
+/// Run until the shell is to be loaded again, in at most `steps` steps.
+fn run_to_shell(cpu: &mut Cpu, steps: usize) {
+    for _ in 0..steps {
+        if cpu.state == CpuState::RebootShell {
+            return;
+        }
+        cpu.step();
+    }
+    assert_eq!(cpu.state, CpuState::RebootShell);
+}
+
 #[test]
 fn a_program_the_shell_started_ends_without_a_restore_failure() {
-    // INT 20h, and MOV AX,4C00h; INT 21h.
-    let dir = scratch("shell_exit", &[("INT20.COM", &[0xCD, 0x20]), ("EXIT.COM", &[0xB8, 0x00, 0x4C, 0xCD, 0x21])]);
-    for program in ["INT20.COM", "EXIT.COM"] {
+    // INT 20h; MOV AX,4C00h; INT 21h; and MOV AX,3100h; MOV DX,0010h; INT 21h.
+    let dir = scratch(
+        "shell_exit",
+        &[
+            ("INT20.COM", &[0xCD, 0x20]),
+            ("EXIT.COM", &[0xB8, 0x00, 0x4C, 0xCD, 0x21]),
+            ("TSR.COM", &[0xB8, 0x00, 0x31, 0xBA, 0x10, 0x00, 0xCD, 0x21]),
+        ],
+    );
+    for program in ["INT20.COM", "EXIT.COM", "TSR.COM"] {
         let mut cpu = Cpu::new(dir.clone());
-        let lines = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
-        let log = lines.clone();
-        cpu.bus.log_hook = Some(Box::new(move |line: &str| log.borrow_mut().push(line.to_string())));
+        let failures = restore_failures(&mut cpu);
         assert!(cpu.load_executable(program, None));
-        for _ in 0..10 {
-            if cpu.state == CpuState::RebootShell {
-                break;
-            }
-            cpu.step();
-        }
-        assert_eq!(cpu.state, CpuState::RebootShell, "{program}");
-        let failures: Vec<_> = lines.borrow().iter().filter(|l| l.contains("Restore Failed")).cloned().collect();
-        assert!(failures.is_empty(), "{program}: {failures:?}");
+        run_to_shell(&mut cpu, 10);
+        assert!(failures.borrow().is_empty(), "{program}: {:?}", failures.borrow());
     }
+}
+
+#[test]
+fn a_debugger_the_shell_started_quits_without_running_its_child_and_without_a_restore_failure() {
+    #[rustfmt::skip]
+    let parent = [
+        0xB8, 0x01, 0x4B,       // MOV AX,4B01h: load the child, don't run it
+        0xBB, 0x00, 0x02,       // MOV BX,0200h
+        0xBA, 0x00, 0x03,       // MOV DX,0300h
+        0xCD, 0x21,             // INT 21h
+        0x0E, 0x5B,             // PUSH CS; POP BX
+        0xB4, 0x50,             // MOV AH,50h: its own PSP current again
+        0xCD, 0x21,             // INT 21h
+        0xB8, 0x00, 0x4C,       // MOV AX,4C00h
+        0xCD, 0x21,             // INT 21h
+    ];
+    let child = [0xB8, 0x07, 0x4C, 0xCD, 0x21]; // MOV AX,4C07h; INT 21h
+    let dir = scratch("exec_load_quit", &[("PARENT.COM", &parent), ("CHILD.COM", &child)]);
+    let mut cpu = Cpu::new(dir);
+    let failures = restore_failures(&mut cpu);
+    assert!(cpu.load_executable("PARENT.COM", None));
+    let psp = cpu.current_psp;
+    let base = psp as usize * 16;
+    cpu.bus.write_16(base + 0x202, 0x0280); // command tail
+    cpu.bus.write_16(base + 0x204, psp);
+    for (field, fcb) in [(0x206, 0x2A0), (0x20A, 0x2C0)] {
+        cpu.bus.write_16(base + field, fcb);
+        cpu.bus.write_16(base + field + 2, psp);
+    }
+    cpu.bus.load_bytes(base + 0x280, &[0x00, 0x0D]);
+    cpu.bus.load_bytes(base + 0x300, b"CHILD.COM\0");
+    run_to_shell(&mut cpu, 100);
+    assert!(failures.borrow().is_empty(), "{:?}", failures.borrow());
 }
 
 /// Run from CS:IP until the next HLT.
