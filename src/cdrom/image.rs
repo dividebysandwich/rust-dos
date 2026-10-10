@@ -84,7 +84,9 @@ impl CdImage {
     fn open_cue(path: &Path) -> Result<Self, String> {
         let text = hostfs::read(path).map_err(|e| format!("{}: {}", path.display(), e))?;
         let sheet = parse_cue(&String::from_utf8_lossy(&text))?;
-        let dir = path.parent().unwrap_or(Path::new("."));
+        // A bare file name's parent is "", which can't be listed to match
+        // names in any case.
+        let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
 
         let mut image = CdImage { path: path.to_path_buf(), files: Vec::new(), tracks: Vec::new() };
         // Sector of the disc where the next file starts.
@@ -421,17 +423,27 @@ pub fn wave_data<R: Read + Seek>(file: &mut R) -> Result<(WaveFormat, u64, u64),
 fn find_file(dir: &Path, name: &str) -> Result<PathBuf, String> {
     let parts: Vec<&str> = name.split(['\\', '/']).filter(|p| !p.is_empty()).collect();
     let file = parts.last().copied().unwrap_or(name);
-    // An absolute path is whoever made the sheet's: only its file name counts.
-    let relative = !name.starts_with(['\\', '/']) && !name.contains(':');
-    let is_file = |p: &Path| hostfs::is_file(p);
-    if relative && parts.len() > 1 {
-        let folders = &parts[..parts.len() - 1];
-        let below = folders.iter().try_fold(dir.to_path_buf(), |d, part| find_in(&d, part, |p| hostfs::is_dir(p)));
+    // An absolute path is whoever made the sheet's: only its file name
+    // counts. So does a path that climbs out of the sheet's folder with `..`.
+    let relative = !name.starts_with(['\\', '/']) && !name.contains(':') && !parts.contains(&"..");
+    let is_file: fn(&Path) -> bool = |p| hostfs::is_file(p);
+    let is_dir: fn(&Path) -> bool = |p| hostfs::is_dir(p);
+    let folders = &parts[..parts.len().saturating_sub(1)];
+    let below_sheet = relative && !folders.is_empty();
+    if below_sheet {
+        let below = folders.iter().try_fold(dir.to_path_buf(), |d, part| find_in(&d, part, is_dir));
         if let Some(path) = below.and_then(|d| find_in(&d, file, is_file)) {
             return Ok(path);
         }
     }
-    find_in(dir, file, is_file).ok_or_else(|| format!("{} not found", dir.join(file).display()))
+    find_in(dir, file, is_file).ok_or_else(|| {
+        let beside = dir.join(file);
+        if below_sheet {
+            format!("{} not found, nor {}", dir.join(parts.join(std::path::MAIN_SEPARATOR_STR)).display(), beside.display())
+        } else {
+            format!("{} not found", beside.display())
+        }
+    })
 }
 
 /// `name` in `dir`, as written or in any case, if `kind` holds for it.
@@ -532,6 +544,22 @@ mod tests {
         let image = CdImage::open(&dir.join("disc.cue")).unwrap();
         let mut raw = [0u8; RAW_SECTOR];
         image.read_raw(image.tracks()[1].start, &mut raw).unwrap();
+        assert_eq!(raw[0], 3);
+    }
+
+    #[test]
+    fn files_are_not_looked_for_above_the_sheet() {
+        // `..\Song2.bin` names a file above the sheet's folder; only the
+        // copy next to the sheet counts.
+        let root = scratch("above");
+        let dir = root.join("disc");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(root.join("Song2.bin"), sectors(5, 9)).unwrap();
+        fs::write(dir.join("Song2.bin"), sectors(5, 3)).unwrap();
+        fs::write(dir.join("disc.cue"), "FILE \"..\\Song2.bin\" BINARY\n TRACK 01 AUDIO\n  INDEX 01 00:00:00\n").unwrap();
+        let image = CdImage::open(&dir.join("disc.cue")).unwrap();
+        let mut raw = [0u8; RAW_SECTOR];
+        image.read_raw(image.tracks()[0].start, &mut raw).unwrap();
         assert_eq!(raw[0], 3);
     }
 
