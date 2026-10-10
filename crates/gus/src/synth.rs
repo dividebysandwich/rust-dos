@@ -236,7 +236,6 @@ impl GusSynth {
     }
 
     /// A channel message: status (with the channel) and its data bytes.
-    #[inline]
     pub fn message(&mut self, status: u8, d1: u8, d2: u8) {
         let ch = (status & 0x0F) as usize;
         match status & 0xF0 {
@@ -464,7 +463,6 @@ impl GusSynth {
     }
 
     /// One stereo frame at the mixer's rate, in 16-bit sample units.
-    #[inline]
     pub fn render(&mut self) -> (f32, f32) {
         let mut l = 0.0;
         let mut r = 0.0;

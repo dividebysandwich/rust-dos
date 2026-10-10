@@ -300,7 +300,6 @@ impl SoundBlaster {
 
     /// Run the DSP up to emulated time `now` (PIT ticks): play the DMA
     /// data that has come due, and raise the block-end IRQs.
-    #[inline]
     pub fn advance(&mut self, now: u64, dma: &mut Dma, ram: &[u8]) {
         let elapsed = now.saturating_sub(self.last_ticks);
         self.last_ticks = now;
@@ -412,7 +411,6 @@ impl SoundBlaster {
 
     /// Port write at `offset` from the base (6 reset, 0Ch command, 4/5
     /// mixer).
-    #[inline]
     pub fn write(&mut self, offset: u16, value: u8, log: &mut Vec<String>) {
         match offset {
             0x4 => self.mixer_index = value,
@@ -432,7 +430,6 @@ impl SoundBlaster {
     }
 
     /// Port read at `offset` from the base.
-    #[inline]
     pub fn read(&mut self, offset: u16) -> u8 {
         match offset {
             0x5 => self.mixer_read(),

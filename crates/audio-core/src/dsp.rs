@@ -37,7 +37,6 @@ pub struct Biquad {
 impl Biquad {
     /// A low-pass at `cutoff` Hz with resonance `q` (0.707 for
     /// Butterworth).
-    #[inline]
     pub fn lowpass(cutoff: f32, q: f32) -> Self {
         let (cos, alpha) = Self::angle(cutoff, q);
         let b1 = 1.0 - cos;
@@ -45,7 +44,6 @@ impl Biquad {
     }
 
     /// A high-pass at `cutoff` Hz with resonance `q`.
-    #[inline]
     pub fn highpass(cutoff: f32, q: f32) -> Self {
         let (cos, alpha) = Self::angle(cutoff, q);
         let b0 = (1.0 + cos) / 2.0;

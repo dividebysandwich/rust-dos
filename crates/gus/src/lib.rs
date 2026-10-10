@@ -392,7 +392,6 @@ impl Gus {
 
     /// Port write. `now` is the emulated time (PIT ticks); the bus has
     /// advanced the card to it.
-    #[inline]
     pub fn write(&mut self, port: u16, value: u8, now: u64) {
         match port.wrapping_sub(self.config.base) {
             0x000 => {
@@ -435,7 +434,6 @@ impl Gus {
         self.adlib_cmd = value;
     }
 
-    #[inline]
     pub fn read(&mut self, port: u16) -> u8 {
         match port.wrapping_sub(self.config.base) {
             0x006 => self.status,
@@ -680,7 +678,6 @@ impl Gus {
     /// Run the card up to emulated time `now` (PIT ticks): DMA, timers and
     /// the voices. Returns the system memory a DMA transfer from the card
     /// wrote, if any.
-    #[inline]
     pub fn advance(&mut self, now: u64, dma: &mut Dma, ram: &mut [u8]) -> Option<Range<usize>> {
         let elapsed = now.saturating_sub(self.last_ticks);
         self.last_ticks = self.last_ticks.max(now);
@@ -844,7 +841,6 @@ impl Gus {
     /// When the card next needs attention without a port access: a timer
     /// expiring, a DMA transfer ending, or a voice reaching the point where
     /// it raises an IRQ. In PIT ticks.
-    #[inline]
     pub fn next_event(&self, dma: &Dma) -> Option<u64> {
         let mut next: Option<u64> = None;
         let mut consider = |t: u64| next = Some(next.map_or(t, |n| n.min(t)));

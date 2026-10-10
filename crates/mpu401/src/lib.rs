@@ -238,7 +238,6 @@ impl Mpu401 {
 
     /// Command port: reset (FFh) and UART mode (3Fh), and the intelligent
     /// mode commands, which are acknowledged and otherwise ignored.
-    #[inline]
     pub fn write_command(&mut self, value: u8) {
         if value == 0xFF {
             self.status = 0;
@@ -249,7 +248,6 @@ impl Mpu401 {
     }
 
     /// A MIDI byte for the synthesizer.
-    #[inline]
     pub fn write_data(&mut self, byte: u8) {
         match byte {
             // Real-time messages may come between any bytes.
@@ -331,7 +329,6 @@ impl Mpu401 {
     }
 
     /// One stereo frame of synthesizer output at the mixer's rate.
-    #[inline]
     pub fn render(&mut self) -> (f32, f32) {
         match &mut self.synth {
             Synth::None => (0.0, 0.0),

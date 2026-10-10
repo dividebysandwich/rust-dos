@@ -67,7 +67,6 @@ impl Opl {
     }
 
     /// Write the latched register of `bank`. `now_us` is emulated time.
-    #[inline]
     pub fn write_data(&mut self, bank: usize, value: u8, now_us: u64) {
         if bank == 1 && !self.opl3 {
             return;
@@ -149,7 +148,6 @@ impl Opl {
     /// The status register: IRQ (bit 7) and the timer flags (6, 5). An
     /// OPL2 also reads 06h in the low bits, which is how programs tell the
     /// two apart.
-    #[inline]
     pub fn read_status(&mut self, now_us: u64) -> u8 {
         // Timer 1 counts 80 us steps, timer 2 320 us steps, up from the
         // value to 256.

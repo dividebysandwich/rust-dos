@@ -148,7 +148,6 @@ impl Dma {
         matches!(port, 0x00..=0x0F | 0x81..=0x8F | 0xC0..=0xDF)
     }
 
-    #[inline]
     pub fn write(&mut self, port: u16, value: u8) {
         match port {
             0x00..=0x0F => self.ctrl[0].write_reg(port as u8, value),
@@ -164,7 +163,6 @@ impl Dma {
         }
     }
 
-    #[inline]
     pub fn read(&mut self, port: u16) -> u8 {
         match port {
             0x00..=0x0F => self.ctrl[0].read_reg(port as u8),
@@ -203,7 +201,6 @@ impl Dma {
     /// "memory to device" transfer does. Returns the number of bytes moved
     /// and whether the channel reached terminal count. A masked channel
     /// moves nothing.
-    #[inline]
     pub fn transfer_read(&mut self, ch: usize, ram: &[u8], buf: &mut [u8]) -> (usize, bool) {
         let words = ch >= 4;
         let unit = if words { 2 } else { 1 };
@@ -247,7 +244,6 @@ impl Dma {
     /// to memory" transfer does. Returns the number of bytes moved, whether
     /// the channel reached terminal count, and the memory written, which
     /// the caller must treat as modified.
-    #[inline]
     pub fn transfer_write(
         &mut self,
         ch: usize,

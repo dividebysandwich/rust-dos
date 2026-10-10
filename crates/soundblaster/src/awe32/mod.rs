@@ -236,7 +236,6 @@ impl Emu8000 {
     }
 
     /// A word read. `now_frames` is the emulated time in 44.1 kHz frames.
-    #[inline]
     pub fn read_word(&mut self, port: u16, now_frames: u64) -> u16 {
         self.read16(port.wrapping_sub(self.base) & !1, now_frames)
     }
@@ -486,7 +485,6 @@ impl Emu8000 {
     }
 
     /// One frame of the chip's output, at 44.1 kHz.
-    #[inline]
     pub fn render(&mut self) -> (f32, f32) {
         if self.effects_dirty {
             self.effects_dirty = false;

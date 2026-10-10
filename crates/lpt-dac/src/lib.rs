@@ -117,7 +117,6 @@ impl LptDac {
 
     /// A write to the control port: on the Disney, a rising edge of
     /// Select takes the data byte into the FIFO, if it has room.
-    #[inline]
     pub fn write_control(&mut self, value: u8) {
         if self.kind == LptDacType::Disney && self.control & 0x08 == 0 && value & 0x08 != 0 && !self.fifo_full() {
             self.fifo.push_back(self.data);
@@ -146,7 +145,6 @@ impl LptDac {
     }
 
     /// The next sample at the mixer's rate, on a 16-bit scale.
-    #[inline]
     pub fn render(&mut self) -> f32 {
         let byte = match self.kind {
             LptDacType::Disney => {
