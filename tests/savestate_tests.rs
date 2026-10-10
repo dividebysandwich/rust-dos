@@ -593,3 +593,32 @@ fn rewind_goes_back_through_a_running_machine_in_small_steps() {
     machine::load(&mut cpu, &states[3]).unwrap();
     assert!(machine::save(&cpu) == states[3]);
 }
+
+/// The devices' entries in DOS's file table keep the time they were
+/// opened at when a load writes the table again, so a loaded machine's
+/// memory is the saved one's whenever the load happens.
+#[test]
+fn a_load_keeps_the_time_stamps_of_the_devices_open_files() {
+    use rust_dos::disk::{SFT_AUX, SFT_CON, SFT_PRN};
+    use rust_dos::dos_files::{ENTRY_SIZE, entry_address};
+    fix_time();
+    let dir = scratch("device_times", &[]);
+    let mut cpu = machine_in(&dir);
+    let entries = |cpu: &Cpu| -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for sft in [SFT_AUX, SFT_CON, SFT_PRN] {
+            let at = entry_address(&cpu.bus, sft);
+            bytes.extend((0..ENTRY_SIZE).map(|i| cpu.bus.read_8(at + i)));
+        }
+        bytes
+    };
+    let saved_entries = entries(&cpu);
+    let state = machine::save(&cpu);
+
+    // Loaded a minute later.
+    let later = NaiveDate::from_ymd_opt(1995, 4, 11).unwrap().and_hms_opt(12, 35, 56).unwrap();
+    rust_dos::hosttime::fix(Some(later));
+    machine::load(&mut cpu, &state).unwrap();
+    rust_dos::dos_files::flush(&mut cpu.bus);
+    assert_eq!(entries(&cpu), saved_entries);
+}
