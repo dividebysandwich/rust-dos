@@ -1208,7 +1208,6 @@ dependencies = [
  "chrono",
  "clap",
  "crc32fast",
- "dirs",
  "dynasm",
  "dynasmrt",
  "flate2",
@@ -1222,9 +1221,20 @@ dependencies = [
  "libc",
  "libloading",
  "md-5",
- "nuked-opl3",
  "png",
- "rustysynth",
+ "rust-dos-audio-core",
+ "rust-dos-dma",
+ "rust-dos-gus",
+ "rust-dos-hostdirs",
+ "rust-dos-lpt-dac",
+ "rust-dos-mpu401",
+ "rust-dos-mt32",
+ "rust-dos-opl",
+ "rust-dos-savestate",
+ "rust-dos-sc55",
+ "rust-dos-soundblaster",
+ "rust-dos-tandy",
+ "rust-dos-zip",
  "serde",
  "serde_json",
  "sevenz-rust2",
@@ -1234,7 +1244,38 @@ dependencies = [
  "tokio",
  "web-time",
  "windows-sys",
- "zip",
+]
+
+[[package]]
+name = "rust-dos-audio-core"
+version = "1.5.0"
+dependencies = [
+ "rust-dos-savestate",
+]
+
+[[package]]
+name = "rust-dos-dma"
+version = "1.5.0"
+dependencies = [
+ "rust-dos-savestate",
+]
+
+[[package]]
+name = "rust-dos-gus"
+version = "1.5.0"
+dependencies = [
+ "rust-dos-audio-core",
+ "rust-dos-dma",
+ "rust-dos-savestate",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "rust-dos-hostdirs"
+version = "1.5.0"
+dependencies = [
+ "dirs",
 ]
 
 [[package]]
@@ -1242,6 +1283,86 @@ name = "rust-dos-libretro"
 version = "1.5.0"
 dependencies = [
  "rust-dos",
+ "zip",
+]
+
+[[package]]
+name = "rust-dos-lpt-dac"
+version = "1.5.0"
+dependencies = [
+ "rust-dos-audio-core",
+ "rust-dos-savestate",
+]
+
+[[package]]
+name = "rust-dos-mpu401"
+version = "1.5.0"
+dependencies = [
+ "rust-dos-audio-core",
+ "rust-dos-gus",
+ "rust-dos-mt32",
+ "rust-dos-savestate",
+ "rust-dos-sc55",
+ "rustysynth",
+]
+
+[[package]]
+name = "rust-dos-mt32"
+version = "1.5.0"
+dependencies = [
+ "libloading",
+ "rust-dos-hostdirs",
+]
+
+[[package]]
+name = "rust-dos-opl"
+version = "1.5.0"
+dependencies = [
+ "nuked-opl3",
+ "rust-dos-audio-core",
+ "rust-dos-savestate",
+]
+
+[[package]]
+name = "rust-dos-savestate"
+version = "1.5.0"
+
+[[package]]
+name = "rust-dos-sc55"
+version = "1.5.0"
+dependencies = [
+ "dirs",
+ "rust-dos-hostdirs",
+ "rust-dos-zip",
+ "sha2",
+]
+
+[[package]]
+name = "rust-dos-soundblaster"
+version = "1.5.0"
+dependencies = [
+ "rust-dos-audio-core",
+ "rust-dos-dma",
+ "rust-dos-hostdirs",
+ "rust-dos-savestate",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "rust-dos-tandy"
+version = "1.5.0"
+dependencies = [
+ "rust-dos-audio-core",
+ "rust-dos-savestate",
+]
+
+[[package]]
+name = "rust-dos-zip"
+version = "1.5.0"
+dependencies = [
+ "flate2",
  "zip",
 ]
 
