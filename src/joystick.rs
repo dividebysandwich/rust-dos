@@ -2,10 +2,15 @@
 //! host's game controllers, or the mouse as joystick A where asked for.
 //!
 //! A write to 201h fires four one-shots, one per axis, each of which stays
-//! high for a time that grows with its stick's position. The legacy
-//! read-count calibration is preserved at one unit per 1 µs port read;
-//! elapsed emulated time also lets a delayed, single read see the axes
-//! discharge. The buttons are the high four bits, low while pressed.
+//! high for a time that grows with its stick's position; games write the
+//! port, then count reads until each bit goes low. An axis trips after a
+//! number of reads: a PC at 4.77 MHz reads the port every 2.5 µs or so, so
+//! about 10 reads at one end and 450 at the other, and games that don't
+//! calibrate (Carrier Command steers its cursor with the joystick) see the
+//! stick where it is whatever the emulated CPU's speed. It also trips once
+//! that many 2.5 µs have passed in emulated time, as on the real thing, for
+//! games that wait and read the port once. The buttons are the high four
+//! bits, low while pressed.
 
 use crate::mouse::{BUTTON_LEFT, BUTTON_RIGHT, MouseState};
 
@@ -133,12 +138,14 @@ fn apply_deadzone(x: f32, y: f32, deadzone: f32) -> (f32, f32) {
     ((x * scale).clamp(-1.0, 1.0), (y * scale).clamp(-1.0, 1.0))
 }
 
-/// Axis one-shot delays, in units of the emulated 1 µs game-port read.
-const TRIP_UNIT_NS: u64 = crate::timer::IO_READ_NS;
+/// Reads until an axis trips, at one end of its travel and past it.
 const TRIP_MIN: u32 = 10;
 const TRIP_RANGE: u32 = 440;
 
-/// The axis discharge duration, in units of a port read.
+/// Emulated time per read until a trip, the read period of a 4.77 MHz PC.
+const TRIP_READ_NS: u64 = 2500;
+
+/// The reads until an axis at `pos` (-1 to 1) trips.
 fn trip(pos: f32) -> u32 {
     TRIP_MIN + ((pos.clamp(-1.0, 1.0) + 1.0) / 2.0 * TRIP_RANGE as f32).round() as u32
 }
@@ -161,6 +168,8 @@ pub struct GamePort {
     /// Emulated time when the one-shots last fired. `None` means they have
     /// not been charged, so connected axes are already discharged.
     armed_at_ns: Option<u64>,
+    /// Reads since the one-shots last fired.
+    read_count: u32,
 }
 
 impl GamePort {
@@ -201,7 +210,7 @@ impl GamePort {
         }
     }
 
-    /// The units until each axis trips (A x, A y, B x, B y), None for a
+    /// The reads until each axis trips (A x, A y, B x, B y), None for a
     /// stick that isn't there, and the buttons held: bit n for button n+1
     /// (A's two, then B's).
     fn state(&self, mouse: &MouseState) -> ([Option<u32>; 4], u8) {
@@ -257,6 +266,7 @@ impl GamePort {
     /// A write to 201h: the one-shots fire.
     pub fn arm(&mut self, now_ns: u64) {
         self.armed_at_ns = Some(now_ns);
+        self.read_count = 0;
     }
 
     /// A read of 201h: an axis bit is high until its one-shot trips, and
@@ -267,10 +277,12 @@ impl GamePort {
             return 0xFF;
         }
         let elapsed_ns = self.armed_at_ns.map_or(u64::MAX, |armed_at_ns| now_ns.saturating_sub(armed_at_ns));
+        let count = self.read_count;
+        self.read_count = count.saturating_add(1);
         let (trips, buttons) = self.state(mouse);
         let mut value = 0xF0 & !(buttons << 4);
         for (bit, trip) in trips.iter().enumerate() {
-            if trip.is_some_and(|units| elapsed_ns < u64::from(units) * TRIP_UNIT_NS) {
+            if trip.is_some_and(|t| count < t && elapsed_ns < u64::from(t) * TRIP_READ_NS) {
                 value |= 1 << bit;
             }
         }
@@ -292,7 +304,7 @@ impl GamePort {
 }
 
 // The game port's own state; the settings and the host's controllers stay.
-crate::state_fields!(GamePort { armed_at_ns } skip { settings, pads });
+crate::state_fields!(GamePort { armed_at_ns, read_count } skip { settings, pads });
 
 #[cfg(test)]
 mod tests {
