@@ -30,6 +30,7 @@ impl Default for DmaChannel {
 }
 
 impl DmaChannel {
+    #[inline]
     pub fn auto_init(&self) -> bool {
         self.mode & 0x10 != 0
     }
@@ -142,10 +143,12 @@ impl Dma {
     }
 
     /// Whether the controllers own `port`.
+    #[inline]
     pub fn owns(port: u16) -> bool {
         matches!(port, 0x00..=0x0F | 0x81..=0x8F | 0xC0..=0xDF)
     }
 
+    #[inline]
     pub fn write(&mut self, port: u16, value: u8) {
         match port {
             0x00..=0x0F => self.ctrl[0].write_reg(port as u8, value),
@@ -161,6 +164,7 @@ impl Dma {
         }
     }
 
+    #[inline]
     pub fn read(&mut self, port: u16) -> u8 {
         match port {
             0x00..=0x0F => self.ctrl[0].read_reg(port as u8),
@@ -178,15 +182,18 @@ impl Dma {
         }
     }
 
+    #[inline]
     pub fn channel(&self, ch: usize) -> &DmaChannel {
         &self.ctrl[ch / 4].ch[ch % 4]
     }
 
+    #[inline]
     pub fn channel_mut(&mut self, ch: usize) -> &mut DmaChannel {
         &mut self.ctrl[ch / 4].ch[ch % 4]
     }
 
     /// Whether a device may transfer on `ch` now.
+    #[inline]
     pub fn ready(&self, ch: usize) -> bool {
         !self.channel(ch).masked
     }
@@ -196,6 +203,7 @@ impl Dma {
     /// "memory to device" transfer does. Returns the number of bytes moved
     /// and whether the channel reached terminal count. A masked channel
     /// moves nothing.
+    #[inline]
     pub fn transfer_read(&mut self, ch: usize, ram: &[u8], buf: &mut [u8]) -> (usize, bool) {
         let words = ch >= 4;
         let unit = if words { 2 } else { 1 };
@@ -239,6 +247,7 @@ impl Dma {
     /// to memory" transfer does. Returns the number of bytes moved, whether
     /// the channel reached terminal count, and the memory written, which
     /// the caller must treat as modified.
+    #[inline]
     pub fn transfer_write(
         &mut self,
         ch: usize,
@@ -293,6 +302,7 @@ impl Dma {
     /// Advance channel `ch` by `units` transfers without moving data, as a
     /// device writing to memory we don't model (a sound card recording
     /// silence) would.
+    #[inline]
     pub fn transfer_skip(&mut self, ch: usize, units: usize) -> bool {
         let mut tc = false;
         for _ in 0..units {
@@ -318,6 +328,6 @@ impl Dma {
     }
 }
 
-crate::state_fields!(DmaChannel { base_addr, base_count, cur_addr, cur_count, page, mode, masked });
-crate::state_fields!(Controller { ch, flipflop, tc, request, command, temp });
-crate::state_fields!(Dma { ctrl, extra_pages });
+rust_dos_savestate::state_fields!(DmaChannel { base_addr, base_count, cur_addr, cur_count, page, mode, masked });
+rust_dos_savestate::state_fields!(Controller { ch, flipflop, tc, request, command, temp });
+rust_dos_savestate::state_fields!(Dma { ctrl, extra_pages });

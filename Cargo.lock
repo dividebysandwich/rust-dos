@@ -1919,6 +1919,7 @@ dependencies = [
  "nuked-opl3",
  "openxr",
  "png",
+ "rust-dos-dma",
  "rust-dos-savestate",
  "rustysynth",
  "sdl2",
@@ -1933,6 +1934,13 @@ dependencies = [
  "web-time",
  "windows-sys 0.61.2",
  "zip",
+]
+
+[[package]]
+name = "rust-dos-dma"
+version = "1.5.0"
+dependencies = [
+ "rust-dos-savestate",
 ]
 
 [[package]]

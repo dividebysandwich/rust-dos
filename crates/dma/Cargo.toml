@@ -1,0 +1,11 @@
+[package]
+name = "rust-dos-dma"
+description = "The AT's 8237 DMA controllers, as rust-dos emulates them"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+rust-dos-savestate = { path = "../savestate" }

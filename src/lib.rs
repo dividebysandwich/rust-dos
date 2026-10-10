@@ -32,7 +32,7 @@ pub mod dos_data;
 pub mod dos_files;
 pub mod dosstr;
 pub mod dpmi;
-pub mod dma;
+pub use rust_dos_dma as dma;
 pub mod dsp;
 pub mod edit;
 pub mod dynrec;
