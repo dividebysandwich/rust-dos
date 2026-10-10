@@ -24,7 +24,7 @@ use serde_json::{Map, Value, json};
 use tokio::sync::{broadcast, oneshot};
 
 use crate::config_ui::UiKey;
-use crate::cpu::{Cpu, CpuFlags, CpuState};
+use crate::cpu::{Cpu, CpuFlags};
 use crate::disk::{DriveKind, MountOptions, drive_letter};
 use crate::keyboard;
 use rust_dos::keylayout::Layout;
@@ -139,7 +139,9 @@ pub enum Cmd {
     Input { events: Vec<InputEvent>, wait: bool },
     InputClear,
     Pause,
-    Resume { until: Option<String> },
+    /// `until_ms`: pause once emulated time reaches that many
+    /// milliseconds since power-on (deterministic mode only).
+    Resume { until: Option<String>, until_ms: Option<u64> },
     Step { count: u64 },
     /// Step, but run a call, interrupt, loop or repeated string instruction
     /// through to the instruction after it.
@@ -202,9 +204,11 @@ pub enum Cmd {
     /// disks into the folders.
     SyncShared,
     /// Save the machine to a save state file, or load one, which the front
-    /// end does (`take_state_requests`).
-    SaveState { path: String },
-    LoadState { path: String },
+    /// end does (`take_state_requests`). A `strict_match` save or load is
+    /// done only while paused, and its load must match this machine and
+    /// resets the debugger.
+    SaveState { path: String, strict_match: bool },
+    LoadState { path: String, strict_match: bool },
     /// Change the CPU speed (`cycles`) as the settings window does, which
     /// the front end does (`take_speed_requests`).
     Speed { cycles: String },
@@ -215,6 +219,8 @@ pub enum Cmd {
 pub struct StateRequest {
     pub load: bool,
     pub path: PathBuf,
+    /// Asked for with `strict_match` (see `take_state_requests`).
+    pub strict_match: bool,
     reply: oneshot::Sender<Reply>,
 }
 
@@ -225,6 +231,12 @@ impl StateRequest {
             Ok(value) => Reply::Json(value),
             Err(e) => Reply::bad(e),
         });
+    }
+
+    /// Answer the request with an error of `status` whose body (with its
+    /// `error`) says more.
+    pub fn fail(self, status: u16, body: Value) {
+        let _ = self.reply.send(Reply::ErrorJson(status, body));
     }
 }
 
@@ -454,6 +466,10 @@ enum PauseReason {
     Watchpoint,
     ProgramStart,
     ProgramExit,
+    /// Deterministic mode starts paused.
+    Startup,
+    /// A resume's `until_ms` reached.
+    Time,
 }
 
 /// Memory the debugger watches: `len` bytes at physical address `phys`,
@@ -527,6 +543,13 @@ pub struct DebugHub {
 
     input: VecDeque<LowInput>,
     input_wait_until: Option<Instant>,
+    /// In deterministic mode: the date and time the clock started at.
+    /// Input is then delivered by `feed_input` at emulated times, and its
+    /// waits end in emulated time (`input_wait_ns`).
+    pub deterministic: Option<chrono::NaiveDateTime>,
+    input_wait_ns: Option<u64>,
+    /// Pause once emulated time reaches this (`until_ms`).
+    stop_at_ns: Option<u64>,
     key_stall_frames: u32,
     /// While the settings window is open, remote input goes to it
     /// (`take_ui_input`) instead of to the machine.
@@ -536,6 +559,8 @@ pub struct DebugHub {
     ui_pointer: (i32, i32),
     /// Ctrl+F12 came in: open or close the settings window.
     hotkey: bool,
+    /// reboot_shell closed the program: the front end releases its part.
+    closed_program: bool,
     /// Save states to save or load, for the front end.
     state_requests: Vec<StateRequest>,
     speed_requests: Vec<SpeedRequest>,
@@ -622,11 +647,15 @@ impl DebugHub {
             batch_t_us: 0,
             input: VecDeque::new(),
             input_wait_until: None,
+            deterministic: None,
+            input_wait_ns: None,
+            stop_at_ns: None,
             key_stall_frames: 0,
             divert: false,
             ui_input: Vec::new(),
             ui_pointer: (0, 0),
             hotkey: false,
+            closed_program: false,
             state_requests: Vec::new(),
             speed_requests: Vec::new(),
             remote_mods: 0,
@@ -692,7 +721,11 @@ impl DebugHub {
         }
         self.rx = Some(rx);
 
-        self.process_input(cpu);
+        // Deterministic mode delivers the machine's input at its ticks
+        // (`feed_input`); the settings window's goes as it comes.
+        if self.deterministic.is_none() || self.divert {
+            self.process_input(cpu);
+        }
         self.check_run(cpu);
 
         let mode = (cpu.bus.video_mode, video::frame_size(&cpu.bus));
@@ -855,6 +888,8 @@ impl DebugHub {
                 PauseReason::Watchpoint => "watchpoint",
                 PauseReason::ProgramStart => "program_start",
                 PauseReason::ProgramExit => "program_exit",
+                PauseReason::Startup => "startup",
+                PauseReason::Time => "time",
             };
             let mut reply = json!({"paused": true, "reason": reason_str, "icount": cpu.executed, "registers": regs});
             match reason {
@@ -920,8 +955,9 @@ impl DebugHub {
             let exec_secs = st.exec_time.as_secs_f64();
             st.mips = if exec_secs > 0.0 { st.executed as f64 / exec_secs / 1e6 } else { 0.0 };
             st.emulated_mips = st.executed as f64 / wall.as_secs_f64() / 1e6;
-            let hits = cache_hits - st.cache_mark.0;
-            let misses = cache_misses - st.cache_mark.1;
+            // A loaded save state starts the decode cache's counts again.
+            let hits = cache_hits.checked_sub(st.cache_mark.0).unwrap_or(cache_hits);
+            let misses = cache_misses.checked_sub(st.cache_mark.1).unwrap_or(cache_misses);
             st.cache_hit_rate = if hits + misses > 0 { hits as f64 / (hits + misses) as f64 } else { 0.0 };
             st.cache_mark = (cache_hits, cache_misses);
             st.executed = 0;
@@ -1103,15 +1139,74 @@ impl DebugHub {
         }
     }
 
+    /// Deterministic mode with a client: the machine waits for it before
+    /// running anything.
+    pub fn pause_at_start(&mut self) {
+        self.enter_pause(PauseReason::Startup);
+    }
+
+    /// Pause if emulated time reached a resume's `until_ms`. The
+    /// deterministic front end asks at every emulated millisecond.
+    pub fn time_stop(&mut self, cpu: &Cpu) -> bool {
+        if self.stop_at_ns.is_some_and(|at| cpu.bus.clock.now_ns() >= at) {
+            self.stop_at_ns = None;
+            self.enter_pause(PauseReason::Time);
+            return true;
+        }
+        false
+    }
+
+    /// Deliver queued input, in deterministic mode: the front end calls
+    /// this at fixed points in emulated time.
+    pub fn feed_input(&mut self, cpu: &mut Cpu) {
+        self.process_input(cpu);
+    }
+
+    /// Deterministic mode: run a millisecond of emulated time at a time up
+    /// to `end`, a pause, the program's exit, or the time a client asked
+    /// to stop at. That time is checked before `end`, so that a frame
+    /// ending at it pauses there. `at_ms` runs at every whole millisecond
+    /// reached; at a tick it delivers the input.
+    pub fn run_deterministic(
+        &mut self,
+        cpu: &mut Cpu,
+        mode: &mut rust_dos::deterministic::Deterministic,
+        hot: bool,
+        end: u64,
+        mut at_ms: impl FnMut(&mut Cpu, &mut DebugHub, rust_dos::deterministic::Boundary),
+    ) {
+        while !self.paused && !self.time_stop(cpu) && cpu.bus.clock.icount < end {
+            let (reason, reached) = mode.step(cpu, self, hot, end);
+            if let Some(boundary) = reached {
+                at_ms(cpu, self, boundary);
+            }
+            if matches!(reason, crate::exec::StopReason::Paused | crate::exec::StopReason::Exit) {
+                break;
+            }
+        }
+    }
+
     // ----- input ------------------------------------------------------------
 
     fn process_input(&mut self, cpu: &mut Cpu) {
         let now = Instant::now();
+        let now_ns = cpu.bus.clock.now_ns();
         if let Some(t) = self.input_wait_until {
             if now < t {
                 return;
             }
             self.input_wait_until = None;
+        }
+        // Emulated time stands still while the settings window pauses the
+        // machine: a wait in emulated time would never end.
+        if self.divert {
+            self.input_wait_ns = None;
+        }
+        if let Some(t) = self.input_wait_ns {
+            if now_ns < t {
+                return;
+            }
+            self.input_wait_ns = None;
         }
         while let Some(ev) = self.input.front() {
             match ev {
@@ -1131,6 +1226,11 @@ impl DebugHub {
                         _ => unreachable!(),
                     }
                     // One scan code per frame.
+                    return;
+                }
+                LowInput::Wait(d) if self.deterministic.is_some() && !self.divert => {
+                    self.input_wait_ns = Some(now_ns + d.as_nanos() as u64);
+                    self.input.pop_front();
                     return;
                 }
                 LowInput::Wait(d) => {
@@ -1220,9 +1320,129 @@ impl DebugHub {
         std::mem::take(&mut self.hotkey)
     }
 
-    /// The save states remote clients asked to save or load.
+    /// Whether reboot_shell closed the program since the last call. The
+    /// front end then stops its pad mapper, autoinput and game, as the
+    /// settings window's close does.
+    pub fn take_closed_program(&mut self) -> bool {
+        std::mem::take(&mut self.closed_program)
+    }
+
+    /// The save states remote clients asked to save or load. Strict-match
+    /// saves and loads asked for while the machine isn't stopped with
+    /// nothing pending are refused here (409): they are only done while the
+    /// debugger holds the machine between two instructions. The other
+    /// requests are carried out at the end of the frame, running or not.
+    ///
+    /// In deterministic mode a load is refused as well while the machine
+    /// runs, as `handle` refuses it when it arrives: a `resume` sent in the
+    /// same frame starts the machine before the load is carried out.
     pub fn take_state_requests(&mut self) -> Vec<StateRequest> {
-        std::mem::take(&mut self.state_requests)
+        let mut taken = Vec::new();
+        for request in std::mem::take(&mut self.state_requests) {
+            if request.load && self.deterministic_refuses() {
+                request.fail(409, deterministic_refusal());
+                continue;
+            }
+            match request.strict_match.then(|| self.strict_match_refusal(request.load)).flatten() {
+                Some(why) => {
+                    let what = if request.load { "load" } else { "save" };
+                    let error = format!("can't do a strict-match {}: {}", what, why);
+                    request.fail(409, json!({"error": error, "paused": self.paused}));
+                }
+                None => taken.push(request),
+            }
+        }
+        taken
+    }
+
+    /// Whether deterministic mode refuses a change to the machine now: it
+    /// runs, and the settings window doesn't hold it.
+    fn deterministic_refuses(&self) -> bool {
+        self.deterministic.is_some() && !self.paused && !self.divert
+    }
+
+    /// Why a strict-match save or load can't be done now, if it can't: the
+    /// machine runs, or a step or run command is still to stop it. A save
+    /// also waits for queued input, which goes on being typed while the
+    /// machine is paused; a load drops it (`reset_after_load`).
+    fn strict_match_refusal(&self, load: bool) -> Option<&'static str> {
+        if !self.paused {
+            Some("the machine runs; pause it first (POST /api/control/pause)")
+        } else if self.step_budget.is_some() {
+            Some("a step is pending")
+        } else if self.run_wait.is_some() {
+            Some("a run command waits for its program")
+        } else if !load && !self.input.is_empty() {
+            Some("queued input is still being typed")
+        } else {
+            None
+        }
+    }
+
+    /// Forget what the debugger was told before a save state was loaded,
+    /// so none of it stops the machine the state brought: breakpoints,
+    /// watchpoints, the stops on exceptions, mode switches and program
+    /// starts and ends, a step or the target of a step-over or run-to, and
+    /// queued input. Requests waiting for a stop or a program, or for
+    /// their input to be typed, are answered with 409. Returns what was
+    /// cleared.
+    pub fn reset_after_load(&mut self, cpu: &Cpu) -> Value {
+        let break_on: Vec<&str> = [
+            (self.break_exceptions != 0, "exceptions"),
+            (self.break_mode_switch, "mode_switch"),
+            (self.break_program_start, "program_start"),
+            (self.break_program_exit, "program_exit"),
+        ]
+        .into_iter()
+        .filter_map(|(on, name)| on.then_some(name))
+        .collect();
+        let cleared = json!({
+            "breakpoints": std::mem::take(&mut self.breakpoints).len(),
+            "watchpoints": std::mem::take(&mut self.watchpoints).len(),
+            "break_on": break_on,
+            "run_to": self.temp_breakpoint.take().is_some(),
+            "step": self.step_budget.take().is_some(),
+            "pause_waits": self.pause_waiters.len(),
+            "run": self.run_wait.is_some(),
+            "input": self.input.len(),
+            "held_keys": self.remote_held.len(),
+            // Deterministic mode: a resume's stop at an emulated time.
+            "until_ms": self.stop_at_ns.take().is_some(),
+        });
+        // Keys held before the load are forgotten without a release: the
+        // restored keyboard has the keys of the moment it was saved, and
+        // a key-up now would reach the restored machine.
+        self.remote_held.clear();
+        self.remote_mods = 0;
+        let gone = || Reply::Error(409, "a save state was loaded".into());
+        for waiter in self.pause_waiters.drain(..) {
+            let _ = waiter.send(gone());
+        }
+        if let Some(run) = self.run_wait.take() {
+            let _ = run.reply.send(gone());
+        }
+        for event in self.input.drain(..) {
+            if let LowInput::Notify(tx) = event {
+                let _ = tx.send(gone());
+            }
+        }
+        self.input_wait_until = None;
+        self.input_wait_ns = None;
+        self.break_exceptions = 0;
+        self.break_mode_switch = false;
+        self.break_program_start = false;
+        self.break_program_exit = false;
+        self.start_once = false;
+        self.start_breakpoint = None;
+        self.skip_bp_once = false;
+        self.pause_hit = None;
+        self.watch_hit = None;
+        // The loaded machine's counts are where the debugger starts from.
+        self.seen_exceptions = cpu.exceptions;
+        self.seen_mode_switches = cpu.mode_switches;
+        self.seen_starts = cpu.programs.started;
+        self.seen_ends = cpu.programs.ended;
+        cleared
     }
 
     /// The CPU speeds remote clients asked for.
@@ -1233,17 +1453,26 @@ impl DebugHub {
     // ----- request handling --------------------------------------------------
 
     fn handle(&mut self, cpu: &mut Cpu, req: Request) {
+        // In deterministic mode, a change to the machine that came while it
+        // runs would land at whatever emulated time the host got to. The
+        // settings window, which holds the machine, takes its input at once.
+        if self.deterministic_refuses() && changes_machine(&req.cmd) {
+            let _ = req.reply.send(Reply::ErrorJson(409, deterministic_refusal()));
+            return;
+        }
         let cmd = match req.cmd {
-            Cmd::SaveState { path } | Cmd::LoadState { path } if path.is_empty() => {
+            Cmd::SaveState { path, .. } | Cmd::LoadState { path, .. } if path.is_empty() => {
                 let _ = req.reply.send(Reply::bad("a path is needed"));
                 return;
             }
-            Cmd::SaveState { path } => {
-                self.state_requests.push(StateRequest { load: false, path: PathBuf::from(path), reply: req.reply });
+            Cmd::SaveState { path, strict_match } => {
+                let path = PathBuf::from(path);
+                self.state_requests.push(StateRequest { load: false, path, strict_match, reply: req.reply });
                 return;
             }
-            Cmd::LoadState { path } => {
-                self.state_requests.push(StateRequest { load: true, path: PathBuf::from(path), reply: req.reply });
+            Cmd::LoadState { path, strict_match } => {
+                let path = PathBuf::from(path);
+                self.state_requests.push(StateRequest { load: true, path, strict_match, reply: req.reply });
                 return;
             }
             Cmd::Speed { cycles } => {
@@ -1342,7 +1571,10 @@ impl DebugHub {
                     }
                 }
                 self.input.extend(low);
-                if wait {
+                // Paused in deterministic mode, the input is delivered only
+                // once the machine resumes: waiting for it would only time out.
+                let held = self.deterministic.is_some() && self.paused && !self.divert;
+                if wait && !held {
                     self.input.push_back(LowInput::Notify(req.reply));
                     return;
                 }
@@ -1355,6 +1587,7 @@ impl DebugHub {
                     }
                 }
                 self.input_wait_until = None;
+                self.input_wait_ns = None;
                 Reply::Json(json!({"ok": true}))
             }
             Cmd::Pause => {
@@ -1369,7 +1602,13 @@ impl DebugHub {
                     return;
                 }
             }
-            Cmd::Resume { until } => {
+            Cmd::Resume { until_ms: Some(_), .. } if self.deterministic.is_none() => {
+                Reply::bad("until_ms needs deterministic mode (--deterministic)")
+            }
+            Cmd::Resume { until_ms: Some(ms), .. } if ms.saturating_mul(1_000_000) <= cpu.bus.clock.now_ns() => {
+                Reply::bad(format!("until_ms {} has passed: emulated time is {} ms", ms, cpu.bus.clock.now_ns() / 1_000_000))
+            }
+            Cmd::Resume { until, until_ms } => {
                 if let Some(a) = until {
                     match parse_addr(cpu, &a).and_then(breakpoint_phys) {
                         Ok(phys) => self.temp_breakpoint = Some(phys),
@@ -1379,6 +1618,7 @@ impl DebugHub {
                         }
                     }
                 }
+                self.stop_at_ns = until_ms.map(|ms| ms.saturating_mul(1_000_000));
                 let was = self.paused;
                 self.resume();
                 if was {
@@ -1414,7 +1654,12 @@ impl DebugHub {
                 }
             }
             Cmd::RebootShell => {
-                cpu.state = CpuState::RebootShell;
+                // As the settings window's close does: the batch file and
+                // commands queued go too, or their next line (often EXIT)
+                // would run. The front end does the rest (take_closed_program).
+                self.release_keys(cpu);
+                cpu.close_program();
+                self.closed_program = true;
                 self.resume();
                 Reply::Json(json!({"ok": true}))
             }
@@ -1692,6 +1937,16 @@ impl DebugHub {
             "uptime_ms": cpu.bus.start_time.elapsed().as_millis() as u64,
             "fps": (self.fps * 10.0).round() / 10.0,
             "cycles_per_ms": cpu.bus.clock.cycles_per_ms(),
+            // Deterministic mode: the clock's start, the machine's clock
+            // now, emulated time, and every how many emulated ms input is
+            // delivered. Null when off.
+            "deterministic": self.deterministic.map(|start| json!({
+                "start_time": start.format("%Y-%m-%d %H:%M:%S").to_string(),
+                "clock": cpu.bus.cmos.now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                "emulated_ms": cpu.bus.clock.now_ns() / 1_000_000,
+                "input_tick_ms": rust_dos::deterministic::TICK_MS,
+                "until_ms": self.stop_at_ns.map(|ns| ns / 1_000_000),
+            })),
             // What `cycles=auto` goes by, counted since start: emulated
             // time, the frames the program drew (at most one a retrace),
             // its bursts of writes to video memory the size of a frame and
@@ -2001,6 +2256,35 @@ impl DebugHub {
             "program_exit": self.break_program_exit,
         })
     }
+}
+
+/// The reply to a change to the machine that deterministic mode refuses
+/// while it runs (409), shaped as a refused strict-match save's.
+fn deterministic_refusal() -> Value {
+    json!({
+        "error": "deterministic mode takes input and changes to the machine only while it is paused: \
+                  pause it, or resume with until_ms, then send the request",
+        "paused": false,
+    })
+}
+
+/// Commands that change the machine (its input, memory, registers, drives,
+/// speed or state), which deterministic mode takes only while it is paused.
+fn changes_machine(cmd: &Cmd) -> bool {
+    matches!(
+        cmd,
+        Cmd::Input { .. }
+            | Cmd::Run { .. }
+            | Cmd::WriteMem { .. }
+            | Cmd::SetRegs(_)
+            | Cmd::Mount { .. }
+            | Cmd::Unmount { .. }
+            | Cmd::SwapImages
+            | Cmd::LoadState { .. }
+            | Cmd::Speed { .. }
+            | Cmd::Reboot
+            | Cmd::RebootShell
+    )
 }
 
 /// Whether the shell waits at its prompt with nothing to run: no program,
@@ -2451,9 +2735,13 @@ fn net_json(cpu: &Cpu) -> serde_json::Value {
 }
 
 #[cfg(test)]
+mod determinism_tests;
+
+#[cfg(test)]
 mod tests {
-    use super::{Cmd, DebugHub, LowInput, Reply, Request, TraceQuery, keys_for_char, step_over_len};
-    use crate::cpu::Cpu;
+    use super::{Cmd, DebugHub, InputEvent, LowInput, Reply, Request, TraceQuery, keys_for_char, step_over_len};
+    use rust_dos::deterministic::Deterministic;
+    use crate::cpu::{Cpu, CpuState};
     use crate::exec::{self, StopReason};
     use rust_dos::keylayout::Layout;
     use serde_json::Value;
@@ -2627,6 +2915,7 @@ mod tests {
             match rx.try_recv() {
                 Ok(Reply::Json(v)) => return Ok(v),
                 Ok(Reply::Error(code, e)) => return Err((code, e)),
+                Ok(Reply::ErrorJson(code, v)) => return Err((code, v.to_string())),
                 Ok(_) => panic!("not a JSON reply"),
                 Err(_) => run(cpu, hub, 1),
             }
@@ -2662,7 +2951,7 @@ mod tests {
         let (mut cpu, mut hub) = machine("exit");
         ask(&mut cpu, &mut hub, break_on(None, Some(true)), 0).unwrap();
         ask(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true }, 50).unwrap();
-        ask(&mut cpu, &mut hub, Cmd::Resume { until: None }, 0).unwrap();
+        ask(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }, 0).unwrap();
         let stop = ask(&mut cpu, &mut hub, Cmd::WaitPause, 50).unwrap();
         assert_eq!(stop["reason"], "program_exit");
         assert!(hub.paused);
@@ -2674,15 +2963,15 @@ mod tests {
         let (mut cpu, mut hub) = machine("abort");
         ask(&mut cpu, &mut hub, break_on(None, Some(true)), 0).unwrap();
         ask(&mut cpu, &mut hub, Cmd::Run { command: "CRASH.COM".into(), stop_at_entry: true }, 50).unwrap();
-        ask(&mut cpu, &mut hub, Cmd::Resume { until: None }, 0).unwrap();
+        ask(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }, 0).unwrap();
         let stop = ask(&mut cpu, &mut hub, Cmd::WaitPause, 50).unwrap();
         assert_eq!(stop["reason"], "program_exit");
         assert_eq!(stop["exit"], serde_json::json!({"name": "CRASH.COM", "code": null, "resident": false, "aborted": true}));
         // The next program's own exit is told apart again.
-        ask(&mut cpu, &mut hub, Cmd::Resume { until: None }, 0).unwrap();
+        ask(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }, 0).unwrap();
         run(&mut cpu, &mut hub, 20);
         ask(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true }, 50).unwrap();
-        ask(&mut cpu, &mut hub, Cmd::Resume { until: None }, 0).unwrap();
+        ask(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }, 0).unwrap();
         let stop = ask(&mut cpu, &mut hub, Cmd::WaitPause, 50).unwrap();
         assert_eq!(stop["exit"]["aborted"], false);
     }
@@ -2736,6 +3025,141 @@ mod tests {
         assert_eq!(answer(&mut cpu, &mut hub, rx, 0).unwrap_err().0, 409, "a program is running");
     }
 
+    #[test]
+    fn reboot_shell_drops_the_batch_file_too() {
+        let (mut cpu, mut hub) = (Cpu::new(".".into()), DebugHub::disabled());
+        cpu.load_shell();
+        cpu.queue_batch_lines(["GAME.EXE", "EXIT"]);
+        let reply = handle(&mut cpu, &mut hub, Cmd::RebootShell);
+        assert!(matches!(reply, Reply::Json(_)));
+        assert_eq!(cpu.state, CpuState::RebootShell);
+        assert!(hub.take_closed_program(), "the front end releases its part");
+        // Run the shell's reload and what would come after it: without the
+        // fix, the batch's EXIT runs and asks to turn the machine off.
+        let mut reloaded = false;
+        for _ in 0..200 {
+            let end = cpu.bus.clock.icount + 1000;
+            cpu.bus.start_batch(end);
+            match exec::run_batch(&mut cpu, &mut exec::NoHook, false) {
+                StopReason::ShellReloaded => reloaded = true,
+                StopReason::Exit => panic!("EXIT ran after the reload"),
+                _ => {}
+            }
+        }
+        assert!(reloaded, "the shell reloads");
+        assert!(!cpu.bus.exit_requested);
+        assert!(!cpu.batch.is_active(), "EXIT must not run after the reload");
+    }
+
+    /// Pause the machine, as the main loop does: its stop is told at the
+    /// end of the frame.
+    fn pause(cpu: &mut Cpu, hub: &mut DebugHub) {
+        let rx = send(cpu, hub, Cmd::Pause);
+        hub.end_batch(cpu);
+        answer(cpu, hub, rx, 0).unwrap();
+        assert!(hub.paused);
+    }
+
+    /// Ask to save a state, with strict_match or not, and the requests the
+    /// front end gets to carry out, with the reply of one refused.
+    fn state_request(cpu: &mut Cpu, hub: &mut DebugHub, strict_match: bool) -> (usize, Option<(u16, Value)>) {
+        let mut rx = send(cpu, hub, Cmd::SaveState { path: "/tmp/x.state".into(), strict_match });
+        let taken = hub.take_state_requests().len();
+        let refused = match rx.try_recv() {
+            Ok(Reply::ErrorJson(code, body)) => Some((code, body)),
+            Ok(_) => panic!("not a refusal"),
+            Err(_) => None,
+        };
+        (taken, refused)
+    }
+
+    #[test]
+    fn a_strict_match_save_or_load_is_done_only_while_the_machine_is_paused() {
+        let (mut cpu, mut hub) = machine("strict-match");
+        let (taken, refused) = state_request(&mut cpu, &mut hub, true);
+        let (code, body) = refused.expect("refused while running");
+        assert_eq!((taken, code), (0, 409));
+        assert!(body["error"].as_str().unwrap().contains("pause it first"), "{}", body);
+
+        pause(&mut cpu, &mut hub);
+        let (taken, refused) = state_request(&mut cpu, &mut hub, true);
+        assert_eq!((taken, refused.is_none()), (1, true), "paused with nothing pending");
+
+        // A step sent with it, in the same frame, starts the machine first.
+        let strict = Cmd::SaveState { path: "/tmp/x.state".into(), strict_match: true };
+        let _save = send(&mut cpu, &mut hub, strict);
+        let _step = send(&mut cpu, &mut hub, Cmd::Step { count: 1 });
+        assert!(hub.take_state_requests().is_empty(), "refused: the step is under way");
+
+        // Queued input goes on being typed while paused: a save waits for
+        // it, and a load drops it.
+        let (mut cpu, mut hub) = machine("strict-match-input");
+        pause(&mut cpu, &mut hub);
+        hub.input.push_back(LowInput::Wait(std::time::Duration::from_secs(60)));
+        let (taken, refused) = state_request(&mut cpu, &mut hub, true);
+        let (code, body) = refused.expect("refused with input queued");
+        assert_eq!((taken, code), (0, 409));
+        assert!(body["error"].as_str().unwrap().contains("queued input"), "{}", body);
+        let _load = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: true });
+        assert_eq!(hub.take_state_requests().len(), 1, "a load drops the input");
+    }
+
+    #[test]
+    fn a_plain_save_or_load_is_done_running_or_not() {
+        let (mut cpu, mut hub) = machine("no-strict-match");
+        let (taken, refused) = state_request(&mut cpu, &mut hub, false);
+        assert_eq!((taken, refused.is_none()), (1, true), "taken while running");
+
+        // Sent with a strict-match save while running: only that save is refused.
+        let mut strict = send(&mut cpu, &mut hub, Cmd::SaveState { path: "/tmp/a.state".into(), strict_match: true });
+        let _plain = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/b.state".into(), strict_match: false });
+        let taken = hub.take_state_requests();
+        assert_eq!(taken.iter().map(|r| (r.load, r.strict_match)).collect::<Vec<_>>(), [(true, false)]);
+        assert!(matches!(strict.try_recv(), Ok(Reply::ErrorJson(409, _))));
+    }
+
+    #[test]
+    fn a_loaded_state_leaves_no_breakpoint_watchpoint_or_stop_from_before() {
+        let (mut cpu, mut hub) = machine("reset");
+        pause(&mut cpu, &mut hub);
+        ask(&mut cpu, &mut hub, Cmd::AddBreakpoint("0100:0000".into()), 0).unwrap();
+        ask(&mut cpu, &mut hub, Cmd::AddWatchpoint { addr: "0200:0000".into(), len: 2 }, 0).unwrap();
+        let on = Cmd::BreakOn { exceptions: Some(1), clear_exceptions: None, mode_switch: Some(true), program_start: None, program_exit: Some(true) };
+        ask(&mut cpu, &mut hub, on, 0).unwrap();
+        hub.temp_breakpoint = Some(0x1234);
+        let mut waiting = send(&mut cpu, &mut hub, Cmd::Input { events: Vec::new(), wait: true });
+        hub.key_down(&mut cpu, super::keys::lookup("a").unwrap(), b'a');
+
+        let cleared = hub.reset_after_load(&cpu);
+        assert_eq!(
+            cleared,
+            serde_json::json!({
+                "breakpoints": 1, "watchpoints": 1, "break_on": ["exceptions", "mode_switch", "program_exit"],
+                "run_to": true, "step": false, "pause_waits": 0, "run": false, "input": 1, "held_keys": 1, "until_ms": false,
+            })
+        );
+        // The key is forgotten: no key-up reaches the restored machine.
+        let before = cpu.bus.kbc.pending();
+        hub.release_keys(&mut cpu);
+        assert_eq!(cpu.bus.kbc.pending(), before, "no break code after the load");
+        assert!(matches!(waiting.try_recv(), Ok(Reply::Error(409, _))), "the input's wait is answered");
+        assert!(!hub.begin_batch(&cpu), "nothing is left to stop the machine");
+        assert!(hub.paused, "the machine stays paused");
+        let listed = ask(&mut cpu, &mut hub, Cmd::ListBreakpoints, 0).unwrap();
+        assert_eq!(listed["breakpoints"].as_array().map(Vec::len), Some(0), "{}", listed);
+    }
+
+    #[test]
+    fn the_cache_hit_rate_starts_again_after_a_load() {
+        let (_cpu, mut hub) = machine("cache-rate");
+        hub.stats.cache_mark = (100, 50);
+        hub.stats.window_start = std::time::Instant::now() - std::time::Duration::from_secs(2);
+        // A loaded state put in a new decode cache, counting from zero.
+        hub.record_batch(0, std::time::Duration::ZERO, 10, 5);
+        assert!((hub.stats.cache_hit_rate - 10.0 / 15.0).abs() < 1e-9, "{}", hub.stats.cache_hit_rate);
+        assert_eq!(hub.stats.cache_mark, (10, 5));
+    }
+
     /// The scan codes of the keys going down to type `c`.
     fn scans(c: char, layout: &str) -> Vec<u8> {
         let mut out = Vec::new();
@@ -2783,6 +3207,161 @@ mod tests {
         assert_eq!(step_over_len(&[0xA4], false), None);
         assert_eq!(step_over_len(&[0xFE, 0x38, 0x21], false), None);
         assert_eq!(step_over_len(&[0xFE, 0x39, 0x08], false), None);
+    }
+
+    /// A machine at the prompt in deterministic mode, paused at the start
+    /// as the front end has it, with PROBE.COM on C:.
+    fn deterministic_machine(name: &str) -> (Cpu, DebugHub, Deterministic) {
+        let mode = Deterministic::new(rust_dos::deterministic::default_start());
+        let dir = std::env::temp_dir().join(format!("rust-dos-det-{}-{}", name, std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let code: Vec<u8> = (0..PROBE.len()).step_by(2).map(|i| u8::from_str_radix(&PROBE[i..i + 2], 16).unwrap()).collect();
+        std::fs::write(dir.join("PROBE.COM"), code).unwrap();
+        let mut cpu = Cpu::new(dir);
+        cpu.bus.set_cycles_per_ms(3000);
+        cpu.load_shell();
+        let mut hub = DebugHub::new(Some(std::sync::mpsc::channel().1), None, 1000);
+        hub.deterministic = Some(mode.start);
+        hub.pause_at_start();
+        (cpu, hub, mode)
+    }
+
+    /// Run `frames` host frames of about `frame_ms` emulated milliseconds,
+    /// as the main loop does in deterministic mode.
+    fn run_deterministic(cpu: &mut Cpu, hub: &mut DebugHub, mode: &mut Deterministic, frames: usize, frame_ms: u64) {
+        for _ in 0..frames {
+            hub.poll(cpu);
+            if hub.paused {
+                continue;
+            }
+            let hot = hub.begin_batch(cpu);
+            let target = cpu.bus.clock.icount_at_ns(cpu.bus.clock.now_ns() + frame_ms * 1_000_000);
+            let end = mode.frame_end(cpu, target);
+            hub.run_deterministic(cpu, mode, hot, end, |cpu, hub, reached| {
+                if reached.tick {
+                    hub.feed_input(cpu);
+                }
+            });
+            hub.end_batch(cpu);
+        }
+    }
+
+    fn typed(text: &str) -> Cmd {
+        Cmd::Input { events: vec![InputEvent::Type { text: text.into(), delay_ms: None }], wait: false }
+    }
+
+    /// Type PROBE at the prompt and run to 2 s of emulated time, in host
+    /// frames of `frame_ms`: the instructions executed, and memory.
+    fn typed_run(name: &str, frame_ms: u64) -> (u64, Vec<u8>) {
+        let (mut cpu, mut hub, mut mode) = deterministic_machine(name);
+        reply(&mut cpu, &mut hub, typed("PROBE\n")).unwrap();
+        let resumed = reply(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: Some(2000) }).unwrap();
+        assert_eq!(resumed["paused"], false);
+        run_deterministic(&mut cpu, &mut hub, &mut mode, 1000, frame_ms);
+        assert!(hub.paused, "stopped at until_ms");
+        assert_eq!(cpu.bus.clock.now_ns() / 1_000_000, 2000);
+        assert_eq!(cpu.programs.started, 1, "PROBE ran");
+        (cpu.executed, cpu.bus.ram().to_vec())
+    }
+
+    #[test]
+    fn deterministic_input_gives_the_same_run_whatever_the_frames() {
+        let a = typed_run("a", 16);
+        let b = typed_run("b", 41);
+        assert_eq!(a.0, b.0);
+        assert!(a.1 == b.1, "the same memory");
+    }
+
+    #[test]
+    fn deterministic_mode_takes_input_only_while_paused() {
+        let (mut cpu, mut hub, _mode) = deterministic_machine("refuse");
+        assert!(reply(&mut cpu, &mut hub, typed("x")).is_ok(), "paused at the start");
+        let waited = Cmd::Input { events: vec![InputEvent::Type { text: "y".into(), delay_ms: None }], wait: true };
+        assert!(reply(&mut cpu, &mut hub, waited).is_ok(), "answered at once while paused, not when delivered");
+        reply(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }).unwrap();
+        assert_eq!(reply(&mut cpu, &mut hub, typed("x")).unwrap_err().0, 409);
+        let run = Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: false };
+        assert_eq!(reply(&mut cpu, &mut hub, run).unwrap_err().0, 409, "run while running");
+        assert_eq!(reply(&mut cpu, &mut hub, write("0050:0000", &[1], None)).unwrap_err().0, 409, "a memory write while running");
+        assert!(reply(&mut cpu, &mut hub, Cmd::GetRegs).is_ok(), "reads still work");
+        let passed = reply(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: Some(0) }).unwrap_err();
+        assert_eq!(passed.0, 400, "a time that has passed");
+        let (mut cpu, mut hub) = (Cpu::new(".".into()), DebugHub::disabled());
+        let refused = reply(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: Some(5) }).unwrap_err();
+        assert_eq!(refused.0, 400, "until_ms needs deterministic mode");
+    }
+
+    /// The body of a 409 refusal, from the request's reply.
+    fn refusal(rx: &mut oneshot::Receiver<Reply>) -> Value {
+        match rx.try_recv() {
+            Ok(Reply::ErrorJson(409, body)) => body,
+            _ => panic!("not refused with 409"),
+        }
+    }
+
+    #[test]
+    fn deterministic_mode_loads_a_state_only_while_paused_and_refuses_as_a_strict_match_save_does() {
+        let (mut cpu, mut hub, _mode) = deterministic_machine("state-refuse");
+        reply(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }).unwrap();
+
+        // A load while running is refused as it arrives, strict match or
+        // not, with the body a refused strict-match save has.
+        for strict_match in [false, true] {
+            let mut load = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match });
+            let body = refusal(&mut load);
+            assert_eq!(body["paused"], false, "{}", body);
+            assert!(body["error"].as_str().unwrap().contains("deterministic mode"), "{}", body);
+        }
+        // A strict-match save is refused by its own rule, in the same shape.
+        let mut save = send(&mut cpu, &mut hub, Cmd::SaveState { path: "/tmp/x.state".into(), strict_match: true });
+        assert!(hub.take_state_requests().is_empty());
+        let body = refusal(&mut save);
+        assert_eq!(body["paused"], false, "{}", body);
+        assert!(body["error"].as_str().unwrap().contains("pause it first"), "{}", body);
+        // A plain save changes nothing and is taken while running.
+        let _save = send(&mut cpu, &mut hub, Cmd::SaveState { path: "/tmp/x.state".into(), strict_match: false });
+        assert_eq!(hub.take_state_requests().len(), 1);
+
+        // A load sent while paused, with a resume in the same frame: the
+        // machine runs when the front end would load it, so it is refused.
+        pause(&mut cpu, &mut hub);
+        let mut load = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: false });
+        reply(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }).unwrap();
+        assert!(hub.take_state_requests().is_empty());
+        assert_eq!(refusal(&mut load)["paused"], false);
+
+        // Paused with nothing pending, both loads are taken.
+        pause(&mut cpu, &mut hub);
+        let _plain = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: false });
+        let _strict = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: true });
+        assert_eq!(hub.take_state_requests().len(), 2);
+    }
+
+    #[test]
+    fn a_strict_match_load_drops_a_pending_until_ms_and_input_waiting_on_emulated_time() {
+        let (mut cpu, mut hub, mut mode) = deterministic_machine("reset-until");
+        reply(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: Some(5000) }).unwrap();
+        run_deterministic(&mut cpu, &mut hub, &mut mode, 10, 16);
+        pause(&mut cpu, &mut hub);
+        let status = reply(&mut cpu, &mut hub, Cmd::Status).unwrap();
+        assert_eq!(status["deterministic"]["until_ms"], 5000, "still pending while paused");
+        // Input typed on emulated time: a wait under way and keys after it.
+        hub.input_wait_ns = Some(cpu.bus.clock.now_ns() + 500_000_000);
+        reply(&mut cpu, &mut hub, typed("x")).unwrap();
+
+        let cleared = hub.reset_after_load(&cpu);
+        assert_eq!(cleared["until_ms"], true, "{}", cleared);
+        assert!(cleared["input"].as_u64().unwrap() > 0, "{}", cleared);
+        assert_eq!((hub.stop_at_ns, hub.input_wait_ns), (None, None));
+        let status = reply(&mut cpu, &mut hub, Cmd::Status).unwrap();
+        assert_eq!(status["deterministic"]["until_ms"], serde_json::Value::Null);
+        assert!(!hub.begin_batch(&cpu), "nothing is left to stop the machine");
+
+        // Run on past 5 s: no stop at the old time.
+        reply(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }).unwrap();
+        run_deterministic(&mut cpu, &mut hub, &mut mode, 700, 16);
+        assert!(cpu.bus.clock.now_ns() > 5_000_000_000);
+        assert!(!hub.paused, "the dropped until_ms didn't stop it");
     }
 }
 

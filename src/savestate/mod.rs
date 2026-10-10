@@ -4,6 +4,7 @@
 
 pub mod disks;
 pub mod machine;
+pub mod media;
 pub mod rewind;
 pub mod slots;
 
