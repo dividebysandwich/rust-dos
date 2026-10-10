@@ -47,6 +47,16 @@ pub struct Header {
     pub memsize: usize,
     /// Its emulated time.
     pub emulated_ns: u64,
+    /// The media of its mounted drives (see media.rs); none in a state
+    /// saved before they were recorded.
+    #[serde(default)]
+    pub media: Option<Vec<super::media::Medium>>,
+    /// Saved in deterministic mode: the date and time its clock started
+    /// at (`YYYY-MM-DD HH:MM:SS`). The machine's clock is that plus
+    /// emulated time, so a machine with another start, or not in the
+    /// mode, reads another time from the state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deterministic: Option<String>,
 }
 
 /// A slot file: the header, the picture and the state.
@@ -109,6 +119,46 @@ pub fn machine_settings(text: &str, settings: &Settings) -> Settings {
     with_machine(settings, &Settings::from_config(&config))
 }
 
+/// How the hardware settings `text` (see `machine_text`) differ from the
+/// hardware of `settings`, a sentence each naming the setting: empty if
+/// they are the same.
+pub fn machine_differences(text: &str, settings: &Settings) -> Vec<String> {
+    // Both as this rust-dos writes them, whatever wrote the state's.
+    let state = entries(&machine_text(&machine_settings(text, &Settings::default())));
+    let now = entries(&machine_text(settings));
+    let mut keys: Vec<&String> = state.keys().chain(now.keys()).collect();
+    keys.sort_unstable();
+    keys.dedup();
+    let shown = |v: Option<&String>| v.map_or_else(|| "the default".to_string(), |v| v.clone());
+    keys.into_iter()
+        .filter(|k| state.get(*k) != now.get(*k))
+        .map(|k| format!("{}: the state has {}, this machine has {}", k, shown(state.get(k)), shown(now.get(k))))
+        .collect()
+}
+
+/// How the deterministic mode of a state (its clock's start time, None
+/// outside the mode) differs from this machine's, if it does.
+pub fn mode_difference(state: Option<&str>, now: Option<&str>) -> Option<String> {
+    let shown = |start: Option<&str>| start.map_or_else(|| "no deterministic mode".to_string(), |s| format!("a clock started at {}", s));
+    (state != now).then(|| format!("deterministic: the state has {}, this machine has {}", shown(state), shown(now)))
+}
+
+/// The `section.key` and value of each setting in configuration text.
+fn entries(text: &str) -> std::collections::BTreeMap<String, String> {
+    let mut section = String::new();
+    let mut out = std::collections::BTreeMap::new();
+    for line in text.lines().map(str::trim) {
+        if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            section = name.trim().to_ascii_lowercase();
+        } else if let Some((key, value)) = line.split_once('=')
+            && !line.starts_with(['#', ';'])
+        {
+            out.insert(format!("{}.{}", section, key.trim().to_ascii_lowercase()), value.trim().to_string());
+        }
+    }
+    out
+}
+
 /// `base` with the hardware settings of `from`.
 fn with_machine(base: &Settings, from: &Settings) -> Settings {
     Settings {
@@ -169,6 +219,9 @@ pub fn header(cpu: &Cpu, settings: &Settings, game: Option<(&str, &str)>) -> Hea
         machine: machine_text(settings),
         memsize: cpu.bus.ram().len() >> 20,
         emulated_ns: cpu.bus.clock.now_ns(),
+        media: Some(super::media::of(cpu)),
+        // The front end sets it in deterministic mode.
+        deterministic: None,
     }
 }
 
@@ -249,6 +302,48 @@ mod tests {
         assert_eq!((loaded.machine, loaded.cpu, loaded.memsize, loaded.ems), (Adapter::Cga, CpuModel::I386, 8, false));
         assert_eq!(loaded.sound, settings.sound);
         assert_eq!(loaded.scale, 2, "the display's settings stay");
+    }
+
+    #[test]
+    fn hardware_that_differs_is_named() {
+        let mut settings = Settings { machine: Adapter::Cga, cpu: CpuModel::I386, ..Default::default() };
+        settings.sound.gus.enabled = false;
+        let text = machine_text(&settings);
+        assert_eq!(machine_differences(&text, &settings), Vec::<String>::new());
+        // The display's settings aren't the hardware's.
+        assert!(machine_differences(&text, &Settings { scale: 3, ..settings.clone() }).is_empty());
+
+        let differences = machine_differences(&text, &Settings::default());
+        assert_eq!(differences.len(), 3, "{:?}", differences);
+        assert!(differences.iter().any(|d| d == "emulator.machine: the state has cga, this machine has the default"), "{:?}", differences);
+        assert!(differences.iter().any(|d| d.contains("this machine has the default")), "{:?}", differences);
+    }
+
+    #[test]
+    fn a_header_without_media_reads_as_one_saved_before_they_were_recorded() {
+        let header = Header { version: "1.5.0".into(), memsize: 16, ..Default::default() };
+        let mut json: serde_json::Value = serde_json::to_value(&header).unwrap();
+        json.as_object_mut().unwrap().remove("media");
+        let read: Header = serde_json::from_value(json).unwrap();
+        assert_eq!(read.media, None);
+    }
+
+    #[test]
+    fn a_deterministic_start_time_that_differs_is_named() {
+        let start = Some("1995-04-11 12:34:56");
+        assert_eq!(mode_difference(start, start), None);
+        assert_eq!(mode_difference(None, None), None);
+        assert_eq!(
+            mode_difference(start, None).as_deref(),
+            Some("deterministic: the state has a clock started at 1995-04-11 12:34:56, this machine has no deterministic mode")
+        );
+        assert!(mode_difference(None, start).unwrap().starts_with("deterministic: the state has no deterministic mode"));
+        assert!(mode_difference(start, Some("1991-12-31 23:00:00")).is_some());
+        // Absent from a state saved outside the mode, and from older ones.
+        let header = Header { version: "1.6.0".into(), memsize: 16, ..Default::default() };
+        let json = serde_json::to_value(&header).unwrap();
+        assert!(json.get("deterministic").is_none(), "{}", json);
+        assert_eq!(serde_json::from_value::<Header>(json).unwrap().deterministic, None);
     }
 
     #[test]

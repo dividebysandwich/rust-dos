@@ -13,7 +13,13 @@ thread_local! {
 /// The current local time, or the fixed one.
 pub fn now() -> DateTime<Local> {
     match FIXED.with(Cell::get) {
-        Some(at) => Local.from_local_datetime(&at).earliest().unwrap_or_else(Local::now),
+        // A time the clocks skip as daylight saving time starts reads as
+        // the hour after it.
+        Some(at) => Local
+            .from_local_datetime(&at)
+            .earliest()
+            .or_else(|| Local.from_local_datetime(&(at + chrono::TimeDelta::hours(1))).earliest())
+            .unwrap_or_else(Local::now),
         None => Local::now(),
     }
 }

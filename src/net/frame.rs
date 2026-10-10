@@ -32,10 +32,13 @@ impl Mac {
     }
 
     /// A random unicast address with the locally administered bit set, so
-    /// it can't be a real card's.
+    /// it can't be a real card's. In deterministic mode it comes from the
+    /// mode's generator, the same in every run with the same start time.
     pub fn random_local() -> Mac {
         let mut bytes = [0; 6];
-        super::fill_random(&mut bytes);
+        if !crate::deterministic::random_bytes(&mut bytes) {
+            super::fill_random(&mut bytes);
+        }
         bytes[0] = (bytes[0] & 0xFC) | 0x02;
         Mac(bytes)
     }

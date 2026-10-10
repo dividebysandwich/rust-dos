@@ -81,6 +81,12 @@ pub fn load(m: &mut Machine, buf: &[u8]) -> Result<slots::Header, String> {
         return Err(why);
     }
     let hardware = slots::machine_settings(&header.machine, &m.settings);
+    // A failed `machine::load` puts the machine back by itself; the
+    // machine from before is needed only when the hardware changes, to
+    // put that back too.
+    let (old_settings, old_hardware) = (m.settings.clone(), m.hardware.clone());
+    let changes = hardware != old_settings || m.hardware.differs(&hardware);
+    let before = changes.then(|| savestate::machine::save(&m.cpu));
     if let Err(e) = m.apply(&hardware) {
         m.warn(&e);
     }
@@ -90,6 +96,14 @@ pub fn load(m: &mut Machine, buf: &[u8]) -> Result<slots::Header, String> {
             m.warn(&warning);
         }
     }
-    savestate::machine::load(&mut m.cpu, state).map_err(|e| e.to_string())?;
+    if let Err(e) = savestate::machine::load(&mut m.cpu, state) {
+        if let Some(before) = before {
+            if let Err(e) = m.apply(&old_settings) {
+                m.warn(&e);
+            }
+            savestate::machine::roll_back(&mut m.cpu, &mut m.hardware, &old_hardware, &old_settings, &before);
+        }
+        return Err(e.to_string());
+    }
     Ok(header)
 }
