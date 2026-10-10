@@ -583,27 +583,30 @@ struct MemPut {
     addr: String,
     hex: Option<String>,
     base64: Option<String>,
+    /// The bytes that must be there for the write to be made, hex.
+    expect: Option<String>,
+}
+
+/// Bytes written as hex digits; what isn't one is left out.
+fn hex_data(h: &str) -> Result<Vec<u8>, ApiError> {
+    let clean: String = h.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+    if clean.len() % 2 != 0 {
+        return Err(bad("hex data must have an even number of digits"));
+    }
+    Ok((0..clean.len()).step_by(2).map(|i| u8::from_str_radix(&clean[i..i + 2], 16).unwrap()).collect())
 }
 
 async fn mem_put(State(s): State<AppState>, body: Bytes) -> ApiResult {
     let b: MemPut = from_value(parse_body(&body)?)?;
     let data = match (b.hex, b.base64) {
-        (Some(h), None) => {
-            let clean: String = h.chars().filter(|c| c.is_ascii_hexdigit()).collect();
-            if clean.len() % 2 != 0 {
-                return Err(bad("hex data must have an even number of digits"));
-            }
-            (0..clean.len())
-                .step_by(2)
-                .map(|i| u8::from_str_radix(&clean[i..i + 2], 16).unwrap())
-                .collect()
-        }
+        (Some(h), None) => hex_data(&h)?,
         (None, Some(b64)) => base64::engine::general_purpose::STANDARD
             .decode(b64.trim())
             .map_err(|e| bad(format!("invalid base64: {}", e)))?,
         _ => return Err(bad("provide exactly one of 'hex' or 'base64'")),
     };
-    s.call_json(Cmd::WriteMem { addr: b.addr, data }, DEFAULT_TIMEOUT).await
+    let expect = b.expect.as_deref().map(hex_data).transpose()?;
+    s.call_json(Cmd::WriteMem { addr: b.addr, data, expect }, DEFAULT_TIMEOUT).await
 }
 
 #[derive(Deserialize)]
@@ -957,7 +960,9 @@ EXECUTION CONTROL
   GET  /api/control/wait?timeout_ms=30000            block until the emulator pauses
   GET  /api/registers        PUT /api/registers {"ax":"1234","flags":"0202"}
   GET  /api/memory?addr=DS:SI&len=256[&format=hex|base64|raw]
-  PUT  /api/memory {"addr":"B800:0000","hex":"41 1F"}  (or "base64")
+  PUT  /api/memory {"addr":"B800:0000","hex":"41 1F"}  (or "base64"); replies with
+                             the bytes replaced ("old") and read back ("new");
+                             "expect":"20 07" writes only if those bytes are there (409)
   GET  /api/disasm?addr=CS:IP&count=20[&format=json]   json: "lines" and "rows"
                                            ({label, phys, bytes, asm, len, current, breakpoint})
   GET/POST/DELETE /api/breakpoints   {"addr":"1234:0100"}  (DELETE without addr = all)

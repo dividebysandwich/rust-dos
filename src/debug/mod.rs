@@ -129,7 +129,9 @@ pub enum Cmd {
     GetRegs,
     SetRegs(Map<String, Value>),
     ReadMem { addr: String, len: usize },
-    WriteMem { addr: String, data: Vec<u8> },
+    /// Write `data` at an address; with `expect`, only if the bytes there
+    /// are those.
+    WriteMem { addr: String, data: Vec<u8>, expect: Option<Vec<u8>> },
     Disasm { addr: Option<String>, count: usize },
     ListBreakpoints,
     AddBreakpoint(String),
@@ -1310,11 +1312,27 @@ impl DebugHub {
                 }
                 Err(e) => Reply::bad(e),
             },
-            Cmd::WriteMem { addr, data } => match parse_addr(cpu, &addr) {
+            Cmd::WriteMem { expect: Some(expect), data, .. } if expect.len() != data.len() => {
+                Reply::bad(format!("expect has {} bytes, the data {}", expect.len(), data.len()))
+            }
+            Cmd::WriteMem { addr, data, expect } => match parse_addr(cpu, &addr) {
                 Ok(a) => {
                     let targets: Option<Vec<usize>> = (0..data.len()).map(|i| a.byte(cpu, i)).collect();
+                    let peek = |cpu: &Cpu, t: &[usize]| t.iter().map(|&p| cpu.bus.peek_8(p)).collect::<Vec<u8>>();
                     match targets {
                         Some(t) if t.iter().all(|&p| p < cpu.bus.ram().len() || cpu.bus.vbe.lfb_offset(p, 1).is_some()) => {
+                            let old = peek(cpu, &t);
+                            if let Some(expect) = expect.filter(|e| *e != old) {
+                                let _ = req.reply.send(Reply::Error(
+                                    409,
+                                    format!(
+                                        "the memory holds {}, not the expected {}; nothing was written",
+                                        trace::hex_bytes(&old),
+                                        trace::hex_bytes(&expect)
+                                    ),
+                                ));
+                                return;
+                            }
                             for (p, b) in t.iter().zip(&data) {
                                 // The debugger patches the ROMs too.
                                 if rust_dos::bus::Bus::is_rom(*p) {
@@ -1328,10 +1346,14 @@ impl DebugHub {
                             for w in &mut self.watchpoints {
                                 w.value = Watch::read(cpu, w.phys, w.len);
                             }
+                            // What it replaced, and what reads back: ROM
+                            // and read-only windows may keep their bytes.
                             Reply::Json(json!({
                                 "ok": true,
                                 "addr": format!("{:05X}", a.phys.unwrap_or(0)),
                                 "written": data.len(),
+                                "old": trace::hex_bytes(&old),
+                                "new": trace::hex_bytes(&peek(cpu, &t)),
                             }))
                         }
                         Some(_) => Reply::bad("write extends past end of memory"),
@@ -2180,8 +2202,50 @@ fn net_json(cpu: &Cpu) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{LowInput, keys_for_char, step_over_len};
+    use super::{Cmd, DebugHub, LowInput, Reply, Request, keys_for_char, step_over_len};
+    use crate::cpu::Cpu;
     use rust_dos::keylayout::Layout;
+    use serde_json::Value;
+    use tokio::sync::oneshot;
+
+    /// The reply to a command the hub answers at once.
+    fn ask(cpu: &mut Cpu, hub: &mut DebugHub, cmd: Cmd) -> Result<Value, (u16, String)> {
+        let (reply, mut rx) = oneshot::channel();
+        hub.handle(cpu, Request { cmd, reply });
+        match rx.try_recv() {
+            Ok(Reply::Json(v)) => Ok(v),
+            Ok(Reply::Error(code, e)) => Err((code, e)),
+            _ => panic!("no JSON reply"),
+        }
+    }
+
+    fn write(addr: &str, data: &[u8], expect: Option<&[u8]>) -> Cmd {
+        Cmd::WriteMem { addr: addr.into(), data: data.to_vec(), expect: expect.map(<[u8]>::to_vec) }
+    }
+
+    #[test]
+    fn a_write_reports_the_bytes_it_replaced() {
+        let (mut cpu, mut hub) = (Cpu::new(".".into()), DebugHub::disabled());
+        cpu.bus.write_8(0x2000, 0xCD);
+        cpu.bus.write_8(0x2001, 0xAB);
+        let done = ask(&mut cpu, &mut hub, write("0200:0000", &[0x21, 0x43], None)).unwrap();
+        assert_eq!((done["old"].as_str(), done["new"].as_str()), (Some("CD AB"), Some("21 43")));
+    }
+
+    #[test]
+    fn a_write_expecting_other_bytes_writes_nothing() {
+        let (mut cpu, mut hub) = (Cpu::new(".".into()), DebugHub::disabled());
+        cpu.bus.write_8(0x2000, 0xCD);
+        cpu.bus.write_8(0x2001, 0xAB);
+        let refused = ask(&mut cpu, &mut hub, write("2000", &[0x21, 0x43], Some(&[0x34, 0x12]))).unwrap_err();
+        assert_eq!(refused.0, 409);
+        assert!(refused.1.contains("CD AB"), "{}", refused.1);
+        assert_eq!((cpu.bus.peek_8(0x2000), cpu.bus.peek_8(0x2001)), (0xCD, 0xAB));
+        let done = ask(&mut cpu, &mut hub, write("2000", &[0x21, 0x43], Some(&[0xCD, 0xAB]))).unwrap();
+        assert_eq!(done["new"], "21 43");
+        let short = ask(&mut cpu, &mut hub, write("2000", &[0x21, 0x43], Some(&[0x21]))).unwrap_err();
+        assert_eq!(short.0, 400, "expect is as long as the data");
+    }
 
     /// The scan codes of the keys going down to type `c`.
     fn scans(c: char, layout: &str) -> Vec<u8> {
