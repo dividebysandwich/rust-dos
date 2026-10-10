@@ -1916,12 +1916,12 @@ dependencies = [
  "libloading 0.9.0",
  "md-5",
  "midir",
- "nuked-opl3",
  "openxr",
  "png",
  "rust-dos-audio-core",
  "rust-dos-dma",
  "rust-dos-hostdirs",
+ "rust-dos-opl",
  "rust-dos-savestate",
  "rust-dos-zip",
  "rustysynth",
@@ -1957,6 +1957,15 @@ name = "rust-dos-hostdirs"
 version = "1.5.0"
 dependencies = [
  "dirs",
+]
+
+[[package]]
+name = "rust-dos-opl"
+version = "1.5.0"
+dependencies = [
+ "nuked-opl3",
+ "rust-dos-audio-core",
+ "rust-dos-savestate",
 ]
 
 [[package]]

@@ -1,0 +1,14 @@
+[package]
+name = "rust-dos-opl"
+description = "The AdLib's and Sound Blaster's FM synthesizer (OPL2/OPL3), with its timers and status, as rust-dos emulates it"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+rust-dos-savestate = { path = "../savestate" }
+rust-dos-audio-core = { path = "../audio-core" }
+# The synthesis itself.
+nuked-opl3 = "0.1"

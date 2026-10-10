@@ -45,6 +45,8 @@ rust-dos-audio-core = { path = "crates/audio-core" }
 rust-dos-hostdirs = { path = "crates/hostdirs" }
 # Zip archives (crates/zip).
 rust-dos-zip = { path = "crates/zip" }
+# The sound cards, each a crate of its own (crates/).
+rust-dos-opl = { path = "crates/opl" }
 iced-x86 = "1.21.0"
 font8x8 = "0.3.1"
 chrono = "0.4.45"
@@ -61,8 +63,6 @@ flate2 = "1"
 # Checksums of BPS patches (src/archive/patch.rs).
 crc32fast = "1"
 base64 = "0.23.1"
-# FM synthesis for the AdLib and Sound Blaster (OPL2/OPL3).
-nuked-opl3 = "0.1"
 # General MIDI through the MPU-401, with a SoundFont.
 rustysynth = { version = "1.3", optional = true }
 # std::time::Instant and SystemTime, which panic in the browser (web/).

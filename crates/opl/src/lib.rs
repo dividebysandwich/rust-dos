@@ -34,6 +34,7 @@ pub struct Opl {
 impl Opl {
     /// Whether the chip has made no sound since it was reset (`render`
     /// then gives silence without running it).
+    #[inline]
     pub fn is_idle(&self) -> bool {
         !self.active
     }
@@ -52,11 +53,13 @@ impl Opl {
         }
     }
 
+    #[inline]
     pub fn is_opl3(&self) -> bool {
         self.opl3
     }
 
     /// Latch a register address in `bank` (1 is the OPL3's second bank).
+    #[inline]
     pub fn write_address(&mut self, bank: usize, value: u8) {
         if bank == 0 || self.opl3 {
             self.address[bank] = value;
@@ -64,6 +67,7 @@ impl Opl {
     }
 
     /// Write the latched register of `bank`. `now_us` is emulated time.
+    #[inline]
     pub fn write_data(&mut self, bank: usize, value: u8, now_us: u64) {
         if bank == 1 && !self.opl3 {
             return;
@@ -145,6 +149,7 @@ impl Opl {
     /// The status register: IRQ (bit 7) and the timer flags (6, 5). An
     /// OPL2 also reads 06h in the low bits, which is how programs tell the
     /// two apart.
+    #[inline]
     pub fn read_status(&mut self, now_us: u64) -> u8 {
         // Timer 1 counts 80 us steps, timer 2 320 us steps, up from the
         // value to 256.
@@ -183,4 +188,4 @@ impl Opl {
 
 // Whether it is an OPL3 comes with the Sound Blaster's model; the chip is
 // written anew from `regs` after a load.
-crate::state_fields!(Opl { address, timer_value, timer_start, timer_mask, timer_expired, active, regs } skip { chip, opl3 });
+rust_dos_savestate::state_fields!(Opl { address, timer_value, timer_start, timer_mask, timer_expired, active, regs } skip { chip, opl3 });
