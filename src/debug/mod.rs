@@ -925,8 +925,9 @@ impl DebugHub {
             let exec_secs = st.exec_time.as_secs_f64();
             st.mips = if exec_secs > 0.0 { st.executed as f64 / exec_secs / 1e6 } else { 0.0 };
             st.emulated_mips = st.executed as f64 / wall.as_secs_f64() / 1e6;
-            let hits = cache_hits - st.cache_mark.0;
-            let misses = cache_misses - st.cache_mark.1;
+            // A loaded save state starts the decode cache's counts again.
+            let hits = cache_hits.checked_sub(st.cache_mark.0).unwrap_or(cache_hits);
+            let misses = cache_misses.checked_sub(st.cache_mark.1).unwrap_or(cache_misses);
             st.cache_hit_rate = if hits + misses > 0 { hits as f64 / (hits + misses) as f64 } else { 0.0 };
             st.cache_mark = (cache_hits, cache_misses);
             st.executed = 0;
@@ -2935,6 +2936,17 @@ mod tests {
         assert!(hub.paused, "the machine stays paused");
         let listed = ask(&mut cpu, &mut hub, Cmd::ListBreakpoints, 0).unwrap();
         assert_eq!(listed["breakpoints"].as_array().map(Vec::len), Some(0), "{}", listed);
+    }
+
+    #[test]
+    fn the_cache_hit_rate_starts_again_after_a_load() {
+        let (_cpu, mut hub) = machine("cache-rate");
+        hub.stats.cache_mark = (100, 50);
+        hub.stats.window_start = std::time::Instant::now() - std::time::Duration::from_secs(2);
+        // A loaded state put in a new decode cache, counting from zero.
+        hub.record_batch(0, std::time::Duration::ZERO, 10, 5);
+        assert!((hub.stats.cache_hit_rate - 10.0 / 15.0).abs() < 1e-9, "{}", hub.stats.cache_hit_rate);
+        assert_eq!(hub.stats.cache_mark, (10, 5));
     }
 
     /// The scan codes of the keys going down to type `c`.
