@@ -332,7 +332,7 @@ pub fn add_search_dir(dir: PathBuf) {
 
 /// The folder in rust-dos's own directory, where the download goes.
 pub fn download_dir() -> Option<PathBuf> {
-    crate::config::user_dir().map(|dir| dir.join("sc55-roms"))
+    rust_dos_hostdirs::user_dir().map(|dir| dir.join("sc55-roms"))
 }
 
 /// Where DOSBox Staging keeps its Sound Canvas ROMs.
@@ -342,7 +342,7 @@ fn dosbox_staging_dir() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     return dirs::home_dir().map(|h| h.join("Library/Preferences/DOSBox/soundcanvas-roms"));
     #[cfg(not(any(windows, target_os = "macos")))]
-    return crate::hostdirs::config_dir().map(|d| d.join("dosbox").join("soundcanvas-roms"));
+    return rust_dos_hostdirs::config_dir().map(|d| d.join("dosbox").join("soundcanvas-roms"));
 }
 
 /// Where the ROMs are looked for without an `sc55roms` setting: the
@@ -374,12 +374,12 @@ impl Source {
             Source::File(path) => std::fs::read(path).map_err(|e| format!("{}: {}", path.display(), e)),
             Source::Zipped(zip, name) => {
                 let mut file = std::fs::File::open(zip).map_err(|e| format!("{}: {}", zip.display(), e))?;
-                let entries = crate::archive::zip::central_directory(&mut file)?;
+                let entries = rust_dos_zip::central_directory(&mut file)?;
                 let entry = entries
                     .iter()
                     .find(|e| &e.name() == name)
                     .ok_or_else(|| format!("{}: no {}", zip.display(), name))?;
-                crate::archive::zip::read(&mut file, entry)
+                rust_dos_zip::read(&mut file, entry)
             }
         }
     }
@@ -448,10 +448,10 @@ fn hashes_of(path: &Path, len: u64, modified: Option<SystemTime>) -> Hashes {
     let mut hashes = Vec::new();
     if is_zip && len <= MAX_ZIP {
         if let Ok(mut file) = std::fs::File::open(path)
-            && let Ok(entries) = crate::archive::zip::central_directory(&mut file)
+            && let Ok(entries) = rust_dos_zip::central_directory(&mut file)
         {
             for entry in entries.iter().filter(|e| !e.is_dir() && e.size <= MAX_ROM) {
-                if let Ok(bytes) = crate::archive::zip::read(&mut file, entry) {
+                if let Ok(bytes) = rust_dos_zip::read(&mut file, entry) {
                     hashes.push((sha256_hex(&bytes), Some(entry.name())));
                 }
             }
@@ -626,11 +626,11 @@ pub fn unscramble(src: &[u8]) -> Vec<u8> {
 /// file name, bytes) of each file that is one of a set's ROMs.
 pub fn roms_in_zip(zip: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
     let mut cursor = Cursor::new(zip);
-    let entries = crate::archive::zip::central_directory(&mut cursor)?;
+    let entries = rust_dos_zip::central_directory(&mut cursor)?;
     let known: Vec<&str> = ROMSETS.iter().flat_map(|r| r.roms.iter().map(|x| x.1)).collect();
     let mut out = Vec::new();
     for entry in entries.iter().filter(|e| !e.is_dir() && e.size <= MAX_ROM) {
-        let bytes = crate::archive::zip::read(&mut cursor, entry)?;
+        let bytes = rust_dos_zip::read(&mut cursor, entry)?;
         if known.contains(&sha256_hex(&bytes).as_str()) {
             let name = entry.name().rsplit('/').next().unwrap_or_default().to_string();
             out.push((name, bytes));
@@ -690,7 +690,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         let files: Vec<Vec<u8>> = (0..3u8).map(|i| vec![i; 0x2000]).collect();
         std::fs::write(dir.join("sub/a.bin"), &files[0]).unwrap();
-        let zip = crate::archive::zip::tests::zip(&[("x/b.bin", &files[1], true), ("c.bin", &files[2], false)]);
+        let zip = rust_dos_zip::tests::zip(&[("x/b.bin", &files[1], true), ("c.bin", &files[2], false)]);
         std::fs::write(dir.join("set.ZIP"), zip).unwrap();
         let mut found = HashMap::new();
         collect(&dir, 0, &mut found);

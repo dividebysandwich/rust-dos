@@ -1,0 +1,28 @@
+[package]
+name = "rust-dos-sc55"
+description = "The Roland Sound Canvas SC-55 family: its H8/532 and sub-CPU, PCM chip and ROMs (a port of Nuked-SC55), as rust-dos emulates it"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+rust-dos-hostdirs = { path = "../hostdirs" }
+rust-dos-zip = { path = "../zip" }
+# The ROMs' checksums.
+sha2 = "0.11"
+
+# DOSBox's ROM directory on macOS.
+[target.'cfg(not(windows))'.dependencies]
+dirs = "7.0.0"
+
+# The ROMs' download (the `download` feature).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ureq = { version = "3", default-features = false, features = ["rustls"], optional = true }
+
+[features]
+download = ["dep:ureq"]
+
+[dev-dependencies]
+rust-dos-zip = { path = "../zip", features = ["test-util"] }

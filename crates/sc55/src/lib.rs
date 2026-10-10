@@ -156,6 +156,7 @@ impl Sc55 {
 
     /// MIDI bytes as they come.
     #[doc(hidden)]
+    #[inline]
     pub fn midi_bytes(&mut self, bytes: &[u8]) {
         self.post(bytes);
     }
@@ -171,6 +172,7 @@ impl Sc55 {
     }
 
     /// A channel message.
+    #[inline]
     pub fn message(&mut self, status: u8, d1: u8, d2: u8) {
         if matches!(status & 0xF0, 0xC0 | 0xD0) {
             self.post(&[status, d1]);

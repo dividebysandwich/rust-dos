@@ -93,7 +93,7 @@ pub mod printer;
 pub mod recorder;
 pub mod savestate;
 pub use rust_dos_soundblaster::sb;
-pub mod sc55;
+pub use rust_dos_sc55 as sc55;
 pub mod serial;
 pub mod shell;
 pub mod shared_disk;

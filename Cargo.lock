@@ -1898,7 +1898,6 @@ dependencies = [
  "chrono",
  "clap",
  "crc32fast",
- "dirs",
  "dynasm",
  "dynasmrt",
  "flate2",
@@ -1926,6 +1925,7 @@ dependencies = [
  "rust-dos-mt32",
  "rust-dos-opl",
  "rust-dos-savestate",
+ "rust-dos-sc55",
  "rust-dos-soundblaster",
  "rust-dos-tandy",
  "rust-dos-zip",
@@ -2003,6 +2003,17 @@ dependencies = [
 [[package]]
 name = "rust-dos-savestate"
 version = "1.5.0"
+
+[[package]]
+name = "rust-dos-sc55"
+version = "1.5.0"
+dependencies = [
+ "dirs",
+ "rust-dos-hostdirs",
+ "rust-dos-zip",
+ "sha2",
+ "ureq",
+]
 
 [[package]]
 name = "rust-dos-soundblaster"

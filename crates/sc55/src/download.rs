@@ -33,7 +33,7 @@ pub fn romset_for(model: &str) -> Option<&'static Romset> {
 /// hash and written to a temporary file first, so a failed download
 /// leaves nothing behind. Returns the folder. It blocks: run it on a
 /// thread of its own.
-#[cfg(all(feature = "sdl", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "download", not(target_arch = "wasm32")))]
 pub fn download(romset: &'static Romset, dir: &Path) -> Result<PathBuf, String> {
     /// The Internet Archive item with a zip of each set.
     const ITEM: &str = "https://archive.org/download/roland-sc-55-series-roms/";
@@ -54,7 +54,7 @@ pub fn download(romset: &'static Romset, dir: &Path) -> Result<PathBuf, String> 
     install(romset, &zip, dir)
 }
 
-#[cfg(not(all(feature = "sdl", not(target_arch = "wasm32"))))]
+#[cfg(not(all(feature = "download", not(target_arch = "wasm32"))))]
 pub fn download(_romset: &'static Romset, _dir: &Path) -> Result<PathBuf, String> {
     Err("downloads are only available in the rust-dos program".to_string())
 }
@@ -95,7 +95,7 @@ mod tests {
 
     #[test]
     fn archives_without_the_roms_are_refused() {
-        let zip = crate::archive::zip::tests::zip(&[("rom1.bin", &[1; 0x8000], true)]);
+        let zip = rust_dos_zip::tests::zip(&[("rom1.bin", &[1; 0x8000], true)]);
         let dir = std::env::temp_dir().join(format!("rust-dos-sc55-install-{}", std::process::id()));
         let set = Romset::by_name("mk2-v1.01").unwrap();
         assert!(install(set, &zip, &dir).is_err());
@@ -105,7 +105,7 @@ mod tests {
     /// Every set the table names comes whole out of the Internet Archive.
     /// Opt-in, as it fetches about 25 MB: RUST_DOS_SC55_DOWNLOAD=<dir>.
     #[test]
-    #[cfg(all(feature = "sdl", not(target_arch = "wasm32")))]
+    #[cfg(all(feature = "download", not(target_arch = "wasm32")))]
     fn every_archive_has_its_set() {
         let Some(dir) = std::env::var_os("RUST_DOS_SC55_DOWNLOAD") else { return };
         let dir = PathBuf::from(dir);

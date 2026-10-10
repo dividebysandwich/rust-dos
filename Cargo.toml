@@ -52,6 +52,7 @@ rust-dos-lpt-dac = { path = "crates/lpt-dac" }
 rust-dos-soundblaster = { path = "crates/soundblaster" }
 rust-dos-gus = { path = "crates/gus" }
 rust-dos-mt32 = { path = "crates/mt32" }
+rust-dos-sc55 = { path = "crates/sc55" }
 iced-x86 = "1.21.0"
 font8x8 = "0.3.1"
 chrono = "0.4.45"
@@ -86,11 +87,6 @@ jpeg-decoder = { version = "0.3", default-features = false, optional = true }
 hayro = { version = "0.7", optional = true }
 # 7z archives as drives (src/archive/sevenz.rs).
 sevenz-rust2 = { version = "0.22", default-features = false, features = ["bzip2", "deflate", "ppmd"], optional = true }
-
-# The user's home and configuration directories, which Windows has in the
-# environment (crates/hostdirs; sc55's DOSBox ROM directory on macOS).
-[target.'cfg(not(windows))'.dependencies]
-dirs = "7.0.0"
 
 # The window, the sound device and the debug server of the rust-dos program,
 # which the browser build (web/) has in JavaScript instead.
@@ -149,7 +145,7 @@ windows-sys = { version = "0.61", features = ["Win32_System_Memory", "Win32_Syst
 default = ["sdl", "gl", "vr", "midi", "hostmidi", "cdaudio", "sevenz", "manuals"]
 # The rust-dos program: its window and sound device, its debug server and
 # its connection to RetroAchievements.
-sdl = ["dep:sdl2", "dep:axum", "dep:ureq", "rust-dos-soundblaster/download"]
+sdl = ["dep:sdl2", "dep:axum", "dep:ureq", "rust-dos-soundblaster/download", "rust-dos-sc55/download"]
 # The window drawn with OpenGL 3: the CRT shaders, and the 3dfx card at
 # higher resolutions. Without it (as on Redox), SDL's renderer draws the
 # picture, without them.
