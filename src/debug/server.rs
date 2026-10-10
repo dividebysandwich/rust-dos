@@ -587,9 +587,24 @@ struct MemPut {
     expect: Option<String>,
 }
 
-/// Bytes written as hex digits; what isn't one is left out.
+/// Bytes written as hex digits; what isn't one is left out, and so is a
+/// `0x` that starts a number, so "0xCD 0xAB" is CD AB.
 fn hex_data(h: &str) -> Result<Vec<u8>, ApiError> {
-    let clean: String = h.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+    let mut clean = String::with_capacity(h.len());
+    let mut prev: Option<char> = None;
+    let mut chars = h.chars().peekable();
+    while let Some(c) = chars.next() {
+        let starts_number = !prev.is_some_and(|p| p.is_ascii_hexdigit());
+        if c == '0' && starts_number && matches!(chars.peek(), Some('x' | 'X')) {
+            chars.next();
+            prev = Some('x');
+            continue;
+        }
+        if c.is_ascii_hexdigit() {
+            clean.push(c);
+        }
+        prev = Some(c);
+    }
     if clean.len() % 2 != 0 {
         return Err(bad("hex data must have an even number of digits"));
     }
@@ -1030,3 +1045,17 @@ WEBSOCKETS
   /ws/audio           text header, then binary s16le 44100 Hz stereo (interleaved) chunks
   /ws/input           send input events (same JSON as /api/input/batch, optional "wait":true)
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::hex_data;
+
+    #[test]
+    fn hex_data_skips_0x_prefixes() {
+        assert_eq!(hex_data("CD AB").ok(), Some(vec![0xCD, 0xAB]));
+        assert_eq!(hex_data("0xCD 0xAB").ok(), Some(vec![0xCD, 0xAB]));
+        assert_eq!(hex_data("0XCDAB").ok(), Some(vec![0xCD, 0xAB]));
+        assert_eq!(hex_data("00 0x10").ok(), Some(vec![0x00, 0x10]));
+        assert!(hex_data("CDA").is_err());
+    }
+}

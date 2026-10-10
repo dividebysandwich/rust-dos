@@ -1323,38 +1323,40 @@ impl DebugHub {
                         Some(t) if t.iter().all(|&p| p < cpu.bus.ram().len() || cpu.bus.vbe.lfb_offset(p, 1).is_some()) => {
                             let old = peek(cpu, &t);
                             if let Some(expect) = expect.filter(|e| *e != old) {
-                                let _ = req.reply.send(Reply::Error(
+                                Reply::Error(
                                     409,
                                     format!(
                                         "the memory holds {}, not the expected {}; nothing was written",
                                         trace::hex_bytes(&old),
                                         trace::hex_bytes(&expect)
                                     ),
-                                ));
-                                return;
-                            }
-                            for (p, b) in t.iter().zip(&data) {
-                                // The debugger patches the ROMs too.
-                                if rust_dos::bus::Bus::is_rom(*p) {
-                                    cpu.bus.write_rom(*p, &[*b]);
-                                } else {
-                                    cpu.bus.write_8(*p, *b);
+                                )
+                            } else {
+                                for (p, b) in t.iter().zip(&data) {
+                                    // The debugger patches the ROMs too.
+                                    if rust_dos::bus::Bus::is_rom(*p) {
+                                        cpu.bus.write_rom(*p, &[*b]);
+                                    } else {
+                                        cpu.bus.write_8(*p, *b);
+                                    }
                                 }
+                                // The debugger's own changes don't stop the
+                                // machine.
+                                for w in &mut self.watchpoints {
+                                    w.value = Watch::read(cpu, w.phys, w.len);
+                                }
+                                // What it replaced, and what reads back: the
+                                // VGA's planes, read through its read mode,
+                                // and device registers can differ from the
+                                // data written.
+                                Reply::Json(json!({
+                                    "ok": true,
+                                    "addr": format!("{:05X}", a.phys.unwrap_or(0)),
+                                    "written": data.len(),
+                                    "old": trace::hex_bytes(&old),
+                                    "new": trace::hex_bytes(&peek(cpu, &t)),
+                                }))
                             }
-                            // The debugger's own changes don't stop the
-                            // machine.
-                            for w in &mut self.watchpoints {
-                                w.value = Watch::read(cpu, w.phys, w.len);
-                            }
-                            // What it replaced, and what reads back: ROM
-                            // and read-only windows may keep their bytes.
-                            Reply::Json(json!({
-                                "ok": true,
-                                "addr": format!("{:05X}", a.phys.unwrap_or(0)),
-                                "written": data.len(),
-                                "old": trace::hex_bytes(&old),
-                                "new": trace::hex_bytes(&peek(cpu, &t)),
-                            }))
                         }
                         Some(_) => Reply::bad("write extends past end of memory"),
                         None => Reply::bad("write reaches an unmapped page"),

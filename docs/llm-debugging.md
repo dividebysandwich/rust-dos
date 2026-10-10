@@ -226,7 +226,11 @@ curl -s -XPOST $H/api/control/resume
     When the bytes there differ, nothing is written and the reply is HTTP
     409 with the bytes found. The check and the write happen between two
     instructions, so the program can't change the bytes in between, paused
-    or not.
+    or not. `expect`, `old` and `new` are the bytes `GET /api/memory` reads
+    there. In the planar VGA modes (A000 outside mode 13h) that read goes
+    through the VGA's read mode and sees one plane, while the write lands on
+    the planes the Map Mask picks, so a match there says nothing about the
+    other planes.
 - **Interrupt vectors:** `GET /api/ivt`. `hle:true` means the vector still
   points at the emulator's built-in handler, so a program has not hooked it.
 - **Disassembly as data:** `GET /api/disasm?format=json` has, next to the
