@@ -1,27 +1,28 @@
 //! The 3dfx card drawn again with OpenGL at `voodoo_scale` times its
-//! resolution, for the window (`voodoo_renderer=opengl`). The card records
-//! what it draws (`rust_dos::voodoo::mirror`); here each of its colour
-//! buffers is the texture of a framebuffer object, all sharing one depth
-//! texture, the triangles go through the card's pixel pipeline in a shader
-//! (voodoo/triangle.frag) with OpenGL's depth test and blending, and the
-//! front buffer through the card's gamma table is the picture the window
-//! shows. With `voodoo_msaa`, the buffers are multisampled and resolved
-//! into their textures before they are shown. The software rasterizer's memory stays what screenshots,
-//! recordings and the debugger see, and what the game reads back; it only
-//! draws what those can still see (`rust_dos::voodoo::backlog`).
+//! resolution, for the window and the libretro core's hardware rendering
+//! (`voodoo_renderer=opengl`). The card records what it draws
+//! (`super::mirror`); here each of its colour buffers is the texture of a
+//! framebuffer object, all sharing one depth texture, the triangles go
+//! through the card's pixel pipeline in a shader (gl/triangle.frag) with
+//! OpenGL's depth test and blending, and the front buffer through the
+//! card's gamma table is the picture shown. With `voodoo_msaa`, the buffers
+//! are multisampled and resolved into their textures before they are shown.
+//! The software rasterizer's memory stays what screenshots, recordings and
+//! the debugger see, and what the game reads back; it only draws what those
+//! can still see (`super::backlog`).
 
 use glow::HasContext;
-use rust_dos::video::Frame;
-use rust_dos::video::shader::Glsl;
-use rust_dos::voodoo::mirror::{Command, Draw, Fill, Frame as Recording, Pixels, Snapshot, Texture, Vertex};
+use crate::video::Frame;
+use crate::video::shader::Glsl;
+use super::mirror::{Command, Draw, Fill, Frame as Recording, Pixels, Snapshot, Texture, Vertex};
 use std::collections::HashMap;
 
-const TRIANGLE_VERT: &str = include_str!("voodoo/triangle.vert");
-const TRIANGLE_FRAG: &str = include_str!("voodoo/triangle.frag");
-const QUAD_VERT: &str = include_str!("voodoo/quad.vert");
-const PIXELS_FRAG: &str = include_str!("voodoo/pixels.frag");
-const DEPTH_FRAG: &str = include_str!("voodoo/depth.frag");
-const CLUT_FRAG: &str = include_str!("voodoo/clut.frag");
+const TRIANGLE_VERT: &str = include_str!("gl/triangle.vert");
+const TRIANGLE_FRAG: &str = include_str!("gl/triangle.frag");
+const QUAD_VERT: &str = include_str!("gl/quad.vert");
+const PIXELS_FRAG: &str = include_str!("gl/pixels.frag");
+const DEPTH_FRAG: &str = include_str!("gl/depth.frag");
+const CLUT_FRAG: &str = include_str!("gl/clut.frag");
 
 const TRIANGLE_UNIFORMS: &[&str] = &[
     "u_size", "u_fbzcp", "u_fbz", "u_alpha", "u_fog", "u_color0", "u_color1", "u_chroma", "u_zacolor", "u_fogcolor",
@@ -805,7 +806,7 @@ fn rgba(key: Option<u32>, value: u16) -> [u8; 4] {
 
 /// The gamma table as 256 RGBA entries a component takes its value from.
 fn lut(clut: &[u32; 33]) -> Vec<u8> {
-    rust_dos::voodoo::gamma_table(clut).iter().flat_map(|&[r, g, b]| [r, g, b, 0xFF]).collect()
+    super::gamma_table(clut).iter().flat_map(|&[r, g, b]| [r, g, b, 0xFF]).collect()
 }
 
 fn vertex_bytes(vertices: &[Vertex]) -> &[u8] {

@@ -148,7 +148,10 @@ sdl = ["dep:sdl2", "dep:axum", "dep:ureq", "rust-dos-soundblaster/download", "ru
 # The window drawn with OpenGL 3: the CRT shaders, and the 3dfx card at
 # higher resolutions. Without it (as on Redox), SDL's renderer draws the
 # picture, without them.
-gl = ["sdl", "dep:glow"]
+gl = ["sdl", "voodoo-gl"]
+# The 3dfx card drawn again with OpenGL (src/voodoo/gl.rs), by the window
+# and by the libretro core's hardware rendering.
+voodoo-gl = ["dep:glow"]
 # The picture on a screen in a 3D scene: in a window with a camera to fly
 # (--vr-desktop), or in a VR headset through OpenXR (--vr, on Linux and
 # Windows).
