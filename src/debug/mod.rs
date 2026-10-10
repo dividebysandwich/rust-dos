@@ -1134,6 +1134,13 @@ impl DebugHub {
         }
     }
 
+    /// A control request takes over the machine: the step count and the
+    /// run-to target of the operation it supersedes stop nothing more.
+    fn take_over(&mut self) {
+        self.step_budget = None;
+        self.temp_breakpoint = None;
+    }
+
     /// Program starts and ends since the journal last told them, as
     /// `program_started` and `program_exited` (with `count` when there were
     /// several in the batch).
@@ -1752,6 +1759,11 @@ impl DebugHub {
         while !self.paused && !self.time_stop(cpu) && cpu.bus.clock.icount < end {
             let (reason, reached) = mode.step(cpu, self, hot, end);
             if let Some(boundary) = reached {
+                // Program starts and ends are told at the millisecond, so
+                // that the journal doesn't depend on the host's frames.
+                if self.shared.is_some() {
+                    self.tell_programs(cpu);
+                }
                 at_ms(cpu, self, boundary);
             }
             if matches!(reason, crate::exec::StopReason::Paused | crate::exec::StopReason::Exit) {
@@ -2300,20 +2312,21 @@ impl DebugHub {
                     Some(Ok(phys)) => Some(phys),
                     None => None,
                 };
-                if target.is_some() {
-                    self.temp_breakpoint = target;
-                }
+                self.take_over();
+                self.temp_breakpoint = target;
                 self.stop_at_ns = until_ms.map(|ms| ms.saturating_mul(1_000_000));
                 self.start_op(cpu, OpKind::Resume, json!({"until": until, "until_ms": until_ms}));
                 Reply::Json(json!({"ok": true, "paused": false}))
             }
             Cmd::Step { count } => {
+                self.take_over();
                 self.step_budget = Some(count.max(1));
                 self.start_op(cpu, OpKind::Step, json!({"count": count.max(1)}));
                 Reply::Json(json!({"ok": true, "paused": false}))
             }
             Cmd::StepOver => {
                 let target = step_over_target(cpu);
+                self.take_over();
                 match target {
                     Some(next) => self.temp_breakpoint = Some(next),
                     None => self.step_budget = Some(1),
@@ -2334,11 +2347,13 @@ impl DebugHub {
                 self.release_keys(cpu);
                 cpu.close_program();
                 self.closed_program = true;
+                self.take_over();
                 self.start_op(cpu, OpKind::RebootShell, json!({}));
                 Reply::Json(json!({"ok": true}))
             }
             Cmd::Reboot => {
                 cpu.bus.reset_requested = true;
+                self.take_over();
                 self.start_op(cpu, OpKind::Reboot, json!({}));
                 Reply::Json(json!({"ok": true}))
             }
@@ -2562,6 +2577,7 @@ impl DebugHub {
                     Reply::bad("command: one command line")
                 } else {
                     cpu.queue_batch_lines([command.trim()]);
+                    self.take_over();
                     self.seen_starts = cpu.programs.started;
                     self.start_once = stop_at_entry;
                     let op = self.cur.as_ref().map_or(0, |c| c.req);
@@ -4095,7 +4111,7 @@ mod tests {
 
     /// Type PROBE at the prompt and run to 2 s of emulated time, in host
     /// frames of `frame_ms`: the instructions executed, and memory.
-    fn typed_run(name: &str, frame_ms: u64) -> (u64, Vec<u8>) {
+    fn typed_run(name: &str, frame_ms: u64) -> (u64, Vec<u8>, Vec<Value>) {
         let (mut cpu, mut hub, mut mode) = deterministic_machine(name);
         reply(&mut cpu, &mut hub, typed("PROBE\n")).unwrap();
         let resumed = reply(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: Some(2000) }).unwrap();
@@ -4104,7 +4120,18 @@ mod tests {
         assert!(hub.paused, "stopped at until_ms");
         assert_eq!(cpu.bus.clock.now_ns() / 1_000_000, 2000);
         assert_eq!(cpu.programs.started, 1, "PROBE ran");
-        (cpu.executed, cpu.bus.ram().to_vec())
+        let stop = entries_of(&hub, "paused").pop().unwrap();
+        // At the first instruction boundary past 2 s.
+        assert_eq!((stop["reason"].as_str(), stop["emu_ns"].as_u64().map(|ns| ns / 1_000_000)), (Some("time"), Some(2000)));
+        // The journal, but for the host's time.
+        let journal = entries(&hub)
+            .into_iter()
+            .map(|mut e| {
+                e.as_object_mut().unwrap().remove("t_ms");
+                e
+            })
+            .collect();
+        (cpu.executed, cpu.bus.ram().to_vec(), journal)
     }
 
     #[test]
@@ -4113,6 +4140,8 @@ mod tests {
         let b = typed_run("b", 41);
         assert_eq!(a.0, b.0);
         assert!(a.1 == b.1, "the same memory");
+        assert_eq!(a.2, b.2, "the same journal");
+        assert!(a.2.iter().any(|e| e["type"] == "input_delivered") && a.2.iter().any(|e| e["type"] == "program_started"));
     }
 
     #[test]
@@ -4154,6 +4183,7 @@ mod tests {
             let mut load = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match });
             let body = refusal(&mut load);
             assert_eq!(body["paused"], false, "{}", body);
+            assert_eq!(body["precondition"], "paused", "{}", body);
             assert!(body["error"].as_str().unwrap().contains("deterministic mode"), "{}", body);
         }
         // A strict-match save is refused by its own rule, in the same shape.
@@ -4206,6 +4236,333 @@ mod tests {
         run_deterministic(&mut cpu, &mut hub, &mut mode, 700, 16);
         assert!(cpu.bus.clock.now_ns() > 5_000_000_000);
         assert!(!hub.paused, "the dropped until_ms didn't stop it");
+    }
+
+    // ----- the journal --------------------------------------------------------
+
+    /// The answer to `cmd` sent with `If-State-Seq: if_state`: the reply's
+    /// JSON or the error's status and body, and the journal's state.
+    fn ask_guarded(cpu: &mut Cpu, hub: &mut DebugHub, cmd: Cmd, if_state: Option<u64>) -> (Result<Value, (u16, Value)>, super::Meta) {
+        let (mut request, mut rx) = hub.request(cmd);
+        request.if_state = if_state;
+        hub.handle(cpu, request);
+        let answer = rx.try_recv().expect("an answer at once");
+        let result = match answer.reply {
+            Reply::Json(v) => Ok(v),
+            Reply::Error(code, e) => Err((code, serde_json::json!({"error": e}))),
+            Reply::ErrorJson(code, v) => Err((code, v)),
+            _ => panic!("not a JSON reply"),
+        };
+        (result, answer.meta)
+    }
+
+    /// The journal's state now.
+    fn journal_state(hub: &DebugHub) -> (u64, Option<u64>, u64) {
+        hub.with_journal(|j| (j.state_seq, j.stop_seq, j.last())).unwrap()
+    }
+
+    fn op_state(hub: &DebugHub, op: u64) -> super::journal::Op {
+        hub.with_journal(|j| match j.op(op) {
+            OpLookup::Found(op) => op.clone(),
+            _ => panic!("no operation {}", op),
+        })
+        .unwrap()
+    }
+
+    /// The request number the answer to a request that started an
+    /// operation names.
+    fn started_op(cpu: &mut Cpu, hub: &mut DebugHub, cmd: Cmd) -> u64 {
+        let (request, mut rx) = hub.request(cmd);
+        let req = request.req;
+        hub.handle(cpu, request);
+        let answer = rx.try_recv().expect("an answer at once");
+        assert!(matches!(answer.reply, Reply::Json(_)), "accepted");
+        assert_eq!(answer.meta.op, Some(req));
+        req
+    }
+
+    /// Stopped at PROBE.COM's first instruction: its code segment.
+    fn at_probe_entry(cpu: &mut Cpu, hub: &mut DebugHub) -> String {
+        let stop = ask(cpu, hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true }, 50).unwrap();
+        stop["registers"]["cs"].as_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn the_journal_numbers_its_entries_and_follows_the_state() {
+        let (mut cpu, mut hub) = machine("journal-numbers");
+        let cs = at_probe_entry(&mut cpu, &mut hub);
+        ask(&mut cpu, &mut hub, write("0200:0000", &[1, 2], None), 0).unwrap();
+        ask(&mut cpu, &mut hub, Cmd::AddBreakpoint { addr: format!("{}:0103", cs), once: false }, 0).unwrap();
+        ask(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }, 0).unwrap();
+        ask(&mut cpu, &mut hub, Cmd::WaitPause, 50).unwrap();
+        let all = entries(&hub);
+        assert_eq!(all[0]["type"], "started");
+        assert_eq!(all[0]["seq"], 1);
+        for (i, e) in all.iter().enumerate() {
+            assert_eq!(e["seq"].as_u64(), Some(i as u64 + 1), "gapless: {}", e);
+        }
+        let changed = all.iter().filter(|e| super::Kind::parse(e["type"].as_str().unwrap()).unwrap().changes_state()).last();
+        assert_eq!(journal_state(&hub).0, changed.unwrap()["seq"].as_u64().unwrap());
+        // A breakpoint is the debugger's own: it changes nothing.
+        let set = &entries_of(&hub, "breakpoint_set")[0];
+        assert!(set["seq"].as_u64().unwrap() > entries_of(&hub, "memory_written")[0]["seq"].as_u64().unwrap());
+    }
+
+    #[test]
+    fn a_pause_and_a_resume_in_one_drain_are_told_in_order() {
+        let (mut cpu, mut hub) = machine("journal-order");
+        let pause = hub.request(Cmd::Pause);
+        let resume = hub.request(Cmd::Resume { until: None, until_ms: None });
+        let resume_req = resume.0.req;
+        hub.handle(&mut cpu, pause.0);
+        hub.handle(&mut cpu, resume.0);
+        let types: Vec<Value> = entries(&hub).iter().skip(1).map(|e| e["type"].clone()).collect();
+        assert_eq!(types, ["paused", "resumed"]);
+        assert_eq!(op_state(&hub, resume_req).state, OpState::Pending);
+        // Another client pauses: the resume ends stopped, by that pause.
+        let (request, _rx) = hub.request(Cmd::Pause);
+        let pause_req = request.req;
+        hub.handle(&mut cpu, request);
+        let op = op_state(&hub, resume_req);
+        assert_eq!(op.state, OpState::Stopped);
+        let stop = &entries_of(&hub, "paused")[1];
+        assert_eq!((stop["by"].as_u64(), stop["cause"].as_u64(), stop["op"].as_u64()), (Some(pause_req), Some(pause_req), Some(resume_req)));
+        assert_eq!(op.end_seq, stop["seq"].as_u64());
+    }
+
+    #[test]
+    fn a_stop_before_the_wait_is_found_after_the_resume() {
+        let (mut cpu, mut hub) = machine("journal-early-stop");
+        let cs = at_probe_entry(&mut cpu, &mut hub);
+        ask(&mut cpu, &mut hub, Cmd::AddBreakpoint { addr: format!("{}:0103", cs), once: false }, 0).unwrap();
+        let op = started_op(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None });
+        let resumed = entries_of(&hub, "resumed").last().unwrap()["seq"].as_u64().unwrap();
+        // The machine stops before anyone asks.
+        run(&mut cpu, &mut hub, 5);
+        assert!(hub.paused);
+        let stop = stop_after(&hub, resumed).expect("the stop is in the journal");
+        assert_eq!((stop["reason"].as_str(), stop["op"].as_u64()), (Some("breakpoint"), Some(op)));
+        assert_eq!(op_reply(&hub, op).unwrap().unwrap()["seq"], stop["seq"]);
+    }
+
+    #[test]
+    fn a_breakpoint_once_goes_once_it_stops_the_machine() {
+        let (mut cpu, mut hub) = machine("journal-once");
+        let cs = at_probe_entry(&mut cpu, &mut hub);
+        let at = format!("{}:0103", cs);
+        let listed = ask(&mut cpu, &mut hub, Cmd::AddBreakpoint { addr: at.clone(), once: true }, 0).unwrap();
+        assert_eq!(listed["once"].as_array().map(Vec::len), Some(1));
+        ask(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }, 0).unwrap();
+        run(&mut cpu, &mut hub, 5);
+        // A wait that comes late, and the journal, show the same stop.
+        let late = ask(&mut cpu, &mut hub, Cmd::WaitPause, 0).unwrap();
+        let stop = entries_of(&hub, "paused").pop().unwrap();
+        for e in [&late, &stop] {
+            assert_eq!((e["reason"].as_str(), e["once"].as_bool()), (Some("breakpoint"), Some(true)), "{}", e);
+            assert_eq!(e["breakpoint"], stop["breakpoint"]);
+        }
+        assert_eq!(late["stop"], stop);
+        let listed = ask(&mut cpu, &mut hub, Cmd::ListBreakpoints, 0).unwrap();
+        assert_eq!(listed["breakpoints"].as_array().map(Vec::len), Some(0), "{}", listed);
+
+        // A run to the same address names no breakpoint.
+        ask(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }, 0).unwrap();
+        run(&mut cpu, &mut hub, 20);
+        let cs = at_probe_entry(&mut cpu, &mut hub);
+        ask(&mut cpu, &mut hub, Cmd::Resume { until: Some(format!("{}:0103", cs)), until_ms: None }, 0).unwrap();
+        run(&mut cpu, &mut hub, 5);
+        let stop = entries_of(&hub, "paused").pop().unwrap();
+        assert!(stop.get("breakpoint").is_none() && stop["target"].is_string(), "{}", stop);
+    }
+
+    #[test]
+    fn a_step_another_resume_takes_over_is_superseded() {
+        let (mut cpu, mut hub) = machine("journal-supersede");
+        let cs = at_probe_entry(&mut cpu, &mut hub);
+        ask(&mut cpu, &mut hub, Cmd::AddBreakpoint { addr: format!("{}:0106", cs), once: false }, 0).unwrap();
+        let step = started_op(&mut cpu, &mut hub, Cmd::Step { count: 1 });
+        let resume = started_op(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None });
+        let op = op_state(&hub, step);
+        assert_eq!((op.state, op.superseded_by), (OpState::Superseded, Some(resume)));
+        assert_eq!(entries_of(&hub, "resumed").last().unwrap()["supersedes"].as_u64(), Some(step));
+        run(&mut cpu, &mut hub, 5);
+        // Where the step's chain ends: the resume's stop.
+        let stop = op_reply(&hub, resume).unwrap().unwrap();
+        assert_eq!((stop["reason"].as_str(), stop["op"].as_u64()), (Some("breakpoint"), Some(resume)));
+    }
+
+    #[test]
+    fn if_state_seq_holds_only_in_the_state_read() {
+        let (mut cpu, mut hub) = machine("journal-if-state");
+        pause(&mut cpu, &mut hub);
+        let read = journal_state(&hub).0;
+        let (done, meta) = ask_guarded(&mut cpu, &mut hub, write("0200:0000", &[1], None), Some(read));
+        done.unwrap();
+        assert!(meta.state_seq > read, "the write moves the state");
+        // Another client wrote since.
+        let mine = meta.state_seq;
+        ask(&mut cpu, &mut hub, write("0200:0000", &[2], None), 0).unwrap();
+        let (refused, _) = ask_guarded(&mut cpu, &mut hub, write("0200:0000", &[3], None), Some(mine));
+        let (code, body) = refused.unwrap_err();
+        assert_eq!((code, body["precondition"].as_str()), (409, Some("state")), "{}", body);
+        assert_eq!(body["state_seq"].as_u64(), Some(journal_state(&hub).0));
+        assert_eq!(cpu.bus.peek_8(0x2000), 2, "nothing was written");
+
+        // A resume and a stop since.
+        let read = journal_state(&hub).0;
+        ask(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }, 0).unwrap();
+        let (refused, _) = ask_guarded(&mut cpu, &mut hub, write("0200:0000", &[3], None), Some(read));
+        assert_eq!(refused.unwrap_err().1["paused"], false, "refused while running");
+        pause(&mut cpu, &mut hub);
+        let (refused, _) = ask_guarded(&mut cpu, &mut hub, write("0200:0000", &[3], None), Some(read));
+        assert_eq!(refused.unwrap_err().0, 409, "refused after the stop");
+
+        // Input being typed while paused, and the settings window open.
+        let read = journal_state(&hub).0;
+        ask(&mut cpu, &mut hub, Cmd::Input { events: vec![InputEvent::Wait { ms: 60_000 }], wait: false }, 0).unwrap();
+        let (refused, _) = ask_guarded(&mut cpu, &mut hub, Cmd::GetRegs, Some(read));
+        assert_eq!(refused.unwrap_err().1["input_queued"], 1);
+        ask(&mut cpu, &mut hub, Cmd::InputClear, 0).unwrap();
+        let read = journal_state(&hub).0;
+        hub.divert = true;
+        let (refused, _) = ask_guarded(&mut cpu, &mut hub, Cmd::GetRegs, Some(read));
+        assert_eq!(refused.unwrap_err().1["settings_window"], true);
+        hub.divert = false;
+        assert!(ask_guarded(&mut cpu, &mut hub, Cmd::GetRegs, Some(read)).0.is_ok());
+
+        // Deterministic mode types nothing while paused: queued input is no
+        // obstacle there.
+        let (mut cpu, mut hub, _mode) = deterministic_machine("journal-if-state-det");
+        reply(&mut cpu, &mut hub, typed("x")).unwrap();
+        let read = journal_state(&hub).0;
+        assert!(ask_guarded(&mut cpu, &mut hub, write("0200:0000", &[1], None), Some(read)).0.is_ok());
+    }
+
+    #[test]
+    fn a_strict_match_load_cancels_the_operations_under_way() {
+        let (mut cpu, mut hub) = machine("journal-strict");
+        pause(&mut cpu, &mut hub);
+        hub.input.push_back(LowInput::Wait(std::time::Duration::from_secs(60)));
+        let (_, refused) = state_request(&mut cpu, &mut hub, true);
+        assert_eq!(refused.unwrap().1["precondition"], "quiescent", "a save waits for the input");
+        hub.input.clear();
+
+        let input = started_op(&mut cpu, &mut hub, Cmd::Input { events: vec![InputEvent::Wait { ms: 60_000 }], wait: true });
+        let (load, _rx) = hub.request(Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: true });
+        let load_req = load.req;
+        hub.handle(&mut cpu, load);
+        let request = hub.next_state_request().expect("taken");
+        hub.state_done(&cpu, request, Ok(serde_json::json!({"loaded": true})));
+        let tail: Vec<Value> = entries(&hub).into_iter().rev().take(3).collect();
+        assert_eq!(tail.iter().rev().map(|e| e["type"].as_str().unwrap()).collect::<Vec<_>>(), ["state_loaded", "debugger_reset", "paused"]);
+        assert_eq!(tail[1]["cancelled"], serde_json::json!([input]));
+        assert_eq!((tail[0]["reason"].as_str(), tail[0]["cause"].as_u64()), (Some("load"), Some(load_req)));
+        assert_eq!(op_state(&hub, input).state, OpState::Cancelled);
+        assert_eq!(op_state(&hub, input).end_seq, tail[1]["seq"].as_u64());
+    }
+
+    #[test]
+    fn eviction_tells_what_is_gone() {
+        let cpu = Cpu::new(".".into());
+        let shared = std::sync::Arc::new(super::Shared::with_capacity(std::time::Instant::now(), 8));
+        let mut hub = DebugHub::new(None, Some(shared), 10);
+        hub.announce(&cpu);
+        for i in 0..20 {
+            hub.append(&cpu, super::Kind::BreakpointSet, None, serde_json::json!({"i": i}));
+        }
+        hub.with_journal(|j| {
+            assert_eq!((j.first(), j.last()), (14, 21));
+            assert_eq!(j.after(5).err(), Some(super::journal::Gone { first: 14, last: 21 }));
+            assert_eq!(j.after(13).map(|it| it.count()).ok(), Some(8));
+        });
+    }
+
+    #[test]
+    fn a_write_after_a_load_in_the_same_frame_comes_after_it() {
+        let mut cpu = Cpu::new(".".into());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let shared = std::sync::Arc::new(super::Shared::new(std::time::Instant::now()));
+        let mut hub = DebugHub::new(Some(rx), Some(shared), 10);
+        hub.announce(&cpu);
+        let (load, _load_rx) = hub.request(Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: false });
+        let (write, mut write_rx) = hub.request(write("0200:0000", &[9], None));
+        tx.send(load).unwrap();
+        tx.send(write).unwrap();
+        hub.poll(&mut cpu);
+        assert!(write_rx.try_recv().is_err(), "the write waits for the load");
+        let request = hub.next_state_request().unwrap();
+        hub.state_done(&cpu, request, Ok(serde_json::json!({"loaded": true})));
+        hub.poll(&mut cpu);
+        assert!(write_rx.try_recv().is_ok());
+        let types: Vec<Value> = entries(&hub).iter().skip(1).map(|e| e["type"].clone()).collect();
+        assert_eq!(types, ["state_loaded", "memory_written"]);
+    }
+
+    #[test]
+    fn programs_are_told_without_a_stop_on_them() {
+        let (mut cpu, mut hub) = machine("journal-programs");
+        cpu.queue_batch_lines(["PROBE.COM"]);
+        run(&mut cpu, &mut hub, 50);
+        let started = entries_of(&hub, "program_started");
+        let exited = entries_of(&hub, "program_exited");
+        assert_eq!(started.last().unwrap()["program"]["name"], "PROBE.COM");
+        assert_eq!(exited.last().unwrap()["exit"]["name"], "PROBE.COM");
+        assert!(started.last().unwrap()["seq"].as_u64() < exited.last().unwrap()["seq"].as_u64());
+        assert!(entries_of(&hub, "paused").is_empty());
+    }
+
+    #[test]
+    fn a_quit_cancels_what_is_pending_and_ends_the_journal() {
+        let mut cpu = Cpu::new(".".into());
+        cpu.load_shell();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let shared = std::sync::Arc::new(super::Shared::new(std::time::Instant::now()));
+        let mut hub = DebugHub::new(Some(rx), Some(shared.clone()), 10);
+        hub.announce(&cpu);
+        let resume = started_op(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None });
+        let (quit, mut quit_rx) = hub.request(Cmd::Quit);
+        let quit_req = quit.req;
+        let (late, mut late_rx) = hub.request(write("0200:0000", &[9], None));
+        tx.send(quit).unwrap();
+        tx.send(late).unwrap();
+        hub.poll(&mut cpu);
+        assert!(hub.quit_requested());
+        assert!(matches!(quit_rx.try_recv().map(|a| a.reply), Ok(Reply::Json(_))));
+        assert!(late_rx.try_recv().is_err(), "nothing is carried out after a quit");
+        let (refused, _) = ask_guarded(&mut cpu, &mut hub, Cmd::GetRegs, None);
+        assert_eq!(refused.unwrap_err().0, 503);
+
+        hub.shutdown(&cpu, super::ShutdownReason::Quit, 0);
+        assert!(matches!(late_rx.try_recv().map(|a| a.reply), Ok(Reply::Error(503, _))));
+        assert_ne!(cpu.bus.peek_8(0x2000), 9);
+        let last = entries(&hub).pop().unwrap();
+        assert_eq!((last["type"].as_str(), last["reason"].as_str()), (Some("shutdown"), Some("quit")));
+        assert_eq!((last["by"].as_u64(), last["cause"].as_u64()), (Some(quit_req), Some(quit_req)));
+        assert_eq!(last["cancelled"], serde_json::json!([resume]));
+        assert_eq!(op_state(&hub, resume).state, OpState::Cancelled);
+        assert!(shared.closed.load(std::sync::atomic::Ordering::Acquire));
+        hub.append(&cpu, super::Kind::BreakpointSet, None, serde_json::json!({}));
+        assert_eq!(entries(&hub).pop().unwrap()["type"], "shutdown", "nothing after it");
+    }
+
+    #[test]
+    fn log_lines_name_their_request_and_the_journal_s_entry() {
+        let (mut cpu, mut hub) = machine("journal-log");
+        let shared = hub.shared.clone().unwrap();
+        let hook = shared.clone();
+        cpu.bus.log_hook = Some(Box::new(move |line: &str| hook.log_line(line)));
+        let dir = std::env::temp_dir().join(format!("rust-dos-debug-log-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let before = journal_state(&hub).2;
+        let mount = Cmd::Mount { drive: "D".into(), path: dir.display().to_string(), kind: None, label: None, read_only: true, images: Vec::new() };
+        let (request, _rx) = hub.request(mount);
+        let req = request.req;
+        hub.handle(&mut cpu, request);
+        let log = shared.log.lock().unwrap();
+        let line = log.iter().find(|l| l.line.contains("mounted")).expect("the mount's line");
+        assert_eq!((line.cause, line.at), (Some(req), before));
+        assert!(log.iter().zip(log.iter().skip(1)).all(|(a, b)| b.n == a.n + 1), "numbered in order");
+        assert_eq!(entries_of(&hub, "drive_mounted")[0]["cause"].as_u64(), Some(req));
     }
 }
 
