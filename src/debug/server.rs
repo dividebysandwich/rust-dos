@@ -34,10 +34,19 @@ struct AppState {
     shared: Arc<Shared>,
 }
 
-pub fn spawn(addr: SocketAddr, tx: mpsc::Sender<Request>, shared: Arc<Shared>) -> Result<(), String> {
+/// Start the server on `addr`, and return the address it listens on. With
+/// port 0 the system picks a free port, and the returned address has it.
+pub fn spawn(addr: SocketAddr, tx: mpsc::Sender<Request>, shared: Arc<Shared>) -> Result<SocketAddr, String> {
     // Bind synchronously so a port conflict is reported at startup rather
     // than silently in the background thread.
     let listener = std::net::TcpListener::bind(addr).map_err(|e| format!("debug server: cannot bind {}: {}", addr, e))?;
+    let bound = listener.local_addr().map_err(|e| e.to_string())?;
+    serve(listener, tx, shared)?;
+    Ok(bound)
+}
+
+/// Serve the debug interface on `listener`, from a thread of its own.
+fn serve(listener: std::net::TcpListener, tx: mpsc::Sender<Request>, shared: Arc<Shared>) -> Result<(), String> {
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
     std::thread::Builder::new()
         .name("debug-server".into())
@@ -1096,7 +1105,54 @@ WEBSOCKETS
 
 #[cfg(test)]
 mod tests {
-    use super::hex_data;
+    use super::{Cmd, Reply, Request, Shared, hex_data, json};
+    use std::io::{Read, Write};
+    use std::net::SocketAddr;
+    use std::sync::{Arc, mpsc};
+
+    /// The response to `GET path` from the server at `addr`.
+    fn get(addr: SocketAddr, path: &str) -> String {
+        let mut stream = std::net::TcpStream::connect(addr).unwrap();
+        let request = format!("GET {path} HTTP/1.1
+Host: x
+Connection: close
+
+");
+        stream.write_all(request.as_bytes()).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    }
+
+    #[test]
+    fn spawn_on_port_0_returns_the_port_it_listens_on() {
+        let (tx, _rx) = mpsc::channel::<Request>();
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let bound = super::spawn(addr, tx, Arc::new(Shared::new(std::time::Instant::now()))).unwrap();
+        assert_eq!(bound.ip(), addr.ip());
+        assert_ne!(bound.port(), 0);
+        // `/api` is the help text, which the server answers without the emulator.
+        let response = get(bound, "/api");
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(response.contains("/api/status"), "{response}");
+    }
+
+    #[test]
+    fn serve_passes_requests_on_a_listener_the_caller_bound() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = mpsc::channel::<Request>();
+        super::serve(listener, tx, Arc::new(Shared::new(std::time::Instant::now()))).unwrap();
+        std::thread::spawn(move || {
+            for req in rx {
+                let status = matches!(req.cmd, Cmd::Status);
+                let _ = req.reply.send(Reply::Json(json!({"status": status})));
+            }
+        });
+        let response = get(addr, "/api/status");
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(response.ends_with(r#"{"status":true}"#), "{response}");
+    }
 
     #[test]
     fn hex_data_skips_0x_prefixes() {

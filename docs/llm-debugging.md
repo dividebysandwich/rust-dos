@@ -28,6 +28,16 @@ until curl -sf localhost:8086/api/status >/dev/null; do sleep 0.2; done
 - **Port conflict:** if port 8086 is in use, the emulator exits at startup
   with a `cannot bind` error. Kill the old instance (`kill $(pgrep -x rust-dos)`)
   or pass `--debug-server 127.0.0.1:<port>`.
+- **Free port:** `--debug-server 127.0.0.1:0` lets the system pick a free
+  port. The emulator prints the address it got on stdout, as
+  `[DEBUG] Debug server listening on http://127.0.0.1:<port>/`. Use this to
+  run several instances side by side, or when 8086 may be taken:
+
+  ```sh
+  ./target/release/rust-dos --no-config -d /path/to/dos/files \
+    --debug-server 127.0.0.1:0 > rust-dos.out &
+  until H=$(grep -om1 '127\.0\.0\.1:[0-9]*' rust-dos.out); do sleep 0.2; done
+  ```
 - **Output:** the emulator log doesn't go to stdout. It goes to
   `rust-dos.log` in the per-user config directory, replaced on every start.
   Read it through `/api/log` instead, which can filter it.
