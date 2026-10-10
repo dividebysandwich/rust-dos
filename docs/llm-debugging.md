@@ -178,14 +178,19 @@ the machine is paused at the entry point of the program it started, with
 breakpoints set now catch its startup code. Without `stop_at_entry` it
 replies as soon as the program started. A command line that starts no
 program (a typo, a built-in command such as `DIR`) gets HTTP 422 once the
-prompt is back, and `run` while a program runs gets 409.
+prompt is back, and `run` while a program runs, or while PAUSE, CHOICE or
+EDIT waits, gets 409. So does a `stop_at_entry` run whose program was
+closed before it reached its entry point.
 
 - **Every program:** `POST /api/breakpoints {"program_start":true}` pauses
   at the entry point of each program DOS starts, a child that a game's
   launcher starts with EXEC too. `{"program_exit":true}` pauses after each
   program ends, with `"reason":"program_exit"` and
-  `"exit":{"name","code","resident"}` (`resident` for a TSR); the machine
-  is then back in the parent or the shell. `false` turns either off.
+  `"exit":{"name","code","resident","aborted"}` (`resident` for a TSR);
+  the machine is then back in the parent or the shell. A program the
+  emulator ended without an exit of its own (a divide overflow,
+  `reboot_shell`, a reboot) has `"aborted":true` and `"code":null`.
+  `false` turns either off.
 - **How the last program ended:** `/api/status` has `program`, the program
   running (empty at the prompt), and `last_exit`.
 

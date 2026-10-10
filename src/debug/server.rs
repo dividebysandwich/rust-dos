@@ -991,7 +991,7 @@ EXECUTION CONTROL
                   also {"exception":"0D"} or {"exception":"any"}: pause in the handler
                   after the CPU raises it ({"exception":"0D","enabled":false} stops); {"mode_switch":true}: pause after CR0.PE changes
                   {"program_start":true}: pause at each program's entry point;
-                  {"program_exit":true}: pause after each program ends ("exit":{name,code,resident})
+                  {"program_exit":true}: pause after each program ends ("exit":{name,code,resident,aborted})
   GET/POST/DELETE /api/watchpoints   {"addr":"DS:0100","len":2}  pause when the 1, 2 or
                   4 bytes there change (DELETE without addr = all)
   GET  /api/ivt              interrupt vector table (real mode)

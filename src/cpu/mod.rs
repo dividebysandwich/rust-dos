@@ -483,14 +483,18 @@ pub struct ProgramEvents {
     /// Programs that ended, and how the last one did.
     pub ended: u64,
     pub last_exit: Option<ProgramExit>,
+    /// Programs started and not yet ended: the ones a shell reload ends
+    /// without an exit of their own (`Cpu::note_abort`).
+    pub running: u32,
 }
 
 /// How a program ended.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProgramExit {
     pub name: String,
-    /// The exit code (AL of INT 21h AH=4Ch or 31h; 0 for INT 20h).
-    pub code: u8,
+    /// The exit code (AL of INT 21h AH=4Ch or 31h; 0 for INT 20h), or
+    /// None for a program the emulator ended (`Cpu::note_abort`).
+    pub code: Option<u8>,
     /// It stayed resident (INT 21h AH=31h).
     pub resident: bool,
 }
@@ -823,7 +827,24 @@ impl Cpu {
         let name = self.program.clone();
         let events = &mut self.programs;
         events.ended += 1;
-        events.last_exit = Some(ProgramExit { name, code, resident });
+        events.running = events.running.saturating_sub(1);
+        events.last_exit = Some(ProgramExit { name, code: Some(code), resident });
+    }
+
+    /// Count the programs still running as ended, if any are, when the
+    /// shell is loaded again without them having exited: a divide
+    /// overflow, the tripwire, a DPMI client that can't go on, the
+    /// debugger's or a frontend's close, a reboot. One exit is recorded,
+    /// for the program that ran last, with no exit code.
+    fn note_abort(&mut self) {
+        let name = self.program.clone();
+        let events = &mut self.programs;
+        if events.running == 0 {
+            return;
+        }
+        events.running = 0;
+        events.ended += 1;
+        events.last_exit = Some(ProgramExit { name, code: None, resident: false });
     }
 
     /// Stop the running program for the shell to be loaded again, with
@@ -1297,6 +1318,7 @@ impl Cpu {
     }
 
     pub fn load_shell(&mut self) {
+        self.note_abort();
         // A shell reload always starts outside any DOS process. Normally
         // termination restored this to the shell's PSP; frontends that
         // explicitly close a running process have no parent context to do so.
@@ -1601,9 +1623,13 @@ impl Cpu {
             self.bus.dta_offset = 0x80;
             self.program = filename.rsplit(['\\', '/', ':']).next().unwrap_or(filename).to_ascii_uppercase();
             let (cs, ip) = (self.cs(), self.ip());
-            let entry = self.get_physical_addr(cs, ip);
+            // Physical, as the debugger's breakpoints are: through the page
+            // tables of a virtual machine (Windows' 386 enhanced mode).
+            let lin = self.get_physical_addr(cs, ip);
+            let entry = self.peek_translate(lin as u32).map_or(lin, |p| p as usize);
             let events = &mut self.programs;
             events.started += 1;
+            events.running += 1;
             events.entry = entry;
             events.entry_cs_ip = (cs, ip);
             events.name = self.program.clone();
