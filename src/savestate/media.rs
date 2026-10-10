@@ -8,7 +8,7 @@
 //! one changes as the machine writes it, so only its size is recorded.
 
 use crate::cpu::Cpu;
-use crate::disk::{DriveInfo, drive_key};
+use crate::disk::{DriveInfo, DriveKind, drive_key};
 use crate::hostfs;
 use crate::mount::display_host_path;
 use serde::{Deserialize, Serialize};
@@ -56,8 +56,71 @@ pub struct Image {
 
 /// The media of the machine's mounted drives now. The drives the machine
 /// has of itself (Z:, held in memory) have none and aren't listed.
+///
+/// The record is made when the mounts change and kept with them, as the
+/// libretro core takes a state every frame: while every drive has the
+/// same folder, overlay and images as when it was made, no CUE sheet is
+/// read again and no file looked at. A checkpoint `forget`s it first, so
+/// one is checked against the files as they are.
 pub fn of(cpu: &Cpu) -> Vec<Medium> {
-    cpu.bus.disk.all_drives().iter().filter_map(medium).collect()
+    let drives = cpu.bus.disk.all_drives();
+    let mounts: Vec<Mount> = drives.iter().map(Mount::of).collect();
+    let kept = &cpu.bus.disk.media;
+    let media = match kept.take() {
+        Some(record) if record.mounts == mounts => record.media,
+        _ => drives.iter().filter_map(medium).collect(),
+    };
+    kept.set(Some(Kept { mounts, media: media.clone() }));
+    media
+}
+
+/// Forget the record `of` keeps for `cpu` and the head hashes, so the
+/// next record reads every CUE sheet and read-only image again. A
+/// checkpoint does this: a track file can appear after the sheet was
+/// mounted, and a file replaced by another of the same size with its
+/// time kept (`cp -p`, `rsync -t`, an unpacked archive) has the cached
+/// hash of the old one.
+pub fn forget(cpu: &Cpu) {
+    cpu.bus.disk.media.set(None);
+    forget_hashes();
+}
+
+/// A machine's record of its media, with the mounts it was made of.
+pub struct Kept {
+    mounts: Vec<Mount>,
+    media: Vec<Medium>,
+}
+
+/// What of a mounted drive `medium` makes its record of.
+#[derive(PartialEq)]
+struct Mount {
+    drive: u8,
+    kind: DriveKind,
+    read_only: bool,
+    root: Option<PathBuf>,
+    overlay: Option<PathBuf>,
+    image: Option<PathBuf>,
+    images: Vec<PathBuf>,
+}
+
+impl Mount {
+    fn of(info: &DriveInfo) -> Self {
+        Mount {
+            drive: info.drive,
+            kind: info.kind,
+            read_only: info.read_only,
+            root: info.root.clone(),
+            overlay: info.overlay.clone(),
+            image: info.image.clone(),
+            images: info.images.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many images `medium` has looked for a CUE sheet's files in.
+    static SHEET_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn medium(info: &DriveInfo) -> Option<Medium> {
@@ -66,8 +129,14 @@ fn medium(info: &DriveInfo) -> Option<Medium> {
         listed.extend(info.image.clone());
     }
     // A CUE sheet's tracks are in the files it names.
-    let paths: Vec<PathBuf> =
-        listed.into_iter().flat_map(|p| std::iter::once(p.clone()).chain(crate::cdrom::image::cue_files(&p))).collect();
+    let paths: Vec<PathBuf> = listed
+        .into_iter()
+        .flat_map(|p| {
+            #[cfg(test)]
+            SHEET_READS.with(|n| n.set(n.get() + 1));
+            std::iter::once(p.clone()).chain(crate::cdrom::image::cue_files(&p))
+        })
+        .collect();
     if info.root.is_none() && paths.is_empty() {
         return None;
     }
@@ -105,15 +174,13 @@ type Known = HashMap<PathBuf, (u64, Option<SystemTime>, String)>;
 static KNOWN: Mutex<Option<Known>> = Mutex::new(None);
 
 /// Forget the head hashes kept, so the next record reads every read-only
-/// image again. A checkpoint does this: a file replaced by another of the
-/// same size with its time kept (`cp -p`, `rsync -t`, an unpacked
-/// archive) has the cached hash of the old one.
-pub fn forget_hashes() {
+/// image again (`forget`).
+fn forget_hashes() {
     *KNOWN.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 /// The hash of the start of the file at `path`, kept while its size and
-/// time stay the same: the libretro core takes a state every frame.
+/// time stay the same: a drive mounted again needn't read it again.
 fn head_hash(path: &Path, size: u64, modified: Option<SystemTime>) -> Option<String> {
     let mut known = KNOWN.lock().unwrap_or_else(|e| e.into_inner());
     let known = known.get_or_insert_with(HashMap::new);
@@ -283,6 +350,70 @@ mod tests {
         let d = medium(&DriveInfo { image: Some(cue), ..info(true) }).unwrap();
         let names: Vec<&str> = d.images.iter().map(|i| i.path.rsplit(['/', '\\']).next().unwrap()).collect();
         assert_eq!(names, ["game.ins", "disk.img"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn sheet_reads() -> usize {
+        SHEET_READS.with(|n| n.get())
+    }
+
+    #[test]
+    fn the_record_is_kept_until_the_mounts_change_or_a_checkpoint() {
+        let dir = std::env::temp_dir().join(format!("rust-dos-media-kept-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("c")).unwrap();
+        std::fs::create_dir_all(dir.join("disc")).unwrap();
+        std::fs::write(dir.join("disc/DATA.DAT"), b"on the disc").unwrap();
+        let folder = crate::cdrom::folder::build(&dir.join("disc"), "GAMECD").unwrap();
+        let folder = crate::cdrom::image::CdImage::from_folder(folder, &dir.join("disc")).unwrap();
+        let mut iso = Vec::new();
+        for lba in 0..folder.leadout() {
+            let mut sector = [0u8; crate::cdrom::DATA_SECTOR];
+            folder.read_data(lba, &mut sector).unwrap();
+            iso.extend_from_slice(&sector);
+        }
+        let track = dir.join("GAME.ISO");
+        std::fs::write(&track, &iso).unwrap();
+        let cue = dir.join("GAME.CUE");
+        std::fs::write(&cue, "FILE \"GAME.ISO\" BINARY\n  TRACK 01 MODE1/2048\n    INDEX 01 00:00:00\n").unwrap();
+        let cdrom = || crate::disk::MountOptions { kind: DriveKind::CdRom, ..Default::default() };
+
+        let mut cpu = Cpu::new(dir.join("c"));
+        cpu.bus.disk.mount(3, &cue, cdrom(), false).unwrap();
+        let reads = sheet_reads();
+        let first = of(&cpu);
+        assert_eq!(sheet_reads(), reads + 1, "the sheet is read once");
+        let d = first.iter().find(|m| m.drive == "D").expect("D: is listed");
+        assert_eq!(d.images.len(), 2, "the sheet and its track: {:?}", d.images);
+        for _ in 0..10 {
+            assert_eq!(of(&cpu), first);
+        }
+        assert_eq!(sheet_reads(), reads + 1, "the record is kept while the mounts stay");
+
+        // The track replaced, with the same size and time: the kept record
+        // stays until a checkpoint forgets it.
+        let modified = std::fs::metadata(&track).unwrap().modified().unwrap();
+        let mut other = iso.clone();
+        other[0] ^= 0xFF;
+        std::fs::write(&track, &other).unwrap();
+        std::fs::File::options().write(true).open(&track).unwrap().set_modified(modified).unwrap();
+        assert_eq!(of(&cpu), first);
+        forget(&cpu);
+        let fresh = of(&cpu);
+        assert_eq!(sheet_reads(), reads + 2, "a checkpoint reads the sheet again");
+        assert_eq!(differences(&first, &fresh).len(), 1, "the track's start differs");
+        std::fs::write(&track, &iso).unwrap();
+
+        // Unmounted, then mounted again.
+        cpu.bus.disk.unmount(3).unwrap();
+        let unmounted = of(&cpu);
+        assert!(unmounted.iter().all(|m| m.drive != "D"), "D: is gone");
+        assert_eq!(of(&cpu), unmounted);
+        cpu.bus.disk.mount(3, &cue, cdrom(), false).unwrap();
+        let reads = sheet_reads();
+        let again = of(&cpu);
+        assert_eq!(sheet_reads(), reads + 1, "a mount reads the sheet");
+        assert_eq!(again.iter().find(|m| m.drive == "D").map(|m| m.images.len()), Some(2));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -346,9 +346,11 @@ a known point and get the same machine and the same debugger) adds
   the machine keeps the keyboard and mouse it was saved with. The machine
   stays paused. The reply's `debugger_reset` counts what was cleared
   (`held_keys` among it), so set the breakpoints again after a load.
-- **Media read again.** The hash of a read-only image's first 64 KiB is
-  otherwise kept while the file's size and time stay the same; a
-  checkpoint save or load reads every read-only image again.
+- **Media read again.** Other saves record the media as they were when
+  the drives were last mounted or changed: CUE sheets are read and the
+  images looked at only then, and the hash of a read-only image's first
+  64 KiB is kept while the file's size and time stay the same. A
+  checkpoint save or load reads every CUE sheet and read-only image again.
 
 ### Booted systems (Windows 95)
 

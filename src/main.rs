@@ -1351,7 +1351,7 @@ fn main() -> Result<(), String> {
                 }
             } else {
                 if request.checkpoint {
-                    savestate::media::forget_hashes();
+                    savestate::media::forget(&cpu);
                 }
                 let saved = host!().save_file(&path);
                 request.done(saved.map(|header| serde_json::json!({"saved": path, "format": format, "emulator": emulator, "header": header})));
@@ -2341,7 +2341,7 @@ impl MainHost<'_, '_> {
         let (header, state) = self.read_state(path).map_err(failed)?;
         let mut differences = slots::machine_differences(&header.machine, &self.machine.settings(self.settings));
         if checkpoint {
-            savestate::media::forget_hashes();
+            savestate::media::forget(self.cpu);
         }
         match &header.media {
             Some(media) => differences.extend(savestate::media::differences(media, &savestate::media::of(self.cpu))),

@@ -796,6 +796,9 @@ pub struct DiskController {
     /// What mounting found to tell the user (a .dosc's patch that can't
     /// be used), for the bus's log (`Bus::mount_drive`).
     pub notes: Vec<String>,
+    /// The record of the drives' media a state's header has, kept with
+    /// the mounts it was made of (savestate/media.rs).
+    pub(crate) media: Cell<Option<crate::savestate::media::Kept>>,
 }
 
 impl DiskController {
@@ -845,6 +848,7 @@ impl DiskController {
             copies_from: None,
             shared_from_state: None,
             notes: Vec::new(),
+            media: Cell::new(None),
         };
         disk.open_standard_devices();
         disk
