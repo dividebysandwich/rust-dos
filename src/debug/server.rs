@@ -1042,8 +1042,9 @@ REQUEST IDS
   (400 otherwise). The response has the same header, and the events the request
   causes carry it as "request_id": "resumed", log lines written while the
   emulator handles the request, and the stop ("paused" event and reply) that
-  ends a run the request started (resume, step, step_over, run, reboot) or that
-  a pause request asked for. /ws/input messages take "request_id" in the JSON
+  ends a run the request started (resume, step, step_over, run, reboot,
+  reboot_shell) or that a pause request asked for, also in the reply to a wait
+  that comes after the stop. /ws/input messages take "request_id" in the JSON
   and their replies carry it.
 
 STATUS / SCREEN
@@ -1198,21 +1199,23 @@ mod tests {
         stream.write_all(request.as_bytes()).unwrap();
         let mut response = String::new();
         stream.read_to_string(&mut response).unwrap();
-        response.to_ascii_lowercase()
+        response
     }
 
     #[test]
     fn a_request_id_reaches_the_emulator_and_comes_back_on_the_response() {
         let addr = echo_server();
         let tagged = get(addr, "X-Request-Id: Call-42\r\n");
-        assert!(tagged.starts_with("http/1.1 200"), "{tagged}");
-        assert!(tagged.contains("\r\nx-request-id: call-42\r\n"), "{tagged}");
-        assert!(tagged.ends_with(r#"{"id":"call-42"}"#), "{tagged}");
+        assert!(tagged.starts_with("HTTP/1.1 200"), "{tagged}");
+        // Header names are case-insensitive; the ID comes back as sent.
+        assert!(tagged.to_ascii_lowercase().contains("\r\nx-request-id: call-42\r\n"), "{tagged}");
+        assert!(tagged.contains(": Call-42\r\n"), "{tagged}");
+        assert!(tagged.ends_with(r#"{"id":"Call-42"}"#), "{tagged}");
         let untagged = get(addr, "");
-        assert!(!untagged.contains("x-request-id"), "{untagged}");
+        assert!(!untagged.to_ascii_lowercase().contains("x-request-id"), "{untagged}");
         assert!(untagged.ends_with(r#"{"id":null}"#), "{untagged}");
         let too_long = get(addr, &format!("X-Request-Id: {}\r\n", "a".repeat(129)));
-        assert!(too_long.starts_with("http/1.1 400"), "{too_long}");
+        assert!(too_long.starts_with("HTTP/1.1 400"), "{too_long}");
     }
 
     #[test]

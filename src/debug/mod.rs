@@ -222,6 +222,9 @@ pub enum Cmd {
 pub struct StateRequest {
     pub load: bool,
     pub path: PathBuf,
+    /// The request's ID, for the log lines written while the front end
+    /// carries it out (`DebugHub::set_log_request_id`).
+    pub id: Option<String>,
     reply: oneshot::Sender<Reply>,
 }
 
@@ -239,6 +242,9 @@ impl StateRequest {
 /// (`done`).
 pub struct SpeedRequest {
     pub cycles: String,
+    /// The request's ID, for the log lines written while the front end
+    /// carries it out (`DebugHub::set_log_request_id`).
+    pub id: Option<String>,
     reply: oneshot::Sender<Reply>,
 }
 
@@ -526,7 +532,8 @@ pub struct DebugHub {
     /// carry.
     request_id: Option<String>,
     /// The ID of the request that last set the machine running or asked
-    /// it to pause, which the stop that follows carries.
+    /// it to pause, which the stop that follows carries, also in the reply
+    /// to a wait that comes after it.
     stop_request_id: Option<String>,
 
     trace: TraceRing,
@@ -676,11 +683,15 @@ impl DebugHub {
                 }
                 log.push_back(LogLine { t_ms, line: line.to_string() });
             }
-            let mut event = json!({"type": "log", "t_ms": t_ms, "line": line});
-            if let Some(id) = log_shared.request_id.lock().ok().and_then(|id| id.clone()) {
-                event["request_id"] = id.into();
+            // Only built for a client that listens: a program can log a
+            // line per instruction.
+            if log_shared.events.receiver_count() > 0 {
+                let mut event = json!({"type": "log", "t_ms": t_ms, "line": line});
+                if let Some(id) = log_shared.request_id.lock().ok().and_then(|id| id.clone()) {
+                    event["request_id"] = id.into();
+                }
+                log_shared.emit(event);
             }
-            log_shared.emit(event);
         }));
         let audio_tx = shared.audio.clone();
         cpu.bus.audio_hook = Some(Box::new(move |samples: &[i16]| {
@@ -880,8 +891,8 @@ impl DebugHub {
             };
             let mut reply = json!({"paused": true, "reason": reason_str, "icount": cpu.executed, "registers": regs});
             // The request that set the machine running, or asked it to stop.
-            if let Some(id) = self.stop_request_id.take() {
-                reply["request_id"] = id.into();
+            if let Some(id) = &self.stop_request_id {
+                reply["request_id"] = id.as_str().into();
             }
             match reason {
                 PauseReason::ProgramStart => reply["program"] = program_json(cpu),
@@ -1273,7 +1284,9 @@ impl DebugHub {
     }
 
     /// Tag the log lines written from now on with a request's ID, or none.
-    fn set_log_request_id(&self, id: Option<String>) {
+    /// The front end tags the lines of the state and speed requests it
+    /// carries out (`StateRequest::id`, `SpeedRequest::id`).
+    pub fn set_log_request_id(&self, id: Option<String>) {
         if let Some(mut current) = self.shared.as_ref().and_then(|s| s.request_id.lock().ok()) {
             *current = id;
         }
@@ -1286,15 +1299,18 @@ impl DebugHub {
                 return;
             }
             Cmd::SaveState { path } => {
-                self.state_requests.push(StateRequest { load: false, path: PathBuf::from(path), reply: req.reply });
+                let id = self.request_id.clone();
+                self.state_requests.push(StateRequest { load: false, path: PathBuf::from(path), id, reply: req.reply });
                 return;
             }
             Cmd::LoadState { path } => {
-                self.state_requests.push(StateRequest { load: true, path: PathBuf::from(path), reply: req.reply });
+                let id = self.request_id.clone();
+                self.state_requests.push(StateRequest { load: true, path: PathBuf::from(path), id, reply: req.reply });
                 return;
             }
             Cmd::Speed { cycles } => {
-                self.speed_requests.push(SpeedRequest { cycles, reply: req.reply });
+                let id = self.request_id.clone();
+                self.speed_requests.push(SpeedRequest { cycles, id, reply: req.reply });
                 return;
             }
             cmd => cmd,
@@ -1455,7 +1471,11 @@ impl DebugHub {
             }
             Cmd::WaitPause => {
                 if self.paused && self.pause_hit.is_none() {
-                    Reply::Json(json!({"paused": true, "icount": cpu.executed, "registers": regs_json(cpu)}))
+                    let mut reply = json!({"paused": true, "icount": cpu.executed, "registers": regs_json(cpu)});
+                    if let Some(id) = &self.stop_request_id {
+                        reply["request_id"] = id.as_str().into();
+                    }
+                    Reply::Json(reply)
                 } else {
                     self.pause_waiters.push(req.reply);
                     return;
@@ -1507,11 +1527,13 @@ impl DebugHub {
                 Reply::bad(format!("expect has {} bytes, the data {}", expect.len(), data.len()))
             }
             // While the machine runs, the bytes checked could change before
-            // the client acts on the reply.
-            Cmd::WriteMem { expect: Some(_), .. } if !self.paused => Reply::ErrorJson(
+            // the client acts on the reply. A pause from the window doesn't
+            // count, since the user can lift it at any moment. A bad address
+            // gets its 400 first.
+            Cmd::WriteMem { expect: Some(_), ref addr, .. } if !self.paused && parse_addr(cpu, addr).is_ok() => Reply::ErrorJson(
                 409,
                 json!({
-                    "error": "a write with \"expect\" needs the machine paused (POST /api/control/pause); nothing was written",
+                    "error": "a write with \"expect\" needs the machine paused by the debugger (POST /api/control/pause), which a pause from the window is not; nothing was written",
                     "paused": false,
                 }),
             ),
@@ -2636,6 +2658,9 @@ mod tests {
         assert_eq!(refused.0, 409);
         assert!(refused.1.contains("needs the machine paused"), "{}", refused.1);
         assert_eq!(cpu.bus.peek_8(0x2000), 0xCD);
+        // A bad address gets its 400 rather than a 409 asking for a pause.
+        let bad = reply(&mut cpu, &mut hub, write("ZZ", &[0x21], Some(&[0xCD]))).unwrap_err();
+        assert_eq!(bad.0, 400, "{}", bad.1);
         // A write without "expect" goes ahead while the machine runs.
         reply(&mut cpu, &mut hub, write("2000", &[0x21], None)).unwrap();
         assert_eq!(cpu.bus.peek_8(0x2000), 0x21);
@@ -2800,6 +2825,9 @@ mod tests {
         let stop = ask(&mut cpu, &mut hub, Cmd::WaitPause, 50).unwrap();
         assert_eq!((stop["reason"].as_str(), stop["request_id"].as_str()), (Some("program_exit"), Some("go-3")));
         assert_eq!(events(&mut rx), [("resumed".into(), id("go-3")), ("paused".into(), id("go-3"))]);
+        // A wait that comes after the stop gets its ID too.
+        let stop = ask(&mut cpu, &mut hub, Cmd::WaitPause, 0).unwrap();
+        assert_eq!(stop["request_id"], "go-3");
 
         // Requests without one cause events without one.
         ask(&mut cpu, &mut hub, Cmd::Resume { until: None }, 0).unwrap();

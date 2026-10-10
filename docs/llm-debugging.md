@@ -40,8 +40,8 @@ until curl -sf localhost:8086/api/status >/dev/null; do sleep 0.2; done
   request, and the stop that ends a run it started (the `paused` event and
   the reply to `step`, `run` or `/api/control/wait`) carry it as
   `"request_id"`. The stop carries the ID of the last request that set the
-  machine running (resume, step, step_over, run, reboot) or asked it to
-  pause.
+  machine running (resume, step, step_over, run, reboot, reboot_shell) or
+  asked it to pause, also in the reply to a wait sent after the stop.
 
 All examples below use `H=localhost:8086` and `J='-H content-type:application/json'`.
 
@@ -278,11 +278,14 @@ curl -s -XPOST $H/api/control/resume
     `PUT /api/memory {"addr":"DS:0200","hex":"21 43","expect":"CD AB"}`.
     When the bytes there differ, nothing is written and the reply is HTTP
     409 with `found` (the bytes there) and `expected`. A write with
-    `expect` needs the machine paused: while it runs the reply is 409 with
+    `expect` needs the machine paused by the debugger
+    (`POST /api/control/pause`): otherwise the reply is 409 with
     `"paused":false` and nothing is written, since the bytes could change
-    again before you act on the reply. The check and the write run between
-    two instructions, so the program can't change the bytes in between. `expect`, `old` and `new` are what `GET /api/memory` reads. In
-    the planar VGA modes (A000 outside mode 13h) that read sees one plane
+    again before you act on the reply. A pause from the emulator's window
+    doesn't count, because the user can lift it at any moment. The check and the write run between
+    two instructions, so the program can't change the bytes in between.
+    `expect`, `old` and `new` are what `GET /api/memory` reads. In the
+    planar VGA modes (A000 outside mode 13h) that read sees one plane
     through the VGA's read mode, while the write goes through its write
     logic as a CPU write does (write mode, Map Mask, Bit Mask), so a match
     says nothing about the other planes.

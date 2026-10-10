@@ -1333,7 +1333,9 @@ fn main() -> Result<(), String> {
         if dbg.take_hotkey() {
             toggle_ui!();
         }
+        // The log lines these requests cause carry their IDs.
         for request in dbg.take_state_requests() {
+            dbg.set_log_request_id(request.id.clone());
             let path = request.path.clone();
             if request.load {
                 let loaded = host!().load_file(&path);
@@ -1342,14 +1344,17 @@ fn main() -> Result<(), String> {
                 let saved = host!().save_file(&path);
                 request.done(saved.map(|()| serde_json::json!({"saved": path})));
             }
+            dbg.set_log_request_id(None);
         }
         for request in dbg.take_speed_requests() {
+            dbg.set_log_request_id(request.id.clone());
             let result = CpuSpeed::parse(&request.cycles).and_then(|cycles| {
                 let new = Settings { cycles, ..settings.clone() };
                 host!().apply(&new)?;
                 Ok(serde_json::json!({"cycles": cycles.to_string()}))
             });
             request.done(result);
+            dbg.set_log_request_id(None);
         }
         for input in dbg.take_ui_input() {
             match input {
