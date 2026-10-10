@@ -30,7 +30,8 @@ pub const CRTCSTATUS: u8 = 0x9C;
 pub const DRAMCTL: u8 = 0xA0;
 pub const PALETTE: u8 = 0xB0;
 
-/// DEBUGREG: hold the RISC, step it.
+/// DEBUGREG: reset the chip, hold the RISC, step it.
+pub const SOFTRESET: u8 = 0x01;
 pub const HOLDRISC: u8 = 0x02;
 pub const STEPRISC: u8 = 0x04;
 

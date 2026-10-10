@@ -1,0 +1,4 @@
+// rust-dos.exe's icon, which Explorer, shortcuts and the taskbar show;
+// build.rs links it in. Ordinal 1 so it is the first: the one Windows
+// takes for the program. Made from packaging/linux/rust-dos.svg.
+1 ICON "rust-dos.ico"

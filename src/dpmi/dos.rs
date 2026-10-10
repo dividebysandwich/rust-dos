@@ -27,7 +27,7 @@ use crate::bus::Bus;
 use crate::cpu::{Cpu, Seg};
 
 /// The transfer buffer: the first 8 KB of the client's private data.
-const TLB_SIZE: u32 = 0x2000;
+pub(super) const TLB_SIZE: u32 = 0x2000;
 /// Where in it a second name or buffer goes.
 const SECOND: u32 = 0x100;
 /// The longest name copied.
@@ -96,13 +96,13 @@ pub(super) fn int21(cpu: &mut Cpu, mut ctx: Context) {
 }
 
 /// AH and AL.
-fn function(ctx: &Context) -> [u8; 2] {
+pub(super) fn function(ctx: &Context) -> [u8; 2] {
     [(ctx.gpr[EAX] >> 8) as u8, ctx.gpr[EAX] as u8]
 }
 
 /// The linear address of `seg`:(E)`reg` in the client's context `ctx`, if
 /// the selector is one.
-fn pointer(cpu: &Cpu, ctx: &Context, seg: Seg, reg: usize, bits32: bool) -> Option<u32> {
+pub(super) fn pointer(cpu: &Cpu, ctx: &Context, seg: Seg, reg: usize, bits32: bool) -> Option<u32> {
     Some(selector_base(cpu, ctx.sel(seg))?.wrapping_add(offset(ctx, reg, bits32)))
 }
 
@@ -115,7 +115,7 @@ fn dta(cpu: &mut Cpu) -> (u16, u32) {
     (segment_selector(cpu, segment).unwrap_or(0), off as u32)
 }
 
-fn copy(bus: &mut Bus, from: u32, to: u32, len: u32) {
+pub(super) fn copy(bus: &mut Bus, from: u32, to: u32, len: u32) {
     for i in 0..len {
         let byte = bus.read_8(from.wrapping_add(i) as usize);
         bus.write_8(to.wrapping_add(i) as usize, byte);

@@ -149,6 +149,18 @@ curl -s "$H/api/log?limit=50&format=text"
 
 - **Start the trace first.** It only records while enabled; it does not
   look back in time.
+- **Trace a stretch of instructions:** `POST /api/trace {"count":5000}`
+  records the next 5000 instructions and stops, so the ring keeps what
+  came right after a breakpoint instead of being overwritten.
+  `/api/status` shows the instructions still to record as `remaining`, and
+  `{"count":0}` stops the trace at once. An open `/ws/trace` stream keeps
+  the ring recording past the count.
+- **Read a long trace in pages:** `GET /api/trace?since=0&limit=2000&format=json`
+  gives the entries after cursor 0, oldest first, and `next`, the cursor
+  for the following page (text replies have it in the `x-trace-next`
+  header). `dropped` counts entries after the cursor that were
+  overwritten before they were read. `/api/trace` without `since` has a
+  `next` too, which pages from there on.
 - **Reading the trace.** Each line is: instruction count, milliseconds since
   start, `CS:IP`, bytes, disassembly, and the registers *before* the
   instruction ran. `HLE INT 21h (AX=4C00)` marks a BIOS/DOS service call
@@ -170,7 +182,37 @@ curl -s "$H/api/log?limit=50&format=text"
 
 ### Stop a program at a specific point
 
-Find out where the program was loaded. The log says so:
+To stop at a program's first instruction, start it with `run` instead of
+typing it:
+
+```sh
+curl -s $J -XPOST -d '{"command":"GAME.EXE /nosound","stop_at_entry":true}' $H/api/control/run
+```
+
+It runs the command line at the DOS prompt as if typed, and replies once
+the machine is paused at the entry point of the program it started, with
+`"reason":"program_start"`, the registers and
+`"program":{"name","entry","psp"}`. Nothing of the program has run yet, so
+breakpoints set now catch its startup code. Without `stop_at_entry` it
+replies as soon as the program started. A command line that starts no
+program (a typo, a built-in command such as `DIR`) gets HTTP 422 once the
+prompt is back, and `run` while a program runs, or while PAUSE, CHOICE or
+EDIT waits, gets 409. So does a `stop_at_entry` run whose program was
+closed before it reached its entry point.
+
+- **Every program:** `POST /api/breakpoints {"program_start":true}` pauses
+  at the entry point of each program DOS starts, a child that a game's
+  launcher starts with EXEC too. `{"program_exit":true}` pauses after each
+  program ends, with `"reason":"program_exit"` and
+  `"exit":{"name","code","resident","aborted"}` (`resident` for a TSR);
+  the machine is then back in the parent or the shell. A program the
+  emulator ended without an exit of its own (a divide overflow,
+  `reboot_shell`, a reboot) has `"aborted":true` and `"code":null`.
+  `false` turns either off.
+- **How the last program ended:** `/api/status` has `program`, the program
+  running (empty at the prompt), and `last_exit`.
+
+Otherwise, find out where the program was loaded. The log says so:
 
 ```sh
 curl -s "$H/api/log?grep=Loaded&format=text"
@@ -229,6 +271,18 @@ curl -s -XPOST $H/api/control/resume
   - Read with `GET /api/memory?addr=B800:0000&len=160`.
   - Write with `PUT /api/memory {"addr":"1000:0200","hex":"90 90"}`. Writes
     also invalidate the decoded-instruction cache, so patching code works.
+    The reply has the bytes the write replaced (`old`) and what reads back
+    (`new`), which can differ from the data in VGA memory.
+  - Write only if the memory holds what you expect with `"expect"`:
+    `PUT /api/memory {"addr":"DS:0200","hex":"21 43","expect":"CD AB"}`.
+    When the bytes there differ, nothing is written and the reply is HTTP
+    409 with `found` (the bytes there) and `expected`. The check and the write run between two
+    instructions, so the program can't change the bytes in between, paused
+    or not. `expect`, `old` and `new` are what `GET /api/memory` reads. In
+    the planar VGA modes (A000 outside mode 13h) that read sees one plane
+    through the VGA's read mode, while the write goes through its write
+    logic as a CPU write does (write mode, Map Mask, Bit Mask), so a match
+    says nothing about the other planes.
 - **Interrupt vectors:** `GET /api/ivt`. `hle:true` means the vector still
   points at the emulator's built-in handler, so a program has not hooked it.
 - **Disassembly as data:** `GET /api/disasm?format=json` has, next to the
@@ -397,7 +451,9 @@ access rights.
   21h a client doesn't handle itself goes to DOS through the host, which
   copies its buffers through a transfer buffer at the start of the
   client's private data (the "MS-DOS" extensions of INT 2Fh AX=168Ah, as
-  Windows has them); DOS's log lines show what DOS got. The log's
+  Windows has them); DOS's log lines show what DOS got. The video BIOS
+  functions with a pointer in ES (palettes, DAC blocks, fonts, AH=13h's
+  string, AX=1B00h) go down the same way. The log's
   `[DPMI]` lines say when a client enters and ends, INT 31h functions it
   doesn't have, and why it ended a program (`DPMI host: exception 0Dh
   ...` on the screen too): an exception the program didn't handle. `--no-config`

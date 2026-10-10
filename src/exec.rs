@@ -42,6 +42,13 @@ pub trait ExecHook {
     fn per_instruction(&self) -> bool {
         true
     }
+
+    /// Called while `run_batch`'s `hot` is set, before the shell runs its
+    /// next command line, which no instruction of the machine's separates
+    /// from the program that just ended. Returns true to stop.
+    fn before_shell(&mut self, _cpu: &Cpu) -> bool {
+        false
+    }
 }
 
 /// A hook that observes nothing.
@@ -228,6 +235,10 @@ fn run<const HOT: bool, const DYN: bool>(cpu: &mut Cpu, fetch: &mut Fetch, hook:
                 && (cpu.pending_command.is_some()
                     || (cpu.batch.is_active() && cpu.shell_wait.is_none() && cpu.process_stack.is_empty())))
         {
+            // After any pending shell reload, so the stop is at the prompt.
+            if HOT && cpu.state != CpuState::RebootShell && hook.before_shell(cpu) {
+                return StopReason::Paused;
+            }
             match shell_services(cpu) {
                 Shell::Idle => {}
                 // Nothing after EXIT runs, not even the rest of its batch file.

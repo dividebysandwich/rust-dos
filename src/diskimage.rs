@@ -103,9 +103,9 @@ pub enum ImageKind {
 
 /// What kind of image `path` is. `requested` is the drive type the mount
 /// asked for: CD-ROM and floppy force theirs, a hard disk (the default)
-/// leaves it to the file. Like DOSBox, .iso, .cue and .bin are CDs, .vfd and
-/// .flp floppies (and 86F images), and other images are floppies if their
-/// size is a floppy's.
+/// leaves it to the file. Like DOSBox, .iso, .cue and .bin are CDs (and
+/// .chd), .vfd and .flp floppies (and 86F images), and other images are
+/// floppies if their size is a floppy's.
 /// The rest are hard disks when they start with a partition table or a boot
 /// sector, and CDs when they hold an ISO 9660 volume.
 pub fn detect(path: &Path, requested: DriveKind) -> Result<ImageKind, String> {
@@ -156,7 +156,7 @@ fn kind_by_name(path: &Path, requested: DriveKind) -> Option<ImageKind> {
     let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
     // GOG's CD images are .gog (the sectors) and .ins (the CUE sheet);
     // Steam's releases of GOG's games name the CUE sheet .inst.
-    if requested == DriveKind::CdRom || matches!(ext.as_str(), "iso" | "cue" | "bin" | "gog" | "ins" | "inst") {
+    if requested == DriveKind::CdRom || matches!(ext.as_str(), "iso" | "cue" | "bin" | "gog" | "ins" | "inst" | "chd") {
         return Some(ImageKind::Cd);
     }
     if requested == DriveKind::Floppy || matches!(ext.as_str(), "vfd" | "flp" | "360" | "720" | "1200" | "1440" | "86f") {

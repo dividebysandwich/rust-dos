@@ -244,3 +244,77 @@ fn particles_are_z_buffered_squares() {
     assert_eq!(pixel(&cpu, base, 4, 3), 0, "2 wide");
     assert_eq!(pixel(&cpu, base, 8, 2), 0, "farther than 50");
 }
+
+/// A port of the card's, as a 32-bit I/O address.
+fn port(reg: u8) -> u16 {
+    IO_BASE + reg as u16
+}
+
+/// An instruction forced through the held RISC, as Rendition's Windows
+/// driver and xf86-video-rendition's `risc_forcestep` do.
+fn force(cpu: &mut Cpu, instruction: u32) {
+    cpu.bus.io_write_wide(port(regs::STATEINDEX), 0x80, 1);
+    cpu.bus.io_write_wide(port(regs::STATEDATA), instruction, 4);
+    cpu.bus.io_write_wide(port(regs::DEBUGREG), (regs::HOLDRISC | regs::STEPRISC) as u32, 1);
+}
+
+/// The 2D microcode started as the Windows driver starts it: the RISC held,
+/// sent to the loader with a jump, let go, and the loader's four words.
+fn windows_2d() -> Cpu {
+    let mut cpu = machine();
+    cpu.bus.io_write_wide(port(regs::DEBUGREG), regs::HOLDRISC as u32, 1);
+    force(&mut cpu, 0x6C00_0000 | 0x800 >> 2);
+    force(&mut cpu, 0);
+    cpu.bus.io_write_wide(port(regs::DEBUGREG), 0, 1);
+    fifo(&mut cpu, &[0, 0xC00, 0, 0x1000]);
+    cpu
+}
+
+#[test]
+fn the_risc_reaches_the_program_the_windows_driver_starts() {
+    let mut cpu = machine();
+    cpu.bus.io_write_wide(port(regs::DEBUGREG), regs::HOLDRISC as u32, 1);
+    // The jump, then the nop in its delay slot.
+    force(&mut cpu, 0x6C00_0000 | 0x800 >> 2);
+    force(&mut cpu, 0);
+    assert_eq!(cpu.bus.io_read_wide(port(regs::DEBUGREG), 1) as u8 & regs::STEPRISC, 0, "stepped");
+    cpu.bus.io_write_wide(port(regs::STATEINDEX), 0x81, 1);
+    assert_eq!(cpu.bus.io_read_wide(port(regs::STATEDATA), 4), 0x800, "the PC");
+}
+
+#[test]
+fn the_crtc_shows_the_windows_drivers_mode() {
+    let mut cpu = machine();
+    // What the driver programs for 800x600 in 16 bits: 565, video on.
+    for (reg, value) in [
+        (regs::CRTCHORZ, 0x008F_1463),
+        (regs::CRTCVERT, 0x0006_B257),
+        (regs::CRTCOFFSET, 0x200),
+        (regs::FRAMEBASEA, 0x20000),
+        (regs::CRTCCTL, 0x1F04),
+    ] {
+        cpu.bus.io_write_wide(port(reg), value, 4);
+    }
+    let mode = cpu.bus.vbe.mode.expect("a mode");
+    assert_eq!((mode.width, mode.height, mode.bpp), (800, 600, 16));
+    assert_eq!(cpu.bus.vbe.pitch, 2048, "1536 bytes fetched, then the offset");
+    assert_eq!(cpu.bus.vbe.start, 0x20000);
+    cpu.bus.io_write_wide(port(regs::CRTCCTL), 0, 4);
+    assert!(cpu.bus.vbe.mode.is_none(), "video off: the VGA's again");
+}
+
+#[test]
+fn the_2d_microcode_fills_and_answers() {
+    let mut cpu = windows_2d();
+    // An 800x600 surface of 16 bits at 128 KB, 2048 bytes a line.
+    fifo(&mut cpu, &[0x20, 800 << 16 | 600, 16 << 16 | 4, 0x20000, 2048, 0x5300]);
+    fifo(&mut cpu, &[0x30, 0x7BEF_7BEF, 10 << 16 | 20, 3 << 16 | 2]);
+    let at = |x: u32, y: u32| {
+        let i = (0x20000 + y * 2048 + x * 2) as usize;
+        u16::from_le_bytes([cpu.bus.vbe.vram[i], cpu.bus.vbe.vram[i + 1]])
+    };
+    assert_eq!((at(10, 20), at(12, 21)), (0x7BEF, 0x7BEF));
+    assert_eq!((at(13, 20), at(10, 22)), (0, 0), "3x2");
+    fifo(&mut cpu, &[8]);
+    assert_eq!(cpu.bus.io_read_wide(port(regs::FIFOOUTVALID), 1), 1, "synced");
+}

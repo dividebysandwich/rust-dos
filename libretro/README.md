@@ -47,7 +47,7 @@ starts.
 | `.zip`, `.dosz`, `.7z` | a [game package](../GAME-PACKAGES.md): C:, read from the archive where it is, with a profile in `saves/rust-dos/games` made the first time and found after (made again when its configuration changes), from its `rust-dos.conf` if it has one; else it starts its one program, if it has one. What the game writes goes to `saves/rust-dos/saves/<name>` |
 | `.conf` | a [game profile](../CONFIGURATION.md#game-profiles), launched; a DOSBox configuration is imported as one first |
 | floppy image (`.img`, `.ima`, `.vfd`, `.86f`, …) | A:, with the prompt at A: |
-| CD image (`.iso`, `.cue`) | D:, with the prompt at D: |
+| CD image (`.iso`, `.cue`, `.chd`) | D:, with the prompt at D: |
 | hard disk image (`.img`, `.vhd`, `.hdd`) | C:. The image is left as it is: its changes go to a delta file in `saves/rust-dos/saves/<name>`, so one Windows install can be the base of many games (see [`-overlay`](../CONFIGURATION.md#mounting-drives)) |
 | `.m3u` | a list of disk images for one drive: the first goes in, the frontend's *Disc Control* changes them |
 
@@ -111,6 +111,19 @@ profile while one plays. Hardware changes wait for the program running to end,
 as in the program; the memory size (`memsize`) changes when the content starts
 again.
 
+## The 3dfx Voodoo with OpenGL
+
+With the core options **3dfx Voodoo** on and **3dfx renderer** set to
+OpenGL (`voodoo_renderer=opengl`), the frontend's OpenGL draws the card's
+picture, as the program's window does: at **3dfx OpenGL scale** times its
+resolution (`voodoo_scale`), with **3dfx OpenGL antialiasing**
+(`voodoo_msaa`). That needs RetroArch's `glcore` or `gl` video driver
+(OpenGL 3, not OpenGL ES). The renderer is picked when content is loaded;
+without such a driver, the software renderer draws the card, as it does by
+default. Save states and the settings window
+work as with the software renderer; while the settings window or the
+performance overlay is open, the card's picture is the software one.
+
 ## Controls
 
 * **Keyboard**: every key of a PC keyboard. RetroArch's hotkeys take some
@@ -148,7 +161,6 @@ the core.
 
 ## What isn't in the core
 
-* The 3dfx Voodoo is drawn in software; the program's OpenGL renderer and
-  CRT shaders aren't there (the frontend has shaders of its own).
+* The program's CRT shaders (the frontend has shaders of its own).
 * MIDI out of the host's MIDI ports (`midisynth=host`).
 * The debug server.

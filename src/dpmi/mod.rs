@@ -28,10 +28,12 @@
 //! the host forgets a client when DOS ends its process (`process_ended`).
 //! DOS calls a client makes with INT 21h in protected mode reach DOS
 //! through the host's translation of their pointers (dos.rs), as under
-//! Windows.
+//! Windows, and so do the video BIOS's functions that take a pointer
+//! (video.rs).
 
 mod dos;
 mod int31;
+mod video;
 
 use crate::bus::Bus;
 use crate::cpu::{CR0_PE, Cpu, CpuFlags, CpuModel, CpuResult, CpuState, DescTable, Seg, SegCache};
@@ -149,6 +151,7 @@ const ECX: usize = 1;
 const EDX: usize = 2;
 const EBX: usize = 3;
 const ESP: usize = 4;
+const EBP: usize = 5;
 const ESI: usize = 6;
 const EDI: usize = 7;
 
@@ -334,7 +337,8 @@ pub struct Frame {
 }
 
 /// Frame kinds. In real mode: an interrupt reflected there, a real-mode
-/// call for INT 31h AX=0300h-0302h, and a DOS call translated (dos.rs). In
+/// call for INT 31h AX=0300h-0302h, and a DOS or video BIOS call
+/// translated (dos.rs, video.rs). In
 /// protected mode: a handler called for an interrupt in real mode, and a
 /// callback's procedure.
 const F_REFLECT: u8 = 0;
@@ -342,6 +346,7 @@ const F_TRANSLATE: u8 = 1;
 const F_HWINT: u8 = 2;
 const F_CALLBACK: u8 = 3;
 const F_DOS: u8 = 4;
+const F_VIDEO: u8 = 5;
 
 /// The host's state.
 #[derive(Debug)]
@@ -1115,6 +1120,7 @@ fn default_interrupt(cpu: &mut Cpu, vector: u8, mut ctx: Context) {
             resume(cpu, &ctx);
         }
         (0x21, _) if !is_irq(cpu, 0x21) => dos::int21(cpu, ctx),
+        (0x10, _) if !is_irq(cpu, 0x10) => video::int10(cpu, ctx),
         _ => reflect(cpu, vector, ctx),
     }
 }
@@ -1221,11 +1227,13 @@ fn push_real(cpu: &mut Cpu, ss: u16, sp: u32, values: &[u16]) -> u32 {
 
 /// Real-mode code the host called for a client returned (to `RM_RETURN`).
 fn rm_return(cpu: &mut Cpu) {
-    let Some(frame) = take_frame(cpu, &[F_REFLECT, F_TRANSLATE, F_DOS]) else { return };
+    let Some(frame) = take_frame(cpu, &[F_REFLECT, F_TRANSLATE, F_DOS, F_VIDEO]) else { return };
     let rm = Context::of(cpu);
     let mut ctx = frame.ctx;
     if frame.kind == F_DOS {
         return dos::returned(cpu, frame, &rm);
+    } else if frame.kind == F_VIDEO {
+        return video::returned(cpu, frame, &rm);
     } else if frame.kind == F_TRANSLATE {
         int31::store_call_structure(cpu, frame.sel, frame.off, &rm);
         ctx.set_cf(false);

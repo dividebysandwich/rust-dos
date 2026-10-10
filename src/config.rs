@@ -196,6 +196,9 @@ pub struct Config {
     pub disk: DiskSettings,
     /// `[mixer]`: the volumes of the sound sources.
     pub mixer: MixerSettings,
+    /// `[mixer]`'s `blocksize` and `prebuffer`: the sound waiting for the
+    /// host's sound device.
+    pub audio_buffer: crate::audio::AudioBuffer,
     /// `[joystick]`: what the game port has plugged in.
     pub joystick: JoystickSettings,
     /// `[network]`: the IPX driver and the LAN.
@@ -1037,6 +1040,14 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Ok(mix) => mixer.chorus_mix = mix,
                             Err(e) => warn(format!("{}: {}", key.to_ascii_lowercase(), e)),
                         },
+                        "blocksize" => match crate::audio::parse_blocksize(value) {
+                            Ok(frames) => config.audio_buffer.blocksize = frames,
+                            Err(e) => warn(e),
+                        },
+                        "prebuffer" => match crate::audio::parse_prebuffer(value) {
+                            Ok(ms) => config.audio_buffer.prebuffer = ms,
+                            Err(e) => warn(e),
+                        },
                         _ => match Channel::parse(key) {
                             Some(channel) => match crate::mixer::parse_level(value) {
                                 Ok(percent) => mixer.set_level(channel, percent),
@@ -1341,6 +1352,9 @@ pub struct Settings {
     pub sound: SoundConfig,
     pub disk: DiskSettings,
     pub mixer: MixerSettings,
+    /// The sound waiting for the host's sound device (`blocksize` and
+    /// `prebuffer`).
+    pub audio_buffer: crate::audio::AudioBuffer,
     pub joystick: JoystickSettings,
     /// `[network]`: the IPX driver and the LAN.
     pub network: crate::net::NetSettings,
@@ -1398,6 +1412,7 @@ impl Default for Settings {
             sound: SoundConfig::default(),
             disk: DiskSettings::default(),
             mixer: MixerSettings::default(),
+            audio_buffer: crate::audio::AudioBuffer::default(),
             joystick: JoystickSettings::default(),
             network: crate::net::NetSettings::default(),
             serial: crate::serial::SerialSettings::default(),
@@ -1501,6 +1516,7 @@ impl Settings {
             sound: config.sound.clone(),
             disk: config.disk,
             mixer: config.mixer,
+            audio_buffer: config.audio_buffer,
             joystick: config.joystick,
             network: config.network.clone(),
             serial: config.serial.clone(),
@@ -1631,6 +1647,8 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Section::Mixer, "reverb_mix", Some(settings.mixer.reverb_mix.to_string())),
         (Section::Mixer, "chorus", Some(settings.mixer.chorus.name().to_string())),
         (Section::Mixer, "chorus_mix", Some(settings.mixer.chorus_mix.to_string())),
+        (Section::Mixer, "blocksize", Some(settings.audio_buffer.blocksize.to_string())),
+        (Section::Mixer, "prebuffer", Some(settings.audio_buffer.prebuffer.to_string())),
     ]);
     entries.extend([
         (Section::Joystick, "joysticktype", Some(settings.joystick.kind.name().to_string())),
@@ -2553,6 +2571,24 @@ mod tests {
     }
 
     #[test]
+    fn audio_buffer_parses_and_saves() {
+        use crate::audio::AudioBuffer;
+        assert_eq!(Settings::from_config(&parse("", Path::new("."), None)).audio_buffer, AudioBuffer::default());
+        let config = parse("[mixer]\nblocksize=1024\nprebuffer=10ms\n", Path::new("."), None);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        let settings = Settings::from_config(&config);
+        assert_eq!(settings.audio_buffer, AudioBuffer { blocksize: 1024, prebuffer: 10 });
+        let saved = update_text("", &Settings::default(), &settings, &[], None);
+        assert!(saved.contains("blocksize=1024") && saved.contains("prebuffer=10"), "{}", saved);
+        assert_eq!(Settings::from_config(&parse(&saved, Path::new("."), None)).audio_buffer, settings.audio_buffer);
+        for line in ["blocksize=500", "blocksize=4096", "blocksize=", "prebuffer=0", "prebuffer=12", "prebuffer=lots"] {
+            let config = parse(&format!("[mixer]\n{}\n", line), Path::new("."), None);
+            assert_eq!(config.warnings.len(), 1, "{}: {:?}", line, config.warnings);
+            assert_eq!(Settings::from_config(&config).audio_buffer, AudioBuffer::default());
+        }
+    }
+
+    #[test]
     fn mouse_sensitivity_parses_and_saves() {
         assert_eq!(Settings::default().mouse_sensitivity, 1.0);
         assert_eq!(Settings::from_config(&parse("", Path::new("."), None)).mouse_sensitivity, 1.0);
@@ -2682,6 +2718,7 @@ mod tests {
                 mixer.chorus_mix = 20;
                 mixer
             },
+            audio_buffer: crate::audio::AudioBuffer { blocksize: 256, prebuffer: 10 },
             joystick: JoystickSettings { kind: JoystickType::TwoAxis, deadzone: 20 },
             network: crate::net::NetSettings {
                 lan: Some("relay.example.com".into()),

@@ -22,6 +22,8 @@
 //! frame buffer and one texture unit with 2 MB.
 
 pub mod backlog;
+#[cfg(feature = "voodoo-gl")]
+pub mod gl;
 pub mod lfb;
 pub mod mem;
 pub mod mirror;

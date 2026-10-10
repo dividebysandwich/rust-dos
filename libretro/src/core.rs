@@ -97,6 +97,11 @@ pub struct Core {
     picture: Frame,
     screen: Frame,
     xrgb: Vec<u32>,
+    /// The size of the picture handed over: the 3dfx card's OpenGL
+    /// picture's while it is shown, else `screen`'s.
+    shown: Option<(u32, u32)>,
+    /// Whether OpenGL drew the 3dfx card's picture last frame.
+    voodoo_gl_shown: bool,
     /// The size and aspect the frontend was told, and the largest size.
     geometry: Option<retro_game_geometry>,
     max_size: (u32, u32),
@@ -244,6 +249,8 @@ impl Core {
             picture: blank.clone(),
             screen: blank,
             xrgb: Vec::new(),
+            shown: None,
+            voodoo_gl_shown: false,
             geometry: None,
             max_size: MAX_SIZE,
             target_ticks: 0,
@@ -328,6 +335,7 @@ impl Core {
         let fast = !waiting && !self.ui.is_open() && self.autoinput_step();
         let m = &mut self.m;
         m.cpu.bus.apply_freezes();
+        m.cpu.bus.set_voodoo_fps_cap(m.settings.voodoo.fps_cap);
         let batch_end = if m.cpu.bus.exit_requested || waiting {
             self.target_ticks = m.cpu.bus.clock.now_ticks();
             self.tick_rem = 0;
@@ -488,9 +496,29 @@ impl Core {
             // Blinking characters keep the cursor's time.
             bus.vga.set_blink(self.cursor_visible);
         }
+        // The 3dfx card's picture from its memory, unless OpenGL draws it
+        // and nothing is drawn over it that mixes with it.
+        let voodoo_picture = !self.voodoo_gl_shown
+            || self.ui.is_open()
+            || self.ui.overlay_shown()
+            || self.wheel_view.is_some()
+            || self.m.settings.monochrome.phosphor().is_some();
+        if let Some(v) = &mut bus.voodoo {
+            v.set_software_picture(voodoo_picture);
+        }
         // The CRTC picks up the Start Address the program flipped to at the
         // vertical retraces that passed.
         bus.sync_display();
+        let voodoo_settings = self.m.settings.voodoo;
+        let voodoo_gl = crate::gl::with_screen(|s| s.run_voodoo(bus, &voodoo_settings)).unwrap_or(false);
+        if !voodoo_gl
+            && !voodoo_picture
+            && let Some(v) = &mut bus.voodoo
+        {
+            v.set_software_picture(true);
+            bus.sync_display();
+        }
+        self.voodoo_gl_shown = voodoo_gl;
         let (width, height) = video::frame_size(bus);
         if self.picture.resize(width, height) {
             bus.vga.mark_dirty_full();
@@ -518,15 +546,38 @@ impl Core {
             rust_dos::config_ui::wheel::draw(&mut self.screen, view);
         }
 
+        // With the frontend's OpenGL, the picture is drawn into its
+        // framebuffer; before it made a context, the last one stays.
+        if crate::gl::granted() {
+            let voodoo = voodoo_gl.then_some(&self.picture);
+            let Some((w, h)) = crate::gl::with_screen(|s| s.present(&self.screen, voodoo)) else {
+                cb.video_dupe();
+                return;
+            };
+            self.shown = Some((w, h));
+            self.set_geometry(cb);
+            let video_start = Instant::now();
+            cb.video_hw(w, h);
+            self.frontend += video_start.elapsed();
+            return;
+        }
         self.xrgb.clear();
         self.xrgb.extend(
             self.screen.rgb.as_chunks::<3>().0.iter().map(|&[r, g, b]| u32::from_be_bytes([0, r, g, b])),
         );
+        self.shown = None;
         self.set_geometry(cb);
         let (w, h) = (self.screen.width, self.screen.height);
         let video_start = Instant::now();
         cb.video(&self.xrgb, w, h);
         self.frontend += video_start.elapsed();
+    }
+
+    /// The frontend draws with OpenGL for the core (`gl.rs`): the largest
+    /// picture is the 3dfx card's at the OpenGL scale.
+    pub fn hardware_rendering(&mut self) {
+        let scale = self.m.settings.voodoo.scale.max(1);
+        self.max_size = (MAX_SIZE.0.max(800 * scale), MAX_SIZE.1.max(600 * scale));
     }
 
     /// Tell the frontend the picture's size and shape when they change.
@@ -555,7 +606,8 @@ impl Core {
     /// The picture's size and shape now: the selected target ratio, or
     /// square pixels when no fixed ratio is selected.
     pub fn geometry_now(&self) -> retro_game_geometry {
-        let (w, h) = (self.screen.width.max(1), self.screen.height.max(1));
+        let (w, h) = self.shown.unwrap_or((self.screen.width, self.screen.height));
+        let (w, h) = (w.max(1), h.max(1));
         let aspect_ratio = self.m.settings.aspect.ratio(w as f32 / h as f32);
         retro_game_geometry { base_width: w, base_height: h, max_width: self.max_size.0, max_height: self.max_size.1, aspect_ratio }
     }

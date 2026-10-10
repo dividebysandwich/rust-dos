@@ -1015,6 +1015,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 return_code, paras_to_keep, tsr_psp
             ));
 
+            cpu.note_exit(return_code, true);
             // Calculate where the resident block ends
             let resident_end = tsr_psp.wrapping_add(paras_to_keep);
 

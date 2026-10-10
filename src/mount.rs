@@ -61,7 +61,7 @@ IMGMOUNT is the same command.\r
 
 /// The extensions of disk and CD images.
 pub(crate) const IMAGE_EXTENSIONS: &[&str] =
-    &["img", "ima", "vfd", "flp", "dsk", "360", "720", "1200", "1440", "86f", "iso", "cue", "bin", "gog", "ins", "inst", "vhd"];
+    &["img", "ima", "vfd", "flp", "dsk", "360", "720", "1200", "1440", "86f", "iso", "cue", "bin", "gog", "ins", "inst", "chd", "vhd"];
 
 /// Whether a path is a disk or CD image's, by its extension.
 pub(crate) fn is_image_name(path: &Path) -> bool {

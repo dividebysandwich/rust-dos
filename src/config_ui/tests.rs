@@ -1458,6 +1458,32 @@ fn the_capture_folder_is_typed() {
 }
 
 #[test]
+fn the_mixer_page_sets_the_sound_buffer() {
+    use crate::audio::AudioBuffer;
+    let mut host = FakeHost::new();
+    let mut ui = opened(&host);
+    ui.show_page(Page::Mixer);
+    ui.row = ui.items().iter().position(|&i| i == Item::AudioBlocksize).unwrap();
+    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("512 frames (11.6 ms, default)"));
+    pick(&mut ui, &mut host, "256 frames (5.8 ms)");
+    assert_eq!(host.applied.last().unwrap().audio_buffer, AudioBuffer { blocksize: 256, prebuffer: 20 });
+    ui.key(UiKey::Down, &mut host);
+    assert_eq!(ui.item(), Some(Item::AudioPrebuffer));
+    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("20 ms"));
+    pick(&mut ui, &mut host, "10 ms");
+    assert_eq!(host.applied.last().unwrap().audio_buffer, AudioBuffer { blocksize: 256, prebuffer: 10 });
+    assert_eq!(Item::AudioBlocksize.applies(), Applies::Now);
+    keys(&mut ui, &mut host, &[UiKey::Save]);
+    assert_eq!(host.saved.last().unwrap().audio_buffer, AudioBuffer { blocksize: 256, prebuffer: 10 });
+
+    // The libretro frontend and the browser buffer the sound themselves.
+    let mut ui = ConfigUi::for_frontend(Frontend { window: false, host_files: true });
+    ui.open(&Settings::default(), Some("rust-dos.conf".into()), &host);
+    ui.show_page(Page::Mixer);
+    assert!(!ui.items().contains(&Item::AudioBlocksize) && !ui.items().contains(&Item::AudioPrebuffer));
+}
+
+#[test]
 fn a_browser_gets_what_it_has() {
     let browser = Frontend { window: false, host_files: false };
     let mut host = FakeHost::new();

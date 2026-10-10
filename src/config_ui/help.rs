@@ -378,6 +378,7 @@ impl Item {
             Reverb => "reverb",
             Chorus => "chorus",
             ReverbMix | ChorusMix => "effect-mix",
+            AudioBlocksize | AudioPrebuffer => "audio-buffer",
             LptDac => "lpt-dac",
             TandySound => "tandy-sound",
             Autoexec => "autoexec",

@@ -1,6 +1,6 @@
 //! The picture drawn with OpenGL 3, as it is or through a CRT look.
 
-use super::voodoo_gl::VoodooGl;
+use rust_dos::voodoo::gl::VoodooGl;
 use crate::config::Filter;
 use crate::video::Frame;
 use rust_dos::config_ui::Layer;

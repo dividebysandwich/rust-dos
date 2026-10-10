@@ -11,6 +11,65 @@ pub trait AudioOutput {
     /// enough that the device doesn't run dry while it waits, and no more,
     /// as each is latency.
     fn target_frames(&self) -> usize;
+    /// Take on the sizes of `[mixer]`'s `blocksize` and `prebuffer`. Only
+    /// the rust-dos program's sound device has them: the libretro
+    /// frontend and the browser buffer the sound themselves.
+    fn set_buffer(&mut self, _buffer: AudioBuffer) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// How much sound waits for the host's sound device (`[mixer]`'s
+/// `blocksize` and `prebuffer`), each frame of it latency: the device's
+/// own buffer, and the queue kept on top of it for a video frame that
+/// comes late. Less is heard sooner, but a busy host may then run the
+/// device dry, which crackles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AudioBuffer {
+    /// The sound device's buffer, in frames (`BLOCKSIZES`).
+    pub blocksize: u16,
+    /// The queue on top of it, in milliseconds (`PREBUFFERS`).
+    pub prebuffer: u16,
+}
+
+impl Default for AudioBuffer {
+    fn default() -> Self {
+        Self { blocksize: 512, prebuffer: 20 }
+    }
+}
+
+/// The device buffers to choose from, in frames: SDL's take powers of two.
+pub const BLOCKSIZES: [u16; 5] = [128, 256, 512, 1024, 2048];
+
+/// The queues to choose from, in milliseconds.
+pub const PREBUFFERS: [u16; 8] = [5, 10, 15, 20, 25, 30, 40, 50];
+
+impl AudioBuffer {
+    /// The milliseconds `frames` play for at the mixer's rate.
+    pub fn millis(frames: u16) -> f64 {
+        frames as f64 * 1000.0 / crate::opl::RATE as f64
+    }
+}
+
+/// A `blocksize` setting: one of `BLOCKSIZES`.
+pub fn parse_blocksize(value: &str) -> Result<u16, String> {
+    value
+        .trim()
+        .parse::<u16>()
+        .ok()
+        .filter(|n| BLOCKSIZES.contains(n))
+        .ok_or_else(|| format!("invalid blocksize '{}' (128, 256, 512, 1024 or 2048)", value.trim()))
+}
+
+/// A `prebuffer` setting, in milliseconds: one of `PREBUFFERS`, with or
+/// without "ms".
+pub fn parse_prebuffer(value: &str) -> Result<u16, String> {
+    let number = value.trim().trim_end_matches("ms").trim_end();
+    number
+        .parse::<u16>()
+        .ok()
+        .filter(|n| PREBUFFERS.contains(n))
+        .ok_or_else(|| format!("invalid prebuffer '{}' (5, 10, 15, 20, 25, 30, 40 or 50 ms)", value.trim()))
 }
 
 /// The BEL character's beep: 200 ms of 880 Hz, mixed into the output.

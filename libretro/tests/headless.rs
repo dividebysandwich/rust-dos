@@ -37,6 +37,8 @@ struct Frontend {
     /// the calls made to it.
     vfs_root: Option<PathBuf>,
     vfs_calls: usize,
+    /// The hardware rendering contexts asked for, none of which it has.
+    hw_render_requests: Vec<u32>,
 }
 
 thread_local! {
@@ -124,6 +126,11 @@ unsafe extern "C" fn environment(cmd: u32, data: *mut c_void) -> bool {
                 }
                 info.iface = &raw const vfs::INTERFACE as *mut retro_vfs_interface;
                 true
+            }
+            RETRO_ENVIRONMENT_SET_HW_RENDER => {
+                let hw = &*(data as *const retro_hw_render_callback);
+                with(|fe| fe.hw_render_requests.push(hw.context_type));
+                false
             }
             RETRO_ENVIRONMENT_GET_LOG_INTERFACE => false,
             _ => true,
@@ -450,6 +457,30 @@ fn without_content_it_starts_at_the_prompt() {
     type_text("VER\r");
     run(30);
     assert_ne!(picture_hash(), before);
+    stop();
+}
+
+#[test]
+fn without_the_frontend_s_opengl_the_3dfx_card_is_drawn_in_software() {
+    let dir = scratch("voodoo_gl");
+    start(&dir, &[("rust_dos_voodoo", "true"), ("rust_dos_voodoo_renderer", "opengl")]);
+    assert!(load(None));
+    // An OpenGL 3.2 core context, then any of 3.0 or later.
+    assert_eq!(with(|fe| fe.hw_render_requests.clone()), [RETRO_HW_CONTEXT_OPENGL_CORE, RETRO_HW_CONTEXT_OPENGL]);
+    run(120);
+    with(|fe| {
+        assert_eq!((fe.width, fe.height), (640, 400));
+        assert!(fe.pixels.iter().any(|&p| p != 0), "something on the screen");
+    });
+    stop();
+}
+
+#[test]
+fn without_a_3dfx_opengl_renderer_the_frontend_s_opengl_is_not_asked_for() {
+    let dir = scratch("voodoo_software");
+    start(&dir, &[("rust_dos_voodoo", "true")]);
+    assert!(load(None));
+    assert!(with(|fe| fe.hw_render_requests.is_empty()));
     stop();
 }
 

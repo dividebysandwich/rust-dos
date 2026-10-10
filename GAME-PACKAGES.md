@@ -349,7 +349,7 @@ the entries at its top count:
 |---|---|
 | `c.vhd`, `c.img` | C:, a hard disk image. With `os=`, the changes to that system ([above](#an-operating-system)) |
 | `d.vhd`, `e.img` | A hard disk image on that letter |
-| `d.cue`, `d.iso`, `d.bin` | A CD-ROM drive with that disc |
+| `d.cue`, `d.iso`, `d.bin`, `d.chd` | A CD-ROM drive with that disc |
 | `d1.iso`, `d2.cue` | More discs in the same drive, in order of the number; Ctrl+F4 changes the disc |
 | `d/`, `e1/` | A folder as a CD |
 | `e.hd/` | A folder as a hard drive |
@@ -370,7 +370,6 @@ name in the OS images folder.
   the folder's drive on that letter is left out.
 - In a booted system, the first other hard disk image is the second hard
   disk; the machine has two, so further ones are left out. Discs stay CDs.
-- `.chd` images aren't read yet.
 
 The log lists what was left out and why.
 
@@ -405,7 +404,7 @@ the first plays is refused, as both would write into its saves folder.
 1. **Put the game in a folder.** Copy the installed game, the way it
    runs from C:, into a new folder named after the game.
 2. **Add the CD, if there is one.** Copy the CD image into it, for
-   example into a `CD` folder. A CUE sheet with its BIN files, an ISO, or
+   example into a `CD` folder. A CUE sheet with its BIN files, an ISO, a CHD, or
    the CD's files as a folder all work.
 3. **Add the manuals.** Make an `EXTRAS` folder and put the PDFs and
    pictures in it, named the way they should be listed.
@@ -437,10 +436,11 @@ the first plays is refused, as both would write into its saves folder.
 from the archive. A compressed file is unpacked into memory the first time
 the game opens it, and stays there. That's fine for game files, but a
 650 MB CD image takes a lot of memory and time. Store CD and disk images
-uncompressed: `zip -0` stores everything, and `zip -n .bin:.iso:.img`
-stores just those files. In a 7z archive, every file in a solid block is
-unpacked together, so turn solid mode off (`-ms=off`). Zip archives are
-the better choice for big games, and they're what RetroAchievements knows
+uncompressed: `zip -0` stores everything, and `zip -n .bin:.iso:.img:.chd`
+stores just those files. A CHD is compressed already, a hunk at a time as
+it is read, so a stored CHD is the smallest CD image that costs no memory.
+In a 7z archive, every file in a solid block is unpacked together, so turn
+solid mode off (`-ms=off`). Zip archives are the better choice for big games, and they're what RetroAchievements knows
 games by.
 
 Zip64 archives (bigger than 4 GB) work. Encrypted archives don't.

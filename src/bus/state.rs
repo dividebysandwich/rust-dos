@@ -8,7 +8,7 @@ use crate::savestate::{Reader, Result, State, StateError, Writer, load_device, s
 
 /// The sections' versions, changed with what a section holds.
 const RAM_VERSION: u16 = 2;
-const CORE_VERSION: u16 = 7;
+const CORE_VERSION: u16 = 8;
 const VIDEO_VERSION: u16 = 2;
 const SOUND_VERSION: u16 = 3;
 const DOS_VERSION: u16 = 6;

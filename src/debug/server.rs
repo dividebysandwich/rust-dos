@@ -152,6 +152,9 @@ impl AppState {
     async fn call_json(&self, cmd: Cmd, timeout: Duration) -> ApiResult {
         match self.call(cmd, timeout).await? {
             Reply::Json(v) => Ok(axum::Json(v).into_response()),
+            Reply::ErrorJson(code, v) => {
+                Ok((StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST), axum::Json(v)).into_response())
+            }
             _ => Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, "unexpected reply".into())),
         }
     }
@@ -261,19 +264,23 @@ async fn screen_text(State(s): State<AppState>, Query(q): Query<FormatQuery>) ->
 
 async fn trace_get(State(s): State<AppState>, Query(q): Query<TraceQuery>) -> ApiResult {
     let json = q.format.as_deref() == Some("json");
-    let Reply::Trace(entries) = s.call(Cmd::TraceQuery(q), DEFAULT_TIMEOUT).await? else {
+    let Reply::Trace { entries, next, dropped } = s.call(Cmd::TraceQuery(q), DEFAULT_TIMEOUT).await? else {
         return Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, "unexpected reply".into()));
     };
-    let body = tokio::task::spawn_blocking(move || format_trace(&entries, json))
+    let body = tokio::task::spawn_blocking(move || format_trace(&entries, json, next, dropped))
         .await
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(body)
+    let cursor = [
+        (header::HeaderName::from_static("x-trace-next"), next.to_string()),
+        (header::HeaderName::from_static("x-trace-dropped"), dropped.to_string()),
+    ];
+    Ok((cursor, body).into_response())
 }
 
-fn format_trace(entries: &[TraceEntry], json: bool) -> Response {
+fn format_trace(entries: &[TraceEntry], json: bool, next: u64, dropped: u64) -> Response {
     if json {
         let v: Vec<Value> = entries.iter().map(|e| e.to_json()).collect();
-        axum::Json(json!({"count": v.len(), "entries": v})).into_response()
+        axum::Json(json!({"count": v.len(), "next": next, "dropped": dropped, "entries": v})).into_response()
     } else {
         let mut out = String::with_capacity(entries.len() * 160 + 128);
         out.push_str(trace::TEXT_HEADER);
@@ -341,11 +348,18 @@ struct TracePost {
     #[serde(default)]
     clear: bool,
     stream_max: Option<usize>,
+    /// Record this many more instructions, then stop.
+    count: Option<u64>,
 }
 
 async fn trace_post(State(s): State<AppState>, body: Bytes) -> ApiResult {
     let p: TracePost = from_value(parse_body(&body)?)?;
-    s.call_json(Cmd::TraceControl { enabled: p.enabled, clear: p.clear, stream_max: p.stream_max }, DEFAULT_TIMEOUT)
+    // A nonzero count turns the trace on and 0 turns it off.
+    if let Some((e, n)) = p.enabled.zip(p.count).filter(|&(e, n)| e != (n > 0)) {
+        return Err(bad(format!("\"enabled\":{e} contradicts \"count\":{n}")));
+    }
+    let cmd = Cmd::TraceControl { enabled: p.enabled, clear: p.clear, stream_max: p.stream_max, count: p.count };
+    s.call_json(cmd, DEFAULT_TIMEOUT)
         .await
 }
 
@@ -501,7 +515,14 @@ struct ControlBody {
     count: Option<u64>,
     until: Option<String>,
     timeout_ms: Option<u64>,
+    /// `run`: the command line, and whether to stop at the program's entry.
+    command: Option<String>,
+    #[serde(default)]
+    stop_at_entry: bool,
 }
+
+/// How long `run` waits for its program to start, unless `timeout_ms` says.
+const RUN_TIMEOUT: Duration = Duration::from_secs(30);
 
 async fn control(State(s): State<AppState>, Path(action): Path<String>, body: Bytes) -> ApiResult {
     let b: ControlBody = from_value(parse_body(&body)?)?;
@@ -513,10 +534,15 @@ async fn control(State(s): State<AppState>, Path(action): Path<String>, body: By
         "step_over" => s.call_json(Cmd::StepOver, timeout).await,
         "reboot_shell" => s.call_json(Cmd::RebootShell, DEFAULT_TIMEOUT).await,
         "reboot" => s.call_json(Cmd::Reboot, DEFAULT_TIMEOUT).await,
+        "run" => {
+            let command = b.command.ok_or_else(|| bad("missing 'command'"))?;
+            let timeout = b.timeout_ms.map_or(RUN_TIMEOUT, Duration::from_millis);
+            s.call_json(Cmd::Run { command, stop_at_entry: b.stop_at_entry }, timeout).await
+        }
         "quit" => s.call_json(Cmd::Quit, DEFAULT_TIMEOUT).await,
         _ => Err(ApiError(
             StatusCode::NOT_FOUND,
-            format!("unknown action '{}' (pause, resume, step, step_over, reboot_shell, reboot, quit)", action),
+            format!("unknown action '{}' (pause, resume, step, step_over, run, reboot_shell, reboot, quit)", action),
         )),
     }
 }
@@ -595,27 +621,45 @@ struct MemPut {
     addr: String,
     hex: Option<String>,
     base64: Option<String>,
+    /// Hex bytes that must be at `addr` for the write to happen.
+    expect: Option<String>,
+}
+
+/// Bytes from hex digits. Anything else is skipped, as is a `0x` that
+/// starts a number, so "0xCD 0xAB" is CD AB.
+fn hex_data(h: &str) -> Result<Vec<u8>, ApiError> {
+    let mut clean = String::with_capacity(h.len());
+    let mut prev: Option<char> = None;
+    let mut chars = h.chars().peekable();
+    while let Some(c) = chars.next() {
+        let starts_number = !prev.is_some_and(|p| p.is_ascii_hexdigit());
+        if c == '0' && starts_number && matches!(chars.peek(), Some('x' | 'X')) {
+            chars.next();
+            prev = Some('x');
+            continue;
+        }
+        if c.is_ascii_hexdigit() {
+            clean.push(c);
+        }
+        prev = Some(c);
+    }
+    if clean.len() % 2 != 0 {
+        return Err(bad("hex data must have an even number of digits"));
+    }
+    Ok((0..clean.len()).step_by(2).map(|i| u8::from_str_radix(&clean[i..i + 2], 16).unwrap()).collect())
 }
 
 async fn mem_put(State(s): State<AppState>, body: Bytes) -> ApiResult {
     let b: MemPut = from_value(parse_body(&body)?)?;
     let data = match (b.hex, b.base64) {
-        (Some(h), None) => {
-            let clean: String = h.chars().filter(|c| c.is_ascii_hexdigit()).collect();
-            if clean.len() % 2 != 0 {
-                return Err(bad("hex data must have an even number of digits"));
-            }
-            (0..clean.len())
-                .step_by(2)
-                .map(|i| u8::from_str_radix(&clean[i..i + 2], 16).unwrap())
-                .collect()
-        }
+        (Some(h), None) => hex_data(&h)?,
         (None, Some(b64)) => base64::engine::general_purpose::STANDARD
             .decode(b64.trim())
             .map_err(|e| bad(format!("invalid base64: {}", e)))?,
         _ => return Err(bad("provide exactly one of 'hex' or 'base64'")),
     };
-    s.call_json(Cmd::WriteMem { addr: b.addr, data }, DEFAULT_TIMEOUT).await
+    let expect = b.expect.as_deref().map(hex_data).transpose()?;
+    s.call_json(Cmd::WriteMem { addr: b.addr, data, expect }, DEFAULT_TIMEOUT).await
 }
 
 #[derive(Deserialize)]
@@ -648,9 +692,13 @@ struct BpBody {
     exception: Option<Value>,
     mode_switch: Option<bool>,
     /// With `addr`: remove the breakpoint when it is hit. Refused with
-    /// `exception` or `mode_switch`.
+    /// `exception`, `mode_switch`, `program_start` or `program_exit`.
     #[serde(default)]
     once: bool,
+    /// Pause at the entry point of each program DOS starts, or after each
+    /// program ends (false stops).
+    program_start: Option<bool>,
+    program_exit: Option<bool>,
     /// With `exception`: false stops pausing on it.
     enabled: Option<bool>,
 }
@@ -671,17 +719,23 @@ fn exception_mask(v: &Value) -> Result<u32, ApiError> {
 
 async fn bp_add(State(s): State<AppState>, body: Bytes) -> ApiResult {
     let b: BpBody = from_value(parse_body(&body)?)?;
-    if b.exception.is_some() || b.mode_switch.is_some() {
+    if b.exception.is_some() || b.mode_switch.is_some() || b.program_start.is_some() || b.program_exit.is_some() {
         // These stop on every hit; a client asking for one hit would get many.
         if b.once {
-            return Err(bad("'once' goes with 'addr' only, not 'exception' or 'mode_switch'"));
+            return Err(bad("'once' goes with 'addr' only, not 'exception', 'mode_switch', 'program_start' or 'program_exit'"));
         }
         let mask = b.exception.as_ref().map(exception_mask).transpose()?;
         let (exceptions, clear_exceptions) = if b.enabled == Some(false) { (None, mask) } else { (mask, None) };
-        let cmd = Cmd::BreakOn { exceptions, clear_exceptions, mode_switch: b.mode_switch };
+        let cmd = Cmd::BreakOn {
+            exceptions,
+            clear_exceptions,
+            mode_switch: b.mode_switch,
+            program_start: b.program_start,
+            program_exit: b.program_exit,
+        };
         return s.call_json(cmd, DEFAULT_TIMEOUT).await;
     }
-    let addr = b.addr.ok_or_else(|| bad("missing 'addr' (or 'exception' / 'mode_switch')"))?;
+    let addr = b.addr.ok_or_else(|| bad("missing 'addr' (or 'exception', 'mode_switch', 'program_start', 'program_exit')"))?;
     s.call_json(Cmd::AddBreakpoint { addr, once: b.once }, DEFAULT_TIMEOUT).await
 }
 
@@ -951,7 +1005,12 @@ STATUS / SCREEN
 
 TRACE
   POST /api/trace  {"enabled":true, "clear":false, "stream_max":1000}
+                   {"count":5000}: record the next 5000 instructions, then stop
+                   ({"count":0} stops now; /api/status shows the rest as remaining)
   GET  /api/trace?last_n=200 | ?last_ms=500 | ?from_ms=&to_ms=  [&limit=&cs=&no_bios=true&format=text|json]
+  GET  /api/trace?since=N[&limit=]   the entries recorded after cursor N, oldest first;
+       the reply's next (x-trace-next) is the cursor to go on from, and dropped
+       (x-trace-dropped) counts entries after N overwritten before they were read
        Instruction trace (registers shown are BEFORE execution). Timestamps are
        ms since emulator start, sampled per ~16 ms batch; icount orders exactly.
 
@@ -973,19 +1032,28 @@ EXECUTION CONTROL
   POST /api/control/step     {"count":1}             returns registers after stepping
   POST /api/control/step_over                        step, but run a CALL, INT, LOOP or
                                                      REP string instruction to the next one
+  POST /api/control/run      {"command":"GAME.EXE /x", "stop_at_entry":true}
+                             run a command line at the DOS prompt; replies once it
+                             started a program ({"program":{name,entry,psp}}), or
+                             with stop_at_entry once paused at its first instruction
+                             (reason "program_start"); 422 if it started none
   POST /api/control/reboot_shell                     kill the running program
   POST /api/control/reboot                           reset the machine, as Ctrl+Alt+Del
   POST /api/control/quit                             turn the machine off, as EXIT
   GET  /api/control/wait?timeout_ms=30000            block until the emulator pauses
   GET  /api/registers        PUT /api/registers {"ax":"1234","flags":"0202"}
   GET  /api/memory?addr=DS:SI&len=256[&format=hex|base64|raw]
-  PUT  /api/memory {"addr":"B800:0000","hex":"41 1F"}  (or "base64")
+  PUT  /api/memory {"addr":"B800:0000","hex":"41 1F"}  (or "base64"); replies with
+                             the bytes replaced ("old") and read back ("new");
+                             "expect":"20 07" writes only if those bytes are there (409)
   GET  /api/disasm?addr=CS:IP&count=20[&format=json]   json: "lines" and "rows"
                                            ({label, phys, bytes, asm, len, current, breakpoint})
   GET/POST/DELETE /api/breakpoints   {"addr":"1234:0100"}  (DELETE without addr = all);
                   "once":true removes it when hit. A stop at one names it ("breakpoint")
                   also {"exception":"0D"} or {"exception":"any"}: pause in the handler
                   after the CPU raises it ({"exception":"0D","enabled":false} stops); {"mode_switch":true}: pause after CR0.PE changes
+                  {"program_start":true}: pause at each program's entry point;
+                  {"program_exit":true}: pause after each program ends ("exit":{name,code,resident,aborted})
   GET/POST/DELETE /api/watchpoints   {"addr":"DS:0100","len":2}  pause when the 1, 2 or
                   4 bytes there change (DELETE without addr = all)
   GET  /api/ivt              interrupt vector table (real mode)
@@ -1048,3 +1116,17 @@ WEBSOCKETS
   /ws/audio           text header, then binary s16le 44100 Hz stereo (interleaved) chunks
   /ws/input           send input events (same JSON as /api/input/batch, optional "wait":true)
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::hex_data;
+
+    #[test]
+    fn hex_data_skips_0x_prefixes() {
+        assert_eq!(hex_data("CD AB").ok(), Some(vec![0xCD, 0xAB]));
+        assert_eq!(hex_data("0xCD 0xAB").ok(), Some(vec![0xCD, 0xAB]));
+        assert_eq!(hex_data("0XCDAB").ok(), Some(vec![0xCD, 0xAB]));
+        assert_eq!(hex_data("00 0x10").ok(), Some(vec![0x00, 0x10]));
+        assert!(hex_data("CDA").is_err());
+    }
+}

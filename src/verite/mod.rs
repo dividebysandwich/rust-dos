@@ -14,7 +14,10 @@
 
 pub mod cmd;
 pub mod draw;
+pub mod ramdac;
 pub mod regs;
+pub mod risc;
+pub mod twod;
 
 use crate::savestate::{Reader, Result, State, Writer};
 use std::cell::RefCell;
@@ -53,6 +56,34 @@ pub fn board_data(memory: u32) -> Vec<u8> {
     data
 }
 
+/// CRTCSTATUS at time `t_ns` of a display with timing `crt`: the vertical
+/// state in bits 23-22 (active, front porch, sync, back porch) with the
+/// scanlines left in it in bits 21-11, and the horizontal state in bits
+/// 10-9 (active, front porch, back porch, sync), as xf86-video-rendition's
+/// `commonregs.h` lays them out. Drivers poll it to wait for the
+/// vertical retrace.
+pub fn crtc_status(crt: &crate::video::crt::CrtTiming, t_ns: u64) -> u32 {
+    let (line, column) = crt.position(t_ns);
+    let (vertical, end) = if line < crt.display {
+        (0, crt.display)
+    } else if line < crt.retrace_start {
+        (1, crt.retrace_start)
+    } else if line < crt.retrace_end {
+        (3, crt.retrace_end)
+    } else {
+        (2, crt.total)
+    };
+    let left = end.saturating_sub(line).min(0x7FF);
+    let blank = (crt.line_ns - crt.hdisplay_ns).max(1) as u64;
+    let horizontal = match column.checked_sub(crt.hdisplay_ns as u64) {
+        None => 0,
+        Some(c) if c < blank / 3 => 1,
+        Some(c) if c < blank * 2 / 3 => 3,
+        Some(_) => 2,
+    };
+    vertical << 22 | left << 11 | horizontal << 9
+}
+
 #[derive(Clone, Debug)]
 struct PciConfig {
     command: u16,
@@ -67,6 +98,43 @@ impl Default for PciConfig {
 }
 
 crate::state_fields!(PciConfig { command, bar1, irq_line });
+
+/// The microcode the RISC runs, whose commands the FIFO carries.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Microcode {
+    /// Rendition's 3D library's, started through the BIOS.
+    #[default]
+    Speedy3d,
+    /// The Windows driver's 2D microcode, started through the debug
+    /// registers.
+    TwoD,
+}
+
+impl State for Microcode {
+    fn save(&self, w: &mut Writer) {
+        (*self as u8).save(w);
+    }
+
+    fn load(&mut self, r: &mut Reader) -> Result<()> {
+        let mut v = 0u8;
+        v.load(r)?;
+        *self = if v == 1 { Microcode::TwoD } else { Microcode::Speedy3d };
+        Ok(())
+    }
+}
+
+/// What the card's own CRTC shows: `width` x `height` pixels of `bpp`
+/// bits (8 through the palette, 15, 16 or 32) from `base` in its memory,
+/// `pitch` bytes a line, with `timing`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Screen {
+    pub width: u16,
+    pub height: u16,
+    pub bpp: u8,
+    pub base: u32,
+    pub pitch: u32,
+    pub timing: crate::video::crt::CrtTiming,
+}
 
 /// What commands did beyond the card.
 #[derive(Default)]
@@ -90,6 +158,17 @@ pub struct Verite {
     pub output: std::collections::VecDeque<u32>,
     /// Whether the processor runs the microcode (the BIOS started it).
     pub running: bool,
+    /// The processor as the debug registers show it.
+    pub risc: risc::Risc,
+    /// Which microcode's commands the FIFO carries.
+    pub microcode: Microcode,
+    /// The RAMDAC.
+    pub dac: ramdac::Bt485,
+    /// The 2D microcode's state.
+    pub twod: twod::Engine,
+    /// Whether the card's own CRTC shows the screen (the Windows driver
+    /// sets its modes through it), rather than the VGA.
+    pub native: bool,
     /// The RAMDAC's palette as last loaded (256 0x00RRGGBB).
     pub palette: Vec<u32>,
     /// What the drawing commands draw with.
@@ -121,6 +200,11 @@ impl Verite {
             fifo: Vec::new(),
             output: Default::default(),
             running: false,
+            risc: Default::default(),
+            microcode: Microcode::Speedy3d,
+            dac: Default::default(),
+            twod: Default::default(),
+            native: false,
             palette: Vec::new(),
             draw: Default::default(),
             seen: Default::default(),
@@ -146,12 +230,18 @@ impl Verite {
         self.fifo.clear();
         self.output.clear();
         self.running = false;
+        self.risc = Default::default();
+        self.microcode = Microcode::Speedy3d;
+        self.dac = Default::default();
+        self.twod = Default::default();
+        self.native = false;
     }
 
     /// The processor held, or started at `pc`: the microcode starts by
     /// reporting its version, which the library checks.
     pub fn run(&mut self, pc: Option<u32>) {
         self.running = pc.is_some();
+        self.microcode = Microcode::Speedy3d;
         if let Some(pc) = pc {
             self.trace(|| format!("RISC start at {:08X}", pc));
             self.output.push_back(VERSION);
@@ -164,6 +254,10 @@ impl Verite {
     pub fn execute(&mut self, vram: &mut [u8]) -> Effects {
         let mut fx = Effects::default();
         if !self.running {
+            return fx;
+        }
+        if self.microcode == Microcode::TwoD {
+            self.execute_2d(vram, &mut fx);
             return fx;
         }
         let mut at = 0;
@@ -213,6 +307,46 @@ impl Verite {
         }
         self.fifo.drain(..at);
         fx
+    }
+
+    /// The 2D microcode's commands in the FIFO: the loader's four words
+    /// first after the RISC was started, then whole commands, leaving a
+    /// partial one for the words to come.
+    fn execute_2d(&mut self, vram: &mut [u8], fx: &mut Effects) {
+        let mut at = 0;
+        while at < self.fifo.len() {
+            if self.twod.loader {
+                if self.fifo.len() - at < 4 {
+                    break;
+                }
+                let words = format!("{:08X?}", &self.fifo[at..at + 4]);
+                self.trace(|| format!("2D loader {}", words));
+                self.twod.loader = false;
+                at += 4;
+                continue;
+            }
+            let len = match twod::length(&self.fifo[at..], self.twod.bpp()) {
+                Some(Some(len)) => len,
+                Some(None) => break,
+                None => {
+                    // Lost: the stream can't be followed past it.
+                    let rest = format!("{:08X?}", &self.fifo[at..]);
+                    self.trace(|| format!("2D command not known: {}", rest));
+                    at = self.fifo.len();
+                    break;
+                }
+            };
+            let words: Vec<u32> = self.fifo[at..at + len].to_vec();
+            at += len;
+            *self.seen.entry((words[0] as u16, 0x2D)).or_default() += 1;
+            self.trace(|| format!("2D {:08X?}", &words[..words.len().min(12)]));
+            if self.twod.run(&words, vram, &mut self.output) {
+                fx.drawn = true;
+            } else {
+                self.trace(|| format!("2D command {:08X} not carried out", words[0]));
+            }
+        }
+        self.fifo.drain(..at);
     }
 
     /// One command.
@@ -373,6 +507,62 @@ impl Verite {
         }
     }
 
+    /// The screen the CRTC shows, if its video is on (CRTCCTL bit 12)
+    /// in a format this shows. The CRTC's counts are xf86-video-rendition's
+    /// (`vmodes.c`): units of 8 pixels across, less one, and lines less
+    /// one. Its line offset is what it adds after it fetched a line, which
+    /// it fetches in units of its video FIFO's size (128 bytes with
+    /// CRTCCTL bit 4, else 64) less one unit when the line fills them
+    /// exactly and the base is a multiple of 8. The refresh rate comes
+    /// from a clock this doesn't model: 60 Hz.
+    pub fn screen(&self) -> Option<Screen> {
+        let ctl = self.read_quiet(regs::CRTCCTL);
+        if ctl & 0x1000 == 0 {
+            return None;
+        }
+        let bpp = match ctl & 0xF {
+            1 | 2 => 8,
+            4 => 16,
+            6 => 15,
+            12 => 32,
+            _ => return None,
+        };
+        let (horz, vert) = (self.read_quiet(regs::CRTCHORZ), self.read_quiet(regs::CRTCVERT));
+        let width = ((horz & 0xFF) + 1) * 8;
+        let h_back = ((horz >> 9 & 0x3F) + 1) * 8;
+        let h_sync = ((horz >> 16 & 0x1F) + 1) * 8;
+        let h_front = ((horz >> 21 & 0x7) + 1) * 8;
+        let lines = (vert & 0x7FF) + 1;
+        let v_back = (vert >> 11 & 0x3F) + 1;
+        let v_sync = (vert >> 17 & 0x7) + 1;
+        let v_front = (vert >> 20 & 0x3F) + 1;
+        let total = lines + v_front + v_sync + v_back;
+        let line_ns = 1_000_000_000 / (60 * total);
+        let h_total = width + h_front + h_sync + h_back;
+        let timing = crate::video::crt::CrtTiming {
+            line_ns,
+            hdisplay_ns: (line_ns as u64 * width as u64 / h_total as u64) as u32,
+            total,
+            display: lines,
+            retrace_start: lines + v_front,
+            retrace_end: lines + v_front + v_sync,
+        };
+        let base = self.read_quiet(regs::FRAMEBASEA) & 0x00FF_FFFF;
+        let bytes = width * (bpp as u32).div_ceil(8);
+        let fifo = if ctl & 0x10 != 0 { 128 } else { 64 };
+        let fetched = if base & 7 == 0 { (bytes - 1) / fifo * fifo } else { bytes / fifo * fifo };
+        let pitch = fetched + (self.read_quiet(regs::CRTCOFFSET) & 0xFFFF);
+        let height = if ctl & 0x2_0000 != 0 { lines / 2 } else { lines };
+        Some(Screen {
+            width: width as u16,
+            height: height as u16,
+            bpp,
+            base,
+            pitch: if pitch < bytes { bytes } else { pitch },
+            timing,
+        })
+    }
+
     pub fn trace(&self, line: impl FnOnce() -> String) {
         if let Some(out) = self.trace.borrow_mut().as_mut() {
             let _ = writeln!(out, "{}", line());
@@ -443,7 +633,13 @@ impl Verite {
 
     /// A register read, `len` bytes from `reg`.
     pub fn read(&mut self, reg: u8, len: u8) -> u32 {
+        let state = (regs::STATEDATA..regs::STATEDATA + 4)
+            .contains(&reg)
+            .then(|| self.risc.state(self.regs[regs::STATEINDEX as usize]))
+            .flatten();
         let value = match reg {
+            // The RISC's state STATEINDEX selects.
+            _ if let Some(state) = state => state >> (8 * (reg - regs::STATEDATA)),
             regs::FIFOINFREE => FIFO_SIZE as u32,
             regs::FIFOOUTVALID => self.output.len().min(FIFO_SIZE as usize) as u32,
             // The output FIFO, through the apertures.
@@ -463,6 +659,38 @@ impl Verite {
         }
         for i in 0..len {
             self.regs[(reg as usize + i as usize) % 256] = (value >> (8 * i)) as u8;
+        }
+        // STATEDATA written is an instruction for the RISC to be forced
+        // through.
+        if reg <= regs::STATEDATA + 3 && reg + len > regs::STATEDATA {
+            self.risc.ir = self.read_quiet(regs::STATEDATA);
+        }
+    }
+
+    /// DEBUGREG written: a soft reset, or the instruction register
+    /// carried out once, which the step bit going back to 0 reports.
+    pub fn debug(&mut self, vram: &mut [u8]) {
+        let debug = self.regs[regs::DEBUGREG as usize];
+        if debug & regs::SOFTRESET != 0 {
+            self.risc.reset();
+        }
+        // Let go after it was held: the RISC runs what the driver loaded,
+        // which takes the 2D microcode's commands.
+        let held = debug & regs::HOLDRISC != 0;
+        if self.risc.held && !held {
+            self.trace(|| format!("RISC runs from {:08X}", self.risc.pc));
+            self.running = true;
+            self.microcode = Microcode::TwoD;
+            self.twod.loader = true;
+        }
+        self.risc.held = held;
+        if debug & regs::STEPRISC != 0 {
+            let ir = self.risc.ir;
+            if !self.risc.step(vram) {
+                self.trace(|| format!("RISC forced {:08X} not known", ir));
+            }
+            self.trace(|| format!("RISC step {:08X}, PC {:08X}", ir, self.risc.pc));
+            self.regs[regs::DEBUGREG as usize] &= !regs::STEPRISC;
         }
     }
 
@@ -505,6 +733,11 @@ impl State for Verite {
         output.save(w);
         self.running.save(w);
         self.draw.save(w);
+        self.risc.save(w);
+        self.microcode.save(w);
+        self.dac.save(w);
+        self.native.save(w);
+        self.twod.save(w);
     }
 
     fn load(&mut self, r: &mut Reader) -> Result<()> {
@@ -519,6 +752,19 @@ impl State for Verite {
         self.output = output.into();
         self.running.load(r)?;
         self.draw.load(r)?;
+        // States from before the RISC's debug registers have none.
+        self.risc = Default::default();
+        self.microcode = Microcode::Speedy3d;
+        self.dac = Default::default();
+        self.native = false;
+        self.twod = Default::default();
+        if !r.is_empty() {
+            self.risc.load(r)?;
+            self.microcode.load(r)?;
+            self.dac.load(r)?;
+            self.native.load(r)?;
+            self.twod.load(r)?;
+        }
         Ok(())
     }
 }
