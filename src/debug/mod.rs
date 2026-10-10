@@ -71,8 +71,8 @@ impl Shared {
 pub enum Reply {
     Json(Value),
     Frame(video::Frame),
-    /// Trace entries, the cursor to go on from (`TraceQuery::since`) and
-    /// how many entries after the asked-for cursor were overwritten.
+    /// Trace entries, the cursor for the next page (`TraceQuery::since`)
+    /// and how many entries after the requested cursor were overwritten.
     Trace { entries: Vec<TraceEntry>, next: u64, dropped: u64 },
     Bytes { addr: usize, segoff: Option<(u16, u32)>, data: Vec<u8> },
     Error(u16, String),
@@ -103,7 +103,7 @@ pub struct TraceQuery {
     pub no_bios: bool,
     /// Output format for the HTTP layer (`text` or `json`).
     pub format: Option<String>,
-    /// The entries recorded after this cursor (a `next` of before),
+    /// Only entries recorded after this cursor (an earlier reply's `next`),
     /// oldest first, up to `limit`.
     pub since: Option<u64>,
 }
@@ -1704,9 +1704,9 @@ impl DebugHub {
                 && !(q.no_bios && e.cs >= 0xF000 && !(e.bytes[0] == 0xFE && e.bytes[1] == 0x38))
         };
         if let Some(since) = q.since {
-            // A cursor past the end (one from an earlier run of the
-            // emulator) reads from the end, so the entries recorded from
-            // now on are not skipped until the total catches up with it.
+            // A cursor past the end (from an earlier run of the emulator)
+            // reads from the end, so new entries are not skipped until the
+            // total catches up with it.
             let since = since.min(self.trace.total());
             // Oldest first, so the next page goes on where this one ends.
             let (after, dropped) = self.trace.after(since);
@@ -2233,8 +2233,8 @@ mod tests {
         rx.try_recv().expect("an answer at once")
     }
 
-    /// The trace from cursor `since`: the instruction counts, the next
-    /// cursor and the entries dropped.
+    /// A trace page from cursor `since`: its instruction counts, the next
+    /// cursor and the number dropped.
     fn page(cpu: &mut Cpu, hub: &mut DebugHub, since: u64, limit: usize) -> (Vec<u64>, u64, u64) {
         let q = TraceQuery { since: Some(since), limit: Some(limit), ..Default::default() };
         match handle(cpu, hub, Cmd::TraceQuery(q)) {
@@ -2249,8 +2249,8 @@ mod tests {
         cpu.load_shell();
         let mut hub = DebugHub::new(None, None, 1000);
         handle(&mut cpu, &mut hub, Cmd::TraceControl { enabled: None, clear: false, stream_max: None, count: Some(50) });
-        // The shell waits for a key at its prompt, a few instructions a
-        // batch.
+        // The shell idles at its prompt waiting for a key, running only a
+        // few instructions a batch.
         for _ in 0..100 {
             let hot = hub.begin_batch(&cpu);
             cpu.bus.start_batch(cpu.bus.clock.icount + 2000);

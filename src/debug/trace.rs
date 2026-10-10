@@ -194,15 +194,15 @@ impl TraceRing {
         v
     }
 
-    /// The entries after the one numbered `seq` (each is numbered by the
-    /// `total()` it made: the first is 1), oldest first and with their
-    /// numbers, and how many of those were overwritten before this.
+    /// Entries after sequence number `seq`, oldest first and paired with
+    /// their numbers (an entry's number is `total()` right after its push,
+    /// so the first is 1). Also returns how many entries after `seq` were
+    /// already overwritten.
     pub fn after(&self, seq: u64) -> (impl Iterator<Item = (u64, &TraceEntry)>, u64) {
         let oldest = self.total - self.buf.len() as u64 + 1;
         let overwritten = (oldest - 1).saturating_sub(seq);
-        // Skipping the slices before numbering them steps over them in one
-        // go, where skipping the zipped pairs would walk a million-entry
-        // ring one entry at a time on every page.
+        // Skip before zipping: the ring's slices skip in one step, while
+        // the zipped pairs would be walked one entry at a time.
         let skip = seq.saturating_sub(oldest - 1).min(self.buf.len() as u64) as usize;
         let entries = (oldest + skip as u64..).zip(self.iter().skip(skip));
         (entries, overwritten)

@@ -334,7 +334,7 @@ struct TracePost {
     #[serde(default)]
     clear: bool,
     stream_max: Option<usize>,
-    /// Record this many instructions more, then stop.
+    /// Record this many more instructions, then stop.
     count: Option<u64>,
 }
 
