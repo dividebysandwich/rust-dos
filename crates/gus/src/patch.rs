@@ -6,12 +6,11 @@
 //! its loop, its root frequency and a six-point volume envelope in the
 //! GF1's volume ramp units.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
-use std::path::Path;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-
-use crate::disk::{DiskController, FileData};
-use crate::memfs::Bytes;
 
 pub const MODE_16BIT: u8 = 0x01;
 pub const MODE_UNSIGNED: u8 = 0x02;
@@ -170,11 +169,31 @@ impl Patch {
     }
 }
 
+/// A patch file, read when its patch is first played.
+pub trait PatchFile {
+    /// The whole file.
+    fn read(&self) -> io::Result<Cow<'static, [u8]>>;
+}
+
+/// A patch file on the host.
+impl PatchFile for PathBuf {
+    fn read(&self) -> io::Result<Cow<'static, [u8]>> {
+        std::fs::read(self).map(Cow::Owned)
+    }
+}
+
+/// A patch file built in.
+impl PatchFile for &'static [u8] {
+    fn read(&self) -> io::Result<Cow<'static, [u8]>> {
+        Ok(Cow::Borrowed(self))
+    }
+}
+
 /// The patch set: General MIDI programs and drum keys mapped to patch
 /// files, loaded when first played.
 pub struct PatchBank {
     /// Patch files by lower-case name without extension.
-    files: HashMap<String, FileData>,
+    files: HashMap<String, Box<dyn PatchFile>>,
     melodic: Vec<Option<String>>,
     drums: Vec<Option<String>>,
     cache: HashMap<String, Option<Arc<Patch>>>,
@@ -192,7 +211,7 @@ impl PatchBank {
                 let path = entry.path();
                 let is_pat = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pat"));
                 if let (true, Some(stem)) = (is_pat, path.file_stem().and_then(|s| s.to_str())) {
-                    files.insert(stem.to_ascii_lowercase(), FileData::Host(path));
+                    files.insert(stem.to_ascii_lowercase(), Box::new(path) as Box<dyn PatchFile>);
                 }
             }
         }
@@ -206,7 +225,7 @@ impl PatchBank {
             .iter()
             .filter_map(|&(path, data)| {
                 let stem = path.strip_prefix("MIDI\\")?.strip_suffix(".PAT")?;
-                Some((stem.to_ascii_lowercase(), FileData::Memory(Bytes::Borrowed(data))))
+                Some((stem.to_ascii_lowercase(), Box::new(data) as Box<dyn PatchFile>))
             })
             .collect();
         Self::with_files(&String::from_utf8_lossy(ini), files)
@@ -214,7 +233,7 @@ impl PatchBank {
 
     /// A bank from the text of `ULTRASND.INI`, with `files` by lower-case
     /// name.
-    fn with_files(ini: &str, files: HashMap<String, FileData>) -> Self {
+    pub fn with_files(ini: &str, files: HashMap<String, Box<dyn PatchFile>>) -> Self {
         let section = |names: &[&str]| -> Vec<Option<String>> {
             let mut map = vec![None; 128];
             for name in names {
@@ -241,42 +260,6 @@ impl PatchBank {
             cache: HashMap::new(),
             missing: Vec::new(),
         }
-    }
-
-    /// The bank of the Ultrasound software in DOS directory `ultradir`
-    /// (ULTRADIR) on the mounted drives: `ULTRASND.INI` there, and the
-    /// patches in the directory it names or else in its MIDI directory.
-    /// Also returns the DOS directory of the patches.
-    pub fn from_dos_dir(disk: &DiskController, ultradir: &str) -> Result<(Self, String), String> {
-        let dir = ultradir.trim_end_matches('\\');
-        let ini_path = format!("{}\\ULTRASND.INI", dir);
-        let ini = disk
-            .file_data(&ini_path)
-            .ok_or_else(|| format!("no {}", ini_path))?
-            .read()
-            .map_err(|e| format!("{}: {}", ini_path, e))?;
-        let ini = String::from_utf8_lossy(&ini);
-        let patches = Self::patch_dir(&ini)
-            .map(|d| d.trim_end_matches('\\').to_string())
-            .filter(|d| disk.is_directory(d))
-            .or_else(|| Some(format!("{}\\MIDI", dir)).filter(|d| disk.is_directory(d)))
-            .ok_or_else(|| format!("no patch directory for {}", ini_path))?;
-        // The patches as programs see them, by their DOS names.
-        let files = disk
-            .list_directory(&format!("{}\\*.PAT", patches), 0)
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|entry| {
-                let data = disk.file_data(&format!("{}\\{}", patches, entry.filename))?;
-                let stem = entry.filename.split('.').next()?.to_ascii_lowercase();
-                Some((stem, data))
-            })
-            .collect();
-        let bank = Self::with_files(&ini, files);
-        if bank.file_count() == 0 {
-            return Err(format!("no patches in {}", patches));
-        }
-        Ok((bank, patches))
     }
 
     /// The DOS directory `ULTRASND.INI` puts the patches in, if it says.

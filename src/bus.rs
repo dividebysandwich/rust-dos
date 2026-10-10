@@ -674,7 +674,7 @@ impl Bus {
         }
         let result = match drive {
             Some(drive) => {
-                let files = crate::gus::builtin::drive(crate::disk::drive_letter(drive));
+                let files = crate::ultrasnd::drive(crate::disk::drive_letter(drive));
                 self.disk.mount_memory(drive, files, crate::gus::builtin::LABEL).map(|()| {
                     self.ultrasnd_drive = Some(drive);
                 })

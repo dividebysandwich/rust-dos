@@ -124,7 +124,7 @@ pub fn apply_config(cpu: &mut Cpu, sound: &SoundConfig, old: Option<&SoundConfig
         let bank = if sound.gus.builtin() {
             Ok((PatchBank::builtin(), "built into rust-dos".to_string()))
         } else {
-            PatchBank::from_dos_dir(&cpu.bus.disk, &sound.gus.ultradir()).map(|(bank, dir)| (bank, format!("in {}", dir)))
+            crate::ultrasnd::patch_bank(&cpu.bus.disk, &sound.gus.ultradir()).map(|(bank, dir)| (bank, format!("in {}", dir)))
         };
         match bank {
             Ok((bank, place)) => {

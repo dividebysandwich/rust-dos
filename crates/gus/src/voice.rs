@@ -263,8 +263,8 @@ fn sample16(dram: &[u8], addr: u32) -> f32 {
 
 // `written` goes in bit 7 of the voice control, which holds no IRQ bit
 // here: states from before it load with it clear.
-impl crate::savestate::State for Voice {
-    fn save(&self, w: &mut crate::savestate::Writer) {
+impl rust_dos_savestate::State for Voice {
+    fn save(&self, w: &mut rust_dos_savestate::Writer) {
         let Voice { wave_ctrl, freq, start, end, pos, ramp_ctrl, ramp_rate, ramp_start, ramp_end, vol, pan, written } = self;
         (wave_ctrl | (*written as u8) << 7).save(w);
         freq.save(w);
@@ -279,7 +279,7 @@ impl crate::savestate::State for Voice {
         pan.save(w);
     }
 
-    fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
+    fn load(&mut self, r: &mut rust_dos_savestate::Reader) -> rust_dos_savestate::Result<()> {
         let Voice { wave_ctrl, freq, start, end, pos, ramp_ctrl, ramp_rate, ramp_start, ramp_end, vol, pan, written } = self;
         wave_ctrl.load(r)?;
         *written = *wave_ctrl & 0x80 != 0;

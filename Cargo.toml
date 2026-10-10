@@ -50,6 +50,7 @@ rust-dos-opl = { path = "crates/opl" }
 rust-dos-tandy = { path = "crates/tandy" }
 rust-dos-lpt-dac = { path = "crates/lpt-dac" }
 rust-dos-soundblaster = { path = "crates/soundblaster" }
+rust-dos-gus = { path = "crates/gus" }
 iced-x86 = "1.21.0"
 font8x8 = "0.3.1"
 chrono = "0.4.45"

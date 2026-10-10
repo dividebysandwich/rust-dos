@@ -1920,6 +1920,7 @@ dependencies = [
  "png",
  "rust-dos-audio-core",
  "rust-dos-dma",
+ "rust-dos-gus",
  "rust-dos-hostdirs",
  "rust-dos-lpt-dac",
  "rust-dos-opl",
@@ -1953,6 +1954,17 @@ name = "rust-dos-dma"
 version = "1.5.0"
 dependencies = [
  "rust-dos-savestate",
+]
+
+[[package]]
+name = "rust-dos-gus"
+version = "1.5.0"
+dependencies = [
+ "rust-dos-audio-core",
+ "rust-dos-dma",
+ "rust-dos-savestate",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

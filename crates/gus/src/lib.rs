@@ -28,8 +28,8 @@ pub mod voice;
 use std::collections::VecDeque;
 use std::ops::Range;
 
-use crate::dma::Dma;
-use crate::timer::PIT_HZ;
+use rust_dos_dma::Dma;
+use rust_dos_audio_core::PIT_HZ;
 use voice::Voice;
 
 /// DRAM on the card.
@@ -84,7 +84,7 @@ impl GusConfig {
     pub fn ultradir(&self) -> String {
         match (&self.ultradir, self.drive) {
             (Some(dir), _) => dir.clone(),
-            (None, Some(drive)) => format!("{}:\\{}", crate::disk::drive_letter(drive), builtin::DIR),
+            (None, Some(drive)) => format!("{}:\\{}", (b'A' + drive) as char, builtin::DIR),
             (None, None) => "C:\\ULTRASND".to_string(),
         }
     }
@@ -301,6 +301,7 @@ impl Gus {
     }
 
     /// The IRQ the card interrupts on, if it has one.
+    #[inline]
     pub fn irq(&self) -> Option<u8> {
         match self.irq {
             0 => None,
@@ -310,12 +311,14 @@ impl Gus {
     }
 
     /// Whether the card's interrupt line is up.
+    #[inline]
     pub fn irq_line(&self) -> bool {
         let enabled = if self.reset_reg & 0x04 != 0 { 0xFF } else { !(IRQ_WAVE | IRQ_RAMP) };
         self.status & enabled != 0 && self.mix & 0x08 != 0
     }
 
     /// Whether something asked for an interrupt since the last call.
+    #[inline]
     pub fn take_fresh(&mut self) -> bool {
         std::mem::take(&mut self.fresh)
     }
@@ -389,6 +392,7 @@ impl Gus {
 
     /// Port write. `now` is the emulated time (PIT ticks); the bus has
     /// advanced the card to it.
+    #[inline]
     pub fn write(&mut self, port: u16, value: u8, now: u64) {
         match port.wrapping_sub(self.config.base) {
             0x000 => {
@@ -426,10 +430,12 @@ impl Gus {
 
     /// A write to the AdLib address port 388h, which the card latches like
     /// one to 2X8h.
+    #[inline]
     pub fn write_adlib_address(&mut self, value: u8) {
         self.adlib_cmd = value;
     }
 
+    #[inline]
     pub fn read(&mut self, port: u16) -> u8 {
         match port.wrapping_sub(self.config.base) {
             0x006 => self.status,
@@ -674,6 +680,7 @@ impl Gus {
     /// Run the card up to emulated time `now` (PIT ticks): DMA, timers and
     /// the voices. Returns the system memory a DMA transfer from the card
     /// wrote, if any.
+    #[inline]
     pub fn advance(&mut self, now: u64, dma: &mut Dma, ram: &mut [u8]) -> Option<Range<usize>> {
         let elapsed = now.saturating_sub(self.last_ticks);
         self.last_ticks = self.last_ticks.max(now);
@@ -837,6 +844,7 @@ impl Gus {
     /// When the card next needs attention without a port access: a timer
     /// expiring, a DMA transfer ending, or a voice reaching the point where
     /// it raises an IRQ. In PIT ticks.
+    #[inline]
     pub fn next_event(&self, dma: &Dma) -> Option<u64> {
         let mut next: Option<u64> = None;
         let mut consider = |t: u64| next = Some(next.map_or(t, |n| n.min(t)));
@@ -871,12 +879,14 @@ impl Gus {
 
     /// Whether `pop_frame` gives silence: nothing but the gap waiting, and
     /// the frame it holds is silent.
+    #[inline]
     pub fn is_idle(&self) -> bool {
         self.out.is_empty() && self.cur == (0.0, 0.0) && self.prev == (0.0, 0.0)
     }
 
     /// Take the frames `frames` calls of `pop_frame` would while the card
     /// is idle (every one of them silent).
+    #[inline]
     pub fn skip_idle(&mut self, frames: usize, rate: u32) {
         debug_assert!(self.is_idle());
         self.phase += frames as f64 * self.frame_rate() / rate as f64;
@@ -935,6 +945,7 @@ impl Gus {
     }
 
     /// Drop output beyond a tenth of a second that nobody took.
+    #[inline]
     pub fn trim_output(&mut self) {
         self.keep_output((self.frame_rate_milli() / 10_000) as usize);
     }
@@ -995,8 +1006,8 @@ impl Gus {
     }
 }
 
-crate::state_fields!(Timer { value, running, masked, reached, irq, next_ns });
-crate::state_fields!(Gus {
+rust_dos_savestate::state_fields!(Timer { value, running, masked, reached, irq, next_ns });
+rust_dos_savestate::state_fields!(Gus {
     dram, voices, active, voice_sel, reg_sel, data, select_readback, dram_addr, mix, latch_armed,
     irq, midi_irq, dma_ch, adlib_cmd, reset_reg, status, wave_irq, ramp_irq, irq_chan, fresh,
     timer_ctrl, timers, dma_ctrl, dma_addr, dma_pos, dma_active, dma_frac, sample_ctrl,
