@@ -3,9 +3,10 @@
 //! keeps the drives by their paths, not what is in them (disk/state.rs),
 //! so a load through the debug server checks that the same media are
 //! there before it puts the state in: the same drives, mounted from the
-//! same paths, and images of the same size. A read-only image (a CD's, a
-//! `-ro` mount's) is also told apart by a hash of its start; a writable
-//! one changes as the machine writes it, so only its size is recorded.
+//! same paths, and images that are there. A read-only image (a CD's, a
+//! `-ro` mount's) is also told apart by its size and a hash of its start;
+//! a writable one changes as the machine writes it (a dynamic VHD grows),
+//! so its size is recorded but not compared.
 
 use crate::cpu::Cpu;
 use crate::disk::{DriveInfo, DriveKind, drive_key};
@@ -235,7 +236,7 @@ pub fn differences(saved: &[Medium], now: &[Medium]) -> Vec<String> {
         }
         for (a, b) in was.images.iter().zip(&is.images) {
             let size = |s: Option<u64>| s.map_or("missing".to_string(), |n| format!("{} bytes", n));
-            if a.size != b.size {
+            if (a.size.is_some() != b.size.is_some() || was.read_only) && a.size != b.size {
                 out.push(format!("{} image {}: {} when saved, {} now", name, a.path, size(a.size), size(b.size)));
             } else if a.head_sha256.is_some() && b.head_sha256.is_some() && a.head_sha256 != b.head_sha256 {
                 out.push(format!("{} image {}: its first {} KiB differ from when it was saved", name, a.path, HEAD >> 10));
@@ -287,6 +288,11 @@ mod tests {
 
         let resized = [folder("C", "/games/keen"), cd("/cds/game.cue", 2000, "ab")];
         assert!(differences(&saved, &resized)[0].contains("1000 bytes when saved, 2000 bytes now"));
+        // A writable image grows as the machine writes it.
+        let writable = |size| Medium { read_only: false, ..cd("/disks/c.vhd", size, "ab") };
+        assert!(differences(&[writable(1000)], &[writable(2000)]).is_empty());
+        let gone = Medium { images: vec![Image { path: "/disks/c.vhd".into(), size: None, head_sha256: None }], ..writable(0) };
+        assert!(differences(&[writable(1000)], &[gone])[0].contains("missing now"));
 
         let moved = [folder("C", "/games/other"), cd("/cds/game.cue", 1000, "ab")];
         let d = differences(&saved, &moved);
@@ -297,8 +303,13 @@ mod tests {
         assert!(differences(&no_cd, &saved)[0].starts_with("drive D: is mounted here"));
     }
 
+    /// Held by the tests that read or forget the kept head hashes, which
+    /// all tests share.
+    static HASHES: Mutex<()> = Mutex::new(());
+
     #[test]
     fn a_folder_and_a_read_only_image_are_recorded() {
+        let _hashes = HASHES.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("rust-dos-media-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("disk.img");
@@ -359,6 +370,7 @@ mod tests {
 
     #[test]
     fn the_record_is_kept_until_the_mounts_change_or_a_strict_match_save() {
+        let _hashes = HASHES.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("rust-dos-media-kept-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("c")).unwrap();
