@@ -414,22 +414,37 @@ pub fn wave_data<R: Read + Seek>(file: &mut R) -> Result<(WaveFormat, u64, u64),
     }
 }
 
-/// A file named in a CUE sheet: next to the sheet, by the name as written
-/// or by any case of it (sheets made on Windows rarely match the case).
+/// A file named in a CUE sheet: below the sheet's folder by its relative
+/// path (GOG's sheets keep their music in `music\`), else next to the
+/// sheet, each part by the name as written or by any case of it (sheets
+/// made on Windows rarely match the case).
 fn find_file(dir: &Path, name: &str) -> Result<PathBuf, String> {
-    // Only the file name counts; sheets can carry the paths of whoever
-    // made them.
-    let name = name.rsplit(['\\', '/']).next().unwrap_or(name);
+    let parts: Vec<&str> = name.split(['\\', '/']).filter(|p| !p.is_empty()).collect();
+    let file = parts.last().copied().unwrap_or(name);
+    // An absolute path is whoever made the sheet's: only its file name counts.
+    let relative = !name.starts_with(['\\', '/']) && !name.contains(':');
+    let is_file = |p: &Path| hostfs::is_file(p);
+    if relative && parts.len() > 1 {
+        let folders = &parts[..parts.len() - 1];
+        let below = folders.iter().try_fold(dir.to_path_buf(), |d, part| find_in(&d, part, |p| hostfs::is_dir(p)));
+        if let Some(path) = below.and_then(|d| find_in(&d, file, is_file)) {
+            return Ok(path);
+        }
+    }
+    find_in(dir, file, is_file).ok_or_else(|| format!("{} not found", dir.join(file).display()))
+}
+
+/// `name` in `dir`, as written or in any case, if `kind` holds for it.
+fn find_in(dir: &Path, name: &str, kind: fn(&Path) -> bool) -> Option<PathBuf> {
     let path = dir.join(name);
-    if hostfs::is_file(&path) {
-        return Ok(path);
+    if kind(&path) {
+        return Some(path);
     }
     hostfs::read_dir(dir)
         .into_iter()
         .flatten()
         .map(|entry| entry.path)
-        .find(|p| p.file_name().is_some_and(|f| f.to_string_lossy().eq_ignore_ascii_case(name)))
-        .ok_or_else(|| format!("{} not found", path.display()))
+        .find(|p| p.file_name().is_some_and(|f| f.to_string_lossy().eq_ignore_ascii_case(name)) && kind(p))
 }
 
 #[cfg(test)]
@@ -499,6 +514,26 @@ mod tests {
         assert_eq!(&raw[..12], &SYNC);
         assert_eq!(&raw[12..16], &[0x00, 0x02, 0x04, 0x01]);
         assert_eq!(raw[16], 7);
+    }
+
+    #[test]
+    fn files_in_a_folder_below_the_sheet() {
+        // As GOG's sheets have their music: `music\Track02.ogg` next to a
+        // folder named MUSIC.
+        let dir = scratch("subfolder");
+        fs::create_dir_all(dir.join("MUSIC")).unwrap();
+        fs::write(dir.join("data.bin"), vec![7u8; 10 * 2048]).unwrap();
+        fs::write(dir.join("MUSIC").join("Track02.bin"), sectors(5, 3)).unwrap();
+        fs::write(
+            dir.join("disc.cue"),
+            "FILE \"data.bin\" BINARY\n TRACK 01 MODE1/2048\n  INDEX 01 00:00:00\n\
+             FILE \"music\\Track02.bin\" BINARY\n TRACK 02 AUDIO\n  INDEX 01 00:00:00\n",
+        )
+        .unwrap();
+        let image = CdImage::open(&dir.join("disc.cue")).unwrap();
+        let mut raw = [0u8; RAW_SECTOR];
+        image.read_raw(image.tracks()[1].start, &mut raw).unwrap();
+        assert_eq!(raw[0], 3);
     }
 
     #[test]
