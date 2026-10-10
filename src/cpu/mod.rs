@@ -936,17 +936,19 @@ impl Cpu {
     /// End the current process: back to the parent's context, returning
     /// through the terminate address in the process's PSP (0Ah), which
     /// EXEC set to the parent's return address and debuggers change. The
-    /// parent's stack holds the interrupt frame the return pops.
+    /// parent's stack holds the interrupt frame the return pops. Returns
+    /// false when no parent's context is kept, as for a process the shell
+    /// started, which the caller ends by loading the shell again.
     pub fn return_to_parent(&mut self) -> bool {
         let psp = self.current_psp;
         let base = psp as u32 * 16;
         let terminate = (self.bus.guest_read_16(base + 0x0A), self.bus.guest_read_16(base + 0x0C));
         let Some(index) = self.exec_context(psp) else {
-            self.bus.log_string(if self.process_stack.is_empty() {
-                "[CPU] Restore Failed: Stack Empty"
-            } else {
-                "[CPU] Restore Failed: no parent's context for the process"
-            });
+            // With no context kept at all, the shell started the process,
+            // and is loaded again for it (`terminate`, INT 21h AH=31h).
+            if !self.process_stack.is_empty() {
+                self.bus.log_string("[CPU] Restore Failed: no parent's context for the process");
+            }
             return false;
         };
         // Contexts kept after it are those of other virtual machines'

@@ -210,6 +210,28 @@ fn com_program_returning_to_psp_offset_0_terminates() {
     assert_eq!(cpu.state, CpuState::RebootShell);
 }
 
+#[test]
+fn a_program_the_shell_started_ends_without_a_restore_failure() {
+    // INT 20h, and MOV AX,4C00h; INT 21h.
+    let dir = scratch("shell_exit", &[("INT20.COM", &[0xCD, 0x20]), ("EXIT.COM", &[0xB8, 0x00, 0x4C, 0xCD, 0x21])]);
+    for program in ["INT20.COM", "EXIT.COM"] {
+        let mut cpu = Cpu::new(dir.clone());
+        let lines = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let log = lines.clone();
+        cpu.bus.log_hook = Some(Box::new(move |line: &str| log.borrow_mut().push(line.to_string())));
+        assert!(cpu.load_executable(program, None));
+        for _ in 0..10 {
+            if cpu.state == CpuState::RebootShell {
+                break;
+            }
+            cpu.step();
+        }
+        assert_eq!(cpu.state, CpuState::RebootShell, "{program}");
+        let failures: Vec<_> = lines.borrow().iter().filter(|l| l.contains("Restore Failed")).cloned().collect();
+        assert!(failures.is_empty(), "{program}: {failures:?}");
+    }
+}
+
 /// Run from CS:IP until the next HLT.
 fn run_to_hlt(cpu: &mut Cpu) {
     for _ in 0..1000 {
