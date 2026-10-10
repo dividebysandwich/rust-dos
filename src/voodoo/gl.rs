@@ -1113,7 +1113,7 @@ mod tests {
                     assert_eq!(gl.get_error(), glow::NO_ERROR);
                 }
                 save(&format!("glide-{frame}-opengl"), &rendered, w, h);
-                let bad = reference.chunks_exact(3).zip(rendered.chunks_exact(3))
+                let bad = reference.as_chunks::<3>().0.iter().zip(rendered.as_chunks::<3>().0)
                     .filter(|(a, b)| a.iter().zip(*b).any(|(a, b)| a.abs_diff(*b) > 32)).count();
                 println!("frame {frame}: {bad} pixels differ by more than 32");
             }
