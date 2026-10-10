@@ -29,7 +29,8 @@ jobs:
         # recompiler, whose two code generators (x86-64 and AArch64) need a
         # host of their kind. On macOS and Windows the recompiler's own tests,
         # for their executable memory (MAP_JIT, VirtualAlloc) and Windows's
-        # calling convention.
+        # calling convention, and the deterministic mode's, which compare
+        # runs against the host's clock and file system.
         include:
           - label: linux-x86_64
             os: ubuntu-latest
@@ -81,6 +82,12 @@ jobs:
         run: |
           cargo test --locked --test dynrec_tests --test dyndiff_tests --test pm_tests
           RUST_DOS_CORE=dynamic cargo test --locked --test pm_tests --test cpu32_tests
+
+      - name: Run the deterministic mode's tests
+        if: ${{ !matrix.full }}
+        run: |
+          cargo test --locked --test deterministic_tests
+          cargo test --locked --bin rust-dos determinis
 
   build:
     name: ${{ matrix.label }}

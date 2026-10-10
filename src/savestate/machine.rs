@@ -11,10 +11,25 @@ const ENV_VERSION: u16 = 1;
 /// The machine's state, between batches.
 pub fn save(cpu: &Cpu) -> Vec<u8> {
     let mut w = Writer::new();
-    cpu.bus.save_state(&mut w);
+    write(cpu, &mut w);
+    w.buf
+}
+
+/// The bytes `save` writes, and the parts they are made of: each
+/// section, and in the bus's sections each device (`SOUN.sb`, `CORE.pic`),
+/// with its range of the bytes. For telling which device two states
+/// differ in.
+pub fn save_parts(cpu: &Cpu) -> (Vec<u8>, Vec<(String, std::ops::Range<usize>)>) {
+    let mut w = Writer::labelled();
+    write(cpu, &mut w);
+    let parts = w.parts();
+    (w.buf, parts)
+}
+
+fn write(cpu: &Cpu, w: &mut Writer) {
+    cpu.bus.save_state(w);
     w.section(b"CPU ", CPU_VERSION, |w| cpu.save(w));
     w.section(b"ENV ", ENV_VERSION, |w| cpu.env_injector.save(w));
-    w.buf
 }
 
 /// Load a state `save` wrote into the machine, between batches. A state
