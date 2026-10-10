@@ -368,6 +368,8 @@ Rust-DOS logs what it does to `Rust-DOS.log` in the
 programs it runs, DOS and BIOS functions and I/O ports it doesn't emulate,
 failed file operations, CPU exceptions and configuration warnings. Attach it
 to bug reports. It is replaced on every start and stops growing at 64 MB.
+`--log FILE` writes it to `FILE` instead, so instances running at the same
+time keep separate logs.
 
 ## Acknowledgements
 

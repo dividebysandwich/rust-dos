@@ -95,6 +95,12 @@ struct Args {
     #[arg(long)]
     no_config: bool,
 
+    /// Write the log to FILE, replacing it, instead of rust-dos.log in the
+    /// configuration directory, so instances running at the same time keep
+    /// separate logs
+    #[arg(long, value_name = "FILE")]
+    log: Option<std::path::PathBuf>,
+
     /// Start at the DOS prompt, without booting the disk image that boots
     /// at startup (`-boot` in [drives])
     #[arg(long)]
@@ -2916,7 +2922,7 @@ fn create_cpu(args: &Args, config: &config::Config, memory_mb: usize) -> Cpu {
     };
 
     let mut cpu = Cpu::with_memory(root_path.clone(), memory_mb);
-    cpu.bus.log_file = open_log_file();
+    cpu.bus.log_file = open_log_file(args.log.clone());
     cpu.shell_history.set_home(rust_dos::cmdline::default_history_file());
     rust_dos::cmdline::configure(&mut cpu, &config.shell);
     if let Some(spec) = c_spec {
@@ -2943,10 +2949,11 @@ fn create_cpu(args: &Args, config: &config::Config, memory_mb: usize) -> Cpu {
     cpu
 }
 
-/// Create the log file in rust-dos's own directory (`config::user_dir`), replacing
-/// the previous run's. The emulator runs without one if that fails.
-fn open_log_file() -> Option<rust_dos::log::LogFile> {
-    let path = rust_dos::log::default_path()?;
+/// Create the log file at `path` (`--log`), or in rust-dos's own directory
+/// (`config::user_dir`), replacing the previous run's. The emulator runs
+/// without one if that fails.
+fn open_log_file(path: Option<std::path::PathBuf>) -> Option<rust_dos::log::LogFile> {
+    let path = path.or_else(rust_dos::log::default_path)?;
     match rust_dos::log::LogFile::create(&path) {
         Ok(log) => Some(log),
         Err(e) => {
@@ -3031,5 +3038,28 @@ fn chord_key(scancode: Option<Scancode>) -> rust_dos::mouse_capture::ChordKey {
         Some(Scancode::LAlt) => ChordKey::LeftAlt,
         Some(Scancode::RAlt) => ChordKey::RightAlt,
         _ => ChordKey::Other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Args, open_log_file};
+    use clap::Parser;
+
+    #[test]
+    fn the_log_goes_to_the_file_log_names() {
+        let path = std::env::temp_dir().join(format!("rust-dos-log-option-{}", std::process::id())).join("run.log");
+        let args = Args::try_parse_from(["rust-dos", "--no-config", "--log", path.to_str().unwrap()]).unwrap();
+        assert_eq!(args.log.as_deref(), Some(path.as_path()));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "previous run\n").unwrap();
+        let mut log = open_log_file(args.log.clone()).expect("log file");
+        log.write_line("[DOS] this run");
+        log.flush();
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        assert!(text.starts_with("rust-dos "), "{text}");
+        assert!(text.ends_with("[DOS] this run\n"), "{text}");
+        assert!(!text.contains("previous run"), "{text}");
     }
 }

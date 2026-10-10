@@ -2185,6 +2185,7 @@ that run; the settings window saves only what you change in it. `rust-dos
 | `-d, --dir DIR` | Make the host directory `DIR` drive C: (default: the configuration's C:, or the current directory) |
 | `-c, --config FILE` | Use this configuration file (see [Configuration file](#configuration-file)) |
 | `--no-config` | Read and create no configuration file |
+| `--log FILE` | Write the [log](README.md#log-file) to `FILE` instead of `rust-dos.log` in the configuration directory |
 | `--no-boot` | Start at the DOS prompt, without booting the disk image marked `-boot` in `[drives]` |
 | `-s, --scale N` | The window scale factor, 1 to 16 |
 | `--vrr` | Show frames at the machine's refresh rate, for a VRR display (`vrr`) |
