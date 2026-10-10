@@ -473,4 +473,20 @@ mod tests {
         assert!(hostfs::write(layer.root().join("NEW.TXT"), b"x").is_err());
         assert!(hostfs::remove_file(layer.root().join("GAME.EXE")).is_err());
     }
+
+    #[test]
+    fn names_joined_to_the_parent_of_a_file_at_the_root_reach_the_layer() {
+        // The parent of `layerN:/GAME.EXE` is `layerN:`, and on Windows a
+        // name joined to it is `layerN:\SAVES`.
+        let dir = scratch("joined");
+        let layer = layer(&dir);
+        let parent = layer.root().join("GAME.EXE").parent().unwrap().to_path_buf();
+        assert_eq!(hostfs::read(parent.join("GAME.EXE")).unwrap(), b"game");
+        assert!(hostfs::is_dir(parent.join("SAVES")));
+        assert_eq!(names(parent.clone()), ["GAME.EXE", "SAVES"]);
+        let backslashed = PathBuf::from(format!("{:?}:\\SAVES\\SLOT1.SAV", layer));
+        assert_eq!(hostfs::read(&backslashed).unwrap(), b"one");
+        hostfs::write(PathBuf::from(format!("{:?}:\\NEW.TXT", layer)), b"x").unwrap();
+        assert_eq!(std::fs::read(dir.join("upper/NEW.TXT")).unwrap(), b"x");
+    }
 }
