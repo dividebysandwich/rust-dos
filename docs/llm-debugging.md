@@ -224,7 +224,7 @@ curl -s -XPOST $H/api/control/resume
   - Write only if the memory holds what you expect with `"expect"`:
     `PUT /api/memory {"addr":"DS:0200","hex":"21 43","expect":"CD AB"}`.
     When the bytes there differ, nothing is written and the reply is HTTP
-    409 with the bytes found. The check and the write run between two
+    409 with `found` (the bytes there) and `expected`. The check and the write run between two
     instructions, so the program can't change the bytes in between, paused
     or not. `expect`, `old` and `new` are what `GET /api/memory` reads. In
     the planar VGA modes (A000 outside mode 13h) that read sees one plane

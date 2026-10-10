@@ -148,6 +148,9 @@ impl AppState {
     async fn call_json(&self, cmd: Cmd, timeout: Duration) -> ApiResult {
         match self.call(cmd, timeout).await? {
             Reply::Json(v) => Ok(axum::Json(v).into_response()),
+            Reply::ErrorJson(code, v) => {
+                Ok((StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST), axum::Json(v)).into_response())
+            }
             _ => Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, "unexpected reply".into())),
         }
     }

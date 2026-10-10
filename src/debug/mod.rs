@@ -74,6 +74,8 @@ pub enum Reply {
     Trace(Vec<TraceEntry>),
     Bytes { addr: usize, segoff: Option<(u16, u32)>, data: Vec<u8> },
     Error(u16, String),
+    /// An error whose body has fields beside its message (`error`).
+    ErrorJson(u16, Value),
 }
 
 impl Reply {
@@ -1323,13 +1325,16 @@ impl DebugHub {
                         Some(t) if t.iter().all(|&p| p < cpu.bus.ram().len() || cpu.bus.vbe.lfb_offset(p, 1).is_some()) => {
                             let old = peek(cpu, &t);
                             if let Some(expect) = expect.filter(|e| *e != old) {
-                                Reply::Error(
+                                let (found, expected) = (trace::hex_bytes(&old), trace::hex_bytes(&expect));
+                                Reply::ErrorJson(
                                     409,
-                                    format!(
-                                        "the memory holds {}, not the expected {}; nothing was written",
-                                        trace::hex_bytes(&old),
-                                        trace::hex_bytes(&expect)
-                                    ),
+                                    json!({
+                                        "error": format!(
+                                            "the memory holds {found}, not the expected {expected}; nothing was written"
+                                        ),
+                                        "found": found,
+                                        "expected": expected,
+                                    }),
                                 )
                             } else {
                                 for (p, b) in t.iter().zip(&data) {
@@ -2216,6 +2221,7 @@ mod tests {
         match rx.try_recv() {
             Ok(Reply::Json(v)) => Ok(v),
             Ok(Reply::Error(code, e)) => Err((code, e)),
+            Ok(Reply::ErrorJson(code, v)) => Err((code, v.to_string())),
             _ => panic!("no JSON reply"),
         }
     }
@@ -2240,7 +2246,8 @@ mod tests {
         cpu.bus.write_8(0x2001, 0xAB);
         let refused = ask(&mut cpu, &mut hub, write("2000", &[0x21, 0x43], Some(&[0x34, 0x12]))).unwrap_err();
         assert_eq!(refused.0, 409);
-        assert!(refused.1.contains("CD AB"), "{}", refused.1);
+        assert!(refused.1.contains(r#""found":"CD AB""#), "{}", refused.1);
+        assert!(refused.1.contains(r#""expected":"34 12""#), "{}", refused.1);
         assert_eq!((cpu.bus.peek_8(0x2000), cpu.bus.peek_8(0x2001)), (0xCD, 0xAB));
         let done = ask(&mut cpu, &mut hub, write("2000", &[0x21, 0x43], Some(&[0xCD, 0xAB]))).unwrap();
         assert_eq!(done["new"], "21 43");
