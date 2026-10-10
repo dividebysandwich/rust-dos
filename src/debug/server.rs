@@ -206,7 +206,7 @@ async fn ui() -> Response {
 }
 
 /// The debug features a client can count on, as `/api/version` lists them.
-const FEATURES: &[&str] = &["breakpoint_once", "quit"];
+const FEATURES: &[&str] = &["breakpoint_once", "quit", "run", "program_stops", "write_expect", "trace_cursor"];
 
 async fn version() -> Response {
     axum::Json(json!({"name": "rust-dos", "version": env!("CARGO_PKG_VERSION"), "features": FEATURES})).into_response()
