@@ -529,6 +529,16 @@ pub fn wave_data<R: Read + Seek>(file: &mut R) -> Result<(WaveFormat, u64, u64),
 
 /// A file named in a CUE sheet: next to the sheet, by the name as written
 /// or by any case of it (sheets made on Windows rarely match the case).
+/// The files the CUE sheet at `path` keeps its tracks in, those that are
+/// there; none if `path` isn't a CUE sheet `CdImage::open` reads as one.
+pub fn cue_files(path: &Path) -> Vec<PathBuf> {
+    let is_cue = path.extension().is_some_and(|e| ["cue", "ins", "inst"].iter().any(|c| e.eq_ignore_ascii_case(c)));
+    let Some(text) = is_cue.then(|| hostfs::read(path).ok()).flatten() else { return Vec::new() };
+    let Ok(sheet) = parse_cue(&String::from_utf8_lossy(&text)) else { return Vec::new() };
+    let dir = path.parent().unwrap_or(Path::new("."));
+    sheet.files.iter().filter_map(|f| find_file(dir, &f.name).ok()).collect()
+}
+
 fn find_file(dir: &Path, name: &str) -> Result<PathBuf, String> {
     // Only the file name counts; sheets can carry the paths of whoever
     // made them.

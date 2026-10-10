@@ -1327,14 +1327,24 @@ fn main() -> Result<(), String> {
         if dbg.take_hotkey() {
             toggle_ui!();
         }
+        // Through the debug server, a state is a checkpoint of this machine
+        // and this debugging session: see `load_checkpoint`.
         for request in dbg.take_state_requests() {
             let path = request.path.clone();
+            // The file layout's version, and this rust-dos's (the header has the one that saved it).
+            let (format, emulator) = (slots::FORMAT, env!("CARGO_PKG_VERSION"));
             if request.load {
-                let loaded = host!().load_file(&path);
-                request.done(loaded.map(|header| serde_json::json!({"loaded": path, "header": header})));
+                match host!().load_checkpoint(&path) {
+                    Ok(header) => {
+                        let cleared = dbg.reset_after_load(&cpu);
+                        let reply = serde_json::json!({"loaded": path, "format": format, "emulator": emulator, "header": header, "debugger_reset": cleared});
+                        request.done(Ok(reply));
+                    }
+                    Err((status, body)) => request.fail(status, body),
+                }
             } else {
                 let saved = host!().save_file(&path);
-                request.done(saved.map(|()| serde_json::json!({"saved": path})));
+                request.done(saved.map(|header| serde_json::json!({"saved": path, "format": format, "emulator": emulator, "header": header})));
             }
         }
         for request in dbg.take_speed_requests() {
@@ -2281,20 +2291,49 @@ impl MainHost<'_, '_> {
         Ok(())
     }
 
-    /// Save the machine to the file `path`, now.
-    fn save_file(&mut self, path: &std::path::Path) -> Result<(), String> {
+    /// Save the machine to the file `path`, now. Returns the state's header.
+    fn save_file(&mut self, path: &std::path::Path) -> Result<slots::Header, String> {
         let (header, picture, state) = self.capture_state();
         savestate::disks::delete_copies(path);
         savestate::disks::save_copies(self.cpu, path)?;
         slots::write_file(path, &slots::encode(&header, &slots::thumbnail(&picture), &state))?;
         self.cpu.bus.log_string(&format!("[STATE] Saved to {}", path.display()));
-        Ok(())
+        Ok(header)
     }
 
     /// Load the save state file `path`: the hardware it was saved with
     /// first, as the settings have it, then the machine. Memory can't
     /// change its size, so a state of another memsize is refused.
     fn load_file(&mut self, path: &std::path::Path) -> Result<slots::Header, String> {
+        let (header, state) = self.read_state(path)?;
+        self.load_state(path, header, &state)
+    }
+
+    /// Load the save state file `path` for the debug server, as a
+    /// checkpoint of this machine: a state of other hardware or media is
+    /// refused (409) with what differs, instead of bringing its own.
+    fn load_checkpoint(&mut self, path: &std::path::Path) -> Result<slots::Header, (u16, serde_json::Value)> {
+        // Whatever failed, the machine, its settings and hardware are as they were.
+        let failed = |e: String| (400, serde_json::json!({"error": e, "loaded": false, "unchanged": true}));
+        let (header, state) = self.read_state(path).map_err(failed)?;
+        let mut differences = slots::machine_differences(&header.machine, &self.machine.settings(self.settings));
+        match &header.media {
+            Some(media) => differences.extend(savestate::media::differences(media, &savestate::media::of(self.cpu))),
+            None => differences.push(format!(
+                "the state doesn't record its media (saved by rust-dos {}), so they can't be checked",
+                header.version
+            )),
+        }
+        if !differences.is_empty() {
+            let error = format!("{} doesn't match this machine; nothing was loaded", path.display());
+            return Err((409, serde_json::json!({"error": error, "loaded": false, "unchanged": true, "differences": differences})));
+        }
+        self.load_state(path, header, &state).map_err(failed)
+    }
+
+    /// The header and machine's state of the save state file `path`, if
+    /// this machine can take it.
+    fn read_state(&mut self, path: &std::path::Path) -> Result<(slots::Header, Vec<u8>), String> {
         if self.achievements.hardcore_active() {
             return Err("hardcore mode: no save states while RetroAchievements plays".to_string());
         }
@@ -2306,6 +2345,16 @@ impl MainHost<'_, '_> {
         if let Some(why) = slots::refusal(&header, self.cpu.bus.ram().len() >> 20) {
             return Err(why);
         }
+        Ok((header, state))
+    }
+
+    /// Load the state `state` of the file `path`, with its header: the
+    /// hardware it was saved with first, then the machine. A load that
+    /// fails puts back the settings and hardware from before it, and the
+    /// machine as it was.
+    fn load_state(&mut self, path: &std::path::Path, header: slots::Header, state: &[u8]) -> Result<slots::Header, String> {
+        let (old_settings, old_hardware) = (self.settings.clone(), self.machine.clone());
+        let before = savestate::machine::save(self.cpu);
         let hardware = slots::machine_settings(&header.machine, self.settings);
         if let Err(e) = self.apply(&hardware) {
             config_warning(self.cpu, &e);
@@ -2318,9 +2367,16 @@ impl MainHost<'_, '_> {
         // A booted system's disks come back from their copies, if the
         // journals don't reach back to the state.
         savestate::disks::offer_copies(self.cpu, path);
-        let loaded = savestate::machine::load(self.cpu, &state).map_err(|e| e.to_string());
+        let loaded = savestate::machine::load(self.cpu, state).map_err(|e| e.to_string());
         savestate::disks::withdraw(self.cpu);
-        loaded?;
+        if let Err(e) = loaded {
+            if let Err(e) = self.apply(&old_settings) {
+                config_warning(self.cpu, &e);
+            }
+            savestate::machine::roll_back(self.cpu, self.machine, &old_hardware, &old_settings, &before);
+            self.cpu.bus.log_string(&format!("[STATE] {} wasn't loaded: {}", path.display(), e));
+            return Err(e);
+        }
         self.pacer.rebase(&self.cpu.bus.clock, std::time::Instant::now());
         *self.state_loaded = true;
         self.cpu.bus.log_string(&format!("[STATE] Loaded {} (saved {})", path.display(), header.saved));

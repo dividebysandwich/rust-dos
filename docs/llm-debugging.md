@@ -302,12 +302,37 @@ them. At the DOS prompt, the `MOUNT` and `IMGMOUNT` commands do the same.
 
 `POST /api/state/save {"path":"/abs/before-boss.state"}` saves the whole
 machine to a file, and `POST /api/state/load` with the same body goes back
-to it, as the Ctrl+F1 and Ctrl+F2 slots do. Save before a step that is
-slow to reach (a menu path, a level) and load to try it again. The load's
-reply has the state's header: when it was saved, the program, and the
-hardware settings it applies first. The files and disk images on the host
-aren't part of a state: what a program wrote since stays written, except
-for a booted system's disks (next section).
+to it. Save before a step that is slow to reach (a menu path, a level) and
+load to try it again. Through the debug server a state is a checkpoint of
+this machine:
+
+- **Paused only.** Both are refused with 409 unless the machine is paused
+  (`POST /api/control/pause`) and no step or `run` command is still to
+  stop it.
+- **Same hardware and media.** A load is refused with 409 and a
+  `differences` list when the state's hardware settings (`cpu`,
+  `machine`, `cycles`, the sound cards, EMS/UMB) differ from
+  the running machine's, or its media do: the mounted drives, their
+  folders, their disk and CD images' paths and sizes, and for a
+  read-only image (a CD's) a hash of its first 64 KiB. Set the speed with
+  `/api/speed` or mount the drive again, then load. The Ctrl+F2 slots and
+  the settings window still bring the state's hardware with it.
+- **All or nothing.** A load that fails (400, or 409 as above) leaves the
+  machine, its settings and hardware as they were; the reply has
+  `"loaded":false` and `"unchanged":true`.
+- **A fresh debugger.** A load clears the breakpoints, watchpoints and
+  `break_on` stops, a step-over's or `resume until` target, and queued
+  input; `/api/control/wait` and `run` requests still waiting get 409.
+  The machine stays paused. The reply's `debugger_reset` counts what was
+  cleared, so set the breakpoints again after a load.
+
+Both replies have `format` (the file layout's version), `emulator` (this
+rust-dos's version) and the state's `header`: the rust-dos that saved it
+(`version`), when, the program, the hardware settings (`machine`) and its
+`media`. A state saved before media were recorded has `"media":null` and
+is refused, as its media can't be checked. The files and disk images on
+the host aren't part of a state: what a program wrote since stays written,
+except for a booted system's disks (next section).
 
 ### Booted systems (Windows 95)
 

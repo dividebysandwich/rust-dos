@@ -47,6 +47,10 @@ pub struct Header {
     pub memsize: usize,
     /// Its emulated time.
     pub emulated_ns: u64,
+    /// The media of its mounted drives (see media.rs); none in a state
+    /// saved before they were recorded.
+    #[serde(default)]
+    pub media: Option<Vec<super::media::Medium>>,
 }
 
 /// A slot file: the header, the picture and the state.
@@ -109,6 +113,39 @@ pub fn machine_settings(text: &str, settings: &Settings) -> Settings {
     with_machine(settings, &Settings::from_config(&config))
 }
 
+/// How the hardware settings `text` (see `machine_text`) differ from the
+/// hardware of `settings`, a sentence each naming the setting: empty if
+/// they are the same.
+pub fn machine_differences(text: &str, settings: &Settings) -> Vec<String> {
+    // Both as this rust-dos writes them, whatever wrote the state's.
+    let state = entries(&machine_text(&machine_settings(text, &Settings::default())));
+    let now = entries(&machine_text(settings));
+    let mut keys: Vec<&String> = state.keys().chain(now.keys()).collect();
+    keys.sort_unstable();
+    keys.dedup();
+    let shown = |v: Option<&String>| v.map_or_else(|| "the default".to_string(), |v| v.clone());
+    keys.into_iter()
+        .filter(|k| state.get(*k) != now.get(*k))
+        .map(|k| format!("{}: the state has {}, this machine has {}", k, shown(state.get(k)), shown(now.get(k))))
+        .collect()
+}
+
+/// The `section.key` and value of each setting in configuration text.
+fn entries(text: &str) -> std::collections::BTreeMap<String, String> {
+    let mut section = String::new();
+    let mut out = std::collections::BTreeMap::new();
+    for line in text.lines().map(str::trim) {
+        if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            section = name.trim().to_ascii_lowercase();
+        } else if let Some((key, value)) = line.split_once('=')
+            && !line.starts_with(['#', ';'])
+        {
+            out.insert(format!("{}.{}", section, key.trim().to_ascii_lowercase()), value.trim().to_string());
+        }
+    }
+    out
+}
+
 /// `base` with the hardware settings of `from`.
 fn with_machine(base: &Settings, from: &Settings) -> Settings {
     Settings {
@@ -169,6 +206,7 @@ pub fn header(cpu: &Cpu, settings: &Settings, game: Option<(&str, &str)>) -> Hea
         machine: machine_text(settings),
         memsize: cpu.bus.ram().len() >> 20,
         emulated_ns: cpu.bus.clock.now_ns(),
+        media: Some(super::media::of(cpu)),
     }
 }
 
@@ -249,6 +287,30 @@ mod tests {
         assert_eq!((loaded.machine, loaded.cpu, loaded.memsize, loaded.ems), (Adapter::Cga, CpuModel::I386, 8, false));
         assert_eq!(loaded.sound, settings.sound);
         assert_eq!(loaded.scale, 2, "the display's settings stay");
+    }
+
+    #[test]
+    fn hardware_that_differs_is_named() {
+        let mut settings = Settings { machine: Adapter::Cga, cpu: CpuModel::I386, ..Default::default() };
+        settings.sound.gus.enabled = false;
+        let text = machine_text(&settings);
+        assert_eq!(machine_differences(&text, &settings), Vec::<String>::new());
+        // The display's settings aren't the hardware's.
+        assert!(machine_differences(&text, &Settings { scale: 3, ..settings.clone() }).is_empty());
+
+        let differences = machine_differences(&text, &Settings::default());
+        assert_eq!(differences.len(), 3, "{:?}", differences);
+        assert!(differences.iter().any(|d| d == "emulator.machine: the state has cga, this machine has the default"), "{:?}", differences);
+        assert!(differences.iter().any(|d| d.contains("this machine has the default")), "{:?}", differences);
+    }
+
+    #[test]
+    fn a_header_without_media_reads_as_one_saved_before_they_were_recorded() {
+        let header = Header { version: "1.5.0".into(), memsize: 16, ..Default::default() };
+        let mut json: serde_json::Value = serde_json::to_value(&header).unwrap();
+        json.as_object_mut().unwrap().remove("media");
+        let read: Header = serde_json::from_value(json).unwrap();
+        assert_eq!(read.media, None);
     }
 
     #[test]

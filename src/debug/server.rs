@@ -1078,8 +1078,15 @@ DRIVES
 
 SAVE STATES
   POST   /api/state/save {"path":"/tmp/keen.state"}  save the machine to a file
-  POST   /api/state/load {"path":"/tmp/keen.state"}  load one: its hardware
-                   settings, then the machine (the same memsize only)
+  POST   /api/state/load {"path":"/tmp/keen.state"}  load one into this machine
+                   Both only while paused with no step or run pending (409).
+                   A load is refused (409, "differences") unless the state's
+                   hardware settings and media (drives, folders, images)
+                   match; a failed load changes nothing ("unchanged":true).
+                   A load clears breakpoints, watchpoints, break_on stops,
+                   run-to targets and queued input ("debugger_reset"), and
+                   answers waiting requests with 409. Replies have the
+                   state's header, "format" and "emulator" (this version).
 
 SPEED
   POST   /api/speed {"cycles":"auto"}   the CPU speed, as `cycles` takes it

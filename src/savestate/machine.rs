@@ -43,6 +43,21 @@ pub fn load(cpu: &mut Cpu, data: &[u8]) -> Result<()> {
     loaded.map(drop)
 }
 
+/// Undo a load that failed after a state's hardware was put in place
+/// (`Hardware::apply`): the hardware goes back to `old`, as `settings`
+/// had it, and the machine to `before`, which `save` took before the
+/// hardware changed.
+pub fn roll_back(cpu: &mut Cpu, hardware: &mut crate::hardware::Hardware, old: &crate::hardware::Hardware, settings: &crate::config::Settings, before: &[u8]) {
+    if hardware != old {
+        for warning in hardware.apply(cpu, &old.settings(settings)) {
+            cpu.bus.log_string(&format!("[STATE] {}", warning));
+        }
+    }
+    load_sections(cpu, before).expect("the state the machine was in loads back");
+    cpu.forget_caches();
+    cpu.bus.after_load();
+}
+
 fn load_sections(cpu: &mut Cpu, data: &[u8]) -> Result<Vec<String>> {
     let mut r = Reader::new(data);
     let lost = cpu.bus.load_state(&mut r)?;

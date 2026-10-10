@@ -535,6 +535,35 @@ fn a_slot_brings_its_hardware_and_its_memory_size_must_match() {
 }
 
 #[test]
+fn a_load_that_fails_takes_back_the_hardware_it_put_in_place() {
+    use rust_dos::savestate::slots;
+    fix_time();
+    let dir = scratch("roll_back", &[]);
+    let defaults = rust_dos::config::Settings::default();
+    let (mut cpu, mut hardware) = configured_machine(&dir, &defaults);
+    run_ms(&mut cpu);
+    let (old, before) = (hardware.clone(), machine::save(&cpu));
+
+    // The state's hardware: CGA and no Ultrasound. Its state is cut
+    // short, so the load fails after the hardware changed.
+    let mut theirs = defaults.clone();
+    theirs.machine = Adapter::Cga;
+    theirs.sound.gus.enabled = false;
+    let (other, _) = configured_machine(&dir, &theirs);
+    let state = machine::save(&other);
+    let wanted = slots::machine_settings(&slots::machine_text(&theirs), &defaults);
+    hardware.apply(&mut cpu, &wanted);
+    assert!(cpu.bus.gus.is_none());
+    assert_eq!(machine::load(&mut cpu, &state[..state.len() - 10]), Err(StateError::Truncated));
+
+    machine::roll_back(&mut cpu, &mut hardware, &old, &defaults, &before);
+    assert_eq!(hardware, old);
+    assert!(cpu.bus.gus.is_some(), "the Ultrasound is back");
+    assert_eq!(cpu.bus.vga.adapter, old.video.adapter);
+    assert!(machine::save(&cpu) == before, "the machine is as it was");
+}
+
+#[test]
 fn rewind_goes_back_through_a_running_machine_in_small_steps() {
     use rust_dos::savestate::rewind::History;
     fix_time();

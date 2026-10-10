@@ -213,6 +213,12 @@ impl StateRequest {
             Err(e) => Reply::bad(e),
         });
     }
+
+    /// Answer the request with an error of `status` whose body (with its
+    /// `error`) says more.
+    pub fn fail(self, status: u16, body: Value) {
+        let _ = self.reply.send(Reply::ErrorJson(status, body));
+    }
 }
 
 /// A CPU speed to change to, which the front end carries out and answers
@@ -1215,9 +1221,90 @@ impl DebugHub {
         std::mem::take(&mut self.hotkey)
     }
 
-    /// The save states remote clients asked to save or load.
+    /// The save states remote clients asked to save or load. Those asked
+    /// for while the machine isn't stopped with nothing pending are
+    /// refused here (409): a state is only taken or put in while the
+    /// debugger holds the machine between two instructions.
     pub fn take_state_requests(&mut self) -> Vec<StateRequest> {
-        std::mem::take(&mut self.state_requests)
+        let requests = std::mem::take(&mut self.state_requests);
+        let Some(why) = self.checkpoint_refusal() else { return requests };
+        for request in requests {
+            let what = if request.load { "load" } else { "save" };
+            let error = format!("can't {} a state: {}", what, why);
+            request.fail(409, json!({"error": error, "paused": self.paused}));
+        }
+        Vec::new()
+    }
+
+    /// Why a save state can't be saved or loaded now, if it can't: the
+    /// machine runs, or a step or run command is still to stop it.
+    fn checkpoint_refusal(&self) -> Option<&'static str> {
+        if !self.paused {
+            Some("the machine runs; pause it first (POST /api/control/pause)")
+        } else if self.step_budget.is_some() {
+            Some("a step is pending")
+        } else if self.run_wait.is_some() {
+            Some("a run command waits for its program")
+        } else {
+            None
+        }
+    }
+
+    /// Forget what the debugger was told before a save state was loaded,
+    /// so none of it stops the machine the state brought: breakpoints,
+    /// watchpoints, the stops on exceptions, mode switches and program
+    /// starts and ends, a step or the target of a step-over or run-to, and
+    /// queued input. Requests waiting for a stop or a program, or for
+    /// their input to be typed, are answered with 409. Returns what was
+    /// cleared.
+    pub fn reset_after_load(&mut self, cpu: &Cpu) -> Value {
+        let break_on: Vec<&str> = [
+            (self.break_exceptions != 0, "exceptions"),
+            (self.break_mode_switch, "mode_switch"),
+            (self.break_program_start, "program_start"),
+            (self.break_program_exit, "program_exit"),
+        ]
+        .into_iter()
+        .filter_map(|(on, name)| on.then_some(name))
+        .collect();
+        let cleared = json!({
+            "breakpoints": std::mem::take(&mut self.breakpoints).len(),
+            "watchpoints": std::mem::take(&mut self.watchpoints).len(),
+            "break_on": break_on,
+            "run_to": self.temp_breakpoint.take().is_some(),
+            "step": self.step_budget.take().is_some(),
+            "pause_waits": self.pause_waiters.len(),
+            "run": self.run_wait.is_some(),
+            "input": self.input.len(),
+        });
+        let gone = || Reply::Error(409, "a save state was loaded".into());
+        for waiter in self.pause_waiters.drain(..) {
+            let _ = waiter.send(gone());
+        }
+        if let Some(run) = self.run_wait.take() {
+            let _ = run.reply.send(gone());
+        }
+        for event in self.input.drain(..) {
+            if let LowInput::Notify(tx) = event {
+                let _ = tx.send(gone());
+            }
+        }
+        self.input_wait_until = None;
+        self.break_exceptions = 0;
+        self.break_mode_switch = false;
+        self.break_program_start = false;
+        self.break_program_exit = false;
+        self.start_once = false;
+        self.start_breakpoint = None;
+        self.skip_bp_once = false;
+        self.pause_hit = None;
+        self.watch_hit = None;
+        // The loaded machine's counts are where the debugger starts from.
+        self.seen_exceptions = cpu.exceptions;
+        self.seen_mode_switches = cpu.mode_switches;
+        self.seen_starts = cpu.programs.started;
+        self.seen_ends = cpu.programs.ended;
+        cleared
     }
 
     /// The CPU speeds remote clients asked for.
@@ -2729,6 +2816,72 @@ mod tests {
         answer(&mut cpu, &mut hub, rx, 50).unwrap();
         let rx = send(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true });
         assert_eq!(answer(&mut cpu, &mut hub, rx, 0).unwrap_err().0, 409, "a program is running");
+    }
+
+    /// Pause the machine, as the main loop does: its stop is told at the
+    /// end of the frame.
+    fn pause(cpu: &mut Cpu, hub: &mut DebugHub) {
+        let rx = send(cpu, hub, Cmd::Pause);
+        hub.end_batch(cpu);
+        answer(cpu, hub, rx, 0).unwrap();
+        assert!(hub.paused);
+    }
+
+    /// Ask to save a state, and the requests the front end gets to carry
+    /// out, with the reply of one refused.
+    fn state_request(cpu: &mut Cpu, hub: &mut DebugHub) -> (usize, Option<(u16, Value)>) {
+        let mut rx = send(cpu, hub, Cmd::SaveState { path: "/tmp/x.state".into() });
+        let taken = hub.take_state_requests().len();
+        let refused = match rx.try_recv() {
+            Ok(Reply::ErrorJson(code, body)) => Some((code, body)),
+            Ok(_) => panic!("not a refusal"),
+            Err(_) => None,
+        };
+        (taken, refused)
+    }
+
+    #[test]
+    fn a_state_is_saved_or_loaded_only_while_the_machine_is_paused() {
+        let (mut cpu, mut hub) = machine("checkpoint");
+        let (taken, refused) = state_request(&mut cpu, &mut hub);
+        let (code, body) = refused.expect("refused while running");
+        assert_eq!((taken, code), (0, 409));
+        assert!(body["error"].as_str().unwrap().contains("pause it first"), "{}", body);
+
+        pause(&mut cpu, &mut hub);
+        let (taken, refused) = state_request(&mut cpu, &mut hub);
+        assert_eq!((taken, refused.is_none()), (1, true), "paused with nothing pending");
+
+        // A step sent with it, in the same frame, starts the machine first.
+        let _save = send(&mut cpu, &mut hub, Cmd::SaveState { path: "/tmp/x.state".into() });
+        let _step = send(&mut cpu, &mut hub, Cmd::Step { count: 1 });
+        assert!(hub.take_state_requests().is_empty(), "refused: the step is under way");
+    }
+
+    #[test]
+    fn a_loaded_state_leaves_no_breakpoint_watchpoint_or_stop_from_before() {
+        let (mut cpu, mut hub) = machine("reset");
+        pause(&mut cpu, &mut hub);
+        ask(&mut cpu, &mut hub, Cmd::AddBreakpoint("0100:0000".into()), 0).unwrap();
+        ask(&mut cpu, &mut hub, Cmd::AddWatchpoint { addr: "0200:0000".into(), len: 2 }, 0).unwrap();
+        let on = Cmd::BreakOn { exceptions: Some(1), clear_exceptions: None, mode_switch: Some(true), program_start: None, program_exit: Some(true) };
+        ask(&mut cpu, &mut hub, on, 0).unwrap();
+        hub.temp_breakpoint = Some(0x1234);
+        let mut waiting = send(&mut cpu, &mut hub, Cmd::Input { events: Vec::new(), wait: true });
+
+        let cleared = hub.reset_after_load(&cpu);
+        assert_eq!(
+            cleared,
+            serde_json::json!({
+                "breakpoints": 1, "watchpoints": 1, "break_on": ["exceptions", "mode_switch", "program_exit"],
+                "run_to": true, "step": false, "pause_waits": 0, "run": false, "input": 1,
+            })
+        );
+        assert!(matches!(waiting.try_recv(), Ok(Reply::Error(409, _))), "the input's wait is answered");
+        assert!(!hub.begin_batch(&cpu), "nothing is left to stop the machine");
+        assert!(hub.paused, "the machine stays paused");
+        let listed = ask(&mut cpu, &mut hub, Cmd::ListBreakpoints, 0).unwrap();
+        assert_eq!(listed["breakpoints"].as_array().map(Vec::len), Some(0), "{}", listed);
     }
 
     /// The scan codes of the keys going down to type `c`.
