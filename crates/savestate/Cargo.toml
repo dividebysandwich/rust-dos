@@ -1,0 +1,10 @@
+[package]
+name = "rust-dos-savestate"
+description = "Save states of rust-dos's devices: the State trait and its byte format"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]

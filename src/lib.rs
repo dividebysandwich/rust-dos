@@ -108,3 +108,6 @@ pub mod voodoo;
 pub mod vr;
 pub mod vr_scenes;
 pub mod xms;
+
+// The save state macros, at the crate root as `crate::state_fields!`.
+pub use rust_dos_savestate::{state_enum, state_fields};

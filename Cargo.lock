@@ -1919,6 +1919,7 @@ dependencies = [
  "nuked-opl3",
  "openxr",
  "png",
+ "rust-dos-savestate",
  "rustysynth",
  "sdl2",
  "serde",
@@ -1933,6 +1934,10 @@ dependencies = [
  "windows-sys 0.61.2",
  "zip",
 ]
+
+[[package]]
+name = "rust-dos-savestate"
+version = "1.5.0"
 
 [[package]]
 name = "rustc-hash"

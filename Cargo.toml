@@ -1,11 +1,11 @@
 [package]
 name = "rust-dos"
 description = "An x86 DOS emulator written in Rust"
-authors = ["dividebysandwich"]
-repository = "https://github.com/dividebysandwich/rust-dos"
-license = "GPL-2.0-or-later"
-version = "1.5.0"
-edition = "2024"
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+version.workspace = true
+edition.workspace = true
 # `cargo run` runs the emulator, not the relay (src/bin).
 default-run = "rust-dos"
 
@@ -23,7 +23,23 @@ required-features = ["sdl"]
 depends = "$auto"
 recommends = "libopenxr-loader1"
 
+# The emulator, and in crates/ the parts of it that stand on their own:
+# the sound cards, and what they need (save states, DMA, ...). `cargo
+# build` and `cargo run` build the emulator; `cargo test --workspace`
+# tests the crates too.
+[workspace]
+members = ["crates/*"]
+default-members = ["."]
+
+[workspace.package]
+authors = ["dividebysandwich"]
+repository = "https://github.com/dividebysandwich/rust-dos"
+license = "GPL-2.0-or-later"
+version = "1.5.0"
+edition = "2024"
+
 [dependencies]
+rust-dos-savestate = { path = "crates/savestate" }
 iced-x86 = "1.21.0"
 font8x8 = "0.3.1"
 chrono = "0.4.45"
