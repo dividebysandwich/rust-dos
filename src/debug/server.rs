@@ -583,12 +583,12 @@ struct MemPut {
     addr: String,
     hex: Option<String>,
     base64: Option<String>,
-    /// The bytes that must be there for the write to be made, hex.
+    /// Hex bytes that must be at `addr` for the write to happen.
     expect: Option<String>,
 }
 
-/// Bytes written as hex digits; what isn't one is left out, and so is a
-/// `0x` that starts a number, so "0xCD 0xAB" is CD AB.
+/// Bytes from hex digits. Anything else is skipped, as is a `0x` that
+/// starts a number, so "0xCD 0xAB" is CD AB.
 fn hex_data(h: &str) -> Result<Vec<u8>, ApiError> {
     let mut clean = String::with_capacity(h.len());
     let mut prev: Option<char> = None;

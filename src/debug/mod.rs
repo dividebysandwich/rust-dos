@@ -130,7 +130,7 @@ pub enum Cmd {
     SetRegs(Map<String, Value>),
     ReadMem { addr: String, len: usize },
     /// Write `data` at an address; with `expect`, only if the bytes there
-    /// are those.
+    /// match it.
     WriteMem { addr: String, data: Vec<u8>, expect: Option<Vec<u8>> },
     Disasm { addr: Option<String>, count: usize },
     ListBreakpoints,
@@ -1345,10 +1345,9 @@ impl DebugHub {
                                 for w in &mut self.watchpoints {
                                     w.value = Watch::read(cpu, w.phys, w.len);
                                 }
-                                // What it replaced, and what reads back: the
-                                // VGA's planes, read through its read mode,
-                                // and device registers can differ from the
-                                // data written.
+                                // The bytes replaced and what reads back,
+                                // which can differ from the data: VGA memory
+                                // reads through the read mode.
                                 Reply::Json(json!({
                                     "ok": true,
                                     "addr": format!("{:05X}", a.phys.unwrap_or(0)),

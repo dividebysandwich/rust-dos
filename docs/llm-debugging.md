@@ -220,17 +220,16 @@ curl -s -XPOST $H/api/control/resume
   - Write with `PUT /api/memory {"addr":"1000:0200","hex":"90 90"}`. Writes
     also invalidate the decoded-instruction cache, so patching code works.
     The reply has the bytes the write replaced (`old`) and what reads back
-    (`new`), which differs where the target keeps its bytes.
+    (`new`), which can differ from the data in VGA memory.
   - Write only if the memory holds what you expect with `"expect"`:
     `PUT /api/memory {"addr":"DS:0200","hex":"21 43","expect":"CD AB"}`.
     When the bytes there differ, nothing is written and the reply is HTTP
-    409 with the bytes found. The check and the write happen between two
+    409 with the bytes found. The check and the write run between two
     instructions, so the program can't change the bytes in between, paused
-    or not. `expect`, `old` and `new` are the bytes `GET /api/memory` reads
-    there. In the planar VGA modes (A000 outside mode 13h) that read goes
-    through the VGA's read mode and sees one plane, while the write lands on
-    the planes the Map Mask picks, so a match there says nothing about the
-    other planes.
+    or not. `expect`, `old` and `new` are what `GET /api/memory` reads. In
+    the planar VGA modes (A000 outside mode 13h) that read sees one plane
+    through the VGA's read mode, while the write lands on the planes the Map
+    Mask picks, so a match says nothing about the other planes.
 - **Interrupt vectors:** `GET /api/ivt`. `hle:true` means the vector still
   points at the emulator's built-in handler, so a program has not hooked it.
 - **Disassembly as data:** `GET /api/disasm?format=json` has, next to the
