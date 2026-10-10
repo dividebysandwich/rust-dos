@@ -51,6 +51,12 @@ pub struct Header {
     /// saved before they were recorded.
     #[serde(default)]
     pub media: Option<Vec<super::media::Medium>>,
+    /// Saved in deterministic mode: the date and time its clock started
+    /// at (`YYYY-MM-DD HH:MM:SS`). The machine's clock is that plus
+    /// emulated time, so a machine with another start, or not in the
+    /// mode, reads another time from the state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deterministic: Option<String>,
 }
 
 /// A slot file: the header, the picture and the state.
@@ -130,6 +136,13 @@ pub fn machine_differences(text: &str, settings: &Settings) -> Vec<String> {
         .collect()
 }
 
+/// How the deterministic mode of a state (its clock's start time, None
+/// outside the mode) differs from this machine's, if it does.
+pub fn mode_difference(state: Option<&str>, now: Option<&str>) -> Option<String> {
+    let shown = |start: Option<&str>| start.map_or_else(|| "no deterministic mode".to_string(), |s| format!("a clock started at {}", s));
+    (state != now).then(|| format!("deterministic: the state has {}, this machine has {}", shown(state), shown(now)))
+}
+
 /// The `section.key` and value of each setting in configuration text.
 fn entries(text: &str) -> std::collections::BTreeMap<String, String> {
     let mut section = String::new();
@@ -207,6 +220,8 @@ pub fn header(cpu: &Cpu, settings: &Settings, game: Option<(&str, &str)>) -> Hea
         memsize: cpu.bus.ram().len() >> 20,
         emulated_ns: cpu.bus.clock.now_ns(),
         media: Some(super::media::of(cpu)),
+        // The front end sets it in deterministic mode.
+        deterministic: None,
     }
 }
 
@@ -311,6 +326,24 @@ mod tests {
         json.as_object_mut().unwrap().remove("media");
         let read: Header = serde_json::from_value(json).unwrap();
         assert_eq!(read.media, None);
+    }
+
+    #[test]
+    fn a_deterministic_start_time_that_differs_is_named() {
+        let start = Some("1995-04-11 12:34:56");
+        assert_eq!(mode_difference(start, start), None);
+        assert_eq!(mode_difference(None, None), None);
+        assert_eq!(
+            mode_difference(start, None).as_deref(),
+            Some("deterministic: the state has a clock started at 1995-04-11 12:34:56, this machine has no deterministic mode")
+        );
+        assert!(mode_difference(None, start).unwrap().starts_with("deterministic: the state has no deterministic mode"));
+        assert!(mode_difference(start, Some("1991-12-31 23:00:00")).is_some());
+        // Absent from a state saved outside the mode, and from older ones.
+        let header = Header { version: "1.6.0".into(), memsize: 16, ..Default::default() };
+        let json = serde_json::to_value(&header).unwrap();
+        assert!(json.get("deterministic").is_none(), "{}", json);
+        assert_eq!(serde_json::from_value::<Header>(json).unwrap().deterministic, None);
     }
 
     #[test]

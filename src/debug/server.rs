@@ -508,6 +508,7 @@ async fn speed(State(s): State<AppState>, body: Bytes) -> ApiResult {
 struct ControlBody {
     count: Option<u64>,
     until: Option<String>,
+    until_ms: Option<u64>,
     timeout_ms: Option<u64>,
     /// `run`: the command line, and whether to stop at the program's entry.
     command: Option<String>,
@@ -523,7 +524,7 @@ async fn control(State(s): State<AppState>, Path(action): Path<String>, body: By
     let timeout = b.timeout_ms.map_or(DEFAULT_TIMEOUT, Duration::from_millis);
     match action.as_str() {
         "pause" => s.call_json(Cmd::Pause, DEFAULT_TIMEOUT).await,
-        "resume" | "continue" => s.call_json(Cmd::Resume { until: b.until }, DEFAULT_TIMEOUT).await,
+        "resume" | "continue" => s.call_json(Cmd::Resume { until: b.until, until_ms: b.until_ms }, DEFAULT_TIMEOUT).await,
         "step" => s.call_json(Cmd::Step { count: b.count.unwrap_or(1) }, timeout).await,
         "step_over" => s.call_json(Cmd::StepOver, timeout).await,
         "reboot_shell" => s.call_json(Cmd::RebootShell, DEFAULT_TIMEOUT).await,
@@ -963,6 +964,11 @@ async fn handle_ws_input(s: &AppState, text: &str) -> Result<Value, ApiError> {
     let timeout = if wait { INPUT_WAIT_TIMEOUT } else { DEFAULT_TIMEOUT };
     match s.call(Cmd::Input { events, wait }, timeout).await? {
         Reply::Json(v) => Ok(v),
+        // Deterministic mode refuses input while the machine runs.
+        Reply::ErrorJson(code, v) => Err(ApiError(
+            StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST),
+            v["error"].as_str().unwrap_or("refused").to_string(),
+        )),
         _ => Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, "unexpected reply".into())),
     }
 }
@@ -1013,6 +1019,8 @@ INPUT  (append ?wait=false to return immediately instead of after delivery)
 EXECUTION CONTROL
   POST /api/control/pause
   POST /api/control/resume   {"until":"1234:0100"}   (optional temporary breakpoint)
+                             {"until_ms":5000}       with --deterministic: pause when
+                                                     emulated time reaches 5000 ms
   POST /api/control/step     {"count":1}             returns registers after stepping
   POST /api/control/step_over                        step, but run a CALL, INT, LOOP or
                                                      REP string instruction to the next one
@@ -1097,8 +1105,11 @@ SAVE STATES
                    (409, "differences") unless the state's hardware
                    settings and media match. It clears breakpoints,
                    watchpoints, break_on stops, run-to targets, queued
-                   input and held keys ("debugger_reset") and answers
-                   waiting requests with 409.
+                   input, held keys and an until_ms ("debugger_reset") and
+                   answers waiting requests with 409.
+                   With --deterministic a load is taken only while paused
+                   (409 otherwise), and a state of another start time or
+                   saved outside the mode differs ("deterministic").
 
 SPEED
   POST   /api/speed {"cycles":"auto"}   the CPU speed, as `cycles` takes it
