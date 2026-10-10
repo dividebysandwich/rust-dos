@@ -415,7 +415,7 @@ pub fn wave_data<R: Read + Seek>(file: &mut R) -> Result<(WaveFormat, u64, u64),
 }
 
 /// A file named in a CUE sheet: below the sheet's folder by its relative
-/// path (GOG's sheets keep their music in `music\`), else next to the
+/// path (some sheets keep their audio tracks in a folder), else next to the
 /// sheet, each part by the name as written or by any case of it (sheets
 /// made on Windows rarely match the case).
 fn find_file(dir: &Path, name: &str) -> Result<PathBuf, String> {
@@ -518,16 +518,15 @@ mod tests {
 
     #[test]
     fn files_in_a_folder_below_the_sheet() {
-        // As GOG's sheets have their music: `music\Track02.ogg` next to a
-        // folder named MUSIC.
+        // The sheet names `audio\Song2.bin`; the folder on disk is AUDIO.
         let dir = scratch("subfolder");
-        fs::create_dir_all(dir.join("MUSIC")).unwrap();
+        fs::create_dir_all(dir.join("AUDIO")).unwrap();
         fs::write(dir.join("data.bin"), vec![7u8; 10 * 2048]).unwrap();
-        fs::write(dir.join("MUSIC").join("Track02.bin"), sectors(5, 3)).unwrap();
+        fs::write(dir.join("AUDIO").join("Song2.bin"), sectors(5, 3)).unwrap();
         fs::write(
             dir.join("disc.cue"),
             "FILE \"data.bin\" BINARY\n TRACK 01 MODE1/2048\n  INDEX 01 00:00:00\n\
-             FILE \"music\\Track02.bin\" BINARY\n TRACK 02 AUDIO\n  INDEX 01 00:00:00\n",
+             FILE \"audio\\Song2.bin\" BINARY\n TRACK 02 AUDIO\n  INDEX 01 00:00:00\n",
         )
         .unwrap();
         let image = CdImage::open(&dir.join("disc.cue")).unwrap();
