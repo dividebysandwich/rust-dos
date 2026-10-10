@@ -3145,7 +3145,8 @@ impl Bus {
     /// In a VESA mode the Start Address registers and CRTC 69h give the
     /// display start in doublewords.
     fn update_vbe_start(&mut self) {
-        if self.video_mode == VideoMode::Vesa {
+        // A Vérité's own CRTC has its start in its own register.
+        if self.video_mode == VideoMode::Vesa && !self.verite.native {
             let crtc = &self.vga.crtc_regs;
             let dwords = (self.vbe.start_high as u32) << 16 | (crtc[0x0C] as u32) << 8 | crtc[0x0D] as u32;
             self.vbe.start = dwords * 4;

@@ -1676,6 +1676,30 @@ spans with perspective, its 8-bit pictures through a colour table, and
 particles. Fog follows the Programming Guide, but its commands are
 guessed: no game on hand uses it.
 
+### Windows 95 on the Vérité
+
+Windows 95 runs on the Vérité with Rendition's V1000 reference driver
+(2.1 beta 2, `v1k_b2_1.zip`), installed with **Have Disk** under Display
+Properties, Settings, Advanced Properties, Change. The driver tests the
+card's processor and starts its 2D microcode (`v10002d.uc`) through the
+card's debug registers, sets the modes through the card's own CRTC, uses
+the Bt485 RAMDAC's palette and hardware cursor, and draws through the
+microcode: fills, copies on and between surfaces, one-bit images, text,
+brushes and clipping, which Rust-DOS carries out as the microcode does.
+The desktop, windows, MS-DOS Prompts (windowed and full screen) and Paint
+were tried at 800x600 in High Color and at 640x480 in 256 colours and in
+True Color.
+
+The driver refuses True Color at 1024x768 at the refresh rate it picks
+(85 Hz), as it would on the card: a Windows that ran in that mode on
+another card shows a black screen after the driver is installed. Set
+another mode before restarting, or in Safe Mode. Direct3D and OpenGL
+under Windows, which load Rendition's 3D microcode the same way, aren't
+supported, nor some of the 2D microcode's rarer commands (lines, stretched
+copies, colour brushes); `RUST_DOS_VERITE_TRACE` lists the ones a program
+sends. Windows 95's own Rendition driver, from the OSR2 CD, hasn't been
+tried.
+
 ## PowerVR PCX2
 
 `powervr=pcx2` in `[emulator]` puts a PowerVR PCX2 in the machine, NEC's

@@ -2,6 +2,8 @@
 //! FIFO from lists in the PC's memory, and its BIOS's own functions.
 
 use super::Bus;
+use crate::video::VideoMode;
+use crate::video::vbe::VbeMode;
 use crate::verite::{regs, swap};
 
 /// DMA lists followed at most, against loops.
@@ -19,19 +21,97 @@ impl Bus {
     }
 
     pub(crate) fn verite_read(&mut self, reg: u8, len: u8) -> u32 {
+        if (regs::CRTCSTATUS..regs::CRTCSTATUS + 4).contains(&reg) {
+            let status = crate::verite::crtc_status(&self.vga.timing(), self.clock.now_ns());
+            return status >> (8 * (reg - regs::CRTCSTATUS));
+        }
+        if Self::verite_dac_port(reg) {
+            let mut value = 0;
+            for i in 0..len {
+                let byte = self.verite.dac.read((reg + i - regs::PALETTE) & 0xF, &self.vga.palette);
+                value |= (byte as u32) << (8 * i);
+            }
+            self.verite.trace(|| format!("r DAC {:02X} {} = {:X}", reg - regs::PALETTE, len, value));
+            return value;
+        }
         let value = self.verite.read(reg, len);
         self.verite_log();
         value
     }
 
     pub(crate) fn verite_write(&mut self, reg: u8, value: u32, len: u8) {
+        if Self::verite_dac_port(reg) {
+            self.verite.trace(|| format!("w DAC {:02X} {} = {:X}", reg - regs::PALETTE, len, value));
+            for i in 0..len {
+                self.verite.dac.write((reg + i - regs::PALETTE) & 0xF, (value >> (8 * i)) as u8, &mut self.vga.palette);
+            }
+            self.vga.dac_8bit = self.verite.dac.dac_8bit();
+            self.vga.mark_dirty_full();
+            return;
+        }
         self.verite.write(reg, value, len);
+        if reg < regs::CRTCSTATUS && reg + len > regs::CRTCCTL {
+            self.verite_settle();
+        }
+        if reg <= regs::DEBUGREG && reg + len > regs::DEBUGREG {
+            self.verite.debug(&mut self.vbe.vram);
+        }
         self.verite_execute();
         // The DMA list pointer's last byte starts the DMA.
         if reg <= regs::DMACMDPTR + 3 && reg + len > regs::DMACMDPTR + 3 {
             self.verite_dma();
         }
         self.verite_log();
+    }
+
+    /// Whether `reg` is one of the RAMDAC's ports.
+    fn verite_dac_port(reg: u8) -> bool {
+        (regs::PALETTE..regs::PALETTE + 16).contains(&reg)
+    }
+
+    /// Show what the card's own CRTC describes, as a VESA mode, or go back
+    /// to the VGA's when its video goes off. Runs after every write to its
+    /// registers.
+    fn verite_settle(&mut self) {
+        match self.verite.screen() {
+            Some(screen) => {
+                let mode = VbeMode { number: 0, width: screen.width, height: screen.height, bpp: screen.bpp, timing: screen.timing };
+                let same = self.verite.native
+                    && self.video_mode == VideoMode::Vesa
+                    && self.vbe.mode == Some(mode)
+                    && self.vbe.pitch == screen.pitch;
+                if !same {
+                    let size = |m: &VbeMode| (m.width, m.height, m.bpp);
+                    if !self.verite.native || self.vbe.mode.as_ref().map(size) != Some(size(&mode)) {
+                        let line = format!(
+                            "[VERITE] Display {}x{}, {} bits per pixel, {} bytes a line",
+                            screen.width, screen.height, screen.bpp, screen.pitch
+                        );
+                        self.log_string(&line);
+                    }
+                    self.verite.native = true;
+                    self.vbe.mode = Some(mode);
+                    self.vbe.pitch = screen.pitch;
+                    self.video_mode = VideoMode::Vesa;
+                    self.vga.set_fixed_timing(Some(screen.timing));
+                    self.vga.mark_dirty_full();
+                }
+                if self.vbe.start != screen.base {
+                    self.vbe.start = screen.base;
+                    self.note_display_start();
+                }
+            }
+            None if self.verite.native => {
+                self.verite.native = false;
+                self.vbe.reset();
+                self.vga.set_fixed_timing(None);
+                let mode = self.vga.register_mode().or_else(|| self.vga.check_video_mode()).unwrap_or(VideoMode::Text80x25Color);
+                self.log_string(&format!("[VERITE] Back to the VGA's {:?}", mode));
+                self.video_mode = mode;
+                self.vga.mark_dirty_full();
+            }
+            None => {}
+        }
     }
 
     /// Follow the DMA list the pointer register points to, feeding the

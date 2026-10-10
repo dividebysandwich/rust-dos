@@ -467,6 +467,30 @@ fn render_vbe(canvas: &mut [u8], canvas_w: usize, y_min: usize, y_max: usize, bu
                 }
             }
         }
+        // A Vérité's RAMDAC's cursor over the row.
+        if bus.verite.native
+            && scale == 1
+            && let (Some((ox, oy)), Some(size)) = (bus.verite.dac.cursor_origin(), bus.verite.dac.cursor_size())
+            && (oy..oy + size as i32).contains(&(fy as i32))
+        {
+            let dac = &bus.verite.dac;
+            let cy = (fy as i32 - oy) as u32;
+            for cx in 0..size {
+                let Ok(x) = usize::try_from(ox + cx as i32) else {
+                    continue;
+                };
+                if x >= mode.width as usize || x >= canvas_w {
+                    break;
+                }
+                let i = dst + x * 3;
+                let rgb = match dac.cursor_pixel(cx, cy) {
+                    crate::verite::ramdac::CursorPixel::Transparent => continue,
+                    crate::verite::ramdac::CursorPixel::Colour(n) => dac.cursor_colour(n),
+                    crate::verite::ramdac::CursorPixel::Invert => (!canvas[i], !canvas[i + 1], !canvas[i + 2]),
+                };
+                canvas[i..i + 3].copy_from_slice(&[rgb.0, rgb.1, rgb.2]);
+            }
+        }
         // An S3's hardware cursor over the row.
         if let Some(cursor) = bus.vga.s3.cursor().filter(|_| bus.vga.adapter.is_s3() && scale == 1) {
             let y = fy as u32;

@@ -244,6 +244,12 @@ impl CrtTiming {
         status
     }
 
+    /// Where the beam is at time `t_ns`: the scanline, and how far into it.
+    pub fn position(&self, t_ns: u64) -> (u32, u64) {
+        let pos = t_ns % self.frame_ns();
+        ((pos / self.line_ns as u64) as u32, pos % self.line_ns as u64)
+    }
+
     fn in_retrace(&self, line: u32) -> bool {
         // A retrace may run past the last line into the next frame.
         (line + self.total - self.retrace_start) % self.total
