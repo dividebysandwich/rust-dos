@@ -61,6 +61,19 @@ pub struct LogLine {
 }
 
 impl Shared {
+    fn new(start_time: Instant) -> Self {
+        Self {
+            frame: Mutex::new(video::Frame::new(video::SCREEN_WIDTH, video::SCREEN_HEIGHT)),
+            frame_seq: AtomicU64::new(0),
+            screen_subscribers: AtomicUsize::new(0),
+            events: broadcast::channel(1024).0,
+            trace: broadcast::channel(64).0,
+            audio: broadcast::channel(256).0,
+            log: Mutex::new(VecDeque::with_capacity(LOG_RING_CAPACITY)),
+            start_time,
+        }
+    }
+
     fn emit(&self, v: Value) {
         if self.events.receiver_count() > 0 {
             let _ = self.events.send(Arc::from(v.to_string()));
@@ -658,24 +671,16 @@ impl DebugHub {
 
     /// Start the server thread and install the log/audio hooks on the bus.
     pub fn start(cpu: &mut Cpu, addr: SocketAddr, trace_capacity: usize) -> Result<Self, String> {
+        let shared = Arc::new(Shared::new(cpu.bus.start_time));
+        let (tx, rx) = mpsc::channel();
+        // With port 0 in `addr`, this is the free port the system picked.
+        let addr = server::spawn(addr, tx, shared.clone())?;
         if !addr.ip().is_loopback() {
             eprintln!(
                 "[DEBUG] WARNING: debug server bound to non-loopback address {}. It has no authentication!",
                 addr
             );
         }
-        let shared = Arc::new(Shared {
-            frame: Mutex::new(video::Frame::new(video::SCREEN_WIDTH, video::SCREEN_HEIGHT)),
-            frame_seq: AtomicU64::new(0),
-            screen_subscribers: AtomicUsize::new(0),
-            events: broadcast::channel(1024).0,
-            trace: broadcast::channel(64).0,
-            audio: broadcast::channel(256).0,
-            log: Mutex::new(VecDeque::with_capacity(LOG_RING_CAPACITY)),
-            start_time: cpu.bus.start_time,
-        });
-        let (tx, rx) = mpsc::channel();
-        server::spawn(addr, tx, shared.clone())?;
 
         let log_shared = shared.clone();
         cpu.bus.log_hook = Some(Box::new(move |line: &str| {

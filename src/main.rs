@@ -101,7 +101,8 @@ struct Args {
     no_boot: bool,
 
     /// Start the HTTP/WebSocket debug server (local-only, unauthenticated).
-    /// Optionally takes the listen address.
+    /// Optionally takes the listen address. With port 0 the system picks a
+    /// free port, and the "Debug server listening on" line gives it.
     #[arg(long, value_name = "ADDR", num_args = 0..=1, default_missing_value = "127.0.0.1:8086")]
     debug_server: Option<std::net::SocketAddr>,
 

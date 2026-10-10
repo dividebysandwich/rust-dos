@@ -2198,7 +2198,7 @@ that run; the settings window saves only what you change in it. `rust-dos
 | `--core auto\|dynamic\|normal` | What runs the instructions (`core`) |
 | `--game NAME` | Launch a [game profile](#game-profiles) at startup, by its file name or its name |
 | `--import PATH` | Import a game set up for DOSBox as a game profile, and launch it |
-| `--debug-server [ADDR]` | Start the [debug server](README.md#debug--remote-control-server) (default `127.0.0.1:8086`) |
+| `--debug-server [ADDR]` | Start the [debug server](README.md#debug--remote-control-server) (default `127.0.0.1:8086`; port 0 takes a free port, printed on stdout) |
 | `--trace-capacity N` | Entries in the debug server's instruction trace (default 1,000,000) |
 | `--deterministic` | Run on emulated time alone, so that the same input gives the same run every time: a fixed speed, a clock that starts at `--start-time`, and the debug server's input delivered at emulated times. With `--debug-server` the machine starts paused (see [docs/llm-debugging.md](docs/llm-debugging.md#deterministic-runs)) |
 | `--start-time "YYYY-MM-DD HH:MM:SS"` | The date and time the clock starts at with `--deterministic` (default 1995-04-11 12:34:56) |
