@@ -478,6 +478,8 @@ pub struct DebugHub {
     ui_pointer: (i32, i32),
     /// Ctrl+F12 came in: open or close the settings window.
     hotkey: bool,
+    /// reboot_shell closed the program: the front end releases its part.
+    closed_program: bool,
     /// Save states to save or load, for the front end.
     state_requests: Vec<StateRequest>,
     speed_requests: Vec<SpeedRequest>,
@@ -561,6 +563,7 @@ impl DebugHub {
             ui_input: Vec::new(),
             ui_pointer: (0, 0),
             hotkey: false,
+            closed_program: false,
             state_requests: Vec::new(),
             speed_requests: Vec::new(),
             remote_mods: 0,
@@ -1084,6 +1087,13 @@ impl DebugHub {
         std::mem::take(&mut self.hotkey)
     }
 
+    /// Whether reboot_shell closed the program since the last call. The
+    /// front end then stops its pad mapper, autoinput and game, as the
+    /// settings window's close does.
+    pub fn take_closed_program(&mut self) -> bool {
+        std::mem::take(&mut self.closed_program)
+    }
+
     /// The save states remote clients asked to save or load.
     pub fn take_state_requests(&mut self) -> Vec<StateRequest> {
         std::mem::take(&mut self.state_requests)
@@ -1271,8 +1281,10 @@ impl DebugHub {
             Cmd::RebootShell => {
                 // As the settings window's close does: the batch file and
                 // commands queued go too, or their next line (often EXIT)
-                // would run.
+                // would run. The front end does the rest (take_closed_program).
+                self.release_keys(cpu);
                 cpu.close_program();
+                self.closed_program = true;
                 self.resume();
                 Reply::Json(json!({"ok": true}))
             }
@@ -2197,6 +2209,21 @@ mod tests {
         hub.handle(&mut cpu, Request { cmd: Cmd::RebootShell, reply });
         assert!(matches!(rx.try_recv(), Ok(Reply::Json(_))));
         assert_eq!(cpu.state, CpuState::RebootShell);
+        assert!(hub.take_closed_program(), "the front end releases its part");
+        // Run the shell's reload and what would come after it: without the
+        // fix, the batch's EXIT runs and asks to turn the machine off.
+        let mut reloaded = false;
+        for _ in 0..200 {
+            let end = cpu.bus.clock.icount + 1000;
+            cpu.bus.start_batch(end);
+            match crate::exec::run_batch(&mut cpu, &mut crate::exec::NoHook, false) {
+                crate::exec::StopReason::ShellReloaded => reloaded = true,
+                crate::exec::StopReason::Exit => panic!("EXIT ran after the reload"),
+                _ => {}
+            }
+        }
+        assert!(reloaded, "the shell reloads");
+        assert!(!cpu.bus.exit_requested);
         assert!(!cpu.batch.is_active(), "EXIT must not run after the reload");
     }
 

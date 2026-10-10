@@ -1306,6 +1306,9 @@ fn main() -> Result<(), String> {
         if dbg.take_hotkey() {
             toggle_ui!();
         }
+        if dbg.take_closed_program() {
+            host!().release_program();
+        }
         for request in dbg.take_state_requests() {
             let path = request.path.clone();
             if request.load {
@@ -2331,6 +2334,26 @@ impl MainHost<'_, '_> {
         config::save(&path, &before, &self.saved.settings, &[], home.as_deref(), config::Saving::Changes)
     }
 
+    /// The front end's part of closing the program: the pad mapper and
+    /// autoinput stop, the game ends and every key comes up. The settings
+    /// window's close and the debug server's reboot_shell both do this.
+    fn release_program(&mut self) {
+        if let Some(mut mapper) = self.padmap.take() {
+            mapper.release(&mut self.cpu.bus);
+        }
+        if let Some(mut input) = self.autoinput.take() {
+            input.stop(self.cpu);
+        }
+        if std::mem::take(self.autoinput_fast) {
+            self.pacer.set_fast_forward(false, &self.cpu.bus.clock, std::time::Instant::now());
+            self.cpu.bus.mixer.fast_forward = false;
+        }
+        if let Some(previous) = self.game.take() {
+            self.end_game(previous);
+        }
+        keyboard::release_all(&mut self.cpu.bus);
+    }
+
     fn end_game(&mut self, game: ActiveGame) {
         self.cpu.bus.log_string(&format!("[CONFIG] The game {} has ended", game.name));
         self.achievements.game_ended();
@@ -2531,20 +2554,7 @@ impl Host for MainHost<'_, '_> {
     }
 
     fn close_program(&mut self) {
-        if let Some(mut mapper) = self.padmap.take() {
-            mapper.release(&mut self.cpu.bus);
-        }
-        if let Some(mut input) = self.autoinput.take() {
-            input.stop(self.cpu);
-        }
-        if std::mem::take(self.autoinput_fast) {
-            self.pacer.set_fast_forward(false, &self.cpu.bus.clock, std::time::Instant::now());
-            self.cpu.bus.mixer.fast_forward = false;
-        }
-        if let Some(previous) = self.game.take() {
-            self.end_game(previous);
-        }
-        keyboard::release_all(&mut self.cpu.bus);
+        self.release_program();
         self.cpu.close_program();
         self.cpu.load_shell();
     }
