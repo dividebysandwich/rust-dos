@@ -1548,7 +1548,7 @@ impl DebugHub {
                 if self.run_wait.as_ref().is_some_and(|r| !r.reply.is_closed()) {
                     Reply::Error(409, "a run command is already waiting for its program".into())
                 } else if !at_idle_prompt(cpu) {
-                    Reply::Error(409, "a program is running: run starts one from the DOS prompt".into())
+                    Reply::Error(409, "the DOS prompt is busy with a program, a batch file, PAUSE, CHOICE or EDIT".into())
                 } else if command.trim().is_empty() || command.contains(['\r', '\n']) {
                     Reply::bad("command: one command line")
                 } else {
@@ -2252,6 +2252,19 @@ impl crate::exec::ExecHook for DebugHub {
     fn before_exec(&mut self, cpu: &Cpu, phys_ip: usize, ram: &[u8]) -> bool {
         self.check_before_exec(cpu, phys_ip, ram)
     }
+
+    /// A program that ended stops the machine before the shell goes on to
+    /// the next line of its batch file (another program, or EXIT).
+    fn before_shell(&mut self, cpu: &Cpu) -> bool {
+        if cpu.programs.ended != self.seen_ends {
+            self.seen_ends = cpu.programs.ended;
+            if self.break_program_exit {
+                self.enter_pause(PauseReason::ProgramExit);
+                return true;
+            }
+        }
+        false
+    }
 }
 
 /// `/api/printer`: the printer on LPT1, what it printed and where it
@@ -2483,6 +2496,19 @@ mod tests {
         ask(&mut cpu, &mut hub, Cmd::Resume { until: None }, 0).unwrap();
         let stop = ask(&mut cpu, &mut hub, Cmd::WaitPause, 50).unwrap();
         assert_eq!(stop["exit"]["aborted"], false);
+    }
+
+    #[test]
+    fn a_batch_file_s_program_stops_at_its_end_before_the_next_line() {
+        let (mut cpu, mut hub) = machine("batch");
+        ask(&mut cpu, &mut hub, break_on(None, Some(true)), 0).unwrap();
+        // The shell runs the next line right after the first program ends,
+        // with no instruction of the machine's in between.
+        cpu.queue_batch_lines(["PROBE.COM", "CRASH.COM"]);
+        let stop = ask(&mut cpu, &mut hub, Cmd::WaitPause, 50).unwrap();
+        assert_eq!(stop["reason"], "program_exit");
+        assert_eq!(stop["exit"]["name"], "PROBE.COM");
+        assert!(cpu.shell_idle() && cpu.program.is_empty(), "back at the prompt, CRASH.COM not started");
     }
 
     #[test]
