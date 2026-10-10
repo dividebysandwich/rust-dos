@@ -503,6 +503,7 @@ async fn speed(State(s): State<AppState>, body: Bytes) -> ApiResult {
 struct ControlBody {
     count: Option<u64>,
     until: Option<String>,
+    until_ms: Option<u64>,
     timeout_ms: Option<u64>,
     /// `run`: the command line, and whether to stop at the program's entry.
     command: Option<String>,
@@ -518,7 +519,7 @@ async fn control(State(s): State<AppState>, Path(action): Path<String>, body: By
     let timeout = b.timeout_ms.map_or(DEFAULT_TIMEOUT, Duration::from_millis);
     match action.as_str() {
         "pause" => s.call_json(Cmd::Pause, DEFAULT_TIMEOUT).await,
-        "resume" | "continue" => s.call_json(Cmd::Resume { until: b.until }, DEFAULT_TIMEOUT).await,
+        "resume" | "continue" => s.call_json(Cmd::Resume { until: b.until, until_ms: b.until_ms }, DEFAULT_TIMEOUT).await,
         "step" => s.call_json(Cmd::Step { count: b.count.unwrap_or(1) }, timeout).await,
         "step_over" => s.call_json(Cmd::StepOver, timeout).await,
         "reboot_shell" => s.call_json(Cmd::RebootShell, DEFAULT_TIMEOUT).await,
@@ -1008,6 +1009,8 @@ INPUT  (append ?wait=false to return immediately instead of after delivery)
 EXECUTION CONTROL
   POST /api/control/pause
   POST /api/control/resume   {"until":"1234:0100"}   (optional temporary breakpoint)
+                             {"until_ms":5000}       with --deterministic: pause when
+                                                     emulated time reaches 5000 ms
   POST /api/control/step     {"count":1}             returns registers after stepping
   POST /api/control/step_over                        step, but run a CALL, INT, LOOP or
                                                      REP string instruction to the next one

@@ -126,7 +126,9 @@ pub enum Cmd {
     Input { events: Vec<InputEvent>, wait: bool },
     InputClear,
     Pause,
-    Resume { until: Option<String> },
+    /// `until_ms`: pause once emulated time reaches that many
+    /// milliseconds since power-on (deterministic mode only).
+    Resume { until: Option<String>, until_ms: Option<u64> },
     Step { count: u64 },
     /// Step, but run a call, interrupt, loop or repeated string instruction
     /// through to the instruction after it.
@@ -441,6 +443,10 @@ enum PauseReason {
     Watchpoint,
     ProgramStart,
     ProgramExit,
+    /// Deterministic mode starts paused.
+    Startup,
+    /// A resume's `until_ms` reached.
+    Time,
 }
 
 /// Memory the debugger watches: `len` bytes at physical address `phys`,
@@ -514,6 +520,13 @@ pub struct DebugHub {
 
     input: VecDeque<LowInput>,
     input_wait_until: Option<Instant>,
+    /// In deterministic mode: the date and time the clock started at.
+    /// Input is then delivered by `feed_input` at emulated times, and its
+    /// waits end in emulated time (`input_wait_ns`).
+    pub deterministic: Option<chrono::NaiveDateTime>,
+    input_wait_ns: Option<u64>,
+    /// Pause once emulated time reaches this (`until_ms`).
+    stop_at_ns: Option<u64>,
     key_stall_frames: u32,
     /// While the settings window is open, remote input goes to it
     /// (`take_ui_input`) instead of to the machine.
@@ -609,6 +622,9 @@ impl DebugHub {
             batch_t_us: 0,
             input: VecDeque::new(),
             input_wait_until: None,
+            deterministic: None,
+            input_wait_ns: None,
+            stop_at_ns: None,
             key_stall_frames: 0,
             divert: false,
             ui_input: Vec::new(),
@@ -687,7 +703,9 @@ impl DebugHub {
         }
         self.rx = Some(rx);
 
-        self.process_input(cpu);
+        if self.deterministic.is_none() {
+            self.process_input(cpu);
+        }
         self.check_run(cpu);
 
         let mode = (cpu.bus.video_mode, video::frame_size(&cpu.bus));
@@ -850,6 +868,8 @@ impl DebugHub {
                 PauseReason::Watchpoint => "watchpoint",
                 PauseReason::ProgramStart => "program_start",
                 PauseReason::ProgramExit => "program_exit",
+                PauseReason::Startup => "startup",
+                PauseReason::Time => "time",
             };
             let mut reply = json!({"paused": true, "reason": reason_str, "icount": cpu.executed, "registers": regs});
             match reason {
@@ -1098,15 +1118,45 @@ impl DebugHub {
         }
     }
 
+    /// Deterministic mode with a client: the machine waits for it before
+    /// running anything.
+    pub fn pause_at_start(&mut self) {
+        self.enter_pause(PauseReason::Startup);
+    }
+
+    /// Pause if emulated time reached a resume's `until_ms`. The
+    /// deterministic front end asks at every emulated millisecond.
+    pub fn time_stop(&mut self, cpu: &Cpu) -> bool {
+        if self.stop_at_ns.is_some_and(|at| cpu.bus.clock.now_ns() >= at) {
+            self.stop_at_ns = None;
+            self.enter_pause(PauseReason::Time);
+            return true;
+        }
+        false
+    }
+
+    /// Deliver queued input, in deterministic mode: the front end calls
+    /// this at fixed points in emulated time.
+    pub fn feed_input(&mut self, cpu: &mut Cpu) {
+        self.process_input(cpu);
+    }
+
     // ----- input ------------------------------------------------------------
 
     fn process_input(&mut self, cpu: &mut Cpu) {
         let now = Instant::now();
+        let now_ns = cpu.bus.clock.now_ns();
         if let Some(t) = self.input_wait_until {
             if now < t {
                 return;
             }
             self.input_wait_until = None;
+        }
+        if let Some(t) = self.input_wait_ns {
+            if now_ns < t {
+                return;
+            }
+            self.input_wait_ns = None;
         }
         while let Some(ev) = self.input.front() {
             match ev {
@@ -1126,6 +1176,11 @@ impl DebugHub {
                         _ => unreachable!(),
                     }
                     // One scan code per frame.
+                    return;
+                }
+                LowInput::Wait(d) if self.deterministic.is_some() => {
+                    self.input_wait_ns = Some(now_ns + d.as_nanos() as u64);
+                    self.input.pop_front();
                     return;
                 }
                 LowInput::Wait(d) => {
@@ -1328,6 +1383,13 @@ impl DebugHub {
                     Reply::Json(json!({"count": picked.len(), "accesses": picked}))
                 }
             },
+            // Input that came while the machine runs would arrive at
+            // whatever emulated time the host got to.
+            Cmd::Input { .. } if self.deterministic.is_some() && !self.paused => Reply::Error(
+                409,
+                "deterministic mode takes input only while the machine is paused: pause it,                  or resume with until_ms, then send the input"
+                    .into(),
+            ),
             Cmd::Input { events, wait } => {
                 let mut low = Vec::new();
                 for ev in &events {
@@ -1350,6 +1412,7 @@ impl DebugHub {
                     }
                 }
                 self.input_wait_until = None;
+                self.input_wait_ns = None;
                 Reply::Json(json!({"ok": true}))
             }
             Cmd::Pause => {
@@ -1364,7 +1427,14 @@ impl DebugHub {
                     return;
                 }
             }
-            Cmd::Resume { until } => {
+            Cmd::Resume { until_ms: Some(_), .. } if self.deterministic.is_none() => {
+                Reply::bad("until_ms needs deterministic mode (--deterministic)")
+            }
+            Cmd::Resume { until_ms: Some(ms), .. } if ms.saturating_mul(1_000_000) <= cpu.bus.clock.now_ns() => {
+                Reply::bad(format!("until_ms {} has passed: emulated time is {} ms", ms, cpu.bus.clock.now_ns() / 1_000_000))
+            }
+            Cmd::Resume { until, until_ms } => {
+                self.stop_at_ns = until_ms.map(|ms| ms * 1_000_000);
                 if let Some(a) = until {
                     match parse_addr(cpu, &a).and_then(breakpoint_phys) {
                         Ok(phys) => self.temp_breakpoint = Some(phys),
@@ -1687,6 +1757,16 @@ impl DebugHub {
             "uptime_ms": cpu.bus.start_time.elapsed().as_millis() as u64,
             "fps": (self.fps * 10.0).round() / 10.0,
             "cycles_per_ms": cpu.bus.clock.cycles_per_ms(),
+            // Deterministic mode: the clock's start, the machine's clock
+            // now, emulated time, and every how many emulated ms input is
+            // delivered. Null when off.
+            "deterministic": self.deterministic.map(|start| json!({
+                "start_time": start.format("%Y-%m-%d %H:%M:%S").to_string(),
+                "clock": cpu.bus.cmos.now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                "emulated_ms": cpu.bus.clock.now_ns() / 1_000_000,
+                "input_tick_ms": rust_dos::deterministic::TICK_MS,
+                "until_ms": self.stop_at_ns.map(|ns| ns / 1_000_000),
+            })),
             // What `cycles=auto` goes by, counted since start: emulated
             // time, the frames the program drew (at most one a retrace),
             // its bursts of writes to video memory the size of a frame and
@@ -2447,7 +2527,8 @@ fn net_json(cpu: &Cpu) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cmd, DebugHub, LowInput, Reply, Request, TraceQuery, keys_for_char, step_over_len};
+    use super::{Cmd, DebugHub, InputEvent, LowInput, Reply, Request, TraceQuery, keys_for_char, step_over_len};
+    use rust_dos::deterministic::Deterministic;
     use crate::cpu::Cpu;
     use crate::exec::{self, StopReason};
     use rust_dos::keylayout::Layout;
@@ -2657,7 +2738,7 @@ mod tests {
         let (mut cpu, mut hub) = machine("exit");
         ask(&mut cpu, &mut hub, break_on(None, Some(true)), 0).unwrap();
         ask(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true }, 50).unwrap();
-        ask(&mut cpu, &mut hub, Cmd::Resume { until: None }, 0).unwrap();
+        ask(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }, 0).unwrap();
         let stop = ask(&mut cpu, &mut hub, Cmd::WaitPause, 50).unwrap();
         assert_eq!(stop["reason"], "program_exit");
         assert!(hub.paused);
@@ -2669,15 +2750,15 @@ mod tests {
         let (mut cpu, mut hub) = machine("abort");
         ask(&mut cpu, &mut hub, break_on(None, Some(true)), 0).unwrap();
         ask(&mut cpu, &mut hub, Cmd::Run { command: "CRASH.COM".into(), stop_at_entry: true }, 50).unwrap();
-        ask(&mut cpu, &mut hub, Cmd::Resume { until: None }, 0).unwrap();
+        ask(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }, 0).unwrap();
         let stop = ask(&mut cpu, &mut hub, Cmd::WaitPause, 50).unwrap();
         assert_eq!(stop["reason"], "program_exit");
         assert_eq!(stop["exit"], serde_json::json!({"name": "CRASH.COM", "code": null, "resident": false, "aborted": true}));
         // The next program's own exit is told apart again.
-        ask(&mut cpu, &mut hub, Cmd::Resume { until: None }, 0).unwrap();
+        ask(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }, 0).unwrap();
         run(&mut cpu, &mut hub, 20);
         ask(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true }, 50).unwrap();
-        ask(&mut cpu, &mut hub, Cmd::Resume { until: None }, 0).unwrap();
+        ask(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }, 0).unwrap();
         let stop = ask(&mut cpu, &mut hub, Cmd::WaitPause, 50).unwrap();
         assert_eq!(stop["exit"]["aborted"], false);
     }
@@ -2778,6 +2859,86 @@ mod tests {
         assert_eq!(step_over_len(&[0xA4], false), None);
         assert_eq!(step_over_len(&[0xFE, 0x38, 0x21], false), None);
         assert_eq!(step_over_len(&[0xFE, 0x39, 0x08], false), None);
+    }
+
+    /// A machine at the prompt in deterministic mode, paused at the start
+    /// as the front end has it, with PROBE.COM on C:.
+    fn deterministic_machine(name: &str) -> (Cpu, DebugHub, Deterministic) {
+        let mode = Deterministic::new(rust_dos::deterministic::default_start());
+        let dir = std::env::temp_dir().join(format!("rust-dos-det-{}-{}", name, std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let code: Vec<u8> = (0..PROBE.len()).step_by(2).map(|i| u8::from_str_radix(&PROBE[i..i + 2], 16).unwrap()).collect();
+        std::fs::write(dir.join("PROBE.COM"), code).unwrap();
+        let mut cpu = Cpu::new(dir);
+        cpu.bus.set_cycles_per_ms(3000);
+        cpu.load_shell();
+        let mut hub = DebugHub::new(Some(std::sync::mpsc::channel().1), None, 1000);
+        hub.deterministic = Some(mode.start);
+        hub.pause_at_start();
+        (cpu, hub, mode)
+    }
+
+    /// Run `frames` host frames of about `frame_ms` emulated milliseconds,
+    /// as the main loop does in deterministic mode.
+    fn run_deterministic(cpu: &mut Cpu, hub: &mut DebugHub, mode: &mut Deterministic, frames: usize, frame_ms: u64) {
+        for _ in 0..frames {
+            hub.poll(cpu);
+            if hub.paused {
+                continue;
+            }
+            let hot = hub.begin_batch(cpu);
+            let target = cpu.bus.clock.icount_at_ns(cpu.bus.clock.now_ns() + frame_ms * 1_000_000);
+            let end = mode.frame_end(cpu, target);
+            while cpu.bus.clock.icount < end && !hub.paused && !hub.time_stop(cpu) {
+                let (reason, reached) = mode.step(cpu, hub, hot, end);
+                if reached.is_some_and(|b| b.tick) {
+                    hub.feed_input(cpu);
+                }
+                if matches!(reason, StopReason::Paused | StopReason::Exit) {
+                    break;
+                }
+            }
+            hub.end_batch(cpu);
+        }
+    }
+
+    fn typed(text: &str) -> Cmd {
+        Cmd::Input { events: vec![InputEvent::Type { text: text.into(), delay_ms: None }], wait: false }
+    }
+
+    /// Type PROBE at the prompt and run to 2 s of emulated time, in host
+    /// frames of `frame_ms`: the instructions executed, and memory.
+    fn typed_run(name: &str, frame_ms: u64) -> (u64, Vec<u8>) {
+        let (mut cpu, mut hub, mut mode) = deterministic_machine(name);
+        reply(&mut cpu, &mut hub, typed("PROBE\n")).unwrap();
+        let resumed = reply(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: Some(2000) }).unwrap();
+        assert_eq!(resumed["paused"], false);
+        run_deterministic(&mut cpu, &mut hub, &mut mode, 1000, frame_ms);
+        assert!(hub.paused, "stopped at until_ms");
+        assert_eq!(cpu.bus.clock.now_ns() / 1_000_000, 2000);
+        assert_eq!(cpu.programs.started, 1, "PROBE ran");
+        (cpu.executed, cpu.bus.ram().to_vec())
+    }
+
+    #[test]
+    fn deterministic_input_gives_the_same_run_whatever_the_frames() {
+        let a = typed_run("a", 16);
+        let b = typed_run("b", 41);
+        assert_eq!(a.0, b.0);
+        assert!(a.1 == b.1, "the same memory");
+    }
+
+    #[test]
+    fn deterministic_mode_takes_input_only_while_paused() {
+        let (mut cpu, mut hub, _mode) = deterministic_machine("refuse");
+        assert!(reply(&mut cpu, &mut hub, typed("x")).is_ok(), "paused at the start");
+        reply(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }).unwrap();
+        assert_eq!(reply(&mut cpu, &mut hub, typed("x")).unwrap_err().0, 409);
+        let passed = reply(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: Some(0) }).unwrap_err();
+        assert_eq!(passed.0, 400, "a time that has passed");
+        let (mut cpu, mut hub) = (Cpu::new(".".into()), DebugHub::disabled());
+        let refused = reply(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: Some(5) }).unwrap_err();
+        assert_eq!(refused.0, 400, "until_ms needs deterministic mode");
     }
 }
 

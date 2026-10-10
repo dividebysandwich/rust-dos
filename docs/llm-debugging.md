@@ -309,6 +309,51 @@ hardware settings it applies first. The files and disk images on the host
 aren't part of a state: what a program wrote since stays written, except
 for a booted system's disks (next section).
 
+### Deterministic runs
+
+`--deterministic` makes two runs of the same program with the same input
+come out the same: the same instructions, memory and pictures at the same
+emulated time, however fast the host is.
+
+```sh
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+  ./target/release/rust-dos --no-config -d /path/to/game --debug-server \
+  --deterministic --cycles 10000 --start-time "1995-04-11 12:34:56" &
+curl -s $J -XPOST -d '{"until_ms":5000}' $H/api/control/resume
+curl -s "$H/api/control/wait?timeout_ms=600000"      # "reason":"time"
+curl -s $J -XPOST -d '{"key":"enter"}' "$H/api/input/key?wait=false"
+curl -s $J -XPOST -d '{"until_ms":8000}' $H/api/control/resume
+```
+
+- **Speed:** a fixed number of cycles. `--cycles` has to be a number;
+  `auto` or `max` from the configuration, a game's profile or the
+  settings window become 3000 or the speed the machine has, and
+  `/api/speed` takes only a number.
+- **Clock:** the real-time clock, DOS's date and time, file times and the
+  BIOS tick count start at `--start-time` (default 1995-04-11 12:34:56)
+  and run with emulated time.
+- **Starts paused:** with the debug server the machine starts paused
+  (`"reason":"startup"`), so the input can be sent before anything runs.
+- **Input:** input is taken only while the machine is paused (HTTP 409
+  otherwise). It is delivered at fixed points in emulated time, every 10
+  ms, from the time the machine resumes: one scan code per point, and
+  `wait` and `hold_ms` count emulated milliseconds. Send it with
+  `?wait=false`, as the reply waits for its delivery.
+- **Stopping at a time:** `resume {"until_ms":N}` pauses when emulated time
+  reaches N ms since power-on, with `"reason":"time"`. Compare runs there:
+  `/api/status` has `icount` and `activity.emulated_ns`, and
+  `deterministic` (null when off) has the start time, the clock now and
+  `emulated_ms`.
+- **Stops are part of the script:** breakpoints, steps and `until_ms`
+  stop at the same instruction on every run, so the same stops give the
+  same run. `POST /api/control/pause` stops wherever the host's frame got
+  to, and the machine can go on slightly differently from there.
+- **What it leaves out:** pictures from `/api/screenshot` have no
+  on-screen messages, which come and go with the host's time, and host
+  game controllers aren't connected. Input from the window's keyboard and
+  mouse, network and serial links, and the end of a game launched from
+  its profile still follow the host.
+
 ### Booted systems (Windows 95)
 
 `IMGMOUNT C /abs/copy.img` then `BOOT -l C` starts the system on the
