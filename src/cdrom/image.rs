@@ -643,4 +643,22 @@ mod tests {
         assert!(!CdImage::probe(&MemoryImage::new(40 * 2048)));
         assert!(CdImage::from_memory("junk.iso", MemoryImage::new(40 * 2048)).is_err());
     }
+
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn a_sheet_at_the_root_of_an_overlaid_drive() {
+        use crate::overlay::{Folder, Overlay};
+        let dir = scratch("overlaid");
+        fs::create_dir_all(dir.join("lower")).unwrap();
+        fs::write(dir.join("lower/game.bin"), sectors(5, 4)).unwrap();
+        fs::write(dir.join("lower/game.cue"), "FILE \"game.bin\" BINARY\n TRACK 01 MODE1/2352\n  INDEX 01 00:00:00\n")
+            .unwrap();
+        let overlay = Overlay::new(Box::new(Folder(dir.join("lower"))), Some(dir.join("upper"))).unwrap();
+        let layer = hostfs::add_layer(std::sync::Arc::new(overlay));
+        let image = CdImage::open(&layer.root().join("game.cue")).unwrap();
+        assert_eq!(image.leadout(), 5);
+        let mut data = [0u8; DATA_SECTOR];
+        image.read_data(2, &mut data).unwrap();
+        assert!(data.iter().all(|&b| b == 4));
+    }
 }
