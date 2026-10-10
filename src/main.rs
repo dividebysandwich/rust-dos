@@ -368,7 +368,7 @@ fn main() -> Result<(), String> {
     text_input.stop();
     let host_clipboard = video_subsystem.clipboard();
 
-    let mut cpu = create_cpu(&args, &config, memory_mb);
+    let mut cpu = create_cpu(&args, &config, memory_mb)?;
     apply_keyboard_layout(&mut cpu, settings.keyboard_layout);
     for warning in rust_dos::hardware::configure(&mut cpu, &settings, sdl_keys::detect_layout()) {
         config_warning(&mut cpu, &warning);
@@ -2890,7 +2890,7 @@ fn load_config(args: &Args) -> Result<config::Config, String> {
 /// Build the CPU with drive C: from `-d`, the config file or the working
 /// directory (in that order), then mount the config's other drives. Opens
 /// the log file.
-fn create_cpu(args: &Args, config: &config::Config, memory_mb: usize) -> Cpu {
+fn create_cpu(args: &Args, config: &config::Config, memory_mb: usize) -> Result<Cpu, String> {
     use crate::disk::DRIVE_C;
 
     let mut warnings = config.warnings.clone();
@@ -2922,7 +2922,7 @@ fn create_cpu(args: &Args, config: &config::Config, memory_mb: usize) -> Cpu {
     };
 
     let mut cpu = Cpu::with_memory(root_path.clone(), memory_mb);
-    cpu.bus.log_file = open_log_file(args.log.clone());
+    cpu.bus.log_file = open_log_file(args.log.as_deref())?;
     cpu.shell_history.set_home(rust_dos::cmdline::default_history_file());
     rust_dos::cmdline::configure(&mut cpu, &config.shell);
     if let Some(spec) = c_spec {
@@ -2946,19 +2946,29 @@ fn create_cpu(args: &Args, config: &config::Config, memory_mb: usize) -> Cpu {
     for warning in &warnings {
         cpu.bus.log_string(&format!("[CONFIG] Warning: {}", warning));
     }
-    cpu
+    Ok(cpu)
 }
 
 /// Create the log file at `path` (`--log`), or in rust-dos's own directory
-/// (`config::user_dir`), replacing the previous run's. The emulator runs
-/// without one if that fails.
-fn open_log_file(path: Option<std::path::PathBuf>) -> Option<rust_dos::log::LogFile> {
-    let path = path.or_else(rust_dos::log::default_path)?;
+/// (`config::user_dir`), replacing the previous run's. Without `--log` the
+/// emulator runs without a log file if it cannot create one. A `--log` file
+/// that cannot be created stops it, as a missing `--config` file does: a
+/// harness that asked for the log at that path would otherwise find none
+/// there, with only a warning on stderr to say why.
+fn open_log_file(path: Option<&std::path::Path>) -> Result<Option<rust_dos::log::LogFile>, String> {
+    if let Some(path) = path {
+        return rust_dos::log::LogFile::create(path)
+            .map(Some)
+            .map_err(|e| format!("cannot create the log file {} (--log): {}", path.display(), e));
+    }
+    let Some(path) = rust_dos::log::default_path() else {
+        return Ok(None);
+    };
     match rust_dos::log::LogFile::create(&path) {
-        Ok(log) => Some(log),
+        Ok(log) => Ok(Some(log)),
         Err(e) => {
             eprintln!("Warning: cannot create the log file {}: {}", path.display(), e);
-            None
+            Ok(None)
         }
     }
 }
@@ -3053,13 +3063,26 @@ mod tests {
         assert_eq!(args.log.as_deref(), Some(path.as_path()));
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "previous run\n").unwrap();
-        let mut log = open_log_file(args.log.clone()).expect("log file");
+        let mut log = open_log_file(args.log.as_deref()).unwrap().expect("log file");
         log.write_line("[DOS] this run");
-        log.flush();
+        // Dropping the log flushes and closes the file, so the directory
+        // can be removed on Windows.
+        drop(log);
         let text = std::fs::read_to_string(&path).unwrap();
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
         assert!(text.starts_with("rust-dos "), "{text}");
         assert!(text.ends_with("[DOS] this run\n"), "{text}");
         assert!(!text.contains("previous run"), "{text}");
+    }
+
+    #[test]
+    fn a_log_file_that_cannot_be_created_is_an_error() {
+        // A directory where the file should be.
+        let path = std::env::temp_dir().join(format!("rust-dos-log-option-dir-{}", std::process::id()));
+        std::fs::create_dir_all(&path).unwrap();
+        let result = open_log_file(Some(&path));
+        std::fs::remove_dir_all(&path).unwrap();
+        let error = result.err().expect("an error");
+        assert!(error.contains("--log"), "{error}");
     }
 }
