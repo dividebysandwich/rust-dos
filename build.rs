@@ -1,5 +1,5 @@
 //! Sets the configuration flags of the target: the dynamic recompiler's
-//! hosts and OpenXR's.
+//! hosts and OpenXR's, and links in the Windows program's icon.
 
 fn main() {
     // The hosts the dynamic recompiler (src/dynrec) generates code for.
@@ -19,5 +19,14 @@ fn main() {
     // unless told otherwise, and the relay would want SDL2 to start.
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         println!("cargo::rustc-link-arg-bin=rust-dos-relay=-Wl,-dead_strip_dylibs");
+    }
+    // The program's icon in rust-dos.exe, for Explorer, shortcuts and the
+    // taskbar; the window's own is set at run time (src/display.rs). Only
+    // with `sdl`, which the program needs: the libretro core has neither.
+    if os == "windows" && std::env::var_os("CARGO_FEATURE_SDL").is_some() {
+        println!("cargo::rerun-if-changed=packaging/windows/rust-dos.ico");
+        embed_resource::compile_for("packaging/windows/rust-dos.rc", ["rust-dos"], embed_resource::NONE)
+            .manifest_required()
+            .unwrap();
     }
 }

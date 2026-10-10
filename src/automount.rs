@@ -296,9 +296,10 @@ fn scan_entries(folder: &Path, entries: &[Entry]) -> Scan {
         let paths = kept.iter().map(|f| folder.join(&f.4.name)).collect();
         scan.mounts.push(Mount { drive, kind, paths, label });
     }
+    #[cfg(not(feature = "chd"))]
     for mount in &scan.mounts {
         if mount.paths.iter().any(|p| p.extension().is_some_and(|e| e.to_string_lossy().to_ascii_lowercase().starts_with("chd"))) {
-            scan.warnings.push(format!("{}: CHD images can't be read yet", letter(mount.drive)));
+            scan.warnings.push(format!("{}: this rust-dos can't read CHD images", letter(mount.drive)));
         }
     }
     scan

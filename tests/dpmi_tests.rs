@@ -996,3 +996,69 @@ fn a_client_allocates_linear_memory_at_an_address() {
     assert_eq!(dword(R + 12), 0x40_0000, "grown where it is");
     assert_eq!(dword(R + 16), 0x40_0000);
 }
+
+/// Set DAC colours 40h and 41h from a buffer the client addresses by
+/// selector (INT 10h AX=1012h, as Jazz Jackrabbit's RTM does), read them
+/// back into another (1017h), and get the 8x16 font's address (1130h),
+/// whose segment becomes a selector.
+fn video_program(bits32: bool) -> Vec<u8> {
+    const COLORS: u16 = 0x2490;
+    const READ_BACK: u16 = 0x24A0;
+    let main = asm16(0x100, |a| {
+        let mut fail = a.create_label();
+        enter(a, bits32, fail)?;
+        step(a, 4)?;
+        a.push(ds)?;
+        a.pop(es)?;
+        a.mov(ax, 0x1012)?;
+        a.mov(bx, 0x40)?;
+        a.mov(cx, 2)?;
+        a.mov(edx, COLORS as u32)?;
+        a.int(0x10)?;
+        a.mov(word_ptr(R), dx)?;
+        a.mov(ax, 0x1017)?;
+        a.mov(bx, 0x40)?;
+        a.mov(cx, 2)?;
+        a.mov(edx, READ_BACK as u32)?;
+        a.int(0x10)?;
+        step(a, 5)?;
+        a.mov(ax, 0x1130)?;
+        a.mov(bh, 6)?;
+        a.int(0x10)?;
+        a.mov(word_ptr(R + 2), es)?;
+        a.mov(word_ptr(R + 4), bp)?;
+        exit(a, 0x2A)?;
+        a.set_label(&mut fail)?;
+        exit(a, 0xEE)
+    });
+    let mut image = com(&[(0x100, main)]);
+    let at = (COLORS - 0x100) as usize;
+    image[at..at + 6].copy_from_slice(&[0x01, 0x02, 0x03, 0x3D, 0x3E, 0x3F]);
+    image
+}
+
+fn check_video(bits32: bool) {
+    let test = if bits32 { "video32" } else { "video16" };
+    let (mut cpu, psp) = machine(test, &[("T.COM", video_program(bits32))], "T.COM");
+    assert!(run_to_exit(&mut cpu, 200), "the program didn't end (step {})", word(&cpu, psp, STEP));
+    let w = |offset: u16| word(&cpu, psp, offset);
+    assert_eq!(cpu.errorlevel, 0x2A, "failed at step {}", w(STEP));
+    // The DAC had them: the shell has set its mode since.
+    let colors = [0x01, 0x02, 0x03, 0x3D, 0x3E, 0x3F];
+    let read_back = psp as usize * 16 + 0x24A0;
+    assert_eq!(cpu.bus.ram()[read_back..read_back + 6], colors);
+    assert_eq!(w(R), 0x2490);
+    // ES:BP is a selector and offset for the font.
+    assert_eq!(w(R + 2) & 7, 7);
+    assert!(!cpu.bus.dpmi.active());
+}
+
+#[test]
+fn a_16_bit_client_calls_the_video_bios_with_selectors() {
+    check_video(false);
+}
+
+#[test]
+fn a_32_bit_client_calls_the_video_bios_with_selectors() {
+    check_video(true);
+}

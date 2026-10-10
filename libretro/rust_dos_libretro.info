@@ -1,12 +1,12 @@
 # Software Information
 display_name = "DOS (rust-dos)"
 authors = "dividebysandwich"
-supported_extensions = "exe|com|bat|zip|dosz|dosc|7z|conf|img|ima|vfd|flp|dsk|86f|vhd|hdd|iso|cue|ins|m3u|m3u8"
+supported_extensions = "exe|com|bat|zip|dosz|dosc|7z|conf|img|ima|vfd|flp|dsk|86f|vhd|hdd|iso|cue|ins|chd|m3u|m3u8"
 corename = "rust-dos"
 categories = "Emulator"
 license = "GPLv2+"
 permissions = ""
-display_version = "1.5.0"
+display_version = "1.6.0"
 
 # Hardware Information
 manufacturer = "IBM"

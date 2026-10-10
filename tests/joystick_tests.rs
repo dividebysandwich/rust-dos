@@ -10,19 +10,18 @@ use rust_dos::interrupts::int15;
 use rust_dos::joystick::{JoystickSettings, JoystickType, PAD_A, PAD_B, PAD_RIGHT, PAD_UP, PAD_X, PAD_Y, PadState};
 use std::path::PathBuf;
 
-/// Fire the one-shots, then count the reads until each axis bit goes low,
-/// as games do: A x, A y, B x, B y, with 0 for an axis that is low from the
-/// start. Also the buttons of the first read.
+/// Fire the one-shots, then read the port until each axis bit goes low:
+/// A x, A y, B x, B y. Also return the buttons from the first sample.
 fn poll(bus: &mut Bus) -> ([u32; 4], u8) {
     bus.io_write(0x201, 0);
     let mut counts = [0u32; 4];
     let mut first = None;
-    for reads in 1..=1000 {
+    for _ in 0..1000 {
         let value = bus.io_read(0x201);
         first.get_or_insert(value);
         for (bit, count) in counts.iter_mut().enumerate() {
             if value & (1 << bit) != 0 {
-                *count = reads;
+                *count += 1;
             }
         }
     }
@@ -34,7 +33,28 @@ fn poll(bus: &mut Bus) -> ([u32; 4], u8) {
 fn bus_with(kind: JoystickType) -> Bus {
     let mut bus = Bus::new(PathBuf::from("."));
     bus.set_joystick(JoystickSettings { kind, deadzone: 0 });
+    bus.set_cycles_per_ms(100_000);
     bus
+}
+
+#[test]
+fn a_single_read_after_guest_time_sees_centered_axes_discharge() {
+    let mut bus = bus_with(JoystickType::FourAxis);
+    bus.joystick.set_pad(0, pad([0.0; 4], 0));
+    bus.io_write(0x201, 0x05);
+    assert_eq!(bus.io_read(0x201) & 0x0F, 0x0F, "axes start charged");
+
+    // A millisecond of guest execution passes without polling the game port.
+    bus.clock.icount += 100_000;
+    assert_eq!(bus.io_read(0x201) & 0x0F, 0x00, "all centred axes have tripped");
+}
+
+#[test]
+fn an_unarmed_connected_joystick_is_already_discharged() {
+    let mut bus = bus_with(JoystickType::FourAxis);
+    bus.joystick.set_pad(0, pad([0.0; 4], 0));
+
+    assert_eq!(bus.io_read(0x201) & 0x0F, 0x00, "no strobe leaves axes discharged");
 }
 
 fn pad(axes: [f32; 4], buttons: u16) -> Option<PadState> {

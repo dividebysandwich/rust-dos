@@ -482,6 +482,15 @@ top of the Sound Blaster's own mixer, which programs set.
   dry, without the effect, `100` the effect alone, and at `50` (the
   default) both play in full; below 50 the effect fades out, above it
   the dry music does.
+* `blocksize` and `prebuffer` set how much sound waits for the host's
+  sound device, and so how late it is heard: `blocksize` is the device's
+  buffer in frames, `128`, `256`, `512` (the default, about 12 ms),
+  `1024` or `2048`, and `prebuffer` the queue kept on top of it for a
+  video frame that comes late, in milliseconds: `5`, `10`, `15`, `20`
+  (the default), `25`, `30`, `40` or `50`. Smaller values bring the
+  sound sooner; if it crackles, the host can't keep up with them. Only
+  the rust-dos program has them: the libretro core and the browser leave
+  the buffering to the frontend.
 * The `MIXER` command shows the mixer and changes it at the prompt, or
   from `[autoexec]`, in DOSBox Staging's syntax:
   `MIXER [CHANNEL] COMMANDS [/NOSHOW]`. The channels are `MASTER`,
@@ -1131,7 +1140,9 @@ lists the options. Each drive keeps its own current directory, as in DOS.
 A CD image always makes a read-only CD-ROM drive, labelled with the disc's
 volume name unless `-label` says otherwise. It can be a CUE sheet (`.cue`,
 or GOG's `.ins`, with BINARY, MOTOROLA or WAVE files, any number of tracks
-and gaps) or a bare image of an ISO 9660 data track in 2048, 2336 or
+and gaps), a CD image in MAME's compressed CHD format (`.chd`, as `chdman
+createcd` makes them; its data and audio tracks, decompressed as they are
+read), or a bare image of an ISO 9660 data track in 2048, 2336 or
 2352-byte sectors (`.iso`, `.bin`, `.img`, GOG's `.gog`). Audio tracks can
 be Ogg Vorbis, FLAC or MP3 files (FILE ... MP3, OGG or FLAC, or WAVE as
 many sheets call them), and WAVE files at other rates: they are decoded to
@@ -1626,7 +1637,8 @@ card's resolution (or through the CRT shader at the window's size, with
 card's pixel counters, until a game reads them: from then on everything
 is drawn and counted (`RUST_DOS_VOODOO_PRUNE=0` in the environment draws
 everything from the start). The CRT shaders draw their scanlines over the
-bigger picture.
+bigger picture. The libretro core draws it with the frontend's OpenGL (see
+[its README](libretro/README.md#the-3dfx-voodoo-with-opengl)).
 
 ## Rendition Vérité
 

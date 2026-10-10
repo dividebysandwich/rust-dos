@@ -56,6 +56,9 @@ enum Source {
     Decoded(RefCell<super::decoded::DecodedTrack>),
     /// A disc made from a host folder, its files read from the host.
     Folder(super::folder::FolderImage, RefCell<super::folder::OpenFiles>),
+    /// The frames of a CHD file, every track's.
+    #[cfg(feature = "chd")]
+    Chd(RefCell<super::chd::ChdDisc>),
 }
 
 pub struct CdImage {
@@ -68,14 +71,16 @@ pub struct CdImage {
 const SYNC: [u8; 12] = [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00];
 
 impl CdImage {
-    /// Open a CD image: a CUE sheet, or a bare image of one data track
-    /// (.iso, .bin, .img), whose sector format is found from where the
-    /// ISO 9660 volume descriptor is.
+    /// Open a CD image: a CUE sheet, a CHD file, or a bare image of one
+    /// data track (.iso, .bin, .img), whose sector format is found from
+    /// where the ISO 9660 volume descriptor is.
     pub fn open(path: &Path) -> Result<Self, String> {
         // GOG's CUE sheets are .ins files, .inst in Steam's copies.
         let is_cue = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("cue") || e.eq_ignore_ascii_case("ins") || e.eq_ignore_ascii_case("inst"));
         if is_cue {
             Self::open_cue(path)
+        } else if is_chd(path) {
+            Self::open_chd(path)
         } else {
             Self::open_bare(path)
         }
@@ -134,9 +139,56 @@ impl CdImage {
         Self::bare(path, Backing::open(path, FileFormat::Binary)?)
     }
 
-    /// A bare image of one data track held in memory, as `open` makes of a
-    /// file with those bytes; `name` names it in messages.
+    #[cfg(feature = "chd")]
+    fn open_chd(path: &Path) -> Result<Self, String> {
+        let file = File::open(path).map_err(|e| format!("{}: {}", path.display(), e))?;
+        Self::chd(path, Box::new(file))
+    }
+
+    #[cfg(not(feature = "chd"))]
+    fn open_chd(path: &Path) -> Result<Self, String> {
+        Err(format!("{}: this rust-dos can't read CHD images", path.display()))
+    }
+
+    /// The tracks of a CHD file one after the other, each with its pregap
+    /// and postgap, as a CUE sheet would lay them out.
+    #[cfg(feature = "chd")]
+    fn chd(path: &Path, stream: Box<dyn super::chd::Stream>) -> Result<Self, String> {
+        use super::chd::{ChdDisc, FRAME};
+        let disc = ChdDisc::open(stream).map_err(|e| format!("{}: {}", path.display(), e))?;
+        let mut tracks = Vec::new();
+        let (mut next, mut frame) = (0u32, 0u64);
+        for t in disc.tracks() {
+            let start = next + t.pregap;
+            let data_start = if t.pregap_stored { next } else { start };
+            let data_end = data_start + t.frames;
+            tracks.push(Track {
+                number: t.number,
+                mode: t.mode,
+                pregap_start: next,
+                start,
+                end: data_end + t.postgap,
+                data_start,
+                data_end,
+                file: 0,
+                offset: frame * FRAME,
+            });
+            frame += t.frames.next_multiple_of(4) as u64;
+            next = data_end + t.postgap;
+        }
+        let len = disc.byte_len();
+        let backing = Backing { source: Source::Chd(RefCell::new(disc)), data_offset: 0, len, swap: true };
+        Ok(CdImage { path: path.to_path_buf(), files: vec![backing], tracks })
+    }
+
+    /// An image held in memory, as `open` makes of a file with those bytes
+    /// (a bare image of one data track, or a CHD file); `name` names it in
+    /// messages.
     pub fn from_memory(name: &str, data: MemoryImage) -> Result<Self, String> {
+        #[cfg(feature = "chd")]
+        if is_chd_memory(&data) {
+            return Self::chd(Path::new(name), Box::new(MemoryReader { data, pos: 0 }));
+        }
         let len = data.len();
         Self::bare(Path::new(name), Backing { source: Source::Memory(data), data_offset: 0, len, swap: false })
     }
@@ -153,9 +205,9 @@ impl CdImage {
         self.files.iter().any(|f| matches!(f.source, Source::Folder(..)))
     }
 
-    /// Whether `data` is a bare image of one data track.
+    /// Whether `data` is a bare image of one data track, or a CHD file.
     pub fn probe(data: &MemoryImage) -> bool {
-        Self::bare_mode(data.len(), |at, buf| data.read_at(at, buf)).is_some()
+        is_chd_memory(data) || Self::bare_mode(data.len(), |at, buf| data.read_at(at, buf)).is_some()
     }
 
     /// The sector format of a bare image of `len` bytes, found from where
@@ -220,8 +272,9 @@ impl CdImage {
             buf.fill(0);
             return Ok(());
         }
-        let at = track.offset + (lba - track.data_start) as u64 * track.mode.sector_size() + skip;
-        self.files[track.file].read_at(at, buf)
+        let file = &self.files[track.file];
+        let at = track.offset + (lba - track.data_start) as u64 * file.stride(track.mode) + skip;
+        file.read_at(at, buf)
     }
 
     /// The 2048 bytes of user data of data sector `lba`.
@@ -331,6 +384,15 @@ impl Backing {
         Err(format!("{}: this rust-dos can't play compressed audio files", path.display()))
     }
 
+    /// Bytes from one sector of a track in `mode` to the next.
+    fn stride(&self, mode: TrackMode) -> u64 {
+        match self.source {
+            #[cfg(feature = "chd")]
+            Source::Chd(_) => super::chd::FRAME,
+            _ => mode.sector_size(),
+        }
+    }
+
     /// Fill `buf` from byte `at` of the sector data; past the end of the
     /// file reads zeros.
     fn read_at(&self, at: u64, buf: &mut [u8]) -> io::Result<()> {
@@ -359,7 +421,58 @@ impl Backing {
                 disc.read_at(at, &mut buf[..n], &mut open.borrow_mut());
                 Ok(())
             }
+            #[cfg(feature = "chd")]
+            Source::Chd(disc) => disc.borrow_mut().read_at(at, &mut buf[..n]),
         }
+    }
+}
+
+/// A CHD file starts with these bytes.
+const CHD_MAGIC: &[u8; 8] = b"MComprHD";
+
+/// Whether `path` is a CHD file: named .chd, or starting as one does.
+fn is_chd(path: &Path) -> bool {
+    if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("chd")) {
+        return true;
+    }
+    let mut magic = [0u8; 8];
+    File::open(path).is_ok_and(|mut f| f.read_exact(&mut magic).is_ok()) && &magic == CHD_MAGIC
+}
+
+fn is_chd_memory(data: &MemoryImage) -> bool {
+    let mut magic = [0u8; 8];
+    data.read_at(0, &mut magic) && &magic == CHD_MAGIC
+}
+
+/// An image held in memory read as a file.
+#[cfg(feature = "chd")]
+struct MemoryReader {
+    data: MemoryImage,
+    pos: u64,
+}
+
+#[cfg(feature = "chd")]
+impl Read for MemoryReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = buf.len().min(self.data.len().saturating_sub(self.pos) as usize);
+        if !self.data.read_at(self.pos, &mut buf[..n]) {
+            return Err(io::ErrorKind::UnexpectedEof.into());
+        }
+        self.pos += n as u64;
+        Ok(n)
+    }
+}
+
+#[cfg(feature = "chd")]
+impl Seek for MemoryReader {
+    fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
+        let pos = match to {
+            SeekFrom::Start(p) => Some(p),
+            SeekFrom::End(d) => self.data.len().checked_add_signed(d),
+            SeekFrom::Current(d) => self.pos.checked_add_signed(d),
+        };
+        self.pos = pos.ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+        Ok(self.pos)
     }
 }
 

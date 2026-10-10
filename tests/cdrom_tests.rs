@@ -170,3 +170,100 @@ fn mount_takes_images_the_way_dosbox_staging_does() {
     assert_eq!(info.images.len(), 2);
     assert!(info.images[0].ends_with("DISC2.CUE"), "{:?}", info.images);
 }
+
+/// The discs the CHD files in tests/cdimage/chd were made from: an ISO
+/// image, the data and audio tracks of `mixed_disc` (the audio's pregap not
+/// in the files), and both tracks in one file with the audio's pregap in it.
+/// Returns each CHD's name with the disc it was made from.
+fn chd_sources(dir: &Path) -> Vec<(&'static str, std::path::PathBuf)> {
+    let image = iso("TESTDISC", &files(&pattern(5000)));
+    let sub = |name: &str| {
+        let d = dir.join(name);
+        fs::create_dir_all(&d).unwrap();
+        d
+    };
+    fs::write(sub("iso").join("GAME.ISO"), &image).unwrap();
+    let split = mixed_disc(&sub("split"), &image, 10);
+    // As the sheet names it, for chdman, which minds the case.
+    fs::rename(dir.join("split/Track2.bin"), dir.join("split/TRACK2.BIN")).unwrap();
+    let one = sub("pregap");
+    let data = mode1_2352(&image);
+    let sectors = (data.len() / cdimage::RAW) as u32;
+    let mut bin = data;
+    bin.extend(cdimage::audio(150 + 30));
+    fs::write(one.join("GAME.BIN"), bin).unwrap();
+    let msf = |s: u32| format!("{:02}:{:02}:{:02}", s / 75 / 60, s / 75 % 60, s % 75);
+    fs::write(
+        one.join("GAME.CUE"),
+        format!(
+            "FILE \"GAME.BIN\" BINARY\r\n  TRACK 01 MODE1/2352\r\n    INDEX 01 00:00:00\r\n  TRACK 02 AUDIO\r\n    \
+             INDEX 00 {}\r\n    INDEX 01 {}\r\n",
+            msf(sectors),
+            msf(sectors + 150)
+        ),
+    )
+    .unwrap();
+    vec![("iso", dir.join("iso/GAME.ISO")), ("split", split), ("pregap", one.join("GAME.CUE"))]
+}
+
+/// Writes the discs of `chd_sources` to target/chd_sources, from which the
+/// CHD files were made with MAME's chdman:
+/// `chdman createcd -i target/chd_sources/NAME/GAME.CUE -o tests/cdimage/chd/NAME.chd`
+/// (GAME.ISO for iso.chd).
+#[test]
+#[ignore]
+fn write_chd_sources() {
+    let dir = Path::new("target/chd_sources");
+    let _ = fs::remove_dir_all(dir);
+    chd_sources(dir);
+}
+
+#[cfg(feature = "chd")]
+#[test]
+fn chd_images_read_as_the_discs_they_were_made_from() {
+    use rust_dos::cdrom::image::CdImage;
+    use rust_dos::cdrom::{DATA_SECTOR, RAW_SECTOR};
+    use rust_dos::diskimage::MemoryImage;
+    let dir = scratch("chd");
+    for (name, source) in chd_sources(&dir) {
+        let chd_path = Path::new("tests/cdimage/chd").join(format!("{}.chd", name));
+        let chd = CdImage::open(&chd_path).unwrap();
+        let from_memory = CdImage::from_memory("GAME.CHD", MemoryImage::from(fs::read(&chd_path).unwrap())).unwrap();
+        let source = CdImage::open(&source).unwrap();
+        for image in [&chd, &from_memory] {
+            let layout = |image: &CdImage| -> Vec<_> {
+                image.tracks().iter().map(|t| (t.number, t.mode, t.pregap_start, t.start, t.end)).collect()
+            };
+            assert_eq!(layout(image), layout(&source), "{}", name);
+            assert_eq!(image.leadout(), source.leadout());
+            for lba in 0..source.leadout() {
+                let (mut a, mut b) = ([0u8; RAW_SECTOR], [0u8; RAW_SECTOR]);
+                image.read_raw(lba, &mut a).unwrap();
+                source.read_raw(lba, &mut b).unwrap();
+                assert!(a == b, "{}: sector {}", name, lba);
+                let (mut a, mut b) = (Vec::new(), Vec::new());
+                image.read_audio(lba, &mut a).unwrap();
+                source.read_audio(lba, &mut b).unwrap();
+                assert!(a == b, "{}: audio of sector {}", name, lba);
+                if !source.track_at(lba).unwrap().is_audio() {
+                    let (mut a, mut b) = ([0u8; DATA_SECTOR], [0u8; DATA_SECTOR]);
+                    image.read_data(lba, &mut a).unwrap();
+                    source.read_data(lba, &mut b).unwrap();
+                    assert!(a == b, "{}: data of sector {}", name, lba);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "chd")]
+#[test]
+fn chd_images_mount_as_cd_drives() {
+    let (mut cpu, dir) = machine("chd_mount");
+    fs::copy("tests/cdimage/chd/split.chd", dir.join("game.chd")).unwrap();
+    mount(&mut cpu, &dir.join("game.chd"));
+    check_files(&mut cpu, &pattern(5000));
+    let image = cpu.bus.disk.cd_image(D).unwrap();
+    assert_eq!(image.tracks().len(), 2);
+    assert!(image.tracks()[1].is_audio());
+}

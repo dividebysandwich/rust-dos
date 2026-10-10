@@ -18,10 +18,17 @@ required-features = ["sdl"]
 
 # The .deb (cargo-deb, in the release workflow): its dependencies are what
 # the programs link; the OpenXR loader, which rust-dos loads for VR
-# headsets (--vr), is recommended.
+# headsets (--vr), is recommended. Besides the programs and README
+# ("$auto"), the launcher entry and its icon, as in the AppImage.
 [package.metadata.deb]
 depends = "$auto"
 recommends = "libopenxr-loader1"
+assets = [
+    "$auto",
+    ["packaging/linux/rust-dos.desktop", "usr/share/applications/", "644"],
+    ["packaging/linux/rust-dos.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+    ["assets/rust-dos.png", "usr/share/icons/hicolor/128x128/apps/", "644"],
+]
 
 # The emulator, and in crates/ the parts of it that stand on their own:
 # the sound cards, and what they need (save states, DMA, ...). `cargo
@@ -35,7 +42,7 @@ default-members = ["."]
 authors = ["dividebysandwich"]
 repository = "https://github.com/dividebysandwich/rust-dos"
 license = "GPL-2.0-or-later"
-version = "1.5.0"
+version = "1.6.0"
 edition = "2024"
 
 [dependencies]
@@ -80,6 +87,8 @@ sha2 = "0.11"
 md-5 = "0.11"
 # Compressed audio tracks of CD images (Ogg Vorbis, FLAC, MP3).
 symphonia = { version = "0.6", default-features = false, features = ["ogg", "vorbis", "flac", "mp3", "wav", "pcm"], optional = true }
+# CD images in MAME's compressed CHD files (src/cdrom/chd.rs).
+chd = { version = "0.3.4", optional = true }
 # The manuals and extras of game profiles (src/manuals): JPEG pictures, and
 # PDF pages rasterized.
 jpeg-decoder = { version = "0.3", default-features = false, optional = true }
@@ -139,14 +148,17 @@ libc = "0.2"
 windows-sys = { version = "0.61", features = ["Win32_System_Memory", "Win32_System_Diagnostics_Debug", "Win32_System_Threading"] }
 
 [features]
-default = ["sdl", "gl", "vr", "midi", "hostmidi", "cdaudio", "sevenz", "manuals"]
+default = ["sdl", "gl", "vr", "midi", "hostmidi", "cdaudio", "chd", "sevenz", "manuals"]
 # The rust-dos program: its window and sound device, its debug server and
 # its connection to RetroAchievements.
 sdl = ["dep:sdl2", "dep:axum", "dep:ureq", "rust-dos-soundblaster/download", "rust-dos-sc55/download"]
 # The window drawn with OpenGL 3: the CRT shaders, and the 3dfx card at
 # higher resolutions. Without it (as on Redox), SDL's renderer draws the
 # picture, without them.
-gl = ["sdl", "dep:glow"]
+gl = ["sdl", "voodoo-gl"]
+# The 3dfx card drawn again with OpenGL (src/voodoo/gl.rs), by the window
+# and by the libretro core's hardware rendering.
+voodoo-gl = ["dep:glow"]
 # The picture on a screen in a 3D scene: in a window with a camera to fly
 # (--vr-desktop), or in a VR headset through OpenXR (--vr, on Linux and
 # Windows).
@@ -154,6 +166,8 @@ vr = ["gl", "dep:gltf", "dep:glam", "dep:openxr", "dep:ash", "dep:jpeg-decoder"]
 midi = ["rust-dos-mpu401/midi"]
 # CD audio tracks in Ogg Vorbis, FLAC or MP3 files.
 cdaudio = ["dep:symphonia"]
+# CD images in CHD files.
+chd = ["dep:chd"]
 # 7z archives mounted as drives (zip archives are always read).
 sevenz = ["dep:sevenz-rust2"]
 # JPEG pictures and PDF documents among games' manuals (PNG and GIF are
@@ -162,6 +176,10 @@ manuals = ["dep:jpeg-decoder", "dep:hayro"]
 # The MPU-401's MIDI out of the host's MIDI ports (ALSA on Linux, which
 # needs libasound2-dev to build).
 hostmidi = ["rust-dos-mpu401/hostmidi"]
+
+[build-dependencies]
+# Links the program's icon (packaging/windows/rust-dos.rc) into rust-dos.exe.
+embed-resource = "3"
 
 [dev-dependencies]
 # Writes the zip archives of the tests.

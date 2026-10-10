@@ -430,6 +430,8 @@ impl Page {
                 ReverbMix,
                 Chorus,
                 ChorusMix,
+                AudioBlocksize,
+                AudioPrebuffer,
             ],
             Page::Network => {
                 &[Online, Relay, Rooms, Player, Ipx, IpxIrq, IpxFrame, Ne2000, NicBase, NicIrq, MacAddr, Lan, LanHost, Room, Password]
@@ -653,6 +655,10 @@ enum Item {
     /// are on.
     ReverbMix,
     ChorusMix,
+    /// The sound waiting for the host's sound device: the device's buffer
+    /// and the queue on top of it.
+    AudioBlocksize,
+    AudioPrebuffer,
     /// The DAC on the parallel port.
     LptDac,
     /// The Tandy's and PCjr's sound chip.
@@ -718,6 +724,12 @@ const FPS_CAPS: [Option<u32>; 13] =
 /// The 3dfx gammas to pick from: none, then 0.1 to 2.0 in steps of 0.1.
 fn gammas() -> impl Iterator<Item = Option<f32>> {
     std::iter::once(None).chain((1..=20).map(|tenths| Some(tenths as f32 / 10.0)))
+}
+
+/// A `blocksize` with the time it plays for, and whether it is the default.
+fn describe_blocksize(frames: u16) -> String {
+    let default = if frames == crate::audio::AudioBuffer::default().blocksize { ", default" } else { "" };
+    format!("{} frames ({:.1} ms{})", frames, crate::audio::AudioBuffer::millis(frames), default)
 }
 
 fn each<T>(s: &Settings, values: impl IntoIterator<Item = T>, set: impl Fn(&mut Settings, T)) -> Vec<Settings> {
@@ -962,6 +974,8 @@ impl Item {
             Reverb => "Reverb (FM, GUS, MIDI)",
             Chorus => "Chorus (FM, GUS, MIDI)",
             ReverbMix | ChorusMix => "  Dry/wet mix",
+            AudioBlocksize => "Sound buffer",
+            AudioPrebuffer => "Sound prebuffer",
             LptDac => "Parallel port DAC",
             TandySound => "Tandy/PCjr sound",
             Autoexec => "Edit the [autoexec] commands...",
@@ -1036,6 +1050,8 @@ impl Item {
             }
             // A thread of its own packs rewind's states.
             Item::Rewind | Item::RewindMemory => frontend.window,
+            // The frontend's own sound output has its own buffers.
+            Item::AudioBlocksize | Item::AudioPrebuffer => frontend.window,
             // The browser has no sockets for a LAN.
             Item::Online | Item::Rooms | Item::Relay | Item::Player => frontend.window,
             Item::Lan | Item::LanHost | Item::Room | Item::Password => frontend.window,
@@ -1120,6 +1136,7 @@ impl Item {
             HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise | Volume(_) | CaptureDir | RecordUi
             | RecordShader => Applies::Now,
             Joystick | Deadzone | MouseSensitivity | SpeakerFilter | SbFilter | Reverb | Chorus | ReverbMix | ChorusMix => Applies::Now,
+            AudioBlocksize | AudioPrebuffer => Applies::Now,
             Rooms => Applies::Now,
             Memsize | Autoexec | Lan | LanHost => Applies::NextStart,
             VrMode | VrQuality | VrAmbientOcclusion | VrMsaa | VrScene | VrControllers | VrSpatialAudio | VrScreenFit | VrScreenGlow
@@ -1365,6 +1382,8 @@ impl Item {
             Chorus => s.mixer.chorus.name().to_string(),
             ReverbMix => percent_bar(s.mixer.reverb_mix, MAX_MIX),
             ChorusMix => percent_bar(s.mixer.chorus_mix, MAX_MIX),
+            AudioBlocksize => describe_blocksize(s.audio_buffer.blocksize),
+            AudioPrebuffer => format!("{} ms", s.audio_buffer.prebuffer),
             LptDac => s.sound.lpt_dac.describe().to_string(),
             TandySound => s.sound.tandy.describe().to_string(),
             Autoexec | Rooms => String::new(),
@@ -1570,6 +1589,8 @@ impl Item {
             }
             Reverb => each(s, ReverbPreset::ALL, |s, preset| s.mixer.reverb = preset),
             Chorus => each(s, ChorusPreset::ALL, |s, preset| s.mixer.chorus = preset),
+            AudioBlocksize => each(s, crate::audio::BLOCKSIZES, |s, frames| s.audio_buffer.blocksize = frames),
+            AudioPrebuffer => each(s, crate::audio::PREBUFFERS, |s, ms| s.audio_buffer.prebuffer = ms),
             LptDac => each(s, crate::lpt_dac::LptDacType::ALL, |s, dac| s.sound.lpt_dac = dac),
             TandySound => each(s, crate::sn76489::TandySound::ALL, |s, tandy| s.sound.tandy = tandy),
             Ipx => each(s, crate::net::IpxMode::ALL, |s, mode| s.network.ipx = mode),
@@ -2183,9 +2204,15 @@ impl ConfigUi {
     /// The mixer's settings changed outside the window (the MIXER
     /// command): show them as they are now, and change them from there.
     pub fn sync_mixer(&mut self, mixer: crate::mixer::MixerSettings) {
+        let before = self.items();
         self.settings.mixer = mixer;
-        // An effect turned off takes its mix off the page, and a list open
-        // has the mixer as it was.
+        // An effect turned off takes its mix off the page: the cursor stays
+        // on its setting, or on the one above the setting that went. A list
+        // open has the mixer as it was.
+        if before.get(self.row).is_some() {
+            let after = self.items();
+            self.row = before[..=self.row].iter().rev().find_map(|i| after.iter().position(|a| a == i)).unwrap_or(0);
+        }
         self.row = self.row.min(self.row_count().saturating_sub(1));
         self.popup = None;
     }

@@ -40,7 +40,7 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   SC-55 (a port of Nuked-SC55) or the host's MIDI ports, Covox and Disney Sound Source, the Tandy/PCjr sound chip, and CD
   audio
 * **Drives:** host directories as floppy, hard disk and CD-ROM drives, CD
-  images (CUE with BIN, WAV, MP3, OGG or FLAC tracks, ISO) and FAT12, FAT16
+  images (CUE with BIN, WAV, MP3, OGG or FLAC tracks, ISO, CHD) and FAT12, FAT16
   and FAT32 disk images (raw, VHD, and 86Box's 86F floppies), with DOSBox Staging's `MOUNT` (and `IMGMOUNT`), and emulated
   disk speeds and noises
 * **[Booting disk images](CONFIGURATION.md#booting-a-disk-image)**

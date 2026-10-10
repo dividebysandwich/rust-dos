@@ -2672,7 +2672,10 @@ impl Bus {
                 // here; VGA mode lives at 0x3D4/0x3D5 (handled by the VGA).
             }
             // Game port write: the one-shots fire.
-            0x0201 => self.joystick.arm(),
+            0x0201 => {
+                let now_ns = self.clock.now_ns();
+                self.joystick.arm(now_ns);
+            }
 
             // The printer on the parallel port.
             p if self.printer_claims(p) => self.printer_write(p, value),
@@ -2783,8 +2786,11 @@ impl Bus {
     /// Read from an I/O port.
     pub fn io_read(&mut self, port: u16) -> u8 {
         self.observe.port_read(port);
+        // Sample the game port at the beginning of the I/O cycle. Its read
+        // stall advances time for the next sample, as one polling interval.
+        let now_ns = self.clock.now_ns();
         self.clock.stall(crate::timer::IO_READ_NS);
-        let value = self.read_port(port);
+        let value = self.read_port(port, now_ns);
         self.log_port(port, value as u32, 1, false);
         // Reads acknowledge interrupts of some devices (the Sound Blaster's
         // at 22Eh, the Ultrasound's status).
@@ -2792,7 +2798,7 @@ impl Bus {
         value
     }
 
-    fn read_port(&mut self, port: u16) -> u8 {
+    fn read_port(&mut self, port: u16, now_ns: u64) -> u8 {
         if self.attribute_reset.take() {
             self.vga.attribute_flip_flop = false;
         }
@@ -2846,7 +2852,7 @@ impl Bus {
             }
 
             // The game port: the joysticks' axes and buttons.
-            0x0201 => self.joystick.read(&self.mouse),
+            0x0201 => self.joystick.read(&self.mouse, now_ns),
 
             // The printer on the parallel port.
             p if self.printer_claims(p) => self.printer_read(p),

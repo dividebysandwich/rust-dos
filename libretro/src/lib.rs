@@ -12,6 +12,7 @@ mod content;
 mod core;
 mod disks;
 pub mod ffi;
+mod gl;
 mod host;
 mod keys;
 mod memmap;
@@ -116,6 +117,23 @@ impl Callbacks {
         }
     }
 
+    /// The picture drawn into the frontend's framebuffer (`gl.rs`).
+    pub fn video_hw(&self, width: u32, height: u32) {
+        if let Some(video) = self.video {
+            // SAFETY: with hardware rendering, this data says the picture
+            // is in the framebuffer.
+            unsafe { video(RETRO_HW_FRAME_BUFFER_VALID, width, height, 0) }
+        }
+    }
+
+    /// The picture as it was last frame.
+    pub fn video_dupe(&self) {
+        if let Some(video) = self.video {
+            // SAFETY: no data asks for the last picture again.
+            unsafe { video(ptr::null(), 0, 0, 0) }
+        }
+    }
+
     /// Stereo samples, interleaved, all of them.
     pub fn audio(&self, samples: &[i16]) {
         let Some(batch) = self.audio_batch else { return };
@@ -151,7 +169,7 @@ thread_local! {
     pub(crate) static INITIAL_IMAGE: RefCell<Option<(usize, PathBuf)>> = const { RefCell::new(None) };
 }
 
-fn callbacks() -> Callbacks {
+pub(crate) fn callbacks() -> Callbacks {
     CALLBACKS.with(Cell::get)
 }
 
@@ -299,7 +317,7 @@ pub extern "C" fn retro_deinit() {
 }
 
 /// The extensions of the content the core takes.
-const EXTENSIONS: &CStr = c"exe|com|bat|zip|dosz|7z|conf|img|ima|vfd|flp|dsk|86f|vhd|hdd|iso|cue|ins|m3u|m3u8";
+const EXTENSIONS: &CStr = c"exe|com|bat|zip|dosz|7z|conf|img|ima|vfd|flp|dsk|86f|vhd|hdd|iso|cue|ins|chd|m3u|m3u8";
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn retro_get_system_info(info: *mut retro_system_info) {
@@ -468,6 +486,14 @@ pub unsafe extern "C" fn retro_load_game(game: *const retro_game_info) -> bool {
         }
     };
     core.ports = PORTS.with(Cell::get);
+    // The 3dfx card's OpenGL renderer draws with the frontend's OpenGL.
+    if core.m.settings.voodoo.renderer == rust_dos::voodoo::Renderer::OpenGl {
+        if gl::request(&cb) {
+            core.hardware_rendering();
+        } else {
+            cb.log(RETRO_LOG_WARN, "The frontend has no OpenGL 3 for the 3dfx card: the software renderer draws it");
+        }
+    }
     let mut yes = true;
     // SAFETY: the calls take what libretro.h says.
     unsafe {

@@ -357,6 +357,9 @@ impl Mirror {
                 tex,
             }
         });
+        // LFB writes between identical draws must stay between them,
+        // not be replayed after a merged draw.
+        self.close_rows();
         if let Some(Command::Draw(draw)) = self.commands.last_mut()
             && draw.state == state
         {
