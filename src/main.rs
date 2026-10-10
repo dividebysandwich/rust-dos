@@ -433,7 +433,7 @@ fn main() -> Result<(), String> {
         cpu.bus.log_string(&format!(
             "[DETERMINISTIC] Clock from {}, {} cycles",
             mode.start.format("%Y-%m-%d %H:%M:%S"),
-            cpu.bus.clock.cycles_per_ms()
+            settings.cycles.initial_cycles()
         ));
     }
     // The keys a game's profile presses, as last stepped in deterministic
@@ -1540,25 +1540,26 @@ fn main() -> Result<(), String> {
         // only consulted when something actually needs it.
         let dbg_hot = dbg.begin_batch(&cpu);
         if let Some(mode) = &mut det {
-            // A millisecond of emulated time at a time, with the input at
-            // its ticks, up to the frame's end, a pause, or the time a
-            // client asked to stop at.
+            // A millisecond of emulated time at a time, with the input, the
+            // frozen values and the profile's keys at its ticks.
+            // Achievements are checked at the first millisecond of each
+            // 1/60 s, fast forwarding or not.
             let ui_open = ui.is_open();
-            while !waiting && cpu.bus.clock.icount < batch_end && !dbg.paused && !dbg.time_stop(&cpu) {
-                let (reason, reached) = mode.step(&mut cpu, &mut dbg, dbg_hot, batch_end);
-                if reached.is_some_and(|b| b.tick) && !ui_open {
-                    dbg.feed_input(&mut cpu);
-                    cpu.bus.apply_freezes();
-                    det_autoinput = step_autoinput(&mut cpu, &mut game, &mut autoinput);
-                }
-                if matches!(reason, exec::StopReason::Paused | exec::StopReason::Exit) {
-                    break;
-                }
-            }
-            let now = cpu.bus.clock.now_ticks();
-            if achievements.checking() && !waiting && now >= next_check {
-                achievements.do_frame(cpu.bus.ram(), cpu.bus.boot.is_some());
-                next_check = now + timer::frame_ticks();
+            let checking = achievements.checking();
+            if !waiting {
+                dbg.run_deterministic(&mut cpu, mode, dbg_hot, batch_end, |cpu, dbg, reached| {
+                    if reached.tick && !ui_open {
+                        dbg.feed_input(cpu);
+                        cpu.bus.apply_freezes();
+                        det_autoinput = step_autoinput(cpu, &mut game, &mut autoinput);
+                    }
+                    let now = cpu.bus.clock.now_ticks();
+                    if checking && now >= next_check {
+                        achievements.do_frame(cpu.bus.ram(), cpu.bus.boot.is_some());
+                        let frame = timer::frame_ticks();
+                        next_check = if next_check + frame <= now { now + frame } else { next_check + frame };
+                    }
+                });
             }
         } else if achievements.checking() && !waiting {
             // A game's achievements are checked every 1/60 s of emulated

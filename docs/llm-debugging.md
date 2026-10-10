@@ -334,8 +334,10 @@ curl -s $J -XPOST -d '{"until_ms":8000}' $H/api/control/resume
   and run with emulated time.
 - **Starts paused:** with the debug server the machine starts paused
   (`"reason":"startup"`), so the input can be sent before anything runs.
-- **Input:** input is taken only while the machine is paused (HTTP 409
-  otherwise). It is delivered at fixed points in emulated time, every 10
+- **Input:** input, and requests that change the machine (`run`, memory
+  and register writes, mounts, `/api/speed`, loading a state, reboots),
+  are taken only while the machine is paused or the settings window is
+  open, which takes its input at once (HTTP 409 otherwise). Input is delivered at fixed points in emulated time, every 10
   ms, from the time the machine resumes: one scan code per point, and
   `wait` and `hold_ms` count emulated milliseconds. Send it with
   `?wait=false`, as the reply waits for its delivery.
