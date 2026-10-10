@@ -378,12 +378,12 @@ impl AspectRatio {
     /// Parse a ratio name, including the former boolean values for old config files.
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "none" | "false" | "off" => Some(Self::None),
-            "4:3" | "true" | "on" => Some(Self::FourThree),
+            "none" => Some(Self::None),
+            "4:3" => Some(Self::FourThree),
             "5:4" => Some(Self::FiveFour),
             "16:10" => Some(Self::SixteenTen),
             "16:9" => Some(Self::SixteenNine),
-            _ => None,
+            other => parse_bool(other).map(|on| if on { Self::FourThree } else { Self::None }),
         }
     }
 
@@ -2517,7 +2517,7 @@ mod tests {
         for (name, ratio) in [
             ("none", AspectRatio::None), ("4:3", AspectRatio::FourThree), ("5:4", AspectRatio::FiveFour),
             ("16:10", AspectRatio::SixteenTen), ("16:9", AspectRatio::SixteenNine), ("true", AspectRatio::FourThree),
-            ("false", AspectRatio::None),
+            ("false", AspectRatio::None), ("yes", AspectRatio::FourThree), ("0", AspectRatio::None),
         ] {
             let config = parse(&format!("[emulator]\naspect={}\n", name), Path::new("/cfg"), None);
             assert_eq!(config.aspect, Some(ratio));
