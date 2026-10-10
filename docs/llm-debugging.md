@@ -146,6 +146,9 @@ curl -s "$H/api/log?limit=50&format=text"
 - **Trace a stretch of instructions:** `POST /api/trace {"count":5000}`
   records the next 5000 instructions and stops, so the ring keeps what
   came right after a breakpoint instead of being overwritten.
+  `/api/status` shows the instructions still to record as `remaining`, and
+  `{"count":0}` stops the trace at once. An open `/ws/trace` stream keeps
+  the ring recording past the count.
 - **Read a long trace in pages:** `GET /api/trace?since=0&limit=2000&format=json`
   gives the entries after cursor 0, oldest first, and `next`, the cursor
   for the following page (text replies have it in the `x-trace-next`

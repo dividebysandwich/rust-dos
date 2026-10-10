@@ -340,6 +340,9 @@ struct TracePost {
 
 async fn trace_post(State(s): State<AppState>, body: Bytes) -> ApiResult {
     let p: TracePost = from_value(parse_body(&body)?)?;
+    if p.enabled == Some(false) && p.count.is_some_and(|n| n > 0) {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "\"enabled\":false contradicts a nonzero \"count\"".into()));
+    }
     let cmd = Cmd::TraceControl { enabled: p.enabled, clear: p.clear, stream_max: p.stream_max, count: p.count };
     s.call_json(cmd, DEFAULT_TIMEOUT)
         .await
@@ -938,6 +941,7 @@ STATUS / SCREEN
 TRACE
   POST /api/trace  {"enabled":true, "clear":false, "stream_max":1000}
                    {"count":5000}: record the next 5000 instructions, then stop
+                   ({"count":0} stops now; /api/status shows the rest as remaining)
   GET  /api/trace?last_n=200 | ?last_ms=500 | ?from_ms=&to_ms=  [&limit=&cs=&no_bios=true&format=text|json]
   GET  /api/trace?since=N[&limit=]   the entries recorded after cursor N, oldest first;
        the reply's next (x-trace-next) is the cursor to go on from, and dropped

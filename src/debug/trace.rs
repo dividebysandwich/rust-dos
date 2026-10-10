@@ -200,7 +200,11 @@ impl TraceRing {
     pub fn after(&self, seq: u64) -> (impl Iterator<Item = (u64, &TraceEntry)>, u64) {
         let oldest = self.total - self.buf.len() as u64 + 1;
         let overwritten = (oldest - 1).saturating_sub(seq);
-        let entries = (oldest..).zip(self.iter()).skip_while(move |(n, _)| *n <= seq);
+        // Skipping the slices before numbering them steps over them in one
+        // go, where skipping the zipped pairs would walk a million-entry
+        // ring one entry at a time on every page.
+        let skip = seq.saturating_sub(oldest - 1).min(self.buf.len() as u64) as usize;
+        let entries = (oldest + skip as u64..).zip(self.iter().skip(skip));
         (entries, overwritten)
     }
 

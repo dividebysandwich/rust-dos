@@ -1149,9 +1149,10 @@ impl DebugHub {
                     self.trace_enabled = e;
                     self.trace_until = None;
                 }
+                // A count of 0 records nothing more: the trace stops now.
                 if let Some(n) = count {
-                    self.trace_enabled = true;
-                    self.trace_until = Some(self.trace.total() + n.max(1));
+                    self.trace_enabled = n > 0;
+                    self.trace_until = (n > 0).then(|| self.trace.total().saturating_add(n));
                 }
                 if clear {
                     self.trace.clear();
@@ -1673,8 +1674,8 @@ impl DebugHub {
             "entries": self.trace.len(),
             "capacity": self.trace.capacity(),
             "total_recorded": self.trace.total(),
-            // Where a `count` stops it.
-            "until": self.trace_until,
+            // The instructions a `count` still has to record.
+            "remaining": self.trace_until.map(|n| n.saturating_sub(self.trace.total())),
             "stream_max_per_frame": self.trace_stream_max,
         })
     }
@@ -1703,6 +1704,10 @@ impl DebugHub {
                 && !(q.no_bios && e.cs >= 0xF000 && !(e.bytes[0] == 0xFE && e.bytes[1] == 0x38))
         };
         if let Some(since) = q.since {
+            // A cursor past the end (one from an earlier run of the
+            // emulator) reads from the end, so the entries recorded from
+            // now on are not skipped until the total catches up with it.
+            let since = since.min(self.trace.total());
             // Oldest first, so the next page goes on where this one ends.
             let (after, dropped) = self.trace.after(since);
             let mut next = since.max(self.trace.total() - self.trace.len() as u64);
@@ -2261,6 +2266,18 @@ mod tests {
         assert_eq!((second.len(), next), (20, 50));
         assert!(first.last() < second.first(), "oldest first, in order");
         assert_eq!(page(&mut cpu, &mut hub, next, 30), (vec![], 50, 0));
+    }
+
+    #[test]
+    fn a_count_shows_what_is_left_and_a_count_of_0_stops_the_trace() {
+        let mut cpu = Cpu::new(".".into());
+        let mut hub = DebugHub::new(None, None, 1000);
+        let control = |count| Cmd::TraceControl { enabled: None, clear: false, stream_max: None, count: Some(count) };
+        let Reply::Json(status) = handle(&mut cpu, &mut hub, control(50)) else { panic!("not json") };
+        assert_eq!((status["enabled"].as_bool(), status["remaining"].as_u64()), (Some(true), Some(50)));
+        let Reply::Json(status) = handle(&mut cpu, &mut hub, control(0)) else { panic!("not json") };
+        assert_eq!(status["enabled"].as_bool(), Some(false));
+        assert!(status["remaining"].is_null());
     }
 
     /// The scan codes of the keys going down to type `c`.
