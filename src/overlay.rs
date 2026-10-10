@@ -476,7 +476,7 @@ mod tests {
 
     #[test]
     fn names_joined_to_the_parent_of_a_file_at_the_root_reach_the_layer() {
-        // On Windows the parent of `layerN:/GAME.EXE` is `layerN:`, and a
+        // The parent of `layerN:/GAME.EXE` is `layerN:`, and on Windows a
         // name joined to it is `layerN:\SAVES`.
         let dir = scratch("joined");
         let layer = layer(&dir);

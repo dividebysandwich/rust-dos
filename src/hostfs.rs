@@ -175,8 +175,11 @@ pub fn backend_path(path: &Path) -> String {
     match s.split_once(':') {
         Some((scheme, rest)) if has_scheme(path) => {
             let rest = rest.trim_start_matches(['/', '\\']);
-            let rest = if cfg!(windows) { rest.replace('\\', "/") } else { rest.to_owned() };
-            format!("{}://{}", scheme, rest)
+            if cfg!(windows) {
+                format!("{}://{}", scheme, rest.replace('\\', "/"))
+            } else {
+                format!("{}://{}", scheme, rest)
+            }
         }
         _ => s.into_owned(),
     }
