@@ -41,8 +41,8 @@ const DEFAULT_CONFIG = `# Rust-DOS settings, in the format of rust-dos.conf. Rem
 # front of a setting to use it. They take effect when the machine restarts.
 
 [emulator]
-# Stretch the picture to 4:3, as a monitor showed 320x200 and 640x400.
-aspect=true
+# Display ratio: none, 4:3, 5:4, 16:10 or 16:9.
+aspect=4:3
 # How the picture is scaled up: nearest (sharp pixels) or linear (smooth),
 # without a CRT shader.
 #filter=nearest
@@ -325,8 +325,8 @@ function setSound(muted, announce) {
 // The screen
 // ---------------------------------------------------------------------
 
-/// Size the canvas to fill the stage at the picture's proportions: 4:3
-/// with `aspect`, else its pixels' own. With WebGL it has the screen's
+/// Size the canvas to fill the stage at the selected display ratio, or
+/// the picture's native ratio. With WebGL it has the screen's
 /// pixels, which the CRT shaders need, and is drawn again.
 function layout() {
   const stage = $('stage');
@@ -337,7 +337,9 @@ function layout() {
     width: stage.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
     height: stage.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom) - keyboard,
   };
-  const ratio = machine?.aspect() ? 4 / 3 : (machine?.screen_width() ?? 640) / (machine?.screen_height() ?? 400);
+  const ratios = { '4:3': 4 / 3, '5:4': 5 / 4, '16:10': 16 / 10, '16:9': 16 / 9 };
+  const aspect = machine?.aspect() ?? 'none';
+  const ratio = ratios[aspect] ?? (machine?.screen_width() ?? 640) / (machine?.screen_height() ?? 400);
   let width = room.width;
   let height = width / ratio;
   if (height > room.height) {

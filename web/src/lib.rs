@@ -248,9 +248,9 @@ impl Machine {
         self.warnings.clone()
     }
 
-    /// Whether to stretch the picture to 4:3 (`aspect`).
-    pub fn aspect(&self) -> bool {
-        self.settings.aspect
+    /// The selected fixed display ratio, or `none` for native pixels.
+    pub fn aspect(&self) -> String {
+        self.settings.aspect.name().to_string()
     }
 
     /// Whether to scale the picture up smoothly (`filter=linear`).

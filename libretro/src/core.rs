@@ -508,9 +508,9 @@ impl Core {
         if self.ui.is_open() || self.ui.overlay_shown() {
             self.ui.set_stats(self.stats.view());
         }
-        // The frontend shows the picture at 4:3 with `aspect`.
+        // The frontend shows the picture with its selected display ratio.
         let (w, h) = (self.screen.width.max(1) as f64, self.screen.height.max(1) as f64);
-        let tall = if self.m.settings.aspect { w * 3.0 / 4.0 / h } else { 1.0 };
+        let tall = self.m.settings.aspect.dimensions().map_or(1.0, |(rw, rh)| w * rh as f64 / (rw as f64 * h));
         self.ui.set_display((1.0, tall), false);
         self.ui.draw(&mut self.screen);
         self.ui.draw_overlay(&mut self.screen);
@@ -552,11 +552,11 @@ impl Core {
         unsafe { cb.env(RETRO_ENVIRONMENT_SET_GEOMETRY, &mut geometry as *mut _ as *mut std::ffi::c_void) };
     }
 
-    /// The picture's size and shape now: 4:3 as a CRT shows it with
-    /// `aspect`, else square pixels.
+    /// The picture's size and shape now: the selected target ratio, or
+    /// square pixels when no fixed ratio is selected.
     pub fn geometry_now(&self) -> retro_game_geometry {
         let (w, h) = (self.screen.width.max(1), self.screen.height.max(1));
-        let aspect_ratio = if self.m.settings.aspect { 4.0 / 3.0 } else { w as f32 / h as f32 };
+        let aspect_ratio = self.m.settings.aspect.ratio(w as f32 / h as f32);
         retro_game_geometry { base_width: w, base_height: h, max_width: self.max_size.0, max_height: self.max_size.1, aspect_ratio }
     }
 

@@ -15,13 +15,14 @@ bars at the sides where needed.
 
 **Alt+Enter** switches between fullscreen and a window at any time.
 
-# 4:3 aspect correction {#aspect}
+# Fixed aspect ratio {#aspect}
 
-DOS games ran on 4:3 monitors that stretched their 320x200 picture a
-little taller than its pixels. Turn this **on** to see them in that
-shape: circles come out round, as the artists drew them.
+Choose the shape to show the picture in: **none** keeps its native pixel
+ratio, while **4:3**, **5:4**, **16:10** and **16:9** expand it to fit
+that display ratio without cropping. DOS games drawn for CRT monitors
+usually look right at **4:3**.
 
-Leave it **off** for perfectly square, sharp pixels.
+Choose **none** for perfectly square, sharp pixels.
 
 # Variable refresh rate (VRR) {#vrr}
 
@@ -41,7 +42,7 @@ How the picture is blown up to the window's size:
 - **nearest**: sharp, blocky pixels.
 - **linear**: smooth, slightly soft pixels.
 
-With *4:3 aspect correction* on, or at an odd window size, **linear**
+With a fixed aspect ratio, or at an odd window size, **linear**
 avoids uneven pixel sizes. It has no effect while a CRT shader is on.
 
 # CRT shader {#shader}

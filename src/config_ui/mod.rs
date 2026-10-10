@@ -40,7 +40,7 @@ pub use states::SlotView;
 
 use crate::games::{GameEntry, NewGame};
 
-use crate::config::{MidiSynth, Settings};
+use crate::config::{AspectRatio, MidiSynth, Settings};
 use crate::cpu::{CoreMode, CpuModel};
 use crate::disk::{DRIVE_C, DriveInfo, DriveKind, drive_letter, drive_number, numbered_unit};
 use crate::diskio::{DiskClass, DiskSpeed, NoiseMode};
@@ -859,7 +859,7 @@ impl Item {
         match self {
             Scale => "Window scale",
             Fullscreen => "Fullscreen",
-            Aspect => "4:3 aspect correction",
+            Aspect => "Fixed aspect ratio",
             Vrr => "Variable refresh rate",
             VrMode => "3D scene",
             VrScene => "Scene",
@@ -1155,7 +1155,7 @@ impl Item {
         match self {
             Scale => format!("{}x", s.scale),
             Fullscreen => on_off(s.fullscreen),
-            Aspect => on_off(s.aspect),
+            Aspect => s.aspect.name().to_string(),
             Vrr => on_off(s.vrr),
             VrMode => match s.vr.mode {
                 crate::vr::VrMode::Off => "off",
@@ -1430,7 +1430,7 @@ impl Item {
         match self {
             Scale => each(s, 1..=16, |s, scale| s.scale = scale),
             Fullscreen => on_off(|s, on| s.fullscreen = on),
-            Aspect => on_off(|s, on| s.aspect = on),
+            Aspect => each(s, AspectRatio::ALL, |s, aspect| s.aspect = aspect),
             Vrr => on_off(|s, on| s.vrr = on),
             VrMode => each(s, crate::vr::VrMode::ALL, |s, mode| s.vr.mode = mode),
             VrControllers => each(s, crate::vr::VrControllers::ALL, |s, c| s.vr.controllers = c),

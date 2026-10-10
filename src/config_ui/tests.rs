@@ -1419,8 +1419,8 @@ fn a_browser_gets_what_it_has() {
         ui.items(),
         [Item::Aspect, Item::Filter, Item::Shader, Item::Monochrome, Item::Composite, Item::CompositeEra]
     );
-    pick(&mut ui, &mut host, "on");
-    assert!(host.applied.last().unwrap().aspect);
+    pick(&mut ui, &mut host, "16:9");
+    assert_eq!(host.applied.last().unwrap().aspect, crate::config::AspectRatio::SixteenNine);
     ui.show_page(Page::Sound);
     assert!(!ui.items().contains(&Item::SoundFont));
     ui.row = ui.items().iter().position(|&i| i == Item::Midi).unwrap();

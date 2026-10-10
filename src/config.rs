@@ -128,8 +128,8 @@ pub struct Config {
     pub scale: Option<u32>,
     /// Desktop fullscreen (`fullscreen`).
     pub fullscreen: Option<bool>,
-    /// Stretch the picture to 4:3 (`aspect`).
-    pub aspect: Option<bool>,
+    /// The picture's display ratio (`aspect`).
+    pub aspect: Option<AspectRatio>,
     /// Show each of the machine's frames when it is due, for a display
     /// with a variable refresh rate (`vrr`).
     pub vrr: Option<bool>,
@@ -357,6 +357,61 @@ impl Section {
             Section::Gamepad => "gamepad",
             Section::None | Section::Unknown => "",
         }
+    }
+}
+
+/// The target display ratio of the picture (`aspect`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AspectRatio {
+    /// Keep the frame's native pixel ratio.
+    #[default]
+    None,
+    FourThree,
+    FiveFour,
+    SixteenTen,
+    SixteenNine,
+}
+
+impl AspectRatio {
+    pub const ALL: [Self; 5] = [Self::None, Self::FourThree, Self::FiveFour, Self::SixteenTen, Self::SixteenNine];
+
+    /// Parse a ratio name, including the former boolean values for old config files.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "none" | "false" | "off" => Some(Self::None),
+            "4:3" | "true" | "on" => Some(Self::FourThree),
+            "5:4" => Some(Self::FiveFour),
+            "16:10" => Some(Self::SixteenTen),
+            "16:9" => Some(Self::SixteenNine),
+            _ => None,
+        }
+    }
+
+    /// The canonical configuration name.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::FourThree => "4:3",
+            Self::FiveFour => "5:4",
+            Self::SixteenTen => "16:10",
+            Self::SixteenNine => "16:9",
+        }
+    }
+
+    /// The target width-to-height dimensions, or none for the frame's native ratio.
+    pub fn dimensions(self) -> Option<(u32, u32)> {
+        match self {
+            Self::None => None,
+            Self::FourThree => Some((4, 3)),
+            Self::FiveFour => Some((5, 4)),
+            Self::SixteenTen => Some((16, 10)),
+            Self::SixteenNine => Some((16, 9)),
+        }
+    }
+
+    /// The target width-to-height ratio, or `native` for None.
+    pub fn ratio(self, native: f32) -> f32 {
+        self.dimensions().map_or(native, |(w, h)| w as f32 / h as f32)
     }
 }
 
@@ -821,10 +876,13 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Ok(n) if (1..=16).contains(&n) => config.scale = Some(n),
                             _ => warn(format!("invalid scale '{}'", value)),
                         },
-                        "fullscreen" | "aspect" => match parse_bool(value) {
-                            Some(on) if key.eq_ignore_ascii_case("fullscreen") => config.fullscreen = Some(on),
-                            Some(on) => config.aspect = Some(on),
-                            None => warn(format!("invalid {} '{}' (true or false)", key, value)),
+                        "fullscreen" => match parse_bool(value) {
+                            Some(on) => config.fullscreen = Some(on),
+                            None => warn(format!("invalid fullscreen '{}' (true or false)", value)),
+                        },
+                        "aspect" => match AspectRatio::parse(value) {
+                            Some(aspect) => config.aspect = Some(aspect),
+                            None => warn(format!("invalid aspect '{}' (none, 4:3, 5:4, 16:10 or 16:9)", value)),
                         },
                         "vrr" => match parse_bool(value) {
                             Some(on) => config.vrr = Some(on),
@@ -1277,7 +1335,7 @@ pub fn load(
 pub struct Settings {
     pub scale: u32,
     pub fullscreen: bool,
-    pub aspect: bool,
+    pub aspect: AspectRatio,
     pub vrr: bool,
     pub filter: Filter,
     pub shader: Shader,
@@ -1361,7 +1419,7 @@ impl Default for Settings {
         Self {
             scale: 1,
             fullscreen: false,
-            aspect: false,
+            aspect: AspectRatio::None,
             vrr: false,
             filter: Filter::Nearest,
             shader: Shader::None,
@@ -1510,7 +1568,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
     let mut entries = vec![
         (Emulator, "scale", Some(settings.scale.to_string())),
         (Emulator, "fullscreen", yes_no(settings.fullscreen)),
-        (Emulator, "aspect", yes_no(settings.aspect)),
+        (Emulator, "aspect", Some(settings.aspect.name().to_string())),
         (Emulator, "vrr", yes_no(settings.vrr)),
         (Emulator, "filter", Some(settings.filter.name().to_string())),
         (Emulator, "shader", Some(settings.shader.name().to_string())),
@@ -2449,13 +2507,21 @@ mod tests {
 
     #[test]
     fn display_settings() {
-        let text = "[emulator]\nfullscreen=yes\naspect=off\nvrr=on\nfilter=Linear\nshader=CRT\nmonochrome=Amber\ncrt_curvature=0\nCRT_Glow=45%\n";
+        let text = "[emulator]\nfullscreen=yes\naspect=5:4\nvrr=on\nfilter=Linear\nshader=CRT\nmonochrome=Amber\ncrt_curvature=0\nCRT_Glow=45%\n";
         let config = parse(text, Path::new("/cfg"), None);
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
-        assert_eq!((config.fullscreen, config.aspect, config.filter), (Some(true), Some(false), Some(Filter::Linear)));
+        assert_eq!((config.fullscreen, config.aspect, config.filter), (Some(true), Some(AspectRatio::FiveFour), Some(Filter::Linear)));
         assert_eq!(config.vrr, Some(true));
         assert_eq!((config.shader, config.monochrome), (Some(Shader::Crt), Some(Monochrome::Amber)));
         assert_eq!(Settings::from_config(&config).crt, CrtSettings { curvature: 0, glow: 45 });
+        for (name, ratio) in [
+            ("none", AspectRatio::None), ("4:3", AspectRatio::FourThree), ("5:4", AspectRatio::FiveFour),
+            ("16:10", AspectRatio::SixteenTen), ("16:9", AspectRatio::SixteenNine), ("true", AspectRatio::FourThree),
+            ("false", AspectRatio::None),
+        ] {
+            let config = parse(&format!("[emulator]\naspect={}\n", name), Path::new("/cfg"), None);
+            assert_eq!(config.aspect, Some(ratio));
+        }
         let text = "[emulator]\nfullscreen=maybe\nvrr=sometimes\nfilter=blur\nshader=bent\nmonochrome=blue\ncrt_curvature=200\ncrt_glow=lots\n";
         let config = parse(text, Path::new("/cfg"), None);
         assert_eq!(config.warnings.len(), 7, "{:?}", config.warnings);
@@ -2559,7 +2625,7 @@ mod tests {
         Settings {
             scale: 3,
             fullscreen: true,
-            aspect: true,
+            aspect: AspectRatio::FourThree,
             vrr: true,
             filter: Filter::Linear,
             shader: Shader::Crt,

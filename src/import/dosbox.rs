@@ -433,9 +433,10 @@ fn setting(imported: &mut Imported, section: &str, key: &str, value: &str) {
         },
         // DOSBox Staging's: auto, on, square-pixels or stretch.
         ("render", "aspect") => match (bool_value(), first) {
-            (Some(b), _) => imported.set("emulator", "aspect", b),
-            (None, "auto") => imported.set("emulator", "aspect", "true"),
-            (None, "square-pixels" | "stretch") => imported.set("emulator", "aspect", "false"),
+            (Some("true"), _) => imported.set("emulator", "aspect", "4:3"),
+            (Some("false"), _) => imported.set("emulator", "aspect", "none"),
+            (None, "auto") => imported.set("emulator", "aspect", "4:3"),
+            (None, "square-pixels" | "stretch") => imported.set("emulator", "aspect", "none"),
             _ => unknown(imported),
         },
         ("sblaster", "sbtype") => match first {
@@ -933,8 +934,8 @@ mod tests {
         assert_eq!(get(&composite, "composite_era").as_deref(), Some("old"));
         // A colour machine stays in colour.
         assert_eq!(get(&imported("[render]\nmonochrome_palette=green\n"), "monochrome"), None);
-        assert_eq!(get(&imported("[render]\naspect=auto\n"), "aspect").as_deref(), Some("true"));
-        assert_eq!(get(&imported("[render]\naspect=square-pixels\n"), "aspect").as_deref(), Some("false"));
+        assert_eq!(get(&imported("[render]\naspect=auto\n"), "aspect").as_deref(), Some("4:3"));
+        assert_eq!(get(&imported("[render]\naspect=square-pixels\n"), "aspect").as_deref(), Some("none"));
         let config = crate::config::parse(&composite.profile_text(None), Path::new("/"), None);
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
     }

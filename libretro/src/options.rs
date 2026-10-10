@@ -100,11 +100,11 @@ fn definitions() -> Vec<Definition> {
         },
         Definition {
             key: "aspect",
-            desc: "4:3 aspect ratio",
-            info: "Show the picture at a CRT's 4:3, as DOS games were drawn for, rather than with square pixels.",
+            desc: "Fixed aspect ratio",
+            info: "Expand the picture to the selected display ratio without cropping, or keep its native pixel ratio.",
             category: "video",
             target: config("emulator", "aspect"),
-            values: configured(&ON_OFF),
+            values: configured(&[("none", "Native pixels"), ("4:3", "4:3"), ("5:4", "5:4"), ("16:10", "16:10"), ("16:9", "16:9")]),
         },
         Definition {
             key: "voodoo",
@@ -350,6 +350,11 @@ impl Values {
                 Some(value) if def.values.iter().any(|(v, _)| v == value) => {
                     sections.entry(section).or_default().push(format!("{}={}", key, value))
                 }
+                Some(value) if key == "aspect" => {
+                    if let Some(aspect) = rust_dos::config::AspectRatio::parse(value) {
+                        sections.entry(section).or_default().push(format!("{}={}", key, aspect.name()));
+                    }
+                }
                 Some(_) => {}
             }
         }
@@ -519,6 +524,15 @@ mod tests {
         assert_eq!(values.mouse_speed(), 2.0);
         let config = rust_dos::config::parse(&values.config_text(), std::path::Path::new("/"), None);
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+    }
+
+    #[test]
+    fn old_boolean_aspect_values_keep_their_meaning() {
+        let mut values = Values::default();
+        values.set("aspect", "true");
+        assert_eq!(values.config_text(), "[emulator]\naspect=4:3\n");
+        values.set("aspect", "false");
+        assert_eq!(values.config_text(), "[emulator]\naspect=none\n");
     }
 
     #[test]

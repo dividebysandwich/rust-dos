@@ -69,8 +69,9 @@ Mistakes in the file are printed as warnings; the emulator still starts.
 * `scale` is the window scale factor. `-s/--scale` overrides it.
 * `fullscreen=true` fills the screen instead of a window, keeping the
   picture's proportions.
-* `aspect=true` stretches the picture to 4:3, the shape a monitor gave
-  320x200 and 640x400.
+* `aspect` selects the picture's display ratio: `none` (native pixels),
+  `4:3`, `5:4`, `16:10` or `16:9`. The picture expands to that shape
+  without cropping; `4:3` is the usual choice for DOS games.
 * `vrr=true` is for a display with a variable refresh rate (G-Sync,
   FreeSync). Each of the machine's frames is shown when its display
   draws it, so the window refreshes at the machine's own rate: 70 Hz for
@@ -806,7 +807,7 @@ Esc closes it.
   booting, without a DOS drive. They are listed after the lettered drives
   with their BIOS unit (*00h*, *01h*, *80h*, *81h*), and **Create a disk
   image...** can mount a new image on one of its kind.
-* **Display:** the scale, fullscreen, 4:3 aspect correction, variable
+* **Display:** the scale, fullscreen, fixed aspect ratio, variable
   refresh rate (VRR), the scaling filter, the CRT shader and the monochrome monitor.
 * **Emulator:** the CPU speed, the processor, the video card, the memory
   size, expanded and upper memory, the disk speeds, the joystick, rewind,
@@ -1942,8 +1943,8 @@ a monochrome tube has a single phosphor; the scanlines, glow and curve stay.
 A VGA shows its 200-line modes double-scanned, so each of the 400 lines is a
 scanline. The looks need a few screen pixels per line: at scale 1 the
 scanlines and phosphors fade out, and they look best at scale 3 or more, or
-in fullscreen on a large screen. At exactly 2x or 3x without 4:3 aspect
-correction the scanlines are sharpest.
+in fullscreen on a large screen. At exactly 2x or 3x with `aspect=none`
+the scanlines are sharpest.
 
 The shaders need OpenGL 3 (WebGL 2 in the browser). Without it, as with
 `SDL_VIDEODRIVER=dummy`, rust-dos draws the picture with SDL's renderer as

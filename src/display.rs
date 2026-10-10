@@ -1,5 +1,5 @@
 //! The window and how the emulated picture fills it: the scale factor,
-//! fullscreen, 4:3 aspect correction, the scaling filter and the CRT
+//! fullscreen, a fixed aspect ratio, the scaling filter and the CRT
 //! shader. OpenGL 3 draws it (gl.rs), or where there is none SDL's own
 //! renderer, without the shaders. With OpenGL, the 3dfx card's picture
 //! can be drawn at a higher resolution (voodoo_gl.rs). Built without the
@@ -16,7 +16,7 @@ mod stage;
 #[cfg(feature = "gl")]
 mod voodoo_gl;
 
-use crate::config::{Filter, Settings};
+use crate::config::{AspectRatio, Filter, Settings};
 use crate::video::mono::Monochrome;
 use crate::video::shader::{CrtSettings, Shader};
 use crate::video::{self, Frame};
@@ -36,15 +36,17 @@ use std::cell::OnceCell;
 static ICON_PNG: &[u8] = include_bytes!("../assets/rust-dos.png");
 
 /// The size the picture is shown at, in the renderer's logical pixels: the
-/// frame itself, or with `aspect` stretched to 4:3, the shape a monitor
-/// gave 320x200 and 640x400. It only ever stretches.
-pub fn display_size(width: u32, height: u32, aspect: bool) -> (u32, u32) {
-    if !aspect || width * 3 == height * 4 {
+/// frame itself, or expanded to `aspect`. It only ever stretches.
+pub fn display_size(width: u32, height: u32, aspect: AspectRatio) -> (u32, u32) {
+    let Some((ratio_width, ratio_height)) = aspect.dimensions() else { return (width, height) };
+    let width_scaled = u64::from(width) * u64::from(ratio_height);
+    let height_scaled = u64::from(height) * u64::from(ratio_width);
+    if width_scaled == height_scaled {
         (width, height)
-    } else if width * 3 > height * 4 {
-        (width, (width * 3).div_ceil(4))
+    } else if width_scaled > height_scaled {
+        (width, (width_scaled.div_ceil(u64::from(ratio_width))) as u32)
     } else {
-        ((height * 4).div_ceil(3), height)
+        ((height_scaled.div_ceil(u64::from(ratio_height))) as u32, height)
     }
 }
 
@@ -70,7 +72,7 @@ pub struct Display<'a> {
     frame: (u32, u32),
     scale: u32,
     fullscreen: bool,
-    aspect: bool,
+    aspect: AspectRatio,
     filter: Filter,
     shader: Shader,
     crt: CrtSettings,
@@ -952,14 +954,18 @@ mod tests {
     }
 
     #[test]
-    fn aspect_correction_stretches_to_4_3() {
-        assert_eq!(display_size(640, 400, false), (640, 400));
-        assert_eq!(display_size(640, 400, true), (640, 480));
-        assert_eq!(display_size(640, 350, true), (640, 480));
-        assert_eq!(display_size(640, 480, true), (640, 480));
-        assert_eq!(display_size(1024, 768, true), (1024, 768));
-        // Taller than 4:3 widens instead.
-        assert_eq!(display_size(640, 512, true), (683, 512));
+    fn fixed_aspect_ratio_expands_without_cropping() {
+        use AspectRatio::*;
+        assert_eq!(display_size(640, 400, None), (640, 400));
+        assert_eq!(display_size(640, 400, FourThree), (640, 480));
+        assert_eq!(display_size(640, 400, FiveFour), (640, 512));
+        assert_eq!(display_size(640, 400, SixteenTen), (640, 400));
+        assert_eq!(display_size(640, 400, SixteenNine), (712, 400));
+        assert_eq!(display_size(640, 350, FourThree), (640, 480));
+        assert_eq!(display_size(640, 480, FourThree), (640, 480));
+        assert_eq!(display_size(1024, 768, FourThree), (1024, 768));
+        // Taller than the target ratio widens instead.
+        assert_eq!(display_size(640, 512, FourThree), (683, 512));
     }
 
     #[test]

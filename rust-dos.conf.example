@@ -18,8 +18,8 @@
 #scale=2
 # Fill the screen instead of a window, keeping the picture's proportions.
 #fullscreen=false
-# Stretch the picture to 4:3, as a monitor showed 320x200 and 640x400.
-#aspect=false
+# Display ratio: none (native pixels), 4:3, 5:4, 16:10 or 16:9.
+#aspect=none
 # For a variable refresh rate (G-Sync, FreeSync) display: show each frame
 # when the machine draws it, at its own rate (70 Hz for VGA) rather than
 # a steady 60 Hz. VRR must be on in the graphics driver or desktop too.

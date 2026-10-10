@@ -645,16 +645,22 @@ fn the_disks_of_a_playlist_change_through_disk_control() {
 #[test]
 fn changed_options_reach_the_machine() {
     let dir = scratch("options");
-    start(&dir, &[("rust_dos_aspect", "false")]);
+    start(&dir, &[("rust_dos_aspect", "none")]);
     assert!(load(None));
     run(10);
     assert_eq!(with(|fe| fe.geometry.map(|g| g.aspect_ratio)), Some(640.0 / 400.0));
     with(|fe| {
-        fe.variables.insert("rust_dos_aspect".into(), CString::new("true").unwrap());
+        fe.variables.insert("rust_dos_aspect".into(), CString::new("4:3").unwrap());
         fe.options_changed = true;
     });
     run(2);
     assert_eq!(with(|fe| fe.geometry.map(|g| g.aspect_ratio)), Some(4.0 / 3.0));
+    with(|fe| {
+        fe.variables.insert("rust_dos_aspect".into(), CString::new("16:9").unwrap());
+        fe.options_changed = true;
+    });
+    run(2);
+    assert_eq!(with(|fe| fe.geometry.map(|g| g.aspect_ratio)), Some(16.0 / 9.0));
     stop();
 }
 
