@@ -16,8 +16,11 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # Without the window (the `sdl` feature), which the frontend has, and
-# without the host's MIDI ports (`hostmidi`), which would need ALSA.
-rust-dos = { path = "..", default-features = false, features = ["midi", "cdaudio", "chd", "sevenz", "manuals"] }
+# without the host's MIDI ports (`hostmidi`), which would need ALSA. The
+# 3dfx card's OpenGL renderer draws through the frontend's OpenGL.
+rust-dos = { path = "..", default-features = false, features = ["midi", "cdaudio", "chd", "sevenz", "manuals", "voodoo-gl"] }
+# The frontend's OpenGL (src/gl.rs), as rust-dos has it.
+glow = "0.18.0"
 
 [dev-dependencies]
 # To make a game's zip in the tests.

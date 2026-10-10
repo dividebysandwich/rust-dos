@@ -111,6 +111,19 @@ profile while one plays. Hardware changes wait for the program running to end,
 as in the program; the memory size (`memsize`) changes when the content starts
 again.
 
+## The 3dfx Voodoo with OpenGL
+
+With the core options **3dfx Voodoo** on and **3dfx renderer** set to
+OpenGL (`voodoo_renderer=opengl`), the frontend's OpenGL draws the card's
+picture, as the program's window does: at **3dfx OpenGL scale** times its
+resolution (`voodoo_scale`), with **3dfx OpenGL antialiasing**
+(`voodoo_msaa`). That needs RetroArch's `glcore` or `gl` video driver
+(OpenGL 3, not OpenGL ES). The renderer is picked when content is loaded;
+without such a driver, the software renderer draws the card, as it does by
+default. Save states and the settings window
+work as with the software renderer; while the settings window or the
+performance overlay is open, the card's picture is the software one.
+
 ## Controls
 
 * **Keyboard**: every key of a PC keyboard. RetroArch's hotkeys take some
@@ -148,7 +161,6 @@ the core.
 
 ## What isn't in the core
 
-* The 3dfx Voodoo is drawn in software; the program's OpenGL renderer and
-  CRT shaders aren't there (the frontend has shaders of its own).
+* The program's CRT shaders (the frontend has shaders of its own).
 * MIDI out of the host's MIDI ports (`midisynth=host`).
 * The debug server.

@@ -1637,7 +1637,8 @@ card's resolution (or through the CRT shader at the window's size, with
 card's pixel counters, until a game reads them: from then on everything
 is drawn and counted (`RUST_DOS_VOODOO_PRUNE=0` in the environment draws
 everything from the start). The CRT shaders draw their scanlines over the
-bigger picture.
+bigger picture. The libretro core draws it with the frontend's OpenGL (see
+[its README](libretro/README.md#the-3dfx-voodoo-with-opengl)).
 
 ## Rendition Vérité
 
