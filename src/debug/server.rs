@@ -504,7 +504,14 @@ struct ControlBody {
     count: Option<u64>,
     until: Option<String>,
     timeout_ms: Option<u64>,
+    /// `run`: the command line, and whether to stop at the program's entry.
+    command: Option<String>,
+    #[serde(default)]
+    stop_at_entry: bool,
 }
+
+/// How long `run` waits for its program to start, unless `timeout_ms` says.
+const RUN_TIMEOUT: Duration = Duration::from_secs(30);
 
 async fn control(State(s): State<AppState>, Path(action): Path<String>, body: Bytes) -> ApiResult {
     let b: ControlBody = from_value(parse_body(&body)?)?;
@@ -516,9 +523,14 @@ async fn control(State(s): State<AppState>, Path(action): Path<String>, body: By
         "step_over" => s.call_json(Cmd::StepOver, timeout).await,
         "reboot_shell" => s.call_json(Cmd::RebootShell, DEFAULT_TIMEOUT).await,
         "reboot" => s.call_json(Cmd::Reboot, DEFAULT_TIMEOUT).await,
+        "run" => {
+            let command = b.command.ok_or_else(|| bad("missing 'command'"))?;
+            let timeout = b.timeout_ms.map_or(RUN_TIMEOUT, Duration::from_millis);
+            s.call_json(Cmd::Run { command, stop_at_entry: b.stop_at_entry }, timeout).await
+        }
         _ => Err(ApiError(
             StatusCode::NOT_FOUND,
-            format!("unknown action '{}' (pause, resume, step, step_over, reboot_shell, reboot)", action),
+            format!("unknown action '{}' (pause, resume, step, step_over, run, reboot_shell, reboot)", action),
         )),
     }
 }
@@ -667,6 +679,10 @@ struct BpBody {
     /// An exception vector (hex, or a number) or "any".
     exception: Option<Value>,
     mode_switch: Option<bool>,
+    /// Pause at the entry point of each program DOS starts, or after each
+    /// program ends (false stops).
+    program_start: Option<bool>,
+    program_exit: Option<bool>,
     /// With `exception`: false stops pausing on it.
     enabled: Option<bool>,
 }
@@ -687,13 +703,19 @@ fn exception_mask(v: &Value) -> Result<u32, ApiError> {
 
 async fn bp_add(State(s): State<AppState>, body: Bytes) -> ApiResult {
     let b: BpBody = from_value(parse_body(&body)?)?;
-    if b.exception.is_some() || b.mode_switch.is_some() {
+    if b.exception.is_some() || b.mode_switch.is_some() || b.program_start.is_some() || b.program_exit.is_some() {
         let mask = b.exception.as_ref().map(exception_mask).transpose()?;
         let (exceptions, clear_exceptions) = if b.enabled == Some(false) { (None, mask) } else { (mask, None) };
-        let cmd = Cmd::BreakOn { exceptions, clear_exceptions, mode_switch: b.mode_switch };
+        let cmd = Cmd::BreakOn {
+            exceptions,
+            clear_exceptions,
+            mode_switch: b.mode_switch,
+            program_start: b.program_start,
+            program_exit: b.program_exit,
+        };
         return s.call_json(cmd, DEFAULT_TIMEOUT).await;
     }
-    let addr = b.addr.ok_or_else(|| bad("missing 'addr' (or 'exception' / 'mode_switch')"))?;
+    let addr = b.addr.ok_or_else(|| bad("missing 'addr' (or 'exception', 'mode_switch', 'program_start', 'program_exit')"))?;
     s.call_json(Cmd::AddBreakpoint(addr), DEFAULT_TIMEOUT).await
 }
 
@@ -989,6 +1011,11 @@ EXECUTION CONTROL
   POST /api/control/step     {"count":1}             returns registers after stepping
   POST /api/control/step_over                        step, but run a CALL, INT, LOOP or
                                                      REP string instruction to the next one
+  POST /api/control/run      {"command":"GAME.EXE /x", "stop_at_entry":true}
+                             run a command line at the DOS prompt; replies once it
+                             started a program ({"program":{name,entry,psp}}), or
+                             with stop_at_entry once paused at its first instruction
+                             (reason "program_start"); 422 if it started none
   POST /api/control/reboot_shell                     kill the running program
   POST /api/control/reboot                           reset the machine, as Ctrl+Alt+Del
   GET  /api/control/wait?timeout_ms=30000            block until the emulator pauses
@@ -1002,6 +1029,8 @@ EXECUTION CONTROL
   GET/POST/DELETE /api/breakpoints   {"addr":"1234:0100"}  (DELETE without addr = all)
                   also {"exception":"0D"} or {"exception":"any"}: pause in the handler
                   after the CPU raises it ({"exception":"0D","enabled":false} stops); {"mode_switch":true}: pause after CR0.PE changes
+                  {"program_start":true}: pause at each program's entry point;
+                  {"program_exit":true}: pause after each program ends ("exit":{name,code,resident,aborted})
   GET/POST/DELETE /api/watchpoints   {"addr":"DS:0100","len":2}  pause when the 1, 2 or
                   4 bytes there change (DELETE without addr = all)
   GET  /api/ivt              interrupt vector table (real mode)

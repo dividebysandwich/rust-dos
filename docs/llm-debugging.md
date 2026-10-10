@@ -176,7 +176,37 @@ curl -s "$H/api/log?limit=50&format=text"
 
 ### Stop a program at a specific point
 
-Find out where the program was loaded. The log says so:
+To stop at a program's first instruction, start it with `run` instead of
+typing it:
+
+```sh
+curl -s $J -XPOST -d '{"command":"GAME.EXE /nosound","stop_at_entry":true}' $H/api/control/run
+```
+
+It runs the command line at the DOS prompt as if typed, and replies once
+the machine is paused at the entry point of the program it started, with
+`"reason":"program_start"`, the registers and
+`"program":{"name","entry","psp"}`. Nothing of the program has run yet, so
+breakpoints set now catch its startup code. Without `stop_at_entry` it
+replies as soon as the program started. A command line that starts no
+program (a typo, a built-in command such as `DIR`) gets HTTP 422 once the
+prompt is back, and `run` while a program runs, or while PAUSE, CHOICE or
+EDIT waits, gets 409. So does a `stop_at_entry` run whose program was
+closed before it reached its entry point.
+
+- **Every program:** `POST /api/breakpoints {"program_start":true}` pauses
+  at the entry point of each program DOS starts, a child that a game's
+  launcher starts with EXEC too. `{"program_exit":true}` pauses after each
+  program ends, with `"reason":"program_exit"` and
+  `"exit":{"name","code","resident","aborted"}` (`resident` for a TSR);
+  the machine is then back in the parent or the shell. A program the
+  emulator ended without an exit of its own (a divide overflow,
+  `reboot_shell`, a reboot) has `"aborted":true` and `"code":null`.
+  `false` turns either off.
+- **How the last program ended:** `/api/status` has `program`, the program
+  running (empty at the prompt), and `last_exit`.
+
+Otherwise, find out where the program was loaded. The log says so:
 
 ```sh
 curl -s "$H/api/log?grep=Loaded&format=text"
