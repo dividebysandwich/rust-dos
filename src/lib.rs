@@ -60,7 +60,7 @@ pub mod log;
 pub mod manuals;
 #[cfg(all(feature = "hostmidi", not(target_arch = "wasm32")))]
 pub mod midiout;
-pub mod lpt_dac;
+pub use rust_dos_lpt_dac as lpt_dac;
 pub mod makeimg;
 pub mod makeimg_command;
 pub mod instructions;
@@ -96,7 +96,7 @@ pub mod sc55;
 pub mod serial;
 pub mod shell;
 pub mod shared_disk;
-pub mod sn76489;
+pub use rust_dos_tandy as sn76489;
 pub mod sound;
 pub mod stats;
 pub mod time_commands;

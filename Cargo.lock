@@ -1921,8 +1921,10 @@ dependencies = [
  "rust-dos-audio-core",
  "rust-dos-dma",
  "rust-dos-hostdirs",
+ "rust-dos-lpt-dac",
  "rust-dos-opl",
  "rust-dos-savestate",
+ "rust-dos-tandy",
  "rust-dos-zip",
  "rustysynth",
  "sdl2",
@@ -1960,6 +1962,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust-dos-lpt-dac"
+version = "1.5.0"
+dependencies = [
+ "rust-dos-audio-core",
+ "rust-dos-savestate",
+]
+
+[[package]]
 name = "rust-dos-opl"
 version = "1.5.0"
 dependencies = [
@@ -1971,6 +1981,14 @@ dependencies = [
 [[package]]
 name = "rust-dos-savestate"
 version = "1.5.0"
+
+[[package]]
+name = "rust-dos-tandy"
+version = "1.5.0"
+dependencies = [
+ "rust-dos-audio-core",
+ "rust-dos-savestate",
+]
 
 [[package]]
 name = "rust-dos-zip"

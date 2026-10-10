@@ -8,7 +8,7 @@
 //! Staging (disney.cpp and covox.cpp), both play through filters that give
 //! them the sound of the real devices.
 
-use crate::dsp::{BUTTERWORTH_Q, Biquad, OnePoleHighpass};
+use rust_dos_audio_core::dsp::{BUTTERWORTH_Q, Biquad, OnePoleHighpass};
 use std::collections::VecDeque;
 
 /// The parallel port's base, and its data, status and control ports.
@@ -101,6 +101,7 @@ impl LptDac {
         }
     }
 
+    #[inline]
     pub fn kind(&self) -> LptDacType {
         self.kind
     }
@@ -109,12 +110,14 @@ impl LptDac {
         self.fifo.len() >= FIFO
     }
 
+    #[inline]
     pub fn write_data(&mut self, value: u8) {
         self.data = value;
     }
 
     /// A write to the control port: on the Disney, a rising edge of
     /// Select takes the data byte into the FIFO, if it has room.
+    #[inline]
     pub fn write_control(&mut self, value: u8) {
         if self.kind == LptDacType::Disney && self.control & 0x08 == 0 && value & 0x08 != 0 && !self.fifo_full() {
             self.fifo.push_back(self.data);
@@ -122,15 +125,18 @@ impl LptDac {
         self.control = value;
     }
 
+    #[inline]
     pub fn read_data(&self) -> u8 {
         self.data
     }
 
+    #[inline]
     pub fn read_control(&self) -> u8 {
         self.control
     }
 
     /// The status port: on the Disney, Acknowledge while the FIFO is full.
+    #[inline]
     pub fn read_status(&self) -> u8 {
         match self.kind {
             LptDacType::Disney if self.fifo_full() => STATUS_IDLE | STATUS_ACK,
@@ -140,10 +146,11 @@ impl LptDac {
     }
 
     /// The next sample at the mixer's rate, on a 16-bit scale.
+    #[inline]
     pub fn render(&mut self) -> f32 {
         let byte = match self.kind {
             LptDacType::Disney => {
-                self.phase += DISNEY_RATE / crate::opl::RATE as f32;
+                self.phase += DISNEY_RATE / rust_dos_audio_core::RATE as f32;
                 if self.phase >= 1.0 {
                     self.phase -= 1.0;
                     if self.fifo.len() > 1 {
@@ -165,23 +172,23 @@ impl LptDac {
 
 /// Which DAC it is comes with the configuration, and with it whether the
 /// Disney's filter is there.
-impl crate::savestate::State for LptDac {
-    fn save(&self, w: &mut crate::savestate::Writer) {
+impl rust_dos_savestate::State for LptDac {
+    fn save(&self, w: &mut rust_dos_savestate::Writer) {
         let LptDac { kind: _, data, control, fifo, phase, high, low, dc } = self;
         (*data, *control).save(w);
         fifo.save(w);
         phase.save(w);
-        crate::savestate::save_device(high, w);
+        rust_dos_savestate::save_device(high, w);
         low.save(w);
         dc.save(w);
     }
-    fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
+    fn load(&mut self, r: &mut rust_dos_savestate::Reader) -> rust_dos_savestate::Result<()> {
         let LptDac { kind: _, data, control, fifo, phase, high, low, dc } = self;
         data.load(r)?;
         control.load(r)?;
         fifo.load(r)?;
         phase.load(r)?;
-        crate::savestate::load_device(high, "Disney Sound Source", r)?;
+        rust_dos_savestate::load_device(high, "Disney Sound Source", r)?;
         low.load(r)?;
         dc.load(r)
     }

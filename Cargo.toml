@@ -47,6 +47,8 @@ rust-dos-hostdirs = { path = "crates/hostdirs" }
 rust-dos-zip = { path = "crates/zip" }
 # The sound cards, each a crate of its own (crates/).
 rust-dos-opl = { path = "crates/opl" }
+rust-dos-tandy = { path = "crates/tandy" }
+rust-dos-lpt-dac = { path = "crates/lpt-dac" }
 iced-x86 = "1.21.0"
 font8x8 = "0.3.1"
 chrono = "0.4.45"

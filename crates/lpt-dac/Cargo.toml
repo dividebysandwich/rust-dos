@@ -1,0 +1,12 @@
+[package]
+name = "rust-dos-lpt-dac"
+description = "DACs on the printer port (Covox Speech Thing, Disney Sound Source), as rust-dos emulates them"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+rust-dos-savestate = { path = "../savestate" }
+rust-dos-audio-core = { path = "../audio-core" }

@@ -4,7 +4,7 @@
 //! As MAME's sn76496.c has it (BSD-3-Clause), in DOSBox Staging's copy,
 //! with DOSBox's filters for the sound of the machines' speaker circuits.
 
-use crate::dsp::{BUTTERWORTH_Q, Biquad};
+use rust_dos_audio_core::dsp::{BUTTERWORTH_Q, Biquad};
 
 /// The chip's clock: the NTSC colour carrier, the machines' 14.318 MHz
 /// crystal divided by 4.
@@ -111,6 +111,7 @@ impl Sn76489 {
         }
     }
 
+    #[inline]
     pub fn variant(&self) -> Variant {
         self.variant
     }
@@ -140,6 +141,7 @@ impl Sn76489 {
 
     /// A byte written to the chip: with bit 7, the register (bits 4-6) and
     /// its low 4 bits; without, a tone period's high 6 bits.
+    #[inline]
     pub fn write(&mut self, data: u8) {
         let r;
         if data & 0x80 != 0 {
@@ -224,8 +226,9 @@ impl Sn76489 {
     /// The next sample at the mixer's rate, on a 16-bit scale: the chip's
     /// output averaged over the ticks since the last one, through the
     /// filters.
+    #[inline]
     pub fn render(&mut self) -> f32 {
-        self.phase += TICK_RATE / crate::opl::RATE as f64;
+        self.phase += TICK_RATE / rust_dos_audio_core::RATE as f64;
         let mut sum = 0.0;
         let mut ticks = 0;
         while self.phase >= 1.0 {
@@ -239,13 +242,14 @@ impl Sn76489 {
     }
 
     /// Whether any channel can be heard.
+    #[inline]
     pub fn audible(&self) -> bool {
         self.volume.iter().any(|&v| v > 0.0)
     }
 }
 
 // The chip's variant comes with the machine.
-crate::state_fields!(Sn76489 { registers, latched, volume, period, count, output, rng, phase, high, low } skip { variant });
+rust_dos_savestate::state_fields!(Sn76489 { registers, latched, volume, period, count, output, rng, phase, high, low } skip { variant });
 
 
 #[cfg(test)]

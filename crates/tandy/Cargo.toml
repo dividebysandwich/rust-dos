@@ -1,0 +1,12 @@
+[package]
+name = "rust-dos-tandy"
+description = "The PCjr's and Tandy's sound chip (SN76489 and the Tandy 1000's NCR 8496), as rust-dos emulates it"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+rust-dos-savestate = { path = "../savestate" }
+rust-dos-audio-core = { path = "../audio-core" }
