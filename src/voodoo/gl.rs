@@ -641,13 +641,18 @@ impl VoodooGl {
                 // The card compares zaColor but stores the interpolated
                 // depth. GL uses gl_FragDepth for both: record which samples
                 // pass with stencil, then write their real depth separately.
-                // Keep overlapping triangles in order, including with MSAA.
+                // Keep overlapping triangles in order, including with MSAA:
+                // each gets its own reference, so the buffer is cleared only
+                // every 255 triangles.
                 gl.enable(glow::STENCIL_TEST);
-                for first in (0..draw.vertices.len() as i32).step_by(3) {
+                for (n, first) in (0..draw.vertices.len() as i32).step_by(3).enumerate() {
+                    let reference = (n % 255) as i32 + 1;
                     gl.stencil_mask(0xFF);
-                    gl.clear_stencil(0);
-                    gl.clear(glow::STENCIL_BUFFER_BIT);
-                    gl.stencil_func(glow::ALWAYS, 1, 0xFF);
+                    if reference == 1 {
+                        gl.clear_stencil(0);
+                        gl.clear(glow::STENCIL_BUFFER_BIT);
+                    }
+                    gl.stencil_func(glow::ALWAYS, reference, 0xFF);
                     gl.stencil_op(glow::KEEP, glow::KEEP, glow::REPLACE);
                     gl.depth_func(DEPTH_FUNCS[func]);
                     gl.depth_mask(false);
@@ -656,7 +661,7 @@ impl VoodooGl {
                     gl.draw_arrays(glow::TRIANGLES, first, 3);
 
                     gl.stencil_mask(0);
-                    gl.stencil_func(glow::EQUAL, 1, 0xFF);
+                    gl.stencil_func(glow::EQUAL, reference, 0xFF);
                     gl.stencil_op(glow::KEEP, glow::KEEP, glow::KEEP);
                     gl.depth_func(glow::ALWAYS);
                     gl.depth_mask(true);
