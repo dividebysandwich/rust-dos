@@ -1,4 +1,4 @@
-// Nuked-SC55 (jcmoyer's fork, at the commit src/sc55 was ported from)
+// Nuked-SC55 (jcmoyer's fork, at the commit crates/sc55 was ported from)
 // switched on with given ROMs and MIDI bytes posted at given frames, for
 // tests/sc55_tests.rs to compare with the port: writes every frame at the
 // chip's rate to stdout as two little-endian int32s.

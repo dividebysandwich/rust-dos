@@ -70,7 +70,7 @@ jobs:
 
       - name: Run tests
         if: matrix.full
-        run: cargo test --locked --verbose
+        run: cargo test --workspace --locked --verbose
 
       - name: Run tests on the dynamic recompiler
         if: matrix.full

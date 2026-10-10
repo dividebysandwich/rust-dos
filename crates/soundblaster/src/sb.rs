@@ -1,6 +1,6 @@
 //! Sound Blaster digital audio: the DSP and the mixer of the SB 2.0 (DSP
 //! 2.01), SB Pro 2 (DSP 3.02, stereo, CT1345 mixer) and SB16 (DSP 4.05,
-//! 16-bit transfers, CT1745 mixer). The FM chip is `opl.rs`.
+//! 16-bit transfers, CT1745 mixer). The FM chip is the `rust-dos-opl` crate's.
 //!
 //! The DSP runs on emulated time: while a DMA transfer is active it pulls
 //! samples from the DMA controller at its sample rate, and raises its IRQ
