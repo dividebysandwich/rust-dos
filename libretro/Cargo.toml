@@ -17,7 +17,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 # Without the window (the `sdl` feature), which the frontend has, and
 # without the host's MIDI ports (`hostmidi`), which would need ALSA.
-rust-dos = { path = "..", default-features = false, features = ["midi", "cdaudio", "sevenz", "manuals"] }
+rust-dos = { path = "..", default-features = false, features = ["midi", "cdaudio", "chd", "sevenz", "manuals"] }
 
 [dev-dependencies]
 # To make a game's zip in the tests.

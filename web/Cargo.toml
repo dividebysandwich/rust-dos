@@ -14,7 +14,7 @@ crate-type = ["cdylib"]
 [dependencies]
 # Without the SoundFont synthesizer (the `midi` feature): the page has no
 # files to load one from. General MIDI plays with the Ultrasound patches.
-rust-dos = { path = "..", default-features = false }
+rust-dos = { path = "..", default-features = false, features = ["chd"] }
 # The version of the wasm-bindgen program that build.sh runs must be the
 # one Cargo.lock has.
 wasm-bindgen = "0.2"

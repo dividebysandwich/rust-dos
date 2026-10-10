@@ -80,6 +80,8 @@ sha2 = "0.11"
 md-5 = "0.11"
 # Compressed audio tracks of CD images (Ogg Vorbis, FLAC, MP3).
 symphonia = { version = "0.6", default-features = false, features = ["ogg", "vorbis", "flac", "mp3", "wav", "pcm"], optional = true }
+# CD images in MAME's compressed CHD files (src/cdrom/chd.rs).
+chd = { version = "0.3.4", optional = true }
 # The manuals and extras of game profiles (src/manuals): JPEG pictures, and
 # PDF pages rasterized.
 jpeg-decoder = { version = "0.3", default-features = false, optional = true }
@@ -139,7 +141,7 @@ libc = "0.2"
 windows-sys = { version = "0.61", features = ["Win32_System_Memory", "Win32_System_Diagnostics_Debug", "Win32_System_Threading"] }
 
 [features]
-default = ["sdl", "gl", "vr", "midi", "hostmidi", "cdaudio", "sevenz", "manuals"]
+default = ["sdl", "gl", "vr", "midi", "hostmidi", "cdaudio", "chd", "sevenz", "manuals"]
 # The rust-dos program: its window and sound device, its debug server and
 # its connection to RetroAchievements.
 sdl = ["dep:sdl2", "dep:axum", "dep:ureq", "rust-dos-soundblaster/download", "rust-dos-sc55/download"]
@@ -154,6 +156,8 @@ vr = ["gl", "dep:gltf", "dep:glam", "dep:openxr", "dep:ash", "dep:jpeg-decoder"]
 midi = ["rust-dos-mpu401/midi"]
 # CD audio tracks in Ogg Vorbis, FLAC or MP3 files.
 cdaudio = ["dep:symphonia"]
+# CD images in CHD files.
+chd = ["dep:chd"]
 # 7z archives mounted as drives (zip archives are always read).
 sevenz = ["dep:sevenz-rust2"]
 # JPEG pictures and PDF documents among games' manuals (PNG and GIF are

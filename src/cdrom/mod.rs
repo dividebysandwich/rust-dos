@@ -1,7 +1,10 @@
-//! CD-ROM images: CUE sheets with their BIN and WAV tracks, and bare ISO,
-//! BIN or IMG images of a data track; the ISO 9660 file system on them.
+//! CD-ROM images: CUE sheets with their BIN and WAV tracks, CHD files, and
+//! bare ISO, BIN or IMG images of a data track; the ISO 9660 file system on
+//! them.
 
 pub mod audio;
+#[cfg(feature = "chd")]
+pub mod chd;
 pub mod cue;
 #[cfg(feature = "cdaudio")]
 pub mod decoded;
