@@ -1,9 +1,4 @@
-//! The Roland MT-32 and CM-32L on the MPU-401 (`midisynth=mt32`), played by
-//! munt's emulation of them, libmt32emu. rust-dos doesn't link the library:
-//! it loads it when the MT-32 is chosen, so the program runs without munt
-//! installed, and plays the MT-32 wherever it is. The synthesizer needs the
-//! module's ROMs, a control ROM and a PCM ROM of the same model, which
-//! munt identifies from their contents whatever the files are called.
+//! munt's library and the synthesizer it plays.
 
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
@@ -11,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use libloading::Library;
 
-pub use crate::config::Mt32Model;
+use crate::Mt32Model;
 
 /// Frames munt renders at a time.
 const BLOCK: usize = 64;
@@ -21,10 +16,10 @@ const BLOCK: usize = 64;
 /// data put them.
 pub fn default_rom_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    if let Some(user) = crate::config::user_dir() {
+    if let Some(user) = rust_dos_hostdirs::user_dir() {
         dirs.push(user.join("mt32-roms"));
     }
-    if let Some(config) = crate::hostdirs::config_dir() {
+    if let Some(config) = rust_dos_hostdirs::config_dir() {
         dirs.push(config.join("dosbox").join("mt32-roms"));
     }
     if cfg!(unix) {
@@ -399,6 +394,7 @@ impl Mt32 {
     }
 
     /// A channel message.
+    #[inline]
     pub fn message(&mut self, status: u8, d1: u8, d2: u8) {
         let msg = status as u32 | (d1 as u32) << 8 | (d2 as u32) << 16;
         // SAFETY: an open synthesizer.

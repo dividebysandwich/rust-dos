@@ -80,7 +80,7 @@ pub mod midi_shadow;
 pub mod mpu401;
 pub mod net;
 #[cfg(not(target_arch = "wasm32"))]
-pub mod mt32;
+pub use rust_dos_mt32 as mt32;
 pub use rust_dos_opl as opl;
 pub mod os_images;
 pub mod overlay;

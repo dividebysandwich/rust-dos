@@ -1923,6 +1923,7 @@ dependencies = [
  "rust-dos-gus",
  "rust-dos-hostdirs",
  "rust-dos-lpt-dac",
+ "rust-dos-mt32",
  "rust-dos-opl",
  "rust-dos-savestate",
  "rust-dos-soundblaster",
@@ -1980,6 +1981,14 @@ version = "1.5.0"
 dependencies = [
  "rust-dos-audio-core",
  "rust-dos-savestate",
+]
+
+[[package]]
+name = "rust-dos-mt32"
+version = "1.5.0"
+dependencies = [
+ "libloading 0.9.0",
+ "rust-dos-hostdirs",
 ]
 
 [[package]]

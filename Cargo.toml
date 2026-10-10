@@ -51,6 +51,7 @@ rust-dos-tandy = { path = "crates/tandy" }
 rust-dos-lpt-dac = { path = "crates/lpt-dac" }
 rust-dos-soundblaster = { path = "crates/soundblaster" }
 rust-dos-gus = { path = "crates/gus" }
+rust-dos-mt32 = { path = "crates/mt32" }
 iced-x86 = "1.21.0"
 font8x8 = "0.3.1"
 chrono = "0.4.45"
