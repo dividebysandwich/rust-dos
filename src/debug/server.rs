@@ -40,13 +40,7 @@ pub fn spawn(addr: SocketAddr, tx: mpsc::Sender<Request>, shared: Arc<Shared>) -
     // Bind synchronously so a port conflict is reported at startup rather
     // than silently in the background thread.
     let listener = std::net::TcpListener::bind(addr).map_err(|e| format!("debug server: cannot bind {}: {}", addr, e))?;
-    let bound = listener.local_addr().map_err(|e| e.to_string())?;
-    serve(listener, tx, shared)?;
-    Ok(bound)
-}
-
-/// Serve the debug interface on `listener`, from a thread of its own.
-fn serve(listener: std::net::TcpListener, tx: mpsc::Sender<Request>, shared: Arc<Shared>) -> Result<(), String> {
+    let bound = listener.local_addr().map_err(|e| format!("debug server: no local address for {}: {}", addr, e))?;
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
     std::thread::Builder::new()
         .name("debug-server".into())
@@ -65,7 +59,7 @@ fn serve(listener: std::net::TcpListener, tx: mpsc::Sender<Request>, shared: Arc
             });
         })
         .map_err(|e| e.to_string())?;
-    Ok(())
+    Ok(bound)
 }
 
 fn router(state: AppState) -> Router {
@@ -1109,15 +1103,14 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::SocketAddr;
     use std::sync::{Arc, mpsc};
+    use std::time::Duration;
 
     /// The response to `GET path` from the server at `addr`.
     fn get(addr: SocketAddr, path: &str) -> String {
         let mut stream = std::net::TcpStream::connect(addr).unwrap();
-        let request = format!("GET {path} HTTP/1.1
-Host: x
-Connection: close
-
-");
+        // A server that never answers fails the test instead of hanging it.
+        stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let request = format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
         stream.write_all(request.as_bytes()).unwrap();
         let mut response = String::new();
         stream.read_to_string(&mut response).unwrap();
@@ -1138,11 +1131,10 @@ Connection: close
     }
 
     #[test]
-    fn serve_passes_requests_on_a_listener_the_caller_bound() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
+    fn spawn_on_port_0_passes_requests_to_the_emulator() {
         let (tx, rx) = mpsc::channel::<Request>();
-        super::serve(listener, tx, Arc::new(Shared::new(std::time::Instant::now()))).unwrap();
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let addr = super::spawn(addr, tx, Arc::new(Shared::new(std::time::Instant::now()))).unwrap();
         std::thread::spawn(move || {
             for req in rx {
                 let status = matches!(req.cmd, Cmd::Status);

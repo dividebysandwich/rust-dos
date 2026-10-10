@@ -34,10 +34,18 @@ until curl -sf localhost:8086/api/status >/dev/null; do sleep 0.2; done
   run several instances side by side, or when 8086 may be taken:
 
   ```sh
-  ./target/release/rust-dos --no-config -d /path/to/dos/files \
+  SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+    ./target/release/rust-dos --no-config -d /path/to/dos/files \
     --debug-server 127.0.0.1:0 > rust-dos.out &
-  until H=$(grep -om1 '127\.0\.0\.1:[0-9]*' rust-dos.out); do sleep 0.2; done
+  until H=$(grep -om1 '127\.0\.0\.1:[0-9][0-9]*' rust-dos.out) &&
+        curl -sf $H/api/status >/dev/null; do
+    kill -0 $! 2>/dev/null || { echo 'rust-dos exited'; break; }
+    sleep 0.2
+  done
   ```
+
+  The address line prints before the emulator starts answering requests,
+  so the loop also waits for `/api/status`, as the snippet above does.
 - **Output:** the emulator log doesn't go to stdout. It goes to
   `rust-dos.log` in the per-user config directory, replaced on every start.
   Read it through `/api/log` instead, which can filter it.
