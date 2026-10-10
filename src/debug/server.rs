@@ -38,6 +38,11 @@ pub fn spawn(addr: SocketAddr, tx: mpsc::Sender<Request>, shared: Arc<Shared>) -
     // Bind synchronously so a port conflict is reported at startup rather
     // than silently in the background thread.
     let listener = std::net::TcpListener::bind(addr).map_err(|e| format!("debug server: cannot bind {}: {}", addr, e))?;
+    serve(listener, tx, shared)
+}
+
+/// Serve the debug interface on `listener`, from a thread of its own.
+fn serve(listener: std::net::TcpListener, tx: mpsc::Sender<Request>, shared: Arc<Shared>) -> Result<(), String> {
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
     std::thread::Builder::new()
         .name("debug-server".into())
@@ -105,6 +110,7 @@ fn router(state: AppState) -> Router {
         .route("/ws/screen", get(ws_screen))
         .route("/ws/audio", get(ws_audio))
         .route("/ws/input", get(ws_input))
+        .layer(axum::middleware::from_fn(request_id))
         .with_state(state)
 }
 
@@ -126,11 +132,52 @@ fn bad(msg: impl Into<String>) -> ApiError {
 
 type ApiResult = Result<Response, ApiError>;
 
+/// The header that carries a client's ID for a request, which comes back
+/// on the response and in the events the request causes.
+const REQUEST_ID: &str = "x-request-id";
+/// The longest request ID taken.
+const REQUEST_ID_MAX: usize = 128;
+
+tokio::task_local! {
+    /// The ID of the HTTP request this task answers, if it came with one.
+    static CURRENT_REQUEST_ID: Option<String>;
+}
+
+/// Whether `id` can be a request ID: 1 to 128 printable ASCII characters.
+fn valid_request_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= REQUEST_ID_MAX && id.bytes().all(|b| (0x20..0x7F).contains(&b))
+}
+
+fn bad_request_id() -> ApiError {
+    bad(format!("a request ID is 1 to {REQUEST_ID_MAX} printable ASCII characters"))
+}
+
+/// Take the request's `X-Request-Id`, hand it to the commands the request
+/// sends the emulator (`AppState::call`), and put it on the response.
+async fn request_id(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let id = match req.headers().get(REQUEST_ID).map(|v| v.to_str()) {
+        None => None,
+        Some(Ok(s)) if valid_request_id(s) => Some(s.to_string()),
+        Some(_) => return bad_request_id().into_response(),
+    };
+    let mut response = CURRENT_REQUEST_ID.scope(id.clone(), next.run(req)).await;
+    if let Some(v) = id.and_then(|id| header::HeaderValue::from_str(&id).ok()) {
+        response.headers_mut().insert(REQUEST_ID, v);
+    }
+    response
+}
+
 impl AppState {
+    /// Send a command for the HTTP request this task answers, with its ID.
     async fn call(&self, cmd: Cmd, timeout: Duration) -> Result<Reply, ApiError> {
+        let id = CURRENT_REQUEST_ID.try_with(Clone::clone).ok().flatten();
+        self.call_with_id(cmd, timeout, id).await
+    }
+
+    async fn call_with_id(&self, cmd: Cmd, timeout: Duration, id: Option<String>) -> Result<Reply, ApiError> {
         let (reply, rx) = oneshot::channel();
         self.tx
-            .send(Request { cmd, reply })
+            .send(Request { cmd, reply, id })
             .map_err(|_| ApiError(StatusCode::SERVICE_UNAVAILABLE, "emulator has shut down".into()))?;
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(Reply::Error(code, msg))) => {
@@ -937,10 +984,14 @@ async fn ws_input(State(s): State<AppState>, ws: WebSocketUpgrade) -> Response {
                 Message::Close(_) => return,
                 _ => continue,
             };
-            let reply = match handle_ws_input(&s, &text).await {
+            let (result, id) = handle_ws_input(&s, &text).await;
+            let mut reply = match result {
                 Ok(v) => v,
                 Err(ApiError(_, e)) => json!({"ok": false, "error": e}),
             };
+            if let (Some(id), Value::Object(o)) = (id, &mut reply) {
+                o.insert("request_id".into(), id.into());
+            }
             if socket.send(Message::Text(reply.to_string().into())).await.is_err() {
                 return;
             }
@@ -948,15 +999,31 @@ async fn ws_input(State(s): State<AppState>, ws: WebSocketUpgrade) -> Response {
     })
 }
 
-async fn handle_ws_input(s: &AppState, text: &str) -> Result<Value, ApiError> {
-    let mut v: Value = serde_json::from_str(text).map_err(|e| bad(format!("invalid JSON: {}", e)))?;
-    let wait = v.get("wait").and_then(|w| w.as_bool()).unwrap_or(false);
+/// Carry out a message of `/ws/input`. Also returns the message's
+/// `request_id`, for the reply.
+async fn handle_ws_input(s: &AppState, text: &str) -> (Result<Value, ApiError>, Option<String>) {
+    let mut v: Value = match serde_json::from_str(text) {
+        Ok(v) => v,
+        Err(e) => return (Err(bad(format!("invalid JSON: {}", e))), None),
+    };
+    let mut wait = false;
+    let mut id = None;
     if let Value::Object(o) = &mut v {
-        o.remove("wait");
+        wait = o.remove("wait").and_then(|w| w.as_bool()).unwrap_or(false);
+        match o.remove("request_id") {
+            None => {}
+            Some(Value::String(s)) if valid_request_id(&s) => id = Some(s),
+            Some(_) => return (Err(bad_request_id()), None),
+        }
     }
+    let result = ws_input_events(s, v, wait, id.clone()).await;
+    (result, id)
+}
+
+async fn ws_input_events(s: &AppState, v: Value, wait: bool, id: Option<String>) -> Result<Value, ApiError> {
     let events = parse_events(v, None)?;
     let timeout = if wait { INPUT_WAIT_TIMEOUT } else { DEFAULT_TIMEOUT };
-    match s.call(Cmd::Input { events, wait }, timeout).await? {
+    match s.call_with_id(Cmd::Input { events, wait }, timeout, id).await? {
         Reply::Json(v) => Ok(v),
         _ => Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, "unexpected reply".into())),
     }
@@ -969,6 +1036,15 @@ Open this address in a web browser for the debugger page (/ui): the screen,
 execution control, registers, disassembly, memory, breakpoints and the log.
 Addresses are hex: "SEG:OFF" (registers allowed, e.g. "CS:IP", "DS:SI", "B800:0")
 or a linear address ("0x12345", "B8000").
+
+REQUEST IDS
+  Any request can carry "X-Request-Id: <1 to 128 printable ASCII characters>"
+  (400 otherwise). The response has the same header, and the events the request
+  causes carry it as "request_id": "resumed", log lines written while the
+  emulator handles the request, and the stop ("paused" event and reply) that
+  ends a run the request started (resume, step, step_over, run, reboot) or that
+  a pause request asked for. /ws/input messages take "request_id" in the JSON
+  and their replies carry it.
 
 STATUS / SCREEN
   GET  /api/status                         emulator state, CS:IP, video mode, trace fill, fps, speed
@@ -1023,7 +1099,8 @@ EXECUTION CONTROL
   GET  /api/memory?addr=DS:SI&len=256[&format=hex|base64|raw]
   PUT  /api/memory {"addr":"B800:0000","hex":"41 1F"}  (or "base64"); replies with
                              the bytes replaced ("old") and read back ("new");
-                             "expect":"20 07" writes only if those bytes are there (409)
+                             "expect":"20 07" writes only if those bytes are there,
+                             and only while the machine is paused (409 otherwise)
   GET  /api/disasm?addr=CS:IP&count=20[&format=json]   json: "lines" and "rows"
                                            ({label, phys, bytes, asm, len, current, breakpoint})
   GET/POST/DELETE /api/breakpoints   {"addr":"1234:0100"}  (DELETE without addr = all)
@@ -1096,7 +1173,47 @@ WEBSOCKETS
 
 #[cfg(test)]
 mod tests {
-    use super::hex_data;
+    use super::{Reply, Request, Shared, hex_data, json};
+    use std::io::{Read, Write};
+    use std::sync::{Arc, mpsc};
+
+    /// A server whose emulator answers every request with the ID it got.
+    fn echo_server() -> std::net::SocketAddr {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = mpsc::channel::<Request>();
+        super::serve(listener, tx, Arc::new(Shared::new(std::time::Instant::now()))).unwrap();
+        std::thread::spawn(move || {
+            for req in rx {
+                let _ = req.reply.send(Reply::Json(json!({"id": req.id})));
+            }
+        });
+        addr
+    }
+
+    /// The response to GET /api/status with these extra header lines.
+    fn get(addr: std::net::SocketAddr, headers: &str) -> String {
+        let mut stream = std::net::TcpStream::connect(addr).unwrap();
+        let request = format!("GET /api/status HTTP/1.1\r\nHost: x\r\n{headers}Connection: close\r\n\r\n");
+        stream.write_all(request.as_bytes()).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response.to_ascii_lowercase()
+    }
+
+    #[test]
+    fn a_request_id_reaches_the_emulator_and_comes_back_on_the_response() {
+        let addr = echo_server();
+        let tagged = get(addr, "X-Request-Id: Call-42\r\n");
+        assert!(tagged.starts_with("http/1.1 200"), "{tagged}");
+        assert!(tagged.contains("\r\nx-request-id: call-42\r\n"), "{tagged}");
+        assert!(tagged.ends_with(r#"{"id":"call-42"}"#), "{tagged}");
+        let untagged = get(addr, "");
+        assert!(!untagged.contains("x-request-id"), "{untagged}");
+        assert!(untagged.ends_with(r#"{"id":null}"#), "{untagged}");
+        let too_long = get(addr, &format!("X-Request-Id: {}\r\n", "a".repeat(129)));
+        assert!(too_long.starts_with("http/1.1 400"), "{too_long}");
+    }
 
     #[test]
     fn hex_data_skips_0x_prefixes() {

@@ -95,6 +95,12 @@ struct Args {
     #[arg(long)]
     no_config: bool,
 
+    /// Write the log to FILE, replacing it, instead of rust-dos.log in the
+    /// configuration directory, so instances running at the same time keep
+    /// separate logs
+    #[arg(long, value_name = "FILE")]
+    log: Option<std::path::PathBuf>,
+
     /// Start at the DOS prompt, without booting the disk image that boots
     /// at startup (`-boot` in [drives])
     #[arg(long)]
@@ -2916,7 +2922,7 @@ fn create_cpu(args: &Args, config: &config::Config, memory_mb: usize) -> Cpu {
     };
 
     let mut cpu = Cpu::with_memory(root_path.clone(), memory_mb);
-    cpu.bus.log_file = open_log_file();
+    cpu.bus.log_file = open_log_file(args.log.clone());
     cpu.shell_history.set_home(rust_dos::cmdline::default_history_file());
     rust_dos::cmdline::configure(&mut cpu, &config.shell);
     if let Some(spec) = c_spec {
@@ -2943,10 +2949,11 @@ fn create_cpu(args: &Args, config: &config::Config, memory_mb: usize) -> Cpu {
     cpu
 }
 
-/// Create the log file in rust-dos's own directory (`config::user_dir`), replacing
-/// the previous run's. The emulator runs without one if that fails.
-fn open_log_file() -> Option<rust_dos::log::LogFile> {
-    let path = rust_dos::log::default_path()?;
+/// Create the log file at `path` (`--log`), or in rust-dos's own directory
+/// (`config::user_dir`), replacing the previous run's. The emulator runs
+/// without one if that fails.
+fn open_log_file(path: Option<std::path::PathBuf>) -> Option<rust_dos::log::LogFile> {
+    let path = path.or_else(rust_dos::log::default_path)?;
     match rust_dos::log::LogFile::create(&path) {
         Ok(log) => Some(log),
         Err(e) => {

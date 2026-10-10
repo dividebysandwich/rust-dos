@@ -52,6 +52,9 @@ pub struct Shared {
     pub audio: broadcast::Sender<Arc<[i16]>>,
     pub log: Mutex<VecDeque<LogLine>>,
     pub start_time: Instant,
+    /// The ID of the request the emulator thread handles now, for the log
+    /// lines it writes meanwhile.
+    pub request_id: Mutex<Option<String>>,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -61,6 +64,20 @@ pub struct LogLine {
 }
 
 impl Shared {
+    fn new(start_time: Instant) -> Self {
+        Self {
+            frame: Mutex::new(video::Frame::new(video::SCREEN_WIDTH, video::SCREEN_HEIGHT)),
+            frame_seq: AtomicU64::new(0),
+            screen_subscribers: AtomicUsize::new(0),
+            events: broadcast::channel(1024).0,
+            trace: broadcast::channel(64).0,
+            audio: broadcast::channel(256).0,
+            log: Mutex::new(VecDeque::with_capacity(LOG_RING_CAPACITY)),
+            start_time,
+            request_id: Mutex::new(None),
+        }
+    }
+
     fn emit(&self, v: Value) {
         if self.events.receiver_count() > 0 {
             let _ = self.events.send(Arc::from(v.to_string()));
@@ -89,6 +106,9 @@ impl Reply {
 pub struct Request {
     pub cmd: Cmd,
     pub reply: oneshot::Sender<Reply>,
+    /// The client's ID for the request (`X-Request-Id`), which the events
+    /// it causes carry as `request_id`.
+    pub id: Option<String>,
 }
 
 #[derive(Deserialize, Default, Debug)]
@@ -502,6 +522,12 @@ pub struct DebugHub {
     seen_ends: u64,
     /// A `run` command waiting for its program to start.
     run_wait: Option<RunWait>,
+    /// The ID of the request being handled, which the events it causes
+    /// carry.
+    request_id: Option<String>,
+    /// The ID of the request that last set the machine running or asked
+    /// it to pause, which the stop that follows carries.
+    stop_request_id: Option<String>,
 
     trace: TraceRing,
     trace_enabled: bool,
@@ -600,6 +626,8 @@ impl DebugHub {
             seen_starts: 0,
             seen_ends: 0,
             run_wait: None,
+            request_id: None,
+            stop_request_id: None,
             trace: TraceRing::new(trace_capacity),
             trace_enabled: false,
             trace_until: None,
@@ -635,16 +663,7 @@ impl DebugHub {
                 addr
             );
         }
-        let shared = Arc::new(Shared {
-            frame: Mutex::new(video::Frame::new(video::SCREEN_WIDTH, video::SCREEN_HEIGHT)),
-            frame_seq: AtomicU64::new(0),
-            screen_subscribers: AtomicUsize::new(0),
-            events: broadcast::channel(1024).0,
-            trace: broadcast::channel(64).0,
-            audio: broadcast::channel(256).0,
-            log: Mutex::new(VecDeque::with_capacity(LOG_RING_CAPACITY)),
-            start_time: cpu.bus.start_time,
-        });
+        let shared = Arc::new(Shared::new(cpu.bus.start_time));
         let (tx, rx) = mpsc::channel();
         server::spawn(addr, tx, shared.clone())?;
 
@@ -657,7 +676,11 @@ impl DebugHub {
                 }
                 log.push_back(LogLine { t_ms, line: line.to_string() });
             }
-            log_shared.emit(json!({"type": "log", "t_ms": t_ms, "line": line}));
+            let mut event = json!({"type": "log", "t_ms": t_ms, "line": line});
+            if let Some(id) = log_shared.request_id.lock().ok().and_then(|id| id.clone()) {
+                event["request_id"] = id.into();
+            }
+            log_shared.emit(event);
         }));
         let audio_tx = shared.audio.clone();
         cpu.bus.audio_hook = Some(Box::new(move |samples: &[i16]| {
@@ -670,8 +693,12 @@ impl DebugHub {
         Ok(Self::new(Some(rx), Some(shared), trace_capacity))
     }
 
-    fn emit(&self, v: Value) {
+    /// Send an event, with the ID of the request that causes it.
+    fn emit(&self, mut v: Value) {
         if let Some(s) = &self.shared {
+            if let Some(id) = &self.request_id {
+                v["request_id"] = id.as_str().into();
+            }
             s.emit(v);
         }
     }
@@ -852,6 +879,10 @@ impl DebugHub {
                 PauseReason::ProgramExit => "program_exit",
             };
             let mut reply = json!({"paused": true, "reason": reason_str, "icount": cpu.executed, "registers": regs});
+            // The request that set the machine running, or asked it to stop.
+            if let Some(id) = self.stop_request_id.take() {
+                reply["request_id"] = id.into();
+            }
             match reason {
                 PauseReason::ProgramStart => reply["program"] = program_json(cpu),
                 PauseReason::ProgramExit => reply["exit"] = exit_json(cpu),
@@ -1091,7 +1122,10 @@ impl DebugHub {
         self.pause_hit = Some(reason);
     }
 
+    /// Set the machine running, for the request being handled: the stop
+    /// that ends this run carries its ID.
     fn resume(&mut self) {
+        self.stop_request_id = self.request_id.clone();
         if self.paused {
             self.paused = false;
             self.skip_bp_once = true;
@@ -1227,7 +1261,25 @@ impl DebugHub {
 
     // ----- request handling --------------------------------------------------
 
-    fn handle(&mut self, cpu: &mut Cpu, req: Request) {
+    fn handle(&mut self, cpu: &mut Cpu, mut req: Request) {
+        self.request_id = req.id.take();
+        if self.request_id.is_some() {
+            self.set_log_request_id(self.request_id.clone());
+        }
+        self.handle_cmd(cpu, req);
+        if self.request_id.take().is_some() {
+            self.set_log_request_id(None);
+        }
+    }
+
+    /// Tag the log lines written from now on with a request's ID, or none.
+    fn set_log_request_id(&self, id: Option<String>) {
+        if let Some(mut current) = self.shared.as_ref().and_then(|s| s.request_id.lock().ok()) {
+            *current = id;
+        }
+    }
+
+    fn handle_cmd(&mut self, cpu: &mut Cpu, req: Request) {
         let cmd = match req.cmd {
             Cmd::SaveState { path } | Cmd::LoadState { path } if path.is_empty() => {
                 let _ = req.reply.send(Reply::bad("a path is needed"));
@@ -1358,6 +1410,7 @@ impl DebugHub {
                 } else {
                     if !self.paused {
                         self.enter_pause(PauseReason::Request);
+                        self.stop_request_id = self.request_id.clone();
                     }
                     // Pause notifications go out from end_batch.
                     self.pause_waiters.push(req.reply);
@@ -1453,6 +1506,15 @@ impl DebugHub {
             Cmd::WriteMem { expect: Some(expect), data, .. } if expect.len() != data.len() => {
                 Reply::bad(format!("expect has {} bytes, the data {}", expect.len(), data.len()))
             }
+            // While the machine runs, the bytes checked could change before
+            // the client acts on the reply.
+            Cmd::WriteMem { expect: Some(_), .. } if !self.paused => Reply::ErrorJson(
+                409,
+                json!({
+                    "error": "a write with \"expect\" needs the machine paused (POST /api/control/pause); nothing was written",
+                    "paused": false,
+                }),
+            ),
             Cmd::WriteMem { addr, data, expect } => match parse_addr(cpu, &addr) {
                 Ok(a) => {
                     let targets: Option<Vec<usize>> = (0..data.len()).map(|i| a.byte(cpu, i)).collect();
@@ -2456,7 +2518,7 @@ mod tests {
 
     fn handle(cpu: &mut Cpu, hub: &mut DebugHub, cmd: Cmd) -> Reply {
         let (reply, mut rx) = oneshot::channel();
-        hub.handle(cpu, Request { cmd, reply });
+        hub.handle(cpu, Request { cmd, reply, id: None });
         rx.try_recv().expect("an answer at once")
     }
 
@@ -2527,7 +2589,7 @@ mod tests {
     /// The reply to a command the hub answers at once.
     fn reply(cpu: &mut Cpu, hub: &mut DebugHub, cmd: Cmd) -> Result<Value, (u16, String)> {
         let (reply, mut rx) = oneshot::channel();
-        hub.handle(cpu, Request { cmd, reply });
+        hub.handle(cpu, Request { cmd, reply, id: None });
         match rx.try_recv() {
             Ok(Reply::Json(v)) => Ok(v),
             Ok(Reply::Error(code, e)) => Err((code, e)),
@@ -2552,6 +2614,7 @@ mod tests {
     #[test]
     fn a_write_expecting_other_bytes_writes_nothing() {
         let (mut cpu, mut hub) = (Cpu::new(".".into()), DebugHub::disabled());
+        hub.paused = true;
         cpu.bus.write_8(0x2000, 0xCD);
         cpu.bus.write_8(0x2001, 0xAB);
         let refused = reply(&mut cpu, &mut hub, write("2000", &[0x21, 0x43], Some(&[0x34, 0x12]))).unwrap_err();
@@ -2563,6 +2626,19 @@ mod tests {
         assert_eq!(done["new"], "21 43");
         let short = reply(&mut cpu, &mut hub, write("2000", &[0x21, 0x43], Some(&[0x21]))).unwrap_err();
         assert_eq!(short.0, 400, "expect is as long as the data");
+    }
+
+    #[test]
+    fn a_write_expecting_bytes_is_refused_while_the_machine_runs() {
+        let (mut cpu, mut hub) = (Cpu::new(".".into()), DebugHub::disabled());
+        cpu.bus.write_8(0x2000, 0xCD);
+        let refused = reply(&mut cpu, &mut hub, write("2000", &[0x21], Some(&[0xCD]))).unwrap_err();
+        assert_eq!(refused.0, 409);
+        assert!(refused.1.contains("needs the machine paused"), "{}", refused.1);
+        assert_eq!(cpu.bus.peek_8(0x2000), 0xCD);
+        // A write without "expect" goes ahead while the machine runs.
+        reply(&mut cpu, &mut hub, write("2000", &[0x21], None)).unwrap();
+        assert_eq!(cpu.bus.peek_8(0x2000), 0x21);
     }
 
     /// A .COM program: MOV AX,1234h; MOV BX,5678h; MOV AX,[0110h];
@@ -2612,7 +2688,7 @@ mod tests {
 
     fn send(cpu: &mut Cpu, hub: &mut DebugHub, cmd: Cmd) -> oneshot::Receiver<Reply> {
         let (reply, rx) = oneshot::channel();
-        hub.handle(cpu, Request { cmd, reply });
+        hub.handle(cpu, Request { cmd, reply, id: None });
         rx
     }
 
@@ -2680,6 +2756,56 @@ mod tests {
         ask(&mut cpu, &mut hub, Cmd::Resume { until: None }, 0).unwrap();
         let stop = ask(&mut cpu, &mut hub, Cmd::WaitPause, 50).unwrap();
         assert_eq!(stop["exit"]["aborted"], false);
+    }
+
+    fn send_with_id(cpu: &mut Cpu, hub: &mut DebugHub, cmd: Cmd, id: &str) -> oneshot::Receiver<Reply> {
+        let (reply, rx) = oneshot::channel();
+        hub.handle(cpu, Request { cmd, reply, id: Some(id.into()) });
+        rx
+    }
+
+    /// The events sent since the last call, by type and request ID.
+    fn events(rx: &mut tokio::sync::broadcast::Receiver<std::sync::Arc<str>>) -> Vec<(String, Option<String>)> {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|e| serde_json::from_str::<Value>(&e).unwrap())
+            .filter(|e| e["type"] != "video_mode")
+            .map(|e| (e["type"].as_str().unwrap().to_string(), e["request_id"].as_str().map(String::from)))
+            .collect()
+    }
+
+    #[test]
+    fn a_request_s_id_comes_back_on_the_events_and_the_stop_it_causes() {
+        let (mut cpu, mut hub) = machine("request-id");
+        let shared = std::sync::Arc::new(super::Shared::new(std::time::Instant::now()));
+        let mut rx = shared.events.subscribe();
+        hub.shared = Some(shared);
+        let id = |s: &str| Some(s.to_string());
+
+        let rx_run = send_with_id(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true }, "run-1");
+        let stop = answer(&mut cpu, &mut hub, rx_run, 50).unwrap();
+        assert_eq!(stop["request_id"], "run-1");
+        assert_eq!(events(&mut rx), [("paused".into(), id("run-1"))]);
+
+        let rx_step = send_with_id(&mut cpu, &mut hub, Cmd::Step { count: 1 }, "step-2");
+        let stop = answer(&mut cpu, &mut hub, rx_step, 5).unwrap();
+        assert_eq!(stop["request_id"], "step-2");
+        // A step sends no "resumed" event.
+        assert_eq!(events(&mut rx), [("paused".into(), id("step-2"))]);
+
+        // A stop long after the request that set the machine running
+        // carries its ID, also in the reply to a wait.
+        ask(&mut cpu, &mut hub, break_on(None, Some(true)), 0).unwrap();
+        let rx_go = send_with_id(&mut cpu, &mut hub, Cmd::Resume { until: None }, "go-3");
+        answer(&mut cpu, &mut hub, rx_go, 0).unwrap();
+        let stop = ask(&mut cpu, &mut hub, Cmd::WaitPause, 50).unwrap();
+        assert_eq!((stop["reason"].as_str(), stop["request_id"].as_str()), (Some("program_exit"), Some("go-3")));
+        assert_eq!(events(&mut rx), [("resumed".into(), id("go-3")), ("paused".into(), id("go-3"))]);
+
+        // Requests without one cause events without one.
+        ask(&mut cpu, &mut hub, Cmd::Resume { until: None }, 0).unwrap();
+        let stop = ask(&mut cpu, &mut hub, Cmd::Step { count: 1 }, 5).unwrap();
+        assert!(stop.get("request_id").is_none(), "{stop}");
+        assert_eq!(events(&mut rx), [("resumed".into(), None), ("paused".into(), None)]);
     }
 
     #[test]
