@@ -400,6 +400,8 @@ pub struct Cpu {
     /// How many programs have been loaded, for telling whether a game's
     /// commands started one (`games::ActiveGame::done`).
     pub programs_loaded: u64,
+    /// The programs started and ended, for the debugger.
+    pub programs: ProgramEvents,
     /// Set by STI, MOV SS and POP SS: hardware interrupts wait until the
     /// next instruction has run.
     pub irq_shadow: bool,
@@ -465,6 +467,32 @@ pub struct FpuKey {
     pub control: u16,
     pub status: u16,
     pub tags: [u8; 8],
+}
+
+/// The programs DOS started and ended since start, for the debugger to
+/// stop at (`debug::DebugHub`).
+#[derive(Debug, Clone, Default)]
+pub struct ProgramEvents {
+    /// Programs loaded and about to run, and where the last one starts
+    /// (the physical address of its entry point), its name and its PSP.
+    pub started: u64,
+    pub entry: usize,
+    pub entry_cs_ip: (u16, u16),
+    pub name: String,
+    pub psp: u16,
+    /// Programs that ended, and how the last one did.
+    pub ended: u64,
+    pub last_exit: Option<ProgramExit>,
+}
+
+/// How a program ended.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProgramExit {
+    pub name: String,
+    /// The exit code (AL of INT 21h AH=4Ch or 31h; 0 for INT 20h).
+    pub code: u8,
+    /// It stayed resident (INT 21h AH=31h).
+    pub resident: bool,
 }
 
 /// A parent process's state while its child runs (INT 21h AH=4Bh).
@@ -573,6 +601,7 @@ impl Cpu {
             bios_wait_until: None,
             process_stack: Vec::new(),
             programs_loaded: 0,
+            programs: ProgramEvents::default(),
             irq_shadow: false,
             // 64K direct-mapped slots (~3.5 MB): comfortably large for any
             // DOS program's hot working set.
@@ -767,6 +796,7 @@ impl Cpu {
     /// Returns whether it went back to a parent.
     pub fn terminate(&mut self, code: u8) -> bool {
         self.last_child_exit = code as u16;
+        self.note_exit(code, false);
         let psp = self.current_psp;
         // Its DPMI clients end with it, and its IPX sockets.
         crate::dpmi::process_ended(self, psp);
@@ -785,6 +815,15 @@ impl Cpu {
         self.errorlevel = code;
         self.state = CpuState::RebootShell;
         false
+    }
+
+    /// Count the running program as ended with exit code `code`, staying
+    /// `resident` or not, for the debugger.
+    pub fn note_exit(&mut self, code: u8, resident: bool) {
+        let name = self.program.clone();
+        let events = &mut self.programs;
+        events.ended += 1;
+        events.last_exit = Some(ProgramExit { name, code, resident });
     }
 
     /// Stop the running program for the shell to be loaded again, with
@@ -1561,6 +1600,14 @@ impl Cpu {
             self.bus.dta_segment = self.current_psp;
             self.bus.dta_offset = 0x80;
             self.program = filename.rsplit(['\\', '/', ':']).next().unwrap_or(filename).to_ascii_uppercase();
+            let (cs, ip) = (self.cs(), self.ip());
+            let entry = self.get_physical_addr(cs, ip);
+            let events = &mut self.programs;
+            events.started += 1;
+            events.entry = entry;
+            events.entry_cs_ip = (cs, ip);
+            events.name = self.program.clone();
+            events.psp = self.current_psp;
         }
         if loaded && !matches!(placement, Placement::Child(_)) {
             // A program started from the shell gets the master environment

@@ -140,7 +140,16 @@ pub enum Cmd {
     RemoveWatchpoint(Option<String>),
     /// Pause after the CPU raises one of these exceptions (bit n = vector
     /// n), or switches between real and protected mode.
-    BreakOn { exceptions: Option<u32>, clear_exceptions: Option<u32>, mode_switch: Option<bool> },
+    BreakOn {
+        exceptions: Option<u32>,
+        clear_exceptions: Option<u32>,
+        mode_switch: Option<bool>,
+        program_start: Option<bool>,
+        program_exit: Option<bool>,
+    },
+    /// Run a command line at the DOS prompt, as typed, and answer once it
+    /// started a program: stopped at its entry point with `stop_at_entry`.
+    Run { command: String, stop_at_entry: bool },
     Ivt,
     Gdt,
     Ldt,
@@ -420,6 +429,8 @@ enum PauseReason {
     Exception,
     ModeSwitch,
     Watchpoint,
+    ProgramStart,
+    ProgramExit,
 }
 
 /// Memory the debugger watches: `len` bytes at physical address `phys`,
@@ -428,6 +439,15 @@ struct Watch {
     phys: usize,
     len: u8,
     value: u32,
+}
+
+/// A `run` command's reply, sent once the command line started a program
+/// (`before` is `cpu.programs.started` as it was queued), or with
+/// `stop_at_entry` once the machine stopped there.
+struct RunWait {
+    before: u64,
+    stop_at_entry: bool,
+    reply: oneshot::Sender<Reply>,
 }
 
 impl Watch {
@@ -459,6 +479,19 @@ pub struct DebugHub {
     /// The watchpoint that stopped the machine: its address and length,
     /// and the value before and after.
     watch_hit: Option<(usize, u8, u32, u32)>,
+    /// Pause at the entry point of every program DOS starts, and after
+    /// every program ends; `start_once` pauses at the next one's only.
+    break_program_start: bool,
+    break_program_exit: bool,
+    start_once: bool,
+    /// The entry point of the program just started, while the machine
+    /// runs to it.
+    start_breakpoint: Option<usize>,
+    /// `cpu.programs.started` and `.ended` as last seen.
+    seen_starts: u64,
+    seen_ends: u64,
+    /// A `run` command waiting for its program to start.
+    run_wait: Option<RunWait>,
 
     trace: TraceRing,
     trace_enabled: bool,
@@ -548,6 +581,13 @@ impl DebugHub {
             seen_mode_switches: 0,
             watchpoints: Vec::new(),
             watch_hit: None,
+            break_program_start: false,
+            break_program_exit: false,
+            start_once: false,
+            start_breakpoint: None,
+            seen_starts: 0,
+            seen_ends: 0,
+            run_wait: None,
             trace: TraceRing::new(trace_capacity),
             trace_enabled: false,
             trace_stream_max: 1000,
@@ -635,8 +675,9 @@ impl DebugHub {
         self.rx = Some(rx);
 
         self.process_input(cpu);
+        self.check_run(cpu);
 
-        let mode = (cpu.bus.video_mode, video::frame_size(&cpu.bus));
+        let mode =(cpu.bus.video_mode, video::frame_size(&cpu.bus));
         if self.last_mode != Some(mode) {
             let (w, h) = cpu.bus.video_mode.dimensions();
             self.emit(json!({
@@ -666,6 +707,10 @@ impl DebugHub {
             || self.break_exceptions != 0
             || self.break_mode_switch
             || !self.watchpoints.is_empty()
+            || self.break_program_start
+            || self.break_program_exit
+            || self.start_once
+            || self.start_breakpoint.is_some()
     }
 
     /// Per-instruction hook, called just before an instruction at `phys_ip`
@@ -697,6 +742,26 @@ impl DebugHub {
                 self.enter_pause(PauseReason::ModeSwitch);
                 return true;
             }
+        }
+        if cpu.programs.ended != self.seen_ends {
+            self.seen_ends = cpu.programs.ended;
+            if self.break_program_exit {
+                self.enter_pause(PauseReason::ProgramExit);
+                return true;
+            }
+        }
+        // A program just started: run to its entry point, through any
+        // interrupt that comes first.
+        if cpu.programs.started != self.seen_starts {
+            self.seen_starts = cpu.programs.started;
+            if self.break_program_start || std::mem::take(&mut self.start_once) {
+                self.start_breakpoint = Some(cpu.programs.entry);
+            }
+        }
+        if self.start_breakpoint == Some(phys_ip) {
+            self.start_breakpoint = None;
+            self.enter_pause(PauseReason::ProgramStart);
+            return true;
         }
         if !self.skip_bp_once
             && (self.temp_breakpoint == Some(phys_ip) || self.breakpoints.contains(&phys_ip))
@@ -762,8 +827,15 @@ impl DebugHub {
                 PauseReason::Exception => "exception",
                 PauseReason::ModeSwitch => "mode_switch",
                 PauseReason::Watchpoint => "watchpoint",
+                PauseReason::ProgramStart => "program_start",
+                PauseReason::ProgramExit => "program_exit",
             };
             let mut reply = json!({"paused": true, "reason": reason_str, "icount": cpu.executed, "registers": regs});
+            match reason {
+                PauseReason::ProgramStart => reply["program"] = program_json(cpu),
+                PauseReason::ProgramExit => reply["exit"] = exit_json(cpu),
+                _ => {}
+            }
             if reason == PauseReason::Exception
                 && let Some(e) = pm::exceptions_json(cpu)["recent"].as_array().and_then(|a| a.last().cloned())
             {
@@ -783,6 +855,11 @@ impl DebugHub {
             self.emit(event);
             for w in self.pause_waiters.drain(..) {
                 let _ = w.send(Reply::Json(reply.clone()));
+            }
+            if reason == PauseReason::ProgramStart
+                && let Some(run) = self.run_wait.take_if(|r| r.stop_at_entry)
+            {
+                let _ = run.reply.send(Reply::Json(reply.clone()));
             }
         }
 
@@ -950,6 +1027,24 @@ impl DebugHub {
                         shared.frame_seq.fetch_add(1, Ordering::Release);
                     }
                 }
+            }
+        }
+    }
+
+    /// Answer a `run` command whose program started, or whose command
+    /// line ended at the prompt without starting one.
+    fn check_run(&mut self, cpu: &Cpu) {
+        let Some(run) = &self.run_wait else { return };
+        if cpu.programs.started > run.before {
+            if !run.stop_at_entry
+                && let Some(run) = self.run_wait.take()
+            {
+                let _ = run.reply.send(Reply::Json(json!({"ok": true, "program": program_json(cpu)})));
+            }
+        } else if cpu.shell_idle() && !cpu.batch.is_active() && cpu.pending_command.is_none() {
+            self.start_once = false;
+            if let Some(run) = self.run_wait.take() {
+                let _ = run.reply.send(Reply::Error(422, "the command line started no program".into()));
             }
         }
     }
@@ -1354,6 +1449,8 @@ impl DebugHub {
                     self.breakpoints.clear();
                     self.break_exceptions = 0;
                     self.break_mode_switch = false;
+                    self.break_program_start = false;
+                    self.break_program_exit = false;
                     Reply::Json(self.breakpoints_json())
                 }
                 Some(a) => match parse_addr(cpu, &a).and_then(breakpoint_phys) {
@@ -1400,7 +1497,7 @@ impl DebugHub {
                     Err(e) => Reply::bad(e),
                 },
             },
-            Cmd::BreakOn { exceptions, clear_exceptions, mode_switch } => {
+            Cmd::BreakOn { exceptions, clear_exceptions, mode_switch, program_start, program_exit } => {
                 if let Some(mask) = exceptions {
                     self.break_exceptions |= mask;
                 }
@@ -1410,9 +1507,37 @@ impl DebugHub {
                 if let Some(m) = mode_switch {
                     self.break_mode_switch = m;
                 }
+                if let Some(b) = program_start {
+                    self.break_program_start = b;
+                }
+                if let Some(b) = program_exit {
+                    self.break_program_exit = b;
+                }
                 self.seen_exceptions = cpu.exceptions;
                 self.seen_mode_switches = cpu.mode_switches;
+                self.seen_starts = cpu.programs.started;
+                self.seen_ends = cpu.programs.ended;
                 Reply::Json(self.breakpoints_json())
+            }
+            Cmd::Run { command, stop_at_entry } => {
+                if self.run_wait.is_some() {
+                    Reply::Error(409, "a run command is already waiting for its program".into())
+                } else if !cpu.shell_idle() || cpu.batch.is_active() || cpu.pending_command.is_some() {
+                    Reply::Error(409, "a program is running: run starts one from the DOS prompt".into())
+                } else if command.trim().is_empty() || command.contains(['\r', '\n']) {
+                    Reply::bad("command: one command line")
+                } else {
+                    cpu.queue_batch_lines([command.trim()]);
+                    self.seen_starts = cpu.programs.started;
+                    self.start_once = stop_at_entry;
+                    self.run_wait = Some(RunWait { before: cpu.programs.started, stop_at_entry, reply: req.reply });
+                    let was = self.paused;
+                    self.resume();
+                    if was {
+                        self.emit(json!({"type": "resumed", "icount": cpu.executed}));
+                    }
+                    return;
+                }
             }
             Cmd::Ivt => Reply::Json(ivt_json(cpu)),
             Cmd::Gdt => Reply::Json(pm::table_json(cpu, false, 1024)),
@@ -1479,7 +1604,7 @@ impl DebugHub {
         let (frame_w, frame_h) = video::frame_size(&cpu.bus);
         let crtc = &cpu.bus.vga.crtc_regs;
         let timing = cpu.bus.vga.peek_timing();
-        json!({
+        let mut status = json!({
             "paused": self.paused,
             "settings_window": self.divert,
             "icount": cpu.executed,
@@ -1644,7 +1769,12 @@ impl DebugHub {
                     "rate": cpu.bus.mouse.ps2.rate,
                 },
             },
-        })
+        });
+        // The program running (empty at the prompt), and how the last one
+        // to end did.
+        status["program"] = cpu.program.clone().into();
+        status["last_exit"] = exit_json(cpu);
+        status
     }
 
     fn trace_status(&self) -> Value {
@@ -1764,7 +1894,27 @@ impl DebugHub {
             "breakpoints": v.iter().map(|p| format!("{:05X}", p)).collect::<Vec<_>>(),
             "exceptions": exceptions,
             "mode_switch": self.break_mode_switch,
+            "program_start": self.break_program_start,
+            "program_exit": self.break_program_exit,
         })
+    }
+}
+
+/// The program started last: its name and entry point.
+fn program_json(cpu: &Cpu) -> Value {
+    let p = &cpu.programs;
+    json!({
+        "name": p.name,
+        "entry": format!("{:04X}:{:04X}", p.entry_cs_ip.0, p.entry_cs_ip.1),
+        "psp": format!("{:04X}", p.psp),
+    })
+}
+
+/// How the program that ended last did, or null before any did.
+fn exit_json(cpu: &Cpu) -> Value {
+    match &cpu.programs.last_exit {
+        Some(e) => json!({"name": e.name, "code": e.code, "resident": e.resident}),
+        None => Value::Null,
     }
 }
 
@@ -2180,8 +2330,143 @@ fn net_json(cpu: &Cpu) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{LowInput, keys_for_char, step_over_len};
+    use super::{Cmd, DebugHub, LowInput, Reply, Request, keys_for_char, step_over_len};
+    use crate::cpu::Cpu;
+    use crate::exec::{self, StopReason};
     use rust_dos::keylayout::Layout;
+    use serde_json::Value;
+    use tokio::sync::oneshot;
+
+    /// A .COM program: MOV AX,1234h; MOV BX,5678h; MOV AX,[0110h];
+    /// MOV AX,4C00h; INT 21h; and the word ABCDh at 0110h.
+    const PROBE: &str = "B83412BB7856A11001B8004CCD210000CDAB";
+
+    /// A machine at the prompt with PROBE.COM on C:, and a hub with no
+    /// server, which takes its commands from `send`.
+    fn machine(name: &str) -> (Cpu, DebugHub) {
+        let dir = std::env::temp_dir().join(format!("rust-dos-debug-{}-{}", name, std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let code: Vec<u8> = (0..PROBE.len()).step_by(2).map(|i| u8::from_str_radix(&PROBE[i..i + 2], 16).unwrap()).collect();
+        std::fs::write(dir.join("PROBE.COM"), code).unwrap();
+        let mut cpu = Cpu::new(dir);
+        cpu.load_shell();
+        // Polled as the server's is; this one's commands come from `send`.
+        let mut hub = DebugHub::new(Some(std::sync::mpsc::channel().1), None, 1000);
+        run(&mut cpu, &mut hub, 20);
+        assert!(cpu.shell_idle(), "the shell waits at its prompt");
+        (cpu, hub)
+    }
+
+    /// Run `frames` frames of a few thousand instructions, as the main loop
+    /// does: the hub's requests first, nothing while it is paused.
+    fn run(cpu: &mut Cpu, hub: &mut DebugHub, frames: usize) {
+        for _ in 0..frames {
+            hub.poll(cpu);
+            if hub.paused {
+                continue;
+            }
+            let hot = hub.begin_batch(cpu);
+            let end = cpu.bus.clock.icount + 5000;
+            cpu.bus.start_batch(end);
+            while cpu.bus.clock.icount < end {
+                match exec::run_batch(cpu, hub, hot) {
+                    StopReason::BatchEnd | StopReason::Paused | StopReason::Exit => break,
+                    StopReason::ShellReloaded => cpu.bus.start_batch(end),
+                }
+            }
+            hub.end_batch(cpu);
+        }
+    }
+
+    fn send(cpu: &mut Cpu, hub: &mut DebugHub, cmd: Cmd) -> oneshot::Receiver<Reply> {
+        let (reply, rx) = oneshot::channel();
+        hub.handle(cpu, Request { cmd, reply });
+        rx
+    }
+
+    /// The reply to a command, after running up to `frames` frames for it.
+    fn answer(cpu: &mut Cpu, hub: &mut DebugHub, mut rx: oneshot::Receiver<Reply>, frames: usize) -> Result<Value, (u16, String)> {
+        for _ in 0..=frames {
+            match rx.try_recv() {
+                Ok(Reply::Json(v)) => return Ok(v),
+                Ok(Reply::Error(code, e)) => return Err((code, e)),
+                Ok(_) => panic!("not a JSON reply"),
+                Err(_) => run(cpu, hub, 1),
+            }
+        }
+        panic!("no reply in {} frames", frames)
+    }
+
+    fn ask(cpu: &mut Cpu, hub: &mut DebugHub, cmd: Cmd, frames: usize) -> Result<Value, (u16, String)> {
+        let rx = send(cpu, hub, cmd);
+        answer(cpu, hub, rx, frames)
+    }
+
+    fn break_on(program_start: Option<bool>, program_exit: Option<bool>) -> Cmd {
+        Cmd::BreakOn { exceptions: None, clear_exceptions: None, mode_switch: None, program_start, program_exit }
+    }
+
+    #[test]
+    fn run_stops_at_the_program_s_entry_point() {
+        let (mut cpu, mut hub) = machine("entry");
+        let rx = send(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true });
+        let stop = answer(&mut cpu, &mut hub, rx, 50).unwrap();
+        assert_eq!(stop["reason"], "program_start");
+        assert_eq!(stop["program"]["name"], "PROBE.COM");
+        assert_eq!(stop["registers"]["ip"], "0100");
+        assert_eq!(stop["program"]["entry"], format!("{}:0100", stop["registers"]["cs"].as_str().unwrap()));
+        assert!(hub.paused);
+        // Nothing of the program ran: AX is what DOS starts it with.
+        assert_eq!(cpu.ax(), 0);
+    }
+
+    #[test]
+    fn a_program_s_end_stops_the_machine_with_its_exit_code() {
+        let (mut cpu, mut hub) = machine("exit");
+        ask(&mut cpu, &mut hub, break_on(None, Some(true)), 0).unwrap();
+        ask(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true }, 50).unwrap();
+        ask(&mut cpu, &mut hub, Cmd::Resume { until: None }, 0).unwrap();
+        let stop = ask(&mut cpu, &mut hub, Cmd::WaitPause, 50).unwrap();
+        assert_eq!(stop["reason"], "program_exit");
+        assert!(hub.paused);
+        assert_eq!(stop["exit"], serde_json::json!({"name": "PROBE.COM", "code": 0, "resident": false}));
+    }
+
+    #[test]
+    fn run_without_stopping_answers_once_the_program_started() {
+        let (mut cpu, mut hub) = machine("started");
+        let started = ask(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: false }, 50).unwrap();
+        assert_eq!(started["program"]["name"], "PROBE.COM");
+        assert!(!hub.paused);
+        run(&mut cpu, &mut hub, 20);
+        assert_eq!(super::exit_json(&cpu)["name"], "PROBE.COM", "the status shows how it ended");
+    }
+
+    #[test]
+    fn every_program_start_stops_while_asked_to() {
+        let (mut cpu, mut hub) = machine("every");
+        ask(&mut cpu, &mut hub, break_on(Some(true), None), 0).unwrap();
+        cpu.queue_batch_lines(["PROBE.COM"]);
+        let stop = ask(&mut cpu, &mut hub, Cmd::WaitPause, 50).unwrap();
+        assert_eq!((stop["reason"].as_str(), stop["registers"]["ip"].as_str()), (Some("program_start"), Some("0100")));
+    }
+
+    #[test]
+    fn run_refuses_a_command_line_that_starts_no_program() {
+        let (mut cpu, mut hub) = machine("none");
+        let rx = send(&mut cpu, &mut hub, Cmd::Run { command: "NOSUCH.EXE".into(), stop_at_entry: true });
+        assert_eq!(answer(&mut cpu, &mut hub, rx, 50).unwrap_err().0, 422);
+        assert!(!hub.paused && !hub.start_once, "no stop is left armed");
+    }
+
+    #[test]
+    fn run_waits_for_the_prompt() {
+        let (mut cpu, mut hub) = machine("busy");
+        let rx = send(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true });
+        answer(&mut cpu, &mut hub, rx, 50).unwrap();
+        let rx = send(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true });
+        assert_eq!(answer(&mut cpu, &mut hub, rx, 0).unwrap_err().0, 409, "a program is running");
+    }
 
     /// The scan codes of the keys going down to type `c`.
     fn scans(c: char, layout: &str) -> Vec<u8> {
