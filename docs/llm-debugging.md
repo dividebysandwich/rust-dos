@@ -306,60 +306,231 @@ them. At the DOS prompt, the `MOUNT` and `IMGMOUNT` commands do the same.
 
 `POST /api/state/save {"path":"/abs/before-boss.state"}` saves the whole
 machine to a file, and `POST /api/state/load` with the same body goes back
-to it, as the Ctrl+F1 and Ctrl+F2 slots do. Save before a step that is
-slow to reach (a menu path, a level) and load to try it again. Both work
-while the machine runs (at the end of a frame) or is paused. A load brings
-the hardware settings the state was saved with, and keeps the breakpoints
-and watchpoints, so you can set a breakpoint and load the same state again
-to hit it. When the state's hardware settings or media differ from the
-running machine's, the reply lists them in `differences`.
+to it. Save before a step that is slow to reach (a menu path, a level) and
+load to try it again. The files are the ones the Ctrl+F1 and Ctrl+F2 slots
+keep; the slots and the settings window's States page load them as a plain
+load does, without a reply to show `differences` in.
 
-A load that fails (400) leaves the machine, its settings and hardware as
-they were; the reply has `"loaded":false` and `"unchanged":true`.
+There are two kinds of save and load:
 
-Both replies have `format` (the file layout's version), `emulator` (this
-rust-dos's version) and the state's `header`: the rust-dos that saved it
-(`version`), when, the program, the hardware settings (`machine`) and its
-`media` (the mounted drives, their folders, and their disk and CD images'
-paths, sizes and, for a read-only image, a hash of its first 64 KiB).
-Every save records the media, so any state saved by this version can be
-loaded with a strict match later. A state saved before media were recorded
-has `"media":null`. The files and disk images on the host aren't part of a
-state: what a program wrote since stays written, except for a booted
-system's disks (see "Booted systems" below).
+- **Plain** (the default) is for trying things by hand. It works while the
+  machine runs, keeps the breakpoints so you can load again to hit one,
+  and loads a state of other hardware or media, listing what differs.
+- **Strict match** (`"strict_match":true` in the body) is for a script that
+  goes back to a checkpoint and has to know the machine there is the one
+  it saved. The load is refused unless the state's hardware settings and
+  media match the running machine's, and it starts the debugger afresh, so
+  nothing set before the load stops or types into the restored machine.
+  Both work only while paused. With `--deterministic`, a run from a
+  strict-match load repeats the run that saved the state (see
+  "Deterministic runs").
+
+Neither kind keeps the files on the host. A state records which folders
+and images the drives were mounted from, and a load mounts them again,
+but not what is in them: what a program wrote since stays written,
+except for a booted system's disks (see "Booted systems" below). A
+strict-match load checks the paths, that the images are there, and the
+size and start of read-only images (see "What counts as the same
+media").
+
+#### Plain save and load
+
+A plain save or load is carried out at the end of the frame, whether the
+machine runs or is paused (in deterministic mode a load waits for a pause,
+see "Deterministic runs"). A load puts in the hardware settings the state
+was saved with, then the machine, which mounts the drives as the state had
+them and unmounts the others; a state of another `memsize` is refused.
+Breakpoints, watchpoints and `break_on` stops stay, and keys held down
+through `/api/input` or the window go up.
+
+When the state's hardware settings, media or deterministic start time
+differ from the running machine's, the state is loaded all the same and
+the reply lists what was different in `differences`. Here D: was mounted
+and the speed set to 20000 after the save (paths shortened):
+
+```sh
+curl -s $J -XPOST -d '{"path":"/work/a.state"}' $H/api/state/load
+```
+
+```json
+{
+  "loaded": "/work/a.state",
+  "format": 1,
+  "emulator": "1.6.0",
+  "header": {
+    "version": "1.6.0",
+    "saved": "2026-10-11 02:22:06",
+    "game": null,
+    "game_name": null,
+    "program": "",
+    "machine": "",
+    "memsize": 16,
+    "emulated_ns": 23917375333,
+    "media": [
+      {"drive": "C", "kind": "hdd", "read_only": false, "folder": "/work/c"}
+    ]
+  },
+  "differences": [
+    "emulator.cycles: the state has the default, this machine has 20000",
+    "drive D: is mounted here (hdd /work/d); the state hasn't it"
+  ]
+}
+```
+
+After the load the machine runs at the state's speed (`auto`, the
+default) and D: is unmounted, as the state had it.
 
 #### Strict match
 
-A client that goes back to a known point of its session and needs the
-same machine and the same debugger there adds `"strict_match":true` to the
-save or load body. A strict-match save or load then works as follows:
+A strict-match save or load guarantees:
 
-- **Paused only.** Both are refused with 409 unless the machine is paused
-  (`POST /api/control/pause`) and no step or `run` command is still to
-  stop it. A save is also refused while queued input (`/api/input`, typed
-  text) is still being typed, which goes on while paused.
-- **Same hardware and media.** A load is refused with 409 and a
-  `differences` list when the state's hardware settings (`cpu`,
-  `machine`, `cycles`, the sound cards, EMS/UMB) or its media differ from
-  the running machine's, or the state has no record of its media. With
-  `--deterministic`, a state saved outside the mode or with another
-  `--start-time` differs too (`deterministic: ...`). Set the
-  speed with `/api/speed` or mount the drive again, then load.
-- **A fresh debugger.** A load clears the breakpoints, watchpoints and
-  `break_on` stops, a step-over's or `resume until` target, and queued
-  input; `/api/control/wait` and `run` requests still waiting get 409.
-  Keys held down through `/api/input` are forgotten without a key-up, so
-  the machine keeps the keyboard and mouse it was saved with. With
-  `--deterministic` it also drops a `resume`'s `until_ms` and input waiting
-  for its emulated time. The machine stays paused. The reply's
-  `debugger_reset` counts what was cleared (`held_keys` and `until_ms`
-  among it), so set the breakpoints again after a load.
-- **Media read again.** Other saves record the media as they were when
-  the drives were last mounted or changed: CUE sheets are read and the
-  images looked at only then, and the hash of a read-only image's first
-  64 KiB is kept while the file's size and time stay the same. A
-  strict-match save or load reads every CUE sheet and read-only image
+- **The machine is stopped between two instructions.** Both are refused
+  with 409 unless the machine is paused (`POST /api/control/pause`) and no
+  step or `run` command is still to stop it. A save is also refused while
+  queued input (`/api/input`, typed text) is still being typed, which goes
+  on while paused. The refusal has the reason and `"paused"`:
+
+  ```json
+  {"error": "can't do a strict-match load: the machine runs; pause it first (POST /api/control/pause)", "paused": false}
+  ```
+
+  The other reasons are `a step is pending`, `a run command waits for its
+  program` and, for a save, `queued input is still being typed`.
+
+- **The same hardware and media.** A load is refused with 409, and nothing
+  is loaded, when the state's hardware settings or media differ from the
+  running machine's, or the state has no record of its media (a state
+  saved by a rust-dos from before media were recorded). The hardware
+  settings compared are those a state brings: `machine`, `cpu`, `cycles`,
+  `memsize`, `ems`, `umb`, `dos_high`, `monochrome`, the sound cards, and
+  the Voodoo and PowerVR cards. The deterministic mode counts as well: a
+  state saved with `--deterministic` differs from a machine without it,
+  and the other way round, and two `--start-time`s differ. The reply
+  lists every difference in the words a plain load uses:
+
+  ```json
+  {
+    "error": "/work/a.state doesn't match this machine; nothing was loaded",
+    "loaded": false,
+    "unchanged": true,
+    "differences": [
+      "emulator.cycles: the state has the default, this machine has 20000",
+      "drive D: is mounted here (hdd /work/d); the state hasn't it"
+    ]
+  }
+  ```
+
+  Set the speed with `/api/speed`, mount or unmount the drives, then load
   again.
+
+- **A fresh debugger.** A load that goes through clears the breakpoints,
+  watchpoints and `break_on` stops, the target of a step-over or of
+  `resume {"until":...}`, and queued input, and drops a `resume`'s
+  `until_ms` in deterministic mode. Requests still waiting on any of it
+  (`/api/control/wait`, input sent with `wait`) get 409 with
+  `{"error":"a save state was loaded"}`. Keys held down through
+  `/api/input` or the window are forgotten without a key-up, so the
+  machine keeps the keys and mouse buttons it was saved with. The machine
+  stays paused. The reply's `debugger_reset` says what was cleared; set
+  the breakpoints you need again before resuming:
+
+  ```sh
+  curl -s $J -XPOST -d '{"path":"/work/a.state","strict_match":true}' $H/api/state/load
+  ```
+
+  ```json
+  {
+    "loaded": "/work/a.state",
+    "format": 1,
+    "emulator": "1.6.0",
+    "header": {"version": "1.6.0", "saved": "2026-10-11 02:22:06", "...": "..."},
+    "debugger_reset": {
+      "breakpoints": 1,
+      "watchpoints": 0,
+      "break_on": [],
+      "run_to": false,
+      "step": false,
+      "pause_waits": 0,
+      "run": false,
+      "input": 0,
+      "held_keys": 0,
+      "until_ms": false
+    }
+  }
+  ```
+
+- **Media read from the files.** A strict-match save or load reads every
+  CUE sheet and hashes every read-only image again. Other saves and loads
+  use the record made when the drives were last mounted or changed, and
+  keep a read-only image's hash while the file's size and modification
+  time stay the same, so they miss an image replaced by one of the same
+  size and time (`cp -p`, `rsync -t`, an unpacked archive), or a CUE
+  track file that appeared after the mount.
+
+#### What counts as the same media
+
+Each mounted drive is compared by its letter (or number, for a disk
+mounted by number) and:
+
+- its type (`floppy`, `hdd`, `cdrom`) and whether it is read-only;
+- the host folder it shows and its overlay folder or delta file, by path;
+- the paths of its disk or CD images, the whole swap list in order, each
+  CUE sheet followed by the track files it names;
+- that each image is there, and for a read-only image (a CD's, a
+  `read_only` mount's) its size and the SHA-256 of its first 64 KiB.
+
+A writable image changes as the machine writes it (a dynamic VHD grows),
+so its size is recorded but not compared, and its contents aren't
+hashed. Labels and what is in a folder aren't compared. Z: and X:, which
+the machine makes itself, aren't listed.
+
+#### Replies
+
+A save replies `{"saved": path, "format", "emulator", "header"}` and a load
+`{"loaded": path, "format", "emulator", "header"}`, with `differences`
+after a plain load that found some and `debugger_reset` after a strict-match
+load.
+
+- `format`: the version of the file's layout.
+- `emulator`: the version of the running rust-dos.
+- `header`: what the file says about the state.
+  - `version`: the rust-dos that saved it.
+  - `saved`: when, in local time (`YYYY-MM-DD HH:MM:SS`).
+  - `game`, `game_name`: the game launched from its profile, or null.
+  - `program`: the program that ran, as DOS started it; empty at the prompt.
+  - `machine`: the hardware settings, as configuration text with only the
+    settings that aren't the defaults (empty if all are).
+  - `memsize`: the memory in MB, which the loading machine must have.
+  - `emulated_ns`: the emulated time.
+  - `media`: a list of the mounted drives, each with `drive`, `kind`,
+    `read_only`, and `folder`, `overlay` and `images` where it has them;
+    each image has `path`, `size` (null if the file couldn't be read) and,
+    if read-only, `head_sha256`. Null in a state saved before media were
+    recorded.
+  - `deterministic`: the start time of the mode's clock, only in a state
+    saved with `--deterministic`.
+- `differences`: a sentence for each setting, drive or image that differs.
+- `debugger_reset`: `breakpoints`, `watchpoints`, `input` (queued input
+  events) and `held_keys` count what was cleared; `break_on` lists the
+  stops that were on (`exceptions`, `mode_switch`, `program_start`,
+  `program_exit`); `run_to` (a step-over's or `resume until` target),
+  `until_ms` and `step` are true if one was set; `pause_waits` counts
+  `/api/control/wait` requests answered with 409. `step` and `run` are
+  always false, as a strict-match load is refused while either is pending.
+
+Errors:
+
+- **400** `{"error", "loaded":false, "unchanged":true}`: the load failed (no
+  such file, which reads `empty`, a file that isn't a state, a state of
+  another `memsize`, a drive of the state that can't be mounted,
+  RetroAchievements hardcore mode) and the machine, its
+  settings and its hardware are as they were. A save that can't write its
+  file, and a body without `path`, get a 400 with only `error`.
+- **409** `{"error", "paused"}`: a strict-match save or load sent while
+  the machine wasn't stopped, or a load of any kind in deterministic mode
+  while the machine runs.
+- **409** `{"error", "loaded":false, "unchanged":true, "differences"}`: a
+  strict-match load of a state that doesn't match.
 
 ### Deterministic runs
 
@@ -412,17 +583,20 @@ curl -s $J -XPOST -d '{"until_ms":8000}' $H/api/control/resume
   mouse, network and serial links, the modification times of files a
   program writes to a host folder, and the end of a game launched from
   its profile still follow the host.
-- **Save states:** a state is loaded only while paused, like other
-  changes (409 otherwise, with `"paused":false` as a refused strict-match
-  save has). Its header has `deterministic`, the start time; a state of another
-  start time or saved outside the mode is listed in `differences` (and
-  refused by a strict-match load), since its clock would read another time. After
-  a load the clock is the start time plus the state's emulated time, input
-  points come every 10 ms from there as in the run that saved it, and the
-  speed is the state's: a fixed one, or for a state saved at `auto` or
-  `max`, the speed it had then. Save and load with a strict match at an
-  `until_ms` stop, and a run from the state reaches the next stop as the
-  run that saved it does.
+- **Save states:** a load is a change to the machine, so it is taken only
+  while paused (409 with `{"error", "paused":false}` otherwise); a plain
+  save is taken while running too. The header's `deterministic` has the
+  start time. The machine's clock is that plus emulated time, so a state
+  saved with another start time, or outside the mode, reads another time:
+  a load lists it in `differences` (`deterministic: the state has no
+  deterministic mode, this machine has a clock started at 1995-04-11
+  12:34:56`) and a strict-match load refuses it. After a load the clock
+  reads the start time plus the state's emulated time, input points come
+  every 10 ms from there as in the run that saved the state, and the speed
+  becomes the state's (for a state saved at `auto` or `max`, the speed it
+  ran at then). Save with a strict match at an `until_ms` stop and load
+  with a strict match, and the run from the state reaches the next stop as
+  the run that saved it did.
 
 ### Booted systems (Windows 95)
 
