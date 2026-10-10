@@ -348,6 +348,13 @@
 # How the music and the chorus are mixed, as reverb_mix: 0 dry, 100 the
 # chorus alone, 50 (the default) both in full.
 #chorus_mix=50
+# How much sound waits for the sound device, and so how late it is heard:
+# the device's buffer in frames, 128, 256, 512 (the default, about 12 ms),
+# 1024 or 2048, and the queue on top of it in milliseconds, 5, 10, 15, 20
+# (the default), 25, 30, 40 or 50. Smaller is sooner; if the sound
+# crackles, make them larger.
+#blocksize=512
+#prebuffer=20
 
 [joystick]
 # What the game port has plugged in: auto (the default: one game controller

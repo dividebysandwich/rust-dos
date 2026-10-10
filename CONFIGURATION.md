@@ -482,6 +482,15 @@ top of the Sound Blaster's own mixer, which programs set.
   dry, without the effect, `100` the effect alone, and at `50` (the
   default) both play in full; below 50 the effect fades out, above it
   the dry music does.
+* `blocksize` and `prebuffer` set how much sound waits for the host's
+  sound device, and so how late it is heard: `blocksize` is the device's
+  buffer in frames, `128`, `256`, `512` (the default, about 12 ms),
+  `1024` or `2048`, and `prebuffer` the queue kept on top of it for a
+  video frame that comes late, in milliseconds: `5`, `10`, `15`, `20`
+  (the default), `25`, `30`, `40` or `50`. Smaller values bring the
+  sound sooner; if it crackles, the host can't keep up with them. Only
+  the rust-dos program has them: the libretro core and the browser leave
+  the buffering to the frontend.
 * The `MIXER` command shows the mixer and changes it at the prompt, or
   from `[autoexec]`, in DOSBox Staging's syntax:
   `MIXER [CHANNEL] COMMANDS [/NOSHOW]`. The channels are `MASTER`,
