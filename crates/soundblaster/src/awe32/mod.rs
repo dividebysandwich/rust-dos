@@ -19,7 +19,6 @@
 //! Creative's `AWEUTIL /S` leaves it in (see `init`), which some programs
 //! (Doom) depend on.
 
-pub mod aweutil;
 pub mod effects;
 pub mod rom;
 pub mod tables;
@@ -231,27 +230,32 @@ impl Emu8000 {
 
     /// Whether a read of `port` is the sample counter, which follows
     /// emulated time rather than rendered audio.
+    #[inline]
     pub fn reads_clock(&self, port: u16) -> bool {
         port.wrapping_sub(self.base) & !1 == DATA2 && self.reg == 1 && self.voice == 27
     }
 
     /// A word read. `now_frames` is the emulated time in 44.1 kHz frames.
+    #[inline]
     pub fn read_word(&mut self, port: u16, now_frames: u64) -> u16 {
         self.read16(port.wrapping_sub(self.base) & !1, now_frames)
     }
 
     /// A byte read: the low or the high byte of the word.
+    #[inline]
     pub fn read_byte(&mut self, port: u16, now_frames: u64) -> u8 {
         let word = self.read_word(port, now_frames);
         if port & 1 != 0 { (word >> 8) as u8 } else { word as u8 }
     }
 
+    #[inline]
     pub fn write_word(&mut self, port: u16, value: u16) {
         self.write16(port.wrapping_sub(self.base) & !1, value);
     }
 
     /// A byte write, which the chip takes as a word: the byte in the low
     /// or the high half, the other half 0. Programs write words.
+    #[inline]
     pub fn write_byte(&mut self, port: u16, value: u8) {
         let word = if port & 1 != 0 { (value as u16) << 8 } else { value as u16 };
         self.write_word(port, word);
@@ -482,6 +486,7 @@ impl Emu8000 {
     }
 
     /// One frame of the chip's output, at 44.1 kHz.
+    #[inline]
     pub fn render(&mut self) -> (f32, f32) {
         if self.effects_dirty {
             self.effects_dirty = false;
@@ -737,11 +742,11 @@ const INIT_ARRAYS: [[u16; 128]; 4] = [
     ],
 ];
 
-crate::state_fields!(Memory { ram } skip {
+rust_dos_savestate::state_fields!(Memory { ram } skip {
     // The ROM comes from its file, and the end from the RAM's size.
     rom, ram_end,
 });
-crate::state_fields!(Emu8000 {
+rust_dos_savestate::state_fields!(Emu8000 {
     mem, voices, hwcf1, hwcf2, hwcf3, hwcf4, hwcf5, hwcf6, hwcf7, init, smalr, smarr, smalw, smarw, smld_buffer,
     smrd_buffer, id, reg, voice, pointer_reads, clock_base, chorus, reverb, eq,
 } skip {

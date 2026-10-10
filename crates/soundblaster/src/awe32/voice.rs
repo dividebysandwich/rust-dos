@@ -20,7 +20,7 @@ pub enum Stage {
     RampUp,
 }
 
-crate::state_enum!(Stage { Stage::Stopped, Stage::Delay, Stage::Attack, Stage::Hold, Stage::Sustain, Stage::RampDown, Stage::RampUp });
+rust_dos_savestate::state_enum!(Stage { Stage::Stopped, Stage::Delay, Stage::Attack, Stage::Hold, Stage::Sustain, Stage::RampDown, Stage::RampUp });
 
 /// An envelope. `value_amp` is the attack's linear phase, `value_db` the
 /// level after it: attenuation for the volume envelope (0 = full,
@@ -655,10 +655,10 @@ impl Voice {
     }
 }
 
-crate::state_fields!(Envelope {
+rust_dos_savestate::state_fields!(Envelope {
     stage, delay_samples, hold_samples, attack_samples, value_amp, value_db, sustain, attack_step, ramp_step, ramp_frac,
 });
-crate::state_fields!(Voice {
+rust_dos_savestate::state_fields!(Voice {
     cpf, ptrx, cvcf, vtft, z2, z1, psst, csl, ccca, envvol, dcysusv, envval, dcysus, atkhldv, lfo1val, lfo2val, atkhld,
     ip, ifatn, pefe, fmmod, tremfrq, fm2frq2, engine_on, addr, loop_start, loop_end, initial_att, initial_filter,
     vol_env, mod_env, lfo1_speed, lfo2_speed, lfo1_count, lfo2_count, lfo1_delay, lfo2_delay, vol_l, vol_r,

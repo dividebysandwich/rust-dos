@@ -494,15 +494,15 @@ impl Eq {
     }
 }
 
-crate::state_fields!(Chorus { feedback, delay, depth, right_offset, lfo_inc, lfo_pos } skip {
+rust_dos_savestate::state_fields!(Chorus { feedback, delay, depth, right_offset, lfo_inc, lfo_pos } skip {
     // The sound ringing on in it.
     write, line,
 });
-crate::state_fields!(Reverb { preset } skip {
+rust_dos_savestate::state_fields!(Reverb { preset } skip {
     // Set again from the preset, and the sound ringing on.
     feedback, damp, in_gain, out_gain, er_gain, echo_mode, pre_len, lines,
 });
-crate::state_fields!(Eq { bass, treble } skip {
+rust_dos_savestate::state_fields!(Eq { bass, treble } skip {
     coef, z,
 });
 

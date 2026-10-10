@@ -37,7 +37,7 @@ pub fn add_search_dir(dir: PathBuf) {
 pub fn default_paths() -> Vec<PathBuf> {
     let mut paths: Vec<PathBuf> =
         SEARCH_DIRS.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|dir| dir.join(FILE_NAME)).collect();
-    if let Some(user) = crate::config::user_dir() {
+    if let Some(user) = rust_dos_hostdirs::user_dir() {
         paths.push(user.join(FILE_NAME));
         paths.push(user.join("AWE32ROM").join(FILE_NAME));
     }
@@ -51,7 +51,7 @@ pub fn default_paths() -> Vec<PathBuf> {
 
 /// Where the download is saved.
 pub fn download_path() -> Option<PathBuf> {
-    crate::config::user_dir().map(|dir| dir.join(FILE_NAME))
+    rust_dos_hostdirs::user_dir().map(|dir| dir.join(FILE_NAME))
 }
 
 /// The ROM to use: the configured file (a directory is searched for
@@ -95,7 +95,7 @@ pub fn verify(bytes: &[u8]) -> bool {
 /// Download the ROM to `dest`, checked against its hash, written to a
 /// temporary file first so a failed download leaves nothing behind. It
 /// blocks: run it on a thread of its own.
-#[cfg(all(feature = "sdl", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "download", not(target_arch = "wasm32")))]
 pub fn download(dest: &Path) -> Result<(), String> {
     use std::time::Duration;
     let agent: ureq::Agent = ureq::Agent::config_builder()
@@ -119,7 +119,7 @@ pub fn download(dest: &Path) -> Result<(), String> {
     std::fs::rename(&temp, dest).map_err(|e| format!("{}: {}", dest.display(), e))
 }
 
-#[cfg(not(all(feature = "sdl", not(target_arch = "wasm32"))))]
+#[cfg(not(all(feature = "download", not(target_arch = "wasm32"))))]
 pub fn download(_dest: &Path) -> Result<(), String> {
     Err("downloads are only available in the rust-dos program".to_string())
 }

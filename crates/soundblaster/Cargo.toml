@@ -1,0 +1,26 @@
+[package]
+name = "rust-dos-soundblaster"
+description = "The Sound Blaster family (SB 1.x to SB16, and the AWE32's EMU8000), as rust-dos emulates it"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+rust-dos-savestate = { path = "../savestate" }
+rust-dos-audio-core = { path = "../audio-core" }
+rust-dos-dma = { path = "../dma" }
+rust-dos-hostdirs = { path = "../hostdirs" }
+# The debug server's view of the EMU8000.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The AWE32 ROM's checksum.
+sha2 = "0.11"
+
+# The AWE32 ROM's download (the `download` feature).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ureq = { version = "3", default-features = false, features = ["rustls"], optional = true }
+
+[features]
+download = ["dep:ureq"]

@@ -49,6 +49,7 @@ rust-dos-zip = { path = "crates/zip" }
 rust-dos-opl = { path = "crates/opl" }
 rust-dos-tandy = { path = "crates/tandy" }
 rust-dos-lpt-dac = { path = "crates/lpt-dac" }
+rust-dos-soundblaster = { path = "crates/soundblaster" }
 iced-x86 = "1.21.0"
 font8x8 = "0.3.1"
 chrono = "0.4.45"
@@ -146,7 +147,7 @@ windows-sys = { version = "0.61", features = ["Win32_System_Memory", "Win32_Syst
 default = ["sdl", "gl", "vr", "midi", "hostmidi", "cdaudio", "sevenz", "manuals"]
 # The rust-dos program: its window and sound device, its debug server and
 # its connection to RetroAchievements.
-sdl = ["dep:sdl2", "dep:axum", "dep:ureq"]
+sdl = ["dep:sdl2", "dep:axum", "dep:ureq", "rust-dos-soundblaster/download"]
 # The window drawn with OpenGL 3: the CRT shaders, and the 3dfx card at
 # higher resolutions. Without it (as on Redox), SDL's renderer draws the
 # picture, without them.

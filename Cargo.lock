@@ -1924,6 +1924,7 @@ dependencies = [
  "rust-dos-lpt-dac",
  "rust-dos-opl",
  "rust-dos-savestate",
+ "rust-dos-soundblaster",
  "rust-dos-tandy",
  "rust-dos-zip",
  "rustysynth",
@@ -1981,6 +1982,20 @@ dependencies = [
 [[package]]
 name = "rust-dos-savestate"
 version = "1.5.0"
+
+[[package]]
+name = "rust-dos-soundblaster"
+version = "1.5.0"
+dependencies = [
+ "rust-dos-audio-core",
+ "rust-dos-dma",
+ "rust-dos-hostdirs",
+ "rust-dos-savestate",
+ "serde",
+ "serde_json",
+ "sha2",
+ "ureq",
+]
 
 [[package]]
 name = "rust-dos-tandy"

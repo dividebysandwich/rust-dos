@@ -11,8 +11,8 @@
 
 use std::collections::VecDeque;
 
-use crate::dma::Dma;
-use crate::timer::PIT_HZ;
+use rust_dos_dma::Dma;
+use rust_dos_audio_core::PIT_HZ;
 
 /// Which card is emulated.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,6 +37,7 @@ impl SbModel {
     }
 
     /// Whether the card is an SB16, as the AWE32 is too.
+    #[inline]
     pub fn is_sb16(self) -> bool {
         matches!(self, SbModel::Sb16 | SbModel::Awe32)
     }
@@ -233,6 +234,7 @@ impl SoundBlaster {
     }
 
     /// Whether the card's interrupt line is up.
+    #[inline]
     pub fn irq_pending(&self) -> bool {
         self.irq8 || self.irq16
     }
@@ -265,6 +267,7 @@ impl SoundBlaster {
 
     /// Volume of the digital audio and of FM, as (left, right) gains
     /// including the master volume.
+    #[inline]
     pub fn volumes(&self) -> ((f32, f32), (f32, f32)) {
         if self.config.model == SbModel::Sb2 {
             return ((1.0, 1.0), (1.0, 1.0));
@@ -279,6 +282,7 @@ impl SoundBlaster {
 
     /// Volume of CD audio as (left, right) gains including the master
     /// volume.
+    #[inline]
     pub fn cd_volume(&self) -> (f32, f32) {
         if self.config.model == SbModel::Sb2 {
             return (1.0, 1.0);
@@ -296,6 +300,7 @@ impl SoundBlaster {
 
     /// Run the DSP up to emulated time `now` (PIT ticks): play the DMA
     /// data that has come due, and raise the block-end IRQs.
+    #[inline]
     pub fn advance(&mut self, now: u64, dma: &mut Dma, ram: &[u8]) {
         let elapsed = now.saturating_sub(self.last_ticks);
         self.last_ticks = now;
@@ -393,6 +398,7 @@ impl SoundBlaster {
 
     /// When the DSP next needs attention: the end of the current block
     /// (or of a silence period), in PIT ticks.
+    #[inline]
     pub fn next_event(&self) -> Option<u64> {
         if let Some(t) = self.transfer.filter(|t| !t.paused && t.rate > 0) {
             let need = (t.remaining as u128 * PIT_HZ as u128).saturating_sub(self.frac as u128);
@@ -406,6 +412,7 @@ impl SoundBlaster {
 
     /// Port write at `offset` from the base (6 reset, 0Ch command, 4/5
     /// mixer).
+    #[inline]
     pub fn write(&mut self, offset: u16, value: u8, log: &mut Vec<String>) {
         match offset {
             0x4 => self.mixer_index = value,
@@ -425,6 +432,7 @@ impl SoundBlaster {
     }
 
     /// Port read at `offset` from the base.
+    #[inline]
     pub fn read(&mut self, offset: u16) -> u8 {
         match offset {
             0x5 => self.mixer_read(),
@@ -699,8 +707,8 @@ impl SoundBlaster {
     }
 }
 
-crate::state_fields!(Transfer { bits16, stereo, signed, auto_init, input, block, remaining, rate, paused, last_block });
-crate::state_fields!(SoundBlaster {
+rust_dos_savestate::state_fields!(Transfer { bits16, stereo, signed, auto_init, input, block, remaining, rate, paused, last_block });
+rust_dos_savestate::state_fields!(SoundBlaster {
     reset_stage, in_command, params, params_needed, read_buf, test_reg, speaker_on, tc_rate, sb16_rate,
     block_size, transfer, silence, irq8, irq16, last_ticks, frac, dac, out, out_rate, pending_left,
     mixer_index, mixer, asp_mode, asp_regs, mem8051, irq, dma8, dma16,
