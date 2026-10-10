@@ -148,6 +148,9 @@ impl AppState {
     async fn call_json(&self, cmd: Cmd, timeout: Duration) -> ApiResult {
         match self.call(cmd, timeout).await? {
             Reply::Json(v) => Ok(axum::Json(v).into_response()),
+            Reply::ErrorJson(code, v) => {
+                Ok((StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST), axum::Json(v)).into_response())
+            }
             _ => Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, "unexpected reply".into())),
         }
     }
@@ -594,27 +597,45 @@ struct MemPut {
     addr: String,
     hex: Option<String>,
     base64: Option<String>,
+    /// Hex bytes that must be at `addr` for the write to happen.
+    expect: Option<String>,
+}
+
+/// Bytes from hex digits. Anything else is skipped, as is a `0x` that
+/// starts a number, so "0xCD 0xAB" is CD AB.
+fn hex_data(h: &str) -> Result<Vec<u8>, ApiError> {
+    let mut clean = String::with_capacity(h.len());
+    let mut prev: Option<char> = None;
+    let mut chars = h.chars().peekable();
+    while let Some(c) = chars.next() {
+        let starts_number = !prev.is_some_and(|p| p.is_ascii_hexdigit());
+        if c == '0' && starts_number && matches!(chars.peek(), Some('x' | 'X')) {
+            chars.next();
+            prev = Some('x');
+            continue;
+        }
+        if c.is_ascii_hexdigit() {
+            clean.push(c);
+        }
+        prev = Some(c);
+    }
+    if clean.len() % 2 != 0 {
+        return Err(bad("hex data must have an even number of digits"));
+    }
+    Ok((0..clean.len()).step_by(2).map(|i| u8::from_str_radix(&clean[i..i + 2], 16).unwrap()).collect())
 }
 
 async fn mem_put(State(s): State<AppState>, body: Bytes) -> ApiResult {
     let b: MemPut = from_value(parse_body(&body)?)?;
     let data = match (b.hex, b.base64) {
-        (Some(h), None) => {
-            let clean: String = h.chars().filter(|c| c.is_ascii_hexdigit()).collect();
-            if clean.len() % 2 != 0 {
-                return Err(bad("hex data must have an even number of digits"));
-            }
-            (0..clean.len())
-                .step_by(2)
-                .map(|i| u8::from_str_radix(&clean[i..i + 2], 16).unwrap())
-                .collect()
-        }
+        (Some(h), None) => hex_data(&h)?,
         (None, Some(b64)) => base64::engine::general_purpose::STANDARD
             .decode(b64.trim())
             .map_err(|e| bad(format!("invalid base64: {}", e)))?,
         _ => return Err(bad("provide exactly one of 'hex' or 'base64'")),
     };
-    s.call_json(Cmd::WriteMem { addr: b.addr, data }, DEFAULT_TIMEOUT).await
+    let expect = b.expect.as_deref().map(hex_data).transpose()?;
+    s.call_json(Cmd::WriteMem { addr: b.addr, data, expect }, DEFAULT_TIMEOUT).await
 }
 
 #[derive(Deserialize)]
@@ -973,7 +994,9 @@ EXECUTION CONTROL
   GET  /api/control/wait?timeout_ms=30000            block until the emulator pauses
   GET  /api/registers        PUT /api/registers {"ax":"1234","flags":"0202"}
   GET  /api/memory?addr=DS:SI&len=256[&format=hex|base64|raw]
-  PUT  /api/memory {"addr":"B800:0000","hex":"41 1F"}  (or "base64")
+  PUT  /api/memory {"addr":"B800:0000","hex":"41 1F"}  (or "base64"); replies with
+                             the bytes replaced ("old") and read back ("new");
+                             "expect":"20 07" writes only if those bytes are there (409)
   GET  /api/disasm?addr=CS:IP&count=20[&format=json]   json: "lines" and "rows"
                                            ({label, phys, bytes, asm, len, current, breakpoint})
   GET/POST/DELETE /api/breakpoints   {"addr":"1234:0100"}  (DELETE without addr = all)
@@ -1041,3 +1064,17 @@ WEBSOCKETS
   /ws/audio           text header, then binary s16le 44100 Hz stereo (interleaved) chunks
   /ws/input           send input events (same JSON as /api/input/batch, optional "wait":true)
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::hex_data;
+
+    #[test]
+    fn hex_data_skips_0x_prefixes() {
+        assert_eq!(hex_data("CD AB").ok(), Some(vec![0xCD, 0xAB]));
+        assert_eq!(hex_data("0xCD 0xAB").ok(), Some(vec![0xCD, 0xAB]));
+        assert_eq!(hex_data("0XCDAB").ok(), Some(vec![0xCD, 0xAB]));
+        assert_eq!(hex_data("00 0x10").ok(), Some(vec![0x00, 0x10]));
+        assert!(hex_data("CDA").is_err());
+    }
+}

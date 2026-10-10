@@ -76,6 +76,8 @@ pub enum Reply {
     Trace { entries: Vec<TraceEntry>, next: u64, dropped: u64 },
     Bytes { addr: usize, segoff: Option<(u16, u32)>, data: Vec<u8> },
     Error(u16, String),
+    /// An error whose body has fields beside its message (`error`).
+    ErrorJson(u16, Value),
 }
 
 impl Reply {
@@ -135,7 +137,9 @@ pub enum Cmd {
     GetRegs,
     SetRegs(Map<String, Value>),
     ReadMem { addr: String, len: usize },
-    WriteMem { addr: String, data: Vec<u8> },
+    /// Write `data` at an address; with `expect`, only if the bytes there
+    /// match it.
+    WriteMem { addr: String, data: Vec<u8>, expect: Option<Vec<u8>> },
     Disasm { addr: Option<String>, count: usize },
     ListBreakpoints,
     AddBreakpoint(String),
@@ -1333,29 +1337,53 @@ impl DebugHub {
                 }
                 Err(e) => Reply::bad(e),
             },
-            Cmd::WriteMem { addr, data } => match parse_addr(cpu, &addr) {
+            Cmd::WriteMem { expect: Some(expect), data, .. } if expect.len() != data.len() => {
+                Reply::bad(format!("expect has {} bytes, the data {}", expect.len(), data.len()))
+            }
+            Cmd::WriteMem { addr, data, expect } => match parse_addr(cpu, &addr) {
                 Ok(a) => {
                     let targets: Option<Vec<usize>> = (0..data.len()).map(|i| a.byte(cpu, i)).collect();
+                    let peek = |cpu: &Cpu, t: &[usize]| t.iter().map(|&p| cpu.bus.peek_8(p)).collect::<Vec<u8>>();
                     match targets {
                         Some(t) if t.iter().all(|&p| p < cpu.bus.ram().len() || cpu.bus.vbe.lfb_offset(p, 1).is_some()) => {
-                            for (p, b) in t.iter().zip(&data) {
-                                // The debugger patches the ROMs too.
-                                if rust_dos::bus::Bus::is_rom(*p) {
-                                    cpu.bus.write_rom(*p, &[*b]);
-                                } else {
-                                    cpu.bus.write_8(*p, *b);
+                            let old = peek(cpu, &t);
+                            if let Some(expect) = expect.filter(|e| *e != old) {
+                                let (found, expected) = (trace::hex_bytes(&old), trace::hex_bytes(&expect));
+                                Reply::ErrorJson(
+                                    409,
+                                    json!({
+                                        "error": format!(
+                                            "the memory holds {found}, not the expected {expected}; nothing was written"
+                                        ),
+                                        "found": found,
+                                        "expected": expected,
+                                    }),
+                                )
+                            } else {
+                                for (p, b) in t.iter().zip(&data) {
+                                    // The debugger patches the ROMs too.
+                                    if rust_dos::bus::Bus::is_rom(*p) {
+                                        cpu.bus.write_rom(*p, &[*b]);
+                                    } else {
+                                        cpu.bus.write_8(*p, *b);
+                                    }
                                 }
+                                // The debugger's own changes don't stop the
+                                // machine.
+                                for w in &mut self.watchpoints {
+                                    w.value = Watch::read(cpu, w.phys, w.len);
+                                }
+                                // The bytes replaced and what reads back,
+                                // which can differ from the data: VGA memory
+                                // reads through the read mode.
+                                Reply::Json(json!({
+                                    "ok": true,
+                                    "addr": format!("{:05X}", a.phys.unwrap_or(0)),
+                                    "written": data.len(),
+                                    "old": trace::hex_bytes(&old),
+                                    "new": trace::hex_bytes(&peek(cpu, &t)),
+                                }))
                             }
-                            // The debugger's own changes don't stop the
-                            // machine.
-                            for w in &mut self.watchpoints {
-                                w.value = Watch::read(cpu, w.phys, w.len);
-                            }
-                            Reply::Json(json!({
-                                "ok": true,
-                                "addr": format!("{:05X}", a.phys.unwrap_or(0)),
-                                "written": data.len(),
-                            }))
                         }
                         Some(_) => Reply::bad("write extends past end of memory"),
                         None => Reply::bad("write reaches an unmapped page"),
@@ -2228,6 +2256,7 @@ mod tests {
     use super::{Cmd, DebugHub, LowInput, Reply, Request, TraceQuery, keys_for_char, step_over_len};
     use crate::cpu::Cpu;
     use rust_dos::keylayout::Layout;
+    use serde_json::Value;
     use tokio::sync::oneshot;
 
     fn handle(cpu: &mut Cpu, hub: &mut DebugHub, cmd: Cmd) -> Reply {
@@ -2298,6 +2327,47 @@ mod tests {
         let Reply::Json(status) = handle(&mut cpu, &mut hub, control(0)) else { panic!("not json") };
         assert_eq!(status["enabled"].as_bool(), Some(false));
         assert!(status["remaining"].is_null());
+    }
+
+    /// The reply to a command the hub answers at once.
+    fn reply(cpu: &mut Cpu, hub: &mut DebugHub, cmd: Cmd) -> Result<Value, (u16, String)> {
+        let (reply, mut rx) = oneshot::channel();
+        hub.handle(cpu, Request { cmd, reply });
+        match rx.try_recv() {
+            Ok(Reply::Json(v)) => Ok(v),
+            Ok(Reply::Error(code, e)) => Err((code, e)),
+            Ok(Reply::ErrorJson(code, v)) => Err((code, v.to_string())),
+            _ => panic!("no JSON reply"),
+        }
+    }
+
+    fn write(addr: &str, data: &[u8], expect: Option<&[u8]>) -> Cmd {
+        Cmd::WriteMem { addr: addr.into(), data: data.to_vec(), expect: expect.map(<[u8]>::to_vec) }
+    }
+
+    #[test]
+    fn a_write_reports_the_bytes_it_replaced() {
+        let (mut cpu, mut hub) = (Cpu::new(".".into()), DebugHub::disabled());
+        cpu.bus.write_8(0x2000, 0xCD);
+        cpu.bus.write_8(0x2001, 0xAB);
+        let done = reply(&mut cpu, &mut hub, write("0200:0000", &[0x21, 0x43], None)).unwrap();
+        assert_eq!((done["old"].as_str(), done["new"].as_str()), (Some("CD AB"), Some("21 43")));
+    }
+
+    #[test]
+    fn a_write_expecting_other_bytes_writes_nothing() {
+        let (mut cpu, mut hub) = (Cpu::new(".".into()), DebugHub::disabled());
+        cpu.bus.write_8(0x2000, 0xCD);
+        cpu.bus.write_8(0x2001, 0xAB);
+        let refused = reply(&mut cpu, &mut hub, write("2000", &[0x21, 0x43], Some(&[0x34, 0x12]))).unwrap_err();
+        assert_eq!(refused.0, 409);
+        assert!(refused.1.contains(r#""found":"CD AB""#), "{}", refused.1);
+        assert!(refused.1.contains(r#""expected":"34 12""#), "{}", refused.1);
+        assert_eq!((cpu.bus.peek_8(0x2000), cpu.bus.peek_8(0x2001)), (0xCD, 0xAB));
+        let done = reply(&mut cpu, &mut hub, write("2000", &[0x21, 0x43], Some(&[0xCD, 0xAB]))).unwrap();
+        assert_eq!(done["new"], "21 43");
+        let short = reply(&mut cpu, &mut hub, write("2000", &[0x21, 0x43], Some(&[0x21]))).unwrap_err();
+        assert_eq!(short.0, 400, "expect is as long as the data");
     }
 
     /// The scan codes of the keys going down to type `c`.
