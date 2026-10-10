@@ -477,13 +477,18 @@ async fn unmount(State(s): State<AppState>, Path(letter): Path<String>) -> ApiRe
 struct StateBody {
     /// The save state file, on the host.
     path: String,
+    /// A checkpoint of this machine: only while paused, and a load must
+    /// match its hardware and media and resets the debugger.
+    #[serde(default)]
+    checkpoint: bool,
 }
 
 async fn state_file(State(s): State<AppState>, Path(action): Path<String>, body: Bytes) -> ApiResult {
     let b: StateBody = from_value(parse_body(&body)?)?;
+    let (path, checkpoint) = (b.path, b.checkpoint);
     match action.as_str() {
-        "save" => s.call_json(Cmd::SaveState { path: b.path }, DEFAULT_TIMEOUT).await,
-        "load" => s.call_json(Cmd::LoadState { path: b.path }, DEFAULT_TIMEOUT).await,
+        "save" => s.call_json(Cmd::SaveState { path, checkpoint }, DEFAULT_TIMEOUT).await,
+        "load" => s.call_json(Cmd::LoadState { path, checkpoint }, DEFAULT_TIMEOUT).await,
         _ => Err(ApiError(StatusCode::NOT_FOUND, format!("unknown action '{}' (save, load)", action))),
     }
 }
@@ -1078,15 +1083,21 @@ DRIVES
 
 SAVE STATES
   POST   /api/state/save {"path":"/tmp/keen.state"}  save the machine to a file
-  POST   /api/state/load {"path":"/tmp/keen.state"}  load one into this machine
-                   Both only while paused with no step or run pending (409).
-                   A load is refused (409, "differences") unless the state's
-                   hardware settings and media (drives, folders, images)
-                   match; a failed load changes nothing ("unchanged":true).
-                   A load clears breakpoints, watchpoints, break_on stops,
-                   run-to targets and queued input ("debugger_reset"), and
-                   answers waiting requests with 409. Replies have the
-                   state's header, "format" and "emulator" (this version).
+  POST   /api/state/load {"path":"/tmp/keen.state"}  load one: its hardware
+                   settings, then the machine (the same memsize only).
+                   Breakpoints and watchpoints stay. "differences" lists
+                   the settings and media (drives, folders, images) the
+                   state has otherwise than this machine, if any.
+                   A failed load changes nothing ("unchanged":true).
+                   Replies have the state's header, "format" and
+                   "emulator" (this version).
+                   With "checkpoint":true both are taken only while paused
+                   with no step or run pending (409), and a load is refused
+                   (409, "differences") unless the state's hardware
+                   settings and media match. It clears breakpoints,
+                   watchpoints, break_on stops, run-to targets and queued
+                   input ("debugger_reset") and answers waiting requests
+                   with 409.
 
 SPEED
   POST   /api/speed {"cycles":"auto"}   the CPU speed, as `cycles` takes it

@@ -189,9 +189,11 @@ pub enum Cmd {
     /// disks into the folders.
     SyncShared,
     /// Save the machine to a save state file, or load one, which the front
-    /// end does (`take_state_requests`).
-    SaveState { path: String },
-    LoadState { path: String },
+    /// end does (`take_state_requests`). A `checkpoint` is taken or put in
+    /// only while paused, and its load must match this machine and resets
+    /// the debugger.
+    SaveState { path: String, checkpoint: bool },
+    LoadState { path: String, checkpoint: bool },
     /// Change the CPU speed (`cycles`) as the settings window does, which
     /// the front end does (`take_speed_requests`).
     Speed { cycles: String },
@@ -202,6 +204,8 @@ pub enum Cmd {
 pub struct StateRequest {
     pub load: bool,
     pub path: PathBuf,
+    /// Asked for as a checkpoint (see `take_state_requests`).
+    pub checkpoint: bool,
     reply: oneshot::Sender<Reply>,
 }
 
@@ -1221,22 +1225,24 @@ impl DebugHub {
         std::mem::take(&mut self.hotkey)
     }
 
-    /// The save states remote clients asked to save or load. Those asked
-    /// for while the machine isn't stopped with nothing pending are
-    /// refused here (409): a state is only taken or put in while the
-    /// debugger holds the machine between two instructions.
+    /// The save states remote clients asked to save or load. Checkpoints
+    /// asked for while the machine isn't stopped with nothing pending are
+    /// refused here (409): a checkpoint is only taken or put in while the
+    /// debugger holds the machine between two instructions. The other
+    /// requests are carried out at the end of the frame, running or not.
     pub fn take_state_requests(&mut self) -> Vec<StateRequest> {
         let requests = std::mem::take(&mut self.state_requests);
         let Some(why) = self.checkpoint_refusal() else { return requests };
-        for request in requests {
+        let (checkpoints, others): (Vec<_>, Vec<_>) = requests.into_iter().partition(|r| r.checkpoint);
+        for request in checkpoints {
             let what = if request.load { "load" } else { "save" };
-            let error = format!("can't {} a state: {}", what, why);
+            let error = format!("can't {} a checkpoint: {}", what, why);
             request.fail(409, json!({"error": error, "paused": self.paused}));
         }
-        Vec::new()
+        others
     }
 
-    /// Why a save state can't be saved or loaded now, if it can't: the
+    /// Why a checkpoint can't be saved or loaded now, if it can't: the
     /// machine runs, or a step or run command is still to stop it.
     fn checkpoint_refusal(&self) -> Option<&'static str> {
         if !self.paused {
@@ -1316,16 +1322,18 @@ impl DebugHub {
 
     fn handle(&mut self, cpu: &mut Cpu, req: Request) {
         let cmd = match req.cmd {
-            Cmd::SaveState { path } | Cmd::LoadState { path } if path.is_empty() => {
+            Cmd::SaveState { path, .. } | Cmd::LoadState { path, .. } if path.is_empty() => {
                 let _ = req.reply.send(Reply::bad("a path is needed"));
                 return;
             }
-            Cmd::SaveState { path } => {
-                self.state_requests.push(StateRequest { load: false, path: PathBuf::from(path), reply: req.reply });
+            Cmd::SaveState { path, checkpoint } => {
+                let path = PathBuf::from(path);
+                self.state_requests.push(StateRequest { load: false, path, checkpoint, reply: req.reply });
                 return;
             }
-            Cmd::LoadState { path } => {
-                self.state_requests.push(StateRequest { load: true, path: PathBuf::from(path), reply: req.reply });
+            Cmd::LoadState { path, checkpoint } => {
+                let path = PathBuf::from(path);
+                self.state_requests.push(StateRequest { load: true, path, checkpoint, reply: req.reply });
                 return;
             }
             Cmd::Speed { cycles } => {
@@ -2827,10 +2835,10 @@ mod tests {
         assert!(hub.paused);
     }
 
-    /// Ask to save a state, and the requests the front end gets to carry
-    /// out, with the reply of one refused.
-    fn state_request(cpu: &mut Cpu, hub: &mut DebugHub) -> (usize, Option<(u16, Value)>) {
-        let mut rx = send(cpu, hub, Cmd::SaveState { path: "/tmp/x.state".into() });
+    /// Ask to save a state, as a checkpoint or not, and the requests the
+    /// front end gets to carry out, with the reply of one refused.
+    fn state_request(cpu: &mut Cpu, hub: &mut DebugHub, checkpoint: bool) -> (usize, Option<(u16, Value)>) {
+        let mut rx = send(cpu, hub, Cmd::SaveState { path: "/tmp/x.state".into(), checkpoint });
         let taken = hub.take_state_requests().len();
         let refused = match rx.try_recv() {
             Ok(Reply::ErrorJson(code, body)) => Some((code, body)),
@@ -2841,21 +2849,36 @@ mod tests {
     }
 
     #[test]
-    fn a_state_is_saved_or_loaded_only_while_the_machine_is_paused() {
+    fn a_checkpoint_is_saved_or_loaded_only_while_the_machine_is_paused() {
         let (mut cpu, mut hub) = machine("checkpoint");
-        let (taken, refused) = state_request(&mut cpu, &mut hub);
+        let (taken, refused) = state_request(&mut cpu, &mut hub, true);
         let (code, body) = refused.expect("refused while running");
         assert_eq!((taken, code), (0, 409));
         assert!(body["error"].as_str().unwrap().contains("pause it first"), "{}", body);
 
         pause(&mut cpu, &mut hub);
-        let (taken, refused) = state_request(&mut cpu, &mut hub);
+        let (taken, refused) = state_request(&mut cpu, &mut hub, true);
         assert_eq!((taken, refused.is_none()), (1, true), "paused with nothing pending");
 
         // A step sent with it, in the same frame, starts the machine first.
-        let _save = send(&mut cpu, &mut hub, Cmd::SaveState { path: "/tmp/x.state".into() });
+        let checkpoint = Cmd::SaveState { path: "/tmp/x.state".into(), checkpoint: true };
+        let _save = send(&mut cpu, &mut hub, checkpoint);
         let _step = send(&mut cpu, &mut hub, Cmd::Step { count: 1 });
         assert!(hub.take_state_requests().is_empty(), "refused: the step is under way");
+    }
+
+    #[test]
+    fn a_state_that_is_no_checkpoint_is_saved_or_loaded_running_or_not() {
+        let (mut cpu, mut hub) = machine("no-checkpoint");
+        let (taken, refused) = state_request(&mut cpu, &mut hub, false);
+        assert_eq!((taken, refused.is_none()), (1, true), "taken while running");
+
+        // Sent with a checkpoint while running: only the checkpoint is refused.
+        let mut checkpoint = send(&mut cpu, &mut hub, Cmd::SaveState { path: "/tmp/a.state".into(), checkpoint: true });
+        let _plain = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/b.state".into(), checkpoint: false });
+        let taken = hub.take_state_requests();
+        assert_eq!(taken.iter().map(|r| (r.load, r.checkpoint)).collect::<Vec<_>>(), [(true, false)]);
+        assert!(matches!(checkpoint.try_recv(), Ok(Reply::ErrorJson(409, _))));
     }
 
     #[test]

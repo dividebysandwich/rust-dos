@@ -1327,17 +1327,22 @@ fn main() -> Result<(), String> {
         if dbg.take_hotkey() {
             toggle_ui!();
         }
-        // Through the debug server, a state is a checkpoint of this machine
-        // and this debugging session: see `load_checkpoint`.
+        // A checkpoint is a state of this machine and this debugging
+        // session: see `load_for_debugger`.
         for request in dbg.take_state_requests() {
             let path = request.path.clone();
             // The file layout's version, and this rust-dos's (the header has the one that saved it).
             let (format, emulator) = (slots::FORMAT, env!("CARGO_PKG_VERSION"));
             if request.load {
-                match host!().load_checkpoint(&path) {
-                    Ok(header) => {
-                        let cleared = dbg.reset_after_load(&cpu);
-                        let reply = serde_json::json!({"loaded": path, "format": format, "emulator": emulator, "header": header, "debugger_reset": cleared});
+                match host!().load_for_debugger(&path, request.checkpoint) {
+                    Ok((header, differences)) => {
+                        let mut reply = serde_json::json!({"loaded": path, "format": format, "emulator": emulator, "header": header});
+                        if request.checkpoint {
+                            reply["debugger_reset"] = dbg.reset_after_load(&cpu);
+                        } else if !differences.is_empty() {
+                            // Told, not refused: the state brought its own.
+                            reply["differences"] = differences.into();
+                        }
                         request.done(Ok(reply));
                     }
                     Err((status, body)) => request.fail(status, body),
@@ -2309,26 +2314,35 @@ impl MainHost<'_, '_> {
         self.load_state(path, header, &state)
     }
 
-    /// Load the save state file `path` for the debug server, as a
-    /// checkpoint of this machine: a state of other hardware or media is
-    /// refused (409) with what differs, instead of bringing its own.
-    fn load_checkpoint(&mut self, path: &std::path::Path) -> Result<slots::Header, (u16, serde_json::Value)> {
+    /// Load the save state file `path` for the debug server. Returns the
+    /// header and how the state's hardware settings and media differ from
+    /// this machine's. A plain load brings the state's own hardware, as
+    /// `load_file` does. A `checkpoint` is a state of this machine: one of
+    /// other hardware or media, or without a record of its media, is
+    /// refused (409) with what differs.
+    fn load_for_debugger(
+        &mut self,
+        path: &std::path::Path,
+        checkpoint: bool,
+    ) -> Result<(slots::Header, Vec<String>), (u16, serde_json::Value)> {
         // Whatever failed, the machine, its settings and hardware are as they were.
         let failed = |e: String| (400, serde_json::json!({"error": e, "loaded": false, "unchanged": true}));
         let (header, state) = self.read_state(path).map_err(failed)?;
         let mut differences = slots::machine_differences(&header.machine, &self.machine.settings(self.settings));
         match &header.media {
             Some(media) => differences.extend(savestate::media::differences(media, &savestate::media::of(self.cpu))),
-            None => differences.push(format!(
+            None if checkpoint => differences.push(format!(
                 "the state doesn't record its media (saved by rust-dos {}), so they can't be checked",
                 header.version
             )),
+            None => {}
         }
-        if !differences.is_empty() {
+        if checkpoint && !differences.is_empty() {
             let error = format!("{} doesn't match this machine; nothing was loaded", path.display());
             return Err((409, serde_json::json!({"error": error, "loaded": false, "unchanged": true, "differences": differences})));
         }
-        self.load_state(path, header, &state).map_err(failed)
+        let header = self.load_state(path, header, &state).map_err(failed)?;
+        Ok((header, differences))
     }
 
     /// The header and machine's state of the save state file `path`, if

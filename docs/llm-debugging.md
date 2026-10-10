@@ -302,37 +302,47 @@ them. At the DOS prompt, the `MOUNT` and `IMGMOUNT` commands do the same.
 
 `POST /api/state/save {"path":"/abs/before-boss.state"}` saves the whole
 machine to a file, and `POST /api/state/load` with the same body goes back
-to it. Save before a step that is slow to reach (a menu path, a level) and
-load to try it again. Through the debug server a state is a checkpoint of
-this machine:
+to it, as the Ctrl+F1 and Ctrl+F2 slots do. Save before a step that is
+slow to reach (a menu path, a level) and load to try it again. Both work
+while the machine runs (at the end of a frame) or is paused. A load brings
+the hardware settings the state was saved with, and keeps the breakpoints
+and watchpoints, so you can set a breakpoint and load the same state again
+to hit it. When the state's hardware settings or media differ from the
+running machine's, the reply lists them in `differences`.
+
+A load that fails (400) leaves the machine, its settings and hardware as
+they were; the reply has `"loaded":false` and `"unchanged":true`.
+
+Both replies have `format` (the file layout's version), `emulator` (this
+rust-dos's version) and the state's `header`: the rust-dos that saved it
+(`version`), when, the program, the hardware settings (`machine`) and its
+`media` (the mounted drives, their folders, and their disk and CD images'
+paths, sizes and, for a read-only image, a hash of its first 64 KiB).
+Every save records the media, so any state saved by this version can be
+loaded as a checkpoint later. A state saved before media were recorded
+has `"media":null`. The files and disk images on the host aren't part of a
+state: what a program wrote since stays written, except for a booted
+system's disks (see "Booted systems" below).
+
+#### Checkpoints
+
+A client that uses a state as a checkpoint of its session (to go back to
+a known point and get the same machine and the same debugger) adds
+`"checkpoint":true` to the save or load body:
 
 - **Paused only.** Both are refused with 409 unless the machine is paused
   (`POST /api/control/pause`) and no step or `run` command is still to
   stop it.
 - **Same hardware and media.** A load is refused with 409 and a
   `differences` list when the state's hardware settings (`cpu`,
-  `machine`, `cycles`, the sound cards, EMS/UMB) differ from
-  the running machine's, or its media do: the mounted drives, their
-  folders, their disk and CD images' paths and sizes, and for a
-  read-only image (a CD's) a hash of its first 64 KiB. Set the speed with
-  `/api/speed` or mount the drive again, then load. The Ctrl+F2 slots and
-  the settings window still bring the state's hardware with it.
-- **All or nothing.** A load that fails (400, or 409 as above) leaves the
-  machine, its settings and hardware as they were; the reply has
-  `"loaded":false` and `"unchanged":true`.
+  `machine`, `cycles`, the sound cards, EMS/UMB) or its media differ from
+  the running machine's, or the state has no record of its media. Set the
+  speed with `/api/speed` or mount the drive again, then load.
 - **A fresh debugger.** A load clears the breakpoints, watchpoints and
   `break_on` stops, a step-over's or `resume until` target, and queued
   input; `/api/control/wait` and `run` requests still waiting get 409.
   The machine stays paused. The reply's `debugger_reset` counts what was
   cleared, so set the breakpoints again after a load.
-
-Both replies have `format` (the file layout's version), `emulator` (this
-rust-dos's version) and the state's `header`: the rust-dos that saved it
-(`version`), when, the program, the hardware settings (`machine`) and its
-`media`. A state saved before media were recorded has `"media":null` and
-is refused, as its media can't be checked. The files and disk images on
-the host aren't part of a state: what a program wrote since stays written,
-except for a booted system's disks (next section).
 
 ### Booted systems (Windows 95)
 
