@@ -338,6 +338,7 @@ impl Item {
             IdeHardDisks => "ide-hard-disks",
             BootCdrom => "boot-cdrom",
             KeyboardLayout => "keyboard-layout",
+            MouseSensitivity => "mouse-sensitivity",
             MouseAutocapture => "mouse-autocapture",
             MouseCaptureMessages => "mouse-capture-messages",
             ShellSuggestions => "shell-suggestions",

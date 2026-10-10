@@ -404,7 +404,7 @@ impl Page {
                 Cycles, Core, Fpu, Cpu, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, VoodooScaleShader, VoodooMsaa,
                 VoodooAnisotropy, VoodooTextureSampling, VoodooFpsCap, VoodooGamma, VoodooOverlay, PowerVr, PowerVrFilter, Memsize, Ems, Umb, DosHigh, Dpmi,
                 DosVersion, IdeHardDisks, BootCdrom, HardDiskSpeed, FloppyDiskSpeed, Joystick,
-                Deadzone, MouseAutocapture, MouseCaptureMessages, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, RecordShader, Autoexec,
+                Deadzone, MouseSensitivity, MouseAutocapture, MouseCaptureMessages, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, RecordShader, Autoexec,
                 ShellSuggestions, ShellColors, SaveShellHistory,
             ],
             Page::Sound => &[
@@ -585,6 +585,8 @@ enum Item {
     /// A booted system's CD-ROM drive, with or without a CD.
     BootCdrom,
     KeyboardLayout,
+    /// The captured mouse's motion multiplier.
+    MouseSensitivity,
     /// The mouse captured and let go by itself.
     MouseAutocapture,
     /// The messages that say the mouse was captured or let go.
@@ -914,6 +916,7 @@ impl Item {
             IdeHardDisks => "IDE hard disks (BOOT)",
             BootCdrom => "CD-ROM drive (BOOT)",
             KeyboardLayout => "Keyboard layout",
+            MouseSensitivity => "Mouse sensitivity",
             MouseAutocapture => "Mouse auto capture",
             MouseCaptureMessages => "Mouse capture messages",
             ShellSuggestions => "Shell suggestions",
@@ -1116,7 +1119,7 @@ impl Item {
             Monochrome => Applies::NowAndAtPrompt,
             HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise | Volume(_) | CaptureDir | RecordUi
             | RecordShader => Applies::Now,
-            Joystick | Deadzone | SpeakerFilter | SbFilter | Reverb | Chorus | ReverbMix | ChorusMix => Applies::Now,
+            Joystick | Deadzone | MouseSensitivity | SpeakerFilter | SbFilter | Reverb | Chorus | ReverbMix | ChorusMix => Applies::Now,
             Rooms => Applies::Now,
             Memsize | Autoexec | Lan | LanHost => Applies::NextStart,
             VrMode | VrQuality | VrAmbientOcclusion | VrMsaa | VrScene | VrControllers | VrSpatialAudio | VrScreenFit | VrScreenGlow
@@ -1133,7 +1136,7 @@ impl Item {
             Item::Volume(_) | Item::ReverbMix | Item::ChorusMix | Item::CrtCurvature | Item::CrtGlow | Item::VrScreenGlow => {
                 Input::Slider
             }
-            Item::Memsize | Item::Deadzone => Input::Slider,
+            Item::Memsize | Item::Deadzone | Item::MouseSensitivity => Input::Slider,
             Item::VrSceneScale | Item::VrSeat(_) | Item::VrSeatTurn | Item::VrResolution => Input::Slider,
             Item::Cycles => Input::Presets,
             Item::UltraDir | Item::CaptureDir => Input::Text,
@@ -1267,6 +1270,7 @@ impl Item {
             IdeHardDisks => on_off(s.ide_hard_disks),
             BootCdrom => if s.boot_cdrom { "always" } else { "with a CD" }.to_string(),
             KeyboardLayout => s.keyboard_layout.describe(),
+            MouseSensitivity => bar(format!("{:.2}x", s.mouse_sensitivity), (s.mouse_sensitivity * 100.0).round() as u16, 1000, 50),
             MouseAutocapture => on_off(s.mouse_autocapture),
             MouseCaptureMessages => on_off(s.mouse_capture_messages),
             ShellSuggestions => on_off(s.shell.autosuggest),
@@ -1596,7 +1600,7 @@ impl Item {
             PrinterTimeout => each(s, [1000, 2000, 3000, 5000, 10_000, 30_000, 0], |s, ms| s.printer.timeout = ms),
             // Slid, typed, picked from the host's files or edited, and a
             // row of several, whose fields have their own.
-            Cycles | CrtCurvature | CrtGlow | Memsize | Volume(_) | ReverbMix | ChorusMix | Deadzone | UltraDir
+            Cycles | CrtCurvature | CrtGlow | Memsize | Volume(_) | ReverbMix | ChorusMix | Deadzone | MouseSensitivity | UltraDir
             | SoundFont | Mt32Roms | Awe32Rom | Awe32Download | Sc55Roms | Sc55Download | VoodooOverlay | CaptureDir | Autoexec | SbPorts | GusPorts | MacAddr
             | Rooms | Relay | Player | VrScene | VrScreenGlow | VrCenter | VrSceneScale | VrSeat(_) | VrSeatTurn | VrResolution
             | Lan | LanHost | Room | Password | ModemListen => Vec::new(),
@@ -1665,6 +1669,12 @@ impl Item {
                 let dz = step_units(s.joystick.deadzone as u16, dir, DEADZONE_UNIT, MAX_DEADZONE as u16);
                 s.joystick.deadzone = dz as u8;
             }
+            MouseSensitivity => {
+                // Exact presets avoid drift and step typed values to the
+                // nearest tenth on that side, from 0.1 to 10.0.
+                let steps: Vec<f64> = (1..=100).map(|n| n as f64 / 10.0).collect();
+                s.mouse_sensitivity = step_number(&steps, s.mouse_sensitivity, dir);
+            }
             // Around the values it is picked from.
             _ => {
                 let choices = self.choices(s, drives, frontend);
@@ -1698,6 +1708,7 @@ impl Item {
             Item::CaptureDir => s.capture_dir.display().to_string(),
             Item::Memsize => s.memsize.to_string(),
             Item::Deadzone => s.joystick.deadzone.to_string(),
+            Item::MouseSensitivity => s.mouse_sensitivity.to_string(),
             Item::CrtCurvature => s.crt.curvature.to_string(),
             Item::CrtGlow => s.crt.glow.to_string(),
             Item::VrScreenGlow => s.vr.screen_glow.to_string(),
@@ -1735,6 +1746,7 @@ impl Item {
                 s.memsize = mb;
             }
             Item::Deadzone => s.joystick.deadzone = crate::joystick::parse_deadzone(text)?,
+            Item::MouseSensitivity => s.mouse_sensitivity = crate::config::parse_mouse_sensitivity(text)?,
             Item::CrtCurvature => s.crt.curvature = parse_amount(text).ok_or("The curvature goes from 0 to 100%")?,
             Item::CrtGlow => s.crt.glow = parse_amount(text).ok_or("The glow goes from 0 to 100%")?,
             Item::VrScreenGlow => s.vr.set("screen_glow", text, std::path::Path::new(""))?,
@@ -1785,6 +1797,9 @@ impl Item {
             Item::Deadzone => {
                 let default = crate::joystick::JoystickSettings::default().deadzone;
                 std::mem::replace(&mut s.joystick.deadzone, default) != default
+            }
+            Item::MouseSensitivity => {
+                std::mem::replace(&mut s.mouse_sensitivity, 1.0) != 1.0
             }
             Item::CrtCurvature => {
                 let default = CrtSettings::default().curvature;

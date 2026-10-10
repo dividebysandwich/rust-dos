@@ -1161,6 +1161,7 @@ fn main() -> Result<(), String> {
                         let (sx, sy) = display.frame_scale();
                         let frame_motion = (xrel as f64 * sx, yrel as f64 * sy);
                         let (dx, dy) = video::overlay::frame_motion_to_mouse(&cpu.bus, &cached_frame, frame_motion);
+                        let (dx, dy) = settings.mouse_motion(dx, dy);
                         // The program's cursor pushed out of the screen
                         // takes the host's pointer out with it, unless the
                         // program steers with the mouse's motion or the

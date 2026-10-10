@@ -902,6 +902,7 @@ impl Core {
         let bus = &mut self.m.cpu.bus;
         if dx != 0.0 || dy != 0.0 {
             let (dx, dy) = video::overlay::frame_motion_to_mouse(bus, &self.screen, (dx, dy));
+            let (dx, dy) = self.m.settings.mouse_motion(dx, dy);
             bus.mouse.move_by(dx, dy);
         }
         for button in 0..3 {

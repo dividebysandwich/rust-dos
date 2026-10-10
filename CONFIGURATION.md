@@ -318,6 +318,9 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   characters of the keys, and dead keys put their accents on the next
   letter. Characters code page 437 doesn't have (€, ø) type nothing.
   `KEYB` at the prompt changes it too.
+* `mouse_sensitivity` multiplies captured mouse movement on both axes:
+  `0.1` to `10.0`, default `1.0`. The settings slider adjusts in `0.1`
+  steps. Uncaptured positioning is unchanged.
 * `mouse_capture_messages` says over the picture when the mouse is
   captured (and that Ctrl+Alt lets it go) or let go: `true` (the default)
   or `false`.

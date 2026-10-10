@@ -175,6 +175,8 @@ pub struct Config {
     pub keyboard_layout: Option<LayoutSetting>,
     /// The mouse captured by itself (`mouse_autocapture`).
     pub mouse_autocapture: Option<bool>,
+    /// The captured mouse's motion multiplier (`mouse_sensitivity`).
+    pub mouse_sensitivity: Option<f64>,
     /// The messages that say the mouse was captured or let go
     /// (`mouse_capture_messages`).
     pub mouse_capture_messages: Option<bool>,
@@ -960,6 +962,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Some(on) => config.mouse_autocapture = Some(on),
                             None => warn(format!("invalid mouse_autocapture '{}' (true or false)", value)),
                         },
+                        "mouse_sensitivity" => match parse_mouse_sensitivity(value) {
+                            Ok(multiplier) => config.mouse_sensitivity = Some(multiplier),
+                            Err(message) => warn(message),
+                        },
                         "rewind" => match parse_bool(value) {
                             Some(on) => config.rewind = Some(on),
                             None => warn(format!("invalid rewind '{}' (true or false)", value)),
@@ -1321,6 +1327,8 @@ pub struct Settings {
     /// uses the mouse driver, and let go as the program's cursor leaves
     /// the screen.
     pub mouse_autocapture: bool,
+    /// Relative mouse motion multiplied by 0.1 to 10.0 (default 1.0).
+    pub mouse_sensitivity: f64,
     /// Say over the picture when the mouse is captured or let go.
     pub mouse_capture_messages: bool,
     /// Rewind with held Alt+F11, and the memory in MB its states may take.
@@ -1381,6 +1389,7 @@ impl Default for Settings {
             boot_cdrom: true,
             keyboard_layout: LayoutSetting::Auto,
             mouse_autocapture: true,
+            mouse_sensitivity: 1.0,
             mouse_capture_messages: true,
             rewind: false,
             rewind_memory: 256,
@@ -1400,7 +1409,19 @@ impl Default for Settings {
     }
 }
 
+/// Parse the host mouse motion multiplier, rejecting non-finite values too.
+pub fn parse_mouse_sensitivity(value: &str) -> Result<f64, String> {
+    value.trim().parse::<f64>().ok()
+        .filter(|n| (0.1..=10.0).contains(n))
+        .ok_or_else(|| format!("invalid mouse_sensitivity '{}' (0.1 to 10.0)", value))
+}
+
 impl Settings {
+
+    /// Scale relative host mouse motion, leaving absolute positioning alone.
+    pub fn mouse_motion(&self, dx: f64, dy: f64) -> (f64, f64) {
+        (dx * self.mouse_sensitivity, dy * self.mouse_sensitivity)
+    }
 
     /// The display adapter and monitor programs see: with `monochrome`, a
     /// VGA's or EGA's monitor is monochrome too (a CGA's stays colour).
@@ -1470,6 +1491,7 @@ impl Settings {
             ide_hard_disks: config.ide_hard_disks.unwrap_or(default.ide_hard_disks),
             boot_cdrom: config.boot_cdrom.unwrap_or(default.boot_cdrom),
             mouse_autocapture: config.mouse_autocapture.unwrap_or(default.mouse_autocapture),
+            mouse_sensitivity: config.mouse_sensitivity.unwrap_or(default.mouse_sensitivity),
             mouse_capture_messages: config.mouse_capture_messages.unwrap_or(default.mouse_capture_messages),
             rewind: config.rewind.unwrap_or(default.rewind),
             rewind_memory: config.rewind_memory.unwrap_or(default.rewind_memory),
@@ -1561,6 +1583,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Emulator, "boot_cdrom", yes_no(settings.boot_cdrom)),
         (Emulator, "keyboard_layout", Some(settings.keyboard_layout.name().to_string())),
         (Emulator, "mouse_autocapture", yes_no(settings.mouse_autocapture)),
+        (Emulator, "mouse_sensitivity", Some(settings.mouse_sensitivity.to_string())),
         (Emulator, "mouse_capture_messages", yes_no(settings.mouse_capture_messages)),
         (Emulator, "rewind", yes_no(settings.rewind)),
         (Emulator, "rewind_memory", Some(settings.rewind_memory.to_string())),
@@ -2529,6 +2552,41 @@ mod tests {
         assert_eq!(config.joystick, JoystickSettings::default());
     }
 
+    #[test]
+    fn mouse_sensitivity_parses_and_saves() {
+        assert_eq!(Settings::default().mouse_sensitivity, 1.0);
+        assert_eq!(Settings::from_config(&parse("", Path::new("."), None)).mouse_sensitivity, 1.0);
+        for value in [0.1, 1.0, 2.35, 5.0, 10.0] {
+            let text = format!("[emulator]\nmouse_sensitivity={}\n", value);
+            let config = parse(&text, Path::new("."), None);
+            assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+            let settings = Settings::from_config(&config);
+            assert_eq!(settings.mouse_sensitivity, value);
+            let saved = update_text("", &Settings::default(), &settings, &[], None);
+            assert_eq!(Settings::from_config(&parse(&saved, Path::new("."), None)).mouse_sensitivity, value);
+        }
+        for value in ["0", "-1", "0.01", "0.099", "10.01", "NaN", "inf", "-inf", "fast", ""] {
+            let config = parse(&format!("[emulator]\nmouse_sensitivity={}\n", value), Path::new("."), None);
+            assert_eq!(config.warnings.len(), 1, "{}: {:?}", value, config.warnings);
+            assert_eq!(Settings::from_config(&config).mouse_sensitivity, 1.0);
+        }
+    }
+
+    #[test]
+    fn mouse_sensitivity_scales_motion_and_preserves_small_movements() {
+        assert_eq!(Settings::default().mouse_motion(3.0, -6.0), (3.0, -6.0));
+        let settings = Settings { mouse_sensitivity: 10.0, ..Settings::default() };
+        assert_eq!(settings.mouse_motion(3.0, -6.0), (30.0, -60.0));
+        let settings = Settings { mouse_sensitivity: 0.1, ..Settings::default() };
+        let mut mouse = crate::mouse::MouseState::new();
+        let before = (mouse.x, mouse.y);
+        for _ in 0..100 {
+            let (dx, dy) = settings.mouse_motion(0.3, 0.3);
+            mouse.move_by(dx, dy);
+        }
+        assert_eq!((mouse.x - before.0, mouse.y - before.1), (3, 3));
+    }
+
     /// Settings with every value away from its default.
     fn changed_settings() -> Settings {
         let sound = SoundConfig {
@@ -2598,6 +2656,7 @@ mod tests {
             boot_cdrom: false,
             keyboard_layout: LayoutSetting::Named("gr"),
             mouse_autocapture: false,
+            mouse_sensitivity: 2.3,
             mouse_capture_messages: false,
             rewind: true,
             rewind_memory: 512,

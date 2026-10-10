@@ -189,6 +189,9 @@
 # be. Without it a click, Ctrl+Alt or Ctrl+F10 captures the mouse. true
 # (the default) or false.
 #mouse_autocapture=true
+# Captured mouse motion multiplier: 0.1 to 10.0, default 1.0.
+# The settings slider adjusts in steps of 0.1.
+#mouse_sensitivity=1.0
 # Say over the picture when the mouse is captured or let go: true (the
 # default) or false.
 #mouse_capture_messages=true

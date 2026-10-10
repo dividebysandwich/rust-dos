@@ -789,6 +789,7 @@ impl Machine {
     /// cursor stops at the edges, but its mickeys don't.
     pub fn mouse_move_by(&mut self, dx: f64, dy: f64) {
         let (dx, dy) = video::overlay::frame_motion_to_mouse(&self.cpu.bus, &self.screen, (dx, dy));
+        let (dx, dy) = self.settings.mouse_motion(dx, dy);
         self.cpu.bus.mouse.move_by(dx, dy);
     }
 

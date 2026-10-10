@@ -306,6 +306,14 @@ The keyboard layout DOS types in. **auto** takes your computer's layout.
 Pick one if the characters come out wrong. `KEYB` at the prompt changes
 it too.
 
+# Mouse sensitivity {#mouse-sensitivity}
+
+Multiplies captured mouse movement on both axes. **1.0** (the default)
+keeps the original speed; lower values slow it down and higher values
+speed it up. The range is **0.1 to 10.0**. Left and Right step by
+**0.1**. Enter lets you type a value; Delete restores **1.0**. Uncaptured
+pointer positioning is unchanged.
+
 # Mouse auto capture {#mouse-autocapture}
 
 When **on**, the mouse cursor is captured by the DOS window as soon as 

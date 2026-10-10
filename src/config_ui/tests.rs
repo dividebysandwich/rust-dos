@@ -1355,6 +1355,58 @@ fn the_joystick_steps_through_the_types() {
 }
 
 #[test]
+fn mouse_sensitivity_is_live_typed_and_resettable() {
+    let mut host = FakeHost::new();
+    let mut ui = opened(&host);
+    ui.show_page(Page::Emulator);
+    ui.row = ui.items().iter().position(|&i| i == Item::MouseSensitivity).unwrap();
+    assert_eq!(Item::MouseSensitivity.applies(), Applies::Now);
+    assert_eq!(Item::MouseSensitivity.input(), Input::Slider);
+    assert!(Item::MouseSensitivity.value(&ui.settings, None).starts_with("1.00x "));
+    keys(&mut ui, &mut host, &[UiKey::Right, UiKey::Right, UiKey::Left]);
+    assert_eq!(host.applied.last().unwrap().mouse_sensitivity, 1.1);
+    keys(&mut ui, &mut host, &[UiKey::Enter, UiKey::End, UiKey::Backspace, UiKey::Backspace, UiKey::Backspace]);
+    ui.text("0.1", &mut host);
+    ui.key(UiKey::Enter, &mut host);
+    assert_eq!(host.applied.last().unwrap().mouse_sensitivity, 0.1);
+    keys(&mut ui, &mut host, &[UiKey::Left, UiKey::Right]);
+    assert_eq!(host.applied.last().unwrap().mouse_sensitivity, 0.2);
+    keys(&mut ui, &mut host, &[UiKey::Delete]);
+    assert_eq!(host.applied.last().unwrap().mouse_sensitivity, 1.0);
+}
+
+#[test]
+fn mouse_sensitivity_steps_through_tenths_from_one_tenth_to_ten() {
+    let item = Item::MouseSensitivity;
+    let mut s = Settings::default();
+    item.set_text(&mut s, "0.1").unwrap();
+    item.step(&mut s, -1, &[], Frontend::DESKTOP);
+    assert_eq!(s.mouse_sensitivity, 0.1);
+    for tenth in 2..=100 {
+        item.step(&mut s, 1, &[], Frontend::DESKTOP);
+        assert_eq!(s.mouse_sensitivity, tenth as f64 / 10.0);
+    }
+    item.step(&mut s, 1, &[], Frontend::DESKTOP);
+    assert_eq!(s.mouse_sensitivity, 10.0);
+    for tenth in (1..100).rev() {
+        item.step(&mut s, -1, &[], Frontend::DESKTOP);
+        assert_eq!(s.mouse_sensitivity, tenth as f64 / 10.0);
+    }
+    item.step(&mut s, -1, &[], Frontend::DESKTOP);
+    assert_eq!(s.mouse_sensitivity, 0.1);
+    item.set_text(&mut s, "0.199").unwrap();
+    item.step(&mut s, 1, &[], Frontend::DESKTOP);
+    assert_eq!(s.mouse_sensitivity, 0.2);
+    for value in ["0", "0.099", "10.1", "NaN", "inf", "invalid"] {
+        assert!(item.set_text(&mut s, value).is_err());
+        assert_eq!(s.mouse_sensitivity, 0.2);
+    }
+    assert!(item.clear(&mut s));
+    assert_eq!(s.mouse_sensitivity, 1.0);
+    assert!(!item.clear(&mut s));
+}
+
+#[test]
 fn expanded_memory_changes_at_the_prompt() {
     let mut host = FakeHost::new();
     let mut ui = opened(&host);
