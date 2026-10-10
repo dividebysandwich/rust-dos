@@ -2712,6 +2712,9 @@ fn net_json(cpu: &Cpu) -> serde_json::Value {
 }
 
 #[cfg(test)]
+mod determinism_tests;
+
+#[cfg(test)]
 mod tests {
     use super::{Cmd, DebugHub, InputEvent, LowInput, Reply, Request, TraceQuery, keys_for_char, step_over_len};
     use rust_dos::deterministic::Deterministic;

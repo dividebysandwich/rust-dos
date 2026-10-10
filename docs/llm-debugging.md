@@ -379,7 +379,11 @@ curl -s $J -XPOST -d '{"until_ms":8000}' $H/api/control/resume
   `/api/speed` takes only a number.
 - **Clock:** the real-time clock, DOS's date and time, file times and the
   BIOS tick count start at `--start-time` (default 1995-04-11 12:34:56)
-  and run with emulated time.
+  and run with emulated time, as does the creation date of a CD a booted
+  system gets from a host folder.
+- **Addresses:** the NE2000's address (without `mac=`) and the IPX
+  driver's node address come from a generator seeded with the start
+  time, so two instances on one LAN need different start times.
 - **Starts paused:** with the debug server the machine starts paused
   (`"reason":"startup"`), so the input can be sent before anything runs.
 - **Input:** input, and requests that change the machine (`run`, memory

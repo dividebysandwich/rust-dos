@@ -23,6 +23,7 @@
 use crate::cpu::Cpu;
 use crate::exec::{self, ExecHook, StopReason};
 use chrono::{NaiveDate, NaiveDateTime, TimeDelta};
+use std::cell::Cell;
 
 const MS: u64 = 1_000_000;
 
@@ -53,6 +54,32 @@ pub fn parse_start(s: &str) -> Result<NaiveDateTime, String> {
         .ok_or_else(|| format!("invalid start time '{}': expected YYYY-MM-DD HH:MM:SS", s))
 }
 
+thread_local! {
+    /// The generator's state in deterministic mode, on the machine's
+    /// thread; None without the mode.
+    static RANDOM: Cell<Option<u64>> = const { Cell::new(None) };
+}
+
+/// In deterministic mode, fill `buf` from the mode's generator (SplitMix64,
+/// seeded with the start time) and return true; without it, return false
+/// and leave `buf` alone. For what the machine makes up that a program
+/// can see: the NE2000's and the IPX driver's addresses.
+pub fn random_bytes(buf: &mut [u8]) -> bool {
+    RANDOM.with(|state| {
+        let Some(mut s) = state.get() else { return false };
+        for chunk in buf.chunks_mut(8) {
+            s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = s;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            chunk.copy_from_slice(&z.to_le_bytes()[..chunk.len()]);
+        }
+        state.set(Some(s));
+        true
+    })
+}
+
 /// What a step reached: a whole emulated millisecond, and whether it is
 /// one where input is delivered (every `TICK_MS`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,11 +96,14 @@ pub struct Deterministic {
 }
 
 impl Deterministic {
-    /// The mode with the clock at `start`. Make it before the machine,
-    /// whose BIOS reads the clock as it starts.
+    /// The mode with the clock at `start`, and the addresses the machine
+    /// makes up (`random_bytes`) from a generator seeded with it. Make it
+    /// before the machine, whose BIOS reads the clock as it starts.
     pub fn new(start: NaiveDateTime) -> Self {
         let mode = Self { start, last_tick: 0 };
         mode.set_clock(0);
+        let seed = start.and_utc().timestamp() as u64;
+        RANDOM.with(|state| state.set(Some(seed ^ 0x9E37_79B9_7F4A_7C15)));
         mode
     }
 
