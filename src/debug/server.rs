@@ -647,7 +647,8 @@ struct BpBody {
     /// An exception vector (hex, or a number) or "any".
     exception: Option<Value>,
     mode_switch: Option<bool>,
-    /// With `addr`: remove the breakpoint when it is hit.
+    /// With `addr`: remove the breakpoint when it is hit. Refused with
+    /// `exception` or `mode_switch`.
     #[serde(default)]
     once: bool,
     /// With `exception`: false stops pausing on it.
@@ -671,6 +672,10 @@ fn exception_mask(v: &Value) -> Result<u32, ApiError> {
 async fn bp_add(State(s): State<AppState>, body: Bytes) -> ApiResult {
     let b: BpBody = from_value(parse_body(&body)?)?;
     if b.exception.is_some() || b.mode_switch.is_some() {
+        // These stop on every hit; a client asking for one hit would get many.
+        if b.once {
+            return Err(bad("'once' goes with 'addr' only, not 'exception' or 'mode_switch'"));
+        }
         let mask = b.exception.as_ref().map(exception_mask).transpose()?;
         let (exceptions, clear_exceptions) = if b.enabled == Some(false) { (None, mask) } else { (mask, None) };
         let cmd = Cmd::BreakOn { exceptions, clear_exceptions, mode_switch: b.mode_switch };

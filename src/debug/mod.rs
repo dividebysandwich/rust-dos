@@ -448,7 +448,7 @@ pub struct DebugHub {
     breakpoints: HashSet<usize>,
     /// The breakpoints removed when hit.
     once: HashSet<usize>,
-    /// The breakpoint that stopped the machine.
+    /// The breakpoint of the list that stopped the machine, until it resumes.
     breakpoint_hit: Option<usize>,
     temp_breakpoint: Option<usize>,
     /// Skip the breakpoint check for the first instruction after resuming,
@@ -585,12 +585,6 @@ impl DebugHub {
 
     /// Start the server thread and install the log/audio hooks on the bus.
     pub fn start(cpu: &mut Cpu, addr: SocketAddr, trace_capacity: usize) -> Result<Self, String> {
-        if !addr.ip().is_loopback() {
-            eprintln!(
-                "[DEBUG] WARNING: debug server bound to non-loopback address {}. It has no authentication!",
-                addr
-            );
-        }
         let shared = Arc::new(Shared {
             frame: Mutex::new(video::Frame::new(video::SCREEN_WIDTH, video::SCREEN_HEIGHT)),
             frame_seq: AtomicU64::new(0),
@@ -604,6 +598,12 @@ impl DebugHub {
         let (tx, rx) = mpsc::channel();
         // Port 0 takes a free port: this is the one it took.
         let addr = server::spawn(addr, tx, shared.clone())?;
+        if !addr.ip().is_loopback() {
+            eprintln!(
+                "[DEBUG] WARNING: debug server bound to non-loopback address {}. It has no authentication!",
+                addr
+            );
+        }
 
         let log_shared = shared.clone();
         cpu.bus.log_hook = Some(Box::new(move |line: &str| {
@@ -712,10 +712,14 @@ impl DebugHub {
             && (self.temp_breakpoint == Some(phys_ip) || self.breakpoints.contains(&phys_ip))
         {
             self.temp_breakpoint = None;
+            // A stop at the address of a `resume until` or a step over names
+            // no breakpoint: the client did not set one there.
+            if self.breakpoints.contains(&phys_ip) {
+                self.breakpoint_hit = Some(phys_ip);
+            }
             if self.once.remove(&phys_ip) {
                 self.breakpoints.remove(&phys_ip);
             }
-            self.breakpoint_hit = Some(phys_ip);
             self.enter_pause(PauseReason::Breakpoint);
             return true;
         }
@@ -783,9 +787,7 @@ impl DebugHub {
             {
                 reply["exception"] = e;
             }
-            if let Some(phys) = self.breakpoint_hit.take() {
-                reply["breakpoint"] = format!("{:05X}", phys).into();
-            }
+            self.name_breakpoint_hit(&mut reply);
             if let Some((phys, len, old, new)) = self.watch_hit.take() {
                 let digits = len as usize * 2;
                 reply["watch"] = json!({
@@ -981,7 +983,35 @@ impl DebugHub {
         if self.paused {
             self.paused = false;
             self.skip_bp_once = true;
+            self.breakpoint_hit = None;
         }
+    }
+
+    /// The machine is off: requests still waiting for a pause or a frame get
+    /// an error, and the server thread has a moment to write the replies
+    /// already given (the one to `quit` among them) before the process ends.
+    pub fn shutdown(&mut self) {
+        if self.shared.is_none() {
+            return;
+        }
+        for w in self.pause_waiters.drain(..).chain(self.frame_waiters.drain(..)) {
+            let _ = w.send(Reply::Error(503, "emulator has shut down".into()));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+
+    /// Put the breakpoint the machine stopped at, if any, in a stop's reply.
+    fn name_breakpoint_hit(&self, reply: &mut Value) {
+        if let Some(phys) = self.breakpoint_hit {
+            reply["breakpoint"] = format!("{:05X}", phys).into();
+        }
+    }
+
+    /// The reply to a pause or wait that finds the machine already stopped.
+    fn already_paused_json(&self, cpu: &Cpu) -> Value {
+        let mut reply = json!({"paused": true, "icount": cpu.executed, "registers": regs_json(cpu)});
+        self.name_breakpoint_hit(&mut reply);
+        reply
     }
 
     // ----- input ------------------------------------------------------------
@@ -1231,7 +1261,7 @@ impl DebugHub {
             }
             Cmd::Pause => {
                 if self.paused && self.pause_hit.is_none() {
-                    Reply::Json(json!({"paused": true, "icount": cpu.executed, "registers": regs_json(cpu)}))
+                    Reply::Json(self.already_paused_json(cpu))
                 } else {
                     if !self.paused {
                         self.enter_pause(PauseReason::Request);
@@ -1279,7 +1309,7 @@ impl DebugHub {
             }
             Cmd::WaitPause => {
                 if self.paused && self.pause_hit.is_none() {
-                    Reply::Json(json!({"paused": true, "icount": cpu.executed, "registers": regs_json(cpu)}))
+                    Reply::Json(self.already_paused_json(cpu))
                 } else {
                     self.pause_waiters.push(req.reply);
                     return;
@@ -1359,9 +1389,10 @@ impl DebugHub {
             },
             Cmd::Disasm { addr, count } => self.disasm(cpu, addr, count),
             Cmd::ListBreakpoints => Reply::Json(self.breakpoints_json()),
+            // The main loop turns the machine off after this frame's batch,
+            // paused or not: a paused machine runs nothing more before it.
             Cmd::Quit => {
                 cpu.bus.exit_requested = true;
-                self.resume();
                 Reply::Json(json!({"ok": true}))
             }
             Cmd::AddBreakpoint { addr, once } => match parse_addr(cpu, &addr).and_then(breakpoint_phys) {
@@ -2250,6 +2281,9 @@ mod tests {
         batch(&mut cpu, &mut hub);
         let stop = json(wait);
         assert_eq!((stop["reason"].as_str(), stop["breakpoint"].as_str()), (Some("breakpoint"), set["once"][0].as_str()));
+        // A wait that comes after the stop names the breakpoint too.
+        let late = json(ask(&mut cpu, &mut hub, Cmd::WaitPause));
+        assert_eq!(late["breakpoint"], stop["breakpoint"]);
         let left = json(ask(&mut cpu, &mut hub, Cmd::ListBreakpoints));
         assert_eq!(left["breakpoints"], serde_json::json!([]));
     }

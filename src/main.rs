@@ -1890,6 +1890,7 @@ fn main() -> Result<(), String> {
         ));
         pacer.wait_for_next_frame();
     }
+    dbg.shutdown();
 
     // The page in the printer comes out, and the job's files are written.
     for notice in cpu.bus.finish_printing() {

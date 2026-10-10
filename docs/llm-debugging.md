@@ -197,7 +197,8 @@ curl -s -XPOST $H/api/control/resume
   emulator stops at the breakpoint before all of the input is delivered.
 - **Breakpoints hit once:** `{"addr":"1000:010B","once":true}` removes the
   breakpoint when it is hit. A stop at a breakpoint names it in
-  `"breakpoint"` (its physical address).
+  `"breakpoint"` (its physical address), and so does a `wait` or `pause`
+  that comes after the stop, until the emulator resumes.
 - **Run to an address:** `POST /api/control/resume {"until":"1000:0120"}`
   runs to that address once, without adding a permanent breakpoint.
 - **Step over:** `POST /api/control/step_over` runs a `CALL`, `INT`, `LOOP`
