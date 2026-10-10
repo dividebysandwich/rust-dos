@@ -709,6 +709,9 @@ mod tests {
     /// blocks with sectors written.
     #[test]
     fn vhd_images_hold_the_same_disk() {
+        // The volume serial comes from the time, and writing the raw image
+        // can take long enough for the second to change before the VHDs.
+        crate::hosttime::fix(chrono::NaiveDate::from_ymd_opt(1995, 4, 11).unwrap().and_hms_opt(12, 34, 56));
         let spec = ImageSpec { size_mb: Some(500), label: Some("VHD".into()), ..Default::default() };
         let plan = plan(&spec).unwrap();
         let raw = scratch("same.img");
