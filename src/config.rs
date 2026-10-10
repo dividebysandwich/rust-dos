@@ -31,32 +31,12 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-pub const FILE_NAME: &str = "rust-dos.conf";
+pub use rust_dos_hostdirs::{FILE_NAME, exe_dir, user_dir};
+use rust_dos_hostdirs::profile_dir;
+#[cfg(test)]
+use rust_dos_hostdirs::user_dir_for;
 /// Written to the default location on first start.
 pub const TEMPLATE: &str = include_str!("../rust-dos.conf.example");
-
-/// rust-dos's own directory, for its log, shell history, downloaded ROMs
-/// and the like: the executable's directory in a portable install (one with
-/// a `rust-dos.conf` beside the executable), else the per-user one, e.g.
-/// `~/.config/rust-dos` on Linux.
-pub fn user_dir() -> Option<PathBuf> {
-    static DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
-    DIR.get_or_init(|| user_dir_for(exe_dir().as_deref(), profile_dir())).clone()
-}
-
-/// The per-user directory, e.g. `~/.config/rust-dos` on Linux.
-fn profile_dir() -> Option<PathBuf> {
-    crate::hostdirs::config_dir().map(|d| d.join("rust-dos"))
-}
-
-/// `exe_dir` if it holds a `rust-dos.conf` (a portable install), else
-/// `profile`.
-fn user_dir_for(exe_dir: Option<&Path>, profile: Option<PathBuf>) -> Option<PathBuf> {
-    match exe_dir {
-        Some(dir) if dir.join(FILE_NAME).is_file() => Some(dir.to_path_buf()),
-        _ => profile,
-    }
-}
 
 /// Per-user default: `<config dir>/rust-dos/rust-dos.conf`, e.g.
 /// `~/.config/rust-dos/rust-dos.conf` on Linux.
@@ -79,14 +59,6 @@ pub enum Located {
     NotFound {
         default: Option<PathBuf>,
     },
-}
-
-/// The directory holding the rust-dos executable, where a
-/// `rust-dos.conf` makes the install portable.
-pub fn exe_dir() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let exe = fs::canonicalize(&exe).unwrap_or(exe);
-    exe.parent().map(Path::to_path_buf)
 }
 
 /// Find the config file to use. An explicitly requested file must exist.

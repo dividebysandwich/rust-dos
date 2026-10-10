@@ -1,0 +1,14 @@
+[package]
+name = "rust-dos-hostdirs"
+description = "The host directories rust-dos keeps its files in"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+
+# On Windows the directories come from the environment (see lib.rs).
+[target.'cfg(not(windows))'.dependencies]
+dirs = "7.0.0"

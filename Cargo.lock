@@ -1921,6 +1921,7 @@ dependencies = [
  "png",
  "rust-dos-audio-core",
  "rust-dos-dma",
+ "rust-dos-hostdirs",
  "rust-dos-savestate",
  "rustysynth",
  "sdl2",
@@ -1949,6 +1950,13 @@ name = "rust-dos-dma"
 version = "1.5.0"
 dependencies = [
  "rust-dos-savestate",
+]
+
+[[package]]
+name = "rust-dos-hostdirs"
+version = "1.5.0"
+dependencies = [
+ "dirs",
 ]
 
 [[package]]

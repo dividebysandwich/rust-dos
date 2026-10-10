@@ -42,6 +42,7 @@ edition = "2024"
 rust-dos-savestate = { path = "crates/savestate" }
 rust-dos-dma = { path = "crates/dma" }
 rust-dos-audio-core = { path = "crates/audio-core" }
+rust-dos-hostdirs = { path = "crates/hostdirs" }
 iced-x86 = "1.21.0"
 font8x8 = "0.3.1"
 chrono = "0.4.45"
@@ -82,7 +83,7 @@ hayro = { version = "0.7", optional = true }
 sevenz-rust2 = { version = "0.22", default-features = false, features = ["bzip2", "deflate", "ppmd"], optional = true }
 
 # The user's home and configuration directories, which Windows has in the
-# environment (src/hostdirs.rs).
+# environment (crates/hostdirs; sc55's DOSBox ROM directory on macOS).
 [target.'cfg(not(windows))'.dependencies]
 dirs = "7.0.0"
 
