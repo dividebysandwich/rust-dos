@@ -351,7 +351,8 @@ curl -s $J -XPOST -d '{"until_ms":8000}' $H/api/control/resume
 - **What it leaves out:** pictures from `/api/screenshot` have no
   on-screen messages, which come and go with the host's time, and host
   game controllers aren't connected. Input from the window's keyboard and
-  mouse, network and serial links, and the end of a game launched from
+  mouse, network and serial links, the modification times of files a
+  program writes to a host folder, and the end of a game launched from
   its profile still follow the host.
 
 ### Booted systems (Windows 95)
