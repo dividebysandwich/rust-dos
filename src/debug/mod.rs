@@ -1231,26 +1231,33 @@ impl DebugHub {
     /// debugger holds the machine between two instructions. The other
     /// requests are carried out at the end of the frame, running or not.
     pub fn take_state_requests(&mut self) -> Vec<StateRequest> {
-        let requests = std::mem::take(&mut self.state_requests);
-        let Some(why) = self.checkpoint_refusal() else { return requests };
-        let (checkpoints, others): (Vec<_>, Vec<_>) = requests.into_iter().partition(|r| r.checkpoint);
-        for request in checkpoints {
-            let what = if request.load { "load" } else { "save" };
-            let error = format!("can't {} a checkpoint: {}", what, why);
-            request.fail(409, json!({"error": error, "paused": self.paused}));
+        let mut taken = Vec::new();
+        for request in std::mem::take(&mut self.state_requests) {
+            match request.checkpoint.then(|| self.checkpoint_refusal(request.load)).flatten() {
+                Some(why) => {
+                    let what = if request.load { "load" } else { "save" };
+                    let error = format!("can't {} a checkpoint: {}", what, why);
+                    request.fail(409, json!({"error": error, "paused": self.paused}));
+                }
+                None => taken.push(request),
+            }
         }
-        others
+        taken
     }
 
     /// Why a checkpoint can't be saved or loaded now, if it can't: the
-    /// machine runs, or a step or run command is still to stop it.
-    fn checkpoint_refusal(&self) -> Option<&'static str> {
+    /// machine runs, or a step or run command is still to stop it. A save
+    /// also waits for queued input, which goes on being typed while the
+    /// machine is paused; a load drops it (`reset_after_load`).
+    fn checkpoint_refusal(&self, load: bool) -> Option<&'static str> {
         if !self.paused {
             Some("the machine runs; pause it first (POST /api/control/pause)")
         } else if self.step_budget.is_some() {
             Some("a step is pending")
         } else if self.run_wait.is_some() {
             Some("a run command waits for its program")
+        } else if !load && !self.input.is_empty() {
+            Some("queued input is still being typed")
         } else {
             None
         }
@@ -1282,7 +1289,13 @@ impl DebugHub {
             "pause_waits": self.pause_waiters.len(),
             "run": self.run_wait.is_some(),
             "input": self.input.len(),
+            "held_keys": self.remote_held.len(),
         });
+        // Keys held before the load are forgotten without a release: the
+        // restored keyboard has the keys of the moment it was saved, and
+        // a key-up now would reach the restored machine.
+        self.remote_held.clear();
+        self.remote_mods = 0;
         let gone = || Reply::Error(409, "a save state was loaded".into());
         for waiter in self.pause_waiters.drain(..) {
             let _ = waiter.send(gone());
@@ -2865,6 +2878,18 @@ mod tests {
         let _save = send(&mut cpu, &mut hub, checkpoint);
         let _step = send(&mut cpu, &mut hub, Cmd::Step { count: 1 });
         assert!(hub.take_state_requests().is_empty(), "refused: the step is under way");
+
+        // Queued input goes on being typed while paused: a save waits for
+        // it, and a load drops it.
+        let (mut cpu, mut hub) = machine("checkpoint-input");
+        pause(&mut cpu, &mut hub);
+        hub.input.push_back(LowInput::Wait(std::time::Duration::from_secs(60)));
+        let (taken, refused) = state_request(&mut cpu, &mut hub, true);
+        let (code, body) = refused.expect("refused with input queued");
+        assert_eq!((taken, code), (0, 409));
+        assert!(body["error"].as_str().unwrap().contains("queued input"), "{}", body);
+        let _load = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), checkpoint: true });
+        assert_eq!(hub.take_state_requests().len(), 1, "a load drops the input");
     }
 
     #[test]
@@ -2891,15 +2916,20 @@ mod tests {
         ask(&mut cpu, &mut hub, on, 0).unwrap();
         hub.temp_breakpoint = Some(0x1234);
         let mut waiting = send(&mut cpu, &mut hub, Cmd::Input { events: Vec::new(), wait: true });
+        hub.key_down(&mut cpu, super::keys::lookup("a").unwrap(), b'a');
 
         let cleared = hub.reset_after_load(&cpu);
         assert_eq!(
             cleared,
             serde_json::json!({
                 "breakpoints": 1, "watchpoints": 1, "break_on": ["exceptions", "mode_switch", "program_exit"],
-                "run_to": true, "step": false, "pause_waits": 0, "run": false, "input": 1,
+                "run_to": true, "step": false, "pause_waits": 0, "run": false, "input": 1, "held_keys": 1,
             })
         );
+        // The key is forgotten: no key-up reaches the restored machine.
+        let before = cpu.bus.kbc.pending();
+        hub.release_keys(&mut cpu);
+        assert_eq!(cpu.bus.kbc.pending(), before, "no break code after the load");
         assert!(matches!(waiting.try_recv(), Ok(Reply::Error(409, _))), "the input's wait is answered");
         assert!(!hub.begin_batch(&cpu), "nothing is left to stop the machine");
         assert!(hub.paused, "the machine stays paused");

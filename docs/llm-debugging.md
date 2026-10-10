@@ -332,7 +332,8 @@ a known point and get the same machine and the same debugger) adds
 
 - **Paused only.** Both are refused with 409 unless the machine is paused
   (`POST /api/control/pause`) and no step or `run` command is still to
-  stop it.
+  stop it. A save is also refused while queued input (`/api/input`, typed
+  text) is still being typed, which goes on while paused.
 - **Same hardware and media.** A load is refused with 409 and a
   `differences` list when the state's hardware settings (`cpu`,
   `machine`, `cycles`, the sound cards, EMS/UMB) or its media differ from
@@ -341,8 +342,13 @@ a known point and get the same machine and the same debugger) adds
 - **A fresh debugger.** A load clears the breakpoints, watchpoints and
   `break_on` stops, a step-over's or `resume until` target, and queued
   input; `/api/control/wait` and `run` requests still waiting get 409.
-  The machine stays paused. The reply's `debugger_reset` counts what was
-  cleared, so set the breakpoints again after a load.
+  Keys held down through `/api/input` are forgotten without a key-up, so
+  the machine keeps the keyboard and mouse it was saved with. The machine
+  stays paused. The reply's `debugger_reset` counts what was cleared
+  (`held_keys` among it), so set the breakpoints again after a load.
+- **Media read again.** The hash of a read-only image's first 64 KiB is
+  otherwise kept while the file's size and time stay the same; a
+  checkpoint save or load reads every read-only image again.
 
 ### Booted systems (Windows 95)
 

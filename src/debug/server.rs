@@ -1092,12 +1092,13 @@ SAVE STATES
                    Replies have the state's header, "format" and
                    "emulator" (this version).
                    With "checkpoint":true both are taken only while paused
-                   with no step or run pending (409), and a load is refused
+                   with no step or run pending (409), a save also not
+                   while queued input is still typed, and a load is refused
                    (409, "differences") unless the state's hardware
                    settings and media match. It clears breakpoints,
-                   watchpoints, break_on stops, run-to targets and queued
-                   input ("debugger_reset") and answers waiting requests
-                   with 409.
+                   watchpoints, break_on stops, run-to targets, queued
+                   input and held keys ("debugger_reset") and answers
+                   waiting requests with 409.
 
 SPEED
   POST   /api/speed {"cycles":"auto"}   the CPU speed, as `cycles` takes it

@@ -9,6 +9,7 @@
 
 use crate::cpu::Cpu;
 use crate::disk::{DriveInfo, drive_key};
+use crate::hostfs;
 use crate::mount::display_host_path;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -70,7 +71,14 @@ fn medium(info: &DriveInfo) -> Option<Medium> {
     if info.root.is_none() && paths.is_empty() {
         return None;
     }
-    let shown = |p: &Path| display_host_path(&std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()));
+    // A frontend's path (`saf://...`, see hostfs.rs) is kept as it is.
+    let shown = |p: &Path| {
+        if hostfs::has_scheme(p) {
+            p.display().to_string()
+        } else {
+            display_host_path(&std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()))
+        }
+    };
     Some(Medium {
         drive: drive_key(info.drive),
         kind: info.kind.name().to_string(),
@@ -82,20 +90,31 @@ fn medium(info: &DriveInfo) -> Option<Medium> {
 }
 
 fn image(path: &Path, read_only: bool, shown: String) -> Image {
-    let meta = std::fs::metadata(path).ok();
-    let size = meta.as_ref().map(std::fs::Metadata::len);
+    let meta = hostfs::metadata(path).ok();
+    let size = meta.as_ref().map(|m| m.len);
     let head_sha256 = match (read_only, &meta) {
-        (true, Some(meta)) => head_hash(path, meta.len(), meta.modified().ok()),
+        (true, Some(meta)) => head_hash(path, meta.len, meta.modified),
         _ => None,
     };
     Image { path: shown, size, head_sha256 }
 }
 
+type Known = HashMap<PathBuf, (u64, Option<SystemTime>, String)>;
+
+/// The head hashes `head_hash` keeps, by path.
+static KNOWN: Mutex<Option<Known>> = Mutex::new(None);
+
+/// Forget the head hashes kept, so the next record reads every read-only
+/// image again. A checkpoint does this: a file replaced by another of the
+/// same size with its time kept (`cp -p`, `rsync -t`, an unpacked
+/// archive) has the cached hash of the old one.
+pub fn forget_hashes() {
+    *KNOWN.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
 /// The hash of the start of the file at `path`, kept while its size and
 /// time stay the same: the libretro core takes a state every frame.
 fn head_hash(path: &Path, size: u64, modified: Option<SystemTime>) -> Option<String> {
-    type Known = HashMap<PathBuf, (u64, Option<SystemTime>, String)>;
-    static KNOWN: Mutex<Option<Known>> = Mutex::new(None);
     let mut known = KNOWN.lock().unwrap_or_else(|e| e.into_inner());
     let known = known.get_or_insert_with(HashMap::new);
     if let Some((s, m, hash)) = known.get(path)
@@ -104,7 +123,7 @@ fn head_hash(path: &Path, size: u64, modified: Option<SystemTime>) -> Option<Str
         return Some(hash.clone());
     }
     let mut head = Vec::new();
-    std::fs::File::open(path).ok()?.take(HEAD).read_to_end(&mut head).ok()?;
+    hostfs::File::open(path).ok()?.take(HEAD).read_to_end(&mut head).ok()?;
     let hash: String = Sha256::digest(&head).iter().map(|b| format!("{:02x}", b)).collect();
     known.insert(path.to_path_buf(), (size, modified, hash.clone()));
     Some(hash)
@@ -247,8 +266,16 @@ mod tests {
         let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
         std::fs::File::options().write(true).open(&path).unwrap().set_modified(later).unwrap();
         let now = medium(&info(true)).unwrap();
-        let d = differences(std::slice::from_ref(&d), &[now]);
+        let d = differences(std::slice::from_ref(&d), std::slice::from_ref(&now));
         assert_eq!(d.len(), 1, "{:?}", d);
+
+        // Replaced again with its time kept: the cached hash stays until
+        // a checkpoint forgets it.
+        std::fs::write(&path, vec![0x4D; 4096]).unwrap();
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(later).unwrap();
+        assert_eq!(medium(&info(true)).unwrap(), now, "the hash kept for the same size and time");
+        forget_hashes();
+        assert_ne!(medium(&info(true)).unwrap(), now, "read again");
 
         // A CUE sheet, with the file its track is in.
         let cue = dir.join("game.ins");

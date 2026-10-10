@@ -1329,6 +1329,7 @@ fn main() -> Result<(), String> {
         }
         // A checkpoint is a state of this machine and this debugging
         // session: see `load_for_debugger`.
+        let mut checkpoint_loaded = false;
         for request in dbg.take_state_requests() {
             let path = request.path.clone();
             // The file layout's version, and this rust-dos's (the header has the one that saved it).
@@ -1337,6 +1338,7 @@ fn main() -> Result<(), String> {
                 match host!().load_for_debugger(&path, request.checkpoint) {
                     Ok((header, differences)) => {
                         let mut reply = serde_json::json!({"loaded": path, "format": format, "emulator": emulator, "header": header});
+                        checkpoint_loaded = request.checkpoint;
                         if request.checkpoint {
                             reply["debugger_reset"] = dbg.reset_after_load(&cpu);
                         } else if !differences.is_empty() {
@@ -1348,6 +1350,9 @@ fn main() -> Result<(), String> {
                     Err((status, body)) => request.fail(status, body),
                 }
             } else {
+                if request.checkpoint {
+                    savestate::media::forget_hashes();
+                }
                 let saved = host!().save_file(&path);
                 request.done(saved.map(|header| serde_json::json!({"saved": path, "format": format, "emulator": emulator, "header": header})));
             }
@@ -1368,12 +1373,18 @@ fn main() -> Result<(), String> {
         }
 
         // A save state loaded: the keys held go up, and a video recording
-        // stops, as its time would jump.
+        // stops, as its time would jump. A checkpoint keeps the keys and
+        // mouse buttons it was saved with: the keys held before it are
+        // forgotten without a key-up reaching the restored machine.
         if std::mem::take(&mut state_loaded) {
             rewinder.clear();
             achievements.reset();
-            release_input(&mut cpu, &mut held);
-            dbg.release_keys(&mut cpu);
+            if checkpoint_loaded {
+                held.clear();
+            } else {
+                release_input(&mut cpu, &mut held);
+                dbg.release_keys(&mut cpu);
+            }
             clipboard.stop_paste(&mut cpu);
             if let Some(video) = video_recording.take() {
                 match video.stop() {
@@ -2329,6 +2340,9 @@ impl MainHost<'_, '_> {
         let failed = |e: String| (400, serde_json::json!({"error": e, "loaded": false, "unchanged": true}));
         let (header, state) = self.read_state(path).map_err(failed)?;
         let mut differences = slots::machine_differences(&header.machine, &self.machine.settings(self.settings));
+        if checkpoint {
+            savestate::media::forget_hashes();
+        }
         match &header.media {
             Some(media) => differences.extend(savestate::media::differences(media, &savestate::media::of(self.cpu))),
             None if checkpoint => differences.push(format!(
@@ -2368,8 +2382,11 @@ impl MainHost<'_, '_> {
     /// machine as it was.
     fn load_state(&mut self, path: &std::path::Path, header: slots::Header, state: &[u8]) -> Result<slots::Header, String> {
         let (old_settings, old_hardware) = (self.settings.clone(), self.machine.clone());
-        let before = savestate::machine::save(self.cpu);
         let hardware = slots::machine_settings(&header.machine, self.settings);
+        // A failed `machine::load` puts the machine back by itself; the
+        // machine from before is needed only when the hardware changes.
+        let changes = hardware != old_settings || self.machine.differs(&hardware);
+        let before = changes.then(|| savestate::machine::save(self.cpu));
         if let Err(e) = self.apply(&hardware) {
             config_warning(self.cpu, &e);
         }
@@ -2384,10 +2401,12 @@ impl MainHost<'_, '_> {
         let loaded = savestate::machine::load(self.cpu, state).map_err(|e| e.to_string());
         savestate::disks::withdraw(self.cpu);
         if let Err(e) = loaded {
-            if let Err(e) = self.apply(&old_settings) {
-                config_warning(self.cpu, &e);
+            if let Some(before) = before {
+                if let Err(e) = self.apply(&old_settings) {
+                    config_warning(self.cpu, &e);
+                }
+                savestate::machine::roll_back(self.cpu, self.machine, &old_hardware, &old_settings, &before);
             }
-            savestate::machine::roll_back(self.cpu, self.machine, &old_hardware, &old_settings, &before);
             self.cpu.bus.log_string(&format!("[STATE] {} wasn't loaded: {}", path.display(), e));
             return Err(e);
         }
