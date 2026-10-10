@@ -1711,7 +1711,12 @@ states and rewind keep the card with its texture memory.
   Raider Gold CD, copied into the game's folder) runs with `cpu=pentium`
   and `memsize=32` (it wants 20 MB free), under its DOS/4GW. It finds a
   VESA 2.0 BIOS, so it doesn't run UniVBE. F1 and F2 change the
-  resolution, F3 shows it and the frame rate.
+  resolution, F3 shows it and the frame rate. F8 switches between double
+  and single buffering, going back to 640x480 as it does; single
+  buffering can be 4 or 5 frames a second faster, which counts while the
+  emulated card runs at 15 to 20 on a typical host. Keys this version has and the others
+  don't (or use differently): F4 shows or hides the PowerVR logo (in the
+  full game only), Z zooms the camera in and X out.
 
 How the card draws follows Imagination's own driver sources and simulator
 of the chip, which they released under the MIT licence
