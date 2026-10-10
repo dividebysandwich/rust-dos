@@ -75,9 +75,7 @@ impl CdImage {
     /// data track (.iso, .bin, .img), whose sector format is found from
     /// where the ISO 9660 volume descriptor is.
     pub fn open(path: &Path) -> Result<Self, String> {
-        // GOG's CUE sheets are .ins files, .inst in Steam's copies.
-        let is_cue = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("cue") || e.eq_ignore_ascii_case("ins") || e.eq_ignore_ascii_case("inst"));
-        if is_cue {
+        if is_cue(path) {
             Self::open_cue(path)
         } else if is_chd(path) {
             Self::open_chd(path)
@@ -527,6 +525,21 @@ pub fn wave_data<R: Read + Seek>(file: &mut R) -> Result<(WaveFormat, u64, u64),
         }
         at += 8 + size + (size & 1);
     }
+}
+
+/// Whether `CdImage::open` reads `path` as a CUE sheet: a `.cue`, or
+/// GOG's `.ins` (`.inst` in Steam's copies).
+fn is_cue(path: &Path) -> bool {
+    path.extension().is_some_and(|e| ["cue", "ins", "inst"].iter().any(|c| e.eq_ignore_ascii_case(c)))
+}
+
+/// The files the CUE sheet at `path` keeps its tracks in, those that are
+/// there; none if `path` isn't a CUE sheet `CdImage::open` reads as one.
+pub fn cue_files(path: &Path) -> Vec<PathBuf> {
+    let Some(text) = is_cue(path).then(|| hostfs::read(path).ok()).flatten() else { return Vec::new() };
+    let Ok(sheet) = parse_cue(&String::from_utf8_lossy(&text)) else { return Vec::new() };
+    let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    sheet.files.iter().filter_map(|f| find_file(dir, &f.name).ok()).collect()
 }
 
 /// A file named in a CUE sheet: below the sheet's folder by its relative

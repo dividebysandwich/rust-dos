@@ -117,6 +117,18 @@ struct Args {
     #[arg(long, value_name = "N|max|auto", value_parser = timer::CpuSpeed::parse)]
     cycles: Option<timer::CpuSpeed>,
 
+    /// Run on emulated time alone: the clock starts at --start-time, the
+    /// speed is fixed (--cycles N, or 3000 when it would be auto or max),
+    /// and the debug server's input arrives at emulated times. With
+    /// --debug-server the machine starts paused
+    #[arg(long)]
+    deterministic: bool,
+
+    /// The date and time the clock starts at with --deterministic
+    /// [default: 1995-04-11 12:34:56]
+    #[arg(long, value_name = "YYYY-MM-DD HH:MM:SS", requires = "deterministic", value_parser = rust_dos::deterministic::parse_start)]
+    start_time: Option<chrono::NaiveDateTime>,
+
     /// What runs the programs' instructions: auto (the interpreter, and the
     /// dynamic recompiler for protected-mode programs), dynamic or normal
     /// [default: auto, or the config file's core]
@@ -265,6 +277,9 @@ fn main() -> Result<(), String> {
     if let Some(cycles) = args.cycles {
         settings.cycles = cycles;
     }
+    if args.deterministic {
+        settings.cycles = deterministic_speed(settings.cycles, args.cycles)?;
+    }
     if let Some(core) = args.core {
         settings.core = core;
     }
@@ -362,6 +377,10 @@ fn main() -> Result<(), String> {
     text_input.stop();
     let host_clipboard = video_subsystem.clipboard();
 
+    // Deterministic mode sets the clock before the machine's BIOS reads it.
+    let mut det = args
+        .deterministic
+        .then(|| rust_dos::deterministic::Deterministic::new(args.start_time.unwrap_or_else(rust_dos::deterministic::default_start)));
     let mut cpu = create_cpu(&args, &config, memory_mb);
     apply_keyboard_layout(&mut cpu, settings.keyboard_layout);
     for warning in rust_dos::hardware::configure(&mut cpu, &settings, sdl_keys::detect_layout()) {
@@ -405,6 +424,21 @@ fn main() -> Result<(), String> {
         Some(addr) => debug::DebugHub::start(&mut cpu, addr, args.trace_capacity)?,
         None => debug::DebugHub::disabled(),
     };
+    if let Some(mode) = &det {
+        dbg.deterministic = Some(mode.start);
+        // A client sends its input before anything runs.
+        if args.debug_server.is_some() {
+            dbg.pause_at_start();
+        }
+        cpu.bus.log_string(&format!(
+            "[DETERMINISTIC] Clock from {}, {} cycles",
+            mode.start.format("%Y-%m-%d %H:%M:%S"),
+            settings.cycles.initial_cycles()
+        ));
+    }
+    // The keys a game's profile presses, as last stepped in deterministic
+    // mode, which steps them in emulated time.
+    let mut det_autoinput: Option<rust_dos::autoinput::Status> = None;
     let mut event_pump = sdl_context.event_pump()?;
     // RetroAchievements: the session with the site, and when the game's
     // logic is checked next (emulated PIT ticks, every 1/60 s). Hardcore
@@ -577,6 +611,7 @@ fn main() -> Result<(), String> {
                 slot: &mut slot,
                 state_loaded: &mut state_loaded,
                 achievements: &mut achievements,
+                deterministic: det.as_ref().map(|mode| mode.start),
             }
         };
     }
@@ -1330,18 +1365,41 @@ fn main() -> Result<(), String> {
         if dbg.take_closed_program() {
             host!().release_program();
         }
+        // A strict-match load brings a state of this machine and this
+        // debugging session: see `load_for_debugger`.
+        let mut strict_match_loaded = false;
         for request in dbg.take_state_requests() {
             let path = request.path.clone();
+            // The file layout's version, and this rust-dos's (the header has the one that saved it).
+            let (format, emulator) = (slots::FORMAT, env!("CARGO_PKG_VERSION"));
             if request.load {
-                let loaded = host!().load_file(&path);
-                request.done(loaded.map(|header| serde_json::json!({"loaded": path, "header": header})));
+                match host!().load_for_debugger(&path, request.strict_match) {
+                    Ok((header, differences)) => {
+                        let mut reply = serde_json::json!({"loaded": path, "format": format, "emulator": emulator, "header": header});
+                        strict_match_loaded = request.strict_match;
+                        if request.strict_match {
+                            reply["debugger_reset"] = dbg.reset_after_load(&cpu);
+                        } else if !differences.is_empty() {
+                            // Told, not refused: the state brought its own.
+                            reply["differences"] = differences.into();
+                        }
+                        request.done(Ok(reply));
+                    }
+                    Err((status, body)) => request.fail(status, body),
+                }
             } else {
+                if request.strict_match {
+                    savestate::media::forget(&cpu);
+                }
                 let saved = host!().save_file(&path);
-                request.done(saved.map(|()| serde_json::json!({"saved": path})));
+                request.done(saved.map(|header| serde_json::json!({"saved": path, "format": format, "emulator": emulator, "header": header})));
             }
         }
         for request in dbg.take_speed_requests() {
             let result = CpuSpeed::parse(&request.cycles).and_then(|cycles| {
+                if det.is_some() && !matches!(cycles, CpuSpeed::Fixed(_)) {
+                    return Err("deterministic mode runs at a fixed speed: give a number of cycles".to_string());
+                }
                 let new = Settings { cycles, ..settings.clone() };
                 host!().apply(&new)?;
                 Ok(serde_json::json!({"cycles": cycles.to_string()}))
@@ -1356,12 +1414,23 @@ fn main() -> Result<(), String> {
         }
 
         // A save state loaded: the keys held go up, and a video recording
-        // stops, as its time would jump.
+        // stops, as its time would jump. A strict-match load keeps the keys
+        // and mouse buttons the state was saved with: the keys held before it are
+        // forgotten without a key-up reaching the restored machine.
         if std::mem::take(&mut state_loaded) {
+            // Deterministic mode's clock and ticks go on from the state's
+            // emulated time.
+            if let Some(mode) = &mut det {
+                mode.resync(&cpu);
+            }
             rewinder.clear();
             achievements.reset();
-            release_input(&mut cpu, &mut held);
-            dbg.release_keys(&mut cpu);
+            if strict_match_loaded {
+                held.clear();
+            } else {
+                release_input(&mut cpu, &mut held);
+                dbg.release_keys(&mut cpu);
+            }
             clipboard.stop_paste(&mut cpu);
             if let Some(video) = video_recording.take() {
                 match video.stop() {
@@ -1408,15 +1477,11 @@ fn main() -> Result<(), String> {
         // started, run fast through their waits unless the player already
         // runs it fast.
         if !waiting && !ui.is_open() {
-            if autoinput.is_none()
-                && let Some(started) = game.as_mut().and_then(|g| g.take_input(&cpu))
-            {
-                autoinput = Some(started);
-            }
-            let status = autoinput.as_mut().map(|input| input.step(&mut cpu));
-            if status == Some(rust_dos::autoinput::Status::Done) {
-                autoinput = None;
-            }
+            // Deterministic mode steps them at its ticks (below).
+            let status = match det {
+                Some(_) => det_autoinput,
+                None => step_autoinput(&mut cpu, &mut game, &mut autoinput),
+            };
             let fast = status == Some(rust_dos::autoinput::Status::Busy { fast_forward: true });
             if fast && !cpu.bus.mixer.fast_forward {
                 pacer.set_fast_forward(true, &cpu.bus.clock, std::time::Instant::now());
@@ -1428,8 +1493,11 @@ fn main() -> Result<(), String> {
                 autoinput_fast = false;
             }
         }
-        // The values frozen on the Cheats page, as the program left them.
-        cpu.bus.apply_freezes();
+        // The values frozen on the Cheats page, as the program left them
+        // (in deterministic mode, at its ticks).
+        if det.is_none() {
+            cpu.bus.apply_freezes();
+        }
         // The controllers as they are now; at rest while the machine waits.
         // A game with a gamepad mapping plays the first pad with it.
         let mapping = game.as_ref().and_then(|g| g.pad.clone());
@@ -1442,7 +1510,9 @@ fn main() -> Result<(), String> {
         let mut wheel_view: Option<rust_dos::padmap::WheelView> = None;
         // A VR headset's controllers, while they are a gamepad, are the
         // first pad, before the host's.
-        let first_pad = vr_pad.or_else(|| controllers.first().map(pad_snapshot));
+        // Deterministic mode has none: they would change the machine at
+        // the host's frames.
+        let first_pad = vr_pad.or_else(|| controllers.first().map(pad_snapshot)).filter(|_| det.is_none());
         for slot in 0..2 {
             if slot == 0
                 && let Some(mapper) = &mut padmap
@@ -1465,7 +1535,7 @@ fn main() -> Result<(), String> {
                 (0, Some(vr)) => Some(rust_dos::vr::joystick(&vr)),
                 _ => controllers.get(slot).map(pad_state),
             };
-            let pad = pad.map(|pad| if waiting { joystick::PadState::default() } else { pad });
+            let pad = pad.map(|pad| if waiting { joystick::PadState::default() } else { pad }).filter(|_| det.is_none());
             cpu.bus.joystick.set_pad(slot, pad);
         }
         cpu.bus.set_voodoo_fps_cap(settings.voodoo.fps_cap);
@@ -1476,7 +1546,7 @@ fn main() -> Result<(), String> {
         // so the window refreshes at the machine's rate, where the host's
         // display goes that fast; under the 3dfx frame rate cap, at the
         // cap's frame times, which the card's swaps keep to.
-        let refresh = (settings.vrr && !waiting)
+        let refresh = (settings.vrr && !waiting && det.is_none())
             .then(|| cpu.bus.voodoo_cap_timing().unwrap_or_else(|| cpu.bus.refresh_timing()))
             .filter(|timing| display.shows_hz(timing.hz()));
         let batch_end = if waiting {
@@ -1486,7 +1556,14 @@ fn main() -> Result<(), String> {
         } else {
             pacer.batch_end(&cpu.bus.clock, batch_start)
         };
-        cpu.bus.start_batch(batch_end);
+        // Deterministic mode runs whole ticks of emulated time.
+        let batch_end = match &det {
+            Some(mode) => mode.frame_end(&cpu, batch_end),
+            None => batch_end,
+        };
+        if det.is_none() {
+            cpu.bus.start_batch(batch_end);
+        }
         let batch_icount = cpu.bus.clock.icount;
         let batch_stalled = cpu.bus.clock.stalled;
         let batch_idle = cpu.bus.clock.idle;
@@ -1496,7 +1573,29 @@ fn main() -> Result<(), String> {
         // Per-instruction debug hook (breakpoints / stepping / tracing) is
         // only consulted when something actually needs it.
         let dbg_hot = dbg.begin_batch(&cpu);
-        if achievements.checking() && !waiting {
+        if let Some(mode) = &mut det {
+            // A millisecond of emulated time at a time, with the input, the
+            // frozen values and the profile's keys at its ticks.
+            // Achievements are checked at the first millisecond of each
+            // 1/60 s, fast forwarding or not.
+            let ui_open = ui.is_open();
+            let checking = achievements.checking();
+            if !waiting {
+                dbg.run_deterministic(&mut cpu, mode, dbg_hot, batch_end, |cpu, dbg, reached| {
+                    if reached.tick && !ui_open {
+                        dbg.feed_input(cpu);
+                        cpu.bus.apply_freezes();
+                        det_autoinput = step_autoinput(cpu, &mut game, &mut autoinput);
+                    }
+                    let now = cpu.bus.clock.now_ticks();
+                    if checking && now >= next_check {
+                        achievements.do_frame(cpu.bus.ram(), cpu.bus.boot.is_some());
+                        let frame = timer::frame_ticks();
+                        next_check = if next_check + frame <= now { now + frame } else { next_check + frame };
+                    }
+                });
+            }
+        } else if achievements.checking() && !waiting {
             // A game's achievements are checked every 1/60 s of emulated
             // time, as in the emulators the sets are made with, fast
             // forwarding or not: the batch runs to each check.
@@ -1566,7 +1665,12 @@ fn main() -> Result<(), String> {
                 let back = |at: u64| (started.saturating_sub(at)) as f64 / 1e9;
                 match rewinder.step_back() {
                     Some((at, state)) => match savestate::machine::load(&mut cpu, &state) {
-                        Ok(()) => osd.show_lasting(format!("Rewind -{:.1} s", back(at))),
+                        Ok(()) => {
+                            if let Some(mode) = &mut det {
+                                mode.resync(&cpu);
+                            }
+                            osd.show_lasting(format!("Rewind -{:.1} s", back(at)))
+                        }
                         Err(e) => osd.show_lasting(format!("Rewind: {}", e)),
                     },
                     None => osd.show_lasting(format!("Rewind -{:.1} s: as far back as it goes", back(cpu.bus.clock.now_ns()))),
@@ -1691,7 +1795,13 @@ fn main() -> Result<(), String> {
         cpu.bus.flush_log();
 
         // Update Cursor Blink
-        if last_blink.elapsed() >= blink_interval {
+        if let Some(mode) = &det {
+            let visible = mode.blink_visible(&cpu);
+            if visible != cursor_visible {
+                cursor_visible = visible;
+                cpu.bus.vga.set_blink(visible);
+            }
+        } else if last_blink.elapsed() >= blink_interval {
             cursor_visible = !cursor_visible;
             last_blink = std::time::Instant::now();
             // Blinking characters keep the cursor's time.
@@ -1853,10 +1963,22 @@ fn main() -> Result<(), String> {
             if capturing && record_ui {
                 capture!();
             }
+            macro_rules! debug_frame {
+                () => {
+                    match ui.with_layer(&screen, (1.0, 1.0)) {
+                        Some(paged) => dbg.capture_frame(&paged),
+                        None => dbg.capture_frame(&screen),
+                    }
+                };
+            }
+            // In deterministic mode the debug server's pictures leave out
+            // the messages, which come and go with the host's time.
+            if det.is_some() {
+                debug_frame!();
+            }
             osd.draw(&mut screen);
-            match ui.with_layer(&screen, (1.0, 1.0)) {
-                Some(paged) => dbg.capture_frame(&paged),
-                None => dbg.capture_frame(&screen),
+            if det.is_none() {
+                debug_frame!();
             }
 
             // Draw Recording Indicator
@@ -1938,6 +2060,36 @@ fn main() -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// The speed in deterministic mode: the one asked for, which has to be a
+/// number of cycles on the command line; from the configuration, auto and
+/// max become `deterministic::DEFAULT_CYCLES`.
+fn deterministic_speed(speed: CpuSpeed, from_args: Option<CpuSpeed>) -> Result<CpuSpeed, String> {
+    match (speed, from_args) {
+        (CpuSpeed::Fixed(_), _) => Ok(speed),
+        (_, Some(asked)) => Err(format!("--deterministic needs a fixed speed: --cycles N, not {}", asked)),
+        _ => Ok(CpuSpeed::Fixed(rust_dos::deterministic::DEFAULT_CYCLES)),
+    }
+}
+
+/// Start the keys a game's profile presses once its program started, and
+/// press the next. Returns what they are doing, None without any.
+fn step_autoinput(
+    cpu: &mut Cpu,
+    game: &mut Option<ActiveGame>,
+    autoinput: &mut Option<rust_dos::autoinput::AutoInput>,
+) -> Option<rust_dos::autoinput::Status> {
+    if autoinput.is_none()
+        && let Some(started) = game.as_mut().and_then(|g| g.take_input(cpu))
+    {
+        *autoinput = Some(started);
+    }
+    let status = autoinput.as_mut().map(|input| input.step(cpu));
+    if status == Some(rust_dos::autoinput::Status::Done) {
+        *autoinput = None;
+    }
+    status
 }
 
 /// The emulated time between the states rewind takes.
@@ -2107,6 +2259,9 @@ struct MainHost<'m, 'd> {
     slot: &'m mut u8,
     state_loaded: &'m mut bool,
     achievements: &'m mut Achievements,
+    /// Deterministic mode: the date and time its clock started at. The
+    /// speed stays fixed, and save states record the start.
+    deterministic: Option<chrono::NaiveDateTime>,
 }
 
 impl MainHost<'_, '_> {
@@ -2263,7 +2418,9 @@ impl MainHost<'_, '_> {
             v.render(&mut picture.rgb, picture.width as usize);
             v.set_software_picture(false);
         }
-        (slots::header(self.cpu, &hardware, game), picture, savestate::machine::save(self.cpu))
+        let mut header = slots::header(self.cpu, &hardware, game);
+        header.deterministic = self.deterministic.map(|start| start.format("%Y-%m-%d %H:%M:%S").to_string());
+        (header, picture, savestate::machine::save(self.cpu))
     }
 
     /// Save the machine to slot `slot`. Its state is taken now; a thread
@@ -2284,20 +2441,64 @@ impl MainHost<'_, '_> {
         Ok(())
     }
 
-    /// Save the machine to the file `path`, now.
-    fn save_file(&mut self, path: &std::path::Path) -> Result<(), String> {
+    /// Save the machine to the file `path`, now. Returns the state's header.
+    fn save_file(&mut self, path: &std::path::Path) -> Result<slots::Header, String> {
         let (header, picture, state) = self.capture_state();
         savestate::disks::delete_copies(path);
         savestate::disks::save_copies(self.cpu, path)?;
         slots::write_file(path, &slots::encode(&header, &slots::thumbnail(&picture), &state))?;
         self.cpu.bus.log_string(&format!("[STATE] Saved to {}", path.display()));
-        Ok(())
+        Ok(header)
     }
 
     /// Load the save state file `path`: the hardware it was saved with
     /// first, as the settings have it, then the machine. Memory can't
     /// change its size, so a state of another memsize is refused.
     fn load_file(&mut self, path: &std::path::Path) -> Result<slots::Header, String> {
+        let (header, state) = self.read_state(path)?;
+        self.load_state(path, header, &state)
+    }
+
+    /// Load the save state file `path` for the debug server. Returns the
+    /// header and how the state's hardware settings and media differ from
+    /// this machine's. A plain load brings the state's own hardware, as
+    /// `load_file` does. A `strict_match` load takes only a state of this
+    /// machine: one of other hardware or media, or without a record of its
+    /// media, is refused (409) with what differs.
+    fn load_for_debugger(
+        &mut self,
+        path: &std::path::Path,
+        strict_match: bool,
+    ) -> Result<(slots::Header, Vec<String>), (u16, serde_json::Value)> {
+        // Whatever failed, the machine, its settings and hardware are as they were.
+        let failed = |e: String| (400, serde_json::json!({"error": e, "loaded": false, "unchanged": true}));
+        let (header, state) = self.read_state(path).map_err(failed)?;
+        let mut differences = slots::machine_differences(&header.machine, &self.machine.settings(self.settings));
+        // The machine's clock is the mode's start plus emulated time.
+        let start = self.deterministic.map(|start| start.format("%Y-%m-%d %H:%M:%S").to_string());
+        differences.extend(slots::mode_difference(header.deterministic.as_deref(), start.as_deref()));
+        if strict_match {
+            savestate::media::forget(self.cpu);
+        }
+        match &header.media {
+            Some(media) => differences.extend(savestate::media::differences(media, &savestate::media::of(self.cpu))),
+            None if strict_match => differences.push(format!(
+                "the state doesn't record its media (saved by rust-dos {}), so they can't be checked",
+                header.version
+            )),
+            None => {}
+        }
+        if strict_match && !differences.is_empty() {
+            let error = format!("{} doesn't match this machine; nothing was loaded", path.display());
+            return Err((409, serde_json::json!({"error": error, "loaded": false, "unchanged": true, "differences": differences})));
+        }
+        let header = self.load_state(path, header, &state).map_err(failed)?;
+        Ok((header, differences))
+    }
+
+    /// The header and machine's state of the save state file `path`, if
+    /// this machine can take it.
+    fn read_state(&mut self, path: &std::path::Path) -> Result<(slots::Header, Vec<u8>), String> {
         if self.achievements.hardcore_active() {
             return Err("hardcore mode: no save states while RetroAchievements plays".to_string());
         }
@@ -2309,7 +2510,20 @@ impl MainHost<'_, '_> {
         if let Some(why) = slots::refusal(&header, self.cpu.bus.ram().len() >> 20) {
             return Err(why);
         }
+        Ok((header, state))
+    }
+
+    /// Load the state `state` of the file `path`, with its header: the
+    /// hardware it was saved with first, then the machine. A load that
+    /// fails puts back the settings and hardware from before it, and the
+    /// machine as it was.
+    fn load_state(&mut self, path: &std::path::Path, header: slots::Header, state: &[u8]) -> Result<slots::Header, String> {
+        let (old_settings, old_hardware) = (self.settings.clone(), self.machine.clone());
         let hardware = slots::machine_settings(&header.machine, self.settings);
+        // A failed `machine::load` puts the machine back by itself; the
+        // machine from before is needed only when the hardware changes.
+        let changes = hardware != old_settings || self.machine.differs(&hardware);
+        let before = changes.then(|| savestate::machine::save(self.cpu));
         if let Err(e) = self.apply(&hardware) {
             config_warning(self.cpu, &e);
         }
@@ -2321,9 +2535,28 @@ impl MainHost<'_, '_> {
         // A booted system's disks come back from their copies, if the
         // journals don't reach back to the state.
         savestate::disks::offer_copies(self.cpu, path);
-        let loaded = savestate::machine::load(self.cpu, &state).map_err(|e| e.to_string());
+        let loaded = savestate::machine::load(self.cpu, state).map_err(|e| e.to_string());
         savestate::disks::withdraw(self.cpu);
-        loaded?;
+        if let Err(e) = loaded {
+            if let Some(before) = before {
+                if let Err(e) = self.apply(&old_settings) {
+                    config_warning(self.cpu, &e);
+                }
+                savestate::machine::roll_back(self.cpu, self.machine, &old_hardware, &old_settings, &before);
+            }
+            self.cpu.bus.log_string(&format!("[STATE] {} wasn't loaded: {}", path.display(), e));
+            return Err(e);
+        }
+        // Deterministic mode runs at the speed the machine's state brought
+        // (a state saved at auto or max brings the speed it had then), so
+        // the run from the state is the same whatever this machine ran at.
+        if self.deterministic.is_some() {
+            let speed = CpuSpeed::Fixed(self.cpu.bus.clock.cycles_per_ms());
+            if self.settings.cycles != speed {
+                self.settings.cycles = speed;
+                self.pacer.set_speed(speed);
+            }
+        }
         self.pacer.rebase(&self.cpu.bus.clock, std::time::Instant::now());
         *self.state_loaded = true;
         self.cpu.bus.log_string(&format!("[STATE] Loaded {} (saved {})", path.display(), header.saved));
@@ -2390,6 +2623,16 @@ impl MainHost<'_, '_> {
 
 impl Host for MainHost<'_, '_> {
     fn apply(&mut self, new: &Settings) -> Result<Option<String>, String> {
+        // Deterministic mode keeps the speed it has where the settings (a
+        // game's profile, the window) ask for auto or max.
+        let pinned;
+        let new = match new.cycles {
+            CpuSpeed::Auto(_) | CpuSpeed::Max if self.deterministic.is_some() => {
+                pinned = Settings { cycles: CpuSpeed::Fixed(self.cpu.bus.clock.cycles_per_ms()), ..new.clone() };
+                &pinned
+            }
+            _ => new,
+        };
         let old = std::mem::replace(self.settings, new.clone());
         let shown = |s: &Settings| (s.scale, s.fullscreen, s.aspect, s.filter, s.shader, s.crt, s.monochrome, s.voodoo.scale_shader);
         if shown(new) != shown(&old) {

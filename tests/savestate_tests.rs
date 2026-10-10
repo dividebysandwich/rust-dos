@@ -535,6 +535,35 @@ fn a_slot_brings_its_hardware_and_its_memory_size_must_match() {
 }
 
 #[test]
+fn a_load_that_fails_takes_back_the_hardware_it_put_in_place() {
+    use rust_dos::savestate::slots;
+    fix_time();
+    let dir = scratch("roll_back", &[]);
+    let defaults = rust_dos::config::Settings::default();
+    let (mut cpu, mut hardware) = configured_machine(&dir, &defaults);
+    run_ms(&mut cpu);
+    let (old, before) = (hardware.clone(), machine::save(&cpu));
+
+    // The state's hardware: CGA and no Ultrasound. Its state is cut
+    // short, so the load fails after the hardware changed.
+    let mut theirs = defaults.clone();
+    theirs.machine = Adapter::Cga;
+    theirs.sound.gus.enabled = false;
+    let (other, _) = configured_machine(&dir, &theirs);
+    let state = machine::save(&other);
+    let wanted = slots::machine_settings(&slots::machine_text(&theirs), &defaults);
+    hardware.apply(&mut cpu, &wanted);
+    assert!(cpu.bus.gus.is_none());
+    assert_eq!(machine::load(&mut cpu, &state[..state.len() - 10]), Err(StateError::Truncated));
+
+    machine::roll_back(&mut cpu, &mut hardware, &old, &defaults, &before);
+    assert_eq!(hardware, old);
+    assert!(cpu.bus.gus.is_some(), "the Ultrasound is back");
+    assert_eq!(cpu.bus.vga.adapter, old.video.adapter);
+    assert!(machine::save(&cpu) == before, "the machine is as it was");
+}
+
+#[test]
 fn rewind_goes_back_through_a_running_machine_in_small_steps() {
     use rust_dos::savestate::rewind::History;
     fix_time();
@@ -563,4 +592,33 @@ fn rewind_goes_back_through_a_running_machine_in_small_steps() {
     // A step back loads.
     machine::load(&mut cpu, &states[3]).unwrap();
     assert!(machine::save(&cpu) == states[3]);
+}
+
+/// The devices' entries in DOS's file table keep the time they were
+/// opened at when a load writes the table again, so a loaded machine's
+/// memory is the saved one's whenever the load happens.
+#[test]
+fn a_load_keeps_the_time_stamps_of_the_devices_open_files() {
+    use rust_dos::disk::{SFT_AUX, SFT_CON, SFT_PRN};
+    use rust_dos::dos_files::{ENTRY_SIZE, entry_address};
+    fix_time();
+    let dir = scratch("device_times", &[]);
+    let mut cpu = machine_in(&dir);
+    let entries = |cpu: &Cpu| -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for sft in [SFT_AUX, SFT_CON, SFT_PRN] {
+            let at = entry_address(&cpu.bus, sft);
+            bytes.extend((0..ENTRY_SIZE).map(|i| cpu.bus.read_8(at + i)));
+        }
+        bytes
+    };
+    let saved_entries = entries(&cpu);
+    let state = machine::save(&cpu);
+
+    // Loaded a minute later.
+    let later = NaiveDate::from_ymd_opt(1995, 4, 11).unwrap().and_hms_opt(12, 35, 56).unwrap();
+    rust_dos::hosttime::fix(Some(later));
+    machine::load(&mut cpu, &state).unwrap();
+    rust_dos::dos_files::flush(&mut cpu.bus);
+    assert_eq!(entries(&cpu), saved_entries);
 }

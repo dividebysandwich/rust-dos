@@ -307,11 +307,122 @@ them. At the DOS prompt, the `MOUNT` and `IMGMOUNT` commands do the same.
 `POST /api/state/save {"path":"/abs/before-boss.state"}` saves the whole
 machine to a file, and `POST /api/state/load` with the same body goes back
 to it, as the Ctrl+F1 and Ctrl+F2 slots do. Save before a step that is
-slow to reach (a menu path, a level) and load to try it again. The load's
-reply has the state's header: when it was saved, the program, and the
-hardware settings it applies first. The files and disk images on the host
-aren't part of a state: what a program wrote since stays written, except
-for a booted system's disks (next section).
+slow to reach (a menu path, a level) and load to try it again. Both work
+while the machine runs (at the end of a frame) or is paused. A load brings
+the hardware settings the state was saved with, and keeps the breakpoints
+and watchpoints, so you can set a breakpoint and load the same state again
+to hit it. When the state's hardware settings or media differ from the
+running machine's, the reply lists them in `differences`.
+
+A load that fails (400) leaves the machine, its settings and hardware as
+they were; the reply has `"loaded":false` and `"unchanged":true`.
+
+Both replies have `format` (the file layout's version), `emulator` (this
+rust-dos's version) and the state's `header`: the rust-dos that saved it
+(`version`), when, the program, the hardware settings (`machine`) and its
+`media` (the mounted drives, their folders, and their disk and CD images'
+paths, sizes and, for a read-only image, a hash of its first 64 KiB).
+Every save records the media, so any state saved by this version can be
+loaded with a strict match later. A state saved before media were recorded
+has `"media":null`. The files and disk images on the host aren't part of a
+state: what a program wrote since stays written, except for a booted
+system's disks (see "Booted systems" below).
+
+#### Strict match
+
+A client that goes back to a known point of its session and needs the
+same machine and the same debugger there adds `"strict_match":true` to the
+save or load body. A strict-match save or load then works as follows:
+
+- **Paused only.** Both are refused with 409 unless the machine is paused
+  (`POST /api/control/pause`) and no step or `run` command is still to
+  stop it. A save is also refused while queued input (`/api/input`, typed
+  text) is still being typed, which goes on while paused.
+- **Same hardware and media.** A load is refused with 409 and a
+  `differences` list when the state's hardware settings (`cpu`,
+  `machine`, `cycles`, the sound cards, EMS/UMB) or its media differ from
+  the running machine's, or the state has no record of its media. With
+  `--deterministic`, a state saved outside the mode or with another
+  `--start-time` differs too (`deterministic: ...`). Set the
+  speed with `/api/speed` or mount the drive again, then load.
+- **A fresh debugger.** A load clears the breakpoints, watchpoints and
+  `break_on` stops, a step-over's or `resume until` target, and queued
+  input; `/api/control/wait` and `run` requests still waiting get 409.
+  Keys held down through `/api/input` are forgotten without a key-up, so
+  the machine keeps the keyboard and mouse it was saved with. With
+  `--deterministic` it also drops a `resume`'s `until_ms` and input waiting
+  for its emulated time. The machine stays paused. The reply's
+  `debugger_reset` counts what was cleared (`held_keys` and `until_ms`
+  among it), so set the breakpoints again after a load.
+- **Media read again.** Other saves record the media as they were when
+  the drives were last mounted or changed: CUE sheets are read and the
+  images looked at only then, and the hash of a read-only image's first
+  64 KiB is kept while the file's size and time stay the same. A
+  strict-match save or load reads every CUE sheet and read-only image
+  again.
+
+### Deterministic runs
+
+`--deterministic` makes two runs of the same program with the same input
+come out the same: the same instructions, memory and pictures at the same
+emulated time, however fast the host is.
+
+```sh
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+  ./target/release/rust-dos --no-config -d /path/to/game --debug-server \
+  --deterministic --cycles 10000 --start-time "1995-04-11 12:34:56" &
+curl -s $J -XPOST -d '{"until_ms":5000}' $H/api/control/resume
+curl -s "$H/api/control/wait?timeout_ms=600000"      # "reason":"time"
+curl -s $J -XPOST -d '{"key":"enter"}' "$H/api/input/key?wait=false"
+curl -s $J -XPOST -d '{"until_ms":8000}' $H/api/control/resume
+```
+
+- **Speed:** a fixed number of cycles. `--cycles` has to be a number;
+  `auto` or `max` from the configuration, a game's profile or the
+  settings window become 3000 or the speed the machine has, and
+  `/api/speed` takes only a number.
+- **Clock:** the real-time clock, DOS's date and time, file times and the
+  BIOS tick count start at `--start-time` (default 1995-04-11 12:34:56)
+  and run with emulated time, as does the creation date of a CD a booted
+  system gets from a host folder.
+- **Addresses:** the NE2000's address (without `mac=`) and the IPX
+  driver's node address come from a generator seeded with the start
+  time, so two instances on one LAN need different start times.
+- **Starts paused:** with the debug server the machine starts paused
+  (`"reason":"startup"`), so the input can be sent before anything runs.
+- **Input:** input, and requests that change the machine (`run`, memory
+  and register writes, mounts, `/api/speed`, loading a state, reboots),
+  are taken only while the machine is paused or the settings window is
+  open, which takes its input at once (HTTP 409 otherwise). Input is delivered at fixed points in emulated time, every 10
+  ms, from the time the machine resumes: one scan code per point, and
+  `wait` and `hold_ms` count emulated milliseconds. Send it with
+  `?wait=false`, as the reply waits for its delivery.
+- **Stopping at a time:** `resume {"until_ms":N}` pauses when emulated time
+  reaches N ms since power-on, with `"reason":"time"`. Compare runs there:
+  `/api/status` has `icount` and `activity.emulated_ns`, and
+  `deterministic` (null when off) has the start time, the clock now and
+  `emulated_ms`.
+- **Stops are part of the script:** breakpoints, steps and `until_ms`
+  stop at the same instruction on every run, so the same stops give the
+  same run. `POST /api/control/pause` stops wherever the host's frame got
+  to, and the machine can go on slightly differently from there.
+- **What it leaves out:** pictures from `/api/screenshot` have no
+  on-screen messages, which come and go with the host's time, and host
+  game controllers aren't connected. Input from the window's keyboard and
+  mouse, network and serial links, the modification times of files a
+  program writes to a host folder, and the end of a game launched from
+  its profile still follow the host.
+- **Save states:** a state is loaded only while paused, like other
+  changes (409 otherwise, with `"paused":false` as a refused strict-match
+  save has). Its header has `deterministic`, the start time; a state of another
+  start time or saved outside the mode is listed in `differences` (and
+  refused by a strict-match load), since its clock would read another time. After
+  a load the clock is the start time plus the state's emulated time, input
+  points come every 10 ms from there as in the run that saved it, and the
+  speed is the state's: a fixed one, or for a state saved at `auto` or
+  `max`, the speed it had then. Save and load with a strict match at an
+  `until_ms` stop, and a run from the state reaches the next stop as the
+  run that saved it does.
 
 ### Booted systems (Windows 95)
 

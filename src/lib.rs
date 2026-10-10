@@ -24,6 +24,7 @@ pub mod config;
 pub mod config_ui;
 pub mod cpu;
 pub mod d86f;
+pub mod deterministic;
 pub mod disk;
 pub mod diskdelta;
 pub mod diskimage;

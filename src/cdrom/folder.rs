@@ -159,7 +159,9 @@ pub fn build(root: &Path, label: &str) -> Result<FolderImage, String> {
     let sectors = next + PADDING;
 
     let mut meta = MemoryImage::new(meta_sectors as u64 * DATA_SECTOR as u64);
-    let now = record_time(Some(SystemTime::now()));
+    // The disc is made now: by the machine's clock, which deterministic
+    // mode sets.
+    let now = record_time(Some(crate::hosttime::now().into()));
     for tree in [Tree::Primary, Tree::Joliet] {
         let sector = PVD + tree as u32;
         let descriptor = volume_descriptor(&dirs, tree, label, sectors, table_len[tree as usize], tables[tree as usize], now);
@@ -652,6 +654,21 @@ mod tests {
             at += len;
         }
         names
+    }
+
+    #[test]
+    fn the_disc_is_made_at_the_machines_time() {
+        let root = scratch("made");
+        fs::write(root.join("a.txt"), b"1").unwrap();
+        let at = chrono::NaiveDate::from_ymd_opt(1995, 4, 11).unwrap().and_hms_opt(12, 34, 56).unwrap();
+        crate::hosttime::fix(Some(at));
+        let image = CdImage::from_folder(build(&root, "x").unwrap(), &root).unwrap();
+        crate::hosttime::fix(None);
+        let mut pvd = [0u8; DATA_SECTOR];
+        image.read_data(PVD, &mut pvd).unwrap();
+        // Created and modified, as digits: 1995-04-11 12:34:56.00.
+        assert_eq!(&pvd[813..829], b"1995041112345600");
+        assert_eq!(&pvd[830..846], b"1995041112345600");
     }
 
     #[test]
