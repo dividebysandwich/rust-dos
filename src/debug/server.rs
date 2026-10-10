@@ -34,11 +34,14 @@ struct AppState {
     shared: Arc<Shared>,
 }
 
-pub fn spawn(addr: SocketAddr, tx: mpsc::Sender<Request>, shared: Arc<Shared>) -> Result<(), String> {
+/// Start the server on `addr`, and return the address it listens on: with
+/// port 0, a free port the system picked.
+pub fn spawn(addr: SocketAddr, tx: mpsc::Sender<Request>, shared: Arc<Shared>) -> Result<SocketAddr, String> {
     // Bind synchronously so a port conflict is reported at startup rather
     // than silently in the background thread.
     let listener = std::net::TcpListener::bind(addr).map_err(|e| format!("debug server: cannot bind {}: {}", addr, e))?;
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+    let bound = listener.local_addr().map_err(|e| e.to_string())?;
     std::thread::Builder::new()
         .name("debug-server".into())
         .spawn(move || {
@@ -56,7 +59,7 @@ pub fn spawn(addr: SocketAddr, tx: mpsc::Sender<Request>, shared: Arc<Shared>) -
             });
         })
         .map_err(|e| e.to_string())?;
-    Ok(())
+    Ok(bound)
 }
 
 fn router(state: AppState) -> Router {
@@ -64,6 +67,7 @@ fn router(state: AppState) -> Router {
         .route("/", get(root))
         .route("/ui", get(ui))
         .route("/api", get(help))
+        .route("/api/version", get(version))
         .route("/api/status", get(status))
         .route("/api/stats", get(stats))
         .route("/api/screenshot", get(screenshot))
@@ -196,6 +200,13 @@ async fn ui() -> Response {
         UI,
     )
         .into_response()
+}
+
+/// The debug features a client can count on, as `/api/version` lists them.
+const FEATURES: &[&str] = &["breakpoint_once", "quit"];
+
+async fn version() -> Response {
+    axum::Json(json!({"name": "rust-dos", "version": env!("CARGO_PKG_VERSION"), "features": FEATURES})).into_response()
 }
 
 async fn status(State(s): State<AppState>) -> ApiResult {
@@ -502,9 +513,10 @@ async fn control(State(s): State<AppState>, Path(action): Path<String>, body: By
         "step_over" => s.call_json(Cmd::StepOver, timeout).await,
         "reboot_shell" => s.call_json(Cmd::RebootShell, DEFAULT_TIMEOUT).await,
         "reboot" => s.call_json(Cmd::Reboot, DEFAULT_TIMEOUT).await,
+        "quit" => s.call_json(Cmd::Quit, DEFAULT_TIMEOUT).await,
         _ => Err(ApiError(
             StatusCode::NOT_FOUND,
-            format!("unknown action '{}' (pause, resume, step, step_over, reboot_shell, reboot)", action),
+            format!("unknown action '{}' (pause, resume, step, step_over, reboot_shell, reboot, quit)", action),
         )),
     }
 }
@@ -635,6 +647,9 @@ struct BpBody {
     /// An exception vector (hex, or a number) or "any".
     exception: Option<Value>,
     mode_switch: Option<bool>,
+    /// With `addr`: remove the breakpoint when it is hit.
+    #[serde(default)]
+    once: bool,
     /// With `exception`: false stops pausing on it.
     enabled: Option<bool>,
 }
@@ -662,7 +677,7 @@ async fn bp_add(State(s): State<AppState>, body: Bytes) -> ApiResult {
         return s.call_json(cmd, DEFAULT_TIMEOUT).await;
     }
     let addr = b.addr.ok_or_else(|| bad("missing 'addr' (or 'exception' / 'mode_switch')"))?;
-    s.call_json(Cmd::AddBreakpoint(addr), DEFAULT_TIMEOUT).await
+    s.call_json(Cmd::AddBreakpoint { addr, once: b.once }, DEFAULT_TIMEOUT).await
 }
 
 async fn bp_remove(State(s): State<AppState>, Query(q): Query<BpBody>, body: Bytes) -> ApiResult {
@@ -917,6 +932,7 @@ Addresses are hex: "SEG:OFF" (registers allowed, e.g. "CS:IP", "DS:SI", "B800:0"
 or a linear address ("0x12345", "B8000").
 
 STATUS / SCREEN
+  GET  /api/version                        version, and the debug features this build has
   GET  /api/status                         emulator state, CS:IP, video mode, trace fill, fps, speed
   GET  /api/stats                          execution speed (MIPS) and decode-cache hit rate, per ~1 s
   GET  /api/screenshot[?format=png|raw]    the screen with its cursors, at the picture's
@@ -954,13 +970,15 @@ EXECUTION CONTROL
                                                      REP string instruction to the next one
   POST /api/control/reboot_shell                     kill the running program
   POST /api/control/reboot                           reset the machine, as Ctrl+Alt+Del
+  POST /api/control/quit                             turn the machine off, as EXIT
   GET  /api/control/wait?timeout_ms=30000            block until the emulator pauses
   GET  /api/registers        PUT /api/registers {"ax":"1234","flags":"0202"}
   GET  /api/memory?addr=DS:SI&len=256[&format=hex|base64|raw]
   PUT  /api/memory {"addr":"B800:0000","hex":"41 1F"}  (or "base64")
   GET  /api/disasm?addr=CS:IP&count=20[&format=json]   json: "lines" and "rows"
                                            ({label, phys, bytes, asm, len, current, breakpoint})
-  GET/POST/DELETE /api/breakpoints   {"addr":"1234:0100"}  (DELETE without addr = all)
+  GET/POST/DELETE /api/breakpoints   {"addr":"1234:0100"}  (DELETE without addr = all);
+                  "once":true removes it when hit. A stop at one names it ("breakpoint")
                   also {"exception":"0D"} or {"exception":"any"}: pause in the handler
                   after the CPU raises it ({"exception":"0D","enabled":false} stops); {"mode_switch":true}: pause after CR0.PE changes
   GET/POST/DELETE /api/watchpoints   {"addr":"DS:0100","len":2}  pause when the 1, 2 or

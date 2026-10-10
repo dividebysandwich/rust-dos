@@ -27,7 +27,13 @@ until curl -sf localhost:8086/api/status >/dev/null; do sleep 0.2; done
   reproducible runs, or `--config FILE` to test a specific configuration.
 - **Port conflict:** if port 8086 is in use, the emulator exits at startup
   with a `cannot bind` error. Kill the old instance (`kill $(pgrep -x rust-dos)`)
-  or pass `--debug-server 127.0.0.1:<port>`.
+  or pass `--debug-server 127.0.0.1:<port>`. Port 0 takes a free port, which
+  the `Debug server listening on` line on stdout gives; use it to run
+  several instances side by side.
+- **Stopping it:** `POST /api/control/quit` turns the machine off as `EXIT`
+  does, and the emulator exits.
+- **What this build has:** `GET /api/version` gives the version and
+  `features`, the names of the debug features a client may need.
 - **Output:** the emulator log doesn't go to stdout. It goes to
   `rust-dos.log` in the per-user config directory, replaced on every start.
   Read it through `/api/log` instead, which can filter it.
@@ -189,6 +195,9 @@ curl -s -XPOST $H/api/control/resume
 - **Why `wait=false`:** use it for input that should trigger a breakpoint.
   Otherwise the input call can block until it times out, because the
   emulator stops at the breakpoint before all of the input is delivered.
+- **Breakpoints hit once:** `{"addr":"1000:010B","once":true}` removes the
+  breakpoint when it is hit. A stop at a breakpoint names it in
+  `"breakpoint"` (its physical address).
 - **Run to an address:** `POST /api/control/resume {"until":"1000:0120"}`
   runs to that address once, without adding a permanent breakpoint.
 - **Step over:** `POST /api/control/step_over` runs a `CALL`, `INT`, `LOOP`

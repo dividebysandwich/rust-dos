@@ -132,7 +132,10 @@ pub enum Cmd {
     WriteMem { addr: String, data: Vec<u8> },
     Disasm { addr: Option<String>, count: usize },
     ListBreakpoints,
-    AddBreakpoint(String),
+    /// A breakpoint at an address; `once` removes it when it is hit.
+    AddBreakpoint { addr: String, once: bool },
+    /// Turn the machine off, as EXIT does.
+    Quit,
     RemoveBreakpoint(Option<String>),
     ListWatchpoints,
     /// Pause when the 1, 2 or 4 bytes at an address change.
@@ -443,6 +446,10 @@ pub struct DebugHub {
     pub paused: bool,
     step_budget: Option<u64>,
     breakpoints: HashSet<usize>,
+    /// The breakpoints removed when hit.
+    once: HashSet<usize>,
+    /// The breakpoint that stopped the machine.
+    breakpoint_hit: Option<usize>,
     temp_breakpoint: Option<usize>,
     /// Skip the breakpoint check for the first instruction after resuming,
     /// so continuing from a breakpoint doesn't immediately re-trigger it.
@@ -538,6 +545,8 @@ impl DebugHub {
             paused: false,
             step_budget: None,
             breakpoints: HashSet::new(),
+            once: HashSet::new(),
+            breakpoint_hit: None,
             temp_breakpoint: None,
             skip_bp_once: false,
             pause_hit: None,
@@ -593,7 +602,8 @@ impl DebugHub {
             start_time: cpu.bus.start_time,
         });
         let (tx, rx) = mpsc::channel();
-        server::spawn(addr, tx, shared.clone())?;
+        // Port 0 takes a free port: this is the one it took.
+        let addr = server::spawn(addr, tx, shared.clone())?;
 
         let log_shared = shared.clone();
         cpu.bus.log_hook = Some(Box::new(move |line: &str| {
@@ -702,6 +712,10 @@ impl DebugHub {
             && (self.temp_breakpoint == Some(phys_ip) || self.breakpoints.contains(&phys_ip))
         {
             self.temp_breakpoint = None;
+            if self.once.remove(&phys_ip) {
+                self.breakpoints.remove(&phys_ip);
+            }
+            self.breakpoint_hit = Some(phys_ip);
             self.enter_pause(PauseReason::Breakpoint);
             return true;
         }
@@ -768,6 +782,9 @@ impl DebugHub {
                 && let Some(e) = pm::exceptions_json(cpu)["recent"].as_array().and_then(|a| a.last().cloned())
             {
                 reply["exception"] = e;
+            }
+            if let Some(phys) = self.breakpoint_hit.take() {
+                reply["breakpoint"] = format!("{:05X}", phys).into();
             }
             if let Some((phys, len, old, new)) = self.watch_hit.take() {
                 let digits = len as usize * 2;
@@ -1342,9 +1359,19 @@ impl DebugHub {
             },
             Cmd::Disasm { addr, count } => self.disasm(cpu, addr, count),
             Cmd::ListBreakpoints => Reply::Json(self.breakpoints_json()),
-            Cmd::AddBreakpoint(a) => match parse_addr(cpu, &a).and_then(breakpoint_phys) {
+            Cmd::Quit => {
+                cpu.bus.exit_requested = true;
+                self.resume();
+                Reply::Json(json!({"ok": true}))
+            }
+            Cmd::AddBreakpoint { addr, once } => match parse_addr(cpu, &addr).and_then(breakpoint_phys) {
                 Ok(phys) => {
                     self.breakpoints.insert(phys);
+                    if once {
+                        self.once.insert(phys);
+                    } else {
+                        self.once.remove(&phys);
+                    }
                     Reply::Json(self.breakpoints_json())
                 }
                 Err(e) => Reply::bad(e),
@@ -1352,12 +1379,14 @@ impl DebugHub {
             Cmd::RemoveBreakpoint(a) => match a {
                 None => {
                     self.breakpoints.clear();
+                    self.once.clear();
                     self.break_exceptions = 0;
                     self.break_mode_switch = false;
                     Reply::Json(self.breakpoints_json())
                 }
                 Some(a) => match parse_addr(cpu, &a).and_then(breakpoint_phys) {
                     Ok(phys) => {
+                        self.once.remove(&phys);
                         if self.breakpoints.remove(&phys) {
                             Reply::Json(self.breakpoints_json())
                         } else {
@@ -1762,6 +1791,8 @@ impl DebugHub {
             (0..32).filter(|i| self.break_exceptions & (1 << i) != 0).map(|i| format!("{:02X}", i)).collect();
         json!({
             "breakpoints": v.iter().map(|p| format!("{:05X}", p)).collect::<Vec<_>>(),
+            // Those removed when hit.
+            "once": v.iter().filter(|p| self.once.contains(p)).map(|p| format!("{:05X}", p)).collect::<Vec<_>>(),
             "exceptions": exceptions,
             "mode_switch": self.break_mode_switch,
         })
@@ -2180,8 +2211,56 @@ fn net_json(cpu: &Cpu) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{LowInput, keys_for_char, step_over_len};
+    use super::{Cmd, DebugHub, LowInput, Reply, Request, keys_for_char, step_over_len};
+    use crate::cpu::Cpu;
     use rust_dos::keylayout::Layout;
+    use serde_json::Value;
+    use tokio::sync::oneshot;
+
+    fn ask(cpu: &mut Cpu, hub: &mut DebugHub, cmd: Cmd) -> oneshot::Receiver<Reply> {
+        let (reply, rx) = oneshot::channel();
+        hub.handle(cpu, Request { cmd, reply });
+        rx
+    }
+
+    fn json(mut rx: oneshot::Receiver<Reply>) -> Value {
+        match rx.try_recv() {
+            Ok(Reply::Json(v)) => v,
+            _ => panic!("no JSON reply"),
+        }
+    }
+
+    /// Run a batch of instructions, as the main loop does.
+    fn batch(cpu: &mut Cpu, hub: &mut DebugHub) {
+        let hot = hub.begin_batch(cpu);
+        cpu.bus.start_batch(cpu.bus.clock.icount + 2000);
+        crate::exec::run_batch(cpu, hub, hot);
+        hub.end_batch(cpu);
+    }
+
+    #[test]
+    fn a_breakpoint_set_once_is_gone_after_it_is_hit() {
+        let mut cpu = Cpu::new(".".into());
+        cpu.load_shell();
+        let mut hub = DebugHub::new(None, None, 1000);
+        let here = format!("{:04X}:{:04X}", cpu.cs(), cpu.ip());
+        let set = json(ask(&mut cpu, &mut hub, Cmd::AddBreakpoint { addr: here, once: true }));
+        assert_eq!(set["once"], set["breakpoints"]);
+        let wait = ask(&mut cpu, &mut hub, Cmd::WaitPause);
+        batch(&mut cpu, &mut hub);
+        let stop = json(wait);
+        assert_eq!((stop["reason"].as_str(), stop["breakpoint"].as_str()), (Some("breakpoint"), set["once"][0].as_str()));
+        let left = json(ask(&mut cpu, &mut hub, Cmd::ListBreakpoints));
+        assert_eq!(left["breakpoints"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn quit_turns_the_machine_off() {
+        let mut cpu = Cpu::new(".".into());
+        let mut hub = DebugHub::new(None, None, 1000);
+        json(ask(&mut cpu, &mut hub, Cmd::Quit));
+        assert!(cpu.bus.exit_requested);
+    }
 
     /// The scan codes of the keys going down to type `c`.
     fn scans(c: char, layout: &str) -> Vec<u8> {
