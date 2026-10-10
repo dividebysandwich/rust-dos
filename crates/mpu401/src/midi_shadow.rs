@@ -206,8 +206,8 @@ impl Channel {
     }
 }
 
-impl crate::savestate::State for Channel {
-    fn save(&self, w: &mut crate::savestate::Writer) {
+impl rust_dos_savestate::State for Channel {
+    fn save(&self, w: &mut rust_dos_savestate::Writer) {
         let Channel { controllers, parameter, parameters, program, bend, pressure } = self;
         controllers.save(w);
         parameter.map(|(nrpn, msb, lsb)| (nrpn, (msb, lsb))).save(w);
@@ -220,7 +220,7 @@ impl crate::savestate::State for Channel {
         bend.save(w);
         pressure.save(w);
     }
-    fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
+    fn load(&mut self, r: &mut rust_dos_savestate::Reader) -> rust_dos_savestate::Result<()> {
         let Channel { controllers, parameter, parameters, program, bend, pressure } = self;
         controllers.load(r)?;
         let mut selected: Option<(bool, (u8, u8))> = None;
@@ -240,7 +240,7 @@ impl crate::savestate::State for Channel {
     }
 }
 
-crate::state_fields!(MidiShadow { channels, sysex });
+rust_dos_savestate::state_fields!(MidiShadow { channels, sysex });
 
 #[cfg(test)]
 mod tests {

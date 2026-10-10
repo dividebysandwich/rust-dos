@@ -1914,7 +1914,6 @@ dependencies = [
  "libc",
  "libloading 0.9.0",
  "md-5",
- "midir",
  "openxr",
  "png",
  "rust-dos-audio-core",
@@ -1922,6 +1921,7 @@ dependencies = [
  "rust-dos-gus",
  "rust-dos-hostdirs",
  "rust-dos-lpt-dac",
+ "rust-dos-mpu401",
  "rust-dos-mt32",
  "rust-dos-opl",
  "rust-dos-savestate",
@@ -1929,7 +1929,6 @@ dependencies = [
  "rust-dos-soundblaster",
  "rust-dos-tandy",
  "rust-dos-zip",
- "rustysynth",
  "sdl2",
  "serde",
  "serde_json",
@@ -1981,6 +1980,19 @@ version = "1.5.0"
 dependencies = [
  "rust-dos-audio-core",
  "rust-dos-savestate",
+]
+
+[[package]]
+name = "rust-dos-mpu401"
+version = "1.5.0"
+dependencies = [
+ "midir",
+ "rust-dos-audio-core",
+ "rust-dos-gus",
+ "rust-dos-mt32",
+ "rust-dos-savestate",
+ "rust-dos-sc55",
+ "rustysynth",
 ]
 
 [[package]]

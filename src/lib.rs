@@ -60,7 +60,7 @@ pub mod keylayout;
 pub mod log;
 pub mod manuals;
 #[cfg(all(feature = "hostmidi", not(target_arch = "wasm32")))]
-pub mod midiout;
+pub use rust_dos_mpu401::midiout;
 pub use rust_dos_lpt_dac as lpt_dac;
 pub mod makeimg;
 pub mod makeimg_command;
@@ -76,8 +76,8 @@ pub mod mixer_command;
 pub mod mount;
 pub mod mouse;
 pub mod mouse_capture;
-pub mod midi_shadow;
-pub mod mpu401;
+pub use rust_dos_mpu401::midi_shadow;
+pub use rust_dos_mpu401 as mpu401;
 pub mod net;
 #[cfg(not(target_arch = "wasm32"))]
 pub use rust_dos_mt32 as mt32;

@@ -7,11 +7,15 @@
 //! the interface is still there, so programs that detect it work, but it
 //! plays nothing.
 
+pub mod midi_shadow;
+#[cfg(all(feature = "hostmidi", not(target_arch = "wasm32")))]
+pub mod midiout;
+
 use std::collections::VecDeque;
 
-use crate::gus::patch::PatchBank;
-use crate::midi_shadow::{Midi, MidiShadow};
-use crate::gus::synth::GusSynth;
+use midi_shadow::{Midi, MidiShadow};
+use rust_dos_gus::patch::PatchBank;
+use rust_dos_gus::synth::GusSynth;
 
 /// Acknowledge byte for commands.
 const ACK: u8 = 0xFE;
@@ -33,8 +37,8 @@ enum Synth {
     },
     Gus(Box<GusSynth>),
     #[cfg(not(target_arch = "wasm32"))]
-    Mt32(Box<crate::mt32::Mt32>),
-    Sc55(Box<crate::sc55::Sc55>),
+    Mt32(Box<rust_dos_mt32::Mt32>),
+    Sc55(Box<rust_dos_sc55::Sc55>),
     #[cfg(all(feature = "hostmidi", not(target_arch = "wasm32")))]
     Host(Box<crate::midiout::HostMidi>),
 }
@@ -150,14 +154,14 @@ impl Mpu401 {
 
     /// Play the MT-32 with munt. Returns what plays, for the log.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn load_mt32(&mut self, synth: crate::mt32::Mt32) -> String {
+    pub fn load_mt32(&mut self, synth: rust_dos_mt32::Mt32) -> String {
         let description = synth.description().to_string();
         self.synth = Synth::Mt32(Box::new(synth));
         description
     }
 
     /// Play a Sound Canvas. Returns what plays, for the log.
-    pub fn load_sc55(&mut self, synth: crate::sc55::Sc55) -> String {
+    pub fn load_sc55(&mut self, synth: rust_dos_sc55::Sc55) -> String {
         let description = synth.description().to_string();
         self.synth = Synth::Sc55(Box::new(synth));
         description
@@ -195,7 +199,7 @@ impl Mpu401 {
     pub fn load_soundfont(&mut self, path: &std::path::Path) -> Result<(), String> {
         let mut file = std::fs::File::open(path).map_err(|e| format!("{}: {}", path.display(), e))?;
         let font = rustysynth::SoundFont::new(&mut file).map_err(|e| format!("{}: {:?}", path.display(), e))?;
-        let settings = rustysynth::SynthesizerSettings::new(crate::opl::RATE as i32);
+        let settings = rustysynth::SynthesizerSettings::new(rust_dos_audio_core::RATE as i32);
         let synth = rustysynth::Synthesizer::new(&std::sync::Arc::new(font), &settings)
             .map_err(|e| format!("{:?}", e))?;
         self.synth = Synth::SoundFont {
@@ -222,16 +226,19 @@ impl Mpu401 {
 
     /// Status port: bit 7 clear when a byte can be read, bit 6 clear when
     /// the interface accepts one (always).
+    #[inline]
     pub fn read_status(&self) -> u8 {
         if self.read_buf.is_empty() { 0x80 } else { 0x00 }
     }
 
+    #[inline]
     pub fn read_data(&mut self) -> u8 {
         self.read_buf.pop_front().unwrap_or(ACK)
     }
 
     /// Command port: reset (FFh) and UART mode (3Fh), and the intelligent
     /// mode commands, which are acknowledged and otherwise ignored.
+    #[inline]
     pub fn write_command(&mut self, value: u8) {
         if value == 0xFF {
             self.status = 0;
@@ -242,6 +249,7 @@ impl Mpu401 {
     }
 
     /// A MIDI byte for the synthesizer.
+    #[inline]
     pub fn write_data(&mut self, byte: u8) {
         match byte {
             // Real-time messages may come between any bytes.
@@ -309,11 +317,10 @@ impl Mpu401 {
         });
     }
 
-    /// One stereo frame of synthesizer output at the mixer's rate.
-    #[inline]
     /// Whether `render` gives silence and nothing in the synthesizer moves
     /// on: no synthesizer, or the Ultrasound patches' with no voice
     /// sounding (others run on their own).
+    #[inline]
     pub fn is_idle(&self) -> bool {
         match &self.synth {
             Synth::None => true,
@@ -323,6 +330,8 @@ impl Mpu401 {
         }
     }
 
+    /// One stereo frame of synthesizer output at the mixer's rate.
+    #[inline]
     pub fn render(&mut self) -> (f32, f32) {
         match &mut self.synth {
             Synth::None => (0.0, 0.0),
@@ -347,7 +356,7 @@ impl Mpu401 {
 }
 
 // The synthesizer is the host's; `after_load` tells it what it missed.
-crate::state_fields!(Mpu401 { read_buf, status, data, have, in_sysex, sysex, shadow } skip { synth });
+rust_dos_savestate::state_fields!(Mpu401 { read_buf, status, data, have, in_sysex, sysex, shadow } skip { synth });
 
 #[cfg(test)]
 mod tests {

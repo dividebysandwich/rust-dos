@@ -1,0 +1,26 @@
+[package]
+name = "rust-dos-mpu401"
+description = "The Roland MPU-401 in UART mode and the synthesizers behind it (SoundFont, Ultrasound patches, MT-32, SC-55, host MIDI ports), as rust-dos emulates them"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+rust-dos-savestate = { path = "../savestate" }
+rust-dos-audio-core = { path = "../audio-core" }
+rust-dos-gus = { path = "../gus" }
+rust-dos-sc55 = { path = "../sc55" }
+rust-dos-mt32 = { path = "../mt32" }
+# General MIDI with a SoundFont (the `midi` feature).
+rustysynth = { version = "1.3", optional = true }
+
+# The host's MIDI ports (the `hostmidi` feature; ALSA on Linux, which
+# needs libasound2-dev to build).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+midir = { version = "0.11", optional = true }
+
+[features]
+midi = ["dep:rustysynth"]
+hostmidi = ["dep:midir"]
