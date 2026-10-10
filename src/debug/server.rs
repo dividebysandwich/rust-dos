@@ -477,18 +477,18 @@ async fn unmount(State(s): State<AppState>, Path(letter): Path<String>) -> ApiRe
 struct StateBody {
     /// The save state file, on the host.
     path: String,
-    /// A checkpoint of this machine: only while paused, and a load must
-    /// match its hardware and media and resets the debugger.
+    /// A strict match with this machine: only while paused, and a load
+    /// must match its hardware and media and resets the debugger.
     #[serde(default)]
-    checkpoint: bool,
+    strict_match: bool,
 }
 
 async fn state_file(State(s): State<AppState>, Path(action): Path<String>, body: Bytes) -> ApiResult {
     let b: StateBody = from_value(parse_body(&body)?)?;
-    let (path, checkpoint) = (b.path, b.checkpoint);
+    let (path, strict_match) = (b.path, b.strict_match);
     match action.as_str() {
-        "save" => s.call_json(Cmd::SaveState { path, checkpoint }, DEFAULT_TIMEOUT).await,
-        "load" => s.call_json(Cmd::LoadState { path, checkpoint }, DEFAULT_TIMEOUT).await,
+        "save" => s.call_json(Cmd::SaveState { path, strict_match }, DEFAULT_TIMEOUT).await,
+        "load" => s.call_json(Cmd::LoadState { path, strict_match }, DEFAULT_TIMEOUT).await,
         _ => Err(ApiError(StatusCode::NOT_FOUND, format!("unknown action '{}' (save, load)", action))),
     }
 }
@@ -1099,7 +1099,7 @@ SAVE STATES
                    A failed load changes nothing ("unchanged":true).
                    Replies have the state's header, "format" and
                    "emulator" (this version).
-                   With "checkpoint":true both are taken only while paused
+                   With "strict_match":true both are done only while paused
                    with no step or run pending (409), a save also not
                    while queued input is still typed, and a load is refused
                    (409, "differences") unless the state's hardware

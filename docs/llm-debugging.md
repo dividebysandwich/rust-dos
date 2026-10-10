@@ -319,16 +319,16 @@ rust-dos's version) and the state's `header`: the rust-dos that saved it
 `media` (the mounted drives, their folders, and their disk and CD images'
 paths, sizes and, for a read-only image, a hash of its first 64 KiB).
 Every save records the media, so any state saved by this version can be
-loaded as a checkpoint later. A state saved before media were recorded
+loaded with a strict match later. A state saved before media were recorded
 has `"media":null`. The files and disk images on the host aren't part of a
 state: what a program wrote since stays written, except for a booted
 system's disks (see "Booted systems" below).
 
-#### Checkpoints
+#### Strict match
 
-A client that uses a state as a checkpoint of its session (to go back to
-a known point and get the same machine and the same debugger) adds
-`"checkpoint":true` to the save or load body:
+A client that goes back to a known point of its session and needs the
+same machine and the same debugger there adds `"strict_match":true` to the
+save or load body. A strict-match save or load then works as follows:
 
 - **Paused only.** Both are refused with 409 unless the machine is paused
   (`POST /api/control/pause`) and no step or `run` command is still to
@@ -354,7 +354,8 @@ a known point and get the same machine and the same debugger) adds
   the drives were last mounted or changed: CUE sheets are read and the
   images looked at only then, and the hash of a read-only image's first
   64 KiB is kept while the file's size and time stay the same. A
-  checkpoint save or load reads every CUE sheet and read-only image again.
+  strict-match save or load reads every CUE sheet and read-only image
+  again.
 
 ### Deterministic runs
 
@@ -404,14 +405,14 @@ curl -s $J -XPOST -d '{"until_ms":8000}' $H/api/control/resume
   program writes to a host folder, and the end of a game launched from
   its profile still follow the host.
 - **Save states:** a state is loaded only while paused, like other
-  changes (409 otherwise, with `"paused":false` as a refused checkpoint
-  has). Its header has `deterministic`, the start time; a state of another
+  changes (409 otherwise, with `"paused":false` as a refused strict-match
+  save has). Its header has `deterministic`, the start time; a state of another
   start time or saved outside the mode is listed in `differences` (and
-  refused as a checkpoint), since its clock would read another time. After
+  refused by a strict-match load), since its clock would read another time. After
   a load the clock is the start time plus the state's emulated time, input
   points come every 10 ms from there as in the run that saved it, and the
   speed is the state's: a fixed one, or for a state saved at `auto` or
-  `max`, the speed it had then. Save and load as checkpoints at an
+  `max`, the speed it had then. Save and load with a strict match at an
   `until_ms` stop, and a run from the state reaches the next stop as the
   run that saved it does.
 

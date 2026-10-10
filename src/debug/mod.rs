@@ -191,11 +191,11 @@ pub enum Cmd {
     /// disks into the folders.
     SyncShared,
     /// Save the machine to a save state file, or load one, which the front
-    /// end does (`take_state_requests`). A `checkpoint` is taken or put in
-    /// only while paused, and its load must match this machine and resets
-    /// the debugger.
-    SaveState { path: String, checkpoint: bool },
-    LoadState { path: String, checkpoint: bool },
+    /// end does (`take_state_requests`). A `strict_match` save or load is
+    /// done only while paused, and its load must match this machine and
+    /// resets the debugger.
+    SaveState { path: String, strict_match: bool },
+    LoadState { path: String, strict_match: bool },
     /// Change the CPU speed (`cycles`) as the settings window does, which
     /// the front end does (`take_speed_requests`).
     Speed { cycles: String },
@@ -206,8 +206,8 @@ pub enum Cmd {
 pub struct StateRequest {
     pub load: bool,
     pub path: PathBuf,
-    /// Asked for as a checkpoint (see `take_state_requests`).
-    pub checkpoint: bool,
+    /// Asked for with `strict_match` (see `take_state_requests`).
+    pub strict_match: bool,
     reply: oneshot::Sender<Reply>,
 }
 
@@ -1312,9 +1312,9 @@ impl DebugHub {
         std::mem::take(&mut self.hotkey)
     }
 
-    /// The save states remote clients asked to save or load. Checkpoints
-    /// asked for while the machine isn't stopped with nothing pending are
-    /// refused here (409): a checkpoint is only taken or put in while the
+    /// The save states remote clients asked to save or load. Strict-match
+    /// saves and loads asked for while the machine isn't stopped with
+    /// nothing pending are refused here (409): they are only done while the
     /// debugger holds the machine between two instructions. The other
     /// requests are carried out at the end of the frame, running or not.
     ///
@@ -1328,10 +1328,10 @@ impl DebugHub {
                 request.fail(409, deterministic_refusal());
                 continue;
             }
-            match request.checkpoint.then(|| self.checkpoint_refusal(request.load)).flatten() {
+            match request.strict_match.then(|| self.strict_match_refusal(request.load)).flatten() {
                 Some(why) => {
                     let what = if request.load { "load" } else { "save" };
-                    let error = format!("can't {} a checkpoint: {}", what, why);
+                    let error = format!("can't do a strict-match {}: {}", what, why);
                     request.fail(409, json!({"error": error, "paused": self.paused}));
                 }
                 None => taken.push(request),
@@ -1346,11 +1346,11 @@ impl DebugHub {
         self.deterministic.is_some() && !self.paused && !self.divert
     }
 
-    /// Why a checkpoint can't be saved or loaded now, if it can't: the
+    /// Why a strict-match save or load can't be done now, if it can't: the
     /// machine runs, or a step or run command is still to stop it. A save
     /// also waits for queued input, which goes on being typed while the
     /// machine is paused; a load drops it (`reset_after_load`).
-    fn checkpoint_refusal(&self, load: bool) -> Option<&'static str> {
+    fn strict_match_refusal(&self, load: bool) -> Option<&'static str> {
         if !self.paused {
             Some("the machine runs; pause it first (POST /api/control/pause)")
         } else if self.step_budget.is_some() {
@@ -1450,14 +1450,14 @@ impl DebugHub {
                 let _ = req.reply.send(Reply::bad("a path is needed"));
                 return;
             }
-            Cmd::SaveState { path, checkpoint } => {
+            Cmd::SaveState { path, strict_match } => {
                 let path = PathBuf::from(path);
-                self.state_requests.push(StateRequest { load: false, path, checkpoint, reply: req.reply });
+                self.state_requests.push(StateRequest { load: false, path, strict_match, reply: req.reply });
                 return;
             }
-            Cmd::LoadState { path, checkpoint } => {
+            Cmd::LoadState { path, strict_match } => {
                 let path = PathBuf::from(path);
-                self.state_requests.push(StateRequest { load: true, path, checkpoint, reply: req.reply });
+                self.state_requests.push(StateRequest { load: true, path, strict_match, reply: req.reply });
                 return;
             }
             Cmd::Speed { cycles } => {
@@ -2236,7 +2236,7 @@ impl DebugHub {
 }
 
 /// The reply to a change to the machine that deterministic mode refuses
-/// while it runs (409), shaped as a refused checkpoint's.
+/// while it runs (409), shaped as a refused strict-match save's.
 fn deterministic_refusal() -> Value {
     json!({
         "error": "deterministic mode takes input and changes to the machine only while it is paused: \
@@ -3008,10 +3008,10 @@ mod tests {
         assert!(hub.paused);
     }
 
-    /// Ask to save a state, as a checkpoint or not, and the requests the
+    /// Ask to save a state, with strict_match or not, and the requests the
     /// front end gets to carry out, with the reply of one refused.
-    fn state_request(cpu: &mut Cpu, hub: &mut DebugHub, checkpoint: bool) -> (usize, Option<(u16, Value)>) {
-        let mut rx = send(cpu, hub, Cmd::SaveState { path: "/tmp/x.state".into(), checkpoint });
+    fn state_request(cpu: &mut Cpu, hub: &mut DebugHub, strict_match: bool) -> (usize, Option<(u16, Value)>) {
+        let mut rx = send(cpu, hub, Cmd::SaveState { path: "/tmp/x.state".into(), strict_match });
         let taken = hub.take_state_requests().len();
         let refused = match rx.try_recv() {
             Ok(Reply::ErrorJson(code, body)) => Some((code, body)),
@@ -3022,8 +3022,8 @@ mod tests {
     }
 
     #[test]
-    fn a_checkpoint_is_saved_or_loaded_only_while_the_machine_is_paused() {
-        let (mut cpu, mut hub) = machine("checkpoint");
+    fn a_strict_match_save_or_load_is_done_only_while_the_machine_is_paused() {
+        let (mut cpu, mut hub) = machine("strict-match");
         let (taken, refused) = state_request(&mut cpu, &mut hub, true);
         let (code, body) = refused.expect("refused while running");
         assert_eq!((taken, code), (0, 409));
@@ -3034,36 +3034,36 @@ mod tests {
         assert_eq!((taken, refused.is_none()), (1, true), "paused with nothing pending");
 
         // A step sent with it, in the same frame, starts the machine first.
-        let checkpoint = Cmd::SaveState { path: "/tmp/x.state".into(), checkpoint: true };
-        let _save = send(&mut cpu, &mut hub, checkpoint);
+        let strict = Cmd::SaveState { path: "/tmp/x.state".into(), strict_match: true };
+        let _save = send(&mut cpu, &mut hub, strict);
         let _step = send(&mut cpu, &mut hub, Cmd::Step { count: 1 });
         assert!(hub.take_state_requests().is_empty(), "refused: the step is under way");
 
         // Queued input goes on being typed while paused: a save waits for
         // it, and a load drops it.
-        let (mut cpu, mut hub) = machine("checkpoint-input");
+        let (mut cpu, mut hub) = machine("strict-match-input");
         pause(&mut cpu, &mut hub);
         hub.input.push_back(LowInput::Wait(std::time::Duration::from_secs(60)));
         let (taken, refused) = state_request(&mut cpu, &mut hub, true);
         let (code, body) = refused.expect("refused with input queued");
         assert_eq!((taken, code), (0, 409));
         assert!(body["error"].as_str().unwrap().contains("queued input"), "{}", body);
-        let _load = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), checkpoint: true });
+        let _load = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: true });
         assert_eq!(hub.take_state_requests().len(), 1, "a load drops the input");
     }
 
     #[test]
-    fn a_state_that_is_no_checkpoint_is_saved_or_loaded_running_or_not() {
-        let (mut cpu, mut hub) = machine("no-checkpoint");
+    fn a_plain_save_or_load_is_done_running_or_not() {
+        let (mut cpu, mut hub) = machine("no-strict-match");
         let (taken, refused) = state_request(&mut cpu, &mut hub, false);
         assert_eq!((taken, refused.is_none()), (1, true), "taken while running");
 
-        // Sent with a checkpoint while running: only the checkpoint is refused.
-        let mut checkpoint = send(&mut cpu, &mut hub, Cmd::SaveState { path: "/tmp/a.state".into(), checkpoint: true });
-        let _plain = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/b.state".into(), checkpoint: false });
+        // Sent with a strict-match save while running: only that save is refused.
+        let mut strict = send(&mut cpu, &mut hub, Cmd::SaveState { path: "/tmp/a.state".into(), strict_match: true });
+        let _plain = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/b.state".into(), strict_match: false });
         let taken = hub.take_state_requests();
-        assert_eq!(taken.iter().map(|r| (r.load, r.checkpoint)).collect::<Vec<_>>(), [(true, false)]);
-        assert!(matches!(checkpoint.try_recv(), Ok(Reply::ErrorJson(409, _))));
+        assert_eq!(taken.iter().map(|r| (r.load, r.strict_match)).collect::<Vec<_>>(), [(true, false)]);
+        assert!(matches!(strict.try_recv(), Ok(Reply::ErrorJson(409, _))));
     }
 
     #[test]
@@ -3246,45 +3246,45 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_mode_loads_a_state_only_while_paused_and_refuses_as_a_checkpoint_does() {
+    fn deterministic_mode_loads_a_state_only_while_paused_and_refuses_as_a_strict_match_save_does() {
         let (mut cpu, mut hub, _mode) = deterministic_machine("state-refuse");
         reply(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }).unwrap();
 
-        // A load while running is refused as it arrives, checkpoint or not,
-        // with the body a refused checkpoint has.
-        for checkpoint in [false, true] {
-            let mut load = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), checkpoint });
+        // A load while running is refused as it arrives, strict match or
+        // not, with the body a refused strict-match save has.
+        for strict_match in [false, true] {
+            let mut load = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match });
             let body = refusal(&mut load);
             assert_eq!(body["paused"], false, "{}", body);
             assert!(body["error"].as_str().unwrap().contains("deterministic mode"), "{}", body);
         }
-        // A checkpoint save is refused by the checkpoint's rule, in the same shape.
-        let mut save = send(&mut cpu, &mut hub, Cmd::SaveState { path: "/tmp/x.state".into(), checkpoint: true });
+        // A strict-match save is refused by its own rule, in the same shape.
+        let mut save = send(&mut cpu, &mut hub, Cmd::SaveState { path: "/tmp/x.state".into(), strict_match: true });
         assert!(hub.take_state_requests().is_empty());
         let body = refusal(&mut save);
         assert_eq!(body["paused"], false, "{}", body);
         assert!(body["error"].as_str().unwrap().contains("pause it first"), "{}", body);
         // A plain save changes nothing and is taken while running.
-        let _save = send(&mut cpu, &mut hub, Cmd::SaveState { path: "/tmp/x.state".into(), checkpoint: false });
+        let _save = send(&mut cpu, &mut hub, Cmd::SaveState { path: "/tmp/x.state".into(), strict_match: false });
         assert_eq!(hub.take_state_requests().len(), 1);
 
         // A load sent while paused, with a resume in the same frame: the
         // machine runs when the front end would load it, so it is refused.
         pause(&mut cpu, &mut hub);
-        let mut load = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), checkpoint: false });
+        let mut load = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: false });
         reply(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }).unwrap();
         assert!(hub.take_state_requests().is_empty());
         assert_eq!(refusal(&mut load)["paused"], false);
 
         // Paused with nothing pending, both loads are taken.
         pause(&mut cpu, &mut hub);
-        let _plain = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), checkpoint: false });
-        let _checkpoint = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), checkpoint: true });
+        let _plain = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: false });
+        let _strict = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: true });
         assert_eq!(hub.take_state_requests().len(), 2);
     }
 
     #[test]
-    fn a_loaded_checkpoint_drops_a_pending_until_ms_and_input_waiting_on_emulated_time() {
+    fn a_strict_match_load_drops_a_pending_until_ms_and_input_waiting_on_emulated_time() {
         let (mut cpu, mut hub, mut mode) = deterministic_machine("reset-until");
         reply(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: Some(5000) }).unwrap();
         run_deterministic(&mut cpu, &mut hub, &mut mode, 10, 16);

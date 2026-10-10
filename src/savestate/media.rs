@@ -60,8 +60,8 @@ pub struct Image {
 /// The record is made when the mounts change and kept with them, as the
 /// libretro core takes a state every frame: while every drive has the
 /// same folder, overlay and images as when it was made, no CUE sheet is
-/// read again and no file looked at. A checkpoint `forget`s it first, so
-/// one is checked against the files as they are.
+/// read again and no file looked at. A strict-match save or load `forget`s
+/// it first, so it is checked against the files as they are.
 pub fn of(cpu: &Cpu) -> Vec<Medium> {
     let drives = cpu.bus.disk.all_drives();
     let mounts: Vec<Mount> = drives.iter().map(Mount::of).collect();
@@ -76,8 +76,8 @@ pub fn of(cpu: &Cpu) -> Vec<Medium> {
 
 /// Forget the record `of` keeps for `cpu` and the head hashes, so the
 /// next record reads every CUE sheet and read-only image again. A
-/// checkpoint does this: a track file can appear after the sheet was
-/// mounted, and a file replaced by another of the same size with its
+/// strict-match save or load does this: a track file can appear after
+/// the sheet was mounted, and a file replaced by another of the same size with its
 /// time kept (`cp -p`, `rsync -t`, an unpacked archive) has the cached
 /// hash of the old one.
 pub fn forget(cpu: &Cpu) {
@@ -337,7 +337,7 @@ mod tests {
         assert_eq!(d.len(), 1, "{:?}", d);
 
         // Replaced again with its time kept: the cached hash stays until
-        // a checkpoint forgets it.
+        // a strict-match save or load forgets it.
         std::fs::write(&path, vec![0x4D; 4096]).unwrap();
         std::fs::File::options().write(true).open(&path).unwrap().set_modified(later).unwrap();
         assert_eq!(medium(&info(true)).unwrap(), now, "the hash kept for the same size and time");
@@ -358,7 +358,7 @@ mod tests {
     }
 
     #[test]
-    fn the_record_is_kept_until_the_mounts_change_or_a_checkpoint() {
+    fn the_record_is_kept_until_the_mounts_change_or_a_strict_match_save() {
         let dir = std::env::temp_dir().join(format!("rust-dos-media-kept-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("c")).unwrap();
@@ -391,7 +391,7 @@ mod tests {
         assert_eq!(sheet_reads(), reads + 1, "the record is kept while the mounts stay");
 
         // The track replaced, with the same size and time: the kept record
-        // stays until a checkpoint forgets it.
+        // stays until a strict-match save or load forgets it.
         let modified = std::fs::metadata(&track).unwrap().modified().unwrap();
         let mut other = iso.clone();
         other[0] ^= 0xFF;
@@ -400,7 +400,7 @@ mod tests {
         assert_eq!(of(&cpu), first);
         forget(&cpu);
         let fresh = of(&cpu);
-        assert_eq!(sheet_reads(), reads + 2, "a checkpoint reads the sheet again");
+        assert_eq!(sheet_reads(), reads + 2, "a strict-match save reads the sheet again");
         assert_eq!(differences(&first, &fresh).len(), 1, "the track's start differs");
         std::fs::write(&track, &iso).unwrap();
 
