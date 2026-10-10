@@ -228,8 +228,9 @@ curl -s -XPOST $H/api/control/resume
     instructions, so the program can't change the bytes in between, paused
     or not. `expect`, `old` and `new` are what `GET /api/memory` reads. In
     the planar VGA modes (A000 outside mode 13h) that read sees one plane
-    through the VGA's read mode, while the write lands on the planes the Map
-    Mask picks, so a match says nothing about the other planes.
+    through the VGA's read mode, while the write goes through its write
+    logic as a CPU write does (write mode, Map Mask, Bit Mask), so a match
+    says nothing about the other planes.
 - **Interrupt vectors:** `GET /api/ivt`. `hle:true` means the vector still
   points at the emulator's built-in handler, so a program has not hooked it.
 - **Disassembly as data:** `GET /api/disasm?format=json` has, next to the
