@@ -82,9 +82,9 @@ fn ticks_to_duration(ticks: u64) -> Duration {
     Duration::from_nanos((ticks as u128 * 1_000_000_000 / PIT_HZ as u128) as u64)
 }
 
-/// How far past the start of a retrace a batch that runs to it ends, so
-/// that the display sees it began whatever the rounding between
-/// instructions, ticks and nanoseconds.
+/// How far past the start of a picture a batch that runs to it ends, so
+/// that the display sees the retrace before it whatever the rounding
+/// between instructions, ticks and nanoseconds.
 const RETRACE_MARGIN_NS: u64 = 1000;
 
 /// How long before a frame is due `sleep_until` stops sleeping and spins:
@@ -564,13 +564,17 @@ impl Pacer {
         clock.icount_at(target)
     }
 
-    /// Like `batch_end`, but on to the start of the display's next vertical
-    /// retrace (`refresh`'s) after the wall clock, noting when that is due
-    /// on the wall clock, which `wait_to_present` waits for: a frame shown
-    /// for each retrace when it begins, a display with a variable refresh
-    /// rate refreshes at the emulated one, 70 Hz or whatever the CRTC's
-    /// registers make it, rather than the host's frames'. A host that
-    /// falls behind skips retraces rather than slowing the machine down.
+    /// Like `batch_end`, but on to where the display (`refresh`'s) next
+    /// starts a picture after the wall clock, past the vertical retrace that
+    /// latched its Start Address, noting when that is due on the wall
+    /// clock, which `wait_to_present` waits for: a frame shown for each
+    /// retrace, a display with a variable refresh rate refreshes at the
+    /// emulated one, 70 Hz or whatever the CRTC's registers make it, rather
+    /// than the host's frames'. Ending at the picture's start rather than
+    /// the retrace's lets the frame have what programs set during the
+    /// retrace for it, such as Jazz Jackrabbit's pixel panning, which goes
+    /// with the Start Address it set before. A host that falls behind skips
+    /// retraces rather than slowing the machine down.
     pub fn retrace_batch_end(&mut self, clock: &Clock, refresh: &CrtTiming, now: Instant) -> u64 {
         if self.fast_forward {
             return self.batch_end(clock, now);
@@ -583,11 +587,11 @@ impl Pacer {
             self.anchor_ticks = emulated;
             wall = emulated;
         }
-        // The retrace in the display's nanoseconds, which count from where
-        // the clock's ticks do.
+        // The picture's start in the display's nanoseconds, which count
+        // from where the clock's ticks do.
         let from_ns = clock.now_ns() + ticks_to_duration(wall.saturating_sub(emulated)).as_nanos() as u64;
-        let retrace_ns = refresh.next_retrace(from_ns) + RETRACE_MARGIN_NS;
-        let ahead = (((retrace_ns - clock.now_ns()) as u128 * PIT_HZ as u128).div_ceil(1_000_000_000)) as u64;
+        let display_ns = refresh.next_display(from_ns) + RETRACE_MARGIN_NS;
+        let ahead = (((display_ns - clock.now_ns()) as u128 * PIT_HZ as u128).div_ceil(1_000_000_000)) as u64;
         let target = emulated + ahead;
         self.deadline = Some((self.anchor_wall + ticks_to_duration(target - self.anchor_ticks), target));
         self.period = Duration::from_nanos(refresh.frame_ns());
@@ -780,7 +784,7 @@ mod tests {
     }
 
     #[test]
-    fn retrace_pacing_runs_each_batch_to_a_retrace_due_a_frame_apart() {
+    fn retrace_pacing_runs_each_batch_past_a_retrace_due_a_frame_apart() {
         let start = Instant::now();
         let mut clock = Clock::new(1000);
         let mut pacer = Pacer::new(CpuSpeed::Fixed(1000), start);
@@ -799,8 +803,9 @@ mod tests {
                 let apart = (at - last_at).as_nanos() as i64;
                 assert!((apart - frame as i64).abs() < 2000, "{} ns apart", apart);
             }
-            // The batch ends just past the retrace's start.
-            assert!(clock.now_ns() - (refresh.next_retrace(clock.now_ns()) - frame) < 3000);
+            // The batch ends just past the picture's start, after the
+            // retrace.
+            assert!(clock.now_ns() % frame < 3000);
             assert_eq!(pacer.period, Duration::from_nanos(frame));
             last = Some((at, retraces));
             // The frame is shown at its deadline; the next starts then.
