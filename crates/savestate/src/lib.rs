@@ -43,6 +43,11 @@ pub type Result<T> = std::result::Result<T, StateError>;
 #[derive(Default)]
 pub struct Writer {
     pub buf: Vec<u8>,
+    /// With `labelled`: where each named part starts, as `SECT.part` (or
+    /// the section's tag alone where it starts), in the order written.
+    labels: Option<Vec<(String, usize)>>,
+    /// The tag of the section being written, for the labels.
+    section: Option<[u8; 4]>,
 }
 
 impl Writer {
@@ -50,13 +55,48 @@ impl Writer {
         Self::default()
     }
 
+    /// A writer that notes where each section and named part starts
+    /// (`label`), so that two states can be compared part by part.
+    pub fn labelled() -> Self {
+        Self { labels: Some(Vec::new()), ..Self::default() }
+    }
+
     pub fn bytes(&mut self, bytes: &[u8]) {
         self.buf.extend_from_slice(bytes);
+    }
+
+    /// Name what is written next, up to the next label or the end of the
+    /// section, in a `labelled` writer. Does nothing in another.
+    pub fn label(&mut self, name: &str) {
+        if let Some(labels) = &mut self.labels {
+            let name = match self.section {
+                Some(tag) => format!("{}.{}", String::from_utf8_lossy(&tag).trim_end(), name),
+                None => name.to_string(),
+            };
+            labels.push((name, self.buf.len()));
+        }
+    }
+
+    /// The parts a `labelled` writer wrote: each label's name and its
+    /// bytes' range. A section's header goes with the section's tag, and
+    /// what a section has before its first label too.
+    pub fn parts(&self) -> Vec<(String, std::ops::Range<usize>)> {
+        let labels = self.labels.as_deref().unwrap_or_default();
+        labels
+            .iter()
+            .enumerate()
+            .map(|(i, (name, at))| {
+                let end = labels.get(i + 1).map_or(self.buf.len(), |next| next.1);
+                (name.clone(), *at..end)
+            })
+            .collect()
     }
 
     /// A section: `tag`, its `version` and the length of what `write` puts
     /// in it.
     pub fn section(&mut self, tag: &[u8; 4], version: u16, write: impl FnOnce(&mut Writer)) {
+        self.label(String::from_utf8_lossy(tag).trim_end());
+        self.section = Some(*tag);
         self.bytes(tag);
         version.save(self);
         let at = self.buf.len();
@@ -64,6 +104,7 @@ impl Writer {
         write(self);
         let len = (self.buf.len() - at - 4) as u32;
         self.buf[at..at + 4].copy_from_slice(&len.to_le_bytes());
+        self.section = None;
     }
 }
 

@@ -11,10 +11,25 @@ const ENV_VERSION: u16 = 1;
 /// The machine's state, between batches.
 pub fn save(cpu: &Cpu) -> Vec<u8> {
     let mut w = Writer::new();
-    cpu.bus.save_state(&mut w);
+    write(cpu, &mut w);
+    w.buf
+}
+
+/// The bytes `save` writes, and the parts they are made of: each
+/// section, and in the bus's sections each device (`SOUN.sb`, `CORE.pic`),
+/// with its range of the bytes. For telling which device two states
+/// differ in.
+pub fn save_parts(cpu: &Cpu) -> (Vec<u8>, Vec<(String, std::ops::Range<usize>)>) {
+    let mut w = Writer::labelled();
+    write(cpu, &mut w);
+    let parts = w.parts();
+    (w.buf, parts)
+}
+
+fn write(cpu: &Cpu, w: &mut Writer) {
+    cpu.bus.save_state(w);
     w.section(b"CPU ", CPU_VERSION, |w| cpu.save(w));
     w.section(b"ENV ", ENV_VERSION, |w| cpu.env_injector.save(w));
-    w.buf
 }
 
 /// Load a state `save` wrote into the machine, between batches. A state
@@ -41,6 +56,21 @@ pub fn load(cpu: &mut Cpu, data: &[u8]) -> Result<()> {
         cpu.bus.log_string(&format!("[STATE] {} was open and can't be opened again", path));
     }
     loaded.map(drop)
+}
+
+/// Undo a load that failed after a state's hardware was put in place
+/// (`Hardware::apply`): the hardware goes back to `old`, as `settings`
+/// had it, and the machine to `before`, which `save` took before the
+/// hardware changed.
+pub fn roll_back(cpu: &mut Cpu, hardware: &mut crate::hardware::Hardware, old: &crate::hardware::Hardware, settings: &crate::config::Settings, before: &[u8]) {
+    if hardware != old {
+        for warning in hardware.apply(cpu, &old.settings(settings)) {
+            cpu.bus.log_string(&format!("[STATE] {}", warning));
+        }
+    }
+    load_sections(cpu, before).expect("the state the machine was in loads back");
+    cpu.forget_caches();
+    cpu.bus.after_load();
 }
 
 fn load_sections(cpu: &mut Cpu, data: &[u8]) -> Result<Vec<String>> {

@@ -325,10 +325,22 @@ pub fn flush(bus: &mut Bus) {
 /// free one is all zeros, with no handle referring to it.
 fn write_entry(bus: &mut Bus, sft: u16) {
     let at = entry_address(bus, sft);
+    // A device has no file time: DOS stamps its entry as it is opened. An
+    // entry written again for the device already open there keeps that
+    // stamp, so writing the whole table after a state load leaves the
+    // devices' entries as the state has them, at any time.
+    let kept = (bus.read_16(at + 0x05) & 0x80 != 0)
+        .then(|| (bus.read_16(at + 0x0D), bus.read_16(at + 0x0F), (0..11).map(|i| bus.read_8(at + 0x20 + i)).collect::<Vec<u8>>()));
     for i in 0..ENTRY_SIZE {
         bus.write_8(at + i, 0);
     }
-    let Some(entry) = bus.disk.sft_entry(sft) else { return };
+    let Some(mut entry) = bus.disk.sft_entry(sft) else { return };
+    if let Some((time, date, name)) = kept
+        && entry.device.is_some()
+        && name == entry.name
+    {
+        (entry.time, entry.date) = (time, date);
+    }
     let position = bus.disk.position(sft).unwrap_or(0);
     // The device information word (as IOCTL 4400h has it), and the
     // device's driver or the drive's parameter block.

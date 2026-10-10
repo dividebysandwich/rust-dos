@@ -75,9 +75,7 @@ impl CdImage {
     /// data track (.iso, .bin, .img), whose sector format is found from
     /// where the ISO 9660 volume descriptor is.
     pub fn open(path: &Path) -> Result<Self, String> {
-        // GOG's CUE sheets are .ins files, .inst in Steam's copies.
-        let is_cue = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("cue") || e.eq_ignore_ascii_case("ins") || e.eq_ignore_ascii_case("inst"));
-        if is_cue {
+        if is_cue(path) {
             Self::open_cue(path)
         } else if is_chd(path) {
             Self::open_chd(path)
@@ -89,7 +87,9 @@ impl CdImage {
     fn open_cue(path: &Path) -> Result<Self, String> {
         let text = hostfs::read(path).map_err(|e| format!("{}: {}", path.display(), e))?;
         let sheet = parse_cue(&String::from_utf8_lossy(&text))?;
-        let dir = path.parent().unwrap_or(Path::new("."));
+        // A bare file name's parent is "", which can't be listed to match
+        // names in any case.
+        let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
 
         let mut image = CdImage { path: path.to_path_buf(), files: Vec::new(), tracks: Vec::new() };
         // Sector of the disc where the next file starts.
@@ -527,22 +527,62 @@ pub fn wave_data<R: Read + Seek>(file: &mut R) -> Result<(WaveFormat, u64, u64),
     }
 }
 
-/// A file named in a CUE sheet: next to the sheet, by the name as written
-/// or by any case of it (sheets made on Windows rarely match the case).
+/// Whether `CdImage::open` reads `path` as a CUE sheet: a `.cue`, or
+/// GOG's `.ins` (`.inst` in Steam's copies).
+fn is_cue(path: &Path) -> bool {
+    path.extension().is_some_and(|e| ["cue", "ins", "inst"].iter().any(|c| e.eq_ignore_ascii_case(c)))
+}
+
+/// The files the CUE sheet at `path` keeps its tracks in, those that are
+/// there; none if `path` isn't a CUE sheet `CdImage::open` reads as one.
+pub fn cue_files(path: &Path) -> Vec<PathBuf> {
+    let Some(text) = is_cue(path).then(|| hostfs::read(path).ok()).flatten() else { return Vec::new() };
+    let Ok(sheet) = parse_cue(&String::from_utf8_lossy(&text)) else { return Vec::new() };
+    let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    sheet.files.iter().filter_map(|f| find_file(dir, &f.name).ok()).collect()
+}
+
+/// A file named in a CUE sheet: below the sheet's folder by its relative
+/// path (some sheets keep their audio tracks in a folder), else next to the
+/// sheet, each part by the name as written or by any case of it (sheets
+/// made on Windows rarely match the case).
 fn find_file(dir: &Path, name: &str) -> Result<PathBuf, String> {
-    // Only the file name counts; sheets can carry the paths of whoever
-    // made them.
-    let name = name.rsplit(['\\', '/']).next().unwrap_or(name);
+    let parts: Vec<&str> = name.split(['\\', '/']).filter(|p| !p.is_empty()).collect();
+    let file = parts.last().copied().unwrap_or(name);
+    // An absolute path is whoever made the sheet's: only its file name
+    // counts. So does a path that climbs out of the sheet's folder with `..`.
+    let relative = !name.starts_with(['\\', '/']) && !name.contains(':') && !parts.contains(&"..");
+    let is_file: fn(&Path) -> bool = |p| hostfs::is_file(p);
+    let is_dir: fn(&Path) -> bool = |p| hostfs::is_dir(p);
+    let folders = &parts[..parts.len().saturating_sub(1)];
+    let below_sheet = relative && !folders.is_empty();
+    if below_sheet {
+        let below = folders.iter().try_fold(dir.to_path_buf(), |d, part| find_in(&d, part, is_dir));
+        if let Some(path) = below.and_then(|d| find_in(&d, file, is_file)) {
+            return Ok(path);
+        }
+    }
+    find_in(dir, file, is_file).ok_or_else(|| {
+        let beside = dir.join(file);
+        if below_sheet {
+            format!("{} not found, nor {}", dir.join(parts.join(std::path::MAIN_SEPARATOR_STR)).display(), beside.display())
+        } else {
+            format!("{} not found", beside.display())
+        }
+    })
+}
+
+/// `name` in `dir`, as written or in any case, if `kind` holds for it.
+fn find_in(dir: &Path, name: &str, kind: fn(&Path) -> bool) -> Option<PathBuf> {
     let path = dir.join(name);
-    if hostfs::is_file(&path) {
-        return Ok(path);
+    if kind(&path) {
+        return Some(path);
     }
     hostfs::read_dir(dir)
         .into_iter()
         .flatten()
         .map(|entry| entry.path)
-        .find(|p| p.file_name().is_some_and(|f| f.to_string_lossy().eq_ignore_ascii_case(name)))
-        .ok_or_else(|| format!("{} not found", path.display()))
+        .find(|p| p.file_name().is_some_and(|f| f.to_string_lossy().eq_ignore_ascii_case(name)) && kind(p))
 }
 
 #[cfg(test)]
@@ -615,6 +655,41 @@ mod tests {
     }
 
     #[test]
+    fn files_in_a_folder_below_the_sheet() {
+        // The sheet names `audio\Song2.bin`; the folder on disk is AUDIO.
+        let dir = scratch("subfolder");
+        fs::create_dir_all(dir.join("AUDIO")).unwrap();
+        fs::write(dir.join("data.bin"), vec![7u8; 10 * 2048]).unwrap();
+        fs::write(dir.join("AUDIO").join("Song2.bin"), sectors(5, 3)).unwrap();
+        fs::write(
+            dir.join("disc.cue"),
+            "FILE \"data.bin\" BINARY\n TRACK 01 MODE1/2048\n  INDEX 01 00:00:00\n\
+             FILE \"audio\\Song2.bin\" BINARY\n TRACK 02 AUDIO\n  INDEX 01 00:00:00\n",
+        )
+        .unwrap();
+        let image = CdImage::open(&dir.join("disc.cue")).unwrap();
+        let mut raw = [0u8; RAW_SECTOR];
+        image.read_raw(image.tracks()[1].start, &mut raw).unwrap();
+        assert_eq!(raw[0], 3);
+    }
+
+    #[test]
+    fn files_are_not_looked_for_above_the_sheet() {
+        // `..\Song2.bin` names a file above the sheet's folder; only the
+        // copy next to the sheet counts.
+        let root = scratch("above");
+        let dir = root.join("disc");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(root.join("Song2.bin"), sectors(5, 9)).unwrap();
+        fs::write(dir.join("Song2.bin"), sectors(5, 3)).unwrap();
+        fs::write(dir.join("disc.cue"), "FILE \"..\\Song2.bin\" BINARY\n TRACK 01 AUDIO\n  INDEX 01 00:00:00\n").unwrap();
+        let image = CdImage::open(&dir.join("disc.cue")).unwrap();
+        let mut raw = [0u8; RAW_SECTOR];
+        image.read_raw(image.tracks()[0].start, &mut raw).unwrap();
+        assert_eq!(raw[0], 3);
+    }
+
+    #[test]
     fn bare_images_are_probed_for_their_sector_format() {
         let dir = scratch("bare");
         let mut raw = sectors(17, 0);
@@ -642,5 +717,23 @@ mod tests {
         assert_eq!(&sector[1..6], b"CD001");
         assert!(!CdImage::probe(&MemoryImage::new(40 * 2048)));
         assert!(CdImage::from_memory("junk.iso", MemoryImage::new(40 * 2048)).is_err());
+    }
+
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn a_sheet_at_the_root_of_an_overlaid_drive() {
+        use crate::overlay::{Folder, Overlay};
+        let dir = scratch("overlaid");
+        fs::create_dir_all(dir.join("lower")).unwrap();
+        fs::write(dir.join("lower/game.bin"), sectors(5, 4)).unwrap();
+        fs::write(dir.join("lower/game.cue"), "FILE \"game.bin\" BINARY\n TRACK 01 MODE1/2352\n  INDEX 01 00:00:00\n")
+            .unwrap();
+        let overlay = Overlay::new(Box::new(Folder(dir.join("lower"))), Some(dir.join("upper"))).unwrap();
+        let layer = hostfs::add_layer(std::sync::Arc::new(overlay));
+        let image = CdImage::open(&layer.root().join("game.cue")).unwrap();
+        assert_eq!(image.leadout(), 5);
+        let mut data = [0u8; DATA_SECTOR];
+        image.read_data(2, &mut data).unwrap();
+        assert!(data.iter().all(|&b| b == 4));
     }
 }

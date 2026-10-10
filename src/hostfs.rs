@@ -155,23 +155,32 @@ pub fn set_backend(backend: Option<Arc<dyn Backend>>) {
 }
 
 /// Whether `path` starts with a scheme: two or more letters, then `:/`
-/// (Windows' `C:\` is one letter). Path handling makes `//` one `/`, so
-/// `saf:/x` is one too, and the parent of `saf://x` is `saf:`, the root.
+/// or `:\` (Windows' `C:\` is one letter). Path handling makes `//` one
+/// `/`, so `saf:/x` is one too, and the parent of `saf://x` is `saf:`, the
+/// root. On Windows, `Path::join` puts a `\` after `saf:`, so a name
+/// joined to the root is `saf:\x`.
 pub fn has_scheme(path: &Path) -> bool {
     let s = path.as_os_str().as_encoded_bytes();
     let Some(colon) = s.iter().position(|&c| c == b':') else { return false };
     colon >= 2
         && s[0].is_ascii_alphabetic()
         && s[..colon].iter().all(|&c| c.is_ascii_alphanumeric() || b"+.-".contains(&c))
-        && matches!(s.get(colon + 1), Some(b'/') | None)
+        && matches!(s.get(colon + 1), Some(b'/' | b'\\') | None)
 }
 
 /// The path as the backend takes it: `scheme://rest`, whatever became of
-/// the `//`.
+/// the `//`. On Windows the `\`s that `Path::join` put in become `/`.
 pub fn backend_path(path: &Path) -> String {
     let s = path.to_string_lossy();
     match s.split_once(':') {
-        Some((scheme, rest)) if has_scheme(path) => format!("{}://{}", scheme, rest.trim_start_matches('/')),
+        Some((scheme, rest)) if has_scheme(path) => {
+            let rest = rest.trim_start_matches(['/', '\\']);
+            if cfg!(windows) {
+                format!("{}://{}", scheme, rest.replace('\\', "/"))
+            } else {
+                format!("{}://{}", scheme, rest)
+            }
+        }
         _ => s.into_owned(),
     }
 }
@@ -667,6 +676,21 @@ pub mod tests {
         assert_eq!(backend_path(Path::new("saf://t%2Fx").join("GAME").as_path()), "saf://t%2Fx/GAME");
         let collapsed: PathBuf = Path::new("saf://t/GAME").components().collect();
         assert_eq!(backend_path(&collapsed), "saf://t/GAME");
+    }
+
+    #[test]
+    fn a_name_joined_to_the_root_on_windows_keeps_its_scheme() {
+        // Windows' `Path::join` gives `saf:\GAME` for the root `saf:`.
+        assert!(has_scheme(Path::new("saf:\\GAME")));
+        assert!(has_scheme(Path::new("layer1:\\GAME")));
+        assert_eq!(backend_path(Path::new("saf:\\GAME")), "saf://GAME");
+        assert!(!has_scheme(Path::new("C:\\GAME")));
+        let joined = Path::new("saf://t/GAME").parent().unwrap().join("DATA");
+        assert!(has_scheme(&joined));
+        assert_eq!(backend_path(&joined), "saf://t/DATA");
+        let at_root = Path::new("saf://GAME").parent().unwrap().join("DATA");
+        assert!(has_scheme(&at_root));
+        assert_eq!(backend_path(&at_root), "saf://DATA");
     }
 
     #[test]

@@ -55,6 +55,8 @@ impl DiskController {
             shared_from_state: _,
             // Told as the drive was mounted.
             notes: _,
+            // Made again from the drives as they are mounted.
+            media: _,
         } = self;
         current_drive.save(w);
         for drive in &drives[..LASTDRIVE as usize] {

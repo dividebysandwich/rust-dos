@@ -25,8 +25,10 @@ const ET4000_VERSION: u16 = 1;
 const SHARED_VERSION: u16 = 1;
 
 /// Save or load each of a list of fields.
+/// Each field is labelled with its name, for comparing states part by
+/// part (`Writer::labelled`).
 macro_rules! save_all {
-    ($w:expr; $($f:expr),* $(,)?) => { $( State::save($f, $w); )* };
+    ($w:expr; $($f:ident),* $(,)?) => { $( $w.label(stringify!($f)); State::save($f, $w); )* };
 }
 macro_rules! load_all {
     ($r:expr; $($f:expr),* $(,)?) => { $( State::load($f, $r)?; )* };
@@ -214,18 +216,25 @@ impl Bus {
         }
         w.section(b"DOS ", DOS_VERSION, |w| {
             save_all!(w; xms, mouse, mscdex, disk_io);
+            w.label("ems");
             save_device(ems, w);
+            w.label("umb");
             save_device(umb, w);
-            dos_high.save(w);
+            save_all!(w; dos_high);
+            w.label("disk");
             disk.save_state(w);
         });
         // The Ultrasound's memory first, where it stays in place for
         // rewind's deltas (rewind.rs) whatever the queues after it hold.
         w.section(b"SOUN", SOUND_VERSION, |w| {
+            w.label("gus");
             save_device(gus, w);
             save_all!(w; opl, mpu, gus_line, tandy_sound);
+            w.label("sb");
             save_device(sb, w);
+            w.label("lpt_dac");
             save_device(lpt_dac, w);
+            w.label("cdaudio");
             cdaudio.save_state(w);
         });
         // The AWE32's EMU8000 (its RAM first, for rewind), only with one,
@@ -257,7 +266,9 @@ impl Bus {
         // isn't part of the machine: frames in flight are lost with a load.
         if net.ipx.is_some() || net.nic.is_some() {
             w.section(b"NET ", NET_VERSION, |w| {
+                w.label("ipx");
                 net.ipx.save(w);
+                w.label("nic");
                 save_device(&net.nic, w);
             });
         }
