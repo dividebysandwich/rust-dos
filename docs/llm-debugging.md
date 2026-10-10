@@ -94,8 +94,9 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   line, timers, DMA, the number of active and playing voices, and every
   voice's registers. A card that plays nothing often has `reset` without
   bit 1 (DAC off) or voices whose volume stays 0.
-- **Kill a stuck program** with `POST /api/control/reboot_shell`. This is
-  better than restarting the emulator. `POST /api/control/reboot` resets
+- **Kill a stuck program** with `POST /api/control/reboot_shell`. The batch
+  file that started it ends too, as with the settings window's close. This
+  is better than restarting the emulator. `POST /api/control/reboot` resets
   the machine as Ctrl+Alt+Del does: DOS starts over and runs its startup
   again.
 

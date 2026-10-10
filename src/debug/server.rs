@@ -952,7 +952,7 @@ EXECUTION CONTROL
   POST /api/control/step     {"count":1}             returns registers after stepping
   POST /api/control/step_over                        step, but run a CALL, INT, LOOP or
                                                      REP string instruction to the next one
-  POST /api/control/reboot_shell                     kill the running program
+  POST /api/control/reboot_shell                     kill the running program and its batch file
   POST /api/control/reboot                           reset the machine, as Ctrl+Alt+Del
   GET  /api/control/wait?timeout_ms=30000            block until the emulator pauses
   GET  /api/registers        PUT /api/registers {"ax":"1234","flags":"0202"}

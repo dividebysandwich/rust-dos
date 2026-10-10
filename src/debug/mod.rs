@@ -24,7 +24,7 @@ use serde_json::{Map, Value, json};
 use tokio::sync::{broadcast, oneshot};
 
 use crate::config_ui::UiKey;
-use crate::cpu::{Cpu, CpuFlags, CpuState};
+use crate::cpu::{Cpu, CpuFlags};
 use crate::disk::{DriveKind, MountOptions, drive_letter};
 use crate::keyboard;
 use rust_dos::keylayout::Layout;
@@ -1269,7 +1269,10 @@ impl DebugHub {
                 }
             }
             Cmd::RebootShell => {
-                cpu.state = CpuState::RebootShell;
+                // As the settings window's close does: the batch file and
+                // commands queued go too, or their next line (often EXIT)
+                // would run.
+                cpu.close_program();
                 self.resume();
                 Reply::Json(json!({"ok": true}))
             }
@@ -2180,8 +2183,22 @@ fn net_json(cpu: &Cpu) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{LowInput, keys_for_char, step_over_len};
+    use super::{Cmd, DebugHub, LowInput, Reply, Request, keys_for_char, step_over_len};
+    use crate::cpu::{Cpu, CpuState};
     use rust_dos::keylayout::Layout;
+    use tokio::sync::oneshot;
+
+    #[test]
+    fn reboot_shell_drops_the_batch_file_too() {
+        let (mut cpu, mut hub) = (Cpu::new(".".into()), DebugHub::disabled());
+        cpu.load_shell();
+        cpu.queue_batch_lines(["GAME.EXE", "EXIT"]);
+        let (reply, mut rx) = oneshot::channel();
+        hub.handle(&mut cpu, Request { cmd: Cmd::RebootShell, reply });
+        assert!(matches!(rx.try_recv(), Ok(Reply::Json(_))));
+        assert_eq!(cpu.state, CpuState::RebootShell);
+        assert!(!cpu.batch.is_active(), "EXIT must not run after the reload");
+    }
 
     /// The scan codes of the keys going down to type `c`.
     fn scans(c: char, layout: &str) -> Vec<u8> {
