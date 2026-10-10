@@ -170,6 +170,10 @@ manuals = ["dep:jpeg-decoder", "dep:hayro"]
 # needs libasound2-dev to build).
 hostmidi = ["rust-dos-mpu401/hostmidi"]
 
+[build-dependencies]
+# Links the program's icon (packaging/windows/rust-dos.rc) into rust-dos.exe.
+embed-resource = "3"
+
 [dev-dependencies]
 # Writes the zip archives of the tests.
 rust-dos-zip = { path = "crates/zip", features = ["test-util"] }
