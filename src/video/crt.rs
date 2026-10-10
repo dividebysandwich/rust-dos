@@ -305,6 +305,13 @@ impl CrtTiming {
     pub fn next_retrace(&self, t_ns: u64) -> u64 {
         self.retraces(t_ns) * self.frame_ns() + self.retrace_ns()
     }
+
+    /// When the picture's first line after `t_ns` begins: a frame's start,
+    /// after the vertical retrace and blanking that latched the Start
+    /// Address for it.
+    pub fn next_display(&self, t_ns: u64) -> u64 {
+        (t_ns / self.frame_ns() + 1) * self.frame_ns()
+    }
 }
 
 crate::state_fields!(CrtTiming { line_ns, hdisplay_ns, total, display, retrace_start, retrace_end });
@@ -350,5 +357,8 @@ mod tests {
         assert_eq!(t.retraces(412 * line), 1);
         assert_eq!(t.next_retrace(0), 412 * line);
         assert_eq!(t.next_retrace(412 * line), 412 * line + t.frame_ns());
+        assert_eq!(t.next_display(0), t.frame_ns());
+        assert_eq!(t.next_display(412 * line), t.frame_ns());
+        assert_eq!(t.next_display(t.frame_ns()), 2 * t.frame_ns());
     }
 }

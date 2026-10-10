@@ -152,10 +152,9 @@ pub fn settings(base: &Base, options: &Values, overlay: Option<&Overlay>) -> (Se
     (frontend_settings(settings), warnings)
 }
 
-/// What the frontend does in the core's place: it draws the picture and
-/// rewinds, and RetroAchievements is its own.
+/// What the frontend does in the core's place: it rewinds, and
+/// RetroAchievements is its own.
 pub fn frontend_settings(mut settings: Settings) -> Settings {
-    settings.voodoo.renderer = rust_dos::voodoo::Renderer::Software;
     settings.rewind = false;
     settings.achievements.enabled = false;
     settings

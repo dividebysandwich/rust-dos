@@ -31,6 +31,9 @@ pub fn load(cpu: &mut Cpu, data: &[u8]) -> Result<()> {
     if loaded.is_ok() {
         // The settings' variables, whatever the state's environment has.
         cpu.apply_env_rules();
+        // The session's count of running programs goes with the state's
+        // machine: one, if a program runs in it.
+        cpu.programs.running = u32::from(!cpu.program.is_empty());
     }
     cpu.forget_caches();
     cpu.bus.after_load();

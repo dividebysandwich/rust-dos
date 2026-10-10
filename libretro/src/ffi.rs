@@ -26,6 +26,7 @@ pub const RETRO_ENVIRONMENT_SET_PIXEL_FORMAT: u32 = 10;
 pub const RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS: u32 = 11;
 pub const RETRO_ENVIRONMENT_SET_KEYBOARD_CALLBACK: u32 = 12;
 pub const RETRO_ENVIRONMENT_SET_DISK_CONTROL_INTERFACE: u32 = 13;
+pub const RETRO_ENVIRONMENT_SET_HW_RENDER: u32 = 14;
 pub const RETRO_ENVIRONMENT_GET_VARIABLE: u32 = 15;
 pub const RETRO_ENVIRONMENT_SET_VARIABLES: u32 = 16;
 pub const RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE: u32 = 17;
@@ -46,6 +47,34 @@ pub const RETRO_ENVIRONMENT_SET_MESSAGE_EXT: u32 = 60;
 pub const RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2: u32 = 67;
 
 pub const RETRO_PIXEL_FORMAT_XRGB8888: u32 = 1;
+
+// Hardware rendering: the context types, and the data `video_refresh`
+// takes for a picture drawn into the frontend's framebuffer.
+pub const RETRO_HW_CONTEXT_OPENGL: u32 = 1;
+pub const RETRO_HW_CONTEXT_OPENGL_CORE: u32 = 3;
+pub const RETRO_HW_FRAME_BUFFER_VALID: *const c_void = usize::MAX as *const c_void;
+
+pub type retro_hw_context_reset_t = unsafe extern "C" fn();
+pub type retro_hw_get_current_framebuffer_t = unsafe extern "C" fn() -> usize;
+pub type retro_proc_address_t = unsafe extern "C" fn();
+pub type retro_hw_get_proc_address_t = unsafe extern "C" fn(sym: *const c_char) -> Option<retro_proc_address_t>;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct retro_hw_render_callback {
+    pub context_type: u32,
+    pub context_reset: Option<retro_hw_context_reset_t>,
+    pub get_current_framebuffer: Option<retro_hw_get_current_framebuffer_t>,
+    pub get_proc_address: Option<retro_hw_get_proc_address_t>,
+    pub depth: bool,
+    pub stencil: bool,
+    pub bottom_left_origin: bool,
+    pub version_major: u32,
+    pub version_minor: u32,
+    pub cache_context: bool,
+    pub context_destroy: Option<retro_hw_context_reset_t>,
+    pub debug_context: bool,
+}
 
 pub const RETRO_LOG_DEBUG: u32 = 0;
 pub const RETRO_LOG_INFO: u32 = 1;

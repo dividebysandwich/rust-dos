@@ -24,6 +24,9 @@
         <MediaTemplate EmbedCab="yes" />
 
         <Property Id="ARPURLINFOABOUT" Value="https://github.com/dividebysandwich/rust-dos" />
+        <!-- The icon in Installed apps; rust-dos.exe has it built in. -->
+        <Icon Id="rust_dos.ico" SourceFile="packaging/windows/rust-dos.ico" />
+        <Property Id="ARPPRODUCTICON" Value="rust_dos.ico" />
 
         <StandardDirectory Id="ProgramFiles64Folder">
             <Directory Id="INSTALLFOLDER" Name="rust-dos">

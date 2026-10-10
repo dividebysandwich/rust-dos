@@ -53,3 +53,16 @@ fuller and wider, from **light** to **strong**.
 
 How much of the effect you hear: **0%** the music alone, **50%** the music
 and the effect both in full, **100%** the effect alone.
+
+# Sound buffer {#audio-buffer}
+
+How much sound waits for the host's sound device, each bit of it heard
+that much later. The **sound buffer** is the device's own (**512 frames**,
+about 12 ms, by default). The **prebuffer** is kept on top of it for a
+video frame that comes late (**20 ms** by default). Smaller values make
+sound effects follow what happens on screen sooner. If the sound
+crackles, the host can't keep up: make them larger again.
+
+Games add their own delay: Descent's Ultrasound driver, for example,
+mixes its sound effects 50 to 80 ms ahead of what plays, as on a real
+card.

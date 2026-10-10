@@ -26,6 +26,9 @@ uniform int u_stipple;
 uniform int u_yorigin;
 uniform int u_fogblend[64];
 uniform int u_fogdelta[64];
+// Compare against zaColor in the colour pass, then write the interpolated
+// depth in a stencil-masked depth pass when fbzMode bit 20 is set.
+uniform int u_constant_depth;
 // Buffer pixels a card pixel is across.
 uniform float u_scale;
 
@@ -398,9 +401,7 @@ void main() {
         c.rgb = fog(c.rgb, iter.a);
     }
 
-    // The depth test compares zaColor with fbzMode bit 20, which here is
-    // also what is written.
-    int depth = bit(u_fbz, 20) ? u_zacolor & 0xFFFF : depthValue();
+    int depth = u_constant_depth != 0 ? u_zacolor & 0xFFFF : depthValue();
     gl_FragDepth = float(depth) / 65535.0;
     o_color = vec4(c) / 255.0;
 }

@@ -25,7 +25,7 @@ const READ_SLICE = 16 << 20;
 /// The size of a new C:, unless Erase C: picked another.
 const DEFAULT_C_MEGABYTES = 250;
 /// Files dropped on their own that go in a drive rather than on C:.
-const DISK_IMAGE = /\.(img|ima|vfd|flp|dsk|iso)$/i;
+const DISK_IMAGE = /\.(img|ima|vfd|flp|dsk|iso|chd)$/i;
 
 const CONFIG_KEY = 'rust-dos.conf';
 /// Wheel travel that makes a notch, in pixels, and what a line and a page
@@ -1487,7 +1487,7 @@ function freeDrive() {
 /// Put the disk or CD image `file` in `drive`: by default a CD in the CD-ROM
 /// drive, a floppy in A: and a hard disk in the next free drive.
 async function insertImage(file, drive) {
-  const cd = /\.iso$/i.test(file.name);
+  const cd = /\.(iso|chd)$/i.test(file.name);
   const floppy = !cd && (/\.86f$/i.test(file.name) || Machine.is_floppy_size(file.size));
   if (drive === undefined) {
     const cdDrive = drives().find((d) => d.kind === 'cdrom');

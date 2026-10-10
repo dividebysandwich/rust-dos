@@ -1129,6 +1129,51 @@ fn the_opengl_renderer_gets_what_is_drawn() {
 }
 
 #[test]
+fn opengl_mode_reads_back_synchronized_colour_and_depth() {
+    for workers in [0, 3] {
+        let mut bus = bus(Board::Standard);
+        bus.voodoo = Some(rust_dos::voodoo::Voodoo::with_workers(Board::Standard, workers));
+        init(&mut bus);
+        let card = bus.voodoo.as_mut().unwrap();
+        card.set_mirror(true);
+        card.set_software_picture(false);
+        take_mirror(&mut bus);
+        w(&mut bus, FBZ_MODE, RGB_WRITE | AUX_WRITE);
+        flat(&mut bus, 255, 0, 0, 255);
+        w(&mut bus, START_Z, 0x1234 << 12);
+        triangle(&mut bus, [(10.0, 10.0), (50.0, 10.0), (10.0, 50.0)]);
+        w(&mut bus, LFB_MODE, 0);
+        let addr = BASE + 0x40_0000 + 20 * 2048 + 20 * 2;
+        assert_eq!(bus.read_32(addr), 0xF800_F800, "colour, workers={workers}");
+        w(&mut bus, LFB_MODE, 2 << 6);
+        assert_eq!(bus.read_32(addr), 0x1234_1234, "depth, workers={workers}");
+    }
+}
+
+#[test]
+fn lfb_writes_separate_identical_opengl_draws() {
+    use rust_dos::voodoo::mirror::Command;
+    let mut bus = bus(Board::Standard);
+    init(&mut bus);
+    bus.voodoo.as_mut().unwrap().set_mirror(true);
+    take_mirror(&mut bus);
+    w(&mut bus, FBZ_MODE, RGB_WRITE);
+    flat(&mut bus, 255, 0, 0, 255);
+    triangle(&mut bus, [(10.0, 10.0), (50.0, 10.0), (10.0, 50.0)]);
+    w(&mut bus, LFB_MODE, 0);
+    bus.write_32(BASE + 0x40_0000 + 20 * 2048 + 20 * 2, 0x07E0_07E0);
+    triangle(&mut bus, [(10.0, 10.0), (50.0, 10.0), (10.0, 50.0)]);
+    let frame = take_mirror(&mut bus);
+    let [Command::Draw(first), Command::Pixels(pixels), Command::Draw(last)] = &frame.commands[..] else {
+        panic!("LFB writes must precede the second draw: {:?}", frame.commands);
+    };
+    assert_eq!(first.state, last.state);
+    assert_eq!((first.vertices.len(), last.vertices.len()), (3, 3));
+    assert_eq!((pixels.x, pixels.y), (20, 20));
+    assert_eq!(pixel(&bus, 0, 20, 20), 0xF800);
+}
+
+#[test]
 fn frame_buffer_writes_are_recorded_a_row_a_buffer() {
     use rust_dos::voodoo::mirror::{Command, Pixels};
     let mut bus = bus(Board::Standard);

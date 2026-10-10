@@ -1,32 +1,33 @@
 //! The 3dfx card drawn again with OpenGL at `voodoo_scale` times its
-//! resolution, for the window (`voodoo_renderer=opengl`). The card records
-//! what it draws (`rust_dos::voodoo::mirror`); here each of its colour
-//! buffers is the texture of a framebuffer object, all sharing one depth
-//! texture, the triangles go through the card's pixel pipeline in a shader
-//! (voodoo/triangle.frag) with OpenGL's depth test and blending, and the
-//! front buffer through the card's gamma table is the picture the window
-//! shows. With `voodoo_msaa`, the buffers are multisampled and resolved
-//! into their textures before they are shown. The software rasterizer's memory stays what screenshots,
-//! recordings and the debugger see, and what the game reads back; it only
-//! draws what those can still see (`rust_dos::voodoo::backlog`).
+//! resolution, for the window and the libretro core's hardware rendering
+//! (`voodoo_renderer=opengl`). The card records what it draws
+//! (`super::mirror`); here each of its colour buffers is the texture of a
+//! framebuffer object, all sharing one depth texture, the triangles go
+//! through the card's pixel pipeline in a shader (gl/triangle.frag) with
+//! OpenGL's depth test and blending, and the front buffer through the
+//! card's gamma table is the picture shown. With `voodoo_msaa`, the buffers
+//! are multisampled and resolved into their textures before they are shown.
+//! The software rasterizer's memory stays what screenshots, recordings and
+//! the debugger see, and what the game reads back; it only draws what those
+//! can still see (`super::backlog`).
 
 use glow::HasContext;
-use rust_dos::video::Frame;
-use rust_dos::video::shader::Glsl;
-use rust_dos::voodoo::mirror::{Command, Draw, Fill, Frame as Recording, Pixels, Snapshot, Texture, Vertex};
+use crate::video::Frame;
+use crate::video::shader::Glsl;
+use super::mirror::{Command, Draw, Fill, Frame as Recording, Pixels, Snapshot, Texture, Vertex};
 use std::collections::HashMap;
 
-const TRIANGLE_VERT: &str = include_str!("voodoo/triangle.vert");
-const TRIANGLE_FRAG: &str = include_str!("voodoo/triangle.frag");
-const QUAD_VERT: &str = include_str!("voodoo/quad.vert");
-const PIXELS_FRAG: &str = include_str!("voodoo/pixels.frag");
-const DEPTH_FRAG: &str = include_str!("voodoo/depth.frag");
-const CLUT_FRAG: &str = include_str!("voodoo/clut.frag");
+const TRIANGLE_VERT: &str = include_str!("gl/triangle.vert");
+const TRIANGLE_FRAG: &str = include_str!("gl/triangle.frag");
+const QUAD_VERT: &str = include_str!("gl/quad.vert");
+const PIXELS_FRAG: &str = include_str!("gl/pixels.frag");
+const DEPTH_FRAG: &str = include_str!("gl/depth.frag");
+const CLUT_FRAG: &str = include_str!("gl/clut.frag");
 
 const TRIANGLE_UNIFORMS: &[&str] = &[
     "u_size", "u_fbzcp", "u_fbz", "u_alpha", "u_fog", "u_color0", "u_color1", "u_chroma", "u_zacolor", "u_fogcolor",
     "u_stipple", "u_yorigin", "u_fogblend", "u_fogdelta", "u_scale", "u_units", "u_config", "u_tmode0", "u_tmode1",
-    "u_tsize0", "u_tsize1", "u_tlod0", "u_tlod1", "u_tdetail0", "u_tdetail1",
+    "u_tsize0", "u_tsize1", "u_tlod0", "u_tlod1", "u_tdetail0", "u_tdetail1", "u_constant_depth",
 ];
 const QUAD_UNIFORMS: &[&str] = &["u_rect", "u_size", "u_scale"];
 
@@ -354,7 +355,7 @@ impl VoodooGl {
                     let depth = gl.create_renderbuffer().ok()?;
                     gl.bind_renderbuffer(glow::RENDERBUFFER, Some(depth));
                     let samples = self.samples as i32;
-                    gl.renderbuffer_storage_multisample(glow::RENDERBUFFER, samples, glow::DEPTH_COMPONENT24, w, h);
+                    gl.renderbuffer_storage_multisample(glow::RENDERBUFFER, samples, glow::DEPTH24_STENCIL8, w, h);
                     gl.bind_renderbuffer(glow::RENDERBUFFER, None);
                     return Some(Depth::Samples(depth));
                 }
@@ -362,12 +363,12 @@ impl VoodooGl {
                 gl.tex_image_2d(
                     glow::TEXTURE_2D,
                     0,
-                    glow::DEPTH_COMPONENT24 as i32,
+                    glow::DEPTH24_STENCIL8 as i32,
                     w,
                     h,
                     0,
-                    glow::DEPTH_COMPONENT,
-                    glow::UNSIGNED_INT,
+                    glow::DEPTH_STENCIL,
+                    glow::UNSIGNED_INT_24_8,
                     glow::PixelUnpackData::Slice(None),
                 );
                 Some(Depth::Texture(depth))
@@ -533,6 +534,7 @@ impl VoodooGl {
         let alpha_planes = fbz & (1 << 18) != 0;
         let has_depth = s.aux && !alpha_planes && self.depth.is_some();
         let depth_write = has_depth && fbz & (1 << 10) != 0;
+        let constant_depth = has_depth && depth_test && fbz & (1 << 20) != 0;
         let rgb = fbz & (1 << 9) != 0;
         let (w, h) = self.scaled();
         let scale = self.scale as f32;
@@ -542,6 +544,7 @@ impl VoodooGl {
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target.draw_fbo()));
             gl.viewport(0, 0, w, h);
             self.clip(gl, s.clip);
+            gl.disable(glow::STENCIL_TEST);
             if has_depth && (depth_test || depth_write) {
                 gl.enable(glow::DEPTH_TEST);
                 gl.depth_func(if depth_test { DEPTH_FUNCS[func] } else { glow::ALWAYS });
@@ -629,11 +632,48 @@ impl VoodooGl {
                 units |= 4;
             }
             gl.uniform_1_i32(p.at("u_units"), units);
+            gl.uniform_1_i32(p.at("u_constant_depth"), constant_depth as i32);
 
             gl.bind_vertex_array(Some(self.vao));
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.vbo));
             gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, vertex_bytes(&draw.vertices), glow::STREAM_DRAW);
-            gl.draw_arrays(glow::TRIANGLES, 0, draw.vertices.len() as i32);
+            if constant_depth && depth_write {
+                // The card compares zaColor but stores the interpolated
+                // depth. GL uses gl_FragDepth for both: record which samples
+                // pass with stencil, then write their real depth separately.
+                // Keep overlapping triangles in order, including with MSAA:
+                // each gets its own reference, so the buffer is cleared only
+                // every 255 triangles.
+                gl.enable(glow::STENCIL_TEST);
+                for (n, first) in (0..draw.vertices.len() as i32).step_by(3).enumerate() {
+                    let reference = (n % 255) as i32 + 1;
+                    gl.stencil_mask(0xFF);
+                    if reference == 1 {
+                        gl.clear_stencil(0);
+                        gl.clear(glow::STENCIL_BUFFER_BIT);
+                    }
+                    gl.stencil_func(glow::ALWAYS, reference, 0xFF);
+                    gl.stencil_op(glow::KEEP, glow::KEEP, glow::REPLACE);
+                    gl.depth_func(DEPTH_FUNCS[func]);
+                    gl.depth_mask(false);
+                    gl.color_mask(rgb, rgb, rgb, false);
+                    gl.uniform_1_i32(p.at("u_constant_depth"), 1);
+                    gl.draw_arrays(glow::TRIANGLES, first, 3);
+
+                    gl.stencil_mask(0);
+                    gl.stencil_func(glow::EQUAL, reference, 0xFF);
+                    gl.stencil_op(glow::KEEP, glow::KEEP, glow::KEEP);
+                    gl.depth_func(glow::ALWAYS);
+                    gl.depth_mask(true);
+                    gl.color_mask(false, false, false, false);
+                    gl.uniform_1_i32(p.at("u_constant_depth"), 0);
+                    gl.draw_arrays(glow::TRIANGLES, first, 3);
+                }
+                gl.disable(glow::STENCIL_TEST);
+                gl.stencil_mask(0xFF);
+            } else {
+                gl.draw_arrays(glow::TRIANGLES, 0, draw.vertices.len() as i32);
+            }
             gl.bind_buffer(glow::ARRAY_BUFFER, None);
             gl.active_texture(glow::TEXTURE0);
         }
@@ -805,7 +845,7 @@ fn rgba(key: Option<u32>, value: u16) -> [u8; 4] {
 
 /// The gamma table as 256 RGBA entries a component takes its value from.
 fn lut(clut: &[u32; 33]) -> Vec<u8> {
-    rust_dos::voodoo::gamma_table(clut).iter().flat_map(|&[r, g, b]| [r, g, b, 0xFF]).collect()
+    super::gamma_table(clut).iter().flat_map(|&[r, g, b]| [r, g, b, 0xFF]).collect()
 }
 
 fn vertex_bytes(vertices: &[Vertex]) -> &[u8] {
@@ -821,6 +861,7 @@ fn restore(gl: &glow::Context) {
         gl.bind_framebuffer(glow::FRAMEBUFFER, None);
         gl.disable(glow::BLEND);
         gl.disable(glow::DEPTH_TEST);
+        gl.disable(glow::STENCIL_TEST);
         gl.disable(glow::SCISSOR_TEST);
         gl.color_mask(true, true, true, true);
         gl.depth_mask(true);
@@ -868,10 +909,10 @@ fn target(gl: &glow::Context, (w, h): (i32, i32), samples: u32, depth: Option<De
         }
         match depth {
             Some(Depth::Texture(depth)) => {
-                gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::DEPTH_ATTACHMENT, glow::TEXTURE_2D, Some(depth), 0)
+                gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::DEPTH_STENCIL_ATTACHMENT, glow::TEXTURE_2D, Some(depth), 0)
             }
             Some(Depth::Samples(depth)) => {
-                gl.framebuffer_renderbuffer(glow::FRAMEBUFFER, glow::DEPTH_ATTACHMENT, glow::RENDERBUFFER, Some(depth))
+                gl.framebuffer_renderbuffer(glow::FRAMEBUFFER, glow::DEPTH_STENCIL_ATTACHMENT, glow::RENDERBUFFER, Some(depth))
             }
             None => {}
         }
@@ -945,6 +986,140 @@ fn compile(
 #[cfg(test)]
 mod tests {
     use super::sampling_filters;
+
+    #[test]
+    #[ignore = "requires a desktop OpenGL context"]
+    fn constant_depth_comparison_writes_interpolated_depth() {
+        use super::*;
+        use crate::voodoo::mirror::{DrawState, Layout};
+        let sdl = sdl2::init().unwrap();
+        let video = sdl.video().unwrap();
+        let attrs = video.gl_attr();
+        attrs.set_context_profile(sdl2::video::GLProfile::Core);
+        attrs.set_context_version(3, 3);
+        let window = video.window("Depth regression", 8, 8).opengl().hidden().build().unwrap();
+        let _context = window.gl_create_context().unwrap();
+        // SAFETY: this thread owns the current SDL OpenGL context.
+        let gl = unsafe { glow::Context::from_loader_function(|s| video.gl_get_proc_address(s).cast()) };
+        for samples in [1, 4] {
+            let mut renderer = VoodooGl::new(&gl, Glsl::Gl150, 1, samples, 1).unwrap();
+            let state = DrawState {
+                dest: 0, fbz_color_path: 0, fbz_mode: (1 << 4) | (5 << 5) | (1 << 9) | (1 << 10) | (1 << 20),
+                alpha_mode: 0, fog_mode: 0, za_color: 0, chroma_key: 0,
+                color0: 0, color1: 0, fog_color: 0, stipple: 0, yorigin: 7,
+                clip: None, aux: true, fogblend: [0; 64], fogdelta: [0; 64], send_config: None, tmu: [None; 2],
+            };
+            // Both triangles compare against zero. The second must see
+            // the first's interpolated depth (20000), not its reference (0).
+            let vertices = [(20000.0, [255.0, 0.0, 0.0, 255.0]), (30000.0, [0.0, 255.0, 0.0, 255.0])]
+                .into_iter().flat_map(|(z, color)| {
+                    [[0.0, 0.0], [16.0, 0.0], [0.0, 16.0]].map(|pos| Vertex { pos, color, zw: [z, 0.0], ..Vertex::default() })
+                }).collect();
+            renderer.run(&gl, Recording {
+                commands: vec![
+                    Command::Resync(Box::new(Snapshot {
+                        layout: Layout { width: 8, height: 8, rowpixels: 8, color: vec![0, 64], aux: Some(128) },
+                        color: vec![vec![0; 64]; 2], aux: Some(vec![0xFFFF; 64]),
+                    })),
+                    Command::Draw(Box::new(Draw { state, vertices })),
+                ],
+                front: Some(0), output: true, width: 8, height: 8, clut: [0; 33],
+            });
+            let target = &renderer.targets[&0];
+            target.resolve(&gl, (8, 8));
+            let mut pixel = [0; 4];
+            // SAFETY: the context and framebuffer belong to this thread.
+            unsafe {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target.fbo));
+                gl.read_pixels(2, 2, 1, 1, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(Some(&mut pixel)));
+                assert_eq!(&pixel[..3], &[0, 255, 0], "samples={samples}");
+                if samples == 1 {
+                    let mut depth = [0u8; 4];
+                    gl.read_pixels(2, 2, 1, 1, glow::DEPTH_COMPONENT, glow::FLOAT, glow::PixelPackData::Slice(Some(&mut depth)));
+                    assert!((f32::from_ne_bytes(depth) * 65535.0 - 30000.0).abs() < 1.0);
+                }
+                assert_eq!(gl.get_error(), glow::NO_ERROR);
+            }
+            renderer.destroy(&gl);
+        }
+    }
+
+    /// Replay a saved Glide scene without changing the running game.
+    /// RUST_DOS_VOODOO_STATE selects the state; images go under target/tmp.
+    #[test]
+    #[ignore = "requires a saved Glide scene and a desktop OpenGL context"]
+    fn replay_saved_glide_scene() {
+        use super::*;
+        use crate::cpu::Cpu;
+        use crate::exec::{NoHook, run_batch};
+        use crate::savestate::{machine, slots};
+        use std::{fs, path::PathBuf};
+
+        let path = std::env::var_os("RUST_DOS_VOODOO_STATE").expect("RUST_DOS_VOODOO_STATE");
+        let (header, state) = slots::decode(&fs::read(path).unwrap()).unwrap();
+        let settings = slots::machine_settings(&header.machine, &Default::default());
+        let mut cpu = Cpu::with_memory(PathBuf::from("."), header.memsize);
+        crate::hardware::configure(&mut cpu, &settings, crate::keylayout::Layout::us());
+        machine::load(&mut cpu, &state).unwrap();
+        cpu.bus.voodoo.as_mut().unwrap().set_mirror(true);
+        cpu.bus.voodoo.as_mut().unwrap().set_software_picture(true);
+
+        let sdl = sdl2::init().unwrap();
+        let video = sdl.video().unwrap();
+        let attrs = video.gl_attr();
+        attrs.set_context_profile(sdl2::video::GLProfile::Core);
+        attrs.set_context_version(3, 3);
+        let window = video.window("Glide replay", 640, 480).opengl().hidden().build().unwrap();
+        let _context = window.gl_create_context().unwrap();
+        // SAFETY: this thread owns the current SDL OpenGL context.
+        let gl = unsafe { glow::Context::from_loader_function(|s| video.gl_get_proc_address(s).cast()) };
+        let samples = std::env::var("RUST_DOS_VOODOO_SAMPLES").ok().and_then(|s| s.parse().ok()).unwrap_or(1);
+        let mut renderer = VoodooGl::new(&gl, Glsl::Gl150, 1, samples, 1).unwrap();
+        let save = |name: &str, rgb: &[u8], w, h| {
+            let file = fs::File::create(format!("target/tmp/{name}.png")).unwrap();
+            let mut encoder = png::Encoder::new(file, w, h);
+            encoder.set_color(png::ColorType::Rgb);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.write_header().unwrap().write_image_data(rgb).unwrap();
+        };
+        for frame in 0..60 {
+            if frame != 0 {
+                cpu.bus.start_batch(cpu.bus.clock.icount + 1_600_000);
+                run_batch(&mut cpu, &mut NoHook, false);
+            }
+            let card = cpu.bus.voodoo.as_mut().unwrap();
+            let recording = card.take_mirror().unwrap();
+            let fills: Vec<_> = recording.commands.iter().filter_map(|c| match c {
+                Command::Fill(f) => Some(f), _ => None,
+            }).collect();
+            println!("frame {frame}, front {:?}, commands {}, fills {:?}", recording.front, recording.commands.len(), fills);
+            renderer.run(&gl, recording);
+            if frame % 10 == 0 || frame == 59 {
+                let (w, h) = (card.fbi.width, card.fbi.height);
+                card.frame_buffer();
+                card.prepare_display();
+                let mut reference = vec![0; (w * h * 3) as usize];
+                card.render(&mut reference, w as usize);
+                save(&format!("glide-{frame}-software"), &reference, w, h);
+                let target = &renderer.targets[&renderer.front.unwrap()];
+                target.resolve(&gl, (w as i32, h as i32));
+                let mut rendered = vec![0; reference.len()];
+                // GL's lower row is the card's top row (the shader's convention).
+                unsafe {
+                    gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target.fbo));
+                    gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
+                    gl.read_pixels(0, 0, w as i32, h as i32, glow::RGB, glow::UNSIGNED_BYTE,
+                        glow::PixelPackData::Slice(Some(&mut rendered)));
+                    assert_eq!(gl.get_error(), glow::NO_ERROR);
+                }
+                save(&format!("glide-{frame}-opengl"), &rendered, w, h);
+                let bad = reference.as_chunks::<3>().0.iter().zip(rendered.as_chunks::<3>().0)
+                    .filter(|(a, b)| a.iter().zip(*b).any(|(a, b)| a.abs_diff(*b) > 32)).count();
+                println!("frame {frame}: {bad} pixels differ by more than 32");
+            }
+        }
+        renderer.destroy(&gl);
+    }
 
     #[test]
     fn unfiltered_blends_mip_levels_only_with_supported_anisotropy() {
