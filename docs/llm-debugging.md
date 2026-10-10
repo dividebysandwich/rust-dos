@@ -143,6 +143,15 @@ curl -s "$H/api/log?limit=50&format=text"
 
 - **Start the trace first.** It only records while enabled; it does not
   look back in time.
+- **Trace a stretch of instructions:** `POST /api/trace {"count":5000}`
+  records the next 5000 instructions and stops, so the ring keeps what
+  came right after a breakpoint instead of being overwritten.
+- **Read a long trace in pages:** `GET /api/trace?since=0&limit=2000&format=json`
+  gives the entries after cursor 0, oldest first, and `next`, the cursor
+  for the following page (text replies have it in the `x-trace-next`
+  header). `dropped` counts entries after the cursor that were
+  overwritten before they were read. `/api/trace` without `since` has a
+  `next` too, which pages from there on.
 - **Reading the trace.** Each line is: instruction count, milliseconds since
   start, `CS:IP`, bytes, disassembly, and the registers *before* the
   instruction ran. `HLE INT 21h (AX=4C00)` marks a BIOS/DOS service call

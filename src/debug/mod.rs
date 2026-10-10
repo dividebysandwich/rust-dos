@@ -71,7 +71,9 @@ impl Shared {
 pub enum Reply {
     Json(Value),
     Frame(video::Frame),
-    Trace(Vec<TraceEntry>),
+    /// Trace entries, the cursor to go on from (`TraceQuery::since`) and
+    /// how many entries after the asked-for cursor were overwritten.
+    Trace { entries: Vec<TraceEntry>, next: u64, dropped: u64 },
     Bytes { addr: usize, segoff: Option<(u16, u32)>, data: Vec<u8> },
     Error(u16, String),
 }
@@ -101,6 +103,9 @@ pub struct TraceQuery {
     pub no_bios: bool,
     /// Output format for the HTTP layer (`text` or `json`).
     pub format: Option<String>,
+    /// The entries recorded after this cursor (a `next` of before),
+    /// oldest first, up to `limit`.
+    pub since: Option<u64>,
 }
 
 pub enum Cmd {
@@ -109,7 +114,8 @@ pub enum Cmd {
     Screenshot,
     ScreenText,
     TraceQuery(TraceQuery),
-    TraceControl { enabled: Option<bool>, clear: bool, stream_max: Option<usize> },
+    /// `count`: record that many more instructions, then stop.
+    TraceControl { enabled: Option<bool>, clear: bool, stream_max: Option<usize>, count: Option<u64> },
     /// Turn the port log on or off, empty it or size it (`/api/ports`).
     PortsControl { enabled: Option<bool>, clear: bool, capacity: Option<usize>, ports: Option<(u16, u16)> },
     /// The port log's accesses to ports `from..=to`, reads or writes or
@@ -462,6 +468,8 @@ pub struct DebugHub {
 
     trace: TraceRing,
     trace_enabled: bool,
+    /// Stop recording once the trace's total reaches this.
+    trace_until: Option<u64>,
     trace_stream_max: usize,
     trace_stream_cursor: u64,
     tracing_now: bool,
@@ -550,6 +558,7 @@ impl DebugHub {
             watch_hit: None,
             trace: TraceRing::new(trace_capacity),
             trace_enabled: false,
+            trace_until: None,
             trace_stream_max: 1000,
             trace_stream_cursor: 0,
             tracing_now: false,
@@ -746,6 +755,11 @@ impl DebugHub {
                 bytes,
                 len: len as u8,
             });
+            if self.trace_until.is_some_and(|n| self.trace.total() >= n) {
+                self.trace_until = None;
+                self.trace_enabled = false;
+                self.tracing_now = self.shared.as_ref().is_some_and(|s| s.trace.receiver_count() > 0);
+            }
         }
         false
     }
@@ -1130,9 +1144,14 @@ impl DebugHub {
             }
             Cmd::ScreenText => screen_text(cpu),
             Cmd::TraceQuery(q) => self.trace_query(cpu, q),
-            Cmd::TraceControl { enabled, clear, stream_max } => {
+            Cmd::TraceControl { enabled, clear, stream_max, count } => {
                 if let Some(e) = enabled {
                     self.trace_enabled = e;
+                    self.trace_until = None;
+                }
+                if let Some(n) = count {
+                    self.trace_enabled = true;
+                    self.trace_until = Some(self.trace.total() + n.max(1));
                 }
                 if clear {
                     self.trace.clear();
@@ -1654,6 +1673,8 @@ impl DebugHub {
             "entries": self.trace.len(),
             "capacity": self.trace.capacity(),
             "total_recorded": self.trace.total(),
+            // Where a `count` stops it.
+            "until": self.trace_until,
             "stream_max_per_frame": self.trace_stream_max,
         })
     }
@@ -1681,10 +1702,26 @@ impl DebugHub {
                 && cs_filter.is_none_or(|cs| e.cs == cs)
                 && !(q.no_bios && e.cs >= 0xF000 && !(e.bytes[0] == 0xFE && e.bytes[1] == 0x38))
         };
+        if let Some(since) = q.since {
+            // Oldest first, so the next page goes on where this one ends.
+            let (after, dropped) = self.trace.after(since);
+            let mut next = since.max(self.trace.total() - self.trace.len() as u64);
+            let mut entries = Vec::new();
+            for (n, e) in after {
+                if entries.len() == limit {
+                    break;
+                }
+                next = n;
+                if matches(e) {
+                    entries.push(*e);
+                }
+            }
+            return Reply::Trace { entries, next, dropped };
+        }
         // Newest-first collection so `limit` keeps the most recent entries.
-        let mut out: Vec<TraceEntry> = self.trace.iter().rev().filter(|e| matches(e)).take(limit).copied().collect();
-        out.reverse();
-        Reply::Trace(out)
+        let mut entries: Vec<TraceEntry> = self.trace.iter().rev().filter(|e| matches(e)).take(limit).copied().collect();
+        entries.reverse();
+        Reply::Trace { entries, next: self.trace.total(), dropped: 0 }
     }
 
     fn disasm(&self, cpu: &Cpu, addr: Option<String>, count: usize) -> Reply {
@@ -2180,8 +2217,51 @@ fn net_json(cpu: &Cpu) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{LowInput, keys_for_char, step_over_len};
+    use super::{Cmd, DebugHub, LowInput, Reply, Request, TraceQuery, keys_for_char, step_over_len};
+    use crate::cpu::Cpu;
     use rust_dos::keylayout::Layout;
+    use tokio::sync::oneshot;
+
+    fn handle(cpu: &mut Cpu, hub: &mut DebugHub, cmd: Cmd) -> Reply {
+        let (reply, mut rx) = oneshot::channel();
+        hub.handle(cpu, Request { cmd, reply });
+        rx.try_recv().expect("an answer at once")
+    }
+
+    /// The trace from cursor `since`: the instruction counts, the next
+    /// cursor and the entries dropped.
+    fn page(cpu: &mut Cpu, hub: &mut DebugHub, since: u64, limit: usize) -> (Vec<u64>, u64, u64) {
+        let q = TraceQuery { since: Some(since), limit: Some(limit), ..Default::default() };
+        match handle(cpu, hub, Cmd::TraceQuery(q)) {
+            Reply::Trace { entries, next, dropped } => (entries.iter().map(|e| e.icount).collect(), next, dropped),
+            _ => panic!("not a trace"),
+        }
+    }
+
+    #[test]
+    fn a_trace_with_a_count_records_that_many_and_stops() {
+        let mut cpu = Cpu::new(".".into());
+        cpu.load_shell();
+        let mut hub = DebugHub::new(None, None, 1000);
+        handle(&mut cpu, &mut hub, Cmd::TraceControl { enabled: None, clear: false, stream_max: None, count: Some(50) });
+        // The shell waits for a key at its prompt, a few instructions a
+        // batch.
+        for _ in 0..100 {
+            let hot = hub.begin_batch(&cpu);
+            cpu.bus.start_batch(cpu.bus.clock.icount + 2000);
+            crate::exec::run_batch(&mut cpu, &mut hub, hot);
+            hub.end_batch(&cpu);
+        }
+        assert_eq!(hub.trace.total(), 50);
+        assert!(!hub.trace_enabled && hub.trace_until.is_none());
+        // Paged through: two pages of 30 and 20, then nothing new.
+        let (first, next, dropped) = page(&mut cpu, &mut hub, 0, 30);
+        assert_eq!((first.len(), next, dropped), (30, 30, 0));
+        let (second, next, _) = page(&mut cpu, &mut hub, next, 30);
+        assert_eq!((second.len(), next), (20, 50));
+        assert!(first.last() < second.first(), "oldest first, in order");
+        assert_eq!(page(&mut cpu, &mut hub, next, 30), (vec![], 50, 0));
+    }
 
     /// The scan codes of the keys going down to type `c`.
     fn scans(c: char, layout: &str) -> Vec<u8> {

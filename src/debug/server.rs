@@ -250,19 +250,23 @@ async fn screen_text(State(s): State<AppState>, Query(q): Query<FormatQuery>) ->
 
 async fn trace_get(State(s): State<AppState>, Query(q): Query<TraceQuery>) -> ApiResult {
     let json = q.format.as_deref() == Some("json");
-    let Reply::Trace(entries) = s.call(Cmd::TraceQuery(q), DEFAULT_TIMEOUT).await? else {
+    let Reply::Trace { entries, next, dropped } = s.call(Cmd::TraceQuery(q), DEFAULT_TIMEOUT).await? else {
         return Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, "unexpected reply".into()));
     };
-    let body = tokio::task::spawn_blocking(move || format_trace(&entries, json))
+    let body = tokio::task::spawn_blocking(move || format_trace(&entries, json, next, dropped))
         .await
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(body)
+    let cursor = [
+        (header::HeaderName::from_static("x-trace-next"), next.to_string()),
+        (header::HeaderName::from_static("x-trace-dropped"), dropped.to_string()),
+    ];
+    Ok((cursor, body).into_response())
 }
 
-fn format_trace(entries: &[TraceEntry], json: bool) -> Response {
+fn format_trace(entries: &[TraceEntry], json: bool, next: u64, dropped: u64) -> Response {
     if json {
         let v: Vec<Value> = entries.iter().map(|e| e.to_json()).collect();
-        axum::Json(json!({"count": v.len(), "entries": v})).into_response()
+        axum::Json(json!({"count": v.len(), "next": next, "dropped": dropped, "entries": v})).into_response()
     } else {
         let mut out = String::with_capacity(entries.len() * 160 + 128);
         out.push_str(trace::TEXT_HEADER);
@@ -330,11 +334,14 @@ struct TracePost {
     #[serde(default)]
     clear: bool,
     stream_max: Option<usize>,
+    /// Record this many instructions more, then stop.
+    count: Option<u64>,
 }
 
 async fn trace_post(State(s): State<AppState>, body: Bytes) -> ApiResult {
     let p: TracePost = from_value(parse_body(&body)?)?;
-    s.call_json(Cmd::TraceControl { enabled: p.enabled, clear: p.clear, stream_max: p.stream_max }, DEFAULT_TIMEOUT)
+    let cmd = Cmd::TraceControl { enabled: p.enabled, clear: p.clear, stream_max: p.stream_max, count: p.count };
+    s.call_json(cmd, DEFAULT_TIMEOUT)
         .await
 }
 
@@ -930,7 +937,11 @@ STATUS / SCREEN
 
 TRACE
   POST /api/trace  {"enabled":true, "clear":false, "stream_max":1000}
+                   {"count":5000}: record the next 5000 instructions, then stop
   GET  /api/trace?last_n=200 | ?last_ms=500 | ?from_ms=&to_ms=  [&limit=&cs=&no_bios=true&format=text|json]
+  GET  /api/trace?since=N[&limit=]   the entries recorded after cursor N, oldest first;
+       the reply's next (x-trace-next) is the cursor to go on from, and dropped
+       (x-trace-dropped) counts entries after N overwritten before they were read
        Instruction trace (registers shown are BEFORE execution). Timestamps are
        ms since emulator start, sampled per ~16 ms batch; icount orders exactly.
 

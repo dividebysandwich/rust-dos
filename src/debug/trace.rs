@@ -194,6 +194,16 @@ impl TraceRing {
         v
     }
 
+    /// The entries after the one numbered `seq` (each is numbered by the
+    /// `total()` it made: the first is 1), oldest first and with their
+    /// numbers, and how many of those were overwritten before this.
+    pub fn after(&self, seq: u64) -> (impl Iterator<Item = (u64, &TraceEntry)>, u64) {
+        let oldest = self.total - self.buf.len() as u64 + 1;
+        let overwritten = (oldest - 1).saturating_sub(seq);
+        let entries = (oldest..).zip(self.iter()).skip_while(move |(n, _)| *n <= seq);
+        (entries, overwritten)
+    }
+
     /// Entries pushed after the entry with sequence number `since_total`
     /// (as returned by `total()`), capped to the newest `max`. Also returns
     /// how many matching entries were dropped because of the cap or because
@@ -204,5 +214,48 @@ impl TraceRing {
         let take = available.min(max);
         let dropped = new - take as u64;
         (self.last_n(take), dropped)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TraceEntry, TraceRing};
+
+    fn ring(capacity: usize, pushed: u64) -> TraceRing {
+        let mut ring = TraceRing::new(capacity);
+        for icount in 1..=pushed {
+            ring.push(TraceEntry { icount, ..Default::default() });
+        }
+        ring
+    }
+
+    fn after(ring: &TraceRing, seq: u64) -> (Vec<(u64, u64)>, u64) {
+        let (entries, overwritten) = ring.after(seq);
+        (entries.map(|(n, e)| (n, e.icount)).collect(), overwritten)
+    }
+
+    #[test]
+    fn entries_after_a_cursor_come_numbered_oldest_first() {
+        let ring = ring(4, 3);
+        assert_eq!(after(&ring, 0), (vec![(1, 1), (2, 2), (3, 3)], 0));
+        assert_eq!(after(&ring, 2), (vec![(3, 3)], 0));
+        assert_eq!(after(&ring, 3), (vec![], 0));
+    }
+
+    #[test]
+    fn entries_overwritten_since_the_cursor_are_counted() {
+        // Entries 1 to 6 are gone; 7 to 10 are kept.
+        let ring = ring(4, 10);
+        assert_eq!(after(&ring, 2), (vec![(7, 7), (8, 8), (9, 9), (10, 10)], 4));
+        assert_eq!(after(&ring, 8), (vec![(9, 9), (10, 10)], 0));
+    }
+
+    #[test]
+    fn a_cleared_ring_keeps_its_numbers() {
+        let mut ring = ring(4, 5);
+        ring.clear();
+        assert_eq!(after(&ring, 5), (vec![], 0));
+        ring.push(TraceEntry { icount: 99, ..Default::default() });
+        assert_eq!(after(&ring, 5), (vec![(6, 99)], 0));
     }
 }
