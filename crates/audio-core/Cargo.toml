@@ -1,0 +1,11 @@
+[package]
+name = "rust-dos-audio-core"
+description = "What rust-dos's sound devices share: the mixer's rate, the PIT clock, and filters and effects"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+rust-dos-savestate = { path = "../savestate" }

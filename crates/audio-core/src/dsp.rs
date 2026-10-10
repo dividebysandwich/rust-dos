@@ -7,7 +7,7 @@
 use std::f32::consts::PI;
 
 /// The mixer's sample rate.
-const RATE: f32 = crate::opl::RATE as f32;
+const RATE: f32 = crate::RATE as f32;
 
 /// The resonance of a second-order Butterworth filter, the flattest.
 pub const BUTTERWORTH_Q: f32 = std::f32::consts::FRAC_1_SQRT_2;
@@ -37,6 +37,7 @@ pub struct Biquad {
 impl Biquad {
     /// A low-pass at `cutoff` Hz with resonance `q` (0.707 for
     /// Butterworth).
+    #[inline]
     pub fn lowpass(cutoff: f32, q: f32) -> Self {
         let (cos, alpha) = Self::angle(cutoff, q);
         let b1 = 1.0 - cos;
@@ -44,6 +45,7 @@ impl Biquad {
     }
 
     /// A high-pass at `cutoff` Hz with resonance `q`.
+    #[inline]
     pub fn highpass(cutoff: f32, q: f32) -> Self {
         let (cos, alpha) = Self::angle(cutoff, q);
         let b0 = (1.0 + cos) / 2.0;
@@ -403,8 +405,8 @@ impl Chorus {
 }
 
 // A filter's memory; its coefficients come with the device it is in.
-crate::state_fields!(Biquad { z1, z2 } skip { b0, b1, b2, a1, a2 });
-crate::state_fields!(OnePoleHighpass { x1, y1 } skip { a });
+rust_dos_savestate::state_fields!(Biquad { z1, z2 } skip { b0, b1, b2, a1, a2 });
+rust_dos_savestate::state_fields!(OnePoleHighpass { x1, y1 } skip { a });
 
 
 #[cfg(test)]

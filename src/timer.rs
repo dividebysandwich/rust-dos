@@ -16,7 +16,7 @@ use crate::video::crt::CrtTiming;
 use std::time::Duration;
 use web_time::Instant;
 
-pub const PIT_HZ: u64 = 1_193_182;
+pub use rust_dos_audio_core::PIT_HZ;
 
 /// Emulated milliseconds per host video frame.
 const FRAME: Duration = Duration::from_micros(16_667);

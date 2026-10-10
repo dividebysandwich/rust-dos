@@ -10,7 +10,7 @@
 use nuked_opl3::Opl3Chip;
 
 /// Output sample rate of the mixer, which the chip renders at.
-pub const RATE: u32 = 44_100;
+pub use rust_dos_audio_core::RATE;
 
 pub struct Opl {
     chip: Opl3Chip,

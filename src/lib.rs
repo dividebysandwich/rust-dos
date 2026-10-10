@@ -33,7 +33,7 @@ pub mod dos_files;
 pub mod dosstr;
 pub mod dpmi;
 pub use rust_dos_dma as dma;
-pub mod dsp;
+pub use rust_dos_audio_core::dsp;
 pub mod edit;
 pub mod dynrec;
 pub mod ems;
