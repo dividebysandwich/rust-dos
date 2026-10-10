@@ -723,7 +723,9 @@ mod tests {
         a.send(Command::Disband);
         assert!(wait_for(|| matches!(b.status().lan, LanState::Failed(_))), "{:?}", b.status());
         assert!(b.take_notices().iter().any(|n| n.contains("ended by its host")));
-        assert_eq!((a.status().lan, a.status().roster), (LanState::Off, None));
+        // A sends the disband before it leaves, so B can hear it first.
+        assert!(wait_for(|| a.status().lan == LanState::Off), "{:?}", a.status());
+        assert_eq!(a.status().roster, None);
         b.send(Command::Leave);
         assert!(wait_for(|| b.status().lan == LanState::Off));
     }
