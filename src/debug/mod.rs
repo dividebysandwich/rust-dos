@@ -754,8 +754,8 @@ impl DebugHub {
         // interrupt that comes first.
         if cpu.programs.started != self.seen_starts {
             self.seen_starts = cpu.programs.started;
-            // `run`'s stop is used up by this start even when every start
-            // stops.
+            // This start uses up `run`'s one stop, even when every start
+            // stops anyway.
             let once = std::mem::take(&mut self.start_once);
             if self.break_program_start || once {
                 self.start_breakpoint = Some(cpu.programs.entry);
@@ -1040,8 +1040,8 @@ impl DebugHub {
     fn check_run(&mut self, cpu: &Cpu) {
         let idle = at_idle_prompt(cpu);
         if idle {
-            // No program runs: an entry point not reached (the program
-            // was closed first) is no one's.
+            // No program runs, so drop an entry point it never reached
+            // (it was closed first).
             self.start_breakpoint = None;
         }
         let Some(run) = &self.run_wait else { return };

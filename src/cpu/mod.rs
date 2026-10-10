@@ -469,12 +469,12 @@ pub struct FpuKey {
     pub tags: [u8; 8],
 }
 
-/// The programs DOS started and ended since start, for the debugger to
-/// stop at (`debug::DebugHub`).
+/// Programs DOS started and ended, for the debugger to stop at
+/// (`debug::DebugHub`).
 #[derive(Debug, Clone, Default)]
 pub struct ProgramEvents {
-    /// Programs loaded and about to run, and where the last one starts
-    /// (the physical address of its entry point), its name and its PSP.
+    /// Programs loaded and about to run, and the last one's entry point
+    /// (physical and CS:IP), name and PSP.
     pub started: u64,
     pub entry: usize,
     pub entry_cs_ip: (u16, u16),
