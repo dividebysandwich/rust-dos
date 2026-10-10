@@ -2023,6 +2023,7 @@ dependencies = [
  "smoltcp",
  "symphonia",
  "tokio",
+ "tungstenite",
  "ureq",
  "web-time",
  "windows-sys 0.61.2",

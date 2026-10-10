@@ -1903,6 +1903,9 @@ WEBSOCKETS
 "#;
 
 #[cfg(test)]
+mod http_tests;
+
+#[cfg(test)]
 mod tests {
     use super::{Answer, Cmd, Meta, Reply, Request, Shared, hex_data, json, with_req};
     use std::io::{Read, Write};
