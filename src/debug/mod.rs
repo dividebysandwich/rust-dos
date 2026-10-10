@@ -1160,6 +1160,9 @@ impl DebugHub {
                 if let Some(m) = stream_max {
                     self.trace_stream_max = m.max(1);
                 }
+                // As the next batch will, so the reply's `active` is current.
+                let streaming = self.shared.as_ref().is_some_and(|s| s.trace.receiver_count() > 0);
+                self.tracing_now = self.trace_enabled || streaming;
                 Reply::Json(self.trace_status())
             }
             Cmd::PortsControl { enabled, clear, capacity, ports } => {
@@ -2266,6 +2269,23 @@ mod tests {
         assert_eq!((second.len(), next), (20, 50));
         assert!(first.last() < second.first(), "oldest first, in order");
         assert_eq!(page(&mut cpu, &mut hub, next, 30), (vec![], 50, 0));
+    }
+
+    #[test]
+    fn a_trace_reply_shows_whether_it_records_now() {
+        let mut cpu = Cpu::new(".".into());
+        let mut hub = DebugHub::new(None, None, 1000);
+        let mut control = |enabled, count| {
+            let cmd = Cmd::TraceControl { enabled, clear: false, stream_max: None, count };
+            match handle(&mut cpu, &mut hub, cmd) {
+                Reply::Json(v) => v["active"].as_bool(),
+                _ => panic!("not JSON"),
+            }
+        };
+        assert_eq!(control(Some(true), None), Some(true));
+        assert_eq!(control(None, Some(0)), Some(false));
+        assert_eq!(control(None, Some(10)), Some(true));
+        assert_eq!(control(Some(false), None), Some(false));
     }
 
     #[test]

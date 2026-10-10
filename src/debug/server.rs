@@ -340,8 +340,9 @@ struct TracePost {
 
 async fn trace_post(State(s): State<AppState>, body: Bytes) -> ApiResult {
     let p: TracePost = from_value(parse_body(&body)?)?;
-    if p.enabled == Some(false) && p.count.is_some_and(|n| n > 0) {
-        return Err(ApiError(StatusCode::BAD_REQUEST, "\"enabled\":false contradicts a nonzero \"count\"".into()));
+    // A nonzero count turns the trace on and 0 turns it off.
+    if let Some((e, n)) = p.enabled.zip(p.count).filter(|&(e, n)| e != (n > 0)) {
+        return Err(bad(format!("\"enabled\":{e} contradicts \"count\":{n}")));
     }
     let cmd = Cmd::TraceControl { enabled: p.enabled, clear: p.clear, stream_max: p.stream_max, count: p.count };
     s.call_json(cmd, DEFAULT_TIMEOUT)
