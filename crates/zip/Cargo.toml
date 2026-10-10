@@ -1,0 +1,17 @@
+[package]
+name = "rust-dos-zip"
+description = "A small zip archive reader: the directory, and stored or deflated files read where they are"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+# Zip archives' directories; flate2 inflates their files.
+flate2 = "1"
+zip = { version = "8.6", default-features = false }
+
+[features]
+# `tests::zip`, which writes archives for other crates' tests.
+test-util = []

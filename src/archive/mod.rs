@@ -16,7 +16,7 @@
 pub mod patch;
 mod variants;
 pub use variants::{Entry as VariantEntry, Variants};
-pub mod zip;
+pub use rust_dos_zip as zip;
 #[cfg(feature = "sevenz")]
 pub mod sevenz;
 

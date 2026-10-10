@@ -1923,6 +1923,7 @@ dependencies = [
  "rust-dos-dma",
  "rust-dos-hostdirs",
  "rust-dos-savestate",
+ "rust-dos-zip",
  "rustysynth",
  "sdl2",
  "serde",
@@ -1935,7 +1936,6 @@ dependencies = [
  "ureq",
  "web-time",
  "windows-sys 0.61.2",
- "zip",
 ]
 
 [[package]]
@@ -1962,6 +1962,14 @@ dependencies = [
 [[package]]
 name = "rust-dos-savestate"
 version = "1.5.0"
+
+[[package]]
+name = "rust-dos-zip"
+version = "1.5.0"
+dependencies = [
+ "flate2",
+ "zip",
+]
 
 [[package]]
 name = "rustc-hash"

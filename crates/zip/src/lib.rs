@@ -121,8 +121,8 @@ pub fn read<F: Read + Seek>(file: &mut F, entry: &ZipEntry) -> Result<Vec<u8>, S
     }
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
+#[cfg(any(test, feature = "test-util"))]
+pub mod tests {
     use super::*;
     use flate2::Compression;
     use flate2::write::DeflateEncoder;

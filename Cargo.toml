@@ -43,6 +43,8 @@ rust-dos-savestate = { path = "crates/savestate" }
 rust-dos-dma = { path = "crates/dma" }
 rust-dos-audio-core = { path = "crates/audio-core" }
 rust-dos-hostdirs = { path = "crates/hostdirs" }
+# Zip archives (crates/zip).
+rust-dos-zip = { path = "crates/zip" }
 iced-x86 = "1.21.0"
 font8x8 = "0.3.1"
 chrono = "0.4.45"
@@ -58,8 +60,6 @@ ab_glyph = "0.2"
 flate2 = "1"
 # Checksums of BPS patches (src/archive/patch.rs).
 crc32fast = "1"
-# Zip archives' directories (src/archive/zip.rs); flate2 inflates their files.
-zip = { version = "8.6", default-features = false }
 base64 = "0.23.1"
 # FM synthesis for the AdLib and Sound Blaster (OPL2/OPL3).
 nuked-opl3 = "0.1"
@@ -166,6 +166,8 @@ manuals = ["dep:jpeg-decoder", "dep:hayro"]
 hostmidi = ["dep:midir"]
 
 [dev-dependencies]
+# Writes the zip archives of the tests.
+rust-dos-zip = { path = "crates/zip", features = ["test-util"] }
 # Writes the 7z archives of src/archive's tests.
 sevenz-rust2 = { version = "0.22", default-features = false, features = ["compress"] }
 # Reads the gzip-compressed SingleStepTests suite in tests/sst386.rs.
