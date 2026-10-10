@@ -869,7 +869,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "ab_glyph",
  "base64",
@@ -914,21 +914,21 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-audio-core"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "rust-dos-savestate",
 ]
 
 [[package]]
 name = "rust-dos-dma"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "rust-dos-savestate",
 ]
 
 [[package]]
 name = "rust-dos-gus"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "rust-dos-audio-core",
  "rust-dos-dma",
@@ -939,14 +939,14 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-hostdirs"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "dirs",
 ]
 
 [[package]]
 name = "rust-dos-lpt-dac"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "rust-dos-audio-core",
  "rust-dos-savestate",
@@ -954,7 +954,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-mpu401"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "rust-dos-audio-core",
  "rust-dos-gus",
@@ -965,7 +965,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-mt32"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "libloading",
  "rust-dos-hostdirs",
@@ -973,7 +973,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-opl"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "nuked-opl3",
  "rust-dos-audio-core",
@@ -982,11 +982,11 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-savestate"
-version = "1.5.0"
+version = "1.6.0"
 
 [[package]]
 name = "rust-dos-sc55"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "dirs",
  "rust-dos-hostdirs",
@@ -996,7 +996,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-soundblaster"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "rust-dos-audio-core",
  "rust-dos-dma",
@@ -1009,7 +1009,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-tandy"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "rust-dos-audio-core",
  "rust-dos-savestate",
@@ -1017,7 +1017,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-web"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "console_error_panic_hook",
  "rust-dos",
@@ -1028,7 +1028,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-zip"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "flate2",
  "zip",
