@@ -300,7 +300,7 @@ impl Link {
     }
 
     fn poll_into(&mut self, now: u64, out: &mut Vec<Vec<u8>>, events: &mut Vec<LinkEvent>) {
-        if now.saturating_sub(self.last_heard) >= DEAD_MS && (self.up || self.theirs != 0) {
+        if self.dead_at().is_some_and(|at| now >= at) {
             self.restart(events);
             self.theirs = 0;
             self.hello_due = now;
@@ -359,11 +359,15 @@ impl Link {
         out
     }
 
+    /// When the other end counts as gone. Only an end that was heard from
+    /// can go silent: without one, the HELLOs are all there is to do.
+    fn dead_at(&self) -> Option<u64> {
+        (self.up || self.theirs != 0).then_some(self.last_heard + DEAD_MS)
+    }
+
     /// When `poll` has something to do next.
     pub fn next_due(&self) -> u64 {
-        // Only an end that was heard from can go silent; `poll` checks no
-        // more than that, so without one the HELLOs are all there is to do.
-        let mut due = if self.up || self.theirs != 0 { self.last_heard + DEAD_MS } else { u64::MAX };
+        let mut due = self.dead_at().unwrap_or(u64::MAX);
         if !self.up {
             return due.min(self.hello_due);
         }
