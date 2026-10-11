@@ -642,6 +642,22 @@ struct OpenFile {
     refs: u16,
     /// Opened for an FCB rather than a handle.
     fcb: bool,
+    /// Made by a create call over a file that may have had bytes: they go
+    /// when the program first uses the handle (`DiskController::settle`).
+    empty_on_use: bool,
+}
+
+/// Empty a file a create call opened, which nothing has used yet.
+fn empty_created(open: &OpenFile) {
+    match &open.data {
+        OpenData::Host(file) => {
+            let _ = file.set_len(0);
+        }
+        OpenData::Fat { volume, at, write: true, .. } => {
+            let _ = volume.truncate(*at, 0);
+        }
+        _ => {}
+    }
 }
 
 /// What an open handle reads and writes.
@@ -870,6 +886,7 @@ impl DiskController {
                 mode: 0x02,
                 refs: 0,
                 fcb: false,
+                empty_on_use: false,
             };
             self.open_files.insert(sft, file);
         }
@@ -1810,6 +1827,7 @@ impl DiskController {
     pub fn sft_entry(&self, sft: u16) -> Option<SftEntry> {
         let open = self.open_files.get(&sft)?;
         let size = match &open.data {
+            _ if open.empty_on_use => 0,
             OpenData::Host(file) => file.len().unwrap_or(0),
             OpenData::Memory(data, _) => data.len() as u64,
             OpenData::Image(_, extent, _) => extent.size as u64,
@@ -2188,7 +2206,7 @@ impl DiskController {
     /// reference of whoever opened it.
     fn opened(&mut self, data: OpenData, drive: u8, owner: u16, key: u64, filename: &str, mode: u8) -> OpenFile {
         let path = self.qualify_path(filename).unwrap_or_else(|| filename.to_ascii_uppercase());
-        OpenFile { data, drive, owner, key, path, mode, refs: 1, fcb: false }
+        OpenFile { data, drive, owner, key, path, mode, refs: 1, fcb: false, empty_on_use: false }
     }
 
     /// The lowest unused entry of the file table.
@@ -2347,8 +2365,11 @@ impl DiskController {
         }
     }
 
-    // INT 21h, AH=3Ch: Create File. Opens read/write, creating the file if
-    // missing but never truncating (see int21.rs for why).
+    /// INT 21h, AH=3Ch: Create File. Opens read/write, creating the file
+    /// if missing. A file that was there is emptied as DOS does, but only
+    /// when the program first reads, writes, seeks or closes the handle:
+    /// the old bytes stay on disk until it does, so a crash between the
+    /// create and the write that follows doesn't lose a save.
     pub fn create_file(&mut self, filename: &str, owner: u16) -> Result<u16, u8> {
         if self.device(filename).is_some() {
             return self.open_file(filename, 0x02, owner);
@@ -2356,7 +2377,22 @@ impl DiskController {
         let normalized = filename.replace('/', "\\");
         let (drive, _) = self.split_drive(&normalized).ok_or(0x03)?;
         self.check_writable(drive)?;
-        self.open_or_create(filename, 0x02, owner, true)
+        let sft = self.open_or_create(filename, 0x02, owner, true)?;
+        if let Some(open) = self.open_files.get_mut(&sft) {
+            open.empty_on_use = matches!(open.data, OpenData::Host(_) | OpenData::Fat { write: true, .. });
+        }
+        Ok(sft)
+    }
+
+    /// Empty the file `sft` if a create call left that for its first use.
+    fn settle(&mut self, sft: u16) {
+        if let Some(open) = self.open_files.get_mut(&sft)
+            && open.empty_on_use
+        {
+            open.empty_on_use = false;
+            empty_created(open);
+            self.mark_dirty(sft);
+        }
     }
 
     /// INT 21h, AH=5Bh: create a file that must not exist yet.
@@ -2520,6 +2556,7 @@ impl DiskController {
     /// (INT 21h AH=3Eh): the file closes with the last of them, but the
     /// standard devices stay. False if it isn't open.
     pub fn close_file(&mut self, sft: u16) -> bool {
+        self.settle(sft);
         let Some(open) = self.open_files.get_mut(&sft) else { return false };
         open.refs = open.refs.saturating_sub(1);
         if open.refs == 0 && sft >= FIRST_FILE {
@@ -2562,6 +2599,7 @@ impl DiskController {
 
     // INT 21h, AH=3Fh: Read from File
     pub fn read_file(&mut self, handle: u16, count: usize) -> Result<Vec<u8>, u16> {
+        self.settle(handle);
         self.mark_moved(handle);
         if let Some(open) = self.open_files.get_mut(&handle) {
             let file = match &mut open.data {
@@ -2604,6 +2642,7 @@ impl DiskController {
 
     // INT 21h, AH=40h: Write to File
     pub fn write_file(&mut self, handle: u16, data: &[u8]) -> Result<u16, u8> {
+        self.settle(handle);
         self.mark_dirty(handle);
         if let Some(open) = self.open_files.get_mut(&handle) {
             let file = match &mut open.data {
@@ -2642,6 +2681,7 @@ impl DiskController {
 
     // INT 21h, AH=42h: Seek
     pub fn seek_file(&mut self, handle: u16, offset: i64, origin: u8) -> Result<u64, u16> {
+        self.settle(handle);
         self.mark_moved(handle);
         if let Some(open) = self.open_files.get_mut(&handle) {
             let file = match &mut open.data {
@@ -2676,6 +2716,7 @@ impl DiskController {
     /// disk fills up first. Files that can't be written get 05h. The
     /// handle's position stays where it was.
     pub fn set_file_size(&mut self, handle: u16, size: u64) -> Result<(), u8> {
+        self.settle(handle);
         let open = self.open_files.get(&handle).ok_or(0x06u8)?;
         match &open.data {
             OpenData::Host(file) => {
@@ -3924,6 +3965,45 @@ mod tests {
         let d = disk.find_directory_entry("D:\\*.*", 0, 0x08).unwrap();
         assert_eq!(d.filename, "GAMECD_D.ISK");
         assert_eq!(disk.volume_label(3).unwrap(), "GAMECD_DISK");
+    }
+
+    #[test]
+    fn creating_a_file_that_exists_empties_it_once_the_handle_is_used() {
+        let base = scratch("create_truncates");
+        fs::write(base.join("SAVE.DAT"), b"a long old save").unwrap();
+        fs::write(base.join("KEEP.DAT"), b"kept").unwrap();
+        fs::write(base.join("EMPTY.DAT"), b"old").unwrap();
+        let mut disk = DiskController::new(base.clone());
+
+        // Create, write something shorter, close: only the new bytes.
+        let h = disk.create_file("C:\\SAVE.DAT", PSP).unwrap();
+        assert_eq!(disk.seek_file(h, 0, 2), Ok(0));
+        assert_eq!(disk.write_file(h, b"new"), Ok(3));
+        disk.close_file(h);
+        assert_eq!(fs::read(base.join("SAVE.DAT")).unwrap(), b"new");
+        // Closed at once: empty.
+        let h = disk.create_file("C:\\EMPTY.DAT", PSP).unwrap();
+        disk.close_file(h);
+        assert_eq!(fs::read(base.join("EMPTY.DAT")).unwrap(), b"");
+        // Until the program uses the handle, the old bytes are kept, so a
+        // crash between the create and the write loses nothing.
+        let h = disk.create_file("C:\\KEEP.DAT", PSP).unwrap();
+        assert_eq!(fs::read(base.join("KEEP.DAT")).unwrap(), b"kept");
+        assert_eq!(disk.read_file(h, 10), Ok(Vec::new()));
+        assert_eq!(fs::read(base.join("KEEP.DAT")).unwrap(), b"");
+
+        // The same on a disk image.
+        let blank = DiskImage::from_memory("F.IMA", MemoryImage::new(1_474_560), true, None, false).unwrap();
+        fat::format(&blank, 0, 2880, None).unwrap();
+        let bytes = blank.memory().unwrap().clone();
+        disk.mount_memory_image(0, "DISK1.IMA", bytes, MountOptions::default()).unwrap();
+        let h = disk.create_file("A:\\SAVE.DAT", PSP).unwrap();
+        disk.write_file(h, b"a long old save").unwrap();
+        disk.close_file(h);
+        let h = disk.create_file("A:\\SAVE.DAT", PSP).unwrap();
+        assert_eq!(disk.write_file(h, b"new"), Ok(3));
+        disk.close_file(h);
+        assert!(matches!(disk.file_data("A:\\SAVE.DAT").map(|f| f.read()), Some(Ok(d)) if &d[..] == b"new"));
     }
 
     #[test]

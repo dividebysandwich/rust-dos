@@ -67,7 +67,13 @@ impl DiskController {
         entries.sort_unstable();
         entries.len().save(w);
         for sft in entries {
-            let OpenFile { data, drive, owner, key, path, mode, refs, fcb } = &open_files[&sft];
+            let OpenFile { data, drive, owner, key, path, mode, refs, fcb, empty_on_use } = &open_files[&sft];
+            // A file a create call left to empty on first use is emptied
+            // now: the state has no room to say so, and DOS would have
+            // emptied it at the create.
+            if *empty_on_use {
+                super::empty_created(&open_files[&sft]);
+            }
             let (device, position) = match data {
                 OpenData::Host(file) => (None, (&*file).stream_position().unwrap_or(0)),
                 OpenData::Memory(_, pos) | OpenData::Image(_, _, pos) | OpenData::Fat { pos, .. } => (None, pos.get()),
