@@ -605,6 +605,7 @@ async fn version(State(s): State<AppState>) -> ApiResult {
     Ok(json_ok(&json!({
         "name": "rust-dos",
         "version": env!("CARGO_PKG_VERSION"),
+        "build": rust_dos::build_info::json(),
         "api_version": journal::API_VERSION,
         "instance": s.shared.instance_hex(),
         "features": journal::FEATURES,
@@ -1242,22 +1243,23 @@ struct MemQuery {
 
 async fn mem_get(State(s): State<AppState>, Query(q): Query<MemQuery>) -> ApiResult {
     let len = q.len.unwrap_or(256).min(1 << 20);
+    // An unknown format is refused before the emulator reads anything.
+    let format = q.format.as_deref().unwrap_or("hex");
+    if !matches!(format, "hex" | "json" | "base64" | "raw" | "bin") {
+        return Err(bad(format!("unknown format '{}' (hex, json, base64, raw)", format)));
+    }
     let (Reply::Bytes { addr, segoff, data }, meta) = s.call(Cmd::ReadMem { addr: q.addr, len }, DEFAULT_TIMEOUT).await? else {
         return Err(unexpected());
     };
-    match q.format.as_deref().unwrap_or("hex") {
+    // The JSON formats: the bytes as base64, or as the hex string PUT takes.
+    let json_with = |key: &str, bytes: String| {
+        json_response(StatusCode::OK, json!({"addr": format!("{:05X}", addr), "len": data.len(), key: bytes}), &meta)
+    };
+    match format {
         "hex" => Ok(with_meta(text_response(hexdump(addr, segoff, &data)), &meta)),
-        "base64" => Ok(json_response(
-            StatusCode::OK,
-            json!({
-                "addr": format!("{:05X}", addr),
-                "len": data.len(),
-                "base64": base64::engine::general_purpose::STANDARD.encode(&data),
-            }),
-            &meta,
-        )),
-        "raw" | "bin" => Ok(with_meta(([(header::CONTENT_TYPE, "application/octet-stream")], data).into_response(), &meta)),
-        f => Err(bad(format!("unknown format '{}' (hex, base64, raw)", f))),
+        "base64" => Ok(json_with("base64", base64::engine::general_purpose::STANDARD.encode(&data))),
+        "json" => Ok(json_with("hex", trace::hex_bytes(&data))),
+        _ => Ok(with_meta(([(header::CONTENT_TYPE, "application/octet-stream")], data).into_response(), &meta)),
     }
 }
 
@@ -1821,7 +1823,11 @@ REQUESTS AND THE JOURNAL
                     the server answers itself (journal, ops, log, version,
                     waits with after= or op=, the page and the streams).
   Either header twice is a 400.
-  GET  /api/version                        name, version, api_version, instance, features
+  GET  /api/version                        name, version, build, api_version, instance, features
+                   build: {"commit","commit_short","dirty"}, the git commit the
+                   program was built from and whether a tracked file differed
+                   from it; all null when the build had no git checkout. The
+                   journal's "started" entry has it too.
   GET  /api/journal?after=S[&type=paused,resumed&op=N&cause=N&limit=200&wait=MS&allow_gap=true]
                    the entries after S, oldest first: {"instance","first","last",
                    "state_seq","stop_seq","entries","next","timed_out"}. With
@@ -1917,7 +1923,14 @@ EXECUTION CONTROL
                                                      (a stop before the request is missed:
                                                      use after= or op=)
   GET  /api/registers        PUT /api/registers {"ax":"1234","flags":"0202"}
-  GET  /api/memory?addr=DS:SI&len=256[&format=hex|base64|raw]
+  GET  /api/memory?addr=DS:SI&len=256[&format=hex|json|base64|raw]
+                             hex (the default): a text dump; raw: the bytes;
+                             json: {"addr","len","hex":"41 1F"}; base64:
+                             {"addr","len","base64"}. The JSON formats have
+                             "state_seq"; X-Debug-State-Seq is on all four.
+                             Their "addr" is linear (physical only for a
+                             bare address); write back to the read's addr=.
+                             (features has "memory_json" when json is there)
   PUT  /api/memory {"addr":"B800:0000","hex":"41 1F"}  (or "base64"); replies with
                              the bytes replaced ("old") and read back ("new");
                              "expect":"20 07" writes only if those bytes are there (409)

@@ -358,6 +358,10 @@ fn every_response_has_its_request_number_and_the_client_s_id() {
     assert_eq!(version["api_version"], 1);
     assert_eq!(version["instance"].as_str().map(str::len), Some(16));
     assert!(version["features"].as_array().unwrap().contains(&json!("journal")));
+    assert_eq!(version["build"], rust_dos::build_info::json());
+    for key in ["commit", "commit_short", "dirty"] {
+        assert!(version["build"].get(key).is_some(), "build.{} even when unknown", key);
+    }
     // The client's ID is in the entries its request caused.
     let set = http(rig.addr, "POST", "/api/breakpoints", &[("X-Request-Id", "bp-1")], Some(&json!({"addr": "0100:0000"})));
     let entry = rig.get(&format!("/api/journal?after={}", set.json()["seq"].as_u64().unwrap() - 1)).json()["entries"][0].clone();
@@ -493,6 +497,31 @@ fn a_guarded_write_is_refused_once_the_state_moved() {
         assert!(body.get(key).is_some(), "{} in {}", key, body);
     }
     assert!(rig.get("/api/memory?addr=0200:0000&len=2&format=base64").json()["base64"] == "M0Q=", "unchanged");
+}
+
+#[test]
+fn every_memory_format_has_the_state_seq_and_json_has_the_hex_put_takes() {
+    let rig = Rig::new("mem-formats");
+    rig.post("/api/control/pause", json!({}));
+    assert_eq!(http(rig.addr, "PUT", "/api/memory", &[], Some(&json!({"addr": "0200:0000", "hex": "41 1F"}))).status, 200);
+    let read = rig.get("/api/memory?addr=0200:0000&len=2&format=json");
+    let body = read.json();
+    assert_eq!((body["addr"].as_str(), body["len"].as_u64(), body["hex"].as_str()), (Some("02000"), Some(2), Some("41 1F")), "{}", body);
+    let seq = read.header("x-debug-state-seq").unwrap().to_string();
+    assert_eq!(body["state_seq"].as_u64().map(|s| s.to_string()), Some(seq.clone()));
+    // What it read goes back as it is.
+    let again = http(rig.addr, "PUT", "/api/memory", &[("If-State-Seq", &seq)], Some(&json!({"addr": "0200:0000", "hex": body["hex"]})));
+    assert_eq!(again.status, 200, "{}", again.body);
+    for format in ["hex", "base64", "raw", "json"] {
+        let r = rig.get(&format!("/api/memory?addr=0200:0000&len=2&format={}", format));
+        assert!(r.header("x-debug-state-seq").is_some(), "{}", format);
+        if format == "base64" {
+            assert_eq!(r.json()["state_seq"].as_u64().map(|s| s.to_string()).as_deref(), r.header("x-debug-state-seq"));
+        }
+    }
+    let unknown = rig.get("/api/memory?addr=0&len=2&format=yaml");
+    assert_eq!(unknown.status, 400);
+    assert!(unknown.body.contains("json"), "{}", unknown.body);
 }
 
 #[test]
