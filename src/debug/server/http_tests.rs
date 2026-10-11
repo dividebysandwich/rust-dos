@@ -785,3 +785,247 @@ fn run_answers_once_its_program_started_without_another_entry() {
     let end = op["end"].clone();
     assert_eq!((end["type"].as_str(), end["op"].clone()), (Some("program_started"), started.json()["op"].clone()), "{}", op);
 }
+
+// ----- consistency under load ------------------------------------------------
+
+/// Every operation the journal names, as `/api/ops` tells it (those evicted
+/// left out).
+fn ops_of(rig: &Rig, entries: &[Value]) -> std::collections::BTreeMap<u64, Value> {
+    let mut ids = std::collections::BTreeSet::new();
+    for e in entries {
+        match e["type"].as_str() {
+            Some("resumed") => ids.extend(e["op"].as_u64()),
+            Some("input_queued") => ids.extend(e["cause"].as_u64()),
+            _ => {}
+        }
+    }
+    let mut ops = std::collections::BTreeMap::new();
+    for id in ids {
+        let r = rig.get(&format!("/api/ops/{}", id));
+        match r.status {
+            200 => {
+                ops.insert(id, r.json());
+            }
+            410 => {}
+            _ => panic!("operation {}: {} {}", id, r.status, r.body),
+        }
+    }
+    ops
+}
+
+/// Check that the journal holds together and agrees with the operations:
+/// numbered without gaps, a resume between two stops, every stop the end
+/// of the operation it names and every ended operation's end entry naming
+/// it. Returns the state and stop the journal says the machine is in.
+fn check_journal(entries: &[Value], ops: &std::collections::BTreeMap<u64, Value>) -> (u64, Option<u64>) {
+    for (i, e) in entries.iter().enumerate() {
+        assert_eq!(e["seq"].as_u64(), Some(i as u64 + 1), "gapless and in order: {}", e);
+    }
+    let entry = |seq: &Value| -> &Value { &entries[seq.as_u64().expect("an entry") as usize - 1] };
+    let lists = |e: &Value, op: u64| e["cancelled"].as_array().is_some_and(|c| c.contains(&json!(op)));
+    let (mut stop, mut state_seq) = (None, 0);
+    for e in entries {
+        let seq = e["seq"].as_u64().unwrap();
+        let kind = e["type"].as_str().unwrap();
+        let op = |n: &Value| n.as_u64().and_then(|n| ops.get(&n));
+        match kind {
+            "paused" => {
+                assert!(stop.is_none() || e["reason"] == "load", "two stops with no resume between: {}", e);
+                stop = Some(seq);
+                if let Some(o) = op(&e["op"]) {
+                    assert_eq!((o["state"].as_str(), o["end_seq"].as_u64()), (Some("stopped"), Some(seq)), "{} ended by {}", o, e);
+                }
+                match e["reason"].as_str() {
+                    Some("request") => assert_eq!(e["by"], e["cause"], "{}", e),
+                    Some("startup" | "load") => {}
+                    _ => assert_eq!(e["cause"], e["op"], "{}", e),
+                }
+            }
+            "resumed" => {
+                assert_eq!(e["from_paused"].as_bool(), Some(stop.is_some()), "{}", e);
+                stop = None;
+                assert_eq!(e["cause"], e["op"], "{}", e);
+                if let Some(o) = op(&e["op"]) {
+                    assert_eq!(o["start_seq"].as_u64(), Some(seq), "{}", o);
+                }
+                if let Some(old) = op(&e["supersedes"]) {
+                    assert_eq!((old["state"].as_str(), &old["superseded_by"]), (Some("superseded"), &e["op"]), "{} by {}", old, e);
+                }
+            }
+            "input_queued" => {
+                if let Some(o) = op(&e["cause"]) {
+                    assert_eq!((o["kind"].as_str(), o["start_seq"].as_u64()), (Some("input"), Some(seq)), "{}", o);
+                }
+            }
+            "input_delivered" => {
+                if let Some(o) = op(&e["cause"]) {
+                    assert_eq!((o["state"].as_str(), o["end_seq"].as_u64()), (Some("done"), Some(seq)), "{}", o);
+                }
+            }
+            "input_cleared" | "debugger_reset" | "shutdown" => {
+                for c in e["cancelled"].as_array().unwrap() {
+                    if let Some(o) = op(c) {
+                        assert_eq!((o["state"].as_str(), o["end_seq"].as_u64()), (Some("cancelled"), Some(seq)), "{}", o);
+                    }
+                }
+            }
+            _ => {}
+        }
+        if super::journal::Kind::parse(kind).unwrap().changes_state() {
+            state_seq = seq;
+        }
+    }
+    let mut pending_control = Vec::new();
+    for (&n, o) in ops {
+        let end = &o["end_seq"];
+        match o["state"].as_str().unwrap() {
+            "pending" => {
+                assert!(end.is_null(), "{}", o);
+                if o["kind"] != "input" {
+                    pending_control.push(n);
+                }
+            }
+            "stopped" => assert_eq!((entry(end)["type"].as_str(), entry(end)["op"].as_u64()), (Some("paused"), Some(n)), "{}", o),
+            "done" => {
+                let e = entry(end);
+                let by_input = e["type"] == "input_delivered" && e["cause"].as_u64() == Some(n);
+                let by_start = e["type"] == "program_started" && e["op"].as_u64() == Some(n);
+                assert!(by_input || by_start, "{} ended by {}", o, e);
+            }
+            "superseded" => {
+                let by = o["superseded_by"].as_u64().unwrap();
+                let took = entries.iter().find(|e| e["type"] == "resumed" && e["op"].as_u64() == Some(by)).expect("the resume that took over");
+                assert_eq!(took["supersedes"].as_u64(), Some(n), "{} by {}", o, took);
+            }
+            "cancelled" => assert!(lists(entry(end), n), "{} ended by {}", o, entry(end)),
+            "failed" => assert_eq!((entry(end)["type"].as_str(), entry(end)["cause"].as_u64()), (Some("op_failed"), Some(n)), "{}", o),
+            other => panic!("state {}", other),
+        }
+    }
+    assert!(pending_control.len() <= 1, "control operations pending at once: {:?}", pending_control);
+    (state_seq, stop)
+}
+
+/// A small generator of numbers for the clients' choices.
+struct Rand(u64);
+
+impl Rand {
+    fn below(&mut self, n: u64) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0 % n
+    }
+}
+
+#[test]
+fn many_clients_at_once_leave_a_consistent_journal() {
+    let mut rig = Rig::with("stress", Options { capacity: 1 << 18, ..Options::default() });
+    let cs = rig.at_entry("COUNT.COM");
+    let addr = rig.addr;
+    // A stream from the start, read throughout.
+    let mut socket = ws(addr, "/ws/events?after=0&volatile=false");
+    let streamed = std::thread::spawn(move || {
+        let mut seqs = Vec::new();
+        while let Some(e) = next(&mut socket) {
+            seqs.push(e["seq"].as_u64().expect("an entry"));
+        }
+        seqs
+    });
+    let clients: Vec<_> = (0..16u64)
+        .map(|i| {
+            let cs = cs.clone();
+            std::thread::spawn(move || {
+                let mut rand = Rand(0x9E37_79B9_7F4A_7C15 ^ (i + 1) * 0x1234_5678_9ABC);
+                let mut seen: Vec<(u64, u16, u64)> = Vec::new();
+                let mut last_op = None;
+                for _ in 0..400 {
+                    let action = match rand.below(13) {
+                        7 if last_op.is_none() => 0,
+                        a => a,
+                    };
+                    let r = match action {
+                        0 => http(addr, "POST", "/api/control/resume", &[], Some(&json!({}))),
+                        1 => http(addr, "POST", "/api/control/pause", &[], Some(&json!({}))),
+                        2 => http(addr, "POST", "/api/control/step", &[], Some(&json!({"count": rand.below(20) + 1, "timeout_ms": 2000}))),
+                        3 => http(addr, "POST", "/api/control/step_over", &[], Some(&json!({"timeout_ms": 2000}))),
+                        4 => {
+                            let read = http(addr, "GET", &format!("/api/memory?addr={}:0300&len=2", cs), &[], None);
+                            let seq = read.header("x-debug-state-seq").unwrap().to_string();
+                            let body = json!({"addr": format!("{}:0300", cs), "hex": format!("{:04X}", rand.below(0x10000))});
+                            http(addr, "PUT", "/api/memory", &[("If-State-Seq", &seq)], Some(&body))
+                        }
+                        5 => {
+                            let wait = if rand.below(2) == 0 { "true" } else { "false" };
+                            http(addr, "POST", &format!("/api/input/type?wait={}", wait), &[], Some(&json!({"text": "ab"})))
+                        }
+                        // Now and then, so that some input is delivered.
+                        6 if rand.below(8) == 0 => http(addr, "DELETE", "/api/input", &[], None),
+                        6 => http(addr, "GET", "/api/status", &[], None),
+                        7 => http(addr, "GET", &format!("/api/ops/{}?wait=200", last_op.unwrap_or(0)), &[], None),
+                        8 => {
+                            let last = http(addr, "GET", "/api/status", &[], None).json()["seq"].as_u64().unwrap();
+                            http(addr, "GET", &format!("/api/control/wait?after={}&timeout_ms=200", last.saturating_sub(rand.below(5))), &[], None)
+                        }
+                        9 => http(addr, "GET", "/api/journal?after=0&limit=1&wait=100", &[], None),
+                        10 => http(addr, "POST", "/api/breakpoints", &[], Some(&json!({"addr": format!("{}:0000", cs), "once": rand.below(2) == 0}))),
+                        11 => http(addr, "POST", "/api/control/resume", &[], Some(&json!({"until": format!("{}:0104", cs)}))),
+                        _ => {
+                            let seq = http(addr, "GET", "/api/registers", &[], None).header("x-debug-state-seq").unwrap().to_string();
+                            http(addr, "PUT", "/api/registers", &[("If-State-Seq", &seq)], Some(&json!({"cx": format!("{:04X}", rand.below(0x10000))})))
+                        }
+                    };
+                    let allowed: &[u16] = match action {
+                        2 | 3 => &[200, 504],
+                        4 | 12 => &[200, 409],
+                        5 => &[200, 429],
+                        7 => &[200, 410],
+                        8 => &[200, 410, 504],
+                        _ => &[200],
+                    };
+                    assert!(allowed.contains(&r.status), "action {}: {} {}", action, r.status, r.body);
+                    if let Some(op) = r.json().get("op").and_then(Value::as_u64) {
+                        last_op = Some(op);
+                    }
+                    seen.push((action, r.status, r.header("x-debug-req").unwrap().parse().unwrap()));
+                }
+                seen
+            })
+        })
+        .collect();
+    let deadline = Instant::now() + Duration::from_secs(240);
+    let mut reqs = Vec::new();
+    for client in clients {
+        reqs.extend(client.join().expect("a client failed").into_iter().map(|(_, _, req)| req));
+    }
+    assert!(Instant::now() < deadline, "no client hung");
+    let count = reqs.len();
+    reqs.sort_unstable();
+    reqs.dedup();
+    assert_eq!(reqs.len(), count, "every request has its own number");
+
+    // Settled: paused, the input delivered or cleared.
+    rig.post("/api/control/pause", json!({}));
+    http(addr, "DELETE", "/api/input", &[], None);
+    let entries = rig.journal();
+    let ops = ops_of(&rig, &entries);
+    let (state_seq, stop) = check_journal(&entries, &ops);
+    let status = rig.get("/api/status").json();
+    assert_eq!((status["state_seq"].as_u64(), status["stop"]["seq"].as_u64()), (Some(state_seq), stop), "the journal's state is the machine's");
+    assert!(entries.iter().filter(|e| e["type"] == "paused").count() > 20, "the clients stopped the machine often");
+    let mut states = std::collections::BTreeMap::new();
+    for o in ops.values() {
+        *states.entry(format!("{}/{}", o["kind"].as_str().unwrap(), o["state"].as_str().unwrap())).or_insert(0) += 1;
+    }
+    eprintln!("{:?}", states);
+    // Every way an operation ends came up.
+    for state in ["stopped", "done", "superseded", "cancelled"] {
+        assert!(ops.values().any(|o| o["state"] == state), "no operation {}", state);
+    }
+    eprintln!("{} entries, {} operations kept", entries.len(), ops.len());
+
+    // The stream had every entry once, in order, to the shutdown.
+    rig.quit();
+    let seqs = streamed.join().unwrap();
+    assert_eq!(seqs, (1..=entries.len() as u64 + 1).collect::<Vec<_>>());
+}
