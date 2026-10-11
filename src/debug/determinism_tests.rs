@@ -1386,6 +1386,7 @@ const ABSENT_SECTIONS: &[(&str, &str)] = &[
     ("ET4K", "the ET4000 is a display adapter, as is the ViRGE the machine has"),
     ("IDE", "the IDE channels are a booted system's"),
     ("SHRD", "shared disks are a booted system's"),
+    ("SBHS", "the SB 2.0's and SB Pro's high-speed mode: the machine's AWE32 has none"),
 ];
 
 /// Parts of the save state that the run doesn't change, and why.
