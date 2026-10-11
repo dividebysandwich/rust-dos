@@ -305,6 +305,32 @@ fn setting_the_same_mode_again_keeps_the_programs_range() {
 }
 
 #[test]
+fn the_no_clear_bit_and_vbe_flags_leave_the_mode_the_same() {
+    // AL bit 7 keeps video memory; it sets the same mode.
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    int10(&mut cpu, 0x0013, 0);
+    call(&mut cpu, 0x0000);
+    range(&mut cpu, 0x0007, 0, 319);
+    int10(&mut cpu, 0x0093, 0);
+    assert_eq!(cpu.bus.mouse.max_x, 319);
+
+    // VBE: bit 15 (keep memory) and bit 14 (linear frame buffer) don't
+    // change the mode either. Another VBE mode resets the range.
+    int10(&mut cpu, 0x4F02, 0x0101);
+    range(&mut cpu, 0x0008, 0, 399);
+    int10(&mut cpu, 0x4F02, 0x8101);
+    assert_eq!(cpu.ax(), 0x004F);
+    assert_eq!(cpu.bus.mouse.max_y, 399);
+    int10(&mut cpu, 0x4F02, 0x4101);
+    assert_eq!(cpu.ax(), 0x004F);
+    assert_eq!(cpu.bus.mouse.max_y, 399);
+    int10(&mut cpu, 0x4F02, 0x0103);
+    assert_eq!(cpu.ax(), 0x004F);
+    let m = &cpu.bus.mouse;
+    assert_eq!((m.min_x, m.max_x, m.min_y, m.max_y), (0, 799, 0, 599));
+}
+
+#[test]
 fn a_range_set_after_the_mode_stays() {
     let mut cpu = Cpu::new(PathBuf::from("."));
     call(&mut cpu, 0x0000);

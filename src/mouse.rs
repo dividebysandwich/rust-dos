@@ -303,7 +303,10 @@ impl MouseState {
     /// from before the call) the program's range stays: Dark Sun 2 sets
     /// x 0-319 in mode 13h, sets mode 13h again and draws its cursor at
     /// the driver's x, which a reset to 0-639 would take off the screen.
-    /// CuteMouse and DOSBox reset the range on this call too.
+    /// CuteMouse and DOSBox reset the range on this call too, and with
+    /// that reset Dark Sun 2's cursor leaves the screen. Microsoft's 1986
+    /// programmer's reference only says a mode set hides the cursor and
+    /// picks the virtual screen for the new mode.
     ///
     /// Either way the cursor is hidden (the show/hide counter goes back to
     /// 1), as both drivers do, so a program shows it again in the new mode.
