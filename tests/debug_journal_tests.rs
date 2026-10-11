@@ -45,13 +45,10 @@ impl Drop for Emulator {
     }
 }
 
-#[test]
-fn the_journal_follows_a_session_to_its_shutdown() {
+/// The emulator with `dir`'s `c` folder as C:, and where its debug server
+/// listens.
+fn start(dir: &std::path::Path) -> (Emulator, SocketAddr) {
     let exe = env!("CARGO_BIN_EXE_rust-dos");
-    let dir = std::env::temp_dir().join(format!("rust-dos-journal-bin-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(dir.join("c")).unwrap();
-    std::fs::write(dir.join("c").join("PROBE.COM"), PROBE).unwrap();
     // What the emulator says on stderr, shown if it doesn't come up.
     let stderr_path = dir.join("stderr.txt");
     let mut child = Command::new(exe)
@@ -80,7 +77,16 @@ fn the_journal_follows_a_session_to_its_shutdown() {
         let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
         panic!("the emulator didn't start its debug server within 60 s (exit: {exited:?}); stderr:\n{stderr}");
     };
-    let addr: SocketAddr = at.parse().unwrap();
+    (emulator, at.parse().unwrap())
+}
+
+#[test]
+fn the_journal_follows_a_session_to_its_shutdown() {
+    let dir = std::env::temp_dir().join(format!("rust-dos-journal-bin-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("c")).unwrap();
+    std::fs::write(dir.join("c").join("PROBE.COM"), PROBE).unwrap();
+    let (mut emulator, addr) = start(&dir);
     let get = |path: &str| http(addr, "GET", path, &[], None);
     let post = |path: &str, body: Value| http(addr, "POST", path, &[], Some(body));
 
@@ -144,4 +150,53 @@ fn the_journal_follows_a_session_to_its_shutdown() {
     };
     assert_eq!(code.code(), Some(0));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_strict_match_load_refuses_a_state_whose_folder_changed_since_the_save() {
+    let dir = std::env::temp_dir().join(format!("rust-dos-contents-bin-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("c").join("SAVES")).unwrap();
+    std::fs::write(dir.join("c").join("CONFIG.DAT"), "sound=1").unwrap();
+    let (_emulator, addr) = start(&dir);
+    let get = |path: &str| http(addr, "GET", path, &[], None);
+    let post = |path: &str, body: Value| http(addr, "POST", path, &[], Some(body));
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !get("/api/status").1["program"].as_str().is_some_and(str::is_empty) {
+        assert!(Instant::now() < deadline, "the shell starts");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(post("/api/control/pause", json!({})).0, 200);
+    // The states go beside C:'s folder, out of it.
+    let state = |name: &str| dir.join(name).display().to_string();
+    let (status, saved) = post("/api/state/save", json!({"path": state("a.state"), "strict_match": true}));
+    assert_eq!(status, 200, "{}", saved);
+    let c = &saved["header"]["media"][0];
+    assert_eq!((c["drive"].as_str(), c["files_recorded"].as_u64()), (Some("C"), Some(2)), "{}", saved);
+    let (status, loaded) = post("/api/state/load", json!({"path": state("a.state"), "strict_match": true}));
+    assert_eq!(status, 200, "{}", loaded);
+    assert!(loaded.get("differences").is_none() && loaded.get("unchecked").is_none(), "{}", loaded);
+
+    // A save game written and the configuration changed after the save.
+    std::fs::write(dir.join("c").join("SAVES").join("GAME1.SAV"), "saved game").unwrap();
+    std::fs::write(dir.join("c").join("CONFIG.DAT"), "sound=0").unwrap();
+    let (status, refused) = post("/api/state/load", json!({"path": state("a.state"), "strict_match": true}));
+    assert_eq!((status, refused["loaded"].as_bool()), (409, Some(false)), "{}", refused);
+    let expected = json!([
+        "drive C: file CONFIG.DAT: its contents differ from when it was saved",
+        "drive C: file SAVES/GAME1.SAV: new since the save",
+    ]);
+    assert_eq!(refused["differences"], expected, "{}", refused);
+    // A plain load goes through and lists them.
+    let (status, loaded) = post("/api/state/load", json!({"path": state("a.state")}));
+    assert_eq!((status, &loaded["differences"]), (200, &expected), "{}", loaded);
+
+    // A plain save records no contents: a strict-match load of it says so
+    // and goes through.
+    assert_eq!(post("/api/state/save", json!({"path": state("b.state")})).0, 200);
+    let (status, loaded) = post("/api/state/load", json!({"path": state("b.state"), "strict_match": true}));
+    assert_eq!(status, 200, "{}", loaded);
+    let unchecked = loaded["unchecked"].as_array().unwrap();
+    assert!(unchecked.len() == 1 && unchecked[0].as_str().unwrap().starts_with("drive C: wasn't checked"), "{}", loaded);
+    assert_eq!(post("/api/control/quit", json!({})).0, 200);
 }

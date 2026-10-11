@@ -256,11 +256,32 @@ pub fn list(dir: &Path) -> Vec<(u8, Header, Vec<u8>)> {
 }
 
 /// The header of the slot file at `path`, if there is one: read from the
-/// start of the file, without its state.
+/// start of the file, without its state. A strict-match save's header
+/// lists the files of its folder drives, so it can be long.
 pub fn read_file_header(path: &Path) -> Option<Header> {
-    let mut start = Vec::new();
-    std::fs::File::open(path).ok()?.take(1 << 20).read_to_end(&mut start).ok()?;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut start = vec![0u8; 14];
+    file.read_exact(&mut start).ok()?;
+    let json = u32::from_le_bytes(start[10..14].try_into().unwrap()) as u64;
+    // The JSON, then an empty picture in place of the file's.
+    file.take(json).read_to_end(&mut start).ok()?;
+    start.extend_from_slice(&0u32.to_le_bytes());
     read_header(&start).ok().map(|(header, _, _)| header)
+}
+
+/// `header` as the debug server's replies show it: a folder drive's
+/// `files` (see media.rs), which can be thousands, are left out and
+/// counted in `files_recorded`.
+pub fn reply_header(header: &Header) -> serde_json::Value {
+    let mut value = serde_json::to_value(header).expect("the header is JSON");
+    if let Some(media) = value.get_mut("media").and_then(serde_json::Value::as_array_mut) {
+        for medium in media.iter_mut().filter_map(serde_json::Value::as_object_mut) {
+            if let Some(files) = medium.remove("files") {
+                medium.insert("files_recorded".into(), files.as_array().map_or(0, Vec::len).into());
+            }
+        }
+    }
+    value
 }
 
 /// The contents of the save state file at `path`. A missing file is an

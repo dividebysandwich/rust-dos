@@ -435,8 +435,12 @@ and images the drives were mounted from, and a load mounts them again,
 but not what is in them: what a program wrote since stays written,
 except for a booted system's disks (see "Booted systems" below). A
 strict-match load checks the paths, that the images are there, and the
-size and start of read-only images (see "What counts as the same
-media").
+size and start of read-only images. A strict-match save also records
+what is on the writable drives (each file's size and SHA-256, and each
+writable image's SHA-256), and a load of that state, strict or plain,
+names the files that changed since (see "What counts as the same
+media"). A strict-match load refuses the state then; put the files back
+or load another state.
 
 #### Plain save and load
 
@@ -576,6 +580,39 @@ A strict-match save or load guarantees:
   size and time (`cp -p`, `rsync -t`, an unpacked archive), or a CUE
   track file that appeared after the mount.
 
+- **The files on the writable drives as they were.** A strict-match save
+  reads every file of each writable folder drive and every writable
+  image, and records their sizes and SHA-256 hashes in the state. A load
+  of that state reads them again and compares: a save game written, a
+  configuration changed or a file deleted since the save is a
+  difference, and a strict-match load is refused:
+
+  ```json
+  {
+    "error": "/work/a.state doesn't match this machine; nothing was loaded",
+    "loaded": false,
+    "unchanged": true,
+    "differences": [
+      "drive C: file CONFIG.DAT: its contents differ from when it was saved",
+      "drive C: file SAVES/GAME1.SAV: new since the save"
+    ]
+  }
+  ```
+
+  This reads every file on those drives once, on the save and again on
+  the load, which takes a while for a large game folder, so only
+  strict-match saves record them; plain saves,
+  the window's slots, rewind and the libretro core's states don't. A
+  strict-match load of a state without the record (a plain save's, or
+  one saved by an older rust-dos) goes through, and its reply lists the
+  drives it couldn't check in `unchecked`:
+
+  ```json
+  "unchecked": [
+    "drive C: wasn't checked: the state doesn't record what is on it (saved without strict_match, or by an older rust-dos)"
+  ]
+  ```
+
 #### What counts as the same media
 
 Each mounted drive is compared by its letter (or number, for a disk
@@ -589,16 +626,32 @@ mounted by number) and:
   `read_only` mount's) its size and the SHA-256 of its first 64 KiB.
 
 A writable image changes as the machine writes it (a dynamic VHD grows),
-so its size is recorded but not compared, and its contents aren't
-hashed. Labels and what is in a folder aren't compared. Z: and X:, which
-the machine makes itself, aren't listed.
+so its size is recorded but not compared. When the state was saved with
+a strict match, these are compared as well:
+
+- on a writable folder drive, every file and folder as the drive shows
+  it (under an overlay, the folder below with the overlay's changes), by
+  its path from the drive's root, its size and the SHA-256 of its
+  contents: a file new, gone, of another size or with other contents is
+  named, up to 20 a drive, and the rest are counted;
+- the SHA-256 of each writable image, the whole file, and of a writable
+  image's delta file.
+
+A booted system's disks are left out, as the state keeps a copy of them
+that the load puts back (see "Booted systems"). A state saved on a
+writable drive leaves its own files out (`a.state`, and `a.C.img` and the
+like beside it), but another state file there is a file like any other:
+keep states outside the drives' folders, or the next save to them
+counts as a change. Labels, the files' times
+and read-only folders' contents aren't compared. Z: and X:, which the
+machine makes itself, aren't listed.
 
 #### Replies
 
 A save replies `{"saved": path, "format", "emulator", "header"}` and a load
 `{"loaded": path, "format", "emulator", "header"}`, with `differences`
-after a plain load that found some and `debugger_reset` after a strict-match
-load.
+after a plain load that found some, and `debugger_reset` and `unchecked`
+after a strict-match load.
 
 - `format`: the version of the file's layout.
 - `emulator`: the version of the running rust-dos.
@@ -615,10 +668,17 @@ load.
     `read_only`, and `folder`, `overlay` and `images` where it has them;
     each image has `path`, `size` (null if the file couldn't be read) and,
     if read-only, `head_sha256`. Null in a state saved before media were
-    recorded.
+    recorded. In a strict-match save's state, a writable folder drive has
+    `files_recorded`, the number of files and folders recorded (the list
+    itself stays in the file), a writable image `sha256`, and a writable
+    image's delta file `overlay_sha256` (`none` before the first write
+    made the file).
   - `deterministic`: the start time of the mode's clock, only in a state
     saved with `--deterministic`.
-- `differences`: a sentence for each setting, drive or image that differs.
+- `differences`: a sentence for each setting, drive, image or file that
+  differs.
+- `unchecked`: a sentence for each writable drive whose files a
+  strict-match load couldn't compare, as the state doesn't record them.
 - `debugger_reset`: `breakpoints`, `watchpoints`, `input` (queued input
   events) and `held_keys` count what was cleared; `break_on` lists the
   stops that were on (`exceptions`, `mode_switch`, `program_start`,

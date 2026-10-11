@@ -622,3 +622,72 @@ fn a_load_keeps_the_time_stamps_of_the_devices_open_files() {
     rust_dos::dos_files::flush(&mut cpu.bus);
     assert_eq!(entries(&cpu), saved_entries);
 }
+
+#[test]
+fn a_strict_match_record_names_the_files_a_program_wrote_after_the_save() {
+    use rust_dos::savestate::media::{self, Medium};
+    use rust_dos::savestate::slots;
+    fix_time();
+    let dir = scratch("contents", &[("GAME.EXE", b"the game"), ("CONFIG.DAT", b"sound=1")]);
+    let lower = scratch("contents_lower", &[("LEVEL1.DAT", b"level one")]);
+    let upper = scratch("contents_upper", &[]);
+    let mut cpu = machine_in(&dir);
+    let overlay = rust_dos::disk::MountOptions { overlay: Some(upper.clone()), ..Default::default() };
+    cpu.bus.disk.mount(3, &lower, overlay, false).unwrap();
+    // The state goes on C:, which its record leaves out.
+    let path = dir.join("contents.state");
+    let record = |cpu: &Cpu| {
+        let mut media = media::of(cpu);
+        media::add_contents(cpu, &mut media, &path, |_| true);
+        media
+    };
+    let drive = |media: &[Medium], key: &str| media.iter().find(|m| m.drive == key).cloned().unwrap();
+    let saved = record(&cpu);
+    let names = |m: &Medium| m.files.as_ref().unwrap().iter().map(|f| f.path.clone()).collect::<Vec<_>>();
+    assert_eq!(names(&drive(&saved, "C")), ["CONFIG.DAT", "GAME.EXE"]);
+    assert_eq!(names(&drive(&saved, "D")), ["LEVEL1.DAT"], "D: as it shows its files, through the overlay");
+    assert!(media::differences(&saved, &record(&cpu)).is_empty());
+
+    // The header keeps the record, and the slot file's header reads back
+    // whole.
+    let mut header = slots::header(&cpu, &rust_dos::config::Settings::default(), None);
+    header.media = Some(saved.clone());
+    slots::write_file(&path, &slots::encode(&header, b"picture", &machine::save(&cpu))).unwrap();
+    fs::write(dir.join("contents.C.img"), b"a booted system's disk").unwrap();
+    assert_eq!(slots::read_file_header(&path).unwrap().media.as_deref(), Some(&saved[..]));
+    assert!(media::differences(&saved, &record(&cpu)).is_empty(), "the state's own files aren't on the record");
+    let shown = slots::reply_header(&header);
+    assert_eq!(shown["media"][0]["files_recorded"], 2, "{}", shown);
+    assert!(shown["media"][0].get("files").is_none());
+
+    // The program saves its game, changes its configuration, and writes
+    // over a level on D:, which goes to the overlay's folder.
+    let handle = dos(&mut cpu, 0x3C00, 0, 0, "C:\\SAVE1.SAV").unwrap();
+    dos(&mut cpu, 0x4000, handle, 4, "save").unwrap();
+    dos(&mut cpu, 0x3E00, handle, 0, "").unwrap();
+    let handle = dos(&mut cpu, 0x3D01, 0, 0, "C:\\CONFIG.DAT").unwrap();
+    dos(&mut cpu, 0x4000, handle, 7, "sound=0").unwrap();
+    dos(&mut cpu, 0x3E00, handle, 0, "").unwrap();
+    let handle = dos(&mut cpu, 0x3D01, 0, 0, "D:\\LEVEL1.DAT").unwrap();
+    dos(&mut cpu, 0x4000, handle, 3, "LEV").unwrap();
+    dos(&mut cpu, 0x3E00, handle, 0, "").unwrap();
+    assert_eq!(fs::read(lower.join("LEVEL1.DAT")).unwrap(), b"level one", "the folder below isn't written");
+
+    let d = media::differences(&saved, &record(&cpu));
+    assert_eq!(
+        d,
+        [
+            "drive C: file CONFIG.DAT: its contents differ from when it was saved",
+            "drive C: file SAVE1.SAV: new since the save",
+            "drive D: file LEVEL1.DAT: its contents differ from when it was saved",
+        ]
+    );
+    // A plain save's record has no contents, and a strict-match load of
+    // it says the drives weren't checked.
+    let plain = media::of(&cpu);
+    assert!(plain.iter().all(|m| !media::has_contents(m)));
+    let unchecked = media::unrecorded(&plain, |_| false);
+    assert_eq!(unchecked.len(), 2, "{:?}", unchecked);
+    assert!(unchecked[0].starts_with("drive C: wasn't checked"), "{}", unchecked[0]);
+    assert!(media::unrecorded(&saved, |_| false).is_empty());
+}

@@ -1953,8 +1953,8 @@ SAVE STATES
                    settings, then the machine and its drives (the same
                    memsize only). Breakpoints and watchpoints stay.
                    "differences" lists the hardware settings, drives,
-                   folders, images and deterministic start time that
-                   differed from this machine's, if any. A failed load
+                   folders, images, files and deterministic start time
+                   that differed from this machine's, if any. A failed load
                    (400) changes nothing ("loaded":false, "unchanged":true).
                    Replies have "saved"/"loaded", the state's "header"
                    (with its "media"), "format" and "emulator" (this
@@ -1964,7 +1964,12 @@ SAVE STATES
                    left to type (409 {"error","paused"} otherwise). A load
                    is refused (409, "differences", nothing loaded) unless
                    the state's hardware settings, media and deterministic
-                   start time match this machine's. It clears breakpoints,
+                   start time match this machine's. A strict-match save
+                   records the size and SHA-256 of every file on the
+                   writable drives and of writable images; a load of it
+                   names the files changed since (refused if strict). A
+                   strict-match load of a state without that record lists
+                   the drives in "unchecked". It clears breakpoints,
                    watchpoints, break_on stops, run-to targets, queued
                    input, held keys and an until_ms, cancels the
                    operations under way (409 to their waits), stays
