@@ -60,6 +60,7 @@ and confirm a large one on a quiet machine before relying on it.
 | File | Measures |
 |---|---|
 | `benches/dos.rs` | The built-in DOS's file calls on a host folder: DIR's listing, FindFirst/FindNext over a whole folder, a pattern search, and opening a file three folders deep |
+| `benches/memory.rs` | XMS block moves (function 0Bh) between extended and conventional memory and between blocks, and an EMS move (function 57h) into conventional memory |
 
 ## Adding benchmarks
 
