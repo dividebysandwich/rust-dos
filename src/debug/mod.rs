@@ -4760,6 +4760,96 @@ mod tests {
         assert_eq!(cpu.bus.peek_8(0x2000), 4);
     }
 
+    /// A program that stops the machine every way a program can: it writes
+    /// memory, calls, switches to protected mode and back, then divides by
+    /// zero.
+    const STOPS: [u8; 34] = [
+        0xC7, 0x06, 0x00, 0x02, 0x34, 0x12, // 0100 mov word [0200], 1234
+        0xB8, 0x01, 0x00, // 0106 mov ax, 1
+        0xE8, 0x04, 0x00, // 0109 call 0110
+        0x90, // 010C nop
+        0xEB, 0x02, // 010D jmp 0111
+        0x90, // 010F
+        0xC3, // 0110 ret
+        0x0F, 0x20, 0xC0, // 0111 mov eax, cr0
+        0x0C, 0x01, // 0114 or al, 1
+        0x0F, 0x22, 0xC0, // 0116 mov cr0, eax
+        0x24, 0xFE, // 0119 and al, FE
+        0x0F, 0x22, 0xC0, // 011B mov cr0, eax
+        0x31, 0xC0, 0xF6, 0xF0, // 011E xor ax, ax; div al
+    ];
+
+    /// Start an operation and run until the machine stops: the stop's
+    /// entry, checked against the operation it ended.
+    fn stopped_by(cpu: &mut Cpu, hub: &mut DebugHub, cmd: Cmd, reason: &str) -> Value {
+        let op = started_op(cpu, hub, cmd);
+        for _ in 0..200 {
+            if hub.paused {
+                break;
+            }
+            run(cpu, hub, 1);
+        }
+        assert!(hub.paused, "stopped: {}", reason);
+        let stop = entries_of(hub, "paused").pop().unwrap();
+        assert_eq!(stop["reason"].as_str(), Some(reason), "{}", stop);
+        assert_eq!((stop["op"].as_u64(), stop["cause"].as_u64()), (Some(op), Some(op)), "{}", stop);
+        let ended = op_state(hub, op);
+        assert_eq!((ended.state, ended.end_seq), (OpState::Stopped, stop["seq"].as_u64()), "{}", stop);
+        let (state_seq, stop_seq, _) = journal_state(hub);
+        assert_eq!((Some(state_seq), stop_seq), (stop["seq"].as_u64(), stop["seq"].as_u64()), "the state is the stop's");
+        stop
+    }
+
+    #[test]
+    fn every_stop_names_its_reason_and_ends_its_operation() {
+        let (mut cpu, mut hub) = machine("journal-stops");
+        let dir = std::env::temp_dir().join(format!("rust-dos-debug-journal-stops-{}", std::process::id()));
+        std::fs::write(dir.join("STOPS.COM"), STOPS).unwrap();
+        let entry = stopped_by(&mut cpu, &mut hub, Cmd::Run { command: "STOPS.COM".into(), stop_at_entry: true }, "program_start");
+        let cs = entry["registers"]["cs"].as_str().unwrap().to_string();
+        let at = |stop: &Value| stop["registers"]["ip"].as_str().unwrap().to_string();
+
+        ask(&mut cpu, &mut hub, Cmd::AddWatchpoint { addr: format!("{}:0200", cs), len: 2 }, 0).unwrap();
+        let resume = || Cmd::Resume { until: None, until_ms: None };
+        let stop = stopped_by(&mut cpu, &mut hub, resume(), "watchpoint");
+        assert_eq!(at(&stop), "0106");
+        let stop = stopped_by(&mut cpu, &mut hub, Cmd::Step { count: 1 }, "step");
+        assert_eq!(at(&stop), "0109");
+        // A call is stepped over by running to the instruction after it.
+        let stop = stopped_by(&mut cpu, &mut hub, Cmd::StepOver, "breakpoint");
+        assert_eq!((at(&stop).as_str(), stop["target"].is_string()), ("010C", true), "the call ran through");
+        ask(&mut cpu, &mut hub, Cmd::AddBreakpoint { addr: format!("{}:010D", cs), once: true }, 0).unwrap();
+        let stop = stopped_by(&mut cpu, &mut hub, resume(), "breakpoint");
+        assert_eq!((at(&stop).as_str(), stop["once"].as_bool()), ("010D", Some(true)));
+        let stop = stopped_by(&mut cpu, &mut hub, Cmd::Resume { until: Some(format!("{}:0114", cs)), until_ms: None }, "breakpoint");
+        assert_eq!(at(&stop), "0114");
+        let on = |mode_switch, exceptions, program_exit| Cmd::BreakOn { exceptions, clear_exceptions: None, mode_switch, program_start: None, program_exit };
+        ask(&mut cpu, &mut hub, on(Some(true), None, None), 0).unwrap();
+        stopped_by(&mut cpu, &mut hub, resume(), "mode_switch");
+        ask(&mut cpu, &mut hub, on(Some(false), Some(1), None), 0).unwrap();
+        stopped_by(&mut cpu, &mut hub, resume(), "exception");
+        ask(&mut cpu, &mut hub, Cmd::BreakOn { exceptions: None, clear_exceptions: Some(1), mode_switch: None, program_start: None, program_exit: Some(true) }, 0).unwrap();
+        let stop = stopped_by(&mut cpu, &mut hub, resume(), "program_exit");
+        assert_eq!(stop["exit"]["name"], "STOPS.COM");
+
+        // A pause: by the request, ending the resume it stops.
+        let resumed = started_op(&mut cpu, &mut hub, resume());
+        run(&mut cpu, &mut hub, 2);
+        let (pause, _rx) = hub.request(Cmd::Pause);
+        let by = pause.req;
+        hub.handle(&mut cpu, pause);
+        hub.end_batch(&cpu);
+        let stop = entries_of(&hub, "paused").pop().unwrap();
+        assert_eq!(stop["reason"], "request");
+        assert_eq!((stop["by"].as_u64(), stop["cause"].as_u64(), stop["op"].as_u64()), (Some(by), Some(by), Some(resumed)), "{}", stop);
+        assert_eq!((op_state(&hub, resumed).state, op_state(&hub, resumed).end_seq), (OpState::Stopped, stop["seq"].as_u64()));
+
+        // Deterministic mode starts stopped, by nothing.
+        let (_cpu, hub, _mode) = deterministic_machine("journal-startup");
+        let stop = entries_of(&hub, "paused").pop().unwrap();
+        assert_eq!((stop["reason"].as_str(), &stop["op"], &stop["cause"]), (Some("startup"), &Value::Null, &Value::Null), "{}", stop);
+    }
+
     #[test]
     fn log_lines_name_their_request_and_the_journal_s_entry() {
         let (mut cpu, mut hub) = machine("journal-log");
