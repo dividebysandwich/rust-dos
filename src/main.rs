@@ -39,7 +39,7 @@ use rust_dos::hardware::Hardware;
 use rust_dos::savestate::{self, slots};
 
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version = rust_dos::build_info::VERSION, about, long_about = None)]
 struct Args {
     /// Window scale factor [default: 1, or the config file's scale]
     #[arg(short, long, value_parser = clap::value_parser!(u32).range(1..=16))]
@@ -3213,7 +3213,11 @@ fn load_config(args: &Args) -> Result<config::Config, String> {
 /// Build the CPU with drive C: from `-d`, the config file or the working
 /// directory (in that order), then mount the config's other drives. Opens
 /// the log file.
-fn create_cpu(args: &Args, config: &config::Config, memory_mb: usize) -> Result<Cpu, String> {
+///
+/// The CPU is boxed: it is about 136 KB, and in a debug build every move of
+/// it gets its own copy in the frame of `main` and here. Unboxed, `main`'s
+/// frame was about 630 KB and startup overflowed Windows's 1 MB main thread stack.
+fn create_cpu(args: &Args, config: &config::Config, memory_mb: usize) -> Result<Box<Cpu>, String> {
     use crate::disk::DRIVE_C;
 
     let mut warnings = config.warnings.clone();
@@ -3244,7 +3248,7 @@ fn create_cpu(args: &Args, config: &config::Config, memory_mb: usize) -> Result<
         _ => std::path::PathBuf::from("."),
     };
 
-    let mut cpu = Cpu::with_memory(root_path.clone(), memory_mb);
+    let mut cpu = Box::new(Cpu::with_memory(root_path.clone(), memory_mb));
     cpu.bus.log_file = open_log_file(args.log.as_deref())?;
     cpu.shell_history.set_home(rust_dos::cmdline::default_history_file());
     rust_dos::cmdline::configure(&mut cpu, &config.shell);
