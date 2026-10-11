@@ -1539,6 +1539,7 @@ impl DebugHub {
                 gs: cpu.gs(),
                 eflags: cpu.get_cpu_flags().bits(),
                 code32: cpu.seg_cache(crate::cpu::Seg::CS).attr & crate::cpu::ATTR_DB != 0,
+                pm: cpu.pm(),
                 bytes,
                 len: len as u8,
             });
@@ -3011,10 +3012,8 @@ impl DebugHub {
             let bytes: Vec<u8> = (0..15)
                 .map(|i| start.byte(cpu, at + i).map_or(0xFF, |a| cpu.bus.peek_8(a)))
                 .collect();
-            let (len, text) = if bytes[0] == 0xFE && bytes[1] == 0x38 {
-                (3, format!("HLE INT {:02X}h", bytes[2]))
-            } else if bytes[0] == 0xFE && bytes[1] == 0x39 {
-                (3, format!("HLE service {:02X}h", bytes[2]))
+            let (len, text) = if let Some(name) = trace::trap_name(&bytes, None, cpu.pm()) {
+                (3, name)
             } else {
                 let ip = start.segoff.map_or(at as u32, |(_, off)| off.wrapping_add(at as u32));
                 trace::disasm_one(&bytes, ip, code32)

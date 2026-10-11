@@ -187,10 +187,13 @@ curl -s "$H/api/log?limit=50&format=text"
   instruction ran. `HLE INT 21h (AX=4C00)` marks a BIOS/DOS service call
   handled by the emulator. `AX` tells you which function was called.
   `HLE service 08h` marks one of the emulator's own ROM services, here the
-  BIOS timer handler counting the tick; `/api/disasm` names them the same.
+  BIOS timer handler counting the tick. `HLE far service` lines are the
+  Plug and Play BIOS's and APM's entry points, `HLE DPMI` lines the DPMI
+  host's. `/api/disasm` names them the same.
 - **Filters:**
-  - `no_bios=true` hides code running in the BIOS segment F000, but keeps
-    the `HLE INT` and `HLE service` lines.
+  - `no_bios=true` hides real-mode and virtual-8086 code running in the
+    BIOS segment F000, but keeps the `HLE` lines. Protected-mode code is
+    never hidden, as its CS is a selector.
   - `cs=1000` keeps only one code segment.
   - `last_ms=500`, or `from_ms`/`to_ms`, select a time window.
 - **Log markers to look for:**

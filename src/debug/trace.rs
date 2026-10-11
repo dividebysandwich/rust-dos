@@ -23,6 +23,9 @@ pub struct TraceEntry {
     pub eflags: u32,
     /// The code segment is 32-bit.
     pub code32: bool,
+    /// Protected mode, not virtual-8086 mode: CS holds a selector, and
+    /// `FE 38`/`FE 39` raise #UD instead of running a service.
+    pub pm: bool,
     pub bytes: [u8; 15],
     pub len: u8,
 }
@@ -45,25 +48,18 @@ impl TraceEntry {
 
     /// Whether `no_bios=true` hides this entry: code in the BIOS segment
     /// F000 other than the HLE traps, which stand for the services they run.
+    /// In protected mode CS is a selector, which says nothing about the BIOS.
     pub fn is_bios_code(&self) -> bool {
-        self.cs >= 0xF000 && !(self.bytes[0] == 0xFE && matches!(self.bytes[1], 0x38 | 0x39))
+        !self.pm && self.cs >= 0xF000 && trap_name(&self.bytes, None, false).is_none()
     }
 
     /// Disassemble this entry. Returns (instruction bytes actually used,
-    /// text). HLE traps are shown as what they run, which is far more useful
-    /// than the undefined opcode: `FE 38 xx` as the BIOS/DOS interrupt it
-    /// handles, `FE 39 xx` as the ROM service (the timer tick, 08h, is one),
-    /// named as `/api/disasm` names it.
+    /// text). HLE traps are shown as what they run (`trap_name`), which is
+    /// far more useful than the undefined opcode.
     pub fn disasm(&self) -> (usize, String) {
         let bytes = self.code_bytes();
-        if bytes.len() >= 3 && bytes[0] == 0xFE && bytes[1] == 0x38 {
-            if bytes[2] == crate::shell::SHELL_COMMAND_BOP {
-                return (3, "HLE shell command".to_string());
-            }
-            return (3, format!("HLE INT {:02X}h (AX={:04X})", bytes[2], self.gpr[0] as u16));
-        }
-        if bytes.len() >= 3 && bytes[0] == 0xFE && bytes[1] == 0x39 {
-            return (3, format!("HLE service {:02X}h", bytes[2]));
+        if let Some(name) = trap_name(bytes, Some(self.gpr[0] as u16), self.pm) {
+            return (3, name);
         }
         disasm_one(bytes, self.eip, self.code32)
     }
@@ -130,6 +126,29 @@ pub const TEXT_HEADER: &str =
 
 pub fn hex_bytes(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02X}", b)).collect::<Vec<_>>().join(" ")
+}
+
+/// What the emulator's service trap at the start of `bytes` runs (the
+/// `FE 38..3B vv` kinds of `exec::service_trap`), or None if it holds none.
+/// An interrupt's line gives AX, its function, when `ax` is known. In
+/// protected mode (`pm`) `FE 38` and `FE 39` are the invalid FE /7 opcode
+/// they encode, as `exec::service_trap` runs them only in real and
+/// virtual-8086 mode.
+pub fn trap_name(bytes: &[u8], ax: Option<u16>, pm: bool) -> Option<String> {
+    let &[0xFE, kind @ 0x38..=0x3B, vv, ..] = bytes else {
+        return None;
+    };
+    if pm && kind <= 0x39 {
+        return None;
+    }
+    Some(match (kind, ax) {
+        (0x38, _) if vv == crate::shell::SHELL_COMMAND_BOP => "HLE shell command".to_string(),
+        (0x38, Some(ax)) => format!("HLE INT {vv:02X}h (AX={ax:04X})"),
+        (0x38, None) => format!("HLE INT {vv:02X}h"),
+        (0x39, _) => format!("HLE service {vv:02X}h"),
+        (0x3A, _) => format!("HLE far service {vv:02X}h"),
+        _ => format!("HLE DPMI {vv:02X}h"),
+    })
 }
 
 /// Disassemble one instruction of 16-bit or 32-bit code. Returns (length,
@@ -234,7 +253,7 @@ impl TraceRing {
 
 #[cfg(test)]
 mod tests {
-    use super::{TraceEntry, TraceRing};
+    use super::{TraceEntry, TraceRing, trap_name};
 
     fn ring(capacity: usize, pushed: u64) -> TraceRing {
         let mut ring = TraceRing::new(capacity);
@@ -277,6 +296,23 @@ mod tests {
         // The INT 21h stub, and the timer handler's tick count in the ROM.
         assert_eq!(code(&[0xFE, 0x38, 0x21, 0xCF]).disasm(), (3, "HLE INT 21h (AX=4C00)".to_string()));
         assert_eq!(code(&[0xFE, 0x39, 0x08, 0xCD, 0x1C]).disasm(), (3, "HLE service 08h".to_string()));
+        // The Plug and Play BIOS's entry point, and the DPMI host's.
+        assert_eq!(code(&[0xFE, 0x3A, 0x01, 0xCB]).disasm(), (3, "HLE far service 01h".to_string()));
+        assert_eq!(code(&[0xFE, 0x3B, 0x01, 0x90]).disasm(), (3, "HLE DPMI 01h".to_string()));
+        assert_eq!(trap_name(&[0xFE, 0x38, 0x21], None, false).as_deref(), Some("HLE INT 21h"));
+        assert_eq!(trap_name(&[0xFE, 0x3C, 0x21], None, false), None);
+    }
+
+    #[test]
+    fn fe_38_and_39_in_protected_mode_are_the_invalid_opcode() {
+        // exec::service_trap runs them only in real and virtual-8086 mode;
+        // the far-call and DPMI traps run in protected mode too.
+        let pm = |bytes: &[u8]| TraceEntry { pm: true, ..code(bytes) };
+        assert_eq!(pm(&[0xFE, 0x38, 0x21]).disasm().1, "(bad)");
+        assert_eq!(pm(&[0xFE, 0x39, 0x08]).disasm().1, "(bad)");
+        assert_eq!(pm(&[0xFE, 0x3A, 0x01]).disasm(), (3, "HLE far service 01h".to_string()));
+        assert_eq!(pm(&[0xFE, 0x3B, 0x01]).disasm(), (3, "HLE DPMI 01h".to_string()));
+        assert_eq!(trap_name(&[0xFE, 0x39, 0x08], None, true), None);
     }
 
     #[test]
@@ -284,8 +320,12 @@ mod tests {
         let at = |cs: u16, bytes: &[u8]| TraceEntry { cs, ..code(bytes) };
         assert!(!at(0xF000, &[0xFE, 0x38, 0x21]).is_bios_code());
         assert!(!at(0xF000, &[0xFE, 0x39, 0x08]).is_bios_code());
+        assert!(!at(0xF000, &[0xFE, 0x3A, 0x01]).is_bios_code());
+        assert!(!at(0xF000, &[0xFE, 0x3B, 0x01]).is_bios_code());
         assert!(at(0xF000, &[0xCD, 0x1C]).is_bios_code());
         assert!(!at(0x1000, &[0xCD, 0x1C]).is_bios_code());
+        // A protected-mode selector of F000 or above is no BIOS segment.
+        assert!(!TraceEntry { pm: true, ..at(0xF00F, &[0xCD, 0x1C]) }.is_bios_code());
     }
 
     #[test]
