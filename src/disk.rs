@@ -230,10 +230,12 @@ pub fn short_names<S: AsRef<str>>(names: &[S]) -> Vec<String> {
 /// that time is under `RECENT` old, too close to tell a change made in the
 /// same tick of a coarse clock (2 seconds on FAT) from the read. Folders
 /// that only a backend reaches (the libretro frontend's, a write overlay's
-/// layer) aren't kept: their times aren't known.
+/// layer) aren't kept: their times aren't known. Nor are folders of fewer
+/// than `MIN_ENTRIES` entries, which take no longer to read than to check.
 ///
 /// The listings of the last few searches are kept the same way, for
-/// FindNext (`DiskController::find_directory_entry`).
+/// FindNext (`DiskController::find_directory_entry`), whatever their size:
+/// a listing stats each entry.
 #[derive(Default)]
 struct HostDirCache {
     /// Counts the guest's changes to host files.
@@ -277,6 +279,10 @@ impl HostDirCache {
     /// Searches kept at most: a program walking a tree has one open per
     /// level.
     const MAX_SEARCHES: usize = 8;
+    /// The fewest entries a folder is kept with. Checking a folder's time
+    /// costs a stat, which on Windows takes about as long as reading a
+    /// folder of a dozen entries.
+    const MIN_ENTRIES: usize = 16;
 
     /// The guest created, wrote, deleted or renamed something on a host
     /// drive: every folder is read again.
@@ -299,16 +305,27 @@ impl HostDirCache {
     }
 
     /// The entries of `dir`, kept or from `read`.
-    fn entries(&self, dir: &Path, read: impl FnOnce() -> Vec<(String, String)>) -> Rc<[(String, String)]> {
+    fn entries(&self, dir: &Path, read: impl Fn() -> Vec<(String, String)>) -> Rc<[(String, String)]> {
+        // Small folders are read each time; a first read tells.
+        let mut first = None;
+        if !self.dirs.borrow().contains_key(dir) {
+            let entries = read();
+            if entries.len() < Self::MIN_ENTRIES {
+                return entries.into();
+            }
+            first = Some(entries);
+        }
         let Some(modified) = Self::settled(dir) else {
             self.dirs.borrow_mut().remove(dir);
-            return read().into();
+            return first.unwrap_or_else(read).into();
         };
         let changes = self.changes.get();
         let kept = self.dirs.borrow().get(dir).filter(|k| k.modified == modified && k.changes == changes).map(|k| k.entries.clone());
         if let Some(entries) = kept {
             return entries;
         }
+        // Read after the time was taken, so that a change made in between
+        // shows as a newer time on the next call.
         let entries: Rc<[(String, String)]> = read().into();
         let mut dirs = self.dirs.borrow_mut();
         if dirs.len() >= Self::MAX_DIRS && !dirs.contains_key(dir) {
@@ -4271,11 +4288,19 @@ mod tests {
         options.open(dir).unwrap().set_modified(at).unwrap();
     }
 
+    /// Files enough for a folder's entries to be kept (`MIN_ENTRIES`).
+    fn fill(dir: &Path) {
+        for i in 0..HostDirCache::MIN_ENTRIES {
+            fs::write(dir.join(format!("FILL{:02}.DAT", i)), b"x").unwrap();
+        }
+    }
+
     #[test]
     fn host_folder_entries_are_kept_until_the_folder_changes() {
         let root = scratch("host_dir_cache");
         fs::create_dir(root.join("DATA")).unwrap();
         fs::write(root.join("DATA").join("RGN001.GFF"), b"x").unwrap();
+        fill(&root.join("DATA"));
         age(&root.join("DATA"));
         let disk = DiskController::new(root.clone());
         let data = disk.resolve_path(r"C:\DATA").unwrap();
@@ -4296,9 +4321,12 @@ mod tests {
     fn host_folders_are_read_again_after_the_guest_changes_one() {
         let root = scratch("host_dir_cache_guest");
         fs::write(root.join("OLD.DAT"), b"x").unwrap();
+        fill(&root);
         age(&root);
         let mut disk = DiskController::new(root.clone());
         assert!(disk.is_file(r"C:\OLD.DAT"));
+        let host_root = disk.resolve_path(r"C:\").unwrap();
+        assert!(disk.host_dirs.dirs.borrow().contains_key(&host_root));
 
         // Each change through DOS is seen at once, even where the folder's
         // time comes out the same: set back after each.
@@ -4373,5 +4401,15 @@ mod tests {
         age(&root);
         let found = disk.find_directory_entry(r"C:\*.DAT", 1, 0).unwrap();
         assert_eq!((found.filename.as_str(), found.size), ("C.DAT", 6));
+    }
+
+    #[test]
+    fn small_host_folders_are_read_each_time() {
+        let root = scratch("host_dir_cache_small");
+        fs::write(root.join("GAME.EXE"), b"x").unwrap();
+        age(&root);
+        let disk = DiskController::new(root.clone());
+        assert!(disk.is_file(r"C:\GAME.EXE"));
+        assert!(disk.host_dirs.dirs.borrow().is_empty());
     }
 }
