@@ -14,8 +14,9 @@ pub const DIRTY: Option<bool> = match env!("RUST_DOS_GIT_DIRTY").as_bytes() {
     _ => None,
 };
 
-/// HEAD's hash as `git rev-parse --short` gave it (7 hex digits or more,
-/// as many as the repository needed to make it unique); None with `COMMIT`.
+/// HEAD's hash as `git rev-parse --short` gave it (core.abbrev digits, 7
+/// by default, or more if the repository needed them to make it unique);
+/// None with `COMMIT`.
 pub const COMMIT_SHORT: Option<&str> = nonempty(env!("RUST_DOS_GIT_COMMIT_SHORT"));
 
 /// The commit for people: "1a2b3c4", "1a2b3c4-dirty" or "unknown".
@@ -45,11 +46,11 @@ mod tests {
     fn the_commit_is_a_full_hash_or_unknown() {
         match COMMIT {
             Some(c) => {
-                assert_eq!(c.len(), 40);
+                assert!(matches!(c.len(), 40 | 64), "a SHA-1 or SHA-256 hash: {}", c);
                 assert!(c.bytes().all(|b| b.is_ascii_hexdigit()));
                 assert!(DIRTY.is_some());
                 let short = COMMIT_SHORT.unwrap();
-                assert!(short.len() >= 7 && c.starts_with(short));
+                assert!(!short.is_empty() && c.starts_with(short));
                 let dirty = if DIRTY == Some(true) { "-dirty" } else { "" };
                 assert_eq!(DESCRIBE, format!("{}{}", short, dirty));
             }

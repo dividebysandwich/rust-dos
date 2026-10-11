@@ -39,14 +39,16 @@ fn main() {
 /// Sets RUST_DOS_GIT_COMMIT (the full hash of HEAD), RUST_DOS_GIT_COMMIT_SHORT,
 /// RUST_DOS_GIT_DIRTY ("true" when a tracked file differs from HEAD) and
 /// RUST_DOS_GIT_DESCRIBE ("1a2b3c4" or "1a2b3c4-dirty") for
-/// src/build_info.rs. The first three are empty and the last "unknown" when the source is not a git checkout of its own (a
-/// crate tarball, a copy, a directory inside some other repository) or
-/// git can't be run.
+/// src/build_info.rs. The first three are empty and the last "unknown"
+/// when the source is not a git checkout of its own (a crate tarball, a
+/// copy, a directory inside some other repository) or git can't be run.
 ///
-/// The script reruns when HEAD moves (a commit, a checkout), when the index
-/// changes, and when a file under src/ or crates/ changes. A change there
-/// rebuilds the crate anyway, so watching it costs no extra link, and it
-/// keeps the dirty flag right after an edit that was not staged.
+/// The script reruns when HEAD moves (a commit, a checkout, a reset), when
+/// the index changes, and when a file the program is compiled from changes:
+/// src/, crates/, the files src/ includes (assets/, rust-dos.conf.example),
+/// the Windows resource and the manifests. A change there rebuilds the
+/// crate anyway, so watching it costs no extra link, and it keeps the dirty
+/// flag right after an edit that was not staged.
 fn git_commit() {
     let dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default());
     let (commit, short, dirty) = match git_state(&dir) {
@@ -58,10 +60,25 @@ fn git_commit() {
         }
         None => Default::default(),
     };
-    for path in ["src", "crates", "build.rs"] {
-        println!("cargo::rerun-if-changed={}", path);
+    for path in [
+        "src",
+        "crates",
+        "build.rs",
+        "assets",
+        "rust-dos.conf.example",
+        "packaging/windows",
+        "Cargo.toml",
+        "Cargo.lock",
+    ] {
+        // Only those that exist: cargo reruns the script at every build for
+        // a path that doesn't, and a packaged crate has no crates/.
+        if dir.join(path).exists() {
+            println!("cargo::rerun-if-changed={}", path);
+        }
     }
-    println!("cargo::rerun-if-env-changed=GIT_DIR");
+    for var in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"] {
+        println!("cargo::rerun-if-env-changed={}", var);
+    }
     println!("cargo::rustc-env=RUST_DOS_GIT_COMMIT={}", commit);
     println!("cargo::rustc-env=RUST_DOS_GIT_COMMIT_SHORT={}", short);
     println!("cargo::rustc-env=RUST_DOS_GIT_DIRTY={}", dirty);
@@ -81,15 +98,19 @@ struct GitState {
     /// Whether a tracked file differs from HEAD.
     dirty: bool,
     /// The files whose change means any of the above may have changed:
-    /// HEAD, the branch's ref, the packed refs and the index (those that
-    /// exist: cargo reruns the script at every build for a path that
-    /// doesn't).
+    /// HEAD, HEAD's reflog, the branch's ref, the packed refs and the index
+    /// (those that exist: cargo reruns the script at every build for a path
+    /// that doesn't).
     watch: Vec<PathBuf>,
 }
 
 fn git_state(dir: &Path) -> Option<GitState> {
+    // `--no-optional-locks`: `git status` would otherwise refresh and
+    // rewrite the index, which is watched, so the next build would rerun
+    // the script, and it would take index.lock from under a git command
+    // the user runs at the same time.
     let git = |args: &[&str]| -> Option<String> {
-        let out = Command::new("git").arg("-C").arg(dir).args(args).output().ok()?;
+        let out = Command::new("git").arg("--no-optional-locks").arg("-C").arg(dir).args(args).output().ok()?;
         out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
     };
     // Only this crate's own checkout: a tarball unpacked inside another
@@ -99,18 +120,25 @@ fn git_state(dir: &Path) -> Option<GitState> {
         return None;
     }
     let commit = git(&["rev-parse", "--verify", "HEAD"])?;
-    if commit.len() != 40 || !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
+    // 40 digits for SHA-1, 64 in a SHA-256 repository.
+    if !matches!(commit.len(), 40 | 64) || !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     let short = git(&["rev-parse", "--short", "HEAD"]).filter(|s| commit.starts_with(s.as_str()))?;
     let dirty = !git(&["status", "--porcelain", "--untracked-files=no"])?.is_empty();
     // In a worktree HEAD and the index are in its own git directory, the
     // refs in the common one; `--git-path` knows which. A relative answer
-    // is relative to `dir`.
-    let path = |p: &str| git(&["rev-parse", "--git-path", p]).map(|p| dir.join(p));
-    let mut names = vec!["HEAD".to_string(), "index".to_string(), "packed-refs".to_string()];
-    names.extend(git(&["symbolic-ref", "-q", "HEAD"]));
-    let watch = names.iter().filter_map(|p| path(p)).filter(|p| p.exists()).collect();
+    // is relative to `dir`. logs/HEAD gets a line at every move of HEAD,
+    // also when the branch's ref is only in packed-refs and the move
+    // creates its file.
+    let branch = git(&["symbolic-ref", "-q", "HEAD"]);
+    let mut args = vec!["rev-parse"];
+    for name in ["HEAD", "logs/HEAD", "index", "packed-refs"].into_iter().chain(branch.as_deref()) {
+        args.extend(["--git-path", name]);
+    }
+    let watch = git(&args)
+        .map(|paths| paths.lines().map(|p| dir.join(p)).filter(|p| p.exists()).collect())
+        .unwrap_or_default();
     Some(GitState { commit, short, dirty, watch })
 }
 
