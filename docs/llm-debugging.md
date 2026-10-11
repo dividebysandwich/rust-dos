@@ -196,6 +196,13 @@ curl -s "$H/api/log?limit=50&format=text"
     never hidden, as its CS is a selector.
   - `cs=1000` keeps only one code segment.
   - `last_ms=500`, or `from_ms`/`to_ms`, select a time window.
+  - `last_n=50000` gets the newest 50000 entries, or `limit` of them if
+    `limit` is smaller. Without `last_n` a reply holds up to `limit`
+    entries, 10000 unless given. When `limit` leaves out matching entries,
+    the reply says `"truncated": true` (the `x-trace-truncated` header in
+    text replies); with `since` it means the page stopped before the newest
+    entry. A full ring of 1,000,000 entries is up to about 230 MB as text
+    and 430 MB as JSON.
 - **Log markers to look for:**
   - `[TRIPWIRE]`: execution jumped into the interrupt table, almost always
     through a corrupted far pointer. The emulator then reloads the shell.

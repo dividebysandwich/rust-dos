@@ -211,7 +211,9 @@ pub enum Reply {
     Frame(video::Frame),
     /// Trace entries, the cursor for the next page (`TraceQuery::since`)
     /// and how many entries after the requested cursor were overwritten.
-    Trace { entries: Vec<TraceEntry>, next: u64, dropped: u64 },
+    /// `truncated`: `limit` left out entries the query asked for (with
+    /// `since`, the page stopped before the newest entry).
+    Trace { entries: Vec<TraceEntry>, next: u64, dropped: u64, truncated: bool },
     Bytes { addr: usize, segoff: Option<(u16, u32)>, data: Vec<u8> },
     Error(u16, String),
     /// An error whose body has fields beside its message (`error`).
@@ -3020,8 +3022,13 @@ impl DebugHub {
                 q.to_ms.map_or(u64::MAX, |v| (v * 1000.0) as u64),
             )
         };
-        let limit = q.limit.unwrap_or(10_000);
-        let limit = q.last_n.map_or(limit, |n| n.min(limit));
+        // `last_n` asks for that many, and `limit` caps it only when given.
+        // A page read with `since` holds up to `limit`, 10000 unless given.
+        let limit = match (q.last_n, q.limit) {
+            (Some(n), Some(limit)) => n.min(limit),
+            (Some(n), None) if q.since.is_none() => n,
+            (last_n, limit) => last_n.unwrap_or(usize::MAX).min(limit.unwrap_or(10_000)),
+        };
         let matches = |e: &TraceEntry| {
             e.t_us >= from_us
                 && e.t_us <= to_us
@@ -3037,8 +3044,10 @@ impl DebugHub {
             let (after, dropped) = self.trace.after(since);
             let mut next = since.max(self.trace.total() - self.trace.len() as u64);
             let mut entries = Vec::new();
+            let mut truncated = false;
             for (n, e) in after {
                 if entries.len() == limit {
+                    truncated = true;
                     break;
                 }
                 next = n;
@@ -3046,12 +3055,17 @@ impl DebugHub {
                     entries.push(*e);
                 }
             }
-            return Reply::Trace { entries, next, dropped };
+            return Reply::Trace { entries, next, dropped, truncated };
         }
         // Newest-first collection so `limit` keeps the most recent entries.
-        let mut entries: Vec<TraceEntry> = self.trace.iter().rev().filter(|e| matches(e)).take(limit).copied().collect();
+        // One more than `limit` tells whether `limit` left out entries that
+        // `last_n` (or a window) asked for.
+        let mut entries: Vec<TraceEntry> =
+            self.trace.iter().rev().filter(|e| matches(e)).take(limit.saturating_add(1)).copied().collect();
+        let truncated = entries.len() > limit && q.last_n.is_none_or(|n| n > limit);
+        entries.truncate(limit);
         entries.reverse();
-        Reply::Trace { entries, next: self.trace.total(), dropped: 0 }
+        Reply::Trace { entries, next: self.trace.total(), dropped: 0, truncated }
     }
 
     fn disasm(&self, cpu: &Cpu, addr: Option<String>, count: usize) -> Reply {
@@ -3685,6 +3699,7 @@ mod determinism_tests;
 mod tests {
     use super::journal::{OpLookup, OpState};
     use super::{Answer, Cmd, DebugHub, InputEvent, LowInput, Reply, StateRequest, TraceQuery, keys_for_char, step_over_len};
+    use super::trace::TraceEntry;
     use rust_dos::deterministic::Deterministic;
     use crate::cpu::{Cpu, CpuState};
     use crate::exec::{self, StopReason};
@@ -3713,7 +3728,7 @@ mod tests {
     fn page(cpu: &mut Cpu, hub: &mut DebugHub, since: u64, limit: usize) -> (Vec<u64>, u64, u64) {
         let q = TraceQuery { since: Some(since), limit: Some(limit), ..Default::default() };
         match handle(cpu, hub, Cmd::TraceQuery(q)) {
-            Reply::Trace { entries, next, dropped } => (entries.iter().map(|e| e.icount).collect(), next, dropped),
+            Reply::Trace { entries, next, dropped, .. } => (entries.iter().map(|e| e.icount).collect(), next, dropped),
             _ => panic!("not a trace"),
         }
     }
@@ -3741,6 +3756,36 @@ mod tests {
         assert_eq!((second.len(), next), (20, 50));
         assert!(first.last() < second.first(), "oldest first, in order");
         assert_eq!(page(&mut cpu, &mut hub, next, 30), (vec![], 50, 0));
+    }
+
+    #[test]
+    fn last_n_gets_that_many_entries() {
+        let mut cpu = Cpu::new(".".into());
+        let mut hub = DebugHub::new(None, None, 30_000);
+        for icount in 1..=25_000 {
+            hub.trace.push(TraceEntry { icount, ..Default::default() });
+        }
+        let mut last = |last_n, limit| {
+            let q = TraceQuery { last_n: Some(last_n), limit, ..Default::default() };
+            match handle(&mut cpu, &mut hub, Cmd::TraceQuery(q)) {
+                Reply::Trace { entries, truncated, .. } => (entries.len(), entries.first().map(|e| e.icount), truncated),
+                _ => panic!("not a trace"),
+            }
+        };
+        assert_eq!(last(20_000, None), (20_000, Some(5_001), false));
+        assert_eq!(last(20_000, Some(100)), (100, Some(24_901), true));
+        assert_eq!(last(50, None), (50, Some(24_951), false));
+        // More than the ring holds: all of it, and nothing left out.
+        assert_eq!(last(30_000, None), (25_000, Some(1), false));
+        // Without `last_n`, and in a page read with `since`, `limit` is
+        // 10000 unless given, and the reply says it left entries out.
+        let mut count = |q| match handle(&mut cpu, &mut hub, Cmd::TraceQuery(q)) {
+            Reply::Trace { entries, truncated, .. } => (entries.len(), truncated),
+            _ => panic!("not a trace"),
+        };
+        assert_eq!(count(TraceQuery::default()), (10_000, true));
+        assert_eq!(count(TraceQuery { since: Some(0), last_n: Some(20_000), ..Default::default() }), (10_000, true));
+        assert_eq!(count(TraceQuery { since: Some(20_000), ..Default::default() }), (5_000, false));
     }
 
     #[test]
