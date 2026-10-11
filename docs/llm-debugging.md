@@ -246,8 +246,9 @@ Set the breakpoint before triggering the code path, then wait for it:
 
 ```sh
 curl -s $J -XPOST -d '{"addr":"1000:010B"}' $H/api/breakpoints
+S=$(curl -s $H/api/status | jq .seq)            # the journal's last entry
 curl -s $J -XPOST -d '{"key":"q"}' "$H/api/input/key?wait=false"
-curl -s "$H/api/control/wait?timeout_ms=10000"   # returns registers when the breakpoint hits
+curl -s "$H/api/control/wait?after=$S&timeout_ms=10000"   # the first stop after it, with the registers
 curl -s "$H/api/disasm?count=10"                 # "=>" marks CS:IP, "*" marks breakpoints
 curl -s "$H/api/memory?addr=DS:SI&len=64"
 curl -s $J -XPOST -d '{"count":5}' $H/api/control/step
@@ -258,13 +259,20 @@ curl -s -XPOST $H/api/control/resume
 - **Why `wait=false`:** use it for input that should trigger a breakpoint.
   Otherwise the input call can block until it times out, because the
   emulator stops at the breakpoint before all of the input is delivered.
+- **Why `after=`:** `/api/control/wait` without it answers with the stop
+  the machine is in, or the next one, so a stop that came before the wait
+  arrived is missed while the machine runs on. With `after=S` it answers
+  with the first stop after journal entry S, at once if there is one. See
+  "The journal" below.
+- **A breakpoint for one stop:** `{"addr":"1000:010B","once":true}` goes
+  once it stops the machine. The stop has `"breakpoint"` and `"once":true`.
 - **Run to an address:** `POST /api/control/resume {"until":"1000:0120"}`
   runs to that address once, without adding a permanent breakpoint.
 - **Step over:** `POST /api/control/step_over` runs a `CALL`, `INT`, `LOOP`
   or `REP` string instruction through to the instruction after it, and
   steps any other instruction. It replies when the machine stops there; a
-  call that never returns times the request out and leaves the machine
-  running.
+  call that never returns times the request out (504, with the `op` to go
+  on waiting on) and leaves the machine running.
 - **Stepping and interrupts:** a hardware interrupt that is due is taken
   before the next instruction. A step can then run the emulator's handler
   (an `FE 38` trap, which returns at once) and report the same CS:IP.
@@ -278,6 +286,80 @@ curl -s -XPOST $H/api/control/resume
 - **If a wait times out,** the breakpoint wasn't hit. Check
   `/api/breakpoints` and `/api/status`, and whether the program was loaded
   at a different segment.
+
+### The journal: what happened, in order
+
+The debug server keeps a numbered record of what the machine and the
+debugger did: every stop, resume, program start and end, input delivered,
+memory and register write, breakpoint change, mount, save and load, speed
+change and the shutdown. A script, a test harness or an agent reads it to
+tie a stop to the request that caused it, to catch stops that came before
+it asked, and to go on after a dropped connection.
+
+```sh
+curl -s "$H/api/journal?after=0&limit=50"
+curl -s "$H/api/journal?after=$S&type=paused&wait=30000"   # long poll for the next stop
+```
+
+- **Entries** have `seq` (1, 2, 3 ... with no gaps), `type`, `t_ms` (host
+  time since start), `icount`, `emu_ns` (emulated time), `cause` (the
+  request that did it, null for the machine or the window), `request_id`
+  (that request's `X-Request-Id`) and `op` (the control request under way),
+  then their own fields. A `paused` entry has what the stop's reply has:
+  `reason`, `registers`, `cs_ip`, `breakpoint`, `watch`, `program`, `exit`
+  and so on. `/api` lists the types.
+- **Requests have numbers.** Every response has `X-Debug-Req`, and JSON
+  object bodies `"req"`. Send `X-Request-Id: <your label>` (up to 128
+  printable ASCII characters) to find your requests' entries by it. Answers
+  from the machine have `state_seq` (the last entry that changed the
+  machine), `stop_seq` (the stop it is in, or null), and, when the request
+  appended entries, `seq`.
+- **Operations.** `resume`, `step`, `step_over`, `run`, `reboot`,
+  `reboot_shell` and input requests start an operation named by the
+  request's number (`"op"` in the reply). `GET /api/ops/N?wait=30000` tells
+  how it ended: `stopped` (with the stop), `done` (input delivered, or a
+  `run` whose program started), `failed`, `superseded` (another control
+  request took over, `superseded_by`; a superseded `run` no longer stops
+  at its program's entry) or `cancelled`. `step`, `step_over`
+  and `run` wait for their operation, unless the body has `"wait":false`
+  (then 202 with `op`). `GET /api/control/wait?op=N` waits for one too.
+  The latest 1024 ended operations are kept, an older one reads as 410;
+  one still pending is kept until it ends. With 1024 input requests still
+  being typed, the next is refused with 429.
+- **Who stopped it:** a stop by `POST /api/control/pause` has `by`, the
+  pause's number, so a client whose resume another client ended can tell.
+- **Change only what you read.** `If-State-Seq: N` on a request (or
+  `"if_state_seq":N` in a `/ws/input` message) carries it out only while
+  the machine is still paused in the state of entry N: no entry since then
+  changed it, no operation is under way, no input is being typed, the
+  settings window is closed and Alt+F11 isn't rewinding. Otherwise the reply is 409 with
+  `"precondition":"state"`. Read with `GET /api/memory` (its
+  `X-Debug-State-Seq`), then write with `If-State-Seq`; the write's reply
+  has the new `state_seq` for the next one. Every refused precondition
+  (deterministic mode's `paused`, strict match's `quiescent`, `state`) has
+  the same body: `error`, `precondition`, `paused`, `stop_seq`,
+  `state_seq`, `pending_ops`, `input_queued` and `settings_window`.
+- **Streams that go on.** `ws://$H/ws/events?after=S` sends the entries
+  after S, then new ones as they come, with no gap and no repeat; reconnect
+  with the last `seq` seen. Log lines and video mode changes come too
+  unless `volatile=false` (`log_after=N` replays the log lines after line
+  N). If entries after S were dropped from the ring (it keeps 4096), the
+  first message is `{"type":"gone","first":F}`, and `/api/journal` answers
+  410 unless `allow_gap=true`. So does `GET /api/control/wait?after=S`,
+  whose stop may be among them. An `after` past the last entry is a 400
+  with `last` and `instance`: it is a cursor from another instance.
+- **Headers once.** `X-Request-Id` or `If-State-Seq` sent twice is a 400.
+  `If-State-Seq` on a request the server answers itself (the journal,
+  `/api/ops`, `/api/log`, `/api/version`, waits with `after` or `op`, the
+  page and the streams) is a 400 too.
+- **Log lines** in `/api/log` have `n` (their number; `after_n=N&wait=MS`
+  pages and long-polls from there), `at` (the journal's last entry then)
+  and `cause`.
+- **Instance:** `/api/version` has `instance`, which is new at every
+  start. A journal from another instance numbers its entries anew.
+- **Quit:** `POST /api/control/quit` turns the emulator off. The journal
+  ends with `shutdown`, which long polls and streams get before the
+  connection closes, and the process exits with code 0.
 
 ### Inspect or patch state
 
@@ -449,9 +531,13 @@ A strict-match save or load guarantees:
 - **A fresh debugger.** A load that goes through clears the breakpoints,
   watchpoints and `break_on` stops, the target of a step-over or of
   `resume {"until":...}`, and queued input, and drops a `resume`'s
-  `until_ms` in deterministic mode. Requests still waiting on any of it
-  (`/api/control/wait`, input sent with `wait`) get 409 with
-  `{"error":"a save state was loaded"}`. Keys held down through
+  `until_ms` in deterministic mode. The operations under way (a `run`
+  waiting for its program, queued input) are cancelled, and requests still
+  waiting on any of it (`/api/control/wait`, input sent with `wait`) get
+  409 with `{"error":"a save state was loaded"}`. The journal has
+  `state_loaded`, then `debugger_reset` with what was cleared and the
+  operations cancelled, then a `paused` entry with `"reason":"load"` and
+  the loaded machine's registers. Keys held down through
   `/api/input` or the window are forgotten without a key-up, so the
   machine keeps the keys and mouse buttons it was saved with. The machine
   stays paused. The reply's `debugger_reset` says what was cleared; set
@@ -565,8 +651,8 @@ emulated time, however fast the host is.
 SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
   ./target/release/rust-dos --no-config -d /path/to/game --debug-server \
   --deterministic --cycles 10000 --start-time "1995-04-11 12:34:56" &
-curl -s $J -XPOST -d '{"until_ms":5000}' $H/api/control/resume
-curl -s "$H/api/control/wait?timeout_ms=600000"      # "reason":"time"
+OP=$(curl -s $J -XPOST -d '{"until_ms":5000}' $H/api/control/resume | jq .op)
+curl -s "$H/api/control/wait?op=$OP&timeout_ms=600000"   # "reason":"time"
 curl -s $J -XPOST -d '{"key":"enter"}' "$H/api/input/key?wait=false"
 curl -s $J -XPOST -d '{"until_ms":8000}' $H/api/control/resume
 ```
@@ -590,7 +676,10 @@ curl -s $J -XPOST -d '{"until_ms":8000}' $H/api/control/resume
   open, which takes its input at once (HTTP 409 otherwise). Input is delivered at fixed points in emulated time, every 10
   ms, from the time the machine resumes: one scan code per point, and
   `wait` and `hold_ms` count emulated milliseconds. While the machine is
-  paused the reply comes at once, as if `?wait=false` had been passed.
+  paused the reply comes at once, with `"held":true`, as if `?wait=false`
+  had been passed; `/api/ops/N` (N is the reply's `op`) is `done` once the
+  input was delivered. Two runs with the same input and stops give the
+  same journal, but for `t_ms`.
 - **Stopping at a time:** `resume {"until_ms":N}` pauses when emulated time
   reaches N ms since power-on, with `"reason":"time"`. Compare runs there:
   `/api/status` has `icount` and `activity.emulated_ns`, and
@@ -832,7 +921,8 @@ address mapped to when it was set.
   program, so query soon after reproducing a problem.
 - **Streams are for tools, not agents.** `/ws/trace` sends about 7 MB/s and
   `/ws/screen` sends PNGs. Don't pipe them into your context. Prefer HTTP
-  polling, or `/ws/events` for pause, log, and video-mode notifications.
+  polling, `/api/journal?wait=` long polls, or `/ws/events` for the
+  journal's entries, log lines and video-mode changes.
 - **Emulator gaps.** Many DOS features are incomplete; see the README. When a
   program misbehaves, the emulator is the likelier culprit. The trace plus
   the log usually shows which interrupt function or port is missing.

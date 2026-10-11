@@ -428,14 +428,14 @@ fn main() -> Result<(), String> {
         drives: mounted_drives(&cpu),
     };
     let mut dbg = match args.debug_server {
-        Some(addr) => debug::DebugHub::start(&mut cpu, addr, args.trace_capacity)?,
+        Some(addr) => debug::DebugHub::start(&mut cpu, addr, args.trace_capacity, det.as_ref().map(|mode| mode.start))?,
         None => debug::DebugHub::disabled(),
     };
     if let Some(mode) = &det {
         dbg.deterministic = Some(mode.start);
         // A client sends its input before anything runs.
         if args.debug_server.is_some() {
-            dbg.pause_at_start();
+            dbg.pause_at_start(&cpu);
         }
         cpu.bus.log_string(&format!(
             "[DETERMINISTIC] Clock from {}, {} cycles",
@@ -680,6 +680,11 @@ fn main() -> Result<(), String> {
         osd.show(note.trim_start_matches("[VR] ").to_string());
     }
 
+    // Why the loop ended, for the debug server's journal, and the speed
+    // the journal told last.
+    let mut shutdown = debug::ShutdownReason::Window;
+    let mut told_cycles = settings.cycles;
+
     // Main Loop
     'running: loop {
         // What the VR headset's thread has to say.
@@ -695,6 +700,10 @@ fn main() -> Result<(), String> {
         if let Some((start, times)) = last_frame {
             stats.record(&cpu.bus, rust_dos::stats::FrameTimes { wall: frame_start - start, ..times });
         }
+        // Whether the window's keyboard or mouse reached the machine this
+        // frame, which the debug server's journal tells while it holds it.
+        let mouse_before = (cpu.bus.mouse.x, cpu.bus.mouse.y, cpu.bus.mouse.buttons);
+        let mut host_keys = false;
         for event in event_pump.poll_iter() {
             match event {
                 Event::Quit { .. } => break 'running,
@@ -761,6 +770,9 @@ fn main() -> Result<(), String> {
                         osd.clear_lasting();
                     }
                     if rewinding.take().is_some() {
+                        // The machine goes on from where rewinding got to,
+                        // as when F11 is released.
+                        dbg.state_loaded_elsewhere(&cpu, "rewind");
                         pacer.rebase(&cpu.bus.clock, std::time::Instant::now());
                         osd.clear_lasting();
                     }
@@ -1091,6 +1103,7 @@ fn main() -> Result<(), String> {
                             input.stop(&mut cpu);
                         }
                         keyboard::key_event(&mut cpu.bus, scan, extended, true, None);
+                        host_keys = true;
                         held.insert(scancode, (scan, extended));
                     }
                 }
@@ -1116,6 +1129,7 @@ fn main() -> Result<(), String> {
                     }
                     // The machine goes on from where rewinding got to.
                     if keycode == Keycode::F11 && rewinding.take().is_some() {
+                        dbg.state_loaded_elsewhere(&cpu, "rewind");
                         // The game's achievements wait for their conditions
                         // to be false again.
                         achievements.reset();
@@ -1133,6 +1147,7 @@ fn main() -> Result<(), String> {
                     // need the break code to know when the key stops being
                     // pressed.
                     keyboard::key_event(&mut cpu.bus, scan, extended, false, None);
+                    host_keys = true;
                 }
 
                 Event::TextInput { text, .. } if ui.is_open() => ui.text(&text, &mut host!()),
@@ -1340,6 +1355,10 @@ fn main() -> Result<(), String> {
             }
         }
 
+        if host_keys || (cpu.bus.mouse.x, cpu.bus.mouse.y, cpu.bus.mouse.buttons) != mouse_before {
+            dbg.host_input(&cpu);
+        }
+
         // The mouse in relative mode while flying, so that it doesn't stop
         // at the window's edges; Q and E move the camera down and up while
         // held.
@@ -1365,7 +1384,12 @@ fn main() -> Result<(), String> {
         // Remote debug requests and queued remote input, which goes to the
         // settings window while it is open.
         dbg.divert = ui.is_open();
+        dbg.rewinding = rewinding.is_some();
         dbg.poll(&mut cpu);
+        if dbg.quit_requested() {
+            shutdown = debug::ShutdownReason::Quit;
+            break 'running;
+        }
         if dbg.take_hotkey() {
             toggle_ui!();
         }
@@ -1375,34 +1399,36 @@ fn main() -> Result<(), String> {
         // A strict-match load brings a state of this machine and this
         // debugging session: see `load_for_debugger`.
         let mut strict_match_loaded = false;
-        for request in dbg.take_state_requests() {
+        let mut debugger_loaded = false;
+        while let Some(request) = dbg.next_state_request() {
             let path = request.path.clone();
             // The file layout's version, and this rust-dos's (the header has the one that saved it).
             let (format, emulator) = (slots::FORMAT, env!("CARGO_PKG_VERSION"));
-            if request.load {
-                match host!().load_for_debugger(&path, request.strict_match) {
-                    Ok((header, differences)) => {
-                        let mut reply = serde_json::json!({"loaded": path, "format": format, "emulator": emulator, "header": header});
-                        strict_match_loaded = request.strict_match;
-                        if request.strict_match {
-                            reply["debugger_reset"] = dbg.reset_after_load(&cpu);
-                        } else if !differences.is_empty() {
-                            // Told, not refused: the state brought its own.
-                            reply["differences"] = differences.into();
-                        }
-                        request.done(Ok(reply));
+            let result = if request.load {
+                host!().load_for_debugger(&path, request.strict_match).map(|(header, differences)| {
+                    let mut reply = serde_json::json!({"loaded": path, "format": format, "emulator": emulator, "header": header});
+                    strict_match_loaded = request.strict_match;
+                    debugger_loaded = true;
+                    if !differences.is_empty() {
+                        // Told, not refused: the state brought its own.
+                        reply["differences"] = differences.into();
                     }
-                    Err((status, body)) => request.fail(status, body),
-                }
+                    reply
+                })
             } else {
                 if request.strict_match {
                     savestate::media::forget(&cpu);
                 }
-                let saved = host!().save_file(&path);
-                request.done(saved.map(|header| serde_json::json!({"saved": path, "format": format, "emulator": emulator, "header": header})));
-            }
+                host!()
+                    .save_file(&path)
+                    .map(|header| serde_json::json!({"saved": path, "format": format, "emulator": emulator, "header": header}))
+                    .map_err(|e| (400, serde_json::json!({"error": e})))
+            };
+            // The front end's part is done; the hub's (the debugger reset of
+            // a strict-match load, the journal and the reply) follows.
+            dbg.state_done(&cpu, request, result);
         }
-        for request in dbg.take_speed_requests() {
+        while let Some(request) = dbg.next_speed_request() {
             let result = CpuSpeed::parse(&request.cycles).and_then(|cycles| {
                 if det.is_some() && !matches!(cycles, CpuSpeed::Fixed(_)) {
                     return Err("deterministic mode runs at a fixed speed: give a number of cycles".to_string());
@@ -1411,7 +1437,8 @@ fn main() -> Result<(), String> {
                 host!().apply(&new)?;
                 Ok(serde_json::json!({"cycles": cycles.to_string()}))
             });
-            request.done(result);
+            dbg.speed_done(&cpu, request, result);
+            told_cycles = settings.cycles;
         }
         for input in dbg.take_ui_input() {
             match input {
@@ -1425,6 +1452,15 @@ fn main() -> Result<(), String> {
         // and mouse buttons the state was saved with: the keys held before it are
         // forgotten without a key-up reaching the restored machine.
         if std::mem::take(&mut state_loaded) {
+            // The debug server's loads are in its journal already.
+            if !debugger_loaded {
+                dbg.state_loaded_elsewhere(&cpu, "window");
+            }
+            // Deterministic mode runs at the speed the state brought.
+            if settings.cycles != told_cycles {
+                told_cycles = settings.cycles;
+                dbg.speed_changed(&cpu, &told_cycles.to_string(), "load");
+            }
             // Deterministic mode's clock and ticks go on from the state's
             // emulated time.
             if let Some(mode) = &mut det {
@@ -1452,6 +1488,7 @@ fn main() -> Result<(), String> {
         // a LAN room (see the batch below).
         if ui.is_open() != ui_shown {
             ui_shown = ui.is_open();
+            dbg.settings_window(&cpu, ui_shown);
             if ui_shown {
                 release_input(&mut cpu, &mut held);
                 clipboard.stop_paste(&mut cpu);
@@ -1697,7 +1734,13 @@ fn main() -> Result<(), String> {
         );
         // EXIT turns the machine off.
         if cpu.bus.exit_requested {
+            shutdown = debug::ShutdownReason::Exit;
             break 'running;
+        }
+        // A speed the settings window or a hotkey set.
+        if settings.cycles != told_cycles {
+            told_cycles = settings.cycles;
+            dbg.speed_changed(&cpu, &told_cycles.to_string(), "window");
         }
         // Pages printed, and printing that failed.
         for notice in cpu.bus.printer_notices() {
@@ -2043,6 +2086,9 @@ fn main() -> Result<(), String> {
         ));
         pacer.wait_for_next_frame();
     }
+    // The journal ends, and the debug server's clients get what they
+    // waited for.
+    dbg.shutdown(&cpu, shutdown, 0);
 
     // The page in the printer comes out, and the job's files are written.
     for notice in cpu.bus.finish_printing() {
