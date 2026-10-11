@@ -215,6 +215,78 @@ fn mapped_pages_keep_their_contents_across_remaps() {
     assert_eq!(cpu.bus.read_8(FRAME + PAGE), 0x77);
 }
 
+/// BloodNet's intro maps logical pages 0-3 into physical pages 0-3, then
+/// page 3 again into physical page 0, and reads an animation's frames from
+/// the CD through physical page 0. Physical page 3 still shows page 3 as
+/// it was before the reads, and mapping something else there must not put
+/// that back over the frames.
+#[test]
+fn a_page_mapped_twice_keeps_what_was_written_through_either() {
+    let mut cpu = machine();
+    let handle = allocate(&mut cpu, 6);
+    for page in 0..4 {
+        assert_eq!(map(&mut cpu, handle, page, page as u8), 0);
+    }
+    assert_eq!(map(&mut cpu, handle, 3, 0), 0);
+    cpu.bus.load_bytes(FRAME + 0x3A00, &[0x04, 0xAE, 0x00, 0x01]);
+    // Physical page 0 moves on to page 4, then physical page 3, which
+    // was only read, to page 5.
+    assert_eq!(map(&mut cpu, handle, 4, 0), 0);
+    assert_eq!(map(&mut cpu, handle, 5, 3), 0);
+    assert_eq!(map(&mut cpu, handle, 3, 1), 0);
+    let frame = |cpu: &Cpu, at: usize| (0..4).map(|i| cpu.bus.read_8(at + i)).collect::<Vec<u8>>();
+    assert_eq!(frame(&cpu, FRAME + PAGE + 0x3A00), [0x04, 0xAE, 0x00, 0x01]);
+
+    // Written through both physical pages, at different places: each
+    // write is kept, and shows in the other physical page once one of
+    // them is mapped over.
+    assert_eq!(map(&mut cpu, handle, 3, 2), 0);
+    cpu.bus.write_8(FRAME + PAGE, 0x11);
+    cpu.bus.write_8(FRAME + 2 * PAGE + 1, 0x22);
+    assert_eq!(map(&mut cpu, handle, 0, 1), 0);
+    assert_eq!(frame(&cpu, FRAME + 2 * PAGE), [0x11, 0x22, 0, 0]);
+    assert_eq!(map(&mut cpu, handle, 4, 2), 0);
+    assert_eq!(map(&mut cpu, handle, 3, 0), 0);
+    assert_eq!(frame(&cpu, FRAME), [0x11, 0x22, 0, 0]);
+    assert_eq!(frame(&cpu, FRAME + 0x3A00), [0x04, 0xAE, 0x00, 0x01]);
+}
+
+/// Function 57h on a page mapped twice reads what was written through
+/// either physical page, and what it writes shows in both.
+#[test]
+fn a_move_reaches_both_copies_of_a_page_mapped_twice() {
+    let mut cpu = machine();
+    let handle = allocate(&mut cpu, 1);
+    assert_eq!(map(&mut cpu, handle, 0, 0), 0);
+    assert_eq!(map(&mut cpu, handle, 0, 3), 0);
+    cpu.bus.load_bytes(FRAME + 3 * PAGE + 0x10, b"AB");
+    let describe = |cpu: &mut Cpu, source: (u8, u16, u16), dest: (u8, u16, u16)| {
+        let at = 0x50000;
+        cpu.bus.write_32(at, 2);
+        for (base, (kind, offset, segment)) in [(at + 4, source), (at + 0x0B, dest)] {
+            cpu.bus.write_8(base, kind);
+            cpu.bus.write_16(base + 1, if kind == 1 { handle } else { 0 });
+            cpu.bus.write_16(base + 3, offset);
+            cpu.bus.write_16(base + 5, segment);
+        }
+        cpu.set_ds(0x5000);
+        cpu.set_si(0);
+    };
+    // Out of the page, written through physical page 3.
+    describe(&mut cpu, (1, 0x10, 0), (0, 0, 0x4000));
+    assert_eq!(ems(&mut cpu, 0x5700), 0);
+    assert_eq!(cpu.bus.read_8(0x40000), b'A');
+    assert_eq!(cpu.bus.read_8(0x40001), b'B');
+    // Into the page: both physical pages show it.
+    cpu.bus.load_bytes(0x40000, b"yz");
+    describe(&mut cpu, (0, 0, 0x4000), (1, 0x20, 0));
+    assert_eq!(ems(&mut cpu, 0x5700), 0);
+    for slot in [0, 3] {
+        assert_eq!(cpu.bus.read_8(FRAME + slot * PAGE + 0x20), b'y');
+        assert_eq!(cpu.bus.read_8(FRAME + slot * PAGE + 0x21), b'z');
+    }
+}
+
 #[test]
 fn move_and_exchange_reach_mapped_and_unmapped_pages() {
     let mut cpu = machine();
