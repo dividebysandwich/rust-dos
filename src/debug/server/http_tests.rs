@@ -1460,14 +1460,23 @@ fn the_ring_and_the_operations_stay_bounded_and_say_what_went() {
     assert_eq!(page["entries"][0]["seq"].as_u64(), Some(first));
     let mut socket = ws(rig.addr, "/ws/events?after=10&volatile=false");
     assert_eq!(next(&mut socket).unwrap(), json!({"type": "gone", "first": first}));
-    // The oldest ended operations are gone; the latest 1024 kept, and the
-    // pending resume, however old.
+    // The operations that ended first are gone; the latest 1024 to end
+    // kept, and the pending resume, however old. Numbers are handed out
+    // before the requests reach the machine, so the order they ended in is
+    // the order of their `input_delivered` entries, not their numbers.
     let kept = super::journal::OPS_CAPACITY;
-    for &op in &inputs[..inputs.len() - kept] {
-        assert_eq!(rig.get(&format!("/api/ops/{}", op)).status, 410, "{}", op);
-    }
-    for &op in &inputs[inputs.len() - kept..] {
-        assert_eq!(rig.get(&format!("/api/ops/{}", op)).json()["state"], "done", "{}", op);
+    let ring = rig.get(&format!("/api/journal?after={}&limit={}", first - 1, super::journal::CAPACITY)).json();
+    let delivered: Vec<u64> =
+        ring["entries"].as_array().unwrap().iter().filter(|e| e["type"] == "input_delivered").map(|e| e["cause"].as_u64().unwrap()).collect();
+    assert!(delivered.len() >= kept, "{}", delivered.len());
+    let latest: std::collections::HashSet<u64> = delivered[delivered.len() - kept..].iter().copied().collect();
+    for &op in &inputs {
+        let r = rig.get(&format!("/api/ops/{}", op));
+        if latest.contains(&op) {
+            assert_eq!(r.json()["state"], "done", "{}", op);
+        } else {
+            assert_eq!(r.status, 410, "{}", op);
+        }
     }
     assert_eq!(rig.get(&format!("/api/ops/{}", resume)).json()["state"], "pending");
     {
