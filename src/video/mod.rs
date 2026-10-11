@@ -899,7 +899,8 @@ fn render_cga_mode4(canvas: &mut [u8], vram: &[u8], bus: &Bus, drawn_from: &mut 
         // samples a line, and the background is the border too.
         let indices = bus.vga.cga_indices_4();
         let border = bus.vga.cga_color & 0x0F;
-        render_cga_composite(canvas, vram, start, decoder, border, drawn_from, |byte, samples| {
+        let colors = [4, indices[0], indices[1], indices[2], indices[3]];
+        render_cga_composite(canvas, vram, start, decoder, border, &colors, drawn_from, |byte, samples| {
             for p in 0..4 {
                 let color = indices[((byte >> (6 - p * 2)) & 3) as usize];
                 samples[p * 2] = color;
@@ -953,7 +954,7 @@ fn render_cga_mode6(canvas: &mut [u8], vram: &[u8], bus: &Bus, drawn_from: &mut 
         // register's colour on black; the artifact colours come from the
         // patterns.
         let fg = bus.vga.cga_color & 0x0F;
-        render_cga_composite(canvas, vram, start, decoder, 0, drawn_from, |byte, samples| {
+        render_cga_composite(canvas, vram, start, decoder, 0, &[6, fg], drawn_from, |byte, samples| {
             for (p, sample) in samples.iter_mut().enumerate() {
                 *sample = if (byte >> (7 - p)) & 1 != 0 { fg } else { 0 };
             }
@@ -985,40 +986,43 @@ fn render_cga_mode6(canvas: &mut [u8], vram: &[u8], bus: &Bus, drawn_from: &mut 
 /// The CGA's graphics through the composite decoder: each of the 200 lines
 /// (interleaved like modes 4 to 6) as the 640 samples `samples` makes of
 /// each of its 80 bytes (8 a byte), decoded to 640 pixels and drawn twice
-/// for 400 lines. Lines whose samples, border and decoder are those they
-/// were drawn from last time (kept in `drawn_from`) are left as they are.
+/// for 400 lines. `colors` is all `samples` depends on besides the byte:
+/// the mode and its colours. Lines whose 80 bytes, colours, border
+/// and decoder are those they were drawn from last time (kept in
+/// `drawn_from`) are left as they are.
+#[allow(clippy::too_many_arguments)]
 fn render_cga_composite(
     canvas: &mut [u8],
     vram: &[u8],
     start: usize,
     decoder: &composite::Decoder,
     border: u8,
+    colors: &[u8],
     drawn_from: &mut DrawnFrom,
     samples: impl Fn(u8, &mut [u8]),
 ) {
     let width = SCREEN_WIDTH as usize;
     let mut key = vec![b'C', border];
     key.extend(decoder.id());
+    key.extend(colors);
     key.extend((canvas.len() as u32).to_le_bytes());
-    if drawn_from.key != key || drawn_from.rows.len() != 200 * 640 {
-        drawn_from.key = key;
-        drawn_from.rows = Vec::new();
-    }
-    let known = !drawn_from.rows.is_empty();
-    drawn_from.rows.resize(200 * 640, 0);
+    let known = drawn_from.reuse(key, 200 * 80);
+    let mut bytes = [0u8; 80];
     let mut line = [0u8; 640];
     let mut rgb = [0u8; 640 * 3];
     for y in 0..200 {
         let bank_offset = if y % 2 == 0 { 0 } else { 0x2000 };
-        for byte_idx in 0..80 {
-            let byte = vram[bank_offset + ((y / 2 * 80 + start + byte_idx) & 0x1FFF)];
-            samples(byte, &mut line[byte_idx * 8..byte_idx * 8 + 8]);
+        for (byte_idx, byte) in bytes.iter_mut().enumerate() {
+            *byte = vram[bank_offset + ((y / 2 * 80 + start + byte_idx) & 0x1FFF)];
         }
-        let drawn = &mut drawn_from.rows[y * 640..(y + 1) * 640];
-        if known && *drawn == line {
+        let drawn = &mut drawn_from.rows[y * 80..(y + 1) * 80];
+        if known && *drawn == bytes {
             continue;
         }
-        drawn.copy_from_slice(&line);
+        drawn.copy_from_slice(&bytes);
+        for (byte, out) in bytes.iter().zip(line.as_chunks_mut::<8>().0) {
+            samples(*byte, out);
+        }
         decoder.decode_line(&line, border, &mut rgb);
         for dy in 0..2 {
             let row = (y * 2 + dy) * width * 3;
