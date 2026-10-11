@@ -186,9 +186,11 @@ curl -s "$H/api/log?limit=50&format=text"
   start, `CS:IP`, bytes, disassembly, and the registers *before* the
   instruction ran. `HLE INT 21h (AX=4C00)` marks a BIOS/DOS service call
   handled by the emulator. `AX` tells you which function was called.
+  `HLE service 08h` marks one of the emulator's own ROM services, here the
+  BIOS timer handler counting the tick; `/api/disasm` names them the same.
 - **Filters:**
   - `no_bios=true` hides code running in the BIOS segment F000, but keeps
-    the HLE service calls.
+    the `HLE INT` and `HLE service` lines.
   - `cs=1000` keeps only one code segment.
   - `last_ms=500`, or `from_ms`/`to_ms`, select a time window.
 - **Log markers to look for:**
@@ -907,7 +909,7 @@ address mapped to when it was set.
 - **Emulated time.** Timers run on emulated time, which advances with
   executed instructions at `cycles_per_ms` (see `/api/status`) and stops
   while paused. Pausing, stepping and tracing don't change when a program
-  sees its timer interrupts (`HLE INT 08h` or its own handler) in
+  sees its timer interrupts (`HLE service 08h` or its own handler) in
   instruction terms, but a timer interrupt can arrive between any two steps.
 - **Measuring speed.** `/api/stats` reports `mips` (host speed while
   executing guest code), `emulated_mips` (guest instructions per wall-clock

@@ -2967,7 +2967,7 @@ impl DebugHub {
             e.t_us >= from_us
                 && e.t_us <= to_us
                 && cs_filter.is_none_or(|cs| e.cs == cs)
-                && !(q.no_bios && e.cs >= 0xF000 && !(e.bytes[0] == 0xFE && e.bytes[1] == 0x38))
+                && !(q.no_bios && e.is_bios_code())
         };
         if let Some(since) = q.since {
             // A cursor past the end (from an earlier run of the emulator)

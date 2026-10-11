@@ -43,9 +43,17 @@ impl TraceEntry {
         self.code32 || self.eip > 0xFFFF || self.gpr.iter().any(|r| r >> 16 != 0)
     }
 
+    /// Whether `no_bios=true` hides this entry: code in the BIOS segment
+    /// F000 other than the HLE traps, which stand for the services they run.
+    pub fn is_bios_code(&self) -> bool {
+        self.cs >= 0xF000 && !(self.bytes[0] == 0xFE && matches!(self.bytes[1], 0x38 | 0x39))
+    }
+
     /// Disassemble this entry. Returns (instruction bytes actually used,
-    /// text). HLE traps (`FE 38 xx`) are shown as the BIOS/DOS service they
-    /// invoke, which is far more useful than the undefined opcode.
+    /// text). HLE traps are shown as what they run, which is far more useful
+    /// than the undefined opcode: `FE 38 xx` as the BIOS/DOS interrupt it
+    /// handles, `FE 39 xx` as the ROM service (the timer tick, 08h, is one),
+    /// named as `/api/disasm` names it.
     pub fn disasm(&self) -> (usize, String) {
         let bytes = self.code_bytes();
         if bytes.len() >= 3 && bytes[0] == 0xFE && bytes[1] == 0x38 {
@@ -53,6 +61,9 @@ impl TraceEntry {
                 return (3, "HLE shell command".to_string());
             }
             return (3, format!("HLE INT {:02X}h (AX={:04X})", bytes[2], self.gpr[0] as u16));
+        }
+        if bytes.len() >= 3 && bytes[0] == 0xFE && bytes[1] == 0x39 {
+            return (3, format!("HLE service {:02X}h", bytes[2]));
         }
         disasm_one(bytes, self.eip, self.code32)
     }
@@ -252,6 +263,29 @@ mod tests {
         let ring = ring(4, 10);
         assert_eq!(after(&ring, 2), (vec![(7, 7), (8, 8), (9, 9), (10, 10)], 4));
         assert_eq!(after(&ring, 8), (vec![(9, 9), (10, 10)], 0));
+    }
+
+    fn code(bytes: &[u8]) -> TraceEntry {
+        let mut entry = TraceEntry { len: bytes.len() as u8, ..Default::default() };
+        entry.bytes[..bytes.len()].copy_from_slice(bytes);
+        entry.gpr[0] = 0x4C00;
+        entry
+    }
+
+    #[test]
+    fn hle_traps_are_shown_as_what_they_run() {
+        // The INT 21h stub, and the timer handler's tick count in the ROM.
+        assert_eq!(code(&[0xFE, 0x38, 0x21, 0xCF]).disasm(), (3, "HLE INT 21h (AX=4C00)".to_string()));
+        assert_eq!(code(&[0xFE, 0x39, 0x08, 0xCD, 0x1C]).disasm(), (3, "HLE service 08h".to_string()));
+    }
+
+    #[test]
+    fn no_bios_keeps_the_hle_traps() {
+        let at = |cs: u16, bytes: &[u8]| TraceEntry { cs, ..code(bytes) };
+        assert!(!at(0xF000, &[0xFE, 0x38, 0x21]).is_bios_code());
+        assert!(!at(0xF000, &[0xFE, 0x39, 0x08]).is_bios_code());
+        assert!(at(0xF000, &[0xCD, 0x1C]).is_bios_code());
+        assert!(!at(0x1000, &[0xCD, 0x1C]).is_bios_code());
     }
 
     #[test]
