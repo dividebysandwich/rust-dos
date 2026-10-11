@@ -23,6 +23,7 @@ const VIRGE_VERSION: u16 = 1;
 const VERITE_VERSION: u16 = 2;
 const ET4000_VERSION: u16 = 1;
 const SHARED_VERSION: u16 = 1;
+const SB_HIGH_SPEED_VERSION: u16 = 1;
 
 /// Save or load each of a list of fields.
 /// Each field is labelled with its name, for comparing states part by
@@ -277,6 +278,15 @@ impl Bus {
         if serial.any() {
             w.section(b"SER ", SERIAL_VERSION, |w| serial.save(w));
         }
+        // The Sound Blaster's high-speed mode, an empty section that is
+        // there only while the mode runs, so states saved before rust-dos
+        // kept the mode load as they did, into a DSP out of it. It comes
+        // last: rewind pairs the sections of two states by position, and a
+        // section that comes and goes with each 91h block would otherwise
+        // shift the ones after it (a 3dfx card's memory) out of their pairs.
+        if sb.as_ref().is_some_and(|sb| sb.high_speed()) {
+            w.section(b"SBHS", SB_HIGH_SPEED_VERSION, |_| {});
+        }
     }
 
     /// Read the bus's sections into it, in place: the RAM keeps its
@@ -516,6 +526,19 @@ impl Bus {
         } else {
             serial.ports = Default::default();
             serial.pic_lines = 0;
+        }
+        let high_speed = r.next_is(b"SBHS");
+        if high_speed {
+            r.section(b"SBHS", SB_HIGH_SPEED_VERSION)?;
+        }
+        match sb {
+            Some(sb) => {
+                if !sb.set_high_speed(high_speed) {
+                    return Err(StateError::Invalid("a Sound Blaster's high-speed mode without a transfer".into()));
+                }
+            }
+            None if high_speed => return Err(StateError::Invalid("a Sound Blaster's high-speed mode without a Sound Blaster".into())),
+            None => {}
         }
         Ok(lost)
     }

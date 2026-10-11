@@ -916,6 +916,7 @@ impl DebugHub {
     fn announce(&mut self, cpu: &Cpu) {
         let fields = json!({
             "version": env!("CARGO_PKG_VERSION"),
+            "build": rust_dos::build_info::json(),
             "api_version": journal::API_VERSION,
             "features": journal::FEATURES,
             "deterministic": self.deterministic.map(|s| s.format("%Y-%m-%d %H:%M:%S").to_string()),
@@ -4485,6 +4486,7 @@ mod tests {
         let all = entries(&hub);
         assert_eq!(all[0]["type"], "started");
         assert_eq!(all[0]["seq"], 1);
+        assert_eq!(all[0]["build"], rust_dos::build_info::json(), "the commit the program was built from");
         for (i, e) in all.iter().enumerate() {
             assert_eq!(e["seq"].as_u64(), Some(i as u64 + 1), "gapless: {}", e);
         }
