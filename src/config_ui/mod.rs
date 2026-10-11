@@ -1429,7 +1429,7 @@ impl Item {
             }
             .to_string(),
             MouseType => s.serial.mouse.describe().to_string(),
-            ModemListen => s.serial.modem_listen.map_or("off".to_string(), |port| format!("TCP port {}", port)),
+            ModemListen => s.serial.modem_listen.map_or("off".to_string(), crate::serial::describe_listen),
             ModemTelnet => on_off(s.serial.modem_telnet),
             PrinterOutput => s.printer.output.describe().to_string(),
             PrinterPaper => match s.printer.paper {
@@ -1751,7 +1751,7 @@ impl Item {
             Item::LanHost => s.network.lan_host.map_or("off".to_string(), |port| port.to_string()),
             Item::Room => s.network.room.clone(),
             Item::Password => s.network.password.clone(),
-            Item::ModemListen => s.serial.modem_listen.map_or("off".to_string(), |port| port.to_string()),
+            Item::ModemListen => s.serial.modem_listen.map_or("off".to_string(), crate::serial::listen_text),
             _ => String::new(),
         }
     }

@@ -15,6 +15,37 @@ pub mod uart;
 use crate::savestate::{Reader, Result, State, Writer};
 use uart::{Chip, Uart};
 
+/// `modemlisten`'s value: a port, which takes calls on all of this
+/// machine's addresses, or `address:port` (`127.0.0.1:2323`,
+/// `[::1]:2323`). Port 0 is refused.
+pub fn parse_listen(value: &str) -> Option<std::net::SocketAddr> {
+    let value = value.trim();
+    let addr = match value.parse::<u16>() {
+        Ok(port) => (std::net::Ipv4Addr::UNSPECIFIED, port).into(),
+        Err(_) => value.parse::<std::net::SocketAddr>().ok()?,
+    };
+    (addr.port() != 0).then_some(addr)
+}
+
+/// `modemlisten`'s value for `addr`: the port alone when it is on all of
+/// this machine's IPv4 addresses.
+pub fn listen_text(addr: std::net::SocketAddr) -> String {
+    if addr.ip() == std::net::Ipv4Addr::UNSPECIFIED { addr.port().to_string() } else { addr.to_string() }
+}
+
+/// Where the modem takes calls, in words: `TCP port 2323` on all
+/// addresses (`TCP port 2323 over IPv6` for `[::]`), or
+/// `TCP 127.0.0.1:2323` on one address.
+pub fn describe_listen(addr: std::net::SocketAddr) -> String {
+    if addr.ip() == std::net::Ipv4Addr::UNSPECIFIED {
+        format!("TCP port {}", addr.port())
+    } else if addr.ip().is_unspecified() {
+        format!("TCP port {} over IPv6", addr.port())
+    } else {
+        format!("TCP {}", addr)
+    }
+}
+
 /// The ports' standard addresses and IRQs.
 pub const BASES: [u16; 4] = [0x3F8, 0x2F8, 0x3E8, 0x2E8];
 pub const IRQS: [u8; 4] = [4, 3, 4, 3];
@@ -82,8 +113,9 @@ pub struct SerialSettings {
     pub irqs: [u8; 4],
     pub chip: Chip,
     pub mouse: mouse::MouseType,
-    /// A TCP port the modem takes calls on.
-    pub modem_listen: Option<u16>,
+    /// Where the modem takes calls: a TCP port on all of this machine's
+    /// addresses (`0.0.0.0:port`), or a port on one address.
+    pub modem_listen: Option<std::net::SocketAddr>,
     /// Whether the modem's TCP calls speak telnet.
     pub modem_telnet: bool,
 }
@@ -139,12 +171,9 @@ impl SerialSettings {
             "modemlisten" => {
                 self.modem_listen = match value.trim() {
                     v if on(v) == Some(false) || v.is_empty() => None,
-                    v => Some(
-                        v.parse()
-                            .ok()
-                            .filter(|&p| p != 0)
-                            .ok_or_else(|| format!("invalid modemlisten '{}' (off or a TCP port)", value))?,
-                    ),
+                    v => Some(parse_listen(v).ok_or_else(|| {
+                        format!("invalid modemlisten '{}' (off, a TCP port, or address:port)", value)
+                    })?),
                 }
             }
             "modemtelnet" => {
@@ -168,7 +197,7 @@ impl SerialSettings {
         }
         entries.push(("uart", Some(if self.chip == Chip::Ns8250 { "8250" } else { "16550" }.into())));
         entries.push(("mousetype", Some(self.mouse.name().into())));
-        entries.push(("modemlisten", Some(self.modem_listen.map_or("off".into(), |p| p.to_string()))));
+        entries.push(("modemlisten", Some(self.modem_listen.map_or("off".into(), listen_text))));
         entries.push(("modemtelnet", Some(if self.modem_telnet { "on" } else { "off" }.into())));
         entries
     }
@@ -428,5 +457,30 @@ mod tests {
         }
         assert_eq!(s, t);
         assert_eq!(t.linked_port(), Some(1));
+        assert_eq!(t.modem_listen, Some("0.0.0.0:5000".parse().unwrap()));
+    }
+
+    #[test]
+    fn modem_listen_takes_a_port_or_an_address() {
+        let mut s = SerialSettings::default();
+        for (value, addr, text) in [
+            ("2323", "0.0.0.0:2323", "2323"),
+            (" 127.0.0.1:2323 ", "127.0.0.1:2323", "127.0.0.1:2323"),
+            ("[::1]:2323", "[::1]:2323", "[::1]:2323"),
+            ("0.0.0.0:2323", "0.0.0.0:2323", "2323"),
+        ] {
+            s.set("modemlisten", value).unwrap();
+            assert_eq!(s.modem_listen, Some(addr.parse().unwrap()), "{}", value);
+            assert_eq!(s.entries().iter().find(|e| e.0 == "modemlisten").unwrap().1.as_deref(), Some(text));
+        }
+        let describe = |value: &str| describe_listen(value.parse().unwrap());
+        assert_eq!(describe("0.0.0.0:2323"), "TCP port 2323");
+        assert_eq!(describe("[::]:2323"), "TCP port 2323 over IPv6");
+        assert_eq!(describe("127.0.0.1:2323"), "TCP 127.0.0.1:2323");
+        s.set("modemlisten", "off").unwrap();
+        assert_eq!(s.modem_listen, None);
+        for bad in ["127.0.0.1:0", "127.0.0.1", "localhost:2323", "70000"] {
+            assert!(s.set("modemlisten", bad).is_err(), "{}", bad);
+        }
     }
 }

@@ -178,7 +178,7 @@ impl Net {
                 "rtt_ms": s.rtt_ms,
                 "retransmits": s.retransmits,
                 "relay_serial": s.relay_serial,
-                "listening": s.listening,
+                "listening": s.listening.map(|addr| addr.port()),
             });
         }
         serde_json::json!({ "port": self.serial.settings.linked_port().map(|p| format!("COM{}", p + 1)), "network": false })

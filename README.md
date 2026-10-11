@@ -126,6 +126,10 @@ To run the program, put `SDL2.dll` from the same `lib\x64` next to
 `rust-dos.exe` (in `target\release`) or on `PATH`. `cargo test` starts the
 debug build in `target\debug` too, so put the DLL on `PATH` for the tests.
 
+`cargo test` runs the tests. A few of them host a LAN relay or look for one
+by broadcast, on all of the computer's network interfaces; if your firewall
+asks about them on every run, `cargo test-local` skips those few.
+
 ## Configuration
 
 Rust-DOS reads `rust-dos.conf`, a DOSBox-style configuration file, from the
