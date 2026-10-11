@@ -49,6 +49,12 @@ impl TextGeometry {
         self.font_h * self.y_scale
     }
 
+    /// Where the character of the cell at `row`, `col` is in text memory;
+    /// its attribute is in the byte after it.
+    pub fn offset(&self, row: usize, col: usize) -> usize {
+        (self.start + row * self.row_bytes + col * 2) & self.wrap
+    }
+
     /// The screen rows (first, past the last) that show the text memory
     /// bytes `start..end`, or None if none of them is on the screen.
     pub fn screen_rows(&self, start: usize, end: usize) -> Option<(u32, u32)> {
@@ -79,10 +85,7 @@ pub fn screen_lines(bus: &Bus) -> Option<Vec<String>> {
     let lines = (0..geometry.rows)
         .map(|r| {
             let line: String = (0..geometry.cols)
-                .map(|c| {
-                    let off = (geometry.start + r * geometry.row_bytes + c * 2) & geometry.wrap;
-                    crate::video::CP437[vram[off] as usize]
-                })
+                .map(|c| crate::video::CP437[vram[geometry.offset(r, c)] as usize])
                 .collect();
             line.trim_end().to_string()
         })
@@ -319,7 +322,7 @@ pub fn render(
 
     for row in row_lo..row_hi {
         for col in 0..g.cols {
-            let offset = (g.start + row * g.row_bytes + col * 2) & g.wrap;
+            let offset = g.offset(row, col);
             let char_code = vram[offset];
             let attr = vram[offset + 1];
             let hidden = blinks && attr & 0x80 != 0 && !blink_on;

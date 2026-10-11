@@ -3500,12 +3500,39 @@ fn screen_text(cpu: &Cpu) -> Reply {
     else {
         return Reply::Error(409, format!("video mode {:?} is a graphics mode; use /api/screenshot", mode));
     };
+    let (cols, rows) = (geometry.cols, geometry.rows);
+    let vram = cpu.bus.display_mem();
+    // Each row's attributes as runs of the same one: a highlighted menu
+    // item or a selected field shows as a run of its own.
+    let attrs: Vec<Vec<Value>> = (0..rows)
+        .map(|r| {
+            let mut runs: Vec<(usize, usize, u8)> = Vec::new();
+            for c in 0..cols {
+                let attr = vram[geometry.offset(r, c) + 1];
+                match runs.last_mut() {
+                    Some((_, len, a)) if *a == attr => *len += 1,
+                    _ => runs.push((c, 1, attr)),
+                }
+            }
+            runs.into_iter().map(|(col, len, a)| json!({"col": col, "len": len, "attr": format!("{:02X}", a)})).collect()
+        })
+        .collect();
+    // The cursor of the active display page (BIOS data area 462h), whose
+    // text the reply shows.
+    let cursor = 0x0450 + 2 * (cpu.bus.peek_8(0x0462) as usize & 7);
     Reply::Json(json!({
         "mode": format!("{:?}", mode),
-        "cols": geometry.cols,
-        "rows": geometry.rows,
-        "cursor": {"col": cpu.bus.peek_8(0x0450), "row": cpu.bus.peek_8(0x0451)},
+        "cols": cols,
+        "rows": rows,
+        "cursor": {"col": cpu.bus.peek_8(cursor), "row": cpu.bus.peek_8(cursor + 1)},
         "lines": lines,
+        "attrs": attrs,
+        // How to read an attribute byte: `blink` says whether bit 7 blinks
+        // the character (when false it selects a bright background), and
+        // `mono` whether the bytes are the MDA and Hercules attributes (07
+        // normal, 70 reverse, 01 underline, 08 bright) in place of colours.
+        "blink": cpu.bus.vga.blinks(),
+        "mono": geometry.mono,
     }))
 }
 
@@ -3846,6 +3873,45 @@ mod tests {
         assert_eq!(count(TraceQuery::default()), (10_000, true));
         assert_eq!(count(TraceQuery { since: Some(0), last_n: Some(20_000), ..Default::default() }), (10_000, true));
         assert_eq!(count(TraceQuery { since: Some(20_000), ..Default::default() }), (5_000, false));
+    }
+
+    #[test]
+    fn screen_text_has_each_rows_attributes_as_runs() {
+        let mut cpu = Cpu::new(".".into());
+        let mut hub = DebugHub::new(None, None, 1000);
+        // Row 2: " Play  Quit", "Quit" highlighted (black on cyan).
+        for (c, ch) in " Play  Quit".bytes().enumerate() {
+            let at = 0xB8000 + 2 * 80 * 2 + c * 2;
+            cpu.bus.write_8(at, ch);
+            cpu.bus.write_8(at + 1, if c >= 7 { 0x30 } else { 0x07 });
+        }
+        for c in 11..80 {
+            cpu.bus.write_8(0xB8000 + 2 * 80 * 2 + c * 2 + 1, 0x07);
+        }
+        let Reply::Json(v) = handle(&mut cpu, &mut hub, Cmd::ScreenText) else { panic!("not JSON") };
+        assert_eq!(v["lines"][2], " Play  Quit");
+        let runs: Vec<(u64, u64, &str)> = v["attrs"][2]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| (r["col"].as_u64().unwrap(), r["len"].as_u64().unwrap(), r["attr"].as_str().unwrap()))
+            .collect();
+        assert_eq!(runs, [(0, 7, "07"), (7, 4, "30"), (11, 69, "07")]);
+        assert_eq!(v["attrs"].as_array().unwrap().len(), v["rows"].as_u64().unwrap() as usize);
+        assert!(v["blink"].is_boolean() && v["mono"] == false, "{v}");
+    }
+
+    #[test]
+    fn screen_text_gives_the_cursor_of_the_active_page() {
+        let mut cpu = Cpu::new(".".into());
+        let mut hub = DebugHub::new(None, None, 1000);
+        cpu.bus.write_8(0x0450, 1);
+        cpu.bus.write_8(0x0451, 2);
+        cpu.bus.write_8(0x0452, 5);
+        cpu.bus.write_8(0x0453, 3);
+        cpu.bus.write_8(0x0462, 1);
+        let Reply::Json(v) = handle(&mut cpu, &mut hub, Cmd::ScreenText) else { panic!("not JSON") };
+        assert_eq!((v["cursor"]["col"].as_u64(), v["cursor"]["row"].as_u64()), (Some(5), Some(3)));
     }
 
     #[test]

@@ -701,7 +701,7 @@ fn the_other_replies_keep_their_keys_too() {
     let cancelled = waiting.join().unwrap();
     assert_eq!((cancelled.status, cancelled.json()["ok"].as_bool(), cancelled.json()["cancelled"].as_bool()), (200, Some(false), Some(true)), "{}", cancelled.body);
     has(&http(rig.addr, "PUT", "/api/memory", &[], Some(&json!({"addr": "0200:0000", "hex": "01"}))), &["ok", "addr", "written", "old", "new"]);
-    has(&rig.get("/api/screen/text?format=json"), &["lines", "rows"]);
+    has(&rig.get("/api/screen/text?format=json"), &["lines", "rows", "attrs"]);
     has(&rig.post("/api/drive/sync", json!({})), &["messages"]);
     has(&rig.post("/api/control/reboot_shell", json!({})), &["ok"]);
 }
