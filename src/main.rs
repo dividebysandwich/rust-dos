@@ -2502,10 +2502,7 @@ impl MainHost<'_, '_> {
         if self.achievements.hardcore_active() {
             return Err("hardcore mode: no save states while RetroAchievements plays".to_string());
         }
-        let data = std::fs::read(path).map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => "empty".to_string(),
-            _ => format!("{}: {}", path.display(), e),
-        })?;
+        let data = slots::read_file(path)?;
         let (header, state) = slots::decode(&data)?;
         if let Some(why) = slots::refusal(&header, self.cpu.bus.ram().len() >> 20) {
             return Err(why);
@@ -2563,9 +2560,13 @@ impl MainHost<'_, '_> {
         Ok(header)
     }
 
-    /// Load slot `slot`.
+    /// Load slot `slot`. A slot without a file is "empty", as the slot
+    /// list calls it.
     fn load_slot(&mut self, slot: u8) -> Result<slots::Header, String> {
         let path = slots::slot_path(&self.slot_dir()?, slot);
+        if !path.exists() {
+            return Err("empty".to_string());
+        }
         self.load_file(&path)
     }
 

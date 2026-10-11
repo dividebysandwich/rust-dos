@@ -263,6 +263,15 @@ pub fn read_file_header(path: &Path) -> Option<Header> {
     read_header(&start).ok().map(|(header, _, _)| header)
 }
 
+/// The contents of the save state file at `path`. A missing file is an
+/// error that names it.
+pub fn read_file(path: &Path) -> Result<Vec<u8>, String> {
+    std::fs::read(path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => format!("no save state at {}", path.display()),
+        _ => format!("{}: {}", path.display(), e),
+    })
+}
+
 /// Write a slot file, replacing the old one in one step.
 pub fn write_file(path: &Path, data: &[u8]) -> Result<(), String> {
     if let Some(dir) = path.parent() {
@@ -289,6 +298,13 @@ mod tests {
         assert_eq!(decode(&data).unwrap(), (header, state));
         assert!(decode(b"RDOSSTAT\x02\x00").unwrap_err().contains("newer"));
         assert!(decode(b"something else").is_err());
+    }
+
+    #[test]
+    fn a_missing_state_file_is_named() {
+        let path = std::env::temp_dir().join("rust-dos-no-such-dir").join("missing.state");
+        let error = read_file(&path).unwrap_err();
+        assert_eq!(error, format!("no save state at {}", path.display()));
     }
 
     #[test]
