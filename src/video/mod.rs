@@ -322,6 +322,22 @@ pub fn render_screen(frame: &mut Frame, bus: &Bus) {
         render_planar(&mut frame.rgb, width, &bus.vga.vram_graphics, bus, &mut frame.drawn_from);
         return;
     }
+    // And the CGA's graphics on a composite monitor, at 640x400.
+    if matches!(bus.video_mode, VideoMode::Cga320x200Color | VideoMode::Cga320x200 | VideoMode::Cga640x200)
+        && !bus.vga.adapter.gate_array()
+        && bus.vga.composite_decoder().is_some()
+        && cga_start(bus).is_some()
+        && (frame.width, frame.height) == (SCREEN_WIDTH, SCREEN_HEIGHT)
+    {
+        frame.doubled = false;
+        let vram = &bus.vga.vram_text;
+        if bus.video_mode == VideoMode::Cga640x200 {
+            render_cga_mode6(&mut frame.rgb, vram, bus, &mut frame.drawn_from);
+        } else {
+            render_cga_mode4(&mut frame.rgb, vram, bus, &mut frame.drawn_from);
+        }
+        return;
+    }
     frame.drawn_from = DrawnFrom::default();
     frame.doubled = false;
 
@@ -344,9 +360,9 @@ pub fn render_screen(frame: &mut Frame, bus: &Bus) {
         // Drawn above.
         VideoMode::Graphics320x200 => {}
         VideoMode::Cga320x200Color | VideoMode::Cga320x200 => {
-            render_cga_mode4(canvas, &bus.vga.vram_text, bus)
+            render_cga_mode4(canvas, &bus.vga.vram_text, bus, &mut DrawnFrom::default())
         }
-        VideoMode::Cga640x200 => render_cga_mode6(canvas, &bus.vga.vram_text, bus),
+        VideoMode::Cga640x200 => render_cga_mode6(canvas, &bus.vga.vram_text, bus, &mut DrawnFrom::default()),
         // Text renderers honour the dirty row band so a single-line shell
         // update only repaints those 16 scanlines instead of the full 80x25.
         VideoMode::Text80x25
@@ -867,14 +883,14 @@ fn cga_start(bus: &Bus) -> Option<usize> {
 /// and odd rows at 2000h. A VGA takes the four colors from palette
 /// registers 0-3, which INT 10h AH=0Bh sets for the background and the
 /// palette; a CGA from its Color Select register.
-fn render_cga_mode4(canvas: &mut [u8], vram: &[u8], bus: &Bus) {
+fn render_cga_mode4(canvas: &mut [u8], vram: &[u8], bus: &Bus, drawn_from: &mut DrawnFrom) {
     let Some(start) = cga_start(bus) else { return };
     if let Some(decoder) = bus.vga.composite_decoder() {
         // On a composite monitor: each pixel is two of the card's 640
         // samples a line, and the background is the border too.
         let indices = bus.vga.cga_indices_4();
         let border = bus.vga.cga_color & 0x0F;
-        render_cga_composite(canvas, vram, start, decoder, border, |byte, samples| {
+        render_cga_composite(canvas, vram, start, decoder, border, drawn_from, |byte, samples| {
             for p in 0..4 {
                 let color = indices[((byte >> (6 - p * 2)) & 3) as usize];
                 samples[p * 2] = color;
@@ -921,14 +937,14 @@ fn cga_rows(canvas: &mut [u8], line: &[u8], y: usize) {
 /// CGA mode 6 (640x200, 2 colors): a bit a pixel, interleaved like mode
 /// 4, in palette registers 0 and 1 (on a CGA black and the Color Select
 /// register's color).
-fn render_cga_mode6(canvas: &mut [u8], vram: &[u8], bus: &Bus) {
+fn render_cga_mode6(canvas: &mut [u8], vram: &[u8], bus: &Bus, drawn_from: &mut DrawnFrom) {
     let Some(start) = cga_start(bus) else { return };
     if let Some(decoder) = bus.vga.composite_decoder() {
         // On a composite monitor: a sample a pixel, in the Color Select
         // register's colour on black; the artifact colours come from the
         // patterns.
         let fg = bus.vga.cga_color & 0x0F;
-        render_cga_composite(canvas, vram, start, decoder, 0, |byte, samples| {
+        render_cga_composite(canvas, vram, start, decoder, 0, drawn_from, |byte, samples| {
             for (p, sample) in samples.iter_mut().enumerate() {
                 *sample = if (byte >> (7 - p)) & 1 != 0 { fg } else { 0 };
             }
@@ -960,16 +976,27 @@ fn render_cga_mode6(canvas: &mut [u8], vram: &[u8], bus: &Bus) {
 /// The CGA's graphics through the composite decoder: each of the 200 lines
 /// (interleaved like modes 4 to 6) as the 640 samples `samples` makes of
 /// each of its 80 bytes (8 a byte), decoded to 640 pixels and drawn twice
-/// for 400 lines.
+/// for 400 lines. Lines whose samples, border and decoder are those they
+/// were drawn from last time (kept in `drawn_from`) are left as they are.
 fn render_cga_composite(
     canvas: &mut [u8],
     vram: &[u8],
     start: usize,
     decoder: &composite::Decoder,
     border: u8,
+    drawn_from: &mut DrawnFrom,
     samples: impl Fn(u8, &mut [u8]),
 ) {
     let width = SCREEN_WIDTH as usize;
+    let mut key = vec![b'C', border];
+    key.extend(decoder.id());
+    key.extend((canvas.len() as u32).to_le_bytes());
+    if drawn_from.key != key || drawn_from.rows.len() != 200 * 640 {
+        drawn_from.key = key;
+        drawn_from.rows = Vec::new();
+    }
+    let known = !drawn_from.rows.is_empty();
+    drawn_from.rows.resize(200 * 640, 0);
     let mut line = [0u8; 640];
     let mut rgb = [0u8; 640 * 3];
     for y in 0..200 {
@@ -978,6 +1005,11 @@ fn render_cga_composite(
             let byte = vram[bank_offset + ((y / 2 * 80 + start + byte_idx) & 0x1FFF)];
             samples(byte, &mut line[byte_idx * 8..byte_idx * 8 + 8]);
         }
+        let drawn = &mut drawn_from.rows[y * 640..(y + 1) * 640];
+        if known && *drawn == line {
+            continue;
+        }
+        drawn.copy_from_slice(&line);
         decoder.decode_line(&line, border, &mut rgb);
         for dy in 0..2 {
             let row = (y * 2 + dy) * width * 3;
@@ -1318,9 +1350,9 @@ mod planar_tests {
                     vec![bus.vga.attribute_rgb(0), bus.vga.attribute_rgb(1)]
                 };
                 if mode == 4 {
-                    render_cga_mode4(&mut new, &vram, &bus);
+                    render_cga_mode4(&mut new, &vram, &bus, &mut DrawnFrom::default());
                 } else {
-                    render_cga_mode6(&mut new, &vram, &bus);
+                    render_cga_mode6(&mut new, &vram, &bus, &mut DrawnFrom::default());
                 }
                 cga_reference(&mut old, &vram, start, &colors, bits);
                 let first = new.iter().zip(&old).position(|(a, b)| a != b);
