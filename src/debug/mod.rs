@@ -1424,6 +1424,14 @@ impl DebugHub {
         if self.tracing_now {
             self.batch_t_us = cpu.bus.start_time.elapsed().as_micros() as u64;
         }
+        // A `run`'s line waits behind the batch lines. The programs they
+        // start may have run without the hook, which counts the starts
+        // before the line from here. (Unless the shell took the line at
+        // the end of the last batch.)
+        self.note_run_line(cpu);
+        if self.run_wait.as_ref().is_some_and(|r| r.before.is_none()) && !self.break_program_start && !self.start_once {
+            self.seen_starts = cpu.programs.started;
+        }
         self.tracing_now
             || self.step_budget.is_some()
             || self.temp_breakpoint.is_some()
@@ -1435,7 +1443,12 @@ impl DebugHub {
             || self.break_program_exit
             || self.start_once
             || self.start_breakpoint.is_some()
-            || self.run_wait.as_ref().is_some_and(|r| r.before.is_none())
+            // A `run`'s line waits: the hook runs while the shell's code
+            // does, which is where the shell takes batch lines, and a batch
+            // run without it ends before the shell takes any while the line
+            // waits (`StopReason::Hook`). The programs the lines before it
+            // start run without the hook.
+            || (cpu.batch.marked_line_waits() && cpu.in_shell_code())
     }
 
     /// Per-instruction hook, called just before an instruction at `phys_ip`
@@ -1738,8 +1751,9 @@ impl DebugHub {
 
     /// Once the shell took a `run`'s command line: the programs started
     /// from then on are its own, and the first of them stops with
-    /// `stop_at_entry`. `seen_starts` counts the starts before it, as the
-    /// per-instruction hook runs while the line waits.
+    /// `stop_at_entry`. `seen_starts` counts the starts before it: the
+    /// per-instruction hook runs while the shell takes batch lines, and
+    /// `begin_batch` catches up with the starts it didn't see.
     fn note_run_line(&mut self, cpu: &Cpu) {
         if let Some(run) = self.run_wait.as_mut().filter(|r| r.before.is_none())
             && cpu.batch.reached == Some(run.op)
@@ -1766,7 +1780,8 @@ impl DebugHub {
         let (op, before, stop_at_entry) = (run.op, run.before, run.stop_at_entry);
         let Some(before) = before else {
             // The prompt is back and the shell never took the line: the
-            // batch lines were ended (Ctrl+C, reboot_shell) with it.
+            // batch lines were ended with it (Ctrl+C, the settings window
+            // closing the program; `reboot_shell` supersedes the run first).
             if idle {
                 self.start_once = false;
                 self.run_wait = None;
@@ -1871,7 +1886,7 @@ impl DebugHub {
                 }
                 at_ms(cpu, self, boundary);
             }
-            if matches!(reason, crate::exec::StopReason::Paused | crate::exec::StopReason::Exit) {
+            if matches!(reason, crate::exec::StopReason::Paused | crate::exec::StopReason::Exit | crate::exec::StopReason::Hook) {
                 break;
             }
         }
@@ -3802,7 +3817,7 @@ mod tests {
             cpu.bus.start_batch(end);
             while cpu.bus.clock.icount < end {
                 match exec::run_batch(cpu, hub, hot) {
-                    StopReason::BatchEnd | StopReason::Paused | StopReason::Exit => break,
+                    StopReason::BatchEnd | StopReason::Paused | StopReason::Exit | StopReason::Hook => break,
                     StopReason::ShellReloaded => cpu.bus.start_batch(end),
                 }
             }
@@ -4020,6 +4035,33 @@ mod tests {
         let rx = send(&mut cpu, &mut hub, Cmd::Run { command: "CRASH.COM".into(), stop_at_entry: false, queue: true });
         let started = answer(&mut cpu, &mut hub, rx, 50).unwrap();
         assert_eq!(started["program"]["name"], "CRASH.COM");
+    }
+
+    #[test]
+    fn a_queued_run_leaves_the_batch_file_s_program_without_the_hook() {
+        let (mut cpu, mut hub) = machine("queued-hook");
+        let dir = std::env::temp_dir().join(format!("rust-dos-debug-queued-hook-{}", std::process::id()));
+        // mov cx,FFFFh; loop $; mov ax,4C00h; int 21h: a few frames' work.
+        std::fs::write(dir.join("SPIN.COM"), [0xB9, 0xFF, 0xFF, 0xE2, 0xFE, 0xB8, 0x00, 0x4C, 0xCD, 0x21]).unwrap();
+        cpu.batch.append_file("AUTOEXEC", b"@echo off\r\nSPIN.COM\r\n", "");
+        let mut sent = send(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true, queue: true });
+        let op = sent.rx.try_recv().expect("an answer at once").meta.op.expect("an operation");
+        let (mut cold, mut stop) = (0, None);
+        for _ in 0..100 {
+            if let Some(end) = op_reply(&hub, op) {
+                stop = Some(end.unwrap());
+                break;
+            }
+            if cpu.programs.running > 0 && !cpu.in_shell_code() && !hub.begin_batch(&cpu) {
+                cold += 1;
+            }
+            run(&mut cpu, &mut hub, 1);
+        }
+        assert!(cold > 0, "SPIN.COM runs without the per-instruction hook");
+        let stop = stop.expect("the run ended");
+        assert_eq!((stop["reason"].as_str(), stop["program"]["name"].as_str()), (Some("program_start"), Some("PROBE.COM")));
+        let started: Vec<Value> = entries_of(&hub, "program_started").iter().map(|e| e["program"]["name"].clone()).collect();
+        assert_eq!(started, ["SPIN.COM", "PROBE.COM"]);
     }
 
     #[test]
@@ -4347,8 +4389,7 @@ mod tests {
         assert!(hub.paused, "paused at the start");
         let busy = Cmd::Run { command: "TARGET.COM".into(), stop_at_entry: true, queue: false };
         assert_eq!(reply(&mut cpu, &mut hub, busy).unwrap_err().0, 409, "busy with the batch file");
-        let sent = send(&mut cpu, &mut hub, Cmd::Run { command: "TARGET.COM".into(), stop_at_entry: true, queue: true });
-        let mut sent = sent;
+        let mut sent = send(&mut cpu, &mut hub, Cmd::Run { command: "TARGET.COM".into(), stop_at_entry: true, queue: true });
         let answer = sent.rx.try_recv().expect("an answer at once");
         assert!(matches!(answer.reply, Reply::Json(_)), "accepted");
         let op = answer.meta.op.expect("an operation");

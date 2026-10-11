@@ -240,7 +240,7 @@ fn run_machine(dir: std::path::PathBuf, rx: mpsc::Receiver<super::super::Request
                     cpu.bus.start_batch(end);
                     while cpu.bus.clock.icount < end {
                         match exec::run_batch(&mut cpu, &mut hub, hot) {
-                            StopReason::BatchEnd | StopReason::Paused | StopReason::Exit => break,
+                            StopReason::BatchEnd | StopReason::Paused | StopReason::Exit | StopReason::Hook => break,
                             StopReason::ShellReloaded => cpu.bus.start_batch(end),
                         }
                     }

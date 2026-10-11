@@ -101,6 +101,12 @@ impl Batch {
         self.frames.iter().any(|f| f.pc < f.lines.len() || f.kind == FrameKind::Pipe)
     }
 
+    /// Whether a line queued with `append_marked` is still to be handed
+    /// out.
+    pub fn marked_line_waits(&self) -> bool {
+        self.frames.iter().any(|f| f.mark.is_some() && f.pc < f.lines.len())
+    }
+
     /// Forget the batch files once their last line has run, and turn ECHO
     /// back to what it was before them. (Until then a GOTO on their last
     /// line may still go back into them.)
@@ -202,11 +208,18 @@ impl Batch {
                 _ => expand(raw, &frame.params[frame.shift.min(frame.params.len())..], env),
             };
             let text = text.trim_start_matches([' ', '\t']);
-            if text.trim_end().is_empty() || text.starts_with(':') {
-                continue;
-            }
+            // A marked line that comes out blank or as a label has still
+            // been taken, and runs nothing.
             if mark.is_some() {
                 self.reached = mark;
+                // Run as at the prompt the batch files before it went back
+                // to: with their ECHO OFF undone.
+                if self.frames.len() == 1 {
+                    self.echo = self.echo_before;
+                }
+            }
+            if text.trim_end().is_empty() || text.starts_with(':') {
+                continue;
             }
             return Some(match text.strip_prefix('@') {
                 Some(rest) => BatchLine { text: rest.trim_start().to_string(), echo: false },
@@ -492,6 +505,28 @@ mod tests {
         assert_eq!(batch.next_line(&[]).unwrap().text, "PROBE.COM");
         assert_eq!(batch.reached, Some(7));
         assert!(!batch.is_active());
+    }
+
+    #[test]
+    fn a_marked_line_is_echoed_as_at_the_prompt_after_the_batch_file() {
+        let mut batch = Batch::default();
+        batch.append_file("AUTOEXEC", b"@echo off
+PROBE.COM
+", "");
+        batch.append_marked("TARGET.COM", 1);
+        assert_eq!(batch.next_line(&[]).unwrap().text, "echo off");
+        batch.echo = false;
+        assert!(!batch.next_line(&[]).unwrap().echo, "PROBE.COM under ECHO OFF");
+        let line = batch.next_line(&[]).unwrap();
+        assert_eq!((line.text.as_str(), line.echo), ("TARGET.COM", true));
+    }
+
+    #[test]
+    fn a_marked_line_that_expands_to_nothing_is_still_reached() {
+        let mut batch = Batch::default();
+        batch.append_marked("%NONE%", 3);
+        assert!(batch.next_line(&[]).is_none());
+        assert_eq!(batch.reached, Some(3));
     }
 
     #[test]

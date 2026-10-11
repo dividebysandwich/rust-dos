@@ -232,7 +232,9 @@ entry point.
   `"queued":true` when the prompt was busy. Any stop before the line runs
   (a breakpoint, `program_start` stops on every program, a pause) ends the
   run's operation; the line still runs. A line dropped with the batch
-  files (Ctrl+C, `reboot_shell`) gets 422.
+  files (Ctrl+C at a batch line, the settings window closing the program)
+  gets 422. `reboot_shell` drops the line too, and as a control request
+  it supersedes the run.
 
 - **Every program:** `POST /api/breakpoints {"program_start":true}` pauses
   at the entry point of each program DOS starts, a child that a game's
@@ -690,6 +692,10 @@ curl -s $J -XPOST -d '{"until_ms":8000}' $H/api/control/resume
   ```sh
   curl -s $J -XPOST -d '{"command":"GAME.EXE","queue":true,"stop_at_entry":true,"timeout_ms":600000}' $H/api/control/run
   ```
+
+  Without `stop_at_entry` the machine runs on after the reply, and the
+  next request is taken wherever the host's frame got to, so its journal
+  entry (`icount`, `emu_ns`) differs from run to run.
 - **Input:** input, and requests that change the machine (`run`, memory
   and register writes, mounts, `/api/speed`, loading a state, reboots),
   are taken only while the machine is paused or the settings window is
