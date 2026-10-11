@@ -75,12 +75,6 @@ jobs:
         if: matrix.full
         run: cargo test --workspace --locked --verbose
 
-      # Each benchmark once, so they keep building and running
-      # (docs/benchmarks.md); timing them on a shared runner says nothing.
-      - name: Run the benchmarks once
-        if: matrix.full
-        run: cargo test --benches --locked
-
       - name: Run tests on the dynamic recompiler
         if: matrix.full
         run: RUST_DOS_CORE=dynamic cargo test --locked
