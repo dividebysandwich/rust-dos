@@ -4,6 +4,7 @@
 mod cdimage;
 
 use cdimage::{IsoFile, file, iso, mixed_disc, mode1_2352, scratch};
+use rust_dos::cdrom::image::{CdImage, cue_files};
 use rust_dos::command::CommandDispatcher;
 use rust_dos::cpu::Cpu;
 use rust_dos::disk::{DriveKind, MountOptions};
@@ -124,6 +125,22 @@ fn cue_sheets_mount_whatever_their_extension() {
     let info = cpu.bus.disk.drive_info(D).expect("mounted");
     assert!(info.image.unwrap().ends_with("Bloodnet.bdn"));
     check_files(&mut cpu, &big);
+    // A save state's record of the media counts the sheet's sectors too.
+    let tracks = cue_files(&dir.join("c/Bloodnet.bdn"));
+    assert_eq!(tracks, [dir.join("c/Bloodnet.gog")]);
+
+    // A sheet of a name nothing knows is found by its contents.
+    let sheet = fs::read(dir.join("c/Bloodnet.bdn")).unwrap();
+    fs::write(dir.join("c/Bloodnet.sht"), &sheet).unwrap();
+    assert!(CdImage::open(&dir.join("c/Bloodnet.sht")).is_ok());
+    assert_eq!(cue_files(&dir.join("c/Bloodnet.sht")), [dir.join("c/Bloodnet.gog")]);
+    // Text that only mentions FILE is no sheet.
+    fs::write(dir.join("c/notes.txt"), "FILE the bug report\r\nTRACK it down\r\n").unwrap();
+    assert!(CdImage::open(&dir.join("c/notes.txt")).unwrap_err().contains("ISO 9660"));
+    assert!(cue_files(&dir.join("c/notes.txt")).is_empty());
+    // A broken .bdn says what is wrong with it.
+    fs::write(dir.join("c/broken.bdn"), "FILE \"Bloodnet.gog\" BINARY\r\n  TRACK 01 CDG\r\n").unwrap();
+    assert!(CdImage::open(&dir.join("c/broken.bdn")).unwrap_err().contains("CDG tracks are not supported"));
 }
 
 #[test]

@@ -1,7 +1,7 @@
 //! A CD image: its tracks laid out on the disc the way the CUE sheet
 //! describes them, and sector reads from the files behind them.
 
-use super::cue::{parse_cue, FileFormat, TrackMode};
+use super::cue::{parse_cue, CueSheet, FileFormat, TrackMode};
 use super::{Extent, DATA_SECTOR, RAW_SECTOR};
 use crate::diskimage::MemoryImage;
 use std::cell::RefCell;
@@ -75,8 +75,8 @@ impl CdImage {
     /// data track (.iso, .bin, .img), whose sector format is found from
     /// where the ISO 9660 volume descriptor is.
     pub fn open(path: &Path) -> Result<Self, String> {
-        if is_cue(path) {
-            Self::open_cue(path)
+        if let Some(sheet) = sheet(path) {
+            Self::open_cue(path, sheet?)
         } else if is_chd(path) {
             Self::open_chd(path)
         } else {
@@ -84,9 +84,7 @@ impl CdImage {
         }
     }
 
-    fn open_cue(path: &Path) -> Result<Self, String> {
-        let text = hostfs::read(path).map_err(|e| format!("{}: {}", path.display(), e))?;
-        let sheet = parse_cue(&String::from_utf8_lossy(&text))?;
+    fn open_cue(path: &Path, sheet: CueSheet) -> Result<Self, String> {
         // A bare file name's parent is "", which can't be listed to match
         // names in any case.
         let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
@@ -527,26 +525,31 @@ pub fn wave_data<R: Read + Seek>(file: &mut R) -> Result<(WaveFormat, u64, u64),
     }
 }
 
-/// The largest file `is_cue` reads to see whether it is a CUE sheet. A
+/// The largest file `sheet` reads to see whether it is a CUE sheet. A
 /// sheet of 99 tracks is a few KiB; a disc image is far larger.
 const MAX_SHEET: u64 = 64 * 1024;
 
-/// Whether `CdImage::open` reads `path` as a CUE sheet: a `.cue`, GOG's
-/// `.ins` (`.inst` in Steam's copies), or a small file of any other name
-/// that reads as a sheet with a track, as GOG's `.bdn` for BloodNet does.
-fn is_cue(path: &Path) -> bool {
-    if path.extension().is_some_and(|e| ["cue", "ins", "inst"].iter().any(|c| e.eq_ignore_ascii_case(c))) {
-        return true;
+/// The CUE sheet at `path`, read and parsed, if `CdImage::open` reads it
+/// as one: a `.cue`, GOG's `.ins` (`.inst` in Steam's copies) or GOG's
+/// `.bdn` for BloodNet, with the error if it can't be read or parsed, or a
+/// small file of any other name that parses as a sheet with a track.
+/// None for any other file.
+fn sheet(path: &Path) -> Option<Result<CueSheet, String>> {
+    let named =
+        path.extension().is_some_and(|e| ["cue", "ins", "inst", "bdn"].iter().any(|c| e.eq_ignore_ascii_case(c)));
+    if !named && !hostfs::metadata(path).is_ok_and(|m| !m.is_dir && m.len <= MAX_SHEET) {
+        return None;
     }
-    hostfs::metadata(path).is_ok_and(|m| !m.is_dir && m.len <= MAX_SHEET)
-        && hostfs::read(path).is_ok_and(|text| parse_cue(&String::from_utf8_lossy(&text)).is_ok())
+    let sheet = hostfs::read(path)
+        .map_err(|e| format!("{}: {}", path.display(), e))
+        .and_then(|text| parse_cue(&String::from_utf8_lossy(&text)));
+    (named || sheet.is_ok()).then_some(sheet)
 }
 
 /// The files the CUE sheet at `path` keeps its tracks in, those that are
 /// there; none if `path` isn't a CUE sheet `CdImage::open` reads as one.
 pub fn cue_files(path: &Path) -> Vec<PathBuf> {
-    let Some(text) = is_cue(path).then(|| hostfs::read(path).ok()).flatten() else { return Vec::new() };
-    let Ok(sheet) = parse_cue(&String::from_utf8_lossy(&text)) else { return Vec::new() };
+    let Some(Ok(sheet)) = sheet(path) else { return Vec::new() };
     let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
     sheet.files.iter().filter_map(|f| find_file(dir, &f.name).ok()).collect()
 }
