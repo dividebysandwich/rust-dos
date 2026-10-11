@@ -12,6 +12,7 @@ const CURRENT: &str = env!("CARGO_PKG_VERSION");
 /// Where to get it, for the messages.
 pub const SITE: &str = "rust-dos.com";
 /// The file in rust-dos's directory with the version last answered.
+#[cfg(all(feature = "sdl", not(target_arch = "wasm32")))]
 const REMEMBERED: &str = "latest-version";
 
 /// The version in version.json's text.
@@ -183,5 +184,9 @@ mod tests {
         assert!(!is_newer("1.6", "1.6.0"));
         assert!(!is_newer("1.7.0-beta", "1.7.0"));
         assert!(!is_newer("garbage", "1.6.1"));
+        assert!(!is_newer("1.6.1", "garbage"));
+        assert!(!is_newer("1.7.0", "1.7.0-beta"));
+        assert!(!is_newer("1.6.9", "1.7.0"));
+        assert!(!is_newer("0.9.99", "1.0"));
     }
 }
