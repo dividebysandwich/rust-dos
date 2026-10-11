@@ -6,6 +6,7 @@
 //! `DebugHub::poll` once per frame, and data flows back through oneshot
 //! replies, broadcast channels, and a shared frame snapshot.
 
+pub mod heat;
 pub mod journal;
 pub mod keys;
 pub mod pm;
@@ -47,6 +48,14 @@ pub struct Shared {
     /// Bumped whenever `frame` changes.
     pub frame_seq: AtomicU64,
     pub screen_subscribers: AtomicUsize,
+    /// The memory heatmap's latest message (`heat.rs`), its number, and
+    /// the streams that want it: the writes are watched only while one
+    /// does.
+    pub heat: Mutex<Arc<[u8]>>,
+    pub heat_seq: AtomicU64,
+    pub heat_subscribers: AtomicUsize,
+    /// The written address ranges of the heatmap's last message.
+    pub heat_ranges: Mutex<Vec<(usize, usize)>>,
     /// Events kept nowhere: log lines and video mode changes. What the
     /// machine and the debugger did is in `journal`.
     pub events: broadcast::Sender<Arc<str>>,
@@ -110,6 +119,10 @@ impl Shared {
             frame: Mutex::new(video::Frame::new(video::SCREEN_WIDTH, video::SCREEN_HEIGHT)),
             frame_seq: AtomicU64::new(0),
             screen_subscribers: AtomicUsize::new(0),
+            heat: Mutex::new(Arc::from([] as [u8; 0])),
+            heat_seq: AtomicU64::new(0),
+            heat_subscribers: AtomicUsize::new(0),
+            heat_ranges: Mutex::new(Vec::new()),
             events: broadcast::channel(1024).0,
             trace: broadcast::channel(64).0,
             audio: broadcast::channel(256).0,
@@ -771,6 +784,8 @@ pub struct DebugHub {
     fps: f64,
     fps_mark: (Instant, u64),
     stats: ExecStats,
+    /// The memory heatmap while a stream wants it.
+    heat: Option<heat::Heat>,
 }
 
 /// Execution speed, measured over windows of about a second of wall time.
@@ -872,6 +887,7 @@ impl DebugHub {
             fps: 0.0,
             fps_mark: (Instant::now(), 0),
             stats: ExecStats::new(),
+            heat: None,
         }
     }
 
@@ -1392,6 +1408,7 @@ impl DebugHub {
             self.handle(cpu, req);
         }
         self.rx = Some(rx);
+        self.update_heat(cpu);
 
         // Deterministic mode delivers the machine's input at its ticks
         // (`feed_input`); the settings window's goes as it comes.
@@ -1710,6 +1727,31 @@ impl DebugHub {
 
     /// Hand the composited frame (cached VGA render + cursor overlays) to
     /// screenshot requests and the screen stream.
+    /// Watch the machine's writes while a heatmap stream is open, and
+    /// publish what they were.
+    fn update_heat(&mut self, cpu: &mut Cpu) {
+        let Some(shared) = &self.shared else { return };
+        let wanted = shared.heat_subscribers.load(Ordering::Relaxed) > 0;
+        match (&mut self.heat, wanted) {
+            (None, true) => self.heat = Some(heat::Heat::start(&mut cpu.bus)),
+            (Some(_), false) => {
+                heat::Heat::stop(&mut cpu.bus);
+                self.heat = None;
+            }
+            (Some(heat), true) => {
+                heat.sample(&cpu.bus);
+                if let Ok(mut message) = shared.heat.lock() {
+                    *message = Arc::from(heat.message(&cpu.bus));
+                    shared.heat_seq.fetch_add(1, Ordering::Release);
+                }
+                if let Ok(mut ranges) = shared.heat_ranges.lock() {
+                    *ranges = heat.hot_ranges();
+                }
+            }
+            (None, false) => {}
+        }
+    }
+
     pub fn capture_frame(&mut self, screen: &video::Frame) {
         self.count_frame();
         if !self.wants_frame() {

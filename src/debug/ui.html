@@ -177,6 +177,11 @@ main {
   pointer-events: none;
 }
 #screen-wrap.captured #screen-hint { display: none; }
+#heat-wrap {
+  height: 100%; background: #000; overflow: hidden;
+  display: flex; align-items: center; justify-content: center;
+}
+#heat { display: block; image-rendering: pixelated; cursor: crosshair; }
 
 /* Disassembly */
 #dis-panel { grid-area: dis; }
@@ -376,6 +381,7 @@ kbd {
         <button class="tab" data-pane="pane-trace">Trace</button>
         <button class="tab" data-pane="pane-tables">Tables</button>
         <button class="tab" data-pane="pane-status">Status</button>
+        <button class="tab" data-pane="pane-heat">Heatmap</button>
       </div>
       <span id="bottom-tools" style="margin-left:auto; display:flex; gap:6px; align-items:center;"></span>
     </div>
@@ -384,6 +390,7 @@ kbd {
       <div class="tabpane" id="pane-trace"><table id="trace"><thead></thead><tbody></tbody></table></div>
       <div class="tabpane" id="pane-tables"><div id="tables"></div></div>
       <div class="tabpane" id="pane-status"><pre class="json" id="status-json"></pre></div>
+      <div class="tabpane" id="pane-heat"><div id="heat-wrap"><canvas id="heat" width="512" height="512"></canvas></div></div>
     </div>
   </section>
 </main>
@@ -417,6 +424,10 @@ kbd {
 </template>
 <template id="tools-status">
   <button id="status-refresh">Refresh</button>
+</template>
+<template id="tools-heat">
+  <span class="muted" id="heat-at">RAM writes (red to yellow) and code (blue): hover for the address</span>
+  <label class="muted"><input type="checkbox" id="heat-code" checked> code</label>
 </template>
 
 <script>
@@ -1034,6 +1045,113 @@ function connectScreen() {
   ws.onclose = () => setTimeout(connectScreen, 1000);
 }
 
+// ---------------------------------------------------------------------------
+// The memory heatmap: a pixel for each 64-byte block of RAM, glowing where
+// the machine writes and blue where code is, from the bottom of memory to
+// the highest block written or holding code (1 MB at least), in rows as
+// wide as fit the panel best. Writes are watched only while the stream is
+// open (the tab is shown).
+
+const heat = { ws: null, last: null, code: true, row: 512, used: 0 };
+
+function openHeat() {
+  if (heat.ws) return;
+  heat.ws = new WebSocket(`ws://${location.host}/ws/heat?fps=15`);
+  heat.ws.binaryType = "arraybuffer";
+  heat.ws.onmessage = (m) => {
+    if (typeof m.data === "string") return;
+    heat.last = parseHeat(m.data);
+    drawHeat();
+  };
+  heat.ws.onclose = () => { heat.ws = null; };
+}
+
+function closeHeat() {
+  if (heat.ws) heat.ws.close();
+  heat.ws = null;
+}
+
+function parseHeat(buffer) {
+  const view = new DataView(buffer);
+  const blockSize = view.getUint32(0, true);
+  const blocks = view.getUint32(4, true);
+  const levels = new Uint8Array(buffer, 8, blocks);
+  const code = new Uint8Array(buffer, 8 + blocks);
+  return { blockSize, blocks, levels, code };
+}
+
+// Black, through red and orange, to yellow-white for a write just now.
+function heatColor(level) {
+  const t = level / 255;
+  return [Math.min(255, 80 + 400 * t), Math.max(0, 420 * t - 120), Math.max(0, 500 * t - 380)];
+}
+
+// The blocks to show, and the row width that shows them biggest in the
+// panel.
+function heatLayout(h) {
+  for (let i = h.blocks - 1; i >= heat.used; i--) {
+    if (h.levels[i] || (h.code[i >> 3] >> (i & 7)) & 1) { heat.used = i + 1; break; }
+  }
+  const shown = Math.min(h.blocks, Math.max(heat.used, (0x110000 / h.blockSize) | 0));
+  const wrap = $("#heat-wrap");
+  const [w, h2] = [wrap.clientWidth || 512, wrap.clientHeight || 256];
+  let best = { row: 512, scale: 0 };
+  for (let row = 64; row <= 4096; row *= 2) {
+    const scale = Math.min(w / row, h2 / Math.ceil(shown / row));
+    if (scale > best.scale) best = { row, scale };
+  }
+  return { shown, ...best };
+}
+
+function drawHeat() {
+  const h = heat.last;
+  if (!h) return;
+  const canvas = $("#heat");
+  const { shown, row, scale } = heatLayout(h);
+  heat.row = row;
+  const rows = Math.ceil(shown / row);
+  if (canvas.width !== row) canvas.width = row;
+  if (canvas.height !== rows) canvas.height = rows;
+  canvas.style.width = `${Math.floor(row * scale)}px`;
+  canvas.style.height = `${Math.floor(rows * scale)}px`;
+  const ctx = canvas.getContext("2d");
+  const img = ctx.createImageData(row, rows);
+  const px = img.data;
+  for (let i = 0; i < shown; i++) {
+    const o = i * 4;
+    const level = h.levels[i];
+    const isCode = heat.code && (h.code[i >> 3] >> (i & 7)) & 1;
+    let rgb = level ? heatColor(level) : isCode ? [30, 60, 140] : [12, 12, 16];
+    if (level && isCode) rgb = [rgb[0], rgb[1], Math.max(rgb[2], 140)];
+    px[o] = rgb[0]; px[o + 1] = rgb[1]; px[o + 2] = rgb[2]; px[o + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  // 640K (video memory from A0000h), the ROMs from C0000h, and 1 MB.
+  ctx.fillStyle = "rgba(255,255,255,0.35)";
+  for (const addr of [0xA0000, 0xC0000, 0x100000]) {
+    const block = addr / h.blockSize;
+    if (block < shown) ctx.fillRect(block % row, Math.floor(block / row), Math.max(1, row / 64), 1);
+  }
+}
+
+// The block under the mouse.
+function heatBlock(e) {
+  const canvas = $("#heat");
+  const rect = canvas.getBoundingClientRect();
+  const x = Math.floor((e.clientX - rect.left) * canvas.width / rect.width);
+  const y = Math.floor((e.clientY - rect.top) * canvas.height / rect.height);
+  if (!heat.last || x < 0 || y < 0 || x >= heat.row) return null;
+  const i = y * heat.row + x;
+  return i < heat.last.blocks ? i : null;
+}
+
+function heatAddress(i) {
+  const addr = i * heat.last.blockSize;
+  const hex = (n, w) => n.toString(16).toUpperCase().padStart(w, "0");
+  const real = addr < 0x100000 ? ` (${hex(addr >> 4, 4)}:0000)` : "";
+  return { addr, text: `${hex(addr, 6)}h${real}` };
+}
+
 let inputSocket;
 let inputQueue = [];
 
@@ -1217,6 +1335,7 @@ function setupTabs() {
 }
 
 function showBottomTools(pane) {
+  if (pane === "pane-heat") openHeat(); else closeHeat();
   const tools = $("#bottom-tools");
   const tpl = $("#tools-" + pane.replace("pane-", ""));
   tools.replaceChildren(tpl.content.cloneNode(true));
@@ -1247,6 +1366,9 @@ function showBottomTools(pane) {
     $("#table-addr").addEventListener("keydown", (e) => { if (e.key === "Enter") loadTable(); });
     $("#table-load").addEventListener("click", loadTable);
     loadTable();
+  } else if (pane === "pane-heat") {
+    $("#heat-code").checked = heat.code;
+    $("#heat-code").addEventListener("change", (e) => { heat.code = e.target.checked; drawHeat(); });
   } else if (pane === "pane-status") {
     $("#status-refresh").addEventListener("click", act(async () => {
       $("#status-json").textContent = JSON.stringify(await api("/api/status"), null, 2);
@@ -1329,6 +1451,23 @@ function setup() {
   setPaused(false);
   connectEvents();
   connectScreen();
+  $("#heat").addEventListener("mousemove", (e) => {
+    const i = heatBlock(e);
+    const at = $("#heat-at");
+    if (i === null || !at) return;
+    const { text } = heatAddress(i);
+    const written = heat.last.levels[i] ? ", written" : "";
+    const code = (heat.last.code[i >> 3] >> (i & 7)) & 1 ? ", code" : "";
+    at.textContent = `${text}${written}${code}: click to show it in the memory panel`;
+  });
+  // /ui#heat opens the heatmap.
+  if (location.hash === "#heat") document.querySelector('[data-pane="pane-heat"]').click();
+  $("#heat").addEventListener("click", (e) => {
+    const i = heatBlock(e);
+    if (i === null) return;
+    $("#mem-addr").value = "phys:" + heatAddress(i).addr.toString(16).toUpperCase();
+    memGo();
+  });
   connectInput();
 
   act(async () => {

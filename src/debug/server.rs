@@ -119,6 +119,8 @@ fn router(state: AppState) -> Router {
         .route("/ws/trace", get(ws_trace))
         .route("/ws/events", get(ws_events))
         .route("/ws/screen", get(ws_screen))
+        .route("/ws/heat", get(ws_heat))
+        .route("/api/heat", get(heat_get))
         .route("/ws/audio", get(ws_audio))
         .route("/ws/input", get(ws_input))
         .layer(middleware::from_fn_with_state(state.clone(), request_ids))
@@ -1674,6 +1676,64 @@ async fn ws_screen(State(s): State<AppState>, Query(q): Query<ScreenQuery>, ws: 
     }))
 }
 
+struct HeatGuard(Arc<Shared>);
+
+impl Drop for HeatGuard {
+    fn drop(&mut self) {
+        self.0.heat_subscribers.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// The memory heatmap (`heat.rs`), a binary message a frame at up to `fps`
+/// a second; the machine's writes are watched while one is open.
+async fn ws_heat(State(s): State<AppState>, Query(q): Query<ScreenQuery>, ws: WebSocketUpgrade) -> ApiResult {
+    server_only()?;
+    let fps = q.fps.unwrap_or(15.0).clamp(0.1, 60.0);
+    Ok(ws.on_upgrade(move |mut socket| async move {
+        s.shared.heat_subscribers.fetch_add(1, Ordering::Relaxed);
+        let _guard = HeatGuard(s.shared.clone());
+        let mut interval = tokio::time::interval(Duration::from_secs_f64(1.0 / fps));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut last_seq = 0;
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {}
+                incoming = socket.recv() => match incoming {
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return,
+                    _ => continue,
+                },
+            }
+            let seq = s.shared.heat_seq.load(Ordering::Acquire);
+            if seq == last_seq {
+                continue;
+            }
+            last_seq = seq;
+            let message = match s.shared.heat.lock() {
+                Ok(m) => m.clone(),
+                Err(_) => return,
+            };
+            if socket.send(Message::Binary(message.to_vec().into())).await.is_err() {
+                return;
+            }
+        }
+    }))
+}
+
+/// The address ranges the heatmap saw written in the last second or so,
+/// while a `/ws/heat` stream is open.
+async fn heat_get(State(s): State<AppState>) -> ApiResult {
+    server_only()?;
+    let active = s.shared.heat_subscribers.load(Ordering::Relaxed) > 0;
+    let ranges: Vec<Value> = s
+        .shared
+        .heat_ranges
+        .lock()
+        .map(|r| r.iter().map(|&(a, b)| json!([format!("{:#07X}", a), format!("{:#07X}", b)])).collect())
+        .unwrap_or_default();
+    let ranges = if active { ranges } else { Vec::new() };
+    Ok(json_ok(&json!({ "active": active, "block_size": 64, "written": ranges })))
+}
+
 async fn ws_audio(State(s): State<AppState>, ws: WebSocketUpgrade) -> ApiResult {
     server_only()?;
     let mut rx = s.shared.audio.subscribe();
@@ -1936,6 +1996,10 @@ PROTECTED MODE
   POST /api/printer/eject    Eject the page and end the print job; returns once
                              its files are written
 
+MEMORY HEATMAP
+  GET  /api/heat             the address ranges written in about the last second, while
+                             a /ws/heat stream is open ("active")
+
 SOUND
   GET  /api/gus              the Gravis Ultrasound: latches, IRQ status, timers,
                              DMA and every voice's registers
@@ -2002,6 +2066,10 @@ WEBSOCKETS
   /ws/trace           as /ws/events, with per-frame batches
                       {"type":"trace","dropped":N,"entries":[...]}
   /ws/screen?fps=5    binary PNG frames, sent only when the screen changes
+  /ws/heat?fps=15     the memory heatmap: u32 LE block size (64), u32 LE block count,
+                      a heat byte per block (255 = just written, fading), then a bit
+                      per block holding code. Every write is watched while it is open
+                      (the recompiler's stores take a slower path).
   /ws/audio           text header, then binary s16le 44100 Hz stereo (interleaved) chunks
   /ws/input           send input events (same JSON as /api/input/batch, optional "wait":true,
                       "request_id" and "if_state_seq"); replies have "req" and "state_seq"

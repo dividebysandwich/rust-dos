@@ -39,6 +39,11 @@ pub const DEFAULT_MEMORY_MB: usize = 16;
 /// enough that a program's variables rarely share a block with its code.
 pub const GEN_SHIFT: usize = 6;
 
+/// `Bus::code_blocks`' marks: a block with code, and every block while
+/// the writes are watched.
+pub const CODE_BLOCK: u8 = 1;
+pub const WATCHED_BLOCK: u8 = 2;
+
 /// Where `Bus` keeps the A20 mask and `irq_ready`, for the dynamic
 /// recompiler's code.
 pub(crate) const A20_MASK_OFFSET: usize = std::mem::offset_of!(Bus, a20_mask);
@@ -334,13 +339,15 @@ pub struct Bus {
     /// What the CPU touches while `idle` proves a loop changes nothing:
     /// the blocks of RAM it writes, and whether it did anything else.
     pub observe: crate::idle::Observe,
-    /// Per block of RAM (`GEN_SHIFT`), 1 if it or the next block holds code
-    /// that was decoded (by the decoded-instruction cache) or translated (by
-    /// the dynamic recompiler). A block stays marked, and every write to it
-    /// bumps its generation. The recompiler's code writes other blocks of
-    /// RAM without bumping theirs: nothing decoded depends on them. (A write
-    /// of up to 4 bytes that reaches into a block with code starts in it or
-    /// the block before, which is marked too.)
+    /// Per block of RAM (`GEN_SHIFT`), `CODE_BLOCK` if it or the next block
+    /// holds code that was decoded (by the decoded-instruction cache) or
+    /// translated (by the dynamic recompiler). A block stays marked, and
+    /// every write to it bumps its generation. The recompiler's code writes
+    /// other blocks of RAM without bumping theirs: nothing decoded depends
+    /// on them. (A write of up to 4 bytes that reaches into a block with
+    /// code starts in it or the block before, which is marked too.)
+    /// `WATCHED_BLOCK` makes the recompiler's writes bump every block's
+    /// generation, for the debugger's heatmap (`set_write_tracking`).
     pub code_blocks: Vec<u8>,
 
     /// Optional observer for every `log_string` line. Installed by the debug
@@ -1183,7 +1190,20 @@ impl Bus {
         let blocks = &mut self.code_blocks;
         let last = ((end - 1) >> GEN_SHIFT).min(blocks.len() - 1);
         for block in (start >> GEN_SHIFT).saturating_sub(1)..=last {
-            blocks[block] = 1;
+            blocks[block] |= CODE_BLOCK;
+        }
+    }
+
+    /// Make the recompiler's writes to every block of RAM bump its
+    /// generation (`page_gen`), as the interpreter's do, so that all the
+    /// machine's writes show; or only those to blocks with code again.
+    pub fn set_write_tracking(&mut self, on: bool) {
+        for block in &mut self.code_blocks {
+            if on {
+                *block |= WATCHED_BLOCK;
+            } else {
+                *block &= !WATCHED_BLOCK;
+            }
         }
     }
 

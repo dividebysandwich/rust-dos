@@ -3676,3 +3676,39 @@ fn video_memory_is_written_and_read_through_the_tlb() {
     assert!(b.cpu.bus.vga.vram_graphics.iter().any(|&p| p != 0));
     assert_ne!(b.cpu.ebx(), 0);
 }
+
+/// A loop storing to DATA's block 100 times: the run on each of `a` and
+/// `b`, and how often DATA's block's generation changed on each.
+fn data_stores(watched: bool) -> (u32, u32) {
+    let (mut a, mut b) = twins(|rig| {
+        let code = asm32(CODE, |a| {
+            a.mov(ecx, 100u32)?;
+            a.mov(dword_ptr(DATA as u64), ecx)?;
+            a.dec(ecx)?;
+            a.jnz(CODE as u64 + 5)?;
+            a.hlt()
+        });
+        rig.load(CODE, &code);
+    });
+    let block = DATA as usize >> rust_dos::bus::GEN_SHIFT;
+    for rig in [&mut a, &mut b] {
+        rig.cpu.bus.set_write_tracking(watched);
+    }
+    let before = (a.cpu.bus.page_gen[block], b.cpu.bus.page_gen[block]);
+    run_both(&mut a, &mut b);
+    (a.cpu.bus.page_gen[block].wrapping_sub(before.0), b.cpu.bus.page_gen[block].wrapping_sub(before.1))
+}
+
+#[test]
+fn watched_writes_bump_every_blocks_generation_on_the_recompiler_too() {
+    // The interpreter bumps every block it writes; the recompiler only
+    // those with code, unless the writes are watched (the debugger's
+    // heatmap).
+    let (interpreted, translated) = data_stores(true);
+    assert!(interpreted >= 100, "{}", interpreted);
+    assert_eq!(translated, interpreted);
+    if AVAILABLE {
+        let (_, translated) = data_stores(false);
+        assert!(translated < interpreted, "the recompiler bumped {} times without watching", translated);
+    }
+}
