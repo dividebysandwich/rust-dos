@@ -95,10 +95,11 @@ fn shell_reload_clears_the_old_screen_of_another_text_mode() {
 
 /// The 16-color renderer redraws only the rows whose plane bytes changed,
 /// and what it leaves must be what a full render draws: after a sprite, a
-/// palette change, a scroll, panning and a split screen moving up and
-/// down, unpanned or not, the frame drawn bit by bit is the frame drawn
-/// from scratch. Over noise, and over a pattern every row of which has the
-/// same bytes, where only the panning tells rows apart.
+/// palette change, a scroll, panning, a row that wraps around the end of
+/// the planes and a split screen moving up and down, unpanned or not, the
+/// frame drawn bit by bit is the frame drawn from scratch. Over noise, and
+/// over a pattern every row of which has the same bytes, where only the
+/// panning tells rows apart.
 #[test]
 fn planar_frames_drawn_row_by_row_match_full_renders() {
     for patterned in [false, true] {
@@ -138,6 +139,17 @@ fn planar_steps(mode: u8, patterned: bool) {
         video::render_screen(&mut fresh, &cpu.bus);
         cpu.bus.vga.clear_dirty();
         assert!(frame == fresh, "mode {mode:02X} over {what}: {step}");
+        // Mode 0Dh's 320x200 is shown at 640x400, every pixel a block of
+        // 2x2, which the window may show at half the size.
+        assert_eq!(frame.doubled, mode == 0x0D, "mode {mode:02X} over {what}: {step}");
+        if frame.doubled {
+            let row = 3 * w as usize;
+            for (y, line) in frame.rgb.chunks_exact(row).enumerate() {
+                let above = &frame.rgb[(y & !1) * row..][..row];
+                let pairs = line.as_chunks::<6>().0.iter().all(|p| p[..3] == p[3..]);
+                assert!(pairs && line == above, "mode {mode:02X} over {what}: {step}, row {y} not doubled");
+            }
+        }
     };
     let attribute = |cpu: &mut Cpu, index: u8, value: u8| {
         cpu.bus.io_read(0x3DA);
@@ -176,6 +188,16 @@ fn planar_steps(mode: u8, patterned: bool) {
     check(&mut cpu, "pan");
     attribute(&mut cpu, 0x13, 0x05);
     check(&mut cpu, "more pan");
+    // Scrolled so that the third row runs past the end of the planes and
+    // goes on at their start, then a byte changed in the part that
+    // wrapped.
+    let start = 0x10000 - 2 * bytes_per_row - 3;
+    crtc(&mut cpu, 0x0C, (start >> 8) as u8);
+    crtc(&mut cpu, 0x0D, start as u8);
+    cpu.bus.vga.latch_start_address();
+    check(&mut cpu, "scroll across the end of the planes");
+    cpu.bus.write_8(0xA0000 + 10, 0x3C);
+    check(&mut cpu, "a byte past the end of the planes");
     // A split screen from scanline `line` on: Line Compare's bits 0-7 in
     // CR18h, bit 8 in CR07h bit 4, bit 9 in CR09h bit 6.
     let split = |cpu: &mut Cpu, line: u16| {
