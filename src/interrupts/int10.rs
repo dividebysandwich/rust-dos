@@ -391,11 +391,23 @@ pub fn assume_machine_display(cpu: &mut Cpu) {
     set_cursor(cpu, col, row, page);
 }
 
+/// What the mouse driver compares across a mode set: the BIOS mode number,
+/// the VBE mode if one is set, and the cursor's screen (`driver_screen`).
+type MouseScreen = (u8, Option<u16>, (i32, i32));
+
+fn mouse_screen(cpu: &mut Cpu) -> MouseScreen {
+    let bios_mode = cpu.bus.guest_read_8(0x0449) & 0x7F;
+    let vbe_mode = cpu.bus.vbe.mode.as_ref().map(|mode| mode.number);
+    (bios_mode, vbe_mode, crate::mouse::driver_screen(&cpu.bus))
+}
+
 /// Tell the mouse driver a program set a video mode, as a driver hooking
-/// INT 10h sees it (see `MouseState::video_mode_set`).
-fn mode_set_for_mouse(cpu: &mut Cpu) {
-    let screen = crate::mouse::driver_screen(&cpu.bus);
-    cpu.bus.mouse.video_mode_set(screen);
+/// INT 10h sees it (see `MouseState::video_mode_set`). `before` is the
+/// screen before the call: when the mode and the screen are the same, the
+/// program's range stays.
+fn mode_set_for_mouse(cpu: &mut Cpu, before: MouseScreen) {
+    let after = mouse_screen(cpu);
+    cpu.bus.mouse.video_mode_set(after.2, after == before);
 }
 
 /// INT 10h AH=00h: set the standard video mode AL (bit 7: keep the
@@ -666,8 +678,9 @@ pub fn handle(cpu: &mut Cpu) {
     match ah {
         // AH = 00h: Set Video Mode
         0x00 => {
+            let before = mouse_screen(cpu);
             set_mode(cpu, cpu.get_al());
-            mode_set_for_mouse(cpu);
+            mode_set_for_mouse(cpu, before);
         }
 
         // AH = 01h: Set Cursor Type
@@ -1178,6 +1191,7 @@ pub fn handle(cpu: &mut Cpu) {
         // AH = 11h: Character Generator
         0x11 => {
             let al = cpu.get_al();
+            let before = mouse_screen(cpu);
             match al {
                 // AL=10h/11h/12h/14h: load a font and take its height: as
                 // many rows as fit in the text mode's scanlines (on a VGA's
@@ -1261,7 +1275,7 @@ pub fn handle(cpu: &mut Cpu) {
             // A text font load (AL=10h-1Fh) can change the rows, and
             // CuteMouse treats it as a mode set: 80x50 gets 0-399.
             if (0x10..=0x1F).contains(&al) {
-                mode_set_for_mouse(cpu);
+                mode_set_for_mouse(cpu, before);
             }
         }
 
@@ -1510,9 +1524,10 @@ pub fn handle(cpu: &mut Cpu) {
         // AH = 4Fh: VESA BIOS Extensions
         0x4F => {
             let set = cpu.get_al() == 0x02;
+            let before = mouse_screen(cpu);
             super::vbe::handle(cpu);
             if set && cpu.ax() == 0x004F {
-                mode_set_for_mouse(cpu);
+                mode_set_for_mouse(cpu, before);
             }
         }
         0x15 if cpu.bus.verite() => crate::bus::verite_bios(cpu),

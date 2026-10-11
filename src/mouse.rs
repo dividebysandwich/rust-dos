@@ -290,20 +290,32 @@ impl MouseState {
     }
 
     /// A program set a video mode through INT 10h (AH=00h, VBE function 02h,
-    /// or a text font load, AH=11h AL=10h-1Fh), whose screen is `w` x `h` (see `driver_screen`). Drivers that hook
-    /// INT 10h, CuteMouse's and DOSBox's among them, set the cursor ranges
-    /// to the new screen, so a range left from the mode before doesn't
-    /// stretch the virtual screen: Conqueror A.D. 1086 sets 0-479 in its
-    /// 640x480 menus and reads 0-199 in its 320x200 battles without setting
-    /// the range again. The cursor stays where it is, inside the new range,
-    /// as in DOSBox (CuteMouse centres it). Both drivers also hide the
-    /// cursor (the show/hide counter goes back to 1), so a program shows it
-    /// again in the new mode. The host pointer's last position was in the
-    /// old screen's units: the next one starts the PS/2 and serial motion
-    /// afresh rather than counting the change of scale as a move.
-    pub fn video_mode_set(&mut self, (w, h): (i32, i32)) {
+    /// or a text font load, AH=11h AL=10h-1Fh), whose screen is `w` x `h`
+    /// (see `driver_screen`). Drivers that hook INT 10h, CuteMouse's and
+    /// DOSBox's among them, set the cursor ranges to the new screen, so a
+    /// range left from the mode before doesn't stretch the virtual screen:
+    /// Conqueror A.D. 1086 sets 0-479 in its 640x480 menus and reads 0-199
+    /// in its 320x200 battles without setting the range again. The cursor
+    /// stays where it is, inside the new range, as in DOSBox (CuteMouse
+    /// centres it).
+    ///
+    /// With `same_mode` (the mode number, VBE mode and screen are those
+    /// from before the call) the program's range stays: Dark Sun 2 sets
+    /// x 0-319 in mode 13h, sets mode 13h again and draws its cursor at
+    /// the driver's x, which a reset to 0-639 would take off the screen.
+    /// CuteMouse and DOSBox reset the range on this call too.
+    ///
+    /// Either way the cursor is hidden (the show/hide counter goes back to
+    /// 1), as both drivers do, so a program shows it again in the new mode.
+    /// The host pointer's last position was in the old screen's units: the
+    /// next one starts the PS/2 and serial motion afresh rather than
+    /// counting a change of scale as a move.
+    pub fn video_mode_set(&mut self, (w, h): (i32, i32), same_mode: bool) {
         self.hide_counter = 1;
         self.ps2.last_position = None;
+        if same_mode {
+            return;
+        }
         self.min_x = 0;
         self.max_x = w - 1;
         self.min_y = 0;
@@ -777,7 +789,7 @@ mod tests {
         let mut mouse = MouseState::new();
         mouse.reset(640, 480);
         mouse.set_position(320, 470);
-        mouse.video_mode_set((640, 200));
+        mouse.video_mode_set((640, 200), false);
         mouse.set_position(320, 196);
         assert_eq!((mouse.ps2.dx, mouse.ps2.dy), (0, 0));
         assert_eq!((mouse.serial_dx, mouse.serial_dy), (0, 0));

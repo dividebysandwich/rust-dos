@@ -274,6 +274,37 @@ fn a_video_mode_set_gives_the_cursor_the_new_screens_range() {
 }
 
 #[test]
+fn setting_the_same_mode_again_keeps_the_programs_range() {
+    // Dark Sun 2: x 0-319 and y 0-199 in mode 13h, then mode 13h again,
+    // with its own cursor drawn at the driver's x as a 320-pixel position.
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    int10(&mut cpu, 0x0013, 0);
+    call(&mut cpu, 0x0000);
+    range(&mut cpu, 0x0007, 0, 0x013F);
+    range(&mut cpu, 0x0008, 0, 0x00C7);
+    cpu.set_cx(0x9F);
+    cpu.set_dx(0x63);
+    call(&mut cpu, 0x0004);
+    call(&mut cpu, 0x0001);
+
+    int10(&mut cpu, 0x0013, 0);
+    let m = &cpu.bus.mouse;
+    assert_eq!((m.min_x, m.max_x, m.min_y, m.max_y), (0, 319, 0, 199));
+    assert_eq!((m.x, m.y), (159, 99));
+    assert_eq!(m.hide_counter, 1, "the mode set still hides the cursor");
+    cpu.bus.mouse.set_position(10_000, 100);
+    call(&mut cpu, 0x0003);
+    assert_eq!(cpu.cx(), 319, "the far right is the 320-pixel screen's");
+
+    // A text font load that leaves 25 rows is the same screen too.
+    int10(&mut cpu, 0x0003, 0);
+    assert_eq!(cpu.bus.mouse.max_x, 639, "another mode resets the range");
+    range(&mut cpu, 0x0007, 0, 319);
+    int10(&mut cpu, 0x1114, 0);
+    assert_eq!(cpu.bus.mouse.max_x, 319);
+}
+
+#[test]
 fn a_range_set_after_the_mode_stays() {
     let mut cpu = Cpu::new(PathBuf::from("."));
     call(&mut cpu, 0x0000);
