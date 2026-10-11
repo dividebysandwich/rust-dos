@@ -1090,6 +1090,10 @@ struct ControlBody {
     command: Option<String>,
     #[serde(default)]
     stop_at_entry: bool,
+    /// `run`: take the command line while the prompt is busy, to run after
+    /// what keeps it busy.
+    #[serde(default)]
+    queue: bool,
     /// step, step_over, run: false answers at once (202) with the
     /// operation, to wait on with /api/ops or /api/control/wait?op=.
     wait: Option<bool>,
@@ -1114,7 +1118,7 @@ async fn control(State(s): State<AppState>, Path(action): Path<String>, body: By
         "run" => {
             let command = b.command.ok_or_else(|| bad("missing 'command'"))?;
             let timeout = b.timeout_ms.map_or(RUN_TIMEOUT, Duration::from_millis);
-            (Cmd::Run { command, stop_at_entry: b.stop_at_entry }, timeout)
+            (Cmd::Run { command, stop_at_entry: b.stop_at_entry, queue: b.queue }, timeout)
         }
         _ => {
             return Err(ApiError::new(
@@ -1874,7 +1878,12 @@ EXECUTION CONTROL
                              run a command line at the DOS prompt; replies once it
                              started a program ({"program":{name,entry,psp}}), or
                              with stop_at_entry once paused at its first instruction
-                             (reason "program_start"); 422 if it started none
+                             (reason "program_start"); 422 if it started none.
+                             409 while the prompt is busy (a program, a batch
+                             file such as AUTOEXEC.BAT, PAUSE); with "queue":true
+                             the command line waits its turn after the batch
+                             lines and runs once the prompt is back (the run's
+                             "resumed" entry has "queued":true)
                              step, step_over and run wait for their end; "wait":false
                              answers at once (202) with "op"; timeout_ms (504 with "op")
   POST /api/control/reboot_shell                     kill the running program and its batch file

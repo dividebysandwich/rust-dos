@@ -819,6 +819,20 @@ fn run_answers_once_its_program_started_without_another_entry() {
     assert_eq!((end["type"].as_str(), end["op"].clone()), (Some("program_started"), started.json()["op"].clone()), "{}", op);
 }
 
+#[test]
+fn a_run_with_queue_is_taken_while_the_prompt_is_busy() {
+    let rig = Rig::new("run-queued");
+    let started = rig.post("/api/control/run", json!({"command": "LOOP.COM", "timeout_ms": 10000}));
+    assert_eq!(started.status, 200, "{}", started.body);
+    // LOOP.COM keeps the prompt busy.
+    let refused = rig.post("/api/control/run", json!({"command": "PROBE.COM"}));
+    assert_eq!(refused.status, 409, "{}", refused.body);
+    let queued = rig.post("/api/control/run", json!({"command": "PROBE.COM", "queue": true, "wait": false}));
+    assert_eq!(queued.status, 202, "{}", queued.body);
+    let op = rig.get(&format!("/api/ops/{}", queued.json()["op"])).json();
+    assert_eq!(op["state"], "pending", "waits for LOOP.COM to end: {}", op);
+}
+
 // ----- consistency under load ------------------------------------------------
 
 /// Every operation the journal names, as `/api/ops` tells it (those evicted

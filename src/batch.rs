@@ -48,11 +48,14 @@ struct Frame {
     params: Vec<String>,
     /// How far SHIFT has moved the parameters along.
     shift: usize,
+    /// The debugger's mark on the lines it queued (`append_marked`), which
+    /// `Batch::reached` takes once one of them is handed out.
+    mark: Option<u64>,
 }
 
 impl Frame {
     fn new(kind: FrameKind, lines: Vec<Vec<u8>>, params: Vec<String>) -> Self {
-        Self { kind, lines, pc: 0, params, shift: 0 }
+        Self { kind, lines, pc: 0, params, shift: 0, mark: None }
     }
 }
 
@@ -80,11 +83,14 @@ pub struct Batch {
     pub dispatching: bool,
     /// The files of the pipes that have ended, to delete.
     expired: Vec<String>,
+    /// The mark of the last line handed out from lines queued with
+    /// `append_marked`.
+    pub reached: Option<u64>,
 }
 
 impl Default for Batch {
     fn default() -> Self {
-        Self { frames: Vec::new(), echo: true, echo_before: true, dispatching: false, expired: Vec::new() }
+        Self { frames: Vec::new(), echo: true, echo_before: true, dispatching: false, expired: Vec::new(), reached: None }
     }
 }
 
@@ -122,6 +128,14 @@ impl Batch {
     {
         let lines = lines.into_iter().map(|l| dosstr::to_bytes(l.as_ref())).collect();
         self.insert_bottom(Frame::new(FrameKind::Lines, lines, vec![String::new()]));
+    }
+
+    /// Run the command line `line` once everything queued before it has
+    /// run, and set `reached` to `mark` when it is handed out.
+    pub fn append_marked(&mut self, line: &str, mark: u64) {
+        let mut frame = Frame::new(FrameKind::Lines, vec![dosstr::to_bytes(line)], vec![String::new()]);
+        frame.mark = Some(mark);
+        self.insert_bottom(frame);
     }
 
     /// Run the batch file `name`, holding `bytes`, with the parameters
@@ -182,6 +196,7 @@ impl Batch {
                 continue;
             };
             frame.pc += 1;
+            let mark = frame.mark;
             let text = match frame.kind {
                 FrameKind::For | FrameKind::Pipe => dosstr::from_bytes(raw),
                 _ => expand(raw, &frame.params[frame.shift.min(frame.params.len())..], env),
@@ -189,6 +204,9 @@ impl Batch {
             let text = text.trim_start_matches([' ', '\t']);
             if text.trim_end().is_empty() || text.starts_with(':') {
                 continue;
+            }
+            if mark.is_some() {
+                self.reached = mark;
             }
             return Some(match text.strip_prefix('@') {
                 Some(rest) => BatchLine { text: rest.trim_start().to_string(), echo: false },
@@ -390,10 +408,11 @@ fn label_key(label: &[u8]) -> Vec<u8> {
 }
 
 crate::state_enum!(FrameKind { FrameKind::File, FrameKind::Lines, FrameKind::For, FrameKind::Pipe });
-crate::state_fields!(Frame { kind, lines, pc, params, shift });
+// The debugger's marks are the session's: a frame loaded has none.
+crate::state_fields!(Frame { kind, lines, pc, params, shift } skip { mark });
 // `dispatching` is only set while a line runs, never between; a state
 // loaded leaves the files of the pipes that ended before it.
-crate::state_fields!(Batch { frames, echo, echo_before } skip { dispatching, expired });
+crate::state_fields!(Batch { frames, echo, echo_before } skip { dispatching, expired, reached });
 
 impl Default for Frame {
     fn default() -> Self {
@@ -455,6 +474,24 @@ mod tests {
         batch.start_file("SUB", b"in sub %1\r\n", "x", true);
         batch.dispatching = false;
         assert_eq!(run_all(&mut batch), ["in sub x", "after sub", "later"]);
+    }
+
+    #[test]
+    fn a_marked_line_is_reached_after_the_batch_file_before_it() {
+        let mut batch = Batch::default();
+        batch.append_file("AUTOEXEC", b"echo one\r\nGO\r\n", "");
+        batch.append_marked("PROBE.COM", 7);
+        assert_eq!(batch.next_line(&[]).unwrap().text, "echo one");
+        assert_eq!(batch.next_line(&[]).unwrap().text, "GO");
+        // A batch file the last line chains to runs before the mark too.
+        batch.dispatching = true;
+        batch.start_file("GO", b"in go\r\n\r\n:end\r\n", "", false);
+        batch.dispatching = false;
+        assert_eq!(batch.next_line(&[]).unwrap().text, "in go");
+        assert_eq!(batch.reached, None);
+        assert_eq!(batch.next_line(&[]).unwrap().text, "PROBE.COM");
+        assert_eq!(batch.reached, Some(7));
+        assert!(!batch.is_active());
     }
 
     #[test]

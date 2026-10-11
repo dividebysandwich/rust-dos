@@ -217,9 +217,22 @@ the machine is paused at the entry point of the program it started, with
 breakpoints set now catch its startup code. Without `stop_at_entry` it
 replies as soon as the program started. A command line that starts no
 program (a typo, a built-in command such as `DIR`) gets HTTP 422 once the
-prompt is back, and `run` while a program runs, or while PAUSE, CHOICE or
-EDIT waits, gets 409. So does a `stop_at_entry` run whose program was
-closed before it reached its entry point.
+prompt is back, and `run` while a program runs, a batch file such as
+AUTOEXEC.BAT has lines left, or PAUSE, CHOICE or EDIT waits, gets 409. So
+does a `stop_at_entry` run whose program was closed before it reached its
+entry point.
+
+- **Queued behind a busy prompt:** `"queue":true` takes the command line
+  while the prompt is busy and adds it after the batch lines waiting. The
+  shell runs it once those lines have run and the prompt is back, and the
+  request waits for its program as before (raise `timeout_ms`, or pass
+  `"wait":false` and wait on the operation). Programs the batch lines start
+  before it don't count: `stop_at_entry` stops at the entry of the
+  program this command line starts. The run's `resumed` entry has
+  `"queued":true` when the prompt was busy. Any stop before the line runs
+  (a breakpoint, `program_start` stops on every program, a pause) ends the
+  run's operation; the line still runs. A line dropped with the batch
+  files (Ctrl+C, `reboot_shell`) gets 422.
 
 - **Every program:** `POST /api/breakpoints {"program_start":true}` pauses
   at the entry point of each program DOS starts, a child that a game's
@@ -670,6 +683,13 @@ curl -s $J -XPOST -d '{"until_ms":8000}' $H/api/control/resume
   time, so two instances on one LAN need different start times.
 - **Starts paused:** with the debug server the machine starts paused
   (`"reason":"startup"`), so the input can be sent before anything runs.
+  AUTOEXEC.BAT hasn't run yet, so a plain `run` gets 409. `run` with
+  `"queue":true` resumes the machine and runs the command line right after
+  AUTOEXEC.BAT ends, at the same emulated moment on every run:
+
+  ```sh
+  curl -s $J -XPOST -d '{"command":"GAME.EXE","queue":true,"stop_at_entry":true,"timeout_ms":600000}' $H/api/control/run
+  ```
 - **Input:** input, and requests that change the machine (`run`, memory
   and register writes, mounts, `/api/speed`, loading a state, reboots),
   are taken only while the machine is paused or the settings window is
