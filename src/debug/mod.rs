@@ -1267,9 +1267,12 @@ impl DebugHub {
         }
     }
 
-    /// The input events still to be delivered.
+    /// The input events still to be delivered, counting a wait under way:
+    /// an input request whose last event is a wait isn't delivered until
+    /// the wait ends.
     fn input_pending(&self) -> usize {
-        self.input.iter().filter(|e| !matches!(e, LowInput::End { .. })).count()
+        let waiting = self.input_wait_until.is_some() || self.input_wait_ns.is_some();
+        self.input.iter().filter(|e| !matches!(e, LowInput::End { .. })).count() + waiting as usize
     }
 
     /// Whether a remote client asked to turn the emulator off.
@@ -4021,6 +4024,22 @@ mod tests {
         assert!(body["error"].as_str().unwrap().contains("queued input"), "{}", body);
         let _load = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: true });
         assert_eq!(take_state_requests(&mut hub).len(), 1, "a load drops the input");
+    }
+
+    #[test]
+    fn input_whose_last_wait_is_under_way_is_still_being_typed() {
+        let (mut cpu, mut hub) = machine("strict-match-wait");
+        pause(&mut cpu, &mut hub);
+        let op = started_op(&mut cpu, &mut hub, Cmd::Input { events: vec![InputEvent::Wait { ms: 60_000 }], wait: false });
+        // The wait starts: only the end of the request is left in the queue.
+        run(&mut cpu, &mut hub, 3);
+        assert_eq!(op_state(&hub, op).state, OpState::Pending);
+        let (taken, refused) = state_request(&mut cpu, &mut hub, true);
+        let (code, body) = refused.expect("refused while the input's operation is pending");
+        assert_eq!((taken, code, body["input_queued"].as_u64()), (0, 409, Some(1)), "{}", body);
+        let read = journal_state(&hub).0;
+        let (refused, _) = ask_guarded(&mut cpu, &mut hub, Cmd::GetRegs, Some(read));
+        assert_eq!(refused.unwrap_err().1["precondition"], "state");
     }
 
     #[test]

@@ -1029,3 +1029,118 @@ fn many_clients_at_once_leave_a_consistent_journal() {
     let seqs = streamed.join().unwrap();
     assert_eq!(seqs, (1..=entries.len() as u64 + 1).collect::<Vec<_>>());
 }
+
+// ----- waits -------------------------------------------------------------------
+
+#[test]
+fn every_wait_times_out_with_what_it_waited_for() {
+    let rig = Rig::new("wait-timeouts");
+    rig.post("/api/control/pause", json!({}));
+    let last = rig.last();
+    let timed = |path: &str| {
+        let start = Instant::now();
+        let r = rig.get(path);
+        (r, start.elapsed())
+    };
+    let (r, took) = timed(&format!("/api/journal?after={}&wait=300", last));
+    assert_eq!((r.status, r.json()["timed_out"].as_bool()), (200, Some(true)));
+    assert!(took >= Duration::from_millis(280), "{:?}", took);
+    let (r, took) = timed(&format!("/api/control/wait?after={}&timeout_ms=300", last));
+    assert_eq!(r.status, 504, "{}", r.body);
+    assert!(took >= Duration::from_millis(280) && took < Duration::from_secs(5), "{:?}", took);
+    // An operation that doesn't end in the wait: pending, at once after it.
+    let typed = rig.post("/api/input/wait?wait=false", json!({"ms": 60000})).json();
+    let op = typed["op"].as_u64().unwrap();
+    let (r, took) = timed(&format!("/api/ops/{}?wait=300", op));
+    assert_eq!((r.status, r.json()["state"].as_str()), (200, Some("pending")), "{}", r.body);
+    assert!(took >= Duration::from_millis(280), "{:?}", took);
+    let (r, _) = timed(&format!("/api/control/wait?op={}&timeout_ms=300", op));
+    assert_eq!((r.status, r.json()["op"].as_u64()), (504, Some(op)), "{}", r.body);
+    let (r, _) = timed("/api/log?after_n=999999999&wait=300");
+    assert_eq!((r.status, r.json()["lines"].as_array().map(Vec::len)), (200, Some(0)));
+    // The longest wait is bounded.
+    let resumed = rig.post("/api/control/resume", json!({})).json();
+    let step = http(rig.addr, "POST", "/api/control/step", &[], Some(&json!({"count": 1u64 << 40, "timeout_ms": 300})));
+    assert_eq!(step.status, 504, "{}", step.body);
+    assert!(step.json()["error"].as_str().unwrap().contains("timed out"), "the message clients look for");
+    assert!(resumed["op"].is_u64());
+    rig.until_idle();
+}
+
+#[test]
+fn a_strict_match_load_ends_the_waits_on_what_it_cancelled() {
+    let rig = Rig::new("wait-load");
+    rig.post("/api/control/pause", json!({}));
+    let saved = rig.post("/api/state/save", json!({"path": "a.state", "strict_match": true}));
+    assert_eq!(saved.status, 200, "{}", saved.body);
+    let addr = rig.addr;
+    // Input that waits a minute, waited for three ways.
+    let typing = std::thread::spawn(move || http(addr, "POST", "/api/input/wait", &[], Some(&json!({"ms": 60000}))));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let op = loop {
+        let queued = rig.get(&format!("/api/journal?after=0&type=input_queued")).json();
+        if let Some(e) = queued["entries"].as_array().unwrap().last() {
+            break e["cause"].as_u64().unwrap();
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let op_wait = std::thread::spawn(move || http(addr, "GET", &format!("/api/ops/{}?wait=60000", op), &[], None));
+    let stop_wait = std::thread::spawn(move || http(addr, "GET", &format!("/api/control/wait?op={}&timeout_ms=60000", op), &[], None));
+    std::thread::sleep(Duration::from_millis(200));
+    let start = Instant::now();
+    let loaded = rig.post("/api/state/load", json!({"path": "a.state", "strict_match": true}));
+    assert_eq!(loaded.status, 200, "{}", loaded.body);
+    assert_eq!(loaded.json()["debugger_reset"]["input"], 1, "{}", loaded.body);
+    let typed = typing.join().unwrap();
+    assert_eq!(typed.status, 409, "{}", typed.body);
+    assert_eq!(typed.json()["error"], "a save state was loaded");
+    let ended = op_wait.join().unwrap().json();
+    assert_eq!((ended["state"].as_str(), ended["end"]["type"].as_str()), (Some("cancelled"), Some("debugger_reset")), "{}", ended);
+    assert_eq!(stop_wait.join().unwrap().status, 409);
+    assert!(start.elapsed() < Duration::from_secs(5));
+    // The journal says it in order.
+    let tail: Vec<String> = rig.journal().iter().rev().take(3).map(|e| e["type"].as_str().unwrap().to_string()).collect();
+    assert_eq!(tail, ["paused", "debugger_reset", "state_loaded"]);
+    rig.until_idle();
+}
+
+#[test]
+fn clients_that_go_away_mid_wait_leave_nothing_behind() {
+    let rig = Rig::new("wait-gone");
+    let cs = rig.at_entry("LOOP.COM");
+    let last = rig.last();
+    let op = rig.post("/api/input/wait?wait=false", json!({"ms": 60000})).json()["op"].as_u64().unwrap();
+    let waits = [
+        format!("/api/journal?after={}&type=paused&wait=60000", last),
+        format!("/api/ops/{}?wait=60000", op),
+        format!("/api/control/wait?op={}&timeout_ms=60000", op),
+        format!("/api/control/wait?after={}&timeout_ms=60000", last),
+        "/api/log?after_n=999999999&wait=60000".to_string(),
+    ];
+    let mut sockets = Vec::new();
+    for _ in 0..20 {
+        for path in &waits {
+            let mut stream = TcpStream::connect(rig.addr).unwrap();
+            stream.write_all(format!("GET {} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", path).as_bytes()).unwrap();
+            sockets.push(stream);
+        }
+    }
+    // Requests that wait for their operation, then go away.
+    for _ in 0..10 {
+        let mut stream = TcpStream::connect(rig.addr).unwrap();
+        let body = json!({"count": 1u64 << 40, "timeout_ms": 60000}).to_string();
+        let request = format!("POST /api/control/step HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}", body.len(), body);
+        stream.write_all(request.as_bytes()).unwrap();
+        sockets.push(stream);
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(rig.shared.busy.load(std::sync::atomic::Ordering::Acquire) >= 100);
+    drop(sockets);
+    // The server lets go of them, and the hub goes on.
+    rig.until_idle();
+    rig.post("/api/control/pause", json!({}));
+    let resumed = rig.post("/api/control/resume", json!({"until": format!("{}:0101", cs)})).json();
+    let stop = rig.get(&format!("/api/control/wait?op={}", resumed["op"]));
+    assert_eq!((stop.status, stop.json()["reason"].as_str()), (200, Some("breakpoint")), "{}", stop.body);
+}
