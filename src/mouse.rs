@@ -799,10 +799,11 @@ impl crate::savestate::State for RangeSet {
 pub enum ModeSet {
     /// The mode number, VBE mode and screen are those from before.
     Same,
-    /// Another mode, through VBE function 02h (INT 10h AX=4F02h).
+    /// Another mode, a VESA one (100h and up) through VBE function 02h
+    /// (INT 10h AX=4F02h).
     Vesa,
-    /// Another mode through any other call: AH=00h, a text font load,
-    /// a Tseng HiColor mode.
+    /// Another mode through any other call: AH=00h, a standard mode
+    /// through VBE function 02h, a text font load, a Tseng HiColor mode.
     Standard,
 }
 

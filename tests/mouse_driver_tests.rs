@@ -457,6 +457,13 @@ fn a_vesa_mode_change_with_no_range_set_gives_the_modes_size() {
     range(&mut cpu, 0x0008, 0, 479);
     int10(&mut cpu, 0x0013, 0);
     assert_eq!(cpu.bus.mouse.max_y, 199);
+
+    // The same for a standard mode set through VBE function 02h.
+    int10(&mut cpu, 0x4F02, 0x0101);
+    range(&mut cpu, 0x0008, 0, 479);
+    int10(&mut cpu, 0x4F02, 0x0013);
+    assert_eq!(cpu.ax(), 0x004F);
+    assert_eq!(cpu.bus.mouse.max_y, 199);
 }
 
 #[test]

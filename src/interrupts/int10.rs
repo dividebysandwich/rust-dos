@@ -406,7 +406,8 @@ fn mouse_screen(cpu: &mut Cpu) -> MouseScreen {
 /// Tell the mouse driver a program set a video mode, as a driver hooking
 /// INT 10h sees it (see `MouseState::video_mode_set`). `before` is the
 /// screen before the call: when the mode and the screen are the same, the
-/// program's range stays. `vesa`: the call was VBE function 02h.
+/// program's range stays. `vesa`: the call was VBE function 02h with a
+/// VESA mode number (100h and up).
 fn mode_set_for_mouse(cpu: &mut Cpu, before: MouseScreen, vesa: bool) {
     use crate::mouse::ModeSet;
     let after = mouse_screen(cpu);
@@ -1535,13 +1536,16 @@ pub fn handle(cpu: &mut Cpu) {
         // AH = 4Fh: VESA BIOS Extensions
         0x4F => {
             // Only function 02h sets a mode: the other calls (window
-            // switches among them) skip the mouse's bookkeeping.
+            // switches among them) skip the mouse's bookkeeping. A mode
+            // number below 100h is a standard mode, set as AH=00h sets it,
+            // and changes the range as AH=00h does.
             let before = (cpu.get_al() == 0x02).then(|| mouse_screen(cpu));
+            let vesa = cpu.bx() & 0x1FF >= 0x100;
             super::vbe::handle(cpu);
             if let Some(before) = before
                 && cpu.ax() == 0x004F
             {
-                mode_set_for_mouse(cpu, before, true);
+                mode_set_for_mouse(cpu, before, vesa);
             }
         }
         0x15 if cpu.bus.verite() => crate::bus::verite_bios(cpu),
