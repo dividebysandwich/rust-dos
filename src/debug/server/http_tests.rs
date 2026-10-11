@@ -1274,3 +1274,67 @@ fn a_reader_slower_than_the_ring_is_told_what_it_lost() {
     assert_eq!(prev, last, "caught up");
     assert!(got.iter().any(|e| e["type"] == "gone"), "the reader fell behind the ring");
 }
+
+// ----- bounds ------------------------------------------------------------------
+
+#[test]
+fn the_ring_and_the_operations_stay_bounded_and_say_what_went() {
+    let rig = Rig::new("bounds");
+    rig.at_entry("LOOP.COM");
+    // A resume that ends only when paused: pending throughout.
+    let resume = rig.post("/api/control/resume", json!({})).json()["op"].as_u64().unwrap();
+    // 2600 input requests, each an operation of two entries.
+    let addr = rig.addr;
+    let threads: Vec<_> = (0..4)
+        .map(|_| {
+            std::thread::spawn(move || {
+                (0..650)
+                    .map(|_| {
+                        let r = http(addr, "POST", "/api/input/type?wait=false", &[], Some(&json!({"text": ""})));
+                        assert_eq!(r.status, 200, "{}", r.body);
+                        r.json()["op"].as_u64().unwrap()
+                    })
+                    .collect::<Vec<u64>>()
+            })
+        })
+        .collect();
+    let mut inputs: Vec<u64> = threads.into_iter().flat_map(|t| t.join().unwrap()).collect();
+    inputs.sort_unstable();
+    // Delivered, all of them.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while rig.get("/api/status").json()["input_queue"] != 0 || rig.get(&format!("/api/ops/{}", inputs.last().unwrap())).json()["state"] != "done" {
+        assert!(Instant::now() < deadline, "the input is delivered");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let status = rig.get("/api/status").json();
+    let (first, last) = (status["first_seq"].as_u64().unwrap(), status["seq"].as_u64().unwrap());
+    assert!(last > 5000, "{}", last);
+    assert_eq!(last - first + 1, super::journal::CAPACITY as u64, "the ring is full and no larger");
+    // Entries before the first: 410 with where it starts, and the streams say so.
+    let gone = rig.get("/api/journal?after=0");
+    assert_eq!((gone.status, gone.json()["first"].as_u64()), (410, Some(first)));
+    let page = rig.get(&format!("/api/journal?after={}&limit=10", first - 1)).json();
+    assert_eq!(page["entries"][0]["seq"].as_u64(), Some(first));
+    let mut socket = ws(rig.addr, "/ws/events?after=10&volatile=false");
+    assert_eq!(next(&mut socket).unwrap(), json!({"type": "gone", "first": first}));
+    // The oldest ended operations are gone; the latest 1024 kept, and the
+    // pending resume, however old.
+    let kept = super::journal::OPS_CAPACITY;
+    for &op in &inputs[..inputs.len() - kept] {
+        assert_eq!(rig.get(&format!("/api/ops/{}", op)).status, 410, "{}", op);
+    }
+    for &op in &inputs[inputs.len() - kept..] {
+        assert_eq!(rig.get(&format!("/api/ops/{}", op)).json()["state"], "done", "{}", op);
+    }
+    assert_eq!(rig.get(&format!("/api/ops/{}", resume)).json()["state"], "pending");
+    {
+        let j = rig.shared.journal.lock().unwrap();
+        assert_eq!(j.ops_len(), kept + 1, "the ended ones and the one pending");
+    }
+    // Its waiter gets its end.
+    let addr = rig.addr;
+    let waiter = std::thread::spawn(move || http(addr, "GET", &format!("/api/ops/{}?wait=10000", resume), &[], None).json());
+    std::thread::sleep(Duration::from_millis(100));
+    rig.post("/api/control/pause", json!({}));
+    assert_eq!(waiter.join().unwrap()["state"], "stopped");
+}
