@@ -3365,26 +3365,14 @@ fn set_regs(cpu: &mut Cpu, map: &Map<String, Value>) -> Result<(), String> {
 
 fn screen_text(cpu: &Cpu) -> Reply {
     let mode = cpu.bus.video_mode;
-    let Some(geometry) = crate::video::text::geometry(&cpu.bus) else {
+    let (Some(geometry), Some(lines)) = (crate::video::text::geometry(&cpu.bus), crate::video::text::screen_lines(&cpu.bus))
+    else {
         return Reply::Error(409, format!("video mode {:?} is a graphics mode; use /api/screenshot", mode));
     };
-    let (cols, rows) = (geometry.cols, geometry.rows);
-    let vram = cpu.bus.display_mem();
-    let lines: Vec<String> = (0..rows)
-        .map(|r| {
-            let s: String = (0..cols)
-                .map(|c| {
-                    let off = (geometry.start + r * geometry.row_bytes + c * 2) & geometry.wrap;
-                    keys::CP437[vram[off] as usize]
-                })
-                .collect();
-            s.trim_end().to_string()
-        })
-        .collect();
     Reply::Json(json!({
         "mode": format!("{:?}", mode),
-        "cols": cols,
-        "rows": rows,
+        "cols": geometry.cols,
+        "rows": geometry.rows,
         "cursor": {"col": cpu.bus.peek_8(0x0450), "row": cpu.bus.peek_8(0x0451)},
         "lines": lines,
     }))

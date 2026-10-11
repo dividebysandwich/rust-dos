@@ -162,6 +162,41 @@ struct Args {
     /// One password for all the rooms of --relay
     #[arg(long, value_name = "PASSWORD", requires = "relay")]
     relay_password: Option<String>,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum Command {
+    /// Run a DOS program, batch file or command without a window, as a
+    /// tool of the host: what it prints goes to standard output, standard
+    /// input is typed at its keyboard, and its exit code is rust-dos's
+    Run(RunArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct RunArgs {
+    /// The folder that is drive C: [default: the current one]
+    #[arg(short, long)]
+    dir: Option<std::path::PathBuf>,
+
+    /// Instructions per emulated millisecond
+    #[arg(long, default_value_t = 100_000)]
+    cycles: u32,
+
+    /// The machine's memory in MB
+    #[arg(long, default_value_t = 16, value_parser = clap::value_parser!(u32).range(1..=256))]
+    mem: u32,
+
+    /// Print the text screen at the end when nothing was printed through
+    /// DOS, for programs that write to the screen's memory
+    #[arg(long)]
+    screen: bool,
+
+    /// The command line, as typed at the DOS prompt
+    #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+    command: Vec<String>,
 }
 
 /// The SDL sound device, where the mixed output goes, through the 3D
@@ -247,6 +282,15 @@ fn parse_vr_graphics(value: &str) -> Result<rust_dos::vr::VrGraphics, String> {
 
 fn main() -> Result<(), String> {
     let args = Args::parse();
+    if let Some(Command::Run(run)) = args.command {
+        std::process::exit(rust_dos::cli::run(rust_dos::cli::RunOptions {
+            command: run.command,
+            dir: run.dir.unwrap_or_else(|| std::path::PathBuf::from(".")),
+            cycles: run.cycles,
+            memory_mb: run.mem as usize,
+            screen: run.screen,
+        }));
+    }
     if let Some(port) = args.relay {
         let bind = std::net::SocketAddr::from(([0, 0, 0, 0], port));
         let name = "rust-dos relay".to_string();

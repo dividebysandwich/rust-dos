@@ -2218,3 +2218,26 @@ that run; the settings window saves only what you change in it. `rust-dos
 | `--start-time "YYYY-MM-DD HH:MM:SS"` | The date and time the clock starts at with `--deterministic` (default 1995-04-11 12:34:56) |
 | `--relay [PORT]` | Relay [LAN](#playing-over-a-lan) rooms on this UDP port (default 21213) instead of starting the emulator |
 | `--relay-password TEXT` | One password for all the rooms of `--relay` (without it, whoever makes a room gives it one or none) |
+
+### Running DOS tools from the host's shell
+
+`rust-dos run COMMAND [ARGS...]` runs a DOS program, batch file or built-in
+command without a window, as a tool of the host: what it prints through DOS
+and the video BIOS goes to standard output (what it writes to handle 2 to
+standard error), standard input is typed at its keyboard, and its exit code
+is rust-dos's. A command that isn't found exits with 127, and a program that
+still waits for keys once standard input has ended is stopped with 255.
+
+```sh
+rust-dos run LHA a DOCS.LZH README.TXT
+echo y | rust-dos run -d ~/dos INSTALL.BAT
+```
+
+It reads no configuration file, and the machine has the default hardware.
+
+| Option | What it does |
+|---|---|
+| `-d, --dir DIR` | The folder that is drive C: (default: the current directory) |
+| `--cycles N` | Instructions per emulated millisecond (default 100000); the run doesn't wait for real time |
+| `--mem MB` | The machine's memory, 1 to 256 MB (default 16) |
+| `--screen` | Print the text screen at the end when nothing was printed through DOS, for programs that write to the screen's memory |

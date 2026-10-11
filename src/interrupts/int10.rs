@@ -861,6 +861,9 @@ pub fn handle(cpu: &mut Cpu) {
         // AH = 0Eh: Teletype Output
         0x0E => {
             let char_code = cpu.get_reg8(Register::AL);
+            if let Some(console) = cpu.host_console.as_mut() {
+                console.write(&[char_code]);
+            }
             // On the active page, as the IBM BIOS does whatever BH says.
             // In graphics modes BL is the character's colour.
             let page = active_page(cpu);

@@ -71,6 +71,25 @@ impl TextGeometry {
     }
 }
 
+/// The text screen's lines as characters, without the spaces they end in;
+/// None in a graphics mode.
+pub fn screen_lines(bus: &Bus) -> Option<Vec<String>> {
+    let geometry = geometry(bus)?;
+    let vram = bus.display_mem();
+    let lines = (0..geometry.rows)
+        .map(|r| {
+            let line: String = (0..geometry.cols)
+                .map(|c| {
+                    let off = (geometry.start + r * geometry.row_bytes + c * 2) & geometry.wrap;
+                    crate::video::CP437[vram[off] as usize]
+                })
+                .collect();
+            line.trim_end().to_string()
+        })
+        .collect();
+    Some(lines)
+}
+
 /// The text screen of the current mode, or None in a graphics mode.
 pub fn geometry(bus: &Bus) -> Option<TextGeometry> {
     if bus.vga.adapter.cga_like() {

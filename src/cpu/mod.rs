@@ -352,6 +352,9 @@ pub struct Cpu {
     /// What a built-in command prints while its output is redirected
     /// (`>file`), instead of the screen.
     pub stdout_capture: Option<Vec<u8>>,
+    /// The host's terminal as the console (`rust-dos run`): what DOS
+    /// prints goes to it as well as to the screen.
+    pub host_console: Option<HostConsole>,
     /// What a built-in command reads while its input is redirected
     /// (`<file`, or a pipe); None for the keyboard.
     pub stdin_redirect: Option<Vec<u8>>,
@@ -499,6 +502,33 @@ pub struct ProgramExit {
     pub resident: bool,
 }
 
+/// The host's terminal as DOS's console (`rust-dos run`): what is printed
+/// on the screen through DOS and the video BIOS, kept for the host's
+/// standard output, or its standard error for handle 2.
+#[derive(Debug, Default)]
+pub struct HostConsole {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    /// Output goes to `stderr` (a write to handle 2).
+    pub to_stderr: bool,
+    /// Output isn't kept: the echo of keys typed.
+    pub muted: bool,
+    /// The host's standard input has ended, and with it the keys: reading
+    /// CON gets to the end of the file.
+    pub input_ended: bool,
+    /// A command line's program wasn't found.
+    pub not_found: bool,
+}
+
+impl HostConsole {
+    pub fn write(&mut self, bytes: &[u8]) {
+        if self.muted {
+            return;
+        }
+        if self.to_stderr { &mut self.stderr } else { &mut self.stdout }.extend_from_slice(bytes);
+    }
+}
+
 /// A parent process's state while its child runs (INT 21h AH=4Bh).
 #[derive(Debug, Clone)]
 pub struct ProcessContext {
@@ -581,6 +611,7 @@ impl Cpu {
             secondary_shells: Vec::new(),
             secondary: None,
             stdout_capture: None,
+            host_console: None,
             stdin_redirect: None,
             batch: crate::batch::Batch::default(),
             environment: default_environment(),
@@ -689,6 +720,22 @@ impl Cpu {
     pub fn hle_wait(&mut self) {
         self.hle_retry = true;
         self.idle = true;
+    }
+
+    /// Print with `print` on the screen only, not on the host's terminal
+    /// (`HostConsole`): what isn't the program's output.
+    pub fn screen_only(&mut self, print: impl FnOnce(&mut Cpu)) {
+        let muted = self.host_console.as_mut().map(|c| std::mem::replace(&mut c.muted, true));
+        print(self);
+        if let (Some(console), Some(muted)) = (self.host_console.as_mut(), muted) {
+            console.muted = muted;
+        }
+    }
+
+    /// Wait in the service for a key, as `hle_wait` does.
+    pub fn key_wait(&mut self) {
+        self.bus.key_waits = self.bus.key_waits.wrapping_add(1);
+        self.hle_wait();
     }
 
     /// PSP segment for programs started from the shell: right above the

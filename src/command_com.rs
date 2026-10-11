@@ -216,7 +216,7 @@ fn step(cpu: &mut Cpu, shell: &mut SecondaryShell) -> Result<u8, u8> {
             crate::dos_files::restore_console(&mut cpu.bus, shell.psp);
             crate::dos_files::flush(&mut cpu.bus);
             if cpu.get_cpu_flag(CpuFlags::CF) {
-                print_string(cpu, "Bad command or file name.\r\n");
+                crate::exec::bad_command(cpu);
             } else {
                 cpu.errorlevel = cpu.last_child_exit as u8;
                 cpu.last_child_exit = 0;

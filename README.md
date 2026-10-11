@@ -107,7 +107,9 @@ cargo build --release
 file's, or the current directory. Drop a game's folder, a GOG install, a zip
 or 7z archive, or a CD or disk image onto the window to mount, import or run
 it.
-`rust-dos --help` lists the other options.
+`rust-dos --help` lists the other options, and `rust-dos run PROGRAM`
+runs a DOS tool from the host's shell without a window
+([more](CONFIGURATION.md#running-dos-tools-from-the-hosts-shell)).
 
 On Windows (MSVC), take SDL2's Visual C++ development package,
 `SDL2-devel-<version>-VC.zip` from

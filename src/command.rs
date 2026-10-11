@@ -546,7 +546,7 @@ impl ShellCommand for LoadHighCommand {
             print_string(cpu, "No upper memory (umb=false): loading the program low\r\n");
         }
         if !crate::exec::run_program(cpu, program, program_args.trim(), true) {
-            print_string(cpu, "Bad command or file name.\r\n");
+            crate::exec::bad_command(cpu);
         }
     }
 }

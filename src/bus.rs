@@ -72,6 +72,9 @@ pub struct Bus {
     pub guest_paging: Option<crate::cpu::paging::GuestPaging>,
     pub guest_fault: Option<(u32, u32)>,
     pub keyboard_buffer: VecDeque<u16>, // Stores (Scancode << 8) | ASCII
+    /// How many times a service waited for a key (`Cpu::key_wait`):
+    /// `rust-dos run` ends a program that waits for good.
+    pub key_waits: u32,
     /// The keyboard's layout and the keys held (see keyboard.rs).
     pub kbd: crate::keyboard::KeyboardState,
     /// The 8042 keyboard controller (ports 60h/64h): scan codes for
@@ -367,6 +370,7 @@ impl Bus {
             guest_paging: None,
             guest_fault: None,
             keyboard_buffer: VecDeque::new(),
+            key_waits: 0,
             kbd: crate::keyboard::KeyboardState::default(),
             kbc: crate::kbc::Kbc::new(),
             kbc_release_at: None,

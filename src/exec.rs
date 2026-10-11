@@ -474,7 +474,7 @@ fn shell_services(cpu: &mut Cpu) -> Shell {
 
         // Start the prompt on a new line.
         if cpu.bus.read_8(0x0450) != 0 {
-            crate::video::print_string(cpu, "\r\n");
+            cpu.screen_only(|cpu| crate::video::print_string(cpu, "\r\n"));
         }
         return Shell::Reloaded;
     }
@@ -540,7 +540,7 @@ pub fn run_command_line(cpu: &mut Cpu, cmd: &str) {
     }
 
     match start(cpu, command, args.trim(), false, false) {
-        None => crate::video::print_string(cpu, "Bad command or file name.\r\n"),
+        None => bad_command(cpu),
         Some(Started::Program) => redirect_program(cpu, &redirect),
         Some(Started::Batch) => {}
     }
@@ -762,7 +762,20 @@ pub fn call(cpu: &mut Cpu, line: &str) {
         return;
     }
     if start(cpu, command, args.trim(), false, true).is_none() {
-        crate::video::print_string(cpu, "Bad command or file name.\r\n");
+        bad_command(cpu);
+    }
+}
+
+/// Say that a command line's program wasn't found: on standard error on
+/// the host's terminal, where it fails the run (`rust-dos run`).
+pub fn bad_command(cpu: &mut Cpu) {
+    if let Some(console) = cpu.host_console.as_mut() {
+        console.to_stderr = true;
+        console.not_found = true;
+    }
+    crate::video::print_string(cpu, "Bad command or file name.\r\n");
+    if let Some(console) = cpu.host_console.as_mut() {
+        console.to_stderr = false;
     }
 }
 

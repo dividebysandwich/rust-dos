@@ -1074,6 +1074,9 @@ pub fn console_write(cpu: &mut Cpu, text: &[u8]) {
     if through_video_bios(cpu) {
         crate::interrupts::teletype(cpu, text);
     } else {
+        if let Some(console) = cpu.host_console.as_mut() {
+            console.write(text);
+        }
         for &b in text {
             print_char(&mut cpu.bus, b);
         }
@@ -1091,6 +1094,11 @@ fn print_cells(cpu: &mut Cpu, text: impl Iterator<Item = u8>, attr: u8) {
         crate::interrupts::teletype(cpu, &text);
         return;
     }
+    let text: Vec<u8> = text.collect();
+    if let Some(console) = cpu.host_console.as_mut() {
+        console.write(&text);
+    }
+    let text = text.into_iter();
     let mut col = cpu.bus.cursor_x;
     let mut row = cpu.bus.cursor_y;
     let max_cols = 80;
