@@ -63,6 +63,8 @@ jobs:
           mv SDL2-2.30.0 SDL2
           echo "LIB=${{ github.workspace }}/SDL2/lib/x64" >> "$GITHUB_ENV"
           echo "INCLUDE=${{ github.workspace }}/SDL2/include" >> "$GITHUB_ENV"
+          # SDL2.dll for the program the tests start.
+          echo "${{ github.workspace }}/SDL2/lib/x64" >> "$GITHUB_PATH"
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
