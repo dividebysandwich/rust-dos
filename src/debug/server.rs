@@ -1779,18 +1779,24 @@ REQUESTS AND THE JOURNAL
                     paused in the state of entry N: nothing pending, the
                     settings window closed, no input being typed, and no
                     entry since N that changed the machine. Otherwise 409
-                    {"error","precondition":"state",...}.
+                    {"error","precondition":"state",...}. A 400 on requests
+                    the server answers itself (journal, ops, log, version,
+                    waits with after= or op=, the page and the streams).
+  Either header twice is a 400.
   GET  /api/version                        name, version, api_version, instance, features
   GET  /api/journal?after=S[&type=paused,resumed&op=N&cause=N&limit=200&wait=MS&allow_gap=true]
                    the entries after S, oldest first: {"instance","first","last",
                    "state_seq","stop_seq","entries","next","timed_out"}. With
                    wait, waits for a matching entry. 410 if some after S are
                    gone (allow_gap goes on from the oldest kept). "shutdown"
-                   matches every filter.
+                   matches every filter. An after past the last entry is a
+                   400 with last and instance (a cursor from another instance).
   GET  /api/ops/N[?wait=MS]                operation N (a resume, step, step_over, run,
                    reboot, reboot_shell or input request): kind, state (pending,
                    stopped, done, failed, superseded, cancelled), start_seq,
-                   end_seq, superseded_by, stop, end, error. 404 unknown, 410 gone.
+                   end_seq, superseded_by, stop, end, error. 404 unknown, 410 gone
+                   (the latest 1024 ended ones are kept, pending ones until they
+                   end). Input past 1024 requests still being typed is a 429.
   Entry types: started, resumed, paused, program_started, program_exited,
   op_failed, input_queued, input_delivered, input_cleared, memory_written,
   registers_written, breakpoint_set, breakpoint_removed, watchpoint_set,
@@ -1864,7 +1870,8 @@ EXECUTION CONTROL
   POST /api/control/quit                             turn the emulator off; the journal ends
                                                      with "shutdown"
   GET  /api/control/wait?after=S[&timeout_ms=]       the first stop after entry S, at once if
-                                                     there is one
+                                                     there is one; 410 if entries after S
+                                                     are gone
   GET  /api/control/wait?op=N                        the end of operation N
   GET  /api/control/wait?timeout_ms=30000            the stop the machine is in, or the next
                                                      (a stop before the request is missed:

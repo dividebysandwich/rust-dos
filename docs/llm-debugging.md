@@ -321,6 +321,9 @@ curl -s "$H/api/journal?after=$S&type=paused&wait=30000"   # long poll for the n
   at its program's entry) or `cancelled`. `step`, `step_over`
   and `run` wait for their operation, unless the body has `"wait":false`
   (then 202 with `op`). `GET /api/control/wait?op=N` waits for one too.
+  The latest 1024 ended operations are kept, an older one reads as 410;
+  one still pending is kept until it ends. With 1024 input requests still
+  being typed, the next is refused with 429.
 - **Who stopped it:** a stop by `POST /api/control/pause` has `by`, the
   pause's number, so a client whose resume another client ended can tell.
 - **Change only what you read.** `If-State-Seq: N` on a request (or
@@ -340,7 +343,13 @@ curl -s "$H/api/journal?after=$S&type=paused&wait=30000"   # long poll for the n
   unless `volatile=false` (`log_after=N` replays the log lines after line
   N). If entries after S were dropped from the ring (it keeps 4096), the
   first message is `{"type":"gone","first":F}`, and `/api/journal` answers
-  410 unless `allow_gap=true`.
+  410 unless `allow_gap=true`. So does `GET /api/control/wait?after=S`,
+  whose stop may be among them. An `after` past the last entry is a 400
+  with `last` and `instance`: it is a cursor from another instance.
+- **Headers once.** `X-Request-Id` or `If-State-Seq` sent twice is a 400.
+  `If-State-Seq` on a request the server answers itself (the journal,
+  `/api/ops`, `/api/log`, `/api/version`, waits with `after` or `op`, the
+  page and the streams) is a 400 too.
 - **Log lines** in `/api/log` have `n` (their number; `after_n=N&wait=MS`
   pages and long-polls from there), `at` (the journal's last entry then)
   and `cause`.
