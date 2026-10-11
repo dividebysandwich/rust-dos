@@ -205,6 +205,8 @@ pub struct Op {
     pub start_seq: u64,
     /// The entry that ended it.
     pub end_seq: Option<u64>,
+    /// That entry's JSON, kept with the operation once the ring dropped it.
+    pub end: Option<Arc<str>>,
     pub superseded_by: Option<u64>,
     /// A failed `run`'s status and message.
     pub error: Option<(u16, String)>,
@@ -340,7 +342,7 @@ impl Journal {
     /// Start operation `req`, of `kind`, at entry `start_seq`, for a
     /// request with the client's ID `tag`.
     pub fn begin_op(&mut self, req: u64, kind: OpKind, start_seq: u64, tag: Option<Arc<str>>) {
-        let op = Op { kind, state: OpState::Pending, start_seq, end_seq: None, superseded_by: None, error: None, tag };
+        let op = Op { kind, state: OpState::Pending, start_seq, end_seq: None, end: None, superseded_by: None, error: None, tag };
         self.ops.insert(req, op);
     }
 
@@ -356,6 +358,11 @@ impl Journal {
         }
     }
 
+    /// The JSON of entry `seq`, if the ring has it.
+    fn json_of(&self, seq: Option<u64>) -> Option<Arc<str>> {
+        seq.and_then(|s| self.get(s)).map(|e| e.json.clone())
+    }
+
     /// The pending operation `req`, to end.
     fn pending(&mut self, req: u64) -> Option<&mut Op> {
         self.ops.get_mut(&req).filter(|op| op.state == OpState::Pending)
@@ -364,9 +371,11 @@ impl Journal {
     /// End operation `req` in `state` at entry `end_seq`, if it is still
     /// pending.
     pub fn end_op(&mut self, req: u64, state: OpState, end_seq: Option<u64>) -> bool {
+        let end = self.json_of(end_seq);
         let Some(op) = self.pending(req) else { return false };
         op.state = state;
         op.end_seq = end_seq;
+        op.end = end;
         self.ended(req);
         true
     }
@@ -380,9 +389,11 @@ impl Journal {
     }
 
     pub fn fail_op(&mut self, req: u64, end_seq: Option<u64>, status: u16, error: String) {
+        let end = self.json_of(end_seq);
         if let Some(op) = self.pending(req) {
             op.state = OpState::Failed;
             op.end_seq = end_seq;
+            op.end = end;
             op.error = Some((status, error));
             self.ended(req);
         }

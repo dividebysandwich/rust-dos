@@ -1720,3 +1720,33 @@ fn the_debugger_page_gets_what_it_reads() {
     let reply = read_entries(&mut input, 1, Duration::from_secs(5));
     assert!(reply[0]["ok"] == false && reply[0]["error"].is_string(), "{:?}", reply);
 }
+
+// ----- what outlives the ring --------------------------------------------------
+
+#[test]
+fn a_stop_and_an_operation_s_end_outlive_their_entries_in_the_ring() {
+    let rig = Rig::with_capacity("outlive", 64);
+    rig.at_probe_entry();
+    let stepped = rig.post("/api/control/step", json!({"count": 1})).json();
+    let op = stepped["op"].as_u64().unwrap();
+    // Input waited for at the machine's level.
+    let typed = rig.post("/api/input/type?wait=false", json!({"text": ""})).json()["op"].as_u64().unwrap();
+    for i in 0..100 {
+        rig.post("/api/breakpoints", json!({"addr": format!("{:05X}", 0x30000 + i)}));
+    }
+    assert!(rig.get("/api/status").json()["first_seq"].as_u64() > stepped["stop"]["seq"].as_u64(), "the stop's entry is gone");
+    // Still paused there, as every reply says.
+    let waited = rig.get("/api/control/wait?timeout_ms=2000");
+    assert_eq!((waited.status, waited.json()["paused"].as_bool(), waited.json()["reason"].as_str()), (200, Some(true), Some("step")), "{}", waited.body);
+    let paused = rig.post("/api/control/pause", json!({})).json();
+    assert_eq!(paused["stop"]["seq"], stepped["stop"]["seq"], "{}", paused);
+    assert_eq!(rig.get("/api/status").json()["stop"]["seq"], stepped["stop"]["seq"]);
+    // The operation's end too.
+    let ended = rig.get(&format!("/api/ops/{}", op)).json();
+    assert_eq!((ended["state"].as_str(), ended["stop"]["reason"].as_str()), (Some("stopped"), Some("step")), "{}", ended);
+    let again = rig.get(&format!("/api/control/wait?op={}", op)).json();
+    assert_eq!((again["reason"].as_str(), again["registers"].is_object()), (Some("step"), true), "{}", again);
+    // An input operation waited for with wait?op= answers as input does.
+    let input = rig.get(&format!("/api/control/wait?op={}", typed));
+    assert_eq!((input.json()["ok"].as_bool(), input.json()["done"].as_bool()), (Some(true), Some(true)), "{}", input.body);
+}

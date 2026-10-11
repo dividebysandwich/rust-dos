@@ -91,6 +91,15 @@ pub struct LogLine {
     pub line: String,
 }
 
+impl LogLine {
+    /// The line as the event streams send it: `{"type":"log",...}`.
+    pub fn event_json(&self) -> String {
+        let mut v = serde_json::to_value(self).unwrap_or(Value::Null);
+        v["type"] = "log".into();
+        v.to_string()
+    }
+}
+
 impl Shared {
     pub fn new(start_time: Instant) -> Self {
         Self::with_capacity(start_time, journal::CAPACITY)
@@ -149,9 +158,7 @@ impl Shared {
         };
         self.log_n.send_replace(entry.n);
         if self.events.receiver_count() > 0 {
-            let mut v = serde_json::to_value(&entry).unwrap_or(Value::Null);
-            v["type"] = "log".into();
-            let _ = self.events.send(Arc::from(v.to_string()));
+            let _ = self.events.send(Arc::from(entry.event_json()));
         }
     }
 
@@ -341,7 +348,8 @@ pub enum Cmd {
     /// disks into the folders.
     SyncShared,
     /// Save the machine to a save state file, or load one, which the front
-    /// end does (`take_state_requests`). A `strict_match` save or load is
+    /// end does: it takes each from `next_state_request` and answers it
+    /// with `state_done`. A `strict_match` save or load is
     /// done only while paused, and its load must match this machine and
     /// resets the debugger.
     SaveState { path: String, strict_match: bool },
@@ -711,6 +719,9 @@ pub struct DebugHub {
     seen_ends: u64,
     /// A `run` command waiting for its program to start.
     run_wait: Option<RunWait>,
+    /// The `paused` entry the machine is stopped in, kept here once the
+    /// ring has dropped it.
+    stop_entry: Option<Value>,
 
     trace: TraceRing,
     trace_enabled: bool,
@@ -831,6 +842,7 @@ impl DebugHub {
             seen_starts: 0,
             seen_ends: 0,
             run_wait: None,
+            stop_entry: None,
             trace: TraceRing::new(trace_capacity),
             trace_enabled: false,
             trace_until: None,
@@ -1087,6 +1099,12 @@ impl DebugHub {
         }
         self.host_input_told = false;
         let op = self.current_op;
+        // A `run` whose operation this stop ends waits no more: it no
+        // longer stops at its program's entry or blocks another `run`.
+        if op.is_some() && self.run_wait.as_ref().is_some_and(|r| Some(r.op) == op) {
+            self.run_wait = None;
+            self.start_once = false;
+        }
         let cause = match reason {
             PauseReason::Request => by,
             PauseReason::Startup => None,
@@ -1100,8 +1118,9 @@ impl DebugHub {
             }
         });
         self.current_op = None;
-        // The whole entry, as `current_stop` and the journal give it.
+        // The whole entry, as the journal gives it.
         if let Some(entry) = seq.and_then(|s| self.with_journal(|j| j.get(s).map(|e| e.value())).flatten()) {
+            self.stop_entry = Some(entry.clone());
             return Some(entry);
         }
         fallback["icount"] = cpu.executed.into();
@@ -1110,7 +1129,8 @@ impl DebugHub {
 
     /// The `paused` entry the machine is stopped in, if it is.
     fn current_stop(&self) -> Option<Value> {
-        self.with_journal(|j| j.stop_seq.and_then(|s| j.get(s)).map(|e| e.value())).flatten()
+        let seq = self.with_journal(|j| j.stop_seq).flatten()?;
+        self.stop_entry.as_ref().filter(|e| e["seq"].as_u64() == Some(seq)).cloned()
     }
 
     /// Start a control request's operation of `kind`: it takes over the
@@ -1134,14 +1154,16 @@ impl DebugHub {
         }
     }
 
-    /// A control request takes over the machine: the step count and the
-    /// run-to target of the operation it supersedes stop nothing more.
+    /// A control request takes over the machine: the step count, the
+    /// run-to target and the time stop (`until_ms`) of the operation it
+    /// supersedes stop nothing more.
     /// A `run` whose operation is superseded doesn't stop at its program's
     /// entry and no longer blocks another `run` or a strict-match save; the
     /// command line it queued still runs.
     fn take_over(&mut self) {
         self.step_budget = None;
         self.temp_breakpoint = None;
+        self.stop_at_ns = None;
         if self.run_wait.as_ref().is_some_and(|r| self.current_op == Some(r.op)) {
             self.run_wait = None;
             self.start_once = false;
@@ -4932,6 +4954,40 @@ mod tests {
         let (_cpu, hub, _mode) = deterministic_machine("journal-startup");
         let stop = entries_of(&hub, "paused").pop().unwrap();
         assert_eq!((stop["reason"].as_str(), &stop["op"], &stop["cause"]), (Some("startup"), &Value::Null, &Value::Null), "{}", stop);
+    }
+
+    #[test]
+    fn a_run_whose_operation_a_stop_ended_waits_no_more() {
+        let (mut cpu, mut hub) = machine("journal-run-stopped");
+        let dir = std::env::temp_dir().join(format!("rust-dos-debug-journal-run-stopped-{}", std::process::id()));
+        std::fs::write(dir.join("HOLD.BAT"), "@pause\r\nPROBE.COM\r\n").unwrap();
+        let op = started_op(&mut cpu, &mut hub, Cmd::Run { command: "HOLD.BAT".into(), stop_at_entry: true });
+        run(&mut cpu, &mut hub, 20);
+        assert!(hub.run_wait.is_some(), "waiting at PAUSE");
+        pause(&mut cpu, &mut hub);
+        assert_eq!(op_state(&hub, op).state, OpState::Stopped);
+        assert!(hub.run_wait.is_none() && !hub.start_once, "the stop ended the run's wait");
+        let (taken, refused) = state_request(&mut cpu, &mut hub, true);
+        assert_eq!((taken, refused.map(|r| r.0)), (1, None), "a strict-match save goes ahead");
+        // Its program starts with nobody stopping it at its entry.
+        ask(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }, 0).unwrap();
+        ask(&mut cpu, &mut hub, Cmd::Input { events: vec![InputEvent::Type { text: " ".into(), delay_ms: None }], wait: false }, 0).unwrap();
+        run(&mut cpu, &mut hub, 100);
+        assert!(cpu.programs.started > 0 && entries_of(&hub, "paused").iter().all(|e| e["reason"] != "program_start"));
+    }
+
+    #[test]
+    fn a_superseded_resume_s_time_stops_nothing() {
+        let (mut cpu, mut hub, mut mode) = deterministic_machine("superseded-time");
+        reply(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: Some(300) }).unwrap();
+        run_deterministic(&mut cpu, &mut hub, &mut mode, 2, 16);
+        // A step takes over, then a plain resume runs past 300 ms.
+        let step = send(&mut cpu, &mut hub, Cmd::Step { count: 1 });
+        answer(&mut cpu, &mut hub, step, 5).unwrap();
+        reply(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }).unwrap();
+        run_deterministic(&mut cpu, &mut hub, &mut mode, 40, 16);
+        assert!(cpu.bus.clock.now_ns() > 400_000_000);
+        assert!(!hub.paused, "{:?}", entries_of(&hub, "paused").pop());
     }
 
     #[test]

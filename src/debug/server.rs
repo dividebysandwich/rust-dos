@@ -26,7 +26,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use tokio::sync::{broadcast, oneshot};
 
-use super::journal::{self, Filter, Journal, Kind, OpLookup, OpState};
+use super::journal::{self, Filter, Journal, Kind, OpKind, OpLookup, OpState};
 use super::trace::{self, TraceEntry};
 use super::{Answer, Cmd, InputEvent, Meta, Reply, Request, Shared, TraceQuery, stop_fields};
 use crate::video;
@@ -491,7 +491,8 @@ fn op_end(j: &Journal, mut req: u64, follow: bool) -> Option<Result<OpEnd, ApiEr
             (OpState::Pending, _) => return None,
             (OpState::Superseded, Some(by)) if follow => req = by,
             _ => {
-                let end = op.end_seq.and_then(|s| j.get(s)).map(|e| e.value());
+                // Kept with the operation: the ring may have dropped it.
+                let end = op.end.as_deref().and_then(|e| serde_json::from_str(e).ok());
                 return Some(Ok(OpEnd { req, op, end }));
             }
         }
@@ -519,13 +520,18 @@ fn op_json(req: u64, end: &OpEnd) -> Value {
 /// with entry `seq`) to end, as replies have it since before the journal:
 /// the stop it ended with, a `run`'s program, delivered input, or the
 /// error that ended it.
-async fn finish_op(s: &AppState, op: u64, seq: Option<u64>, timeout: Duration, kind: &str) -> ApiResult {
+async fn finish_op(s: &AppState, op: u64, seq: Option<u64>, timeout: Duration) -> ApiResult {
+    // The reply's shape is the operation's kind's, whoever waits for it.
+    let kind = match s.shared.journal.lock().unwrap_or_else(|e| e.into_inner()).op(op) {
+        OpLookup::Found(found) => Some(found.kind),
+        _ => None,
+    };
     let ended = wait_journal(&s.shared, deadline(timeout), |j| op_end(j, op, true)).await;
     let meta = s.meta_now(seq, Some(op));
     let Some(ended) = ended else {
         let error = match kind {
-            "input" => "timed out waiting for the input to be delivered",
-            "run" => "timed out waiting for the program to start",
+            Some(OpKind::Input) => "timed out waiting for the input to be delivered",
+            Some(OpKind::Run) => "timed out waiting for the program to start",
             _ => "timed out waiting for the stop",
         };
         return Err(ApiError { status: StatusCode::GATEWAY_TIMEOUT, body: json!({"error": error, "op": op}), meta: Some(meta) });
@@ -544,7 +550,7 @@ async fn finish_op(s: &AppState, op: u64, seq: Option<u64>, timeout: Duration, k
             }
             Ok(json_response(StatusCode::OK, reply, &meta))
         }
-        OpState::Done if kind == "input" => Ok(json_response(StatusCode::OK, json!({"ok": true, "done": true}), &meta)),
+        OpState::Done if end.op.kind == OpKind::Input => Ok(json_response(StatusCode::OK, json!({"ok": true, "done": true}), &meta)),
         OpState::Done => Ok(json_response(StatusCode::OK, json!({"ok": true, "program": entry["program"]}), &meta)),
         OpState::Failed => {
             let (status, error) = end.op.error.clone().unwrap_or((500, "failed".into()));
@@ -989,7 +995,7 @@ async fn queue_input(s: &AppState, ctx: &Ctx, events: Vec<InputEvent>, wait: boo
         return Err(unexpected());
     };
     match meta.op {
-        Some(op) if wait && v["held"] != true => finish_op(s, op, meta.seq, INPUT_WAIT_TIMEOUT, "input").await,
+        Some(op) if wait && v["held"] != true => finish_op(s, op, meta.seq, INPUT_WAIT_TIMEOUT).await,
         _ => Ok(json_response(StatusCode::OK, v, &meta)),
     }
 }
@@ -1124,7 +1130,7 @@ async fn control(State(s): State<AppState>, Path(action): Path<String>, body: By
     if b.wait == Some(false) {
         return Ok(json_response(StatusCode::ACCEPTED, json!({"ok": true}), &meta));
     }
-    finish_op(&s, op, meta.seq, timeout, &action).await
+    finish_op(&s, op, meta.seq, timeout).await
 }
 
 #[derive(Deserialize)]
@@ -1143,7 +1149,7 @@ async fn wait_pause(State(s): State<AppState>, Query(q): Query<PauseWaitQuery>) 
     let timeout = Duration::from_millis(q.timeout_ms.unwrap_or(30_000));
     if let Some(op) = q.op {
         server_only()?;
-        return finish_op(&s, op, None, timeout, "wait").await;
+        return finish_op(&s, op, None, timeout).await;
     }
     let after = match q.after {
         Some(after) => {
@@ -1512,8 +1518,10 @@ async fn stream_events(mut socket: WebSocket, shared: Arc<Shared>, mut stream: E
         }
         None => Default::default(),
     };
-    // Live log lines up to this one were replayed.
+    // Live log lines up to this one were replayed: those are dropped
+    // until the first live line past it.
     let replayed = log_replay.back().map_or(0, |l| l.n);
+    let mut dedup = replayed > 0;
     loop {
         seq.borrow_and_update();
         let mut out: Vec<String> = Vec::new();
@@ -1528,7 +1536,7 @@ async fn stream_events(mut socket: WebSocket, shared: Arc<Shared>, mut stream: E
                 for e in entries {
                     // Log lines written before this entry go first.
                     while log_replay.front().is_some_and(|l| l.at < e.seq) {
-                        out.extend(log_replay.pop_front().map(|l| log_json(&l)));
+                        out.extend(log_replay.pop_front().map(|l| l.event_json()));
                     }
                     out.push(e.json.to_string());
                     cursor = e.seq;
@@ -1536,7 +1544,7 @@ async fn stream_events(mut socket: WebSocket, shared: Arc<Shared>, mut stream: E
                 }
             }
         }
-        out.extend(log_replay.drain(..).map(|l| log_json(&l)));
+        out.extend(log_replay.drain(..).map(|l| l.event_json()));
         for text in out {
             if socket.send(Message::Text(text.into())).await.is_err() {
                 return;
@@ -1552,8 +1560,16 @@ async fn stream_events(mut socket: WebSocket, shared: Arc<Shared>, mut stream: E
                 Err(_) => return,
             },
             m = next_broadcast(volatile.as_mut()) => match m {
-                Ok(m) if replayed > 0 && log_n(&m).is_some_and(|n| n <= replayed) => continue,
-                Ok(m) => m.to_string(),
+                Ok(m) => {
+                    if dedup {
+                        match log_n(&m) {
+                            Some(n) if n <= replayed => continue,
+                            Some(_) => dedup = false,
+                            None => {}
+                        }
+                    }
+                    m.to_string()
+                }
                 Err(RecvError::Lagged(n)) => json!({"type": "lagged", "missed": n}).to_string(),
                 Err(RecvError::Closed) => return,
             },
@@ -1571,12 +1587,6 @@ async fn stream_events(mut socket: WebSocket, shared: Arc<Shared>, mut stream: E
             return;
         }
     }
-}
-
-fn log_json(line: &super::LogLine) -> String {
-    let mut v = serde_json::to_value(line).unwrap_or(Value::Null);
-    v["type"] = "log".into();
-    v.to_string()
 }
 
 /// A live log line's number, if the event is one.
@@ -1740,8 +1750,10 @@ async fn handle_ws_input(s: &AppState, text: &str) -> Value {
     .await;
     let mut reply = match result {
         Ok(response) => {
+            // The HTTP reply's body, which is JSON: a body that isn't is an
+            // error, told as one.
             let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap_or_default();
-            serde_json::from_slice(&bytes).unwrap_or_else(|_| json!({"ok": true}))
+            serde_json::from_slice(&bytes).unwrap_or_else(|_| json!({"ok": false, "error": "unexpected reply"}))
         }
         Err(e) => {
             let mut body = e.body.clone();
