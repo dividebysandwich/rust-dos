@@ -240,7 +240,7 @@ fn run_machine(dir: std::path::PathBuf, rx: mpsc::Receiver<super::super::Request
                     cpu.bus.start_batch(end);
                     while cpu.bus.clock.icount < end {
                         match exec::run_batch(&mut cpu, &mut hub, hot) {
-                            StopReason::BatchEnd | StopReason::Paused | StopReason::Exit => break,
+                            StopReason::BatchEnd | StopReason::Paused | StopReason::Exit | StopReason::Hook => break,
                             StopReason::ShellReloaded => cpu.bus.start_batch(end),
                         }
                     }
@@ -898,6 +898,20 @@ fn run_answers_once_its_program_started_without_another_entry() {
     assert_eq!(op["state"], "done", "{}", op);
     let end = op["end"].clone();
     assert_eq!((end["type"].as_str(), end["op"].clone()), (Some("program_started"), started.json()["op"].clone()), "{}", op);
+}
+
+#[test]
+fn a_run_with_queue_is_taken_while_the_prompt_is_busy() {
+    let rig = Rig::new("run-queued");
+    let started = rig.post("/api/control/run", json!({"command": "LOOP.COM", "timeout_ms": 10000}));
+    assert_eq!(started.status, 200, "{}", started.body);
+    // LOOP.COM keeps the prompt busy.
+    let refused = rig.post("/api/control/run", json!({"command": "PROBE.COM"}));
+    assert_eq!(refused.status, 409, "{}", refused.body);
+    let queued = rig.post("/api/control/run", json!({"command": "PROBE.COM", "queue": true, "wait": false}));
+    assert_eq!(queued.status, 202, "{}", queued.body);
+    let op = rig.get(&format!("/api/ops/{}", queued.json()["op"])).json();
+    assert_eq!(op["state"], "pending", "waits for LOOP.COM to end: {}", op);
 }
 
 // ----- consistency under load ------------------------------------------------

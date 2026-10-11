@@ -333,7 +333,8 @@ pub enum Cmd {
     },
     /// Run a command line at the DOS prompt, as typed, and answer once it
     /// started a program: stopped at its entry point with `stop_at_entry`.
-    Run { command: String, stop_at_entry: bool },
+    /// With `queue`, a busy prompt takes it after what keeps it busy.
+    Run { command: String, stop_at_entry: bool, queue: bool },
     Ivt,
     Gdt,
     Ldt,
@@ -671,11 +672,12 @@ struct Watch {
     value: u32,
 }
 
-/// A `run` operation waiting for its program to start (`before` is
-/// `cpu.programs.started` as it was queued), or with `stop_at_entry` to
-/// stop there.
+/// A `run` operation waiting for its program to start, or with
+/// `stop_at_entry` to stop there. Its command line is a batch line marked
+/// with `op`; `before` is `cpu.programs.started` as the shell took it,
+/// None until then.
 struct RunWait {
-    before: u64,
+    before: Option<u64>,
     stop_at_entry: bool,
     op: u64,
 }
@@ -1121,7 +1123,7 @@ impl DebugHub {
         if self.trace.total() > 0 {
             stop["trace"] = self.trace.total().into();
         }
-        if reason == PauseReason::ProgramStart && self.run_wait.as_ref().is_some_and(|r| r.stop_at_entry) {
+        if reason == PauseReason::ProgramStart && self.run_wait.as_ref().is_some_and(|r| r.stop_at_entry && r.before.is_some()) {
             self.run_wait = None;
         }
         self.host_input_told = false;
@@ -1216,7 +1218,7 @@ impl DebugHub {
                 fields["count"] = (started - self.told_starts).into();
             }
             // A `run` that doesn't stop at the entry is done with this entry.
-            let run = self.run_wait.as_ref().filter(|r| !r.stop_at_entry && started > r.before).map(|r| r.op);
+            let run = self.run_wait.as_ref().filter(|r| !r.stop_at_entry && r.before.is_some_and(|b| started > b)).map(|r| r.op);
             let seq = self.append_then(cpu, Kind::ProgramStarted, None, fields, |j, seq| {
                 if let Some(op) = run {
                     j.end_op(op, OpState::Done, Some(seq));
@@ -1450,6 +1452,14 @@ impl DebugHub {
         if self.tracing_now {
             self.batch_t_us = cpu.bus.start_time.elapsed().as_micros() as u64;
         }
+        // A `run`'s line waits behind the batch lines. The programs they
+        // start may have run without the hook, which counts the starts
+        // before the line from here. (Unless the shell took the line at
+        // the end of the last batch.)
+        self.note_run_line(cpu);
+        if self.run_wait.as_ref().is_some_and(|r| r.before.is_none()) && !self.break_program_start && !self.start_once {
+            self.seen_starts = cpu.programs.started;
+        }
         self.tracing_now
             || self.step_budget.is_some()
             || self.temp_breakpoint.is_some()
@@ -1461,6 +1471,12 @@ impl DebugHub {
             || self.break_program_exit
             || self.start_once
             || self.start_breakpoint.is_some()
+            // A `run`'s line waits: the hook runs while the shell's code
+            // does, which is where the shell takes batch lines, and a batch
+            // run without it ends before the shell takes any while the line
+            // waits (`StopReason::Hook`). The programs the lines before it
+            // start run without the hook.
+            || (cpu.batch.marked_line_waits() && cpu.in_shell_code())
     }
 
     /// Per-instruction hook, called just before an instruction at `phys_ip`
@@ -1500,6 +1516,9 @@ impl DebugHub {
                 return true;
             }
         }
+        // Before the start the run's line made, which no instruction
+        // separates from it.
+        self.note_run_line(cpu);
         // A program just started: run to its entry point, through any
         // interrupt that comes first.
         if cpu.programs.started != self.seen_starts {
@@ -1784,10 +1803,27 @@ impl DebugHub {
         }
     }
 
+    /// Once the shell took a `run`'s command line: the programs started
+    /// from then on are its own, and the first of them stops with
+    /// `stop_at_entry`. `seen_starts` counts the starts before it: the
+    /// per-instruction hook runs while the shell takes batch lines, and
+    /// `begin_batch` catches up with the starts it didn't see.
+    fn note_run_line(&mut self, cpu: &Cpu) {
+        if let Some(run) = self.run_wait.as_mut().filter(|r| r.before.is_none())
+            && cpu.batch.reached == Some(run.op)
+        {
+            run.before = Some(self.seen_starts);
+            self.start_once = run.stop_at_entry;
+        }
+    }
+
     /// End a `run` operation whose program started, or whose command line
     /// ended at the prompt without starting one. A `run` goes on when its
     /// client stops waiting: how it ends is in the journal.
     fn check_run(&mut self, cpu: &Cpu) {
+        // The shell may have taken the line after the batch's last
+        // instruction.
+        self.note_run_line(cpu);
         let idle = at_idle_prompt(cpu);
         if idle {
             // No program runs, so drop an entry point it never reached
@@ -1796,6 +1832,17 @@ impl DebugHub {
         }
         let Some(run) = &self.run_wait else { return };
         let (op, before, stop_at_entry) = (run.op, run.before, run.stop_at_entry);
+        let Some(before) = before else {
+            // The prompt is back and the shell never took the line: the
+            // batch lines were ended with it (Ctrl+C, the settings window
+            // closing the program; `reboot_shell` supersedes the run first).
+            if idle {
+                self.start_once = false;
+                self.run_wait = None;
+                self.fail_op(cpu, op, 422, "the command line was dropped with the batch lines before it ran");
+            }
+            return;
+        };
         if cpu.programs.started > before {
             if !stop_at_entry {
                 // A start the journal didn't tell (a load brought it): the
@@ -1893,7 +1940,7 @@ impl DebugHub {
                 }
                 at_ms(cpu, self, boundary);
             }
-            if matches!(reason, crate::exec::StopReason::Paused | crate::exec::StopReason::Exit) {
+            if matches!(reason, crate::exec::StopReason::Paused | crate::exec::StopReason::Exit | crate::exec::StopReason::Hook) {
                 break;
             }
         }
@@ -2679,7 +2726,8 @@ impl DebugHub {
                 // The counts go stale while nothing watches them. While
                 // something does, a program that started or ended in the
                 // last instruction of the batch is still to be seen.
-                if !self.break_program_start && !self.start_once {
+                let run_line_waits = self.run_wait.as_ref().is_some_and(|r| r.before.is_none());
+                if !self.break_program_start && !self.start_once && !run_line_waits {
                     self.seen_starts = cpu.programs.started;
                 }
                 if !self.break_program_exit {
@@ -2712,21 +2760,25 @@ impl DebugHub {
                 self.record(cpu, Kind::BreakOn, fields);
                 Reply::Json(list)
             }
-            Cmd::Run { command, stop_at_entry } => {
+            Cmd::Run { command, stop_at_entry, queue } => {
+                let idle = at_idle_prompt(cpu);
                 if self.run_wait.is_some() {
                     Reply::Error(409, "a run command is already waiting for its program".into())
-                } else if !at_idle_prompt(cpu) {
+                } else if !idle && !queue {
                     Reply::Error(409, "the DOS prompt is busy with a program, a batch file, PAUSE, CHOICE or EDIT".into())
                 } else if command.trim().is_empty() || command.contains(['\r', '\n']) {
                     Reply::bad("command: one command line")
                 } else {
-                    cpu.queue_batch_lines([command.trim()]);
+                    // A batch line after the ones queued: the shell takes
+                    // it once they have run and the prompt is back, at once
+                    // when it is idle.
+                    let op = self.cur.as_ref().map_or(0, |c| c.req);
+                    cpu.batch.append_marked(command.trim(), op);
                     self.take_over();
                     self.seen_starts = cpu.programs.started;
-                    self.start_once = stop_at_entry;
-                    let op = self.cur.as_ref().map_or(0, |c| c.req);
-                    self.run_wait = Some(RunWait { before: cpu.programs.started, stop_at_entry, op });
-                    self.start_op(cpu, OpKind::Run, json!({"command": command.trim(), "stop_at_entry": stop_at_entry}));
+                    self.run_wait = Some(RunWait { before: None, stop_at_entry, op });
+                    let fields = json!({"command": command.trim(), "stop_at_entry": stop_at_entry, "queued": !idle});
+                    self.start_op(cpu, OpKind::Run, fields);
                     Reply::Json(json!({"ok": true}))
                 }
             }
@@ -3896,7 +3948,7 @@ mod tests {
             cpu.bus.start_batch(end);
             while cpu.bus.clock.icount < end {
                 match exec::run_batch(cpu, hub, hot) {
-                    StopReason::BatchEnd | StopReason::Paused | StopReason::Exit => break,
+                    StopReason::BatchEnd | StopReason::Paused | StopReason::Exit | StopReason::Hook => break,
                     StopReason::ShellReloaded => cpu.bus.start_batch(end),
                 }
             }
@@ -4000,7 +4052,7 @@ mod tests {
     #[test]
     fn run_stops_at_the_program_s_entry_point() {
         let (mut cpu, mut hub) = machine("entry");
-        let rx = send(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true });
+        let rx = send(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true, queue: false });
         let stop = answer(&mut cpu, &mut hub, rx, 50).unwrap();
         assert_eq!(stop["reason"], "program_start");
         assert_eq!(stop["program"]["name"], "PROBE.COM");
@@ -4015,7 +4067,7 @@ mod tests {
     fn a_program_s_end_stops_the_machine_with_its_exit_code() {
         let (mut cpu, mut hub) = machine("exit");
         ask(&mut cpu, &mut hub, break_on(None, Some(true)), 0).unwrap();
-        ask(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true }, 50).unwrap();
+        ask(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true, queue: false }, 50).unwrap();
         ask(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }, 0).unwrap();
         let stop = ask(&mut cpu, &mut hub, Cmd::WaitPause, 50).unwrap();
         assert_eq!(stop["reason"], "program_exit");
@@ -4027,7 +4079,7 @@ mod tests {
     fn a_program_the_emulator_ends_stops_the_machine_with_no_exit_code() {
         let (mut cpu, mut hub) = machine("abort");
         ask(&mut cpu, &mut hub, break_on(None, Some(true)), 0).unwrap();
-        ask(&mut cpu, &mut hub, Cmd::Run { command: "CRASH.COM".into(), stop_at_entry: true }, 50).unwrap();
+        ask(&mut cpu, &mut hub, Cmd::Run { command: "CRASH.COM".into(), stop_at_entry: true, queue: false }, 50).unwrap();
         ask(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }, 0).unwrap();
         let stop = ask(&mut cpu, &mut hub, Cmd::WaitPause, 50).unwrap();
         assert_eq!(stop["reason"], "program_exit");
@@ -4035,7 +4087,7 @@ mod tests {
         // The next program's own exit is told apart again.
         ask(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }, 0).unwrap();
         run(&mut cpu, &mut hub, 20);
-        ask(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true }, 50).unwrap();
+        ask(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true, queue: false }, 50).unwrap();
         ask(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }, 0).unwrap();
         let stop = ask(&mut cpu, &mut hub, Cmd::WaitPause, 50).unwrap();
         assert_eq!(stop["exit"]["aborted"], false);
@@ -4057,7 +4109,7 @@ mod tests {
     #[test]
     fn run_without_stopping_answers_once_the_program_started() {
         let (mut cpu, mut hub) = machine("started");
-        let started = ask(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: false }, 50).unwrap();
+        let started = ask(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: false, queue: false }, 50).unwrap();
         assert_eq!(started["program"]["name"], "PROBE.COM");
         assert!(!hub.paused);
         run(&mut cpu, &mut hub, 20);
@@ -4076,7 +4128,7 @@ mod tests {
     #[test]
     fn run_refuses_a_command_line_that_starts_no_program() {
         let (mut cpu, mut hub) = machine("none");
-        let rx = send(&mut cpu, &mut hub, Cmd::Run { command: "NOSUCH.EXE".into(), stop_at_entry: true });
+        let rx = send(&mut cpu, &mut hub, Cmd::Run { command: "NOSUCH.EXE".into(), stop_at_entry: true, queue: false });
         assert_eq!(answer(&mut cpu, &mut hub, rx, 50).unwrap_err().0, 422);
         assert!(!hub.paused && !hub.start_once, "no stop is left armed");
     }
@@ -4084,10 +4136,87 @@ mod tests {
     #[test]
     fn run_waits_for_the_prompt() {
         let (mut cpu, mut hub) = machine("busy");
-        let rx = send(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true });
+        let rx = send(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true, queue: false });
         answer(&mut cpu, &mut hub, rx, 50).unwrap();
-        let rx = send(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true });
+        let rx = send(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true, queue: false });
         assert_eq!(answer(&mut cpu, &mut hub, rx, 0).unwrap_err().0, 409, "a program is running");
+    }
+
+    #[test]
+    fn a_queued_run_waits_for_the_batch_lines_before_it() {
+        let (mut cpu, mut hub) = machine("queued");
+        // A batch file runs, as AUTOEXEC.BAT does at startup.
+        cpu.batch.append_file("AUTOEXEC", b"@echo off\r\nPROBE.COM\r\n", "");
+        let refused = send(&mut cpu, &mut hub, Cmd::Run { command: "CRASH.COM".into(), stop_at_entry: true, queue: false });
+        assert_eq!(answer(&mut cpu, &mut hub, refused, 0).unwrap_err().0, 409, "busy without queue");
+        let rx = send(&mut cpu, &mut hub, Cmd::Run { command: "CRASH.COM".into(), stop_at_entry: true, queue: true });
+        let stop = answer(&mut cpu, &mut hub, rx, 50).unwrap();
+        // PROBE.COM's start didn't take the run's stop.
+        assert_eq!((stop["reason"].as_str(), stop["program"]["name"].as_str()), (Some("program_start"), Some("CRASH.COM")));
+        assert_eq!(cpu.programs.started, 2);
+        let started: Vec<Value> = entries_of(&hub, "program_started").iter().map(|e| e["program"]["name"].clone()).collect();
+        assert_eq!(started, ["PROBE.COM", "CRASH.COM"]);
+        assert_eq!(entries_of(&hub, "resumed").last().unwrap()["queued"], true);
+    }
+
+    #[test]
+    fn a_queued_run_without_stopping_answers_with_its_own_program() {
+        let (mut cpu, mut hub) = machine("queued-started");
+        cpu.batch.append_file("AUTOEXEC", b"PROBE.COM\r\n", "");
+        let rx = send(&mut cpu, &mut hub, Cmd::Run { command: "CRASH.COM".into(), stop_at_entry: false, queue: true });
+        let started = answer(&mut cpu, &mut hub, rx, 50).unwrap();
+        assert_eq!(started["program"]["name"], "CRASH.COM");
+    }
+
+    #[test]
+    fn a_queued_run_leaves_the_batch_file_s_program_without_the_hook() {
+        let (mut cpu, mut hub) = machine("queued-hook");
+        let dir = std::env::temp_dir().join(format!("rust-dos-debug-queued-hook-{}", std::process::id()));
+        // mov cx,FFFFh; loop $; mov ax,4C00h; int 21h: a few frames' work.
+        std::fs::write(dir.join("SPIN.COM"), [0xB9, 0xFF, 0xFF, 0xE2, 0xFE, 0xB8, 0x00, 0x4C, 0xCD, 0x21]).unwrap();
+        cpu.batch.append_file("AUTOEXEC", b"@echo off\r\nSPIN.COM\r\n", "");
+        let mut sent = send(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true, queue: true });
+        let op = sent.rx.try_recv().expect("an answer at once").meta.op.expect("an operation");
+        let (mut cold, mut stop) = (0, None);
+        for _ in 0..100 {
+            if let Some(end) = op_reply(&hub, op) {
+                stop = Some(end.unwrap());
+                break;
+            }
+            if cpu.programs.running > 0 && !cpu.in_shell_code() && !hub.begin_batch(&cpu) {
+                cold += 1;
+            }
+            run(&mut cpu, &mut hub, 1);
+        }
+        assert!(cold > 0, "SPIN.COM runs without the per-instruction hook");
+        let stop = stop.expect("the run ended");
+        assert_eq!((stop["reason"].as_str(), stop["program"]["name"].as_str()), (Some("program_start"), Some("PROBE.COM")));
+        let started: Vec<Value> = entries_of(&hub, "program_started").iter().map(|e| e["program"]["name"].clone()).collect();
+        assert_eq!(started, ["SPIN.COM", "PROBE.COM"]);
+    }
+
+    #[test]
+    fn a_queued_run_at_an_idle_prompt_runs_at_once() {
+        let (mut cpu, mut hub) = machine("queued-idle");
+        let rx = send(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true, queue: true });
+        let stop = answer(&mut cpu, &mut hub, rx, 50).unwrap();
+        assert_eq!(stop["program"]["name"], "PROBE.COM");
+        assert_eq!(entries_of(&hub, "resumed").last().unwrap()["queued"], false);
+    }
+
+    #[test]
+    fn a_queued_run_dropped_with_its_batch_lines_fails() {
+        let (mut cpu, mut hub) = machine("queued-dropped");
+        cpu.batch.append_file("AUTOEXEC", b"PAUSE\r\n", "");
+        let rx = send(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true, queue: true });
+        run(&mut cpu, &mut hub, 20);
+        assert!(cpu.shell_wait.is_some(), "PAUSE waits for a key");
+        // Ctrl+C at PAUSE ends the batch files, the run's line with them.
+        cpu.batch.clear();
+        cpu.shell_wait = None;
+        let failed = answer(&mut cpu, &mut hub, rx, 50).unwrap_err();
+        assert_eq!(failed.0, 422, "{}", failed.1);
+        assert!(hub.run_wait.is_none() && !hub.start_once);
     }
 
     #[test]
@@ -4379,6 +4508,56 @@ mod tests {
         assert!(a.2.iter().any(|e| e["type"] == "input_delivered") && a.2.iter().any(|e| e["type"] == "program_started"));
     }
 
+    /// From the startup pause, with a batch file busy at the prompt as
+    /// AUTOEXEC.BAT is: a queued `run` of TARGET.COM resumes the machine
+    /// and stops at its entry. Run in host frames of `frame_ms`: the stop,
+    /// the instructions executed, and the journal but for the host's time.
+    fn queued_run(name: &str, frame_ms: u64) -> (Value, u64, Vec<Value>) {
+        let (mut cpu, mut hub, mut mode) = deterministic_machine(name);
+        let dir = std::env::temp_dir().join(format!("rust-dos-det-{}-{}", name, std::process::id()));
+        std::fs::write(dir.join("TARGET.COM"), CRASH).unwrap();
+        cpu.batch.append_file("AUTOEXEC", b"@echo off\r\nPROBE.COM\r\necho ready\r\n", "");
+        assert!(hub.paused, "paused at the start");
+        let busy = Cmd::Run { command: "TARGET.COM".into(), stop_at_entry: true, queue: false };
+        assert_eq!(reply(&mut cpu, &mut hub, busy).unwrap_err().0, 409, "busy with the batch file");
+        let mut sent = send(&mut cpu, &mut hub, Cmd::Run { command: "TARGET.COM".into(), stop_at_entry: true, queue: true });
+        let answer = sent.rx.try_recv().expect("an answer at once");
+        assert!(matches!(answer.reply, Reply::Json(_)), "accepted");
+        let op = answer.meta.op.expect("an operation");
+        let mut stop = None;
+        for _ in 0..1000 {
+            if let Some(end) = op_reply(&hub, op) {
+                stop = Some(end.unwrap());
+                break;
+            }
+            run_deterministic(&mut cpu, &mut hub, &mut mode, 1, frame_ms);
+        }
+        let mut stop = stop.expect("the run ended");
+        stop.as_object_mut().unwrap().remove("t_ms");
+        assert!(hub.paused);
+        let journal = entries(&hub)
+            .into_iter()
+            .map(|mut e| {
+                e.as_object_mut().unwrap().remove("t_ms");
+                e
+            })
+            .collect();
+        (stop, cpu.executed, journal)
+    }
+
+    #[test]
+    fn a_paused_deterministic_machine_resumes_into_a_queued_run_the_same_whatever_the_frames() {
+        let a = queued_run("queued-a", 16);
+        let b = queued_run("queued-b", 41);
+        let (stop, ..) = &a;
+        assert_eq!((stop["reason"].as_str(), stop["program"]["name"].as_str()), (Some("program_start"), Some("TARGET.COM")));
+        assert_eq!(stop["registers"]["ip"], "0100", "nothing of it ran");
+        assert!(a.2.iter().any(|e| e["type"] == "program_started" && e["program"]["name"] == "PROBE.COM"), "after the batch file's program");
+        assert_eq!(a.1, b.1, "the same instructions");
+        assert_eq!(a.0, b.0, "the same stop");
+        assert_eq!(a.2, b.2, "the same journal");
+    }
+
     /// Carry out the save states asked for, in memory, as the
     /// deterministic front end does.
     fn carry_out_states(cpu: &mut Cpu, hub: &mut DebugHub, mode: &mut Deterministic, saved: &mut Option<Vec<u8>>) {
@@ -4472,7 +4651,7 @@ mod tests {
         assert_eq!(held["held"], true, "answered at once while paused, not when delivered");
         reply(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }).unwrap();
         assert_eq!(reply(&mut cpu, &mut hub, typed("x")).unwrap_err().0, 409);
-        let run = Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: false };
+        let run = Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: false, queue: false };
         assert_eq!(reply(&mut cpu, &mut hub, run).unwrap_err().0, 409, "run while running");
         assert_eq!(reply(&mut cpu, &mut hub, write("0050:0000", &[1], None)).unwrap_err().0, 409, "a memory write while running");
         assert!(reply(&mut cpu, &mut hub, Cmd::GetRegs).is_ok(), "reads still work");
@@ -4602,7 +4781,7 @@ mod tests {
 
     /// Stopped at PROBE.COM's first instruction: its code segment.
     fn at_probe_entry(cpu: &mut Cpu, hub: &mut DebugHub) -> String {
-        let stop = ask(cpu, hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true }, 50).unwrap();
+        let stop = ask(cpu, hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true, queue: false }, 50).unwrap();
         stop["registers"]["cs"].as_str().unwrap().to_string()
     }
 
@@ -4714,7 +4893,7 @@ mod tests {
     #[test]
     fn a_run_another_resume_takes_over_does_not_stop_at_entry() {
         let (mut cpu, mut hub) = machine("journal-supersede-run");
-        let run_op = started_op(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true });
+        let run_op = started_op(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true, queue: false });
         let resume = started_op(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None });
         assert_eq!(op_state(&hub, run_op).superseded_by, Some(resume));
         assert!(hub.run_wait.is_none() && !hub.start_once, "the run's stop at entry is dropped");
@@ -5043,7 +5222,7 @@ mod tests {
         let (mut cpu, mut hub) = machine("journal-stops");
         let dir = std::env::temp_dir().join(format!("rust-dos-debug-journal-stops-{}", std::process::id()));
         std::fs::write(dir.join("STOPS.COM"), STOPS).unwrap();
-        let entry = stopped_by(&mut cpu, &mut hub, Cmd::Run { command: "STOPS.COM".into(), stop_at_entry: true }, "program_start");
+        let entry = stopped_by(&mut cpu, &mut hub, Cmd::Run { command: "STOPS.COM".into(), stop_at_entry: true, queue: false }, "program_start");
         let cs = entry["registers"]["cs"].as_str().unwrap().to_string();
         let at = |stop: &Value| stop["registers"]["ip"].as_str().unwrap().to_string();
 
@@ -5093,7 +5272,7 @@ mod tests {
         let (mut cpu, mut hub) = machine("journal-run-stopped");
         let dir = std::env::temp_dir().join(format!("rust-dos-debug-journal-run-stopped-{}", std::process::id()));
         std::fs::write(dir.join("HOLD.BAT"), "@pause\r\nPROBE.COM\r\n").unwrap();
-        let op = started_op(&mut cpu, &mut hub, Cmd::Run { command: "HOLD.BAT".into(), stop_at_entry: true });
+        let op = started_op(&mut cpu, &mut hub, Cmd::Run { command: "HOLD.BAT".into(), stop_at_entry: true, queue: false });
         run(&mut cpu, &mut hub, 20);
         assert!(hub.run_wait.is_some(), "waiting at PAUSE");
         pause(&mut cpu, &mut hub);

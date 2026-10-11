@@ -24,6 +24,10 @@ pub enum StopReason {
     Paused,
     /// A program ended and the shell was reloaded.
     ShellReloaded,
+    /// The shell is about to take batch lines that include one the
+    /// debugger marked, without the hook: run again with it
+    /// (`Batch::marked_line_waits`).
+    Hook,
     /// The EXIT command asked to turn the machine off (`Bus::exit_requested`).
     Exit,
 }
@@ -238,6 +242,9 @@ fn run<const HOT: bool, const DYN: bool>(cpu: &mut Cpu, fetch: &mut Fetch, hook:
             // After any pending shell reload, so the stop is at the prompt.
             if HOT && cpu.state != CpuState::RebootShell && hook.before_shell(cpu) {
                 return StopReason::Paused;
+            }
+            if !HOT && cpu.state != CpuState::RebootShell && cpu.batch.marked_line_waits() {
+                return StopReason::Hook;
             }
             match shell_services(cpu) {
                 Shell::Idle => {}
