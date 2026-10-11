@@ -1118,7 +1118,9 @@ impl PageHost<'_> {
     }
 
     /// Load slot `slot`: the hardware it was saved with first, then the
-    /// machine. A state of another memsize is refused.
+    /// machine. A state of another memsize is refused. A load that fails
+    /// puts back the settings and hardware from before it, and the machine
+    /// as it was.
     fn load_slot(&mut self, slot: u8) -> Result<String, String> {
         let data = self.states.get(&self.state_key(slot)).ok_or("empty")?;
         let (header, state) = slots::decode(data)?;
@@ -1126,6 +1128,12 @@ impl PageHost<'_> {
             return Err(why);
         }
         let hardware = slots::machine_settings(&header.machine, self.settings);
+        // A failed `machine::load` puts the machine back by itself; the
+        // machine from before is needed only when the hardware changes, to
+        // put that back too.
+        let (old_settings, old_hardware) = (self.settings.clone(), self.hardware.clone());
+        let changes = hardware != old_settings || self.hardware.differs(&hardware);
+        let before = changes.then(|| savestate::machine::save(self.cpu));
         if let Err(e) = self.apply(&hardware) {
             self.cpu.bus.log_string(&format!("[CONFIG] Warning: {}", e));
         }
@@ -1134,7 +1142,15 @@ impl PageHost<'_> {
                 self.cpu.bus.log_string(&format!("[CONFIG] Warning: {}", warning));
             }
         }
-        savestate::machine::load(self.cpu, &state).map_err(|e| e.to_string())?;
+        if let Err(e) = savestate::machine::load(self.cpu, &state) {
+            if let Some(before) = before {
+                if let Err(e) = self.apply(&old_settings) {
+                    self.cpu.bus.log_string(&format!("[CONFIG] Warning: {}", e));
+                }
+                savestate::machine::roll_back(self.cpu, self.hardware, &old_hardware, &old_settings, &before);
+            }
+            return Err(e.to_string());
+        }
         self.pacer.rebase(&self.cpu.bus.clock, Instant::now());
         *self.slot = slot;
         Ok(format!("Loaded slot {}: {}", slot, describe_state(&header)))
@@ -1571,6 +1587,29 @@ mod tests {
         assert_eq!(ui_key("c", true, false), None);
         assert_eq!(ui_key("Dead", false, false), None);
         assert_eq!(ui_key("Shift", false, true), None);
+    }
+
+    #[test]
+    fn a_slot_that_fails_to_load_leaves_the_hardware_as_it_was() {
+        use rust_dos::video::adapter::Adapter;
+        let mut m = Machine::new("");
+        let (settings, hardware) = (m.settings.clone(), m.hardware.clone());
+        // A state of a CGA machine without an Ultrasound, cut short, so
+        // the load fails after the state's hardware is in place.
+        let mut theirs = settings.clone();
+        theirs.machine = Adapter::Cga;
+        theirs.sound.gus.enabled = false;
+        let header = slots::header(&m.cpu, &theirs, None);
+        let state = savestate::machine::save(&m.cpu);
+        let before = state.clone();
+        m.states.insert("dos/1".to_string(), slots::encode(&header, &[], &state[..state.len() - 10]));
+
+        assert!(m.with_ui(|_, host| host.load_slot(1)).is_err());
+        assert_eq!(m.settings, settings);
+        assert_eq!(m.hardware, hardware);
+        assert_eq!(m.cpu.bus.vga.adapter, hardware.video.adapter);
+        assert!(m.cpu.bus.gus.is_some(), "the Ultrasound is back");
+        assert!(savestate::machine::save(&m.cpu) == before, "the machine is as it was");
     }
 
     #[test]
