@@ -965,7 +965,7 @@ fn many_clients_at_once_leave_a_consistent_journal() {
         .map(|i| {
             let cs = cs.clone();
             std::thread::spawn(move || {
-                let mut rand = Rand(0x9E37_79B9_7F4A_7C15 ^ (i + 1) * 0x1234_5678_9ABC);
+                let mut rand = Rand(0x9E37_79B9_7F4A_7C15 ^ ((i + 1) * 0x1234_5678_9ABC));
                 let mut seen: Vec<(u64, u16, u64)> = Vec::new();
                 let mut last_op = None;
                 for _ in 0..400 {
@@ -1393,7 +1393,7 @@ fn saves_loads_and_speed_changes_take_effect_in_the_order_of_the_journal() {
         .map(|i| {
             let at = at.clone();
             std::thread::spawn(move || {
-                let mut rand = Rand(0xD1B5_4A32_D192_ED03 ^ (i + 1) * 0x9E37_79B9);
+                let mut rand = Rand(0xD1B5_4A32_D192_ED03 ^ ((i + 1) * 0x9E37_79B9));
                 // (action, status, request, body, state seq header)
                 let mut done: Vec<(u64, u16, u64, Value, Option<u64>)> = Vec::new();
                 for _ in 0..80 {
