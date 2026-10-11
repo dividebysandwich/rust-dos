@@ -3099,6 +3099,58 @@ fn fpu_sums_of_80_bit_values_run_as_their_handlers() {
 }
 
 #[test]
+fn fpu_sums_of_80_bit_values_round_to_doubles_as_the_handlers_do() {
+    // The sum's double (what FMUL computes with) rounds to nearest on both
+    // cores: the 80 bits of 1 and a bit plus the others leave bits a
+    // double hasn't, which round up or not.
+    let (input, output) = (DATA, DATA + 0x8000);
+    let n = EXTENDED.len() as u32;
+    let (mut a, mut b) = twins(|rig| {
+        for k in 0..n * n {
+            let at = input + 32 * k;
+            for (o, (se, man)) in [(0, EXTENDED[(k % n) as usize]), (16, EXTENDED[(k / n) as usize])] {
+                rig.write32(at + o, man as u32);
+                rig.write32(at + o + 4, (man >> 32) as u32);
+                rig.write32(at + o + 8, se as u32);
+            }
+        }
+        rig.load(CODE, &asm32(CODE, |a| {
+            let mut again = a.create_label();
+            a.fninit()?;
+            a.mov(esi, input)?;
+            a.mov(edi, output)?;
+            a.mov(ecx, n * n)?;
+            a.set_label(&mut again)?;
+            a.fld(tword_ptr(esi + 16))?;
+            a.fld(tword_ptr(esi))?;
+            a.fadd_2(st0, st1)?;
+            a.fld1()?;
+            a.fmulp(st1, st0)?;
+            a.fstp(qword_ptr(edi))?;
+            a.fld(tword_ptr(esi))?;
+            a.fsubr_2(st0, st1)?;
+            a.fld1()?;
+            a.fmulp(st1, st0)?;
+            a.fstp(qword_ptr(edi + 8))?;
+            a.fstp(st0)?;
+            a.add(esi, 32)?;
+            a.add(edi, 16)?;
+            a.dec(ecx)?;
+            a.jnz(again)?;
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    // 1 and a bit plus 0 rounds down to 1; just under 2 plus 0, and plus
+    // 2^-64 * 1.5 (shifted out), round up to 2.
+    let at = |i: usize, j: usize| output + 16 * (j * EXTENDED.len() + i) as u32;
+    let read64 = |rig: &Rig, at: u32| rig.read32(at) as u64 | (rig.read32(at + 4) as u64) << 32;
+    assert_eq!(read64(&b, at(0, 5)), 1f64.to_bits());
+    assert_eq!(read64(&b, at(1, 5)), 2f64.to_bits());
+    assert_eq!(read64(&b, at(1, 4)), 2f64.to_bits());
+}
+
+#[test]
 fn fpu_sums_in_fast_mode_are_the_doubles_on_both_cores() {
     // The same sums come out otherwise (1 and a bit a double hasn't, ...),
     // and the cores agree on them.

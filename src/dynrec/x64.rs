@@ -219,6 +219,18 @@ fn fpu_addsub(ops: &mut Asm) {
         ; btr r9, 52
         ; shl rcx, 52
         ; or r9, rcx
+        // Rounded to nearest, ties to even: up when the 11 bits cut off
+        // and the last bit kept come to more than 0x400 (a carry goes on
+        // into the exponent).
+        ; mov rdx, r8
+        ; shr rdx, 11
+        ; and edx, 1
+        ; mov ecx, r8d
+        ; and ecx, 0x7FF
+        ; add ecx, edx
+        ; cmp ecx, 0x400
+        ; seta dl
+        ; add r9, rdx
         ; mov rdx, rax
         ; shl rdx, 48
         ; or r9, rdx

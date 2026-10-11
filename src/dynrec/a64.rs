@@ -221,6 +221,14 @@ fn fpu_addsub(ops: &mut Asm) {
         ; b.hi =>slow
         ; ubfx x7, x2, 11, 52
         ; orr x7, x7, x5, lsl 52
+        // Rounded to nearest, ties to even: up when the 11 bits cut off
+        // and the last bit kept come to more than 0x400 (a carry goes on
+        // into the exponent).
+        ; ubfx x6, x2, 11, 1
+        ; and x5, x2, 0x7FF
+        ; add x5, x5, x6
+        ; cmp x5, 0x400
+        ; cinc x7, x7, hi
         ; orr x7, x7, x0, lsl 48
         ; b >store
         ; zero:

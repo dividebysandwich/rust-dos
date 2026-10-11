@@ -393,7 +393,7 @@ impl F80 {
                 (sign << 63) | (0x7FF << 52)
             } else {
                 let f64_mantissa = ((mantissa >> 11) & 0xFFFFFFFFFFFFF) as u64;
-                (sign << 63) | ((f64_exp as u64) << 52) | f64_mantissa
+                (sign << 63) | (((f64_exp as u64) << 52 | f64_mantissa) + round_up(mantissa as u64) as u64)
             }
         };
 
@@ -402,6 +402,17 @@ impl F80 {
 }
 
 crate::state_fields!(F80 { st });
+
+/// Whether a 64-bit significand cut to a double's 53 bits rounds up, to
+/// nearest with ties to even (the x87's default rounding): the 11 bits
+/// dropped are over half, or exactly half with the last bit kept odd.
+/// Added to the double's bits, a carry out of the significand goes on into
+/// the exponent, and past the largest double makes the infinity.
+#[inline]
+fn round_up(mantissa: u64) -> bool {
+    let dropped = mantissa & 0x7FF;
+    dropped > 0x400 || (dropped == 0x400 && mantissa & 0x800 != 0)
+}
 
 /// What a double is after it went into an FPU register and came back
 /// (`F80::set_f64`, then `get_f64`): a denormal is 0, and a NaN quiet.
