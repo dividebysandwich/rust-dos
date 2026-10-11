@@ -1713,7 +1713,9 @@ fn the_debugger_page_gets_what_it_reads() {
     assert!(rig.get("/api/disasm?format=json&count=1&addr=CS:EIP").json()["rows"][0]["phys"].is_string());
     assert!(rig.get("/api/memory?format=base64&len=16&addr=SS:FFF0").json()["base64"].is_string());
     assert!(rig.get("/api/log?limit=500").json()["lines"].is_array());
-    assert!(rig.get("/api/trace?format=json&last_n=200").json()["entries"].is_array());
+    let trace = rig.get("/api/trace?format=json&last_n=200");
+    assert!(trace.json()["entries"].is_array() && trace.json()["truncated"] == false);
+    assert_eq!(trace.header("x-trace-truncated"), Some("false"));
     assert!(rig.get("/api/breakpoints").json().is_object());
     assert!(rig.get("/api/watchpoints").json().is_object());
     // The stream: a stop with its reason and what the watchpoint saw, a

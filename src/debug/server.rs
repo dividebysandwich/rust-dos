@@ -224,7 +224,12 @@ fn current_req() -> Option<u64> {
 /// A JSON response, serialized once. An object gets the request's number
 /// first, as `"req"`.
 fn json_body(status: StatusCode, v: &Value, req: Option<u64>) -> Response {
-    let mut out = Vec::with_capacity(256);
+    (status, [(header::CONTENT_TYPE, "application/json")], json_bytes(v, req, 256)).into_response()
+}
+
+/// The bytes of `json_body`, in a buffer reserved for `capacity` of them.
+fn json_bytes(v: &Value, req: Option<u64>, capacity: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(capacity);
     match (req, v) {
         (Some(req), Value::Object(map)) => {
             out.extend_from_slice(format!("{{\"req\":{}", req).as_bytes());
@@ -241,7 +246,7 @@ fn json_body(status: StatusCode, v: &Value, req: Option<u64>) -> Response {
             let _ = serde_json::to_writer(&mut out, v);
         }
     }
-    (status, [(header::CONTENT_TYPE, "application/json")], out).into_response()
+    out
 }
 
 /// `json_body` for the request being answered.
@@ -779,24 +784,25 @@ async fn screen_text(State(s): State<AppState>, Query(q): Query<FormatQuery>) ->
 
 async fn trace_get(State(s): State<AppState>, Query(q): Query<TraceQuery>) -> ApiResult {
     let json = q.format.as_deref() == Some("json");
-    let (Reply::Trace { entries, next, dropped }, meta) = s.call(Cmd::TraceQuery(q), DEFAULT_TIMEOUT).await? else {
+    let (Reply::Trace { entries, next, dropped, truncated }, meta) = s.call(Cmd::TraceQuery(q), DEFAULT_TIMEOUT).await? else {
         return Err(unexpected());
     };
     let req = current_req();
-    let body = tokio::task::spawn_blocking(move || format_trace(&entries, json, next, dropped, &meta, req))
+    let body = tokio::task::spawn_blocking(move || format_trace(&entries, json, next, dropped, truncated, &meta, req))
         .await
         .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let cursor = [
         (header::HeaderName::from_static("x-trace-next"), next.to_string()),
         (header::HeaderName::from_static("x-trace-dropped"), dropped.to_string()),
+        (header::HeaderName::from_static("x-trace-truncated"), truncated.to_string()),
     ];
     Ok(with_meta((cursor, body).into_response(), &meta))
 }
 
-fn format_trace(entries: &[TraceEntry], json: bool, next: u64, dropped: u64, meta: &Meta, req: Option<u64>) -> Response {
+fn format_trace(entries: &[TraceEntry], json: bool, next: u64, dropped: u64, truncated: bool, meta: &Meta, req: Option<u64>) -> Response {
     if json {
-        let v: Vec<Value> = entries.iter().map(|e| e.to_json()).collect();
-        json_response_to(StatusCode::OK, json!({"count": v.len(), "next": next, "dropped": dropped, "entries": v}), meta, req)
+        let out = trace_json(entries, next, dropped, truncated, meta, req);
+        (StatusCode::OK, [(header::CONTENT_TYPE, "application/json")], out).into_response()
     } else {
         let mut out = String::with_capacity(entries.len() * 160 + 128);
         out.push_str(trace::TEXT_HEADER);
@@ -807,6 +813,26 @@ fn format_trace(entries: &[TraceEntry], json: bool, next: u64, dropped: u64, met
         }
         text_response(out)
     }
+}
+
+/// A trace reply as JSON, with `entries` last. The entries are written one
+/// at a time: a `Value` for each of a full ring's million entries would take
+/// gigabytes.
+fn trace_json(entries: &[TraceEntry], next: u64, dropped: u64, truncated: bool, meta: &Meta, req: Option<u64>) -> Vec<u8> {
+    let mut head = json!({"count": entries.len(), "next": next, "dropped": dropped, "truncated": truncated});
+    merge_meta(&mut head, meta);
+    let mut out = json_bytes(&head, req, entries.len() * 450 + 256);
+    out.pop(); // the object's closing brace
+    out.extend_from_slice(b",\"entries\":[");
+    for (i, e) in entries.iter().enumerate() {
+        if i > 0 {
+            out.push(b',');
+        }
+        // Writing to a Vec doesn't fail.
+        let _ = serde_json::to_writer(&mut out, &e.to_json());
+    }
+    out.extend_from_slice(b"]}");
+    out
 }
 
 #[derive(Deserialize)]
@@ -1838,7 +1864,8 @@ TRACE
                    {"count":5000}: record the next 5000 instructions, then stop
                    ({"count":0} stops now; /api/status shows the rest as remaining)
   GET  /api/trace?last_n=200 | ?last_ms=500 | ?from_ms=&to_ms=  [&limit=&cs=&no_bios=true&format=text|json]
-       the newest entries: last_n of them, else up to limit (default 10000)
+       the newest entries: last_n of them (at most limit, if given), else up to limit (default 10000);
+       truncated (x-trace-truncated) is true when limit left out entries that match
   GET  /api/trace?since=N[&limit=]   the entries recorded after cursor N, oldest first;
        the reply's next (x-trace-next) is the cursor to go on from, and dropped
        (x-trace-dropped) counts entries after N overwritten before they were read
@@ -2016,6 +2043,28 @@ mod tests {
         let mut response = String::new();
         stream.read_to_string(&mut response).unwrap();
         response
+    }
+
+    #[test]
+    fn a_json_trace_reply_has_the_fields_and_every_entry() {
+        let entries: Vec<_> = (1..=3)
+            .map(|icount| super::TraceEntry { icount, eip: 0x1234_5678, gpr: [0xFFFF_FFFF; 8], ..Default::default() })
+            .collect();
+        let meta = Meta { state_seq: 7, ..Default::default() };
+        let out = super::trace_json(&entries, 3, 1, true, &meta, Some(42));
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!((v["req"].as_u64(), v["count"].as_u64(), v["next"].as_u64()), (Some(42), Some(3), Some(3)));
+        assert_eq!((v["dropped"].as_u64(), v["truncated"].as_bool(), v["state_seq"].as_u64()), (Some(1), Some(true), Some(7)));
+        let icounts: Vec<_> = v["entries"].as_array().unwrap().iter().map(|e| e["icount"].as_u64().unwrap()).collect();
+        assert_eq!(icounts, [1, 2, 3]);
+        assert_eq!(v["entries"][0], entries[0].to_json());
+        // The guide gives the size of a full ring from these.
+        let one = super::trace_json(&entries[..1], 3, 0, false, &meta, None).len();
+        let two = super::trace_json(&entries[..2], 3, 0, false, &meta, None).len();
+        eprintln!("json bytes per entry: {}, text: {}", two - one, entries[0].to_text().len() + 1);
+        assert!(two - one < 450, "{} bytes", two - one);
+        let none = super::trace_json(&[], 0, 0, false, &meta, None);
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&none).unwrap()["entries"], json!([]));
     }
 
     #[test]
