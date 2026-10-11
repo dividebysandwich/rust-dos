@@ -437,6 +437,15 @@ fn save_states_keep_high_speed_mode() {
     assert!(machine::save(&b) == high_speed, "a loaded state saves as the same bytes");
     assert_eq!(b.bus.io_read(0x22C) & 0x80, 0x80, "a loaded high-speed transfer keeps the DSP busy");
 
+    // An SB16 has no high-speed mode, so the state loads into one that
+    // takes commands.
+    let mut sb16_machine = Cpu::new(PathBuf::from("."));
+    sb16_machine.bus.set_cycles_per_ms(1000);
+    sb16_machine.bus.configure_sound(Some(SbConfig { model: SbModel::Sb16, ..SbConfig::default() }), true);
+    sb16_machine.load_shell();
+    machine::load(&mut sb16_machine, &high_speed).unwrap();
+    assert_eq!(sb16_machine.bus.io_read(0x22C) & 0x80, 0, "an SB16 stays ready");
+
     // A state with a transfer out of high-speed mode, as every state
     // rust-dos saved before it kept the mode, leaves the DSP taking
     // commands.

@@ -238,12 +238,6 @@ impl Bus {
             w.label("cdaudio");
             cdaudio.save_state(w);
         });
-        // The Sound Blaster's high-speed mode, an empty section that is
-        // there only while the mode runs, so states saved before rust-dos
-        // kept the mode load as they did, into a DSP out of it.
-        if sb.as_ref().is_some_and(|sb| sb.high_speed()) {
-            w.section(b"SBHS", SB_HIGH_SPEED_VERSION, |_| {});
-        }
         // The AWE32's EMU8000 (its RAM first, for rewind), only with one,
         // so states of machines without load as they did.
         if let Some(awe) = awe {
@@ -283,6 +277,15 @@ impl Bus {
         // machine.
         if serial.any() {
             w.section(b"SER ", SERIAL_VERSION, |w| serial.save(w));
+        }
+        // The Sound Blaster's high-speed mode, an empty section that is
+        // there only while the mode runs, so states saved before rust-dos
+        // kept the mode load as they did, into a DSP out of it. It comes
+        // last: rewind pairs the sections of two states by position, and a
+        // section that comes and goes with each 91h block would otherwise
+        // shift the ones after it (a 3dfx card's memory) out of their pairs.
+        if sb.as_ref().is_some_and(|sb| sb.high_speed()) {
+            w.section(b"SBHS", SB_HIGH_SPEED_VERSION, |_| {});
         }
     }
 
@@ -474,15 +477,6 @@ impl Bus {
         load_device(sb, "Sound Blaster", &mut section)?;
         load_device(lpt_dac, "DAC on LPT1", &mut section)?;
         cdaudio.load_state(&mut section, |drive| disk.cd_image(drive))?;
-        let high_speed = r.next_is(b"SBHS");
-        if high_speed {
-            r.section(b"SBHS", SB_HIGH_SPEED_VERSION)?;
-        }
-        match sb {
-            Some(sb) => sb.set_high_speed(high_speed),
-            None if high_speed => return Err(StateError::Invalid("a Sound Blaster's high-speed mode without a Sound Blaster".into())),
-            None => {}
-        }
         match (r.next_is(b"AWE "), awe) {
             (true, Some(awe)) => awe.load(&mut r.section(b"AWE ", AWE_VERSION)?)?,
             (false, None) => {}
@@ -532,6 +526,19 @@ impl Bus {
         } else {
             serial.ports = Default::default();
             serial.pic_lines = 0;
+        }
+        let high_speed = r.next_is(b"SBHS");
+        if high_speed {
+            r.section(b"SBHS", SB_HIGH_SPEED_VERSION)?;
+        }
+        match sb {
+            Some(sb) => {
+                if !sb.set_high_speed(high_speed) {
+                    return Err(StateError::Invalid("a Sound Blaster's high-speed mode without a transfer".into()));
+                }
+            }
+            None if high_speed => return Err(StateError::Invalid("a Sound Blaster's high-speed mode without a Sound Blaster".into())),
+            None => {}
         }
         Ok(lost)
     }
