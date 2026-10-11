@@ -24,6 +24,10 @@ pub enum StopReason {
     Paused,
     /// A program ended and the shell was reloaded.
     ShellReloaded,
+    /// The shell is about to take batch lines that include one the
+    /// debugger marked, without the hook: run again with it
+    /// (`Batch::marked_line_waits`).
+    Hook,
     /// The EXIT command asked to turn the machine off (`Bus::exit_requested`).
     Exit,
 }
@@ -238,6 +242,9 @@ fn run<const HOT: bool, const DYN: bool>(cpu: &mut Cpu, fetch: &mut Fetch, hook:
             // After any pending shell reload, so the stop is at the prompt.
             if HOT && cpu.state != CpuState::RebootShell && hook.before_shell(cpu) {
                 return StopReason::Paused;
+            }
+            if !HOT && cpu.state != CpuState::RebootShell && cpu.batch.marked_line_waits() {
+                return StopReason::Hook;
             }
             match shell_services(cpu) {
                 Shell::Idle => {}
@@ -474,7 +481,7 @@ fn shell_services(cpu: &mut Cpu) -> Shell {
 
         // Start the prompt on a new line.
         if cpu.bus.read_8(0x0450) != 0 {
-            crate::video::print_string(cpu, "\r\n");
+            cpu.screen_only(|cpu| crate::video::print_string(cpu, "\r\n"));
         }
         return Shell::Reloaded;
     }
@@ -540,7 +547,7 @@ pub fn run_command_line(cpu: &mut Cpu, cmd: &str) {
     }
 
     match start(cpu, command, args.trim(), false, false) {
-        None => crate::video::print_string(cpu, "Bad command or file name.\r\n"),
+        None => bad_command(cpu),
         Some(Started::Program) => redirect_program(cpu, &redirect),
         Some(Started::Batch) => {}
     }
@@ -762,7 +769,20 @@ pub fn call(cpu: &mut Cpu, line: &str) {
         return;
     }
     if start(cpu, command, args.trim(), false, true).is_none() {
-        crate::video::print_string(cpu, "Bad command or file name.\r\n");
+        bad_command(cpu);
+    }
+}
+
+/// Say that a command line's program wasn't found: on standard error on
+/// the host's terminal, where it fails the run (`rust-dos run`).
+pub fn bad_command(cpu: &mut Cpu) {
+    if let Some(console) = cpu.host_console.as_mut() {
+        console.to_stderr = true;
+        console.not_found = true;
+    }
+    crate::video::print_string(cpu, "Bad command or file name.\r\n");
+    if let Some(console) = cpu.host_console.as_mut() {
+        console.to_stderr = false;
     }
 }
 
@@ -1094,7 +1114,7 @@ fn decode_cached<'a>(
         // generations from now on (see `Bus::code_blocks`).
         let last = if slot.is_invalid() { 14 } else { slot.len() - 1 };
         for block in (phys_ip >> GEN_SHIFT).saturating_sub(1)..=(phys_ip + last) >> GEN_SHIFT {
-            code_blocks[block] = 1;
+            code_blocks[block] |= crate::bus::CODE_BLOCK;
         }
     })
 }

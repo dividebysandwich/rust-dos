@@ -45,6 +45,39 @@ fn enable_activates_mouse_without_reset() {
     assert_eq!((cpu.cx(), cpu.dx()), (2, 4));
 }
 
+/// BloodNet resets the driver with the software reset alone, after its
+/// setup program left the cursor shown.
+#[test]
+fn software_reset_resets_the_driver_as_a_reset_does() {
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    call(&mut cpu, 0x0000);
+    call(&mut cpu, 0x0001);
+    cpu.set_cx(0);
+    cpu.set_dx(100);
+    call(&mut cpu, 0x0007);
+    cpu.set_cx(0x0001);
+    cpu.set_es(0x1234);
+    cpu.set_dx(0x5678);
+    call(&mut cpu, 0x000C);
+    cpu.bus.mouse.move_by(30.0, 20.0);
+    cpu.bus.mouse.installed = false;
+
+    cpu.set_bx(0);
+    call(&mut cpu, 0x0021);
+
+    assert_eq!((cpu.ax(), cpu.bx()), (0xFFFF, 3), "installed, three buttons");
+    let m = &cpu.bus.mouse;
+    assert!(m.installed);
+    assert_eq!(m.hide_counter, 1, "the cursor is hidden");
+    assert_eq!((m.callback_mask, m.callback_cs, m.callback_ip), (0, 0, 0), "no event handler");
+    assert_eq!((m.mickey_x, m.mickey_y), (0, 0));
+    let mut fresh = Cpu::new(PathBuf::from("."));
+    call(&mut fresh, 0x0000);
+    let f = &fresh.bus.mouse;
+    assert_eq!((m.x, m.y), (f.x, f.y), "the cursor is where a reset puts it");
+    assert_eq!((m.min_x, m.max_x, m.min_y, m.max_y), (f.min_x, f.max_x, f.min_y, f.max_y), "the ranges cover the screen");
+}
+
 #[test]
 fn enable_preserves_driver_configuration_and_pending_input() {
     let mut cpu = Cpu::new(PathBuf::from("."));
@@ -167,6 +200,56 @@ fn reflected_motion_poll_delivers_buttons_with_if_clear_and_preserves_full_regis
     }
     assert_eq!((cpu.ds(), cpu.es(), cpu.sp()), (0x4000, 0x5000, 0xFF00));
     assert!(!cpu.get_cpu_flag(CpuFlags::IF));
+}
+
+/// BloodNet's event handler moves its own pointer by SI and DI, then
+/// clears the motion counters with AX=000Bh. Each call has to get the
+/// motion since that read.
+#[test]
+fn handler_motion_counts_from_the_last_read_of_the_counters() {
+    let mut cpu = polling_cpu();
+    cpu.bus.mouse.callback_mask = 0x0001;
+    for round in 1..=3 {
+        cpu.bus.mouse.move_by(3.0, 3.0);
+        assert!(rust_dos::mouse::deliver_callback(&mut cpu));
+        finish_callback(&mut cpu, 0x0100);
+        assert_eq!(cpu.bus.read_16(CALLBACK_COUNT), round);
+        let mickeys = (cpu.bus.read_16(CALLBACK_ARGS + 8), cpu.bus.read_16(CALLBACK_ARGS + 10));
+        assert_eq!(mickeys, (2, 4), "SI and DI at call {round}");
+    }
+}
+
+/// A handler that leaves the counters alone gets them as they add up over
+/// its calls, until the program reads them with AX=000Bh, as the
+/// Microsoft driver, CuteMouse and DOSBox pass them.
+#[test]
+fn handler_motion_without_reads_is_the_running_counters() {
+    const QUIET_IP: u16 = 0x0300;
+    let mut cpu = polling_cpu();
+    let mut a = CodeAssembler::new(16).unwrap();
+    a.inc(word_ptr(0x400).cs()).unwrap();
+    a.mov(word_ptr(0x40A).cs(), si).unwrap();
+    a.mov(word_ptr(0x40C).cs(), di).unwrap();
+    a.retf().unwrap();
+    for (i, byte) in a.assemble(QUIET_IP as u64).unwrap().into_iter().enumerate() {
+        cpu.bus.write_8(((POLL_SEG as usize) << 4) + QUIET_IP as usize + i, byte);
+    }
+    cpu.bus.mouse.callback_ip = QUIET_IP;
+    cpu.bus.mouse.callback_mask = 0x0001;
+    for (round, expected) in [(1, (2, 4)), (2, (4, 8)), (3, (2, 4))] {
+        cpu.bus.mouse.move_by(3.0, 3.0);
+        if round == 3 {
+            cpu.bus.mouse.move_by(3.0, 3.0);
+            call(&mut cpu, 0x000B);
+            assert_eq!((cpu.cx(), cpu.dx()), (8, 16), "four moves, the handler's calls cleared nothing");
+            cpu.bus.mouse.move_by(3.0, 3.0);
+        }
+        assert!(rust_dos::mouse::deliver_callback(&mut cpu));
+        finish_callback(&mut cpu, 0x0100);
+        assert_eq!(cpu.bus.read_16(CALLBACK_COUNT), round);
+        let mickeys = (cpu.bus.read_16(CALLBACK_ARGS + 8), cpu.bus.read_16(CALLBACK_ARGS + 10));
+        assert_eq!(mickeys, expected, "SI and DI at call {round}");
+    }
 }
 
 #[test]

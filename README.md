@@ -107,7 +107,9 @@ cargo build --release
 file's, or the current directory. Drop a game's folder, a GOG install, a zip
 or 7z archive, or a CD or disk image onto the window to mount, import or run
 it.
-`rust-dos --help` lists the other options.
+`rust-dos --help` lists the other options, and `rust-dos run PROGRAM`
+runs a DOS tool from the host's shell without a window
+([more](CONFIGURATION.md#running-dos-tools-from-the-hosts-shell)).
 
 On Windows (MSVC), take SDL2's Visual C++ development package,
 `SDL2-devel-<version>-VC.zip` from
@@ -249,6 +251,8 @@ from the history. The history is kept between sessions. The
 |---|---|
 | Ctrl+F12 | Open or close the [settings window](CONFIGURATION.md#settings-window) |
 | Ctrl+Shift+F12 | Show or hide the performance overlay: the frames a second and the host's CPU use, with small graphs, at the bottom right |
+| Ctrl+Shift+D | Degauss the monitor: the picture wobbles with colour fringes, with the coil's thump with [`monitor_effects`](CONFIGURATION.md#emulator) sound |
+| Ctrl+Shift+S | Show or hide the sound visualizer: an oscilloscope of each sound source, the FM synthesizer's channels, the Ultrasound's voices and the MIDI notes held; click one to mute it, or a source's S to hear it alone (until the visualizer closes) |
 | Ctrl+F1 | Save the machine to the current [save state](#save-states) slot |
 | Ctrl+F2 | Load the current slot |
 | Ctrl+F3 | Pick the next slot (it says what is in it) |
@@ -370,7 +374,8 @@ debugging. It has no authentication, so keep it on localhost. With port 0
 Open the address in a browser for the debugger: the screen with remote
 input, pause, step and run to an address, the disassembly with breakpoints,
 the registers, memory, stack and watchpoints, and the log, the instruction
-trace and the rest of the machine's state. For scripts, `curl
+trace, a heatmap of the memory the machine writes (`/ui#heat`, where code
+shows too) and the rest of the machine's state. For scripts, `curl
 localhost:8086/` lists every endpoint:
 
 ```sh

@@ -16,9 +16,15 @@ pub fn handle(cpu: &mut Cpu) {
     }
 
     match func {
-        0x0000 => {
+        // AX=0021h is the software reset of drivers from 6.0 on: AX=0000h
+        // but for the mouse hardware, which this driver has none of.
+        // BloodNet resets the driver with it alone.
+        0x0000 | 0x0021 => {
             // Reset driver + query installation status.
-            // Returns: AX = FFFFh if installed, 0000h if not. BX = button count.
+            // Returns: AX = FFFFh, as this driver is always installed (one
+            // that isn't leaves AX alone). BX = button count for both: HelpPC
+            // lists BX=2 for AX=0021h, but RBIL, CuteMouse and DOSBox-X
+            // return the button count there too.
             let (w, h) = crate::mouse::driver_screen(&cpu.bus);
             cpu.bus.mouse.reset(w, h);
             crate::mouse::clear_callback_busy(&mut cpu.bus);
@@ -114,7 +120,9 @@ pub fn handle(cpu: &mut Cpu) {
         }
 
         0x000B => {
-            // Read motion counters. Returns CX = mickey X, DX = mickey Y. Clears.
+            // Read motion counters. Returns CX = mickey X, DX = mickey Y.
+            // Clears them, so the event handler's SI and DI count from
+            // here too (see `deliver_callback`).
             cpu.set_cx(cpu.bus.mouse.mickey_x as u16);
             cpu.set_dx(cpu.bus.mouse.mickey_y as u16);
             cpu.bus.mouse.mickey_x = 0;

@@ -11,4 +11,4 @@ license.workspace = true
 rust-dos-savestate = { path = "../savestate" }
 rust-dos-audio-core = { path = "../audio-core" }
 # The synthesis itself.
-nuked-opl3 = "0.1"
+nuked-opl3 = { path = "../nuked-opl3" }

@@ -120,7 +120,7 @@ fn archive_image(files: &[String]) -> Option<String> {
             _ => None,
         }
     };
-    one(&|f| matches!(extension(f).as_str(), "cue" | "ins" | "inst"))
+    one(&|f| matches!(extension(f).as_str(), "cue" | "ins" | "inst" | "bdn"))
         .or_else(|| one(&|f| crate::mount::is_image_name(Path::new(f))))
 }
 
@@ -1652,6 +1652,14 @@ impl DiskController {
         self.drive(drive)?.disk().cloned()
     }
 
+    /// The host folder the drive's files are read from: the folder itself,
+    /// or under an overlay the overlay's root (`layerN:/`), which shows
+    /// the files below with the changes made to them. None for a drive
+    /// that isn't a host folder.
+    pub fn host_root(&self, drive: u8) -> Option<PathBuf> {
+        self.drive(drive)?.host_root().map(Path::to_path_buf)
+    }
+
     /// The IDE slot `drive` was mounted for (`-ide`), if any.
     pub fn ide_slot(&self, drive: u8) -> Option<crate::ide::IdeSlot> {
         self.drive(drive)?.mount.as_ref()?.opts.ide
@@ -2662,21 +2670,44 @@ impl DiskController {
     }
 
     /// Make an open file `size` bytes long, cutting it or adding zeros
-    /// (INT 21h AH=28h with no records). Only host files can be cut;
-    /// the others grow with zeros written at their end.
+    /// (INT 21h AH=28h with no records, AH=40h with none to write). Host
+    /// files and files on disk images opened for writing can be cut; the
+    /// others grow with zeros written at their end, and get 27h when the
+    /// disk fills up first. Files that can't be written get 05h. The
+    /// handle's position stays where it was.
     pub fn set_file_size(&mut self, handle: u16, size: u64) -> Result<(), u8> {
         let open = self.open_files.get(&handle).ok_or(0x06u8)?;
-        if let OpenData::Host(file) = &open.data {
-            let result = file.set_len(size).map_err(|_| 0x05);
-            self.mark_dirty(handle);
-            return result;
+        match &open.data {
+            OpenData::Host(file) => {
+                let result = file.set_len(size).map_err(|_| 0x05);
+                self.mark_dirty(handle);
+                return result;
+            }
+            OpenData::Memory(..) | OpenData::Image(..) | OpenData::Fat { write: false, .. } => return Err(0x05),
+            OpenData::Fat { volume, at, .. } if size < volume.reload(*at)?.size as u64 => {
+                let result = volume.truncate(*at, size);
+                self.mark_dirty(handle);
+                return result;
+            }
+            OpenData::Fat { .. } | OpenData::Device(_) => {}
         }
-        let end = self.seek_file(handle, 0, 2).map_err(|_| 0x05u8)?;
-        if end > size {
-            return Err(0x05);
+        let was = self.position(handle).unwrap_or(0);
+        let mut end = self.seek_file(handle, 0, 2).map_err(|_| 0x05u8)?;
+        // A piece at a time, so a position far past the end doesn't take a
+        // buffer that big. A full disk stops it short with 27h.
+        let zeros = vec![0u8; size.saturating_sub(end).min(0x8000) as usize];
+        let mut result = if end > size { Err(0x05) } else { Ok(()) };
+        while result.is_ok() && end < size {
+            let n = (size - end).min(zeros.len() as u64) as usize;
+            result = match self.write_file(handle, &zeros[..n]) {
+                Ok(written) if written as usize == n => Ok(()),
+                Ok(_) => Err(0x27),
+                Err(code) => Err(code),
+            };
+            end += n as u64;
         }
-        let zeros = vec![0u8; (size - end) as usize];
-        self.write_file(handle, &zeros).map(|_| ())
+        let _ = self.seek_file(handle, was as i64, 0);
+        result
     }
 
     // ========================================================================
@@ -2787,8 +2818,8 @@ impl DiskController {
         if let Some((_, drive, path)) = self.locate_in_memory(filename) {
             let files = drive.tree().ok_or(0x03u8)?;
             return match files.file(&path) {
-                Some(node) => Ok(Self::tree_attr(Some(node)) as u16),
-                None if files.is_dir(&path) => Ok(0x11),
+                Some(node) => Ok(Self::tree_attr(Some(node), None) as u16),
+                None if files.is_dir(&path) => Ok(Self::tree_attr(None, files.dir_record(&path)) as u16),
                 None => Err(0x02),
             };
         }
@@ -2979,9 +3010,11 @@ impl DiskController {
     }
 
     /// The attributes of an entry of a tree held in memory (None for a
-    /// directory): read-only, and hidden where the CD says so.
-    fn tree_attr(node: Option<&Node>) -> u8 {
+    /// directory, with its record on the CD if it has one): read-only, and
+    /// hidden where the CD says so.
+    fn tree_attr(node: Option<&Node>, dir_record: Option<crate::cdrom::Extent>) -> u8 {
         match node {
+            None if dir_record.is_some_and(|r| r.hidden) => 0x13,
             None => 0x11,
             Some(Node::Extent(extent)) if extent.hidden => 0x23,
             Some(_) => 0x21,
@@ -3008,18 +3041,20 @@ impl DiskController {
     }
 
     /// The ".." and "." entries of a directory below the root that match
-    /// `pattern`.
-    fn dot_entries(pattern: &str) -> impl Iterator<Item = DosDirEntry> + '_ {
+    /// `pattern`, with the DOS time and date of each: the parent's for "..",
+    /// the directory's own for ".".
+    fn dot_entries(pattern: &str, times: [(u16, u16); 2]) -> impl Iterator<Item = DosDirEntry> + '_ {
         ["..", "."]
             .into_iter()
-            .filter(|dot| Self::matches_pattern(dot, pattern))
-            .map(|dot| DosDirEntry {
+            .zip(times)
+            .filter(|(dot, _)| Self::matches_pattern(dot, pattern))
+            .map(|(dot, (dos_time, dos_date))| DosDirEntry {
                 filename: dot.to_string(),
                 size: 0,
                 is_dir: true,
                 is_readonly: false,
-                dos_time: 0,
-                dos_date: 0,
+                dos_time,
+                dos_date,
                 attr: 0x10,
             })
     }
@@ -3109,16 +3144,28 @@ impl DiskController {
             if !files.is_dir(&dir) {
                 return Err(0x03);
             }
+            // A directory's time and date: its record's on a CD, the
+            // drive's default elsewhere.
+            let dir_time = |path: &str| {
+                files.dir_record(path).map_or((MEMORY_TIME, MEMORY_DATE), |r| (r.time, r.date))
+            };
             if !dir.is_empty() {
-                valid_entries.extend(Self::dot_entries(pattern));
+                let parent = dir.rsplit_once('\\').map_or("", |(parent, _)| parent);
+                valid_entries.extend(Self::dot_entries(pattern, [dir_time(parent), dir_time(&dir)]));
             }
             for (name, node) in files.list(&dir) {
-                let attr = Self::tree_attr(node);
+                let dir_record = match node {
+                    None if dir.is_empty() => files.dir_record(name),
+                    None => files.dir_record(&format!("{}\\{}", dir, name)),
+                    Some(_) => None,
+                };
+                let attr = Self::tree_attr(node, dir_record);
                 if (attr as u16 & restricted_bits) & !search_attr != 0 || !Self::matches_pattern(name, pattern) {
                     continue;
                 }
-                let (dos_time, dos_date) = match node {
-                    Some(Node::Extent(extent)) => (extent.time, extent.date),
+                let (dos_time, dos_date) = match (node, dir_record) {
+                    (Some(Node::Extent(extent)), _) => (extent.time, extent.date),
+                    (None, Some(record)) => (record.time, record.date),
                     _ => (MEMORY_TIME, MEMORY_DATE),
                 };
                 valid_entries.push(DosDirEntry {
@@ -3144,7 +3191,7 @@ impl DiskController {
         let media_ro = !drive.writable();
 
         if !is_host_root {
-            valid_entries.extend(Self::dot_entries(pattern));
+            valid_entries.extend(Self::dot_entries(pattern, [(0, 0); 2]));
         }
 
         for (original_name, final_name) in Self::host_entries(&host_dir) {
@@ -3976,6 +4023,36 @@ mod tests {
         disk.unmount(23).unwrap();
         assert!(disk.read_file(h, 1).is_err());
         assert!(!disk.is_file("X:\\GUS\\README.TXT"));
+    }
+
+    #[test]
+    fn cd_directories_show_their_records() {
+        let mut disk = DiskController::new(scratch("dir-records"));
+        let record = |time: u16, hidden| crate::cdrom::Extent { lba: 20, size: 2048, time, date: 0x1F5F, hidden };
+        let mut files = MemFs::new();
+        files.insert_dir_record("", record(1 << 11, false));
+        files.insert_dir_record("DATA", record(2 << 11, false));
+        files.insert_dir_record("DATA\\SECRET", record(3 << 11, true));
+        files.insert("DATA\\SECRET\\KEY.DAT", &b"key"[..]);
+        files.insert("DATA\\PLAIN\\A.DAT", &b"a"[..]);
+        disk.mount_memory(23, files, "disc").unwrap();
+
+        let times = |spec: &str, attr: u16| -> Vec<(String, u8, u16)> {
+            disk.list_directory(spec, attr).unwrap().into_iter().map(|e| (e.filename, e.attr, e.dos_time)).collect()
+        };
+        // ".." has the parent's record (the root's), "." the directory's own;
+        // a directory without a record shows the drive's default.
+        assert_eq!(
+            times("X:\\DATA\\*.*", 0x10),
+            [("..".to_string(), 0x10, 1 << 11), (".".to_string(), 0x10, 2 << 11), ("PLAIN".to_string(), 0x11, MEMORY_TIME)]
+        );
+        // A hidden directory is listed only when hidden entries are asked for.
+        assert_eq!(times("X:\\DATA\\S*.*", 0x12), [("SECRET".to_string(), 0x13, 3 << 11)]);
+        assert_eq!(disk.get_file_attribute("X:\\DATA\\SECRET"), Ok(0x13));
+        assert_eq!(times("X:\\DATA\\SECRET\\*.*", 0x10)[..2], [("..".to_string(), 0x10, 2 << 11), (".".to_string(), 0x10, 3 << 11)]);
+        let plain = disk.list_directory("X:\\DATA\\PLAIN\\*.*", 0x10).unwrap();
+        assert_eq!((plain[0].dos_time, plain[0].dos_date), (2 << 11, 0x1F5F));
+        assert_eq!((plain[1].dos_time, plain[1].dos_date), (MEMORY_TIME, MEMORY_DATE));
     }
 
     #[test]

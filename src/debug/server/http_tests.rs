@@ -240,7 +240,7 @@ fn run_machine(dir: std::path::PathBuf, rx: mpsc::Receiver<super::super::Request
                     cpu.bus.start_batch(end);
                     while cpu.bus.clock.icount < end {
                         match exec::run_batch(&mut cpu, &mut hub, hot) {
-                            StopReason::BatchEnd | StopReason::Paused | StopReason::Exit => break,
+                            StopReason::BatchEnd | StopReason::Paused | StopReason::Exit | StopReason::Hook => break,
                             StopReason::ShellReloaded => cpu.bus.start_batch(end),
                         }
                     }
@@ -336,6 +336,58 @@ fn next(socket: &mut Socket) -> Option<Value> {
 /// The JSON keys of an object.
 fn keys(v: &Value) -> Vec<String> {
     v.as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default()
+}
+
+#[test]
+fn input_with_a_field_it_does_not_have_is_refused() {
+    let rig = Rig::new("input-fields");
+    let before = rig.last();
+    // "modifiers" for "mods": taking it would press the key without Alt.
+    let refused = rig.post("/api/input/key?wait=false", json!({"key": "o", "modifiers": ["alt"]}));
+    assert_eq!(refused.status, 400, "{}", refused.body);
+    let error = refused.json()["error"].as_str().unwrap().to_string();
+    assert!(error.contains("`modifiers`") && error.contains("(did you mean `mods`?)"), "{}", error);
+    let batch = json!({"events": [{"type": "type", "text": "x"}, {"type": "mouse", "action": "click", "x": 1, "y": 2, "z": 3}]});
+    let refused = rig.post("/api/input/batch?wait=false", batch);
+    assert_eq!(refused.status, 400, "{}", refused.body);
+    assert!(refused.json()["error"].as_str().unwrap().starts_with("events[1]: "), "{}", refused.body);
+    assert_eq!(rig.post("/api/input/wait?wait=false", json!({"ms": 1, "for": 2})).status, 400);
+    // A field beside the events.
+    let beside = json!({"events": [{"type": "type", "text": "x"}], "wiat": false});
+    assert_eq!(rig.post("/api/input/batch?wait=false", beside).status, 400);
+    // The socket takes off its own fields and refuses the rest.
+    let mut input = ws(rig.addr, "/ws/input");
+    for msg in [
+        json!({"events": [{"type": "key", "key": "o", "modifiers": ["alt"]}], "wait": false, "request_id": "r"}),
+        json!({"type": "key", "key": "o", "wiat": false}),
+        json!({"events": [{"type": "key", "key": "o"}], "wait": "false"}),
+    ] {
+        input.send(tungstenite::Message::Text(msg.to_string().into())).unwrap();
+        let reply = read_entries(&mut input, 1, Duration::from_secs(5));
+        assert!(reply[0]["ok"] == false && reply[0]["error"].is_string(), "{}: {:?}", msg, reply);
+    }
+    let queued = || rig.get(&format!("/api/journal?after={}&type=input_queued", before)).json()["entries"].as_array().map(Vec::len);
+    assert_eq!(queued(), Some(0), "nothing was queued");
+    let taken = rig.post("/api/input/key?wait=false", json!({"key": "o", "mods": ["alt"]}));
+    assert_eq!(taken.status, 200, "{}", taken.body);
+    assert_eq!(queued(), Some(1), "the key with mods was queued");
+}
+
+#[test]
+fn other_bodies_with_a_field_they_do_not_have_are_refused() {
+    let rig = Rig::new("body-fields");
+    // "adr" for "addr" would otherwise be a breakpoint request without an
+    // address, and a DELETE without one removes them all.
+    let refused = rig.post("/api/breakpoints", json!({"adr": "1234:0100"}));
+    assert_eq!(refused.status, 400, "{}", refused.body);
+    assert!(refused.json()["error"].as_str().unwrap().ends_with("(did you mean `addr`?)"), "{}", refused.body);
+    let added = rig.post("/api/breakpoints", json!({"addr": "1234:0100"}));
+    assert_eq!(added.status, 200, "{}", added.body);
+    assert_eq!(http(rig.addr, "DELETE", "/api/breakpoints?adr=1234:0100", &[], None).status, 400);
+    assert_eq!(rig.get("/api/breakpoints").json()["breakpoints"].as_array().map(Vec::len), Some(1), "the breakpoint stays");
+    let refused = rig.post("/api/control/step", json!({"cnt": 5}));
+    assert_eq!(refused.status, 400, "{}", refused.body);
+    assert_eq!(rig.post("/api/speed", json!({"cycles": "max", "turbo": true})).status, 400);
 }
 
 #[test]
@@ -649,7 +701,7 @@ fn the_other_replies_keep_their_keys_too() {
     let cancelled = waiting.join().unwrap();
     assert_eq!((cancelled.status, cancelled.json()["ok"].as_bool(), cancelled.json()["cancelled"].as_bool()), (200, Some(false), Some(true)), "{}", cancelled.body);
     has(&http(rig.addr, "PUT", "/api/memory", &[], Some(&json!({"addr": "0200:0000", "hex": "01"}))), &["ok", "addr", "written", "old", "new"]);
-    has(&rig.get("/api/screen/text?format=json"), &["lines", "rows"]);
+    has(&rig.get("/api/screen/text?format=json"), &["lines", "rows", "attrs"]);
     has(&rig.post("/api/drive/sync", json!({})), &["messages"]);
     has(&rig.post("/api/control/reboot_shell", json!({})), &["ok"]);
 }
@@ -846,6 +898,20 @@ fn run_answers_once_its_program_started_without_another_entry() {
     assert_eq!(op["state"], "done", "{}", op);
     let end = op["end"].clone();
     assert_eq!((end["type"].as_str(), end["op"].clone()), (Some("program_started"), started.json()["op"].clone()), "{}", op);
+}
+
+#[test]
+fn a_run_with_queue_is_taken_while_the_prompt_is_busy() {
+    let rig = Rig::new("run-queued");
+    let started = rig.post("/api/control/run", json!({"command": "LOOP.COM", "timeout_ms": 10000}));
+    assert_eq!(started.status, 200, "{}", started.body);
+    // LOOP.COM keeps the prompt busy.
+    let refused = rig.post("/api/control/run", json!({"command": "PROBE.COM"}));
+    assert_eq!(refused.status, 409, "{}", refused.body);
+    let queued = rig.post("/api/control/run", json!({"command": "PROBE.COM", "queue": true, "wait": false}));
+    assert_eq!(queued.status, 202, "{}", queued.body);
+    let op = rig.get(&format!("/api/ops/{}", queued.json()["op"])).json();
+    assert_eq!(op["state"], "pending", "waits for LOOP.COM to end: {}", op);
 }
 
 // ----- consistency under load ------------------------------------------------
@@ -1394,14 +1460,23 @@ fn the_ring_and_the_operations_stay_bounded_and_say_what_went() {
     assert_eq!(page["entries"][0]["seq"].as_u64(), Some(first));
     let mut socket = ws(rig.addr, "/ws/events?after=10&volatile=false");
     assert_eq!(next(&mut socket).unwrap(), json!({"type": "gone", "first": first}));
-    // The oldest ended operations are gone; the latest 1024 kept, and the
-    // pending resume, however old.
+    // The operations that ended first are gone; the latest 1024 to end
+    // kept, and the pending resume, however old. Numbers are handed out
+    // before the requests reach the machine, so the order they ended in is
+    // the order of their `input_delivered` entries, not their numbers.
     let kept = super::journal::OPS_CAPACITY;
-    for &op in &inputs[..inputs.len() - kept] {
-        assert_eq!(rig.get(&format!("/api/ops/{}", op)).status, 410, "{}", op);
-    }
-    for &op in &inputs[inputs.len() - kept..] {
-        assert_eq!(rig.get(&format!("/api/ops/{}", op)).json()["state"], "done", "{}", op);
+    let ring = rig.get(&format!("/api/journal?after={}&limit={}", first - 1, super::journal::CAPACITY)).json();
+    let delivered: Vec<u64> =
+        ring["entries"].as_array().unwrap().iter().filter(|e| e["type"] == "input_delivered").map(|e| e["cause"].as_u64().unwrap()).collect();
+    assert!(delivered.len() >= kept, "{}", delivered.len());
+    let latest: std::collections::HashSet<u64> = delivered[delivered.len() - kept..].iter().copied().collect();
+    for &op in &inputs {
+        let r = rig.get(&format!("/api/ops/{}", op));
+        if latest.contains(&op) {
+            assert_eq!(r.json()["state"], "done", "{}", op);
+        } else {
+            assert_eq!(r.status, 410, "{}", op);
+        }
     }
     assert_eq!(rig.get(&format!("/api/ops/{}", resume)).json()["state"], "pending");
     {
@@ -1742,7 +1817,9 @@ fn the_debugger_page_gets_what_it_reads() {
     assert!(rig.get("/api/disasm?format=json&count=1&addr=CS:EIP").json()["rows"][0]["phys"].is_string());
     assert!(rig.get("/api/memory?format=base64&len=16&addr=SS:FFF0").json()["base64"].is_string());
     assert!(rig.get("/api/log?limit=500").json()["lines"].is_array());
-    assert!(rig.get("/api/trace?format=json&last_n=200").json()["entries"].is_array());
+    let trace = rig.get("/api/trace?format=json&last_n=200");
+    assert!(trace.json()["entries"].is_array() && trace.json()["truncated"] == false);
+    assert_eq!(trace.header("x-trace-truncated"), Some("false"));
     assert!(rig.get("/api/breakpoints").json().is_object());
     assert!(rig.get("/api/watchpoints").json().is_object());
     // The stream: a stop with its reason and what the watchpoint saw, a

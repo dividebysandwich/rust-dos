@@ -1,0 +1,12 @@
+[package]
+name = "nuked-opl3"
+version = "0.1.0"
+edition = "2021"
+authors = ["Tony Gies", "Nuke.YKT", "Daniel Balsom"]
+description = "Pure Rust port of the Nuked-OPL3 Yamaha YMF262 (OPL3) FM synthesis chip emulator: nuked-opl3 0.1.0 from crates.io, with rust-dos's channel mutes and views for its sound visualizer"
+license = "LGPL-2.1-or-later"
+repository = "https://github.com/tgies/nuked-opl3-rs"
+publish = false
+
+[features]
+stereo-ext = []

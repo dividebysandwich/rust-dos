@@ -1,0 +1,65 @@
+{
+  "format": 1,
+  "boards": [
+    {
+      "number": "555-0101",
+      "name": "Level 29",
+      "address": "bbs.fozztexx.com:23",
+      "telnet": true
+    },
+    {
+      "number": "555-0102",
+      "name": "The Particles! BBS",
+      "address": "particlesbbs.dyndns.org:6400",
+      "telnet": true
+    },
+    {
+      "number": "555-0103",
+      "name": "Vertrauen",
+      "address": "vert.synchro.net:23",
+      "telnet": true
+    },
+    {
+      "number": "555-0104",
+      "name": "Retro Campus BBS",
+      "address": "bbs.retrocampus.com:23",
+      "telnet": true
+    },
+    {
+      "number": "555-0105",
+      "name": "20 For Beers",
+      "address": "20forbeers.com:1337",
+      "telnet": true
+    },
+    {
+      "number": "555-0106",
+      "name": "Electronic Chicken BBS",
+      "address": "bbs.electronicchicken.com:23",
+      "telnet": true
+    },
+    {
+      "number": "555-0107",
+      "name": "Heatwave BBS",
+      "address": "heatwave.ddns.net:9640",
+      "telnet": true
+    },
+    {
+      "number": "555-0108",
+      "name": "Dura-Europos BBS",
+      "address": "dura-bbs.net:6359",
+      "telnet": true
+    },
+    {
+      "number": "555-0109",
+      "name": "Absinthe BBS",
+      "address": "absinthebbs.net:1940",
+      "telnet": true
+    },
+    {
+      "number": "555-0110",
+      "name": "Xibalba",
+      "address": "xibalba.l33t.codes:44510",
+      "telnet": true
+    }
+  ]
+}

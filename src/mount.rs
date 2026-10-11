@@ -6,7 +6,7 @@
 //! the line. The path is a host directory, a zip or 7z archive (`archive`),
 //! or a disk or CD image (.img,
 //! .ima, .vfd, .flp, .dsk, .360, .720, .1200, .1440, .86f, .iso, .cue,
-//! .bin, .gog, .ins) on the host or on a mounted drive (C:\GAME\CD.CUE), whose
+//! .bin, .gog, .ins, .bdn) on the host or on a mounted drive (C:\GAME\CD.CUE), whose
 //! type is found from the image unless `-t` gives it. Several images, or a
 //! wildcard that matches several (disk*.img), make a list that Ctrl+F4
 //! steps through. A: and B: are floppies whatever the type says. `IMGMOUNT`
@@ -61,7 +61,7 @@ IMGMOUNT is the same command.\r
 
 /// The extensions of disk and CD images.
 pub(crate) const IMAGE_EXTENSIONS: &[&str] =
-    &["img", "ima", "vfd", "flp", "dsk", "360", "720", "1200", "1440", "86f", "iso", "cue", "bin", "gog", "ins", "inst", "chd", "vhd"];
+    &["img", "ima", "vfd", "flp", "dsk", "360", "720", "1200", "1440", "86f", "iso", "cue", "bin", "gog", "ins", "inst", "bdn", "chd", "vhd"];
 
 /// Whether a path is a disk or CD image's, by its extension.
 pub(crate) fn is_image_name(path: &Path) -> bool {

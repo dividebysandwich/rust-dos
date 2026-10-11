@@ -269,6 +269,96 @@ fn file_times_are_kept() {
     close(&mut cpu, handle);
 }
 
+/// Free clusters on `drive` (1-based, as AH=36h takes it).
+fn free_clusters(cpu: &mut Cpu, drive: u8) -> u16 {
+    cpu.set_reg8(Register::DL, drive);
+    int21(cpu, 0x3600);
+    cpu.bx()
+}
+
+fn seek(cpu: &mut Cpu, handle: u16, to: u32) {
+    cpu.set_bx(handle);
+    cpu.set_cx((to >> 16) as u16);
+    cpu.set_dx(to as u16);
+    int21(cpu, 0x4200);
+    assert!(!cf(cpu));
+}
+
+#[test]
+fn writing_no_bytes_ends_the_file_at_its_position() {
+    // Conqueror A.D. 1086 rewrites CONQUER.INI in place, then writes no
+    // bytes to cut off what the longer old contents had past the new.
+    let dir = fatimage::scratch("write0");
+    let image = floppy_with_files(&dir);
+    let mut cpu = cpu(&dir);
+    mount(&mut cpu, DRIVE_A, &image);
+    for path in ["C:\\CONQUER.INI", "A:\\CONQUER.INI"] {
+        let handle = create(&mut cpu, path).unwrap();
+        write(&mut cpu, handle, b"CDMUSIC=OFF\r\nGOB=C:\\\r\n").unwrap();
+        close(&mut cpu, handle);
+        let handle = open(&mut cpu, path, 2).unwrap();
+        write(&mut cpu, handle, b"CDMUSIC=ON\r\nGOB=C:\\\r\n").unwrap();
+        assert_eq!(write(&mut cpu, handle, b""), Ok(0), "{}", path);
+        close(&mut cpu, handle);
+        assert_eq!(read_file(&mut cpu, path), b"CDMUSIC=ON\r\nGOB=C:\\\r\n", "{}", path);
+
+        // Past the end it extends the file with zeros.
+        let handle = open(&mut cpu, path, 2).unwrap();
+        seek(&mut cpu, handle, 25);
+        assert_eq!(write(&mut cpu, handle, b""), Ok(0), "{}", path);
+        close(&mut cpu, handle);
+        assert_eq!(read_file(&mut cpu, path), b"CDMUSIC=ON\r\nGOB=C:\\\r\n\0\0\0\0", "{}", path);
+
+        // A handle opened for reading can't change the file, and its
+        // position stays where it was.
+        let handle = open(&mut cpu, path, 0).unwrap();
+        seek(&mut cpu, handle, 3);
+        assert_eq!(write(&mut cpu, handle, b""), Err(0x05), "{}", path);
+        assert_eq!(read(&mut cpu, handle, 4), b"USIC", "{}", path);
+        close(&mut cpu, handle);
+        assert_eq!(read_file(&mut cpu, path).len(), 25, "{}", path);
+    }
+    assert_eq!(fs::read(dir.join("c/CONQUER.INI")).unwrap().len(), 25);
+
+    // On an image the clusters past the new end are free again, and the
+    // cut file stays cut on a fresh mount.
+    let free = free_clusters(&mut cpu, 1);
+    let handle = create(&mut cpu, "A:\\SAVE.DAT").unwrap();
+    write(&mut cpu, handle, &pattern(20_000, 5)).unwrap();
+    assert_eq!(free - free_clusters(&mut cpu, 1), 40);
+    seek(&mut cpu, handle, 600);
+    assert_eq!(write(&mut cpu, handle, b""), Ok(0));
+    close(&mut cpu, handle);
+    assert_eq!(free - free_clusters(&mut cpu, 1), 2);
+    remount(&mut cpu, &image);
+    assert_eq!(read_file(&mut cpu, "A:\\SAVE.DAT"), pattern(20_000, 5)[..600]);
+    let handle = open(&mut cpu, "A:\\SAVE.DAT", 2).unwrap();
+    assert_eq!(write(&mut cpu, handle, b""), Ok(0));
+    close(&mut cpu, handle);
+    assert_eq!(free_clusters(&mut cpu, 1), free, "cut to nothing");
+    assert!(read_file(&mut cpu, "A:\\SAVE.DAT").is_empty());
+
+    // Past what the disk holds it grows the file to fill the disk, with no
+    // error (a handle write tells of a full disk by its count), and the
+    // position stays where it was.
+    let handle = open(&mut cpu, "A:\\SAVE.DAT", 2).unwrap();
+    seek(&mut cpu, handle, 2_000_000);
+    assert_eq!(write(&mut cpu, handle, b""), Ok(0));
+    cpu.set_bx(handle);
+    cpu.set_cx(0);
+    cpu.set_dx(0);
+    int21(&mut cpu, 0x4201);
+    assert_eq!((cpu.dx() as u32) << 16 | cpu.ax() as u32, 2_000_000);
+    close(&mut cpu, handle);
+    assert_eq!(free_clusters(&mut cpu, 1), 0);
+    assert_eq!(read_file(&mut cpu, "A:\\SAVE.DAT").len(), free as usize * 512);
+}
+
+fn remount(cpu: &mut Cpu, image: &Path) {
+    cpu.bus.unmount_drive(DRIVE_A).unwrap();
+    mount(cpu, DRIVE_A, image);
+}
+
 #[test]
 fn write_protected_images() {
     let dir = fatimage::scratch("ro");

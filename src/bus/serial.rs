@@ -21,6 +21,7 @@ impl Bus {
     /// with something else plugged in, another IRQ or another chip starts
     /// anew.
     pub fn configure_serial(&mut self, settings: &SerialSettings) {
+        crate::serial::phonebook::set_yours(&settings.phonebook);
         for n in 0..4 {
             let kind = settings.ports[n];
             let current = self.serial.ports[n].as_ref().map(|p| (p.backend.kind(), p.uart.irq, p.uart.chip));

@@ -76,6 +76,18 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   the mode's own size in graphics modes, doubled where it is small (mode 13h
   is 640x400, mode 12h and 320x240 "mode X" 640x480). `/api/status` →
   `video.frame` has it.
+- **Find the highlighted item in a text-mode menu.** The text alone doesn't
+  show which item is selected. The JSON reply of `/api/screen/text` (without
+  `format=text`) has `attrs`: for each row, runs of cells with the same
+  attribute as `{"col":19,"len":21,"attr":"71"}`. `col` and `len` count
+  cells, one character of `lines` each; a box-drawing character is three
+  bytes in UTF-8, so slice a line by characters. A selected item or field
+  is usually a run of its own, such as blue on light grey (`71`) in a row
+  of light grey on blue (`17`). `blink` says whether attribute bit 7
+  blinks the character (when false it selects a bright background, so `F1`
+  is blue on bright white), and `mono` is true for the MDA and Hercules,
+  whose attributes are `07` normal, `70` reverse, `01` underline and `08`
+  bright.
 - **Check state with `/api/status`.** It reports `shell_idle` (true at the
   DOS prompt), `cs_ip`, the video mode and `video.adapter` (the display
   adapter `machine` gives programs), `paused`, `input_queue`, and
@@ -148,6 +160,12 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   `type` string takes roughly 2 frames per character, or 4 for shifted
   characters.
 - **Unknown key names** return an error that lists all valid names.
+- **Unknown fields** are refused with HTTP 400 naming the field and the
+  ones the event has, and nothing in the request is queued:
+  `{"key":"o","modifiers":["alt"]}` gets 400 and presses nothing, with
+  "(did you mean `mods`?)" in the error. The other JSON bodies (control,
+  breakpoints, watchpoints, memory, trace, ports, drives, state, speed)
+  refuse unknown fields the same way.
 - **Stop pending input:** `DELETE /api/input` clears whatever is still
   queued.
 - **The settings window** opens with `DOSCONFIG` at the prompt or
@@ -186,11 +204,23 @@ curl -s "$H/api/log?limit=50&format=text"
   start, `CS:IP`, bytes, disassembly, and the registers *before* the
   instruction ran. `HLE INT 21h (AX=4C00)` marks a BIOS/DOS service call
   handled by the emulator. `AX` tells you which function was called.
+  `HLE service 08h` marks one of the emulator's own ROM services, here the
+  BIOS timer handler counting the tick. `HLE far service` lines are the
+  Plug and Play BIOS's and APM's entry points, `HLE DPMI` lines the DPMI
+  host's. `/api/disasm` names them the same.
 - **Filters:**
-  - `no_bios=true` hides code running in the BIOS segment F000, but keeps
-    the HLE service calls.
+  - `no_bios=true` hides real-mode and virtual-8086 code running in the
+    BIOS segment F000, but keeps the `HLE` lines. Protected-mode code is
+    never hidden, as its CS is a selector.
   - `cs=1000` keeps only one code segment.
   - `last_ms=500`, or `from_ms`/`to_ms`, select a time window.
+  - `last_n=50000` gets the newest 50000 entries, or `limit` of them if
+    `limit` is smaller. Without `last_n` a reply holds up to `limit`
+    entries, 10000 unless given. When `limit` leaves out matching entries,
+    the reply says `"truncated": true` (the `x-trace-truncated` header in
+    text replies); with `since` it means the page stopped before the newest
+    entry. A full ring of 1,000,000 entries is up to about 230 MB as text
+    and 430 MB as JSON.
 - **Log markers to look for:**
   - `[TRIPWIRE]`: execution jumped into the interrupt table, almost always
     through a corrupted far pointer. The emulator then reloads the shell.
@@ -217,9 +247,24 @@ the machine is paused at the entry point of the program it started, with
 breakpoints set now catch its startup code. Without `stop_at_entry` it
 replies as soon as the program started. A command line that starts no
 program (a typo, a built-in command such as `DIR`) gets HTTP 422 once the
-prompt is back, and `run` while a program runs, or while PAUSE, CHOICE or
-EDIT waits, gets 409. So does a `stop_at_entry` run whose program was
-closed before it reached its entry point.
+prompt is back, and `run` while a program runs, a batch file such as
+AUTOEXEC.BAT has lines left, or PAUSE, CHOICE or EDIT waits, gets 409. So
+does a `stop_at_entry` run whose program was closed before it reached its
+entry point.
+
+- **Queued behind a busy prompt:** `"queue":true` takes the command line
+  while the prompt is busy and adds it after the batch lines waiting. The
+  shell runs it once those lines have run and the prompt is back, and the
+  request waits for its program as before (raise `timeout_ms`, or pass
+  `"wait":false` and wait on the operation). Programs the batch lines start
+  before it don't count: `stop_at_entry` stops at the entry of the
+  program this command line starts. The run's `resumed` entry has
+  `"queued":true` when the prompt was busy. Any stop before the line runs
+  (a breakpoint, `program_start` stops on every program, a pause) ends the
+  run's operation; the line still runs. A line dropped with the batch
+  files (Ctrl+C at a batch line, the settings window closing the program)
+  gets 422. `reboot_shell` drops the line too, and as a control request
+  it supersedes the run.
 
 - **Every program:** `POST /api/breakpoints {"program_start":true}` pauses
   at the entry point of each program DOS starts, a child that a game's
@@ -452,8 +497,12 @@ and images the drives were mounted from, and a load mounts them again,
 but not what is in them: what a program wrote since stays written,
 except for a booted system's disks (see "Booted systems" below). A
 strict-match load checks the paths, that the images are there, and the
-size and start of read-only images (see "What counts as the same
-media").
+size and start of read-only images. For more, ask for `"check_files":
+true`: a save then also records what is on the writable drives (each
+file's size and SHA-256, and each writable image's SHA-256), and a load
+with it names the files that changed since (see "What counts as the
+same media"). A strict-match load refuses the state then; put the files
+back or load another state.
 
 #### Plain save and load
 
@@ -593,6 +642,53 @@ A strict-match save or load guarantees:
   size and time (`cp -p`, `rsync -t`, an unpacked archive), or a CUE
   track file that appeared after the mount.
 
+With `"check_files": true` on the save and on the load, a strict match
+also guarantees:
+
+- **The files on the writable drives as they were.** A `check_files` save
+  (strict or plain) reads every file of each writable folder drive and
+  every writable image, and records their sizes and SHA-256 hashes in
+  the state. A `check_files` load of that state reads them again and
+  compares: a save game written, a configuration changed or a file
+  deleted since the save is a difference. A strict-match load is
+  refused; a plain one goes through and lists them:
+
+  ```json
+  {
+    "error": "/work/a.state doesn't match this machine; nothing was loaded",
+    "loaded": false,
+    "unchanged": true,
+    "differences": [
+      "drive C: file CONFIG.DAT: its contents differ from when it was saved",
+      "drive C: file SAVES/GAME1.SAV: new since the save"
+    ]
+  }
+  ```
+
+  The check is off unless asked for. What a program wrote to a file
+  rarely matters to the machine's state, which a state holds whole;
+  reading and hashing every file of a large game folder on each save and
+  load takes time; and other files on the drive (a log, another tool's
+  output, a state saved there) show up as changes. Without
+  `check_files` no file is read or hashed, a strict match is as
+  described above, and a state's header has no file list. The window's
+  slots (Ctrl+F keys), rewind and the libretro core's states never
+  check.
+
+  A `check_files` load of a state without the record (one saved without
+  `check_files`, or by an older rust-dos) goes through, and its reply
+  lists the drives it couldn't check in `unchecked`:
+
+  ```json
+  "unchecked": [
+    "drive C: wasn't checked: the state doesn't record what is on it (saved without check_files, or by an older rust-dos)"
+  ]
+  ```
+
+  A file that couldn't be read (another program had it locked, say), at
+  the save or at the load, is a difference too, as its contents can't be
+  compared.
+
 #### What counts as the same media
 
 Each mounted drive is compared by its letter (or number, for a disk
@@ -606,16 +702,33 @@ mounted by number) and:
   `read_only` mount's) its size and the SHA-256 of its first 64 KiB.
 
 A writable image changes as the machine writes it (a dynamic VHD grows),
-so its size is recorded but not compared, and its contents aren't
-hashed. Labels and what is in a folder aren't compared. Z: and X:, which
-the machine makes itself, aren't listed.
+so its size is recorded but not compared. When the state was saved and
+is loaded with `check_files`, these are compared as well:
+
+- on a writable folder drive, every file and folder as the drive shows
+  it (under an overlay, the folder below with the overlay's changes), by
+  its path from the drive's root, its size and the SHA-256 of its
+  contents: a file new, gone, of another size or with other contents is
+  named, up to 20 a drive, and the rest are counted;
+- the SHA-256 of each writable image, the whole file, and of a writable
+  image's delta file.
+
+A booted system's disks are left out, as the state keeps a copy of them
+that the load puts back (see "Booted systems"). A state saved on a
+writable drive leaves its own files out (`a.state`, and `a.C.img` and the
+like beside it), but another state file there is a file like any other:
+keep states outside the drives' folders, or the next save to them
+counts as a change. Labels, the files' times
+and read-only folders' contents aren't compared. Z: and X:, which the
+machine makes itself, aren't listed.
 
 #### Replies
 
 A save replies `{"saved": path, "format", "emulator", "header"}` and a load
 `{"loaded": path, "format", "emulator", "header"}`, with `differences`
-after a plain load that found some and `debugger_reset` after a strict-match
-load.
+after a plain load that found some, `debugger_reset` after a strict-match
+load, and `unchecked` after a `check_files` load of a state without a
+record of the files.
 
 - `format`: the version of the file's layout.
 - `emulator`: the version of the running rust-dos.
@@ -632,10 +745,17 @@ load.
     `read_only`, and `folder`, `overlay` and `images` where it has them;
     each image has `path`, `size` (null if the file couldn't be read) and,
     if read-only, `head_sha256`. Null in a state saved before media were
-    recorded.
+    recorded. In a `check_files` save's state, a writable folder drive has
+    `files_recorded`, the number of files and folders recorded (the list
+    itself stays in the file), a writable image `sha256`, and a writable
+    image's delta file `overlay_sha256` (`none` before the first write
+    made the file).
   - `deterministic`: the start time of the mode's clock, only in a state
     saved with `--deterministic`.
-- `differences`: a sentence for each setting, drive or image that differs.
+- `differences`: a sentence for each setting, drive, image or file that
+  differs.
+- `unchecked`: a sentence for each writable drive whose files a
+  `check_files` load couldn't compare, as the state doesn't record them.
 - `debugger_reset`: `breakpoints`, `watchpoints`, `input` (queued input
   events) and `held_keys` count what was cleared; `break_on` lists the
   stops that were on (`exceptions`, `mode_switch`, `program_start`,
@@ -687,6 +807,17 @@ curl -s $J -XPOST -d '{"until_ms":8000}' $H/api/control/resume
   time, so two instances on one LAN need different start times.
 - **Starts paused:** with the debug server the machine starts paused
   (`"reason":"startup"`), so the input can be sent before anything runs.
+  AUTOEXEC.BAT hasn't run yet, so a plain `run` gets 409. `run` with
+  `"queue":true` resumes the machine and runs the command line right after
+  AUTOEXEC.BAT ends, at the same emulated moment on every run:
+
+  ```sh
+  curl -s $J -XPOST -d '{"command":"GAME.EXE","queue":true,"stop_at_entry":true,"timeout_ms":600000}' $H/api/control/run
+  ```
+
+  Without `stop_at_entry` the machine runs on after the reply, and the
+  next request is taken wherever the host's frame got to, so its journal
+  entry (`icount`, `emu_ns`) differs from run to run.
 - **Input:** input, and requests that change the machine (`run`, memory
   and register writes, mounts, `/api/speed`, loading a state, reboots),
   are taken only while the machine is paused or the settings window is
@@ -924,7 +1055,7 @@ address mapped to when it was set.
 - **Emulated time.** Timers run on emulated time, which advances with
   executed instructions at `cycles_per_ms` (see `/api/status`) and stops
   while paused. Pausing, stepping and tracing don't change when a program
-  sees its timer interrupts (`HLE INT 08h` or its own handler) in
+  sees its timer interrupts (`HLE service 08h` or its own handler) in
   instruction terms, but a timer interrupt can arrive between any two steps.
 - **Measuring speed.** `/api/stats` reports `mips` (host speed while
   executing guest code), `emulated_mips` (guest instructions per wall-clock

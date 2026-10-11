@@ -23,6 +23,8 @@ fn drive_info(spec: &MountSpec) -> DriveInfo {
 struct FakeHost {
     drives: Vec<DriveInfo>,
     applied: Vec<Settings>,
+    /// How many times the machine was reset.
+    resets: usize,
     mounts: Vec<(MountSpec, bool)>,
     unmounts: Vec<u8>,
     /// The drives booted from.
@@ -77,6 +79,7 @@ impl FakeHost {
         Self {
             drives: vec![drive_info(&c), z],
             applied: vec![],
+            resets: 0,
             mounts: vec![],
             unmounts: vec![],
             booted: vec![],
@@ -112,6 +115,10 @@ impl FakeHost {
 }
 
 impl Host for FakeHost {
+    fn reset_machine(&mut self) {
+        self.resets += 1;
+    }
+
     fn apply(&mut self, settings: &Settings) -> Result<Option<String>, String> {
         self.applied.push(settings.clone());
         if self.no_shaders && settings.shader != Shader::None {
@@ -2556,3 +2563,62 @@ fn the_scene_list_asks_rust_dos_com_only_when_told() {
     ui.key(Enter, &mut host);
     assert!(ui.scenes.is_none() && ui.browser.is_some());
 }
+
+#[test]
+fn the_modem_phonebook_lists_the_boards_and_copies_a_dial_command() {
+    let mut host = FakeHost::new();
+    let mut ui = opened(&host);
+    ui.show_page(Page::Serial);
+    ui.row = ui.items().iter().position(|&i| i == Item::Phonebook).expect("the phonebook is on the Serial page");
+    ui.key(UiKey::Enter, &mut host);
+    let list = ui.phonebook.as_ref().expect("Enter opens the phonebook");
+    let lines = ui.phone_lines(list);
+    assert!(lines.iter().filter(|l| matches!(l, phonebook::Line::Board(_))).count() >= 10);
+    let mut frame = Frame::new(640, 400);
+    ui.draw(&mut frame);
+    // The first board: FakeHost has no clipboard, so the window says what
+    // to type.
+    ui.key(UiKey::Enter, &mut host);
+    assert!(status(&ui).0.starts_with("Type ATDT "), "{:?}", status(&ui));
+    ui.key(UiKey::Esc, &mut host);
+    assert!(ui.phonebook.is_none());
+}
+
+    #[test]
+    fn changes_wait_for_save_and_exit() {
+        let mut host = FakeHost::new();
+        let mut ui = ConfigUi::new();
+        ui.open_setup(&Settings::default(), None, &host);
+        assert!(ui.setup_shown());
+        let mut frame = Frame::new(640, 400);
+        ui.draw(&mut frame);
+        // BIOS FEATURES SETUP, the CPU on it, one step.
+        ui.key(UiKey::Down, &mut host);
+        ui.key(UiKey::Enter, &mut host);
+        ui.draw(&mut frame);
+        let before = Settings::default().cpu;
+        ui.key(UiKey::PageUp, &mut host);
+        let changed = ui.setup.as_ref().unwrap().settings.cpu;
+        assert_ne!(changed, before);
+        assert!(host.applied.is_empty(), "nothing applies yet");
+        ui.key(UiKey::F10, &mut host);
+        ui.draw(&mut frame);
+        ui.key(UiKey::Char('y'), &mut host);
+        assert!(!ui.is_open());
+        assert_eq!(host.applied.last().map(|s| s.cpu), Some(changed));
+        assert_eq!(host.resets, 1);
+    }
+
+    #[test]
+    fn quitting_changes_nothing() {
+        let mut host = FakeHost::new();
+        let mut ui = ConfigUi::new();
+        ui.open_setup(&Settings::default(), None, &host);
+        ui.key(UiKey::Enter, &mut host);
+        ui.key(UiKey::PageUp, &mut host);
+        ui.key(UiKey::Esc, &mut host);
+        ui.key(UiKey::Esc, &mut host);
+        ui.key(UiKey::Char('y'), &mut host);
+        assert!(!ui.is_open());
+        assert!(host.applied.is_empty() && host.resets == 0);
+    }

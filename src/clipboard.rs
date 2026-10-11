@@ -143,8 +143,7 @@ impl Clipboard {
             .map(|row| {
                 let line: String = (first.0..=last.0)
                     .map(|col| {
-                        let off = (g.start + row * g.row_bytes + col * 2) & g.wrap;
-                        video::CP437[vram.get(off).copied().unwrap_or(b' ') as usize]
+                        video::CP437[vram.get(g.offset(row, col)).copied().unwrap_or(b' ') as usize]
                     })
                     .collect();
                 line.trim_end().to_string()

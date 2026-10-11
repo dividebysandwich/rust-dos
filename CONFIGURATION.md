@@ -97,6 +97,25 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   monochrome text mode 7; an EGA has IBM's Monochrome Display, and only
   modes 7 and 0Fh. On a CGA it is the look alone, and a Hercules card is
   always monochrome.
+* `monitor_effects` plays a CRT monitor's own effects: `off` (the
+  default), `picture`, `sound` or `on` (both). At power on, the picture
+  warms up, slightly too big at first, and wobbles with colour fringes as
+  the degaussing coil's field dies away, to its thump and hum and the
+  crackle of the high voltage; when the card changes to another line or
+  frame rate (640x480 at 60 Hz after the 70 Hz text mode, say) the
+  monitor's relay clicks and the picture blanks and comes back with a
+  jolt, as a multisync monitor did; and when rust-dos quits, the picture
+  collapses to a line and a fading dot. **Ctrl+Shift+D** degausses. The
+  sounds have their own volume, `monitor`, in [`[mixer]`](#mixer).
+* `post` shows a BIOS power-on self test before the built-in DOS starts,
+  and at each reboot: `off` (the default), `quick` (about a second) or
+  `full` (about three, the memory counted up as it is tested). It lists the
+  CPU, the memory, the drives and the sound cards. **Del** while it shows
+  opens the settings as a period CMOS setup utility, whose pages are
+  changed with PgUp/PgDn or +/-; nothing changes until *Save & Exit Setup*
+  (**F10**), which applies and saves the settings and restarts the
+  machine. **Esc** skips the memory test. A booted disk image has no POST
+  of rust-dos's.
 * `composite` shows a CGA's graphics (`machine=cga`) as a composite
   monitor or TV did: fine patterns of pixels come out as colours, the
   "artifact colours" that King's Quest, the Ultima games, Sierra's AGI
@@ -468,8 +487,9 @@ The volume of each sound source in percent, from 0 to 200: `speaker` (the
 PC speaker and the prompt's beeps), `sb` (the Sound Blaster's digital
 audio), `fm` (the FM synthesizer), `gus`, `midi`, `cdaudio`, `disknoise`,
 `lptdac` (the Covox or Disney Sound Source), `tandy` (the Tandy's and
-PCjr's sound chip) and `awe32` (the AWE32's wavetable synthesizer), and
-`master` for all of them together. At 100, the
+PCjr's sound chip), `awe32` (the AWE32's wavetable synthesizer) and
+`monitor` (the [monitor's effects](#emulator)), and `master` for all of
+them together. At 100, the
 default, a source plays as loud as its card makes it. The volumes apply on
 top of the Sound Blaster's own mixer, which programs set.
 
@@ -601,7 +621,24 @@ games](#serial-and-modem-games)). Changes take effect at the DOS prompt.
   answers it, or `ATS0=1` answers the first ring.
 * `modemtelnet` makes the modem's TCP calls speak telnet, for BBSes:
   `off` (the default: the characters as they are, as DOSBox's modem sends
-  them) or `on`.
+  them) or `on`. Calls to the phonebook's numbers speak telnet anyway,
+  unless their entry says `raw`.
+
+### `[phonebook]`
+
+Numbers of your own for the modem's phonebook (see [Serial and modem
+games](#serial-and-modem-games)), one per line: the number, then the
+board's host and port (23 unless given), then optionally `raw` for a
+plain TCP call without telnet, and a name. Dashes in numbers are only for
+reading: `ATDT 5550199` dials `555-0199` too. A number here comes before
+rust-dos.com's and the built-in ones. The settings window doesn't change
+this section; edit it in the file.
+
+```ini
+[phonebook]
+555-0199 = bbs.example.org Example Board
+555-0198 = 192.0.2.7:2323 raw My other board
+```
 
 ### `[printer]`
 
@@ -1148,9 +1185,11 @@ lists the options. Each drive keeps its own current directory, as in DOS.
 
 A CD image always makes a read-only CD-ROM drive, labelled with the disc's
 volume name unless `-label` says otherwise. It can be a CUE sheet (`.cue`,
-or GOG's `.ins`, with BINARY, MOTOROLA or WAVE files, any number of tracks
-and gaps), a CD image in MAME's compressed CHD format (`.chd`, as `chdman
-createcd` makes them; its data and audio tracks, decompressed as they are
+GOG's `.ins`, GOG's `.bdn` for BloodNet, or a file of any other name that
+is at most 64 KiB and reads as a sheet; with BINARY, MOTOROLA or WAVE
+files, any number of tracks and gaps), a CD image in MAME's compressed CHD
+format (`.chd`, as `chdman createcd` makes them; its data and audio
+tracks, decompressed as they are
 read), or a bare image of an ISO 9660 data track in 2048, 2336 or
 2352-byte sectors (`.iso`, `.bin`, `.img`, GOG's `.gog`). Audio tracks can
 be Ogg Vorbis, FLAC or MP3 files (FILE ... MP3, OGG or FLAC, or WAVE as
@@ -1575,10 +1614,8 @@ card's gamma table, which games set brighter than DOSBox-X shows them.
   the game) and run under a DOS extender such as DOS/4GW, which maps the
   card's memory. Tomb Raider's 3dfx patch (`3DPATCH\3DFX\TOMB.EXE` on the
   Tomb Raider Gold CD) runs with `voodoo=true` and `cpu=pentium`. Its
-  saved games don't mix with the other versions': loading one saved by
-  another version corrupts the textures. [Issue #38](https://github.com/dividebysandwich/rust-dos/issues/38)
-  has a zip that keeps the 3dfx version apart, so it lives peacefully
-  beside the others.
+  saved games don't load in the PowerVR version, nor that version's in
+  it (see the PowerVR card below).
   Games made for the Voodoo Rush and later boards load Glide from
   `GLIDE2X.OVL` (Tomb Raider's Rush patch, `3DPATCH\VOORUSH\TOMB.EXE`),
   and the one of 3dfx's Voodoo Graphics driver drives this card whatever
@@ -1766,6 +1803,14 @@ states and rewind keep the card with its texture memory.
   emulated card runs at 15 to 20 on a typical host. Keys this version has and the others
   don't (or use differently): F4 shows or hides the PowerVR logo (in the
   full game only), Z zooms the camera in and X out.
+  Its saved games and the 3dfx version's (and the other versions') share
+  the names `SAVEGAME.x` but don't work in each other: one way round the
+  game loads to a black screen, the other way it quits with an error
+  about GetHeight. The textures aren't harmed. [Issue #38](https://github.com/dividebysandwich/rust-dos/issues/38)
+  has TOMBPCX2.EXE (v2.1e and v2.0e) modified to save as `SAVEPCX2.x`
+  instead, so it lives peacefully beside the others in one folder, and
+  the same for Tomb Raider: Unfinished Business's PowerVR version, which
+  saves as `SVUBPX.x` instead of `SAVEUB.x`.
 
 How the card draws follows Imagination's own driver sources and simulator
 of the chip, which they released under the MIT licence
@@ -1871,6 +1916,12 @@ default; set the game up for that port, at any speed.
   it is a TCP address, port 23 unless given: `ATDT bbs.example.com` or
   `ATDT 192.0.2.7:5000`. With `modemlisten` another rust-dos, or
   DOSBox's modem, can call this one.
+* **The phonebook:** a number in it calls a bulletin board on the
+  internet instead of the other player, by telnet: `ATDT 555-0101` dials
+  Level 29. Rust-DOS knows a few boards that are still running; the
+  settings window's *Modem phonebook* (Serial page) lists them, fetches
+  more from rust-dos.com when you ask it to, and copies the command that
+  dials one. Numbers of your own go in [`[phonebook]`](#phonebook).
 * The modem knows the usual commands: `ATZ`, `AT&F`, `ATE`, `ATV`, `ATQ`,
   `ATH`, `ATA`, `ATO`, `ATD`, `ATI`, `ATS0=`..`ATS15=` and `ATSn?`,
   `A/`, and the escape `+++` with a second's pause before and after; it
@@ -2218,3 +2269,26 @@ that run; the settings window saves only what you change in it. `rust-dos
 | `--start-time "YYYY-MM-DD HH:MM:SS"` | The date and time the clock starts at with `--deterministic` (default 1995-04-11 12:34:56) |
 | `--relay [PORT]` | Relay [LAN](#playing-over-a-lan) rooms on this UDP port (default 21213) instead of starting the emulator |
 | `--relay-password TEXT` | One password for all the rooms of `--relay` (without it, whoever makes a room gives it one or none) |
+
+### Running DOS tools from the host's shell
+
+`rust-dos run COMMAND [ARGS...]` runs a DOS program, batch file or built-in
+command without a window, as a tool of the host: what it prints through DOS
+and the video BIOS goes to standard output (what it writes to handle 2 to
+standard error), standard input is typed at its keyboard, and its exit code
+is rust-dos's. A command that isn't found exits with 127, and a program that
+still waits for keys once standard input has ended is stopped with 255.
+
+```sh
+rust-dos run LHA a DOCS.LZH README.TXT
+echo y | rust-dos run -d ~/dos INSTALL.BAT
+```
+
+It reads no configuration file, and the machine has the default hardware.
+
+| Option | What it does |
+|---|---|
+| `-d, --dir DIR` | The folder that is drive C: (default: the current directory) |
+| `--cycles N` | Instructions per emulated millisecond (default 100000); the run doesn't wait for real time |
+| `--mem MB` | The machine's memory, 1 to 256 MB (default 16) |
+| `--screen` | Print the text screen at the end when nothing was printed through DOS, for programs that write to the screen's memory |

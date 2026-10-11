@@ -52,12 +52,26 @@ pub fn primary_descriptor(image: &CdImage) -> Result<Box<[u8; DATA_SECTOR]>, Str
     Err("no primary volume descriptor".to_string())
 }
 
-/// The DOS date and time of a directory record's 7-byte date.
+/// The DOS time and date of a directory record's 7-byte date (years since
+/// 1900, month, day, hour, minute, second; the GMT offset is left out).
+/// Dates before 1980 show as 1 January 1980 00:00 and dates after 2107 as
+/// 31 December 2107 23:59:58, the ends of the range DOS can hold.
 fn dos_time(date: &[u8]) -> (u16, u16) {
     let year = 1900 + date[0] as u16;
-    let (month, day) = (date[1].clamp(1, 12) as u16, date[2].clamp(1, 31) as u16);
-    let dos_date = (year.max(1980) - 1980) << 9 | month << 5 | day;
-    let dos_time = (date[3] as u16) << 11 | (date[4] as u16) << 5 | date[5] as u16 / 2;
+    let (year, month, day, hour, minute, second) = match year {
+        ..1980 => (1980, 1, 1, 0, 0, 0),
+        2108.. => (2107, 12, 31, 23, 59, 58),
+        _ => (
+            year,
+            date[1].clamp(1, 12) as u16,
+            date[2].clamp(1, 31) as u16,
+            date[3].min(23) as u16,
+            date[4].min(59) as u16,
+            date[5].min(59) as u16,
+        ),
+    };
+    let dos_date = (year - 1980) << 9 | month << 5 | day;
+    let dos_time = hour << 11 | minute << 5 | (second / 2);
     (dos_time, dos_date)
 }
 
@@ -130,6 +144,7 @@ pub fn read_volume(image: &CdImage) -> Result<IsoVolume, String> {
     // Padded with spaces, or on some discs with NULs.
     let label = String::from_utf8_lossy(&descriptor[40..72]).trim_matches([' ', '\0']).to_string();
     let mut files = MemFs::new();
+    files.insert_dir_record("", root(&descriptor));
     let mut visited = HashSet::new();
     let mut pending = vec![(String::new(), root(&descriptor), 0)];
     while let Some((path, dir, depth)) = pending.pop() {
@@ -139,7 +154,7 @@ pub fn read_volume(image: &CdImage) -> Result<IsoVolume, String> {
         for (name, record) in dos_entries(image, &dir) {
             let child = if path.is_empty() { name } else { format!("{}\\{}", path, name) };
             if record.is_dir {
-                files.insert_dir(&child);
+                files.insert_dir_record(&child, record.extent);
                 if depth < MAX_DEPTH {
                     pending.push((child, record.extent, depth + 1));
                 }
@@ -170,4 +185,21 @@ pub fn find_record(image: &CdImage, path: &str) -> Option<Vec<u8>> {
         dir = record.extent;
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dos_time;
+
+    #[test]
+    fn record_dates_fit_the_dos_range() {
+        // 31 October 1995, 12:34:56.
+        assert_eq!(dos_time(&[95, 10, 31, 12, 34, 56, 0]), (12 << 11 | 34 << 5 | 28, 15 << 9 | 10 << 5 | 31));
+        // Before 1980 and after 2107: the ends of the range.
+        assert_eq!(dos_time(&[79, 12, 31, 23, 59, 59, 0]), (0, 1 << 5 | 1));
+        assert_eq!(dos_time(&[208, 1, 1, 0, 0, 0, 0]), (23 << 11 | 59 << 5 | 29, 127 << 9 | 12 << 5 | 31));
+        assert_eq!(dos_time(&[255, 1, 1, 0, 0, 0, 0]), (23 << 11 | 59 << 5 | 29, 127 << 9 | 12 << 5 | 31));
+        // 2107 itself fits; fields out of range are cut to theirs.
+        assert_eq!(dos_time(&[207, 13, 0, 24, 60, 61, 0]), (23 << 11 | 59 << 5 | 29, 127 << 9 | 12 << 5 | 1));
+    }
 }

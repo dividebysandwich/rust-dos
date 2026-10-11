@@ -122,6 +122,19 @@ struct Timer {
     next_ns: u64,
 }
 
+/// What a voice plays, as `Gus::voice_views` sees it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct VoiceView {
+    /// Its wave runs.
+    pub playing: bool,
+    /// Its volume and the louder side of its pan, 0 to about 1.
+    pub level: f32,
+    /// 0 left to 15 right.
+    pub pan: u8,
+    /// Frequency control: the position increment.
+    pub freq: u16,
+}
+
 pub struct Gus {
     pub config: GusConfig,
     dram: Vec<u8>,
@@ -171,6 +184,9 @@ pub struct Gus {
     /// card plays next comes at its time.
     gap: usize,
     mix_buf: Vec<(f32, f32)>,
+    /// The voices left out of the mix (the sound visualizer's), a bit each:
+    /// they go on playing, unheard.
+    mute: u32,
     /// Resampling position between `prev` and `cur` for the mixer.
     phase: f64,
     prev: (f32, f32),
@@ -220,6 +236,7 @@ impl Gus {
             out: VecDeque::new(),
             gap: 0,
             mix_buf: Vec::new(),
+            mute: 0,
             phase: 0.0,
             prev: (0.0, 0.0),
             cur: (0.0, 0.0),
@@ -796,11 +813,14 @@ impl Gus {
                 if v.silent() {
                     continue;
                 }
+                let heard = (self.mute >> i) & 1 == 0;
                 for frame in self.mix_buf.iter_mut() {
-                    let s = v.sample(dram);
-                    let (gl, gr) = v.gains();
-                    frame.0 += s * gl;
-                    frame.1 += s * gr;
+                    if heard {
+                        let s = v.sample(dram);
+                        let (gl, gr) = v.gains();
+                        frame.0 += s * gl;
+                        frame.1 += s * gr;
+                    }
                     let events = v.step();
                     if events != 0 {
                         if events & voice::WAVE_IRQ != 0 {
@@ -951,6 +971,28 @@ impl Gus {
         self.dram[(addr & DRAM_MASK) as usize]
     }
 
+    /// Leave the voices whose bits are set out of the mix; they go on
+    /// playing, with their IRQs, unheard.
+    pub fn set_mute(&mut self, mask: u32) {
+        self.mute = mask;
+    }
+
+    pub fn mute(&self) -> u32 {
+        self.mute
+    }
+
+    /// What the active voices play, for the sound visualizer.
+    pub fn voice_views(&self) -> Vec<VoiceView> {
+        let running = self.reset_reg & 0x01 != 0;
+        self.voices[..self.active as usize]
+            .iter()
+            .map(|v| {
+                let (l, r) = v.gains();
+                VoiceView { playing: running && v.wave_running(), level: l.max(r), pan: v.pan & 0x0F, freq: v.freq }
+            })
+            .collect()
+    }
+
     /// The card's state for the debugger.
     pub fn snapshot(&self) -> serde_json::Value {
         let voices: Vec<serde_json::Value> = self
@@ -1011,6 +1053,8 @@ rust_dos_savestate::state_fields!(Gus {
 } skip {
     // The configuration's, and a buffer each mix starts afresh.
     config, mix_buf,
+    // The visualizer's, which the host sets.
+    mute,
     // A few milliseconds of silence at most.
     gap,
 });

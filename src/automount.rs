@@ -15,7 +15,9 @@ use std::path::{Path, PathBuf};
 /// The folder's name.
 pub const FOLDER: &str = "automount";
 
-const CD_EXTENSIONS: [&str; 5] = ["cue", "iso", "bin", "ins", "chd"];
+const CD_EXTENSIONS: [&str; 7] = ["cue", "iso", "bin", "ins", "inst", "bdn", "chd"];
+/// The CUE sheets' extensions, GOG's among them.
+const SHEET_EXTENSIONS: [&str; 4] = ["cue", "ins", "inst", "bdn"];
 const DISK_EXTENSIONS: [&str; 7] = ["vhd", "img", "ima", "dsk", "vfd", "flp", "86f"];
 /// A system's, in the order `os_images` looks for a name.
 const SYSTEM_EXTENSIONS: [&str; 6] = ["img", "vhd", "ima", "dosz", "zip", "7z"];
@@ -228,7 +230,10 @@ fn scan_entries(folder: &Path, entries: &[Entry]) -> Scan {
     entries.sort_by_key(|e| e.name.to_ascii_lowercase());
     // The tracks a CUE sheet names are its disc's, not discs of their own.
     let mut tracks: Vec<String> = Vec::new();
-    for entry in entries.iter().filter(|e| !e.is_dir && e.name.to_ascii_lowercase().ends_with(".cue")) {
+    let sheet = |name: &str| {
+        Path::new(name).extension().is_some_and(|e| SHEET_EXTENSIONS.iter().any(|s| e.eq_ignore_ascii_case(s)))
+    };
+    for entry in entries.iter().filter(|e| !e.is_dir && sheet(&e.name)) {
         let text = crate::archive::read_member(&folder.join(&entry.name))
             .unwrap_or_else(|| crate::hostfs::read(folder.join(&entry.name)).map_err(|e| e.to_string()))
             .map(|data| String::from_utf8_lossy(&data).into_owned())

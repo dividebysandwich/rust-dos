@@ -114,6 +114,11 @@ pub struct Config {
     pub crt_glow: Option<u16>,
     /// A monochrome monitor's phosphor (`monochrome`).
     pub monochrome: Option<Monochrome>,
+    /// The monitor's power-on, resync and power-off effects
+    /// (`monitor_effects`).
+    pub monitor_effects: Option<crate::video::power::MonitorEffects>,
+    /// The BIOS's power-on self test before DOS (`post`).
+    pub post: Option<crate::post::PostMode>,
     /// The CGA's composite monitor (`composite`, `composite_era`).
     pub composite: Option<CompositeMode>,
     pub composite_era: Option<CompositeEra>,
@@ -264,6 +269,8 @@ enum Section {
     Joystick,
     Network,
     Serial,
+    /// The modem's numbers of bulletin boards (serial/phonebook.rs).
+    Phonebook,
     Printer,
     Achievements,
     Shell,
@@ -287,6 +294,7 @@ pub fn has_own_sections(text: &str) -> bool {
             Section::Emulator
                 | Section::Sound
                 | Section::Network
+                | Section::Phonebook
                 | Section::Achievements
                 | Section::Shell
                 | Section::Vr
@@ -306,6 +314,7 @@ impl Section {
             "joystick" => Section::Joystick,
             "network" => Section::Network,
             "serial" => Section::Serial,
+            "phonebook" => Section::Phonebook,
             "printer" => Section::Printer,
             "achievements" => Section::Achievements,
             "shell" => Section::Shell,
@@ -326,6 +335,7 @@ impl Section {
             Section::Joystick => "joystick",
             Section::Network => "network",
             Section::Serial => "serial",
+            Section::Phonebook => "phonebook",
             Section::Printer => "printer",
             Section::Achievements => "achievements",
             Section::Shell => "shell",
@@ -799,6 +809,7 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
             | Section::Joystick
             | Section::Network
             | Section::Serial
+            | Section::Phonebook
             | Section::Printer
             | Section::Achievements
             | Section::Shell
@@ -910,6 +921,14 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                                 Ok(g) if (0.1..=2.0).contains(&g) => config.voodoo_gamma = Some(Some(g)),
                                 _ => warn(format!("invalid voodoo_gamma '{}' (off, or 0.1 to 2)", value)),
                             },
+                        },
+                        "post" => match crate::post::PostMode::parse(value) {
+                            Some(post) => config.post = Some(post),
+                            None => warn(format!("invalid post '{}' (off, quick or full)", value)),
+                        },
+                        "monitor_effects" => match crate::video::power::MonitorEffects::parse(value) {
+                            Some(effects) => config.monitor_effects = Some(effects),
+                            None => warn(format!("invalid monitor_effects '{}' (off, picture, sound or on)", value)),
                         },
                         "monochrome" => match Monochrome::parse(value) {
                             Some(mono) => config.monochrome = Some(mono),
@@ -1126,6 +1145,14 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                     continue;
                 }
 
+                if section == Section::Phonebook {
+                    match crate::serial::phonebook::parse_line(key, value) {
+                        Ok(entry) => config.serial.phonebook.push(entry),
+                        Err(e) => warn(e),
+                    }
+                    continue;
+                }
+
                 if section == Section::Printer {
                     if let Err(e) = config.printer.set(key, value, home) {
                         warn(e);
@@ -1299,6 +1326,8 @@ pub struct Settings {
     /// The CRT look's own settings.
     pub crt: CrtSettings,
     pub monochrome: Monochrome,
+    pub monitor_effects: crate::video::power::MonitorEffects,
+    pub post: crate::post::PostMode,
     /// The CGA's composite monitor.
     pub composite: CompositeSettings,
     pub machine: Adapter,
@@ -1389,6 +1418,8 @@ impl Default for Settings {
             shader: Shader::None,
             crt: CrtSettings::default(),
             monochrome: Monochrome::Off,
+            monitor_effects: crate::video::power::MonitorEffects::Off,
+            post: crate::post::PostMode::Off,
             composite: CompositeSettings::default(),
             machine: Adapter::Svga,
             voodoo: Default::default(),
@@ -1480,6 +1511,8 @@ impl Settings {
                 glow: config.crt_glow.unwrap_or(default.crt.glow),
             },
             monochrome: config.monochrome.unwrap_or(default.monochrome),
+            monitor_effects: config.monitor_effects.unwrap_or(default.monitor_effects),
+            post: config.post.unwrap_or(default.post),
             composite: CompositeSettings {
                 mode: config.composite.unwrap_or(default.composite.mode),
                 era: config.composite_era.unwrap_or(default.composite.era),
@@ -1557,6 +1590,8 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Emulator, "crt_curvature", Some(settings.crt.curvature.to_string())),
         (Emulator, "crt_glow", Some(settings.crt.glow.to_string())),
         (Emulator, "monochrome", Some(settings.monochrome.name().to_string())),
+        (Emulator, "monitor_effects", Some(settings.monitor_effects.name().to_string())),
+        (Emulator, "post", Some(settings.post.name().to_string())),
         (Emulator, "composite", Some(settings.composite.mode.name().to_string())),
         (Emulator, "composite_era", Some(settings.composite.era.name().to_string())),
         (Emulator, "machine", Some(settings.machine.name().to_string())),
@@ -2550,7 +2585,7 @@ mod tests {
         assert!(config.warnings[1].starts_with("line 6: unknown setting 'bass'"), "{:?}", config.warnings);
         let mixer = Settings::from_config(&config).mixer;
         let levels = Channel::ALL.map(|channel| mixer.level(channel));
-        assert_eq!(levels, [80, 100, 100, 150, 100, 100, 0, 100, 100, 100, 100]);
+        assert_eq!(levels, [80, 100, 100, 150, 100, 100, 0, 100, 100, 100, 100, 100]);
         assert!(mixer.speaker_filter);
         assert_eq!((mixer.sb_filter, mixer.reverb, mixer.chorus), (SbFilter::Auto, ReverbPreset::Off, ChorusPreset::Off));
 
@@ -2670,6 +2705,8 @@ mod tests {
             shader: Shader::Crt,
             crt: CrtSettings { curvature: 70, glow: 90 },
             monochrome: Monochrome::Green,
+            monitor_effects: crate::video::power::MonitorEffects::On,
+            post: crate::post::PostMode::Full,
             composite: CompositeSettings { mode: CompositeMode::On, era: CompositeEra::New },
             machine: Adapter::Vga,
             voodoo: crate::voodoo::VoodooSettings {

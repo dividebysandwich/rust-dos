@@ -15,7 +15,7 @@
 //! that expect a cable both work on it.
 
 use super::uart::{MCR_DTR, MSR_CTS, MSR_DCD, MSR_DSR, MSR_RI, Uart};
-use super::{LinkCmd, LinkEvent};
+use super::{DialTarget, LinkCmd, LinkEvent};
 use crate::timer::PIT_HZ;
 
 /// The S-registers there are, and their values after ATZ.
@@ -446,8 +446,8 @@ impl Modem {
         *self = Self { dtr, peer, ..Self::default() };
     }
 
-    /// `ATD` and what follows it: a host on the internet, or the other
-    /// player in the room.
+    /// `ATD` and what follows it: a host on the internet, a number in the
+    /// phonebook, or the other player in the room.
     fn dial(&mut self, uart: &mut Uart, rest: &str, now: u64, link: &mut Vec<LinkCmd>) {
         if self.call != Call::None {
             return self.result(uart, Result::Error, now);
@@ -460,7 +460,10 @@ impl Modem {
         let target = if host {
             let address: String = number.chars().filter(|c| !c.is_whitespace()).collect();
             let address = if address.contains(':') { address } else { format!("{}:23", address) };
-            Some(address)
+            Some(DialTarget::to(&address))
+        } else if let Some(entry) = super::phonebook::lookup(number) {
+            // A number in the phonebook: its board.
+            Some(DialTarget { address: entry.address, telnet: Some(entry.telnet) })
         } else if self.peer {
             None
         } else {
@@ -673,13 +676,35 @@ mod tests {
     }
 
     #[test]
+    fn dialing_a_number_in_the_phonebook_calls_its_board() {
+        let _lock = crate::serial::phonebook::TEST_LOCK.lock();
+        let mut rig = Rig::new();
+        rig.send("ATE0\r");
+        rig.output();
+        rig.link.clear();
+        // A built-in board, by telnet.
+        rig.send("ATDT 555-0101\r");
+        let telnet = DialTarget { address: "bbs.fozztexx.com:23".into(), telnet: Some(true) };
+        assert_eq!(rig.link, [LinkCmd::Dial(Some(telnet))]);
+        rig.event(LinkEvent::NoCarrier);
+        rig.output();
+        rig.link.clear();
+        // One of the user's, as plain TCP.
+        crate::serial::phonebook::set_yours(&[crate::serial::phonebook::parse_line("555-0777", "127.0.0.1:2323 raw").unwrap()]);
+        rig.send("ATDT5550777\r");
+        crate::serial::phonebook::set_yours(&[]);
+        let raw = DialTarget { address: "127.0.0.1:2323".into(), telnet: Some(false) };
+        assert_eq!(rig.link, [LinkCmd::Dial(Some(raw))]);
+    }
+
+    #[test]
     fn dialing_a_host_and_the_escape() {
         let mut rig = Rig::new();
         rig.send("ATE0\r");
         rig.output();
         rig.link.clear();
         rig.send("ATDT example.com\r");
-        assert_eq!(rig.link, [LinkCmd::Dial(Some("example.com:23".into()))]);
+        assert_eq!(rig.link, [LinkCmd::Dial(Some(DialTarget::to("example.com:23")))]);
         rig.link.clear();
         rig.event(LinkEvent::Connected);
         assert_eq!(rig.output(), "\r\nCONNECT 9600\r\n");

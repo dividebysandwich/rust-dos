@@ -242,7 +242,8 @@ pub struct ConLine {
 
 /// Echo a character read from the console at the cursor, as DOS does.
 fn con_echo(cpu: &mut Cpu, text: &[u8]) {
-    console_write(cpu, text);
+    // The host's terminal echoes what is typed at it itself.
+    cpu.screen_only(|cpu| console_write(cpu, text));
 }
 
 /// Edit a line from the keyboard as DOS's console does, for AH=0Ah and
@@ -281,7 +282,7 @@ fn edit_line(cpu: &mut Cpu, max: usize) -> Option<Vec<u8>> {
         }
     }
     cpu.con_line = Some(line);
-    cpu.hle_wait();
+    cpu.key_wait();
     None
 }
 
@@ -441,7 +442,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                     console_write(cpu, &[ascii]);
                 }
             } else {
-                cpu.hle_wait();
+                cpu.key_wait();
             }
         }
 
@@ -450,7 +451,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             if let Some(ascii) = con_read(cpu) {
                 cpu.set_reg8(Register::AL, ascii);
             } else {
-                cpu.hle_wait();
+                cpu.key_wait();
             }
         }
 
@@ -460,7 +461,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             if let Some(ascii) = con_read(cpu) {
                 cpu.set_reg8(Register::AL, ascii);
             } else {
-                cpu.hle_wait();
+                cpu.key_wait();
             }
         }
 
@@ -1228,6 +1229,15 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 // waiting for Enter, and hand out the line with its CR LF
                 // over as many reads as it takes.
                 if cpu.con_pending.is_empty() && count > 0 {
+                    // The end of the host's standard input is the end of
+                    // the file (`rust-dos run`).
+                    if cpu.host_console.as_ref().is_some_and(|c| c.input_ended)
+                        && crate::keyboard::peek_keystroke(&mut cpu.bus).is_none()
+                    {
+                        cpu.set_ax(0);
+                        cpu.set_cpu_flag(CpuFlags::CF, false);
+                        return;
+                    }
                     let Some(line) = edit_line(cpu, 127) else { return };
                     con_echo(cpu, b"\r\n");
                     cpu.con_pending.extend(line);
@@ -1272,12 +1282,10 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
 
         // AH = 40h: Write to File (or Stdout)
         //
-        // DOS standard: with CX=0 this would truncate the file at the
-        // current seek position. We don't perform that truncation right now
-        // because programs in this emulator still crash mid-flow and would
-        // take real user data (rosters, saves, copied region files) down
-        // with them. Log the call so we can spot legitimate truncations
-        // while tracing and re-enable later if something depends on it.
+        // With CX=0 the file ends at the current position: DOS cuts it
+        // there, or extends it to there. Programs rewrite a file in place
+        // and then cut off what the old contents had past the new ones
+        // (Conqueror A.D. 1086's CONQUER.INI).
         0x40 => {
             let handle = cpu.bx();
             let count = cpu.cx() as usize;
@@ -1290,13 +1298,27 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             // redirected them.
             let console = cpu.bus.disk.handle_device(sft) == Some(CharDevice::Con);
             if count == 0 && !console {
-                cpu.bus.log_string(&format!(
-                    "[DOS] AH=40h CX=0 on handle {:04X} — truncate-at-pos NOT performed (safety)",
-                    handle
-                ));
-                cpu.set_ax(0);
-                cpu.set_cpu_flag(CpuFlags::CF, false);
-                return;
+                let disk = &mut cpu.bus.disk;
+                let result = match disk.handle_device(sft) {
+                    Some(_) => Ok(()),
+                    None => disk.position(sft).ok_or(0x19).and_then(|at| disk.set_file_size(sft, at)),
+                };
+                if let Err(code) = result {
+                    cpu.bus.log_string(&format!(
+                        "[DOS] Write of 0 bytes (set the end) on handle {:04X} failed, Error={:02X}",
+                        handle, code
+                    ));
+                }
+                // A handle write tells of a full disk only by writing fewer
+                // bytes than asked, and here that's 0 either way: no error.
+                let result = match result {
+                    Ok(()) | Err(0x27) => {
+                        file_io(cpu, sft, 0, Some(true));
+                        Ok(0)
+                    }
+                    Err(code) => Err(code),
+                };
+                return set_result(cpu, result);
             }
 
             let mut data = vec![0u8; count];
@@ -1329,7 +1351,15 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                     }
                 }
                 let visible: Vec<u8> = data.iter().copied().filter(|&b| b != 0x07).collect();
+                // Handle 2 is standard error on the host's terminal.
+                let stderr = handle == 2;
+                if let Some(console) = cpu.host_console.as_mut() {
+                    console.to_stderr = stderr;
+                }
                 crate::video::print_cp437(cpu, &visible, 0x07);
+                if let Some(console) = cpu.host_console.as_mut() {
+                    console.to_stderr = false;
+                }
                 cpu.set_ax(count as u16);
             } else {
                 match cpu.bus.disk.write_file(sft, &data) {

@@ -114,11 +114,14 @@ fn router(state: AppState) -> Router {
         .route("/api/printer", get(printer))
         .route("/api/printer/eject", post(printer_eject))
         .route("/api/gus", get(gus))
+        .route("/api/sound", get(sound))
         .route("/api/awe32", get(awe32))
         .route("/api/exceptions", get(exceptions))
         .route("/ws/trace", get(ws_trace))
         .route("/ws/events", get(ws_events))
         .route("/ws/screen", get(ws_screen))
+        .route("/ws/heat", get(ws_heat))
+        .route("/api/heat", get(heat_get))
         .route("/ws/audio", get(ws_audio))
         .route("/ws/input", get(ws_input))
         .layer(middleware::from_fn_with_state(state.clone(), request_ids))
@@ -224,7 +227,12 @@ fn current_req() -> Option<u64> {
 /// A JSON response, serialized once. An object gets the request's number
 /// first, as `"req"`.
 fn json_body(status: StatusCode, v: &Value, req: Option<u64>) -> Response {
-    let mut out = Vec::with_capacity(256);
+    (status, [(header::CONTENT_TYPE, "application/json")], json_bytes(v, req, 256)).into_response()
+}
+
+/// The bytes of `json_body`, in a buffer reserved for `capacity` of them.
+fn json_bytes(v: &Value, req: Option<u64>, capacity: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(capacity);
     match (req, v) {
         (Some(req), Value::Object(map)) => {
             out.extend_from_slice(format!("{{\"req\":{}", req).as_bytes());
@@ -241,7 +249,7 @@ fn json_body(status: StatusCode, v: &Value, req: Option<u64>) -> Response {
             let _ = serde_json::to_writer(&mut out, v);
         }
     }
-    (status, [(header::CONTENT_TYPE, "application/json")], out).into_response()
+    out
 }
 
 /// `json_body` for the request being answered.
@@ -431,7 +439,49 @@ fn parse_body(body: &Bytes) -> Result<Value, ApiError> {
 }
 
 fn from_value<T: serde::de::DeserializeOwned>(v: Value) -> Result<T, ApiError> {
-    serde_json::from_value(v).map_err(|e| bad(e.to_string()))
+    serde_json::from_value(v).map_err(|e| bad(with_field_hint(e.to_string())))
+}
+
+/// serde's "unknown field `modifiers`, expected one of `key`, ..., `mods`"
+/// (or "unknown variant") with "(did you mean `mods`?)" added when one of
+/// the names it lists is close to the unknown one: the same first three
+/// letters, or two edits apart.
+fn with_field_hint(msg: String) -> String {
+    let Some(rest) = msg.strip_prefix("unknown field `").or_else(|| msg.strip_prefix("unknown variant `")) else {
+        return msg;
+    };
+    let Some((unknown, expected)) = rest.split_once('`') else {
+        return msg;
+    };
+    let unknown = unknown.to_ascii_lowercase();
+    let prefix = |a: &str, b: &str| a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count();
+    let best = expected
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .map(|field| (field, prefix(&unknown, field), edit_distance(&unknown, field)))
+        .filter(|&(_, p, d)| p >= 3 || (d <= 2 && d < unknown.len()))
+        .min_by_key(|&(_, p, d)| (std::cmp::Reverse(p.min(3)), d));
+    match best {
+        Some((field, ..)) => format!("{} (did you mean `{}`?)", msg, field),
+        None => msg,
+    }
+}
+
+/// Levenshtein distance, for the short field names above.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut diag = row[0];
+        row[0] = i + 1;
+        for (j, &cb) in b.iter().enumerate() {
+            let next = (diag + usize::from(ca != cb)).min(row[j] + 1).min(row[j + 1] + 1);
+            diag = row[j + 1];
+            row[j + 1] = next;
+        }
+    }
+    row[b.len()]
 }
 
 fn text_response(s: String) -> Response {
@@ -780,24 +830,25 @@ async fn screen_text(State(s): State<AppState>, Query(q): Query<FormatQuery>) ->
 
 async fn trace_get(State(s): State<AppState>, Query(q): Query<TraceQuery>) -> ApiResult {
     let json = q.format.as_deref() == Some("json");
-    let (Reply::Trace { entries, next, dropped }, meta) = s.call(Cmd::TraceQuery(q), DEFAULT_TIMEOUT).await? else {
+    let (Reply::Trace { entries, next, dropped, truncated }, meta) = s.call(Cmd::TraceQuery(q), DEFAULT_TIMEOUT).await? else {
         return Err(unexpected());
     };
     let req = current_req();
-    let body = tokio::task::spawn_blocking(move || format_trace(&entries, json, next, dropped, &meta, req))
+    let body = tokio::task::spawn_blocking(move || format_trace(&entries, json, next, dropped, truncated, &meta, req))
         .await
         .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let cursor = [
         (header::HeaderName::from_static("x-trace-next"), next.to_string()),
         (header::HeaderName::from_static("x-trace-dropped"), dropped.to_string()),
+        (header::HeaderName::from_static("x-trace-truncated"), truncated.to_string()),
     ];
     Ok(with_meta((cursor, body).into_response(), &meta))
 }
 
-fn format_trace(entries: &[TraceEntry], json: bool, next: u64, dropped: u64, meta: &Meta, req: Option<u64>) -> Response {
+fn format_trace(entries: &[TraceEntry], json: bool, next: u64, dropped: u64, truncated: bool, meta: &Meta, req: Option<u64>) -> Response {
     if json {
-        let v: Vec<Value> = entries.iter().map(|e| e.to_json()).collect();
-        json_response_to(StatusCode::OK, json!({"count": v.len(), "next": next, "dropped": dropped, "entries": v}), meta, req)
+        let out = trace_json(entries, next, dropped, truncated, meta, req);
+        (StatusCode::OK, [(header::CONTENT_TYPE, "application/json")], out).into_response()
     } else {
         let mut out = String::with_capacity(entries.len() * 160 + 128);
         out.push_str(trace::TEXT_HEADER);
@@ -810,7 +861,28 @@ fn format_trace(entries: &[TraceEntry], json: bool, next: u64, dropped: u64, met
     }
 }
 
+/// A trace reply as JSON, with `entries` last. The entries are written one
+/// at a time: a `Value` for each of a full ring's million entries would take
+/// gigabytes.
+fn trace_json(entries: &[TraceEntry], next: u64, dropped: u64, truncated: bool, meta: &Meta, req: Option<u64>) -> Vec<u8> {
+    let mut head = json!({"count": entries.len(), "next": next, "dropped": dropped, "truncated": truncated});
+    merge_meta(&mut head, meta);
+    let mut out = json_bytes(&head, req, entries.len() * 450 + 256);
+    out.pop(); // the object's closing brace
+    out.extend_from_slice(b",\"entries\":[");
+    for (i, e) in entries.iter().enumerate() {
+        if i > 0 {
+            out.push(b',');
+        }
+        // Writing to a Vec doesn't fail.
+        let _ = serde_json::to_writer(&mut out, &e.to_json());
+    }
+    out.extend_from_slice(b"]}");
+    out
+}
+
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PortsPost {
     enabled: Option<bool>,
     #[serde(default)]
@@ -860,6 +932,7 @@ async fn ports_get(State(s): State<AppState>, Query(q): Query<PortsQuery>) -> Ap
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TracePost {
     enabled: Option<bool>,
     #[serde(default)]
@@ -954,20 +1027,27 @@ struct WaitQuery {
 /// `{"events": [...]}`. `default_type` is injected into objects lacking a
 /// `type` field (so `/api/input/key` accepts `{"key": "enter"}`).
 fn parse_events(v: Value, default_type: Option<&str>) -> Result<Vec<InputEvent>, ApiError> {
-    let list = match v {
-        Value::Array(a) => a,
-        Value::Object(mut o) if o.contains_key("events") => match o.remove("events") {
-            Some(Value::Array(a)) => a,
-            _ => return Err(bad("'events' must be an array")),
-        },
-        other => vec![other],
+    let (list, several) = match v {
+        Value::Array(a) => (a, true),
+        Value::Object(mut o) if o.contains_key("events") => {
+            let Some(Value::Array(a)) = o.remove("events") else {
+                return Err(bad("'events' must be an array"));
+            };
+            // A field beside the events is refused as one in an event is.
+            if let Some(field) = o.keys().next() {
+                return Err(bad(format!("unknown field `{}` beside `events`", field)));
+            }
+            (a, true)
+        }
+        other => (vec![other], false),
     };
     list.into_iter()
-        .map(|mut ev| {
+        .enumerate()
+        .map(|(i, mut ev)| {
             if let (Some(t), Value::Object(o)) = (default_type, &mut ev) {
                 o.entry("type").or_insert_with(|| Value::String(t.to_string()));
             }
-            from_value(ev)
+            from_value(ev).map_err(|e| if several { bad(format!("events[{}]: {}", i, e.message())) } else { e })
         })
         .collect()
 }
@@ -1010,6 +1090,7 @@ async fn drives(State(s): State<AppState>) -> ApiResult {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MountBody {
     path: String,
     /// floppy, hdd or cdrom
@@ -1051,6 +1132,7 @@ async fn unmount(State(s): State<AppState>, Path(letter): Path<String>) -> ApiRe
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StateBody {
     /// The save state file, on the host.
     path: String,
@@ -1058,19 +1140,24 @@ struct StateBody {
     /// must match its hardware and media and resets the debugger.
     #[serde(default)]
     strict_match: bool,
+    /// Record the files on the writable drives (save), or compare them
+    /// with the record (load). Off unless asked for.
+    #[serde(default)]
+    check_files: bool,
 }
 
 async fn state_file(State(s): State<AppState>, Path(action): Path<String>, body: Bytes) -> ApiResult {
     let b: StateBody = from_value(parse_body(&body)?)?;
-    let (path, strict_match) = (b.path, b.strict_match);
+    let (path, strict_match, check_files) = (b.path, b.strict_match, b.check_files);
     match action.as_str() {
-        "save" => s.call_json(Cmd::SaveState { path, strict_match }, DEFAULT_TIMEOUT).await,
-        "load" => s.call_json(Cmd::LoadState { path, strict_match }, DEFAULT_TIMEOUT).await,
+        "save" => s.call_json(Cmd::SaveState { path, strict_match, check_files }, DEFAULT_TIMEOUT).await,
+        "load" => s.call_json(Cmd::LoadState { path, strict_match, check_files }, DEFAULT_TIMEOUT).await,
         _ => Err(ApiError::new(StatusCode::NOT_FOUND, format!("unknown action '{}' (save, load)", action))),
     }
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SpeedBody {
     /// As `cycles` in the configuration file: auto, max or a number.
     cycles: String,
@@ -1082,6 +1169,7 @@ async fn speed(State(s): State<AppState>, body: Bytes) -> ApiResult {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ControlBody {
     count: Option<u64>,
     until: Option<String>,
@@ -1091,6 +1179,10 @@ struct ControlBody {
     command: Option<String>,
     #[serde(default)]
     stop_at_entry: bool,
+    /// `run`: take the command line while the prompt is busy, to run after
+    /// what keeps it busy.
+    #[serde(default)]
+    queue: bool,
     /// step, step_over, run: false answers at once (202) with the
     /// operation, to wait on with /api/ops or /api/control/wait?op=.
     wait: Option<bool>,
@@ -1115,7 +1207,7 @@ async fn control(State(s): State<AppState>, Path(action): Path<String>, body: By
         "run" => {
             let command = b.command.ok_or_else(|| bad("missing 'command'"))?;
             let timeout = b.timeout_ms.map_or(RUN_TIMEOUT, Duration::from_millis);
-            (Cmd::Run { command, stop_at_entry: b.stop_at_entry }, timeout)
+            (Cmd::Run { command, stop_at_entry: b.stop_at_entry, queue: b.queue }, timeout)
         }
         _ => {
             return Err(ApiError::new(
@@ -1261,6 +1353,7 @@ fn hexdump(base: usize, segoff: Option<(u16, u32)>, data: &[u8]) -> String {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MemPut {
     addr: String,
     hex: Option<String>,
@@ -1330,6 +1423,7 @@ async fn bp_list(State(s): State<AppState>) -> ApiResult {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BpBody {
     addr: Option<String>,
     /// With `addr`: the breakpoint goes once it stops the machine.
@@ -1391,6 +1485,7 @@ async fn wp_list(State(s): State<AppState>) -> ApiResult {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WpBody {
     addr: Option<String>,
     len: Option<u8>,
@@ -1454,6 +1549,10 @@ async fn printer(State(s): State<AppState>) -> ApiResult {
 
 async fn printer_eject(State(s): State<AppState>) -> ApiResult {
     s.call_json(Cmd::Printer { eject: true }, DEFAULT_TIMEOUT).await
+}
+
+async fn sound(State(s): State<AppState>) -> ApiResult {
+    s.call_json(Cmd::Sound, DEFAULT_TIMEOUT).await
 }
 
 async fn gus(State(s): State<AppState>) -> ApiResult {
@@ -1674,6 +1773,64 @@ async fn ws_screen(State(s): State<AppState>, Query(q): Query<ScreenQuery>, ws: 
     }))
 }
 
+struct HeatGuard(Arc<Shared>);
+
+impl Drop for HeatGuard {
+    fn drop(&mut self) {
+        self.0.heat_subscribers.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// The memory heatmap (`heat.rs`), a binary message a frame at up to `fps`
+/// a second; the machine's writes are watched while one is open.
+async fn ws_heat(State(s): State<AppState>, Query(q): Query<ScreenQuery>, ws: WebSocketUpgrade) -> ApiResult {
+    server_only()?;
+    let fps = q.fps.unwrap_or(15.0).clamp(0.1, 60.0);
+    Ok(ws.on_upgrade(move |mut socket| async move {
+        s.shared.heat_subscribers.fetch_add(1, Ordering::Relaxed);
+        let _guard = HeatGuard(s.shared.clone());
+        let mut interval = tokio::time::interval(Duration::from_secs_f64(1.0 / fps));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut last_seq = 0;
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {}
+                incoming = socket.recv() => match incoming {
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return,
+                    _ => continue,
+                },
+            }
+            let seq = s.shared.heat_seq.load(Ordering::Acquire);
+            if seq == last_seq {
+                continue;
+            }
+            last_seq = seq;
+            let message = match s.shared.heat.lock() {
+                Ok(m) => m.clone(),
+                Err(_) => return,
+            };
+            if socket.send(Message::Binary(message.to_vec().into())).await.is_err() {
+                return;
+            }
+        }
+    }))
+}
+
+/// The address ranges the heatmap saw written in the last second or so,
+/// while a `/ws/heat` stream is open.
+async fn heat_get(State(s): State<AppState>) -> ApiResult {
+    server_only()?;
+    let active = s.shared.heat_subscribers.load(Ordering::Relaxed) > 0;
+    let ranges: Vec<Value> = s
+        .shared
+        .heat_ranges
+        .lock()
+        .map(|r| r.iter().map(|&(a, b)| json!([format!("{:#07X}", a), format!("{:#07X}", b)])).collect())
+        .unwrap_or_default();
+    let ranges = if active { ranges } else { Vec::new() };
+    Ok(json_ok(&json!({ "active": active, "block_size": 64, "written": ranges })))
+}
+
 async fn ws_audio(State(s): State<AppState>, ws: WebSocketUpgrade) -> ApiResult {
     server_only()?;
     let mut rx = s.shared.audio.subscribe();
@@ -1734,7 +1891,11 @@ async fn handle_ws_input(s: &AppState, text: &str) -> Value {
             Value::Object(o) => o.remove(key),
             _ => None,
         };
-        let wait = take("wait").and_then(|w| w.as_bool()).unwrap_or(false);
+        let wait = match take("wait") {
+            Some(Value::Bool(w)) => w,
+            Some(_) => return Err(bad("wait: true or false")),
+            None => false,
+        };
         let tag = match take("request_id") {
             Some(Value::String(t)) => Some(request_id(&t)?),
             Some(_) => return Err(bad("request_id: a string")),
@@ -1776,6 +1937,7 @@ async fn handle_ws_input(s: &AppState, text: &str) -> Value {
 const HELP: &str = r#"rust-dos debug interface
 ========================
 All endpoints are local-only and unauthenticated. JSON in, JSON out unless noted.
+A JSON body with a field the endpoint doesn't have gets 400 naming it.
 Open this address in a web browser for the debugger page (/ui): the screen,
 execution control, registers, disassembly, memory, breakpoints and the log.
 Addresses are hex: "SEG:OFF" (registers allowed, e.g. "CS:IP", "DS:SI", "B800:0")
@@ -1831,7 +1993,12 @@ STATUS / SCREEN
                                            size: 640x400 in text modes, the mode's size
                                            (small ones doubled) otherwise (raw = RGB24
                                            bytes, size in x-width/x-height)
-  GET  /api/screen/text[?format=text]      text-mode screen contents (CP437 -> Unicode)
+  GET  /api/screen/text[?format=text]      text-mode screen contents (CP437 -> Unicode);
+                                           JSON has attrs: each row's attribute runs {col,len,attr},
+                                           blink (bit 7 blinks, else bright background),
+                                           mono (MDA/Hercules attributes), and the cursor
+                                           of the active display page
+                                           (features has "screen_attrs")
   GET  /api/log[?since_ms=&limit=&grep=&format=text]   emulator log lines, each with its
                                            number n, the journal's last entry "at", and the
                                            request that wrote it ("cause")
@@ -1844,6 +2011,8 @@ TRACE
                    {"count":5000}: record the next 5000 instructions, then stop
                    ({"count":0} stops now; /api/status shows the rest as remaining)
   GET  /api/trace?last_n=200 | ?last_ms=500 | ?from_ms=&to_ms=  [&limit=&cs=&no_bios=true&format=text|json]
+       the newest entries: last_n of them (at most limit, if given), else up to limit (default 10000);
+       truncated (x-trace-truncated) is true when limit left out entries that match
   GET  /api/trace?since=N[&limit=]   the entries recorded after cursor N, oldest first;
        the reply's next (x-trace-next) is the cursor to go on from, and dropped
        (x-trace-dropped) counts entries after N overwritten before they were read
@@ -1863,6 +2032,7 @@ INPUT  (append ?wait=false to return immediately instead of after delivery)
   POST /api/input/wait   {"ms":500}
   POST /api/input/batch  [{"type":"type","text":"cd games\n"},{"type":"wait","ms":300},
                           {"type":"key","key":"f1"}]
+                         A field an event doesn't have gets 400 and queues nothing.
   DELETE /api/input      clear pending queued input ("cancelled": the input operations)
 
 EXECUTION CONTROL
@@ -1880,7 +2050,12 @@ EXECUTION CONTROL
                              run a command line at the DOS prompt; replies once it
                              started a program ({"program":{name,entry,psp}}), or
                              with stop_at_entry once paused at its first instruction
-                             (reason "program_start"); 422 if it started none
+                             (reason "program_start"); 422 if it started none.
+                             409 while the prompt is busy (a program, a batch
+                             file such as AUTOEXEC.BAT, PAUSE); with "queue":true
+                             the command line waits its turn after the batch
+                             lines and runs once the prompt is back (the run's
+                             "resumed" entry has "queued":true)
                              step, step_over and run wait for their end; "wait":false
                              answers at once (202) with "op"; timeout_ms (504 with "op")
   POST /api/control/reboot_shell                     kill the running program and its batch file
@@ -1936,7 +2111,14 @@ PROTECTED MODE
   POST /api/printer/eject    Eject the page and end the print job; returns once
                              its files are written
 
+MEMORY HEATMAP
+  GET  /api/heat             the address ranges written in about the last second, while
+                             a /ws/heat stream is open ("active")
+
 SOUND
+  GET  /api/sound            what the sound visualizer (Ctrl+Shift+S) shows: the FM
+                             channels' notes and envelopes, the Ultrasound's voices,
+                             the MIDI notes held, and what it muted
   GET  /api/gus              the Gravis Ultrasound: latches, IRQ status, timers,
                              DMA and every voice's registers
   GET  /api/awe32            the AWE32's EMU8000: ROM, RAM, configuration, effects
@@ -1966,8 +2148,8 @@ SAVE STATES
                    settings, then the machine and its drives (the same
                    memsize only). Breakpoints and watchpoints stay.
                    "differences" lists the hardware settings, drives,
-                   folders, images and deterministic start time that
-                   differed from this machine's, if any. A failed load
+                   folders, images, files and deterministic start time
+                   that differed from this machine's, if any. A failed load
                    (400) changes nothing ("loaded":false, "unchanged":true).
                    Replies have "saved"/"loaded", the state's "header"
                    (with its "media"), "format" and "emulator" (this
@@ -1986,6 +2168,15 @@ SAVE STATES
                    paused (409 otherwise).
                    A load while paused stops the machine in the loaded
                    state: a "paused" entry with reason "load".
+                   "check_files":true on either, for extra strictness: a
+                   save records the size and SHA-256 of every file on
+                   the writable drives and of writable images; a load
+                   names the files changed since in "differences"
+                   (refused if strict), or lists in "unchecked" the
+                   drives the state has no such record of. Off by
+                   default: files rarely affect the machine's state,
+                   hashing large folders takes time, and other files on
+                   the drive show up as changes.
 
 SPEED
   POST   /api/speed {"cycles":"auto"}   the CPU speed, as `cycles` takes it
@@ -2002,6 +2193,10 @@ WEBSOCKETS
   /ws/trace           as /ws/events, with per-frame batches
                       {"type":"trace","dropped":N,"entries":[...]}
   /ws/screen?fps=5    binary PNG frames, sent only when the screen changes
+  /ws/heat?fps=15     the memory heatmap: u32 LE block size (64), u32 LE block count,
+                      a heat byte per block (255 = just written, fading), then a bit
+                      per block holding code. Every write is watched while it is open
+                      (the recompiler's stores take a slower path).
   /ws/audio           text header, then binary s16le 44100 Hz stereo (interleaved) chunks
   /ws/input           send input events (same JSON as /api/input/batch, optional "wait":true,
                       "request_id" and "if_state_seq"); replies have "req" and "state_seq"
@@ -2012,7 +2207,7 @@ mod http_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::{Answer, Cmd, Meta, Reply, Request, Shared, hex_data, json, json_body};
+    use super::{Answer, Cmd, Meta, Reply, Request, Shared, hex_data, json, json_body, with_field_hint};
     use std::io::{Read, Write};
     use std::net::SocketAddr;
     use std::sync::{Arc, mpsc};
@@ -2028,6 +2223,28 @@ mod tests {
         let mut response = String::new();
         stream.read_to_string(&mut response).unwrap();
         response
+    }
+
+    #[test]
+    fn a_json_trace_reply_has_the_fields_and_every_entry() {
+        let entries: Vec<_> = (1..=3)
+            .map(|icount| super::TraceEntry { icount, eip: 0x1234_5678, gpr: [0xFFFF_FFFF; 8], ..Default::default() })
+            .collect();
+        let meta = Meta { state_seq: 7, ..Default::default() };
+        let out = super::trace_json(&entries, 3, 1, true, &meta, Some(42));
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!((v["req"].as_u64(), v["count"].as_u64(), v["next"].as_u64()), (Some(42), Some(3), Some(3)));
+        assert_eq!((v["dropped"].as_u64(), v["truncated"].as_bool(), v["state_seq"].as_u64()), (Some(1), Some(true), Some(7)));
+        let icounts: Vec<_> = v["entries"].as_array().unwrap().iter().map(|e| e["icount"].as_u64().unwrap()).collect();
+        assert_eq!(icounts, [1, 2, 3]);
+        assert_eq!(v["entries"][0], entries[0].to_json());
+        // The guide gives the size of a full ring from these.
+        let one = super::trace_json(&entries[..1], 3, 0, false, &meta, None).len();
+        let two = super::trace_json(&entries[..2], 3, 0, false, &meta, None).len();
+        eprintln!("json bytes per entry: {}, text: {}", two - one, entries[0].to_text().len() + 1);
+        assert!(two - one < 450, "{} bytes", two - one);
+        let none = super::trace_json(&[], 0, 0, false, &meta, None);
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&none).unwrap()["entries"], json!([]));
     }
 
     #[test]
@@ -2066,6 +2283,23 @@ mod tests {
         assert_eq!(hex_data("0XCDAB").ok(), Some(vec![0xCD, 0xAB]));
         assert_eq!(hex_data("00 0x10").ok(), Some(vec![0x00, 0x10]));
         assert!(hex_data("CDA").is_err());
+    }
+
+    #[test]
+    fn an_unknown_field_close_to_a_known_one_is_named() {
+        let hint = |m: &str| with_field_hint(m.to_string());
+        let key = "unknown field `modifiers`, expected one of `key`, `scancode`, `ascii`, `action`, `mods`, `hold_ms`";
+        assert!(hint(key).ends_with(" (did you mean `mods`?)"), "{}", hint(key));
+        let mount = "unknown field `readonly`, expected one of `path`, `type`, `label`, `read_only`, `images`";
+        assert!(hint(mount).ends_with(" (did you mean `read_only`?)"), "{}", hint(mount));
+        let step = "unknown field `cnt`, expected one of `count`, `until`";
+        assert!(hint(step).ends_with(" (did you mean `count`?)"), "{}", hint(step));
+        let variant = "unknown variant `keys`, expected one of `key`, `type`, `mouse`, `wait`";
+        assert!(hint(variant).ends_with(" (did you mean `key`?)"), "{}", hint(variant));
+        // Nothing close: the message as serde gave it.
+        let far = "unknown field `z`, expected one of `x`, `y`, `dx`";
+        assert_eq!(hint(far), far);
+        assert_eq!(hint("missing field `ms`"), "missing field `ms`");
     }
 
     #[test]

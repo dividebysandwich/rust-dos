@@ -6,6 +6,7 @@
 //! `DebugHub::poll` once per frame, and data flows back through oneshot
 //! replies, broadcast channels, and a shared frame snapshot.
 
+pub mod heat;
 pub mod journal;
 pub mod keys;
 pub mod pm;
@@ -47,6 +48,14 @@ pub struct Shared {
     /// Bumped whenever `frame` changes.
     pub frame_seq: AtomicU64,
     pub screen_subscribers: AtomicUsize,
+    /// The memory heatmap's latest message (`heat.rs`), its number, and
+    /// the streams that want it: the writes are watched only while one
+    /// does.
+    pub heat: Mutex<Arc<[u8]>>,
+    pub heat_seq: AtomicU64,
+    pub heat_subscribers: AtomicUsize,
+    /// The written address ranges of the heatmap's last message.
+    pub heat_ranges: Mutex<Vec<(usize, usize)>>,
     /// Events kept nowhere: log lines and video mode changes. What the
     /// machine and the debugger did is in `journal`.
     pub events: broadcast::Sender<Arc<str>>,
@@ -110,6 +119,10 @@ impl Shared {
             frame: Mutex::new(video::Frame::new(video::SCREEN_WIDTH, video::SCREEN_HEIGHT)),
             frame_seq: AtomicU64::new(0),
             screen_subscribers: AtomicUsize::new(0),
+            heat: Mutex::new(Arc::from([] as [u8; 0])),
+            heat_seq: AtomicU64::new(0),
+            heat_subscribers: AtomicUsize::new(0),
+            heat_ranges: Mutex::new(Vec::new()),
             events: broadcast::channel(1024).0,
             trace: broadcast::channel(64).0,
             audio: broadcast::channel(256).0,
@@ -198,7 +211,9 @@ pub enum Reply {
     Frame(video::Frame),
     /// Trace entries, the cursor for the next page (`TraceQuery::since`)
     /// and how many entries after the requested cursor were overwritten.
-    Trace { entries: Vec<TraceEntry>, next: u64, dropped: u64 },
+    /// `truncated`: `limit` left out entries the query asked for (with
+    /// `since`, the page stopped before the newest entry).
+    Trace { entries: Vec<TraceEntry>, next: u64, dropped: u64, truncated: bool },
     Bytes { addr: usize, segoff: Option<(u16, u32)>, data: Vec<u8> },
     Error(u16, String),
     /// An error whose body has fields beside its message (`error`).
@@ -318,7 +333,8 @@ pub enum Cmd {
     },
     /// Run a command line at the DOS prompt, as typed, and answer once it
     /// started a program: stopped at its entry point with `stop_at_entry`.
-    Run { command: String, stop_at_entry: bool },
+    /// With `queue`, a busy prompt takes it after what keeps it busy.
+    Run { command: String, stop_at_entry: bool, queue: bool },
     Ivt,
     Gdt,
     Ldt,
@@ -332,6 +348,7 @@ pub enum Cmd {
     Printer { eject: bool },
     Exceptions,
     Gus,
+    Sound,
     Awe32,
     Drives,
     Mount {
@@ -352,8 +369,10 @@ pub enum Cmd {
     /// with `state_done`. A `strict_match` save or load is
     /// done only while paused, and its load must match this machine and
     /// resets the debugger.
-    SaveState { path: String, strict_match: bool },
-    LoadState { path: String, strict_match: bool },
+    /// A `check_files` save records the files on the writable drives,
+    /// and a `check_files` load compares them (savestate/media.rs).
+    SaveState { path: String, strict_match: bool, check_files: bool },
+    LoadState { path: String, strict_match: bool, check_files: bool },
     /// Change the CPU speed (`cycles`) as the settings window does, which
     /// the front end does (`next_speed_request`).
     Speed { cycles: String },
@@ -369,6 +388,9 @@ pub struct StateRequest {
     pub path: PathBuf,
     /// Asked for with `strict_match` (see `next_state_request`).
     pub strict_match: bool,
+    /// Asked for with `check_files`: record or compare the files on the
+    /// writable drives.
+    pub check_files: bool,
     ctx: Ctx,
     if_state: Option<u64>,
     reply: oneshot::Sender<Answer>,
@@ -399,7 +421,10 @@ pub enum ShutdownReason {
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize, Debug, Clone)]
-#[serde(tag = "type", rename_all = "snake_case")]
+// A field the event doesn't have is refused: dropping it would send other
+// input than the client asked for ("modifiers" for "mods" pressed the key
+// without Alt).
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum InputEvent {
     Key {
         key: Option<String>,
@@ -488,6 +513,7 @@ pub enum UiInput {
 
 /// F12 in the key table: its make code.
 const F12_SCAN: u8 = 0x58;
+const S_SCAN: u8 = 0x1F;
 
 fn modifier_key(name: &str) -> Result<PcKey, String> {
     match keys::lookup(name) {
@@ -651,11 +677,12 @@ struct Watch {
     value: u32,
 }
 
-/// A `run` operation waiting for its program to start (`before` is
-/// `cpu.programs.started` as it was queued), or with `stop_at_entry` to
-/// stop there.
+/// A `run` operation waiting for its program to start, or with
+/// `stop_at_entry` to stop there. Its command line is a batch line marked
+/// with `op`; `before` is `cpu.programs.started` as the shell took it,
+/// None until then.
 struct RunWait {
-    before: u64,
+    before: Option<u64>,
     stop_at_entry: bool,
     op: u64,
 }
@@ -754,6 +781,8 @@ pub struct DebugHub {
     ui_pointer: (i32, i32),
     /// Ctrl+F12 came in: open or close the settings window.
     hotkey: bool,
+    /// Ctrl+Shift+S came in: show or hide the sound visualizer.
+    sound_viz_key: bool,
     /// reboot_shell closed the program: the front end releases its part.
     closed_program: bool,
     /// Save states to save or load, for the front end.
@@ -771,6 +800,8 @@ pub struct DebugHub {
     fps: f64,
     fps_mark: (Instant, u64),
     stats: ExecStats,
+    /// The memory heatmap while a stream wants it.
+    heat: Option<heat::Heat>,
 }
 
 /// Execution speed, measured over windows of about a second of wall time.
@@ -861,6 +892,7 @@ impl DebugHub {
             ui_input: Vec::new(),
             ui_pointer: (0, 0),
             hotkey: false,
+            sound_viz_key: false,
             closed_program: false,
             state_requests: Vec::new(),
             speed_requests: Vec::new(),
@@ -872,6 +904,7 @@ impl DebugHub {
             fps: 0.0,
             fps_mark: (Instant::now(), 0),
             stats: ExecStats::new(),
+            heat: None,
         }
     }
 
@@ -1095,7 +1128,7 @@ impl DebugHub {
         if self.trace.total() > 0 {
             stop["trace"] = self.trace.total().into();
         }
-        if reason == PauseReason::ProgramStart && self.run_wait.as_ref().is_some_and(|r| r.stop_at_entry) {
+        if reason == PauseReason::ProgramStart && self.run_wait.as_ref().is_some_and(|r| r.stop_at_entry && r.before.is_some()) {
             self.run_wait = None;
         }
         self.host_input_told = false;
@@ -1190,7 +1223,7 @@ impl DebugHub {
                 fields["count"] = (started - self.told_starts).into();
             }
             // A `run` that doesn't stop at the entry is done with this entry.
-            let run = self.run_wait.as_ref().filter(|r| !r.stop_at_entry && started > r.before).map(|r| r.op);
+            let run = self.run_wait.as_ref().filter(|r| !r.stop_at_entry && r.before.is_some_and(|b| started > b)).map(|r| r.op);
             let seq = self.append_then(cpu, Kind::ProgramStarted, None, fields, |j, seq| {
                 if let Some(op) = run {
                     j.end_op(op, OpState::Done, Some(seq));
@@ -1392,6 +1425,7 @@ impl DebugHub {
             self.handle(cpu, req);
         }
         self.rx = Some(rx);
+        self.update_heat(cpu);
 
         // Deterministic mode delivers the machine's input at its ticks
         // (`feed_input`); the settings window's goes as it comes.
@@ -1423,6 +1457,14 @@ impl DebugHub {
         if self.tracing_now {
             self.batch_t_us = cpu.bus.start_time.elapsed().as_micros() as u64;
         }
+        // A `run`'s line waits behind the batch lines. The programs they
+        // start may have run without the hook, which counts the starts
+        // before the line from here. (Unless the shell took the line at
+        // the end of the last batch.)
+        self.note_run_line(cpu);
+        if self.run_wait.as_ref().is_some_and(|r| r.before.is_none()) && !self.break_program_start && !self.start_once {
+            self.seen_starts = cpu.programs.started;
+        }
         self.tracing_now
             || self.step_budget.is_some()
             || self.temp_breakpoint.is_some()
@@ -1434,6 +1476,12 @@ impl DebugHub {
             || self.break_program_exit
             || self.start_once
             || self.start_breakpoint.is_some()
+            // A `run`'s line waits: the hook runs while the shell's code
+            // does, which is where the shell takes batch lines, and a batch
+            // run without it ends before the shell takes any while the line
+            // waits (`StopReason::Hook`). The programs the lines before it
+            // start run without the hook.
+            || (cpu.batch.marked_line_waits() && cpu.in_shell_code())
     }
 
     /// Per-instruction hook, called just before an instruction at `phys_ip`
@@ -1473,6 +1521,9 @@ impl DebugHub {
                 return true;
             }
         }
+        // Before the start the run's line made, which no instruction
+        // separates from it.
+        self.note_run_line(cpu);
         // A program just started: run to its entry point, through any
         // interrupt that comes first.
         if cpu.programs.started != self.seen_starts {
@@ -1540,6 +1591,7 @@ impl DebugHub {
                 gs: cpu.gs(),
                 eflags: cpu.get_cpu_flags().bits(),
                 code32: cpu.seg_cache(crate::cpu::Seg::CS).attr & crate::cpu::ATTR_DB != 0,
+                pm: cpu.pm(),
                 bytes,
                 len: len as u8,
             });
@@ -1710,6 +1762,31 @@ impl DebugHub {
 
     /// Hand the composited frame (cached VGA render + cursor overlays) to
     /// screenshot requests and the screen stream.
+    /// Watch the machine's writes while a heatmap stream is open, and
+    /// publish what they were.
+    fn update_heat(&mut self, cpu: &mut Cpu) {
+        let Some(shared) = &self.shared else { return };
+        let wanted = shared.heat_subscribers.load(Ordering::Relaxed) > 0;
+        match (&mut self.heat, wanted) {
+            (None, true) => self.heat = Some(heat::Heat::start(&mut cpu.bus)),
+            (Some(_), false) => {
+                heat::Heat::stop(&mut cpu.bus);
+                self.heat = None;
+            }
+            (Some(heat), true) => {
+                heat.sample(&cpu.bus);
+                if let Ok(mut message) = shared.heat.lock() {
+                    *message = Arc::from(heat.message(&cpu.bus));
+                    shared.heat_seq.fetch_add(1, Ordering::Release);
+                }
+                if let Ok(mut ranges) = shared.heat_ranges.lock() {
+                    *ranges = heat.hot_ranges();
+                }
+            }
+            (None, false) => {}
+        }
+    }
+
     pub fn capture_frame(&mut self, screen: &video::Frame) {
         self.count_frame();
         if !self.wants_frame() {
@@ -1731,10 +1808,27 @@ impl DebugHub {
         }
     }
 
+    /// Once the shell took a `run`'s command line: the programs started
+    /// from then on are its own, and the first of them stops with
+    /// `stop_at_entry`. `seen_starts` counts the starts before it: the
+    /// per-instruction hook runs while the shell takes batch lines, and
+    /// `begin_batch` catches up with the starts it didn't see.
+    fn note_run_line(&mut self, cpu: &Cpu) {
+        if let Some(run) = self.run_wait.as_mut().filter(|r| r.before.is_none())
+            && cpu.batch.reached == Some(run.op)
+        {
+            run.before = Some(self.seen_starts);
+            self.start_once = run.stop_at_entry;
+        }
+    }
+
     /// End a `run` operation whose program started, or whose command line
     /// ended at the prompt without starting one. A `run` goes on when its
     /// client stops waiting: how it ends is in the journal.
     fn check_run(&mut self, cpu: &Cpu) {
+        // The shell may have taken the line after the batch's last
+        // instruction.
+        self.note_run_line(cpu);
         let idle = at_idle_prompt(cpu);
         if idle {
             // No program runs, so drop an entry point it never reached
@@ -1743,6 +1837,17 @@ impl DebugHub {
         }
         let Some(run) = &self.run_wait else { return };
         let (op, before, stop_at_entry) = (run.op, run.before, run.stop_at_entry);
+        let Some(before) = before else {
+            // The prompt is back and the shell never took the line: the
+            // batch lines were ended with it (Ctrl+C, the settings window
+            // closing the program; `reboot_shell` supersedes the run first).
+            if idle {
+                self.start_once = false;
+                self.run_wait = None;
+                self.fail_op(cpu, op, 422, "the command line was dropped with the batch lines before it ran");
+            }
+            return;
+        };
         if cpu.programs.started > before {
             if !stop_at_entry {
                 // A start the journal didn't tell (a load brought it): the
@@ -1840,7 +1945,7 @@ impl DebugHub {
                 }
                 at_ms(cpu, self, boundary);
             }
-            if matches!(reason, crate::exec::StopReason::Paused | crate::exec::StopReason::Exit) {
+            if matches!(reason, crate::exec::StopReason::Paused | crate::exec::StopReason::Exit | crate::exec::StopReason::Hook) {
                 break;
             }
         }
@@ -1943,8 +2048,12 @@ impl DebugHub {
     /// to the machine. Ctrl+F12 toggles the window, as on the keyboard.
     fn key_down(&mut self, cpu: &mut Cpu, key: PcKey, ascii: u8) {
         self.remote_mods |= key.modifier;
-        if key.scan == F12_SCAN && self.remote_mods & (keys::MOD_CTRL | keys::MOD_ALT) == keys::MOD_CTRL {
+        let shift = self.remote_mods & (keys::MOD_LSHIFT | keys::MOD_RSHIFT) != 0;
+        let ctrl = self.remote_mods & (keys::MOD_CTRL | keys::MOD_ALT) == keys::MOD_CTRL;
+        if key.scan == F12_SCAN && ctrl {
             self.hotkey = true;
+        } else if key.scan == S_SCAN && ctrl && shift && !self.divert {
+            self.sound_viz_key = true;
         } else if self.divert {
             self.ui_input.extend(ui_key(key, ascii, self.remote_mods).map(UiInput::Key));
         } else {
@@ -1980,6 +2089,11 @@ impl DebugHub {
     /// Whether a remote Ctrl+F12 came in since the last call.
     pub fn take_hotkey(&mut self) -> bool {
         std::mem::take(&mut self.hotkey)
+    }
+
+    /// Whether a remote Ctrl+Shift+S came in since the last call.
+    pub fn take_sound_viz_key(&mut self) -> bool {
+        std::mem::take(&mut self.sound_viz_key)
     }
 
     /// Whether reboot_shell closed the program since the last call. The
@@ -2211,14 +2325,14 @@ impl DebugHub {
                 self.answer(&ctx, tx, Reply::bad("a path is needed"));
                 return;
             }
-            Cmd::SaveState { path, strict_match } => {
+            Cmd::SaveState { path, strict_match, check_files } => {
                 let path = PathBuf::from(path);
-                self.state_requests.push(StateRequest { load: false, path, strict_match, ctx, if_state, reply: tx });
+                self.state_requests.push(StateRequest { load: false, path, strict_match, check_files, ctx, if_state, reply: tx });
                 return;
             }
-            Cmd::LoadState { path, strict_match } => {
+            Cmd::LoadState { path, strict_match, check_files } => {
                 let path = PathBuf::from(path);
-                self.state_requests.push(StateRequest { load: true, path, strict_match, ctx, if_state, reply: tx });
+                self.state_requests.push(StateRequest { load: true, path, strict_match, check_files, ctx, if_state, reply: tx });
                 return;
             }
             Cmd::Speed { cycles } => {
@@ -2617,7 +2731,8 @@ impl DebugHub {
                 // The counts go stale while nothing watches them. While
                 // something does, a program that started or ended in the
                 // last instruction of the batch is still to be seen.
-                if !self.break_program_start && !self.start_once {
+                let run_line_waits = self.run_wait.as_ref().is_some_and(|r| r.before.is_none());
+                if !self.break_program_start && !self.start_once && !run_line_waits {
                     self.seen_starts = cpu.programs.started;
                 }
                 if !self.break_program_exit {
@@ -2650,21 +2765,25 @@ impl DebugHub {
                 self.record(cpu, Kind::BreakOn, fields);
                 Reply::Json(list)
             }
-            Cmd::Run { command, stop_at_entry } => {
+            Cmd::Run { command, stop_at_entry, queue } => {
+                let idle = at_idle_prompt(cpu);
                 if self.run_wait.is_some() {
                     Reply::Error(409, "a run command is already waiting for its program".into())
-                } else if !at_idle_prompt(cpu) {
+                } else if !idle && !queue {
                     Reply::Error(409, "the DOS prompt is busy with a program, a batch file, PAUSE, CHOICE or EDIT".into())
                 } else if command.trim().is_empty() || command.contains(['\r', '\n']) {
                     Reply::bad("command: one command line")
                 } else {
-                    cpu.queue_batch_lines([command.trim()]);
+                    // A batch line after the ones queued: the shell takes
+                    // it once they have run and the prompt is back, at once
+                    // when it is idle.
+                    let op = self.cur.as_ref().map_or(0, |c| c.req);
+                    cpu.batch.append_marked(command.trim(), op);
                     self.take_over();
                     self.seen_starts = cpu.programs.started;
-                    self.start_once = stop_at_entry;
-                    let op = self.cur.as_ref().map_or(0, |c| c.req);
-                    self.run_wait = Some(RunWait { before: cpu.programs.started, stop_at_entry, op });
-                    self.start_op(cpu, OpKind::Run, json!({"command": command.trim(), "stop_at_entry": stop_at_entry}));
+                    self.run_wait = Some(RunWait { before: None, stop_at_entry, op });
+                    let fields = json!({"command": command.trim(), "stop_at_entry": stop_at_entry, "queued": !idle});
+                    self.start_op(cpu, OpKind::Run, fields);
                     Reply::Json(json!({"ok": true}))
                 }
             }
@@ -2685,6 +2804,7 @@ impl DebugHub {
                 Some(gus) => gus.snapshot(),
                 None => serde_json::json!({ "installed": false }),
             }),
+            Cmd::Sound => Reply::Json(sound_json(cpu)),
             Cmd::Awe32 => Reply::Json(match &cpu.bus.awe {
                 Some(awe) => awe.snapshot(),
                 None => serde_json::json!({ "installed": false }),
@@ -2962,13 +3082,18 @@ impl DebugHub {
                 q.to_ms.map_or(u64::MAX, |v| (v * 1000.0) as u64),
             )
         };
-        let limit = q.limit.unwrap_or(10_000);
-        let limit = q.last_n.map_or(limit, |n| n.min(limit));
+        // `last_n` asks for that many, and `limit` caps it only when given.
+        // A page read with `since` holds up to `limit`, 10000 unless given.
+        let limit = match (q.last_n, q.limit) {
+            (Some(n), Some(limit)) => n.min(limit),
+            (Some(n), None) if q.since.is_none() => n,
+            (last_n, limit) => last_n.unwrap_or(usize::MAX).min(limit.unwrap_or(10_000)),
+        };
         let matches = |e: &TraceEntry| {
             e.t_us >= from_us
                 && e.t_us <= to_us
                 && cs_filter.is_none_or(|cs| e.cs == cs)
-                && !(q.no_bios && e.cs >= 0xF000 && !(e.bytes[0] == 0xFE && e.bytes[1] == 0x38))
+                && !(q.no_bios && e.is_bios_code())
         };
         if let Some(since) = q.since {
             // A cursor past the end (from an earlier run of the emulator)
@@ -2979,8 +3104,10 @@ impl DebugHub {
             let (after, dropped) = self.trace.after(since);
             let mut next = since.max(self.trace.total() - self.trace.len() as u64);
             let mut entries = Vec::new();
+            let mut truncated = false;
             for (n, e) in after {
                 if entries.len() == limit {
+                    truncated = true;
                     break;
                 }
                 next = n;
@@ -2988,12 +3115,17 @@ impl DebugHub {
                     entries.push(*e);
                 }
             }
-            return Reply::Trace { entries, next, dropped };
+            return Reply::Trace { entries, next, dropped, truncated };
         }
         // Newest-first collection so `limit` keeps the most recent entries.
-        let mut entries: Vec<TraceEntry> = self.trace.iter().rev().filter(|e| matches(e)).take(limit).copied().collect();
+        // One more than `limit` tells whether `limit` left out entries that
+        // `last_n` (or a window) asked for.
+        let mut entries: Vec<TraceEntry> =
+            self.trace.iter().rev().filter(|e| matches(e)).take(limit.saturating_add(1)).copied().collect();
+        let truncated = entries.len() > limit && q.last_n.is_none_or(|n| n > limit);
+        entries.truncate(limit);
         entries.reverse();
-        Reply::Trace { entries, next: self.trace.total(), dropped: 0 }
+        Reply::Trace { entries, next: self.trace.total(), dropped: 0, truncated }
     }
 
     fn disasm(&self, cpu: &Cpu, addr: Option<String>, count: usize) -> Reply {
@@ -3012,10 +3144,8 @@ impl DebugHub {
             let bytes: Vec<u8> = (0..15)
                 .map(|i| start.byte(cpu, at + i).map_or(0xFF, |a| cpu.bus.peek_8(a)))
                 .collect();
-            let (len, text) = if bytes[0] == 0xFE && bytes[1] == 0x38 {
-                (3, format!("HLE INT {:02X}h", bytes[2]))
-            } else if bytes[0] == 0xFE && bytes[1] == 0x39 {
-                (3, format!("HLE service {:02X}h", bytes[2]))
+            let (len, text) = if let Some(name) = trace::trap_name(&bytes, None, cpu.pm()) {
+                (3, name)
             } else {
                 let ip = start.segoff.map_or(at as u32, |(_, off)| off.wrapping_add(at as u32));
                 trace::disasm_one(&bytes, ip, code32)
@@ -3202,6 +3332,7 @@ fn ui_key(key: PcKey, ascii: u8, mods: u8) -> Option<UiKey> {
         0x52 => Insert,
         0x3B if !ctrl => Help,
         0x3C => Save,
+        0x44 => F10,
         0x1F if ctrl => Save,
         _ if (0x20..0x7F).contains(&ascii) => Char(ascii as char),
         _ => return None,
@@ -3365,29 +3496,81 @@ fn set_regs(cpu: &mut Cpu, map: &Map<String, Value>) -> Result<(), String> {
 
 fn screen_text(cpu: &Cpu) -> Reply {
     let mode = cpu.bus.video_mode;
-    let Some(geometry) = crate::video::text::geometry(&cpu.bus) else {
+    let (Some(geometry), Some(lines)) = (crate::video::text::geometry(&cpu.bus), crate::video::text::screen_lines(&cpu.bus))
+    else {
         return Reply::Error(409, format!("video mode {:?} is a graphics mode; use /api/screenshot", mode));
     };
     let (cols, rows) = (geometry.cols, geometry.rows);
     let vram = cpu.bus.display_mem();
-    let lines: Vec<String> = (0..rows)
+    // Each row's attributes as runs of the same one: a highlighted menu
+    // item or a selected field shows as a run of its own.
+    let attrs: Vec<Vec<Value>> = (0..rows)
         .map(|r| {
-            let s: String = (0..cols)
-                .map(|c| {
-                    let off = (geometry.start + r * geometry.row_bytes + c * 2) & geometry.wrap;
-                    keys::CP437[vram[off] as usize]
-                })
-                .collect();
-            s.trim_end().to_string()
+            let mut runs: Vec<(usize, usize, u8)> = Vec::new();
+            for c in 0..cols {
+                let attr = vram[geometry.offset(r, c) + 1];
+                match runs.last_mut() {
+                    Some((_, len, a)) if *a == attr => *len += 1,
+                    _ => runs.push((c, 1, attr)),
+                }
+            }
+            runs.into_iter().map(|(col, len, a)| json!({"col": col, "len": len, "attr": format!("{:02X}", a)})).collect()
         })
         .collect();
+    // The cursor of the active display page (BIOS data area 462h), whose
+    // text the reply shows.
+    let cursor = 0x0450 + 2 * (cpu.bus.peek_8(0x0462) as usize & 7);
     Reply::Json(json!({
         "mode": format!("{:?}", mode),
         "cols": cols,
         "rows": rows,
-        "cursor": {"col": cpu.bus.peek_8(0x0450), "row": cpu.bus.peek_8(0x0451)},
+        "cursor": {"col": cpu.bus.peek_8(cursor), "row": cpu.bus.peek_8(cursor + 1)},
         "lines": lines,
+        "attrs": attrs,
+        // How to read an attribute byte: `blink` says whether bit 7 blinks
+        // the character (when false it selects a bright background), and
+        // `mono` whether the bytes are the MDA and Hercules attributes (07
+        // normal, 70 reverse, 01 underline, 08 bright) in place of colours.
+        "blink": cpu.bus.vga.blinks(),
+        "mono": geometry.mono,
     }))
+}
+
+/// What the sound visualizer shows: the FM channels, the Ultrasound's
+/// voices, the MIDI notes held, and what is muted.
+fn sound_json(cpu: &Cpu) -> Value {
+    let bus = &cpu.bus;
+    let fm: Vec<Value> = bus
+        .opl
+        .channels()
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            json!({ "channel": i + 1, "key_on": c.key_on, "f_num": c.f_num, "block": c.block, "level": c.level,
+                    "four_op": c.four_op, "drum": c.drum, "muted": bus.opl.mute() >> i & 1 != 0 })
+        })
+        .collect();
+    let gus: Option<Vec<Value>> = bus.gus.as_ref().map(|gus| {
+        gus.voice_views()
+            .iter()
+            .enumerate()
+            .map(|(i, v)| json!({ "voice": i + 1, "playing": v.playing, "level": v.level, "pan": v.pan, "muted": gus.mute() >> i & 1 != 0 }))
+            .collect()
+    });
+    let midi: Vec<Value> = bus
+        .mpu
+        .held_notes()
+        .iter()
+        .enumerate()
+        .filter_map(|(ch, notes)| {
+            let held: Vec<Value> = notes.iter().enumerate().filter(|(_, v)| **v > 0).map(|(n, v)| json!([n, v])).collect();
+            let muted = bus.mpu.mute() >> ch & 1 != 0;
+            (!held.is_empty() || muted).then(|| json!({ "channel": ch + 1, "notes": held, "muted": muted }))
+        })
+        .collect();
+    let silenced: Vec<&str> =
+        rust_dos::mixer::Channel::ALL.iter().filter(|c| bus.mixer.silenced >> c.index() & 1 != 0).map(|c| c.key()).collect();
+    json!({ "fm": { "opl3": bus.opl.is_opl3(), "idle": bus.opl.is_idle(), "channels": fm }, "gus": gus, "midi": midi, "silenced": silenced })
 }
 
 fn ivt_json(cpu: &Cpu) -> Value {
@@ -3603,6 +3786,7 @@ mod determinism_tests;
 mod tests {
     use super::journal::{OpLookup, OpState};
     use super::{Answer, Cmd, DebugHub, InputEvent, LowInput, Reply, StateRequest, TraceQuery, keys_for_char, step_over_len};
+    use super::trace::TraceEntry;
     use rust_dos::deterministic::Deterministic;
     use crate::cpu::{Cpu, CpuState};
     use crate::exec::{self, StopReason};
@@ -3631,7 +3815,7 @@ mod tests {
     fn page(cpu: &mut Cpu, hub: &mut DebugHub, since: u64, limit: usize) -> (Vec<u64>, u64, u64) {
         let q = TraceQuery { since: Some(since), limit: Some(limit), ..Default::default() };
         match handle(cpu, hub, Cmd::TraceQuery(q)) {
-            Reply::Trace { entries, next, dropped } => (entries.iter().map(|e| e.icount).collect(), next, dropped),
+            Reply::Trace { entries, next, dropped, .. } => (entries.iter().map(|e| e.icount).collect(), next, dropped),
             _ => panic!("not a trace"),
         }
     }
@@ -3659,6 +3843,75 @@ mod tests {
         assert_eq!((second.len(), next), (20, 50));
         assert!(first.last() < second.first(), "oldest first, in order");
         assert_eq!(page(&mut cpu, &mut hub, next, 30), (vec![], 50, 0));
+    }
+
+    #[test]
+    fn last_n_gets_that_many_entries() {
+        let mut cpu = Cpu::new(".".into());
+        let mut hub = DebugHub::new(None, None, 30_000);
+        for icount in 1..=25_000 {
+            hub.trace.push(TraceEntry { icount, ..Default::default() });
+        }
+        let mut last = |last_n, limit| {
+            let q = TraceQuery { last_n: Some(last_n), limit, ..Default::default() };
+            match handle(&mut cpu, &mut hub, Cmd::TraceQuery(q)) {
+                Reply::Trace { entries, truncated, .. } => (entries.len(), entries.first().map(|e| e.icount), truncated),
+                _ => panic!("not a trace"),
+            }
+        };
+        assert_eq!(last(20_000, None), (20_000, Some(5_001), false));
+        assert_eq!(last(20_000, Some(100)), (100, Some(24_901), true));
+        assert_eq!(last(50, None), (50, Some(24_951), false));
+        // More than the ring holds: all of it, and nothing left out.
+        assert_eq!(last(30_000, None), (25_000, Some(1), false));
+        // Without `last_n`, and in a page read with `since`, `limit` is
+        // 10000 unless given, and the reply says it left entries out.
+        let mut count = |q| match handle(&mut cpu, &mut hub, Cmd::TraceQuery(q)) {
+            Reply::Trace { entries, truncated, .. } => (entries.len(), truncated),
+            _ => panic!("not a trace"),
+        };
+        assert_eq!(count(TraceQuery::default()), (10_000, true));
+        assert_eq!(count(TraceQuery { since: Some(0), last_n: Some(20_000), ..Default::default() }), (10_000, true));
+        assert_eq!(count(TraceQuery { since: Some(20_000), ..Default::default() }), (5_000, false));
+    }
+
+    #[test]
+    fn screen_text_has_each_rows_attributes_as_runs() {
+        let mut cpu = Cpu::new(".".into());
+        let mut hub = DebugHub::new(None, None, 1000);
+        // Row 2: " Play  Quit", "Quit" highlighted (black on cyan).
+        for (c, ch) in " Play  Quit".bytes().enumerate() {
+            let at = 0xB8000 + 2 * 80 * 2 + c * 2;
+            cpu.bus.write_8(at, ch);
+            cpu.bus.write_8(at + 1, if c >= 7 { 0x30 } else { 0x07 });
+        }
+        for c in 11..80 {
+            cpu.bus.write_8(0xB8000 + 2 * 80 * 2 + c * 2 + 1, 0x07);
+        }
+        let Reply::Json(v) = handle(&mut cpu, &mut hub, Cmd::ScreenText) else { panic!("not JSON") };
+        assert_eq!(v["lines"][2], " Play  Quit");
+        let runs: Vec<(u64, u64, &str)> = v["attrs"][2]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| (r["col"].as_u64().unwrap(), r["len"].as_u64().unwrap(), r["attr"].as_str().unwrap()))
+            .collect();
+        assert_eq!(runs, [(0, 7, "07"), (7, 4, "30"), (11, 69, "07")]);
+        assert_eq!(v["attrs"].as_array().unwrap().len(), v["rows"].as_u64().unwrap() as usize);
+        assert!(v["blink"].is_boolean() && v["mono"] == false, "{v}");
+    }
+
+    #[test]
+    fn screen_text_gives_the_cursor_of_the_active_page() {
+        let mut cpu = Cpu::new(".".into());
+        let mut hub = DebugHub::new(None, None, 1000);
+        cpu.bus.write_8(0x0450, 1);
+        cpu.bus.write_8(0x0451, 2);
+        cpu.bus.write_8(0x0452, 5);
+        cpu.bus.write_8(0x0453, 3);
+        cpu.bus.write_8(0x0462, 1);
+        let Reply::Json(v) = handle(&mut cpu, &mut hub, Cmd::ScreenText) else { panic!("not JSON") };
+        assert_eq!((v["cursor"]["col"].as_u64(), v["cursor"]["row"].as_u64()), (Some(5), Some(3)));
     }
 
     #[test]
@@ -3766,7 +4019,7 @@ mod tests {
             cpu.bus.start_batch(end);
             while cpu.bus.clock.icount < end {
                 match exec::run_batch(cpu, hub, hot) {
-                    StopReason::BatchEnd | StopReason::Paused | StopReason::Exit => break,
+                    StopReason::BatchEnd | StopReason::Paused | StopReason::Exit | StopReason::Hook => break,
                     StopReason::ShellReloaded => cpu.bus.start_batch(end),
                 }
             }
@@ -3870,7 +4123,7 @@ mod tests {
     #[test]
     fn run_stops_at_the_program_s_entry_point() {
         let (mut cpu, mut hub) = machine("entry");
-        let rx = send(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true });
+        let rx = send(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true, queue: false });
         let stop = answer(&mut cpu, &mut hub, rx, 50).unwrap();
         assert_eq!(stop["reason"], "program_start");
         assert_eq!(stop["program"]["name"], "PROBE.COM");
@@ -3885,7 +4138,7 @@ mod tests {
     fn a_program_s_end_stops_the_machine_with_its_exit_code() {
         let (mut cpu, mut hub) = machine("exit");
         ask(&mut cpu, &mut hub, break_on(None, Some(true)), 0).unwrap();
-        ask(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true }, 50).unwrap();
+        ask(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true, queue: false }, 50).unwrap();
         ask(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }, 0).unwrap();
         let stop = ask(&mut cpu, &mut hub, Cmd::WaitPause, 50).unwrap();
         assert_eq!(stop["reason"], "program_exit");
@@ -3897,7 +4150,7 @@ mod tests {
     fn a_program_the_emulator_ends_stops_the_machine_with_no_exit_code() {
         let (mut cpu, mut hub) = machine("abort");
         ask(&mut cpu, &mut hub, break_on(None, Some(true)), 0).unwrap();
-        ask(&mut cpu, &mut hub, Cmd::Run { command: "CRASH.COM".into(), stop_at_entry: true }, 50).unwrap();
+        ask(&mut cpu, &mut hub, Cmd::Run { command: "CRASH.COM".into(), stop_at_entry: true, queue: false }, 50).unwrap();
         ask(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }, 0).unwrap();
         let stop = ask(&mut cpu, &mut hub, Cmd::WaitPause, 50).unwrap();
         assert_eq!(stop["reason"], "program_exit");
@@ -3905,7 +4158,7 @@ mod tests {
         // The next program's own exit is told apart again.
         ask(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }, 0).unwrap();
         run(&mut cpu, &mut hub, 20);
-        ask(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true }, 50).unwrap();
+        ask(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true, queue: false }, 50).unwrap();
         ask(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }, 0).unwrap();
         let stop = ask(&mut cpu, &mut hub, Cmd::WaitPause, 50).unwrap();
         assert_eq!(stop["exit"]["aborted"], false);
@@ -3927,7 +4180,7 @@ mod tests {
     #[test]
     fn run_without_stopping_answers_once_the_program_started() {
         let (mut cpu, mut hub) = machine("started");
-        let started = ask(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: false }, 50).unwrap();
+        let started = ask(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: false, queue: false }, 50).unwrap();
         assert_eq!(started["program"]["name"], "PROBE.COM");
         assert!(!hub.paused);
         run(&mut cpu, &mut hub, 20);
@@ -3946,7 +4199,7 @@ mod tests {
     #[test]
     fn run_refuses_a_command_line_that_starts_no_program() {
         let (mut cpu, mut hub) = machine("none");
-        let rx = send(&mut cpu, &mut hub, Cmd::Run { command: "NOSUCH.EXE".into(), stop_at_entry: true });
+        let rx = send(&mut cpu, &mut hub, Cmd::Run { command: "NOSUCH.EXE".into(), stop_at_entry: true, queue: false });
         assert_eq!(answer(&mut cpu, &mut hub, rx, 50).unwrap_err().0, 422);
         assert!(!hub.paused && !hub.start_once, "no stop is left armed");
     }
@@ -3954,10 +4207,87 @@ mod tests {
     #[test]
     fn run_waits_for_the_prompt() {
         let (mut cpu, mut hub) = machine("busy");
-        let rx = send(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true });
+        let rx = send(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true, queue: false });
         answer(&mut cpu, &mut hub, rx, 50).unwrap();
-        let rx = send(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true });
+        let rx = send(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true, queue: false });
         assert_eq!(answer(&mut cpu, &mut hub, rx, 0).unwrap_err().0, 409, "a program is running");
+    }
+
+    #[test]
+    fn a_queued_run_waits_for_the_batch_lines_before_it() {
+        let (mut cpu, mut hub) = machine("queued");
+        // A batch file runs, as AUTOEXEC.BAT does at startup.
+        cpu.batch.append_file("AUTOEXEC", b"@echo off\r\nPROBE.COM\r\n", "");
+        let refused = send(&mut cpu, &mut hub, Cmd::Run { command: "CRASH.COM".into(), stop_at_entry: true, queue: false });
+        assert_eq!(answer(&mut cpu, &mut hub, refused, 0).unwrap_err().0, 409, "busy without queue");
+        let rx = send(&mut cpu, &mut hub, Cmd::Run { command: "CRASH.COM".into(), stop_at_entry: true, queue: true });
+        let stop = answer(&mut cpu, &mut hub, rx, 50).unwrap();
+        // PROBE.COM's start didn't take the run's stop.
+        assert_eq!((stop["reason"].as_str(), stop["program"]["name"].as_str()), (Some("program_start"), Some("CRASH.COM")));
+        assert_eq!(cpu.programs.started, 2);
+        let started: Vec<Value> = entries_of(&hub, "program_started").iter().map(|e| e["program"]["name"].clone()).collect();
+        assert_eq!(started, ["PROBE.COM", "CRASH.COM"]);
+        assert_eq!(entries_of(&hub, "resumed").last().unwrap()["queued"], true);
+    }
+
+    #[test]
+    fn a_queued_run_without_stopping_answers_with_its_own_program() {
+        let (mut cpu, mut hub) = machine("queued-started");
+        cpu.batch.append_file("AUTOEXEC", b"PROBE.COM\r\n", "");
+        let rx = send(&mut cpu, &mut hub, Cmd::Run { command: "CRASH.COM".into(), stop_at_entry: false, queue: true });
+        let started = answer(&mut cpu, &mut hub, rx, 50).unwrap();
+        assert_eq!(started["program"]["name"], "CRASH.COM");
+    }
+
+    #[test]
+    fn a_queued_run_leaves_the_batch_file_s_program_without_the_hook() {
+        let (mut cpu, mut hub) = machine("queued-hook");
+        let dir = std::env::temp_dir().join(format!("rust-dos-debug-queued-hook-{}", std::process::id()));
+        // mov cx,FFFFh; loop $; mov ax,4C00h; int 21h: a few frames' work.
+        std::fs::write(dir.join("SPIN.COM"), [0xB9, 0xFF, 0xFF, 0xE2, 0xFE, 0xB8, 0x00, 0x4C, 0xCD, 0x21]).unwrap();
+        cpu.batch.append_file("AUTOEXEC", b"@echo off\r\nSPIN.COM\r\n", "");
+        let mut sent = send(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true, queue: true });
+        let op = sent.rx.try_recv().expect("an answer at once").meta.op.expect("an operation");
+        let (mut cold, mut stop) = (0, None);
+        for _ in 0..100 {
+            if let Some(end) = op_reply(&hub, op) {
+                stop = Some(end.unwrap());
+                break;
+            }
+            if cpu.programs.running > 0 && !cpu.in_shell_code() && !hub.begin_batch(&cpu) {
+                cold += 1;
+            }
+            run(&mut cpu, &mut hub, 1);
+        }
+        assert!(cold > 0, "SPIN.COM runs without the per-instruction hook");
+        let stop = stop.expect("the run ended");
+        assert_eq!((stop["reason"].as_str(), stop["program"]["name"].as_str()), (Some("program_start"), Some("PROBE.COM")));
+        let started: Vec<Value> = entries_of(&hub, "program_started").iter().map(|e| e["program"]["name"].clone()).collect();
+        assert_eq!(started, ["SPIN.COM", "PROBE.COM"]);
+    }
+
+    #[test]
+    fn a_queued_run_at_an_idle_prompt_runs_at_once() {
+        let (mut cpu, mut hub) = machine("queued-idle");
+        let rx = send(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true, queue: true });
+        let stop = answer(&mut cpu, &mut hub, rx, 50).unwrap();
+        assert_eq!(stop["program"]["name"], "PROBE.COM");
+        assert_eq!(entries_of(&hub, "resumed").last().unwrap()["queued"], false);
+    }
+
+    #[test]
+    fn a_queued_run_dropped_with_its_batch_lines_fails() {
+        let (mut cpu, mut hub) = machine("queued-dropped");
+        cpu.batch.append_file("AUTOEXEC", b"PAUSE\r\n", "");
+        let rx = send(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true, queue: true });
+        run(&mut cpu, &mut hub, 20);
+        assert!(cpu.shell_wait.is_some(), "PAUSE waits for a key");
+        // Ctrl+C at PAUSE ends the batch files, the run's line with them.
+        cpu.batch.clear();
+        cpu.shell_wait = None;
+        let failed = answer(&mut cpu, &mut hub, rx, 50).unwrap_err();
+        assert_eq!(failed.0, 422, "{}", failed.1);
+        assert!(hub.run_wait.is_none() && !hub.start_once);
     }
 
     #[test]
@@ -3998,7 +4328,7 @@ mod tests {
     /// Ask to save a state, with strict_match or not, and the requests the
     /// front end gets to carry out, with the reply of one refused.
     fn state_request(cpu: &mut Cpu, hub: &mut DebugHub, strict_match: bool) -> (usize, Option<(u16, Value)>) {
-        let mut sent = send(cpu, hub, Cmd::SaveState { path: "/tmp/x.state".into(), strict_match });
+        let mut sent = send(cpu, hub, Cmd::SaveState { path: "/tmp/x.state".into(), strict_match, check_files: false });
         let taken = take_state_requests(hub).len();
         let refused = match sent.rx.try_recv().map(|a| a.reply) {
             Ok(Reply::ErrorJson(code, body)) => Some((code, body)),
@@ -4031,7 +4361,7 @@ mod tests {
         assert_eq!((taken, refused.is_none()), (1, true), "paused with nothing pending");
 
         // A step sent with it, in the same frame, starts the machine first.
-        let strict = Cmd::SaveState { path: "/tmp/x.state".into(), strict_match: true };
+        let strict = Cmd::SaveState { path: "/tmp/x.state".into(), strict_match: true, check_files: false };
         let _save = send(&mut cpu, &mut hub, strict);
         let _step = send(&mut cpu, &mut hub, Cmd::Step { count: 1 });
         assert!(take_state_requests(&mut hub).is_empty(), "refused: the step is under way");
@@ -4045,7 +4375,7 @@ mod tests {
         let (code, body) = refused.expect("refused with input queued");
         assert_eq!((taken, code), (0, 409));
         assert!(body["error"].as_str().unwrap().contains("queued input"), "{}", body);
-        let _load = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: true });
+        let _load = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: true, check_files: false });
         assert_eq!(take_state_requests(&mut hub).len(), 1, "a load drops the input");
     }
 
@@ -4072,8 +4402,8 @@ mod tests {
         assert_eq!((taken, refused.is_none()), (1, true), "taken while running");
 
         // Sent with a strict-match save while running: only that save is refused.
-        let mut strict = send(&mut cpu, &mut hub, Cmd::SaveState { path: "/tmp/a.state".into(), strict_match: true });
-        let _plain = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/b.state".into(), strict_match: false });
+        let mut strict = send(&mut cpu, &mut hub, Cmd::SaveState { path: "/tmp/a.state".into(), strict_match: true, check_files: false });
+        let _plain = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/b.state".into(), strict_match: false, check_files: false });
         let taken = take_state_requests(&mut hub);
         assert_eq!(taken.iter().map(|r| (r.load, r.strict_match)).collect::<Vec<_>>(), [(true, false)]);
         assert!(matches!(strict.rx.try_recv().map(|a| a.reply), Ok(Reply::ErrorJson(409, _))));
@@ -4249,6 +4579,56 @@ mod tests {
         assert!(a.2.iter().any(|e| e["type"] == "input_delivered") && a.2.iter().any(|e| e["type"] == "program_started"));
     }
 
+    /// From the startup pause, with a batch file busy at the prompt as
+    /// AUTOEXEC.BAT is: a queued `run` of TARGET.COM resumes the machine
+    /// and stops at its entry. Run in host frames of `frame_ms`: the stop,
+    /// the instructions executed, and the journal but for the host's time.
+    fn queued_run(name: &str, frame_ms: u64) -> (Value, u64, Vec<Value>) {
+        let (mut cpu, mut hub, mut mode) = deterministic_machine(name);
+        let dir = std::env::temp_dir().join(format!("rust-dos-det-{}-{}", name, std::process::id()));
+        std::fs::write(dir.join("TARGET.COM"), CRASH).unwrap();
+        cpu.batch.append_file("AUTOEXEC", b"@echo off\r\nPROBE.COM\r\necho ready\r\n", "");
+        assert!(hub.paused, "paused at the start");
+        let busy = Cmd::Run { command: "TARGET.COM".into(), stop_at_entry: true, queue: false };
+        assert_eq!(reply(&mut cpu, &mut hub, busy).unwrap_err().0, 409, "busy with the batch file");
+        let mut sent = send(&mut cpu, &mut hub, Cmd::Run { command: "TARGET.COM".into(), stop_at_entry: true, queue: true });
+        let answer = sent.rx.try_recv().expect("an answer at once");
+        assert!(matches!(answer.reply, Reply::Json(_)), "accepted");
+        let op = answer.meta.op.expect("an operation");
+        let mut stop = None;
+        for _ in 0..1000 {
+            if let Some(end) = op_reply(&hub, op) {
+                stop = Some(end.unwrap());
+                break;
+            }
+            run_deterministic(&mut cpu, &mut hub, &mut mode, 1, frame_ms);
+        }
+        let mut stop = stop.expect("the run ended");
+        stop.as_object_mut().unwrap().remove("t_ms");
+        assert!(hub.paused);
+        let journal = entries(&hub)
+            .into_iter()
+            .map(|mut e| {
+                e.as_object_mut().unwrap().remove("t_ms");
+                e
+            })
+            .collect();
+        (stop, cpu.executed, journal)
+    }
+
+    #[test]
+    fn a_paused_deterministic_machine_resumes_into_a_queued_run_the_same_whatever_the_frames() {
+        let a = queued_run("queued-a", 16);
+        let b = queued_run("queued-b", 41);
+        let (stop, ..) = &a;
+        assert_eq!((stop["reason"].as_str(), stop["program"]["name"].as_str()), (Some("program_start"), Some("TARGET.COM")));
+        assert_eq!(stop["registers"]["ip"], "0100", "nothing of it ran");
+        assert!(a.2.iter().any(|e| e["type"] == "program_started" && e["program"]["name"] == "PROBE.COM"), "after the batch file's program");
+        assert_eq!(a.1, b.1, "the same instructions");
+        assert_eq!(a.0, b.0, "the same stop");
+        assert_eq!(a.2, b.2, "the same journal");
+    }
+
     /// Carry out the save states asked for, in memory, as the
     /// deterministic front end does.
     fn carry_out_states(cpu: &mut Cpu, hub: &mut DebugHub, mode: &mut Deterministic, saved: &mut Option<Vec<u8>>) {
@@ -4287,12 +4667,12 @@ mod tests {
         let ty = |text: &str| InputEvent::Type { text: text.into(), delay_ms: Some(30) };
         reply(&mut cpu, &mut hub, Cmd::Input { events: vec![wait(120), ty("PROBE"), wait(45), ty("\n")], wait: false }).unwrap();
         go(&mut cpu, &mut hub, &mut mode, 900);
-        let sent = send(&mut cpu, &mut hub, Cmd::SaveState { path: "s".into(), strict_match: true });
+        let sent = send(&mut cpu, &mut hub, Cmd::SaveState { path: "s".into(), strict_match: true, check_files: false });
         carry_out_states(&mut cpu, &mut hub, &mut mode, &mut saved);
         answer(&mut cpu, &mut hub, sent, 0).unwrap();
         reply(&mut cpu, &mut hub, Cmd::Input { events: vec![ty("DIR"), wait(70), ty("\n")], wait: false }).unwrap();
         go(&mut cpu, &mut hub, &mut mode, 1600);
-        let sent = send(&mut cpu, &mut hub, Cmd::LoadState { path: "s".into(), strict_match: true });
+        let sent = send(&mut cpu, &mut hub, Cmd::LoadState { path: "s".into(), strict_match: true, check_files: false });
         carry_out_states(&mut cpu, &mut hub, &mut mode, &mut saved);
         answer(&mut cpu, &mut hub, sent, 0).unwrap();
         reply(&mut cpu, &mut hub, Cmd::Input { events: vec![ty("VER\n")], wait: false }).unwrap();
@@ -4342,7 +4722,7 @@ mod tests {
         assert_eq!(held["held"], true, "answered at once while paused, not when delivered");
         reply(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }).unwrap();
         assert_eq!(reply(&mut cpu, &mut hub, typed("x")).unwrap_err().0, 409);
-        let run = Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: false };
+        let run = Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: false, queue: false };
         assert_eq!(reply(&mut cpu, &mut hub, run).unwrap_err().0, 409, "run while running");
         assert_eq!(reply(&mut cpu, &mut hub, write("0050:0000", &[1], None)).unwrap_err().0, 409, "a memory write while running");
         assert!(reply(&mut cpu, &mut hub, Cmd::GetRegs).is_ok(), "reads still work");
@@ -4369,34 +4749,34 @@ mod tests {
         // A load while running is refused as it arrives, strict match or
         // not, with the body a refused strict-match save has.
         for strict_match in [false, true] {
-            let mut load = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match });
+            let mut load = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match, check_files: false });
             let body = refusal(&mut load);
             assert_eq!(body["paused"], false, "{}", body);
             assert_eq!(body["precondition"], "paused", "{}", body);
             assert!(body["error"].as_str().unwrap().contains("deterministic mode"), "{}", body);
         }
         // A strict-match save is refused by its own rule, in the same shape.
-        let mut save = send(&mut cpu, &mut hub, Cmd::SaveState { path: "/tmp/x.state".into(), strict_match: true });
+        let mut save = send(&mut cpu, &mut hub, Cmd::SaveState { path: "/tmp/x.state".into(), strict_match: true, check_files: false });
         assert!(take_state_requests(&mut hub).is_empty());
         let body = refusal(&mut save);
         assert_eq!(body["paused"], false, "{}", body);
         assert!(body["error"].as_str().unwrap().contains("pause it first"), "{}", body);
         // A plain save changes nothing and is taken while running.
-        let _save = send(&mut cpu, &mut hub, Cmd::SaveState { path: "/tmp/x.state".into(), strict_match: false });
+        let _save = send(&mut cpu, &mut hub, Cmd::SaveState { path: "/tmp/x.state".into(), strict_match: false, check_files: false });
         assert_eq!(take_state_requests(&mut hub).len(), 1);
 
         // A load sent while paused, with a resume in the same frame: the
         // machine runs when the front end would load it, so it is refused.
         pause(&mut cpu, &mut hub);
-        let mut load = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: false });
+        let mut load = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: false, check_files: false });
         reply(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }).unwrap();
         assert!(take_state_requests(&mut hub).is_empty());
         assert_eq!(refusal(&mut load)["paused"], false);
 
         // Paused with nothing pending, both loads are taken.
         pause(&mut cpu, &mut hub);
-        let _plain = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: false });
-        let _strict = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: true });
+        let _plain = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: false, check_files: false });
+        let _strict = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: true, check_files: false });
         assert_eq!(take_state_requests(&mut hub).len(), 2);
     }
 
@@ -4472,7 +4852,7 @@ mod tests {
 
     /// Stopped at PROBE.COM's first instruction: its code segment.
     fn at_probe_entry(cpu: &mut Cpu, hub: &mut DebugHub) -> String {
-        let stop = ask(cpu, hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true }, 50).unwrap();
+        let stop = ask(cpu, hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true, queue: false }, 50).unwrap();
         stop["registers"]["cs"].as_str().unwrap().to_string()
     }
 
@@ -4584,7 +4964,7 @@ mod tests {
     #[test]
     fn a_run_another_resume_takes_over_does_not_stop_at_entry() {
         let (mut cpu, mut hub) = machine("journal-supersede-run");
-        let run_op = started_op(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true });
+        let run_op = started_op(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true, queue: false });
         let resume = started_op(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None });
         assert_eq!(op_state(&hub, run_op).superseded_by, Some(resume));
         assert!(hub.run_wait.is_none() && !hub.start_once, "the run's stop at entry is dropped");
@@ -4658,7 +5038,7 @@ mod tests {
         hub.input.clear();
 
         let input = started_op(&mut cpu, &mut hub, Cmd::Input { events: vec![InputEvent::Wait { ms: 60_000 }], wait: true });
-        let (load, _rx) = hub.request(Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: true });
+        let (load, _rx) = hub.request(Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: true, check_files: false });
         let load_req = load.req;
         hub.handle(&mut cpu, load);
         let request = hub.next_state_request().expect("taken");
@@ -4732,7 +5112,7 @@ mod tests {
         let shared = std::sync::Arc::new(super::Shared::new(std::time::Instant::now()));
         let mut hub = DebugHub::new(Some(rx), Some(shared), 10);
         hub.announce(&cpu);
-        let (load, _load_rx) = hub.request(Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: false });
+        let (load, _load_rx) = hub.request(Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: false, check_files: false });
         let (write, mut write_rx) = hub.request(write("0200:0000", &[9], None));
         tx.send(load).unwrap();
         tx.send(write).unwrap();
@@ -4815,12 +5195,12 @@ mod tests {
         // All in the channel at once, as from clients in one frame.
         let mut cmds = vec![
             (write("0200:0000", &[1], None), None),
-            (Cmd::SaveState { path: "s".into(), strict_match: true }, None),
+            (Cmd::SaveState { path: "s".into(), strict_match: true, check_files: false }, None),
             (write("0200:0000", &[2], None), None),
             (Cmd::Speed { cycles: "5000".into() }, None),
             // Guarded by the state before the first write: refused.
             (write("0200:0000", &[3], None), Some(state)),
-            (Cmd::LoadState { path: "s".into(), strict_match: true }, None),
+            (Cmd::LoadState { path: "s".into(), strict_match: true, check_files: false }, None),
             // Holds only once the load brought back the 1.
             (write("0200:0000", &[4], Some(&[1])), None),
             (Cmd::Resume { until: None, until_ms: None }, None),
@@ -4913,7 +5293,7 @@ mod tests {
         let (mut cpu, mut hub) = machine("journal-stops");
         let dir = std::env::temp_dir().join(format!("rust-dos-debug-journal-stops-{}", std::process::id()));
         std::fs::write(dir.join("STOPS.COM"), STOPS).unwrap();
-        let entry = stopped_by(&mut cpu, &mut hub, Cmd::Run { command: "STOPS.COM".into(), stop_at_entry: true }, "program_start");
+        let entry = stopped_by(&mut cpu, &mut hub, Cmd::Run { command: "STOPS.COM".into(), stop_at_entry: true, queue: false }, "program_start");
         let cs = entry["registers"]["cs"].as_str().unwrap().to_string();
         let at = |stop: &Value| stop["registers"]["ip"].as_str().unwrap().to_string();
 
@@ -4963,7 +5343,7 @@ mod tests {
         let (mut cpu, mut hub) = machine("journal-run-stopped");
         let dir = std::env::temp_dir().join(format!("rust-dos-debug-journal-run-stopped-{}", std::process::id()));
         std::fs::write(dir.join("HOLD.BAT"), "@pause\r\nPROBE.COM\r\n").unwrap();
-        let op = started_op(&mut cpu, &mut hub, Cmd::Run { command: "HOLD.BAT".into(), stop_at_entry: true });
+        let op = started_op(&mut cpu, &mut hub, Cmd::Run { command: "HOLD.BAT".into(), stop_at_entry: true, queue: false });
         run(&mut cpu, &mut hub, 20);
         assert!(hub.run_wait.is_some(), "waiting at PAUSE");
         pause(&mut cpu, &mut hub);

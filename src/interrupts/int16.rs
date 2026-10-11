@@ -20,7 +20,7 @@ pub fn handle(cpu: &mut Cpu) {
                 cpu.set_ax(if ah == 0x00 { plain_keystroke(key_code) } else { key_code });
             } else {
                 // Buffer empty: wait in the BIOS for a keystroke.
-                cpu.hle_wait();
+                cpu.key_wait();
             }
         }
 
@@ -135,7 +135,7 @@ fn booted(cpu: &mut Cpu, ah: u8) {
     match ah {
         0x00 | 0x10 => match BiosBuffer::pop(bus) {
             Some(key) => cpu.set_ax(convert(key)),
-            None => cpu.hle_wait(),
+            None => cpu.key_wait(),
         },
         0x01 | 0x11 => match BiosBuffer::peek(bus) {
             Some(key) => {

@@ -162,6 +162,41 @@ struct Args {
     /// One password for all the rooms of --relay
     #[arg(long, value_name = "PASSWORD", requires = "relay")]
     relay_password: Option<String>,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum Command {
+    /// Run a DOS program, batch file or command without a window, as a
+    /// tool of the host: what it prints goes to standard output, standard
+    /// input is typed at its keyboard, and its exit code is rust-dos's
+    Run(RunArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct RunArgs {
+    /// The folder that is drive C: [default: the current one]
+    #[arg(short, long)]
+    dir: Option<std::path::PathBuf>,
+
+    /// Instructions per emulated millisecond
+    #[arg(long, default_value_t = 100_000)]
+    cycles: u32,
+
+    /// The machine's memory in MB
+    #[arg(long, default_value_t = 16, value_parser = clap::value_parser!(u32).range(1..=256))]
+    mem: u32,
+
+    /// Print the text screen at the end when nothing was printed through
+    /// DOS, for programs that write to the screen's memory
+    #[arg(long)]
+    screen: bool,
+
+    /// The command line, as typed at the DOS prompt
+    #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+    command: Vec<String>,
 }
 
 /// The SDL sound device, where the mixed output goes, through the 3D
@@ -247,6 +282,15 @@ fn parse_vr_graphics(value: &str) -> Result<rust_dos::vr::VrGraphics, String> {
 
 fn main() -> Result<(), String> {
     let args = Args::parse();
+    if let Some(Command::Run(run)) = args.command {
+        std::process::exit(rust_dos::cli::run(rust_dos::cli::RunOptions {
+            command: run.command,
+            dir: run.dir.unwrap_or_else(|| std::path::PathBuf::from(".")),
+            cycles: run.cycles,
+            memory_mb: run.mem as usize,
+            screen: run.screen,
+        }));
+    }
     if let Some(port) = args.relay {
         let bind = std::net::SocketAddr::from(([0, 0, 0, 0], port));
         let name = "rust-dos relay".to_string();
@@ -630,6 +674,7 @@ fn main() -> Result<(), String> {
                 state_loaded: &mut state_loaded,
                 achievements: &mut achievements,
                 deterministic: det.as_ref().map(|mode| mode.start),
+                clipboard: &host_clipboard,
             }
         };
     }
@@ -695,6 +740,13 @@ fn main() -> Result<(), String> {
     // the journal told last.
     let mut shutdown = debug::ShutdownReason::Window;
     let mut told_cycles = settings.cycles;
+
+    // The monitor's power effects: it comes on now, and again at each
+    // reset, and syncs anew at each change of frequency.
+    let mut power = video::power::PowerFx::default();
+    let mut seen_power = (cpu.bus.power_ons, cpu.bus.vga.resyncs);
+    cpu.bus.monitor_noise.enabled = settings.monitor_effects.sound();
+    power_on(&mut power, &mut cpu.bus, settings.monitor_effects);
 
     // Main Loop
     'running: loop {
@@ -804,6 +856,23 @@ fn main() -> Result<(), String> {
                     let shift = keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD);
                     if !repeat {
                         ctrl_alt.key_down(chord_key(scancode));
+                    }
+                    // Ctrl+Shift+D degausses the monitor.
+                    if keycode == Keycode::D && ctrl && shift && !alt {
+                        if !repeat {
+                            power.trigger(video::power::Effect::Degauss, std::time::Instant::now());
+                            cpu.bus.audio_catch_up();
+                            cpu.bus.monitor_noise.play(rust_dos::monitor_noise::Sound::Degauss, 0);
+                        }
+                        continue;
+                    }
+                    // Ctrl+Shift+S shows and hides the sound visualizer.
+                    if keycode == Keycode::S && ctrl && shift && !alt {
+                        if !repeat {
+                            let message = ui.sound_viz_key(&mut cpu.bus);
+                            osd.show(message);
+                        }
+                        continue;
                     }
                     if keycode == Keycode::F12 && ctrl && shift && !alt {
                         if !repeat && let Some(message) = ui.overlay_key() {
@@ -1199,6 +1268,16 @@ fn main() -> Result<(), String> {
                     }
                 }
 
+                // A click on the sound visualizer's controls.
+                Event::MouseButtonDown { mouse_btn: MouseButton::Left, x, y, .. }
+                    if !mouse_captured && ui.sound_viz_hit(display.to_frame(x, y)).is_some() =>
+                {
+                    if let Some(action) = ui.sound_viz_hit(display.to_frame(x, y)) {
+                        action.apply(&mut cpu.bus);
+                    }
+                }
+                Event::MouseButtonUp { mouse_btn: MouseButton::Left, x, y, .. }
+                    if !mouse_captured && ui.sound_viz_hit(display.to_frame(x, y)).is_some() => {}
                 Event::MouseButtonDown { mouse_btn: MouseButton::Left, x, y, .. } if ui.is_open() => {
                     let (fx, fy) = display.to_frame(x, y);
                     ui.click(fx, fy, &mut host!());
@@ -1404,6 +1483,10 @@ fn main() -> Result<(), String> {
         if dbg.take_hotkey() {
             toggle_ui!();
         }
+        if dbg.take_sound_viz_key() {
+            let message = ui.sound_viz_key(&mut cpu.bus);
+            osd.show(message);
+        }
         if dbg.take_closed_program() {
             host!().release_program();
         }
@@ -1416,13 +1499,17 @@ fn main() -> Result<(), String> {
             // The file layout's version, and this rust-dos's (the header has the one that saved it).
             let (format, emulator) = (slots::FORMAT, env!("CARGO_PKG_VERSION"));
             let result = if request.load {
-                host!().load_for_debugger(&path, request.strict_match).map(|(header, differences)| {
+                host!().load_for_debugger(&path, request.strict_match, request.check_files).map(|(header, differences, unchecked)| {
+                    let header = slots::reply_header(&header);
                     let mut reply = serde_json::json!({"loaded": path, "format": format, "emulator": emulator, "header": header});
                     strict_match_loaded = request.strict_match;
                     debugger_loaded = true;
                     if !differences.is_empty() {
                         // Told, not refused: the state brought its own.
                         reply["differences"] = differences.into();
+                    }
+                    if !unchecked.is_empty() {
+                        reply["unchecked"] = unchecked.into();
                     }
                     reply
                 })
@@ -1431,8 +1518,11 @@ fn main() -> Result<(), String> {
                     savestate::media::forget(&cpu);
                 }
                 host!()
-                    .save_file(&path)
-                    .map(|header| serde_json::json!({"saved": path, "format": format, "emulator": emulator, "header": header}))
+                    .save_file(&path, request.check_files)
+                    .map(|header| {
+                        let header = slots::reply_header(&header);
+                        serde_json::json!({"saved": path, "format": format, "emulator": emulator, "header": header})
+                    })
                     .map_err(|e| (400, serde_json::json!({"error": e})))
             };
             // The front end's part is done; the hub's (the debugger reset of
@@ -1761,6 +1851,12 @@ fn main() -> Result<(), String> {
             osd.show(notice);
         }
 
+        // Del during the POST asks for the BIOS setup.
+        if std::mem::take(&mut cpu.bus.setup_requested) && !ui.is_open() {
+            let current = settings.clone();
+            ui.open_setup(&current, saved.file.clone(), &host!());
+        }
+        cpu.post_mode = settings.post;
         // DOSCONFIG asks for the settings window.
         if std::mem::take(&mut cpu.bus.config_ui_requested) && !ui.is_open() {
             toggle_ui!();
@@ -1933,11 +2029,26 @@ fn main() -> Result<(), String> {
             clipboard.draws(&cpu.bus),
             osd.is_empty(),
         );
+        // The monitor follows the machine: a reset is a power on, another
+        // frequency a resync.
+        cpu.bus.monitor_noise.enabled = settings.monitor_effects.sound();
+        let now_power = (cpu.bus.power_ons, cpu.bus.vga.resyncs);
+        if now_power.0 != seen_power.0 {
+            power_on(&mut power, &mut cpu.bus, settings.monitor_effects);
+        } else if now_power.1 != seen_power.1 {
+            resync(&mut power, &mut cpu.bus, settings.monitor_effects);
+        }
+        seen_power = now_power;
+        let power_now = std::time::Instant::now();
+        let power_look = power.active(power_now).then(|| power.look(power_now)).flatten();
+
         let still = !rendered
+            && power_look.is_none()
             && last_screen_key == Some(screen_key)
             && !voodoo_gl
             && !ui.is_open()
             && !ui.overlay_shown()
+            && !ui.sound_viz_shown()
             && wheel_view.is_none()
             && osd.is_empty()
             && !screenshot
@@ -1958,6 +2069,8 @@ fn main() -> Result<(), String> {
                 && !clipboard.draws(&cpu.bus)
                 && !ui.is_open()
                 && !ui.overlay_shown()
+                && !ui.sound_viz_shown()
+                && power_look.is_none()
                 && wheel_view.is_none()
                 && osd.is_empty()
                 && !recorder.is_active()
@@ -1965,6 +2078,9 @@ fn main() -> Result<(), String> {
                 && video_recording.is_none();
             video::overlay::draw_cursors(&mut screen, &cpu.bus, cursor_visible);
             video::mono::apply(&mut screen, settings.monochrome);
+            if let Some(look) = &power_look {
+                video::power::apply(&mut screen, look);
+            }
             clipboard.draw(&mut screen, &cpu.bus);
             let frame_w = width as usize;
 
@@ -2029,6 +2145,10 @@ fn main() -> Result<(), String> {
             }
             ui.draw(&mut screen);
             ui.draw_overlay(&mut screen);
+            if ui.sound_viz_shown() {
+                ui.set_sound(&cpu.bus);
+                ui.draw_sound_viz(&mut screen);
+            }
             if let Some(view) = &wheel_view {
                 rust_dos::config_ui::wheel::draw(&mut screen, view);
             }
@@ -2108,6 +2228,11 @@ fn main() -> Result<(), String> {
         ));
         pacer.wait_for_next_frame();
     }
+    // The monitor goes off: the picture collapses to a dot, with a thunk.
+    if settings.monitor_effects != video::power::MonitorEffects::Off {
+        power_off(&mut power, &mut display, &screen, &mut cpu.bus, settings.monitor_effects)?;
+    }
+
     // The journal ends, and the debug server's clients get what they
     // waited for.
     dbg.shutdown(&cpu, shutdown, 0);
@@ -2337,6 +2462,7 @@ struct MainHost<'m, 'd> {
     /// Deterministic mode: the date and time its clock started at. The
     /// speed stays fixed, and save states record the start.
     deterministic: Option<chrono::NaiveDateTime>,
+    clipboard: &'m sdl2::clipboard::ClipboardUtil,
 }
 
 impl MainHost<'_, '_> {
@@ -2517,10 +2643,16 @@ impl MainHost<'_, '_> {
     }
 
     /// Save the machine to the file `path`, now. Returns the state's header.
-    fn save_file(&mut self, path: &std::path::Path) -> Result<slots::Header, String> {
-        let (header, picture, state) = self.capture_state();
+    /// `contents` records what is on the writable drives as well, which
+    /// reads every file on them (a `check_files` save, media.rs).
+    fn save_file(&mut self, path: &std::path::Path, contents: bool) -> Result<slots::Header, String> {
+        let (mut header, picture, state) = self.capture_state();
         savestate::disks::delete_copies(path);
         savestate::disks::save_copies(self.cpu, path)?;
+        // After the copies, which make the state's folder.
+        if contents && let Some(media) = header.media.as_mut() {
+            savestate::media::add_contents(self.cpu, media, path, |_| true);
+        }
         slots::write_file(path, &slots::encode(&header, &slots::thumbnail(&picture), &state))?;
         self.cpu.bus.log_string(&format!("[STATE] Saved to {}", path.display()));
         Ok(header)
@@ -2539,12 +2671,20 @@ impl MainHost<'_, '_> {
     /// this machine's. A plain load brings the state's own hardware, as
     /// `load_file` does. A `strict_match` load takes only a state of this
     /// machine: one of other hardware or media, or without a record of its
-    /// media, is refused (409) with what differs.
+    /// media, is refused (409) with what differs. A `check_files` load of
+    /// a state that records what was on the writable drives (a
+    /// `check_files` save's) compares them with the files now, and the
+    /// changed files are differences like the others. The third list names
+    /// the writable drives a `check_files` load couldn't check, as the
+    /// state has no record of what was on them. Without `check_files` no
+    /// file is read.
+    #[allow(clippy::type_complexity)]
     fn load_for_debugger(
         &mut self,
         path: &std::path::Path,
         strict_match: bool,
-    ) -> Result<(slots::Header, Vec<String>), (u16, serde_json::Value)> {
+        check_files: bool,
+    ) -> Result<(slots::Header, Vec<String>, Vec<String>), (u16, serde_json::Value)> {
         // Whatever failed, the machine, its settings and hardware are as they were.
         let failed = |e: String| (400, serde_json::json!({"error": e, "loaded": false, "unchanged": true}));
         let (header, state) = self.read_state(path).map_err(failed)?;
@@ -2555,8 +2695,25 @@ impl MainHost<'_, '_> {
         if strict_match {
             savestate::media::forget(self.cpu);
         }
+        let mut unchecked = Vec::new();
         match &header.media {
-            Some(media) => differences.extend(savestate::media::differences(media, &savestate::media::of(self.cpu))),
+            Some(media) => {
+                let mut now = savestate::media::of(self.cpu);
+                if check_files {
+                    // What is on the drives the state has a record of.
+                    let recorded = |m: &savestate::media::Medium| {
+                        media.iter().any(|saved| saved.drive == m.drive && savestate::media::has_contents(saved))
+                    };
+                    savestate::media::add_contents(self.cpu, &mut now, path, recorded);
+                }
+                // Without `check_files` the machine's media have no record of
+                // their files, so the state's isn't compared.
+                differences.extend(savestate::media::differences(media, &now));
+                if check_files {
+                    let copied = |key: &str| savestate::disks::copy_path_of(path, key).exists();
+                    unchecked = savestate::media::unrecorded(media, copied);
+                }
+            }
             None if strict_match => differences.push(format!(
                 "the state doesn't record its media (saved by rust-dos {}), so they can't be checked",
                 header.version
@@ -2568,7 +2725,7 @@ impl MainHost<'_, '_> {
             return Err((409, serde_json::json!({"error": error, "loaded": false, "unchanged": true, "differences": differences})));
         }
         let header = self.load_state(path, header, &state).map_err(failed)?;
-        Ok((header, differences))
+        Ok((header, differences, unchecked))
     }
 
     /// The header and machine's state of the save state file `path`, if
@@ -2807,6 +2964,14 @@ impl Host for MainHost<'_, '_> {
         let shared =
             bus.disk.shared_drives().into_iter().filter_map(|d| Some((d, rust_dos::boot::drive_unit(bus, d)?))).collect();
         Some(config_ui::BootView { cd_drive: bus.booted_cd_drive(), shared })
+    }
+
+    fn reset_machine(&mut self) {
+        self.cpu.bus.reset_requested = true;
+    }
+
+    fn copy_text(&mut self, text: &str) -> Result<(), String> {
+        self.clipboard.set_clipboard_text(text)
     }
 
     fn sync_shared(&mut self, drive: u8) -> Result<String, String> {
@@ -3077,7 +3242,7 @@ impl Host for MainHost<'_, '_> {
 
     fn save_state(&mut self, slot: u8) -> Result<String, String> {
         let path = slots::slot_path(&self.slot_dir()?, slot);
-        self.save_file(&path)?;
+        self.save_file(&path, false)?;
         *self.slot = slot;
         Ok(format!("Saved to slot {}", slot))
     }
@@ -3118,6 +3283,7 @@ fn ui_key(keycode: Keycode, keymod: Mod) -> Option<UiKey> {
         Keycode::Insert => UiKey::Insert,
         Keycode::F1 => UiKey::Help,
         Keycode::F2 => UiKey::Save,
+        Keycode::F10 if !ctrl => UiKey::F10,
         Keycode::S if ctrl => UiKey::Save,
         _ => return None,
     })
@@ -3138,6 +3304,78 @@ fn release_input(cpu: &mut Cpu, held: &mut HashMap<Scancode, (u8, bool)>) {
 }
 
 /// Caps Lock and Num Lock as the host's keyboard has them.
+/// The monitor coming on (`monitor_effects`): the picture warming up and
+/// degaussed, to the high voltage's crackle and the coil's thump.
+fn power_on(power: &mut video::power::PowerFx, bus: &mut rust_dos::bus::Bus, effects: video::power::MonitorEffects) {
+    use rust_dos::monitor_noise::Sound;
+    if effects.picture() {
+        power.trigger(video::power::Effect::PowerOn, std::time::Instant::now());
+    }
+    if effects.sound() {
+        bus.audio_catch_up();
+        bus.monitor_noise.play(Sound::Relay, 0);
+        bus.monitor_noise.play(Sound::Crackle, 60);
+        bus.monitor_noise.play(Sound::Degauss, 200);
+    }
+}
+
+/// The monitor syncing to another frequency: the picture blanks, the relay
+/// clicks.
+fn resync(power: &mut video::power::PowerFx, bus: &mut rust_dos::bus::Bus, effects: video::power::MonitorEffects) {
+    if effects.picture() {
+        power.trigger(video::power::Effect::Resync, std::time::Instant::now());
+    }
+    if effects.sound() {
+        bus.audio_catch_up();
+        bus.monitor_noise.play(rust_dos::monitor_noise::Sound::Relay, 0);
+    }
+}
+
+/// The monitor going off as rust-dos quits: `last`, the picture shown
+/// last, collapses to a dot, and the supply thunks, straight to the sound
+/// device, as the machine no longer runs.
+fn power_off(
+    power: &mut video::power::PowerFx,
+    display: &mut Display,
+    last: &video::Frame,
+    bus: &mut rust_dos::bus::Bus,
+    effects: video::power::MonitorEffects,
+) -> Result<(), String> {
+    use rust_dos::mixer::Channel;
+    let start = std::time::Instant::now();
+    if effects.sound() {
+        bus.monitor_noise.enabled = true;
+        bus.monitor_noise.play(rust_dos::monitor_noise::Sound::PowerOff, 0);
+        let gains = bus.mixer.gains();
+        let gain = gains[Channel::Monitor.index()] * gains[Channel::Master.index()];
+        let frames = bus.monitor_noise.take(rust_dos::opl::RATE as usize / 3);
+        let samples: Vec<i16> =
+            frames.iter().flat_map(|&s| [(s * gain).clamp(-32768.0, 32767.0) as i16; 2]).collect();
+        if let Some(device) = &mut bus.audio_device {
+            let _ = device.queue(&samples);
+        }
+    }
+    if !effects.picture() {
+        // The sound plays out before the device closes.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        return Ok(());
+    }
+    power.trigger(video::power::Effect::PowerOff, start);
+    loop {
+        let now = std::time::Instant::now();
+        if !power.active(now) {
+            return Ok(());
+        }
+        if let Some(look) = power.look(now) {
+            let mut frame = last.clone();
+            video::power::apply(&mut frame, &look);
+            display.redraw();
+            display.present(&mut frame, None, None)?;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(15));
+    }
+}
+
 fn sync_locks(cpu: &mut Cpu, mods: Mod) {
     // A booted system's BIOS keeps its own locks, from the keys.
     if cpu.bus.boot.is_some() {

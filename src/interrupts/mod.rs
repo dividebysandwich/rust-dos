@@ -271,6 +271,11 @@ pub fn handle_hle(cpu: &mut Cpu, vector: u8) {
             cpu.set_ax(0x3100);
             int21::handle(cpu);
         }
+        // DOS's fast console output: AL at the cursor, as CON writes it.
+        0x29 => {
+            let al = cpu.get_al();
+            crate::video::console_write(cpu, &[al]);
+        }
         // DOS's idle interrupt: the program waits (for `cycles=auto`).
         0x28 => cpu.bus.activity.poll(),
         0x2A => { /* DOS Timer Tick - Do nothing for now */ }

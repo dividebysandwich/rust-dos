@@ -75,6 +75,14 @@ Shows the picture on a one-colour monitor: **white**, **amber** or
 With a VGA or EGA video card, games that support a monochrome screen see
 one too (from the next DOS prompt on) and pick their best graphics for it.
 
+# Monitor effects {#monitor-effects}
+
+A CRT monitor's own show: the picture warms up and wobbles while it is
+degaussed when Rust-DOS starts, blanks and jumps back when a game changes
+to another frequency, and shrinks to a dot when Rust-DOS quits. **sound**
+adds the degaussing thump and the relay's click; **picture only** and
+**sound only** keep one of them. **Ctrl+Shift+D** degausses.
+
 # CGA composite colour {#composite}
 
 Many 1980s games (King's Quest, Ultima, Sierra's AGI games) were made

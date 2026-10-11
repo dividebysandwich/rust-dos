@@ -287,6 +287,8 @@ pub enum ShellWait {
     More(Vec<Vec<u8>>),
     /// EDIT: every key, until it ends.
     Edit(Box<crate::edit::Editor>),
+    /// The BIOS's power-on self test, before DOS starts (`post`).
+    Post(Box<crate::post::Post>),
 }
 
 /// A CHOICE waiting for a key.
@@ -345,6 +347,15 @@ pub fn take_key(cpu: &mut Cpu, key: u16) -> bool {
             None => true,
         };
     }
+    if let ShellWait::Post(post) = wait {
+        return match crate::post::key(cpu, post, key) {
+            Some(post) => {
+                cpu.shell_wait = Some(ShellWait::Post(post));
+                false
+            }
+            None => true,
+        };
+    }
     // The others take the keys of the older keyboards (INT 16h AH=00h's),
     // as a character.
     if crate::interrupts::int16::is_enhanced(key) {
@@ -374,7 +385,7 @@ pub fn take_key(cpu: &mut Cpu, key: u16) -> bool {
                 return false;
             }
         }
-        ShellWait::Edit(_) => {}
+        ShellWait::Edit(_) | ShellWait::Post(_) => {}
         ShellWait::Choice(choice) => match choice.index(key) {
             Some(i) => {
                 video::print_string(cpu, &format!("{}\r\n", choice.keys[i] as char));
@@ -467,6 +478,12 @@ pub fn tick(cpu: &mut Cpu) {
         }
         return;
     }
+    if matches!(cpu.shell_wait, Some(ShellWait::Post(_))) {
+        if !crate::post::tick(cpu) {
+            cpu.set_ip(labels().prompt_start);
+        }
+        return;
+    }
     if let Some(key) = timed_out_key(cpu) {
         cpu.set_ax(key as u16);
         cpu.set_ip(labels().key_ready);
@@ -542,6 +559,10 @@ impl crate::savestate::State for ShellWait {
                 7u8.save(w);
                 (**editor).save(w);
             }
+            ShellWait::Post(post) => {
+                8u8.save(w);
+                (**post).save(w);
+            }
         }
     }
     fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
@@ -578,6 +599,11 @@ impl crate::savestate::State for ShellWait {
                 let mut editor = Box::<crate::edit::Editor>::default();
                 (*editor).load(r)?;
                 ShellWait::Edit(editor)
+            }
+            8 => {
+                let mut post = Box::<crate::post::Post>::default();
+                (*post).load(r)?;
+                ShellWait::Post(post)
             }
             _ => return Err(crate::savestate::StateError::Invalid("a wait of the shell it doesn't know".into())),
         };
