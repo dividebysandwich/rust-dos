@@ -11,6 +11,7 @@ pub use rust_dos_soundblaster::awe32;
 pub mod batch;
 pub mod bios;
 pub mod boot;
+pub mod build_info;
 pub mod boot_command;
 pub mod bus;
 pub mod capture;

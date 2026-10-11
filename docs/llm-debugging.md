@@ -357,6 +357,13 @@ curl -s "$H/api/journal?after=$S&type=paused&wait=30000"   # long poll for the n
   and `cause`.
 - **Instance:** `/api/version` has `instance`, which is new at every
   start. A journal from another instance numbers its entries anew.
+- **Build:** `/api/version` and the journal's `started` entry have
+  `build: {"commit", "commit_short", "dirty"}`: the git commit the program
+  was built from, and `dirty: true` when a tracked file differed from it.
+  `version` stays the same between releases, so record `build` to tell
+  which source a session ran. All three are null when the program was
+  built outside a git checkout (a crate tarball, a copied tree, no git).
+  `rust-dos --version` prints the same commit.
 - **Quit:** `POST /api/control/quit` turns the emulator off. The journal
   ends with `shutdown`, which long polls and streams get before the
   connection closes, and the process exits with code 0.

@@ -39,7 +39,7 @@ use rust_dos::hardware::Hardware;
 use rust_dos::savestate::{self, slots};
 
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version = rust_dos::build_info::VERSION, about, long_about = None)]
 struct Args {
     /// Window scale factor [default: 1, or the config file's scale]
     #[arg(short, long, value_parser = clap::value_parser!(u32).range(1..=16))]
