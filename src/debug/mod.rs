@@ -4301,7 +4301,7 @@ mod tests {
         for (i, e) in all.iter().enumerate() {
             assert_eq!(e["seq"].as_u64(), Some(i as u64 + 1), "gapless: {}", e);
         }
-        let changed = all.iter().filter(|e| super::Kind::parse(e["type"].as_str().unwrap()).unwrap().changes_state()).last();
+        let changed = all.iter().rfind(|e| super::Kind::parse(e["type"].as_str().unwrap()).unwrap().changes_state());
         assert_eq!(journal_state(&hub).0, changed.unwrap()["seq"].as_u64().unwrap());
         // A breakpoint is the debugger's own: it changes nothing.
         let set = &entries_of(&hub, "breakpoint_set")[0];
