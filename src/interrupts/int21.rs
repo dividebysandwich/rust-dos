@@ -1282,12 +1282,10 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
 
         // AH = 40h: Write to File (or Stdout)
         //
-        // DOS standard: with CX=0 this would truncate the file at the
-        // current seek position. We don't perform that truncation right now
-        // because programs in this emulator still crash mid-flow and would
-        // take real user data (rosters, saves, copied region files) down
-        // with them. Log the call so we can spot legitimate truncations
-        // while tracing and re-enable later if something depends on it.
+        // With CX=0 the file ends at the current position: DOS cuts it
+        // there, or extends it to there. Programs rewrite a file in place
+        // and then cut off what the old contents had past the new ones
+        // (Conqueror A.D. 1086's CONQUER.INI).
         0x40 => {
             let handle = cpu.bx();
             let count = cpu.cx() as usize;
@@ -1300,13 +1298,27 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             // redirected them.
             let console = cpu.bus.disk.handle_device(sft) == Some(CharDevice::Con);
             if count == 0 && !console {
-                cpu.bus.log_string(&format!(
-                    "[DOS] AH=40h CX=0 on handle {:04X} — truncate-at-pos NOT performed (safety)",
-                    handle
-                ));
-                cpu.set_ax(0);
-                cpu.set_cpu_flag(CpuFlags::CF, false);
-                return;
+                let disk = &mut cpu.bus.disk;
+                let result = match disk.handle_device(sft) {
+                    Some(_) => Ok(()),
+                    None => disk.position(sft).ok_or(0x19).and_then(|at| disk.set_file_size(sft, at)),
+                };
+                if let Err(code) = result {
+                    cpu.bus.log_string(&format!(
+                        "[DOS] Write of 0 bytes (set the end) on handle {:04X} failed, Error={:02X}",
+                        handle, code
+                    ));
+                }
+                // A handle write tells of a full disk only by writing fewer
+                // bytes than asked, and here that's 0 either way: no error.
+                let result = match result {
+                    Ok(()) | Err(0x27) => {
+                        file_io(cpu, sft, 0, Some(true));
+                        Ok(0)
+                    }
+                    Err(code) => Err(code),
+                };
+                return set_result(cpu, result);
             }
 
             let mut data = vec![0u8; count];

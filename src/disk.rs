@@ -2662,21 +2662,44 @@ impl DiskController {
     }
 
     /// Make an open file `size` bytes long, cutting it or adding zeros
-    /// (INT 21h AH=28h with no records). Only host files can be cut;
-    /// the others grow with zeros written at their end.
+    /// (INT 21h AH=28h with no records, AH=40h with none to write). Host
+    /// files and files on disk images opened for writing can be cut; the
+    /// others grow with zeros written at their end, and get 27h when the
+    /// disk fills up first. Files that can't be written get 05h. The
+    /// handle's position stays where it was.
     pub fn set_file_size(&mut self, handle: u16, size: u64) -> Result<(), u8> {
         let open = self.open_files.get(&handle).ok_or(0x06u8)?;
-        if let OpenData::Host(file) = &open.data {
-            let result = file.set_len(size).map_err(|_| 0x05);
-            self.mark_dirty(handle);
-            return result;
+        match &open.data {
+            OpenData::Host(file) => {
+                let result = file.set_len(size).map_err(|_| 0x05);
+                self.mark_dirty(handle);
+                return result;
+            }
+            OpenData::Memory(..) | OpenData::Image(..) | OpenData::Fat { write: false, .. } => return Err(0x05),
+            OpenData::Fat { volume, at, .. } if size < volume.reload(*at)?.size as u64 => {
+                let result = volume.truncate(*at, size);
+                self.mark_dirty(handle);
+                return result;
+            }
+            OpenData::Fat { .. } | OpenData::Device(_) => {}
         }
-        let end = self.seek_file(handle, 0, 2).map_err(|_| 0x05u8)?;
-        if end > size {
-            return Err(0x05);
+        let was = self.position(handle).unwrap_or(0);
+        let mut end = self.seek_file(handle, 0, 2).map_err(|_| 0x05u8)?;
+        // A piece at a time, so a position far past the end doesn't take a
+        // buffer that big. A full disk stops it short with 27h.
+        let zeros = vec![0u8; size.saturating_sub(end).min(0x8000) as usize];
+        let mut result = if end > size { Err(0x05) } else { Ok(()) };
+        while result.is_ok() && end < size {
+            let n = (size - end).min(zeros.len() as u64) as usize;
+            result = match self.write_file(handle, &zeros[..n]) {
+                Ok(written) if written as usize == n => Ok(()),
+                Ok(_) => Err(0x27),
+                Err(code) => Err(code),
+            };
+            end += n as u64;
         }
-        let zeros = vec![0u8; (size - end) as usize];
-        self.write_file(handle, &zeros).map(|_| ())
+        let _ = self.seek_file(handle, was as i64, 0);
+        result
     }
 
     // ========================================================================

@@ -336,6 +336,17 @@ impl Params {
         }
     }
 
+    /// Mark the directory entry `raw` as written now: the archive bit, the
+    /// time and date, `cluster` as its first and `size` as its size.
+    fn set_written(&self, raw: &mut [u8], cluster: u32, size: u32) {
+        let (time, date) = dos_now();
+        raw[11] |= ATTR_ARCHIVE;
+        raw[22..24].copy_from_slice(&time.to_le_bytes());
+        raw[24..26].copy_from_slice(&date.to_le_bytes());
+        self.set_cluster(raw, cluster);
+        raw[28..32].copy_from_slice(&size.to_le_bytes());
+    }
+
     /// Where the boot sector's extended BPB (signature 29h, then the
     /// serial number and the label) is.
     fn extended_bpb(&self) -> usize {
@@ -1139,19 +1150,45 @@ impl FatVolume {
                 self.write_chain(&state, &chain, old_size, &gap)?;
             }
             self.write_chain(&state, &chain, offset, &data[..written])?;
-            let (time, date) = dos_now();
             let size = if written > 0 { old_size.max(end) } else { old_size } as u32;
             let params = state.params;
-            self.update_entry(at, |raw| {
-                raw[11] |= ATTR_ARCHIVE;
-                raw[22..24].copy_from_slice(&time.to_le_bytes());
-                raw[24..26].copy_from_slice(&date.to_le_bytes());
-                params.set_cluster(raw, entry.cluster);
-                raw[28..32].copy_from_slice(&size.to_le_bytes());
-            })
+            self.update_entry(at, |raw| params.set_written(raw, entry.cluster, size))
         })();
         let finished = self.finish(&mut state);
         result.and(finished).map(|()| written)
+    }
+
+    /// Cut the file whose entry is at `at` to `size` bytes, freeing the
+    /// clusters past the new end. A `size` at or past the end leaves the
+    /// file as it is.
+    pub fn truncate(&self, at: EntryRef, size: u64) -> Result<(), u8> {
+        let mut state = self.state();
+        let result = (|| {
+            let buf = self.raw_entry(at)?;
+            let entry = state.params.entry(&buf[at.index * ENTRY_SIZE..(at.index + 1) * ENTRY_SIZE], at);
+            if size >= entry.size as u64 {
+                return Ok(());
+            }
+            let chain = if entry.cluster == 0 { Vec::new() } else { state.chain(entry.cluster) };
+            let keep = size.div_ceil(state.params.cluster_bytes) as usize;
+            let mut cluster = entry.cluster;
+            if keep < chain.len() {
+                for &c in &chain[keep..] {
+                    state.set(c, 0);
+                }
+                match keep.checked_sub(1) {
+                    Some(last) => {
+                        let end = state.end_of_chain();
+                        state.set(chain[last], end);
+                    }
+                    None => cluster = 0,
+                }
+            }
+            let params = state.params;
+            self.update_entry(at, |raw| params.set_written(raw, cluster, size as u32))
+        })();
+        let finished = self.finish(&mut state);
+        result.and(finished)
     }
 
     /// Put a file with the contents `data`, dated `time` and `date`, at
