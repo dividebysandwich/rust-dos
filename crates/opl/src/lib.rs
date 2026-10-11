@@ -8,6 +8,7 @@
 //! renders up to the present before each write (see `Bus::audio_catch_up`).
 
 use nuked_opl3::Opl3Chip;
+pub use nuked_opl3::ChannelView;
 
 /// Output sample rate of the mixer, which the chip renders at.
 pub use rust_dos_audio_core::RATE;
@@ -29,6 +30,9 @@ pub struct Opl {
     /// The chip's registers as written, for a save state: the chip can't
     /// be saved, so a loaded state writes them to a new one (`after_load`).
     regs: [[u8; 256]; 2],
+    /// The channels left out of the mix (the sound visualizer's), a bit
+    /// each.
+    mute: u32,
 }
 
 impl Opl {
@@ -50,6 +54,7 @@ impl Opl {
             timer_expired: [false; 2],
             active: false,
             regs: [[0; 256]; 2],
+            mute: 0,
         }
     }
 
@@ -99,6 +104,7 @@ impl Opl {
     /// with their instruments.
     pub fn after_load(&mut self) {
         self.chip = Opl3Chip::new(RATE);
+        self.chip.set_mute(self.mute);
         let key_part = |reg: usize| (0xA0..=0xB8).contains(&reg) || reg == 0xBD;
         let mut order = Vec::with_capacity(512);
         if self.opl3 {
@@ -172,6 +178,21 @@ impl Opl {
         if self.opl3 { status } else { status | 0x06 }
     }
 
+    /// Leave the channels whose bits are set (0 to 17) out of the mix.
+    pub fn set_mute(&mut self, mask: u32) {
+        self.mute = mask;
+        self.chip.set_mute(mask);
+    }
+
+    pub fn mute(&self) -> u32 {
+        self.mute
+    }
+
+    /// What the 18 channels play (the first 9 on an OPL2).
+    pub fn channels(&self) -> [ChannelView; 18] {
+        self.chip.channel_views()
+    }
+
     /// Render one stereo frame at `RATE`.
     #[inline]
     pub fn render(&mut self) -> (i16, i16) {
@@ -186,4 +207,35 @@ impl Opl {
 
 // Whether it is an OPL3 comes with the Sound Blaster's model; the chip is
 // written anew from `regs` after a load.
-rust_dos_savestate::state_fields!(Opl { address, timer_value, timer_start, timer_mask, timer_expired, active, regs } skip { chip, opl3 });
+rust_dos_savestate::state_fields!(Opl { address, timer_value, timer_start, timer_mask, timer_expired, active, regs } skip { chip, opl3, mute });
+
+#[cfg(test)]
+mod mute_tests {
+    use super::*;
+
+    /// The loudest sample of `frames` frames.
+    fn loudest(opl: &mut Opl, frames: usize) -> i32 {
+        (0..frames).map(|_| opl.render()).map(|(l, r)| (l as i32).abs().max((r as i32).abs())).max().unwrap_or(0)
+    }
+
+    #[test]
+    fn a_muted_channel_plays_on_unheard() {
+        let mut opl = Opl::new(false);
+        // Channel 0: a plain sine on both operators, full volume, fast
+        // attack and no decay, then A4 keyed on.
+        for (reg, value) in [(0x20, 0x01), (0x23, 0x01), (0x40, 0x10), (0x43, 0x00), (0x60, 0xF0), (0x63, 0xF0), (0x80, 0x00), (0x83, 0x00), (0xC0, 0x01), (0xA0, 0x44), (0xB0, 0x32)] {
+            opl.write_address(0, reg);
+            opl.write_data(0, value, 0);
+        }
+        assert!(loudest(&mut opl, 2000) > 1000);
+        let view = opl.channels()[0];
+        assert!(view.key_on && view.level > 200 && view.f_num == 0x244 && view.block == 4, "{:?}", view);
+        opl.set_mute(1);
+        // The resampler's last frames, then nothing.
+        loudest(&mut opl, 4);
+        assert_eq!(loudest(&mut opl, 2000), 0);
+        assert!(opl.channels()[0].key_on, "it goes on playing");
+        opl.set_mute(0);
+        assert!(loudest(&mut opl, 2000) > 1000);
+    }
+}

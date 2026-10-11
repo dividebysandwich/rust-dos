@@ -93,7 +93,8 @@ impl Channel {
         }
     }
 
-    fn index(self) -> usize {
+    /// Its place in the mixer's arrays and masks.
+    pub fn index(self) -> usize {
         self as usize
     }
 }
@@ -233,6 +234,29 @@ pub struct Mixer {
     crossfeed: [f32; CHANNELS],
     reverse: [bool; CHANNELS],
     dsp: Dsp,
+    /// The sources left out of the mix for now (the sound visualizer's
+    /// mute and solo, never saved), a bit each by `Channel::index`.
+    pub silenced: u16,
+    /// What each source played lately, while the sound visualizer shows
+    /// it.
+    pub scopes: Option<Box<Scopes>>,
+}
+
+/// The frames a scope keeps of each source.
+pub const SCOPE_LEN: usize = 1024;
+
+/// The last `SCOPE_LEN` frames of each source, mono, after its volume,
+/// full scale 32768: a ring, the oldest at `at`.
+#[derive(Clone, Debug)]
+pub struct Scopes {
+    pub frames: [[f32; SCOPE_LEN]; CHANNELS],
+    pub at: usize,
+}
+
+impl Default for Scopes {
+    fn default() -> Self {
+        Self { frames: [[0.0; SCOPE_LEN]; CHANNELS], at: 0 }
+    }
 }
 
 impl Default for Mixer {
@@ -251,6 +275,8 @@ impl Default for Mixer {
             crossfeed: [0.0; CHANNELS],
             reverse: [false; CHANNELS],
             dsp: Dsp::default(),
+            silenced: 0,
+            scopes: None,
         }
     }
 }
@@ -366,10 +392,16 @@ impl Mixer {
     /// with its line-out and crossfeed, sending it to the effects, and note
     /// its peak.
     #[inline]
-    pub(crate) fn add(&self, frame: &mut MixFrame, peaks: &mut [f32; CHANNELS], channel: Channel, (l, r): (f32, f32)) {
+    pub(crate) fn add(&mut self, frame: &mut MixFrame, peaks: &mut [f32; CHANNELS], channel: Channel, (l, r): (f32, f32)) {
         let i = channel.index();
         let gain = self.gains[i];
         let (mut l, mut r) = (l * gain, r * gain);
+        if let Some(scopes) = &mut self.scopes {
+            scopes.frames[i][scopes.at] = (l + r) * 0.5;
+        }
+        if self.silenced >> i & 1 != 0 {
+            return;
+        }
         if self.reverse[i] {
             std::mem::swap(&mut l, &mut r);
         }
@@ -424,6 +456,14 @@ impl Mixer {
         }
         let gain = self.gains[Channel::Master.index()];
         let (l, r) = (l * gain, r * gain);
+        if let Some(scopes) = &mut self.scopes {
+            scopes.frames[Channel::Master.index()][scopes.at] = (l + r) * 0.5;
+            // The next frame's place, silent for the sources that don't
+            // play then.
+            scopes.at = (scopes.at + 1) % SCOPE_LEN;
+            let at = scopes.at;
+            scopes.frames.iter_mut().for_each(|f| f[at] = 0.0);
+        }
         let peak = &mut peaks[Channel::Master.index()];
         *peak = peak.max(l.abs()).max(r.abs());
         (l, r)
@@ -500,6 +540,19 @@ mod tests {
         let taken = mixer.take_peaks();
         assert_eq!(taken[Channel::Master.index()], 1200.0 / 32768.0);
         assert_eq!(mixer.take_peaks(), [0.0; CHANNELS]);
+    }
+
+    #[test]
+    fn a_silenced_source_shows_on_its_scope_but_isnt_heard() {
+        let mut mixer = Mixer { scopes: Some(Box::default()), silenced: 1 << Channel::Fm.index(), ..Mixer::default() };
+        let mut peaks = [0.0; CHANNELS];
+        let mut mix = MixFrame::default();
+        mixer.add(&mut mix, &mut peaks, Channel::Fm, (1000.0, 1000.0));
+        mixer.add(&mut mix, &mut peaks, Channel::Sb, (100.0, 300.0));
+        assert_eq!(mixer.finish(mix, &mut peaks), (100.0, 300.0));
+        let scopes = mixer.scopes.as_ref().unwrap();
+        assert_eq!((scopes.at, scopes.frames[Channel::Fm.index()][0], scopes.frames[Channel::Sb.index()][0]), (1, 1000.0, 200.0));
+        assert_eq!(scopes.frames[Channel::Master.index()][0], 200.0);
     }
 
     #[test]

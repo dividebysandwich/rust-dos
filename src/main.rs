@@ -850,6 +850,14 @@ fn main() -> Result<(), String> {
                     if !repeat {
                         ctrl_alt.key_down(chord_key(scancode));
                     }
+                    // Ctrl+Shift+S shows and hides the sound visualizer.
+                    if keycode == Keycode::S && ctrl && shift && !alt {
+                        if !repeat {
+                            let message = ui.sound_viz_key(&mut cpu.bus);
+                            osd.show(message);
+                        }
+                        continue;
+                    }
                     if keycode == Keycode::F12 && ctrl && shift && !alt {
                         if !repeat && let Some(message) = ui.overlay_key() {
                             osd.show(message);
@@ -1244,6 +1252,16 @@ fn main() -> Result<(), String> {
                     }
                 }
 
+                // A click on the sound visualizer's controls.
+                Event::MouseButtonDown { mouse_btn: MouseButton::Left, x, y, .. }
+                    if !mouse_captured && ui.sound_viz_hit(display.to_frame(x, y)).is_some() =>
+                {
+                    if let Some(action) = ui.sound_viz_hit(display.to_frame(x, y)) {
+                        action.apply(&mut cpu.bus);
+                    }
+                }
+                Event::MouseButtonUp { mouse_btn: MouseButton::Left, x, y, .. }
+                    if !mouse_captured && ui.sound_viz_hit(display.to_frame(x, y)).is_some() => {}
                 Event::MouseButtonDown { mouse_btn: MouseButton::Left, x, y, .. } if ui.is_open() => {
                     let (fx, fy) = display.to_frame(x, y);
                     ui.click(fx, fy, &mut host!());
@@ -1448,6 +1466,10 @@ fn main() -> Result<(), String> {
         }
         if dbg.take_hotkey() {
             toggle_ui!();
+        }
+        if dbg.take_sound_viz_key() {
+            let message = ui.sound_viz_key(&mut cpu.bus);
+            osd.show(message);
         }
         if dbg.take_closed_program() {
             host!().release_program();
@@ -1983,6 +2005,7 @@ fn main() -> Result<(), String> {
             && !voodoo_gl
             && !ui.is_open()
             && !ui.overlay_shown()
+            && !ui.sound_viz_shown()
             && wheel_view.is_none()
             && osd.is_empty()
             && !screenshot
@@ -2074,6 +2097,10 @@ fn main() -> Result<(), String> {
             }
             ui.draw(&mut screen);
             ui.draw_overlay(&mut screen);
+            if ui.sound_viz_shown() {
+                ui.set_sound(&cpu.bus);
+                ui.draw_sound_viz(&mut screen);
+            }
             if let Some(view) = &wheel_view {
                 rust_dos::config_ui::wheel::draw(&mut screen, view);
             }

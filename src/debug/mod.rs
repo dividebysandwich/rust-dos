@@ -345,6 +345,7 @@ pub enum Cmd {
     Printer { eject: bool },
     Exceptions,
     Gus,
+    Sound,
     Awe32,
     Drives,
     Mount {
@@ -501,6 +502,7 @@ pub enum UiInput {
 
 /// F12 in the key table: its make code.
 const F12_SCAN: u8 = 0x58;
+const S_SCAN: u8 = 0x1F;
 
 fn modifier_key(name: &str) -> Result<PcKey, String> {
     match keys::lookup(name) {
@@ -767,6 +769,8 @@ pub struct DebugHub {
     ui_pointer: (i32, i32),
     /// Ctrl+F12 came in: open or close the settings window.
     hotkey: bool,
+    /// Ctrl+Shift+S came in: show or hide the sound visualizer.
+    sound_viz_key: bool,
     /// reboot_shell closed the program: the front end releases its part.
     closed_program: bool,
     /// Save states to save or load, for the front end.
@@ -876,6 +880,7 @@ impl DebugHub {
             ui_input: Vec::new(),
             ui_pointer: (0, 0),
             hotkey: false,
+            sound_viz_key: false,
             closed_program: false,
             state_requests: Vec::new(),
             speed_requests: Vec::new(),
@@ -1985,8 +1990,12 @@ impl DebugHub {
     /// to the machine. Ctrl+F12 toggles the window, as on the keyboard.
     fn key_down(&mut self, cpu: &mut Cpu, key: PcKey, ascii: u8) {
         self.remote_mods |= key.modifier;
-        if key.scan == F12_SCAN && self.remote_mods & (keys::MOD_CTRL | keys::MOD_ALT) == keys::MOD_CTRL {
+        let shift = self.remote_mods & (keys::MOD_LSHIFT | keys::MOD_RSHIFT) != 0;
+        let ctrl = self.remote_mods & (keys::MOD_CTRL | keys::MOD_ALT) == keys::MOD_CTRL;
+        if key.scan == F12_SCAN && ctrl {
             self.hotkey = true;
+        } else if key.scan == S_SCAN && ctrl && shift && !self.divert {
+            self.sound_viz_key = true;
         } else if self.divert {
             self.ui_input.extend(ui_key(key, ascii, self.remote_mods).map(UiInput::Key));
         } else {
@@ -2022,6 +2031,11 @@ impl DebugHub {
     /// Whether a remote Ctrl+F12 came in since the last call.
     pub fn take_hotkey(&mut self) -> bool {
         std::mem::take(&mut self.hotkey)
+    }
+
+    /// Whether a remote Ctrl+Shift+S came in since the last call.
+    pub fn take_sound_viz_key(&mut self) -> bool {
+        std::mem::take(&mut self.sound_viz_key)
     }
 
     /// Whether reboot_shell closed the program since the last call. The
@@ -2727,6 +2741,7 @@ impl DebugHub {
                 Some(gus) => gus.snapshot(),
                 None => serde_json::json!({ "installed": false }),
             }),
+            Cmd::Sound => Reply::Json(sound_json(cpu)),
             Cmd::Awe32 => Reply::Json(match &cpu.bus.awe {
                 Some(awe) => awe.snapshot(),
                 None => serde_json::json!({ "installed": false }),
@@ -3418,6 +3433,43 @@ fn screen_text(cpu: &Cpu) -> Reply {
         "cursor": {"col": cpu.bus.peek_8(0x0450), "row": cpu.bus.peek_8(0x0451)},
         "lines": lines,
     }))
+}
+
+/// What the sound visualizer shows: the FM channels, the Ultrasound's
+/// voices, the MIDI notes held, and what is muted.
+fn sound_json(cpu: &Cpu) -> Value {
+    let bus = &cpu.bus;
+    let fm: Vec<Value> = bus
+        .opl
+        .channels()
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            json!({ "channel": i + 1, "key_on": c.key_on, "f_num": c.f_num, "block": c.block, "level": c.level,
+                    "four_op": c.four_op, "drum": c.drum, "muted": bus.opl.mute() >> i & 1 != 0 })
+        })
+        .collect();
+    let gus: Option<Vec<Value>> = bus.gus.as_ref().map(|gus| {
+        gus.voice_views()
+            .iter()
+            .enumerate()
+            .map(|(i, v)| json!({ "voice": i + 1, "playing": v.playing, "level": v.level, "pan": v.pan, "muted": gus.mute() >> i & 1 != 0 }))
+            .collect()
+    });
+    let midi: Vec<Value> = bus
+        .mpu
+        .held_notes()
+        .iter()
+        .enumerate()
+        .filter_map(|(ch, notes)| {
+            let held: Vec<Value> = notes.iter().enumerate().filter(|(_, v)| **v > 0).map(|(n, v)| json!([n, v])).collect();
+            let muted = bus.mpu.mute() >> ch & 1 != 0;
+            (!held.is_empty() || muted).then(|| json!({ "channel": ch + 1, "notes": held, "muted": muted }))
+        })
+        .collect();
+    let silenced: Vec<&str> =
+        rust_dos::mixer::Channel::ALL.iter().filter(|c| bus.mixer.silenced >> c.index() & 1 != 0).map(|c| c.key()).collect();
+    json!({ "fm": { "opl3": bus.opl.is_opl3(), "idle": bus.opl.is_idle(), "channels": fm }, "gus": gus, "midi": midi, "silenced": silenced })
 }
 
 fn ivt_json(cpu: &Cpu) -> Value {

@@ -24,6 +24,7 @@ mod rooms;
 mod sc55;
 mod phonebook;
 mod scenes;
+pub mod sound_viz;
 mod states;
 pub mod wheel;
 
@@ -2059,6 +2060,8 @@ pub struct ConfigUi {
     /// for (phonebook.rs).
     phonebook: Option<PhoneList>,
     phone_catalog: phonebook::Catalog,
+    /// The sound visualizer while it shows (sound_viz.rs).
+    sound_viz: Option<sound_viz::SoundViz>,
     scene_download: Option<scenes::SceneDownload>,
     /// The help shown over everything (F1).
     help: Option<help::HelpView>,
@@ -2138,6 +2141,7 @@ impl ConfigUi {
             scene_catalog: scenes::Catalog::default(),
             phonebook: None,
             phone_catalog: phonebook::Catalog::default(),
+            sound_viz: None,
             scene_download: None,
             help: None,
             awe32_download: None,

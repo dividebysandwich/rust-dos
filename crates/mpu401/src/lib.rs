@@ -104,6 +104,12 @@ pub struct Mpu401 {
     /// What the synthesizer was told, for after a save state is loaded.
     shadow: MidiShadow,
     synth: Synth,
+    /// The notes held on each channel, by their velocity (0 for none),
+    /// for the sound visualizer.
+    held: [[u8; 128]; 16],
+    /// The channels whose notes don't reach the synthesizer (the
+    /// visualizer's), a bit each.
+    mute: u16,
 }
 
 impl Default for Mpu401 {
@@ -123,6 +129,8 @@ impl Mpu401 {
             sysex: Vec::new(),
             shadow: MidiShadow::default(),
             synth: Synth::None,
+            held: [[0; 128]; 16],
+            mute: 0,
         }
     }
 
@@ -222,6 +230,28 @@ impl Mpu401 {
         self.in_sysex = false;
         self.shadow.reset_channels();
         self.synth.silence();
+        self.held = [[0; 128]; 16];
+    }
+
+    /// The notes held on each channel, by velocity.
+    pub fn held_notes(&self) -> &[[u8; 128]; 16] {
+        &self.held
+    }
+
+    /// Keep the notes of the channels whose bits are set from the
+    /// synthesizer; those playing on a channel muted now stop.
+    pub fn set_mute(&mut self, mask: u16) {
+        let newly = mask & !self.mute;
+        self.mute = mask;
+        for ch in (0..16u8).filter(|ch| newly >> ch & 1 != 0) {
+            // All Sound Off and All Notes Off.
+            self.synth.message(0xB0 | ch, 120, 0);
+            self.synth.message(0xB0 | ch, 123, 0);
+        }
+    }
+
+    pub fn mute(&self) -> u16 {
+        self.mute
     }
 
     /// Status port: bit 7 clear when a byte can be read, bit 6 clear when
@@ -295,6 +325,18 @@ impl Mpu401 {
 
     fn message(&mut self, status: u8, d1: u8, d2: u8) {
         self.shadow.message(status, d1, d2);
+        let ch = (status & 0x0F) as usize;
+        let note_on = status & 0xF0 == 0x90 && d2 > 0;
+        match status & 0xF0 {
+            0x90 | 0x80 => self.held[ch][d1 as usize & 0x7F] = if note_on { d2 } else { 0 },
+            // All Sound Off (120), All Notes Off (123) and the mode
+            // messages after it, which end the notes too.
+            0xB0 if d1 == 120 || d1 >= 123 => self.held[ch] = [0; 128],
+            _ => {}
+        }
+        if note_on && self.mute >> ch & 1 != 0 {
+            return;
+        }
         self.synth.message(status, d1, d2);
     }
 
@@ -353,7 +395,7 @@ impl Mpu401 {
 }
 
 // The synthesizer is the host's; `after_load` tells it what it missed.
-rust_dos_savestate::state_fields!(Mpu401 { read_buf, status, data, have, in_sysex, sysex, shadow } skip { synth });
+rust_dos_savestate::state_fields!(Mpu401 { read_buf, status, data, have, in_sysex, sysex, shadow } skip { synth, held, mute });
 
 #[cfg(test)]
 mod tests {

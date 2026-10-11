@@ -114,6 +114,7 @@ fn router(state: AppState) -> Router {
         .route("/api/printer", get(printer))
         .route("/api/printer/eject", post(printer_eject))
         .route("/api/gus", get(gus))
+        .route("/api/sound", get(sound))
         .route("/api/awe32", get(awe32))
         .route("/api/exceptions", get(exceptions))
         .route("/ws/trace", get(ws_trace))
@@ -1458,6 +1459,10 @@ async fn printer_eject(State(s): State<AppState>) -> ApiResult {
     s.call_json(Cmd::Printer { eject: true }, DEFAULT_TIMEOUT).await
 }
 
+async fn sound(State(s): State<AppState>) -> ApiResult {
+    s.call_json(Cmd::Sound, DEFAULT_TIMEOUT).await
+}
+
 async fn gus(State(s): State<AppState>) -> ApiResult {
     s.call_json(Cmd::Gus, DEFAULT_TIMEOUT).await
 }
@@ -2001,6 +2006,9 @@ MEMORY HEATMAP
                              a /ws/heat stream is open ("active")
 
 SOUND
+  GET  /api/sound            what the sound visualizer (Ctrl+Shift+S) shows: the FM
+                             channels' notes and envelopes, the Ultrasound's voices,
+                             the MIDI notes held, and what it muted
   GET  /api/gus              the Gravis Ultrasound: latches, IRQ status, timers,
                              DMA and every voice's registers
   GET  /api/awe32            the AWE32's EMU8000: ROM, RAM, configuration, effects
