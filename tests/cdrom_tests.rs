@@ -55,6 +55,18 @@ fn check_files(cpu: &mut Cpu, big: &[u8]) {
     assert_eq!((entry.size as usize, entry.attr), (big.len(), 0x21));
     // 31 October 1995, 12:00.
     assert_eq!((entry.dos_date, entry.dos_time), ((15 << 9) | (10 << 5) | 31, 12 << 11));
+    // Directories show their records' dates too.
+    for spec in ["D:\\DATA", "D:\\DATA\\LEVELS"] {
+        let entry = cpu.bus.disk.find_directory_entry(spec, 0, 0x10).unwrap();
+        assert!(entry.is_dir, "{}", spec);
+        assert_eq!((entry.dos_date, entry.dos_time), ((15 << 9) | (10 << 5) | 31, 12 << 11), "{}", spec);
+    }
+    // And so do the "." and ".." entries in them.
+    let dots = cpu.bus.disk.list_directory("D:\\DATA\\LEVELS\\*.*", 0x10).unwrap();
+    assert_eq!(dots[..2].iter().map(|e| e.filename.as_str()).collect::<Vec<_>>(), ["..", "."]);
+    for entry in &dots[..2] {
+        assert_eq!((entry.dos_date, entry.dos_time), ((15 << 9) | (10 << 5) | 31, 12 << 11), "{}", entry.filename);
+    }
     assert_eq!(cpu.bus.disk.get_file_attribute("D:\\SECRET.DAT"), Ok(0x23));
 
     // Reads across sector boundaries, seeks, and the end of the file.

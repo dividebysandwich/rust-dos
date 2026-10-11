@@ -2810,8 +2810,8 @@ impl DiskController {
         if let Some((_, drive, path)) = self.locate_in_memory(filename) {
             let files = drive.tree().ok_or(0x03u8)?;
             return match files.file(&path) {
-                Some(node) => Ok(Self::tree_attr(Some(node)) as u16),
-                None if files.is_dir(&path) => Ok(0x11),
+                Some(node) => Ok(Self::tree_attr(Some(node), None) as u16),
+                None if files.is_dir(&path) => Ok(Self::tree_attr(None, files.dir_record(&path)) as u16),
                 None => Err(0x02),
             };
         }
@@ -3002,9 +3002,11 @@ impl DiskController {
     }
 
     /// The attributes of an entry of a tree held in memory (None for a
-    /// directory): read-only, and hidden where the CD says so.
-    fn tree_attr(node: Option<&Node>) -> u8 {
+    /// directory, with its record on the CD if it has one): read-only, and
+    /// hidden where the CD says so.
+    fn tree_attr(node: Option<&Node>, dir_record: Option<crate::cdrom::Extent>) -> u8 {
         match node {
+            None if dir_record.is_some_and(|r| r.hidden) => 0x13,
             None => 0x11,
             Some(Node::Extent(extent)) if extent.hidden => 0x23,
             Some(_) => 0x21,
@@ -3031,18 +3033,20 @@ impl DiskController {
     }
 
     /// The ".." and "." entries of a directory below the root that match
-    /// `pattern`.
-    fn dot_entries(pattern: &str) -> impl Iterator<Item = DosDirEntry> + '_ {
+    /// `pattern`, with the DOS time and date of each: the parent's for "..",
+    /// the directory's own for ".".
+    fn dot_entries(pattern: &str, times: [(u16, u16); 2]) -> impl Iterator<Item = DosDirEntry> + '_ {
         ["..", "."]
             .into_iter()
-            .filter(|dot| Self::matches_pattern(dot, pattern))
-            .map(|dot| DosDirEntry {
+            .zip(times)
+            .filter(|(dot, _)| Self::matches_pattern(dot, pattern))
+            .map(|(dot, (dos_time, dos_date))| DosDirEntry {
                 filename: dot.to_string(),
                 size: 0,
                 is_dir: true,
                 is_readonly: false,
-                dos_time: 0,
-                dos_date: 0,
+                dos_time,
+                dos_date,
                 attr: 0x10,
             })
     }
@@ -3132,16 +3136,28 @@ impl DiskController {
             if !files.is_dir(&dir) {
                 return Err(0x03);
             }
+            // A directory's time and date: its record's on a CD, the
+            // drive's default elsewhere.
+            let dir_time = |path: &str| {
+                files.dir_record(path).map_or((MEMORY_TIME, MEMORY_DATE), |r| (r.time, r.date))
+            };
             if !dir.is_empty() {
-                valid_entries.extend(Self::dot_entries(pattern));
+                let parent = dir.rsplit_once('\\').map_or("", |(parent, _)| parent);
+                valid_entries.extend(Self::dot_entries(pattern, [dir_time(parent), dir_time(&dir)]));
             }
             for (name, node) in files.list(&dir) {
-                let attr = Self::tree_attr(node);
+                let dir_record = match node {
+                    None if dir.is_empty() => files.dir_record(name),
+                    None => files.dir_record(&format!("{}\\{}", dir, name)),
+                    Some(_) => None,
+                };
+                let attr = Self::tree_attr(node, dir_record);
                 if (attr as u16 & restricted_bits) & !search_attr != 0 || !Self::matches_pattern(name, pattern) {
                     continue;
                 }
-                let (dos_time, dos_date) = match node {
-                    Some(Node::Extent(extent)) => (extent.time, extent.date),
+                let (dos_time, dos_date) = match (node, dir_record) {
+                    (Some(Node::Extent(extent)), _) => (extent.time, extent.date),
+                    (None, Some(record)) => (record.time, record.date),
                     _ => (MEMORY_TIME, MEMORY_DATE),
                 };
                 valid_entries.push(DosDirEntry {
@@ -3167,7 +3183,7 @@ impl DiskController {
         let media_ro = !drive.writable();
 
         if !is_host_root {
-            valid_entries.extend(Self::dot_entries(pattern));
+            valid_entries.extend(Self::dot_entries(pattern, [(0, 0); 2]));
         }
 
         for (original_name, final_name) in Self::host_entries(&host_dir) {
@@ -3999,6 +4015,36 @@ mod tests {
         disk.unmount(23).unwrap();
         assert!(disk.read_file(h, 1).is_err());
         assert!(!disk.is_file("X:\\GUS\\README.TXT"));
+    }
+
+    #[test]
+    fn cd_directories_show_their_records() {
+        let mut disk = DiskController::new(scratch("dir-records"));
+        let record = |time: u16, hidden| crate::cdrom::Extent { lba: 20, size: 2048, time, date: 0x1F5F, hidden };
+        let mut files = MemFs::new();
+        files.insert_dir_record("", record(1 << 11, false));
+        files.insert_dir_record("DATA", record(2 << 11, false));
+        files.insert_dir_record("DATA\\SECRET", record(3 << 11, true));
+        files.insert("DATA\\SECRET\\KEY.DAT", &b"key"[..]);
+        files.insert("DATA\\PLAIN\\A.DAT", &b"a"[..]);
+        disk.mount_memory(23, files, "disc").unwrap();
+
+        let times = |spec: &str, attr: u16| -> Vec<(String, u8, u16)> {
+            disk.list_directory(spec, attr).unwrap().into_iter().map(|e| (e.filename, e.attr, e.dos_time)).collect()
+        };
+        // ".." has the parent's record (the root's), "." the directory's own;
+        // a directory without a record shows the drive's default.
+        assert_eq!(
+            times("X:\\DATA\\*.*", 0x10),
+            [("..".to_string(), 0x10, 1 << 11), (".".to_string(), 0x10, 2 << 11), ("PLAIN".to_string(), 0x11, MEMORY_TIME)]
+        );
+        // A hidden directory is listed only when hidden entries are asked for.
+        assert_eq!(times("X:\\DATA\\S*.*", 0x12), [("SECRET".to_string(), 0x13, 3 << 11)]);
+        assert_eq!(disk.get_file_attribute("X:\\DATA\\SECRET"), Ok(0x13));
+        assert_eq!(times("X:\\DATA\\SECRET\\*.*", 0x10)[..2], [("..".to_string(), 0x10, 2 << 11), (".".to_string(), 0x10, 3 << 11)]);
+        let plain = disk.list_directory("X:\\DATA\\PLAIN\\*.*", 0x10).unwrap();
+        assert_eq!((plain[0].dos_time, plain[0].dos_date), (2 << 11, 0x1F5F));
+        assert_eq!((plain[1].dos_time, plain[1].dos_date), (MEMORY_TIME, MEMORY_DATE));
     }
 
     #[test]
