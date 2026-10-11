@@ -14,7 +14,7 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use axum::Router;
-use axum::body::{Body, Bytes};
+use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
@@ -198,36 +198,50 @@ async fn request_ids(State(s): State<AppState>, request: axum::extract::Request,
     let _busy = Busy::new(&s.shared);
     let req = s.shared.next_req.fetch_add(1, Ordering::Relaxed);
     let tag = request.headers().get("x-request-id").cloned();
-    let response = match context(req, request.headers()) {
+    let mut response = match context(req, request.headers()) {
         Ok(ctx) => CTX.scope(ctx, next.run(request)).await,
-        Err(e) => e.into_response(),
+        Err(e) => json_body(e.status, &e.body, Some(req)),
     };
-    let (mut parts, body) = response.into_parts();
-    parts.headers.insert("x-debug-req", HeaderValue::from(req));
+    // The body is the handler's: its JSON has `"req"` already (`json_body`).
+    let headers = response.headers_mut();
+    headers.insert("x-debug-req", HeaderValue::from(req));
     if let Some(tag) = tag {
-        parts.headers.insert("x-request-id", tag);
+        headers.insert("x-request-id", tag);
     }
-    let json = parts.headers.get(header::CONTENT_TYPE).is_some_and(|t| t.as_bytes().starts_with(b"application/json"));
-    if !json {
-        return Response::from_parts(parts, body);
-    }
-    let Ok(bytes) = axum::body::to_bytes(body, usize::MAX).await else {
-        return ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "response body").into_response();
-    };
-    parts.headers.remove(header::CONTENT_LENGTH);
-    Response::from_parts(parts, Body::from(with_req(&bytes, req)))
+    response
 }
 
-/// A JSON object body with `"req"` first.
-fn with_req(body: &[u8], req: u64) -> Vec<u8> {
-    if body.first() != Some(&b'{') {
-        return body.to_vec();
+/// The number of the HTTP request being answered.
+fn current_req() -> Option<u64> {
+    Ctx::current().map(|c| c.req)
+}
+
+/// A JSON response, serialized once. An object gets the request's number
+/// first, as `"req"`.
+fn json_body(status: StatusCode, v: &Value, req: Option<u64>) -> Response {
+    let mut out = Vec::with_capacity(256);
+    match (req, v) {
+        (Some(req), Value::Object(map)) => {
+            out.extend_from_slice(format!("{{\"req\":{}", req).as_bytes());
+            for (k, v) in map.iter().filter(|(k, _)| k.as_str() != "req") {
+                out.push(b',');
+                // Writing to a Vec doesn't fail.
+                let _ = serde_json::to_writer(&mut out, k);
+                out.push(b':');
+                let _ = serde_json::to_writer(&mut out, v);
+            }
+            out.push(b'}');
+        }
+        _ => {
+            let _ = serde_json::to_writer(&mut out, v);
+        }
     }
-    let rest = &body[1..];
-    let empty = rest.iter().find(|b| !b.is_ascii_whitespace()) == Some(&b'}');
-    let mut out = format!("{{\"req\":{}{}", req, if empty { "" } else { "," }).into_bytes();
-    out.extend_from_slice(rest);
-    out
+    (status, [(header::CONTENT_TYPE, "application/json")], out).into_response()
+}
+
+/// `json_body` for the request being answered.
+fn json_ok(v: &Value) -> Response {
+    json_body(StatusCode::OK, v, current_req())
 }
 
 /// Refuse `If-State-Seq` on an endpoint the server answers itself: there
@@ -265,7 +279,7 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         match self.meta {
             Some(meta) => json_response(self.status, self.body, &meta),
-            None => (self.status, axum::Json(self.body)).into_response(),
+            None => json_body(self.status, &self.body, current_req()),
         }
     }
 }
@@ -301,9 +315,14 @@ fn with_meta(mut response: Response, meta: &Meta) -> Response {
     response
 }
 
-fn json_response(status: StatusCode, mut v: Value, meta: &Meta) -> Response {
+fn json_response(status: StatusCode, v: Value, meta: &Meta) -> Response {
+    json_response_to(status, v, meta, current_req())
+}
+
+/// `json_response` for request `req`, outside the request's task.
+fn json_response_to(status: StatusCode, mut v: Value, meta: &Meta, req: Option<u64>) -> Response {
     merge_meta(&mut v, meta);
-    with_meta((status, axum::Json(v)).into_response(), meta)
+    with_meta(json_body(status, &v, req), meta)
 }
 
 fn unexpected() -> ApiError {
@@ -534,14 +553,13 @@ async fn ui() -> Response {
 
 async fn version(State(s): State<AppState>) -> ApiResult {
     server_only()?;
-    Ok(axum::Json(json!({
+    Ok(json_ok(&json!({
         "name": "rust-dos",
         "version": env!("CARGO_PKG_VERSION"),
         "api_version": journal::API_VERSION,
         "instance": s.shared.instance_hex(),
         "features": journal::FEATURES,
-    }))
-    .into_response())
+    })))
 }
 
 #[derive(Deserialize)]
@@ -619,12 +637,13 @@ async fn journal_get(State(s): State<AppState>, Query(q): Query<JournalQuery>) -
                 "first": gone.first,
                 "last": gone.last,
             });
-            return Ok((StatusCode::GONE, axum::Json(body)).into_response());
+            return Ok(json_body(StatusCode::GONE, &body, current_req()));
         }
     };
     // The entries' JSON as it is, without parsing it again.
-    let body = format!(
-        r#"{{"instance":"{}","first":{},"last":{},"state_seq":{},"stop_seq":{},"next":{},"timed_out":{},"entries":[{}]}}"#,
+    let mut body = format!(
+        r#"{{"req":{},"instance":"{}","first":{},"last":{},"state_seq":{},"stop_seq":{},"next":{},"timed_out":{},"entries":["#,
+        current_req().unwrap_or(0),
         s.shared.instance_hex(),
         j.first(),
         j.last(),
@@ -632,8 +651,16 @@ async fn journal_get(State(s): State<AppState>, Query(q): Query<JournalQuery>) -
         j.stop_seq.map_or("null".to_string(), |s| s.to_string()),
         next,
         timed_out,
-        entries.join(",")
     );
+    drop(j);
+    body.reserve(entries.iter().map(|e| e.len() + 1).sum::<usize>() + 2);
+    for (i, e) in entries.iter().enumerate() {
+        if i > 0 {
+            body.push(',');
+        }
+        body.push_str(e);
+    }
+    body.push_str("]}");
     Ok(([(header::CONTENT_TYPE, "application/json")], body).into_response())
 }
 
@@ -659,7 +686,7 @@ async fn op_get(State(s): State<AppState>, Path(req): Path<u64>, Query(q): Query
             }
         }
     };
-    Ok(axum::Json(op_json(req, &end)).into_response())
+    Ok(json_ok(&op_json(req, &end)))
 }
 
 async fn status(State(s): State<AppState>) -> ApiResult {
@@ -718,7 +745,8 @@ async fn trace_get(State(s): State<AppState>, Query(q): Query<TraceQuery>) -> Ap
     let (Reply::Trace { entries, next, dropped }, meta) = s.call(Cmd::TraceQuery(q), DEFAULT_TIMEOUT).await? else {
         return Err(unexpected());
     };
-    let body = tokio::task::spawn_blocking(move || format_trace(&entries, json, next, dropped, &meta))
+    let req = current_req();
+    let body = tokio::task::spawn_blocking(move || format_trace(&entries, json, next, dropped, &meta, req))
         .await
         .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let cursor = [
@@ -728,10 +756,10 @@ async fn trace_get(State(s): State<AppState>, Query(q): Query<TraceQuery>) -> Ap
     Ok(with_meta((cursor, body).into_response(), &meta))
 }
 
-fn format_trace(entries: &[TraceEntry], json: bool, next: u64, dropped: u64, meta: &Meta) -> Response {
+fn format_trace(entries: &[TraceEntry], json: bool, next: u64, dropped: u64, meta: &Meta, req: Option<u64>) -> Response {
     if json {
         let v: Vec<Value> = entries.iter().map(|e| e.to_json()).collect();
-        json_response(StatusCode::OK, json!({"count": v.len(), "next": next, "dropped": dropped, "entries": v}), meta)
+        json_response_to(StatusCode::OK, json!({"count": v.len(), "next": next, "dropped": dropped, "entries": v}), meta, req)
     } else {
         let mut out = String::with_capacity(entries.len() * 160 + 128);
         out.push_str(trace::TEXT_HEADER);
@@ -876,7 +904,7 @@ async fn log_get(State(s): State<AppState>, Query(q): Query<LogQuery>) -> ApiRes
         let s: String = lines.iter().map(|l| format!("{:>10} {}\n", l.t_ms, l.line)).collect();
         return Ok(text_response(s));
     }
-    Ok(axum::Json(json!({"lines": lines})).into_response())
+    Ok(json_ok(&json!({"lines": lines})))
 }
 
 #[derive(Deserialize)]
@@ -1905,7 +1933,7 @@ mod http_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::{Answer, Cmd, Meta, Reply, Request, Shared, hex_data, json, with_req};
+    use super::{Answer, Cmd, Meta, Reply, Request, Shared, hex_data, json, json_body};
     use std::io::{Read, Write};
     use std::net::SocketAddr;
     use std::sync::{Arc, mpsc};
@@ -1963,8 +1991,16 @@ mod tests {
 
     #[test]
     fn the_request_number_goes_first_in_a_json_object() {
-        assert_eq!(with_req(br#"{"a":1}"#, 7), br#"{"req":7,"a":1}"#.to_vec());
-        assert_eq!(with_req(b"{}", 7), br#"{"req":7}"#.to_vec());
-        assert_eq!(with_req(b"[1]", 7), b"[1]".to_vec());
+        let body = |v: serde_json::Value, req| {
+            let response = json_body(axum::http::StatusCode::OK, &v, req);
+            let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+            let bytes = rt.block_on(axum::body::to_bytes(response.into_body(), usize::MAX)).unwrap();
+            String::from_utf8(bytes.to_vec()).unwrap()
+        };
+        assert_eq!(body(json!({"a": 1, "b": "x"}), Some(7)), r#"{"req":7,"a":1,"b":"x"}"#);
+        assert_eq!(body(json!({}), Some(7)), r#"{"req":7}"#);
+        assert_eq!(body(json!({"req": 3, "a": 1}), Some(7)), r#"{"req":7,"a":1}"#, "one req, the request's");
+        assert_eq!(body(json!([1]), Some(7)), "[1]");
+        assert_eq!(body(json!({"a": 1}), None), r#"{"a":1}"#);
     }
 }

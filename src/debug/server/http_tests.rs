@@ -242,6 +242,42 @@ fn every_response_has_its_request_number_and_the_client_s_id() {
 }
 
 #[test]
+fn every_json_body_has_its_request_number_first() {
+    let rig = Rig::new("req-first");
+    rig.post("/api/control/pause", json!({}));
+    let op = rig.post("/api/input/type", json!({"text": "x"})).json()["op"].clone();
+    let large = "/api/memory?addr=0&len=1048576&format=base64";
+    let paths = [
+        "/api/status",
+        "/api/version",
+        "/api/journal?after=0",
+        &format!("/api/ops/{}", op),
+        "/api/ops/999999",
+        "/api/log?limit=5",
+        "/api/trace?format=json&last_n=5",
+        "/api/registers",
+        "/api/control/wait",
+        "/api/journal?type=nonsense",
+        large,
+    ];
+    for path in paths {
+        let r = rig.get(path);
+        let req = r.header("x-debug-req").unwrap();
+        assert!(r.body.starts_with(&format!("{{\"req\":{},", req)), "{} {}: {}", path, r.status, &r.body[..r.body.len().min(200)]);
+        assert_eq!(r.header("content-type"), Some("application/json"), "{}", path);
+    }
+    assert_eq!(rig.get(large).json()["len"], 1 << 20);
+    // A refusal from the emulator thread, and one the middleware makes.
+    let refused = http(rig.addr, "PUT", "/api/memory", &[("If-State-Seq", "1")], Some(&json!({"addr": "0", "hex": "00"})));
+    assert_eq!(refused.status, 409);
+    let bad = http(rig.addr, "GET", "/api/status", &[("If-State-Seq", "x")], None);
+    assert_eq!(bad.status, 400);
+    for r in [refused, bad] {
+        assert!(r.body.starts_with(&format!("{{\"req\":{},", r.header("x-debug-req").unwrap())), "{}", r.body);
+    }
+}
+
+#[test]
 fn an_operation_ends_when_another_client_pauses_the_machine() {
     let rig = Rig::new("ops");
     let resumed = rig.post("/api/control/resume", json!({}));
