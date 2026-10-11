@@ -1565,7 +1565,11 @@ card's gamma table, which games set brighter than DOSBox-X shows them.
 * **DOS games** bring Glide with them (linked in, or `GLIDE2X.OVL` beside
   the game) and run under a DOS extender such as DOS/4GW, which maps the
   card's memory. Tomb Raider's 3dfx patch (`3DPATCH\3DFX\TOMB.EXE` on the
-  Tomb Raider Gold CD) runs with `voodoo=true` and `cpu=pentium`.
+  Tomb Raider Gold CD) runs with `voodoo=true` and `cpu=pentium`. Its
+  saved games don't mix with the other versions': loading one saved by
+  another version corrupts the textures. [Issue #38](https://github.com/dividebysandwich/rust-dos/issues/38)
+  has a zip that keeps the 3dfx version apart, so it lives peacefully
+  beside the others.
   Games made for the Voodoo Rush and later boards load Glide from
   `GLIDE2X.OVL` (Tomb Raider's Rush patch, `3DPATCH\VOORUSH\TOMB.EXE`),
   and the one of 3dfx's Voodoo Graphics driver drives this card whatever
