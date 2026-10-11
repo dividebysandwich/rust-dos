@@ -344,6 +344,7 @@ impl Item {
             ShellSuggestions => "shell-suggestions",
             ShellColors => "shell-colors",
             SaveShellHistory => "save-shell-history",
+            VersionCheck => "version-check",
             Rewind => "rewind",
             RewindMemory => "rewind-memory",
             SbType => "sb-type",

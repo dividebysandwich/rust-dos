@@ -405,7 +405,7 @@ impl Page {
                 VoodooAnisotropy, VoodooTextureSampling, VoodooFpsCap, VoodooGamma, VoodooOverlay, PowerVr, PowerVrFilter, Memsize, Ems, Umb, DosHigh, Dpmi,
                 DosVersion, IdeHardDisks, BootCdrom, HardDiskSpeed, FloppyDiskSpeed, Joystick,
                 Deadzone, MouseSensitivity, MouseAutocapture, MouseCaptureMessages, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, RecordShader, Autoexec,
-                ShellSuggestions, ShellColors, SaveShellHistory,
+                ShellSuggestions, ShellColors, SaveShellHistory, VersionCheck,
             ],
             Page::Sound => &[
                 SbType, SbPorts, Awe32Rom, Awe32Download, Awe32Ram, Opl, Gus, GusPorts, GusDrive, UltraDir, Midi,
@@ -596,6 +596,8 @@ enum Item {
     ShellSuggestions,
     ShellColors,
     SaveShellHistory,
+    /// Ask rust-dos.com at startup whether there is a newer version.
+    VersionCheck,
     /// Rewind (held Alt+F11) and the memory it takes.
     Rewind,
     RewindMemory,
@@ -934,6 +936,7 @@ impl Item {
             ShellSuggestions => "Shell suggestions",
             ShellColors => "Shell colors",
             SaveShellHistory => "Save shell history",
+            VersionCheck => "Check for new versions",
             Rewind => "Rewind (Alt+F11)",
             RewindMemory => "  Rewind memory",
             SbType => "Sound Blaster",
@@ -1138,7 +1141,7 @@ impl Item {
             Joystick | Deadzone | MouseSensitivity | SpeakerFilter | SbFilter | Reverb | Chorus | ReverbMix | ChorusMix => Applies::Now,
             AudioBlocksize | AudioPrebuffer => Applies::Now,
             Rooms => Applies::Now,
-            Memsize | Autoexec | Lan | LanHost => Applies::NextStart,
+            Memsize | Autoexec | Lan | LanHost | VersionCheck => Applies::NextStart,
             VrMode | VrQuality | VrAmbientOcclusion | VrMsaa | VrScene | VrControllers | VrSpatialAudio | VrScreenFit | VrScreenGlow
             | VrCenter | VrSceneScale | VrSeat(_) | VrSeatTurn | VrResolution | VrRefresh => Applies::Now,
             // SDL makes the window's context as the headset needs it as it
@@ -1293,6 +1296,7 @@ impl Item {
             ShellSuggestions => on_off(s.shell.autosuggest),
             ShellColors => on_off(s.shell.colors),
             SaveShellHistory => on_off(s.shell.save_history),
+            VersionCheck => on_off(s.version_check),
             Rewind => on_off(s.rewind),
             RewindMemory => format!("{} MB", s.rewind_memory),
             SbType if !s.sound.sb_installed => "none".to_string(),
@@ -1521,6 +1525,7 @@ impl Item {
             ShellSuggestions => on_off(|s, on| s.shell.autosuggest = on),
             ShellColors => on_off(|s, on| s.shell.colors = on),
             SaveShellHistory => on_off(|s, on| s.shell.save_history = on),
+            VersionCheck => on_off(|s, on| s.version_check = on),
             Rewind => on_off(|s, on| s.rewind = on),
             RecordUi => on_off(|s, on| s.record_ui = on),
             RecordShader => on_off(|s, on| s.record_shader = on),

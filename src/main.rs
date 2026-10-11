@@ -290,6 +290,10 @@ fn main() -> Result<(), String> {
     if let Some(core) = args.core {
         settings.core = core;
     }
+    // Ask rust-dos.com whether there is a newer version while the window
+    // opens; not in runs whose screens must come out the same.
+    let mut update_check = (settings.version_check && !args.deterministic && args.debug_server.is_none())
+        .then(rust_dos::version_check::Check::start);
     // A game to launch: its profile, read now so its memory size is the
     // machine's.
     let imported = match &args.import {
@@ -467,7 +471,14 @@ fn main() -> Result<(), String> {
         Some(drive) => StartupItem::Lines(vec![format!("BOOT -l {}", disk::drive_key(drive))]),
         None => StartupItem::BatchFile("C:\\AUTOEXEC.BAT".to_string()),
     });
-    cpu.startup = Startup { notes: banner_notes(&config, args.no_config), commands };
+    // A newer version under the box: the answer if it comes in a moment,
+    // else what the last check found.
+    let update = update_check.as_mut().and_then(|check| {
+        check.wait(std::time::Duration::from_secs(1));
+        check.banner()
+    });
+    let update = update.as_deref().map(rust_dos::version_check::console_line);
+    cpu.startup = Startup { notes: banner_notes(&config, args.no_config), update, commands };
     cpu.start_dos();
 
     // Cached render target. We re-render the full VGA surface only when
@@ -1800,6 +1811,17 @@ fn main() -> Result<(), String> {
             osd.notify(notice.title, notice.detail, notice.big);
         }
         osd.set_corner(achievements.trackers());
+        // A newer rust-dos, once the website has answered.
+        if let Some(check) = &mut update_check {
+            if let Some(version) = check.news() {
+                let (title, detail) = rust_dos::version_check::notification(&version);
+                cpu.bus.log_string(&format!("[VERSION] {}. {}", title, detail));
+                osd.notify(title, detail, true);
+            }
+            if check.finished() {
+                update_check = None;
+            }
+        }
         if let Some((username, token)) = achievements.take_new_token() {
             ui.sync_achievements(&username, &token);
             if let Err(e) = host!().keep_token(&username, &token) {

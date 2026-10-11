@@ -324,6 +324,13 @@ Mistakes in the file are printed as warnings; the emulator still starts.
 * `mouse_capture_messages` says over the picture when the mouse is
   captured (and that Ctrl+Alt lets it go) or let go: `true` (the default)
   or `false`.
+* `version_check` asks rust-dos.com at startup whether a newer version
+  is out (`https://rust-dos.com/version.json`); one that is shows in a
+  notification over the picture and in a line under the box above the
+  first DOS prompt. When the answer is slow to come, the line names the
+  version the last check found, and the notification follows once the
+  answer is in. `true` (the default) or `false`. Deterministic mode and
+  the debug server never check.
 * `mouse_autocapture` captures the mouse as it moves over the focused
   window while a program uses the mouse driver (INT 33h), and lets it go
   as the program's cursor reaches the edge of the screen and the mouse

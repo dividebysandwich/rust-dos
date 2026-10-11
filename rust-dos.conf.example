@@ -195,6 +195,10 @@
 # Say over the picture when the mouse is captured or let go: true (the
 # default) or false.
 #mouse_capture_messages=true
+# Ask rust-dos.com at startup whether a newer version is out, and say so
+# over the picture and under the box above the first prompt: true (the
+# default) or false.
+#version_check=true
 # Rewind: holding Alt+F11 goes back in time, half a second a step. It keeps
 # the machine's states of the last minutes, which take memory and a little
 # of the host's time: true or false (the default).

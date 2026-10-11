@@ -180,6 +180,8 @@ pub struct Config {
     /// The messages that say the mouse was captured or let go
     /// (`mouse_capture_messages`).
     pub mouse_capture_messages: Option<bool>,
+    /// The check for a newer rust-dos at startup (`version_check`).
+    pub version_check: Option<bool>,
     /// Rewind (`rewind`), and the memory its states may take in MB
     /// (`rewind_memory`).
     pub rewind: Option<bool>,
@@ -961,6 +963,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Some(on) => config.mouse_capture_messages = Some(on),
                             None => warn(format!("invalid mouse_capture_messages '{}' (true or false)", value)),
                         },
+                        "version_check" => match parse_bool(value) {
+                            Some(on) => config.version_check = Some(on),
+                            None => warn(format!("invalid version_check '{}' (true or false)", value)),
+                        },
                         "mouse_autocapture" => match parse_bool(value) {
                             Some(on) => config.mouse_autocapture = Some(on),
                             None => warn(format!("invalid mouse_autocapture '{}' (true or false)", value)),
@@ -1342,6 +1348,8 @@ pub struct Settings {
     pub mouse_sensitivity: f64,
     /// Say over the picture when the mouse is captured or let go.
     pub mouse_capture_messages: bool,
+    /// Ask rust-dos.com at startup whether there is a newer version.
+    pub version_check: bool,
     /// Rewind with held Alt+F11, and the memory in MB its states may take.
     pub rewind: bool,
     pub rewind_memory: usize,
@@ -1405,6 +1413,7 @@ impl Default for Settings {
             mouse_autocapture: true,
             mouse_sensitivity: 1.0,
             mouse_capture_messages: true,
+            version_check: true,
             rewind: false,
             rewind_memory: 256,
             idle_skip: true,
@@ -1508,6 +1517,7 @@ impl Settings {
             mouse_autocapture: config.mouse_autocapture.unwrap_or(default.mouse_autocapture),
             mouse_sensitivity: config.mouse_sensitivity.unwrap_or(default.mouse_sensitivity),
             mouse_capture_messages: config.mouse_capture_messages.unwrap_or(default.mouse_capture_messages),
+            version_check: config.version_check.unwrap_or(default.version_check),
             rewind: config.rewind.unwrap_or(default.rewind),
             rewind_memory: config.rewind_memory.unwrap_or(default.rewind_memory),
             idle_skip: config.idle_skip.unwrap_or(default.idle_skip),
@@ -1601,6 +1611,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Emulator, "mouse_autocapture", yes_no(settings.mouse_autocapture)),
         (Emulator, "mouse_sensitivity", Some(settings.mouse_sensitivity.to_string())),
         (Emulator, "mouse_capture_messages", yes_no(settings.mouse_capture_messages)),
+        (Emulator, "version_check", yes_no(settings.version_check)),
         (Emulator, "rewind", yes_no(settings.rewind)),
         (Emulator, "rewind_memory", Some(settings.rewind_memory.to_string())),
         (Emulator, "idle_skip", yes_no(settings.idle_skip)),
@@ -2694,6 +2705,7 @@ mod tests {
             mouse_autocapture: false,
             mouse_sensitivity: 2.3,
             mouse_capture_messages: false,
+            version_check: false,
             rewind: true,
             rewind_memory: 512,
             idle_skip: false,

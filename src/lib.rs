@@ -105,6 +105,7 @@ pub mod time_commands;
 pub mod timer;
 pub mod ultrasnd;
 pub mod verite;
+pub mod version_check;
 pub mod vhd;
 pub mod video;
 pub mod voodoo;

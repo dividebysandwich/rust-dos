@@ -276,6 +276,8 @@ pub struct Startup {
     /// (label, value) lines under the emulator's name; the value stands
     /// out.
     pub notes: Vec<(String, String)>,
+    /// A line under the box: a newer rust-dos (`version_check`).
+    pub update: Option<String>,
     pub commands: Vec<StartupItem>,
 }
 

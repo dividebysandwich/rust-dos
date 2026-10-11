@@ -1526,7 +1526,8 @@ impl Cpu {
     /// and batch files.
     pub fn start_dos(&mut self) {
         self.load_shell();
-        crate::video::print_banner(self, &self.startup.notes.clone());
+        let (notes, update) = (self.startup.notes.clone(), self.startup.update.clone());
+        crate::video::print_banner(self, &notes, update.as_deref());
         for item in self.startup.commands.clone() {
             match item {
                 crate::boot::StartupItem::Lines(lines) => self.queue_batch_lines(&lines),
