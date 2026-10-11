@@ -30,7 +30,9 @@ until curl -sf localhost:8086/api/status >/dev/null; do sleep 0.2; done
   or pass `--debug-server 127.0.0.1:<port>`.
 - **Output:** the emulator log doesn't go to stdout. It goes to
   `rust-dos.log` in the per-user config directory, replaced on every start.
-  Read it through `/api/log` instead, which can filter it.
+  Read it through `/api/log` instead, which can filter it. When running
+  several instances, give each its own file with `--log FILE`, or they
+  replace each other's log.
 
 All examples below use `H=localhost:8086` and `J='-H content-type:application/json'`.
 

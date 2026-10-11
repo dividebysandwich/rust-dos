@@ -1,8 +1,8 @@
 //! The emulator log file, `rust-dos.log` in the per-user configuration
-//! directory: every `Bus::log_string` line, kept so users can attach it to
-//! bug reports. It is recreated on every start, and stops growing at
-//! `MAX_BYTES` so a program that keeps triggering a log line can't fill the
-//! disk.
+//! directory or the file `--log` names: every `Bus::log_string` line, kept
+//! so users can attach it to bug reports. It is recreated on every start,
+//! and stops growing at `MAX_BYTES` so a program that keeps triggering a
+//! log line can't fill the disk.
 
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
