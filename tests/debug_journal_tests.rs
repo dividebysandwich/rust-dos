@@ -72,10 +72,25 @@ fn start(dir: &std::path::Path) -> (Emulator, SocketAddr) {
             }
         }
     });
-    let Ok(at) = lines.recv_timeout(Duration::from_secs(60)) else {
-        let exited = emulator.0.try_wait().ok().flatten();
-        let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
-        panic!("the emulator didn't start its debug server within 60 s (exit: {exited:?}); stderr:\n{stderr}");
+    let at = match lines.recv_timeout(Duration::from_secs(60)) {
+        Ok(at) => at,
+        Err(e) => {
+            // A closed stdout means the emulator is ending: its exit code
+            // (a DLL it can't load, a stack overflow) comes a moment later.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let exited = loop {
+                match emulator.0.try_wait() {
+                    Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+                    status => break status.ok().flatten(),
+                }
+            };
+            let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
+            let why = match e {
+                std::sync::mpsc::RecvTimeoutError::Timeout => "didn't start its debug server within 60 s",
+                std::sync::mpsc::RecvTimeoutError::Disconnected => "closed its output before starting its debug server",
+            };
+            panic!("the emulator {why} (exit: {exited:?}); stderr:\n{stderr}");
+        }
     };
     (emulator, at.parse().unwrap())
 }

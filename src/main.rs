@@ -39,7 +39,7 @@ use rust_dos::hardware::Hardware;
 use rust_dos::savestate::{self, slots};
 
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version = rust_dos::build_info::VERSION, about, long_about = None)]
 struct Args {
     /// Window scale factor [default: 1, or the config file's scale]
     #[arg(short, long, value_parser = clap::value_parser!(u32).range(1..=16))]
@@ -290,6 +290,10 @@ fn main() -> Result<(), String> {
     if let Some(core) = args.core {
         settings.core = core;
     }
+    // Ask rust-dos.com whether there is a newer version while the window
+    // opens; not in runs whose screens must come out the same.
+    let mut update_check = (settings.version_check && !args.deterministic && args.debug_server.is_none())
+        .then(rust_dos::version_check::Check::start);
     // A game to launch: its profile, read now so its memory size is the
     // machine's.
     let imported = match &args.import {
@@ -467,7 +471,14 @@ fn main() -> Result<(), String> {
         Some(drive) => StartupItem::Lines(vec![format!("BOOT -l {}", disk::drive_key(drive))]),
         None => StartupItem::BatchFile("C:\\AUTOEXEC.BAT".to_string()),
     });
-    cpu.startup = Startup { notes: banner_notes(&config, args.no_config), commands };
+    // A newer version under the box: the answer if it comes in a moment,
+    // else what the last check found.
+    let update = update_check.as_mut().and_then(|check| {
+        check.wait(std::time::Duration::from_secs(1));
+        check.banner()
+    });
+    let update = update.as_deref().map(rust_dos::version_check::console_line);
+    cpu.startup = Startup { notes: banner_notes(&config, args.no_config), update, commands };
     cpu.start_dos();
 
     // Cached render target. We re-render the full VGA surface only when
@@ -1807,6 +1818,17 @@ fn main() -> Result<(), String> {
             osd.notify(notice.title, notice.detail, notice.big);
         }
         osd.set_corner(achievements.trackers());
+        // A newer rust-dos, once the website has answered.
+        if let Some(check) = &mut update_check {
+            if let Some(version) = check.news() {
+                let (title, detail) = rust_dos::version_check::notification(&version);
+                cpu.bus.log_string(&format!("[VERSION] {}. {}", title, detail));
+                osd.notify(title, detail, true);
+            }
+            if check.finished() {
+                update_check = None;
+            }
+        }
         if let Some((username, token)) = achievements.take_new_token() {
             ui.sync_achievements(&username, &token);
             if let Err(e) = host!().keep_token(&username, &token) {
@@ -3229,7 +3251,11 @@ fn load_config(args: &Args) -> Result<config::Config, String> {
 /// Build the CPU with drive C: from `-d`, the config file or the working
 /// directory (in that order), then mount the config's other drives. Opens
 /// the log file.
-fn create_cpu(args: &Args, config: &config::Config, memory_mb: usize) -> Result<Cpu, String> {
+///
+/// The CPU is boxed: it is about 136 KB, and in a debug build every move of
+/// it gets its own copy in the frame of `main` and here. Unboxed, `main`'s
+/// frame was about 630 KB and startup overflowed Windows's 1 MB main thread stack.
+fn create_cpu(args: &Args, config: &config::Config, memory_mb: usize) -> Result<Box<Cpu>, String> {
     use crate::disk::DRIVE_C;
 
     let mut warnings = config.warnings.clone();
@@ -3260,7 +3286,7 @@ fn create_cpu(args: &Args, config: &config::Config, memory_mb: usize) -> Result<
         _ => std::path::PathBuf::from("."),
     };
 
-    let mut cpu = Cpu::with_memory(root_path.clone(), memory_mb);
+    let mut cpu = Box::new(Cpu::with_memory(root_path.clone(), memory_mb));
     cpu.bus.log_file = open_log_file(args.log.as_deref())?;
     cpu.shell_history.set_home(rust_dos::cmdline::default_history_file());
     rust_dos::cmdline::configure(&mut cpu, &config.shell);

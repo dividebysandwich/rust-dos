@@ -989,8 +989,8 @@ pub fn print_char(bus: &mut Bus, ascii: u8) {
 
 /// The box above the first DOS prompt: the emulator and its version, then
 /// `notes`, (label, value) with the value standing out, then the way to
-/// the settings.
-pub fn print_banner(cpu: &mut Cpu, notes: &[(String, String)]) {
+/// the settings; and `update` under it, in yellow.
+pub fn print_banner(cpu: &mut Cpu, notes: &[(String, String)], update: Option<&str>) {
     // Bright cyan, white and yellow on blue, as the rust-dos program has it.
     const FRAME: u8 = 0x1B;
     const TEXT: u8 = 0x1F;
@@ -1036,7 +1036,12 @@ pub fn print_banner(cpu: &mut Cpu, notes: &[(String, String)]) {
         print_string(cpu, "\r\n");
     }
     put(cpu, &format!("╚{}╝", "═".repeat(width + 2)), FRAME);
-    print_string(cpu, "\r\n\r\n");
+    print_string(cpu, "\r\n");
+    if let Some(update) = update {
+        put(cpu, update, 0x0E);
+        print_string(cpu, "\r\n");
+    }
+    print_string(cpu, "\r\n");
 }
 
 pub fn print_string(cpu: &mut Cpu, s: &str) {
