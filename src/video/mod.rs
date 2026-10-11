@@ -201,16 +201,32 @@ impl PartialEq for Frame {
 
 impl Eq for Frame {}
 
-/// What the 256-color renderer drew a frame's rows from: the colors and
-/// the shape, and each row's color indices as the CRTC scanned them out.
-/// Rows it would draw the same again are left as they are, which spares
-/// converting a picture a program keeps writing without changing what
-/// shows, as DOSBox's renderer compares its lines. Empty where the frame
-/// holds anything else.
+/// What the 256-color or the 16-color renderer drew a frame's rows from:
+/// the colors and the shape (`key`), and each row's source as the CRTC
+/// scanned it out (the 256-color renderer's color indices, the 16-color
+/// one's plane bytes). Rows it would draw the same again are left as they
+/// are, which spares converting a picture a program keeps writing without
+/// changing what shows, as DOSBox's renderer compares its lines. Empty
+/// where the frame holds anything else.
 #[derive(Clone, Debug, Default)]
 struct DrawnFrom {
     key: Vec<u8>,
     rows: Vec<u8>,
+}
+
+impl DrawnFrom {
+    /// Make room for `len` bytes of rows drawn under `key`, forgetting the
+    /// rows kept under another key. True if the rows kept are still those
+    /// on the canvas.
+    fn reuse(&mut self, key: Vec<u8>, len: usize) -> bool {
+        if self.key != key {
+            self.key = key;
+            self.rows = Vec::new();
+        }
+        let known = self.rows.len() == len;
+        self.rows.resize(len, 0);
+        known
+    }
 }
 
 impl Frame {
@@ -318,8 +334,9 @@ pub fn render_screen(frame: &mut Frame, bus: &Bus) {
     }
     // So does the 16-color one.
     if bus.video_mode.is_planar() && !bus.vga.adapter.gate_array() {
-        frame.doubled = false;
+        let (w, rows) = bus.vga.graphics_size();
         render_planar(&mut frame.rgb, width, &bus.vga.vram_graphics, bus, &mut frame.drawn_from);
+        frame.doubled = (frame.width as usize, frame.height as usize) == (2 * w, 2 * rows);
         return;
     }
     frame.drawn_from = DrawnFrom::default();
@@ -606,12 +623,7 @@ fn render_planar(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus: &Bus, dra
     let mut key = vec![b'P'];
     key.extend(colors.iter().flat_map(|&(r, g, b)| [r, g, b]));
     key.extend([width, rows, canvas_w, canvas_h, pan, split_pan, split.min(rows)].iter().flat_map(|v| (*v as u32).to_le_bytes()));
-    if drawn_from.key != key || drawn_from.rows.len() != 4 * span * rows {
-        drawn_from.key = key;
-        drawn_from.rows = Vec::new();
-    }
-    let known = !drawn_from.rows.is_empty();
-    drawn_from.rows.resize(4 * span * rows, 0);
+    let known = drawn_from.reuse(key, 4 * span * rows);
     let mask = plane_size - 1;
     let mut source = vec![0u8; 4 * span];
 
@@ -809,12 +821,7 @@ fn render_graphics_mode(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus: &B
     // are the same.
     let mut key = colors.concat();
     key.extend([width, rows, canvas_w, canvas_h].iter().flat_map(|v| (*v as u32).to_le_bytes()));
-    if drawn_from.key != key || drawn_from.rows.len() != width * rows {
-        drawn_from.key = key;
-        drawn_from.rows = Vec::new();
-    }
-    let known = !drawn_from.rows.is_empty();
-    drawn_from.rows.resize(width * rows, 0);
+    let known = drawn_from.reuse(key, width * rows);
 
     // The source pixel of each column of the canvas.
     let columns: Vec<usize> = (0..canvas_w).map(|tx| tx * width / canvas_w).collect();
