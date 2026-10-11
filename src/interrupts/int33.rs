@@ -126,7 +126,9 @@ pub fn handle(cpu: &mut Cpu) {
         }
 
         0x000B => {
-            // Read motion counters. Returns CX = mickey X, DX = mickey Y. Clears.
+            // Read motion counters. Returns CX = mickey X, DX = mickey Y.
+            // Clears them, so the event handler's SI and DI count from
+            // here too (see `deliver_callback`).
             cpu.set_cx(cpu.bus.mouse.mickey_x as u16);
             cpu.set_dx(cpu.bus.mouse.mickey_y as u16);
             cpu.bus.mouse.mickey_x = 0;

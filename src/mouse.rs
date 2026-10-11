@@ -129,11 +129,8 @@ pub struct MouseState {
     ///   bit 3 = R-press, bit 4 = R-release,
     ///   bit 5 = M-press, bit 6 = M-release.
     pub pending_callback_events: u16,
-    /// Snapshot of the mickey delta passed to the last callback. Used so
-    /// motion events can pass the accumulated mickey count without
-    /// destroying the AH=0Bh counter's independent accumulator.
-    pub last_callback_mickey_x: i16,
-    pub last_callback_mickey_y: i16,
+    /// Where two fields used to be saved; kept so older states load.
+    unused: UnusedMickeys,
     /// The parts of a pixel a captured mouse moved that the cursor hasn't
     /// yet (see `move_by`).
     rest_x: f64,
@@ -178,8 +175,7 @@ impl MouseState {
             callback_cs: 0,
             callback_ip: 0,
             pending_callback_events: 0,
-            last_callback_mickey_x: 0,
-            last_callback_mickey_y: 0,
+            unused: UnusedMickeys,
             rest_x: 0.0,
             rest_y: 0.0,
             ps2: Ps2Mouse::default(),
@@ -255,8 +251,6 @@ impl MouseState {
         self.callback_cs = 0;
         self.callback_ip = 0;
         self.pending_callback_events = 0;
-        self.last_callback_mickey_x = 0;
-        self.last_callback_mickey_y = 0;
     }
 
     /// Move the cursor, clamped to the clipping window, and accumulate
@@ -445,17 +439,17 @@ pub fn deliver_callback(cpu: &mut crate::cpu::Cpu) -> bool {
     let mouse = &mut cpu.bus.mouse;
     // Snapshot and consume the bits we're about to handle.
     mouse.pending_callback_events &= !fire;
-    let dx = mouse.mickey_x - mouse.last_callback_mickey_x;
-    let dy = mouse.mickey_y - mouse.last_callback_mickey_y;
-    mouse.last_callback_mickey_x = mouse.mickey_x;
-    mouse.last_callback_mickey_y = mouse.mickey_y;
+    // SI and DI hold the motion counters as they stand, the motion since
+    // a program last read them with AX=000Bh, as the Microsoft driver,
+    // CuteMouse and DOSBox pass them. BloodNet's handler moves its pointer
+    // by them and reads the counters after each move.
     let regs = [
         fire,
         mouse.buttons as u16,
         mouse.x as u16,
         mouse.y as u16,
-        dx as u16,
-        dy as u16,
+        mouse.mickey_x as u16,
+        mouse.mickey_y as u16,
     ];
     let (handler_cs, handler_ip) = (mouse.callback_cs, mouse.callback_ip);
 
@@ -693,8 +687,21 @@ crate::state_fields!(MouseState {
     press_count, press_x, press_y, release_count, release_x, release_y,
     mickey_x, mickey_y, mickey_accum_x, mickey_accum_y,
     callback_mask, callback_cs, callback_ip, pending_callback_events,
-    last_callback_mickey_x, last_callback_mickey_y, rest_x, rest_y, ps2,
+    unused, rest_x, rest_y, ps2,
 } skip { serial_dx, serial_dy, last_call_ns, last_relative_ns });
+
+/// Two i16 placeholders in a saved mouse: saved as zeros, read and
+/// dropped on load.
+struct UnusedMickeys;
+
+impl crate::savestate::State for UnusedMickeys {
+    fn save(&self, w: &mut crate::savestate::Writer) {
+        crate::savestate::State::save(&[0i16; 2], w);
+    }
+    fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
+        crate::savestate::State::load(&mut [0i16; 2], r)
+    }
+}
 
 /// Whether `at` is no longer than `window` nanoseconds before `now`, or
 /// after it (a state loaded from earlier).
@@ -737,5 +744,64 @@ mod tests {
         assert_eq!((mouse.x, mouse.y), (639, 50), "the range clamps it");
         assert_eq!((mouse.mickey_x, mouse.mickey_y), (0, 0));
         assert_eq!(mouse.pending_callback_events, 0);
+    }
+
+    /// A mouse saved before the event handler stopped keeping its own
+    /// motion snapshot loads, and saves to the same bytes.
+    #[test]
+    fn a_mouse_keeps_its_saved_layout() {
+        use crate::savestate::{Reader, State, Writer};
+        let mut mouse = MouseState::new();
+        mouse.reset(640, 200);
+        mouse.move_by(7.5, -3.0);
+        mouse.callback_mask = 0x1F;
+        mouse.ps2.rate = 60;
+
+        // The fields in the order older versions saved them, with the
+        // event handler's motion snapshot between the pending events and
+        // the parts of a pixel.
+        let layout = |mouse: &MouseState, snapshot: [i16; 2]| {
+            let mut w = Writer::new();
+            let m = mouse;
+            m.installed.save(&mut w);
+            m.hide_counter.save(&mut w);
+            m.x.save(&mut w);
+            m.y.save(&mut w);
+            m.buttons.save(&mut w);
+            m.min_x.save(&mut w);
+            m.max_x.save(&mut w);
+            m.min_y.save(&mut w);
+            m.max_y.save(&mut w);
+            m.press_count.save(&mut w);
+            m.press_x.save(&mut w);
+            m.press_y.save(&mut w);
+            m.release_count.save(&mut w);
+            m.release_x.save(&mut w);
+            m.release_y.save(&mut w);
+            m.mickey_x.save(&mut w);
+            m.mickey_y.save(&mut w);
+            m.mickey_accum_x.save(&mut w);
+            m.mickey_accum_y.save(&mut w);
+            m.callback_mask.save(&mut w);
+            m.callback_cs.save(&mut w);
+            m.callback_ip.save(&mut w);
+            m.pending_callback_events.save(&mut w);
+            snapshot.save(&mut w);
+            m.rest_x.save(&mut w);
+            m.rest_y.save(&mut w);
+            m.ps2.save(&mut w);
+            w.buf
+        };
+
+        let mut w = Writer::new();
+        mouse.save(&mut w);
+        assert_eq!(w.buf, layout(&mouse, [0, 0]));
+
+        let old = layout(&mouse, [12, -4]);
+        let mut loaded = MouseState::new();
+        let mut r = Reader::new(&old);
+        loaded.load(&mut r).unwrap();
+        assert!(r.is_empty());
+        assert_eq!(layout(&loaded, [0, 0]), layout(&mouse, [0, 0]));
     }
 }
