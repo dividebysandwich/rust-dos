@@ -391,15 +391,15 @@ pub fn assume_machine_display(cpu: &mut Cpu) {
     set_cursor(cpu, col, row, page);
 }
 
-/// INT 10h AH=00h: set the standard video mode AL (bit 7: keep the
-/// contents of video memory). This also leaves a VESA mode.
 /// Tell the mouse driver a program set a video mode, as a driver hooking
-/// INT 10h sees it (see `Mouse::video_mode_set`).
+/// INT 10h sees it (see `MouseState::video_mode_set`).
 fn mode_set_for_mouse(cpu: &mut Cpu) {
     let screen = crate::mouse::screen_size(&cpu.bus);
     cpu.bus.mouse.video_mode_set(screen);
 }
 
+/// INT 10h AH=00h: set the standard video mode AL (bit 7: keep the
+/// contents of video memory). This also leaves a VESA mode.
 pub fn set_mode(cpu: &mut Cpu, al: u8) {
     let keep = al & 0x80 != 0;
     // A monochrome adapter only has mode 7, whatever a program asks for.
