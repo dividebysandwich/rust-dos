@@ -289,6 +289,23 @@ impl MouseState {
         self.y = new_y;
     }
 
+    /// A program set a video mode through INT 10h (AH=00h, or VBE function
+    /// 02h), whose screen is `screen` (see `screen_size`). Drivers that hook
+    /// INT 10h, CuteMouse's and DOSBox's among them, set the cursor ranges
+    /// to the new screen, so a range left from the mode before doesn't
+    /// stretch the virtual screen: Conqueror A.D. 1086 sets 0-479 in its
+    /// 640x480 menus and reads 0-199 in its 320x200 battles without setting
+    /// the range again. The cursor stays where it is, inside the new range.
+    pub fn video_mode_set(&mut self, screen: (usize, usize)) {
+        let (w, h) = (if screen.0 < 640 { 640 } else { screen.0 as i32 }, screen.1 as i32);
+        self.min_x = 0;
+        self.max_x = w - 1;
+        self.min_y = 0;
+        self.max_y = h - 1;
+        let (x, y) = (self.x, self.y);
+        self.warp(x, y);
+    }
+
     /// Put the cursor at (`x`, `y`) within the range, as the program asks
     /// with INT 33h AX=0004h, or by setting a range the cursor is outside
     /// of. The mouse didn't move: a driver counts no mickeys and calls no

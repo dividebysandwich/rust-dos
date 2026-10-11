@@ -393,6 +393,13 @@ pub fn assume_machine_display(cpu: &mut Cpu) {
 
 /// INT 10h AH=00h: set the standard video mode AL (bit 7: keep the
 /// contents of video memory). This also leaves a VESA mode.
+/// Tell the mouse driver a program set a video mode, as a driver hooking
+/// INT 10h sees it (see `Mouse::video_mode_set`).
+fn mode_set_for_mouse(cpu: &mut Cpu) {
+    let screen = crate::mouse::screen_size(&cpu.bus);
+    cpu.bus.mouse.video_mode_set(screen);
+}
+
 pub fn set_mode(cpu: &mut Cpu, al: u8) {
     let keep = al & 0x80 != 0;
     // A monochrome adapter only has mode 7, whatever a program asks for.
@@ -658,7 +665,10 @@ pub fn handle(cpu: &mut Cpu) {
 
     match ah {
         // AH = 00h: Set Video Mode
-        0x00 => set_mode(cpu, cpu.get_al()),
+        0x00 => {
+            set_mode(cpu, cpu.get_al());
+            mode_set_for_mouse(cpu);
+        }
 
         // AH = 01h: Set Cursor Type
         0x01 => {
@@ -1493,7 +1503,13 @@ pub fn handle(cpu: &mut Cpu) {
         }
 
         // AH = 4Fh: VESA BIOS Extensions
-        0x4F => super::vbe::handle(cpu),
+        0x4F => {
+            let set = cpu.get_al() == 0x02;
+            super::vbe::handle(cpu);
+            if set && cpu.ax() == 0x004F {
+                mode_set_for_mouse(cpu);
+            }
+        }
         0x15 if cpu.bus.verite() => crate::bus::verite_bios(cpu),
 
         // AH = 0Ch: Write Graphics Pixel, in any standard graphics mode

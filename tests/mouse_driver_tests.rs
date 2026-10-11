@@ -227,3 +227,59 @@ fn reflected_poll_without_matching_handler_leaves_event_pending() {
         assert!(!rust_dos::mouse::callback_busy(&cpu.bus));
     }
 }
+
+/// INT 10h with AX and BX, as a program sets a video mode.
+fn int10(cpu: &mut Cpu, function: u16, mode: u16) {
+    cpu.set_ax(function);
+    cpu.set_bx(mode);
+    rust_dos::interrupts::int10::handle(cpu);
+}
+
+fn range(cpu: &mut Cpu, function: u16, min: u16, max: u16) {
+    cpu.set_cx(min);
+    cpu.set_dx(max);
+    call(cpu, function);
+}
+
+#[test]
+fn a_video_mode_set_gives_the_cursor_the_new_screens_range() {
+    // Conqueror A.D. 1086: its menus in VESA mode 101h set 0-479, its
+    // battles in mode 13h read 0-199 and set no range of their own.
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    int10(&mut cpu, 0x4F02, 0x0101);
+    assert_eq!(cpu.ax(), 0x004F);
+    call(&mut cpu, 0x0000);
+    range(&mut cpu, 0x0007, 0, 639);
+    range(&mut cpu, 0x0008, 0, 479);
+    cpu.set_cx(320);
+    cpu.set_dx(240);
+    call(&mut cpu, 0x0004);
+
+    int10(&mut cpu, 0x0013, 0);
+    let m = &cpu.bus.mouse;
+    assert_eq!((m.min_x, m.max_x, m.min_y, m.max_y), (0, 639, 0, 199));
+    assert_eq!((m.x, m.y), (320, 199), "the cursor stays, inside the new range");
+    assert_eq!(m.virtual_screen(&cpu.bus), (640, 200), "the picture's bottom row is y 199");
+    call(&mut cpu, 0x0003);
+    assert_eq!((cpu.cx(), cpu.dx()), (320, 199));
+
+    // Back in the menus, through VBE function 02h.
+    int10(&mut cpu, 0x4F02, 0x0101);
+    let m = &cpu.bus.mouse;
+    assert_eq!((m.min_x, m.max_x, m.min_y, m.max_y), (0, 639, 0, 479));
+    assert_eq!(m.virtual_screen(&cpu.bus), (640, 480));
+}
+
+#[test]
+fn a_range_set_after_the_mode_stays() {
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    call(&mut cpu, 0x0000);
+    int10(&mut cpu, 0x0013, 0);
+    range(&mut cpu, 0x0008, 0, 399);
+    let m = &cpu.bus.mouse;
+    assert_eq!((m.min_y, m.max_y), (0, 399));
+    assert_eq!(m.virtual_screen(&cpu.bus), (640, 400), "a program that halves the coordinates");
+    // A VBE call other than a mode set leaves it.
+    int10(&mut cpu, 0x4F03, 0);
+    assert_eq!(cpu.bus.mouse.max_y, 399);
+}
