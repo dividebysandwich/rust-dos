@@ -394,3 +394,11 @@ When **on**, the lines typed at the DOS prompt are kept in
 and **F7** find them again after a restart. When **off**, the history lasts
 only until Rust-DOS quits. A line that begins with a space is never kept.
 The `HISTORY` command lists the lines, and `HISTORY CLEAR` forgets them.
+
+# Check for new versions {#version-check}
+
+When **on**, Rust-DOS asks rust-dos.com at startup whether a newer version
+is out. If there is one, a notification says so over the picture and a line
+under the box above the first DOS prompt names it. Only the version number
+is fetched; nothing about you or your games is sent. **Off** skips the
+check. The change takes effect at the next start.
