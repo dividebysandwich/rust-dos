@@ -374,7 +374,10 @@ curl -s "$H/api/journal?after=$S&type=paused&wait=30000"   # long poll for the n
     takes, `base64` is `{"addr","len","base64"}`, and `raw` is the bytes as
     `application/octet-stream`. The JSON formats have `state_seq` in the
     body; every format has it in the `X-Debug-State-Seq` header, which is
-    what `If-State-Seq` on the next write wants.
+    what `If-State-Seq` on the next write wants. Their `addr` is the linear
+    address (physical only when the request gave a bare address), and a
+    bare address in `PUT` is physical, so with paging on write back to the
+    `addr` the read was given, not the one in the reply.
   - Write with `PUT /api/memory {"addr":"1000:0200","hex":"90 90"}`. Writes
     also invalidate the decoded-instruction cache, so patching code works.
     The reply has the bytes the write replaced (`old`) and what reads back

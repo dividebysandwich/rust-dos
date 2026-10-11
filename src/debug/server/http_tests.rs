@@ -511,6 +511,9 @@ fn every_memory_format_has_the_state_seq_and_json_has_the_hex_put_takes() {
     for format in ["hex", "base64", "raw", "json"] {
         let r = rig.get(&format!("/api/memory?addr=0200:0000&len=2&format={}", format));
         assert!(r.header("x-debug-state-seq").is_some(), "{}", format);
+        if format == "base64" {
+            assert_eq!(r.json()["state_seq"].as_u64().map(|s| s.to_string()).as_deref(), r.header("x-debug-state-seq"));
+        }
     }
     let unknown = rig.get("/api/memory?addr=0&len=2&format=yaml");
     assert_eq!(unknown.status, 400);
