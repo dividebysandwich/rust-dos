@@ -197,3 +197,12 @@ flate2 = "1"
 iced-x86 = { version = "1.21.0", features = ["code_asm"] }
 # The WebSocket client of the debug server's tests.
 tungstenite = "0.29"
+# The benchmarks in benches/ (docs/benchmarks.md). Without its default
+# features: no plots, no rayon.
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+# One benchmark file per subsystem, sharing benches/common. Criterion runs
+# them, in place of the built-in harness.
+[[bench]]
+name = "dos"
+harness = false

@@ -131,6 +131,7 @@ debug build in `target\debug` too, so put the DLL on `PATH` for the tests.
 `cargo test` runs the tests. A few of them host a LAN relay or look for one
 by broadcast, on all of the computer's network interfaces; if your firewall
 asks about them on every run, `cargo test-local` skips those few.
+`cargo bench` runs the benchmarks ([docs/benchmarks.md](docs/benchmarks.md)).
 
 ## Configuration
 
