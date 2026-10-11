@@ -688,9 +688,6 @@ pub struct DebugHub {
     quit: Option<Ctx>,
     /// Window input reached the machine in this stop (`host_input`).
     host_input_told: bool,
-    /// The `X-Request-Id` of the latest operations, for the entries they
-    /// cause after their request was carried out.
-    op_tags: std::collections::BTreeMap<u64, Arc<str>>,
     /// Exceptions (bit n = vector n) and mode switches to pause after, and
     /// the counts of them last seen.
     break_exceptions: u32,
@@ -821,7 +818,6 @@ impl DebugHub {
             last_start_seq: None,
             quit: None,
             host_input_told: false,
-            op_tags: std::collections::BTreeMap::new(),
             break_exceptions: 0,
             break_mode_switch: false,
             seen_exceptions: 0,
@@ -961,24 +957,26 @@ impl DebugHub {
         then: impl FnOnce(&mut Journal, u64),
     ) -> Option<u64> {
         let shared = self.shared.as_ref()?;
-        let request_id = cause.and_then(|c| match self.cur.as_ref().filter(|ctx| ctx.req == c) {
-            Some(ctx) => ctx.tag.clone(),
-            None => self.op_tags.get(&c).cloned(),
-        });
-        let stamp = Stamp {
-            t_ms: shared.start_time.elapsed().as_millis() as u64,
-            icount: cpu.executed,
-            emu_ns: cpu.bus.clock.now_ns(),
-            cause,
-            request_id,
-            op: self.current_op,
-        };
+        let current = cause.and_then(|c| self.cur.as_ref().filter(|ctx| ctx.req == c));
         let fields = match fields {
             Value::Object(m) => m,
             _ => Map::new(),
         };
         let seq = {
             let mut j = shared.journal.lock().ok()?;
+            // The request being carried out, or the operation it started.
+            let request_id = match current {
+                Some(ctx) => ctx.tag.clone(),
+                None => cause.and_then(|c| j.op_tag(c)),
+            };
+            let stamp = Stamp {
+                t_ms: shared.start_time.elapsed().as_millis() as u64,
+                icount: cpu.executed,
+                emu_ns: cpu.bus.clock.now_ns(),
+                cause,
+                request_id,
+                op: self.current_op,
+            };
             let seq = j.append(kind, stamp, fields)?;
             then(&mut j, seq);
             seq
@@ -988,17 +986,6 @@ impl DebugHub {
             ctx.seq = Some(seq);
         }
         Some(seq)
-    }
-
-    /// Keep the tag of the request being carried out, which starts an
-    /// operation, for the entries the operation causes later.
-    fn keep_tag(&mut self) {
-        if let Some(Ctx { req, tag: Some(tag), .. }) = &self.cur {
-            self.op_tags.insert(*req, tag.clone());
-            while self.op_tags.len() > journal::OPS_CAPACITY {
-                self.op_tags.pop_first();
-            }
-        }
     }
 
     /// Append an entry caused by the request being carried out.
@@ -1122,8 +1109,7 @@ impl DebugHub {
     /// machine from the one under way, which is superseded, and resumes
     /// it, appending `resumed` with `fields`.
     fn start_op(&mut self, cpu: &Cpu, kind: OpKind, mut fields: Value) {
-        let Some(req) = self.cur.as_ref().map(|c| c.req) else { return };
-        self.keep_tag();
+        let Some((req, tag)) = self.cur.as_ref().map(|c| (c.req, c.tag.clone())) else { return };
         let supersedes = self.current_op.replace(req);
         fields["kind"] = kind.name().into();
         fields["from_paused"] = self.paused.into();
@@ -1133,7 +1119,7 @@ impl DebugHub {
             if let Some(old) = supersedes {
                 j.supersede_op(old, req);
             }
-            j.begin_op(req, kind, seq);
+            j.begin_op(req, kind, seq, tag);
         });
         if let Some(ctx) = self.cur.as_mut() {
             ctx.op = Some(req);
@@ -2286,6 +2272,14 @@ impl DebugHub {
                 }
             },
             Cmd::Input { events, wait } => {
+                // Pending operations are never evicted: this bounds them.
+                let pending = self.with_journal(|j| j.pending_ops(|k| k == OpKind::Input).len()).unwrap_or(0);
+                if pending >= journal::PENDING_INPUT_CAPACITY {
+                    return Reply::Error(
+                        429,
+                        format!("{} input requests are still being typed: wait for some (or DELETE /api/input)", pending),
+                    );
+                }
                 let mut low = Vec::new();
                 for ev in &events {
                     if let Err(e) = expand_input(ev, cpu.bus.typing_layout(), &mut low) {
@@ -2297,9 +2291,9 @@ impl DebugHub {
                 // event is delivered (`input_delivered`).
                 let req = self.cur.as_ref().map_or(0, |c| c.req);
                 self.input.push_back(LowInput::End { req });
-                self.keep_tag();
+                let tag = self.cur.as_ref().and_then(|c| c.tag.clone());
                 let fields = json!({"events": events.len(), "wait": wait});
-                self.append_then(cpu, Kind::InputQueued, Some(req), fields, |j, seq| j.begin_op(req, OpKind::Input, seq));
+                self.append_then(cpu, Kind::InputQueued, Some(req), fields, |j, seq| j.begin_op(req, OpKind::Input, seq, tag));
                 if let Some(ctx) = self.cur.as_mut() {
                     ctx.op = Some(req);
                 }
@@ -4538,6 +4532,44 @@ mod tests {
             assert_eq!(j.after(5).err(), Some(super::journal::Gone { first: 14, last: 21 }));
             assert_eq!(j.after(13).map(|it| it.count()).ok(), Some(8));
         });
+    }
+
+    #[test]
+    fn a_pending_operation_outlives_any_number_of_others() {
+        let (mut cpu, mut hub) = machine("journal-pending");
+        pause(&mut cpu, &mut hub);
+        // Input queued with a client's ID, which nothing delivers while
+        // only requests are carried out.
+        let (mut request, _rx) = hub.request(typed("x"));
+        let input = request.req;
+        request.tag = Some(std::sync::Arc::from("typed-1"));
+        hub.handle(&mut cpu, request);
+        // More operations than the journal keeps, each ended at once.
+        for _ in 0..super::journal::OPS_CAPACITY + 100 {
+            started_op(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None });
+            ask(&mut cpu, &mut hub, Cmd::Pause, 0).unwrap();
+        }
+        assert_eq!(op_state(&hub, input).state, OpState::Pending, "still there");
+        assert!(hub.with_journal(|j| j.ops_len()).unwrap() <= super::journal::OPS_CAPACITY + 1);
+        // Delivered now, its entry has the request's ID.
+        run(&mut cpu, &mut hub, 20);
+        assert_eq!(op_state(&hub, input).state, OpState::Done);
+        let delivered = entries_of(&hub, "input_delivered").pop().unwrap();
+        assert_eq!((delivered["cause"].as_u64(), delivered["request_id"].as_str()), (Some(input), Some("typed-1")));
+    }
+
+    #[test]
+    fn input_past_the_pending_limit_is_refused() {
+        let (mut cpu, mut hub) = machine("journal-pending-limit");
+        pause(&mut cpu, &mut hub);
+        for _ in 0..super::journal::PENDING_INPUT_CAPACITY {
+            ask(&mut cpu, &mut hub, typed("x"), 0).unwrap();
+        }
+        let refused = reply(&mut cpu, &mut hub, typed("x")).unwrap_err();
+        assert_eq!(refused.0, 429, "{}", refused.1);
+        // Once some are delivered, input is taken again.
+        ask(&mut cpu, &mut hub, Cmd::InputClear, 0).unwrap();
+        assert!(reply(&mut cpu, &mut hub, typed("x")).is_ok());
     }
 
     #[test]

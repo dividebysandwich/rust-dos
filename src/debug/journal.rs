@@ -16,8 +16,13 @@ use serde_json::{Map, Value};
 
 /// Entries kept; the oldest go first.
 pub const CAPACITY: usize = 4096;
-/// Operations kept; asking for an older one gets 410.
+/// Operations kept once they ended; asking for one evicted gets 410. An
+/// operation still pending is never evicted.
 pub const OPS_CAPACITY: usize = 1024;
+/// Input operations pending at once; an input request past it gets 429.
+/// At most one control operation is pending, so this bounds the pending
+/// operations.
+pub const PENDING_INPUT_CAPACITY: usize = 1024;
 /// Goes up only when a change breaks clients; additions go in `FEATURES`.
 pub const API_VERSION: u32 = 1;
 /// What this server offers, for clients to check before relying on it.
@@ -203,6 +208,9 @@ pub struct Op {
     pub superseded_by: Option<u64>,
     /// A failed `run`'s status and message.
     pub error: Option<(u16, String)>,
+    /// The `X-Request-Id` of the request that started it, for the entries
+    /// it causes later.
+    pub tag: Option<Arc<str>>,
 }
 
 /// An operation looked up by its request number.
@@ -248,6 +256,9 @@ pub struct Journal {
     /// The last entry that changed the machine.
     pub state_seq: u64,
     ops: BTreeMap<u64, Op>,
+    /// The operations that ended, in the order they did. The first goes
+    /// once more than `OPS_CAPACITY` ended.
+    ended: VecDeque<u64>,
     /// The highest operation number evicted.
     ops_evicted: u64,
     /// The `shutdown` entry, once there is one.
@@ -263,6 +274,7 @@ impl Journal {
             stop_seq: None,
             state_seq: 0,
             ops: BTreeMap::new(),
+            ended: VecDeque::new(),
             ops_evicted: 0,
             shutdown: None,
         }
@@ -325,50 +337,73 @@ impl Journal {
         self.after(from).ok()?.find(|e| filter.matches(e))
     }
 
-    /// Start operation `req`, of `kind`, at entry `start_seq`.
-    pub fn begin_op(&mut self, req: u64, kind: OpKind, start_seq: u64) {
-        self.ops.insert(req, Op { kind, state: OpState::Pending, start_seq, end_seq: None, superseded_by: None, error: None });
-        while self.ops.len() > OPS_CAPACITY {
-            if let Some((old, _)) = self.ops.pop_first() {
+    /// Start operation `req`, of `kind`, at entry `start_seq`, for a
+    /// request with the client's ID `tag`.
+    pub fn begin_op(&mut self, req: u64, kind: OpKind, start_seq: u64, tag: Option<Arc<str>>) {
+        let op = Op { kind, state: OpState::Pending, start_seq, end_seq: None, superseded_by: None, error: None, tag };
+        self.ops.insert(req, op);
+    }
+
+    /// Operation `req` ended. Past `OPS_CAPACITY` ended ones, the one that
+    /// ended first goes; pending ones stay, however old.
+    fn ended(&mut self, req: u64) {
+        self.ended.push_back(req);
+        while self.ended.len() > OPS_CAPACITY {
+            if let Some(old) = self.ended.pop_front() {
+                self.ops.remove(&old);
                 self.ops_evicted = self.ops_evicted.max(old);
             }
         }
     }
 
+    /// The pending operation `req`, to end.
+    fn pending(&mut self, req: u64) -> Option<&mut Op> {
+        self.ops.get_mut(&req).filter(|op| op.state == OpState::Pending)
+    }
+
     /// End operation `req` in `state` at entry `end_seq`, if it is still
     /// pending.
     pub fn end_op(&mut self, req: u64, state: OpState, end_seq: Option<u64>) -> bool {
-        match self.ops.get_mut(&req) {
-            Some(op) if op.state == OpState::Pending => {
-                op.state = state;
-                op.end_seq = end_seq;
-                true
-            }
-            _ => false,
-        }
+        let Some(op) = self.pending(req) else { return false };
+        op.state = state;
+        op.end_seq = end_seq;
+        self.ended(req);
+        true
     }
 
     pub fn supersede_op(&mut self, req: u64, by: u64) {
-        if let Some(op) = self.ops.get_mut(&req).filter(|op| op.state == OpState::Pending) {
+        if let Some(op) = self.pending(req) {
             op.state = OpState::Superseded;
             op.superseded_by = Some(by);
+            self.ended(req);
         }
     }
 
     pub fn fail_op(&mut self, req: u64, end_seq: Option<u64>, status: u16, error: String) {
-        if self.end_op(req, OpState::Failed, end_seq)
-            && let Some(op) = self.ops.get_mut(&req)
-        {
+        if let Some(op) = self.pending(req) {
+            op.state = OpState::Failed;
+            op.end_seq = end_seq;
             op.error = Some((status, error));
+            self.ended(req);
         }
     }
 
     pub fn op(&self, req: u64) -> OpLookup<'_> {
         match self.ops.get(&req) {
             Some(op) => OpLookup::Found(op),
-            None if req <= self.ops_evicted => OpLookup::Gone,
+            None if req != 0 && req <= self.ops_evicted => OpLookup::Gone,
             None => OpLookup::Unknown,
         }
+    }
+
+    /// The `X-Request-Id` of the request that started operation `req`.
+    pub fn op_tag(&self, req: u64) -> Option<Arc<str>> {
+        self.ops.get(&req).and_then(|op| op.tag.clone())
+    }
+
+    /// The operations kept, pending and ended.
+    pub fn ops_len(&self) -> usize {
+        self.ops.len()
     }
 
     /// The operations still pending, of the kinds `want` takes.
@@ -485,18 +520,38 @@ mod tests {
     #[test]
     fn operations_end_once_and_old_ones_are_gone() {
         let mut j = Journal::new(16);
-        j.begin_op(5, OpKind::Step, 1);
+        j.begin_op(5, OpKind::Step, 1, Some(Arc::from("mine")));
         j.supersede_op(5, 6);
         assert!(!j.end_op(5, OpState::Stopped, Some(3)), "a superseded op stays superseded");
         let OpLookup::Found(op) = j.op(5) else { panic!("no op") };
         assert_eq!((op.state, op.superseded_by), (OpState::Superseded, Some(6)));
+        assert_eq!(j.op_tag(5).as_deref(), Some("mine"));
         for req in 10..10 + OPS_CAPACITY as u64 {
-            j.begin_op(req, OpKind::Input, 1);
+            j.begin_op(req, OpKind::Input, 1, None);
+            j.end_op(req, OpState::Done, Some(2));
         }
-        assert!(matches!(j.op(5), OpLookup::Gone));
+        assert!(matches!(j.op(5), OpLookup::Gone), "the first to end goes first");
         assert!(matches!(j.op(10), OpLookup::Found(_)));
         assert!(matches!(j.op(1 << 40), OpLookup::Unknown));
-        assert_eq!(j.pending_ops(|k| k == OpKind::Input).len(), OPS_CAPACITY);
+        assert!(matches!(j.op(0), OpLookup::Unknown), "0 is never an operation");
+        assert_eq!(j.ops_len(), OPS_CAPACITY);
+    }
+
+    #[test]
+    fn a_pending_operation_is_never_evicted() {
+        let mut j = Journal::new(16);
+        j.begin_op(1, OpKind::Input, 1, Some(Arc::from("old")));
+        j.begin_op(2, OpKind::Resume, 1, None);
+        for req in 10..10 + 3 * OPS_CAPACITY as u64 {
+            j.begin_op(req, OpKind::Step, 1, None);
+            j.supersede_op(req, req + 1);
+        }
+        assert!(matches!(j.op(1), OpLookup::Found(op) if op.state == OpState::Pending));
+        assert!(matches!(j.op(2), OpLookup::Found(op) if op.state == OpState::Pending));
+        assert_eq!(j.op_tag(1).as_deref(), Some("old"), "its request's ID stays with it");
+        assert_eq!(j.ops_len(), OPS_CAPACITY + 2, "the ended ones are bounded");
+        assert!(j.end_op(1, OpState::Done, Some(5)), "it still ends");
+        assert!(matches!(j.op(10), OpLookup::Gone));
     }
 
     #[test]
