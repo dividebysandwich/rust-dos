@@ -45,6 +45,34 @@ fn enable_activates_mouse_without_reset() {
     assert_eq!((cpu.cx(), cpu.dx()), (2, 4));
 }
 
+/// BloodNet resets the driver with the software reset alone, after its
+/// setup program left the cursor shown.
+#[test]
+fn software_reset_resets_the_driver_as_a_reset_does() {
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    call(&mut cpu, 0x0000);
+    call(&mut cpu, 0x0001);
+    cpu.set_cx(0x0001);
+    cpu.set_es(0x1234);
+    cpu.set_dx(0x5678);
+    call(&mut cpu, 0x000C);
+    cpu.bus.mouse.move_by(30.0, 20.0);
+    cpu.bus.mouse.installed = false;
+
+    cpu.set_bx(0);
+    call(&mut cpu, 0x0021);
+
+    assert_eq!((cpu.ax(), cpu.bx()), (0xFFFF, 3), "installed, three buttons");
+    let m = &cpu.bus.mouse;
+    assert!(m.installed);
+    assert_eq!(m.hide_counter, 1, "the cursor is hidden");
+    assert_eq!((m.callback_mask, m.callback_cs, m.callback_ip), (0, 0, 0), "no event handler");
+    assert_eq!((m.mickey_x, m.mickey_y), (0, 0));
+    let mut fresh = Cpu::new(PathBuf::from("."));
+    call(&mut fresh, 0x0000);
+    assert_eq!((m.x, m.y), (fresh.bus.mouse.x, fresh.bus.mouse.y), "the cursor is where a reset puts it");
+}
+
 #[test]
 fn enable_preserves_driver_configuration_and_pending_input() {
     let mut cpu = Cpu::new(PathBuf::from("."));

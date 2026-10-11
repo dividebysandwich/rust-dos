@@ -28,7 +28,10 @@ pub fn handle(cpu: &mut Cpu) {
     }
 
     match func {
-        0x0000 => {
+        // AX=0021h is the software reset of drivers from 6.0 on: AX=0000h
+        // but for the mouse hardware, which this driver has none of.
+        // BloodNet resets the driver with it alone.
+        0x0000 | 0x0021 => {
             // Reset driver + query installation status.
             // Returns: AX = FFFFh if installed, 0000h if not. BX = button count.
             let (w, h) = virtual_screen_dims(&cpu.bus);
