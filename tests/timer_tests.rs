@@ -768,3 +768,97 @@ fn pit_channel_2_times_a_calibration_loop() {
     assert_eq!(word(PIT2_HELD), 0x1000);
     assert_eq!(word(PIT2_OUT_HELD) & 0x20, 0);
 }
+
+#[test]
+fn channel_2_keeps_counting_after_a_square_wave_control_word() {
+    // Bao Xiao San Guo Zhi (SANGO.EXE, DOSBox-X issue 1274) makes its
+    // random numbers so, without ever writing a count: a counter latch
+    // command, a square wave control word, then the count's two bytes.
+    // The numbers must change from call to call, or every roll comes out
+    // the same and its keyboard loop can wait forever.
+    let mut bus = bus_at(20_000);
+    let mut rolls = Vec::new();
+    for call in 0..8u64 {
+        bus.clock.icount += 1_000 + 37 * call;
+        bus.io_write(0x43, 0x86);
+        bus.io_write(0x43, 0xB6);
+        let lsb = bus.io_read(0x42) as u16;
+        let msb = bus.io_read(0x42) as u16;
+        rolls.push(msb << 8 | lsb);
+    }
+    rolls.sort_unstable();
+    rolls.dedup();
+    assert_eq!(rolls.len(), 8, "{:04X?}", rolls);
+}
+
+#[test]
+fn a_mode_0_control_word_still_stops_channel_2() {
+    // Tony & Friends in Kellogg's Land times its frames so: mode 0 with the
+    // gate low, a count, a latch, then the gate up. The count it reads is
+    // the one it wrote, and the control word stops a running count.
+    let mut bus = bus_at(20_000);
+    let read = |bus: &mut Bus| {
+        bus.io_write(0x43, 0x80);
+        bus.io_read(0x42) as u16 | (bus.io_read(0x42) as u16) << 8
+    };
+    bus.io_write(0x61, 0x00);
+    bus.io_write(0x43, 0xB0);
+    let stopped = read(&mut bus);
+    bus.clock.icount += 1_000;
+    assert_eq!(read(&mut bus), stopped);
+    bus.io_write(0x42, 0xB2);
+    bus.io_write(0x42, 0x41);
+    bus.clock.icount += 1_000;
+    assert_eq!(read(&mut bus), 0x41B2);
+    bus.io_write(0x61, 0x01);
+    bus.clock.icount += 1_000;
+    assert!(read(&mut bus) < 0x41B2);
+}
+
+#[test]
+fn states_saved_before_channel_2_was_modelled_load() {
+    use rust_dos::savestate::machine;
+    let machine = || {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.bus.set_cycles_per_ms(20_000);
+        cpu.load_shell();
+        cpu
+    };
+    let mut a = machine();
+    a.bus.io_write(0x43, 0xB6);
+    a.bus.io_write(0x42, 0x34);
+    a.bus.io_write(0x42, 0x12);
+    a.bus.io_write(0x61, 0x00);
+    // A state as rust-dos saved it before channel 2 was modelled: the CORE
+    // section with the read flip-flop, the last control word and the
+    // write flip-flop where the zeros are now, and no PIT2 section.
+    let (bytes, parts) = machine::save_parts(&a);
+    let range = |name: &str| parts.iter().find(|(n, _)| n == name).unwrap_or_else(|| panic!("no {}", name)).1.clone();
+    let flip_flops = range("CORE.channel_2_v8");
+    assert_eq!(flip_flops.len(), 3);
+    let mut old = bytes[..flip_flops.start].to_vec();
+    old.extend_from_slice(&[0, 0xB6, 0]);
+    old.extend_from_slice(&bytes[flip_flops.end..range("PIT2").start]);
+    old.extend_from_slice(&bytes[range("PIT2.ppi_b").end..]);
+
+    let mut b = machine();
+    b.bus.io_write(0x43, 0xB0);
+    machine::load(&mut b, &old).unwrap();
+    assert_eq!(b.bus.pit_divisor, 0x1234);
+    // Port 61h reads as it did with the speaker off, and the count runs
+    // whatever the gate, as the free-running counter did.
+    assert_eq!(b.bus.io_read(0x61) & 0x0F, 0x00);
+    let read = |bus: &mut Bus| {
+        bus.io_write(0x43, 0x80);
+        bus.io_read(0x42) as u16 | (bus.io_read(0x42) as u16) << 8
+    };
+    let first = read(&mut b.bus);
+    b.bus.clock.icount += 100;
+    let second = read(&mut b.bus);
+    assert!(first <= 0x1234 && second <= 0x1234 && first != second, "{:04X} {:04X}", first, second);
+
+    // A state saved now loads and saves as the same bytes.
+    let mut c = machine();
+    machine::load(&mut c, &bytes).unwrap();
+    assert!(machine::save(&c) == bytes);
+}

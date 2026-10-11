@@ -447,6 +447,20 @@ impl Pit2 {
         }
     }
 
+    /// The channel of a state saved before it was modelled, which kept only
+    /// the last count and the byte flip-flops: a square wave of that count
+    /// with the gate high, in the phase the free-running counter had (it
+    /// counted from tick 0), and the flip-flops as they were. A count
+    /// half written has its LSB in `count` already.
+    pub fn free_running(count: u16, write_msb: bool, read_msb: bool) -> Self {
+        Self {
+            reload: if count == 0 { 0x10000 } else { count as u32 },
+            write_lsb: write_msb.then_some(count as u8),
+            read_msb,
+            ..Self::new()
+        }
+    }
+
     /// Modes 1 and 5 count from the gate's rising edge.
     fn gate_triggered(&self) -> bool {
         matches!(self.mode, 1 | 5)
@@ -495,6 +509,14 @@ impl Pit2 {
 
     /// A control word for channel 2 at `now` (access mode 0, the counter
     /// latch command, included).
+    ///
+    /// The 8254 data sheet stops the count until a new one is written. In
+    /// modes 2 and 3 a running count goes on here with the count it had,
+    /// as rust-dos's free-running channel 2 did before it was modelled:
+    /// Bao Xiao San Guo Zhi makes its random numbers by writing B6h to
+    /// port 43h and reading port 42h twice, never writing a count, and a
+    /// stopped count gives it the same number every time (DOSBox SVN's
+    /// "every roll is 5"), and can hang its keyboard loop.
     pub fn control(&mut self, value: u8, now: u64) {
         let access = (value >> 4) & 3;
         if access == 0 {
@@ -503,14 +525,25 @@ impl Pit2 {
             }
             return;
         }
-        self.stopped = self.count(now);
-        let mode = (value >> 1) & 7;
-        self.mode = if mode >= 6 { mode - 4 } else { mode };
+        let mode = match (value >> 1) & 7 {
+            mode @ 6.. => mode - 4,
+            mode => mode,
+        };
+        let runs_on = self.started && matches!(mode, 2 | 3);
+        if !runs_on {
+            self.stopped = self.count(now);
+            self.started = false;
+            self.run_from = None;
+            self.done = 0;
+        } else if !self.gate
+            && let Some(from) = self.run_from.take()
+        {
+            // Modes 1 and 5 ran with the gate low; 2 and 3 hold there.
+            self.done += now.saturating_sub(from);
+        }
+        self.mode = mode;
         self.access = access;
         self.loaded = false;
-        self.started = false;
-        self.run_from = None;
-        self.done = 0;
         self.write_lsb = None;
         self.read_msb = false;
         self.latched = None;
