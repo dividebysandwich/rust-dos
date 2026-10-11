@@ -109,6 +109,23 @@ or 7z archive, or a CD or disk image onto the window to mount, import or run
 it.
 `rust-dos --help` lists the other options.
 
+On Windows (MSVC), take SDL2's Visual C++ development package,
+`SDL2-devel-<version>-VC.zip` from
+[SDL's releases](https://github.com/libsdl-org/SDL/releases) (a 2.x release,
+since the SDL3 packages listed beside them have no `SDL2.lib`; CI builds with
+[2.30.0](https://github.com/libsdl-org/SDL/releases/download/release-2.30.0/SDL2-devel-2.30.0-VC.zip)),
+unpack it, and add its `lib\x64` to `LIB` so the linker finds `SDL2.lib`.
+With 2.30.0 unpacked to `C:\`:
+
+```powershell
+$env:LIB = "C:\SDL2-2.30.0\lib\x64;$env:LIB"
+cargo build --release
+```
+
+To run the program, put `SDL2.dll` from the same `lib\x64` next to
+`rust-dos.exe` (in `target\release`) or on `PATH`. `cargo test` starts the
+debug build in `target\debug` too, so put the DLL on `PATH` for the tests.
+
 ## Configuration
 
 Rust-DOS reads `rust-dos.conf`, a DOSBox-style configuration file, from the
