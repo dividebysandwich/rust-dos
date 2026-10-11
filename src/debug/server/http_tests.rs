@@ -339,6 +339,24 @@ fn keys(v: &Value) -> Vec<String> {
 }
 
 #[test]
+fn input_with_a_field_it_does_not_have_is_refused() {
+    let rig = Rig::new("input-fields");
+    let before = rig.last();
+    // "modifiers" for "mods": taking it would press the key without Alt.
+    let refused = rig.post("/api/input/key?wait=false", json!({"key": "o", "modifiers": ["alt"]}));
+    assert_eq!(refused.status, 400, "{}", refused.body);
+    let error = refused.json()["error"].as_str().unwrap().to_string();
+    assert!(error.contains("`modifiers`") && error.contains("`mods`"), "{}", error);
+    let batch = json!({"events": [{"type": "type", "text": "x"}, {"type": "mouse", "action": "click", "x": 1, "y": 2, "z": 3}]});
+    assert_eq!(rig.post("/api/input/batch?wait=false", batch).status, 400);
+    assert_eq!(rig.post("/api/input/wait?wait=false", json!({"ms": 1, "for": 2})).status, 400);
+    let queued = rig.get(&format!("/api/journal?after={}&type=input_queued", before)).json();
+    assert_eq!(queued["entries"].as_array().map(Vec::len), Some(0), "nothing was queued: {}", queued);
+    let taken = rig.post("/api/input/key?wait=false", json!({"key": "o", "mods": ["alt"]}));
+    assert_eq!(taken.status, 200, "{}", taken.body);
+}
+
+#[test]
 fn every_response_has_its_request_number_and_the_client_s_id() {
     let rig = Rig::new("ids");
     let a = rig.get("/api/status");

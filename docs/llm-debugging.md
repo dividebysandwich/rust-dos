@@ -148,6 +148,9 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   `type` string takes roughly 2 frames per character, or 4 for shifted
   characters.
 - **Unknown key names** return an error that lists all valid names.
+- **Unknown fields** are refused with HTTP 400 naming the field and the
+  ones the event has, and nothing in the request is queued:
+  `{"key":"o","modifiers":["alt"]}` is an error, not an `o` without Alt.
 - **Stop pending input:** `DELETE /api/input` clears whatever is still
   queued.
 - **The settings window** opens with `DOSCONFIG` at the prompt or
