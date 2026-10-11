@@ -346,14 +346,48 @@ fn input_with_a_field_it_does_not_have_is_refused() {
     let refused = rig.post("/api/input/key?wait=false", json!({"key": "o", "modifiers": ["alt"]}));
     assert_eq!(refused.status, 400, "{}", refused.body);
     let error = refused.json()["error"].as_str().unwrap().to_string();
-    assert!(error.contains("`modifiers`") && error.contains("`mods`"), "{}", error);
+    assert!(error.contains("`modifiers`") && error.contains("(did you mean `mods`?)"), "{}", error);
     let batch = json!({"events": [{"type": "type", "text": "x"}, {"type": "mouse", "action": "click", "x": 1, "y": 2, "z": 3}]});
-    assert_eq!(rig.post("/api/input/batch?wait=false", batch).status, 400);
+    let refused = rig.post("/api/input/batch?wait=false", batch);
+    assert_eq!(refused.status, 400, "{}", refused.body);
+    assert!(refused.json()["error"].as_str().unwrap().starts_with("events[1]: "), "{}", refused.body);
     assert_eq!(rig.post("/api/input/wait?wait=false", json!({"ms": 1, "for": 2})).status, 400);
-    let queued = rig.get(&format!("/api/journal?after={}&type=input_queued", before)).json();
-    assert_eq!(queued["entries"].as_array().map(Vec::len), Some(0), "nothing was queued: {}", queued);
+    // A field beside the events.
+    let beside = json!({"events": [{"type": "type", "text": "x"}], "wiat": false});
+    assert_eq!(rig.post("/api/input/batch?wait=false", beside).status, 400);
+    // The socket takes off its own fields and refuses the rest.
+    let mut input = ws(rig.addr, "/ws/input");
+    for msg in [
+        json!({"events": [{"type": "key", "key": "o", "modifiers": ["alt"]}], "wait": false, "request_id": "r"}),
+        json!({"type": "key", "key": "o", "wiat": false}),
+        json!({"events": [{"type": "key", "key": "o"}], "wait": "false"}),
+    ] {
+        input.send(tungstenite::Message::Text(msg.to_string().into())).unwrap();
+        let reply = read_entries(&mut input, 1, Duration::from_secs(5));
+        assert!(reply[0]["ok"] == false && reply[0]["error"].is_string(), "{}: {:?}", msg, reply);
+    }
+    let queued = || rig.get(&format!("/api/journal?after={}&type=input_queued", before)).json()["entries"].as_array().map(Vec::len);
+    assert_eq!(queued(), Some(0), "nothing was queued");
     let taken = rig.post("/api/input/key?wait=false", json!({"key": "o", "mods": ["alt"]}));
     assert_eq!(taken.status, 200, "{}", taken.body);
+    assert_eq!(queued(), Some(1), "the key with mods was queued");
+}
+
+#[test]
+fn other_bodies_with_a_field_they_do_not_have_are_refused() {
+    let rig = Rig::new("body-fields");
+    // "adr" for "addr" would otherwise be a breakpoint request without an
+    // address, and a DELETE without one removes them all.
+    let refused = rig.post("/api/breakpoints", json!({"adr": "1234:0100"}));
+    assert_eq!(refused.status, 400, "{}", refused.body);
+    assert!(refused.json()["error"].as_str().unwrap().ends_with("(did you mean `addr`?)"), "{}", refused.body);
+    let added = rig.post("/api/breakpoints", json!({"addr": "1234:0100"}));
+    assert_eq!(added.status, 200, "{}", added.body);
+    assert_eq!(http(rig.addr, "DELETE", "/api/breakpoints?adr=1234:0100", &[], None).status, 400);
+    assert_eq!(rig.get("/api/breakpoints").json()["breakpoints"].as_array().map(Vec::len), Some(1), "the breakpoint stays");
+    let refused = rig.post("/api/control/step", json!({"cnt": 5}));
+    assert_eq!(refused.status, 400, "{}", refused.body);
+    assert_eq!(rig.post("/api/speed", json!({"cycles": "max", "turbo": true})).status, 400);
 }
 
 #[test]

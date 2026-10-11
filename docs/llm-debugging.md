@@ -150,7 +150,10 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
 - **Unknown key names** return an error that lists all valid names.
 - **Unknown fields** are refused with HTTP 400 naming the field and the
   ones the event has, and nothing in the request is queued:
-  `{"key":"o","modifiers":["alt"]}` is an error, not an `o` without Alt.
+  `{"key":"o","modifiers":["alt"]}` gets 400 and presses nothing, with
+  "(did you mean `mods`?)" in the error. The other JSON bodies (control,
+  breakpoints, watchpoints, memory, trace, ports, drives, state, speed)
+  refuse unknown fields the same way.
 - **Stop pending input:** `DELETE /api/input` clears whatever is still
   queued.
 - **The settings window** opens with `DOSCONFIG` at the prompt or
