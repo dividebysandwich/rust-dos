@@ -1836,9 +1836,21 @@ impl Cpu {
         let reloc_count = u16::from_le_bytes([bytes[6], bytes[7]]) as usize;
         let reloc_offset = u16::from_le_bytes([bytes[24], bytes[25]]) as usize;
 
+        // Bound extenders keep data after the MZ load module, which they
+        // read themselves. As in load_exe, only copy the bytes the header
+        // counts; loading the whole file can overwrite the caller's memory.
+        let pages = u16::from_le_bytes([bytes[4], bytes[5]]) as usize;
+        let last_page = u16::from_le_bytes([bytes[2], bytes[3]]) as usize;
+        let module_len = match (pages, last_page) {
+            (0, _) => bytes.len(),
+            (p, 0) => p * 512,
+            (p, l) => (p - 1) * 512 + l,
+        };
+        let image_end = module_len.clamp(header_size, bytes.len());
+
         // Copy image bytes directly at load_segment:0000 — no PSP, no offset.
         let image_phys = self.get_physical_addr(load_segment, 0) as u32;
-        self.bus.guest_write_bytes(image_phys, &bytes[header_size..]);
+        self.bus.guest_write_bytes(image_phys, &bytes[header_size..image_end]);
 
         // Apply relocations: each entry is (offset, segment); the 16-bit word
         // at (load_segment + segment):offset gets `reloc_factor` added to it.
