@@ -261,8 +261,10 @@ fn tseng_hicolor(cpu: &mut Cpu) {
     let bl = cpu.get_reg8(Register::BL);
     match cpu.get_al() {
         0xF0 => {
+            let before = mouse_screen(cpu);
             if set_hicolor_mode(cpu, bl, 15) {
                 cpu.set_ax(0x0010);
+                mode_set_for_mouse(cpu, before);
             }
         }
         0xF1 => {
@@ -1191,7 +1193,9 @@ pub fn handle(cpu: &mut Cpu) {
         // AH = 11h: Character Generator
         0x11 => {
             let al = cpu.get_al();
-            let before = mouse_screen(cpu);
+            // A text font load (AL=10h-1Fh) can change the rows, and
+            // CuteMouse treats it as a mode set: 80x50 gets 0-399.
+            let before = (0x10..=0x1F).contains(&al).then(|| mouse_screen(cpu));
             match al {
                 // AL=10h/11h/12h/14h: load a font and take its height: as
                 // many rows as fit in the text mode's scanlines (on a VGA's
@@ -1272,9 +1276,7 @@ pub fn handle(cpu: &mut Cpu) {
                         .log_string(&format!("[BIOS] Unhandled INT 10h AH=11h AL={:02X}", al));
                 }
             }
-            // A text font load (AL=10h-1Fh) can change the rows, and
-            // CuteMouse treats it as a mode set: 80x50 gets 0-399.
-            if (0x10..=0x1F).contains(&al) {
+            if let Some(before) = before {
                 mode_set_for_mouse(cpu, before);
             }
         }
@@ -1523,10 +1525,13 @@ pub fn handle(cpu: &mut Cpu) {
 
         // AH = 4Fh: VESA BIOS Extensions
         0x4F => {
-            let set = cpu.get_al() == 0x02;
-            let before = mouse_screen(cpu);
+            // Only function 02h sets a mode: the other calls (window
+            // switches among them) skip the mouse's bookkeeping.
+            let before = (cpu.get_al() == 0x02).then(|| mouse_screen(cpu));
             super::vbe::handle(cpu);
-            if set && cpu.ax() == 0x004F {
+            if let Some(before) = before
+                && cpu.ax() == 0x004F
+            {
                 mode_set_for_mouse(cpu, before);
             }
         }

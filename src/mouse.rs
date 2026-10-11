@@ -209,8 +209,7 @@ impl MouseState {
     /// games that halve the coordinates do. Ranges of 2048 and up are left
     /// alone; they stand for relative movement rather than a screen.
     pub fn virtual_extent(&self, (w, h): (usize, usize)) -> (i32, i32) {
-        let w = if w < 640 { 640 } else { w as i32 };
-        let h = h as i32;
+        let (w, h) = driver_extent((w, h));
         let range = |max: i32, size: i32| if max < 2048 { size.max(max + 1) } else { size };
         (range(self.max_x, w), range(self.max_y, h))
     }
@@ -425,8 +424,12 @@ pub fn screen_size(bus: &crate::bus::Bus) -> (usize, usize) {
 /// `screen_size`, at least 640 wide, the Microsoft driver's width for the
 /// 320-pixel modes.
 pub fn driver_screen(bus: &crate::bus::Bus) -> (i32, i32) {
-    let (w, h) = screen_size(bus);
-    (if w < 640 { 640 } else { w as i32 }, h as i32)
+    driver_extent(screen_size(bus))
+}
+
+/// A screen of `w` x `h` as the driver counts it: at least 640 wide.
+fn driver_extent((w, h): (usize, usize)) -> (i32, i32) {
+    ((w as i32).max(640), h as i32)
 }
 
 /// ROM trampoline (F000:F200) that runs the INT 33h AX=000Ch event handler
@@ -788,7 +791,7 @@ mod tests {
     #[test]
     fn a_mode_set_is_no_ps2_motion() {
         // The host pointer at the bottom of 640x480, then the same spot of
-        // a 640x200 screen: a change of scale, not a move.
+        // a 640x200 screen: a change of scale, which adds no motion.
         let mut mouse = MouseState::new();
         mouse.reset(640, 480);
         mouse.set_position(320, 470);
