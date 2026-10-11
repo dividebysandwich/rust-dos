@@ -17,7 +17,7 @@ use super::serial::station::Station;
 use super::tunnel::wire::{RejectReason, RoomInfo, Roster};
 use std::collections::HashMap;
 use std::io;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -449,9 +449,7 @@ impl State {
 
     fn connect(&mut self, relay: Result<SocketAddr, String>, request: JoinRequest) {
         let bound = relay.and_then(|relay| {
-            let local: SocketAddr =
-                if relay.is_ipv4() { (Ipv4Addr::UNSPECIFIED, 0).into() } else { (Ipv6Addr::UNSPECIFIED, 0).into() };
-            let socket = std::net::UdpSocket::bind(local)
+            let socket = std::net::UdpSocket::bind(discover::local_for(relay))
                 .and_then(|s| s.set_nonblocking(true).map(|_| s))
                 .and_then(UdpSocket::from_std)
                 .map_err(|e| format!("can't open a UDP socket: {}", e))?;
@@ -680,6 +678,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(feature = "skip-host-network-tests", ignore = "binds a socket on all interfaces")]
     fn two_hubs_meet_in_a_hosted_room() {
         let a = Hub::start().unwrap();
         let b = Hub::start().unwrap();
@@ -731,6 +730,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(feature = "skip-host-network-tests", ignore = "binds a socket on all interfaces")]
     fn a_room_made_where_another_instance_relays_goes_on_its_relay() {
         let join = |room: &str, player: &str| JoinRequest {
             relay: None,
@@ -781,6 +781,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(feature = "skip-host-network-tests", ignore = "binds a socket on all interfaces")]
     fn guests_on_a_shared_lan_get_addresses_of_their_own() {
         let a = Hub::start().unwrap();
         let b = Hub::start().unwrap();

@@ -259,7 +259,7 @@ fn the_modem_dials_a_host_and_takes_calls() {
     let listen = free_port();
     let settings = SerialSettings {
         ports: [PortType::Off, PortType::Modem, PortType::Off, PortType::Off],
-        modem_listen: Some(listen),
+        modem_listen: Some((std::net::Ipv4Addr::LOCALHOST, listen).into()),
         ..Default::default()
     };
     let mut bus = bus_with(settings);

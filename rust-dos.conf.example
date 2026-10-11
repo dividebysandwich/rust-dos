@@ -436,8 +436,9 @@
 #uart=16550
 # The serial mouse: microsoft (two buttons) or logitech (three).
 #mousetype=microsoft
-# Take calls for the modem on this TCP port: off or a port. A call rings
-# the modem (ATA answers).
+# Take calls for the modem on this TCP port: off, a port (on all of this
+# computer's addresses), or address:port (127.0.0.1:2323 for calls from
+# this computer only). A call rings the modem (ATA answers).
 #modemlisten=off
 # Speak telnet on the modem's TCP calls, for BBSes: off or on.
 #modemtelnet=off
