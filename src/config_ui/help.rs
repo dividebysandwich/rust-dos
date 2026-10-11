@@ -404,6 +404,7 @@ impl Item {
             MouseType => "mouse-type",
             ModemListen => "modem-listen",
             ModemTelnet => "modem-telnet",
+            Phonebook => "phonebook",
             PrinterOutput => "printer",
             PrinterPaper => "printer-paper",
             PrinterDpi => "printer-dpi",

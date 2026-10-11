@@ -674,6 +674,7 @@ fn main() -> Result<(), String> {
                 state_loaded: &mut state_loaded,
                 achievements: &mut achievements,
                 deterministic: det.as_ref().map(|mode| mode.start),
+                clipboard: &host_clipboard,
             }
         };
     }
@@ -2381,6 +2382,7 @@ struct MainHost<'m, 'd> {
     /// Deterministic mode: the date and time its clock started at. The
     /// speed stays fixed, and save states record the start.
     deterministic: Option<chrono::NaiveDateTime>,
+    clipboard: &'m sdl2::clipboard::ClipboardUtil,
 }
 
 impl MainHost<'_, '_> {
@@ -2851,6 +2853,10 @@ impl Host for MainHost<'_, '_> {
         let shared =
             bus.disk.shared_drives().into_iter().filter_map(|d| Some((d, rust_dos::boot::drive_unit(bus, d)?))).collect();
         Some(config_ui::BootView { cd_drive: bus.booted_cd_drive(), shared })
+    }
+
+    fn copy_text(&mut self, text: &str) -> Result<(), String> {
+        self.clipboard.set_clipboard_text(text)
     }
 
     fn sync_shared(&mut self, drive: u8) -> Result<String, String> {

@@ -443,6 +443,12 @@
 # Speak telnet on the modem's TCP calls, for BBSes: off or on.
 #modemtelnet=off
 
+[phonebook]
+# Numbers the modem dials bulletin boards with, before the built-in ones
+# and rust-dos.com's: number = host[:port] [raw] [name]. The port is
+# telnet's (23) unless given; raw makes the call plain TCP, not telnet.
+#555-0199 = bbs.example.org Example Board
+
 [printer]
 # A printer on the parallel port LPT1 (378h), an Epson ESC/P 2 printer as
 # DOSBox-X has one, which programs print to through the port, the BIOS

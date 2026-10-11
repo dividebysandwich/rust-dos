@@ -22,6 +22,7 @@ pub mod osd;
 mod perf;
 mod rooms;
 mod sc55;
+mod phonebook;
 mod scenes;
 mod states;
 pub mod wheel;
@@ -34,6 +35,7 @@ pub use draw::cp437;
 use games::{GameDialog, GameField};
 use image::{ImageDialog, ImageField};
 use rooms::{RoomBrowser, RoomButton, RoomField};
+use phonebook::PhoneList;
 use scenes::SceneList;
 pub use manual::Layer;
 pub use states::SlotView;
@@ -131,6 +133,10 @@ pub trait Host {
     /// one runs.
     fn booted(&self) -> Option<BootView> {
         None
+    }
+    /// Put `text` on the host's clipboard.
+    fn copy_text(&mut self, _text: &str) -> Result<(), String> {
+        Err("there is no clipboard".to_string())
     }
     /// Copy what the booted system changed on the disk of the host
     /// directory `drive` into it. Returns what to tell the user.
@@ -449,6 +455,7 @@ impl Page {
                 MouseType,
                 ModemListen,
                 ModemTelnet,
+                Phonebook,
                 PrinterOutput,
                 PrinterPaper,
                 PrinterDpi,
@@ -697,6 +704,8 @@ enum Item {
     MouseType,
     ModemListen,
     ModemTelnet,
+    /// The numbers the modem dials bulletin boards with.
+    Phonebook,
     /// The printer on LPT1: where its printing goes, its paper and
     /// resolution, whether a job's pages are one document, and how long
     /// a job waits for more.
@@ -1006,6 +1015,7 @@ impl Item {
             MouseType => "Serial mouse",
             ModemListen => "Modem takes calls on",
             ModemTelnet => "Modem speaks telnet",
+            Phonebook => "Modem phonebook...",
             PrinterOutput => "Printer (LPT1)",
             PrinterPaper => "  Paper",
             PrinterDpi => "  Resolution",
@@ -1058,7 +1068,7 @@ impl Item {
             // The browser has no sockets for a LAN.
             Item::Online | Item::Rooms | Item::Relay | Item::Player => frontend.window,
             Item::Lan | Item::LanHost | Item::Room | Item::Password => frontend.window,
-            Item::ModemListen | Item::ModemTelnet => frontend.window,
+            Item::ModemListen | Item::ModemTelnet | Item::Phonebook => frontend.window,
             // The browser has nowhere for printouts to go.
             Item::PrinterOutput
             | Item::PrinterPaper
@@ -1115,7 +1125,7 @@ impl Item {
             Item::Relay => s.network.online,
             Item::SerialIrq(n) => s.serial.ports[n as usize] != crate::serial::PortType::Off,
             Item::MouseType => s.serial.ports.contains(&crate::serial::PortType::Mouse),
-            Item::ModemListen | Item::ModemTelnet => s.serial.ports.contains(&crate::serial::PortType::Modem),
+            Item::ModemListen | Item::ModemTelnet | Item::Phonebook => s.serial.ports.contains(&crate::serial::PortType::Modem),
             // The pages' settings for the pages printed; the bytes of a
             // file are as they come.
             Item::PrinterPaper | Item::PrinterDpi => {
@@ -1140,7 +1150,7 @@ impl Item {
             | RecordShader => Applies::Now,
             Joystick | Deadzone | MouseSensitivity | SpeakerFilter | SbFilter | Reverb | Chorus | ReverbMix | ChorusMix => Applies::Now,
             AudioBlocksize | AudioPrebuffer => Applies::Now,
-            Rooms => Applies::Now,
+            Rooms | Phonebook => Applies::Now,
             Memsize | Autoexec | Lan | LanHost | VersionCheck => Applies::NextStart,
             VrMode | VrQuality | VrAmbientOcclusion | VrMsaa | VrScene | VrControllers | VrSpatialAudio | VrScreenFit | VrScreenGlow
             | VrCenter | VrSceneScale | VrSeat(_) | VrSeatTurn | VrResolution | VrRefresh => Applies::Now,
@@ -1165,7 +1175,7 @@ impl Item {
             }
             Item::ModemListen => Input::Text,
             Item::SoundFont | Item::Mt32Roms | Item::Awe32Rom | Item::Sc55Roms | Item::VrScene => Input::File,
-            Item::Autoexec | Item::Rooms | Item::Awe32Download | Item::Sc55Download | Item::VoodooOverlay | Item::VrCenter => {
+            Item::Autoexec | Item::Rooms | Item::Phonebook | Item::Awe32Download | Item::Sc55Download | Item::VoodooOverlay | Item::VrCenter => {
                 Input::Link
             }
             _ => Input::Choice,
@@ -1390,7 +1400,7 @@ impl Item {
             AudioPrebuffer => format!("{} ms", s.audio_buffer.prebuffer),
             LptDac => s.sound.lpt_dac.describe().to_string(),
             TandySound => s.sound.tandy.describe().to_string(),
-            Autoexec | Rooms => String::new(),
+            Autoexec | Rooms | Phonebook => String::new(),
             Ipx => match s.network.ipx {
                 crate::net::IpxMode::Auto => "auto (with LAN HOST or JOIN)",
                 crate::net::IpxMode::On => "on",
@@ -1629,7 +1639,7 @@ impl Item {
             Cycles | CrtCurvature | CrtGlow | Memsize | Volume(_) | ReverbMix | ChorusMix | Deadzone | MouseSensitivity | UltraDir
             | SoundFont | Mt32Roms | Awe32Rom | Awe32Download | Sc55Roms | Sc55Download | VoodooOverlay | CaptureDir | Autoexec | SbPorts | GusPorts | MacAddr
             | Rooms | Relay | Player | VrScene | VrScreenGlow | VrCenter | VrSceneScale | VrSeat(_) | VrSeatTurn | VrResolution
-            | Lan | LanHost | Room | Password | ModemListen => Vec::new(),
+            | Lan | LanHost | Room | Password | ModemListen | Phonebook => Vec::new(),
         }
     }
 
@@ -1936,6 +1946,7 @@ enum Target {
     RoomsOnline(bool),
     /// A line of the VR page's scene list.
     SceneRow(usize),
+    PhoneRow(usize),
     /// A value of the popup list, and the rest of it.
     PopupRow(usize),
     Popup,
@@ -2044,6 +2055,10 @@ pub struct ConfigUi {
     /// asked for, and the one downloading (scenes.rs).
     scenes: Option<SceneList>,
     scene_catalog: scenes::Catalog,
+    /// The modem's phonebook, and rust-dos.com's list of boards once asked
+    /// for (phonebook.rs).
+    phonebook: Option<PhoneList>,
+    phone_catalog: phonebook::Catalog,
     scene_download: Option<scenes::SceneDownload>,
     /// The help shown over everything (F1).
     help: Option<help::HelpView>,
@@ -2121,6 +2136,8 @@ impl ConfigUi {
             rooms: None,
             scenes: None,
             scene_catalog: scenes::Catalog::default(),
+            phonebook: None,
+            phone_catalog: phonebook::Catalog::default(),
             scene_download: None,
             help: None,
             awe32_download: None,
@@ -2152,6 +2169,7 @@ impl ConfigUi {
         self.poll_sc55_download(host);
         self.poll_glide_download(host);
         self.poll_scenes(host);
+        self.poll_phonebook();
     }
 
     /// Download the AWE32's ROM on a thread of its own, into rust-dos's
@@ -2259,6 +2277,7 @@ impl ConfigUi {
         self.autoexec = None;
         self.rooms = None;
         self.scenes = None;
+        self.phonebook = None;
         self.help = None;
         self.put_away_manual();
         self.manual = None;
@@ -2411,6 +2430,8 @@ impl ConfigUi {
             self.rooms_key(key, host);
         } else if self.scenes.is_some() {
             self.scenes_key(key, host);
+        } else if self.phonebook.is_some() {
+            self.phonebook_key(key, host);
         } else if self.cheats.edit.is_some() {
             self.cheats_edit_key(key, host);
         } else if self.achievements.edit.is_some() {
@@ -2478,6 +2499,7 @@ impl ConfigUi {
                     && self.autoexec.is_none()
                     && self.rooms.is_none()
                     && self.scenes.is_none()
+                    && self.phonebook.is_none()
                 {
                     self.edit = None;
                     self.cheats.edit = None;
@@ -2547,6 +2569,7 @@ impl ConfigUi {
                 self.room_clicked(target, host)
             }
             Target::SceneRow(_) => self.scene_clicked(target, host),
+            Target::PhoneRow(_) => self.phone_clicked(target, host),
             Target::PopupRow(i) => {
                 if let Some(popup) = &mut self.popup {
                     popup.selected = i;
@@ -2665,6 +2688,7 @@ impl ConfigUi {
             (UiKey::Enter, Input::File) if item == Item::VrScene => self.open_scenes(),
             (UiKey::Enter, Input::File) => self.open_browser(Pick::SoundFont),
             (UiKey::Enter, Input::Link) if item == Item::Rooms => self.open_rooms(),
+            (UiKey::Enter, Input::Link) if item == Item::Phonebook => self.open_phonebook(),
             (UiKey::Enter, Input::Link) if item == Item::Awe32Download => self.download_awe32_rom(),
             (UiKey::Enter, Input::Link) if item == Item::Sc55Download => self.ask_sc55_download(),
             (UiKey::Enter, Input::Link) if item == Item::VoodooOverlay => self.ask_glide_download(),
@@ -3228,6 +3252,8 @@ impl ConfigUi {
             self.draw_rooms(&mut g, content.clone());
         } else if self.scenes.is_some() {
             self.draw_scenes(&mut g, content.clone());
+        } else if self.phonebook.is_some() {
+            self.draw_phonebook(&mut g, content.clone());
         } else if self.confirm_sc55.is_some() {
             self.draw_sc55_question(&mut g, content.clone());
         } else if self.confirm_glide {
@@ -3807,6 +3833,8 @@ impl ConfigUi {
             Some("rooms")
         } else if self.scenes.is_some() {
             Some("vr-scenes")
+        } else if self.phonebook.is_some() {
+            Some("phonebook")
         } else {
             self.page.help().or_else(|| self.item().map(Item::help))
         }
@@ -3924,6 +3952,8 @@ impl ConfigUi {
             self.room_hints()
         } else if self.scenes.is_some() {
             self.scene_hints()
+        } else if self.phonebook.is_some() {
+            self.phone_hints()
         } else if self.confirm_launch.is_some() {
             vec![("Enter", "Close and start", Enter), ("Esc", "Keep running", Esc)]
         } else if self.confirm_delete.is_some() {
@@ -3995,7 +4025,7 @@ impl ConfigUi {
                 }
                 Some(Input::Text) => vec![("Enter", "Type", Enter)],
                 Some(Input::File) => vec![("Enter", "Pick", Enter), ("Del", "None", Delete)],
-                Some(Input::Link) if self.item() == Some(Item::Rooms) => vec![("Enter", "Open", Enter)],
+                Some(Input::Link) if matches!(self.item(), Some(Item::Rooms | Item::Phonebook)) => vec![("Enter", "Open", Enter)],
                 Some(Input::Link) => vec![("Enter", "Edit", Enter)],
                 None => Vec::new(),
             };

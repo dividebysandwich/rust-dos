@@ -601,7 +601,24 @@ games](#serial-and-modem-games)). Changes take effect at the DOS prompt.
   answers it, or `ATS0=1` answers the first ring.
 * `modemtelnet` makes the modem's TCP calls speak telnet, for BBSes:
   `off` (the default: the characters as they are, as DOSBox's modem sends
-  them) or `on`.
+  them) or `on`. Calls to the phonebook's numbers speak telnet anyway,
+  unless their entry says `raw`.
+
+### `[phonebook]`
+
+Numbers of your own for the modem's phonebook (see [Serial and modem
+games](#serial-and-modem-games)), one per line: the number, then the
+board's host and port (23 unless given), then optionally `raw` for a
+plain TCP call without telnet, and a name. Dashes in numbers are only for
+reading: `ATDT 5550199` dials `555-0199` too. A number here comes before
+rust-dos.com's and the built-in ones. The settings window doesn't change
+this section; edit it in the file.
+
+```ini
+[phonebook]
+555-0199 = bbs.example.org Example Board
+555-0198 = 192.0.2.7:2323 raw My other board
+```
 
 ### `[printer]`
 
@@ -1871,6 +1888,12 @@ default; set the game up for that port, at any speed.
   it is a TCP address, port 23 unless given: `ATDT bbs.example.com` or
   `ATDT 192.0.2.7:5000`. With `modemlisten` another rust-dos, or
   DOSBox's modem, can call this one.
+* **The phonebook:** a number in it calls a bulletin board on the
+  internet instead of the other player, by telnet: `ATDT 555-0101` dials
+  Level 29. Rust-DOS knows a few boards that are still running; the
+  settings window's *Modem phonebook* (Serial page) lists them, fetches
+  more from rust-dos.com when you ask it to, and copies the command that
+  dials one. Numbers of your own go in [`[phonebook]`](#phonebook).
 * The modem knows the usual commands: `ATZ`, `AT&F`, `ATE`, `ATV`, `ATQ`,
   `ATH`, `ATA`, `ATO`, `ATD`, `ATI`, `ATS0=`..`ATS15=` and `ATSn?`,
   `A/`, and the escape `+++` with a second's pause before and after; it

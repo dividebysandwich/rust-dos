@@ -10,6 +10,7 @@
 pub mod modem;
 pub mod mouse;
 pub mod nullmodem;
+pub mod phonebook;
 pub mod uart;
 
 use crate::savestate::{Reader, Result, State, Writer};
@@ -118,6 +119,8 @@ pub struct SerialSettings {
     pub modem_listen: Option<std::net::SocketAddr>,
     /// Whether the modem's TCP calls speak telnet.
     pub modem_telnet: bool,
+    /// The `[phonebook]` section's numbers (`phonebook`).
+    pub phonebook: Vec<phonebook::Entry>,
 }
 
 impl Default for SerialSettings {
@@ -129,6 +132,7 @@ impl Default for SerialSettings {
             mouse: mouse::MouseType::Microsoft,
             modem_listen: None,
             modem_telnet: false,
+            phonebook: Vec::new(),
         }
     }
 }
@@ -224,12 +228,28 @@ pub enum LinkCmd {
     Bytes(Vec<u8>),
     /// Our DTR and RTS, for the other end's DSR/DCD and CTS.
     Lines { dtr: bool, rts: bool },
-    /// Call: the other player in the room (`None`), or `host:port`.
-    Dial(Option<String>),
+    /// Call: the other player in the room (`None`), or a host.
+    Dial(Option<DialTarget>),
     /// Take the call that rings.
     Answer,
     /// End the call.
     Hangup,
+}
+
+/// A host the modem calls.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DialTarget {
+    /// `host:port`.
+    pub address: String,
+    /// Whether the call speaks telnet; None as `modemtelnet` says.
+    pub telnet: Option<bool>,
+}
+
+impl DialTarget {
+    /// `address`, speaking telnet as `modemtelnet` says.
+    pub fn to(address: &str) -> Self {
+        Self { address: address.to_string(), telnet: None }
+    }
 }
 
 /// What the network tells a port's cable or modem.

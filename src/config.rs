@@ -264,6 +264,8 @@ enum Section {
     Joystick,
     Network,
     Serial,
+    /// The modem's numbers of bulletin boards (serial/phonebook.rs).
+    Phonebook,
     Printer,
     Achievements,
     Shell,
@@ -287,6 +289,7 @@ pub fn has_own_sections(text: &str) -> bool {
             Section::Emulator
                 | Section::Sound
                 | Section::Network
+                | Section::Phonebook
                 | Section::Achievements
                 | Section::Shell
                 | Section::Vr
@@ -306,6 +309,7 @@ impl Section {
             "joystick" => Section::Joystick,
             "network" => Section::Network,
             "serial" => Section::Serial,
+            "phonebook" => Section::Phonebook,
             "printer" => Section::Printer,
             "achievements" => Section::Achievements,
             "shell" => Section::Shell,
@@ -326,6 +330,7 @@ impl Section {
             Section::Joystick => "joystick",
             Section::Network => "network",
             Section::Serial => "serial",
+            Section::Phonebook => "phonebook",
             Section::Printer => "printer",
             Section::Achievements => "achievements",
             Section::Shell => "shell",
@@ -799,6 +804,7 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
             | Section::Joystick
             | Section::Network
             | Section::Serial
+            | Section::Phonebook
             | Section::Printer
             | Section::Achievements
             | Section::Shell
@@ -1122,6 +1128,14 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                 if section == Section::Serial {
                     if let Err(e) = config.serial.set(key, value) {
                         warn(e);
+                    }
+                    continue;
+                }
+
+                if section == Section::Phonebook {
+                    match crate::serial::phonebook::parse_line(key, value) {
+                        Ok(entry) => config.serial.phonebook.push(entry),
+                        Err(e) => warn(e),
                     }
                     continue;
                 }

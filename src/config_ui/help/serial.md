@@ -41,7 +41,19 @@ port, such as `127.0.0.1:2323`, takes them on that address only.
 # Modem speaks telnet {#modem-telnet}
 
 Turn **on** for calling telnet BBSes with the modem, so their menus come
-out right. Leave **off** for games played over the modem.
+out right. Leave **off** for games played over the modem. The numbers in
+the phonebook speak telnet either way.
+
+# Modem phonebook {#phonebook}
+
+Bulletin boards on the internet that the modem dials by number: type
+`ATDT 555-0101` in a terminal program (Telix, Telemate, Terminate,
+Qmodem) to call the first one. **Enter** on a board copies its dial
+command. *Fetch more boards* asks rust-dos.com for its list, which is
+kept for the next start.
+
+Numbers of your own go in the configuration file's `[phonebook]`
+section, as `555-0199 = bbs.example.org Example Board`.
 
 # Printer {#printer}
 

@@ -2556,3 +2556,23 @@ fn the_scene_list_asks_rust_dos_com_only_when_told() {
     ui.key(Enter, &mut host);
     assert!(ui.scenes.is_none() && ui.browser.is_some());
 }
+
+#[test]
+fn the_modem_phonebook_lists_the_boards_and_copies_a_dial_command() {
+    let mut host = FakeHost::new();
+    let mut ui = opened(&host);
+    ui.show_page(Page::Serial);
+    ui.row = ui.items().iter().position(|&i| i == Item::Phonebook).expect("the phonebook is on the Serial page");
+    ui.key(UiKey::Enter, &mut host);
+    let list = ui.phonebook.as_ref().expect("Enter opens the phonebook");
+    let lines = ui.phone_lines(list);
+    assert!(lines.iter().filter(|l| matches!(l, phonebook::Line::Board(_))).count() >= 10);
+    let mut frame = Frame::new(640, 400);
+    ui.draw(&mut frame);
+    // The first board: FakeHost has no clipboard, so the window says what
+    // to type.
+    ui.key(UiKey::Enter, &mut host);
+    assert!(status(&ui).0.starts_with("Type ATDT "), "{:?}", status(&ui));
+    ui.key(UiKey::Esc, &mut host);
+    assert!(ui.phonebook.is_none());
+}

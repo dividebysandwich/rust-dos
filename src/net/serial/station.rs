@@ -264,14 +264,14 @@ impl Station {
                 }
                 _ => self.tell(port, LinkEvent::NoCarrier),
             },
-            LinkCmd::Dial(Some(address)) => {
+            LinkCmd::Dial(Some(target)) => {
                 if call != Call::None {
                     return self.tell(port, LinkEvent::NoCarrier);
                 }
                 self.next_id += 1;
                 let id = self.next_id;
-                let tx = tcp::dial(id, address, self.events.clone());
-                let telnet = self.setup.telnet.then(Telnet::default);
+                let tx = tcp::dial(id, target.address, self.events.clone());
+                let telnet = target.telnet.unwrap_or(self.setup.telnet).then(Telnet::default);
                 self.tcp.insert(id, Connection { tx, telnet, early: Vec::new() });
                 self.calls[port] = Call::TcpDialing(id);
             }
