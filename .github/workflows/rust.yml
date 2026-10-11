@@ -63,6 +63,8 @@ jobs:
           mv SDL2-2.30.0 SDL2
           echo "LIB=${{ github.workspace }}/SDL2/lib/x64" >> "$GITHUB_ENV"
           echo "INCLUDE=${{ github.workspace }}/SDL2/include" >> "$GITHUB_ENV"
+          # SDL2.dll for the program the tests start.
+          echo "${{ github.workspace }}/SDL2/lib/x64" >> "$GITHUB_PATH"
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -88,6 +90,12 @@ jobs:
         run: |
           cargo test --locked --test deterministic_tests
           cargo test --locked --bin rust-dos determinis
+
+      # Starts the debug build of the program, whose large frames must fit
+      # in Windows's 1 MB main thread stack.
+      - name: Run the debug build of the program (Windows)
+        if: runner.os == 'Windows'
+        run: cargo test --locked --test debug_journal_tests
 
   build:
     name: ${{ matrix.label }}
