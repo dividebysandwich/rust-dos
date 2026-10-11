@@ -107,6 +107,15 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   jolt, as a multisync monitor did; and when rust-dos quits, the picture
   collapses to a line and a fading dot. **Ctrl+Shift+D** degausses. The
   sounds have their own volume, `monitor`, in [`[mixer]`](#mixer).
+* `post` shows a BIOS power-on self test before the built-in DOS starts,
+  and at each reboot: `off` (the default), `quick` (about a second) or
+  `full` (about three, the memory counted up as it is tested). It lists the
+  CPU, the memory, the drives and the sound cards. **Del** while it shows
+  opens the settings as a period CMOS setup utility, whose pages are
+  changed with PgUp/PgDn or +/-; nothing changes until *Save & Exit Setup*
+  (**F10**), which applies and saves the settings and restarts the
+  machine. **Esc** skips the memory test. A booted disk image has no POST
+  of rust-dos's.
 * `composite` shows a CGA's graphics (`machine=cga`) as a composite
   monitor or TV did: fine patterns of pixels come out as colours, the
   "artifact colours" that King's Quest, the Ultima games, Sierra's AGI

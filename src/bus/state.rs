@@ -160,6 +160,7 @@ impl Bus {
             disknoise: _,
             monitor_noise: _,
             power_ons: _,
+            setup_requested: _,
             drives_active: _,
             audio_out: _,
             // The printer is the host's: loading a state takes back no
@@ -409,6 +410,7 @@ impl Bus {
             disknoise: _,
             monitor_noise: _,
             power_ons: _,
+            setup_requested: _,
             drives_active: _,
             audio_out: _,
             printer: _,

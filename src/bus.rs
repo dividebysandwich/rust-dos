@@ -296,6 +296,8 @@ pub struct Bus {
     /// Bumped each time the machine is reset or a system it boots starts:
     /// the monitor's power effects show a power on.
     pub power_ons: u32,
+    /// Del during the POST: the front end opens the BIOS setup.
+    pub setup_requested: bool,
     /// The drives read or written since the front end last looked (bit n
     /// for drive n), for its activity lights.
     pub drives_active: u32,
@@ -481,6 +483,7 @@ impl Bus {
             disknoise: crate::disknoise::DiskNoise::new(),
             monitor_noise: Default::default(),
             power_ons: 0,
+            setup_requested: false,
             drives_active: 0,
             mscdex: Default::default(),
             audio_out: VecDeque::new(),

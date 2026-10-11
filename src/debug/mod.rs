@@ -3259,6 +3259,7 @@ fn ui_key(key: PcKey, ascii: u8, mods: u8) -> Option<UiKey> {
         0x52 => Insert,
         0x3B if !ctrl => Help,
         0x3C => Save,
+        0x44 => F10,
         0x1F if ctrl => Save,
         _ if (0x20..0x7F).contains(&ascii) => Char(ascii as char),
         _ => return None,

@@ -23,6 +23,8 @@ fn drive_info(spec: &MountSpec) -> DriveInfo {
 struct FakeHost {
     drives: Vec<DriveInfo>,
     applied: Vec<Settings>,
+    /// How many times the machine was reset.
+    resets: usize,
     mounts: Vec<(MountSpec, bool)>,
     unmounts: Vec<u8>,
     /// The drives booted from.
@@ -77,6 +79,7 @@ impl FakeHost {
         Self {
             drives: vec![drive_info(&c), z],
             applied: vec![],
+            resets: 0,
             mounts: vec![],
             unmounts: vec![],
             booted: vec![],
@@ -112,6 +115,10 @@ impl FakeHost {
 }
 
 impl Host for FakeHost {
+    fn reset_machine(&mut self) {
+        self.resets += 1;
+    }
+
     fn apply(&mut self, settings: &Settings) -> Result<Option<String>, String> {
         self.applied.push(settings.clone());
         if self.no_shaders && settings.shader != Shader::None {
@@ -2576,3 +2583,42 @@ fn the_modem_phonebook_lists_the_boards_and_copies_a_dial_command() {
     ui.key(UiKey::Esc, &mut host);
     assert!(ui.phonebook.is_none());
 }
+
+    #[test]
+    fn changes_wait_for_save_and_exit() {
+        let mut host = FakeHost::new();
+        let mut ui = ConfigUi::new();
+        ui.open_setup(&Settings::default(), None, &host);
+        assert!(ui.setup_shown());
+        let mut frame = Frame::new(640, 400);
+        ui.draw(&mut frame);
+        // BIOS FEATURES SETUP, the CPU on it, one step.
+        ui.key(UiKey::Down, &mut host);
+        ui.key(UiKey::Enter, &mut host);
+        ui.draw(&mut frame);
+        let before = Settings::default().cpu;
+        ui.key(UiKey::PageUp, &mut host);
+        let changed = ui.setup.as_ref().unwrap().settings.cpu;
+        assert_ne!(changed, before);
+        assert!(host.applied.is_empty(), "nothing applies yet");
+        ui.key(UiKey::F10, &mut host);
+        ui.draw(&mut frame);
+        ui.key(UiKey::Char('y'), &mut host);
+        assert!(!ui.is_open());
+        assert_eq!(host.applied.last().map(|s| s.cpu), Some(changed));
+        assert_eq!(host.resets, 1);
+    }
+
+    #[test]
+    fn quitting_changes_nothing() {
+        let mut host = FakeHost::new();
+        let mut ui = ConfigUi::new();
+        ui.open_setup(&Settings::default(), None, &host);
+        ui.key(UiKey::Enter, &mut host);
+        ui.key(UiKey::PageUp, &mut host);
+        ui.key(UiKey::Esc, &mut host);
+        ui.key(UiKey::Esc, &mut host);
+        ui.key(UiKey::Char('y'), &mut host);
+        assert!(!ui.is_open());
+        assert!(host.applied.is_empty() && host.resets == 0);
+    }

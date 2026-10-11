@@ -39,6 +39,7 @@ pub struct Hardware {
 pub fn configure(cpu: &mut Cpu, settings: &Settings, host_layout: &'static crate::keylayout::Layout) -> Vec<String> {
     cpu.model = settings.cpu;
     cpu.core = settings.core;
+    cpu.post_mode = settings.post;
     cpu.set_fpu_fast(settings.fpu_fast);
     cpu.bus.observe.enabled = settings.idle_skip;
     cpu.bus.idle_hint = settings.idle_hint;

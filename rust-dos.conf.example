@@ -52,6 +52,11 @@
 # at power off; the sound is the degaussing coil's thump and hum and the
 # relay's click. Ctrl+Shift+D degausses.
 #monitor_effects=off
+# A BIOS power-on self test before DOS starts and at each reboot: off (the
+# default), quick (a moment) or full (the memory counted as it is tested).
+# Del during it opens the settings as a BIOS setup; F10 there saves them and
+# restarts the machine.
+#post=off
 # The CGA's composite monitor (machine=cga): the colours a composite
 # monitor or TV makes of fine patterns of pixels, which King's Quest, the
 # Ultima games and many more drew their graphics with. auto (the default)

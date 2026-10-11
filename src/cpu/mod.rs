@@ -355,6 +355,8 @@ pub struct Cpu {
     /// The host's terminal as the console (`rust-dos run`): what DOS
     /// prints goes to it as well as to the screen.
     pub host_console: Option<HostConsole>,
+    /// The BIOS's power-on self test before DOS starts (`post`).
+    pub post_mode: crate::post::PostMode,
     /// What a built-in command reads while its input is redirected
     /// (`<file`, or a pipe); None for the keyboard.
     pub stdin_redirect: Option<Vec<u8>>,
@@ -612,6 +614,7 @@ impl Cpu {
             secondary: None,
             stdout_capture: None,
             host_console: None,
+            post_mode: crate::post::PostMode::Off,
             stdin_redirect: None,
             batch: crate::batch::Batch::default(),
             environment: default_environment(),
@@ -1573,8 +1576,13 @@ impl Cpu {
     /// and batch files.
     pub fn start_dos(&mut self) {
         self.load_shell();
-        let (notes, update) = (self.startup.notes.clone(), self.startup.update.clone());
-        crate::video::print_banner(self, &notes, update.as_deref());
+        if self.post_mode != crate::post::PostMode::Off {
+            // The box comes when the POST ends.
+            crate::post::begin(self, self.post_mode);
+        } else {
+            let (notes, update) = (self.startup.notes.clone(), self.startup.update.clone());
+            crate::video::print_banner(self, &notes, update.as_deref());
+        }
         for item in self.startup.commands.clone() {
             match item {
                 crate::boot::StartupItem::Lines(lines) => self.queue_batch_lines(&lines),

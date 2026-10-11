@@ -310,6 +310,7 @@ impl Item {
             CrtGlow => "crt-glow",
             Monochrome => "monochrome",
             MonitorEffects => "monitor-effects",
+            Post => "post",
             Composite => "composite",
             CompositeEra => "composite-era",
             Cycles => "cycles",

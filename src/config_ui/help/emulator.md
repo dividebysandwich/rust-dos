@@ -65,6 +65,14 @@ MMX**.
 that ask for one, and for 3dfx games; **Pentium MMX** for those that
 need MMX. Takes effect at the DOS prompt.
 
+# BIOS POST screen {#post}
+
+A BIOS's power-on self test before DOS starts, and at each reboot: the
+memory counted, the CPU, the drives and the sound cards. **quick** shows
+it for a moment, **full** counts the memory as it is tested. **Del** while
+it shows opens these settings as a BIOS setup, where **F10** saves them and
+restarts the machine; **Esc** skips the memory test.
+
 # Video card {#machine}
 
 The display card games find, which decides the graphics they choose:

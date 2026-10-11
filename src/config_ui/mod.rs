@@ -24,6 +24,7 @@ mod rooms;
 mod sc55;
 mod phonebook;
 mod scenes;
+mod setup;
 pub mod sound_viz;
 mod states;
 pub mod wheel;
@@ -80,6 +81,8 @@ pub enum UiKey {
     Overlay,
     /// Show or hide the help on what is under the cursor (F1).
     Help,
+    /// Save and exit the BIOS setup (F10).
+    F10,
     Char(char),
 }
 
@@ -135,6 +138,8 @@ pub trait Host {
     fn booted(&self) -> Option<BootView> {
         None
     }
+    /// Reset the machine, as Ctrl+Alt+Del does.
+    fn reset_machine(&mut self) {}
     /// Put `text` on the host's clipboard.
     fn copy_text(&mut self, _text: &str) -> Result<(), String> {
         Err("there is no clipboard".to_string())
@@ -408,7 +413,7 @@ impl Page {
                 &[Scale, Fullscreen, Aspect, Vrr, Filter, Shader, CrtCurvature, CrtGlow, Monochrome, MonitorEffects, Composite, CompositeEra]
             }
             Page::Emulator => &[
-                Cycles, Core, Fpu, Cpu, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, VoodooScaleShader, VoodooMsaa,
+                Cycles, Core, Fpu, Cpu, Post, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, VoodooScaleShader, VoodooMsaa,
                 VoodooAnisotropy, VoodooTextureSampling, VoodooFpsCap, VoodooGamma, VoodooOverlay, PowerVr, PowerVrFilter, Memsize, Ems, Umb, DosHigh, Dpmi,
                 DosVersion, IdeHardDisks, BootCdrom, HardDiskSpeed, FloppyDiskSpeed, Joystick,
                 Deadzone, MouseSensitivity, MouseAutocapture, MouseCaptureMessages, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, RecordShader, Autoexec,
@@ -557,6 +562,8 @@ enum Item {
     Monochrome,
     /// The monitor's power, resync and degauss effects.
     MonitorEffects,
+    /// The BIOS's power-on self test before DOS.
+    Post,
     /// The CGA's composite monitor, and which CGA makes the signal.
     Composite,
     CompositeEra,
@@ -915,6 +922,7 @@ impl Item {
             CrtGlow => "  Glow",
             Monochrome => "Monochrome monitor",
             MonitorEffects => "Monitor effects",
+            Post => "BIOS POST screen",
             Composite => "CGA composite colour",
             CompositeEra => "  CGA revision",
             Cycles => "CPU speed (cycles)",
@@ -1067,7 +1075,7 @@ impl Item {
                 frontend.window
             }
             // Only the window plays the monitor's effects.
-            Item::MonitorEffects => frontend.window,
+            Item::MonitorEffects | Item::Post => frontend.window,
             // A thread of its own packs rewind's states.
             Item::Rewind | Item::RewindMemory => frontend.window,
             // The frontend's own sound output has its own buffers.
@@ -1154,6 +1162,7 @@ impl Item {
             | VoodooRenderer | VoodooScale | VoodooScaleShader | VoodooMsaa | VoodooTextureSampling | VoodooAnisotropy | VoodooFpsCap | VoodooOverlay | PowerVrFilter => Applies::Now,
             Monochrome => Applies::NowAndAtPrompt,
             MonitorEffects => Applies::Now,
+            Post => Applies::NextStart,
             HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise | Volume(_) | CaptureDir | RecordUi
             | RecordShader => Applies::Now,
             Joystick | Deadzone | MouseSensitivity | SpeakerFilter | SbFilter | Reverb | Chorus | ReverbMix | ChorusMix => Applies::Now,
@@ -1244,6 +1253,7 @@ impl Item {
             CrtGlow => percent_bar(s.crt.glow, MAX_AMOUNT),
             Monochrome => s.monochrome.describe().to_string(),
             MonitorEffects => s.monitor_effects.describe().to_string(),
+            Post => s.post.describe().to_string(),
             Composite => s.composite.mode.describe().to_string(),
             CompositeEra => s.composite.era.describe().to_string(),
             Cycles => match s.cycles {
@@ -1492,6 +1502,7 @@ impl Item {
             Shader => each(s, crate::video::shader::Shader::ALL, |s, shader| s.shader = shader),
             Monochrome => each(s, crate::video::mono::Monochrome::ALL, |s, mono| s.monochrome = mono),
             MonitorEffects => each(s, crate::video::power::MonitorEffects::ALL, |s, e| s.monitor_effects = e),
+            Post => each(s, crate::post::PostMode::ALL, |s, post| s.post = post),
             Composite => each(s, crate::video::composite::CompositeMode::ALL, |s, mode| s.composite.mode = mode),
             CompositeEra => each(s, crate::video::composite::CompositeEra::ALL, |s, era| s.composite.era = era),
             Core => each(s, [CoreMode::Auto, CoreMode::Dynamic, CoreMode::Normal], |s, core| s.core = core),
@@ -2071,6 +2082,8 @@ pub struct ConfigUi {
     phone_catalog: phonebook::Catalog,
     /// The sound visualizer while it shows (sound_viz.rs).
     sound_viz: Option<sound_viz::SoundViz>,
+    /// The settings as a BIOS setup, while it shows (setup.rs).
+    setup: Option<setup::Setup>,
     scene_download: Option<scenes::SceneDownload>,
     /// The help shown over everything (F1).
     help: Option<help::HelpView>,
@@ -2151,6 +2164,7 @@ impl ConfigUi {
             phonebook: None,
             phone_catalog: phonebook::Catalog::default(),
             sound_viz: None,
+            setup: None,
             scene_download: None,
             help: None,
             awe32_download: None,
@@ -2316,6 +2330,7 @@ impl ConfigUi {
 
     pub fn close(&mut self) {
         self.open = false;
+        self.setup = None;
         self.layout = None;
         self.hits.clear();
         self.put_away_manual();
@@ -2416,6 +2431,9 @@ impl ConfigUi {
     pub fn key(&mut self, key: UiKey, host: &mut dyn Host) {
         if !self.open {
             return;
+        }
+        if self.setup.is_some() {
+            return self.setup_key(key, host);
         }
         if key == UiKey::Overlay {
             self.overlay_key();
@@ -3217,6 +3235,9 @@ impl ConfigUi {
     pub fn draw(&mut self, frame: &mut Frame) {
         if !self.open {
             return;
+        }
+        if self.setup.is_some() {
+            return self.draw_setup(frame);
         }
         if self.manual_page_shown() {
             return self.draw_manual_page(frame);

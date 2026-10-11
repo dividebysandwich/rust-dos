@@ -1844,6 +1844,12 @@ fn main() -> Result<(), String> {
             osd.show(notice);
         }
 
+        // Del during the POST asks for the BIOS setup.
+        if std::mem::take(&mut cpu.bus.setup_requested) && !ui.is_open() {
+            let current = settings.clone();
+            ui.open_setup(&current, saved.file.clone(), &host!());
+        }
+        cpu.post_mode = settings.post;
         // DOSCONFIG asks for the settings window.
         if std::mem::take(&mut cpu.bus.config_ui_requested) && !ui.is_open() {
             toggle_ui!();
@@ -2922,6 +2928,10 @@ impl Host for MainHost<'_, '_> {
         Some(config_ui::BootView { cd_drive: bus.booted_cd_drive(), shared })
     }
 
+    fn reset_machine(&mut self) {
+        self.cpu.bus.reset_requested = true;
+    }
+
     fn copy_text(&mut self, text: &str) -> Result<(), String> {
         self.clipboard.set_clipboard_text(text)
     }
@@ -3235,6 +3245,7 @@ fn ui_key(keycode: Keycode, keymod: Mod) -> Option<UiKey> {
         Keycode::Insert => UiKey::Insert,
         Keycode::F1 => UiKey::Help,
         Keycode::F2 => UiKey::Save,
+        Keycode::F10 if !ctrl => UiKey::F10,
         Keycode::S if ctrl => UiKey::Save,
         _ => return None,
     })
