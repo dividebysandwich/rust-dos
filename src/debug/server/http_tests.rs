@@ -36,11 +36,14 @@ struct Options {
     frame: u64,
     /// Host time a frame waits.
     sleep: Duration,
+    /// How long the emulator thread lives on after the shutdown, as the
+    /// front end does (printing, saving settings).
+    linger: Duration,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { capacity: super::journal::CAPACITY, deterministic: None, frame: 5000, sleep: Duration::from_millis(1) }
+        Options { capacity: super::journal::CAPACITY, deterministic: None, frame: 5000, sleep: Duration::from_millis(1), linger: Duration::ZERO }
     }
 }
 
@@ -192,6 +195,7 @@ fn run_machine(dir: std::path::PathBuf, rx: mpsc::Receiver<super::super::Request
         hub.poll(&mut cpu);
         if hub.quit_requested() {
             hub.shutdown(&cpu, ShutdownReason::Quit, 0);
+            std::thread::sleep(options.linger);
             return;
         }
         while let Some(request) = hub.next_state_request() {
@@ -687,6 +691,84 @@ fn malformed_requests_get_a_clear_error_and_change_nothing() {
     assert_eq!(rig.get("/api/status").status, 200, "the server goes on");
     // None of it reached the machine.
     assert_eq!(rig.last(), before, "{:?}", rig.get(&format!("/api/journal?after={}", before)).body);
+}
+
+/// `http`, or None if the connection failed.
+fn try_http(addr: SocketAddr, method: &str, path: &str, body: Option<&Value>) -> Option<Resp> {
+    let body = body.cloned();
+    let path = path.to_string();
+    let method = method.to_string();
+    std::panic::catch_unwind(move || http(addr, &method, &path, &[], body.as_ref())).ok()
+}
+
+#[test]
+fn a_quit_answers_everything_in_flight_and_after() {
+    let mut rig = Rig::with("quit-busy", Options { linger: Duration::from_secs(4), ..Options::default() });
+    let cs = rig.at_entry("LOOP.COM");
+    let last = rig.last();
+    let addr = rig.addr;
+    // Waits of every kind, open as the quit comes.
+    let poll = std::thread::spawn(move || http(addr, "GET", &format!("/api/journal?after={}&type=paused&wait=60000", last), &[], None));
+    let op = rig.post("/api/control/resume", json!({})).json()["op"].as_u64().unwrap();
+    let op_wait = std::thread::spawn(move || http(addr, "GET", &format!("/api/ops/{}?wait=60000", op), &[], None));
+    let stop_wait = std::thread::spawn(move || http(addr, "GET", "/api/control/wait?timeout_ms=60000", &[], None));
+    let step = std::thread::spawn(move || http(addr, "POST", "/api/control/step", &[], Some(&json!({"count": 1u64 << 40, "timeout_ms": 60000}))));
+    let log = std::thread::spawn(move || http(addr, "GET", "/api/log?after_n=999999999&wait=60000", &[], None));
+    let mut socket = ws(rig.addr, &format!("/ws/events?after={}&volatile=false", last));
+    // Clients that go on sending as it quits.
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let clients: Vec<_> = (0..6)
+        .map(|i| {
+            let stop = stop.clone();
+            let cs = cs.clone();
+            std::thread::spawn(move || {
+                let mut seen = Vec::new();
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let start = Instant::now();
+                    let r = match i % 3 {
+                        0 => try_http(addr, "GET", "/api/registers", None),
+                        1 => try_http(addr, "POST", "/api/breakpoints", Some(&json!({"addr": format!("{}:0300", cs)}))),
+                        _ => try_http(addr, "POST", "/api/input/type?wait=false", Some(&json!({"text": "a"}))),
+                    };
+                    seen.push((r.map_or(0, |r| r.status), start.elapsed()));
+                }
+                seen
+            })
+        })
+        .collect();
+    std::thread::sleep(Duration::from_millis(300));
+    let start = Instant::now();
+    let quit = rig.quit();
+    assert_eq!(quit.status, 200);
+    let shut_down_in = start.elapsed();
+    std::thread::sleep(Duration::from_millis(500));
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(shut_down_in < Duration::from_secs(8), "the emulator thread ends: {:?}", shut_down_in);
+    for client in clients {
+        for (status, took) in client.join().unwrap() {
+            assert!(matches!(status, 200 | 409 | 429 | 503), "status {}", status);
+            assert!(took < Duration::from_secs(3), "a request took {:?} (status {})", took, status);
+        }
+    }
+    let polled = poll.join().unwrap().json();
+    assert_eq!(polled["entries"].as_array().unwrap().last().unwrap()["type"], "shutdown", "{}", polled);
+    let ended = op_wait.join().unwrap().json();
+    // The step took the resume over; the step's own end is the shutdown.
+    assert_eq!(ended["state"], "superseded", "{}", ended);
+    for r in [stop_wait.join().unwrap(), step.join().unwrap()] {
+        assert_eq!(r.status, 503, "{}", r.body);
+        assert_eq!(r.json()["shutdown"]["type"], "shutdown", "{}", r.body);
+    }
+    assert_eq!(log.join().unwrap().status, 200);
+    let mut types = Vec::new();
+    while let Some(e) = next(&mut socket) {
+        types.push(e["type"].as_str().unwrap_or("").to_string());
+    }
+    assert_eq!(types.last().map(String::as_str), Some("shutdown"));
+    // After it, at once.
+    let start = Instant::now();
+    assert_eq!(rig.get("/api/registers").status, 503);
+    assert!(start.elapsed() < Duration::from_secs(1));
 }
 
 #[test]

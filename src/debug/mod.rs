@@ -1310,7 +1310,9 @@ impl DebugHub {
         for (ctx, tx) in std::mem::take(&mut self.frame_waiters) {
             self.answer(&ctx, tx, gone());
         }
-        if let Some(rx) = &self.rx {
+        // Requests still queued get 503, and the channel closes: one sent
+        // later fails at once, and the server answers it with 503 too.
+        if let Some(rx) = self.rx.take() {
             while let Ok(req) = rx.try_recv() {
                 let _ = req.reply.send(Answer { reply: gone(), meta: Meta::default() });
             }
@@ -4662,6 +4664,11 @@ mod tests {
         assert!(shared.closed.load(std::sync::atomic::Ordering::Acquire));
         hub.append(&cpu, super::Kind::BreakpointSet, None, serde_json::json!({}));
         assert_eq!(entries(&hub).pop().unwrap()["type"], "shutdown", "nothing after it");
+        // A request that passed the server's check just before the shutdown
+        // isn't left waiting: the channel is closed.
+        let (after, mut after_rx) = hub.request(Cmd::GetRegs);
+        assert!(tx.send(after).is_err(), "nobody takes requests any more");
+        assert!(matches!(after_rx.try_recv(), Err(oneshot::error::TryRecvError::Closed)));
     }
 
     #[test]
