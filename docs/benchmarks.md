@@ -12,9 +12,10 @@ cargo bench --bench dos              # one subsystem
 cargo bench --bench dos -- find      # the benchmarks whose name contains "find"
 ```
 
-Criterion prints the median time per iteration with a confidence interval,
-and the change from the previous run on the same machine. Results go to
-`target/criterion/`.
+Criterion prints its estimate of the time per iteration (the mean, or the
+slope of a linear fit when it times growing batches) with a confidence
+interval, and the change from the previous run on the same machine.
+Results go to `target/criterion/`.
 
 ## Before and after a change
 
@@ -33,8 +34,8 @@ Close other programs while it runs, and run it twice when a result is
 borderline: a laptop's power management, a virus scanner or a build in
 another terminal moves file system numbers by 10% or more.
 
-`cargo test --benches` runs each benchmark once, as a quick check that it
-still works; CI does this on Linux.
+`cargo test --benches` runs each benchmark once, in a debug build, as a
+quick check that it still works; CI does this on Linux.
 
 ## What is there
 
@@ -63,7 +64,10 @@ Benchmarks see the `rust-dos` library's public API only, as the tests in
 private, prefer a small public entry point that a test could use as well
 over a benchmark-only feature.
 
-Build what the scenario needs outside `b.iter`, and keep each benchmark
-under about ten seconds (use `group.sample_size(10)` for slow ones). Fixtures
+Build what the scenario needs outside `b.iter`. Criterion takes 100
+samples unless told otherwise, and never fewer than ten samples of one
+iteration each, so give a benchmark that takes over about 50 ms an
+iteration `group.sample_size(10)`; one of a second an iteration still
+runs for about half a minute (`dos/find_first_next/218` on main). Fixtures
 are generated at run time; commit a file only when it can't be generated,
 and record its source and licence in a README beside it.

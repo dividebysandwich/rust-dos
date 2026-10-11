@@ -9,12 +9,23 @@ edition.workspace = true
 # `cargo run` runs the emulator, not the relay (src/bin).
 default-run = "rust-dos"
 
+# `bench = false` on the library and the programs: `cargo bench` and
+# `cargo test --benches` run the benchmarks in benches/ only, without
+# building and running the unit tests a second time.
+[lib]
+bench = false
+
 # The emulator's window needs SDL (the `sdl` feature); the library, the
 # relay and the libretro core (libretro/) don't.
 [[bin]]
 name = "rust-dos"
 path = "src/main.rs"
 required-features = ["sdl"]
+bench = false
+
+[[bin]]
+name = "rust-dos-relay"
+bench = false
 
 # The .deb (cargo-deb, in the release workflow): its dependencies are what
 # the programs link; the OpenXR loader, which rust-dos loads for VR
