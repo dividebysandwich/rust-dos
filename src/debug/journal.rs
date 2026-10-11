@@ -39,6 +39,7 @@ pub const FEATURES: &[&str] = &[
     "trace_cursor",
     "run",
     "program_stops",
+    "build",
 ];
 
 macro_rules! kinds {

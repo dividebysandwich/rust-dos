@@ -145,6 +145,10 @@ jobs:
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             git ca-certificates curl zstd build-essential cmake pkg-config libsdl2-dev libasound2-dev
+          # The workspace belongs to the runner's user and the container
+          # runs as root, so git would refuse the checkout as "dubious
+          # ownership" and the binaries would report `commit unknown`.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - uses: actions/checkout@v7
 
@@ -482,6 +486,10 @@ jobs:
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             git ca-certificates curl zstd build-essential pkg-config zip
+          # The workspace belongs to the runner's user and the container
+          # runs as root, so git would refuse the checkout as "dubious
+          # ownership" and the binaries would report `commit unknown`.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - uses: actions/checkout@v7
 

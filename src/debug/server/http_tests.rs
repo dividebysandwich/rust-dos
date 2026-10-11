@@ -358,6 +358,10 @@ fn every_response_has_its_request_number_and_the_client_s_id() {
     assert_eq!(version["api_version"], 1);
     assert_eq!(version["instance"].as_str().map(str::len), Some(16));
     assert!(version["features"].as_array().unwrap().contains(&json!("journal")));
+    assert_eq!(version["build"], rust_dos::build_info::json());
+    for key in ["commit", "commit_short", "dirty"] {
+        assert!(version["build"].get(key).is_some(), "build.{} even when unknown", key);
+    }
     // The client's ID is in the entries its request caused.
     let set = http(rig.addr, "POST", "/api/breakpoints", &[("X-Request-Id", "bp-1")], Some(&json!({"addr": "0100:0000"})));
     let entry = rig.get(&format!("/api/journal?after={}", set.json()["seq"].as_u64().unwrap() - 1)).json()["entries"][0].clone();

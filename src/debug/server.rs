@@ -600,6 +600,7 @@ async fn version(State(s): State<AppState>) -> ApiResult {
     Ok(json_ok(&json!({
         "name": "rust-dos",
         "version": env!("CARGO_PKG_VERSION"),
+        "build": rust_dos::build_info::json(),
         "api_version": journal::API_VERSION,
         "instance": s.shared.instance_hex(),
         "features": journal::FEATURES,
@@ -1795,7 +1796,11 @@ REQUESTS AND THE JOURNAL
                     the server answers itself (journal, ops, log, version,
                     waits with after= or op=, the page and the streams).
   Either header twice is a 400.
-  GET  /api/version                        name, version, api_version, instance, features
+  GET  /api/version                        name, version, build, api_version, instance, features
+                   build: {"commit","commit_short","dirty"}, the git commit the
+                   program was built from and whether a tracked file differed
+                   from it; all null when the build had no git checkout. The
+                   journal's "started" entry has it too.
   GET  /api/journal?after=S[&type=paused,resumed&op=N&cause=N&limit=200&wait=MS&allow_gap=true]
                    the entries after S, oldest first: {"instance","first","last",
                    "state_seq","stop_seq","entries","next","timed_out"}. With
