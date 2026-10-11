@@ -289,15 +289,21 @@ impl MouseState {
         self.y = new_y;
     }
 
-    /// A program set a video mode through INT 10h (AH=00h, or VBE function
-    /// 02h), whose screen is `screen` (see `screen_size`). Drivers that hook
+    /// A program set a video mode through INT 10h (AH=00h, VBE function 02h,
+    /// or a text font load, AH=11h AL=10h-1Fh), whose screen is `w` x `h` (see `driver_screen`). Drivers that hook
     /// INT 10h, CuteMouse's and DOSBox's among them, set the cursor ranges
     /// to the new screen, so a range left from the mode before doesn't
     /// stretch the virtual screen: Conqueror A.D. 1086 sets 0-479 in its
     /// 640x480 menus and reads 0-199 in its 320x200 battles without setting
-    /// the range again. The cursor stays where it is, inside the new range.
-    pub fn video_mode_set(&mut self, screen: (usize, usize)) {
-        let (w, h) = (if screen.0 < 640 { 640 } else { screen.0 as i32 }, screen.1 as i32);
+    /// the range again. The cursor stays where it is, inside the new range,
+    /// as in DOSBox (CuteMouse centres it). Both drivers also hide the
+    /// cursor (the show/hide counter goes back to 1), so a program shows it
+    /// again in the new mode. The host pointer's last position was in the
+    /// old screen's units: the next one starts the PS/2 and serial motion
+    /// afresh rather than counting the change of scale as a move.
+    pub fn video_mode_set(&mut self, (w, h): (i32, i32)) {
+        self.hide_counter = 1;
+        self.ps2.last_position = None;
         self.min_x = 0;
         self.max_x = w - 1;
         self.min_y = 0;
@@ -398,6 +404,14 @@ pub fn screen_size(bus: &crate::bus::Bus) -> (usize, usize) {
         Some(text) => (text.cols * 8, text.rows * 8),
         None => bus.display_size(),
     }
+}
+
+/// The screen a reset (INT 33h AX=0000h) or a mode set gives the cursor:
+/// `screen_size`, at least 640 wide, the Microsoft driver's width for the
+/// 320-pixel modes.
+pub fn driver_screen(bus: &crate::bus::Bus) -> (i32, i32) {
+    let (w, h) = screen_size(bus);
+    (if w < 640 { 640 } else { w as i32 }, h as i32)
 }
 
 /// ROM trampoline (F000:F200) that runs the INT 33h AX=000Ch event handler
@@ -754,5 +768,20 @@ mod tests {
         assert_eq!((mouse.x, mouse.y), (639, 50), "the range clamps it");
         assert_eq!((mouse.mickey_x, mouse.mickey_y), (0, 0));
         assert_eq!(mouse.pending_callback_events, 0);
+    }
+
+    #[test]
+    fn a_mode_set_is_no_ps2_motion() {
+        // The host pointer at the bottom of 640x480, then the same spot of
+        // a 640x200 screen: a change of scale, not a move.
+        let mut mouse = MouseState::new();
+        mouse.reset(640, 480);
+        mouse.set_position(320, 470);
+        mouse.video_mode_set((640, 200));
+        mouse.set_position(320, 196);
+        assert_eq!((mouse.ps2.dx, mouse.ps2.dy), (0, 0));
+        assert_eq!((mouse.serial_dx, mouse.serial_dy), (0, 0));
+        mouse.set_position(320, 198);
+        assert_eq!(mouse.ps2.dy, 2, "the moves after it count");
     }
 }

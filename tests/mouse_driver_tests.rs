@@ -254,9 +254,12 @@ fn a_video_mode_set_gives_the_cursor_the_new_screens_range() {
     cpu.set_cx(320);
     cpu.set_dx(240);
     call(&mut cpu, 0x0004);
+    call(&mut cpu, 0x0001);
+    assert_eq!(cpu.bus.mouse.hide_counter, 0);
 
     int10(&mut cpu, 0x0013, 0);
     let m = &cpu.bus.mouse;
+    assert_eq!(m.hide_counter, 1, "a mode set hides the cursor, as CuteMouse and DOSBox do");
     assert_eq!((m.min_x, m.max_x, m.min_y, m.max_y), (0, 639, 0, 199));
     assert_eq!((m.x, m.y), (320, 199), "the cursor stays, inside the new range");
     assert_eq!(m.virtual_screen(&cpu.bus), (640, 200), "the picture's bottom row is y 199");
@@ -282,4 +285,17 @@ fn a_range_set_after_the_mode_stays() {
     // A VBE call other than a mode set leaves it.
     int10(&mut cpu, 0x4F03, 0);
     assert_eq!(cpu.bus.mouse.max_y, 399);
+}
+
+#[test]
+fn a_font_load_that_changes_the_rows_gives_the_new_range() {
+    // 80x25, then the 8x8 font for 80x50: CuteMouse takes AH=11h AL=10h-1Fh
+    // for a mode set.
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    int10(&mut cpu, 0x0003, 0);
+    call(&mut cpu, 0x0000);
+    assert_eq!(cpu.bus.mouse.max_y, 199);
+    int10(&mut cpu, 0x1112, 0);
+    let m = &cpu.bus.mouse;
+    assert_eq!((m.min_x, m.max_x, m.min_y, m.max_y), (0, 639, 0, 399));
 }

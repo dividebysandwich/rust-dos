@@ -394,7 +394,7 @@ pub fn assume_machine_display(cpu: &mut Cpu) {
 /// Tell the mouse driver a program set a video mode, as a driver hooking
 /// INT 10h sees it (see `MouseState::video_mode_set`).
 fn mode_set_for_mouse(cpu: &mut Cpu) {
-    let screen = crate::mouse::screen_size(&cpu.bus);
+    let screen = crate::mouse::driver_screen(&cpu.bus);
     cpu.bus.mouse.video_mode_set(screen);
 }
 
@@ -1257,6 +1257,11 @@ pub fn handle(cpu: &mut Cpu) {
                     cpu.bus
                         .log_string(&format!("[BIOS] Unhandled INT 10h AH=11h AL={:02X}", al));
                 }
+            }
+            // A text font load (AL=10h-1Fh) can change the rows, and
+            // CuteMouse treats it as a mode set: 80x50 gets 0-399.
+            if (0x10..=0x1F).contains(&al) {
+                mode_set_for_mouse(cpu);
             }
         }
 

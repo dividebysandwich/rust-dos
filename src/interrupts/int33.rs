@@ -2,18 +2,6 @@ use crate::cpu::Cpu;
 use crate::mouse::{BUTTON_LEFT, BUTTON_MIDDLE, BUTTON_RIGHT};
 use iced_x86::Register;
 
-/// Return (width, height) in driver virtual units for the current video mode.
-/// For graphics modes the driver historically reports X in pixels but rounded
-/// up to multiples that match the internal mouse resolution. We keep it simple
-/// and use the mode's native pixel grid, except for 320-wide modes where the
-/// x range is doubled (convention for the DOS mouse driver). Text modes count
-/// 8 a character (see `mouse::screen_size`).
-fn virtual_screen_dims(bus: &crate::bus::Bus) -> (i32, i32) {
-    let (w, h) = crate::mouse::screen_size(bus);
-    let virt_w = if w < 640 { 640 } else { w as i32 };
-    (virt_w, h as i32)
-}
-
 /// Bytes of driver state AX=16h saves: the event handler's mask and
 /// address, the show/hide counter and the position.
 const STATE_SIZE: usize = 12;
@@ -31,7 +19,7 @@ pub fn handle(cpu: &mut Cpu) {
         0x0000 => {
             // Reset driver + query installation status.
             // Returns: AX = FFFFh if installed, 0000h if not. BX = button count.
-            let (w, h) = virtual_screen_dims(&cpu.bus);
+            let (w, h) = crate::mouse::driver_screen(&cpu.bus);
             cpu.bus.mouse.reset(w, h);
             crate::mouse::clear_callback_busy(&mut cpu.bus);
             cpu.set_ax(0xFFFF);
