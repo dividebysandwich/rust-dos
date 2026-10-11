@@ -39,6 +39,8 @@ pub const FEATURES: &[&str] = &[
     "trace_cursor",
     "run",
     "program_stops",
+    "build",
+    "memory_json",
 ];
 
 macro_rules! kinds {

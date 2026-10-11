@@ -324,6 +324,13 @@ Mistakes in the file are printed as warnings; the emulator still starts.
 * `mouse_capture_messages` says over the picture when the mouse is
   captured (and that Ctrl+Alt lets it go) or let go: `true` (the default)
   or `false`.
+* `version_check` asks rust-dos.com at startup whether a newer version
+  is out (`https://rust-dos.com/version.json`); one that is shows in a
+  notification over the picture and in a line under the box above the
+  first DOS prompt. When the answer is slow to come, the line names the
+  version the last check found, and the notification follows once the
+  answer is in. `true` (the default) or `false`. Deterministic mode and
+  the debug server never check.
 * `mouse_autocapture` captures the mouse as it moves over the focused
   window while a program uses the mouse driver (INT 33h), and lets it go
   as the program's cursor reaches the edge of the screen and the mouse
@@ -588,8 +595,10 @@ games](#serial-and-modem-games)). Changes take effect at the DOS prompt.
 * `mousetype` is the serial mouse: `microsoft` (the default, two
   buttons) or `logitech` (three buttons).
 * `modemlisten` takes calls for the first modem on a TCP port: `off` (the
-  default) or a port. A call rings the modem; `ATA` answers it, or `ATS0=1`
-  answers the first ring.
+  default), a port (`2323`, on all of this computer's addresses), or an
+  address and a port (`127.0.0.1:2323` takes calls from this computer
+  only, `[::1]:2323` the same over IPv6). A call rings the modem; `ATA`
+  answers it, or `ATS0=1` answers the first ring.
 * `modemtelnet` makes the modem's TCP calls speak telnet, for BBSes:
   `off` (the default: the characters as they are, as DOSBox's modem sends
   them) or `on`.
@@ -1565,7 +1574,11 @@ card's gamma table, which games set brighter than DOSBox-X shows them.
 * **DOS games** bring Glide with them (linked in, or `GLIDE2X.OVL` beside
   the game) and run under a DOS extender such as DOS/4GW, which maps the
   card's memory. Tomb Raider's 3dfx patch (`3DPATCH\3DFX\TOMB.EXE` on the
-  Tomb Raider Gold CD) runs with `voodoo=true` and `cpu=pentium`.
+  Tomb Raider Gold CD) runs with `voodoo=true` and `cpu=pentium`. Its
+  saved games don't mix with the other versions': loading one saved by
+  another version corrupts the textures. [Issue #38](https://github.com/dividebysandwich/rust-dos/issues/38)
+  has a zip that keeps the 3dfx version apart, so it lives peacefully
+  beside the others.
   Games made for the Voodoo Rush and later boards load Glide from
   `GLIDE2X.OVL` (Tomb Raider's Rush patch, `3DPATCH\VOORUSH\TOMB.EXE`),
   and the one of 3dfx's Voodoo Graphics driver drives this card whatever

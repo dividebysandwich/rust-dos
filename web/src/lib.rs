@@ -316,6 +316,7 @@ impl Machine {
         let notes = notes.into_iter().map(|note| (note, String::new())).collect();
         self.cpu.startup = Startup {
             notes,
+            update: None,
             commands: vec![
                 StartupItem::Lines(self.autoexec.clone()),
                 StartupItem::BatchFile("C:\\AUTOEXEC.BAT".to_string()),
