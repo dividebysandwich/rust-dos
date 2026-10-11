@@ -120,7 +120,7 @@ fn archive_image(files: &[String]) -> Option<String> {
             _ => None,
         }
     };
-    one(&|f| matches!(extension(f).as_str(), "cue" | "ins" | "inst"))
+    one(&|f| matches!(extension(f).as_str(), "cue" | "ins" | "inst" | "bdn"))
         .or_else(|| one(&|f| crate::mount::is_image_name(Path::new(f))))
 }
 

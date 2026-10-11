@@ -106,6 +106,9 @@ fn parse_msf(s: &str) -> Result<u32, String> {
 
 pub fn parse_cue(text: &str) -> Result<CueSheet, String> {
     let mut sheet = CueSheet::default();
+    // Sheets saved by Notepad and some rippers start with a UTF-8 byte
+    // order mark, which would hide the first line's keyword.
+    let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
     for (number, line) in text.lines().enumerate() {
         let error = |msg: String| format!("line {}: {}", number + 1, msg);
         let tokens = tokenize(line).map_err(error)?;
@@ -179,6 +182,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(sheet.files.len(), 1);
+        let with_bom = parse_cue("\u{FEFF}FILE \"SAMNMAX.img\" BINARY\r\n   TRACK 1 MODE1/2352\r\n   INDEX 1 00:00:00\r\n");
+        assert_eq!(with_bom.unwrap().files[0].name, "SAMNMAX.img");
         let file = &sheet.files[0];
         assert_eq!((file.name.as_str(), file.format), ("SAMNMAX.img", FileFormat::Binary));
         assert_eq!(file.tracks[0].mode, TrackMode::Mode1_2352);

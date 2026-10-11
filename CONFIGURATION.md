@@ -1185,9 +1185,11 @@ lists the options. Each drive keeps its own current directory, as in DOS.
 
 A CD image always makes a read-only CD-ROM drive, labelled with the disc's
 volume name unless `-label` says otherwise. It can be a CUE sheet (`.cue`,
-or GOG's `.ins`, with BINARY, MOTOROLA or WAVE files, any number of tracks
-and gaps), a CD image in MAME's compressed CHD format (`.chd`, as `chdman
-createcd` makes them; its data and audio tracks, decompressed as they are
+GOG's `.ins`, GOG's `.bdn` for BloodNet, or a file of any other name that
+is at most 64 KiB and reads as a sheet; with BINARY, MOTOROLA or WAVE
+files, any number of tracks and gaps), a CD image in MAME's compressed CHD
+format (`.chd`, as `chdman createcd` makes them; its data and audio
+tracks, decompressed as they are
 read), or a bare image of an ISO 9660 data track in 2048, 2336 or
 2352-byte sectors (`.iso`, `.bin`, `.img`, GOG's `.gog`). Audio tracks can
 be Ogg Vorbis, FLAC or MP3 files (FILE ... MP3, OGG or FLAC, or WAVE as
