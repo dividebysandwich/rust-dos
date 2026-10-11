@@ -164,7 +164,7 @@ fn cham_q_db(q: usize, fc: f64) -> f64 {
 const CHAM_TOP_OCT: f64 = 6.173_793_071_813_106;
 /// Intervals of the coefficient tables over the filter's range: about 64
 /// an octave, with the top cutoff on the last entry.
-const COEFF_INTERVALS: usize = 396;
+pub(super) const COEFF_INTERVALS: usize = 396;
 
 /// The filter's frequency coefficient and damping (1 / resonance) for Q
 /// `q` with the cutoff `oct` octaves above `CHAM_BASE_HZ`, clamped to the
@@ -179,18 +179,16 @@ fn cham_coeffs(q: usize, oct: f64) -> (f64, f64) {
 /// `cham_coeffs` for each Q at every 1/64 octave or so of the filter's
 /// range. The modulation envelope and LFO1 move the cutoff every sample;
 /// interpolating these costs a fraction of the four transcendentals.
-fn coeff_tables() -> &'static [[(f64, f64); COEFF_INTERVALS + 1]] {
-    static TABLES: std::sync::OnceLock<Vec<[(f64, f64); COEFF_INTERVALS + 1]>> = std::sync::OnceLock::new();
-    TABLES.get_or_init(|| {
-        let oct = |i: usize| i as f64 * CHAM_TOP_OCT / COEFF_INTERVALS as f64;
-        (0..16).map(|q| std::array::from_fn(|i| cham_coeffs(q, oct(i)))).collect()
-    })
+/// `tables::get()` holds them.
+pub(super) fn coeff_tables() -> Vec<[(f64, f64); COEFF_INTERVALS + 1]> {
+    let oct = |i: usize| i as f64 * CHAM_TOP_OCT / COEFF_INTERVALS as f64;
+    (0..16).map(|q| std::array::from_fn(|i| cham_coeffs(q, oct(i)))).collect()
 }
 
 /// `cham_coeffs`, interpolated from the tables.
 #[inline]
 fn cham_coeffs_fast(q: usize, oct: f64) -> (f64, f64) {
-    let table = &coeff_tables()[q];
+    let table = &tables::get().filter_coeffs[q];
     let pos = oct.clamp(0.0, CHAM_TOP_OCT) * (COEFF_INTERVALS as f64 / CHAM_TOP_OCT);
     let i = (pos as usize).min(COEFF_INTERVALS - 1);
     let frac = pos - i as f64;

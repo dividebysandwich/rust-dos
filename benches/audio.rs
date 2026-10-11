@@ -161,6 +161,10 @@ fn awe32_voices(c: &mut Criterion) {
     for preset in PRESETS {
         let mut chip = Emu8000::new(0x220, Arc::from([]), 512, 0);
         set_up(&mut chip, preset);
+        // A silent chip would time nothing worth measuring.
+        notes_on(&mut chip);
+        let sounds = (0..FRAMES).map(|_| chip.render()).any(|(l, r)| l != 0.0 || r != 0.0);
+        assert!(sounds, "{}: the voices are silent", preset.name);
         group.bench_with_input(BenchmarkId::from_parameter(preset.name), &preset, |b, _| {
             b.iter_custom(|iters| time_frames(&mut chip, iters, render))
         });
@@ -190,6 +194,14 @@ fn awe32_machine(c: &mut Criterion) {
         bus.set_awe_setup(Arc::from([]), 512);
         bus.configure_sound(Some(SbConfig { model: SbModel::Awe32, ..SbConfig::default() }), true);
         set_up(&mut bus, preset);
+        notes_on(&mut bus);
+        bus.clock.icount += 1000 * 1000 / 60;
+        if bus.clock.icount >= bus.clock.deadline {
+            bus.service_timers();
+        }
+        bus.audio_catch_up();
+        assert!(bus.audio_out.iter().any(|&s| s != 0), "{}: the voices are silent", preset.name);
+        bus.audio_out.clear();
         group.bench_with_input(BenchmarkId::from_parameter(preset.name), &preset, |b, _| {
             b.iter_custom(|iters| time_frames(&mut bus, iters, frame))
         });
