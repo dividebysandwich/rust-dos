@@ -1405,7 +1405,7 @@ fn main() -> Result<(), String> {
             // The file layout's version, and this rust-dos's (the header has the one that saved it).
             let (format, emulator) = (slots::FORMAT, env!("CARGO_PKG_VERSION"));
             let result = if request.load {
-                host!().load_for_debugger(&path, request.strict_match).map(|(header, differences, unchecked)| {
+                host!().load_for_debugger(&path, request.strict_match, request.check_files).map(|(header, differences, unchecked)| {
                     let header = slots::reply_header(&header);
                     let mut reply = serde_json::json!({"loaded": path, "format": format, "emulator": emulator, "header": header});
                     strict_match_loaded = request.strict_match;
@@ -1424,7 +1424,7 @@ fn main() -> Result<(), String> {
                     savestate::media::forget(&cpu);
                 }
                 host!()
-                    .save_file(&path, request.strict_match)
+                    .save_file(&path, request.check_files)
                     .map(|header| {
                         let header = slots::reply_header(&header);
                         serde_json::json!({"saved": path, "format": format, "emulator": emulator, "header": header})
@@ -2503,7 +2503,7 @@ impl MainHost<'_, '_> {
 
     /// Save the machine to the file `path`, now. Returns the state's header.
     /// `contents` records what is on the writable drives as well, which
-    /// reads every file on them (a strict-match save, media.rs).
+    /// reads every file on them (a `check_files` save, media.rs).
     fn save_file(&mut self, path: &std::path::Path, contents: bool) -> Result<slots::Header, String> {
         let (mut header, picture, state) = self.capture_state();
         savestate::disks::delete_copies(path);
@@ -2530,16 +2530,19 @@ impl MainHost<'_, '_> {
     /// this machine's. A plain load brings the state's own hardware, as
     /// `load_file` does. A `strict_match` load takes only a state of this
     /// machine: one of other hardware or media, or without a record of its
-    /// media, is refused (409) with what differs. A state that records
-    /// what was on the writable drives (a strict-match save's) has them
-    /// compared with the files now, on either kind of load. The third list
-    /// names the writable drives a strict-match load couldn't check, as
-    /// the state has no record of what was on them.
+    /// media, is refused (409) with what differs. A `check_files` load of
+    /// a state that records what was on the writable drives (a
+    /// `check_files` save's) compares them with the files now, and the
+    /// changed files are differences like the others. The third list names
+    /// the writable drives a `check_files` load couldn't check, as the
+    /// state has no record of what was on them. Without `check_files` no
+    /// file is read.
     #[allow(clippy::type_complexity)]
     fn load_for_debugger(
         &mut self,
         path: &std::path::Path,
         strict_match: bool,
+        check_files: bool,
     ) -> Result<(slots::Header, Vec<String>, Vec<String>), (u16, serde_json::Value)> {
         // Whatever failed, the machine, its settings and hardware are as they were.
         let failed = |e: String| (400, serde_json::json!({"error": e, "loaded": false, "unchanged": true}));
@@ -2555,13 +2558,17 @@ impl MainHost<'_, '_> {
         match &header.media {
             Some(media) => {
                 let mut now = savestate::media::of(self.cpu);
-                // What is on the drives the state has a record of.
-                let recorded = |m: &savestate::media::Medium| {
-                    media.iter().any(|saved| saved.drive == m.drive && savestate::media::has_contents(saved))
-                };
-                savestate::media::add_contents(self.cpu, &mut now, path, recorded);
+                if check_files {
+                    // What is on the drives the state has a record of.
+                    let recorded = |m: &savestate::media::Medium| {
+                        media.iter().any(|saved| saved.drive == m.drive && savestate::media::has_contents(saved))
+                    };
+                    savestate::media::add_contents(self.cpu, &mut now, path, recorded);
+                }
+                // Without `check_files` the machine's media have no record of
+                // their files, so the state's isn't compared.
                 differences.extend(savestate::media::differences(media, &now));
-                if strict_match {
+                if check_files {
                     let copied = |key: &str| savestate::disks::copy_path_of(path, key).exists();
                     unchecked = savestate::media::unrecorded(media, copied);
                 }

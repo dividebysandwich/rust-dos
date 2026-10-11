@@ -1057,14 +1057,18 @@ struct StateBody {
     /// must match its hardware and media and resets the debugger.
     #[serde(default)]
     strict_match: bool,
+    /// Record the files on the writable drives (save), or compare them
+    /// with the record (load). Off unless asked for.
+    #[serde(default)]
+    check_files: bool,
 }
 
 async fn state_file(State(s): State<AppState>, Path(action): Path<String>, body: Bytes) -> ApiResult {
     let b: StateBody = from_value(parse_body(&body)?)?;
-    let (path, strict_match) = (b.path, b.strict_match);
+    let (path, strict_match, check_files) = (b.path, b.strict_match, b.check_files);
     match action.as_str() {
-        "save" => s.call_json(Cmd::SaveState { path, strict_match }, DEFAULT_TIMEOUT).await,
-        "load" => s.call_json(Cmd::LoadState { path, strict_match }, DEFAULT_TIMEOUT).await,
+        "save" => s.call_json(Cmd::SaveState { path, strict_match, check_files }, DEFAULT_TIMEOUT).await,
+        "load" => s.call_json(Cmd::LoadState { path, strict_match, check_files }, DEFAULT_TIMEOUT).await,
         _ => Err(ApiError::new(StatusCode::NOT_FOUND, format!("unknown action '{}' (save, load)", action))),
     }
 }
@@ -1964,12 +1968,7 @@ SAVE STATES
                    left to type (409 {"error","paused"} otherwise). A load
                    is refused (409, "differences", nothing loaded) unless
                    the state's hardware settings, media and deterministic
-                   start time match this machine's. A strict-match save
-                   records the size and SHA-256 of every file on the
-                   writable drives and of writable images; a load of it
-                   names the files changed since (refused if strict). A
-                   strict-match load of a state without that record lists
-                   the drives in "unchecked". It clears breakpoints,
+                   start time match this machine's. It clears breakpoints,
                    watchpoints, break_on stops, run-to targets, queued
                    input, held keys and an until_ms, cancels the
                    operations under way (409 to their waits), stays
@@ -1978,6 +1977,15 @@ SAVE STATES
                    paused (409 otherwise).
                    A load while paused stops the machine in the loaded
                    state: a "paused" entry with reason "load".
+                   "check_files":true on either, for extra strictness: a
+                   save records the size and SHA-256 of every file on
+                   the writable drives and of writable images; a load
+                   names the files changed since in "differences"
+                   (refused if strict), or lists in "unchecked" the
+                   drives the state has no such record of. Off by
+                   default: files rarely affect the machine's state,
+                   hashing large folders takes time, and other files on
+                   the drive show up as changes.
 
 SPEED
   POST   /api/speed {"cycles":"auto"}   the CPU speed, as `cycles` takes it

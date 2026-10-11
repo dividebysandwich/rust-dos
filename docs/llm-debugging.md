@@ -435,12 +435,12 @@ and images the drives were mounted from, and a load mounts them again,
 but not what is in them: what a program wrote since stays written,
 except for a booted system's disks (see "Booted systems" below). A
 strict-match load checks the paths, that the images are there, and the
-size and start of read-only images. A strict-match save also records
-what is on the writable drives (each file's size and SHA-256, and each
-writable image's SHA-256), and a load of that state, strict or plain,
-names the files that changed since (see "What counts as the same
-media"). A strict-match load refuses the state then; put the files back
-or load another state.
+size and start of read-only images. For more, ask for `"check_files":
+true`: a save then also records what is on the writable drives (each
+file's size and SHA-256, and each writable image's SHA-256), and a load
+with it names the files that changed since (see "What counts as the
+same media"). A strict-match load refuses the state then; put the files
+back or load another state.
 
 #### Plain save and load
 
@@ -580,12 +580,16 @@ A strict-match save or load guarantees:
   size and time (`cp -p`, `rsync -t`, an unpacked archive), or a CUE
   track file that appeared after the mount.
 
-- **The files on the writable drives as they were.** A strict-match save
-  reads every file of each writable folder drive and every writable
-  image, and records their sizes and SHA-256 hashes in the state. A load
-  of that state reads them again and compares: a save game written, a
-  configuration changed or a file deleted since the save is a
-  difference, and a strict-match load is refused:
+With `"check_files": true` on the save and on the load, a strict match
+also guarantees:
+
+- **The files on the writable drives as they were.** A `check_files` save
+  (strict or plain) reads every file of each writable folder drive and
+  every writable image, and records their sizes and SHA-256 hashes in
+  the state. A `check_files` load of that state reads them again and
+  compares: a save game written, a configuration changed or a file
+  deleted since the save is a difference. A strict-match load is
+  refused; a plain one goes through and lists them:
 
   ```json
   {
@@ -599,19 +603,29 @@ A strict-match save or load guarantees:
   }
   ```
 
-  This reads every file on those drives once, on the save and again on
-  the load, which takes a while for a large game folder, so only
-  strict-match saves record them; plain saves,
-  the window's slots, rewind and the libretro core's states don't. A
-  strict-match load of a state without the record (a plain save's, or
-  one saved by an older rust-dos) goes through, and its reply lists the
-  drives it couldn't check in `unchecked`:
+  The check is off unless asked for. What a program wrote to a file
+  rarely matters to the machine's state, which a state holds whole;
+  reading and hashing every file of a large game folder on each save and
+  load takes time; and other files on the drive (a log, another tool's
+  output, a state saved there) show up as changes. Without
+  `check_files` no file is read or hashed, a strict match is as
+  described above, and a state's header has no file list. The window's
+  slots (Ctrl+F keys), rewind and the libretro core's states never
+  check.
+
+  A `check_files` load of a state without the record (one saved without
+  `check_files`, or by an older rust-dos) goes through, and its reply
+  lists the drives it couldn't check in `unchecked`:
 
   ```json
   "unchecked": [
-    "drive C: wasn't checked: the state doesn't record what is on it (saved without strict_match, or by an older rust-dos)"
+    "drive C: wasn't checked: the state doesn't record what is on it (saved without check_files, or by an older rust-dos)"
   ]
   ```
+
+  A file that couldn't be read (another program had it locked, say), at
+  the save or at the load, is a difference too, as its contents can't be
+  compared.
 
 #### What counts as the same media
 
@@ -626,8 +640,8 @@ mounted by number) and:
   `read_only` mount's) its size and the SHA-256 of its first 64 KiB.
 
 A writable image changes as the machine writes it (a dynamic VHD grows),
-so its size is recorded but not compared. When the state was saved with
-a strict match, these are compared as well:
+so its size is recorded but not compared. When the state was saved and
+is loaded with `check_files`, these are compared as well:
 
 - on a writable folder drive, every file and folder as the drive shows
   it (under an overlay, the folder below with the overlay's changes), by
@@ -650,8 +664,9 @@ machine makes itself, aren't listed.
 
 A save replies `{"saved": path, "format", "emulator", "header"}` and a load
 `{"loaded": path, "format", "emulator", "header"}`, with `differences`
-after a plain load that found some, and `debugger_reset` and `unchecked`
-after a strict-match load.
+after a plain load that found some, `debugger_reset` after a strict-match
+load, and `unchecked` after a `check_files` load of a state without a
+record of the files.
 
 - `format`: the version of the file's layout.
 - `emulator`: the version of the running rust-dos.
@@ -668,7 +683,7 @@ after a strict-match load.
     `read_only`, and `folder`, `overlay` and `images` where it has them;
     each image has `path`, `size` (null if the file couldn't be read) and,
     if read-only, `head_sha256`. Null in a state saved before media were
-    recorded. In a strict-match save's state, a writable folder drive has
+    recorded. In a `check_files` save's state, a writable folder drive has
     `files_recorded`, the number of files and folders recorded (the list
     itself stays in the file), a writable image `sha256`, and a writable
     image's delta file `overlay_sha256` (`none` before the first write
@@ -678,7 +693,7 @@ after a strict-match load.
 - `differences`: a sentence for each setting, drive, image or file that
   differs.
 - `unchecked`: a sentence for each writable drive whose files a
-  strict-match load couldn't compare, as the state doesn't record them.
+  `check_files` load couldn't compare, as the state doesn't record them.
 - `debugger_reset`: `breakpoints`, `watchpoints`, `input` (queued input
   events) and `held_keys` count what was cleared; `break_on` lists the
   stops that were on (`exceptions`, `mode_switch`, `program_start`,

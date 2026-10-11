@@ -8,12 +8,13 @@
 //! a writable one changes as the machine writes it (a dynamic VHD grows),
 //! so its size is recorded but not compared.
 //!
-//! A strict-match save also records what is on the writable drives
-//! (`add_contents`): each file of a folder drive with its size and
-//! SHA-256, and the SHA-256 of each writable image and delta file. A load
-//! of such a state compares them with the files as they are, and names
-//! the files a program (or anything else) changed since the save. The
-//! state doesn't keep the files themselves, so a load can't put them back.
+//! A save asked for with `check_files` also records what is on the
+//! writable drives (`add_contents`): each file of a folder drive with its
+//! size and SHA-256, and the SHA-256 of each writable image and delta
+//! file. A `check_files` load of such a state compares them with the files
+//! as they are, and names the files a program (or anything else) changed
+//! since the save. Without `check_files` no file is read. The state
+//! doesn't keep the files themselves, so a load can't put them back.
 
 use crate::cpu::Cpu;
 use crate::disk::{DriveInfo, DriveKind, drive_key};
@@ -50,12 +51,12 @@ pub struct Medium {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<Image>,
     /// What is on a writable folder drive, as the drive shows it (with
-    /// its overlay's changes), sorted by path: recorded by a strict-match
+    /// its overlay's changes), sorted by path: recorded by a `check_files`
     /// save (`add_contents`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub files: Option<Vec<FileEntry>>,
     /// SHA-256 of a writable image's delta file (`overlay`), recorded by a
-    /// strict-match save; `none` while there is no such file (it is made at
+    /// `check_files` save; `none` while there is no such file (it is made at
     /// the first write).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overlay_sha256: Option<String>,
@@ -71,7 +72,7 @@ pub struct Image {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head_sha256: Option<String>,
     /// SHA-256 of the whole file, for a writable image, recorded by a
-    /// strict-match save.
+    /// `check_files` save.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
 }
@@ -160,13 +161,14 @@ thread_local! {
     static SHEET_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// The images of a drive: its list of them, or the one it shows.
+fn listed(info: &DriveInfo) -> Vec<PathBuf> {
+    if info.images.is_empty() { info.image.iter().cloned().collect() } else { info.images.clone() }
+}
+
 fn medium(info: &DriveInfo) -> Option<Medium> {
-    let mut listed: Vec<PathBuf> = info.images.clone();
-    if listed.is_empty() {
-        listed.extend(info.image.clone());
-    }
     // A CUE sheet's tracks are in the files it names.
-    let paths: Vec<PathBuf> = listed
+    let paths: Vec<PathBuf> = listed(info)
         .into_iter()
         .flat_map(|p| {
             #[cfg(test)]
@@ -237,15 +239,15 @@ fn head_hash(path: &Path, size: u64, modified: Option<SystemTime>) -> Option<Str
 /// Record what is on the writable drives of `media` (the machine's now,
 /// from `of`) that `wanted` picks: each file and folder of a host folder
 /// drive with its size and SHA-256 (`files`), and the SHA-256 of each
-/// writable image and delta file. Every file is read through, so a
-/// strict-match save does it and a plain one doesn't. A booted system's
+/// writable image and delta file. Every file is read through, so only a
+/// save or load asked for with `check_files` does it. A booted system's
 /// disks are left out: its state keeps a copy of them (disks.rs). So are
 /// the files of the state at `state` itself, if it is on a drive: the
 /// state file and the copies of disks beside it.
 pub fn add_contents(cpu: &Cpu, media: &mut [Medium], state: &Path, wanted: impl Fn(&Medium) -> bool) {
     let own = StateFiles::of(state);
     for info in cpu.bus.disk.all_drives() {
-        if info.read_only || cpu.bus.disk.bios_image(info.drive).is_some_and(|disk| disk.journaling()) {
+        if info.read_only || crate::savestate::disks::journaling(cpu, info.drive) {
             continue;
         }
         let key = drive_key(info.drive);
@@ -254,15 +256,17 @@ pub fn add_contents(cpu: &Cpu, media: &mut [Medium], state: &Path, wanted: impl 
             continue;
         }
         if let Some(root) = cpu.bus.disk.host_root(info.drive) {
+            // The host folders the drive's files are in: under an overlay,
+            // the one below and the overlay's, though the drive is read
+            // through the overlay's root (`layerN:/`).
+            let folders: Vec<&Path> = info.root.iter().chain(&info.overlay).map(PathBuf::as_path).collect();
+            let beside = own.place(&folders);
             let mut files = Vec::new();
-            walk(&root, "", &own, &mut files);
+            walk(&root, "", &own, beside.as_deref(), &mut files);
             files.sort_by(|a, b| a.path.cmp(&b.path));
             medium.files = Some(files);
         }
-        let mut listed = info.images.clone();
-        if listed.is_empty() {
-            listed.extend(info.image.clone());
-        }
+        let listed = listed(&info);
         if listed.len() == medium.images.len() {
             for (path, image) in listed.iter().zip(&mut medium.images) {
                 image.sha256 = file_hash(path);
@@ -277,14 +281,14 @@ pub fn add_contents(cpu: &Cpu, media: &mut [Medium], state: &Path, wanted: impl 
     }
 }
 
-/// Whether a strict-match save recorded what is on the drive of `medium`.
+/// Whether a `check_files` save recorded what is on the drive of `medium`.
 pub fn has_contents(medium: &Medium) -> bool {
     medium.files.is_some() || medium.overlay_sha256.is_some() || medium.images.iter().any(|i| i.sha256.is_some())
 }
 
 /// The writable drives of the media a state was saved with whose contents
 /// it has no record of (`add_contents`), each as a sentence: a state saved
-/// without a strict match, or by an older rust-dos. `copied` says whether
+/// without `check_files`, or by an older rust-dos. `copied` says whether
 /// a copy of a drive's disk is kept beside the state (a booted system's,
 /// disks.rs), which the load puts back.
 pub fn unrecorded(saved: &[Medium], copied: impl Fn(&str) -> bool) -> Vec<String> {
@@ -294,7 +298,7 @@ pub fn unrecorded(saved: &[Medium], copied: impl Fn(&str) -> bool) -> Vec<String
         .filter(|m| !has_contents(m) && !copied(&m.drive))
         .map(|m| {
             format!(
-                "{} wasn't checked: the state doesn't record what is on it (saved without strict_match, or by an older rust-dos)",
+                "{} wasn't checked: the state doesn't record what is on it (saved without check_files, or by an older rust-dos)",
                 drive_name(&m.drive)
             )
         })
@@ -302,25 +306,26 @@ pub fn unrecorded(saved: &[Medium], copied: impl Fn(&str) -> bool) -> Vec<String
 }
 
 /// The files and folders under `dir`, `prefix` their path from the root.
-/// A link to a folder is listed as a folder without going into it.
-fn walk(dir: &Path, prefix: &str, own: &StateFiles, out: &mut Vec<FileEntry>) {
+/// A link to a folder is listed as a folder without going into it. The
+/// state's own files are left out of the folder at `beside` (`place`).
+fn walk(dir: &Path, prefix: &str, own: &StateFiles, beside: Option<&str>, out: &mut Vec<FileEntry>) {
     let Ok(entries) = hostfs::read_dir(dir) else { return };
-    let beside_state = own.dir.is_some() && std::fs::canonicalize(dir).ok() == own.dir;
+    let beside_state = beside.is_some_and(|at| at.eq_ignore_ascii_case(prefix));
     for entry in entries {
         let name = entry.name.to_string_lossy();
         if beside_state && own.has(&name) {
             continue;
         }
         let path = format!("{}{}", prefix, name);
-        let is_dir = entry.is_dir || hostfs::metadata(&entry.path).is_ok_and(|m| m.is_dir);
-        if is_dir {
+        // A link isn't a folder to `read_dir`; its target's metadata says.
+        let meta = if entry.is_dir { None } else { hostfs::metadata(&entry.path).ok() };
+        if entry.is_dir || meta.as_ref().is_some_and(|m| m.is_dir) {
             out.push(FileEntry { path: format!("{}/", path), size: None, sha256: None });
             if entry.is_dir {
-                walk(&entry.path, &format!("{}/", path), own, out);
+                walk(&entry.path, &format!("{}/", path), own, beside, out);
             }
         } else {
-            let size = hostfs::metadata(&entry.path).map(|m| m.len).ok();
-            out.push(FileEntry { path, size, sha256: file_hash(&entry.path) });
+            out.push(FileEntry { path, size: meta.map(|m| m.len), sha256: file_hash(&entry.path) });
         }
     }
 }
@@ -342,9 +347,26 @@ impl StateFiles {
         StateFiles { dir: std::fs::canonicalize(parent).ok(), name: text(state.file_name()), stem: text(state.file_stem()) }
     }
 
+    /// Where the folder of the state's files is on a drive whose files are
+    /// in the host folders `folders`: its path from the drive's root,
+    /// ending in `/` ("" for the root). None if it is in none of them.
+    fn place(&self, folders: &[&Path]) -> Option<String> {
+        let dir = self.dir.as_ref()?;
+        folders.iter().find_map(|folder| {
+            let folder = std::fs::canonicalize(folder).ok()?;
+            let below = dir.strip_prefix(&folder).ok()?;
+            Some(below.iter().map(|name| format!("{}/", name.to_string_lossy())).collect())
+        })
+    }
+
     fn has(&self, name: &str) -> bool {
         let name = name.to_ascii_lowercase();
-        let copy = name.strip_prefix(&self.stem).and_then(|rest| rest.strip_prefix('.')).is_some_and(|rest| rest.ends_with(".img"));
+        // `a.C.img`, `a.2.img`: the copy of a drive's disk (`disks::copy_path`).
+        let key = name.strip_prefix(&self.stem).and_then(|rest| rest.strip_prefix('.')).and_then(|rest| rest.strip_suffix(".img"));
+        let copy = key.is_some_and(|key| {
+            (key.len() == 1 && key.bytes().all(|b| b.is_ascii_alphabetic()))
+                || (!key.is_empty() && key.bytes().all(|b| b.is_ascii_digit()))
+        });
         name == self.name || name == format!("{}.partial", self.stem) || copy
     }
 }
@@ -353,7 +375,7 @@ impl StateFiles {
 fn file_hash(path: &Path) -> Option<String> {
     let mut file = hostfs::File::open(path).ok()?;
     let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 1 << 20];
+    let mut buf = vec![0u8; 64 << 10];
     loop {
         match file.read(&mut buf) {
             Ok(0) => break,
@@ -379,11 +401,11 @@ const NAMED_FILES: usize = 20;
 /// The files and folders that differ between two records of a drive's
 /// (`files`), as sentences starting with `name`.
 fn file_differences(name: &str, was: &[FileEntry], is: &[FileEntry]) -> Vec<String> {
-    let index = |list: &[FileEntry]| list.iter().map(|f| (f.path.clone(), f.clone())).collect::<std::collections::BTreeMap<_, _>>();
+    fn index(list: &[FileEntry]) -> std::collections::BTreeMap<&str, &FileEntry> {
+        list.iter().map(|f| (f.path.as_str(), f)).collect()
+    }
     let (was, is) = (index(was), index(is));
-    let mut paths: Vec<&String> = was.keys().chain(is.keys()).collect();
-    paths.sort_unstable();
-    paths.dedup();
+    let paths: std::collections::BTreeSet<&str> = was.keys().chain(is.keys()).copied().collect();
     let size = |f: &FileEntry| f.size.map_or("unreadable".to_string(), |n| format!("{} bytes", n));
     let mut out: Vec<String> = paths
         .into_iter()
@@ -394,6 +416,12 @@ fn file_differences(name: &str, was: &[FileEntry], is: &[FileEntry]) -> Vec<Stri
                 (None, Some(_)) => Some(format!("{} {} {}: new since the save", name, what, path)),
                 (Some(a), Some(b)) if a.size != b.size => {
                     Some(format!("{} file {}: {} when saved, {} now", name, path, size(a), size(b)))
+                }
+                // A file locked by another program, say: what is in it is
+                // unknown, so it can't count as the same.
+                (Some(a), Some(b)) if what == "file" && (a.sha256.is_none() || b.sha256.is_none()) => {
+                    let when = if a.sha256.is_none() { "when saved" } else { "now" };
+                    Some(format!("{} file {}: it couldn't be read {}, so its contents weren't compared", name, path, when))
                 }
                 (Some(a), Some(b)) if a.sha256 != b.sha256 => {
                     Some(format!("{} file {}: its contents differ from when it was saved", name, path))
@@ -682,7 +710,7 @@ mod tests {
             file("SAVES/", 3, "ee"),
         ]);
         assert_eq!(
-            differences(&[saved.clone()], &[now]),
+            differences(std::slice::from_ref(&saved), &[now]),
             [
                 "drive C: file CONFIG.DAT: its contents differ from when it was saved",
                 "drive C: file NEW.SAV: new since the save",
@@ -693,8 +721,22 @@ mod tests {
         // A state without the record, or a machine whose drive wasn't
         // read, has nothing to compare.
         let plain = folder("C", "/games/keen");
-        assert!(differences(&[plain.clone()], &[with_files(Vec::new())]).is_empty());
+        assert!(differences(std::slice::from_ref(&plain), &[with_files(Vec::new())]).is_empty());
         assert!(differences(&[saved], &[plain]).is_empty());
+    }
+
+    #[test]
+    fn a_file_that_couldnt_be_read_is_a_difference() {
+        let unread = |path: &str| FileEntry { path: path.into(), size: Some(7), sha256: None };
+        let saved = with_files(vec![unread("LOCKED.DAT"), file("BUSY.DAT", 7, "aa")]);
+        let now = with_files(vec![unread("LOCKED.DAT"), unread("BUSY.DAT")]);
+        assert_eq!(
+            differences(&[saved], &[now]),
+            [
+                "drive C: file BUSY.DAT: it couldn't be read now, so its contents weren't compared",
+                "drive C: file LOCKED.DAT: it couldn't be read when saved, so its contents weren't compared",
+            ]
+        );
     }
 
     #[test]
@@ -761,8 +803,8 @@ mod tests {
         assert_eq!(
             unrecorded(&saved, |_| false),
             [
-                "drive C: wasn't checked: the state doesn't record what is on it (saved without strict_match, or by an older rust-dos)",
-                "disk 2 wasn't checked: the state doesn't record what is on it (saved without strict_match, or by an older rust-dos)",
+                "drive C: wasn't checked: the state doesn't record what is on it (saved without check_files, or by an older rust-dos)",
+                "disk 2 wasn't checked: the state doesn't record what is on it (saved without check_files, or by an older rust-dos)",
             ]
         );
         assert_eq!(unrecorded(&saved, |key| key == "2").len(), 1, "a booted system's disk comes back from its copy");

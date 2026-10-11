@@ -153,7 +153,7 @@ fn the_journal_follows_a_session_to_its_shutdown() {
 }
 
 #[test]
-fn a_strict_match_load_refuses_a_state_whose_folder_changed_since_the_save() {
+fn a_check_files_load_names_the_files_changed_since_the_save_and_one_without_it_reads_none() {
     let dir = std::env::temp_dir().join(format!("rust-dos-contents-bin-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("c").join("SAVES")).unwrap();
@@ -169,32 +169,45 @@ fn a_strict_match_load_refuses_a_state_whose_folder_changed_since_the_save() {
     assert_eq!(post("/api/control/pause", json!({})).0, 200);
     // The states go beside C:'s folder, out of it.
     let state = |name: &str| dir.join(name).display().to_string();
-    let (status, saved) = post("/api/state/save", json!({"path": state("a.state"), "strict_match": true}));
+    let checked = |name: &str, strict: bool| json!({"path": state(name), "strict_match": strict, "check_files": true});
+    let (status, saved) = post("/api/state/save", checked("a.state", true));
     assert_eq!(status, 200, "{}", saved);
     let c = &saved["header"]["media"][0];
     assert_eq!((c["drive"].as_str(), c["files_recorded"].as_u64()), (Some("C"), Some(2)), "{}", saved);
-    let (status, loaded) = post("/api/state/load", json!({"path": state("a.state"), "strict_match": true}));
+    let (status, loaded) = post("/api/state/load", checked("a.state", true));
     assert_eq!(status, 200, "{}", loaded);
     assert!(loaded.get("differences").is_none() && loaded.get("unchecked").is_none(), "{}", loaded);
+    // A save without check_files, strict or not, records no files.
+    for (name, strict) in [("b.state", true), ("c.state", false)] {
+        let (status, saved) = post("/api/state/save", json!({"path": state(name), "strict_match": strict}));
+        assert_eq!(status, 200, "{}", saved);
+        assert!(saved["header"]["media"][0].get("files_recorded").is_none(), "{}", saved);
+    }
 
     // A save game written and the configuration changed after the save.
     std::fs::write(dir.join("c").join("SAVES").join("GAME1.SAV"), "saved game").unwrap();
     std::fs::write(dir.join("c").join("CONFIG.DAT"), "sound=0").unwrap();
-    let (status, refused) = post("/api/state/load", json!({"path": state("a.state"), "strict_match": true}));
+    let (status, refused) = post("/api/state/load", checked("a.state", true));
     assert_eq!((status, refused["loaded"].as_bool()), (409, Some(false)), "{}", refused);
     let expected = json!([
         "drive C: file CONFIG.DAT: its contents differ from when it was saved",
         "drive C: file SAVES/GAME1.SAV: new since the save",
     ]);
     assert_eq!(refused["differences"], expected, "{}", refused);
-    // A plain load goes through and lists them.
-    let (status, loaded) = post("/api/state/load", json!({"path": state("a.state")}));
+    // Without strict_match it goes through and lists them.
+    let (status, loaded) = post("/api/state/load", checked("a.state", false));
     assert_eq!((status, &loaded["differences"]), (200, &expected), "{}", loaded);
+    // Without check_files no file is compared, even for a state with the
+    // record and a strict match.
+    for strict in [true, false] {
+        let (status, loaded) = post("/api/state/load", json!({"path": state("a.state"), "strict_match": strict}));
+        assert_eq!(status, 200, "{}", loaded);
+        assert!(loaded.get("differences").is_none() && loaded.get("unchecked").is_none(), "{}", loaded);
+    }
 
-    // A plain save records no contents: a strict-match load of it says so
-    // and goes through.
-    assert_eq!(post("/api/state/save", json!({"path": state("b.state")})).0, 200);
-    let (status, loaded) = post("/api/state/load", json!({"path": state("b.state"), "strict_match": true}));
+    // A state saved without check_files: a check_files load says it
+    // couldn't check C: and goes through.
+    let (status, loaded) = post("/api/state/load", checked("b.state", true));
     assert_eq!(status, 200, "{}", loaded);
     let unchecked = loaded["unchecked"].as_array().unwrap();
     assert!(unchecked.len() == 1 && unchecked[0].as_str().unwrap().starts_with("drive C: wasn't checked"), "{}", loaded);

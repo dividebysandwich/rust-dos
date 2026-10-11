@@ -256,12 +256,16 @@ pub fn list(dir: &Path) -> Vec<(u8, Header, Vec<u8>)> {
 }
 
 /// The header of the slot file at `path`, if there is one: read from the
-/// start of the file, without its state. A strict-match save's header
+/// start of the file, without its state. A `check_files` save's header
 /// lists the files of its folder drives, so it can be long.
 pub fn read_file_header(path: &Path) -> Option<Header> {
     let mut file = std::fs::File::open(path).ok()?;
     let mut start = vec![0u8; 14];
     file.read_exact(&mut start).ok()?;
+    // Not the rest of a file that isn't a state.
+    if start[..8] != MAGIC[..] {
+        return None;
+    }
     let json = u32::from_le_bytes(start[10..14].try_into().unwrap()) as u64;
     // The JSON, then an empty picture in place of the file's.
     file.take(json).read_to_end(&mut start).ok()?;

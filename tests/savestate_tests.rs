@@ -624,7 +624,7 @@ fn a_load_keeps_the_time_stamps_of_the_devices_open_files() {
 }
 
 #[test]
-fn a_strict_match_record_names_the_files_a_program_wrote_after_the_save() {
+fn a_check_files_record_names_the_files_a_program_wrote_after_the_save() {
     use rust_dos::savestate::media::{self, Medium};
     use rust_dos::savestate::slots;
     fix_time();
@@ -647,6 +647,18 @@ fn a_strict_match_record_names_the_files_a_program_wrote_after_the_save() {
     assert_eq!(names(&drive(&saved, "C")), ["CONFIG.DAT", "GAME.EXE"]);
     assert_eq!(names(&drive(&saved, "D")), ["LEVEL1.DAT"], "D: as it shows its files, through the overlay");
     assert!(media::differences(&saved, &record(&cpu)).is_empty());
+    // A state in the folder below D:'s overlay is left out of D:'s record,
+    // though D: is read through the overlay.
+    let below = lower.join("below.state");
+    fs::write(&below, b"a state").unwrap();
+    fs::write(lower.join("below.C.img"), b"a booted system's disk").unwrap();
+    fs::write(lower.join("below.disk1.img"), b"a disk of the game").unwrap();
+    let mut beside = media::of(&cpu);
+    media::add_contents(&cpu, &mut beside, &below, |m| m.drive == "D");
+    assert_eq!(names(&drive(&beside, "D")), ["LEVEL1.DAT", "below.disk1.img"]);
+    for name in ["below.state", "below.C.img", "below.disk1.img"] {
+        fs::remove_file(lower.join(name)).unwrap();
+    }
 
     // The header keeps the record, and the slot file's header reads back
     // whole.
@@ -682,8 +694,8 @@ fn a_strict_match_record_names_the_files_a_program_wrote_after_the_save() {
             "drive D: file LEVEL1.DAT: its contents differ from when it was saved",
         ]
     );
-    // A plain save's record has no contents, and a strict-match load of
-    // it says the drives weren't checked.
+    // A save without check_files has no contents in its record, and a
+    // check_files load of it says the drives weren't checked.
     let plain = media::of(&cpu);
     assert!(plain.iter().all(|m| !media::has_contents(m)));
     let unchecked = media::unrecorded(&plain, |_| false);

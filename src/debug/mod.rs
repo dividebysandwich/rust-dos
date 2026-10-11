@@ -352,8 +352,10 @@ pub enum Cmd {
     /// with `state_done`. A `strict_match` save or load is
     /// done only while paused, and its load must match this machine and
     /// resets the debugger.
-    SaveState { path: String, strict_match: bool },
-    LoadState { path: String, strict_match: bool },
+    /// A `check_files` save records the files on the writable drives,
+    /// and a `check_files` load compares them (savestate/media.rs).
+    SaveState { path: String, strict_match: bool, check_files: bool },
+    LoadState { path: String, strict_match: bool, check_files: bool },
     /// Change the CPU speed (`cycles`) as the settings window does, which
     /// the front end does (`next_speed_request`).
     Speed { cycles: String },
@@ -369,6 +371,9 @@ pub struct StateRequest {
     pub path: PathBuf,
     /// Asked for with `strict_match` (see `next_state_request`).
     pub strict_match: bool,
+    /// Asked for with `check_files`: record or compare the files on the
+    /// writable drives.
+    pub check_files: bool,
     ctx: Ctx,
     if_state: Option<u64>,
     reply: oneshot::Sender<Answer>,
@@ -2210,14 +2215,14 @@ impl DebugHub {
                 self.answer(&ctx, tx, Reply::bad("a path is needed"));
                 return;
             }
-            Cmd::SaveState { path, strict_match } => {
+            Cmd::SaveState { path, strict_match, check_files } => {
                 let path = PathBuf::from(path);
-                self.state_requests.push(StateRequest { load: false, path, strict_match, ctx, if_state, reply: tx });
+                self.state_requests.push(StateRequest { load: false, path, strict_match, check_files, ctx, if_state, reply: tx });
                 return;
             }
-            Cmd::LoadState { path, strict_match } => {
+            Cmd::LoadState { path, strict_match, check_files } => {
                 let path = PathBuf::from(path);
-                self.state_requests.push(StateRequest { load: true, path, strict_match, ctx, if_state, reply: tx });
+                self.state_requests.push(StateRequest { load: true, path, strict_match, check_files, ctx, if_state, reply: tx });
                 return;
             }
             Cmd::Speed { cycles } => {
@@ -3997,7 +4002,7 @@ mod tests {
     /// Ask to save a state, with strict_match or not, and the requests the
     /// front end gets to carry out, with the reply of one refused.
     fn state_request(cpu: &mut Cpu, hub: &mut DebugHub, strict_match: bool) -> (usize, Option<(u16, Value)>) {
-        let mut sent = send(cpu, hub, Cmd::SaveState { path: "/tmp/x.state".into(), strict_match });
+        let mut sent = send(cpu, hub, Cmd::SaveState { path: "/tmp/x.state".into(), strict_match, check_files: false });
         let taken = take_state_requests(hub).len();
         let refused = match sent.rx.try_recv().map(|a| a.reply) {
             Ok(Reply::ErrorJson(code, body)) => Some((code, body)),
@@ -4030,7 +4035,7 @@ mod tests {
         assert_eq!((taken, refused.is_none()), (1, true), "paused with nothing pending");
 
         // A step sent with it, in the same frame, starts the machine first.
-        let strict = Cmd::SaveState { path: "/tmp/x.state".into(), strict_match: true };
+        let strict = Cmd::SaveState { path: "/tmp/x.state".into(), strict_match: true, check_files: false };
         let _save = send(&mut cpu, &mut hub, strict);
         let _step = send(&mut cpu, &mut hub, Cmd::Step { count: 1 });
         assert!(take_state_requests(&mut hub).is_empty(), "refused: the step is under way");
@@ -4044,7 +4049,7 @@ mod tests {
         let (code, body) = refused.expect("refused with input queued");
         assert_eq!((taken, code), (0, 409));
         assert!(body["error"].as_str().unwrap().contains("queued input"), "{}", body);
-        let _load = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: true });
+        let _load = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: true, check_files: false });
         assert_eq!(take_state_requests(&mut hub).len(), 1, "a load drops the input");
     }
 
@@ -4071,8 +4076,8 @@ mod tests {
         assert_eq!((taken, refused.is_none()), (1, true), "taken while running");
 
         // Sent with a strict-match save while running: only that save is refused.
-        let mut strict = send(&mut cpu, &mut hub, Cmd::SaveState { path: "/tmp/a.state".into(), strict_match: true });
-        let _plain = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/b.state".into(), strict_match: false });
+        let mut strict = send(&mut cpu, &mut hub, Cmd::SaveState { path: "/tmp/a.state".into(), strict_match: true, check_files: false });
+        let _plain = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/b.state".into(), strict_match: false, check_files: false });
         let taken = take_state_requests(&mut hub);
         assert_eq!(taken.iter().map(|r| (r.load, r.strict_match)).collect::<Vec<_>>(), [(true, false)]);
         assert!(matches!(strict.rx.try_recv().map(|a| a.reply), Ok(Reply::ErrorJson(409, _))));
@@ -4286,12 +4291,12 @@ mod tests {
         let ty = |text: &str| InputEvent::Type { text: text.into(), delay_ms: Some(30) };
         reply(&mut cpu, &mut hub, Cmd::Input { events: vec![wait(120), ty("PROBE"), wait(45), ty("\n")], wait: false }).unwrap();
         go(&mut cpu, &mut hub, &mut mode, 900);
-        let sent = send(&mut cpu, &mut hub, Cmd::SaveState { path: "s".into(), strict_match: true });
+        let sent = send(&mut cpu, &mut hub, Cmd::SaveState { path: "s".into(), strict_match: true, check_files: false });
         carry_out_states(&mut cpu, &mut hub, &mut mode, &mut saved);
         answer(&mut cpu, &mut hub, sent, 0).unwrap();
         reply(&mut cpu, &mut hub, Cmd::Input { events: vec![ty("DIR"), wait(70), ty("\n")], wait: false }).unwrap();
         go(&mut cpu, &mut hub, &mut mode, 1600);
-        let sent = send(&mut cpu, &mut hub, Cmd::LoadState { path: "s".into(), strict_match: true });
+        let sent = send(&mut cpu, &mut hub, Cmd::LoadState { path: "s".into(), strict_match: true, check_files: false });
         carry_out_states(&mut cpu, &mut hub, &mut mode, &mut saved);
         answer(&mut cpu, &mut hub, sent, 0).unwrap();
         reply(&mut cpu, &mut hub, Cmd::Input { events: vec![ty("VER\n")], wait: false }).unwrap();
@@ -4368,34 +4373,34 @@ mod tests {
         // A load while running is refused as it arrives, strict match or
         // not, with the body a refused strict-match save has.
         for strict_match in [false, true] {
-            let mut load = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match });
+            let mut load = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match, check_files: false });
             let body = refusal(&mut load);
             assert_eq!(body["paused"], false, "{}", body);
             assert_eq!(body["precondition"], "paused", "{}", body);
             assert!(body["error"].as_str().unwrap().contains("deterministic mode"), "{}", body);
         }
         // A strict-match save is refused by its own rule, in the same shape.
-        let mut save = send(&mut cpu, &mut hub, Cmd::SaveState { path: "/tmp/x.state".into(), strict_match: true });
+        let mut save = send(&mut cpu, &mut hub, Cmd::SaveState { path: "/tmp/x.state".into(), strict_match: true, check_files: false });
         assert!(take_state_requests(&mut hub).is_empty());
         let body = refusal(&mut save);
         assert_eq!(body["paused"], false, "{}", body);
         assert!(body["error"].as_str().unwrap().contains("pause it first"), "{}", body);
         // A plain save changes nothing and is taken while running.
-        let _save = send(&mut cpu, &mut hub, Cmd::SaveState { path: "/tmp/x.state".into(), strict_match: false });
+        let _save = send(&mut cpu, &mut hub, Cmd::SaveState { path: "/tmp/x.state".into(), strict_match: false, check_files: false });
         assert_eq!(take_state_requests(&mut hub).len(), 1);
 
         // A load sent while paused, with a resume in the same frame: the
         // machine runs when the front end would load it, so it is refused.
         pause(&mut cpu, &mut hub);
-        let mut load = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: false });
+        let mut load = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: false, check_files: false });
         reply(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }).unwrap();
         assert!(take_state_requests(&mut hub).is_empty());
         assert_eq!(refusal(&mut load)["paused"], false);
 
         // Paused with nothing pending, both loads are taken.
         pause(&mut cpu, &mut hub);
-        let _plain = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: false });
-        let _strict = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: true });
+        let _plain = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: false, check_files: false });
+        let _strict = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: true, check_files: false });
         assert_eq!(take_state_requests(&mut hub).len(), 2);
     }
 
@@ -4656,7 +4661,7 @@ mod tests {
         hub.input.clear();
 
         let input = started_op(&mut cpu, &mut hub, Cmd::Input { events: vec![InputEvent::Wait { ms: 60_000 }], wait: true });
-        let (load, _rx) = hub.request(Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: true });
+        let (load, _rx) = hub.request(Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: true, check_files: false });
         let load_req = load.req;
         hub.handle(&mut cpu, load);
         let request = hub.next_state_request().expect("taken");
@@ -4730,7 +4735,7 @@ mod tests {
         let shared = std::sync::Arc::new(super::Shared::new(std::time::Instant::now()));
         let mut hub = DebugHub::new(Some(rx), Some(shared), 10);
         hub.announce(&cpu);
-        let (load, _load_rx) = hub.request(Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: false });
+        let (load, _load_rx) = hub.request(Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: false, check_files: false });
         let (write, mut write_rx) = hub.request(write("0200:0000", &[9], None));
         tx.send(load).unwrap();
         tx.send(write).unwrap();
@@ -4813,12 +4818,12 @@ mod tests {
         // All in the channel at once, as from clients in one frame.
         let mut cmds = vec![
             (write("0200:0000", &[1], None), None),
-            (Cmd::SaveState { path: "s".into(), strict_match: true }, None),
+            (Cmd::SaveState { path: "s".into(), strict_match: true, check_files: false }, None),
             (write("0200:0000", &[2], None), None),
             (Cmd::Speed { cycles: "5000".into() }, None),
             // Guarded by the state before the first write: refused.
             (write("0200:0000", &[3], None), Some(state)),
-            (Cmd::LoadState { path: "s".into(), strict_match: true }, None),
+            (Cmd::LoadState { path: "s".into(), strict_match: true, check_files: false }, None),
             // Holds only once the load brought back the 1.
             (write("0200:0000", &[4], Some(&[1])), None),
             (Cmd::Resume { until: None, until_ms: None }, None),
