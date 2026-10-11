@@ -47,10 +47,14 @@ pub fn dial(id: u64, address: String, events: WeakUnboundedSender<Command>) -> U
     tx
 }
 
-/// Take calls on TCP port `port`, numbering them from `first_id`. Ends
-/// with the task (`JoinHandle::abort`).
-pub async fn listen(port: u16, first_id: u64, events: WeakUnboundedSender<Command>) -> std::io::Result<()> {
-    let listener = TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, port)).await?;
+/// Take calls on `addr`, numbering them from `first_id`. Ends with the
+/// task (`JoinHandle::abort`).
+pub async fn listen(
+    addr: std::net::SocketAddr,
+    first_id: u64,
+    events: WeakUnboundedSender<Command>,
+) -> std::io::Result<()> {
+    let listener = TcpListener::bind(addr).await?;
     let mut id = first_id;
     loop {
         let (stream, from) = listener.accept().await?;

@@ -595,8 +595,10 @@ games](#serial-and-modem-games)). Changes take effect at the DOS prompt.
 * `mousetype` is the serial mouse: `microsoft` (the default, two
   buttons) or `logitech` (three buttons).
 * `modemlisten` takes calls for the first modem on a TCP port: `off` (the
-  default) or a port. A call rings the modem; `ATA` answers it, or `ATS0=1`
-  answers the first ring.
+  default), a port (`2323`, on all of this computer's addresses), or an
+  address and a port (`127.0.0.1:2323` takes calls from this computer
+  only, `[::1]:2323` the same over IPv6). A call rings the modem; `ATA`
+  answers it, or `ATS0=1` answers the first ring.
 * `modemtelnet` makes the modem's TCP calls speak telnet, for BBSes:
   `off` (the default: the characters as they are, as DOSBox's modem sends
   them) or `on`.
