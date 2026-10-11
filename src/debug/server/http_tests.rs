@@ -1144,3 +1144,133 @@ fn clients_that_go_away_mid_wait_leave_nothing_behind() {
     let stop = rig.get(&format!("/api/control/wait?op={}", resumed["op"]));
     assert_eq!((stop.status, stop.json()["reason"].as_str()), (200, Some("breakpoint")), "{}", stop.body);
 }
+
+// ----- streams -----------------------------------------------------------------
+
+/// Threads that append entries as fast as requests go (breakpoints set),
+/// `n` each; joined, they return the longest a request took.
+fn writers(addr: SocketAddr, threads: u64, n: u64) -> Vec<JoinHandle<Duration>> {
+    (0..threads)
+        .map(|t| {
+            std::thread::spawn(move || {
+                let mut longest = Duration::ZERO;
+                for i in 0..n {
+                    let start = Instant::now();
+                    let r = http(addr, "POST", "/api/breakpoints", &[], Some(&json!({"addr": format!("{:05X}", 0x10000 + t * 0x1000 + i)})));
+                    assert_eq!(r.status, 200, "{}", r.body);
+                    longest = longest.max(start.elapsed());
+                }
+                longest
+            })
+        })
+        .collect()
+}
+
+/// Read a stream's entries (the `gone` message as seq 0), up to `n` of them
+/// or until nothing comes for `quiet`.
+fn read_entries(socket: &mut Socket, n: usize, quiet: Duration) -> Vec<Value> {
+    if let tungstenite::stream::MaybeTlsStream::Plain(s) = socket.get_ref() {
+        s.set_read_timeout(Some(quiet)).unwrap();
+    }
+    let mut out = Vec::new();
+    while out.len() < n {
+        match socket.read() {
+            Ok(tungstenite::Message::Text(t)) => out.push(serde_json::from_str(t.as_str()).unwrap()),
+            Ok(tungstenite::Message::Close(_)) => break,
+            Ok(_) => {}
+            Err(tungstenite::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => break,
+            Err(e) => panic!("{}", e),
+        }
+    }
+    out
+}
+
+#[test]
+fn a_stream_reconnected_at_any_point_misses_and_repeats_nothing() {
+    let rig = Rig::new("ws-reconnect");
+    rig.post("/api/control/pause", json!({}));
+    let writing = writers(rig.addr, 4, 300);
+    let mut seen: Vec<u64> = Vec::new();
+    let mut rand = Rand(0x5EED);
+    let mut connections = 0;
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let after = seen.last().copied().unwrap_or(0);
+        let mut socket = ws(rig.addr, &format!("/ws/events?after={}&volatile=false", after));
+        connections += 1;
+        // A few entries, or many, then away.
+        let take = 1 + rand.below(60) as usize;
+        let got = read_entries(&mut socket, take, Duration::from_millis(500));
+        let _ = socket.close(None);
+        seen.extend(got.iter().map(|e| e["seq"].as_u64().expect("no gone: the ring keeps them all")));
+        let done = writing.iter().all(|w| w.is_finished());
+        if done && got.is_empty() {
+            break;
+        }
+        assert!(Instant::now() < deadline);
+    }
+    for w in writing {
+        w.join().unwrap();
+    }
+    let last = rig.last();
+    assert_eq!(seen, (1..=last).collect::<Vec<_>>(), "every entry once, in order, over {} connections", connections);
+    assert!(connections > 20);
+}
+
+#[test]
+fn a_slow_reader_holds_up_nothing_and_loses_nothing_the_ring_keeps() {
+    let rig = Rig::new("ws-slow");
+    rig.post("/api/control/pause", json!({}));
+    let from = rig.last();
+    // Connected, then not read while 2000 entries come.
+    let mut socket = ws(rig.addr, &format!("/ws/events?after={}", from));
+    let longest = writers(rig.addr, 4, 500).into_iter().map(|w| w.join().unwrap()).max().unwrap();
+    assert!(longest < Duration::from_secs(1), "a request took {:?} while the reader slept", longest);
+    let last = rig.last();
+    let got = read_entries(&mut socket, usize::MAX, Duration::from_millis(1000));
+    let seqs: Vec<u64> = got.iter().filter(|e| e["type"] != "log" && e["type"] != "video_mode").map(|e| e["seq"].as_u64().unwrap()).collect();
+    assert_eq!(seqs, (from + 1..=last).collect::<Vec<_>>());
+}
+
+#[test]
+fn a_reader_slower_than_the_ring_is_told_what_it_lost() {
+    let rig = Rig::with_capacity("ws-slower", 64);
+    rig.post("/api/control/pause", json!({}));
+    let from = rig.last();
+    let mut socket = ws(rig.addr, &format!("/ws/events?after={}&volatile=false", from));
+    // A large backlog of large entries (256-byte writes, kept as hex): the
+    // socket's buffers fill and the ring moves on.
+    let addr = rig.addr;
+    let big: Vec<_> = (0..4u64)
+        .map(|t| {
+            std::thread::spawn(move || {
+                for i in 0..1000u64 {
+                    let hex = format!("{:02X}", (t * 1000 + i) % 256).repeat(256);
+                    let r = http(addr, "PUT", "/api/memory", &[], Some(&json!({"addr": format!("{:05X}", 0x20000 + t * 0x1000), "hex": hex})));
+                    assert_eq!(r.status, 200, "{}", r.body);
+                }
+            })
+        })
+        .collect();
+    for w in big {
+        w.join().unwrap();
+    }
+    let last = rig.last();
+    let got = read_entries(&mut socket, usize::MAX, Duration::from_millis(1000));
+    // In order, no repeat; a gap only right after a `gone`, which says
+    // where it goes on.
+    let mut prev = from;
+    for e in &got {
+        if e["type"] == "gone" {
+            let first = e["first"].as_u64().unwrap();
+            assert!(first > prev + 1, "{} after {}", e, prev);
+            prev = first - 1;
+            continue;
+        }
+        let seq = e["seq"].as_u64().unwrap();
+        assert_eq!(seq, prev + 1, "after {}: {}", prev, e);
+        prev = seq;
+    }
+    assert_eq!(prev, last, "caught up");
+    assert!(got.iter().any(|e| e["type"] == "gone"), "the reader fell behind the ring");
+}
