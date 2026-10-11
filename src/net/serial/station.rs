@@ -73,8 +73,8 @@ pub struct SerialStatus {
     pub retransmits: u64,
     /// Whether the relay carries serial links (None: not in a room).
     pub relay_serial: Option<bool>,
-    /// Calls on TCP: taken on this port.
-    pub listening: Option<u16>,
+    /// Calls on TCP: taken on this address.
+    pub listening: Option<std::net::SocketAddr>,
 }
 
 pub struct Station {
@@ -132,7 +132,7 @@ impl Station {
             rtt_ms: self.link.as_ref().and_then(|l| l.rtt_ms()),
             retransmits: self.link.as_ref().map_or(0, |l| l.retransmits),
             relay_serial: self.relay_serial,
-            listening: self.listener.as_ref().map(|(addr, _)| addr.port()),
+            listening: self.listener.as_ref().map(|(addr, _)| *addr),
         }
     }
 

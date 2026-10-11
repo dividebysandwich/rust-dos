@@ -33,11 +33,14 @@ pub fn listen_text(addr: std::net::SocketAddr) -> String {
     if addr.ip() == std::net::Ipv4Addr::UNSPECIFIED { addr.port().to_string() } else { addr.to_string() }
 }
 
-/// Where the modem takes calls, in words: `TCP port 2323`, or
+/// Where the modem takes calls, in words: `TCP port 2323` on all
+/// addresses (`TCP port 2323 over IPv6` for `[::]`), or
 /// `TCP 127.0.0.1:2323` on one address.
 pub fn describe_listen(addr: std::net::SocketAddr) -> String {
     if addr.ip() == std::net::Ipv4Addr::UNSPECIFIED {
         format!("TCP port {}", addr.port())
+    } else if addr.ip().is_unspecified() {
+        format!("TCP port {} over IPv6", addr.port())
     } else {
         format!("TCP {}", addr)
     }
@@ -470,6 +473,10 @@ mod tests {
             assert_eq!(s.modem_listen, Some(addr.parse().unwrap()), "{}", value);
             assert_eq!(s.entries().iter().find(|e| e.0 == "modemlisten").unwrap().1.as_deref(), Some(text));
         }
+        let describe = |value: &str| describe_listen(value.parse().unwrap());
+        assert_eq!(describe("0.0.0.0:2323"), "TCP port 2323");
+        assert_eq!(describe("[::]:2323"), "TCP port 2323 over IPv6");
+        assert_eq!(describe("127.0.0.1:2323"), "TCP 127.0.0.1:2323");
         s.set("modemlisten", "off").unwrap();
         assert_eq!(s.modem_listen, None);
         for bad in ["127.0.0.1:0", "127.0.0.1", "localhost:2323", "70000"] {
