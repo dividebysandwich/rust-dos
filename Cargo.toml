@@ -42,7 +42,7 @@ default-members = ["."]
 authors = ["dividebysandwich"]
 repository = "https://github.com/dividebysandwich/rust-dos"
 license = "GPL-2.0-or-later"
-version = "1.6.0"
+version = "1.6.1"
 edition = "2024"
 
 [dependencies]
