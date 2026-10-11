@@ -326,7 +326,7 @@ impl Journal {
         if seq.saturating_add(1) < first {
             return Err(Gone { first, last: self.last });
         }
-        let skip = (seq + 1).saturating_sub(first) as usize;
+        let skip = seq.saturating_add(1).saturating_sub(first).min(self.entries.len() as u64) as usize;
         Ok(self.entries.iter().skip(skip))
     }
 
@@ -493,6 +493,9 @@ mod tests {
         assert_eq!((j.first(), j.last()), (13, 20));
         assert_eq!(j.after(5).err(), Some(Gone { first: 13, last: 20 }));
         assert_eq!(j.after(12).unwrap().count(), 8, "nothing after 12 is missing");
+        assert_eq!(j.after(20).unwrap().count(), 0);
+        assert_eq!(j.after(u64::MAX).unwrap().count(), 0, "nothing after the end, without overflow");
+        assert!(j.find_after(u64::MAX, &Filter::default()).is_none());
         assert!(j.get(12).is_none() && j.get(13).is_some() && j.get(21).is_none());
         // A search from an evicted number starts at the oldest kept.
         assert_eq!(j.find_after(1, &Filter::default()).map(|e| e.seq), Some(13));

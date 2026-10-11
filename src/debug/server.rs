@@ -175,6 +175,11 @@ fn request_id(tag: &str) -> Result<Arc<str>, ApiError> {
 
 /// The context of a request from its headers.
 fn context(req: u64, headers: &HeaderMap) -> Result<Ctx, ApiError> {
+    for name in ["x-request-id", "if-state-seq"] {
+        if headers.get_all(name).iter().nth(1).is_some() {
+            return Err(bad(format!("{}: one header, not several", name)));
+        }
+    }
     let tag = match headers.get("x-request-id") {
         Some(v) => Some(request_id(v.to_str().map_err(|_| bad("X-Request-Id: printable ASCII"))?)?),
         None => None,
@@ -250,6 +255,25 @@ fn server_only() -> Result<(), ApiError> {
     match Ctx::current().and_then(|c| c.if_state) {
         Some(_) => Err(bad("If-State-Seq applies to requests the emulator carries out, not to this one")),
         None => Ok(()),
+    }
+}
+
+/// Refuse a cursor (`after`) past the journal's last entry: no entry of
+/// this instance has that number, so it is another instance's, and waiting
+/// on it would skip entries.
+fn check_after(shared: &Shared, after: Option<u64>) -> Result<(), ApiError> {
+    let last = shared.journal.lock().unwrap_or_else(|e| e.into_inner()).last();
+    match after {
+        Some(after) if after > last => Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            body: json!({
+                "error": format!("after {} is past the journal's last entry {}: a cursor from another instance?", after, last),
+                "last": last,
+                "instance": shared.instance_hex(),
+            }),
+            meta: None,
+        }),
+        _ => Ok(()),
     }
 }
 
@@ -335,6 +359,17 @@ fn shutting_down() -> ApiError {
 
 fn gone_op(req: u64) -> ApiError {
     ApiError::new(StatusCode::GONE, format!("operation {} is gone from the journal", req))
+}
+
+/// 410: some of the entries after `after` were evicted.
+fn gone_entries(after: u64, gone: &journal::Gone) -> ApiError {
+    let body = json!({
+        "error": format!("entries after {} are gone", after),
+        "gone": true,
+        "first": gone.first,
+        "last": gone.last,
+    });
+    ApiError { status: StatusCode::GONE, body, meta: None }
 }
 
 fn unknown_op(req: u64) -> ApiError {
@@ -604,6 +639,7 @@ fn journal_page(j: &Journal, after: u64, allow_gap: bool, filter: &Filter, limit
 /// `limit`; with `wait`, once there is one.
 async fn journal_get(State(s): State<AppState>, Query(q): Query<JournalQuery>) -> ApiResult {
     server_only()?;
+    check_after(&s.shared, q.after)?;
     let kinds = match &q.kinds {
         None => None,
         Some(list) => Some(
@@ -630,15 +666,7 @@ async fn journal_get(State(s): State<AppState>, Query(q): Query<JournalQuery>) -
     };
     let (entries, next) = match result {
         Ok(page) => page,
-        Err(gone) => {
-            let body = json!({
-                "error": format!("entries after {} are gone", after),
-                "gone": true,
-                "first": gone.first,
-                "last": gone.last,
-            });
-            return Ok(json_body(StatusCode::GONE, &body, current_req()));
-        }
+        Err(gone) => return Err(gone_entries(after, &gone)),
     };
     // The entries' JSON as it is, without parsing it again.
     let mut body = format!(
@@ -1117,6 +1145,12 @@ async fn wait_pause(State(s): State<AppState>, Query(q): Query<PauseWaitQuery>) 
     let after = match q.after {
         Some(after) => {
             server_only()?;
+            check_after(&s.shared, Some(after))?;
+            // The first stop after `after` may be among entries evicted.
+            let gone = s.shared.journal.lock().unwrap_or_else(|e| e.into_inner()).after(after).err();
+            if let Some(gone) = gone {
+                return Err(gone_entries(after, &gone));
+            }
             after
         }
         None => match s.call(Cmd::WaitPause, DEFAULT_TIMEOUT).await? {
@@ -1553,6 +1587,7 @@ fn log_n(event: &str) -> Option<u64> {
 
 async fn ws_trace(State(s): State<AppState>, Query(q): Query<EventsQuery>, ws: WebSocketUpgrade) -> ApiResult {
     server_only()?;
+    check_after(&s.shared, q.after)?;
     // Subscribing to the trace channel is what turns streaming on; the main
     // loop checks receiver_count() every batch.
     let stream = EventStream {
@@ -1567,6 +1602,7 @@ async fn ws_trace(State(s): State<AppState>, Query(q): Query<EventsQuery>, ws: W
 
 async fn ws_events(State(s): State<AppState>, Query(q): Query<EventsQuery>, ws: WebSocketUpgrade) -> ApiResult {
     server_only()?;
+    check_after(&s.shared, q.after)?;
     let stream = EventStream { after: q.after, volatile: q.volatile.unwrap_or(true), log_after: q.log_after, trace: None };
     let shared = s.shared.clone();
     Ok(ws.on_upgrade(move |socket| stream_events(socket, shared, stream)))

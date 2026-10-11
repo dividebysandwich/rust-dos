@@ -528,6 +528,9 @@ fn an_event_stream_from_an_evicted_entry_says_what_is_gone() {
     assert_eq!(journal.status, 410);
     let first = journal.json()["first"].as_u64().unwrap();
     assert_eq!(rig.get("/api/journal?after=0&allow_gap=true").json()["entries"][0]["seq"].as_u64(), Some(first));
+    // The first stop after entry 1 may be among those gone.
+    let waited = rig.get("/api/control/wait?after=1&timeout_ms=100");
+    assert_eq!((waited.status, waited.json()["first"].as_u64()), (410, Some(first)), "{}", waited.body);
     let mut socket = ws(rig.addr, "/ws/events?after=1&volatile=false");
     assert_eq!(next(&mut socket).unwrap(), json!({"type": "gone", "first": first}));
     assert_eq!(next(&mut socket).unwrap()["seq"].as_u64(), Some(first));
@@ -583,6 +586,107 @@ fn replies_keep_the_keys_they_had() {
     assert_eq!((typed.json()["ok"].as_bool(), typed.json()["done"].as_bool()), (Some(true), Some(true)), "{}", typed.body);
     let op = rig.get(&format!("/api/ops/{}", typed.json()["op"])).json();
     assert_eq!((op["kind"].as_str(), op["state"].as_str()), (Some("input"), Some("done")));
+}
+
+/// The status of a request with raw header lines.
+fn raw_status(addr: SocketAddr, request: &[u8]) -> u16 {
+    let mut stream = TcpStream::connect(addr).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    stream.write_all(request).unwrap();
+    // The status line and headers are enough; a refused upgrade keeps the
+    // connection open.
+    let mut raw = Vec::new();
+    let mut buf = [0u8; 4096];
+    while !raw.windows(4).any(|w| w == b"\r\n\r\n") {
+        match stream.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => raw.extend_from_slice(&buf[..n]),
+        }
+    }
+    let raw = String::from_utf8_lossy(&raw);
+    raw.split(' ').nth(1).and_then(|s| s.parse().ok()).unwrap_or(0)
+}
+
+#[test]
+fn malformed_requests_get_a_clear_error_and_change_nothing() {
+    let rig = Rig::new("malformed");
+    rig.post("/api/control/pause", json!({}));
+    let before = rig.last();
+    let status = |path: &str, headers: &[(&str, &str)]| http(rig.addr, "GET", path, headers, None).status;
+    // Request IDs.
+    assert_eq!(status("/api/status", &[("X-Request-Id", "")]), 400);
+    assert_eq!(status("/api/status", &[("X-Request-Id", &"y".repeat(129))]), 400);
+    assert_eq!(status("/api/status", &[("X-Request-Id", &"y".repeat(128))]), 200);
+    assert_eq!(raw_status(rig.addr, b"GET /api/status HTTP/1.1\r\nHost: x\r\nConnection: close\r\nX-Request-Id: caf\xc3\xa9\r\n\r\n"), 400);
+    // If-State-Seq values, and the header twice.
+    for bad in ["abc", "-1", "1.5", "99999999999999999999", "0x10"] {
+        assert_eq!(status("/api/registers", &[("If-State-Seq", bad)]), 400, "{}", bad);
+    }
+    let twice = b"GET /api/registers HTTP/1.1\r\nHost: x\r\nConnection: close\r\nIf-State-Seq: 1\r\nIf-State-Seq: 2\r\n\r\n";
+    assert_eq!(raw_status(rig.addr, twice), 400, "two preconditions");
+    let twice = b"GET /api/status HTTP/1.1\r\nHost: x\r\nConnection: close\r\nX-Request-Id: a\r\nX-Request-Id: b\r\n\r\n";
+    assert_eq!(raw_status(rig.addr, twice), 400, "two request IDs");
+    // If-State-Seq where the server answers itself.
+    let seq = before.to_string();
+    for path in ["/api/version", "/api/journal", "/api/ops/1", "/api/log", "/api/control/wait?after=1", "/api/control/wait?op=1"] {
+        assert_eq!(status(path, &[("If-State-Seq", &seq)]), 400, "{}", path);
+    }
+    let upgrade = format!(
+        "GET /ws/events HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nIf-State-Seq: {}\r\n\r\n",
+        seq
+    );
+    assert_eq!(raw_status(rig.addr, upgrade.as_bytes()), 400, "on a stream");
+    // Cursors past the journal's end: another instance's, or garbage.
+    for after in [u64::MAX.to_string(), (before + 1000).to_string()] {
+        let r = rig.get(&format!("/api/journal?after={}", after));
+        assert_eq!(r.status, 400, "{}: {}", after, r.body);
+        assert_eq!(r.json()["last"].as_u64(), Some(before), "{}", r.body);
+        assert_eq!(rig.get(&format!("/api/journal?after={}&wait=100", after)).status, 400);
+        assert_eq!(rig.get(&format!("/api/control/wait?after={}&timeout_ms=100", after)).status, 400);
+        assert!(tungstenite::connect(format!("ws://{}/ws/events?after={}", rig.addr, after)).is_err());
+    }
+    // Negative and non-numeric parameters.
+    for path in ["/api/journal?after=-1", "/api/journal?limit=abc", "/api/journal?wait=-5", "/api/ops/abc", "/api/ops/-1", "/api/control/wait?op=x", "/api/log?after_n=-2"] {
+        assert_eq!(rig.get(path).status, 400, "{}", path);
+    }
+    // Operations that never were.
+    for op in ["0", "999999", &u64::MAX.to_string()] {
+        assert_eq!(rig.get(&format!("/api/ops/{}", op)).status, 404, "{}", op);
+        assert_eq!(rig.get(&format!("/api/ops/{}?wait=100", op)).status, 404, "{}", op);
+        assert_eq!(rig.get(&format!("/api/control/wait?op={}", op)).status, 404, "{}", op);
+    }
+    // Bodies: not JSON, the wrong shape, too large.
+    let put = |body: &str| {
+        let request = format!("PUT /api/memory HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}", body.len(), body);
+        raw_status(rig.addr, request.as_bytes())
+    };
+    assert_eq!(put("{not json"), 400);
+    assert_eq!(put(r#"{"addr": 5, "hex": "00"}"#), 400);
+    // A body past the limit (2 MB) is refused: a 413, or on Windows often
+    // a reset, since the server closes with the body's rest unread.
+    let mut stream = TcpStream::connect(rig.addr).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut writer = stream.try_clone().unwrap();
+    let sender = std::thread::spawn(move || {
+        let head = "PUT /api/memory HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 4194304\r\n\r\n";
+        let _ = writer.write_all(head.as_bytes());
+        let chunk = vec![b' '; 64 << 10];
+        for _ in 0..64 {
+            if writer.write_all(&chunk).is_err() {
+                break;
+            }
+        }
+    });
+    let mut first = [0u8; 12];
+    match stream.read_exact(&mut first) {
+        Ok(()) => assert_eq!(&first[9..12], b"413", "{}", String::from_utf8_lossy(&first)),
+        Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::ConnectionReset, "{}", e),
+    }
+    drop(stream);
+    let _ = sender.join();
+    assert_eq!(rig.get("/api/status").status, 200, "the server goes on");
+    // None of it reached the machine.
+    assert_eq!(rig.last(), before, "{:?}", rig.get(&format!("/api/journal?after={}", before)).body);
 }
 
 #[test]
