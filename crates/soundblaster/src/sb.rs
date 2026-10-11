@@ -127,6 +127,9 @@ struct Transfer {
     paused: bool,
     /// Stop at the end of the current block (exit auto-init).
     last_block: bool,
+    /// Started by a high-speed command (90h, 91h, 98h, 99h) on an SB 2.0
+    /// or SB Pro: the DSP takes no command while it runs.
+    high_speed: bool,
 }
 
 /// Mixer registers of the SB16 (CT1745) used for volumes.
@@ -240,6 +243,11 @@ impl SoundBlaster {
     }
 
     fn reset_dsp(&mut self) {
+        // A reset in high-speed mode is how a driver leaves it: the
+        // transfer stops, and the DSP's settings stay as they were before
+        // the mode began (Creative's hardware programming guide), so the
+        // speaker stays on.
+        let speaker_on = self.high_speed().then_some(self.speaker_on);
         self.in_command = None;
         self.params.clear();
         self.read_buf.clear();
@@ -251,6 +259,25 @@ impl SoundBlaster {
         self.sb16_rate = None;
         self.pending_left = None;
         self.dac = 0;
+        if let Some(on) = speaker_on {
+            self.speaker_on = on;
+        }
+    }
+
+    /// Whether the DSP is in high-speed mode: a transfer that a high-speed
+    /// command started on an SB 2.0 or SB Pro runs. Until its block ends
+    /// (91h, 99h) or a reset ends it (any of them), the DSP ignores the
+    /// bytes written to its command port and the write status reads busy.
+    pub fn high_speed(&self) -> bool {
+        self.transfer.is_some_and(|t| t.high_speed)
+    }
+
+    /// Put the running transfer in or out of high-speed mode, as a save
+    /// state has it (the state keeps the mode apart from the transfer).
+    pub fn set_high_speed(&mut self, on: bool) {
+        if let Some(t) = &mut self.transfer {
+            t.high_speed = on;
+        }
     }
 
     fn reset_mixer(&mut self) {
@@ -434,6 +461,8 @@ impl SoundBlaster {
         match offset {
             0x5 => self.mixer_read(),
             0xA => self.read_buf.pop_front().unwrap_or(0xFF),
+            // Write status: busy for good in high-speed mode.
+            0xC if self.high_speed() => 0xFF,
             // Write status: bit 7 clear, ready for a byte.
             0xC => 0x7F,
             // Read status: bit 7 when data waits. Acknowledges the 8-bit
@@ -534,6 +563,10 @@ impl SoundBlaster {
     }
 
     fn write_command(&mut self, value: u8, log: &mut Vec<String>) {
+        if self.high_speed() {
+            log.push(format!("[SB] DSP byte {:02X}h ignored: high-speed mode runs until a reset", value));
+            return;
+        }
         if let Some(cmd) = self.in_command {
             self.params.push(value);
             if self.params.len() >= self.params_needed {
@@ -587,6 +620,7 @@ impl SoundBlaster {
             rate: rate.max(1),
             paused: false,
             last_block: false,
+            high_speed: false,
         });
     }
 
@@ -604,9 +638,15 @@ impl SoundBlaster {
                 let len = self.param16(0) + 1;
                 self.start(false, stereo8, false, false, false, len);
             }
-            // 8-bit auto-init output (1Fh: ADPCM), and high-speed modes.
-            0x1C | 0x1F | 0x90 => self.start(false, stereo8, false, true, false, self.block_size),
-            0x91 => self.start(false, stereo8, false, false, false, self.block_size),
+            // 8-bit auto-init output (1Fh: ADPCM).
+            0x1C | 0x1F => self.start(false, stereo8, false, true, false, self.block_size),
+            // High-speed output (90h auto-init, 91h single-cycle) and input
+            // (98h, 99h). The SB16 takes them as plain 8-bit transfers.
+            0x90 | 0x91 | 0x98 | 0x99 => {
+                let input = cmd >= 0x98;
+                self.start(false, stereo8 && !input, false, cmd & 1 == 0, input, self.block_size);
+                self.set_high_speed(!sb16);
+            }
             // Direct ADC: silence.
             0x20 => self.read_buf.push_back(0x80),
             // 8-bit input.
@@ -614,8 +654,7 @@ impl SoundBlaster {
                 let len = self.param16(0) + 1;
                 self.start(false, false, false, false, true, len);
             }
-            0x2C | 0x98 => self.start(false, false, false, true, true, self.block_size),
-            0x99 => self.start(false, false, false, false, true, self.block_size),
+            0x2C => self.start(false, false, false, true, true, self.block_size),
             // MIDI output byte (the SB's own UART): nothing attached.
             0x38 => {}
             0x40 => {
@@ -704,7 +743,9 @@ impl SoundBlaster {
     }
 }
 
-rust_dos_savestate::state_fields!(Transfer { bits16, stereo, signed, auto_init, input, block, remaining, rate, paused, last_block });
+// `high_speed` goes in a section of its own (`SBHS`, bus/state.rs), written
+// only while the mode runs, so states from before it was kept still load.
+rust_dos_savestate::state_fields!(Transfer { bits16, stereo, signed, auto_init, input, block, remaining, rate, paused, last_block } skip { high_speed });
 rust_dos_savestate::state_fields!(SoundBlaster {
     reset_stage, in_command, params, params_needed, read_buf, test_reg, speaker_on, tc_rate, sb16_rate,
     block_size, transfer, silence, irq8, irq16, last_ticks, frac, dac, out, out_rate, pending_left,

@@ -3,6 +3,8 @@
 //! controllers, the OPL's detection timers and the MPU-401.
 
 use rust_dos::bus::Bus;
+use rust_dos::cpu::Cpu;
+use rust_dos::savestate::machine;
 use rust_dos::sb::{SbConfig, SbModel};
 use std::path::PathBuf;
 
@@ -346,4 +348,104 @@ fn silence_interrupts_while_the_driver_polls_the_dsp() {
     let elapsed = bus.clock.icount - start;
     assert_eq!(bus.pic_pending_irq(), Some(7), "silence ends with IRQ 7");
     assert!((950..=1100).contains(&elapsed), "after {} instructions (1 ms is 1000)", elapsed);
+}
+
+fn sb_pro() -> Bus {
+    bus_with(SbConfig { model: SbModel::SbPro2, ..SbConfig::default() })
+}
+
+/// Start 8-bit output of blocks of 1000 bytes at 10000 Hz (0.1 s each)
+/// with DSP command `cmd`, from a 4000-byte auto-init DMA buffer.
+fn start_8bit(bus: &mut Bus, cmd: u8) {
+    program_dma1(bus, 0x20000, 4000, true);
+    dsp_write(bus, 0xD1);
+    dsp_write(bus, 0x40);
+    dsp_write(bus, 156);
+    dsp_write(bus, 0x48);
+    dsp_write(bus, (999 & 0xFF) as u8);
+    dsp_write(bus, (999 >> 8) as u8);
+    dsp_write(bus, cmd);
+}
+
+#[test]
+fn high_speed_dsp_ignores_commands_until_a_reset() {
+    let mut bus = sb_pro();
+    reset_dsp(&mut bus);
+    start_8bit(&mut bus, 0x90);
+    assert_eq!(bus.io_read(0x22C) & 0x80, 0x80, "busy in high-speed mode");
+    // A pause and a version request go nowhere: the block plays on.
+    bus.io_write(0x22C, 0xD0);
+    bus.io_write(0x22C, 0xE1);
+    wait_ms(&mut bus, 50.0);
+    let left = dma1_count(&mut bus);
+    assert!((3495..=3505).contains(&left), "played on through D0h: count {}", left);
+    assert_eq!(bus.io_read(0x22E) & 0x80, 0, "no answer to E1h");
+    assert_eq!(bus.io_read(0x22C) & 0x80, 0x80, "still busy");
+
+    // A reset ends the mode and the transfer, and keeps the speaker on.
+    reset_dsp(&mut bus);
+    let left = dma1_count(&mut bus);
+    wait_ms(&mut bus, 20.0);
+    assert_eq!(dma1_count(&mut bus), left, "the transfer stopped");
+    dsp_write(&mut bus, 0xD8);
+    assert_eq!(dsp_read(&mut bus), 0xFF, "speaker on");
+    dsp_write(&mut bus, 0xE1);
+    assert_eq!((dsp_read(&mut bus), dsp_read(&mut bus)), (3, 2));
+}
+
+#[test]
+fn high_speed_single_cycle_mode_ends_with_its_block() {
+    let mut bus = bus_with(SbConfig { model: SbModel::Sb2, ..SbConfig::default() });
+    reset_dsp(&mut bus);
+    start_8bit(&mut bus, 0x91);
+    wait_ms(&mut bus, 50.0);
+    assert_eq!(bus.io_read(0x22C) & 0x80, 0x80, "busy while the block plays");
+    wait_ms(&mut bus, 51.0);
+    assert_eq!(bus.pic_pending_irq(), Some(7), "block end raises IRQ 7");
+    bus.io_read(0x22E);
+    dsp_write(&mut bus, 0xE1);
+    assert_eq!((dsp_read(&mut bus), dsp_read(&mut bus)), (2, 1));
+}
+
+#[test]
+fn sb16_takes_high_speed_commands_as_plain_transfers() {
+    let mut bus = sb16();
+    reset_dsp(&mut bus);
+    start_8bit(&mut bus, 0x90);
+    wait_ms(&mut bus, 20.0);
+    dsp_write(&mut bus, 0xD0);
+    let left = dma1_count(&mut bus);
+    wait_ms(&mut bus, 20.0);
+    assert_eq!(dma1_count(&mut bus), left, "D0h paused the transfer");
+}
+
+#[test]
+fn save_states_keep_high_speed_mode() {
+    let machine = || {
+        let mut cpu = Cpu::new(PathBuf::from("."));
+        cpu.bus.set_cycles_per_ms(1000);
+        cpu.bus.configure_sound(Some(SbConfig { model: SbModel::SbPro2, ..SbConfig::default() }), true);
+        cpu.load_shell();
+        cpu
+    };
+    let mut a = machine();
+    reset_dsp(&mut a.bus);
+    start_8bit(&mut a.bus, 0x90);
+    let high_speed = machine::save(&a);
+    let mut b = machine();
+    machine::load(&mut b, &high_speed).unwrap();
+    assert!(machine::save(&b) == high_speed, "a loaded state saves as the same bytes");
+    assert_eq!(b.bus.io_read(0x22C) & 0x80, 0x80, "a loaded high-speed transfer keeps the DSP busy");
+
+    // A state with a transfer out of high-speed mode, as every state
+    // rust-dos saved before it kept the mode, leaves the DSP taking
+    // commands.
+    let mut c = machine();
+    reset_dsp(&mut c.bus);
+    start_8bit(&mut c.bus, 0x1C);
+    machine::load(&mut b, &machine::save(&c)).unwrap();
+    dsp_write(&mut b.bus, 0xD0);
+    let left = dma1_count(&mut b.bus);
+    wait_ms(&mut b.bus, 20.0);
+    assert_eq!(dma1_count(&mut b.bus), left, "D0h paused the transfer");
 }

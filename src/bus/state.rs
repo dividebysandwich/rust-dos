@@ -23,6 +23,7 @@ const VIRGE_VERSION: u16 = 1;
 const VERITE_VERSION: u16 = 2;
 const ET4000_VERSION: u16 = 1;
 const SHARED_VERSION: u16 = 1;
+const SB_HIGH_SPEED_VERSION: u16 = 1;
 
 /// Save or load each of a list of fields.
 /// Each field is labelled with its name, for comparing states part by
@@ -237,6 +238,12 @@ impl Bus {
             w.label("cdaudio");
             cdaudio.save_state(w);
         });
+        // The Sound Blaster's high-speed mode, an empty section that is
+        // there only while the mode runs, so states saved before rust-dos
+        // kept the mode load as they did, into a DSP out of it.
+        if sb.as_ref().is_some_and(|sb| sb.high_speed()) {
+            w.section(b"SBHS", SB_HIGH_SPEED_VERSION, |_| {});
+        }
         // The AWE32's EMU8000 (its RAM first, for rewind), only with one,
         // so states of machines without load as they did.
         if let Some(awe) = awe {
@@ -467,6 +474,15 @@ impl Bus {
         load_device(sb, "Sound Blaster", &mut section)?;
         load_device(lpt_dac, "DAC on LPT1", &mut section)?;
         cdaudio.load_state(&mut section, |drive| disk.cd_image(drive))?;
+        let high_speed = r.next_is(b"SBHS");
+        if high_speed {
+            r.section(b"SBHS", SB_HIGH_SPEED_VERSION)?;
+        }
+        match sb {
+            Some(sb) => sb.set_high_speed(high_speed),
+            None if high_speed => return Err(StateError::Invalid("a Sound Blaster's high-speed mode without a Sound Blaster".into())),
+            None => {}
+        }
         match (r.next_is(b"AWE "), awe) {
             (true, Some(awe)) => awe.load(&mut r.section(b"AWE ", AWE_VERSION)?)?,
             (false, None) => {}
