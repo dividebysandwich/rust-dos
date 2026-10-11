@@ -340,7 +340,9 @@ RetroAchievements are the frontend's.
 
 `--debug-server` starts a local HTTP/WebSocket interface on
 `127.0.0.1:8086` (or `--debug-server ADDR`) for scripted and LLM-driven
-debugging. It has no authentication, so keep it on localhost.
+debugging. It has no authentication, so keep it on localhost. With port 0
+(`--debug-server 127.0.0.1:0`) the system picks a free port, and the
+`Debug server listening on` line on stdout gives the address.
 
 <img width="1349" height="1017" alt="image" src="https://github.com/user-attachments/assets/3d01c401-3e3a-4ef3-a2df-ddb280b983a1" />
 
