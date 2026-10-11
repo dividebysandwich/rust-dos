@@ -592,6 +592,35 @@ fn replies_keep_the_keys_they_had() {
     assert_eq!((op["kind"].as_str(), op["state"].as_str()), (Some("input"), Some("done")));
 }
 
+#[test]
+fn the_other_replies_keep_their_keys_too() {
+    let rig = Rig::new("legacy-more");
+    let has = |r: &Resp, keys: &[&str]| {
+        assert!(r.status < 300, "{}", r.body);
+        let v = r.json();
+        for key in keys {
+            assert!(v.get(*key).is_some(), "{} in {}", key, v);
+        }
+        v
+    };
+    let ran = rig.post("/api/control/run", json!({"command": "PROBE.COM"}));
+    assert_eq!(has(&ran, &["ok", "program"])["ok"], true);
+    rig.until_idle();
+    rig.post("/api/control/pause", json!({}));
+    has(&rig.post("/api/input/type?wait=false", json!({"text": "x"})), &["ok", "queued"]);
+    // Input waited for and cleared: answered as before, 200 and cancelled.
+    let addr = rig.addr;
+    let waiting = std::thread::spawn(move || http(addr, "POST", "/api/input/wait", &[], Some(&json!({"ms": 60000}))));
+    std::thread::sleep(Duration::from_millis(200));
+    has(&http(rig.addr, "DELETE", "/api/input", &[], None), &["ok"]);
+    let cancelled = waiting.join().unwrap();
+    assert_eq!((cancelled.status, cancelled.json()["ok"].as_bool(), cancelled.json()["cancelled"].as_bool()), (200, Some(false), Some(true)), "{}", cancelled.body);
+    has(&http(rig.addr, "PUT", "/api/memory", &[], Some(&json!({"addr": "0200:0000", "hex": "01"}))), &["ok", "addr", "written", "old", "new"]);
+    has(&rig.get("/api/screen/text?format=json"), &["lines", "rows"]);
+    has(&rig.post("/api/drive/sync", json!({})), &["messages"]);
+    has(&rig.post("/api/control/reboot_shell", json!({})), &["ok"]);
+}
+
 /// The status of a request with raw header lines.
 fn raw_status(addr: SocketAddr, request: &[u8]) -> u16 {
     let mut stream = TcpStream::connect(addr).unwrap();
@@ -1638,4 +1667,56 @@ fn a_deterministic_session_over_http_is_the_same_whatever_the_host_does() {
     for kind in ["input_delivered", "state_saved", "memory_written", "state_loaded", "debugger_reset", "program_started"] {
         assert!(kinds.contains(&kind), "{} in {:?}", kind, kinds);
     }
+}
+
+// ----- the debugger page -------------------------------------------------------
+
+/// What the page (ui.html) reads, as it reads it: its requests, and the
+/// stream it opens with no parameters.
+#[test]
+fn the_debugger_page_gets_what_it_reads() {
+    let rig = Rig::new("ui");
+    let page = rig.get("/ui");
+    assert_eq!(page.status, 200);
+    assert!(page.body.contains("new WebSocket(`ws://${location.host}/ws/events`)"), "the page this test follows");
+    let cs = rig.at_entry("COUNT.COM");
+    let mut events = ws(rig.addr, "/ws/events");
+    let mut input = ws(rig.addr, "/ws/input");
+    // Its polls.
+    let status = rig.get("/api/status").json();
+    for key in ["paused", "cs_ip", "cpu_mode", "shell_idle", "video", "fps", "trace"] {
+        assert!(status.get(key).is_some(), "{} in {}", key, status);
+    }
+    assert!(status["trace"]["enabled"].is_boolean());
+    assert!(rig.get("/api/stats").json()["mips"].is_number());
+    assert!(rig.get("/api/disasm?format=json&count=1&addr=CS:EIP").json()["rows"][0]["phys"].is_string());
+    assert!(rig.get("/api/memory?format=base64&len=16&addr=SS:FFF0").json()["base64"].is_string());
+    assert!(rig.get("/api/log?limit=500").json()["lines"].is_array());
+    assert!(rig.get("/api/trace?format=json&last_n=200").json()["entries"].is_array());
+    assert!(rig.get("/api/breakpoints").json().is_object());
+    assert!(rig.get("/api/watchpoints").json().is_object());
+    // The stream: a stop with its reason and what the watchpoint saw, a
+    // resume, a log line.
+    rig.post("/api/watchpoints", json!({"addr": format!("{}:0200", cs), "len": 2}));
+    rig.post("/api/control/resume", json!({}));
+    rig.until_paused();
+    let mount = std::env::temp_dir().join(format!("rust-dos-http-ui-mount-{}", std::process::id()));
+    std::fs::create_dir_all(&mount).unwrap();
+    assert_eq!(http(rig.addr, "PUT", "/api/drive/E", &[], Some(&json!({"path": mount.display().to_string()}))).status, 200);
+    let seen = read_entries(&mut events, usize::MAX, Duration::from_millis(500));
+    let paused = seen.iter().find(|e| e["type"] == "paused").expect("a stop");
+    assert_eq!(paused["reason"], "watchpoint");
+    for key in ["addr", "old", "new"] {
+        assert!(paused["watch"][key].is_string(), "{} in {}", key, paused);
+    }
+    assert!(seen.iter().any(|e| e["type"] == "resumed"));
+    let log = seen.iter().find(|e| e["type"] == "log").expect("a log line");
+    assert!(log["t_ms"].is_number() && log["line"].is_string(), "{}", log);
+    // The input it sends, and the error it shows.
+    input.send(tungstenite::Message::Text(json!({"events": [{"type": "key", "key": "a"}], "wait": false}).to_string().into())).unwrap();
+    let reply = read_entries(&mut input, 1, Duration::from_secs(5));
+    assert_eq!(reply[0]["ok"], true, "{:?}", reply);
+    input.send(tungstenite::Message::Text(json!({"events": [{"type": "key", "key": "nokey"}], "wait": false}).to_string().into())).unwrap();
+    let reply = read_entries(&mut input, 1, Duration::from_secs(5));
+    assert!(reply[0]["ok"] == false && reply[0]["error"].is_string(), "{:?}", reply);
 }
