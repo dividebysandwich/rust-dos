@@ -1837,6 +1837,17 @@ impl Bus {
             sb.advance(now, &mut self.dma, &self.ram);
             self.sync_sb_irq();
         }
+        self.sb_dma_write();
+    }
+
+    /// Let the Sound Blaster write what it has for memory (the answer of
+    /// DSP command E2h) if its DMA channel takes it.
+    fn sb_dma_write(&mut self) {
+        if let Some(sb) = &mut self.sb
+            && let Some(written) = sb.dma_write(&mut self.dma, &mut self.ram)
+        {
+            self.bump_page_gens(written.start, written.end);
+        }
     }
 
     /// Run the Ultrasound up to the present and update its interrupt line.
@@ -2269,6 +2280,7 @@ impl Bus {
                 if let Some(sb) = &mut self.sb {
                     sb.write(offset, value, &mut log);
                 }
+                self.sb_dma_write();
                 for line in log {
                     self.log_string(&line);
                 }
@@ -2698,6 +2710,7 @@ impl Bus {
                 self.sb_advance();
                 self.gus_advance();
                 self.dma.write(p, value);
+                self.sb_dma_write();
                 self.clock.schedule(self.next_event());
             }
 
