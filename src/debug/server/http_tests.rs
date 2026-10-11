@@ -1218,6 +1218,21 @@ fn read_entries(socket: &mut Socket, n: usize, quiet: Duration) -> Vec<Value> {
     out
 }
 
+/// Read a stream's messages until one is entry `last`. A socket that was
+/// left unread long enough to fill its buffers can be quiet for seconds
+/// once read again: TCP finds the reopened window with its zero-window
+/// probes, whose interval doubled while the reader slept (on Linux). So
+/// this waits up to a minute, not for a quiet spell.
+fn read_through(socket: &mut Socket, last: u64) -> Vec<Value> {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut out: Vec<Value> = Vec::new();
+    while out.last().is_none_or(|e| e["seq"].as_u64() != Some(last)) {
+        assert!(Instant::now() < deadline, "entry {} not streamed; the last of {} messages: {:?}", last, out.len(), out.last());
+        out.extend(read_entries(socket, 1, Duration::from_secs(1)));
+    }
+    out
+}
+
 #[test]
 fn a_stream_reconnected_at_any_point_misses_and_repeats_nothing() {
     let rig = Rig::new("ws-reconnect");
@@ -1236,8 +1251,8 @@ fn a_stream_reconnected_at_any_point_misses_and_repeats_nothing() {
         let got = read_entries(&mut socket, take, Duration::from_millis(500));
         let _ = socket.close(None);
         seen.extend(got.iter().map(|e| e["seq"].as_u64().expect("no gone: the ring keeps them all")));
-        let done = writing.iter().all(|w| w.is_finished());
-        if done && got.is_empty() {
+        // Done once the writers are and the stream caught up with them.
+        if writing.iter().all(|w| w.is_finished()) && seen.last().copied() == Some(rig.last()) {
             break;
         }
         assert!(Instant::now() < deadline);
@@ -1260,7 +1275,7 @@ fn a_slow_reader_holds_up_nothing_and_loses_nothing_the_ring_keeps() {
     let longest = writers(rig.addr, 4, 500).into_iter().map(|w| w.join().unwrap()).max().unwrap();
     assert!(longest < Duration::from_secs(1), "a request took {:?} while the reader slept", longest);
     let last = rig.last();
-    let got = read_entries(&mut socket, usize::MAX, Duration::from_millis(1000));
+    let got = read_through(&mut socket, last);
     let seqs: Vec<u64> = got.iter().filter(|e| e["type"] != "log" && e["type"] != "video_mode").map(|e| e["seq"].as_u64().unwrap()).collect();
     assert_eq!(seqs, (from + 1..=last).collect::<Vec<_>>());
 }
@@ -1289,7 +1304,7 @@ fn a_reader_slower_than_the_ring_is_told_what_it_lost() {
         w.join().unwrap();
     }
     let last = rig.last();
-    let got = read_entries(&mut socket, usize::MAX, Duration::from_millis(1000));
+    let got = read_through(&mut socket, last);
     // In order, no repeat; a gap only right after a `gone`, which says
     // where it goes on.
     let mut prev = from;
