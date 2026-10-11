@@ -34,6 +34,7 @@ pub const FEATURES: &[&str] = &[
     "breakpoint_once",
     "quit",
     "strict_match",
+    "check_files",
     "until_ms",
     "write_expect",
     "trace_cursor",

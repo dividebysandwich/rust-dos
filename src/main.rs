@@ -1499,13 +1499,17 @@ fn main() -> Result<(), String> {
             // The file layout's version, and this rust-dos's (the header has the one that saved it).
             let (format, emulator) = (slots::FORMAT, env!("CARGO_PKG_VERSION"));
             let result = if request.load {
-                host!().load_for_debugger(&path, request.strict_match).map(|(header, differences)| {
+                host!().load_for_debugger(&path, request.strict_match, request.check_files).map(|(header, differences, unchecked)| {
+                    let header = slots::reply_header(&header);
                     let mut reply = serde_json::json!({"loaded": path, "format": format, "emulator": emulator, "header": header});
                     strict_match_loaded = request.strict_match;
                     debugger_loaded = true;
                     if !differences.is_empty() {
                         // Told, not refused: the state brought its own.
                         reply["differences"] = differences.into();
+                    }
+                    if !unchecked.is_empty() {
+                        reply["unchecked"] = unchecked.into();
                     }
                     reply
                 })
@@ -1514,8 +1518,11 @@ fn main() -> Result<(), String> {
                     savestate::media::forget(&cpu);
                 }
                 host!()
-                    .save_file(&path)
-                    .map(|header| serde_json::json!({"saved": path, "format": format, "emulator": emulator, "header": header}))
+                    .save_file(&path, request.check_files)
+                    .map(|header| {
+                        let header = slots::reply_header(&header);
+                        serde_json::json!({"saved": path, "format": format, "emulator": emulator, "header": header})
+                    })
                     .map_err(|e| (400, serde_json::json!({"error": e})))
             };
             // The front end's part is done; the hub's (the debugger reset of
@@ -2636,10 +2643,16 @@ impl MainHost<'_, '_> {
     }
 
     /// Save the machine to the file `path`, now. Returns the state's header.
-    fn save_file(&mut self, path: &std::path::Path) -> Result<slots::Header, String> {
-        let (header, picture, state) = self.capture_state();
+    /// `contents` records what is on the writable drives as well, which
+    /// reads every file on them (a `check_files` save, media.rs).
+    fn save_file(&mut self, path: &std::path::Path, contents: bool) -> Result<slots::Header, String> {
+        let (mut header, picture, state) = self.capture_state();
         savestate::disks::delete_copies(path);
         savestate::disks::save_copies(self.cpu, path)?;
+        // After the copies, which make the state's folder.
+        if contents && let Some(media) = header.media.as_mut() {
+            savestate::media::add_contents(self.cpu, media, path, |_| true);
+        }
         slots::write_file(path, &slots::encode(&header, &slots::thumbnail(&picture), &state))?;
         self.cpu.bus.log_string(&format!("[STATE] Saved to {}", path.display()));
         Ok(header)
@@ -2658,12 +2671,20 @@ impl MainHost<'_, '_> {
     /// this machine's. A plain load brings the state's own hardware, as
     /// `load_file` does. A `strict_match` load takes only a state of this
     /// machine: one of other hardware or media, or without a record of its
-    /// media, is refused (409) with what differs.
+    /// media, is refused (409) with what differs. A `check_files` load of
+    /// a state that records what was on the writable drives (a
+    /// `check_files` save's) compares them with the files now, and the
+    /// changed files are differences like the others. The third list names
+    /// the writable drives a `check_files` load couldn't check, as the
+    /// state has no record of what was on them. Without `check_files` no
+    /// file is read.
+    #[allow(clippy::type_complexity)]
     fn load_for_debugger(
         &mut self,
         path: &std::path::Path,
         strict_match: bool,
-    ) -> Result<(slots::Header, Vec<String>), (u16, serde_json::Value)> {
+        check_files: bool,
+    ) -> Result<(slots::Header, Vec<String>, Vec<String>), (u16, serde_json::Value)> {
         // Whatever failed, the machine, its settings and hardware are as they were.
         let failed = |e: String| (400, serde_json::json!({"error": e, "loaded": false, "unchanged": true}));
         let (header, state) = self.read_state(path).map_err(failed)?;
@@ -2674,8 +2695,25 @@ impl MainHost<'_, '_> {
         if strict_match {
             savestate::media::forget(self.cpu);
         }
+        let mut unchecked = Vec::new();
         match &header.media {
-            Some(media) => differences.extend(savestate::media::differences(media, &savestate::media::of(self.cpu))),
+            Some(media) => {
+                let mut now = savestate::media::of(self.cpu);
+                if check_files {
+                    // What is on the drives the state has a record of.
+                    let recorded = |m: &savestate::media::Medium| {
+                        media.iter().any(|saved| saved.drive == m.drive && savestate::media::has_contents(saved))
+                    };
+                    savestate::media::add_contents(self.cpu, &mut now, path, recorded);
+                }
+                // Without `check_files` the machine's media have no record of
+                // their files, so the state's isn't compared.
+                differences.extend(savestate::media::differences(media, &now));
+                if check_files {
+                    let copied = |key: &str| savestate::disks::copy_path_of(path, key).exists();
+                    unchecked = savestate::media::unrecorded(media, copied);
+                }
+            }
             None if strict_match => differences.push(format!(
                 "the state doesn't record its media (saved by rust-dos {}), so they can't be checked",
                 header.version
@@ -2687,7 +2725,7 @@ impl MainHost<'_, '_> {
             return Err((409, serde_json::json!({"error": error, "loaded": false, "unchanged": true, "differences": differences})));
         }
         let header = self.load_state(path, header, &state).map_err(failed)?;
-        Ok((header, differences))
+        Ok((header, differences, unchecked))
     }
 
     /// The header and machine's state of the save state file `path`, if
@@ -3204,7 +3242,7 @@ impl Host for MainHost<'_, '_> {
 
     fn save_state(&mut self, slot: u8) -> Result<String, String> {
         let path = slots::slot_path(&self.slot_dir()?, slot);
-        self.save_file(&path)?;
+        self.save_file(&path, false)?;
         *self.slot = slot;
         Ok(format!("Saved to slot {}", slot))
     }

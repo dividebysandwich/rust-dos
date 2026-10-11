@@ -13,12 +13,24 @@ use std::path::{Path, PathBuf};
 
 /// Where the copy of the disk in `drive` goes for the state file `state`.
 pub fn copy_path(state: &Path, drive: u8) -> PathBuf {
-    state.with_extension(format!("{}.img", drive_key(drive)))
+    copy_path_of(state, &drive_key(drive))
+}
+
+/// `copy_path` of the drive with the key `key` (`C`, or `2` for a disk
+/// mounted by number).
+pub fn copy_path_of(state: &Path, key: &str) -> PathBuf {
+    state.with_extension(format!("{}.img", key))
+}
+
+/// Whether the disk in `drive` keeps a journal: a booted system's, which
+/// its states keep a copy of.
+pub fn journaling(cpu: &Cpu, drive: u8) -> bool {
+    cpu.bus.disk.bios_image(drive).is_some_and(|disk| disk.journaling())
 }
 
 /// The drives whose disks keep journals: a booted system's.
 fn journaled(cpu: &Cpu) -> Vec<u8> {
-    (0..DRIVE_SLOTS).filter(|&d| cpu.bus.disk.bios_image(d).is_some_and(|disk| disk.journaling())).collect()
+    (0..DRIVE_SLOTS).filter(|&d| journaling(cpu, d)).collect()
 }
 
 /// Copy the disks of the booted system beside the state file `state`, as

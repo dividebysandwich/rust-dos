@@ -1652,6 +1652,14 @@ impl DiskController {
         self.drive(drive)?.disk().cloned()
     }
 
+    /// The host folder the drive's files are read from: the folder itself,
+    /// or under an overlay the overlay's root (`layerN:/`), which shows
+    /// the files below with the changes made to them. None for a drive
+    /// that isn't a host folder.
+    pub fn host_root(&self, drive: u8) -> Option<PathBuf> {
+        self.drive(drive)?.host_root().map(Path::to_path_buf)
+    }
+
     /// The IDE slot `drive` was mounted for (`-ide`), if any.
     pub fn ide_slot(&self, drive: u8) -> Option<crate::ide::IdeSlot> {
         self.drive(drive)?.mount.as_ref()?.opts.ide
