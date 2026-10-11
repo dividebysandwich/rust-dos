@@ -1890,7 +1890,8 @@ EXECUTION CONTROL
                              hex (the default): a text dump; raw: the bytes;
                              json: {"addr","len","hex":"41 1F"}; base64:
                              {"addr","len","base64"}. The JSON formats have
-                             "state_seq"; X-Debug-State-Seq is on all four
+                             "state_seq"; X-Debug-State-Seq is on all four.
+                             (features has "memory_json" when json is there)
   PUT  /api/memory {"addr":"B800:0000","hex":"41 1F"}  (or "base64"); replies with
                              the bytes replaced ("old") and read back ("new");
                              "expect":"20 07" writes only if those bytes are there (409)
