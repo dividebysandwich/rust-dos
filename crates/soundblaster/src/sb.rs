@@ -474,8 +474,9 @@ impl SoundBlaster {
     /// The write status port (2xCh). An idle DSP takes a byte at once. One
     /// running a DMA transfer is busy for a moment now and then while it
     /// services the transfer (at most 3.4 us at a time, about a fifth of
-    /// the time), so reads in a loop see bit 7 set every few reads. Miles' AIL 2 Sound Blaster drivers (SBPDIG.ADV) rely on
-    /// that when they stop a block that is still playing: they poll for
+    /// the time), so reads in a loop see bit 7 set every few reads. Miles'
+    /// AIL 2 Sound Blaster drivers (SBPDIG.ADV) rely on that when they
+    /// stop a block that is still playing: they poll for
     /// bit 7 with the IRQ vector already restored, then halt the DMA. A
     /// DSP that never reads busy keeps them polling until the block ends,
     /// its IRQ goes to the BIOS's handler, and the card's request stays
