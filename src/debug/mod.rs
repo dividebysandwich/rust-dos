@@ -4691,6 +4691,76 @@ mod tests {
     }
 
     #[test]
+    fn requests_sent_together_take_effect_in_the_order_sent() {
+        let mut cpu = Cpu::new(".".into());
+        cpu.load_shell();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let shared = std::sync::Arc::new(super::Shared::new(std::time::Instant::now()));
+        let mut hub = DebugHub::new(Some(rx), Some(shared), 10);
+        hub.announce(&cpu);
+        let (p, _p) = hub.request(Cmd::Pause);
+        tx.send(p).unwrap();
+        hub.poll(&mut cpu);
+        assert!(hub.paused);
+        let before = journal_state(&hub).2;
+        let state = journal_state(&hub).0;
+        // All in the channel at once, as from clients in one frame.
+        let mut cmds = vec![
+            (write("0200:0000", &[1], None), None),
+            (Cmd::SaveState { path: "s".into(), strict_match: true }, None),
+            (write("0200:0000", &[2], None), None),
+            (Cmd::Speed { cycles: "5000".into() }, None),
+            // Guarded by the state before the first write: refused.
+            (write("0200:0000", &[3], None), Some(state)),
+            (Cmd::LoadState { path: "s".into(), strict_match: true }, None),
+            // Holds only once the load brought back the 1.
+            (write("0200:0000", &[4], Some(&[1])), None),
+            (Cmd::Resume { until: None, until_ms: None }, None),
+            (Cmd::Pause, None),
+        ];
+        let mut answers = Vec::new();
+        for (cmd, if_state) in cmds.drain(..) {
+            let (mut request, rx) = hub.request(cmd);
+            request.if_state = if_state;
+            tx.send(request).unwrap();
+            answers.push(rx);
+        }
+        let mut saved: Option<Vec<u8>> = None;
+        for _ in 0..10 {
+            hub.poll(&mut cpu);
+            while let Some(request) = hub.next_state_request() {
+                let result = if request.load {
+                    rust_dos::savestate::machine::load(&mut cpu, saved.as_ref().unwrap()).unwrap();
+                    Ok(serde_json::json!({"loaded": true}))
+                } else {
+                    saved = Some(rust_dos::savestate::machine::save(&cpu));
+                    Ok(serde_json::json!({"saved": true}))
+                };
+                hub.state_done(&cpu, request, result);
+            }
+            while let Some(request) = hub.next_speed_request() {
+                let cycles = request.cycles.clone();
+                hub.speed_done(&cpu, request, Ok(serde_json::json!({"cycles": cycles})));
+            }
+        }
+        let statuses: Vec<u16> = answers
+            .iter_mut()
+            .map(|rx| match rx.try_recv().expect("answered").reply {
+                Reply::Json(_) => 200,
+                Reply::Error(code, _) | Reply::ErrorJson(code, _) => code,
+                _ => panic!("not a JSON reply"),
+            })
+            .collect();
+        assert_eq!(statuses, [200, 200, 200, 200, 409, 200, 200, 200, 200]);
+        let types: Vec<String> = entries(&hub).iter().filter(|e| e["seq"].as_u64() > Some(before)).map(|e| e["type"].as_str().unwrap().to_string()).collect();
+        assert_eq!(
+            types,
+            ["memory_written", "state_saved", "memory_written", "speed_changed", "state_loaded", "debugger_reset", "paused", "memory_written", "resumed", "paused"]
+        );
+        assert_eq!(cpu.bus.peek_8(0x2000), 4);
+    }
+
+    #[test]
     fn log_lines_name_their_request_and_the_journal_s_entry() {
         let (mut cpu, mut hub) = machine("journal-log");
         let shared = hub.shared.clone().unwrap();

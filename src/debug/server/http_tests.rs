@@ -1338,3 +1338,137 @@ fn the_ring_and_the_operations_stay_bounded_and_say_what_went() {
     rig.post("/api/control/pause", json!({}));
     assert_eq!(waiter.join().unwrap()["state"], "stopped");
 }
+
+// ----- deferred requests -------------------------------------------------------
+
+/// Bytes as hex with no spaces, upper case.
+fn hex_of(v: &Value) -> String {
+    v.as_str().unwrap_or_else(|| panic!("hex: {}", v)).replace(' ', "").to_uppercase()
+}
+
+/// The two bytes of a one-line hex dump.
+fn dumped(text: &str) -> String {
+    text.split_whitespace().skip(1).take(2).collect::<String>().to_uppercase()
+}
+
+#[test]
+fn saves_loads_and_speed_changes_take_effect_in_the_order_of_the_journal() {
+    // Long frames, so that requests pile up in one.
+    let rig = Rig::with("deferred", Options { sleep: Duration::from_millis(25), ..Options::default() });
+    let cs = rig.at_entry("COUNT.COM");
+    let addr = rig.addr;
+    // COUNT.COM counts at 0200; 0300 changes only by what the clients do.
+    let at = format!("{}:0300", cs);
+    let first = dumped(&rig.get(&format!("/api/memory?addr={}&len=2", at)).body);
+    let clients: Vec<_> = (0..8u64)
+        .map(|i| {
+            let at = at.clone();
+            std::thread::spawn(move || {
+                let mut rand = Rand(0xD1B5_4A32_D192_ED03 ^ (i + 1) * 0x9E37_79B9);
+                // (action, status, request, body, state seq header)
+                let mut done: Vec<(u64, u16, u64, Value, Option<u64>)> = Vec::new();
+                for _ in 0..80 {
+                    let action = rand.below(10);
+                    let path = format!("s{}.state", rand.below(3));
+                    let strict = rand.below(2) == 0;
+                    let r = match action {
+                        0 | 1 => http(addr, "PUT", "/api/memory", &[], Some(&json!({"addr": at, "hex": format!("{:04X}", rand.below(0x10000))}))),
+                        2 => {
+                            let read = http(addr, "GET", &format!("/api/memory?addr={}&len=2", at), &[], None);
+                            let seq = read.header("x-debug-state-seq").unwrap().to_string();
+                            http(addr, "PUT", "/api/memory", &[("If-State-Seq", &seq)], Some(&json!({"addr": at, "hex": format!("{:04X}", rand.below(0x10000))})))
+                        }
+                        3 => http(addr, "POST", "/api/state/save", &[], Some(&json!({"path": path, "strict_match": strict}))),
+                        4 => http(addr, "POST", "/api/state/load", &[], Some(&json!({"path": path, "strict_match": strict}))),
+                        5 => http(addr, "POST", "/api/speed", &[], Some(&json!({"cycles": format!("{}", 1000 + rand.below(9000))}))),
+                        6 => http(addr, "POST", "/api/control/resume", &[], Some(&json!({}))),
+                        7 => http(addr, "POST", "/api/control/pause", &[], Some(&json!({}))),
+                        _ => http(addr, "GET", &format!("/api/memory?addr={}&len=2", at), &[], None),
+                    };
+                    let allowed: &[u16] = match action {
+                        2 => &[200, 409],
+                        3 => &[200, 409],
+                        4 => &[200, 404, 409],
+                        _ => &[200],
+                    };
+                    assert!(allowed.contains(&r.status), "action {}: {} {}", action, r.status, r.body);
+                    let seq = r.header("x-debug-state-seq").and_then(|s| s.parse().ok());
+                    let body = if action >= 8 { json!({"hex": dumped(&r.body)}) } else { r.json() };
+                    done.push((action, r.status, r.header("x-debug-req").unwrap().parse().unwrap(), body, seq));
+                }
+                done
+            })
+        })
+        .collect();
+    let done: Vec<Vec<(u64, u16, u64, Value, Option<u64>)>> = clients.into_iter().map(|c| c.join().expect("a client failed")).collect();
+    rig.post("/api/control/pause", json!({}));
+    let entries = rig.journal();
+
+    // Replayed in the journal's order, the value at 0300 after each entry.
+    let mut value = first.clone();
+    let mut states: std::collections::HashMap<String, String> = Default::default();
+    let mut after: Vec<String> = vec![first];
+    let mut by_cause: std::collections::HashMap<u64, Vec<&Value>> = Default::default();
+    for e in &entries {
+        if let Some(c) = e["cause"].as_u64() {
+            by_cause.entry(c).or_default().push(e);
+        }
+        match e["type"].as_str().unwrap() {
+            "memory_written" => {
+                assert_eq!(hex_of(&e["old"]), value, "a write replaced what the journal says was there: {}", e);
+                value = hex_of(&e["new"]);
+            }
+            "state_saved" => {
+                states.insert(e["path"].as_str().unwrap().to_string(), value.clone());
+            }
+            "state_loaded" => {
+                value = states.get(e["path"].as_str().unwrap()).unwrap_or_else(|| panic!("loaded before saved: {}", e)).clone();
+            }
+            _ => {}
+        }
+        after.push(value.clone());
+    }
+    assert_eq!(dumped(&rig.get(&format!("/api/memory?addr={}&len=2", at)).body), value, "the end is where the journal says");
+
+    let (mut saves, mut loads, mut speeds) = (0, 0, 0);
+    for client in &done {
+        let mut last_seq = 0;
+        for (action, status, req, body, state_seq) in client {
+            let mine = by_cause.get(req).cloned().unwrap_or_default();
+            let kinds: Vec<&str> = mine.iter().map(|e| e["type"].as_str().unwrap()).collect();
+            // Each client's requests, one after the other, are in the
+            // journal in that order.
+            if let Some(e) = mine.first() {
+                let seq = e["seq"].as_u64().unwrap();
+                assert!(seq > last_seq, "request {} at {} after {}", req, seq, last_seq);
+                last_seq = mine.last().unwrap()["seq"].as_u64().unwrap();
+            }
+            match (action, status) {
+                (0..=2, 200) => {
+                    assert_eq!(kinds, ["memory_written"], "{}", req);
+                    assert_eq!((hex_of(&body["old"]), hex_of(&body["new"])), (hex_of(&mine[0]["old"]), hex_of(&mine[0]["new"])));
+                }
+                (3, 200) => {
+                    saves += 1;
+                    assert_eq!(kinds, ["state_saved"], "{}", req);
+                }
+                (4, 200) => {
+                    loads += 1;
+                    assert_eq!(kinds[0], "state_loaded", "{}", req);
+                }
+                (5, 200) => {
+                    speeds += 1;
+                    assert_eq!(kinds, ["speed_changed"], "{}", req);
+                }
+                (2..=4, 400..) => assert!(kinds.is_empty() || kinds == ["op_failed"], "a refused request changed nothing: {} {:?}", req, kinds),
+                (8.., 200) => {
+                    // A read is the value after the entry its state seq names.
+                    let seq = state_seq.expect("a read's state seq") as usize;
+                    assert_eq!(hex_of(&body["hex"]), after[seq], "read {} at state {}", req, seq);
+                }
+                _ => {}
+            }
+        }
+    }
+    assert!(saves > 20 && loads > 20 && speeds > 20, "saves {} loads {} speeds {}", saves, loads, speeds);
+}
