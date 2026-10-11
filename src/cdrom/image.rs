@@ -527,10 +527,19 @@ pub fn wave_data<R: Read + Seek>(file: &mut R) -> Result<(WaveFormat, u64, u64),
     }
 }
 
-/// Whether `CdImage::open` reads `path` as a CUE sheet: a `.cue`, or
-/// GOG's `.ins` (`.inst` in Steam's copies).
+/// The largest file `is_cue` reads to see whether it is a CUE sheet. A
+/// sheet of 99 tracks is a few KiB; a disc image is far larger.
+const MAX_SHEET: u64 = 64 * 1024;
+
+/// Whether `CdImage::open` reads `path` as a CUE sheet: a `.cue`, GOG's
+/// `.ins` (`.inst` in Steam's copies), or a small file of any other name
+/// that reads as a sheet with a track, as GOG's `.bdn` for BloodNet does.
 fn is_cue(path: &Path) -> bool {
-    path.extension().is_some_and(|e| ["cue", "ins", "inst"].iter().any(|c| e.eq_ignore_ascii_case(c)))
+    if path.extension().is_some_and(|e| ["cue", "ins", "inst"].iter().any(|c| e.eq_ignore_ascii_case(c))) {
+        return true;
+    }
+    hostfs::metadata(path).is_ok_and(|m| !m.is_dir && m.len <= MAX_SHEET)
+        && hostfs::read(path).is_ok_and(|text| parse_cue(&String::from_utf8_lossy(&text)).is_ok())
 }
 
 /// The files the CUE sheet at `path` keeps its tracks in, those that are

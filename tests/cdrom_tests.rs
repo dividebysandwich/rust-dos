@@ -112,6 +112,21 @@ fn bare_raw_images_are_recognised() {
 }
 
 #[test]
+fn cue_sheets_mount_whatever_their_extension() {
+    // GOG's BloodNet: the sheet is BLOODNET.BDN, the sectors BLOODNET.GOG,
+    // mounted with `imgmount D "..\bloodnet.bdn" -t iso -fs iso`.
+    let (mut cpu, dir) = machine("bdn");
+    let big = pattern(5000);
+    fs::write(dir.join("c/Bloodnet.gog"), mode1_2352(&iso("TESTDISC", &files(&big)))).unwrap();
+    fs::write(dir.join("c/Bloodnet.bdn"), "FILE \"Bloodnet.gog\" BINARY\r\n  TRACK 01 MODE1/2352\r\n    INDEX 01 00:00:00\r\n")
+        .unwrap();
+    run(&mut cpu, "IMGMOUNT D C:\\BLOODNET.BDN -t iso -fs iso");
+    let info = cpu.bus.disk.drive_info(D).expect("mounted");
+    assert!(info.image.unwrap().ends_with("Bloodnet.bdn"));
+    check_files(&mut cpu, &big);
+}
+
+#[test]
 fn only_cd_images_mount() {
     let (mut cpu, dir) = machine("refused");
     fs::write(dir.join("junk.img"), vec![0u8; 100_000]).unwrap();
