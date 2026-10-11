@@ -176,6 +176,11 @@ manuals = ["dep:jpeg-decoder", "dep:hayro"]
 # The MPU-401's MIDI out of the host's MIDI ports (ALSA on Linux, which
 # needs libasound2-dev to build).
 hostmidi = ["rust-dos-mpu401/hostmidi"]
+# Tests only: skips the tests that open a socket on all of the machine's
+# interfaces (a relay hosted for the LAN, or a broadcast to find one),
+# which make a desktop firewall ask about rust-dos on every run.
+# `cargo test-local` turns it on.
+skip-host-network-tests = []
 
 [build-dependencies]
 # Links the program's icon (packaging/windows/rust-dos.rc) into rust-dos.exe.
