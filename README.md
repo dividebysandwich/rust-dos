@@ -103,6 +103,20 @@ cargo build --release
 ./target/release/rust-dos -d ~/dos
 ```
 
+On Windows (MSVC), take SDL2's Visual C++ development package,
+`SDL2-devel-<version>-VC.zip` from
+[SDL's releases](https://github.com/libsdl-org/SDL/releases) (CI builds with
+[2.30.0](https://github.com/libsdl-org/SDL/releases/download/release-2.30.0/SDL2-devel-2.30.0-VC.zip)),
+unpack it, and add its `lib\x64` to `LIB` so the linker finds `SDL2.lib`:
+
+```powershell
+$env:LIB = "C:\SDL2-2.30.0\lib\x64;$env:LIB"
+cargo build --release
+```
+
+To run the program, put `SDL2.dll` from the same `lib\x64` next to
+`rust-dos.exe` or on `PATH`.
+
 `-d` makes a host directory drive C:; without it, C: is the configuration
 file's, or the current directory. Drop a game's folder, a GOG install, a zip
 or 7z archive, or a CD or disk image onto the window to mount, import or run
