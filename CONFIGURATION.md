@@ -1614,10 +1614,8 @@ card's gamma table, which games set brighter than DOSBox-X shows them.
   the game) and run under a DOS extender such as DOS/4GW, which maps the
   card's memory. Tomb Raider's 3dfx patch (`3DPATCH\3DFX\TOMB.EXE` on the
   Tomb Raider Gold CD) runs with `voodoo=true` and `cpu=pentium`. Its
-  saved games don't mix with the other versions': loading one saved by
-  another version corrupts the textures. [Issue #38](https://github.com/dividebysandwich/rust-dos/issues/38)
-  has a zip that keeps the 3dfx version apart, so it lives peacefully
-  beside the others.
+  saved games don't load in the PowerVR version, nor that version's in
+  it (see the PowerVR card below).
   Games made for the Voodoo Rush and later boards load Glide from
   `GLIDE2X.OVL` (Tomb Raider's Rush patch, `3DPATCH\VOORUSH\TOMB.EXE`),
   and the one of 3dfx's Voodoo Graphics driver drives this card whatever
@@ -1805,6 +1803,14 @@ states and rewind keep the card with its texture memory.
   emulated card runs at 15 to 20 on a typical host. Keys this version has and the others
   don't (or use differently): F4 shows or hides the PowerVR logo (in the
   full game only), Z zooms the camera in and X out.
+  Its saved games and the 3dfx version's (and the other versions') share
+  the names `SAVEGAME.x` but don't work in each other: one way round the
+  game loads to a black screen, the other way it quits with an error
+  about GetHeight. The textures aren't harmed. [Issue #38](https://github.com/dividebysandwich/rust-dos/issues/38)
+  has TOMBPCX2.EXE (v2.1e and v2.0e) modified to save as `SAVEPCX2.x`
+  instead, so it lives peacefully beside the others in one folder, and
+  the same for Tomb Raider: Unfinished Business's PowerVR version, which
+  saves as `SVUBPX.x` instead of `SAVEUB.x`.
 
 How the card draws follows Imagination's own driver sources and simulator
 of the chip, which they released under the MIT licence
