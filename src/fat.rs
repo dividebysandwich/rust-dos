@@ -1154,6 +1154,46 @@ impl FatVolume {
         result.and(finished).map(|()| written)
     }
 
+    /// Cut the file whose entry is at `at` to `size` bytes, freeing the
+    /// clusters past the new end. A `size` at or past the end leaves the
+    /// file as it is.
+    pub fn truncate(&self, at: EntryRef, size: u64) -> Result<(), u8> {
+        let mut state = self.state();
+        let result = (|| {
+            let buf = self.raw_entry(at)?;
+            let entry = state.params.entry(&buf[at.index * ENTRY_SIZE..(at.index + 1) * ENTRY_SIZE], at);
+            if size >= entry.size as u64 {
+                return Ok(());
+            }
+            let chain = if entry.cluster == 0 { Vec::new() } else { state.chain(entry.cluster) };
+            let keep = size.div_ceil(state.params.cluster_bytes) as usize;
+            let mut cluster = entry.cluster;
+            if keep < chain.len() {
+                for &c in &chain[keep..] {
+                    state.set(c, 0);
+                }
+                match keep.checked_sub(1) {
+                    Some(last) => {
+                        let end = state.end_of_chain();
+                        state.set(chain[last], end);
+                    }
+                    None => cluster = 0,
+                }
+            }
+            let (time, date) = dos_now();
+            let params = state.params;
+            self.update_entry(at, |raw| {
+                raw[11] |= ATTR_ARCHIVE;
+                raw[22..24].copy_from_slice(&time.to_le_bytes());
+                raw[24..26].copy_from_slice(&date.to_le_bytes());
+                params.set_cluster(raw, cluster);
+                raw[28..32].copy_from_slice(&(size as u32).to_le_bytes());
+            })
+        })();
+        let finished = self.finish(&mut state);
+        result.and(finished)
+    }
+
     /// Put a file with the contents `data`, dated `time` and `date`, at
     /// `path`, making the directories on its way and replacing a file that
     /// is there. 27h (disk full) if it doesn't fit, which leaves no file.

@@ -2662,12 +2662,20 @@ impl DiskController {
     }
 
     /// Make an open file `size` bytes long, cutting it or adding zeros
-    /// (INT 21h AH=28h with no records). Only host files can be cut;
-    /// the others grow with zeros written at their end.
+    /// (INT 21h AH=28h with no records, AH=40h with none to write). Host
+    /// files and files on disk images opened for writing can be cut; the
+    /// others grow with zeros written at their end.
     pub fn set_file_size(&mut self, handle: u16, size: u64) -> Result<(), u8> {
         let open = self.open_files.get(&handle).ok_or(0x06u8)?;
         if let OpenData::Host(file) = &open.data {
             let result = file.set_len(size).map_err(|_| 0x05);
+            self.mark_dirty(handle);
+            return result;
+        }
+        if let OpenData::Fat { volume, at, write: true, .. } = &open.data
+            && size < volume.reload(*at)?.size as u64
+        {
+            let result = volume.truncate(*at, size);
             self.mark_dirty(handle);
             return result;
         }
