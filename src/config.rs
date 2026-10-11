@@ -2744,7 +2744,7 @@ mod tests {
                     crate::serial::PortType::Mouse,
                     crate::serial::PortType::Off,
                 ],
-                modem_listen: Some(2323),
+                modem_listen: Some("0.0.0.0:2323".parse().unwrap()),
                 ..Default::default()
             },
             printer: crate::printer::PrinterSettings {

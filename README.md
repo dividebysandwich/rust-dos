@@ -109,6 +109,10 @@ or 7z archive, or a CD or disk image onto the window to mount, import or run
 it.
 `rust-dos --help` lists the other options.
 
+`cargo test` runs the tests. A few of them host a LAN relay or look for one
+by broadcast, on all of the computer's network interfaces; if your firewall
+asks about them on every run, `cargo test-local` skips those few.
+
 ## Configuration
 
 Rust-DOS reads `rust-dos.conf`, a DOSBox-style configuration file, from the
