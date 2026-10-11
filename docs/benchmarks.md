@@ -35,7 +35,25 @@ borderline: a laptop's power management, a virus scanner or a build in
 another terminal moves file system numbers by 10% or more.
 
 `cargo test --benches` runs each benchmark once, in a debug build, as a
-quick check that it still works; CI does this on Linux.
+quick check that it still works.
+
+## In CI
+
+The regular CI doesn't build or run the benchmarks. The Benchmarks
+workflow (`.github/workflows/benchmarks.yml`) runs them on demand, on a
+Linux runner:
+
+- On a PR with the `performance` label. Adding the label starts it, and
+  every push to the PR runs it again while the label is on. It benchmarks
+  the base commit, saves that as a baseline, benchmarks the PR merged
+  into the base, and puts a table of both times and the change in the
+  run's summary. When the base has no benchmarks it shows the PR's times
+  only.
+- By hand, with "Run workflow" on the Actions tab: it benchmarks the
+  chosen branch and puts the times in the summary.
+
+Shared runners are noisy: treat a difference of a few percent as noise,
+and confirm a large one on a quiet machine before relying on it.
 
 ## What is there
 
