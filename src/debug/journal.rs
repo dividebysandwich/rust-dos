@@ -413,6 +413,7 @@ impl Journal {
     }
 
     /// The operations kept, pending and ended.
+    #[cfg(test)]
     pub fn ops_len(&self) -> usize {
         self.ops.len()
     }

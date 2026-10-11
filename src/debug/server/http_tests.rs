@@ -1111,7 +1111,7 @@ fn a_strict_match_load_ends_the_waits_on_what_it_cancelled() {
     let typing = std::thread::spawn(move || http(addr, "POST", "/api/input/wait", &[], Some(&json!({"ms": 60000}))));
     let deadline = Instant::now() + Duration::from_secs(10);
     let op = loop {
-        let queued = rig.get(&format!("/api/journal?after=0&type=input_queued")).json();
+        let queued = rig.get("/api/journal?after=0&type=input_queued").json();
         if let Some(e) = queued["entries"].as_array().unwrap().last() {
             break e["cause"].as_u64().unwrap();
         }
@@ -1399,6 +1399,9 @@ fn dumped(text: &str) -> String {
     text.split_whitespace().skip(1).take(2).collect::<String>().to_uppercase()
 }
 
+/// What a client did: (action, status, request, body, state seq header).
+type Done = (u64, u16, u64, Value, Option<u64>);
+
 #[test]
 fn saves_loads_and_speed_changes_take_effect_in_the_order_of_the_journal() {
     // Long frames, so that requests pile up in one.
@@ -1413,8 +1416,7 @@ fn saves_loads_and_speed_changes_take_effect_in_the_order_of_the_journal() {
             let at = at.clone();
             std::thread::spawn(move || {
                 let mut rand = Rand(0xD1B5_4A32_D192_ED03 ^ ((i + 1) * 0x9E37_79B9));
-                // (action, status, request, body, state seq header)
-                let mut done: Vec<(u64, u16, u64, Value, Option<u64>)> = Vec::new();
+                let mut done: Vec<Done> = Vec::new();
                 for _ in 0..80 {
                     let action = rand.below(10);
                     let path = format!("s{}.state", rand.below(3));
@@ -1448,7 +1450,7 @@ fn saves_loads_and_speed_changes_take_effect_in_the_order_of_the_journal() {
             })
         })
         .collect();
-    let done: Vec<Vec<(u64, u16, u64, Value, Option<u64>)>> = clients.into_iter().map(|c| c.join().expect("a client failed")).collect();
+    let done: Vec<Vec<Done>> = clients.into_iter().map(|c| c.join().expect("a client failed")).collect();
     rig.post("/api/control/pause", json!({}));
     let entries = rig.journal();
 
