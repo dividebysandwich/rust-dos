@@ -381,6 +381,230 @@ impl Pit0 {
     }
 }
 
+/// 8254 PIT channel 2, whose gate is bit 0 of port 61h and whose output
+/// drives the PC speaker and reads back as bit 5 of port 61h. Programs time
+/// short delays and measure the CPU's speed with it: Linux and Memtest86+
+/// load a count in mode 0 and poll bit 5 until the output goes high; the
+/// AdLib drivers of Bloodnet and others read the count of a mode 4 run.
+/// The port side (access modes, byte flip-flops, the counter latch) is here
+/// as well, since nothing else shares it.
+///
+/// Time is in PIT ticks. The count runs while `run_from` is set, from that
+/// tick on; `done` is the ticks it ran before the gate last stopped it.
+pub struct Pit2 {
+    /// Counter mode, 0..=5 (6 and 7 alias 2 and 3).
+    mode: u8,
+    /// Access mode of the control word: 1 LSB, 2 MSB, 3 LSB then MSB.
+    access: u8,
+    /// Count loaded at each reload, 1..=65536.
+    reload: u32,
+    /// Whether a count was written since the last control word.
+    loaded: bool,
+    /// Whether the count is under way: from the count written, or in modes
+    /// 1 and 5 from the gate's rising edge after it.
+    started: bool,
+    /// The gate input, port 61h bit 0.
+    gate: bool,
+    /// The emulated tick the count has been running from, while it runs.
+    run_from: Option<u64>,
+    /// Ticks counted before `run_from`, in runs the gate ended.
+    done: u64,
+    /// What a read returns while no count runs: where it stopped.
+    stopped: u16,
+    /// The LSB of a count being written in access mode 3, waiting for its MSB.
+    write_lsb: Option<u8>,
+    /// Whether the next read in access mode 3 returns the MSB.
+    read_msb: bool,
+    /// A count latched by a counter latch command, read out before the
+    /// live count.
+    latched: Option<u16>,
+}
+
+impl Default for Pit2 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Pit2 {
+    /// Power-on state: a square wave of count 65536 with the gate high,
+    /// so programs that read the count without setting the channel up
+    /// see it run (Carrier Command times its drawing so).
+    pub fn new() -> Self {
+        Self {
+            mode: 3,
+            access: 3,
+            reload: 0x10000,
+            loaded: true,
+            started: true,
+            gate: true,
+            run_from: Some(0),
+            done: 0,
+            stopped: 0,
+            write_lsb: None,
+            read_msb: false,
+            latched: None,
+        }
+    }
+
+    /// Modes 1 and 5 count from the gate's rising edge.
+    fn gate_triggered(&self) -> bool {
+        matches!(self.mode, 1 | 5)
+    }
+
+    /// Ticks counted since the count was loaded.
+    fn elapsed(&self, now: u64) -> u64 {
+        self.done + self.run_from.map_or(0, |from| now.saturating_sub(from))
+    }
+
+    /// The count a read sees at `now`.
+    pub fn count(&self, now: u64) -> u16 {
+        if !self.started {
+            return self.stopped;
+        }
+        let e = self.elapsed(now);
+        let reload = self.reload as u64;
+        match self.mode {
+            2 => (reload - e % reload) as u16,
+            // The square wave counts down by two, twice a period.
+            3 => (reload - 2 * (e % reload) % reload) as u16,
+            // One-shot modes run on through zero.
+            _ => reload.wrapping_sub(e) as u16,
+        }
+    }
+
+    /// The output at `now`, as port 61h bit 5 shows it.
+    pub fn output(&self, now: u64) -> bool {
+        if !self.started {
+            // Mode 0 goes low on the control word, the others high.
+            return self.mode != 0;
+        }
+        let e = self.elapsed(now);
+        let reload = self.reload as u64;
+        match self.mode {
+            0 | 1 => e >= reload,
+            // Low for the one tick before the reload.
+            2 => !self.gate || e % reload != reload - 1,
+            // High for the first half of each period (the larger half of
+            // an odd count).
+            3 => !self.gate || e % reload < reload.div_ceil(2),
+            // Low for the one tick at terminal count.
+            _ => e != reload,
+        }
+    }
+
+    /// A control word for channel 2 at `now` (access mode 0, the counter
+    /// latch command, included).
+    pub fn control(&mut self, value: u8, now: u64) {
+        let access = (value >> 4) & 3;
+        if access == 0 {
+            if self.latched.is_none() {
+                self.latched = Some(self.count(now));
+            }
+            return;
+        }
+        self.stopped = self.count(now);
+        let mode = (value >> 1) & 7;
+        self.mode = if mode >= 6 { mode - 4 } else { mode };
+        self.access = access;
+        self.loaded = false;
+        self.started = false;
+        self.run_from = None;
+        self.done = 0;
+        self.write_lsb = None;
+        self.read_msb = false;
+        self.latched = None;
+    }
+
+    /// A byte written to port 42h at `now`. Returns the count when this
+    /// byte completed one.
+    pub fn write(&mut self, value: u8, now: u64) -> Option<u16> {
+        let count = match self.access {
+            1 => value as u16,
+            2 => (value as u16) << 8,
+            _ => match self.write_lsb.take() {
+                None => {
+                    self.write_lsb = Some(value);
+                    // Mode 0 stops counting at the first byte.
+                    if self.mode == 0 && self.started {
+                        self.stopped = self.count(now);
+                        self.started = false;
+                        self.run_from = None;
+                    }
+                    return None;
+                }
+                Some(lsb) => (value as u16) << 8 | lsb as u16,
+            },
+        };
+        self.load(count, now);
+        Some(count)
+    }
+
+    /// A complete count was written (0 means 65536). Modes 0, 2, 3 and 4
+    /// start over from it at once; 1 and 5 wait for a rising gate edge, or
+    /// keep the run in progress.
+    fn load(&mut self, count: u16, now: u64) {
+        self.reload = if count == 0 { 0x10000 } else { count as u32 };
+        self.loaded = true;
+        if self.gate_triggered() {
+            return;
+        }
+        self.start(now);
+    }
+
+    fn start(&mut self, now: u64) {
+        self.started = true;
+        self.done = 0;
+        self.run_from = (self.gate || self.gate_triggered()).then_some(now);
+    }
+
+    /// The gate input at `now`. Low stops the count in modes 0, 2, 3 and 4;
+    /// a rising edge restarts it in modes 1, 2, 3 and 5 and goes on in 0
+    /// and 4.
+    pub fn set_gate(&mut self, gate: bool, now: u64) {
+        if gate == self.gate {
+            return;
+        }
+        self.gate = gate;
+        if gate {
+            match self.mode {
+                0 | 4 if self.started => self.run_from = Some(now),
+                1 | 5 if self.loaded => self.start(now),
+                2 | 3 if self.started => self.start(now),
+                _ => {}
+            }
+        } else if !self.gate_triggered()
+            && let Some(from) = self.run_from.take()
+        {
+            self.done += now.saturating_sub(from);
+        }
+    }
+
+    /// A byte read from port 42h at `now`.
+    pub fn read(&mut self, now: u64) -> u8 {
+        let value = self.latched.unwrap_or_else(|| self.count(now));
+        match self.access {
+            1 => {
+                self.latched = None;
+                value as u8
+            }
+            2 => {
+                self.latched = None;
+                (value >> 8) as u8
+            }
+            _ if !self.read_msb => {
+                self.read_msb = true;
+                value as u8
+            }
+            _ => {
+                self.read_msb = false;
+                self.latched = None;
+                (value >> 8) as u8
+            }
+        }
+    }
+}
+
 /// How fast the emulated CPU runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CpuSpeed {
@@ -727,6 +951,7 @@ impl HostSample {
     }
 }
 
+crate::state_fields!(Pit2 { mode, access, reload, loaded, started, gate, run_from, done, stopped, write_lsb, read_msb, latched });
 crate::state_fields!(Pit0 { mode, reload, pending_reload, counting, stopped, armed, period_start, next_tc });
 crate::state_fields!(Clock { icount, deadline, stalled, idle, batch_end, cycles_per_ms, base_icount, base_ticks, base_ns });
 

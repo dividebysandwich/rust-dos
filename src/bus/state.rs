@@ -8,7 +8,7 @@ use crate::savestate::{Reader, Result, State, StateError, Writer, load_device, s
 
 /// The sections' versions, changed with what a section holds.
 const RAM_VERSION: u16 = 2;
-const CORE_VERSION: u16 = 8;
+const CORE_VERSION: u16 = 9;
 const VIDEO_VERSION: u16 = 2;
 const SOUND_VERSION: u16 = 3;
 const DOS_VERSION: u16 = 6;
@@ -59,9 +59,8 @@ impl Bus {
             a20_mask,
             cmos,
             pit_divisor,
-            pit_read_msb,
-            pit_mode,
-            pit_write_msb,
+            pit2,
+            ppi_b,
             pit0_divisor,
             pit0_write_msb,
             pit0_read_msb,
@@ -182,7 +181,7 @@ impl Bus {
         w.section(b"CORE", CORE_VERSION, |w| {
             save_all!(w;
                 keyboard_buffer, kbd, kbc, a20_mask, cmos,
-                pit_divisor, pit_read_msb, pit_mode, pit_write_msb,
+                pit_divisor, pit2, ppi_b,
                 pit0_divisor, pit0_write_msb, pit0_read_msb, pit0_access, pit0_latched, pit0_latched_active,
                 pit0, clock, pic, dma, joystick,
                 dta_segment, dta_offset, search_handles, search_serial, cursor_x, cursor_y,
@@ -318,9 +317,8 @@ impl Bus {
             a20_mask,
             cmos,
             pit_divisor,
-            pit_read_msb,
-            pit_mode,
-            pit_write_msb,
+            pit2,
+            ppi_b,
             pit0_divisor,
             pit0_write_msb,
             pit0_read_msb,
@@ -439,7 +437,7 @@ impl Bus {
         let mut section = r.section(b"CORE", CORE_VERSION)?;
         load_all!(&mut section;
             keyboard_buffer, kbd, kbc, a20_mask, cmos,
-            pit_divisor, pit_read_msb, pit_mode, pit_write_msb,
+            pit_divisor, pit2, ppi_b,
             pit0_divisor, pit0_write_msb, pit0_read_msb, pit0_access, pit0_latched, pit0_latched_active,
             pit0, clock, pic, dma, joystick,
             dta_segment, dta_offset, search_handles, search_serial, cursor_x, cursor_y,

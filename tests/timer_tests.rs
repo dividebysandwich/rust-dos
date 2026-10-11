@@ -568,3 +568,203 @@ fn bios_wait_passes_emulated_time_with_interrupts_enabled() {
     assert!((20_000..25_000).contains(&waited), "waited {} us", waited);
     assert!(!cpu.get_cpu_flag(CpuFlags::CF));
 }
+
+#[test]
+fn an_adlib_delay_reads_channel_2_down() {
+    // Bloodnet's AdLib driver waits after each register write by reading
+    // channel 2 in mode 4: the LSB, then MSB and LSB pairs until the LSB
+    // has dropped by more than 4.
+    let mut bus = bus_at(20_000);
+    bus.io_write(0x43, 0xB8);
+    let ppi = bus.io_read(0x61);
+    bus.io_write(0x61, ppi | 1);
+    bus.io_write(0x42, 0);
+    bus.io_write(0x42, 0);
+    let start = bus.clock.now_ticks();
+    let first = bus.io_read(0x42);
+    for reads in 0.. {
+        assert!(reads < 1000, "the wait doesn't end");
+        bus.io_read(0x42);
+        let lsb = bus.io_read(0x42);
+        bus.clock.icount += 4;
+        if first.wrapping_sub(lsb) > 4 {
+            break;
+        }
+    }
+    assert!(bus.clock.now_ticks() - start >= 5);
+}
+
+#[test]
+fn channel_2_square_wave_follows_its_gate() {
+    let mut bus = bus_at(1000);
+    let out = |bus: &mut Bus| bus.io_read(0x61) & 0x20 != 0;
+    // A tone of 1000 ticks with the gate high: the output is high for the
+    // first 500 ticks, low for the next.
+    bus.io_write(0x61, 0x01);
+    bus.io_write(0x43, 0xB6);
+    bus.io_write(0x42, 0xE8);
+    bus.io_write(0x42, 0x03);
+    assert!(out(&mut bus));
+    bus.clock.icount += 600; // about 716 ticks
+    assert!(!out(&mut bus));
+    // The gate low forces it high and stops the count; up again, the
+    // period starts over.
+    bus.io_write(0x61, 0x00);
+    assert!(out(&mut bus));
+    bus.io_write(0x43, 0x80);
+    let held = bus.io_read(0x42) as u16 | (bus.io_read(0x42) as u16) << 8;
+    bus.clock.icount += 300;
+    bus.io_write(0x43, 0x80);
+    let later = bus.io_read(0x42) as u16 | (bus.io_read(0x42) as u16) << 8;
+    assert_eq!(held, later);
+    bus.io_write(0x61, 0x01);
+    assert!(out(&mut bus));
+    bus.io_write(0x43, 0x80);
+    let restarted = bus.io_read(0x42) as u16 | (bus.io_read(0x42) as u16) << 8;
+    assert!(restarted > 990, "{}", restarted);
+}
+
+#[test]
+fn channel_2_mode_1_waits_for_the_gate() {
+    let mut bus = bus_at(1000);
+    let out = |bus: &mut Bus| bus.io_read(0x61) & 0x20 != 0;
+    bus.io_write(0x61, 0x00);
+    // Mode 1, count 100: nothing happens until the gate rises.
+    bus.io_write(0x43, 0xB2);
+    bus.io_write(0x42, 100);
+    bus.io_write(0x42, 0);
+    bus.clock.icount += 1000;
+    assert!(out(&mut bus));
+    bus.io_write(0x61, 0x01);
+    assert!(!out(&mut bus));
+    bus.clock.icount += 200; // about 239 ticks
+    assert!(out(&mut bus));
+    // Another rising edge fires it again.
+    bus.io_write(0x61, 0x00);
+    bus.io_write(0x61, 0x01);
+    assert!(!out(&mut bus));
+}
+
+/// Where the channel 2 program keeps its results, in its segment.
+const PIT2_TICKS: u16 = 0x400;
+const PIT2_FRESH: u16 = 0x402;
+const PIT2_HELD: u16 = 0x404;
+const PIT2_OUT_HELD: u16 = 0x406;
+
+/// A COM program timing 50 ms twenty times on PIT channel 2 as Memtest86+'s
+/// `cpuspeed()` and Linux's TSC calibration do: gate high, speaker off,
+/// count 59659 in mode 0, then poll port 61h bit 5 until the output goes
+/// high at terminal count. It keeps the BIOS ticks the twenty waits took,
+/// then a count of FFFFh latched just after it was written, and one of
+/// 1000h latched with the gate low (with the output then).
+fn pit2_program() -> Vec<u8> {
+    use iced_x86::code_asm::*;
+    let mut a = CodeAssembler::new(16).unwrap();
+    let asm = |a: &mut CodeAssembler| -> Result<(), IcedError> {
+        a.mov(ax, 0x40)?;
+        a.mov(es, ax)?;
+        let mut sync = a.create_label();
+        a.mov(bx, word_ptr(0x6C).es())?;
+        a.set_label(&mut sync)?;
+        a.cmp(bx, word_ptr(0x6C).es())?;
+        a.je(sync)?;
+        a.mov(bx, word_ptr(0x6C).es())?;
+        a.mov(si, 20)?;
+        let mut measure = a.create_label();
+        let mut poll = a.create_label();
+        a.set_label(&mut measure)?;
+        a.in_(al, 0x61)?;
+        a.and(al, 0xFD)?;
+        a.or(al, 1)?;
+        a.out(0x61, al)?;
+        a.mov(al, 0xB0)?;
+        a.out(0x43, al)?;
+        a.mov(al, 0x0B)?;
+        a.out(0x42, al)?;
+        a.mov(al, 0xE9)?;
+        a.out(0x42, al)?;
+        a.set_label(&mut poll)?;
+        a.in_(al, 0x61)?;
+        a.test(al, 0x20)?;
+        a.jz(poll)?;
+        a.dec(si)?;
+        a.jnz(measure)?;
+        a.mov(ax, word_ptr(0x6C).es())?;
+        a.sub(ax, bx)?;
+        a.mov(word_ptr(PIT2_TICKS), ax)?;
+        // A fresh count reads back from where it starts.
+        a.mov(al, 0xB0)?;
+        a.out(0x43, al)?;
+        a.mov(al, 0xFF)?;
+        a.out(0x42, al)?;
+        a.out(0x42, al)?;
+        a.mov(al, 0x80)?;
+        a.out(0x43, al)?;
+        a.in_(al, 0x42)?;
+        a.mov(byte_ptr(PIT2_FRESH), al)?;
+        a.in_(al, 0x42)?;
+        a.mov(byte_ptr(PIT2_FRESH + 1), al)?;
+        // With the gate low, the count holds and the output stays low.
+        a.in_(al, 0x61)?;
+        a.and(al, 0xFC)?;
+        a.out(0x61, al)?;
+        a.mov(al, 0xB0)?;
+        a.out(0x43, al)?;
+        a.mov(al, 0x00)?;
+        a.out(0x42, al)?;
+        a.mov(al, 0x10)?;
+        a.out(0x42, al)?;
+        a.mov(cx, 5000)?;
+        let mut idle = a.create_label();
+        a.set_label(&mut idle)?;
+        a.loop_(idle)?;
+        a.mov(al, 0x80)?;
+        a.out(0x43, al)?;
+        a.in_(al, 0x42)?;
+        a.mov(byte_ptr(PIT2_HELD), al)?;
+        a.in_(al, 0x42)?;
+        a.mov(byte_ptr(PIT2_HELD + 1), al)?;
+        a.in_(al, 0x61)?;
+        a.mov(byte_ptr(PIT2_OUT_HELD), al)?;
+        // The gate up again, it runs out.
+        a.or(al, 1)?;
+        a.out(0x61, al)?;
+        let mut out = a.create_label();
+        a.set_label(&mut out)?;
+        a.in_(al, 0x61)?;
+        a.test(al, 0x20)?;
+        a.jz(out)?;
+        a.mov(ax, 0x4C2A)?;
+        a.int(0x21)
+    };
+    asm(&mut a).unwrap();
+    let mut image = a.assemble(0x100).unwrap();
+    image.resize(0x500 - 0x100, 0);
+    image
+}
+
+#[test]
+fn pit_channel_2_times_a_calibration_loop() {
+    use rust_dos::exec::{NoHook, StopReason, run_batch};
+    let dir = std::path::PathBuf::from("target/test_timer/pit2");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("T.COM"), pit2_program()).unwrap();
+    let mut cpu = Cpu::new(dir);
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.COM", None));
+    cpu.bus.set_cycles_per_ms(20_000);
+    let psp = cpu.current_psp as usize;
+    let ended = (0..2000).any(|_| {
+        cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
+        run_batch(&mut cpu, &mut NoHook, false) == StopReason::ShellReloaded
+    });
+    assert!(ended, "the program didn't end");
+    assert_eq!(cpu.errorlevel, 0x2A);
+    let word = |offset: u16| cpu.bus.read_16(psp * 16 + offset as usize);
+    // Twenty times 50 ms is a second: 18.2 BIOS ticks.
+    assert!((17..=19).contains(&word(PIT2_TICKS)), "{} ticks", word(PIT2_TICKS));
+    assert!(word(PIT2_FRESH) >= 0xFF00, "{:04X}", word(PIT2_FRESH));
+    assert_eq!(word(PIT2_HELD), 0x1000);
+    assert_eq!(word(PIT2_OUT_HELD) & 0x20, 0);
+}

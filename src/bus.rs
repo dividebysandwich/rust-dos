@@ -185,11 +185,16 @@ pub struct Bus {
     /// The game port at 201h and the joysticks on it (see joystick.rs).
     pub joystick: crate::joystick::GamePort,
     pub audio_device: Option<Box<dyn crate::audio::AudioOutput>>,
-    pub speaker_on: bool,    // Is the speaker playing?
-    pub pit_divisor: u16,    // Current Frequency Divisor
-    pub pit_read_msb: bool,  // Channel 2 read LSB/MSB toggle
-    pub pit_mode: u8,        // PIT Command Mode
-    pub pit_write_msb: bool, // Toggle to handle 2-byte writes (LSB/MSB)
+    /// Whether the speaker plays channel 2's square wave: port 61h bits 0
+    /// (the gate) and 1 (speaker data) both set.
+    pub speaker_on: bool,
+    /// Channel 2's last complete count, the speaker's tone divisor.
+    pub pit_divisor: u16,
+    /// PIT channel 2: its counter, gate and output.
+    pub pit2: crate::timer::Pit2,
+    /// The low four bits last written to port 61h, which reads give back:
+    /// channel 2's gate, speaker data, and the parity and I/O check enables.
+    pub ppi_b: u8,
     /// Channel 0 count register as assembled from port 0x40 writes. A
     /// complete count is handed to `pit0`.
     pub pit0_divisor: u16,
@@ -432,9 +437,8 @@ impl Bus {
             audio_device: None,
             speaker_on: false,
             pit_divisor: 0xFFFF,
-            pit_mode: 0,
-            pit_write_msb: false,
-            pit_read_msb: false,
+            pit2: crate::timer::Pit2::new(),
+            ppi_b: 0x01,
             pit0_divisor: 0xFFFF,
             pit0_write_msb: false,
             pit0_read_msb: false,
@@ -1717,10 +1721,9 @@ impl Bus {
         self.write_32(addr + 4, (value >> 32) as u32);
     }
 
-    /// PIT channel 2's output: a square wave at the programmed frequency.
+    /// PIT channel 2's output, port 61h bit 5.
     fn pit2_output(&self) -> bool {
-        let divisor = if self.pit_divisor == 0 { 0x10000u64 } else { self.pit_divisor as u64 };
-        self.clock.now_ticks() % divisor < divisor / 2
+        self.pit2.output(self.clock.now_ticks())
     }
 
     /// Start an execution batch that runs until instruction `end`.
@@ -2588,29 +2591,19 @@ impl Bus {
                 }
             }
 
-            // PIT Channel 2 Data (Port 0x42)
-            // This sets the frequency.
-            // Frequency = 1,193,182 Hz / Divisor
+            // PIT channel 2's count. A complete one is the speaker's
+            // frequency divisor: 1,193,182 Hz / count.
             0x42 => {
                 if self.speaker_on {
                     self.audio_catch_up();
                 }
-                if !self.pit_write_msb {
-                    // Write LSB
-                    self.pit_divisor = (self.pit_divisor & 0xFF00) | (value as u16);
-                    self.pit_write_msb = true; // Next write will be MSB
-                } else {
-                    // Write MSB
-                    self.pit_divisor = (self.pit_divisor & 0x00FF) | ((value as u16) << 8);
-                    self.pit_write_msb = false; // Reset to LSB
-                    // println!("[PIT] Frequency Divisor Set to: {}", self.pit_divisor);
+                if let Some(count) = self.pit2.write(value, self.clock.now_ticks()) {
+                    self.pit_divisor = count;
                 }
             }
 
             // PIT Command Register (Port 0x43)
             0x43 => {
-                self.pit_mode = value;
-
                 // Extract the Channel bits (7-6)
                 // 00 = Channel 0, 01 = Channel 1, 10 = Channel 2
                 let channel = (value >> 6) & 0x03;
@@ -2625,6 +2618,8 @@ impl Bus {
                         self.pit0_latched = self.pit0.count(self.clock.now_ticks());
                         self.pit0_latched_active = true;
                         self.pit0_read_msb = false;
+                    } else if channel == 2 {
+                        self.pit2.control(value, self.clock.now_ticks());
                     }
                 } else {
                     match channel {
@@ -2637,7 +2632,7 @@ impl Bus {
                             self.pit0.set_mode((value >> 1) & 0x07, self.clock.now_ticks());
                             self.clock.schedule(self.next_event());
                         }
-                        2 => self.pit_write_msb = false, // Reset Channel 2 LSB/MSB
+                        2 => self.pit2.control(value, self.clock.now_ticks()),
                         _ => {}
                     }
                 }
@@ -2653,6 +2648,8 @@ impl Bus {
                     self.audio_catch_up();
                 }
                 self.speaker_on = enabled;
+                self.ppi_b = value & 0x0F;
+                self.pit2.set_gate(value & 0x01 != 0, self.clock.now_ticks());
             }
 
             // The FM chip: AdLib ports 388h/389h, and the OPL3's second
@@ -2908,30 +2905,9 @@ impl Bus {
                 }
             }
 
-            // Port 0x42 — PIT channel 2 (PC speaker tone) data. Some games
-            // read this port as a cheap free-running counter for tight
-            // timing loops ("wait until count < threshold"), independent of
-            // whether they ever use the speaker. Returning a constant would
-            // hang those loops, so we synthesize the current count from the
-            // active divisor and emulated time, matching real hardware's
-            // 1.193 MHz tick rate.
-            0x42 => {
-                let divisor = if self.pit_divisor == 0 {
-                    0x10000u32
-                } else {
-                    self.pit_divisor as u32
-                };
-                let ticks = self.clock.now_ticks();
-                let rem = (ticks % divisor as u64) as u32;
-                let count = ((divisor - 1 - rem) & 0xFFFF) as u16;
-                if !self.pit_read_msb {
-                    self.pit_read_msb = true;
-                    (count & 0xFF) as u8
-                } else {
-                    self.pit_read_msb = false;
-                    (count >> 8) as u8
-                }
-            }
+            // Port 0x42: PIT channel 2's count (or the latched one), which
+            // programs read as a counter for short delays and calibration.
+            0x42 => self.pit2.read(self.clock.now_ticks()),
 
             // Port 0x60 — Keyboard data port. Real hardware latches the
             // last-received scan code here; programs either read this from
@@ -2973,13 +2949,11 @@ impl Bus {
                 value
             }
 
-            // Read PPI Port B: speaker gate and data, the DRAM refresh
-            // request (bit 4, toggles), and the PIT channel 2 output (bit 5).
+            // Read PPI Port B: the bits written (speaker gate and data, the
+            // check enables), the DRAM refresh request (bit 4, toggles), and
+            // the PIT channel 2 output (bit 5).
             0x61 => {
-                let mut val = 0;
-                if self.speaker_on {
-                    val |= 0x03;
-                }
+                let mut val = self.ppi_b;
                 self.refresh_toggle = !self.refresh_toggle;
                 if self.refresh_toggle {
                     val |= 0x10;
