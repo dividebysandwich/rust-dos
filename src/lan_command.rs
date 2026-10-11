@@ -375,8 +375,8 @@ fn show(cpu: &mut Cpu) {
             };
             print_line(cpu, &format!("Serial: COM{} {}", port + 1, link));
         }
-        if let Some(port) = serial.listening {
-            print_line(cpu, &format!("The modem takes calls on TCP port {}", port));
+        if let Some(addr) = serial.listening {
+            print_line(cpu, &format!("The modem takes calls on {}", crate::serial::describe_listen(addr)));
         }
     }
 }

@@ -340,8 +340,9 @@ curl -s "$H/api/journal?after=$S&type=paused&wait=30000"   # long poll for the n
   changed it, no operation is under way, no input is being typed, the
   settings window is closed and Alt+F11 isn't rewinding. Otherwise the reply is 409 with
   `"precondition":"state"`. Read with `GET /api/memory` (its
-  `X-Debug-State-Seq`), then write with `If-State-Seq`; the write's reply
-  has the new `state_seq` for the next one. Every refused precondition
+  `X-Debug-State-Seq` header, in every format, or `state_seq` in the body
+  with `format=json` or `format=base64`), then write with `If-State-Seq`;
+  the write's reply has the new `state_seq` for the next one. Every refused precondition
   (deterministic mode's `paused`, strict match's `quiescent`, `state`) has
   the same body: `error`, `precondition`, `paused`, `stop_seq`,
   `state_seq`, `pending_ops`, `input_queued` and `settings_window`.
@@ -363,6 +364,13 @@ curl -s "$H/api/journal?after=$S&type=paused&wait=30000"   # long poll for the n
   and `cause`.
 - **Instance:** `/api/version` has `instance`, which is new at every
   start. A journal from another instance numbers its entries anew.
+- **Build:** `/api/version` and the journal's `started` entry have
+  `build: {"commit", "commit_short", "dirty"}`: the git commit the program
+  was built from, and `dirty: true` when a tracked file differed from it.
+  `version` stays the same between releases, so record `build` to tell
+  which source a session ran. All three are null when the program was
+  built outside a git checkout (a crate tarball, a copied tree, no git).
+  `rust-dos --version` prints the same commit.
 - **Quit:** `POST /api/control/quit` turns the emulator off. The journal
   ends with `shutdown`, which long polls and streams get before the
   connection closes, and the process exits with code 0.
@@ -373,7 +381,16 @@ curl -s "$H/api/journal?after=$S&type=paused&wait=30000"   # long poll for the n
   `PUT /api/registers {"ax":"1234","flags":"0246"}`. Strings are hex; JSON
   numbers are decimal.
 - **Memory:**
-  - Read with `GET /api/memory?addr=B800:0000&len=160`.
+  - Read with `GET /api/memory?addr=B800:0000&len=160`. `format` picks the
+    reply: `hex` (the default) is a text dump in DEBUG's layout, `json` is
+    `{"addr","len","hex":"41 1F ..."}` with the bytes in the form `PUT`
+    takes, `base64` is `{"addr","len","base64"}`, and `raw` is the bytes as
+    `application/octet-stream`. The JSON formats have `state_seq` in the
+    body; every format has it in the `X-Debug-State-Seq` header, which is
+    what `If-State-Seq` on the next write wants. Their `addr` is the linear
+    address (physical only when the request gave a bare address), and a
+    bare address in `PUT` is physical, so with paging on write back to the
+    `addr` the read was given, not the one in the reply.
   - Write with `PUT /api/memory {"addr":"1000:0200","hex":"90 90"}`. Writes
     also invalidate the decoded-instruction cache, so patching code works.
     The reply has the bytes the write replaced (`old`) and what reads back

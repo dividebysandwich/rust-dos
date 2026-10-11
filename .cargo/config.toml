@@ -1,0 +1,4 @@
+[alias]
+# The tests without those that open a socket on all interfaces, for a
+# desktop whose firewall asks about each one (see Cargo.toml).
+test-local = "test --features skip-host-network-tests"
