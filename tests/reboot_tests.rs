@@ -117,6 +117,39 @@ fn port_cf9_reboots_dos() {
 }
 
 #[test]
+fn a_pci_probe_does_not_reboot() {
+    // Linux's pci_check_type1() and Memtest86+'s PCI probe: set CFBh to 1,
+    // read the configuration address at CF8h, write 80000000h, read it
+    // back, then write back the value read first. Without a PCI bus that
+    // is FFFFFFFFh, a doubleword write that must not reach CF9h.
+    const PROBE: &[u8] = &[
+        0xBA, 0xFB, 0x0C, // MOV DX, 0CFBh
+        0xB0, 0x01, // MOV AL, 1
+        0xEE, // OUT DX, AL
+        0xBA, 0xF8, 0x0C, // MOV DX, 0CF8h
+        0x66, 0xED, // IN EAX, DX
+        0x66, 0x89, 0xC3, // MOV EBX, EAX
+        0x66, 0xB8, 0x00, 0x00, 0x00, 0x80, // MOV EAX, 80000000h
+        0x66, 0xEF, // OUT DX, EAX
+        0x66, 0xED, // IN EAX, DX
+        0x66, 0x89, 0xD8, // MOV EAX, EBX
+        0x66, 0xEF, // OUT DX, EAX
+        0xCD, 0x20, // INT 20h
+    ];
+    let dir = scratch(
+        "pciprobe",
+        &[("TSR.COM", TSR), ("PROBE.COM", PROBE), ("AUTOEXEC.BAT", b"@echo off\r\nset BOOTED=%BOOTED%x\r\necho booted %BOOTED%\r\n")],
+    );
+    let mut cpu = machine(&dir);
+    settle(&mut cpu);
+    cpu.queue_batch_lines(["PROBE", "echo probed"]);
+    settle(&mut cpu);
+    let text = screen(&cpu);
+    assert!(text.contains("probed"), "{}", text);
+    assert!(!text.contains("booted xx"), "the machine rebooted: {}", text);
+}
+
+#[test]
 fn ctrl_alt_del_reboots_dos() {
     let dir = scratch("ctrlaltdel", &[("TSR.COM", TSR), ("AUTOEXEC.BAT", b"@echo off\r\nset BOOTED=%BOOTED%x\r\necho booted %BOOTED%\r\n")]);
     let mut cpu = machine(&dir);
