@@ -884,9 +884,12 @@ impl Cpu {
     /// shell), rather than a PSP a program made itself (INT 21h AH=26h or
     /// 55h), as Windows does its tasks'.
     pub fn started_by_exec(&mut self, psp: u16) -> bool {
-        if self.exec_context(psp).is_some() {
-            return true;
-        }
+        self.exec_context(psp).is_some() || self.started_by_shell(psp)
+    }
+
+    /// Whether the shell started the process `psp`: its PSP names no
+    /// parent (16h is 0, or its own segment).
+    fn started_by_shell(&mut self, psp: u16) -> bool {
         let parent = self.bus.guest_read_16(psp as u32 * 16 + 0x16);
         psp == 0 || parent == 0 || parent == psp
     }
@@ -936,17 +939,21 @@ impl Cpu {
     /// End the current process: back to the parent's context, returning
     /// through the terminate address in the process's PSP (0Ah), which
     /// EXEC set to the parent's return address and debuggers change. The
-    /// parent's stack holds the interrupt frame the return pops.
+    /// parent's stack holds the interrupt frame the return pops. Returns
+    /// false when no parent's context is kept, as for a process the shell
+    /// started, which the caller ends by loading the shell again.
     pub fn return_to_parent(&mut self) -> bool {
         let psp = self.current_psp;
         let base = psp as u32 * 16;
         let terminate = (self.bus.guest_read_16(base + 0x0A), self.bus.guest_read_16(base + 0x0C));
         let Some(index) = self.exec_context(psp) else {
-            self.bus.log_string(if self.process_stack.is_empty() {
-                "[CPU] Restore Failed: Stack Empty"
-            } else {
-                "[CPU] Restore Failed: no parent's context for the process"
-            });
+            // A process the shell started has none, and the caller loads
+            // the shell again for it (`terminate`, INT 21h AH=31h), even
+            // with contexts kept: a debugger's child that EXEC AL=01h
+            // loaded and that never ran.
+            if !self.started_by_shell(psp) {
+                self.bus.log_string("[CPU] Restore Failed: no parent's context for the process");
+            }
             return false;
         };
         // Contexts kept after it are those of other virtual machines'
@@ -1836,9 +1843,21 @@ impl Cpu {
         let reloc_count = u16::from_le_bytes([bytes[6], bytes[7]]) as usize;
         let reloc_offset = u16::from_le_bytes([bytes[24], bytes[25]]) as usize;
 
+        // Bound extenders keep data after the MZ load module, which they
+        // read themselves. As in load_exe, only copy the bytes the header
+        // counts; loading the whole file can overwrite the caller's memory.
+        let pages = u16::from_le_bytes([bytes[4], bytes[5]]) as usize;
+        let last_page = u16::from_le_bytes([bytes[2], bytes[3]]) as usize;
+        let module_len = match (pages, last_page) {
+            (0, _) => bytes.len(),
+            (p, 0) => p * 512,
+            (p, l) => (p - 1) * 512 + l,
+        };
+        let image_end = module_len.clamp(header_size, bytes.len());
+
         // Copy image bytes directly at load_segment:0000 — no PSP, no offset.
         let image_phys = self.get_physical_addr(load_segment, 0) as u32;
-        self.bus.guest_write_bytes(image_phys, &bytes[header_size..]);
+        self.bus.guest_write_bytes(image_phys, &bytes[header_size..image_end]);
 
         // Apply relocations: each entry is (offset, segment); the 16-bit word
         // at (load_segment + segment):offset gets `reloc_factor` added to it.

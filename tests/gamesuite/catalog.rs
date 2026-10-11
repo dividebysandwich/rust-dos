@@ -632,7 +632,8 @@ fn early() -> Vec<Scenario> {
 }
 
 /// Jill's own configuration questions: the Sound Blaster's when it finds
-/// one, the keyboard, and the graphics (`video`: c, e or v).
+/// one, and the graphics (`video`: c, e or v). Without a controller on the
+/// game port it doesn't ask for keyboard or joystick.
 fn jill_play(has_sb: bool, video: &'static str) -> Vec<Step> {
     let mut steps = vec![WaitFor(Cond::Text("to configure"), 10000), Type("c")];
     {
@@ -644,8 +645,6 @@ fn jill_play(has_sb: bool, video: &'static str) -> Vec<Step> {
         ]);
     }
     steps.extend([
-        WaitFor(Cond::Text("K)eyboard"), 5000),
-        Type("k"),
         WaitFor(Cond::Text("C)ga E)ga V)ga?"), 5000),
         Type(video),
         Wait(2500),

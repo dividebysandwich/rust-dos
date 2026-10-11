@@ -1,8 +1,8 @@
 setup 7a4bd5d60637bf538196754e
 apogee b21399d36a67c24240cbd337
-apogee-sound 563f1afd98fd240364f873ca
+apogee-sound 4867f96e19576afc55e7bbb4
 cygnus 19ee81312ea17a062bcbdf00
 intro 46b82de11487dec3c9ad3c2e
-intro-sound 47701afc68313b05c5edc1b6
+intro-sound 75d46e72667c9331749da268
 menu 46b82de11487dec3c9ad3c2e
 new-mission c374e71dfe7e8472f8ce9867

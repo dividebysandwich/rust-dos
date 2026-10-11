@@ -17,14 +17,13 @@
 //! is listed with the reason. A device added to the machine has to be
 //! added to the run, or listed.
 
-use super::{Cmd, Coords, DebugHub, InputEvent, MouseAction, Reply, Request};
+use super::{Cmd, Coords, DebugHub, InputEvent, MouseAction, Reply};
 use crate::cpu::Cpu;
 use iced_x86::code_asm::*;
 use rust_dos::deterministic::Deterministic;
 use std::collections::BTreeSet;
 use std::ops::Range;
 use std::path::Path;
-use tokio::sync::oneshot;
 
 #[path = "../../tests/cdimage/mod.rs"]
 mod cdimage;
@@ -1081,9 +1080,9 @@ fn machine(name: &str) -> (Cpu, DebugHub, Deterministic) {
     let cdrom = rust_dos::disk::MountOptions { kind: rust_dos::disk::DriveKind::CdRom, ..Default::default() };
     cpu.bus.mount_drive(4, &dir.join("cdfolder"), cdrom, false).unwrap();
     cpu.load_shell();
-    let mut hub = DebugHub::new(Some(std::sync::mpsc::channel().1), None, 1000);
+    let mut hub = DebugHub::for_tests(&cpu);
     hub.deterministic = Some(mode.start);
-    hub.pause_at_start();
+    hub.pause_at_start(&cpu);
     (cpu, hub, mode)
 }
 
@@ -1174,9 +1173,9 @@ impl Snapshot {
 }
 
 fn reply(cpu: &mut Cpu, hub: &mut DebugHub, cmd: Cmd) {
-    let (reply, mut rx) = oneshot::channel();
-    hub.handle(cpu, Request { cmd, reply });
-    match rx.try_recv() {
+    let (request, mut rx) = hub.request(cmd);
+    hub.handle(cpu, request);
+    match rx.try_recv().map(|a| a.reply) {
         Ok(Reply::Json(_)) => {}
         Ok(Reply::Error(code, e)) => panic!("{}: {}", code, e),
         Ok(Reply::ErrorJson(code, v)) => panic!("{}: {}", code, v),

@@ -28,9 +28,32 @@ until curl -sf localhost:8086/api/status >/dev/null; do sleep 0.2; done
 - **Port conflict:** if port 8086 is in use, the emulator exits at startup
   with a `cannot bind` error. Kill the old instance (`kill $(pgrep -x rust-dos)`)
   or pass `--debug-server 127.0.0.1:<port>`.
+- **Free port:** `--debug-server 127.0.0.1:0` lets the system pick a free
+  port. The emulator prints the address it got on stdout, as
+  `[DEBUG] Debug server listening on http://127.0.0.1:<port>/`. Use this to
+  run several instances side by side, or when 8086 may be taken:
+
+  ```sh
+  : > rust-dos.out
+  SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+    ./target/release/rust-dos --no-config -d /path/to/dos/files \
+    --debug-server 127.0.0.1:0 > rust-dos.out &
+  until H=$(grep -om1 '127\.0\.0\.1:[0-9][0-9]*' rust-dos.out) &&
+        curl -sf $H/api/status >/dev/null; do
+    kill -0 $! 2>/dev/null || { echo 'rust-dos exited'; break; }
+    sleep 0.2
+  done
+  ```
+
+  The address line prints before the emulator starts answering requests,
+  so the loop also waits for `/api/status`. Emptying `rust-dos.out` first
+  keeps the loop from reading a port left there by an earlier run, and
+  from failing to find the file before the shell creates it.
 - **Output:** the emulator log doesn't go to stdout. It goes to
   `rust-dos.log` in the per-user config directory, replaced on every start.
-  Read it through `/api/log` instead, which can filter it.
+  Read it through `/api/log` instead, which can filter it. When running
+  several instances, give each its own file with `--log FILE`, or they
+  replace each other's log.
 
 All examples below use `H=localhost:8086` and `J='-H content-type:application/json'`.
 
@@ -223,8 +246,9 @@ Set the breakpoint before triggering the code path, then wait for it:
 
 ```sh
 curl -s $J -XPOST -d '{"addr":"1000:010B"}' $H/api/breakpoints
+S=$(curl -s $H/api/status | jq .seq)            # the journal's last entry
 curl -s $J -XPOST -d '{"key":"q"}' "$H/api/input/key?wait=false"
-curl -s "$H/api/control/wait?timeout_ms=10000"   # returns registers when the breakpoint hits
+curl -s "$H/api/control/wait?after=$S&timeout_ms=10000"   # the first stop after it, with the registers
 curl -s "$H/api/disasm?count=10"                 # "=>" marks CS:IP, "*" marks breakpoints
 curl -s "$H/api/memory?addr=DS:SI&len=64"
 curl -s $J -XPOST -d '{"count":5}' $H/api/control/step
@@ -235,13 +259,20 @@ curl -s -XPOST $H/api/control/resume
 - **Why `wait=false`:** use it for input that should trigger a breakpoint.
   Otherwise the input call can block until it times out, because the
   emulator stops at the breakpoint before all of the input is delivered.
+- **Why `after=`:** `/api/control/wait` without it answers with the stop
+  the machine is in, or the next one, so a stop that came before the wait
+  arrived is missed while the machine runs on. With `after=S` it answers
+  with the first stop after journal entry S, at once if there is one. See
+  "The journal" below.
+- **A breakpoint for one stop:** `{"addr":"1000:010B","once":true}` goes
+  once it stops the machine. The stop has `"breakpoint"` and `"once":true`.
 - **Run to an address:** `POST /api/control/resume {"until":"1000:0120"}`
   runs to that address once, without adding a permanent breakpoint.
 - **Step over:** `POST /api/control/step_over` runs a `CALL`, `INT`, `LOOP`
   or `REP` string instruction through to the instruction after it, and
   steps any other instruction. It replies when the machine stops there; a
-  call that never returns times the request out and leaves the machine
-  running.
+  call that never returns times the request out (504, with the `op` to go
+  on waiting on) and leaves the machine running.
 - **Stepping and interrupts:** a hardware interrupt that is due is taken
   before the next instruction. A step can then run the emulator's handler
   (an `FE 38` trap, which returns at once) and report the same CS:IP.
@@ -255,6 +286,80 @@ curl -s -XPOST $H/api/control/resume
 - **If a wait times out,** the breakpoint wasn't hit. Check
   `/api/breakpoints` and `/api/status`, and whether the program was loaded
   at a different segment.
+
+### The journal: what happened, in order
+
+The debug server keeps a numbered record of what the machine and the
+debugger did: every stop, resume, program start and end, input delivered,
+memory and register write, breakpoint change, mount, save and load, speed
+change and the shutdown. A script, a test harness or an agent reads it to
+tie a stop to the request that caused it, to catch stops that came before
+it asked, and to go on after a dropped connection.
+
+```sh
+curl -s "$H/api/journal?after=0&limit=50"
+curl -s "$H/api/journal?after=$S&type=paused&wait=30000"   # long poll for the next stop
+```
+
+- **Entries** have `seq` (1, 2, 3 ... with no gaps), `type`, `t_ms` (host
+  time since start), `icount`, `emu_ns` (emulated time), `cause` (the
+  request that did it, null for the machine or the window), `request_id`
+  (that request's `X-Request-Id`) and `op` (the control request under way),
+  then their own fields. A `paused` entry has what the stop's reply has:
+  `reason`, `registers`, `cs_ip`, `breakpoint`, `watch`, `program`, `exit`
+  and so on. `/api` lists the types.
+- **Requests have numbers.** Every response has `X-Debug-Req`, and JSON
+  object bodies `"req"`. Send `X-Request-Id: <your label>` (up to 128
+  printable ASCII characters) to find your requests' entries by it. Answers
+  from the machine have `state_seq` (the last entry that changed the
+  machine), `stop_seq` (the stop it is in, or null), and, when the request
+  appended entries, `seq`.
+- **Operations.** `resume`, `step`, `step_over`, `run`, `reboot`,
+  `reboot_shell` and input requests start an operation named by the
+  request's number (`"op"` in the reply). `GET /api/ops/N?wait=30000` tells
+  how it ended: `stopped` (with the stop), `done` (input delivered, or a
+  `run` whose program started), `failed`, `superseded` (another control
+  request took over, `superseded_by`; a superseded `run` no longer stops
+  at its program's entry) or `cancelled`. `step`, `step_over`
+  and `run` wait for their operation, unless the body has `"wait":false`
+  (then 202 with `op`). `GET /api/control/wait?op=N` waits for one too.
+  The latest 1024 ended operations are kept, an older one reads as 410;
+  one still pending is kept until it ends. With 1024 input requests still
+  being typed, the next is refused with 429.
+- **Who stopped it:** a stop by `POST /api/control/pause` has `by`, the
+  pause's number, so a client whose resume another client ended can tell.
+- **Change only what you read.** `If-State-Seq: N` on a request (or
+  `"if_state_seq":N` in a `/ws/input` message) carries it out only while
+  the machine is still paused in the state of entry N: no entry since then
+  changed it, no operation is under way, no input is being typed, the
+  settings window is closed and Alt+F11 isn't rewinding. Otherwise the reply is 409 with
+  `"precondition":"state"`. Read with `GET /api/memory` (its
+  `X-Debug-State-Seq`), then write with `If-State-Seq`; the write's reply
+  has the new `state_seq` for the next one. Every refused precondition
+  (deterministic mode's `paused`, strict match's `quiescent`, `state`) has
+  the same body: `error`, `precondition`, `paused`, `stop_seq`,
+  `state_seq`, `pending_ops`, `input_queued` and `settings_window`.
+- **Streams that go on.** `ws://$H/ws/events?after=S` sends the entries
+  after S, then new ones as they come, with no gap and no repeat; reconnect
+  with the last `seq` seen. Log lines and video mode changes come too
+  unless `volatile=false` (`log_after=N` replays the log lines after line
+  N). If entries after S were dropped from the ring (it keeps 4096), the
+  first message is `{"type":"gone","first":F}`, and `/api/journal` answers
+  410 unless `allow_gap=true`. So does `GET /api/control/wait?after=S`,
+  whose stop may be among them. An `after` past the last entry is a 400
+  with `last` and `instance`: it is a cursor from another instance.
+- **Headers once.** `X-Request-Id` or `If-State-Seq` sent twice is a 400.
+  `If-State-Seq` on a request the server answers itself (the journal,
+  `/api/ops`, `/api/log`, `/api/version`, waits with `after` or `op`, the
+  page and the streams) is a 400 too.
+- **Log lines** in `/api/log` have `n` (their number; `after_n=N&wait=MS`
+  pages and long-polls from there), `at` (the journal's last entry then)
+  and `cause`.
+- **Instance:** `/api/version` has `instance`, which is new at every
+  start. A journal from another instance numbers its entries anew.
+- **Quit:** `POST /api/control/quit` turns the emulator off. The journal
+  ends with `shutdown`, which long polls and streams get before the
+  connection closes, and the process exits with code 0.
 
 ### Inspect or patch state
 
@@ -306,60 +411,235 @@ them. At the DOS prompt, the `MOUNT` and `IMGMOUNT` commands do the same.
 
 `POST /api/state/save {"path":"/abs/before-boss.state"}` saves the whole
 machine to a file, and `POST /api/state/load` with the same body goes back
-to it, as the Ctrl+F1 and Ctrl+F2 slots do. Save before a step that is
-slow to reach (a menu path, a level) and load to try it again. Both work
-while the machine runs (at the end of a frame) or is paused. A load brings
-the hardware settings the state was saved with, and keeps the breakpoints
-and watchpoints, so you can set a breakpoint and load the same state again
-to hit it. When the state's hardware settings or media differ from the
-running machine's, the reply lists them in `differences`.
+to it. Save before a step that is slow to reach (a menu path, a level) and
+load to try it again. The files are the ones the Ctrl+F1 and Ctrl+F2 slots
+keep; the slots and the settings window's States page load them as a plain
+load does, without a reply to show `differences` in.
 
-A load that fails (400) leaves the machine, its settings and hardware as
-they were; the reply has `"loaded":false` and `"unchanged":true`.
+There are two kinds of save and load:
 
-Both replies have `format` (the file layout's version), `emulator` (this
-rust-dos's version) and the state's `header`: the rust-dos that saved it
-(`version`), when, the program, the hardware settings (`machine`) and its
-`media` (the mounted drives, their folders, and their disk and CD images'
-paths, sizes and, for a read-only image, a hash of its first 64 KiB).
-Every save records the media, so any state saved by this version can be
-loaded with a strict match later. A state saved before media were recorded
-has `"media":null`. The files and disk images on the host aren't part of a
-state: what a program wrote since stays written, except for a booted
-system's disks (see "Booted systems" below).
+- **Plain** (the default) is for trying things by hand. It works while the
+  machine runs, keeps the breakpoints so you can load again to hit one,
+  and loads a state of other hardware or media, listing what differs.
+- **Strict match** (`"strict_match":true` in the body) is for a script that
+  goes back to a checkpoint and has to know the machine there is the one
+  it saved. The load is refused unless the state's hardware settings and
+  media match the running machine's, and it starts the debugger afresh, so
+  nothing set before the load stops or types into the restored machine.
+  Both work only while paused. With `--deterministic`, a run from a
+  strict-match load repeats the run that saved the state (see
+  "Deterministic runs").
+
+Neither kind keeps the files on the host. A state records which folders
+and images the drives were mounted from, and a load mounts them again,
+but not what is in them: what a program wrote since stays written,
+except for a booted system's disks (see "Booted systems" below). A
+strict-match load checks the paths, that the images are there, and the
+size and start of read-only images (see "What counts as the same
+media").
+
+#### Plain save and load
+
+A plain save or load is carried out at the end of the frame, whether the
+machine runs or is paused (in deterministic mode a load waits for a pause,
+see "Deterministic runs"). A load puts in the hardware settings the state
+was saved with, then the machine, which mounts the drives as the state had
+them and unmounts the others; a state of another `memsize` is refused.
+Breakpoints, watchpoints and `break_on` stops stay, and keys held down
+through `/api/input` or the window go up.
+
+When the state's hardware settings, media or deterministic start time
+differ from the running machine's, the state is loaded all the same and
+the reply lists what was different in `differences`. Here D: was mounted
+and the speed set to 20000 after the save (paths shortened):
+
+```sh
+curl -s $J -XPOST -d '{"path":"/work/a.state"}' $H/api/state/load
+```
+
+```json
+{
+  "loaded": "/work/a.state",
+  "format": 1,
+  "emulator": "1.6.0",
+  "header": {
+    "version": "1.6.0",
+    "saved": "2026-10-11 02:22:06",
+    "game": null,
+    "game_name": null,
+    "program": "",
+    "machine": "",
+    "memsize": 16,
+    "emulated_ns": 23917375333,
+    "media": [
+      {"drive": "C", "kind": "hdd", "read_only": false, "folder": "/work/c"}
+    ]
+  },
+  "differences": [
+    "emulator.cycles: the state has the default, this machine has 20000",
+    "drive D: is mounted here (hdd /work/d); the state hasn't it"
+  ]
+}
+```
+
+After the load the machine runs at the state's speed (`auto`, the
+default) and D: is unmounted, as the state had it.
 
 #### Strict match
 
-A client that goes back to a known point of its session and needs the
-same machine and the same debugger there adds `"strict_match":true` to the
-save or load body. A strict-match save or load then works as follows:
+A strict-match save or load guarantees:
 
-- **Paused only.** Both are refused with 409 unless the machine is paused
-  (`POST /api/control/pause`) and no step or `run` command is still to
-  stop it. A save is also refused while queued input (`/api/input`, typed
-  text) is still being typed, which goes on while paused.
-- **Same hardware and media.** A load is refused with 409 and a
-  `differences` list when the state's hardware settings (`cpu`,
-  `machine`, `cycles`, the sound cards, EMS/UMB) or its media differ from
-  the running machine's, or the state has no record of its media. With
-  `--deterministic`, a state saved outside the mode or with another
-  `--start-time` differs too (`deterministic: ...`). Set the
-  speed with `/api/speed` or mount the drive again, then load.
-- **A fresh debugger.** A load clears the breakpoints, watchpoints and
-  `break_on` stops, a step-over's or `resume until` target, and queued
-  input; `/api/control/wait` and `run` requests still waiting get 409.
-  Keys held down through `/api/input` are forgotten without a key-up, so
-  the machine keeps the keyboard and mouse it was saved with. With
-  `--deterministic` it also drops a `resume`'s `until_ms` and input waiting
-  for its emulated time. The machine stays paused. The reply's
-  `debugger_reset` counts what was cleared (`held_keys` and `until_ms`
-  among it), so set the breakpoints again after a load.
-- **Media read again.** Other saves record the media as they were when
-  the drives were last mounted or changed: CUE sheets are read and the
-  images looked at only then, and the hash of a read-only image's first
-  64 KiB is kept while the file's size and time stay the same. A
-  strict-match save or load reads every CUE sheet and read-only image
+- **The machine is stopped between two instructions.** Both are refused
+  with 409 unless the machine is paused (`POST /api/control/pause`) and no
+  step or `run` command is still to stop it. A save is also refused while
+  queued input (`/api/input`, typed text) is still being typed, which goes
+  on while paused. The refusal has the reason and `"paused"`:
+
+  ```json
+  {"error": "can't do a strict-match load: the machine runs; pause it first (POST /api/control/pause)", "paused": false}
+  ```
+
+  The other reasons are `a step is pending`, `a run command waits for its
+  program` and, for a save, `queued input is still being typed`.
+
+- **The same hardware and media.** A load is refused with 409, and nothing
+  is loaded, when the state's hardware settings or media differ from the
+  running machine's, or the state has no record of its media (a state
+  saved by a rust-dos from before media were recorded). The hardware
+  settings compared are those a state brings: `machine`, `cpu`, `cycles`,
+  `memsize`, `ems`, `umb`, `dos_high`, `monochrome`, the sound cards, and
+  the Voodoo and PowerVR cards. The deterministic mode counts as well: a
+  state saved with `--deterministic` differs from a machine without it,
+  and the other way round, and two `--start-time`s differ. The reply
+  lists every difference in the words a plain load uses:
+
+  ```json
+  {
+    "error": "/work/a.state doesn't match this machine; nothing was loaded",
+    "loaded": false,
+    "unchanged": true,
+    "differences": [
+      "emulator.cycles: the state has the default, this machine has 20000",
+      "drive D: is mounted here (hdd /work/d); the state hasn't it"
+    ]
+  }
+  ```
+
+  Set the speed with `/api/speed`, mount or unmount the drives, then load
   again.
+
+- **A fresh debugger.** A load that goes through clears the breakpoints,
+  watchpoints and `break_on` stops, the target of a step-over or of
+  `resume {"until":...}`, and queued input, and drops a `resume`'s
+  `until_ms` in deterministic mode. The operations under way (a `run`
+  waiting for its program, queued input) are cancelled, and requests still
+  waiting on any of it (`/api/control/wait`, input sent with `wait`) get
+  409 with `{"error":"a save state was loaded"}`. The journal has
+  `state_loaded`, then `debugger_reset` with what was cleared and the
+  operations cancelled, then a `paused` entry with `"reason":"load"` and
+  the loaded machine's registers. Keys held down through
+  `/api/input` or the window are forgotten without a key-up, so the
+  machine keeps the keys and mouse buttons it was saved with. The machine
+  stays paused. The reply's `debugger_reset` says what was cleared; set
+  the breakpoints you need again before resuming:
+
+  ```sh
+  curl -s $J -XPOST -d '{"path":"/work/a.state","strict_match":true}' $H/api/state/load
+  ```
+
+  ```json
+  {
+    "loaded": "/work/a.state",
+    "format": 1,
+    "emulator": "1.6.0",
+    "header": {"version": "1.6.0", "saved": "2026-10-11 02:22:06", "...": "..."},
+    "debugger_reset": {
+      "breakpoints": 1,
+      "watchpoints": 0,
+      "break_on": [],
+      "run_to": false,
+      "step": false,
+      "pause_waits": 0,
+      "run": false,
+      "input": 0,
+      "held_keys": 0,
+      "until_ms": false
+    }
+  }
+  ```
+
+- **Media read from the files.** A strict-match save or load reads every
+  CUE sheet and hashes every read-only image again. Other saves and loads
+  use the record made when the drives were last mounted or changed, and
+  keep a read-only image's hash while the file's size and modification
+  time stay the same, so they miss an image replaced by one of the same
+  size and time (`cp -p`, `rsync -t`, an unpacked archive), or a CUE
+  track file that appeared after the mount.
+
+#### What counts as the same media
+
+Each mounted drive is compared by its letter (or number, for a disk
+mounted by number) and:
+
+- its type (`floppy`, `hdd`, `cdrom`) and whether it is read-only;
+- the host folder it shows and its overlay folder or delta file, by path;
+- the paths of its disk or CD images, the whole swap list in order, each
+  CUE sheet followed by the track files it names;
+- that each image is there, and for a read-only image (a CD's, a
+  `read_only` mount's) its size and the SHA-256 of its first 64 KiB.
+
+A writable image changes as the machine writes it (a dynamic VHD grows),
+so its size is recorded but not compared, and its contents aren't
+hashed. Labels and what is in a folder aren't compared. Z: and X:, which
+the machine makes itself, aren't listed.
+
+#### Replies
+
+A save replies `{"saved": path, "format", "emulator", "header"}` and a load
+`{"loaded": path, "format", "emulator", "header"}`, with `differences`
+after a plain load that found some and `debugger_reset` after a strict-match
+load.
+
+- `format`: the version of the file's layout.
+- `emulator`: the version of the running rust-dos.
+- `header`: what the file says about the state.
+  - `version`: the rust-dos that saved it.
+  - `saved`: when, in local time (`YYYY-MM-DD HH:MM:SS`).
+  - `game`, `game_name`: the game launched from its profile, or null.
+  - `program`: the program that ran, as DOS started it; empty at the prompt.
+  - `machine`: the hardware settings, as configuration text with only the
+    settings that aren't the defaults (empty if all are).
+  - `memsize`: the memory in MB, which the loading machine must have.
+  - `emulated_ns`: the emulated time.
+  - `media`: a list of the mounted drives, each with `drive`, `kind`,
+    `read_only`, and `folder`, `overlay` and `images` where it has them;
+    each image has `path`, `size` (null if the file couldn't be read) and,
+    if read-only, `head_sha256`. Null in a state saved before media were
+    recorded.
+  - `deterministic`: the start time of the mode's clock, only in a state
+    saved with `--deterministic`.
+- `differences`: a sentence for each setting, drive or image that differs.
+- `debugger_reset`: `breakpoints`, `watchpoints`, `input` (queued input
+  events) and `held_keys` count what was cleared; `break_on` lists the
+  stops that were on (`exceptions`, `mode_switch`, `program_start`,
+  `program_exit`); `run_to` (a step-over's or `resume until` target),
+  `until_ms` and `step` are true if one was set; `pause_waits` counts
+  `/api/control/wait` requests answered with 409. `step` and `run` are
+  always false, as a strict-match load is refused while either is pending.
+
+Errors:
+
+- **400** `{"error", "loaded":false, "unchanged":true}`: the load failed (no
+  such file, which reads `empty`, a file that isn't a state, a state of
+  another `memsize`, a drive of the state that can't be mounted,
+  RetroAchievements hardcore mode) and the machine, its
+  settings and its hardware are as they were. A save that can't write its
+  file, and a body without `path`, get a 400 with only `error`.
+- **409** `{"error", "paused"}`: a strict-match save or load sent while
+  the machine wasn't stopped, or a load of any kind in deterministic mode
+  while the machine runs.
+- **409** `{"error", "loaded":false, "unchanged":true, "differences"}`: a
+  strict-match load of a state that doesn't match.
 
 ### Deterministic runs
 
@@ -371,8 +651,8 @@ emulated time, however fast the host is.
 SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
   ./target/release/rust-dos --no-config -d /path/to/game --debug-server \
   --deterministic --cycles 10000 --start-time "1995-04-11 12:34:56" &
-curl -s $J -XPOST -d '{"until_ms":5000}' $H/api/control/resume
-curl -s "$H/api/control/wait?timeout_ms=600000"      # "reason":"time"
+OP=$(curl -s $J -XPOST -d '{"until_ms":5000}' $H/api/control/resume | jq .op)
+curl -s "$H/api/control/wait?op=$OP&timeout_ms=600000"   # "reason":"time"
 curl -s $J -XPOST -d '{"key":"enter"}' "$H/api/input/key?wait=false"
 curl -s $J -XPOST -d '{"until_ms":8000}' $H/api/control/resume
 ```
@@ -396,7 +676,10 @@ curl -s $J -XPOST -d '{"until_ms":8000}' $H/api/control/resume
   open, which takes its input at once (HTTP 409 otherwise). Input is delivered at fixed points in emulated time, every 10
   ms, from the time the machine resumes: one scan code per point, and
   `wait` and `hold_ms` count emulated milliseconds. While the machine is
-  paused the reply comes at once, as if `?wait=false` had been passed.
+  paused the reply comes at once, with `"held":true`, as if `?wait=false`
+  had been passed; `/api/ops/N` (N is the reply's `op`) is `done` once the
+  input was delivered. Two runs with the same input and stops give the
+  same journal, but for `t_ms`.
 - **Stopping at a time:** `resume {"until_ms":N}` pauses when emulated time
   reaches N ms since power-on, with `"reason":"time"`. Compare runs there:
   `/api/status` has `icount` and `activity.emulated_ns`, and
@@ -412,17 +695,20 @@ curl -s $J -XPOST -d '{"until_ms":8000}' $H/api/control/resume
   mouse, network and serial links, the modification times of files a
   program writes to a host folder, and the end of a game launched from
   its profile still follow the host.
-- **Save states:** a state is loaded only while paused, like other
-  changes (409 otherwise, with `"paused":false` as a refused strict-match
-  save has). Its header has `deterministic`, the start time; a state of another
-  start time or saved outside the mode is listed in `differences` (and
-  refused by a strict-match load), since its clock would read another time. After
-  a load the clock is the start time plus the state's emulated time, input
-  points come every 10 ms from there as in the run that saved it, and the
-  speed is the state's: a fixed one, or for a state saved at `auto` or
-  `max`, the speed it had then. Save and load with a strict match at an
-  `until_ms` stop, and a run from the state reaches the next stop as the
-  run that saved it does.
+- **Save states:** a load is a change to the machine, so it is taken only
+  while paused (409 with `{"error", "paused":false}` otherwise); a plain
+  save is taken while running too. The header's `deterministic` has the
+  start time. The machine's clock is that plus emulated time, so a state
+  saved with another start time, or outside the mode, reads another time:
+  a load lists it in `differences` (`deterministic: the state has no
+  deterministic mode, this machine has a clock started at 1995-04-11
+  12:34:56`) and a strict-match load refuses it. After a load the clock
+  reads the start time plus the state's emulated time, input points come
+  every 10 ms from there as in the run that saved the state, and the speed
+  becomes the state's (for a state saved at `auto` or `max`, the speed it
+  ran at then). Save with a strict match at an `until_ms` stop and load
+  with a strict match, and the run from the state reaches the next stop as
+  the run that saved it did.
 
 ### Booted systems (Windows 95)
 
@@ -635,7 +921,8 @@ address mapped to when it was set.
   program, so query soon after reproducing a problem.
 - **Streams are for tools, not agents.** `/ws/trace` sends about 7 MB/s and
   `/ws/screen` sends PNGs. Don't pipe them into your context. Prefer HTTP
-  polling, or `/ws/events` for pause, log, and video-mode notifications.
+  polling, `/api/journal?wait=` long polls, or `/ws/events` for the
+  journal's entries, log lines and video-mode changes.
 - **Emulator gaps.** Many DOS features are incomplete; see the README. When a
   program misbehaves, the emulator is the likelier culprit. The trace plus
   the log usually shows which interrupt function or port is missing.

@@ -95,13 +95,20 @@ struct Args {
     #[arg(long)]
     no_config: bool,
 
+    /// Write the log to FILE, replacing it, instead of rust-dos.log in the
+    /// configuration directory, so instances running at the same time keep
+    /// separate logs
+    #[arg(long, value_name = "FILE")]
+    log: Option<std::path::PathBuf>,
+
     /// Start at the DOS prompt, without booting the disk image that boots
     /// at startup (`-boot` in [drives])
     #[arg(long)]
     no_boot: bool,
 
     /// Start the HTTP/WebSocket debug server (local-only, unauthenticated).
-    /// Optionally takes the listen address.
+    /// Optionally takes the listen address. With port 0 the system picks a
+    /// free port, and the "Debug server listening on" line gives it.
     #[arg(long, value_name = "ADDR", num_args = 0..=1, default_missing_value = "127.0.0.1:8086")]
     debug_server: Option<std::net::SocketAddr>,
 
@@ -381,7 +388,7 @@ fn main() -> Result<(), String> {
     let mut det = args
         .deterministic
         .then(|| rust_dos::deterministic::Deterministic::new(args.start_time.unwrap_or_else(rust_dos::deterministic::default_start)));
-    let mut cpu = create_cpu(&args, &config, memory_mb);
+    let mut cpu = create_cpu(&args, &config, memory_mb)?;
     apply_keyboard_layout(&mut cpu, settings.keyboard_layout);
     for warning in rust_dos::hardware::configure(&mut cpu, &settings, sdl_keys::detect_layout()) {
         config_warning(&mut cpu, &warning);
@@ -421,14 +428,14 @@ fn main() -> Result<(), String> {
         drives: mounted_drives(&cpu),
     };
     let mut dbg = match args.debug_server {
-        Some(addr) => debug::DebugHub::start(&mut cpu, addr, args.trace_capacity)?,
+        Some(addr) => debug::DebugHub::start(&mut cpu, addr, args.trace_capacity, det.as_ref().map(|mode| mode.start))?,
         None => debug::DebugHub::disabled(),
     };
     if let Some(mode) = &det {
         dbg.deterministic = Some(mode.start);
         // A client sends its input before anything runs.
         if args.debug_server.is_some() {
-            dbg.pause_at_start();
+            dbg.pause_at_start(&cpu);
         }
         cpu.bus.log_string(&format!(
             "[DETERMINISTIC] Clock from {}, {} cycles",
@@ -673,6 +680,11 @@ fn main() -> Result<(), String> {
         osd.show(note.trim_start_matches("[VR] ").to_string());
     }
 
+    // Why the loop ended, for the debug server's journal, and the speed
+    // the journal told last.
+    let mut shutdown = debug::ShutdownReason::Window;
+    let mut told_cycles = settings.cycles;
+
     // Main Loop
     'running: loop {
         // What the VR headset's thread has to say.
@@ -688,6 +700,10 @@ fn main() -> Result<(), String> {
         if let Some((start, times)) = last_frame {
             stats.record(&cpu.bus, rust_dos::stats::FrameTimes { wall: frame_start - start, ..times });
         }
+        // Whether the window's keyboard or mouse reached the machine this
+        // frame, which the debug server's journal tells while it holds it.
+        let mouse_before = (cpu.bus.mouse.x, cpu.bus.mouse.y, cpu.bus.mouse.buttons);
+        let mut host_keys = false;
         for event in event_pump.poll_iter() {
             match event {
                 Event::Quit { .. } => break 'running,
@@ -754,6 +770,9 @@ fn main() -> Result<(), String> {
                         osd.clear_lasting();
                     }
                     if rewinding.take().is_some() {
+                        // The machine goes on from where rewinding got to,
+                        // as when F11 is released.
+                        dbg.state_loaded_elsewhere(&cpu, "rewind");
                         pacer.rebase(&cpu.bus.clock, std::time::Instant::now());
                         osd.clear_lasting();
                     }
@@ -1084,6 +1103,7 @@ fn main() -> Result<(), String> {
                             input.stop(&mut cpu);
                         }
                         keyboard::key_event(&mut cpu.bus, scan, extended, true, None);
+                        host_keys = true;
                         held.insert(scancode, (scan, extended));
                     }
                 }
@@ -1109,6 +1129,7 @@ fn main() -> Result<(), String> {
                     }
                     // The machine goes on from where rewinding got to.
                     if keycode == Keycode::F11 && rewinding.take().is_some() {
+                        dbg.state_loaded_elsewhere(&cpu, "rewind");
                         // The game's achievements wait for their conditions
                         // to be false again.
                         achievements.reset();
@@ -1126,6 +1147,7 @@ fn main() -> Result<(), String> {
                     // need the break code to know when the key stops being
                     // pressed.
                     keyboard::key_event(&mut cpu.bus, scan, extended, false, None);
+                    host_keys = true;
                 }
 
                 Event::TextInput { text, .. } if ui.is_open() => ui.text(&text, &mut host!()),
@@ -1333,6 +1355,10 @@ fn main() -> Result<(), String> {
             }
         }
 
+        if host_keys || (cpu.bus.mouse.x, cpu.bus.mouse.y, cpu.bus.mouse.buttons) != mouse_before {
+            dbg.host_input(&cpu);
+        }
+
         // The mouse in relative mode while flying, so that it doesn't stop
         // at the window's edges; Q and E move the camera down and up while
         // held.
@@ -1358,7 +1384,12 @@ fn main() -> Result<(), String> {
         // Remote debug requests and queued remote input, which goes to the
         // settings window while it is open.
         dbg.divert = ui.is_open();
+        dbg.rewinding = rewinding.is_some();
         dbg.poll(&mut cpu);
+        if dbg.quit_requested() {
+            shutdown = debug::ShutdownReason::Quit;
+            break 'running;
+        }
         if dbg.take_hotkey() {
             toggle_ui!();
         }
@@ -1368,34 +1399,36 @@ fn main() -> Result<(), String> {
         // A strict-match load brings a state of this machine and this
         // debugging session: see `load_for_debugger`.
         let mut strict_match_loaded = false;
-        for request in dbg.take_state_requests() {
+        let mut debugger_loaded = false;
+        while let Some(request) = dbg.next_state_request() {
             let path = request.path.clone();
             // The file layout's version, and this rust-dos's (the header has the one that saved it).
             let (format, emulator) = (slots::FORMAT, env!("CARGO_PKG_VERSION"));
-            if request.load {
-                match host!().load_for_debugger(&path, request.strict_match) {
-                    Ok((header, differences)) => {
-                        let mut reply = serde_json::json!({"loaded": path, "format": format, "emulator": emulator, "header": header});
-                        strict_match_loaded = request.strict_match;
-                        if request.strict_match {
-                            reply["debugger_reset"] = dbg.reset_after_load(&cpu);
-                        } else if !differences.is_empty() {
-                            // Told, not refused: the state brought its own.
-                            reply["differences"] = differences.into();
-                        }
-                        request.done(Ok(reply));
+            let result = if request.load {
+                host!().load_for_debugger(&path, request.strict_match).map(|(header, differences)| {
+                    let mut reply = serde_json::json!({"loaded": path, "format": format, "emulator": emulator, "header": header});
+                    strict_match_loaded = request.strict_match;
+                    debugger_loaded = true;
+                    if !differences.is_empty() {
+                        // Told, not refused: the state brought its own.
+                        reply["differences"] = differences.into();
                     }
-                    Err((status, body)) => request.fail(status, body),
-                }
+                    reply
+                })
             } else {
                 if request.strict_match {
                     savestate::media::forget(&cpu);
                 }
-                let saved = host!().save_file(&path);
-                request.done(saved.map(|header| serde_json::json!({"saved": path, "format": format, "emulator": emulator, "header": header})));
-            }
+                host!()
+                    .save_file(&path)
+                    .map(|header| serde_json::json!({"saved": path, "format": format, "emulator": emulator, "header": header}))
+                    .map_err(|e| (400, serde_json::json!({"error": e})))
+            };
+            // The front end's part is done; the hub's (the debugger reset of
+            // a strict-match load, the journal and the reply) follows.
+            dbg.state_done(&cpu, request, result);
         }
-        for request in dbg.take_speed_requests() {
+        while let Some(request) = dbg.next_speed_request() {
             let result = CpuSpeed::parse(&request.cycles).and_then(|cycles| {
                 if det.is_some() && !matches!(cycles, CpuSpeed::Fixed(_)) {
                     return Err("deterministic mode runs at a fixed speed: give a number of cycles".to_string());
@@ -1404,7 +1437,8 @@ fn main() -> Result<(), String> {
                 host!().apply(&new)?;
                 Ok(serde_json::json!({"cycles": cycles.to_string()}))
             });
-            request.done(result);
+            dbg.speed_done(&cpu, request, result);
+            told_cycles = settings.cycles;
         }
         for input in dbg.take_ui_input() {
             match input {
@@ -1418,6 +1452,15 @@ fn main() -> Result<(), String> {
         // and mouse buttons the state was saved with: the keys held before it are
         // forgotten without a key-up reaching the restored machine.
         if std::mem::take(&mut state_loaded) {
+            // The debug server's loads are in its journal already.
+            if !debugger_loaded {
+                dbg.state_loaded_elsewhere(&cpu, "window");
+            }
+            // Deterministic mode runs at the speed the state brought.
+            if settings.cycles != told_cycles {
+                told_cycles = settings.cycles;
+                dbg.speed_changed(&cpu, &told_cycles.to_string(), "load");
+            }
             // Deterministic mode's clock and ticks go on from the state's
             // emulated time.
             if let Some(mode) = &mut det {
@@ -1445,6 +1488,7 @@ fn main() -> Result<(), String> {
         // a LAN room (see the batch below).
         if ui.is_open() != ui_shown {
             ui_shown = ui.is_open();
+            dbg.settings_window(&cpu, ui_shown);
             if ui_shown {
                 release_input(&mut cpu, &mut held);
                 clipboard.stop_paste(&mut cpu);
@@ -1690,7 +1734,13 @@ fn main() -> Result<(), String> {
         );
         // EXIT turns the machine off.
         if cpu.bus.exit_requested {
+            shutdown = debug::ShutdownReason::Exit;
             break 'running;
+        }
+        // A speed the settings window or a hotkey set.
+        if settings.cycles != told_cycles {
+            told_cycles = settings.cycles;
+            dbg.speed_changed(&cpu, &told_cycles.to_string(), "window");
         }
         // Pages printed, and printing that failed.
         for notice in cpu.bus.printer_notices() {
@@ -2036,6 +2086,9 @@ fn main() -> Result<(), String> {
         ));
         pacer.wait_for_next_frame();
     }
+    // The journal ends, and the debug server's clients get what they
+    // waited for.
+    dbg.shutdown(&cpu, shutdown, 0);
 
     // The page in the printer comes out, and the job's files are written.
     for notice in cpu.bus.finish_printing() {
@@ -2502,10 +2555,7 @@ impl MainHost<'_, '_> {
         if self.achievements.hardcore_active() {
             return Err("hardcore mode: no save states while RetroAchievements plays".to_string());
         }
-        let data = std::fs::read(path).map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => "empty".to_string(),
-            _ => format!("{}: {}", path.display(), e),
-        })?;
+        let data = slots::read_file(path)?;
         let (header, state) = slots::decode(&data)?;
         if let Some(why) = slots::refusal(&header, self.cpu.bus.ram().len() >> 20) {
             return Err(why);
@@ -2563,9 +2613,13 @@ impl MainHost<'_, '_> {
         Ok(header)
     }
 
-    /// Load slot `slot`.
+    /// Load slot `slot`. A slot without a file is "empty", as the slot
+    /// list calls it.
     fn load_slot(&mut self, slot: u8) -> Result<slots::Header, String> {
         let path = slots::slot_path(&self.slot_dir()?, slot);
+        if !path.exists() {
+            return Err("empty".to_string());
+        }
         self.load_file(&path)
     }
 
@@ -3137,7 +3191,7 @@ fn load_config(args: &Args) -> Result<config::Config, String> {
 /// Build the CPU with drive C: from `-d`, the config file or the working
 /// directory (in that order), then mount the config's other drives. Opens
 /// the log file.
-fn create_cpu(args: &Args, config: &config::Config, memory_mb: usize) -> Cpu {
+fn create_cpu(args: &Args, config: &config::Config, memory_mb: usize) -> Result<Cpu, String> {
     use crate::disk::DRIVE_C;
 
     let mut warnings = config.warnings.clone();
@@ -3169,7 +3223,7 @@ fn create_cpu(args: &Args, config: &config::Config, memory_mb: usize) -> Cpu {
     };
 
     let mut cpu = Cpu::with_memory(root_path.clone(), memory_mb);
-    cpu.bus.log_file = open_log_file();
+    cpu.bus.log_file = open_log_file(args.log.as_deref())?;
     cpu.shell_history.set_home(rust_dos::cmdline::default_history_file());
     rust_dos::cmdline::configure(&mut cpu, &config.shell);
     if let Some(spec) = c_spec {
@@ -3193,18 +3247,29 @@ fn create_cpu(args: &Args, config: &config::Config, memory_mb: usize) -> Cpu {
     for warning in &warnings {
         cpu.bus.log_string(&format!("[CONFIG] Warning: {}", warning));
     }
-    cpu
+    Ok(cpu)
 }
 
-/// Create the log file in rust-dos's own directory (`config::user_dir`), replacing
-/// the previous run's. The emulator runs without one if that fails.
-fn open_log_file() -> Option<rust_dos::log::LogFile> {
-    let path = rust_dos::log::default_path()?;
+/// Create the log file at `path` (`--log`), or in rust-dos's own directory
+/// (`config::user_dir`), replacing the previous run's. Without `--log` the
+/// emulator runs without a log file if it cannot create one. A `--log` file
+/// that cannot be created stops it, as a missing `--config` file does: a
+/// harness that asked for the log at that path would otherwise find none
+/// there, with only a warning on stderr to say why.
+fn open_log_file(path: Option<&std::path::Path>) -> Result<Option<rust_dos::log::LogFile>, String> {
+    if let Some(path) = path {
+        return rust_dos::log::LogFile::create(path)
+            .map(Some)
+            .map_err(|e| format!("cannot create the log file {} (--log): {}", path.display(), e));
+    }
+    let Some(path) = rust_dos::log::default_path() else {
+        return Ok(None);
+    };
     match rust_dos::log::LogFile::create(&path) {
-        Ok(log) => Some(log),
+        Ok(log) => Ok(Some(log)),
         Err(e) => {
             eprintln!("Warning: cannot create the log file {}: {}", path.display(), e);
-            None
+            Ok(None)
         }
     }
 }
@@ -3284,5 +3349,41 @@ fn chord_key(scancode: Option<Scancode>) -> rust_dos::mouse_capture::ChordKey {
         Some(Scancode::LAlt) => ChordKey::LeftAlt,
         Some(Scancode::RAlt) => ChordKey::RightAlt,
         _ => ChordKey::Other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Args, open_log_file};
+    use clap::Parser;
+
+    #[test]
+    fn the_log_goes_to_the_file_log_names() {
+        let path = std::env::temp_dir().join(format!("rust-dos-log-option-{}", std::process::id())).join("run.log");
+        let args = Args::try_parse_from(["rust-dos", "--no-config", "--log", path.to_str().unwrap()]).unwrap();
+        assert_eq!(args.log.as_deref(), Some(path.as_path()));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "previous run\n").unwrap();
+        let mut log = open_log_file(args.log.as_deref()).unwrap().expect("log file");
+        log.write_line("[DOS] this run");
+        // Dropping the log flushes and closes the file, so the directory
+        // can be removed on Windows.
+        drop(log);
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        assert!(text.starts_with("rust-dos "), "{text}");
+        assert!(text.ends_with("[DOS] this run\n"), "{text}");
+        assert!(!text.contains("previous run"), "{text}");
+    }
+
+    #[test]
+    fn a_log_file_that_cannot_be_created_is_an_error() {
+        // A directory where the file should be.
+        let path = std::env::temp_dir().join(format!("rust-dos-log-option-dir-{}", std::process::id()));
+        std::fs::create_dir_all(&path).unwrap();
+        let result = open_log_file(Some(&path));
+        std::fs::remove_dir_all(&path).unwrap();
+        let error = result.err().expect("an error");
+        assert!(error.contains("--log"), "{error}");
     }
 }

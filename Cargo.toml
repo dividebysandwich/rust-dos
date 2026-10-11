@@ -190,3 +190,5 @@ sevenz-rust2 = { version = "0.22", default-features = false, features = ["compre
 flate2 = "1"
 # The assembler builds the protected-mode test programs in tests/pm_*.rs.
 iced-x86 = { version = "1.21.0", features = ["code_asm"] }
+# The WebSocket client of the debug server's tests.
+tungstenite = "0.29"

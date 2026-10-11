@@ -6,6 +6,7 @@
 //! `DebugHub::poll` once per frame, and data flows back through oneshot
 //! replies, broadcast channels, and a shared frame snapshot.
 
+pub mod journal;
 pub mod keys;
 pub mod pm;
 pub mod server;
@@ -14,14 +15,16 @@ pub mod trace;
 use std::collections::{HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{broadcast, oneshot, watch};
+
+use journal::{Journal, Kind, OpKind, OpState, Stamp};
 
 use crate::config_ui::UiKey;
 use crate::cpu::{Cpu, CpuFlags};
@@ -44,28 +47,150 @@ pub struct Shared {
     /// Bumped whenever `frame` changes.
     pub frame_seq: AtomicU64,
     pub screen_subscribers: AtomicUsize,
-    /// JSON event stream: log lines, pause/resume, breakpoints, mode changes.
+    /// Events kept nowhere: log lines and video mode changes. What the
+    /// machine and the debugger did is in `journal`.
     pub events: broadcast::Sender<Arc<str>>,
     /// JSON trace batches (one per frame while subscribed).
     pub trace: broadcast::Sender<Arc<str>>,
     /// Mixed audio, 44.1 kHz stereo s16, interleaved.
     pub audio: broadcast::Sender<Arc<[i16]>>,
     pub log: Mutex<VecDeque<LogLine>>,
+    /// The number of the last log line (they count from 1).
+    pub log_n: watch::Sender<u64>,
     pub start_time: Instant,
+    /// The journal, which only the emulator thread appends to, and the
+    /// sequence number of its last entry, which readers wait on.
+    pub journal: Mutex<Journal>,
+    pub journal_seq: watch::Sender<u64>,
+    /// This process, so that a client can tell another took the port.
+    pub instance: u64,
+    /// The next request number (`req`).
+    pub next_req: AtomicU64,
+    /// The request the emulator thread is carrying out, which log lines
+    /// name as their cause.
+    pub current: Mutex<Option<(u64, Option<Arc<str>>)>>,
+    /// Set once the emulator shut down: requests get 503.
+    pub closed: AtomicBool,
+    /// HTTP requests and event streams in flight, which the shutdown
+    /// gives a moment to finish.
+    pub busy: AtomicUsize,
 }
 
 #[derive(Clone, serde::Serialize)]
 pub struct LogLine {
+    /// The line's number, counting from 1.
+    pub n: u64,
     pub t_ms: u64,
+    /// The journal's last entry when the line was written.
+    pub at: u64,
+    /// The request being carried out, if the line came from one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cause: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
     pub line: String,
 }
 
+impl LogLine {
+    /// The line as the event streams send it: `{"type":"log",...}`.
+    pub fn event_json(&self) -> String {
+        let mut v = serde_json::to_value(self).unwrap_or(Value::Null);
+        v["type"] = "log".into();
+        v.to_string()
+    }
+}
+
 impl Shared {
+    pub fn new(start_time: Instant) -> Self {
+        Self::with_capacity(start_time, journal::CAPACITY)
+    }
+
+    pub fn with_capacity(start_time: Instant, capacity: usize) -> Self {
+        Self {
+            frame: Mutex::new(video::Frame::new(video::SCREEN_WIDTH, video::SCREEN_HEIGHT)),
+            frame_seq: AtomicU64::new(0),
+            screen_subscribers: AtomicUsize::new(0),
+            events: broadcast::channel(1024).0,
+            trace: broadcast::channel(64).0,
+            audio: broadcast::channel(256).0,
+            log: Mutex::new(VecDeque::with_capacity(LOG_RING_CAPACITY)),
+            log_n: watch::channel(0).0,
+            start_time,
+            journal: Mutex::new(Journal::new(capacity)),
+            journal_seq: watch::channel(0).0,
+            instance: getrandom::u64().unwrap_or_else(|_| {
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64)
+            }),
+            next_req: AtomicU64::new(1),
+            current: Mutex::new(None),
+            closed: AtomicBool::new(false),
+            busy: AtomicUsize::new(0),
+        }
+    }
+
     fn emit(&self, v: Value) {
         if self.events.receiver_count() > 0 {
             let _ = self.events.send(Arc::from(v.to_string()));
         }
     }
+
+    /// The instance as clients see it: 16 hex digits (a JSON number would
+    /// lose bits in JavaScript).
+    pub fn instance_hex(&self) -> String {
+        format!("{:016x}", self.instance)
+    }
+
+    /// Add a line to the log, numbered, with the journal position and the
+    /// request being carried out.
+    pub fn log_line(&self, line: &str) {
+        let t_ms = self.start_time.elapsed().as_millis() as u64;
+        let at = *self.journal_seq.borrow();
+        let (cause, request_id) = self.current.lock().ok().and_then(|c| c.clone()).map_or((None, None), |(r, t)| (Some(r), t));
+        let entry = {
+            let Ok(mut log) = self.log.lock() else { return };
+            let n = log.back().map_or(0, |l| l.n) + 1;
+            if log.len() >= LOG_RING_CAPACITY {
+                log.pop_front();
+            }
+            let entry = LogLine { n, t_ms, at, cause, request_id: request_id.map(|t| t.to_string()), line: line.to_string() };
+            log.push_back(entry.clone());
+            entry
+        };
+        self.log_n.send_replace(entry.n);
+        if self.events.receiver_count() > 0 {
+            let _ = self.events.send(Arc::from(entry.event_json()));
+        }
+    }
+
+    /// Wait up to `limit` for the requests and streams in flight to finish,
+    /// so that they get to send what the shutdown told them.
+    pub fn drain(&self, limit: Duration) {
+        let until = Instant::now() + limit;
+        while self.busy.load(Ordering::Acquire) > 0 && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // The last responses' bytes are on their way.
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// What the hub tells about the journal with every answer.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Meta {
+    pub state_seq: u64,
+    pub stop_seq: Option<u64>,
+    /// The journal's last entry.
+    pub last: u64,
+    /// The last entry this request caused, if it caused any.
+    pub seq: Option<u64>,
+    /// The operation this request started, if it started one.
+    pub op: Option<u64>,
+}
+
+/// A reply with the journal's state at the time.
+pub struct Answer {
+    pub reply: Reply,
+    pub meta: Meta,
 }
 
 pub enum Reply {
@@ -88,7 +213,38 @@ impl Reply {
 
 pub struct Request {
     pub cmd: Cmd,
-    pub reply: oneshot::Sender<Reply>,
+    pub reply: oneshot::Sender<Answer>,
+    /// The request's number (`req`), unique in this process.
+    pub req: u64,
+    /// The client's `X-Request-Id`, copied into the entries it causes.
+    pub tag: Option<Arc<str>>,
+    /// `If-State-Seq`: carry the request out only if the machine is still
+    /// stopped in the state of that entry.
+    pub if_state: Option<u64>,
+}
+
+/// The request being carried out, and what it did to the journal.
+#[derive(Clone, Debug, Default)]
+struct Ctx {
+    req: u64,
+    tag: Option<Arc<str>>,
+    /// The last entry it caused.
+    seq: Option<u64>,
+    /// The operation it started.
+    op: Option<u64>,
+}
+
+/// What a request needs of the machine to be carried out (`DebugHub::check`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Need {
+    /// Paused (or held by the settings window): deterministic mode takes
+    /// changes to the machine only then.
+    Paused,
+    /// Paused with no step or run pending, and with `input_ok` false, no
+    /// input still to be typed: a strict-match save (false) or load (true).
+    Quiescent { input_ok: bool },
+    /// Still stopped in the state of entry N (`If-State-Seq`).
+    State(u64),
 }
 
 #[derive(Deserialize, Default, Debug)]
@@ -144,7 +300,8 @@ pub enum Cmd {
     WriteMem { addr: String, data: Vec<u8>, expect: Option<Vec<u8>> },
     Disasm { addr: Option<String>, count: usize },
     ListBreakpoints,
-    AddBreakpoint(String),
+    /// A breakpoint; with `once` it goes once it stops the machine.
+    AddBreakpoint { addr: String, once: bool },
     RemoveBreakpoint(Option<String>),
     ListWatchpoints,
     /// Pause when the 1, 2 or 4 bytes at an address change.
@@ -191,57 +348,50 @@ pub enum Cmd {
     /// disks into the folders.
     SyncShared,
     /// Save the machine to a save state file, or load one, which the front
-    /// end does (`take_state_requests`). A `strict_match` save or load is
+    /// end does: it takes each from `next_state_request` and answers it
+    /// with `state_done`. A `strict_match` save or load is
     /// done only while paused, and its load must match this machine and
     /// resets the debugger.
     SaveState { path: String, strict_match: bool },
     LoadState { path: String, strict_match: bool },
     /// Change the CPU speed (`cycles`) as the settings window does, which
-    /// the front end does (`take_speed_requests`).
+    /// the front end does (`next_speed_request`).
     Speed { cycles: String },
+    /// Turn the emulator off: the front end leaves its loop, and the
+    /// journal ends with `shutdown`.
+    Quit,
 }
 
-/// A save state to save or load, which the front end carries out and
-/// answers (`done`).
+/// A save state to save or load, which the front end carries out
+/// (`DebugHub::next_state_request`) and answers (`DebugHub::state_done`).
 pub struct StateRequest {
     pub load: bool,
     pub path: PathBuf,
-    /// Asked for with `strict_match` (see `take_state_requests`).
+    /// Asked for with `strict_match` (see `next_state_request`).
     pub strict_match: bool,
-    reply: oneshot::Sender<Reply>,
+    ctx: Ctx,
+    if_state: Option<u64>,
+    reply: oneshot::Sender<Answer>,
 }
 
-impl StateRequest {
-    /// Answer the request: what was saved or loaded, or why not.
-    pub fn done(self, result: Result<Value, String>) {
-        let _ = self.reply.send(match result {
-            Ok(value) => Reply::Json(value),
-            Err(e) => Reply::bad(e),
-        });
-    }
-
-    /// Answer the request with an error of `status` whose body (with its
-    /// `error`) says more.
-    pub fn fail(self, status: u16, body: Value) {
-        let _ = self.reply.send(Reply::ErrorJson(status, body));
-    }
-}
-
-/// A CPU speed to change to, which the front end carries out and answers
-/// (`done`).
+/// A CPU speed to change to, which the front end carries out
+/// (`DebugHub::next_speed_request`) and answers (`DebugHub::speed_done`).
 pub struct SpeedRequest {
     pub cycles: String,
-    reply: oneshot::Sender<Reply>,
+    ctx: Ctx,
+    if_state: Option<u64>,
+    reply: oneshot::Sender<Answer>,
 }
 
-impl SpeedRequest {
-    /// Answer the request: the speed now, or why it can't be.
-    pub fn done(self, result: Result<Value, String>) {
-        let _ = self.reply.send(match result {
-            Ok(value) => Reply::Json(value),
-            Err(e) => Reply::bad(e),
-        });
-    }
+/// Why the emulator turned off, for the `shutdown` entry.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ShutdownReason {
+    /// `POST /api/control/quit`.
+    Quit,
+    /// The machine ran EXIT.
+    Exit,
+    /// The window was closed.
+    Window,
 }
 
 // ---------------------------------------------------------------------------
@@ -322,7 +472,9 @@ pub(crate) enum LowInput {
     MouseRel { dx: i32, dy: i32 },
     Button { idx: usize, down: bool },
     Wait(Duration),
-    Notify(oneshot::Sender<Reply>),
+    /// The end of input request `req`: its events before this one are
+    /// delivered (`input_delivered`).
+    End { req: u64 },
 }
 
 const DEFAULT_HOLD_MS: u64 = 50;
@@ -457,6 +609,38 @@ enum PauseReason {
     Startup,
     /// A resume's `until_ms` reached.
     Time,
+    /// A save state was loaded while paused: the machine is stopped in
+    /// another state.
+    Load,
+}
+
+impl PauseReason {
+    fn name(self) -> &'static str {
+        match self {
+            PauseReason::Request => "request",
+            PauseReason::Breakpoint => "breakpoint",
+            PauseReason::Step => "step",
+            PauseReason::Exception => "exception",
+            PauseReason::ModeSwitch => "mode_switch",
+            PauseReason::Watchpoint => "watchpoint",
+            PauseReason::ProgramStart => "program_start",
+            PauseReason::ProgramExit => "program_exit",
+            PauseReason::Startup => "startup",
+            PauseReason::Time => "time",
+            PauseReason::Load => "load",
+        }
+    }
+}
+
+/// The breakpoint that stopped the machine: its address, whether a user
+/// breakpoint is there (and was a one-shot one), and whether it was the
+/// target of a resume `until` or a step-over.
+#[derive(Clone, Copy)]
+struct BreakpointHit {
+    phys: usize,
+    user: bool,
+    once: bool,
+    target: bool,
 }
 
 /// Memory the debugger watches: `len` bytes at physical address `phys`,
@@ -467,13 +651,13 @@ struct Watch {
     value: u32,
 }
 
-/// A `run` command's reply, sent once the command line started a program
-/// (`before` is `cpu.programs.started` as it was queued), or with
-/// `stop_at_entry` once the machine stopped there.
+/// A `run` operation waiting for its program to start (`before` is
+/// `cpu.programs.started` as it was queued), or with `stop_at_entry` to
+/// stop there.
 struct RunWait {
     before: u64,
     stop_at_entry: bool,
-    reply: oneshot::Sender<Reply>,
+    op: u64,
 }
 
 impl Watch {
@@ -494,7 +678,24 @@ pub struct DebugHub {
     /// so continuing from a breakpoint doesn't immediately re-trigger it.
     skip_bp_once: bool,
     pause_hit: Option<PauseReason>,
-    pause_waiters: Vec<oneshot::Sender<Reply>>,
+    /// The pause request that stopped the machine (reason `request`).
+    pause_by: Option<u64>,
+    breakpoint_hit: Option<BreakpointHit>,
+    /// The breakpoints that go once they stop the machine.
+    once: HashSet<usize>,
+    /// The control request whose operation is under way.
+    current_op: Option<u64>,
+    /// The request being carried out.
+    cur: Option<Ctx>,
+    /// `cpu.programs.started` and `.ended` as the journal last told them.
+    told_starts: u64,
+    told_ends: u64,
+    /// The last `program_started` entry.
+    last_start_seq: Option<u64>,
+    /// A quit request came in: the front end turns the emulator off.
+    quit: Option<Ctx>,
+    /// Window input reached the machine in this stop (`host_input`).
+    host_input_told: bool,
     /// Exceptions (bit n = vector n) and mode switches to pause after, and
     /// the counts of them last seen.
     break_exceptions: u32,
@@ -518,6 +719,9 @@ pub struct DebugHub {
     seen_ends: u64,
     /// A `run` command waiting for its program to start.
     run_wait: Option<RunWait>,
+    /// The `paused` entry the machine is stopped in, kept here once the
+    /// ring has dropped it.
+    stop_entry: Option<Value>,
 
     trace: TraceRing,
     trace_enabled: bool,
@@ -541,6 +745,10 @@ pub struct DebugHub {
     /// While the settings window is open, remote input goes to it
     /// (`take_ui_input`) instead of to the machine.
     pub divert: bool,
+    /// While Alt+F11 rewinds, the front end loads a state every few frames,
+    /// which the journal hears about only once rewinding ends: until then
+    /// `If-State-Seq` and strict-match requests are refused.
+    pub rewinding: bool,
     ui_input: Vec<UiInput>,
     /// Where the remote mouse is, for clicks on the settings window.
     ui_pointer: (i32, i32),
@@ -556,7 +764,7 @@ pub struct DebugHub {
     /// Keys the remote client holds down on the machine.
     remote_held: Vec<PcKey>,
 
-    frame_waiters: Vec<oneshot::Sender<Reply>>,
+    frame_waiters: Vec<(Ctx, oneshot::Sender<Answer>)>,
     /// The video mode and picture size last reported as an event.
     last_mode: Option<(VideoMode, (u32, u32))>,
     frames: u64,
@@ -611,7 +819,16 @@ impl DebugHub {
             temp_breakpoint: None,
             skip_bp_once: false,
             pause_hit: None,
-            pause_waiters: Vec::new(),
+            pause_by: None,
+            breakpoint_hit: None,
+            once: HashSet::new(),
+            current_op: None,
+            cur: None,
+            told_starts: 0,
+            told_ends: 0,
+            last_start_seq: None,
+            quit: None,
+            host_input_told: false,
             break_exceptions: 0,
             break_mode_switch: false,
             seen_exceptions: 0,
@@ -625,6 +842,7 @@ impl DebugHub {
             seen_starts: 0,
             seen_ends: 0,
             run_wait: None,
+            stop_entry: None,
             trace: TraceRing::new(trace_capacity),
             trace_enabled: false,
             trace_until: None,
@@ -639,6 +857,7 @@ impl DebugHub {
             stop_at_ns: None,
             key_stall_frames: 0,
             divert: false,
+            rewinding: false,
             ui_input: Vec::new(),
             ui_pointer: (0, 0),
             hotkey: false,
@@ -657,37 +876,27 @@ impl DebugHub {
     }
 
     /// Start the server thread and install the log/audio hooks on the bus.
-    pub fn start(cpu: &mut Cpu, addr: SocketAddr, trace_capacity: usize) -> Result<Self, String> {
+    /// `deterministic` is the clock's start in deterministic mode, which
+    /// the journal's `started` entry tells.
+    pub fn start(
+        cpu: &mut Cpu,
+        addr: SocketAddr,
+        trace_capacity: usize,
+        deterministic: Option<chrono::NaiveDateTime>,
+    ) -> Result<Self, String> {
+        let shared = Arc::new(Shared::new(cpu.bus.start_time));
+        let (tx, rx) = mpsc::channel();
+        // With port 0 in `addr`, this is the free port the system picked.
+        let addr = server::spawn(addr, tx, shared.clone())?;
         if !addr.ip().is_loopback() {
             eprintln!(
                 "[DEBUG] WARNING: debug server bound to non-loopback address {}. It has no authentication!",
                 addr
             );
         }
-        let shared = Arc::new(Shared {
-            frame: Mutex::new(video::Frame::new(video::SCREEN_WIDTH, video::SCREEN_HEIGHT)),
-            frame_seq: AtomicU64::new(0),
-            screen_subscribers: AtomicUsize::new(0),
-            events: broadcast::channel(1024).0,
-            trace: broadcast::channel(64).0,
-            audio: broadcast::channel(256).0,
-            log: Mutex::new(VecDeque::with_capacity(LOG_RING_CAPACITY)),
-            start_time: cpu.bus.start_time,
-        });
-        let (tx, rx) = mpsc::channel();
-        server::spawn(addr, tx, shared.clone())?;
 
         let log_shared = shared.clone();
-        cpu.bus.log_hook = Some(Box::new(move |line: &str| {
-            let t_ms = log_shared.start_time.elapsed().as_millis() as u64;
-            if let Ok(mut log) = log_shared.log.lock() {
-                if log.len() >= LOG_RING_CAPACITY {
-                    log.pop_front();
-                }
-                log.push_back(LogLine { t_ms, line: line.to_string() });
-            }
-            log_shared.emit(json!({"type": "log", "t_ms": t_ms, "line": line}));
-        }));
+        cpu.bus.log_hook = Some(Box::new(move |line: &str| log_shared.log_line(line)));
         let audio_tx = shared.audio.clone();
         cpu.bus.audio_hook = Some(Box::new(move |samples: &[i16]| {
             if audio_tx.receiver_count() > 0 {
@@ -696,12 +905,474 @@ impl DebugHub {
         }));
 
         println!("[DEBUG] Debug server listening on http://{}/", addr);
-        Ok(Self::new(Some(rx), Some(shared), trace_capacity))
+        let mut hub = Self::new(Some(rx), Some(shared), trace_capacity);
+        hub.deterministic = deterministic;
+        hub.announce(cpu);
+        Ok(hub)
+    }
+
+    /// Append the journal's first entry, `started`, and take the program
+    /// counts as they are.
+    fn announce(&mut self, cpu: &Cpu) {
+        let fields = json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "api_version": journal::API_VERSION,
+            "features": journal::FEATURES,
+            "deterministic": self.deterministic.map(|s| s.format("%Y-%m-%d %H:%M:%S").to_string()),
+        });
+        self.append(cpu, Kind::Started, None, fields);
+        self.told_starts = cpu.programs.started;
+        self.told_ends = cpu.programs.ended;
+    }
+
+    /// A hub with a journal and no server, which takes its requests from
+    /// `request` and `handle`.
+    #[cfg(test)]
+    fn for_tests(cpu: &Cpu) -> Self {
+        let shared = Arc::new(Shared::new(Instant::now()));
+        let mut hub = Self::new(Some(mpsc::channel().1), Some(shared), 1000);
+        hub.announce(cpu);
+        hub
+    }
+
+    /// A request for `cmd` with the next request number, and its answer.
+    #[cfg(test)]
+    fn request(&self, cmd: Cmd) -> (Request, oneshot::Receiver<Answer>) {
+        let req = self.shared.as_ref().map_or(1, |s| s.next_req.fetch_add(1, Ordering::Relaxed));
+        let (reply, rx) = oneshot::channel();
+        (Request { cmd, reply, req, tag: None, if_state: None }, rx)
     }
 
     fn emit(&self, v: Value) {
         if let Some(s) = &self.shared {
             s.emit(v);
+        }
+    }
+
+    // ----- the journal -------------------------------------------------------
+
+    /// Append an entry of `kind` with the object `fields`, caused by
+    /// request `cause` (None: the machine or the window). Returns its
+    /// sequence number; None without a server, or after the shutdown.
+    fn append(&mut self, cpu: &Cpu, kind: Kind, cause: Option<u64>, fields: Value) -> Option<u64> {
+        self.append_then(cpu, kind, cause, fields, |_, _| {})
+    }
+
+    /// `append`, then `then` with the journal and the entry's number, under
+    /// the same lock, so that no reader sees one without the other.
+    fn append_then(
+        &mut self,
+        cpu: &Cpu,
+        kind: Kind,
+        cause: Option<u64>,
+        fields: Value,
+        then: impl FnOnce(&mut Journal, u64),
+    ) -> Option<u64> {
+        let shared = self.shared.as_ref()?;
+        let current = cause.and_then(|c| self.cur.as_ref().filter(|ctx| ctx.req == c));
+        let fields = match fields {
+            Value::Object(m) => m,
+            _ => Map::new(),
+        };
+        let seq = {
+            let mut j = shared.journal.lock().ok()?;
+            // The request being carried out, or the operation it started.
+            let request_id = match current {
+                Some(ctx) => ctx.tag.clone(),
+                None => cause.and_then(|c| j.op_tag(c)),
+            };
+            let stamp = Stamp {
+                t_ms: shared.start_time.elapsed().as_millis() as u64,
+                icount: cpu.executed,
+                emu_ns: cpu.bus.clock.now_ns(),
+                cause,
+                request_id,
+                op: self.current_op,
+            };
+            let seq = j.append(kind, stamp, fields)?;
+            then(&mut j, seq);
+            seq
+        };
+        shared.journal_seq.send_replace(seq);
+        if let Some(ctx) = self.cur.as_mut().filter(|ctx| Some(ctx.req) == cause) {
+            ctx.seq = Some(seq);
+        }
+        Some(seq)
+    }
+
+    /// Append an entry caused by the request being carried out.
+    fn record(&mut self, cpu: &Cpu, kind: Kind, fields: Value) -> Option<u64> {
+        let cause = self.cur.as_ref().map(|c| c.req);
+        self.append(cpu, kind, cause, fields)
+    }
+
+    /// Wake the server's waits on the journal after a change that appended
+    /// no entry (an operation that ended at an earlier one).
+    fn wake(&self) {
+        if let Some(shared) = &self.shared {
+            shared.journal_seq.send_modify(|_| {});
+        }
+    }
+
+    fn with_journal<T>(&self, f: impl FnOnce(&mut Journal) -> T) -> Option<T> {
+        let shared = self.shared.as_ref()?;
+        let mut j = shared.journal.lock().ok()?;
+        Some(f(&mut j))
+    }
+
+    /// The journal's state for an answer to `ctx`'s request.
+    fn meta(&self, ctx: &Ctx) -> Meta {
+        let (state_seq, stop_seq, last) = self.with_journal(|j| (j.state_seq, j.stop_seq, j.last())).unwrap_or_default();
+        Meta { state_seq, stop_seq, last, seq: ctx.seq, op: ctx.op }
+    }
+
+    /// Start carrying out a request: log lines name it from now on.
+    fn begin(&mut self, ctx: Ctx) {
+        if let Some(shared) = &self.shared
+            && let Ok(mut current) = shared.current.lock()
+        {
+            *current = Some((ctx.req, ctx.tag.clone()));
+        }
+        self.cur = Some(ctx);
+    }
+
+    /// Done with the request being carried out: its context, with what it
+    /// did to the journal.
+    fn finish(&mut self) -> Ctx {
+        if let Some(shared) = &self.shared
+            && let Ok(mut current) = shared.current.lock()
+        {
+            *current = None;
+        }
+        self.cur.take().unwrap_or_default()
+    }
+
+    /// Answer `ctx`'s request with `reply` and the journal's state.
+    fn answer(&self, ctx: &Ctx, tx: oneshot::Sender<Answer>, reply: Reply) {
+        let _ = tx.send(Answer { reply, meta: self.meta(ctx) });
+    }
+
+    /// Append the `paused` entry of the stop the batch or a request made,
+    /// if there is one, ending the operation under way. Returns the entry.
+    fn flush_stop(&mut self, cpu: &Cpu) -> Option<Value> {
+        let reason = self.pause_hit.take()?;
+        let mut stop = json!({"reason": reason.name()});
+        if let Some(hit) = self.breakpoint_hit.take() {
+            if hit.user {
+                stop["breakpoint"] = format!("{:05X}", hit.phys).into();
+                stop["once"] = hit.once.into();
+            }
+            if hit.target {
+                stop["target"] = format!("{:05X}", hit.phys).into();
+            }
+        }
+        match reason {
+            PauseReason::ProgramStart => stop["program"] = program_json(cpu),
+            PauseReason::ProgramExit => stop["exit"] = exit_json(cpu),
+            _ => {}
+        }
+        if reason == PauseReason::Exception
+            && let Some(e) = pm::exceptions_json(cpu)["recent"].as_array().and_then(|a| a.last().cloned())
+        {
+            stop["exception"] = e;
+        }
+        if let Some((phys, len, old, new)) = self.watch_hit.take() {
+            let digits = len as usize * 2;
+            stop["watch"] = json!({
+                "addr": format!("{:05X}", phys),
+                "len": len,
+                "old": format!("{:0width$X}", old, width = digits),
+                "new": format!("{:0width$X}", new, width = digits),
+            });
+        }
+        let by = self.pause_by.take();
+        if reason == PauseReason::Request {
+            stop["by"] = by.into();
+        }
+        stop["cs_ip"] = cs_ip(cpu).into();
+        stop["registers"] = regs_json(cpu);
+        if self.trace.total() > 0 {
+            stop["trace"] = self.trace.total().into();
+        }
+        if reason == PauseReason::ProgramStart && self.run_wait.as_ref().is_some_and(|r| r.stop_at_entry) {
+            self.run_wait = None;
+        }
+        self.host_input_told = false;
+        let op = self.current_op;
+        // A `run` whose operation this stop ends waits no more: it no
+        // longer stops at its program's entry or blocks another `run`.
+        if op.is_some() && self.run_wait.as_ref().is_some_and(|r| Some(r.op) == op) {
+            self.run_wait = None;
+            self.start_once = false;
+        }
+        let cause = match reason {
+            PauseReason::Request => by,
+            PauseReason::Startup => None,
+            PauseReason::Load => self.cur.as_ref().map(|c| c.req),
+            _ => op,
+        };
+        let mut fallback = stop.clone();
+        let seq = self.append_then(cpu, Kind::Paused, cause, stop, |j, seq| {
+            if let Some(op) = op {
+                j.end_op(op, OpState::Stopped, Some(seq));
+            }
+        });
+        self.current_op = None;
+        // The whole entry, as the journal gives it.
+        if let Some(entry) = seq.and_then(|s| self.with_journal(|j| j.get(s).map(|e| e.value())).flatten()) {
+            self.stop_entry = Some(entry.clone());
+            return Some(entry);
+        }
+        fallback["icount"] = cpu.executed.into();
+        Some(fallback)
+    }
+
+    /// The `paused` entry the machine is stopped in, if it is.
+    fn current_stop(&self) -> Option<Value> {
+        let seq = self.with_journal(|j| j.stop_seq).flatten()?;
+        self.stop_entry.as_ref().filter(|e| e["seq"].as_u64() == Some(seq)).cloned()
+    }
+
+    /// Start a control request's operation of `kind`: it takes over the
+    /// machine from the one under way, which is superseded, and resumes
+    /// it, appending `resumed` with `fields`.
+    fn start_op(&mut self, cpu: &Cpu, kind: OpKind, mut fields: Value) {
+        let Some((req, tag)) = self.cur.as_ref().map(|c| (c.req, c.tag.clone())) else { return };
+        let supersedes = self.current_op.replace(req);
+        fields["kind"] = kind.name().into();
+        fields["from_paused"] = self.paused.into();
+        fields["supersedes"] = supersedes.into();
+        self.resume();
+        self.append_then(cpu, Kind::Resumed, Some(req), fields, |j, seq| {
+            if let Some(old) = supersedes {
+                j.supersede_op(old, req);
+            }
+            j.begin_op(req, kind, seq, tag);
+        });
+        if let Some(ctx) = self.cur.as_mut() {
+            ctx.op = Some(req);
+        }
+    }
+
+    /// A control request takes over the machine: the step count, the
+    /// run-to target and the time stop (`until_ms`) of the operation it
+    /// supersedes stop nothing more.
+    /// A `run` whose operation is superseded doesn't stop at its program's
+    /// entry and no longer blocks another `run` or a strict-match save; the
+    /// command line it queued still runs.
+    fn take_over(&mut self) {
+        self.step_budget = None;
+        self.temp_breakpoint = None;
+        self.stop_at_ns = None;
+        if self.run_wait.as_ref().is_some_and(|r| self.current_op == Some(r.op)) {
+            self.run_wait = None;
+            self.start_once = false;
+        }
+    }
+
+    /// Program starts and ends since the journal last told them, as
+    /// `program_started` and `program_exited` (with `count` when there were
+    /// several in the batch). When both came in one batch, the start goes
+    /// first if the program that started no longer runs (its PSP isn't the
+    /// current one): it ended in the batch too.
+    fn tell_programs(&mut self, cpu: &Cpu) {
+        let (started, ended) = (cpu.programs.started, cpu.programs.ended);
+        let new_start = started > self.told_starts;
+        let new_end = ended > self.told_ends;
+        let start_first = new_start && new_end && cpu.current_psp != cpu.programs.psp;
+        if new_end && !start_first {
+            self.tell_exit(cpu, ended);
+        }
+        if new_start {
+            let mut fields = json!({"program": program_json(cpu)});
+            if started - self.told_starts > 1 {
+                fields["count"] = (started - self.told_starts).into();
+            }
+            // A `run` that doesn't stop at the entry is done with this entry.
+            let run = self.run_wait.as_ref().filter(|r| !r.stop_at_entry && started > r.before).map(|r| r.op);
+            let seq = self.append_then(cpu, Kind::ProgramStarted, None, fields, |j, seq| {
+                if let Some(op) = run {
+                    j.end_op(op, OpState::Done, Some(seq));
+                }
+            });
+            self.last_start_seq = seq.or(self.last_start_seq);
+            if let Some(op) = run.filter(|_| seq.is_some()) {
+                self.run_wait = None;
+                if self.current_op == Some(op) {
+                    self.current_op = None;
+                }
+            }
+        }
+        if start_first {
+            self.tell_exit(cpu, ended);
+        }
+        // A reboot or a load can take the counts back.
+        self.told_starts = started;
+        self.told_ends = ended;
+    }
+
+    /// The `program_exited` entry of the ends since the journal last told
+    /// them, `ended` now.
+    fn tell_exit(&mut self, cpu: &Cpu, ended: u64) {
+        let mut fields = json!({"exit": exit_json(cpu)});
+        if ended - self.told_ends > 1 {
+            fields["count"] = (ended - self.told_ends).into();
+        }
+        self.append(cpu, Kind::ProgramExited, None, fields);
+    }
+
+    /// Whether `need` holds now; if not, the 409 body that says why.
+    pub fn check(&self, need: Need) -> Result<(), Value> {
+        let (stop_seq, state_seq, pending_ops) = self
+            .with_journal(|j| (j.stop_seq, j.state_seq, j.pending_ops(|k| k != OpKind::Input)))
+            .unwrap_or((None, 0, Vec::new()));
+        let input_queued = self.input_pending();
+        let why: Option<(&str, String)> = match need {
+            Need::Paused => self.deterministic_refuses().then(|| {
+                (
+                    "paused",
+                    "deterministic mode takes input and changes to the machine only while it is paused: \
+                     pause it, or resume with until_ms, then send the request"
+                        .to_string(),
+                )
+            }),
+            Need::Quiescent { input_ok } => {
+                let why = if !self.paused {
+                    Some("the machine runs; pause it first (POST /api/control/pause)")
+                } else if self.rewinding {
+                    Some("the machine is being rewound")
+                } else if self.step_budget.is_some() {
+                    Some("a step is pending")
+                } else if self.run_wait.is_some() {
+                    Some("a run command waits for its program")
+                } else if !input_ok && input_queued > 0 {
+                    Some("queued input is still being typed")
+                } else {
+                    None
+                };
+                why.map(|w| ("quiescent", w.to_string()))
+            }
+            Need::State(n) => {
+                // Input goes on being typed while paused, but in
+                // deterministic mode, where it waits for emulated time.
+                let typing = input_queued > 0 && (self.deterministic.is_none() || self.divert);
+                let why = if !self.paused || stop_seq.is_none() {
+                    Some("the machine runs; pause it, then read its state again".to_string())
+                } else if self.divert {
+                    Some("the settings window is open".to_string())
+                } else if self.rewinding {
+                    Some("the machine is being rewound".to_string())
+                } else if !pending_ops.is_empty() {
+                    Some("an operation is under way".to_string())
+                } else if typing {
+                    Some("queued input is being typed".to_string())
+                } else if state_seq != n {
+                    Some(format!("the state changed since entry {}: it is now at entry {}", n, state_seq))
+                } else {
+                    None
+                };
+                why.map(|w| ("state", w))
+            }
+        };
+        match why {
+            None => Ok(()),
+            Some((precondition, error)) => Err(json!({
+                "error": error,
+                "precondition": precondition,
+                "paused": self.paused,
+                "stop_seq": stop_seq,
+                "state_seq": state_seq,
+                "pending_ops": pending_ops,
+                "input_queued": input_queued,
+                "settings_window": self.divert,
+            })),
+        }
+    }
+
+    /// The input events still to be delivered, counting a wait under way:
+    /// an input request whose last event is a wait isn't delivered until
+    /// the wait ends.
+    fn input_pending(&self) -> usize {
+        let waiting = self.input_wait_until.is_some() || self.input_wait_ns.is_some();
+        self.input.iter().filter(|e| !matches!(e, LowInput::End { .. })).count() + waiting as usize
+    }
+
+    /// Whether a remote client asked to turn the emulator off.
+    pub fn quit_requested(&self) -> bool {
+        self.quit.is_some()
+    }
+
+    /// The emulator turns off: what is pending is cancelled, the journal
+    /// ends with `shutdown`, requests still coming get 503, and the server
+    /// gets a moment to send what it has.
+    pub fn shutdown(&mut self, cpu: &Cpu, reason: ShutdownReason, exit_code: i32) {
+        let Some(shared) = self.shared.clone() else { return };
+        let by = self.quit.take();
+        let cancelled = self.with_journal(|j| j.pending_ops(|_| true)).unwrap_or_default();
+        self.current_op = None;
+        let fields = json!({
+            "reason": match reason {
+                ShutdownReason::Quit => "quit",
+                ShutdownReason::Exit => "exit",
+                ShutdownReason::Window => "window",
+            },
+            "by": by.as_ref().map(|c| c.req),
+            "cancelled": cancelled,
+            "exit_code": exit_code,
+        });
+        if let Some(ctx) = by {
+            self.begin(ctx);
+        }
+        let ids = cancelled.clone();
+        self.append_then(cpu, Kind::Shutdown, self.cur.as_ref().map(|c| c.req), fields, move |j, seq| {
+            for req in ids {
+                j.end_op(req, OpState::Cancelled, Some(seq));
+            }
+        });
+        self.finish();
+        shared.closed.store(true, Ordering::Release);
+        let gone = || Reply::Error(503, "the emulator is shutting down".into());
+        for (ctx, tx) in std::mem::take(&mut self.frame_waiters) {
+            self.answer(&ctx, tx, gone());
+        }
+        // Requests still queued get 503, and the channel closes: one sent
+        // later fails at once, and the server answers it with 503 too.
+        if let Some(rx) = self.rx.take() {
+            while let Ok(req) = rx.try_recv() {
+                let _ = req.reply.send(Answer { reply: gone(), meta: Meta::default() });
+            }
+        }
+        shared.drain(Duration::from_secs(2));
+    }
+
+    /// Window input reached the machine while the debugger holds it: one
+    /// `host_input` entry a stop.
+    pub fn host_input(&mut self, cpu: &Cpu) {
+        if self.paused && !self.host_input_told {
+            self.host_input_told = true;
+            self.append(cpu, Kind::HostInput, None, json!({}));
+        }
+    }
+
+    /// The settings window opened or closed.
+    pub fn settings_window(&mut self, cpu: &Cpu, open: bool) {
+        self.append(cpu, Kind::SettingsWindow, None, json!({"open": open}));
+    }
+
+    /// The speed changed otherwise than through the debug server.
+    pub fn speed_changed(&mut self, cpu: &Cpu, cycles: &str, source: &str) {
+        self.append(cpu, Kind::SpeedChanged, None, json!({"cycles": cycles, "source": source}));
+    }
+
+    /// A save state was loaded otherwise than through the debug server:
+    /// from the window (`source` "window") or by rewinding ("rewind").
+    pub fn state_loaded_elsewhere(&mut self, cpu: &Cpu, source: &str) {
+        self.told_starts = cpu.programs.started;
+        self.told_ends = cpu.programs.ended;
+        self.append(cpu, Kind::StateLoaded, None, json!({"source": source}));
+        if self.paused {
+            self.pause_hit = Some(PauseReason::Load);
+            self.flush_stop(cpu);
         }
     }
 
@@ -711,7 +1382,12 @@ impl DebugHub {
     /// before the execution batch.
     pub fn poll(&mut self, cpu: &mut Cpu) {
         let Some(rx) = self.rx.take() else { return };
-        while let Ok(req) = rx.try_recv() {
+        // A save state or speed request is carried out by the front end
+        // after this, before any request behind it, so that requests take
+        // effect in the order they came: those behind it wait a frame. After
+        // a quit nothing more is carried out.
+        while self.state_requests.is_empty() && self.speed_requests.is_empty() && self.quit.is_none() {
+            let Ok(req) = rx.try_recv() else { break };
             self.handle(cpu, req);
         }
         self.rx = Some(rx);
@@ -815,7 +1491,13 @@ impl DebugHub {
         if !self.skip_bp_once
             && (self.temp_breakpoint == Some(phys_ip) || self.breakpoints.contains(&phys_ip))
         {
-            self.temp_breakpoint = None;
+            let target = self.temp_breakpoint.take() == Some(phys_ip);
+            let user = self.breakpoints.contains(&phys_ip);
+            let once = user && self.once.remove(&phys_ip);
+            if once {
+                self.breakpoints.remove(&phys_ip);
+            }
+            self.breakpoint_hit = Some(BreakpointHit { phys: phys_ip, user, once, target });
             self.enter_pause(PauseReason::Breakpoint);
             return true;
         }
@@ -872,52 +1554,11 @@ impl DebugHub {
     /// Call after the execution batch: delivers pause notifications and
     /// streams new trace entries.
     pub fn end_batch(&mut self, cpu: &Cpu) {
-        if let Some(reason) = self.pause_hit.take() {
-            let regs = regs_json(cpu);
-            let reason_str = match reason {
-                PauseReason::Request => "request",
-                PauseReason::Breakpoint => "breakpoint",
-                PauseReason::Step => "step",
-                PauseReason::Exception => "exception",
-                PauseReason::ModeSwitch => "mode_switch",
-                PauseReason::Watchpoint => "watchpoint",
-                PauseReason::ProgramStart => "program_start",
-                PauseReason::ProgramExit => "program_exit",
-                PauseReason::Startup => "startup",
-                PauseReason::Time => "time",
-            };
-            let mut reply = json!({"paused": true, "reason": reason_str, "icount": cpu.executed, "registers": regs});
-            match reason {
-                PauseReason::ProgramStart => reply["program"] = program_json(cpu),
-                PauseReason::ProgramExit => reply["exit"] = exit_json(cpu),
-                _ => {}
-            }
-            if reason == PauseReason::Exception
-                && let Some(e) = pm::exceptions_json(cpu)["recent"].as_array().and_then(|a| a.last().cloned())
-            {
-                reply["exception"] = e;
-            }
-            if let Some((phys, len, old, new)) = self.watch_hit.take() {
-                let digits = len as usize * 2;
-                reply["watch"] = json!({
-                    "addr": format!("{:05X}", phys),
-                    "len": len,
-                    "old": format!("{:0width$X}", old, width = digits),
-                    "new": format!("{:0width$X}", new, width = digits),
-                });
-            }
-            let mut event = reply.clone();
-            event["type"] = "paused".into();
-            self.emit(event);
-            for w in self.pause_waiters.drain(..) {
-                let _ = w.send(Reply::Json(reply.clone()));
-            }
-            if reason == PauseReason::ProgramStart
-                && let Some(run) = self.run_wait.take_if(|r| r.stop_at_entry)
-            {
-                let _ = run.reply.send(Reply::Json(reply.clone()));
-            }
+        // Programs that started or ended in the batch, then its stop.
+        if self.shared.is_some() {
+            self.tell_programs(cpu);
         }
+        self.flush_stop(cpu);
 
         if let Some(shared) = &self.shared {
             if shared.trace.receiver_count() > 0 {
@@ -1073,8 +1714,9 @@ impl DebugHub {
         if !self.wants_frame() {
             return;
         }
-        for w in self.frame_waiters.drain(..) {
-            let _ = w.send(Reply::Frame(screen.clone()));
+        for (ctx, w) in std::mem::take(&mut self.frame_waiters) {
+            let meta = self.meta(&ctx);
+            let _ = w.send(Answer { reply: Reply::Frame(screen.clone()), meta });
         }
         if let Some(shared) = &self.shared {
             if shared.screen_subscribers.load(Ordering::Relaxed) > 0 {
@@ -1088,9 +1730,9 @@ impl DebugHub {
         }
     }
 
-    /// Answer a `run` command whose program started, or whose command
-    /// line ended at the prompt without starting one. A `run` whose client
-    /// gave up waiting is dropped with the stop it armed.
+    /// End a `run` operation whose program started, or whose command line
+    /// ended at the prompt without starting one. A `run` goes on when its
+    /// client stops waiting: how it ends is in the journal.
     fn check_run(&mut self, cpu: &Cpu) {
         let idle = at_idle_prompt(cpu);
         if idle {
@@ -1099,25 +1741,41 @@ impl DebugHub {
             self.start_breakpoint = None;
         }
         let Some(run) = &self.run_wait else { return };
-        if run.reply.is_closed() {
-            self.run_wait = None;
-            self.start_once = false;
-            if !self.break_program_start {
-                self.start_breakpoint = None;
-            }
-        } else if cpu.programs.started > run.before {
-            if !run.stop_at_entry {
-                if let Some(run) = self.run_wait.take() {
-                    let _ = run.reply.send(Reply::Json(json!({"ok": true, "program": program_json(cpu)})));
+        let (op, before, stop_at_entry) = (run.op, run.before, run.stop_at_entry);
+        if cpu.programs.started > before {
+            if !stop_at_entry {
+                // A start the journal didn't tell (a load brought it): the
+                // run is done with the last start told.
+                self.run_wait = None;
+                let end = self.last_start_seq;
+                self.with_journal(|j| j.end_op(op, OpState::Done, end));
+                self.wake();
+                if self.current_op == Some(op) {
+                    self.current_op = None;
                 }
-            } else if idle && let Some(run) = self.run_wait.take() {
-                let _ = run.reply.send(Reply::Error(409, "the program ended before it reached its entry point".into()));
+            } else if idle {
+                self.run_wait = None;
+                self.fail_op(cpu, op, 409, "the program ended before it reached its entry point");
             }
         } else if idle {
             self.start_once = false;
-            if let Some(run) = self.run_wait.take() {
-                let _ = run.reply.send(Reply::Error(422, "the command line started no program".into()));
-            }
+            self.run_wait = None;
+            self.fail_op(cpu, op, 422, "the command line started no program");
+        }
+    }
+
+    /// End operation `op` as failed with `status`, appending `op_failed`.
+    /// An operation that already ended (a `run` another control request
+    /// superseded, or a pause stopped) is left as it is.
+    fn fail_op(&mut self, cpu: &Cpu, op: u64, status: u16, error: &str) {
+        let pending = self.with_journal(|j| matches!(j.op(op), journal::OpLookup::Found(o) if o.state == OpState::Pending));
+        if pending == Some(true) {
+            let message = error.to_string();
+            let fields = json!({"status": status, "error": error});
+            self.append_then(cpu, Kind::OpFailed, Some(op), fields, move |j, seq| j.fail_op(op, Some(seq), status, message));
+        }
+        if self.current_op == Some(op) {
+            self.current_op = None;
         }
     }
 
@@ -1136,8 +1794,9 @@ impl DebugHub {
 
     /// Deterministic mode with a client: the machine waits for it before
     /// running anything.
-    pub fn pause_at_start(&mut self) {
+    pub fn pause_at_start(&mut self, cpu: &Cpu) {
         self.enter_pause(PauseReason::Startup);
+        self.flush_stop(cpu);
     }
 
     /// Pause if emulated time reached a resume's `until_ms`. The
@@ -1173,6 +1832,11 @@ impl DebugHub {
         while !self.paused && !self.time_stop(cpu) && cpu.bus.clock.icount < end {
             let (reason, reached) = mode.step(cpu, self, hot, end);
             if let Some(boundary) = reached {
+                // Program starts and ends are told at the millisecond, so
+                // that the journal doesn't depend on the host's frames.
+                if self.shared.is_some() {
+                    self.tell_programs(cpu);
+                }
                 at_ms(cpu, self, boundary);
             }
             if matches!(reason, crate::exec::StopReason::Paused | crate::exec::StopReason::Exit) {
@@ -1264,8 +1928,10 @@ impl DebugHub {
                         cpu.bus.mouse.button_up(idx);
                     }
                 }
-                LowInput::Notify(tx) => {
-                    let _ = tx.send(Reply::Json(json!({"ok": true, "done": true})));
+                LowInput::End { req } => {
+                    self.append_then(cpu, Kind::InputDelivered, Some(req), json!({}), |j, seq| {
+                        j.end_op(req, OpState::Done, Some(seq));
+                    });
                 }
                 _ => unreachable!(),
             }
@@ -1322,32 +1988,92 @@ impl DebugHub {
         std::mem::take(&mut self.closed_program)
     }
 
-    /// The save states remote clients asked to save or load. Strict-match
-    /// saves and loads asked for while the machine isn't stopped with
-    /// nothing pending are refused here (409): they are only done while the
-    /// debugger holds the machine between two instructions. The other
-    /// requests are carried out at the end of the frame, running or not.
-    ///
-    /// In deterministic mode a load is refused as well while the machine
-    /// runs, as `handle` refuses it when it arrives: a `resume` sent in the
-    /// same frame starts the machine before the load is carried out.
-    pub fn take_state_requests(&mut self) -> Vec<StateRequest> {
-        let mut taken = Vec::new();
-        for request in std::mem::take(&mut self.state_requests) {
-            if request.load && self.deterministic_refuses() {
-                request.fail(409, deterministic_refusal());
-                continue;
+    /// The next save state a remote client asked to save or load, for the
+    /// front end to carry out and answer with `state_done`. Requests that
+    /// can't be carried out now are refused here (409, from `check`): a
+    /// strict-match save or load while the machine isn't stopped with
+    /// nothing pending (they are only done while the debugger holds the
+    /// machine between two instructions), a load in deterministic mode
+    /// while the machine runs (a `resume` sent in the same frame starts it
+    /// before the load is carried out), and one whose `If-State-Seq` no
+    /// longer holds. The others are carried out at the end of the frame,
+    /// running or not.
+    pub fn next_state_request(&mut self) -> Option<StateRequest> {
+        while !self.state_requests.is_empty() {
+            let request = self.state_requests.remove(0);
+            let mut refusal = Ok(());
+            if request.load {
+                refusal = self.check(Need::Paused);
             }
-            match request.strict_match.then(|| self.strict_match_refusal(request.load)).flatten() {
-                Some(why) => {
-                    let what = if request.load { "load" } else { "save" };
-                    let error = format!("can't do a strict-match {}: {}", what, why);
-                    request.fail(409, json!({"error": error, "paused": self.paused}));
+            if request.strict_match {
+                refusal = refusal.and_then(|_| {
+                    self.check(Need::Quiescent { input_ok: request.load }).map_err(|mut body| {
+                        let what = if request.load { "load" } else { "save" };
+                        body["error"] = format!("can't do a strict-match {}: {}", what, body["error"].as_str().unwrap_or("")).into();
+                        body
+                    })
+                });
+            }
+            if let Some(n) = request.if_state {
+                refusal = refusal.and_then(|_| self.check(Need::State(n)));
+            }
+            match refusal {
+                Err(body) => self.answer(&request.ctx, request.reply, Reply::ErrorJson(409, body)),
+                Ok(()) => {
+                    self.begin(request.ctx.clone());
+                    return Some(request);
                 }
-                None => taken.push(request),
             }
         }
-        taken
+        None
+    }
+
+    /// The front end carried out `request` from `next_state_request`:
+    /// `result` is its reply, or the status and body of its failure. A
+    /// save appends `state_saved`; a load `state_loaded`, and when strict,
+    /// resets the debugger (`debugger_reset`); a load while paused stops
+    /// the machine in the loaded state (`paused`, reason `load`). A failed
+    /// load appends nothing.
+    pub fn state_done(&mut self, cpu: &Cpu, request: StateRequest, result: Result<Value, (u16, Value)>) {
+        let path = request.path.display().to_string();
+        let reply = match result {
+            Err((status, body)) => Reply::ErrorJson(status, body),
+            Ok(mut value) if request.load => {
+                self.told_starts = cpu.programs.started;
+                self.told_ends = cpu.programs.ended;
+                let reset = request.strict_match.then(|| self.reset_after_load(cpu));
+                let differences = value.get("differences").cloned().unwrap_or_else(|| json!([]));
+                let fields = json!({"path": path, "strict_match": request.strict_match, "source": "debugger", "differences": differences});
+                self.record(cpu, Kind::StateLoaded, fields);
+                if let Some((cleared, cancelled)) = reset {
+                    value["debugger_reset"] = cleared.clone();
+                    let ids = cancelled.clone();
+                    let cause = Some(request.ctx.req);
+                    self.append_then(cpu, Kind::DebuggerReset, cause, json!({"cleared": cleared, "cancelled": cancelled}), |j, seq| {
+                        for req in ids {
+                            j.end_op(req, OpState::Cancelled, Some(seq));
+                        }
+                    });
+                }
+                if self.paused {
+                    self.pause_hit = Some(PauseReason::Load);
+                    self.flush_stop(cpu);
+                }
+                Reply::Json(value)
+            }
+            Ok(value) => {
+                let fields = json!({
+                    "path": path,
+                    "strict_match": request.strict_match,
+                    "format": value.get("format"),
+                    "emulator": value.get("emulator"),
+                });
+                self.record(cpu, Kind::StateSaved, fields);
+                Reply::Json(value)
+            }
+        };
+        let ctx = self.finish();
+        self.answer(&ctx, request.reply, reply);
     }
 
     /// Whether deterministic mode refuses a change to the machine now: it
@@ -1356,32 +2082,14 @@ impl DebugHub {
         self.deterministic.is_some() && !self.paused && !self.divert
     }
 
-    /// Why a strict-match save or load can't be done now, if it can't: the
-    /// machine runs, or a step or run command is still to stop it. A save
-    /// also waits for queued input, which goes on being typed while the
-    /// machine is paused; a load drops it (`reset_after_load`).
-    fn strict_match_refusal(&self, load: bool) -> Option<&'static str> {
-        if !self.paused {
-            Some("the machine runs; pause it first (POST /api/control/pause)")
-        } else if self.step_budget.is_some() {
-            Some("a step is pending")
-        } else if self.run_wait.is_some() {
-            Some("a run command waits for its program")
-        } else if !load && !self.input.is_empty() {
-            Some("queued input is still being typed")
-        } else {
-            None
-        }
-    }
-
     /// Forget what the debugger was told before a save state was loaded,
     /// so none of it stops the machine the state brought: breakpoints,
     /// watchpoints, the stops on exceptions, mode switches and program
     /// starts and ends, a step or the target of a step-over or run-to, and
-    /// queued input. Requests waiting for a stop or a program, or for
-    /// their input to be typed, are answered with 409. Returns what was
-    /// cleared.
-    pub fn reset_after_load(&mut self, cpu: &Cpu) -> Value {
+    /// queued input. Returns what was cleared, and the requests whose
+    /// operations it cancelled: the control operation under way, a `run`
+    /// waiting for its program, and queued input.
+    pub fn reset_after_load(&mut self, cpu: &Cpu) -> (Value, Vec<u64>) {
         let break_on: Vec<&str> = [
             (self.break_exceptions != 0, "exceptions"),
             (self.break_mode_switch, "mode_switch"),
@@ -1391,36 +2099,37 @@ impl DebugHub {
         .into_iter()
         .filter_map(|(on, name)| on.then_some(name))
         .collect();
+        let mut cancelled: Vec<u64> = self.current_op.take().into_iter().collect();
         let cleared = json!({
             "breakpoints": std::mem::take(&mut self.breakpoints).len(),
             "watchpoints": std::mem::take(&mut self.watchpoints).len(),
             "break_on": break_on,
             "run_to": self.temp_breakpoint.take().is_some(),
             "step": self.step_budget.take().is_some(),
-            "pause_waits": self.pause_waiters.len(),
+            // The control operation that was to end with a stop.
+            "pause_waits": cancelled.len(),
             "run": self.run_wait.is_some(),
-            "input": self.input.len(),
+            "input": self.input_pending(),
             "held_keys": self.remote_held.len(),
             // Deterministic mode: a resume's stop at an emulated time.
             "until_ms": self.stop_at_ns.take().is_some(),
         });
+        self.once.clear();
         // Keys held before the load are forgotten without a release: the
         // restored keyboard has the keys of the moment it was saved, and
         // a key-up now would reach the restored machine.
         self.remote_held.clear();
         self.remote_mods = 0;
-        let gone = || Reply::Error(409, "a save state was loaded".into());
-        for waiter in self.pause_waiters.drain(..) {
-            let _ = waiter.send(gone());
-        }
         if let Some(run) = self.run_wait.take() {
-            let _ = run.reply.send(gone());
+            cancelled.push(run.op);
         }
         for event in self.input.drain(..) {
-            if let LowInput::Notify(tx) = event {
-                let _ = tx.send(gone());
+            if let LowInput::End { req } = event {
+                cancelled.push(req);
             }
         }
+        cancelled.sort_unstable();
+        cancelled.dedup();
         self.input_wait_until = None;
         self.input_wait_ns = None;
         self.break_exceptions = 0;
@@ -1431,62 +2140,118 @@ impl DebugHub {
         self.start_breakpoint = None;
         self.skip_bp_once = false;
         self.pause_hit = None;
+        self.pause_by = None;
+        self.breakpoint_hit = None;
         self.watch_hit = None;
         // The loaded machine's counts are where the debugger starts from.
         self.seen_exceptions = cpu.exceptions;
         self.seen_mode_switches = cpu.mode_switches;
         self.seen_starts = cpu.programs.started;
         self.seen_ends = cpu.programs.ended;
-        cleared
+        (cleared, cancelled)
     }
 
-    /// The CPU speeds remote clients asked for.
-    pub fn take_speed_requests(&mut self) -> Vec<SpeedRequest> {
-        std::mem::take(&mut self.speed_requests)
+    /// The next CPU speed a remote client asked for, for the front end to
+    /// change to and answer with `speed_done`. One that can't be changed to
+    /// now (deterministic mode running, or its `If-State-Seq` no longer
+    /// holding) is refused here.
+    pub fn next_speed_request(&mut self) -> Option<SpeedRequest> {
+        while !self.speed_requests.is_empty() {
+            let request = self.speed_requests.remove(0);
+            let refusal = self.check(Need::Paused).and_then(|_| request.if_state.map_or(Ok(()), |n| self.check(Need::State(n))));
+            match refusal {
+                Err(body) => self.answer(&request.ctx, request.reply, Reply::ErrorJson(409, body)),
+                Ok(()) => {
+                    self.begin(request.ctx.clone());
+                    return Some(request);
+                }
+            }
+        }
+        None
+    }
+
+    /// The front end carried out `request`: `result` is the speed now, or
+    /// why it can't be. A change appends `speed_changed`.
+    pub fn speed_done(&mut self, cpu: &Cpu, request: SpeedRequest, result: Result<Value, String>) {
+        let reply = match result {
+            Ok(value) => {
+                self.record(cpu, Kind::SpeedChanged, json!({"cycles": value.get("cycles"), "source": "debugger"}));
+                Reply::Json(value)
+            }
+            Err(e) => Reply::bad(e),
+        };
+        let ctx = self.finish();
+        self.answer(&ctx, request.reply, reply);
     }
 
     // ----- request handling --------------------------------------------------
 
     fn handle(&mut self, cpu: &mut Cpu, req: Request) {
+        // A stop comes before anything this request does.
+        self.flush_stop(cpu);
+        let Request { cmd, reply: tx, req, tag, if_state } = req;
+        let ctx = Ctx { req, tag, seq: None, op: None };
+        if self.quit.is_some() {
+            self.answer(&ctx, tx, Reply::Error(503, "the emulator is shutting down".into()));
+            return;
+        }
         // In deterministic mode, a change to the machine that came while it
         // runs would land at whatever emulated time the host got to. The
         // settings window, which holds the machine, takes its input at once.
-        if self.deterministic_refuses() && changes_machine(&req.cmd) {
-            let _ = req.reply.send(Reply::ErrorJson(409, deterministic_refusal()));
+        // Save states and speeds are checked again as they are carried out.
+        let need = changes_machine(&cmd).then_some(Need::Paused);
+        let refusal = need.map_or(Ok(()), |n| self.check(n)).and_then(|_| if_state.map_or(Ok(()), |n| self.check(Need::State(n))));
+        if let Err(body) = refusal {
+            self.answer(&ctx, tx, Reply::ErrorJson(409, body));
             return;
         }
-        let cmd = match req.cmd {
+        let cmd = match cmd {
             Cmd::SaveState { path, .. } | Cmd::LoadState { path, .. } if path.is_empty() => {
-                let _ = req.reply.send(Reply::bad("a path is needed"));
+                self.answer(&ctx, tx, Reply::bad("a path is needed"));
                 return;
             }
             Cmd::SaveState { path, strict_match } => {
                 let path = PathBuf::from(path);
-                self.state_requests.push(StateRequest { load: false, path, strict_match, reply: req.reply });
+                self.state_requests.push(StateRequest { load: false, path, strict_match, ctx, if_state, reply: tx });
                 return;
             }
             Cmd::LoadState { path, strict_match } => {
                 let path = PathBuf::from(path);
-                self.state_requests.push(StateRequest { load: true, path, strict_match, reply: req.reply });
+                self.state_requests.push(StateRequest { load: true, path, strict_match, ctx, if_state, reply: tx });
                 return;
             }
             Cmd::Speed { cycles } => {
-                self.speed_requests.push(SpeedRequest { cycles, reply: req.reply });
+                self.speed_requests.push(SpeedRequest { cycles, ctx, if_state, reply: tx });
+                return;
+            }
+            Cmd::Screenshot => {
+                // Answered by the next capture_frame call.
+                self.frame_waiters.push((ctx, tx));
                 return;
             }
             cmd => cmd,
         };
-        let reply = match cmd {
+        self.begin(ctx);
+        let reply = self.dispatch(cpu, cmd);
+        let ctx = self.finish();
+        self.answer(&ctx, tx, reply);
+    }
+
+    /// Carry out a command the hub answers at once.
+    fn dispatch(&mut self, cpu: &mut Cpu, cmd: Cmd) -> Reply {
+        match cmd {
             Cmd::Status => {
                 let status = self.status(cpu);
                 cpu.bus.audio_peak = 0;
                 Reply::Json(status)
             }
             Cmd::Stats => Reply::Json(self.stats_json(cpu)),
-            Cmd::Screenshot => {
-                // Answered by the next capture_frame call.
-                self.frame_waiters.push(req.reply);
-                return;
+            Cmd::Screenshot | Cmd::SaveState { .. } | Cmd::LoadState { .. } | Cmd::Speed { .. } => {
+                unreachable!("answered later, by `handle`'s arrangement")
+            }
+            Cmd::Quit => {
+                self.quit = self.cur.clone();
+                Reply::Json(json!({"ok": true, "shutting_down": true}))
             }
             Cmd::ScreenText => screen_text(cpu),
             Cmd::TraceQuery(q) => self.trace_query(cpu, q),
@@ -1558,44 +2323,63 @@ impl DebugHub {
                 }
             },
             Cmd::Input { events, wait } => {
+                // Pending operations are never evicted: this bounds them.
+                let pending = self.with_journal(|j| j.pending_ops(|k| k == OpKind::Input).len()).unwrap_or(0);
+                if pending >= journal::PENDING_INPUT_CAPACITY {
+                    return Reply::Error(
+                        429,
+                        format!("{} input requests are still being typed: wait for some (or DELETE /api/input)", pending),
+                    );
+                }
                 let mut low = Vec::new();
                 for ev in &events {
                     if let Err(e) = expand_input(ev, cpu.bus.typing_layout(), &mut low) {
-                        let _ = req.reply.send(Reply::bad(e));
-                        return;
+                        return Reply::bad(e);
                     }
                 }
                 self.input.extend(low);
-                // Paused in deterministic mode, the input is delivered only
-                // once the machine resumes: waiting for it would only time out.
-                let held = self.deterministic.is_some() && self.paused && !self.divert;
-                if wait && !held {
-                    self.input.push_back(LowInput::Notify(req.reply));
-                    return;
+                // Every input request is an operation, done once its last
+                // event is delivered (`input_delivered`).
+                let req = self.cur.as_ref().map_or(0, |c| c.req);
+                self.input.push_back(LowInput::End { req });
+                let tag = self.cur.as_ref().and_then(|c| c.tag.clone());
+                let fields = json!({"events": events.len(), "wait": wait});
+                self.append_then(cpu, Kind::InputQueued, Some(req), fields, |j, seq| j.begin_op(req, OpKind::Input, seq, tag));
+                if let Some(ctx) = self.cur.as_mut() {
+                    ctx.op = Some(req);
                 }
-                Reply::Json(json!({"ok": true, "queued": self.input.len()}))
+                // Paused in deterministic mode, the input is delivered only
+                // once the machine resumes: a wait for it is answered at once
+                // (`held`), and its operation shows when it was delivered.
+                let held = self.deterministic.is_some() && self.paused && !self.divert;
+                Reply::Json(json!({"ok": true, "queued": self.input_pending(), "held": held}))
             }
             Cmd::InputClear => {
+                let mut cancelled = Vec::new();
                 for ev in self.input.drain(..) {
-                    if let LowInput::Notify(tx) = ev {
-                        let _ = tx.send(Reply::Json(json!({"ok": false, "cancelled": true})));
+                    if let LowInput::End { req } = ev {
+                        cancelled.push(req);
                     }
                 }
                 self.input_wait_until = None;
                 self.input_wait_ns = None;
-                Reply::Json(json!({"ok": true}))
+                let ids = cancelled.clone();
+                let cause = self.cur.as_ref().map(|c| c.req);
+                self.append_then(cpu, Kind::InputCleared, cause, json!({"cancelled": cancelled}), |j, seq| {
+                    for req in ids {
+                        j.end_op(req, OpState::Cancelled, Some(seq));
+                    }
+                });
+                Reply::Json(json!({"ok": true, "cancelled": cancelled}))
             }
             Cmd::Pause => {
-                if self.paused && self.pause_hit.is_none() {
-                    Reply::Json(json!({"paused": true, "icount": cpu.executed, "registers": regs_json(cpu)}))
-                } else {
-                    if !self.paused {
-                        self.enter_pause(PauseReason::Request);
-                    }
-                    // Pause notifications go out from end_batch.
-                    self.pause_waiters.push(req.reply);
-                    return;
+                if !self.paused {
+                    self.enter_pause(PauseReason::Request);
+                    self.pause_by = self.cur.as_ref().map(|c| c.req);
                 }
+                // A stop the batch made comes first; the stop is the reply.
+                let stop = self.flush_stop(cpu).or_else(|| self.current_stop());
+                Reply::Json(stop_reply(stop, cpu))
             }
             Cmd::Resume { until_ms: Some(_), .. } if self.deterministic.is_none() => {
                 Reply::bad("until_ms needs deterministic mode (--deterministic)")
@@ -1604,50 +2388,39 @@ impl DebugHub {
                 Reply::bad(format!("until_ms {} has passed: emulated time is {} ms", ms, cpu.bus.clock.now_ns() / 1_000_000))
             }
             Cmd::Resume { until, until_ms } => {
-                if let Some(a) = until {
-                    match parse_addr(cpu, &a).and_then(breakpoint_phys) {
-                        Ok(phys) => self.temp_breakpoint = Some(phys),
-                        Err(e) => {
-                            let _ = req.reply.send(Reply::bad(e));
-                            return;
-                        }
-                    }
-                }
+                let target = match until.as_deref().map(|a| parse_addr(cpu, a).and_then(breakpoint_phys)) {
+                    Some(Err(e)) => return Reply::bad(e),
+                    Some(Ok(phys)) => Some(phys),
+                    None => None,
+                };
+                self.take_over();
+                self.temp_breakpoint = target;
                 self.stop_at_ns = until_ms.map(|ms| ms.saturating_mul(1_000_000));
-                let was = self.paused;
-                self.resume();
-                if was {
-                    self.emit(json!({"type": "resumed", "icount": cpu.executed}));
-                }
+                self.start_op(cpu, OpKind::Resume, json!({"until": until, "until_ms": until_ms}));
                 Reply::Json(json!({"ok": true, "paused": false}))
             }
             Cmd::Step { count } => {
+                self.take_over();
                 self.step_budget = Some(count.max(1));
-                self.resume();
-                self.pause_waiters.push(req.reply);
-                return;
+                self.start_op(cpu, OpKind::Step, json!({"count": count.max(1)}));
+                Reply::Json(json!({"ok": true, "paused": false}))
             }
             Cmd::StepOver => {
-                match step_over_target(cpu) {
+                let target = step_over_target(cpu);
+                self.take_over();
+                match target {
                     Some(next) => self.temp_breakpoint = Some(next),
                     None => self.step_budget = Some(1),
                 }
-                let was = self.paused;
-                self.resume();
-                if was {
-                    self.emit(json!({"type": "resumed", "icount": cpu.executed}));
-                }
-                self.pause_waiters.push(req.reply);
-                return;
+                self.start_op(cpu, OpKind::StepOver, json!({"until": target.map(|p| format!("{:05X}", p))}));
+                Reply::Json(json!({"ok": true, "paused": false}))
             }
-            Cmd::WaitPause => {
-                if self.paused && self.pause_hit.is_none() {
-                    Reply::Json(json!({"paused": true, "icount": cpu.executed, "registers": regs_json(cpu)}))
-                } else {
-                    self.pause_waiters.push(req.reply);
-                    return;
-                }
-            }
+            Cmd::WaitPause => match self.paused.then(|| self.current_stop()).flatten() {
+                // Stopped: the stop, with the registers as they are now.
+                Some(stop) => Reply::Json(stop_reply(Some(stop), cpu)),
+                // The server waits for the next stop in the journal.
+                None => Reply::Json(json!({"paused": false})),
+            },
             Cmd::RebootShell => {
                 // As the settings window's close does: the batch file and
                 // commands queued go too, or their next line (often EXIT)
@@ -1655,17 +2428,23 @@ impl DebugHub {
                 self.release_keys(cpu);
                 cpu.close_program();
                 self.closed_program = true;
-                self.resume();
+                self.take_over();
+                self.start_op(cpu, OpKind::RebootShell, json!({}));
                 Reply::Json(json!({"ok": true}))
             }
             Cmd::Reboot => {
                 cpu.bus.reset_requested = true;
-                self.resume();
+                self.take_over();
+                self.start_op(cpu, OpKind::Reboot, json!({}));
                 Reply::Json(json!({"ok": true}))
             }
             Cmd::GetRegs => Reply::Json(regs_json(cpu)),
             Cmd::SetRegs(map) => match set_regs(cpu, &map) {
-                Ok(()) => Reply::Json(regs_json(cpu)),
+                Ok(()) => {
+                    let changed: Map<String, Value> = map.iter().map(|(k, v)| (k.to_ascii_lowercase(), v.clone())).collect();
+                    self.record(cpu, Kind::RegistersWritten, json!({"changed": changed}));
+                    Reply::Json(regs_json(cpu))
+                }
                 Err(e) => Reply::bad(e),
             },
             Cmd::ReadMem { addr, len } => match parse_addr(cpu, &addr) {
@@ -1705,6 +2484,7 @@ impl DebugHub {
                     match targets {
                         Some(t) if t.iter().all(|&p| p < cpu.bus.ram().len() || cpu.bus.vbe.lfb_offset(p, 1).is_some()) => {
                             let old = peek(cpu, &t);
+                            let guarded = expect.is_some();
                             if let Some(expect) = expect.filter(|e| *e != old) {
                                 let (found, expected) = (trace::hex_bytes(&old), trace::hex_bytes(&expect));
                                 Reply::ErrorJson(
@@ -1734,12 +2514,21 @@ impl DebugHub {
                                 // The bytes replaced and what reads back,
                                 // which can differ from the data: VGA memory
                                 // reads through the read mode.
+                                let new = peek(cpu, &t);
+                                let addr = format!("{:05X}", a.phys.unwrap_or(0));
+                                self.record(cpu, Kind::MemoryWritten, json!({
+                                    "addr": addr,
+                                    "len": data.len(),
+                                    "old": bytes_record(&old),
+                                    "new": bytes_record(&new),
+                                    "expect": guarded,
+                                }));
                                 Reply::Json(json!({
                                     "ok": true,
-                                    "addr": format!("{:05X}", a.phys.unwrap_or(0)),
+                                    "addr": addr,
                                     "written": data.len(),
                                     "old": trace::hex_bytes(&old),
-                                    "new": trace::hex_bytes(&peek(cpu, &t)),
+                                    "new": trace::hex_bytes(&new),
                                 }))
                             }
                         }
@@ -1751,9 +2540,15 @@ impl DebugHub {
             },
             Cmd::Disasm { addr, count } => self.disasm(cpu, addr, count),
             Cmd::ListBreakpoints => Reply::Json(self.breakpoints_json()),
-            Cmd::AddBreakpoint(a) => match parse_addr(cpu, &a).and_then(breakpoint_phys) {
+            Cmd::AddBreakpoint { addr, once } => match parse_addr(cpu, &addr).and_then(breakpoint_phys) {
                 Ok(phys) => {
                     self.breakpoints.insert(phys);
+                    if once {
+                        self.once.insert(phys);
+                    } else {
+                        self.once.remove(&phys);
+                    }
+                    self.record(cpu, Kind::BreakpointSet, json!({"addr": format!("{:05X}", phys), "once": once}));
                     Reply::Json(self.breakpoints_json())
                 }
                 Err(e) => Reply::bad(e),
@@ -1761,15 +2556,19 @@ impl DebugHub {
             Cmd::RemoveBreakpoint(a) => match a {
                 None => {
                     self.breakpoints.clear();
+                    self.once.clear();
                     self.break_exceptions = 0;
                     self.break_mode_switch = false;
                     self.break_program_start = false;
                     self.break_program_exit = false;
+                    self.record(cpu, Kind::BreakpointRemoved, json!({"all": true}));
                     Reply::Json(self.breakpoints_json())
                 }
                 Some(a) => match parse_addr(cpu, &a).and_then(breakpoint_phys) {
                     Ok(phys) => {
                         if self.breakpoints.remove(&phys) {
+                            self.once.remove(&phys);
+                            self.record(cpu, Kind::BreakpointRemoved, json!({"addr": format!("{:05X}", phys)}));
                             Reply::Json(self.breakpoints_json())
                         } else {
                             Reply::Error(404, format!("no breakpoint at {:05X}", phys))
@@ -1781,13 +2580,13 @@ impl DebugHub {
             Cmd::ListWatchpoints => Reply::Json(self.watchpoints_json(cpu)),
             Cmd::AddWatchpoint { addr, len } => {
                 if !matches!(len, 1 | 2 | 4) {
-                    let _ = req.reply.send(Reply::bad("len is 1, 2 or 4"));
-                    return;
+                    return Reply::bad("len is 1, 2 or 4");
                 }
                 match parse_addr(cpu, &addr).and_then(breakpoint_phys) {
                     Ok(phys) => {
                         self.watchpoints.retain(|w| w.phys != phys);
                         self.watchpoints.push(Watch { phys, len, value: Watch::read(cpu, phys, len) });
+                        self.record(cpu, Kind::WatchpointSet, json!({"addr": format!("{:05X}", phys), "len": len}));
                         Reply::Json(self.watchpoints_json(cpu))
                     }
                     Err(e) => Reply::bad(e),
@@ -1796,6 +2595,7 @@ impl DebugHub {
             Cmd::RemoveWatchpoint(addr) => match addr {
                 None => {
                     self.watchpoints.clear();
+                    self.record(cpu, Kind::WatchpointRemoved, json!({"all": true}));
                     Reply::Json(self.watchpoints_json(cpu))
                 }
                 Some(a) => match parse_addr(cpu, &a).and_then(breakpoint_phys) {
@@ -1803,6 +2603,7 @@ impl DebugHub {
                         let before = self.watchpoints.len();
                         self.watchpoints.retain(|w| w.phys != phys);
                         if self.watchpoints.len() < before {
+                            self.record(cpu, Kind::WatchpointRemoved, json!({"addr": format!("{:05X}", phys)}));
                             Reply::Json(self.watchpoints_json(cpu))
                         } else {
                             Reply::Error(404, format!("no watchpoint at {:05X}", phys))
@@ -1838,10 +2639,18 @@ impl DebugHub {
                 }
                 self.seen_exceptions = cpu.exceptions;
                 self.seen_mode_switches = cpu.mode_switches;
-                Reply::Json(self.breakpoints_json())
+                let list = self.breakpoints_json();
+                let fields = json!({
+                    "exceptions": list["exceptions"],
+                    "mode_switch": self.break_mode_switch,
+                    "program_start": self.break_program_start,
+                    "program_exit": self.break_program_exit,
+                });
+                self.record(cpu, Kind::BreakOn, fields);
+                Reply::Json(list)
             }
             Cmd::Run { command, stop_at_entry } => {
-                if self.run_wait.as_ref().is_some_and(|r| !r.reply.is_closed()) {
+                if self.run_wait.is_some() {
                     Reply::Error(409, "a run command is already waiting for its program".into())
                 } else if !at_idle_prompt(cpu) {
                     Reply::Error(409, "the DOS prompt is busy with a program, a batch file, PAUSE, CHOICE or EDIT".into())
@@ -1849,15 +2658,13 @@ impl DebugHub {
                     Reply::bad("command: one command line")
                 } else {
                     cpu.queue_batch_lines([command.trim()]);
+                    self.take_over();
                     self.seen_starts = cpu.programs.started;
                     self.start_once = stop_at_entry;
-                    self.run_wait = Some(RunWait { before: cpu.programs.started, stop_at_entry, reply: req.reply });
-                    let was = self.paused;
-                    self.resume();
-                    if was {
-                        self.emit(json!({"type": "resumed", "icount": cpu.executed}));
-                    }
-                    return;
+                    let op = self.cur.as_ref().map_or(0, |c| c.req);
+                    self.run_wait = Some(RunWait { before: cpu.programs.started, stop_at_entry, op });
+                    self.start_op(cpu, OpKind::Run, json!({"command": command.trim(), "stop_at_entry": stop_at_entry}));
+                    Reply::Json(json!({"ok": true}))
                 }
             }
             Cmd::Ivt => Reply::Json(ivt_json(cpu)),
@@ -1883,12 +2690,17 @@ impl DebugHub {
             }),
             Cmd::Exceptions => Reply::Json(pm::exceptions_json(cpu)),
             Cmd::Drives => Reply::Json(drives_json(cpu)),
-            Cmd::SyncShared => Reply::Json(json!({"messages": cpu.bus.sync_shared(None)})),
+            Cmd::SyncShared => {
+                let messages = cpu.bus.sync_shared(None);
+                self.record(cpu, Kind::SharedSynced, json!({"messages": messages}));
+                Reply::Json(json!({"messages": messages}))
+            }
             Cmd::SwapImages => {
                 let messages = cpu.bus.swap_images();
                 for message in &messages {
                     cpu.bus.log_string(&format!("[DEBUG] {}", message));
                 }
+                self.record(cpu, Kind::ImagesSwapped, json!({"messages": messages}));
                 Reply::Json(json!({"messages": messages, "drives": drives_json(cpu)}))
             }
             Cmd::Mount { drive, path, kind, label, read_only, images } => {
@@ -1899,25 +2711,29 @@ impl DebugHub {
                             drive,
                             root.display()
                         ));
+                        let drives = drives_json(cpu);
+                        let key = parse_drive_name(&drive).map(crate::disk::drive_key);
+                        let mounted = key.as_ref().and_then(|k| drives["drives"].get(k).cloned()).unwrap_or(Value::Null);
+                        self.record(cpu, Kind::DriveMounted, json!({"drive": key, "mounted": mounted}));
+                        Reply::Json(drives)
+                    }
+                    Err(e) => Reply::bad(e),
+                }
+            }
+            Cmd::Unmount { drive } => {
+                let parsed = parse_drive_name(&drive);
+                let result = parsed
+                    .ok_or_else(|| format!("invalid drive letter '{}'", drive))
+                    .and_then(|d| cpu.bus.unmount_drive(d));
+                match result {
+                    Ok(()) => {
+                        self.record(cpu, Kind::DriveUnmounted, json!({"drive": parsed.map(crate::disk::drive_key)}));
                         Reply::Json(drives_json(cpu))
                     }
                     Err(e) => Reply::bad(e),
                 }
             }
-            Cmd::SaveState { .. } | Cmd::LoadState { .. } | Cmd::Speed { .. } => {
-                unreachable!("handed to the front end above")
-            }
-            Cmd::Unmount { drive } => {
-                let result = parse_drive_name(&drive)
-                    .ok_or_else(|| format!("invalid drive letter '{}'", drive))
-                    .and_then(|d| cpu.bus.unmount_drive(d));
-                match result {
-                    Ok(()) => Reply::Json(drives_json(cpu)),
-                    Err(e) => Reply::bad(e),
-                }
-            }
-        };
-        let _ = req.reply.send(reply);
+        }
     }
 
     fn status(&self, cpu: &Cpu) -> Value {
@@ -1956,11 +2772,7 @@ impl DebugHub {
                 "polls": cpu.bus.activity.polls,
                 "status_reads": cpu.bus.activity.status_reads,
             },
-            "cs_ip": if cpu.eip() > 0xFFFF {
-                format!("{:04X}:{:08X}", cpu.cs(), cpu.eip())
-            } else {
-                format!("{:04X}:{:04X}", cpu.cs(), cpu.ip())
-            },
+            "cs_ip": cs_ip(cpu),
             "cpu_mode": pm::mode_name(cpu),
             "cpu_state": format!("{:?}", cpu.state),
             "shell_idle": cpu.shell_idle(),
@@ -2051,7 +2863,7 @@ impl DebugHub {
             "trace": self.trace_status(),
             "breakpoints": self.breakpoints.len(),
             "watchpoints": self.watchpoints.len(),
-            "input_queue": self.input.len(),
+            "input_queue": self.input_pending(),
             "keyboard_buffer": cpu.bus.keyboard_buffer.len(),
             // The interrupt controllers: requests waiting, masked lines and
             // lines in service (bit n = line n of that chip).
@@ -2105,6 +2917,19 @@ impl DebugHub {
         // to end did.
         status["program"] = cpu.program.clone().into();
         status["last_exit"] = exit_json(cpu);
+        // The journal: its last and oldest entries, the last that changed
+        // the machine, the stop it is in, the control operation under way,
+        // and whether a strict-match save could be done now.
+        if let Some(shared) = &self.shared {
+            let (last, first, state_seq) = self.with_journal(|j| (j.last(), j.first(), j.state_seq)).unwrap_or_default();
+            status["seq"] = last.into();
+            status["first_seq"] = first.into();
+            status["state_seq"] = state_seq.into();
+            status["stop"] = self.current_stop().unwrap_or(Value::Null);
+            status["op"] = self.current_op.into();
+            status["quiescent"] = self.check(Need::Quiescent { input_ok: false }).is_ok().into();
+            status["instance"] = shared.instance_hex().into();
+        }
         status
     }
 
@@ -2241,10 +3066,14 @@ impl DebugHub {
     fn breakpoints_json(&self) -> Value {
         let mut v: Vec<_> = self.breakpoints.iter().copied().collect();
         v.sort();
+        let mut once: Vec<_> = self.once.iter().copied().collect();
+        once.sort();
         let exceptions: Vec<String> =
             (0..32).filter(|i| self.break_exceptions & (1 << i) != 0).map(|i| format!("{:02X}", i)).collect();
         json!({
             "breakpoints": v.iter().map(|p| format!("{:05X}", p)).collect::<Vec<_>>(),
+            // The breakpoints among them that go once they stop the machine.
+            "once": once.iter().map(|p| format!("{:05X}", p)).collect::<Vec<_>>(),
             "exceptions": exceptions,
             "mode_switch": self.break_mode_switch,
             "program_start": self.break_program_start,
@@ -2253,14 +3082,42 @@ impl DebugHub {
     }
 }
 
-/// The reply to a change to the machine that deterministic mode refuses
-/// while it runs (409), shaped as a refused strict-match save's.
-fn deterministic_refusal() -> Value {
-    json!({
-        "error": "deterministic mode takes input and changes to the machine only while it is paused: \
-                  pause it, or resume with until_ms, then send the request",
-        "paused": false,
-    })
+/// The fields of a stop as replies have them since before the journal
+/// (`paused`, `reason`, `icount`, `registers` and the rest), and the whole
+/// `paused` entry as `stop`.
+pub(crate) fn stop_fields(stop: &Value) -> Value {
+    let mut reply = json!({"paused": true});
+    if let Value::Object(entry) = stop {
+        for (k, v) in entry {
+            if !matches!(k.as_str(), "seq" | "type" | "t_ms" | "emu_ns" | "cause" | "request_id" | "op") {
+                reply[k] = v.clone();
+            }
+        }
+    }
+    reply["stop"] = stop.clone();
+    reply
+}
+
+/// The reply to a pause or a wait: `stop_fields`, with the instruction
+/// count and the registers as they are now, which a write after the stop
+/// may have changed.
+fn stop_reply(stop: Option<Value>, cpu: &Cpu) -> Value {
+    let mut reply = stop_fields(&stop.unwrap_or(Value::Null));
+    reply["icount"] = cpu.executed.into();
+    reply["registers"] = regs_json(cpu);
+    reply
+}
+
+/// Bytes as a `memory_written` entry keeps them: hex up to 256 bytes, else
+/// their SHA-256.
+fn bytes_record(bytes: &[u8]) -> Value {
+    use sha2::Digest;
+    if bytes.len() <= 256 {
+        trace::hex_bytes(bytes).into()
+    } else {
+        let digest = sha2::Sha256::digest(bytes);
+        json!({"sha256": digest.iter().map(|b| format!("{:02x}", b)).collect::<String>()})
+    }
 }
 
 /// Commands that change the machine (its input, memory, registers, drives,
@@ -2280,6 +3137,15 @@ fn changes_machine(cmd: &Cmd) -> bool {
             | Cmd::Reboot
             | Cmd::RebootShell
     )
+}
+
+/// CS:IP, or CS:EIP past FFFFh.
+fn cs_ip(cpu: &Cpu) -> String {
+    if cpu.eip() > 0xFFFF {
+        format!("{:04X}:{:08X}", cpu.cs(), cpu.eip())
+    } else {
+        format!("{:04X}:{:04X}", cpu.cs(), cpu.ip())
+    }
 }
 
 /// Whether the shell waits at its prompt with nothing to run: no program,
@@ -2734,7 +3600,8 @@ mod determinism_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::{Cmd, DebugHub, InputEvent, LowInput, Reply, Request, TraceQuery, keys_for_char, step_over_len};
+    use super::journal::{OpLookup, OpState};
+    use super::{Answer, Cmd, DebugHub, InputEvent, LowInput, Reply, StateRequest, TraceQuery, keys_for_char, step_over_len};
     use rust_dos::deterministic::Deterministic;
     use crate::cpu::{Cpu, CpuState};
     use crate::exec::{self, StopReason};
@@ -2743,9 +3610,19 @@ mod tests {
     use tokio::sync::oneshot;
 
     fn handle(cpu: &mut Cpu, hub: &mut DebugHub, cmd: Cmd) -> Reply {
-        let (reply, mut rx) = oneshot::channel();
-        hub.handle(cpu, Request { cmd, reply });
-        rx.try_recv().expect("an answer at once")
+        let (request, mut rx) = hub.request(cmd);
+        hub.handle(cpu, request);
+        rx.try_recv().expect("an answer at once").reply
+    }
+
+    /// The journal's entries, as JSON.
+    fn entries(hub: &DebugHub) -> Vec<Value> {
+        hub.with_journal(|j| j.after(0).map(|it| it.map(|e| e.value()).collect()).unwrap_or_default()).unwrap_or_default()
+    }
+
+    /// The journal's entries of type `kind`.
+    fn entries_of(hub: &DebugHub, kind: &str) -> Vec<Value> {
+        entries(hub).into_iter().filter(|e| e["type"] == kind).collect()
     }
 
     /// A trace page from cursor `since`: its instruction counts, the next
@@ -2814,12 +3691,10 @@ mod tests {
 
     /// The reply to a command the hub answers at once.
     fn reply(cpu: &mut Cpu, hub: &mut DebugHub, cmd: Cmd) -> Result<Value, (u16, String)> {
-        let (reply, mut rx) = oneshot::channel();
-        hub.handle(cpu, Request { cmd, reply });
-        match rx.try_recv() {
-            Ok(Reply::Json(v)) => Ok(v),
-            Ok(Reply::Error(code, e)) => Err((code, e)),
-            Ok(Reply::ErrorJson(code, v)) => Err((code, v.to_string())),
+        match handle(cpu, hub, cmd) {
+            Reply::Json(v) => Ok(v),
+            Reply::Error(code, e) => Err((code, e)),
+            Reply::ErrorJson(code, v) => Err((code, v.to_string())),
             _ => panic!("no JSON reply"),
         }
     }
@@ -2871,7 +3746,7 @@ mod tests {
         let mut cpu = Cpu::new(dir);
         cpu.load_shell();
         // Polled as the server's is; this one's commands come from `send`.
-        let mut hub = DebugHub::new(Some(std::sync::mpsc::channel().1), None, 1000);
+        let mut hub = DebugHub::for_tests(&cpu);
         run(&mut cpu, &mut hub, 20);
         assert!(cpu.shell_idle(), "the shell waits at its prompt");
         (cpu, hub)
@@ -2898,24 +3773,88 @@ mod tests {
         }
     }
 
-    fn send(cpu: &mut Cpu, hub: &mut DebugHub, cmd: Cmd) -> oneshot::Receiver<Reply> {
-        let (reply, rx) = oneshot::channel();
-        hub.handle(cpu, Request { cmd, reply });
-        rx
+    /// A request sent to the hub: what the server waits for after the
+    /// hub's answer, and the answer.
+    struct Sent {
+        wait: Wait,
+        rx: oneshot::Receiver<Answer>,
     }
 
-    /// The reply to a command, after running up to `frames` frames for it.
-    fn answer(cpu: &mut Cpu, hub: &mut DebugHub, mut rx: oneshot::Receiver<Reply>, frames: usize) -> Result<Value, (u16, String)> {
-        for _ in 0..=frames {
-            match rx.try_recv() {
-                Ok(Reply::Json(v)) => return Ok(v),
-                Ok(Reply::Error(code, e)) => return Err((code, e)),
-                Ok(Reply::ErrorJson(code, v)) => return Err((code, v.to_string())),
-                Ok(_) => panic!("not a JSON reply"),
-                Err(_) => run(cpu, hub, 1),
+    enum Wait {
+        /// Nothing: the answer is the reply.
+        No,
+        /// The end of the operation the request started.
+        Op,
+        /// The stop the machine is in, or the next.
+        Stop,
+    }
+
+    fn send(cpu: &mut Cpu, hub: &mut DebugHub, cmd: Cmd) -> Sent {
+        let wait = match cmd {
+            Cmd::Step { .. } | Cmd::StepOver | Cmd::Run { .. } => Wait::Op,
+            Cmd::WaitPause => Wait::Stop,
+            _ => Wait::No,
+        };
+        let (request, rx) = hub.request(cmd);
+        hub.handle(cpu, request);
+        Sent { wait, rx }
+    }
+
+    /// How operation `op` ended, as the server tells it: the stop, a run's
+    /// program, or its failure. None while it is pending.
+    fn op_reply(hub: &DebugHub, op: u64) -> Option<Result<Value, (u16, String)>> {
+        hub.with_journal(|j| {
+            let OpLookup::Found(found) = j.op(op) else { panic!("no operation {}", op) };
+            let end = found.end_seq.and_then(|s| j.get(s)).map(|e| e.value()).unwrap_or(Value::Null);
+            match found.state {
+                OpState::Pending => None,
+                OpState::Stopped => Some(Ok(end)),
+                OpState::Done => Some(Ok(serde_json::json!({"ok": true, "program": end["program"]}))),
+                OpState::Failed => Some(Err(found.error.clone().unwrap())),
+                OpState::Cancelled => Some(Err((409, end.to_string()))),
+                OpState::Superseded => Some(Err((409, "superseded".into()))),
             }
+        })
+        .unwrap()
+    }
+
+    /// The first `paused` entry after `after`.
+    fn stop_after(hub: &DebugHub, after: u64) -> Option<Value> {
+        entries(hub).into_iter().find(|e| e["type"] == "paused" && e["seq"].as_u64() > Some(after))
+    }
+
+    /// The reply to a command, after running up to `frames` frames for it
+    /// and what the server waits for after the hub's answer.
+    fn answer(cpu: &mut Cpu, hub: &mut DebugHub, mut sent: Sent, frames: usize) -> Result<Value, (u16, String)> {
+        let mut frame = 0;
+        let answer = loop {
+            match sent.rx.try_recv() {
+                Ok(answer) => break answer,
+                Err(_) if frame < frames => run(cpu, hub, 1),
+                Err(_) => panic!("no answer in {} frames", frames),
+            }
+            frame += 1;
+        };
+        let value = match answer.reply {
+            Reply::Json(v) => v,
+            Reply::Error(code, e) => return Err((code, e)),
+            Reply::ErrorJson(code, v) => return Err((code, v.to_string())),
+            _ => panic!("not a JSON reply"),
+        };
+        loop {
+            let done = match sent.wait {
+                Wait::No => Some(Ok(value.clone())),
+                Wait::Op => op_reply(hub, answer.meta.op.expect("an operation")),
+                Wait::Stop if value["paused"] == true => Some(Ok(value.clone())),
+                Wait::Stop => stop_after(hub, answer.meta.last).map(Ok),
+            };
+            match done {
+                Some(done) => return done,
+                None if frame < frames => run(cpu, hub, 1),
+                None => panic!("no end in {} frames", frames),
+            }
+            frame += 1;
         }
-        panic!("no reply in {} frames", frames)
     }
 
     fn ask(cpu: &mut Cpu, hub: &mut DebugHub, cmd: Cmd, frames: usize) -> Result<Value, (u16, String)> {
@@ -3058,14 +3997,24 @@ mod tests {
     /// Ask to save a state, with strict_match or not, and the requests the
     /// front end gets to carry out, with the reply of one refused.
     fn state_request(cpu: &mut Cpu, hub: &mut DebugHub, strict_match: bool) -> (usize, Option<(u16, Value)>) {
-        let mut rx = send(cpu, hub, Cmd::SaveState { path: "/tmp/x.state".into(), strict_match });
-        let taken = hub.take_state_requests().len();
-        let refused = match rx.try_recv() {
+        let mut sent = send(cpu, hub, Cmd::SaveState { path: "/tmp/x.state".into(), strict_match });
+        let taken = take_state_requests(hub).len();
+        let refused = match sent.rx.try_recv().map(|a| a.reply) {
             Ok(Reply::ErrorJson(code, body)) => Some((code, body)),
             Ok(_) => panic!("not a refusal"),
             Err(_) => None,
         };
         (taken, refused)
+    }
+
+    /// The save states the front end gets to save or load now.
+    fn take_state_requests(hub: &mut DebugHub) -> Vec<StateRequest> {
+        std::iter::from_fn(|| {
+            let request = hub.next_state_request();
+            hub.finish();
+            request
+        })
+        .collect()
     }
 
     #[test]
@@ -3084,7 +4033,7 @@ mod tests {
         let strict = Cmd::SaveState { path: "/tmp/x.state".into(), strict_match: true };
         let _save = send(&mut cpu, &mut hub, strict);
         let _step = send(&mut cpu, &mut hub, Cmd::Step { count: 1 });
-        assert!(hub.take_state_requests().is_empty(), "refused: the step is under way");
+        assert!(take_state_requests(&mut hub).is_empty(), "refused: the step is under way");
 
         // Queued input goes on being typed while paused: a save waits for
         // it, and a load drops it.
@@ -3096,7 +4045,23 @@ mod tests {
         assert_eq!((taken, code), (0, 409));
         assert!(body["error"].as_str().unwrap().contains("queued input"), "{}", body);
         let _load = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: true });
-        assert_eq!(hub.take_state_requests().len(), 1, "a load drops the input");
+        assert_eq!(take_state_requests(&mut hub).len(), 1, "a load drops the input");
+    }
+
+    #[test]
+    fn input_whose_last_wait_is_under_way_is_still_being_typed() {
+        let (mut cpu, mut hub) = machine("strict-match-wait");
+        pause(&mut cpu, &mut hub);
+        let op = started_op(&mut cpu, &mut hub, Cmd::Input { events: vec![InputEvent::Wait { ms: 60_000 }], wait: false });
+        // The wait starts: only the end of the request is left in the queue.
+        run(&mut cpu, &mut hub, 3);
+        assert_eq!(op_state(&hub, op).state, OpState::Pending);
+        let (taken, refused) = state_request(&mut cpu, &mut hub, true);
+        let (code, body) = refused.expect("refused while the input's operation is pending");
+        assert_eq!((taken, code, body["input_queued"].as_u64()), (0, 409, Some(1)), "{}", body);
+        let read = journal_state(&hub).0;
+        let (refused, _) = ask_guarded(&mut cpu, &mut hub, Cmd::GetRegs, Some(read));
+        assert_eq!(refused.unwrap_err().1["precondition"], "state");
     }
 
     #[test]
@@ -3108,24 +4073,26 @@ mod tests {
         // Sent with a strict-match save while running: only that save is refused.
         let mut strict = send(&mut cpu, &mut hub, Cmd::SaveState { path: "/tmp/a.state".into(), strict_match: true });
         let _plain = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/b.state".into(), strict_match: false });
-        let taken = hub.take_state_requests();
+        let taken = take_state_requests(&mut hub);
         assert_eq!(taken.iter().map(|r| (r.load, r.strict_match)).collect::<Vec<_>>(), [(true, false)]);
-        assert!(matches!(strict.try_recv(), Ok(Reply::ErrorJson(409, _))));
+        assert!(matches!(strict.rx.try_recv().map(|a| a.reply), Ok(Reply::ErrorJson(409, _))));
     }
 
     #[test]
     fn a_loaded_state_leaves_no_breakpoint_watchpoint_or_stop_from_before() {
         let (mut cpu, mut hub) = machine("reset");
         pause(&mut cpu, &mut hub);
-        ask(&mut cpu, &mut hub, Cmd::AddBreakpoint("0100:0000".into()), 0).unwrap();
+        ask(&mut cpu, &mut hub, Cmd::AddBreakpoint { addr: "0100:0000".into(), once: false }, 0).unwrap();
         ask(&mut cpu, &mut hub, Cmd::AddWatchpoint { addr: "0200:0000".into(), len: 2 }, 0).unwrap();
         let on = Cmd::BreakOn { exceptions: Some(1), clear_exceptions: None, mode_switch: Some(true), program_start: None, program_exit: Some(true) };
         ask(&mut cpu, &mut hub, on, 0).unwrap();
         hub.temp_breakpoint = Some(0x1234);
-        let mut waiting = send(&mut cpu, &mut hub, Cmd::Input { events: Vec::new(), wait: true });
+        let typed = Cmd::Input { events: vec![InputEvent::Wait { ms: 60_000 }], wait: true };
+        let sent = send(&mut cpu, &mut hub, typed);
+        answer(&mut cpu, &mut hub, sent, 0).unwrap();
         hub.key_down(&mut cpu, super::keys::lookup("a").unwrap(), b'a');
 
-        let cleared = hub.reset_after_load(&cpu);
+        let (cleared, cancelled) = hub.reset_after_load(&cpu);
         assert_eq!(
             cleared,
             serde_json::json!({
@@ -3133,11 +4100,12 @@ mod tests {
                 "run_to": true, "step": false, "pause_waits": 0, "run": false, "input": 1, "held_keys": 1, "until_ms": false,
             })
         );
+        let queued = entries_of(&hub, "input_queued");
+        assert_eq!(cancelled, [queued[0]["cause"].as_u64().unwrap()], "the input's operation is cancelled");
         // The key is forgotten: no key-up reaches the restored machine.
         let before = cpu.bus.kbc.pending();
         hub.release_keys(&mut cpu);
         assert_eq!(cpu.bus.kbc.pending(), before, "no break code after the load");
-        assert!(matches!(waiting.try_recv(), Ok(Reply::Error(409, _))), "the input's wait is answered");
         assert!(!hub.begin_batch(&cpu), "nothing is left to stop the machine");
         assert!(hub.paused, "the machine stays paused");
         let listed = ask(&mut cpu, &mut hub, Cmd::ListBreakpoints, 0).unwrap();
@@ -3215,9 +4183,9 @@ mod tests {
         let mut cpu = Cpu::new(dir);
         cpu.bus.set_cycles_per_ms(3000);
         cpu.load_shell();
-        let mut hub = DebugHub::new(Some(std::sync::mpsc::channel().1), None, 1000);
+        let mut hub = DebugHub::for_tests(&cpu);
         hub.deterministic = Some(mode.start);
-        hub.pause_at_start();
+        hub.pause_at_start(&cpu);
         (cpu, hub, mode)
     }
 
@@ -3247,7 +4215,7 @@ mod tests {
 
     /// Type PROBE at the prompt and run to 2 s of emulated time, in host
     /// frames of `frame_ms`: the instructions executed, and memory.
-    fn typed_run(name: &str, frame_ms: u64) -> (u64, Vec<u8>) {
+    fn typed_run(name: &str, frame_ms: u64) -> (u64, Vec<u8>, Vec<Value>) {
         let (mut cpu, mut hub, mut mode) = deterministic_machine(name);
         reply(&mut cpu, &mut hub, typed("PROBE\n")).unwrap();
         let resumed = reply(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: Some(2000) }).unwrap();
@@ -3256,7 +4224,18 @@ mod tests {
         assert!(hub.paused, "stopped at until_ms");
         assert_eq!(cpu.bus.clock.now_ns() / 1_000_000, 2000);
         assert_eq!(cpu.programs.started, 1, "PROBE ran");
-        (cpu.executed, cpu.bus.ram().to_vec())
+        let stop = entries_of(&hub, "paused").pop().unwrap();
+        // At the first instruction boundary past 2 s.
+        assert_eq!((stop["reason"].as_str(), stop["emu_ns"].as_u64().map(|ns| ns / 1_000_000)), (Some("time"), Some(2000)));
+        // The journal, but for the host's time.
+        let journal = entries(&hub)
+            .into_iter()
+            .map(|mut e| {
+                e.as_object_mut().unwrap().remove("t_ms");
+                e
+            })
+            .collect();
+        (cpu.executed, cpu.bus.ram().to_vec(), journal)
     }
 
     #[test]
@@ -3265,6 +4244,92 @@ mod tests {
         let b = typed_run("b", 41);
         assert_eq!(a.0, b.0);
         assert!(a.1 == b.1, "the same memory");
+        assert_eq!(a.2, b.2, "the same journal");
+        assert!(a.2.iter().any(|e| e["type"] == "input_delivered") && a.2.iter().any(|e| e["type"] == "program_started"));
+    }
+
+    /// Carry out the save states asked for, in memory, as the
+    /// deterministic front end does.
+    fn carry_out_states(cpu: &mut Cpu, hub: &mut DebugHub, mode: &mut Deterministic, saved: &mut Option<Vec<u8>>) {
+        while let Some(request) = hub.next_state_request() {
+            let result = if request.load {
+                rust_dos::savestate::machine::load(cpu, saved.as_ref().unwrap()).unwrap();
+                mode.resync(cpu);
+                Ok(serde_json::json!({"loaded": true}))
+            } else {
+                *saved = Some(rust_dos::savestate::machine::save(cpu));
+                Ok(serde_json::json!({"saved": true}))
+            };
+            hub.state_done(cpu, request, result);
+        }
+    }
+
+    /// A session in deterministic mode, in host frames whose emulated
+    /// lengths come from `frames`: typed input with waits, a strict-match
+    /// save and load, and a rewind. The instructions executed, memory and
+    /// the journal but for the host's time.
+    fn session(name: &str, frames: &[u64]) -> (u64, Vec<u8>, Vec<Value>) {
+        let (mut cpu, mut hub, mut mode) = deterministic_machine(name);
+        let mut saved = None;
+        let mut next = frames.iter().copied().cycle();
+        let mut go = |cpu: &mut Cpu, hub: &mut DebugHub, mode: &mut Deterministic, until_ms: u64| {
+            reply(cpu, hub, Cmd::Resume { until: None, until_ms: Some(until_ms) }).unwrap();
+            for _ in 0..100_000 {
+                if hub.paused {
+                    break;
+                }
+                run_deterministic(cpu, hub, mode, 1, next.next().unwrap());
+            }
+            assert!(hub.paused && cpu.bus.clock.now_ns() / 1_000_000 == until_ms, "{}: at {} ms", name, until_ms);
+        };
+        let wait = |ms| InputEvent::Wait { ms };
+        let ty = |text: &str| InputEvent::Type { text: text.into(), delay_ms: Some(30) };
+        reply(&mut cpu, &mut hub, Cmd::Input { events: vec![wait(120), ty("PROBE"), wait(45), ty("\n")], wait: false }).unwrap();
+        go(&mut cpu, &mut hub, &mut mode, 900);
+        let sent = send(&mut cpu, &mut hub, Cmd::SaveState { path: "s".into(), strict_match: true });
+        carry_out_states(&mut cpu, &mut hub, &mut mode, &mut saved);
+        answer(&mut cpu, &mut hub, sent, 0).unwrap();
+        reply(&mut cpu, &mut hub, Cmd::Input { events: vec![ty("DIR"), wait(70), ty("\n")], wait: false }).unwrap();
+        go(&mut cpu, &mut hub, &mut mode, 1600);
+        let sent = send(&mut cpu, &mut hub, Cmd::LoadState { path: "s".into(), strict_match: true });
+        carry_out_states(&mut cpu, &mut hub, &mut mode, &mut saved);
+        answer(&mut cpu, &mut hub, sent, 0).unwrap();
+        reply(&mut cpu, &mut hub, Cmd::Input { events: vec![ty("VER\n")], wait: false }).unwrap();
+        go(&mut cpu, &mut hub, &mut mode, 1500);
+        // A rewind: the front end loads a state and tells the hub after.
+        rust_dos::savestate::machine::load(&mut cpu, saved.as_ref().unwrap()).unwrap();
+        mode.resync(&cpu);
+        hub.state_loaded_elsewhere(&cpu, "rewind");
+        reply(&mut cpu, &mut hub, Cmd::Input { events: vec![ty("PROBE\n")], wait: false }).unwrap();
+        go(&mut cpu, &mut hub, &mut mode, 2400);
+        let journal = entries(&hub)
+            .into_iter()
+            .map(|mut e| {
+                e.as_object_mut().unwrap().remove("t_ms");
+                e
+            })
+            .collect();
+        (cpu.executed, cpu.bus.ram().to_vec(), journal)
+    }
+
+    #[test]
+    fn a_deterministic_session_with_loads_and_a_rewind_is_the_same_whatever_the_frames() {
+        let a = session("session-a", &[16]);
+        let b = session("session-b", &[41]);
+        let c = session("session-c", &[3, 29, 1, 70, 12]);
+        for other in [&b, &c] {
+            assert_eq!(a.0, other.0, "the same instructions");
+            assert!(a.1 == other.1, "the same memory");
+            assert_eq!(a.2.len(), other.2.len(), "as many entries");
+            for (x, y) in a.2.iter().zip(&other.2) {
+                assert_eq!(x, y, "the same journal");
+            }
+        }
+        let kinds: Vec<&str> = a.2.iter().map(|e| e["type"].as_str().unwrap()).collect();
+        for kind in ["input_delivered", "state_saved", "state_loaded", "debugger_reset", "program_started"] {
+            assert!(kinds.contains(&kind), "{} in {:?}", kind, kinds);
+        }
+        assert_eq!(a.2.iter().filter(|e| e["type"] == "state_loaded").count(), 2, "the load and the rewind");
     }
 
     #[test]
@@ -3272,7 +4337,8 @@ mod tests {
         let (mut cpu, mut hub, _mode) = deterministic_machine("refuse");
         assert!(reply(&mut cpu, &mut hub, typed("x")).is_ok(), "paused at the start");
         let waited = Cmd::Input { events: vec![InputEvent::Type { text: "y".into(), delay_ms: None }], wait: true };
-        assert!(reply(&mut cpu, &mut hub, waited).is_ok(), "answered at once while paused, not when delivered");
+        let held = reply(&mut cpu, &mut hub, waited).unwrap();
+        assert_eq!(held["held"], true, "answered at once while paused, not when delivered");
         reply(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }).unwrap();
         assert_eq!(reply(&mut cpu, &mut hub, typed("x")).unwrap_err().0, 409);
         let run = Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: false };
@@ -3287,8 +4353,8 @@ mod tests {
     }
 
     /// The body of a 409 refusal, from the request's reply.
-    fn refusal(rx: &mut oneshot::Receiver<Reply>) -> Value {
-        match rx.try_recv() {
+    fn refusal(sent: &mut Sent) -> Value {
+        match sent.rx.try_recv().map(|a| a.reply) {
             Ok(Reply::ErrorJson(409, body)) => body,
             _ => panic!("not refused with 409"),
         }
@@ -3305,31 +4371,32 @@ mod tests {
             let mut load = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match });
             let body = refusal(&mut load);
             assert_eq!(body["paused"], false, "{}", body);
+            assert_eq!(body["precondition"], "paused", "{}", body);
             assert!(body["error"].as_str().unwrap().contains("deterministic mode"), "{}", body);
         }
         // A strict-match save is refused by its own rule, in the same shape.
         let mut save = send(&mut cpu, &mut hub, Cmd::SaveState { path: "/tmp/x.state".into(), strict_match: true });
-        assert!(hub.take_state_requests().is_empty());
+        assert!(take_state_requests(&mut hub).is_empty());
         let body = refusal(&mut save);
         assert_eq!(body["paused"], false, "{}", body);
         assert!(body["error"].as_str().unwrap().contains("pause it first"), "{}", body);
         // A plain save changes nothing and is taken while running.
         let _save = send(&mut cpu, &mut hub, Cmd::SaveState { path: "/tmp/x.state".into(), strict_match: false });
-        assert_eq!(hub.take_state_requests().len(), 1);
+        assert_eq!(take_state_requests(&mut hub).len(), 1);
 
         // A load sent while paused, with a resume in the same frame: the
         // machine runs when the front end would load it, so it is refused.
         pause(&mut cpu, &mut hub);
         let mut load = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: false });
         reply(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }).unwrap();
-        assert!(hub.take_state_requests().is_empty());
+        assert!(take_state_requests(&mut hub).is_empty());
         assert_eq!(refusal(&mut load)["paused"], false);
 
         // Paused with nothing pending, both loads are taken.
         pause(&mut cpu, &mut hub);
         let _plain = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: false });
         let _strict = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: true });
-        assert_eq!(hub.take_state_requests().len(), 2);
+        assert_eq!(take_state_requests(&mut hub).len(), 2);
     }
 
     #[test]
@@ -3344,7 +4411,7 @@ mod tests {
         hub.input_wait_ns = Some(cpu.bus.clock.now_ns() + 500_000_000);
         reply(&mut cpu, &mut hub, typed("x")).unwrap();
 
-        let cleared = hub.reset_after_load(&cpu);
+        let (cleared, _) = hub.reset_after_load(&cpu);
         assert_eq!(cleared["until_ms"], true, "{}", cleared);
         assert!(cleared["input"].as_u64().unwrap() > 0, "{}", cleared);
         assert_eq!((hub.stop_at_ns, hub.input_wait_ns), (None, None));
@@ -3357,6 +4424,590 @@ mod tests {
         run_deterministic(&mut cpu, &mut hub, &mut mode, 700, 16);
         assert!(cpu.bus.clock.now_ns() > 5_000_000_000);
         assert!(!hub.paused, "the dropped until_ms didn't stop it");
+    }
+
+    // ----- the journal --------------------------------------------------------
+
+    /// The answer to `cmd` sent with `If-State-Seq: if_state`: the reply's
+    /// JSON or the error's status and body, and the journal's state.
+    fn ask_guarded(cpu: &mut Cpu, hub: &mut DebugHub, cmd: Cmd, if_state: Option<u64>) -> (Result<Value, (u16, Value)>, super::Meta) {
+        let (mut request, mut rx) = hub.request(cmd);
+        request.if_state = if_state;
+        hub.handle(cpu, request);
+        let answer = rx.try_recv().expect("an answer at once");
+        let result = match answer.reply {
+            Reply::Json(v) => Ok(v),
+            Reply::Error(code, e) => Err((code, serde_json::json!({"error": e}))),
+            Reply::ErrorJson(code, v) => Err((code, v)),
+            _ => panic!("not a JSON reply"),
+        };
+        (result, answer.meta)
+    }
+
+    /// The journal's state now.
+    fn journal_state(hub: &DebugHub) -> (u64, Option<u64>, u64) {
+        hub.with_journal(|j| (j.state_seq, j.stop_seq, j.last())).unwrap()
+    }
+
+    fn op_state(hub: &DebugHub, op: u64) -> super::journal::Op {
+        hub.with_journal(|j| match j.op(op) {
+            OpLookup::Found(op) => op.clone(),
+            _ => panic!("no operation {}", op),
+        })
+        .unwrap()
+    }
+
+    /// The request number the answer to a request that started an
+    /// operation names.
+    fn started_op(cpu: &mut Cpu, hub: &mut DebugHub, cmd: Cmd) -> u64 {
+        let (request, mut rx) = hub.request(cmd);
+        let req = request.req;
+        hub.handle(cpu, request);
+        let answer = rx.try_recv().expect("an answer at once");
+        assert!(matches!(answer.reply, Reply::Json(_)), "accepted");
+        assert_eq!(answer.meta.op, Some(req));
+        req
+    }
+
+    /// Stopped at PROBE.COM's first instruction: its code segment.
+    fn at_probe_entry(cpu: &mut Cpu, hub: &mut DebugHub) -> String {
+        let stop = ask(cpu, hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true }, 50).unwrap();
+        stop["registers"]["cs"].as_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn the_journal_numbers_its_entries_and_follows_the_state() {
+        let (mut cpu, mut hub) = machine("journal-numbers");
+        let cs = at_probe_entry(&mut cpu, &mut hub);
+        ask(&mut cpu, &mut hub, write("0200:0000", &[1, 2], None), 0).unwrap();
+        ask(&mut cpu, &mut hub, Cmd::AddBreakpoint { addr: format!("{}:0103", cs), once: false }, 0).unwrap();
+        ask(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }, 0).unwrap();
+        ask(&mut cpu, &mut hub, Cmd::WaitPause, 50).unwrap();
+        let all = entries(&hub);
+        assert_eq!(all[0]["type"], "started");
+        assert_eq!(all[0]["seq"], 1);
+        for (i, e) in all.iter().enumerate() {
+            assert_eq!(e["seq"].as_u64(), Some(i as u64 + 1), "gapless: {}", e);
+        }
+        let changed = all.iter().rfind(|e| super::Kind::parse(e["type"].as_str().unwrap()).unwrap().changes_state());
+        assert_eq!(journal_state(&hub).0, changed.unwrap()["seq"].as_u64().unwrap());
+        // A breakpoint is the debugger's own: it changes nothing.
+        let set = &entries_of(&hub, "breakpoint_set")[0];
+        assert!(set["seq"].as_u64().unwrap() > entries_of(&hub, "memory_written")[0]["seq"].as_u64().unwrap());
+    }
+
+    #[test]
+    fn a_pause_and_a_resume_in_one_drain_are_told_in_order() {
+        let (mut cpu, mut hub) = machine("journal-order");
+        let pause = hub.request(Cmd::Pause);
+        let resume = hub.request(Cmd::Resume { until: None, until_ms: None });
+        let resume_req = resume.0.req;
+        hub.handle(&mut cpu, pause.0);
+        hub.handle(&mut cpu, resume.0);
+        let types: Vec<Value> = entries(&hub).iter().skip(1).map(|e| e["type"].clone()).collect();
+        assert_eq!(types, ["paused", "resumed"]);
+        assert_eq!(op_state(&hub, resume_req).state, OpState::Pending);
+        // Another client pauses: the resume ends stopped, by that pause.
+        let (request, _rx) = hub.request(Cmd::Pause);
+        let pause_req = request.req;
+        hub.handle(&mut cpu, request);
+        let op = op_state(&hub, resume_req);
+        assert_eq!(op.state, OpState::Stopped);
+        let stop = &entries_of(&hub, "paused")[1];
+        assert_eq!((stop["by"].as_u64(), stop["cause"].as_u64(), stop["op"].as_u64()), (Some(pause_req), Some(pause_req), Some(resume_req)));
+        assert_eq!(op.end_seq, stop["seq"].as_u64());
+    }
+
+    #[test]
+    fn a_stop_before_the_wait_is_found_after_the_resume() {
+        let (mut cpu, mut hub) = machine("journal-early-stop");
+        let cs = at_probe_entry(&mut cpu, &mut hub);
+        ask(&mut cpu, &mut hub, Cmd::AddBreakpoint { addr: format!("{}:0103", cs), once: false }, 0).unwrap();
+        let op = started_op(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None });
+        let resumed = entries_of(&hub, "resumed").last().unwrap()["seq"].as_u64().unwrap();
+        // The machine stops before anyone asks.
+        run(&mut cpu, &mut hub, 5);
+        assert!(hub.paused);
+        let stop = stop_after(&hub, resumed).expect("the stop is in the journal");
+        assert_eq!((stop["reason"].as_str(), stop["op"].as_u64()), (Some("breakpoint"), Some(op)));
+        assert_eq!(op_reply(&hub, op).unwrap().unwrap()["seq"], stop["seq"]);
+    }
+
+    #[test]
+    fn a_breakpoint_once_goes_once_it_stops_the_machine() {
+        let (mut cpu, mut hub) = machine("journal-once");
+        let cs = at_probe_entry(&mut cpu, &mut hub);
+        let at = format!("{}:0103", cs);
+        let listed = ask(&mut cpu, &mut hub, Cmd::AddBreakpoint { addr: at.clone(), once: true }, 0).unwrap();
+        assert_eq!(listed["once"].as_array().map(Vec::len), Some(1));
+        ask(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }, 0).unwrap();
+        run(&mut cpu, &mut hub, 5);
+        // A wait that comes late, and the journal, show the same stop.
+        let late = ask(&mut cpu, &mut hub, Cmd::WaitPause, 0).unwrap();
+        let stop = entries_of(&hub, "paused").pop().unwrap();
+        for e in [&late, &stop] {
+            assert_eq!((e["reason"].as_str(), e["once"].as_bool()), (Some("breakpoint"), Some(true)), "{}", e);
+            assert_eq!(e["breakpoint"], stop["breakpoint"]);
+        }
+        assert_eq!(late["stop"], stop);
+        let listed = ask(&mut cpu, &mut hub, Cmd::ListBreakpoints, 0).unwrap();
+        assert_eq!(listed["breakpoints"].as_array().map(Vec::len), Some(0), "{}", listed);
+
+        // A run to the same address names no breakpoint.
+        ask(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }, 0).unwrap();
+        run(&mut cpu, &mut hub, 20);
+        let cs = at_probe_entry(&mut cpu, &mut hub);
+        ask(&mut cpu, &mut hub, Cmd::Resume { until: Some(format!("{}:0103", cs)), until_ms: None }, 0).unwrap();
+        run(&mut cpu, &mut hub, 5);
+        let stop = entries_of(&hub, "paused").pop().unwrap();
+        assert!(stop.get("breakpoint").is_none() && stop["target"].is_string(), "{}", stop);
+    }
+
+    #[test]
+    fn a_step_another_resume_takes_over_is_superseded() {
+        let (mut cpu, mut hub) = machine("journal-supersede");
+        let cs = at_probe_entry(&mut cpu, &mut hub);
+        ask(&mut cpu, &mut hub, Cmd::AddBreakpoint { addr: format!("{}:0106", cs), once: false }, 0).unwrap();
+        let step = started_op(&mut cpu, &mut hub, Cmd::Step { count: 1 });
+        let resume = started_op(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None });
+        let op = op_state(&hub, step);
+        assert_eq!((op.state, op.superseded_by), (OpState::Superseded, Some(resume)));
+        assert_eq!(entries_of(&hub, "resumed").last().unwrap()["supersedes"].as_u64(), Some(step));
+        run(&mut cpu, &mut hub, 5);
+        // Where the step's chain ends: the resume's stop.
+        let stop = op_reply(&hub, resume).unwrap().unwrap();
+        assert_eq!((stop["reason"].as_str(), stop["op"].as_u64()), (Some("breakpoint"), Some(resume)));
+    }
+
+    #[test]
+    fn a_run_another_resume_takes_over_does_not_stop_at_entry() {
+        let (mut cpu, mut hub) = machine("journal-supersede-run");
+        let run_op = started_op(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true });
+        let resume = started_op(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None });
+        assert_eq!(op_state(&hub, run_op).superseded_by, Some(resume));
+        assert!(hub.run_wait.is_none() && !hub.start_once, "the run's stop at entry is dropped");
+        run(&mut cpu, &mut hub, 50);
+        assert!(!hub.paused, "the program ran through its entry");
+        assert!(entries_of(&hub, "paused").is_empty(), "{:?}", entries_of(&hub, "paused"));
+        assert_eq!(op_state(&hub, run_op).state, OpState::Superseded);
+        assert!(entries_of(&hub, "program_started").iter().any(|e| e["program"]["name"] == "PROBE.COM"), "the command line still ran");
+    }
+
+    #[test]
+    fn if_state_seq_holds_only_in_the_state_read() {
+        let (mut cpu, mut hub) = machine("journal-if-state");
+        pause(&mut cpu, &mut hub);
+        let read = journal_state(&hub).0;
+        let (done, meta) = ask_guarded(&mut cpu, &mut hub, write("0200:0000", &[1], None), Some(read));
+        done.unwrap();
+        assert!(meta.state_seq > read, "the write moves the state");
+        // Another client wrote since.
+        let mine = meta.state_seq;
+        ask(&mut cpu, &mut hub, write("0200:0000", &[2], None), 0).unwrap();
+        let (refused, _) = ask_guarded(&mut cpu, &mut hub, write("0200:0000", &[3], None), Some(mine));
+        let (code, body) = refused.unwrap_err();
+        assert_eq!((code, body["precondition"].as_str()), (409, Some("state")), "{}", body);
+        assert_eq!(body["state_seq"].as_u64(), Some(journal_state(&hub).0));
+        assert_eq!(cpu.bus.peek_8(0x2000), 2, "nothing was written");
+
+        // A resume and a stop since.
+        let read = journal_state(&hub).0;
+        ask(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }, 0).unwrap();
+        let (refused, _) = ask_guarded(&mut cpu, &mut hub, write("0200:0000", &[3], None), Some(read));
+        assert_eq!(refused.unwrap_err().1["paused"], false, "refused while running");
+        pause(&mut cpu, &mut hub);
+        let (refused, _) = ask_guarded(&mut cpu, &mut hub, write("0200:0000", &[3], None), Some(read));
+        assert_eq!(refused.unwrap_err().0, 409, "refused after the stop");
+
+        // Input being typed while paused, and the settings window open.
+        let read = journal_state(&hub).0;
+        ask(&mut cpu, &mut hub, Cmd::Input { events: vec![InputEvent::Wait { ms: 60_000 }], wait: false }, 0).unwrap();
+        let (refused, _) = ask_guarded(&mut cpu, &mut hub, Cmd::GetRegs, Some(read));
+        assert_eq!(refused.unwrap_err().1["input_queued"], 1);
+        ask(&mut cpu, &mut hub, Cmd::InputClear, 0).unwrap();
+        let read = journal_state(&hub).0;
+        hub.divert = true;
+        let (refused, _) = ask_guarded(&mut cpu, &mut hub, Cmd::GetRegs, Some(read));
+        assert_eq!(refused.unwrap_err().1["settings_window"], true);
+        hub.divert = false;
+        assert!(ask_guarded(&mut cpu, &mut hub, Cmd::GetRegs, Some(read)).0.is_ok());
+        // Rewinding loads states the journal hears about only at its end.
+        hub.rewinding = true;
+        let (refused, _) = ask_guarded(&mut cpu, &mut hub, Cmd::GetRegs, Some(read));
+        assert_eq!(refused.unwrap_err().1["error"], "the machine is being rewound");
+        hub.rewinding = false;
+        assert!(ask_guarded(&mut cpu, &mut hub, Cmd::GetRegs, Some(read)).0.is_ok());
+
+        // Deterministic mode types nothing while paused: queued input is no
+        // obstacle there.
+        let (mut cpu, mut hub, _mode) = deterministic_machine("journal-if-state-det");
+        reply(&mut cpu, &mut hub, typed("x")).unwrap();
+        let read = journal_state(&hub).0;
+        assert!(ask_guarded(&mut cpu, &mut hub, write("0200:0000", &[1], None), Some(read)).0.is_ok());
+    }
+
+    #[test]
+    fn a_strict_match_load_cancels_the_operations_under_way() {
+        let (mut cpu, mut hub) = machine("journal-strict");
+        pause(&mut cpu, &mut hub);
+        hub.input.push_back(LowInput::Wait(std::time::Duration::from_secs(60)));
+        let (_, refused) = state_request(&mut cpu, &mut hub, true);
+        assert_eq!(refused.unwrap().1["precondition"], "quiescent", "a save waits for the input");
+        hub.input.clear();
+
+        let input = started_op(&mut cpu, &mut hub, Cmd::Input { events: vec![InputEvent::Wait { ms: 60_000 }], wait: true });
+        let (load, _rx) = hub.request(Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: true });
+        let load_req = load.req;
+        hub.handle(&mut cpu, load);
+        let request = hub.next_state_request().expect("taken");
+        hub.state_done(&cpu, request, Ok(serde_json::json!({"loaded": true})));
+        let tail: Vec<Value> = entries(&hub).into_iter().rev().take(3).collect();
+        assert_eq!(tail.iter().rev().map(|e| e["type"].as_str().unwrap()).collect::<Vec<_>>(), ["state_loaded", "debugger_reset", "paused"]);
+        assert_eq!(tail[1]["cancelled"], serde_json::json!([input]));
+        assert_eq!((tail[0]["reason"].as_str(), tail[0]["cause"].as_u64()), (Some("load"), Some(load_req)));
+        assert_eq!(op_state(&hub, input).state, OpState::Cancelled);
+        assert_eq!(op_state(&hub, input).end_seq, tail[1]["seq"].as_u64());
+    }
+
+    #[test]
+    fn eviction_tells_what_is_gone() {
+        let cpu = Cpu::new(".".into());
+        let shared = std::sync::Arc::new(super::Shared::with_capacity(std::time::Instant::now(), 8));
+        let mut hub = DebugHub::new(None, Some(shared), 10);
+        hub.announce(&cpu);
+        for i in 0..20 {
+            hub.append(&cpu, super::Kind::BreakpointSet, None, serde_json::json!({"i": i}));
+        }
+        hub.with_journal(|j| {
+            assert_eq!((j.first(), j.last()), (14, 21));
+            assert_eq!(j.after(5).err(), Some(super::journal::Gone { first: 14, last: 21 }));
+            assert_eq!(j.after(13).map(|it| it.count()).ok(), Some(8));
+        });
+    }
+
+    #[test]
+    fn a_pending_operation_outlives_any_number_of_others() {
+        let (mut cpu, mut hub) = machine("journal-pending");
+        pause(&mut cpu, &mut hub);
+        // Input queued with a client's ID, which nothing delivers while
+        // only requests are carried out.
+        let (mut request, _rx) = hub.request(typed("x"));
+        let input = request.req;
+        request.tag = Some(std::sync::Arc::from("typed-1"));
+        hub.handle(&mut cpu, request);
+        // More operations than the journal keeps, each ended at once.
+        for _ in 0..super::journal::OPS_CAPACITY + 100 {
+            started_op(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None });
+            ask(&mut cpu, &mut hub, Cmd::Pause, 0).unwrap();
+        }
+        assert_eq!(op_state(&hub, input).state, OpState::Pending, "still there");
+        assert!(hub.with_journal(|j| j.ops_len()).unwrap() <= super::journal::OPS_CAPACITY + 1);
+        // Delivered now, its entry has the request's ID.
+        run(&mut cpu, &mut hub, 20);
+        assert_eq!(op_state(&hub, input).state, OpState::Done);
+        let delivered = entries_of(&hub, "input_delivered").pop().unwrap();
+        assert_eq!((delivered["cause"].as_u64(), delivered["request_id"].as_str()), (Some(input), Some("typed-1")));
+    }
+
+    #[test]
+    fn input_past_the_pending_limit_is_refused() {
+        let (mut cpu, mut hub) = machine("journal-pending-limit");
+        pause(&mut cpu, &mut hub);
+        for _ in 0..super::journal::PENDING_INPUT_CAPACITY {
+            ask(&mut cpu, &mut hub, typed("x"), 0).unwrap();
+        }
+        let refused = reply(&mut cpu, &mut hub, typed("x")).unwrap_err();
+        assert_eq!(refused.0, 429, "{}", refused.1);
+        // Once some are delivered, input is taken again.
+        ask(&mut cpu, &mut hub, Cmd::InputClear, 0).unwrap();
+        assert!(reply(&mut cpu, &mut hub, typed("x")).is_ok());
+    }
+
+    #[test]
+    fn a_write_after_a_load_in_the_same_frame_comes_after_it() {
+        let mut cpu = Cpu::new(".".into());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let shared = std::sync::Arc::new(super::Shared::new(std::time::Instant::now()));
+        let mut hub = DebugHub::new(Some(rx), Some(shared), 10);
+        hub.announce(&cpu);
+        let (load, _load_rx) = hub.request(Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: false });
+        let (write, mut write_rx) = hub.request(write("0200:0000", &[9], None));
+        tx.send(load).unwrap();
+        tx.send(write).unwrap();
+        hub.poll(&mut cpu);
+        assert!(write_rx.try_recv().is_err(), "the write waits for the load");
+        let request = hub.next_state_request().unwrap();
+        hub.state_done(&cpu, request, Ok(serde_json::json!({"loaded": true})));
+        hub.poll(&mut cpu);
+        assert!(write_rx.try_recv().is_ok());
+        let types: Vec<Value> = entries(&hub).iter().skip(1).map(|e| e["type"].clone()).collect();
+        assert_eq!(types, ["state_loaded", "memory_written"]);
+    }
+
+    #[test]
+    fn programs_are_told_without_a_stop_on_them() {
+        let (mut cpu, mut hub) = machine("journal-programs");
+        cpu.queue_batch_lines(["PROBE.COM"]);
+        run(&mut cpu, &mut hub, 50);
+        let started = entries_of(&hub, "program_started");
+        let exited = entries_of(&hub, "program_exited");
+        assert_eq!(started.last().unwrap()["program"]["name"], "PROBE.COM");
+        assert_eq!(exited.last().unwrap()["exit"]["name"], "PROBE.COM");
+        assert!(started.last().unwrap()["seq"].as_u64() < exited.last().unwrap()["seq"].as_u64());
+        assert!(entries_of(&hub, "paused").is_empty());
+    }
+
+    #[test]
+    fn a_quit_cancels_what_is_pending_and_ends_the_journal() {
+        let mut cpu = Cpu::new(".".into());
+        cpu.load_shell();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let shared = std::sync::Arc::new(super::Shared::new(std::time::Instant::now()));
+        let mut hub = DebugHub::new(Some(rx), Some(shared.clone()), 10);
+        hub.announce(&cpu);
+        let resume = started_op(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None });
+        let (quit, mut quit_rx) = hub.request(Cmd::Quit);
+        let quit_req = quit.req;
+        let (late, mut late_rx) = hub.request(write("0200:0000", &[9], None));
+        tx.send(quit).unwrap();
+        tx.send(late).unwrap();
+        hub.poll(&mut cpu);
+        assert!(hub.quit_requested());
+        assert!(matches!(quit_rx.try_recv().map(|a| a.reply), Ok(Reply::Json(_))));
+        assert!(late_rx.try_recv().is_err(), "nothing is carried out after a quit");
+        let (refused, _) = ask_guarded(&mut cpu, &mut hub, Cmd::GetRegs, None);
+        assert_eq!(refused.unwrap_err().0, 503);
+
+        hub.shutdown(&cpu, super::ShutdownReason::Quit, 0);
+        assert!(matches!(late_rx.try_recv().map(|a| a.reply), Ok(Reply::Error(503, _))));
+        assert_ne!(cpu.bus.peek_8(0x2000), 9);
+        let last = entries(&hub).pop().unwrap();
+        assert_eq!((last["type"].as_str(), last["reason"].as_str()), (Some("shutdown"), Some("quit")));
+        assert_eq!((last["by"].as_u64(), last["cause"].as_u64()), (Some(quit_req), Some(quit_req)));
+        assert_eq!(last["cancelled"], serde_json::json!([resume]));
+        assert_eq!(op_state(&hub, resume).state, OpState::Cancelled);
+        assert!(shared.closed.load(std::sync::atomic::Ordering::Acquire));
+        hub.append(&cpu, super::Kind::BreakpointSet, None, serde_json::json!({}));
+        assert_eq!(entries(&hub).pop().unwrap()["type"], "shutdown", "nothing after it");
+        // A request that passed the server's check just before the shutdown
+        // isn't left waiting: the channel is closed.
+        let (after, mut after_rx) = hub.request(Cmd::GetRegs);
+        assert!(tx.send(after).is_err(), "nobody takes requests any more");
+        assert!(matches!(after_rx.try_recv(), Err(oneshot::error::TryRecvError::Closed)));
+    }
+
+    #[test]
+    fn requests_sent_together_take_effect_in_the_order_sent() {
+        let mut cpu = Cpu::new(".".into());
+        cpu.load_shell();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let shared = std::sync::Arc::new(super::Shared::new(std::time::Instant::now()));
+        let mut hub = DebugHub::new(Some(rx), Some(shared), 10);
+        hub.announce(&cpu);
+        let (p, _p) = hub.request(Cmd::Pause);
+        tx.send(p).unwrap();
+        hub.poll(&mut cpu);
+        assert!(hub.paused);
+        let before = journal_state(&hub).2;
+        let state = journal_state(&hub).0;
+        // All in the channel at once, as from clients in one frame.
+        let mut cmds = vec![
+            (write("0200:0000", &[1], None), None),
+            (Cmd::SaveState { path: "s".into(), strict_match: true }, None),
+            (write("0200:0000", &[2], None), None),
+            (Cmd::Speed { cycles: "5000".into() }, None),
+            // Guarded by the state before the first write: refused.
+            (write("0200:0000", &[3], None), Some(state)),
+            (Cmd::LoadState { path: "s".into(), strict_match: true }, None),
+            // Holds only once the load brought back the 1.
+            (write("0200:0000", &[4], Some(&[1])), None),
+            (Cmd::Resume { until: None, until_ms: None }, None),
+            (Cmd::Pause, None),
+        ];
+        let mut answers = Vec::new();
+        for (cmd, if_state) in cmds.drain(..) {
+            let (mut request, rx) = hub.request(cmd);
+            request.if_state = if_state;
+            tx.send(request).unwrap();
+            answers.push(rx);
+        }
+        let mut saved: Option<Vec<u8>> = None;
+        for _ in 0..10 {
+            hub.poll(&mut cpu);
+            while let Some(request) = hub.next_state_request() {
+                let result = if request.load {
+                    rust_dos::savestate::machine::load(&mut cpu, saved.as_ref().unwrap()).unwrap();
+                    Ok(serde_json::json!({"loaded": true}))
+                } else {
+                    saved = Some(rust_dos::savestate::machine::save(&cpu));
+                    Ok(serde_json::json!({"saved": true}))
+                };
+                hub.state_done(&cpu, request, result);
+            }
+            while let Some(request) = hub.next_speed_request() {
+                let cycles = request.cycles.clone();
+                hub.speed_done(&cpu, request, Ok(serde_json::json!({"cycles": cycles})));
+            }
+        }
+        let statuses: Vec<u16> = answers
+            .iter_mut()
+            .map(|rx| match rx.try_recv().expect("answered").reply {
+                Reply::Json(_) => 200,
+                Reply::Error(code, _) | Reply::ErrorJson(code, _) => code,
+                _ => panic!("not a JSON reply"),
+            })
+            .collect();
+        assert_eq!(statuses, [200, 200, 200, 200, 409, 200, 200, 200, 200]);
+        let types: Vec<String> = entries(&hub).iter().filter(|e| e["seq"].as_u64() > Some(before)).map(|e| e["type"].as_str().unwrap().to_string()).collect();
+        assert_eq!(
+            types,
+            ["memory_written", "state_saved", "memory_written", "speed_changed", "state_loaded", "debugger_reset", "paused", "memory_written", "resumed", "paused"]
+        );
+        assert_eq!(cpu.bus.peek_8(0x2000), 4);
+    }
+
+    /// A program that stops the machine every way a program can: it writes
+    /// memory, calls, switches to protected mode and back, then divides by
+    /// zero.
+    const STOPS: [u8; 34] = [
+        0xC7, 0x06, 0x00, 0x02, 0x34, 0x12, // 0100 mov word [0200], 1234
+        0xB8, 0x01, 0x00, // 0106 mov ax, 1
+        0xE8, 0x04, 0x00, // 0109 call 0110
+        0x90, // 010C nop
+        0xEB, 0x02, // 010D jmp 0111
+        0x90, // 010F
+        0xC3, // 0110 ret
+        0x0F, 0x20, 0xC0, // 0111 mov eax, cr0
+        0x0C, 0x01, // 0114 or al, 1
+        0x0F, 0x22, 0xC0, // 0116 mov cr0, eax
+        0x24, 0xFE, // 0119 and al, FE
+        0x0F, 0x22, 0xC0, // 011B mov cr0, eax
+        0x31, 0xC0, 0xF6, 0xF0, // 011E xor ax, ax; div al
+    ];
+
+    /// Start an operation and run until the machine stops: the stop's
+    /// entry, checked against the operation it ended.
+    fn stopped_by(cpu: &mut Cpu, hub: &mut DebugHub, cmd: Cmd, reason: &str) -> Value {
+        let op = started_op(cpu, hub, cmd);
+        for _ in 0..200 {
+            if hub.paused {
+                break;
+            }
+            run(cpu, hub, 1);
+        }
+        assert!(hub.paused, "stopped: {}", reason);
+        let stop = entries_of(hub, "paused").pop().unwrap();
+        assert_eq!(stop["reason"].as_str(), Some(reason), "{}", stop);
+        assert_eq!((stop["op"].as_u64(), stop["cause"].as_u64()), (Some(op), Some(op)), "{}", stop);
+        let ended = op_state(hub, op);
+        assert_eq!((ended.state, ended.end_seq), (OpState::Stopped, stop["seq"].as_u64()), "{}", stop);
+        let (state_seq, stop_seq, _) = journal_state(hub);
+        assert_eq!((Some(state_seq), stop_seq), (stop["seq"].as_u64(), stop["seq"].as_u64()), "the state is the stop's");
+        stop
+    }
+
+    #[test]
+    fn every_stop_names_its_reason_and_ends_its_operation() {
+        let (mut cpu, mut hub) = machine("journal-stops");
+        let dir = std::env::temp_dir().join(format!("rust-dos-debug-journal-stops-{}", std::process::id()));
+        std::fs::write(dir.join("STOPS.COM"), STOPS).unwrap();
+        let entry = stopped_by(&mut cpu, &mut hub, Cmd::Run { command: "STOPS.COM".into(), stop_at_entry: true }, "program_start");
+        let cs = entry["registers"]["cs"].as_str().unwrap().to_string();
+        let at = |stop: &Value| stop["registers"]["ip"].as_str().unwrap().to_string();
+
+        ask(&mut cpu, &mut hub, Cmd::AddWatchpoint { addr: format!("{}:0200", cs), len: 2 }, 0).unwrap();
+        let resume = || Cmd::Resume { until: None, until_ms: None };
+        let stop = stopped_by(&mut cpu, &mut hub, resume(), "watchpoint");
+        assert_eq!(at(&stop), "0106");
+        let stop = stopped_by(&mut cpu, &mut hub, Cmd::Step { count: 1 }, "step");
+        assert_eq!(at(&stop), "0109");
+        // A call is stepped over by running to the instruction after it.
+        let stop = stopped_by(&mut cpu, &mut hub, Cmd::StepOver, "breakpoint");
+        assert_eq!((at(&stop).as_str(), stop["target"].is_string()), ("010C", true), "the call ran through");
+        ask(&mut cpu, &mut hub, Cmd::AddBreakpoint { addr: format!("{}:010D", cs), once: true }, 0).unwrap();
+        let stop = stopped_by(&mut cpu, &mut hub, resume(), "breakpoint");
+        assert_eq!((at(&stop).as_str(), stop["once"].as_bool()), ("010D", Some(true)));
+        let stop = stopped_by(&mut cpu, &mut hub, Cmd::Resume { until: Some(format!("{}:0114", cs)), until_ms: None }, "breakpoint");
+        assert_eq!(at(&stop), "0114");
+        let on = |mode_switch, exceptions, program_exit| Cmd::BreakOn { exceptions, clear_exceptions: None, mode_switch, program_start: None, program_exit };
+        ask(&mut cpu, &mut hub, on(Some(true), None, None), 0).unwrap();
+        stopped_by(&mut cpu, &mut hub, resume(), "mode_switch");
+        ask(&mut cpu, &mut hub, on(Some(false), Some(1), None), 0).unwrap();
+        stopped_by(&mut cpu, &mut hub, resume(), "exception");
+        ask(&mut cpu, &mut hub, Cmd::BreakOn { exceptions: None, clear_exceptions: Some(1), mode_switch: None, program_start: None, program_exit: Some(true) }, 0).unwrap();
+        let stop = stopped_by(&mut cpu, &mut hub, resume(), "program_exit");
+        assert_eq!(stop["exit"]["name"], "STOPS.COM");
+
+        // A pause: by the request, ending the resume it stops.
+        let resumed = started_op(&mut cpu, &mut hub, resume());
+        run(&mut cpu, &mut hub, 2);
+        let (pause, _rx) = hub.request(Cmd::Pause);
+        let by = pause.req;
+        hub.handle(&mut cpu, pause);
+        hub.end_batch(&cpu);
+        let stop = entries_of(&hub, "paused").pop().unwrap();
+        assert_eq!(stop["reason"], "request");
+        assert_eq!((stop["by"].as_u64(), stop["cause"].as_u64(), stop["op"].as_u64()), (Some(by), Some(by), Some(resumed)), "{}", stop);
+        assert_eq!((op_state(&hub, resumed).state, op_state(&hub, resumed).end_seq), (OpState::Stopped, stop["seq"].as_u64()));
+
+        // Deterministic mode starts stopped, by nothing.
+        let (_cpu, hub, _mode) = deterministic_machine("journal-startup");
+        let stop = entries_of(&hub, "paused").pop().unwrap();
+        assert_eq!((stop["reason"].as_str(), &stop["op"], &stop["cause"]), (Some("startup"), &Value::Null, &Value::Null), "{}", stop);
+    }
+
+    #[test]
+    fn a_run_whose_operation_a_stop_ended_waits_no_more() {
+        let (mut cpu, mut hub) = machine("journal-run-stopped");
+        let dir = std::env::temp_dir().join(format!("rust-dos-debug-journal-run-stopped-{}", std::process::id()));
+        std::fs::write(dir.join("HOLD.BAT"), "@pause\r\nPROBE.COM\r\n").unwrap();
+        let op = started_op(&mut cpu, &mut hub, Cmd::Run { command: "HOLD.BAT".into(), stop_at_entry: true });
+        run(&mut cpu, &mut hub, 20);
+        assert!(hub.run_wait.is_some(), "waiting at PAUSE");
+        pause(&mut cpu, &mut hub);
+        assert_eq!(op_state(&hub, op).state, OpState::Stopped);
+        assert!(hub.run_wait.is_none() && !hub.start_once, "the stop ended the run's wait");
+        let (taken, refused) = state_request(&mut cpu, &mut hub, true);
+        assert_eq!((taken, refused.map(|r| r.0)), (1, None), "a strict-match save goes ahead");
+        // Its program starts with nobody stopping it at its entry.
+        ask(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }, 0).unwrap();
+        ask(&mut cpu, &mut hub, Cmd::Input { events: vec![InputEvent::Type { text: " ".into(), delay_ms: None }], wait: false }, 0).unwrap();
+        run(&mut cpu, &mut hub, 100);
+        assert!(cpu.programs.started > 0 && entries_of(&hub, "paused").iter().all(|e| e["reason"] != "program_start"));
+    }
+
+    #[test]
+    fn a_superseded_resume_s_time_stops_nothing() {
+        let (mut cpu, mut hub, mut mode) = deterministic_machine("superseded-time");
+        reply(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: Some(300) }).unwrap();
+        run_deterministic(&mut cpu, &mut hub, &mut mode, 2, 16);
+        // A step takes over, then a plain resume runs past 300 ms.
+        let step = send(&mut cpu, &mut hub, Cmd::Step { count: 1 });
+        answer(&mut cpu, &mut hub, step, 5).unwrap();
+        reply(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }).unwrap();
+        run_deterministic(&mut cpu, &mut hub, &mut mode, 40, 16);
+        assert!(cpu.bus.clock.now_ns() > 400_000_000);
+        assert!(!hub.paused, "{:?}", entries_of(&hub, "paused").pop());
+    }
+
+    #[test]
+    fn log_lines_name_their_request_and_the_journal_s_entry() {
+        let (mut cpu, mut hub) = machine("journal-log");
+        let shared = hub.shared.clone().unwrap();
+        let hook = shared.clone();
+        cpu.bus.log_hook = Some(Box::new(move |line: &str| hook.log_line(line)));
+        let dir = std::env::temp_dir().join(format!("rust-dos-debug-log-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let before = journal_state(&hub).2;
+        let mount = Cmd::Mount { drive: "D".into(), path: dir.display().to_string(), kind: None, label: None, read_only: true, images: Vec::new() };
+        let (request, _rx) = hub.request(mount);
+        let req = request.req;
+        hub.handle(&mut cpu, request);
+        let log = shared.log.lock().unwrap();
+        let line = log.iter().find(|l| l.line.contains("mounted")).expect("the mount's line");
+        assert_eq!((line.cause, line.at), (Some(req), before));
+        assert!(log.iter().zip(log.iter().skip(1)).all(|(a, b)| b.n == a.n + 1), "numbered in order");
+        assert_eq!(entries_of(&hub, "drive_mounted")[0]["cause"].as_u64(), Some(req));
     }
 }
 

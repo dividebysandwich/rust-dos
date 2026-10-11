@@ -93,6 +93,45 @@ fn exe_loader_copies_only_the_load_module() {
 }
 
 #[test]
+fn overlay_loader_copies_only_the_load_module_and_relocates_it() {
+    // Include both partial and full final pages, and an image spanning
+    // multiple pages. Appended extender data must not overwrite its caller.
+    for code_len in [16, 480, 512] {
+        let mut code = vec![0x90; code_len];
+        code[0..2].copy_from_slice(&0x0010u16.to_le_bytes());
+        let mut exe = mz(&code, &[0xAA; 256]);
+        exe[6..8].copy_from_slice(&1u16.to_le_bytes());
+        exe[0x1C..0x20].copy_from_slice(&[0, 0, 0, 0]);
+        let dir = scratch(
+            &format!("overlay_module_{code_len}"),
+            &[("EXTENDER.EXE", &exe)],
+        );
+        let mut cpu = Cpu::new(dir);
+        let image = 0x80000;
+        cpu.bus.load_bytes(image, &vec![0xCC; code_len + 256]);
+
+        // EXEC AL=03h uses independent load and relocation segments.
+        cpu.bus.load_bytes(0x20000, b"EXTENDER.EXE\0");
+        cpu.bus.write_16(0x20100, 0x8000);
+        cpu.bus.write_16(0x20102, 0x1234);
+        cpu.set_ds(0x2000);
+        cpu.set_dx(0);
+        cpu.set_es(0x2000);
+        cpu.set_bx(0x100);
+        cpu.set_ax(0x4B03);
+        int21::handle(&mut cpu);
+
+        assert!(!cf(&cpu), "overlay load succeeded");
+        assert_eq!(cpu.bus.read_16(image), 0x1244, "relocation applied");
+        assert!((2..code_len).all(|i| cpu.bus.read_8(image + i) == 0x90));
+        assert!(
+            (code_len..code_len + 256).all(|i| cpu.bus.read_8(image + i) == 0xCC),
+            "the data after the load module stays in the file"
+        );
+    }
+}
+
+#[test]
 fn environment_ends_with_the_fully_qualified_program_path() {
     let code = [0xEB, 0xFE];
     let dir = scratch("env_path", &[("GAMES/PROG.EXE", &mz(&code, &[]))]);

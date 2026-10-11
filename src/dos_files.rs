@@ -200,6 +200,12 @@ pub fn init_psp(bus: &mut Bus, psp: u16, parent: Option<u16>) {
         };
         bus.guest_write_8(base + 0x18 + h as u32, slot);
     }
+    if parent.is_none() {
+        // No parent (PSP 16h), which is how `Cpu::started_by_shell` tells
+        // the shell's programs apart; memory left by an earlier program at
+        // this segment must not name one. EXEC and AH=26h/55h write theirs.
+        bus.guest_write_16(base + 0x16, 0);
+    }
     psp_fields(bus, psp);
 }
 
