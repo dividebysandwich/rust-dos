@@ -309,9 +309,12 @@ fn writing_no_bytes_ends_the_file_at_its_position() {
         close(&mut cpu, handle);
         assert_eq!(read_file(&mut cpu, path), b"CDMUSIC=ON\r\nGOB=C:\\\r\n\0\0\0\0", "{}", path);
 
-        // A handle opened for reading can't change the file.
+        // A handle opened for reading can't change the file, and its
+        // position stays where it was.
         let handle = open(&mut cpu, path, 0).unwrap();
+        seek(&mut cpu, handle, 3);
         assert_eq!(write(&mut cpu, handle, b""), Err(0x05), "{}", path);
+        assert_eq!(read(&mut cpu, handle, 4), b"USIC", "{}", path);
         close(&mut cpu, handle);
         assert_eq!(read_file(&mut cpu, path).len(), 25, "{}", path);
     }
@@ -334,6 +337,21 @@ fn writing_no_bytes_ends_the_file_at_its_position() {
     close(&mut cpu, handle);
     assert_eq!(free_clusters(&mut cpu, 1), free, "cut to nothing");
     assert!(read_file(&mut cpu, "A:\\SAVE.DAT").is_empty());
+
+    // Past what the disk holds it grows the file to fill the disk, with no
+    // error (a handle write tells of a full disk by its count), and the
+    // position stays where it was.
+    let handle = open(&mut cpu, "A:\\SAVE.DAT", 2).unwrap();
+    seek(&mut cpu, handle, 2_000_000);
+    assert_eq!(write(&mut cpu, handle, b""), Ok(0));
+    cpu.set_bx(handle);
+    cpu.set_cx(0);
+    cpu.set_dx(0);
+    int21(&mut cpu, 0x4201);
+    assert_eq!((cpu.dx() as u32) << 16 | cpu.ax() as u32, 2_000_000);
+    close(&mut cpu, handle);
+    assert_eq!(free_clusters(&mut cpu, 1), 0);
+    assert_eq!(read_file(&mut cpu, "A:\\SAVE.DAT").len(), free as usize * 512);
 }
 
 fn remount(cpu: &mut Cpu, image: &Path) {

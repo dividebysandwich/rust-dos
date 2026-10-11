@@ -1291,10 +1291,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 let disk = &mut cpu.bus.disk;
                 let result = match disk.handle_device(sft) {
                     Some(_) => Ok(()),
-                    None => disk
-                        .seek_file(sft, 0, 1)
-                        .map_err(|e| e as u8)
-                        .and_then(|at| disk.set_file_size(sft, at)),
+                    None => disk.position(sft).ok_or(0x19).and_then(|at| disk.set_file_size(sft, at)),
                 };
                 if let Err(code) = result {
                     cpu.bus.log_string(&format!(
@@ -1302,7 +1299,16 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                         handle, code
                     ));
                 }
-                return set_result(cpu, result.map(|()| 0));
+                // A handle write tells of a full disk only by writing fewer
+                // bytes than asked, and here that's 0 either way: no error.
+                let result = match result {
+                    Ok(()) | Err(0x27) => {
+                        file_io(cpu, sft, 0, Some(true));
+                        Ok(0)
+                    }
+                    Err(code) => Err(code),
+                };
+                return set_result(cpu, result);
             }
 
             let mut data = vec![0u8; count];
