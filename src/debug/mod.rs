@@ -415,7 +415,10 @@ pub enum ShutdownReason {
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize, Debug, Clone)]
-#[serde(tag = "type", rename_all = "snake_case")]
+// A field the event doesn't have is refused: dropping it would send other
+// input than the client asked for ("modifiers" for "mods" pressed the key
+// without Alt).
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum InputEvent {
     Key {
         key: Option<String>,

@@ -439,7 +439,49 @@ fn parse_body(body: &Bytes) -> Result<Value, ApiError> {
 }
 
 fn from_value<T: serde::de::DeserializeOwned>(v: Value) -> Result<T, ApiError> {
-    serde_json::from_value(v).map_err(|e| bad(e.to_string()))
+    serde_json::from_value(v).map_err(|e| bad(with_field_hint(e.to_string())))
+}
+
+/// serde's "unknown field `modifiers`, expected one of `key`, ..., `mods`"
+/// (or "unknown variant") with "(did you mean `mods`?)" added when one of
+/// the names it lists is close to the unknown one: the same first three
+/// letters, or two edits apart.
+fn with_field_hint(msg: String) -> String {
+    let Some(rest) = msg.strip_prefix("unknown field `").or_else(|| msg.strip_prefix("unknown variant `")) else {
+        return msg;
+    };
+    let Some((unknown, expected)) = rest.split_once('`') else {
+        return msg;
+    };
+    let unknown = unknown.to_ascii_lowercase();
+    let prefix = |a: &str, b: &str| a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count();
+    let best = expected
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .map(|field| (field, prefix(&unknown, field), edit_distance(&unknown, field)))
+        .filter(|&(_, p, d)| p >= 3 || (d <= 2 && d < unknown.len()))
+        .min_by_key(|&(_, p, d)| (std::cmp::Reverse(p.min(3)), d));
+    match best {
+        Some((field, ..)) => format!("{} (did you mean `{}`?)", msg, field),
+        None => msg,
+    }
+}
+
+/// Levenshtein distance, for the short field names above.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut diag = row[0];
+        row[0] = i + 1;
+        for (j, &cb) in b.iter().enumerate() {
+            let next = (diag + usize::from(ca != cb)).min(row[j] + 1).min(row[j + 1] + 1);
+            diag = row[j + 1];
+            row[j + 1] = next;
+        }
+    }
+    row[b.len()]
 }
 
 fn text_response(s: String) -> Response {
@@ -840,6 +882,7 @@ fn trace_json(entries: &[TraceEntry], next: u64, dropped: u64, truncated: bool, 
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PortsPost {
     enabled: Option<bool>,
     #[serde(default)]
@@ -889,6 +932,7 @@ async fn ports_get(State(s): State<AppState>, Query(q): Query<PortsQuery>) -> Ap
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TracePost {
     enabled: Option<bool>,
     #[serde(default)]
@@ -983,20 +1027,27 @@ struct WaitQuery {
 /// `{"events": [...]}`. `default_type` is injected into objects lacking a
 /// `type` field (so `/api/input/key` accepts `{"key": "enter"}`).
 fn parse_events(v: Value, default_type: Option<&str>) -> Result<Vec<InputEvent>, ApiError> {
-    let list = match v {
-        Value::Array(a) => a,
-        Value::Object(mut o) if o.contains_key("events") => match o.remove("events") {
-            Some(Value::Array(a)) => a,
-            _ => return Err(bad("'events' must be an array")),
-        },
-        other => vec![other],
+    let (list, several) = match v {
+        Value::Array(a) => (a, true),
+        Value::Object(mut o) if o.contains_key("events") => {
+            let Some(Value::Array(a)) = o.remove("events") else {
+                return Err(bad("'events' must be an array"));
+            };
+            // A field beside the events is refused as one in an event is.
+            if let Some(field) = o.keys().next() {
+                return Err(bad(format!("unknown field `{}` beside `events`", field)));
+            }
+            (a, true)
+        }
+        other => (vec![other], false),
     };
     list.into_iter()
-        .map(|mut ev| {
+        .enumerate()
+        .map(|(i, mut ev)| {
             if let (Some(t), Value::Object(o)) = (default_type, &mut ev) {
                 o.entry("type").or_insert_with(|| Value::String(t.to_string()));
             }
-            from_value(ev)
+            from_value(ev).map_err(|e| if several { bad(format!("events[{}]: {}", i, e.message())) } else { e })
         })
         .collect()
 }
@@ -1039,6 +1090,7 @@ async fn drives(State(s): State<AppState>) -> ApiResult {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MountBody {
     path: String,
     /// floppy, hdd or cdrom
@@ -1080,6 +1132,7 @@ async fn unmount(State(s): State<AppState>, Path(letter): Path<String>) -> ApiRe
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StateBody {
     /// The save state file, on the host.
     path: String,
@@ -1100,6 +1153,7 @@ async fn state_file(State(s): State<AppState>, Path(action): Path<String>, body:
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SpeedBody {
     /// As `cycles` in the configuration file: auto, max or a number.
     cycles: String,
@@ -1111,6 +1165,7 @@ async fn speed(State(s): State<AppState>, body: Bytes) -> ApiResult {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ControlBody {
     count: Option<u64>,
     until: Option<String>,
@@ -1290,6 +1345,7 @@ fn hexdump(base: usize, segoff: Option<(u16, u32)>, data: &[u8]) -> String {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MemPut {
     addr: String,
     hex: Option<String>,
@@ -1359,6 +1415,7 @@ async fn bp_list(State(s): State<AppState>) -> ApiResult {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BpBody {
     addr: Option<String>,
     /// With `addr`: the breakpoint goes once it stops the machine.
@@ -1420,6 +1477,7 @@ async fn wp_list(State(s): State<AppState>) -> ApiResult {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WpBody {
     addr: Option<String>,
     len: Option<u8>,
@@ -1825,7 +1883,11 @@ async fn handle_ws_input(s: &AppState, text: &str) -> Value {
             Value::Object(o) => o.remove(key),
             _ => None,
         };
-        let wait = take("wait").and_then(|w| w.as_bool()).unwrap_or(false);
+        let wait = match take("wait") {
+            Some(Value::Bool(w)) => w,
+            Some(_) => return Err(bad("wait: true or false")),
+            None => false,
+        };
         let tag = match take("request_id") {
             Some(Value::String(t)) => Some(request_id(&t)?),
             Some(_) => return Err(bad("request_id: a string")),
@@ -1867,6 +1929,7 @@ async fn handle_ws_input(s: &AppState, text: &str) -> Value {
 const HELP: &str = r#"rust-dos debug interface
 ========================
 All endpoints are local-only and unauthenticated. JSON in, JSON out unless noted.
+A JSON body with a field the endpoint doesn't have gets 400 naming it.
 Open this address in a web browser for the debugger page (/ui): the screen,
 execution control, registers, disassembly, memory, breakpoints and the log.
 Addresses are hex: "SEG:OFF" (registers allowed, e.g. "CS:IP", "DS:SI", "B800:0")
@@ -1956,6 +2019,7 @@ INPUT  (append ?wait=false to return immediately instead of after delivery)
   POST /api/input/wait   {"ms":500}
   POST /api/input/batch  [{"type":"type","text":"cd games\n"},{"type":"wait","ms":300},
                           {"type":"key","key":"f1"}]
+                         A field an event doesn't have gets 400 and queues nothing.
   DELETE /api/input      clear pending queued input ("cancelled": the input operations)
 
 EXECUTION CONTROL
@@ -2116,7 +2180,7 @@ mod http_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::{Answer, Cmd, Meta, Reply, Request, Shared, hex_data, json, json_body};
+    use super::{Answer, Cmd, Meta, Reply, Request, Shared, hex_data, json, json_body, with_field_hint};
     use std::io::{Read, Write};
     use std::net::SocketAddr;
     use std::sync::{Arc, mpsc};
@@ -2192,6 +2256,23 @@ mod tests {
         assert_eq!(hex_data("0XCDAB").ok(), Some(vec![0xCD, 0xAB]));
         assert_eq!(hex_data("00 0x10").ok(), Some(vec![0x00, 0x10]));
         assert!(hex_data("CDA").is_err());
+    }
+
+    #[test]
+    fn an_unknown_field_close_to_a_known_one_is_named() {
+        let hint = |m: &str| with_field_hint(m.to_string());
+        let key = "unknown field `modifiers`, expected one of `key`, `scancode`, `ascii`, `action`, `mods`, `hold_ms`";
+        assert!(hint(key).ends_with(" (did you mean `mods`?)"), "{}", hint(key));
+        let mount = "unknown field `readonly`, expected one of `path`, `type`, `label`, `read_only`, `images`";
+        assert!(hint(mount).ends_with(" (did you mean `read_only`?)"), "{}", hint(mount));
+        let step = "unknown field `cnt`, expected one of `count`, `until`";
+        assert!(hint(step).ends_with(" (did you mean `count`?)"), "{}", hint(step));
+        let variant = "unknown variant `keys`, expected one of `key`, `type`, `mouse`, `wait`";
+        assert!(hint(variant).ends_with(" (did you mean `key`?)"), "{}", hint(variant));
+        // Nothing close: the message as serde gave it.
+        let far = "unknown field `z`, expected one of `x`, `y`, `dx`";
+        assert_eq!(hint(far), far);
+        assert_eq!(hint("missing field `ms`"), "missing field `ms`");
     }
 
     #[test]
