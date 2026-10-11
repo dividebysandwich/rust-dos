@@ -169,6 +169,24 @@ fn reflected_motion_poll_delivers_buttons_with_if_clear_and_preserves_full_regis
     assert!(!cpu.get_cpu_flag(CpuFlags::IF));
 }
 
+/// BloodNet's event handler moves its own pointer by SI and DI, then
+/// clears the motion counters with AX=000Bh. Each call has to get the
+/// motion since then, not a difference from what the counters were at the
+/// call before.
+#[test]
+fn handler_motion_counts_from_the_last_read_of_the_counters() {
+    let mut cpu = polling_cpu();
+    cpu.bus.mouse.callback_mask = 0x0001;
+    for round in 1..=3 {
+        cpu.bus.mouse.move_by(3.0, 3.0);
+        assert!(rust_dos::mouse::deliver_callback(&mut cpu));
+        finish_callback(&mut cpu, 0x0100);
+        assert_eq!(cpu.bus.read_16(CALLBACK_COUNT), round);
+        let mickeys = (cpu.bus.read_16(CALLBACK_ARGS + 8), cpu.bus.read_16(CALLBACK_ARGS + 10));
+        assert_eq!(mickeys, (2, 4), "SI and DI at call {round}");
+    }
+}
+
 #[test]
 fn reflected_button_polls_preserve_service_results() {
     for function in [0x0003, 0x0005, 0x0006] {
