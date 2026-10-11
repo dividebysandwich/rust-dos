@@ -2227,6 +2227,9 @@ impl Bus {
                 // from now.
                 self.sb_advance();
                 let mut log = Vec::new();
+                if std::env::var_os("SBDBG").is_some() && offset == 0xC {
+                    eprintln!("SBDBG icount={} dsp write {:02X} dma1masked={} ", self.clock.icount, value, !self.dma.ready(1));
+                }
                 if let Some(sb) = &mut self.sb {
                     sb.write(offset, value, &mut log);
                 }
@@ -2297,6 +2300,9 @@ impl Bus {
         let (irq, irq8, irq16) = self.sb_irq_now();
         let (old_irq, old8, old16) = self.sb_irq;
         let up = irq8 || irq16;
+        if std::env::var_os("SBDBG").is_some() && (irq8 != old8) {
+            eprintln!("SBDBG icount={} irq8 {} -> {} irr={:02X} isr={:02X} imr={:02X}", self.clock.icount, old8, irq8, self.pic.master.irr, self.pic.master.isr, self.pic.master.imr);
+        }
         if let Some(old) = old_irq
             && (old8 || old16)
             && (!up || irq != old_irq)
@@ -2342,6 +2348,9 @@ impl Bus {
     /// The CPU takes interrupt `irq`: it is in service until an EOI.
     /// Returns its vector.
     pub fn pic_acknowledge(&mut self, irq: u8) -> u8 {
+        if std::env::var_os("SBDBG").is_some() && irq == 5 {
+            eprintln!("SBDBG icount={} ack irq5", self.clock.icount);
+        }
         let vector = self.pic.acknowledge(irq);
         self.refresh_irq();
         vector

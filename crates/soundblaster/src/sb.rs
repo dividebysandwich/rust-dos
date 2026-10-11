@@ -336,6 +336,9 @@ impl SoundBlaster {
             // setup finds the card's channel by trying each one. So does one
             // with no channel selected.
             let Some(ch) = ch.filter(|&ch| dma.ready(ch)) else {
+                if std::env::var_os("SBDBG").is_some() {
+                    eprintln!("SBDBG dma not ready, remaining {}", t.remaining);
+                }
                 self.frac = 0;
                 break;
             };
