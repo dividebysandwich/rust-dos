@@ -103,6 +103,12 @@ cargo build --release
 ./target/release/rust-dos -d ~/dos
 ```
 
+`-d` makes a host directory drive C:; without it, C: is the configuration
+file's, or the current directory. Drop a game's folder, a GOG install, a zip
+or 7z archive, or a CD or disk image onto the window to mount, import or run
+it.
+`rust-dos --help` lists the other options.
+
 On Windows (MSVC), take SDL2's Visual C++ development package,
 `SDL2-devel-<version>-VC.zip` from
 [SDL's releases](https://github.com/libsdl-org/SDL/releases) (CI builds with
@@ -116,12 +122,6 @@ cargo build --release
 
 To run the program, put `SDL2.dll` from the same `lib\x64` next to
 `rust-dos.exe` or on `PATH`.
-
-`-d` makes a host directory drive C:; without it, C: is the configuration
-file's, or the current directory. Drop a game's folder, a GOG install, a zip
-or 7z archive, or a CD or disk image onto the window to mount, import or run
-it.
-`rust-dos --help` lists the other options.
 
 ## Configuration
 
