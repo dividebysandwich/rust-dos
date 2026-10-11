@@ -1,5 +1,5 @@
-use crate::cpu::Cpu;
-use crate::f80::F80;
+use crate::cpu::{Cpu, FpuFlags};
+use crate::f80::{BCD_INDEFINITE, F80};
 use crate::instructions::utils::calculate_addr;
 use iced_x86::{Instruction, MemorySize, OpKind, Register};
 
@@ -78,11 +78,33 @@ pub fn fbld(cpu: &mut Cpu, instr: &Instruction) {
 }
 
 /// A double as the word or dword (`size` 2 or 4) FIST and FISTP store,
-/// rounded as the control word says. The dynamic recompiler's code calls
-/// it for what its own conversion doesn't cover.
-pub fn to_int(value: f64, control: u16, size: u8) -> u32 {
-    let rounded = x87_round(value, (control >> 10) & 0x03);
+/// rounded as the control word says. An infinity, a NaN or what doesn't
+/// fit stores the integer indefinite (the smallest negative integer) and
+/// sets IE, as the FPU does with its exceptions masked. The dynamic
+/// recompiler's code calls it for what its own conversion doesn't cover.
+pub fn to_int(cpu: &mut Cpu, value: f64, size: u8) -> u32 {
+    let rounded = x87_round(value, (cpu.fpu_control >> 10) & 0x03);
+    let (min, max) = if size == 2 { (i16::MIN as f64, i16::MAX as f64) } else { (i32::MIN as f64, i32::MAX as f64) };
+    // (A NaN fails both.)
+    if !(rounded >= min && rounded <= max) {
+        cpu.set_fpu_flag(FpuFlags::IE, true);
+        return if size == 2 { 0x8000 } else { 0x8000_0000 };
+    }
     if size == 2 { rounded as i16 as u16 as u32 } else { rounded as i32 as u32 }
+}
+
+/// An 80-bit value as the qword FISTP stores, from all 64 bits of its
+/// significand, with `to_int`'s indefinite for what doesn't fit.
+fn to_int64(cpu: &mut Cpu, value: F80) -> u64 {
+    let negative = value.is_negative();
+    match value.to_integer((cpu.fpu_control >> 10) & 0x03) {
+        Some(n) if negative && n <= 1 << 63 => n.wrapping_neg(),
+        Some(n) if !negative && n < 1 << 63 => n,
+        _ => {
+            cpu.set_fpu_flag(FpuFlags::IE, true);
+            1 << 63
+        }
+    }
 }
 
 fn x87_round(f_val: f64, rc: u16) -> f64 {
@@ -115,22 +137,22 @@ fn x87_round(f_val: f64, rc: u16) -> f64 {
 pub fn fistp(cpu: &mut Cpu, instr: &Instruction) {
     // (The register's value whatever its tag.)
     let val = cpu.fpu_reg_f64(cpu.fpu_top);
+    let val80 = cpu.fpu_reg(cpu.fpu_top);
     cpu.fpu_drop();
     let addr = calculate_addr(cpu, instr);
 
-    // Use the custom rounding logic
-    let rc = (cpu.fpu_control >> 10) & 0x03;
-    let rounded = x87_round(val, rc);
-
     match instr.memory_size() {
         MemorySize::Int16 => {
-            cpu.lin_write_16(addr, to_int(val, cpu.fpu_control, 2) as u16);
+            let int = to_int(cpu, val, 2);
+            cpu.lin_write_16(addr, int as u16);
         }
         MemorySize::Int32 => {
-            cpu.lin_write_32(addr, to_int(val, cpu.fpu_control, 4));
+            let int = to_int(cpu, val, 4);
+            cpu.lin_write_32(addr, int);
         }
         MemorySize::Int64 => {
-            cpu.lin_write_64(addr, rounded as i64 as u64);
+            let int = to_int64(cpu, val80);
+            cpu.lin_write_64(addr, int);
         }
         _ => {}
     }
@@ -192,7 +214,10 @@ pub fn fbstp(cpu: &mut Cpu, instr: &Instruction) {
     let val: F80 = cpu.fpu_pop();
     let addr = calculate_addr(cpu, instr);
 
-    let bcd_bytes = val.to_bcd_packed();
+    let bcd_bytes = val.to_bcd_packed((cpu.fpu_control >> 10) & 0x03).unwrap_or_else(|| {
+        cpu.set_fpu_flag(FpuFlags::IE, true);
+        BCD_INDEFINITE
+    });
 
     // Write the 10-byte BCD block to Memory
     for i in 0..10 {
@@ -333,10 +358,12 @@ pub fn fist(cpu: &mut Cpu, instr: &Instruction) {
 
     match instr.memory_size() {
         MemorySize::Int16 => {
-            cpu.lin_write_16(addr, to_int(f_val, cpu.fpu_control, 2) as u16);
+            let int = to_int(cpu, f_val, 2);
+            cpu.lin_write_16(addr, int as u16);
         }
         MemorySize::Int32 => {
-            cpu.lin_write_32(addr, to_int(f_val, cpu.fpu_control, 4));
+            let int = to_int(cpu, f_val, 4);
+            cpu.lin_write_32(addr, int);
         }
         _ => {
             cpu.bus.log_string(&format!(
