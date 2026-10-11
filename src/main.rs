@@ -764,6 +764,9 @@ fn main() -> Result<(), String> {
                         osd.clear_lasting();
                     }
                     if rewinding.take().is_some() {
+                        // The machine goes on from where rewinding got to,
+                        // as when F11 is released.
+                        dbg.state_loaded_elsewhere(&cpu, "rewind");
                         pacer.rebase(&cpu.bus.clock, std::time::Instant::now());
                         osd.clear_lasting();
                     }
@@ -1375,6 +1378,7 @@ fn main() -> Result<(), String> {
         // Remote debug requests and queued remote input, which goes to the
         // settings window while it is open.
         dbg.divert = ui.is_open();
+        dbg.rewinding = rewinding.is_some();
         dbg.poll(&mut cpu);
         if dbg.quit_requested() {
             shutdown = debug::ShutdownReason::Quit;
@@ -1445,6 +1449,11 @@ fn main() -> Result<(), String> {
             // The debug server's loads are in its journal already.
             if !debugger_loaded {
                 dbg.state_loaded_elsewhere(&cpu, "window");
+            }
+            // Deterministic mode runs at the speed the state brought.
+            if settings.cycles != told_cycles {
+                told_cycles = settings.cycles;
+                dbg.speed_changed(&cpu, &told_cycles.to_string(), "load");
             }
             // Deterministic mode's clock and ticks go on from the state's
             // emulated time.

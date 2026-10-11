@@ -28,7 +28,7 @@ use tokio::sync::{broadcast, oneshot};
 
 use super::journal::{self, Filter, Journal, Kind, OpLookup, OpState};
 use super::trace::{self, TraceEntry};
-use super::{Answer, Cmd, InputEvent, Meta, Reply, Request, Shared, TraceQuery};
+use super::{Answer, Cmd, InputEvent, Meta, Reply, Request, Shared, TraceQuery, stop_fields};
 use crate::video;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -461,22 +461,6 @@ fn op_json(req: u64, end: &OpEnd) -> Value {
     })
 }
 
-/// The fields of a stop as replies have them since before the journal
-/// (`paused`, `reason`, `icount`, `registers` and the rest), and the whole
-/// `paused` entry as `stop`.
-fn stop_fields(stop: &Value) -> Value {
-    let mut reply = json!({"paused": true});
-    if let Value::Object(entry) = stop {
-        for (k, v) in entry {
-            if !matches!(k.as_str(), "seq" | "type" | "t_ms" | "emu_ns" | "cause" | "request_id" | "op") {
-                reply[k] = v.clone();
-            }
-        }
-    }
-    reply["stop"] = stop.clone();
-    reply
-}
-
 /// The reply to a request that waited for its operation `op` (started
 /// with entry `seq`) to end, as replies have it since before the journal:
 /// the stop it ended with, a `run`'s program, delivered input, or the
@@ -865,11 +849,25 @@ async fn log_get(State(s): State<AppState>, Query(q): Query<LogQuery>) -> ApiRes
         && let (Some(_), Some(ms)) = (q.after_n, q.wait)
     {
         let mut n = s.shared.log_n.subscribe();
+        // The shutdown ends the wait too, so that it doesn't hold the exit.
+        let mut seq = s.shared.journal_seq.subscribe();
         let until = deadline(Duration::from_millis(ms));
         loop {
             n.borrow_and_update();
+            seq.borrow_and_update();
             lines = pick();
-            if !lines.is_empty() || !matches!(tokio::time::timeout_at(until, n.changed()).await, Ok(Ok(()))) {
+            let shut = s.shared.journal.lock().unwrap_or_else(|e| e.into_inner()).shutdown.is_some();
+            if !lines.is_empty() || shut {
+                break;
+            }
+            let woke = tokio::time::timeout_at(until, async {
+                tokio::select! {
+                    r = n.changed() => r.is_ok(),
+                    r = seq.changed() => r.is_ok(),
+                }
+            })
+            .await;
+            if !matches!(woke, Ok(true)) {
                 break;
             }
         }

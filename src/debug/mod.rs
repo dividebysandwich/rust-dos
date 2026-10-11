@@ -737,6 +737,10 @@ pub struct DebugHub {
     /// While the settings window is open, remote input goes to it
     /// (`take_ui_input`) instead of to the machine.
     pub divert: bool,
+    /// While Alt+F11 rewinds, the front end loads a state every few frames,
+    /// which the journal hears about only once rewinding ends: until then
+    /// `If-State-Seq` and strict-match requests are refused.
+    pub rewinding: bool,
     ui_input: Vec<UiInput>,
     /// Where the remote mouse is, for clicks on the settings window.
     ui_pointer: (i32, i32),
@@ -845,6 +849,7 @@ impl DebugHub {
             stop_at_ns: None,
             key_stall_frames: 0,
             divert: false,
+            rewinding: false,
             ui_input: Vec::new(),
             ui_pointer: (0, 0),
             hotkey: false,
@@ -1093,18 +1098,19 @@ impl DebugHub {
             PauseReason::Load => self.cur.as_ref().map(|c| c.req),
             _ => op,
         };
-        let mut value = stop.clone();
+        let mut fallback = stop.clone();
         let seq = self.append_then(cpu, Kind::Paused, cause, stop, |j, seq| {
             if let Some(op) = op {
                 j.end_op(op, OpState::Stopped, Some(seq));
             }
         });
         self.current_op = None;
-        if let Some(seq) = seq {
-            value["seq"] = seq.into();
+        // The whole entry, as `current_stop` and the journal give it.
+        if let Some(entry) = seq.and_then(|s| self.with_journal(|j| j.get(s).map(|e| e.value())).flatten()) {
+            return Some(entry);
         }
-        value["icount"] = cpu.executed.into();
-        Some(value)
+        fallback["icount"] = cpu.executed.into();
+        Some(fallback)
     }
 
     /// The `paused` entry the machine is stopped in, if it is.
@@ -1136,33 +1142,54 @@ impl DebugHub {
 
     /// A control request takes over the machine: the step count and the
     /// run-to target of the operation it supersedes stop nothing more.
+    /// A `run` whose operation is superseded doesn't stop at its program's
+    /// entry and no longer blocks another `run` or a strict-match save; the
+    /// command line it queued still runs.
     fn take_over(&mut self) {
         self.step_budget = None;
         self.temp_breakpoint = None;
+        if self.run_wait.as_ref().is_some_and(|r| self.current_op == Some(r.op)) {
+            self.run_wait = None;
+            self.start_once = false;
+        }
     }
 
     /// Program starts and ends since the journal last told them, as
     /// `program_started` and `program_exited` (with `count` when there were
-    /// several in the batch).
+    /// several in the batch). When both came in one batch, the start goes
+    /// first if the program that started no longer runs (its PSP isn't the
+    /// current one): it ended in the batch too.
     fn tell_programs(&mut self, cpu: &Cpu) {
         let (started, ended) = (cpu.programs.started, cpu.programs.ended);
-        if ended > self.told_ends {
-            let mut fields = json!({"exit": exit_json(cpu)});
-            if ended - self.told_ends > 1 {
-                fields["count"] = (ended - self.told_ends).into();
-            }
-            self.append(cpu, Kind::ProgramExited, None, fields);
+        let new_start = started > self.told_starts;
+        let new_end = ended > self.told_ends;
+        let start_first = new_start && new_end && cpu.current_psp != cpu.programs.psp;
+        if new_end && !start_first {
+            self.tell_exit(cpu, ended);
         }
-        if started > self.told_starts {
+        if new_start {
             let mut fields = json!({"program": program_json(cpu)});
             if started - self.told_starts > 1 {
                 fields["count"] = (started - self.told_starts).into();
             }
             self.last_start_seq = self.append(cpu, Kind::ProgramStarted, None, fields).or(self.last_start_seq);
         }
+        if start_first {
+            self.tell_exit(cpu, ended);
+        }
         // A reboot or a load can take the counts back.
         self.told_starts = started;
         self.told_ends = ended;
+    }
+
+    /// The `program_exited` entry of the ends since the journal last told
+    /// them, `ended` now.
+    fn tell_exit(&mut self, cpu: &Cpu, ended: u64) {
+        let mut fields = json!({"exit": exit_json(cpu)});
+        if ended - self.told_ends > 1 {
+            fields["count"] = (ended - self.told_ends).into();
+        }
+        self.append(cpu, Kind::ProgramExited, None, fields);
     }
 
     /// Whether `need` holds now; if not, the 409 body that says why.
@@ -1183,6 +1210,8 @@ impl DebugHub {
             Need::Quiescent { input_ok } => {
                 let why = if !self.paused {
                     Some("the machine runs; pause it first (POST /api/control/pause)")
+                } else if self.rewinding {
+                    Some("the machine is being rewound")
                 } else if self.step_budget.is_some() {
                     Some("a step is pending")
                 } else if self.run_wait.is_some() {
@@ -1202,6 +1231,8 @@ impl DebugHub {
                     Some("the machine runs; pause it, then read its state again".to_string())
                 } else if self.divert {
                     Some("the settings window is open".to_string())
+                } else if self.rewinding {
+                    Some("the machine is being rewound".to_string())
                 } else if !pending_ops.is_empty() {
                     Some("an operation is under way".to_string())
                 } else if typing {
@@ -1697,10 +1728,15 @@ impl DebugHub {
     }
 
     /// End operation `op` as failed with `status`, appending `op_failed`.
+    /// An operation that already ended (a `run` another control request
+    /// superseded, or a pause stopped) is left as it is.
     fn fail_op(&mut self, cpu: &Cpu, op: u64, status: u16, error: &str) {
-        let message = error.to_string();
-        let fields = json!({"status": status, "error": error});
-        self.append_then(cpu, Kind::OpFailed, Some(op), fields, move |j, seq| j.fail_op(op, Some(seq), status, message));
+        let pending = self.with_journal(|j| matches!(j.op(op), journal::OpLookup::Found(o) if o.state == OpState::Pending));
+        if pending == Some(true) {
+            let message = error.to_string();
+            let fields = json!({"status": status, "error": error});
+            self.append_then(cpu, Kind::OpFailed, Some(op), fields, move |j, seq| j.fail_op(op, Some(seq), status, message));
+        }
         if self.current_op == Some(op) {
             self.current_op = None;
         }
@@ -3001,22 +3037,29 @@ impl DebugHub {
     }
 }
 
-/// The reply to a pause or a wait: the stop's fields (`reason`, `icount`,
-/// `registers` and the rest, with `"paused": true`) and the whole `paused`
-/// entry as `stop`. The registers are as they are now, which a write after
-/// the stop may have changed.
-fn stop_reply(stop: Option<Value>, cpu: &Cpu) -> Value {
+/// The fields of a stop as replies have them since before the journal
+/// (`paused`, `reason`, `icount`, `registers` and the rest), and the whole
+/// `paused` entry as `stop`.
+pub(crate) fn stop_fields(stop: &Value) -> Value {
     let mut reply = json!({"paused": true});
-    if let Some(Value::Object(entry)) = &stop {
+    if let Value::Object(entry) = stop {
         for (k, v) in entry {
             if !matches!(k.as_str(), "seq" | "type" | "t_ms" | "emu_ns" | "cause" | "request_id" | "op") {
                 reply[k] = v.clone();
             }
         }
     }
+    reply["stop"] = stop.clone();
+    reply
+}
+
+/// The reply to a pause or a wait: `stop_fields`, with the instruction
+/// count and the registers as they are now, which a write after the stop
+/// may have changed.
+fn stop_reply(stop: Option<Value>, cpu: &Cpu) -> Value {
+    let mut reply = stop_fields(&stop.unwrap_or(Value::Null));
     reply["icount"] = cpu.executed.into();
     reply["registers"] = regs_json(cpu);
-    reply["stop"] = stop.unwrap_or(Value::Null);
     reply
 }
 
@@ -4392,6 +4435,20 @@ mod tests {
     }
 
     #[test]
+    fn a_run_another_resume_takes_over_does_not_stop_at_entry() {
+        let (mut cpu, mut hub) = machine("journal-supersede-run");
+        let run_op = started_op(&mut cpu, &mut hub, Cmd::Run { command: "PROBE.COM".into(), stop_at_entry: true });
+        let resume = started_op(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None });
+        assert_eq!(op_state(&hub, run_op).superseded_by, Some(resume));
+        assert!(hub.run_wait.is_none() && !hub.start_once, "the run's stop at entry is dropped");
+        run(&mut cpu, &mut hub, 50);
+        assert!(!hub.paused, "the program ran through its entry");
+        assert!(entries_of(&hub, "paused").is_empty(), "{:?}", entries_of(&hub, "paused"));
+        assert_eq!(op_state(&hub, run_op).state, OpState::Superseded);
+        assert!(entries_of(&hub, "program_started").iter().any(|e| e["program"]["name"] == "PROBE.COM"), "the command line still ran");
+    }
+
+    #[test]
     fn if_state_seq_holds_only_in_the_state_read() {
         let (mut cpu, mut hub) = machine("journal-if-state");
         pause(&mut cpu, &mut hub);
@@ -4428,6 +4485,12 @@ mod tests {
         let (refused, _) = ask_guarded(&mut cpu, &mut hub, Cmd::GetRegs, Some(read));
         assert_eq!(refused.unwrap_err().1["settings_window"], true);
         hub.divert = false;
+        assert!(ask_guarded(&mut cpu, &mut hub, Cmd::GetRegs, Some(read)).0.is_ok());
+        // Rewinding loads states the journal hears about only at its end.
+        hub.rewinding = true;
+        let (refused, _) = ask_guarded(&mut cpu, &mut hub, Cmd::GetRegs, Some(read));
+        assert_eq!(refused.unwrap_err().1["error"], "the machine is being rewound");
+        hub.rewinding = false;
         assert!(ask_guarded(&mut cpu, &mut hub, Cmd::GetRegs, Some(read)).0.is_ok());
 
         // Deterministic mode types nothing while paused: queued input is no

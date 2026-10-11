@@ -317,7 +317,8 @@ curl -s "$H/api/journal?after=$S&type=paused&wait=30000"   # long poll for the n
   request's number (`"op"` in the reply). `GET /api/ops/N?wait=30000` tells
   how it ended: `stopped` (with the stop), `done` (input delivered, or a
   `run` whose program started), `failed`, `superseded` (another control
-  request took over, `superseded_by`) or `cancelled`. `step`, `step_over`
+  request took over, `superseded_by`; a superseded `run` no longer stops
+  at its program's entry) or `cancelled`. `step`, `step_over`
   and `run` wait for their operation, unless the body has `"wait":false`
   (then 202 with `op`). `GET /api/control/wait?op=N` waits for one too.
 - **Who stopped it:** a stop by `POST /api/control/pause` has `by`, the
@@ -325,8 +326,8 @@ curl -s "$H/api/journal?after=$S&type=paused&wait=30000"   # long poll for the n
 - **Change only what you read.** `If-State-Seq: N` on a request (or
   `"if_state_seq":N` in a `/ws/input` message) carries it out only while
   the machine is still paused in the state of entry N: no entry since then
-  changed it, no operation is under way, no input is being typed and the
-  settings window is closed. Otherwise the reply is 409 with
+  changed it, no operation is under way, no input is being typed, the
+  settings window is closed and Alt+F11 isn't rewinding. Otherwise the reply is 409 with
   `"precondition":"state"`. Read with `GET /api/memory` (its
   `X-Debug-State-Seq`), then write with `If-State-Seq`; the write's reply
   has the new `state_seq` for the next one. Every refused precondition

@@ -1,6 +1,7 @@
 //! The debug server's journal in the emulator itself: the binary with no
 //! window (`SDL_VIDEODRIVER=dummy`), on a free port, driven over HTTP from
-//! a program's entry to `quit`.
+//! a program's entry to `quit`. The binary needs the `sdl` feature.
+#![cfg(feature = "sdl")]
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -46,11 +47,13 @@ impl Drop for Emulator {
 
 #[test]
 fn the_journal_follows_a_session_to_its_shutdown() {
-    let Some(exe) = option_env!("CARGO_BIN_EXE_rust-dos") else { return };
+    let exe = env!("CARGO_BIN_EXE_rust-dos");
     let dir = std::env::temp_dir().join(format!("rust-dos-journal-bin-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("c")).unwrap();
     std::fs::write(dir.join("c").join("PROBE.COM"), PROBE).unwrap();
+    // What the emulator says on stderr, shown if it doesn't come up.
+    let stderr_path = dir.join("stderr.txt");
     let mut child = Command::new(exe)
         .args(["--no-config", "-d"])
         .arg(dir.join("c"))
@@ -58,7 +61,7 @@ fn the_journal_follows_a_session_to_its_shutdown() {
         .env("SDL_VIDEODRIVER", "dummy")
         .env("SDL_AUDIODRIVER", "dummy")
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(std::fs::File::create(&stderr_path).unwrap())
         .spawn()
         .unwrap();
     let stdout = child.stdout.take().unwrap();
@@ -73,9 +76,9 @@ fn the_journal_follows_a_session_to_its_shutdown() {
         }
     });
     let Ok(at) = lines.recv_timeout(Duration::from_secs(60)) else {
-        // No dummy video driver here: nothing to test.
-        eprintln!("the emulator didn't start its debug server");
-        return;
+        let exited = emulator.0.try_wait().ok().flatten();
+        let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
+        panic!("the emulator didn't start its debug server within 60 s (exit: {exited:?}); stderr:\n{stderr}");
     };
     let addr: SocketAddr = at.parse().unwrap();
     let get = |path: &str| http(addr, "GET", path, &[], None);
