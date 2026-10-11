@@ -193,6 +193,26 @@ pub struct SoundBlaster {
     dma16: Option<u8>,
 }
 
+/// While a transfer runs, emulated time is cut into slots of `BUSY_TICKS`
+/// PIT ticks (about 3.4 us), and the write status reads busy in about one
+/// slot in five, never in two slots in a row.
+const BUSY_TICKS: u64 = 4;
+
+/// Whether the DSP is busy in time slot `slot` while a transfer runs. A
+/// hash of the slot number picks the busy slots instead of a fixed period,
+/// so a poll loop whose period happens to be a multiple of a fixed
+/// pattern's (at some cycles setting) does not sample the same phase on
+/// every read: it sees both states within a few reads.
+fn busy_slot(slot: u64) -> bool {
+    let picked = |n: u64| {
+        let mut x = n.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        (x ^ (x >> 31)) & 3 == 0
+    };
+    picked(slot) && !picked(slot.wrapping_sub(1))
+}
+
 /// Frames `out` keeps at most (about a second), for when nobody drains it.
 const OUT_MAX: usize = 48_000;
 
@@ -434,8 +454,8 @@ impl SoundBlaster {
         match offset {
             0x5 => self.mixer_read(),
             0xA => self.read_buf.pop_front().unwrap_or(0xFF),
-            // Write status: bit 7 clear, ready for a byte.
-            0xC => 0x7F,
+            // Write status: bit 7 set while the DSP is busy.
+            0xC => self.write_status(),
             // Read status: bit 7 when data waits. Acknowledges the 8-bit
             // (and on older cards the only) interrupt.
             0xE => {
@@ -449,6 +469,22 @@ impl SoundBlaster {
             }
             _ => 0xFF,
         }
+    }
+
+    /// The write status port (2xCh). An idle DSP takes a byte at once. One
+    /// running a DMA transfer is busy for a moment now and then while it
+    /// services the transfer (at most 3.4 us at a time, about a fifth of
+    /// the time), so reads in a loop see bit 7 set every few reads. Miles' AIL 2 Sound Blaster drivers (SBPDIG.ADV) rely on
+    /// that when they stop a block that is still playing: they poll for
+    /// bit 7 with the IRQ vector already restored, then halt the DMA. A
+    /// DSP that never reads busy keeps them polling until the block ends,
+    /// its IRQ goes to the BIOS's handler, and the card's request stays
+    /// up unacknowledged, so the next block's end raises no new interrupt.
+    /// `last_ticks` is the present here: port reads bring the DSP up to
+    /// date first.
+    fn write_status(&self) -> u8 {
+        let running = self.transfer.is_some_and(|t| !t.paused);
+        if running && busy_slot(self.last_ticks / BUSY_TICKS) { 0xFF } else { 0x7F }
     }
 
     fn mixer_write(&mut self, value: u8) {
@@ -712,3 +748,23 @@ rust_dos_savestate::state_fields!(SoundBlaster {
 } skip {
     config,
 });
+
+#[cfg(test)]
+mod tests {
+    use super::busy_slot;
+
+    #[test]
+    fn busy_slots_are_short_and_do_not_alias_with_a_poll_period() {
+        let busy = (0..16_000u64).filter(|&s| busy_slot(s)).count();
+        assert!((2_400..=3_600).contains(&busy), "busy in {} of 16000 slots", busy);
+        assert!((0..16_000u64).all(|s| !(busy_slot(s) && busy_slot(s + 1))), "never busy two slots in a row");
+        // A loop polling every `step` slots, from any phase, sees both
+        // states within a few dozen reads.
+        for step in 1..=64u64 {
+            for start in 0..256u64 {
+                let reads: Vec<bool> = (0..64).map(|k| busy_slot(start + k * step)).collect();
+                assert!(reads.contains(&true) && reads.contains(&false), "step {} from {}", step, start);
+            }
+        }
+    }
+}
