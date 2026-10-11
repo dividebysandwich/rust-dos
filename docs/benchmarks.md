@@ -60,6 +60,7 @@ and confirm a large one on a quiet machine before relying on it.
 | File | Measures |
 |---|---|
 | `benches/dos.rs` | The built-in DOS's file calls on a host folder: DIR's listing, FindFirst/FindNext over a whole folder, a pattern search, and opening a file three folders deep |
+| `benches/host.rs` | Host-side work on the emulation thread: capturing a frame of a GIF animation, a 256-colour 640x400 picture and a high-colour 640x480 one |
 
 ## Adding benchmarks
 
