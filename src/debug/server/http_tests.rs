@@ -1472,3 +1472,98 @@ fn saves_loads_and_speed_changes_take_effect_in_the_order_of_the_journal() {
     }
     assert!(saves > 20 && loads > 20 && speeds > 20, "saves {} loads {} speeds {}", saves, loads, speeds);
 }
+
+// ----- If-State-Seq ------------------------------------------------------------
+
+#[test]
+fn if_state_seq_guards_every_request_the_emulator_carries_out() {
+    let rig = Rig::new("if-state-all");
+    rig.post("/api/control/pause", json!({}));
+    let mount = std::env::temp_dir().join(format!("rust-dos-http-if-state-mount-{}", std::process::id()));
+    std::fs::create_dir_all(&mount).unwrap();
+    let saved = rig.post("/api/state/save", json!({"path": "if.state"}));
+    assert_eq!(saved.status, 200, "{}", saved.body);
+    let mount = mount.display().to_string();
+    // Every request the emulator carries out (the screenshot, which the
+    // front end draws, aside).
+    let requests: Vec<(&str, String, Option<Value>)> = vec![
+        ("GET", "/api/status".into(), None),
+        ("GET", "/api/stats".into(), None),
+        ("GET", "/api/screen/text".into(), None),
+        ("GET", "/api/trace".into(), None),
+        ("POST", "/api/trace".into(), Some(json!({"clear": true}))),
+        ("POST", "/api/ports".into(), Some(json!({"enabled": true}))),
+        ("GET", "/api/ports".into(), None),
+        ("POST", "/api/input/type?wait=false".into(), Some(json!({"text": ""}))),
+        ("DELETE", "/api/input".into(), None),
+        ("GET", "/api/drive".into(), None),
+        ("PUT", "/api/drive/E".into(), Some(json!({"path": mount}))),
+        ("DELETE", "/api/drive/E".into(), None),
+        ("POST", "/api/drive/swap".into(), None),
+        ("POST", "/api/drive/sync".into(), None),
+        ("POST", "/api/state/save".into(), Some(json!({"path": "if2.state", "strict_match": true}))),
+        ("POST", "/api/state/load".into(), Some(json!({"path": "if.state", "strict_match": true}))),
+        ("POST", "/api/speed".into(), Some(json!({"cycles": "4000"}))),
+        ("GET", "/api/control/wait".into(), None),
+        ("POST", "/api/control/step".into(), Some(json!({"count": 1}))),
+        ("POST", "/api/control/step_over".into(), Some(json!({}))),
+        ("POST", "/api/control/resume".into(), Some(json!({}))),
+        ("POST", "/api/control/pause".into(), Some(json!({}))),
+        ("GET", "/api/registers".into(), None),
+        ("PUT", "/api/registers".into(), Some(json!({"cx": "1234"}))),
+        ("GET", "/api/memory?addr=0200:0000&len=4".into(), None),
+        ("PUT", "/api/memory".into(), Some(json!({"addr": "0200:0000", "hex": "01"}))),
+        ("GET", "/api/disasm".into(), None),
+        ("GET", "/api/breakpoints".into(), None),
+        ("POST", "/api/breakpoints".into(), Some(json!({"addr": "1234:0000"}))),
+        ("DELETE", "/api/breakpoints?addr=1234:0000".into(), None),
+        ("GET", "/api/watchpoints".into(), None),
+        ("POST", "/api/watchpoints".into(), Some(json!({"addr": "0200:0000", "len": 2}))),
+        ("DELETE", "/api/watchpoints?addr=0200:0000".into(), None),
+        ("GET", "/api/ivt".into(), None),
+        ("GET", "/api/gdt".into(), None),
+        ("GET", "/api/ldt".into(), None),
+        ("GET", "/api/idt".into(), None),
+        ("GET", "/api/tss".into(), None),
+        ("GET", "/api/pagewalk?addr=0".into(), None),
+        ("GET", "/api/xms".into(), None),
+        ("GET", "/api/net".into(), None),
+        ("GET", "/api/serial".into(), None),
+        ("GET", "/api/printer".into(), None),
+        ("POST", "/api/printer/eject".into(), None),
+        ("GET", "/api/gus".into(), None),
+        ("GET", "/api/awe32".into(), None),
+        ("GET", "/api/exceptions".into(), None),
+    ];
+    for (method, path, body) in &requests {
+        if rig.get("/api/status").json()["paused"] != true {
+            rig.post("/api/control/pause", json!({}));
+        }
+        let status = rig.get("/api/status").json();
+        let (state, last) = (status["state_seq"].as_u64().unwrap(), status["seq"].as_u64().unwrap());
+        // Held against a state the machine left: refused, nothing done.
+        let stale = (state - 1).to_string();
+        let refused = http(rig.addr, method, path, &[("If-State-Seq", &stale)], body.as_ref());
+        assert_eq!(refused.status, 409, "{} {} with an old state: {}", method, path, refused.body);
+        assert_eq!(refused.json()["precondition"], "state", "{} {}: {}", method, path, refused.body);
+        assert_eq!(rig.last(), last, "{} {} refused, yet the journal moved", method, path);
+        // Held against the state it is in: carried out.
+        let current = state.to_string();
+        let done = http(rig.addr, method, path, &[("If-State-Seq", &current)], body.as_ref());
+        assert!(done.status < 300, "{} {} in its state: {} {}", method, path, done.status, done.body);
+    }
+    // The server's own: no machine state to hold them against.
+    let state = rig.get("/api/status").json()["state_seq"].as_u64().unwrap().to_string();
+    for path in ["/", "/ui", "/api", "/api/version", "/api/journal?after=0", "/api/ops/1", "/api/log", "/api/control/wait?after=0", "/api/control/wait?op=1"] {
+        let r = http(rig.addr, "GET", path, &[("If-State-Seq", &state)], None);
+        assert_eq!(r.status, 400, "{}: {}", path, r.body);
+        assert!(r.json()["error"].as_str().unwrap().contains("If-State-Seq"), "{}: {}", path, r.body);
+    }
+    for path in ["/ws/events", "/ws/trace", "/ws/screen", "/ws/audio", "/ws/input"] {
+        let upgrade = format!(
+            "GET {} HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nIf-State-Seq: {}\r\n\r\n",
+            path, state
+        );
+        assert_eq!(raw_status(rig.addr, upgrade.as_bytes()), 400, "{}", path);
+    }
+}

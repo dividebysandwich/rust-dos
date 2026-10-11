@@ -564,26 +564,29 @@ async fn finish_op(s: &AppState, op: u64, seq: Option<u64>, timeout: Duration, k
 // HTTP handlers
 // ---------------------------------------------------------------------------
 
-async fn help() -> Response {
-    text_response(HELP.to_string())
+async fn help() -> ApiResult {
+    server_only()?;
+    Ok(text_response(HELP.to_string()))
 }
 
 /// A browser gets the debugger page; everything else (curl, agents) the
 /// endpoint reference.
-async fn root(headers: HeaderMap) -> Response {
+async fn root(headers: HeaderMap) -> ApiResult {
     let html = headers
         .get(header::ACCEPT)
         .and_then(|a| a.to_str().ok())
         .is_some_and(|a| a.contains("text/html"));
-    if html { Redirect::to("/ui").into_response() } else { help().await }
+    if html {
+        server_only()?;
+        Ok(Redirect::to("/ui").into_response())
+    } else {
+        help().await
+    }
 }
 
-async fn ui() -> Response {
-    (
-        [(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-cache")],
-        UI,
-    )
-        .into_response()
+async fn ui() -> ApiResult {
+    server_only()?;
+    Ok(([(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-cache")], UI).into_response())
 }
 
 async fn version(State(s): State<AppState>) -> ApiResult {
@@ -1621,9 +1624,10 @@ impl Drop for SubscriberGuard {
     }
 }
 
-async fn ws_screen(State(s): State<AppState>, Query(q): Query<ScreenQuery>, ws: WebSocketUpgrade) -> Response {
+async fn ws_screen(State(s): State<AppState>, Query(q): Query<ScreenQuery>, ws: WebSocketUpgrade) -> ApiResult {
+    server_only()?;
     let fps = q.fps.unwrap_or(5.0).clamp(0.1, 60.0);
-    ws.on_upgrade(move |mut socket| async move {
+    Ok(ws.on_upgrade(move |mut socket| async move {
         s.shared.screen_subscribers.fetch_add(1, Ordering::Relaxed);
         let _guard = SubscriberGuard(s.shared.clone());
         let mut interval = tokio::time::interval(Duration::from_secs_f64(1.0 / fps));
@@ -1655,12 +1659,13 @@ async fn ws_screen(State(s): State<AppState>, Query(q): Query<ScreenQuery>, ws: 
                 return;
             }
         }
-    })
+    }))
 }
 
-async fn ws_audio(State(s): State<AppState>, ws: WebSocketUpgrade) -> Response {
+async fn ws_audio(State(s): State<AppState>, ws: WebSocketUpgrade) -> ApiResult {
+    server_only()?;
     let mut rx = s.shared.audio.subscribe();
-    ws.on_upgrade(move |mut socket| async move {
+    Ok(ws.on_upgrade(move |mut socket| async move {
         use broadcast::error::RecvError;
         let header = json!({"type": "audio_format", "sample_rate": 44100, "channels": 2, "format": "s16le"});
         if socket.send(Message::Text(header.to_string().into())).await.is_err() {
@@ -1684,11 +1689,14 @@ async fn ws_audio(State(s): State<AppState>, ws: WebSocketUpgrade) -> Response {
                 return;
             }
         }
-    })
+    }))
 }
 
-async fn ws_input(State(s): State<AppState>, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(move |mut socket| async move {
+/// Each message carries its own `if_state_seq`; the header on the upgrade
+/// would hold for none of them.
+async fn ws_input(State(s): State<AppState>, ws: WebSocketUpgrade) -> ApiResult {
+    server_only()?;
+    Ok(ws.on_upgrade(move |mut socket| async move {
         while let Some(Ok(msg)) = socket.recv().await {
             let text = match msg {
                 Message::Text(t) => t.to_string(),
@@ -1700,7 +1708,7 @@ async fn ws_input(State(s): State<AppState>, ws: WebSocketUpgrade) -> Response {
                 return;
             }
         }
-    })
+    }))
 }
 
 /// One `/ws/input` message: input events as `/api/input/batch` takes them,
