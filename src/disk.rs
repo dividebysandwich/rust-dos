@@ -1,5 +1,5 @@
 use chrono::{DateTime, Datelike, Local, Timelike};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -217,6 +217,74 @@ pub fn short_names<S: AsRef<str>>(names: &[S]) -> Vec<String> {
         }
     }
     result
+}
+
+/// The entries of host folders as last read, with their DOS names. Each
+/// component of a DOS path is looked up among the entries of its folder,
+/// so without this every open, attribute call and FindNext reads and sorts
+/// every folder on its path.
+///
+/// A folder's entries are read again when the guest changed anything on a
+/// host drive since (`changed`), when the folder's modification time moved
+/// (another program added, removed or renamed something in it), and while
+/// that time is under `RECENT` old, too close to tell a change made in the
+/// same tick of a coarse clock (2 seconds on FAT) from the read. Folders
+/// that only a backend reaches (the libretro frontend's, a write overlay's
+/// layer) aren't kept: their times aren't known.
+#[derive(Default)]
+struct HostDirCache {
+    /// Counts the guest's changes to host files.
+    changes: Cell<u64>,
+    dirs: RefCell<HashMap<PathBuf, HostDir>>,
+}
+
+struct HostDir {
+    modified: std::time::SystemTime,
+    changes: u64,
+    entries: Rc<[(String, String)]>,
+}
+
+impl HostDirCache {
+    /// How recent a folder's modification time can be for its entries to
+    /// be kept.
+    const RECENT: std::time::Duration = std::time::Duration::from_secs(2);
+    /// Folders kept at most; all are dropped when there would be more.
+    const MAX_DIRS: usize = 64;
+
+    /// The guest created, wrote, deleted or renamed something on a host
+    /// drive: every folder is read again.
+    fn changed(&self) {
+        self.changes.set(self.changes.get().wrapping_add(1));
+    }
+
+    /// The entries of `dir`, kept or from `read`.
+    fn entries(&self, dir: &Path, read: impl FnOnce() -> Vec<(String, String)>) -> Rc<[(String, String)]> {
+        let modified = if hostfs::has_scheme(dir) {
+            None
+        } else {
+            hostfs::metadata(dir)
+                .ok()
+                .filter(|m| m.is_dir)
+                .and_then(|m| m.modified)
+                .filter(|&at| at.elapsed().is_ok_and(|age| age >= Self::RECENT))
+        };
+        let Some(modified) = modified else {
+            self.dirs.borrow_mut().remove(dir);
+            return read().into();
+        };
+        let changes = self.changes.get();
+        let kept = self.dirs.borrow().get(dir).filter(|k| k.modified == modified && k.changes == changes).map(|k| k.entries.clone());
+        if let Some(entries) = kept {
+            return entries;
+        }
+        let entries: Rc<[(String, String)]> = read().into();
+        let mut dirs = self.dirs.borrow_mut();
+        if dirs.len() >= Self::MAX_DIRS && !dirs.contains_key(dir) {
+            dirs.clear();
+        }
+        dirs.insert(dir.to_path_buf(), HostDir { modified, changes, entries: entries.clone() });
+        entries
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -799,6 +867,8 @@ pub struct DiskController {
     /// The record of the drives' media a state's header has, kept with
     /// the mounts it was made of (savestate/media.rs).
     pub(crate) media: Cell<Option<crate::savestate::media::Kept>>,
+    /// The entries of host folders as last read (`host_entries`).
+    host_dirs: HostDirCache,
 }
 
 impl DiskController {
@@ -849,6 +919,7 @@ impl DiskController {
             shared_from_state: None,
             notes: Vec::new(),
             media: Cell::new(None),
+            host_dirs: HostDirCache::default(),
         };
         disk.open_standard_devices();
         disk
@@ -2085,7 +2156,13 @@ impl DiskController {
 
     /// The entries of a host directory with their DOS names (see
     /// `short_names`), in sorted order. Hidden (dot) files are left out.
-    fn host_entries(dir: &Path) -> Vec<(String, String)> {
+    /// Every component of a path is looked up here, so the entries are
+    /// kept while the folder doesn't change (`HostDirCache`).
+    fn host_entries(&self, dir: &Path) -> Rc<[(String, String)]> {
+        self.host_dirs.entries(dir, || Self::read_host_entries(dir))
+    }
+
+    fn read_host_entries(dir: &Path) -> Vec<(String, String)> {
         let mut names: Vec<String> = hostfs::read_dir(dir)
             .into_iter()
             .flatten()
@@ -2102,7 +2179,7 @@ impl DiskController {
     /// name that matches nothing comes back uppercased, for creating it.
     fn find_host_child(&self, dir: &Path, target: &str) -> (String, String) {
         let target_upper = target.to_ascii_uppercase();
-        let entries = Self::host_entries(dir);
+        let entries = self.host_entries(dir);
         entries
             .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case(target))
@@ -2336,7 +2413,11 @@ impl DiskController {
         }
 
         let handle = self.free_handle()?;
-        match options.open(path) {
+        let opened = options.open(path);
+        if create {
+            self.host_dirs.changed();
+        }
+        match opened {
             Ok(file) => {
                 let key = self.file_key(filename);
                 let file = self.opened(OpenData::Host(file), drive, owner, key, filename, mode);
@@ -2400,7 +2481,9 @@ impl DiskController {
         if !path.parent().is_some_and(hostfs::is_dir) {
             return Err(0x03);
         }
-        hostfs::write(&path, data).map_err(|_| 0x05)?;
+        let written = hostfs::write(&path, data);
+        self.host_dirs.changed();
+        written.map_err(|_| 0x05)?;
         if let Some(when) = stamp.and_then(|(time, date)| dos_to_system_time(time, date)) {
             let _ = OpenOptions::new().write(true).open(&path).and_then(|f| f.set_modified(when));
         }
@@ -2426,7 +2509,9 @@ impl DiskController {
             return Err(0x02); // File not found
         }
         self.check_writable(drive)?;
-        hostfs::remove_file(path).map_err(|_| 0x05)
+        let removed = hostfs::remove_file(path);
+        self.host_dirs.changed();
+        removed.map_err(|_| 0x05)
     }
 
     /// INT 21h, AH=56h: rename or move a file within a drive.
@@ -2471,7 +2556,9 @@ impl DiskController {
         if self.find_existing_child(&parent, leaf).is_some() {
             return Err(0x05); // Destination exists
         }
-        hostfs::rename(source, parent.join(leaf.to_uppercase())).map_err(|_| 0x05)
+        let renamed = hostfs::rename(source, parent.join(leaf.to_uppercase()));
+        self.host_dirs.changed();
+        renamed.map_err(|_| 0x05)
     }
 
     /// INT 21h, AX=5700h: the DOS time and date of a file's last change.
@@ -2907,7 +2994,9 @@ impl DiskController {
             }
         }
         let target = parent_path.join(leaf.to_uppercase());
-        hostfs::create_dir(&target).map_err(|_| 0x05)
+        let created = hostfs::create_dir(&target);
+        self.host_dirs.changed();
+        created.map_err(|_| 0x05)
     }
 
     /// DOS AH=3Ah: Remove an empty directory.
@@ -2934,7 +3023,9 @@ impl DiskController {
         if self.drive(drive_num).is_some_and(|d| dos_form.eq_ignore_ascii_case(&d.current_dir)) {
             return Err(0x10);
         }
-        hostfs::remove_dir(&host_path).map_err(|e| match e.kind() {
+        let removed = hostfs::remove_dir(&host_path);
+        self.host_dirs.changed();
+        removed.map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => 0x03,
             _ => 0x05, // Access denied (e.g. not empty)
         })
@@ -3194,7 +3285,7 @@ impl DiskController {
             valid_entries.extend(Self::dot_entries(pattern, [(0, 0); 2]));
         }
 
-        for (original_name, final_name) in Self::host_entries(&host_dir) {
+        for (original_name, final_name) in self.host_entries(&host_dir).iter().cloned() {
             let Ok(metadata) = hostfs::metadata(host_dir.join(&original_name)) else {
                 continue;
             };
@@ -4068,5 +4159,77 @@ mod tests {
         let z = disk.list_directory("*.*", 0x10).unwrap();
         assert_eq!(z.len(), 1);
         assert_eq!(z[0].filename, "COMMAND.COM");
+    }
+
+    /// Sets a folder's modification time to one in 2020, as a game folder
+    /// installed earlier has it, so that `HostDirCache` keeps its entries.
+    /// Always the same time, as a coarse clock gives a folder changed twice
+    /// in a tick.
+    fn age(dir: &Path) {
+        let mut options = fs::OpenOptions::new();
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            // FILE_WRITE_ATTRIBUTES, FILE_FLAG_BACKUP_SEMANTICS (to open a
+            // folder).
+            options.access_mode(0x100).custom_flags(0x0200_0000);
+        }
+        #[cfg(not(windows))]
+        options.read(true);
+        let at = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
+        options.open(dir).unwrap().set_modified(at).unwrap();
+    }
+
+    #[test]
+    fn host_folder_entries_are_kept_until_the_folder_changes() {
+        let root = scratch("host_dir_cache");
+        fs::create_dir(root.join("DATA")).unwrap();
+        fs::write(root.join("DATA").join("RGN001.GFF"), b"x").unwrap();
+        age(&root.join("DATA"));
+        let disk = DiskController::new(root.clone());
+        let data = disk.resolve_path(r"C:\DATA").unwrap();
+        assert!(disk.is_file(r"C:\DATA\RGN001.GFF"));
+        assert!(disk.host_dirs.dirs.borrow().contains_key(&data), "an old folder is kept");
+
+        // Another program adds a file: the folder's time moves, and it is
+        // read again.
+        fs::write(data.join("Long Name.txt"), b"x").unwrap();
+        assert!(disk.is_file(r"C:\DATA\LONGNA~1.TXT"));
+
+        // The folder changed within the last two seconds: not kept, as a
+        // change in the same tick of the clock wouldn't show.
+        assert!(!disk.host_dirs.dirs.borrow().contains_key(&data), "a recent folder isn't kept");
+    }
+
+    #[test]
+    fn host_folders_are_read_again_after_the_guest_changes_one() {
+        let root = scratch("host_dir_cache_guest");
+        fs::write(root.join("OLD.DAT"), b"x").unwrap();
+        age(&root);
+        let mut disk = DiskController::new(root.clone());
+        assert!(disk.is_file(r"C:\OLD.DAT"));
+
+        // Each change through DOS is seen at once, even where the folder's
+        // time comes out the same: set back after each.
+        disk.rename_file(r"C:\OLD.DAT", r"C:\NEW.DAT").unwrap();
+        age(&root);
+        assert!(!disk.is_file(r"C:\OLD.DAT"));
+        assert!(disk.is_file(r"C:\NEW.DAT"));
+
+        let handle = disk.create_file(r"C:\MADE.DAT", PSP).unwrap();
+        disk.close_file(handle);
+        age(&root);
+        assert!(disk.is_file(r"C:\MADE.DAT"));
+
+        disk.delete_file(r"C:\MADE.DAT").unwrap();
+        age(&root);
+        assert!(!disk.is_file(r"C:\MADE.DAT"));
+
+        disk.create_directory(r"C:\SAVES").unwrap();
+        age(&root);
+        assert!(disk.is_directory(r"C:\SAVES"));
+        disk.remove_directory(r"C:\SAVES").unwrap();
+        age(&root);
+        assert!(!disk.is_directory(r"C:\SAVES"));
     }
 }

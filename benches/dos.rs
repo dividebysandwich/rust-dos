@@ -61,11 +61,12 @@ fn find_pattern(c: &mut Criterion) {
 fn open_deep(c: &mut Criterion) {
     let root = scratch("open_deep");
     let games = root.join("GAMES");
-    write_files(&games, &game_names(50));
     let game = games.join("DARKSUN");
+    // Innermost first: each folder is dated after its subfolder is made.
+    write_files(&game.join("DATA"), &game_names(218));
     write_files(&game, &game_names(218));
-    let data = game.join("DATA");
-    write_files(&data, &game_names(218));
+    write_files(&games, &game_names(50));
+    age(&root);
     let mut cpu = machine(&root);
     let path = r"C:\GAMES\DARKSUN\DATA\RGN0D2.GFF";
     open_close(&mut cpu, path);
