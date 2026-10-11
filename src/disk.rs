@@ -2343,7 +2343,10 @@ impl DiskController {
                 self.insert(handle, file);
                 Ok(handle)
             }
-            Err(_) => Err(0x02),
+            // A file that is there but can't be opened this way (read-only,
+            // in use by another program) is access denied, as DOS has it.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(0x02),
+            Err(_) => Err(0x05),
         }
     }
 
@@ -3924,6 +3927,25 @@ mod tests {
         let d = disk.find_directory_entry("D:\\*.*", 0, 0x08).unwrap();
         assert_eq!(d.filename, "GAMECD_D.ISK");
         assert_eq!(disk.volume_label(3).unwrap(), "GAMECD_DISK");
+    }
+
+    #[test]
+    fn a_read_only_file_opened_for_writing_is_access_denied() {
+        let base = scratch("read_only_open");
+        fs::write(base.join("SAVE.DAT"), b"old").unwrap();
+        let mut perms = fs::metadata(base.join("SAVE.DAT")).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(base.join("SAVE.DAT"), perms.clone()).unwrap();
+        let mut disk = DiskController::new(base.clone());
+        // Reading is fine; writing is access denied (05h), as on a FAT
+        // disk, and a missing file is still file not found (02h).
+        assert!(disk.open_file("C:\\SAVE.DAT", 0, PSP).is_ok());
+        assert_eq!(disk.open_file("C:\\SAVE.DAT", 1, PSP), Err(0x05));
+        assert_eq!(disk.open_file("C:\\SAVE.DAT", 2, PSP), Err(0x05));
+        assert_eq!(disk.create_file("C:\\SAVE.DAT", PSP), Err(0x05));
+        assert_eq!(disk.open_file("C:\\NONE.DAT", 2, PSP), Err(0x02));
+        perms.set_readonly(false);
+        fs::set_permissions(base.join("SAVE.DAT"), perms).unwrap();
     }
 
     #[test]
