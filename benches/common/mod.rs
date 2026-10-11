@@ -77,8 +77,9 @@ pub fn find_all(cpu: &mut Cpu, spec: &str, attr: u16) -> usize {
 }
 
 /// Opens `path` for reading (AH=3Dh) and closes it again (AH=3Eh), as a
-/// game does to check for or load a data file. Panics if the open fails, so
-/// a broken scenario can't benchmark the error path by accident.
+/// game does to check for or load a data file. Panics if the open or the
+/// close fails, so a broken scenario can't benchmark the error path by
+/// accident, and a handle left open can't use up the 20 a process has.
 pub fn open_close(cpu: &mut Cpu, path: &str) {
     set_dsdx_string(cpu, path);
     cpu.set_reg8(Register::AL, 0);
@@ -88,6 +89,7 @@ pub fn open_close(cpu: &mut Cpu, path: &str) {
     let handle = cpu.ax();
     cpu.set_bx(handle);
     int21(cpu, 0x3E);
+    assert!(!cf(cpu), "close {} failed with {:02X}h", path, cpu.ax());
 }
 
 /// Names like those of a DOS game's folder: `count` 8.3 data files

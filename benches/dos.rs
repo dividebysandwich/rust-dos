@@ -19,7 +19,7 @@ fn dir_listing(c: &mut Criterion) {
     for count in SIZES {
         let root = game_folder(&format!("dir_listing_{count}"), count);
         let cpu = machine(&root);
-        group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, _| {
+        group.bench_function(BenchmarkId::from_parameter(count), |b| {
             b.iter(|| black_box(cpu.bus.disk.list_directory(r"C:\*.*", 0x16).unwrap().len()))
         });
     }
@@ -37,7 +37,7 @@ fn find_first_next(c: &mut Criterion) {
         let mut cpu = machine(&root);
         set_dta(&mut cpu);
         assert_eq!(find_all(&mut cpu, r"C:\*.*", 0x16), count);
-        group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, _| {
+        group.bench_function(BenchmarkId::from_parameter(count), |b| {
             b.iter(|| black_box(find_all(&mut cpu, r"C:\*.*", 0x16)))
         });
     }
