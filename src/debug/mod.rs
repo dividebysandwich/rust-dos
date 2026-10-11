@@ -2961,8 +2961,12 @@ impl DebugHub {
                 q.to_ms.map_or(u64::MAX, |v| (v * 1000.0) as u64),
             )
         };
-        let limit = q.limit.unwrap_or(10_000);
-        let limit = q.last_n.map_or(limit, |n| n.min(limit));
+        // `last_n` asks for that many; `limit` caps it only when given.
+        let limit = match (q.last_n, q.limit) {
+            (Some(n), Some(limit)) => n.min(limit),
+            (Some(n), None) => n,
+            (None, limit) => limit.unwrap_or(10_000),
+        };
         let matches = |e: &TraceEntry| {
             e.t_us >= from_us
                 && e.t_us <= to_us
@@ -3602,6 +3606,7 @@ mod determinism_tests;
 mod tests {
     use super::journal::{OpLookup, OpState};
     use super::{Answer, Cmd, DebugHub, InputEvent, LowInput, Reply, StateRequest, TraceQuery, keys_for_char, step_over_len};
+    use super::trace::TraceEntry;
     use rust_dos::deterministic::Deterministic;
     use crate::cpu::{Cpu, CpuState};
     use crate::exec::{self, StopReason};
@@ -3658,6 +3663,25 @@ mod tests {
         assert_eq!((second.len(), next), (20, 50));
         assert!(first.last() < second.first(), "oldest first, in order");
         assert_eq!(page(&mut cpu, &mut hub, next, 30), (vec![], 50, 0));
+    }
+
+    #[test]
+    fn last_n_gets_that_many_entries() {
+        let mut cpu = Cpu::new(".".into());
+        let mut hub = DebugHub::new(None, None, 30_000);
+        for icount in 1..=25_000 {
+            hub.trace.push(TraceEntry { icount, ..Default::default() });
+        }
+        let mut last = |last_n, limit| {
+            let q = TraceQuery { last_n: Some(last_n), limit, ..Default::default() };
+            match handle(&mut cpu, &mut hub, Cmd::TraceQuery(q)) {
+                Reply::Trace { entries, .. } => (entries.len(), entries.first().map(|e| e.icount)),
+                _ => panic!("not a trace"),
+            }
+        };
+        assert_eq!(last(20_000, None), (20_000, Some(5_001)));
+        assert_eq!(last(20_000, Some(100)), (100, Some(24_901)));
+        assert_eq!(last(50, None), (50, Some(24_951)));
     }
 
     #[test]

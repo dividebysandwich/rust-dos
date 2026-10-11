@@ -191,6 +191,8 @@ curl -s "$H/api/log?limit=50&format=text"
     the HLE service calls.
   - `cs=1000` keeps only one code segment.
   - `last_ms=500`, or `from_ms`/`to_ms`, select a time window.
+  - `last_n=50000` gets the newest 50000 entries. Without `last_n` a reply
+    holds up to `limit` entries, 10000 unless given.
 - **Log markers to look for:**
   - `[TRIPWIRE]`: execution jumped into the interrupt table, almost always
     through a corrupted far pointer. The emulator then reloads the shell.

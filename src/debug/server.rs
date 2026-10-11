@@ -1838,6 +1838,7 @@ TRACE
                    {"count":5000}: record the next 5000 instructions, then stop
                    ({"count":0} stops now; /api/status shows the rest as remaining)
   GET  /api/trace?last_n=200 | ?last_ms=500 | ?from_ms=&to_ms=  [&limit=&cs=&no_bios=true&format=text|json]
+       the newest entries: last_n of them, else up to limit (default 10000)
   GET  /api/trace?since=N[&limit=]   the entries recorded after cursor N, oldest first;
        the reply's next (x-trace-next) is the cursor to go on from, and dropped
        (x-trace-dropped) counts entries after N overwritten before they were read
