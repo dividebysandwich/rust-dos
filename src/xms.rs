@@ -554,17 +554,16 @@ fn move_block(cpu: &mut Cpu) {
     match (src, dst) {
         (Ok(src), Ok(dst)) => {
             let len = length as usize;
-            if cpu.bus.is_plain_ram(src, len) && cpu.bus.is_plain_ram(dst, len) {
+            if cpu.bus.is_plain_run(src, len) && cpu.bus.is_plain_run(dst, len) {
                 // Both in RAM: one copy, which reads the source whole
-                // before writing as the byte loop below does.
+                // before writing.
                 cpu.bus.copy_ram(src, dst, len);
             } else {
-                // Through the bus, so video memory reads and takes the
-                // bytes as programs see it.
-                let data: Vec<u8> = (0..len).map(|i| cpu.bus.read_8(src + i)).collect();
-                for (i, &b) in data.iter().enumerate() {
-                    cpu.bus.write_8(dst + i, b);
-                }
+                // Video memory or upper memory at one end: through the
+                // bus, so it reads and takes the bytes as programs see it.
+                let mut data = Vec::with_capacity(len);
+                cpu.bus.read_run(src, len, &mut data);
+                cpu.bus.write_run(dst, &data);
             }
             ok(cpu);
         }

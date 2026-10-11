@@ -912,17 +912,13 @@ impl Region {
     }
 }
 
-/// The `len` bytes at `runs` (`Region::runs`), through the bus, so video
-/// memory and the page frame read as programs see them; plain RAM a run at
-/// a time.
+/// The `len` bytes at `runs` (`Region::runs`), a run at a time
+/// (`Bus::read_run`), so video memory and the page frame read as programs
+/// see them.
 fn read_runs(bus: &Bus, runs: &[(usize, usize)], len: usize) -> Vec<u8> {
     let mut data = Vec::with_capacity(len);
     for &(addr, n) in runs {
-        if bus.is_plain_ram(addr, n) {
-            data.extend_from_slice(&bus.ram()[addr..addr + n]);
-        } else {
-            data.extend((addr..addr + n).map(|a| bus.read_8(a)));
-        }
+        bus.read_run(addr, n, &mut data);
     }
     data
 }
@@ -931,14 +927,7 @@ fn read_runs(bus: &Bus, runs: &[(usize, usize)], len: usize) -> Vec<u8> {
 fn write_runs(bus: &mut Bus, runs: &[(usize, usize)], data: &[u8]) {
     let mut at = 0;
     for &(addr, n) in runs {
-        let part = &data[at..at + n];
-        if bus.is_plain_ram(addr, n) {
-            bus.load_bytes(addr, part);
-        } else {
-            for (i, &b) in part.iter().enumerate() {
-                bus.write_8(addr + i, b);
-            }
-        }
+        bus.write_run(addr, &data[at..at + n]);
         at += n;
     }
 }
