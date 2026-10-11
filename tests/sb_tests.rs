@@ -34,8 +34,15 @@ fn wait_ms(bus: &mut Bus, ms: f64) {
     }
 }
 
+/// Wait for the DSP to take a byte, as drivers do, then write it. It reads
+/// busy now and then while a transfer runs.
 fn dsp_write(bus: &mut Bus, value: u8) {
-    assert_eq!(bus.io_read(0x22C) & 0x80, 0, "DSP ready for a byte");
+    let mut reads = 0;
+    while bus.io_read(0x22C) & 0x80 != 0 {
+        reads += 1;
+        assert!(reads < 100, "DSP ready for a byte");
+        bus.clock.icount += 1;
+    }
     bus.io_write(0x22C, value);
 }
 
@@ -346,4 +353,42 @@ fn silence_interrupts_while_the_driver_polls_the_dsp() {
     let elapsed = bus.clock.icount - start;
     assert_eq!(bus.pic_pending_irq(), Some(7), "silence ends with IRQ 7");
     assert!((950..=1100).contains(&elapsed), "after {} instructions (1 ms is 1000)", elapsed);
+}
+
+#[test]
+fn write_status_reads_busy_now_and_then_while_a_transfer_runs() {
+    // Miles' AIL 2 driver (SBPDIG.ADV, Dark Sun 2) stops a block that is
+    // still playing by polling the write status for bit 7 with its IRQ
+    // vector restored, then sending D0h. If the DSP never reads busy, the
+    // block ends first and its IRQ is lost.
+    let mut bus = sb16();
+    reset_dsp(&mut bus);
+    let idle = (0..200).all(|_| {
+        bus.clock.icount += 1;
+        bus.io_read(0x22C) & 0x80 == 0
+    });
+    assert!(idle, "an idle DSP is always ready");
+
+    program_dma1(&mut bus, 0x20000, 1000, false);
+    dsp_write(&mut bus, 0x40);
+    dsp_write(&mut bus, 156);
+    dsp_write(&mut bus, 0x14);
+    dsp_write(&mut bus, (999 & 0xFF) as u8);
+    dsp_write(&mut bus, (999 >> 8) as u8);
+    let busy = (0..200)
+        .filter(|_| {
+            bus.clock.icount += 1;
+            bus.io_read(0x22C) & 0x80 != 0
+        })
+        .count();
+    assert!((20..=100).contains(&busy), "busy on {} of 200 reads a microsecond apart", busy);
+
+    // Halted with D0h, it is ready again.
+    dsp_write(&mut bus, 0xD0);
+    let ready = (0..200).all(|_| {
+        bus.clock.icount += 1;
+        bus.io_read(0x22C) & 0x80 == 0
+    });
+    assert!(ready, "a paused DSP is always ready");
+    assert_eq!(bus.pic_pending_irq(), None, "the halted block raised no IRQ");
 }

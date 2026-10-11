@@ -193,6 +193,12 @@ pub struct SoundBlaster {
     dma16: Option<u8>,
 }
 
+/// While a transfer runs, the write status reads busy for the first
+/// `BUSY_TICKS` PIT ticks (about 3.4 us) of every `BUSY_PERIOD_TICKS`
+/// (about 13.4 us).
+const BUSY_PERIOD_TICKS: u64 = 16;
+const BUSY_TICKS: u64 = 4;
+
 /// Frames `out` keeps at most (about a second), for when nobody drains it.
 const OUT_MAX: usize = 48_000;
 
@@ -336,9 +342,6 @@ impl SoundBlaster {
             // setup finds the card's channel by trying each one. So does one
             // with no channel selected.
             let Some(ch) = ch.filter(|&ch| dma.ready(ch)) else {
-                if std::env::var_os("SBDBG").is_some() {
-                    eprintln!("SBDBG dma not ready, remaining {}", t.remaining);
-                }
                 self.frac = 0;
                 break;
             };
@@ -437,8 +440,8 @@ impl SoundBlaster {
         match offset {
             0x5 => self.mixer_read(),
             0xA => self.read_buf.pop_front().unwrap_or(0xFF),
-            // Write status: bit 7 clear, ready for a byte.
-            0xC => 0x7F,
+            // Write status: bit 7 set while the DSP is busy.
+            0xC => self.write_status(),
             // Read status: bit 7 when data waits. Acknowledges the 8-bit
             // (and on older cards the only) interrupt.
             0xE => {
@@ -452,6 +455,22 @@ impl SoundBlaster {
             }
             _ => 0xFF,
         }
+    }
+
+    /// The write status port (2xCh). An idle DSP takes a byte at once. One
+    /// running a DMA transfer is busy for a moment every few microseconds
+    /// while it services the transfer, so reads in a loop see bit 7 set now
+    /// and then. Miles' AIL 2 Sound Blaster drivers (SBPDIG.ADV) rely on
+    /// that when they stop a block that is still playing: they poll for
+    /// bit 7 with the IRQ vector already restored, then halt the DMA. A
+    /// DSP that never reads busy keeps them polling until the block ends,
+    /// its IRQ goes to the BIOS's handler, and the card's request stays
+    /// up unacknowledged, so the next block's end raises no new interrupt.
+    /// `last_ticks` is the present here: port reads bring the DSP up to
+    /// date first.
+    fn write_status(&self) -> u8 {
+        let running = self.transfer.is_some_and(|t| !t.paused);
+        if running && self.last_ticks % BUSY_PERIOD_TICKS < BUSY_TICKS { 0xFF } else { 0x7F }
     }
 
     fn mixer_write(&mut self, value: u8) {
