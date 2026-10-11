@@ -79,9 +79,15 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
 - **Find the highlighted item in a text-mode menu.** The text alone doesn't
   show which item is selected. The JSON reply of `/api/screen/text` (without
   `format=text`) has `attrs`: for each row, runs of cells with the same
-  attribute as `{"col":19,"len":21,"attr":"71"}`. A selected item or field
+  attribute as `{"col":19,"len":21,"attr":"71"}`. `col` and `len` count
+  cells, one character of `lines` each; a box-drawing character is three
+  bytes in UTF-8, so slice a line by characters. A selected item or field
   is usually a run of its own, such as blue on light grey (`71`) in a row
-  of light grey on blue (`17`).
+  of light grey on blue (`17`). `blink` says whether attribute bit 7
+  blinks the character (when false it selects a bright background, so `F1`
+  is blue on bright white), and `mono` is true for the MDA and Hercules,
+  whose attributes are `07` normal, `70` reverse, `01` underline and `08`
+  bright.
 - **Check state with `/api/status`.** It reports `shell_idle` (true at the
   DOS prompt), `cs_ip`, the video mode and `video.adapter` (the display
   adapter `machine` gives programs), `paused`, `input_queue`, and
