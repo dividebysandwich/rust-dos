@@ -611,7 +611,11 @@ fn the_other_replies_keep_their_keys_too() {
     // Input waited for and cleared: answered as before, 200 and cancelled.
     let addr = rig.addr;
     let waiting = std::thread::spawn(move || http(addr, "POST", "/api/input/wait", &[], Some(&json!({"ms": 60000}))));
-    std::thread::sleep(Duration::from_millis(200));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while rig.get("/api/journal?after=0&type=input_queued").json()["entries"].as_array().unwrap().len() < 2 {
+        assert!(Instant::now() < deadline, "the input is queued");
+        std::thread::sleep(Duration::from_millis(5));
+    }
     has(&http(rig.addr, "DELETE", "/api/input", &[], None), &["ok"]);
     let cancelled = waiting.join().unwrap();
     assert_eq!((cancelled.status, cancelled.json()["ok"].as_bool(), cancelled.json()["cancelled"].as_bool()), (200, Some(false), Some(true)), "{}", cancelled.body);
