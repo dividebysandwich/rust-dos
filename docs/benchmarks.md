@@ -42,6 +42,7 @@ quick check that it still works; CI does this on Linux.
 | File | Measures |
 |---|---|
 | `benches/dos.rs` | The built-in DOS's file calls on a host folder: DIR's listing, FindFirst/FindNext over a whole folder, a pattern search, and opening a file three folders deep |
+| `benches/video.rs` | The VGA renderer: a sprite moving over modes 0Dh and 12h, a full-screen scroll in mode 12h, and a DOS program animating a box in mode 12h run frame by frame through the emulator |
 
 ## Adding benchmarks
 
