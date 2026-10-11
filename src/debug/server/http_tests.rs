@@ -1567,3 +1567,75 @@ fn if_state_seq_guards_every_request_the_emulator_carries_out() {
         assert_eq!(raw_status(rig.addr, upgrade.as_bytes()), 400, "{}", path);
     }
 }
+
+// ----- determinism -------------------------------------------------------------
+
+/// A deterministic session driven over HTTP, in host frames of `frame_ms`
+/// emulated milliseconds that each wait `sleep`: the journal with the
+/// host's time left out and request numbers counted from the first.
+fn deterministic_session(name: &str, frame_ms: u64, sleep: Duration) -> Vec<Value> {
+    let rig = Rig::with(name, Options { deterministic: Some(frame_ms), sleep, ..Options::default() });
+    let go = |until_ms: u64| {
+        let op = rig.post("/api/control/resume", json!({"until_ms": until_ms})).json()["op"].as_u64().unwrap();
+        let stop = rig.get(&format!("/api/control/wait?op={}&timeout_ms=60000", op));
+        assert_eq!((stop.status, stop.json()["reason"].as_str()), (200, Some("time")), "{}", stop.body);
+    };
+    let input = |events: Value| {
+        let r = rig.post("/api/input/batch?wait=false", json!({"events": events}));
+        assert_eq!(r.status, 200, "{}", r.body);
+    };
+    input(json!([{"type": "wait", "ms": 100}, {"type": "type", "text": "PROBE\n", "delay_ms": 25}]));
+    go(700);
+    assert_eq!(rig.post("/api/state/save", json!({"path": "d.state", "strict_match": true})).status, 200);
+    input(json!([{"type": "type", "text": "COUNT\n"}]));
+    go(1300);
+    // Guarded: a write in the state just read.
+    let seq = rig.get("/api/memory?addr=0200:0000&len=2").header("x-debug-state-seq").unwrap().to_string();
+    let w = http(rig.addr, "PUT", "/api/memory", &[("If-State-Seq", &seq)], Some(&json!({"addr": "0200:0000", "hex": "AA55"})));
+    assert_eq!(w.status, 200, "{}", w.body);
+    let loaded = rig.post("/api/state/load", json!({"path": "d.state", "strict_match": true}));
+    assert_eq!(loaded.status, 200, "{}", loaded.body);
+    input(json!([{"type": "type", "text": "PROBE\n"}]));
+    go(1800);
+    let mut numbers: std::collections::HashMap<u64, u64> = Default::default();
+    let mut renumber = |v: &mut Value| {
+        if let Some(n) = v.as_u64() {
+            let next = numbers.len() as u64 + 1;
+            *v = (*numbers.entry(n).or_insert(next)).into();
+        }
+    };
+    rig.journal()
+        .into_iter()
+        .map(|mut e| {
+            let o = e.as_object_mut().unwrap();
+            o.remove("t_ms");
+            for key in ["cause", "by", "op", "supersedes"] {
+                if let Some(v) = o.get_mut(key) {
+                    renumber(v);
+                }
+            }
+            if let Some(Value::Array(list)) = o.get_mut("cancelled") {
+                list.iter_mut().for_each(&mut renumber);
+            }
+            // Where the rig keeps its states.
+            if let Some(path) = o.get_mut("path") {
+                *path = path.as_str().map(|p| p.rsplit(['/', '\\']).next().unwrap().to_string()).into();
+            }
+            e
+        })
+        .collect()
+}
+
+#[test]
+fn a_deterministic_session_over_http_is_the_same_whatever_the_host_does() {
+    let a = deterministic_session("det-a", 16, Duration::from_millis(1));
+    let b = deterministic_session("det-b", 41, Duration::from_millis(9));
+    assert_eq!(a.len(), b.len(), "as many entries");
+    for (x, y) in a.iter().zip(&b) {
+        assert_eq!(x, y, "the same journal");
+    }
+    let kinds: Vec<&str> = a.iter().map(|e| e["type"].as_str().unwrap()).collect();
+    for kind in ["input_delivered", "state_saved", "memory_written", "state_loaded", "debugger_reset", "program_started"] {
+        assert!(kinds.contains(&kind), "{} in {:?}", kind, kinds);
+    }
+}

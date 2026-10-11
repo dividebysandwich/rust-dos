@@ -4226,6 +4226,90 @@ mod tests {
         assert!(a.2.iter().any(|e| e["type"] == "input_delivered") && a.2.iter().any(|e| e["type"] == "program_started"));
     }
 
+    /// Carry out the save states asked for, in memory, as the
+    /// deterministic front end does.
+    fn carry_out_states(cpu: &mut Cpu, hub: &mut DebugHub, mode: &mut Deterministic, saved: &mut Option<Vec<u8>>) {
+        while let Some(request) = hub.next_state_request() {
+            let result = if request.load {
+                rust_dos::savestate::machine::load(cpu, saved.as_ref().unwrap()).unwrap();
+                mode.resync(cpu);
+                Ok(serde_json::json!({"loaded": true}))
+            } else {
+                *saved = Some(rust_dos::savestate::machine::save(cpu));
+                Ok(serde_json::json!({"saved": true}))
+            };
+            hub.state_done(cpu, request, result);
+        }
+    }
+
+    /// A session in deterministic mode, in host frames whose emulated
+    /// lengths come from `frames`: typed input with waits, a strict-match
+    /// save and load, and a rewind. The instructions executed, memory and
+    /// the journal but for the host's time.
+    fn session(name: &str, frames: &[u64]) -> (u64, Vec<u8>, Vec<Value>) {
+        let (mut cpu, mut hub, mut mode) = deterministic_machine(name);
+        let mut saved = None;
+        let mut next = frames.iter().copied().cycle();
+        let mut go = |cpu: &mut Cpu, hub: &mut DebugHub, mode: &mut Deterministic, until_ms: u64| {
+            reply(cpu, hub, Cmd::Resume { until: None, until_ms: Some(until_ms) }).unwrap();
+            for _ in 0..100_000 {
+                if hub.paused {
+                    break;
+                }
+                run_deterministic(cpu, hub, mode, 1, next.next().unwrap());
+            }
+            assert!(hub.paused && cpu.bus.clock.now_ns() / 1_000_000 == until_ms, "{}: at {} ms", name, until_ms);
+        };
+        let wait = |ms| InputEvent::Wait { ms };
+        let ty = |text: &str| InputEvent::Type { text: text.into(), delay_ms: Some(30) };
+        reply(&mut cpu, &mut hub, Cmd::Input { events: vec![wait(120), ty("PROBE"), wait(45), ty("\n")], wait: false }).unwrap();
+        go(&mut cpu, &mut hub, &mut mode, 900);
+        let sent = send(&mut cpu, &mut hub, Cmd::SaveState { path: "s".into(), strict_match: true });
+        carry_out_states(&mut cpu, &mut hub, &mut mode, &mut saved);
+        answer(&mut cpu, &mut hub, sent, 0).unwrap();
+        reply(&mut cpu, &mut hub, Cmd::Input { events: vec![ty("DIR"), wait(70), ty("\n")], wait: false }).unwrap();
+        go(&mut cpu, &mut hub, &mut mode, 1600);
+        let sent = send(&mut cpu, &mut hub, Cmd::LoadState { path: "s".into(), strict_match: true });
+        carry_out_states(&mut cpu, &mut hub, &mut mode, &mut saved);
+        answer(&mut cpu, &mut hub, sent, 0).unwrap();
+        reply(&mut cpu, &mut hub, Cmd::Input { events: vec![ty("VER\n")], wait: false }).unwrap();
+        go(&mut cpu, &mut hub, &mut mode, 1500);
+        // A rewind: the front end loads a state and tells the hub after.
+        rust_dos::savestate::machine::load(&mut cpu, saved.as_ref().unwrap()).unwrap();
+        mode.resync(&cpu);
+        hub.state_loaded_elsewhere(&cpu, "rewind");
+        reply(&mut cpu, &mut hub, Cmd::Input { events: vec![ty("PROBE\n")], wait: false }).unwrap();
+        go(&mut cpu, &mut hub, &mut mode, 2400);
+        let journal = entries(&hub)
+            .into_iter()
+            .map(|mut e| {
+                e.as_object_mut().unwrap().remove("t_ms");
+                e
+            })
+            .collect();
+        (cpu.executed, cpu.bus.ram().to_vec(), journal)
+    }
+
+    #[test]
+    fn a_deterministic_session_with_loads_and_a_rewind_is_the_same_whatever_the_frames() {
+        let a = session("session-a", &[16]);
+        let b = session("session-b", &[41]);
+        let c = session("session-c", &[3, 29, 1, 70, 12]);
+        for other in [&b, &c] {
+            assert_eq!(a.0, other.0, "the same instructions");
+            assert!(a.1 == other.1, "the same memory");
+            assert_eq!(a.2.len(), other.2.len(), "as many entries");
+            for (x, y) in a.2.iter().zip(&other.2) {
+                assert_eq!(x, y, "the same journal");
+            }
+        }
+        let kinds: Vec<&str> = a.2.iter().map(|e| e["type"].as_str().unwrap()).collect();
+        for kind in ["input_delivered", "state_saved", "state_loaded", "debugger_reset", "program_started"] {
+            assert!(kinds.contains(&kind), "{} in {:?}", kind, kinds);
+        }
+        assert_eq!(a.2.iter().filter(|e| e["type"] == "state_loaded").count(), 2, "the load and the rewind");
+    }
+
     #[test]
     fn deterministic_mode_takes_input_only_while_paused() {
         let (mut cpu, mut hub, _mode) = deterministic_machine("refuse");
