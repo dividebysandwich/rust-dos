@@ -46,6 +46,12 @@
 # (machine), programs see the monochrome monitor too, from the DOS prompt
 # on, and the prompt is the monochrome text mode 7.
 #monochrome=off
+# The monitor's own effects: off (the default), picture, sound or on. The
+# picture warms up and wobbles as it is degaussed at power on, blanks with
+# a jolt when the card changes to another frequency, and collapses to a dot
+# at power off; the sound is the degaussing coil's thump and hum and the
+# relay's click. Ctrl+Shift+D degausses.
+#monitor_effects=off
 # The CGA's composite monitor (machine=cga): the colours a composite
 # monitor or TV makes of fine patterns of pixels, which King's Quest, the
 # Ultima games and many more drew their graphics with. auto (the default)
@@ -332,6 +338,8 @@
 #tandy=100
 # The AWE32's wavetable synthesizer.
 #awe32=100
+# The monitor's relay clicks and degaussing (monitor_effects).
+#monitor=100
 # The PC speaker through a filter that gives it the sound of the small
 # speaker in a PC, without the harsh edges: on (the default) or off.
 #speaker_filter=on

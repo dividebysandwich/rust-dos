@@ -12,6 +12,7 @@ pub mod hercules;
 pub mod modes;
 pub mod mono;
 pub mod overlay;
+pub mod power;
 pub mod palette;
 pub mod pixels;
 pub mod s3;

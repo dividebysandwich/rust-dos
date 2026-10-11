@@ -54,6 +54,10 @@ pub struct VgaCard {
     /// reprogram the CRTC pass through nonsense on the way; the monitor
     /// keeps the old picture meanwhile.
     good_timing: CrtTiming,
+    /// How many times the monitor had to sync to another frequency
+    /// (`CrtTiming::resyncs_from`): the front end's power effects click
+    /// and blank on each.
+    pub resyncs: u32,
     /// A timing that overrides the registers, for modes whose registers
     /// the VGA doesn't model (VESA).
     fixed_timing: Option<CrtTiming>,
@@ -167,6 +171,7 @@ impl VgaCard {
             latched_start_addr: 0,
             timing_cache: None,
             good_timing: CrtTiming::VGA_400,
+            resyncs: 0,
             fixed_timing: None,
             retraces: 0,
             rebase: true,
@@ -937,6 +942,9 @@ impl VgaCard {
         }
         let timing = self.fixed_timing.unwrap_or_else(|| self.registers_timing().unwrap_or(self.good_timing));
         if timing != self.good_timing {
+            if timing.resyncs_from(&self.good_timing) {
+                self.resyncs = self.resyncs.wrapping_add(1);
+            }
             self.good_timing = timing;
             self.rebase = true;
         }
@@ -1245,6 +1253,8 @@ crate::state_fields!(VgaCard {
     timing_cache, composite_decoder, dirty, dirty_y_min, dirty_y_max,
     // Settled at the next retrace.
     mode_switched,
+    // The front end's count.
+    resyncs,
     // The front end's.
     blink_on,
 });

@@ -291,6 +291,11 @@ pub struct Bus {
     /// The time disk access takes, and the drives' noises.
     pub disk_io: crate::diskio::DiskIo,
     pub disknoise: crate::disknoise::DiskNoise,
+    /// The monitor's sounds (`monitor_effects`).
+    pub monitor_noise: crate::monitor_noise::MonitorNoise,
+    /// Bumped each time the machine is reset or a system it boots starts:
+    /// the monitor's power effects show a power on.
+    pub power_ons: u32,
     /// The drives read or written since the front end last looked (bit n
     /// for drive n), for its activity lights.
     pub drives_active: u32,
@@ -474,6 +479,8 @@ impl Bus {
             cdaudio: crate::cdrom::audio::CdPlayer::new(),
             disk_io: crate::diskio::DiskIo::default(),
             disknoise: crate::disknoise::DiskNoise::new(),
+            monitor_noise: Default::default(),
+            power_ons: 0,
             drives_active: 0,
             mscdex: Default::default(),
             audio_out: VecDeque::new(),
@@ -2031,6 +2038,10 @@ impl Bus {
             self.mixer.add(&mut mix, &mut peaks, Channel::CdAudio, (cdl * cl, cdr * cr));
             let noise = self.disknoise.render();
             self.mixer.add(&mut mix, &mut peaks, Channel::DiskNoise, (noise, noise));
+            if !self.monitor_noise.is_silent() {
+                let noise = self.monitor_noise.render();
+                self.mixer.add(&mut mix, &mut peaks, Channel::Monitor, (noise, noise));
+            }
             if let Some(gus) = &mut self.gus {
                 let (gl, gr) = gus.pop_frame(crate::opl::RATE);
                 self.mixer.add(&mut mix, &mut peaks, Channel::Gus, (gl * GUS_GAIN, gr * GUS_GAIN));
@@ -2073,6 +2084,7 @@ impl Bus {
             && self.mpu.is_idle()
             && self.cdaudio.is_idle()
             && self.disknoise.is_silent()
+            && self.monitor_noise.is_silent()
             && self.gus.as_ref().is_none_or(|g| g.is_idle())
             && self.awe.is_none()
             && self.lpt_dac.is_none()

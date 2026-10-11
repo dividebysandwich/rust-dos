@@ -28,9 +28,11 @@ pub enum Channel {
     Tandy,
     /// The AWE32's EMU8000 wavetable synthesizer.
     Awe,
+    /// The monitor's relay clicks and degaussing (`monitor_effects`).
+    Monitor,
 }
 
-pub const CHANNELS: usize = 11;
+pub const CHANNELS: usize = 12;
 
 /// The loudest volume, in percent.
 pub const MAX_LEVEL: u16 = 200;
@@ -53,6 +55,7 @@ impl Channel {
         Channel::LptDac,
         Channel::Tandy,
         Channel::Awe,
+        Channel::Monitor,
     ];
 
     /// Its key in `[mixer]`.
@@ -69,6 +72,7 @@ impl Channel {
             Channel::LptDac => "lptdac",
             Channel::Tandy => "tandy",
             Channel::Awe => "awe32",
+            Channel::Monitor => "monitor",
         }
     }
 
@@ -90,6 +94,7 @@ impl Channel {
             Channel::LptDac => "Covox/Disney",
             Channel::Tandy => "Tandy/PCjr",
             Channel::Awe => "AWE32 wavetable",
+            Channel::Monitor => "Monitor",
         }
     }
 

@@ -97,6 +97,16 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   monochrome text mode 7; an EGA has IBM's Monochrome Display, and only
   modes 7 and 0Fh. On a CGA it is the look alone, and a Hercules card is
   always monochrome.
+* `monitor_effects` plays a CRT monitor's own effects: `off` (the
+  default), `picture`, `sound` or `on` (both). At power on, the picture
+  warms up, slightly too big at first, and wobbles with colour fringes as
+  the degaussing coil's field dies away, to its thump and hum and the
+  crackle of the high voltage; when the card changes to another line or
+  frame rate (640x480 at 60 Hz after the 70 Hz text mode, say) the
+  monitor's relay clicks and the picture blanks and comes back with a
+  jolt, as a multisync monitor did; and when rust-dos quits, the picture
+  collapses to a line and a fading dot. **Ctrl+Shift+D** degausses. The
+  sounds have their own volume, `monitor`, in [`[mixer]`](#mixer).
 * `composite` shows a CGA's graphics (`machine=cga`) as a composite
   monitor or TV did: fine patterns of pixels come out as colours, the
   "artifact colours" that King's Quest, the Ultima games, Sierra's AGI
@@ -468,8 +478,9 @@ The volume of each sound source in percent, from 0 to 200: `speaker` (the
 PC speaker and the prompt's beeps), `sb` (the Sound Blaster's digital
 audio), `fm` (the FM synthesizer), `gus`, `midi`, `cdaudio`, `disknoise`,
 `lptdac` (the Covox or Disney Sound Source), `tandy` (the Tandy's and
-PCjr's sound chip) and `awe32` (the AWE32's wavetable synthesizer), and
-`master` for all of them together. At 100, the
+PCjr's sound chip), `awe32` (the AWE32's wavetable synthesizer) and
+`monitor` (the [monitor's effects](#emulator)), and `master` for all of
+them together. At 100, the
 default, a source plays as loud as its card makes it. The volumes apply on
 top of the Sound Blaster's own mixer, which programs set.
 

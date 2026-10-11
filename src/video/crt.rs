@@ -39,6 +39,15 @@ const CLOCK_25MHZ: u64 = 25_175_000;
 const CLOCK_28MHZ: u64 = 28_322_000;
 
 impl CrtTiming {
+    /// Whether a monitor showing `old` has to sync again for this: its
+    /// line or frame rate is more than 2% off. A multisync monitor blanks
+    /// then, and many click a relay.
+    pub fn resyncs_from(&self, old: &CrtTiming) -> bool {
+        let off = |a: u64, b: u64| a.abs_diff(b) * 50 > b.max(1);
+        let frame = |t: &CrtTiming| t.line_ns as u64 * t.total as u64;
+        old.line_ns != 0 && (off(self.line_ns as u64, old.line_ns as u64) || off(frame(self), frame(old)))
+    }
+
     /// 400 displayed scanlines at 70 Hz: the text modes, mode 13h and the
     /// 200 and 350-line modes (31.469 kHz, 449 lines).
     pub const VGA_400: Self = Self {

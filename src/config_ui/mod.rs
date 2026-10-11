@@ -405,7 +405,7 @@ impl Page {
                 VrCenter, VrSceneScale, VrSeat(0), VrSeat(1), VrSeat(2), VrSeatTurn, VrResolution, VrFoveation, VrRefresh, VrGraphics,
             ],
             Page::Display => {
-                &[Scale, Fullscreen, Aspect, Vrr, Filter, Shader, CrtCurvature, CrtGlow, Monochrome, Composite, CompositeEra]
+                &[Scale, Fullscreen, Aspect, Vrr, Filter, Shader, CrtCurvature, CrtGlow, Monochrome, MonitorEffects, Composite, CompositeEra]
             }
             Page::Emulator => &[
                 Cycles, Core, Fpu, Cpu, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, VoodooScaleShader, VoodooMsaa,
@@ -430,6 +430,7 @@ impl Page {
                 Volume(Channel::DiskNoise),
                 Volume(Channel::LptDac),
                 Volume(Channel::Tandy),
+                Volume(Channel::Monitor),
                 Volume(Channel::Awe),
                 SpeakerFilter,
                 SbFilter,
@@ -554,6 +555,8 @@ enum Item {
     CrtCurvature,
     CrtGlow,
     Monochrome,
+    /// The monitor's power, resync and degauss effects.
+    MonitorEffects,
     /// The CGA's composite monitor, and which CGA makes the signal.
     Composite,
     CompositeEra,
@@ -911,6 +914,7 @@ impl Item {
             CrtCurvature => "  Curvature",
             CrtGlow => "  Glow",
             Monochrome => "Monochrome monitor",
+            MonitorEffects => "Monitor effects",
             Composite => "CGA composite colour",
             CompositeEra => "  CGA revision",
             Cycles => "CPU speed (cycles)",
@@ -1062,6 +1066,8 @@ impl Item {
             Item::VoodooRenderer | Item::VoodooScale | Item::VoodooScaleShader | Item::VoodooMsaa | Item::VoodooAnisotropy => {
                 frontend.window
             }
+            // Only the window plays the monitor's effects.
+            Item::MonitorEffects => frontend.window,
             // A thread of its own packs rewind's states.
             Item::Rewind | Item::RewindMemory => frontend.window,
             // The frontend's own sound output has its own buffers.
@@ -1147,6 +1153,7 @@ impl Item {
             Cycles | Core | Fpu | Dpmi | DosVersion | IdeHardDisks | BootCdrom | KeyboardLayout | MouseAutocapture | MouseCaptureMessages | ShellSuggestions | ShellColors | SaveShellHistory | Rewind | RewindMemory
             | VoodooRenderer | VoodooScale | VoodooScaleShader | VoodooMsaa | VoodooTextureSampling | VoodooAnisotropy | VoodooFpsCap | VoodooOverlay | PowerVrFilter => Applies::Now,
             Monochrome => Applies::NowAndAtPrompt,
+            MonitorEffects => Applies::Now,
             HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise | Volume(_) | CaptureDir | RecordUi
             | RecordShader => Applies::Now,
             Joystick | Deadzone | MouseSensitivity | SpeakerFilter | SbFilter | Reverb | Chorus | ReverbMix | ChorusMix => Applies::Now,
@@ -1236,6 +1243,7 @@ impl Item {
             CrtCurvature => percent_bar(s.crt.curvature, MAX_AMOUNT),
             CrtGlow => percent_bar(s.crt.glow, MAX_AMOUNT),
             Monochrome => s.monochrome.describe().to_string(),
+            MonitorEffects => s.monitor_effects.describe().to_string(),
             Composite => s.composite.mode.describe().to_string(),
             CompositeEra => s.composite.era.describe().to_string(),
             Cycles => match s.cycles {
@@ -1483,6 +1491,7 @@ impl Item {
             Filter => each(s, [crate::config::Filter::Nearest, crate::config::Filter::Linear], |s, f| s.filter = f),
             Shader => each(s, crate::video::shader::Shader::ALL, |s, shader| s.shader = shader),
             Monochrome => each(s, crate::video::mono::Monochrome::ALL, |s, mono| s.monochrome = mono),
+            MonitorEffects => each(s, crate::video::power::MonitorEffects::ALL, |s, e| s.monitor_effects = e),
             Composite => each(s, crate::video::composite::CompositeMode::ALL, |s, mode| s.composite.mode = mode),
             CompositeEra => each(s, crate::video::composite::CompositeEra::ALL, |s, era| s.composite.era = era),
             Core => each(s, [CoreMode::Auto, CoreMode::Dynamic, CoreMode::Normal], |s, core| s.core = core),

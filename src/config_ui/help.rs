@@ -309,6 +309,7 @@ impl Item {
             CrtCurvature => "crt-curvature",
             CrtGlow => "crt-glow",
             Monochrome => "monochrome",
+            MonitorEffects => "monitor-effects",
             Composite => "composite",
             CompositeEra => "composite-era",
             Cycles => "cycles",

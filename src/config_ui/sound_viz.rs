@@ -184,6 +184,7 @@ fn source_label(channel: Channel) -> &'static str {
         Channel::LptDac => "LPT DAC",
         Channel::Tandy => "Tandy",
         Channel::Awe => "AWE32",
+        Channel::Monitor => "Monitor",
     }
 }
 
