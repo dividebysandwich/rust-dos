@@ -34,7 +34,9 @@ with 3 buttons for programs that use a middle button.
 
 Lets another Rust-DOS, or DOSBox's modem, call your modem over the
 internet on this TCP port. When it rings, the game (or `ATA`) answers.
-**off** takes no calls; LAN room players can call without it.
+**off** takes no calls; LAN room players can call without it. A port
+alone takes calls on all of this computer's addresses; an address and a
+port, such as `127.0.0.1:2323`, takes them on that address only.
 
 # Modem speaks telnet {#modem-telnet}
 

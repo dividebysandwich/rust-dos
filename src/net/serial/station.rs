@@ -56,9 +56,9 @@ struct Connection {
 pub struct Setup {
     /// The port that goes to the other player in the room.
     pub linked: Option<usize>,
-    /// The modem that takes calls on TCP port `listen`.
+    /// The modem that takes calls on `listen`.
     pub modem: Option<usize>,
-    pub listen: Option<u16>,
+    pub listen: Option<std::net::SocketAddr>,
     pub telnet: bool,
 }
 
@@ -73,8 +73,8 @@ pub struct SerialStatus {
     pub retransmits: u64,
     /// Whether the relay carries serial links (None: not in a room).
     pub relay_serial: Option<bool>,
-    /// Calls on TCP: taken on this port.
-    pub listening: Option<u16>,
+    /// Calls on TCP: taken on this address.
+    pub listening: Option<std::net::SocketAddr>,
 }
 
 pub struct Station {
@@ -84,7 +84,7 @@ pub struct Station {
     calls: [Call; 4],
     tcp: HashMap<u64, Connection>,
     next_id: u64,
-    listener: Option<(u16, JoinHandle<()>)>,
+    listener: Option<(std::net::SocketAddr, JoinHandle<()>)>,
     events: WeakUnboundedSender<Command>,
     /// Datagrams for the other player: (member, payload).
     pub out: Vec<(u8, Vec<u8>)>,
@@ -132,7 +132,7 @@ impl Station {
             rtt_ms: self.link.as_ref().and_then(|l| l.rtt_ms()),
             retransmits: self.link.as_ref().map_or(0, |l| l.retransmits),
             relay_serial: self.relay_serial,
-            listening: self.listener.as_ref().map(|(port, _)| *port),
+            listening: self.listener.as_ref().map(|(addr, _)| *addr),
         }
     }
 
@@ -159,20 +159,21 @@ impl Station {
             if let Some((_, task)) = self.listener.take() {
                 task.abort();
             }
-            if let Some(port) = setup.listen {
+            if let Some(addr) = setup.listen {
                 let events = self.events.clone();
                 let notices = self.events.clone();
                 let task = tokio::spawn(async move {
-                    if let Err(e) = tcp::listen(port, INCOMING_IDS, events).await
+                    if let Err(e) = tcp::listen(addr, INCOMING_IDS, events).await
                         && let Some(tx) = notices.upgrade()
                     {
                         let _ = tx.send(Command::Serial(super::SerialCommand::ListenFailed(format!(
-                            "The modem can't take calls on TCP port {}: {}",
-                            port, e
+                            "The modem can't take calls on {}: {}",
+                            crate::serial::describe_listen(addr),
+                            e
                         ))));
                     }
                 });
-                self.listener = Some((port, task));
+                self.listener = Some((addr, task));
             }
         }
         self.setup = setup;

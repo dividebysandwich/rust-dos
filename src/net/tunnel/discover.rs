@@ -6,7 +6,7 @@
 use super::wire::{self, DEFAULT_PORT, DecodeError, Message, Packet, RoomInfo};
 use crate::net::RoomList;
 use std::io;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs, UdpSocket};
 use std::time::{Duration, Instant};
 
 /// How long looking for relays on the LAN listens for them.
@@ -69,6 +69,19 @@ pub fn discover(port: u16, wait: Duration) -> io::Result<Vec<Found>> {
     Ok(found)
 }
 
+/// The local address of a socket that talks to `relay`: the loopback for
+/// a relay on this machine, which keeps the socket off the network, and
+/// any address of the relay's family otherwise.
+pub fn local_for(relay: SocketAddr) -> SocketAddr {
+    let ip: IpAddr = match (relay.is_ipv4(), relay.ip().is_loopback()) {
+        (true, true) => Ipv4Addr::LOCALHOST.into(),
+        (true, false) => Ipv4Addr::UNSPECIFIED.into(),
+        (false, true) => Ipv6Addr::LOCALHOST.into(),
+        (false, false) => Ipv6Addr::UNSPECIFIED.into(),
+    };
+    SocketAddr::new(ip, 0)
+}
+
 /// `host`, `host:port` or an address, with the relay port unless given.
 pub fn split_relay(relay: &str) -> (String, u16) {
     let relay = relay.trim();
@@ -114,9 +127,7 @@ pub fn rooms(relay: Option<&str>, filter: &str) -> Result<Vec<RoomList>, String>
 /// The rooms whose names contain `filter` at the relay at `relay`, asked
 /// for a page at a time until the relay has no more or `MAX_PAGES`.
 pub fn list(relay: SocketAddr, filter: &str) -> Result<RoomList, String> {
-    let local: SocketAddr =
-        if relay.is_ipv4() { (Ipv4Addr::UNSPECIFIED, 0).into() } else { (Ipv6Addr::UNSPECIFIED, 0).into() };
-    let socket = UdpSocket::bind(local).map_err(|e| format!("can't open a UDP socket: {}", e))?;
+    let socket = UdpSocket::bind(local_for(relay)).map_err(|e| format!("can't open a UDP socket: {}", e))?;
     let mut list = RoomList { relay, name: String::new(), password: false, rooms: Vec::new(), total: 0 };
     let mut buf = [0; 2048];
     for page in 0..MAX_PAGES {
@@ -180,6 +191,7 @@ mod tests {
     use crate::net::tunnel::relay::{RelayConfig, RelayServer};
 
     #[test]
+    #[cfg_attr(feature = "skip-host-network-tests", ignore = "binds a socket on all interfaces")]
     fn finds_a_relay_on_this_machine() {
         let config = RelayConfig { name: "den".into(), password: Some("pw".into()), port: 0 };
         let server = RelayServer::start((Ipv4Addr::UNSPECIFIED, 0).into(), config, Box::new(|_| {})).unwrap();
@@ -191,6 +203,15 @@ mod tests {
         // Heard by the LAN and by the loopback, it is where this machine
         // reaches it best.
         assert!(found[0].relay.ip().is_loopback(), "{:?}", found);
+    }
+
+    #[test]
+    fn talks_to_a_relay_on_this_machine_over_the_loopback() {
+        let local = |relay: &str| local_for(relay.parse().unwrap()).to_string();
+        assert_eq!(local("127.0.0.1:213"), "127.0.0.1:0");
+        assert_eq!(local("[::1]:213"), "[::1]:0");
+        assert_eq!(local("192.0.2.1:213"), "0.0.0.0:0");
+        assert_eq!(local("[2001:db8::1]:213"), "[::]:0");
     }
 
     #[test]

@@ -32,6 +32,7 @@ fn machine(dir: &Path) -> Cpu {
     cpu.bus.set_cycles_per_ms(1000);
     cpu.startup = Startup {
         notes: vec![("Note: ".to_string(), "startup".to_string())],
+        update: None,
         commands: vec![
             StartupItem::Lines(vec!["TSR".to_string()]),
             StartupItem::BatchFile("C:\\AUTOEXEC.BAT".to_string()),
