@@ -76,6 +76,12 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   the mode's own size in graphics modes, doubled where it is small (mode 13h
   is 640x400, mode 12h and 320x240 "mode X" 640x480). `/api/status` →
   `video.frame` has it.
+- **Find the highlighted item in a text-mode menu.** The text alone doesn't
+  show which item is selected. The JSON reply of `/api/screen/text` (without
+  `format=text`) has `attrs`: for each row, runs of cells with the same
+  attribute as `{"col":19,"len":21,"attr":"71"}`. A selected item or field
+  is usually a run of its own, such as blue on light grey (`71`) in a row
+  of light grey on blue (`17`).
 - **Check state with `/api/status`.** It reports `shell_idle` (true at the
   DOS prompt), `cs_ip`, the video mode and `video.adapter` (the display
   adapter `machine` gives programs), `paused`, `input_queue`, and

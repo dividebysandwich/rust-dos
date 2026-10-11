@@ -3369,15 +3369,26 @@ fn screen_text(cpu: &Cpu) -> Reply {
     };
     let (cols, rows) = (geometry.cols, geometry.rows);
     let vram = cpu.bus.display_mem();
+    let cell = |r: usize, c: usize| (geometry.start + r * geometry.row_bytes + c * 2) & geometry.wrap;
     let lines: Vec<String> = (0..rows)
         .map(|r| {
-            let s: String = (0..cols)
-                .map(|c| {
-                    let off = (geometry.start + r * geometry.row_bytes + c * 2) & geometry.wrap;
-                    keys::CP437[vram[off] as usize]
-                })
-                .collect();
+            let s: String = (0..cols).map(|c| keys::CP437[vram[cell(r, c)] as usize]).collect();
             s.trim_end().to_string()
+        })
+        .collect();
+    // Each row's attributes as runs of the same one: a highlighted menu
+    // item or a selected field shows as a run of its own.
+    let attrs: Vec<Vec<Value>> = (0..rows)
+        .map(|r| {
+            let mut runs: Vec<(usize, usize, u8)> = Vec::new();
+            for c in 0..cols {
+                let attr = vram[cell(r, c) + 1];
+                match runs.last_mut() {
+                    Some((_, len, a)) if *a == attr => *len += 1,
+                    _ => runs.push((c, 1, attr)),
+                }
+            }
+            runs.into_iter().map(|(col, len, a)| json!({"col": col, "len": len, "attr": format!("{:02X}", a)})).collect()
         })
         .collect();
     Reply::Json(json!({
@@ -3386,6 +3397,7 @@ fn screen_text(cpu: &Cpu) -> Reply {
         "rows": rows,
         "cursor": {"col": cpu.bus.peek_8(0x0450), "row": cpu.bus.peek_8(0x0451)},
         "lines": lines,
+        "attrs": attrs,
     }))
 }
 
@@ -3658,6 +3670,31 @@ mod tests {
         assert_eq!((second.len(), next), (20, 50));
         assert!(first.last() < second.first(), "oldest first, in order");
         assert_eq!(page(&mut cpu, &mut hub, next, 30), (vec![], 50, 0));
+    }
+
+    #[test]
+    fn screen_text_has_each_rows_attributes_as_runs() {
+        let mut cpu = Cpu::new(".".into());
+        let mut hub = DebugHub::new(None, None, 1000);
+        // Row 2: " Play  Quit", "Quit" highlighted (black on cyan).
+        for (c, ch) in " Play  Quit".bytes().enumerate() {
+            let at = 0xB8000 + 2 * 80 * 2 + c * 2;
+            cpu.bus.write_8(at, ch);
+            cpu.bus.write_8(at + 1, if c >= 7 { 0x30 } else { 0x07 });
+        }
+        for c in 11..80 {
+            cpu.bus.write_8(0xB8000 + 2 * 80 * 2 + c * 2 + 1, 0x07);
+        }
+        let Reply::Json(v) = handle(&mut cpu, &mut hub, Cmd::ScreenText) else { panic!("not JSON") };
+        assert_eq!(v["lines"][2], " Play  Quit");
+        let runs: Vec<(u64, u64, &str)> = v["attrs"][2]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| (r["col"].as_u64().unwrap(), r["len"].as_u64().unwrap(), r["attr"].as_str().unwrap()))
+            .collect();
+        assert_eq!(runs, [(0, 7, "07"), (7, 4, "30"), (11, 69, "07")]);
+        assert_eq!(v["attrs"].as_array().unwrap().len(), v["rows"].as_u64().unwrap() as usize);
     }
 
     #[test]

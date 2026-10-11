@@ -1825,7 +1825,8 @@ STATUS / SCREEN
                                            size: 640x400 in text modes, the mode's size
                                            (small ones doubled) otherwise (raw = RGB24
                                            bytes, size in x-width/x-height)
-  GET  /api/screen/text[?format=text]      text-mode screen contents (CP437 -> Unicode)
+  GET  /api/screen/text[?format=text]      text-mode screen contents (CP437 -> Unicode);
+                                           JSON has attrs: each row's attribute runs {col,len,attr}
   GET  /api/log[?since_ms=&limit=&grep=&format=text]   emulator log lines, each with its
                                            number n, the journal's last entry "at", and the
                                            request that wrote it ("cause")
