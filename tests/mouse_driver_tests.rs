@@ -171,8 +171,7 @@ fn reflected_motion_poll_delivers_buttons_with_if_clear_and_preserves_full_regis
 
 /// BloodNet's event handler moves its own pointer by SI and DI, then
 /// clears the motion counters with AX=000Bh. Each call has to get the
-/// motion since then, not a difference from what the counters were at the
-/// call before.
+/// motion since that read.
 #[test]
 fn handler_motion_counts_from_the_last_read_of_the_counters() {
     let mut cpu = polling_cpu();
@@ -184,6 +183,39 @@ fn handler_motion_counts_from_the_last_read_of_the_counters() {
         assert_eq!(cpu.bus.read_16(CALLBACK_COUNT), round);
         let mickeys = (cpu.bus.read_16(CALLBACK_ARGS + 8), cpu.bus.read_16(CALLBACK_ARGS + 10));
         assert_eq!(mickeys, (2, 4), "SI and DI at call {round}");
+    }
+}
+
+/// A handler that leaves the counters alone gets them as they add up over
+/// its calls, until the program reads them with AX=000Bh, as the
+/// Microsoft driver, CuteMouse and DOSBox pass them.
+#[test]
+fn handler_motion_without_reads_is_the_running_counters() {
+    const QUIET_IP: u16 = 0x0300;
+    let mut cpu = polling_cpu();
+    let mut a = CodeAssembler::new(16).unwrap();
+    a.inc(word_ptr(0x400).cs()).unwrap();
+    a.mov(word_ptr(0x40A).cs(), si).unwrap();
+    a.mov(word_ptr(0x40C).cs(), di).unwrap();
+    a.retf().unwrap();
+    for (i, byte) in a.assemble(QUIET_IP as u64).unwrap().into_iter().enumerate() {
+        cpu.bus.write_8(((POLL_SEG as usize) << 4) + QUIET_IP as usize + i, byte);
+    }
+    cpu.bus.mouse.callback_ip = QUIET_IP;
+    cpu.bus.mouse.callback_mask = 0x0001;
+    for (round, expected) in [(1, (2, 4)), (2, (4, 8)), (3, (2, 4))] {
+        cpu.bus.mouse.move_by(3.0, 3.0);
+        if round == 3 {
+            cpu.bus.mouse.move_by(3.0, 3.0);
+            call(&mut cpu, 0x000B);
+            assert_eq!((cpu.cx(), cpu.dx()), (8, 16), "four moves, the handler's calls cleared nothing");
+            cpu.bus.mouse.move_by(3.0, 3.0);
+        }
+        assert!(rust_dos::mouse::deliver_callback(&mut cpu));
+        finish_callback(&mut cpu, 0x0100);
+        assert_eq!(cpu.bus.read_16(CALLBACK_COUNT), round);
+        let mickeys = (cpu.bus.read_16(CALLBACK_ARGS + 8), cpu.bus.read_16(CALLBACK_ARGS + 10));
+        assert_eq!(mickeys, expected, "SI and DI at call {round}");
     }
 }
 

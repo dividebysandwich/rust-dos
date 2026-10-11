@@ -126,17 +126,13 @@ pub fn handle(cpu: &mut Cpu) {
         }
 
         0x000B => {
-            // Read motion counters. Returns CX = mickey X, DX = mickey Y. Clears.
+            // Read motion counters. Returns CX = mickey X, DX = mickey Y.
+            // Clears them, so the event handler's SI and DI count from
+            // here too (see `deliver_callback`).
             cpu.set_cx(cpu.bus.mouse.mickey_x as u16);
             cpu.set_dx(cpu.bus.mouse.mickey_y as u16);
-            let m = &mut cpu.bus.mouse;
-            m.mickey_x = 0;
-            m.mickey_y = 0;
-            // The event handler's SI and DI count from here too, as a
-            // driver passes it its counters: BloodNet's handler reads
-            // them with this call after each move.
-            m.last_callback_mickey_x = 0;
-            m.last_callback_mickey_y = 0;
+            cpu.bus.mouse.mickey_x = 0;
+            cpu.bus.mouse.mickey_y = 0;
         }
 
         0x000C => {
