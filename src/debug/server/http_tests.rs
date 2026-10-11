@@ -21,61 +21,64 @@ const PROBE: &str = "B83412BB7856A11001B8004CCD210000CDAB";
 /// A .COM program that runs forever: NOP; JMP 0100h.
 const LOOP: [u8; 3] = [0x90, 0xEB, 0xFD];
 
+/// A .COM program that counts forever: INC WORD [0200h]; JMP back.
+const COUNT: [u8; 6] = [0xFF, 0x06, 0x00, 0x02, 0xEB, 0xFA];
+
+/// How a rig's machine runs.
+#[derive(Clone)]
+struct Options {
+    /// Journal entries kept.
+    capacity: usize,
+    /// Deterministic mode, paused at the start, in host frames of this
+    /// many emulated milliseconds.
+    deterministic: Option<u64>,
+    /// Instructions a frame (outside deterministic mode).
+    frame: u64,
+    /// Host time a frame waits.
+    sleep: Duration,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options { capacity: super::journal::CAPACITY, deterministic: None, frame: 5000, sleep: Duration::from_millis(1) }
+    }
+}
+
 /// A server and the machine behind it.
 struct Rig {
     addr: SocketAddr,
+    shared: Arc<Shared>,
     emulator: Option<JoinHandle<()>>,
 }
 
 impl Rig {
     fn new(name: &str) -> Self {
-        Self::with_capacity(name, super::journal::CAPACITY)
+        Self::with(name, Options::default())
     }
 
     /// A rig whose journal keeps `capacity` entries.
     fn with_capacity(name: &str, capacity: usize) -> Self {
+        Self::with(name, Options { capacity, ..Options::default() })
+    }
+
+    fn with(name: &str, options: Options) -> Self {
         let dir = std::env::temp_dir().join(format!("rust-dos-http-{}-{}", name, std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let code: Vec<u8> = (0..PROBE.len()).step_by(2).map(|i| u8::from_str_radix(&PROBE[i..i + 2], 16).unwrap()).collect();
         std::fs::write(dir.join("PROBE.COM"), code).unwrap();
         std::fs::write(dir.join("LOOP.COM"), LOOP).unwrap();
+        std::fs::write(dir.join("COUNT.COM"), COUNT).unwrap();
         let (tx, rx) = mpsc::channel();
-        let shared = Arc::new(Shared::with_capacity(Instant::now(), capacity));
+        let shared = Arc::new(Shared::with_capacity(Instant::now(), options.capacity));
         let addr = super::spawn("127.0.0.1:0".parse().unwrap(), tx, shared.clone()).unwrap();
+        let machine_shared = shared.clone();
         let emulator = std::thread::Builder::new()
             .stack_size(16 << 20)
-            .spawn(move || {
-                let mut cpu = Cpu::new(dir);
-                cpu.load_shell();
-                let hook = shared.clone();
-                cpu.bus.log_hook = Some(Box::new(move |line: &str| hook.log_line(line)));
-                let mut hub = DebugHub::new(Some(rx), Some(shared), 1000);
-                hub.announce(&cpu);
-                loop {
-                    hub.poll(&mut cpu);
-                    if hub.quit_requested() {
-                        hub.shutdown(&cpu, ShutdownReason::Quit, 0);
-                        return;
-                    }
-                    if !hub.paused {
-                        let hot = hub.begin_batch(&cpu);
-                        let end = cpu.bus.clock.icount + 5000;
-                        cpu.bus.start_batch(end);
-                        while cpu.bus.clock.icount < end {
-                            match exec::run_batch(&mut cpu, &mut hub, hot) {
-                                StopReason::BatchEnd | StopReason::Paused | StopReason::Exit => break,
-                                StopReason::ShellReloaded => cpu.bus.start_batch(end),
-                            }
-                        }
-                        hub.end_batch(&cpu);
-                    }
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-            })
+            .spawn(move || run_machine(dir, rx, machine_shared, options))
             .unwrap();
-        let rig = Rig { addr, emulator: Some(emulator) };
-        // Running, at the prompt.
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let rig = Rig { addr, shared, emulator: Some(emulator) };
+        // At the prompt (paused there in deterministic mode).
+        let deadline = Instant::now() + Duration::from_secs(20);
         while !rig.get("/api/status").json()["program"].as_str().is_some_and(str::is_empty) {
             assert!(Instant::now() < deadline, "the shell starts");
             std::thread::sleep(Duration::from_millis(10));
@@ -94,6 +97,23 @@ impl Rig {
     /// The journal's last entry.
     fn last(&self) -> u64 {
         self.get("/api/status").json()["seq"].as_u64().unwrap()
+    }
+
+    /// Every entry, which the journal must still have.
+    fn journal(&self) -> Vec<Value> {
+        let mut all = Vec::new();
+        let mut after = 0;
+        loop {
+            let page = self.get(&format!("/api/journal?after={}&limit=4096", after));
+            assert_eq!(page.status, 200, "{}", page.body);
+            let page = page.json();
+            let entries = page["entries"].as_array().unwrap().clone();
+            if entries.is_empty() {
+                return all;
+            }
+            after = page["next"].as_u64().unwrap();
+            all.extend(entries);
+        }
     }
 
     /// Paused at PROBE.COM's first instruction: its code segment.
@@ -116,15 +136,115 @@ impl Rig {
             std::thread::sleep(Duration::from_millis(5));
         }
     }
+
+    /// Wait until no request or stream is in flight on the server.
+    fn until_idle(&self) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while self.shared.busy.load(std::sync::atomic::Ordering::Acquire) > 0 {
+            assert!(Instant::now() < deadline, "requests in flight: {}", self.shared.busy.load(std::sync::atomic::Ordering::Acquire));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Quit, and wait for the emulator thread to end.
+    fn quit(&mut self) -> Resp {
+        let quit = self.post("/api/control/quit", json!({}));
+        if let Some(emulator) = self.emulator.take() {
+            emulator.join().unwrap();
+        }
+        quit
+    }
 }
 
 impl Drop for Rig {
     fn drop(&mut self) {
+        if self.emulator.is_none() {
+            return;
+        }
         let addr = self.addr;
         let _ = std::panic::catch_unwind(move || http(addr, "POST", "/api/control/quit", &[], Some(&json!({}))));
         if let Some(emulator) = self.emulator.take() {
             let _ = emulator.join();
         }
+    }
+}
+
+/// The machine's loop, as the front end runs it: requests, save states and
+/// speeds (kept in memory), then a batch, until a quit.
+fn run_machine(dir: std::path::PathBuf, rx: mpsc::Receiver<super::super::Request>, shared: Arc<Shared>, options: Options) {
+    // Made before the machine, whose BIOS reads the clock.
+    let mut mode = options.deterministic.map(|_| rust_dos::deterministic::Deterministic::new(rust_dos::deterministic::default_start()));
+    let mut cpu = Cpu::new(dir);
+    if mode.is_some() {
+        cpu.bus.set_cycles_per_ms(3000);
+    }
+    cpu.load_shell();
+    let hook = shared.clone();
+    cpu.bus.log_hook = Some(Box::new(move |line: &str| hook.log_line(line)));
+    let mut hub = DebugHub::new(Some(rx), Some(shared), 1000);
+    hub.deterministic = mode.as_ref().map(|m| m.start);
+    hub.announce(&cpu);
+    if mode.is_some() {
+        hub.pause_at_start(&cpu);
+    }
+    let mut states: std::collections::HashMap<std::path::PathBuf, Vec<u8>> = Default::default();
+    loop {
+        hub.poll(&mut cpu);
+        if hub.quit_requested() {
+            hub.shutdown(&cpu, ShutdownReason::Quit, 0);
+            return;
+        }
+        while let Some(request) = hub.next_state_request() {
+            let path = request.path.clone();
+            let result = if request.load {
+                match states.get(&path) {
+                    Some(data) => match rust_dos::savestate::machine::load(&mut cpu, data) {
+                        Ok(()) => {
+                            if let Some(mode) = &mut mode {
+                                mode.resync(&cpu);
+                            }
+                            Ok(json!({"loaded": path}))
+                        }
+                        Err(e) => Err((400, json!({"error": e.to_string()}))),
+                    },
+                    None => Err((404, json!({"error": "no such state", "unchanged": true}))),
+                }
+            } else {
+                states.insert(path.clone(), rust_dos::savestate::machine::save(&cpu));
+                Ok(json!({"saved": path}))
+            };
+            hub.state_done(&cpu, request, result);
+        }
+        while let Some(request) = hub.next_speed_request() {
+            let cycles = request.cycles.clone();
+            hub.speed_done(&cpu, request, Ok(json!({"cycles": cycles})));
+        }
+        if !hub.paused {
+            let hot = hub.begin_batch(&cpu);
+            match (&mut mode, options.deterministic) {
+                (Some(mode), Some(frame_ms)) => {
+                    let target = cpu.bus.clock.icount_at_ns(cpu.bus.clock.now_ns() + frame_ms * 1_000_000);
+                    let end = mode.frame_end(&cpu, target);
+                    hub.run_deterministic(&mut cpu, mode, hot, end, |cpu, hub, reached| {
+                        if reached.tick {
+                            hub.feed_input(cpu);
+                        }
+                    });
+                }
+                _ => {
+                    let end = cpu.bus.clock.icount + options.frame;
+                    cpu.bus.start_batch(end);
+                    while cpu.bus.clock.icount < end {
+                        match exec::run_batch(&mut cpu, &mut hub, hot) {
+                            StopReason::BatchEnd | StopReason::Paused | StopReason::Exit => break,
+                            StopReason::ShellReloaded => cpu.bus.start_batch(end),
+                        }
+                    }
+                }
+            }
+        }
+        hub.end_batch(&cpu);
+        std::thread::sleep(options.sleep);
     }
 }
 
@@ -463,4 +583,19 @@ fn replies_keep_the_keys_they_had() {
     assert_eq!((typed.json()["ok"].as_bool(), typed.json()["done"].as_bool()), (Some(true), Some(true)), "{}", typed.body);
     let op = rig.get(&format!("/api/ops/{}", typed.json()["op"])).json();
     assert_eq!((op["kind"].as_str(), op["state"].as_str()), (Some("input"), Some("done")));
+}
+
+#[test]
+fn run_answers_once_its_program_started_without_another_entry() {
+    let rig = Rig::new("run-started");
+    // LOOP.COM runs forever and makes no entry after its start.
+    let start = Instant::now();
+    let started = rig.post("/api/control/run", json!({"command": "LOOP.COM", "timeout_ms": 10000}));
+    assert_eq!(started.status, 200, "{}", started.body);
+    assert!(start.elapsed() < Duration::from_secs(3), "answered as the program started: {:?}", start.elapsed());
+    assert_eq!(started.json()["program"]["name"], "LOOP.COM");
+    let op = rig.get(&format!("/api/ops/{}", started.json()["op"])).json();
+    assert_eq!(op["state"], "done", "{}", op);
+    let end = op["end"].clone();
+    assert_eq!((end["type"].as_str(), end["op"].clone()), (Some("program_started"), started.json()["op"].clone()), "{}", op);
 }

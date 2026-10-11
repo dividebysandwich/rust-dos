@@ -994,6 +994,14 @@ impl DebugHub {
         self.append(cpu, kind, cause, fields)
     }
 
+    /// Wake the server's waits on the journal after a change that appended
+    /// no entry (an operation that ended at an earlier one).
+    fn wake(&self) {
+        if let Some(shared) = &self.shared {
+            shared.journal_seq.send_modify(|_| {});
+        }
+    }
+
     fn with_journal<T>(&self, f: impl FnOnce(&mut Journal) -> T) -> Option<T> {
         let shared = self.shared.as_ref()?;
         let mut j = shared.journal.lock().ok()?;
@@ -1158,7 +1166,20 @@ impl DebugHub {
             if started - self.told_starts > 1 {
                 fields["count"] = (started - self.told_starts).into();
             }
-            self.last_start_seq = self.append(cpu, Kind::ProgramStarted, None, fields).or(self.last_start_seq);
+            // A `run` that doesn't stop at the entry is done with this entry.
+            let run = self.run_wait.as_ref().filter(|r| !r.stop_at_entry && started > r.before).map(|r| r.op);
+            let seq = self.append_then(cpu, Kind::ProgramStarted, None, fields, |j, seq| {
+                if let Some(op) = run {
+                    j.end_op(op, OpState::Done, Some(seq));
+                }
+            });
+            self.last_start_seq = seq.or(self.last_start_seq);
+            if let Some(op) = run.filter(|_| seq.is_some()) {
+                self.run_wait = None;
+                if self.current_op == Some(op) {
+                    self.current_op = None;
+                }
+            }
         }
         if start_first {
             self.tell_exit(cpu, ended);
@@ -1696,9 +1717,12 @@ impl DebugHub {
         let (op, before, stop_at_entry) = (run.op, run.before, run.stop_at_entry);
         if cpu.programs.started > before {
             if !stop_at_entry {
+                // A start the journal didn't tell (a load brought it): the
+                // run is done with the last start told.
                 self.run_wait = None;
                 let end = self.last_start_seq;
                 self.with_journal(|j| j.end_op(op, OpState::Done, end));
+                self.wake();
                 if self.current_op == Some(op) {
                     self.current_op = None;
                 }
