@@ -602,6 +602,18 @@ impl SoundBlaster {
                 low | high
             }
             (m, 0x82) if m.is_sb16() => (self.irq8 as u8) | (self.irq16 as u8) << 1 | 0x20,
+            // On an SB16 the SB Pro's volume registers are another view of
+            // its own: the top four of each side's five bits, so a level
+            // set through either reads back through both.
+            (m, 0x04 | 0x22 | 0x26 | PRO_CD) if m.is_sb16() => {
+                let (l, r) = match reg {
+                    0x04 => (VOICE_L, VOICE_R),
+                    0x22 => (MASTER_L, MASTER_R),
+                    0x26 => (FM_L, FM_R),
+                    _ => (CD_L, CD_R),
+                };
+                (self.mixer[l as usize] & 0xF0) | self.mixer[r as usize] >> 4
+            }
             _ => self.mixer[reg as usize],
         }
     }
