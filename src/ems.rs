@@ -9,9 +9,11 @@
 //! directly, so the frame has to hold the page itself. The one thing this
 //! doesn't do as the hardware does is alias: a logical page mapped into two
 //! physical pages at once is two copies. What the program writes through
-//! one shows in the other only once one of them is mapped over, when the
-//! bytes written through it go back to the logical page and into the other
-//! copies (see `Ems::write_back`).
+//! one shows in the other only once one of them is mapped over, or a
+//! function 57h move or exchange runs: then the bytes written through each
+//! go back to the logical page and into the other copies (see
+//! `Ems::write_back`). Where the program wrote one byte through both, the
+//! copy whose bytes go back first wins, whichever write came last.
 //!
 //! VCPI isn't there (AX=DE00h says so), as the CPU runs DOS in real mode,
 //! not virtual-8086 mode: DOS extenders then use XMS or raw mode.
@@ -151,13 +153,26 @@ impl Ems {
             bus.copy_ram(from, home, PAGE);
             return;
         }
-        for i in 0..PAGE {
-            let value = bus.read_8(from + i);
-            if value != bus.read_8(home + i) {
-                bus.write_8(home + i, value);
-                for &alias in &aliases {
-                    bus.write_8(alias + i, value);
-                }
+        let ram = bus.ram();
+        let (Some(copy), Some(page)) = (ram.get(from..from + PAGE), ram.get(home..home + PAGE)) else { return };
+        let written: Vec<(usize, u8)> =
+            copy.iter().zip(page).enumerate().filter(|(_, (c, p))| c != p).map(|(i, (&c, _))| (i, c)).collect();
+        for to in std::iter::once(home).chain(aliases) {
+            for &(i, value) in &written {
+                bus.write_8(to + i, value);
+            }
+        }
+    }
+
+    /// Bring the copies of every logical page shown in more than one
+    /// physical page in line, each with what was written through the
+    /// others, so function 57h finds the page's latest contents in the
+    /// first copy, and what it writes there reaches the others.
+    fn sync_aliases(&self, bus: &mut Bus) {
+        for slot in 0..FRAME_PAGES {
+            let target = self.mapped[slot];
+            if target.is_some() && (0..FRAME_PAGES).any(|other| other != slot && self.mapped[other] == target) {
+                self.write_back(bus, slot);
             }
         }
     }
@@ -933,6 +948,7 @@ fn move_or_exchange(cpu: &mut Cpu, ems: &mut Ems, al: u8) -> u8 {
     if overlap && al == 1 {
         return EXCHANGE_OVERLAP;
     }
+    ems.sync_aliases(&mut cpu.bus);
     // Through the bus, so video memory is a destination as well.
     let from: Vec<u8> = (0..len).map(|i| cpu.bus.read_8(source.addr(ems, i))).collect();
     if al == 1 {
@@ -944,6 +960,7 @@ fn move_or_exchange(cpu: &mut Cpu, ems: &mut Ems, al: u8) -> u8 {
     for (i, b) in from.into_iter().enumerate() {
         cpu.bus.write_8(dest.addr(ems, i), b);
     }
+    ems.sync_aliases(&mut cpu.bus);
     if overlap { MOVE_OVERLAP } else { OK }
 }
 
