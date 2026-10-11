@@ -50,7 +50,7 @@ impl TraceEntry {
     /// F000 other than the HLE traps, which stand for the services they run.
     /// In protected mode CS is a selector, which says nothing about the BIOS.
     pub fn is_bios_code(&self) -> bool {
-        !self.pm && self.cs >= 0xF000 && trap_name(&self.bytes, None, false).is_none()
+        !self.pm && self.cs >= 0xF000 && !is_trap(&self.bytes, false)
     }
 
     /// Disassemble this entry. Returns (instruction bytes actually used,
@@ -149,6 +149,12 @@ pub fn trap_name(bytes: &[u8], ax: Option<u16>, pm: bool) -> Option<String> {
         (0x3A, _) => format!("HLE far service {vv:02X}h"),
         _ => format!("HLE DPMI {vv:02X}h"),
     })
+}
+
+/// Whether `bytes` start with a service trap that `trap_name` names, in
+/// protected mode (`pm`) or outside it, without building the name.
+fn is_trap(bytes: &[u8], pm: bool) -> bool {
+    matches!(bytes, &[0xFE, kind @ 0x38..=0x3B, _, ..] if !(pm && kind <= 0x39))
 }
 
 /// Disassemble one instruction of 16-bit or 32-bit code. Returns (length,
