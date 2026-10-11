@@ -89,6 +89,12 @@ jobs:
           cargo test --locked --test deterministic_tests
           cargo test --locked --bin rust-dos determinis
 
+      # Starts the debug build of the program, whose large frames must fit
+      # in Windows's 1 MB main thread stack.
+      - name: Run the debug build of the program (Windows)
+        if: runner.os == 'Windows'
+        run: cargo test --locked --test debug_journal_tests
+
   build:
     name: ${{ matrix.label }}
     needs: test
