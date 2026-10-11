@@ -95,84 +95,108 @@ fn shell_reload_clears_the_old_screen_of_another_text_mode() {
 
 /// The 16-color renderer redraws only the rows whose plane bytes changed,
 /// and what it leaves must be what a full render draws: after a sprite, a
-/// palette change, a scroll, panning and a split screen, the frame drawn
-/// bit by bit is the frame drawn from scratch.
+/// palette change, a scroll, panning and a split screen moving up and
+/// down, unpanned or not, the frame drawn bit by bit is the frame drawn
+/// from scratch. Over noise, and over a pattern every row of which has the
+/// same bytes, where only the panning tells rows apart.
 #[test]
 fn planar_frames_drawn_row_by_row_match_full_renders() {
-    use rust_dos::interrupts::int10;
-    for mode in [0x0Du8, 0x10, 0x12] {
-        let mut cpu = Cpu::new(scratch(&format!("planar_{mode:02X}")));
-        int10::set_mode(&mut cpu, mode);
-        let bytes_per_row = cpu.bus.vga.graphics_size().0 / 8;
-        let planes = |cpu: &mut Cpu, mask: u8| {
-            cpu.bus.io_write(0x3C4, 0x02);
-            cpu.bus.io_write(0x3C5, mask);
-        };
-        let mut seed = 0x2545_F491u32;
-        for plane in 0..4 {
-            planes(&mut cpu, 1 << plane);
-            for at in 0..0x10000 {
-                seed ^= seed << 13;
-                seed ^= seed >> 17;
-                seed ^= seed << 5;
-                cpu.bus.write_8(0xA0000 + at, seed as u8);
-            }
+    for patterned in [false, true] {
+        for mode in [0x0Du8, 0x10, 0x12] {
+            planar_steps(mode, patterned);
         }
-        let (w, h) = video::frame_size(&cpu.bus);
-        let mut frame = Frame::new(w, h);
-        let mut check = |cpu: &mut Cpu, what: &str| {
-            video::render_screen(&mut frame, &cpu.bus);
-            cpu.bus.vga.clear_dirty();
-            let mut fresh = Frame::new(w, h);
-            cpu.bus.vga.mark_dirty_full();
-            video::render_screen(&mut fresh, &cpu.bus);
-            cpu.bus.vga.clear_dirty();
-            assert!(frame == fresh, "mode {mode:02X}: {what}");
-        };
-        check(&mut cpu, "first frame");
-        // A sprite: four bytes wide, a plane at a time.
-        for plane in 0..4u8 {
-            planes(&mut cpu, 1 << plane);
-            for y in 40..72 {
-                for x in 10..14 {
-                    cpu.bus.write_8(0xA0000 + y * bytes_per_row + x, 0xA5 ^ plane);
-                }
-            }
-        }
-        check(&mut cpu, "sprite");
-        planes(&mut cpu, 0x0F);
-        cpu.bus.write_8(0xA0000 + 3 * bytes_per_row, 0x55);
-        check(&mut cpu, "one byte in all planes");
-        // Palette register 1 to another colour.
-        cpu.bus.io_read(0x3DA);
-        cpu.bus.io_write(0x3C0, 0x01);
-        cpu.bus.io_write(0x3C0, 0x3F);
-        cpu.bus.io_write(0x3C0, 0x20);
-        check(&mut cpu, "palette");
-        // Scrolled down a row and three bytes.
-        let start = bytes_per_row + 3;
-        cpu.bus.io_write(0x3D4, 0x0C);
-        cpu.bus.io_write(0x3D5, (start >> 8) as u8);
-        cpu.bus.io_write(0x3D4, 0x0D);
-        cpu.bus.io_write(0x3D5, start as u8);
-        cpu.bus.vga.latch_start_address();
-        check(&mut cpu, "scroll");
-        // Panned by three pixels.
-        cpu.bus.io_read(0x3DA);
-        cpu.bus.io_write(0x3C0, 0x33);
-        cpu.bus.io_write(0x3C0, 0x03);
-        cpu.bus.io_write(0x3C0, 0x20);
-        check(&mut cpu, "pan");
-        cpu.bus.io_read(0x3DA);
-        cpu.bus.io_write(0x3C0, 0x33);
-        cpu.bus.io_write(0x3C0, 0x05);
-        cpu.bus.io_write(0x3C0, 0x20);
-        check(&mut cpu, "more pan");
-        // A split screen from scanline 100 on.
-        cpu.bus.io_write(0x3D4, 0x18);
-        cpu.bus.io_write(0x3D5, 100);
-        check(&mut cpu, "split");
     }
+}
+
+fn planar_steps(mode: u8, patterned: bool) {
+    use rust_dos::interrupts::int10;
+    let what = if patterned { "pattern" } else { "noise" };
+    let mut cpu = Cpu::new(scratch(&format!("planar_{mode:02X}_{what}")));
+    int10::set_mode(&mut cpu, mode);
+    let bytes_per_row = cpu.bus.vga.graphics_size().0 / 8;
+    let planes = |cpu: &mut Cpu, mask: u8| {
+        cpu.bus.io_write(0x3C4, 0x02);
+        cpu.bus.io_write(0x3C5, mask);
+    };
+    let mut seed = 0x2545_F491u32;
+    for plane in 0..4 {
+        planes(&mut cpu, 1 << plane);
+        for at in 0..0x10000 {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            cpu.bus.write_8(0xA0000 + at, if patterned { 0x0F } else { seed as u8 });
+        }
+    }
+    let (w, h) = video::frame_size(&cpu.bus);
+    let mut frame = Frame::new(w, h);
+    let mut check = |cpu: &mut Cpu, step: &str| {
+        video::render_screen(&mut frame, &cpu.bus);
+        cpu.bus.vga.clear_dirty();
+        let mut fresh = Frame::new(w, h);
+        cpu.bus.vga.mark_dirty_full();
+        video::render_screen(&mut fresh, &cpu.bus);
+        cpu.bus.vga.clear_dirty();
+        assert!(frame == fresh, "mode {mode:02X} over {what}: {step}");
+    };
+    let attribute = |cpu: &mut Cpu, index: u8, value: u8| {
+        cpu.bus.io_read(0x3DA);
+        cpu.bus.io_write(0x3C0, index | 0x20);
+        cpu.bus.io_write(0x3C0, value);
+    };
+    let crtc = |cpu: &mut Cpu, index: u8, value: u8| {
+        cpu.bus.io_write(0x3D4, index);
+        cpu.bus.io_write(0x3D5, value);
+    };
+    check(&mut cpu, "first frame");
+    // A sprite: four bytes wide, a plane at a time.
+    for plane in 0..4u8 {
+        planes(&mut cpu, 1 << plane);
+        for y in 40..72 {
+            for x in 10..14 {
+                cpu.bus.write_8(0xA0000 + y * bytes_per_row + x, 0xA5 ^ plane);
+            }
+        }
+    }
+    check(&mut cpu, "sprite");
+    planes(&mut cpu, 0x0F);
+    cpu.bus.write_8(0xA0000 + 3 * bytes_per_row, 0x55);
+    check(&mut cpu, "one byte in all planes");
+    // Palette register 1 to another colour.
+    attribute(&mut cpu, 0x01, 0x3F);
+    check(&mut cpu, "palette");
+    // Scrolled down a row and three bytes.
+    let start = bytes_per_row + 3;
+    crtc(&mut cpu, 0x0C, (start >> 8) as u8);
+    crtc(&mut cpu, 0x0D, start as u8);
+    cpu.bus.vga.latch_start_address();
+    check(&mut cpu, "scroll");
+    // Panned by three pixels, then five.
+    attribute(&mut cpu, 0x13, 0x03);
+    check(&mut cpu, "pan");
+    attribute(&mut cpu, 0x13, 0x05);
+    check(&mut cpu, "more pan");
+    // A split screen from scanline `line` on: Line Compare's bits 0-7 in
+    // CR18h, bit 8 in CR07h bit 4, bit 9 in CR09h bit 6.
+    let split = |cpu: &mut Cpu, line: u16| {
+        let regs = cpu.bus.vga.crtc_regs;
+        crtc(cpu, 0x18, line as u8);
+        crtc(cpu, 0x07, (regs[0x07] & !0x10) | ((line >> 4) as u8 & 0x10));
+        crtc(cpu, 0x09, (regs[0x09] & !0x40) | ((line >> 3) as u8 & 0x40));
+    };
+    split(&mut cpu, 100);
+    assert!(cpu.bus.vga.split_row() < cpu.bus.vga.graphics_size().1, "no split screen");
+    check(&mut cpu, "split");
+    // The split screen unpanned (Attribute Mode Control bit 5), moving.
+    let mode_control = cpu.bus.vga.attribute_regs[0x10];
+    attribute(&mut cpu, 0x10, mode_control | 0x20);
+    check(&mut cpu, "split unpanned");
+    for line in [300u16, 60, 150, 0] {
+        split(&mut cpu, line);
+        check(&mut cpu, &format!("split unpanned moved to {line}"));
+    }
+    attribute(&mut cpu, 0x10, mode_control);
+    check(&mut cpu, "split panned again");
 }
 
 /// The CGA's composite picture is redrawn only where its lines changed,

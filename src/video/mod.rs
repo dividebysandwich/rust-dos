@@ -612,14 +612,16 @@ fn render_planar(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus: &Bus, dra
     let columns: Vec<usize> = (0..canvas_w).map(|tx| tx * width / canvas_w).collect();
     let mut line = vec![0u8; width + 16];
 
-    // The rows drawn before are still there if the colors, the shape and
-    // the panning are the same. Each row is kept as the plane bytes it was
-    // drawn from: `spans` bytes of each plane.
+    // The rows drawn before are still there if the colors, the shape, the
+    // panning and the split screen's first row are the same. Each row is
+    // kept as the plane bytes it was drawn from: `spans` bytes of each
+    // plane. (The split row is in the key because a row that moves across
+    // it changes its panning, and its bytes may be the same on both sides.)
     let spans = |pan: usize| (pan % 8 + width).div_ceil(8);
     let span = spans(pan).max(spans(split_pan));
     let mut key = vec![b'P'];
     key.extend(colors.iter().flat_map(|&(r, g, b)| [r, g, b]));
-    key.extend([width, rows, canvas_w, canvas_h, pan, split_pan].iter().flat_map(|v| (*v as u32).to_le_bytes()));
+    key.extend([width, rows, canvas_w, canvas_h, pan, split_pan, split.min(rows)].iter().flat_map(|v| (*v as u32).to_le_bytes()));
     if drawn_from.key != key || drawn_from.rows.len() != 4 * span * rows {
         drawn_from.key = key;
         drawn_from.rows = Vec::new();
