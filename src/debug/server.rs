@@ -1219,19 +1219,16 @@ async fn mem_get(State(s): State<AppState>, Query(q): Query<MemQuery>) -> ApiRes
     let (Reply::Bytes { addr, segoff, data }, meta) = s.call(Cmd::ReadMem { addr: q.addr, len }, DEFAULT_TIMEOUT).await? else {
         return Err(unexpected());
     };
+    // The JSON formats: the bytes as base64, or as the hex string PUT takes.
+    let json_with = |key: &str, bytes: String| {
+        json_response(StatusCode::OK, json!({"addr": format!("{:05X}", addr), "len": data.len(), key: bytes}), &meta)
+    };
     match q.format.as_deref().unwrap_or("hex") {
         "hex" => Ok(with_meta(text_response(hexdump(addr, segoff, &data)), &meta)),
-        "base64" => Ok(json_response(
-            StatusCode::OK,
-            json!({
-                "addr": format!("{:05X}", addr),
-                "len": data.len(),
-                "base64": base64::engine::general_purpose::STANDARD.encode(&data),
-            }),
-            &meta,
-        )),
+        "base64" => Ok(json_with("base64", base64::engine::general_purpose::STANDARD.encode(&data))),
+        "json" => Ok(json_with("hex", trace::hex_bytes(&data))),
         "raw" | "bin" => Ok(with_meta(([(header::CONTENT_TYPE, "application/octet-stream")], data).into_response(), &meta)),
-        f => Err(bad(format!("unknown format '{}' (hex, base64, raw)", f))),
+        f => Err(bad(format!("unknown format '{}' (hex, json, base64, raw)", f))),
     }
 }
 
@@ -1889,7 +1886,11 @@ EXECUTION CONTROL
                                                      (a stop before the request is missed:
                                                      use after= or op=)
   GET  /api/registers        PUT /api/registers {"ax":"1234","flags":"0202"}
-  GET  /api/memory?addr=DS:SI&len=256[&format=hex|base64|raw]
+  GET  /api/memory?addr=DS:SI&len=256[&format=hex|json|base64|raw]
+                             hex (the default): a text dump; raw: the bytes;
+                             json: {"addr","len","hex":"41 1F"}; base64:
+                             {"addr","len","base64"}. The JSON formats have
+                             "state_seq"; X-Debug-State-Seq is on all four
   PUT  /api/memory {"addr":"B800:0000","hex":"41 1F"}  (or "base64"); replies with
                              the bytes replaced ("old") and read back ("new");
                              "expect":"20 07" writes only if those bytes are there (409)
