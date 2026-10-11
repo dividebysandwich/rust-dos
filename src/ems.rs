@@ -8,7 +8,10 @@
 //! another over it copies it back: instruction fetch and DMA read RAM
 //! directly, so the frame has to hold the page itself. The one thing this
 //! doesn't do as the hardware does is alias: a logical page mapped into two
-//! physical pages at once is two copies, and the one mapped last wins.
+//! physical pages at once is two copies. What the program writes through
+//! one shows in the other only once one of them is mapped over, when the
+//! bytes written through it go back to the logical page and into the other
+//! copies (see `Ems::write_back`).
 //!
 //! VCPI isn't there (AX=DE00h says so), as the CPU runs DOS in real mode,
 //! not virtual-8086 mode: DOS extenders then use XMS or raw mode.
@@ -131,11 +134,31 @@ impl Ems {
     }
 
     /// Copy what physical page `slot` shows back to its logical page.
+    ///
+    /// A logical page shown in other physical pages too has a copy in
+    /// each, all made from the logical page, so where a copy differs
+    /// from it the program wrote through that physical page. Only those
+    /// bytes go back, and into the other copies as well: a copy that was
+    /// only read must not put back the contents the page had when it was
+    /// mapped over what the program wrote through another.
     fn write_back(&self, bus: &mut Bus, slot: usize) {
-        if let Some((handle, page)) = self.mapped[slot]
-            && let Some(&addr) = self.handle(handle).and_then(|h| h.pages.get(page as usize))
-        {
-            bus.copy_ram(FRAME + slot * PAGE, addr as usize, PAGE);
+        let Some(target) = self.mapped[slot] else { return };
+        let Some(&home) = self.handle(target.0).and_then(|h| h.pages.get(target.1 as usize)) else { return };
+        let (from, home) = (FRAME + slot * PAGE, home as usize);
+        let aliases: Vec<usize> =
+            (0..FRAME_PAGES).filter(|&o| o != slot && self.mapped[o] == Some(target)).map(|o| FRAME + o * PAGE).collect();
+        if aliases.is_empty() {
+            bus.copy_ram(from, home, PAGE);
+            return;
+        }
+        for i in 0..PAGE {
+            let value = bus.read_8(from + i);
+            if value != bus.read_8(home + i) {
+                bus.write_8(home + i, value);
+                for &alias in &aliases {
+                    bus.write_8(alias + i, value);
+                }
+            }
         }
     }
 
