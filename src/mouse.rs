@@ -82,7 +82,7 @@ pub const BUTTON_RIGHT: u8 = 0x02;
 pub const BUTTON_MIDDLE: u8 = 0x04;
 
 pub struct MouseState {
-    /// True once software resets or enables the driver (INT 33h AX=0000h/0020h).
+    /// True once software resets or enables the driver (INT 33h AX=0000h/0020h/0021h).
     pub installed: bool,
     /// Balanced show/hide counter. Cursor is drawn when this is 0.
     pub hide_counter: i32,
@@ -230,7 +230,7 @@ impl MouseState {
         self.pending_callback_events = 0;
     }
 
-    /// Reset state to "just installed" defaults and return number of buttons.
+    /// Reset state to "just installed" defaults (INT 33h AX=0000h/0021h).
     pub fn reset(&mut self, screen_w: i32, screen_h: i32) {
         self.installed = true;
         self.hide_counter = 1;

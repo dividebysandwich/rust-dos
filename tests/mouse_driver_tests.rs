@@ -52,6 +52,9 @@ fn software_reset_resets_the_driver_as_a_reset_does() {
     let mut cpu = Cpu::new(PathBuf::from("."));
     call(&mut cpu, 0x0000);
     call(&mut cpu, 0x0001);
+    cpu.set_cx(0);
+    cpu.set_dx(100);
+    call(&mut cpu, 0x0007);
     cpu.set_cx(0x0001);
     cpu.set_es(0x1234);
     cpu.set_dx(0x5678);
@@ -70,7 +73,9 @@ fn software_reset_resets_the_driver_as_a_reset_does() {
     assert_eq!((m.mickey_x, m.mickey_y), (0, 0));
     let mut fresh = Cpu::new(PathBuf::from("."));
     call(&mut fresh, 0x0000);
-    assert_eq!((m.x, m.y), (fresh.bus.mouse.x, fresh.bus.mouse.y), "the cursor is where a reset puts it");
+    let f = &fresh.bus.mouse;
+    assert_eq!((m.x, m.y), (f.x, f.y), "the cursor is where a reset puts it");
+    assert_eq!((m.min_x, m.max_x, m.min_y, m.max_y), (f.min_x, f.max_x, f.min_y, f.max_y), "the ranges cover the screen");
 }
 
 #[test]
