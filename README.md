@@ -372,7 +372,8 @@ debugging. It has no authentication, so keep it on localhost. With port 0
 Open the address in a browser for the debugger: the screen with remote
 input, pause, step and run to an address, the disassembly with breakpoints,
 the registers, memory, stack and watchpoints, and the log, the instruction
-trace and the rest of the machine's state. For scripts, `curl
+trace, a heatmap of the memory the machine writes (`/ui#heat`, where code
+shows too) and the rest of the machine's state. For scripts, `curl
 localhost:8086/` lists every endpoint:
 
 ```sh
