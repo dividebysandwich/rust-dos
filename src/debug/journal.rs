@@ -40,6 +40,7 @@ pub const FEATURES: &[&str] = &[
     "run",
     "program_stops",
     "build",
+    "memory_json",
 ];
 
 macro_rules! kinds {
