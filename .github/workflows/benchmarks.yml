@@ -13,10 +13,6 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 
-concurrency:
-  group: benchmarks-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
 jobs:
   bench:
     runs-on: ubuntu-latest
@@ -26,6 +22,11 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       (contains(github.event.pull_request.labels.*.name, 'performance') &&
        (github.event.action != 'labeled' || github.event.label.name == 'performance'))
+    # On the job, so a run the "if" skips (another label added to the PR)
+    # doesn't cancel a benchmark run in progress.
+    concurrency:
+      group: benchmarks-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
     timeout-minutes: 60
     steps:
       # On a PR this is the merge of the PR into its base, whose first
@@ -46,17 +47,25 @@ jobs:
       - name: Clear old results
         run: rm -rf target/criterion
 
+      # A base benchmark that fails (say, one the PR fixes) leaves the
+      # benchmarks after it without a baseline; the PR is still measured.
+      # The base run's "new" results are removed afterwards, so a benchmark
+      # the PR deletes doesn't show up in the summary with the base's time.
       - name: Benchmark the base commit
         if: github.event_name == 'pull_request'
         run: |
           head=$(git rev-parse HEAD)
           git checkout --quiet HEAD^1
           if grep -q '^\[\[bench\]\]' Cargo.toml; then
-            cargo bench --locked -- --save-baseline base
+            cargo bench --locked -- --save-baseline base ||
+              echo "::warning::The base commit's benchmarks failed; those after the failure have no baseline."
           else
             echo "The base commit has no benchmarks, so there is nothing to compare against."
           fi
           git checkout --quiet "$head"
+          if [ -d target/criterion ]; then
+            find target/criterion -type d -name new -prune -exec rm -rf {} +
+          fi
 
       # --baseline-lenient: a benchmark the base doesn't have runs without
       # a comparison.

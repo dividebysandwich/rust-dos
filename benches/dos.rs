@@ -50,7 +50,11 @@ fn find_pattern(c: &mut Criterion) {
     let root = game_folder("find_pattern", 218);
     let mut cpu = machine(&root);
     set_dta(&mut cpu);
-    assert!(find_all(&mut cpu, r"C:\RGN*.GFF", 0) > 0);
+    let expected = game_names(218)
+        .iter()
+        .filter(|name| name.starts_with("RGN") && name.ends_with(".GFF"))
+        .count();
+    assert_eq!(find_all(&mut cpu, r"C:\RGN*.GFF", 0), expected);
     c.bench_function("dos/find_pattern/218", |b| {
         b.iter(|| black_box(find_all(&mut cpu, r"C:\RGN*.GFF", 0)))
     });
