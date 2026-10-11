@@ -139,7 +139,7 @@ pub fn read_volume(image: &CdImage) -> Result<IsoVolume, String> {
         for (name, record) in dos_entries(image, &dir) {
             let child = if path.is_empty() { name } else { format!("{}\\{}", path, name) };
             if record.is_dir {
-                files.insert_dir(&child);
+                files.insert_dir_dated(&child, record.extent.time, record.extent.date);
                 if depth < MAX_DEPTH {
                     pending.push((child, record.extent, depth + 1));
                 }

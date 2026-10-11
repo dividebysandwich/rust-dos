@@ -3119,7 +3119,11 @@ impl DiskController {
                 }
                 let (dos_time, dos_date) = match node {
                     Some(Node::Extent(extent)) => (extent.time, extent.date),
-                    _ => (MEMORY_TIME, MEMORY_DATE),
+                    Some(Node::Bytes(_)) => (MEMORY_TIME, MEMORY_DATE),
+                    None => {
+                        let path = if dir.is_empty() { name.to_string() } else { format!("{}\\{}", dir, name) };
+                        files.dir_time(&path).unwrap_or((MEMORY_TIME, MEMORY_DATE))
+                    }
                 };
                 valid_entries.push(DosDirEntry {
                     filename: name.to_string(),

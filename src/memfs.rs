@@ -34,6 +34,9 @@ pub struct MemFs {
     files: BTreeMap<String, Node>,
     /// Every directory but the root.
     dirs: BTreeSet<String>,
+    /// The DOS time and date of the directories that have one (a CD's
+    /// directory records); the others show the drive's default.
+    dir_times: BTreeMap<String, (u16, u16)>,
 }
 
 impl MemFs {
@@ -60,6 +63,20 @@ impl MemFs {
         if !path.is_empty() {
             self.dirs.insert(path);
         }
+    }
+
+    /// Add a directory with the DOS time and date it shows in listings.
+    pub fn insert_dir_dated(&mut self, path: &str, time: u16, date: u16) {
+        self.insert_dir(path);
+        let path = path.trim_start_matches('\\').to_ascii_uppercase();
+        if !path.is_empty() {
+            self.dir_times.insert(path, (time, date));
+        }
+    }
+
+    /// The DOS time and date `insert_dir_dated` gave the directory at `path`.
+    pub fn dir_time(&self, path: &str) -> Option<(u16, u16)> {
+        self.dir_times.get(path).copied()
     }
 
     fn insert_parents(&mut self, path: &str) {
