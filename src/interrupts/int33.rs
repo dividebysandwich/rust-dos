@@ -92,6 +92,7 @@ pub fn handle(cpu: &mut Cpu) {
             let (min, max) = if lo <= hi { (lo, hi) } else { (hi, lo) };
             cpu.bus.mouse.min_x = min;
             cpu.bus.mouse.max_x = max;
+            cpu.bus.mouse.range_set.x = true;
             // Also clamp current position.
             let cx = cpu.bus.mouse.x;
             let cy = cpu.bus.mouse.y;
@@ -105,6 +106,7 @@ pub fn handle(cpu: &mut Cpu) {
             let (min, max) = if lo <= hi { (lo, hi) } else { (hi, lo) };
             cpu.bus.mouse.min_y = min;
             cpu.bus.mouse.max_y = max;
+            cpu.bus.mouse.range_set.y = true;
             let cx = cpu.bus.mouse.x;
             let cy = cpu.bus.mouse.y;
             cpu.bus.mouse.warp(cx, cy);

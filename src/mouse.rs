@@ -97,6 +97,9 @@ pub struct MouseState {
     pub max_x: i32,
     pub min_y: i32,
     pub max_y: i32,
+    /// Which ranges the program set (AX=0007h, AX=0008h) since the last
+    /// reset or mode change (see `video_mode_set`).
+    pub range_set: RangeSet,
 
     /// Press / release counters read by AH=05/06. Indexed by button number.
     pub press_count: [u16; 3],
@@ -161,6 +164,7 @@ impl MouseState {
             max_x: 639,
             min_y: 0,
             max_y: 199,
+            range_set: RangeSet::default(),
             press_count: [0; 3],
             press_x: [0; 3],
             press_y: [0; 3],
@@ -236,6 +240,7 @@ impl MouseState {
         self.max_x = screen_w - 1;
         self.min_y = 0;
         self.max_y = screen_h - 1;
+        self.range_set = RangeSet::default();
         self.press_count = [0; 3];
         self.press_x = [0; 3];
         self.press_y = [0; 3];
@@ -292,7 +297,16 @@ impl MouseState {
     /// stays where it is, inside the new range, as in DOSBox (CuteMouse
     /// centres it).
     ///
-    /// With `same_mode` (the mode number, VBE mode and screen are those
+    /// A VESA mode change keeps each range the program set since the last
+    /// reset or mode change (`range_set`), and gives the other the new
+    /// screen: Down by the Laituri sets x 0-1280 and y 0-960 in text mode,
+    /// then VESA mode 101h, sets no range after it and draws its cursor at
+    /// half the driver's position. DOSBox keeps the range at every VESA
+    /// mode set; a range nobody set is the default for the old screen,
+    /// which the new mode's size replaces here. Each axis counts on its
+    /// own: an axis the program didn't set holds only that old default.
+    ///
+    /// With `ModeSet::Same` (the mode number, VBE mode and screen are those
     /// from before the call) the program's range stays: Dark Sun 2 sets
     /// x 0-319 in mode 13h, sets mode 13h again and draws its cursor at
     /// the driver's x, which a reset to 0-639 would take off the screen.
@@ -306,16 +320,23 @@ impl MouseState {
     /// The host pointer's last position was in the old screen's units: the
     /// next one starts the PS/2 and serial motion afresh rather than
     /// counting a change of scale as a move.
-    pub fn video_mode_set(&mut self, (w, h): (i32, i32), same_mode: bool) {
+    pub fn video_mode_set(&mut self, (w, h): (i32, i32), change: ModeSet) {
         self.hide_counter = 1;
         self.ps2.last_position = None;
-        if same_mode {
-            return;
+        let keep = match change {
+            ModeSet::Same => return,
+            ModeSet::Vesa => self.range_set,
+            ModeSet::Standard => RangeSet::default(),
+        };
+        if !keep.x {
+            self.min_x = 0;
+            self.max_x = w - 1;
         }
-        self.min_x = 0;
-        self.max_x = w - 1;
-        self.min_y = 0;
-        self.max_y = h - 1;
+        if !keep.y {
+            self.min_y = 0;
+            self.max_y = h - 1;
+        }
+        self.range_set = RangeSet::default();
         let (x, y) = (self.x, self.y);
         self.warp(x, y);
     }
@@ -736,7 +757,7 @@ crate::state_fields!(MouseState {
     press_count, press_x, press_y, release_count, release_x, release_y,
     mickey_x, mickey_y, mickey_accum_x, mickey_accum_y,
     callback_mask, callback_cs, callback_ip, pending_callback_events,
-    unused, rest_x, rest_y, ps2,
+    unused, rest_x, rest_y, ps2, range_set,
 } skip { serial_dx, serial_dy, last_call_ns, last_relative_ns });
 
 /// Two i16 placeholders in a saved mouse: saved as zeros, read and
@@ -752,12 +773,44 @@ impl crate::savestate::State for UnusedMickeys {
     }
 }
 
+/// Whether the program set the horizontal (AX=0007h) and the vertical
+/// (AX=0008h) range since the driver's last reset or mode change.
+///
+/// A state saves none of it, so states keep their format. Loading one
+/// marks both as set: a VESA mode change after it keeps the range, as
+/// DOSBox does, and the driver's reset (AX=0000h) or a mode change
+/// clears them again.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RangeSet {
+    pub x: bool,
+    pub y: bool,
+}
+
+impl crate::savestate::State for RangeSet {
+    fn save(&self, _: &mut crate::savestate::Writer) {}
+    fn load(&mut self, _: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
+        *self = RangeSet { x: true, y: true };
+        Ok(())
+    }
+}
+
+/// What a mode set (`MouseState::video_mode_set`) did to the screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModeSet {
+    /// The mode number, VBE mode and screen are those from before.
+    Same,
+    /// Another mode, through VBE function 02h (INT 10h AX=4F02h).
+    Vesa,
+    /// Another mode through any other call: AH=00h, a text font load,
+    /// a Tseng HiColor mode.
+    Standard,
+}
+
 /// Whether `at` is no longer than `window` nanoseconds before `now`, or
 /// after it (a state loaded from earlier).
 fn recent(at: Option<u64>, now: u64, window: u64) -> bool {
     at.is_some_and(|at| now.saturating_sub(at) < window)
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -802,7 +855,7 @@ mod tests {
         let mut mouse = MouseState::new();
         mouse.reset(640, 480);
         mouse.set_position(320, 470);
-        mouse.video_mode_set((640, 200), false);
+        mouse.video_mode_set((640, 200), ModeSet::Standard);
         mouse.set_position(320, 196);
         assert_eq!((mouse.ps2.dx, mouse.ps2.dy), (0, 0));
         assert_eq!((mouse.serial_dx, mouse.serial_dy), (0, 0));
@@ -867,5 +920,9 @@ mod tests {
         loaded.load(&mut r).unwrap();
         assert!(r.is_empty());
         assert_eq!(layout(&loaded, [0, 0]), layout(&mouse, [0, 0]));
+        // Which ranges the program set isn't saved; a loaded state counts
+        // both as set (see `RangeSet`).
+        assert_eq!(mouse.range_set, RangeSet::default());
+        assert_eq!(loaded.range_set, RangeSet { x: true, y: true });
     }
 }

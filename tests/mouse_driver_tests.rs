@@ -398,7 +398,9 @@ fn the_no_clear_bit_and_vbe_flags_leave_the_mode_the_same() {
     assert_eq!(cpu.bus.mouse.max_x, 319);
 
     // VBE: bit 15 (keep memory) and bit 14 (linear frame buffer) don't
-    // change the mode either. Another VBE mode resets the range.
+    // change the mode either. Another VBE mode keeps the range the
+    // program set (y) and gives the other (x) the new screen.
+    call(&mut cpu, 0x0000);
     int10(&mut cpu, 0x4F02, 0x0101);
     range(&mut cpu, 0x0008, 0, 399);
     int10(&mut cpu, 0x4F02, 0x8101);
@@ -410,7 +412,51 @@ fn the_no_clear_bit_and_vbe_flags_leave_the_mode_the_same() {
     int10(&mut cpu, 0x4F02, 0x0103);
     assert_eq!(cpu.ax(), 0x004F);
     let m = &cpu.bus.mouse;
+    assert_eq!((m.min_x, m.max_x, m.min_y, m.max_y), (0, 799, 0, 399));
+}
+
+#[test]
+fn a_vesa_mode_change_keeps_the_range_the_program_set_before_it() {
+    // Down by the Laituri: in text mode 3 it resets the driver, sets
+    // x 0-1280 and y 0-960, then VESA mode 101h and no range after it,
+    // and draws its cursor at half the driver's position.
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    int10(&mut cpu, 0x0003, 0);
+    call(&mut cpu, 0x0000);
+    range(&mut cpu, 0x0007, 0, 1280);
+    range(&mut cpu, 0x0008, 0, 960);
+    int10(&mut cpu, 0x4F02, 0x0101);
+    assert_eq!(cpu.ax(), 0x004F);
+    let m = &cpu.bus.mouse;
+    assert_eq!((m.min_x, m.max_x, m.min_y, m.max_y), (0, 1280, 0, 960));
+    assert_eq!(m.virtual_screen(&cpu.bus), (1281, 961), "the host pointer spans the whole range");
+    cpu.bus.mouse.set_position(10_000, 10_000);
+    call(&mut cpu, 0x0003);
+    assert_eq!((cpu.cx(), cpu.dx()), (1280, 960), "the bottom-right corner of its 640x480 picture");
+
+    // That mode set used the program's range up: the next VESA mode
+    // change, with no range set in between, takes the new mode's size.
+    int10(&mut cpu, 0x4F02, 0x0103);
+    let m = &cpu.bus.mouse;
     assert_eq!((m.min_x, m.max_x, m.min_y, m.max_y), (0, 799, 0, 599));
+}
+
+#[test]
+fn a_vesa_mode_change_with_no_range_set_gives_the_modes_size() {
+    // The reset's range is the old screen's (text mode: 640x200), which
+    // the program never asked for.
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    int10(&mut cpu, 0x0003, 0);
+    call(&mut cpu, 0x0000);
+    int10(&mut cpu, 0x4F02, 0x0101);
+    let m = &cpu.bus.mouse;
+    assert_eq!((m.min_x, m.max_x, m.min_y, m.max_y), (0, 639, 0, 479));
+
+    // A range set before a standard mode change goes with it, as
+    // Conqueror A.D. 1086's battles need.
+    range(&mut cpu, 0x0008, 0, 479);
+    int10(&mut cpu, 0x0013, 0);
+    assert_eq!(cpu.bus.mouse.max_y, 199);
 }
 
 #[test]

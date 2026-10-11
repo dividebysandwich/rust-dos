@@ -264,7 +264,7 @@ fn tseng_hicolor(cpu: &mut Cpu) {
             let before = mouse_screen(cpu);
             if set_hicolor_mode(cpu, bl, 15) {
                 cpu.set_ax(0x0010);
-                mode_set_for_mouse(cpu, before);
+                mode_set_for_mouse(cpu, before, false);
             }
         }
         0xF1 => {
@@ -406,10 +406,16 @@ fn mouse_screen(cpu: &mut Cpu) -> MouseScreen {
 /// Tell the mouse driver a program set a video mode, as a driver hooking
 /// INT 10h sees it (see `MouseState::video_mode_set`). `before` is the
 /// screen before the call: when the mode and the screen are the same, the
-/// program's range stays.
-fn mode_set_for_mouse(cpu: &mut Cpu, before: MouseScreen) {
+/// program's range stays. `vesa`: the call was VBE function 02h.
+fn mode_set_for_mouse(cpu: &mut Cpu, before: MouseScreen, vesa: bool) {
+    use crate::mouse::ModeSet;
     let after = mouse_screen(cpu);
-    cpu.bus.mouse.video_mode_set(after.2, after == before);
+    let change = match (after == before, vesa) {
+        (true, _) => ModeSet::Same,
+        (false, true) => ModeSet::Vesa,
+        (false, false) => ModeSet::Standard,
+    };
+    cpu.bus.mouse.video_mode_set(after.2, change);
 }
 
 /// INT 10h AH=00h: set the standard video mode AL (bit 7: keep the
@@ -682,7 +688,7 @@ pub fn handle(cpu: &mut Cpu) {
         0x00 => {
             let before = mouse_screen(cpu);
             set_mode(cpu, cpu.get_al());
-            mode_set_for_mouse(cpu, before);
+            mode_set_for_mouse(cpu, before, false);
         }
 
         // AH = 01h: Set Cursor Type
@@ -1280,7 +1286,7 @@ pub fn handle(cpu: &mut Cpu) {
                 }
             }
             if let Some(before) = before {
-                mode_set_for_mouse(cpu, before);
+                mode_set_for_mouse(cpu, before, false);
             }
         }
 
@@ -1535,7 +1541,7 @@ pub fn handle(cpu: &mut Cpu) {
             if let Some(before) = before
                 && cpu.ax() == 0x004F
             {
-                mode_set_for_mouse(cpu, before);
+                mode_set_for_mouse(cpu, before, true);
             }
         }
         0x15 if cpu.bus.verite() => crate::bus::verite_bios(cpu),
