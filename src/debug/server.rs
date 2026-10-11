@@ -1836,6 +1836,7 @@ STATUS / SCREEN
                                            blink (bit 7 blinks, else bright background),
                                            mono (MDA/Hercules attributes), and the cursor
                                            of the active display page
+                                           (features has "screen_attrs")
   GET  /api/log[?since_ms=&limit=&grep=&format=text]   emulator log lines, each with its
                                            number n, the journal's last entry "at", and the
                                            request that wrote it ("cause")

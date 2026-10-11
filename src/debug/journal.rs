@@ -41,6 +41,7 @@ pub const FEATURES: &[&str] = &[
     "program_stops",
     "build",
     "memory_json",
+    "screen_attrs",
 ];
 
 macro_rules! kinds {
