@@ -1068,8 +1068,39 @@ impl Bus {
         self.load_bytes(addr, data);
     }
 
+    /// Whether the `len` bytes at `addr` are plain RAM (`is_plain_ram`),
+    /// for a `len` a program chose: one longer than RAM is not, so that
+    /// `addr + len` can't overflow a 32-bit `usize`.
+    pub(crate) fn is_plain_run(&self, addr: usize, len: usize) -> bool {
+        len <= self.ram.len() && self.is_plain_ram(addr, len)
+    }
+
+    /// Append the `len` bytes at `addr` to `out` as programs read them:
+    /// plain RAM as one slice, anything else (video memory, the ROMs,
+    /// upper memory) through `read_8`.
+    pub(crate) fn read_run(&self, addr: usize, len: usize, out: &mut Vec<u8>) {
+        if self.is_plain_run(addr, len) {
+            out.extend_from_slice(&self.ram[addr..addr + len]);
+        } else {
+            out.extend((0..len).map(|i| self.read_8(addr.wrapping_add(i))));
+        }
+    }
+
+    /// Write `data` at `addr` as programs write it, as `read_run` reads
+    /// it: plain RAM with one copy, anything else through `write_8`.
+    pub(crate) fn write_run(&mut self, addr: usize, data: &[u8]) {
+        if self.is_plain_run(addr, data.len()) {
+            self.load_bytes(addr, data);
+        } else {
+            for (i, &b) in data.iter().enumerate() {
+                self.write_8(addr.wrapping_add(i), b);
+            }
+        }
+    }
+
     /// Copy `len` bytes of RAM from `from` to `to`, bypassing the VGA
-    /// mapping, as the expanded memory manager maps its pages.
+    /// mapping, as the expanded memory manager maps its pages and the XMS
+    /// driver moves blocks. Overlapping ranges copy the source as it was.
     pub fn copy_ram(&mut self, from: usize, to: usize, len: usize) {
         let len = len.min(self.ram.len().saturating_sub(from.max(to)));
         if len == 0 {

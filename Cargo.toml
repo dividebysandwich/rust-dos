@@ -225,3 +225,7 @@ harness = false
 [[bench]]
 name = "video"
 harness = false
+
+[[bench]]
+name = "memory"
+harness = false

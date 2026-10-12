@@ -62,6 +62,7 @@ and confirm a large one on a quiet machine before relying on it.
 | `benches/dos.rs` | The built-in DOS's file calls on a host folder: DIR's listing, FindFirst/FindNext over a whole folder, a pattern search, and opening a file three folders deep |
 | `benches/audio.rs` | One video frame of sound: the AWE32 playing 32 voices with the filter open, fixed, swept by the modulation envelope and wobbled by LFO1 |
 | `benches/video.rs` | The VGA renderer: a sprite moving over modes 0Dh and 12h, a full-screen scroll in mode 12h, and a DOS program animating a box in mode 12h run frame by frame through the emulator |
+| `benches/memory.rs` | XMS block moves (function 0Bh) between extended and conventional memory and between blocks, and an EMS move (function 57h) into conventional memory |
 
 ## Adding benchmarks
 

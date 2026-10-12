@@ -510,10 +510,7 @@ fn resize(cpu: &mut Cpu, handle: u16, size_kb: u32) -> Result<(), u8> {
     };
     if base != block.base {
         let len = (block.size_kb.min(size_kb) * KB) as usize;
-        let data: Vec<u8> = (0..len)
-            .map(|i| cpu.bus.read_8(block.base as usize + i))
-            .collect();
-        cpu.bus.load_bytes(base as usize, &data);
+        cpu.bus.copy_ram(block.base as usize, base as usize, len);
     }
     cpu.bus.xms.blocks[handle as usize - 1] = Some(Block {
         base,
@@ -556,9 +553,17 @@ fn move_block(cpu: &mut Cpu) {
     let dst = resolve(dst_handle, dst_offset, ERR_INVALID_DEST_HANDLE, ERR_INVALID_DEST_OFFSET);
     match (src, dst) {
         (Ok(src), Ok(dst)) => {
-            let data: Vec<u8> = (0..length as usize).map(|i| cpu.bus.read_8(src + i)).collect();
-            for (i, &b) in data.iter().enumerate() {
-                cpu.bus.write_8(dst + i, b);
+            let len = length as usize;
+            if cpu.bus.is_plain_run(src, len) && cpu.bus.is_plain_run(dst, len) {
+                // Both in RAM: one copy, which reads the source whole
+                // before writing.
+                cpu.bus.copy_ram(src, dst, len);
+            } else {
+                // Video memory or upper memory at one end: through the
+                // bus, so it reads and takes the bytes as programs see it.
+                let mut data = Vec::with_capacity(len);
+                cpu.bus.read_run(src, len, &mut data);
+                cpu.bus.write_run(dst, &data);
             }
             ok(cpu);
         }
