@@ -73,7 +73,8 @@ crate::state_fields!(Cpu {
     // The session's, and set only from a reset to the shell handling it.
     startup, reboot,
     // The host's, as the history.
-    edit_clipboard, mode_switches, exceptions, exception_log,
+    edit_clipboard, mode_switches, exceptions, exception_log, exception_places,
+    exception_places_per_vector,
     // Only set while a command runs, never between the batches a state
     // is saved in.
     secondary, stdout_capture, stdin_redirect,

@@ -6,6 +6,7 @@
 //! fault) and delivers the exception, so the handler sees the faulting
 //! instruction's address, as on a 286 and later.
 
+use std::collections::hash_map::Entry;
 use std::num::NonZeroU8;
 use super::seg::{
     Descriptor, INT_GATE16, INT_GATE32, TASK_GATE, TRAP_GATE16, TRAP_GATE32, is_null, rpl, sel_error,
@@ -122,8 +123,14 @@ pub struct ExceptionRecord {
 
 /// Exceptions kept in `Cpu::exception_log`.
 pub const EXCEPTION_LOG_LEN: usize = 64;
-/// Exceptions written to the emulator log; later ones are only counted.
-const EXCEPTIONS_LOGGED: u64 = 200;
+/// Places (CS:EIP) for each vector whose exceptions are written to the
+/// emulator log, and the lines each place gets; later ones are only
+/// counted. Systems raise many exceptions on purpose (Windows 9x: ARPL as
+/// a breakpoint, the ports and IOPL-sensitive instructions it emulates in
+/// virtual-8086 mode, pages it fills on demand from all over its code),
+/// and these limits keep them from crowding out the rest.
+const PLACES_LOGGED: u16 = 200;
+const LINES_PER_PLACE: u8 = 3;
 
 /// Mnemonic of an exception vector, as in #GP.
 pub fn exception_name(vector: u8) -> &'static str {
@@ -483,22 +490,42 @@ impl Cpu {
             self.exception_log.pop_front();
         }
         self.exception_log.push_back(record);
-        if self.exceptions <= EXCEPTIONS_LOGGED {
-            let error = match (fault.error(), self.pe()) {
-                (Some(e), true) => format!("({:04X})", e),
-                _ => String::new(),
-            };
-            let cr2 = if fault.vector == 14 { format!(" CR2={:08X}", self.cr2) } else { String::new() };
-            self.bus.log_string(&format!(
-                "[CPU] {}{} at {:04X}:{:08X}{}{}",
-                exception_name(fault.vector),
-                error,
-                record.cs,
-                record.eip,
-                cr2,
-                if self.exceptions == EXCEPTIONS_LOGGED { " (further exceptions not logged)" } else { "" }
-            ));
+        let place = (fault.vector, record.cs, record.eip);
+        let places = &mut self.exception_places_per_vector[fault.vector as usize];
+        let (lines, last_place) = match self.exception_places.entry(place) {
+            Entry::Occupied(entry) => (entry.into_mut(), false),
+            Entry::Vacant(entry) => {
+                if *places == PLACES_LOGGED {
+                    return;
+                }
+                *places += 1;
+                (entry.insert(0), *places == PLACES_LOGGED)
+            }
+        };
+        if *lines == LINES_PER_PLACE {
+            return;
         }
+        *lines += 1;
+        let last_here = *lines == LINES_PER_PLACE;
+        let error = match (fault.error(), self.pe()) {
+            (Some(e), true) => format!("({:04X})", e),
+            _ => String::new(),
+        };
+        let cr2 = if fault.vector == 14 { format!(" CR2={:08X}", self.cr2) } else { String::new() };
+        let v86 = if self.v86() { " in virtual-8086 mode" } else { "" };
+        let here = if last_here { " (later ones here not logged)" } else { "" };
+        let places = if last_place { " (last place logged for this exception)" } else { "" };
+        self.bus.log_string(&format!(
+            "[CPU] {}{} at {:04X}:{:08X}{}{}{}{}",
+            exception_name(fault.vector),
+            error,
+            record.cs,
+            record.eip,
+            cr2,
+            v86,
+            here,
+            places
+        ));
     }
 
     /// The error code an exception pushes: in protected mode only.

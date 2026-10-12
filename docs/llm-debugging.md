@@ -1001,8 +1001,13 @@ access rights.
 - **Exceptions:** `GET /api/exceptions` lists the last 64 (vector, error
   code, `CS:EIP`, CR2 for page faults). Page faults (`#PF`, vector 0E) are
   normal under DOS/4GW, whose virtual memory manager loads pages on demand.
-  The log also has a line for each of the first 200 exceptions
-  (`?grep=%23GP`; `#` must be written `%23` in a URL).
+  The log also has lines for exceptions (`?grep=%23GP`; `#` must be
+  written `%23` in a URL): the first 3 at each place (`CS:EIP`), at the
+  first 200 places for each exception. Systems raise many exceptions on
+  purpose from a few places, such as Windows 9x's ARPL breakpoints, the
+  ports and IOPL-sensitive instructions it emulates in virtual-8086 mode
+  and the pages it fills on demand; the limit per place keeps them from
+  hiding the rest.
 - **Break on an exception:** `POST /api/breakpoints {"exception":"0D"}`
   (or `"any"`) pauses at the first instruction of the handler after the CPU
   raises it; the pause reply includes the exception. `{"mode_switch":true}`

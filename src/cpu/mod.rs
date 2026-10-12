@@ -419,6 +419,10 @@ pub struct Cpu {
     /// Exceptions raised since start, and the most recent ones.
     pub exceptions: u64,
     pub exception_log: VecDeque<fault::ExceptionRecord>,
+    /// How many lines the log has for each place exceptions were raised
+    /// at (vector, CS, EIP), and how many places each vector has.
+    exception_places: std::collections::HashMap<(u8, u16, u32), u8>,
+    exception_places_per_vector: [u16; 32],
     /// Set by BIOS services that wait for input (INT 16h with an empty
     /// keyboard buffer). The main loop then skips ahead to the next timer
     /// event instead of spinning through the retry loop, like it does for HLT.
@@ -649,6 +653,8 @@ impl Cpu {
             mode_switches: 0,
             exceptions: 0,
             exception_log: VecDeque::with_capacity(fault::EXCEPTION_LOG_LEN),
+            exception_places: std::collections::HashMap::new(),
+            exception_places_per_vector: [0; 32],
             idle: false,
             hle_retry: false,
             core: CoreMode::initial(),
