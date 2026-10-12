@@ -221,3 +221,7 @@ harness = false
 [[bench]]
 name = "audio"
 harness = false
+
+[[bench]]
+name = "video"
+harness = false
