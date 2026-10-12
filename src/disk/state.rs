@@ -108,7 +108,7 @@ impl DiskController {
     /// Mount the drives as the state has them, where they differ, and open
     /// its files again. Returns the files that couldn't be opened.
     pub(crate) fn load_state(&mut self, r: &mut Reader) -> Result<Vec<String>> {
-        self.host_dirs.changed();
+        self.host_dirs.forget();
         let mut current = 0u8;
         current.load(r)?;
         for drive in 0..LASTDRIVE {

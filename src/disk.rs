@@ -299,6 +299,13 @@ impl HostDirCache {
         self.changes.set(self.changes.get().wrapping_add(1));
     }
 
+    /// Host folders changed outside the guest's file calls (a state was
+    /// loaded, a shared disk copied back): nothing kept is used again.
+    fn forget(&self) {
+        self.changed();
+        self.searches.borrow_mut().clear();
+    }
+
     /// The guest created, wrote, resized, deleted or renamed the host file
     /// or folder `path`, or changed its attributes: the searches of its
     /// folder, and of `path` and the folders under it, list them again.
@@ -1769,6 +1776,7 @@ impl DiskController {
             lines.extend(report.conflicts.iter().map(|c| format!("Drive {}: {} changed on both sides", drive_letter(d), c)));
             lines.extend(report.errors.iter().map(|e| format!("Drive {}: {}", drive_letter(d), e)));
         }
+        self.host_dirs.forget();
         lines
     }
 
@@ -3340,7 +3348,8 @@ impl DiskController {
         // back as "RGN?????.GFF"), so both are keyed in that form.
         let pattern = crate::interrupts::utils::pattern_to_fcb(pattern);
         let root = drive.host_root() == Some(dir.as_path());
-        Some(SearchKey { dir, pattern, attr: search_attr, writable: drive.writable(), root })
+        // FindNext gets the attributes back from the DTA's one byte.
+        Some(SearchKey { dir, pattern, attr: search_attr & 0xFF, writable: drive.writable(), root })
     }
 
     /// The files a path names, with wildcards in its last part or not,
