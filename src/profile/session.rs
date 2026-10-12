@@ -151,6 +151,11 @@ impl Session {
         self.samples.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
+    /// How many samples there are so far, without copying them.
+    pub fn total(&self) -> u64 {
+        self.samples.lock().unwrap_or_else(|e| e.into_inner()).total
+    }
+
     /// The counts: the bus's while it runs, the ones kept after.
     pub fn counters<'a>(&'a self, cpu: &'a Cpu) -> Option<&'a Counters> {
         self.counters.as_deref().or(cpu.bus.profile.as_deref())

@@ -126,11 +126,14 @@ impl Jitter {
     }
 }
 
+/// The longest sleep between checks of `stop`: what `Sampler::stop` waits
+/// at most at rates under about 150 Hz. Faster rates sleep in one piece.
+const STOP_SLICE: Duration = Duration::from_millis(10);
+
 /// The sampler thread, while it runs.
 pub struct Sampler {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
-    samples: Arc<Mutex<Samples>>,
 }
 
 impl Sampler {
@@ -140,7 +143,7 @@ impl Sampler {
         let stop = Arc::new(AtomicBool::new(false));
         let interval = Duration::from_secs_f64(1.0 / hz.max(1) as f64);
         let thread = {
-            let (stop, samples) = (stop.clone(), samples.clone());
+            let stop = stop.clone();
             std::thread::Builder::new().name("rust-dos profiler".into()).spawn(move || {
                 raise_priority();
                 let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64);
@@ -153,19 +156,28 @@ impl Sampler {
                         Timer::Sleep => {
                             let ask = wait.saturating_sub(oversleep);
                             let asked_at = Instant::now();
-                            std::thread::sleep(ask);
+                            // In slices, so that a stop at a low rate
+                            // doesn't wait out a long interval.
+                            let end = asked_at + ask;
+                            loop {
+                                let left = end.saturating_duration_since(Instant::now());
+                                if left.is_zero() || stop.load(Ordering::Relaxed) {
+                                    break;
+                                }
+                                std::thread::sleep(left.min(STOP_SLICE));
+                            }
                             let over = asked_at.elapsed().saturating_sub(ask);
                             oversleep = (oversleep * 7 + over) / 8;
                         }
                         Timer::Spin => {
                             let end = Instant::now() + wait;
-                            while Instant::now() < end {
+                            while Instant::now() < end && !stop.load(Ordering::Relaxed) {
                                 std::hint::spin_loop();
                             }
                         }
                     }
                     let now = Instant::now();
-                    if until.is_some_and(|u| now >= u) {
+                    if until.is_some_and(|u| now >= u) || stop.load(Ordering::Relaxed) {
                         break;
                     }
                     let loc = Loc(WORD.load(Ordering::Relaxed));
@@ -173,17 +185,12 @@ impl Sampler {
                 }
             })?
         };
-        Ok(Sampler { stop, thread: Some(thread), samples })
+        Ok(Sampler { stop, thread: Some(thread) })
     }
 
     /// Whether the thread still samples (it ends at its `until`).
     pub fn running(&self) -> bool {
         self.thread.as_ref().is_some_and(|t| !t.is_finished())
-    }
-
-    /// The samples so far.
-    pub fn samples(&self) -> Samples {
-        self.samples.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Stop the thread.
@@ -245,12 +252,22 @@ mod tests {
     }
 
     #[test]
+    fn a_slow_profile_stops_without_waiting_out_its_interval() {
+        let samples = Arc::new(Mutex::new(Samples::default()));
+        let mut s = Sampler::start(1, Timer::Sleep, None, samples).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        let asked = Instant::now();
+        s.stop();
+        assert!(asked.elapsed() < Duration::from_millis(250), "stop took {:?}", asked.elapsed());
+    }
+
+    #[test]
     fn the_thread_samples_and_stops() {
         let samples = Arc::new(Mutex::new(Samples::default()));
-        let mut s = Sampler::start(2000, Timer::Sleep, None, samples).unwrap();
+        let mut s = Sampler::start(2000, Timer::Sleep, None, samples.clone()).unwrap();
         std::thread::sleep(Duration::from_millis(100));
         s.stop();
-        let got = s.samples();
+        let got = samples.lock().unwrap().clone();
         assert!(got.total > 10, "{} samples in 100 ms at 2000 Hz", got.total);
         assert!(!s.running());
     }

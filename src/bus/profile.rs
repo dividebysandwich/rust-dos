@@ -12,7 +12,12 @@ impl Bus {
             p if self.ide_claims(p) => Zone::IoIde,
             p if self.ne2000_claims(p) => Zone::IoNe2000,
             p if self.serial_claims(p) => Zone::IoSerial,
-            0x3BF | 0x3CD if self.et4000() => Zone::IoEt4000,
+            // The ports only the ET4000 has: KEY, segment select and the
+            // Display Mode Control pair. `write_port` also gives it some
+            // writes to 3C5h-3C9h (sequencer 6/7, the DAC mask), which
+            // depend on the state at the time, so a table by port counts
+            // those as the VGA's.
+            0x3BF | 0x3CD | 0x3B8 | 0x3D8 if self.et4000() => Zone::IoEt4000,
             0x20 | 0x21 | 0xA0 | 0xA1 => Zone::IoPic,
             0x60 | 0x64 => Zone::IoKbc,
             0x70 | 0x71 => Zone::IoCmos,

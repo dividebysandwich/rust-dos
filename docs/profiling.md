@@ -109,7 +109,7 @@ The JSON's sections:
 | `vga` | `vga.render`: the picture from video memory |
 | `frontend`, `audio`, `rewind`, `debug`, `ui` | `frontend` (the rest of the front end's frame), `audio.pump` (sound to the host), `audio.synth` (FM, sample and wavetable synthesis as the machine runs), `rewind`, `debug` (the debug server's requests), `ui` (menus and overlays) |
 | `cpu` | `cpu.interp`, `cpu.jit` (translated code) |
-| `dynrec` | `dynrec.dispatch` (between translated blocks), `dynrec.translate`, `dynrec.fallback` (an instruction translated code hands to the interpreter), `dynrec.slow_mem` (translated code's memory accesses that leave plain RAM) |
+| `dynrec` | `dynrec.dispatch` (between translated blocks), `dynrec.translate`, `dynrec.fallback` (an instruction translated code hands to the interpreter), `dynrec.slow_mem` (translated code's memory operands checked in Rust, where its TLB or segment checks miss, and its accesses across a page or outside plain RAM) |
 | `timers`, `irq`, `shell`, `idle` | Timer events, delivering hardware interrupts, the built-in shell, `idle.proof` (proving a loop only waits) |
 | `mem` | `mem.video`, `mem.upper`, `mem.device` |
 | `sb`, `gus`, `voodoo`, `powervr` | `sb.dma` (the Sound Blaster's DMA), `gus.advance` (the Ultrasound), `voodoo` and `voodoo.frame` (the 3dfx card's work on the emulation thread, and its frame), `powervr` |

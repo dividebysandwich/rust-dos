@@ -2339,13 +2339,8 @@ fn main() -> Result<(), String> {
         profile::set_host(Zone::FrameWait);
         pacer.wait_for_next_frame();
     }
-    // The monitor goes off: the picture collapses to a dot, with a thunk.
-    if settings.monitor_effects != video::power::MonitorEffects::Off {
-        power_off(&mut power, &mut display, &screen, &mut cpu.bus, settings.monitor_effects)?;
-    }
-
-    // The journal ends, and the debug server's clients get what they
-    // waited for.
+    // The profile ends with the machine's last frame, before the monitor's
+    // animation, which isn't the machine's work.
     if let Some(path) = &args.profile {
         match dbg.profile_write(&mut cpu, path) {
             Ok(files) => {
@@ -2355,6 +2350,13 @@ fn main() -> Result<(), String> {
             Err(e) => eprintln!("The profile can't be written to {}: {}", path.display(), e),
         }
     }
+    // The monitor goes off: the picture collapses to a dot, with a thunk.
+    if settings.monitor_effects != video::power::MonitorEffects::Off {
+        power_off(&mut power, &mut display, &screen, &mut cpu.bus, settings.monitor_effects)?;
+    }
+
+    // The journal ends, and the debug server's clients get what they
+    // waited for.
     dbg.shutdown(&cpu, shutdown, 0);
 
     // The page in the printer comes out, and the job's files are written.

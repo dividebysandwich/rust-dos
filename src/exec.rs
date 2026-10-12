@@ -227,7 +227,11 @@ fn run<const HOT: bool, const DYN: bool, const PROF: bool>(cpu: &mut Cpu, fetch:
             if cpu.bus.clock.icount >= cpu.bus.clock.batch_end() {
                 return StopReason::BatchEnd;
             }
-            cpu.bus.service_timers();
+            if PROF {
+                profile::within(profile::Zone::Timers, || cpu.bus.service_timers());
+            } else {
+                cpu.bus.service_timers();
+            }
         }
 
         if deliver_interrupts(cpu) {
@@ -1312,10 +1316,10 @@ fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
         0x3A => profile::Zone::HleFar,
         _ => profile::Zone::Dpmi,
     });
-    let function = profile::counters::function(vector, cpu.ax()) as usize;
+    let ax = cpu.ax();
     if let Some(p) = &mut cpu.bus.profile {
         match kind {
-            0x38 => p.hle[(vector as usize) << 8 | function] += 1,
+            0x38 => p.hle[(vector as usize) << 8 | profile::counters::function(vector, ax) as usize] += 1,
             _ => p.services[(kind - 0x39) as usize][vector as usize] += 1,
         }
     }

@@ -5,7 +5,7 @@
 use serde_json::{Map, Value, json};
 
 use rust_dos::profile::report::{self, Query, pct};
-use rust_dos::profile::sampler::Timer;
+use rust_dos::profile::sampler::{Samples, Timer};
 use rust_dos::profile::session::{Options, Session, Totals};
 use rust_dos::profile::{Engine, Loc, Mode, Zone, counters::MemKind};
 
@@ -90,12 +90,13 @@ impl DebugHub {
         session.stop(cpu);
         let session = self.profile.as_ref().unwrap();
         let query = Query { top: 50, ..Query::default() };
-        let report = self.profile_json(cpu, session, &query);
-        let folded = report::folded(&session.samples().counts, &query);
+        let samples = session.samples();
+        let report = self.profile_json(cpu, session, &samples, &query);
+        let folded = report::folded(&samples.counts, &query);
         let files = [
             (path.to_path_buf(), serde_json::to_string_pretty(&report).unwrap_or_default()),
-            (path.with_extension("txt"), text(&report)),
-            (path.with_extension("folded"), folded),
+            (beside(path, "txt"), text(&report)),
+            (beside(path, "folded"), folded),
         ];
         for (file, contents) in &files {
             std::fs::write(file, contents)?;
@@ -120,7 +121,6 @@ impl DebugHub {
         match &self.profile {
             None => json!({"profile": null, "running": false}),
             Some(s) => {
-                let samples = s.samples();
                 let (a, b) = s.window(cpu);
                 json!({
                     "running": s.running(),
@@ -128,7 +128,7 @@ impl DebugHub {
                     "timer": s.options.timer.name(),
                     "duration_ms": s.options.duration.map(|d| d.as_millis() as u64),
                     "wall_ms": ms(&a, &b),
-                    "samples": samples.total,
+                    "samples": s.total(),
                 })
             }
         }
@@ -142,13 +142,12 @@ impl DebugHub {
         let samples = session.samples();
         match format {
             Format::Folded => Reply::Json(json!({"text": report::folded(&samples.counts, query)})),
-            Format::Json => Reply::Json(self.profile_json(cpu, session, query)),
-            Format::Text => Reply::Json(json!({"text": text(&self.profile_json(cpu, session, query))})),
+            Format::Json => Reply::Json(self.profile_json(cpu, session, &samples, query)),
+            Format::Text => Reply::Json(json!({"text": text(&self.profile_json(cpu, session, &samples, query))})),
         }
     }
 
-    fn profile_json(&self, cpu: &Cpu, session: &Session, query: &Query) -> Value {
-        let samples = session.samples();
+    fn profile_json(&self, cpu: &Cpu, session: &Session, samples: &Samples, query: &Query) -> Value {
         let total = samples.total;
         let (a, b) = session.window(cpu);
         let wall_s = b.at.duration_since(a.at).as_secs_f64();
@@ -310,6 +309,20 @@ impl DebugHub {
 }
 
 const NO_PROFILE: &str = "no profile; POST /api/profile {\"enabled\":true} starts one";
+
+/// The file beside the report `path` with extension `ext`: `run.json`
+/// gives `run.txt`. A `path` that already ends in `.ext` (`run.txt`) gets
+/// `.ext` added (`run.txt.txt`), so the report isn't written over.
+fn beside(path: &std::path::Path, ext: &str) -> std::path::PathBuf {
+    let other = path.with_extension(ext);
+    if other != path {
+        return other;
+    }
+    let mut name = path.as_os_str().to_owned();
+    name.push(".");
+    name.push(ext);
+    name.into()
+}
 
 fn ms(a: &Totals, b: &Totals) -> u64 {
     b.at.duration_since(a.at).as_millis() as u64

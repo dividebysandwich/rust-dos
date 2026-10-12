@@ -1350,6 +1350,11 @@ impl Bus {
     /// Reads of the video memory, the ROM area and past the end of RAM.
     fn read_8_mapped(&self, addr: usize) -> u8 {
         let _profile = self.profile.as_deref().map(|p| p.mem(addr, false));
+        self.mapped_8(addr)
+    }
+
+    /// `read_8_mapped` without the profiler's count, for debuggers.
+    fn mapped_8(&self, addr: usize) -> u8 {
         if self.observe.on {
             self.observe.mapped(addr, self.ram.len());
         }
@@ -1399,7 +1404,7 @@ impl Bus {
             return dword as u8;
         }
         if addr >= self.ram.len() {
-            return self.read_8_mapped(addr);
+            return self.mapped_8(addr);
         }
         if (ADDR_VGA_GRAPHICS..ADDR_VGA_GRAPHICS + SIZE_GRAPHICS).contains(&addr) && self.video_mode != VideoMode::Vesa {
             let saved = self.vga.latches.get();
@@ -1407,7 +1412,8 @@ impl Bus {
             self.vga.latches.set(saved);
             return v;
         }
-        self.read_8(addr)
+        // (Not `read_8`: a profile counts the program's reads, not these.)
+        if self.is_plain_ram(addr, 1) { self.ram[addr] } else { self.mapped_8(addr) }
     }
 
     /// `write_8`, `write_16` or `write_32` (`size` bytes of `value`) at
