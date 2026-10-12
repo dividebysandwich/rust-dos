@@ -201,13 +201,14 @@ impl PartialEq for Frame {
 
 impl Eq for Frame {}
 
-/// What the 256-color or the 16-color renderer drew a frame's rows from:
-/// the colors and the shape (`key`), and each row's source as the CRTC
-/// scanned it out (the 256-color renderer's color indices, the 16-color
-/// one's plane bytes). Rows it would draw the same again are left as they
-/// are, which spares converting a picture a program keeps writing without
-/// changing what shows, as DOSBox's renderer compares its lines. Empty
-/// where the frame holds anything else.
+/// What the 256-color, the 16-color or the CGA's composite renderer drew a
+/// frame's rows from: the colors and the shape (`key`), and each row's
+/// source as the CRTC scanned it out (the 256-color renderer's color
+/// indices, the 16-color one's plane bytes, the composite one's 80 bytes
+/// of video memory a line). Rows it would draw the same again are left as
+/// they are, which spares converting a picture a program keeps writing
+/// without changing what shows, as DOSBox's renderer compares its lines.
+/// Empty where the frame holds anything else.
 #[derive(Clone, Debug, Default)]
 struct DrawnFrom {
     key: Vec<u8>,

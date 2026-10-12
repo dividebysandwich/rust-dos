@@ -240,7 +240,7 @@ fn sprite_program() -> Vec<u8> {
 
 /// A CGA on a composite monitor in mode 6 with the colour burst on, as
 /// King's Quest and other artifact-colour games use it: the screen filled
-/// with a pattern, then each frame a 32x16 box (four bytes, sixteen rows
+/// with a pattern, then each frame a 32x32 box (four bytes, sixteen rows
 /// in each bank) drawn one step further on, and the frame rendered.
 fn cga_composite(c: &mut Criterion) {
     let mut cpu = machine(&scratch("cga_composite"));

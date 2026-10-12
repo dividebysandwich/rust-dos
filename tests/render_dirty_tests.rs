@@ -223,7 +223,8 @@ fn planar_steps(mode: u8, patterned: bool) {
 
 /// The CGA's composite picture is redrawn only where its lines changed,
 /// and what it leaves must be what a full render draws: after a box, a
-/// colour and palette change, the burst off and on, and a scroll.
+/// colour and palette change, the burst off and on, a scroll, the other
+/// revision of the card, and the picture off and on.
 #[test]
 fn cga_composite_frames_drawn_line_by_line_match_full_renders() {
     use rust_dos::interrupts::int10;
@@ -274,5 +275,13 @@ fn cga_composite_frames_drawn_line_by_line_match_full_renders() {
         cpu.bus.io_write(0x3D5, 40);
         cpu.bus.vga.latch_start_address();
         check(&mut cpu, "scroll");
+        // The other revision of the card.
+        cpu.bus.vga.set_composite(CompositeSettings { mode: CompositeMode::On, era: CompositeEra::New });
+        check(&mut cpu, "new era");
+        // The picture off (drawn black by the RGB path) and on again.
+        cpu.bus.io_write(0x3D8, control & !0x08);
+        check(&mut cpu, "video off");
+        cpu.bus.io_write(0x3D8, control);
+        check(&mut cpu, "video on");
     }
 }
