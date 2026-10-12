@@ -1,7 +1,7 @@
 //! What the 3D view shows, as plain data: the meshes with their materials
 //! and pictures, the lights, the screen the emulated picture goes on,
 //! where the viewer starts and the things on the desk to pick up (the
-//! game's manual). It comes from a glTF file exported from
+//! game's manual and a joystick). It comes from a glTF file exported from
 //! Blender, or is the built-in test room.
 
 use glam::{Mat3, Mat4, Vec2, Vec3};
@@ -255,19 +255,21 @@ impl Spawn {
     }
 }
 
-/// Something to pick up (see `props`): the game's manual.
+/// Something to pick up (see `props`): the game's manual, or a joystick.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PropKind {
     Manual,
+    Joystick,
 }
 
 impl PropKind {
-    /// A prop by its node's name (`manual`, `manual.001`) or custom
+    /// A prop by its node's name (`manual`, `joystick.001`) or custom
     /// property's value.
     fn parse(name: &str) -> Option<Self> {
         let name = name.trim().to_ascii_lowercase();
         match name.split('.').next().unwrap_or(&name) {
             "manual" => Some(PropKind::Manual),
+            "joystick" => Some(PropKind::Joystick),
             _ => None,
         }
     }
@@ -285,6 +287,8 @@ pub enum PartRole {
     /// frame of `Prop::hinge`, lying along +X.
     SheetFront,
     SheetBack,
+    /// The joystick's stick, in the frame of `Prop::stick`.
+    Stick,
 }
 
 pub struct PropPart {
@@ -298,17 +302,22 @@ pub struct Prop {
     /// Its frame in the scene: where it stands, +Y up and -Z away from
     /// the player. Without scale.
     pub pose: Mat4,
-    /// Its parts, in its frame (but the sheet's).
+    /// Its parts, in its frame (but the stick's and the sheet's).
     pub parts: Vec<PropPart>,
+    /// The stick's frame in the prop's: at the pivot, +Y along the stick.
+    pub stick: Mat4,
+    /// Where a hand holds the stick, in the stick's frame.
+    pub knob: Vec3,
     /// The spine, where a page turns about the Z axis, in the prop's frame.
     pub hinge: Vec3,
-    /// The box around it in its frame: where a hand takes it.
+    /// The box around it in its frame (but the stick's): where a hand
+    /// takes it.
     pub bounds: (Vec3, Vec3),
 }
 
 impl Prop {
     fn new(kind: PropKind, pose: Mat4) -> Self {
-        Prop { kind, pose, parts: Vec::new(), hinge: Vec3::ZERO, bounds: (Vec3::ZERO, Vec3::ZERO) }
+        Prop { kind, pose, parts: Vec::new(), stick: Mat4::IDENTITY, knob: Vec3::ZERO, hinge: Vec3::ZERO, bounds: (Vec3::ZERO, Vec3::ZERO) }
     }
 
     fn push(&mut self, role: PartRole, mesh: Mesh) {
@@ -327,7 +336,15 @@ impl Prop {
 
     /// Work out where it is held, and the sheet a page turns on.
     fn finish(&mut self) {
-        self.bounds = self.bounds_of(|r| matches!(r, PartRole::Body | PartRole::PageLeft | PartRole::PageRight)).unwrap_or_default();
+        let (mut low, mut high) = self.bounds_of(|r| matches!(r, PartRole::Body | PartRole::PageLeft | PartRole::PageRight)).unwrap_or_default();
+        if let Some((_, top)) = self.bounds_of(|r| r == PartRole::Stick) {
+            // The knob: the top of the stick.
+            self.knob = Vec3::new(0.0, (top.y - 0.015).max(0.0), 0.0);
+            let base = self.stick.transform_point3(Vec3::ZERO);
+            low = low.min(base);
+            high = high.max(base);
+        }
+        self.bounds = (low, high);
         if let Some((a, b)) = self.bounds_of(|r| r == PartRole::PageRight)
             && !self.has(PartRole::SheetFront)
         {
@@ -392,8 +409,8 @@ const SCREEN_GLOW: f32 = 5.0;
 /// The test room's desk: the middle of its top's top, and the top's size.
 const TEST_DESK: Vec3 = Vec3::new(0.0, 0.72, -0.55);
 const TEST_DESK_TOP: Vec3 = Vec3::new(1.2, 0.03, 0.6);
-/// Where the manual stands on it.
-const TEST_PROPS: [(PropKind, Vec3); 1] = [(PropKind::Manual, Vec3::new(-0.28, 0.72, -0.47))];
+/// Where the manual and the joystick stand on it.
+const TEST_PROPS: [(PropKind, Vec3); 2] = [(PropKind::Manual, Vec3::new(-0.28, 0.72, -0.47)), (PropKind::Joystick, Vec3::new(0.3, 0.72, -0.45))];
 
 /// The sunset sky's sun: low, ahead and to the left.
 fn sunset_sun() -> Vec3 {
@@ -488,7 +505,7 @@ impl Scene {
             meshes.push(cuboid(on_front(x, 0.0), Vec3::new(0.008, 0.008, 0.008), material));
         }
         // A desk in front of the viewer, its top at `DESK`'s height, for the
-        // manual: the top and four legs.
+        // manual and the joystick: the top and four legs.
         let (desk, top) = (TEST_DESK, TEST_DESK_TOP);
         meshes.push(cuboid(desk - Vec3::Y * top.y / 2.0, top, 9));
         for (x, z) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
@@ -549,18 +566,33 @@ impl Scene {
                     prop.push(role, page(Vec3::new(x0, 0.0081, -d / 2.0), w, d, paper));
                 }
             }
+            PropKind::Joystick => {
+                // A desktop joystick: a square base with a fire button,
+                // and a stick with a red knob on it.
+                let black = self.add_material(Material::plain(srgb(0x18181b), Shading::Lit));
+                let grey = self.add_material(Material::plain(srgb(0x55575c), Shading::Lit));
+                let red = self.add_material(Material::plain(srgb(0xb3161b), Shading::Lit));
+                let (side, height) = (0.12, 0.04);
+                prop.push(PartRole::Body, cuboid(Vec3::new(0.0, height / 2.0, 0.0), Vec3::new(side, height, side), black));
+                prop.push(PartRole::Body, cylinder(Vec3::new(0.0, height, 0.0), 0.022, 0.006, 16, grey));
+                prop.push(PartRole::Body, cylinder(Vec3::new(-0.04, height, -0.04), 0.009, 0.006, 12, red));
+                prop.stick = Mat4::from_translation(Vec3::new(0.0, height + 0.004, 0.0));
+                prop.push(PartRole::Stick, cylinder(Vec3::ZERO, 0.009, 0.13, 12, black));
+                prop.push(PartRole::Stick, cylinder(Vec3::new(0.0, 0.11, 0.0), 0.017, 0.04, 16, red));
+            }
         }
         prop.finish();
         prop
     }
 
-    /// Rust-DOS's own manual, for a scene without it: standing on what is
-    /// below the viewer's left hand, facing the viewer; in the air there if
-    /// nothing is.
+    /// Rust-DOS's own manual and joystick, for a scene without them:
+    /// standing on what is below the viewer's hands, the manual to the
+    /// left and the joystick to the right, facing the viewer; in the air
+    /// there if nothing is.
     fn add_missing_props(&mut self) {
         let spawn = self.spawn;
         let turn = Mat4::from_rotation_y(spawn.yaw);
-        for (kind, side) in [(PropKind::Manual, -0.25)] {
+        for (kind, side) in [(PropKind::Manual, -0.25), (PropKind::Joystick, 0.25)] {
             if self.props.iter().any(|p| p.kind == kind) {
                 continue;
             }
@@ -803,6 +835,7 @@ fn part_role(node: &gltf::Node) -> Option<PartRole> {
     match name.split('.').next().unwrap_or(&name) {
         "manual_page_left" => Some(PartRole::PageLeft),
         "manual_page_right" => Some(PartRole::PageRight),
+        "joystick_stick" => Some(PartRole::Stick),
         _ => None,
     }
 }
@@ -906,10 +939,19 @@ impl Walk<'_> {
         Ok(())
     }
 
-    /// A node of a prop, its meshes taken into the prop's frame by `to`.
-    fn prop_node(&mut self, prop: &mut Prop, node: gltf::Node, world: Mat4, to: Mat4, mut role: PartRole) -> Result<(), String> {
-        if let Some(part) = part_role(&node) {
-            role = part;
+    /// A node of a prop, its meshes taken into the frame `to` takes the
+    /// scene's coordinates to: the prop's, or below the stick, the
+    /// stick's.
+    fn prop_node(&mut self, prop: &mut Prop, node: gltf::Node, world: Mat4, mut to: Mat4, mut role: PartRole) -> Result<(), String> {
+        match part_role(&node) {
+            Some(PartRole::Stick) => {
+                let pivot = rigid(world);
+                prop.stick = prop.pose.inverse() * pivot;
+                to = pivot.inverse();
+                role = PartRole::Stick;
+            }
+            Some(part) => role = part,
+            None => {}
         }
         if let Some(mesh) = node.mesh() {
             for (mut read, primitive) in self.read_mesh(&mesh, to * world)? {
@@ -1032,6 +1074,39 @@ fn sheet(width: f32, (z0, z1): (f32, f32), up: f32, material: usize) -> Mesh {
     };
     let indices = if up > 0.0 { vec![0, 1, 2, 0, 2, 3] } else { vec![0, 2, 1, 0, 3, 2] };
     Mesh { vertices: vec![at(0.0, 0.0), at(0.0, 1.0), at(1.0, 1.0), at(1.0, 0.0)], indices, material }
+}
+
+/// An upright cylinder from `bottom`, closed at both ends.
+fn cylinder(bottom: Vec3, radius: f32, height: f32, segments: u32, material: usize) -> Mesh {
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    let around = |i: u32| {
+        let a = i as f32 / segments as f32 * std::f32::consts::TAU;
+        Vec3::new(a.cos(), 0.0, -a.sin())
+    };
+    for i in 0..segments {
+        let base = vertices.len() as u32;
+        let (n0, n1) = (around(i), around(i + 1));
+        for (n, y) in [(n0, 0.0), (n1, 0.0), (n1, height), (n0, height)] {
+            let p = bottom + n * radius + Vec3::Y * y;
+            vertices.push(Vertex { position: p.to_array(), normal: n.to_array(), uv: [0.0, 0.0] });
+        }
+        indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    for (y, up) in [(0.0, -1.0f32), (height, 1.0)] {
+        let center = vertices.len() as u32;
+        let normal = [0.0, up, 0.0];
+        vertices.push(Vertex { position: (bottom + Vec3::Y * y).to_array(), normal, uv: [0.0, 0.0] });
+        for i in 0..segments {
+            let p = bottom + around(i) * radius + Vec3::Y * y;
+            vertices.push(Vertex { position: p.to_array(), normal, uv: [0.0, 0.0] });
+        }
+        for i in 0..segments {
+            let (a, b) = (center + 1 + i, center + 1 + (i + 1) % segments);
+            indices.extend(if up > 0.0 { [center, a, b] } else { [center, b, a] });
+        }
+    }
+    Mesh { vertices, indices, material }
 }
 
 /// A hash of some bytes, to tell scenes apart.
@@ -1277,7 +1352,7 @@ mod tests {
             assert!(near(a, b), "{:?}: {:?} {:?}", led, a, b);
             assert!(ea.iter().zip(eb).all(|(x, y)| (x - y).abs() < 1e-4), "{:?}: {:?} {:?}", led, ea, eb);
         }
-        // The manual on the desk, as Rust-DOS's model.
+        // The manual and the joystick on the desk, as Rust-DOS's models.
         assert_eq!(blend.props.len(), built.props.len());
         for b in &built.props {
             let a = blend.props.iter().find(|a| a.kind == b.kind).expect("the prop");
@@ -1290,7 +1365,7 @@ mod tests {
     fn props_stand_on_the_desk_and_have_their_parts() {
         let room = Scene::test_room();
         let kinds: Vec<PropKind> = room.props.iter().map(|p| p.kind).collect();
-        assert_eq!(kinds, [PropKind::Manual]);
+        assert_eq!(kinds, [PropKind::Manual, PropKind::Joystick]);
         for prop in &room.props {
             let at = prop.pose.transform_point3(Vec3::ZERO);
             assert_eq!(room.surface_below(at + Vec3::Y * 0.1, 1.0), Some(at), "{:?} on the desk", prop.kind);
@@ -1302,34 +1377,39 @@ mod tests {
         }
         // The sheet turns about the spine, between the pages.
         assert!(manual.hinge.x.abs() < 1e-4);
-        // A scene without it gets it where the hands are, in the air in the
-        // glTF quad's scene (nothing is below).
+        let joystick = &room.props[1];
+        assert!(joystick.has(PartRole::Stick) && joystick.knob.y > 0.1);
+        // A scene without them gets them where the hands are, on the floor
+        // of the glTF quad's scene (nothing is below).
         let scene = Scene::from_gltf(quad_gltf().as_bytes(), Path::new(".")).unwrap();
-        assert_eq!(scene.props.len(), 1);
+        assert_eq!(scene.props.len(), 2);
     }
 
     #[test]
     fn gltf_props_keep_their_own_meshes() {
-        // The screen quad, and a manual: a cover with the quad as its mesh
-        // and the right page below it, moved.
+        // The screen quad, and a joystick: a base with the quad as its mesh
+        // and a stick below it, moved and turned.
         let text = quad_gltf()
             .replace(r#""nodes": [0, 2, 3, 4]"#, r#""nodes": [0, 2, 3, 4, 5]"#)
             .replace(
                 r#"{"name": "Light", "mesh": 0, "extras": {"rustdos_led": "hdd"}, "translation": [5, 0, 0]}"#,
                 r#"{"name": "Light", "mesh": 0, "extras": {"rustdos_led": "hdd"}, "translation": [5, 0, 0]},
-                {"name": "Booklet", "extras": {"rustdos_prop": "manual"}, "mesh": 0, "translation": [1, 0.7, -0.5], "children": [6]},
-                {"name": "manual_page_right", "mesh": 0, "translation": [1, 0.05, 0]}"#,
+                {"name": "Stick base", "extras": {"rustdos_prop": "joystick"}, "mesh": 0, "translation": [1, 0.7, -0.5], "children": [6]},
+                {"name": "joystick_stick", "mesh": 0, "translation": [0, 0.05, 0]}"#,
             );
         let scene = Scene::from_gltf(text.as_bytes(), Path::new(".")).unwrap();
-        // Not in the room's meshes.
+        // Not in the room's meshes; and the manual is Rust-DOS's.
         assert_eq!(scene.meshes.len(), 2);
-        let manual = &scene.props[0];
-        assert!(manual.pose.transform_point3(Vec3::ZERO).abs_diff_eq(Vec3::new(1.0, 0.7, -0.5), 1e-4));
-        assert_eq!(manual.parts.iter().filter(|p| p.role == PartRole::Body).count(), 1);
-        // The page is in the prop's frame, and a sheet turns at its left edge.
-        let page = &manual.parts.iter().find(|p| p.role == PartRole::PageRight).unwrap().mesh;
-        assert!(page.vertices.iter().any(|v| v.position == [2.0, 1.05, 0.0]));
-        assert!(manual.has(PartRole::SheetFront) && (manual.hinge.x - 0.0).abs() < 1e-4);
+        let joystick = scene.props.iter().find(|p| p.kind == PropKind::Joystick).unwrap();
+        assert!(joystick.pose.transform_point3(Vec3::ZERO).abs_diff_eq(Vec3::new(1.0, 0.7, -0.5), 1e-4));
+        assert_eq!(joystick.parts.iter().filter(|p| p.role == PartRole::Body).count(), 1);
+        assert_eq!(joystick.parts.iter().filter(|p| p.role == PartRole::Stick).count(), 1);
+        assert!(joystick.stick.transform_point3(Vec3::ZERO).abs_diff_eq(Vec3::new(0.0, 0.05, 0.0), 1e-4));
+        // The stick's mesh is in its own frame: the quad, from -1 to 1.
+        let stick = &joystick.parts.iter().find(|p| p.role == PartRole::Stick).unwrap().mesh;
+        assert!(stick.vertices.iter().any(|v| v.position == [1.0, 1.0, 0.0]));
+        assert!((joystick.knob.y - 0.985).abs() < 1e-4);
+        assert!(scene.props.iter().any(|p| p.kind == PropKind::Manual && p.has(PartRole::PageRight)));
     }
 
     #[test]

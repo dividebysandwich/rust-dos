@@ -130,9 +130,9 @@ What Rust-DOS looks for, by object name:
   speaker_left/right      where the left and right sound comes from
   led_power, led_turbo,   the PC's lights: they glow in their material's
   led_hdd, led_floppy     emission colour while the emulated PC's are lit
-  manual                  where the game's manual lies, to be picked up in VR
-                          (its +Y away from you); an empty gets Rust-DOS's
-                          model, or put your own meshes below it
+  manual, joystick        where the game's manual and the joystick stand, to
+                          be picked up in VR (their +Y away from you); empties
+                          get Rust-DOS's models, or put your own meshes below
 
 Export: File > Export > glTF 2.0
   Format: glTF Binary (.glb)
@@ -234,9 +234,10 @@ def build():
     for i, (x, z) in enumerate([(-1, -1), (1, -1), (1, 1), (-1, 1)]):
         leg = from_gltf(desk_x + x * (top[0] / 2 - 0.04), (top_y - top[1]) / 2, desk_z + z * (top[2] / 2 - 0.04))
         cuboid(f"Desk leg {i + 1}", leg, (0.04, 0.04, top_y - top[1]), wood, desk)
-    # On it, the manual (shown while a game with one runs): an empty, so
-    # Rust-DOS's own model lies there.
+    # On it, the manual (shown while a game with one runs) and the
+    # joystick: empties, so Rust-DOS's own models stand there.
     empty("manual", from_gltf(-0.28, top_y, -0.47), markers, kind="ARROWS", size=0.1)
+    empty("joystick", from_gltf(0.3, top_y, -0.45), markers, kind="ARROWS", size=0.1)
 
     # Where the eyes start (1.2 m up, looking at the screen along +Y), and
     # where the sound comes from: the screen's sides, as without them.

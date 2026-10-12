@@ -1,6 +1,8 @@
 //! The things on the desk to pick up (`Scene::props`): the game's manual,
-//! a booklet whose pages turn with the thumbstick of the hand holding it.
-//! What is put down settles upright on what is below it.
+//! a booklet whose pages turn with the thumbstick of the hand holding it,
+//! and a joystick, whose stick, held, follows the hand and is the game
+//! port's joystick, and whose base moves it. What is put down settles
+//! upright on what is below it.
 //!
 //! The manual's pages are rendered on a thread of their own, as they are
 //! needed, into textures of the context that draws them.
@@ -8,15 +10,22 @@
 use super::controls::Tracking;
 use super::render::{Gpu, PropDraw};
 use super::scene::{PartRole, Prop, PropKind, Scene};
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Quat, Vec3};
 use glow::HasContext;
+use rust_dos::padmap::PadSnapshot;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 
-/// How far outside a prop a hand still takes it, in metres.
+/// How far outside a prop a hand still takes it, and from the knob the
+/// stick, in metres.
 const REACH: f32 = 0.05;
+const KNOB_REACH: f32 = 0.07;
+/// How far the stick tilts, and the tilt that is the joystick's full
+/// deflection (less, so that it is reached at the corners too).
+const MAX_TILT: f32 = 22.0 * std::f32::consts::PI / 180.0;
+const FULL_TILT: f32 = MAX_TILT * 0.8;
 /// How long a page takes to turn, and how long the thumbstick is held to
 /// turn another.
 const TURN: Duration = Duration::from_millis(350);
@@ -33,6 +42,9 @@ const KEEP: usize = 6;
 enum Hold {
     /// A prop, where it is in the hand's frame.
     Body { prop: usize, offset: Mat4 },
+    /// The joystick's stick, the hand where it was in the stick's frame
+    /// when it took it.
+    Stick { prop: usize, from: Vec3 },
 }
 
 /// What the props do to the machine at a frame.
@@ -41,10 +53,14 @@ pub struct PropInput {
     /// The hands holding something, whose buttons and stick are the
     /// prop's.
     pub busy: [bool; 2],
+    /// The joystick's stick, held: the game port's joystick.
+    pub pad: Option<PadSnapshot>,
 }
 
 pub struct Props {
     poses: Vec<Mat4>,
+    /// Each prop's stick: the way it points in its frame.
+    tilts: Vec<Vec3>,
     holds: [Option<Hold>; 2],
     squeezed: [bool; 2],
     pressed: [bool; 2],
@@ -55,6 +71,7 @@ impl Props {
     pub fn new(scene: &Scene) -> Self {
         let mut props = Props {
             poses: Vec::new(),
+            tilts: Vec::new(),
             holds: [None; 2],
             squeezed: [false; 2],
             pressed: [false; 2],
@@ -67,6 +84,7 @@ impl Props {
     /// Back where `scene` has them.
     pub fn reset(&mut self, scene: &Scene) {
         self.poses = scene.props.iter().map(|p| p.pose).collect();
+        self.tilts = vec![Vec3::Y; scene.props.len()];
         self.holds = [None; 2];
         self.booklet.canvas = scene.props.iter().find(|p| p.kind == PropKind::Manual).map_or((768, PAGE_HEIGHT), page_canvas);
     }
@@ -124,6 +142,23 @@ impl Props {
                         }
                     }
                 }
+                Some(Hold::Stick { prop, from }) => {
+                    let frame = self.poses[prop] * scene.props[prop].stick;
+                    let to = frame.inverse().transform_point3(grip);
+                    let tilt = clamp_tilt(Quat::from_rotation_arc(from.normalize_or(Vec3::Y), to.normalize_or(Vec3::Y)) * Vec3::Y);
+                    self.tilts[prop] = tilt;
+                    // Pushed away is up, as on a joystick; the trigger is the
+                    // first button, the primary the second.
+                    let axis = |side: f32| (side.atan2(tilt.y) / FULL_TILT).clamp(-1.0, 1.0);
+                    let mut pad = PadSnapshot { axes: [axis(tilt.x), axis(tilt.z), 0.0, 0.0], ..PadSnapshot::default() };
+                    if hand.select {
+                        pad.buttons |= rust_dos::vr::PAD_A;
+                    }
+                    if hand.primary {
+                        pad.buttons |= rust_dos::vr::PAD_B;
+                    }
+                    input.pad = Some(pad);
+                }
                 None => {}
             }
             self.pressed[i] = hand.primary;
@@ -132,12 +167,19 @@ impl Props {
         input
     }
 
-    /// What hand at `grip` (its frame `hand`) takes: the nearest prop it is
-    /// in or by.
+    /// What hand at `grip` (its frame `hand`) takes: the stick first, then
+    /// the nearest prop it is in or by.
     fn take(&self, scene: &Scene, grip: Vec3, hand: Mat4) -> Option<Hold> {
         let mut best: Option<(f32, Hold)> = None;
         for (i, prop) in scene.props.iter().enumerate().filter(|(_, p)| self.shown(p)) {
             let pose = self.poses[i];
+            if prop.parts.iter().any(|p| p.role == PartRole::Stick) {
+                let frame = pose * prop.stick;
+                let knob = frame.transform_point3(self.tilt_matrix(i).transform_point3(prop.knob));
+                if grip.distance(knob) < KNOB_REACH {
+                    return Some(Hold::Stick { prop: i, from: frame.inverse().transform_point3(grip) });
+                }
+            }
             let local = pose.inverse().transform_point3(grip);
             let (low, high) = prop.bounds;
             let outside = (low - local).max(local - high).max(Vec3::ZERO).length();
@@ -148,17 +190,26 @@ impl Props {
         best.map(|(_, hold)| hold)
     }
 
-    /// Hand `i` lets go: a prop settles upright on what is below it.
+    /// Hand `i` lets go: a prop settles upright on what is below it; a
+    /// stick springs back.
     fn release(&mut self, scene: &Scene, i: usize) {
-        if let Some(Hold::Body { prop, .. }) = self.holds[i].take() {
-            let (_, rotation, position) = self.poses[prop].to_scale_rotation_translation();
-            let ahead = rotation * Vec3::NEG_Z;
-            let yaw = if ahead.x.abs() + ahead.z.abs() > 1e-4 { (-ahead.x).atan2(-ahead.z) } else { 0.0 };
-            let upright = Mat4::from_rotation_y(yaw);
-            let lift = Vec3::Y * scene.props[prop].bounds.1.y.max(0.05);
-            let at = scene.surface_below(position + lift, 3.0).unwrap_or(position);
-            self.poses[prop] = Mat4::from_translation(at) * upright;
+        match self.holds[i].take() {
+            Some(Hold::Body { prop, .. }) => {
+                let (_, rotation, position) = self.poses[prop].to_scale_rotation_translation();
+                let ahead = rotation * Vec3::NEG_Z;
+                let yaw = if ahead.x.abs() + ahead.z.abs() > 1e-4 { (-ahead.x).atan2(-ahead.z) } else { 0.0 };
+                let upright = Mat4::from_rotation_y(yaw);
+                let lift = Vec3::Y * scene.props[prop].bounds.1.y.max(0.05);
+                let at = scene.surface_below(position + lift, 3.0).unwrap_or(position);
+                self.poses[prop] = Mat4::from_translation(at) * upright;
+            }
+            Some(Hold::Stick { prop, .. }) => self.tilts[prop] = Vec3::Y,
+            None => {}
         }
+    }
+
+    fn tilt_matrix(&self, prop: usize) -> Mat4 {
+        Mat4::from_quat(Quat::from_rotation_arc(Vec3::Y, self.tilts[prop]))
     }
 
     /// The props' parts to draw, the manual's pages rendered as they come.
@@ -178,6 +229,7 @@ impl Props {
                         let page = if p.role == PartRole::SheetFront { front } else { back };
                         (pose * Mat4::from_translation(prop.hinge) * Mat4::from_rotation_z(angle), self.booklet.texture(page))
                     }
+                    PartRole::Stick => (pose * prop.stick * self.tilt_matrix(i), None),
                 };
                 draws.push(PropDraw { prop: i, part, model, page });
             }
@@ -189,6 +241,17 @@ impl Props {
     pub fn delete(mut self, gl: &glow::Context) {
         self.booklet.forget(gl);
     }
+}
+
+/// `tilt` no further than `MAX_TILT` from upright.
+fn clamp_tilt(tilt: Vec3) -> Vec3 {
+    let tilt = tilt.normalize_or(Vec3::Y);
+    let angle = tilt.y.clamp(-1.0, 1.0).acos();
+    if angle <= MAX_TILT {
+        return tilt;
+    }
+    let across = Vec3::new(tilt.x, 0.0, tilt.z).normalize_or(Vec3::X);
+    across * MAX_TILT.sin() + Vec3::Y * MAX_TILT.cos()
 }
 
 /// The size of the manual's pages' textures: `PAGE_HEIGHT` tall, as wide as
@@ -463,24 +526,44 @@ mod tests {
     }
 
     #[test]
+    fn the_joystick_is_taken_by_its_stick_and_follows_the_hand() {
+        let room = Scene::test_room();
+        let mut props = Props::new(&room);
+        let now = Instant::now();
+        let j = room.props.iter().position(|p| p.kind == PropKind::Joystick).unwrap();
+        let prop = &room.props[j];
+        let knob = (prop.pose * prop.stick).transform_point3(prop.knob);
+        let input = props.update(&room, &tracking(hand_at(knob, true)), now);
+        assert!(input.busy[1]);
+        let pad = input.pad.unwrap();
+        assert!(pad.axes[0].abs() < 1e-3 && pad.axes[1].abs() < 1e-3, "{:?}", pad.axes);
+        // Pushed away (-Z) and to the right: up and right, at full tilt.
+        let input = props.update(&room, &tracking(hand_at(knob + Vec3::new(0.08, 0.0, -0.08), true)), now);
+        let pad = input.pad.unwrap();
+        assert!(pad.axes[0] > 0.85 && pad.axes[1] < -0.85, "{:?}", pad.axes);
+        // Let go, it stands up again and isn't the joystick any more.
+        let input = props.update(&room, &tracking(hand_at(knob, false)), now);
+        assert!(input.pad.is_none() && !input.busy[1]);
+        assert_eq!(props.tilts[j], Vec3::Y);
+    }
+
+    #[test]
     fn props_put_down_stand_on_what_is_below() {
         let room = Scene::test_room();
         let mut props = Props::new(&room);
         let now = Instant::now();
-        let j = room.props.iter().position(|p| p.kind == PropKind::Manual).unwrap();
-        // (Shown with a manual to show.)
-        props.booklet.manuals = vec![PathBuf::from("manual.pdf")];
-        let base = room.props[j].pose.transform_point3(Vec3::new(0.0, 0.005, 0.0));
+        let j = room.props.iter().position(|p| p.kind == PropKind::Joystick).unwrap();
+        let base = room.props[j].pose.transform_point3(Vec3::new(0.0, 0.02, 0.0));
         props.update(&room, &tracking(hand_at(base, true)), now);
-        // Carried along the desk, and turned a little.
-        let moved = base + Vec3::new(0.4, 0.3, -0.1);
+        // Carried over the desk's other side, and turned a little.
+        let moved = base + Vec3::new(-0.4, 0.3, -0.1);
         let mut hand = hand_at(moved, true);
         hand.grip *= Mat4::from_rotation_x(0.3) * Mat4::from_rotation_y(0.5);
         props.update(&room, &tracking(hand), now);
         props.update(&room, &tracking(hand_at(moved, false)), now);
         let (_, rotation, at) = props.poses[j].to_scale_rotation_translation();
         assert!((at.y - 0.72).abs() < 1e-3, "on the desk: {:?}", at);
-        assert!((at.x - (base.x + 0.4)).abs() < 0.05);
+        assert!((at.x - (base.x - 0.4)).abs() < 0.05);
         assert!((rotation * Vec3::Y).dot(Vec3::Y) > 0.9999, "upright");
     }
 
@@ -509,5 +592,12 @@ mod tests {
             booklet.showing(at + TURN);
         }
         assert_eq!(booklet.spread, 4);
+    }
+
+    #[test]
+    fn the_tilt_stops_at_full_deflection() {
+        let tilt = clamp_tilt(Vec3::new(1.0, 0.1, 0.0));
+        assert!((tilt.y.acos() - MAX_TILT).abs() < 1e-4);
+        assert_eq!(clamp_tilt(Vec3::Y), Vec3::Y);
     }
 }

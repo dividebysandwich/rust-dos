@@ -720,7 +720,10 @@ fn session(
         let tracking = xr.track(world);
         let now = std::time::Instant::now();
         let held = props.update(&scene, &tracking, now);
-        let (input, extras, hold) = controllers.update(mode, &tracking, held.busy, &scene.screen, now);
+        let (mut input, extras, hold) = controllers.update(mode, &tracking, held.busy, &scene.screen, now);
+        if held.pad.is_some() {
+            input.pad = held.pad;
+        }
         if hold {
             xr.recenter();
         }
