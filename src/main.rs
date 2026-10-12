@@ -581,6 +581,9 @@ fn main() -> Result<(), String> {
     // The button whose click captured the mouse, whose release the program
     // doesn't see either.
     let mut capturing_click: Option<MouseButton> = None;
+    // The right button held still opening the settings window
+    // (`mouse_menu_hold`), for a TV or a remote without F12.
+    let mut menu_hold = rust_dos::menu_hold::MenuHold::default();
     // The text selected with the right button while the mouse isn't
     // captured (Ctrl+Shift+C copies it), and the text being pasted
     // (Ctrl+Shift+V).
@@ -774,6 +777,18 @@ fn main() -> Result<(), String> {
         let mouse_before = (cpu.bus.mouse.x, cpu.bus.mouse.y, cpu.bus.mouse.buttons);
         let mut host_keys = false;
         for event in event_pump.poll_iter() {
+            // The right button held still for the settings window; its
+            // release is swallowed once the window opened.
+            match &event {
+                Event::MouseButtonDown { mouse_btn: MouseButton::Right, .. }
+                    if settings.mouse_menu_hold && !ui.is_open() && !paused && !steering!() =>
+                {
+                    menu_hold.press(std::time::Instant::now());
+                }
+                Event::MouseMotion { xrel, yrel, .. } => menu_hold.motion(*xrel, *yrel),
+                Event::MouseButtonUp { mouse_btn: MouseButton::Right, .. } if menu_hold.release() => continue,
+                _ => {}
+            }
             match event {
                 Event::Quit { .. } => break 'running,
                 // Ctrl+Shift and the mouse fly the 3D scene's camera: look
@@ -1591,6 +1606,17 @@ fn main() -> Result<(), String> {
                     Err(e) => osd.show(format!("The video recording failed: {}", e)),
                 }
             }
+        }
+
+        // The right button held still long enough opens the settings
+        // window, with the button let go on the machine.
+        if menu_hold.poll(std::time::Instant::now()) && !ui.is_open() {
+            if capturing_click == Some(MouseButton::Right) {
+                capturing_click = None;
+            } else if cpu.bus.mouse.buttons & 2 != 0 {
+                cpu.bus.mouse.button_up(1);
+            }
+            toggle_ui!();
         }
 
         // The window opening or closing: it takes the keyboard and mouse

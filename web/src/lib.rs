@@ -787,6 +787,12 @@ impl Machine {
         self.cpu.bus.mouse.installed
     }
 
+    /// Whether holding the right button still opens the settings window
+    /// (`mouse_menu_hold`).
+    pub fn mouse_menu_hold(&self) -> bool {
+        self.settings.mouse_menu_hold
+    }
+
     /// The mouse moved to (`x`, `y`) on the screen, in its pixels.
     /// The captured mouse moved by (`dx`, `dy`) screen pixels: the driver's
     /// cursor stops at the edges, but its mickeys don't.

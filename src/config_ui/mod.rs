@@ -416,7 +416,7 @@ impl Page {
                 Cycles, Core, Fpu, Cpu, Post, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, VoodooScaleShader, VoodooMsaa,
                 VoodooAnisotropy, VoodooTextureSampling, VoodooFpsCap, VoodooGamma, VoodooOverlay, PowerVr, PowerVrFilter, Memsize, Ems, Umb, DosHigh, Dpmi,
                 DosVersion, IdeHardDisks, BootCdrom, HardDiskSpeed, FloppyDiskSpeed, Joystick,
-                Deadzone, MouseSensitivity, MouseAutocapture, MouseCaptureMessages, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, RecordShader, Autoexec,
+                Deadzone, MouseSensitivity, MouseAutocapture, MouseCaptureMessages, MouseMenuHold, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, RecordShader, Autoexec,
                 ShellSuggestions, ShellColors, SaveShellHistory, VersionCheck,
             ],
             Page::Sound => &[
@@ -612,6 +612,8 @@ enum Item {
     MouseAutocapture,
     /// The messages that say the mouse was captured or let go.
     MouseCaptureMessages,
+    /// The right button held still opening the settings window.
+    MouseMenuHold,
     ShellSuggestions,
     ShellColors,
     SaveShellHistory,
@@ -956,6 +958,7 @@ impl Item {
             MouseSensitivity => "Mouse sensitivity",
             MouseAutocapture => "Mouse auto capture",
             MouseCaptureMessages => "Mouse capture messages",
+            MouseMenuHold => "Hold right button for settings",
             ShellSuggestions => "Shell suggestions",
             ShellColors => "Shell colors",
             SaveShellHistory => "Save shell history",
@@ -1159,7 +1162,7 @@ impl Item {
             Scale | Fullscreen | Aspect | Vrr | Filter | Shader | CrtCurvature | CrtGlow | Composite | CompositeEra => {
                 Applies::Now
             }
-            Cycles | Core | Fpu | Dpmi | DosVersion | IdeHardDisks | BootCdrom | KeyboardLayout | MouseAutocapture | MouseCaptureMessages | ShellSuggestions | ShellColors | SaveShellHistory | Rewind | RewindMemory
+            Cycles | Core | Fpu | Dpmi | DosVersion | IdeHardDisks | BootCdrom | KeyboardLayout | MouseAutocapture | MouseCaptureMessages | MouseMenuHold | ShellSuggestions | ShellColors | SaveShellHistory | Rewind | RewindMemory
             | VoodooRenderer | VoodooScale | VoodooScaleShader | VoodooMsaa | VoodooTextureSampling | VoodooAnisotropy | VoodooFpsCap | VoodooOverlay | PowerVrFilter => Applies::Now,
             Monochrome => Applies::NowAndAtPrompt,
             MonitorEffects => Applies::Now,
@@ -1323,6 +1326,7 @@ impl Item {
             MouseSensitivity => bar(format!("{:.2}x", s.mouse_sensitivity), (s.mouse_sensitivity * 100.0).round() as u16, 1000, 50),
             MouseAutocapture => on_off(s.mouse_autocapture),
             MouseCaptureMessages => on_off(s.mouse_capture_messages),
+            MouseMenuHold => on_off(s.mouse_menu_hold),
             ShellSuggestions => on_off(s.shell.autosuggest),
             ShellColors => on_off(s.shell.colors),
             SaveShellHistory => on_off(s.shell.save_history),
@@ -1554,6 +1558,7 @@ impl Item {
             KeyboardLayout => each(s, crate::keylayout::LayoutSetting::all(), |s, layout| s.keyboard_layout = layout),
             MouseAutocapture => on_off(|s, on| s.mouse_autocapture = on),
             MouseCaptureMessages => on_off(|s, on| s.mouse_capture_messages = on),
+            MouseMenuHold => on_off(|s, on| s.mouse_menu_hold = on),
             ShellSuggestions => on_off(|s, on| s.shell.autosuggest = on),
             ShellColors => on_off(|s, on| s.shell.colors = on),
             SaveShellHistory => on_off(|s, on| s.shell.save_history = on),

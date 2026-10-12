@@ -74,6 +74,7 @@ pub mod lan_command;
 pub mod mcb;
 pub mod mem_command;
 pub mod memfs;
+pub mod menu_hold;
 pub mod mixer;
 pub mod mixer_command;
 pub mod modem_sound;

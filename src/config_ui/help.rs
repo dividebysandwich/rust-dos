@@ -343,6 +343,7 @@ impl Item {
             MouseSensitivity => "mouse-sensitivity",
             MouseAutocapture => "mouse-autocapture",
             MouseCaptureMessages => "mouse-capture-messages",
+            MouseMenuHold => "mouse-menu-hold",
             ShellSuggestions => "shell-suggestions",
             ShellColors => "shell-colors",
             SaveShellHistory => "save-shell-history",

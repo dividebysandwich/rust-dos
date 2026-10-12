@@ -831,6 +831,45 @@ window.addEventListener('blur', releaseInput);
 /// captured, the page moves it by the mouse's motion.
 const pointer = { x: 0, y: 0 };
 const buttonsDown = new Set();
+
+/// The right button held still for three seconds opens the settings
+/// window (`mouse_menu_hold`), for a TV or a remote without F12: the
+/// pending hold, and how far the mouse moved meanwhile.
+const MENU_HOLD_MS = 3000;
+const MENU_HOLD_TRAVEL = 8;
+let menuHold = null;
+
+function menuHoldPress() {
+  menuHoldCancel();
+  if (!guard(() => machine.mouse_menu_hold())) {
+    return;
+  }
+  const hold = { travel: 0 };
+  hold.timer = setTimeout(() => {
+    menuHold = null;
+    if (buttonsDown.delete(2)) {
+      guard(() => machine.mouse_button(2, false));
+    }
+    openSettings();
+  }, MENU_HOLD_MS);
+  menuHold = hold;
+}
+
+function menuHoldMove(event) {
+  if (menuHold) {
+    menuHold.travel += Math.abs(event.movementX) + Math.abs(event.movementY);
+    if (menuHold.travel > MENU_HOLD_TRAVEL) {
+      menuHoldCancel();
+    }
+  }
+}
+
+function menuHoldCancel() {
+  if (menuHold) {
+    clearTimeout(menuHold.timer);
+    menuHold = null;
+  }
+}
 const captured = () => document.pointerLockElement === canvas;
 
 /// The screen pixel under the mouse, through the curve of a curved CRT
@@ -870,6 +909,7 @@ canvas.addEventListener('pointermove', (event) => {
   if (event.pointerType === 'touch') {
     trackpadMove(event);
   } else {
+    menuHoldMove(event);
     movePointer(event);
   }
 });
@@ -889,6 +929,9 @@ canvas.addEventListener('pointerdown', (event) => {
     canvas.setPointerCapture(event.pointerId);
     trackpadDown(event);
     return;
+  }
+  if (event.button === 2) {
+    menuHoldPress();
   }
   // A program using the mouse gets it captured by a click, which it
   // doesn't see, as in DOSBox.
@@ -910,6 +953,9 @@ window.addEventListener('pointerup', (event) => {
   if (event.pointerType === 'touch') {
     trackpadUp(event);
     return;
+  }
+  if (event.button === 2) {
+    menuHoldCancel();
   }
   if (buttonsDown.delete(event.button)) {
     guard(() => machine.mouse_button(event.button, false));

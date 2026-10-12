@@ -339,6 +339,15 @@ When **on**, each mouse capture/release action will show a notification
 message on the top of the screen. While helpful for new users, turning it
 **off** can help reduce notification noise.
 
+# Hold right button for settings {#mouse-menu-hold}
+
+When **on** (the default), holding the right mouse button for **3
+seconds** without moving the mouse opens this settings window, for
+setups with no keyboard or no F12 key, such as a TV with a remote. The
+program still sees the press, and a release as the window opens. Moving
+the mouse while holding the button keeps it an ordinary press. Turn it
+**off** for a game that has you hold the right button still.
+
 # Rewind (Alt+F11) {#rewind}
 
 When **on**, Rust-DOS keeps the last minutes of play: hold **Alt+F11** to
