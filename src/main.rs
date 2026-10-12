@@ -589,8 +589,10 @@ fn main() -> Result<(), String> {
     // recorded (Ctrl+F6).
     let mut screenshot = false;
     let mut sound_recording: Option<WavWriter> = None;
-    // The video being recorded (Ctrl+F7).
+    // The video being recorded (Ctrl+F7), and when it last got a frame:
+    // while the machine stands still it goes on in the host's time.
     let mut video_recording: Option<VideoRecorder> = None;
+    let mut video_frame_at = std::time::Instant::now();
     // The save states, in `states` beside the configuration file: the slot
     // Ctrl+F1 saves to and Ctrl+F2 loads (Ctrl+F3 picks another), and the
     // results of the threads writing them.
@@ -1129,6 +1131,7 @@ fn main() -> Result<(), String> {
                                     {
                                         Ok((path, video)) => {
                                             video_recording = Some(video);
+                                            video_frame_at = std::time::Instant::now();
                                             osd.show(format!("Recording video to {}", path.display()));
                                         }
                                         Err(e) => osd.show(e),
@@ -2126,7 +2129,14 @@ fn main() -> Result<(), String> {
                     let picture = shaded.as_ref().unwrap_or(base);
                     recorder.capture(base);
                     if let Some(video) = &mut video_recording {
-                        if !video.record(picture, samples.clone(), cpu.bus.clock.now_ns()) {
+                        let now = std::time::Instant::now();
+                        let since = now.duration_since(std::mem::replace(&mut video_frame_at, now));
+                        let recorded = if waiting {
+                            video.record_still(picture, since.as_nanos() as u64)
+                        } else {
+                            video.record(picture, samples.clone(), cpu.bus.clock.now_ns())
+                        };
+                        if !recorded {
                             if let Some(video) = video_recording.take() {
                                 match video.stop() {
                                     Ok(frames) => osd.show(format!("Video recording stopped: the file is full ({} frames)", frames)),

@@ -176,14 +176,18 @@ enum Work {
 
 /// A video recording, encoding and writing on its own thread. The frames
 /// come at 60 a second of emulated time, the sound as the machine makes it.
+/// While the machine stands still (paused, or in the settings window) they
+/// come at 60 a second of the host's time, with silence.
 pub struct VideoRecorder {
     work: Sender<Work>,
     thread: Option<JoinHandle<Result<u32, String>>>,
     width: usize,
     height: usize,
-    /// Emulated time at the start, and the frames sent since.
-    start_ns: u64,
+    /// The time recorded, and the frames sent for it.
+    recorded_ns: u64,
     frames: u64,
+    /// The emulated time last recorded.
+    last_ns: u64,
     /// Sound waiting for the next frame.
     carry: Vec<i16>,
 }
@@ -212,7 +216,7 @@ impl VideoRecorder {
             }
             avi.finish()
         });
-        Ok(Self { work, thread: Some(thread), width, height, start_ns: now_ns, frames: 0, carry: Vec::new() })
+        Ok(Self { work, thread: Some(thread), width, height, recorded_ns: 0, frames: 0, last_ns: now_ns, carry: Vec::new() })
     }
 
     /// Record the frames due by emulated time `now_ns`, `frame` the first of
@@ -222,12 +226,31 @@ impl VideoRecorder {
     /// failed).
     pub fn record(&mut self, frame: &crate::video::Frame, sound: Vec<i16>, now_ns: u64) -> bool {
         self.carry.extend(sound);
-        let due = (now_ns.saturating_sub(self.start_ns) as u128 * FPS as u128 / 1_000_000_000) as u64;
+        // A rewind takes emulated time back; the recording goes on.
+        self.recorded_ns += now_ns.saturating_sub(self.last_ns);
+        self.last_ns = now_ns;
+        self.send(frame, false)
+    }
+
+    /// Record the frames due over `ns` of the host's time the machine stood
+    /// still, `frame` the first of them, with silence.
+    pub fn record_still(&mut self, frame: &crate::video::Frame, ns: u64) -> bool {
+        self.recorded_ns += ns;
+        self.send(frame, true)
+    }
+
+    fn send(&mut self, frame: &crate::video::Frame, silent: bool) -> bool {
+        let due = (self.recorded_ns as u128 * FPS as u128 / 1_000_000_000) as u64;
         let mut rgb = (self.frames < due).then(|| zmbv::fitted(frame, self.width, self.height).into_owned());
         while self.frames < due {
+            // The silence a frame lasts, after the sound made before it.
+            let mut sound = std::mem::take(&mut self.carry);
+            if silent {
+                let at = |frames: u64| frames * AUDIO_RATE as u64 / FPS as u64;
+                sound.resize(sound.len() + 2 * (at(self.frames + 1) - at(self.frames)) as usize, 0);
+            }
             self.frames += 1;
-            let work = Work::Frame { rgb: rgb.take(), sound: std::mem::take(&mut self.carry) };
-            if self.work.send(work).is_err() {
+            if self.work.send(Work::Frame { rgb: rgb.take(), sound }).is_err() {
                 return false;
             }
         }
@@ -295,5 +318,30 @@ mod tests {
         let audio_strh = 12 + 8 + 4 + (8 + 56) + (12 + (8 + 56) + (8 + 40)) + 12;
         assert_eq!(&bytes[audio_strh..audio_strh + 4], b"strh");
         assert_eq!(u32_at(&bytes, audio_strh + 8 + 32), 60 * 735, "sound frames");
+    }
+
+    #[test]
+    fn a_recording_goes_on_while_the_machine_stands_still() {
+        let path = std::env::temp_dir().join(format!("rust-dos-avi-still-{}.avi", std::process::id()));
+        let mut recorder = VideoRecorder::start(&path, 32, 16, 1_000_000_000).unwrap();
+        let frame = Frame::new(32, 16);
+        let sixtieth = 1_000_000_000 / 60 + 1;
+        // Half a second running, half a second paused, then a rewind of a
+        // second and half a second running again.
+        for i in 1..=30u64 {
+            assert!(recorder.record(&frame, vec![0; 1470], 1_000_000_000 + i * sixtieth));
+        }
+        for _ in 0..30 {
+            assert!(recorder.record_still(&frame, sixtieth));
+        }
+        for i in 0..=30u64 {
+            let sound = if i == 0 { Vec::new() } else { vec![0; 1470] };
+            assert!(recorder.record(&frame, sound, i * sixtieth));
+        }
+        assert_eq!(recorder.stop().unwrap(), 90);
+        let bytes = std::fs::read(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let audio_strh = 12 + 8 + 4 + (8 + 56) + (12 + (8 + 56) + (8 + 40)) + 12;
+        assert_eq!(u32_at(&bytes, audio_strh + 8 + 32), 90 * 735, "the sound as long as the pictures");
     }
 }
