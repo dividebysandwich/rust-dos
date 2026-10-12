@@ -77,9 +77,6 @@ struct Fetch {
     window: CodeWindow,
     /// The dynamic recompiler, taken out of the CPU like the cache.
     dynrec: DynState,
-    /// A profile runs: the interpreter notes each instruction it runs
-    /// (`profile::WORD`).
-    profiling: bool,
 }
 
 /// The page instructions are being fetched from: where it is in physical
@@ -178,7 +175,6 @@ impl Fetch {
             cache: std::mem::take(&mut cpu.decode_cache),
             window: CodeWindow::NONE,
             dynrec: std::mem::take(&mut cpu.dynrec),
-            profiling: cpu.bus.profile.is_some(),
         }
     }
 
@@ -203,22 +199,31 @@ pub fn run_batch(cpu: &mut Cpu, hook: &mut dyn ExecHook, hot: bool) -> StopReaso
     // test for it on every instruction, and the interpreter's doesn't look
     // for translated code. A program that switches to protected mode
     // during the batch (`core=auto`) goes on the recompiler in the next.
+    // The copies for a running profile note each interpreted instruction
+    // (`profile::WORD`); the others have no trace of the profiler.
     let dynamic = cpu.dynamic_active() && !(hot && hook.per_instruction());
-    let reason = match (hot, dynamic) {
-        (false, false) => run::<false, false>(cpu, &mut fetch, hook),
-        (false, true) => run::<false, true>(cpu, &mut fetch, hook),
-        (true, false) => run::<true, false>(cpu, &mut fetch, hook),
-        (true, true) => run::<true, true>(cpu, &mut fetch, hook),
+    let reason = match (hot, dynamic, cpu.bus.profile.is_some()) {
+        (false, false, false) => run::<false, false, false>(cpu, &mut fetch, hook),
+        (false, true, false) => run::<false, true, false>(cpu, &mut fetch, hook),
+        (true, false, false) => run::<true, false, false>(cpu, &mut fetch, hook),
+        (true, true, false) => run::<true, true, false>(cpu, &mut fetch, hook),
+        (false, false, true) => run::<false, false, true>(cpu, &mut fetch, hook),
+        (false, true, true) => run::<false, true, true>(cpu, &mut fetch, hook),
+        (true, false, true) => run::<true, false, true>(cpu, &mut fetch, hook),
+        (true, true, true) => run::<true, true, true>(cpu, &mut fetch, hook),
     };
     fetch.finish(cpu);
     reason
 }
 
-fn run<const HOT: bool, const DYN: bool>(cpu: &mut Cpu, fetch: &mut Fetch, hook: &mut dyn ExecHook) -> StopReason {
+fn run<const HOT: bool, const DYN: bool, const PROF: bool>(cpu: &mut Cpu, fetch: &mut Fetch, hook: &mut dyn ExecHook) -> StopReason {
     loop {
         if cpu.bus.clock.icount >= cpu.bus.clock.deadline {
-            let _profile = profile::zone(profile::Zone::Timers);
-            crate::idle::at_event(cpu);
+            if PROF {
+                profile::within(profile::Zone::Timers, || crate::idle::at_event(cpu));
+            } else {
+                crate::idle::at_event(cpu);
+            }
             if cpu.bus.clock.icount >= cpu.bus.clock.batch_end() {
                 return StopReason::BatchEnd;
             }
@@ -252,8 +257,8 @@ fn run<const HOT: bool, const DYN: bool>(cpu: &mut Cpu, fetch: &mut Fetch, hook:
             if !HOT && cpu.state != CpuState::RebootShell && cpu.batch.marked_line_waits() {
                 return StopReason::Hook;
             }
-            let _profile = profile::zone(profile::Zone::Shell);
-            match shell_services(cpu) {
+            let shell = if PROF { profile::within(profile::Zone::Shell, || shell_services(cpu)) } else { shell_services(cpu) };
+            match shell {
                 Shell::Idle => {}
                 // Nothing after EXIT runs, not even the rest of its batch file.
                 Shell::Handled if cpu.bus.exit_requested => return StopReason::Exit,
@@ -270,20 +275,22 @@ fn run<const HOT: bool, const DYN: bool>(cpu: &mut Cpu, fetch: &mut Fetch, hook:
         let stop = if !HOT && cpu.bus.observe.watching() {
             // A busy-wait loop is looked for or proven (`idle`): one
             // instruction at a time, on the interpreter.
-            let profile = profile::zone(profile::Zone::IdleProof);
-            crate::idle::before_instruction(cpu);
-            drop(profile);
+            if PROF {
+                profile::within(profile::Zone::IdleProof, || crate::idle::before_instruction(cpu));
+            } else {
+                crate::idle::before_instruction(cpu);
+            }
             if cpu.bus.clock.icount >= cpu.bus.clock.deadline {
                 // Passes were skipped up to the next timer event.
                 continue;
             }
-            instruction::<false, false>(cpu, fetch, hook)
+            instruction::<false, false, PROF>(cpu, fetch, hook)
         } else if DYN && !cpu.irq_shadow && !cpu.get_cpu_flag(CpuFlags::TF) && cpu.dynamic_active() {
-            dynamic::<HOT>(cpu, fetch, hook, false)
+            dynamic::<HOT, PROF>(cpu, fetch, hook, false)
         } else if !HOT && !DYN {
-            instruction::<HOT, true>(cpu, fetch, hook)
+            instruction::<HOT, true, PROF>(cpu, fetch, hook)
         } else {
-            instruction::<HOT, false>(cpu, fetch, hook)
+            instruction::<HOT, false, PROF>(cpu, fetch, hook)
         };
         if let Some(reason) = stop {
             return reason;
@@ -337,11 +344,13 @@ impl Cpu {
             return;
         }
         let mut fetch = Fetch::new(self);
-        if self.dynamic_active() && !self.irq_shadow && !self.get_cpu_flag(CpuFlags::TF) {
-            dynamic::<false>(self, &mut fetch, &mut NoHook, true);
-        } else {
-            instruction::<false, false>(self, &mut fetch, &mut NoHook);
-        }
+        let translated = self.dynamic_active() && !self.irq_shadow && !self.get_cpu_flag(CpuFlags::TF);
+        match (translated, self.bus.profile.is_some()) {
+            (true, false) => dynamic::<false, false>(self, &mut fetch, &mut NoHook, true),
+            (true, true) => dynamic::<false, true>(self, &mut fetch, &mut NoHook, true),
+            (false, false) => instruction::<false, false, false>(self, &mut fetch, &mut NoHook),
+            (false, true) => instruction::<false, false, true>(self, &mut fetch, &mut NoHook),
+        };
         fetch.finish(self);
     }
 
@@ -872,7 +881,7 @@ pub(crate) struct At {
 /// Run one instruction or emulator service trap at CS:IP, and with
 /// `CHAIN` the ones after it that `chain` can run.
 #[inline(always)]
-fn instruction<const HOT: bool, const CHAIN: bool>(
+fn instruction<const HOT: bool, const CHAIN: bool, const PROF: bool>(
     cpu: &mut Cpu,
     fetch: &mut Fetch,
     hook: &mut dyn ExecHook,
@@ -880,7 +889,7 @@ fn instruction<const HOT: bool, const CHAIN: bool>(
     // This instruction ends the interrupt shadow of the previous one.
     cpu.irq_shadow = false;
     let at = fetch_location(cpu, fetch)?;
-    execute_at::<HOT, CHAIN>(cpu, fetch, hook, at)
+    execute_at::<HOT, CHAIN, PROF>(cpu, fetch, hook, at)
 }
 
 /// Run translated code from CS:EIP, or the instruction there through the
@@ -890,7 +899,7 @@ fn instruction<const HOT: bool, const CHAIN: bool>(
 /// the interpreter looks for one after every instruction. With `single`,
 /// translated blocks hold one instruction.
 #[inline(always)]
-fn dynamic<const HOT: bool>(
+fn dynamic<const HOT: bool, const PROF: bool>(
     cpu: &mut Cpu,
     fetch: &mut Fetch,
     hook: &mut dyn ExecHook,
@@ -906,7 +915,7 @@ fn dynamic<const HOT: bool>(
         && !cpu.in_shell_code()
         && !is_service_trap(fetch.ram, at.phys_ip);
     if !translatable {
-        return execute_at::<false, false>(cpu, fetch, hook, at);
+        return execute_at::<false, false, PROF>(cpu, fetch, hook, at);
     }
     // What the code window depends on, before the blocks run.
     let window = (cpu.tlb.epoch, cpu.cpl, cpu.bus.a20_mask());
@@ -914,8 +923,8 @@ fn dynamic<const HOT: bool>(
         // No block runs here (or none fits before the timer event, which
         // the interpreter then runs up to): the interpreter goes on through
         // the simple instructions after this one, as on its own.
-        Run::Interpret if !single => execute_at::<false, true>(cpu, fetch, hook, at),
-        Run::Interpret => execute_at::<false, false>(cpu, fetch, hook, at),
+        Run::Interpret if !single => execute_at::<false, true, PROF>(cpu, fetch, hook, at),
+        Run::Interpret => execute_at::<false, false, PROF>(cpu, fetch, hook, at),
         Run::Ran { page } => {
             fetch.window.moved(page, window);
             finish_instruction(cpu);
@@ -952,9 +961,9 @@ fn fetch_location(cpu: &mut Cpu, fetch: &mut Fetch) -> Option<At> {
 
 /// Run the instruction `fetch_location` found. `HOOK` calls the
 /// debugger's `before_exec` first; `CHAIN` goes on with the instructions
-/// after a simple one in `chain`.
+/// after a simple one in `chain`; `PROF` notes it for the profiler.
 #[inline(always)]
-fn execute_at<const HOOK: bool, const CHAIN: bool>(
+fn execute_at<const HOOK: bool, const CHAIN: bool, const PROF: bool>(
     cpu: &mut Cpu,
     fetch: &mut Fetch,
     hook: &mut dyn ExecHook,
@@ -964,7 +973,7 @@ fn execute_at<const HOOK: bool, const CHAIN: bool>(
     if HOOK && hook.before_exec(cpu, phys_ip, fetch.ram) {
         return Some(StopReason::Paused);
     }
-    if fetch.profiling {
+    if PROF {
         note_instruction(cpu, eip, code32);
     }
     cpu.executed += 1;
@@ -1051,7 +1060,7 @@ fn execute_at<const HOOK: bool, const CHAIN: bool>(
     cpu.bus.clock.icount += 1;
     finish_instruction(cpu);
     if chains && cpu.state == CpuState::Running && !cpu.in_shell_code() {
-        chain(cpu, fetch, code32);
+        chain::<PROF>(cpu, fetch, code32);
     }
     None
 }
@@ -1063,7 +1072,7 @@ fn execute_at<const HOOK: bool, const CHAIN: bool>(
 /// instruction cache. Stops after an instruction that isn't simple or
 /// faults, and before one the loop has to find or decode itself.
 #[inline(always)]
-fn chain(cpu: &mut Cpu, fetch: &mut Fetch, code32: bool) {
+fn chain<const PROF: bool>(cpu: &mut Cpu, fetch: &mut Fetch, code32: bool) {
     let cs = cpu.seg_cache(Seg::CS);
     let (cs_base, cs_limit) = (cs.base, cs.limit);
     let CodeWindow { lin: window_lin, len: window_len, phys: window_phys, .. } = fetch.window;
@@ -1088,7 +1097,7 @@ fn chain(cpu: &mut Cpu, fetch: &mut Fetch, code32: bool) {
         let Some((instr, handler, simple)) = fetch.cache.get(phys_ip, eip, code32, page_gen) else {
             return;
         };
-        if fetch.profiling {
+        if PROF {
             note_instruction(cpu, eip, code32);
         }
         cpu.executed += 1;

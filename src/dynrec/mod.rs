@@ -901,7 +901,7 @@ mod engine {
                 let ret = unsafe { (self.enter)(cpu, &mut *self.ctx, code) };
                 if profiling {
                     // Back in Rust, still for the block that left.
-                    crate::profile::set_zone(crate::profile::Zone::JitDispatch);
+                    crate::profile::set_zone_here(crate::profile::Zone::JitDispatch);
                 }
                 if std::mem::take(&mut self.ctx.vga_wrote) != 0 {
                     // The code wrote the VGA's planes itself.

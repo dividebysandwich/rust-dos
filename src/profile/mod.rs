@@ -411,6 +411,14 @@ fn set_zone_now(zone: Zone) {
     }
 }
 
+/// `set_zone` on the thread being profiled, as the caller knows (its
+/// machine has the profile's counters): no check of the thread.
+#[inline(always)]
+pub fn set_zone_here(zone: Zone) {
+    let now = WORD.load(Ordering::Relaxed);
+    WORD.store(now & !ZONE_MASK | (zone as u64) << ZONE_SHIFT, Ordering::Relaxed);
+}
+
 /// A zone for as long as it lives, inside whatever the thread was doing:
 /// the guest code stays, and the zone before comes back when it drops, so
 /// nested zones count only their own time.
@@ -447,6 +455,14 @@ impl Drop for ZoneGuard {
             WORD.store(prev, Ordering::Relaxed);
         }
     }
+}
+
+/// Run `f` in `zone`. Out of line, so a hot loop that calls it only in
+/// its copy for profiling (a const generic) keeps no guard in the other.
+#[inline(never)]
+pub fn within<R>(zone: Zone, f: impl FnOnce() -> R) -> R {
+    let _zone = self::zone(zone);
+    f()
 }
 
 /// The word now (the sampler's read, and the tests').

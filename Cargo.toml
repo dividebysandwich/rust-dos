@@ -235,3 +235,7 @@ harness = false
 [[bench]]
 name = "host"
 harness = false
+
+[[bench]]
+name = "cpu"
+harness = false
