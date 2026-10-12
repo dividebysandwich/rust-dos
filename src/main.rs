@@ -718,6 +718,9 @@ fn main() -> Result<(), String> {
     // Until when the scene's PC shows its hard disk and floppy lights.
     let mut hdd_light = std::time::Instant::now();
     let mut floppy_light = std::time::Instant::now();
+    // The running game's manuals, for the booklet in the 3D scene, and the
+    // game they are of.
+    let mut vr_manuals: (Option<String>, Vec<PathBuf>) = (None, Vec::new());
     // The mouse held in SDL's relative mode while Ctrl+Shift fly the 3D
     // scene's camera, and the start of the last frame's flight.
     let mut steering_mouse = false;
@@ -1783,6 +1786,18 @@ fn main() -> Result<(), String> {
                 hdd: now < hdd_light,
                 floppy: now < floppy_light,
             });
+            if vr_manuals.0.as_deref() != game.as_ref().map(|g| g.id.as_str()) {
+                vr_manuals.0 = game.as_ref().map(|g| g.id.clone());
+                vr_manuals.1 = match (&game, games_dir(saved.file.as_deref())) {
+                    (Some(game), Some(dir)) => {
+                        let text = std::fs::read_to_string(dir.join(format!("{}.conf", game.id))).unwrap_or_default();
+                        let home = rust_dos::hostdirs::home_dir();
+                        games::manuals(&dir, &game.id, &text, home.as_deref()).into_iter().map(|m| m.path).collect()
+                    }
+                    _ => Vec::new(),
+                };
+            }
+            display.set_manuals(&vr_manuals.1);
         }
         let mix = display.audio_mix().filter(|_| settings.vr.spatial_audio);
         audio_mix.set(mix.unwrap_or(display::audio_mix::IDENTITY));

@@ -60,6 +60,7 @@ blender --background --factory-startup --python assets/vr/make_test_room.py
 | `spawn` | Empty (or a camera) | Where your eyes start, and which way they face. |
 | `speaker_left`, `speaker_right` | Empty | Where the left and right sound channels come from. |
 | `led_power`, `led_turbo`, `led_hdd`, `led_floppy` | Mesh | The PC's front-panel lights. |
+| `manual` | Empty, or the parent of meshes | Where the game's manual lies, to be picked up in VR. See [Props](#props). |
 
 Names are not case-sensitive. LED and speaker names may carry Blender's
 copy suffix (`led_hdd.001` works). **`screen` and `spawn` must be exact**:
@@ -72,6 +73,7 @@ Properties > Custom Properties):
 |---|---|---|
 | `rustdos_screen` | `1` or `True` (a boolean) | `screen` |
 | `rustdos_led` | `power`, `turbo`, `hdd` or `floppy` (a string) | `led_…` |
+| `rustdos_prop` | `manual`, `manual_page_left` or `manual_page_right` (a string) | that name |
 
 Custom properties only reach Rust-DOS if **Include > Custom Properties** is
 ticked in the export dialog.
@@ -184,6 +186,32 @@ How they look:
   between all four LEDs and they still switch on and off separately.
 - Keep LEDs small (a few millimetres) and slightly in front of the panel, so
   they don't flicker against it.
+
+## Props
+
+The **manual** of the game that runs (from its profile's manuals and
+extras, while it has one) lies on the desk, to be picked up with a VR
+controller's grip button. Its pages turn with the thumbstick of the hand
+holding it; with several manuals, the A/X button picks the next. Put
+down, it settles upright on what is below it. In the window
+(`mode=desktop`) it lies where the scene has it.
+
+Rust-DOS brings its own model. Place it with an **empty** named `manual`,
+on the desk, its **+Y pointing away from you** (the way you look from the
+spawn). A scene without it gets it anyway, in front of the spawn on what
+is below your left hand, or in the air there if nothing is.
+
+To use **your own model**, make the empty (or a mesh) named `manual` the
+parent of the meshes. Its origin is where it lies, on the surface. Below
+it:
+
+| Object | What it does |
+|---|---|
+| `manual_page_left`, `manual_page_right` | The open booklet's pages: flat meshes facing up, whose UVs place the page (UV 0,0 at the page's top left). A page turning is a sheet the size of the right page, hinged at its left edge. |
+
+Everything else below it is its body. Props move, so they aren't in the
+shadows and the bounced light worked out for the room: they are lit by
+the lights and the screen, and cast no shadows of their own.
 
 ## Materials
 

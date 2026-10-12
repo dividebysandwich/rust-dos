@@ -9,7 +9,8 @@
 //! shows; the scene itself is drawn every frame, since the viewer moves.
 //! The PC in the scene has its lights lit as the machine's would be, the
 //! sound comes from the screen's sides, and the headset's controllers
-//! point at the screen as the mouse and are a gamepad.
+//! point at the screen as the mouse and are a gamepad. The game's manual
+//! and a joystick lie on the desk, to be picked up in the headset.
 
 mod camera;
 mod controls;
@@ -19,6 +20,7 @@ mod gi;
 #[cfg(xr)]
 mod headset;
 mod pick;
+mod props;
 mod render;
 mod scene;
 mod shadow;
@@ -78,6 +80,11 @@ pub struct Stage {
     loading: Option<(Option<PathBuf>, Receiver<Result<Scene, String>>)>,
     /// When the window's frame times were last said (RUST_DOS_VR_TIMING).
     timing_since: std::time::Instant,
+    /// The props as the window shows them (where the scene has them), and
+    /// the game's manuals, which they haven't taken yet if `fresh_manuals`.
+    props: props::Props,
+    manuals: Vec<PathBuf>,
+    fresh_manuals: bool,
 }
 
 /// How the window's view is drawn, as `look` says: timed with
@@ -143,6 +150,7 @@ impl Stage {
             screens.push(screen);
         }
         let camera = FlyCamera::at(scene.spawn);
+        let props = props::Props::new(&scene);
         #[allow(unused_mut)]
         let mut stage = Stage {
             scene,
@@ -166,6 +174,9 @@ impl Stage {
             scene_path: settings.scene.clone(),
             loading: None,
             timing_since: std::time::Instant::now(),
+            props,
+            manuals: Vec::new(),
+            fresh_manuals: false,
         };
         if settings.mode == VrMode::Headset {
             notes.extend(stage.start_headset(settings, window, main));
@@ -186,6 +197,7 @@ impl Stage {
             let textures = [self.screens[0].texture, self.screens[1].texture, self.screens[2].texture];
             match headset::Headset::start(window, main, self.glsl, self.scene.clone(), textures, settings) {
                 Ok(headset) => {
+                    headset.set_manuals(self.manuals.clone());
                     self.headset = Some(headset);
                     None
                 }
@@ -211,6 +223,7 @@ impl Stage {
     /// `gl` current. (A scene still being read is let go of.)
     pub fn close(mut self, gl: &glow::Context) {
         self.stop_headset(gl);
+        self.props.delete(gl);
         self.gpu.delete(gl);
         for screen in self.screens {
             screen.delete(gl);
@@ -280,7 +293,11 @@ impl Stage {
         let aspect = drawable.0 as f32 / drawable.1 as f32;
         let view = View { view: self.camera.view(), projection: self.camera.projection(aspect) };
         let format = Format { size: drawable, srgb: false };
-        if let Err(e) = self.gpu.render(gl, &self.scene, &[view], Dest::Own(format), drawable, screen, self.leds, &[]) {
+        if std::mem::take(&mut self.fresh_manuals) {
+            self.props.set_manuals(gl, self.manuals.clone());
+        }
+        let props = self.props.draws(gl, &self.gpu, &self.scene, std::time::Instant::now());
+        if let Err(e) = self.gpu.render(gl, &self.scene, &[view], Dest::Own(format), drawable, screen, self.leds, &props, &[]) {
             eprintln!("[VR] {}", e);
             clear_window(gl, drawable);
             return;
@@ -390,6 +407,7 @@ impl Stage {
         self.scene_path = path;
         self.scene = scene.clone();
         self.camera = FlyCamera::at(scene.spawn);
+        self.props.reset(&scene);
         self.fresh = self.latest.is_some();
         self.shown = None;
         #[cfg(xr)]
@@ -406,6 +424,19 @@ impl Stage {
         #[cfg(xr)]
         if let Some(headset) = &self.headset {
             headset.set_leds(leds);
+        }
+    }
+
+    /// The game's manuals, for the booklet on the desk: none hides it.
+    pub fn set_manuals(&mut self, manuals: &[PathBuf]) {
+        if manuals == self.manuals.as_slice() {
+            return;
+        }
+        self.manuals = manuals.to_vec();
+        self.fresh_manuals = true;
+        #[cfg(xr)]
+        if let Some(headset) = &self.headset {
+            headset.set_manuals(self.manuals.clone());
         }
     }
 

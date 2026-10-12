@@ -1,6 +1,7 @@
 //! What the 3D view shows, as plain data: the meshes with their materials
-//! and pictures, the lights, the screen the emulated picture goes on and
-//! where the viewer starts. It comes from a glTF file exported from
+//! and pictures, the lights, the screen the emulated picture goes on,
+//! where the viewer starts and the things on the desk to pick up (the
+//! game's manual). It comes from a glTF file exported from
 //! Blender, or is the built-in test room.
 
 use glam::{Mat3, Mat4, Vec2, Vec3};
@@ -254,6 +255,93 @@ impl Spawn {
     }
 }
 
+/// Something to pick up (see `props`): the game's manual.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PropKind {
+    Manual,
+}
+
+impl PropKind {
+    /// A prop by its node's name (`manual`, `manual.001`) or custom
+    /// property's value.
+    fn parse(name: &str) -> Option<Self> {
+        let name = name.trim().to_ascii_lowercase();
+        match name.split('.').next().unwrap_or(&name) {
+            "manual" => Some(PropKind::Manual),
+            _ => None,
+        }
+    }
+}
+
+/// What a part of a prop is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PartRole {
+    Body,
+    /// The manual's open pages, which show its pages' pictures: UV (0, 0)
+    /// is a page's top left.
+    PageLeft,
+    PageRight,
+    /// A page being turned, both its sides, hinged at the spine: in the
+    /// frame of `Prop::hinge`, lying along +X.
+    SheetFront,
+    SheetBack,
+}
+
+pub struct PropPart {
+    pub role: PartRole,
+    pub mesh: Mesh,
+}
+
+/// A prop as the scene has it, where it starts.
+pub struct Prop {
+    pub kind: PropKind,
+    /// Its frame in the scene: where it stands, +Y up and -Z away from
+    /// the player. Without scale.
+    pub pose: Mat4,
+    /// Its parts, in its frame (but the sheet's).
+    pub parts: Vec<PropPart>,
+    /// The spine, where a page turns about the Z axis, in the prop's frame.
+    pub hinge: Vec3,
+    /// The box around it in its frame: where a hand takes it.
+    pub bounds: (Vec3, Vec3),
+}
+
+impl Prop {
+    fn new(kind: PropKind, pose: Mat4) -> Self {
+        Prop { kind, pose, parts: Vec::new(), hinge: Vec3::ZERO, bounds: (Vec3::ZERO, Vec3::ZERO) }
+    }
+
+    fn push(&mut self, role: PartRole, mesh: Mesh) {
+        self.parts.push(PropPart { role, mesh });
+    }
+
+    fn has(&self, role: PartRole) -> bool {
+        self.parts.iter().any(|p| p.role == role)
+    }
+
+    /// The box around the parts of `role` in their own frame.
+    fn bounds_of(&self, role: impl Fn(PartRole) -> bool) -> Option<(Vec3, Vec3)> {
+        let points = self.parts.iter().filter(|p| role(p.role)).flat_map(|p| p.mesh.vertices.iter().map(|v| Vec3::from(v.position)));
+        points.fold(None, |b, p| Some(b.map_or((p, p), |(low, high): (Vec3, Vec3)| (low.min(p), high.max(p)))))
+    }
+
+    /// Work out where it is held, and the sheet a page turns on.
+    fn finish(&mut self) {
+        self.bounds = self.bounds_of(|r| matches!(r, PartRole::Body | PartRole::PageLeft | PartRole::PageRight)).unwrap_or_default();
+        if let Some((a, b)) = self.bounds_of(|r| r == PartRole::PageRight)
+            && !self.has(PartRole::SheetFront)
+        {
+            // A sheet the size of the right page, a little above it.
+            let width = b.x - a.x;
+            self.hinge = Vec3::new(a.x, b.y + 0.0006, 0.0);
+            let material = self.parts.iter().find(|p| p.role == PartRole::PageRight).map_or(0, |p| p.mesh.material);
+            for (role, up) in [(PartRole::SheetFront, 1.0), (PartRole::SheetBack, -1.0)] {
+                self.push(role, sheet(width, (a.z, b.z), up, material));
+            }
+        }
+    }
+}
+
 pub struct Scene {
     pub meshes: Vec<Mesh>,
     pub materials: Vec<Material>,
@@ -289,6 +377,9 @@ pub struct Scene {
     /// The light bounced around it, once the first view of it works it
     /// out: shared by the window's and the headset's.
     pub probes: std::sync::OnceLock<Option<super::gi::Probes>>,
+    /// The things to pick up, where they start: not in `meshes`, nor in
+    /// the lighting worked out for the room, since they move.
+    pub props: Vec<Prop>,
 }
 
 /// How far from the screen and the viewer's start the lighting is worked
@@ -297,6 +388,12 @@ const FOCUS: f32 = 12.0;
 
 /// How brightly the screen lights the room, unless the scene says.
 const SCREEN_GLOW: f32 = 5.0;
+
+/// The test room's desk: the middle of its top's top, and the top's size.
+const TEST_DESK: Vec3 = Vec3::new(0.0, 0.72, -0.55);
+const TEST_DESK_TOP: Vec3 = Vec3::new(1.2, 0.03, 0.6);
+/// Where the manual stands on it.
+const TEST_PROPS: [(PropKind, Vec3); 1] = [(PropKind::Manual, Vec3::new(-0.28, 0.72, -0.47))];
 
 /// The sunset sky's sun: low, ahead and to the left.
 fn sunset_sun() -> Vec3 {
@@ -339,6 +436,8 @@ impl Scene {
             Material::led(Led::Turbo, [1.0, 0.65, 0.05]),
             Material::led(Led::Hdd, [1.0, 0.12, 0.05]),
             Material::led(Led::Floppy, [0.1, 1.0, 0.15]),
+            // The desk.
+            Material::plain(srgb(0x6b4a30), Shading::Lit),
         ];
         let mut meshes = Vec::new();
         // The floor, so big that its edges are lost in the haze.
@@ -388,6 +487,14 @@ impl Scene {
             let x = -0.05 + i as f32 * 0.025;
             meshes.push(cuboid(on_front(x, 0.0), Vec3::new(0.008, 0.008, 0.008), material));
         }
+        // A desk in front of the viewer, its top at `DESK`'s height, for the
+        // manual: the top and four legs.
+        let (desk, top) = (TEST_DESK, TEST_DESK_TOP);
+        meshes.push(cuboid(desk - Vec3::Y * top.y / 2.0, top, 9));
+        for (x, z) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+            let leg = Vec3::new(desk.x + x * (top.x / 2.0 - 0.04), (desk.y - top.y) / 2.0, desk.z + z * (top.z / 2.0 - 0.04));
+            meshes.push(cuboid(leg, Vec3::new(0.04, desk.y - top.y, 0.04), 9));
+        }
         let mut scene = Scene {
             meshes,
             materials,
@@ -406,13 +513,79 @@ impl Scene {
             screen_glow: SCREEN_GLOW,
             source: hash(b"the test room"),
             probes: std::sync::OnceLock::new(),
+            props: Vec::new(),
         };
         let (sun, ambient) = sunset_lights();
         scene.lights.push(sun);
         scene.ambient = ambient;
         scene.collect_screen();
         scene.speakers = scene.screen_speakers();
+        for (kind, at) in TEST_PROPS {
+            let prop = scene.built_in_prop(kind, Mat4::from_translation(at));
+            scene.props.push(prop);
+        }
         scene
+    }
+
+    fn add_material(&mut self, material: Material) -> usize {
+        self.materials.push(material);
+        self.materials.len() - 1
+    }
+
+    /// Rust-DOS's own model of a prop, standing at `pose`.
+    fn built_in_prop(&mut self, kind: PropKind, pose: Mat4) -> Prop {
+        let mut prop = Prop::new(kind, pose);
+        match kind {
+            PropKind::Manual => {
+                // An A5 booklet, open: its cover, the pages' edges, and the
+                // two pages showing.
+                let cover = self.add_material(Material::plain(srgb(0x23325e), Shading::Lit));
+                let edges = self.add_material(Material::plain(srgb(0xdedbd0), Shading::Lit));
+                let paper = self.add_material(Material::plain(srgb(0xf4f2ec), Shading::Lit));
+                let (w, d) = (0.148, 0.21);
+                prop.push(PartRole::Body, cuboid(Vec3::new(0.0, 0.0015, 0.0), Vec3::new(2.0 * w + 0.008, 0.003, d + 0.006), cover));
+                prop.push(PartRole::Body, cuboid(Vec3::new(0.0, 0.0055, 0.0), Vec3::new(2.0 * w, 0.005, d), edges));
+                for (role, x0) in [(PartRole::PageLeft, -w), (PartRole::PageRight, 0.0)] {
+                    prop.push(role, page(Vec3::new(x0, 0.0081, -d / 2.0), w, d, paper));
+                }
+            }
+        }
+        prop.finish();
+        prop
+    }
+
+    /// Rust-DOS's own manual, for a scene without it: standing on what is
+    /// below the viewer's left hand, facing the viewer; in the air there if
+    /// nothing is.
+    fn add_missing_props(&mut self) {
+        let spawn = self.spawn;
+        let turn = Mat4::from_rotation_y(spawn.yaw);
+        for (kind, side) in [(PropKind::Manual, -0.25)] {
+            if self.props.iter().any(|p| p.kind == kind) {
+                continue;
+            }
+            let over = spawn.position + turn.transform_vector3(Vec3::new(side, 0.0, -0.45));
+            let floor = self.surface_below(over, 1.2).unwrap_or(over - Vec3::Y * 0.45);
+            let prop = self.built_in_prop(kind, Mat4::from_translation(floor) * turn);
+            self.props.push(prop);
+        }
+    }
+
+    /// The first opaque surface below `point`, at most `reach` down.
+    pub fn surface_below(&self, point: Vec3, reach: f32) -> Option<Vec3> {
+        let mut nearest: Option<f32> = None;
+        for mesh in self.meshes.iter().filter(|m| self.materials[m.material].casts_shadow()) {
+            for tri in mesh.indices.chunks_exact(3) {
+                let corners = [tri[0], tri[1], tri[2]].map(|i| Vec3::from(mesh.vertices[i as usize].position));
+                if let Some((t, _, _)) = super::pick::hit_triangle(point, Vec3::NEG_Y, corners)
+                    && t <= reach
+                    && nearest.is_none_or(|n| t < n)
+                {
+                    nearest = Some(t);
+                }
+            }
+        }
+        nearest.map(|t| point - Vec3::Y * t)
     }
 
     /// The box around the meshes, cut down to `FOCUS` around the screen
@@ -547,6 +720,7 @@ impl Scene {
                 .map_or(SCREEN_GLOW, |g| g.max(0.0) as f32),
             source: hash(bytes),
             probes: std::sync::OnceLock::new(),
+            props: Vec::new(),
         };
         let mut walk = Walk {
             buffers: &buffers,
@@ -557,6 +731,7 @@ impl Scene {
             speakers: [None; 2],
             leds: Vec::new(),
             screen_stretch: false,
+            prop_places: Vec::new(),
         };
         for node in scene.nodes() {
             walk.node(&mut loaded, node, Mat4::IDENTITY, false)?;
@@ -592,6 +767,12 @@ impl Scene {
             loaded.meshes[mesh].material = loaded.materials.len();
             loaded.materials.push(material);
         }
+        // Props placed by an empty of their name: Rust-DOS's model.
+        for (kind, pose) in walk.prop_places {
+            let prop = loaded.built_in_prop(kind, pose);
+            loaded.props.push(prop);
+        }
+        loaded.add_missing_props();
         Ok(loaded)
     }
 }
@@ -611,6 +792,25 @@ struct Walk<'a> {
     leds: Vec<(usize, Led)>,
     /// A screen's `rustdos_screen_fit` is `stretch`.
     screen_stretch: bool,
+    /// Props that are only an empty: where Rust-DOS's model goes.
+    prop_places: Vec<(PropKind, Mat4)>,
+}
+
+/// What a node of a prop is, by its name or `rustdos_prop`.
+fn part_role(node: &gltf::Node) -> Option<PartRole> {
+    let named = extra(node.extras(), "rustdos_prop").and_then(|v| v.as_str().map(str::to_string)).or_else(|| node.name().map(str::to_string))?;
+    let name = named.trim().to_ascii_lowercase();
+    match name.split('.').next().unwrap_or(&name) {
+        "manual_page_left" => Some(PartRole::PageLeft),
+        "manual_page_right" => Some(PartRole::PageRight),
+        _ => None,
+    }
+}
+
+/// Where a node is, without its scale.
+fn rigid(world: Mat4) -> Mat4 {
+    let (_, rotation, position) = world.to_scale_rotation_translation();
+    Mat4::from_rotation_translation(rotation, position)
 }
 
 /// The lights of a scene are at most this many; the shader has room for
@@ -620,6 +820,12 @@ pub const MAX_LIGHTS: usize = 8;
 impl Walk<'_> {
     fn node(&mut self, scene: &mut Scene, node: gltf::Node, parent: Mat4, in_screen: bool) -> Result<(), String> {
         let world = parent * Mat4::from_cols_array_2d(&node.transform().matrix());
+        let prop = extra(node.extras(), "rustdos_prop")
+            .and_then(|v| v.as_str().and_then(PropKind::parse))
+            .or_else(|| node.name().and_then(PropKind::parse));
+        if let Some(kind) = prop.filter(|_| !in_screen) {
+            return self.prop(scene, node, world, kind);
+        }
         let named = |name: Option<&str>, wanted: &str| name.is_some_and(|n| n.eq_ignore_ascii_case(wanted));
         if named(node.name(), "spawn") {
             self.spawn = Some(Spawn::from_matrix(world));
@@ -667,6 +873,62 @@ impl Walk<'_> {
             .or_else(|| node.name().filter(|n| n.to_ascii_lowercase().starts_with("led_")).and_then(Led::parse))
             .or_else(|| node.mesh().and_then(|m| m.name()).filter(|n| n.to_ascii_lowercase().starts_with("led_")).and_then(Led::parse));
         if let Some(mesh) = node.mesh() {
+            for (mut read, primitive) in self.read_mesh(&mesh, world)? {
+                read.material = if screen {
+                    self.screen_material
+                } else {
+                    primitive.material().index().unwrap_or(self.default_material)
+                };
+                if let Some(led) = led.filter(|_| !screen) {
+                    self.leds.push((scene.meshes.len(), led));
+                }
+                scene.meshes.push(read);
+            }
+        }
+        for child in node.children() {
+            self.node(scene, child, world, screen)?;
+        }
+        Ok(())
+    }
+
+    /// A prop and what is below it: its meshes in its frame, apart from
+    /// the room's. Only an empty, it is where Rust-DOS's model goes.
+    fn prop(&mut self, scene: &mut Scene, node: gltf::Node, world: Mat4, kind: PropKind) -> Result<(), String> {
+        let pose = rigid(world);
+        let mut prop = Prop::new(kind, pose);
+        self.prop_node(&mut prop, node, world, pose.inverse(), PartRole::Body)?;
+        if prop.parts.is_empty() {
+            self.prop_places.push((kind, pose));
+        } else {
+            prop.finish();
+            scene.props.push(prop);
+        }
+        Ok(())
+    }
+
+    /// A node of a prop, its meshes taken into the prop's frame by `to`.
+    fn prop_node(&mut self, prop: &mut Prop, node: gltf::Node, world: Mat4, to: Mat4, mut role: PartRole) -> Result<(), String> {
+        if let Some(part) = part_role(&node) {
+            role = part;
+        }
+        if let Some(mesh) = node.mesh() {
+            for (mut read, primitive) in self.read_mesh(&mesh, to * world)? {
+                read.material = primitive.material().index().unwrap_or(self.default_material);
+                prop.push(role, read);
+            }
+        }
+        for child in node.children() {
+            let child_world = world * Mat4::from_cols_array_2d(&child.transform().matrix());
+            self.prop_node(prop, child, child_world, to, role)?;
+        }
+        Ok(())
+    }
+
+    /// A mesh's triangle primitives, through `world`, with their
+    /// primitives (for the material).
+    fn read_mesh<'m>(&self, mesh: &gltf::Mesh<'m>, world: Mat4) -> Result<Vec<(Mesh, gltf::Primitive<'m>)>, String> {
+        let mut read = Vec::new();
+        {
             let normals = Mat3::from_mat4(world).inverse().transpose();
             for primitive in mesh.primitives() {
                 if primitive.mode() != gltf::mesh::Mode::Triangles {
@@ -703,21 +965,10 @@ impl Walk<'_> {
                         uv: uvs.get(i).copied().unwrap_or([0.0, 0.0]),
                     })
                     .collect();
-                let material = if screen {
-                    self.screen_material
-                } else {
-                    primitive.material().index().unwrap_or(self.default_material)
-                };
-                if let Some(led) = led.filter(|_| !screen) {
-                    self.leds.push((scene.meshes.len(), led));
-                }
-                scene.meshes.push(Mesh { vertices, indices, material });
+                read.push((Mesh { vertices, indices, material: self.default_material }, primitive));
             }
         }
-        for child in node.children() {
-            self.node(scene, child, world, screen)?;
-        }
-        Ok(())
+        Ok(read)
     }
 }
 
@@ -761,6 +1012,26 @@ fn cuboid(center: Vec3, size: Vec3, material: usize) -> Mesh {
         }
     }
     Mesh { vertices, indices, material }
+}
+
+/// A page lying face up, `w` across and `d` deep from its top left
+/// corner, UV (0, 0) there.
+fn page(corner: Vec3, w: f32, d: f32, material: usize) -> Mesh {
+    let at = |x: f32, z: f32| Vertex { position: (corner + Vec3::new(x * w, 0.0, z * d)).to_array(), normal: [0.0, 1.0, 0.0], uv: [x, z] };
+    Mesh { vertices: vec![at(0.0, 0.0), at(0.0, 1.0), at(1.0, 1.0), at(1.0, 0.0)], indices: vec![0, 1, 2, 0, 2, 3], material }
+}
+
+/// A page being turned, `width` long along +X from the hinge and from
+/// `z.0` to `z.1`: its front faces +Y, its back (`up` -1) -Y, which lies
+/// face up as the left page once turned over.
+fn sheet(width: f32, (z0, z1): (f32, f32), up: f32, material: usize) -> Mesh {
+    let depth = z1 - z0;
+    let at = |x: f32, z: f32| {
+        let u = if up > 0.0 { x } else { 1.0 - x };
+        Vertex { position: [x * width, 0.0, z0 + z * depth], normal: [0.0, up, 0.0], uv: [u, z] }
+    };
+    let indices = if up > 0.0 { vec![0, 1, 2, 0, 2, 3] } else { vec![0, 2, 1, 0, 3, 2] };
+    Mesh { vertices: vec![at(0.0, 0.0), at(0.0, 1.0), at(1.0, 1.0), at(1.0, 0.0)], indices, material }
 }
 
 /// A hash of some bytes, to tell scenes apart.
@@ -1006,6 +1277,59 @@ mod tests {
             assert!(near(a, b), "{:?}: {:?} {:?}", led, a, b);
             assert!(ea.iter().zip(eb).all(|(x, y)| (x - y).abs() < 1e-4), "{:?}: {:?} {:?}", led, ea, eb);
         }
+        // The manual on the desk, as Rust-DOS's model.
+        assert_eq!(blend.props.len(), built.props.len());
+        for b in &built.props {
+            let a = blend.props.iter().find(|a| a.kind == b.kind).expect("the prop");
+            assert!(a.pose.abs_diff_eq(b.pose, 1e-4), "{:?}: {:?} {:?}", a.kind, a.pose, b.pose);
+            assert_eq!(a.parts.len(), b.parts.len());
+        }
+    }
+
+    #[test]
+    fn props_stand_on_the_desk_and_have_their_parts() {
+        let room = Scene::test_room();
+        let kinds: Vec<PropKind> = room.props.iter().map(|p| p.kind).collect();
+        assert_eq!(kinds, [PropKind::Manual]);
+        for prop in &room.props {
+            let at = prop.pose.transform_point3(Vec3::ZERO);
+            assert_eq!(room.surface_below(at + Vec3::Y * 0.1, 1.0), Some(at), "{:?} on the desk", prop.kind);
+            assert!(prop.bounds.0.y >= -1e-4 && prop.bounds.1.y > 0.0);
+        }
+        let manual = &room.props[0];
+        for role in [PartRole::PageLeft, PartRole::PageRight, PartRole::SheetFront, PartRole::SheetBack] {
+            assert!(manual.has(role), "{:?}", role);
+        }
+        // The sheet turns about the spine, between the pages.
+        assert!(manual.hinge.x.abs() < 1e-4);
+        // A scene without it gets it where the hands are, in the air in the
+        // glTF quad's scene (nothing is below).
+        let scene = Scene::from_gltf(quad_gltf().as_bytes(), Path::new(".")).unwrap();
+        assert_eq!(scene.props.len(), 1);
+    }
+
+    #[test]
+    fn gltf_props_keep_their_own_meshes() {
+        // The screen quad, and a manual: a cover with the quad as its mesh
+        // and the right page below it, moved.
+        let text = quad_gltf()
+            .replace(r#""nodes": [0, 2, 3, 4]"#, r#""nodes": [0, 2, 3, 4, 5]"#)
+            .replace(
+                r#"{"name": "Light", "mesh": 0, "extras": {"rustdos_led": "hdd"}, "translation": [5, 0, 0]}"#,
+                r#"{"name": "Light", "mesh": 0, "extras": {"rustdos_led": "hdd"}, "translation": [5, 0, 0]},
+                {"name": "Booklet", "extras": {"rustdos_prop": "manual"}, "mesh": 0, "translation": [1, 0.7, -0.5], "children": [6]},
+                {"name": "manual_page_right", "mesh": 0, "translation": [1, 0.05, 0]}"#,
+            );
+        let scene = Scene::from_gltf(text.as_bytes(), Path::new(".")).unwrap();
+        // Not in the room's meshes.
+        assert_eq!(scene.meshes.len(), 2);
+        let manual = &scene.props[0];
+        assert!(manual.pose.transform_point3(Vec3::ZERO).abs_diff_eq(Vec3::new(1.0, 0.7, -0.5), 1e-4));
+        assert_eq!(manual.parts.iter().filter(|p| p.role == PartRole::Body).count(), 1);
+        // The page is in the prop's frame, and a sheet turns at its left edge.
+        let page = &manual.parts.iter().find(|p| p.role == PartRole::PageRight).unwrap().mesh;
+        assert!(page.vertices.iter().any(|v| v.position == [2.0, 1.05, 0.0]));
+        assert!(manual.has(PartRole::SheetFront) && (manual.hinge.x - 0.0).abs() < 1e-4);
     }
 
     #[test]
