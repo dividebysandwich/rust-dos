@@ -589,8 +589,10 @@ fn main() -> Result<(), String> {
     // recorded (Ctrl+F6).
     let mut screenshot = false;
     let mut sound_recording: Option<WavWriter> = None;
-    // The video being recorded (Ctrl+F7).
+    // The video being recorded (Ctrl+F7), and when it last got a frame:
+    // while the machine stands still it goes on in the host's time.
     let mut video_recording: Option<VideoRecorder> = None;
+    let mut video_frame_at = std::time::Instant::now();
     // The save states, in `states` beside the configuration file: the slot
     // Ctrl+F1 saves to and Ctrl+F2 loads (Ctrl+F3 picks another), and the
     // results of the threads writing them.
@@ -718,6 +720,9 @@ fn main() -> Result<(), String> {
     // Until when the scene's PC shows its hard disk and floppy lights.
     let mut hdd_light = std::time::Instant::now();
     let mut floppy_light = std::time::Instant::now();
+    // The running game's manuals, for the booklet in the 3D scene, and the
+    // game they are of.
+    let mut vr_manuals: (Option<String>, Vec<PathBuf>) = (None, Vec::new());
     // The mouse held in SDL's relative mode while Ctrl+Shift fly the 3D
     // scene's camera, and the start of the last frame's flight.
     let mut steering_mouse = false;
@@ -762,6 +767,7 @@ fn main() -> Result<(), String> {
         let frame_start = std::time::Instant::now();
         if let Some((start, times)) = last_frame {
             stats.record(&cpu.bus, rust_dos::stats::FrameTimes { wall: frame_start - start, ..times });
+            dbg.set_frame_stats(stats.latest());
         }
         // Whether the window's keyboard or mouse reached the machine this
         // frame, which the debug server's journal tells while it holds it.
@@ -1125,6 +1131,7 @@ fn main() -> Result<(), String> {
                                     {
                                         Ok((path, video)) => {
                                             video_recording = Some(video);
+                                            video_frame_at = std::time::Instant::now();
                                             osd.show(format!("Recording video to {}", path.display()));
                                         }
                                         Err(e) => osd.show(e),
@@ -1567,6 +1574,8 @@ fn main() -> Result<(), String> {
             if let Some(mode) = &mut det {
                 mode.resync(&cpu);
             }
+            // The Stats page's emulated speed leaves out the jump.
+            stats.clock_moved(&cpu.bus);
             rewinder.clear();
             achievements.reset();
             if strict_match_loaded {
@@ -1783,6 +1792,18 @@ fn main() -> Result<(), String> {
                 hdd: now < hdd_light,
                 floppy: now < floppy_light,
             });
+            if vr_manuals.0.as_deref() != game.as_ref().map(|g| g.id.as_str()) {
+                vr_manuals.0 = game.as_ref().map(|g| g.id.clone());
+                vr_manuals.1 = match (&game, games_dir(saved.file.as_deref())) {
+                    (Some(game), Some(dir)) => {
+                        let text = std::fs::read_to_string(dir.join(format!("{}.conf", game.id))).unwrap_or_default();
+                        let home = rust_dos::hostdirs::home_dir();
+                        games::manuals(&dir, &game.id, &text, home.as_deref()).into_iter().map(|m| m.path).collect()
+                    }
+                    _ => Vec::new(),
+                };
+            }
+            display.set_manuals(&vr_manuals.1);
         }
         let mix = display.audio_mix().filter(|_| settings.vr.spatial_audio);
         audio_mix.set(mix.unwrap_or(display::audio_mix::IDENTITY));
@@ -2108,7 +2129,14 @@ fn main() -> Result<(), String> {
                     let picture = shaded.as_ref().unwrap_or(base);
                     recorder.capture(base);
                     if let Some(video) = &mut video_recording {
-                        if !video.record(picture, samples.clone(), cpu.bus.clock.now_ns()) {
+                        let now = std::time::Instant::now();
+                        let since = now.duration_since(std::mem::replace(&mut video_frame_at, now));
+                        let recorded = if waiting {
+                            video.record_still(picture, since.as_nanos() as u64)
+                        } else {
+                            video.record(picture, samples.clone(), cpu.bus.clock.now_ns())
+                        };
+                        if !recorded {
                             if let Some(video) = video_recording.take() {
                                 match video.stop() {
                                     Ok(frames) => osd.show(format!("Video recording stopped: the file is full ({} frames)", frames)),
@@ -2131,6 +2159,11 @@ fn main() -> Result<(), String> {
                         }
                     }
                 };
+            }
+            // A stopped animation recording finishes writing on its own
+            // thread; say so if that failed.
+            if let Some(e) = recorder.finished() {
+                osd.show(e);
             }
             let capturing = screenshot || recorder.is_active() || video_recording.is_some();
             if capturing && !record_ui {
@@ -2871,10 +2904,12 @@ impl Host for MainHost<'_, '_> {
         if shown(new) != shown(&old) {
             self.display.apply(new)?;
         }
-        // The 3D scene opened, closed or changed; the first of what it has
-        // to say is shown, unless the machine has more to say.
+        // The 3D scene opened, closed or changed (a scene file is read again
+        // once it is written again, an update downloaded in its place); the
+        // first of what it has to say is shown, unless the machine has more
+        // to say.
         let mut vr_note = None;
-        if new.vr != old.vr {
+        if new.vr != old.vr || new.vr.scene.is_some() {
             for note in self.display.apply_vr(&new.vr) {
                 self.cpu.bus.log_string(&note);
                 vr_note.get_or_insert_with(|| note.trim_start_matches("[VR] ").to_string());

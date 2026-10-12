@@ -13,9 +13,14 @@
 //! whose other end does, finds the modem online at once, as over a null
 //! modem cable: games that set their modems up with AT commands and those
 //! that expect a cable both work on it.
+//!
+//! A call takes as long as a real modem's: the dial tone, the number, the
+//! other end ringing and the handshake play on the speaker (`ATM`, `ATL`,
+//! see `modem_sound`), and CONNECT comes when the handshake is done.
 
 use super::uart::{MCR_DTR, MSR_CTS, MSR_DCD, MSR_DSR, MSR_RI, Uart};
 use super::{DialTarget, LinkCmd, LinkEvent};
+use crate::modem_sound::{self, ModemSound};
 use crate::timer::PIT_HZ;
 
 /// The S-registers there are, and their values after ATZ.
@@ -28,6 +33,16 @@ const RI_TICKS: u64 = 2 * PIT_HZ;
 const LINE: usize = 80;
 /// How much longer the answering modem takes to have the carrier.
 const ANSWER_TICKS: u64 = PIT_HZ * 3 / 10;
+
+/// Mixer frames in PIT ticks.
+fn ticks(frames: u64) -> u64 {
+    crate::timer::mul_div(frames, PIT_HZ, crate::opl::RATE as u64)
+}
+
+/// How long the handshake takes.
+fn handshake_ticks() -> u64 {
+    ticks(modem_sound::handshake_frames())
+}
 /// What starts a command, or comes between them: all else a program sends
 /// in command mode with another player in the room goes to them.
 const COMMAND_START: &[u8] = b"Aa\r\n +~";
@@ -76,8 +91,8 @@ pub enum Call {
     Dialing(u64),
     /// Ringing here.
     Ringing,
-    /// Answered: the carrier is there at the tick given, as the answering
-    /// modem's handshake takes a while longer than the caller's. (Two
+    /// Answered, the handshake going on: the carrier is there at the tick
+    /// given, at the answering end a while later than the caller's. (Two
     /// emulated machines alike otherwise would see the same time when the
     /// call goes through, where games like DOOM's SERSETUP take their
     /// player's number from it.)
@@ -118,6 +133,17 @@ pub struct Modem {
     escape_due: Option<u64>,
     /// What came from the other end before the carrier was there here.
     held: Vec<u8>,
+    /// `ATM`: the speaker off (0), on until the carrier (1), always on
+    /// (2), or on but not while dialing (3). `ATL`: its volume, 0 to 3.
+    speaker: u8,
+    volume: u8,
+    /// `ATP`/`ATT`: numbers are dialed with pulses.
+    pulse: bool,
+    /// When the dialing and the first ring are over, calling.
+    dial_end: u64,
+    /// This end called: a key during the handshake ends the call.
+    calling: bool,
+    pub sound: ModemSound,
 }
 
 impl Default for Modem {
@@ -143,6 +169,12 @@ impl Default for Modem {
             last_data: 0,
             escape_due: None,
             held: Vec::new(),
+            speaker: 1,
+            volume: 2,
+            pulse: false,
+            dial_end: 0,
+            calling: false,
+            sound: ModemSound::default(),
         }
     }
 }
@@ -150,7 +182,7 @@ impl Default for Modem {
 // The call is the network's, not the machine's: it stays as it is.
 crate::state_fields!(Modem {
     echo, verbose, quiet, s, amp_c, amp_d, line, last, dtr
-} skip { call, online, direct, peer, ring_due, ri_off, ri, plus, last_data, escape_due, held });
+} skip { call, online, direct, peer, ring_due, ri_off, ri, plus, last_data, escape_due, held, speaker, volume, pulse, dial_end, calling, sound });
 
 impl Modem {
     /// The guard time of the escape: S12, in fiftieths of a second.
@@ -212,6 +244,8 @@ impl Modem {
         self.escape_due = None;
         self.plus = 0;
         self.held.clear();
+        self.calling = false;
+        self.sound.stop();
     }
 
     /// End the call there is, telling the network.
@@ -285,11 +319,17 @@ impl Modem {
     }
 
     fn command_char(&mut self, uart: &mut Uart, b: u8, now: u64, link: &mut Vec<LinkCmd>) {
-        if self.echo && !matches!(self.call, Call::Dialing(_)) {
+        let dialing = matches!(self.call, Call::Dialing(_)) || (self.calling && matches!(self.call, Call::Answering(_)));
+        if self.echo && !dialing {
             uart.receive(&[b], now);
         }
-        if let Call::Dialing(_) = self.call {
-            // A key while dialing ends the call.
+        if dialing && b == self.s[4] {
+            // The line feed after the command's carriage return (`ECHO
+            // ATDT555 > COM2`) isn't a key.
+            return;
+        }
+        if dialing {
+            // A key while dialing, or during the handshake, ends the call.
             self.hang_up(link);
             self.result(uart, Result::NoCarrier, now);
             return;
@@ -379,7 +419,11 @@ impl Modem {
                 'E' => self.echo = number(&mut chars).unwrap_or(0) != 0,
                 'V' => self.verbose = number(&mut chars).unwrap_or(0) != 0,
                 'Q' => self.quiet = number(&mut chars).unwrap_or(0) != 0,
-                'X' | 'L' | 'M' | 'B' | 'N' | 'W' | 'P' | 'T' | 'Y' => {
+                'L' => self.volume = number(&mut chars).unwrap_or(0).min(3) as u8,
+                'M' => self.speaker = number(&mut chars).unwrap_or(0).min(3) as u8,
+                'P' => self.pulse = true,
+                'T' => self.pulse = false,
+                'X' | 'B' | 'N' | 'W' | 'Y' => {
                     number(&mut chars);
                 }
                 'I' => {
@@ -453,7 +497,9 @@ impl Modem {
             return self.result(uart, Result::Error, now);
         }
         let mut number = rest.trim().trim_end_matches(';').trim();
+        let mut pulse = self.pulse;
         if let Some(n) = number.strip_prefix(['T', 't', 'P', 'p']) {
+            pulse = number.starts_with(['P', 'p']);
             number = n.trim();
         }
         let host = number.contains(['.', ':']) || number.chars().any(|c| c.is_ascii_alphabetic() && !"TPWtpw".contains(c));
@@ -470,7 +516,12 @@ impl Modem {
             return self.result(uart, Result::NoCarrier, now);
         };
         link.push(LinkCmd::Dial(target));
-        self.call = Call::Dialing(now + self.s[7].max(1) as u64 * PIT_HZ);
+        let frames = self.sound.dial(number, host, pulse, &self.s, self.volume, self.speaker);
+        self.dial_end = now + ticks(frames);
+        self.calling = true;
+        // S7, the wait for the carrier, counts from when the number is
+        // dialed.
+        self.call = Call::Dialing(self.dial_end + self.s[7].max(1) as u64 * PIT_HZ);
     }
 
     /// Something from the network.
@@ -484,9 +535,13 @@ impl Modem {
                 }
             }
             LinkEvent::Connected => match self.call {
-                Call::Dialing(_) => self.connect(uart, now),
+                Call::Dialing(_) => {
+                    self.call = Call::Answering(self.dial_end.max(now) + handshake_ticks());
+                    self.sound.answered(self.speaker);
+                }
                 Call::Ringing => {
-                    self.call = Call::Answering(now + ANSWER_TICKS);
+                    self.call = Call::Answering(now + handshake_ticks() + ANSWER_TICKS);
+                    self.sound.answer(self.volume, self.speaker);
                     self.ring_due = None;
                     self.ri_off = None;
                     self.ri = false;
@@ -539,6 +594,8 @@ impl Modem {
         self.ri = false;
         self.last_data = now;
         self.plus = 0;
+        self.calling = false;
+        self.sound.stop();
         self.result(uart, Result::Connect, now);
         let held = std::mem::take(&mut self.held);
         uart.receive(&held, now);
@@ -707,8 +764,16 @@ mod tests {
         assert_eq!(rig.link, [LinkCmd::Dial(Some(DialTarget::to("example.com:23")))]);
         rig.link.clear();
         rig.event(LinkEvent::Connected);
+        // The handshake, after the dialing.
+        let connect = rig.modem.dial_end + handshake_ticks();
+        assert_eq!(rig.modem.call, Call::Answering(connect));
+        rig.wait(connect - rig.now - 1);
+        assert_eq!(rig.output(), "");
+        assert_eq!(rig.uart.lines() & MSR_DCD, 0);
+        rig.wait(1);
         assert_eq!(rig.output(), "\r\nCONNECT 9600\r\n");
         assert_ne!(rig.uart.lines() & MSR_DCD, 0);
+        assert!(rig.modem.sound.is_silent());
         rig.send("hi");
         assert_eq!(rig.link, [LinkCmd::Bytes(b"hi".to_vec())]);
         rig.link.clear();
@@ -742,12 +807,47 @@ mod tests {
         // What the caller sends before the carrier is there here waits.
         rig.event(LinkEvent::Bytes(b"early".to_vec()));
         assert!(rig.output().ends_with("RING\r\n"));
-        rig.wait(ANSWER_TICKS);
+        assert!(!rig.modem.sound.is_silent());
+        rig.wait(handshake_ticks() + ANSWER_TICKS);
         assert_eq!(rig.output(), "\r\nCONNECT 9600\r\nearly");
         rig.event(LinkEvent::Bytes(b"x".to_vec()));
         assert_eq!(rig.output(), "x");
         rig.event(LinkEvent::NoCarrier);
         assert_eq!(rig.output(), "\r\nNO CARRIER\r\n");
+    }
+
+    #[test]
+    fn dialing_takes_as_long_as_the_number() {
+        let mut rig = Rig::new();
+        rig.send("ATE0M0L3\r");
+        rig.output();
+        rig.send("ATDT example.com\r\n");
+        assert!(matches!(rig.modem.call, Call::Dialing(_)));
+        let short = rig.modem.dial_end - rig.now;
+        // Even with the speaker off, the call takes its time.
+        assert!(short > 2 * PIT_HZ, "{}", short);
+        assert!(rig.modem.sound.is_silent() || rig.modem.speaker == 0);
+        rig.send("ATH\r");
+        rig.output();
+        // Calling the other player in the room.
+        rig.event(LinkEvent::Peer(true));
+        rig.send("ATDP 9,5550199\r");
+        assert_eq!(rig.link.last(), Some(&LinkCmd::Dial(None)));
+        // A comma waits S8 seconds, and pulses are slower than tones.
+        assert!(rig.modem.dial_end - rig.now > short + 2 * PIT_HZ);
+        // A key during the handshake hangs up.
+        rig.event(LinkEvent::Connected);
+        rig.link.clear();
+        rig.send("x");
+        assert_eq!(rig.link, [LinkCmd::Hangup]);
+        assert_eq!(rig.output(), "\r\nNO CARRIER\r\n");
+        assert!(rig.modem.sound.is_silent());
+        // A connection that takes longer than the dialing: the handshake
+        // starts when it comes.
+        rig.send("ATDT example.com\r");
+        rig.wait(rig.modem.dial_end - rig.now + 5 * PIT_HZ);
+        rig.event(LinkEvent::Connected);
+        assert_eq!(rig.modem.call, Call::Answering(rig.now + handshake_ticks()));
     }
 
     #[test]

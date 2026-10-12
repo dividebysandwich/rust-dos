@@ -189,7 +189,11 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   640x200, 60 Hz), `tandy` (a Tandy 1000), `pcjr` (an IBM PCjr) or
   `hercules` (a Hercules Graphics Card on a monochrome monitor: the MDA's
   text and 720x348 graphics, 50 Hz). A change takes effect at the DOS
-  prompt.
+  prompt. A DOSBox configuration's `svga_s3`, DOSBox's default, imports
+  as `svga`, which is what DOS games get from it there; one that boots a
+  hard disk keeps `svga_s3`, as the Windows on the disk was installed
+  with the S3's driver (unless the package's `os` boots another system
+  in its place).
 * With `svga_et4000` programs find a Tseng ET4000AX on the ISA bus, as
   DOS games and Windows 3.x drivers made for it detect it: its KEY
   (3BFh/3D8h), Segment Select (3CDh) with separate read and write banks,
@@ -488,7 +492,8 @@ PC speaker and the prompt's beeps), `sb` (the Sound Blaster's digital
 audio), `fm` (the FM synthesizer), `gus`, `midi`, `cdaudio`, `disknoise`,
 `lptdac` (the Covox or Disney Sound Source), `tandy` (the Tandy's and
 PCjr's sound chip), `awe32` (the AWE32's wavetable synthesizer) and
-`monitor` (the [monitor's effects](#emulator)), and `master` for all of
+`monitor` (the [monitor's effects](#emulator)), `modem` (the [modem's
+speaker](#serial-and-modem-games)), and `master` for all of
 them together. At 100, the
 default, a source plays as loud as its card makes it. The volumes apply on
 top of the Sound Blaster's own mixer, which programs set.
@@ -1560,6 +1565,16 @@ machine=svga_s3
 memsize=64
 ```
 
+A DOSBox-X configuration's `IMGMOUNT` and `BOOT` lines work as they are,
+such as these, which mount the Windows image by number and a CD on the
+secondary IDE channel:
+
+```
+imgmount 2 win95.img -size 512,63,16,520 -t hdd -fs none
+imgmount D game.iso -t cdrom -fs iso -ide 2m
+boot -l c
+```
+
 The S3 driver shows the desktop up to 1024x768 in 32 bits per pixel with
 its accelerated drawing and hardware cursor; the Sound Blaster 16 plays
 Windows' sounds and FM music; the PS/2 mouse and APM work (Shut Down turns
@@ -1567,6 +1582,14 @@ the machine off). MS-DOS Prompts run in a window or full screen
 (Alt+Enter), and **Restart in MS-DOS mode** works. Windows keeps the
 hardware it was installed on in its registry, so an image installed on
 other hardware may look for devices this machine hasn't.
+
+Windows 95, OSR2 included, is the system the booted machine was built and
+tried with. Windows 98, 98 SE and ME have no recorded run, so try them on a
+copy of the image. The machine has APM and no ACPI, and its Sound Blaster
+is a legacy card that Windows finds at the resources [`[sound]`](#sound)
+gives it (DOSBox-X's `sbtype=sb16vibra` is an ISA Plug and Play card).
+`memsize` is capped by the CPU, at most 512 MB with `cpu=pentium_mmx` (see
+[`[emulator]`](#emulator)).
 
 ### Direct3D on an S3 ViRGE
 
@@ -1922,8 +1945,18 @@ default; set the game up for that port, at any speed.
   settings window's *Modem phonebook* (Serial page) lists them, fetches
   more from rust-dos.com when you ask it to, and copies the command that
   dials one. Numbers of your own go in [`[phonebook]`](#phonebook).
+* **A call sounds and takes as long as a real one:** the modem's speaker
+  plays the dial tone, the number as touch tones (`ATDT`) or pulse clicks
+  (`ATDP`), the other end ringing, and a real modem's handshake, about 25
+  seconds in all; CONNECT comes when the handshake ends. A host on the
+  internet dials a seven-digit number of its own. `ATM0` turns the speaker
+  off, `ATM3` keeps it quiet while dialing, and `ATL0`..`ATL3` set its
+  volume; the call takes as long either way. `modem` in
+  [`[mixer]`](#mixer) is its volume in the mix. A key during the dialing
+  or the handshake ends the call.
 * The modem knows the usual commands: `ATZ`, `AT&F`, `ATE`, `ATV`, `ATQ`,
-  `ATH`, `ATA`, `ATO`, `ATD`, `ATI`, `ATS0=`..`ATS15=` and `ATSn?`,
+  `ATH`, `ATA`, `ATO`, `ATD`, `ATP`, `ATT`, `ATL`, `ATM`, `ATI`,
+  `ATS0=`..`ATS15=` and `ATSn?`,
   `A/`, and the escape `+++` with a second's pause before and after; it
   answers the settings of error correction and compression with OK.
 * The link is reliable and in order over the relay's UDP, and needs a

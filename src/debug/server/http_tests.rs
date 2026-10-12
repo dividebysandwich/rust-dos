@@ -191,6 +191,9 @@ fn run_machine(dir: std::path::PathBuf, rx: mpsc::Receiver<super::super::Request
         hub.pause_at_start(&cpu);
     }
     let mut states: std::collections::HashMap<std::path::PathBuf, Vec<u8>> = Default::default();
+    // The Stats page's numbers, recorded each frame as the front end does.
+    let mut stats = rust_dos::stats::Stats::new();
+    let mut frame_start = Instant::now();
     loop {
         hub.poll(&mut cpu);
         if hub.quit_requested() {
@@ -248,7 +251,12 @@ fn run_machine(dir: std::path::PathBuf, rx: mpsc::Receiver<super::super::Request
             }
         }
         hub.end_batch(&cpu);
+        let busy = frame_start.elapsed();
         std::thread::sleep(options.sleep);
+        let wall = frame_start.elapsed();
+        frame_start = Instant::now();
+        stats.record(&cpu.bus, rust_dos::stats::FrameTimes { wall, busy, ..Default::default() });
+        hub.set_frame_stats(stats.latest());
     }
 }
 
@@ -1792,6 +1800,29 @@ fn a_deterministic_session_over_http_is_the_same_whatever_the_host_does() {
     for kind in ["input_delivered", "state_saved", "memory_written", "state_loaded", "debugger_reset", "program_started"] {
         assert!(kinds.contains(&kind), "{} in {:?}", kind, kinds);
     }
+}
+
+/// `/api/stats` carries the Stats page's numbers, which tell whether the
+/// machine keeps real time and how much of the host it takes.
+#[test]
+fn stats_tell_the_stats_page_s_numbers() {
+    let rig = Rig::new("frame-stats");
+    rig.post("/api/control/run", json!({"command": "COUNT.COM"}));
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let frame = loop {
+        let stats = rig.get("/api/stats").json();
+        if stats["frame"]["emulated_speed"].as_f64().is_some_and(|s| s > 0.0) {
+            break stats["frame"].clone();
+        }
+        assert!(Instant::now() < deadline, "the machine runs: {}", stats);
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    for key in ["fps", "refresh_hz", "emulated_speed", "cpu_use", "halted", "recompiled", "render_ms"] {
+        assert!(frame[key].is_number(), "{} in {}", key, frame);
+    }
+    let cpu_use = frame["cpu_use"].as_f64().unwrap();
+    assert!(cpu_use > 0.0 && cpu_use <= 100.0, "{}", frame);
+    assert!((frame["refresh_hz"].as_f64().unwrap() - 70.0).abs() < 1.0, "text mode at 70 Hz: {}", frame);
 }
 
 // ----- the debugger page -------------------------------------------------------

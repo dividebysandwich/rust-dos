@@ -36,11 +36,12 @@ rows = []
 for info_path in root.glob("**/new/benchmark.json"):
     bench_dir = info_path.parent.parent
     new = load(bench_dir / "new" / "estimates.json")
-    if new is None:
+    info = load(info_path)
+    if new is None or info is None:
         continue
     base = load(bench_dir / "base" / "estimates.json")
     change = load(bench_dir / "change" / "estimates.json")
-    name = load(info_path)["full_id"]
+    name = info["full_id"]
     if base is not None and change is not None:
         mean = change["mean"]
         ci = mean["confidence_interval"]

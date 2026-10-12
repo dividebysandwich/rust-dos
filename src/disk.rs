@@ -2542,7 +2542,18 @@ impl DiskController {
                 self.insert(handle, file);
                 Ok(handle)
             }
-            Err(_) => Err(0x02),
+            // Missing: file not found (02h) when its folder is there, path
+            // not found (03h) when a folder on the way isn't.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Err(if path.parent().is_some_and(hostfs::is_dir) { 0x02 } else { 0x03 })
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotADirectory => Err(0x03),
+            // A name Windows refuses (a wildcard in it) is a file that
+            // isn't there, as on other hosts.
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidFilename => Err(0x02),
+            // A file that is there but can't be opened this way (read-only,
+            // in use by another program) is access denied, as DOS has it.
+            Err(_) => Err(0x05),
         }
     }
 
@@ -4193,6 +4204,49 @@ mod tests {
         let d = disk.find_directory_entry("D:\\*.*", 0, 0x08).unwrap();
         assert_eq!(d.filename, "GAMECD_D.ISK");
         assert_eq!(disk.volume_label(3).unwrap(), "GAMECD_DISK");
+    }
+
+    #[test]
+    fn a_read_only_file_opened_for_writing_is_access_denied() {
+        let base = scratch("read_only_open");
+        let save = base.join("SAVE.DAT");
+        fs::write(&save, b"old").unwrap();
+        let writable = fs::metadata(&save).unwrap().permissions();
+        let mut perms = writable.clone();
+        perms.set_readonly(true);
+        fs::set_permissions(&save, perms).unwrap();
+        // Root on Unix writes read-only files anyway: nothing to check.
+        let root = fs::OpenOptions::new().write(true).open(&save).is_ok();
+        let mut disk = DiskController::new(base.clone());
+        // Reading is fine; writing is access denied (05h), as on a FAT
+        // disk.
+        let results = [
+            disk.open_file("C:\\SAVE.DAT", 0, PSP).map(|_| ()),
+            disk.open_file("C:\\SAVE.DAT", 1, PSP).map(|_| ()),
+            disk.open_file("C:\\SAVE.DAT", 2, PSP).map(|_| ()),
+            disk.create_file("C:\\SAVE.DAT", PSP).map(|_| ()),
+        ];
+        // Put the attribute back first, so a failure leaves a file the
+        // next run can delete.
+        fs::set_permissions(&save, writable).unwrap();
+        if !root {
+            assert_eq!(results, [Ok(()), Err(0x05), Err(0x05), Err(0x05)]);
+        }
+    }
+
+    #[test]
+    fn a_missing_file_or_folder_on_a_host_drive() {
+        let base = scratch("missing_open");
+        fs::write(base.join("SAVE.DAT"), b"old").unwrap();
+        let mut disk = DiskController::new(base.clone());
+        // A missing file in a folder that's there is file not found (02h);
+        // a missing folder on the way, or a file used as one, is path not
+        // found (03h), as in DOS.
+        assert_eq!(disk.open_file("C:\\NONE.DAT", 2, PSP), Err(0x02));
+        assert_eq!(disk.open_file("C:\\NODIR\\SAVE.DAT", 0, PSP), Err(0x03));
+        assert_eq!(disk.create_file("C:\\NODIR\\SAVE.DAT", PSP), Err(0x03));
+        assert_eq!(disk.open_file("C:\\SAVE.DAT\\X.DAT", 0, PSP), Err(0x03));
+        assert_eq!(disk.create_file("C:\\SAVE.DAT\\X.DAT", PSP), Err(0x03));
     }
 
     #[test]

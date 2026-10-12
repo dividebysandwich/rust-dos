@@ -328,8 +328,12 @@ fn move_and_exchange_reach_mapped_and_unmapped_pages() {
     assert_eq!(cpu.bus.read_8(0xB8000), b'A');
 
     // Overlapping moves within a handle work and say so; exchanges don't.
+    // The move copies the source as it was before any of it was written.
+    cpu.bus.load_bytes(FRAME + 0x3FF0, b"01234567");
     describe(&mut cpu, 8, (1, handle, 0x3FF0, 1), (1, handle, 0x3FF4, 1));
     assert_eq!(ems(&mut cpu, 0x5700), 0x92);
+    let moved: Vec<u8> = (0..8).map(|i| cpu.bus.read_8(FRAME + 0x3FF4 + i)).collect();
+    assert_eq!(moved, b"01234567");
     assert_eq!(ems(&mut cpu, 0x5701), 0x97);
     // Past the handle's pages, and an offset past a page.
     describe(&mut cpu, 0x10, (1, handle, 0x3FF8, 2), (0, 0, 0, 0x4000));

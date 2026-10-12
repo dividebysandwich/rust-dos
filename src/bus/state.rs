@@ -24,6 +24,7 @@ const VERITE_VERSION: u16 = 2;
 const ET4000_VERSION: u16 = 1;
 const SHARED_VERSION: u16 = 1;
 const SB_HIGH_SPEED_VERSION: u16 = 1;
+const PIT2_VERSION: u16 = 1;
 
 /// Save or load each of a list of fields.
 /// Each field is labelled with its name, for comparing states part by
@@ -62,6 +63,8 @@ impl Bus {
             pit_read_msb,
             pit_mode,
             pit_write_msb,
+            pit2,
+            speaker_data,
             pit0_divisor,
             pit0_write_msb,
             pit0_read_msb,
@@ -189,6 +192,11 @@ impl Bus {
                 post_code, refresh_toggle, speaker_on, audio_phase, audio_frames, sb_phase, sb_frame, beep_frames,
                 boot, pci,
             );
+        });
+        // Channel 2's counter and gate, in a section of their own so states
+        // saved before it load.
+        w.section(b"PIT2", PIT2_VERSION, |w| {
+            save_all!(w; pit2, speaker_data);
         });
         w.section(b"VIDE", VIDEO_VERSION, |w| {
             save_all!(w; video_mode, vga, vbe, s3_engine, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
@@ -321,6 +329,8 @@ impl Bus {
             pit_read_msb,
             pit_mode,
             pit_write_msb,
+            pit2,
+            speaker_data,
             pit0_divisor,
             pit0_write_msb,
             pit0_read_msb,
@@ -446,6 +456,18 @@ impl Bus {
             post_code, refresh_toggle, speaker_on, audio_phase, audio_frames, sb_phase, sb_frame, beep_frames,
                 boot, pci,
         );
+        if r.next_is(b"PIT2") {
+            let mut section = r.section(b"PIT2", PIT2_VERSION)?;
+            load_all!(&mut section; pit2, speaker_data);
+        } else {
+            // An older state: a stopped channel 2 with the gate and the
+            // speaker as they were.
+            *pit2 = crate::timer::Pit2::new();
+            let now = clock.now_ticks();
+            pit2.write_count(*pit_divisor, now);
+            pit2.set_gate(*speaker_on, now);
+            *speaker_data = *speaker_on;
+        }
         let mut section = r.section(b"VIDE", VIDEO_VERSION)?;
         load_all!(&mut section; video_mode, vga, vbe, s3_engine, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
         *virge = Default::default();

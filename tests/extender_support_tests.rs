@@ -322,6 +322,13 @@ fn xms_moves_lock_free_and_a20() {
     assert!(!xms_call(&mut cpu, 0x0B));
     assert_eq!(cpu.get_reg8(Register::BL), 0xA7);
 
+    // Between two real-mode pointers, a length past the HMA is refused.
+    cpu.bus.write_32(params, 0xFFFF_FFFE);
+    cpu.bus.write_16(params + 10, 0);
+    cpu.bus.write_32(params + 12, 0x0000_8000);
+    assert!(!xms_call(&mut cpu, 0x0B));
+    assert_eq!(cpu.get_reg8(Register::BL), 0xA4);
+
     // Local enables nest; the gate stays on until the last is undone.
     assert!(xms_call(&mut cpu, 0x05));
     assert!(xms_call(&mut cpu, 0x05));
@@ -331,6 +338,54 @@ fn xms_moves_lock_free_and_a20() {
     assert_eq!(cpu.ax(), 1);
     assert!(xms_call(&mut cpu, 0x06));
     assert!(!cpu.bus.a20());
+}
+
+/// XMS moves within a block copy the source as it was before the move,
+/// overlapping or not; moves into the text screen show on it; a block
+/// that grows into a new place keeps its contents.
+#[test]
+fn xms_moves_overlap_reach_video_memory_and_survive_a_resize() {
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    cpu.set_dx(16);
+    assert!(xms_call(&mut cpu, 0x09));
+    let handle = cpu.dx();
+    // A second block right after it, so the first can't grow in place.
+    cpu.set_dx(16);
+    assert!(xms_call(&mut cpu, 0x09));
+    let params = 0x6000;
+    let do_move = |cpu: &mut Cpu, len: u32, src: (u16, u32), dst: (u16, u32)| {
+        cpu.bus.write_32(params, len);
+        cpu.bus.write_16(params + 4, src.0);
+        cpu.bus.write_32(params + 6, src.1);
+        cpu.bus.write_16(params + 10, dst.0);
+        cpu.bus.write_32(params + 12, dst.1);
+        cpu.set_ds(0);
+        cpu.set_si(params as u16);
+        assert!(xms_call(cpu, 0x0B));
+    };
+    let pattern: Vec<u8> = (0..0x2000u32).map(|i| (i * 7 + i / 256) as u8).collect();
+    cpu.bus.load_bytes(0x30000, &pattern);
+    do_move(&mut cpu, 0x2000, (0, 0x3000_0000), (handle, 0));
+    // Forward and backward over itself.
+    do_move(&mut cpu, 0x1000, (handle, 0), (handle, 0x100));
+    do_move(&mut cpu, 0x1000, (handle, 0x100), (handle, 0x40));
+    do_move(&mut cpu, 0x1000, (handle, 0x40), (0, 0x4000_0000));
+    let back: Vec<u8> = (0..0x1000).map(|i| cpu.bus.read_8(0x40000 + i)).collect();
+    assert_eq!(back, pattern[..0x1000]);
+
+    // Into the text screen, through the video memory.
+    cpu.bus.load_bytes(0x30000, b"H\x1Fi\x1F");
+    do_move(&mut cpu, 4, (0, 0x3000_0000), (handle, 0x3000));
+    do_move(&mut cpu, 4, (handle, 0x3000), (0, 0xB800_0000));
+    assert_eq!(cpu.bus.vga.vram_text[..4], *b"H\x1Fi\x1F");
+
+    // Grown to 64 KB: moved past the second block, contents and all.
+    cpu.set_dx(handle);
+    cpu.set_reg16(Register::BX, 64);
+    assert!(xms_call(&mut cpu, 0x0F));
+    do_move(&mut cpu, 0x1000, (handle, 0x40), (0, 0x5000_0000));
+    let moved: Vec<u8> = (0..0x1000).map(|i| cpu.bus.read_8(0x50000 + i)).collect();
+    assert_eq!(moved, pattern[..0x1000]);
 }
 
 fn int21(cpu: &mut Cpu, ax: u16) {
