@@ -7,7 +7,8 @@
 // types a command at the first prompt (both can be given more than once);
 // ?persist=0 keeps C: in memory only; ?log sends the emulator's log to the
 // console; ?renderer=2d draws without WebGL 2, and so without the CRT
-// shaders.
+// shaders. ?section.key=value sets a rust-dos.conf setting for this visit
+// only, for example ?emulator.cycles=3000&sound.sbtype=sb2.
 
 import init, { Machine, shader_program } from './pkg/rust_dos_web.js';
 import { DiskStore } from './storage.js';
@@ -128,6 +129,35 @@ aspect=4:3
 
 const params = new URLSearchParams(location.search);
 const persist = params.get('persist') !== '0';
+
+/// The settings the page address gives (?section.key=value), as
+/// rust-dos.conf text, how many there are, and the ones it can't take.
+function urlSettings() {
+  const sections = new Map();
+  const skipped = [];
+  let count = 0;
+  for (const [name, value] of params) {
+    const dot = name.indexOf('.');
+    if (dot < 0) {
+      continue;
+    }
+    const section = name.slice(0, dot).trim().toLowerCase();
+    const key = name.slice(dot + 1).trim();
+    if (!section || !key || /[\r\n\[\]=]/.test(name) || /[\r\n]/.test(value)) {
+      skipped.push(`?${name} isn't a setting the page address can give`);
+    } else if (section === 'autoexec' || section === 'drives') {
+      skipped.push(`?${name}: [${section}] can't be set from the page address`);
+    } else {
+      if (!sections.has(section)) {
+        sections.set(section, []);
+      }
+      sections.get(section).push(`${key}=${value}`);
+      count++;
+    }
+  }
+  const text = [...sections].map(([section, lines]) => `[${section}]\n${lines.join('\n')}\n`).join('');
+  return { text, count, skipped };
+}
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('screen');
@@ -2047,7 +2077,8 @@ async function start() {
     $('loading').querySelector('p').textContent = `Rust-DOS didn't load: ${error.message ?? error}`;
     return;
   }
-  machine = new Machine(remembered(CONFIG_KEY, DEFAULT_CONFIG));
+  const fromUrl = urlSettings();
+  machine = new Machine(remembered(CONFIG_KEY, DEFAULT_CONFIG), fromUrl.text);
   machine.set_games(remembered(GAMES_KEY, '{}'));
   setUpTouch();
   machine.set_muted(speaker.muted, false);
@@ -2055,8 +2086,12 @@ async function start() {
     machine.log_to_console();
   }
   machine.set_shaders_available(screenGl !== null);
-  for (const warning of machine.warnings()) {
+  for (const warning of [...fromUrl.skipped, ...machine.warnings()]) {
     toast(`Settings: ${warning}`, 'warn');
+  }
+  if (fromUrl.count) {
+    const settings = fromUrl.count === 1 ? '1 setting' : `${fromUrl.count} settings`;
+    toast(`${settings} from the page address apply to this visit only.`);
   }
   await setUpC();
   await restoreStates();

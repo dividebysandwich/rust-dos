@@ -340,6 +340,11 @@ The page takes parameters: `?zip=URL` copies an archive to C: at startup,
 `?zip=games/keen.zip&run=cd%20keen&run=keen1`. `?persist=0` keeps C: in
 memory only, `?log` sends the log to the browser console, and
 `?renderer=2d` draws without WebGL 2 (and so without the CRT shaders).
+`?section.key=value` sets any [`rust-dos.conf`](CONFIGURATION.md) setting
+for that visit only, for example `?emulator.cycles=3000&sound.sbtype=sb2`:
+the browser's saved settings stay as they are, and a game profile's own
+settings still win over them (`[autoexec]` and `[drives]` can't be set
+this way).
 
 ## As a libretro core
 
