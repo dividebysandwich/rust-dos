@@ -122,8 +122,14 @@ pub struct ExceptionRecord {
 
 /// Exceptions kept in `Cpu::exception_log`.
 pub const EXCEPTION_LOG_LEN: usize = 64;
-/// Exceptions written to the emulator log; later ones are only counted.
-const EXCEPTIONS_LOGGED: u64 = 200;
+/// Places (CS:EIP) for each vector whose exceptions are written to the
+/// emulator log, and the lines each place gets; later ones are only
+/// counted. Systems raise many exceptions on purpose (Windows 9x: ARPL as
+/// a breakpoint, the ports and IOPL-sensitive instructions it emulates in
+/// virtual-8086 mode, pages it fills on demand from all over its code),
+/// and these limits keep them from crowding out the rest.
+const PLACES_LOGGED: u16 = 200;
+const LINES_PER_PLACE: u8 = 3;
 
 /// Mnemonic of an exception vector, as in #GP.
 pub fn exception_name(vector: u8) -> &'static str {
@@ -483,22 +489,41 @@ impl Cpu {
             self.exception_log.pop_front();
         }
         self.exception_log.push_back(record);
-        if self.exceptions <= EXCEPTIONS_LOGGED {
-            let error = match (fault.error(), self.pe()) {
-                (Some(e), true) => format!("({:04X})", e),
-                _ => String::new(),
-            };
-            let cr2 = if fault.vector == 14 { format!(" CR2={:08X}", self.cr2) } else { String::new() };
-            self.bus.log_string(&format!(
-                "[CPU] {}{} at {:04X}:{:08X}{}{}",
-                exception_name(fault.vector),
-                error,
-                record.cs,
-                record.eip,
-                cr2,
-                if self.exceptions == EXCEPTIONS_LOGGED { " (further exceptions not logged)" } else { "" }
-            ));
+        let place = (fault.vector, record.cs, record.eip);
+        let new = !self.exception_places.contains_key(&place);
+        let places = &mut self.exception_places_per_vector[fault.vector as usize % 32];
+        if new {
+            if *places == PLACES_LOGGED {
+                return;
+            }
+            *places += 1;
         }
+        let last_place = new && *places == PLACES_LOGGED;
+        let lines = self.exception_places.entry(place).or_insert(0);
+        if *lines == LINES_PER_PLACE {
+            return;
+        }
+        *lines += 1;
+        let last_here = *lines == LINES_PER_PLACE;
+        let error = match (fault.error(), self.pe()) {
+            (Some(e), true) => format!("({:04X})", e),
+            _ => String::new(),
+        };
+        let cr2 = if fault.vector == 14 { format!(" CR2={:08X}", self.cr2) } else { String::new() };
+        let v86 = if self.v86() { " in virtual-8086 mode" } else { "" };
+        let here = if last_here { " (later ones here not logged)" } else { "" };
+        let places = if last_place { " (this exception at other places not logged)" } else { "" };
+        self.bus.log_string(&format!(
+            "[CPU] {}{} at {:04X}:{:08X}{}{}{}{}",
+            exception_name(fault.vector),
+            error,
+            record.cs,
+            record.eip,
+            cr2,
+            v86,
+            here,
+            places
+        ));
     }
 
     /// The error code an exception pushes: in protected mode only.

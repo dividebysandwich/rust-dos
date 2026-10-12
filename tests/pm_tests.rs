@@ -8,6 +8,7 @@ use pmrig::*;
 use rust_dos::cpu::CpuFlags;
 
 const GP: u8 = 13;
+const UD: u8 = 6;
 const NP: u8 = 11;
 const SS: u8 = 12;
 const PF: u8 = 14;
@@ -604,6 +605,97 @@ fn virtual_8086_mode_with_iopl_0_traps_cli() {
     });
     let (vector, stack) = rig.recorded();
     assert_eq!((vector, stack[0], stack[1], stack[2]), (GP as u32, 0, 0, 0x3000));
+}
+
+#[test]
+fn the_log_has_3_lines_for_each_place_exceptions_are_raised_at() {
+    let mut rig = Rig::new();
+    // With IOPL 0, CLI and STI fault in virtual-8086 mode, as under a
+    // monitor that keeps the virtual interrupt flag. The CLI faults 300
+    // times.
+    let v86 = asm16(0x30000, |a| {
+        let mut again = a.create_label();
+        a.mov(cx, 300u32)?;
+        a.set_label(&mut again)?;
+        a.cli()?;
+        a.loop_(again)?;
+        a.sti()?;
+        a.ud2()
+    });
+    rig.load(0x30000, &v86);
+    // The monitor steps over the one-byte instruction that faulted.
+    rig.handler(GP, 0, |a| {
+        a.add(dword_ptr(esp + 4), 1)?;
+        a.add(esp, 4)?;
+        a.iretd()
+    });
+    rig.record(UD);
+    let lines = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let log = lines.clone();
+    rig.cpu.bus.log_hook = Some(Box::new(move |line: &str| {
+        if line.starts_with("[CPU] #") {
+            log.borrow_mut().push(line.to_string());
+        }
+    }));
+    rig.run(|a| {
+        for v in [0u32, 0, 0, 0, 0x2000, 0xFFFE, 0x0002_0002, 0x3000, 0] {
+            a.push(v)?;
+        }
+        a.iretd()
+    });
+    assert_eq!(rig.recorded().0, UD as u32, "the run got to the UD2");
+    assert_eq!(rig.cpu.exceptions, 302, "every exception is counted");
+    let lines = lines.borrow();
+    assert_eq!(
+        *lines,
+        [
+            "[CPU] #GP(0000) at 3000:00000003 in virtual-8086 mode",
+            "[CPU] #GP(0000) at 3000:00000003 in virtual-8086 mode",
+            "[CPU] #GP(0000) at 3000:00000003 in virtual-8086 mode (later ones here not logged)",
+            "[CPU] #GP(0000) at 3000:00000006 in virtual-8086 mode",
+            "[CPU] #UD at 3000:00000007 in virtual-8086 mode",
+        ]
+    );
+}
+
+#[test]
+fn an_exception_raised_at_many_places_leaves_the_log_to_the_others() {
+    let mut rig = Rig::new();
+    // 250 CLIs, each a place of its own, then a UD2.
+    let v86 = asm16(0x30000, |a| {
+        for _ in 0..250 {
+            a.cli()?;
+        }
+        a.ud2()
+    });
+    rig.load(0x30000, &v86);
+    rig.handler(GP, 0, |a| {
+        a.add(dword_ptr(esp + 4), 1)?;
+        a.add(esp, 4)?;
+        a.iretd()
+    });
+    rig.record(UD);
+    let lines = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let log = lines.clone();
+    rig.cpu.bus.log_hook = Some(Box::new(move |line: &str| {
+        if line.starts_with("[CPU] #") {
+            log.borrow_mut().push(line.to_string());
+        }
+    }));
+    rig.run(|a| {
+        for v in [0u32, 0, 0, 0, 0x2000, 0xFFFE, 0x0002_0002, 0x3000, 0] {
+            a.push(v)?;
+        }
+        a.iretd()
+    });
+    assert_eq!(rig.recorded().0, UD as u32, "the run got to the UD2");
+    let lines = lines.borrow();
+    assert_eq!(lines.len(), 201, "200 places of the #GP, and the #UD");
+    assert_eq!(
+        lines[199],
+        "[CPU] #GP(0000) at 3000:000000C7 in virtual-8086 mode (this exception at other places not logged)"
+    );
+    assert_eq!(lines[200], "[CPU] #UD at 3000:000000FA in virtual-8086 mode");
 }
 
 #[test]
