@@ -500,3 +500,68 @@ fn save_states_keep_high_speed_mode() {
     wait_ms(&mut b.bus, 20.0);
     assert_eq!(dma1_count(&mut b.bus), left, "D0h paused the transfer");
 }
+
+/// The initiation key's 32 bytes, from the shift register's 6Ah.
+fn isapnp_key(bus: &mut Bus) {
+    bus.io_write(0x279, 0);
+    bus.io_write(0x279, 0);
+    let mut x = 0x6Au8;
+    for _ in 0..32 {
+        bus.io_write(0x279, x);
+        x = (x >> 1) | (((x ^ (x >> 1)) & 1) << 7);
+    }
+}
+
+fn isapnp_write(bus: &mut Bus, reg: u8, value: u8) {
+    bus.io_write(0x279, reg);
+    bus.io_write(0xA79, value);
+}
+
+#[test]
+fn a_vibra16c_moves_where_its_plug_and_play_registers_put_it() {
+    let machine = || {
+        let mut cpu = Cpu::new(PathBuf::from("."));
+        cpu.bus.set_cycles_per_ms(1000);
+        cpu.bus.configure_sound(Some(SbConfig { model: SbModel::Sb16Vibra, ..SbConfig::default() }), true);
+        cpu.load_shell();
+        cpu
+    };
+    let mut a = machine();
+    // As the BIOS leaves it: at 220h, a DSP 4.13.
+    reset_dsp(&mut a.bus);
+    dsp_write(&mut a.bus, 0xE1);
+    assert_eq!((dsp_read(&mut a.bus), dsp_read(&mut a.bus)), (4, 13));
+    // Its mixer only reads the IRQ and DMA setup.
+    a.bus.io_write(0x224, 0x80);
+    a.bus.io_write(0x225, 0x02);
+    assert_eq!(a.bus.io_read(0x225), 0x04, "IRQ 7");
+
+    // Card 1's audio device to 240h, IRQ 5, DMA 3 and 7.
+    isapnp_key(&mut a.bus);
+    isapnp_write(&mut a.bus, 0x03, 0x01);
+    isapnp_write(&mut a.bus, 0x07, 0x00);
+    isapnp_write(&mut a.bus, 0x30, 0x00);
+    assert_eq!(a.bus.io_read(0x22E), 0xFF, "a deactivated card is off the bus");
+    for (reg, value) in [(0x60, 0x02), (0x61, 0x40), (0x70, 0x05), (0x74, 0x03), (0x75, 0x07), (0x30, 0x01)] {
+        isapnp_write(&mut a.bus, reg, value);
+    }
+    isapnp_write(&mut a.bus, 0x02, 0x02);
+    a.bus.io_write(0x246, 1);
+    a.bus.io_write(0x246, 0);
+    assert_eq!(a.bus.io_read(0x24A), 0xAA, "the DSP at 240h");
+    a.bus.io_write(0x244, 0x81);
+    assert_eq!(a.bus.io_read(0x245), 0x88, "DMA 3 and 7");
+
+    // A save state keeps the card where it is.
+    let mut b = machine();
+    machine::load(&mut b, &machine::save(&a)).unwrap();
+    b.bus.io_write(0x244, 0x80);
+    assert_eq!(b.bus.io_read(0x245), 0x02, "IRQ 5");
+    b.bus.io_write(0x246, 1);
+    b.bus.io_write(0x246, 0);
+    assert_eq!(b.bus.io_read(0x24A), 0xAA);
+    // A machine with an SB16 can't take it.
+    let mut sb16 = Cpu::new(PathBuf::from("."));
+    sb16.load_shell();
+    assert!(machine::load(&mut sb16, &machine::save(&a)).is_err());
+}

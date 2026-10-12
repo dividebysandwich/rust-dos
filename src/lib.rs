@@ -69,6 +69,7 @@ pub mod makeimg;
 pub mod makeimg_command;
 pub mod instructions;
 pub mod interrupts;
+pub mod isapnp;
 pub mod joystick;
 pub mod lan_command;
 pub mod mcb;

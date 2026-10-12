@@ -443,7 +443,8 @@ fn setting(imported: &mut Imported, section: &str, key: &str, value: &str) {
             "sb1" | "sb2" => imported.set("sound", "sbtype", "sb2"),
             // DOSBox Staging's ESS AudioDrive, a Sound Blaster Pro to games.
             "sbpro1" | "sbpro2" | "ess" => imported.set("sound", "sbtype", "sbpro2"),
-            "sb16" | "sb16vibra" => imported.set("sound", "sbtype", "sb16"),
+            "sb16" => imported.set("sound", "sbtype", "sb16"),
+            "sb16vibra" => imported.set("sound", "sbtype", "sb16vibra"),
             "none" => imported.set("sound", "sbtype", "none"),
             _ => unknown(imported),
         },
@@ -962,6 +963,16 @@ mod tests {
         fs::write(dir.join("GM.SF2"), "").unwrap();
         let imported = import(&["[fluidsynth]\nsoundfont=gm.sf2 70\n"], std::slice::from_ref(&dir), "x", None);
         assert_eq!(get(&imported, "soundfont"), Some(dir.join("GM.SF2").display().to_string()));
+    }
+
+    #[test]
+    fn a_vibra16c_stays_a_plug_and_play_card() {
+        let imported = import(&["[sblaster]
+sbtype=sb16vibra
+"], &[PathBuf::from("/")], "x", None);
+        assert_eq!(get(&imported, "sbtype").as_deref(), Some("sb16vibra"));
+        let config = crate::config::parse(&imported.profile_text(None), Path::new("/"), None);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
     }
 
     #[test]

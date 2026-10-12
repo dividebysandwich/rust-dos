@@ -1334,6 +1334,7 @@ impl Item {
                 SbModel::Awe32 => "SB AWE32",
                 SbModel::SbPro2 => "SB Pro 2",
                 SbModel::Sb2 => "SB 2.0",
+                SbModel::Sb16Vibra => "SB16 ViBRA PnP",
             }
             .to_string(),
             SbPorts | GusPorts => self
@@ -1562,7 +1563,7 @@ impl Item {
             RecordShader => on_off(|s, on| s.record_shader = on),
             RewindMemory => each(s, REWIND_MEMORY, |s, mb| s.rewind_memory = mb),
             SbType => {
-                let models = [Some(SbModel::Sb16), Some(SbModel::Awe32), Some(SbModel::SbPro2), Some(SbModel::Sb2), None];
+                let models = [Some(SbModel::Sb16), Some(SbModel::Awe32), Some(SbModel::SbPro2), Some(SbModel::Sb2), Some(SbModel::Sb16Vibra), None];
                 each(s, models, |s, model| match model {
                     Some(model) => {
                         s.sound.sb.model = model;

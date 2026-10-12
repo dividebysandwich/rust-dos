@@ -28,7 +28,7 @@ const FUNCTION_NOT_SUPPORTED: u16 = 0x82;
 const BAD_PARAMETER: u16 = 0x84;
 
 /// A compressed EISA ID ("PNP0303").
-fn eisa_id(id: &[u8; 7]) -> [u8; 4] {
+pub(crate) fn eisa_id(id: &[u8; 7]) -> [u8; 4] {
     let letter = |c: u8| (c - b'@') as u32 & 0x1F;
     let hex = |c: u8| (if c <= b'9' { c - b'0' } else { c - b'A' + 10 }) as u32;
     let value = letter(id[0]) << 2
@@ -226,13 +226,16 @@ pub fn entry(cpu: &mut Cpu) {
             0x42 | 0x43 => SUCCESS,
             _ => FUNCTION_NOT_SUPPORTED,
         },
-        // Get Plug and Play ISA Configuration Structure: revision 1, no
-        // ISA PnP cards and no read port.
+        // Get Plug and Play ISA Configuration Structure: revision 1, the
+        // CSNs given to the ISA Plug and Play cards and the read port they
+        // were isolated with, or none without a card.
         0x40 => {
             let pointer = dword(cpu, 2);
             if pointer != 0 {
                 let at = far_pointer(cpu, pointer);
-                cpu.bus.guest_write_bytes(at, &[0x01, 0x00, 0x00, 0x00, 0x00, 0x00]);
+                let (csns, port) = cpu.bus.isapnp.as_ref().map_or((0, 0), |pnp| (pnp.csns(), crate::isapnp::BIOS_READ_PORT));
+                let [lo, hi] = port.to_le_bytes();
+                cpu.bus.guest_write_bytes(at, &[0x01, csns, lo, hi, 0x00, 0x00]);
             }
             SUCCESS
         }

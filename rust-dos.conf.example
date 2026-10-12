@@ -239,9 +239,11 @@
 #floppy_disk_speed=maximum
 
 [sound]
-# The Sound Blaster: sb16 (the default), awe32 (an SB16 with the EMU8000
-# wavetable synthesizer), sbpro2, sb2, or none. Programs learn its settings
-# from the BLASTER environment variable, which follows these.
+# The Sound Blaster: sb16 (the default), sb16vibra (an SB16 as the ViBRA16C,
+# an ISA Plug and Play card whose resources Windows 95 sets), awe32 (an
+# SB16 with the EMU8000 wavetable synthesizer), sbpro2, sb2, or none.
+# Programs learn its settings from the BLASTER environment variable, which
+# follows these.
 #sbtype=sb16
 # Base port (hex), IRQ, 8-bit DMA channel, and the SB16's 16-bit channel.
 #sbbase=220
