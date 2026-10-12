@@ -164,7 +164,13 @@ fn encode(writer: BufWriter<File>, frames: Receiver<Work>, last_delay: u16) -> R
         encoder.write_frame(&gif_frame).map_err(|e| e.to_string())?;
         match next {
             Some(next) => shown = next,
-            None => return Ok(()),
+            // Through the trailer and the last flush, whose errors the
+            // encoder's and the writer's drops would ignore.
+            None => {
+                let writer = encoder.into_inner().map_err(|e| e.to_string())?;
+                writer.into_inner().map_err(|e| e.error().to_string())?;
+                return Ok(());
+            }
         }
     }
 }
