@@ -367,12 +367,13 @@ fn setting(imported: &mut Imported, section: &str, key: &str, value: &str) {
         ("cpu", "cputype") => match first {
             f if f.starts_with("386") => imported.set("emulator", "cpu", "386"),
             f if f.starts_with("486") || f == "auto" => imported.set("emulator", "cpu", "486"),
-            // The Pentium MMX, and the later ones with MMX as the nearest
-            // there is; the Pentium Pro had none.
-            f if f.starts_with("pentium_mmx") || f.starts_with("pentium_ii") || f == "experimental" => {
-                imported.set("emulator", "cpu", "pentium_mmx")
-            }
-            f if f.starts_with("pentium") || f.starts_with("ppro") => imported.set("emulator", "cpu", "pentium"),
+            f if f.starts_with("pentium_mmx") => imported.set("emulator", "cpu", "pentium_mmx"),
+            // The Pentium II, and the Pentium III (and DOSBox-X's
+            // experimental type, which reports one) with the Pentium II as
+            // the nearest there is: it has no SSE.
+            f if f.starts_with("pentium_ii") || f == "experimental" => imported.set("emulator", "cpu", "pentium_ii"),
+            f if f.starts_with("ppro") => imported.set("emulator", "cpu", "pentium_pro"),
+            f if f.starts_with("pentium") => imported.set("emulator", "cpu", "pentium"),
             _ => unknown(imported),
         },
         // DOSBox's default, svga_s3, is what DOS games get from it: the
@@ -838,6 +839,13 @@ mod tests {
         assert_eq!(pentium.settings.iter().find(|(_, k, _)| *k == "cpu").map(|(_, _, v)| v.as_str()), Some("pentium"));
         let mmx = import(&["[cpu]\ncputype=pentium_mmx\n"], &[PathBuf::from("/")], "x", None);
         assert_eq!(mmx.settings.iter().find(|(_, k, _)| *k == "cpu").map(|(_, _, v)| v.as_str()), Some("pentium_mmx"));
+        for (cputype, cpu) in
+            [("ppro_slow", "pentium_pro"), ("pentium_ii", "pentium_ii"), ("pentium_iii", "pentium_ii"), ("experimental", "pentium_ii")]
+        {
+            let conf = format!("[cpu]\ncputype={}\n", cputype);
+            let got = import(&[conf.as_str()], &[PathBuf::from("/")], "x", None);
+            assert_eq!(got.settings.iter().find(|(_, k, _)| *k == "cpu").map(|(_, _, v)| v.as_str()), Some(cpu), "{}", cputype);
+        }
         assert_eq!(get("keyboard_layout"), Some("gr"));
         assert_eq!(get("umb"), Some("false"));
         assert_eq!(get("dos_version"), Some("7.10"));

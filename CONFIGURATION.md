@@ -147,11 +147,18 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   `386`, or `pentium`, a Pentium as DOSBox-X has one: CPUID (a
   GenuineIntel family 5), the time stamp counter, which counts the
   instructions and so runs at the `cycles` speed, its MSRs, CMPXCHG8B and
-  4 MB pages, without the virtual-8086 mode extensions; or `pentium_mmx`,
+  4 MB pages, without the virtual-8086 mode extensions; `pentium_mmx`,
   that Pentium with MMX (CPUID family 5, model 4), whose eight MM
-  registers are the FPU's. A DOSBox configuration's `cputype` of a
-  Pentium or Pentium Pro imports as `pentium`, of a Pentium MMX or later
-  as `pentium_mmx`.
+  registers are the FPU's; `pentium_pro`, a Pentium Pro as DOSBox-X's
+  `ppro_slow` (CPUID family 6, model 1): the Pentium's with CMOVcc,
+  FCMOVcc, FCOMI and FUCOMI, the P6 hinting NOPs and the local APIC base
+  and microcode revision MSRs Windows 98 and ME read, without MMX; or
+  `pentium_ii`, a Pentium II as DOSBox-X's (family 6, model 3): the
+  Pentium Pro's with MMX and SYSENTER/SYSEXIT. Neither has SSE, FXSAVE,
+  RDPMC, a local APIC or memory type range registers, as in DOSBox-X. A
+  DOSBox configuration's `cputype` of a Pentium imports as `pentium`, of
+  a Pentium MMX as `pentium_mmx`, of a Pentium Pro as `pentium_pro`, and
+  of a Pentium II or III as `pentium_ii`.
 * `core` is what runs the programs' instructions: `auto` (the default)
   runs the interpreter, and the dynamic recompiler for a program from the
   moment it switches to protected mode until it ends, as DOSBox's
@@ -276,7 +283,8 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   a recording stops at 1 GB.
 * `memsize` is the RAM in MB (default 16), from 2 to as much as
   motherboards took for the `cpu`: 64 MB for a 386, 128 MB for a 486,
-  256 MB for a Pentium and 512 MB for a Pentium MMX. More than the CPU
+  256 MB for a Pentium and 512 MB for a Pentium MMX, Pentium Pro or
+  Pentium II. More than the CPU
   takes is warned about and cut to its most. Memory above the first
   megabyte is extended memory for DOS extenders and XMS; XMS 3.0's 32-bit
   functions and INT 15h E801h/E820h report all of it, HIMEM's older calls

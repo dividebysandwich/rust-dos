@@ -125,6 +125,8 @@ pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
         Xadd => transfer::xadd(cpu, instr),
         Cmpxchg => transfer::cmpxchg(cpu, instr),
         Cmpxchg8b => transfer::cmpxchg8b(cpu, instr),
+        Cmovo | Cmovno | Cmovb | Cmovae | Cmove | Cmovne | Cmovbe | Cmova | Cmovs | Cmovns | Cmovp | Cmovnp
+        | Cmovl | Cmovge | Cmovle | Cmovg => transfer::cmov(cpu, instr),
         Cbw => arith::cbw(cpu),
         Cwde => arith::cwde(cpu),
         Cwd => arith::cwd(cpu),
@@ -226,6 +228,8 @@ pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
         Sti => system::sti(cpu),
         Hlt => system::hlt(cpu),
         Nop | Pause => Ok(()),
+        // The hinting NOPs of a P6 (0F 18 to 0F 1E).
+        Reservednop | Prefetchnta | Prefetcht0 | Prefetcht1 | Prefetcht2 => system::hint_nop(cpu),
         Wait => system::wait(cpu),
         Lgdt => system::load_table(cpu, instr, false),
         Lidt => system::load_table(cpu, instr, true),
@@ -249,6 +253,8 @@ pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
         Rdtsc => system::rdtsc(cpu),
         Rdmsr => system::msr(cpu, false),
         Wrmsr => system::msr(cpu, true),
+        Sysenter => system::sysenter(cpu),
+        Sysexit => system::sysexit(cpu),
 
         // --- FPU ---
         Fadd | Faddp | Fiadd | Fsub | Fsubp | Fsubr | Fsubrp | Fisub | Fisubr | Fmul | Fmulp
@@ -256,10 +262,18 @@ pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
         | Fprem1 | Frndint | Fxtract | Fabs | Fchs | F2xm1 | Fyl2x | Fyl2xp1 | Fsin | Fcos
         | Fsincos | Fptan | Fpatan | Fld | Fst | Fstp | Fild | Fist | Fistp | Fisttp | Fbld
         | Fbstp | Fxch | Fld1 | Fldz | Fldpi | Fldl2e | Fldl2t | Fldlg2 | Fldln2 | Fcom | Fcomp
-        | Fcompp | Ficom | Ficomp | Ftst | Fxam | Fcomi | Fcomip | Fucomi | Fucomip | Finit
+        | Fcompp | Ficom | Ficomp | Ftst | Fxam | Finit
         | Fninit | Fldcw | Fstcw | Fnstcw | Fstsw | Fnstsw | Fclex | Fnclex | Fsave | Fnsave
         | Frstor | Fstenv | Fnstenv | Fldenv | Fnop | Ffree | Fincstp | Fdecstp | Fucom | Fucomp
         | Fucompp | Fneni | Fndisi | Fnsetpm | Feni | Fdisi | Fsetpm | Fstpnce | Ffreep => {
+            fpu_instruction(cpu, instr)
+        }
+        // The P6's conditional moves and compares into EFLAGS.
+        Fcmovb | Fcmove | Fcmovbe | Fcmovu | Fcmovnb | Fcmovne | Fcmovnbe | Fcmovnu | Fcomi | Fcomip | Fucomi
+        | Fucomip => {
+            if !cpu.model.is_p6() {
+                return Err(Fault::UD);
+            }
             fpu_instruction(cpu, instr)
         }
 

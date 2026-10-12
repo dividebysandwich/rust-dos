@@ -1027,7 +1027,12 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             "486" => config.cpu = Some(CpuModel::I486),
                             "pentium" | "586" => config.cpu = Some(CpuModel::Pentium),
                             "pentium_mmx" | "pentiummmx" | "mmx" => config.cpu = Some(CpuModel::PentiumMmx),
-                            _ => warn(format!("invalid cpu '{}' (386, 486, pentium or pentium_mmx)", value)),
+                            "pentium_pro" | "pentiumpro" | "ppro" | "686" => config.cpu = Some(CpuModel::PentiumPro),
+                            "pentium_ii" | "pentiumii" | "pentium2" => config.cpu = Some(CpuModel::PentiumII),
+                            _ => warn(format!(
+                                "invalid cpu '{}' (386, 486, pentium, pentium_mmx, pentium_pro or pentium_ii)",
+                                value
+                            )),
                         },
                         "hard_disk_speed" | "floppy_disk_speed" => match DiskSpeed::parse(value) {
                             Some(speed) if key.eq_ignore_ascii_case("hard_disk_speed") => {
@@ -1629,6 +1634,8 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
                 CpuModel::I486 => "486",
                 CpuModel::Pentium => "pentium",
                 CpuModel::PentiumMmx => "pentium_mmx",
+                CpuModel::PentiumPro => "pentium_pro",
+                CpuModel::PentiumII => "pentium_ii",
             }
             .to_string()),
         ),
@@ -2469,6 +2476,11 @@ mod tests {
         assert_eq!(config.cpu, Some(crate::cpu::CpuModel::I386));
         let config = parse("[emulator]\ncpu=Pentium\n", Path::new("/cfg"), None);
         assert_eq!(config.cpu, Some(crate::cpu::CpuModel::Pentium));
+        let config = parse("[emulator]\ncpu=pentium_pro\n", Path::new("/cfg"), None);
+        assert_eq!(config.cpu, Some(crate::cpu::CpuModel::PentiumPro));
+        let config = parse("[emulator]\ncpu=pentium_ii\nmemsize=512\n", Path::new("/cfg"), None);
+        assert_eq!(config.cpu, Some(crate::cpu::CpuModel::PentiumII));
+        assert_eq!(Settings::from_config(&config).memsize, 512);
         let config = parse("[emulator]\ncpu=8086\n", Path::new("/cfg"), None);
         assert_eq!(config.cpu, None);
         assert!(config.warnings[0].contains("invalid cpu '8086'"));
