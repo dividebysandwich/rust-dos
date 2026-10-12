@@ -765,6 +765,7 @@ fn main() -> Result<(), String> {
         let frame_start = std::time::Instant::now();
         if let Some((start, times)) = last_frame {
             stats.record(&cpu.bus, rust_dos::stats::FrameTimes { wall: frame_start - start, ..times });
+            dbg.set_frame_stats(stats.latest());
         }
         // Whether the window's keyboard or mouse reached the machine this
         // frame, which the debug server's journal tells while it holds it.
@@ -1570,6 +1571,8 @@ fn main() -> Result<(), String> {
             if let Some(mode) = &mut det {
                 mode.resync(&cpu);
             }
+            // The Stats page's emulated speed leaves out the jump.
+            stats.clock_moved(&cpu.bus);
             rewinder.clear();
             achievements.reset();
             if strict_match_loaded {

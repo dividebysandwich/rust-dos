@@ -800,6 +800,9 @@ pub struct DebugHub {
     fps: f64,
     fps_mark: (Instant, u64),
     stats: ExecStats,
+    /// What the settings window's Stats page shows, as the front end last
+    /// told it.
+    frame_stats: Option<rust_dos::stats::StatsView>,
     /// The memory heatmap while a stream wants it.
     heat: Option<heat::Heat>,
 }
@@ -904,6 +907,7 @@ impl DebugHub {
             fps: 0.0,
             fps_mark: (Instant::now(), 0),
             stats: ExecStats::new(),
+            frame_stats: None,
             heat: None,
         }
     }
@@ -1740,7 +1744,34 @@ impl DebugHub {
             "decode_cache_hit_rate": (st.cache_hit_rate * 10000.0).round() / 10000.0,
             "instructions": st.total_executed,
             "fps": (self.fps * 10.0).round() / 10.0,
+            // The Stats page's numbers over the last quarter second, and
+            // the emulated speed, which the page doesn't show: the frames
+            // the program drew a second, the display's refresh rate,
+            // emulated seconds a wall second, and in percent the
+            // wall time the emulator's main thread worked, the emulated
+            // time the CPU sat halted and the instructions the
+            // recompiler's code ran; and ms a frame drawing the picture.
+            // Null before the first frame.
+            "frame": self.frame_stats.as_ref().map(|v| {
+                let round = |x: f32, places: f64| (x as f64 * places).round() / places;
+                json!({
+                    "fps": round(v.fps, 10.0),
+                    "refresh_hz": round(v.refresh_hz, 10.0),
+                    "emulated_speed": round(v.emulated_speed, 100.0),
+                    "cpu_use": round(v.cpu_use, 10.0),
+                    "halted": round(v.halted, 10.0),
+                    "recompiled": round(v.recompiled, 10.0),
+                    "render_ms": round(v.render_ms, 100.0),
+                })
+            }),
         })
+    }
+
+    /// Keep the Stats page's numbers for `/api/stats`.
+    pub fn set_frame_stats(&mut self, view: &rust_dos::stats::StatsView) {
+        if self.shared.is_some() {
+            self.frame_stats = Some(view.clone());
+        }
     }
 
     /// Count a frame of the window's for `fps`, shown anew or not.
