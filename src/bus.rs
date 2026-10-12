@@ -190,6 +190,10 @@ pub struct Bus {
     pub pit_read_msb: bool,  // Channel 2 read LSB/MSB toggle
     pub pit_mode: u8,        // PIT Command Mode
     pub pit_write_msb: bool, // Toggle to handle 2-byte writes (LSB/MSB)
+    /// Channel 2's count and output as programs read them, with its gate.
+    pub pit2: crate::timer::Pit2,
+    /// Port 61h bit 1, the speaker data enable.
+    pub speaker_data: bool,
     /// Channel 0 count register as assembled from port 0x40 writes. A
     /// complete count is handed to `pit0`.
     pub pit0_divisor: u16,
@@ -435,6 +439,8 @@ impl Bus {
             pit_mode: 0,
             pit_write_msb: false,
             pit_read_msb: false,
+            pit2: crate::timer::Pit2::new(),
+            speaker_data: false,
             pit0_divisor: 0xFFFF,
             pit0_write_msb: false,
             pit0_read_msb: false,
@@ -1748,12 +1754,6 @@ impl Bus {
         self.write_32(addr + 4, (value >> 32) as u32);
     }
 
-    /// PIT channel 2's output: a square wave at the programmed frequency.
-    fn pit2_output(&self) -> bool {
-        let divisor = if self.pit_divisor == 0 { 0x10000u64 } else { self.pit_divisor as u64 };
-        self.clock.now_ticks() % divisor < divisor / 2
-    }
-
     /// Start an execution batch that runs until instruction `end`.
     pub fn start_batch(&mut self, end: u64) {
         self.clock.set_batch_end(end);
@@ -2633,15 +2633,27 @@ impl Bus {
                 if self.speaker_on {
                     self.audio_catch_up();
                 }
-                if !self.pit_write_msb {
-                    // Write LSB
-                    self.pit_divisor = (self.pit_divisor & 0xFF00) | (value as u16);
-                    self.pit_write_msb = true; // Next write will be MSB
-                } else {
-                    // Write MSB
-                    self.pit_divisor = (self.pit_divisor & 0x00FF) | ((value as u16) << 8);
-                    self.pit_write_msb = false; // Reset to LSB
-                    // println!("[PIT] Frequency Divisor Set to: {}", self.pit_divisor);
+                let now = self.clock.now_ticks();
+                match self.pit2.access {
+                    1 => {
+                        self.pit_divisor = value as u16;
+                        self.pit2.write_count(self.pit_divisor, now);
+                    }
+                    2 => {
+                        self.pit_divisor = (value as u16) << 8;
+                        self.pit2.write_count(self.pit_divisor, now);
+                    }
+                    _ if !self.pit_write_msb => {
+                        // Write LSB
+                        self.pit_divisor = (self.pit_divisor & 0xFF00) | (value as u16);
+                        self.pit_write_msb = true; // Next write will be MSB
+                    }
+                    _ => {
+                        // Write MSB
+                        self.pit_divisor = (self.pit_divisor & 0x00FF) | ((value as u16) << 8);
+                        self.pit_write_msb = false; // Reset to LSB
+                        self.pit2.write_count(self.pit_divisor, now);
+                    }
                 }
             }
 
@@ -2663,6 +2675,9 @@ impl Bus {
                         self.pit0_latched = self.pit0.count(self.clock.now_ticks());
                         self.pit0_latched_active = true;
                         self.pit0_read_msb = false;
+                    } else if channel == 2 && self.pit2.latched.is_none() {
+                        self.pit2.latched = Some(self.pit2.read(self.clock.now_ticks()).0);
+                        self.pit_read_msb = false;
                     }
                 } else {
                     match channel {
@@ -2675,7 +2690,12 @@ impl Bus {
                             self.pit0.set_mode((value >> 1) & 0x07, self.clock.now_ticks());
                             self.clock.schedule(self.next_event());
                         }
-                        2 => self.pit_write_msb = false, // Reset Channel 2 LSB/MSB
+                        2 => {
+                            // Reset Channel 2 LSB/MSB
+                            self.pit_write_msb = false;
+                            self.pit_read_msb = false;
+                            self.pit2.set_mode((value >> 1) & 0x07, access, self.clock.now_ticks());
+                        }
                         _ => {}
                     }
                 }
@@ -2685,6 +2705,8 @@ impl Bus {
             // Bit 0: Timer 2 Gate (Must be 1 for timer to run)
             // Bit 1: Speaker Data (Must be 1 for sound to pass to speaker)
             0x61 => {
+                self.pit2.set_gate(value & 0x01 != 0, self.clock.now_ticks());
+                self.speaker_data = value & 0x02 != 0;
                 // If both Bit 0 and Bit 1 are set, the speaker is ON
                 let enabled = (value & 0x03) == 0x03;
                 if enabled != self.speaker_on {
@@ -2946,28 +2968,32 @@ impl Bus {
                 }
             }
 
-            // Port 0x42 — PIT channel 2 (PC speaker tone) data. Some games
-            // read this port as a cheap free-running counter for tight
-            // timing loops ("wait until count < threshold"), independent of
-            // whether they ever use the speaker. Returning a constant would
-            // hang those loops, so we synthesize the current count from the
-            // active divisor and emulated time, matching real hardware's
-            // 1.193 MHz tick rate.
+            // Port 0x42 — PIT channel 2 (PC speaker tone) data. Programs
+            // read it as a free-running counter for timing loops, or time a
+            // delay loop by gating it through port 61h bit 0.
             0x42 => {
-                let divisor = if self.pit_divisor == 0 {
-                    0x10000u32
-                } else {
-                    self.pit_divisor as u32
+                let count = match self.pit2.latched {
+                    Some(latched) => latched,
+                    None => self.pit2.read(self.clock.now_ticks()).0,
                 };
-                let ticks = self.clock.now_ticks();
-                let rem = (ticks % divisor as u64) as u32;
-                let count = ((divisor - 1 - rem) & 0xFFFF) as u16;
-                if !self.pit_read_msb {
-                    self.pit_read_msb = true;
-                    (count & 0xFF) as u8
-                } else {
-                    self.pit_read_msb = false;
-                    (count >> 8) as u8
+                match self.pit2.access {
+                    1 => {
+                        self.pit2.latched = None;
+                        (count & 0xFF) as u8
+                    }
+                    2 => {
+                        self.pit2.latched = None;
+                        (count >> 8) as u8
+                    }
+                    _ if !self.pit_read_msb => {
+                        self.pit_read_msb = true;
+                        (count & 0xFF) as u8
+                    }
+                    _ => {
+                        self.pit_read_msb = false;
+                        self.pit2.latched = None;
+                        (count >> 8) as u8
+                    }
                 }
             }
 
@@ -3015,14 +3041,17 @@ impl Bus {
             // request (bit 4, toggles), and the PIT channel 2 output (bit 5).
             0x61 => {
                 let mut val = 0;
-                if self.speaker_on {
-                    val |= 0x03;
+                if self.pit2.gate() {
+                    val |= 0x01;
+                }
+                if self.speaker_data {
+                    val |= 0x02;
                 }
                 self.refresh_toggle = !self.refresh_toggle;
                 if self.refresh_toggle {
                     val |= 0x10;
                 }
-                if self.pit2_output() {
+                if self.pit2.read(self.clock.now_ticks()).1 {
                     val |= 0x20;
                 }
                 val
