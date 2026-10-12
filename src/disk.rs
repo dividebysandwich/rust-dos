@@ -247,11 +247,9 @@ pub fn short_names<S: AsRef<str>>(names: &[S]) -> Vec<String> {
 struct HostDirCache {
     /// Counts the guest's changes to the names in host folders.
     changes: Cell<u64>,
-    /// Counts the guest's changes to host files' sizes and attributes,
-    /// which a search's listing has and a folder's names don't.
-    edits: Cell<u64>,
     dirs: RefCell<HashMap<PathBuf, HostDir>>,
-    /// The most recent search last.
+    /// The most recent search last. The guest's changes drop the searches
+    /// of the folders they were made in (`touched`).
     searches: RefCell<Vec<HostSearch>>,
 }
 
@@ -259,8 +257,6 @@ struct HostDirCache {
 struct HostSearch {
     key: SearchKey,
     modified: std::time::SystemTime,
-    /// `changes` and `edits` when it was listed.
-    changes: (u64, u64),
     entries: Rc<[DosDirEntry]>,
 }
 
@@ -303,10 +299,14 @@ impl HostDirCache {
         self.changes.set(self.changes.get().wrapping_add(1));
     }
 
-    /// The guest wrote to a host file, or changed its size or attributes:
-    /// searches list their folders again, and the folders' names are kept.
-    fn edited(&self) {
-        self.edits.set(self.edits.get().wrapping_add(1));
+    /// The guest created, wrote, resized, deleted or renamed the host file
+    /// or folder `path`, or changed its attributes: the searches of its
+    /// folder, and of `path` and the folders under it, list them again.
+    /// Searches of other folders are kept, so a program copying the files
+    /// it finds into another folder doesn't list its source each time.
+    fn touched(&self, path: &Path) {
+        let parent = path.parent();
+        self.searches.borrow_mut().retain(|s| Some(s.key.dir.as_path()) != parent && !s.key.dir.starts_with(path));
     }
 
     /// The modification time of the host folder `dir`, if what was read of
@@ -381,15 +381,14 @@ impl HostDirCache {
         let Some(modified) = Self::settled(&key.dir) else {
             return list().map(Into::into);
         };
-        let changes = (self.changes.get(), self.edits.get());
         let entries = match kept {
-            Some(kept) if !first && kept.modified == modified && kept.changes == changes => kept.entries,
+            Some(kept) if !first && kept.modified == modified => kept.entries,
             _ => list()?.into(),
         };
         if searches.len() >= Self::MAX_SEARCHES {
             searches.remove(0);
         }
-        searches.push(HostSearch { key, modified, changes, entries: entries.clone() });
+        searches.push(HostSearch { key, modified, entries: entries.clone() });
         Ok(entries)
     }
 }
@@ -821,7 +820,9 @@ struct OpenFile {
 
 /// What an open handle reads and writes.
 enum OpenData {
-    Host(File),
+    /// A host file, and its host path when it was opened for writing:
+    /// writes drop the searches of its folder (`HostDirCache::touched`).
+    Host(File, Option<PathBuf>),
     /// A file held in memory, and the position, which the handles
     /// duplicated from this one share.
     Memory(Bytes, Rc<Cell<u64>>),
@@ -1989,7 +1990,7 @@ impl DiskController {
     pub fn sft_entry(&self, sft: u16) -> Option<SftEntry> {
         let open = self.open_files.get(&sft)?;
         let size = match &open.data {
-            OpenData::Host(file) => file.len().unwrap_or(0),
+            OpenData::Host(file, _) => file.len().unwrap_or(0),
             OpenData::Memory(data, _) => data.len() as u64,
             OpenData::Image(_, extent, _) => extent.size as u64,
             OpenData::Fat { volume, at, .. } => volume.reload(*at).map_or(0, |entry| entry.size as u64),
@@ -2024,7 +2025,7 @@ impl DiskController {
     /// Where in the open file `sft` the next read or write goes.
     pub fn position(&self, sft: u16) -> Option<u64> {
         match &self.open_files.get(&sft)?.data {
-            OpenData::Host(file) => (&*file).stream_position().ok(),
+            OpenData::Host(file, _) => (&*file).stream_position().ok(),
             OpenData::Memory(_, pos) | OpenData::Image(_, _, pos) | OpenData::Fat { pos, .. } => Some(pos.get()),
             OpenData::Device(_) => Some(0),
         }
@@ -2527,15 +2528,17 @@ impl DiskController {
         }
 
         let handle = self.free_handle()?;
-        let opened = options.open(path);
+        let opened = options.open(&path);
         // Opening a file that is there already adds no name to its folder.
         if create && existing.is_none() {
             self.host_dirs.changed();
+            self.host_dirs.touched(&path);
         }
         match opened {
             Ok(file) => {
                 let key = self.file_key(filename);
-                let file = self.opened(OpenData::Host(file), drive, owner, key, filename, mode);
+                let written = (writable && mode & 0x03 != 0).then_some(path);
+                let file = self.opened(OpenData::Host(file, written), drive, owner, key, filename, mode);
                 self.insert(handle, file);
                 Ok(handle)
             }
@@ -2598,6 +2601,7 @@ impl DiskController {
         }
         let written = hostfs::write(&path, data);
         self.host_dirs.changed();
+        self.host_dirs.touched(&path);
         written.map_err(|_| 0x05)?;
         if let Some(when) = stamp.and_then(|(time, date)| dos_to_system_time(time, date)) {
             let _ = OpenOptions::new().write(true).open(&path).and_then(|f| f.set_modified(when));
@@ -2624,8 +2628,9 @@ impl DiskController {
             return Err(0x02); // File not found
         }
         self.check_writable(drive)?;
-        let removed = hostfs::remove_file(path);
+        let removed = hostfs::remove_file(&path);
         self.host_dirs.changed();
+        self.host_dirs.touched(&path);
         removed.map_err(|_| 0x05)
     }
 
@@ -2671,8 +2676,11 @@ impl DiskController {
         if self.find_existing_child(&parent, leaf).is_some() {
             return Err(0x05); // Destination exists
         }
-        let renamed = hostfs::rename(source, parent.join(leaf.to_uppercase()));
+        let target = parent.join(leaf.to_uppercase());
+        let renamed = hostfs::rename(&source, &target);
         self.host_dirs.changed();
+        self.host_dirs.touched(&source);
+        self.host_dirs.touched(&target);
         renamed.map_err(|_| 0x05)
     }
 
@@ -2680,7 +2688,7 @@ impl DiskController {
     pub fn file_time(&self, handle: u16) -> Result<(u16, u16), u8> {
         let open = self.open_files.get(&handle).ok_or(0x06)?;
         let modified = match &open.data {
-            OpenData::Host(f) => f.modified(),
+            OpenData::Host(f, _) => f.modified(),
             OpenData::Memory(..) => return Ok((MEMORY_TIME, MEMORY_DATE)),
             OpenData::Image(_, extent, _) => return Ok((extent.time, extent.date)),
             OpenData::Fat { volume, at, .. } => {
@@ -2725,7 +2733,10 @@ impl DiskController {
         let Some(open) = self.open_files.get_mut(&sft) else { return false };
         open.refs = open.refs.saturating_sub(1);
         if open.refs == 0 && sft >= FIRST_FILE {
-            self.open_files.remove(&sft);
+            // The host may set a written file's time when it is closed.
+            if let Some(OpenFile { data: OpenData::Host(_, Some(path)), .. }) = self.open_files.remove(&sft) {
+                self.host_dirs.touched(&path);
+            }
         }
         self.mark_dirty(sft);
         true
@@ -2767,7 +2778,7 @@ impl DiskController {
         self.mark_moved(handle);
         if let Some(open) = self.open_files.get_mut(&handle) {
             let file = match &mut open.data {
-                OpenData::Host(file) => file,
+                OpenData::Host(file, _) => file,
                 OpenData::Memory(data, pos) => {
                     let start = (pos.get() as usize).min(data.len());
                     let end = start.saturating_add(count).min(data.len());
@@ -2809,9 +2820,11 @@ impl DiskController {
         self.mark_dirty(handle);
         if let Some(open) = self.open_files.get_mut(&handle) {
             let file = match &mut open.data {
-                OpenData::Host(file) => {
+                OpenData::Host(file, path) => {
                     // A search's listing has the file's size and date.
-                    self.host_dirs.edited();
+                    if let Some(path) = path {
+                        self.host_dirs.touched(path);
+                    }
                     file
                 }
                 OpenData::Memory(..) | OpenData::Image(..) => return Err(0x05),
@@ -2851,7 +2864,7 @@ impl DiskController {
         self.mark_moved(handle);
         if let Some(open) = self.open_files.get_mut(&handle) {
             let file = match &mut open.data {
-                OpenData::Host(file) => file,
+                OpenData::Host(file, _) => file,
                 OpenData::Memory(data, pos) => return Self::seek_in(data.len() as u64, pos, offset, origin),
                 OpenData::Image(_, extent, pos) => return Self::seek_in(extent.size as u64, pos, offset, origin),
                 OpenData::Fat { volume, at, pos, .. } => {
@@ -2884,8 +2897,10 @@ impl DiskController {
     pub fn set_file_size(&mut self, handle: u16, size: u64) -> Result<(), u8> {
         let open = self.open_files.get(&handle).ok_or(0x06u8)?;
         match &open.data {
-            OpenData::Host(file) => {
-                self.host_dirs.edited();
+            OpenData::Host(file, path) => {
+                if let Some(path) = path {
+                    self.host_dirs.touched(path);
+                }
                 let result = file.set_len(size).map_err(|_| 0x05);
                 self.mark_dirty(handle);
                 return result;
@@ -3073,7 +3088,7 @@ impl DiskController {
         if let Ok(meta) = hostfs::metadata(&path) {
             let want_ro = (attr & 0x01) != 0;
             if meta.readonly != want_ro {
-                self.host_dirs.edited();
+                self.host_dirs.touched(&path);
                 // Ignore permission-set errors on systems where it's not supported.
                 let _ = hostfs::set_readonly(&path, want_ro);
             }
@@ -3117,6 +3132,7 @@ impl DiskController {
         let target = parent_path.join(leaf.to_uppercase());
         let created = hostfs::create_dir(&target);
         self.host_dirs.changed();
+        self.host_dirs.touched(&target);
         created.map_err(|_| 0x05)
     }
 
@@ -3146,6 +3162,7 @@ impl DiskController {
         }
         let removed = hostfs::remove_dir(&host_path);
         self.host_dirs.changed();
+        self.host_dirs.touched(&host_path);
         removed.map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => 0x03,
             _ => 0x05, // Access denied (e.g. not empty)
@@ -4458,6 +4475,18 @@ mod tests {
         age(&root);
         let found = disk.find_directory_entry(r"C:\*.DAT", 1, 0).unwrap();
         assert_eq!((found.filename.as_str(), found.size), ("C.DAT", 6));
+
+        // Copying what it finds into another folder, as an installer does,
+        // keeps the search of the source.
+        fs::create_dir(root.join("DEST")).unwrap();
+        age(&root);
+        assert_eq!(disk.find_directory_entry(r"C:\*.DAT", 0, 0).unwrap().filename, "B.DAT");
+        let handle = disk.create_file(r"C:\DEST\B.DAT", PSP).unwrap();
+        disk.write_file(handle, b"x").unwrap();
+        disk.close_file(handle);
+        let source = disk.resolve_path(r"C:\").unwrap();
+        assert!(disk.host_dirs.searches.borrow().iter().any(|s| s.key.dir == source), "kept");
+        assert_eq!(disk.find_directory_entry(r"C:\*.DAT", 1, 0).unwrap().filename, "C.DAT");
     }
 
     #[test]
