@@ -1561,6 +1561,16 @@ machine=svga_s3
 memsize=64
 ```
 
+A DOSBox-X configuration's `IMGMOUNT` and `BOOT` lines work as they are,
+such as these, which mount the Windows image by number and a CD on the
+secondary IDE channel:
+
+```
+imgmount 2 win95.img -size 512,63,16,520 -t hdd -fs none
+imgmount D game.iso -t cdrom -fs iso -ide 2m
+boot -l c
+```
+
 The S3 driver shows the desktop up to 1024x768 in 32 bits per pixel with
 its accelerated drawing and hardware cursor; the Sound Blaster 16 plays
 Windows' sounds and FM music; the PS/2 mouse and APM work (Shut Down turns
@@ -1568,6 +1578,14 @@ the machine off). MS-DOS Prompts run in a window or full screen
 (Alt+Enter), and **Restart in MS-DOS mode** works. Windows keeps the
 hardware it was installed on in its registry, so an image installed on
 other hardware may look for devices this machine hasn't.
+
+Windows 95, OSR2 included, is the system the booted machine was built and
+tried with. Windows 98, 98 SE and ME have no recorded run, so try them on a
+copy of the image. The machine has APM and no ACPI, and its Sound Blaster
+is a legacy card that Windows finds at the resources [`[sound]`](#sound)
+gives it (DOSBox-X's `sbtype=sb16vibra` is an ISA Plug and Play card).
+`memsize` is capped by the CPU, at most 512 MB with `cpu=pentium_mmx` (see
+[`[emulator]`](#emulator)).
 
 ### Direct3D on an S3 ViRGE
 
