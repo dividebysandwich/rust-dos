@@ -57,6 +57,8 @@ impl DiskController {
             notes: _,
             // Made again from the drives as they are mounted.
             media: _,
+            // Read again from the host folders.
+            host_dirs: _,
         } = self;
         current_drive.save(w);
         for drive in &drives[..LASTDRIVE as usize] {
@@ -106,6 +108,7 @@ impl DiskController {
     /// Mount the drives as the state has them, where they differ, and open
     /// its files again. Returns the files that couldn't be opened.
     pub(crate) fn load_state(&mut self, r: &mut Reader) -> Result<Vec<String>> {
+        self.host_dirs.changed();
         let mut current = 0u8;
         current.load(r)?;
         for drive in 0..LASTDRIVE {
