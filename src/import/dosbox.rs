@@ -163,10 +163,12 @@ fn import_from(texts: &[&str], bases: &[PathBuf], name: &str, home: Option<&Path
     // DOSBox Staging's cycles, which the old `cycles` overrides, and the
     // palette of a monochrome machine.
     let (mut legacy_cycles, mut cpu_cycles, mut cpu_cycles_protected, mut palette) = (false, None, None, None);
+    let mut dosbox_machine: Option<String> = None;
     for conf in &confs {
         for (section, key, value) in &conf.values {
             gus_set |= section == "gus" && key == "gus";
             match (section.as_str(), key.as_str()) {
+                ("dosbox", "machine") => dosbox_machine = value.split_whitespace().next().map(str::to_ascii_lowercase),
                 ("cpu", "cycles") => legacy_cycles |= !value.is_empty(),
                 ("cpu", "cpu_cycles") => cpu_cycles = Some(value.to_ascii_lowercase()),
                 ("cpu", "cpu_cycles_protected") => cpu_cycles_protected = Some(value.to_ascii_lowercase()),
@@ -228,8 +230,30 @@ fn import_from(texts: &[&str], bases: &[PathBuf], name: &str, home: Option<&Path
         }
         autoexec_line(&mut imported, line, bases, home, &mut roots);
     }
+    // A Windows installed in DOSBox on its S3 card (DOSBox's default
+    // machine, or one of DOSBox-X's S3 chips) has the S3's driver and
+    // falls back to safe mode without the card. A configuration that boots
+    // a hard disk keeps the S3, which DOS games get as svga.
+    let s3 = match dosbox_machine.as_deref() {
+        None => true,
+        Some(m) => match crate::video::adapter::Adapter::parse(m) {
+            Some(adapter) => adapter == crate::video::adapter::Adapter::S3,
+            None => m.starts_with("svga_s3"),
+        },
+    };
+    if s3 && imported.autoexec.iter().any(|line| boots_hard_disk(line)) {
+        imported.set("emulator", "machine", "svga_s3");
+    }
     imported.drop_invalid();
     imported
+}
+
+/// Whether an imported BOOT line starts a system from a hard disk: `-l`
+/// with C:, D: or the hard disk units 2 and 3.
+fn boots_hard_disk(line: &str) -> bool {
+    let tokens: Vec<String> = line.split_whitespace().map(str::to_ascii_lowercase).collect();
+    tokens.first().is_some_and(|verb| verb == "boot")
+        && tokens.windows(2).any(|pair| pair[0] == "-l" && matches!(pair[1].trim_end_matches(':'), "c" | "d" | "2" | "3"))
 }
 
 /// The game in the operating system `name`, its package's own
@@ -786,6 +810,29 @@ mod tests {
         assert_eq!(machine("[dosbox]\nmachine=svga_s3virge\n").as_deref(), Some("svga_s3virge"));
         assert_eq!(machine("[dosbox]\nmachine=svga_s3virgevx\n").as_deref(), Some("svga_s3virgevx"));
         assert_eq!(machine("[dosbox]\nmachine=svga_et4000\n").as_deref(), Some("svga_et4000"));
+    }
+
+    /// A Windows installed on DOSBox's S3 keeps the card when booted; DOS
+    /// games, and a booter floppy, get the plain Super VGA.
+    #[test]
+    fn a_booted_hard_disk_keeps_the_s3() {
+        let machine = |conf: &str| {
+            let imported = import(&[conf], &[PathBuf::from("/")], "x", None);
+            imported.settings.iter().find(|(_, k, _)| *k == "machine").map(|(_, _, v)| v.clone())
+        };
+        let boot = "[autoexec]\nimgmount 2 win95.img -size 512,63,16,520 -t hdd -fs none\nboot -l c\n";
+        assert_eq!(machine(&format!("[dosbox]\nmachine=svga_s3\n{}", boot)).as_deref(), Some("svga_s3"));
+        assert_eq!(machine(boot).as_deref(), Some("svga_s3"), "DOSBox's default machine");
+        assert_eq!(machine(&format!("[dosbox]\nmachine=svga_s3trio64\n{}", boot)).as_deref(), Some("svga_s3"));
+        assert_eq!(machine("[dosbox]\nmachine=svga_s3\n[autoexec]\nimgmount c win95.img\nboot c:\n").as_deref(), Some("svga_s3"));
+        // Other cards stay as they are.
+        assert_eq!(machine(&format!("[dosbox]\nmachine=svga_s3virge\n{}", boot)).as_deref(), Some("svga_s3virge"));
+        assert_eq!(machine(&format!("[dosbox]\nmachine=svga_et4000\n{}", boot)).as_deref(), Some("svga_et4000"));
+        assert_eq!(machine(&format!("[dosbox]\nmachine=vgaonly\n{}", boot)).as_deref(), Some("vga"));
+        // No boot, or a floppy's.
+        assert_eq!(machine("[dosbox]\nmachine=svga_s3\n[autoexec]\ngame.exe\n").as_deref(), Some("svga"));
+        assert_eq!(machine("[dosbox]\nmachine=svga_s3\n[autoexec]\nboot game.img\n").as_deref(), Some("svga"));
+        assert_eq!(machine("[dosbox]\nmachine=svga_s3\n[autoexec]\nimgmount a game.img -t floppy\nboot -l a\n").as_deref(), Some("svga"));
     }
 
     #[test]
