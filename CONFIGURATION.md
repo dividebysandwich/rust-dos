@@ -1442,6 +1442,20 @@ compatibility mode". Transfers without DMA (which Windows doesn't use)
 aren't supported. `floppy_controller=false` in `[emulator]` leaves the
 floppies to INT 13h alone.
 
+Use the wizard's detection path rather than selecting the controller from
+the list. On Windows 95 4.00.950 B, the manual path can report a resource
+conflict and install the controller disabled even when its resources do
+not conflict. To repair that installation, open **Device Manager** →
+**Floppy disk controllers** → **Standard Floppy Disk Controller** →
+**Properties**. In **Resources**, click **Set Configuration Manually**:
+**Basic configuration 0** uses I/O 03F2–03F5, IRQ 06 and DMA 02. Check
+that the **Conflicting device list** says **No conflicts**, then in
+**General** clear **Disable in this hardware profile**, apply and restart
+the system. The device should then report that it is working properly.
+If the list names a conflicting device, resolve that actual conflict
+instead. See [the Windows 95 investigation](docs/windows95-floppy-install.md)
+for the reproduction and verification of this case.
+
 ### Operating systems by name
 
 Hard disk images of installed systems in the `os` folder of rust-dos's
