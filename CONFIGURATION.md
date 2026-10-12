@@ -488,7 +488,8 @@ PC speaker and the prompt's beeps), `sb` (the Sound Blaster's digital
 audio), `fm` (the FM synthesizer), `gus`, `midi`, `cdaudio`, `disknoise`,
 `lptdac` (the Covox or Disney Sound Source), `tandy` (the Tandy's and
 PCjr's sound chip), `awe32` (the AWE32's wavetable synthesizer) and
-`monitor` (the [monitor's effects](#emulator)), and `master` for all of
+`monitor` (the [monitor's effects](#emulator)), `modem` (the [modem's
+speaker](#serial-and-modem-games)), and `master` for all of
 them together. At 100, the
 default, a source plays as loud as its card makes it. The volumes apply on
 top of the Sound Blaster's own mixer, which programs set.
@@ -1922,8 +1923,18 @@ default; set the game up for that port, at any speed.
   settings window's *Modem phonebook* (Serial page) lists them, fetches
   more from rust-dos.com when you ask it to, and copies the command that
   dials one. Numbers of your own go in [`[phonebook]`](#phonebook).
+* **A call sounds and takes as long as a real one:** the modem's speaker
+  plays the dial tone, the number as touch tones (`ATDT`) or pulse clicks
+  (`ATDP`), the other end ringing, and a real modem's handshake, about 25
+  seconds in all; CONNECT comes when the handshake ends. A host on the
+  internet dials a seven-digit number of its own. `ATM0` turns the speaker
+  off, `ATM3` keeps it quiet while dialing, and `ATL0`..`ATL3` set its
+  volume; the call takes as long either way. `modem` in
+  [`[mixer]`](#mixer) is its volume in the mix. A key during the dialing
+  or the handshake ends the call.
 * The modem knows the usual commands: `ATZ`, `AT&F`, `ATE`, `ATV`, `ATQ`,
-  `ATH`, `ATA`, `ATO`, `ATD`, `ATI`, `ATS0=`..`ATS15=` and `ATSn?`,
+  `ATH`, `ATA`, `ATO`, `ATD`, `ATP`, `ATT`, `ATL`, `ATM`, `ATI`,
+  `ATS0=`..`ATS15=` and `ATSn?`,
   `A/`, and the escape `+++` with a second's pause before and after; it
   answers the settings of error correction and compression with OK.
 * The link is reliable and in order over the relay's UDP, and needs a

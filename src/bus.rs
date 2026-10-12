@@ -1965,6 +1965,7 @@ impl Bus {
             // A CD plays on meanwhile, and the disks spin.
             self.cdaudio.skip(target - rate / 2 - self.audio_frames);
             self.disknoise.skip(target - rate / 2 - self.audio_frames);
+            self.serial.skip_sound(target - rate / 2 - self.audio_frames);
             self.audio_frames = target - rate / 2;
         }
         let frames = target.saturating_sub(self.audio_frames) as usize;
@@ -2019,6 +2020,7 @@ impl Bus {
         use crate::mixer::Channel;
         let mut peaks = [0.0f32; crate::mixer::CHANNELS];
         let tandy_on = self.tandy_sound_enabled();
+        let modem_on = self.serial.sound_playing();
         for _ in 0..frames {
             let mut mix = crate::mixer::MixFrame::default();
             // The PC speaker, and the prompt's beep, through the speaker's
@@ -2076,6 +2078,10 @@ impl Bus {
                 let noise = self.monitor_noise.render();
                 self.mixer.add(&mut mix, &mut peaks, Channel::Monitor, (noise, noise));
             }
+            if modem_on {
+                let s = self.serial.render_sound();
+                self.mixer.add(&mut mix, &mut peaks, Channel::Modem, (s, s));
+            }
             if let Some(gus) = &mut self.gus {
                 let (gl, gr) = gus.pop_frame(crate::opl::RATE);
                 self.mixer.add(&mut mix, &mut peaks, Channel::Gus, (gl * GUS_GAIN, gr * GUS_GAIN));
@@ -2119,6 +2125,7 @@ impl Bus {
             && self.cdaudio.is_idle()
             && self.disknoise.is_silent()
             && self.monitor_noise.is_silent()
+            && !self.serial.sound_playing()
             && self.gus.as_ref().is_none_or(|g| g.is_idle())
             && self.awe.is_none()
             && self.lpt_dac.is_none()
