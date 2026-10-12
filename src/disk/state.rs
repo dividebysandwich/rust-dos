@@ -71,7 +71,7 @@ impl DiskController {
         for sft in entries {
             let OpenFile { data, drive, owner, key, path, mode, refs, fcb } = &open_files[&sft];
             let (device, position) = match data {
-                OpenData::Host(file) => (None, (&*file).stream_position().unwrap_or(0)),
+                OpenData::Host(file, _) => (None, (&*file).stream_position().unwrap_or(0)),
                 OpenData::Memory(_, pos) | OpenData::Image(_, _, pos) | OpenData::Fat { pos, .. } => (None, pos.get()),
                 OpenData::Device(device) => (Some(*device), 0),
             };
