@@ -95,6 +95,7 @@ pub mod pci;
 pub mod pic;
 pub mod pnpbios;
 pub mod post;
+pub mod profile;
 pub mod powervr;
 pub mod printer;
 pub mod recorder;

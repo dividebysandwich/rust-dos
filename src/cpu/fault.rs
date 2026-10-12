@@ -477,6 +477,9 @@ impl Cpu {
     /// Keep a record of an exception for debuggers, and log the first ones.
     fn note_exception(&mut self, fault: Fault) {
         self.exceptions += 1;
+        if let Some(p) = &mut self.bus.profile {
+            p.exceptions[fault.vector as usize & 31] += 1;
+        }
         let record = ExceptionRecord {
             vector: fault.vector,
             error: fault.error(),

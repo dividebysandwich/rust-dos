@@ -14,6 +14,7 @@ use crate::cpu::{ATTR_DB, CR0_PG, Cpu, CpuFlags, CpuState, Fault, IntSource, SHE
 use crate::dynrec::{DynState, Run};
 use crate::instr_cache::InstrCache;
 use crate::instructions::Handler;
+use crate::profile;
 
 /// Why `run_batch` returned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +77,9 @@ struct Fetch {
     window: CodeWindow,
     /// The dynamic recompiler, taken out of the CPU like the cache.
     dynrec: DynState,
+    /// A profile runs: the interpreter notes each instruction it runs
+    /// (`profile::WORD`).
+    profiling: bool,
 }
 
 /// The page instructions are being fetched from: where it is in physical
@@ -174,6 +178,7 @@ impl Fetch {
             cache: std::mem::take(&mut cpu.decode_cache),
             window: CodeWindow::NONE,
             dynrec: std::mem::take(&mut cpu.dynrec),
+            profiling: cpu.bus.profile.is_some(),
         }
     }
 
@@ -212,6 +217,7 @@ pub fn run_batch(cpu: &mut Cpu, hook: &mut dyn ExecHook, hot: bool) -> StopReaso
 fn run<const HOT: bool, const DYN: bool>(cpu: &mut Cpu, fetch: &mut Fetch, hook: &mut dyn ExecHook) -> StopReason {
     loop {
         if cpu.bus.clock.icount >= cpu.bus.clock.deadline {
+            let _profile = profile::zone(profile::Zone::Timers);
             crate::idle::at_event(cpu);
             if cpu.bus.clock.icount >= cpu.bus.clock.batch_end() {
                 return StopReason::BatchEnd;
@@ -246,6 +252,7 @@ fn run<const HOT: bool, const DYN: bool>(cpu: &mut Cpu, fetch: &mut Fetch, hook:
             if !HOT && cpu.state != CpuState::RebootShell && cpu.batch.marked_line_waits() {
                 return StopReason::Hook;
             }
+            let _profile = profile::zone(profile::Zone::Shell);
             match shell_services(cpu) {
                 Shell::Idle => {}
                 // Nothing after EXIT runs, not even the rest of its batch file.
@@ -263,7 +270,9 @@ fn run<const HOT: bool, const DYN: bool>(cpu: &mut Cpu, fetch: &mut Fetch, hook:
         let stop = if !HOT && cpu.bus.observe.watching() {
             // A busy-wait loop is looked for or proven (`idle`): one
             // instruction at a time, on the interpreter.
+            let profile = profile::zone(profile::Zone::IdleProof);
             crate::idle::before_instruction(cpu);
+            drop(profile);
             if cpu.bus.clock.icount >= cpu.bus.clock.deadline {
                 // Passes were skipped up to the next timer event.
                 continue;
@@ -385,6 +394,10 @@ fn deliver_pending(cpu: &mut Cpu) -> bool {
     // lets the line through: not masked in the IMR and not blocked by an
     // interrupt still in service.
     if let Some(irq) = cpu.bus.pic_pending_irq() {
+        let _profile = profile::zone(profile::Zone::Irq);
+        if let Some(p) = &mut cpu.bus.profile {
+            p.irqs[irq as usize & 15] += 1;
+        }
         let vector = cpu.bus.pic.vector(irq);
         if !cpu.pe() {
             let entry = cpu.idtr.base.wrapping_add(vector as u32 * 4);
@@ -951,6 +964,9 @@ fn execute_at<const HOOK: bool, const CHAIN: bool>(
     if HOOK && hook.before_exec(cpu, phys_ip, fetch.ram) {
         return Some(StopReason::Paused);
     }
+    if fetch.profiling {
+        note_instruction(cpu, eip, code32);
+    }
     cpu.executed += 1;
 
     // Decode via the decoded-instruction cache. On a hit (the common case
@@ -1072,6 +1088,9 @@ fn chain(cpu: &mut Cpu, fetch: &mut Fetch, code32: bool) {
         let Some((instr, handler, simple)) = fetch.cache.get(phys_ip, eip, code32, page_gen) else {
             return;
         };
+        if fetch.profiling {
+            note_instruction(cpu, eip, code32);
+        }
         cpu.executed += 1;
         let start_esp = cpu.esp();
         cpu.set_eip(eip.wrapping_add(instr.len() as u32));
@@ -1090,6 +1109,13 @@ fn chain(cpu: &mut Cpu, fetch: &mut Fetch, code32: bool) {
             return;
         }
     }
+}
+
+/// Note the interpreter's instruction at CS:EIP for the profiler.
+#[inline(always)]
+fn note_instruction(cpu: &Cpu, eip: u32, code32: bool) {
+    let mode = profile::Mode::of(cpu.pe(), cpu.v86(), code32);
+    profile::set_guest(profile::Loc::guest(profile::Engine::Interp, mode, cpu.cs(), eip));
 }
 
 /// Decode the instruction at `phys_ip` into the decoded-instruction
@@ -1271,6 +1297,19 @@ fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
         cpu.bus.observe.opaque();
     }
     let trap = (cpu.cs(), cpu.eip());
+    let _profile = profile::zone(match kind {
+        0x38 => profile::Zone::hle(vector),
+        0x39 => profile::Zone::HleInline,
+        0x3A => profile::Zone::HleFar,
+        _ => profile::Zone::Dpmi,
+    });
+    let ah = (cpu.ax() >> 8) as usize;
+    if let Some(p) = &mut cpu.bus.profile {
+        match kind {
+            0x38 => p.hle[(vector as usize) << 8 | ah] += 1,
+            _ => p.services[(kind - 0x39) as usize][vector as usize] += 1,
+        }
+    }
     // An own-host extender can reflect mouse polls with IF clear throughout
     // the real-mode call. Deliver at the completed poll's return address,
     // never at this trap (which would run the service a second time).

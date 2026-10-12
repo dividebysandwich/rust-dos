@@ -353,6 +353,7 @@ jit_fn! {
         // SAFETY: translated code passes the CPU and context the execution
         // loop entered it with, and its own block, which outlive the call.
         let (cpu, ctx, data) = unsafe { (&mut *cpu, &mut *ctx, &mut *data) };
+        let _profile = crate::profile::zone(crate::profile::Zone::JitFallback);
         let ix = ix as usize;
         let instr = &data.instrs[ix];
         let handler = data.handlers[ix];
@@ -789,6 +790,7 @@ jit_fn! {
         // SAFETY: as in `jit_fallback`.
         let (cpu, ctx) = unsafe { (&mut *cpu, &mut *ctx) };
         ctx.calls.memref += 1;
+        let _profile = crate::profile::zone(crate::profile::Zone::JitSlowMem);
         let seg = Seg::ALL[(desc & 7) as usize];
         let size = (desc >> 4 & 15) as u8;
         let access = if desc & 0x100 != 0 { Access::Write } else { Access::Read };
@@ -831,6 +833,7 @@ jit_fn! {
         // SAFETY: as in `jit_fallback`.
         let (cpu, ctx) = unsafe { (&mut *cpu, &mut *ctx) };
         ctx.calls.slow += 1;
+        let _profile = crate::profile::zone(crate::profile::Zone::JitSlowMem);
         let r = ctx.refs[slot as usize & 3];
         guard(ctx, 0, || cpu.mem_read(r))
     }
@@ -843,6 +846,7 @@ jit_fn! {
         // SAFETY: as in `jit_fallback`.
         let (cpu, ctx) = unsafe { (&mut *cpu, &mut *ctx) };
         ctx.calls.slow += 1;
+        let _profile = crate::profile::zone(crate::profile::Zone::JitSlowMem);
         let r = ctx.refs[slot as usize & 3];
         guard(ctx, (), || cpu.mem_write(r, value));
         let in_first = 0x1000 - (r.phys & 0xFFF);

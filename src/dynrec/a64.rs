@@ -295,6 +295,17 @@ fn mov32(ops: &mut Asm, reg: u8, v: u32) {
     }
 }
 
+/// X`reg` = `v`.
+fn mov64(ops: &mut Asm, reg: u8, v: u64) {
+    dynasm!(ops ; .arch aarch64 ; movz X(reg), (v & 0xFFFF) as u32);
+    for shift in [16u32, 32, 48] {
+        let part = (v >> shift & 0xFFFF) as u32;
+        if part != 0 {
+            dynasm!(ops ; .arch aarch64 ; movk X(reg), part, lsl shift);
+        }
+    }
+}
+
 /// The system register NZCV's encoding, for MRS.
 const NZCV: u32 = 0x5A10;
 
@@ -1107,6 +1118,12 @@ impl Gen<'_> {
         let data = self.data;
         let n = data.count() as u32;
         let (deadline, revalidate, limit, body) = (self.deadline, self.revalidate, self.limit, self.body);
+        if let Some(word) = self.env.profile {
+            // The profiler's sampler sees the block from here on.
+            mov64(&mut self.ops, 0, word);
+            mov64(&mut self.ops, 1, &crate::profile::WORD as *const _ as u64);
+            dynasm!(self.ops ; .arch aarch64 ; str x0, [x1]);
+        }
         self.field(Access::Ldr64, 0, layout::ICOUNT);
         self.field(Access::Ldr64, 1, layout::DEADLINE);
         dynasm!(self.ops

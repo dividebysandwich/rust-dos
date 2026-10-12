@@ -780,6 +780,16 @@ impl Gen<'_> {
         let (deadline, revalidate, body) = (self.deadline, self.revalidate, self.body);
         let data_ptr = self.data_ptr;
         let limit = self.limit;
+        if let Some(word) = self.env.profile {
+            // The profiler's sampler sees the block from here on.
+            let at = &crate::profile::WORD as *const _ as i64;
+            dynasm!(self.ops
+                ; .arch x64
+                ; mov rax, QWORD word as i64
+                ; mov rcx, QWORD at
+                ; mov QWORD [rcx], rax
+            );
+        }
         dynasm!(self.ops
             ; .arch x64
             ; mov rax, QWORD [rbx + ICOUNT]
