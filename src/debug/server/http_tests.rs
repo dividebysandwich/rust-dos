@@ -1937,12 +1937,14 @@ fn a_profile_finds_the_loop_the_machine_runs() {
     let top: Vec<&str> = r["top"].as_array().unwrap().iter().filter_map(|p| p["addr"].as_str()).collect();
     assert!(top.iter().any(|a| a.ends_with(":0100") || a.ends_with(":0104")), "{:?}", top);
     let place = &r["top"][0];
-    assert_eq!((place["mode"].as_str(), place["engine"].as_str()), (Some("real"), Some("cpu.interp")), "{}", place);
+    // (The interpreter's, or translated code's with RUST_DOS_CORE=dynamic.)
+    assert_eq!(place["mode"].as_str(), Some("real"), "{}", place);
+    assert!(matches!(place["engine"].as_str(), Some("cpu.interp" | "cpu.jit")), "{}", place);
     assert!(place["disasm"][0].as_str().is_some_and(|d| d.contains("inc") || d.contains("jmp")), "{}", place);
     let folded = rig.get("/api/profile?format=folded");
     assert_eq!(folded.status, 200);
     assert!(folded.header("content-type").is_some_and(|t| t.starts_with("text/plain")), "{:?}", folded.headers);
-    assert!(folded.body.lines().any(|l| l.starts_with("cpu.interp;real ")), "{}", folded.body);
+    assert!(folded.body.lines().any(|l| l.starts_with("cpu.interp;real ") || l.starts_with("cpu.jit;real ")), "{}", folded.body);
     let text = rig.get("/api/profile?format=text");
     assert!(text.body.starts_with("Profile stopped"), "{}", text.body);
     assert_eq!(rig.get("/api/profile?zone=nope").status, 400);
