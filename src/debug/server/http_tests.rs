@@ -1705,6 +1705,13 @@ fn if_state_seq_guards_every_request_the_emulator_carries_out() {
         let current = state.to_string();
         let done = http(rig.addr, method, path, &[("If-State-Seq", &current)], body.as_ref());
         assert!(done.status < 300, "{} {} in its state: {} {}", method, path, done.status, done.body);
+        // Input is typed while paused too, and its `input_delivered` entry
+        // would move the journal under the next request's check.
+        if path.starts_with("/api/input/") {
+            let op = done.json()["op"].as_u64().unwrap();
+            let ended = rig.get(&format!("/api/ops/{}?wait=10000", op));
+            assert_eq!(ended.status, 200, "{} {}: {}", method, path, ended.body);
+        }
     }
     // The server's own: no machine state to hold them against.
     let state = rig.get("/api/status").json()["state_seq"].as_u64().unwrap().to_string();
