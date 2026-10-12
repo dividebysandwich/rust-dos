@@ -96,6 +96,15 @@ pub enum CpuModel {
 }
 
 impl CpuModel {
+    pub const ALL: [CpuModel; 6] = [
+        CpuModel::I386,
+        CpuModel::I486,
+        CpuModel::Pentium,
+        CpuModel::PentiumMmx,
+        CpuModel::PentiumPro,
+        CpuModel::PentiumII,
+    ];
+
     /// The EFLAGS bits a program may change beyond the 386's: AC on a 486,
     /// and ID too on a Pentium and later, whose toggling tells that CPUID
     /// is there.

@@ -87,7 +87,8 @@ pub fn simple(instr: &Instruction, fast: bool) -> bool {
         | Test | Inc | Dec | Neg | Not | Mul | Imul | Div | Idiv | Daa | Das | Aaa | Aas | Aam | Aad | Rol
         | Ror | Rcl | Rcr | Shl | Sal | Shr | Sar | Shld | Shrd | Bt | Bts | Btr | Btc | Bsf | Bsr | Seto
         | Setno | Setb | Setae | Sete | Setne | Setbe | Seta | Sets | Setns | Setp | Setnp | Setl | Setge
-        | Setle | Setg | Ret | Jo | Jno | Jb | Jae | Je | Jne | Jbe | Ja | Js | Jns | Jp | Jnp | Jl | Jge
+        | Setle | Setg | Cmovo | Cmovno | Cmovb | Cmovae | Cmove | Cmovne | Cmovbe | Cmova | Cmovs | Cmovns
+        | Cmovp | Cmovnp | Cmovl | Cmovge | Cmovle | Cmovg | Ret | Jo | Jno | Jb | Jae | Je | Jne | Jbe | Ja | Js | Jns | Jp | Jnp | Jl | Jge
         | Jle | Jg | Jcxz | Jecxz | Loop | Loope | Loopne | Enter | Leave | Movsb | Movsw | Movsd | Cmpsb
         | Cmpsw | Cmpsd | Scasb | Scasw | Scasd | Lodsb | Lodsw | Lodsd | Stosb | Stosw | Stosd | Clc
         | Stc | Cmc | Cld | Std | Nop | Pause => !special,
@@ -227,9 +228,15 @@ pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
         Cli => system::cli(cpu),
         Sti => system::sti(cpu),
         Hlt => system::hlt(cpu),
+        // NOP r/m (0F 1F) is a hinting NOP of a P6, like those below.
+        Nop if instr.op_count() != 0 => system::hint_nop(cpu),
         Nop | Pause => Ok(()),
-        // The hinting NOPs of a P6 (0F 18 to 0F 1E).
-        Reservednop | Prefetchnta | Prefetcht0 | Prefetcht1 | Prefetcht2 => system::hint_nop(cpu),
+        // The hinting NOPs of a P6 (0F 18 to 0F 1F), with the encodings
+        // later processors gave meanings: CLDEMOTE (0F 1C /0), and ENDBR32,
+        // ENDBR64 and RDSSPD (F3 0F 1E).
+        Reservednop | Prefetchnta | Prefetcht0 | Prefetcht1 | Prefetcht2 | Cldemote | Endbr32 | Endbr64 | Rdsspd => {
+            system::hint_nop(cpu)
+        }
         Wait => system::wait(cpu),
         Lgdt => system::load_table(cpu, instr, false),
         Lidt => system::load_table(cpu, instr, true),

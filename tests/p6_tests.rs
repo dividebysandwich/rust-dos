@@ -50,12 +50,22 @@ fn cpuid_reports_a_pentium_pro_and_a_pentium_ii() {
 fn p6_instructions_are_undefined_on_a_pentium_mmx() {
     // 0F 44 C3 -> CMOVE AX, BX ; DA C1 -> FCMOVB ST0, ST1 ;
     // DB F1 -> FCOMI ST0, ST1 ; DF E9 -> FUCOMIP ST0, ST1 ;
-    // 0F 19 C0 -> hinting NOP ; 0F 34 -> SYSENTER ; 0F 35 -> SYSEXIT
-    for code in [&[0x0F, 0x44, 0xC3][..], &[0xDA, 0xC1], &[0xDB, 0xF1], &[0xDF, 0xE9], &[0x0F, 0x19, 0xC0], &[0x0F, 0x34], &[0x0F, 0x35]]
-    {
+    // 0F 19 C0 -> hinting NOP ; 0F 1F 00 -> NOP [BX+SI] ;
+    // 0F 34 -> SYSENTER ; 0F 35 -> SYSEXIT
+    for code in [
+        &[0x0F, 0x44, 0xC3][..],
+        &[0xDA, 0xC1],
+        &[0xDB, 0xF1],
+        &[0xDF, 0xE9],
+        &[0x0F, 0x19, 0xC0],
+        &[0x0F, 0x1F, 0x00],
+        &[0x0F, 0x34],
+        &[0x0F, 0x35],
+    ] {
         assert!(undefined_on(CpuModel::PentiumMmx, code), "{:02X?} raises #UD on a Pentium MMX", code);
     }
-    for code in [&[0x0F, 0x44, 0xC3][..], &[0x0F, 0x19, 0xC0]] {
+    // 0F 1C 00 -> CLDEMOTE [BX+SI] ; F3 0F 1E FB -> ENDBR32: hinting NOPs too
+    for code in [&[0x0F, 0x44, 0xC3][..], &[0x0F, 0x19, 0xC0], &[0x0F, 0x1C, 0x00], &[0xF3, 0x0F, 0x1E, 0xFB], &[0x0F, 0x1F, 0x00]] {
         assert!(!undefined_on(CpuModel::PentiumPro, code), "{:02X?} runs on a Pentium Pro", code);
     }
 }
@@ -135,6 +145,37 @@ fn fcmov_and_fcomi_compare_and_move() {
     assert_eq!(f32::from_bits(rig.read32(DATA + 16)), 5.0);
     assert_eq!(rig.read32(DATA + 20) & 0xFF, 1);
     assert_eq!(f32::from_bits(rig.read32(DATA + 24)), 5.0);
+}
+
+#[test]
+fn fcomi_orders_signed_zeros_and_negative_numbers() {
+    let mut rig = p6_rig(CpuModel::PentiumPro);
+    rig.write32(DATA, (-2.0f32).to_bits());
+    rig.write32(DATA + 4, (-5.0f32).to_bits());
+    rig.run(|a| {
+        a.fninit()?;
+        a.fldz()?;
+        a.fchs()?; // ST1 = -0
+        a.fldz()?; // ST0 = +0
+        a.mov(eax, 0x7FFF_FFFFu32)?;
+        a.add(eax, 1)?; // OF, SF and AF set
+        a.fcomi(st0, st1)?; // +0 = -0: ZF set, OF, SF and AF cleared
+        a.sete(byte_ptr(DATA + 8))?;
+        a.seto(byte_ptr(DATA + 9))?;
+        a.sets(byte_ptr(DATA + 10))?;
+        a.fninit()?;
+        a.fld(dword_ptr(DATA + 4))?; // ST1 = -5
+        a.fld(dword_ptr(DATA))?; // ST0 = -2
+        a.fcomi(st0, st1)?; // -2 > -5: CF and ZF clear
+        a.setb(byte_ptr(DATA + 12))?;
+        a.sete(byte_ptr(DATA + 13))?;
+        a.fxch(st0, st1)?;
+        a.fcomi(st0, st1)?; // -5 < -2: CF set
+        a.setb(byte_ptr(DATA + 14))?;
+        a.hlt()
+    });
+    assert_eq!(rig.read32(DATA + 8) & 0xFF_FFFF, 0x00_0001);
+    assert_eq!(rig.read32(DATA + 12) & 0xFF_FFFF, 0x01_0000);
 }
 
 #[test]

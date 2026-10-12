@@ -1507,14 +1507,10 @@ impl Item {
             CompositeEra => each(s, crate::video::composite::CompositeEra::ALL, |s, era| s.composite.era = era),
             Core => each(s, [CoreMode::Auto, CoreMode::Dynamic, CoreMode::Normal], |s, core| s.core = core),
             Fpu => on_off(|s, on| s.fpu_fast = on),
-            Cpu => each(
-                s,
-                [CpuModel::I386, CpuModel::I486, CpuModel::Pentium, CpuModel::PentiumMmx, CpuModel::PentiumPro, CpuModel::PentiumII],
-                |s, cpu| {
-                    s.cpu = cpu;
-                    s.memsize = s.memsize.min(cpu.max_memsize());
-                },
-            ),
+            Cpu => each(s, CpuModel::ALL, |s, cpu| {
+                s.cpu = cpu;
+                s.memsize = s.memsize.min(cpu.max_memsize());
+            }),
             Machine => each(s, crate::video::adapter::Adapter::ALL, |s, machine| s.machine = machine),
             Voodoo => on_off(|s, on| s.voodoo.enabled = on),
             VoodooMemory => {
