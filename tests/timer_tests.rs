@@ -854,7 +854,7 @@ fn a_count_after_a_square_wave_control_word_loads_at_once() {
 }
 
 #[test]
-fn a_due_count_survives_a_save_state() {
+fn a_due_count_and_port_61h_survive_a_save_state() {
     use rust_dos::savestate::machine;
     let machine = || {
         let mut cpu = Cpu::new(std::path::PathBuf::from("."));
@@ -863,7 +863,7 @@ fn a_due_count_survives_a_save_state() {
         cpu
     };
     let mut a = machine();
-    a.bus.io_write(0x61, 0x01);
+    a.bus.io_write(0x61, 0x0D);
     a.bus.io_write(0x43, 0xB6);
     a.bus.io_write(0x42, 0x00);
     a.bus.io_write(0x42, 0x00);
@@ -874,18 +874,21 @@ fn a_due_count_survives_a_save_state() {
     machine::load(&mut b, &bytes).unwrap();
     assert!(b.bus.pit2.count_due);
     assert!(machine::save(&b) == bytes);
+    assert_eq!(b.bus.io_read(0x61) & 0x0F, 0x0D);
 
     // A PIT2 section that ends before the flag, as states saved before it
     // was kept, loads without it.
     let range = |name: &str| parts.iter().find(|(n, _)| n == name).unwrap_or_else(|| panic!("no {}", name)).1.clone();
-    let flag = range("PIT2.pit2_count_due");
-    let mut old = bytes[..flag.start].to_vec();
-    old.extend_from_slice(&bytes[flag.end..]);
+    let later = range("PIT2.pit2_count_due").start..range("VIDE").start;
+    let mut old = bytes[..later.start].to_vec();
+    old.extend_from_slice(&bytes[later.end..]);
     // The section's length follows its tag and version.
     let len_at = range("PIT2").start + 6;
-    let len = u32::from_le_bytes(old[len_at..len_at + 4].try_into().unwrap()) - flag.len() as u32;
+    let len = u32::from_le_bytes(old[len_at..len_at + 4].try_into().unwrap()) - later.len() as u32;
     old[len_at..len_at + 4].copy_from_slice(&len.to_le_bytes());
     let mut c = machine();
+    c.bus.io_write(0x61, 0x0C);
     machine::load(&mut c, &old).unwrap();
     assert!(!c.bus.pit2.count_due);
+    assert_eq!(c.bus.io_read(0x61) & 0x0C, 0);
 }

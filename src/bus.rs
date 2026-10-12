@@ -194,6 +194,9 @@ pub struct Bus {
     pub pit2: crate::timer::Pit2,
     /// Port 61h bit 1, the speaker data enable.
     pub speaker_data: bool,
+    /// Port 61h bits 2 and 3 as written, the RAM parity and I/O channel
+    /// check enables, which reads give back.
+    pub ppi_checks: u8,
     /// Channel 0 count register as assembled from port 0x40 writes. A
     /// complete count is handed to `pit0`.
     pub pit0_divisor: u16,
@@ -441,6 +444,7 @@ impl Bus {
             pit_read_msb: false,
             pit2: crate::timer::Pit2::new(),
             speaker_data: false,
+            ppi_checks: 0,
             pit0_divisor: 0xFFFF,
             pit0_write_msb: false,
             pit0_read_msb: false,
@@ -2707,6 +2711,7 @@ impl Bus {
             0x61 => {
                 self.pit2.set_gate(value & 0x01 != 0, self.clock.now_ticks());
                 self.speaker_data = value & 0x02 != 0;
+                self.ppi_checks = value & 0x0C;
                 // If both Bit 0 and Bit 1 are set, the speaker is ON
                 let enabled = (value & 0x03) == 0x03;
                 if enabled != self.speaker_on {
@@ -3037,10 +3042,11 @@ impl Bus {
                 value
             }
 
-            // Read PPI Port B: speaker gate and data, the DRAM refresh
-            // request (bit 4, toggles), and the PIT channel 2 output (bit 5).
+            // Read PPI Port B: speaker gate and data and the check enables
+            // as written, the DRAM refresh request (bit 4, toggles), and the
+            // PIT channel 2 output (bit 5).
             0x61 => {
-                let mut val = 0;
+                let mut val = self.ppi_checks;
                 if self.pit2.gate() {
                     val |= 0x01;
                 }

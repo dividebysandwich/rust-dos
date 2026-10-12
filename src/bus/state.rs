@@ -65,6 +65,7 @@ impl Bus {
             pit_write_msb,
             pit2,
             speaker_data,
+            ppi_checks,
             pit0_divisor,
             pit0_write_msb,
             pit0_read_msb,
@@ -198,7 +199,7 @@ impl Bus {
         // a section that ends before them loads with their defaults.
         let pit2_count_due = &pit2.count_due;
         w.section(b"PIT2", PIT2_VERSION, |w| {
-            save_all!(w; pit2, speaker_data, pit2_count_due);
+            save_all!(w; pit2, speaker_data, pit2_count_due, ppi_checks);
         });
         w.section(b"VIDE", VIDEO_VERSION, |w| {
             save_all!(w; video_mode, vga, vbe, s3_engine, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
@@ -333,6 +334,7 @@ impl Bus {
             pit_write_msb,
             pit2,
             speaker_data,
+            ppi_checks,
             pit0_divisor,
             pit0_write_msb,
             pit0_read_msb,
@@ -462,8 +464,9 @@ impl Bus {
             let mut section = r.section(b"PIT2", PIT2_VERSION)?;
             load_all!(&mut section; pit2, speaker_data);
             pit2.count_due = false;
+            *ppi_checks = 0;
             if !section.is_empty() {
-                load_all!(&mut section; &mut pit2.count_due);
+                load_all!(&mut section; &mut pit2.count_due, ppi_checks);
             }
         } else {
             // An older state: a stopped channel 2 with the gate and the
@@ -473,6 +476,7 @@ impl Bus {
             pit2.write_count(*pit_divisor, now);
             pit2.set_gate(*speaker_on, now);
             *speaker_data = *speaker_on;
+            *ppi_checks = 0;
         }
         let mut section = r.section(b"VIDE", VIDEO_VERSION)?;
         load_all!(&mut section; video_mode, vga, vbe, s3_engine, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);

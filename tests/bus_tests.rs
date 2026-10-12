@@ -156,6 +156,10 @@ fn test_speaker_io_port_61() {
     // 3. Write 0x02 (Bit 0 off)
     bus.io_write(0x61, 0x02);
     assert_eq!(bus.speaker_on, false);
+
+    // The low four bits read back as written, the check enables too.
+    bus.io_write(0x61, 0x0D);
+    assert_eq!(bus.io_read(0x61) & 0x0F, 0x0D);
 }
 
 #[test]
