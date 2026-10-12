@@ -1568,6 +1568,8 @@ fn main() -> Result<(), String> {
             if let Some(mode) = &mut det {
                 mode.resync(&cpu);
             }
+            // The Stats page's emulated speed leaves out the jump.
+            stats.clock_moved(&cpu.bus);
             rewinder.clear();
             achievements.reset();
             if strict_match_loaded {

@@ -251,10 +251,10 @@ fn run_machine(dir: std::path::PathBuf, rx: mpsc::Receiver<super::super::Request
             }
         }
         hub.end_batch(&cpu);
+        let busy = frame_start.elapsed();
         std::thread::sleep(options.sleep);
         let wall = frame_start.elapsed();
         frame_start = Instant::now();
-        let busy = wall.saturating_sub(options.sleep);
         stats.record(&cpu.bus, rust_dos::stats::FrameTimes { wall, busy, ..Default::default() });
         hub.set_frame_stats(stats.latest());
     }

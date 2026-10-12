@@ -1744,12 +1744,14 @@ impl DebugHub {
             "decode_cache_hit_rate": (st.cache_hit_rate * 10000.0).round() / 10000.0,
             "instructions": st.total_executed,
             "fps": (self.fps * 10.0).round() / 10.0,
-            // The Stats page's numbers over the last quarter second: the
-            // frames the program drew a second, the display's refresh
-            // rate, emulated seconds a wall second, and in percent the
-            // host's time the emulator took, the emulated time the CPU sat
-            // halted and the instructions the recompiler's code ran; and
-            // ms a frame drawing the picture. Null before the first frame.
+            // The Stats page's numbers over the last quarter second, and
+            // the emulated speed, which the page doesn't show: the frames
+            // the program drew a second, the display's refresh rate,
+            // emulated seconds a wall second, and in percent the
+            // wall time the emulator's main thread worked, the emulated
+            // time the CPU sat halted and the instructions the
+            // recompiler's code ran; and ms a frame drawing the picture.
+            // Null before the first frame.
             "frame": self.frame_stats.as_ref().map(|v| {
                 let round = |x: f32, places: f64| (x as f64 * places).round() / places;
                 json!({

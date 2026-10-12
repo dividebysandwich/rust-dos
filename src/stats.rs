@@ -92,7 +92,8 @@ impl Stats {
         let drawn = bus.frames_drawn;
         self.drawn += drawn - self.last_drawn.unwrap_or(drawn);
         self.last_drawn = Some(drawn);
-        // A loaded save state can take the clock back.
+        // A loaded save state can take the clock back; one that takes it
+        // ahead is passed over by `clock_moved`.
         let now = bus.clock.now_ns();
         self.emulated_ns += now.saturating_sub(self.last_ns.unwrap_or(now));
         self.last_ns = Some(now);
@@ -137,6 +138,13 @@ impl Stats {
         self.emulated_ns = 0;
         self.frames = 0;
         self.drawn = 0;
+    }
+
+    /// Start the next frame's emulated time from the clock as it is now,
+    /// after a loaded save state moved it, so a jump ahead doesn't count
+    /// as time the machine ran.
+    pub fn clock_moved(&mut self, bus: &Bus) {
+        self.last_ns = Some(bus.clock.now_ns());
     }
 
     /// The numbers of `view`, without the histories.
@@ -197,6 +205,25 @@ mod tests {
         assert_eq!((view.blocks, view.code_bytes), (40, 4096));
         assert!(view.refresh_hz > 69.0 && view.refresh_hz < 71.0, "text mode at 70 Hz");
         assert_eq!((view.fps_history.len(), view.cpu_history.len()), (1, 1));
+    }
+
+    /// A save state that takes the clock ahead, as one saved later in a
+    /// game does, is not emulated time the machine ran.
+    #[test]
+    fn a_loaded_state_s_jump_ahead_is_not_speed() {
+        let mut bus = Bus::new(PathBuf::from("."));
+        let mut stats = Stats::new();
+        stats.record(&bus, FrameTimes::default());
+        for i in 0..25 {
+            if i == 10 {
+                bus.clock.icount += bus.clock.cycles_per_ms() as u64 * 600_000;
+                stats.clock_moved(&bus);
+            }
+            bus.clock.icount += bus.clock.cycles_per_ms() as u64 * 10;
+            stats.record(&bus, frame(10, 5));
+        }
+        let view = stats.view();
+        assert!((view.emulated_speed - 1.0).abs() < 0.01, "10 minutes ahead: {:?}", view);
     }
 
     #[test]

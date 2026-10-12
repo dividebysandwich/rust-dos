@@ -1060,11 +1060,13 @@ address mapped to when it was set.
 - **Measuring speed.** `/api/stats` reports `mips` (host speed while
   executing guest code), `emulated_mips` (guest instructions per wall-clock
   second) and the decode-cache hit rate, averaged over about a second. Its
-  `frame` object has the settings window's Stats page numbers over the last
-  quarter second: the game runs at full speed when `emulated_speed` (emulated
+  `frame` object has the settings window's Stats page numbers and the
+  emulated speed over the last quarter second: the game runs at full speed when `emulated_speed` (emulated
   seconds a wall second) stays near 1, `frame.fps` is the frames the program
   draws a second (the top-level `fps` counts the window's frames), and
-  100 minus `cpu_use` is the percent of the host's time left over. Use a
+  `cpu_use` is the percent of the wall time the emulator's main thread
+  works (running the machine and drawing the picture), so 100 minus it is
+  that thread's time to spare, on one host core. Use a
   release build and a CPU-bound scene, such as the Stunts intro, when
   comparing emulator changes.
 - **Coarse timestamps.** Trace times are sampled once per frame (about
