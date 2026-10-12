@@ -280,6 +280,23 @@ fn parse_vr_graphics(value: &str) -> Result<rust_dos::vr::VrGraphics, String> {
     rust_dos::vr::VrGraphics::parse(value).ok_or_else(|| "auto, gl, egl or vulkan".to_string())
 }
 
+/// Closes the console window Windows opens next to the program's own when
+/// it is started from Explorer or a shortcut: a console program gets a
+/// console of its own then, which only it is attached to. Started from a
+/// terminal, it shares the terminal's and keeps it for its output. Windows
+/// 11 24H2 and later don't open one at all (the manifest's
+/// consoleAllocationPolicy, packaging/windows/rust-dos.manifest).
+#[cfg(windows)]
+fn leave_explorer_console() {
+    use windows_sys::Win32::System::Console::{FreeConsole, GetConsoleProcessList};
+    let mut pids = [0u32; 2];
+    // SAFETY: the list has room for the two entries it is given.
+    if unsafe { GetConsoleProcessList(pids.as_mut_ptr(), pids.len() as u32) } == 1 {
+        // SAFETY: nothing holds on to the console's handles.
+        unsafe { FreeConsole() };
+    }
+}
+
 fn main() -> Result<(), String> {
     let args = Args::parse();
     if let Some(Command::Run(run)) = args.command {
@@ -300,6 +317,8 @@ fn main() -> Result<(), String> {
             port,
         });
     }
+    #[cfg(windows)]
+    leave_explorer_console();
     let config = load_config(&args)?;
     let mut settings = Settings::from_config(&config);
     if let Some(scale) = args.scale {

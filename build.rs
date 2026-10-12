@@ -1,6 +1,6 @@
 //! Sets the configuration flags of the target: the dynamic recompiler's
 //! hosts and OpenXR's, records the git commit the build is made from, and
-//! links in the Windows program's icon.
+//! links in the Windows program's icon and manifest.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -30,6 +30,7 @@ fn main() {
     // with `sdl`, which the program needs: the libretro core has neither.
     if os == "windows" && std::env::var_os("CARGO_FEATURE_SDL").is_some() {
         println!("cargo::rerun-if-changed=packaging/windows/rust-dos.ico");
+        println!("cargo::rerun-if-changed=packaging/windows/rust-dos.manifest");
         embed_resource::compile_for("packaging/windows/rust-dos.rc", ["rust-dos"], embed_resource::NONE)
             .manifest_required()
             .unwrap();
