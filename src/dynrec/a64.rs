@@ -297,12 +297,16 @@ fn mov32(ops: &mut Asm, reg: u8, v: u32) {
 
 /// X`reg` = `v`.
 fn mov64(ops: &mut Asm, reg: u8, v: u64) {
-    dynasm!(ops ; .arch aarch64 ; movz X(reg), (v & 0xFFFF) as u32);
-    for shift in [16u32, 32, 48] {
-        let part = (v >> shift & 0xFFFF) as u32;
-        if part != 0 {
-            dynasm!(ops ; .arch aarch64 ; movk X(reg), part, lsl shift);
-        }
+    let part = |shift: u32| (v >> shift & 0xFFFF) as u32;
+    dynasm!(ops ; .arch aarch64 ; movz X(reg), part(0));
+    if part(16) != 0 {
+        dynasm!(ops ; .arch aarch64 ; movk X(reg), part(16), lsl 16);
+    }
+    if part(32) != 0 {
+        dynasm!(ops ; .arch aarch64 ; movk X(reg), part(32), lsl 32);
+    }
+    if part(48) != 0 {
+        dynasm!(ops ; .arch aarch64 ; movk X(reg), part(48), lsl 48);
     }
 }
 

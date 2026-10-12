@@ -154,7 +154,7 @@ zones! {
     IdleProof = "idle.proof",
     // Memory that isn't plain RAM.
     MemVideo = "mem.video",
-    MemRom = "mem.rom",
+    MemUpper = "mem.upper",
     MemDevice = "mem.device",
     // Sound made as the machine runs.
     AudioSynth = "audio.synth",
@@ -241,6 +241,12 @@ impl Zone {
         }
     }
 
+    /// The front end waiting for the next frame: the time the emulator has
+    /// nothing to do, which busy shares leave out.
+    pub fn is_wait(self) -> bool {
+        self == Zone::FrameWait
+    }
+
     /// A device's ports.
     pub fn is_io(self) -> bool {
         (Zone::IoVga as u8..=Zone::IoUnhandled as u8).contains(&(self as u8))
@@ -248,7 +254,7 @@ impl Zone {
 
     /// Memory that isn't plain RAM.
     pub fn is_mem(self) -> bool {
-        matches!(self, Zone::MemVideo | Zone::MemRom | Zone::MemDevice)
+        matches!(self, Zone::MemVideo | Zone::MemUpper | Zone::MemDevice)
     }
 
     /// The zone by its name.

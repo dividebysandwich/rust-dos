@@ -1312,10 +1312,10 @@ fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
         0x3A => profile::Zone::HleFar,
         _ => profile::Zone::Dpmi,
     });
-    let ah = (cpu.ax() >> 8) as usize;
+    let function = profile::counters::function(vector, cpu.ax()) as usize;
     if let Some(p) = &mut cpu.bus.profile {
         match kind {
-            0x38 => p.hle[(vector as usize) << 8 | ah] += 1,
+            0x38 => p.hle[(vector as usize) << 8 | function] += 1,
             _ => p.services[(kind - 0x39) as usize][vector as usize] += 1,
         }
     }

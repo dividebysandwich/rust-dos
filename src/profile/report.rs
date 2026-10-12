@@ -59,10 +59,13 @@ pub fn pct(part: u64, whole: u64) -> f64 {
     if whole == 0 { 0.0 } else { (part as f64 * 10000.0 / whole as f64).round() / 100.0 }
 }
 
-/// A guest place and its samples, by zone.
+/// A guest place and its samples, by zone. With buckets, `hottest` is the
+/// instruction in it with the most samples, which its disassembly starts
+/// at (the bucket's start can be inside an instruction).
 #[derive(Clone, Debug)]
 pub struct Place {
     pub loc: Loc,
+    pub hottest: Loc,
     pub samples: u64,
     pub zones: Vec<(Zone, u64)>,
 }
@@ -79,6 +82,7 @@ pub fn by_zone(counts: &HashMap<u64, u64>) -> [u64; ZONES] {
 /// The guest places with the most samples the query takes, most first.
 pub fn places(counts: &HashMap<u64, u64>, query: &Query) -> Vec<Place> {
     let mut by: HashMap<Loc, (u64, [u64; ZONES])> = HashMap::new();
+    let mut exact: HashMap<Loc, u64> = HashMap::new();
     for (&word, &n) in counts {
         let loc = Loc(word);
         if loc.cs_eip().is_none() || !query.takes(loc.zone()) {
@@ -88,6 +92,17 @@ pub fn places(counts: &HashMap<u64, u64>, query: &Query) -> Vec<Place> {
         let entry = by.entry(place).or_insert((0, [0; ZONES]));
         entry.0 += n;
         entry.1[loc.zone() as usize] += n;
+        if query.bucket > 1 {
+            *exact.entry(loc.place()).or_insert(0) += n;
+        }
+    }
+    // The hottest instruction of each bucket.
+    let mut hottest: HashMap<Loc, (u64, Loc)> = HashMap::new();
+    for (&loc, &n) in &exact {
+        let best = hottest.entry(loc.bucketed(query.bucket)).or_insert((0, loc));
+        if (n, std::cmp::Reverse(loc.0)) > (best.0, std::cmp::Reverse(best.1.0)) {
+            *best = (n, loc);
+        }
     }
     let mut places: Vec<Place> = by
         .into_iter()
@@ -95,7 +110,8 @@ pub fn places(counts: &HashMap<u64, u64>, query: &Query) -> Vec<Place> {
             let mut zones: Vec<(Zone, u64)> =
                 zones.iter().enumerate().filter(|&(_, &n)| n > 0).map(|(z, &n)| (Zone::ALL[z], n)).collect();
             zones.sort_by_key(|&(z, n)| (std::cmp::Reverse(n), z));
-            Place { loc, samples, zones }
+            let hottest = hottest.get(&loc).map_or(loc, |&(_, h)| h);
+            Place { loc, hottest, samples, zones }
         })
         .collect();
     places.sort_by_key(|p| (std::cmp::Reverse(p.samples), p.loc.0));
@@ -159,25 +175,46 @@ pub fn folded(counts: &HashMap<u64, u64>, query: &Query) -> String {
     out
 }
 
-/// The zones with samples, most first, as JSON.
-pub fn zones_json(zones: &[u64; ZONES], total: u64) -> Value {
-    let mut v: Vec<(Zone, u64)> = zones.iter().enumerate().filter(|&(_, &n)| n > 0).map(|(z, &n)| (Zone::ALL[z], n)).collect();
-    v.sort_by_key(|&(z, n)| (std::cmp::Reverse(n), z));
-    Value::Array(v.iter().map(|&(z, n)| json!({"zone": z.name(), "samples": n, "pct": pct(n, total)})).collect())
+/// The samples outside the frame wait: the time the emulator works, which
+/// the busy shares (`busy_pct`) are of.
+pub fn busy(zones: &[u64; ZONES]) -> u64 {
+    zones.iter().enumerate().filter(|&(z, _)| !Zone::ALL[z].is_wait()).map(|(_, &n)| n).sum()
 }
 
-/// The zones' groups with samples, most first, as JSON.
+/// The zones with samples, most first, as JSON: their share of all the
+/// samples, and of the busy ones but for the wait.
+pub fn zones_json(zones: &[u64; ZONES], total: u64) -> Value {
+    let busy = busy(zones);
+    let mut v: Vec<(Zone, u64)> = zones.iter().enumerate().filter(|&(_, &n)| n > 0).map(|(z, &n)| (Zone::ALL[z], n)).collect();
+    v.sort_by_key(|&(z, n)| (std::cmp::Reverse(n), z));
+    Value::Array(
+        v.iter()
+            .map(|&(z, n)| {
+                let busy_pct = if z.is_wait() { Value::Null } else { json!(pct(n, busy)) };
+                json!({"zone": z.name(), "samples": n, "pct": pct(n, total), "busy_pct": busy_pct})
+            })
+            .collect(),
+    )
+}
+
+/// The zones' groups with samples, most first, as JSON, with their busy
+/// shares as for the zones.
 pub fn groups_json(zones: &[u64; ZONES], total: u64) -> Value {
-    let mut by: Vec<(&str, u64)> = Vec::new();
+    let busy = busy(zones);
+    let mut by: Vec<(&str, u64, u64)> = Vec::new();
     for (z, &n) in zones.iter().enumerate().filter(|&(_, &n)| n > 0) {
-        let group = Zone::ALL[z].group();
-        match by.iter_mut().find(|(g, _)| *g == group) {
-            Some(entry) => entry.1 += n,
-            None => by.push((group, n)),
+        let zone = Zone::ALL[z];
+        let working = if zone.is_wait() { 0 } else { n };
+        match by.iter_mut().find(|(g, _, _)| *g == zone.group()) {
+            Some(entry) => {
+                entry.1 += n;
+                entry.2 += working;
+            }
+            None => by.push((zone.group(), n, working)),
         }
     }
     by.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-    Value::Array(by.iter().map(|&(g, n)| json!({"group": g, "samples": n, "pct": pct(n, total)})).collect())
+    Value::Array(by.iter().map(|&(g, n, w)| json!({"group": g, "samples": n, "pct": pct(n, total), "busy_pct": pct(w, busy)})).collect())
 }
 
 /// What a BIOS or DOS function is, for the common ones.
@@ -235,11 +272,20 @@ pub fn service_name(vector: u8, ah: u8) -> Option<&'static str> {
         (0x21, 0x4F) => "find next",
         (0x21, 0x56) => "rename",
         (0x21, 0x57) => "file date and time",
+        (0x2F, 0x15) => "CD-ROM (MSCDEX)",
         (0x2F, 0x16) => "Windows and DPMI",
         (0x2F, 0x43) => "XMS",
         (0x33, 0x00) => "mouse: reset",
+        (0x33, 0x01) => "mouse: show pointer",
+        (0x33, 0x02) => "mouse: hide pointer",
         (0x33, 0x03) => "mouse: position and buttons",
+        (0x33, 0x04) => "mouse: move pointer",
+        (0x33, 0x05) => "mouse: button presses",
+        (0x33, 0x06) => "mouse: button releases",
+        (0x33, 0x07) => "mouse: horizontal range",
+        (0x33, 0x08) => "mouse: vertical range",
         (0x33, 0x0B) => "mouse: motion",
+        (0x33, 0x0C) => "mouse: event handler",
         (0x67, _) => "EMS",
         _ => return None,
     })
@@ -279,6 +325,8 @@ mod tests {
         let p = places(&counts(), &q);
         assert_eq!(p.len(), 2, "1234:0105 and 1234:0108 in one bucket");
         assert_eq!(p[1].samples, 15);
+        assert_eq!(p[1].loc.addr_text().as_deref(), Some("1234:0100"));
+        assert_eq!(p[1].hottest.addr_text().as_deref(), Some("1234:0105"), "the one with 10 of the 15");
         let io = Query { zone: Some("io".into()), ..Query::default() };
         let p = places(&counts(), &io);
         assert_eq!(p.len(), 1);
@@ -303,8 +351,14 @@ mod tests {
         let zones = by_zone(&c);
         let groups = groups_json(&zones, 195);
         assert_eq!(groups[0]["group"], "frame");
+        assert_eq!(groups[0]["busy_pct"], 0.0, "only the wait");
         assert_eq!(groups[1]["group"], "cpu");
         assert_eq!(groups[1]["samples"], 65);
+        assert_eq!(busy(&zones), 95);
+        assert_eq!(groups[1]["busy_pct"], 68.42);
+        let zones_v = zones_json(&zones, 195);
+        assert_eq!(zones_v[0]["zone"], "frame.wait");
+        assert!(zones_v[0]["busy_pct"].is_null());
         let segs = segments(&c, &Query::default());
         assert_eq!(segs[0], ((0x168, Mode::Pm32), 80));
         assert_eq!(pct(1, 3), 33.33);

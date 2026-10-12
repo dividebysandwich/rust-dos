@@ -10,17 +10,18 @@ use super::{ZONES, Zone, ZoneGuard};
 pub const MEM_KINDS: usize = 3;
 
 /// Memory that isn't plain RAM: the video memory windows at A0000h-BFFFFh,
-/// the ROM and upper memory area, and devices above RAM (linear frame
-/// buffers, the 3D cards, MMIO).
+/// the upper memory area at C0000h-FFFFFh (the ROMs, the EMS page frame and
+/// upper memory blocks), and devices above RAM (linear frame buffers, the
+/// 3D cards, MMIO).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MemKind {
     Video = 0,
-    Rom = 1,
+    Upper = 1,
     Device = 2,
 }
 
 impl MemKind {
-    pub const ALL: [MemKind; MEM_KINDS] = [MemKind::Video, MemKind::Rom, MemKind::Device];
+    pub const ALL: [MemKind; MEM_KINDS] = [MemKind::Video, MemKind::Upper, MemKind::Device];
 
     /// The kind of address `addr`, which isn't plain RAM.
     #[inline]
@@ -28,7 +29,7 @@ impl MemKind {
         if addr < 0xC0000 {
             MemKind::Video
         } else if addr < 0x10_0000 {
-            MemKind::Rom
+            MemKind::Upper
         } else {
             MemKind::Device
         }
@@ -37,7 +38,7 @@ impl MemKind {
     pub fn name(self) -> &'static str {
         match self {
             MemKind::Video => "video",
-            MemKind::Rom => "rom",
+            MemKind::Upper => "upper",
             MemKind::Device => "device",
         }
     }
@@ -45,7 +46,7 @@ impl MemKind {
     pub fn zone(self) -> Zone {
         match self {
             MemKind::Video => Zone::MemVideo,
-            MemKind::Rom => Zone::MemRom,
+            MemKind::Upper => Zone::MemUpper,
             MemKind::Device => Zone::MemDevice,
         }
     }
@@ -55,6 +56,18 @@ impl MemKind {
 /// besides the interrupt handlers: inline services (FE 39), far-call
 /// services (FE 3A) and the DPMI host's entries (FE 3B).
 pub const SERVICE_KINDS: usize = 3;
+
+/// The function number of a call of interrupt `vector`'s handler, by
+/// which it is counted: AL for the mouse driver (INT 33h, whose functions
+/// are numbered in AX), AH for the others.
+pub fn function(vector: u8, ax: u16) -> u8 {
+    if vector == 0x33 { ax as u8 } else { (ax >> 8) as u8 }
+}
+
+/// The register `function` takes the function number from.
+pub fn function_register(vector: u8) -> &'static str {
+    if vector == 0x33 { "AL" } else { "AH" }
+}
 
 /// A page of guest code: translations of blocks in it, and blocks thrown
 /// away because their bytes changed before they ran (stale) or as they ran
@@ -73,8 +86,8 @@ pub struct Counters {
     pub port_reads: Box<[u64]>,
     pub port_writes: Box<[u64]>,
     pub port_zone: Box<[u8]>,
-    /// Calls of the emulator's interrupt handlers, by vector and AH
-    /// (`vector << 8 | ah`).
+    /// Calls of the emulator's interrupt handlers, by vector and function
+    /// (`vector << 8 | function`, see `function`).
     pub hle: Box<[u64]>,
     /// The other services, by kind and number.
     pub services: [[u64; 256]; SERVICE_KINDS],
@@ -198,10 +211,17 @@ mod tests {
     }
 
     #[test]
+    fn mouse_calls_count_by_al() {
+        assert_eq!(function(0x33, 0x0003), 3);
+        assert_eq!(function(0x21, 0x3F00), 0x3F);
+        assert_eq!(function_register(0x33), "AL");
+    }
+
+    #[test]
     fn memory_kinds_by_address() {
         assert_eq!(MemKind::of(0xA0000), MemKind::Video);
         assert_eq!(MemKind::of(0xB8000), MemKind::Video);
-        assert_eq!(MemKind::of(0xF0000), MemKind::Rom);
+        assert_eq!(MemKind::of(0xF0000), MemKind::Upper);
         assert_eq!(MemKind::of(0xE000_0000), MemKind::Device);
     }
 }

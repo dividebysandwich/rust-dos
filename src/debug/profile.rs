@@ -125,12 +125,20 @@ impl DebugHub {
         let wall_s = b.at.duration_since(a.at).as_secs_f64();
         let per_s = |n: u64| if wall_s > 0.0 { (n as f64 / wall_s * 10.0).round() / 10.0 } else { 0.0 };
         let zones = report::by_zone(&samples.counts);
+        let busy = report::busy(&zones);
+        let waits = total - busy;
 
         let mut engines = [0u64; 3];
         for (&word, &n) in &samples.counts {
             engines[Loc(word).engine() as usize] += n;
         }
         let taken: u64 = samples.counts.iter().filter(|&(&w, _)| query.takes(Loc(w).zone())).map(|(_, &n)| n).sum();
+        let taken_busy: u64 = samples
+            .counts
+            .iter()
+            .filter(|&(&w, _)| query.takes(Loc(w).zone()) && !Loc(w).zone().is_wait())
+            .map(|(_, &n)| n)
+            .sum();
         let places: Vec<Value> = report::places(&samples.counts, query)
             .into_iter()
             .take(query.top)
@@ -141,13 +149,17 @@ impl DebugHub {
                     "engine": p.loc.engine().name(),
                     "samples": p.samples,
                     "pct": pct(p.samples, total),
-                    "zones": p.zones.iter().map(|&(z, n)| json!({"zone": z.name(), "samples": n, "pct": pct(n, total)})).collect::<Vec<_>>(),
+                    "busy_pct": pct(p.samples, busy),
+                    "zones": p.zones.iter().map(|&(z, n)| json!({"zone": z.name(), "samples": n, "pct": pct(n, total), "busy_pct": pct(n, busy)})).collect::<Vec<_>>(),
                 });
                 if let Some(lin) = linear(p.loc) {
                     v["lin"] = json!(format!("{:08X}", lin));
                 }
+                if query.bucket > 1 {
+                    v["hottest"] = json!(p.hottest.addr_text());
+                }
                 if query.disasm > 0 {
-                    v["disasm"] = self.place_disasm(cpu, p.loc, query.disasm);
+                    v["disasm"] = self.place_disasm(cpu, p.hottest, query.disasm);
                 }
                 v
             })
@@ -155,7 +167,7 @@ impl DebugHub {
         let segments: Vec<Value> = report::segments(&samples.counts, query)
             .into_iter()
             .take(query.top.min(10))
-            .map(|((cs, mode), n)| json!({"cs": format!("{:04X}", cs), "mode": mode.name(), "samples": n, "pct": pct(n, total)}))
+            .map(|((cs, mode), n)| json!({"cs": format!("{:04X}", cs), "mode": mode.name(), "samples": n, "pct": pct(n, total), "busy_pct": pct(n, busy)}))
             .collect();
 
         let mut out = json!({
@@ -177,10 +189,16 @@ impl DebugHub {
                 },
             },
             "window": window_json(&a, &b),
+            "busy": {"samples": busy, "pct": pct(busy, total)},
             "engines": {
                 "frontend": pct(engines[Engine::None as usize], total),
                 "interp": pct(engines[Engine::Interp as usize], total),
                 "jit": pct(engines[Engine::Jit as usize], total),
+                "busy": {
+                    "frontend": pct(engines[Engine::None as usize] - waits, busy),
+                    "interp": pct(engines[Engine::Interp as usize], busy),
+                    "jit": pct(engines[Engine::Jit as usize], busy),
+                },
             },
             "groups": report::groups_json(&zones, total),
             "zones": report::zones_json(&zones, total),
@@ -189,6 +207,7 @@ impl DebugHub {
                 "bucket": query.bucket,
                 "samples": taken,
                 "pct": pct(taken, total),
+                "busy_pct": pct(taken_busy, busy),
             },
             "top": places,
             "segments": segments,
@@ -226,7 +245,7 @@ impl DebugHub {
                         let mut by: Vec<(Zone, u32)> =
                             zones.iter().enumerate().filter(|&(_, &z)| z > 0).map(|(z, &k)| (Zone::ALL[z], k)).collect();
                         by.sort_by_key(|&(z, k)| (std::cmp::Reverse(k), z));
-                        let shares: Map<String, Value> = by.iter().map(|&(z, k)| (z.name().to_string(), json!(pct(k as u64, n)))).collect();
+                        let shares: Vec<Value> = by.iter().map(|&(z, k)| json!({"zone": z.name(), "pct": pct(k as u64, n)})).collect();
                         json!({"t_s": s, "samples": n, "zones": shares})
                     })
                     .collect(),
@@ -345,17 +364,16 @@ fn hle_json(c: &rust_dos::profile::Counters, top: usize, per_s: &dyn Fn(u64) -> 
     let mut ints: Vec<(usize, u64)> = by_int.iter().copied().enumerate().filter(|&(_, n)| n > 0).collect();
     ints.sort_by_key(|&(v, n)| (std::cmp::Reverse(n), v));
     const KINDS: [&str; 3] = ["inline", "far", "dpmi"];
-    let services: Vec<Value> = KINDS
+    let mut services: Vec<(&str, usize, u64)> = KINDS
         .iter()
         .enumerate()
-        .flat_map(|(k, kind)| {
-            c.services[k]
-                .iter()
-                .enumerate()
-                .filter(|&(_, &n)| n > 0)
-                .map(move |(v, &n)| (kind, v, n))
-        })
-        .map(|(kind, v, n)| json!({"kind": kind, "service": format!("{:02X}", v), "calls": n, "per_s": per_s(n)}))
+        .flat_map(|(k, &kind)| c.services[k].iter().enumerate().filter(|&(_, &n)| n > 0).map(move |(v, &n)| (kind, v, n)))
+        .collect();
+    services.sort_by_key(|&(kind, v, n)| (std::cmp::Reverse(n), kind, v));
+    let services: Vec<Value> = services
+        .iter()
+        .take(top)
+        .map(|&(kind, v, n)| json!({"kind": kind, "service": format!("{:02X}", v), "calls": n, "per_s": per_s(n)}))
         .collect();
     json!({
         "total": calls.iter().map(|&(_, n)| n).sum::<u64>(),
@@ -365,7 +383,8 @@ fn hle_json(c: &rust_dos::profile::Counters, top: usize, per_s: &dyn Fn(u64) -> 
             .take(top)
             .map(|&(k, n)| json!({
                 "int": format!("{:02X}", k >> 8),
-                "ah": format!("{:02X}", k & 0xFF),
+                "function": format!("{:02X}", k & 0xFF),
+                "register": rust_dos::profile::counters::function_register((k >> 8) as u8),
                 "name": report::service_name((k >> 8) as u8, k as u8),
                 "calls": n,
                 "per_s": per_s(n),
@@ -465,18 +484,29 @@ fn text(r: &Value) -> String {
         "Machine: {} ms emulated ({}x), {} instructions ({} MIPS), {}% recompiled, {}% halted, {} fps",
         w["emulated_ms"], w["emulated_speed"], w["instructions"], w["mips"], w["recompiled_pct"], w["halted_pct"], w["fps"],
     );
-    let e = &r["engines"];
-    let _ = writeln!(out, "Engines: interpreter {}%, translated code {}%, front end {}%", e["interp"], e["jit"], e["frontend"]);
-    let _ = writeln!(out, "\nZones:");
+    let f = |v: &Value| v.as_f64().unwrap_or(0.0);
+    let _ = writeln!(
+        out,
+        "Busy: {:.2}% of the samples, the rest waiting for the next frame; \"busy\" shares are of the busy samples",
+        f(&r["busy"]["pct"]),
+    );
+    let e = &r["engines"]["busy"];
+    let _ = writeln!(
+        out,
+        "Engines (busy): interpreter {:.2}%, translated code {:.2}%, front end {:.2}%",
+        f(&e["interp"]),
+        f(&e["jit"]),
+        f(&e["frontend"]),
+    );
+    let _ = writeln!(out, "\nZones:       busy      all");
     for z in r["zones"].as_array().into_iter().flatten().take(20) {
-        let _ = writeln!(out, "  {:>6.2}%  {}", z["pct"].as_f64().unwrap_or(0.0), z["zone"].as_str().unwrap_or(""));
+        let busy = if z["busy_pct"].is_null() { "-".to_string() } else { format!("{:.2}%", f(&z["busy_pct"])) };
+        let _ = writeln!(out, "  {:>12} {:>8.2}%  {}", busy, f(&z["pct"]), z["zone"].as_str().unwrap_or(""));
     }
     let q = &r["query"];
-    let (filter, share) = match q["zone"].as_str() {
-        Some(z) => (format!(" in {}", z), q["pct"].as_f64().unwrap_or(0.0)),
-        None => (String::new(), e["interp"].as_f64().unwrap_or(0.0) + e["jit"].as_f64().unwrap_or(0.0)),
-    };
-    let _ = writeln!(out, "\nGuest code{} ({:.2}% of samples):", filter, share);
+    let filter = q["zone"].as_str().map(|z| format!(" in {}", z)).unwrap_or_default();
+    let share = if q["zone"].is_null() { f(&e["interp"]) + f(&e["jit"]) } else { f(&q["busy_pct"]) };
+    let _ = writeln!(out, "\nGuest code{} ({:.2}% of busy):", filter, share);
     for p in r["top"].as_array().into_iter().flatten() {
         let zones: Vec<String> = p["zones"]
             .as_array()
@@ -484,13 +514,14 @@ fn text(r: &Value) -> String {
             .flatten()
             .skip(1)
             .take(3)
-            .map(|z| format!("{} {}%", z["zone"].as_str().unwrap_or(""), z["pct"]))
+            .map(|z| format!("{} {:.2}%", z["zone"].as_str().unwrap_or(""), f(&z["busy_pct"])))
             .collect();
         let first = p["disasm"].as_array().and_then(|d| d.first()).and_then(|l| l.as_str()).unwrap_or("");
         let _ = writeln!(
             out,
-            "  {:>6.2}%  {} {:<14} {:<10} {}{}",
-            p["pct"].as_f64().unwrap_or(0.0),
+            "  {:>11.2}% {:>8.2}%  {} {:<14} {:<10} {}{}",
+            f(&p["busy_pct"]),
+            f(&p["pct"]),
             p["mode"].as_str().unwrap_or(""),
             p["addr"].as_str().unwrap_or(""),
             p["engine"].as_str().unwrap_or(""),
@@ -512,27 +543,43 @@ fn text(r: &Value) -> String {
             );
         }
     }
-    if let Some(calls) = r["hle"]["top"].as_array().filter(|p| !p.is_empty()) {
-        let _ = writeln!(out, "\nServices ({} calls):", r["hle"]["total"]);
-        for c in calls.iter().take(10) {
-            let _ = writeln!(
-                out,
-                "  INT {} AH={} {:<28} {:>10} {:>10}/s",
-                c["int"].as_str().unwrap_or(""),
-                c["ah"].as_str().unwrap_or(""),
-                c["name"].as_str().unwrap_or(""),
-                c["calls"],
-                c["per_s"],
-            );
+    // The interrupt handlers' functions and the emulator's other services
+    // (the DPMI host, inline and far-call traps) in one list, most first.
+    let mut lines: Vec<(u64, String)> = Vec::new();
+    for c in r["hle"]["top"].as_array().into_iter().flatten() {
+        let what = format!(
+            "INT {} {}={} {}",
+            c["int"].as_str().unwrap_or(""),
+            c["register"].as_str().unwrap_or(""),
+            c["function"].as_str().unwrap_or(""),
+            c["name"].as_str().unwrap_or(""),
+        );
+        lines.push((c["calls"].as_u64().unwrap_or(0), format!("  {:<42} {:>10} {:>10}/s", what, c["calls"], c["per_s"])));
+    }
+    for c in r["hle"]["services"].as_array().into_iter().flatten() {
+        let what = format!("{} service {}", c["kind"].as_str().unwrap_or(""), c["service"].as_str().unwrap_or(""));
+        lines.push((c["calls"].as_u64().unwrap_or(0), format!("  {:<42} {:>10} {:>10}/s", what, c["calls"], c["per_s"])));
+    }
+    if !lines.is_empty() {
+        lines.sort_by_key(|(n, _)| std::cmp::Reverse(*n));
+        let _ = writeln!(out, "\nServices:");
+        for (_, line) in lines.iter().take(12) {
+            let _ = writeln!(out, "{}", line);
         }
     }
     let d = &r["dynrec"];
     if d.is_object() {
-        let _ = writeln!(
+        let _ = write!(
             out,
-            "\nRecompiler: {} blocks translated, {} stale, {} smc, {} flushes, {} fallbacks",
-            d["blocks_translated"], d["stale"], d["smc"], d["flushes"], d["calls"]["fallback"],
+            "\nRecompiler: {} blocks translated, {} stale, {} smc, {} flushes",
+            d["blocks_translated"], d["stale"], d["smc"], d["flushes"],
         );
+        match d["calls"]["fallback"].as_u64() {
+            Some(n) => {
+                let _ = writeln!(out, ", {} fallbacks", n);
+            }
+            None => out.push('\n'),
+        }
         let top: Vec<String> = d["calls"]["fallback_top"]
             .as_array()
             .into_iter()

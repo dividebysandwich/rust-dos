@@ -1915,3 +1915,40 @@ fn a_stop_and_an_operation_s_end_outlive_their_entries_in_the_ring() {
     let input = rig.get(&format!("/api/control/wait?op={}", typed));
     assert_eq!((input.json()["ok"].as_bool(), input.json()["done"].as_bool()), (Some(true), Some(true)), "{}", input.body);
 }
+
+/// `/api/profile`: a profile of a counting loop finds the loop, ends at its
+/// duration, gives folded stacks as text, and refuses what it can't do.
+#[test]
+fn a_profile_finds_the_loop_the_machine_runs() {
+    let rig = Rig::new("profile");
+    assert_eq!(rig.get("/api/profile").status, 404, "none yet");
+    assert_eq!(rig.post("/api/profile", json!({"enabled": false})).status, 404, "nothing to stop");
+    assert_eq!(rig.post("/api/profile", json!({"hz": 100})).status, 400, "hz without enabled");
+    assert_eq!(rig.post("/api/profile", json!({"enabled": true, "hz": 1})).status, 400, "hz out of range");
+    assert_eq!(rig.post("/api/profile", json!({"enabled": true, "timer": "nap"})).status, 400);
+    rig.post("/api/control/run", json!({"command": "COUNT.COM"}));
+    let started = rig.post("/api/profile", json!({"enabled": true, "hz": 1000, "duration_ms": 300})).json();
+    assert_eq!(started["running"], true, "{}", started);
+    let r = rig.get("/api/profile?wait_ms=10000&top=5").json();
+    assert_eq!(r["running"], false, "stopped at its duration: {}", r["sampler"]);
+    assert!(r["sampler"]["samples"].as_u64().unwrap() > 50, "{}", r["sampler"]);
+    assert!(r["window"]["instructions"].as_u64().unwrap() > 0, "{}", r["window"]);
+    // The loop is INC WORD [0200h] at 0100h and JMP at 0104h.
+    let top: Vec<&str> = r["top"].as_array().unwrap().iter().filter_map(|p| p["addr"].as_str()).collect();
+    assert!(top.iter().any(|a| a.ends_with(":0100") || a.ends_with(":0104")), "{:?}", top);
+    let place = &r["top"][0];
+    assert_eq!((place["mode"].as_str(), place["engine"].as_str()), (Some("real"), Some("cpu.interp")), "{}", place);
+    assert!(place["disasm"][0].as_str().is_some_and(|d| d.contains("inc") || d.contains("jmp")), "{}", place);
+    let folded = rig.get("/api/profile?format=folded");
+    assert_eq!(folded.status, 200);
+    assert!(folded.header("content-type").is_some_and(|t| t.starts_with("text/plain")), "{:?}", folded.headers);
+    assert!(folded.body.lines().any(|l| l.starts_with("cpu.interp;real ")), "{}", folded.body);
+    let text = rig.get("/api/profile?format=text");
+    assert!(text.body.starts_with("Profile stopped"), "{}", text.body);
+    assert_eq!(rig.get("/api/profile?zone=nope").status, 400);
+    assert_eq!(rig.get("/api/profile?bucket=3").status, 400);
+    assert_eq!(rig.get("/api/profile?bogus=1").status, 400);
+    let only = rig.get("/api/profile?zone=cpu&bucket=16").json();
+    assert!(only["top"][0]["hottest"].is_string(), "{}", only["top"][0]);
+    assert_eq!(rig.post("/api/profile", json!({"enabled": false})).status, 200, "a stopped profile can be stopped");
+}
