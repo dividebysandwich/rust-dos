@@ -815,8 +815,9 @@ impl Pit2 {
     /// Control word for channel 2: set the mode and stop the counter until
     /// a count is written, as the 8254 data sheet has it.
     ///
-    /// A mode 2 or 3 count that runs when a control word for mode 2 or 3
-    /// comes goes on with the count it had. Bao Xiao San Guo Zhi
+    /// A mode 2 or 3 count that runs when a control word for the same mode
+    /// comes goes on with the count it had. A switch between modes 2 and 3
+    /// stops it as any other control word does. Bao Xiao San Guo Zhi
     /// (SANGO.EXE) makes its random numbers with `out 43h,86h; out 43h,B6h`
     /// and two reads of port 42h, never writing a count; a stopped count
     /// gives it the same number every time (DOSBox SVN's "every roll is
@@ -824,7 +825,7 @@ impl Pit2 {
     pub fn set_mode(&mut self, mode: u8, access: u8, now: u64) {
         let (count, _) = self.read(now);
         let mode = if mode >= 6 { mode - 4 } else { mode };
-        let runs_on = self.held.is_none() && self.periodic() && matches!(mode, 2 | 3);
+        let runs_on = self.held.is_none() && self.periodic() && mode == self.mode;
         self.mode = mode;
         self.access = access;
         self.pending = None;

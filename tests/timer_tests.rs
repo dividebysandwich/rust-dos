@@ -611,16 +611,13 @@ fn channel_2_square_wave_follows_its_gate() {
     // period starts over.
     bus.io_write(0x61, 0x00);
     assert!(out(&mut bus));
-    bus.io_write(0x43, 0x80);
-    let held = bus.io_read(0x42) as u16 | (bus.io_read(0x42) as u16) << 8;
+    let held = latched_pit2(&mut bus);
     bus.clock.icount += 300;
-    bus.io_write(0x43, 0x80);
-    let later = bus.io_read(0x42) as u16 | (bus.io_read(0x42) as u16) << 8;
+    let later = latched_pit2(&mut bus);
     assert_eq!(held, later);
     bus.io_write(0x61, 0x01);
     assert!(out(&mut bus));
-    bus.io_write(0x43, 0x80);
-    let restarted = bus.io_read(0x42) as u16 | (bus.io_read(0x42) as u16) << 8;
+    let restarted = latched_pit2(&mut bus);
     assert!(restarted > 990, "{}", restarted);
 }
 
@@ -775,22 +772,18 @@ fn a_mode_0_control_word_still_stops_channel_2() {
     // gate low, a count, a latch, then the gate up. The count it reads is
     // the one it wrote, and the control word stops a running count.
     let mut bus = bus_at(20_000);
-    let read = |bus: &mut Bus| {
-        bus.io_write(0x43, 0x80);
-        bus.io_read(0x42) as u16 | (bus.io_read(0x42) as u16) << 8
-    };
     bus.io_write(0x61, 0x00);
     bus.io_write(0x43, 0xB0);
-    let stopped = read(&mut bus);
+    let stopped = latched_pit2(&mut bus);
     bus.clock.icount += 1_000;
-    assert_eq!(read(&mut bus), stopped);
+    assert_eq!(latched_pit2(&mut bus), stopped);
     bus.io_write(0x42, 0xB2);
     bus.io_write(0x42, 0x41);
     bus.clock.icount += 1_000;
-    assert_eq!(read(&mut bus), 0x41B2);
+    assert_eq!(latched_pit2(&mut bus), 0x41B2);
     bus.io_write(0x61, 0x01);
     bus.clock.icount += 1_000;
-    assert!(read(&mut bus) < 0x41B2);
+    assert!(latched_pit2(&mut bus) < 0x41B2);
 }
 
 /// Bao Xiao San Guo Zhi's random numbers (SANGO.EXE, DOSBox-X issue 1274):
@@ -923,4 +916,52 @@ fn pit2_gate_at_start_runs_channel_2() {
     // Turned off again, the gate goes down.
     rust_dos::sound::apply_config(&mut cpu, &off, Some(&on));
     assert_eq!(cpu.bus.io_read(0x61) & 0x03, 0);
+    // Turned on after a program left the channel in mode 0 (a game's
+    // profile, launched at the DOS prompt), it runs in mode 3 from FFFFh.
+    cpu.bus.io_write(0x43, 0xB0);
+    cpu.bus.io_write(0x42, 0x34);
+    rust_dos::sound::apply_config(&mut cpu, &on, Some(&off));
+    assert_eq!(cpu.bus.io_read(0x61) & 0x03, 0x01);
+    assert_eq!(sango_rolls(&mut cpu.bus), 8);
+}
+
+#[test]
+fn a_reboot_puts_back_the_gate_pit2_gate_at_start_asks_for() {
+    use rust_dos::config::SoundConfig;
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    cpu.bus.set_cycles_per_ms(20_000);
+    cpu.load_shell();
+    let off = SoundConfig::default();
+    let on = SoundConfig { pit2_gate_at_start: true, ..SoundConfig::default() };
+    rust_dos::sound::apply_config(&mut cpu, &on, Some(&off));
+    // A program beeps, then ends the beep by lowering the gate and the
+    // speaker bit; a reboot raises the gate again.
+    cpu.bus.io_write(0x61, 0x0F);
+    cpu.bus.io_write(0x61, 0x0C);
+    rust_dos::boot::reboot_dos(&mut cpu);
+    assert_eq!(cpu.bus.io_read(0x61) & 0x0F, 0x01);
+    assert_eq!(sango_rolls(&mut cpu.bus), 8);
+    // With the setting off, a reboot leaves the speaker off and the gate
+    // low, as a real BIOS does after its beep.
+    rust_dos::sound::apply_config(&mut cpu, &off, Some(&on));
+    cpu.bus.io_write(0x61, 0x0F);
+    rust_dos::boot::reboot_dos(&mut cpu);
+    assert_eq!(cpu.bus.io_read(0x61) & 0x0F, 0);
+    assert!(!cpu.bus.speaker_on);
+}
+
+#[test]
+fn a_switch_between_modes_2_and_3_stops_channel_2() {
+    // Only a control word for the mode that runs leaves the count running;
+    // a switch to the other periodic mode stops it until a count comes.
+    let mut bus = bus_at(20_000);
+    bus.io_write(0x61, 0x01);
+    bus.io_write(0x43, 0xB6);
+    bus.io_write(0x42, 0xE8);
+    bus.io_write(0x42, 0x03);
+    bus.clock.icount += 250;
+    bus.io_write(0x43, 0xB4);
+    let stopped = latched_pit2(&mut bus);
+    bus.clock.icount += 1_000;
+    assert_eq!(latched_pit2(&mut bus), stopped);
 }
