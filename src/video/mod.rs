@@ -222,7 +222,7 @@ impl DrawnFrom {
     fn reuse(&mut self, key: Vec<u8>, len: usize) -> bool {
         if self.key != key {
             self.key = key;
-            self.rows = Vec::new();
+            self.rows.clear();
         }
         let known = self.rows.len() == len;
         self.rows.resize(len, 0);
