@@ -46,7 +46,9 @@ fn hicolor_frame(shift: usize) -> Frame {
 
 /// One captured animation frame: the time `ScreenRecorder::capture` takes
 /// on the emulation thread for a frame it records. The recorder runs at
-/// a rate that records every frame it is given.
+/// a rate that takes every frame it is given; the encoding thread can't
+/// keep up, so most of them find its queue full and are skipped after
+/// the copy, which costs the same as one it queues.
 fn gif_capture(c: &mut Criterion) {
     let mut group = c.benchmark_group("host/gif_capture");
     group.sample_size(30);

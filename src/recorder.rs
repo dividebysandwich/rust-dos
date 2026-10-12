@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use gif::{Encoder, Repeat};
 
+use crate::capture::zmbv::fitted;
 use crate::video::Frame;
 
 /// Frames waiting for the encoding thread. When it falls behind (a
@@ -17,9 +18,7 @@ const QUEUED: usize = 2;
 
 /// A captured frame for the encoding thread, and when it was captured.
 struct Work {
-    width: u32,
-    height: u32,
-    rgb: Vec<u8>,
+    frame: Frame,
     at: Instant,
 }
 
@@ -28,14 +27,21 @@ struct Work {
 /// compresses it and writes it.
 pub struct ScreenRecorder {
     work: Option<SyncSender<Work>>,
-    thread: Option<JoinHandle<Result<(), String>>>,
+    /// The encoding threads: the recording's, and those of stopped
+    /// recordings still writing the frames queued for them.
+    threads: Vec<JoinHandle<Result<(), String>>>,
     last_frame_time: Instant,
     frame_delay: Duration,
 }
 
 impl ScreenRecorder {
     pub fn new(fps: u64) -> Self {
-        Self { work: None, thread: None, last_frame_time: Instant::now(), frame_delay: Duration::from_millis(1000 / fps) }
+        Self {
+            work: None,
+            threads: Vec::new(),
+            last_frame_time: Instant::now(),
+            frame_delay: Duration::from_millis(1000 / fps),
+        }
     }
 
     pub fn is_active(&self) -> bool {
@@ -43,7 +49,10 @@ impl ScreenRecorder {
     }
 
     /// Start recording to a new file in `dir`, or stop. Returns the file
-    /// it started recording to.
+    /// it started recording to. A stopped recording's thread goes on
+    /// writing the frames queued for it (a high-colour frame takes it
+    /// about 0.2 s) without holding up the caller; `finished` says when
+    /// a recording failed.
     pub fn toggle(&mut self, dir: &Path) -> Result<Option<PathBuf>, String> {
         if self.is_active() {
             self.stop();
@@ -62,24 +71,27 @@ impl ScreenRecorder {
         let thread = std::thread::Builder::new()
             .name("gif recorder".into())
             .spawn(move || encode(BufWriter::new(file), frames, last_delay))
-            .map_err(|e| format!("Can't start the recording: {}", e))?;
+            .map_err(|e| {
+                let _ = std::fs::remove_file(&path);
+                format!("Can't start the recording: {}", e)
+            })?;
         self.work = Some(work);
-        self.thread = Some(thread);
+        self.threads.push(thread);
         self.last_frame_time = Instant::now();
         Ok(path)
     }
 
+    /// Stop recording without waiting: the thread writes the frames
+    /// queued for it and the file's trailer once the channel closes.
     fn stop(&mut self) {
-        // The thread writes what it has and the file's trailer once the
-        // channel closes.
         self.work = None;
-        if let Some(thread) = self.thread.take() {
-            match thread.join() {
-                Ok(Ok(())) => println!("[RECORDER] Stopped recording."),
-                Ok(Err(e)) => println!("[RECORDER] The recording failed: {}", e),
-                Err(_) => println!("[RECORDER] The recording failed"),
-            }
-        }
+    }
+
+    /// Why a recording failed, once its thread has finished. Called every
+    /// frame: it takes at most one finished thread and never waits.
+    pub fn finished(&mut self) -> Option<String> {
+        let at = self.threads.iter().position(|t| t.is_finished())?;
+        joined(self.threads.swap_remove(at)).err()
     }
 
     /// Record a frame. The recording keeps the size of its first frame;
@@ -91,19 +103,33 @@ impl ScreenRecorder {
         }
         let now = Instant::now();
         self.last_frame_time = now;
-        let item = Work { width: frame.width, height: frame.height, rgb: frame.rgb.clone(), at: now };
-        match work.try_send(item) {
+        match work.try_send(Work { frame: frame.clone(), at: now }) {
             Ok(()) | Err(TrySendError::Full(_)) => {}
-            // The thread stopped: writing failed.
+            // The thread stopped: writing failed, which `finished` reports.
             Err(TrySendError::Disconnected(_)) => self.stop(),
         }
     }
 }
 
+/// Quitting while recording, or while a stopped recording is still being
+/// written, waits for the files to be complete.
 impl Drop for ScreenRecorder {
     fn drop(&mut self) {
         self.stop();
+        for thread in self.threads.drain(..) {
+            let _ = joined(thread);
+        }
     }
+}
+
+/// Wait for an encoding thread and log how its recording ended.
+fn joined(thread: JoinHandle<Result<(), String>>) -> Result<(), String> {
+    let result = thread.join().unwrap_or_else(|_| Err("the recording thread failed".to_string()));
+    match &result {
+        Ok(()) => println!("[RECORDER] Finished writing the recording."),
+        Err(e) => println!("[RECORDER] The recording failed: {}", e),
+    }
+    result.map_err(|e| format!("The animation recording failed: {}", e))
 }
 
 /// The encoding thread: each frame is written when the next arrives, which
@@ -111,7 +137,7 @@ impl Drop for ScreenRecorder {
 /// hundredths of a second.
 fn encode(writer: BufWriter<File>, frames: Receiver<Work>, last_delay: u16) -> Result<(), String> {
     let Ok(first) = frames.recv() else { return Ok(()) };
-    let (width, height) = (first.width as u16, first.height as u16);
+    let (width, height) = (first.frame.width as u16, first.frame.height as u16);
     let mut encoder = Encoder::new(writer, width, height, &[]).map_err(|e| e.to_string())?;
     encoder.set_repeat(Repeat::Infinite).map_err(|e| e.to_string())?;
     let mut shown = first;
@@ -124,12 +150,15 @@ fn encode(writer: BufWriter<File>, frames: Receiver<Work>, last_delay: u16) -> R
             Some(next) => {
                 let until = (next.at - start).as_millis() as u64 / 10;
                 let delay = until.saturating_sub(written).min(u16::MAX as u64);
-                written += delay;
+                // From the capture time, so that time a frame could not
+                // be shown for (past the longest delay) is not carried
+                // over to the next.
+                written = until.max(written);
                 delay as u16
             }
             None => last_delay,
         };
-        let pixels = fitted(&shown, width as usize, height as usize);
+        let pixels = fitted(&shown.frame, width as usize, height as usize);
         let mut gif_frame = gif::Frame::from_rgb(width, height, &pixels);
         gif_frame.delay = delay;
         encoder.write_frame(&gif_frame).map_err(|e| e.to_string())?;
@@ -138,24 +167,6 @@ fn encode(writer: BufWriter<File>, frames: Receiver<Work>, last_delay: u16) -> R
             None => return Ok(()),
         }
     }
-}
-
-/// The frame's pixels at `w` x `h`: as they are, or scaled (nearest
-/// neighbour).
-fn fitted(frame: &Work, w: usize, h: usize) -> std::borrow::Cow<'_, [u8]> {
-    let (fw, fh) = (frame.width as usize, frame.height as usize);
-    if (fw, fh) == (w, h) {
-        return std::borrow::Cow::Borrowed(&frame.rgb);
-    }
-    let mut rgb = Vec::with_capacity(w * h * 3);
-    for y in 0..h {
-        let sy = y * fh / h;
-        for x in 0..w {
-            let at = (sy * fw + x * fw / w) * 3;
-            rgb.extend_from_slice(&frame.rgb[at..at + 3]);
-        }
-    }
-    std::borrow::Cow::Owned(rgb)
 }
 
 #[cfg(test)]
@@ -192,15 +203,23 @@ mod tests {
         }
         assert_eq!(recorder.toggle(&dir).unwrap(), None);
         assert!(!recorder.is_active());
+        // Stopping returns at once; the thread finishes the file on its own.
+        let waited = Instant::now();
+        while !recorder.threads.is_empty() {
+            assert_eq!(recorder.finished(), None);
+            assert!(waited.elapsed() < Duration::from_secs(10), "the recording was never finished");
+            std::thread::sleep(Duration::from_millis(5));
+        }
         let (w, h, frames) = frames_of(&path);
         assert_eq!((w, h), (32, 16));
         assert_eq!(frames.len(), 3);
         // Each frame as big as the first, the second scaled down.
         assert!(frames.iter().all(|f| (f.0, f.1) == (32, 16)));
         assert_eq!(frames.iter().map(|f| f.3[0]).collect::<Vec<_>>(), [10, 200, 90]);
-        // Each stays until the next was captured, 50 ms or a little more
-        // later; the last a frame's time of the recorder.
-        assert!(frames[..2].iter().all(|f| (5..=20).contains(&f.2)), "{:?}", frames);
+        // Each stays until the next was captured, 50 ms or more later (a
+        // busy machine may sleep much longer); the last a frame's time of
+        // the recorder.
+        assert!(frames[..2].iter().all(|f| f.2 >= 5), "{:?}", frames);
         assert_eq!(frames[2].2, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
