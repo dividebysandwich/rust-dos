@@ -541,7 +541,12 @@ fn move_block(cpu: &mut Cpu) {
         if handle == 0 {
             let segment = offset >> 16;
             let off = offset & 0xFFFF;
-            return Ok(((segment << 4) + off) as usize);
+            let addr = (segment << 4) + off;
+            // Within the first megabyte and the HMA, not a 4 GB copy.
+            if addr as u64 + length as u64 > 0x110000 {
+                return Err(bad_offset);
+            }
+            return Ok(addr as usize);
         }
         let block = cpu.bus.xms.block(handle).ok_or(bad_handle)?;
         if offset as u64 + length as u64 > (block.size_kb * KB) as u64 {

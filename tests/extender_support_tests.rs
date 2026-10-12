@@ -322,6 +322,13 @@ fn xms_moves_lock_free_and_a20() {
     assert!(!xms_call(&mut cpu, 0x0B));
     assert_eq!(cpu.get_reg8(Register::BL), 0xA7);
 
+    // Between two real-mode pointers, a length past the HMA is refused.
+    cpu.bus.write_32(params, 0xFFFF_FFFE);
+    cpu.bus.write_16(params + 10, 0);
+    cpu.bus.write_32(params + 12, 0x0000_8000);
+    assert!(!xms_call(&mut cpu, 0x0B));
+    assert_eq!(cpu.get_reg8(Register::BL), 0xA4);
+
     // Local enables nest; the gate stays on until the last is undone.
     assert!(xms_call(&mut cpu, 0x05));
     assert!(xms_call(&mut cpu, 0x05));
