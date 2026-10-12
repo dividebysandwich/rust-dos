@@ -1988,7 +1988,10 @@ STATUS / SCREEN
   GET  /api/status                         emulator state, CS:IP, video mode, trace fill, fps, speed,
                                            and the journal: seq, first_seq, state_seq, stop, op,
                                            quiescent, instance
-  GET  /api/stats                          execution speed (MIPS) and decode-cache hit rate, per ~1 s
+  GET  /api/stats                          execution speed (MIPS) and decode-cache hit rate, per ~1 s;
+                                           frame: the Stats page's numbers per 1/4 s. Full speed while
+                                           emulated_speed (emulated s per wall s) stays near 1; fps the
+                                           program draws; host headroom is 100 - cpu_use (percent)
   GET  /api/screenshot[?format=png|raw]    the screen with its cursors, at the picture's
                                            size: 640x400 in text modes, the mode's size
                                            (small ones doubled) otherwise (raw = RGB24

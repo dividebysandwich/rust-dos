@@ -762,6 +762,7 @@ fn main() -> Result<(), String> {
         let frame_start = std::time::Instant::now();
         if let Some((start, times)) = last_frame {
             stats.record(&cpu.bus, rust_dos::stats::FrameTimes { wall: frame_start - start, ..times });
+            dbg.set_frame_stats(stats.latest());
         }
         // Whether the window's keyboard or mouse reached the machine this
         // frame, which the debug server's journal tells while it holds it.
