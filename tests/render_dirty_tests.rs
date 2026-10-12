@@ -220,3 +220,68 @@ fn planar_steps(mode: u8, patterned: bool) {
     attribute(&mut cpu, 0x10, mode_control);
     check(&mut cpu, "split panned again");
 }
+
+/// The CGA's composite picture is redrawn only where its lines changed,
+/// and what it leaves must be what a full render draws: after a box, a
+/// colour and palette change, the burst off and on, a scroll, the other
+/// revision of the card, and the picture off and on.
+#[test]
+fn cga_composite_frames_drawn_line_by_line_match_full_renders() {
+    use rust_dos::interrupts::int10;
+    use rust_dos::video::adapter::{Adapter, VideoSetup};
+    use rust_dos::video::bios;
+    use rust_dos::video::composite::{CompositeEra, CompositeMode, CompositeSettings};
+    for (mode, control) in [(0x04u8, 0x0Au8), (0x06, 0x1A)] {
+        let mut cpu = Cpu::new(scratch(&format!("composite_{mode:02X}")));
+        bios::install(&mut cpu.bus, VideoSetup { adapter: Adapter::Cga, ..Default::default() });
+        int10::set_mode(&mut cpu, mode);
+        cpu.bus.io_write(0x3D8, control);
+        cpu.bus.vga.set_composite(CompositeSettings { mode: CompositeMode::On, era: CompositeEra::Old });
+        assert!(cpu.bus.vga.composite_active());
+        for offset in 0..0x4000 {
+            cpu.bus.write_8(0xB8000 + offset, (offset * 13 + offset / 80) as u8);
+        }
+        let mut frame = Frame::new(SCREEN_WIDTH, SCREEN_HEIGHT);
+        let mut check = |cpu: &mut Cpu, what: &str| {
+            video::render_screen(&mut frame, &cpu.bus);
+            cpu.bus.vga.clear_dirty();
+            let mut fresh = Frame::new(SCREEN_WIDTH, SCREEN_HEIGHT);
+            cpu.bus.vga.mark_dirty_full();
+            video::render_screen(&mut fresh, &cpu.bus);
+            cpu.bus.vga.clear_dirty();
+            assert!(frame == fresh, "mode {mode:02X}: {what}");
+        };
+        check(&mut cpu, "first frame");
+        for bank in [0, 0x2000] {
+            for y in 20..36 {
+                for x in 30..34 {
+                    cpu.bus.write_8(0xB8000 + bank + y * 80 + x, 0x5A);
+                }
+            }
+        }
+        check(&mut cpu, "box");
+        // Another background and palette (mode 4) or foreground (mode 6).
+        cpu.bus.io_write(0x3D9, 0x21);
+        check(&mut cpu, "colour select");
+        // The burst off: a grey picture.
+        cpu.bus.io_write(0x3D8, control | 0x04);
+        check(&mut cpu, "burst off");
+        cpu.bus.io_write(0x3D8, control);
+        check(&mut cpu, "burst on");
+        // Started a line further on.
+        cpu.bus.io_write(0x3D4, 0x0C);
+        cpu.bus.io_write(0x3D5, 0);
+        cpu.bus.io_write(0x3D4, 0x0D);
+        cpu.bus.io_write(0x3D5, 40);
+        cpu.bus.vga.latch_start_address();
+        check(&mut cpu, "scroll");
+        // The other revision of the card.
+        cpu.bus.vga.set_composite(CompositeSettings { mode: CompositeMode::On, era: CompositeEra::New });
+        check(&mut cpu, "new era");
+        // The picture off (drawn black by the RGB path) and on again.
+        cpu.bus.io_write(0x3D8, control & !0x08);
+        check(&mut cpu, "video off");
+        cpu.bus.io_write(0x3D8, control);
+        check(&mut cpu, "video on");
+    }
+}

@@ -14,7 +14,9 @@ use iced_x86::code_asm::*;
 use rust_dos::cpu::Cpu;
 use rust_dos::exec::{self, NoHook, StopReason};
 use rust_dos::interrupts::int10;
-use rust_dos::video::{self, Frame};
+use rust_dos::video::adapter::{Adapter, VideoSetup};
+use rust_dos::video::composite::{CompositeEra, CompositeMode, CompositeSettings};
+use rust_dos::video::{self, Frame, bios};
 use std::hint::black_box;
 
 /// A machine in video mode `mode`, its 64 KB of each plane filled with
@@ -236,5 +238,55 @@ fn sprite_program() -> Vec<u8> {
     assemble().unwrap()
 }
 
-criterion_group!(benches, planar_sprite, planar_scroll, planar_program);
+/// A CGA on a composite monitor in mode 6 with the colour burst on, as
+/// King's Quest and other artifact-colour games use it: the screen filled
+/// with a pattern, then each frame a 32x32 box (four bytes, sixteen rows
+/// in each bank) drawn one step further on, and the frame rendered.
+fn cga_composite(c: &mut Criterion) {
+    let mut cpu = machine(&scratch("cga_composite"));
+    bios::install(&mut cpu.bus, VideoSetup { adapter: Adapter::Cga, ..Default::default() });
+    int10::set_mode(&mut cpu, 0x06);
+    cpu.bus.io_write(0x3D8, 0x1A);
+    cpu.bus.vga.set_composite(CompositeSettings { mode: CompositeMode::On, era: CompositeEra::Old });
+    assert!(cpu.bus.vga.composite_active());
+    for offset in 0..0x4000 {
+        cpu.bus.write_8(0xB8000 + offset, (offset * 13 + offset / 80) as u8);
+    }
+    let (width, height) = video::frame_size(&cpu.bus);
+    let mut frame = Frame::new(width, height);
+    render(&mut cpu, &mut frame);
+    let mut step = 0usize;
+    c.bench_function("video/cga_composite/sprite", |b| {
+        b.iter(|| {
+            step += 1;
+            let (column, top) = (step % 76, (step * 3) % 84);
+            for bank in [0, 0x2000] {
+                for y in top..top + 16 {
+                    for x in column..column + 4 {
+                        cpu.bus.write_8(0xB8000 + bank + y * 80 + x, (step * 0x11) as u8);
+                    }
+                }
+            }
+            render(&mut cpu, &mut frame);
+            black_box(frame.rgb[0]);
+        })
+    });
+    // Every line new each frame: the start address a line further on.
+    let mut line = 0usize;
+    c.bench_function("video/cga_composite/scroll", |b| {
+        b.iter(|| {
+            line = (line + 1) % 50;
+            let start = line * 40;
+            cpu.bus.io_write(0x3D4, 0x0C);
+            cpu.bus.io_write(0x3D5, (start >> 8) as u8);
+            cpu.bus.io_write(0x3D4, 0x0D);
+            cpu.bus.io_write(0x3D5, start as u8);
+            cpu.bus.vga.latch_start_address();
+            render(&mut cpu, &mut frame);
+            black_box(frame.rgb[0]);
+        })
+    });
+}
+
+criterion_group!(benches, planar_sprite, planar_scroll, planar_program, cga_composite);
 criterion_main!(benches);
