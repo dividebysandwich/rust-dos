@@ -238,8 +238,11 @@ pub fn short_names<S: AsRef<str>>(names: &[S]) -> Vec<String> {
 /// a listing stats each entry.
 #[derive(Default)]
 struct HostDirCache {
-    /// Counts the guest's changes to host files.
+    /// Counts the guest's changes to the names in host folders.
     changes: Cell<u64>,
+    /// Counts the guest's changes to host files' sizes and attributes,
+    /// which a search's listing has and a folder's names don't.
+    edits: Cell<u64>,
     dirs: RefCell<HashMap<PathBuf, HostDir>>,
     /// The most recent search last.
     searches: RefCell<Vec<HostSearch>>,
@@ -249,19 +252,22 @@ struct HostDirCache {
 struct HostSearch {
     key: SearchKey,
     modified: std::time::SystemTime,
-    changes: u64,
+    /// `changes` and `edits` when it was listed.
+    changes: (u64, u64),
     entries: Rc<[DosDirEntry]>,
 }
 
-/// What a search lists: the matches of `pattern` among the entries of the
-/// host folder `dir` with search attributes `attr`, on a drive that is
-/// writable or not.
+/// What a search lists: the matches of `pattern` (in the 8.3 form the DTA
+/// keeps for FindNext) among the entries of the host folder `dir` with
+/// search attributes `attr`, on a drive that is writable or not, and that
+/// has `dir` as its root (no "." and ".." entries) or not.
 #[derive(PartialEq, Eq)]
 struct SearchKey {
     dir: PathBuf,
-    pattern: String,
+    pattern: [u8; 11],
     attr: u16,
     writable: bool,
+    root: bool,
 }
 
 struct HostDir {
@@ -288,6 +294,12 @@ impl HostDirCache {
     /// drive: every folder is read again.
     fn changed(&self) {
         self.changes.set(self.changes.get().wrapping_add(1));
+    }
+
+    /// The guest wrote to a host file, or changed its size or attributes:
+    /// searches list their folders again, and the folders' names are kept.
+    fn edited(&self) {
+        self.edits.set(self.edits.get().wrapping_add(1));
     }
 
     /// The modification time of the host folder `dir`, if what was read of
@@ -349,7 +361,7 @@ impl HostDirCache {
         let Some(modified) = Self::settled(&key.dir) else {
             return list().map(Into::into);
         };
-        let changes = self.changes.get();
+        let changes = (self.changes.get(), self.edits.get());
         let entries = match kept {
             Some(kept) if !first && kept.modified == modified && kept.changes == changes => kept.entries,
             _ => list()?.into(),
@@ -2660,8 +2672,6 @@ impl DiskController {
     /// INT 21h AX=5701h: set the time and date of an open file. Only
     /// files on disk images keep them; host files keep their own.
     pub fn set_file_time(&self, handle: u16, time: u16, date: u16) -> Result<(), u8> {
-        // A search's listing has the file's date.
-        self.host_dirs.changed();
         match &self.open_files.get(&handle).ok_or(0x06u8)?.data {
             OpenData::Fat { volume, at, .. } => volume.set_time(*at, time, date),
             _ => Ok(()),
@@ -2770,11 +2780,13 @@ impl DiskController {
     // INT 21h, AH=40h: Write to File
     pub fn write_file(&mut self, handle: u16, data: &[u8]) -> Result<u16, u8> {
         self.mark_dirty(handle);
-        // A search's listing has the file's size and date.
-        self.host_dirs.changed();
         if let Some(open) = self.open_files.get_mut(&handle) {
             let file = match &mut open.data {
-                OpenData::Host(file) => file,
+                OpenData::Host(file) => {
+                    // A search's listing has the file's size and date.
+                    self.host_dirs.edited();
+                    file
+                }
                 OpenData::Memory(..) | OpenData::Image(..) => return Err(0x05),
                 OpenData::Fat { write: false, .. } => return Err(0x05),
                 OpenData::Fat { volume, at, pos, .. } => {
@@ -2843,10 +2855,10 @@ impl DiskController {
     /// disk fills up first. Files that can't be written get 05h. The
     /// handle's position stays where it was.
     pub fn set_file_size(&mut self, handle: u16, size: u64) -> Result<(), u8> {
-        self.host_dirs.changed();
         let open = self.open_files.get(&handle).ok_or(0x06u8)?;
         match &open.data {
             OpenData::Host(file) => {
+                self.host_dirs.edited();
                 let result = file.set_len(size).map_err(|_| 0x05);
                 self.mark_dirty(handle);
                 return result;
@@ -3020,7 +3032,6 @@ impl DiskController {
     /// Hidden/System bits. Directory and Volume Label bits cannot be set via
     /// this call on real DOS either.
     pub fn set_file_attribute(&self, filename: &str, attr: u16) -> Result<(), u8> {
-        self.host_dirs.changed();
         if let Some((drive, volume, parts)) = self.locate_fat(filename) {
             let parts = refs(&parts);
             volume.find(&parts)?;
@@ -3035,6 +3046,7 @@ impl DiskController {
         if let Ok(meta) = hostfs::metadata(&path) {
             let want_ro = (attr & 0x01) != 0;
             if meta.readonly != want_ro {
+                self.host_dirs.edited();
                 // Ignore permission-set errors on systems where it's not supported.
                 let _ = hostfs::set_readonly(&path, want_ro);
             }
@@ -3269,7 +3281,11 @@ impl DiskController {
             None => ("", rest),
         };
         let dir = self.resolve_on(drive_num, if parent_dir.is_empty() { "." } else { parent_dir })?;
-        Some(SearchKey { dir, pattern: pattern.to_string(), attr: search_attr, writable: drive.writable() })
+        // FindNext gets the pattern back from the DTA ("RGN*.GFF" comes
+        // back as "RGN?????.GFF"), so both are keyed in that form.
+        let pattern = crate::interrupts::utils::pattern_to_fcb(pattern);
+        let root = drive.host_root() == Some(dir.as_path());
+        Some(SearchKey { dir, pattern, attr: search_attr, writable: drive.writable(), root })
     }
 
     /// The files a path names, with wildcards in its last part or not,
@@ -4370,6 +4386,10 @@ mod tests {
         assert_eq!(listed, ["A.DAT", "B.DAT", "C.DAT", "LONGNA~1.TXT", "SUB"]);
         assert_eq!(find_all(&disk, r"C:\*.*"), listed);
         assert_eq!(disk.host_dirs.searches.borrow().len(), 1, "kept for FindNext");
+        // FindNext spells the pattern as the DTA keeps it.
+        assert_eq!(disk.find_directory_entry(r"C:\*.dat", 0, 0x16).unwrap().filename, "A.DAT");
+        assert_eq!(disk.find_directory_entry(r"C:\????????.DAT", 1, 0x16).unwrap().filename, "B.DAT");
+        assert_eq!(disk.host_dirs.searches.borrow().len(), 2, "one search per pattern");
 
         // Another program adds a file mid-search: the folder's time moves,
         // and the next FindNext lists it again.
