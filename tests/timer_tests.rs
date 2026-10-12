@@ -892,3 +892,35 @@ fn a_due_count_and_port_61h_survive_a_save_state() {
     assert!(!c.bus.pit2.count_due);
     assert_eq!(c.bus.io_read(0x61) & 0x0C, 0);
 }
+
+#[test]
+fn channel_2_starts_with_its_gate_low() {
+    // As on a real PC: read without being set up, the count holds, and
+    // Bao Xiao San Guo Zhi's rolls all come out the same.
+    let mut bus = bus_at(20_000);
+    assert_eq!(bus.io_read(0x61) & 0x03, 0);
+    let first = latched_pit2(&mut bus);
+    bus.clock.icount += 1_000;
+    assert_eq!(latched_pit2(&mut bus), first);
+    assert_eq!(sango_rolls(&mut bus), 1);
+}
+
+#[test]
+fn pit2_gate_at_start_runs_channel_2() {
+    use rust_dos::config::SoundConfig;
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    cpu.bus.set_cycles_per_ms(20_000);
+    let off = SoundConfig::default();
+    let on = SoundConfig { pit2_gate_at_start: true, ..SoundConfig::default() };
+    rust_dos::sound::apply_config(&mut cpu, &on, Some(&off));
+    // The gate is up and the speaker silent; the count runs.
+    assert_eq!(cpu.bus.io_read(0x61) & 0x03, 0x01);
+    assert!(!cpu.bus.speaker_on);
+    let first = latched_pit2(&mut cpu.bus);
+    cpu.bus.clock.icount += 1_000;
+    assert_ne!(latched_pit2(&mut cpu.bus), first);
+    assert_eq!(sango_rolls(&mut cpu.bus), 8);
+    // Turned off again, the gate goes down.
+    rust_dos::sound::apply_config(&mut cpu, &off, Some(&on));
+    assert_eq!(cpu.bus.io_read(0x61) & 0x03, 0);
+}

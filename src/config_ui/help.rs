@@ -384,6 +384,7 @@ impl Item {
             AudioBlocksize | AudioPrebuffer => "audio-buffer",
             LptDac => "lpt-dac",
             TandySound => "tandy-sound",
+            Pit2GateAtStart => "pit2-gate-at-start",
             Autoexec => "autoexec",
             Ipx => "ipx",
             IpxIrq => "ipx-irq",

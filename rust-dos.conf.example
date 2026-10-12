@@ -314,6 +314,12 @@
 # and noise: auto (the default) on those machines (machine), on on any, for
 # games that play Tandy sound with VGA graphics, or off.
 #tandy=auto
+# Start with PIT channel 2's gate (port 61h bit 0) high and its count
+# running, the speaker silent: false (the default, as on a real PC) or
+# true, for games that read the channel without setting it up, such as Bao
+# Xiao San Guo Zhi, whose random numbers come out the same every time
+# without it. A change takes effect at the DOS prompt.
+#pit2_gate_at_start=false
 # The noises the hard disks and floppy drives make: off (the default),
 # seek-only (the heads moving), or on (the disk spinning as well). They
 # sound best with the disk speeds above set lower than maximum.

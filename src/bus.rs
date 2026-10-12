@@ -772,6 +772,15 @@ impl Bus {
         &mut self.tandy_sound
     }
 
+    /// Set PIT channel 2's gate (port 61h bit 0) as `pit2_gate_at_start`
+    /// has it at startup, with the speaker data bit clear so nothing
+    /// sounds, as DOSBox-X's BIOS does for its "pcspeaker clock gate enable
+    /// at startup". With the gate up, a channel that was never set up
+    /// counts in mode 3 from FFFFh.
+    pub fn set_pit2_gate_at_start(&mut self, on: bool) {
+        self.io_write(0x61, self.ppi_checks | on as u8);
+    }
+
     /// Put a DAC on LPT1 (`lpt_dac`), or take it away: the printer gives
     /// way to it, and the BIOS data area has LPT1 while either is there.
     pub fn configure_lpt_dac(&mut self, kind: crate::lpt_dac::LptDacType) {

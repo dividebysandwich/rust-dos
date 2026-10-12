@@ -541,6 +541,9 @@ pub struct SoundConfig {
     pub lpt_dac: LptDacType,
     /// The Tandy's and PCjr's sound chip (`tandy`).
     pub tandy: crate::sn76489::TandySound,
+    /// Whether PIT channel 2 starts with its gate (port 61h bit 0) high and
+    /// its count running (`pit2_gate_at_start`).
+    pub pit2_gate_at_start: bool,
 }
 
 impl MidiSynth {
@@ -576,6 +579,7 @@ impl Default for SoundConfig {
             midiport: String::new(),
             lpt_dac: LptDacType::None,
             tandy: crate::sn76489::TandySound::Auto,
+            pit2_gate_at_start: false,
         }
     }
 }
@@ -752,6 +756,10 @@ impl SoundConfig {
             "lpt_dac" => {
                 self.lpt_dac = LptDacType::parse(value)
                     .ok_or_else(|| format!("invalid lpt_dac '{}' (none, disney or covox)", value))?;
+            }
+            "pit2_gate_at_start" => {
+                self.pit2_gate_at_start = parse_bool(value)
+                    .ok_or_else(|| format!("invalid pit2_gate_at_start '{}' (true or false)", value))?;
             }
             _ => return Err(format!("unknown setting '{}'", key)),
         }
@@ -1681,6 +1689,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Sound, "midiport", (!sound.midiport.is_empty()).then(|| sound.midiport.clone())),
         (Sound, "lpt_dac", Some(sound.lpt_dac.name().to_string())),
         (Sound, "tandy", Some(sound.tandy.name().to_string())),
+        (Sound, "pit2_gate_at_start", yes_no(sound.pit2_gate_at_start)),
         (Sound, "hard_disk_noise", Some(settings.disk.hard_disk_noise.name().to_string())),
         (Sound, "floppy_disk_noise", Some(settings.disk.floppy_disk_noise.name().to_string())),
     ];
@@ -2286,6 +2295,22 @@ mod tests {
     }
 
     #[test]
+    fn channel_2_can_start_with_its_gate_high() {
+        assert!(!parse("[sound]
+", Path::new("/cfg"), None).sound.pit2_gate_at_start);
+        let config = parse("[sound]
+pit2_gate_at_start=true
+", Path::new("/cfg"), None);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        assert!(config.sound.pit2_gate_at_start);
+        let config = parse("[sound]
+pit2_gate_at_start=maybe
+", Path::new("/cfg"), None);
+        assert!(!config.sound.pit2_gate_at_start);
+        assert!(config.warnings[0].contains("pit2_gate_at_start"), "{:?}", config.warnings);
+    }
+
+    #[test]
     fn a_dac_on_the_parallel_port() {
         let config = parse("[sound]\nlpt_dac=Disney\n", Path::new("/cfg"), None);
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
@@ -2695,6 +2720,7 @@ mod tests {
             midiport: "FLUID".to_string(),
             lpt_dac: LptDacType::Disney,
             tandy: crate::sn76489::TandySound::On,
+            pit2_gate_at_start: true,
         };
         Settings {
             scale: 3,

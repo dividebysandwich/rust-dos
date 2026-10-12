@@ -558,6 +558,12 @@ fn setting(imported: &mut Imported, section: &str, key: &str, value: &str) {
             _ => unknown(imported),
         },
         ("speaker", "disney") if bool_value() == Some("true") => imported.set("sound", "lpt_dac", "disney"),
+        // DOSBox-X's option for Bao Xiao San Guo Zhi, off by default.
+        ("speaker", "pcspeaker clock gate enable at startup") => match bool_value() {
+            Some("true") => imported.set("sound", "pit2_gate_at_start", "true"),
+            Some(_) => {}
+            None => unknown(imported),
+        },
         // DOSBox-X's 3dfx card. Its default, auto, is in every config it
         // writes, so only a card asked for by name is put in.
         ("voodoo", "voodoo_card") | ("pci", "voodoo") => match first {
@@ -891,7 +897,7 @@ mod tests {
 
     #[test]
     fn settings_map_onto_rust_dos_s() {
-        let conf = "[cpu]\ncycles=max 80%\ncputype=386_prefetch\ncore=simple\n[dos]\nkeyboardlayout=de\numb=false\nver=7.1\n[gus]\ngus=true\ngusbase=240\n[joystick]\njoysticktype=fcs\n[speaker]\ndisney=true\n[sblaster]\nsbtype=gb\n";
+        let conf = "[cpu]\ncycles=max 80%\ncputype=386_prefetch\ncore=simple\n[dos]\nkeyboardlayout=de\numb=false\nver=7.1\n[gus]\ngus=true\ngusbase=240\n[joystick]\njoysticktype=fcs\n[speaker]\ndisney=true\npcspeaker clock gate enable at startup = true\n[sblaster]\nsbtype=gb\n";
         let imported = import(&[conf], &[PathBuf::from("/")], "x", None);
         let get = |key: &str| imported.settings.iter().find(|(_, k, _)| *k == key).map(|(_, _, v)| v.as_str());
         assert_eq!(get("cycles"), Some("max"));
@@ -913,6 +919,7 @@ mod tests {
         assert_eq!(get("gus"), Some("true"));
         assert_eq!(get("joysticktype"), Some("4axis"));
         assert_eq!(get("lpt_dac"), Some("disney"));
+        assert_eq!(get("pit2_gate_at_start"), Some("true"));
         assert_eq!(get("sbtype"), None);
         assert!(imported.warnings[0].contains("sbtype=gb"), "{:?}", imported.warnings);
     }

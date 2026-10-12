@@ -422,7 +422,7 @@ impl Page {
             Page::Sound => &[
                 SbType, SbPorts, Awe32Rom, Awe32Download, Awe32Ram, Opl, Gus, GusPorts, GusDrive, UltraDir, Midi,
                 Sc55Roms, Sc55Model, Sc55Download, SoundFont, Mt32Roms, Mt32Model, MidiPort, LptDac, TandySound,
-                HardDiskNoise, FloppyDiskNoise,
+                Pit2GateAtStart, HardDiskNoise, FloppyDiskNoise,
             ],
             Page::Mixer => &[
                 Volume(Channel::Master),
@@ -684,6 +684,8 @@ enum Item {
     LptDac,
     /// The Tandy's and PCjr's sound chip.
     TandySound,
+    /// PIT channel 2's gate at startup (`pit2_gate_at_start`).
+    Pit2GateAtStart,
     /// The configuration file's `[autoexec]` commands (autoexec.rs).
     Autoexec,
     /// The IPX driver, its IRQ and its frame type.
@@ -1004,6 +1006,7 @@ impl Item {
             AudioPrebuffer => "Sound prebuffer",
             LptDac => "Parallel port DAC",
             TandySound => "Tandy/PCjr sound",
+            Pit2GateAtStart => "Timer 2 gate at startup",
             Autoexec => "Edit the [autoexec] commands...",
             Ipx => "IPX driver",
             IpxIrq => "  IRQ",
@@ -1420,6 +1423,7 @@ impl Item {
             AudioPrebuffer => format!("{} ms", s.audio_buffer.prebuffer),
             LptDac => s.sound.lpt_dac.describe().to_string(),
             TandySound => s.sound.tandy.describe().to_string(),
+            Pit2GateAtStart => on_off(s.sound.pit2_gate_at_start),
             Autoexec | Rooms | Phonebook => String::new(),
             Ipx => match s.network.ipx {
                 crate::net::IpxMode::Auto => "auto (with LAN HOST or JOIN)",
@@ -1630,6 +1634,7 @@ impl Item {
             AudioPrebuffer => each(s, crate::audio::PREBUFFERS, |s, ms| s.audio_buffer.prebuffer = ms),
             LptDac => each(s, crate::lpt_dac::LptDacType::ALL, |s, dac| s.sound.lpt_dac = dac),
             TandySound => each(s, crate::sn76489::TandySound::ALL, |s, tandy| s.sound.tandy = tandy),
+            Pit2GateAtStart => on_off(|s, on| s.sound.pit2_gate_at_start = on),
             Ipx => each(s, crate::net::IpxMode::ALL, |s, mode| s.network.ipx = mode),
             IpxIrq => each(s, [None, Some(3), Some(4), Some(5), Some(7), Some(9), Some(10), Some(11), Some(15)], |s, irq| {
                 s.network.ipx_irq = irq

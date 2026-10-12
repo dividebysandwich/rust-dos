@@ -482,6 +482,18 @@ Mistakes in the file are printed as warnings; the emulator still starts.
 * `tandy` is the Tandy 1000's and PCjr's sound chip at port C0h, three
   square waves and noise: `auto` (the default) on those machines, `on`
   on any (for games that play Tandy sound with VGA graphics), or `off`.
+* `pit2_gate_at_start=true` starts PIT channel 2, the PC speaker's
+  timer, with its gate (port 61h bit 0) high and its count running in
+  mode 3 from FFFFh, with the speaker silent. The default, `false`, starts
+  it with the gate low and the count stopped, as on a real PC, whose BIOS
+  clears port 61h bits 0 and 1 after the POST beep, and as in DOSBox and
+  86Box. Bao Xiao San Guo Zhi (SANGO.EXE) needs `true`: it reads its
+  random numbers from the channel without setting it up or raising the
+  gate, so with the gate low every roll is the same. DOSBox-X's
+  `pcspeaker clock gate enable at startup` is the same setting and
+  imports as this one. Put it in the game's
+  [profile](#game-profiles) to have it for that game only. A change takes
+  effect at the DOS prompt.
 * `hard_disk_noise` and `floppy_disk_noise` add the drives' noises; see
   [Disk speed and noises](#disk-speed-and-noises).
 
