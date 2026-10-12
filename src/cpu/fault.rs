@@ -6,6 +6,7 @@
 //! fault) and delivers the exception, so the handler sees the faulting
 //! instruction's address, as on a 286 and later.
 
+use std::collections::hash_map::Entry;
 use std::num::NonZeroU8;
 use super::seg::{
     Descriptor, INT_GATE16, INT_GATE32, TASK_GATE, TRAP_GATE16, TRAP_GATE32, is_null, rpl, sel_error,
@@ -490,16 +491,17 @@ impl Cpu {
         }
         self.exception_log.push_back(record);
         let place = (fault.vector, record.cs, record.eip);
-        let new = !self.exception_places.contains_key(&place);
-        let places = &mut self.exception_places_per_vector[fault.vector as usize % 32];
-        if new {
-            if *places == PLACES_LOGGED {
-                return;
+        let places = &mut self.exception_places_per_vector[fault.vector as usize];
+        let (lines, last_place) = match self.exception_places.entry(place) {
+            Entry::Occupied(entry) => (entry.into_mut(), false),
+            Entry::Vacant(entry) => {
+                if *places == PLACES_LOGGED {
+                    return;
+                }
+                *places += 1;
+                (entry.insert(0), *places == PLACES_LOGGED)
             }
-            *places += 1;
-        }
-        let last_place = new && *places == PLACES_LOGGED;
-        let lines = self.exception_places.entry(place).or_insert(0);
+        };
         if *lines == LINES_PER_PLACE {
             return;
         }
@@ -512,7 +514,7 @@ impl Cpu {
         let cr2 = if fault.vector == 14 { format!(" CR2={:08X}", self.cr2) } else { String::new() };
         let v86 = if self.v86() { " in virtual-8086 mode" } else { "" };
         let here = if last_here { " (later ones here not logged)" } else { "" };
-        let places = if last_place { " (this exception at other places not logged)" } else { "" };
+        let places = if last_place { " (last place logged for this exception)" } else { "" };
         self.bus.log_string(&format!(
             "[CPU] {}{} at {:04X}:{:08X}{}{}{}{}",
             exception_name(fault.vector),
