@@ -1,0 +1,88 @@
+name: Benchmarks
+
+# On demand only: on a PR with the "performance" label, or by hand from the
+# Actions tab (docs/benchmarks.md).
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    # On a PR: when it has the label, and for a "labeled" event only when
+    # the label added is this one.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (contains(github.event.pull_request.labels.*.name, 'performance') &&
+       (github.event.action != 'labeled' || github.event.label.name == 'performance'))
+    # On the job, so a run the "if" skips (another label added to the PR)
+    # doesn't cancel a benchmark run in progress.
+    concurrency:
+      group: benchmarks-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
+    timeout-minutes: 60
+    steps:
+      # On a PR this is the merge of the PR into its base, whose first
+      # parent is the base commit.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsdl2-dev libasound2-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bench
+
+      # The cache may hold results of an earlier run.
+      - name: Clear old results
+        run: rm -rf target/criterion
+
+      # A base benchmark that fails (say, one the PR fixes) leaves the
+      # benchmarks after it without a baseline; the PR is still measured.
+      # The base run's "new" results are removed afterwards, so a benchmark
+      # the PR deletes doesn't show up in the summary with the base's time.
+      - name: Benchmark the base commit
+        if: github.event_name == 'pull_request'
+        run: |
+          head=$(git rev-parse HEAD)
+          git checkout --quiet HEAD^1
+          if grep -q '^\[\[bench\]\]' Cargo.toml; then
+            cargo bench --locked -- --save-baseline base ||
+              echo "::warning::The base commit's benchmarks failed; those after the failure have no baseline."
+          else
+            echo "The base commit has no benchmarks, so there is nothing to compare against."
+          fi
+          git checkout --quiet "$head"
+          if [ -d target/criterion ]; then
+            find target/criterion -type d -name new -prune -exec rm -rf {} +
+          fi
+
+      # --baseline-lenient: a benchmark the base doesn't have runs without
+      # a comparison.
+      - name: Benchmark this commit
+        run: |
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            cargo bench --locked -- --baseline-lenient base
+          else
+            cargo bench --locked
+          fi
+
+      - name: Write the summary
+        run: |
+          {
+            echo "## Benchmarks"
+            echo
+            echo "Timings on a shared GitHub runner are indicative only: differences of a few percent are noise, and only large changes count. Confirm them on a quiet machine (docs/benchmarks.md)."
+            echo
+            python3 .github/scripts/bench_summary.py
+          } >> "$GITHUB_STEP_SUMMARY"
