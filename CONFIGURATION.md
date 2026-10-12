@@ -189,7 +189,11 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   640x200, 60 Hz), `tandy` (a Tandy 1000), `pcjr` (an IBM PCjr) or
   `hercules` (a Hercules Graphics Card on a monochrome monitor: the MDA's
   text and 720x348 graphics, 50 Hz). A change takes effect at the DOS
-  prompt.
+  prompt. A DOSBox configuration's `svga_s3`, DOSBox's default, imports
+  as `svga`, which is what DOS games get from it there; one that boots a
+  hard disk keeps `svga_s3`, as the Windows on the disk was installed
+  with the S3's driver (unless the package's `os` boots another system
+  in its place).
 * With `svga_et4000` programs find a Tseng ET4000AX on the ISA bus, as
   DOS games and Windows 3.x drivers made for it detect it: its KEY
   (3BFh/3D8h), Segment Select (3CDh) with separate read and write banks,
