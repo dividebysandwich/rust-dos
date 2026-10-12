@@ -2132,6 +2132,11 @@ fn main() -> Result<(), String> {
                     }
                 };
             }
+            // A stopped animation recording finishes writing on its own
+            // thread; say so if that failed.
+            if let Some(e) = recorder.finished() {
+                osd.show(e);
+            }
             let capturing = screenshot || recorder.is_active() || video_recording.is_some();
             if capturing && !record_ui {
                 capture!();
