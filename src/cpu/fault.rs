@@ -556,6 +556,7 @@ impl Cpu {
         // counters are cleared.
         self.tsc_offset = self.bus.clock.icount.wrapping_neg();
         self.perf_msrs = [0; 3];
+        self.sysenter = [0; 3];
         self.reset_to_real_mode();
         self.seg[Seg::CS as usize] = super::SegCache::real(0xF000);
         self.eip = 0xFFF0;

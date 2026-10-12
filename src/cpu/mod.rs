@@ -67,8 +67,9 @@ fn program_paras(bytes: &[u8]) -> u16 {
 /// and NT.
 const FLAGS16_WRITABLE: u32 = 0x7FD5;
 
-/// The processor being emulated, in the order they came out: a later one
-/// has what an earlier one has (`model >= CpuModel::I486`).
+/// The processor being emulated, each with what the one before it has
+/// (`model >= CpuModel::I486`), except that a Pentium Pro has no MMX
+/// (`has_mmx`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CpuModel {
     I386,
@@ -83,16 +84,35 @@ pub enum CpuModel {
     /// A Pentium MMX (P55C): the Pentium's, MMX, and CPUID saying family
     /// 5, model 4, stepping 3.
     PentiumMmx,
+    /// A Pentium Pro as DOSBox-X's `ppro_slow` has it: the Pentium's (no
+    /// MMX), CMOVcc, FCMOVcc, FCOMI/FUCOMI and their popping forms, the
+    /// hinting NOPs (0F 18 to 0F 1E), the local APIC base and microcode
+    /// revision MSRs, and CPUID saying family 6, model 1, stepping 2.
+    PentiumPro,
+    /// A Pentium II (Klamath) as DOSBox-X's `pentium_ii` has it: the
+    /// Pentium Pro's, MMX, SYSENTER/SYSEXIT with their MSRs, and CPUID
+    /// saying family 6, model 3, stepping 3.
+    PentiumII,
 }
 
 impl CpuModel {
+    pub const ALL: [CpuModel; 6] = [
+        CpuModel::I386,
+        CpuModel::I486,
+        CpuModel::Pentium,
+        CpuModel::PentiumMmx,
+        CpuModel::PentiumPro,
+        CpuModel::PentiumII,
+    ];
+
     /// The EFLAGS bits a program may change beyond the 386's: AC on a 486,
-    /// and ID too on a Pentium, whose toggling tells that CPUID is there.
+    /// and ID too on a Pentium and later, whose toggling tells that CPUID
+    /// is there.
     pub fn eflags_extra(self) -> u32 {
         match self {
             CpuModel::I386 => 0,
             CpuModel::I486 => CpuFlags::AC.bits(),
-            CpuModel::Pentium | CpuModel::PentiumMmx => CpuFlags::AC.bits() | CpuFlags::ID.bits(),
+            _ => CpuFlags::AC.bits() | CpuFlags::ID.bits(),
         }
     }
 
@@ -104,6 +124,8 @@ impl CpuModel {
             CpuModel::I486 => 0x0402,
             CpuModel::Pentium => 0x0517,
             CpuModel::PentiumMmx => 0x0543,
+            CpuModel::PentiumPro => 0x0612,
+            CpuModel::PentiumII => 0x0633,
         }
     }
 
@@ -114,24 +136,39 @@ impl CpuModel {
             CpuModel::I486 => "486",
             CpuModel::Pentium => "Pentium",
             CpuModel::PentiumMmx => "Pentium MMX",
+            CpuModel::PentiumPro => "Pentium Pro",
+            CpuModel::PentiumII => "Pentium II",
         }
     }
 
     /// The most RAM in MB (`memsize`) a machine with this CPU takes, as
     /// the motherboards of its day did: 64 MB on a 386, 128 MB on a 486,
     /// 256 MB on a Pentium (430FX/VX) and 512 MB on a Pentium MMX (430HX).
+    /// A Pentium Pro or Pentium II board (440FX, 440BX) takes 1 GB, which
+    /// `MAX_MEMSIZE` keeps to 512 MB.
     pub fn max_memsize(self) -> usize {
         match self {
             CpuModel::I386 => 64,
             CpuModel::I486 => 128,
             CpuModel::Pentium => 256,
-            CpuModel::PentiumMmx => 512,
+            CpuModel::PentiumMmx | CpuModel::PentiumPro | CpuModel::PentiumII => 512,
         }
     }
 
-    /// The family: 3, 4 or 5.
+    /// The family: 3, 4, 5 or 6.
     pub fn family(self) -> u8 {
         (self.signature() >> 8) as u8
+    }
+
+    /// Whether it runs MMX instructions: a Pentium MMX or a Pentium II.
+    pub fn has_mmx(self) -> bool {
+        matches!(self, CpuModel::PentiumMmx | CpuModel::PentiumII)
+    }
+
+    /// Whether it is a P6 (family 6, a Pentium Pro or Pentium II), with
+    /// CMOVcc, FCMOVcc and FCOMI.
+    pub fn is_p6(self) -> bool {
+        self >= CpuModel::PentiumPro
     }
 }
 
@@ -308,6 +345,9 @@ pub struct Cpu {
     /// select (11h) and the two counters (12h, 13h), which hold what was
     /// written to them.
     pub perf_msrs: [u64; 3],
+    /// The Pentium II's SYSENTER MSRs: the code selector (174h), the stack
+    /// pointer (175h) and the instruction pointer (176h) SYSENTER loads.
+    pub sysenter: [u32; 3],
     /// Debug registers; stored, but breakpoints are not implemented.
     pub dr: [u32; 8],
     pub gdtr: DescTable,
@@ -594,6 +634,7 @@ impl Cpu {
             cr4: 0,
             tsc_offset: 0,
             perf_msrs: [0; 3],
+            sysenter: [0; 3],
             dr: [0; 8],
             gdtr: DescTable { base: 0, limit: 0xFFFF },
             idtr: DescTable { base: 0, limit: 0x3FF },

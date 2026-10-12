@@ -58,12 +58,14 @@ mode.
 
 # Processor {#cpu}
 
-The processor games find: **386**, **486**, **Pentium** or **Pentium
-MMX**.
+The processor games find: **386**, **486**, **Pentium**, **Pentium
+MMX**, **Pentium Pro** or **Pentium II**.
 
 **486** suits almost everything. Pick **Pentium** for late-1990s games
 that ask for one, and for 3dfx games; **Pentium MMX** for those that
-need MMX. Takes effect at the DOS prompt.
+need MMX; **Pentium II** for programs built for a Pentium Pro or later,
+which use its conditional moves (CMOV). **Pentium Pro** is that without
+MMX. Takes effect at the DOS prompt.
 
 # BIOS POST screen {#post}
 
@@ -216,7 +218,8 @@ late games want **32** or **64 MB**.
 
 How much there can be depends on the processor, as with the motherboards
 of its day: up to **64 MB** with a 386, **128 MB** with a 486, **256 MB**
-with a Pentium and **512 MB** with a Pentium MMX. Picking a smaller
+with a Pentium and **512 MB** with a Pentium MMX, Pentium Pro or Pentium
+II. Picking a smaller
 processor brings the memory down to what it takes. Save states and rewind
 grow with the memory.
 

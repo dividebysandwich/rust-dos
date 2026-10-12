@@ -61,6 +61,9 @@ crate::state_fields!(Cpu {
 } skip {
     // Saved in sections of its own (the injector's in savestate/machine.rs).
     bus, env_injector,
+    // In a section of its own (savestate/machine.rs), which older states
+    // lack.
+    sysenter,
     // Set from the configuration, which a state carries in its header.
     model, core, string_bulk, fpu_fast,
     // Caches, emptied after a load.

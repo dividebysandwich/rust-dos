@@ -1405,6 +1405,7 @@ const STILL: &[(&str, &str)] = &[
     ("DOS.dos_high", "the settings' DOS=HIGH"),
     ("DOS.disk_io", "the disk's speed settings, and the time charged until the next instruction takes it"),
     ("ENV", "the settings' environment variables"),
+    ("SEP", "the SYSENTER MSRs, which only a Pentium II's WRMSR sets"),
 ];
 
 /// The `Bus` fields saved as a section of their own (or in one with the

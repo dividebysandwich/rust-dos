@@ -2,7 +2,8 @@
 //! registers, the machine status word, control, debug and test registers,
 //! the LDT and task registers, the protected-mode segment inspection
 //! instructions (LAR, LSL, VERR, VERW, ARPL), the 486 cache and TLB
-//! instructions, and the Pentium's CPUID, time stamp counter and MSRs.
+//! instructions, the Pentium's CPUID, time stamp counter and MSRs, and
+//! the Pentium II's SYSENTER and SYSEXIT.
 
 use iced_x86::{Code, Instruction, Register};
 
@@ -14,7 +15,7 @@ use crate::cpu::seg::{
 };
 use crate::cpu::{
     Access, CR0_AM, CR0_CD, CR0_EM, CR0_ET, CR0_MP, CR0_NE, CR0_NW, CR0_PE, CR0_PG, CR0_TS, CR0_WP, CR4_PSE,
-    CR4_TSD, Cpu, CpuFlags, CpuModel, CpuResult, CpuState, DescTable, Descriptor, Fault, SegCache,
+    CR4_TSD, Cpu, CpuFlags, CpuModel, CpuResult, CpuState, DescTable, Descriptor, Fault, Seg, SegCache,
 };
 
 /// Instructions only privilege level 0 may run: in protected and
@@ -246,8 +247,32 @@ pub fn invlpg(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
 /// 4 MB pages, the time stamp counter, MSRs and CMPXCHG8B.
 const CPUID_FEATURES: u32 = 0x0001 | 0x0008 | 0x0010 | 0x0020 | 0x0100;
 
-/// The CPUID feature bit of MMX, which a Pentium MMX adds.
+/// The CPUID feature bit of MMX, which a Pentium MMX and a Pentium II add.
 const CPUID_MMX: u32 = 0x0080_0000;
+
+/// The CPUID feature bit of CMOVcc (and, with an FPU, FCMOVcc and FCOMI),
+/// which a P6 adds.
+const CPUID_CMOV: u32 = 0x0000_8000;
+
+/// The CPUID feature bit of SYSENTER/SYSEXIT, which a Pentium II adds.
+const CPUID_SEP: u32 = 0x0000_0800;
+
+/// The features CPUID leaf 1 reports in EDX for `model`, as DOSBox-X has
+/// them (cpu.cpp, `CPU_CPUID`), less the 36-bit page size extension it
+/// gives its Pentium II, which this one doesn't have.
+pub fn cpuid_features(model: CpuModel) -> u32 {
+    let mut features = CPUID_FEATURES;
+    if model.has_mmx() {
+        features |= CPUID_MMX;
+    }
+    if model.is_p6() {
+        features |= CPUID_CMOV;
+    }
+    if model >= CpuModel::PentiumII {
+        features |= CPUID_SEP;
+    }
+    features
+}
 
 /// CPUID (Pentium): leaf 0 gives the highest leaf, 1, and "GenuineIntel",
 /// leaf 1 the family, model and stepping and the features. Leaves past it
@@ -257,10 +282,7 @@ pub fn cpuid(cpu: &mut Cpu) -> CpuResult {
     let text = |s: &[u8; 4]| u32::from_le_bytes(*s);
     let (eax, ebx, ecx, edx) = match cpu.eax() {
         0 => (1, text(b"Genu"), text(b"ntel"), text(b"ineI")),
-        1 => {
-            let mmx = if cpu.model >= CpuModel::PentiumMmx { CPUID_MMX } else { 0 };
-            (cpu.model.signature(), 0, 0, CPUID_FEATURES | mmx)
-        }
+        1 => (cpu.model.signature(), 0, 0, cpuid_features(cpu.model)),
         _ => (0, 0, 0, 0),
     };
     cpu.set_eax(eax);
@@ -285,24 +307,61 @@ pub fn rdtsc(cpu: &mut Cpu) -> CpuResult {
     Ok(())
 }
 
+/// A hinting NOP (P6): 0F 19 to 0F 1E with a ModRM byte, and 0F 18 (the
+/// Pentium III's prefetches), which a Pentium Pro or Pentium II runs as a
+/// NOP, as DOSBox-X does (prefix_0f.h). Its memory operand isn't accessed.
+pub fn hint_nop(cpu: &Cpu) -> CpuResult {
+    if cpu.model.is_p6() { Ok(()) } else { Err(Fault::UD) }
+}
+
 /// What Glide puts in EBX for its model-specific register accesses.
 const GLIDE_MSR_MARK: u32 = 0xDEAD_CAFE;
 
+/// What a P6 reads from its microcode revision MSR (8Bh): DOSBox-X's
+/// value for its Pentium Pro and Pentium II, high enough that Windows 98
+/// and ME don't try to update the microcode.
+const MICROCODE_REVISION: u64 = 0x003F_003F_001E_03FF;
+
+/// Whether `model` has the model-specific register `msr` for a read or a
+/// write: a Pentium the machine check address and type (0, 1), the time
+/// stamp counter (10h) and its performance monitoring control and counters
+/// (11h to 13h). A P6 has the first three, and the local APIC base (1Bh)
+/// and the microcode revision (8Bh), which Windows 98 and ME use without
+/// asking CPUID. A Pentium II adds those DOSBox-X gives it (cpu.cpp,
+/// `CPU_RDMSR` and `CPU_WRMSR`): the power-on configuration (2Ah), the L2
+/// cache control registers (119h, 11Eh), the SYSENTER registers (174h to
+/// 176h), and the microcode update trigger (79h), which can only be
+/// written.
+fn has_msr(model: CpuModel, msr: u32, write: bool) -> bool {
+    let p6 = model.is_p6();
+    let pentium_ii = model >= CpuModel::PentiumII;
+    match msr {
+        0x00 | 0x01 | 0x10 => true,
+        0x11..=0x13 => !p6,
+        0x1B | 0x8B => p6,
+        0x2A | 0x119 | 0x11E | 0x174..=0x176 => pentium_ii,
+        0x79 => pentium_ii && write,
+        _ => false,
+    }
+}
+
 /// RDMSR and WRMSR (Pentium): the model-specific register ECX names into
-/// or from EDX:EAX, at level 0. A Pentium has the machine check address
-/// and type (0 and 1, which read 0, as nothing checks the machine), the
-/// time stamp counter (10h) and the performance monitoring control and
-/// counters (11h to 13h, which don't count); any other raises #GP(0),
-/// except with EBX DEADCAFEh: 3dfx's Glide marks its accesses to the
-/// memory type range registers so (a Pentium II's, for write-combining),
-/// for its Windows driver to catch the fault where there are none, and
-/// its DOS overlay (GLIDE2X.OVL) relies on that; they read 0 and write
-/// nothing.
+/// or from EDX:EAX, at level 0 (see `has_msr`). The machine check
+/// registers read 0, as nothing checks the machine; the performance
+/// counters hold what was written to them and don't count. There is no
+/// local APIC, so its base reads 0 and a write to it changes nothing, as
+/// in DOSBox-X; the Pentium II's cache and configuration registers read 0
+/// and keep nothing, and a microcode update does nothing. Any other MSR
+/// raises #GP(0), except with EBX DEADCAFEh: 3dfx's Glide marks its
+/// accesses to the memory type range registers so (a Pentium II's, for
+/// write-combining), for its Windows driver to catch the fault where
+/// there are none, and its DOS overlay (GLIDE2X.OVL) relies on that; they
+/// read 0 and write nothing.
 pub fn msr(cpu: &mut Cpu, write: bool) -> CpuResult {
     require_pentium(cpu)?;
     require_cpl0(cpu)?;
     let msr = cpu.ecx();
-    if !matches!(msr, 0x00 | 0x01 | 0x10..=0x13) {
+    if !has_msr(cpu.model, msr, write) {
         if cpu.ebx() == GLIDE_MSR_MARK {
             if !write {
                 cpu.set_eax(0);
@@ -317,17 +376,75 @@ pub fn msr(cpu: &mut Cpu, write: bool) -> CpuResult {
         match msr {
             0x10 => cpu.set_tsc(value),
             0x11..=0x13 => cpu.perf_msrs[msr as usize - 0x11] = value,
+            // The code selector keeps 16 bits.
+            0x174 => cpu.sysenter[0] = cpu.eax() & 0xFFFF,
+            0x175..=0x176 => cpu.sysenter[msr as usize - 0x174] = cpu.eax(),
             _ => {}
         }
     } else {
         let value = match msr {
             0x10 => cpu.tsc(),
             0x11..=0x13 => cpu.perf_msrs[msr as usize - 0x11],
+            0x8B => MICROCODE_REVISION,
+            0x174..=0x176 => cpu.sysenter[msr as usize - 0x174] as u64,
             _ => 0,
         };
         cpu.set_eax(value as u32);
         cpu.set_edx((value >> 32) as u32);
     }
+    Ok(())
+}
+
+/// The access rights and flags of the flat 4 GB segments SYSENTER and
+/// SYSEXIT load, whatever the descriptor tables hold: a readable code
+/// segment and a writable data segment, accessed, 32-bit, with 4 KB
+/// granularity, at privilege level 0 or (with `0x60`) 3.
+const SEP_CODE: u16 = 0xC09B;
+const SEP_STACK: u16 = 0xC093;
+const SEP_DPL3: u16 = 0x0060;
+
+/// SYSENTER (Pentium II): a fast call to level 0, to the code selector
+/// in MSR 174h and the stack selector after it, both flat, at the ESP and
+/// EIP in MSRs 175h and 176h, with VM, IF and RF cleared. #GP(0) in real
+/// mode or with a null code selector in the MSR.
+pub fn sysenter(cpu: &mut Cpu) -> CpuResult {
+    if cpu.model < CpuModel::PentiumII {
+        return Err(Fault::UD);
+    }
+    let cs = cpu.sysenter[0] as u16 & 0xFFFC;
+    if !cpu.pe() || cs == 0 {
+        return Err(Fault::gp(0));
+    }
+    cpu.set_cpu_flag(CpuFlags::VM, false);
+    cpu.set_cpu_flag(CpuFlags::IF, false);
+    cpu.set_cpu_flag(CpuFlags::RF, false);
+    cpu.set_seg_cache(Seg::CS, SegCache::from_descriptor(cs, 0, 0xFFFF_FFFF, SEP_CODE));
+    cpu.set_seg_cache(Seg::SS, SegCache::from_descriptor(cs.wrapping_add(8), 0, 0xFFFF_FFFF, SEP_STACK));
+    cpu.cpl = 0;
+    cpu.set_esp(cpu.sysenter[1]);
+    cpu.set_eip(cpu.sysenter[2]);
+    Ok(())
+}
+
+/// SYSEXIT (Pentium II): a fast return from level 0 to level 3, to the
+/// flat code and stack selectors 16 and 24 past the one in MSR 174h, at
+/// EIP = EDX and ESP = ECX. #GP(0) outside protected mode, at another
+/// level, or with a null code selector in the MSR.
+pub fn sysexit(cpu: &mut Cpu) -> CpuResult {
+    if cpu.model < CpuModel::PentiumII {
+        return Err(Fault::UD);
+    }
+    let cs = cpu.sysenter[0] as u16 & 0xFFFC;
+    if !cpu.pm() || cpu.cpl != 0 || cs == 0 {
+        return Err(Fault::gp(0));
+    }
+    let code = SegCache::from_descriptor(cs.wrapping_add(16) | 3, 0, 0xFFFF_FFFF, SEP_CODE | SEP_DPL3);
+    let stack = SegCache::from_descriptor(cs.wrapping_add(24) | 3, 0, 0xFFFF_FFFF, SEP_STACK | SEP_DPL3);
+    cpu.set_seg_cache(Seg::CS, code);
+    cpu.set_seg_cache(Seg::SS, stack);
+    cpu.cpl = 3;
+    cpu.set_esp(cpu.ecx());
+    cpu.set_eip(cpu.edx());
     Ok(())
 }
 
