@@ -1429,6 +1429,8 @@ impl DebugHub {
     /// Drain pending requests and feed queued input. Call once per frame,
     /// before the execution batch.
     pub fn poll(&mut self, cpu: &mut Cpu) {
+        // (A profile from `--profile` runs without the server.)
+        self.profile_poll(cpu);
         let Some(rx) = self.rx.take() else { return };
         // A save state or speed request is carried out by the front end
         // after this, before any request behind it, so that requests take
@@ -1440,7 +1442,6 @@ impl DebugHub {
         }
         self.rx = Some(rx);
         self.update_heat(cpu);
-        self.profile_poll(cpu);
 
         // Deterministic mode delivers the machine's input at its ticks
         // (`feed_input`); the settings window's goes as it comes.

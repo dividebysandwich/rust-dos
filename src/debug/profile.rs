@@ -74,6 +74,35 @@ impl DebugHub {
         Reply::Json(self.profile_status(cpu))
     }
 
+    /// `--profile`: start a profile with the machine.
+    pub fn profile_at_start(&mut self, cpu: &mut Cpu, hz: u32) -> std::io::Result<()> {
+        let options = Options { hz, ..Options::default() };
+        self.profile = Some(Session::start(cpu, options)?);
+        cpu.bus.log_string(&format!("[PROFILE] Started at {} Hz until the emulator exits", options.hz));
+        Ok(())
+    }
+
+    /// `--profile FILE`, as the emulator exits: stop the profile and write
+    /// its report, as JSON to `path`, and as a table and as folded stacks
+    /// beside it (`.txt`, `.folded`). Returns the files written.
+    pub fn profile_write(&mut self, cpu: &mut Cpu, path: &std::path::Path) -> std::io::Result<Vec<std::path::PathBuf>> {
+        let Some(session) = &mut self.profile else { return Ok(Vec::new()) };
+        session.stop(cpu);
+        let session = self.profile.as_ref().unwrap();
+        let query = Query { top: 50, ..Query::default() };
+        let report = self.profile_json(cpu, session, &query);
+        let folded = report::folded(&session.samples().counts, &query);
+        let files = [
+            (path.to_path_buf(), serde_json::to_string_pretty(&report).unwrap_or_default()),
+            (path.with_extension("txt"), text(&report)),
+            (path.with_extension("folded"), folded),
+        ];
+        for (file, contents) in &files {
+            std::fs::write(file, contents)?;
+        }
+        Ok(files.into_iter().map(|(file, _)| file).collect())
+    }
+
     /// Stop a profile at the end of its duration. Once a frame.
     pub(super) fn profile_poll(&mut self, cpu: &mut Cpu) {
         if let Some(session) = &mut self.profile

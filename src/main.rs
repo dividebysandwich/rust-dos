@@ -118,6 +118,17 @@ struct Args {
     #[arg(long, default_value_t = 1_000_000)]
     trace_capacity: usize,
 
+    /// Profile the emulator from startup, and write where its time went to
+    /// FILE as JSON when it exits, with a table (FILE.txt) and folded
+    /// stacks for flame graphs (FILE.folded) beside it (docs/profiling.md)
+    #[arg(long, value_name = "FILE")]
+    profile: Option<std::path::PathBuf>,
+
+    /// Samples a second for --profile (10 to 20000)
+    #[arg(long, value_name = "HZ", default_value_t = rust_dos::profile::session::DEFAULT_HZ,
+          value_parser = clap::value_parser!(u32).range(rust_dos::profile::session::MIN_HZ as i64..=rust_dos::profile::session::MAX_HZ as i64))]
+    profile_hz: u32,
+
     /// Emulated CPU speed in instructions per millisecond, "max" for as
     /// fast as the host keeps up with, or "auto" for the speed the running
     /// program's frames show it needs (optionally with the least speed,
@@ -499,6 +510,9 @@ fn main() -> Result<(), String> {
         Some(addr) => debug::DebugHub::start(&mut cpu, addr, args.trace_capacity, det.as_ref().map(|mode| mode.start))?,
         None => debug::DebugHub::disabled(),
     };
+    if args.profile.is_some() {
+        dbg.profile_at_start(&mut cpu, args.profile_hz).map_err(|e| format!("The profiler's thread can't start: {}", e))?;
+    }
     if let Some(mode) = &det {
         dbg.deterministic = Some(mode.start);
         // A client sends its input before anything runs.
@@ -2332,6 +2346,15 @@ fn main() -> Result<(), String> {
 
     // The journal ends, and the debug server's clients get what they
     // waited for.
+    if let Some(path) = &args.profile {
+        match dbg.profile_write(&mut cpu, path) {
+            Ok(files) => {
+                let names: Vec<String> = files.iter().map(|f| f.display().to_string()).collect();
+                println!("Profile written to {}", names.join(", "));
+            }
+            Err(e) => eprintln!("The profile can't be written to {}: {}", path.display(), e),
+        }
+    }
     dbg.shutdown(&cpu, shutdown, 0);
 
     // The page in the printer comes out, and the job's files are written.

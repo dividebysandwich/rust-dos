@@ -1,7 +1,7 @@
 //! The profiler: where the emulator's host time goes, by subsystem and by
 //! the guest code it ran, and exact counts that explain why a spot is hot.
-//! The debug server starts and reads it (`/api/profile`, see
-//! docs/profiling.md).
+//! The debug server starts and reads it (`/api/profile`), and `--profile
+//! FILE` runs one from startup to exit (docs/profiling.md).
 //!
 //! The emulation thread keeps one word up to date, `WORD`: the host zone it
 //! is in now (`Zone`: the interpreter, translated code, a device's ports,
@@ -15,7 +15,7 @@
 //!
 //! While a profile runs, the bus counts what explains a hot spot in fixed
 //! arrays (`Counters`): port accesses by port, BIOS and DOS services by
-//! interrupt and AH, interrupts delivered, accesses to memory-mapped
+//! interrupt and function, interrupts delivered, accesses to memory-mapped
 //! devices, and the recompiler's translations by page.
 //!
 //! The word is one for the process, and only the thread being profiled
