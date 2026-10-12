@@ -792,3 +792,100 @@ fn a_mode_0_control_word_still_stops_channel_2() {
     bus.clock.icount += 1_000;
     assert!(read(&mut bus) < 0x41B2);
 }
+
+/// Bao Xiao San Guo Zhi's random numbers (SANGO.EXE, DOSBox-X issue 1274):
+/// a counter latch command, a square wave control word, then the count's
+/// two bytes, never writing a count. Returns how many of eight calls
+/// differ.
+fn sango_rolls(bus: &mut Bus) -> usize {
+    let mut rolls = Vec::new();
+    for call in 0..8u64 {
+        bus.clock.icount += 1_000 + 37 * call;
+        bus.io_write(0x43, 0x86);
+        bus.io_write(0x43, 0xB6);
+        let lsb = bus.io_read(0x42) as u16;
+        let msb = bus.io_read(0x42) as u16;
+        rolls.push(msb << 8 | lsb);
+    }
+    rolls.sort_unstable();
+    rolls.dedup();
+    rolls.len()
+}
+
+#[test]
+fn channel_2_keeps_counting_after_a_square_wave_control_word() {
+    // A square wave already runs with the gate high; the game's control
+    // words leave it running, so every roll differs.
+    let mut bus = bus_at(20_000);
+    bus.io_write(0x61, 0x01);
+    bus.io_write(0x43, 0xB6);
+    bus.io_write(0x42, 0x00);
+    bus.io_write(0x42, 0x00);
+    assert_eq!(sango_rolls(&mut bus), 8);
+}
+
+/// Channel 2's count, through a counter latch command.
+fn latched_pit2(bus: &mut Bus) -> u16 {
+    bus.io_write(0x43, 0x80);
+    bus.io_read(0x42) as u16 | (bus.io_read(0x42) as u16) << 8
+}
+
+#[test]
+fn a_count_after_a_square_wave_control_word_loads_at_once() {
+    // The control word leaves the rate generator running, but the count
+    // written after it starts over at once, as after any control word,
+    // without waiting for the running period to end.
+    let mut bus = bus_at(20_000);
+    bus.io_write(0x61, 0x01);
+    bus.io_write(0x43, 0xB4);
+    bus.io_write(0x42, 0x00);
+    bus.io_write(0x42, 0x00);
+    bus.clock.icount += 1_000;
+    bus.io_write(0x43, 0xB4);
+    bus.io_write(0x42, 0x00);
+    bus.io_write(0x42, 0x10);
+    let count = latched_pit2(&mut bus);
+    assert!((0xF00..=0x1000).contains(&count), "{:04X}", count);
+    // A count written while it runs, with no control word before it,
+    // waits for the period to end.
+    bus.io_write(0x42, 0x00);
+    bus.io_write(0x42, 0x20);
+    assert!(latched_pit2(&mut bus) <= 0x1000);
+}
+
+#[test]
+fn a_due_count_survives_a_save_state() {
+    use rust_dos::savestate::machine;
+    let machine = || {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.bus.set_cycles_per_ms(20_000);
+        cpu.load_shell();
+        cpu
+    };
+    let mut a = machine();
+    a.bus.io_write(0x61, 0x01);
+    a.bus.io_write(0x43, 0xB6);
+    a.bus.io_write(0x42, 0x00);
+    a.bus.io_write(0x42, 0x00);
+    a.bus.clock.icount += 1_000;
+    a.bus.io_write(0x43, 0xB6);
+    let (bytes, parts) = machine::save_parts(&a);
+    let mut b = machine();
+    machine::load(&mut b, &bytes).unwrap();
+    assert!(b.bus.pit2.count_due);
+    assert!(machine::save(&b) == bytes);
+
+    // A PIT2 section that ends before the flag, as states saved before it
+    // was kept, loads without it.
+    let range = |name: &str| parts.iter().find(|(n, _)| n == name).unwrap_or_else(|| panic!("no {}", name)).1.clone();
+    let flag = range("PIT2.pit2_count_due");
+    let mut old = bytes[..flag.start].to_vec();
+    old.extend_from_slice(&bytes[flag.end..]);
+    // The section's length follows its tag and version.
+    let len_at = range("PIT2").start + 6;
+    let len = u32::from_le_bytes(old[len_at..len_at + 4].try_into().unwrap()) - flag.len() as u32;
+    old[len_at..len_at + 4].copy_from_slice(&len.to_le_bytes());
+    let mut c = machine();
+    machine::load(&mut c, &old).unwrap();
+    assert!(!c.bus.pit2.count_due);
+}

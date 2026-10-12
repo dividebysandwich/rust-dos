@@ -194,9 +194,11 @@ impl Bus {
             );
         });
         // Channel 2's counter and gate, in a section of their own so states
-        // saved before it load.
+        // saved before it load. The fields after `speaker_data` came later:
+        // a section that ends before them loads with their defaults.
+        let pit2_count_due = &pit2.count_due;
         w.section(b"PIT2", PIT2_VERSION, |w| {
-            save_all!(w; pit2, speaker_data);
+            save_all!(w; pit2, speaker_data, pit2_count_due);
         });
         w.section(b"VIDE", VIDEO_VERSION, |w| {
             save_all!(w; video_mode, vga, vbe, s3_engine, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
@@ -459,6 +461,10 @@ impl Bus {
         if r.next_is(b"PIT2") {
             let mut section = r.section(b"PIT2", PIT2_VERSION)?;
             load_all!(&mut section; pit2, speaker_data);
+            pit2.count_due = false;
+            if !section.is_empty() {
+                load_all!(&mut section; &mut pit2.count_due);
+            }
         } else {
             // An older state: a stopped channel 2 with the gate and the
             // speaker as they were.
