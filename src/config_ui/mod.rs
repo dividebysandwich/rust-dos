@@ -437,6 +437,7 @@ impl Page {
                 Volume(Channel::Tandy),
                 Volume(Channel::Monitor),
                 Volume(Channel::Awe),
+                Volume(Channel::Modem),
                 SpeakerFilter,
                 SbFilter,
                 Reverb,

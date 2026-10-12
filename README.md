@@ -6,7 +6,7 @@
 
 ## Introduction
 
-Rust-DOS is a DOS emulator aimed at the golden age of DOS gaming from the early days up to the dawn of Windows95. It is a work in progress and some games and programs may not run yet.
+Rust-DOS is a DOS emulator aimed at the golden age of DOS gaming from the early days up to the dawn of Windows 95, which it can [boot from a disk image](CONFIGURATION.md#windows-95). It is a work in progress and some games and programs may not run yet.
 
 *Rust-DOS is looking for contributors!*
 
@@ -44,7 +44,7 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   and FAT32 disk images (raw, VHD, and 86Box's 86F floppies), with DOSBox Staging's `MOUNT` (and `IMGMOUNT`), and emulated
   disk speeds and noises
 * **[Booting disk images](CONFIGURATION.md#booting-a-disk-image)**
-  (`BOOT`): MS-DOS, Windows 95 and other systems of their own, with a Plug
+  (`BOOT`): MS-DOS, [Windows 95](CONFIGURATION.md#windows-95) and other systems of their own, with a Plug
   and Play BIOS, APM, a PCI bus and IDE hard disks and CD-ROM drive (for
   Windows' 32-bit disk access), from the prompt, the settings window or
   [at every start](CONFIGURATION.md#booting-at-startup); your folders
