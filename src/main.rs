@@ -2891,10 +2891,12 @@ impl Host for MainHost<'_, '_> {
         if shown(new) != shown(&old) {
             self.display.apply(new)?;
         }
-        // The 3D scene opened, closed or changed; the first of what it has
-        // to say is shown, unless the machine has more to say.
+        // The 3D scene opened, closed or changed (a scene file is read again
+        // once it is written again, an update downloaded in its place); the
+        // first of what it has to say is shown, unless the machine has more
+        // to say.
         let mut vr_note = None;
-        if new.vr != old.vr {
+        if new.vr != old.vr || new.vr.scene.is_some() {
             for note in self.display.apply_vr(&new.vr) {
                 self.cpu.bus.log_string(&note);
                 vr_note.get_or_insert_with(|| note.trim_start_matches("[VR] ").to_string());
