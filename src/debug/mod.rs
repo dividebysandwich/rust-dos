@@ -3340,16 +3340,24 @@ fn ui_key(key: PcKey, ascii: u8, mods: u8) -> Option<UiKey> {
 }
 
 /// Map screenshot pixels (the picture's own size) into the mouse driver's
-/// virtual coordinate system (same convention as the SDL path in main.rs).
+/// virtual coordinate system. Unlike captured SDL motion, an explicit screen
+/// position must also span large absolute ranges (e.g. Allegro's 8x pixels).
 fn screen_to_virtual_mouse(cpu: &Cpu, x: i32, y: i32) -> (i32, i32) {
     let (w, h) = video::frame_size(&cpu.bus);
     let (w, h) = (w as i32, h as i32);
     let px = x.clamp(0, w - 1);
     let py = y.clamp(0, h - 1);
     let (virt_w, virt_h) = cpu.bus.mouse.virtual_screen(&cpu.bus);
-    let vx = (px as i64 * virt_w as i64 / w as i64) as i32;
-    let vy = (py as i64 * virt_h as i64 / h as i64) as i32;
-    (vx.clamp(0, virt_w - 1), vy.clamp(0, virt_h - 1))
+    let axis = |pixel: i32, size: i32, extent: i32, max: i32| {
+        if max >= extent {
+            // virtual_screen intentionally ignores large ranges for relative
+            // mouse users. Absolute positions need their inclusive endpoints.
+            (pixel as i64 * max as i64 / (size - 1).max(1) as i64) as i32
+        } else {
+            (pixel as i64 * extent as i64 / size as i64) as i32
+        }
+    };
+    (axis(px, w, virt_w, cpu.bus.mouse.max_x), axis(py, h, virt_h, cpu.bus.mouse.max_y))
 }
 
 // ---------------------------------------------------------------------------
@@ -3791,8 +3799,67 @@ mod tests {
     use crate::cpu::{Cpu, CpuState};
     use crate::exec::{self, StopReason};
     use rust_dos::keylayout::Layout;
-    use serde_json::Value;
+    use serde_json::{Value, json};
     use tokio::sync::oneshot;
+
+    fn mouse_machine(mode: u16, max_x: u16, max_y: u16) -> (Cpu, DebugHub) {
+        let mut cpu = Cpu::new(".".into());
+        cpu.set_ax(mode);
+        rust_dos::interrupts::int10::handle(&mut cpu);
+        cpu.set_ax(0);
+        rust_dos::interrupts::int33::handle(&mut cpu);
+        for (axis, max) in [(7, max_x), (8, max_y)] {
+            cpu.set_ax(axis);
+            cpu.set_cx(0);
+            cpu.set_dx(max);
+            rust_dos::interrupts::int33::handle(&mut cpu);
+        }
+        let hub = DebugHub::for_tests(&cpu);
+        (cpu, hub)
+    }
+
+    fn mouse_input(cpu: &mut Cpu, hub: &mut DebugHub, event: Value) -> (u16, u16, u16) {
+        let event = serde_json::from_value(event).unwrap();
+        reply(cpu, hub, Cmd::Input { events: vec![event], wait: false }).unwrap();
+        hub.process_input(cpu);
+        cpu.set_ax(3);
+        rust_dos::interrupts::int33::handle(cpu);
+        (cpu.bx(), cpu.cx(), cpu.dx())
+    }
+
+    #[test]
+    fn screen_mouse_uses_large_absolute_ranges_for_incremental_dragging() {
+        // SEAL's polling driver uses eight coordinate units per picture pixel.
+        let (mut cpu, mut hub) = mouse_machine(0x12, 5112, 3832);
+        assert_eq!(crate::video::frame_size(&cpu.bus), (640, 480));
+        let event = |action, x, y| json!({"type":"mouse", "action":action, "x":x, "y":y, "button":"left", "coords":"screen"});
+        assert_eq!(mouse_input(&mut cpu, &mut hub, event("down", 260, 74)), (1, 2080, 592));
+        assert_eq!(mouse_input(&mut cpu, &mut hub, event("move", 320, 180)), (1, 2560, 1440));
+        assert_eq!(mouse_input(&mut cpu, &mut hub, event("up", 320, 180)), (0, 2560, 1440));
+    }
+
+    #[test]
+    fn screen_mouse_has_no_large_range_cutoff_and_clamps_picture_coordinates() {
+        for (max, center, last) in [(2047, 1024, 2044), (2048, 1025, 2048), (32767, 16409, 32767)] {
+            let (mut cpu, mut hub) = mouse_machine(0x12, max, 479);
+            let event = |x, y| json!({"type":"mouse", "action":"move", "x":x, "y":y, "coords":"screen"});
+            assert_eq!(mouse_input(&mut cpu, &mut hub, event(320, 240)), (0, center, 240), "range {max}");
+            assert_eq!(mouse_input(&mut cpu, &mut hub, event(-100, -100)), (0, 0, 0));
+            assert_eq!(mouse_input(&mut cpu, &mut hub, event(i32::MAX, i32::MAX)), (0, last, 479), "range {max}");
+        }
+    }
+
+    #[test]
+    fn screen_mouse_keeps_default_low_resolution_and_virtual_coordinates() {
+        let (mut cpu, mut hub) = mouse_machine(0x13, 639, 199);
+        assert_eq!(crate::video::frame_size(&cpu.bus), (640, 400));
+        let screen = json!({"type":"mouse", "action":"move", "x":80, "y":80, "coords":"screen"});
+        assert_eq!(mouse_input(&mut cpu, &mut hub, screen), (0, 80, 40));
+        let virtual_position = json!({"type":"mouse", "action":"move", "x":123, "y":99, "coords":"virtual"});
+        assert_eq!(mouse_input(&mut cpu, &mut hub, virtual_position), (0, 123, 99));
+        let relative = json!({"type":"mouse", "action":"move", "dx":3, "dy":-4});
+        assert_eq!(mouse_input(&mut cpu, &mut hub, relative), (0, 126, 95));
+    }
 
     fn handle(cpu: &mut Cpu, hub: &mut DebugHub, cmd: Cmd) -> Reply {
         let (request, mut rx) = hub.request(cmd);
