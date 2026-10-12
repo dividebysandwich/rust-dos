@@ -3332,9 +3332,12 @@ impl DiskController {
         }
 
         let (mut entries, kept) = self.host_entries(&host_dir);
-        if kept && !entries.iter().any(|(_, name)| Self::matches_pattern(name, pattern)) {
-            // Nothing kept matches: the folder may have changed without its
-            // time moving (`HostDirCache`).
+        // The folder may have changed without its time moving
+        // (`HostDirCache`). A wildcard search lists what is there now: it
+        // stats every match anyway, so the read adds little. A search for
+        // one name reads again only when nothing kept matches.
+        let wild = pattern.contains(['*', '?']);
+        if kept && (wild || !entries.iter().any(|(_, name)| Self::matches_pattern(name, pattern))) {
             entries = self.host_dirs.reread(&host_dir, || Self::read_host_entries(&host_dir));
         }
         for (original_name, final_name) in entries.iter() {
@@ -4328,6 +4331,12 @@ mod tests {
         age(&root);
         let found: Vec<String> = disk.list_directory(r"C:\PATCH2.DAT", 0).unwrap().into_iter().map(|e| e.filename).collect();
         assert_eq!(found, ["PATCH2.DAT"]);
+
+        // A wildcard search lists the folder as it is.
+        fs::write(root.join("PATCH3.DAT"), b"x").unwrap();
+        age(&root);
+        let found: Vec<String> = disk.list_directory(r"C:\PATCH*.DAT", 0).unwrap().into_iter().map(|e| e.filename).collect();
+        assert_eq!(found, ["PATCH.DAT", "PATCH2.DAT", "PATCH3.DAT"]);
     }
 
     #[test]
