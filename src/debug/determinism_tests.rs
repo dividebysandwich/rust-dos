@@ -1393,7 +1393,8 @@ const ABSENT_SECTIONS: &[(&str, &str)] = &[
 const STILL: &[(&str, &str)] = &[
     ("CORE.boot", "a booted system's: none is booted"),
     ("CORE.beep_frames", "a BEL beep's frames, none left at the stops"),
-    ("CORE.channel_2_v8", "where older states kept channel 2's flip-flops, saved as zeros"),
+    ("CORE.pit_read_msb", "channel 2's read flip-flop, at rest after a whole read"),
+    ("CORE.pit_write_msb", "channel 2's write flip-flop, at rest after a whole write"),
     ("CORE.pit0_read_msb", "channel 0's read flip-flop, at rest after a whole read"),
     ("CORE.pit0_write_msb", "channel 0's write flip-flop, at rest after a whole write"),
     ("CORE.pit0_latched_active", "channel 0's latch, read out"),

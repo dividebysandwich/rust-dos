@@ -60,8 +60,11 @@ impl Bus {
             a20_mask,
             cmos,
             pit_divisor,
+            pit_read_msb,
+            pit_mode,
+            pit_write_msb,
             pit2,
-            ppi_b,
+            speaker_data,
             pit0_divisor,
             pit0_write_msb,
             pit0_read_msb,
@@ -179,11 +182,10 @@ impl Bus {
             audio_hook: _,
         } = self;
         w.section(b"RAM ", RAM_VERSION, |w| ram.save(w));
-        let channel_2_v8 = &Channel2V8::default();
         w.section(b"CORE", CORE_VERSION, |w| {
             save_all!(w;
                 keyboard_buffer, kbd, kbc, a20_mask, cmos,
-                pit_divisor, channel_2_v8,
+                pit_divisor, pit_read_msb, pit_mode, pit_write_msb,
                 pit0_divisor, pit0_write_msb, pit0_read_msb, pit0_access, pit0_latched, pit0_latched_active,
                 pit0, clock, pic, dma, joystick,
                 dta_segment, dta_offset, search_handles, search_serial, cursor_x, cursor_y,
@@ -191,10 +193,10 @@ impl Bus {
                 boot, pci,
             );
         });
-        // Channel 2 and port 61h, in a section of their own so that states
-        // saved before channel 2 was modelled load (see `Channel2V8`).
+        // Channel 2's counter and gate, in a section of their own so states
+        // saved before it load.
         w.section(b"PIT2", PIT2_VERSION, |w| {
-            save_all!(w; pit2, ppi_b);
+            save_all!(w; pit2, speaker_data);
         });
         w.section(b"VIDE", VIDEO_VERSION, |w| {
             save_all!(w; video_mode, vga, vbe, s3_engine, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
@@ -324,8 +326,11 @@ impl Bus {
             a20_mask,
             cmos,
             pit_divisor,
+            pit_read_msb,
+            pit_mode,
+            pit_write_msb,
             pit2,
-            ppi_b,
+            speaker_data,
             pit0_divisor,
             pit0_write_msb,
             pit0_read_msb,
@@ -442,10 +447,9 @@ impl Bus {
         }
         ram.copy_from_slice(section.take(len)?);
         let mut section = r.section(b"CORE", CORE_VERSION)?;
-        let mut channel_2_v8 = Channel2V8::default();
         load_all!(&mut section;
             keyboard_buffer, kbd, kbc, a20_mask, cmos,
-            pit_divisor, &mut channel_2_v8,
+            pit_divisor, pit_read_msb, pit_mode, pit_write_msb,
             pit0_divisor, pit0_write_msb, pit0_read_msb, pit0_access, pit0_latched, pit0_latched_active,
             pit0, clock, pic, dma, joystick,
             dta_segment, dta_offset, search_handles, search_serial, cursor_x, cursor_y,
@@ -454,14 +458,15 @@ impl Bus {
         );
         if r.next_is(b"PIT2") {
             let mut section = r.section(b"PIT2", PIT2_VERSION)?;
-            load_all!(&mut section; pit2, ppi_b);
+            load_all!(&mut section; pit2, speaker_data);
         } else {
-            // A state saved before channel 2 was modelled: its counter ran
-            // free whatever the gate, and port 61h read bits 0 and 1 as
-            // set only with the speaker on.
-            let Channel2V8 { read_msb, write_msb } = channel_2_v8;
-            *pit2 = crate::timer::Pit2::free_running(*pit_divisor, write_msb, read_msb);
-            *ppi_b = if *speaker_on { 0x03 } else { 0x00 };
+            // An older state: a stopped channel 2 with the gate and the
+            // speaker as they were.
+            *pit2 = crate::timer::Pit2::new();
+            let now = clock.now_ticks();
+            pit2.write_count(*pit_divisor, now);
+            pit2.set_gate(*speaker_on, now);
+            *speaker_data = *speaker_on;
         }
         let mut section = r.section(b"VIDE", VIDEO_VERSION)?;
         load_all!(&mut section; video_mode, vga, vbe, s3_engine, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
@@ -630,28 +635,5 @@ impl Bus {
         if let Some(awe) = &mut self.awe {
             awe.after_load();
         }
-    }
-}
-
-/// Where the CORE section kept channel 2's read flip-flop, the last
-/// control word and the write flip-flop before the channel was modelled
-/// (`Pit2`, saved in the PIT2 section since). New states save them as
-/// zeros; a state without a PIT2 section is set up from the flip-flops.
-#[derive(Default)]
-struct Channel2V8 {
-    read_msb: bool,
-    write_msb: bool,
-}
-
-impl State for Channel2V8 {
-    fn save(&self, w: &mut Writer) {
-        false.save(w);
-        0u8.save(w);
-        false.save(w);
-    }
-    fn load(&mut self, r: &mut Reader) -> Result<()> {
-        self.read_msb.load(r)?;
-        0u8.load(r)?;
-        self.write_msb.load(r)
     }
 }
