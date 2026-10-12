@@ -1549,7 +1549,7 @@ no room where the filesystem shares data between files) that loading it puts
 back. The browser's slots can't hold disks and refuse a booted system's
 state.
 
-### Windows 95
+### Windows 9x
 
 A Windows 95 installed in DOSBox-X on its S3 card (`machine=svga_s3`)
 starts as it would there, with the settings it was installed with:
@@ -1557,16 +1557,81 @@ starts as it would there, with the settings it was installed with:
 ```ini
 [emulator]
 machine=svga_s3
+cpu=pentium
 memsize=64
 ```
 
-The S3 driver shows the desktop up to 1024x768 in 32 bits per pixel with
-its accelerated drawing and hardware cursor; the Sound Blaster 16 plays
-Windows' sounds and FM music; the PS/2 mouse and APM work (Shut Down turns
-the machine off). MS-DOS Prompts run in a window or full screen
-(Alt+Enter), and **Restart in MS-DOS mode** works. Windows keeps the
-hardware it was installed on in its registry, so an image installed on
-other hardware may look for devices this machine hasn't.
+The `IMGMOUNT` and `BOOT` lines of a DOSBox-X configuration work as they
+are. Enemy Infestation's package, for one, mounts its Windows 95 image by
+number and its CD on the secondary channel:
+
+```
+imgmount 2 enemy.img -size 512,63,16,520 -t hdd -fs none
+imgmount D game.iso -t cdrom -fs iso -ide 2m
+boot -l c
+```
+
+Windows boots to the desktop, and the game, a DirectX one of 1998, plays
+its intro video with sound, shows its menus at 800x600 and goes into a
+mission.
+
+Windows 95 is the system the booted machine was built and tried with,
+OSR2 included. Windows 98, 98 SE and ME have no recorded run: try them on
+a copy of the image.
+
+What Windows finds:
+
+* **Processor:** an 80486 with `cpu=486`, a Pentium with `pentium`, a
+  Pentium with MMX with `pentium_mmx` (see `cpu` in
+  [`[emulator]`](#emulator)).
+* **Memory:** `memsize`, up to 256 MB with a Pentium and 512 MB with a
+  Pentium MMX, in the INT 15h E820h memory map. Windows 95 with 512 MB may
+  need its file cache limited (`MaxFileCache` in SYSTEM.INI's `[vcache]`).
+* **System board:** the Plug and Play BIOS lists the keyboard, the PS/2
+  mouse, the DMA and interrupt controllers, the timer, the real-time
+  clock, the speaker, the coprocessor, the ISA bus, the PCI bus where
+  there is one, the IDE controllers with a drive on them and the serial
+  ports, under the handles DOSBox-X gives them, so a Windows installed
+  there doesn't install them again. APM 1.2 lets Windows idle the
+  processor and turn the machine off.
+* **Display:** with `svga_s3`, the S3 Trio64 on the PCI bus, whose
+  Windows 95 driver shows the desktop up to 1024x768 in 32 bits per pixel
+  with its accelerated drawing and hardware cursor; with `svga_s3virge`
+  or `svga_s3virgevx` the ViRGE and Direct3D (see
+  [below](#direct3d-on-an-s3-virge)); with `svga_verite` the Vérité and
+  Rendition's driver (see [Windows 95 on the
+  Vérité](#windows-95-on-the-vérité)). The other adapters sit on the ISA
+  bus. `voodoo=true` adds the [3dfx card](#3dfx-voodoo-graphics) for Glide.
+* **Disks:** the hard disk images and an ATAPI CD-ROM drive on the IDE
+  channels, which Windows' 32-bit disk access drives itself, with CD
+  audio and disc changes (see [above](#booting-a-disk-image)), and host
+  folders as [hard disks or CDs](#host-folders-in-a-booted-system).
+* **Sound:** the Sound Blaster 16 at the resources `[sound]` gives it,
+  which Windows' SB16 driver plays its sounds and FM music through; the
+  driver moves the card to the IRQ and DMA channels Device Manager sets.
+* **Network:** the [NE2000](#network-card), with Windows' own driver.
+* **Mouse:** the PS/2 mouse, through the keyboard controller.
+
+MS-DOS Prompts run in a window or full screen (Alt+Enter), and **Restart
+in MS-DOS mode** works. Windows keeps the hardware it was installed on in
+its registry, so an image installed on other hardware may look for
+devices this machine hasn't.
+
+Compared with DOSBox-X, the machine has no:
+
+* ACPI. DOSBox-X's `acpi` setting, experimental there, is meant for
+  Windows 98 and ME; here Windows has APM.
+* ISA Plug and Play cards. DOSBox-X's `sbtype=sb16vibra` is a ViBRA 16C
+  (CTL0070) that Windows lists through ISA Plug and Play; here the Sound
+  Blaster is a legacy card, and `sb16vibra` imports as `sb16`.
+* Pentium Pro, Pentium II or Pentium III. A DOSBox configuration's
+  `pentium_ii` and later import as `pentium_mmx`.
+* Memory past 512 MB.
+* Floppy disk controller. A booted system reads and writes floppy images
+  through INT 13h only.
+* Third or later IDE channel: the booted machine has the primary and
+  secondary ones, four drives in all, and one CD-ROM drive. The IDE
+  drives move data by PIO, without DMA.
 
 ### Direct3D on an S3 ViRGE
 

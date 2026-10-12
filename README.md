@@ -6,7 +6,7 @@
 
 ## Introduction
 
-Rust-DOS is a DOS emulator aimed at the golden age of DOS gaming from the early days up to the dawn of Windows95. It is a work in progress and some games and programs may not run yet.
+Rust-DOS is a DOS emulator aimed at the golden age of DOS gaming, from the early days to the Windows 95 games of the late 1990s, which run in a Windows 95 [booted from a disk image](#windows-9x). It is a work in progress and some games and programs may not run yet.
 
 *Rust-DOS is looking for contributors!*
 
@@ -301,6 +301,42 @@ A [game profile](CONFIGURATION.md#game-profiles) has slots of its own, in
   disks go back with its state.
 * The FM chip and MIDI synthesizers are told their registers and
   instruments again, so notes that were playing start again.
+
+## Windows 9x
+
+Rust-DOS runs Windows 95 the way a PC does: `BOOT` starts an installed
+Windows from a hard disk image, and Windows drives the emulated hardware
+with its own drivers. The built-in DOS isn't involved once it boots.
+
+* **Versions:** Windows 95, OSR2 included. Windows 98, 98 SE
+  and ME have no recorded run; try them on a copy of the image.
+* **Images:** a Windows installed in DOSBox-X on its S3 card
+  (`machine=svga_s3`) starts with the settings it was installed with.
+  DOSBox-X's `IMGMOUNT` and `BOOT` lines work unchanged, for example a
+  game package's
+
+  ```
+  imgmount 2 enemy.img -size 512,63,16,520 -t hdd -fs none
+  imgmount D game.iso -t cdrom -fs iso -ide 2m
+  boot -l c
+  ```
+
+  which boots Enemy Infestation's Windows 95 to the desktop, plays the
+  DirectX game's intro video with sound, shows its menus at 800x600 and
+  goes into a mission.
+* **Hardware Windows finds:** a 486, Pentium or Pentium MMX, up to 512 MB,
+  a Plug and Play BIOS and APM, IDE hard disks with 32-bit disk access and
+  an ATAPI CD-ROM drive with CD audio, an S3 Trio64 or ViRGE (Direct3D), a
+  Rendition Vérité, a 3dfx Voodoo Graphics for Glide, a Sound Blaster 16,
+  an NE2000 network card, serial ports and a PS/2 mouse.
+* **Missing compared with DOSBox-X:** ACPI, ISA Plug and Play cards (the
+  Sound Blaster is a legacy card), the Pentium Pro, II and III, more than
+  512 MB, a floppy disk controller, and more than two IDE channels.
+
+[Windows 9x](CONFIGURATION.md#windows-9x) in CONFIGURATION.md has the
+settings, the drivers each card works with and the limits;
+[Booting a disk image](CONFIGURATION.md#booting-a-disk-image) has `BOOT`,
+the disks and save states of a booted system.
 
 ## Running in a browser
 
