@@ -60,6 +60,7 @@ and confirm a large one on a quiet machine before relying on it.
 | File | Measures |
 |---|---|
 | `benches/dos.rs` | The built-in DOS's file calls on a host folder: DIR's listing, FindFirst/FindNext over a whole folder, a pattern search, and opening a file three folders deep |
+| `benches/audio.rs` | One video frame of sound: the AWE32 playing 32 voices with the filter open, fixed, swept by the modulation envelope and wobbled by LFO1 |
 
 ## Adding benchmarks
 
