@@ -1427,6 +1427,21 @@ The first start of a Windows installed without the IDE controller finds it
 as new hardware and asks to restart; after that, **System Properties** →
 **Performance** shows the hard disk without "MS-DOS compatibility mode".
 
+The floppy drives A: and B: (or the disks mounted as 0 and 1) are on a
+floppy disk controller of the booted machine as well, an 82077AA at ports
+3F0h-3F5h and 3F7h with IRQ 6 and DMA channel 2, with the same images
+INT 13h reads and writes. A system's own floppy driver finds it there:
+Windows 95's reads and writes the disks with 32-bit access, and a disk
+changed with Ctrl+F4 or another `IMGMOUNT` sets the drive's disk change
+line. The Plug and Play BIOS lists the controller (PNP0700). A Windows
+installed without one, as in DOSBox-X, doesn't look for it by itself: in
+the Control Panel, **Add New Hardware** with **Yes (Recommended)** finds
+the Standard Floppy Disk Controller, and after the restart **System
+Properties** → **Performance** no longer lists A: and B: in "MS-DOS
+compatibility mode". Transfers without DMA (which Windows doesn't use)
+aren't supported. `floppy_controller=false` in `[emulator]` leaves the
+floppies to INT 13h alone.
+
 ### Operating systems by name
 
 Hard disk images of installed systems in the `os` folder of rust-dos's

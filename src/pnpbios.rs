@@ -10,7 +10,8 @@
 //! ports are there as the machine has them (COM1 and COM2 at DOSBox-X's
 //! handles, COM3 and COM4 after the IDE controllers), the IDE controllers
 //! but with a booted system's hard disks or CD-ROM drive on them, and the
-//! PCI bus but on a machine with one, so the handles skip theirs.
+//! PCI bus but on a machine with one, so the handles skip theirs. The
+//! floppy disk controller of a booted system comes after COM4.
 
 use crate::bus::Bus;
 use crate::cpu::{Cpu, Seg};
@@ -51,6 +52,9 @@ enum Resource {
     /// the IDE controllers.
     Irq2(u8),
     Dma(u8),
+    /// A DMA channel for 8-bit transfers alone, as DOSBox-X gives the
+    /// floppy disk controller.
+    Dma8(u8),
     /// Memory: base and length.
     Memory(u32, u32),
 }
@@ -77,6 +81,7 @@ fn node(id: &[u8; 7], typ: [u8; 3], resources: &[Resource]) -> Vec<u8> {
                 data.extend([0x22, lo, hi]);
             }
             Resource::Dma(dma) => data.extend([0x2A, 1 << dma, 0x01]),
+            Resource::Dma8(dma) => data.extend([0x2A, 1 << dma, 0x00]),
             Resource::Memory(base, len) => {
                 data.extend([0x86, 9, 0, 0x01]);
                 data.extend(base.to_le_bytes());
@@ -119,9 +124,18 @@ fn nodes(bus: &Bus) -> Vec<(u8, Vec<u8>)> {
     // The PCI bus, where there is one.
     .filter(|(handle, _)| *handle != 0x0A || bus.pci_present())
     // The IDE controllers a booted system has.
+    // The primary's 3F7h is the floppy disk controller's, where there is
+    // one, as DOSBox-X has it.
     .chain(crate::ide::ChannelId::ALL.into_iter().filter(|id| bus.ide[id.index()].is_some()).map(|id| {
-        let resources = [Io(id.base(), 8, 8), Io(id.alt(), 1, 2), Irq2(id.irq())];
+        let alt_len = if id.alt() + 1 == crate::fdc::DIR && bus.fdc.is_some() { 1 } else { 2 };
+        let resources = [Io(id.base(), 8, 8), Io(id.alt(), 1, alt_len), Irq2(id.irq())];
         (id.pnp_handle(), node(b"PNP0600", [0x01, 0x01, 0x00], &resources))
+    }))
+    // The floppy disk controller of a booted system: 3F0h-3F5h, 3F7h,
+    // IRQ 6 and DMA channel 2, as DOSBox-X's (floppy.cpp).
+    .chain(bus.fdc.as_ref().map(|_| {
+        let resources = [Io(crate::fdc::BASE, 1, 6), Io(crate::fdc::DIR, 1, 1), Irq(crate::fdc::IRQ), Dma8(crate::fdc::DMA_CHANNEL as u8)];
+        (crate::fdc::PNP_HANDLE, node(b"PNP0700", [0x01, 0x02, 0x00], &resources))
     }))
     // The serial ports.
     .chain(bus.serial.ports.iter().zip(SERIAL_HANDLES).filter_map(|(port, handle)| {
@@ -328,6 +342,28 @@ mod tests {
         assert_eq!(&node[9..17], &[0x47, 0x01, 0xF0, 0x01, 0xF0, 0x01, 0x08, 0x08]);
         assert_eq!(&node[17..25], &[0x47, 0x01, 0xF6, 0x03, 0xF6, 0x03, 0x01, 0x02]);
         assert_eq!(&node[25..28], &[0x22, 0x00, 0x40]);
+    }
+
+    #[test]
+    fn the_floppy_disk_controller_is_listed_while_it_is_there() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        assert!(nodes(&cpu.bus).iter().all(|(handle, _)| *handle != crate::fdc::PNP_HANDLE));
+        cpu.bus.ide[0] = Some(crate::ide::Channel::new(crate::ide::ChannelId::Primary));
+        cpu.bus.fdc = Some(crate::fdc::Fdc::new());
+        let nodes = nodes(&cpu.bus);
+        let (handle, node) = nodes.last().unwrap();
+        assert_eq!(*handle, 0x13);
+        // PNP0700, a floppy controller, with ports 3F0h-3F5h and 3F7h, IRQ
+        // 6 and DMA channel 2 for 8-bit transfers.
+        assert_eq!(&node[0..4], &eisa_id(b"PNP0700"));
+        assert_eq!(&node[4..7], &[0x01, 0x02, 0x00]);
+        assert_eq!(&node[9..17], &[0x47, 0x01, 0xF0, 0x03, 0xF0, 0x03, 0x01, 0x06]);
+        assert_eq!(&node[17..25], &[0x47, 0x01, 0xF7, 0x03, 0xF7, 0x03, 0x01, 0x01]);
+        assert_eq!(&node[25..29], &[0x23, 0x40, 0x00, 0x09]);
+        assert_eq!(&node[29..32], &[0x2A, 0x04, 0x00]);
+        // The primary IDE channel leaves it 3F7h.
+        let (_, ide) = nodes.iter().find(|(handle, _)| *handle == 0x0F).unwrap();
+        assert_eq!(&ide[17..25], &[0x47, 0x01, 0xF6, 0x03, 0xF6, 0x03, 0x01, 0x01]);
     }
 
     #[test]

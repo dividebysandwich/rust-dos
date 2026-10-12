@@ -339,6 +339,7 @@ impl Item {
             DosVersion => "dos-version",
             IdeHardDisks => "ide-hard-disks",
             BootCdrom => "boot-cdrom",
+            FloppyController => "floppy-controller",
             KeyboardLayout => "keyboard-layout",
             MouseSensitivity => "mouse-sensitivity",
             MouseAutocapture => "mouse-autocapture",

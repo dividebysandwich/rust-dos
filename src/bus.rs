@@ -8,6 +8,7 @@ mod guest;
 pub mod port_log;
 pub mod s3;
 mod et4000;
+mod fdc;
 mod ide;
 mod net;
 mod printer;
@@ -125,6 +126,8 @@ pub struct Bus {
     /// A booted system's hard disks are ATA disks on the IDE channels too
     /// (`ide_hard_disks`).
     pub ide_hard_disks: bool,
+    /// A booted system has a floppy disk controller (`floppy_controller`).
+    pub floppy_controller: bool,
     /// A booted system has a CD-ROM drive even with no CD mounted, for one
     /// to go in later (`boot_cdrom`).
     pub boot_cdrom: bool,
@@ -254,6 +257,8 @@ pub struct Bus {
     /// The port accesses going on are the BIOS's show of driving an IDE
     /// disk for a V86 monitor (`ide::int13`): the disks answer at once.
     pub ide_faked: bool,
+    /// A booted system's floppy disk controller, with drives 0 and 1.
+    pub fdc: Option<crate::fdc::Fdc>,
     pub search_handles: std::collections::HashMap<u32, String>,
     /// The search ID FindFirst handed out last (the key of
     /// `search_handles`, kept in the program's DTA).
@@ -405,6 +410,7 @@ impl Bus {
             dpmi: crate::dpmi::Dpmi::default(),
             dos_version: crate::config::DosVersion::default(),
             ide_hard_disks: true,
+            floppy_controller: true,
             boot_cdrom: true,
             idle_hint: false,
             disk_notices: Vec::new(),
@@ -462,6 +468,7 @@ impl Bus {
             notices: Vec::new(),
             glide_hint: None,
             ide: [None, None],
+            fdc: None,
             ide_faked: false,
             search_handles: std::collections::HashMap::new(),
             search_serial: 0,
@@ -588,6 +595,7 @@ impl Bus {
         self.reset_voodoo();
         self.reset_powervr();
         self.detach_ide();
+        self.detach_fdc();
         self.disk.drop_boot_cds();
         self.cmos.set_hard_disks(&[]);
         self.init_dos_machine(self.vga.setup());
@@ -679,6 +687,7 @@ impl Bus {
             self.cdaudio.stop_drive(drive);
             self.mscdex.disc_changed(drive);
             self.ide_media_changed(drive);
+            self.fdc_media_changed(drive);
         }
         self.sync_drive_bda();
         result
@@ -875,6 +884,7 @@ impl Bus {
         self.cdaudio.stop_drive(drive);
         self.mscdex.disc_changed(drive);
         self.ide_media_changed(drive);
+        self.fdc_media_changed(drive);
     }
 
     /// Copy what the booted system changed on the disks made of shared
@@ -907,6 +917,7 @@ impl Bus {
         let result = self.disk.unmount(drive);
         self.cdaudio.stop_drive(drive);
         self.ide_media_changed(drive);
+        self.fdc_media_changed(drive);
         self.sync_drive_bda();
         result
     }
@@ -938,6 +949,7 @@ impl Bus {
         }
         self.cdaudio.stop_drive(from);
         self.ide_media_changed(from);
+        self.fdc_media_changed(from);
         self.sync_drive_bda();
         mounted
     }
@@ -1797,6 +1809,7 @@ impl Bus {
             self.voodoo_next_event(),
             self.powervr_next_event(),
             self.ide_next_event(),
+            self.fdc_next_event(),
             self.net_next_event(),
             self.serial_next_event(),
             self.kbc_release_at,
@@ -1833,6 +1846,9 @@ impl Bus {
         }
         if self.ide_next_event().is_some_and(|t| t <= now) {
             self.ide_service();
+        }
+        if self.fdc_next_event().is_some_and(|t| t <= now) {
+            self.fdc_service();
         }
         if self.net_next_event().is_some_and(|t| t <= now) {
             self.net_service();
@@ -2522,6 +2538,9 @@ impl Bus {
             return;
         }
         match port {
+            // A booted system's floppy disk controller, ahead of the IDE
+            // channel that would have 3F7h.
+            p if self.fdc_claims(p) => self.fdc_write(p, value),
             // A booted system's IDE channels.
             p if self.ide_claims(p) => self.ide_write(p, value),
             p if self.ne2000_claims(p) => self.ne2000_write(p, value),
@@ -2876,6 +2895,7 @@ impl Bus {
             return self.verite_read(reg, 1) as u8;
         }
         match port {
+            p if self.fdc_claims(p) => self.fdc_read(p),
             p if self.ide_claims(p) => self.ide_read(p),
             p if self.ne2000_claims(p) => self.ne2000_read(p),
             p if self.serial_claims(p) => self.serial_read(p),

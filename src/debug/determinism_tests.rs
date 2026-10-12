@@ -1385,6 +1385,7 @@ const ABSENT_SECTIONS: &[(&str, &str)] = &[
     ("VRTE", "the Verite is a display adapter, as is the ViRGE the machine has"),
     ("ET4K", "the ET4000 is a display adapter, as is the ViRGE the machine has"),
     ("IDE", "the IDE channels are a booted system's"),
+    ("FDC", "the floppy disk controller is a booted system's"),
     ("SHRD", "shared disks are a booted system's"),
     ("SBHS", "the SB 2.0's and SB Pro's high-speed mode: the machine's AWE32 has none"),
 ];
@@ -1418,6 +1419,7 @@ const SECTION_FIELDS: &[(&str, &str)] = &[
     ("powervr", "PVR"),
     ("powervr_line", "PVR"),
     ("ide", "IDE"),
+    ("fdc", "FDC"),
     ("dpmi", "DPMI"),
     ("net", "NET"),
     ("serial", "SER"),
