@@ -1442,9 +1442,8 @@ compatibility mode". Transfers without DMA (which Windows doesn't use)
 aren't supported. `floppy_controller=false` in `[emulator]` leaves the
 floppies to INT 13h alone.
 
-On Windows 95 4.00.950 B, manually selecting the controller in **Add New
-Hardware** can report a resource conflict and leave it disabled (Code 22).
-To repair that installation, open **Device Manager** →
+If manually adding the controller in Windows 95 leaves it disabled
+(Code 22), open **Device Manager** →
 **Floppy disk controllers** → **Standard Floppy Disk Controller** →
 **Properties**. In **Resources**, click **Set Configuration Manually**:
 **Basic configuration 0** uses I/O 03F2–03F5, IRQ 06 and DMA 02. Check
