@@ -10,6 +10,7 @@ pub mod heat;
 pub mod journal;
 pub mod keys;
 pub mod pm;
+pub mod profile;
 pub mod server;
 pub mod trace;
 
@@ -379,6 +380,12 @@ pub enum Cmd {
     /// Turn the emulator off: the front end leaves its loop, and the
     /// journal ends with `shutdown`.
     Quit,
+    /// Start or stop a profile (`/api/profile`).
+    ProfileControl(profile::Control),
+    /// Whether a profile runs.
+    ProfileStatus,
+    /// The profile's report.
+    ProfileGet { query: rust_dos::profile::report::Query, format: profile::Format },
 }
 
 /// A save state to save or load, which the front end carries out
@@ -805,6 +812,8 @@ pub struct DebugHub {
     frame_stats: Option<rust_dos::stats::StatsView>,
     /// The memory heatmap while a stream wants it.
     heat: Option<heat::Heat>,
+    /// The last profile started (`/api/profile`), running or stopped.
+    profile: Option<rust_dos::profile::session::Session>,
 }
 
 /// Execution speed, measured over windows of about a second of wall time.
@@ -909,6 +918,7 @@ impl DebugHub {
             stats: ExecStats::new(),
             frame_stats: None,
             heat: None,
+            profile: None,
         }
     }
 
@@ -1419,6 +1429,8 @@ impl DebugHub {
     /// Drain pending requests and feed queued input. Call once per frame,
     /// before the execution batch.
     pub fn poll(&mut self, cpu: &mut Cpu) {
+        // (A profile from `--profile` runs without the server.)
+        self.profile_poll(cpu);
         let Some(rx) = self.rx.take() else { return };
         // A save state or speed request is carried out by the front end
         // after this, before any request behind it, so that requests take
@@ -2392,6 +2404,9 @@ impl DebugHub {
                 Reply::Json(status)
             }
             Cmd::Stats => Reply::Json(self.stats_json(cpu)),
+            Cmd::ProfileControl(c) => self.profile_control(cpu, c),
+            Cmd::ProfileStatus => Reply::Json(self.profile_status(cpu)),
+            Cmd::ProfileGet { query, format } => self.profile_report(cpu, &query, format),
             Cmd::Screenshot | Cmd::SaveState { .. } | Cmd::LoadState { .. } | Cmd::Speed { .. } => {
                 unreachable!("answered later, by `handle`'s arrangement")
             }

@@ -968,6 +968,27 @@ a game's frame rate at a few fixed speeds shows where it stops growing.
 Start the emulator with `RUST_DOS_AUTO_TRACE=1` to have every measurement
 and the speed it chose printed to stderr.
 
+### Where the emulator's time goes (profiling)
+
+`POST /api/profile {"enabled":true,"duration_ms":30000}` samples which
+part of the emulator runs and which guest code, 2000 times a second, and
+counts port accesses, BIOS and DOS calls, interrupts and the recompiler's
+work meanwhile. Send the input to measure, then read it once:
+
+```sh
+curl -s -X POST $H/api/profile -H 'content-type: application/json'      -d '{"enabled":true,"duration_ms":30000}'
+curl -s -X POST $H/api/input/batch -H 'content-type: application/json' -d @input.json
+curl -s "$H/api/profile?wait_ms=40000&format=text"
+```
+
+Read the `busy_pct` shares (of the time the emulator works, not waiting
+for the next frame), then the hottest guest places with their
+disassembly, the ports and the services. `?zone=io` (or `dynrec`, `hle`,
+`io.vga`) narrows the places to what spent time there; `?format=folded`
+gives flame graph stacks. To compare two builds, load the same save state
+in each and send the same input. [profiling.md](profiling.md) has the
+whole report.
+
 ### Protected-mode programs (DOS extenders)
 
 Programs built with DOS/4GW, DOS/32A, PMODE or Borland's RTM switch the CPU

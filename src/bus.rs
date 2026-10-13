@@ -6,6 +6,7 @@ use crate::video::{self, ADDR_VGA_GRAPHICS, SIZE_GRAPHICS, VideoMode};
 
 mod guest;
 pub mod port_log;
+mod profile;
 pub mod s3;
 mod et4000;
 mod ide;
@@ -105,6 +106,8 @@ pub struct Bus {
     pub port_accesses: VecDeque<crate::bios::PortAccess>,
     /// The port accesses made, while a debugger keeps a log of them.
     pub port_log: Option<port_log::PortLog>,
+    /// What the profiler counts, while a profile runs (`profile::Session`).
+    pub profile: Option<Box<crate::profile::Counters>>,
     /// The DOSCONFIG command asked for the settings window; the frontend
     /// opens it.
     pub config_ui_requested: bool,
@@ -402,6 +405,7 @@ impl Bus {
             reset_requested: false,
             port_accesses: VecDeque::new(),
             port_log: None,
+            profile: None,
             rom_writes: 0,
             config_ui_requested: false,
             exit_requested: false,
@@ -1372,6 +1376,12 @@ impl Bus {
 
     /// Reads of the video memory, the ROM area and past the end of RAM.
     fn read_8_mapped(&self, addr: usize) -> u8 {
+        let _profile = self.profile.as_deref().map(|p| p.mem(addr, false));
+        self.mapped_8(addr)
+    }
+
+    /// `read_8_mapped` without the profiler's count, for debuggers.
+    fn mapped_8(&self, addr: usize) -> u8 {
         if self.observe.on {
             self.observe.mapped(addr, self.ram.len());
         }
@@ -1421,7 +1431,7 @@ impl Bus {
             return dword as u8;
         }
         if addr >= self.ram.len() {
-            return self.read_8_mapped(addr);
+            return self.mapped_8(addr);
         }
         if (ADDR_VGA_GRAPHICS..ADDR_VGA_GRAPHICS + SIZE_GRAPHICS).contains(&addr) && self.video_mode != VideoMode::Vesa {
             let saved = self.vga.latches.get();
@@ -1429,7 +1439,8 @@ impl Bus {
             self.vga.latches.set(saved);
             return v;
         }
-        self.read_8(addr)
+        // (Not `read_8`: a profile counts the program's reads, not these.)
+        if self.is_plain_ram(addr, 1) { self.ram[addr] } else { self.mapped_8(addr) }
     }
 
     /// `write_8`, `write_16` or `write_32` (`size` bytes of `value`) at
@@ -1481,6 +1492,7 @@ impl Bus {
             }
             return false;
         }
+        let _profile = self.profile.as_deref().map(|p| p.mem(addr, true));
         if self.observe.on {
             self.observe.mapped_write(addr, self.ram.len());
         }
@@ -1635,6 +1647,7 @@ impl Bus {
             }
             return false;
         }
+        let _profile = self.profile.as_deref().map(|p| p.mem(addr, true));
         if self.observe.on {
             self.observe.mapped_write(addr, self.ram.len());
         }
@@ -1675,6 +1688,7 @@ impl Bus {
                 ])
             };
         }
+        let _profile = self.profile.as_deref().map(|p| p.mem(addr, false));
         if self.observe.on {
             self.observe.mapped(addr, self.ram.len());
         }
@@ -1710,6 +1724,7 @@ impl Bus {
                 ])
             };
         }
+        let _profile = self.profile.as_deref().map(|p| p.mem(addr, false));
         if self.observe.on {
             self.observe.mapped(addr, self.ram.len());
         }
@@ -1745,6 +1760,7 @@ impl Bus {
             }
             return;
         }
+        let _profile = self.profile.as_deref().map(|p| p.mem(addr, true));
         if self.observe.on {
             self.observe.mapped_write(addr, self.ram.len());
         }
@@ -1890,6 +1906,7 @@ impl Bus {
 
     /// Run the Sound Blaster's DSP up to the present.
     fn sb_advance(&mut self) {
+        let _profile = crate::profile::zone(crate::profile::Zone::SbDma);
         let now = self.clock.now_ticks();
         if let Some(sb) = &mut self.sb {
             sb.advance(now, &mut self.dma, &self.ram);
@@ -1899,6 +1916,7 @@ impl Bus {
 
     /// Run the Ultrasound up to the present and update its interrupt line.
     fn gus_advance(&mut self) {
+        let _profile = crate::profile::zone(crate::profile::Zone::Gus);
         let now = self.clock.now_ticks();
         if let Some(gus) = &mut self.gus {
             if let Some(written) = gus.advance(now, &mut self.dma, &mut self.ram) {
@@ -1982,6 +2000,7 @@ impl Bus {
     /// change a program makes now (an FM register, a DAC sample, the
     /// speaker gate) is heard from now on.
     pub fn audio_catch_up(&mut self) {
+        let _profile = crate::profile::zone(crate::profile::Zone::AudioSynth);
         self.sb_advance();
         self.gus_advance();
         let rate = crate::opl::RATE as u64;
@@ -2530,6 +2549,7 @@ impl Bus {
 
     /// Write to an I/O port.
     pub fn io_write(&mut self, port: u16, value: u8) {
+        let _profile = self.profile.as_mut().map(|p| p.port(port, true));
         self.observe.port_write();
         self.clock.stall(crate::timer::IO_WRITE_NS);
         self.log_port(port, value as u32, 1, true);
@@ -2912,6 +2932,7 @@ impl Bus {
     // Read from an I/O Port
     /// Read from an I/O port.
     pub fn io_read(&mut self, port: u16) -> u8 {
+        let _profile = self.profile.as_mut().map(|p| p.port(port, false));
         self.observe.port_read(port);
         // Sample the game port at the beginning of the I/O cycle. Its read
         // stall advances time for the next sample, as one polling interval.

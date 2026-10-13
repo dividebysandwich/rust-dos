@@ -143,6 +143,7 @@ impl Bus {
             port_accesses: _,
             ide_faked: _,
             port_log: _,
+            profile: _,
             guest_paging: _,
             guest_fault: _,
             // How many ignored ROM writes were logged.
@@ -409,6 +410,7 @@ impl Bus {
             port_accesses: _,
             ide_faked: _,
             port_log: _,
+            profile: _,
             guest_paging: _,
             guest_fault: _,
             rom_writes: _,

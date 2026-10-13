@@ -320,7 +320,17 @@ impl Cpu {
                     self.set_seg_cache(seg, SegCache::null(0));
                 }
             }
+            let code32 = self.seg_cache(Seg::CS).attr & super::ATTR_DB != 0;
             self.load_cs_pm(selector, &mut desc, new_cpl)?;
+            if crate::profile::any_active() && new_cpl == 0 {
+                let cause = match source {
+                    IntSource::Software => crate::profile::Cause::Int,
+                    IntSource::Exception => crate::profile::Cause::Exception,
+                    IntSource::External => crate::profile::Cause::Irq,
+                };
+                let mode = crate::profile::Mode::of(true, v86, code32);
+                crate::profile::note_entry(mode, cs as u16, eip, cause, vector);
+            }
         } else {
             if v86 {
                 return Err(Fault::gp(sel_err));
@@ -477,6 +487,9 @@ impl Cpu {
     /// Keep a record of an exception for debuggers, and log the first ones.
     fn note_exception(&mut self, fault: Fault) {
         self.exceptions += 1;
+        if let Some(p) = &mut self.bus.profile {
+            p.exceptions[fault.vector as usize & 31] += 1;
+        }
         let record = ExceptionRecord {
             vector: fault.vector,
             error: fault.error(),

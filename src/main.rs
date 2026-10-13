@@ -36,6 +36,7 @@ use rust_dos::achievements::{Achievements, http::HttpTransport};
 use rust_dos::boot::{Startup, StartupItem};
 use rust_dos::games::{ActiveGame, GameEntry, NewGame};
 use rust_dos::hardware::Hardware;
+use rust_dos::profile::{self, Zone};
 use rust_dos::savestate::{self, slots};
 
 #[derive(Parser, Debug)]
@@ -116,6 +117,17 @@ struct Args {
     /// Allocated only once tracing is enabled via the debug server.
     #[arg(long, default_value_t = 1_000_000)]
     trace_capacity: usize,
+
+    /// Profile the emulator from startup, and write where its time went to
+    /// FILE as JSON when it exits, with a table (FILE.txt) and folded
+    /// stacks for flame graphs (FILE.folded) beside it (docs/profiling.md)
+    #[arg(long, value_name = "FILE")]
+    profile: Option<std::path::PathBuf>,
+
+    /// Samples a second for --profile (10 to 20000)
+    #[arg(long, value_name = "HZ", default_value_t = rust_dos::profile::session::DEFAULT_HZ,
+          value_parser = clap::value_parser!(u32).range(rust_dos::profile::session::MIN_HZ as i64..=rust_dos::profile::session::MAX_HZ as i64))]
+    profile_hz: u32,
 
     /// Emulated CPU speed in instructions per millisecond, "max" for as
     /// fast as the host keeps up with, or "auto" for the speed the running
@@ -498,6 +510,9 @@ fn main() -> Result<(), String> {
         Some(addr) => debug::DebugHub::start(&mut cpu, addr, args.trace_capacity, det.as_ref().map(|mode| mode.start))?,
         None => debug::DebugHub::disabled(),
     };
+    if args.profile.is_some() {
+        dbg.profile_at_start(&mut cpu, args.profile_hz).map_err(|e| format!("The profiler's thread can't start: {}", e))?;
+    }
     if let Some(mode) = &det {
         dbg.deterministic = Some(mode.start);
         // A client sends its input before anything runs.
@@ -786,6 +801,7 @@ fn main() -> Result<(), String> {
         for (title, detail) in std::mem::take(&mut cpu.bus.notices) {
             osd.notify(title, detail, true);
         }
+        profile::set_host(Zone::Events);
         let frame_start = std::time::Instant::now();
         if let Some((start, times)) = last_frame {
             stats.record(&cpu.bus, rust_dos::stats::FrameTimes { wall: frame_start - start, ..times });
@@ -1516,7 +1532,9 @@ fn main() -> Result<(), String> {
         // settings window while it is open.
         dbg.divert = ui.is_open();
         dbg.rewinding = rewinding.is_some();
+        profile::set_host(Zone::Debug);
         dbg.poll(&mut cpu);
+        profile::set_host(Zone::Frontend);
         if dbg.quit_requested() {
             shutdown = debug::ShutdownReason::Quit;
             break 'running;
@@ -1814,7 +1832,9 @@ fn main() -> Result<(), String> {
         } else {
             exec::run_batch(&mut cpu, &mut dbg, dbg_hot);
         }
+        profile::set_host(Zone::Debug);
         dbg.end_batch(&cpu);
+        profile::set_host(Zone::Frontend);
         let translated = cpu.dynrec.counts().executed.saturating_sub(batch_translated);
 
         // The scene's PC lights its lights as the machine's would: the hard
@@ -1867,7 +1887,9 @@ fn main() -> Result<(), String> {
         }
         let now_ns = cpu.bus.clock.now_ns();
         if settings.rewind && !waiting && now_ns >= next_capture.0 && next_capture.1.elapsed() >= Duration::from_millis(250) {
+            profile::set_host(Zone::Rewind);
             rewinder.offer(now_ns, savestate::machine::save(&cpu));
+            profile::set_host(Zone::Frontend);
             next_capture = (now_ns + REWIND_INTERVAL_NS, std::time::Instant::now());
         }
         if let Some((started, frames)) = &mut rewinding {
@@ -2013,7 +2035,9 @@ fn main() -> Result<(), String> {
         }
 
         // Update Audio
+        profile::set_host(Zone::AudioPump);
         let samples = pump_audio(&mut cpu.bus, waiting);
+        profile::set_host(Zone::Frontend);
         if let Some(wav) = &mut sound_recording
             && let Err(e) = wav.write(&samples)
         {
@@ -2062,6 +2086,11 @@ fn main() -> Result<(), String> {
         if let Some(v) = &mut cpu.bus.voodoo {
             v.set_software_picture(voodoo_picture);
         }
+        profile::set_host(if cpu.bus.voodoo.is_some() {
+            Zone::VoodooFrame
+        } else {
+            Zone::FrameCompose
+        });
         cpu.bus.sync_display();
         let voodoo_gl = display.run_voodoo(&mut cpu.bus, &settings.voodoo);
         if !voodoo_gl
@@ -2077,6 +2106,7 @@ fn main() -> Result<(), String> {
             cpu.bus.vga.mark_dirty_full();
             display.set_frame_size(width, height)?;
         }
+        profile::set_host(Zone::VgaRender);
         let render_start = std::time::Instant::now();
         let rendered = cpu.bus.vga.dirty;
         if cpu.bus.vga.dirty {
@@ -2084,6 +2114,7 @@ fn main() -> Result<(), String> {
             cpu.bus.vga.clear_dirty();
         }
         let render_time = render_start.elapsed();
+        profile::set_host(Zone::FrameCompose);
 
         // The picture shown already, where nothing in it changed: neither
         // the machine's nor anything drawn over it. Composing it, comparing
@@ -2214,6 +2245,7 @@ fn main() -> Result<(), String> {
             if capturing && !record_ui {
                 capture!();
             }
+            profile::set_host(Zone::Ui);
             if ui.is_open() {
                 ui.set_mixer_status(cpu.bus.mixer.muted, cpu.bus.mixer.take_peaks());
                 ui.poll(&mut host!());
@@ -2227,6 +2259,7 @@ fn main() -> Result<(), String> {
                 ui.set_sound(&cpu.bus);
                 ui.draw_sound_viz(&mut screen);
             }
+            profile::set_host(Zone::FrameCompose);
             if let Some(view) = &wheel_view {
                 rust_dos::config_ui::wheel::draw(&mut screen, view);
             }
@@ -2275,7 +2308,9 @@ fn main() -> Result<(), String> {
         }
         // Waiting for the deadline of a frame paced to the retrace is
         // neither the frame's work nor time the CPU could have had.
+        profile::set_host(Zone::FrameWait);
         let waited = pacer.wait_to_present(&cpu.bus.clock);
+        profile::set_host(Zone::FramePresent);
         if still {
             dbg.count_frame();
             // The 3D scene is drawn every frame: the viewer moves.
@@ -2285,6 +2320,7 @@ fn main() -> Result<(), String> {
             last_screen_key = Some(screen_key);
         }
 
+        profile::set_host(Zone::Frontend);
         let overhead = frame_start.elapsed().saturating_sub(exec_time + waited);
         if let Some(cycles) = pacer.end_frame(&cpu.bus, cpu.pm_latched, executed, exec_time, overhead) {
             cpu.bus.set_cycles_per_ms(cycles);
@@ -2304,7 +2340,19 @@ fn main() -> Result<(), String> {
                 code_bytes: code.code_bytes,
             },
         ));
+        profile::set_host(Zone::FrameWait);
         pacer.wait_for_next_frame();
+    }
+    // The profile ends with the machine's last frame, before the monitor's
+    // animation, which isn't the machine's work.
+    if let Some(path) = &args.profile {
+        match dbg.profile_write(&mut cpu, path) {
+            Ok(files) => {
+                let names: Vec<String> = files.iter().map(|f| f.display().to_string()).collect();
+                println!("Profile written to {}", names.join(", "));
+            }
+            Err(e) => eprintln!("The profile can't be written to {}: {}", path.display(), e),
+        }
     }
     // The monitor goes off: the picture collapses to a dot, with a thunk.
     if settings.monitor_effects != video::power::MonitorEffects::Off {

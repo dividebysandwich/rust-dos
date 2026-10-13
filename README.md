@@ -396,6 +396,16 @@ Set `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy` to run without a window or
 sound device. [docs/llm-debugging.md](docs/llm-debugging.md) is a guide to
 using it.
 
+## Profiling
+
+`POST /api/profile {"enabled":true}` on the debug server, or `--profile
+FILE` from startup to exit, samples where the emulator's time goes (the
+interpreter, translated code, each device's ports, drawing, sound) and which
+guest code it runs, and counts port accesses, BIOS and DOS calls and the
+recompiler's work. The report comes as JSON, a table, or folded stacks for
+flame graphs. Without a profile running it costs nothing.
+[docs/profiling.md](docs/profiling.md) describes it.
+
 ## Log file
 
 Rust-DOS logs what it does to `Rust-DOS.log` in the

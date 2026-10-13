@@ -1633,3 +1633,185 @@ fn the_bios_replay_of_an_ide_read_runs_through() {
     assert_eq!(status & 0x89, 0, "not busy, no data left, no error: {:02X}", status);
     assert_eq!((rig.cpu.bus.io_read(0x1F3), rig.cpu.bus.io_read(0x1F2)), (1, 0));
 }
+
+/// The profiler's words are the process's: one test at a time uses them.
+static ONE_PROFILE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[test]
+fn a_profile_charges_ring_0_to_the_entry_and_16_bit_code_to_its_32_bit_caller() {
+    use rust_dos::profile::{self, Cause, Entry, Loc, Mode};
+    use std::sync::atomic::Ordering;
+    let _one = ONE_PROFILE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut rig = Rig::new();
+    rig.handler(0x40, 3, |a| a.hlt());
+    // 16-bit ring 3 code that enters ring 0 with INT 40h, called from
+    // 32-bit ring 3 code: a Win32 program's thunk to Win16 code.
+    let code16_at = RING3 + 0x1000;
+    rig.set_gdt(FREE, seg_desc(code16_at, 0xFFFF, CODE_R3, 0));
+    rig.load(code16_at, &asm16(0, |a| a.int(0x40)));
+    // Called from a routine with an EBP frame, which its caller called
+    // with EBP 0 (the outermost frame).
+    rig.ring3(|a| {
+        let mut routine = a.create_label();
+        a.xor(ebp, ebp)?;
+        a.call(routine)?;
+        a.hlt()?;
+        a.set_label(&mut routine)?;
+        a.push(ebp)?;
+        a.mov(ebp, esp)?;
+        a.call_far(FREE | 3, 0)
+    });
+    profile::set_active(true);
+    rig.run(to_ring3);
+    let entry = Entry::of(profile::ENTRY.load(Ordering::Relaxed));
+    let thunk = profile::thunk_now();
+    profile::set_active(false);
+    let entry = entry.expect("the INT 40h from ring 3 is an entry");
+    assert_eq!(entry.cause(), Cause::Int);
+    assert_eq!(entry.via(), "int 40h");
+    assert_eq!(entry.place().mode(), Mode::Pm16);
+    assert_eq!(entry.place().cs_eip(), Some((FREE | 3, 2)), "the return address, after INT 40h");
+    assert_eq!(Loc(thunk[0]).mode(), Mode::Pm32);
+    let (sel, eip) = Loc(thunk[0]).cs_eip().unwrap();
+    assert_eq!(sel, CODE32_R3);
+    assert_eq!(rig.cpu.bus.read_8((eip - 7) as usize), 0x9A, "the return address of the far call");
+    let (_, ret) = Loc(thunk[1]).cs_eip().expect("the caller up the EBP chain");
+    assert_eq!(rig.cpu.bus.read_8((ret - 5) as usize), 0xE8, "right after the routine's CALL");
+    assert_eq!(thunk[2], 0, "the chain ends at a saved EBP of 0");
+}
+
+#[test]
+fn a_profile_notes_call_gates_and_forgets_a_thunk_back_in_32_bit_code() {
+    use rust_dos::profile::{self, Cause, Entry};
+    use std::sync::atomic::Ordering;
+    let _one = ONE_PROFILE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut rig = Rig::new();
+    let routine = asm32(HANDLERS, |a| a.hlt());
+    rig.load(HANDLERS, &routine);
+    rig.set_gdt(FREE, gate_desc(CODE32, HANDLERS, CALL_GATE32, 3, 0));
+    // 16-bit ring 3 code that returns to 32-bit code at once.
+    let code16_at = RING3 + 0x1000;
+    rig.set_gdt(FREE + 8, seg_desc(code16_at, 0xFFFF, CODE_R3, 0));
+    // o32 RETF: the 32-bit return address the far call pushed.
+    rig.load(code16_at, &[0x66, 0xCB]);
+    rig.ring3(|a| {
+        a.call_far((FREE + 8) | 3, 0)?;
+        a.call_far(FREE | 3, 0)
+    });
+    profile::set_active(true);
+    rig.run(to_ring3);
+    let entry = Entry::of(profile::ENTRY.load(Ordering::Relaxed));
+    let thunk = profile::thunk_now();
+    profile::set_active(false);
+    let entry = entry.expect("the call gate to ring 0 is an entry");
+    assert_eq!(entry.cause(), Cause::Gate);
+    assert_eq!(entry.via(), "call gate");
+    assert_eq!(entry.place().cs_eip(), Some((CODE32_R3, RING3 + 14)));
+    assert_eq!(thunk, [0; 4], "the 16-bit code returned to 32-bit code");
+}
+
+#[test]
+fn a_thunk_without_ebp_frames_finds_its_callers_on_the_stack() {
+    use rust_dos::profile::{self, Loc};
+    let _one = ONE_PROFILE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut rig = Rig::new();
+    rig.handler(0x40, 3, |a| a.hlt());
+    let code16_at = RING3 + 0x1000;
+    rig.set_gdt(FREE, seg_desc(code16_at, 0xFFFF, CODE_R3, 0));
+    rig.load(code16_at, &asm16(0, |a| a.int(0x40)));
+    // A stub without a frame (EBP 0), called with a value on the stack
+    // above the return address that no CALL left there.
+    rig.ring3(|a| {
+        let mut stub = a.create_label();
+        a.xor(ebp, ebp)?;
+        a.push(RING3 + 2)?;
+        a.call(stub)?;
+        a.hlt()?;
+        a.set_label(&mut stub)?;
+        a.call_far(FREE | 3, 0)
+    });
+    profile::set_active(true);
+    rig.run(to_ring3);
+    let thunk = profile::thunk_now();
+    profile::set_active(false);
+    let (_, ret) = Loc(thunk[1]).cs_eip().expect("the stub's caller, from the stack");
+    assert_eq!(rig.cpu.bus.read_8((ret - 5) as usize), 0xE8);
+    assert_eq!(thunk[2], 0, "RING3+2 follows no CALL");
+}
+
+/// A ring 3 program that goes through every place the profiler notes:
+/// 32-bit code with an EBP frame calls 16-bit code, which enters ring 0
+/// with INT 41h and returns to 32-bit code, which calls ring 0 through a
+/// call gate; fifty times. Run as the emulator runs programs, in batches,
+/// with or without a profile. Returns the registers and the memory it
+/// used.
+fn ring_changes(profiled: bool) -> (Vec<u64>, Vec<u8>) {
+    use rust_dos::profile::session::{Options, Session};
+    let mut rig = Rig::new();
+    rig.load(HANDLERS, &asm32(HANDLERS, |a| {
+        a.add(ebx, 0x100u32)?;
+        a.retf()
+    }));
+    rig.set_gdt(FREE, gate_desc(CODE32, HANDLERS, CALL_GATE32, 3, 0));
+    let code16_at = RING3 + 0x1000;
+    rig.set_gdt(FREE + 8, seg_desc(code16_at, 0xFFFF, CODE_R3, 0));
+    let mut code16 = asm16(0, |a| {
+        a.int(0x41)?;
+        a.add(si, 3)
+    });
+    // o32 RETF: back to the 32-bit caller.
+    code16.extend_from_slice(&[0x66, 0xCB]);
+    rig.load(code16_at, &code16);
+    rig.handler(0x41, 3, |a| {
+        a.inc(edx)?;
+        a.iretd()
+    });
+    rig.handler(0x40, 3, |a| a.hlt());
+    rig.ring3(|a| {
+        let mut routine = a.create_label();
+        let mut again = a.create_label();
+        a.mov(ax, DATA32_R3 as u32)?;
+        a.mov(ds, ax)?;
+        a.xor(ebp, ebp)?;
+        a.mov(ecx, 50u32)?;
+        a.set_label(&mut again)?;
+        a.call(routine)?;
+        a.add(dword_ptr(DATA), ecx)?;
+        a.dec(ecx)?;
+        a.jnz(again)?;
+        a.int(0x40)?;
+        a.set_label(&mut routine)?;
+        a.push(ebp)?;
+        a.mov(ebp, esp)?;
+        a.call_far((FREE + 8) | 3, 0)?;
+        a.call_far(FREE | 3, 0)?;
+        a.pop(ebp)?;
+        a.ret()
+    });
+    let mut session = profiled.then(|| Session::start(&mut rig.cpu, Options::default()).unwrap());
+    rig.run_batched(to_ring3);
+    if let Some(s) = &mut session {
+        s.stop(&mut rig.cpu);
+    }
+    let c = &rig.cpu;
+    let regs = [c.eax(), c.ebx(), c.ecx(), c.edx(), c.esi(), c.edi(), c.esp(), c.ebp(), c.eip()];
+    let mut regs: Vec<u64> = regs.iter().map(|&r| r as u64).collect();
+    regs.extend([c.cs() as u64, c.ss() as u64, c.cpl as u64, c.executed]);
+    let mut memory = Vec::new();
+    for (from, len) in [(DATA, 16), (STACK3_TOP - 0x100, 0x100), (STACK0_TOP - 0x100, 0x100)] {
+        memory.extend((from..from + len).map(|at| c.bus.read_8(at as usize)));
+    }
+    (regs, memory)
+}
+
+/// A profile only watches: the ring changes, thunks to 16-bit code and
+/// stack walks it notes leave the program as it would be without one.
+#[test]
+fn a_profile_leaves_ring_changes_as_they_would_be() {
+    let _one = ONE_PROFILE.lock().unwrap_or_else(|e| e.into_inner());
+    let plain = ring_changes(false);
+    assert_eq!(plain.0[1], 0x100 * 50, "the call gate's routine ran each time");
+    assert_eq!(plain.0[3], 50, "so did the INT 41h handler");
+    assert_eq!(plain.1[..4], (1u32..=50).sum::<u32>().to_le_bytes(), "the loop's sum");
+    assert_eq!(ring_changes(true), plain);
+}
