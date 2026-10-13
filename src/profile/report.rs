@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use serde_json::{Value, json};
 
-use super::{Engine, Loc, ZONES, Zone};
+use super::{Engine, Entry, Loc, Thunk, ZONES, Zone};
 
 /// What a report shows.
 #[derive(Clone, Debug)]
@@ -151,14 +151,53 @@ pub fn stack(loc: Loc) -> Vec<String> {
     }
 }
 
+/// The Win32 code a `Thunk` holds, root first: the farthest caller up the
+/// EBP chain first, the place of the switch to 16-bit code last.
+pub fn win32_frames(thunk: &Thunk, bucket: u32) -> Vec<Loc> {
+    thunk.iter().rev().filter(|&&w| w != 0).map(|&w| Loc(w).bucketed(bucket)).collect()
+}
+
+/// The frames a chained sample's stack starts with, root first: the Win32
+/// code that switched to 16-bit code (its callers, then the switch), then
+/// the place that entered ring 0 and how.
+pub fn chain_frames(entry: u64, thunk: &Thunk, bucket: u32) -> Vec<String> {
+    let win32 = win32_frames(thunk, bucket);
+    let mut frames: Vec<String> = win32
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            let text = format!("{} {}", l.mode().name(), l.addr_text().unwrap_or_default());
+            if i + 1 == win32.len() { text + " (thunk)" } else { text }
+        })
+        .collect();
+    if let Some(e) = Entry::of(entry) {
+        let place = e.bucketed(bucket).place();
+        frames.push(format!("{} {} ({})", place.mode().name(), place.addr_text().unwrap_or_default(), e.via()));
+    }
+    frames
+}
+
 /// The samples as folded stacks, one `frame;frame;... count` line each, for
 /// inferno's or speedscope's flame graphs. The front end's zones are a
-/// stack of one frame.
-pub fn folded(counts: &HashMap<u64, u64>, query: &Query) -> String {
+/// stack of one frame. A chained sample's stack starts with the code it is
+/// charged to (`chain_frames`).
+pub fn folded(counts: &HashMap<u64, u64>, chains: &HashMap<(u64, u64, Thunk), u64>, query: &Query) -> String {
     let mut by: HashMap<String, u64> = HashMap::new();
-    for (&word, &n) in counts {
+    let mut chained: HashMap<u64, u64> = HashMap::new();
+    for (&(word, entry, thunk), &n) in chains {
+        *chained.entry(word).or_insert(0) += n;
         let loc = Loc(word);
         if !query.takes(loc.zone()) {
+            continue;
+        }
+        let mut frames = chain_frames(entry, &thunk, query.bucket);
+        frames.extend(stack(loc.bucketed(query.bucket)));
+        *by.entry(frames.join(";")).or_insert(0) += n;
+    }
+    for (&word, &n) in counts {
+        let loc = Loc(word);
+        let n = n.saturating_sub(chained.get(&word).copied().unwrap_or(0));
+        if n == 0 || !query.takes(loc.zone()) {
             continue;
         }
         *by.entry(stack(loc.bucketed(query.bucket)).join(";")).or_insert(0) += n;
@@ -172,6 +211,53 @@ pub fn folded(counts: &HashMap<u64, u64>, query: &Query) -> String {
         out.push_str(&n.to_string());
         out.push('\n');
     }
+    out
+}
+
+/// Samples charged to the code that caused them: ring-0 samples to the
+/// entry that reached ring 0, and 16-bit ring-3 samples (and the ring-0
+/// ones they entered) to the Win32 code that switched to 16-bit code.
+#[derive(Clone, Debug)]
+pub struct Chain {
+    /// The Win32 code, root first (`win32_frames`); empty for an entry
+    /// from other code.
+    pub win32: Vec<Loc>,
+    pub entry: Option<Entry>,
+    pub samples: u64,
+    /// Where the samples are, most first.
+    pub places: Vec<(Loc, u64)>,
+}
+
+/// The chains the query takes, most samples first, with places and the
+/// code they are charged to bucketed as the query asks.
+pub fn chains(chains: &HashMap<(u64, u64, Thunk), u64>, query: &Query) -> Vec<Chain> {
+    // By the Win32 code and the entry: the samples, and where they were.
+    type Row = (u64, HashMap<Loc, u64>);
+    let mut by: HashMap<(Vec<Loc>, u64), Row> = HashMap::new();
+    for (&(word, entry, thunk), &n) in chains {
+        let loc = Loc(word);
+        if !query.takes(loc.zone()) {
+            continue;
+        }
+        let entry = Entry::of(entry).map_or(0, |e| e.bucketed(query.bucket).0);
+        let row = by.entry((win32_frames(&thunk, query.bucket), entry)).or_default();
+        row.0 += n;
+        *row.1.entry(loc.bucketed(query.bucket).place()).or_insert(0) += n;
+    }
+    let mut out: Vec<Chain> = by
+        .into_iter()
+        .map(|((win32, entry), (samples, places))| {
+            let mut places: Vec<(Loc, u64)> = places.into_iter().collect();
+            places.sort_by_key(|&(l, n)| (std::cmp::Reverse(n), l.0));
+            Chain { win32, entry: Entry::of(entry), samples, places }
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        b.samples.cmp(&a.samples).then_with(|| {
+            let key = |c: &Chain| (c.win32.iter().map(|l| l.0).collect::<Vec<_>>(), c.entry.map(|e| e.0));
+            key(a).cmp(&key(b))
+        })
+    });
     out
 }
 
@@ -337,12 +423,45 @@ mod tests {
 
     #[test]
     fn folded_stacks_root_first() {
-        let text = folded(&counts(), &Query::default());
+        let text = folded(&counts(), &HashMap::new(), &Query::default());
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], "frame.wait 100");
         assert!(lines.contains(&"cpu.jit;pm32 0168:00001000 50"));
         assert!(lines.contains(&"cpu.jit;pm32 0168:00001000;io.vga 30"));
         assert!(lines.contains(&"cpu.interp;real 1234:0105 10"));
+    }
+
+    #[test]
+    fn chained_samples_go_to_their_callers() {
+        use crate::profile::{Cause, Entry};
+        let ring0 = Loc::guest(Engine::Jit, Mode::Pm32, 0x0028, 0xC000_13AC);
+        let win16 = Loc::guest(Engine::Jit, Mode::Pm16, 0x003F, 0x03D0);
+        let entry = Entry::new(Mode::Pm16, 0x003F, 0x03D2, Cause::Int, 0x30).0;
+        let win32 = |eip| Loc::guest(Engine::None, Mode::Pm32, 0x0137, eip).0;
+        // The switch in KERNEL32, called from USER32, called from the game.
+        let thunk = [win32(0xBFF7_13D9), win32(0xBFF5_2010), win32(0x0040_3000), 0];
+        let counts = HashMap::from([(ring0.0, 10), (win16.0, 4)]);
+        let chains_in = HashMap::from([((ring0.0, entry, thunk), 6), ((win16.0, 0, thunk), 4)]);
+
+        let rows = chains(&chains_in, &Query::default());
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].samples, 6);
+        assert_eq!(rows[0].entry.map(|e| e.via()).as_deref(), Some("int 30h"));
+        let names: Vec<String> = rows[0].win32.iter().filter_map(|l| l.addr_text()).collect();
+        assert_eq!(names, ["0137:00403000", "0137:BFF52010", "0137:BFF713D9"], "root first");
+        assert_eq!(rows[0].places, vec![(ring0, 6)]);
+        assert_eq!((rows[1].samples, rows[1].entry), (4, None));
+
+        let modules = chains(&chains_in, &Query { bucket: 0x10000, ..Query::default() });
+        assert_eq!(modules[0].win32[0].addr_text().as_deref(), Some("0137:00400000"));
+
+        let text = folded(&counts, &chains_in, &Query::default());
+        let lines: Vec<&str> = text.lines().collect();
+        let game = "pm32 0137:00403000;pm32 0137:BFF52010;pm32 0137:BFF713D9 (thunk)";
+        assert!(lines.contains(&format!("{};pm16 003F:03D2 (int 30h);cpu.jit;pm32 0028:C00013AC 6", game).as_str()), "{}", text);
+        assert!(lines.contains(&"cpu.jit;pm32 0028:C00013AC 4"), "the samples before the first entry: {}", text);
+        assert!(lines.contains(&format!("{};cpu.jit;pm16 003F:03D0 4", game).as_str()), "{}", text);
+        assert_eq!(lines.len(), 3);
     }
 
     #[test]

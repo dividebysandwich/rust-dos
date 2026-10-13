@@ -415,6 +415,11 @@ pub fn sysenter(cpu: &mut Cpu) -> CpuResult {
     if !cpu.pe() || cs == 0 {
         return Err(Fault::gp(0));
     }
+    if crate::profile::any_active() && cpu.cpl != 0 {
+        let code32 = cpu.seg_cache(Seg::CS).attr & crate::cpu::ATTR_DB != 0;
+        let mode = crate::profile::Mode::of(true, cpu.v86(), code32);
+        crate::profile::note_entry(mode, cpu.cs(), cpu.eip(), crate::profile::Cause::Gate, 1);
+    }
     cpu.set_cpu_flag(CpuFlags::VM, false);
     cpu.set_cpu_flag(CpuFlags::IF, false);
     cpu.set_cpu_flag(CpuFlags::RF, false);

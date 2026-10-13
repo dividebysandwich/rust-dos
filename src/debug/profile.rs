@@ -12,6 +12,11 @@ use rust_dos::profile::{Engine, Loc, Mode, Zone, counters::MemKind};
 use super::{DebugHub, Reply};
 use crate::cpu::Cpu;
 
+/// The profiler's word and flag are the process's: the tests that start
+/// profiles take turns.
+#[cfg(test)]
+pub(crate) static ONE_PROFILE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// `POST /api/profile`.
 #[derive(Clone, Debug, Default)]
 pub struct Control {
@@ -92,7 +97,7 @@ impl DebugHub {
         let query = Query { top: 50, ..Query::default() };
         let samples = session.samples();
         let report = self.profile_json(cpu, session, &samples, &query);
-        let folded = report::folded(&samples.counts, &query);
+        let folded = report::folded(&samples.counts, &samples.chains, &query);
         let files = [
             (path.to_path_buf(), serde_json::to_string_pretty(&report).unwrap_or_default()),
             (beside(path, "txt"), text(&report)),
@@ -141,7 +146,7 @@ impl DebugHub {
         }
         let samples = session.samples();
         match format {
-            Format::Folded => Reply::Json(json!({"text": report::folded(&samples.counts, query)})),
+            Format::Folded => Reply::Json(json!({"text": report::folded(&samples.counts, &samples.chains, query)})),
             Format::Json => Reply::Json(self.profile_json(cpu, session, &samples, query)),
             Format::Text => Reply::Json(json!({"text": text(&self.profile_json(cpu, session, &samples, query))})),
         }
@@ -198,6 +203,36 @@ impl DebugHub {
             .map(|((cs, mode), n)| json!({"cs": format!("{:04X}", cs), "mode": mode.name(), "samples": n, "pct": pct(n, total), "busy_pct": pct(n, busy)}))
             .collect();
 
+        // Ring-0 code, charged to the place that entered ring 0, and
+        // 16-bit code, charged to the Win32 code that switched to it.
+        let ring0: u64 = samples
+            .counts
+            .iter()
+            .filter(|&(&w, _)| {
+                let loc = Loc(w);
+                query.takes(loc.zone()) && loc.mode().is_protected() && loc.cs_eip().is_some_and(|(cs, _)| cs & 3 == 0)
+            })
+            .map(|(_, &n)| n)
+            .sum();
+        let chains = report::chains(&samples.chains, query);
+        let chained: u64 = chains.iter().map(|c| c.samples).sum();
+        let ring0_charged: u64 = chains.iter().filter(|c| c.entry.is_some()).map(|c| c.samples).sum();
+        let callers: Vec<Value> = chains
+            .iter()
+            .take(query.top)
+            .map(|c| {
+                let place = |l: Loc, n: u64| json!({"addr": l.addr_text(), "mode": l.mode().name(), "samples": n, "busy_pct": pct(n, busy)});
+                json!({
+                    "win32": c.win32.iter().map(|l| l.addr_text()).collect::<Vec<_>>(),
+                    "entry": c.entry.map(|e| json!({"addr": e.place().addr_text(), "mode": e.place().mode().name(), "via": e.via()})),
+                    "samples": c.samples,
+                    "pct": pct(c.samples, total),
+                    "busy_pct": pct(c.samples, busy),
+                    "places": c.places.iter().take(5).map(|&(l, n)| place(l, n)).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+
         let mut out = json!({
             "running": session.running(),
             "build": rust_dos::build_info::json(),
@@ -239,6 +274,13 @@ impl DebugHub {
             },
             "top": places,
             "segments": segments,
+            "callers": {
+                "samples": chained,
+                "busy_pct": pct(chained, busy),
+                "ring0_busy_pct": pct(ring0, busy),
+                "ring0_charged_pct": pct(ring0_charged, ring0),
+                "top": callers,
+            },
         });
         if let Some(c) = session.counters(cpu) {
             out["ports"] = ports_json(c, query.top, &per_s);
@@ -570,6 +612,35 @@ fn text(r: &Value) -> String {
             first,
             if zones.is_empty() { String::new() } else { format!("  [{}]", zones.join(", ")) },
         );
+    }
+    let c = &r["callers"];
+    if let Some(rows) = c["top"].as_array().filter(|t| !t.is_empty()) {
+        let _ = writeln!(
+            out,
+            "
+Charged to callers ({:.2}% of busy; ring 0 is {:.2}% of busy, {:.2}% of it charged to an entry):",
+            f(&c["busy_pct"]),
+            f(&c["ring0_busy_pct"]),
+            f(&c["ring0_charged_pct"]),
+        );
+        for row in rows.iter().take(15) {
+            let calls: Vec<&str> = row["win32"].as_array().into_iter().flatten().filter_map(|a| a.as_str()).collect();
+            let win32 = (!calls.is_empty()).then(|| format!("pm32 {} (thunk)", calls.join(" -> ")));
+            let entry = row["entry"].as_object().map(|e| {
+                format!("{} {} ({})", e["mode"].as_str().unwrap_or(""), e["addr"].as_str().unwrap_or(""), e["via"].as_str().unwrap_or(""))
+            });
+            let from: Vec<String> = [win32, entry].into_iter().flatten().collect();
+            let top = &row["places"][0];
+            let _ = writeln!(
+                out,
+                "  {:>11.2}% {:>8.2}%  {} -> {} {}",
+                f(&row["busy_pct"]),
+                f(&row["pct"]),
+                from.join(" -> "),
+                top["mode"].as_str().unwrap_or(""),
+                top["addr"].as_str().unwrap_or(""),
+            );
+        }
     }
     if let Some(ports) = r["ports"]["top"].as_array().filter(|p| !p.is_empty()) {
         let _ = writeln!(out, "\nPorts ({} accesses):", r["ports"]["total"]);

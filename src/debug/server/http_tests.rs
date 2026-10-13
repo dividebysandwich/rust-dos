@@ -1920,6 +1920,7 @@ fn a_stop_and_an_operation_s_end_outlive_their_entries_in_the_ring() {
 /// duration, gives folded stacks as text, and refuses what it can't do.
 #[test]
 fn a_profile_finds_the_loop_the_machine_runs() {
+    let _one = crate::debug::profile::ONE_PROFILE.lock().unwrap_or_else(|e| e.into_inner());
     let rig = Rig::new("profile");
     assert_eq!(rig.get("/api/profile").status, 404, "none yet");
     assert_eq!(rig.post("/api/profile", json!({"enabled": false})).status, 404, "nothing to stop");

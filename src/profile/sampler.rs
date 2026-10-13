@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use super::{Loc, WORD, ZONES};
+use super::{ENTRY, Loc, Thunk, WORD, ZONES};
 
 /// How the sampler waits between reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,6 +49,9 @@ const WAIT_BUCKETS: usize = 800;
 pub struct Samples {
     /// Samples by the word read.
     pub counts: HashMap<u64, u64>,
+    /// The samples `counts` has that `profile::chain` charges to an entry
+    /// to ring 0 or a Win32 caller: by the word, `ENTRY` and `THUNK`.
+    pub chains: HashMap<(u64, u64, Thunk), u64>,
     pub total: u64,
     /// When the sampler took its first and last sample.
     pub first: Option<Instant>,
@@ -65,8 +68,11 @@ pub struct Samples {
 }
 
 impl Samples {
-    fn add(&mut self, loc: Loc, now: Instant) {
+    fn add(&mut self, loc: Loc, entry: u64, thunk: Thunk, now: Instant) {
         *self.counts.entry(loc.0).or_insert(0) += 1;
+        if let Some((entry, thunk)) = super::chain(loc, entry, thunk) {
+            *self.chains.entry((loc.0, entry, thunk)).or_insert(0) += 1;
+        }
         self.total += 1;
         let first = *self.first.get_or_insert(now);
         if let Some(last) = self.last {
@@ -181,7 +187,8 @@ impl Sampler {
                         break;
                     }
                     let loc = Loc(WORD.load(Ordering::Relaxed));
-                    samples.lock().unwrap_or_else(|e| e.into_inner()).add(loc, now);
+                    let (entry, thunk) = (ENTRY.load(Ordering::Relaxed), super::thunk_now());
+                    samples.lock().unwrap_or_else(|e| e.into_inner()).add(loc, entry, thunk, now);
                 }
             })?
         };
@@ -227,10 +234,10 @@ mod tests {
     fn samples_count_words_waits_and_seconds() {
         let mut s = Samples::default();
         let t0 = Instant::now();
-        s.add(Loc::host(Zone::FrameWait), t0);
-        s.add(Loc::host(Zone::FrameWait), t0 + Duration::from_micros(500));
-        s.add(Loc::host(Zone::VgaRender), t0 + Duration::from_micros(1500));
-        s.add(Loc::host(Zone::VgaRender), t0 + Duration::from_millis(1200));
+        s.add(Loc::host(Zone::FrameWait), 0, [0; 4], t0);
+        s.add(Loc::host(Zone::FrameWait), 0, [0; 4], t0 + Duration::from_micros(500));
+        s.add(Loc::host(Zone::VgaRender), 0, [0; 4], t0 + Duration::from_micros(1500));
+        s.add(Loc::host(Zone::VgaRender), 0, [0; 4], t0 + Duration::from_millis(1200));
         assert_eq!(s.total, 4);
         assert_eq!(s.counts[&Loc::host(Zone::FrameWait).0], 2);
         assert_eq!((s.waits, s.wait_min_us, s.wait_max_us), (3, 500, 1_198_500));

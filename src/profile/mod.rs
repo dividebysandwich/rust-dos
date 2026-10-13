@@ -104,6 +104,12 @@ impl Mode {
     pub fn segmented(self) -> bool {
         matches!(self, Mode::Real | Mode::V86)
     }
+
+    /// Protected mode outside virtual-8086 mode, where CS's low two bits
+    /// are the privilege level.
+    pub fn is_protected(self) -> bool {
+        matches!(self, Mode::Pm16 | Mode::Pm32)
+    }
 }
 
 macro_rules! zones {
@@ -373,6 +379,9 @@ pub fn set_active(on: bool) {
     if !on {
         WORD.store(0, Ordering::Relaxed);
     }
+    // A profile charges nothing to an entry or a thunk of the one before.
+    ENTRY.store(0, Ordering::Relaxed);
+    drop_thunk_now();
 }
 
 /// Put the emulation thread in `zone` doing the front end's work, with no
@@ -476,6 +485,171 @@ pub fn now() -> Loc {
     Loc(WORD.load(Ordering::Relaxed))
 }
 
+/// The place that last entered ring 0 from an outer level (ring 3 or
+/// virtual-8086 mode), and how: an `Entry`, or 0 before the first. A ring-0
+/// sample is charged to it, since the CPU gets to ring 0 only through such
+/// an entry.
+pub static ENTRY: AtomicU64 = AtomicU64::new(0);
+
+/// The ring-3 32-bit code that last switched to 16-bit ring-3 code: the
+/// place of the switch (a `Loc`), then up to three return addresses up its
+/// EBP chain, the nearest first; all 0 once 16-bit code switched back to
+/// 32-bit code. Under Windows 9x this is a Win32 program calling USER, GDI
+/// or KERNEL through KERNEL32's thunk, whose callers need EBP frames, so
+/// the return addresses lead back to the program. The 16-bit samples, and
+/// the ring-0 ones the 16-bit code enters, are charged to it.
+pub static THUNK: [AtomicU64; THUNK_FRAMES] = [const { AtomicU64::new(0) }; THUNK_FRAMES];
+
+/// The words of `THUNK`.
+pub const THUNK_FRAMES: usize = 4;
+
+/// What `THUNK` holds, as the sampler read it.
+pub type Thunk = [u64; THUNK_FRAMES];
+
+/// `THUNK` now.
+pub fn thunk_now() -> Thunk {
+    std::array::from_fn(|i| THUNK[i].load(Ordering::Relaxed))
+}
+
+/// How the CPU entered ring 0.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum Cause {
+    /// A far call or jump through a call gate (vector 0), or SYSENTER
+    /// (vector 1).
+    Gate = 0,
+    /// INT n, INT3 or INTO.
+    Int = 1,
+    /// An exception.
+    Exception = 2,
+    /// A hardware interrupt.
+    Irq = 3,
+}
+
+/// An entry to ring 0: the outer place (EIP in bits 0-31, CS in 32-47), the
+/// vector in 48-55, the `Cause` in 56-57, the outer place's `Mode` in 58-59
+/// and bit 60 set. EIP is the return address: the faulting instruction for
+/// a fault, the next one for the others.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Entry(pub u64);
+
+impl Entry {
+    const SET: u64 = 1 << 60;
+
+    pub fn new(mode: Mode, cs: u16, eip: u32, cause: Cause, vector: u8) -> Entry {
+        Entry(eip as u64 | (cs as u64) << 32 | (vector as u64) << 48 | (cause as u64) << 56 | (mode as u64) << MODE_SHIFT | Self::SET)
+    }
+
+    /// The entry a word of `ENTRY` holds, if any.
+    pub fn of(word: u64) -> Option<Entry> {
+        (word & Self::SET != 0).then_some(Entry(word))
+    }
+
+    pub fn cause(self) -> Cause {
+        match (self.0 >> 56) & 3 {
+            0 => Cause::Gate,
+            1 => Cause::Int,
+            2 => Cause::Exception,
+            _ => Cause::Irq,
+        }
+    }
+
+    pub fn vector(self) -> u8 {
+        (self.0 >> 48) as u8
+    }
+
+    /// The outer place, as a sample of it would be.
+    pub fn place(self) -> Loc {
+        let mode = Loc(self.0).mode();
+        Loc::guest(Engine::None, mode, (self.0 >> 32) as u16, self.0 as u32)
+    }
+
+    /// The same entry with the place's EIP rounded down to a multiple of
+    /// `bucket`.
+    pub fn bucketed(self, bucket: u32) -> Entry {
+        if bucket <= 1 {
+            return self;
+        }
+        Entry(self.0 & !(bucket as u64 - 1))
+    }
+
+    /// How it entered: `int 30h`, `#GP`, `irq int 50h`, `call gate`.
+    pub fn via(self) -> String {
+        match self.cause() {
+            Cause::Gate if self.vector() == 1 => "sysenter".into(),
+            Cause::Gate => "call gate".into(),
+            Cause::Int => format!("int {:02X}h", self.vector()),
+            Cause::Exception => crate::cpu::fault::exception_name(self.vector()).into(),
+            Cause::Irq => format!("irq int {:02X}h", self.vector()),
+        }
+    }
+}
+
+/// Whether a profile runs on any thread: the check before noting an entry
+/// or a thunk, a load and a branch.
+#[inline(always)]
+pub fn any_active() -> bool {
+    ANY_ACTIVE.load(Ordering::Relaxed)
+}
+
+/// Note an entry to ring 0 from `mode` at CS:EIP. The caller checks
+/// `any_active` first.
+#[cold]
+#[inline(never)]
+pub fn note_entry(mode: Mode, cs: u16, eip: u32, cause: Cause, vector: u8) {
+    if this_thread() {
+        ENTRY.store(Entry::new(mode, cs, eip, cause, vector).0, Ordering::Relaxed);
+    }
+}
+
+/// Note a transfer in ring 3 from 32-bit code at CS:EIP (the return
+/// address) to 16-bit code, called from `returns` (up its EBP chain, the
+/// nearest first). The caller checks `any_active` first.
+#[cold]
+#[inline(never)]
+pub fn note_thunk(cs: u16, eip: u32, returns: &[u32]) {
+    if !this_thread() {
+        return;
+    }
+    THUNK[0].store(Loc::guest(Engine::None, Mode::Pm32, cs, eip).0, Ordering::Relaxed);
+    for (i, word) in THUNK.iter().enumerate().skip(1) {
+        let at = returns.get(i - 1).map_or(0, |&ret| Loc::guest(Engine::None, Mode::Pm32, cs, ret).0);
+        word.store(at, Ordering::Relaxed);
+    }
+}
+
+/// Note a transfer in ring 3 from 16-bit code back to 32-bit code. The
+/// caller checks `any_active` first.
+#[cold]
+#[inline(never)]
+pub fn drop_thunk() {
+    if this_thread() {
+        drop_thunk_now();
+    }
+}
+
+fn drop_thunk_now() {
+    for word in &THUNK {
+        word.store(0, Ordering::Relaxed);
+    }
+}
+
+/// What a sample is charged to: the entry (`ENTRY`) for ring-0 code, and
+/// the Win32 caller (`THUNK`) for 16-bit ring-3 code and for ring-0 code
+/// that 16-bit code entered. `None` for the other samples.
+pub fn chain(loc: Loc, entry: u64, thunk: Thunk) -> Option<(u64, Thunk)> {
+    let (cs, _) = loc.cs_eip()?;
+    match (loc.mode(), cs & 3) {
+        (Mode::Pm16 | Mode::Pm32, 0) => {
+            let e = Entry::of(entry)?;
+            let thunk = if e.place().mode() == Mode::Pm16 { thunk } else { [0; THUNK_FRAMES] };
+            Some((entry, thunk))
+        }
+        (Mode::Pm16, 3) if thunk[0] != 0 => Some((0, thunk)),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -515,6 +689,61 @@ mod tests {
         }
         assert_eq!(Zone::IoVga.group(), "io");
         assert_eq!(Zone::Rewind.group(), "rewind");
+    }
+
+    #[test]
+    fn an_entry_keeps_its_fields() {
+        let e = Entry::new(Mode::Pm16, 0x003F, 0x03D2, Cause::Int, 0x30);
+        assert_eq!(Entry::of(e.0), Some(e));
+        assert_eq!(Entry::of(0), None);
+        assert_eq!(e.place().cs_eip(), Some((0x003F, 0x03D2)));
+        assert_eq!(e.place().mode(), Mode::Pm16);
+        assert_eq!((e.cause(), e.vector(), e.via()), (Cause::Int, 0x30, "int 30h".to_string()));
+        assert_eq!(Entry::new(Mode::V86, 0x1234, 5, Cause::Exception, 13).via(), "#GP");
+        assert_eq!(Entry::new(Mode::Pm32, 0x137, 5, Cause::Irq, 0x50).via(), "irq int 50h");
+        assert_eq!(Entry::new(Mode::Pm32, 0x137, 5, Cause::Gate, 1).via(), "sysenter");
+        let b = Entry::new(Mode::Pm32, 0x137, 0x1000_A08F, Cause::Int, 0x2E).bucketed(0x10000);
+        assert_eq!(b.place().cs_eip(), Some((0x137, 0x1000_0000)));
+        assert_eq!(b.via(), "int 2Eh", "a bucket keeps how it entered");
+    }
+
+    #[test]
+    fn samples_are_charged_by_privilege_level_and_code_size() {
+        let ring0 = Loc::guest(Engine::Jit, Mode::Pm32, 0x0028, 0xC000_13AC);
+        let win16 = Loc::guest(Engine::Jit, Mode::Pm16, 0x003F, 0x03D0);
+        let win32 = Loc::guest(Engine::Jit, Mode::Pm32, 0x0137, 0x1000_A08F);
+        let from16 = Entry::new(Mode::Pm16, 0x003F, 0x03D2, Cause::Int, 0x30).0;
+        let from32 = Entry::new(Mode::Pm32, 0x0137, 0x1000_A091, Cause::Exception, 13).0;
+        let thunk = [Loc::guest(Engine::None, Mode::Pm32, 0x0137, 0xBFF7_13D4).0, 0, 0, 0];
+        assert_eq!(chain(ring0, from32, thunk), Some((from32, [0; 4])), "a thunk counts only for 16-bit callers");
+        assert_eq!(chain(ring0, from16, thunk), Some((from16, thunk)));
+        assert_eq!(chain(ring0, 0, thunk), None, "no entry yet");
+        assert_eq!(chain(win16, from16, thunk), Some((0, thunk)));
+        assert_eq!(chain(win16, from16, [0; 4]), None, "16-bit code nobody called through a thunk");
+        assert_eq!(chain(win32, from32, thunk), None, "32-bit ring 3 code is its own");
+        assert_eq!(chain(Loc::host(Zone::FrameWait), from32, thunk), None);
+        let v86 = Loc::guest(Engine::Interp, Mode::V86, 0x0070, 0x046E);
+        assert_eq!(chain(v86, from32, thunk), None, "CS in V86 mode is a segment, not a privilege level");
+    }
+
+    #[test]
+    fn a_thunk_is_noted_going_to_16_bit_code_and_dropped_coming_back() {
+        let _one = crate::profile::session::tests::ONE_PROFILE.lock().unwrap_or_else(|e| e.into_inner());
+        set_active(true);
+        note_thunk(0x0137, 0xBFF7_13D9, &[0xBFF5_1000, 0x0040_2000]);
+        let t = thunk_now();
+        assert_eq!(Loc(t[0]).cs_eip(), Some((0x0137, 0xBFF7_13D9)));
+        assert_eq!(Loc(t[1]).cs_eip(), Some((0x0137, 0xBFF5_1000)));
+        assert_eq!(Loc(t[2]).cs_eip(), Some((0x0137, 0x0040_2000)));
+        assert_eq!(t[3], 0);
+        note_thunk(0x0137, 0xBFF7_13D9, &[]);
+        assert_eq!(thunk_now()[1], 0, "a thunk without frames leaves none of the last one's");
+        drop_thunk();
+        assert_eq!(thunk_now(), [0; 4]);
+        note_entry(Mode::Pm32, 0x0137, 0x1000, Cause::Int, 0x30);
+        assert_ne!(ENTRY.load(Ordering::Relaxed), 0);
+        set_active(false);
+        assert_eq!(ENTRY.load(Ordering::Relaxed), 0, "the next profile starts without it");
     }
 
     #[test]

@@ -489,7 +489,9 @@ jit_fn! {
     /// `Uop::FarCallCheck` (`load` 0) and `Uop::FarCallLoad` (1): a far
     /// CALL in protected mode to `selector:offset`, checked as
     /// `Cpu::call_far_pm` does before its pushes, then CS and EIP loaded
-    /// after them. Returns as `jit_far_ret`.
+    /// after them; for the load, `offset` is the return address (for the
+    /// profiler: translated code's EIP may be the block's). Returns as
+    /// `jit_far_ret`.
     fn jit_far_call(cpu: *mut Cpu, ctx: *mut JitCtx, offset: u32, selector: u32, load: u32) -> u32 {
         // SAFETY: as in `jit_fallback`.
         let (cpu, ctx) = unsafe { (&mut *cpu, &mut *ctx) };
@@ -502,9 +504,10 @@ jit_fn! {
                 ctx.far_target = (selector as u16, offset, desc.0);
                 return Ok(true);
             }
+            let next = offset;
             let (selector, offset, desc) = ctx.far_target;
             let (tr, cpl) = (cpu.tr.selector, cpu.cpl);
-            cpu.load_cs_pm(selector, &mut crate::cpu::seg::Descriptor(desc), cpl)?;
+            cpu.load_cs_pm_after(selector, &mut crate::cpu::seg::Descriptor(desc), cpl, next)?;
             cpu.set_eip(offset);
             ctx.after = far_goes_on(cpu, ctx, true, tr, cpl) as u8;
             Ok(true)

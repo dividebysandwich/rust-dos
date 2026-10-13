@@ -83,6 +83,14 @@ The JSON's sections:
   virtual-8086 mode, and a few lines of disassembly from the memory as it
   is now.
 - `segments`: the samples by code segment.
+- `callers`: ring-0 and 16-bit samples charged to the code that made them
+  run (see [Work Windows does for the game](#work-windows-does-for-the-game)):
+  their share of busy time, ring 0's share (`ring0_busy_pct`) and how much
+  of it has an entry (`ring0_charged_pct`), and in `top` each chain: the
+  32-bit callers root first (`win32`, empty when there are none), the
+  entry to ring 0 (`entry`: its place, mode and `via`, such as `int 30h`,
+  `#GP`, `irq int 50h`, `call gate` or `sysenter`; null for 16-bit code
+  that didn't enter ring 0), the samples, and the places they were at.
 - `ports`: port accesses by device and by port, with rates a second. A
   word or doubleword access to byte ports counts once.
 - `hle`: calls of the emulator's BIOS and DOS functions by interrupt and
@@ -130,6 +138,14 @@ cpu.interp;pm32 0008:00002C84;hle.dpmi 608
 cpu.jit;pm32 01FF:00232432;dynrec.fallback 371
 ```
 
+A sample charged to its callers (`callers`) has them at the root of its
+stack, the 32-bit code that switched to 16-bit code marked `(thunk)` and
+the entry to ring 0 with how it came in:
+
+```
+pm32 0137:10008E52;pm32 0137:BFE3621D;pm32 0137:BFF7E916;pm32 0137:BFF713E2 (thunk);pm16 003B:03D2 (int 30h);cpu.jit;pm32 0028:C023127C 416
+```
+
 Feed it to [inferno](https://github.com/jonhoo/inferno)
 (`inferno-flamegraph < run.folded > run.svg`) or open it in
 [speedscope](https://www.speedscope.app/). Add `zone=cpu` (or
@@ -171,7 +187,7 @@ bits are the privilege level. On Windows 95:
 | `pm16` (ring 3) | Win16 code: the 16-bit halves of USER, GDI and KERNEL, which Win32 calls reach through thunks |
 | `v86` | DOS and the BIOS in a virtual machine |
 
-The intro spent its busy time as 48% ring-3 flat code, 34% ring 0, 14%
+The intro spent its busy time as 56% ring-3 flat code, 31% ring 0, 13%
 16-bit code and almost nothing in v86.
 
 ### By module
@@ -190,33 +206,109 @@ Windows 95 keeps one page directory for every process (CR3 stays the
 same), so the profile can't tell processes apart. With a full-screen game
 in front, the code below 80000000h is the game's.
 
-To name the module behind a block, read its first bytes:
-`GET /api/memory?addr=lin:BFF70000&len=64`. An image starts with `MZ`,
-the PE header's offset is at 3Ch, and the export directory gives the DLL's
-name. Windows often leaves the header page of a loaded image out of
-memory, and then the read gives `FF` bytes. In this run KERNEL32's header
-was in memory, the game's EXE (00400000h) and its DLL (10000000h) weren't.
-In that case take the image base from the file's own PE header (a DLL
-that Windows had to relocate loads elsewhere).
+`tools/profile_modules.py` names the module behind each block. It needs
+Python 3 and nothing else, and reads a running profile from the debug
+server:
 
-In the intro, the game's code was 22% of busy time, KERNEL32 23%, the
-16-bit code 14% and ring 0 34%.
+```
+python tools/profile_modules.py --host 127.0.0.1:8086 --files game --system system --save modules.json
+```
+
+`--files` is a folder with the game's EXE and DLLs, `--system` one with
+Windows' DLLs (`WINDOWS\SYSTEM`). Each file's PE header says where the
+image loads, and the script compares the file's code with guest memory at
+the block's hottest instruction to confirm it, or finds where Windows moved
+a DLL it had to relocate. An image without a file is named from its header
+in guest memory, where Windows left the header's page in memory
+(KERNEL32's usually is; most others read as `FF` bytes). The script prints
+the busy time by module, the time Windows spent for each module (below)
+and the modules it found; `--save` keeps them for `--map` in later runs of
+the same game. In the intro:
+
+```
+Busy time by module (26332 busy samples):
+   32.66%  KERNEL32.DLL
+   31.00%  ring 0: the VMM and VxDs
+   16.68%  SMACKW32.DLL [program]
+   13.36%  16-bit ring 3: Win16 (USER, GDI, KERNEL)
+    1.25%  WINMM.DLL
+    0.37%  EI.EXE [program]
+```
+
+`[program]` marks the modules from `--files`. SMACKW32.DLL is the Smacker
+video decoder the intro plays with.
+
+#### Getting the files
+
+The files are on the game's disk image, and the emulator can copy them out
+without booting Windows. On a copy of the image:
+
+```
+rust-dos --no-boot --debug-server 127.0.0.1:0 --config copy.conf
+```
+
+with `copy.conf` mounting the copy as C:. Then type into the DOS prompt
+(`POST /api/input/type`):
+
+```
+mount e C:\host\folder\game
+copy c:\progra~1\game\*.exe e:\
+copy c:\progra~1\game\*.dll e:\
+mount e C:\host\folder\system
+copy c:\windows\system\*.dll e:\
+```
+
+The built-in shell sees FAT drives with their short names (`dir c:\progra~1`
+finds the game's folder). An agent running the profile can do all of this
+before the profiled run, and keep the module map for later runs.
 
 ### Work Windows does for the game
 
-Ring-0 and 16-bit samples say where Windows spent the time, not which
-game code asked for it. The counters often do say why:
+Ring-0 and 16-bit samples are Windows' code, but the profile also notes
+which code made Windows run it, and charges the samples to that code
+(`callers`):
 
-- `ports`: port 40h read 265,000 times a second and port 43h written
-  132,000 times: a timer driver latching the PIT on each time query
-  (`timeGetTime` and `QueryPerformanceCounter` reach the VTD this way).
+- Each entry to ring 0 from an outer level (an interrupt, an exception, a
+  hardware interrupt, a call gate or SYSENTER) is noted with the place it
+  came from. Every ring-0 sample is charged to the last such entry.
+- Each switch from 32-bit to 16-bit ring-3 code (a Win32 call thunking to
+  the 16-bit half of USER, GDI or KERNEL) is noted with the Win32 code that
+  switched and the callers above it on the stack. 16-bit samples, and
+  ring-0 samples entered from that 16-bit code, are charged to that Win32
+  code until it runs again.
+
+The callers are found up the EBP chain, and on the stack above ESP where a
+routine keeps no frame pointer (KERNEL32's thunk stubs don't); only
+addresses right after a CALL instruction count. The report's `callers`
+lists each chain, root first, and the script names its modules:
+
+```
+Ring-0 and 16-bit time by the code that caused it (44.19% of busy):
+   34.38%  SMACKW32.DLL [program]
+    7.12%  Win32: KERNEL32.DLL
+
+By chain, root first:
+   24.41%  SMACKW32.DLL [program] -> WINMM.DLL -> KERNEL32.DLL -> pm16 int 30h -> ring 0: the VMM and VxDs
+    6.57%  KERNEL32.DLL -> 16-bit code -> 16-bit ring 3: Win16 (USER, GDI, KERNEL)
+    5.54%  SMACKW32.DLL [program] -> WINMM.DLL -> KERNEL32.DLL -> 16-bit code -> 16-bit ring 3: Win16 (USER, GDI, KERNEL)
+```
+
+The video decoder calls WINMM, which thunks through KERNEL32 to 16-bit
+code that enters the VMM with `int 30h`: a time query, 139,000 times a
+second. With the decoder's own 17%, the intro's video costs about half of
+the busy time. Samples with no Win32 caller (hardware interrupts, the
+KERNEL32 code that thunks on its own) are charged to the entry alone.
+
+The counters say what the ring-0 code did:
+
+- `ports`: port 40h read 279,000 times a second and port 43h written
+  139,000 times: the VTD latching the PIT for each time query.
 - `dynrec.calls.fallback_top`: `Int`, `Iretd`, `Lar`, `Popfd` and
-  `Cmpsb` each about 132,000 times a second, the same rate. The top place
-  for `dynrec.fallback` is 16-bit code doing `int 30h` into the VMM. Each
-  time query changes rings in and out, and the recompiler hands both
-  changes to the interpreter.
+  `Cmpsb` each at about the rate of the time queries. Each time query
+  changes rings in and out, and the recompiler hands both changes to the
+  interpreter.
 - `ports` again: port 170h, the secondary IDE channel's data port, read
-  275,000 times a second: Windows' IDE driver reads the CD with PIO.
+  230,000 times a second: Windows' IDE driver reads the CD with PIO.
   `zone=io.ide` shows the driver's loop (`0028:C1051C27`).
 - `exceptions`: #GP and #UD are how Windows traps port I/O and V86 calls,
   #PF its paging. A high rate here points at Windows working on the
@@ -245,6 +337,16 @@ translations away), and the rest of the marks are a load of a flag and a
 branch. `benches/cpu.rs` measures a guest loop on both engines; compared
 with a build without the profiler, its times are within noise.
 
+A profile only watches. Two tests run the same program with and without
+one, on the interpreter and (with `RUST_DOS_CORE=dynamic`) the recompiler,
+and require the same machine: `a_profile_leaves_the_machine_as_it_would_be`
+in `src/debug/determinism_tests.rs` starts a profile partway through the
+program that uses every device and compares the whole save state, the
+picture, the sound and the instruction count at each stop;
+`a_profile_leaves_ring_changes_as_they_would_be` in `tests/pm_tests.rs`
+does the same for the ring changes, call gates and thunks the profile
+notes in protected mode.
+
 While a profile runs, the interpreter stores the place of each instruction
 and translated code stores it at each block's start. In `benches/cpu.rs`,
 a loop of blocks of a few instructions, this costs 13% on the interpreter
@@ -264,6 +366,18 @@ The emulation thread keeps one 64-bit word up to date, `profile::WORD`:
 | 55 | The word holds guest code |
 | 56-57 | The engine: front end, interpreter, translated code |
 | 58-59 | The CPU mode: real, virtual-8086, 16-bit or 32-bit protected |
+
+Two more words carry what `callers` charges samples to. `profile::ENTRY`
+holds the last entry to ring 0 from an outer level: the place it came from
+(EIP, CS and the mode, as in the word above), the cause (an interrupt, an
+exception, a hardware interrupt, or a call gate or SYSENTER) and the
+vector. `profile::THUNK` holds the last switch from 32-bit to 16-bit ring-3
+code: the place after the instruction that switched, then up to three
+callers' return addresses. A switch back to 32-bit code clears it. The
+callers come from the EBP chain, or, where that finds none, from the
+32-bit stack above ESP, and only an address right after a CALL counts. The
+walk reads RAM through the page tables without faulting, so it changes
+nothing in the machine, and runs once per switch.
 
 Every update is a relaxed store: no clock read, lock or allocation. A zone
 is a guard (`profile::zone`) that puts the word back as it was when it

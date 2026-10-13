@@ -1816,12 +1816,13 @@ impl Gen<'_> {
                 let end = self.end();
                 self.slow.push(Slow::Bail { at: bail, end, ix: self.ix, dirty: self.dirty, leave: true });
             }
-            Uop::FarCallLoad => {
+            Uop::FarCallLoad { next } => {
                 let fail = self.fail();
                 self.data_x1();
                 dynasm!(self.ops ; .arch aarch64 ; str x1, [x20, CTX_FAR_BLOCK as u32]);
                 self.field(Access::Ldr32, 0, seg_field(Seg::CS, layout::SEG_BASE));
                 dynasm!(self.ops ; .arch aarch64 ; str w0, [x20, CTX_FAR_BASE as u32] ; movz w4, 1);
+                self.mov32(2, next);
                 self.far_call();
                 dynasm!(self.ops ; .arch aarch64 ; cbnz w0, =>fail);
             }
