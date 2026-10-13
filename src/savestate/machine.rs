@@ -43,6 +43,10 @@ pub fn load(cpu: &mut Cpu, data: &[u8]) -> Result<()> {
     let before = save(cpu);
     let loaded = load_sections(cpu, data);
     if loaded.is_err() {
+        // Folders a debugger load asked for are the failed state's, not
+        // the machine's from before: a load that failed ahead of the DOS
+        // section didn't take them.
+        cpu.bus.disk.folders_from_state.clear();
         load_sections(cpu, &before).expect("the state the machine was in loads back");
     }
     if loaded.is_ok() {

@@ -308,4 +308,5 @@ fn a_load_takes_a_folder_drive_from_a_copy_of_its_folder_in_another_run() {
     let entries = http(addr, "GET", "/api/journal?after=0&type=state_loaded", &[], None).1;
     assert_eq!(entries["entries"][0]["folders"], json!({"C": copy}), "{}", entries);
     assert_eq!(post("/api/control/quit", json!({})).0, 200);
+    let _ = std::fs::remove_dir_all(&root);
 }
