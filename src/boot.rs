@@ -127,16 +127,30 @@ pub fn boot_drive(cpu: &mut Cpu, drive: u8) -> Result<(), String> {
 }
 
 /// Start the booted system over from its disk, as after a reset or
-/// INT 19h. If the disk can't boot any more, the machine is turned off.
+/// INT 19h. A system booted from a floppy drive that has no disk in it
+/// now starts from the first hard disk, as a BIOS that boots from A: and
+/// then C: does: Windows 98's Setup, started from its boot disk, restarts
+/// from the hard disk it installed to once the disk is out. If the disk
+/// can't boot any more, the machine is turned off.
 pub fn restart(cpu: &mut Cpu) {
     let Some(unit) = cpu.bus.boot.as_ref().map(|b| b.unit) else {
         return;
     };
-    match boot_sector(&cpu.bus, unit) {
-        Ok(sector) => {
-            cpu.bus.log_string("[BOOT] Restarting");
+    let empty = |bus: &Bus, unit: u8| unit_drive(bus, unit).and_then(|drive| bus.disk.bios_image(drive)).is_none();
+    let found = match boot_sector(&cpu.bus, unit) {
+        Err(e) if unit < 0x80 && empty(&cpu.bus, unit) => boot_sector(&cpu.bus, 0x80).map(|sector| (0x80, sector)).map_err(|_| e),
+        found => found.map(|sector| (unit, sector)),
+    };
+    match found {
+        Ok((from, sector)) => {
+            if from == unit {
+                cpu.bus.log_string("[BOOT] Restarting");
+            } else {
+                cpu.bus.log_string("[BOOT] Restarting from the first hard disk: the floppy drive is empty");
+            }
+            // The floppy drive stays the first to boot from.
             power_on(cpu, unit);
-            start(cpu, unit, &sector);
+            start(cpu, from, &sector);
         }
         Err(e) => power_off(cpu, &e),
     }
