@@ -153,6 +153,13 @@ The three-voice sound chip of the Tandy 1000 and PCjr. **auto** has it
 with those video cards. **on** adds it to any machine, for games that
 offer *Tandy* sound with VGA graphics.
 
+# Timer 2 gate at startup {#pit2-gate-at-start}
+
+**on** starts the PC speaker's timer (PIT channel 2) counting with the
+speaker silent, for games that read it without setting it up. Bao Xiao
+San Guo Zhi needs it for its random numbers: with it **off**, every roll
+comes out the same. Real PCs start with it **off**.
+
 # Hard disk noise {#hard-disk-noise}
 
 Plays the sounds of a hard disk: **seek-only** the heads moving on each

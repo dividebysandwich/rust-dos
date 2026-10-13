@@ -758,6 +758,10 @@ pub struct Pit2 {
     pub access: u8,
     /// Count frozen by a latch command, read until both bytes are read.
     pub latched: Option<u16>,
+    /// A control word came and no count since: the next complete count
+    /// loads at once, even into a mode 2 or 3 period that ran on through
+    /// the control word. Saved after the PIT2 section's first fields.
+    pub count_due: bool,
 }
 
 impl Default for Pit2 {
@@ -779,6 +783,7 @@ impl Pit2 {
             held: Some((0xFFFF, true)),
             access: 3,
             latched: None,
+            count_due: false,
         }
     }
 
@@ -808,27 +813,41 @@ impl Pit2 {
     }
 
     /// Control word for channel 2: set the mode and stop the counter until
-    /// a count is written.
+    /// a count is written, as the 8254 data sheet has it.
+    ///
+    /// A mode 2 or 3 count that runs when a control word for the same mode
+    /// comes goes on with the count it had. A switch between modes 2 and 3
+    /// stops it as any other control word does. Bao Xiao San Guo Zhi
+    /// (SANGO.EXE) makes its random numbers with `out 43h,86h; out 43h,B6h`
+    /// and two reads of port 42h, never writing a count; a stopped count
+    /// gives it the same number every time (DOSBox SVN's "every roll is
+    /// 5", DOSBox-X issue 1274).
     pub fn set_mode(&mut self, mode: u8, access: u8, now: u64) {
         let (count, _) = self.read(now);
-        self.mode = if mode >= 6 { mode - 4 } else { mode };
+        let mode = if mode >= 6 { mode - 4 } else { mode };
+        let runs_on = self.held.is_none() && self.periodic() && mode == self.mode;
+        self.mode = mode;
         self.access = access;
         self.pending = None;
         self.latched = None;
-        // Mode 0's output goes low at the control word, the others' high.
-        self.held = Some((count, self.mode != 0));
+        self.count_due = true;
+        if !runs_on {
+            // Mode 0's output goes low at the control word, the others' high.
+            self.held = Some((count, self.mode != 0));
+        }
     }
 
     /// A complete count was written (0 means 65536).
     pub fn write_count(&mut self, count: u16, now: u64) {
         let reload = if count == 0 { 0x10000 } else { count as u32 };
         self.apply_pending(now);
-        if self.held.is_none() && self.periodic() {
+        if self.held.is_none() && self.periodic() && !self.count_due {
             let reload_now = self.reload as u64;
             let into = (now - self.start) % reload_now;
             self.pending = Some((reload, now - into + reload_now));
             return;
         }
+        self.count_due = false;
         self.reload = reload;
         self.from = reload;
         self.pending = None;
@@ -912,7 +931,7 @@ impl Pit2 {
 }
 
 crate::state_fields!(Pit0 { mode, reload, pending_reload, counting, stopped, armed, period_start, next_tc });
-crate::state_fields!(Pit2 { mode, reload, pending, gate, start, from, held, access, latched });
+crate::state_fields!(Pit2 { mode, reload, pending, gate, start, from, held, access, latched } skip { count_due });
 crate::state_fields!(Clock { icount, deadline, stalled, idle, batch_end, cycles_per_ms, base_icount, base_ticks, base_ns });
 
 #[cfg(test)]
