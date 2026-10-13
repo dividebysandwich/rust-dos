@@ -1478,6 +1478,7 @@ impl Gen<'_> {
             }
             Uop::Alu { op, size, a, b } => self.alu(op, size, a, b),
             Uop::Unary { op, size, t } => self.unary(op, size, t),
+            Uop::Bswap { t } => dynasm!(self.ops ; .arch x64 ; bswap Rd(r(t))),
             Uop::Shift { op, size, t, count } => self.shift(op, size, t, Some(count)),
             Uop::DoubleShift { left, size, dst, src, count } => self.double_shift(left, size, dst, src, Some(count)),
             Uop::ShiftVar { op, size, t, count } => {
@@ -1977,6 +1978,7 @@ impl Gen<'_> {
                 dynasm!(self.ops ; .arch x64 ; mov Rd(r(t)), eax);
             }
             Uop::FToInt { t, x, size } => self.fpu_to_int(t, x, size),
+            Uop::FToInt64 { lo, hi, x } => self.fpu_to_int64(lo, hi, x),
             Uop::FMul { a, b } => dynasm!(self.ops ; .arch x64 ; mulsd Rx(a.0), Rx(b.0)),
             Uop::FAdd { a, b, sub: false } => dynasm!(self.ops ; .arch x64 ; addsd Rx(a.0), Rx(b.0)),
             Uop::FAdd { a, b, sub: true } => dynasm!(self.ops ; .arch x64 ; subsd Rx(a.0), Rx(b.0)),
@@ -2278,6 +2280,36 @@ impl Gen<'_> {
         );
         self.restore_after_call();
         dynasm!(self.ops ; .arch x64 ; mov Rd(t_), eax ; toint_done:);
+    }
+
+    /// `Uop::FToInt64`: the conversion where the control word rounds to
+    /// nearest or chops, else the handler's. A value that doesn't fit, or a
+    /// NaN, converts to the integer indefinite (i64::MIN), which goes to
+    /// the handler too.
+    fn fpu_to_int64(&mut self, lo: T, hi: T, x: X) {
+        let at = self.ops.new_dynamic_label();
+        dynasm!(self.ops
+            ; .arch x64
+            ; movzx eax, WORD [rbx + FPU_CONTROL]
+            ; and eax, 0xC00
+            ; jnz >toint64_other
+            ; cvtsd2si rcx, Rx(x.0)
+            ; jmp >toint64_check
+            ; toint64_other:
+            ; cmp eax, 0xC00
+            ; jne =>at
+            ; cvttsd2si rcx, Rx(x.0)
+            ; toint64_check:
+            // (Only i64::MIN overflows when 1 is taken from it.)
+            ; cmp rcx, 1
+            ; jo =>at
+            ; mov Rd(r(lo)), ecx
+            ; shr rcx, 32
+            ; mov Rd(r(hi)), ecx
+        );
+        let end = self.end();
+        let (wb, reload) = (self.cache.dirty, self.cache.loaded);
+        self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, wb, reload, leave: false });
     }
 
     /// Keep the temporaries and the cached guest registers around a call

@@ -1060,6 +1060,40 @@ impl Gen<'_> {
         );
     }
 
+    /// `Uop::FToInt64`: the conversion where the control word rounds to
+    /// nearest or chops, else the handler's. AArch64's conversions saturate
+    /// and make a NaN 0: a NaN and the limits go to the handler too.
+    fn fpu_to_int64(&mut self, lo: T, hi: T, x: X) {
+        let x_ = d(x);
+        let at = self.ops.new_dynamic_label();
+        self.field(Access::Ldr16, 0, layout::fpu::CONTROL);
+        dynasm!(self.ops
+            ; .arch aarch64
+            ; fcmp D(x_), D(x_)
+            ; b.vs =>at
+            ; and w0, w0, 0xC00
+            ; cbnz w0, >toint64_other
+            ; fcvtns x1, D(x_)
+            ; b >toint64_check
+            ; toint64_other:
+            ; cmp w0, 0xC00
+            ; b.ne =>at
+            ; fcvtzs x1, D(x_)
+            ; toint64_check:
+            ; movz x2, 0x8000, lsl 48
+            ; cmp x1, x2
+            ; b.eq =>at
+            ; sub x2, x2, 1
+            ; cmp x1, x2
+            ; b.eq =>at
+            ; mov W(r(lo)), w1
+            ; lsr x1, x1, 32
+            ; mov W(r(hi)), w1
+        );
+        let end = self.end();
+        self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, leave: false });
+    }
+
     /// Add `v` to the u64 CPU field at `off`.
     fn add_field64(&mut self, off: usize, v: u32) {
         if v == 0 {
@@ -1629,6 +1663,7 @@ impl Gen<'_> {
             }
             Uop::Alu { op, size, a, b } => self.alu(op, size, a, b),
             Uop::Unary { op, size, t } => self.unary(op, size, t),
+            Uop::Bswap { t } => dynasm!(self.ops ; .arch aarch64 ; rev W(r(t)), W(r(t))),
             Uop::Shift { op, size, t, count } => self.shift(op, size, t, Some(count)),
             Uop::DoubleShift { left, size, dst, src, count } => self.double_shift(left, size, dst, src, Some(count)),
             Uop::ShiftVar { op, size, t, count } => {
@@ -2086,6 +2121,7 @@ impl Gen<'_> {
                 }
             }
             Uop::FToInt { t, x, size } => self.fpu_to_int(t, x, size),
+            Uop::FToInt64 { lo, hi, x } => self.fpu_to_int64(lo, hi, x),
             Uop::FMul { a, b } => dynasm!(self.ops ; .arch aarch64 ; fmul D(d(a)), D(d(a)), D(d(b))),
             Uop::FAdd { a, b, sub: false } => dynasm!(self.ops ; .arch aarch64 ; fadd D(d(a)), D(d(a)), D(d(b))),
             Uop::FAdd { a, b, sub: true } => dynasm!(self.ops ; .arch aarch64 ; fsub D(d(a)), D(d(a)), D(d(b))),

@@ -23,7 +23,8 @@ const DF: u32 = 0x0400;
 /// With `segments`, the code generator has the loads of data segment
 /// registers in protected mode too (in real mode it always has them).
 /// With `fpu`, FPU instructions are translated, for `fast_fpu`'s arithmetic
-/// (`Cpu::fpu_fast`) if set.
+/// (`Cpu::fpu_fast`) if set. `i486`: the CPU is a 486 or later, which
+/// has BSWAP (a 386 faults on it).
 #[allow(clippy::too_many_arguments)]
 pub fn translate(
     instr: &Instruction,
@@ -34,6 +35,7 @@ pub fn translate(
     fpu: bool,
     fast_fpu: bool,
     real: bool,
+    i486: bool,
 ) -> Option<Vec<Uop>> {
     use Mnemonic::*;
     let mut u = Vec::with_capacity(8);
@@ -76,6 +78,7 @@ pub fn translate(
         Movzx => movx(instr, false, &mut u),
         Movsx => movx(instr, true, &mut u),
         Xchg => xchg(instr, &mut u),
+        Bswap if i486 => bswap(instr, &mut u),
         Cbw => extend_acc(1, false, &mut u),
         Cwde => extend_acc(2, false, &mut u),
         Cwd => extend_acc(2, true, &mut u),
@@ -381,6 +384,16 @@ fn movx(instr: &Instruction, signed: bool, u: &mut Vec<Uop>) -> bool {
     }
     u.push(Uop::Extend { t: T0, from, signed });
     u.push(Uop::Set { r: dest, t: T0 });
+    true
+}
+
+/// BSWAP of a dword register (the 16-bit form, which a 486 clears, runs
+/// through `transfer::bswap`).
+fn bswap(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
+    let Some(r) = gpr(instr.op0_register()).filter(|r| r.size == 4) else { return false };
+    u.push(Uop::Get { t: T0, r });
+    u.push(Uop::Bswap { t: T0 });
+    u.push(Uop::Set { r, t: T0 });
     true
 }
 

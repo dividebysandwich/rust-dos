@@ -266,6 +266,23 @@ pub fn translate(instr: &Instruction, fast: bool, u: &mut Vec<Uop>) -> bool {
             }
             u.push(Uop::Store { m: T1, src: T0, size });
         }
+        Fistp_m64int => {
+            guard(u, 1);
+            if mem(instr, T1, 8, true, u).is_none() {
+                return false;
+            }
+            u.push(Uop::BailUnlessRam { t: T1 });
+            u.push(Uop::FGet { x: X0, i: 0 });
+            u.push(Uop::FToInt64 { lo: T0, hi: T2, x: X0 });
+            u.push(Uop::FPop { n: 1 });
+            // As the handler writes it: the low dword, then the high one.
+            u.push(Uop::Store { m: T1, src: T0, size: 4 });
+            u.push(Uop::AddConst { t: T1, v: 4, size: 4 });
+            u.push(Uop::Store { m: T1, src: T2, size: 4 });
+        }
+        // FWAIT: #NM where CR0's MP and TS are set, which the guard leaves
+        // to the handler.
+        Wait => guard(u, 0),
         Fst_sti | Fstp_sti | Fstpnce_sti | Fstp_sti_DFD0 | Fstp_sti_DFD8 => {
             if instr.op0_kind() != OpKind::Register {
                 return false;
