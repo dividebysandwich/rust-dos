@@ -3451,6 +3451,24 @@ fn bswap_runs_as_its_handler() {
 }
 
 #[test]
+fn bswap_of_a_word_register_runs_through_its_handler() {
+    // A 486 clears the word; the dword around it stays.
+    let (mut a, mut b) = twins(|rig| {
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.mov(eax, 0x1234_5678u32)?;
+            a.bswap(ax)?;
+            a.bswap(eax)?;
+            a.hlt()
+        }));
+    });
+    let stats = run_both(&mut a, &mut b);
+    assert_eq!(b.cpu.eax(), 0x0000_3412);
+    if AVAILABLE && cfg!(target_arch = "x86_64") {
+        assert_eq!(untranslated(&stats), 1, "handlers ran them: {:?}", stats);
+    }
+}
+
+#[test]
 fn bswap_on_a_386_faults_in_its_block() {
     const UD: u8 = 6;
     let (mut a, mut b) = twins(|rig| {
