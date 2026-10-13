@@ -1229,14 +1229,39 @@ struct StateBody {
     /// with the record (load). Off unless asked for.
     #[serde(default)]
     check_files: bool,
+    /// A load only: folder drives of the state, by letter, to take as
+    /// mounted from these host folders instead of the ones it records.
+    #[serde(default)]
+    folders: Map<String, Value>,
+}
+
+/// A load's `folders`: each drive letter's number and its absolute host folder.
+fn state_folders(folders: Map<String, Value>) -> Result<Vec<(u8, String)>, ApiError> {
+    let mut out = Vec::new();
+    for (letter, folder) in folders {
+        let drive = match letter.as_bytes() {
+            [c] if c.is_ascii_alphabetic() => c.to_ascii_uppercase() - b'A',
+            _ => return Err(bad(format!("folders: '{}' isn't a drive letter", letter))),
+        };
+        let folder = folder.as_str().ok_or_else(|| bad(format!("folders.{}: a host folder's path", letter)))?;
+        if !std::path::Path::new(folder).is_absolute() {
+            return Err(bad(format!("folders.{}: '{}' isn't an absolute path", letter, folder)));
+        }
+        out.push((drive, folder.to_string()));
+    }
+    Ok(out)
 }
 
 async fn state_file(State(s): State<AppState>, Path(action): Path<String>, body: Bytes) -> ApiResult {
     let b: StateBody = from_value(parse_body(&body)?)?;
     let (path, strict_match, check_files) = (b.path, b.strict_match, b.check_files);
     match action.as_str() {
+        "save" if !b.folders.is_empty() => Err(bad("folders is for a load: a save records the folders as they are")),
         "save" => s.call_json(Cmd::SaveState { path, strict_match, check_files }, DEFAULT_TIMEOUT).await,
-        "load" => s.call_json(Cmd::LoadState { path, strict_match, check_files }, DEFAULT_TIMEOUT).await,
+        "load" => {
+            let folders = state_folders(b.folders)?;
+            s.call_json(Cmd::LoadState { path, strict_match, check_files, folders }, DEFAULT_TIMEOUT).await
+        }
         _ => Err(ApiError::new(StatusCode::NOT_FOUND, format!("unknown action '{}' (save, load)", action))),
     }
 }
@@ -2276,6 +2301,13 @@ SAVE STATES
                    default: files rarely affect the machine's state,
                    hashing large folders takes time, and other files on
                    the drive show up as changes.
+                   "folders":{"C":"/abs/copy"} on a load: take the
+                   state's folder drive C: as mounted from /abs/copy
+                   instead of the folder it records, to load it in
+                   another run whose C: is a copy of that folder. The
+                   media are compared, and with "check_files" the files
+                   in /abs/copy too, and the load leaves C: mounted from
+                   it. 400 for a drive the state hasn't as a folder.
 
 SPEED
   POST   /api/speed {"cycles":"auto"}   the CPU speed, as `cycles` takes it

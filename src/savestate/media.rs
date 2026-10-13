@@ -166,6 +166,32 @@ fn listed(info: &DriveInfo) -> Vec<PathBuf> {
     if info.images.is_empty() { info.image.iter().cloned().collect() } else { info.images.clone() }
 }
 
+/// A host folder as a state's media record shows it: absolute, without
+/// Windows' `\?\` prefix.
+pub fn shown_folder(path: &Path) -> String {
+    display_host_path(&std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()))
+}
+
+/// Take the folder drives of `media` that `folders` names (by drive number)
+/// as mounted from those host folders: a load that puts a state saved in
+/// one folder into a machine whose drive shows a copy of it. Refused for a
+/// drive the state hasn't as a folder drive (none, or one of images or an
+/// overlay).
+pub fn relocate(media: &mut [Medium], folders: &[(u8, PathBuf)]) -> Result<(), String> {
+    for (drive, folder) in folders {
+        let key = drive_key(*drive);
+        let name = drive_name(&key);
+        let Some(medium) = media.iter_mut().find(|m| m.drive == key) else {
+            return Err(format!("{} isn't in the state, so it can't be taken from {}", name, folder.display()));
+        };
+        if medium.folder.is_none() || !medium.images.is_empty() || medium.overlay.is_some() {
+            return Err(format!("{} isn't a folder drive in the state; folders takes only those", name));
+        }
+        medium.folder = Some(shown_folder(folder));
+    }
+    Ok(())
+}
+
 fn medium(info: &DriveInfo) -> Option<Medium> {
     // A CUE sheet's tracks are in the files it names.
     let paths: Vec<PathBuf> = listed(info)

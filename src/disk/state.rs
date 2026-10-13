@@ -52,6 +52,7 @@ impl DiskController {
             emm_device: _,
             reverts: _,
             copies_from: _,
+            folders_from_state: _,
             shared_from_state: _,
             // Told as the drive was mounted.
             notes: _,
@@ -190,13 +191,21 @@ impl DiskController {
         dir.load(r)?;
         image.load(r)?;
         changed.load(r)?;
+        // Relative paths are the emulator's working directory's, as they
+        // were when the drive was mounted.
+        let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
+        let spec_of = |text: &str| {
+            let tokens = tokenize(text).map_err(StateError::Invalid)?;
+            parse_mount_spec(drive, &tokens, &cwd, None).map_err(StateError::Invalid)
+        };
+        // A folder drive the load takes from another folder is mounted from it.
+        if let (Some(text), Some((_, folder))) = (&mount, self.folders_from_state.iter().find(|(d, _)| *d == drive)) {
+            let spec = MountSpec { path: folder.clone(), ..spec_of(text)? };
+            mount = Some(state_value(&spec));
+        }
         let now = self.drive(drive).and_then(|d| d.mount.as_ref()).map(state_value);
         if let Some(text) = mount.as_ref().filter(|&text| now.as_ref() != Some(text)) {
-            // Relative paths are the emulator's working directory's, as
-            // they were when the drive was mounted.
-            let tokens = tokenize(text).map_err(StateError::Invalid)?;
-            let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
-            let mut spec = parse_mount_spec(drive, &tokens, &cwd, None).map_err(StateError::Invalid)?;
+            let mut spec = spec_of(text)?;
             spec.opts.boot = self.boot_drive() == Some(drive);
             self.mount(drive, &spec.path, spec.opts, true)
                 .map_err(|e| StateError::Mismatch(format!("drive {} can't be mounted: {}", name, e)))?;

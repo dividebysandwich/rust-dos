@@ -973,6 +973,9 @@ pub struct DiskController {
     /// The state file being loaded, whose copies of disks the drives are
     /// offered once they are mounted as it has them (savestate/disks.rs).
     pub(crate) copies_from: Option<PathBuf>,
+    /// The folder drives the state being loaded takes as mounted from other
+    /// host folders, by drive number (a debug server load's `folders`).
+    pub folders_from_state: Vec<(u8, PathBuf)>,
     /// The disks made of shared host directories that a state being loaded
     /// has, with their manifests, for once the drives are mounted as it
     /// has them (`restore_shared`).
@@ -1032,6 +1035,7 @@ impl DiskController {
             emm_device: false,
             reverts: Vec::new(),
             copies_from: None,
+            folders_from_state: Vec::new(),
             shared_from_state: None,
             notes: Vec::new(),
             media: Cell::new(None),

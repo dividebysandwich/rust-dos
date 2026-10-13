@@ -228,3 +228,72 @@ fn a_check_files_load_names_the_files_changed_since_the_save_and_one_without_it_
     assert!(unchecked.len() == 1 && unchecked[0].as_str().unwrap().starts_with("drive C: wasn't checked"), "{}", loaded);
     assert_eq!(post("/api/control/quit", json!({})).0, 200);
 }
+
+/// The shell started and the machine paused, on the emulator at `addr`.
+fn paused_at_the_prompt(addr: SocketAddr) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !http(addr, "GET", "/api/status", &[], None).1["program"].as_str().is_some_and(str::is_empty) {
+        assert!(Instant::now() < deadline, "the shell starts");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(http(addr, "POST", "/api/control/pause", &[], Some(json!({}))).0, 200);
+}
+
+#[test]
+fn a_load_takes_a_folder_drive_from_a_copy_of_its_folder_in_another_run() {
+    let root = std::env::temp_dir().join(format!("rust-dos-load-folders-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let (first, second) = (root.join("first"), root.join("second"));
+    std::fs::create_dir_all(first.join("c").join("SAVES")).unwrap();
+    std::fs::write(first.join("c").join("CONFIG.DAT"), "sound=1").unwrap();
+    let state = root.join("a.state").display().to_string();
+
+    // The first run saves its machine, with a record of the files on C:.
+    let (emulator, addr) = start(&first);
+    paused_at_the_prompt(addr);
+    let save = json!({"path": state, "strict_match": true, "check_files": true});
+    let (status, saved) = http(addr, "POST", "/api/state/save", &[], Some(save));
+    assert_eq!(status, 200, "{}", saved);
+    assert_eq!(http(addr, "POST", "/api/control/quit", &[], Some(json!({}))).0, 200);
+    drop(emulator);
+
+    // The second run's C: is a copy of the first's folder, in another place.
+    std::fs::create_dir_all(second.join("c").join("SAVES")).unwrap();
+    std::fs::write(second.join("c").join("CONFIG.DAT"), "sound=1").unwrap();
+    let (_emulator, addr) = start(&second);
+    paused_at_the_prompt(addr);
+    let post = |path: &str, body: Value| http(addr, "POST", path, &[], Some(body));
+    let copy = second.join("c").display().to_string();
+    let load = |folders: Value| json!({"path": state, "strict_match": true, "check_files": true, "folders": folders});
+
+    // Without folders the state's C: is another folder: refused.
+    let (status, refused) = post("/api/state/load", json!({"path": state, "strict_match": true, "check_files": true}));
+    assert_eq!(status, 409, "{}", refused);
+    assert!(refused["differences"][0].as_str().unwrap().starts_with("drive C: folder: the state has"), "{}", refused);
+
+    // A drive the state hasn't, a relative path, and folders on a save are refused.
+    let (status, refused) = post("/api/state/load", load(json!({"D": copy})));
+    assert_eq!((status, refused["unchanged"].as_bool()), (400, Some(true)), "{}", refused);
+    let (status, refused) = post("/api/state/load", load(json!({"C": "c"})));
+    assert_eq!(status, 400, "{}", refused);
+    let (status, refused) = post("/api/state/save", json!({"path": state, "folders": {"C": copy}}));
+    assert_eq!(status, 400, "{}", refused);
+
+    // A file of the copy that differs from the record is named, and nothing is loaded.
+    std::fs::write(second.join("c").join("CONFIG.DAT"), "sound=0").unwrap();
+    let (status, refused) = post("/api/state/load", load(json!({"C": copy})));
+    assert_eq!(status, 409, "{}", refused);
+    assert_eq!(refused["differences"], json!(["drive C: file CONFIG.DAT: its contents differ from when it was saved"]));
+    std::fs::write(second.join("c").join("CONFIG.DAT"), "sound=1").unwrap();
+
+    // With the copy as it was, the state loads and C: stays the copy.
+    let (status, loaded) = post("/api/state/load", load(json!({"c": copy})));
+    assert_eq!(status, 200, "{}", loaded);
+    assert_eq!(loaded["folders"], json!({"C": copy}), "{}", loaded);
+    assert_eq!(loaded["header"]["media"][0]["folder"].as_str(), Some(first.join("c").display().to_string().as_str()));
+    let drives = http(addr, "GET", "/api/drive", &[], None).1;
+    assert_eq!(drives["drives"]["C"]["path"].as_str(), Some(copy.as_str()), "{}", drives);
+    let entries = http(addr, "GET", "/api/journal?after=0&type=state_loaded", &[], None).1;
+    assert_eq!(entries["entries"][0]["folders"], json!({"C": copy}), "{}", entries);
+    assert_eq!(post("/api/control/quit", json!({})).0, 200);
+}

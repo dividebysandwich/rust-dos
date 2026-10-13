@@ -722,13 +722,38 @@ counts as a change. Labels, the files' times
 and read-only folders' contents aren't compared. Z: and X:, which the
 machine makes itself, aren't listed.
 
+#### Loading a state in another run
+
+A state records a folder drive by its host folder, so a load in another
+run whose C: shows another folder (a fresh copy for each run, say) finds
+a different folder: a strict-match load refuses it, and a plain load
+mounts the state's folder again. `"folders"` on a load names the folder
+drives to take from other host folders, by letter, each an absolute path:
+
+```sh
+cp -r /runs/1/c /runs/2/c   # C: as it was when the state was saved
+curl -s $J -XPOST -d '{"path":"/work/a.state","strict_match":true,"check_files":true,"folders":{"C":"/runs/2/c"}}' $H/api/state/load
+```
+
+The load then takes the state as if it had been saved with C: mounted
+from `/runs/2/c`: the media are compared with that folder, a
+`check_files` load compares the files in it with the state's record, and
+the load leaves C: mounted from it, with the files the state had open
+opened again there. A strict-match load with `check_files` thereby
+loads the state only onto a copy holding what C: held at the save. The
+reply and the journal's `state_loaded` entry have `folders`, the folders
+taken; the reply's header keeps the folders the state records. A drive
+the state hasn't as a folder drive (none, or one of disk images or with
+an overlay) is refused with 400 and nothing is loaded, as is a save with
+`folders`.
+
 #### Replies
 
 A save replies `{"saved": path, "format", "emulator", "header"}` and a load
 `{"loaded": path, "format", "emulator", "header"}`, with `differences`
 after a plain load that found some, `debugger_reset` after a strict-match
-load, and `unchecked` after a `check_files` load of a state without a
-record of the files.
+load, `unchecked` after a `check_files` load of a state without a
+record of the files, and `folders` after a load that took some.
 
 - `format`: the version of the file's layout.
 - `emulator`: the version of the running rust-dos.
@@ -768,7 +793,8 @@ Errors:
 
 - **400** `{"error", "loaded":false, "unchanged":true}`: the load failed (no
   such file, which reads `empty`, a file that isn't a state, a state of
-  another `memsize`, a drive of the state that can't be mounted,
+  another `memsize`, a drive of the state that can't be mounted, a
+  `folders` drive the state hasn't as a folder drive,
   RetroAchievements hardcore mode) and the machine, its
   settings and its hardware are as they were. A save that can't write its
   file, and a body without `path`, get a 400 with only `error`.
