@@ -740,6 +740,106 @@ fn code_traced_with_tf_takes_a_single_step_trap_after_every_instruction() {
 }
 
 #[test]
+fn popf_at_ring_0_runs_in_translated_code() {
+    // As Windows' VMM saves and restores the flags: the arithmetic flags,
+    // DF, IOPL and IF through POPFD, and the low word through POPF.
+    let (mut a, mut b) = twins(|rig| {
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.xor(ebx, ebx)?;
+            a.mov(ecx, 100u32)?;
+            let mut top = a.create_label();
+            a.set_label(&mut top)?;
+            a.stc()?;
+            a.pushfd()?;
+            a.clc()?;
+            a.popfd()?;
+            a.adc(ebx, 0)?;
+            a.pushfd()?;
+            a.or(dword_ptr(esp), 0x3400)?;
+            a.and(dword_ptr(esp), !0x200)?;
+            a.popfd()?;
+            a.pushfd()?;
+            a.pop(eax)?;
+            a.add(esi, eax)?;
+            a.pushfd()?;
+            a.and(dword_ptr(esp), !0x3401)?;
+            a.or(dword_ptr(esp), 0x200)?;
+            a.popfd()?;
+            a.cmp(ebx, ecx)?;
+            a.pushf()?;
+            a.xor(word_ptr(esp), 0x8C5)?;
+            a.popf()?;
+            a.setb(dl)?;
+            a.add(edi, edx)?;
+            a.dec(ecx)?;
+            a.jnz(top)?;
+            a.pushfd()?;
+            a.pop(ebp)?;
+            a.hlt()
+        }));
+    });
+    let stats = run_both(&mut a, &mut b);
+    assert_eq!(b.cpu.ebx(), 100);
+    assert_eq!(b.cpu.ebp() & 0x3600, 0x0200, "IOPL 0 and IF set at the end");
+    if AVAILABLE {
+        assert_eq!(untranslated(&stats), 0, "{:?}", stats);
+    }
+}
+
+#[test]
+fn popfd_that_sets_if_lets_a_waiting_interrupt_in_after_it() {
+    let (mut a, mut b) = twins(|rig| {
+        with_timer(rig, |a| {
+            a.pushfd()?;
+            a.and(dword_ptr(esp), !0x200)?;
+            a.popfd()?;
+            for _ in 0..20 {
+                a.inc(esi)?;
+            }
+            a.pushfd()?;
+            a.or(dword_ptr(esp), 0x200)?;
+            a.popfd()?;
+            a.inc(ebp)?;
+            a.add(ebx, ebp)
+        });
+    });
+    run_both(&mut a, &mut b);
+    assert!(b.cpu.edi() > 10, "IRQ 0 came {} times", b.cpu.edi());
+}
+
+#[test]
+fn popfd_where_it_cant_load_if_or_loads_id_runs_as_its_handler() {
+    // At ring 3 with IOPL 0, IF and IOPL stay as they were; at ring 0, a
+    // POPFD that flips ID (CPUID's detection, on a Pentium) goes to the
+    // handler too.
+    let (mut a, mut b) = twins(|rig| {
+        rig.cpu.model = rust_dos::cpu::CpuModel::Pentium;
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.pushfd()?;
+            a.xor(dword_ptr(esp), 0x20_0000)?;
+            a.popfd()?;
+            a.pushfd()?;
+            a.pop(esi)?;
+            a.pushfd()?;
+            a.or(dword_ptr(esp), 0x200)?;
+            a.popfd()?;
+            to_ring3(a)
+        }));
+        rig.ring3(|a| {
+            a.pushfd()?;
+            a.xor(dword_ptr(esp), 0x3201)?;
+            a.popfd()?;
+            a.pushfd()?;
+            a.pop(edi)?;
+            a.hlt()
+        });
+    });
+    run_both(&mut a, &mut b);
+    assert_eq!(b.cpu.esi() & 0x20_0000, 0x20_0000, "ID flipped");
+    assert_eq!(b.cpu.edi() & 0x3201, 0x0201, "IF and IOPL kept, CF loaded");
+}
+
+#[test]
 fn jumps_within_a_block_and_out_of_it_keep_the_counts() {
     // The block from LOOP goes on after its conditional jumps: one to a
     // later instruction in it (past two), every other time around, and one
@@ -3711,104 +3811,4 @@ fn watched_writes_bump_every_blocks_generation_on_the_recompiler_too() {
         let (_, translated) = data_stores(false);
         assert!(translated < interpreted, "the recompiler bumped {} times without watching", translated);
     }
-}
-
-#[test]
-fn popf_at_ring_0_runs_in_translated_code() {
-    // As Windows' VMM saves and restores the flags: the arithmetic flags,
-    // DF, IOPL and IF through POPFD, and the low word through POPF.
-    let (mut a, mut b) = twins(|rig| {
-        rig.load(CODE, &asm32(CODE, |a| {
-            a.xor(ebx, ebx)?;
-            a.mov(ecx, 100u32)?;
-            let mut top = a.create_label();
-            a.set_label(&mut top)?;
-            a.stc()?;
-            a.pushfd()?;
-            a.clc()?;
-            a.popfd()?;
-            a.adc(ebx, 0)?;
-            a.pushfd()?;
-            a.or(dword_ptr(esp), 0x3400)?;
-            a.and(dword_ptr(esp), !0x200)?;
-            a.popfd()?;
-            a.pushfd()?;
-            a.pop(eax)?;
-            a.add(esi, eax)?;
-            a.pushfd()?;
-            a.and(dword_ptr(esp), !0x3401)?;
-            a.or(dword_ptr(esp), 0x200)?;
-            a.popfd()?;
-            a.cmp(ebx, ecx)?;
-            a.pushf()?;
-            a.xor(word_ptr(esp), 0x8C5)?;
-            a.popf()?;
-            a.setb(dl)?;
-            a.add(edi, edx)?;
-            a.dec(ecx)?;
-            a.jnz(top)?;
-            a.pushfd()?;
-            a.pop(ebp)?;
-            a.hlt()
-        }));
-    });
-    let stats = run_both(&mut a, &mut b);
-    assert_eq!(b.cpu.ebx(), 100);
-    assert_eq!(b.cpu.ebp() & 0x3600, 0x0200, "IOPL 0 and IF set at the end");
-    if AVAILABLE {
-        assert_eq!(untranslated(&stats), 0, "{:?}", stats);
-    }
-}
-
-#[test]
-fn popfd_that_sets_if_lets_a_waiting_interrupt_in_after_it() {
-    let (mut a, mut b) = twins(|rig| {
-        with_timer(rig, |a| {
-            a.pushfd()?;
-            a.and(dword_ptr(esp), !0x200)?;
-            a.popfd()?;
-            for _ in 0..20 {
-                a.inc(esi)?;
-            }
-            a.pushfd()?;
-            a.or(dword_ptr(esp), 0x200)?;
-            a.popfd()?;
-            a.inc(ebp)?;
-            a.add(ebx, ebp)
-        });
-    });
-    run_both(&mut a, &mut b);
-    assert!(b.cpu.edi() > 10, "IRQ 0 came {} times", b.cpu.edi());
-}
-
-#[test]
-fn popfd_where_it_cant_load_if_or_loads_id_runs_as_its_handler() {
-    // At ring 3 with IOPL 0, IF and IOPL stay as they were; at ring 0, a
-    // POPFD that flips ID (CPUID's detection, on a Pentium) goes to the
-    // handler too.
-    let (mut a, mut b) = twins(|rig| {
-        rig.cpu.model = rust_dos::cpu::CpuModel::Pentium;
-        rig.load(CODE, &asm32(CODE, |a| {
-            a.pushfd()?;
-            a.xor(dword_ptr(esp), 0x20_0000)?;
-            a.popfd()?;
-            a.pushfd()?;
-            a.pop(esi)?;
-            a.pushfd()?;
-            a.or(dword_ptr(esp), 0x200)?;
-            a.popfd()?;
-            to_ring3(a)
-        }));
-        rig.ring3(|a| {
-            a.pushfd()?;
-            a.xor(dword_ptr(esp), 0x3201)?;
-            a.popfd()?;
-            a.pushfd()?;
-            a.pop(edi)?;
-            a.hlt()
-        });
-    });
-    run_both(&mut a, &mut b);
-    assert_eq!(b.cpu.esi() & 0x20_0000, 0x20_0000, "ID flipped");
-    assert_eq!(b.cpu.edi() & 0x3201, 0x0201, "IF and IOPL kept, CF loaded");
 }
