@@ -1006,6 +1006,38 @@ impl Gen<'_> {
         self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, leave: true });
     }
 
+    /// `Uop::FBailPrecise` (see `x64::Gen::fpu_bail_precise`).
+    fn fpu_bail_precise(&mut self, regs: u8, directed: bool) {
+        let at = self.ops.new_dynamic_label();
+        if directed {
+            self.field(Access::Ldr16, 0, layout::fpu::CONTROL);
+            dynasm!(self.ops ; .arch aarch64 ; tst w0, 0xC00 ; b.eq >precise_done);
+        }
+        self.field(Access::Ldr64, 1, layout::fpu::TOP);
+        for i in (0..8).filter(|i| regs >> i & 1 != 0) {
+            self.cpu_addr(2, layout::fpu::STALE);
+            dynasm!(self.ops
+                ; .arch aarch64
+                ; add w3, w1, i
+                ; and w3, w3, 7
+                ; ldrb w0, [x2, x3]
+                ; cbnz w0, >precise_next
+            );
+            self.cpu_addr(2, layout::fpu::X80);
+            dynasm!(self.ops
+                ; .arch aarch64
+                ; add x2, x2, x3, lsl 4
+                ; ldr x0, [x2]
+                ; tst x0, 0x7FF
+                ; b.ne =>at
+                ; precise_next:
+            );
+        }
+        dynasm!(self.ops ; .arch aarch64 ; precise_done:);
+        let end = self.end();
+        self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, leave: true });
+    }
+
     /// `Uop::FToInt`: the conversion inline where the control word rounds
     /// to nearest or chops and the result fits, else through
     /// `jit_fpu_to_int`. (AArch64's conversions saturate and make a NaN 0,
@@ -1936,6 +1968,7 @@ impl Gen<'_> {
                 self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, leave: false });
             }
             Uop::FpuGuard { valid } => self.fpu_guard(valid),
+            Uop::FBailPrecise { regs, directed } => self.fpu_bail_precise(regs, directed),
             Uop::FGet { x, i } => {
                 self.fpu_phys(1, i);
                 self.cpu_addr(2, layout::fpu::F64);

@@ -3151,6 +3151,88 @@ fn fpu_sums_of_80_bit_values_round_to_doubles_as_the_handlers_do() {
 }
 
 #[test]
+fn fpu_stores_and_compares_of_80_bit_values_round_once_on_both_cores() {
+    // FIST, FST, FRNDINT and FCOM of 80 bits a double hasn't, under each
+    // rounding: from the 80 bits, not from their double (rounded to
+    // nearest), on both cores.
+    let mut values = EXTENDED.to_vec();
+    values.extend([
+        (0x4000, 0xBFFF_FFFF_FFFF_FFF0), // just under 3
+        (0xC000, 0xBFFF_FFFF_FFFF_FFF0), // just over -3
+        (0x3FFF, 0x8000_017F_FFFF_FFFF), // just under a single's tie
+        (0x3FFE, 0x8000_0000_0000_0001), // just over 0.5
+        (0x4000, 0xA000_0000_0000_0001), // just over 2.5
+    ]);
+    let (input, output, three) = (DATA, DATA + 0x8000, DATA + 0x7FF0);
+    let n = values.len() as u32 * 4;
+    let (mut a, mut b) = twins(|rig| {
+        for (k, (se, man)) in values.iter().enumerate() {
+            for rc in 0..4u32 {
+                let at = input + 16 * (4 * k as u32 + rc);
+                rig.write32(at, *man as u32);
+                rig.write32(at + 4, (man >> 32) as u32);
+                rig.write32(at + 8, *se as u32);
+                rig.write32(at + 12, 0x037F | rc << 10);
+            }
+        }
+        rig.write32(three, 0);
+        rig.write32(three + 4, (3f64.to_bits() >> 32) as u32);
+        rig.load(CODE, &asm32(CODE, |a| {
+            let mut again = a.create_label();
+            a.fninit()?;
+            a.mov(esi, input)?;
+            a.mov(edi, output)?;
+            a.mov(ecx, n)?;
+            a.set_label(&mut again)?;
+            a.fldcw(word_ptr(esi + 12))?;
+            a.fld(qword_ptr(three))?;
+            a.fld(tword_ptr(esi))?;
+            a.fist(dword_ptr(edi))?;
+            a.fist(word_ptr(edi + 4))?;
+            a.fst(dword_ptr(edi + 8))?;
+            a.fst(qword_ptr(edi + 12))?;
+            a.fcom(qword_ptr(three))?;
+            a.fnstsw(ax)?;
+            a.mov(word_ptr(edi + 20), ax)?;
+            a.fcom_2(st0, st1)?;
+            a.fnstsw(ax)?;
+            a.mov(word_ptr(edi + 24), ax)?;
+            a.fld(st0)?;
+            a.frndint()?;
+            a.fstp(qword_ptr(edi + 28))?;
+            a.fistp(dword_ptr(edi + 36))?;
+            a.fstp(st0)?;
+            a.add(esi, 16)?;
+            a.add(edi, 64)?;
+            a.dec(ecx)?;
+            a.jnz(again)?;
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    let k = |se_man: (u16, u64)| values.iter().position(|&v| v == se_man).unwrap() as u32;
+    let at = |k: u32, rc: u32| output + 64 * (4 * k + rc);
+    let read64 = |rig: &Rig, at: u32| rig.read32(at) as u64 | (rig.read32(at + 4) as u64) << 32;
+    let under_3 = k((0x4000, 0xBFFF_FFFF_FFFF_FFF0));
+    // Chopped: 2, which the double (3.0) would have made 3.
+    assert_eq!(b.read32(at(under_3, 3)), 2);
+    assert_eq!(b.read32(at(under_3, 3) + 36), 2);
+    assert_eq!(read64(&b, at(under_3, 3) + 28), 2f64.to_bits());
+    // Below 3 by the 80 bits, though its double is 3: C0 set, C3 clear.
+    assert_eq!(b.read32(at(under_3, 0) + 20) & 0x4500, 0x0100);
+    assert_eq!(b.read32(at(under_3, 0) + 24) & 0x4500, 0x0100);
+    // To nearest, the double 3.0 itself.
+    assert_eq!(read64(&b, at(under_3, 0) + 12), 3f64.to_bits());
+    // A single rounded once: 3F800001h (the double would tie and go even).
+    assert_eq!(b.read32(at(k((0x3FFF, 0x8000_017F_FFFF_FFFF)), 0) + 8), 0x3F80_0001);
+    // Just under 2, chopped to a double: 1.9999999999999998.
+    assert_eq!(read64(&b, at(k((0x3FFF, 0xFFFF_FFFF_FFFF_FFFF)), 3) + 12), 0x3FFF_FFFF_FFFF_FFFF);
+    // Just over 2.5 and 0.5, to nearest: 3 and 1, not ties going even.
+    assert_eq!(b.read32(at(k((0x4000, 0xA000_0000_0000_0001)), 0)), 3);
+    assert_eq!(b.read32(at(k((0x3FFE, 0x8000_0000_0000_0001)), 0)), 1);
+}
+
+#[test]
 fn fpu_sums_in_fast_mode_are_the_doubles_on_both_cores() {
     // The same sums come out otherwise (1 and a bit a double hasn't, ...),
     // and the cores agree on them.

@@ -1825,6 +1825,7 @@ impl Gen<'_> {
                 self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, wb, reload, leave: false });
             }
             Uop::FpuGuard { valid } => self.fpu_guard(valid),
+            Uop::FBailPrecise { regs, directed } => self.fpu_bail_precise(regs, directed),
             Uop::FGet { x, i } => {
                 self.fpu_phys(RAX, i);
                 dynasm!(self.ops ; .arch x64 ; movsd Rx(x.0), QWORD [rbx + rax * 8 + FPU_F64]);
@@ -2152,6 +2153,35 @@ impl Gen<'_> {
         // The handler runs the instruction then, and the block stops after
         // it: what the code after it knows of the registers holds only
         // where this one's operations ran.
+        let end = self.end();
+        let (wb, reload) = (self.cache.dirty, self.cache.loaded);
+        self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, wb, reload, leave: true });
+    }
+
+    /// `Uop::FBailPrecise`: the handler runs the instruction where one of
+    /// the registers in `regs` isn't stale and has significand bits below a
+    /// double's 53 (with `directed`, and the control word doesn't round to
+    /// nearest).
+    fn fpu_bail_precise(&mut self, regs: u8, directed: bool) {
+        let at = self.ops.new_dynamic_label();
+        if directed {
+            dynasm!(self.ops ; .arch x64 ; test WORD [rbx + FPU_CONTROL], 0xC00 ; jz >precise_done);
+        }
+        dynasm!(self.ops ; .arch x64 ; mov eax, DWORD [rbx + FPU_TOP]);
+        for i in (0..8).filter(|i| regs >> i & 1 != 0) {
+            dynasm!(self.ops
+                ; .arch x64
+                ; lea ecx, [rax + i]
+                ; and ecx, 7
+                ; cmp BYTE [rbx + rcx + FPU_STALE], 0
+                ; jne >precise_next
+                ; shl ecx, 4
+                ; test WORD [rbx + rcx + FPU_X80], 0x7FF
+                ; jnz =>at
+                ; precise_next:
+            );
+        }
+        dynasm!(self.ops ; .arch x64 ; precise_done:);
         let end = self.end();
         let (wb, reload) = (self.cache.dirty, self.cache.loaded);
         self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, wb, reload, leave: true });

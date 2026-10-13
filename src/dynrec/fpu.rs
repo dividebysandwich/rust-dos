@@ -4,7 +4,9 @@
 //! which the handlers compute on the 80 bits, call the handlers' own code,
 //! except in fast mode (`Cpu::fpu_fast`), where they are the doubles' too.
 //! Every instruction starts with a `FpuGuard`, which leaves the rare cases
-//! (no coprocessor, an empty register) to the handler.
+//! (no coprocessor, an empty register) to the handler. Stores, integer
+//! conversions and compares also leave a register whose 80 bits hold more
+//! than its double to the handler (`FBailPrecise`).
 
 use iced_x86::{Code, Instruction, OpKind, Register};
 
@@ -52,6 +54,9 @@ fn fast_addsub_value(u: &mut Vec<Uop>, kind: u32) {
 pub fn translate(instr: &Instruction, fast: bool, u: &mut Vec<Uop>) -> bool {
     use Code::*;
     let guard = |u: &mut Vec<Uop>, valid: u8| u.push(Uop::FpuGuard { valid });
+    // Rounding the registers' doubles would round twice where their 80
+    // bits hold more: the handler then has the instruction.
+    let precise = |u: &mut Vec<Uop>, regs: u8, directed: bool| u.push(Uop::FBailPrecise { regs, directed });
     // A single in memory, into X0.
     let single = |u: &mut Vec<Uop>| -> bool {
         if mem(instr, T1, 4, false, u).is_none() {
@@ -123,6 +128,7 @@ pub fn translate(instr: &Instruction, fast: bool, u: &mut Vec<Uop>) -> bool {
         }
         Fst_m64fp | Fstp_m64fp => {
             guard(u, 1);
+            precise(u, 1, true);
             if mem(instr, T1, 8, true, u).is_none() {
                 return false;
             }
@@ -175,6 +181,7 @@ pub fn translate(instr: &Instruction, fast: bool, u: &mut Vec<Uop>) -> bool {
         }
         Fcom_m64fp | Fcomp_m64fp => {
             guard(u, 1);
+            precise(u, 1, false);
             if !double(u, false) {
                 return false;
             }
@@ -243,6 +250,7 @@ pub fn translate(instr: &Instruction, fast: bool, u: &mut Vec<Uop>) -> bool {
         }
         Fst_m32fp | Fstp_m32fp => {
             guard(u, 1);
+            precise(u, 1, false);
             if mem(instr, T1, 4, true, u).is_none() {
                 return false;
             }
@@ -256,6 +264,7 @@ pub fn translate(instr: &Instruction, fast: bool, u: &mut Vec<Uop>) -> bool {
         Fist_m16int | Fist_m32int | Fistp_m16int | Fistp_m32int => {
             let size = if matches!(instr.code(), Fist_m16int | Fistp_m16int) { 2 } else { 4 };
             guard(u, 1);
+            precise(u, 1, false);
             if mem(instr, T1, size, true, u).is_none() {
                 return false;
             }
@@ -387,6 +396,7 @@ pub fn translate(instr: &Instruction, fast: bool, u: &mut Vec<Uop>) -> bool {
         }
         Fcom_m32fp | Fcomp_m32fp => {
             guard(u, 1);
+            precise(u, 1, false);
             if !single(u) {
                 return false;
             }
@@ -400,6 +410,7 @@ pub fn translate(instr: &Instruction, fast: bool, u: &mut Vec<Uop>) -> bool {
         | Fucom_st0_sti | Fucomp_st0_sti | Fucompp => {
             let Some((lhs, rhs, pops)) = comparison::fcom_registers(instr) else { return false };
             guard(u, 1 << lhs | 1 << rhs);
+            precise(u, 1 << lhs | 1 << rhs, false);
             u.push(Uop::FGet { x: X0, i: lhs as u8 });
             u.push(Uop::FGet { x: X1, i: rhs as u8 });
             u.push(Uop::FCom { a: X0, b: X1 });

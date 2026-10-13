@@ -294,3 +294,20 @@ fn test_sum_stored_as_double_rounds_to_nearest() {
     run_cpu_code(&mut cpu, &[0xDD, 0x1E, 0x10, 0x10]);
     assert_eq!(cpu.bus.read_64(0x1010), 0x3FD3_3333_3333_3334);
 }
+
+/// FISTP QWORD of 3 - 2^-60 under chop stores 2, as an x87 does: from the
+/// 80 bits, not from their double (3.0).
+#[test]
+fn test_fistp_int64_chops_the_80_bits() {
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    cpu.bus.write_64(0x1000, 0xBFFF_FFFF_FFFF_FFF0);
+    cpu.bus.write_16(0x1008, 0x4000);
+    cpu.bus.write_16(0x1020, 0x0F7F);
+    // D9 2E 20 10: FLDCW [1020]
+    run_cpu_code(&mut cpu, &[0xD9, 0x2E, 0x20, 0x10]);
+    // DB 2E 00 10: FLD TBYTE PTR [1000]
+    run_cpu_code(&mut cpu, &[0xDB, 0x2E, 0x00, 0x10]);
+    // DF 3E 10 10: FISTP QWORD PTR [1010]
+    run_cpu_code(&mut cpu, &[0xDF, 0x3E, 0x10, 0x10]);
+    assert_eq!(cpu.bus.read_64(0x1010), 2);
+}

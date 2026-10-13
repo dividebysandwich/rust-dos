@@ -257,6 +257,13 @@ pub enum Uop {
     /// reads as the real indefinite). The operations below read and write
     /// the registers as doubles (`f80::FpuRegs`), as the handlers do.
     FpuGuard { valid: u8 },
+    /// After an `FpuGuard`: the handler runs the instruction instead of the
+    /// operations after this one where one of the registers ST(i) with bit
+    /// i set in `regs` holds more than its double (`FpuRegs::beyond_double`),
+    /// which the handler then rounds from the 80 bits; with `directed`,
+    /// only where the control word rounds other than to nearest. The block
+    /// stops after it, as after an `FpuGuard`'s.
+    FBailPrecise { regs: u8, directed: bool },
     /// x = ST(i).
     FGet { x: X, i: u8 },
     /// ST(i) = x; with `canon`, x may be a denormal or a signalling NaN
