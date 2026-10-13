@@ -2626,8 +2626,18 @@ impl DiskController {
         self.close_file(sft)
     }
 
-    /// Empty the file `sft` if a create call left that for its first use.
+    /// Empty the file `sft` names if a create call left that for its first
+    /// use, through whichever handle: DOS emptied it for all of them.
     fn settle(&mut self, sft: u16) {
+        if self.open_files.values().any(|f| f.empty_on_use)
+            && let Some(key) = self.open_files.get(&sft).map(|f| f.key)
+        {
+            self.settle_where(|_, f| f.key == key);
+        }
+    }
+
+    /// Empty the file `sft` if a create call left that for its first use.
+    fn settle_one(&mut self, sft: u16) {
         if let Some(open) = self.open_files.get_mut(&sft)
             && open.empty_on_use
         {
@@ -2647,7 +2657,7 @@ impl DiskController {
         let pending: Vec<u16> =
             self.open_files.iter().filter(|&(&sft, f)| f.empty_on_use && which(sft, f)).map(|(&sft, _)| sft).collect();
         for sft in pending {
-            self.settle(sft);
+            self.settle_one(sft);
         }
     }
 
@@ -2685,7 +2695,9 @@ impl DiskController {
     /// Write a whole file at once, as COPY does: `data` at `dos_path`,
     /// replacing a file that is there, dated `stamp` (the packed DOS time
     /// and date) or now.
-    pub fn write_whole_file(&self, dos_path: &str, data: &[u8], stamp: Option<(u16, u16)>) -> Result<(), u8> {
+    pub fn write_whole_file(&mut self, dos_path: &str, data: &[u8], stamp: Option<(u16, u16)>) -> Result<(), u8> {
+        // Before the file is replaced: a FAT image's entry may move.
+        self.settle_named(dos_path);
         if let Some((drive, volume, parts)) = self.locate_fat(dos_path) {
             self.check_writable(drive)?;
             let (time, date) = stamp.unwrap_or_else(fat::dos_now);
@@ -2879,9 +2891,10 @@ impl DiskController {
         }
     }
 
-    /// Close every open file, for when the shell is reloaded.
+    /// Close every open file, for when the shell is reloaded. A file a
+    /// create call left for its first use keeps its bytes: the program
+    /// was aborted or the machine reset before it wrote its save.
     pub fn close_all_files(&mut self) {
-        self.settle_where(|_, _| true);
         self.open_files.clear();
         self.open_standard_devices();
     }
@@ -4399,6 +4412,34 @@ mod tests {
         assert_eq!(loaded.write_file(h, b"new"), Ok(3));
         loaded.close_file(h);
         assert_eq!(fs::read(base.join("SAVE.DAT")).unwrap(), b"new");
+    }
+
+    #[test]
+    fn an_aborted_program_keeps_the_file_its_create_left_unused() {
+        let base = scratch("create_abort");
+        fs::write(base.join("SAVE.DAT"), b"old save").unwrap();
+        let mut disk = DiskController::new(base.clone());
+        disk.create_file("C:\\SAVE.DAT", PSP).unwrap();
+        disk.close_all_files();
+        assert_eq!(fs::read(base.join("SAVE.DAT")).unwrap(), b"old save");
+    }
+
+    #[test]
+    fn a_create_empties_the_file_for_a_handle_opened_before_it() {
+        let base = scratch("create_shared");
+        fs::write(base.join("SAVE.DAT"), b"old save").unwrap();
+        let mut disk = DiskController::new(base.clone());
+        let before = disk.open_file("C:\\SAVE.DAT", 0x02, PSP).unwrap();
+        let created = disk.create_file("C:\\SAVE.DAT", PSP).unwrap();
+        assert_eq!(disk.write_file(before, b"new"), Ok(3));
+        disk.close_file(before);
+        disk.close_file(created);
+        assert_eq!(fs::read(base.join("SAVE.DAT")).unwrap(), b"new");
+        // A whole-file write by name empties first, not after.
+        let created = disk.create_file("C:\\SAVE.DAT", PSP).unwrap();
+        disk.write_whole_file("C:\\SAVE.DAT", b"copied", None).unwrap();
+        disk.close_file(created);
+        assert_eq!(fs::read(base.join("SAVE.DAT")).unwrap(), b"copied");
     }
 
     #[test]

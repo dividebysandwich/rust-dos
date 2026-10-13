@@ -36,11 +36,13 @@ struct SavedFile {
     mode: u8,
     device: Option<CharDevice>,
     position: u64,
-    /// Made by a create call and emptied on first use, which hasn't come.
-    empty_on_use: bool,
 }
 
-crate::state_fields!(SavedFile { sft, refs, fcb, drive, owner, key, path, mode, device, position, empty_on_use });
+crate::state_fields!(SavedFile { sft, refs, fcb, drive, owner, key, path, mode, device, position });
+
+/// Set in `SavedFile::refs` for a file a create call left to empty on its
+/// first use, which hasn't come: older states load with it clear.
+const EMPTY_ON_USE: u16 = 0x8000;
 
 impl DiskController {
     pub(crate) fn save_state(&self, w: &mut Writer) {
@@ -81,7 +83,7 @@ impl DiskController {
             };
             let saved = SavedFile {
                 sft,
-                refs: *refs,
+                refs: *refs | if *empty_on_use { EMPTY_ON_USE } else { 0 },
                 fcb: *fcb,
                 drive: *drive,
                 owner: *owner,
@@ -90,7 +92,6 @@ impl DiskController {
                 mode: *mode,
                 device,
                 position,
-                empty_on_use: *empty_on_use,
             };
             saved.save(w);
         }
@@ -137,6 +138,7 @@ impl DiskController {
 
         // Each open again, in its entry.
         let mut lost = Vec::new();
+        let mut empty_on_use = Vec::new();
         for file in files {
             let reopened = match file.device {
                 Some(device) => {
@@ -156,13 +158,19 @@ impl DiskController {
             open.key = file.key;
             open.path = file.path;
             open.mode = file.mode;
-            open.refs = file.refs;
+            open.refs = file.refs & !EMPTY_ON_USE;
+            if file.refs & EMPTY_ON_USE != 0 {
+                empty_on_use.push(file.sft);
+            }
             open.fcb = file.fcb;
             self.open_files.insert(file.sft, open);
             let _ = self.seek_file(file.sft, file.position as i64, 0);
-            // After the seek, which would empty the file.
-            if let Some(open) = self.open_files.get_mut(&file.sft) {
-                open.empty_on_use = file.empty_on_use;
+        }
+        // Once every file is open again: reopening or seeking one would
+        // empty another entry of the same file.
+        for sft in empty_on_use {
+            if let Some(open) = self.open_files.get_mut(&sft) {
+                open.empty_on_use = true;
             }
         }
         self.sft_dirty = u128::MAX;
