@@ -4195,7 +4195,8 @@ fn memory_operands_take_little_host_code() {
         let load = host_bytes(paging, |a| a.mov(eax, dword_ptr(esi + 4)));
         let store = host_bytes(paging, |a| a.mov(dword_ptr(edi + 4), eax));
         let both = host_bytes(paging, |a| a.add(dword_ptr(edi + 8), eax));
-        assert!(load < 220 && store < 280 && both < 450, "paging {paging}: {load}, {store}, {both} bytes");    }
+        assert!(load < 220 && store < 280 && both < 450, "paging {paging}: {load}, {store}, {both} bytes");
+    }
 }
 
 #[test]
