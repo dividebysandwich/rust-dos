@@ -3634,6 +3634,56 @@ fn fpu_qword_integer_stores_and_fwait_run_as_their_handlers() {
 }
 
 #[test]
+fn fpu_qword_integer_stores_round_from_the_80_bits() {
+    // Integers past a double's 53 bits load exactly and store back as they
+    // were; 2^52 + 1/2 rounds as the control word says. Neither is the
+    // register's double, so the handler stores them.
+    const VALUES: [u64; 4] = [(1 << 60) + 1, ((1u64 << 62) + 3).wrapping_neg(), (1 << 53) + 1, (1 << 53) + 3];
+    let (results, controls, half) = (DATA + 0x1000, DATA + 0x100, DATA + 0x120);
+    let (mut a, mut b) = twins(|rig| {
+        for (i, v) in VALUES.iter().enumerate() {
+            rig.write32(DATA + 8 * i as u32, *v as u32);
+            rig.write32(DATA + 8 * i as u32 + 4, (*v >> 32) as u32);
+        }
+        for rc in 0..4 {
+            rig.write32(controls + 4 * rc, 0x037F | rc << 10);
+        }
+        // 2^52 + 1/2 as 80 bits.
+        rig.write32(half, 1 << 10);
+        rig.write32(half + 4, 1 << 31);
+        rig.write32(half + 8, 16383 + 52);
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.fninit()?;
+            a.mov(ecx, 100u32)?;
+            let mut again = a.create_label();
+            a.set_label(&mut again)?;
+            for rc in 0..4u32 {
+                a.fldcw(word_ptr(controls + 4 * rc))?;
+                for i in 0..4u32 {
+                    a.fild(qword_ptr(DATA + 8 * i))?;
+                    a.fistp(qword_ptr(results + 0x40 * rc + 8 * i))?;
+                }
+                a.fld(tword_ptr(half))?;
+                a.fistp(qword_ptr(results + 0x40 * rc + 0x20))?;
+            }
+            a.dec(ecx)?;
+            a.jnz(again)?;
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    let qword = |at: u32| b.read32(at) as u64 | (b.read32(at + 4) as u64) << 32;
+    for rc in 0..4 {
+        for (i, v) in VALUES.iter().enumerate() {
+            assert_eq!(qword(results + 0x40 * rc + 8 * i as u32), *v, "RC {rc}, value {i}");
+        }
+        // Nearest (even), down, up, chop.
+        let rounded = (1u64 << 52) + [0, 0, 1, 0][rc as usize];
+        assert_eq!(qword(results + 0x40 * rc + 0x20), rounded, "RC {rc}");
+    }
+}
+
+#[test]
 fn an_fwait_with_mp_and_ts_set_faults_in_its_block() {
     const NM: u8 = 7;
     let (mut a, mut b) = twins(|rig| {

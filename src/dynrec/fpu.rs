@@ -282,6 +282,7 @@ pub fn translate(instr: &Instruction, fast: bool, u: &mut Vec<Uop>) -> bool {
             }
             u.push(Uop::BailUnlessRam { t: T1 });
             u.push(Uop::FGet { x: X0, i: 0 });
+            precise(u, 1, Precise::Int(X0));
             u.push(Uop::FToInt64 { lo: T0, hi: T2, x: X0 });
             u.push(Uop::FPop { n: 1 });
             // As the handler writes it: the low dword, then the high one.
