@@ -1558,9 +1558,13 @@ fn main() -> Result<(), String> {
             // The file layout's version, and this rust-dos's (the header has the one that saved it).
             let (format, emulator) = (slots::FORMAT, env!("CARGO_PKG_VERSION"));
             let result = if request.load {
-                host!().load_for_debugger(&path, request.strict_match, request.check_files).map(|(header, differences, unchecked)| {
+                let loaded = host!().load_for_debugger(&path, request.strict_match, request.check_files, &request.folders);
+                loaded.map(|(header, differences, unchecked)| {
                     let header = slots::reply_header(&header);
                     let mut reply = serde_json::json!({"loaded": path, "format": format, "emulator": emulator, "header": header});
+                    if !request.folders.is_empty() {
+                        reply["folders"] = debug::folders_json(&request.folders);
+                    }
                     strict_match_loaded = request.strict_match;
                     debugger_loaded = true;
                     if !differences.is_empty() {
@@ -2803,17 +2807,30 @@ impl MainHost<'_, '_> {
     /// changed files are differences like the others. The third list names
     /// the writable drives a `check_files` load couldn't check, as the
     /// state has no record of what was on them. Without `check_files` no
-    /// file is read.
+    /// file is read. `folders` takes the state's folder drives it names as
+    /// mounted from other host folders: they are compared (and with
+    /// `check_files` their files) as if the state had been saved with them,
+    /// and the load leaves the drives mounted from them. The header returned
+    /// has the folders the state records.
     #[allow(clippy::type_complexity)]
     fn load_for_debugger(
         &mut self,
         path: &std::path::Path,
         strict_match: bool,
         check_files: bool,
+        folders: &[(u8, PathBuf)],
     ) -> Result<(slots::Header, Vec<String>, Vec<String>), (u16, serde_json::Value)> {
         // Whatever failed, the machine, its settings and hardware are as they were.
         let failed = |e: String| (400, serde_json::json!({"error": e, "loaded": false, "unchanged": true}));
-        let (header, state) = self.read_state(path).map_err(failed)?;
+        let (mut header, state) = self.read_state(path).map_err(failed)?;
+        // A `check_files` state's media list every file: kept only when relocated.
+        let recorded = (!folders.is_empty()).then(|| header.media.clone());
+        if !folders.is_empty() {
+            let media = header.media.as_mut().ok_or_else(|| {
+                failed(format!("the state doesn't record its media (saved by rust-dos {}), so folders can't be taken", header.version))
+            })?;
+            savestate::media::relocate(media, folders).map_err(failed)?;
+        }
         let mut differences = slots::machine_differences(&header.machine, &self.machine.settings(self.settings));
         // The machine's clock is the mode's start plus emulated time.
         let start = self.deterministic.map(|start| start.format("%Y-%m-%d %H:%M:%S").to_string());
@@ -2850,7 +2867,13 @@ impl MainHost<'_, '_> {
             let error = format!("{} doesn't match this machine; nothing was loaded", path.display());
             return Err((409, serde_json::json!({"error": error, "loaded": false, "unchanged": true, "differences": differences})));
         }
-        let header = self.load_state(path, header, &state).map_err(failed)?;
+        self.cpu.bus.disk.folders_from_state = folders.to_vec();
+        let loaded = self.load_state(path, header, &state);
+        self.cpu.bus.disk.folders_from_state.clear();
+        let mut header = loaded.map_err(failed)?;
+        if let Some(recorded) = recorded {
+            header.media = recorded;
+        }
         Ok((header, differences, unchecked))
     }
 

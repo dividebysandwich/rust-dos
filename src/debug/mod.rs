@@ -372,8 +372,10 @@ pub enum Cmd {
     /// resets the debugger.
     /// A `check_files` save records the files on the writable drives,
     /// and a `check_files` load compares them (savestate/media.rs).
+    /// A load's `folders` takes the state's folder drives it names (by
+    /// number, 2 for C:) as mounted from those host folders instead.
     SaveState { path: String, strict_match: bool, check_files: bool },
-    LoadState { path: String, strict_match: bool, check_files: bool },
+    LoadState { path: String, strict_match: bool, check_files: bool, folders: Vec<(u8, String)> },
     /// Change the CPU speed (`cycles`) as the settings window does, which
     /// the front end does (`next_speed_request`).
     Speed { cycles: String },
@@ -398,6 +400,9 @@ pub struct StateRequest {
     /// Asked for with `check_files`: record or compare the files on the
     /// writable drives.
     pub check_files: bool,
+    /// A load's folder drives to take as mounted from other host folders
+    /// (see `Cmd::LoadState`).
+    pub folders: Vec<(u8, PathBuf)>,
     ctx: Ctx,
     if_state: Option<u64>,
     reply: oneshot::Sender<Answer>,
@@ -2201,7 +2206,10 @@ impl DebugHub {
                 self.told_ends = cpu.programs.ended;
                 let reset = request.strict_match.then(|| self.reset_after_load(cpu));
                 let differences = value.get("differences").cloned().unwrap_or_else(|| json!([]));
-                let fields = json!({"path": path, "strict_match": request.strict_match, "source": "debugger", "differences": differences});
+                let mut fields = json!({"path": path, "strict_match": request.strict_match, "source": "debugger", "differences": differences});
+                if let Some(folders) = value.get("folders") {
+                    fields["folders"] = folders.clone();
+                }
                 self.record(cpu, Kind::StateLoaded, fields);
                 if let Some((cleared, cancelled)) = reset {
                     value["debugger_reset"] = cleared.clone();
@@ -2370,12 +2378,14 @@ impl DebugHub {
             }
             Cmd::SaveState { path, strict_match, check_files } => {
                 let path = PathBuf::from(path);
-                self.state_requests.push(StateRequest { load: false, path, strict_match, check_files, ctx, if_state, reply: tx });
+                let folders = Vec::new();
+                self.state_requests.push(StateRequest { load: false, path, strict_match, check_files, folders, ctx, if_state, reply: tx });
                 return;
             }
-            Cmd::LoadState { path, strict_match, check_files } => {
+            Cmd::LoadState { path, strict_match, check_files, folders } => {
                 let path = PathBuf::from(path);
-                self.state_requests.push(StateRequest { load: true, path, strict_match, check_files, ctx, if_state, reply: tx });
+                let folders = folders.into_iter().map(|(drive, folder)| (drive, PathBuf::from(folder))).collect();
+                self.state_requests.push(StateRequest { load: true, path, strict_match, check_files, folders, ctx, if_state, reply: tx });
                 return;
             }
             Cmd::Speed { cycles } => {
@@ -3295,6 +3305,15 @@ fn bytes_record(bytes: &[u8]) -> Value {
         let digest = sha2::Sha256::digest(bytes);
         json!({"sha256": digest.iter().map(|b| format!("{:02x}", b)).collect::<String>()})
     }
+}
+
+/// A load's `folders` as its request had them: the host folder by drive letter.
+pub fn folders_json(folders: &[(u8, PathBuf)]) -> Value {
+    let map: Map<String, Value> = folders
+        .iter()
+        .map(|(drive, folder)| (crate::disk::drive_key(*drive), folder.display().to_string().into()))
+        .collect();
+    Value::Object(map)
 }
 
 /// Commands that change the machine (its input, memory, registers, drives,
@@ -4488,7 +4507,7 @@ mod tests {
         let (code, body) = refused.expect("refused with input queued");
         assert_eq!((taken, code), (0, 409));
         assert!(body["error"].as_str().unwrap().contains("queued input"), "{}", body);
-        let _load = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: true, check_files: false });
+        let _load = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: true, check_files: false, folders: Vec::new() });
         assert_eq!(take_state_requests(&mut hub).len(), 1, "a load drops the input");
     }
 
@@ -4516,7 +4535,7 @@ mod tests {
 
         // Sent with a strict-match save while running: only that save is refused.
         let mut strict = send(&mut cpu, &mut hub, Cmd::SaveState { path: "/tmp/a.state".into(), strict_match: true, check_files: false });
-        let _plain = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/b.state".into(), strict_match: false, check_files: false });
+        let _plain = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/b.state".into(), strict_match: false, check_files: false, folders: Vec::new() });
         let taken = take_state_requests(&mut hub);
         assert_eq!(taken.iter().map(|r| (r.load, r.strict_match)).collect::<Vec<_>>(), [(true, false)]);
         assert!(matches!(strict.rx.try_recv().map(|a| a.reply), Ok(Reply::ErrorJson(409, _))));
@@ -4785,7 +4804,7 @@ mod tests {
         answer(&mut cpu, &mut hub, sent, 0).unwrap();
         reply(&mut cpu, &mut hub, Cmd::Input { events: vec![ty("DIR"), wait(70), ty("\n")], wait: false }).unwrap();
         go(&mut cpu, &mut hub, &mut mode, 1600);
-        let sent = send(&mut cpu, &mut hub, Cmd::LoadState { path: "s".into(), strict_match: true, check_files: false });
+        let sent = send(&mut cpu, &mut hub, Cmd::LoadState { path: "s".into(), strict_match: true, check_files: false, folders: Vec::new() });
         carry_out_states(&mut cpu, &mut hub, &mut mode, &mut saved);
         answer(&mut cpu, &mut hub, sent, 0).unwrap();
         reply(&mut cpu, &mut hub, Cmd::Input { events: vec![ty("VER\n")], wait: false }).unwrap();
@@ -4862,7 +4881,7 @@ mod tests {
         // A load while running is refused as it arrives, strict match or
         // not, with the body a refused strict-match save has.
         for strict_match in [false, true] {
-            let mut load = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match, check_files: false });
+            let mut load = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match, check_files: false, folders: Vec::new() });
             let body = refusal(&mut load);
             assert_eq!(body["paused"], false, "{}", body);
             assert_eq!(body["precondition"], "paused", "{}", body);
@@ -4881,15 +4900,15 @@ mod tests {
         // A load sent while paused, with a resume in the same frame: the
         // machine runs when the front end would load it, so it is refused.
         pause(&mut cpu, &mut hub);
-        let mut load = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: false, check_files: false });
+        let mut load = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: false, check_files: false, folders: Vec::new() });
         reply(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: None }).unwrap();
         assert!(take_state_requests(&mut hub).is_empty());
         assert_eq!(refusal(&mut load)["paused"], false);
 
         // Paused with nothing pending, both loads are taken.
         pause(&mut cpu, &mut hub);
-        let _plain = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: false, check_files: false });
-        let _strict = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: true, check_files: false });
+        let _plain = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: false, check_files: false, folders: Vec::new() });
+        let _strict = send(&mut cpu, &mut hub, Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: true, check_files: false, folders: Vec::new() });
         assert_eq!(take_state_requests(&mut hub).len(), 2);
     }
 
@@ -5151,7 +5170,7 @@ mod tests {
         hub.input.clear();
 
         let input = started_op(&mut cpu, &mut hub, Cmd::Input { events: vec![InputEvent::Wait { ms: 60_000 }], wait: true });
-        let (load, _rx) = hub.request(Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: true, check_files: false });
+        let (load, _rx) = hub.request(Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: true, check_files: false, folders: Vec::new() });
         let load_req = load.req;
         hub.handle(&mut cpu, load);
         let request = hub.next_state_request().expect("taken");
@@ -5225,7 +5244,7 @@ mod tests {
         let shared = std::sync::Arc::new(super::Shared::new(std::time::Instant::now()));
         let mut hub = DebugHub::new(Some(rx), Some(shared), 10);
         hub.announce(&cpu);
-        let (load, _load_rx) = hub.request(Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: false, check_files: false });
+        let (load, _load_rx) = hub.request(Cmd::LoadState { path: "/tmp/x.state".into(), strict_match: false, check_files: false, folders: Vec::new() });
         let (write, mut write_rx) = hub.request(write("0200:0000", &[9], None));
         tx.send(load).unwrap();
         tx.send(write).unwrap();
@@ -5313,7 +5332,7 @@ mod tests {
             (Cmd::Speed { cycles: "5000".into() }, None),
             // Guarded by the state before the first write: refused.
             (write("0200:0000", &[3], None), Some(state)),
-            (Cmd::LoadState { path: "s".into(), strict_match: true, check_files: false }, None),
+            (Cmd::LoadState { path: "s".into(), strict_match: true, check_files: false, folders: Vec::new() }, None),
             // Holds only once the load brought back the 1.
             (write("0200:0000", &[4], Some(&[1])), None),
             (Cmd::Resume { until: None, until_ms: None }, None),
