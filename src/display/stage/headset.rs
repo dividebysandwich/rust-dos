@@ -18,6 +18,7 @@
 //! reallocates a texture the other could be using.
 
 use super::controls::{Controllers, VrInput};
+use super::props::Props;
 use super::render::{Dest, Features, Format, Gpu, Multiview, Options, Pass};
 use super::scene::{Leds, Scene, Spawn};
 use super::xr::{Xr, XrOptions, log};
@@ -228,6 +229,8 @@ struct State {
     placement: Placement,
     /// A scene to show instead, once the thread takes it.
     scene: Option<Arc<Scene>>,
+    /// The game's manuals, for the booklet, once the thread takes them.
+    manuals: Option<Vec<std::path::PathBuf>>,
     recenter: bool,
     // From the headset.
     /// The left eye's view, with its view-projection.
@@ -384,6 +387,11 @@ impl Headset {
     /// Show `scene` from now on.
     pub fn set_scene(&self, scene: Arc<Scene>) {
         self.shared.lock().scene = Some(scene);
+    }
+
+    /// The game's manuals, for the booklet on the desk.
+    pub fn set_manuals(&self, manuals: Vec<std::path::PathBuf>) {
+        self.shared.lock().manuals = Some(manuals);
     }
 
     pub fn set_placement(&self, placement: Placement) {
@@ -630,6 +638,7 @@ fn session(
         state.mirror_size = size;
     }
     let mut controllers = Controllers::default();
+    let mut props = Props::new(&scene);
     let mut screen: Option<usize> = None;
     let mut reported = std::time::Instant::now();
     let mut failed: Option<String> = None;
@@ -644,6 +653,7 @@ fn session(
                     if let Some(index) = screen {
                         gpu.prepare(gl, &next, screens[index]);
                     }
+                    props.reset(&next);
                     scene = next;
                 }
                 Err(e) => shared.note(format!("The headset can't show the scene: {}", e)),
@@ -654,8 +664,13 @@ fn session(
             shared.note(note);
         }
         if lost {
+            props.delete(gl);
             xr.close(gl);
             return Ok(());
+        }
+        let manuals = shared.lock().manuals.take();
+        if let Some(manuals) = manuals {
+            props.set_manuals(gl, manuals);
         }
         shared.lock().running = xr.running();
         if !xr.wait_frame() {
@@ -703,16 +718,22 @@ fn session(
         }
         let world = placement.world(scene.spawn);
         let tracking = xr.track(world);
-        let (input, extras, hold) = controllers.update(mode, &tracking, &scene.screen, std::time::Instant::now());
+        let now = std::time::Instant::now();
+        let held = props.update(&scene, &tracking, now);
+        let (mut input, extras, hold) = controllers.update(mode, &tracking, held.busy, &scene.screen, now);
+        if held.pad.is_some() {
+            input.pad = held.pad;
+        }
         if hold {
             xr.recenter();
         }
+        let prop_draws = props.draws(gl, &gpu, &scene, now);
         let picture = screen.map(|i| screens[i]);
         let mut left = None;
         let drawn = xr.draw(gl, world, |target, views| {
             let format = Format { size: target.size, srgb: target.srgb };
             let dest = Dest::Image { texture: target.texture, format, layered: target.layered };
-            if let Err(e) = gpu.render(gl, &scene, views, dest, target.area, picture, leds, &extras) {
+            if let Err(e) = gpu.render(gl, &scene, views, dest, target.area, picture, leds, &prop_draws, &extras) {
                 // (Once, not every frame.)
                 if failed.as_ref() != Some(&e) {
                     log::line(&e);
@@ -774,6 +795,7 @@ fn session(
         state.input = input;
         state.head = tracking.head;
     }
+    props.delete(gl);
     xr.close(gl);
     Ok(())
 }

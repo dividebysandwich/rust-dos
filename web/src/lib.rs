@@ -190,10 +190,12 @@ impl Machine {
     /// A machine set up as the configuration file text `text` (in
     /// rust-dos.conf's format) has it. There are no host directories for
     /// `[drives]` to mount: the page mounts C: (`format_c`, `mount_image`)
-    /// before `boot`.
+    /// before `boot`. `overrides`, in the same format, is laid over it for
+    /// this visit only (the page address's settings): saving from the
+    /// settings window keeps them out of the text it saves.
     #[wasm_bindgen(constructor)]
-    pub fn new(text: &str) -> Machine {
-        let config = config::parse(text, Path::new("/"), None);
+    pub fn new(text: &str, overrides: &str) -> Machine {
+        let config = config::parse(&format!("{}\n{}", text, overrides), Path::new("/"), None);
         let settings = Settings::from_config(&config);
         let mut warnings = config.warnings.clone();
         if !config.drives.is_empty() {
@@ -783,6 +785,12 @@ impl Machine {
     /// capture the mouse.
     pub fn mouse_installed(&self) -> bool {
         self.cpu.bus.mouse.installed
+    }
+
+    /// Whether holding the right button still opens the settings window
+    /// (`mouse_menu_hold`).
+    pub fn mouse_menu_hold(&self) -> bool {
+        self.settings.mouse_menu_hold
     }
 
     /// The mouse moved to (`x`, `y`) on the screen, in its pixels.
@@ -1592,9 +1600,23 @@ mod tests {
     }
 
     #[test]
+    fn the_page_addresss_settings_apply_but_are_not_saved() {
+        let m = Machine::new("[emulator]\nmemsize=8\n", "[emulator]\nmemsize=32\n");
+        assert_eq!(m.settings.memsize, 32);
+        // The settings window saves as `save_settings` does, after a change
+        // to something else.
+        let mut changed = m.settings.clone();
+        changed.sound.opl3 = !changed.sound.opl3;
+        let text = config::complete_text(&m.saved.text, Path::new("/"), &m.saved.settings, &changed, &[], None);
+        let saved = Settings::from_config(&config::parse(&text, Path::new("/"), None));
+        assert_eq!(saved.memsize, 8);
+        assert_eq!(saved.sound.opl3, changed.sound.opl3);
+    }
+
+    #[test]
     fn a_slot_that_fails_to_load_leaves_the_hardware_as_it_was() {
         use rust_dos::video::adapter::Adapter;
-        let mut m = Machine::new("");
+        let mut m = Machine::new("", "");
         let (settings, hardware) = (m.settings.clone(), m.hardware.clone());
         // A state of a CGA machine without an Ultrasound, cut short, so
         // the load fails after the state's hardware is in place.

@@ -70,8 +70,8 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
         Mnemonic::Fldln2 => data::fldln2(cpu),
 
         // Conditional Move (Pentium Pro+)
-        // Mnemonic::Fcmovb | Mnemonic::Fcmove | ... => data::fcmov(cpu, instr),
-        // Don't know if we'll ever get there...
+        Mnemonic::Fcmovb | Mnemonic::Fcmove | Mnemonic::Fcmovbe | Mnemonic::Fcmovu | Mnemonic::Fcmovnb
+        | Mnemonic::Fcmovne | Mnemonic::Fcmovnbe | Mnemonic::Fcmovnu => data::fcmov(cpu, instr),
 
         // ARITHMETIC
         // ----------

@@ -147,11 +147,18 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   `386`, or `pentium`, a Pentium as DOSBox-X has one: CPUID (a
   GenuineIntel family 5), the time stamp counter, which counts the
   instructions and so runs at the `cycles` speed, its MSRs, CMPXCHG8B and
-  4 MB pages, without the virtual-8086 mode extensions; or `pentium_mmx`,
+  4 MB pages, without the virtual-8086 mode extensions; `pentium_mmx`,
   that Pentium with MMX (CPUID family 5, model 4), whose eight MM
-  registers are the FPU's. A DOSBox configuration's `cputype` of a
-  Pentium or Pentium Pro imports as `pentium`, of a Pentium MMX or later
-  as `pentium_mmx`.
+  registers are the FPU's; `pentium_pro`, a Pentium Pro as DOSBox-X's
+  `ppro_slow` (CPUID family 6, model 1): the Pentium's with CMOVcc,
+  FCMOVcc, FCOMI and FUCOMI, the P6 hinting NOPs and the local APIC base
+  and microcode revision MSRs Windows 98 and ME read, without MMX; or
+  `pentium_ii`, a Pentium II as DOSBox-X's (family 6, model 3): the
+  Pentium Pro's with MMX and SYSENTER/SYSEXIT. Neither has SSE, FXSAVE,
+  RDPMC, a local APIC or memory type range registers, as in DOSBox-X. A
+  DOSBox configuration's `cputype` of a Pentium imports as `pentium`, of
+  a Pentium MMX as `pentium_mmx`, of a Pentium Pro as `pentium_pro`, and
+  of a Pentium II or III as `pentium_ii`.
 * `core` is what runs the programs' instructions: `auto` (the default)
   runs the interpreter, and the dynamic recompiler for a program from the
   moment it switches to protected mode until it ends, as DOSBox's
@@ -189,7 +196,11 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   640x200, 60 Hz), `tandy` (a Tandy 1000), `pcjr` (an IBM PCjr) or
   `hercules` (a Hercules Graphics Card on a monochrome monitor: the MDA's
   text and 720x348 graphics, 50 Hz). A change takes effect at the DOS
-  prompt.
+  prompt. A DOSBox configuration's `svga_s3`, DOSBox's default, imports
+  as `svga`, which is what DOS games get from it there; one that boots a
+  hard disk keeps `svga_s3`, as the Windows on the disk was installed
+  with the S3's driver (unless the package's `os` boots another system
+  in its place).
 * With `svga_et4000` programs find a Tseng ET4000AX on the ISA bus, as
   DOS games and Windows 3.x drivers made for it detect it: its KEY
   (3BFh/3D8h), Segment Select (3CDh) with separate read and write banks,
@@ -276,7 +287,8 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   a recording stops at 1 GB.
 * `memsize` is the RAM in MB (default 16), from 2 to as much as
   motherboards took for the `cpu`: 64 MB for a 386, 128 MB for a 486,
-  256 MB for a Pentium and 512 MB for a Pentium MMX. More than the CPU
+  256 MB for a Pentium and 512 MB for a Pentium MMX, Pentium Pro or
+  Pentium II. More than the CPU
   takes is warned about and cut to its most. Memory above the first
   megabyte is extended memory for DOS extenders and XMS; XMS 3.0's 32-bit
   functions and INT 15h E801h/E820h report all of it, HIMEM's older calls
@@ -343,6 +355,12 @@ Mistakes in the file are printed as warnings; the emulator still starts.
 * `mouse_capture_messages` says over the picture when the mouse is
   captured (and that Ctrl+Alt lets it go) or let go: `true` (the default)
   or `false`.
+* `mouse_menu_hold` opens the settings window when the right mouse button
+  is held for three seconds without moving the mouse, for a TV or a remote
+  with no F12 or no keyboard at all: `true` (the default) or `false`. The
+  program sees the press, and a release as the window opens; moving the
+  mouse while holding the button keeps it an ordinary press. Turn it off
+  for a game that has you hold the right button still.
 * `version_check` asks rust-dos.com at startup whether a newer version
   is out (`https://rust-dos.com/version.json`); one that is shows in a
   notification over the picture and in a line under the box above the
@@ -478,6 +496,18 @@ Mistakes in the file are printed as warnings; the emulator still starts.
 * `tandy` is the Tandy 1000's and PCjr's sound chip at port C0h, three
   square waves and noise: `auto` (the default) on those machines, `on`
   on any (for games that play Tandy sound with VGA graphics), or `off`.
+* `pit2_gate_at_start=true` starts PIT channel 2, the PC speaker's
+  timer, with its gate (port 61h bit 0) high and its count running in
+  mode 3 from FFFFh, with the speaker silent. The default, `false`, starts
+  it with the gate low and the count stopped, as on a real PC, whose BIOS
+  clears port 61h bits 0 and 1 after the POST beep, and as in DOSBox and
+  86Box. Bao Xiao San Guo Zhi (SANGO.EXE) needs `true`: it reads its
+  random numbers from the channel without setting it up or raising the
+  gate, so with the gate low every roll is the same. DOSBox-X's
+  `pcspeaker clock gate enable at startup` is the same setting and
+  imports as this one. Put it in the game's
+  [profile](#game-profiles) to have it for that game only. A change takes
+  effect at the DOS prompt.
 * `hard_disk_noise` and `floppy_disk_noise` add the drives' noises; see
   [Disk speed and noises](#disk-speed-and-noises).
 
@@ -488,7 +518,8 @@ PC speaker and the prompt's beeps), `sb` (the Sound Blaster's digital
 audio), `fm` (the FM synthesizer), `gus`, `midi`, `cdaudio`, `disknoise`,
 `lptdac` (the Covox or Disney Sound Source), `tandy` (the Tandy's and
 PCjr's sound chip), `awe32` (the AWE32's wavetable synthesizer) and
-`monitor` (the [monitor's effects](#emulator)), and `master` for all of
+`monitor` (the [monitor's effects](#emulator)), `modem` (the [modem's
+speaker](#serial-and-modem-games)), and `master` for all of
 them together. At 100, the
 default, a source plays as loud as its card makes it. The volumes apply on
 top of the Sound Blaster's own mixer, which programs set.
@@ -837,7 +868,8 @@ devices and the resident programs start over, and the screen is cleared.
 
 ## Settings window
 
-Press **Ctrl+F12**, or type `DOSCONFIG` at the DOS prompt, to open the
+Press **Ctrl+F12**, type `DOSCONFIG` at the DOS prompt, or hold the right
+mouse button still for three seconds (`mouse_menu_hold`) to open the
 settings window over the running program. The program pauses while it is
 open, except on the Mixer page, where it plays on so you hear the volumes
 as you set them, and the Stats page, which shows it running. Ctrl+F12 or
@@ -1587,6 +1619,16 @@ machine=svga_s3
 memsize=64
 ```
 
+A DOSBox-X configuration's `IMGMOUNT` and `BOOT` lines work as they are,
+such as these, which mount the Windows image by number and a CD on the
+secondary IDE channel:
+
+```
+imgmount 2 win95.img -size 512,63,16,520 -t hdd -fs none
+imgmount D game.iso -t cdrom -fs iso -ide 2m
+boot -l c
+```
+
 The S3 driver shows the desktop up to 1024x768 in 32 bits per pixel with
 its accelerated drawing and hardware cursor; the Sound Blaster 16 plays
 Windows' sounds and FM music; the PS/2 mouse and APM work (Shut Down turns
@@ -1594,6 +1636,14 @@ the machine off). MS-DOS Prompts run in a window or full screen
 (Alt+Enter), and **Restart in MS-DOS mode** works. Windows keeps the
 hardware it was installed on in its registry, so an image installed on
 other hardware may look for devices this machine hasn't.
+
+Windows 95, OSR2 included, is the system the booted machine was built and
+tried with. Windows 98, 98 SE and ME have no recorded run, so try them on a
+copy of the image. The machine has APM and no ACPI, and its Sound Blaster
+is a legacy card that Windows finds at the resources [`[sound]`](#sound)
+gives it (DOSBox-X's `sbtype=sb16vibra` is an ISA Plug and Play card).
+`memsize` is capped by the CPU, at most 512 MB with `cpu=pentium_mmx` (see
+[`[emulator]`](#emulator)).
 
 ### Direct3D on an S3 ViRGE
 
@@ -1949,8 +1999,18 @@ default; set the game up for that port, at any speed.
   settings window's *Modem phonebook* (Serial page) lists them, fetches
   more from rust-dos.com when you ask it to, and copies the command that
   dials one. Numbers of your own go in [`[phonebook]`](#phonebook).
+* **A call sounds and takes as long as a real one:** the modem's speaker
+  plays the dial tone, the number as touch tones (`ATDT`) or pulse clicks
+  (`ATDP`), the other end ringing, and a real modem's handshake, about 25
+  seconds in all; CONNECT comes when the handshake ends. A host on the
+  internet dials a seven-digit number of its own. `ATM0` turns the speaker
+  off, `ATM3` keeps it quiet while dialing, and `ATL0`..`ATL3` set its
+  volume; the call takes as long either way. `modem` in
+  [`[mixer]`](#mixer) is its volume in the mix. A key during the dialing
+  or the handshake ends the call.
 * The modem knows the usual commands: `ATZ`, `AT&F`, `ATE`, `ATV`, `ATQ`,
-  `ATH`, `ATA`, `ATO`, `ATD`, `ATI`, `ATS0=`..`ATS15=` and `ATSn?`,
+  `ATH`, `ATA`, `ATO`, `ATD`, `ATP`, `ATT`, `ATL`, `ATM`, `ATI`,
+  `ATS0=`..`ATS15=` and `ATSn?`,
   `A/`, and the escape `+++` with a second's pause before and after; it
   answers the settings of error correction and compression with OK.
 * The link is reliable and in order over the relay's UDP, and needs a

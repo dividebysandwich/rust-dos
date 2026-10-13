@@ -1,0 +1,5 @@
+A dial-up modem calling, from a recording of a real call: the dial tone
+(1.95-2.35 s, two periods of 350 + 440 Hz, cross-faded into a loop) and
+the handshake (6.90-27.27 s, the answer tones up to the carrier), mixed
+down to 16-bit mono 11025 Hz WAVE files. The touch tones, pulse clicks and
+ringing are synthesized in src/modem_sound.rs from the number dialed.

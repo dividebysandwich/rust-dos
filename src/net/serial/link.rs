@@ -300,7 +300,7 @@ impl Link {
     }
 
     fn poll_into(&mut self, now: u64, out: &mut Vec<Vec<u8>>, events: &mut Vec<LinkEvent>) {
-        if now.saturating_sub(self.last_heard) >= DEAD_MS && (self.up || self.theirs != 0) {
+        if self.dead_at().is_some_and(|at| now >= at) {
             self.restart(events);
             self.theirs = 0;
             self.hello_due = now;
@@ -359,9 +359,15 @@ impl Link {
         out
     }
 
+    /// When the other end counts as gone. Only an end that was heard from
+    /// can go silent: without one, the HELLOs are all there is to do.
+    fn dead_at(&self) -> Option<u64> {
+        (self.up || self.theirs != 0).then_some(self.last_heard + DEAD_MS)
+    }
+
     /// When `poll` has something to do next.
     pub fn next_due(&self) -> u64 {
-        let mut due = self.last_heard + DEAD_MS;
+        let mut due = self.dead_at().unwrap_or(u64::MAX);
         if !self.up {
             return due.min(self.hello_due);
         }
@@ -503,5 +509,28 @@ mod tests {
         p.run(DEAD_MS + 10, |to_b, _, d| (!to_b).then_some(d).filter(|_| false));
         assert_eq!(p.events_a, [LinkEvent::Down]);
         assert!(!p.a.is_up());
+        // Gone, it is greeted every HELLO_MS, no more often.
+        assert!(p.a.next_due() > p.now);
+    }
+
+    /// An end that never answers (the other player has no port linked):
+    /// the link has nothing to do between two HELLOs, also once DEAD_MS
+    /// has passed. The network thread sleeps until `next_due`.
+    #[test]
+    fn a_silent_other_end_is_greeted_every_hello_ms() {
+        let mut link = Link::new(2, 0);
+        let mut out = Vec::new();
+        let mut now = 0;
+        let mut polls = 0;
+        while now < 6 * DEAD_MS {
+            link.poll(now, &mut out);
+            polls += 1;
+            let due = link.next_due();
+            assert!(due > now, "due at {due} after a poll at {now}");
+            now = due;
+        }
+        assert_eq!(polls as u64, 6 * DEAD_MS / HELLO_MS);
+        assert_eq!(out.len(), polls);
+        assert!(!link.is_up());
     }
 }

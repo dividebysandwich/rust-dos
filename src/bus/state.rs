@@ -25,6 +25,7 @@ const VERITE_VERSION: u16 = 2;
 const ET4000_VERSION: u16 = 1;
 const SHARED_VERSION: u16 = 1;
 const SB_HIGH_SPEED_VERSION: u16 = 1;
+const PIT2_VERSION: u16 = 1;
 
 /// Save or load each of a list of fields.
 /// Each field is labelled with its name, for comparing states part by
@@ -64,6 +65,10 @@ impl Bus {
             pit_read_msb,
             pit_mode,
             pit_write_msb,
+            pit2,
+            speaker_data,
+            ppi_checks,
+            pit2_gate_at_start: _,
             pit0_divisor,
             pit0_write_msb,
             pit0_read_msb,
@@ -141,6 +146,7 @@ impl Bus {
             port_accesses: _,
             ide_faked: _,
             port_log: _,
+            profile: _,
             guest_paging: _,
             guest_fault: _,
             // How many ignored ROM writes were logged.
@@ -192,6 +198,13 @@ impl Bus {
                 post_code, refresh_toggle, speaker_on, audio_phase, audio_frames, sb_phase, sb_frame, beep_frames,
                 boot, pci,
             );
+        });
+        // Channel 2's counter and gate, in a section of their own so states
+        // saved before it load. The fields after `speaker_data` came later:
+        // a section that ends before them loads with their defaults.
+        let pit2_count_due = &pit2.count_due;
+        w.section(b"PIT2", PIT2_VERSION, |w| {
+            save_all!(w; pit2, speaker_data, pit2_count_due, ppi_checks);
         });
         w.section(b"VIDE", VIDEO_VERSION, |w| {
             save_all!(w; video_mode, vga, vbe, s3_engine, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
@@ -329,6 +342,10 @@ impl Bus {
             pit_read_msb,
             pit_mode,
             pit_write_msb,
+            pit2,
+            speaker_data,
+            ppi_checks,
+            pit2_gate_at_start: _,
             pit0_divisor,
             pit0_write_msb,
             pit0_read_msb,
@@ -402,6 +419,7 @@ impl Bus {
             port_accesses: _,
             ide_faked: _,
             port_log: _,
+            profile: _,
             guest_paging: _,
             guest_fault: _,
             rom_writes: _,
@@ -455,6 +473,24 @@ impl Bus {
             post_code, refresh_toggle, speaker_on, audio_phase, audio_frames, sb_phase, sb_frame, beep_frames,
                 boot, pci,
         );
+        if r.next_is(b"PIT2") {
+            let mut section = r.section(b"PIT2", PIT2_VERSION)?;
+            load_all!(&mut section; pit2, speaker_data);
+            pit2.count_due = false;
+            *ppi_checks = 0;
+            if !section.is_empty() {
+                load_all!(&mut section; &mut pit2.count_due, ppi_checks);
+            }
+        } else {
+            // An older state: a stopped channel 2 with the gate and the
+            // speaker as they were.
+            *pit2 = crate::timer::Pit2::new();
+            let now = clock.now_ticks();
+            pit2.write_count(*pit_divisor, now);
+            pit2.set_gate(*speaker_on, now);
+            *speaker_data = *speaker_on;
+            *ppi_checks = 0;
+        }
         let mut section = r.section(b"VIDE", VIDEO_VERSION)?;
         load_all!(&mut section; video_mode, vga, vbe, s3_engine, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
         *virge = Default::default();

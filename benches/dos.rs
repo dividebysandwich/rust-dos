@@ -65,16 +65,35 @@ fn find_pattern(c: &mut Criterion) {
 fn open_deep(c: &mut Criterion) {
     let root = scratch("open_deep");
     let games = root.join("GAMES");
-    write_files(&games, &game_names(50));
     let game = games.join("DARKSUN");
+    // Innermost first: each folder is dated after its subfolder is made.
+    write_files(&game.join("DATA"), &game_names(218));
     write_files(&game, &game_names(218));
-    let data = game.join("DATA");
-    write_files(&data, &game_names(218));
+    write_files(&games, &game_names(50));
+    age(&root);
     let mut cpu = machine(&root);
     let path = r"C:\GAMES\DARKSUN\DATA\RGN0D2.GFF";
     open_close(&mut cpu, path);
     c.bench_function("dos/open_close_deep", |b| b.iter(|| open_close(&mut cpu, path)));
 }
 
-criterion_group!(benches, dir_listing, find_first_next, find_pattern, open_deep);
+/// Opening and closing C:\DATA\F000.DAT, with the root and DATA holding
+/// `count` entries each: small folders as BloodNet's (2 to 30 entries) up to
+/// a game folder's size.
+fn open_by_folder_size(c: &mut Criterion) {
+    let mut group = c.benchmark_group("dos/open_close");
+    for count in [4, 16, 64, 218] {
+        let root = scratch(&format!("open_close_{count}"));
+        let names: Vec<String> = (0..count).map(|i| format!("F{i:03}.DAT")).collect();
+        write_files(&root.join("DATA"), &names);
+        write_files(&root, &names[1..]);
+        let mut cpu = machine(&root);
+        let path = r"C:\DATA\F000.DAT";
+        open_close(&mut cpu, path);
+        group.bench_function(BenchmarkId::from_parameter(count), |b| b.iter(|| open_close(&mut cpu, path)));
+    }
+    group.finish();
+}
+
+criterion_group!(benches, dir_listing, find_first_next, find_pattern, open_deep, open_by_folder_size);
 criterion_main!(benches);

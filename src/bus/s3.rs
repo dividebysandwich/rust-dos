@@ -265,6 +265,7 @@ impl Bus {
     /// the AWE32's EMU8000 a word at a time, to anything else a byte at a
     /// time, low byte first.
     pub fn io_write_wide(&mut self, port: u16, value: u32, len: u8) {
+        let _profile = self.profile.as_mut().map(|p| p.port(port, true));
         self.observe.opaque();
         // A booted system's IDE data ports, a word at a time.
         if let Some(id) = self.ide_data_port(port) {
@@ -305,6 +306,7 @@ impl Bus {
     }
 
     pub fn io_read_wide(&mut self, port: u16, len: u8) -> u32 {
+        let _profile = self.profile.as_mut().map(|p| p.port(port, false));
         self.observe.opaque();
         if let Some(id) = self.ide_data_port(port) {
             return self.ide_read_wide(id, len);
