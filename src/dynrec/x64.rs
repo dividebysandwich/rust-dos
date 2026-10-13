@@ -838,6 +838,18 @@ impl Gen<'_> {
         *self.end.get_or_insert_with(|| ops.new_dynamic_label())
     }
 
+    /// A label that stops the block after the instruction being translated
+    /// (EIP at the next one), for STI and POPF to jump to.
+    fn stop_after(&mut self) -> DynamicLabel {
+        let data = self.data;
+        let next = data.eips[self.ix].wrapping_add(data.instrs[self.ix].len() as u32);
+        let at = self.ops.new_dynamic_label();
+        let fail = self.fail();
+        let code = EXIT_AFTER | if self.dirty { EXIT_FLAGS } else { 0 };
+        self.slow.push(Slow::After { at, next, code, fail });
+        at
+    }
+
     /// Leave the block before the instruction being translated if any of
     /// its watched bytes differ from what was translated.
     fn check_watched(&mut self) {
@@ -2093,14 +2105,57 @@ impl Gen<'_> {
             }
             Uop::FGetControl { t } => dynasm!(self.ops ; .arch x64 ; movzx Rd(r(t)), WORD [rbx + FPU_CONTROL]),
             Uop::FSetControl { t } => dynasm!(self.ops ; .arch x64 ; mov WORD [rbx + FPU_CONTROL], Rw(r(t))),
+            Uop::LoadFlags { t, size } => {
+                let at = self.ops.new_dynamic_label();
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; cmp BYTE [rbx + CPL], 0
+                    ; jne =>at
+                    ; mov eax, DWORD [rbx + FLAGS]
+                );
+                if size == 4 {
+                    dynasm!(self.ops
+                        ; .arch x64
+                        ; mov ecx, Rd(r(t))
+                        ; xor ecx, eax
+                        ; test ecx, POPF_KEPT as i32
+                        ; jnz =>at
+                    );
+                }
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; mov ecx, Rd(r(t))
+                    ; and ecx, POPF_RING0 as i32
+                    ; and eax, !POPF_RING0 as i32
+                    ; or eax, ecx
+                    ; or eax, 2
+                    ; mov DWORD [rbx + FLAGS], eax
+                );
+                if self.dirty {
+                    dynasm!(self.ops ; .arch x64 ; mov ebp, eax);
+                }
+                let end = self.end();
+                let (wb, reload) = (self.cache.dirty, self.cache.loaded);
+                self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, wb, reload, leave: false });
+            }
+            Uop::FlagsLoaded => {
+                let at = self.stop_after();
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; mov eax, DWORD [rbx + FLAGS]
+                    ; test eax, 0x100
+                    ; jnz =>at
+                    ; test eax, 0x200
+                    ; jz >quiet
+                    ; cmp BYTE [rbx + layout::IRQ_READY as i32], 0
+                    ; jne =>at
+                    ; quiet:
+                );
+            }
             Uop::Sti => {
                 const IF: i32 = 0x200;
                 let data = self.data;
-                let next = data.eips[self.ix].wrapping_add(data.instrs[self.ix].len() as u32);
-                let at = self.ops.new_dynamic_label();
-                let fail = self.fail();
-                let code = EXIT_AFTER | if self.dirty { EXIT_FLAGS } else { 0 };
-                self.slow.push(Slow::After { at, next, code, fail });
+                let at = self.stop_after();
                 // Interrupts are recognized after the next instruction: with
                 // one waiting, the execution loop runs that; else the shadow
                 // ends where the next instruction runs, in the block.

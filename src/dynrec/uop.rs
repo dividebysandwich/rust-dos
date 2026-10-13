@@ -76,6 +76,12 @@ pub enum FKind {
 pub const ECX: u8 = 1;
 pub const ESP: u8 = 4;
 
+/// The flags POPF and POPFD load at CPL 0 (`Uop::LoadFlags`): CF, PF, AF,
+/// ZF, SF, TF, IF, DF, OF, IOPL and NT, as `Cpu::load_flags_pm` has them.
+pub const POPF_RING0: u32 = 0x7FD5;
+/// The flags a translated POPFD leaves as they were: AC and ID.
+pub const POPF_KEPT: u32 = 0x24_0000;
+
 /// A second operand: a register value or a constant.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Src {
@@ -257,6 +263,17 @@ pub enum Uop {
     /// the execution loop checks (see `helpers::jit_port`).
     In { size: u8, port: Src, t: T },
     Out { size: u8, port: Src, t: T },
+    /// POPF or POPFD's flags from t, a `size` byte value, as
+    /// `Cpu::load_flags_pm` loads them at CPL 0: the arithmetic flags, TF,
+    /// DF, NT, IF and IOPL. The instruction's handler runs it instead of the
+    /// operations after this one where CPL isn't 0 (or the CPU is in
+    /// virtual-8086 mode), or a POPFD would change AC or ID (as CPUID's
+    /// detection does). Nothing before it may change anything.
+    LoadFlags { t: T, size: u8 },
+    /// After `LoadFlags` and the stack pointer: the block stops after the
+    /// instruction where TF is set (its trap comes from the execution loop)
+    /// or IF is set with an interrupt waiting, as `jit_fallback` stops it.
+    FlagsLoaded,
     /// STI after its `CheckIopl`: IF set, the interrupt shadow where it was
     /// clear, and the block stopped after it where an interrupt waits.
     Sti,
