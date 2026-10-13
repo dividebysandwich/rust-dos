@@ -196,37 +196,28 @@ pub fn fcomi_variants(cpu: &mut Cpu, instr: &Instruction) {
     let st0 = cpu.fpu_get(0);
     let sti = cpu.fpu_get(idx);
     
-    // Set ZF, PF, CF based on comparison
-    // ZF=1 if Equal, CF=1 if Less, PF=1 if NaN
-    #[allow(unused_assignments)]
-    let mut zf = false;
-    #[allow(unused_assignments)]
-    let mut pf = false;
-    #[allow(unused_assignments)]
-    let mut cf = false;
-    
-    if st0.is_nan() || sti.is_nan() {
-        zf = true; pf = true; cf = true; // "Unordered"
-    } else if st0.get() == sti.get() {
-        zf = true; pf = false; cf = false; // Equal
+    // ZF=1 if equal, CF=1 if less, all three if unordered (a NaN). The
+    // comparison is of all 80 bits, and +0 equals -0.
+    let (zf, pf, cf) = if st0.is_nan() || sti.is_nan() {
+        (true, true, true)
+    } else if st0.get() == sti.get() || (st0.is_zero() && sti.is_zero()) {
+        (true, false, false)
     } else {
-        // By the doubles, or the 80 bits where either holds more (the
-        // doubles are rounded to nearest, and could come out equal).
-        let precise = cpu.fpu_beyond_double(0) || cpu.fpu_beyond_double(idx);
-        let less = match precise.then(|| st0.compare(&sti)).flatten() {
-            Some(order) => order == Ordering::Less,
-            None => st0.get_f64() < sti.get_f64(),
+        const MAGNITUDE: u128 = (1u128 << 79) - 1;
+        let (a, b) = (st0.get() & MAGNITUDE, sti.get() & MAGNITUDE);
+        let less = match (st0.get_sign(), sti.get_sign()) {
+            (false, false) => a < b,
+            (true, true) => a > b,
+            (negative, _) => negative,
         };
-        if less {
-            zf = false; pf = false; cf = true;
-        } else {
-            zf = false; pf = false; cf = false;
-        }
-    }
-    
+        (false, false, less)
+    };
+
     cpu.set_cpu_flag(CpuFlags::ZF, zf);
     cpu.set_cpu_flag(CpuFlags::PF, pf);
     cpu.set_cpu_flag(CpuFlags::CF, cf);
+    // OF, SF and AF are cleared.
+    cpu.set_cpu_flag(CpuFlags::OF | CpuFlags::SF | CpuFlags::AF, false);
 
     // Pop if P-variant (FCOMIP / FUCOMIP)
     let m = instr.mnemonic();

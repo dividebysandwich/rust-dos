@@ -792,6 +792,16 @@ impl Gen<'_> {
         let (deadline, revalidate, body) = (self.deadline, self.revalidate, self.body);
         let data_ptr = self.data_ptr;
         let limit = self.limit;
+        if let Some(word) = self.env.profile {
+            // The profiler's sampler sees the block from here on.
+            let at = &crate::profile::WORD as *const _ as i64;
+            dynasm!(self.ops
+                ; .arch x64
+                ; mov rax, QWORD word as i64
+                ; mov rcx, QWORD at
+                ; mov QWORD [rcx], rax
+            );
+        }
         dynasm!(self.ops
             ; .arch x64
             ; mov rax, QWORD [rbx + ICOUNT]
@@ -1681,7 +1691,7 @@ impl Gen<'_> {
             }
             Uop::FarCallCheck { sel, off } => {
                 let (bail, fail) = (self.ops.new_dynamic_label(), self.fail());
-                self.far_call(Some((sel, off)));
+                self.far_call(Some((sel, off)), 0);
                 dynasm!(self.ops
                     ; .arch x64
                     ; test eax, eax
@@ -1695,7 +1705,7 @@ impl Gen<'_> {
                 let (wb, reload) = (self.cache.dirty, self.cache.loaded);
                 self.slow.push(Slow::Bail { at: bail, end, ix: self.ix, dirty: self.dirty, wb, reload, leave: true });
             }
-            Uop::FarCallLoad => {
+            Uop::FarCallLoad { next } => {
                 let fail = self.fail();
                 let data_ptr = self.data_ptr;
                 dynasm!(self.ops
@@ -1705,7 +1715,7 @@ impl Gen<'_> {
                     ; mov eax, DWORD [rbx + seg_field(Seg::CS, layout::SEG_BASE)]
                     ; mov DWORD [r12 + CTX_FAR_BASE], eax
                 );
-                self.far_call(None);
+                self.far_call(None, next);
                 dynasm!(self.ops ; .arch x64 ; test eax, eax ; jnz =>fail);
             }
             Uop::FarExit => {
@@ -2217,7 +2227,7 @@ impl Gen<'_> {
     }
 
     /// Call `jit_far_call`: its checks of `sel:off`, or (None) its load.
-    fn far_call(&mut self, target: Option<(T, T)>) {
+    fn far_call(&mut self, target: Option<(T, T)>, next: u32) {
         self.save_for_call();
         match target {
             Some((sel, off)) => dynasm!(self.ops
@@ -2226,7 +2236,7 @@ impl Gen<'_> {
                 ; mov ecx, Rd(r(sel))
                 ; xor r8d, r8d
             ),
-            None => dynasm!(self.ops ; .arch x64 ; mov r8d, 1),
+            None => dynasm!(self.ops ; .arch x64 ; mov edx, next as i32 ; mov r8d, 1),
         }
         dynasm!(self.ops
             ; .arch x64

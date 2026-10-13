@@ -304,6 +304,19 @@ pub fn require_pentium(cpu: &Cpu) -> CpuResult {
     if cpu.model < CpuModel::Pentium { Err(Fault::UD) } else { Ok(()) }
 }
 
+/// CMOVcc r, r/m (P6): the source into the register if the condition
+/// holds. A memory source is read, and can fault, either way.
+pub fn cmov(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    if !cpu.model.is_p6() {
+        return Err(Fault::UD);
+    }
+    let value = read_op(cpu, instr, 1, op_size(instr, 0))?;
+    if super::logic::condition(cpu, instr.condition_code()) {
+        cpu.set_reg(instr.op0_register(), value);
+    }
+    Ok(())
+}
+
 /// BSWAP r32 (486).
 pub fn bswap(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
     require_486(cpu)?;

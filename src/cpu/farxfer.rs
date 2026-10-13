@@ -165,7 +165,12 @@ impl Cpu {
                     self.set_seg_cache(Seg::SS, ss_cache);
                     self.set_esp(esp);
                     self.set_stack_ptr(sp);
+                    let code32 = self.seg_cache(Seg::CS).attr & super::ATTR_DB != 0;
                     self.load_cs_pm(target, &mut code, new_cpl)?;
+                    if crate::profile::any_active() && new_cpl == 0 {
+                        let mode = crate::profile::Mode::of(true, false, code32);
+                        crate::profile::note_entry(mode, cs as u16, eip, crate::profile::Cause::Gate, 0);
+                    }
                 } else {
                     let ss = *self.seg_cache(Seg::SS);
                     let sp = self.stack_ptr();

@@ -80,7 +80,7 @@ impl Uop {
             | Uop::ExitIf { .. }
             | Uop::FarRetPm { .. }
             | Uop::FarCallCheck { .. }
-            | Uop::FarCallLoad
+            | Uop::FarCallLoad { .. }
             | Uop::FarExit => ARITH,
             _ => 0,
         }

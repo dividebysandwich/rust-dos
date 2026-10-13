@@ -1225,8 +1225,11 @@ fn shift_down() -> InputEvent {
 }
 
 /// Run the script in `frames`, as the main loop runs the machine in
-/// deterministic mode, and take the machine's state at each stop.
-fn run(name: &str, mut frames: Frames, leak: Leak) -> Vec<Snapshot> {
+/// deterministic mode, and take the machine's state at each stop. With
+/// `profiled`, a profile starts at the first stop, as `POST /api/profile`
+/// starts one (the recompiler's translations are thrown away), and ends at
+/// the last.
+fn run(name: &str, mut frames: Frames, leak: Leak, profiled: bool) -> Vec<Snapshot> {
     let (mut cpu, mut hub, mut mode) = machine(name);
     let mut picture = rust_dos::video::Frame::new(rust_dos::video::SCREEN_WIDTH, rust_dos::video::SCREEN_HEIGHT);
     let mut cursor_visible = true;
@@ -1281,6 +1284,28 @@ fn run(name: &str, mut frames: Frames, leak: Leak) -> Vec<Snapshot> {
         let snapshot = Snapshot::of(&cpu, &picture, &sound);
         assert_eq!(snapshot.ms, until_ms, "{}: the stop is at the time asked for", name);
         snapshots.push(snapshot);
+        if profiled && snapshots.len() == 1 {
+            // At the sampler's top rate, spinning, so that even a short run
+            // has samples.
+            let start = super::profile::Control {
+                enabled: Some(true),
+                hz: Some(rust_dos::profile::session::MAX_HZ),
+                timer: Some(rust_dos::profile::sampler::Timer::Spin),
+                duration_ms: None,
+            };
+            reply(&mut cpu, &mut hub, Cmd::ProfileControl(start));
+        }
+    }
+    if profiled {
+        let samples = hub.profile.as_ref().expect("the profile runs").samples();
+        assert!(
+            samples.counts.keys().any(|&w| rust_dos::profile::Loc(w).cs_eip().is_some()),
+            "{}: the profile saw guest code in {} samples",
+            name,
+            samples.total
+        );
+        let stop = super::profile::Control { enabled: Some(false), ..Default::default() };
+        reply(&mut cpu, &mut hub, Cmd::ProfileControl(stop));
     }
     snapshots
 }
@@ -1315,9 +1340,9 @@ fn differences(a: &Snapshot, b: &Snapshot) -> Vec<String> {
 /// apart, so that the host's clock is in another second. They use the same
 /// folder, whose paths the state has.
 fn two_runs(name: &str, leak: Leak) -> (Vec<Snapshot>, Vec<Snapshot>) {
-    let a = run(name, Frames::new(16, 25, 0x5EED), leak);
+    let a = run(name, Frames::new(16, 25, 0x5EED), leak, false);
     std::thread::sleep(std::time::Duration::from_millis(1100));
-    let b = run(name, Frames::new(37, 25, 0xF00D), leak);
+    let b = run(name, Frames::new(37, 25, 0xF00D), leak, false);
     (a, b)
 }
 
@@ -1358,6 +1383,27 @@ fn every_device_ends_alike_whatever_the_host_frames_and_time() {
     assert_eq!(&end.segment[at..at + 12], b"a disc made ", "the folder's file");
 }
 
+/// A profile only watches the machine: a run with one started at the first
+/// stop ends each stop as a run without, on the interpreter and (with
+/// `RUST_DOS_CORE=dynamic`, as CI runs the tests a second time) on the
+/// recompiler. The profiled copy of the execution loop, translated code
+/// that notes its place, and the bus's counters must not change what the
+/// program does.
+#[test]
+fn a_profile_leaves_the_machine_as_it_would_be() {
+    let _one = super::profile::ONE_PROFILE.lock().unwrap_or_else(|e| e.into_inner());
+    let plain = run("profile", Frames::new(16, 25, 0x5EED), Leak::None, false);
+    let profiled = run("profile", Frames::new(16, 25, 0x5EED), Leak::None, true);
+    for (x, y) in plain.iter().zip(&profiled) {
+        let differ = differences(x, y);
+        assert!(differ.is_empty(), "at {} ms the profiled run differs in: {}", x.ms, differ.join(", "));
+        assert_eq!(x.executed, y.executed, "at {} ms", x.ms);
+        assert!(x.picture == y.picture, "at {} ms the pictures differ", x.ms);
+        assert!(x.sound == y.sound, "at {} ms the sound differs", x.ms);
+    }
+    assert_eq!(plain.len(), profiled.len());
+}
+
 /// A test that can't fail proves nothing: with the machine's clock the
 /// host's, the runs differ, and the parts they differ in say where.
 #[test]
@@ -1395,6 +1441,8 @@ const STILL: &[(&str, &str)] = &[
     ("CORE.beep_frames", "a BEL beep's frames, none left at the stops"),
     ("CORE.pit_read_msb", "channel 2's read flip-flop, at rest after a whole read"),
     ("CORE.pit_write_msb", "channel 2's write flip-flop, at rest after a whole write"),
+    ("PIT2.pit2_count_due", "a control word's count, written before the stops"),
+    ("PIT2.ppi_checks", "port 61h's check enables, which DOS programs leave alone"),
     ("CORE.pit0_read_msb", "channel 0's read flip-flop, at rest after a whole read"),
     ("CORE.pit0_write_msb", "channel 0's write flip-flop, at rest after a whole write"),
     ("CORE.pit0_latched_active", "channel 0's latch, read out"),
@@ -1405,6 +1453,7 @@ const STILL: &[(&str, &str)] = &[
     ("DOS.dos_high", "the settings' DOS=HIGH"),
     ("DOS.disk_io", "the disk's speed settings, and the time charged until the next instruction takes it"),
     ("ENV", "the settings' environment variables"),
+    ("SEP", "the SYSENTER MSRs, which only a Pentium II's WRMSR sets"),
 ];
 
 /// The `Bus` fields saved as a section of their own (or in one with the
@@ -1451,7 +1500,7 @@ fn saved_bus_fields() -> Vec<String> {
 /// run fails here.
 #[test]
 fn the_run_reaches_every_part_of_the_machine() {
-    let snapshots = run("coverage", Frames::new(16, 25, 0xC0FE), Leak::None);
+    let snapshots = run("coverage", Frames::new(16, 25, 0xC0FE), Leak::None, false);
     let (prompt, during) = snapshots.split_first().unwrap();
     let parts: BTreeSet<&str> = snapshots.iter().flat_map(|s| s.parts.iter().map(|(n, _)| n.as_str())).collect();
     let sections: BTreeSet<&str> = parts.iter().map(|p| p.split('.').next().unwrap()).collect();

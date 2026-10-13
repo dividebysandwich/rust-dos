@@ -313,6 +313,37 @@ pub fn fxch(cpu: &mut Cpu, instr: &Instruction) {
     cpu.set_fpu_flag(crate::cpu::FpuFlags::C1, false);
 }
 
+/// FCMOVcc ST(0), ST(i) (P6): ST(i) into ST(0) if the condition on CF, ZF
+/// and PF holds (B, E, BE, U and their negations).
+pub fn fcmov(cpu: &mut Cpu, instr: &Instruction) {
+    use crate::cpu::CpuFlags;
+    use iced_x86::Mnemonic::*;
+    let f = |flag| cpu.get_cpu_flag(flag);
+    let holds = match instr.mnemonic() {
+        Fcmovb => f(CpuFlags::CF),
+        Fcmove => f(CpuFlags::ZF),
+        Fcmovbe => f(CpuFlags::CF) || f(CpuFlags::ZF),
+        Fcmovu => f(CpuFlags::PF),
+        Fcmovnb => !f(CpuFlags::CF),
+        Fcmovne => !f(CpuFlags::ZF),
+        Fcmovnbe => !f(CpuFlags::CF) && !f(CpuFlags::ZF),
+        _ => !f(CpuFlags::PF),
+    };
+    cpu.set_fpu_flag(crate::cpu::FpuFlags::C1, false);
+    if !holds {
+        return;
+    }
+    let idx = (instr.op1_register().number() - Register::ST0.number()) as usize & 7;
+    if cpu.fpu_fast {
+        let sti = cpu.fpu_get_f64(idx);
+        cpu.fpu_set_f64(0, sti);
+    } else {
+        let sti = cpu.fpu_get(idx);
+        cpu.fpu_set(0, sti);
+    }
+    cpu.fpu_tags[cpu.fpu_top] = crate::cpu::FPU_TAG_VALID;
+}
+
 // FLD1: Push +1.0
 pub fn fld1(cpu: &mut Cpu) {
     let mut f = F80::new();

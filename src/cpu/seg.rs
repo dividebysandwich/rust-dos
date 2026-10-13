@@ -379,11 +379,106 @@ impl Cpu {
     /// Load CS for a transfer to a code segment in protected mode, at
     /// privilege level `cpl` (the selector's RPL becomes the CPL).
     pub fn load_cs_pm(&mut self, selector: u16, desc: &mut Descriptor, cpl: u8) -> CpuResult {
+        self.load_cs_pm_after(selector, desc, cpl, self.eip)
+    }
+
+    /// `load_cs_pm` for the transfer made by the instruction that ends at
+    /// `next` (a CALL's return address), which the profiler notes where
+    /// 32-bit code switches to 16-bit code.
+    pub fn load_cs_pm_after(&mut self, selector: u16, desc: &mut Descriptor, cpl: u8, next: u32) -> CpuResult {
         self.mark_accessed(selector, desc)?;
         let selector = (selector & 0xFFFC) | cpl as u16;
-        self.set_seg_cache(Seg::CS, desc.cache(selector));
+        let cache = desc.cache(selector);
+        if crate::profile::any_active() && cpl == 3 && self.cpl == 3 {
+            let from32 = self.seg_cache(Seg::CS).attr & super::ATTR_DB != 0;
+            match (from32, cache.attr & super::ATTR_DB != 0) {
+                (true, false) => {
+                    let mut returns = [0u32; crate::profile::THUNK_FRAMES - 1];
+                    let n = self.caller_returns(&mut returns);
+                    crate::profile::note_thunk(self.cs(), next, &returns[..n]);
+                }
+                (false, true) => crate::profile::drop_thunk(),
+                _ => {}
+            }
+        }
+        self.set_seg_cache(Seg::CS, cache);
         self.cpl = cpl;
         Ok(())
+    }
+
+    /// Return addresses of the 32-bit code that called this code, the
+    /// nearest first, for the profiler. Up the EBP chain: [EBP+4], then the
+    /// same from the frame at [EBP], while each frame is further up the
+    /// stack. Where that finds none (code without frame pointers, such as
+    /// KERNEL32's own thunk stubs), the values on the stack from ESP up that
+    /// could be ring-3 code addresses. Either way only addresses right after
+    /// a CALL count. Frames are read in the code segment's address space (a
+    /// flat model's: a thunk to 16-bit code may already be on a 16-bit
+    /// stack), the stack scan only on a 32-bit stack. Reads RAM alone, so
+    /// nothing faults or changes.
+    fn caller_returns(&self, out: &mut [u32]) -> usize {
+        /// How far up the stack the scan looks, in doublewords.
+        const SCAN: u32 = 64;
+        let page: std::cell::Cell<Option<(u32, usize)>> = std::cell::Cell::new(None);
+        let byte = |lin: u32| -> Option<u8> {
+            let at = match page.get() {
+                Some((p, at)) if p == lin >> 12 => at,
+                _ => {
+                    let at = self.peek_translate(lin & !0xFFF)? as usize;
+                    page.set(Some((lin >> 12, at)));
+                    at
+                }
+            };
+            self.bus.ram().get(at + (lin & 0xFFF) as usize).copied()
+        };
+        let dword = |lin: u32| -> Option<u32> {
+            let mut v = 0;
+            for i in 0..4 {
+                v |= (byte(lin.wrapping_add(i))? as u32) << (8 * i);
+            }
+            Some(v)
+        };
+        let code = self.seg_cache(Seg::CS).base;
+        // A CALL ends right before `ret`: E8 rel32, or FF /2 (near) or
+        // FF /3 (far) with a ModRM of 1, 2, 5 or 6 bytes, or 9A ptr16:32.
+        let after_call = |ret: u32| -> bool {
+            let at = |back: u32| byte(code.wrapping_add(ret).wrapping_sub(back));
+            if at(5) == Some(0xE8) || at(7) == Some(0x9A) {
+                return true;
+            }
+            [2u32, 3, 6, 7].iter().any(|&len| at(len) == Some(0xFF) && at(len - 1).is_some_and(|m| matches!(m >> 3 & 7, 2 | 3)))
+        };
+        let mut n = 0;
+        let mut ebp = self.ebp();
+        while n < out.len() {
+            let (Some(next), Some(ret)) = (dword(code.wrapping_add(ebp)), dword(code.wrapping_add(ebp).wrapping_add(4))) else {
+                break;
+            };
+            if ret == 0 || !after_call(ret) {
+                break;
+            }
+            out[n] = ret;
+            n += 1;
+            if next <= ebp {
+                break;
+            }
+            ebp = next;
+        }
+        let ss = self.seg_cache(Seg::SS);
+        if n == 0 && ss.attr & super::ATTR_DB != 0 {
+            let esp = self.esp();
+            for i in 0..SCAN {
+                let Some(v) = dword(ss.base.wrapping_add(esp).wrapping_add(4 * i)) else { break };
+                if (0x1_0000..0xC000_0000).contains(&v) && !out[..n].contains(&v) && after_call(v) {
+                    out[n] = v;
+                    n += 1;
+                    if n == out.len() {
+                        break;
+                    }
+                }
+            }
+        }
+        n
     }
 
     /// After a return to an outer privilege level: data segment registers

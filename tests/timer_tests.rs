@@ -568,3 +568,400 @@ fn bios_wait_passes_emulated_time_with_interrupts_enabled() {
     assert!((20_000..25_000).contains(&waited), "waited {} us", waited);
     assert!(!cpu.get_cpu_flag(CpuFlags::CF));
 }
+
+#[test]
+fn an_adlib_delay_reads_channel_2_down() {
+    // Bloodnet's AdLib driver waits after each register write by reading
+    // channel 2 in mode 4: the LSB, then MSB and LSB pairs until the LSB
+    // has dropped by more than 4.
+    let mut bus = bus_at(20_000);
+    bus.io_write(0x43, 0xB8);
+    let ppi = bus.io_read(0x61);
+    bus.io_write(0x61, ppi | 1);
+    bus.io_write(0x42, 0);
+    bus.io_write(0x42, 0);
+    let start = bus.clock.now_ticks();
+    let first = bus.io_read(0x42);
+    for reads in 0.. {
+        assert!(reads < 1000, "the wait doesn't end");
+        bus.io_read(0x42);
+        let lsb = bus.io_read(0x42);
+        bus.clock.icount += 4;
+        if first.wrapping_sub(lsb) > 4 {
+            break;
+        }
+    }
+    assert!(bus.clock.now_ticks() - start >= 5);
+}
+
+#[test]
+fn channel_2_square_wave_follows_its_gate() {
+    let mut bus = bus_at(1000);
+    let out = |bus: &mut Bus| bus.io_read(0x61) & 0x20 != 0;
+    // A tone of 1000 ticks with the gate high: the output is high for the
+    // first 500 ticks, low for the next.
+    bus.io_write(0x61, 0x01);
+    bus.io_write(0x43, 0xB6);
+    bus.io_write(0x42, 0xE8);
+    bus.io_write(0x42, 0x03);
+    assert!(out(&mut bus));
+    bus.clock.icount += 600; // about 716 ticks
+    assert!(!out(&mut bus));
+    // The gate low forces it high and stops the count; up again, the
+    // period starts over.
+    bus.io_write(0x61, 0x00);
+    assert!(out(&mut bus));
+    let held = latched_pit2(&mut bus);
+    bus.clock.icount += 300;
+    let later = latched_pit2(&mut bus);
+    assert_eq!(held, later);
+    bus.io_write(0x61, 0x01);
+    assert!(out(&mut bus));
+    let restarted = latched_pit2(&mut bus);
+    assert!(restarted > 990, "{}", restarted);
+}
+
+#[test]
+fn channel_2_mode_1_waits_for_the_gate() {
+    let mut bus = bus_at(1000);
+    let out = |bus: &mut Bus| bus.io_read(0x61) & 0x20 != 0;
+    bus.io_write(0x61, 0x00);
+    // Mode 1, count 100: nothing happens until the gate rises.
+    bus.io_write(0x43, 0xB2);
+    bus.io_write(0x42, 100);
+    bus.io_write(0x42, 0);
+    bus.clock.icount += 1000;
+    assert!(out(&mut bus));
+    bus.io_write(0x61, 0x01);
+    assert!(!out(&mut bus));
+    bus.clock.icount += 200; // about 239 ticks
+    assert!(out(&mut bus));
+    // Another rising edge fires it again.
+    bus.io_write(0x61, 0x00);
+    bus.io_write(0x61, 0x01);
+    assert!(!out(&mut bus));
+}
+
+/// Where the channel 2 program keeps its results, in its segment.
+const PIT2_TICKS: u16 = 0x400;
+const PIT2_FRESH: u16 = 0x402;
+const PIT2_HELD: u16 = 0x404;
+const PIT2_OUT_HELD: u16 = 0x406;
+
+/// A COM program timing 50 ms twenty times on PIT channel 2 as Memtest86+'s
+/// `cpuspeed()` and Linux's TSC calibration do: gate high, speaker off,
+/// count 59659 in mode 0, then poll port 61h bit 5 until the output goes
+/// high at terminal count. It keeps the BIOS ticks the twenty waits took,
+/// then a count of FFFFh latched just after it was written, and one of
+/// 1000h latched with the gate low (with the output then).
+fn pit2_program() -> Vec<u8> {
+    use iced_x86::code_asm::*;
+    let mut a = CodeAssembler::new(16).unwrap();
+    let asm = |a: &mut CodeAssembler| -> Result<(), IcedError> {
+        a.mov(ax, 0x40)?;
+        a.mov(es, ax)?;
+        let mut sync = a.create_label();
+        a.mov(bx, word_ptr(0x6C).es())?;
+        a.set_label(&mut sync)?;
+        a.cmp(bx, word_ptr(0x6C).es())?;
+        a.je(sync)?;
+        a.mov(bx, word_ptr(0x6C).es())?;
+        a.mov(si, 20)?;
+        let mut measure = a.create_label();
+        let mut poll = a.create_label();
+        a.set_label(&mut measure)?;
+        a.in_(al, 0x61)?;
+        a.and(al, 0xFD)?;
+        a.or(al, 1)?;
+        a.out(0x61, al)?;
+        a.mov(al, 0xB0)?;
+        a.out(0x43, al)?;
+        a.mov(al, 0x0B)?;
+        a.out(0x42, al)?;
+        a.mov(al, 0xE9)?;
+        a.out(0x42, al)?;
+        a.set_label(&mut poll)?;
+        a.in_(al, 0x61)?;
+        a.test(al, 0x20)?;
+        a.jz(poll)?;
+        a.dec(si)?;
+        a.jnz(measure)?;
+        a.mov(ax, word_ptr(0x6C).es())?;
+        a.sub(ax, bx)?;
+        a.mov(word_ptr(PIT2_TICKS), ax)?;
+        // A fresh count reads back from where it starts.
+        a.mov(al, 0xB0)?;
+        a.out(0x43, al)?;
+        a.mov(al, 0xFF)?;
+        a.out(0x42, al)?;
+        a.out(0x42, al)?;
+        a.mov(al, 0x80)?;
+        a.out(0x43, al)?;
+        a.in_(al, 0x42)?;
+        a.mov(byte_ptr(PIT2_FRESH), al)?;
+        a.in_(al, 0x42)?;
+        a.mov(byte_ptr(PIT2_FRESH + 1), al)?;
+        // With the gate low, the count holds and the output stays low.
+        a.in_(al, 0x61)?;
+        a.and(al, 0xFC)?;
+        a.out(0x61, al)?;
+        a.mov(al, 0xB0)?;
+        a.out(0x43, al)?;
+        a.mov(al, 0x00)?;
+        a.out(0x42, al)?;
+        a.mov(al, 0x10)?;
+        a.out(0x42, al)?;
+        a.mov(cx, 5000)?;
+        let mut idle = a.create_label();
+        a.set_label(&mut idle)?;
+        a.loop_(idle)?;
+        a.mov(al, 0x80)?;
+        a.out(0x43, al)?;
+        a.in_(al, 0x42)?;
+        a.mov(byte_ptr(PIT2_HELD), al)?;
+        a.in_(al, 0x42)?;
+        a.mov(byte_ptr(PIT2_HELD + 1), al)?;
+        a.in_(al, 0x61)?;
+        a.mov(byte_ptr(PIT2_OUT_HELD), al)?;
+        // The gate up again, it runs out.
+        a.or(al, 1)?;
+        a.out(0x61, al)?;
+        let mut out = a.create_label();
+        a.set_label(&mut out)?;
+        a.in_(al, 0x61)?;
+        a.test(al, 0x20)?;
+        a.jz(out)?;
+        a.mov(ax, 0x4C2A)?;
+        a.int(0x21)
+    };
+    asm(&mut a).unwrap();
+    let mut image = a.assemble(0x100).unwrap();
+    image.resize(0x500 - 0x100, 0);
+    image
+}
+
+#[test]
+fn pit_channel_2_times_a_calibration_loop() {
+    use rust_dos::exec::{NoHook, StopReason, run_batch};
+    let dir = std::path::PathBuf::from("target/test_timer/pit2");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("T.COM"), pit2_program()).unwrap();
+    let mut cpu = Cpu::new(dir);
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.COM", None));
+    cpu.bus.set_cycles_per_ms(20_000);
+    let psp = cpu.current_psp as usize;
+    let ended = (0..2000).any(|_| {
+        cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
+        run_batch(&mut cpu, &mut NoHook, false) == StopReason::ShellReloaded
+    });
+    assert!(ended, "the program didn't end");
+    assert_eq!(cpu.errorlevel, 0x2A);
+    let word = |offset: u16| cpu.bus.read_16(psp * 16 + offset as usize);
+    // Twenty times 50 ms is a second: 18.2 BIOS ticks.
+    assert!((17..=19).contains(&word(PIT2_TICKS)), "{} ticks", word(PIT2_TICKS));
+    assert!(word(PIT2_FRESH) >= 0xFF00, "{:04X}", word(PIT2_FRESH));
+    assert_eq!(word(PIT2_HELD), 0x1000);
+    assert_eq!(word(PIT2_OUT_HELD) & 0x20, 0);
+}
+
+#[test]
+fn a_mode_0_control_word_still_stops_channel_2() {
+    // Tony & Friends in Kellogg's Land times its frames so: mode 0 with the
+    // gate low, a count, a latch, then the gate up. The count it reads is
+    // the one it wrote, and the control word stops a running count.
+    let mut bus = bus_at(20_000);
+    bus.io_write(0x61, 0x00);
+    bus.io_write(0x43, 0xB0);
+    let stopped = latched_pit2(&mut bus);
+    bus.clock.icount += 1_000;
+    assert_eq!(latched_pit2(&mut bus), stopped);
+    bus.io_write(0x42, 0xB2);
+    bus.io_write(0x42, 0x41);
+    bus.clock.icount += 1_000;
+    assert_eq!(latched_pit2(&mut bus), 0x41B2);
+    bus.io_write(0x61, 0x01);
+    bus.clock.icount += 1_000;
+    assert!(latched_pit2(&mut bus) < 0x41B2);
+}
+
+/// Bao Xiao San Guo Zhi's random numbers (SANGO.EXE, DOSBox-X issue 1274):
+/// a counter latch command, a square wave control word, then the count's
+/// two bytes, never writing a count. Returns how many of eight calls
+/// differ.
+fn sango_rolls(bus: &mut Bus) -> usize {
+    let mut rolls = Vec::new();
+    for call in 0..8u64 {
+        bus.clock.icount += 1_000 + 37 * call;
+        bus.io_write(0x43, 0x86);
+        bus.io_write(0x43, 0xB6);
+        let lsb = bus.io_read(0x42) as u16;
+        let msb = bus.io_read(0x42) as u16;
+        rolls.push(msb << 8 | lsb);
+    }
+    rolls.sort_unstable();
+    rolls.dedup();
+    rolls.len()
+}
+
+#[test]
+fn channel_2_keeps_counting_after_a_square_wave_control_word() {
+    // A square wave already runs with the gate high; the game's control
+    // words leave it running, so every roll differs.
+    let mut bus = bus_at(20_000);
+    bus.io_write(0x61, 0x01);
+    bus.io_write(0x43, 0xB6);
+    bus.io_write(0x42, 0x00);
+    bus.io_write(0x42, 0x00);
+    assert_eq!(sango_rolls(&mut bus), 8);
+}
+
+/// Channel 2's count, through a counter latch command.
+fn latched_pit2(bus: &mut Bus) -> u16 {
+    bus.io_write(0x43, 0x80);
+    bus.io_read(0x42) as u16 | (bus.io_read(0x42) as u16) << 8
+}
+
+#[test]
+fn a_count_after_a_square_wave_control_word_loads_at_once() {
+    // The control word leaves the rate generator running, but the count
+    // written after it starts over at once, as after any control word,
+    // without waiting for the running period to end.
+    let mut bus = bus_at(20_000);
+    bus.io_write(0x61, 0x01);
+    bus.io_write(0x43, 0xB4);
+    bus.io_write(0x42, 0x00);
+    bus.io_write(0x42, 0x00);
+    bus.clock.icount += 1_000;
+    bus.io_write(0x43, 0xB4);
+    bus.io_write(0x42, 0x00);
+    bus.io_write(0x42, 0x10);
+    let count = latched_pit2(&mut bus);
+    assert!((0xF00..=0x1000).contains(&count), "{:04X}", count);
+    // A count written while it runs, with no control word before it,
+    // waits for the period to end.
+    bus.io_write(0x42, 0x00);
+    bus.io_write(0x42, 0x20);
+    assert!(latched_pit2(&mut bus) <= 0x1000);
+}
+
+#[test]
+fn a_due_count_and_port_61h_survive_a_save_state() {
+    use rust_dos::savestate::machine;
+    let machine = || {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.bus.set_cycles_per_ms(20_000);
+        cpu.load_shell();
+        cpu
+    };
+    let mut a = machine();
+    a.bus.io_write(0x61, 0x0D);
+    a.bus.io_write(0x43, 0xB6);
+    a.bus.io_write(0x42, 0x00);
+    a.bus.io_write(0x42, 0x00);
+    a.bus.clock.icount += 1_000;
+    a.bus.io_write(0x43, 0xB6);
+    let (bytes, parts) = machine::save_parts(&a);
+    let mut b = machine();
+    machine::load(&mut b, &bytes).unwrap();
+    assert!(b.bus.pit2.count_due);
+    assert!(machine::save(&b) == bytes);
+    assert_eq!(b.bus.io_read(0x61) & 0x0F, 0x0D);
+
+    // A PIT2 section that ends before the flag, as states saved before it
+    // was kept, loads without it.
+    let range = |name: &str| parts.iter().find(|(n, _)| n == name).unwrap_or_else(|| panic!("no {}", name)).1.clone();
+    let later = range("PIT2.pit2_count_due").start..range("VIDE").start;
+    let mut old = bytes[..later.start].to_vec();
+    old.extend_from_slice(&bytes[later.end..]);
+    // The section's length follows its tag and version.
+    let len_at = range("PIT2").start + 6;
+    let len = u32::from_le_bytes(old[len_at..len_at + 4].try_into().unwrap()) - later.len() as u32;
+    old[len_at..len_at + 4].copy_from_slice(&len.to_le_bytes());
+    let mut c = machine();
+    c.bus.io_write(0x61, 0x0C);
+    machine::load(&mut c, &old).unwrap();
+    assert!(!c.bus.pit2.count_due);
+    assert_eq!(c.bus.io_read(0x61) & 0x0C, 0);
+}
+
+#[test]
+fn channel_2_starts_with_its_gate_low() {
+    // As on a real PC: read without being set up, the count holds, and
+    // Bao Xiao San Guo Zhi's rolls all come out the same.
+    let mut bus = bus_at(20_000);
+    assert_eq!(bus.io_read(0x61) & 0x03, 0);
+    let first = latched_pit2(&mut bus);
+    bus.clock.icount += 1_000;
+    assert_eq!(latched_pit2(&mut bus), first);
+    assert_eq!(sango_rolls(&mut bus), 1);
+}
+
+#[test]
+fn pit2_gate_at_start_runs_channel_2() {
+    use rust_dos::config::SoundConfig;
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    cpu.bus.set_cycles_per_ms(20_000);
+    let off = SoundConfig::default();
+    let on = SoundConfig { pit2_gate_at_start: true, ..SoundConfig::default() };
+    rust_dos::sound::apply_config(&mut cpu, &on, Some(&off));
+    // The gate is up and the speaker silent; the count runs.
+    assert_eq!(cpu.bus.io_read(0x61) & 0x03, 0x01);
+    assert!(!cpu.bus.speaker_on);
+    let first = latched_pit2(&mut cpu.bus);
+    cpu.bus.clock.icount += 1_000;
+    assert_ne!(latched_pit2(&mut cpu.bus), first);
+    assert_eq!(sango_rolls(&mut cpu.bus), 8);
+    // Turned off again, the gate goes down.
+    rust_dos::sound::apply_config(&mut cpu, &off, Some(&on));
+    assert_eq!(cpu.bus.io_read(0x61) & 0x03, 0);
+    // Turned on after a program left the channel in mode 0 (a game's
+    // profile, launched at the DOS prompt), it runs in mode 3 from FFFFh.
+    cpu.bus.io_write(0x43, 0xB0);
+    cpu.bus.io_write(0x42, 0x34);
+    rust_dos::sound::apply_config(&mut cpu, &on, Some(&off));
+    assert_eq!(cpu.bus.io_read(0x61) & 0x03, 0x01);
+    assert_eq!(sango_rolls(&mut cpu.bus), 8);
+}
+
+#[test]
+fn a_reboot_puts_back_the_gate_pit2_gate_at_start_asks_for() {
+    use rust_dos::config::SoundConfig;
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    cpu.bus.set_cycles_per_ms(20_000);
+    cpu.load_shell();
+    let off = SoundConfig::default();
+    let on = SoundConfig { pit2_gate_at_start: true, ..SoundConfig::default() };
+    rust_dos::sound::apply_config(&mut cpu, &on, Some(&off));
+    // A program beeps, then ends the beep by lowering the gate and the
+    // speaker bit; a reboot raises the gate again.
+    cpu.bus.io_write(0x61, 0x0F);
+    cpu.bus.io_write(0x61, 0x0C);
+    rust_dos::boot::reboot_dos(&mut cpu);
+    assert_eq!(cpu.bus.io_read(0x61) & 0x0F, 0x01);
+    assert_eq!(sango_rolls(&mut cpu.bus), 8);
+    // With the setting off, a reboot leaves the speaker off and the gate
+    // low, as a real BIOS does after its beep.
+    rust_dos::sound::apply_config(&mut cpu, &off, Some(&on));
+    cpu.bus.io_write(0x61, 0x0F);
+    rust_dos::boot::reboot_dos(&mut cpu);
+    assert_eq!(cpu.bus.io_read(0x61) & 0x0F, 0);
+    assert!(!cpu.bus.speaker_on);
+}
+
+#[test]
+fn a_switch_between_modes_2_and_3_stops_channel_2() {
+    // Only a control word for the mode that runs leaves the count running;
+    // a switch to the other periodic mode stops it until a count comes.
+    let mut bus = bus_at(20_000);
+    bus.io_write(0x61, 0x01);
+    bus.io_write(0x43, 0xB6);
+    bus.io_write(0x42, 0xE8);
+    bus.io_write(0x42, 0x03);
+    bus.clock.icount += 250;
+    bus.io_write(0x43, 0xB4);
+    let stopped = latched_pit2(&mut bus);
+    bus.clock.icount += 1_000;
+    assert_eq!(latched_pit2(&mut bus), stopped);
+}

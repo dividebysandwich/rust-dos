@@ -185,6 +185,9 @@ pub struct Config {
     /// The messages that say the mouse was captured or let go
     /// (`mouse_capture_messages`).
     pub mouse_capture_messages: Option<bool>,
+    /// The right button held still opening the settings window
+    /// (`mouse_menu_hold`).
+    pub mouse_menu_hold: Option<bool>,
     /// The check for a newer rust-dos at startup (`version_check`).
     pub version_check: Option<bool>,
     /// Rewind (`rewind`), and the memory its states may take in MB
@@ -541,6 +544,9 @@ pub struct SoundConfig {
     pub lpt_dac: LptDacType,
     /// The Tandy's and PCjr's sound chip (`tandy`).
     pub tandy: crate::sn76489::TandySound,
+    /// Whether PIT channel 2 starts with its gate (port 61h bit 0) high and
+    /// its count running (`pit2_gate_at_start`).
+    pub pit2_gate_at_start: bool,
 }
 
 impl MidiSynth {
@@ -576,6 +582,7 @@ impl Default for SoundConfig {
             midiport: String::new(),
             lpt_dac: LptDacType::None,
             tandy: crate::sn76489::TandySound::Auto,
+            pit2_gate_at_start: false,
         }
     }
 }
@@ -752,6 +759,10 @@ impl SoundConfig {
             "lpt_dac" => {
                 self.lpt_dac = LptDacType::parse(value)
                     .ok_or_else(|| format!("invalid lpt_dac '{}' (none, disney or covox)", value))?;
+            }
+            "pit2_gate_at_start" => {
+                self.pit2_gate_at_start = parse_bool(value)
+                    .ok_or_else(|| format!("invalid pit2_gate_at_start '{}' (true or false)", value))?;
             }
             _ => return Err(format!("unknown setting '{}'", key)),
         }
@@ -982,6 +993,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Some(on) => config.mouse_capture_messages = Some(on),
                             None => warn(format!("invalid mouse_capture_messages '{}' (true or false)", value)),
                         },
+                        "mouse_menu_hold" => match parse_bool(value) {
+                            Some(on) => config.mouse_menu_hold = Some(on),
+                            None => warn(format!("invalid mouse_menu_hold '{}' (true or false)", value)),
+                        },
                         "version_check" => match parse_bool(value) {
                             Some(on) => config.version_check = Some(on),
                             None => warn(format!("invalid version_check '{}' (true or false)", value)),
@@ -1027,7 +1042,12 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             "486" => config.cpu = Some(CpuModel::I486),
                             "pentium" | "586" => config.cpu = Some(CpuModel::Pentium),
                             "pentium_mmx" | "pentiummmx" | "mmx" => config.cpu = Some(CpuModel::PentiumMmx),
-                            _ => warn(format!("invalid cpu '{}' (386, 486, pentium or pentium_mmx)", value)),
+                            "pentium_pro" | "pentiumpro" | "ppro" | "686" => config.cpu = Some(CpuModel::PentiumPro),
+                            "pentium_ii" | "pentiumii" | "pentium2" => config.cpu = Some(CpuModel::PentiumII),
+                            _ => warn(format!(
+                                "invalid cpu '{}' (386, 486, pentium, pentium_mmx, pentium_pro or pentium_ii)",
+                                value
+                            )),
                         },
                         "hard_disk_speed" | "floppy_disk_speed" => match DiskSpeed::parse(value) {
                             Some(speed) if key.eq_ignore_ascii_case("hard_disk_speed") => {
@@ -1377,6 +1397,9 @@ pub struct Settings {
     pub mouse_sensitivity: f64,
     /// Say over the picture when the mouse is captured or let go.
     pub mouse_capture_messages: bool,
+    /// The right mouse button held still for three seconds opens the
+    /// settings window.
+    pub mouse_menu_hold: bool,
     /// Ask rust-dos.com at startup whether there is a newer version.
     pub version_check: bool,
     /// Rewind with held Alt+F11, and the memory in MB its states may take.
@@ -1444,6 +1467,7 @@ impl Default for Settings {
             mouse_autocapture: true,
             mouse_sensitivity: 1.0,
             mouse_capture_messages: true,
+            mouse_menu_hold: true,
             version_check: true,
             rewind: false,
             rewind_memory: 256,
@@ -1550,6 +1574,7 @@ impl Settings {
             mouse_autocapture: config.mouse_autocapture.unwrap_or(default.mouse_autocapture),
             mouse_sensitivity: config.mouse_sensitivity.unwrap_or(default.mouse_sensitivity),
             mouse_capture_messages: config.mouse_capture_messages.unwrap_or(default.mouse_capture_messages),
+            mouse_menu_hold: config.mouse_menu_hold.unwrap_or(default.mouse_menu_hold),
             version_check: config.version_check.unwrap_or(default.version_check),
             rewind: config.rewind.unwrap_or(default.rewind),
             rewind_memory: config.rewind_memory.unwrap_or(default.rewind_memory),
@@ -1629,6 +1654,8 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
                 CpuModel::I486 => "486",
                 CpuModel::Pentium => "pentium",
                 CpuModel::PentiumMmx => "pentium_mmx",
+                CpuModel::PentiumPro => "pentium_pro",
+                CpuModel::PentiumII => "pentium_ii",
             }
             .to_string()),
         ),
@@ -1646,6 +1673,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Emulator, "mouse_autocapture", yes_no(settings.mouse_autocapture)),
         (Emulator, "mouse_sensitivity", Some(settings.mouse_sensitivity.to_string())),
         (Emulator, "mouse_capture_messages", yes_no(settings.mouse_capture_messages)),
+        (Emulator, "mouse_menu_hold", yes_no(settings.mouse_menu_hold)),
         (Emulator, "version_check", yes_no(settings.version_check)),
         (Emulator, "rewind", yes_no(settings.rewind)),
         (Emulator, "rewind_memory", Some(settings.rewind_memory.to_string())),
@@ -1681,6 +1709,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Sound, "midiport", (!sound.midiport.is_empty()).then(|| sound.midiport.clone())),
         (Sound, "lpt_dac", Some(sound.lpt_dac.name().to_string())),
         (Sound, "tandy", Some(sound.tandy.name().to_string())),
+        (Sound, "pit2_gate_at_start", yes_no(sound.pit2_gate_at_start)),
         (Sound, "hard_disk_noise", Some(settings.disk.hard_disk_noise.name().to_string())),
         (Sound, "floppy_disk_noise", Some(settings.disk.floppy_disk_noise.name().to_string())),
     ];
@@ -2286,6 +2315,22 @@ mod tests {
     }
 
     #[test]
+    fn channel_2_can_start_with_its_gate_high() {
+        assert!(!parse("[sound]
+", Path::new("/cfg"), None).sound.pit2_gate_at_start);
+        let config = parse("[sound]
+pit2_gate_at_start=true
+", Path::new("/cfg"), None);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        assert!(config.sound.pit2_gate_at_start);
+        let config = parse("[sound]
+pit2_gate_at_start=maybe
+", Path::new("/cfg"), None);
+        assert!(!config.sound.pit2_gate_at_start);
+        assert!(config.warnings[0].contains("pit2_gate_at_start"), "{:?}", config.warnings);
+    }
+
+    #[test]
     fn a_dac_on_the_parallel_port() {
         let config = parse("[sound]\nlpt_dac=Disney\n", Path::new("/cfg"), None);
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
@@ -2469,6 +2514,11 @@ mod tests {
         assert_eq!(config.cpu, Some(crate::cpu::CpuModel::I386));
         let config = parse("[emulator]\ncpu=Pentium\n", Path::new("/cfg"), None);
         assert_eq!(config.cpu, Some(crate::cpu::CpuModel::Pentium));
+        let config = parse("[emulator]\ncpu=pentium_pro\n", Path::new("/cfg"), None);
+        assert_eq!(config.cpu, Some(crate::cpu::CpuModel::PentiumPro));
+        let config = parse("[emulator]\ncpu=pentium_ii\nmemsize=512\n", Path::new("/cfg"), None);
+        assert_eq!(config.cpu, Some(crate::cpu::CpuModel::PentiumII));
+        assert_eq!(Settings::from_config(&config).memsize, 512);
         let config = parse("[emulator]\ncpu=8086\n", Path::new("/cfg"), None);
         assert_eq!(config.cpu, None);
         assert!(config.warnings[0].contains("invalid cpu '8086'"));
@@ -2585,7 +2635,7 @@ mod tests {
         assert!(config.warnings[1].starts_with("line 6: unknown setting 'bass'"), "{:?}", config.warnings);
         let mixer = Settings::from_config(&config).mixer;
         let levels = Channel::ALL.map(|channel| mixer.level(channel));
-        assert_eq!(levels, [80, 100, 100, 150, 100, 100, 0, 100, 100, 100, 100, 100]);
+        assert_eq!(levels, [80, 100, 100, 150, 100, 100, 0, 100, 100, 100, 100, 100, 100]);
         assert!(mixer.speaker_filter);
         assert_eq!((mixer.sb_filter, mixer.reverb, mixer.chorus), (SbFilter::Auto, ReverbPreset::Off, ChorusPreset::Off));
 
@@ -2695,6 +2745,7 @@ mod tests {
             midiport: "FLUID".to_string(),
             lpt_dac: LptDacType::Disney,
             tandy: crate::sn76489::TandySound::On,
+            pit2_gate_at_start: true,
         };
         Settings {
             scale: 3,
@@ -2742,6 +2793,7 @@ mod tests {
             mouse_autocapture: false,
             mouse_sensitivity: 2.3,
             mouse_capture_messages: false,
+            mouse_menu_hold: false,
             version_check: false,
             rewind: true,
             rewind_memory: 512,

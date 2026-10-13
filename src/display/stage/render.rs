@@ -161,6 +161,19 @@ pub struct Extra {
     pub color: [f32; 4],
 }
 
+/// A part of a prop (`Scene::props`, by their indices) drawn where `model`
+/// takes it, lit; showing `page` where it is a manual's page.
+#[derive(Clone, Copy, Debug)]
+pub struct PropDraw {
+    pub prop: usize,
+    pub part: usize,
+    pub model: Mat4,
+    pub page: Option<glow::Texture>,
+}
+
+/// How brightly a manual's pages glow, to be read in a dark room.
+const PAGE_GLOW: f32 = 0.25;
+
 /// What a view is drawn into: its size, the colour format (RGBA8, or
 /// SRGB8_ALPHA8 which encodes linear light itself).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -549,6 +562,8 @@ pub struct Gpu {
     /// For the sky's triangle, made from the vertex number.
     empty: glow::VertexArray,
     meshes: Vec<GpuMesh>,
+    /// The props' parts, by prop and part.
+    prop_meshes: Vec<Vec<GpuMesh>>,
     /// The unit cube the extras are drawn with.
     cube: GpuMesh,
     /// The scene's pictures, by their index.
@@ -666,7 +681,7 @@ impl Gpu {
                 clock.delete(gl);
             }
             gl.delete_vertex_array(self.empty);
-            for mesh in self.meshes.into_iter().chain([self.cube]) {
+            for mesh in self.meshes.into_iter().chain(self.prop_meshes.into_iter().flatten()).chain([self.cube]) {
                 gl.delete_vertex_array(mesh.vao);
                 for buffer in mesh.buffers {
                     gl.delete_buffer(buffer);
@@ -783,6 +798,7 @@ impl Gpu {
             glow: 1.0,
             empty,
             meshes: Vec::new(),
+            prop_meshes: Vec::new(),
             cube,
             textures: Vec::new(),
             target: None,
@@ -1494,7 +1510,31 @@ impl Gpu {
         for mesh in &scene.meshes {
             self.meshes.push(upload_mesh(gl, mesh)?);
         }
+        for prop in &scene.props {
+            let parts = prop.parts.iter().map(|part| upload_mesh(gl, &part.mesh)).collect::<Result<_, _>>()?;
+            self.prop_meshes.push(parts);
+        }
         Ok(())
+    }
+
+    /// A texture of a manual's page: `rgba`, `size` big, rows from the top.
+    pub fn page_texture(&self, gl: &glow::Context, rgba: &[u8], (w, h): (u32, u32)) -> Option<glow::Texture> {
+        // SAFETY: see `GlScreen`.
+        unsafe {
+            let texture = gl.create_texture().ok()?;
+            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
+            let pixels = glow::PixelUnpackData::Slice(Some(rgba));
+            gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::SRGB8_ALPHA8 as i32, w as i32, h as i32, 0, glow::RGBA, glow::UNSIGNED_BYTE, pixels);
+            gl.generate_mipmap(glow::TEXTURE_2D);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR_MIPMAP_LINEAR as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+            self.set_anisotropy(gl);
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            Some(texture)
+        }
     }
 
     /// The target for `format`, made anew if it is of another.
@@ -1519,8 +1559,9 @@ impl Gpu {
     /// Draw `scene` as `views` see it (one, or both with `Multiview`) into
     /// `dest`, its `area` from the bottom left (the whole, or less to draw
     /// less), with `screen` the picture on the screen, the PC's lights as
-    /// `leds` and `extras` over it all. An sRGB target is written linear
-    /// light, which it encodes; another sRGB values.
+    /// `leds`, the props as `props` say and `extras` over it all. An sRGB
+    /// target is written linear light, which it encodes; another sRGB
+    /// values.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
@@ -1531,6 +1572,7 @@ impl Gpu {
         area: (u32, u32),
         screen: Option<glow::Texture>,
         leds: Leds,
+        props: &[PropDraw],
         extras: &[Extra],
     ) -> Result<(), String> {
         let format = dest.format();
@@ -1657,6 +1699,18 @@ impl Gpu {
                     gl.bind_vertex_array(Some(mesh.vao));
                     gl.draw_elements(glow::TRIANGLES, mesh.count, glow::UNSIGNED_INT, 0);
                 }
+                if !blended && !props.is_empty() {
+                    // The props, among the opaque meshes but not in the
+                    // depth drawn first, nor in its ambient occlusion.
+                    gl.depth_mask(true);
+                    gl.depth_func(glow::LESS);
+                    gl.uniform_1_i32(has_ao.as_ref(), 0);
+                    self.draw_props(gl, scene, &locations, model.as_ref(), props);
+                    gl.uniform_matrix_4_f32_slice(model.as_ref(), false, &Mat4::IDENTITY.to_cols_array());
+                    gl.uniform_1_i32(has_ao.as_ref(), ao.is_some() as i32);
+                    gl.depth_func(glow::LEQUAL);
+                    gl.depth_mask(false);
+                }
             }
 
             // The extras, unlit, seen through where they are.
@@ -1689,6 +1743,37 @@ impl Gpu {
         }
         self.mark(gl, Pass::Scene);
         Ok(())
+    }
+
+    /// The props' parts, with the lit program in use.
+    fn draw_props(&self, gl: &glow::Context, scene: &Scene, locations: &MaterialLocations, model: Option<&glow::UniformLocation>, props: &[PropDraw]) {
+        for draw in props {
+            let Some(mesh) = self.prop_meshes.get(draw.prop).and_then(|parts| parts.get(draw.part)) else { continue };
+            let material = &scene.materials[mesh.material];
+            // SAFETY: see `GlScreen`.
+            unsafe {
+                gl.uniform_matrix_4_f32_slice(model, false, &draw.model.to_cols_array());
+                self.bind_material(gl, locations, material, true);
+                if let Some(page) = draw.page {
+                    // The page's picture, glowing a little.
+                    gl.uniform_4_f32_slice(locations.base_color.as_ref(), &[1.0; 4]);
+                    gl.uniform_3_f32_slice(locations.emissive.as_ref(), &[PAGE_GLOW; 3]);
+                    for (unit, flag) in [(0, &locations.has_base), (1, &locations.has_emissive)] {
+                        gl.uniform_1_i32(flag.as_ref(), 1);
+                        gl.active_texture(glow::TEXTURE0 + unit);
+                        gl.bind_texture(glow::TEXTURE_2D, Some(page));
+                    }
+                }
+                if material.double_sided {
+                    gl.disable(glow::CULL_FACE);
+                } else {
+                    gl.enable(glow::CULL_FACE);
+                    gl.cull_face(glow::BACK);
+                }
+                gl.bind_vertex_array(Some(mesh.vao));
+                gl.draw_elements(glow::TRIANGLES, mesh.count, glow::UNSIGNED_INT, 0);
+            }
+        }
     }
 
     /// A framebuffer drawing into the headset's image `texture`, `size`

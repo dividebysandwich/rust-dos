@@ -416,13 +416,13 @@ impl Page {
                 Cycles, Core, Fpu, Cpu, Post, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, VoodooScaleShader, VoodooMsaa,
                 VoodooAnisotropy, VoodooTextureSampling, VoodooFpsCap, VoodooGamma, VoodooOverlay, PowerVr, PowerVrFilter, Memsize, Ems, Umb, DosHigh, Dpmi,
                 DosVersion, IdeHardDisks, BootCdrom, HardDiskSpeed, FloppyDiskSpeed, Joystick,
-                Deadzone, MouseSensitivity, MouseAutocapture, MouseCaptureMessages, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, RecordShader, Autoexec,
+                Deadzone, MouseSensitivity, MouseAutocapture, MouseCaptureMessages, MouseMenuHold, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, RecordShader, Autoexec,
                 ShellSuggestions, ShellColors, SaveShellHistory, VersionCheck,
             ],
             Page::Sound => &[
                 SbType, SbPorts, Awe32Rom, Awe32Download, Awe32Ram, Opl, Gus, GusPorts, GusDrive, UltraDir, Midi,
                 Sc55Roms, Sc55Model, Sc55Download, SoundFont, Mt32Roms, Mt32Model, MidiPort, LptDac, TandySound,
-                HardDiskNoise, FloppyDiskNoise,
+                Pit2GateAtStart, HardDiskNoise, FloppyDiskNoise,
             ],
             Page::Mixer => &[
                 Volume(Channel::Master),
@@ -437,6 +437,7 @@ impl Page {
                 Volume(Channel::Tandy),
                 Volume(Channel::Monitor),
                 Volume(Channel::Awe),
+                Volume(Channel::Modem),
                 SpeakerFilter,
                 SbFilter,
                 Reverb,
@@ -611,6 +612,8 @@ enum Item {
     MouseAutocapture,
     /// The messages that say the mouse was captured or let go.
     MouseCaptureMessages,
+    /// The right button held still opening the settings window.
+    MouseMenuHold,
     ShellSuggestions,
     ShellColors,
     SaveShellHistory,
@@ -683,6 +686,8 @@ enum Item {
     LptDac,
     /// The Tandy's and PCjr's sound chip.
     TandySound,
+    /// PIT channel 2's gate at startup (`pit2_gate_at_start`).
+    Pit2GateAtStart,
     /// The configuration file's `[autoexec]` commands (autoexec.rs).
     Autoexec,
     /// The IPX driver, its IRQ and its frame type.
@@ -955,6 +960,7 @@ impl Item {
             MouseSensitivity => "Mouse sensitivity",
             MouseAutocapture => "Mouse auto capture",
             MouseCaptureMessages => "Mouse capture messages",
+            MouseMenuHold => "Hold right button for settings",
             ShellSuggestions => "Shell suggestions",
             ShellColors => "Shell colors",
             SaveShellHistory => "Save shell history",
@@ -1003,6 +1009,7 @@ impl Item {
             AudioPrebuffer => "Sound prebuffer",
             LptDac => "Parallel port DAC",
             TandySound => "Tandy/PCjr sound",
+            Pit2GateAtStart => "Timer 2 gate at startup",
             Autoexec => "Edit the [autoexec] commands...",
             Ipx => "IPX driver",
             IpxIrq => "  IRQ",
@@ -1158,7 +1165,7 @@ impl Item {
             Scale | Fullscreen | Aspect | Vrr | Filter | Shader | CrtCurvature | CrtGlow | Composite | CompositeEra => {
                 Applies::Now
             }
-            Cycles | Core | Fpu | Dpmi | DosVersion | IdeHardDisks | BootCdrom | KeyboardLayout | MouseAutocapture | MouseCaptureMessages | ShellSuggestions | ShellColors | SaveShellHistory | Rewind | RewindMemory
+            Cycles | Core | Fpu | Dpmi | DosVersion | IdeHardDisks | BootCdrom | KeyboardLayout | MouseAutocapture | MouseCaptureMessages | MouseMenuHold | ShellSuggestions | ShellColors | SaveShellHistory | Rewind | RewindMemory
             | VoodooRenderer | VoodooScale | VoodooScaleShader | VoodooMsaa | VoodooTextureSampling | VoodooAnisotropy | VoodooFpsCap | VoodooOverlay | PowerVrFilter => Applies::Now,
             Monochrome => Applies::NowAndAtPrompt,
             MonitorEffects => Applies::Now,
@@ -1322,6 +1329,7 @@ impl Item {
             MouseSensitivity => bar(format!("{:.2}x", s.mouse_sensitivity), (s.mouse_sensitivity * 100.0).round() as u16, 1000, 50),
             MouseAutocapture => on_off(s.mouse_autocapture),
             MouseCaptureMessages => on_off(s.mouse_capture_messages),
+            MouseMenuHold => on_off(s.mouse_menu_hold),
             ShellSuggestions => on_off(s.shell.autosuggest),
             ShellColors => on_off(s.shell.colors),
             SaveShellHistory => on_off(s.shell.save_history),
@@ -1419,6 +1427,7 @@ impl Item {
             AudioPrebuffer => format!("{} ms", s.audio_buffer.prebuffer),
             LptDac => s.sound.lpt_dac.describe().to_string(),
             TandySound => s.sound.tandy.describe().to_string(),
+            Pit2GateAtStart => on_off(s.sound.pit2_gate_at_start),
             Autoexec | Rooms | Phonebook => String::new(),
             Ipx => match s.network.ipx {
                 crate::net::IpxMode::Auto => "auto (with LAN HOST or JOIN)",
@@ -1507,7 +1516,7 @@ impl Item {
             CompositeEra => each(s, crate::video::composite::CompositeEra::ALL, |s, era| s.composite.era = era),
             Core => each(s, [CoreMode::Auto, CoreMode::Dynamic, CoreMode::Normal], |s, core| s.core = core),
             Fpu => on_off(|s, on| s.fpu_fast = on),
-            Cpu => each(s, [CpuModel::I386, CpuModel::I486, CpuModel::Pentium, CpuModel::PentiumMmx], |s, cpu| {
+            Cpu => each(s, CpuModel::ALL, |s, cpu| {
                 s.cpu = cpu;
                 s.memsize = s.memsize.min(cpu.max_memsize());
             }),
@@ -1553,6 +1562,7 @@ impl Item {
             KeyboardLayout => each(s, crate::keylayout::LayoutSetting::all(), |s, layout| s.keyboard_layout = layout),
             MouseAutocapture => on_off(|s, on| s.mouse_autocapture = on),
             MouseCaptureMessages => on_off(|s, on| s.mouse_capture_messages = on),
+            MouseMenuHold => on_off(|s, on| s.mouse_menu_hold = on),
             ShellSuggestions => on_off(|s, on| s.shell.autosuggest = on),
             ShellColors => on_off(|s, on| s.shell.colors = on),
             SaveShellHistory => on_off(|s, on| s.shell.save_history = on),
@@ -1629,6 +1639,7 @@ impl Item {
             AudioPrebuffer => each(s, crate::audio::PREBUFFERS, |s, ms| s.audio_buffer.prebuffer = ms),
             LptDac => each(s, crate::lpt_dac::LptDacType::ALL, |s, dac| s.sound.lpt_dac = dac),
             TandySound => each(s, crate::sn76489::TandySound::ALL, |s, tandy| s.sound.tandy = tandy),
+            Pit2GateAtStart => on_off(|s, on| s.sound.pit2_gate_at_start = on),
             Ipx => each(s, crate::net::IpxMode::ALL, |s, mode| s.network.ipx = mode),
             IpxIrq => each(s, [None, Some(3), Some(4), Some(5), Some(7), Some(9), Some(10), Some(11), Some(15)], |s, irq| {
                 s.network.ipx_irq = irq

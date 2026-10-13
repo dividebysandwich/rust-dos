@@ -49,6 +49,7 @@ struct Controls {
     set: xr::ActionSet,
     /// (Kept with the spaces made of it.)
     _aim: xr::Action<xr::Posef>,
+    _grip: xr::Action<xr::Posef>,
     select: xr::Action<bool>,
     squeeze: xr::Action<bool>,
     stick: xr::Action<xr::Vector2f>,
@@ -59,6 +60,8 @@ struct Controls {
     hands: [xr::Path; 2],
     /// Where each hand points from, its -Z the way.
     spaces: Vec<xr::Space>,
+    /// Where each hand holds the controller.
+    grips: Vec<xr::Space>,
 }
 
 pub struct Xr {
@@ -541,11 +544,18 @@ impl Xr {
         if self.session.sync_actions(&[xr::ActiveActionSet::new(&controls.set)]).is_err() {
             return tracking;
         }
-        for (i, (&path, space)) in controls.hands.iter().zip(&controls.spaces).enumerate() {
+        for (i, ((&path, space), grip)) in controls.hands.iter().zip(&controls.spaces).zip(&controls.grips).enumerate() {
             let Ok(location) = space.locate(&self.space, time) else { continue };
             if !location.location_flags.contains(valid) {
                 continue;
             }
+            let aim = rigid(world * pose_matrix(location.pose));
+            // (Where the runtime has no grip, the aim.)
+            let grip = grip
+                .locate(&self.space, time)
+                .ok()
+                .filter(|g| g.location_flags.contains(valid))
+                .map_or(aim, |g| rigid(world * pose_matrix(g.pose)));
             let held = |action: &xr::Action<bool>| {
                 action.state(&self.session, path).is_ok_and(|s| s.is_active && s.current_state)
             };
@@ -556,7 +566,8 @@ impl Xr {
                 .filter(|s| s.is_active)
                 .map_or(Vec2::ZERO, |s| Vec2::new(s.current_state.x, s.current_state.y));
             tracking.hands[i] = Some(Hand {
-                aim: rigid(world * pose_matrix(location.pose)),
+                aim,
+                grip,
                 select: held(&controls.select),
                 squeeze: held(&controls.squeeze),
                 primary: held(&controls.primary),
@@ -703,6 +714,7 @@ fn make_controls(
     let set = instance.create_action_set("rustdos", "Rust-DOS", 0).map_err(err("the controllers"))?;
     let made = err("the controllers");
     let aim = set.create_action::<xr::Posef>("aim", "Point", &hands).map_err(&made)?;
+    let grip = set.create_action::<xr::Posef>("grip", "Hold", &hands).map_err(&made)?;
     let select = set.create_action::<bool>("select", "Click (mouse left) / fire", &hands).map_err(&made)?;
     let squeeze = set.create_action::<bool>("squeeze", "Mouse right / second button", &hands).map_err(&made)?;
     let stick = set.create_action::<xr::Vector2f>("stick", "Joystick", &hands).map_err(&made)?;
@@ -716,6 +728,7 @@ fn make_controls(
                 let at = path(&format!("/user/hand/{}/input/{}", side, input))?;
                 bindings.push(match control {
                     Control::Aim => xr::Binding::new(&aim, at),
+                    Control::Grip => xr::Binding::new(&grip, at),
                     Control::Select => xr::Binding::new(&select, at),
                     Control::Squeeze => xr::Binding::new(&squeeze, at),
                     Control::Stick => xr::Binding::new(&stick, at),
@@ -732,11 +745,12 @@ fn make_controls(
         }
     }
     session.attach_action_sets(&[&set]).map_err(&made)?;
-    let mut spaces = Vec::new();
+    let (mut spaces, mut grips) = (Vec::new(), Vec::new());
     for &hand in &hands {
         spaces.push(aim.create_space(session, hand, xr::Posef::IDENTITY).map_err(&made)?);
+        grips.push(grip.create_space(session, hand, xr::Posef::IDENTITY).map_err(&made)?);
     }
-    Ok(Controls { set, _aim: aim, select, squeeze, stick, primary, secondary, menu, hands, spaces })
+    Ok(Controls { set, _aim: aim, _grip: grip, grips, select, squeeze, stick, primary, secondary, menu, hands, spaces })
 }
 
 /// Ask for the refresh rate `options` want, out of those the session's
