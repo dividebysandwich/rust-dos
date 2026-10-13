@@ -1635,10 +1635,8 @@ impl Bus {
     }
 
     /// A write of `size` bytes of `value` at `addr` into the VESA linear
-    /// frame buffer, with the profiler's and the idle detector's hooks.
+    /// frame buffer, as `write_8`, `write_16` and `write_32` make one there.
     /// False, having written nothing, where the bytes aren't all in it.
-    /// `write_16` and `write_32` try it first, and translated code's
-    /// stores to devices (`jit_dev_write`).
     #[inline]
     pub(crate) fn write_lfb(&mut self, addr: usize, value: u32, size: usize) -> bool {
         if addr < self.ram.len() {
@@ -1688,12 +1686,13 @@ impl Bus {
             }
             return false;
         }
-        if self.write_lfb(addr, value as u32, 2) {
-            return true;
-        }
         let _profile = self.profile.as_deref().map(|p| p.mem(addr, true));
         if self.observe.on {
             self.observe.mapped_write(addr, self.ram.len());
+        }
+        if let Some(offset) = self.vbe.lfb_offset(addr, 2) {
+            self.write_vram(offset, &value.to_le_bytes());
+            return true;
         }
         if let Some(port) = self.s3_mmio(addr) {
             self.mmio_write(port, value as u32, 2);
@@ -1800,12 +1799,13 @@ impl Bus {
             }
             return;
         }
-        if self.write_lfb(addr, value, 4) {
-            return;
-        }
         let _profile = self.profile.as_deref().map(|p| p.mem(addr, true));
         if self.observe.on {
             self.observe.mapped_write(addr, self.ram.len());
+        }
+        if let Some(offset) = self.vbe.lfb_offset(addr, 4) {
+            self.write_vram(offset, &value.to_le_bytes());
+            return;
         }
         if let Some(port) = self.s3_mmio(addr) {
             self.mmio_write(port, value, 4);
