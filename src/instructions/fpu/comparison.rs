@@ -1,6 +1,9 @@
 use iced_x86::{Code, Instruction, Mnemonic, OpKind, MemorySize, Register};
 
+use std::cmp::Ordering;
+
 use crate::cpu::{Cpu, FpuFlags, CpuFlags, FPU_TAG_EMPTY};
+use crate::f80::F80;
 use crate::instructions::utils::calculate_addr;
 
 // Performs the FPU comparison and sets Status Word flags
@@ -20,6 +23,33 @@ fn fpu_compare_values(cpu: &mut Cpu, lhs: f64, rhs: f64) {
         cpu.set_fpu_flag(FpuFlags::C0, true);
     }
     // Greater Than: All flags 0
+}
+
+/// Compare two values by their 80 bits (`F80::compare`), given where
+/// either holds more than its double (`precise`): the doubles are rounded
+/// to nearest, so a value just below a double could compare equal to it.
+/// False where the doubles' comparison stands.
+fn fpu_compare_precise(cpu: &mut Cpu, precise: Option<(F80, F80)>) -> bool {
+    let Some(order) = precise.and_then(|(lhs, rhs)| lhs.compare(&rhs)) else {
+        return false;
+    };
+    cpu.set_fpu_flag(FpuFlags::C0 | FpuFlags::C2 | FpuFlags::C3, false);
+    match order {
+        Ordering::Equal => cpu.set_fpu_flag(FpuFlags::C3, true),
+        Ordering::Less => cpu.set_fpu_flag(FpuFlags::C0, true),
+        Ordering::Greater => {}
+    }
+    true
+}
+
+/// A double from memory as 80 bits, where a register holds it as it is (0
+/// or a normal number); None otherwise.
+fn f80_of(value: f64) -> Option<F80> {
+    (value == 0.0 || value.is_normal()).then(|| {
+        let mut f = F80::new();
+        f.set_f64(value);
+        f
+    })
 }
 
 /// The registers FCOM, FUCOM and their popping forms compare, ST(lhs)
@@ -64,8 +94,13 @@ pub fn fcom_registers(instr: &Instruction) -> Option<(usize, usize, u8)> {
 }
 
 pub fn fcom_variants(cpu: &mut Cpu, instr: &Instruction) {
-    let (lhs, rhs) = match fcom_registers(instr) {
-        Some((lhs, rhs, _)) => (cpu.fpu_get_f64(lhs), cpu.fpu_get_f64(rhs)),
+    // The doubles, and the 80 bits where either register holds more.
+    let (lhs, rhs, precise) = match fcom_registers(instr) {
+        Some((lhs, rhs, _)) => {
+            let precise = (cpu.fpu_beyond_double(lhs) || cpu.fpu_beyond_double(rhs))
+                .then(|| (cpu.fpu_get(lhs), cpu.fpu_get(rhs)));
+            (cpu.fpu_get_f64(lhs), cpu.fpu_get_f64(rhs), precise)
+        }
         None => {
             // Memory Comparison is ALWAYS ST(0) vs Memory
             let val_0 = cpu.fpu_get_f64(0);
@@ -75,11 +110,14 @@ pub fn fcom_variants(cpu: &mut Cpu, instr: &Instruction) {
                 MemorySize::Float64 => f64::from_bits(cpu.lin_read_64(addr)),
                 _ => f64::NAN,
             };
-            (val_0, val_op)
+            let precise = cpu.fpu_beyond_double(0).then(|| f80_of(val_op).map(|op| (cpu.fpu_get(0), op))).flatten();
+            (val_0, val_op, precise)
         }
     };
 
-    fpu_compare_values(cpu, lhs, rhs);
+    if !fpu_compare_precise(cpu, precise) {
+        fpu_compare_values(cpu, lhs, rhs);
+    }
 
     match instr.mnemonic() {
         Mnemonic::Fcomp | Mnemonic::Fucomp => cpu.fpu_drop(),
@@ -99,7 +137,10 @@ pub fn ficom_variants(cpu: &mut Cpu, instr: &Instruction) {
         MemorySize::Int32 => (cpu.lin_read_32(addr) as i32) as f64,
         _ => 0.0,
     };
-    fpu_compare_values(cpu, st0, val);
+    let precise = cpu.fpu_beyond_double(0).then(|| f80_of(val).map(|op| (cpu.fpu_get(0), op))).flatten();
+    if !fpu_compare_precise(cpu, precise) {
+        fpu_compare_values(cpu, st0, val);
+    }
     if instr.mnemonic() == Mnemonic::Ficomp {
         cpu.fpu_pop();
     }

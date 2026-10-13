@@ -40,6 +40,27 @@ impl Gpr {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct X(pub u8);
 
+/// When rounding an FPU register's double (itself the 80 bits rounded to
+/// nearest) could give another result than rounding the 80 bits: rounding
+/// to nearest is monotonic and keeps every double, so a second rounding of
+/// the double comes out as one of the 80 bits unless the double is a
+/// boundary of the second rounding (`Uop::FBailPrecise`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Precise {
+    /// To a double, where the control word rounds other than to nearest.
+    Directed,
+    /// To an integer, where the double in x is one or halfway between two
+    /// (or is 2^52 or more, or not finite).
+    Int(X),
+    /// To a single, where the double in x has 25 significant bits or fewer
+    /// (each single, and each value halfway between two), or the control
+    /// word rounds other than to nearest (a single from the double rounds
+    /// to nearest, as `data::single_bits` has it).
+    Single(X),
+    /// Compared, where the doubles in the two are equal.
+    Equal(X, X),
+}
+
 pub const X0: X = X(0);
 pub const X1: X = X(1);
 
@@ -258,6 +279,13 @@ pub enum Uop {
     /// reads as the real indefinite). The operations below read and write
     /// the registers as doubles (`f80::FpuRegs`), as the handlers do.
     FpuGuard { valid: u8 },
+    /// The handler runs the instruction instead of the operations after
+    /// this one where one of the registers ST(i) with bit i set in `regs`
+    /// holds more than its double (`FpuRegs::beyond_double`), which the
+    /// handler then rounds from the 80 bits, and `when` says that rounding
+    /// the double instead could come out different. Nothing before it may
+    /// change anything. The block stops after it, as after an `FpuGuard`'s.
+    FBailPrecise { regs: u8, when: Precise },
     /// x = ST(i).
     FGet { x: X, i: u8 },
     /// ST(i) = x; with `canon`, x may be a denormal or a signalling NaN

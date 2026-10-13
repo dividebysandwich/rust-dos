@@ -1,5 +1,5 @@
 use crate::cpu::{Cpu, FpuFlags};
-use crate::f80::{F80, canon_f64};
+use crate::f80::{F80, F80_EXP_BIAS, canon_f64};
 use crate::instructions::utils::calculate_addr;
 use iced_x86::{Instruction, MemorySize, OpKind, Register};
 
@@ -423,6 +423,22 @@ pub fn frndint(cpu: &mut Cpu) {
     let mut st0 = cpu.fpu_get(0);
     let val = st0.get_f64();
     let rc = (cpu.fpu_control >> 10) & 0x03;
+    // Where the 80 bits hold more than the double, from them: the double
+    // is rounded to nearest, and rounding it again could cross an integer.
+    if let Some(n) = cpu.fpu_beyond_double(0).then(|| st0.round_int(rc)).flatten() {
+        let negative = st0.get_sign();
+        let magnitude = n.unsigned_abs() as u64;
+        let mut result = F80::new();
+        if magnitude != 0 {
+            let up = magnitude.leading_zeros();
+            result.set_exponent((F80_EXP_BIAS + 63 - up as i32) as u16);
+            result.set_mantissa(magnitude << up);
+        }
+        result.set_sign(negative);
+        cpu.fpu_set(0, result);
+        cpu.set_fpu_flag(FpuFlags::C2, false);
+        return;
+    }
     let result = match rc {
         0 => val.round(), // Nearest
         1 => val.floor(), // Down

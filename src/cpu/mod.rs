@@ -1299,6 +1299,19 @@ impl Cpu {
         self.fpu_stack.get_f64(i)
     }
 
+    /// Whether physical register `i`'s 80 bits hold more than its double
+    /// (`FpuRegs::beyond_double`), whatever its tag.
+    pub fn fpu_reg_beyond_double(&self, i: usize) -> bool {
+        self.fpu_stack.beyond_double(i)
+    }
+
+    /// Whether ST(i) holds more than its double: `fpu_get(i)`'s 80 bits
+    /// (an empty register is the indefinite, which a double holds).
+    pub fn fpu_beyond_double(&self, index: usize) -> bool {
+        let actual_idx = (self.fpu_top.wrapping_add(index)) & 7;
+        self.fpu_tags[actual_idx] != crate::cpu::FPU_TAG_EMPTY && self.fpu_stack.beyond_double(actual_idx)
+    }
+
     pub fn fpu_set_reg(&mut self, i: usize, val: F80) {
         self.fpu_stack.set(i, val);
     }
