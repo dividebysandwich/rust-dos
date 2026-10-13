@@ -2,6 +2,7 @@ use rust_dos::cpu::{Cpu, FpuFlags};
 use rust_dos::f80::F80;
 
 mod testrunners;
+use testrunners::run_cpu_code;
 
 #[test]
 fn test_fpu_arithmetic_matrix() {
@@ -333,4 +334,42 @@ fn test_trigonometry() {
     
     assert!((cpu.fpu_get(0).get_f64() - 1.0).abs() < 0.0001); // The pushed 1.0
     assert!((cpu.fpu_get(1).get_f64() - 1.0).abs() < 0.0001); // The result tan(pi/4)
+}
+
+/// FRNDINT rounds halves to even, sets PE where the result is inexact, and
+/// C1 where its magnitude went up.
+#[test]
+fn test_frndint_rounds_to_even_and_reports_the_rounding() {
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    for (value, rounded, up) in [(2.5, 2.0, false), (3.5, 4.0, true), (2.6, 3.0, true), (-2.6, -3.0, true), (-2.4, -2.0, false)] {
+        cpu.set_fpu_flags(FpuFlags::empty());
+        push_val(&mut cpu, value);
+        // D9 FC: FRNDINT
+        run_cpu_code(&mut cpu, &[0xD9, 0xFC]);
+        assert_eq!(cpu.fpu_get(0).get_f64(), rounded, "{value}");
+        let flags = cpu.get_fpu_flags();
+        assert!(flags.contains(FpuFlags::PE), "{value}");
+        assert_eq!(flags.contains(FpuFlags::C1), up, "{value}");
+        cpu.fpu_pop();
+    }
+    cpu.set_fpu_flags(FpuFlags::C1);
+    push_val(&mut cpu, 3.0);
+    run_cpu_code(&mut cpu, &[0xD9, 0xFC]);
+    assert_eq!(cpu.fpu_get(0).get_f64(), 3.0);
+    assert!(!cpu.get_fpu_flags().intersects(FpuFlags::PE | FpuFlags::C1));
+}
+
+/// From the 80 bits: 2 + 2^-62 is past its double, and rounds up under RC=up.
+#[test]
+fn test_frndint_from_the_80_bits_reports_the_rounding() {
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    let mut f = F80::new();
+    f.set(((16383u128 + 1) << 64) | 0x8000_0000_0000_0001);
+    cpu.fpu_push(f);
+    cpu.fpu_control = 0x0B7F;
+    cpu.set_fpu_flags(FpuFlags::empty());
+    run_cpu_code(&mut cpu, &[0xD9, 0xFC]);
+    assert_eq!(cpu.fpu_get(0).get_f64(), 3.0);
+    let flags = cpu.get_fpu_flags();
+    assert!(flags.contains(FpuFlags::PE | FpuFlags::C1));
 }
