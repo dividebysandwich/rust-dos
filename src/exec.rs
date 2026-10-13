@@ -638,7 +638,7 @@ fn pipe_files(cpu: &mut Cpu, count: usize) -> Option<Vec<String>> {
         .map(|dir| dir.trim_end_matches('\\').to_string())
         .chain([format!("{}:", current), "C:".to_string()]);
     for directory in directories.collect::<Vec<_>>() {
-        let disk = &cpu.bus.disk;
+        let disk = &mut cpu.bus.disk;
         let mut files = Vec::new();
         for n in 1..1000 {
             if files.len() == count {

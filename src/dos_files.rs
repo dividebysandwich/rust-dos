@@ -108,7 +108,7 @@ pub fn attach(bus: &mut Bus, psp: u16, sft: u16) -> Result<u16, u8> {
             Ok(handle)
         }
         None => {
-            bus.disk.close_file(sft);
+            bus.disk.close_unused(sft);
             Err(0x04)
         }
     }

@@ -36,9 +36,11 @@ struct SavedFile {
     mode: u8,
     device: Option<CharDevice>,
     position: u64,
+    /// Made by a create call and emptied on first use, which hasn't come.
+    empty_on_use: bool,
 }
 
-crate::state_fields!(SavedFile { sft, refs, fcb, drive, owner, key, path, mode, device, position });
+crate::state_fields!(SavedFile { sft, refs, fcb, drive, owner, key, path, mode, device, position, empty_on_use });
 
 impl DiskController {
     pub(crate) fn save_state(&self, w: &mut Writer) {
@@ -71,7 +73,7 @@ impl DiskController {
         entries.sort_unstable();
         entries.len().save(w);
         for sft in entries {
-            let OpenFile { data, drive, owner, key, path, mode, refs, fcb } = &open_files[&sft];
+            let OpenFile { data, drive, owner, key, path, mode, refs, fcb, empty_on_use } = &open_files[&sft];
             let (device, position) = match data {
                 OpenData::Host(file, _) => (None, (&*file).stream_position().unwrap_or(0)),
                 OpenData::Memory(_, pos) | OpenData::Image(_, _, pos) | OpenData::Fat { pos, .. } => (None, pos.get()),
@@ -88,6 +90,7 @@ impl DiskController {
                 mode: *mode,
                 device,
                 position,
+                empty_on_use: *empty_on_use,
             };
             saved.save(w);
         }
@@ -157,6 +160,10 @@ impl DiskController {
             open.fcb = file.fcb;
             self.open_files.insert(file.sft, open);
             let _ = self.seek_file(file.sft, file.position as i64, 0);
+            // After the seek, which would empty the file.
+            if let Some(open) = self.open_files.get_mut(&file.sft) {
+                open.empty_on_use = file.empty_on_use;
+            }
         }
         self.sft_dirty = u128::MAX;
 

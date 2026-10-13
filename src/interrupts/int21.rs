@@ -1144,14 +1144,11 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
 
         // AH=3Ch: Create File
         //
-        // DOS standard behavior is create-OR-truncate, but because our
-        // emulator is still crash-prone on real game binaries, an eager
-        // truncate wipes user data (roster files, saved games, regn.3dg
-        // theatre selection) whenever the program dies before its matching
-        // write completes. Prefer the safer "open for read/write, create if
-        // missing, do NOT truncate" semantics here. Programs that genuinely
-        // want to shrink an existing file can still do so via AH=40h with
-        // CX=0 once they have real data to write.
+        // An existing file is emptied as in DOS, but on the handle's first
+        // use (`DiskController::create_file` lists what counts): an
+        // eager truncate wiped user data (roster files, saved games,
+        // regn.3dg theatre selection) whenever the program died between
+        // the create and its write.
         0x3C => {
             let addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
             let filename = read_asciiz_string(&mut cpu.bus, addr);
