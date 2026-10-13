@@ -1,35 +1,37 @@
 //! The right mouse button held still for a few seconds opens the settings
 //! window (`mouse_menu_hold`), for a TV or a remote without F12 or any
-//! keyboard. The press reaches the program as usual; moving the mouse while
-//! holding it, as a text selection or a game does, makes it a press like
-//! any other.
+//! keyboard. The press reaches the program as usual; moving the mouse away
+//! while holding it, as a text selection or a game does, makes it a press
+//! like any other. A hand on the mouse jitters, and a captured mouse's
+//! motion comes in the sensor's counts, so only how far it got from where
+//! the press began counts, not the path.
 
 use std::time::{Duration, Instant};
 
 /// How long the button is held.
 pub const HOLD: Duration = Duration::from_secs(3);
-/// How far the mouse may move meanwhile: window pixels, or the captured
-/// mouse's motion, summed over both axes.
-const TRAVEL: i32 = 8;
+/// How far the mouse may get from where the press began, on either axis:
+/// window pixels, or the captured mouse's motion.
+const TRAVEL: i32 = 24;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MenuHold {
     since: Option<Instant>,
-    travel: i32,
+    travel: (i32, i32),
     fired: bool,
 }
 
 impl MenuHold {
     /// The right button went down.
     pub fn press(&mut self, now: Instant) {
-        *self = Self { since: Some(now), travel: 0, fired: false };
+        *self = Self { since: Some(now), travel: (0, 0), fired: false };
     }
 
     /// The mouse moved by `(dx, dy)`.
     pub fn motion(&mut self, dx: i32, dy: i32) {
         if self.since.is_some() && !self.fired {
-            self.travel = self.travel.saturating_add(dx.abs() + dy.abs());
-            if self.travel > TRAVEL {
+            self.travel = (self.travel.0.saturating_add(dx), self.travel.1.saturating_add(dy));
+            if self.travel.0.abs() > TRAVEL || self.travel.1.abs() > TRAVEL {
                 self.since = None;
             }
         }
@@ -86,15 +88,18 @@ mod tests {
         let t = Instant::now();
         let mut h = MenuHold::default();
         h.press(t);
-        h.motion(3, -2);
+        h.motion(10, -2);
         assert!(!h.poll(t + HOLD - Duration::from_millis(1)));
-        h.motion(2, 2);
+        h.motion(15, 2);
         assert!(!h.poll(t + HOLD));
         assert!(!h.release());
-        // A jitter of a pixel or two doesn't.
+        // A jitter back and forth doesn't, however long its path.
         h.press(t);
-        h.motion(1, 1);
-        h.motion(-1, 0);
+        for _ in 0..50 {
+            h.motion(3, 2);
+            h.motion(-3, -2);
+        }
+        h.motion(TRAVEL, -TRAVEL);
         assert!(h.poll(t + HOLD));
     }
 
