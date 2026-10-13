@@ -636,6 +636,16 @@ impl Fdc {
         let c = std::mem::take(&mut self.command);
         let drive = (c[1] & 3) as usize;
         let hds = (c[1] >> 2) & 1;
+        // Without a disk turning in the drive (none in it, or its motor
+        // off) there are no index pulses, and the command waits for them
+        // until a reset, as the 82077AA's does: the driver gives up after
+        // its own timeout and finds the drive not ready. Windows 98's
+        // HSFLOP.PDR takes an error for a disk it can't read instead
+        // ("General failure"), and its Setup stops on that.
+        if env.disk(drive).is_none() || self.dor & (0x10 << drive) == 0 {
+            self.exec_due = None;
+            return;
+        }
         // A disk under the heads that the controller can read: in the
         // drive, its motor on, MFM at the data rate it was written at, on
         // a side and track it has.
@@ -1134,13 +1144,26 @@ mod tests {
         rig.out(DIR, 0x02);
         assert_eq!(rig.command(&[0x4A, 0x00])[..2], [0x40, 0x01]);
         rig.out(DIR, 0x00);
-        // Nor with its motor off, or without a disk.
+        // With its motor off, or without a disk, nothing turns: the command
+        // waits, busy, until a reset.
         rig.out(DOR, 0x0C);
-        assert_eq!(rig.command(&[0x4A, 0x00])[..2], [0x40, 0x01]);
+        assert!(rig.command(&[0x4A, 0x00]).is_empty());
+        assert_eq!(rig.fdc.read(MSR) & (RQM | CB), CB);
+        assert!(!rig.fdc.irq());
+        // A reset ends it, with the four drives' polling statuses.
+        let reset = |rig: &mut Rig| {
+            rig.out(DOR, 0x08);
+            rig.out(DOR, 0x1C);
+            for d in 0..4 {
+                assert_eq!(rig.command(&[0x08])[0], 0xC0 | d);
+            }
+        };
+        reset(&mut rig);
         rig.out(DOR, 0x2D);
-        assert_eq!(rig.command(&[0x4A, 0x01])[..2], [0x41, 0x01]);
+        assert!(rig.command(&[0x4A, 0x01]).is_empty());
         // With the channel masked, the data overruns.
-        rig.out(DOR, 0x1C);
+        reset(&mut rig);
+        rig.seek(0, 0);
         rig.dma.write(0x0A, 0x06);
         assert_eq!(
             rig.command(&[0x46, 0x00, 0, 0, 1, 2, 18, 0x1B, 0xFF])[..2],
