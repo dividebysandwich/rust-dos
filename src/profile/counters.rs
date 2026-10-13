@@ -148,12 +148,19 @@ impl Counters {
     /// time).
     #[inline(always)]
     pub fn mem(&self, addr: usize, write: bool) -> ZoneGuard {
+        self.mem_run(addr, write, 1)
+    }
+
+    /// `mem` for `accesses` accesses done at once from `addr` on (a string
+    /// move's elements), counted as the accesses one at a time would be.
+    #[inline(always)]
+    pub fn mem_run(&self, addr: usize, write: bool, accesses: u64) -> ZoneGuard {
         if super::now().zone().is_mem() {
             return ZoneGuard { prev: None };
         }
         let kind = MemKind::of(addr);
         let count = if write { &self.mem_writes[kind as usize] } else { &self.mem_reads[kind as usize] };
-        count.set(count.get() + 1);
+        count.set(count.get() + accesses);
         super::zone(kind.zone())
     }
 
