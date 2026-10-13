@@ -1689,6 +1689,7 @@ impl Bus {
     /// A write of `size` bytes of `value` at `addr` into the VESA linear
     /// frame buffer, as `write_8`, `write_16` and `write_32` make one there.
     /// False, having written nothing, where the bytes aren't all in it.
+    /// Keep it as their frame buffer branches, which stay inline for speed.
     #[inline]
     pub(crate) fn write_lfb(&mut self, addr: usize, value: u32, size: usize) -> bool {
         if addr < self.ram.len() {
