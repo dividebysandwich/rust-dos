@@ -162,6 +162,8 @@ pub enum Uop {
     /// a = a OP b, and the flags as the interpreter's ALU sets them.
     Alu { op: AluOp, size: u8, a: T, b: Src },
     Unary { op: UnOp, size: u8, t: T },
+    /// Reverse the bytes of dword t, without flags (BSWAP).
+    Bswap { t: T },
     /// Shift or rotate by a count of 1 to size * 8 - 1.
     Shift { op: ShiftOp, size: u8, t: T, count: u8 },
     /// SHLD (`left`) or SHRD of `dst` by a count of 1 to size * 8 - 1,
@@ -316,6 +318,11 @@ pub enum Uop {
     /// t = x as a word or dword (`size` 2 or 4), rounded as the control
     /// word says (`fpu::data::to_int`).
     FToInt { t: T, x: X, size: u8 },
+    /// lo and hi = the low and high dwords of x as a qword, where the
+    /// control word rounds to nearest or chops and the value fits; else
+    /// the instruction's handler runs it instead of the operations after
+    /// this one, as `Bail` (nothing before it may change anything).
+    FToInt64 { lo: T, hi: T, x: X },
     /// a *= b.
     FMul { a: X, b: X },
     /// a += b, or -= with `sub` (fast mode's `arithmetic::sum`).

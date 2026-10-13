@@ -50,6 +50,7 @@ impl Uop {
             // As a 486 leaves them (instructions/arith.rs `division_flags`).
             Uop::DivWide { .. } => ARITH,
             Uop::Flag { mask, .. } => mask & ARITH,
+            Uop::LoadFlags { .. } => ARITH,
             _ => 0,
         }
     }
@@ -65,12 +66,21 @@ impl Uop {
             // A count of 0 leaves the flags as they were.
             Uop::ShiftVar { op, .. } => shift_flags(op),
             Uop::DoubleShiftVar { .. } => CF | OF | SZP,
-            Uop::Bail { .. } | Uop::BailUnlessRam { .. } | Uop::CsReal | Uop::RepStart { .. } | Uop::Forward | Uop::FpuGuard { .. } | Uop::FBailPrecise { .. } => ARITH,
+            Uop::Bail { .. }
+            | Uop::BailUnlessRam { .. }
+            | Uop::CsReal
+            | Uop::RepStart { .. }
+            | Uop::Forward
+            | Uop::FpuGuard { .. }
+            | Uop::FBailPrecise { .. }
+            | Uop::FToInt64 { .. } => ARITH,
             Uop::MemRef { .. }
             | Uop::LoadSeg { .. }
             | Uop::In { .. }
             | Uop::Out { .. }
             | Uop::Sti
+            | Uop::LoadFlags { .. }
+            | Uop::FlagsLoaded
             | Uop::CheckLimit { .. }
             | Uop::CheckIopl
             | Uop::CheckV86Iopl

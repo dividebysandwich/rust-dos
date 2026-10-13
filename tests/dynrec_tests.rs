@@ -3502,6 +3502,125 @@ fn fpu_doubles_in_memory_run_as_their_handlers() {
 }
 
 #[test]
+fn fpu_qword_integer_stores_and_fwait_run_as_their_handlers() {
+    // MSVC's _ftol: FWAITs around a chopped FISTP QWORD. The products
+    // reach past 2^63 (1e10 * 1e10) and are NaN (infinity * 0), which the
+    // handler stores.
+    let (_, b, stats) = fpu_loop(|a| {
+        a.wait()?;
+        a.fld(dword_ptr(esi))?;
+        a.fld(dword_ptr(esi + 4))?;
+        a.fld(st1)?;
+        a.fistp(qword_ptr(edi))?;
+        a.wait()?;
+        a.fmul_2(st0, st1)?;
+        a.fld(st0)?;
+        a.fistp(qword_ptr(edi + 8))?;
+        a.fistp(qword_ptr(edi + 16))?;
+        a.fild(dword_ptr(esi + 8))?;
+        a.fmul(dword_ptr(esi))?;
+        a.fistp(qword_ptr(edi + 24))?;
+        a.fistp(qword_ptr(edi + 32))?;
+        // An empty ST(0), for the handler.
+        a.fistp(qword_ptr(edi + 40))?;
+        a.fnstsw(ax)?;
+        a.add(ebx, eax)
+    });
+    assert_ne!(b.read32(DATA + 0x10000), 0);
+    if AVAILABLE && cfg!(target_arch = "x86_64") {
+        // (The FNINIT before the loop.)
+        assert_eq!(untranslated(&stats), 1, "handlers ran them: {:?}", stats);
+    }
+}
+
+#[test]
+fn an_fwait_with_mp_and_ts_set_faults_in_its_block() {
+    const NM: u8 = 7;
+    let (mut a, mut b) = twins(|rig| {
+        rig.record(NM);
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.fninit()?;
+            a.mov(eax, cr0)?;
+            a.or(eax, 0x0A)?; // MP and TS
+            a.mov(cr0, eax)?;
+            a.jmp(CODE as u64 + 0x100)
+        }));
+        rig.load(CODE + 0x100, &asm32(CODE + 0x100, |a| {
+            a.mov(ebx, 1u32)?;
+            a.wait()?;
+            a.mov(ebx, 2u32)?;
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    let (vector, stack) = b.recorded();
+    assert_eq!((vector, stack[0], b.cpu.ebx()), (NM as u32, CODE + 0x105, 1));
+}
+
+#[test]
+fn bswap_runs_as_its_handler() {
+    let (mut a, mut b) = twins(|rig| {
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.mov(eax, 0x1234_5678u32)?;
+            a.mov(esi, 0x8000_00FFu32)?;
+            a.mov(ecx, 100u32)?;
+            let mut again = a.create_label();
+            a.set_label(&mut again)?;
+            a.bswap(eax)?;
+            a.add(eax, ecx)?;
+            a.bswap(esi)?;
+            a.xor(esi, eax)?;
+            a.bswap(ecx)?;
+            a.bswap(ecx)?;
+            a.dec(ecx)?;
+            a.jnz(again)?;
+            a.hlt()
+        }));
+    });
+    let stats = run_both(&mut a, &mut b);
+    assert_ne!(b.cpu.esi(), 0);
+    if AVAILABLE && cfg!(target_arch = "x86_64") {
+        assert_eq!(untranslated(&stats), 0, "handlers ran them: {:?}", stats);
+    }
+}
+
+#[test]
+fn bswap_of_a_word_register_runs_through_its_handler() {
+    // A 486 clears the word; the dword around it stays.
+    let (mut a, mut b) = twins(|rig| {
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.mov(eax, 0x1234_5678u32)?;
+            a.bswap(ax)?;
+            a.bswap(eax)?;
+            a.hlt()
+        }));
+    });
+    let stats = run_both(&mut a, &mut b);
+    assert_eq!(b.cpu.eax(), 0x0000_3412);
+    if AVAILABLE && cfg!(target_arch = "x86_64") {
+        assert_eq!(untranslated(&stats), 1, "handlers ran them: {:?}", stats);
+    }
+}
+
+#[test]
+fn bswap_on_a_386_faults_in_its_block() {
+    const UD: u8 = 6;
+    let (mut a, mut b) = twins(|rig| {
+        rig.cpu.model = rust_dos::cpu::CpuModel::I386;
+        rig.record(UD);
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.mov(ebx, 1u32)?;
+            a.bswap(eax)?;
+            a.mov(ebx, 2u32)?;
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    let (vector, stack) = b.recorded();
+    assert_eq!((vector, stack[0], b.cpu.ebx()), (UD as u32, CODE + 5, 1));
+}
+
+#[test]
 fn fpu_instructions_on_empty_registers_run_as_their_handlers() {
     // Pops from an empty stack and pushes onto a full one: the registers
     // read as the real indefinite, which the handlers see to.
