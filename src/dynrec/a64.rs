@@ -1890,6 +1890,51 @@ impl Gen<'_> {
             }
             Uop::In { size, port, t } => self.port_io(false, size, port, t),
             Uop::Out { size, port, t } => self.port_io(true, size, port, t),
+            Uop::LoadFlags { t, size } => {
+                // As x86-64's.
+                let t_ = r(t);
+                let at = self.ops.new_dynamic_label();
+                self.field(Access::Ldr8, 1, layout::CPL);
+                dynasm!(self.ops ; .arch aarch64 ; cbnz w1, =>at);
+                self.field(Access::Ldr32, 0, layout::FLAGS);
+                if size == 4 {
+                    self.mov32(2, POPF_KEPT);
+                    dynasm!(self.ops
+                        ; .arch aarch64
+                        ; eor w1, W(t_), w0
+                        ; tst w1, w2
+                        ; b.ne =>at
+                    );
+                }
+                self.mov32(2, POPF_RING0);
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; and w1, W(t_), w2
+                    ; bic w0, w0, w2
+                    ; orr w0, w0, w1
+                    ; orr w0, w0, 2
+                );
+                self.field(Access::Str32, 0, layout::FLAGS);
+                if self.dirty {
+                    dynasm!(self.ops ; .arch aarch64 ; mov w28, w0);
+                }
+                let end = self.end();
+                self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, leave: false });
+            }
+            Uop::FlagsLoaded => {
+                // As x86-64's.
+                let data = self.data;
+                let next = data.eips[self.ix].wrapping_add(data.instrs[self.ix].len() as u32);
+                let at = self.ops.new_dynamic_label();
+                let fail = self.fail();
+                let code = EXIT_AFTER | if self.dirty { EXIT_FLAGS } else { 0 };
+                self.slow.push(Slow::After { at, next, code, fail });
+                let quiet = self.ops.new_dynamic_label();
+                self.field(Access::Ldr32, 0, layout::FLAGS);
+                dynasm!(self.ops ; .arch aarch64 ; tbnz w0, 8, =>at ; tbz w0, 9, =>quiet);
+                self.field(Access::Ldr8, 2, layout::IRQ_READY);
+                dynasm!(self.ops ; .arch aarch64 ; cbnz w2, =>at ; =>quiet);
+            }
             Uop::Sti => {
                 // As x86-64's: interrupts are recognized after the next
                 // instruction; with one waiting the execution loop runs

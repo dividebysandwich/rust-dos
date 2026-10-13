@@ -107,6 +107,7 @@ pub fn translate(
         Pusha | Pushad => pusha(instr, stack32, &mut u),
         Popa | Popad => popa(instr, stack32, &mut u),
         Pushf | Pushfd => pushf(instr, stack32, &mut u),
+        Popf | Popfd if system && !real => popf(instr, stack32, &mut u),
         Bt => bit_op(instr, BitKind::Test, &mut u),
         Bts => bit_op(instr, BitKind::Set, &mut u),
         Btr => bit_op(instr, BitKind::Reset, &mut u),
@@ -1209,6 +1210,23 @@ fn pushf(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
     u.push(Uop::GetFlags { t: T0, size });
     push_t0(size, stack32, u);
     u.push(Uop::Set { r: sp(stack32), t: T1 });
+    true
+}
+
+/// POPF or POPFD in protected mode, as `transfer::popf` at CPL 0 (the
+/// handler's elsewhere, see `Uop::LoadFlags`): the value off the stack
+/// (its access checked), the flags, then the stack pointer.
+fn popf(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
+    let size = match instr.stack_pointer_increment() {
+        2 => 2,
+        4 => 4,
+        _ => return false,
+    };
+    u.push(Uop::CheckV86Iopl);
+    pop_t0(size, stack32, u);
+    u.push(Uop::LoadFlags { t: T0, size });
+    u.push(Uop::Set { r: sp(stack32), t: T1 });
+    u.push(Uop::FlagsLoaded);
     true
 }
 
