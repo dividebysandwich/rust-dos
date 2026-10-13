@@ -1634,6 +1634,25 @@ impl Bus {
         }
     }
 
+    /// A write of `size` bytes of `value` at `addr` into the VESA linear
+    /// frame buffer, as `write_8`, `write_16` and `write_32` make one there.
+    /// False, having written nothing, where the bytes aren't all in it.
+    #[inline]
+    pub(crate) fn write_lfb(&mut self, addr: usize, value: u32, size: usize) -> bool {
+        if addr < self.ram.len() {
+            return false;
+        }
+        let Some(offset) = self.vbe.lfb_offset(addr, size) else {
+            return false;
+        };
+        let _profile = self.profile.as_deref().map(|p| p.mem(addr, true));
+        if self.observe.on {
+            self.observe.mapped_write(addr, self.ram.len());
+        }
+        self.write_vram(offset, &value.to_le_bytes()[..size]);
+        true
+    }
+
     /// Write VESA video memory, marking the rows of the picture it shows
     /// in for repainting.
     #[inline]

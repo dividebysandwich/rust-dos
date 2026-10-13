@@ -960,6 +960,12 @@ jit_fn! {
         // SAFETY: as in `jit_fallback`.
         let (cpu, ctx) = unsafe { (&mut *cpu, &mut *ctx) };
         ctx.calls.dev += 1;
+        // Pixels into the linear frame buffer, which DirectDraw's own copy
+        // loops write a dword at a time: nothing the VGA's state has, and
+        // nothing in RAM.
+        if guard(ctx, false, || cpu.bus.write_lfb(phys as usize, value, size as usize)) {
+            return 0;
+        }
         // Pixels into the VGA's planes, which mode X programs write one or
         // two at a time. (They can't be in the block's bytes, which are in
         // RAM.)

@@ -1626,7 +1626,7 @@ fn the_bios_replay_of_an_ide_read_runs_through() {
     let (vector, stack) = rig.recorded();
     assert_eq!((vector, stack[1]), (0x40, 0x3000), "back in the V86 code after the replay");
     assert!(rig.cpu.bus.port_accesses.is_empty());
-    assert!(!rig.cpu.bus.ide_faked);
+    assert!(!rig.cpu.bus.faked_io);
     assert!(stack[2] & 0x200 != 0, "the caller's IF, back from the IRET");
     // The disk read the sector for the replay and is done.
     let status = rig.cpu.bus.io_read(0x3F6);
