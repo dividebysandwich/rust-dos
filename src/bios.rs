@@ -613,7 +613,8 @@ pub enum PortAccess {
     /// Read `count` words at `port`: a sector's data.
     InWords { port: u16, count: u16 },
     /// The accesses after are (true) or aren't a BIOS's show for a V86
-    /// monitor, which the IDE disks answer at once (`Bus::ide_faked`).
+    /// monitor, which the IDE disks and the floppy disk controller answer
+    /// at once (`Bus::faked_io`).
     Faked(bool),
 }
 
@@ -625,7 +626,7 @@ pub fn next_port_access(cpu: &mut Cpu) {
     use iced_x86::Register::{AL, BH, BL, CH, CL};
     let mut next = cpu.bus.port_accesses.pop_front();
     while let Some(PortAccess::Faked(on)) = next {
-        cpu.bus.ide_faked = on;
+        cpu.bus.faked_io = on;
         next = cpu.bus.port_accesses.pop_front();
     }
     match next {
@@ -664,7 +665,7 @@ pub fn next_port_access(cpu: &mut Cpu) {
         }
         Some(PortAccess::Faked(_)) => unreachable!(),
         None => {
-            cpu.bus.ide_faked = false;
+            cpu.bus.faked_io = false;
             cpu.set_reg8(BL, 0xFF);
         }
     }

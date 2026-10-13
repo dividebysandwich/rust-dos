@@ -175,6 +175,9 @@ pub fn power_on(cpu: &mut Cpu, unit: u8) {
         .collect();
     crate::bios::install_for_boot(bus, &hard_disks);
     bus.cmos.set_hard_disks(&hard_disks.iter().map(|&(chs, _)| chs).collect::<Vec<_>>());
+    // Both floppy drives, empty or not, as the equipment word has them:
+    // Windows 98's floppy driver (HSFLOP.PDR) finds the drives in the CMOS.
+    bus.cmos.set_floppies(2);
     // The hard disks and a CD image reach the system on the IDE channels
     // too, and the floppies on the floppy disk controller.
     bus.attach_ide();
