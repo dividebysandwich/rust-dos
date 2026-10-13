@@ -371,6 +371,43 @@ impl VrFoveation {
     }
 }
 
+/// Where the headset's cameras show the real keyboard through the scene
+/// (passthrough, where the headset has it).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VrKeyboard {
+    #[default]
+    Off,
+    /// On the desk below the screen, moved to where the fingers type when
+    /// the hands are tracked.
+    Auto,
+    /// Where it was marked with a controller (as `Auto` until it is).
+    Marked,
+}
+
+impl VrKeyboard {
+    pub const ALL: [VrKeyboard; 3] = [VrKeyboard::Off, VrKeyboard::Auto, VrKeyboard::Marked];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            VrKeyboard::Off => "off",
+            VrKeyboard::Auto => "auto",
+            VrKeyboard::Marked => "marked",
+        }
+    }
+
+    pub fn describe(self) -> &'static str {
+        match self {
+            VrKeyboard::Off => "off",
+            VrKeyboard::Auto => "auto: below the screen, found by typing",
+            VrKeyboard::Marked => "where it was marked",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| value.trim().eq_ignore_ascii_case(k.name()))
+    }
+}
+
 /// Valve's Vulkan layers that foveate render passes the size of the
 /// headset's images, eye-tracked, as Steam turns them on for its games.
 pub const FDM_LAYERS: &str = "VK_LAYER_VALVE_rpo:VK_LAYER_VALVE_fdm_injection";
@@ -752,6 +789,8 @@ pub struct VrSettings {
     pub refresh: Option<u32>,
     /// The edges of the view drawn coarser than where the eyes look.
     pub foveation: VrFoveation,
+    /// The real keyboard seen through the scene.
+    pub keyboard: VrKeyboard,
 }
 
 impl Default for VrSettings {
@@ -773,6 +812,7 @@ impl Default for VrSettings {
             msaa: VrMsaa::Auto,
             refresh: None,
             foveation: VrFoveation::Auto,
+            keyboard: VrKeyboard::Off,
         }
     }
 }
@@ -819,6 +859,10 @@ impl VrSettings {
             "foveation" => {
                 self.foveation = VrFoveation::parse(value)
                     .ok_or_else(|| format!("invalid foveation '{}' (auto, off, low, medium or high)", value))?;
+            }
+            "keyboard" => {
+                self.keyboard = VrKeyboard::parse(value)
+                    .ok_or_else(|| format!("invalid keyboard '{}' (off, auto or marked)", value))?;
             }
             "refresh" => {
                 let value = value.trim();
@@ -912,6 +956,7 @@ impl VrSettings {
             ("msaa", Some(self.msaa.name().to_string())),
             ("refresh", Some(self.refresh.map_or("auto".to_string(), |hz| hz.to_string()))),
             ("foveation", Some(self.foveation.name().to_string())),
+            ("keyboard", Some(self.keyboard.name().to_string())),
         ]
     }
 

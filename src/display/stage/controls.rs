@@ -36,6 +36,13 @@ pub struct Tracking {
     pub head: Option<Mat4>,
     /// Left and right.
     pub hands: [Option<Hand>; 2],
+    /// The fingertips (index to little) of the hands the headset's
+    /// cameras track, left and right.
+    pub tips: [Option<[Vec3; 4]>; 2],
+    /// Where the space that stays put in the room is (the runtime's stage,
+    /// else its own seated space, neither moved by recentring): a frame
+    /// in the scene, scaled as the scene is.
+    pub anchor: Option<Mat4>,
 }
 
 /// What the controllers do to the machine at a frame.
@@ -206,7 +213,7 @@ mod tests {
         let room = Scene::test_room();
         let mut c = Controllers::default();
         let now = Instant::now();
-        let mut tracking = Tracking { head: None, hands: [Some(ahead(0.0)), Some(ahead(5.0))] };
+        let mut tracking = Tracking { head: None, hands: [Some(ahead(0.0)), Some(ahead(5.0))], ..Tracking::default() };
         // The right hand points first, past the screen: no pointer.
         let (input, extras, _) = c.update(VrControllers::Both, &tracking, [false; 2], &room.screen, now);
         assert_eq!(input.pointer, None);
@@ -251,7 +258,7 @@ mod tests {
         let start = Instant::now();
         let mut hand = ahead(0.0);
         let at = |c: &mut Controllers, hand: Hand, ms: u64| {
-            let tracking = Tracking { head: None, hands: [None, Some(hand)] };
+            let tracking = Tracking { head: None, hands: [None, Some(hand)], ..Tracking::default() };
             c.update(VrControllers::Both, &tracking, [false; 2], &room.screen, start + Duration::from_millis(ms))
         };
         hand.menu = true;

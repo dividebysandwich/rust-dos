@@ -912,6 +912,7 @@ fn main() -> Result<(), String> {
                     let shift = keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD);
                     if !repeat {
                         ctrl_alt.key_down(chord_key(scancode));
+                        display.vr_key_pressed();
                     }
                     // Ctrl+Shift+D degausses the monitor.
                     if keycode == Keycode::D && ctrl && shift && !alt {
@@ -3140,6 +3141,13 @@ impl Host for MainHost<'_, '_> {
         }
         self.display.recenter();
         Ok("View centered where your head is".to_string())
+    }
+
+    fn mark_vr_keyboard(&mut self) -> Result<String, String> {
+        if !self.display.mark_vr_keyboard() {
+            return Err("No VR headset shows the scene".to_string());
+        }
+        Ok("In the headset: hold the trigger along the keyboard's front edge, then click at its back edge (grip cancels)".to_string())
     }
 
     fn boot(&mut self, drive: u8) -> Result<String, String> {

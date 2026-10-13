@@ -834,6 +834,16 @@ The picture on a screen in a 3D scene (see [3D scene and VR](#3d-scene-and-vr)).
   (`VK_LAYER_VALVE_fdm_injection`), which reach OpenGL through Zink. It does
   nothing elsewhere. While it is on, `resolution=auto` draws all of the eye
   images. It takes effect at the next start.
+* `keyboard`: shows the real keyboard (and the hands on it) through the
+  scene with the headset's cameras, in a soft-edged window on the desk:
+  `off` (the default), `auto` (below the screen, then where the fingers press
+  keys while the hands are tracked) or `marked` (where it was marked with a
+  controller from the settings window's VR page). It needs passthrough the
+  program can use: OpenXR's alpha-blended environment (the Steam Frame
+  running Rust-DOS itself, Varjo XR headsets) or `XR_FB_passthrough` (a
+  Quest through Link). The places found and marked are kept in
+  `vr-keyboard.txt` in Rust-DOS's folder. Turning it on or off starts the
+  headset again.
 * `refresh`: the headset's refresh rate in Hz, the runtime's nearest to
   it, or `auto` (the default: the runtime's own, or on a standalone headset
   the lowest from 72 Hz, for more time for each frame). Only where the

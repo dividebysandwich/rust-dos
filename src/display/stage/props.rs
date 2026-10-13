@@ -532,7 +532,7 @@ mod tests {
     }
 
     fn tracking(right: Hand) -> Tracking {
-        Tracking { head: None, hands: [None, Some(right)] }
+        Tracking { head: None, hands: [None, Some(right)], ..Tracking::default() }
     }
 
     #[test]

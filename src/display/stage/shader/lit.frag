@@ -409,5 +409,6 @@ void main() {
         float dist = length(v_world - u_eye[VIEW]);
         color = mix(color, tone(sky_color(v_world - u_eye[VIEW])), 1.0 - exp(-dist * u_fog));
     }
-    o_color = finish(color, base.a);
+    // (Opaque: alpha 1, over the real world where it shows through.)
+    o_color = finish(color, u_see_through == 1 ? base.a : 1.0);
 }

@@ -20,6 +20,7 @@ const GRID_FRAG: &str = include_str!("shader/grid.frag");
 const GI_UPDATE_FRAG: &str = include_str!("shader/gi_update.frag");
 const AO_FRAG: &str = include_str!("shader/ao.frag");
 const AO_BLUR_FRAG: &str = include_str!("shader/ao_blur.frag");
+const PUNCH_FRAG: &str = include_str!("shader/punch.frag");
 
 /// What `quality` works out: the screen's light as the picture's colours
 /// in how many patches across and down, how many samples soften a shadow's
@@ -159,6 +160,26 @@ pub struct Extra {
     pub model: Mat4,
     /// Linear RGB, and alpha.
     pub color: [f32; 4],
+}
+
+/// A window where the real world shows through the eyes' images (the
+/// headset's passthrough): `frame` takes its own metres into the scene (x
+/// across, y up, z deep; unscaled), it is `size` across and deep, and
+/// fades out over `feather` around it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Window {
+    pub frame: Mat4,
+    pub size: glam::Vec2,
+    pub feather: f32,
+}
+
+/// Where the real world shows through: nowhere, through windows, or
+/// everywhere, this much of it.
+#[derive(Clone, Copy, Debug)]
+pub enum Punch<'a> {
+    None,
+    Windows(&'a [Window]),
+    Whole(f32),
 }
 
 /// A part of a prop (`Scene::props`, by their indices) drawn where `model`
@@ -532,6 +553,8 @@ struct ImageDepth {
 pub struct Gpu {
     lit: glow::Program,
     sky: glow::Program,
+    /// The passthrough's windows (`Punch`).
+    punch: glow::Program,
     /// Only the depth, of what is in front: first in each view, so that
     /// the lit program works out each pixel once.
     depth: glow::Program,
@@ -653,7 +676,7 @@ impl Gpu {
     pub fn delete(self, gl: &glow::Context) {
         // SAFETY: see `GlScreen`.
         unsafe {
-            for program in [self.lit, self.sky, self.depth, self.shadow, self.grid_program] {
+            for program in [self.lit, self.sky, self.punch, self.depth, self.shadow, self.grid_program] {
                 gl.delete_program(program);
             }
             for framebuffer in self.image_framebuffers.into_values().chain(self.read_framebuffers.into_values()) {
@@ -736,6 +759,7 @@ impl Gpu {
             (&view_defines, MESH_VERT, SHADOW_FRAG, "depth"),
             (&defines, MESH_VERT, SHADOW_FRAG, "shadow"),
             (&defines, FULLSCREEN_VERT, GRID_FRAG, "screen light"),
+            (&view_defines, MESH_VERT, PUNCH_FRAG, "passthrough"),
         ] {
             match link(gl, glsl, defines, vertex, fragment, name) {
                 Ok(program) => programs.push(program),
@@ -748,7 +772,7 @@ impl Gpu {
                 }
             }
         }
-        let [lit, sky, depth, shadow, grid_program] = programs[..] else { unreachable!() };
+        let [lit, sky, depth, shadow, grid_program, punch] = programs[..] else { unreachable!() };
         let ao = if ao_samples > 0 && scene.ao {
             let estimate = link(gl, glsl, &view_defines, FULLSCREEN_VERT, AO_FRAG, "ambient occlusion");
             let blur = link(gl, glsl, &view_defines, FULLSCREEN_VERT, AO_BLUR_FRAG, "ambient occlusion's blur");
@@ -780,6 +804,7 @@ impl Gpu {
         let mut gpu = Gpu {
             lit,
             sky,
+            punch,
             depth,
             shadow,
             grid_program,
@@ -1559,9 +1584,10 @@ impl Gpu {
     /// Draw `scene` as `views` see it (one, or both with `Multiview`) into
     /// `dest`, its `area` from the bottom left (the whole, or less to draw
     /// less), with `screen` the picture on the screen, the PC's lights as
-    /// `leds`, the props as `props` say and `extras` over it all. An sRGB
-    /// target is written linear light, which it encodes; another sRGB
-    /// values.
+    /// `leds`, the props as `props` say and `extras` over it all; the real
+    /// world through it where `punch` says (premultiplied: colour and alpha
+    /// 0 where only it shows). An sRGB target is written linear light,
+    /// which it encodes; another sRGB values.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
@@ -1574,6 +1600,7 @@ impl Gpu {
         leds: Leds,
         props: &[PropDraw],
         extras: &[Extra],
+        punch: Punch,
     ) -> Result<(), String> {
         let format = dest.format();
         let layered = matches!(dest, Dest::Image { layered: true, .. });
@@ -1671,10 +1698,17 @@ impl Gpu {
                     gl.uniform_1_i32(u(sky, "u_sky").as_ref(), scene.sky as i32);
                     gl.uniform_1_i32(u(sky, "u_encode").as_ref(), encode);
                     gl.bind_vertex_array(Some(empty));
+                    if !matches!(punch, Punch::None) {
+                        // Not over where the real world shows (premultiplied).
+                        gl.enable(glow::BLEND);
+                        gl.blend_func_separate(glow::DST_ALPHA, glow::ZERO, glow::ZERO, glow::ONE);
+                    }
                     gl.draw_arrays(glow::TRIANGLES, 0, 3);
                     gl.use_program(Some(lit));
                     gl.enable(glow::BLEND);
-                    gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+                    // (Alpha as premultiplied: over the real world, where
+                    // it shows, what is drawn is as opaque as it is.)
+                    gl.blend_func_separate(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA, glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
                     gl.uniform_1_i32(has_ao.as_ref(), 0);
                     // What is seen through is lit more cheaply: it is over
                     // other surfaces, often many and large.
@@ -1698,6 +1732,13 @@ impl Gpu {
                     }
                     gl.bind_vertex_array(Some(mesh.vao));
                     gl.draw_elements(glow::TRIANGLES, mesh.count, glow::UNSIGNED_INT, 0);
+                }
+                if !blended && !matches!(punch, Punch::None) {
+                    // The real world through the room's meshes, but not
+                    // through the props, nor what is seen through, nor the
+                    // extras, which are over it.
+                    self.draw_punch(gl, punch, &vp_floats);
+                    gl.use_program(Some(lit));
                 }
                 if !blended && !props.is_empty() {
                     // The props, among the opaque meshes but not in the
@@ -1743,6 +1784,57 @@ impl Gpu {
         }
         self.mark(gl, Pass::Scene);
         Ok(())
+    }
+
+    /// Take away the colour and alpha where `punch` lets the real world
+    /// show: through the windows, whatever is in front of them (the scene's
+    /// desk is seldom where the real one is), or all of it. Leaves the lit
+    /// program unbound.
+    fn draw_punch(&self, gl: &glow::Context, punch: Punch, vp_floats: &[f32]) {
+        // SAFETY: see `GlScreen`.
+        unsafe {
+            match punch {
+                Punch::None => {}
+                Punch::Windows(windows) if !windows.is_empty() => {
+                    let program = self.punch;
+                    let u = |name: &'static str| uniform(gl, program, name);
+                    gl.use_program(Some(program));
+                    gl.uniform_matrix_4_f32_slice(u("u_view_projection").as_ref(), false, vp_floats);
+                    gl.disable(glow::DEPTH_TEST);
+                    gl.enable(glow::BLEND);
+                    gl.blend_func(glow::ZERO, glow::ONE_MINUS_SRC_ALPHA);
+                    // The top of a flat box: seen from above only, once.
+                    gl.enable(glow::CULL_FACE);
+                    gl.cull_face(glow::BACK);
+                    gl.bind_vertex_array(Some(self.cube.vao));
+                    for window in windows {
+                        let around = window.size + glam::Vec2::splat(window.feather * 2.0);
+                        let model = window.frame * Mat4::from_scale(Vec3::new(around.x, 0.001, around.y));
+                        gl.uniform_matrix_4_f32_slice(u("u_model").as_ref(), false, &model.to_cols_array());
+                        gl.uniform_matrix_4_f32_slice(u("u_local").as_ref(), false, &window.frame.inverse().to_cols_array());
+                        gl.uniform_2_f32_slice(u("u_half").as_ref(), &(window.size / 2.0).to_array());
+                        gl.uniform_1_f32(u("u_feather").as_ref(), window.feather.max(1e-4));
+                        gl.draw_elements(glow::TRIANGLES, self.cube.count, glow::UNSIGNED_INT, 0);
+                    }
+                    gl.disable(glow::BLEND);
+                    gl.enable(glow::DEPTH_TEST);
+                }
+                Punch::Windows(_) => {}
+                Punch::Whole(much) => {
+                    // Any program over the whole view: only the constant
+                    // counts.
+                    gl.use_program(Some(self.sky));
+                    gl.disable(glow::DEPTH_TEST);
+                    gl.enable(glow::BLEND);
+                    gl.blend_color(0.0, 0.0, 0.0, much.clamp(0.0, 1.0));
+                    gl.blend_func(glow::ZERO, glow::ONE_MINUS_CONSTANT_ALPHA);
+                    gl.bind_vertex_array(Some(self.empty));
+                    gl.draw_arrays(glow::TRIANGLES, 0, 3);
+                    gl.disable(glow::BLEND);
+                    gl.enable(glow::DEPTH_TEST);
+                }
+            }
+        }
     }
 
     /// The props' parts, with the lit program in use.
