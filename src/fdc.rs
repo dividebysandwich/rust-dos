@@ -1076,6 +1076,9 @@ mod tests {
         for drive in [0, 1] {
             assert_eq!(rig.command(&[0xE6, drive, 0, 0, 1, 2, 18, 0x1B, 0xFF]), [drive, 0, 0, 0, 0, 2, 2]);
         }
+        // A write too, writing nothing.
+        rig.dma(SECTOR_SIZE, false);
+        assert_eq!(rig.command(&[0xC5, 0, 0, 0, 1, 2, 18, 0x1B, 0xFF]), [0, 0, 0, 0, 0, 2, 2]);
         assert_eq!(rig.sector_at(0), 0, "no data moved");
         assert!(rig.fdc.activity.is_empty() && !rig.fdc.irq());
     }

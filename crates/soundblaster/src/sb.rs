@@ -174,6 +174,17 @@ const EMPTY_ASP_REGS: [u8; 256] = {
     regs
 };
 
+/// The 8051 microcontroller's memory as an SB16 starts (DOSBox-X's values,
+/// from a card's): zeros but for 0Eh, 0Fh and 37h. Windows 98's SB16.VXD
+/// reads 0Eh, and fails to start (Code 10) where it finds 00h.
+const MEM8051_START: [u8; 256] = {
+    let mut mem = [0; 256];
+    mem[0x0E] = 0xFF;
+    mem[0x0F] = 0x07;
+    mem[0x37] = 0x38;
+    mem
+};
+
 const PRO_REGS: [u8; 9] = [0x00, 0x04, 0x0A, 0x0C, 0x0E, 0x22, 0x26, PRO_CD, 0x2E];
 
 pub struct SoundBlaster {
@@ -276,7 +287,7 @@ impl SoundBlaster {
             mixer: [0; 256],
             asp_mode: 0,
             asp_regs: EMPTY_ASP_REGS,
-            mem8051: [0; 256],
+            mem8051: MEM8051_START,
             irq: Some(config.irq),
             dma8: Some(config.dma8),
             dma16: Some(config.dma16),
@@ -902,6 +913,11 @@ mod tests {
         }
         assert_eq!(asp_reg(&mut sb, 0x05), 0x01, "an empty socket keeps nothing");
         assert_eq!(asp_reg(&mut sb, 0x09), 0xF8);
+        // ... and its 8051's memory at 0Eh.
+        for byte in [0xF9, 0x0E] {
+            sb.write(0xC, byte, &mut Vec::new());
+        }
+        assert_eq!(sb.read(0xA), 0xFF);
         // Mixer registers the CT1745 lacks read 0Ah, whatever was written.
         for (reg, kept) in [(0x90, false), (0xFF, false), (0x30, true)] {
             sb.write(0x4, reg, &mut Vec::new());
