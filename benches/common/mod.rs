@@ -115,12 +115,33 @@ pub fn game_names(count: usize) -> Vec<String> {
     names
 }
 
-/// Writes `names` as small files into `dir` (created if missing).
+/// Writes `names` as small files into `dir` (created if missing), then
+/// dates the folder as `age` does.
 pub fn write_files(dir: &Path, names: &[String]) {
     fs::create_dir_all(dir).unwrap();
     for name in names {
         fs::write(dir.join(name), b"bench").unwrap();
     }
+    age(dir);
+}
+
+/// Sets a folder's modification time to one in 2020, as a game installed
+/// earlier has it. The emulator reads a folder changed in the last few
+/// seconds again on every lookup, so a folder made just now would measure
+/// that case only. Call it again after adding to a folder.
+pub fn age(dir: &Path) {
+    let mut options = fs::OpenOptions::new();
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_WRITE_ATTRIBUTES, and FILE_FLAG_BACKUP_SEMANTICS to open a
+        // folder.
+        options.access_mode(0x100).custom_flags(0x0200_0000);
+    }
+    #[cfg(not(windows))]
+    options.read(true);
+    let at = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
+    options.open(dir).unwrap().set_modified(at).unwrap();
 }
 
 /// A folder of `count` files named as by `game_names`, in a fresh scratch

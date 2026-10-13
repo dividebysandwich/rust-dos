@@ -53,7 +53,7 @@ default-members = ["."]
 authors = ["dividebysandwich"]
 repository = "https://github.com/dividebysandwich/rust-dos"
 license = "GPL-2.0-or-later"
-version = "1.7.0"
+version = "1.7.1"
 edition = "2024"
 
 [dependencies]
@@ -155,8 +155,10 @@ dynasmrt = "5"
 [target.'cfg(all(unix, any(target_arch = "x86_64", target_arch = "aarch64")))'.dependencies]
 libc = "0.2"
 
-[target.'cfg(all(windows, any(target_arch = "x86_64", target_arch = "aarch64")))'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_System_Memory", "Win32_System_Diagnostics_Debug", "Win32_System_Threading"] }
+# The dynamic recompiler's executable memory, and the console the program
+# leaves when Explorer opened one for it (src/main.rs).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Memory", "Win32_System_Diagnostics_Debug", "Win32_System_Threading", "Win32_System_Console"] }
 
 [features]
 default = ["sdl", "gl", "vr", "midi", "hostmidi", "cdaudio", "chd", "sevenz", "manuals"]
@@ -232,4 +234,8 @@ harness = false
 
 [[bench]]
 name = "host"
+harness = false
+
+[[bench]]
+name = "cpu"
 harness = false

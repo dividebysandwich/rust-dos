@@ -662,6 +662,13 @@ impl Display<'_> {
         }
     }
 
+    /// The running game's manuals, for the booklet in the scene.
+    pub fn set_manuals(&mut self, manuals: &[std::path::PathBuf]) {
+        if let Some(stage) = self.stage_mut() {
+            stage.set_manuals(manuals);
+        }
+    }
+
     /// Take on the `[vr]` settings: the scene shown or not, in the window
     /// or a headset, as `mode` says. What is worth saying about it.
     pub fn apply_vr(&mut self, settings: &rust_dos::vr::VrSettings) -> Vec<String> {
@@ -710,6 +717,8 @@ impl Display<'_> {
 #[cfg(not(feature = "vr"))]
 impl Display<'_> {
     pub fn set_leds(&mut self, _leds: rust_dos::vr::Leds) {}
+
+    pub fn set_manuals(&mut self, _manuals: &[std::path::PathBuf]) {}
 
     pub fn apply_vr(&mut self, settings: &rust_dos::vr::VrSettings) -> Vec<String> {
         if settings.mode == rust_dos::vr::VrMode::Off {

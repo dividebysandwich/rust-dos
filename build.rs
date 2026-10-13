@@ -1,6 +1,6 @@
 //! Sets the configuration flags of the target: the dynamic recompiler's
 //! hosts and OpenXR's, records the git commit the build is made from, and
-//! links in the Windows program's icon.
+//! links in the Windows program's icon, manifest and version.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -30,10 +30,51 @@ fn main() {
     // with `sdl`, which the program needs: the libretro core has neither.
     if os == "windows" && std::env::var_os("CARGO_FEATURE_SDL").is_some() {
         println!("cargo::rerun-if-changed=packaging/windows/rust-dos.ico");
-        embed_resource::compile_for("packaging/windows/rust-dos.rc", ["rust-dos"], embed_resource::NONE)
+        println!("cargo::rerun-if-changed=packaging/windows/rust-dos.manifest");
+        let out_dir = std::env::var("OUT_DIR").unwrap();
+        version_resource(Path::new(&out_dir));
+        embed_resource::compile_for("packaging/windows/rust-dos.rc", ["rust-dos"], embed_resource::ParamsIncludeDirs([&out_dir]))
             .manifest_required()
             .unwrap();
     }
+}
+
+/// Writes version.rc into `out_dir` for packaging/windows/rust-dos.rc to
+/// include: the version and names that Explorer shows on the Details tab of
+/// rust-dos.exe's properties, from Cargo.toml.
+fn version_resource(out_dir: &Path) {
+    let var = |name: &str| std::env::var(name).unwrap_or_default();
+    let numbers = format!(
+        "{},{},{},0",
+        var("CARGO_PKG_VERSION_MAJOR"),
+        var("CARGO_PKG_VERSION_MINOR"),
+        var("CARGO_PKG_VERSION_PATCH")
+    );
+    let version = var("CARGO_PKG_VERSION");
+    // Quotes in a resource string are doubled.
+    let text = |s: &str| s.replace('"', "\"\"");
+    let authors = text(&var("CARGO_PKG_AUTHORS").replace(':', ", "));
+    let strings = [
+        ("CompanyName", authors.clone()),
+        ("FileDescription", "Rust-DOS".to_string()),
+        ("FileVersion", text(&version)),
+        ("InternalName", "rust-dos".to_string()),
+        ("LegalCopyright", format!("{}, GPL-2.0-or-later", authors)),
+        ("OriginalFilename", "rust-dos.exe".to_string()),
+        ("ProductName", "Rust-DOS".to_string()),
+        ("ProductVersion", text(&version)),
+        ("Comments", text(&var("CARGO_PKG_DESCRIPTION"))),
+    ];
+    // An application (FILETYPE 1) for 32-bit Windows (FILEOS 0x40004).
+    let mut rc = format!(
+        "1 VERSIONINFO\nFILEVERSION {numbers}\nPRODUCTVERSION {numbers}\nFILEFLAGSMASK 0x3F\nFILEFLAGS 0\nFILEOS 0x40004\nFILETYPE 1\nFILESUBTYPE 0\nBEGIN\n  BLOCK \"StringFileInfo\"\n  BEGIN\n    BLOCK \"040904B0\"\n    BEGIN\n"
+    );
+    for (key, value) in strings {
+        rc += &format!("      VALUE \"{}\", \"{}\"\n", key, value);
+    }
+    // US English, Unicode.
+    rc += "    END\n  END\n  BLOCK \"VarFileInfo\"\n  BEGIN\n    VALUE \"Translation\", 0x409, 1200\n  END\nEND\n";
+    std::fs::write(out_dir.join("version.rc"), rc).unwrap();
 }
 
 /// Sets RUST_DOS_GIT_COMMIT (the full hash of HEAD), RUST_DOS_GIT_COMMIT_SHORT,

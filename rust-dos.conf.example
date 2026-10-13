@@ -77,8 +77,10 @@
 # --cycles overrides it.
 #cycles=auto
 # Processor: 486 (the default, a 486DX with FPU), 386, pentium (with
-# CPUID, the time stamp counter, MSRs, CMPXCHG8B and 4 MB pages), or
-# pentium_mmx (that Pentium with MMX).
+# CPUID, the time stamp counter, MSRs, CMPXCHG8B and 4 MB pages),
+# pentium_mmx (that Pentium with MMX), pentium_pro (the Pentium's with
+# CMOVcc, FCMOVcc and FCOMI, without MMX) or pentium_ii (the Pentium
+# Pro's with MMX and SYSENTER/SYSEXIT). None has SSE.
 #cpu=486
 # What runs the programs' instructions:
 #   auto     the interpreter, and the dynamic recompiler for a program
@@ -161,7 +163,8 @@
 # while a video records.
 #record_shader=false
 # RAM in MB, from 2 to as much as the CPU's machines took: 64 on a 386,
-# 128 on a 486, 256 on a Pentium, 512 on a Pentium MMX. Memory above the
+# 128 on a 486, 256 on a Pentium, 512 on a Pentium MMX, Pentium Pro or
+# Pentium II. Memory above the
 # first megabyte is extended memory for DOS extenders and XMS.
 #memsize=16
 # Expanded memory (EMS 4.0), which many games of the early 1990s need: 16 KB
@@ -316,6 +319,12 @@
 # and noise: auto (the default) on those machines (machine), on on any, for
 # games that play Tandy sound with VGA graphics, or off.
 #tandy=auto
+# Start with PIT channel 2's gate (port 61h bit 0) high and its count
+# running, the speaker silent: false (the default, as on a real PC) or
+# true, for games that read the channel without setting it up, such as Bao
+# Xiao San Guo Zhi, whose random numbers come out the same every time
+# without it. A change takes effect at the DOS prompt.
+#pit2_gate_at_start=false
 # The noises the hard disks and floppy drives make: off (the default),
 # seek-only (the heads moving), or on (the disk spinning as well). They
 # sound best with the disk speeds above set lower than maximum.

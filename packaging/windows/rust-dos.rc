@@ -2,3 +2,10 @@
 // build.rs links it in. Ordinal 1 so it is the first: the one Windows
 // takes for the program. Made from packaging/linux/rust-dos.svg.
 1 ICON "rust-dos.ico"
+
+// Its manifest: no console window of its own next to the SDL window.
+1 24 "rust-dos.manifest"
+
+// Its version, description and names for the Details tab of its
+// properties: version.rc, which build.rs writes from Cargo.toml.
+#include "version.rc"

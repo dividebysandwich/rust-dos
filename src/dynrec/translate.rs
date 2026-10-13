@@ -1402,7 +1402,7 @@ fn far_call_pm(instr: &Instruction, next: u32, stack32: bool, u: &mut Vec<Uop>) 
     u.push(Uop::Const { t: T1, v: next });
     u.push(Uop::Store { m: T0, src: T1, size });
     u.push(Uop::Unspill { t: T1, slot: 0 });
-    u.push(Uop::FarCallLoad);
+    u.push(Uop::FarCallLoad { next });
     u.push(Uop::Set { r: sp, t: T1 });
     u.push(Uop::FarExit);
     true

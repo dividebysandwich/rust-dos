@@ -970,6 +970,27 @@ a game's frame rate at a few fixed speeds shows where it stops growing.
 Start the emulator with `RUST_DOS_AUTO_TRACE=1` to have every measurement
 and the speed it chose printed to stderr.
 
+### Where the emulator's time goes (profiling)
+
+`POST /api/profile {"enabled":true,"duration_ms":30000}` samples which
+part of the emulator runs and which guest code, 2000 times a second, and
+counts port accesses, BIOS and DOS calls, interrupts and the recompiler's
+work meanwhile. Send the input to measure, then read it once:
+
+```sh
+curl -s -X POST $H/api/profile -H 'content-type: application/json'      -d '{"enabled":true,"duration_ms":30000}'
+curl -s -X POST $H/api/input/batch -H 'content-type: application/json' -d @input.json
+curl -s "$H/api/profile?wait_ms=40000&format=text"
+```
+
+Read the `busy_pct` shares (of the time the emulator works, not waiting
+for the next frame), then the hottest guest places with their
+disassembly, the ports and the services. `?zone=io` (or `dynrec`, `hle`,
+`io.vga`) narrows the places to what spent time there; `?format=folded`
+gives flame graph stacks. To compare two builds, load the same save state
+in each and send the same input. [profiling.md](profiling.md) has the
+whole report.
+
 ### Protected-mode programs (DOS extenders)
 
 Programs built with DOS/4GW, DOS/32A, PMODE or Borland's RTM switch the CPU
@@ -1003,8 +1024,13 @@ access rights.
 - **Exceptions:** `GET /api/exceptions` lists the last 64 (vector, error
   code, `CS:EIP`, CR2 for page faults). Page faults (`#PF`, vector 0E) are
   normal under DOS/4GW, whose virtual memory manager loads pages on demand.
-  The log also has a line for each of the first 200 exceptions
-  (`?grep=%23GP`; `#` must be written `%23` in a URL).
+  The log also has lines for exceptions (`?grep=%23GP`; `#` must be
+  written `%23` in a URL): the first 3 at each place (`CS:EIP`), at the
+  first 200 places for each exception. Systems raise many exceptions on
+  purpose from a few places, such as Windows 9x's ARPL breakpoints, the
+  ports and IOPL-sensitive instructions it emulates in virtual-8086 mode
+  and the pages it fills on demand; the limit per place keeps them from
+  hiding the rest.
 - **Break on an exception:** `POST /api/breakpoints {"exception":"0D"}`
   (or `"any"`) pauses at the first instruction of the handler after the CPU
   raises it; the pause reply includes the exception. `{"mode_switch":true}`
@@ -1061,7 +1087,15 @@ address mapped to when it was set.
   instruction terms, but a timer interrupt can arrive between any two steps.
 - **Measuring speed.** `/api/stats` reports `mips` (host speed while
   executing guest code), `emulated_mips` (guest instructions per wall-clock
-  second) and the decode-cache hit rate, averaged over about a second. Use a
+  second) and the decode-cache hit rate, averaged over about a second. Its
+  `frame` object has the settings window's Stats page numbers and the
+  emulated speed over the last quarter second: the game runs at full speed
+  when `emulated_speed` (emulated seconds a wall second) stays near 1,
+  `frame.fps` is the frames the program draws a second (the top-level `fps`
+  counts the window's frames), and `cpu_use` is the percent of the wall
+  time the emulator's main thread works (running the machine and drawing
+  the picture), so 100 minus it is that thread's time to spare, on one host
+  core. Use a
   release build and a CPU-bound scene, such as the Stunts intro, when
   comparing emulator changes.
 - **Coarse timestamps.** Trace times are sampled once per frame (about
