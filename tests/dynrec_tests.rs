@@ -3716,9 +3716,11 @@ fn watched_writes_bump_every_blocks_generation_on_the_recompiler_too() {
 #[test]
 fn stores_into_the_linear_frame_buffer_are_the_interpreters() {
     // DirectDraw's own copy loop into a 640x480 16-bit VESA mode's frame
-    // buffer at E0000000h, and stores of each size, the last ones reaching
-    // past the end of the video memory (4 MB), where the bus takes them a
-    // byte or word at a time. The display start is in the middle of a row.
+    // buffer at E0000000h, and stores of each size. The last ones reach
+    // past the end of the video memory (4 MB), which ends on a page
+    // boundary: they cross a page, so translated code takes them through
+    // `jit_write` and the interpreter a byte at a time, and `write_lfb`
+    // never sees them. The display start is in the middle of a row.
     const LFB: u32 = 0xE000_0000;
     let (mut a, mut b) = twins(|rig| {
         rig.cpu.set_ax(0x4F02);

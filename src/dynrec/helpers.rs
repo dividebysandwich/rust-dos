@@ -962,8 +962,9 @@ jit_fn! {
         ctx.calls.dev += 1;
         // Pixels into the linear frame buffer, which DirectDraw's own copy
         // loops write a dword at a time: nothing the VGA's state has, and
-        // nothing in RAM.
-        if guard(ctx, false, || cpu.bus.write_lfb(phys as usize, value, size as usize)) {
+        // nothing in RAM. (A panic in it is the store's, which isn't made
+        // again below.)
+        if guard(ctx, true, || cpu.bus.write_lfb(phys as usize, value, size as usize)) {
             return 0;
         }
         // Pixels into the VGA's planes, which mode X programs write one or

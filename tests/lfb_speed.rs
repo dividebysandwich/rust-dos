@@ -4,26 +4,14 @@
 //!
 //! `cargo test --release --test lfb_speed -- --ignored --nocapture`
 
+mod dyndiff;
 mod pmrig;
 
 use iced_x86::code_asm::*;
 use pmrig::*;
-use rust_dos::cpu::{CoreMode, Cpu};
-use rust_dos::exec::{ExecHook, StopReason, run_batch};
+use rust_dos::cpu::CoreMode;
+use rust_dos::exec::StopReason;
 use std::time::Instant;
-
-/// Stops the execution loop before a HLT.
-struct StopAtHlt;
-
-impl ExecHook for StopAtHlt {
-    fn before_exec(&mut self, _cpu: &Cpu, phys_ip: usize, ram: &[u8]) -> bool {
-        ram.get(phys_ip) == Some(&0xF4)
-    }
-
-    fn per_instruction(&self) -> bool {
-        false
-    }
-}
 
 const LFB: u32 = 0xE000_0000;
 /// A 640x480 16-bit frame, in dwords.
@@ -58,13 +46,7 @@ fn time(dst: u32, frames: u32) -> f64 {
     }));
     rig.enter_pm();
     let start = Instant::now();
-    loop {
-        let end = rig.cpu.bus.clock.icount + 1_000_000;
-        rig.cpu.bus.start_batch(end);
-        if run_batch(&mut rig.cpu, &mut StopAtHlt, true) == StopReason::Paused {
-            break;
-        }
-    }
+    while dyndiff::batch(&mut rig.cpu, 1_000_000, true) != StopReason::Paused {}
     start.elapsed().as_secs_f64()
 }
 
