@@ -182,6 +182,36 @@ pub fn boot_ivt() -> [u32; 256] {
     ivt
 }
 
+/// A hard disk's fixed disk parameter table: cylinders, heads, no reduced
+/// write current, no write precompensation, the control byte (8: more than
+/// eight heads), the landing zone and the sectors per track. Where INT 13h
+/// has more heads than the drive (more than 16), the table is a translating
+/// BIOS's (Phoenix's EDD specification): INT 13h's geometry, the A0h
+/// signature, the drive's own cylinders, heads and sectors as the IDE
+/// disk has them, and a checksum. Windows 98's IDE driver (ESDI_506.PDR)
+/// sets the drive up with the plain table's heads, and gives up where
+/// those are more than a drive can have.
+fn fixed_disk_params(chs: crate::diskimage::Chs, total: u64) -> [u8; 16] {
+    let mut table = [0u8; 16];
+    let cylinders = chs.cylinders.clamp(1, 1024) as u16;
+    table[0..2].copy_from_slice(&cylinders.to_le_bytes());
+    table[2] = chs.heads as u8;
+    table[5..7].copy_from_slice(&0xFFFFu16.to_le_bytes());
+    table[8] = if chs.heads > 8 { 0x08 } else { 0 };
+    table[14] = chs.sectors as u8;
+    if chs.heads <= 16 {
+        table[12..14].copy_from_slice(&cylinders.to_le_bytes());
+        return table;
+    }
+    let drive = crate::ide::ata::Geometry::for_disk(chs, total);
+    table[3] = 0xA0;
+    table[4] = drive.sectors as u8;
+    table[9..11].copy_from_slice(&(drive.cylinders.min(0xFFFF) as u16).to_le_bytes());
+    table[11] = drive.heads as u8;
+    table[15] = table[..15].iter().fold(0u8, |sum, &b| sum.wrapping_sub(b));
+    table
+}
+
 fn write_ivt(bus: &mut Bus, ivt: &[u32; 256]) {
     for (vector, &entry) in ivt.iter().enumerate() {
         bus.write_16(vector * 4, entry as u16);
@@ -193,23 +223,12 @@ fn write_ivt(bus: &mut Bus, ivt: &[u32; 256]) {
 
 /// Set up the vector table and the BIOS data area as a PC's BIOS leaves
 /// them for the operating system it boots, in memory cleared to zeros,
-/// with `hard_disks` the geometries of the hard disks as INT 13h has them.
-pub fn install_for_boot(bus: &mut Bus, hard_disks: &[crate::diskimage::Chs]) {
+/// with `hard_disks` the geometries of the hard disks as INT 13h has them
+/// and their sizes in sectors.
+pub fn install_for_boot(bus: &mut Bus, hard_disks: &[(crate::diskimage::Chs, u64)]) {
     write_ivt(bus, &boot_ivt());
-    // The fixed disk parameter tables: cylinders, heads, no reduced write
-    // current, no write precompensation, the control byte (8: more than
-    // eight heads), the landing zone and the sectors per track.
     for i in 0..2 {
-        let mut table = [0u8; 16];
-        if let Some(chs) = hard_disks.get(i) {
-            let cylinders = chs.cylinders.clamp(1, 1024) as u16;
-            table[0..2].copy_from_slice(&cylinders.to_le_bytes());
-            table[2] = chs.heads as u8;
-            table[5..7].copy_from_slice(&0xFFFFu16.to_le_bytes());
-            table[8] = if chs.heads > 8 { 0x08 } else { 0 };
-            table[12..14].copy_from_slice(&cylinders.to_le_bytes());
-            table[14] = chs.sectors as u8;
-        }
+        let table = hard_disks.get(i).map_or([0; 16], |&(chs, total)| fixed_disk_params(chs, total));
         write_rom(bus, FIXED_DISK_PARAMS + 16 * i as u16, &table);
     }
 
@@ -648,5 +667,25 @@ pub fn next_port_access(cpu: &mut Cpu) {
             cpu.bus.ide_faked = false;
             cpu.set_reg8(BL, 0xFF);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fixed_disk_params;
+    use crate::diskimage::Chs;
+
+    #[test]
+    fn fixed_disk_params_translate_more_than_16_heads() {
+        // 1024/16/63 is the drive's own geometry: a plain table.
+        let t = fixed_disk_params(Chs { cylinders: 1024, heads: 16, sectors: 63 }, 1024 * 16 * 63);
+        assert_eq!((u16::from_le_bytes([t[0], t[1]]), t[2], t[3], t[14]), (1024, 16, 0, 63));
+        // A 4 GB disk at 522/255/63 is 8319/16/63 to the drive: INT 13h's
+        // geometry, the A0h signature, the drive's and a checksum.
+        let total = 4_293_596_672 / 512;
+        let t = fixed_disk_params(Chs { cylinders: 522, heads: 255, sectors: 63 }, total);
+        assert_eq!((u16::from_le_bytes([t[0], t[1]]), t[2], t[3], t[4]), (522, 255, 0xA0, 63));
+        assert_eq!((u16::from_le_bytes([t[9], t[10]]), t[11], t[14]), (8319, 16, 63));
+        assert_eq!(t.iter().fold(0u8, |sum, &b| sum.wrapping_add(b)), 0);
     }
 }
