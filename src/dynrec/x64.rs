@@ -130,9 +130,10 @@ pub fn trampoline() -> Trampoline {
     thunks[Thunk::Load as usize] = ops.offset().0;
     load_thunk(&mut ops);
     for size in [1, 2, 4] {
-        thunks[Thunk::store(size, false) as usize] = ops.offset().0;
-        store_thunk(&mut ops, size);
-        thunks[Thunk::store(size, true) as usize] = ops.offset().0;
+        let code = ops.new_dynamic_label();
+        thunks[Thunk::store(size) as usize] = ops.offset().0;
+        store_thunk(&mut ops, size, code);
+        dynasm!(ops ; .arch x64 ; =>code);
         code_store_thunk(&mut ops, size);
     }
     for thunk in [Thunk::Dev, Thunk::DevTlbRead, Thunk::DevTlbWrite, Thunk::DevTlbUserRead, Thunk::DevTlbUserWrite] {
@@ -154,20 +155,17 @@ enum Thunk {
     /// EAX = the bytes (ECX of them) at handle RDX, which isn't RAM's,
     /// through `jit_dev_read` or `jit_read`.
     Load,
-    /// Store the byte, word or dword in ECX at handle RDX, which isn't
-    /// RAM's: into the VGA's planes inline where `vga_ok` says so, else
-    /// through `jit_dev_write` or `jit_write`. RAX holds the block's bytes
-    /// after the instruction, `smc_lo | smc_hi << 32`.
+    /// Store the byte, word or dword in ECX at handle RDX. RAX holds the
+    /// block's bytes after the instruction, `smc_lo | smc_hi << 32`. A
+    /// handle that isn't RAM's goes into the VGA's planes inline where
+    /// `vga_ok` says so, else through `jit_dev_write` or `jit_write`. A RAM
+    /// handle is one in a block with code (the inline path writes the
+    /// rest): the store, the code generations of the first and last byte's
+    /// blocks bumped, as the bus's writes bump them, and a store into the
+    /// block's later bytes noted.
     Store1,
     Store2,
     Store4,
-    /// Store ECX at handle RDX, RAM in a block with code: the store, the
-    /// code generations of the first and last byte's blocks bumped, as the
-    /// bus's writes bump them, and a store into the block's later bytes
-    /// noted. RAX as for `Store1`.
-    CodeStore1,
-    CodeStore2,
-    CodeStore4,
     /// The handle of an operand at physical address EAX that isn't plain
     /// RAM, as `MemRef` gives it for offset EDX and `memref_desc` ECX: the
     /// address with `DEV_BIT` where the operand is within one page, else
@@ -184,23 +182,23 @@ enum Thunk {
 const _: () = assert!(Thunk::DevTlbUserWrite as usize + 1 == THUNKS);
 
 impl Thunk {
-    fn store(size: u8, code: bool) -> Thunk {
-        match (size, code) {
-            (1, false) => Thunk::Store1,
-            (2, false) => Thunk::Store2,
-            (_, false) => Thunk::Store4,
-            (1, true) => Thunk::CodeStore1,
-            (2, true) => Thunk::CodeStore2,
-            (_, true) => Thunk::CodeStore4,
+    fn store(size: u8) -> Thunk {
+        match size {
+            1 => Thunk::Store1,
+            2 => Thunk::Store2,
+            _ => Thunk::Store4,
         }
     }
 
-    /// The `Dev` thunk for a TLB's set and tag offset (`Slow::MemRef`).
-    fn dev(tlb: Option<(i32, i32)>) -> Thunk {
-        [Thunk::Dev, Thunk::DevTlbRead, Thunk::DevTlbWrite, Thunk::DevTlbUserRead, Thunk::DevTlbUserWrite]
-            .into_iter()
-            .find(|t| t.tlb() == tlb)
-            .expect("a TLB set and tag")
+    /// The `Dev` thunk through the TLB's set for user or supervisor code,
+    /// for a write or a read.
+    fn dev_tlb(user: bool, write: bool) -> Thunk {
+        match (user, write) {
+            (false, false) => Thunk::DevTlbRead,
+            (false, true) => Thunk::DevTlbWrite,
+            (true, false) => Thunk::DevTlbUserRead,
+            (true, true) => Thunk::DevTlbUserWrite,
+        }
     }
 
     /// The TLB's set and the tag's offset in an entry a `Dev` thunk uses.
@@ -227,6 +225,23 @@ impl Thunk {
 /// call into Rust (the thunk's own call left RSP 8 off 16 bytes), with
 /// the CPU and the context as the first two arguments.
 fn thunk_save(ops: &mut Asm) {
+    push_live(ops);
+    dynasm!(ops
+        ; .arch x64
+        ; sub rsp, 8
+        ; mov rdi, rbx
+        ; mov rsi, r12
+    );
+}
+
+fn thunk_restore(ops: &mut Asm) {
+    dynasm!(ops ; .arch x64 ; add rsp, 8);
+    pop_live(ops);
+}
+
+/// Push the temporaries and the cached guest registers that Rust doesn't
+/// keep (48 bytes), and pop them back.
+fn push_live(ops: &mut Asm) {
     dynasm!(ops
         ; .arch x64
         ; push r8
@@ -235,16 +250,12 @@ fn thunk_save(ops: &mut Asm) {
         ; push r11
         ; push rsi
         ; push rdi
-        ; sub rsp, 8
-        ; mov rdi, rbx
-        ; mov rsi, r12
     );
 }
 
-fn thunk_restore(ops: &mut Asm) {
+fn pop_live(ops: &mut Asm) {
     dynasm!(ops
         ; .arch x64
-        ; add rsp, 8
         ; pop rdi
         ; pop rsi
         ; pop r11
@@ -278,10 +289,14 @@ fn load_thunk(ops: &mut Asm) {
     dynasm!(ops ; .arch x64 ; ret);
 }
 
-fn store_thunk(ops: &mut Asm, size: u8) {
+/// `Thunk::Store1` and on, going on at `code` (`code_store_thunk`) with a
+/// RAM handle.
+fn store_thunk(ops: &mut Asm, size: u8, code: DynamicLabel) {
     let s = size as i32;
     dynasm!(ops
         ; .arch x64
+        ; cmp rdx, RAM_HANDLES
+        ; jbe =>code
         ; mov QWORD [r12 + CTX_SMC_LO], rax
         ; push r8
         ; push r9
@@ -688,20 +703,20 @@ fn seg_field(seg: Seg, field: usize) -> i32 {
 enum Slow {
     /// A memory operand the inline checks didn't take: from `at`, through
     /// `jit_memref`; from `dev`, an operand that isn't plain RAM, with its
-    /// physical address in `addr`, or with `tlb` (the TLB's set, and the
-    /// tag's offset in an entry) its linear address in EAX: if it is
-    /// within one page (one the TLB holds), its handle is that address with
-    /// `DEV_BIT`, else it takes `jit_memref` too (`Thunk::Dev`).
-    MemRef { at: DynamicLabel, dev: DynamicLabel, back: DynamicLabel, t: T, desc: u32, fail: DynamicLabel, addr: u8, tlb: Option<(i32, i32)> },
+    /// physical address in `addr` (`Thunk::Dev`), or with its linear
+    /// address in EAX for one of the TLB's `thunk`s: if it is within one
+    /// page (one the TLB holds), its handle is that address with
+    /// `DEV_BIT`, else it takes `jit_memref` too.
+    MemRef { at: DynamicLabel, dev: DynamicLabel, back: DynamicLabel, t: T, desc: u32, fail: DynamicLabel, addr: u8, thunk: Thunk },
     Load { at: DynamicLabel, back: DynamicLabel, dst: T, m: T, size: u8 },
     /// Where a memory reference's slow paths come back to before a load or
     /// store that takes its handle as RAM's (`Gen::ram_back`): to `slow`
     /// with one that isn't, else to the RAM access at `ram`.
     Recheck { at: DynamicLabel, m: T, slow: DynamicLabel, ram: DynamicLabel },
-    Store { at: DynamicLabel, back: DynamicLabel, m: T, src: T, size: u8, lo: u32, hi: u32 },
-    /// A store into a block of RAM with code (`Bus::code_blocks`): its
-    /// generations bumped, and a store into the rest of the block noted.
-    CodeStore { at: DynamicLabel, back: DynamicLabel, m: T, src: T, size: u8, lo: u32, hi: u32 },
+    /// A store through `thunk` (`Thunk::Store1` and on): one that isn't to
+    /// plain RAM, or one into a block of RAM with code (`Bus::code_blocks`),
+    /// its generations bumped and a store into the rest of the block noted.
+    Store { at: DynamicLabel, back: DynamicLabel, m: T, src: T, thunk: Thunk, lo: u32, hi: u32 },
     /// An instruction's fault with an exit code of its own (#GP(0), #DE).
     Fault { at: DynamicLabel, code: u32, fail: DynamicLabel },
     /// A store hit the rest of the block: it leaves after the instruction,
@@ -1256,7 +1271,7 @@ impl Gen<'_> {
         }
         for slow in std::mem::take(&mut self.slow) {
             match slow {
-                Slow::MemRef { at, dev, back, t, desc, fail, addr, tlb } => {
+                Slow::MemRef { at, dev, back, t, desc, fail, addr, thunk } => {
                     let tail = self.ops.new_dynamic_label();
                     dynasm!(self.ops
                         ; .arch x64
@@ -1269,7 +1284,7 @@ impl Gen<'_> {
                         ; .arch x64
                         ; mov edx, Rd(r(t))
                         ; mov ecx, desc as i32
-                        ; call QWORD [BYTE r12 + Thunk::dev(tlb).slot()]
+                        ; call QWORD [BYTE r12 + thunk.slot()]
                         ; jmp =>tail
                         ; =>at
                         ; mov edx, Rd(r(t))
@@ -1411,13 +1426,9 @@ impl Gen<'_> {
                         ; jmp =>fail_tail
                     );
                 }
-                Slow::CodeStore { at, back, m, src, size, lo, hi } => {
+                Slow::Store { at, back, m, src, thunk, lo, hi } => {
                     dynasm!(self.ops ; .arch x64 ; =>at);
-                    self.thunk_store(Thunk::store(size, true), m, src, lo, hi, back);
-                }
-                Slow::Store { at, back, m, src, size, lo, hi } => {
-                    dynasm!(self.ops ; .arch x64 ; =>at);
-                    self.thunk_store(Thunk::store(size, false), m, src, lo, hi, back);
+                    self.thunk_store(thunk, m, src, lo, hi, back);
                 }
             }
         }
@@ -1599,21 +1610,21 @@ impl Gen<'_> {
                 let m_ = r(m);
                 // RAM of a block without code is written as it is, without
                 // bumping its generation, which nothing reads (see
-                // `Bus::code_blocks`).
-                let code = self.ops.new_dynamic_label();
+                // `Bus::code_blocks`). RAM of a block with code takes the
+                // same slow path as a handle that isn't RAM's: the thunk
+                // tells them apart.
                 self.ram_or(m, at);
                 dynasm!(self.ops
                     ; .arch x64
                     ; mov ecx, Rd(m_)
                     ; shr ecx, crate::bus::GEN_SHIFT as i8
                     ; cmp BYTE [r14 + rcx], 0
-                    ; jne =>code
+                    ; jne =>at
                 );
                 self.store_ram(m, src, size);
                 dynasm!(self.ops ; .arch x64 ; =>back);
                 let (lo, hi) = self.rest();
-                self.slow.push(Slow::Store { at, back, m, src, size, lo, hi });
-                self.slow.push(Slow::CodeStore { at: code, back, m, src, size, lo, hi });
+                self.slow.push(Slow::Store { at, back, m, src, thunk: Thunk::store(size), lo, hi });
             }
             Uop::Alu { op, size, a, b } => self.alu(op, size, a, b),
             Uop::Unary { op, size, t } => self.unary(op, size, t),
@@ -2422,27 +2433,11 @@ impl Gen<'_> {
     /// Keep the temporaries and the cached guest registers around a call
     /// into Rust, which doesn't keep them (16 bytes aligned).
     fn save_for_call(&mut self) {
-        dynasm!(self.ops
-            ; .arch x64
-            ; push r8
-            ; push r9
-            ; push r10
-            ; push r11
-            ; push rsi
-            ; push rdi
-        );
+        push_live(&mut self.ops);
     }
 
     fn restore_after_call(&mut self) {
-        dynasm!(self.ops
-            ; .arch x64
-            ; pop rdi
-            ; pop rsi
-            ; pop r11
-            ; pop r10
-            ; pop r9
-            ; pop r8
-        );
+        pop_live(&mut self.ops);
     }
 
     /// IN (into t) or OUT (of t) of `size` bytes through `jit_port`, the
@@ -2689,7 +2684,8 @@ impl Gen<'_> {
             self.ram_back = Some((t, back));
             let desc = memref_desc(seg, size, write, slot);
             let fail = self.fail();
-            self.slow.push(Slow::MemRef { at, dev, back, t, desc, fail, addr: RAX, tlb: Some((entry, tag)) });
+            let thunk = Thunk::dev_tlb(set != 0, write);
+            self.slow.push(Slow::MemRef { at, dev, back, t, desc, fail, addr: RAX, thunk });
             return;
         }
         if paging || !a20 {
@@ -2766,7 +2762,7 @@ impl Gen<'_> {
         self.ram_back = Some((t, back));
         let desc = memref_desc(seg, size, write, slot);
         let fail = self.fail();
-        self.slow.push(Slow::MemRef { at, dev, back, t, desc, fail, addr, tlb: None });
+        self.slow.push(Slow::MemRef { at, dev, back, t, desc, fail, addr, thunk: Thunk::Dev });
     }
 
     /// Where a memory reference's slow paths come back to, if it is still
