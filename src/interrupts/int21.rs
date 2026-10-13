@@ -1145,7 +1145,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         // AH=3Ch: Create File
         //
         // An existing file is emptied as in DOS, but on the handle's first
-        // read, write, seek or close (`DiskController::create_file`): an
+        // use (`DiskController::create_file` lists what counts): an
         // eager truncate wiped user data (roster files, saved games,
         // regn.3dg theatre selection) whenever the program died between
         // the create and its write.

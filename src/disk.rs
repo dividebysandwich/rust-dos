@@ -642,7 +642,7 @@ struct OpenFile {
     refs: u16,
     /// Opened for an FCB rather than a handle.
     fcb: bool,
-    /// Made by a create call over a file that may have had bytes: they go
+    /// Made by a create call over a file that had bytes: they go
     /// when the program first uses the handle (`DiskController::settle`).
     empty_on_use: bool,
 }
@@ -1419,6 +1419,8 @@ impl DiskController {
     }
 
     fn close_drive_files(&mut self, drive: u8) {
+        // Closed by DOS, which emptied them at the create.
+        self.settle_where(|sft, f| sft >= FIRST_FILE && f.drive == drive);
         let gone: Vec<u16> = self
             .open_files
             .iter()
@@ -2266,6 +2268,9 @@ impl DiskController {
             self.insert(handle, file);
             return Ok(handle);
         }
+        // DOS empties the file at the create call, so opening it again while
+        // the create's handle is still unused must find it empty.
+        self.settle_named(filename);
         // Files held in memory are read-only: read/write opens are
         // downgraded as on a CD-ROM.
         if let Some((drive, d, path)) = self.locate_in_memory(filename) {
@@ -2367,8 +2372,9 @@ impl DiskController {
 
     /// INT 21h, AH=3Ch: Create File. Opens read/write, creating the file
     /// if missing. A file that was there is emptied as DOS does, but only
-    /// when the program first reads, writes, seeks or closes the handle:
-    /// the old bytes stay on disk until it does, so a crash between the
+    /// when the program first reads, writes, seeks, resizes, stamps or
+    /// closes the handle, or opens, deletes or renames the file by name:
+    /// the old bytes stay on disk until then, so a crash between the
     /// create and the write that follows doesn't lose a save.
     pub fn create_file(&mut self, filename: &str, owner: u16) -> Result<u16, u8> {
         if self.device(filename).is_some() {
@@ -2379,9 +2385,23 @@ impl DiskController {
         self.check_writable(drive)?;
         let sft = self.open_or_create(filename, 0x02, owner, true)?;
         if let Some(open) = self.open_files.get_mut(&sft) {
-            open.empty_on_use = matches!(open.data, OpenData::Host(_) | OpenData::Fat { write: true, .. });
+            open.empty_on_use = match &open.data {
+                OpenData::Host(file) => file.len().is_ok_and(|len| len > 0),
+                OpenData::Fat { volume, at, write: true, .. } => volume.reload(*at).is_ok_and(|e| e.size > 0),
+                _ => false,
+            };
         }
         Ok(sft)
+    }
+
+    /// Close the file `sft` that was just opened for a program that got no
+    /// handle for it: a file a create call opened keeps its bytes, as DOS
+    /// fails such a create before it touches the file.
+    pub fn close_unused(&mut self, sft: u16) -> bool {
+        if let Some(open) = self.open_files.get_mut(&sft) {
+            open.empty_on_use = false;
+        }
+        self.close_file(sft)
     }
 
     /// Empty the file `sft` if a create call left that for its first use.
@@ -2392,6 +2412,26 @@ impl DiskController {
             open.empty_on_use = false;
             empty_created(open);
             self.mark_dirty(sft);
+        }
+    }
+
+    /// Empty every file a create call left for its first use that
+    /// `which` picks.
+    fn settle_where(&mut self, which: impl Fn(u16, &OpenFile) -> bool) {
+        let pending: Vec<u16> =
+            self.open_files.iter().filter(|&(&sft, f)| f.empty_on_use && which(sft, f)).map(|(&sft, _)| sft).collect();
+        for sft in pending {
+            self.settle(sft);
+        }
+    }
+
+    /// Empty the file `filename` names if a create call left that for its
+    /// first use: before it is opened again, deleted or renamed, which DOS
+    /// does to the file the create already emptied.
+    fn settle_named(&mut self, filename: &str) {
+        if self.open_files.values().any(|f| f.empty_on_use) {
+            let key = self.file_key(filename);
+            self.settle_where(|_, f| f.key == key);
         }
     }
 
@@ -2444,7 +2484,9 @@ impl DiskController {
     }
 
     /// INT 21h, AH=41h: delete a file.
-    pub fn delete_file(&self, filename: &str) -> Result<(), u8> {
+    pub fn delete_file(&mut self, filename: &str) -> Result<(), u8> {
+        // A disk image's entry must not be emptied after it is freed.
+        self.settle_named(filename);
         if let Some((drive, volume, parts)) = self.locate_fat(filename) {
             let parts = refs(&parts);
             let entry = volume.find(&parts)?;
@@ -2466,7 +2508,10 @@ impl DiskController {
     }
 
     /// INT 21h, AH=56h: rename or move a file within a drive.
-    pub fn rename_file(&self, from: &str, to: &str) -> Result<(), u8> {
+    pub fn rename_file(&mut self, from: &str, to: &str) -> Result<(), u8> {
+        // A disk image's entry may move: empty the file while it is where
+        // the handle has it.
+        self.settle_named(from);
         if let Some((drive, volume, from_parts)) = self.locate_fat(from) {
             let from_parts = refs(&from_parts);
             if from_parts.is_empty() {
@@ -2532,7 +2577,10 @@ impl DiskController {
 
     /// INT 21h AX=5701h: set the time and date of an open file. Only
     /// files on disk images keep them; host files keep their own.
-    pub fn set_file_time(&self, handle: u16, time: u16, date: u16) -> Result<(), u8> {
+    pub fn set_file_time(&mut self, handle: u16, time: u16, date: u16) -> Result<(), u8> {
+        // Emptying a disk-image file at its first use stamps it with the
+        // current time, which would replace the one set here.
+        self.settle(handle);
         match &self.open_files.get(&handle).ok_or(0x06u8)?.data {
             OpenData::Fat { volume, at, .. } => volume.set_time(*at, time, date),
             _ => Ok(()),
@@ -2593,6 +2641,7 @@ impl DiskController {
 
     /// Close every open file, for when the shell is reloaded.
     pub fn close_all_files(&mut self) {
+        self.settle_where(|_, _| true);
         self.open_files.clear();
         self.open_standard_devices();
     }
@@ -3991,6 +4040,20 @@ mod tests {
         assert_eq!(fs::read(base.join("KEEP.DAT")).unwrap(), b"kept");
         assert_eq!(disk.read_file(h, 10), Ok(Vec::new()));
         assert_eq!(fs::read(base.join("KEEP.DAT")).unwrap(), b"");
+        disk.close_file(h);
+        // Opened again by name, the file is empty, and stays as the second
+        // handle writes it.
+        fs::write(base.join("KEEP.DAT"), b"kept").unwrap();
+        let created = disk.create_file("C:\\KEEP.DAT", PSP).unwrap();
+        let again = disk.open_file("C:\\KEEP.DAT", 0x02, PSP).unwrap();
+        assert_eq!(disk.write_file(again, b"xy"), Ok(2));
+        disk.close_file(again);
+        disk.close_file(created);
+        assert_eq!(fs::read(base.join("KEEP.DAT")).unwrap(), b"xy");
+        // A create the program got no handle for leaves the file alone.
+        let h = disk.create_file("C:\\KEEP.DAT", PSP).unwrap();
+        disk.close_unused(h);
+        assert_eq!(fs::read(base.join("KEEP.DAT")).unwrap(), b"xy");
 
         // The same on a disk image.
         let blank = DiskImage::from_memory("F.IMA", MemoryImage::new(1_474_560), true, None, false).unwrap();
@@ -4004,6 +4067,53 @@ mod tests {
         assert_eq!(disk.write_file(h, b"new"), Ok(3));
         disk.close_file(h);
         assert!(matches!(disk.file_data("A:\\SAVE.DAT").map(|f| f.read()), Some(Ok(d)) if &d[..] == b"new"));
+
+        // Deleted or renamed on the image before the handle is used: the
+        // file is emptied first, and closing the handle later leaves a file
+        // made in the freed entry alone.
+        let h = disk.create_file("A:\\SAVE.DAT", PSP).unwrap();
+        disk.delete_file("A:\\SAVE.DAT").unwrap();
+        let other = disk.create_file("A:\\OTHER.DAT", PSP).unwrap();
+        assert_eq!(disk.write_file(other, b"other"), Ok(5));
+        disk.close_file(other);
+        disk.close_file(h);
+        assert!(matches!(disk.file_data("A:\\OTHER.DAT").map(|f| f.read()), Some(Ok(d)) if &d[..] == b"other"));
+        let h = disk.create_file("A:\\OTHER.DAT", PSP).unwrap();
+        disk.rename_file("A:\\OTHER.DAT", "A:\\MOVED.DAT").unwrap();
+        disk.close_file(h);
+        assert!(matches!(disk.file_data("A:\\MOVED.DAT").map(|f| f.read()), Some(Ok(d)) if d.is_empty()));
+    }
+
+    #[test]
+    fn a_save_state_keeps_a_created_file_waiting_to_be_emptied() {
+        let base = scratch("create_state");
+        fs::write(base.join("SAVE.DAT"), b"old save").unwrap();
+        let mut disk = DiskController::new(base.clone());
+        let h = disk.create_file("C:\\SAVE.DAT", PSP).unwrap();
+        // Saving leaves the old bytes on disk.
+        let mut w = crate::savestate::Writer::new();
+        disk.save_state(&mut w);
+        assert_eq!(fs::read(base.join("SAVE.DAT")).unwrap(), b"old save");
+        // Loaded back, the handle still empties the file when used.
+        let mut loaded = DiskController::new(base.clone());
+        let lost = loaded.load_state(&mut crate::savestate::Reader::new(&w.buf)).unwrap();
+        assert!(lost.is_empty());
+        assert_eq!(fs::read(base.join("SAVE.DAT")).unwrap(), b"old save");
+        assert_eq!(loaded.write_file(h, b"new"), Ok(3));
+        loaded.close_file(h);
+        assert_eq!(fs::read(base.join("SAVE.DAT")).unwrap(), b"new");
+    }
+
+    #[test]
+    fn unmounting_empties_a_created_file_waiting_for_its_first_use() {
+        let base = scratch("create_unmount");
+        fs::create_dir_all(base.join("D")).unwrap();
+        fs::write(base.join("D").join("CFG.DAT"), b"old config").unwrap();
+        let mut disk = DiskController::new(base.clone());
+        disk.mount(3, &base.join("D"), MountOptions::default(), false).unwrap();
+        disk.create_file("D:\\CFG.DAT", PSP).unwrap();
+        disk.unmount(3).unwrap();
+        assert_eq!(fs::read(base.join("D").join("CFG.DAT")).unwrap(), b"");
     }
 
     #[test]
