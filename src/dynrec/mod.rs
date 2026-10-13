@@ -519,6 +519,10 @@ mod engine {
             let returns = vec![Return::NONE; 1 << RETURN_BITS].into_boxed_slice();
             let mut ctx = Box::new(JitCtx::new(base + tramp.exit));
             ctx.fpu[4] = base + tramp.addsub;
+            #[cfg(target_arch = "x86_64")]
+            for (thunk, at) in ctx.thunks.iter_mut().zip(tramp.thunks) {
+                *thunk = base + at;
+            }
             ctx.returns = returns.as_ptr();
             Ok(Engine {
                 mem,

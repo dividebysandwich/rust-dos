@@ -4094,6 +4094,111 @@ fn video_memory_is_written_and_read_through_the_tlb() {
     assert_ne!(b.cpu.ebx(), 0);
 }
 
+/// The host code bytes one copy of `instr` adds to a block: eight copies
+/// in a loop against the empty loop, with paging on or off.
+fn host_bytes(paging: bool, instr: impl Fn(&mut CodeAssembler) -> Result<(), IcedError> + Copy) -> u64 {
+    let run = |copies: usize| {
+        let (mut a, mut b) = twins(|rig| {
+            let (dir, table) = (0x80000u32, 0x81000u32);
+            rig.write32(dir, table | 3);
+            for i in 0..1024u32 {
+                rig.write32(table + 4 * i, (i << 12) | 3);
+            }
+            rig.load(CODE, &asm32(CODE, |a| {
+                if paging {
+                    a.mov(eax, dir)?;
+                    a.mov(cr3, eax)?;
+                    a.mov(eax, cr0)?;
+                    a.or(eax, 0x8000_0000u32)?;
+                    a.mov(cr0, eax)?;
+                }
+                a.mov(esi, DATA)?;
+                a.mov(edi, DATA + 0x100)?;
+                a.xor(edx, edx)?;
+                a.mov(ecx, 4u32)?;
+                a.jmp(CODE as u64 + 0x100)
+            }));
+            rig.load(CODE + 0x100, &asm32(CODE + 0x100, |a| {
+                let mut again = a.create_label();
+                a.set_label(&mut again)?;
+                for _ in 0..copies {
+                    instr(a)?;
+                }
+                a.dec(ecx)?;
+                a.jnz(again)?;
+                a.hlt()
+            }));
+        });
+        run_both(&mut a, &mut b).code_bytes
+    };
+    (run(8) - run(0)) / 8
+}
+
+#[test]
+fn memory_operands_take_little_host_code() {
+    // Each memory operand's slow paths call the trampoline's routines
+    // (`x64::Thunk`) instead of carrying their own copies.
+    if !AVAILABLE || !cfg!(target_arch = "x86_64") {
+        return;
+    }
+    for paging in [false, true] {
+        let load = host_bytes(paging, |a| a.mov(eax, dword_ptr(esi + 4)));
+        let store = host_bytes(paging, |a| a.mov(dword_ptr(edi + 4), eax));
+        let both = host_bytes(paging, |a| a.add(dword_ptr(edi + 8), eax));
+        assert!(load < 220 && store < 280 && both < 450, "paging {paging}: {load}, {store}, {both} bytes");    }
+}
+
+#[test]
+fn video_memory_is_written_and_read_from_ring_3_through_the_tlb() {
+    // Ring 3 code, as a Windows game drawing into a frame buffer: the
+    // window at A0000h mapped at linear 300000h on user pages, in chain 4,
+    // with operands that reach into the next page.
+    let (mut a, mut b) = twins(|rig| {
+        let (dir, table) = (0x80000u32, 0x81000u32);
+        rig.write32(dir, table | 7);
+        for i in 0..1024u32 {
+            let page = if (0x300..0x310).contains(&i) { 0xA0 + (i - 0x300) } else { i };
+            rig.write32(table + 4 * i, (page << 12) | 7);
+        }
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.mov(eax, dir)?;
+            a.mov(cr3, eax)?;
+            a.mov(eax, cr0)?;
+            a.or(eax, 0x8000_0000u32)?;
+            a.mov(cr0, eax)?;
+            for (port, index, value) in [(0x3C4u32, 4u32, 0x0Eu32), (0x3C4, 2, 0x0F), (0x3CE, 5, 0x40), (0x3CE, 6, 0x05)] {
+                a.mov(edx, port)?;
+                a.mov(eax, index | value << 8)?;
+                a.out(dx, ax)?;
+            }
+            to_ring3(a)
+        }));
+        rig.ring3(|a| {
+            let mut pixels = a.create_label();
+            a.mov(ax, DATA32_R3 as u32)?;
+            a.mov(ds, ax)?;
+            a.xor(ebx, ebx)?;
+            a.mov(ecx, 0x900u32)?;
+            a.set_label(&mut pixels)?;
+            a.mov(eax, ecx)?;
+            a.imul_3(eax, eax, 0x0103_0507)?;
+            a.mov(byte_ptr(ecx + 0x30_0000), al)?;
+            a.mov(word_ptr(ecx * 2 + 0x30_4001), ax)?;
+            a.mov(dword_ptr(ecx * 4 + 0x30_6FFE), eax)?;
+            a.add(ebx, dword_ptr(ecx * 4 + 0x30_6FFE))?;
+            a.add(bx, word_ptr(ecx + 0x30_0FFF))?;
+            a.add(byte_ptr(ecx + 0x30_8000), bl)?;
+            a.dec(ecx)?;
+            a.jnz(pixels)?;
+            a.hlt()
+        });
+    });
+    run_both(&mut a, &mut b);
+    assert!(b.cpu.bus.vga.vram_graphics.iter().any(|&p| p != 0));
+    assert_eq!(a.cpu.bus.vga.vram_graphics, b.cpu.bus.vga.vram_graphics);
+    assert_ne!(b.cpu.ebx(), 0);
+}
+
 /// A loop storing to DATA's block 100 times: the run on each of `a` and
 /// `b`, and how often DATA's block's generation changed on each.
 fn data_stores(watched: bool) -> (u32, u32) {
