@@ -45,6 +45,7 @@ pub mod env_inject;
 pub mod exec;
 pub mod f80;
 pub mod fat;
+pub mod fdc;
 pub mod file_commands;
 pub mod filter_commands;
 pub mod games;

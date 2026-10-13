@@ -86,7 +86,7 @@ impl Bus {
 
     /// The device configured on IRQ `irq`, which an IDE channel can't
     /// have.
-    fn irq_owner(&self, irq: u8) -> Option<&'static str> {
+    pub(super) fn irq_owner(&self, irq: u8) -> Option<&'static str> {
         if self.sb.as_ref().is_some_and(|sb| sb.config.irq == irq) {
             Some("Sound Blaster")
         } else if self.gus.as_ref().and_then(|gus| gus.irq()) == Some(irq) {

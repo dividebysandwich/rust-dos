@@ -277,6 +277,12 @@ drive letter in the *Drives* page. **with a CD** gives it one only when a
 CD is mounted as it boots, as older rust-dos did; a system installed
 without a CD-ROM drive then finds no new hardware.
 
+# Floppy controller (BOOT) {#floppy-controller}
+
+Only matters for a system booted from a disk image with `BOOT`, such as
+Windows 95: **on** gives it a floppy disk controller, so that its own
+floppy driver reads and writes the disks in A: and B:. Leave it on.
+
 # Hard disk speed {#hard-disk-speed}
 
 Slows the hard disk down to the speed of the time. **maximum** is as fast

@@ -415,7 +415,7 @@ impl Page {
             Page::Emulator => &[
                 Cycles, Core, Fpu, Cpu, Post, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, VoodooScaleShader, VoodooMsaa,
                 VoodooAnisotropy, VoodooTextureSampling, VoodooFpsCap, VoodooGamma, VoodooOverlay, PowerVr, PowerVrFilter, Memsize, Ems, Umb, DosHigh, Dpmi,
-                DosVersion, IdeHardDisks, BootCdrom, HardDiskSpeed, FloppyDiskSpeed, Joystick,
+                DosVersion, IdeHardDisks, BootCdrom, FloppyController, HardDiskSpeed, FloppyDiskSpeed, Joystick,
                 Deadzone, MouseSensitivity, MouseAutocapture, MouseCaptureMessages, MouseMenuHold, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, RecordShader, Autoexec,
                 ShellSuggestions, ShellColors, SaveShellHistory, VersionCheck,
             ],
@@ -605,6 +605,7 @@ enum Item {
     IdeHardDisks,
     /// A booted system's CD-ROM drive, with or without a CD.
     BootCdrom,
+    FloppyController,
     KeyboardLayout,
     /// The captured mouse's motion multiplier.
     MouseSensitivity,
@@ -956,6 +957,7 @@ impl Item {
             DosVersion => "Reported DOS version",
             IdeHardDisks => "IDE hard disks (BOOT)",
             BootCdrom => "CD-ROM drive (BOOT)",
+            FloppyController => "Floppy controller (BOOT)",
             KeyboardLayout => "Keyboard layout",
             MouseSensitivity => "Mouse sensitivity",
             MouseAutocapture => "Mouse auto capture",
@@ -1165,7 +1167,7 @@ impl Item {
             Scale | Fullscreen | Aspect | Vrr | Filter | Shader | CrtCurvature | CrtGlow | Composite | CompositeEra => {
                 Applies::Now
             }
-            Cycles | Core | Fpu | Dpmi | DosVersion | IdeHardDisks | BootCdrom | KeyboardLayout | MouseAutocapture | MouseCaptureMessages | MouseMenuHold | ShellSuggestions | ShellColors | SaveShellHistory | Rewind | RewindMemory
+            Cycles | Core | Fpu | Dpmi | DosVersion | IdeHardDisks | BootCdrom | FloppyController | KeyboardLayout | MouseAutocapture | MouseCaptureMessages | MouseMenuHold | ShellSuggestions | ShellColors | SaveShellHistory | Rewind | RewindMemory
             | VoodooRenderer | VoodooScale | VoodooScaleShader | VoodooMsaa | VoodooTextureSampling | VoodooAnisotropy | VoodooFpsCap | VoodooOverlay | PowerVrFilter => Applies::Now,
             Monochrome => Applies::NowAndAtPrompt,
             MonitorEffects => Applies::Now,
@@ -1325,6 +1327,7 @@ impl Item {
             DosVersion => s.dos_version.name(),
             IdeHardDisks => on_off(s.ide_hard_disks),
             BootCdrom => if s.boot_cdrom { "always" } else { "with a CD" }.to_string(),
+            FloppyController => on_off(s.floppy_controller),
             KeyboardLayout => s.keyboard_layout.describe(),
             MouseSensitivity => bar(format!("{:.2}x", s.mouse_sensitivity), (s.mouse_sensitivity * 100.0).round() as u16, 1000, 50),
             MouseAutocapture => on_off(s.mouse_autocapture),
@@ -1552,6 +1555,7 @@ impl Item {
             Dpmi => on_off(|s, on| s.dpmi = on),
             IdeHardDisks => on_off(|s, on| s.ide_hard_disks = on),
             BootCdrom => on_off(|s, on| s.boot_cdrom = on),
+            FloppyController => on_off(|s, on| s.floppy_controller = on),
             DosVersion => {
                 let mut versions = crate::config::DosVersion::PRESETS.to_vec();
                 if !versions.contains(&s.dos_version) {

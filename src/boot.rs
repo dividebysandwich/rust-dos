@@ -176,8 +176,9 @@ pub fn power_on(cpu: &mut Cpu, unit: u8) {
     crate::bios::install_for_boot(bus, &hard_disks);
     bus.cmos.set_hard_disks(&hard_disks);
     // The hard disks and a CD image reach the system on the IDE channels
-    // too.
+    // too, and the floppies on the floppy disk controller.
     bus.attach_ide();
+    bus.attach_fdc();
     bus.refresh_irq();
 
     // The processor as after a reset, and the screen in text mode.

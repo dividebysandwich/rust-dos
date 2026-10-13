@@ -1468,6 +1468,33 @@ The first start of a Windows installed without the IDE controller finds it
 as new hardware and asks to restart; after that, **System Properties** →
 **Performance** shows the hard disk without "MS-DOS compatibility mode".
 
+Booted systems have a floppy controller enabled by default for images
+mounted as A: and B: (or disks 0 and 1). Their own floppy drivers can read
+and write those images directly. Changing a disk with Ctrl+F4 or
+`IMGMOUNT` signals a disk change to the guest system. The built-in DOS
+continues to access floppy images through INT 13h.
+
+If Windows 95 does not list **Standard Floppy Disk Controller** in
+**Device Manager**, open **Control Panel** → **Add New Hardware** and
+choose **Yes (Recommended)** to detect it, then restart Windows. In
+**System Properties** → **Performance**, A: and B: should no longer be
+listed as using "MS-DOS compatibility mode".
+
+If manually adding the controller in Windows 95 leaves it disabled
+(Code 22), open **Device Manager** →
+**Floppy disk controllers** → **Standard Floppy Disk Controller** →
+**Properties**. In **Resources**, click **Set Configuration Manually**:
+**Basic configuration 0** uses I/O 03F2–03F5, IRQ 06 and DMA 02. Check
+that the **Conflicting device list** says **No conflicts**, then in
+**General** clear **Disable in this hardware profile**, apply and restart
+the system. The device should then report that it is working properly.
+If the list names a conflicting device, resolve that conflict first.
+
+Set `floppy_controller=false` in `[emulator]` to disable the controller
+and leave floppy access to the BIOS (INT 13h). The controller uses ports
+3F0h–3F5h and 3F7h, IRQ 6 and DMA channel 2. Transfers without DMA are
+not supported.
+
 ### Operating systems by name
 
 Hard disk images of installed systems in the `os` folder of rust-dos's

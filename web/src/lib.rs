@@ -1233,6 +1233,7 @@ impl Host for PageHost<'_> {
         self.cpu.bus.dpmi.enabled = new.dpmi;
         self.cpu.bus.ide_hard_disks = new.ide_hard_disks;
         self.cpu.bus.boot_cdrom = new.boot_cdrom;
+        self.cpu.bus.floppy_controller = new.floppy_controller;
         if new.dos_version != old.dos_version {
             rust_dos::dos_data::set_version(&mut self.cpu.bus, new.dos_version);
         }

@@ -930,6 +930,13 @@ the system writes its disk (`cp --reflink=auto` on btrfs takes no room).
   (`{"enabled":true,"ports":"1F0-1F7"}` for the primary channel): READ
   SECTORS (20h) and WRITE SECTORS (30h) at 1F7h, the address at 1F3h-1F6h
   (1F6h's bit 6 set for LBA), the data words at 1F0h.
+- **Floppy controller:** a floppy driver's commands show in the port log
+  (`"ports":"3F0-3F7"`): the command bytes written to 3F5h and the result
+  bytes read from it, with 3F4h's status between them (80h idle, 90h
+  taking a command, D0h handing out a result), 3F2h's resets and motors,
+  and 3F7h's disk change line (bit 7). E6h is READ DATA, C5h WRITE DATA,
+  4Ah READ ID, 0Fh SEEK, 08h SENSE INTERRUPT STATUS. The log's `[FDC]`
+  lines name commands it doesn't know.
 
 ### 3dfx (Glide) games
 
