@@ -936,7 +936,7 @@ jit_fn! {
     /// `Uop::FToInt`, for what the code's own conversion doesn't cover:
     /// rounding up or down, and values that don't fit.
     fn jit_fpu_to_int(cpu: *mut Cpu, ctx: *mut JitCtx, size: u32, value: f64) -> u32 {
-        fpu_helper(cpu, ctx, |cpu| crate::instructions::fpu::data::to_int(value, cpu.fpu_control, size as u8))
+        fpu_helper(cpu, ctx, |cpu| crate::instructions::fpu::data::to_int(cpu, value, size as u8))
     }
 }
 

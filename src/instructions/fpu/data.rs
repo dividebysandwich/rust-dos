@@ -80,9 +80,32 @@ pub fn fbld(cpu: &mut Cpu, instr: &Instruction) {
 /// A double as the word or dword (`size` 2 or 4) FIST and FISTP store,
 /// rounded as the control word says. The dynamic recompiler's code calls
 /// it for what its own conversion doesn't cover.
-pub fn to_int(value: f64, control: u16, size: u8) -> u32 {
+pub fn to_int(cpu: &mut Cpu, value: f64, size: u8) -> u32 {
+    let n = int_of_double(value, cpu.fpu_control);
+    int_or_indefinite(cpu, n, size) as u32
+}
+
+/// A double rounded to an integer as the control word says; None for a NaN.
+/// (Past i128's range it saturates, which no integer store holds either.)
+fn int_of_double(value: f64, control: u16) -> Option<i128> {
     let rounded = x87_round(value, (control >> 10) & 0x03);
-    if size == 2 { rounded as i16 as u16 as u32 } else { rounded as i32 as u32 }
+    (!rounded.is_nan()).then_some(rounded as i128)
+}
+
+/// What FIST and FISTP store of `size` bytes (2, 4 or 8) for integer `n`,
+/// None for a NaN: one that doesn't fit, or a NaN, is an invalid operation,
+/// and with it masked the FPU stores the integer indefinite, the smallest
+/// integer of the size.
+fn int_or_indefinite(cpu: &mut Cpu, n: Option<i128>, size: u8) -> u64 {
+    let bits = 8 * size as u32;
+    let min = -(1i128 << (bits - 1));
+    match n {
+        Some(n) if n >= min && n < -min => n as u64 & (u64::MAX >> (64 - bits)),
+        _ => {
+            cpu.set_fpu_flag(crate::cpu::FpuFlags::IE, true);
+            min as u64 & (u64::MAX >> (64 - bits))
+        }
+    }
 }
 
 fn x87_round(f_val: f64, rc: u16) -> f64 {
@@ -111,18 +134,22 @@ fn x87_round(f_val: f64, rc: u16) -> f64 {
     }
 }
 
-/// The integer FIST and FISTP store of a register whose 80 bits hold more
-/// than its double (`FpuRegs::beyond_double`): rounded from all 80 bits as
-/// the control word says, saturated to `size` bytes (2, 4 or 8) as the
-/// double's conversion saturates. None where the double's conversion
-/// stands (`F80::round_int`).
-fn int_of_80_bits(value: F80, control: u16, size: u8) -> Option<u64> {
-    let n = value.round_int((control >> 10) & 0x03)?;
-    Some(match size {
-        2 => n.clamp(i16::MIN as i128, i16::MAX as i128) as i16 as u16 as u64,
-        4 => n.clamp(i32::MIN as i128, i32::MAX as i128) as i32 as u32 as u64,
-        _ => n.clamp(i64::MIN as i128, i64::MAX as i128) as i64 as u64,
-    })
+/// The integer a register whose 80 bits hold more than its double
+/// (`FpuRegs::beyond_double`) rounds to, from all 80 bits as the control
+/// word says, for `int_or_indefinite`. None where the double's rounding
+/// stands (`F80::round_int`). From 2^63 on (where the double could round
+/// a value under -2^63 to it) the value is past any integer store but
+/// -2^63's.
+fn int_of_80_bits(value: F80, control: u16) -> Option<i128> {
+    if let Some(n) = value.round_int((control >> 10) & 0x03) {
+        return Some(n);
+    }
+    let exp = value.get_exponent() as i32 - crate::f80::F80_EXP_BIAS;
+    if !value.is_normal() || value.get_integer_bit() == 0 || exp < 63 {
+        return None;
+    }
+    let exact_min = value.get_sign() && exp == 63 && value.get_mantissa() == 1 << 63;
+    Some(if exact_min { i64::MIN as i128 } else if value.get_sign() { i128::MIN } else { i128::MAX })
 }
 
 // FISTP: Store Integer and Pop
@@ -139,11 +166,9 @@ pub fn fistp(cpu: &mut Cpu, instr: &Instruction) {
         MemorySize::Int64 => 8,
         _ => return,
     };
-    let stored = match precise.and_then(|f| int_of_80_bits(f, cpu.fpu_control, size)) {
-        Some(n) => n,
-        None if size == 8 => x87_round(val, (cpu.fpu_control >> 10) & 0x03) as i64 as u64,
-        None => to_int(val, cpu.fpu_control, size) as u64,
-    };
+    let control = cpu.fpu_control;
+    let n = precise.and_then(|f| int_of_80_bits(f, control)).or_else(|| int_of_double(val, control));
+    let stored = int_or_indefinite(cpu, n, size);
     match size {
         2 => cpu.lin_write_16(addr, stored as u16),
         4 => cpu.lin_write_32(addr, stored as u32),
@@ -396,17 +421,16 @@ pub fn fist(cpu: &mut Cpu, instr: &Instruction) {
     let addr = calculate_addr(cpu, instr);
     let f_val = val.get_f64();
     let control = cpu.fpu_control;
-    let int = |size: u8| match precise.then(|| int_of_80_bits(val, control, size)).flatten() {
-        Some(n) => n as u32,
-        None => to_int(f_val, control, size),
-    };
+    let n = precise.then(|| int_of_80_bits(val, control)).flatten().or_else(|| int_of_double(f_val, control));
 
     match instr.memory_size() {
         MemorySize::Int16 => {
-            cpu.lin_write_16(addr, int(2) as u16);
+            let int = int_or_indefinite(cpu, n, 2);
+            cpu.lin_write_16(addr, int as u16);
         }
         MemorySize::Int32 => {
-            cpu.lin_write_32(addr, int(4));
+            let int = int_or_indefinite(cpu, n, 4);
+            cpu.lin_write_32(addr, int as u32);
         }
         _ => {
             cpu.bus.log_string(&format!(

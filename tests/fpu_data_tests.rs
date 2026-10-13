@@ -311,3 +311,50 @@ fn test_fistp_int64_chops_the_80_bits() {
     run_cpu_code(&mut cpu, &[0xDF, 0x3E, 0x10, 0x10]);
     assert_eq!(cpu.bus.read_64(0x1010), 2);
 }
+/// FISTP of a value that doesn't fit, or of a NaN, is an invalid operation:
+/// with it masked the FPU stores the integer indefinite and sets IE.
+#[test]
+fn test_fistp_stores_the_integer_indefinite() {
+    use rust_dos::cpu::FpuFlags;
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    let store = |cpu: &mut Cpu, value: f64, code: &[u8]| {
+        cpu.set_fpu_flags(FpuFlags::empty());
+        let mut f = F80::new();
+        f.set_f64(value);
+        cpu.fpu_push(f);
+        run_cpu_code(cpu, code);
+        cpu.get_fpu_flags().contains(FpuFlags::IE)
+    };
+    // DF 1E 00 10: FISTP WORD PTR [1000]
+    assert!(store(&mut cpu, 40000.0, &[0xDF, 0x1E, 0x00, 0x10]));
+    assert_eq!(cpu.bus.read_16(0x1000), 0x8000);
+    assert!(!store(&mut cpu, -32768.0, &[0xDF, 0x1E, 0x00, 0x10]));
+    assert_eq!(cpu.bus.read_16(0x1000), 0x8000);
+    assert!(!store(&mut cpu, -1.0, &[0xDF, 0x1E, 0x00, 0x10]));
+    assert_eq!(cpu.bus.read_16(0x1000), 0xFFFF);
+    // DB 1E 04 10: FISTP DWORD PTR [1004]
+    assert!(store(&mut cpu, 3e9, &[0xDB, 0x1E, 0x04, 0x10]));
+    assert_eq!(cpu.bus.read_32(0x1004), 0x8000_0000);
+    // DF 3E 08 10: FISTP QWORD PTR [1008]
+    assert!(store(&mut cpu, f64::NAN, &[0xDF, 0x3E, 0x08, 0x10]));
+    assert_eq!(cpu.bus.read_64(0x1008), 0x8000_0000_0000_0000);
+    assert!(store(&mut cpu, f64::INFINITY, &[0xDF, 0x3E, 0x08, 0x10]));
+    assert!(!store(&mut cpu, -9.223372036854775808e18, &[0xDF, 0x3E, 0x08, 0x10]));
+    assert_eq!(cpu.bus.read_64(0x1008), 0x8000_0000_0000_0000);
+}
+
+/// -(2^63 + 1) doesn't fit a qword, though its double (-2^63) does.
+#[test]
+fn test_fistp_int64_past_its_range_from_the_80_bits() {
+    use rust_dos::cpu::FpuFlags;
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    cpu.bus.write_64(0x1000, 0x8000_0000_0000_0001);
+    cpu.bus.write_16(0x1008, 0xC000 | (16383 + 63));
+    cpu.set_fpu_flags(FpuFlags::empty());
+    // DB 2E 00 10: FLD TBYTE PTR [1000]
+    run_cpu_code(&mut cpu, &[0xDB, 0x2E, 0x00, 0x10]);
+    // DF 3E 10 10: FISTP QWORD PTR [1010]
+    run_cpu_code(&mut cpu, &[0xDF, 0x3E, 0x10, 0x10]);
+    assert_eq!(cpu.bus.read_64(0x1010), 0x8000_0000_0000_0000);
+    assert!(cpu.get_fpu_flags().contains(FpuFlags::IE));
+}
