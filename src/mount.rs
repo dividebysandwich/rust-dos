@@ -144,15 +144,12 @@ fn parse_arguments(tokens: &[String]) -> Result<Arguments, String> {
             "-share" => args.opts.share = Some(true),
             "-noshare" => args.opts.share = Some(false),
             // DOSBox-X's IDE slot for the image (`-ide 2m`: secondary
-            // master), which may follow; without one, or `auto`, it goes
-            // where a booted system has it by default. There are two
-            // channels: 3m to 4s go by default too.
+            // master), the word after it, as DOSBox-X takes it; `auto`, or
+            // a slot rust-dos hasn't, goes where a booted system has it by
+            // default. There are two channels: 3m to 4s go by default too,
+            // and so does DOSBox-X's `0m`, which it ignores.
             "-ide" => {
-                let slot = iter.next_if(|value| {
-                    let v = value.to_ascii_lowercase();
-                    v == "auto"
-                        || (v.len() == 2 && matches!(v.as_bytes()[0], b'1'..=b'4') && matches!(v.as_bytes()[1], b'm' | b's'))
-                });
+                let slot = iter.next_if(|value| !value.starts_with('-'));
                 args.opts.ide = slot.and_then(|s| crate::ide::IdeSlot::parse(s));
             }
             // DOSBox's own CD-ROM access, which batch files made for it ask
@@ -780,6 +777,9 @@ mod tests {
         assert!(mount_spec_value(&spec, None).ends_with(" -ide 2s"));
         assert_eq!(mounted(mount("2 hdd.img -ide 3m", cwd)).opts.ide, None, "two channels");
         assert_eq!(mounted(mount("2 hdd.img -ide auto", cwd)).path, cwd.join("hdd.img"));
+        // DOSBox-X takes any word after -ide, and ignores 0m.
+        let spec = mounted(mount("2 hdd.img -ide 0m", cwd));
+        assert_eq!((spec.path, spec.opts.ide), (cwd.join("hdd.img"), None));
         assert!(mount("d x.iso -freesize", cwd).is_err());
         // -pr: from the configuration file's folder.
         let paths = PathContext { base: cwd, config_dir: Some(Path::new("/cfg")), home: None, locate: &|_| None };

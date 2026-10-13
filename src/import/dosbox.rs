@@ -626,7 +626,13 @@ const SECTIONS: [&str; 8] = ["cpu", "dosbox", "dos", "render", "sblaster", "gus"
 /// is. `roots` are the directories of the drives mounted so far, for
 /// images named by their DOS paths.
 fn autoexec_line(imported: &mut Imported, line: &str, bases: &[PathBuf], home: Option<&Path>, roots: &mut Vec<(u8, PathBuf)>) {
-    let working_dir = bases.first().map_or(Path::new("."), PathBuf::as_path);
+    // Where DOSBox ran: the first of `bases` there is (GOG's DOSBOX folder
+    // only where the game has one).
+    let working_dir = bases
+        .iter()
+        .find(|base| crate::hostfs::exists(base))
+        .or(bases.first())
+        .map_or(Path::new("."), PathBuf::as_path);
     let command = line.trim_start_matches('@').trim();
     let tokens = tokenize(command).unwrap_or_default();
     let verb = tokens.first().map_or_else(String::new, |t| command_verb(t));
@@ -770,10 +776,16 @@ fn image_path(token: &str, bases: &[PathBuf], roots: &[(u8, PathBuf)]) -> PathBu
 }
 
 /// A path relative to the first of `bases` it is found from, or else to the
-/// first.
+/// first of them that is there (GOG's DOSBOX folder only where the game
+/// has one).
 fn resolve(bases: &[PathBuf], rel: &str) -> PathBuf {
     let candidates = bases.iter().map(|base| host_path(base, rel));
-    candidates.clone().find(|p| crate::hostfs::exists(p)).or_else(|| candidates.clone().next()).unwrap_or_else(|| PathBuf::from(rel))
+    candidates
+        .clone()
+        .find(|p| crate::hostfs::exists(p))
+        .or_else(|| bases.iter().find(|base| crate::hostfs::exists(base)).map(|base| host_path(base, rel)))
+        .or_else(|| candidates.clone().next())
+        .unwrap_or_else(|| PathBuf::from(rel))
 }
 
 #[cfg(test)]
@@ -1178,6 +1190,22 @@ sbtype=sb16vibra
         // A drive that isn't there.
         let imported = import_in(&["[autoexec]\nremount f g\n"], &bases, "x", None, Some(&game));
         assert_eq!(imported.warnings.len(), 1, "{:?}", imported.warnings);
+    }
+
+    /// A DOSBox-X package booting a hard disk image from its own folder,
+    /// with a folder that isn't there: paths from the package's folder,
+    /// not from a DOSBOX folder it hasn't, and `-ide 0m` no image.
+    #[test]
+    fn a_dosbox_x_disk_image_package_mounts_from_its_folder() {
+        let dir = scratch("dosbox-x-image");
+        fs::remove_dir(dir.join("DOSBOX")).unwrap();
+        fs::write(dir.join("hdd.img"), "").unwrap();
+        let bases = [dir.join("DOSBOX"), dir.clone()];
+        let conf = "[autoexec]\nmount X \"..\\sources\"\nimgmount 2 hdd.img -ide 0m\nboot c:\n";
+        let imported = import(&[conf], &bases, "x", None);
+        let drive = |d| imported.drives.iter().find(|m| m.drive == d).map(|m| (m.path.clone(), m.opts.more_images.clone()));
+        assert_eq!(drive(crate::disk::numbered_drive(2)), Some((dir.join("hdd.img"), vec![])), "{:?}", imported.drives);
+        assert_eq!(drive(23).map(|(p, _)| p), Some(dir.join("..\\sources")));
     }
 
     /// A package's automount folder: its drives by their names, and its
