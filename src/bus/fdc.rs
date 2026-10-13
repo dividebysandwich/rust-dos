@@ -92,17 +92,29 @@ impl Bus {
         for line in log {
             self.log_string(&line);
         }
-        // The drive's light and noise.
+        // The drive's light and noise, for the time its sectors took. The
+        // command's execution phase already took that time, so nothing is
+        // charged to `disk_io` for an HLE service to wait out.
         for (unit, lba, sectors) in activity {
-            if let Some(drive) = self.fdc_drive(unit) {
-                self.sector_activity(drive, lba, sectors, false);
-            }
+            let Some(drive) = self.fdc_drive(unit) else { continue };
+            self.drives_active |= 1 << drive;
+            let bytes = sectors.saturating_mul(crate::diskimage::SECTOR_SIZE as u32);
+            self.activity.io_bytes += bytes as u64;
+            let per_track = self.disk.bios_image(drive).map_or(1, |disk| disk.geometry().sectors.max(1) as u64);
+            let class = crate::diskio::DiskClass::Floppy;
+            let ns = self.disk_io.cost_ns(class, bytes);
+            self.disk_noise(class, crate::disknoise::Access::Track(lba / per_track), ns);
         }
         self.clock.schedule(self.next_event());
     }
 
+    /// A port read needs none of the disks or DMA: only reading a result
+    /// byte changes the controller, and `sync_fdc` follows that.
     pub(crate) fn fdc_read(&mut self, port: u16) -> u8 {
-        self.with_fdc(|fdc, _| fdc.read(port)).unwrap_or(0xFF)
+        let Some(fdc) = &mut self.fdc else { return 0xFF };
+        let value = fdc.read(port);
+        self.sync_fdc();
+        value
     }
 
     pub(crate) fn fdc_write(&mut self, port: u16, value: u8) {

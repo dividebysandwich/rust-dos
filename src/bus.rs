@@ -686,8 +686,7 @@ impl Bus {
             // system's CD-ROM drive say so.
             self.cdaudio.stop_drive(drive);
             self.mscdex.disc_changed(drive);
-            self.ide_media_changed(drive);
-            self.fdc_media_changed(drive);
+            self.booted_media_changed(drive);
         }
         self.sync_drive_bda();
         result
@@ -878,11 +877,17 @@ impl Bus {
         Ok(lines.into_iter().next().unwrap_or_default())
     }
 
-    /// Tell the CD audio, MSCDEX and the IDE drive that another disk is in
-    /// `drive`.
+    /// Tell the CD audio, MSCDEX, the IDE drive and the floppy disk
+    /// controller that another disk is in `drive`.
     fn image_changed(&mut self, drive: u8) {
         self.cdaudio.stop_drive(drive);
         self.mscdex.disc_changed(drive);
+        self.booted_media_changed(drive);
+    }
+
+    /// Tell a booted system's CD-ROM drive and floppy disk controller that
+    /// the disk in `drive` changed.
+    fn booted_media_changed(&mut self, drive: u8) {
         self.ide_media_changed(drive);
         self.fdc_media_changed(drive);
     }
@@ -916,8 +921,7 @@ impl Bus {
         self.shared_in_use(drive)?;
         let result = self.disk.unmount(drive);
         self.cdaudio.stop_drive(drive);
-        self.ide_media_changed(drive);
-        self.fdc_media_changed(drive);
+        self.booted_media_changed(drive);
         self.sync_drive_bda();
         result
     }
@@ -948,8 +952,7 @@ impl Bus {
             self.disk.set_current_drive(to);
         }
         self.cdaudio.stop_drive(from);
-        self.ide_media_changed(from);
-        self.fdc_media_changed(from);
+        self.booted_media_changed(from);
         self.sync_drive_bda();
         mounted
     }

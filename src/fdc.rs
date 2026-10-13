@@ -7,19 +7,21 @@
 //! DOSBox-X's `FloppyController` (floppy.cpp) is the model: the digital
 //! output register's reset, drive select and motors, the main status
 //! register, the command and result phases through the data port, the
-//! sectors moved by DMA until terminal count with the end of the track
-//! (not the command's EOT) ending a transfer that runs on, and the disk
-//! change line in the digital input register. Beyond DOSBox-X, from the
-//! 82077AA data sheet: the four polling interrupts after a reset, SENSE
-//! INTERRUPT STATUS's single invalid byte with none pending, the drive
-//! busy bits of a seek, relative seeks, the data rate a disk reads at,
-//! FORMAT TRACK, VERSION, PERPENDICULAR MODE and LOCK, the end of the
-//! track (with MT, of the cylinder) ending a transfer with EN, and the
-//! write protect, missing address mark and wrong cylinder errors.
+//! sectors moved by DMA until terminal count or the end of the track, and
+//! the disk change line in the digital input register. Beyond DOSBox-X,
+//! from the 82077AA data sheet: the four polling interrupts after a reset,
+//! SENSE INTERRUPT STATUS's single invalid byte with none pending, the
+//! drive busy bits of a seek, relative seeks, the data rate a disk reads
+//! at, FORMAT TRACK, VERSION, PERPENDICULAR MODE and LOCK, the command's
+//! EOT as the last sector of a track, the end of the track (with MT, of
+//! the cylinder) ending a transfer with EN, READ DELETED DATA finding
+//! normal data marks (CM, with SK skipping the sector), and the write
+//! protect, missing address mark and wrong cylinder errors.
 //!
 //! What isn't there: transfers without DMA (SPECIFY's ND), READ TRACK,
-//! VERIFY and the SCAN commands, deleted data (images have none) and
-//! sectors of other sizes than 512 bytes.
+//! VERIFY and the SCAN commands, deleted data marks (images have none, so
+//! WRITE DELETED DATA writes normal sectors) and sectors of other sizes
+//! than 512 bytes.
 
 use crate::diskimage::{DiskImage, SECTOR_SIZE, STATUS_CRC_ERROR};
 use crate::dma::Dma;
@@ -72,7 +74,9 @@ const ST1_OR: u8 = 0x10;
 const ST1_ND: u8 = 0x04;
 const ST1_NW: u8 = 0x02;
 const ST1_MA: u8 = 0x01;
-/// ST2: data error in the data field, wrong cylinder, bad cylinder.
+/// ST2: control mark, data error in the data field, wrong cylinder, bad
+/// cylinder.
+const ST2_CM: u8 = 0x40;
 const ST2_DD: u8 = 0x20;
 const ST2_WC: u8 = 0x10;
 const ST2_BC: u8 = 0x02;
@@ -638,7 +642,9 @@ impl Fdc {
         let result = match disk {
             // No address marks to be found.
             None => {
-                let id = if c.len() >= 6 {
+                // READ and WRITE DATA's own C, H, R and N; FORMAT TRACK's
+                // bytes from the third on are N, SC, GPL and D.
+                let id = if c.len() == 9 {
                     [c[2], c[3], c[4], c[5]]
                 } else {
                     [self.track[drive], hds, 1, N_512]
@@ -658,8 +664,8 @@ impl Fdc {
     }
 
     /// READ or WRITE DATA: sectors from the command's on, moved by DMA
-    /// until terminal count, or the end of the track (with MT, of the
-    /// cylinder). The result: ST0-ST2 and the ID of the next sector.
+    /// until terminal count, or the end of the track at the command's EOT
+    /// (with MT, of the cylinder). The result: ST0-ST2 and the ID of the next sector.
     fn transfer(&mut self, c: &[u8], disk: &DiskImage, env: &mut Env) -> Vec<u8> {
         let write = matches!(c[0] & 0x1F, 0x05 | 0x09);
         let multi_track = c[0] & 0x80 != 0;
@@ -670,11 +676,13 @@ impl Fdc {
         let geometry = disk.geometry();
         let per_track = geometry.sectors;
         let track = self.track[drive];
+        // READ DELETED DATA finds only normal data marks, since images have
+        // no deleted sectors: each sector sets CM, and with SK is skipped
+        // unread, without SK is read and ends the command.
+        let deleted = c[0] & 0x1F == 0x0C;
+        let skip = c[0] & 0x20 != 0;
         let (mut st1, mut st2) = (0u8, 0u8);
-        if c[0] & 0x1F == 0x0C {
-            // READ DELETED DATA: images have no deleted sectors.
-            st1 |= ST1_MA | ST1_ND;
-        } else if write && !disk.writable() {
+        if write && !disk.writable() {
             st1 |= ST1_NW;
         } else if self.dor & DOR_DMA == 0 {
             // No DMA to move the data.
@@ -687,6 +695,11 @@ impl Fdc {
                 st2 |= if cylinder == 0xFF { ST2_BC } else { ST2_WC };
                 break;
             }
+            // MT carries on to side 1, which a single-sided disk hasn't.
+            if hds as u32 >= geometry.heads {
+                st1 |= ST1_MA;
+                break;
+            }
             if head != hds || size != N_512 || sector == 0 || sector as u32 > per_track {
                 st1 |= ST1_ND;
                 break;
@@ -695,7 +708,12 @@ impl Fdc {
                 + sector as u64
                 - 1;
             let mut data = [0u8; SECTOR_SIZE];
-            let (moved, tc) = if write {
+            if deleted {
+                st2 |= ST2_CM;
+            }
+            let (moved, tc) = if deleted && skip {
+                (SECTOR_SIZE, false)
+            } else if write {
                 // What terminal count leaves of the sector is zeros.
                 let (moved, tc) = env.dma.transfer_read(DMA_CHANNEL, env.ram, &mut data);
                 if moved == SECTOR_SIZE || tc {
@@ -739,8 +757,8 @@ impl Fdc {
             if st1 != 0 {
                 break;
             }
-            // The next sector's ID.
-            let end_of_track = sector as u32 == per_track;
+            // The next sector's ID. The command's EOT ends the track early.
+            let end_of_track = sector as u32 == per_track || sector == self.eot;
             let next_side = end_of_track && multi_track && hds == 0;
             if !end_of_track {
                 sector += 1;
@@ -756,14 +774,16 @@ impl Fdc {
                     }
                 }
             }
-            if tc {
+            // A normal sector read without SK ends READ DELETED DATA.
+            if tc || (deleted && !skip) {
                 break;
             }
             if end_of_track && !next_side {
                 st1 |= ST1_EN;
             }
         }
-        let st0 = (c[1] & 3) | hds << 2 | if st1 | st2 != 0 { ST0_ABNORMAL } else { 0 };
+        // CM alone is a normal termination.
+        let st0 = (c[1] & 3) | hds << 2 | if st1 | (st2 & !ST2_CM) != 0 { ST0_ABNORMAL } else { 0 };
         vec![st0, st1, st2, cylinder, head, sector, size]
     }
 
@@ -1098,6 +1118,74 @@ mod tests {
             rig.command(&[0x46, 0x00, 0, 0, 1, 2, 18, 0x1B, 0xFF])[..2],
             [0x40, 0x10]
         );
+    }
+
+    #[test]
+    fn multi_track_stops_at_the_side_a_single_sided_disk_lacks() {
+        let mut rig = Rig::new();
+        // A 160 KB disk: 40 cylinders, one side, 8 sectors a track.
+        let bytes: Vec<u8> = (0..320u16).flat_map(|lba| {
+            let mut sector = [0u8; SECTOR_SIZE];
+            sector[..2].copy_from_slice(&lba.to_le_bytes());
+            sector
+        }).collect();
+        let geometry = Chs { cylinders: 40, heads: 1, sectors: 8 };
+        rig.disks[0] = Some(Rc::new(
+            DiskImage::from_memory("ss.img", MemoryImage::from(bytes), true, Some(geometry), false).unwrap(),
+        ));
+        rig.ready();
+        rig.out(DIR, 0x02);
+        rig.dma(2 * SECTOR_SIZE, true);
+        // Sector 8 of side 0, then side 1, which has no address marks.
+        assert_eq!(
+            rig.command(&[0xE6, 0x00, 0, 0, 8, 2, 8, 0x2A, 0xFF]),
+            [0x44, 0x01, 0, 0, 1, 1, 2]
+        );
+        assert_eq!(rig.sector_at(0), 7);
+        assert_eq!(rig.sector_at(512), 0, "nothing more was moved");
+    }
+
+    #[test]
+    fn eot_is_the_last_sector_of_the_track() {
+        let mut rig = Rig::new();
+        rig.ready();
+        rig.dma(2 * SECTOR_SIZE, true);
+        // EOT 1: sector 1 only, then EN with the next cylinder's ID.
+        assert_eq!(
+            rig.command(&[0x46, 0x00, 0, 0, 1, 2, 1, 0x1B, 0xFF]),
+            [0x40, 0x80, 0, 1, 0, 1, 2]
+        );
+        assert_eq!(rig.sector_at(0), 0);
+        assert_eq!(rig.sector_at(512), 0, "nothing more was moved");
+        // With MT, EOT ends side 0 and the transfer goes on to side 1.
+        rig.dma(2 * SECTOR_SIZE, true);
+        assert_eq!(
+            rig.command(&[0xC6, 0x00, 0, 0, 2, 2, 2, 0x1B, 0xFF]),
+            [0x04, 0, 0, 0, 1, 2, 2]
+        );
+        assert_eq!([rig.sector_at(0), rig.sector_at(512)], [1, 18]);
+    }
+
+    #[test]
+    fn read_deleted_data_finds_normal_data_marks() {
+        let mut rig = Rig::new();
+        rig.ready();
+        // Without SK: the sector is read, CM is set, and the command ends
+        // normally after it.
+        rig.dma(2 * SECTOR_SIZE, true);
+        assert_eq!(
+            rig.command(&[0x4C, 0x00, 0, 0, 3, 2, 18, 0x1B, 0xFF]),
+            [0x00, 0, 0x40, 0, 0, 4, 2]
+        );
+        assert_eq!(rig.sector_at(0), 2);
+        assert_eq!(rig.sector_at(512), 0, "nothing more was moved");
+        // With SK every sector is skipped to the end of the track.
+        rig.dma(2 * SECTOR_SIZE, true);
+        assert_eq!(
+            rig.command(&[0x6C, 0x00, 0, 0, 17, 2, 18, 0x1B, 0xFF]),
+            [0x40, 0x80, 0x40, 1, 0, 1, 2]
+        );
+        assert_eq!(rig.sector_at(0), 2, "nothing was moved");
     }
 
     #[test]
