@@ -66,6 +66,9 @@ pub fn apply_config(cpu: &mut Cpu, sound: &SoundConfig, old: Option<&SoundConfig
     if changed(&|s| s.tandy.name().to_string()) {
         cpu.bus.configure_tandy_sound(sound.tandy);
     }
+    if changed(&|s| s.pit2_gate_at_start.to_string()) {
+        cpu.bus.set_pit2_gate_at_start(sound.pit2_gate_at_start);
+    }
 
     let midi = |s: &SoundConfig| {
         format!(

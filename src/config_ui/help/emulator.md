@@ -58,12 +58,14 @@ mode.
 
 # Processor {#cpu}
 
-The processor games find: **386**, **486**, **Pentium** or **Pentium
-MMX**.
+The processor games find: **386**, **486**, **Pentium**, **Pentium
+MMX**, **Pentium Pro** or **Pentium II**.
 
 **486** suits almost everything. Pick **Pentium** for late-1990s games
 that ask for one, and for 3dfx games; **Pentium MMX** for those that
-need MMX. Takes effect at the DOS prompt.
+need MMX; **Pentium II** for programs built for a Pentium Pro or later,
+which use its conditional moves (CMOV). **Pentium Pro** is that without
+MMX. Takes effect at the DOS prompt.
 
 # BIOS POST screen {#post}
 
@@ -216,7 +218,8 @@ late games want **32** or **64 MB**.
 
 How much there can be depends on the processor, as with the motherboards
 of its day: up to **64 MB** with a 386, **128 MB** with a 486, **256 MB**
-with a Pentium and **512 MB** with a Pentium MMX. Picking a smaller
+with a Pentium and **512 MB** with a Pentium MMX, Pentium Pro or Pentium
+II. Picking a smaller
 processor brings the memory down to what it takes. Save states and rewind
 grow with the memory.
 
@@ -273,6 +276,12 @@ CD image or a folder of yours can go in while it runs: mount it on a CD
 drive letter in the *Drives* page. **with a CD** gives it one only when a
 CD is mounted as it boots, as older rust-dos did; a system installed
 without a CD-ROM drive then finds no new hardware.
+
+# Floppy controller (BOOT) {#floppy-controller}
+
+Only matters for a system booted from a disk image with `BOOT`, such as
+Windows 95: **on** gives it a floppy disk controller, so that its own
+floppy driver reads and writes the disks in A: and B:. Leave it on.
 
 # Hard disk speed {#hard-disk-speed}
 
@@ -338,6 +347,15 @@ pressing **Ctrl+Alt** or **Ctrl+F10**.
 When **on**, each mouse capture/release action will show a notification
 message on the top of the screen. While helpful for new users, turning it
 **off** can help reduce notification noise.
+
+# Hold right button for settings {#mouse-menu-hold}
+
+When **on** (the default), holding the right mouse button for **3
+seconds** without moving the mouse opens this settings window, for
+setups with no keyboard or no F12 key, such as a TV with a remote. The
+program still sees the press, and a release as the window opens. Moving
+the mouse while holding the button keeps it an ordinary press. Turn it
+**off** for a game that has you hold the right button still.
 
 # Rewind (Alt+F11) {#rewind}
 

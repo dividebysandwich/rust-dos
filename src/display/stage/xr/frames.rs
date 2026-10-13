@@ -2,6 +2,7 @@
 //! with: each eye is drawn with OpenGL into a framebuffer either way.
 
 use super::gl_frames::{Acquired, Failure, GlFrames};
+use super::passthrough::Passthrough;
 use openxr as xr;
 
 pub enum Frames {
@@ -106,7 +107,7 @@ impl Frames {
     }
 
     /// End the frame: the eyes drawn from `views`, `area` of their images
-    /// (where `partial`), or nothing.
+    /// (where `partial`), or nothing; over the cameras with `passthrough`.
     pub fn end(
         &mut self,
         time: xr::Time,
@@ -114,13 +115,14 @@ impl Frames {
         space: &xr::Space,
         views: Option<&[xr::View]>,
         area: (u32, u32),
+        passthrough: Option<&Passthrough>,
     ) -> xr::Result<()> {
         match self {
-            Frames::Gl(frames) => frames.end(time, blend, space, views, area),
+            Frames::Gl(frames) => frames.end(time, blend, space, views, area, passthrough),
             #[cfg(target_os = "linux")]
-            Frames::Egl(frames) => frames.end(time, blend, space, views, area),
+            Frames::Egl(frames) => frames.end(time, blend, space, views, area, passthrough),
             #[cfg(target_os = "linux")]
-            Frames::Vulkan(bridge) => bridge.end(time, blend, space, views),
+            Frames::Vulkan(bridge) => bridge.end(time, blend, space, views, passthrough),
         }
     }
 

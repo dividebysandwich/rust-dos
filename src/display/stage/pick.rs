@@ -17,7 +17,7 @@ pub fn ray(inverse_view_projection: Mat4, ndc: Vec2) -> (Vec3, Vec3) {
 
 /// How far along the ray it meets the triangle, and where on it (the
 /// weights of the second and third corner), from either side.
-fn hit_triangle(origin: Vec3, dir: Vec3, [a, b, c]: [Vec3; 3]) -> Option<(f32, f32, f32)> {
+pub fn hit_triangle(origin: Vec3, dir: Vec3, [a, b, c]: [Vec3; 3]) -> Option<(f32, f32, f32)> {
     let (e1, e2) = (b - a, c - a);
     let p = dir.cross(e2);
     let det = e1.dot(p);

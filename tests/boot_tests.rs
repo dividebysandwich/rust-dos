@@ -148,6 +148,32 @@ fn ctrl_alt_del_boots_again() {
     assert!(cpu.bus.boot.is_some());
 }
 
+/// A system booted from a floppy starts from the hard disk at the next
+/// reset once the floppy is out, as a BIOS that boots from A: and then C:
+/// does (Windows 98's Setup, started from its boot disk).
+#[test]
+fn a_restart_with_the_floppy_out_boots_the_hard_disk() {
+    let mut cpu = machine("floppy-out");
+    let mut img = vec![0u8; 1_474_560];
+    img[..SECTOR_SIZE].copy_from_slice(&boot_sector());
+    let path = PathBuf::from("target/test_boot/floppy-out/a.img");
+    std::fs::write(&path, img).unwrap();
+    let unit0 = rust_dos::disk::numbered_drive(0);
+    let opts = MountOptions { kind: rust_dos::disk::DriveKind::Floppy, ..Default::default() };
+    cpu.bus.mount_drive(unit0, &path, opts, false).unwrap();
+    exec::run_command_line(&mut cpu, "BOOT -l A");
+    assert!(run_until(&mut cpu, 1000, |cpu| cpu.bus.read_8(WAITING) == 1));
+    assert_eq!(cpu.bus.read_8(UNIT), 0x00);
+    cpu.bus.unmount_drive(unit0).unwrap();
+    cpu.bus.write_8(WAITING, 0);
+    press(&mut cpu, 0x1D, false);
+    press(&mut cpu, 0x38, false);
+    press(&mut cpu, 0x53, true);
+    assert!(run_until(&mut cpu, 1000, |cpu| cpu.bus.read_8(WAITING) == 1), "the hard disk's boot sector runs");
+    assert_eq!(cpu.bus.read_8(UNIT), 0x80);
+    assert!(cpu.bus.boot.is_some());
+}
+
 #[test]
 fn turning_off_brings_dos_back() {
     let mut cpu = machine("off");

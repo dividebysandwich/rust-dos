@@ -11,7 +11,7 @@
 use iced_x86::{CpuidFeature, Instruction, Mnemonic, OpKind, Register};
 
 use super::operand::{effective_offset, mem_operand, mem_operand_at, mem_seg};
-use crate::cpu::{Access, CR0_EM, CR0_TS, Cpu, CpuModel, CpuResult, FPU_TAG_EMPTY, FPU_TAG_VALID, Fault};
+use crate::cpu::{Access, CR0_EM, CR0_TS, Cpu, CpuResult, FPU_TAG_EMPTY, FPU_TAG_VALID, Fault};
 
 /// What a write to MMn puts in bits 64 to 79 of the FPU register.
 const MMX_EXPONENT: u128 = 0xFFFF << 64;
@@ -19,7 +19,7 @@ const MMX_EXPONENT: u128 = 0xFFFF << 64;
 /// An MMX instruction: the MMX forms of the mnemonics (not the SSE2 ones
 /// on XMM registers, nor the SSE additions on MMX registers).
 pub fn mmx(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
-    if cpu.model < CpuModel::PentiumMmx || instr.cpuid_features() != [CpuidFeature::MMX] {
+    if !cpu.model.has_mmx() || instr.cpuid_features() != [CpuidFeature::MMX] {
         return Err(Fault::UD);
     }
     if cpu.cr0 & CR0_EM != 0 {

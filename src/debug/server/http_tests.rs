@@ -191,6 +191,9 @@ fn run_machine(dir: std::path::PathBuf, rx: mpsc::Receiver<super::super::Request
         hub.pause_at_start(&cpu);
     }
     let mut states: std::collections::HashMap<std::path::PathBuf, Vec<u8>> = Default::default();
+    // The Stats page's numbers, recorded each frame as the front end does.
+    let mut stats = rust_dos::stats::Stats::new();
+    let mut frame_start = Instant::now();
     loop {
         hub.poll(&mut cpu);
         if hub.quit_requested() {
@@ -248,7 +251,12 @@ fn run_machine(dir: std::path::PathBuf, rx: mpsc::Receiver<super::super::Request
             }
         }
         hub.end_batch(&cpu);
+        let busy = frame_start.elapsed();
         std::thread::sleep(options.sleep);
+        let wall = frame_start.elapsed();
+        frame_start = Instant::now();
+        stats.record(&cpu.bus, rust_dos::stats::FrameTimes { wall, busy, ..Default::default() });
+        hub.set_frame_stats(stats.latest());
     }
 }
 
@@ -1705,6 +1713,13 @@ fn if_state_seq_guards_every_request_the_emulator_carries_out() {
         let current = state.to_string();
         let done = http(rig.addr, method, path, &[("If-State-Seq", &current)], body.as_ref());
         assert!(done.status < 300, "{} {} in its state: {} {}", method, path, done.status, done.body);
+        // Input is typed while paused too, and its `input_delivered` entry
+        // would move the journal under the next request's check.
+        if path.starts_with("/api/input/") {
+            let op = done.json()["op"].as_u64().unwrap();
+            let ended = rig.get(&format!("/api/ops/{}?wait=10000", op));
+            assert_eq!(ended.status, 200, "{} {}: {}", method, path, ended.body);
+        }
     }
     // The server's own: no machine state to hold them against.
     let state = rig.get("/api/status").json()["state_seq"].as_u64().unwrap().to_string();
@@ -1794,6 +1809,29 @@ fn a_deterministic_session_over_http_is_the_same_whatever_the_host_does() {
     }
 }
 
+/// `/api/stats` carries the Stats page's numbers, which tell whether the
+/// machine keeps real time and how much of the host it takes.
+#[test]
+fn stats_tell_the_stats_page_s_numbers() {
+    let rig = Rig::new("frame-stats");
+    rig.post("/api/control/run", json!({"command": "COUNT.COM"}));
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let frame = loop {
+        let stats = rig.get("/api/stats").json();
+        if stats["frame"]["emulated_speed"].as_f64().is_some_and(|s| s > 0.0) {
+            break stats["frame"].clone();
+        }
+        assert!(Instant::now() < deadline, "the machine runs: {}", stats);
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    for key in ["fps", "refresh_hz", "emulated_speed", "cpu_use", "halted", "recompiled", "render_ms"] {
+        assert!(frame[key].is_number(), "{} in {}", key, frame);
+    }
+    let cpu_use = frame["cpu_use"].as_f64().unwrap();
+    assert!(cpu_use > 0.0 && cpu_use <= 100.0, "{}", frame);
+    assert!((frame["refresh_hz"].as_f64().unwrap() - 70.0).abs() < 1.0, "text mode at 70 Hz: {}", frame);
+}
+
 // ----- the debugger page -------------------------------------------------------
 
 /// What the page (ui.html) reads, as it reads it: its requests, and the
@@ -1876,4 +1914,44 @@ fn a_stop_and_an_operation_s_end_outlive_their_entries_in_the_ring() {
     // An input operation waited for with wait?op= answers as input does.
     let input = rig.get(&format!("/api/control/wait?op={}", typed));
     assert_eq!((input.json()["ok"].as_bool(), input.json()["done"].as_bool()), (Some(true), Some(true)), "{}", input.body);
+}
+
+/// `/api/profile`: a profile of a counting loop finds the loop, ends at its
+/// duration, gives folded stacks as text, and refuses what it can't do.
+#[test]
+fn a_profile_finds_the_loop_the_machine_runs() {
+    let _one = crate::debug::profile::ONE_PROFILE.lock().unwrap_or_else(|e| e.into_inner());
+    let rig = Rig::new("profile");
+    assert_eq!(rig.get("/api/profile").status, 404, "none yet");
+    assert_eq!(rig.post("/api/profile", json!({"enabled": false})).status, 404, "nothing to stop");
+    assert_eq!(rig.post("/api/profile", json!({"hz": 100})).status, 400, "hz without enabled");
+    assert_eq!(rig.post("/api/profile", json!({"enabled": true, "hz": 1})).status, 400, "hz out of range");
+    assert_eq!(rig.post("/api/profile", json!({"enabled": true, "timer": "nap"})).status, 400);
+    rig.post("/api/control/run", json!({"command": "COUNT.COM"}));
+    let started = rig.post("/api/profile", json!({"enabled": true, "hz": 1000, "duration_ms": 300})).json();
+    assert_eq!(started["running"], true, "{}", started);
+    let r = rig.get("/api/profile?wait_ms=10000&top=5").json();
+    assert_eq!(r["running"], false, "stopped at its duration: {}", r["sampler"]);
+    assert!(r["sampler"]["samples"].as_u64().unwrap() > 50, "{}", r["sampler"]);
+    assert!(r["window"]["instructions"].as_u64().unwrap() > 0, "{}", r["window"]);
+    // The loop is INC WORD [0200h] at 0100h and JMP at 0104h.
+    let top: Vec<&str> = r["top"].as_array().unwrap().iter().filter_map(|p| p["addr"].as_str()).collect();
+    assert!(top.iter().any(|a| a.ends_with(":0100") || a.ends_with(":0104")), "{:?}", top);
+    let place = &r["top"][0];
+    // (The interpreter's, or translated code's with RUST_DOS_CORE=dynamic.)
+    assert_eq!(place["mode"].as_str(), Some("real"), "{}", place);
+    assert!(matches!(place["engine"].as_str(), Some("cpu.interp" | "cpu.jit")), "{}", place);
+    assert!(place["disasm"][0].as_str().is_some_and(|d| d.contains("inc") || d.contains("jmp")), "{}", place);
+    let folded = rig.get("/api/profile?format=folded");
+    assert_eq!(folded.status, 200);
+    assert!(folded.header("content-type").is_some_and(|t| t.starts_with("text/plain")), "{:?}", folded.headers);
+    assert!(folded.body.lines().any(|l| l.starts_with("cpu.interp;real ") || l.starts_with("cpu.jit;real ")), "{}", folded.body);
+    let text = rig.get("/api/profile?format=text");
+    assert!(text.body.starts_with("Profile stopped"), "{}", text.body);
+    assert_eq!(rig.get("/api/profile?zone=nope").status, 400);
+    assert_eq!(rig.get("/api/profile?bucket=3").status, 400);
+    assert_eq!(rig.get("/api/profile?bogus=1").status, 400);
+    let only = rig.get("/api/profile?zone=cpu&bucket=16").json();
+    assert!(only["top"][0]["hottest"].is_string(), "{}", only["top"][0]);
+    assert_eq!(rig.post("/api/profile", json!({"enabled": false})).status, 200, "a stopped profile can be stopped");
 }

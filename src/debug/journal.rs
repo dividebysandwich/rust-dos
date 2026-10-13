@@ -35,6 +35,7 @@ pub const FEATURES: &[&str] = &[
     "quit",
     "strict_match",
     "check_files",
+    "load_folders",
     "until_ms",
     "write_expect",
     "trace_cursor",

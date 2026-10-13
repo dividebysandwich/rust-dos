@@ -214,7 +214,8 @@ pub enum Uop {
     /// isn't a direct call (the block stops after it); then CS and EIP
     /// loaded after the pushes.
     FarCallCheck { sel: T, off: T },
-    FarCallLoad,
+    /// `next`: the return address, for the profiler's note of a thunk.
+    FarCallLoad { next: u32 },
     /// Leave the block after `FarRetPm` or `FarCallLoad`: through the links a return takes,
     /// or back to the execution loop where `jit_far_ret` said so.
     FarExit,

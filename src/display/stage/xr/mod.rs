@@ -6,10 +6,12 @@
 mod egl;
 mod frames;
 mod gl_frames;
+mod hands;
 #[cfg(target_os = "linux")]
 mod gl_interop;
 pub mod log;
 mod native;
+mod passthrough;
 pub mod probe;
 mod profiles;
 #[cfg(target_os = "linux")]
@@ -24,6 +26,7 @@ use glam::{Mat4, Quat, Vec2, Vec3};
 use glow::HasContext;
 use openxr as xr;
 use log::FrameStats;
+use passthrough::Passthrough;
 use profiles::Control;
 use rust_dos::vr::{Binding, Offered, VrGraphics};
 use std::sync::OnceLock;
@@ -49,6 +52,7 @@ struct Controls {
     set: xr::ActionSet,
     /// (Kept with the spaces made of it.)
     _aim: xr::Action<xr::Posef>,
+    _grip: xr::Action<xr::Posef>,
     select: xr::Action<bool>,
     squeeze: xr::Action<bool>,
     stick: xr::Action<xr::Vector2f>,
@@ -59,12 +63,21 @@ struct Controls {
     hands: [xr::Path; 2],
     /// Where each hand points from, its -Z the way.
     spaces: Vec<xr::Space>,
+    /// Where each hand holds the controller.
+    grips: Vec<xr::Space>,
 }
 
 pub struct Xr {
     // Dropped first: what belongs to the session, then the session, then
     // the instance.
     controls: Option<Controls>,
+    /// How the cameras are seen through the scene, where they are.
+    passthrough: Option<Passthrough>,
+    /// The hands the cameras track, where they do and are wanted.
+    hands: Option<hands::Hands>,
+    /// The space that stays put in the room, and its name (`anchor`).
+    anchor: xr::Space,
+    anchor_name: &'static str,
     /// The eyes' swapchains and the frames' stream.
     frames: Frames,
     space: xr::Space,
@@ -120,6 +133,9 @@ pub struct XrOptions {
     pub refresh: Option<u32>,
     /// The graphics chip is a standalone headset's.
     pub mobile: bool,
+    /// The headset's cameras are to show through where the eyes' images
+    /// are transparent, where the headset can.
+    pub passthrough: bool,
 }
 
 /// What a session draws with that is to outlive it.
@@ -234,6 +250,10 @@ impl Xr {
         // The refresh rate, where one is to be asked for.
         extensions.fb_display_refresh_rate =
             available.fb_display_refresh_rate && (options.refresh.is_some() || options.mobile);
+        extensions.fb_passthrough = available.fb_passthrough && options.passthrough;
+        // The fingers typing find the keyboard.
+        extensions.ext_hand_tracking = available.ext_hand_tracking && options.passthrough;
+        extensions.ext_hand_tracking_data_source = available.ext_hand_tracking_data_source && extensions.ext_hand_tracking;
         let app = xr::ApplicationInfo {
             application_name: "Rust-DOS",
             application_version: 0,
@@ -245,11 +265,8 @@ impl Xr {
         let runtime = instance.properties().map_err(err("OpenXR"))?;
         let system = instance.system(xr::FormFactor::HEAD_MOUNTED_DISPLAY).map_err(err("no headset"))?;
         let system_name = instance.system_properties(system).map(|p| p.system_name).unwrap_or_default();
-        let blend = instance
-            .enumerate_environment_blend_modes(system, VIEW)
-            .ok()
-            .and_then(|modes| modes.first().copied())
-            .unwrap_or(xr::EnvironmentBlendMode::OPAQUE);
+        let modes = instance.enumerate_environment_blend_modes(system, VIEW).unwrap_or_default();
+        let blend = modes.first().copied().unwrap_or(xr::EnvironmentBlendMode::OPAQUE);
         let views = instance.enumerate_view_configuration_views(system, VIEW).map_err(err("the headset's views"))?;
         let sizes: Vec<_> = views
             .iter()
@@ -294,12 +311,43 @@ impl Xr {
         if extensions.fb_display_refresh_rate {
             refresh_rate(&session, options);
         }
+        let (passthrough, blend) = match options.passthrough {
+            true => Passthrough::open(&session, &modes, extensions.fb_passthrough)
+                .map_or((None, blend), |(passthrough, blend)| (Some(passthrough), blend)),
+            false => (None, blend),
+        };
         let space = session
             .create_reference_space(xr::ReferenceSpaceType::LOCAL, xr::Posef::IDENTITY)
             .map_err(err("the headset's space"))?;
         let head = session
             .create_reference_space(xr::ReferenceSpaceType::VIEW, xr::Posef::IDENTITY)
             .map_err(err("the headset's space"))?;
+        // What stays where it is in the room: the stage (the room's floor,
+        // kept by the runtime from one session to the next), else the
+        // seated space as the runtime has it (never recentred here).
+        let stage = session.enumerate_reference_spaces().unwrap_or_default().contains(&xr::ReferenceSpaceType::STAGE);
+        let (anchor, anchor_name) = match stage {
+            true => (session.create_reference_space(xr::ReferenceSpaceType::STAGE, xr::Posef::IDENTITY), "stage"),
+            false => (session.create_reference_space(xr::ReferenceSpaceType::LOCAL, xr::Posef::IDENTITY), "local"),
+        };
+        let anchor = anchor.map_err(err("the headset's space"))?;
+        let hands = if extensions.ext_hand_tracking {
+            match hands::Hands::new(&session, extensions.ext_hand_tracking_data_source) {
+                Ok(hands) => {
+                    log::line(format!(
+                        "Hand tracking{}",
+                        if extensions.ext_hand_tracking_data_source { ", the cameras' hands only" } else { "" }
+                    ));
+                    Some(hands)
+                }
+                Err(e) => {
+                    log::line(format!("No hand tracking: {}", e));
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let controls = match make_controls(&instance, &session, extensions.ext_hand_interaction) {
             Ok(controls) => Some(controls),
             Err(e) => {
@@ -320,6 +368,10 @@ impl Xr {
         );
         Ok(Xr {
             controls,
+            passthrough,
+            hands,
+            anchor,
+            anchor_name,
             frames,
             space,
             head,
@@ -431,6 +483,17 @@ impl Xr {
         log::line(format!("Controllers: {}", said.join(" ")));
     }
 
+    /// The cameras show through where the eyes' images are transparent.
+    pub fn passthrough(&self) -> bool {
+        self.passthrough.is_some()
+    }
+
+    /// The name of the space that stays put in the room (`Tracking::anchor`):
+    /// what is kept where it is in the room is kept in it.
+    pub fn anchor_name(&self) -> &'static str {
+        self.anchor_name
+    }
+
     pub fn running(&self) -> bool {
         self.running
     }
@@ -537,15 +600,30 @@ impl Xr {
         {
             tracking.head = Some(rigid(world * pose_matrix(head.pose)));
         }
+        if let Ok(anchor) = self.anchor.locate(&self.space, time)
+            && anchor.location_flags.contains(valid)
+        {
+            tracking.anchor = Some(world * pose_matrix(anchor.pose));
+        }
+        if let Some(hands) = &self.hands {
+            tracking.tips = hands.tips(&self.space, time).map(|tips| tips.map(|tips| tips.map(|p| world.transform_point3(p))));
+        }
         let Some(controls) = &self.controls else { return tracking };
         if self.session.sync_actions(&[xr::ActiveActionSet::new(&controls.set)]).is_err() {
             return tracking;
         }
-        for (i, (&path, space)) in controls.hands.iter().zip(&controls.spaces).enumerate() {
+        for (i, ((&path, space), grip)) in controls.hands.iter().zip(&controls.spaces).zip(&controls.grips).enumerate() {
             let Ok(location) = space.locate(&self.space, time) else { continue };
             if !location.location_flags.contains(valid) {
                 continue;
             }
+            let aim = rigid(world * pose_matrix(location.pose));
+            // (Where the runtime has no grip, the aim.)
+            let grip = grip
+                .locate(&self.space, time)
+                .ok()
+                .filter(|g| g.location_flags.contains(valid))
+                .map_or(aim, |g| rigid(world * pose_matrix(g.pose)));
             let held = |action: &xr::Action<bool>| {
                 action.state(&self.session, path).is_ok_and(|s| s.is_active && s.current_state)
             };
@@ -556,7 +634,8 @@ impl Xr {
                 .filter(|s| s.is_active)
                 .map_or(Vec2::ZERO, |s| Vec2::new(s.current_state.x, s.current_state.y));
             tracking.hands[i] = Some(Hand {
-                aim: rigid(world * pose_matrix(location.pose)),
+                aim,
+                grip,
                 select: held(&controls.select),
                 squeeze: held(&controls.squeeze),
                 primary: held(&controls.primary),
@@ -580,7 +659,7 @@ impl Xr {
         let drawn = drawn.and_then(|views| flushed.map(|()| views));
         let failed = drawn.as_ref().err().map(|&(what, e)| self.fail(what, e));
         let views = drawn.ok().flatten();
-        let ended = self.frames.end(time, self.blend, &self.space, views.as_deref(), self.area);
+        let ended = self.frames.end(time, self.blend, &self.space, views.as_deref(), self.area, self.passthrough.as_ref());
         if let Some(begun) = self.begun.take() {
             self.stats.worked(begun.elapsed());
         }
@@ -703,6 +782,7 @@ fn make_controls(
     let set = instance.create_action_set("rustdos", "Rust-DOS", 0).map_err(err("the controllers"))?;
     let made = err("the controllers");
     let aim = set.create_action::<xr::Posef>("aim", "Point", &hands).map_err(&made)?;
+    let grip = set.create_action::<xr::Posef>("grip", "Hold", &hands).map_err(&made)?;
     let select = set.create_action::<bool>("select", "Click (mouse left) / fire", &hands).map_err(&made)?;
     let squeeze = set.create_action::<bool>("squeeze", "Mouse right / second button", &hands).map_err(&made)?;
     let stick = set.create_action::<xr::Vector2f>("stick", "Joystick", &hands).map_err(&made)?;
@@ -716,6 +796,7 @@ fn make_controls(
                 let at = path(&format!("/user/hand/{}/input/{}", side, input))?;
                 bindings.push(match control {
                     Control::Aim => xr::Binding::new(&aim, at),
+                    Control::Grip => xr::Binding::new(&grip, at),
                     Control::Select => xr::Binding::new(&select, at),
                     Control::Squeeze => xr::Binding::new(&squeeze, at),
                     Control::Stick => xr::Binding::new(&stick, at),
@@ -732,11 +813,12 @@ fn make_controls(
         }
     }
     session.attach_action_sets(&[&set]).map_err(&made)?;
-    let mut spaces = Vec::new();
+    let (mut spaces, mut grips) = (Vec::new(), Vec::new());
     for &hand in &hands {
         spaces.push(aim.create_space(session, hand, xr::Posef::IDENTITY).map_err(&made)?);
+        grips.push(grip.create_space(session, hand, xr::Posef::IDENTITY).map_err(&made)?);
     }
-    Ok(Controls { set, _aim: aim, select, squeeze, stick, primary, secondary, menu, hands, spaces })
+    Ok(Controls { set, _aim: aim, _grip: grip, grips, select, squeeze, stick, primary, secondary, menu, hands, spaces })
 }
 
 /// Ask for the refresh rate `options` want, out of those the session's

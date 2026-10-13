@@ -17,6 +17,8 @@ use std::time::{Duration, Instant};
 pub struct Hand {
     /// Its aim in the scene: the unit's -Z is the way it points.
     pub aim: Mat4,
+    /// Where it is held: the palm, which takes things.
+    pub grip: Mat4,
     /// The trigger, the grip, the face buttons (A or X, B or Y) and the
     /// menu button.
     pub select: bool,
@@ -34,6 +36,13 @@ pub struct Tracking {
     pub head: Option<Mat4>,
     /// Left and right.
     pub hands: [Option<Hand>; 2],
+    /// The fingertips (index to little) of the hands the headset's
+    /// cameras track, left and right.
+    pub tips: [Option<[Vec3; 4]>; 2],
+    /// Where the space that stays put in the room is (the runtime's stage,
+    /// else its own seated space, neither moved by recentring): a frame
+    /// in the scene, scaled as the scene is.
+    pub anchor: Option<Mat4>,
 }
 
 /// What the controllers do to the machine at a frame.
@@ -80,14 +89,22 @@ impl Default for Controllers {
 impl Controllers {
     /// The input of `tracking` with the controllers doing what `mode`
     /// says, the boxes that show them, and whether to centre the view.
+    /// The `busy` hands hold a prop: they don't point, and their buttons
+    /// and stick are the prop's.
     pub fn update(
         &mut self,
         mode: VrControllers,
         tracking: &Tracking,
+        busy: [bool; 2],
         screen: &Screen,
         now: Instant,
     ) -> (VrInput, Vec<Extra>, bool) {
-        let hands = tracking.hands;
+        let mut hands = tracking.hands;
+        for (hand, _) in hands.iter_mut().zip(busy).filter(|(_, busy)| *busy) {
+            if let Some(hand) = hand {
+                *hand = Hand { aim: hand.aim, grip: hand.grip, menu: hand.menu, ..Hand::default() };
+            }
+        }
         // The hand pulling its trigger becomes the pointing one.
         for (i, hand) in hands.iter().enumerate() {
             let select = hand.is_some_and(|h| h.select);
@@ -103,7 +120,7 @@ impl Controllers {
             let body = hand.aim * Mat4::from_translation(Vec3::new(0.0, 0.0, 0.06)) * Mat4::from_scale(Vec3::new(0.03, 0.03, 0.12));
             extras.push(Extra { model: body, color: [0.06, 0.06, 0.07, 1.0] });
         }
-        let pointing = hands[self.active].filter(|_| mode.pointer());
+        let pointing = hands[self.active].filter(|_| mode.pointer() && !busy[self.active]);
         if let Some(hand) = pointing {
             let origin = hand.aim.transform_point3(Vec3::ZERO);
             let dir = hand.aim.transform_vector3(Vec3::NEG_Z).normalize_or(Vec3::NEG_Z);
@@ -196,24 +213,24 @@ mod tests {
         let room = Scene::test_room();
         let mut c = Controllers::default();
         let now = Instant::now();
-        let mut tracking = Tracking { head: None, hands: [Some(ahead(0.0)), Some(ahead(5.0))] };
+        let mut tracking = Tracking { head: None, hands: [Some(ahead(0.0)), Some(ahead(5.0))], ..Tracking::default() };
         // The right hand points first, past the screen: no pointer.
-        let (input, extras, _) = c.update(VrControllers::Both, &tracking, &room.screen, now);
+        let (input, extras, _) = c.update(VrControllers::Both, &tracking, [false; 2], &room.screen, now);
         assert_eq!(input.pointer, None);
         assert_eq!(extras.len(), 3, "two controllers and a beam");
         // The left pulls its trigger: it points, at the screen's middle,
         // and clicks; its trigger isn't the gamepad's.
         tracking.hands[0].as_mut().unwrap().select = true;
-        let (input, extras, _) = c.update(VrControllers::Both, &tracking, &room.screen, now);
+        let (input, extras, _) = c.update(VrControllers::Both, &tracking, [false; 2], &room.screen, now);
         let uv = input.pointer.unwrap();
         assert!(uv.abs_diff_eq(Vec2::new(0.5, 0.5), 1e-3), "{:?}", uv);
         assert_eq!(input.buttons, [true, false]);
         assert_eq!(extras.len(), 4, "and the dot where it meets the screen");
         assert_eq!(input.pad.unwrap().triggers, [0.0, 0.0]);
         // Laser only: no gamepad. Gamepad only: no laser, the trigger fires.
-        let (input, _, _) = c.update(VrControllers::Pointer, &tracking, &room.screen, now);
+        let (input, _, _) = c.update(VrControllers::Pointer, &tracking, [false; 2], &room.screen, now);
         assert!(input.pad.is_none() && input.pointer.is_some());
-        let (input, extras, _) = c.update(VrControllers::Gamepad, &tracking, &room.screen, now);
+        let (input, extras, _) = c.update(VrControllers::Gamepad, &tracking, [false; 2], &room.screen, now);
         assert!(input.pointer.is_none() && extras.len() == 2);
         assert_eq!(input.pad.unwrap().triggers, [1.0, 0.0]);
     }
@@ -241,8 +258,8 @@ mod tests {
         let start = Instant::now();
         let mut hand = ahead(0.0);
         let at = |c: &mut Controllers, hand: Hand, ms: u64| {
-            let tracking = Tracking { head: None, hands: [None, Some(hand)] };
-            c.update(VrControllers::Both, &tracking, &room.screen, start + Duration::from_millis(ms))
+            let tracking = Tracking { head: None, hands: [None, Some(hand)], ..Tracking::default() };
+            c.update(VrControllers::Both, &tracking, [false; 2], &room.screen, start + Duration::from_millis(ms))
         };
         hand.menu = true;
         assert_eq!(at(&mut c, hand, 0).0.menu_presses, 0);
