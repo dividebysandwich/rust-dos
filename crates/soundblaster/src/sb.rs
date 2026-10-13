@@ -150,6 +150,17 @@ const PRO_CD: u8 = 0x28;
 /// CD and line.
 const PRO_REGS: [u8; 9] = [0x00, 0x04, 0x0A, 0x0C, 0x0E, 0x22, 0x26, PRO_CD, 0x2E];
 
+/// The SB16 registers (left, right) that an SB Pro volume register (04h,
+/// 22h, 26h or 28h) reads and writes.
+fn pro_volume_regs(reg: u8) -> (u8, u8) {
+    match reg {
+        0x04 => (VOICE_L, VOICE_R),
+        0x22 => (MASTER_L, MASTER_R),
+        0x26 => (FM_L, FM_R),
+        _ => (CD_L, CD_R),
+    }
+}
+
 pub struct SoundBlaster {
     pub config: SbConfig,
     reset_stage: u8,
@@ -317,11 +328,6 @@ impl SoundBlaster {
         for reg in [MASTER_L, MASTER_R, VOICE_L, VOICE_R, FM_L, FM_R, CD_L, CD_R] {
             self.mixer[reg as usize] = 0xC0;
         }
-        // SB Pro view: master, voice, FM and CD at the same levels.
-        self.mixer[0x22] = 0xCC;
-        self.mixer[0x04] = 0xCC;
-        self.mixer[0x26] = 0xCC;
-        self.mixer[PRO_CD as usize] = 0xCC;
     }
 
     /// Volume of the digital audio and of FM, as (left, right) gains
@@ -541,15 +547,9 @@ impl SoundBlaster {
         }
         match reg {
             0x00 => self.reset_mixer(),
-            // SB Pro registers: a nibble per side, mirrored into the SB16's.
+            // SB Pro volumes: a nibble per side, kept in the SB16's registers.
             0x04 | 0x22 | 0x26 | PRO_CD => {
-                self.mixer[reg as usize] = value;
-                let (l, r) = match reg {
-                    0x04 => (VOICE_L, VOICE_R),
-                    0x22 => (MASTER_L, MASTER_R),
-                    0x26 => (FM_L, FM_R),
-                    _ => (CD_L, CD_R),
-                };
+                let (l, r) = pro_volume_regs(reg);
                 self.mixer[l as usize] = (value & 0xF0) | 0x08;
                 self.mixer[r as usize] = (value << 4) | 0x08;
             }
@@ -602,16 +602,12 @@ impl SoundBlaster {
                 low | high
             }
             (m, 0x82) if m.is_sb16() => (self.irq8 as u8) | (self.irq16 as u8) << 1 | 0x20,
-            // On an SB16 the SB Pro's volume registers are another view of
-            // its own: the top four of each side's five bits, so a level
-            // set through either reads back through both.
-            (m, 0x04 | 0x22 | 0x26 | PRO_CD) if m.is_sb16() => {
-                let (l, r) = match reg {
-                    0x04 => (VOICE_L, VOICE_R),
-                    0x22 => (MASTER_L, MASTER_R),
-                    0x26 => (FM_L, FM_R),
-                    _ => (CD_L, CD_R),
-                };
+            // The SB Pro's volume registers read the top four of each
+            // side's five bits in the SB16's, so on an SB16 a level set
+            // through either reads back through both. An SB Pro can write
+            // only the nibbles, and reads back what it wrote.
+            (_, 0x04 | 0x22 | 0x26 | PRO_CD) => {
+                let (l, r) = pro_volume_regs(reg);
                 (self.mixer[l as usize] & 0xF0) | self.mixer[r as usize] >> 4
             }
             _ => self.mixer[reg as usize],
