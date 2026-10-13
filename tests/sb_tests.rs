@@ -501,14 +501,12 @@ fn save_states_keep_high_speed_mode() {
     assert_eq!(dma1_count(&mut b.bus), left, "D0h paused the transfer");
 }
 
-/// The initiation key's 32 bytes, from the shift register's 6Ah.
+/// The initiation key's 32 bytes, after two writes of 0.
 fn isapnp_key(bus: &mut Bus) {
     bus.io_write(0x279, 0);
     bus.io_write(0x279, 0);
-    let mut x = 0x6Au8;
-    for _ in 0..32 {
-        bus.io_write(0x279, x);
-        x = (x >> 1) | (((x ^ (x >> 1)) & 1) << 7);
+    for k in rust_dos::isapnp::KEY {
+        bus.io_write(0x279, k);
     }
 }
 
@@ -564,4 +562,29 @@ fn a_vibra16c_moves_where_its_plug_and_play_registers_put_it() {
     let mut sb16 = Cpu::new(PathBuf::from("."));
     sb16.load_shell();
     assert!(machine::load(&mut sb16, &machine::save(&a)).is_err());
+
+    // The debugger reports where the card answers now.
+    assert_eq!(a.bus.sb_blaster().as_deref(), Some("A240 I5 D3 H7 P330 T6"));
+    // A program's end leaves it there, as a DOS configuration tool set it.
+    a.bus.reset_sound();
+    assert_eq!(a.bus.sb_blaster().as_deref(), Some("A240 I5 D3 H7 P330 T6"));
+    reset_dsp_at(&mut a.bus, 0x240);
+    // A base with its low 4 bits set decodes as the 16-port block it is in.
+    isapnp_key(&mut a.bus);
+    isapnp_write(&mut a.bus, 0x03, 0x01);
+    isapnp_write(&mut a.bus, 0x07, 0x00);
+    isapnp_write(&mut a.bus, 0x61, 0x68);
+    isapnp_write(&mut a.bus, 0x02, 0x02);
+    reset_dsp_at(&mut a.bus, 0x260);
+    // A reboot gives it the BIOS's resources back.
+    a.bus.power_on_sound();
+    assert_eq!(a.bus.sb_blaster().as_deref(), Some("A220 I7 D1 H5 P330 T6"));
+    reset_dsp_at(&mut a.bus, 0x220);
+}
+
+/// Reset the DSP at `base` and expect its AAh.
+fn reset_dsp_at(bus: &mut Bus, base: u16) {
+    bus.io_write(base + 6, 1);
+    bus.io_write(base + 6, 0);
+    assert_eq!(bus.io_read(base + 0xA), 0xAA, "the DSP at {:03X}h", base);
 }

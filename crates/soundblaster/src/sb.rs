@@ -276,6 +276,11 @@ impl SoundBlaster {
         self.dma16 = dma16.filter(|&ch| ch >= 4);
     }
 
+    /// The 8-bit and 16-bit DMA channels the card uses now (see `irq`).
+    pub fn dma(&self) -> (Option<u8>, Option<u8>) {
+        (self.dma8, self.dma16)
+    }
+
     /// Whether the card's interrupt line is up.
     #[inline]
     pub fn irq_pending(&self) -> bool {

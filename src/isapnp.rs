@@ -26,7 +26,7 @@ pub const BIOS_READ_PORT: u16 = 0x20B;
 
 /// The initiation key: 32 writes to ADDRESS of the values a linear
 /// feedback shift register goes through from 6Ah.
-const KEY: [u8; 32] = {
+pub const KEY: [u8; 32] = {
     let mut key = [0u8; 32];
     let mut x = 0x6Au8;
     let mut i = 0;
@@ -210,6 +210,9 @@ impl State for IsaPnp {
         if self.key_pos as usize >= KEY.len() {
             return Err(StateError::Invalid("an ISA Plug and Play key position".into()));
         }
+        if self.read_port.is_some_and(|port| !(0x203..=0x3FF).contains(&port) || port & 3 != 3) {
+            return Err(StateError::Invalid("an ISA Plug and Play read port".into()));
+        }
         Ok(())
     }
 }
@@ -315,9 +318,8 @@ impl IsaPnp {
         }
     }
 
-    /// A write to WRITE_DATA, into the register ADDRESS selected. True
-    /// when it may have changed a logical device's configuration.
-    pub fn write_data(&mut self, value: u8) -> bool {
+    /// A write to WRITE_DATA, into the register ADDRESS selected.
+    pub fn write_data(&mut self, value: u8) {
         let reg = self.address;
         match reg {
             // Set RD_DATA port: bits 9-2 of the port, whose bits 1-0 are
@@ -325,16 +327,13 @@ impl IsaPnp {
             0x00 if self.cards.iter().any(Card::listening) => {
                 let port = (value as u16) << 2 | 3;
                 self.read_port = (0x203..=0x3FF).contains(&port).then_some(port);
-                false
             }
             // Config control: reset the logical devices, wait for the
             // key, forget the CSN.
             0x02 => {
-                let mut changed = false;
                 for card in self.cards.iter_mut().filter(|c| c.listening()) {
                     if value & 0x01 != 0 {
                         card.devices.iter_mut().for_each(|d| *d = Registers::default());
-                        changed = true;
                     }
                     if value & 0x04 != 0 {
                         card.csn = 0;
@@ -345,7 +344,6 @@ impl IsaPnp {
                         card.state = CardState::WaitForKey;
                     }
                 }
-                changed
             }
             // Wake[CSN]: the card with it wakes, to isolation for CSN 0
             // and to configuration otherwise, from the start of its serial
@@ -361,7 +359,6 @@ impl IsaPnp {
                         card.state = CardState::Sleep;
                     }
                 }
-                false
             }
             // Card Select Number: the isolated card takes it and is
             // configured from now on.
@@ -372,23 +369,19 @@ impl IsaPnp {
                         card.state = CardState::Config;
                     }
                 }
-                false
             }
             0x07 => {
                 if let Some(card) = self.configured() {
                     card.logical = value;
                 }
-                false
             }
-            0x30.. => match self.configured() {
-                Some(card) => {
+            0x30.. => {
+                if let Some(card) = self.configured() {
                     let logical = card.logical as usize;
                     card.set_device_register(logical, reg, value);
-                    true
                 }
-                None => false,
-            },
-            _ => false,
+            }
+            _ => {}
         }
     }
 
@@ -546,7 +539,7 @@ mod tests {
         }
     }
 
-    fn write(pnp: &mut IsaPnp, reg: u8, value: u8) -> bool {
+    fn write(pnp: &mut IsaPnp, reg: u8, value: u8) {
         pnp.write_address(reg);
         pnp.write_data(value)
     }
@@ -667,7 +660,7 @@ mod tests {
         send_key(&mut pnp);
         write(&mut pnp, 0x03, 0x01);
         write(&mut pnp, 0x07, 0x00);
-        assert!(write(&mut pnp, 0x30, 0x00));
+        write(&mut pnp, 0x30, 0x00);
         assert_eq!(pnp.audio(), None);
         write(&mut pnp, 0x60, 0x02);
         write(&mut pnp, 0x61, 0x40);
@@ -682,7 +675,7 @@ mod tests {
         assert_eq!(read(&mut pnp, 0x61), 0x00);
         assert_eq!(read(&mut pnp, 0x60), 0x02);
         // Reset puts the logical devices at their power-up values.
-        assert!(write(&mut pnp, 0x02, 0x01));
+        write(&mut pnp, 0x02, 0x01);
         assert_eq!(pnp.audio(), None);
         assert_eq!(pnp.cards[0].device_register(AUDIO, 0x74), 0x04);
         // Wait for Key: the card leaves the read port alone.

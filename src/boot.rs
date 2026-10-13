@@ -228,7 +228,7 @@ fn reset_machine(cpu: &mut Cpu) {
     bus.port_accesses.clear();
     crate::keyboard::reset_keystrokes(bus);
     bus.reset_timers();
-    bus.reset_sound();
+    bus.power_on_sound();
     bus.reset_network();
     bus.reset_ne2000();
     bus.reset_serial();
