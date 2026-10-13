@@ -109,6 +109,17 @@ The JSON's sections:
   mnemonic) and its slow paths, and the pages with the most translations
   and invalidations.
 
+  A profile starts with no translated code (see [Cost](#cost)), so the
+  program's code is translated again as it runs. `blocks_translated` and
+  the `dynrec.translate` zone count that as well as code the program
+  runs for the first time, and in the first seconds the machine can fall
+  behind (`window.emulated_speed` below 1). In a 30-second profile of a
+  Windows 95 game's battle map the recompiler translated 22,574 blocks
+  (3.5% of the busy samples); without a profile the same game, played
+  through new parts of a level, translated a median of 18 blocks a
+  second. `timeline=true` shows when the translations came; a longer
+  profile, or the seconds after the first few, shows the program's own.
+
 ### Zones
 
 | Group | Zones |
