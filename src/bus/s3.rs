@@ -301,7 +301,16 @@ impl Bus {
             return;
         }
         for i in 0..len {
-            self.io_write(port.wrapping_add(i as u16), (value >> (8 * i)) as u8);
+            let p = port.wrapping_add(i as u16);
+            // The reset control register at CF9h takes bytes: a word or
+            // doubleword covering it leaves it alone. (Memtest86+ and Linux
+            // probe for PCI by writing back what a doubleword read of CF8h
+            // gave, FFFFFFFFh on a machine without a PCI bus.)
+            if p == 0xCF9 {
+                self.log_port(p, value >> (8 * i) & 0xFF, 1, true);
+                continue;
+            }
+            self.io_write(p, (value >> (8 * i)) as u8);
         }
     }
 
