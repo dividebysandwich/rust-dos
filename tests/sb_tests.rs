@@ -241,6 +241,38 @@ fn sb_pro_mixer_lacks_the_sb16_registers() {
 }
 
 #[test]
+fn sb16_pro_mixer_registers_show_the_sb16_levels() {
+    let mut bus = sb16();
+    let mut mixer = |reg: u8, value: Option<u8>| {
+        bus.io_write(0x224, reg);
+        if let Some(value) = value {
+            bus.io_write(0x225, value);
+        }
+        bus.io_read(0x225)
+    };
+    // A mixer program sets the master volume through the SB16's own
+    // registers (30h/31h, five bits each); a game reading the SB Pro's
+    // master volume (22h, a nibble a side) sees the same levels.
+    mixer(0x30, Some(0x80));
+    mixer(0x31, Some(0x40));
+    assert_eq!(mixer(0x22, None), 0x84);
+    // Voice (32h/33h as 04h), FM (34h/35h as 26h), CD (36h/37h as 28h).
+    mixer(0x32, Some(0xF8));
+    mixer(0x33, Some(0x00));
+    assert_eq!(mixer(0x04, None), 0xF0);
+    mixer(0x35, Some(0x10));
+    mixer(0x34, Some(0x20));
+    assert_eq!(mixer(0x26, None), 0x21);
+    mixer(0x36, Some(0x00));
+    mixer(0x37, Some(0xF8));
+    assert_eq!(mixer(0x28, None), 0x0F);
+    // And the other way, as before.
+    mixer(0x22, Some(0x9C));
+    assert_eq!((mixer(0x30, None), mixer(0x31, None)), (0x98, 0xC8));
+    assert_eq!(mixer(0x22, None), 0x9C);
+}
+
+#[test]
 fn transfer_waits_while_its_dma_channel_is_masked() {
     let mut bus = sb16();
     reset_dsp(&mut bus);
