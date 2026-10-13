@@ -150,6 +150,82 @@ The counts are exact, but the input's timing depends on the host, so
 compare shares and rates rather than single samples. A difference of a
 few tenths of a percent in a zone with few samples is noise.
 
+## Profiling Windows games
+
+A game under a booted Windows shares the machine with the operating
+system, and the profile counts both. Most of the split comes from the
+CPU state each sample already carries; telling the game's own code from
+the Windows code it calls takes a few more steps. The examples come from
+Enemy Infestation on Windows 95 (`machine=svga_s3`, recompiler), 30
+seconds of its intro.
+
+### By privilege level
+
+`segments` splits the samples by code segment, and the selector's low two
+bits are the privilege level. On Windows 95:
+
+| Code | What runs there |
+|---|---|
+| `pm32`, CS `0028` (ring 0) | The VMM and the VxDs: scheduling, paging, timers, disk and CD drivers |
+| `pm32`, CS `0137` (ring 3, flat) | Win32 code: the game's EXE and DLLs, and the system DLLs it calls (KERNEL32, USER32, GDI32, DirectX) |
+| `pm16` (ring 3) | Win16 code: the 16-bit halves of USER, GDI and KERNEL, which Win32 calls reach through thunks |
+| `v86` | DOS and the BIOS in a virtual machine |
+
+The intro spent its busy time as 48% ring-3 flat code, 34% ring 0, 14%
+16-bit code and almost nothing in v86.
+
+### By module
+
+`bucket=65536` counts guest code by 64 KB blocks, and Windows loads each
+PE image on a 64 KB boundary. On Windows 95 the address also says whose
+code it is:
+
+| Linear address | |
+|---|---|
+| below 80000000h | The running process: the game's EXE (usually at 00400000h) and its DLLs |
+| 80000000h-BFFFFFFFh | Shared by all processes: the system DLLs, KERNEL32 at BFF70000h |
+| C0000000h and up | The VMM and the VxDs |
+
+Windows 95 keeps one page directory for every process (CR3 stays the
+same), so the profile can't tell processes apart. With a full-screen game
+in front, the code below 80000000h is the game's.
+
+To name the module behind a block, read its first bytes:
+`GET /api/memory?addr=lin:BFF70000&len=64`. An image starts with `MZ`,
+the PE header's offset is at 3Ch, and the export directory gives the DLL's
+name. Windows often leaves the header page of a loaded image out of
+memory, and then the read gives `FF` bytes. In this run KERNEL32's header
+was in memory, the game's EXE (00400000h) and its DLL (10000000h) weren't.
+In that case take the image base from the file's own PE header (a DLL
+that Windows had to relocate loads elsewhere).
+
+In the intro, the game's code was 22% of busy time, KERNEL32 23%, the
+16-bit code 14% and ring 0 34%.
+
+### Work Windows does for the game
+
+Ring-0 and 16-bit samples say where Windows spent the time, not which
+game code asked for it. The counters often do say why:
+
+- `ports`: port 40h read 265,000 times a second and port 43h written
+  132,000 times: a timer driver latching the PIT on each time query
+  (`timeGetTime` and `QueryPerformanceCounter` reach the VTD this way).
+- `dynrec.calls.fallback_top`: `Int`, `Iretd`, `Lar`, `Popfd` and
+  `Cmpsb` each about 132,000 times a second, the same rate. The top place
+  for `dynrec.fallback` is 16-bit code doing `int 30h` into the VMM. Each
+  time query changes rings in and out, and the recompiler hands both
+  changes to the interpreter.
+- `ports` again: port 170h, the secondary IDE channel's data port, read
+  275,000 times a second: Windows' IDE driver reads the CD with PIO.
+  `zone=io.ide` shows the driver's loop (`0028:C1051C27`).
+- `exceptions`: #GP and #UD are how Windows traps port I/O and V86 calls,
+  #PF its paging. A high rate here points at Windows working on the
+  game's behalf.
+
+Before profiling a game, profile the idle desktop for 10 seconds as a
+baseline. Here Windows 95 alone was busy 7% of the time, against 40% with
+the game.
+
 ## The sampler's timing
 
 The sampler waits a random 0.5 to 1.5 times the interval between samples,

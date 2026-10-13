@@ -2086,7 +2086,11 @@ fn main() -> Result<(), String> {
         if let Some(v) = &mut cpu.bus.voodoo {
             v.set_software_picture(voodoo_picture);
         }
-        profile::set_host(Zone::VoodooFrame);
+        profile::set_host(if cpu.bus.voodoo.is_some() {
+            Zone::VoodooFrame
+        } else {
+            Zone::FrameCompose
+        });
         cpu.bus.sync_display();
         let voodoo_gl = display.run_voodoo(&mut cpu.bus, &settings.voodoo);
         if !voodoo_gl
