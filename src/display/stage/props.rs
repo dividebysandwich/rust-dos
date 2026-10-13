@@ -7,7 +7,7 @@
 //! The manual's pages are rendered on a thread of their own, as they are
 //! needed, into textures of the context that draws them.
 
-use super::controls::Tracking;
+use super::controls::{Hand, Tracking};
 use super::render::{Gpu, PropDraw};
 use super::scene::{PartRole, Prop, PropKind, Scene};
 use glam::{Mat4, Quat, Vec3};
@@ -18,8 +18,8 @@ use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 
-/// How far outside a prop a hand still takes it, and from the knob the
-/// stick, in metres.
+/// How far outside a prop a hand (its grip, or the tip of the controller
+/// drawn for it) still takes it, and from the knob the stick, in metres.
 const REACH: f32 = 0.05;
 const KNOB_REACH: f32 = 0.07;
 /// How far the stick tilts, and the tilt that is the joystick's full
@@ -43,8 +43,8 @@ enum Hold {
     /// A prop, where it is in the hand's frame.
     Body { prop: usize, offset: Mat4 },
     /// The joystick's stick, the hand where it was in the stick's frame
-    /// when it took it.
-    Stick { prop: usize, from: Vec3 },
+    /// when it took it, by the controller's tip or by the grip.
+    Stick { prop: usize, from: Vec3, tip: bool },
 }
 
 /// What the props do to the machine at a frame.
@@ -115,9 +115,8 @@ impl Props {
                 self.squeezed[i] = false;
                 continue;
             };
-            let grip = hand.grip.transform_point3(Vec3::ZERO);
             if hand.squeeze && !self.squeezed[i] && self.holds[i].is_none() {
-                self.holds[i] = self.take(scene, grip, hand.grip);
+                self.holds[i] = self.take(scene, hand);
                 // Taken from the other hand.
                 if let Some(Hold::Body { prop, .. }) = self.holds[i]
                     && let Some(Hold::Body { prop: other, .. }) = self.holds[1 - i]
@@ -142,9 +141,9 @@ impl Props {
                         }
                     }
                 }
-                Some(Hold::Stick { prop, from }) => {
+                Some(Hold::Stick { prop, from, tip }) => {
                     let frame = self.poses[prop] * scene.props[prop].stick;
-                    let to = frame.inverse().transform_point3(grip);
+                    let to = frame.inverse().transform_point3(reaching(hand)[tip as usize]);
                     let tilt = clamp_tilt(Quat::from_rotation_arc(from.normalize_or(Vec3::Y), to.normalize_or(Vec3::Y)) * Vec3::Y);
                     self.tilts[prop] = tilt;
                     // Pushed away is up, as on a joystick; the trigger is the
@@ -167,27 +166,33 @@ impl Props {
         input
     }
 
-    /// What hand at `grip` (its frame `hand`) takes: the stick first, then
-    /// the nearest prop it is in or by.
-    fn take(&self, scene: &Scene, grip: Vec3, hand: Mat4) -> Option<Hold> {
+    /// What `hand` takes with its grip or its controller's tip: the stick
+    /// first, then the nearest prop it is in or by.
+    fn take(&self, scene: &Scene, hand: &Hand) -> Option<Hold> {
+        let points = reaching(hand);
+        let mut stick: Option<(f32, Hold)> = None;
         let mut best: Option<(f32, Hold)> = None;
         for (i, prop) in scene.props.iter().enumerate().filter(|(_, p)| self.shown(p)) {
             let pose = self.poses[i];
-            if prop.parts.iter().any(|p| p.role == PartRole::Stick) {
-                let frame = pose * prop.stick;
-                let knob = frame.transform_point3(self.tilt_matrix(i).transform_point3(prop.knob));
-                if grip.distance(knob) < KNOB_REACH {
-                    return Some(Hold::Stick { prop: i, from: frame.inverse().transform_point3(grip) });
+            for (tip, &point) in points.iter().enumerate() {
+                let tip = tip == 1;
+                if prop.parts.iter().any(|p| p.role == PartRole::Stick) {
+                    let frame = pose * prop.stick;
+                    let knob = frame.transform_point3(self.tilt_matrix(i).transform_point3(prop.knob));
+                    let distance = point.distance(knob);
+                    if distance < KNOB_REACH && stick.is_none_or(|(d, _)| distance < d) {
+                        stick = Some((distance, Hold::Stick { prop: i, from: frame.inverse().transform_point3(point), tip }));
+                    }
+                }
+                let local = pose.inverse().transform_point3(point);
+                let (low, high) = prop.bounds;
+                let outside = (low - local).max(local - high).max(Vec3::ZERO).length();
+                if outside < REACH && best.is_none_or(|(d, _)| outside < d) {
+                    best = Some((outside, Hold::Body { prop: i, offset: hand.grip.inverse() * pose }));
                 }
             }
-            let local = pose.inverse().transform_point3(grip);
-            let (low, high) = prop.bounds;
-            let outside = (low - local).max(local - high).max(Vec3::ZERO).length();
-            if outside < REACH && best.is_none_or(|(d, _)| outside < d) {
-                best = Some((outside, Hold::Body { prop: i, offset: hand.inverse() * pose }));
-            }
         }
-        best.map(|(_, hold)| hold)
+        stick.or(best).map(|(_, hold)| hold)
     }
 
     /// Hand `i` lets go: a prop settles upright on what is below it; a
@@ -244,6 +249,12 @@ impl Props {
 }
 
 /// `tilt` no further than `MAX_TILT` from upright.
+/// Where a hand takes things: its grip, and the tip of the controller
+/// drawn for it (see `controls`), which is where it points from.
+fn reaching(hand: &Hand) -> [Vec3; 2] {
+    [hand.grip.transform_point3(Vec3::ZERO), hand.aim.transform_point3(Vec3::ZERO)]
+}
+
 fn clamp_tilt(tilt: Vec3) -> Vec3 {
     let tilt = tilt.normalize_or(Vec3::Y);
     let angle = tilt.y.clamp(-1.0, 1.0).acos();
@@ -513,7 +524,6 @@ fn render_page(document: &rust_dos::manuals::Document, page: usize, (cw, ch): (u
 
 #[cfg(test)]
 mod tests {
-    use super::super::controls::Hand;
     use super::*;
 
     fn hand_at(p: Vec3, squeeze: bool) -> Hand {
@@ -545,6 +555,26 @@ mod tests {
         let input = props.update(&room, &tracking(hand_at(knob, false)), now);
         assert!(input.pad.is_none() && !input.busy[1]);
         assert_eq!(props.tilts[j], Vec3::Y);
+    }
+
+    #[test]
+    fn the_controllers_tip_takes_things_too() {
+        let room = Scene::test_room();
+        let mut props = Props::new(&room);
+        let now = Instant::now();
+        let j = room.props.iter().position(|p| p.kind == PropKind::Joystick).unwrap();
+        let prop = &room.props[j];
+        let knob = (prop.pose * prop.stick).transform_point3(prop.knob);
+        // The grip well behind the knob, the tip on it.
+        let mut hand = hand_at(knob + Vec3::new(0.0, 0.0, 0.2), true);
+        hand.aim = Mat4::from_translation(knob);
+        let input = props.update(&room, &tracking(hand), now);
+        let pad = input.pad.unwrap();
+        assert!(pad.axes[0].abs() < 1e-3 && pad.axes[1].abs() < 1e-3, "{:?}", pad.axes);
+        // The tip, not the grip, moves the stick.
+        hand.aim = Mat4::from_translation(knob + Vec3::new(0.08, 0.0, -0.08));
+        let pad = props.update(&room, &tracking(hand), now).pad.unwrap();
+        assert!(pad.axes[0] > 0.85 && pad.axes[1] < -0.85, "{:?}", pad.axes);
     }
 
     #[test]
