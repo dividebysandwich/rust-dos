@@ -1239,6 +1239,66 @@ impl Bus {
         true
     }
 
+    /// Write the `len` bytes of plain RAM at `src` into the VESA linear
+    /// frame buffer at `dst`, as a string move's writes through `write_32`
+    /// do (a DirectDraw blit's row). Returns false, having written nothing,
+    /// where the range isn't all in the frame buffer.
+    pub(crate) fn move_to_lfb(&mut self, src: usize, dst: usize, len: usize) -> bool {
+        let Some(offset) = self.lfb_run(dst, len) else {
+            return false;
+        };
+        let _profile = self.profile.as_deref().map(|p| p.mem(dst, true));
+        self.vbe.vram[offset..offset + len].copy_from_slice(&self.ram[src..src + len]);
+        self.lfb_written(dst, offset, len);
+        true
+    }
+
+    /// Fill the VESA linear frame buffer at `dst` with `count` elements of
+    /// `size` bytes of `value`, as a string store's writes do (see
+    /// `move_to_lfb`).
+    pub(crate) fn fill_lfb(&mut self, dst: usize, count: usize, size: usize, value: u32) -> bool {
+        let len = count * size;
+        let Some(offset) = self.lfb_run(dst, len) else {
+            return false;
+        };
+        let _profile = self.profile.as_deref().map(|p| p.mem(dst, true));
+        let bytes = value.to_le_bytes();
+        for element in self.vbe.vram[offset..offset + len].chunks_exact_mut(size) {
+            element.copy_from_slice(&bytes[..size]);
+        }
+        self.lfb_written(dst, offset, len);
+        true
+    }
+
+    /// Where `len` bytes at `dst` are in the video memory, if all of them
+    /// are in the linear frame buffer.
+    fn lfb_run(&self, dst: usize, len: usize) -> Option<usize> {
+        if dst < self.ram.len() {
+            return None;
+        }
+        self.vbe.lfb_offset(dst, len)
+    }
+
+    /// The rest of `write_vram` for `len` bytes written at `offset` (at
+    /// `dst`) at once, and the hooks of the writes one by one.
+    fn lfb_written(&mut self, dst: usize, offset: usize, len: usize) {
+        if self.observe.on {
+            self.observe.mapped_write(dst, self.ram.len());
+        }
+        self.note_video_write(len as u64);
+        if self.video_mode == VideoMode::Vesa {
+            // The rows of the bytes from the display start on: `frame_rows`
+            // has none for a range that begins before it.
+            let end = offset + len;
+            let first = offset.max(self.vbe.latched_start as usize);
+            if first < end
+                && let Some((top, bottom)) = self.vbe.frame_rows(first, end - first)
+            {
+                self.vga.mark_dirty_rows(top, bottom);
+            }
+        }
+    }
+
     /// Where the byte at `addr` in the graphics window at A0000h is for
     /// the VGA's memory logic: its offset in the window, for a write or a
     /// read.

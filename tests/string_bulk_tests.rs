@@ -215,3 +215,60 @@ fn a_segment_limit_part_of_the_way_faults_where_it_is_reached() {
     // The dwords up to the limit, stored.
     assert_eq!((b.read32(0x61F00), b.read32(0x61FFC), b.read32(0x62000)), (0x5555_AAAA, 0x5555_AAAA, 0));
 }
+
+#[test]
+fn moves_and_stores_into_the_linear_frame_buffer_are_the_iterations_one_at_a_time() {
+    // A DirectDraw blit's rows into a 640x480 16-bit VESA mode's frame
+    // buffer at E0000000h, up and down, stores of each size, and a range
+    // that starts before the display start and ends after it.
+    const LFB: u32 = 0xE000_0000;
+    let (mut a, mut b) = pair(|rig| {
+        rig.cpu.set_ax(0x4F02);
+        rig.cpu.set_reg16(iced_x86::Register::BX, 0x4111);
+        rust_dos::interrupts::int10::handle(&mut rig.cpu);
+        assert_eq!(rig.cpu.ax(), 0x004F, "no VESA mode");
+        rig.cpu.bus.vbe.latched_start = 0x1200;
+        rig.cpu.bus.vga.dirty = false;
+        rig.cpu.bus.vga.dirty_y_min = u32::MAX;
+        rig.cpu.bus.vga.dirty_y_max = 0;
+        pattern(rig, 0x100000, 0x4000);
+        let code = asm32(CODE, |a| {
+            a.cld()?;
+            for (src, dst, count) in [(0x100000u32, LFB + 0x2000, 320u32), (0x100010, LFB + 0x2F00, 700), (0x100400, LFB + 0x0E00, 0x200)] {
+                a.mov(esi, src)?;
+                a.mov(edi, dst)?;
+                a.mov(ecx, count)?;
+                a.rep().movsd()?;
+            }
+            a.mov(esi, 0x101001u32)?;
+            a.mov(edi, LFB + 0x9003)?;
+            a.mov(ecx, 3001u32)?;
+            a.rep().movsb()?;
+            a.std()?;
+            a.mov(esi, 0x103FFCu32)?;
+            a.mov(edi, LFB + 0x20FFC)?;
+            a.mov(ecx, 2000u32)?;
+            a.rep().movsd()?;
+            a.mov(edi, LFB + 0x30FFE)?;
+            a.mov(eax, 0x1234_5678u32)?;
+            a.mov(ecx, 3000u32)?;
+            a.rep().stosw()?;
+            a.cld()?;
+            a.mov(edi, LFB + 0x40001)?;
+            a.mov(ecx, 5000u32)?;
+            a.rep().stosd()?;
+            a.mov(ecx, 777u32)?;
+            a.rep().stosb()?;
+            a.hlt()
+        });
+        rig.load(CODE, &code);
+    });
+    run(&mut a, &mut b);
+    assert!(b.cpu.bus.vbe.vram[0x2000..0x2010].iter().any(|&x| x != 0));
+    let shown = |rig: &Rig| {
+        let v = &rig.cpu.bus.vga;
+        (v.dirty, v.dirty_y_min, v.dirty_y_max, rig.cpu.bus.activity.video_bytes)
+    };
+    assert_eq!(shown(&a), shown(&b));
+    assert!(shown(&b).0);
+}
