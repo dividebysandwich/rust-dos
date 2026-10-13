@@ -1102,6 +1102,18 @@ impl Gen<'_> {
         *self.end.get_or_insert_with(|| ops.new_dynamic_label())
     }
 
+    /// As x86-64's: a label that stops the block after the instruction
+    /// being translated, for STI and POPF to jump to.
+    fn stop_after(&mut self) -> DynamicLabel {
+        let data = self.data;
+        let next = data.eips[self.ix].wrapping_add(data.instrs[self.ix].len() as u32);
+        let at = self.ops.new_dynamic_label();
+        let fail = self.fail();
+        let code = EXIT_AFTER | if self.dirty { EXIT_FLAGS } else { 0 };
+        self.slow.push(Slow::After { at, next, code, fail });
+        at
+    }
+
     /// X1 = the block's data.
     fn data_x1(&mut self) {
         let lit = self.data_lit;
@@ -1923,15 +1935,10 @@ impl Gen<'_> {
             }
             Uop::FlagsLoaded => {
                 // As x86-64's.
-                let data = self.data;
-                let next = data.eips[self.ix].wrapping_add(data.instrs[self.ix].len() as u32);
-                let at = self.ops.new_dynamic_label();
-                let fail = self.fail();
-                let code = EXIT_AFTER | if self.dirty { EXIT_FLAGS } else { 0 };
-                self.slow.push(Slow::After { at, next, code, fail });
+                let at = self.stop_after();
                 let quiet = self.ops.new_dynamic_label();
                 self.field(Access::Ldr32, 0, layout::FLAGS);
-                dynasm!(self.ops ; .arch aarch64 ; tbnz w0, 8, =>at ; tbz w0, 9, =>quiet);
+                dynasm!(self.ops ; .arch aarch64 ; tst w0, 0x100 ; b.ne =>at ; tbz w0, 9, =>quiet);
                 self.field(Access::Ldr8, 2, layout::IRQ_READY);
                 dynasm!(self.ops ; .arch aarch64 ; cbnz w2, =>at ; =>quiet);
             }
@@ -1941,11 +1948,7 @@ impl Gen<'_> {
                 // that, else the shadow ends where the next instruction
                 // runs, in the block.
                 let data = self.data;
-                let next = data.eips[self.ix].wrapping_add(data.instrs[self.ix].len() as u32);
-                let at = self.ops.new_dynamic_label();
-                let fail = self.fail();
-                let code = EXIT_AFTER | if self.dirty { EXIT_FLAGS } else { 0 };
-                self.slow.push(Slow::After { at, next, code, fail });
+                let at = self.stop_after();
                 self.field(Access::Ldr32, 0, layout::FLAGS);
                 dynasm!(self.ops ; .arch aarch64 ; orr w1, w0, 0x200);
                 self.field(Access::Str32, 1, layout::FLAGS);

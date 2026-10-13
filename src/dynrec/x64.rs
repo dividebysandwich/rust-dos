@@ -826,6 +826,18 @@ impl Gen<'_> {
         *self.end.get_or_insert_with(|| ops.new_dynamic_label())
     }
 
+    /// A label that stops the block after the instruction being translated
+    /// (EIP at the next one), for STI and POPF to jump to.
+    fn stop_after(&mut self) -> DynamicLabel {
+        let data = self.data;
+        let next = data.eips[self.ix].wrapping_add(data.instrs[self.ix].len() as u32);
+        let at = self.ops.new_dynamic_label();
+        let fail = self.fail();
+        let code = EXIT_AFTER | if self.dirty { EXIT_FLAGS } else { 0 };
+        self.slow.push(Slow::After { at, next, code, fail });
+        at
+    }
+
     /// Leave the block before the instruction being translated if any of
     /// its watched bytes differ from what was translated.
     fn check_watched(&mut self) {
@@ -2112,12 +2124,7 @@ impl Gen<'_> {
                 self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, wb, reload, leave: false });
             }
             Uop::FlagsLoaded => {
-                let data = self.data;
-                let next = data.eips[self.ix].wrapping_add(data.instrs[self.ix].len() as u32);
-                let at = self.ops.new_dynamic_label();
-                let fail = self.fail();
-                let code = EXIT_AFTER | if self.dirty { EXIT_FLAGS } else { 0 };
-                self.slow.push(Slow::After { at, next, code, fail });
+                let at = self.stop_after();
                 dynasm!(self.ops
                     ; .arch x64
                     ; mov eax, DWORD [rbx + FLAGS]
@@ -2133,11 +2140,7 @@ impl Gen<'_> {
             Uop::Sti => {
                 const IF: i32 = 0x200;
                 let data = self.data;
-                let next = data.eips[self.ix].wrapping_add(data.instrs[self.ix].len() as u32);
-                let at = self.ops.new_dynamic_label();
-                let fail = self.fail();
-                let code = EXIT_AFTER | if self.dirty { EXIT_FLAGS } else { 0 };
-                self.slow.push(Slow::After { at, next, code, fail });
+                let at = self.stop_after();
                 // Interrupts are recognized after the next instruction: with
                 // one waiting, the execution loop runs that; else the shadow
                 // ends where the next instruction runs, in the block.
