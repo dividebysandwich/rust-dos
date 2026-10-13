@@ -217,12 +217,19 @@ fn two_machines_play_over_a_null_modem_and_call_by_modem() {
             bus.io_write(COM2, byte);
         }
     };
+    // The handshake before CONNECT takes some 20 emulated seconds: sleep
+    // only now and then so it does not take longer than that here.
     let read_line = |bus: &mut Bus, other: &mut Bus, want: &str| {
         let mut text = String::new();
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut ms = 0u32;
         while !text.contains(want) && Instant::now() < deadline {
-            run_networked(bus, 2);
-            run_networked(other, 2);
+            pass(bus, 1);
+            pass(other, 1);
+            ms += 1;
+            if ms % 10 == 0 {
+                std::thread::sleep(Duration::from_micros(200));
+            }
             while bus.io_read(COM2 + 5) & 1 != 0 {
                 text.push(bus.io_read(COM2) as char);
             }

@@ -1259,6 +1259,7 @@ fn the_stats_page_draws_its_numbers_and_graphs() {
         recompiled: 97.0,
         halted: 12.0,
         cpu_use: 40.0,
+        emulated_speed: 1.0,
         render_ms: 0.4,
         blocks: 3456,
         code_bytes: 2 << 20,

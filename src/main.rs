@@ -36,6 +36,7 @@ use rust_dos::achievements::{Achievements, http::HttpTransport};
 use rust_dos::boot::{Startup, StartupItem};
 use rust_dos::games::{ActiveGame, GameEntry, NewGame};
 use rust_dos::hardware::Hardware;
+use rust_dos::profile::{self, Zone};
 use rust_dos::savestate::{self, slots};
 
 #[derive(Parser, Debug)]
@@ -116,6 +117,17 @@ struct Args {
     /// Allocated only once tracing is enabled via the debug server.
     #[arg(long, default_value_t = 1_000_000)]
     trace_capacity: usize,
+
+    /// Profile the emulator from startup, and write where its time went to
+    /// FILE as JSON when it exits, with a table (FILE.txt) and folded
+    /// stacks for flame graphs (FILE.folded) beside it (docs/profiling.md)
+    #[arg(long, value_name = "FILE")]
+    profile: Option<std::path::PathBuf>,
+
+    /// Samples a second for --profile (10 to 20000)
+    #[arg(long, value_name = "HZ", default_value_t = rust_dos::profile::session::DEFAULT_HZ,
+          value_parser = clap::value_parser!(u32).range(rust_dos::profile::session::MIN_HZ as i64..=rust_dos::profile::session::MAX_HZ as i64))]
+    profile_hz: u32,
 
     /// Emulated CPU speed in instructions per millisecond, "max" for as
     /// fast as the host keeps up with, or "auto" for the speed the running
@@ -280,6 +292,23 @@ fn parse_vr_graphics(value: &str) -> Result<rust_dos::vr::VrGraphics, String> {
     rust_dos::vr::VrGraphics::parse(value).ok_or_else(|| "auto, gl, egl or vulkan".to_string())
 }
 
+/// Closes the console window Windows opens next to the program's own when
+/// it is started from Explorer or a shortcut: a console program gets a
+/// console of its own then, which only it is attached to. Started from a
+/// terminal, it shares the terminal's and keeps it for its output. Windows
+/// 11 24H2 and later don't open one at all (the manifest's
+/// consoleAllocationPolicy, packaging/windows/rust-dos.manifest).
+#[cfg(windows)]
+fn leave_explorer_console() {
+    use windows_sys::Win32::System::Console::{FreeConsole, GetConsoleProcessList};
+    let mut pids = [0u32; 2];
+    // SAFETY: the list has room for the two entries it is given.
+    if unsafe { GetConsoleProcessList(pids.as_mut_ptr(), pids.len() as u32) } == 1 {
+        // SAFETY: nothing holds on to the console's handles.
+        unsafe { FreeConsole() };
+    }
+}
+
 fn main() -> Result<(), String> {
     let args = Args::parse();
     if let Some(Command::Run(run)) = args.command {
@@ -300,6 +329,8 @@ fn main() -> Result<(), String> {
             port,
         });
     }
+    #[cfg(windows)]
+    leave_explorer_console();
     let config = load_config(&args)?;
     let mut settings = Settings::from_config(&config);
     if let Some(scale) = args.scale {
@@ -479,6 +510,9 @@ fn main() -> Result<(), String> {
         Some(addr) => debug::DebugHub::start(&mut cpu, addr, args.trace_capacity, det.as_ref().map(|mode| mode.start))?,
         None => debug::DebugHub::disabled(),
     };
+    if args.profile.is_some() {
+        dbg.profile_at_start(&mut cpu, args.profile_hz).map_err(|e| format!("The profiler's thread can't start: {}", e))?;
+    }
     if let Some(mode) = &det {
         dbg.deterministic = Some(mode.start);
         // A client sends its input before anything runs.
@@ -581,6 +615,9 @@ fn main() -> Result<(), String> {
     // The button whose click captured the mouse, whose release the program
     // doesn't see either.
     let mut capturing_click: Option<MouseButton> = None;
+    // The right button held still opening the settings window
+    // (`mouse_menu_hold`), for a TV or a remote without F12.
+    let mut menu_hold = rust_dos::menu_hold::MenuHold::default();
     // The text selected with the right button while the mouse isn't
     // captured (Ctrl+Shift+C copies it), and the text being pasted
     // (Ctrl+Shift+V).
@@ -589,8 +626,10 @@ fn main() -> Result<(), String> {
     // recorded (Ctrl+F6).
     let mut screenshot = false;
     let mut sound_recording: Option<WavWriter> = None;
-    // The video being recorded (Ctrl+F7).
+    // The video being recorded (Ctrl+F7), and when it last got a frame:
+    // while the machine stands still it goes on in the host's time.
     let mut video_recording: Option<VideoRecorder> = None;
+    let mut video_frame_at = std::time::Instant::now();
     // The save states, in `states` beside the configuration file: the slot
     // Ctrl+F1 saves to and Ctrl+F2 loads (Ctrl+F3 picks another), and the
     // results of the threads writing them.
@@ -718,6 +757,9 @@ fn main() -> Result<(), String> {
     // Until when the scene's PC shows its hard disk and floppy lights.
     let mut hdd_light = std::time::Instant::now();
     let mut floppy_light = std::time::Instant::now();
+    // The running game's manuals, for the booklet in the 3D scene, and the
+    // game they are of.
+    let mut vr_manuals: (Option<String>, Vec<PathBuf>) = (None, Vec::new());
     // The mouse held in SDL's relative mode while Ctrl+Shift fly the 3D
     // scene's camera, and the start of the last frame's flight.
     let mut steering_mouse = false;
@@ -759,15 +801,29 @@ fn main() -> Result<(), String> {
         for (title, detail) in std::mem::take(&mut cpu.bus.notices) {
             osd.notify(title, detail, true);
         }
+        profile::set_host(Zone::Events);
         let frame_start = std::time::Instant::now();
         if let Some((start, times)) = last_frame {
             stats.record(&cpu.bus, rust_dos::stats::FrameTimes { wall: frame_start - start, ..times });
+            dbg.set_frame_stats(stats.latest());
         }
         // Whether the window's keyboard or mouse reached the machine this
         // frame, which the debug server's journal tells while it holds it.
         let mouse_before = (cpu.bus.mouse.x, cpu.bus.mouse.y, cpu.bus.mouse.buttons);
         let mut host_keys = false;
         for event in event_pump.poll_iter() {
+            // The right button held still for the settings window; its
+            // release is swallowed once the window opened.
+            match &event {
+                Event::MouseButtonDown { mouse_btn: MouseButton::Right, .. }
+                    if settings.mouse_menu_hold && !ui.is_open() && !paused && !steering!() =>
+                {
+                    menu_hold.press(std::time::Instant::now());
+                }
+                Event::MouseMotion { xrel, yrel, .. } => menu_hold.motion(*xrel, *yrel),
+                Event::MouseButtonUp { mouse_btn: MouseButton::Right, .. } if menu_hold.release() => continue,
+                _ => {}
+            }
             match event {
                 Event::Quit { .. } => break 'running,
                 // Ctrl+Shift and the mouse fly the 3D scene's camera: look
@@ -856,6 +912,7 @@ fn main() -> Result<(), String> {
                     let shift = keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD);
                     if !repeat {
                         ctrl_alt.key_down(chord_key(scancode));
+                        display.vr_key_pressed();
                     }
                     // Ctrl+Shift+D degausses the monitor.
                     if keycode == Keycode::D && ctrl && shift && !alt {
@@ -1125,6 +1182,7 @@ fn main() -> Result<(), String> {
                                     {
                                         Ok((path, video)) => {
                                             video_recording = Some(video);
+                                            video_frame_at = std::time::Instant::now();
                                             osd.show(format!("Recording video to {}", path.display()));
                                         }
                                         Err(e) => osd.show(e),
@@ -1475,7 +1533,9 @@ fn main() -> Result<(), String> {
         // settings window while it is open.
         dbg.divert = ui.is_open();
         dbg.rewinding = rewinding.is_some();
+        profile::set_host(Zone::Debug);
         dbg.poll(&mut cpu);
+        profile::set_host(Zone::Frontend);
         if dbg.quit_requested() {
             shutdown = debug::ShutdownReason::Quit;
             break 'running;
@@ -1499,9 +1559,13 @@ fn main() -> Result<(), String> {
             // The file layout's version, and this rust-dos's (the header has the one that saved it).
             let (format, emulator) = (slots::FORMAT, env!("CARGO_PKG_VERSION"));
             let result = if request.load {
-                host!().load_for_debugger(&path, request.strict_match, request.check_files).map(|(header, differences, unchecked)| {
+                let loaded = host!().load_for_debugger(&path, request.strict_match, request.check_files, &request.folders);
+                loaded.map(|(header, differences, unchecked)| {
                     let header = slots::reply_header(&header);
                     let mut reply = serde_json::json!({"loaded": path, "format": format, "emulator": emulator, "header": header});
+                    if !request.folders.is_empty() {
+                        reply["folders"] = debug::folders_json(&request.folders);
+                    }
                     strict_match_loaded = request.strict_match;
                     debugger_loaded = true;
                     if !differences.is_empty() {
@@ -1567,6 +1631,8 @@ fn main() -> Result<(), String> {
             if let Some(mode) = &mut det {
                 mode.resync(&cpu);
             }
+            // The Stats page's emulated speed leaves out the jump.
+            stats.clock_moved(&cpu.bus);
             rewinder.clear();
             achievements.reset();
             if strict_match_loaded {
@@ -1582,6 +1648,17 @@ fn main() -> Result<(), String> {
                     Err(e) => osd.show(format!("The video recording failed: {}", e)),
                 }
             }
+        }
+
+        // The right button held still long enough opens the settings
+        // window, with the button let go on the machine.
+        if menu_hold.poll(std::time::Instant::now()) && !ui.is_open() {
+            if capturing_click == Some(MouseButton::Right) {
+                capturing_click = None;
+            } else if cpu.bus.mouse.buttons & 2 != 0 {
+                cpu.bus.mouse.button_up(1);
+            }
+            toggle_ui!();
         }
 
         // The window opening or closing: it takes the keyboard and mouse
@@ -1760,7 +1837,9 @@ fn main() -> Result<(), String> {
         } else {
             exec::run_batch(&mut cpu, &mut dbg, dbg_hot);
         }
+        profile::set_host(Zone::Debug);
         dbg.end_batch(&cpu);
+        profile::set_host(Zone::Frontend);
         let translated = cpu.dynrec.counts().executed.saturating_sub(batch_translated);
 
         // The scene's PC lights its lights as the machine's would: the hard
@@ -1783,6 +1862,18 @@ fn main() -> Result<(), String> {
                 hdd: now < hdd_light,
                 floppy: now < floppy_light,
             });
+            if vr_manuals.0.as_deref() != game.as_ref().map(|g| g.id.as_str()) {
+                vr_manuals.0 = game.as_ref().map(|g| g.id.clone());
+                vr_manuals.1 = match (&game, games_dir(saved.file.as_deref())) {
+                    (Some(game), Some(dir)) => {
+                        let text = std::fs::read_to_string(dir.join(format!("{}.conf", game.id))).unwrap_or_default();
+                        let home = rust_dos::hostdirs::home_dir();
+                        games::manuals(&dir, &game.id, &text, home.as_deref()).into_iter().map(|m| m.path).collect()
+                    }
+                    _ => Vec::new(),
+                };
+            }
+            display.set_manuals(&vr_manuals.1);
         }
         let mix = display.audio_mix().filter(|_| settings.vr.spatial_audio);
         audio_mix.set(mix.unwrap_or(display::audio_mix::IDENTITY));
@@ -1801,7 +1892,9 @@ fn main() -> Result<(), String> {
         }
         let now_ns = cpu.bus.clock.now_ns();
         if settings.rewind && !waiting && now_ns >= next_capture.0 && next_capture.1.elapsed() >= Duration::from_millis(250) {
+            profile::set_host(Zone::Rewind);
             rewinder.offer(now_ns, savestate::machine::save(&cpu));
+            profile::set_host(Zone::Frontend);
             next_capture = (now_ns + REWIND_INTERVAL_NS, std::time::Instant::now());
         }
         if let Some((started, frames)) = &mut rewinding {
@@ -1947,7 +2040,9 @@ fn main() -> Result<(), String> {
         }
 
         // Update Audio
+        profile::set_host(Zone::AudioPump);
         let samples = pump_audio(&mut cpu.bus, waiting);
+        profile::set_host(Zone::Frontend);
         if let Some(wav) = &mut sound_recording
             && let Err(e) = wav.write(&samples)
         {
@@ -1996,6 +2091,11 @@ fn main() -> Result<(), String> {
         if let Some(v) = &mut cpu.bus.voodoo {
             v.set_software_picture(voodoo_picture);
         }
+        profile::set_host(if cpu.bus.voodoo.is_some() {
+            Zone::VoodooFrame
+        } else {
+            Zone::FrameCompose
+        });
         cpu.bus.sync_display();
         let voodoo_gl = display.run_voodoo(&mut cpu.bus, &settings.voodoo);
         if !voodoo_gl
@@ -2011,6 +2111,7 @@ fn main() -> Result<(), String> {
             cpu.bus.vga.mark_dirty_full();
             display.set_frame_size(width, height)?;
         }
+        profile::set_host(Zone::VgaRender);
         let render_start = std::time::Instant::now();
         let rendered = cpu.bus.vga.dirty;
         if cpu.bus.vga.dirty {
@@ -2018,6 +2119,7 @@ fn main() -> Result<(), String> {
             cpu.bus.vga.clear_dirty();
         }
         let render_time = render_start.elapsed();
+        profile::set_host(Zone::FrameCompose);
 
         // The picture shown already, where nothing in it changed: neither
         // the machine's nor anything drawn over it. Composing it, comparing
@@ -2108,7 +2210,14 @@ fn main() -> Result<(), String> {
                     let picture = shaded.as_ref().unwrap_or(base);
                     recorder.capture(base);
                     if let Some(video) = &mut video_recording {
-                        if !video.record(picture, samples.clone(), cpu.bus.clock.now_ns()) {
+                        let now = std::time::Instant::now();
+                        let since = now.duration_since(std::mem::replace(&mut video_frame_at, now));
+                        let recorded = if waiting {
+                            video.record_still(picture, since.as_nanos() as u64)
+                        } else {
+                            video.record(picture, samples.clone(), cpu.bus.clock.now_ns())
+                        };
+                        if !recorded {
                             if let Some(video) = video_recording.take() {
                                 match video.stop() {
                                     Ok(frames) => osd.show(format!("Video recording stopped: the file is full ({} frames)", frames)),
@@ -2132,10 +2241,16 @@ fn main() -> Result<(), String> {
                     }
                 };
             }
+            // A stopped animation recording finishes writing on its own
+            // thread; say so if that failed.
+            if let Some(e) = recorder.finished() {
+                osd.show(e);
+            }
             let capturing = screenshot || recorder.is_active() || video_recording.is_some();
             if capturing && !record_ui {
                 capture!();
             }
+            profile::set_host(Zone::Ui);
             if ui.is_open() {
                 ui.set_mixer_status(cpu.bus.mixer.muted, cpu.bus.mixer.take_peaks());
                 ui.poll(&mut host!());
@@ -2149,6 +2264,7 @@ fn main() -> Result<(), String> {
                 ui.set_sound(&cpu.bus);
                 ui.draw_sound_viz(&mut screen);
             }
+            profile::set_host(Zone::FrameCompose);
             if let Some(view) = &wheel_view {
                 rust_dos::config_ui::wheel::draw(&mut screen, view);
             }
@@ -2197,7 +2313,9 @@ fn main() -> Result<(), String> {
         }
         // Waiting for the deadline of a frame paced to the retrace is
         // neither the frame's work nor time the CPU could have had.
+        profile::set_host(Zone::FrameWait);
         let waited = pacer.wait_to_present(&cpu.bus.clock);
+        profile::set_host(Zone::FramePresent);
         if still {
             dbg.count_frame();
             // The 3D scene is drawn every frame: the viewer moves.
@@ -2207,6 +2325,7 @@ fn main() -> Result<(), String> {
             last_screen_key = Some(screen_key);
         }
 
+        profile::set_host(Zone::Frontend);
         let overhead = frame_start.elapsed().saturating_sub(exec_time + waited);
         if let Some(cycles) = pacer.end_frame(&cpu.bus, cpu.pm_latched, executed, exec_time, overhead) {
             cpu.bus.set_cycles_per_ms(cycles);
@@ -2226,7 +2345,19 @@ fn main() -> Result<(), String> {
                 code_bytes: code.code_bytes,
             },
         ));
+        profile::set_host(Zone::FrameWait);
         pacer.wait_for_next_frame();
+    }
+    // The profile ends with the machine's last frame, before the monitor's
+    // animation, which isn't the machine's work.
+    if let Some(path) = &args.profile {
+        match dbg.profile_write(&mut cpu, path) {
+            Ok(files) => {
+                let names: Vec<String> = files.iter().map(|f| f.display().to_string()).collect();
+                println!("Profile written to {}", names.join(", "));
+            }
+            Err(e) => eprintln!("The profile can't be written to {}: {}", path.display(), e),
+        }
     }
     // The monitor goes off: the picture collapses to a dot, with a thunk.
     if settings.monitor_effects != video::power::MonitorEffects::Off {
@@ -2677,17 +2808,30 @@ impl MainHost<'_, '_> {
     /// changed files are differences like the others. The third list names
     /// the writable drives a `check_files` load couldn't check, as the
     /// state has no record of what was on them. Without `check_files` no
-    /// file is read.
+    /// file is read. `folders` takes the state's folder drives it names as
+    /// mounted from other host folders: they are compared (and with
+    /// `check_files` their files) as if the state had been saved with them,
+    /// and the load leaves the drives mounted from them. The header returned
+    /// has the folders the state records.
     #[allow(clippy::type_complexity)]
     fn load_for_debugger(
         &mut self,
         path: &std::path::Path,
         strict_match: bool,
         check_files: bool,
+        folders: &[(u8, PathBuf)],
     ) -> Result<(slots::Header, Vec<String>, Vec<String>), (u16, serde_json::Value)> {
         // Whatever failed, the machine, its settings and hardware are as they were.
         let failed = |e: String| (400, serde_json::json!({"error": e, "loaded": false, "unchanged": true}));
-        let (header, state) = self.read_state(path).map_err(failed)?;
+        let (mut header, state) = self.read_state(path).map_err(failed)?;
+        // A `check_files` state's media list every file: kept only when relocated.
+        let recorded = (!folders.is_empty()).then(|| header.media.clone());
+        if !folders.is_empty() {
+            let media = header.media.as_mut().ok_or_else(|| {
+                failed(format!("the state doesn't record its media (saved by rust-dos {}), so folders can't be taken", header.version))
+            })?;
+            savestate::media::relocate(media, folders).map_err(failed)?;
+        }
         let mut differences = slots::machine_differences(&header.machine, &self.machine.settings(self.settings));
         // The machine's clock is the mode's start plus emulated time.
         let start = self.deterministic.map(|start| start.format("%Y-%m-%d %H:%M:%S").to_string());
@@ -2724,7 +2868,13 @@ impl MainHost<'_, '_> {
             let error = format!("{} doesn't match this machine; nothing was loaded", path.display());
             return Err((409, serde_json::json!({"error": error, "loaded": false, "unchanged": true, "differences": differences})));
         }
-        let header = self.load_state(path, header, &state).map_err(failed)?;
+        self.cpu.bus.disk.folders_from_state = folders.to_vec();
+        let loaded = self.load_state(path, header, &state);
+        self.cpu.bus.disk.folders_from_state.clear();
+        let mut header = loaded.map_err(failed)?;
+        if let Some(recorded) = recorded {
+            header.media = recorded;
+        }
         Ok((header, differences, unchecked))
     }
 
@@ -2871,10 +3021,12 @@ impl Host for MainHost<'_, '_> {
         if shown(new) != shown(&old) {
             self.display.apply(new)?;
         }
-        // The 3D scene opened, closed or changed; the first of what it has
-        // to say is shown, unless the machine has more to say.
+        // The 3D scene opened, closed or changed (a scene file is read again
+        // once it is written again, an update downloaded in its place); the
+        // first of what it has to say is shown, unless the machine has more
+        // to say.
         let mut vr_note = None;
-        if new.vr != old.vr {
+        if new.vr != old.vr || new.vr.scene.is_some() {
             for note in self.display.apply_vr(&new.vr) {
                 self.cpu.bus.log_string(&note);
                 vr_note.get_or_insert_with(|| note.trim_start_matches("[VR] ").to_string());
@@ -2900,6 +3052,7 @@ impl Host for MainHost<'_, '_> {
         rust_dos::voodoo::overlay::provide(&mut self.cpu.bus);
         self.cpu.bus.ide_hard_disks = new.ide_hard_disks;
         self.cpu.bus.boot_cdrom = new.boot_cdrom;
+        self.cpu.bus.floppy_controller = new.floppy_controller;
         if new.dos_version != old.dos_version {
             rust_dos::dos_data::set_version(&mut self.cpu.bus, new.dos_version);
         }
@@ -2988,6 +3141,13 @@ impl Host for MainHost<'_, '_> {
         }
         self.display.recenter();
         Ok("View centered where your head is".to_string())
+    }
+
+    fn mark_vr_keyboard(&mut self) -> Result<String, String> {
+        if !self.display.mark_vr_keyboard() {
+            return Err("No VR headset shows the scene".to_string());
+        }
+        Ok("In the headset: hold the trigger along the keyboard's front edge, then click at its back edge (grip cancels)".to_string())
     }
 
     fn boot(&mut self, drive: u8) -> Result<String, String> {

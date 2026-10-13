@@ -130,6 +130,9 @@ What Rust-DOS looks for, by object name:
   speaker_left/right      where the left and right sound comes from
   led_power, led_turbo,   the PC's lights: they glow in their material's
   led_hdd, led_floppy     emission colour while the emulated PC's are lit
+  manual, joystick        where the game's manual and the joystick stand, to
+                          be picked up in VR (their +Y away from you); empties
+                          get Rust-DOS's models, or put your own meshes below
 
 Export: File > Export > glTF 2.0
   Format: glTF Binary (.glb)
@@ -161,9 +164,10 @@ def build():
 
     room = bpy.data.collections.new("Room")
     pc = bpy.data.collections.new("PC")
+    desk = bpy.data.collections.new("Desk")
     markers = bpy.data.collections.new("Rust-DOS markers")
     preview = bpy.data.collections.new("Viewport only")
-    for collection in (room, pc, markers, preview):
+    for collection in (room, pc, desk, markers, preview):
         scene.collection.children.link(collection)
 
     # The floor: 500 m square, so its edges are lost in the haze; one UV
@@ -220,6 +224,20 @@ def build():
     ):
         x = -0.05 + i * 0.025
         cuboid(f"led_{name}", on_front(x, 0.0), (0.008, 0.008, 0.008), led(f"LED {name}", color), pc)
+
+    # A desk in front of the viewer, its top 72 cm up: the top and four
+    # legs.
+    wood = material("Desk", hex_linear(0x6B4A30))
+    top_y, top = 0.72, (1.2, 0.03, 0.6)
+    desk_x, desk_z = 0.0, -0.55
+    cuboid("Desk top", from_gltf(desk_x, top_y - top[1] / 2, desk_z), (top[0], top[2], top[1]), wood, desk)
+    for i, (x, z) in enumerate([(-1, -1), (1, -1), (1, 1), (-1, 1)]):
+        leg = from_gltf(desk_x + x * (top[0] / 2 - 0.04), (top_y - top[1]) / 2, desk_z + z * (top[2] / 2 - 0.04))
+        cuboid(f"Desk leg {i + 1}", leg, (0.04, 0.04, top_y - top[1]), wood, desk)
+    # On it, the manual (shown while a game with one runs) and the
+    # joystick: empties, so Rust-DOS's own models stand there.
+    empty("manual", from_gltf(-0.28, top_y, -0.47), markers, kind="ARROWS", size=0.1)
+    empty("joystick", from_gltf(0.3, top_y, -0.45), markers, kind="ARROWS", size=0.1)
 
     # Where the eyes start (1.2 m up, looking at the screen along +Y), and
     # where the sound comes from: the screen's sides, as without them.

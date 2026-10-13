@@ -9,7 +9,8 @@
 //! shows; the scene itself is drawn every frame, since the viewer moves.
 //! The PC in the scene has its lights lit as the machine's would be, the
 //! sound comes from the screen's sides, and the headset's controllers
-//! point at the screen as the mouse and are a gamepad.
+//! point at the screen as the mouse and are a gamepad. The game's manual
+//! and a joystick lie on the desk, to be picked up in the headset.
 
 mod camera;
 mod controls;
@@ -18,7 +19,10 @@ mod foveation;
 mod gi;
 #[cfg(xr)]
 mod headset;
+#[cfg(xr)]
+mod keyboard;
 mod pick;
+mod props;
 mod render;
 mod scene;
 mod shadow;
@@ -32,13 +36,14 @@ pub use controls::VrInput;
 use super::audio_mix::Mix;
 use glam::{Mat4, Vec2};
 use glow::HasContext;
-use render::{Dest, Format, Gpu, Options, Pass, ScreenTarget, View};
+use render::{Dest, Format, Gpu, Options, Pass, Punch, ScreenTarget, View};
 use rust_dos::vr::{ScreenFit, VrMode, VrSettings};
 use scene::Scene;
 use rust_dos::vr::{Leds, VrGraphics, VrLook};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError};
+use std::time::SystemTime;
 
 pub struct Stage {
     scene: Arc<Scene>,
@@ -69,15 +74,23 @@ pub struct Stage {
     look: VrLook,
     mobile: bool,
     /// How the headset's session draws, its eyes' resolution and its
-    /// refresh rate, which it is started again for.
-    headset_options: (VrGraphics, Option<u32>, Option<u32>),
+    /// refresh rate, and whether the cameras show the keyboard, which it
+    /// is started again for.
+    headset_options: (VrGraphics, Option<u32>, Option<u32>, bool),
     glow: f32,
-    /// The scene file shown (None: the test room), and the one being read
-    /// on a thread of its own to take its place.
+    /// The scene file shown (None: the test room) and when it was written,
+    /// and the one being read on a thread of its own to take its place.
+    /// Written again (an update downloaded in its place), it is read again.
     scene_path: Option<PathBuf>,
-    loading: Option<(Option<PathBuf>, Receiver<Result<Scene, String>>)>,
+    scene_written: Option<SystemTime>,
+    loading: Option<(Option<PathBuf>, Option<SystemTime>, Receiver<Result<Scene, String>>)>,
     /// When the window's frame times were last said (RUST_DOS_VR_TIMING).
     timing_since: std::time::Instant,
+    /// The props as the window shows them (where the scene has them), and
+    /// the game's manuals, which they haven't taken yet if `fresh_manuals`.
+    props: props::Props,
+    manuals: Vec<PathBuf>,
+    fresh_manuals: bool,
 }
 
 /// How the window's view is drawn, as `look` says: timed with
@@ -89,6 +102,11 @@ fn window_options(look: VrLook) -> Options {
         multiview: None,
         ambient_occlusion: look.ambient_occlusion,
     }
+}
+
+/// What the headset's session is started again for when it changes.
+fn headset_options(settings: &VrSettings) -> (VrGraphics, Option<u32>, Option<u32>, bool) {
+    (settings.graphics, settings.resolution, settings.refresh, settings.keyboard != rust_dos::vr::VrKeyboard::Off)
 }
 
 /// Width and height.
@@ -143,6 +161,7 @@ impl Stage {
             screens.push(screen);
         }
         let camera = FlyCamera::at(scene.spawn);
+        let props = props::Props::new(&scene);
         #[allow(unused_mut)]
         let mut stage = Stage {
             scene,
@@ -161,11 +180,15 @@ impl Stage {
             mode: settings.mode,
             look,
             mobile,
-            headset_options: (settings.graphics, settings.resolution, settings.refresh),
+            headset_options: headset_options(settings),
             glow: glow_of(settings),
             scene_path: settings.scene.clone(),
+            scene_written: written(settings.scene.as_deref()),
             loading: None,
             timing_since: std::time::Instant::now(),
+            props,
+            manuals: Vec::new(),
+            fresh_manuals: false,
         };
         if settings.mode == VrMode::Headset {
             notes.extend(stage.start_headset(settings, window, main));
@@ -186,6 +209,7 @@ impl Stage {
             let textures = [self.screens[0].texture, self.screens[1].texture, self.screens[2].texture];
             match headset::Headset::start(window, main, self.glsl, self.scene.clone(), textures, settings) {
                 Ok(headset) => {
+                    headset.set_manuals(self.manuals.clone());
                     self.headset = Some(headset);
                     None
                 }
@@ -211,6 +235,7 @@ impl Stage {
     /// `gl` current. (A scene still being read is let go of.)
     pub fn close(mut self, gl: &glow::Context) {
         self.stop_headset(gl);
+        self.props.delete(gl);
         self.gpu.delete(gl);
         for screen in self.screens {
             screen.delete(gl);
@@ -280,7 +305,11 @@ impl Stage {
         let aspect = drawable.0 as f32 / drawable.1 as f32;
         let view = View { view: self.camera.view(), projection: self.camera.projection(aspect) };
         let format = Format { size: drawable, srgb: false };
-        if let Err(e) = self.gpu.render(gl, &self.scene, &[view], Dest::Own(format), drawable, screen, self.leds, &[]) {
+        if std::mem::take(&mut self.fresh_manuals) {
+            self.props.set_manuals(gl, self.manuals.clone());
+        }
+        let props = self.props.draws(gl, &self.gpu, &self.scene, std::time::Instant::now());
+        if let Err(e) = self.gpu.render(gl, &self.scene, &[view], Dest::Own(format), drawable, screen, self.leds, &props, &[], Punch::None) {
             eprintln!("[VR] {}", e);
             clear_window(gl, drawable);
             return;
@@ -322,6 +351,26 @@ impl Stage {
         }
     }
 
+    /// Mark the real keyboard with a controller, in the headset: false
+    /// without one.
+    pub fn mark_keyboard(&mut self) -> bool {
+        #[cfg(xr)]
+        if let Some(headset) = &self.headset {
+            headset.mark_keyboard();
+            return true;
+        }
+        false
+    }
+
+    /// A key of the host's was pressed (where the fingers are finds the
+    /// keyboard).
+    pub fn key_pressed(&self) {
+        #[cfg(xr)]
+        if let Some(headset) = &self.headset {
+            headset.key_pressed();
+        }
+    }
+
     /// Whether a headset is attached, running or not.
     pub fn has_headset(&self) -> bool {
         #[cfg(xr)]
@@ -349,8 +398,9 @@ impl Stage {
     /// Read the scene `path` (None: the test room) on a thread of its own,
     /// to show once it is read.
     fn switch_scene(&mut self, path: Option<PathBuf>) {
-        let wanted = self.loading.as_ref().map_or(&self.scene_path, |(path, _)| path);
-        if *wanted == path {
+        let when = written(path.as_deref());
+        let wanted = self.loading.as_ref().map_or((&self.scene_path, self.scene_written), |(path, when, _)| (path, *when));
+        if wanted == (&path, when) {
             return;
         }
         let (done, result) = std::sync::mpsc::channel();
@@ -360,20 +410,20 @@ impl Stage {
         });
         // (Without a thread, the scene stays.)
         if spawned.is_ok() {
-            self.loading = Some((path, result));
+            self.loading = Some((path, when, result));
         }
     }
 
     /// The scene read, in place of the one shown: in the window, and in
     /// the headset. Kept if it can't be drawn.
     fn poll_scene(&mut self, gl: &glow::Context) -> Vec<String> {
-        let Some((path, result)) = &self.loading else { return Vec::new() };
+        let Some((path, when, result)) = &self.loading else { return Vec::new() };
         let read = match result.try_recv() {
             Ok(read) => read,
             Err(TryRecvError::Empty) => return Vec::new(),
             Err(TryRecvError::Disconnected) => Err("reading it stopped".to_string()),
         };
-        let path = path.clone();
+        let (path, when) = (path.clone(), *when);
         self.loading = None;
         let scene = match read.and_then(|scene| Ok((Gpu::new(gl, self.glsl, &scene, self.look.quality, window_options(self.look))?, scene))) {
             Ok((gpu, scene)) => {
@@ -382,14 +432,17 @@ impl Stage {
                 Arc::new(scene)
             }
             Err(e) => {
-                // Tried again when it is chosen again.
+                // Tried again when it is chosen again, or written again.
                 self.scene_path = path;
+                self.scene_written = when;
                 return vec![format!("The scene can't be shown: {}", e)];
             }
         };
         self.scene_path = path;
+        self.scene_written = when;
         self.scene = scene.clone();
         self.camera = FlyCamera::at(scene.spawn);
+        self.props.reset(&scene);
         self.fresh = self.latest.is_some();
         self.shown = None;
         #[cfg(xr)]
@@ -406,6 +459,19 @@ impl Stage {
         #[cfg(xr)]
         if let Some(headset) = &self.headset {
             headset.set_leds(leds);
+        }
+    }
+
+    /// The game's manuals, for the booklet on the desk: none hides it.
+    pub fn set_manuals(&mut self, manuals: &[PathBuf]) {
+        if manuals == self.manuals.as_slice() {
+            return;
+        }
+        self.manuals = manuals.to_vec();
+        self.fresh_manuals = true;
+        #[cfg(xr)]
+        if let Some(headset) = &self.headset {
+            headset.set_manuals(self.manuals.clone());
         }
     }
 
@@ -435,8 +501,8 @@ impl Stage {
                 Err(e) => notes.push(format!("[VR] The lighting can't be changed: {}", e)),
             }
         }
-        if (settings.graphics, settings.resolution, settings.refresh) != self.headset_options {
-            self.headset_options = (settings.graphics, settings.resolution, settings.refresh);
+        if headset_options(settings) != self.headset_options {
+            self.headset_options = headset_options(settings);
             restart |= self.has_headset();
         }
         if settings.mode != self.mode || restart {
@@ -455,6 +521,7 @@ impl Stage {
             headset.set_controllers(settings.controllers);
             headset.set_glow(glow_of(settings));
             headset.set_placement(headset::Placement::of(settings));
+            headset.set_keyboard(settings.keyboard);
         }
         notes
     }
@@ -482,6 +549,11 @@ impl Stage {
 }
 
 /// The scene of the file `path`, or the test room.
+/// When the scene file `path` was last written, if it can be said.
+fn written(path: Option<&std::path::Path>) -> Option<SystemTime> {
+    std::fs::metadata(path?).and_then(|m| m.modified()).ok()
+}
+
 fn load(path: Option<&std::path::Path>) -> Result<Scene, String> {
     match path {
         Some(path) => Scene::load(path),

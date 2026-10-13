@@ -163,10 +163,12 @@ fn import_from(texts: &[&str], bases: &[PathBuf], name: &str, home: Option<&Path
     // DOSBox Staging's cycles, which the old `cycles` overrides, and the
     // palette of a monochrome machine.
     let (mut legacy_cycles, mut cpu_cycles, mut cpu_cycles_protected, mut palette) = (false, None, None, None);
+    let mut dosbox_machine: Option<String> = None;
     for conf in &confs {
         for (section, key, value) in &conf.values {
             gus_set |= section == "gus" && key == "gus";
             match (section.as_str(), key.as_str()) {
+                ("dosbox", "machine") => dosbox_machine = value.split_whitespace().next().map(str::to_ascii_lowercase),
                 ("cpu", "cycles") => legacy_cycles |= !value.is_empty(),
                 ("cpu", "cpu_cycles") => cpu_cycles = Some(value.to_ascii_lowercase()),
                 ("cpu", "cpu_cycles_protected") => cpu_cycles_protected = Some(value.to_ascii_lowercase()),
@@ -228,8 +230,48 @@ fn import_from(texts: &[&str], bases: &[PathBuf], name: &str, home: Option<&Path
         }
         autoexec_line(&mut imported, line, bases, home, &mut roots);
     }
+    // A Windows installed in DOSBox on its S3 card (DOSBox's default
+    // machine, or one of DOSBox-X's S3 chips) has the S3's driver and
+    // falls back to safe mode without the card. A configuration that boots
+    // a hard disk keeps the S3, which DOS games get as svga. A machine
+    // its commands set (CONFIG -SET) stays.
+    let s3 = dosbox_machine.as_deref().is_none_or(dosbox_s3);
+    let machine = imported.settings.iter().find(|(_, k, _)| *k == "machine").map(|(_, _, v)| v.as_str());
+    if s3 && matches!(machine, None | Some("svga")) && imported.autoexec.iter().any(|line| boots_hard_disk(line)) {
+        imported.set("emulator", "machine", "svga_s3");
+    }
     imported.drop_invalid();
     imported
+}
+
+/// Whether DOSBox's `machine` is its S3: `svga_s3`, the VESA variants of
+/// it (`vesa_nolfb`, `vesa_oldvbe`), or one of DOSBox-X's other S3 chips
+/// that rust-dos has no card of its own for.
+fn dosbox_s3(machine: &str) -> bool {
+    use crate::video::adapter::Adapter;
+    match Adapter::parse(machine) {
+        Some(adapter) => adapter == Adapter::S3 || matches!(machine, "vesa_nolfb" | "vesa_oldvbe"),
+        None => machine.starts_with("svga_s3"),
+    }
+}
+
+/// A command's name as DOS runs it: without a path, drive or `.COM`, in
+/// lower case.
+fn command_verb(token: &str) -> String {
+    let verb = token.to_ascii_lowercase();
+    verb.rsplit(['\\', ':']).next().unwrap_or(&verb).trim_end_matches(".com").to_string()
+}
+
+/// Whether an imported BOOT line starts a system from a hard disk: `-l`
+/// with C:, D: or the hard disk units 2 and 3.
+fn boots_hard_disk(line: &str) -> bool {
+    let mut tokens = line.split_whitespace();
+    let is_boot = tokens.next().is_some_and(|verb| command_verb(verb) == "boot");
+    let args: Vec<&str> = tokens.collect();
+    is_boot
+        && args.windows(2).any(|pair| {
+            pair[0].eq_ignore_ascii_case("-l") && matches!(pair[1].trim_end_matches(':').to_ascii_lowercase().as_str(), "c" | "d" | "2" | "3")
+        })
 }
 
 /// The game in the operating system `name`, its package's own
@@ -317,6 +359,11 @@ fn boot_os(imported: &mut Imported, name: &str, root: Option<&Path>, scan: &crat
         }
     }
     imported.drives.push(crate::mount::MountSpec { drive: numbered_drive(2), path: disk, opts: Default::default() });
+    // The S3 was kept for the configuration's own disk, which isn't booted.
+    let kept_s3 = imported.settings.iter().any(|(_, k, v)| *k == "machine" && v == "svga_s3");
+    if kept_s3 && imported.autoexec.iter().any(|line| boots_hard_disk(line)) {
+        imported.set("emulator", "machine", "svga");
+    }
     let dropped: Vec<String> = imported.autoexec.drain(..).filter(|l| !l.trim_start_matches('@').to_ascii_lowercase().starts_with("boot")).collect();
     if !dropped.is_empty() {
         imported.warnings.push(format!("[rust-dos] os={}: these commands don't run in it: {}", name, dropped.join("; ")));
@@ -367,12 +414,13 @@ fn setting(imported: &mut Imported, section: &str, key: &str, value: &str) {
         ("cpu", "cputype") => match first {
             f if f.starts_with("386") => imported.set("emulator", "cpu", "386"),
             f if f.starts_with("486") || f == "auto" => imported.set("emulator", "cpu", "486"),
-            // The Pentium MMX, and the later ones with MMX as the nearest
-            // there is; the Pentium Pro had none.
-            f if f.starts_with("pentium_mmx") || f.starts_with("pentium_ii") || f == "experimental" => {
-                imported.set("emulator", "cpu", "pentium_mmx")
-            }
-            f if f.starts_with("pentium") || f.starts_with("ppro") => imported.set("emulator", "cpu", "pentium"),
+            f if f.starts_with("pentium_mmx") => imported.set("emulator", "cpu", "pentium_mmx"),
+            // The Pentium II, and the Pentium III (and DOSBox-X's
+            // experimental type, which reports one) with the Pentium II as
+            // the nearest there is: it has no SSE.
+            f if f.starts_with("pentium_ii") || f == "experimental" => imported.set("emulator", "cpu", "pentium_ii"),
+            f if f.starts_with("ppro") => imported.set("emulator", "cpu", "pentium_pro"),
+            f if f.starts_with("pentium") => imported.set("emulator", "cpu", "pentium"),
             _ => unknown(imported),
         },
         // DOSBox's default, svga_s3, is what DOS games get from it: the
@@ -443,7 +491,8 @@ fn setting(imported: &mut Imported, section: &str, key: &str, value: &str) {
             "sb1" | "sb2" => imported.set("sound", "sbtype", "sb2"),
             // DOSBox Staging's ESS AudioDrive, a Sound Blaster Pro to games.
             "sbpro1" | "sbpro2" | "ess" => imported.set("sound", "sbtype", "sbpro2"),
-            "sb16" | "sb16vibra" => imported.set("sound", "sbtype", "sb16"),
+            "sb16" => imported.set("sound", "sbtype", "sb16"),
+            "sb16vibra" => imported.set("sound", "sbtype", "sb16vibra"),
             "none" => imported.set("sound", "sbtype", "none"),
             _ => unknown(imported),
         },
@@ -511,6 +560,12 @@ fn setting(imported: &mut Imported, section: &str, key: &str, value: &str) {
             _ => unknown(imported),
         },
         ("speaker", "disney") if bool_value() == Some("true") => imported.set("sound", "lpt_dac", "disney"),
+        // DOSBox-X's option for Bao Xiao San Guo Zhi, off by default.
+        ("speaker", "pcspeaker clock gate enable at startup") => match bool_value() {
+            Some("true") => imported.set("sound", "pit2_gate_at_start", "true"),
+            Some(_) => {}
+            None => unknown(imported),
+        },
         // DOSBox-X's 3dfx card. Its default, auto, is in every config it
         // writes, so only a card asked for by name is put in.
         ("voodoo", "voodoo_card") | ("pci", "voodoo") => match first {
@@ -571,11 +626,16 @@ const SECTIONS: [&str; 8] = ["cpu", "dosbox", "dos", "render", "sblaster", "gus"
 /// is. `roots` are the directories of the drives mounted so far, for
 /// images named by their DOS paths.
 fn autoexec_line(imported: &mut Imported, line: &str, bases: &[PathBuf], home: Option<&Path>, roots: &mut Vec<(u8, PathBuf)>) {
-    let working_dir = bases.first().map_or(Path::new("."), PathBuf::as_path);
+    // Where DOSBox ran: the first of `bases` there is (GOG's DOSBOX folder
+    // only where the game has one).
+    let working_dir = bases
+        .iter()
+        .find(|base| crate::hostfs::exists(base))
+        .or(bases.first())
+        .map_or(Path::new("."), PathBuf::as_path);
     let command = line.trim_start_matches('@').trim();
     let tokens = tokenize(command).unwrap_or_default();
-    let verb = tokens.first().map(|t| t.to_ascii_lowercase()).unwrap_or_default();
-    let verb = verb.rsplit(['\\', ':']).next().unwrap_or(&verb).trim_end_matches(".com").to_string();
+    let verb = tokens.first().map_or_else(String::new, |t| command_verb(t));
     match verb.as_str() {
         // DOSBox Staging's MOUNT took in IMGMOUNT; both take images, by
         // their host paths or their DOS paths on drives mounted before.
@@ -716,10 +776,16 @@ fn image_path(token: &str, bases: &[PathBuf], roots: &[(u8, PathBuf)]) -> PathBu
 }
 
 /// A path relative to the first of `bases` it is found from, or else to the
-/// first.
+/// first of them that is there (GOG's DOSBOX folder only where the game
+/// has one).
 fn resolve(bases: &[PathBuf], rel: &str) -> PathBuf {
     let candidates = bases.iter().map(|base| host_path(base, rel));
-    candidates.clone().find(|p| crate::hostfs::exists(p)).or_else(|| candidates.clone().next()).unwrap_or_else(|| PathBuf::from(rel))
+    candidates
+        .clone()
+        .find(|p| crate::hostfs::exists(p))
+        .or_else(|| bases.iter().find(|base| crate::hostfs::exists(base)).map(|base| host_path(base, rel)))
+        .or_else(|| candidates.clone().next())
+        .unwrap_or_else(|| PathBuf::from(rel))
 }
 
 #[cfg(test)]
@@ -788,6 +854,29 @@ mod tests {
         assert_eq!(machine("[dosbox]\nmachine=svga_et4000\n").as_deref(), Some("svga_et4000"));
     }
 
+    /// A Windows installed on DOSBox's S3 keeps the card when booted; DOS
+    /// games, and a booter floppy, get the plain Super VGA.
+    #[test]
+    fn a_booted_hard_disk_keeps_the_s3() {
+        let machine = |conf: &str| get(&import(&[conf], &[PathBuf::from("/")], "x", None), "machine");
+        let boot = "[autoexec]\nimgmount 2 win95.img -size 512,63,16,520 -t hdd -fs none\nboot -l c\n";
+        assert_eq!(machine(&format!("[dosbox]\nmachine=svga_s3\n{}", boot)).as_deref(), Some("svga_s3"));
+        assert_eq!(machine(boot).as_deref(), Some("svga_s3"), "DOSBox's default machine");
+        assert_eq!(machine(&format!("[dosbox]\nmachine=svga_s3trio64\n{}", boot)).as_deref(), Some("svga_s3"));
+        assert_eq!(machine(&format!("[dosbox]\nmachine=vesa_nolfb\n{}", boot)).as_deref(), Some("svga_s3"));
+        assert_eq!(machine("[dosbox]\nmachine=svga_s3\n[autoexec]\nimgmount c win95.img\nboot c:\n").as_deref(), Some("svga_s3"));
+        assert_eq!(machine("[autoexec]\nimgmount c win95.img\nZ:\\BOOT.COM -l c\n").as_deref(), Some("svga_s3"));
+        // Other cards stay as they are, and so does one the commands set.
+        assert_eq!(machine(&format!("[dosbox]\nmachine=svga_s3virge\n{}", boot)).as_deref(), Some("svga_s3virge"));
+        assert_eq!(machine(&format!("[dosbox]\nmachine=svga_et4000\n{}", boot)).as_deref(), Some("svga_et4000"));
+        assert_eq!(machine(&format!("[dosbox]\nmachine=vgaonly\n{}", boot)).as_deref(), Some("vga"));
+        assert_eq!(machine("[autoexec]\nconfig -set \"dosbox machine=svga_et4000\"\nimgmount c win95.img\nboot -l c\n").as_deref(), Some("svga_et4000"));
+        // No boot, or a floppy's.
+        assert_eq!(machine("[dosbox]\nmachine=svga_s3\n[autoexec]\ngame.exe\n").as_deref(), Some("svga"));
+        assert_eq!(machine("[dosbox]\nmachine=svga_s3\n[autoexec]\nboot game.img\n").as_deref(), Some("svga"));
+        assert_eq!(machine("[dosbox]\nmachine=svga_s3\n[autoexec]\nimgmount a game.img -t floppy\nboot -l a\n").as_deref(), Some("svga"));
+    }
+
     #[test]
     fn network_settings_map_onto_rust_dos_s() {
         let conf = "[ipx]\nipx=true\n[ne2000]\nne2000=true\nnicbase=280\nnicirq=5\nmacaddr=AC:DE:48:88:99:AA\n[autoexec]\nipxnet connect 10.0.0.1\n";
@@ -822,7 +911,7 @@ mod tests {
 
     #[test]
     fn settings_map_onto_rust_dos_s() {
-        let conf = "[cpu]\ncycles=max 80%\ncputype=386_prefetch\ncore=simple\n[dos]\nkeyboardlayout=de\numb=false\nver=7.1\n[gus]\ngus=true\ngusbase=240\n[joystick]\njoysticktype=fcs\n[speaker]\ndisney=true\n[sblaster]\nsbtype=gb\n";
+        let conf = "[cpu]\ncycles=max 80%\ncputype=386_prefetch\ncore=simple\n[dos]\nkeyboardlayout=de\numb=false\nver=7.1\n[gus]\ngus=true\ngusbase=240\n[joystick]\njoysticktype=fcs\n[speaker]\ndisney=true\npcspeaker clock gate enable at startup = true\n[sblaster]\nsbtype=gb\n";
         let imported = import(&[conf], &[PathBuf::from("/")], "x", None);
         let get = |key: &str| imported.settings.iter().find(|(_, k, _)| *k == key).map(|(_, _, v)| v.as_str());
         assert_eq!(get("cycles"), Some("max"));
@@ -838,12 +927,20 @@ mod tests {
         assert_eq!(pentium.settings.iter().find(|(_, k, _)| *k == "cpu").map(|(_, _, v)| v.as_str()), Some("pentium"));
         let mmx = import(&["[cpu]\ncputype=pentium_mmx\n"], &[PathBuf::from("/")], "x", None);
         assert_eq!(mmx.settings.iter().find(|(_, k, _)| *k == "cpu").map(|(_, _, v)| v.as_str()), Some("pentium_mmx"));
+        for (cputype, cpu) in
+            [("ppro_slow", "pentium_pro"), ("pentium_ii", "pentium_ii"), ("pentium_iii", "pentium_ii"), ("experimental", "pentium_ii")]
+        {
+            let conf = format!("[cpu]\ncputype={}\n", cputype);
+            let got = import(&[conf.as_str()], &[PathBuf::from("/")], "x", None);
+            assert_eq!(got.settings.iter().find(|(_, k, _)| *k == "cpu").map(|(_, _, v)| v.as_str()), Some(cpu), "{}", cputype);
+        }
         assert_eq!(get("keyboard_layout"), Some("gr"));
         assert_eq!(get("umb"), Some("false"));
         assert_eq!(get("dos_version"), Some("7.10"));
         assert_eq!(get("gus"), Some("true"));
         assert_eq!(get("joysticktype"), Some("4axis"));
         assert_eq!(get("lpt_dac"), Some("disney"));
+        assert_eq!(get("pit2_gate_at_start"), Some("true"));
         assert_eq!(get("sbtype"), None);
         assert!(imported.warnings[0].contains("sbtype=gb"), "{:?}", imported.warnings);
     }
@@ -965,6 +1062,16 @@ mod tests {
     }
 
     #[test]
+    fn a_vibra16c_stays_a_plug_and_play_card() {
+        let imported = import(&["[sblaster]
+sbtype=sb16vibra
+"], &[PathBuf::from("/")], "x", None);
+        assert_eq!(get(&imported, "sbtype").as_deref(), Some("sb16vibra"));
+        let config = crate::config::parse(&imported.profile_text(None), Path::new("/"), None);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+    }
+
+    #[test]
     fn dosbox_s_commands_become_rust_dos_s() {
         let conf = "[autoexec]\nmount c .\nc:\nconfig -set cpu cycles=9000\nconfig -set \"sblaster irq=5\"\nconfig -set memsize=32\nconfig -get cpu\nmixer sb 50:50 /noshow\nloadfix -64 game.exe -nosound\nloadfix\n";
         let imported = import(&[conf], &[PathBuf::from("/")], "x", None);
@@ -1009,6 +1116,10 @@ mod tests {
         assert_eq!(drive(crate::disk::numbered_drive(2)), Some(os.join("Win98Test.img")));
         assert_eq!(imported.autoexec, ["BOOT -l C"]);
         assert_eq!(imported.warnings.len(), 1, "{:?}", imported.warnings);
+        // The configuration's hard disk isn't booted, so it doesn't keep the S3.
+        let conf = "[rust-dos]\nos=win98test\n[autoexec]\nimgmount 2 win95.img -t hdd\nboot -l c\n";
+        let imported = import_in(&[conf], std::slice::from_ref(&dir), "x", None, Some(&game));
+        assert_eq!(get(&imported, "machine").as_deref(), Some("svga"));
         let imported = import_in(&["[rust-dos]\nos=nothing\n"], std::slice::from_ref(&dir), "x", None, Some(&game));
         assert!(imported.warnings[0].contains("nothing"), "{:?}", imported.warnings);
     }
@@ -1079,6 +1190,22 @@ mod tests {
         // A drive that isn't there.
         let imported = import_in(&["[autoexec]\nremount f g\n"], &bases, "x", None, Some(&game));
         assert_eq!(imported.warnings.len(), 1, "{:?}", imported.warnings);
+    }
+
+    /// A DOSBox-X package booting a hard disk image from its own folder,
+    /// with a folder that isn't there: paths from the package's folder,
+    /// not from a DOSBOX folder it hasn't, and `-ide 0m` no image.
+    #[test]
+    fn a_dosbox_x_disk_image_package_mounts_from_its_folder() {
+        let dir = scratch("dosbox-x-image");
+        fs::remove_dir(dir.join("DOSBOX")).unwrap();
+        fs::write(dir.join("hdd.img"), "").unwrap();
+        let bases = [dir.join("DOSBOX"), dir.clone()];
+        let conf = "[autoexec]\nmount X \"..\\sources\"\nimgmount 2 hdd.img -ide 0m\nboot c:\n";
+        let imported = import(&[conf], &bases, "x", None);
+        let drive = |d| imported.drives.iter().find(|m| m.drive == d).map(|m| (m.path.clone(), m.opts.more_images.clone()));
+        assert_eq!(drive(crate::disk::numbered_drive(2)), Some((dir.join("hdd.img"), vec![])), "{:?}", imported.drives);
+        assert_eq!(drive(23).map(|(p, _)| p), Some(dir.join("..\\sources")));
     }
 
     /// A package's automount folder: its drives by their names, and its

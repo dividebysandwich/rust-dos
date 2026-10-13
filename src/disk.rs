@@ -1,5 +1,5 @@
 use chrono::{DateTime, Datelike, Local, Timelike};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -217,6 +217,187 @@ pub fn short_names<S: AsRef<str>>(names: &[S]) -> Vec<String> {
         }
     }
     result
+}
+
+/// The entries of host folders as last read, with their DOS names. Each
+/// component of a DOS path is looked up among the entries of its folder,
+/// so without this every open, attribute call and FindNext reads and sorts
+/// every folder on its path.
+///
+/// A folder's entries are read again when the guest changed anything on a
+/// host drive since (`changed`), when the folder's modification time moved
+/// (another program added, removed or renamed something in it), and while
+/// that time is under `RECENT` old, too close to tell a change made in the
+/// same tick of a coarse clock (2 seconds on FAT) from the read. Folders
+/// that only a backend reaches (the libretro frontend's, a write overlay's
+/// layer) aren't kept: their times aren't known. Nor are folders of fewer
+/// than `MIN_ENTRIES` entries, which take no longer to read than to check.
+///
+/// A folder's time doesn't always move when another program changes it:
+/// Windows doesn't update it on FAT and exFAT, and unpackers and copy tools
+/// set it back. So a name that isn't among a folder's kept entries is
+/// looked for again in a fresh read (`reread`) before it counts as missing.
+///
+/// The listings of the last few searches are kept the same way, for
+/// FindNext (`DiskController::find_directory_entry`), whatever their size:
+/// a listing stats each entry. FindFirst always lists afresh, so where a
+/// folder's time doesn't move, a file another program adds mid-search
+/// shows on the next FindFirst.
+#[derive(Default)]
+struct HostDirCache {
+    /// Counts the guest's changes to the names in host folders.
+    changes: Cell<u64>,
+    dirs: RefCell<HashMap<PathBuf, HostDir>>,
+    /// The most recent search last. The guest's changes drop the searches
+    /// of the folders they were made in (`touched`).
+    searches: RefCell<Vec<HostSearch>>,
+}
+
+/// A search of a host folder, as FindFirst listed it.
+struct HostSearch {
+    key: SearchKey,
+    modified: std::time::SystemTime,
+    entries: Rc<[DosDirEntry]>,
+}
+
+/// What a search lists: the matches of `pattern` (in the 8.3 form the DTA
+/// keeps for FindNext) among the entries of the host folder `dir` with
+/// search attributes `attr`, on a drive that is writable or not, and that
+/// has `dir` as its root (no "." and ".." entries) or not.
+#[derive(PartialEq, Eq)]
+struct SearchKey {
+    dir: PathBuf,
+    pattern: [u8; 11],
+    attr: u16,
+    writable: bool,
+    root: bool,
+}
+
+struct HostDir {
+    modified: std::time::SystemTime,
+    changes: u64,
+    entries: Rc<[(String, String)]>,
+}
+
+impl HostDirCache {
+    /// How recent a folder's modification time can be for its entries to
+    /// be kept.
+    const RECENT: std::time::Duration = std::time::Duration::from_secs(2);
+    /// Folders kept at most; one is dropped to make room for another.
+    const MAX_DIRS: usize = 64;
+    /// Searches kept at most: a program walking a tree has one open per
+    /// level.
+    const MAX_SEARCHES: usize = 8;
+    /// The fewest entries a folder is kept with. Checking a folder's time
+    /// costs a stat, which on Windows takes about as long as reading a
+    /// folder of a dozen entries.
+    const MIN_ENTRIES: usize = 16;
+
+    /// The guest created, wrote, deleted or renamed something on a host
+    /// drive: every folder is read again.
+    fn changed(&self) {
+        self.changes.set(self.changes.get().wrapping_add(1));
+    }
+
+    /// Host folders changed outside the guest's file calls (a state was
+    /// loaded, a shared disk copied back): nothing kept is used again.
+    fn forget(&self) {
+        self.changed();
+        self.searches.borrow_mut().clear();
+    }
+
+    /// The guest created, wrote, resized, deleted or renamed the host file
+    /// or folder `path`, or changed its attributes: the searches of its
+    /// folder, and of `path` and the folders under it, list them again.
+    /// Searches of other folders are kept, so a program copying the files
+    /// it finds into another folder doesn't list its source each time.
+    fn touched(&self, path: &Path) {
+        let parent = path.parent();
+        self.searches.borrow_mut().retain(|s| Some(s.key.dir.as_path()) != parent && !s.key.dir.starts_with(path));
+    }
+
+    /// The modification time of the host folder `dir`, if what was read of
+    /// it can be kept: it is a folder `std::fs` reaches, and the time is
+    /// `RECENT` or more in the past.
+    fn settled(dir: &Path) -> Option<std::time::SystemTime> {
+        if hostfs::has_scheme(dir) {
+            return None;
+        }
+        hostfs::metadata(dir)
+            .ok()
+            .filter(|m| m.is_dir)
+            .and_then(|m| m.modified)
+            .filter(|&at| at.elapsed().is_ok_and(|age| age >= Self::RECENT))
+    }
+
+    /// The entries of `dir` from `read`, kept in place of the ones kept:
+    /// what was kept lacked a name the guest looked for.
+    fn reread(&self, dir: &Path, read: impl Fn() -> Vec<(String, String)>) -> Rc<[(String, String)]> {
+        let entries: Rc<[(String, String)]> = read().into();
+        if let Some(kept) = self.dirs.borrow_mut().get_mut(dir) {
+            kept.entries = entries.clone();
+        }
+        entries
+    }
+
+    /// The entries of `dir`, kept or from `read`, and whether they are the
+    /// kept ones.
+    fn entries(&self, dir: &Path, read: impl Fn() -> Vec<(String, String)>) -> (Rc<[(String, String)]>, bool) {
+        // Small folders are read each time; a first read tells.
+        let mut first = None;
+        if !self.dirs.borrow().contains_key(dir) {
+            let entries = read();
+            if entries.len() < Self::MIN_ENTRIES {
+                return (entries.into(), false);
+            }
+            first = Some(entries);
+        }
+        let Some(modified) = Self::settled(dir) else {
+            self.dirs.borrow_mut().remove(dir);
+            return (first.unwrap_or_else(read).into(), false);
+        };
+        let changes = self.changes.get();
+        let kept = self.dirs.borrow().get(dir).filter(|k| k.modified == modified && k.changes == changes).map(|k| k.entries.clone());
+        if let Some(entries) = kept {
+            return (entries, true);
+        }
+        // Read after the time was taken, so that a change made in between
+        // shows as a newer time on the next call.
+        let entries: Rc<[(String, String)]> = read().into();
+        let mut dirs = self.dirs.borrow_mut();
+        if dirs.len() >= Self::MAX_DIRS && !dirs.contains_key(dir) {
+            if let Some(dropped) = dirs.keys().next().cloned() {
+                dirs.remove(&dropped);
+            }
+        }
+        dirs.insert(dir.to_path_buf(), HostDir { modified, changes, entries: entries.clone() });
+        (entries, false)
+    }
+
+    /// The listing of the search `key`: the one kept, unless `first` (a
+    /// new search lists the folder as it is now), or from `list`.
+    fn search(
+        &self,
+        key: SearchKey,
+        first: bool,
+        list: impl FnOnce() -> Result<Vec<DosDirEntry>, u8>,
+    ) -> Result<Rc<[DosDirEntry]>, u8> {
+        let mut searches = self.searches.borrow_mut();
+        let at = searches.iter().position(|s| s.key == key);
+        let kept = at.map(|i| searches.remove(i));
+        let Some(modified) = Self::settled(&key.dir) else {
+            return list().map(Into::into);
+        };
+        let entries = match kept {
+            Some(kept) if !first && kept.modified == modified => kept.entries,
+            _ => list()?.into(),
+        };
+        if searches.len() >= Self::MAX_SEARCHES {
+            searches.remove(0);
+        }
+        searches.push(HostSearch { key, modified, entries: entries.clone() });
+        Ok(entries)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -642,11 +823,29 @@ struct OpenFile {
     refs: u16,
     /// Opened for an FCB rather than a handle.
     fcb: bool,
+    /// Made by a create call over a file that had bytes: they go
+    /// when the program first uses the handle (`DiskController::settle`).
+    empty_on_use: bool,
+}
+
+/// Empty a file a create call opened, which nothing has used yet.
+fn empty_created(open: &OpenFile) {
+    match &open.data {
+        OpenData::Host(file, _) => {
+            let _ = file.set_len(0);
+        }
+        OpenData::Fat { volume, at, write: true, .. } => {
+            let _ = volume.truncate(*at, 0);
+        }
+        _ => {}
+    }
 }
 
 /// What an open handle reads and writes.
 enum OpenData {
-    Host(File),
+    /// A host file, and its host path when it was opened for writing:
+    /// writes drop the searches of its folder (`HostDirCache::touched`).
+    Host(File, Option<PathBuf>),
     /// A file held in memory, and the position, which the handles
     /// duplicated from this one share.
     Memory(Bytes, Rc<Cell<u64>>),
@@ -758,6 +957,7 @@ pub fn char_device(filename: &str) -> Option<CharDevice> {
 
 /// Helper struct to transfer directory search results back to the CPU
 #[allow(dead_code)]
+#[derive(Clone)]
 pub struct DosDirEntry {
     pub filename: String,
     pub size: u32,
@@ -789,6 +989,9 @@ pub struct DiskController {
     /// The state file being loaded, whose copies of disks the drives are
     /// offered once they are mounted as it has them (savestate/disks.rs).
     pub(crate) copies_from: Option<PathBuf>,
+    /// The folder drives the state being loaded takes as mounted from other
+    /// host folders, by drive number (a debug server load's `folders`).
+    pub folders_from_state: Vec<(u8, PathBuf)>,
     /// The disks made of shared host directories that a state being loaded
     /// has, with their manifests, for once the drives are mounted as it
     /// has them (`restore_shared`).
@@ -799,6 +1002,8 @@ pub struct DiskController {
     /// The record of the drives' media a state's header has, kept with
     /// the mounts it was made of (savestate/media.rs).
     pub(crate) media: Cell<Option<crate::savestate::media::Kept>>,
+    /// The entries of host folders as last read (`host_entries`).
+    host_dirs: HostDirCache,
 }
 
 impl DiskController {
@@ -846,9 +1051,11 @@ impl DiskController {
             emm_device: false,
             reverts: Vec::new(),
             copies_from: None,
+            folders_from_state: Vec::new(),
             shared_from_state: None,
             notes: Vec::new(),
             media: Cell::new(None),
+            host_dirs: HostDirCache::default(),
         };
         disk.open_standard_devices();
         disk
@@ -870,6 +1077,7 @@ impl DiskController {
                 mode: 0x02,
                 refs: 0,
                 fcb: false,
+                empty_on_use: false,
             };
             self.open_files.insert(sft, file);
         }
@@ -1402,6 +1610,8 @@ impl DiskController {
     }
 
     fn close_drive_files(&mut self, drive: u8) {
+        // Closed by DOS, which emptied them at the create.
+        self.settle_where(|sft, f| sft >= FIRST_FILE && f.drive == drive);
         let gone: Vec<u16> = self
             .open_files
             .iter()
@@ -1589,6 +1799,7 @@ impl DiskController {
             lines.extend(report.conflicts.iter().map(|c| format!("Drive {}: {} changed on both sides", drive_letter(d), c)));
             lines.extend(report.errors.iter().map(|e| format!("Drive {}: {}", drive_letter(d), e)));
         }
+        self.host_dirs.forget();
         lines
     }
 
@@ -1810,7 +2021,8 @@ impl DiskController {
     pub fn sft_entry(&self, sft: u16) -> Option<SftEntry> {
         let open = self.open_files.get(&sft)?;
         let size = match &open.data {
-            OpenData::Host(file) => file.len().unwrap_or(0),
+            _ if open.empty_on_use => 0,
+            OpenData::Host(file, _) => file.len().unwrap_or(0),
             OpenData::Memory(data, _) => data.len() as u64,
             OpenData::Image(_, extent, _) => extent.size as u64,
             OpenData::Fat { volume, at, .. } => volume.reload(*at).map_or(0, |entry| entry.size as u64),
@@ -1845,7 +2057,7 @@ impl DiskController {
     /// Where in the open file `sft` the next read or write goes.
     pub fn position(&self, sft: u16) -> Option<u64> {
         match &self.open_files.get(&sft)?.data {
-            OpenData::Host(file) => (&*file).stream_position().ok(),
+            OpenData::Host(file, _) => (&*file).stream_position().ok(),
             OpenData::Memory(_, pos) | OpenData::Image(_, _, pos) | OpenData::Fat { pos, .. } => Some(pos.get()),
             OpenData::Device(_) => Some(0),
         }
@@ -2085,7 +2297,14 @@ impl DiskController {
 
     /// The entries of a host directory with their DOS names (see
     /// `short_names`), in sorted order. Hidden (dot) files are left out.
-    fn host_entries(dir: &Path) -> Vec<(String, String)> {
+    /// Every component of a path is looked up here, so the entries are
+    /// kept while the folder doesn't change (`HostDirCache`).
+    /// The flag says whether they are the kept ones.
+    fn host_entries(&self, dir: &Path) -> (Rc<[(String, String)]>, bool) {
+        self.host_dirs.entries(dir, || Self::read_host_entries(dir))
+    }
+
+    fn read_host_entries(dir: &Path) -> Vec<(String, String)> {
         let mut names: Vec<String> = hostfs::read_dir(dir)
             .into_iter()
             .flatten()
@@ -2102,12 +2321,16 @@ impl DiskController {
     /// name that matches nothing comes back uppercased, for creating it.
     fn find_host_child(&self, dir: &Path, target: &str) -> (String, String) {
         let target_upper = target.to_ascii_uppercase();
-        let entries = Self::host_entries(dir);
-        entries
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case(target))
-            .or_else(|| entries.iter().find(|(_, short)| *short == target_upper))
-            .cloned()
+        let find = |entries: &[(String, String)]| {
+            entries
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(target))
+                .or_else(|| entries.iter().find(|(_, short)| *short == target_upper))
+                .cloned()
+        };
+        let (entries, kept) = self.host_entries(dir);
+        find(&entries)
+            .or_else(|| kept.then(|| find(&self.host_dirs.reread(dir, || Self::read_host_entries(dir)))).flatten())
             .unwrap_or((target_upper.clone(), target_upper))
     }
 
@@ -2188,7 +2411,7 @@ impl DiskController {
     /// reference of whoever opened it.
     fn opened(&mut self, data: OpenData, drive: u8, owner: u16, key: u64, filename: &str, mode: u8) -> OpenFile {
         let path = self.qualify_path(filename).unwrap_or_else(|| filename.to_ascii_uppercase());
-        OpenFile { data, drive, owner, key, path, mode, refs: 1, fcb: false }
+        OpenFile { data, drive, owner, key, path, mode, refs: 1, fcb: false, empty_on_use: false }
     }
 
     /// The lowest unused entry of the file table.
@@ -2248,6 +2471,9 @@ impl DiskController {
             self.insert(handle, file);
             return Ok(handle);
         }
+        // DOS empties the file at the create call, so opening it again while
+        // the create's handle is still unused must find it empty.
+        self.settle_named(filename);
         // Files held in memory are read-only: read/write opens are
         // downgraded as on a CD-ROM.
         if let Some((drive, d, path)) = self.locate_in_memory(filename) {
@@ -2306,7 +2532,8 @@ impl DiskController {
 
         let (drive, path) = self.locate(filename).ok_or(0x03)?; // Path not found
         // A directory (or a bare "D:") isn't a file: access denied.
-        if hostfs::is_dir(&path) {
+        let existing = hostfs::metadata(&path).ok();
+        if existing.as_ref().is_some_and(|m| m.is_dir) {
             return Err(0x05);
         }
         let writable = self.is_writable(drive);
@@ -2336,19 +2563,41 @@ impl DiskController {
         }
 
         let handle = self.free_handle()?;
-        match options.open(path) {
+        let opened = options.open(&path);
+        // Opening a file that is there already adds no name to its folder.
+        if create && existing.is_none() {
+            self.host_dirs.changed();
+            self.host_dirs.touched(&path);
+        }
+        match opened {
             Ok(file) => {
                 let key = self.file_key(filename);
-                let file = self.opened(OpenData::Host(file), drive, owner, key, filename, mode);
+                let written = (writable && mode & 0x03 != 0).then_some(path);
+                let file = self.opened(OpenData::Host(file, written), drive, owner, key, filename, mode);
                 self.insert(handle, file);
                 Ok(handle)
             }
-            Err(_) => Err(0x02),
+            // Missing: file not found (02h) when its folder is there, path
+            // not found (03h) when a folder on the way isn't.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Err(if path.parent().is_some_and(hostfs::is_dir) { 0x02 } else { 0x03 })
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotADirectory => Err(0x03),
+            // A name Windows refuses (a wildcard in it) is a file that
+            // isn't there, as on other hosts.
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidFilename => Err(0x02),
+            // A file that is there but can't be opened this way (read-only,
+            // in use by another program) is access denied, as DOS has it.
+            Err(_) => Err(0x05),
         }
     }
 
-    // INT 21h, AH=3Ch: Create File. Opens read/write, creating the file if
-    // missing but never truncating (see int21.rs for why).
+    /// INT 21h, AH=3Ch: Create File. Opens read/write, creating the file
+    /// if missing. A file that was there is emptied as DOS does, but only
+    /// when the program first reads, writes, seeks, resizes, stamps or
+    /// closes the handle, or opens, deletes or renames the file by name:
+    /// the old bytes stay on disk until then, so a crash between the
+    /// create and the write that follows doesn't lose a save.
     pub fn create_file(&mut self, filename: &str, owner: u16) -> Result<u16, u8> {
         if self.device(filename).is_some() {
             return self.open_file(filename, 0x02, owner);
@@ -2356,7 +2605,70 @@ impl DiskController {
         let normalized = filename.replace('/', "\\");
         let (drive, _) = self.split_drive(&normalized).ok_or(0x03)?;
         self.check_writable(drive)?;
-        self.open_or_create(filename, 0x02, owner, true)
+        let sft = self.open_or_create(filename, 0x02, owner, true)?;
+        if let Some(open) = self.open_files.get_mut(&sft) {
+            open.empty_on_use = match &open.data {
+                OpenData::Host(file, _) => file.len().is_ok_and(|len| len > 0),
+                OpenData::Fat { volume, at, write: true, .. } => volume.reload(*at).is_ok_and(|e| e.size > 0),
+                _ => false,
+            };
+        }
+        Ok(sft)
+    }
+
+    /// Close the file `sft` that was just opened for a program that got no
+    /// handle for it: a file a create call opened keeps its bytes, as DOS
+    /// fails such a create before it touches the file.
+    pub fn close_unused(&mut self, sft: u16) -> bool {
+        if let Some(open) = self.open_files.get_mut(&sft) {
+            open.empty_on_use = false;
+        }
+        self.close_file(sft)
+    }
+
+    /// Empty the file `sft` names if a create call left that for its first
+    /// use, through whichever handle: DOS emptied it for all of them.
+    fn settle(&mut self, sft: u16) {
+        if self.open_files.values().any(|f| f.empty_on_use)
+            && let Some(key) = self.open_files.get(&sft).map(|f| f.key)
+        {
+            self.settle_where(|_, f| f.key == key);
+        }
+    }
+
+    /// Empty the file `sft` if a create call left that for its first use.
+    fn settle_one(&mut self, sft: u16) {
+        if let Some(open) = self.open_files.get_mut(&sft)
+            && open.empty_on_use
+        {
+            open.empty_on_use = false;
+            empty_created(open);
+            // A search's listing has the file's size.
+            if let OpenData::Host(_, Some(path)) = &open.data {
+                self.host_dirs.touched(path);
+            }
+            self.mark_dirty(sft);
+        }
+    }
+
+    /// Empty every file a create call left for its first use that
+    /// `which` picks.
+    fn settle_where(&mut self, which: impl Fn(u16, &OpenFile) -> bool) {
+        let pending: Vec<u16> =
+            self.open_files.iter().filter(|&(&sft, f)| f.empty_on_use && which(sft, f)).map(|(&sft, _)| sft).collect();
+        for sft in pending {
+            self.settle_one(sft);
+        }
+    }
+
+    /// Empty the file `filename` names if a create call left that for its
+    /// first use: before it is opened again, deleted or renamed, which DOS
+    /// does to the file the create already emptied.
+    fn settle_named(&mut self, filename: &str) {
+        if self.open_files.values().any(|f| f.empty_on_use) {
+            let key = self.file_key(filename);
+            self.settle_where(|_, f| f.key == key);
+        }
     }
 
     /// INT 21h, AH=5Bh: create a file that must not exist yet.
@@ -2383,7 +2695,9 @@ impl DiskController {
     /// Write a whole file at once, as COPY does: `data` at `dos_path`,
     /// replacing a file that is there, dated `stamp` (the packed DOS time
     /// and date) or now.
-    pub fn write_whole_file(&self, dos_path: &str, data: &[u8], stamp: Option<(u16, u16)>) -> Result<(), u8> {
+    pub fn write_whole_file(&mut self, dos_path: &str, data: &[u8], stamp: Option<(u16, u16)>) -> Result<(), u8> {
+        // Before the file is replaced: a FAT image's entry may move.
+        self.settle_named(dos_path);
         if let Some((drive, volume, parts)) = self.locate_fat(dos_path) {
             self.check_writable(drive)?;
             let (time, date) = stamp.unwrap_or_else(fat::dos_now);
@@ -2400,7 +2714,10 @@ impl DiskController {
         if !path.parent().is_some_and(hostfs::is_dir) {
             return Err(0x03);
         }
-        hostfs::write(&path, data).map_err(|_| 0x05)?;
+        let written = hostfs::write(&path, data);
+        self.host_dirs.changed();
+        self.host_dirs.touched(&path);
+        written.map_err(|_| 0x05)?;
         if let Some(when) = stamp.and_then(|(time, date)| dos_to_system_time(time, date)) {
             let _ = OpenOptions::new().write(true).open(&path).and_then(|f| f.set_modified(when));
         }
@@ -2408,7 +2725,9 @@ impl DiskController {
     }
 
     /// INT 21h, AH=41h: delete a file.
-    pub fn delete_file(&self, filename: &str) -> Result<(), u8> {
+    pub fn delete_file(&mut self, filename: &str) -> Result<(), u8> {
+        // A disk image's entry must not be emptied after it is freed.
+        self.settle_named(filename);
         if let Some((drive, volume, parts)) = self.locate_fat(filename) {
             let parts = refs(&parts);
             let entry = volume.find(&parts)?;
@@ -2426,11 +2745,17 @@ impl DiskController {
             return Err(0x02); // File not found
         }
         self.check_writable(drive)?;
-        hostfs::remove_file(path).map_err(|_| 0x05)
+        let removed = hostfs::remove_file(&path);
+        self.host_dirs.changed();
+        self.host_dirs.touched(&path);
+        removed.map_err(|_| 0x05)
     }
 
     /// INT 21h, AH=56h: rename or move a file within a drive.
-    pub fn rename_file(&self, from: &str, to: &str) -> Result<(), u8> {
+    pub fn rename_file(&mut self, from: &str, to: &str) -> Result<(), u8> {
+        // A disk image's entry may move: empty the file while it is where
+        // the handle has it.
+        self.settle_named(from);
         if let Some((drive, volume, from_parts)) = self.locate_fat(from) {
             let from_parts = refs(&from_parts);
             if from_parts.is_empty() {
@@ -2471,14 +2796,19 @@ impl DiskController {
         if self.find_existing_child(&parent, leaf).is_some() {
             return Err(0x05); // Destination exists
         }
-        hostfs::rename(source, parent.join(leaf.to_uppercase())).map_err(|_| 0x05)
+        let target = parent.join(leaf.to_uppercase());
+        let renamed = hostfs::rename(&source, &target);
+        self.host_dirs.changed();
+        self.host_dirs.touched(&source);
+        self.host_dirs.touched(&target);
+        renamed.map_err(|_| 0x05)
     }
 
     /// INT 21h, AX=5700h: the DOS time and date of a file's last change.
     pub fn file_time(&self, handle: u16) -> Result<(u16, u16), u8> {
         let open = self.open_files.get(&handle).ok_or(0x06)?;
         let modified = match &open.data {
-            OpenData::Host(f) => f.modified(),
+            OpenData::Host(f, _) => f.modified(),
             OpenData::Memory(..) => return Ok((MEMORY_TIME, MEMORY_DATE)),
             OpenData::Image(_, extent, _) => return Ok((extent.time, extent.date)),
             OpenData::Fat { volume, at, .. } => {
@@ -2496,7 +2826,10 @@ impl DiskController {
 
     /// INT 21h AX=5701h: set the time and date of an open file. Only
     /// files on disk images keep them; host files keep their own.
-    pub fn set_file_time(&self, handle: u16, time: u16, date: u16) -> Result<(), u8> {
+    pub fn set_file_time(&mut self, handle: u16, time: u16, date: u16) -> Result<(), u8> {
+        // Emptying a disk-image file at its first use stamps it with the
+        // current time, which would replace the one set here.
+        self.settle(handle);
         match &self.open_files.get(&handle).ok_or(0x06u8)?.data {
             OpenData::Fat { volume, at, .. } => volume.set_time(*at, time, date),
             _ => Ok(()),
@@ -2520,10 +2853,14 @@ impl DiskController {
     /// (INT 21h AH=3Eh): the file closes with the last of them, but the
     /// standard devices stay. False if it isn't open.
     pub fn close_file(&mut self, sft: u16) -> bool {
+        self.settle(sft);
         let Some(open) = self.open_files.get_mut(&sft) else { return false };
         open.refs = open.refs.saturating_sub(1);
         if open.refs == 0 && sft >= FIRST_FILE {
-            self.open_files.remove(&sft);
+            // The host may set a written file's time when it is closed.
+            if let Some(OpenFile { data: OpenData::Host(_, Some(path)), .. }) = self.open_files.remove(&sft) {
+                self.host_dirs.touched(&path);
+            }
         }
         self.mark_dirty(sft);
         true
@@ -2554,7 +2891,9 @@ impl DiskController {
         }
     }
 
-    /// Close every open file, for when the shell is reloaded.
+    /// Close every open file, for when the shell is reloaded. A file a
+    /// create call left for its first use keeps its bytes: the program
+    /// was aborted or the machine reset before it wrote its save.
     pub fn close_all_files(&mut self) {
         self.open_files.clear();
         self.open_standard_devices();
@@ -2562,10 +2901,11 @@ impl DiskController {
 
     // INT 21h, AH=3Fh: Read from File
     pub fn read_file(&mut self, handle: u16, count: usize) -> Result<Vec<u8>, u16> {
+        self.settle(handle);
         self.mark_moved(handle);
         if let Some(open) = self.open_files.get_mut(&handle) {
             let file = match &mut open.data {
-                OpenData::Host(file) => file,
+                OpenData::Host(file, _) => file,
                 OpenData::Memory(data, pos) => {
                     let start = (pos.get() as usize).min(data.len());
                     let end = start.saturating_add(count).min(data.len());
@@ -2604,10 +2944,17 @@ impl DiskController {
 
     // INT 21h, AH=40h: Write to File
     pub fn write_file(&mut self, handle: u16, data: &[u8]) -> Result<u16, u8> {
+        self.settle(handle);
         self.mark_dirty(handle);
         if let Some(open) = self.open_files.get_mut(&handle) {
             let file = match &mut open.data {
-                OpenData::Host(file) => file,
+                OpenData::Host(file, path) => {
+                    // A search's listing has the file's size and date.
+                    if let Some(path) = path {
+                        self.host_dirs.touched(path);
+                    }
+                    file
+                }
                 OpenData::Memory(..) | OpenData::Image(..) => return Err(0x05),
                 OpenData::Fat { write: false, .. } => return Err(0x05),
                 OpenData::Fat { volume, at, pos, .. } => {
@@ -2642,10 +2989,11 @@ impl DiskController {
 
     // INT 21h, AH=42h: Seek
     pub fn seek_file(&mut self, handle: u16, offset: i64, origin: u8) -> Result<u64, u16> {
+        self.settle(handle);
         self.mark_moved(handle);
         if let Some(open) = self.open_files.get_mut(&handle) {
             let file = match &mut open.data {
-                OpenData::Host(file) => file,
+                OpenData::Host(file, _) => file,
                 OpenData::Memory(data, pos) => return Self::seek_in(data.len() as u64, pos, offset, origin),
                 OpenData::Image(_, extent, pos) => return Self::seek_in(extent.size as u64, pos, offset, origin),
                 OpenData::Fat { volume, at, pos, .. } => {
@@ -2676,9 +3024,13 @@ impl DiskController {
     /// disk fills up first. Files that can't be written get 05h. The
     /// handle's position stays where it was.
     pub fn set_file_size(&mut self, handle: u16, size: u64) -> Result<(), u8> {
+        self.settle(handle);
         let open = self.open_files.get(&handle).ok_or(0x06u8)?;
         match &open.data {
-            OpenData::Host(file) => {
+            OpenData::Host(file, path) => {
+                if let Some(path) = path {
+                    self.host_dirs.touched(path);
+                }
                 let result = file.set_len(size).map_err(|_| 0x05);
                 self.mark_dirty(handle);
                 return result;
@@ -2866,6 +3218,7 @@ impl DiskController {
         if let Ok(meta) = hostfs::metadata(&path) {
             let want_ro = (attr & 0x01) != 0;
             if meta.readonly != want_ro {
+                self.host_dirs.touched(&path);
                 // Ignore permission-set errors on systems where it's not supported.
                 let _ = hostfs::set_readonly(&path, want_ro);
             }
@@ -2907,7 +3260,10 @@ impl DiskController {
             }
         }
         let target = parent_path.join(leaf.to_uppercase());
-        hostfs::create_dir(&target).map_err(|_| 0x05)
+        let created = hostfs::create_dir(&target);
+        self.host_dirs.changed();
+        self.host_dirs.touched(&target);
+        created.map_err(|_| 0x05)
     }
 
     /// DOS AH=3Ah: Remove an empty directory.
@@ -2934,7 +3290,10 @@ impl DiskController {
         if self.drive(drive_num).is_some_and(|d| dos_form.eq_ignore_ascii_case(&d.current_dir)) {
             return Err(0x10);
         }
-        hostfs::remove_dir(&host_path).map_err(|e| match e.kind() {
+        let removed = hostfs::remove_dir(&host_path);
+        self.host_dirs.changed();
+        self.host_dirs.touched(&host_path);
+        removed.map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => 0x03,
             _ => 0x05, // Access denied (e.g. not empty)
         })
@@ -3061,16 +3420,47 @@ impl DiskController {
 
     // INT 21h, AH=4E/4F: Find First / Find Next
     // search_spec contains the path AND the pattern e.g. "C:\GAMES\*.EXE" or "*.EXE"
+    /// Entry `search_index` of the listing of `search_spec`. FindNext
+    /// passes the same spec with the next index each call; on a host drive
+    /// the listing FindFirst (index 0) made is kept for it, as long as the
+    /// folder doesn't change (`HostDirCache`), rather than listing the
+    /// folder again for each entry.
     pub fn find_directory_entry(
         &self,
         search_spec: &str,
         search_index: usize,
         search_attr: u16,
     ) -> Result<DosDirEntry, u8> {
-        self.list_directory(search_spec, search_attr)?
-            .into_iter()
-            .nth(search_index)
-            .ok_or(0x12)
+        let Some(key) = self.search_key(search_spec, search_attr) else {
+            return self.list_directory(search_spec, search_attr)?.into_iter().nth(search_index).ok_or(0x12);
+        };
+        let entries = self.host_dirs.search(key, search_index == 0, || self.list_directory(search_spec, search_attr))?;
+        entries.get(search_index).cloned().ok_or(0x12)
+    }
+
+    /// What a search of a folder on a host drive lists (see
+    /// `list_directory`); None for other drives and volume label searches.
+    fn search_key(&self, search_spec: &str, search_attr: u16) -> Option<SearchKey> {
+        if search_attr & 0x08 != 0 {
+            return None;
+        }
+        let normalized = search_spec.replace('/', "\\");
+        let (drive_num, rest) = self.split_drive(&normalized)?;
+        let drive = self.drive(drive_num)?;
+        if drive.fat().is_some() || drive.tree().is_some() {
+            return None;
+        }
+        let (parent_dir, pattern) = match rest.rfind('\\') {
+            Some(idx) => rest.split_at(idx + 1),
+            None => ("", rest),
+        };
+        let dir = self.resolve_on(drive_num, if parent_dir.is_empty() { "." } else { parent_dir })?;
+        // FindNext gets the pattern back from the DTA ("RGN*.GFF" comes
+        // back as "RGN?????.GFF"), so both are keyed in that form.
+        let pattern = crate::interrupts::utils::pattern_to_fcb(pattern);
+        let root = drive.host_root() == Some(dir.as_path());
+        // FindNext gets the attributes back from the DTA's one byte.
+        Some(SearchKey { dir, pattern, attr: search_attr & 0xFF, writable: drive.writable(), root })
     }
 
     /// The files a path names, with wildcards in its last part or not,
@@ -3194,8 +3584,22 @@ impl DiskController {
             valid_entries.extend(Self::dot_entries(pattern, [(0, 0); 2]));
         }
 
-        for (original_name, final_name) in Self::host_entries(&host_dir) {
-            let Ok(metadata) = hostfs::metadata(host_dir.join(&original_name)) else {
+        let (mut entries, kept) = self.host_entries(&host_dir);
+        // The folder may have changed without its time moving
+        // (`HostDirCache`). A wildcard search lists what is there now: it
+        // stats every match anyway, so the read adds little. A search for
+        // one name reads again only when nothing kept matches.
+        let wild = pattern.contains(['*', '?']);
+        if kept && (wild || !entries.iter().any(|(_, name)| Self::matches_pattern(name, pattern))) {
+            entries = self.host_dirs.reread(&host_dir, || Self::read_host_entries(&host_dir));
+        }
+        for (original_name, final_name) in entries.iter() {
+            // The name decides first: a stat per entry is what a listing
+            // costs, and a search for one name needs only its own.
+            if !Self::matches_pattern(final_name, pattern) {
+                continue;
+            }
+            let Ok(metadata) = hostfs::metadata(host_dir.join(original_name)) else {
                 continue;
             };
 
@@ -3210,14 +3614,10 @@ impl DiskController {
                 continue;
             }
 
-            if !Self::matches_pattern(&final_name, pattern) {
-                continue;
-            }
-
             let (dos_time, dos_date) = system_time_to_dos(metadata.modified.unwrap_or(std::time::SystemTime::now()));
 
             valid_entries.push(DosDirEntry {
-                filename: final_name,
+                filename: final_name.clone(),
                 size: metadata.len as u32,
                 is_dir,
                 is_readonly,
@@ -3927,6 +4327,177 @@ mod tests {
     }
 
     #[test]
+    fn creating_a_file_that_exists_empties_it_once_the_handle_is_used() {
+        let base = scratch("create_truncates");
+        fs::write(base.join("SAVE.DAT"), b"a long old save").unwrap();
+        fs::write(base.join("KEEP.DAT"), b"kept").unwrap();
+        fs::write(base.join("EMPTY.DAT"), b"old").unwrap();
+        let mut disk = DiskController::new(base.clone());
+
+        // Create, write something shorter, close: only the new bytes.
+        let h = disk.create_file("C:\\SAVE.DAT", PSP).unwrap();
+        assert_eq!(disk.seek_file(h, 0, 2), Ok(0));
+        assert_eq!(disk.write_file(h, b"new"), Ok(3));
+        disk.close_file(h);
+        assert_eq!(fs::read(base.join("SAVE.DAT")).unwrap(), b"new");
+        // Closed at once: empty.
+        let h = disk.create_file("C:\\EMPTY.DAT", PSP).unwrap();
+        disk.close_file(h);
+        assert_eq!(fs::read(base.join("EMPTY.DAT")).unwrap(), b"");
+        // Until the program uses the handle, the old bytes are kept, so a
+        // crash between the create and the write loses nothing.
+        let h = disk.create_file("C:\\KEEP.DAT", PSP).unwrap();
+        assert_eq!(fs::read(base.join("KEEP.DAT")).unwrap(), b"kept");
+        assert_eq!(disk.read_file(h, 10), Ok(Vec::new()));
+        assert_eq!(fs::read(base.join("KEEP.DAT")).unwrap(), b"");
+        disk.close_file(h);
+        // Opened again by name, the file is empty, and stays as the second
+        // handle writes it.
+        fs::write(base.join("KEEP.DAT"), b"kept").unwrap();
+        let created = disk.create_file("C:\\KEEP.DAT", PSP).unwrap();
+        let again = disk.open_file("C:\\KEEP.DAT", 0x02, PSP).unwrap();
+        assert_eq!(disk.write_file(again, b"xy"), Ok(2));
+        disk.close_file(again);
+        disk.close_file(created);
+        assert_eq!(fs::read(base.join("KEEP.DAT")).unwrap(), b"xy");
+        // A create the program got no handle for leaves the file alone.
+        let h = disk.create_file("C:\\KEEP.DAT", PSP).unwrap();
+        disk.close_unused(h);
+        assert_eq!(fs::read(base.join("KEEP.DAT")).unwrap(), b"xy");
+
+        // The same on a disk image.
+        let blank = DiskImage::from_memory("F.IMA", MemoryImage::new(1_474_560), true, None, false).unwrap();
+        fat::format(&blank, 0, 2880, None).unwrap();
+        let bytes = blank.memory().unwrap().clone();
+        disk.mount_memory_image(0, "DISK1.IMA", bytes, MountOptions::default()).unwrap();
+        let h = disk.create_file("A:\\SAVE.DAT", PSP).unwrap();
+        disk.write_file(h, b"a long old save").unwrap();
+        disk.close_file(h);
+        let h = disk.create_file("A:\\SAVE.DAT", PSP).unwrap();
+        assert_eq!(disk.write_file(h, b"new"), Ok(3));
+        disk.close_file(h);
+        assert!(matches!(disk.file_data("A:\\SAVE.DAT").map(|f| f.read()), Some(Ok(d)) if &d[..] == b"new"));
+
+        // Deleted or renamed on the image before the handle is used: the
+        // file is emptied first, and closing the handle later leaves a file
+        // made in the freed entry alone.
+        let h = disk.create_file("A:\\SAVE.DAT", PSP).unwrap();
+        disk.delete_file("A:\\SAVE.DAT").unwrap();
+        let other = disk.create_file("A:\\OTHER.DAT", PSP).unwrap();
+        assert_eq!(disk.write_file(other, b"other"), Ok(5));
+        disk.close_file(other);
+        disk.close_file(h);
+        assert!(matches!(disk.file_data("A:\\OTHER.DAT").map(|f| f.read()), Some(Ok(d)) if &d[..] == b"other"));
+        let h = disk.create_file("A:\\OTHER.DAT", PSP).unwrap();
+        disk.rename_file("A:\\OTHER.DAT", "A:\\MOVED.DAT").unwrap();
+        disk.close_file(h);
+        assert!(matches!(disk.file_data("A:\\MOVED.DAT").map(|f| f.read()), Some(Ok(d)) if d.is_empty()));
+    }
+
+    #[test]
+    fn a_save_state_keeps_a_created_file_waiting_to_be_emptied() {
+        let base = scratch("create_state");
+        fs::write(base.join("SAVE.DAT"), b"old save").unwrap();
+        let mut disk = DiskController::new(base.clone());
+        let h = disk.create_file("C:\\SAVE.DAT", PSP).unwrap();
+        // Saving leaves the old bytes on disk.
+        let mut w = crate::savestate::Writer::new();
+        disk.save_state(&mut w);
+        assert_eq!(fs::read(base.join("SAVE.DAT")).unwrap(), b"old save");
+        // Loaded back, the handle still empties the file when used.
+        let mut loaded = DiskController::new(base.clone());
+        let lost = loaded.load_state(&mut crate::savestate::Reader::new(&w.buf)).unwrap();
+        assert!(lost.is_empty());
+        assert_eq!(fs::read(base.join("SAVE.DAT")).unwrap(), b"old save");
+        assert_eq!(loaded.write_file(h, b"new"), Ok(3));
+        loaded.close_file(h);
+        assert_eq!(fs::read(base.join("SAVE.DAT")).unwrap(), b"new");
+    }
+
+    #[test]
+    fn an_aborted_program_keeps_the_file_its_create_left_unused() {
+        let base = scratch("create_abort");
+        fs::write(base.join("SAVE.DAT"), b"old save").unwrap();
+        let mut disk = DiskController::new(base.clone());
+        disk.create_file("C:\\SAVE.DAT", PSP).unwrap();
+        disk.close_all_files();
+        assert_eq!(fs::read(base.join("SAVE.DAT")).unwrap(), b"old save");
+    }
+
+    #[test]
+    fn a_create_empties_the_file_for_a_handle_opened_before_it() {
+        let base = scratch("create_shared");
+        fs::write(base.join("SAVE.DAT"), b"old save").unwrap();
+        let mut disk = DiskController::new(base.clone());
+        let before = disk.open_file("C:\\SAVE.DAT", 0x02, PSP).unwrap();
+        let created = disk.create_file("C:\\SAVE.DAT", PSP).unwrap();
+        assert_eq!(disk.write_file(before, b"new"), Ok(3));
+        disk.close_file(before);
+        disk.close_file(created);
+        assert_eq!(fs::read(base.join("SAVE.DAT")).unwrap(), b"new");
+        // A whole-file write by name empties first, not after.
+        let created = disk.create_file("C:\\SAVE.DAT", PSP).unwrap();
+        disk.write_whole_file("C:\\SAVE.DAT", b"copied", None).unwrap();
+        disk.close_file(created);
+        assert_eq!(fs::read(base.join("SAVE.DAT")).unwrap(), b"copied");
+    }
+
+    #[test]
+    fn unmounting_empties_a_created_file_waiting_for_its_first_use() {
+        let base = scratch("create_unmount");
+        fs::create_dir_all(base.join("D")).unwrap();
+        fs::write(base.join("D").join("CFG.DAT"), b"old config").unwrap();
+        let mut disk = DiskController::new(base.clone());
+        disk.mount(3, &base.join("D"), MountOptions::default(), false).unwrap();
+        disk.create_file("D:\\CFG.DAT", PSP).unwrap();
+        disk.unmount(3).unwrap();
+        assert_eq!(fs::read(base.join("D").join("CFG.DAT")).unwrap(), b"");
+    }
+
+    #[test]
+    fn a_read_only_file_opened_for_writing_is_access_denied() {
+        let base = scratch("read_only_open");
+        let save = base.join("SAVE.DAT");
+        fs::write(&save, b"old").unwrap();
+        let writable = fs::metadata(&save).unwrap().permissions();
+        let mut perms = writable.clone();
+        perms.set_readonly(true);
+        fs::set_permissions(&save, perms).unwrap();
+        // Root on Unix writes read-only files anyway: nothing to check.
+        let root = fs::OpenOptions::new().write(true).open(&save).is_ok();
+        let mut disk = DiskController::new(base.clone());
+        // Reading is fine; writing is access denied (05h), as on a FAT
+        // disk.
+        let results = [
+            disk.open_file("C:\\SAVE.DAT", 0, PSP).map(|_| ()),
+            disk.open_file("C:\\SAVE.DAT", 1, PSP).map(|_| ()),
+            disk.open_file("C:\\SAVE.DAT", 2, PSP).map(|_| ()),
+            disk.create_file("C:\\SAVE.DAT", PSP).map(|_| ()),
+        ];
+        // Put the attribute back first, so a failure leaves a file the
+        // next run can delete.
+        fs::set_permissions(&save, writable).unwrap();
+        if !root {
+            assert_eq!(results, [Ok(()), Err(0x05), Err(0x05), Err(0x05)]);
+        }
+    }
+
+    #[test]
+    fn a_missing_file_or_folder_on_a_host_drive() {
+        let base = scratch("missing_open");
+        fs::write(base.join("SAVE.DAT"), b"old").unwrap();
+        let mut disk = DiskController::new(base.clone());
+        // A missing file in a folder that's there is file not found (02h);
+        // a missing folder on the way, or a file used as one, is path not
+        // found (03h), as in DOS.
+        assert_eq!(disk.open_file("C:\\NONE.DAT", 2, PSP), Err(0x02));
+        assert_eq!(disk.open_file("C:\\NODIR\\SAVE.DAT", 0, PSP), Err(0x03));
+        assert_eq!(disk.create_file("C:\\NODIR\\SAVE.DAT", PSP), Err(0x03));
+        assert_eq!(disk.open_file("C:\\SAVE.DAT\\X.DAT", 0, PSP), Err(0x03));
+        assert_eq!(disk.create_file("C:\\SAVE.DAT\\X.DAT", PSP), Err(0x03));
+    }
+
+    #[test]
     fn images_held_in_memory() {
         let mut disk = DiskController::new(scratch("memimage"));
         // A hard disk made for C:, and files put on it.
@@ -4068,5 +4639,211 @@ mod tests {
         let z = disk.list_directory("*.*", 0x10).unwrap();
         assert_eq!(z.len(), 1);
         assert_eq!(z[0].filename, "COMMAND.COM");
+    }
+
+    /// Sets a folder's modification time to one in 2020, as a game folder
+    /// installed earlier has it, so that `HostDirCache` keeps its entries.
+    /// Always the same time, as a coarse clock gives a folder changed twice
+    /// in a tick.
+    fn age(dir: &Path) {
+        let mut options = fs::OpenOptions::new();
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            // FILE_WRITE_ATTRIBUTES, FILE_FLAG_BACKUP_SEMANTICS (to open a
+            // folder).
+            options.access_mode(0x100).custom_flags(0x0200_0000);
+        }
+        #[cfg(not(windows))]
+        options.read(true);
+        let at = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
+        options.open(dir).unwrap().set_modified(at).unwrap();
+    }
+
+    /// Files enough for a folder's entries to be kept (`MIN_ENTRIES`).
+    fn fill(dir: &Path) {
+        for i in 0..HostDirCache::MIN_ENTRIES {
+            fs::write(dir.join(format!("FILL{:02}.DAT", i)), b"x").unwrap();
+        }
+    }
+
+    #[test]
+    fn host_folder_entries_are_kept_until_the_folder_changes() {
+        let root = scratch("host_dir_cache");
+        fs::create_dir(root.join("DATA")).unwrap();
+        fs::write(root.join("DATA").join("RGN001.GFF"), b"x").unwrap();
+        fill(&root.join("DATA"));
+        age(&root.join("DATA"));
+        let disk = DiskController::new(root.clone());
+        let data = disk.resolve_path(r"C:\DATA").unwrap();
+        assert!(disk.is_file(r"C:\DATA\RGN001.GFF"));
+        assert!(disk.host_dirs.dirs.borrow().contains_key(&data), "an old folder is kept");
+
+        // Another program adds a file: the folder's time moves, and it is
+        // read again.
+        fs::write(data.join("Long Name.txt"), b"x").unwrap();
+        assert!(disk.is_file(r"C:\DATA\LONGNA~1.TXT"));
+
+        // The folder changed within the last two seconds: not kept, as a
+        // change in the same tick of the clock wouldn't show.
+        assert!(!disk.host_dirs.dirs.borrow().contains_key(&data), "a recent folder isn't kept");
+    }
+
+    #[test]
+    fn host_folders_are_read_again_after_the_guest_changes_one() {
+        let root = scratch("host_dir_cache_guest");
+        fs::write(root.join("OLD.DAT"), b"x").unwrap();
+        fill(&root);
+        age(&root);
+        let mut disk = DiskController::new(root.clone());
+        assert!(disk.is_file(r"C:\OLD.DAT"));
+        let host_root = disk.resolve_path(r"C:\").unwrap();
+        assert!(disk.host_dirs.dirs.borrow().contains_key(&host_root));
+
+        // Each change through DOS is seen at once, even where the folder's
+        // time comes out the same: set back after each.
+        disk.rename_file(r"C:\OLD.DAT", r"C:\NEW.DAT").unwrap();
+        age(&root);
+        assert!(!disk.is_file(r"C:\OLD.DAT"));
+        assert!(disk.is_file(r"C:\NEW.DAT"));
+
+        let handle = disk.create_file(r"C:\MADE.DAT", PSP).unwrap();
+        disk.close_file(handle);
+        age(&root);
+        assert!(disk.is_file(r"C:\MADE.DAT"));
+
+        disk.delete_file(r"C:\MADE.DAT").unwrap();
+        age(&root);
+        assert!(!disk.is_file(r"C:\MADE.DAT"));
+
+        disk.create_directory(r"C:\SAVES").unwrap();
+        age(&root);
+        assert!(disk.is_directory(r"C:\SAVES"));
+        disk.remove_directory(r"C:\SAVES").unwrap();
+        age(&root);
+        assert!(!disk.is_directory(r"C:\SAVES"));
+    }
+
+    /// The names FindFirst and FindNext give for `spec`, until the end.
+    fn find_all(disk: &DiskController, spec: &str) -> Vec<String> {
+        (0..).map_while(|i| disk.find_directory_entry(spec, i, 0x16).ok()).map(|e| e.filename).collect()
+    }
+
+    #[test]
+    fn find_next_goes_on_from_the_listing_find_first_made() {
+        let root = scratch("find_next_kept");
+        for name in ["A.DAT", "B.DAT", "C.DAT", "Long Name.txt"] {
+            fs::write(root.join(name), b"x").unwrap();
+        }
+        fs::create_dir(root.join("SUB")).unwrap();
+        age(&root);
+        let disk = DiskController::new(root.clone());
+        let listed: Vec<String> = disk.list_directory(r"C:\*.*", 0x16).unwrap().into_iter().map(|e| e.filename).collect();
+        assert_eq!(listed, ["A.DAT", "B.DAT", "C.DAT", "LONGNA~1.TXT", "SUB"]);
+        assert_eq!(find_all(&disk, r"C:\*.*"), listed);
+        assert_eq!(disk.host_dirs.searches.borrow().len(), 1, "kept for FindNext");
+        // FindNext spells the pattern as the DTA keeps it.
+        assert_eq!(disk.find_directory_entry(r"C:\*.dat", 0, 0x16).unwrap().filename, "A.DAT");
+        assert_eq!(disk.find_directory_entry(r"C:\????????.DAT", 1, 0x16).unwrap().filename, "B.DAT");
+        assert_eq!(disk.host_dirs.searches.borrow().len(), 2, "one search per pattern");
+
+        // Another program adds a file mid-search: the folder's time moves,
+        // and the next FindNext lists it again.
+        assert_eq!(disk.find_directory_entry(r"C:\*.*", 0, 0x16).unwrap().filename, "A.DAT");
+        fs::write(root.join("AA.DAT"), b"x").unwrap();
+        assert_eq!(disk.find_directory_entry(r"C:\*.*", 1, 0x16).unwrap().filename, "AA.DAT");
+    }
+
+    #[test]
+    fn find_next_sees_the_guest_s_changes_mid_search() {
+        let root = scratch("find_next_guest");
+        for name in ["A.DAT", "B.DAT", "C.DAT"] {
+            fs::write(root.join(name), b"x").unwrap();
+        }
+        age(&root);
+        let mut disk = DiskController::new(root.clone());
+        // A program deleting what it finds, as before: the listing after
+        // the delete is the folder as it is then.
+        assert_eq!(disk.find_directory_entry(r"C:\*.DAT", 0, 0).unwrap().filename, "A.DAT");
+        disk.delete_file(r"C:\A.DAT").unwrap();
+        age(&root);
+        assert_eq!(disk.find_directory_entry(r"C:\*.DAT", 1, 0).unwrap().filename, "C.DAT");
+
+        // A write changes the size a search reports.
+        let handle = disk.open_file(r"C:\C.DAT", 2, PSP).unwrap();
+        assert_eq!(disk.find_directory_entry(r"C:\C.DAT", 0, 0).unwrap().size, 1);
+        disk.write_file(handle, b"longer").unwrap();
+        disk.close_file(handle);
+        age(&root);
+        let found = disk.find_directory_entry(r"C:\*.DAT", 1, 0).unwrap();
+        assert_eq!((found.filename.as_str(), found.size), ("C.DAT", 6));
+
+        // Copying what it finds into another folder, as an installer does,
+        // keeps the search of the source.
+        fs::create_dir(root.join("DEST")).unwrap();
+        age(&root);
+        assert_eq!(disk.find_directory_entry(r"C:\*.DAT", 0, 0).unwrap().filename, "B.DAT");
+        let handle = disk.create_file(r"C:\DEST\B.DAT", PSP).unwrap();
+        disk.write_file(handle, b"x").unwrap();
+        disk.close_file(handle);
+        let source = disk.resolve_path(r"C:\").unwrap();
+        assert!(disk.host_dirs.searches.borrow().iter().any(|s| s.key.dir == source), "kept");
+        assert_eq!(disk.find_directory_entry(r"C:\*.DAT", 1, 0).unwrap().filename, "C.DAT");
+    }
+
+    #[test]
+    fn small_host_folders_are_read_each_time() {
+        let root = scratch("host_dir_cache_small");
+        fs::write(root.join("GAME.EXE"), b"x").unwrap();
+        age(&root);
+        let disk = DiskController::new(root.clone());
+        assert!(disk.is_file(r"C:\GAME.EXE"));
+        assert!(disk.host_dirs.dirs.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_name_missing_from_a_kept_folder_is_looked_for_again() {
+        let root = scratch("host_dir_cache_unmoved");
+        fill(&root);
+        age(&root);
+        let disk = DiskController::new(root.clone());
+        assert!(!disk.is_file(r"C:\PATCH.DAT"));
+        let host_root = disk.resolve_path(r"C:\").unwrap();
+        assert!(disk.host_dirs.dirs.borrow().contains_key(&host_root));
+
+        // Another program adds a file and the folder's time stays where it
+        // was, as on FAT under Windows or after an unpacker restores it.
+        fs::write(root.join("Patch.dat"), b"x").unwrap();
+        age(&root);
+        assert!(disk.is_file(r"C:\PATCH.DAT"));
+        let found: Vec<String> = disk.list_directory(r"C:\PATCH2.DAT", 0).unwrap().into_iter().map(|e| e.filename).collect();
+        assert!(found.is_empty());
+        fs::write(root.join("PATCH2.DAT"), b"x").unwrap();
+        age(&root);
+        let found: Vec<String> = disk.list_directory(r"C:\PATCH2.DAT", 0).unwrap().into_iter().map(|e| e.filename).collect();
+        assert_eq!(found, ["PATCH2.DAT"]);
+
+        // A wildcard search lists the folder as it is.
+        fs::write(root.join("PATCH3.DAT"), b"x").unwrap();
+        age(&root);
+        let found: Vec<String> = disk.list_directory(r"C:\PATCH*.DAT", 0).unwrap().into_iter().map(|e| e.filename).collect();
+        assert_eq!(found, ["PATCH.DAT", "PATCH2.DAT", "PATCH3.DAT"]);
+    }
+
+    #[test]
+    fn a_create_over_an_existing_file_keeps_the_folders() {
+        let root = scratch("host_dir_cache_recreate");
+        fs::write(root.join("CONFIG.DAT"), b"x").unwrap();
+        fill(&root);
+        age(&root);
+        let mut disk = DiskController::new(root.clone());
+        assert!(disk.is_file(r"C:\CONFIG.DAT"));
+        let changes = disk.host_dirs.changes.get();
+        let handle = disk.create_file(r"C:\CONFIG.DAT", PSP).unwrap();
+        disk.close_file(handle);
+        assert_eq!(disk.host_dirs.changes.get(), changes, "no name was added");
+        let handle = disk.create_file(r"C:\NEW.DAT", PSP).unwrap();
+        disk.close_file(handle);
+        assert_ne!(disk.host_dirs.changes.get(), changes);
     }
 }

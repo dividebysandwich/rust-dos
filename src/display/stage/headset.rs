@@ -18,14 +18,16 @@
 //! reallocates a texture the other could be using.
 
 use super::controls::{Controllers, VrInput};
+use super::keyboard::Keyboard;
+use super::props::Props;
 use super::render::{Dest, Features, Format, Gpu, Multiview, Options, Pass};
 use super::scene::{Leds, Scene, Spawn};
 use super::xr::{Xr, XrOptions, log};
 use crate::video::shader::Glsl;
 use glam::{Mat4, Vec3};
 use glow::HasContext;
-use rust_dos::vr::{VrControllers, VrSettings};
-use std::sync::atomic::{AtomicBool, Ordering};
+use rust_dos::vr::{VrControllers, VrKeyboard, VrSettings};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
@@ -228,7 +230,13 @@ struct State {
     placement: Placement,
     /// A scene to show instead, once the thread takes it.
     scene: Option<Arc<Scene>>,
+    /// The game's manuals, for the booklet, once the thread takes them.
+    manuals: Option<Vec<std::path::PathBuf>>,
     recenter: bool,
+    /// Where the cameras show the real keyboard, and whether it is to be
+    /// marked with a controller.
+    keyboard: VrKeyboard,
+    mark_keyboard: bool,
     // From the headset.
     /// The left eye's view, with its view-projection.
     mirror: Ring<Fence, Mat4>,
@@ -244,6 +252,8 @@ struct State {
 struct Shared {
     state: Mutex<State>,
     stop: AtomicBool,
+    /// The host's keys pressed so far.
+    presses: AtomicU32,
 }
 
 impl Shared {
@@ -323,7 +333,14 @@ impl Headset {
         // (Making it made it current here.)
         window.gl_make_current(main)?;
         let context = context?;
-        let shared = Arc::new(Shared { state: Mutex::new(State { controllers, glow, placement: Placement::of(&settings), ..State::default() }), stop: AtomicBool::new(false) });
+        let state = State {
+            controllers,
+            glow,
+            placement: Placement::of(&settings),
+            keyboard: settings.keyboard,
+            ..State::default()
+        };
+        let shared = Arc::new(Shared { state: Mutex::new(state), stop: AtomicBool::new(false), presses: AtomicU32::new(0) });
         // SAFETY: the context outlives the thread (`Headset::drop`).
         let (raw_window, raw_context) = (Raw(hidden.raw().cast()), Raw(unsafe { context.raw() }));
         let thread_shared = shared.clone();
@@ -386,6 +403,11 @@ impl Headset {
         self.shared.lock().scene = Some(scene);
     }
 
+    /// The game's manuals, for the booklet on the desk.
+    pub fn set_manuals(&self, manuals: Vec<std::path::PathBuf>) {
+        self.shared.lock().manuals = Some(manuals);
+    }
+
     pub fn set_placement(&self, placement: Placement) {
         self.shared.lock().placement = placement;
     }
@@ -396,6 +418,20 @@ impl Headset {
 
     pub fn recenter(&self) {
         self.shared.lock().recenter = true;
+    }
+
+    pub fn set_keyboard(&self, keyboard: VrKeyboard) {
+        self.shared.lock().keyboard = keyboard;
+    }
+
+    /// Mark where the real keyboard is with a controller, from now.
+    pub fn mark_keyboard(&self) {
+        self.shared.lock().mark_keyboard = true;
+    }
+
+    /// A key of the host's was pressed: the fingers are on the keyboard.
+    pub fn key_pressed(&self) {
+        self.shared.presses.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Whether the headset shows the scene.
@@ -572,6 +608,7 @@ fn session(
         layered: multiview.is_some(),
         refresh: settings.refresh,
         mobile,
+        passthrough: settings.keyboard != rust_dos::vr::VrKeyboard::Off,
     };
     let mut xr = Xr::new(gl, &options).map_err(|e| format!("No headset ({}); the scene is shown in the window", e))?;
     shared.note(xr.describe().to_string());
@@ -630,6 +667,19 @@ fn session(
         state.mirror_size = size;
     }
     let mut controllers = Controllers::default();
+    let mut props = Props::new(&scene);
+    // The real keyboard through the scene, where the headset's cameras can
+    // show it (else the windows would be black).
+    if settings.keyboard != VrKeyboard::Off && !xr.passthrough() {
+        shared.note("The headset can't show the real world (no passthrough): the keyboard isn't shown".into());
+    }
+    let passthrough = xr.passthrough();
+    let mut keyboard = Keyboard::new(
+        if passthrough { settings.keyboard } else { VrKeyboard::Off },
+        xr.anchor_name(),
+        rust_dos::config::user_dir().map(|dir| dir.join("vr-keyboard.txt")),
+    );
+    let mut last_frame = std::time::Instant::now();
     let mut screen: Option<usize> = None;
     let mut reported = std::time::Instant::now();
     let mut failed: Option<String> = None;
@@ -644,6 +694,7 @@ fn session(
                     if let Some(index) = screen {
                         gpu.prepare(gl, &next, screens[index]);
                     }
+                    props.reset(&next);
                     scene = next;
                 }
                 Err(e) => shared.note(format!("The headset can't show the scene: {}", e)),
@@ -654,15 +705,20 @@ fn session(
             shared.note(note);
         }
         if lost {
+            props.delete(gl);
             xr.close(gl);
             return Ok(());
+        }
+        let manuals = shared.lock().manuals.take();
+        if let Some(manuals) = manuals {
+            props.set_manuals(gl, manuals);
         }
         shared.lock().running = xr.running();
         if !xr.wait_frame() {
             std::thread::sleep(std::time::Duration::from_millis(20));
             continue;
         }
-        let (taken, leds, mode, recenter, mirror_index, mirror_released, glow, placement) = {
+        let (taken, leds, mode, recenter, mirror_index, mirror_released, glow, placement, keyboard_mode, mark) = {
             let mut state = shared.lock();
             let (taken, stale) = state.screen.take(|| release(gl));
             if let Some(Fence(stale)) = stale {
@@ -670,7 +726,18 @@ fn session(
                 unsafe { gl.delete_sync(stale) };
             }
             let (mirror_index, mirror_released) = (state.mirror.free(), state.mirror.released());
-            (taken, state.leds, state.controllers, std::mem::take(&mut state.recenter), mirror_index, mirror_released, state.glow, state.placement)
+            (
+                taken,
+                state.leds,
+                state.controllers,
+                std::mem::take(&mut state.recenter),
+                mirror_index,
+                mirror_released,
+                state.glow,
+                state.placement,
+                state.keyboard,
+                std::mem::take(&mut state.mark_keyboard),
+            )
         };
         if let Some(Fence(fence)) = mirror_released {
             // SAFETY: see `GlScreen`: the window's reads of the mirror's
@@ -703,16 +770,35 @@ fn session(
         }
         let world = placement.world(scene.spawn);
         let tracking = xr.track(world);
-        let (input, extras, hold) = controllers.update(mode, &tracking, &scene.screen, std::time::Instant::now());
+        let now = std::time::Instant::now();
+        if passthrough {
+            keyboard.set_mode(keyboard_mode);
+        }
+        if mark {
+            keyboard.mark();
+        }
+        let presses = shared.presses.load(Ordering::Relaxed);
+        let dt = now.duration_since(last_frame).as_secs_f32();
+        last_frame = now;
+        let (windows, whole, marks) = keyboard.update(&scene, world, &tracking, presses, dt);
+        let held = props.update(&scene, &tracking, now);
+        // Marking, the controllers do nothing else.
+        let busy = if keyboard.marking() { [true; 2] } else { held.busy };
+        let (mut input, mut extras, hold) = controllers.update(mode, &tracking, busy, &scene.screen, now);
+        extras.extend(marks);
+        if held.pad.is_some() {
+            input.pad = held.pad;
+        }
         if hold {
             xr.recenter();
         }
+        let prop_draws = props.draws(gl, &gpu, &scene, now);
         let picture = screen.map(|i| screens[i]);
         let mut left = None;
         let drawn = xr.draw(gl, world, |target, views| {
             let format = Format { size: target.size, srgb: target.srgb };
             let dest = Dest::Image { texture: target.texture, format, layered: target.layered };
-            if let Err(e) = gpu.render(gl, &scene, views, dest, target.area, picture, leds, &extras) {
+            if let Err(e) = gpu.render(gl, &scene, views, dest, target.area, picture, leds, &prop_draws, &extras, Keyboard::punch(&windows, whole)) {
                 // (Once, not every frame.)
                 if failed.as_ref() != Some(&e) {
                     log::line(&e);
@@ -774,6 +860,7 @@ fn session(
         state.input = input;
         state.head = tracking.head;
     }
+    props.delete(gl);
     xr.close(gl);
     Ok(())
 }
