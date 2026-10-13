@@ -120,15 +120,18 @@ fn transfer(cpu: &mut Cpu, dl: u8, drive: u8, disk: &Rc<DiskImage>, ah: u8) {
 
 /// INT 13h AH=02h, 03h or 04h on floppy unit `dl` of a booted system:
 /// when a V86 monitor traps the floppy disk controller, the accesses a BIOS
-/// makes to read, write or verify the sectors (motor on and drive select,
-/// DMA channel 2 set up for the buffer at ES:BX, READ or WRITE DATA, its
-/// result, and the interrupt acknowledged), left for the processor to make
-/// on its way out (`bios::PORT_ACCESSES`), where the monitor sees them.
-/// The controller answers them at once (`Env::faked`). Windows 98's IOS
-/// gives a floppy unit to its floppy driver (HSFLOP.PDR) only once it has
-/// seen the BIOS drive the controller for it, with a read or a write;
-/// otherwise the drive stays in MS-DOS compatibility mode. The disk's
-/// sectors are the service's own business.
+/// makes to the controller to read, write or verify the first sector
+/// (motor on and drive select, READ or WRITE DATA and its result), left for
+/// the processor to make on its way out (`bios::PORT_ACCESSES`), where the
+/// monitor sees them. The controller answers them at once (`Env::faked`).
+/// Windows 98's IOS gives a floppy unit to its floppy driver (HSFLOP.PDR)
+/// only once it has seen the BIOS drive the controller for it, with a read
+/// or a write; otherwise the drive stays in MS-DOS compatibility mode. The
+/// DMA channel and the interrupt controller, which Windows' own drivers
+/// virtualise, are left alone: with a write's DMA set up and IRQ 6
+/// acknowledged through them, HSFLOP.PDR's start in the hardware setup of
+/// Windows 98's Setup ends in a protection error. The disk's sectors are
+/// the service's own business.
 fn show_floppy_transfer(cpu: &mut Cpu, dl: u8, ah: u8) {
     use crate::bios::PortAccess::{self, In, Out};
     if cpu.bus.boot.is_none()
@@ -141,24 +144,10 @@ fn show_floppy_transfer(cpu: &mut Cpu, dl: u8, ah: u8) {
     }
     let cl = cpu.get_reg8(Register::CL);
     let (cylinder, head, sector) = (cpu.get_reg8(Register::CH), cpu.get_reg8(Register::DH) & 1, cl & 0x3F);
-    let buffer = cpu.real_linear(cpu.es(), cpu.bx());
-    let count = (cpu.get_al().max(1) as u32 * SECTOR_SIZE as u32 - 1) as u16;
     let mut queue = vec![
         PortAccess::Faked(true),
         // Motor on and the drive selected, DMA and interrupts on.
         Out(0x3F2, 0x0C | dl | 0x10 << dl),
-        // DMA channel 2: masked, single mode writing memory (a read),
-        // reading it (a write) or verifying, the buffer's address and
-        // page, the count, unmasked.
-        Out(0x0A, 0x06),
-        Out(0x0C, 0),
-        Out(0x0B, [0x46, 0x4A, 0x42][(ah - 2) as usize]),
-        Out(0x04, buffer as u8),
-        Out(0x04, (buffer >> 8) as u8),
-        Out(0x81, (buffer >> 16) as u8),
-        Out(0x05, count as u8),
-        Out(0x05, (count >> 8) as u8),
-        Out(0x0A, 0x02),
     ];
     // READ or WRITE DATA: MFM, 512-byte sectors, 18 a track, the gap
     // length.
@@ -169,8 +158,7 @@ fn show_floppy_transfer(cpu: &mut Cpu, dl: u8, ah: u8) {
     for _ in 0..7 {
         queue.extend([In(crate::fdc::BASE + 4), In(crate::fdc::DATA)]);
     }
-    // The interrupt acknowledged: a specific EOI for IRQ 6.
-    queue.extend([Out(0x20, 0x60 + crate::fdc::IRQ), PortAccess::Faked(false)]);
+    queue.push(PortAccess::Faked(false));
     cpu.bus.port_accesses.extend(queue);
 }
 
