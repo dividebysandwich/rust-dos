@@ -177,7 +177,14 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   sums can differ from a real machine's in the last bits, they are always
   rounded to nearest whatever the control word says, and FXCH keeps only
   the doubles of the registers it exchanges (a value loaded as 80 bits
-  loses its last bits there). Saved states load in either mode.
+  loses its last bits there). Saved states load in either mode. In both,
+  products, quotients, square roots and the transcendental functions are
+  the doubles', so they keep 53 bits of significand where a 387 keeps 64,
+  rounded to nearest whatever the control word says, and the control
+  word's precision field isn't used (a program that sets it to 53 bits,
+  as Win32 programs built with MSVC do, gets close to what a 387
+  gives). Loads, stores, integer conversions, compares and FRNDINT use
+  all 80 bits.
 * `machine` is the display adapter programs find when they look for
   one, and so the graphics they choose: `svga` (the default, a VGA with
   VESA modes up to 1024x768), `svga_s3` (an S3 Trio64 on the PCI bus,
