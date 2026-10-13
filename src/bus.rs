@@ -56,6 +56,19 @@ pub(crate) const IRQ_READY_OFFSET: usize = std::mem::offset_of!(Bus, irq_ready);
 /// mode and back take.
 const IDLE_SLICE_TICKS: u64 = 60;
 
+/// Fill `range` with elements of `size` bytes (1, 2 or 4) of `value`, as a
+/// string store does. By the element's size: a copy of a size known only
+/// at run time is a call per element.
+#[inline]
+fn fill_pattern(range: &mut [u8], size: usize, value: u32) {
+    let bytes = value.to_le_bytes();
+    match size {
+        1 => range.fill(bytes[0]),
+        2 => range.as_chunks_mut::<2>().0.fill([bytes[0], bytes[1]]),
+        _ => range.as_chunks_mut::<4>().0.fill(bytes),
+    }
+}
+
 /// A program waiting, as at a HLT, until PIT tick `until`: the code it
 /// runs stays where it was (`at`, CS and EIP, from when the loop first
 /// sees it), while interrupts come and their handlers run.
@@ -1242,12 +1255,13 @@ impl Bus {
     /// Write the `len` bytes of plain RAM at `src` into the VESA linear
     /// frame buffer at `dst`, as a string move's writes through `write_32`
     /// do (a DirectDraw blit's row). Returns false, having written nothing,
-    /// where the range isn't all in the frame buffer.
-    pub(crate) fn move_to_lfb(&mut self, src: usize, dst: usize, len: usize) -> bool {
+    /// where the range isn't all in the frame buffer. `size` is the
+    /// element's, for the profile's count of writes.
+    pub(crate) fn move_to_lfb(&mut self, src: usize, dst: usize, len: usize, size: usize) -> bool {
         let Some(offset) = self.lfb_run(dst, len) else {
             return false;
         };
-        let _profile = self.profile.as_deref().map(|p| p.mem(dst, true));
+        let _profile = self.profile.as_deref().map(|p| p.mem_run(dst, true, (len / size) as u64));
         self.vbe.vram[offset..offset + len].copy_from_slice(&self.ram[src..src + len]);
         self.lfb_written(dst, offset, len);
         true
@@ -1261,11 +1275,8 @@ impl Bus {
         let Some(offset) = self.lfb_run(dst, len) else {
             return false;
         };
-        let _profile = self.profile.as_deref().map(|p| p.mem(dst, true));
-        let bytes = value.to_le_bytes();
-        for element in self.vbe.vram[offset..offset + len].chunks_exact_mut(size) {
-            element.copy_from_slice(&bytes[..size]);
-        }
+        let _profile = self.profile.as_deref().map(|p| p.mem_run(dst, true, count as u64));
+        fill_pattern(&mut self.vbe.vram[offset..offset + len], size, value);
         self.lfb_written(dst, offset, len);
         true
     }
@@ -1285,18 +1296,7 @@ impl Bus {
         if self.observe.on {
             self.observe.mapped_write(dst, self.ram.len());
         }
-        self.note_video_write(len as u64);
-        if self.video_mode == VideoMode::Vesa {
-            // The rows of the bytes from the display start on: `frame_rows`
-            // has none for a range that begins before it.
-            let end = offset + len;
-            let first = offset.max(self.vbe.latched_start as usize);
-            if first < end
-                && let Some((top, bottom)) = self.vbe.frame_rows(first, end - first)
-            {
-                self.vga.mark_dirty_rows(top, bottom);
-            }
-        }
+        self.vram_written(offset, len);
     }
 
     /// Where the byte at `addr` in the graphics window at A0000h is for
@@ -1321,15 +1321,7 @@ impl Bus {
     /// `value`, as a string store does, and bump their code generations.
     /// The range is in plain RAM.
     pub(crate) fn fill_elements(&mut self, dst: usize, count: usize, size: usize, value: u32) {
-        let bytes = value.to_le_bytes();
-        let range = &mut self.ram[dst..dst + count * size];
-        // (By the element's size: a copy of a size known only at run time
-        // is a call per element.)
-        match size {
-            1 => range.fill(bytes[0]),
-            2 => range.as_chunks_mut::<2>().0.fill([bytes[0], bytes[1]]),
-            _ => range.as_chunks_mut::<4>().0.fill(bytes),
-        }
+        fill_pattern(&mut self.ram[dst..dst + count * size], size, value);
         self.bump_page_gens(dst, dst + count * size);
     }
 
@@ -1698,11 +1690,18 @@ impl Bus {
     #[inline]
     fn write_vram(&mut self, offset: usize, bytes: &[u8]) {
         self.vbe.vram[offset..offset + bytes.len()].copy_from_slice(bytes);
-        self.note_video_write(bytes.len() as u64);
-        if self.video_mode == VideoMode::Vesa {
-            if let Some((first, last)) = self.vbe.frame_rows(offset, bytes.len()) {
-                self.vga.mark_dirty_rows(first, last);
-            }
+        self.vram_written(offset, bytes.len());
+    }
+
+    /// Count `len` bytes written to VESA video memory at `offset` and mark
+    /// the rows of the picture they show in for repainting.
+    #[inline]
+    fn vram_written(&mut self, offset: usize, len: usize) {
+        self.note_video_write(len as u64);
+        if self.video_mode == VideoMode::Vesa
+            && let Some((first, last)) = self.vbe.frame_rows(offset, len)
+        {
+            self.vga.mark_dirty_rows(first, last);
         }
     }
 

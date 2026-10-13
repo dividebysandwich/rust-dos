@@ -227,7 +227,7 @@ fn moves_and_stores_into_the_linear_frame_buffer_are_the_iterations_one_at_a_tim
         rig.cpu.set_reg16(iced_x86::Register::BX, 0x4111);
         rust_dos::interrupts::int10::handle(&mut rig.cpu);
         assert_eq!(rig.cpu.ax(), 0x004F, "no VESA mode");
-        rig.cpu.bus.vbe.latched_start = 0x1200;
+        rig.cpu.bus.vbe.latched_start = 0x1202;
         rig.cpu.bus.vga.dirty = false;
         rig.cpu.bus.vga.dirty_y_min = u32::MAX;
         rig.cpu.bus.vga.dirty_y_max = 0;
