@@ -37,7 +37,7 @@ pub const BASE: u16 = 0x3F0;
 const DOR: u16 = 0x3F2;
 const TDR: u16 = 0x3F3;
 const MSR: u16 = 0x3F4;
-const DATA: u16 = 0x3F5;
+pub const DATA: u16 = 0x3F5;
 pub const DIR: u16 = 0x3F7;
 
 pub const IRQ: u8 = 6;

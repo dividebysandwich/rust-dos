@@ -109,11 +109,14 @@ impl Bus {
     }
 
     /// A port read needs none of the disks or DMA: only reading a result
-    /// byte changes the controller, and `sync_fdc` follows that.
+    /// byte changes the controller, and `sync_fdc` follows that. Status
+    /// polls between the bytes leave the timers alone.
     pub(crate) fn fdc_read(&mut self, port: u16) -> u8 {
         let Some(fdc) = &mut self.fdc else { return 0xFF };
         let value = fdc.read(port);
-        self.sync_fdc();
+        if port == crate::fdc::DATA {
+            self.sync_fdc();
+        }
         value
     }
 
@@ -130,12 +133,14 @@ impl Bus {
         self.with_fdc(|fdc, env| fdc.service(env));
     }
 
-    /// Another disk is in `drive`, or none: if it is A: or B:, or the disk
-    /// mounted as 0 or 1, the floppy unit's disk change line goes on.
+    /// Another disk is in `drive`, or none: if it is the disk mounted as 0
+    /// or 1, or A: or B: where no disk is mounted as that number, the
+    /// floppy unit's disk change line goes on.
     pub(crate) fn fdc_media_changed(&mut self, drive: u8) {
         if let Some(fdc) = &mut self.fdc {
             for unit in 0..DRIVES {
-                if drive == unit as u8 || drive == crate::disk::numbered_drive(unit as u8) {
+                let numbered = crate::disk::numbered_drive(unit as u8);
+                if drive == numbered || (drive == unit as u8 && !self.disk.is_mounted(numbered)) {
                     fdc.media_changed(unit);
                 }
             }

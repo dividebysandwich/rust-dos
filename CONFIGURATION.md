@@ -1474,21 +1474,11 @@ and write those images directly. Changing a disk with Ctrl+F4 or
 `IMGMOUNT` signals a disk change to the guest system. The built-in DOS
 continues to access floppy images through INT 13h.
 
-If Windows 95 does not list **Standard Floppy Disk Controller** in
-**Device Manager**, open **Control Panel** → **Add New Hardware** and
-choose **Yes (Recommended)** to detect it, then restart Windows. In
-**System Properties** → **Performance**, A: and B: should no longer be
-listed as using "MS-DOS compatibility mode".
-
-If manually adding the controller in Windows 95 leaves it disabled
-(Code 22), open **Device Manager** →
-**Floppy disk controllers** → **Standard Floppy Disk Controller** →
-**Properties**. In **Resources**, click **Set Configuration Manually**:
-**Basic configuration 0** uses I/O 03F2–03F5, IRQ 06 and DMA 02. Check
-that the **Conflicting device list** says **No conflicts**, then in
-**General** clear **Disable in this hardware profile**, apply and restart
-the system. The device should then report that it is working properly.
-If the list names a conflicting device, resolve that conflict first.
+The first start of a Windows installed without the floppy controller finds
+it as new hardware (**Standard Floppy Disk Controller**) and may ask to
+restart; after that, **System Properties** → **Performance** no longer lists
+A: and B: as using "MS-DOS compatibility mode". If it doesn't find it, run
+**Control Panel** → **Add New Hardware** and let it detect the hardware.
 
 Set `floppy_controller=false` in `[emulator]` to disable the controller
 and leave floppy access to the BIOS (INT 13h). The controller uses ports
