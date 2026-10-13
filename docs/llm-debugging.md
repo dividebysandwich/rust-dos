@@ -744,8 +744,10 @@ loads the state only onto a copy holding what C: held at the save. The
 reply and the journal's `state_loaded` entry have `folders`, the folders
 taken; the reply's header keeps the folders the state records. A drive
 the state hasn't as a folder drive (none, or one of disk images or with
-an overlay) is refused with 400 and nothing is loaded, as is a save with
-`folders`.
+an overlay), a path that isn't an existing folder, and a drive named twice
+(`"C"` and `"c"`) are refused with 400 and nothing is loaded, as is a save
+with `folders`. The folder is compared by its canonical path, as a
+mounted drive's is, so a symbolic link to the copy matches it.
 
 #### Replies
 
@@ -794,7 +796,8 @@ Errors:
 - **400** `{"error", "loaded":false, "unchanged":true}`: the load failed (no
   such file, which reads `empty`, a file that isn't a state, a state of
   another `memsize`, a drive of the state that can't be mounted, a
-  `folders` drive the state hasn't as a folder drive,
+  `folders` drive the state hasn't as a folder drive or a `folders`
+  path that isn't a folder,
   RetroAchievements hardcore mode) and the machine, its
   settings and its hardware are as they were. A save that can't write its
   file, and a body without `path`, get a 400 with only `error`.

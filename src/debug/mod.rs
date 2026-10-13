@@ -2207,8 +2207,8 @@ impl DebugHub {
                 let reset = request.strict_match.then(|| self.reset_after_load(cpu));
                 let differences = value.get("differences").cloned().unwrap_or_else(|| json!([]));
                 let mut fields = json!({"path": path, "strict_match": request.strict_match, "source": "debugger", "differences": differences});
-                if !request.folders.is_empty() {
-                    fields["folders"] = folders_json(&request.folders);
+                if let Some(folders) = value.get("folders") {
+                    fields["folders"] = folders.clone();
                 }
                 self.record(cpu, Kind::StateLoaded, fields);
                 if let Some((cleared, cancelled)) = reset {
@@ -3311,7 +3311,7 @@ fn bytes_record(bytes: &[u8]) -> Value {
 pub fn folders_json(folders: &[(u8, PathBuf)]) -> Value {
     let map: Map<String, Value> = folders
         .iter()
-        .map(|(drive, folder)| (((b'A' + drive) as char).to_string(), folder.display().to_string().into()))
+        .map(|(drive, folder)| (crate::disk::drive_key(*drive), folder.display().to_string().into()))
         .collect();
     Value::Object(map)
 }
@@ -5332,7 +5332,7 @@ mod tests {
             (Cmd::Speed { cycles: "5000".into() }, None),
             // Guarded by the state before the first write: refused.
             (write("0200:0000", &[3], None), Some(state)),
-            (Cmd::LoadState { path: "s".into(), strict_match: true, check_files: false }, None),
+            (Cmd::LoadState { path: "s".into(), strict_match: true, check_files: false, folders: Vec::new() }, None),
             // Holds only once the load brought back the 1.
             (write("0200:0000", &[4], Some(&[1])), None),
             (Cmd::Resume { until: None, until_ms: None }, None),

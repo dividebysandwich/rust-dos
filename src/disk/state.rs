@@ -14,6 +14,7 @@ use super::{
 use crate::mount::{MountSpec, mount_spec_value, parse_mount_spec, tokenize};
 use crate::savestate::{Reader, Result, State, StateError, Writer};
 use std::io::Seek;
+use std::path::PathBuf;
 
 crate::state_enum!(CharDevice {
     CharDevice::Nul, CharDevice::Con, CharDevice::Emm, CharDevice::Com1, CharDevice::Com2, CharDevice::Com3,
@@ -110,10 +111,13 @@ impl DiskController {
     /// its files again. Returns the files that couldn't be opened.
     pub(crate) fn load_state(&mut self, r: &mut Reader) -> Result<Vec<String>> {
         self.host_dirs.forget();
+        // Taken by this load alone: a failed load's roll back to the
+        // machine from before mounts its drives where they were.
+        let folders = std::mem::take(&mut self.folders_from_state);
         let mut current = 0u8;
         current.load(r)?;
         for drive in 0..LASTDRIVE {
-            self.load_drive(drive, r)?;
+            self.load_drive(drive, &folders, r)?;
         }
         self.current_drive = if self.is_mounted(current) { current } else { DRIVE_C };
         self.restore_shared().map_err(StateError::Mismatch)?;
@@ -163,7 +167,7 @@ impl DiskController {
                     self.unmount(drive).map_err(StateError::Mismatch)?;
                 }
             } else {
-                self.load_drive(drive, r)?;
+                self.load_drive(drive, &[], r)?;
             }
         }
         if !r.is_empty() {
@@ -173,8 +177,9 @@ impl DiskController {
     }
 
     /// Mount `drive` as the state has it, where it differs, with the disk
-    /// of its list in it that the state has.
-    fn load_drive(&mut self, drive: u8, r: &mut Reader) -> Result<()> {
+    /// of its list in it that the state has. A folder drive that `folders`
+    /// names is mounted from the host folder it gives.
+    fn load_drive(&mut self, drive: u8, folders: &[(u8, PathBuf)], r: &mut Reader) -> Result<()> {
         let name = drive_name(drive);
         let mut present = false;
         present.load(r)?;
@@ -199,7 +204,7 @@ impl DiskController {
             parse_mount_spec(drive, &tokens, &cwd, None).map_err(StateError::Invalid)
         };
         // A folder drive the load takes from another folder is mounted from it.
-        if let (Some(text), Some((_, folder))) = (&mount, self.folders_from_state.iter().find(|(d, _)| *d == drive)) {
+        if let (Some(text), Some((_, folder))) = (&mount, folders.iter().find(|(d, _)| *d == drive)) {
             let spec = MountSpec { path: folder.clone(), ..spec_of(text)? };
             mount = Some(state_value(&spec));
         }

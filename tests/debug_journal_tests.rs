@@ -229,6 +229,13 @@ fn a_check_files_load_names_the_files_changed_since_the_save_and_one_without_it_
     assert_eq!(post("/api/control/quit", json!({})).0, 200);
 }
 
+/// A host folder as the emulator shows it: canonical, without Windows'
+/// `\\?\` prefix.
+fn shown(path: &std::path::Path) -> String {
+    let canonical = std::fs::canonicalize(path).unwrap().display().to_string();
+    canonical.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(canonical)
+}
+
 /// The shell started and the machine paused, on the emulator at `addr`.
 fn paused_at_the_prompt(addr: SocketAddr) {
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -276,6 +283,11 @@ fn a_load_takes_a_folder_drive_from_a_copy_of_its_folder_in_another_run() {
     assert_eq!((status, refused["unchanged"].as_bool()), (400, Some(true)), "{}", refused);
     let (status, refused) = post("/api/state/load", load(json!({"C": "c"})));
     assert_eq!(status, 400, "{}", refused);
+    let missing = root.join("missing").display().to_string();
+    let (status, refused) = post("/api/state/load", load(json!({"C": missing})));
+    assert_eq!((status, refused["unchanged"].as_bool()), (400, Some(true)), "{}", refused);
+    let (status, refused) = post("/api/state/load", load(json!({"C": copy, "c": copy})));
+    assert_eq!(status, 400, "{}", refused);
     let (status, refused) = post("/api/state/save", json!({"path": state, "folders": {"C": copy}}));
     assert_eq!(status, 400, "{}", refused);
 
@@ -290,9 +302,9 @@ fn a_load_takes_a_folder_drive_from_a_copy_of_its_folder_in_another_run() {
     let (status, loaded) = post("/api/state/load", load(json!({"c": copy})));
     assert_eq!(status, 200, "{}", loaded);
     assert_eq!(loaded["folders"], json!({"C": copy}), "{}", loaded);
-    assert_eq!(loaded["header"]["media"][0]["folder"].as_str(), Some(first.join("c").display().to_string().as_str()));
+    assert_eq!(loaded["header"]["media"][0]["folder"].as_str(), Some(shown(&first.join("c")).as_str()));
     let drives = http(addr, "GET", "/api/drive", &[], None).1;
-    assert_eq!(drives["drives"]["C"]["path"].as_str(), Some(copy.as_str()), "{}", drives);
+    assert_eq!(drives["drives"]["C"]["path"].as_str(), Some(shown(&second.join("c")).as_str()), "{}", drives);
     let entries = http(addr, "GET", "/api/journal?after=0&type=state_loaded", &[], None).1;
     assert_eq!(entries["entries"][0]["folders"], json!({"C": copy}), "{}", entries);
     assert_eq!(post("/api/control/quit", json!({})).0, 200);

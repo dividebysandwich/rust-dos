@@ -1237,12 +1237,15 @@ struct StateBody {
 
 /// A load's `folders`: each drive letter's number and its absolute host folder.
 fn state_folders(folders: Map<String, Value>) -> Result<Vec<(u8, String)>, ApiError> {
-    let mut out = Vec::new();
+    let mut out: Vec<(u8, String)> = Vec::new();
     for (letter, folder) in folders {
-        let drive = match letter.as_bytes() {
-            [c] if c.is_ascii_alphabetic() => c.to_ascii_uppercase() - b'A',
-            _ => return Err(bad(format!("folders: '{}' isn't a drive letter", letter))),
+        let Some(drive) = crate::mount::parse_drive_letter(&letter) else {
+            return Err(bad(format!("folders: '{}' isn't a drive letter", letter)));
         };
+        // "C" and "c" would name one drive twice.
+        if out.iter().any(|(d, _)| *d == drive) {
+            return Err(bad(format!("folders: drive {} is named twice", letter.to_ascii_uppercase())));
+        }
         let folder = folder.as_str().ok_or_else(|| bad(format!("folders.{}: a host folder's path", letter)))?;
         if !std::path::Path::new(folder).is_absolute() {
             return Err(bad(format!("folders.{}: '{}' isn't an absolute path", letter, folder)));
@@ -2307,7 +2310,8 @@ SAVE STATES
                    another run whose C: is a copy of that folder. The
                    media are compared, and with "check_files" the files
                    in /abs/copy too, and the load leaves C: mounted from
-                   it. 400 for a drive the state hasn't as a folder.
+                   it. 400 for a drive the state hasn't as a folder,
+                   a path that isn't a folder, or a drive named twice.
 
 SPEED
   POST   /api/speed {"cycles":"auto"}   the CPU speed, as `cycles` takes it

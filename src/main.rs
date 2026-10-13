@@ -2823,7 +2823,8 @@ impl MainHost<'_, '_> {
         // Whatever failed, the machine, its settings and hardware are as they were.
         let failed = |e: String| (400, serde_json::json!({"error": e, "loaded": false, "unchanged": true}));
         let (mut header, state) = self.read_state(path).map_err(failed)?;
-        let recorded = header.media.clone();
+        // A `check_files` state's media list every file: kept only when relocated.
+        let recorded = (!folders.is_empty()).then(|| header.media.clone());
         if !folders.is_empty() {
             let media = header.media.as_mut().ok_or_else(|| {
                 failed(format!("the state doesn't record its media (saved by rust-dos {}), so folders can't be taken", header.version))
@@ -2870,7 +2871,9 @@ impl MainHost<'_, '_> {
         let loaded = self.load_state(path, header, &state);
         self.cpu.bus.disk.folders_from_state.clear();
         let mut header = loaded.map_err(failed)?;
-        header.media = recorded;
+        if let Some(recorded) = recorded {
+            header.media = recorded;
+        }
         Ok((header, differences, unchecked))
     }
 

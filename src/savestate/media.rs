@@ -166,10 +166,12 @@ fn listed(info: &DriveInfo) -> Vec<PathBuf> {
     if info.images.is_empty() { info.image.iter().cloned().collect() } else { info.images.clone() }
 }
 
-/// A host folder as a state's media record shows it: absolute, without
-/// Windows' `\?\` prefix.
-pub fn shown_folder(path: &Path) -> String {
-    display_host_path(&std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()))
+/// A host folder as a state's media record shows it. A mounted folder
+/// drive's root is the canonical path (symbolic links and Windows' short
+/// names resolved), so this is too, without Windows' `\?\` prefix.
+fn shown_folder(path: &Path) -> String {
+    let canonical = hostfs::canonicalize(path).or_else(|_| std::path::absolute(path));
+    display_host_path(&canonical.unwrap_or_else(|_| path.to_path_buf()))
 }
 
 /// Take the folder drives of `media` that `folders` names (by drive number)
@@ -186,6 +188,9 @@ pub fn relocate(media: &mut [Medium], folders: &[(u8, PathBuf)]) -> Result<(), S
         };
         if medium.folder.is_none() || !medium.images.is_empty() || medium.overlay.is_some() {
             return Err(format!("{} isn't a folder drive in the state; folders takes only those", name));
+        }
+        if !hostfs::is_dir(folder) {
+            return Err(format!("{} isn't a folder, so {} can't be taken from it", folder.display(), name));
         }
         medium.folder = Some(shown_folder(folder));
     }
