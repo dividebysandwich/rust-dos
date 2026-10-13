@@ -77,6 +77,10 @@ pub struct JitCtx {
     pub revalidate: usize,
     /// Where translated code jumps to return to the execution loop.
     pub exit: usize,
+    /// The trampoline's routines that the slow paths of memory operands
+    /// call (x86-64, `x64::Thunk`): early in the context, where the code
+    /// reaches them with a byte's displacement.
+    pub thunks: [usize; THUNKS],
     /// RAM and its code generations.
     pub ram: *const u8,
     pub page_gen: *const u32,
@@ -200,6 +204,12 @@ pub const CTX_VGA_WROTE: i32 = offset_of!(JitCtx, vga_wrote) as i32;
 pub const CTX_VGA_PLANES: i32 = offset_of!(JitCtx, vga_planes) as i32;
 pub const CTX_REVALIDATE: i32 = offset_of!(JitCtx, revalidate) as i32;
 pub const CTX_EXIT: i32 = offset_of!(JitCtx, exit) as i32;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub const CTX_THUNKS: i32 = offset_of!(JitCtx, thunks) as i32;
+/// The number of `JitCtx::thunks`.
+pub const THUNKS: usize = 13;
+const _: () = assert!(CTX_THUNKS + 8 * THUNKS as i32 <= 128);
+const _: () = assert!(CTX_SMC_HI == CTX_SMC_LO + 4);
 pub const CTX_RAM: i32 = offset_of!(JitCtx, ram) as i32;
 pub const CTX_PAGE_GEN: i32 = offset_of!(JitCtx, page_gen) as i32;
 pub const CTX_CODE_BLOCKS: i32 = offset_of!(JitCtx, code_blocks) as i32;
@@ -268,6 +278,7 @@ impl JitCtx {
             fallback: jit_fallback as *const () as usize,
             revalidate: jit_revalidate as *const () as usize,
             exit,
+            thunks: [0; THUNKS],
             ram: std::ptr::null(),
             page_gen: std::ptr::null(),
             code_blocks: std::ptr::null(),
