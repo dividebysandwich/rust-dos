@@ -3,6 +3,7 @@
 //! headset's thread, drawn into through a framebuffer each.
 
 use super::err;
+use super::passthrough::{self, Passthrough};
 use glow::HasContext;
 use openxr as xr;
 
@@ -166,7 +167,9 @@ impl<G: GlGraphics> GlFrames<G> {
         space: &xr::Space,
         views: Option<&[xr::View]>,
         area: (u32, u32),
+        passthrough: Option<&Passthrough>,
     ) -> xr::Result<()> {
+        // (No layer: the runtime shows nothing of the scene or the cameras.)
         let Some(views) = views else { return self.stream.end(time, blend, &[]) };
         let layered = self.layered;
         let projection_views: Vec<_> = views
@@ -184,7 +187,7 @@ impl<G: GlGraphics> GlFrames<G> {
             })
             .collect();
         let layer = xr::CompositionLayerProjection::new().space(space).views(&projection_views);
-        self.stream.end(time, blend, &[&layer])
+        passthrough::end(&mut self.stream, time, blend, layer, passthrough)
     }
 
     /// Nothing of OpenGL's to delete: the runtime's textures go with the

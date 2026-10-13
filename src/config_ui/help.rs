@@ -299,6 +299,7 @@ impl Item {
             VrMsaa => "vr-msaa",
             VrScreenGlow => "vr-screen-glow",
             VrCenter => "vr-center",
+            VrKeyboard | VrMarkKeyboard => "vr-keyboard",
             VrSceneScale | VrSeat(_) | VrSeatTurn => "vr-seat",
             VrResolution => "vr-resolution",
             VrFoveation => "vr-foveation",

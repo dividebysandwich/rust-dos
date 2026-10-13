@@ -127,6 +127,11 @@ pub trait Host {
     fn center_vr(&mut self) -> Result<String, String> {
         Err("No VR headset shows the scene".to_string())
     }
+    /// Start marking the real keyboard with a controller in the headset.
+    /// Returns what to tell the user.
+    fn mark_vr_keyboard(&mut self) -> Result<String, String> {
+        Err("No VR headset shows the scene".to_string())
+    }
     /// Boot the system on `drive`'s disk image now, as BOOT -l does.
     /// Returns what to tell the user.
     fn boot(&mut self, drive: u8) -> Result<String, String> {
@@ -407,7 +412,8 @@ impl Page {
             Page::Drives | Page::Games | Page::States | Page::Cheats | Page::Achievements | Page::Stats => &[],
             Page::Vr => &[
                 VrMode, VrScene, VrScreenFit, VrQuality, VrAmbientOcclusion, VrMsaa, VrScreenGlow, VrControllers, VrSpatialAudio,
-                VrCenter, VrSceneScale, VrSeat(0), VrSeat(1), VrSeat(2), VrSeatTurn, VrResolution, VrFoveation, VrRefresh, VrGraphics,
+                VrCenter, VrSceneScale, VrSeat(0), VrSeat(1), VrSeat(2), VrSeatTurn, VrKeyboard, VrMarkKeyboard, VrResolution,
+                VrFoveation, VrRefresh, VrGraphics,
             ],
             Page::Display => {
                 &[Scale, Fullscreen, Aspect, Vrr, Filter, Shader, CrtCurvature, CrtGlow, Monochrome, MonitorEffects, Composite, CompositeEra]
@@ -547,6 +553,10 @@ enum Item {
     VrSceneScale,
     VrSeat(u8),
     VrSeatTurn,
+    /// The real keyboard shown through the scene by the headset's cameras,
+    /// and marking where it is with a controller.
+    VrKeyboard,
+    VrMarkKeyboard,
     /// The headset's eye images, in percent of the size its runtime
     /// recommends, and its refresh rate.
     VrResolution,
@@ -918,6 +928,8 @@ impl Item {
             VrSeat(1) => "  Seat higher",
             VrSeat(_) => "  Seat closer to the screen",
             VrSeatTurn => "  Seat turned to the left",
+            VrKeyboard => "Show the real keyboard",
+            VrMarkKeyboard => "  Mark the keyboard with a controller",
             VrResolution => "Headset resolution",
             VrFoveation => "Foveated rendering",
             VrRefresh => "Headset refresh rate",
@@ -1064,6 +1076,8 @@ impl Item {
             | Item::VrSceneScale
             | Item::VrSeat(_)
             | Item::VrSeatTurn
+            | Item::VrKeyboard
+            | Item::VrMarkKeyboard
             | Item::VrResolution
             | Item::VrFoveation
             | Item::VrRefresh
@@ -1122,10 +1136,12 @@ impl Item {
             | Item::VrSceneScale
             | Item::VrSeat(_)
             | Item::VrSeatTurn
+            | Item::VrKeyboard
             | Item::VrResolution
             | Item::VrFoveation
             | Item::VrRefresh
             | Item::VrGraphics => s.vr.mode == crate::vr::VrMode::Headset,
+            Item::VrMarkKeyboard => s.vr.mode == crate::vr::VrMode::Headset && s.vr.keyboard != crate::vr::VrKeyboard::Off,
             Item::ReverbMix => s.mixer.reverb != ReverbPreset::Off,
             Item::ChorusMix => s.mixer.chorus != ChorusPreset::Off,
             Item::RewindMemory => s.rewind,
@@ -1179,7 +1195,7 @@ impl Item {
             Rooms | Phonebook => Applies::Now,
             Memsize | Autoexec | Lan | LanHost | VersionCheck => Applies::NextStart,
             VrMode | VrQuality | VrAmbientOcclusion | VrMsaa | VrScene | VrControllers | VrSpatialAudio | VrScreenFit | VrScreenGlow
-            | VrCenter | VrSceneScale | VrSeat(_) | VrSeatTurn | VrResolution | VrRefresh => Applies::Now,
+            | VrCenter | VrSceneScale | VrSeat(_) | VrSeatTurn | VrKeyboard | VrMarkKeyboard | VrResolution | VrRefresh => Applies::Now,
             // SDL makes the window's context as the headset needs it as it
             // starts.
             VrGraphics | VrFoveation => Applies::NextStart,
@@ -1201,7 +1217,8 @@ impl Item {
             }
             Item::ModemListen => Input::Text,
             Item::SoundFont | Item::Mt32Roms | Item::Awe32Rom | Item::Sc55Roms | Item::VrScene => Input::File,
-            Item::Autoexec | Item::Rooms | Item::Phonebook | Item::Awe32Download | Item::Sc55Download | Item::VoodooOverlay | Item::VrCenter => {
+            Item::Autoexec | Item::Rooms | Item::Phonebook | Item::Awe32Download | Item::Sc55Download | Item::VoodooOverlay | Item::VrCenter
+            | Item::VrMarkKeyboard => {
                 Input::Link
             }
             _ => Input::Choice,
@@ -1238,7 +1255,8 @@ impl Item {
                 let glow = s.vr.screen_glow.min(crate::vr::SCREEN_GLOW_MAX) as u16;
                 bar(format!("{:>3}%", glow), glow, crate::vr::SCREEN_GLOW_MAX as u16, SCREEN_GLOW_UNIT)
             }
-            VrCenter => String::new(),
+            VrCenter | VrMarkKeyboard => String::new(),
+            VrKeyboard => s.vr.keyboard.describe().to_string(),
             VrSceneScale => format!("{}%", s.vr.scene_scale),
             VrSeat(axis) => format!("{:+} cm", s.vr.seat[axis as usize]),
             VrSeatTurn => format!("{:+}°", s.vr.seat_turn),
@@ -1510,6 +1528,7 @@ impl Item {
             VrMsaa => each(s, crate::vr::VrMsaa::ALL, |s, msaa| s.vr.msaa = msaa),
             VrRefresh => each(s, std::iter::once(None).chain(crate::vr::REFRESH_RATES.map(Some)), |s, hz| s.vr.refresh = hz),
             VrFoveation => each(s, crate::vr::VrFoveation::ALL, |s, f| s.vr.foveation = f),
+            VrKeyboard => each(s, crate::vr::VrKeyboard::ALL, |s, k| s.vr.keyboard = k),
             VrGraphics => each(s, crate::vr::VrGraphics::ALL, |s, g| s.vr.graphics = g),
             Filter => each(s, [crate::config::Filter::Nearest, crate::config::Filter::Linear], |s, f| s.filter = f),
             Shader => each(s, crate::video::shader::Shader::ALL, |s, shader| s.shader = shader),
@@ -1675,7 +1694,7 @@ impl Item {
             // row of several, whose fields have their own.
             Cycles | CrtCurvature | CrtGlow | Memsize | Volume(_) | ReverbMix | ChorusMix | Deadzone | MouseSensitivity | UltraDir
             | SoundFont | Mt32Roms | Awe32Rom | Awe32Download | Sc55Roms | Sc55Download | VoodooOverlay | CaptureDir | Autoexec | SbPorts | GusPorts | MacAddr
-            | Rooms | Relay | Player | VrScene | VrScreenGlow | VrCenter | VrSceneScale | VrSeat(_) | VrSeatTurn | VrResolution
+            | Rooms | Relay | Player | VrScene | VrScreenGlow | VrCenter | VrMarkKeyboard | VrSceneScale | VrSeat(_) | VrSeatTurn | VrResolution
             | Lan | LanHost | Room | Password | ModemListen | Phonebook => Vec::new(),
         }
     }
@@ -2741,6 +2760,17 @@ impl ConfigUi {
             (UiKey::Enter, Input::Link) if item == Item::VoodooOverlay => self.ask_glide_download(),
             (UiKey::Enter, Input::Link) if item == Item::VrCenter => match host.center_vr() {
                 Ok(message) => self.info(message),
+                Err(e) => self.error(e),
+            },
+            (UiKey::Enter, Input::Link) if item == Item::VrMarkKeyboard => match host.mark_vr_keyboard() {
+                Ok(message) => {
+                    // What is marked is what is shown from now on.
+                    if self.settings.vr.keyboard != crate::vr::VrKeyboard::Marked {
+                        self.settings.vr.keyboard = crate::vr::VrKeyboard::Marked;
+                        self.changed(Item::VrKeyboard, host);
+                    }
+                    self.info(message);
+                }
                 Err(e) => self.error(e),
             },
             (UiKey::Enter, Input::Link) => self.open_autoexec(host),
