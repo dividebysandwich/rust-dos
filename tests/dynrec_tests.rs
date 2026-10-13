@@ -3917,6 +3917,70 @@ fn plain_plane_writes_in_translated_code_are_the_interpreters() {
 }
 
 #[test]
+fn stores_into_the_linear_frame_buffer_are_the_interpreters() {
+    // DirectDraw's own copy loop into a 640x480 16-bit VESA mode's frame
+    // buffer at E0000000h, and stores of each size. The last ones reach
+    // past the end of the video memory (4 MB), which ends on a page
+    // boundary: they cross a page, so translated code takes them through
+    // `jit_write` and the interpreter a byte at a time, and `write_lfb`
+    // never sees them. The display start is in the middle of a row.
+    const LFB: u32 = 0xE000_0000;
+    let (mut a, mut b) = twins(|rig| {
+        rig.cpu.set_ax(0x4F02);
+        rig.cpu.set_reg16(iced_x86::Register::BX, 0x4111);
+        rust_dos::interrupts::int10::handle(&mut rig.cpu);
+        assert_eq!(rig.cpu.ax(), 0x004F, "no VESA mode");
+        rig.cpu.bus.vbe.latched_start = 0x1234;
+        rig.cpu.bus.vga.dirty = false;
+        rig.cpu.bus.vga.dirty_y_min = u32::MAX;
+        rig.cpu.bus.vga.dirty_y_max = 0;
+        for i in 0..0x1000u32 {
+            rig.write32(DATA + 4 * i, i.wrapping_mul(0x0103_0507));
+        }
+        rig.load(CODE, &asm32(CODE, |a| {
+            let mut dword = a.create_label();
+            a.mov(edi, DATA)?;
+            a.mov(esi, LFB + 0x1000)?;
+            a.lea(edx, dword_ptr(esi + 0x4000))?;
+            a.set_label(&mut dword)?;
+            a.mov(eax, dword_ptr(edi))?;
+            a.add(edi, 4)?;
+            a.mov(dword_ptr(esi), eax)?;
+            a.add(esi, 4)?;
+            a.cmp(esi, edx)?;
+            a.jne(dword)?;
+            let mut each = a.create_label();
+            a.mov(ecx, 0x300u32)?;
+            a.set_label(&mut each)?;
+            a.mov(eax, ecx)?;
+            a.imul_3(eax, eax, 0x0301_0507)?;
+            a.mov(byte_ptr(ecx + LFB + 0x9000), al)?;
+            a.mov(word_ptr(ecx * 2 + LFB + 0xA001), ax)?;
+            a.mov(dword_ptr(ecx * 4 + LFB + 0xB003), eax)?;
+            a.add(ebx, dword_ptr(ecx * 4 + LFB + 0xB003))?;
+            a.dec(ecx)?;
+            a.jnz(each)?;
+            a.mov(eax, 0x1122_3344u32)?;
+            a.mov(dword_ptr(LFB + 0x3F_FFFE), eax)?;
+            a.mov(word_ptr(LFB + 0x3F_FFFF), ax)?;
+            a.mov(dword_ptr(LFB + 0x3F_FFFC), eax)?;
+            a.hlt()
+        }));
+    });
+    let stats = run_both(&mut a, &mut b);
+    assert!(b.cpu.bus.vbe.vram[0x1000..0x1010].iter().any(|&x| x != 0));
+    assert_eq!(b.cpu.bus.vbe.vram[0x3F_FFFC..], [0x44, 0x33, 0x22, 0x11]);
+    let shown = |rig: &Rig| {
+        let v = &rig.cpu.bus.vga;
+        (v.dirty, v.dirty_y_min, v.dirty_y_max, rig.cpu.bus.activity.video_bytes)
+    };
+    assert_eq!(shown(&a), shown(&b));
+    if AVAILABLE {
+        assert_eq!(untranslated(&stats), 0, "{:?}", stats);
+    }
+}
+
+#[test]
 fn video_memory_is_written_and_read_by_its_physical_address() {
     let (_, b) = video_memory_program(false);
     assert!(b.cpu.bus.vga.vram_graphics.iter().any(|&p| p != 0));
