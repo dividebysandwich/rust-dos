@@ -323,8 +323,8 @@ impl IsaPnp {
         let reg = self.address;
         match reg {
             // Set RD_DATA port: bits 9-2 of the port, whose bits 1-0 are
-            // 11b, in 203h-3FFh.
-            0x00 if self.cards.iter().any(Card::listening) => {
+            // 11b, in 203h-3FFh. Only in the Isolation state.
+            0x00 if self.cards.iter().any(|c| c.state == CardState::Isolation) => {
                 let port = (value as u16) << 2 | 3;
                 self.read_port = (0x203..=0x3FF).contains(&port).then_some(port);
             }

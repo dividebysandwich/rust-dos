@@ -228,12 +228,12 @@ pub fn entry(cpu: &mut Cpu) {
         },
         // Get Plug and Play ISA Configuration Structure: revision 1, the
         // CSNs given to the ISA Plug and Play cards and the read port they
-        // were isolated with, or none without a card.
+        // were isolated with (where software last put it), or none without a card.
         0x40 => {
             let pointer = dword(cpu, 2);
             if pointer != 0 {
                 let at = far_pointer(cpu, pointer);
-                let (csns, port) = cpu.bus.isapnp.as_ref().map_or((0, 0), |pnp| (pnp.csns(), crate::isapnp::BIOS_READ_PORT));
+                let (csns, port) = cpu.bus.isapnp.as_ref().map_or((0, 0), |pnp| (pnp.csns(), pnp.read_port().unwrap_or(0)));
                 let [lo, hi] = port.to_le_bytes();
                 cpu.bus.guest_write_bytes(at, &[0x01, csns, lo, hi, 0x00, 0x00]);
             }
