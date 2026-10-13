@@ -228,6 +228,10 @@ fn reset_machine(cpu: &mut Cpu) {
     bus.port_accesses.clear();
     crate::keyboard::reset_keystrokes(bus);
     bus.reset_timers();
+    // The BIOS clears port 61h after its beep: the speaker off, the check
+    // enables clear, and channel 2's gate as `pit2_gate_at_start` has it.
+    bus.ppi_checks = 0;
+    bus.set_pit2_gate_at_start(bus.pit2_gate_at_start);
     bus.reset_sound();
     bus.reset_network();
     bus.reset_ne2000();

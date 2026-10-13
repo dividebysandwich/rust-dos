@@ -417,6 +417,8 @@ pub fn ends_block(instr: &Instruction) -> bool {
         // delivers after the block.)
         Mov if instr.op0_register().is_cr() || instr.op0_register().is_dr() || instr.op0_register().is_tr() => true,
         Lmsw | Clts | Invlpg | Ltr => true,
+        // (SYSENTER and SYSEXIT, which change CS, SS and the privilege
+        // level, stop it as a call and a return.)
         _ => false,
     }
 }

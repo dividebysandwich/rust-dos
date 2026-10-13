@@ -6,6 +6,7 @@ use crate::video::{self, ADDR_VGA_GRAPHICS, SIZE_GRAPHICS, VideoMode};
 
 mod guest;
 pub mod port_log;
+mod profile;
 pub mod s3;
 mod et4000;
 mod ide;
@@ -105,6 +106,8 @@ pub struct Bus {
     pub port_accesses: VecDeque<crate::bios::PortAccess>,
     /// The port accesses made, while a debugger keeps a log of them.
     pub port_log: Option<port_log::PortLog>,
+    /// What the profiler counts, while a profile runs (`profile::Session`).
+    pub profile: Option<Box<crate::profile::Counters>>,
     /// The DOSCONFIG command asked for the settings window; the frontend
     /// opens it.
     pub config_ui_requested: bool,
@@ -190,6 +193,15 @@ pub struct Bus {
     pub pit_read_msb: bool,  // Channel 2 read LSB/MSB toggle
     pub pit_mode: u8,        // PIT Command Mode
     pub pit_write_msb: bool, // Toggle to handle 2-byte writes (LSB/MSB)
+    /// Channel 2's count and output as programs read them, with its gate.
+    pub pit2: crate::timer::Pit2,
+    /// Port 61h bit 1, the speaker data enable.
+    pub speaker_data: bool,
+    /// Port 61h bits 2 and 3 as written, the RAM parity and I/O channel
+    /// check enables, which reads give back.
+    pub ppi_checks: u8,
+    /// The `pit2_gate_at_start` setting, which a reset puts back.
+    pub pit2_gate_at_start: bool,
     /// Channel 0 count register as assembled from port 0x40 writes. A
     /// complete count is handed to `pit0`.
     pub pit0_divisor: u16,
@@ -393,6 +405,7 @@ impl Bus {
             reset_requested: false,
             port_accesses: VecDeque::new(),
             port_log: None,
+            profile: None,
             rom_writes: 0,
             config_ui_requested: false,
             exit_requested: false,
@@ -435,6 +448,10 @@ impl Bus {
             pit_mode: 0,
             pit_write_msb: false,
             pit_read_msb: false,
+            pit2: crate::timer::Pit2::new(),
+            speaker_data: false,
+            ppi_checks: 0,
+            pit2_gate_at_start: false,
             pit0_divisor: 0xFFFF,
             pit0_write_msb: false,
             pit0_read_msb: false,
@@ -762,6 +779,26 @@ impl Bus {
         &mut self.tandy_sound
     }
 
+    /// Set PIT channel 2's gate (port 61h bit 0) as `pit2_gate_at_start`
+    /// has it at startup, with the speaker data bit clear so nothing
+    /// sounds, as DOSBox-X's BIOS does for its "pcspeaker clock gate enable
+    /// at startup". With the gate up, the channel counts in mode 3 from
+    /// FFFFh, whatever an earlier program left in it: a game's profile
+    /// turns this on at the DOS prompt, after other programs ran.
+    pub fn set_pit2_gate_at_start(&mut self, on: bool) {
+        self.pit2_gate_at_start = on;
+        // The speaker off and the gate low first, so a tone ends where it
+        // was.
+        self.io_write(0x61, self.ppi_checks);
+        if on {
+            self.pit2 = crate::timer::Pit2::new();
+            self.pit_divisor = 0xFFFF;
+            self.pit_write_msb = false;
+            self.pit_read_msb = false;
+            self.io_write(0x61, self.ppi_checks | 0x01);
+        }
+    }
+
     /// Put a DAC on LPT1 (`lpt_dac`), or take it away: the printer gives
     /// way to it, and the BIOS data area has LPT1 while either is there.
     pub fn configure_lpt_dac(&mut self, kind: crate::lpt_dac::LptDacType) {
@@ -1068,8 +1105,39 @@ impl Bus {
         self.load_bytes(addr, data);
     }
 
+    /// Whether the `len` bytes at `addr` are plain RAM (`is_plain_ram`),
+    /// for a `len` a program chose: one longer than RAM is not, so that
+    /// `addr + len` can't overflow a 32-bit `usize`.
+    pub(crate) fn is_plain_run(&self, addr: usize, len: usize) -> bool {
+        len <= self.ram.len() && self.is_plain_ram(addr, len)
+    }
+
+    /// Append the `len` bytes at `addr` to `out` as programs read them:
+    /// plain RAM as one slice, anything else (video memory, the ROMs,
+    /// upper memory) through `read_8`.
+    pub(crate) fn read_run(&self, addr: usize, len: usize, out: &mut Vec<u8>) {
+        if self.is_plain_run(addr, len) {
+            out.extend_from_slice(&self.ram[addr..addr + len]);
+        } else {
+            out.extend((0..len).map(|i| self.read_8(addr.wrapping_add(i))));
+        }
+    }
+
+    /// Write `data` at `addr` as programs write it, as `read_run` reads
+    /// it: plain RAM with one copy, anything else through `write_8`.
+    pub(crate) fn write_run(&mut self, addr: usize, data: &[u8]) {
+        if self.is_plain_run(addr, data.len()) {
+            self.load_bytes(addr, data);
+        } else {
+            for (i, &b) in data.iter().enumerate() {
+                self.write_8(addr.wrapping_add(i), b);
+            }
+        }
+    }
+
     /// Copy `len` bytes of RAM from `from` to `to`, bypassing the VGA
-    /// mapping, as the expanded memory manager maps its pages.
+    /// mapping, as the expanded memory manager maps its pages and the XMS
+    /// driver moves blocks. Overlapping ranges copy the source as it was.
     pub fn copy_ram(&mut self, from: usize, to: usize, len: usize) {
         let len = len.min(self.ram.len().saturating_sub(from.max(to)));
         if len == 0 {
@@ -1308,6 +1376,12 @@ impl Bus {
 
     /// Reads of the video memory, the ROM area and past the end of RAM.
     fn read_8_mapped(&self, addr: usize) -> u8 {
+        let _profile = self.profile.as_deref().map(|p| p.mem(addr, false));
+        self.mapped_8(addr)
+    }
+
+    /// `read_8_mapped` without the profiler's count, for debuggers.
+    fn mapped_8(&self, addr: usize) -> u8 {
         if self.observe.on {
             self.observe.mapped(addr, self.ram.len());
         }
@@ -1357,7 +1431,7 @@ impl Bus {
             return dword as u8;
         }
         if addr >= self.ram.len() {
-            return self.read_8_mapped(addr);
+            return self.mapped_8(addr);
         }
         if (ADDR_VGA_GRAPHICS..ADDR_VGA_GRAPHICS + SIZE_GRAPHICS).contains(&addr) && self.video_mode != VideoMode::Vesa {
             let saved = self.vga.latches.get();
@@ -1365,7 +1439,8 @@ impl Bus {
             self.vga.latches.set(saved);
             return v;
         }
-        self.read_8(addr)
+        // (Not `read_8`: a profile counts the program's reads, not these.)
+        if self.is_plain_ram(addr, 1) { self.ram[addr] } else { self.mapped_8(addr) }
     }
 
     /// `write_8`, `write_16` or `write_32` (`size` bytes of `value`) at
@@ -1417,6 +1492,7 @@ impl Bus {
             }
             return false;
         }
+        let _profile = self.profile.as_deref().map(|p| p.mem(addr, true));
         if self.observe.on {
             self.observe.mapped_write(addr, self.ram.len());
         }
@@ -1571,6 +1647,7 @@ impl Bus {
             }
             return false;
         }
+        let _profile = self.profile.as_deref().map(|p| p.mem(addr, true));
         if self.observe.on {
             self.observe.mapped_write(addr, self.ram.len());
         }
@@ -1611,6 +1688,7 @@ impl Bus {
                 ])
             };
         }
+        let _profile = self.profile.as_deref().map(|p| p.mem(addr, false));
         if self.observe.on {
             self.observe.mapped(addr, self.ram.len());
         }
@@ -1646,6 +1724,7 @@ impl Bus {
                 ])
             };
         }
+        let _profile = self.profile.as_deref().map(|p| p.mem(addr, false));
         if self.observe.on {
             self.observe.mapped(addr, self.ram.len());
         }
@@ -1681,6 +1760,7 @@ impl Bus {
             }
             return;
         }
+        let _profile = self.profile.as_deref().map(|p| p.mem(addr, true));
         if self.observe.on {
             self.observe.mapped_write(addr, self.ram.len());
         }
@@ -1715,12 +1795,6 @@ impl Bus {
     pub fn write_64(&mut self, addr: usize, value: u64) {
         self.write_32(addr, (value & 0xFFFFFFFF) as u32);
         self.write_32(addr + 4, (value >> 32) as u32);
-    }
-
-    /// PIT channel 2's output: a square wave at the programmed frequency.
-    fn pit2_output(&self) -> bool {
-        let divisor = if self.pit_divisor == 0 { 0x10000u64 } else { self.pit_divisor as u64 };
-        self.clock.now_ticks() % divisor < divisor / 2
     }
 
     /// Start an execution batch that runs until instruction `end`.
@@ -1832,6 +1906,7 @@ impl Bus {
 
     /// Run the Sound Blaster's DSP up to the present.
     fn sb_advance(&mut self) {
+        let _profile = crate::profile::zone(crate::profile::Zone::SbDma);
         let now = self.clock.now_ticks();
         if let Some(sb) = &mut self.sb {
             sb.advance(now, &mut self.dma, &self.ram);
@@ -1841,6 +1916,7 @@ impl Bus {
 
     /// Run the Ultrasound up to the present and update its interrupt line.
     fn gus_advance(&mut self) {
+        let _profile = crate::profile::zone(crate::profile::Zone::Gus);
         let now = self.clock.now_ticks();
         if let Some(gus) = &mut self.gus {
             if let Some(written) = gus.advance(now, &mut self.dma, &mut self.ram) {
@@ -1924,6 +2000,7 @@ impl Bus {
     /// change a program makes now (an FM register, a DAC sample, the
     /// speaker gate) is heard from now on.
     pub fn audio_catch_up(&mut self) {
+        let _profile = crate::profile::zone(crate::profile::Zone::AudioSynth);
         self.sb_advance();
         self.gus_advance();
         let rate = crate::opl::RATE as u64;
@@ -1934,6 +2011,7 @@ impl Bus {
             // A CD plays on meanwhile, and the disks spin.
             self.cdaudio.skip(target - rate / 2 - self.audio_frames);
             self.disknoise.skip(target - rate / 2 - self.audio_frames);
+            self.serial.skip_sound(target - rate / 2 - self.audio_frames);
             self.audio_frames = target - rate / 2;
         }
         let frames = target.saturating_sub(self.audio_frames) as usize;
@@ -1988,6 +2066,7 @@ impl Bus {
         use crate::mixer::Channel;
         let mut peaks = [0.0f32; crate::mixer::CHANNELS];
         let tandy_on = self.tandy_sound_enabled();
+        let modem_on = self.serial.sound_playing();
         for _ in 0..frames {
             let mut mix = crate::mixer::MixFrame::default();
             // The PC speaker, and the prompt's beep, through the speaker's
@@ -2045,6 +2124,10 @@ impl Bus {
                 let noise = self.monitor_noise.render();
                 self.mixer.add(&mut mix, &mut peaks, Channel::Monitor, (noise, noise));
             }
+            if modem_on {
+                let s = self.serial.render_sound();
+                self.mixer.add(&mut mix, &mut peaks, Channel::Modem, (s, s));
+            }
             if let Some(gus) = &mut self.gus {
                 let (gl, gr) = gus.pop_frame(crate::opl::RATE);
                 self.mixer.add(&mut mix, &mut peaks, Channel::Gus, (gl * GUS_GAIN, gr * GUS_GAIN));
@@ -2088,6 +2171,7 @@ impl Bus {
             && self.cdaudio.is_idle()
             && self.disknoise.is_silent()
             && self.monitor_noise.is_silent()
+            && !self.serial.sound_playing()
             && self.gus.as_ref().is_none_or(|g| g.is_idle())
             && self.awe.is_none()
             && self.lpt_dac.is_none()
@@ -2465,6 +2549,7 @@ impl Bus {
 
     /// Write to an I/O port.
     pub fn io_write(&mut self, port: u16, value: u8) {
+        let _profile = self.profile.as_mut().map(|p| p.port(port, true));
         self.observe.port_write();
         self.clock.stall(crate::timer::IO_WRITE_NS);
         self.log_port(port, value as u32, 1, true);
@@ -2595,15 +2680,27 @@ impl Bus {
                 if self.speaker_on {
                     self.audio_catch_up();
                 }
-                if !self.pit_write_msb {
-                    // Write LSB
-                    self.pit_divisor = (self.pit_divisor & 0xFF00) | (value as u16);
-                    self.pit_write_msb = true; // Next write will be MSB
-                } else {
-                    // Write MSB
-                    self.pit_divisor = (self.pit_divisor & 0x00FF) | ((value as u16) << 8);
-                    self.pit_write_msb = false; // Reset to LSB
-                    // println!("[PIT] Frequency Divisor Set to: {}", self.pit_divisor);
+                let now = self.clock.now_ticks();
+                match self.pit2.access {
+                    1 => {
+                        self.pit_divisor = value as u16;
+                        self.pit2.write_count(self.pit_divisor, now);
+                    }
+                    2 => {
+                        self.pit_divisor = (value as u16) << 8;
+                        self.pit2.write_count(self.pit_divisor, now);
+                    }
+                    _ if !self.pit_write_msb => {
+                        // Write LSB
+                        self.pit_divisor = (self.pit_divisor & 0xFF00) | (value as u16);
+                        self.pit_write_msb = true; // Next write will be MSB
+                    }
+                    _ => {
+                        // Write MSB
+                        self.pit_divisor = (self.pit_divisor & 0x00FF) | ((value as u16) << 8);
+                        self.pit_write_msb = false; // Reset to LSB
+                        self.pit2.write_count(self.pit_divisor, now);
+                    }
                 }
             }
 
@@ -2625,6 +2722,9 @@ impl Bus {
                         self.pit0_latched = self.pit0.count(self.clock.now_ticks());
                         self.pit0_latched_active = true;
                         self.pit0_read_msb = false;
+                    } else if channel == 2 && self.pit2.latched.is_none() {
+                        self.pit2.latched = Some(self.pit2.read(self.clock.now_ticks()).0);
+                        self.pit_read_msb = false;
                     }
                 } else {
                     match channel {
@@ -2637,7 +2737,12 @@ impl Bus {
                             self.pit0.set_mode((value >> 1) & 0x07, self.clock.now_ticks());
                             self.clock.schedule(self.next_event());
                         }
-                        2 => self.pit_write_msb = false, // Reset Channel 2 LSB/MSB
+                        2 => {
+                            // Reset Channel 2 LSB/MSB
+                            self.pit_write_msb = false;
+                            self.pit_read_msb = false;
+                            self.pit2.set_mode((value >> 1) & 0x07, access, self.clock.now_ticks());
+                        }
                         _ => {}
                     }
                 }
@@ -2647,6 +2752,9 @@ impl Bus {
             // Bit 0: Timer 2 Gate (Must be 1 for timer to run)
             // Bit 1: Speaker Data (Must be 1 for sound to pass to speaker)
             0x61 => {
+                self.pit2.set_gate(value & 0x01 != 0, self.clock.now_ticks());
+                self.speaker_data = value & 0x02 != 0;
+                self.ppi_checks = value & 0x0C;
                 // If both Bit 0 and Bit 1 are set, the speaker is ON
                 let enabled = (value & 0x03) == 0x03;
                 if enabled != self.speaker_on {
@@ -2824,6 +2932,7 @@ impl Bus {
     // Read from an I/O Port
     /// Read from an I/O port.
     pub fn io_read(&mut self, port: u16) -> u8 {
+        let _profile = self.profile.as_mut().map(|p| p.port(port, false));
         self.observe.port_read(port);
         // Sample the game port at the beginning of the I/O cycle. Its read
         // stall advances time for the next sample, as one polling interval.
@@ -2908,28 +3017,32 @@ impl Bus {
                 }
             }
 
-            // Port 0x42 — PIT channel 2 (PC speaker tone) data. Some games
-            // read this port as a cheap free-running counter for tight
-            // timing loops ("wait until count < threshold"), independent of
-            // whether they ever use the speaker. Returning a constant would
-            // hang those loops, so we synthesize the current count from the
-            // active divisor and emulated time, matching real hardware's
-            // 1.193 MHz tick rate.
+            // Port 0x42 — PIT channel 2 (PC speaker tone) data. Programs
+            // read it as a free-running counter for timing loops, or time a
+            // delay loop by gating it through port 61h bit 0.
             0x42 => {
-                let divisor = if self.pit_divisor == 0 {
-                    0x10000u32
-                } else {
-                    self.pit_divisor as u32
+                let count = match self.pit2.latched {
+                    Some(latched) => latched,
+                    None => self.pit2.read(self.clock.now_ticks()).0,
                 };
-                let ticks = self.clock.now_ticks();
-                let rem = (ticks % divisor as u64) as u32;
-                let count = ((divisor - 1 - rem) & 0xFFFF) as u16;
-                if !self.pit_read_msb {
-                    self.pit_read_msb = true;
-                    (count & 0xFF) as u8
-                } else {
-                    self.pit_read_msb = false;
-                    (count >> 8) as u8
+                match self.pit2.access {
+                    1 => {
+                        self.pit2.latched = None;
+                        (count & 0xFF) as u8
+                    }
+                    2 => {
+                        self.pit2.latched = None;
+                        (count >> 8) as u8
+                    }
+                    _ if !self.pit_read_msb => {
+                        self.pit_read_msb = true;
+                        (count & 0xFF) as u8
+                    }
+                    _ => {
+                        self.pit_read_msb = false;
+                        self.pit2.latched = None;
+                        (count >> 8) as u8
+                    }
                 }
             }
 
@@ -2973,18 +3086,22 @@ impl Bus {
                 value
             }
 
-            // Read PPI Port B: speaker gate and data, the DRAM refresh
-            // request (bit 4, toggles), and the PIT channel 2 output (bit 5).
+            // Read PPI Port B: speaker gate and data and the check enables
+            // as written, the DRAM refresh request (bit 4, toggles), and the
+            // PIT channel 2 output (bit 5).
             0x61 => {
-                let mut val = 0;
-                if self.speaker_on {
-                    val |= 0x03;
+                let mut val = self.ppi_checks;
+                if self.pit2.gate() {
+                    val |= 0x01;
+                }
+                if self.speaker_data {
+                    val |= 0x02;
                 }
                 self.refresh_toggle = !self.refresh_toggle;
                 if self.refresh_toggle {
                     val |= 0x10;
                 }
-                if self.pit2_output() {
+                if self.pit2.read(self.clock.now_ticks()).1 {
                     val |= 0x20;
                 }
                 val

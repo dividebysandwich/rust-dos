@@ -111,6 +111,13 @@ What a VR headset's controllers do:
 The menu button opens and closes the settings window, which the laser
 clicks in; held for a second, it centers the view.
 
+The grip button also picks up what is on the desk: the running game's
+manual, whose pages turn with that hand's thumbstick (A/X picks the next
+manual, if there are several), and the joystick. Hold the joystick by its
+stick and the stick follows your hand as the game port's joystick, the
+trigger and A/X its buttons; hold it by its base to move it. Let go and
+it settles on what is below.
+
 # Center the view {#vr-center}
 
 Puts your eyes where the scene's seat is (its `spawn`), facing the

@@ -54,6 +54,7 @@ impl Bus {
 
     /// Write `len` bytes (1, 2 or 4) of a window, not crossing a dword.
     pub(crate) fn powervr_write(&mut self, (window, offset): (Window, u32), value: u32, len: u32) {
+        let _profile = crate::profile::zone(crate::profile::Zone::PowerVr);
         let Some(p) = &mut self.powervr else { return };
         match window {
             Window::Textures => p.write_texture(offset, value, len),
@@ -115,6 +116,7 @@ impl Bus {
 
     /// End the render whose time came.
     pub(crate) fn powervr_service(&mut self) {
+        let _profile = crate::profile::zone(crate::profile::Zone::PowerVr);
         let now = self.clock.now_ticks();
         if let Some(p) = &mut self.powervr
             && p.service(now)

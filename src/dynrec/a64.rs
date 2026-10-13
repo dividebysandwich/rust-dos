@@ -295,6 +295,21 @@ fn mov32(ops: &mut Asm, reg: u8, v: u32) {
     }
 }
 
+/// X`reg` = `v`.
+fn mov64(ops: &mut Asm, reg: u8, v: u64) {
+    let part = |shift: u32| (v >> shift & 0xFFFF) as u32;
+    dynasm!(ops ; .arch aarch64 ; movz X(reg), part(0));
+    if part(16) != 0 {
+        dynasm!(ops ; .arch aarch64 ; movk X(reg), part(16), lsl 16);
+    }
+    if part(32) != 0 {
+        dynasm!(ops ; .arch aarch64 ; movk X(reg), part(32), lsl 32);
+    }
+    if part(48) != 0 {
+        dynasm!(ops ; .arch aarch64 ; movk X(reg), part(48), lsl 48);
+    }
+}
+
 /// The system register NZCV's encoding, for MRS.
 const NZCV: u32 = 0x5A10;
 
@@ -1107,6 +1122,12 @@ impl Gen<'_> {
         let data = self.data;
         let n = data.count() as u32;
         let (deadline, revalidate, limit, body) = (self.deadline, self.revalidate, self.limit, self.body);
+        if let Some(word) = self.env.profile {
+            // The profiler's sampler sees the block from here on.
+            mov64(&mut self.ops, 0, word);
+            mov64(&mut self.ops, 1, &crate::profile::WORD as *const _ as u64);
+            dynasm!(self.ops ; .arch aarch64 ; str x0, [x1]);
+        }
         self.field(Access::Ldr64, 0, layout::ICOUNT);
         self.field(Access::Ldr64, 1, layout::DEADLINE);
         dynasm!(self.ops
@@ -1795,12 +1816,13 @@ impl Gen<'_> {
                 let end = self.end();
                 self.slow.push(Slow::Bail { at: bail, end, ix: self.ix, dirty: self.dirty, leave: true });
             }
-            Uop::FarCallLoad => {
+            Uop::FarCallLoad { next } => {
                 let fail = self.fail();
                 self.data_x1();
                 dynasm!(self.ops ; .arch aarch64 ; str x1, [x20, CTX_FAR_BLOCK as u32]);
                 self.field(Access::Ldr32, 0, seg_field(Seg::CS, layout::SEG_BASE));
                 dynasm!(self.ops ; .arch aarch64 ; str w0, [x20, CTX_FAR_BASE as u32] ; movz w4, 1);
+                self.mov32(2, next);
                 self.far_call();
                 dynasm!(self.ops ; .arch aarch64 ; cbnz w0, =>fail);
             }
