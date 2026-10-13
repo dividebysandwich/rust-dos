@@ -176,6 +176,8 @@ pub struct Config {
     pub ide_hard_disks: Option<bool>,
     /// A booted system has a CD-ROM drive with no disc in it (`boot_cdrom`).
     pub boot_cdrom: Option<bool>,
+    /// A booted system's floppy disk controller (`floppy_controller`).
+    pub floppy_controller: Option<bool>,
     /// The keyboard layout (`keyboard_layout`).
     pub keyboard_layout: Option<LayoutSetting>,
     /// The mouse captured by itself (`mouse_autocapture`).
@@ -636,7 +638,7 @@ impl SoundConfig {
                     self.sb_installed = false;
                 } else {
                     sb.model = crate::sb::SbModel::parse(value)
-                        .ok_or_else(|| format!("invalid sbtype '{}' (sb16, awe32, sbpro2, sb2 or none)", value))?;
+                        .ok_or_else(|| format!("invalid sbtype '{}' (sb16, sb16vibra, awe32, sbpro2, sb2 or none)", value))?;
                     self.sb_installed = true;
                 }
             }
@@ -975,6 +977,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         "boot_cdrom" => match parse_bool(value) {
                             Some(on) => config.boot_cdrom = Some(on),
                             None => warn(format!("invalid boot_cdrom '{}' (true or false)", value)),
+                        },
+                        "floppy_controller" => match parse_bool(value) {
+                            Some(on) => config.floppy_controller = Some(on),
+                            None => warn(format!("invalid floppy_controller '{}' (true or false)", value)),
                         },
                         "dos_version" => match DosVersion::parse(value) {
                             Some(version) => config.dos_version = Some(version),
@@ -1388,6 +1394,8 @@ pub struct Settings {
     pub ide_hard_disks: bool,
     /// A booted system has a CD-ROM drive even with no CD mounted.
     pub boot_cdrom: bool,
+    /// A booted system has a floppy disk controller for its floppy drives.
+    pub floppy_controller: bool,
     pub keyboard_layout: LayoutSetting,
     /// The mouse captured as it moves over the window while a program
     /// uses the mouse driver, and let go as the program's cursor leaves
@@ -1463,6 +1471,7 @@ impl Default for Settings {
             dos_version: DosVersion::default(),
             ide_hard_disks: true,
             boot_cdrom: true,
+            floppy_controller: true,
             keyboard_layout: LayoutSetting::Auto,
             mouse_autocapture: true,
             mouse_sensitivity: 1.0,
@@ -1571,6 +1580,7 @@ impl Settings {
             dos_version: config.dos_version.unwrap_or(default.dos_version),
             ide_hard_disks: config.ide_hard_disks.unwrap_or(default.ide_hard_disks),
             boot_cdrom: config.boot_cdrom.unwrap_or(default.boot_cdrom),
+            floppy_controller: config.floppy_controller.unwrap_or(default.floppy_controller),
             mouse_autocapture: config.mouse_autocapture.unwrap_or(default.mouse_autocapture),
             mouse_sensitivity: config.mouse_sensitivity.unwrap_or(default.mouse_sensitivity),
             mouse_capture_messages: config.mouse_capture_messages.unwrap_or(default.mouse_capture_messages),
@@ -1669,6 +1679,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Emulator, "dos_version", Some(settings.dos_version.name())),
         (Emulator, "ide_hard_disks", yes_no(settings.ide_hard_disks)),
         (Emulator, "boot_cdrom", yes_no(settings.boot_cdrom)),
+        (Emulator, "floppy_controller", yes_no(settings.floppy_controller)),
         (Emulator, "keyboard_layout", Some(settings.keyboard_layout.name().to_string())),
         (Emulator, "mouse_autocapture", yes_no(settings.mouse_autocapture)),
         (Emulator, "mouse_sensitivity", Some(settings.mouse_sensitivity.to_string())),
@@ -2789,6 +2800,7 @@ pit2_gate_at_start=maybe
             dos_version: DosVersion::new(7, 10),
             ide_hard_disks: false,
             boot_cdrom: false,
+            floppy_controller: false,
             keyboard_layout: LayoutSetting::Named("gr"),
             mouse_autocapture: false,
             mouse_sensitivity: 2.3,
@@ -2875,6 +2887,7 @@ pit2_gate_at_start=maybe
                 msaa: crate::vr::VrMsaa::Two,
                 refresh: Some(90),
                 foveation: crate::vr::VrFoveation::High,
+                keyboard: crate::vr::VrKeyboard::Marked,
             },
         }
     }
@@ -3096,7 +3109,7 @@ pit2_gate_at_start=maybe
         assert!(saved.contains("\nroom=lobby\n\n[serial]\nserial1=mouse\n"), "{}", saved);
         assert!(saved.contains("\nmodemtelnet=off\n\n[printer]\noutput=pdf\n"), "{}", saved);
         assert!(saved.contains("\ntimeout=3000\n\n[achievements]\nenabled=false\nhardcore=false\n\n[shell]\nautosuggest=true\n"), "{}", saved);
-        assert!(saved.contains("\nsuggestion_color=darkgray\n\n[vr]\nmode=off\ncontrollers=both\nspatial_audio=true\nscreen_fit=auto\nquality=auto\nscreen_glow=100\nscene_scale=100\nseat_right=0\nseat_up=0\nseat_forward=0\nseat_turn=0\ngraphics=auto\nresolution=auto\nambient_occlusion=auto\nmsaa=auto\nrefresh=auto\nfoveation=auto\n\n[autoexec]\nDIR\n"), "{}", saved);
+        assert!(saved.contains("\nsuggestion_color=darkgray\n\n[vr]\nmode=off\ncontrollers=both\nspatial_audio=true\nscreen_fit=auto\nquality=auto\nscreen_glow=100\nscene_scale=100\nseat_right=0\nseat_up=0\nseat_forward=0\nseat_turn=0\ngraphics=auto\nresolution=auto\nambient_occlusion=auto\nmsaa=auto\nrefresh=auto\nfoveation=auto\nkeyboard=off\n\n[autoexec]\nDIR\n"), "{}", saved);
         let config = parse(&saved, Path::new("/cfg"), Some(home));
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
         assert_eq!(Settings::from_config(&config), Settings { cycles: CpuSpeed::Max, ..settings.clone() });

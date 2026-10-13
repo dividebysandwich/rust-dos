@@ -408,10 +408,19 @@ Mistakes in the file are printed as warnings; the emulator still starts.
 
 ### `[sound]`
 
-* `sbtype` is the Sound Blaster: `sb16` (the default), `awe32`, `sbpro2`,
-  `sb2` or `none`. `sbbase` (hex), `irq`, `dma` and `hdma` (the SB16's
-  and AWE32's 16-bit channel) set its resources; the defaults are 220, 7,
-  1 and 5. The `BLASTER` environment variable follows them.
+* `sbtype` is the Sound Blaster: `sb16` (the default), `sb16vibra`,
+  `awe32`, `sbpro2`, `sb2` or `none`. `sbbase` (hex), `irq`, `dma` and
+  `hdma` (the SB16's and AWE32's 16-bit channel) set its resources; the
+  defaults are 220, 7, 1 and 5. The `BLASTER` environment variable follows
+  them.
+* `sb16vibra` is an SB16 as Creative's ViBRA16C (CTL0070, DSP 4.13), an
+  ISA Plug and Play card, as DOSBox-X's `sbtype=sb16vibra` is. The BIOS
+  leaves it configured at the resources above, so DOS programs find it as
+  they find an SB16. Windows 95 finds it as a Plug and Play device
+  ("Creative ViBRA16C PnP", with its audio device CTL0001 and its game
+  port CTL7001) and gives it the resources it picks: the card's ports,
+  IRQ and DMA channels move there. The MPU-401 stays at 330h, the OPL3 at
+  388h and the game port at 201h whatever Windows gives those parts.
 * `awe32` is an SB16 with the AWE32's EMU8000 wavetable synthesizer at the
   base + 400h, 800h and C00h (620h, A20h and E20h), as games with AWE32
   music drivers expect it; `BLASTER` gets its `E620`. The card starts as
@@ -825,6 +834,16 @@ The picture on a screen in a 3D scene (see [3D scene and VR](#3d-scene-and-vr)).
   (`VK_LAYER_VALVE_fdm_injection`), which reach OpenGL through Zink. It does
   nothing elsewhere. While it is on, `resolution=auto` draws all of the eye
   images. It takes effect at the next start.
+* `keyboard`: shows the real keyboard (and the hands on it) through the
+  scene with the headset's cameras, in a soft-edged window on the desk:
+  `off` (the default), `auto` (below the screen, then where the fingers press
+  keys while the hands are tracked) or `marked` (where it was marked with a
+  controller from the settings window's VR page). It needs passthrough the
+  program can use: OpenXR's alpha-blended environment (the Steam Frame
+  running Rust-DOS itself, Varjo XR headsets) or `XR_FB_passthrough` (a
+  Quest through Link). The places found and marked are kept in
+  `vr-keyboard.txt` in Rust-DOS's folder. Turning it on or off starts the
+  headset again.
 * `refresh`: the headset's refresh rate in Hz, the runtime's nearest to
   it, or `auto` (the default: the runtime's own, or on a standalone headset
   the lowest from 72 Hz, for more time for each frame). Only where the
@@ -1458,6 +1477,23 @@ such a BIOS does, which Windows for Workgroups' 32-bit disk access checks.
 The first start of a Windows installed without the IDE controller finds it
 as new hardware and asks to restart; after that, **System Properties** →
 **Performance** shows the hard disk without "MS-DOS compatibility mode".
+
+Booted systems have a floppy controller enabled by default for images
+mounted as A: and B: (or disks 0 and 1). Their own floppy drivers can read
+and write those images directly. Changing a disk with Ctrl+F4 or
+`IMGMOUNT` signals a disk change to the guest system. The built-in DOS
+continues to access floppy images through INT 13h.
+
+The first start of a Windows installed without the floppy controller finds
+it as new hardware (**Standard Floppy Disk Controller**) and may ask to
+restart; after that, **System Properties** → **Performance** no longer lists
+A: and B: as using "MS-DOS compatibility mode". If it doesn't find it, run
+**Control Panel** → **Add New Hardware** and let it detect the hardware.
+
+Set `floppy_controller=false` in `[emulator]` to disable the controller
+and leave floppy access to the BIOS (INT 13h). The controller uses ports
+3F0h–3F5h and 3F7h, IRQ 6 and DMA channel 2. Transfers without DMA are
+not supported.
 
 ### Operating systems by name
 

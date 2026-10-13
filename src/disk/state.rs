@@ -14,6 +14,7 @@ use super::{
 use crate::mount::{MountSpec, mount_spec_value, parse_mount_spec, tokenize};
 use crate::savestate::{Reader, Result, State, StateError, Writer};
 use std::io::Seek;
+use std::path::PathBuf;
 
 crate::state_enum!(CharDevice {
     CharDevice::Nul, CharDevice::Con, CharDevice::Emm, CharDevice::Com1, CharDevice::Com2, CharDevice::Com3,
@@ -39,6 +40,10 @@ struct SavedFile {
 
 crate::state_fields!(SavedFile { sft, refs, fcb, drive, owner, key, path, mode, device, position });
 
+/// Set in `SavedFile::refs` for a file a create call left to empty on its
+/// first use, which hasn't come: older states load with it clear.
+const EMPTY_ON_USE: u16 = 0x8000;
+
 impl DiskController {
     pub(crate) fn save_state(&self, w: &mut Writer) {
         // Whether EMMXXXX0 is there comes with the configuration.
@@ -52,6 +57,7 @@ impl DiskController {
             emm_device: _,
             reverts: _,
             copies_from: _,
+            folders_from_state: _,
             shared_from_state: _,
             // Told as the drive was mounted.
             notes: _,
@@ -69,7 +75,7 @@ impl DiskController {
         entries.sort_unstable();
         entries.len().save(w);
         for sft in entries {
-            let OpenFile { data, drive, owner, key, path, mode, refs, fcb } = &open_files[&sft];
+            let OpenFile { data, drive, owner, key, path, mode, refs, fcb, empty_on_use } = &open_files[&sft];
             let (device, position) = match data {
                 OpenData::Host(file, _) => (None, (&*file).stream_position().unwrap_or(0)),
                 OpenData::Memory(_, pos) | OpenData::Image(_, _, pos) | OpenData::Fat { pos, .. } => (None, pos.get()),
@@ -77,7 +83,7 @@ impl DiskController {
             };
             let saved = SavedFile {
                 sft,
-                refs: *refs,
+                refs: *refs | if *empty_on_use { EMPTY_ON_USE } else { 0 },
                 fcb: *fcb,
                 drive: *drive,
                 owner: *owner,
@@ -109,10 +115,13 @@ impl DiskController {
     /// its files again. Returns the files that couldn't be opened.
     pub(crate) fn load_state(&mut self, r: &mut Reader) -> Result<Vec<String>> {
         self.host_dirs.forget();
+        // Taken by this load alone: a failed load's roll back to the
+        // machine from before mounts its drives where they were.
+        let folders = std::mem::take(&mut self.folders_from_state);
         let mut current = 0u8;
         current.load(r)?;
         for drive in 0..LASTDRIVE {
-            self.load_drive(drive, r)?;
+            self.load_drive(drive, &folders, r)?;
         }
         self.current_drive = if self.is_mounted(current) { current } else { DRIVE_C };
         self.restore_shared().map_err(StateError::Mismatch)?;
@@ -129,6 +138,7 @@ impl DiskController {
 
         // Each open again, in its entry.
         let mut lost = Vec::new();
+        let mut empty_on_use = Vec::new();
         for file in files {
             let reopened = match file.device {
                 Some(device) => {
@@ -148,10 +158,20 @@ impl DiskController {
             open.key = file.key;
             open.path = file.path;
             open.mode = file.mode;
-            open.refs = file.refs;
+            open.refs = file.refs & !EMPTY_ON_USE;
+            if file.refs & EMPTY_ON_USE != 0 {
+                empty_on_use.push(file.sft);
+            }
             open.fcb = file.fcb;
             self.open_files.insert(file.sft, open);
             let _ = self.seek_file(file.sft, file.position as i64, 0);
+        }
+        // Once every file is open again: reopening or seeking one would
+        // empty another entry of the same file.
+        for sft in empty_on_use {
+            if let Some(open) = self.open_files.get_mut(&sft) {
+                open.empty_on_use = true;
+            }
         }
         self.sft_dirty = u128::MAX;
 
@@ -162,7 +182,7 @@ impl DiskController {
                     self.unmount(drive).map_err(StateError::Mismatch)?;
                 }
             } else {
-                self.load_drive(drive, r)?;
+                self.load_drive(drive, &[], r)?;
             }
         }
         if !r.is_empty() {
@@ -172,8 +192,9 @@ impl DiskController {
     }
 
     /// Mount `drive` as the state has it, where it differs, with the disk
-    /// of its list in it that the state has.
-    fn load_drive(&mut self, drive: u8, r: &mut Reader) -> Result<()> {
+    /// of its list in it that the state has. A folder drive that `folders`
+    /// names is mounted from the host folder it gives.
+    fn load_drive(&mut self, drive: u8, folders: &[(u8, PathBuf)], r: &mut Reader) -> Result<()> {
         let name = drive_name(drive);
         let mut present = false;
         present.load(r)?;
@@ -190,13 +211,21 @@ impl DiskController {
         dir.load(r)?;
         image.load(r)?;
         changed.load(r)?;
+        // Relative paths are the emulator's working directory's, as they
+        // were when the drive was mounted.
+        let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
+        let spec_of = |text: &str| {
+            let tokens = tokenize(text).map_err(StateError::Invalid)?;
+            parse_mount_spec(drive, &tokens, &cwd, None).map_err(StateError::Invalid)
+        };
+        // A folder drive the load takes from another folder is mounted from it.
+        if let (Some(text), Some((_, folder))) = (&mount, folders.iter().find(|(d, _)| *d == drive)) {
+            let spec = MountSpec { path: folder.clone(), ..spec_of(text)? };
+            mount = Some(state_value(&spec));
+        }
         let now = self.drive(drive).and_then(|d| d.mount.as_ref()).map(state_value);
         if let Some(text) = mount.as_ref().filter(|&text| now.as_ref() != Some(text)) {
-            // Relative paths are the emulator's working directory's, as
-            // they were when the drive was mounted.
-            let tokens = tokenize(text).map_err(StateError::Invalid)?;
-            let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
-            let mut spec = parse_mount_spec(drive, &tokens, &cwd, None).map_err(StateError::Invalid)?;
+            let mut spec = spec_of(text)?;
             spec.opts.boot = self.boot_drive() == Some(drive);
             self.mount(drive, &spec.path, spec.opts, true)
                 .map_err(|e| StateError::Mismatch(format!("drive {} can't be mounted: {}", name, e)))?;

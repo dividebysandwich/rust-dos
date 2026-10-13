@@ -140,6 +140,28 @@ Fine-tune where you sit in the scene, in small steps with **Left** and
 
 They take effect at once, and are kept with the other settings.
 
+# Show the real keyboard {#vr-keyboard}
+
+Lets the headset's cameras show your real keyboard (and your hands on
+it) through the scene, in a window on the desk with soft edges. It needs
+a headset whose cameras the program can show: the Steam Frame running
+Rust-DOS on the headset itself, Varjo's XR headsets, or a Quest through
+Link. Elsewhere the headset says it can't, and nothing changes.
+
+- **auto**: on the desk below the screen, in front of your seat. With
+  the hands tracked (controllers put down), the window moves to where your
+  fingers press keys, and is kept for the next time.
+- **marked**: where you marked it with a controller.
+- **off**: the scene only.
+
+**Mark the keyboard with a controller** shows the room through the scene.
+Put the controller's tip on one front corner of the keyboard, hold the
+trigger and move to the other front corner, let go; then touch the back
+edge and pull the trigger. The grip button cancels. What you mark is kept
+for the next time, and **Show the real keyboard** becomes **marked**.
+
+Turning it on or off starts the headset again.
+
 # Headset resolution {#vr-resolution}
 
 How sharp the headset's picture is: the size of each eye's image in

@@ -15,6 +15,7 @@ const DOS_VERSION: u16 = 6;
 const VOODOO_VERSION: u16 = 1;
 const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 2;
+const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 1;
@@ -24,6 +25,7 @@ const VERITE_VERSION: u16 = 2;
 const ET4000_VERSION: u16 = 1;
 const SHARED_VERSION: u16 = 1;
 const SB_HIGH_SPEED_VERSION: u16 = 1;
+const ISAPNP_VERSION: u16 = 1;
 const PIT2_VERSION: u16 = 1;
 
 /// Save or load each of a list of fields.
@@ -50,6 +52,7 @@ impl Bus {
             notices: _,
             glide_hint: _,
             ide,
+            fdc,
             net,
             serial,
             keyboard_buffer,
@@ -104,6 +107,7 @@ impl Bus {
             gate_array_shadow_at,
             opl,
             sb,
+            isapnp,
             mpu,
             gus,
             gus_line,
@@ -128,6 +132,7 @@ impl Bus {
             ultrasnd_drive: _,
             dos_version: _,
             ide_hard_disks: _,
+            floppy_controller: _,
             boot_cdrom: _,
             idle_hint: _,
             disk_notices: _,
@@ -141,7 +146,7 @@ impl Bus {
             // A service's port accesses for a V86 monitor, made within the
             // instructions after it.
             port_accesses: _,
-            ide_faked: _,
+            faked_io: _,
             port_log: _,
             profile: _,
             guest_paging: _,
@@ -260,6 +265,10 @@ impl Bus {
         if let Some(awe) = awe {
             w.section(b"AWE ", AWE_VERSION, |w| awe.save(w));
         }
+        // The ISA Plug and Play cards (a ViBRA16C), likewise.
+        if let Some(isapnp) = isapnp {
+            w.section(b"PNP ", ISAPNP_VERSION, |w| isapnp.save(w));
+        }
         // A 3dfx card, whose memory comes first, and only on a machine
         // with one, so states of machines without load as they did.
         if let Some(voodoo) = voodoo {
@@ -275,6 +284,10 @@ impl Bus {
         // A booted system's IDE channels, likewise.
         if ide.iter().any(Option::is_some) {
             w.section(b"IDE ", IDE_VERSION, |w| ide.save(w));
+        }
+        // A booted system's floppy disk controller, likewise.
+        if let Some(fdc) = fdc {
+            w.section(b"FDC ", FDC_VERSION, |w| fdc.save(w));
         }
         // The DPMI host, while it has clients.
         if dpmi.active() {
@@ -321,6 +334,7 @@ impl Bus {
             notices: _,
             glide_hint: _,
             ide,
+            fdc,
             net,
             serial,
             keyboard_buffer,
@@ -375,6 +389,7 @@ impl Bus {
             gate_array_shadow_at,
             opl,
             sb,
+            isapnp,
             mpu,
             gus,
             gus_line,
@@ -397,6 +412,7 @@ impl Bus {
             ultrasnd_drive: _,
             dos_version: _,
             ide_hard_disks: _,
+            floppy_controller: _,
             boot_cdrom: _,
             idle_hint: _,
             disk_notices: _,
@@ -408,7 +424,7 @@ impl Bus {
             code_blocks: _,
             reset_requested: _,
             port_accesses: _,
-            ide_faked: _,
+            faked_io: _,
             port_log: _,
             profile: _,
             guest_paging: _,
@@ -527,6 +543,12 @@ impl Bus {
             (true, None) => return Err(StateError::Mismatch("it has an AWE32 and this machine hasn't".into())),
             (false, Some(_)) => return Err(StateError::Mismatch("this machine has an AWE32 and it hasn't".into())),
         }
+        match (r.next_is(b"PNP "), isapnp) {
+            (true, Some(isapnp)) => isapnp.load(&mut r.section(b"PNP ", ISAPNP_VERSION)?)?,
+            (false, None) => {}
+            (true, None) => return Err(StateError::Mismatch("it has a ViBRA16C and this machine hasn't".into())),
+            (false, Some(_)) => return Err(StateError::Mismatch("this machine has a ViBRA16C and it hasn't".into())),
+        }
         match (r.next_is(b"3DFX"), voodoo) {
             (true, Some(voodoo)) => voodoo.load(&mut r.section(b"3DFX", VOODOO_VERSION)?)?,
             (false, None) => {}
@@ -547,6 +569,14 @@ impl Bus {
         *ide = [None, None];
         if r.next_is(b"IDE ") {
             ide.load(&mut r.section(b"IDE ", IDE_VERSION)?)?;
+        }
+        // So does the floppy disk controller; a state saved before
+        // rust-dos had one has none.
+        *fdc = None;
+        if r.next_is(b"FDC ") {
+            let mut controller = crate::fdc::Fdc::new();
+            controller.load(&mut r.section(b"FDC ", FDC_VERSION)?)?;
+            *fdc = Some(controller);
         }
         dpmi.reset();
         if r.next_is(b"DPMI") {

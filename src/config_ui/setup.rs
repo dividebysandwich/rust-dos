@@ -36,6 +36,7 @@ const CATEGORIES: [Category; 4] = [
             Item::DosHigh,
             Item::IdeHardDisks,
             Item::BootCdrom,
+            Item::FloppyController,
             Item::HardDiskSpeed,
             Item::FloppyDiskSpeed,
         ],

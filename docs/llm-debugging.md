@@ -113,7 +113,9 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
 - **Check sound with `/api/status` → `audio`.** `peak` is the loudest
   sample since the previous status request (0 means silence), `underruns`
   counts how often the output device ran dry, and `sound_blaster` is the
-  card's BLASTER string (null without one). To listen or analyse, record
+  card's BLASTER string for where it answers now, after a driver or a Plug
+  and Play configuration moved it (null without a card, or while a
+  ViBRA16C's audio device is inactive). To listen or analyse, record
   `/ws/audio`: a JSON format header, then s16le stereo PCM at 44.1 kHz
   (`curl -s --max-time 3 ws://localhost:8086/ws/audio -o audio.bin`).
   `ultrasound` is the ULTRASND string, and `midi_synth` says what plays the
@@ -722,13 +724,40 @@ counts as a change. Labels, the files' times
 and read-only folders' contents aren't compared. Z: and X:, which the
 machine makes itself, aren't listed.
 
+#### Loading a state in another run
+
+A state records a folder drive by its host folder, so a load in another
+run whose C: shows another folder (a fresh copy for each run, say) finds
+a different folder: a strict-match load refuses it, and a plain load
+mounts the state's folder again. `"folders"` on a load names the folder
+drives to take from other host folders, by letter, each an absolute path:
+
+```sh
+cp -r /runs/1/c /runs/2/c   # C: as it was when the state was saved
+curl -s $J -XPOST -d '{"path":"/work/a.state","strict_match":true,"check_files":true,"folders":{"C":"/runs/2/c"}}' $H/api/state/load
+```
+
+The load then takes the state as if it had been saved with C: mounted
+from `/runs/2/c`: the media are compared with that folder, a
+`check_files` load compares the files in it with the state's record, and
+the load leaves C: mounted from it, with the files the state had open
+opened again there. A strict-match load with `check_files` thereby
+loads the state only onto a copy holding what C: held at the save. The
+reply and the journal's `state_loaded` entry have `folders`, the folders
+taken; the reply's header keeps the folders the state records. A drive
+the state hasn't as a folder drive (none, or one of disk images or with
+an overlay), a path that isn't an existing folder, and a drive named twice
+(`"C"` and `"c"`) are refused with 400 and nothing is loaded, as is a save
+with `folders`. The folder is compared by its canonical path, as a
+mounted drive's is, so a symbolic link to the copy matches it.
+
 #### Replies
 
 A save replies `{"saved": path, "format", "emulator", "header"}` and a load
 `{"loaded": path, "format", "emulator", "header"}`, with `differences`
 after a plain load that found some, `debugger_reset` after a strict-match
-load, and `unchecked` after a `check_files` load of a state without a
-record of the files.
+load, `unchecked` after a `check_files` load of a state without a
+record of the files, and `folders` after a load that took some.
 
 - `format`: the version of the file's layout.
 - `emulator`: the version of the running rust-dos.
@@ -768,7 +797,9 @@ Errors:
 
 - **400** `{"error", "loaded":false, "unchanged":true}`: the load failed (no
   such file, which reads `empty`, a file that isn't a state, a state of
-  another `memsize`, a drive of the state that can't be mounted,
+  another `memsize`, a drive of the state that can't be mounted, a
+  `folders` drive the state hasn't as a folder drive or a `folders`
+  path that isn't a folder,
   RetroAchievements hardcore mode) and the machine, its
   settings and its hardware are as they were. A save that can't write its
   file, and a body without `path`, get a 400 with only `error`.
@@ -899,6 +930,13 @@ the system writes its disk (`cp --reflink=auto` on btrfs takes no room).
   (`{"enabled":true,"ports":"1F0-1F7"}` for the primary channel): READ
   SECTORS (20h) and WRITE SECTORS (30h) at 1F7h, the address at 1F3h-1F6h
   (1F6h's bit 6 set for LBA), the data words at 1F0h.
+- **Floppy controller:** a floppy driver's commands show in the port log
+  (`"ports":"3F0-3F7"`): the command bytes written to 3F5h and the result
+  bytes read from it, with 3F4h's status between them (80h idle, 90h
+  taking a command, D0h handing out a result), 3F2h's resets and motors,
+  and 3F7h's disk change line (bit 7). E6h is READ DATA, C5h WRITE DATA,
+  4Ah READ ID, 0Fh SEEK, 08h SENSE INTERRUPT STATUS. The log's `[FDC]`
+  lines name commands it doesn't know.
 
 ### 3dfx (Glide) games
 
