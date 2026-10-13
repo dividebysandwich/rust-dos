@@ -1603,7 +1603,9 @@ no program runs (over a booted system, it starts over from that disk).
 prompt without booting.
 
 Turning the machine off (Windows' **Shut Down**) brings back the DOS prompt;
-restarting (Ctrl+Alt+Del, or Windows' **Restart**) boots the disk again.
+restarting (Ctrl+Alt+Del, or Windows' **Restart**) boots the disk again. A
+system booted from a floppy starts from the first hard disk when the floppy
+drive is empty by then, as a PC that boots from A: and then C: does.
 Changes to the hardware settings wait for the prompt.
 
 What the system writes goes into the image, so try things on a copy (on
@@ -1647,12 +1649,79 @@ hardware it was installed on in its registry, so an image installed on
 other hardware may look for devices this machine hasn't.
 
 Windows 95, OSR2 included, is the system the booted machine was built and
-tried with. Windows 98, 98 SE and ME have no recorded run, so try them on a
-copy of the image. The machine has APM and no ACPI, and its Sound Blaster
+tried with, and Windows 98 SE runs too (see below). Windows 98 First Edition
+and ME have no recorded run, so try them on a copy of the image. The machine
+has APM and no ACPI, and its Sound Blaster
 is a legacy card that Windows finds at the resources [`[sound]`](#sound)
 gives it (DOSBox-X's `sbtype=sb16vibra` is an ISA Plug and Play card).
 `memsize` is capped by the CPU, at most 512 MB with `cpu=pentium_mmx` (see
 [`[emulator]`](#emulator)).
+
+### Windows 98
+
+Windows 98 SE runs on the same machine, with a Pentium Pro or Pentium II
+for its processor support:
+
+```ini
+[emulator]
+machine=svga_s3
+cpu=pentium_ii
+memsize=128
+```
+
+An image installed in DOSBox-X (archive.org has such packs, with their
+`dosbox.conf`) starts as it is, imported as a game or mounted by hand, and
+one installed in another emulator, 86Box say, as well. Windows finds this
+machine's IDE and floppy controllers as new hardware at its first start and
+asks to restart; an image installed elsewhere also asks for the Windows 98
+CD for its drivers (mount it as a CD-ROM drive, or, where Windows can't read
+it yet, copy its `WIN98` folder to `C:\WIN98` from the built-in DOS and
+give Windows that folder). After that, **System Properties** →
+**Performance** says the system is configured for optimal performance: the
+hard disk and the floppy drives in 32 bits, the Sound Blaster 16 playing,
+the S3 driver up to 1024x768 in 32 bits per pixel, MS-DOS Prompts,
+**Restart in MS-DOS mode**, Shut Down, and save states.
+
+A few things an image may bring with it:
+
+* **All drives in MS-DOS compatibility mode:** Windows switches its IDE
+  driver off for good when it fails once, as it can in other emulators,
+  with the value `NoIDE` in the registry key
+  `HKEY_LOCAL_MACHINE\System\CurrentControlSet\Services\VxD\IOS`.
+  Delete the value with `regedit` and restart.
+* **The network card:** Windows keeps the NE2000's port and interrupt as
+  the image was set up with. Give rust-dos the same ones (`nicbase`,
+  `nicirq` in [`[network]`](#network)), or change the adapter's resources
+  in Device Manager to rust-dos's, and Windows gets its address from the
+  router and reaches the internet.
+
+To install Windows 98 SE on a new disk, make the disk with `MAKEIMG` (a
+partition formatted FAT32, so Setup needn't partition and format it) and
+boot the Windows 98 boot floppy with the CD in the CD-ROM drive:
+
+```
+MAKEIMG win98.img -t hd -size 2000 -fat 32
+```
+
+```ini
+[drives]
+0=win98boot.img floppy
+2=win98.img
+D=win98se.iso cdrom
+
+[autoexec]
+boot -l A
+```
+
+Choose **Start Windows 98 Setup from CD-ROM**. When Setup offers to make a
+startup disk, cancel it and unmount drive 0 (the settings window's Drives
+page, or the debug server): its restarts then start from the hard disk.
+The installation takes about a quarter of an hour at full speed, and ends
+on the desktop with everything above working. An empty disk image works
+too: partition it with the floppy's FDISK (with the partition active),
+restart and format it with FORMAT, then run Setup from the CD (`OEMSETUP`
+in `D:\WIN98` on an OEM CD). An OEM boot floppy lacks FORMAT.COM, which
+`A:\EXTRACT /L A:\ A:\EBD.CAB FORMAT.COM` puts on the floppy.
 
 ### Direct3D on an S3 ViRGE
 
