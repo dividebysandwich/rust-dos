@@ -1022,12 +1022,53 @@ impl Gen<'_> {
     }
 
     /// `Uop::FBailPrecise` (see `x64::Gen::fpu_bail_precise`).
-    fn fpu_bail_precise(&mut self, regs: u8, directed: bool) {
+    fn fpu_bail_precise(&mut self, regs: u8, when: Precise) {
         let at = self.ops.new_dynamic_label();
-        if directed {
-            self.field(Access::Ldr16, 0, layout::fpu::CONTROL);
-            dynasm!(self.ops ; .arch aarch64 ; tst w0, 0xC00 ; b.eq >precise_done);
+        match when {
+            Precise::Directed => {
+                self.field(Access::Ldr16, 0, layout::fpu::CONTROL);
+                dynasm!(self.ops ; .arch aarch64 ; tst w0, 0xC00 ; b.eq >precise_done);
+            }
+            Precise::Int(x) => {
+                // As x86-64's.
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; fmov x0, D(d(x))
+                    ; ubfx x2, x0, 52, 11
+                    ; cmp w2, 1023 + 52
+                    ; b.hs >precise_regs
+                    ; cmp w2, 1023 - 1
+                    ; b.lo >precise_done
+                    ; mov w3, 1023 + 51
+                    ; sub w3, w3, w2
+                    ; mov x2, 1
+                    ; lsl x2, x2, x3
+                    ; sub x2, x2, 1
+                    ; tst x0, x2
+                    ; b.ne >precise_done
+                );
+            }
+            Precise::Single(x) => {
+                self.field(Access::Ldr16, 0, layout::fpu::CONTROL);
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; tst w0, 0xC00
+                    ; b.ne >precise_regs
+                    ; fmov x0, D(d(x))
+                    ; tst w0, 0x0FFF_FFFF
+                    ; b.ne >precise_done
+                );
+            }
+            Precise::Equal(a, b) => {
+                // Not equal where unordered either.
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; fcmp D(d(a)), D(d(b))
+                    ; b.ne >precise_done
+                );
+            }
         }
+        dynasm!(self.ops ; .arch aarch64 ; precise_regs:);
         self.field(Access::Ldr64, 1, layout::fpu::TOP);
         for i in (0..8).filter(|i| regs >> i & 1 != 0) {
             self.cpu_addr(2, layout::fpu::STALE);
@@ -1990,7 +2031,7 @@ impl Gen<'_> {
                 self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, leave: false });
             }
             Uop::FpuGuard { valid } => self.fpu_guard(valid),
-            Uop::FBailPrecise { regs, directed } => self.fpu_bail_precise(regs, directed),
+            Uop::FBailPrecise { regs, when } => self.fpu_bail_precise(regs, when),
             Uop::FGet { x, i } => {
                 self.fpu_phys(1, i);
                 self.cpu_addr(2, layout::fpu::F64);

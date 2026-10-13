@@ -1835,7 +1835,7 @@ impl Gen<'_> {
                 self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, wb, reload, leave: false });
             }
             Uop::FpuGuard { valid } => self.fpu_guard(valid),
-            Uop::FBailPrecise { regs, directed } => self.fpu_bail_precise(regs, directed),
+            Uop::FBailPrecise { regs, when } => self.fpu_bail_precise(regs, when),
             Uop::FGet { x, i } => {
                 self.fpu_phys(RAX, i);
                 dynasm!(self.ops ; .arch x64 ; movsd Rx(x.0), QWORD [rbx + rax * 8 + FPU_F64]);
@@ -2168,15 +2168,58 @@ impl Gen<'_> {
         self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, wb, reload, leave: true });
     }
 
-    /// `Uop::FBailPrecise`: the handler runs the instruction where one of
-    /// the registers in `regs` isn't stale and has significand bits below a
-    /// double's 53 (with `directed`, and the control word doesn't round to
-    /// nearest).
-    fn fpu_bail_precise(&mut self, regs: u8, directed: bool) {
+    /// `Uop::FBailPrecise`: the handler runs the instruction where `when`
+    /// holds and one of the registers in `regs` isn't stale and has
+    /// significand bits below a double's 53.
+    fn fpu_bail_precise(&mut self, regs: u8, when: Precise) {
         let at = self.ops.new_dynamic_label();
-        if directed {
-            dynasm!(self.ops ; .arch x64 ; test WORD [rbx + FPU_CONTROL], 0xC00 ; jz >precise_done);
+        match when {
+            Precise::Directed => {
+                dynasm!(self.ops ; .arch x64 ; test WORD [rbx + FPU_CONTROL], 0xC00 ; jz >precise_done);
+            }
+            Precise::Int(x) => {
+                // A multiple of 1/2: the significand bits below 2^-1, for
+                // an exponent e from -1 to 51, are 0. (Below 1/2 the
+                // value isn't one, from 2^52 on it is.)
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; movq rax, Rx(x.0)
+                    ; mov rdx, rax
+                    ; shr rdx, 52
+                    ; and edx, 0x7FF
+                    ; cmp edx, 1023 + 52
+                    ; jae >precise_regs
+                    ; cmp edx, 1023 - 1
+                    ; jb >precise_done
+                    ; mov ecx, 1023 + 51
+                    ; sub ecx, edx
+                    ; mov edx, 1
+                    ; shl rdx, cl
+                    ; dec rdx
+                    ; test rax, rdx
+                    ; jnz >precise_done
+                );
+            }
+            Precise::Single(x) => {
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; test WORD [rbx + FPU_CONTROL], 0xC00
+                    ; jnz >precise_regs
+                    ; movq rax, Rx(x.0)
+                    ; test eax, 0x0FFF_FFFF
+                    ; jnz >precise_done
+                );
+            }
+            Precise::Equal(a, b) => {
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; ucomisd Rx(a.0), Rx(b.0)
+                    ; jne >precise_done
+                    ; jp >precise_done
+                );
+            }
         }
+        dynasm!(self.ops ; .arch x64 ; precise_regs:);
         dynasm!(self.ops ; .arch x64 ; mov eax, DWORD [rbx + FPU_TOP]);
         for i in (0..8).filter(|i| regs >> i & 1 != 0) {
             dynasm!(self.ops
