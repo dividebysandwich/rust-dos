@@ -408,10 +408,19 @@ Mistakes in the file are printed as warnings; the emulator still starts.
 
 ### `[sound]`
 
-* `sbtype` is the Sound Blaster: `sb16` (the default), `awe32`, `sbpro2`,
-  `sb2` or `none`. `sbbase` (hex), `irq`, `dma` and `hdma` (the SB16's
-  and AWE32's 16-bit channel) set its resources; the defaults are 220, 7,
-  1 and 5. The `BLASTER` environment variable follows them.
+* `sbtype` is the Sound Blaster: `sb16` (the default), `sb16vibra`,
+  `awe32`, `sbpro2`, `sb2` or `none`. `sbbase` (hex), `irq`, `dma` and
+  `hdma` (the SB16's and AWE32's 16-bit channel) set its resources; the
+  defaults are 220, 7, 1 and 5. The `BLASTER` environment variable follows
+  them.
+* `sb16vibra` is an SB16 as Creative's ViBRA16C (CTL0070, DSP 4.13), an
+  ISA Plug and Play card, as DOSBox-X's `sbtype=sb16vibra` is. The BIOS
+  leaves it configured at the resources above, so DOS programs find it as
+  they find an SB16. Windows 95 finds it as a Plug and Play device
+  ("Creative ViBRA16C PnP", with its audio device CTL0001 and its game
+  port CTL7001) and gives it the resources it picks: the card's ports,
+  IRQ and DMA channels move there. The MPU-401 stays at 330h, the OPL3 at
+  388h and the game port at 201h whatever Windows gives those parts.
 * `awe32` is an SB16 with the AWE32's EMU8000 wavetable synthesizer at the
   base + 400h, 800h and C00h (620h, A20h and E20h), as games with AWE32
   music drivers expect it; `BLASTER` gets its `E620`. The card starts as

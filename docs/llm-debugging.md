@@ -113,7 +113,9 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
 - **Check sound with `/api/status` → `audio`.** `peak` is the loudest
   sample since the previous status request (0 means silence), `underruns`
   counts how often the output device ran dry, and `sound_blaster` is the
-  card's BLASTER string (null without one). To listen or analyse, record
+  card's BLASTER string for where it answers now, after a driver or a Plug
+  and Play configuration moved it (null without a card, or while a
+  ViBRA16C's audio device is inactive). To listen or analyse, record
   `/ws/audio`: a JSON format header, then s16le stereo PCM at 44.1 kHz
   (`curl -s --max-time 3 ws://localhost:8086/ws/audio -o audio.bin`).
   `ultrasound` is the ULTRASND string, and `midi_synth` says what plays the

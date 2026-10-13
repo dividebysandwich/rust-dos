@@ -20,6 +20,10 @@ pub enum SbModel {
     Sb2,
     SbPro2,
     Sb16,
+    /// Creative's ViBRA16C (CTL0070), an SB16 on one chip that is an ISA
+    /// Plug and Play card: its resources are set through the PnP
+    /// registers, and its mixer's 80h and 81h only read them.
+    Sb16Vibra,
     /// An SB16 with the EMU8000 wavetable synthesizer (`crate::awe32`).
     Awe32,
 }
@@ -31,6 +35,8 @@ impl SbModel {
             SbModel::Sb2 => (2, 1),
             SbModel::SbPro2 => (3, 2),
             SbModel::Sb16 => (4, 5),
+            // The ViBRA16C's, as DOSBox-X gives it.
+            SbModel::Sb16Vibra => (4, 13),
             // A CT3990's.
             SbModel::Awe32 => (4, 13),
         }
@@ -39,7 +45,7 @@ impl SbModel {
     /// Whether the card is an SB16, as the AWE32 is too.
     #[inline]
     pub fn is_sb16(self) -> bool {
-        matches!(self, SbModel::Sb16 | SbModel::Awe32)
+        matches!(self, SbModel::Sb16 | SbModel::Sb16Vibra | SbModel::Awe32)
     }
 
     /// The T value of the BLASTER variable.
@@ -47,7 +53,7 @@ impl SbModel {
         match self {
             SbModel::Sb2 => 3,
             SbModel::SbPro2 => 4,
-            SbModel::Sb16 | SbModel::Awe32 => 6,
+            SbModel::Sb16 | SbModel::Sb16Vibra | SbModel::Awe32 => 6,
         }
     }
 
@@ -57,6 +63,7 @@ impl SbModel {
             SbModel::Sb2 => "sb2",
             SbModel::SbPro2 => "sbpro2",
             SbModel::Sb16 => "sb16",
+            SbModel::Sb16Vibra => "sb16vibra",
             SbModel::Awe32 => "awe32",
         }
     }
@@ -66,6 +73,7 @@ impl SbModel {
             "sb2" | "sb20" => Some(SbModel::Sb2),
             "sbpro2" | "sbpro" => Some(SbModel::SbPro2),
             "sb16" => Some(SbModel::Sb16),
+            "sb16vibra" | "vibra" => Some(SbModel::Sb16Vibra),
             "awe32" | "sbawe" | "awe" => Some(SbModel::Awe32),
             _ => None,
         }
@@ -257,6 +265,20 @@ impl SoundBlaster {
         };
         sb.reset_mixer();
         sb
+    }
+
+    /// Route the card to an IRQ and DMA channels, as an ISA Plug and Play
+    /// configuration does (None for none). A 16-bit channel below 4 is
+    /// none: 16-bit transfers then use the 8-bit channel.
+    pub fn set_lines(&mut self, irq: Option<u8>, dma8: Option<u8>, dma16: Option<u8>) {
+        self.irq = irq;
+        self.dma8 = dma8;
+        self.dma16 = dma16.filter(|&ch| ch >= 4);
+    }
+
+    /// The 8-bit and 16-bit DMA channels the card uses now (see `irq`).
+    pub fn dma(&self) -> (Option<u8>, Option<u8>) {
+        (self.dma8, self.dma16)
     }
 
     /// Whether the card's interrupt line is up.
@@ -553,6 +575,9 @@ impl SoundBlaster {
                 self.mixer[l as usize] = (value & 0xF0) | 0x08;
                 self.mixer[r as usize] = (value << 4) | 0x08;
             }
+            // The ViBRA16C takes its interrupt and DMA channels from its
+            // Plug and Play registers only (DOSBox-X, sblaster.cpp).
+            0x80 | 0x81 if self.config.model == SbModel::Sb16Vibra => {}
             // SB16 interrupt and DMA setup, a bit per line or channel.
             0x80 => {
                 self.irq = [(0x01, 9), (0x02, 5), (0x04, 7), (0x08, 10)]

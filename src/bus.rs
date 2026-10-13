@@ -279,6 +279,9 @@ pub struct Bus {
     pub opl: crate::opl::Opl,
     /// The Sound Blaster, if one is installed.
     pub sb: Option<crate::sb::SoundBlaster>,
+    /// The ISA Plug and Play cards: the Sound Blaster when it is a
+    /// ViBRA16C (`sbtype=sb16vibra`), None for the others.
+    pub isapnp: Option<crate::isapnp::IsaPnp>,
     /// The two 8237 DMA controllers.
     pub dma: crate::dma::Dma,
     /// The MPU-401 MIDI interface at 330h.
@@ -485,6 +488,7 @@ impl Bus {
             mouse: crate::mouse::MouseState::new(),
             opl: crate::opl::Opl::new(true),
             sb: Some(crate::sb::SoundBlaster::new(crate::sb::SbConfig::default())),
+            isapnp: None,
             dma: crate::dma::Dma::new(),
             mpu: crate::mpu401::Mpu401::new(),
             gus: Some(crate::gus::Gus::new(crate::gus::GusConfig::default(), 0)),
@@ -2210,6 +2214,7 @@ impl Bus {
     /// whether the FM chip is an OPL3.
     pub fn configure_sound(&mut self, sb: Option<crate::sb::SbConfig>, opl3: bool) {
         self.sb = sb.map(crate::sb::SoundBlaster::new);
+        self.isapnp = sb.filter(|sb| sb.model == crate::sb::SbModel::Sb16Vibra).map(|sb| crate::isapnp::IsaPnp::vibra16c(&sb));
         self.opl = crate::opl::Opl::new(opl3);
         self.configure_awe();
         self.sync_sb_irq();
@@ -2219,11 +2224,18 @@ impl Bus {
     /// Power-on state of the sound hardware, when a program ends. The
     /// Ultrasound keeps its DRAM, and when a resident program has hooked
     /// its interrupt (a MIDI driver like ULTRAMID), its settings too: only
-    /// its voices stop.
+    /// its voices stop. A ViBRA16C keeps its Plug and Play configuration,
+    /// as the card does until RESET DRV, so a DOS configuration tool's
+    /// resources outlast it: a reboot (`power_on_sound`) gives the BIOS's.
     pub fn reset_sound(&mut self) {
         let config = self.sb.as_ref().map(|sb| sb.config);
         let opl3 = self.opl.is_opl3();
+        let pnp = self.isapnp.take();
         self.configure_sound(config, opl3);
+        if self.isapnp.is_some() && pnp.is_some() {
+            self.isapnp = pnp;
+            self.route_isapnp_audio();
+        }
         self.dma = crate::dma::Dma::new();
         self.mpu.reset();
         self.tandy_sound = crate::sn76489::Sn76489::new(self.tandy_sound.variant());
@@ -2244,6 +2256,14 @@ impl Bus {
         }
         self.sync_gus_irq();
         self.clock.schedule(self.next_event());
+    }
+
+    /// Power-on state of the sound hardware, at a reboot: as at a
+    /// program's end, with a ViBRA16C back at the resources the BIOS gives
+    /// it.
+    pub fn power_on_sound(&mut self) {
+        self.isapnp = None;
+        self.reset_sound();
     }
 
     /// The AWE32's ROM and RAM size (KB), for the card from now on. A card
@@ -2382,9 +2402,89 @@ impl Bus {
         self.opl.write_data(bank, value, now);
     }
 
-    /// The Sound Blaster's base port, if the card is there.
-    fn sb_base(&self) -> Option<u16> {
-        self.sb.as_ref().map(|sb| sb.config.base)
+    /// The Sound Blaster's base port, if the card is there: a ViBRA16C's
+    /// is where its Plug and Play registers put it, while it is active. The
+    /// Sound Blaster's ports decode on address bits 15-4, so the low 4
+    /// bits of a base the registers have are ignored: an unaligned base
+    /// still leaves the card somewhere.
+    pub fn sb_base(&self) -> Option<u16> {
+        match &self.isapnp {
+            Some(pnp) => pnp.audio().map(|audio| audio.base & 0xFFF0).filter(|&base| base != 0),
+            None => self.sb.as_ref().map(|sb| sb.config.base),
+        }
+    }
+
+    /// A write to the ISA Plug and Play WRITE_DATA port. A logical device
+    /// configured anew takes the Sound Blaster's IRQ and DMA channels
+    /// along: none while it is inactive.
+    fn isapnp_write(&mut self, value: u8) {
+        let Some(pnp) = &mut self.isapnp else { return };
+        let before = (pnp.read_port(), pnp.cards.iter().map(|c| c.csn).collect::<Vec<_>>(), pnp.audio());
+        pnp.write_data(value);
+        let after = (pnp.read_port(), pnp.cards.iter().map(|c| c.csn).collect::<Vec<_>>(), pnp.audio());
+        if after.0 != before.0 {
+            let port = after.0.map_or("none".to_string(), |p| format!("{:03X}h", p));
+            self.log_string(&format!("[ISAPNP] Read port {}", port));
+        }
+        if after.1 != before.1 {
+            self.log_string(&format!("[ISAPNP] CSNs {:?}", after.1));
+        }
+        if after.2 == before.2 {
+            return;
+        }
+        let audio = after.2;
+        let line = match audio {
+            Some(a) => format!("[ISAPNP] ViBRA16C audio at {:03X}h, IRQ {:?}, DMA {:?} and {:?}", a.base, a.irq, a.dma8, a.dma16),
+            None => "[ISAPNP] ViBRA16C audio deactivated".to_string(),
+        };
+        self.log_string(&line);
+        self.sb_advance();
+        self.route_isapnp_audio();
+        self.clock.schedule(self.next_event());
+    }
+
+    /// The Sound Blaster's resources now, as a BLASTER string: the base,
+    /// IRQ and DMA channels a Plug and Play configuration or the SB16's
+    /// mixer (80h and 81h) moved it to, with a line it has none of left
+    /// out. None without a card, or while a ViBRA16C's audio device is
+    /// inactive.
+    pub fn sb_blaster(&self) -> Option<String> {
+        let sb = self.sb.as_ref()?;
+        let config = sb.config;
+        let base = self.sb_base()?;
+        let (dma8, dma16) = sb.dma();
+        let mut s = format!("A{:X}", base);
+        if let Some(irq) = sb.irq {
+            s.push_str(&format!(" I{}", irq));
+        }
+        if let Some(dma) = dma8 {
+            s.push_str(&format!(" D{}", dma));
+        }
+        if config.model.is_sb16() {
+            if let Some(dma) = dma16 {
+                s.push_str(&format!(" H{}", dma));
+            }
+            s.push_str(" P330");
+        }
+        if config.model == crate::sb::SbModel::Awe32 {
+            s.push_str(&format!(" E{:X}", base + 0x400));
+        }
+        s.push_str(&format!(" T{}", config.model.blaster_type()));
+        Some(s)
+    }
+
+    /// Give the Sound Blaster the IRQ and DMA channels the ViBRA16C's audio
+    /// device has: none while it is inactive.
+    fn route_isapnp_audio(&mut self) {
+        let Some(pnp) = &self.isapnp else { return };
+        let audio = pnp.audio();
+        if let Some(sb) = &mut self.sb {
+            match audio {
+                Some(audio) => sb.set_lines(audio.irq, audio.dma8, audio.dma16),
+                None => sb.set_lines(None, None, None),
+            }
+        }
+        self.sync_sb_irq();
     }
 
     /// Power-on state of the PIT channel 0 and the PIC, so a program that
@@ -2576,6 +2676,13 @@ impl Bus {
             return;
         }
         match port {
+            // ISA Plug and Play's ADDRESS and WRITE_DATA ports.
+            crate::isapnp::ADDRESS if self.isapnp.is_some() => {
+                if let Some(pnp) = &mut self.isapnp {
+                    pnp.write_address(value);
+                }
+            }
+            crate::isapnp::WRITE_DATA if self.isapnp.is_some() => self.isapnp_write(value),
             // A booted system's IDE channels.
             p if self.ide_claims(p) => self.ide_write(p, value),
             p if self.ne2000_claims(p) => self.ne2000_write(p, value),
@@ -2954,6 +3061,9 @@ impl Bus {
             return self.verite_read(reg, 1) as u8;
         }
         match port {
+            // ISA Plug and Play's READ_DATA port, wherever software put it,
+            // while a card answers there.
+            p if self.isapnp.as_ref().is_some_and(|pnp| pnp.reads(p)) => self.isapnp.as_mut().map_or(0xFF, |pnp| pnp.read_data()),
             p if self.ide_claims(p) => self.ide_read(p),
             p if self.ne2000_claims(p) => self.ne2000_read(p),
             p if self.serial_claims(p) => self.serial_read(p),

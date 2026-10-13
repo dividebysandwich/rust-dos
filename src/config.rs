@@ -636,7 +636,7 @@ impl SoundConfig {
                     self.sb_installed = false;
                 } else {
                     sb.model = crate::sb::SbModel::parse(value)
-                        .ok_or_else(|| format!("invalid sbtype '{}' (sb16, awe32, sbpro2, sb2 or none)", value))?;
+                        .ok_or_else(|| format!("invalid sbtype '{}' (sb16, sb16vibra, awe32, sbpro2, sb2 or none)", value))?;
                     self.sb_installed = true;
                 }
             }

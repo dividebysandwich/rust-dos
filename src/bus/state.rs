@@ -24,6 +24,7 @@ const VERITE_VERSION: u16 = 2;
 const ET4000_VERSION: u16 = 1;
 const SHARED_VERSION: u16 = 1;
 const SB_HIGH_SPEED_VERSION: u16 = 1;
+const ISAPNP_VERSION: u16 = 1;
 const PIT2_VERSION: u16 = 1;
 
 /// Save or load each of a list of fields.
@@ -104,6 +105,7 @@ impl Bus {
             gate_array_shadow_at,
             opl,
             sb,
+            isapnp,
             mpu,
             gus,
             gus_line,
@@ -260,6 +262,10 @@ impl Bus {
         if let Some(awe) = awe {
             w.section(b"AWE ", AWE_VERSION, |w| awe.save(w));
         }
+        // The ISA Plug and Play cards (a ViBRA16C), likewise.
+        if let Some(isapnp) = isapnp {
+            w.section(b"PNP ", ISAPNP_VERSION, |w| isapnp.save(w));
+        }
         // A 3dfx card, whose memory comes first, and only on a machine
         // with one, so states of machines without load as they did.
         if let Some(voodoo) = voodoo {
@@ -375,6 +381,7 @@ impl Bus {
             gate_array_shadow_at,
             opl,
             sb,
+            isapnp,
             mpu,
             gus,
             gus_line,
@@ -526,6 +533,12 @@ impl Bus {
             (false, None) => {}
             (true, None) => return Err(StateError::Mismatch("it has an AWE32 and this machine hasn't".into())),
             (false, Some(_)) => return Err(StateError::Mismatch("this machine has an AWE32 and it hasn't".into())),
+        }
+        match (r.next_is(b"PNP "), isapnp) {
+            (true, Some(isapnp)) => isapnp.load(&mut r.section(b"PNP ", ISAPNP_VERSION)?)?,
+            (false, None) => {}
+            (true, None) => return Err(StateError::Mismatch("it has a ViBRA16C and this machine hasn't".into())),
+            (false, Some(_)) => return Err(StateError::Mismatch("this machine has a ViBRA16C and it hasn't".into())),
         }
         match (r.next_is(b"3DFX"), voodoo) {
             (true, Some(voodoo)) => voodoo.load(&mut r.section(b"3DFX", VOODOO_VERSION)?)?,

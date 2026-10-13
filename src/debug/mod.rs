@@ -3055,7 +3055,7 @@ impl DebugHub {
                 "underruns": cpu.bus.audio_underruns,
                 "frames": cpu.bus.audio_frames(),
                 "queued_frames": cpu.bus.audio_device.as_ref().map_or(0, |d| d.queued_frames()),
-                "sound_blaster": cpu.bus.sb.as_ref().map(|sb| sb.config.blaster()),
+                "sound_blaster": cpu.bus.sb_blaster(),
                 "opl3": cpu.bus.opl.is_opl3(),
                 "ultrasound": cpu.bus.gus.as_ref().map(|gus| gus.config.ultrasnd()),
                 "midi_synth": cpu.bus.mpu.synth_name(),

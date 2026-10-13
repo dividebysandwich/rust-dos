@@ -232,7 +232,7 @@ fn reset_machine(cpu: &mut Cpu) {
     // enables clear, and channel 2's gate as `pit2_gate_at_start` has it.
     bus.ppi_checks = 0;
     bus.set_pit2_gate_at_start(bus.pit2_gate_at_start);
-    bus.reset_sound();
+    bus.power_on_sound();
     bus.reset_network();
     bus.reset_ne2000();
     bus.reset_serial();
