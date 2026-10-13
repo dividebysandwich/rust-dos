@@ -65,6 +65,7 @@ impl Bus {
             now,
             ns_per_sector,
             written: None,
+            faked: self.faked_io,
         };
         let result = f(fdc, &mut env);
         let written = env.written.take();

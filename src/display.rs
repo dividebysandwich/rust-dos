@@ -647,6 +647,19 @@ impl Display<'_> {
         }
     }
 
+    /// Mark the real keyboard with a controller in the headset: false
+    /// without one.
+    pub fn mark_vr_keyboard(&mut self) -> bool {
+        self.stage_mut().is_some_and(|stage| stage.mark_keyboard())
+    }
+
+    /// A key of the host's was pressed, for the headset.
+    pub fn vr_key_pressed(&mut self) {
+        if let Some(stage) = self.stage_mut() {
+            stage.key_pressed();
+        }
+    }
+
     /// The headset's events; what is worth saying.
     pub fn poll_headset(&mut self) -> Vec<String> {
         match &mut self.out {
@@ -757,6 +770,12 @@ impl Display<'_> {
     pub fn camera_rise(&mut self, _metres: f32) {}
 
     pub fn recenter(&mut self) {}
+
+    pub fn mark_vr_keyboard(&mut self) -> bool {
+        false
+    }
+
+    pub fn vr_key_pressed(&mut self) {}
 
     pub fn poll_headset(&mut self) -> Vec<String> {
         Vec::new()

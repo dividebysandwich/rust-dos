@@ -156,6 +156,24 @@ const CD_R: u8 = 0x37;
 const PRO_CD: u8 = 0x28;
 /// The SB Pro's mixer registers: voice, mic, input, output, master, FM,
 /// CD and line.
+/// What an empty ASP socket's registers read (DOSBox-X's start values, from
+/// an SB16): their own number, but 0 for 00h-1Fh and 80h-83h, 01h for 05h
+/// and F8h for 09h. Windows 98's SB16.VXD fails to start (Code 10) on a
+/// card whose 09h isn't F8h.
+const EMPTY_ASP_REGS: [u8; 256] = {
+    let mut regs = [0; 256];
+    let mut i = 0x20;
+    while i < 256 {
+        if i < 0x80 || i > 0x83 {
+            regs[i] = i as u8;
+        }
+        i += 1;
+    }
+    regs[0x05] = 0x01;
+    regs[0x09] = 0xF8;
+    regs
+};
+
 const PRO_REGS: [u8; 9] = [0x00, 0x04, 0x0A, 0x0C, 0x0E, 0x22, 0x26, PRO_CD, 0x2E];
 
 pub struct SoundBlaster {
@@ -257,7 +275,7 @@ impl SoundBlaster {
             mixer_index: 0,
             mixer: [0; 256],
             asp_mode: 0,
-            asp_regs: [0; 256],
+            asp_regs: EMPTY_ASP_REGS,
             mem8051: [0; 256],
             irq: Some(config.irq),
             dma8: Some(config.dma8),
@@ -627,6 +645,11 @@ impl SoundBlaster {
                 low | high
             }
             (m, 0x82) if m.is_sb16() => (self.irq8 as u8) | (self.irq16 as u8) << 1 | 0x20,
+            // Nor does the SB16's keep registers past its own, as DOSBox-X
+            // answers them: Windows 98's SB16 driver writes and reads back
+            // 8Ch-90h and FFh, and fails to start on a card that keeps them.
+            (_, 0x30..=0x47) => self.mixer[reg as usize],
+            _ if !PRO_REGS.contains(&reg) => 0x0A,
             _ => self.mixer[reg as usize],
         }
     }
@@ -809,7 +832,8 @@ impl SoundBlaster {
             // The SB16's ASP socket, empty, as Windows' driver probes it:
             // the mode (04h), a codec parameter (05h), the chip's version
             // (08h 03h: none, FFh as a card without one says) and its
-            // registers (0Eh, 0Fh). DOSBox-X's sblaster.cpp answers the same.
+            // registers (0Eh, 0Fh), which keep nothing written to them.
+            // DOSBox-X's sblaster.cpp answers the same.
             0x04 if sb16 => self.asp_mode = self.params[0],
             0x04 => self.read_buf.push_back(if self.config.model == SbModel::Sb2 { 0x88 } else { 0x7B }),
             0x05 if sb16 => {}
@@ -818,7 +842,7 @@ impl SoundBlaster {
                     self.read_buf.push_back(0xFF);
                 }
             }
-            0x0E if sb16 => self.asp_regs[self.params[0] as usize] = self.params[1],
+            0x0E if sb16 => {}
             0x0F if sb16 => self.read_buf.push_back(self.asp_regs[self.params[0] as usize]),
             // The 8051's memory.
             0xF9 if sb16 => self.read_buf.push_back(self.mem8051[self.params[0] as usize]),
@@ -860,6 +884,30 @@ mod tests {
         sb.write(0xC, 0xD0, &mut log);
         sb.write(0xC, 0xD0, &mut log);
         assert_eq!(log.len(), 2, "{:?}", log);
+    }
+
+    #[test]
+    fn sb16_answers_windows_98s_probes_as_a_card_without_an_asp() {
+        let mut sb = SoundBlaster::new(SbConfig::default());
+        let mut log = Vec::new();
+        let mut asp_reg = |sb: &mut SoundBlaster, reg: u8| {
+            for byte in [0x0F, reg] {
+                sb.write(0xC, byte, &mut log);
+            }
+            sb.read(0xA)
+        };
+        // SB16.VXD writes ASP register 05h, reads it back, and wants F8h in 09h.
+        for byte in [0x0E, 0x05, 0x03] {
+            sb.write(0xC, byte, &mut Vec::new());
+        }
+        assert_eq!(asp_reg(&mut sb, 0x05), 0x01, "an empty socket keeps nothing");
+        assert_eq!(asp_reg(&mut sb, 0x09), 0xF8);
+        // Mixer registers the CT1745 lacks read 0Ah, whatever was written.
+        for (reg, kept) in [(0x90, false), (0xFF, false), (0x30, true)] {
+            sb.write(0x4, reg, &mut Vec::new());
+            sb.write(0x5, 0x18, &mut Vec::new());
+            assert_eq!(sb.read(0x5) == 0x18, kept, "mixer register {:02X}h", reg);
+        }
     }
 
     #[test]

@@ -19,6 +19,8 @@ mod foveation;
 mod gi;
 #[cfg(xr)]
 mod headset;
+#[cfg(xr)]
+mod keyboard;
 mod pick;
 mod props;
 mod render;
@@ -34,7 +36,7 @@ pub use controls::VrInput;
 use super::audio_mix::Mix;
 use glam::{Mat4, Vec2};
 use glow::HasContext;
-use render::{Dest, Format, Gpu, Options, Pass, ScreenTarget, View};
+use render::{Dest, Format, Gpu, Options, Pass, Punch, ScreenTarget, View};
 use rust_dos::vr::{ScreenFit, VrMode, VrSettings};
 use scene::Scene;
 use rust_dos::vr::{Leds, VrGraphics, VrLook};
@@ -72,8 +74,9 @@ pub struct Stage {
     look: VrLook,
     mobile: bool,
     /// How the headset's session draws, its eyes' resolution and its
-    /// refresh rate, which it is started again for.
-    headset_options: (VrGraphics, Option<u32>, Option<u32>),
+    /// refresh rate, and whether the cameras show the keyboard, which it
+    /// is started again for.
+    headset_options: (VrGraphics, Option<u32>, Option<u32>, bool),
     glow: f32,
     /// The scene file shown (None: the test room) and when it was written,
     /// and the one being read on a thread of its own to take its place.
@@ -99,6 +102,11 @@ fn window_options(look: VrLook) -> Options {
         multiview: None,
         ambient_occlusion: look.ambient_occlusion,
     }
+}
+
+/// What the headset's session is started again for when it changes.
+fn headset_options(settings: &VrSettings) -> (VrGraphics, Option<u32>, Option<u32>, bool) {
+    (settings.graphics, settings.resolution, settings.refresh, settings.keyboard != rust_dos::vr::VrKeyboard::Off)
 }
 
 /// Width and height.
@@ -172,7 +180,7 @@ impl Stage {
             mode: settings.mode,
             look,
             mobile,
-            headset_options: (settings.graphics, settings.resolution, settings.refresh),
+            headset_options: headset_options(settings),
             glow: glow_of(settings),
             scene_path: settings.scene.clone(),
             scene_written: written(settings.scene.as_deref()),
@@ -301,7 +309,7 @@ impl Stage {
             self.props.set_manuals(gl, self.manuals.clone());
         }
         let props = self.props.draws(gl, &self.gpu, &self.scene, std::time::Instant::now());
-        if let Err(e) = self.gpu.render(gl, &self.scene, &[view], Dest::Own(format), drawable, screen, self.leds, &props, &[]) {
+        if let Err(e) = self.gpu.render(gl, &self.scene, &[view], Dest::Own(format), drawable, screen, self.leds, &props, &[], Punch::None) {
             eprintln!("[VR] {}", e);
             clear_window(gl, drawable);
             return;
@@ -340,6 +348,26 @@ impl Stage {
         #[cfg(xr)]
         if let Some(headset) = &self.headset {
             headset.recenter();
+        }
+    }
+
+    /// Mark the real keyboard with a controller, in the headset: false
+    /// without one.
+    pub fn mark_keyboard(&mut self) -> bool {
+        #[cfg(xr)]
+        if let Some(headset) = &self.headset {
+            headset.mark_keyboard();
+            return true;
+        }
+        false
+    }
+
+    /// A key of the host's was pressed (where the fingers are finds the
+    /// keyboard).
+    pub fn key_pressed(&self) {
+        #[cfg(xr)]
+        if let Some(headset) = &self.headset {
+            headset.key_pressed();
         }
     }
 
@@ -473,8 +501,8 @@ impl Stage {
                 Err(e) => notes.push(format!("[VR] The lighting can't be changed: {}", e)),
             }
         }
-        if (settings.graphics, settings.resolution, settings.refresh) != self.headset_options {
-            self.headset_options = (settings.graphics, settings.resolution, settings.refresh);
+        if headset_options(settings) != self.headset_options {
+            self.headset_options = headset_options(settings);
             restart |= self.has_headset();
         }
         if settings.mode != self.mode || restart {
@@ -493,6 +521,7 @@ impl Stage {
             headset.set_controllers(settings.controllers);
             headset.set_glow(glow_of(settings));
             headset.set_placement(headset::Placement::of(settings));
+            headset.set_keyboard(settings.keyboard);
         }
         notes
     }

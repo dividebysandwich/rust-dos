@@ -109,6 +109,9 @@ pub struct Env<'a> {
     pub ns_per_sector: u64,
     /// The memory DMA wrote, which the caller must treat as modified.
     pub written: Option<Range<usize>>,
+    /// The BIOS's show of a transfer for a V86 monitor (`Bus::faked_io`):
+    /// READ and WRITE DATA end at once, moving nothing.
+    pub faked: bool,
 }
 
 impl Env<'_> {
@@ -562,6 +565,11 @@ impl Fdc {
                 self.lock = c[0] & 0x80 != 0;
                 self.finish(vec![(self.lock as u8) << 4], false);
             }
+            // The BIOS's show of a sector transfer: done, with the next
+            // sector's ID, no data moved and no interrupt.
+            _ if env.faked && c.len() == 9 && c[0] & 0x1F != 0x0D => {
+                self.finish(vec![c[1] & 7, 0, 0, c[2], c[3], c[4].wrapping_add(1), c[5]], false);
+            }
             // READ ID, READ and WRITE DATA, FORMAT TRACK: after the time
             // the disk takes.
             _ => {
@@ -879,6 +887,7 @@ mod tests {
         ram: Vec<u8>,
         disks: [Option<Rc<DiskImage>>; DRIVES],
         now: u64,
+        faked: bool,
     }
 
     impl Rig {
@@ -889,6 +898,7 @@ mod tests {
                 ram: vec![0; 0x20000],
                 disks: [Some(disk(false)), None],
                 now: 0,
+                faked: false,
             }
         }
 
@@ -900,6 +910,7 @@ mod tests {
                 now: self.now,
                 ns_per_sector: 0,
                 written: None,
+                faked: self.faked,
             };
             f(&mut self.fdc, &mut env)
         }
@@ -1053,6 +1064,20 @@ mod tests {
         rig.out(DOR, 0x2D);
         rig.seek(1, 3);
         assert_eq!(rig.fdc.read(DIR) & 0x80, 0x80);
+    }
+
+    #[test]
+    fn the_bios_show_of_a_read_ends_at_once_moving_nothing() {
+        let mut rig = Rig::new();
+        rig.ready();
+        rig.faked = true;
+        rig.dma(SECTOR_SIZE, true);
+        // Drive 1 has no disk: the show reads all the same.
+        for drive in [0, 1] {
+            assert_eq!(rig.command(&[0xE6, drive, 0, 0, 1, 2, 18, 0x1B, 0xFF]), [drive, 0, 0, 0, 0, 2, 2]);
+        }
+        assert_eq!(rig.sector_at(0), 0, "no data moved");
+        assert!(rig.fdc.activity.is_empty() && !rig.fdc.irq());
     }
 
     #[test]

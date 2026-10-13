@@ -118,6 +118,58 @@ fn transfer(cpu: &mut Cpu, dl: u8, drive: u8, disk: &Rc<DiskImage>, ah: u8) {
     }
 }
 
+/// INT 13h AH=02h on floppy unit `dl` of a booted system: when a V86
+/// monitor traps the floppy disk controller, the accesses a BIOS makes to
+/// read the sectors (motor on and drive select, DMA channel 2 set up for
+/// the buffer at ES:BX, READ DATA, its result, and the interrupt
+/// acknowledged), left for the processor to make on its way out
+/// (`bios::PORT_ACCESSES`), where the monitor sees them. The controller
+/// answers them at once (`Env::faked`). Windows 98's IOS gives a floppy
+/// unit to its floppy driver (HSFLOP.PDR) only once it has seen the BIOS
+/// drive the controller for it; otherwise the drive stays in MS-DOS
+/// compatibility mode. The disk's sectors are the service's own business.
+fn show_floppy_read(cpu: &mut Cpu, dl: u8) {
+    use crate::bios::PortAccess::{self, In, Out};
+    if cpu.bus.boot.is_none()
+        || cpu.bus.fdc.is_none()
+        || dl >= crate::boot::FLOPPY_UNITS
+        || !cpu.v86()
+        || cpu.check_io(crate::fdc::DATA, 1).is_ok()
+    {
+        return;
+    }
+    let cl = cpu.get_reg8(Register::CL);
+    let (cylinder, head, sector) = (cpu.get_reg8(Register::CH), cpu.get_reg8(Register::DH) & 1, cl & 0x3F);
+    let buffer = cpu.real_linear(cpu.es(), cpu.bx());
+    let count = (cpu.get_al().max(1) as u32 * SECTOR_SIZE as u32 - 1) as u16;
+    let mut queue = vec![
+        PortAccess::Faked(true),
+        // Motor on and the drive selected, DMA and interrupts on.
+        Out(0x3F2, 0x0C | dl | 0x10 << dl),
+        // DMA channel 2: masked, single mode writing memory, the
+        // buffer's address and page, the count, unmasked.
+        Out(0x0A, 0x06),
+        Out(0x0C, 0),
+        Out(0x0B, 0x46),
+        Out(0x04, buffer as u8),
+        Out(0x04, (buffer >> 8) as u8),
+        Out(0x81, (buffer >> 16) as u8),
+        Out(0x05, count as u8),
+        Out(0x05, (count >> 8) as u8),
+        Out(0x0A, 0x02),
+    ];
+    // READ DATA: MFM, 512-byte sectors, 18 a track, the gap length.
+    for byte in [0xE6, head << 2 | dl, cylinder, head, sector, 2, 18, 0x1B, 0xFF] {
+        queue.extend([In(crate::fdc::BASE + 4), Out(crate::fdc::DATA, byte)]);
+    }
+    for _ in 0..7 {
+        queue.extend([In(crate::fdc::BASE + 4), In(crate::fdc::DATA)]);
+    }
+    // The interrupt acknowledged: a specific EOI for IRQ 6.
+    queue.extend([Out(0x20, 0x60 + crate::fdc::IRQ), PortAccess::Faked(false)]);
+    cpu.bus.port_accesses.extend(queue);
+}
+
 /// Read `count` sectors from `lba` into the buffer at linear address
 /// `buffer`, or with `write` write them from it; with `verify` just read
 /// them.
@@ -269,24 +321,29 @@ pub fn handle(cpu: &mut Cpu) {
         }
 
         // AH=02h Read, 03h Write and 04h Verify Sector(s).
-        0x02..=0x04 => match (drive, &image) {
-            (Some(drive), Some(disk)) => transfer(cpu, dl, drive, disk, ah),
-            (None, _) => finish(cpu, dl, not_present_status(dl)),
-            // A booted system's floppy unit without a disk.
-            (Some(_), None) if cpu.bus.boot.is_some() => finish(cpu, dl, not_present_status(dl)),
-            // A read-only mount looks like a write-protected disk.
-            (Some(d), None) if ah == 0x03 && !cpu.bus.disk.is_writable(d) => finish(cpu, dl, 0x03),
-            (Some(_), None) => {
-                if ah == 0x02 {
-                    cpu.bus.log_string(&format!(
-                        "[BIOS] INT 13h Read Sectors: DL={:02X} count={} (no disk image)",
-                        dl, al
-                    ));
-                }
-                cpu.set_reg8(Register::AL, al); // sectors transferred
-                finish(cpu, dl, 0);
+        0x02..=0x04 => {
+            if ah == 0x02 {
+                show_floppy_read(cpu, dl);
             }
-        },
+            match (drive, &image) {
+                (Some(drive), Some(disk)) => transfer(cpu, dl, drive, disk, ah),
+                (None, _) => finish(cpu, dl, not_present_status(dl)),
+                // A booted system's floppy unit without a disk.
+                (Some(_), None) if cpu.bus.boot.is_some() => finish(cpu, dl, not_present_status(dl)),
+                // A read-only mount looks like a write-protected disk.
+                (Some(d), None) if ah == 0x03 && !cpu.bus.disk.is_writable(d) => finish(cpu, dl, 0x03),
+                (Some(_), None) => {
+                    if ah == 0x02 {
+                        cpu.bus.log_string(&format!(
+                            "[BIOS] INT 13h Read Sectors: DL={:02X} count={} (no disk image)",
+                            dl, al
+                        ));
+                    }
+                    cpu.set_reg8(Register::AL, al); // sectors transferred
+                    finish(cpu, dl, 0);
+                }
+            }
+        }
 
         // AH=05h Format Track: the image's sectors stay; a write-protected
         // disk refuses.

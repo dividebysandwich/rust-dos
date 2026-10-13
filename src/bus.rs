@@ -280,8 +280,9 @@ pub struct Bus {
     /// hard disks and CD-ROM drive.
     pub ide: [Option<crate::ide::Channel>; 2],
     /// The port accesses going on are the BIOS's show of driving an IDE
-    /// disk for a V86 monitor (`ide::int13`): the disks answer at once.
-    pub ide_faked: bool,
+    /// disk (`ide::int13`) or the floppy disk controller (`interrupts::int13`)
+    /// for a V86 monitor: the disks and the controller answer at once.
+    pub faked_io: bool,
     /// A booted system's floppy disk controller, with drives 0 and 1.
     pub fdc: Option<crate::fdc::Fdc>,
     pub search_handles: std::collections::HashMap<u32, String>,
@@ -502,7 +503,7 @@ impl Bus {
             glide_hint: None,
             ide: [None, None],
             fdc: None,
-            ide_faked: false,
+            faked_io: false,
             search_handles: std::collections::HashMap::new(),
             search_serial: 0,
             mouse: crate::mouse::MouseState::new(),
