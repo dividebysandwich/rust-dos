@@ -293,20 +293,23 @@ impl Bus {
             self.awe_write(port, value, len);
             return;
         }
-        // The PCI configuration address, a doubleword. Without a PCI bus
-        // nothing answers it; it never reaches the reset control register
-        // at CF9h, which takes bytes. (Memtest86+ and Linux probe for PCI
-        // by writing back what a CF8h read gave, FFFFFFFFh on a machine
-        // without it.)
-        if port == 0xCF8 && len == 4 {
+        // The PCI configuration address, a doubleword.
+        if port == 0xCF8 && len == 4 && self.pci_present() {
             self.log_port(port, value, len, true);
-            if self.pci_present() {
-                self.pci.address = value;
-            }
+            self.pci.address = value;
             return;
         }
         for i in 0..len {
-            self.io_write(port.wrapping_add(i as u16), (value >> (8 * i)) as u8);
+            let p = port.wrapping_add(i as u16);
+            // The reset control register at CF9h takes bytes: a word or
+            // doubleword covering it leaves it alone. (Memtest86+ and Linux
+            // probe for PCI by writing back what a doubleword read of CF8h
+            // gave, FFFFFFFFh on a machine without a PCI bus.)
+            if p == 0xCF9 {
+                self.log_port(p, value >> (8 * i) & 0xFF, 1, true);
+                continue;
+            }
+            self.io_write(p, (value >> (8 * i)) as u8);
         }
     }
 
