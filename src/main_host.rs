@@ -246,8 +246,7 @@ impl MainHost<'_, '_> {
     }
 
     /// Load the save state file `path`: the hardware it was saved with
-    /// first, as the settings have it, then the machine. Memory can't
-    /// change its size, so a state of another memsize is refused.
+    /// first, as the settings have it, then the machine.
     fn load_file(&mut self, path: &std::path::Path) -> Result<slots::Header, String> {
         let (header, state) = self.read_state(path)?;
         self.load_state(path, header, &state)
@@ -341,11 +340,7 @@ impl MainHost<'_, '_> {
             return Err("hardcore mode: no save states while RetroAchievements plays".to_string());
         }
         let data = slots::read_file(path)?;
-        let (header, state) = slots::decode(&data)?;
-        if let Some(why) = slots::refusal(&header, self.cpu.bus.ram().len() >> 20) {
-            return Err(why);
-        }
-        Ok((header, state))
+        slots::decode(&data)
     }
 
     /// Load the state `state` of the file `path`, with its header: the
@@ -354,7 +349,9 @@ impl MainHost<'_, '_> {
     /// machine as it was.
     fn load_state(&mut self, path: &std::path::Path, header: slots::Header, state: &[u8]) -> Result<slots::Header, String> {
         let (old_settings, old_hardware) = (self.settings.clone(), self.machine.clone());
-        let hardware = slots::machine_settings(&header.machine, self.settings);
+        let mut hardware = slots::machine_settings(&header.machine, self.settings);
+        // The memory the state has, which it brings (bus/state.rs).
+        hardware.memsize = header.memsize;
         // A failed `machine::load` puts the machine back by itself; the
         // machine from before is needed only when the hardware changes.
         let changes = hardware != old_settings || self.machine.differs(&hardware);

@@ -522,7 +522,8 @@ A plain save or load is carried out at the end of the frame, whether the
 machine runs or is paused (in deterministic mode a load waits for a pause,
 see "Deterministic runs"). A load puts in the hardware settings the state
 was saved with, then the machine, which mounts the drives as the state had
-them and unmounts the others; a state of another `memsize` is refused.
+them and unmounts the others; a state of another `memsize` brings its
+memory size as well.
 Breakpoints, watchpoints and `break_on` stops stay, and keys held down
 through `/api/input` or the window go up.
 
@@ -778,7 +779,7 @@ record of the files, and `folders` after a load that took some.
   - `program`: the program that ran, as DOS started it; empty at the prompt.
   - `machine`: the hardware settings, as configuration text with only the
     settings that aren't the defaults (empty if all are).
-  - `memsize`: the memory in MB, which the loading machine must have.
+  - `memsize`: the memory in MB, which the loading machine takes on.
   - `emulated_ns`: the emulated time.
   - `media`: a list of the mounted drives, each with `drive`, `kind`,
     `read_only`, and `folder`, `overlay` and `images` where it has them;
@@ -806,10 +807,9 @@ record of the files, and `folders` after a load that took some.
 Errors:
 
 - **400** `{"error", "loaded":false, "unchanged":true}`: the load failed (no
-  such file, which reads `empty`, a file that isn't a state, a state of
-  another `memsize`, a drive of the state that can't be mounted, a
-  `folders` drive the state hasn't as a folder drive or a `folders`
-  path that isn't a folder,
+  such file, which reads `empty`, a file that isn't a state, a drive of
+  the state that can't be mounted, a `folders` drive the state hasn't as
+  a folder drive or a `folders` path that isn't a folder,
   RetroAchievements hardcore mode) and the machine, its
   settings and its hardware are as they were. A save that can't write its
   file, and a body without `path`, get a 400 with only `error`.

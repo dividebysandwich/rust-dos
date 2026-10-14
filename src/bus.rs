@@ -87,7 +87,7 @@ pub type LogHook = Box<dyn FnMut(&str)>;
 pub type AudioHook = Box<dyn FnMut(&[i16])>;
 
 pub struct Bus {
-    ram: Vec<u8>, // System RAM, allocated once
+    ram: Vec<u8>, // System RAM, reallocated only by a state of another size
     pub video_mode: VideoMode, // Current State
     pub disk: DiskController,
     /// The operating system booted from a disk image (BOOT), which has the

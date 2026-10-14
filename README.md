@@ -295,8 +295,9 @@ A [game profile](CONFIGURATION.md#game-profiles) has slots of its own, in
 `states/<game>` beside the configuration file; otherwise they are in
 `states/dos`.
 
-* Loading a state puts its hardware settings back first. A state of a
-  machine with another memory size (`memsize`) isn't loaded.
+* Loading a state puts its hardware settings back first, the memory size
+  (`memsize`) and network card among them. (The libretro core loads only
+  states with its own memory size.)
 * Files on the host and in disk images aren't part of a state: what a
   program wrote since stays written, as in DOSBox. A system [booted from a
   disk image](CONFIGURATION.md#booting-a-disk-image) is the exception: its

@@ -157,8 +157,9 @@ impl Fetch {
         // SAFETY: we build a read-only view of the bus RAM that outlives the
         // mutable borrows of the CPU while instructions execute (which may
         // write RAM through `bus.write_8`). This is sound because:
-        //   1. The RAM buffer is allocated once in `Bus::new` and never
-        //      resized, so the pointer stays valid.
+        //   1. The RAM buffer is reallocated only by a state load, which
+        //      happens between batches, so the pointer stays valid while
+        //      this view lives.
         //   2. Emulation is single-threaded, so no concurrent access occurs.
         //   3. Reads go through this slice and writes through the bus, one
         //      after the other, never overlapping, and `u8` has no alignment

@@ -107,16 +107,27 @@ pub fn decode(data: &[u8]) -> Result<(Header, Vec<u8>), String> {
 
 /// The settings of the hardware a state is of, as configuration text:
 /// the processor, the memory, the sound, the display adapter and its
-/// monitor, and the speed. What differs from the defaults is written.
+/// monitor, the network card, and the speed. What differs from the
+/// defaults is written, and whether there is a network card always.
 pub fn machine_text(settings: &Settings) -> String {
     let hardware = with_machine(&Settings::default(), settings);
-    crate::config::update_text("", &Settings::default(), &hardware, &[], None)
+    let mut baseline = Settings::default();
+    baseline.network.ne2000 = !hardware.network.ne2000;
+    crate::config::update_text("", &baseline, &hardware, &[], None)
 }
 
 /// `settings` with the hardware settings `text` (see `machine_text`) has.
+/// A state saved before they recorded the network card keeps the card
+/// `settings` have.
 pub fn machine_settings(text: &str, settings: &Settings) -> Settings {
     let config = crate::config::parse(text, Path::new("."), None);
-    with_machine(settings, &Settings::from_config(&config))
+    let mut from = Settings::from_config(&config);
+    if !entries(text).contains_key("network.ne2000") {
+        let network = &settings.network;
+        (from.network.ne2000, from.network.nic_base, from.network.nic_irq) =
+            (network.ne2000, network.nic_base, network.nic_irq);
+    }
+    with_machine(settings, &from)
 }
 
 /// How the hardware settings `text` (see `machine_text`) differ from the
@@ -173,6 +184,12 @@ fn with_machine(base: &Settings, from: &Settings) -> Settings {
         umb: from.umb,
         dos_high: from.dos_high,
         sound: from.sound.clone(),
+        network: crate::net::NetSettings {
+            ne2000: from.network.ne2000,
+            nic_base: from.network.nic_base,
+            nic_irq: from.network.nic_irq,
+            ..base.network.clone()
+        },
         ..base.clone()
     }
 }
@@ -226,7 +243,8 @@ pub fn header(cpu: &Cpu, settings: &Settings, game: Option<(&str, &str)>) -> Hea
 }
 
 /// Why a state of `header` can't be loaded into a machine with `memsize`
-/// MB, if it can't: memory can't change size while the machine runs.
+/// MB, if it can't, for a front end that can't let the memory change its
+/// size: one that gave its address out (libretro's memory map).
 pub fn refusal(header: &Header, memsize: usize) -> Option<String> {
     (header.memsize != memsize).then(|| {
         format!("it is of a machine with {} MB of memory, this one has {} MB (memsize)", header.memsize, memsize)
@@ -343,6 +361,23 @@ mod tests {
         assert_eq!((loaded.machine, loaded.cpu, loaded.memsize, loaded.ems), (Adapter::Cga, CpuModel::I386, 8, false));
         assert_eq!(loaded.sound, settings.sound);
         assert_eq!(loaded.scale, 2, "the display's settings stay");
+    }
+
+    #[test]
+    fn the_network_card_comes_back() {
+        let mut settings = Settings::default();
+        settings.network.ne2000 = true;
+        settings.network.nic_irq = 5;
+        let mut current = Settings::default();
+        current.network.player = "me".into();
+        let loaded = machine_settings(&machine_text(&settings), &current);
+        assert!(loaded.network.ne2000);
+        assert_eq!((loaded.network.nic_irq, loaded.network.player.as_str()), (5, "me"), "the LAN's settings stay");
+        // A state without one takes it out.
+        let loaded = machine_settings(&machine_text(&Settings::default()), &settings);
+        assert!(!loaded.network.ne2000);
+        // A state from before the card was recorded keeps this machine's.
+        assert!(machine_settings("[emulator]\nmemsize=8\n", &settings).network.ne2000);
     }
 
     #[test]

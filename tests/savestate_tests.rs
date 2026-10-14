@@ -184,14 +184,38 @@ fn a_state_that_cant_be_loaded_leaves_the_machine_as_it_was() {
     small.load_shell();
     let before = machine::save(&small);
 
+    // Cut short after its memory: the machine had taken the state's size.
     let state = machine::save(&machine_in(&dir));
-    let refused = machine::load(&mut small, &state);
-    assert!(matches!(refused, Err(StateError::Mismatch(_))), "{:?}", refused);
-    assert!(machine::save(&small) == before, "a 16 MB state leaves a 4 MB machine alone");
+    assert_eq!(machine::load(&mut small, &state[..state.len() - 10]), Err(StateError::Truncated));
+    assert_eq!(small.bus.ram().len(), 4 << 20);
+    assert!(machine::save(&small) == before, "a 16 MB state cut short leaves a 4 MB machine alone");
 
     let own = machine::save(&small);
     assert_eq!(machine::load(&mut small, &own[..own.len() - 10]), Err(StateError::Truncated));
     assert!(machine::save(&small) == before, "a state cut short leaves the machine alone");
+}
+
+#[test]
+fn a_state_brings_its_memory_size() {
+    fix_time();
+    let dir = scratch("memsize", &[]);
+    let mut small = Cpu::with_memory(dir.clone(), 4);
+    small.load_shell();
+    let own = machine::save(&small);
+
+    let mut big = machine_in(&dir);
+    run_ms(&mut big);
+    let state = machine::save(&big);
+    machine::load(&mut small, &state).unwrap();
+    assert_eq!(small.bus.ram().len(), 16 << 20);
+    assert!(machine::save(&small) == state, "the 4 MB machine is the 16 MB one");
+    run_ms(&mut small);
+    run_ms(&mut big);
+    assert!(machine::save(&small) == machine::save(&big), "and runs on as it does");
+
+    machine::load(&mut small, &own).unwrap();
+    assert_eq!(small.bus.ram().len(), 4 << 20);
+    assert!(machine::save(&small) == own, "and goes back to 4 MB");
 }
 
 /// A machine with `adapter`, at the prompt.
@@ -504,7 +528,7 @@ fn configured_machine(dir: &Path, settings: &rust_dos::config::Settings) -> (Cpu
 }
 
 #[test]
-fn a_slot_brings_its_hardware_and_its_memory_size_must_match() {
+fn a_slot_brings_its_hardware() {
     use rust_dos::savestate::slots;
     fix_time();
     let dir = scratch("hardware", &[]);
@@ -530,6 +554,7 @@ fn a_slot_brings_its_hardware_and_its_memory_size_must_match() {
     assert!(b.bus.gus.is_none() && b.bus.sb.as_ref().unwrap().config.model == rust_dos::sb::SbModel::SbPro2);
     assert_eq!(b.bus.vga.adapter, Adapter::Cga);
 
+    // The memory size stays libretro's to refuse.
     assert_eq!(slots::refusal(&header, 16), None);
     assert!(slots::refusal(&header, 8).is_some(), "a 16 MB state on an 8 MB machine");
 }

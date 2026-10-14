@@ -2279,8 +2279,8 @@ DRIVES
 SAVE STATES
   POST   /api/state/save {"path":"/tmp/keen.state"}  save the machine to a file
   POST   /api/state/load {"path":"/tmp/keen.state"}  load one: its hardware
-                   settings, then the machine and its drives (the same
-                   memsize only). Breakpoints and watchpoints stay.
+                   settings (memsize too), then the machine and its
+                   drives. Breakpoints and watchpoints stay.
                    "differences" lists the hardware settings, drives,
                    folders, images, files and deterministic start time
                    that differed from this machine's, if any. A failed load

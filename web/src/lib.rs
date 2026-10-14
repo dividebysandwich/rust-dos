@@ -1127,16 +1127,14 @@ impl PageHost<'_> {
     }
 
     /// Load slot `slot`: the hardware it was saved with first, then the
-    /// machine. A state of another memsize is refused. A load that fails
+    /// machine, with the memory size it has. A load that fails
     /// puts back the settings and hardware from before it, and the machine
     /// as it was.
     fn load_slot(&mut self, slot: u8) -> Result<String, String> {
         let data = self.states.get(&self.state_key(slot)).ok_or("empty")?;
         let (header, state) = slots::decode(data)?;
-        if let Some(why) = slots::refusal(&header, self.cpu.bus.ram().len() >> 20) {
-            return Err(why);
-        }
-        let hardware = slots::machine_settings(&header.machine, self.settings);
+        let mut hardware = slots::machine_settings(&header.machine, self.settings);
+        hardware.memsize = header.memsize;
         // A failed `machine::load` puts the machine back by itself; the
         // machine from before is needed only when the hardware changes, to
         // put that back too.
