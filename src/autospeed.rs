@@ -7,7 +7,8 @@
 //! a host core busy; and frames drawn faster than the display shows them
 //! are never seen, and some games (Descent) play badly at such rates. So
 //! the speed goes up in steps while the frame rate follows, back to where
-//! it stopped following, and never past the display's refresh rate.
+//! it stopped following, and never past the display's refresh rate, or
+//! the frame rate the user asks for instead (`auto_fps`).
 //!
 //! The frames are counted on the bus (`Activity`): page flips, or where a
 //! program draws out of sight and copies the finished picture to video
@@ -246,7 +247,8 @@ pub struct Measurement {
     /// Bytes a second it wrote to video memory and moved on drives: whether
     /// a program without frames does anything.
     pub output: f64,
-    /// The display's refresh rate.
+    /// The frame rate to aim for: the display's refresh rate, or the
+    /// user's (`auto_fps`).
     pub refresh: f64,
 }
 
@@ -273,6 +275,9 @@ pub struct AutoSpeed {
     /// The speed of real-mode programs without frames to go by, and the
     /// least there is.
     base: u32,
+    /// The frame rate to aim for in place of the display's refresh rate
+    /// (`auto_fps`).
+    target_fps: Option<u32>,
     mark: Option<Mark>,
     /// No measurement starts before this emulated time.
     settle_until: u64,
@@ -288,12 +293,16 @@ pub struct AutoSpeed {
 }
 
 impl AutoSpeed {
-    pub fn new(base: u32) -> Self {
-        Self { base, mark: None, settle_until: 0, unsettled: None, step: Step::Start, working: None, output: (0, 0) }
+    pub fn new(base: u32, target_fps: Option<u32>) -> Self {
+        Self { base, target_fps, mark: None, settle_until: 0, unsettled: None, step: Step::Start, working: None, output: (0, 0) }
     }
 
     pub fn base(&self) -> u32 {
         self.base
+    }
+
+    pub fn target_fps(&self) -> Option<u32> {
+        self.target_fps
     }
 
     /// Start over, as for another program, or from a machine that jumped
@@ -342,9 +351,10 @@ impl AutoSpeed {
         let ran = now.icount.saturating_sub(mark.icount).max(1) as f64;
         let polls = (now.polls - mark.polls) as f64 / seconds;
         let status = (now.status_reads - mark.status_reads) as f64 * STATUS_READ_NS / ns as f64;
-        let refresh = match &bus.voodoo {
-            Some(v) if v.output() => v.refresh_hz(),
-            _ => bus.vga.peek_timing().hz(),
+        let refresh = match (self.target_fps, &bus.voodoo) {
+            (Some(fps), _) => fps as f64,
+            (None, Some(v)) if v.output() => v.refresh_hz(),
+            (None, _) => bus.vga.peek_timing().hz(),
         };
         let mut fps = (frames > 0).then(|| frames as f64 / seconds);
         if let (Some(rate), Some((before, tries))) = (fps, self.unsettled) {
@@ -511,7 +521,7 @@ mod tests {
 
     /// The speeds `auto` runs `program` at, one a measurement.
     fn run(program: impl Fn(u32) -> Measurement, protected: bool, measurements: usize) -> Vec<u32> {
-        let mut auto = AutoSpeed::new(3000);
+        let mut auto = AutoSpeed::new(3000, None);
         let mut speed = 3000;
         (0..measurements)
             .map(|_| {
@@ -567,7 +577,7 @@ mod tests {
 
     #[test]
     fn a_heavier_scene_gets_more_at_once() {
-        let mut auto = AutoSpeed::new(3000);
+        let mut auto = AutoSpeed::new(3000, None);
         let light = game(35.0 / 30_000.0, 35.0);
         let heavy = game(35.0 / 60_000.0, 35.0);
         let mut speed = 3000;
@@ -590,13 +600,13 @@ mod tests {
         assert_eq!(run(nothing(0.0, 1e6), true, 2), [HOST, HOST]);
         assert_eq!(run(nothing(0.9, 1e6), true, 2), [PROTECTED_LEAST, PROTECTED_LEAST]);
         // Spinning without doing anything, it gets less.
-        let mut auto = AutoSpeed::new(3000);
+        let mut auto = AutoSpeed::new(3000, None);
         assert_eq!(auto.decide(100_000, &nothing(0.0, 100.0)(0), true, HOST), 80_000);
     }
 
     #[test]
     fn a_program_at_work_keeps_the_speed_to_go_back_to() {
-        let mut auto = AutoSpeed::new(3000);
+        let mut auto = AutoSpeed::new(3000, None);
         let loading = Measurement { fps: None, polling: 0.0, halted: 0.0, output: 1e6, refresh: 70.0 };
         assert_eq!(auto.decide(PROTECTED_LEAST, &loading, true, HOST), HOST);
         assert_eq!(auto.working, Some(PROTECTED_LEAST), "where it goes back to");
@@ -609,7 +619,7 @@ mod tests {
 
     #[test]
     fn a_waiting_program_gets_less() {
-        let mut auto = AutoSpeed::new(3000);
+        let mut auto = AutoSpeed::new(3000, None);
         let waiting = Measurement { fps: None, polling: 0.5, halted: 0.0, output: 0.0, refresh: 70.0 };
         let mut speed = 100_000;
         for _ in 0..30 {
@@ -621,6 +631,17 @@ mod tests {
             speed = auto.decide(speed, &waiting, true, HOST);
         }
         assert_eq!(speed, PROTECTED_LEAST);
+    }
+
+    #[test]
+    fn a_target_frame_rate_takes_the_refresh_rates_place() {
+        // Descent at `auto_fps=35`, which `update` aims for in place of
+        // the display's 70.
+        let descent = |speed: u32| Measurement { refresh: 35.0, ..game(0.0008, f64::INFINITY)(speed) };
+        let speeds = run(descent, true, 40);
+        let settled = speeds[10];
+        assert!((35_000..=48_000).contains(&settled), "{:?}", speeds);
+        assert!(speeds[10..].iter().all(|&s| s.abs_diff(settled) < settled / 5), "{:?}", speeds);
     }
 
     #[test]

@@ -162,6 +162,9 @@ pub struct Config {
     pub record_shader: Option<bool>,
     /// Emulated CPU speed (`cycles`).
     pub cycles: Option<CpuSpeed>,
+    /// The frame rate `cycles=auto` aims for (`auto_fps`), or None for the
+    /// display's refresh rate.
+    pub auto_fps: Option<Option<u32>>,
     /// Emulated processor (`cpu`).
     pub cpu: Option<CpuModel>,
     /// What runs the programs' instructions (`core`).

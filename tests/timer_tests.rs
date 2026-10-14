@@ -372,7 +372,7 @@ fn adlib_timer_runs_on_emulated_time() {
 fn pacer_runs_emulated_time_up_to_the_wall_clock() {
     let start = Instant::now();
     let clock = Clock::new(1000);
-    let mut pacer = Pacer::new(CpuSpeed::Fixed(1000), start);
+    let mut pacer = Pacer::new(CpuSpeed::Fixed(1000), None, start);
     // 20 ms of wall time at 1000 instructions per ms.
     let end = pacer.batch_end(&clock, start + Duration::from_millis(20));
     assert!((19_999..=20_001).contains(&end), "end {}", end);
@@ -382,7 +382,7 @@ fn pacer_runs_emulated_time_up_to_the_wall_clock() {
 fn pacer_drops_a_large_backlog() {
     let start = Instant::now();
     let clock = Clock::new(1000);
-    let mut pacer = Pacer::new(CpuSpeed::Fixed(1000), start);
+    let mut pacer = Pacer::new(CpuSpeed::Fixed(1000), None, start);
     // A two second stall: run one frame, not two seconds' worth.
     let end = pacer.batch_end(&clock, start + Duration::from_secs(2));
     assert!((16_000..=17_000).contains(&end), "end {}", end);
@@ -393,7 +393,7 @@ fn auto_speed_follows_the_program() {
     let start = Instant::now();
     let fast = Duration::from_millis(2);
     let mut bus = bus_at(3000);
-    let mut pacer = Pacer::new(CpuSpeed::Auto(3000), start);
+    let mut pacer = Pacer::new(CpuSpeed::Auto(3000), None, start);
     // Run `ms` of emulated time, a frame at a time, moving `io` bytes on
     // a drive in each, returning the speed the pacer asks for last.
     let run = |bus: &mut Bus, pacer: &mut Pacer, protected: bool, io: u64, ms: u64| {
@@ -444,7 +444,7 @@ fn auto_speed_parses_and_prints() {
 fn max_speed_tracks_host_throughput() {
     let start = Instant::now();
     let bus = bus_at(20_000);
-    let mut pacer = Pacer::new(CpuSpeed::Max, start);
+    let mut pacer = Pacer::new(CpuSpeed::Max, None, start);
     // Plenty of headroom: speed goes up, by at most 10% per frame, once
     // frames took long enough to time.
     let fast = |pacer: &mut Pacer| {
@@ -464,7 +464,7 @@ fn max_speed_tracks_host_throughput() {
     );
     assert_eq!(down, Some(18_000));
     // Fixed speed never changes.
-    let mut fixed = Pacer::new(CpuSpeed::Fixed(20_000), start);
+    let mut fixed = Pacer::new(CpuSpeed::Fixed(20_000), None, start);
     assert_eq!(
         fixed.end_frame(&bus, true, 333_000, Duration::from_millis(2), Duration::ZERO),
         None

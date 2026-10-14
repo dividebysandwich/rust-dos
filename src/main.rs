@@ -221,7 +221,7 @@ fn main() -> Result<(), String> {
 
     // Paces emulated time against the wall clock, one frame at a time.
     cpu.bus.set_cycles_per_ms(settings.cycles.initial_cycles());
-    let mut pacer = timer::Pacer::new(settings.cycles, std::time::Instant::now());
+    let mut pacer = timer::Pacer::new(settings.cycles, settings.auto_fps, std::time::Instant::now());
 
     // The settings window (Ctrl+F12, DOSCONFIG), and whether the machine
     // has been set aside for it: paused, its keys released.

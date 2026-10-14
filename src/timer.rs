@@ -459,6 +459,33 @@ impl CpuSpeed {
     }
 }
 
+/// The frame rates `auto_fps` takes: the frame rate `CpuSpeed::Auto` aims
+/// for in place of the display's refresh rate.
+pub const AUTO_FPS_RANGE: std::ops::RangeInclusive<u32> = 10..=240;
+
+/// Parse `auto_fps`: `auto` (None, the display's refresh rate) or a frame
+/// rate.
+pub fn parse_auto_fps(s: &str) -> Result<Option<u32>, String> {
+    let s = s.trim();
+    if s.eq_ignore_ascii_case("auto") {
+        return Ok(None);
+    }
+    match s.parse::<u32>() {
+        Ok(n) if AUTO_FPS_RANGE.contains(&n) => Ok(Some(n)),
+        _ => Err(format!(
+            "invalid auto_fps '{}': expected auto or {}-{}",
+            s,
+            AUTO_FPS_RANGE.start(),
+            AUTO_FPS_RANGE.end()
+        )),
+    }
+}
+
+/// `auto_fps` as `parse_auto_fps` reads it.
+pub fn auto_fps_text(fps: Option<u32>) -> String {
+    fps.map_or("auto".to_string(), |n| n.to_string())
+}
+
 /// Keeps emulated time in step with the wall clock, one video frame at a
 /// time, and tunes the speed in `CpuSpeed::Max` and `Auto` modes.
 pub struct Pacer {
@@ -489,10 +516,10 @@ pub struct Pacer {
 }
 
 impl Pacer {
-    pub fn new(speed: CpuSpeed, now: Instant) -> Self {
+    pub fn new(speed: CpuSpeed, auto_fps: Option<u32>, now: Instant) -> Self {
         Self {
             speed,
-            auto: AutoSpeed::new(speed.initial_cycles()),
+            auto: AutoSpeed::new(speed.initial_cycles(), auto_fps),
             protected: false,
             host_max: None,
             sample: HostSample::default(),
@@ -536,9 +563,15 @@ impl Pacer {
     /// clock's rate (`CpuSpeed::initial_cycles`).
     pub fn set_speed(&mut self, speed: CpuSpeed) {
         if let CpuSpeed::Auto(base) = speed {
-            self.auto = AutoSpeed::new(base);
+            self.auto = AutoSpeed::new(base, self.auto.target_fps());
         }
         self.speed = speed;
+    }
+
+    /// Change the frame rate `Auto` aims for (`auto_fps`), None for the
+    /// display's refresh rate; the search starts over.
+    pub fn set_auto_fps(&mut self, fps: Option<u32>) {
+        self.auto = AutoSpeed::new(self.auto.base(), fps);
     }
 
     /// The instruction count the next batch should run to, so emulated time
@@ -961,7 +994,7 @@ mod tests {
     fn fast_forward_runs_ahead_and_goes_on_from_there() {
         let start = Instant::now();
         let mut clock = Clock::new(1000);
-        let mut pacer = Pacer::new(CpuSpeed::Fixed(1000), start);
+        let mut pacer = Pacer::new(CpuSpeed::Fixed(1000), None, start);
         // Normally a frame of wall time is a frame of emulated time.
         let frame_ticks = duration_to_ticks(FRAME);
         let end = pacer.batch_end(&clock, start + FRAME);
@@ -991,7 +1024,7 @@ mod tests {
     fn retrace_pacing_runs_each_batch_past_a_retrace_due_a_frame_apart() {
         let start = Instant::now();
         let mut clock = Clock::new(1000);
-        let mut pacer = Pacer::new(CpuSpeed::Fixed(1000), start);
+        let mut pacer = Pacer::new(CpuSpeed::Fixed(1000), None, start);
         let refresh = CrtTiming::VGA_400;
         let frame = refresh.frame_ns();
         let mut now = start;
@@ -1021,7 +1054,7 @@ mod tests {
     fn retrace_pacing_skips_retraces_a_slow_host_missed() {
         let start = Instant::now();
         let mut clock = Clock::new(1000);
-        let mut pacer = Pacer::new(CpuSpeed::Fixed(1000), start);
+        let mut pacer = Pacer::new(CpuSpeed::Fixed(1000), None, start);
         let refresh = CrtTiming::VGA_400;
         clock.icount = pacer.retrace_batch_end(&clock, &refresh, start);
         let first = refresh.retraces(clock.now_ns());
@@ -1040,7 +1073,7 @@ mod tests {
         // The frontend leaves it out of the frame's work.
         let start = Instant::now();
         let mut clock = Clock::new(1000);
-        let mut pacer = Pacer::new(CpuSpeed::Fixed(1000), start);
+        let mut pacer = Pacer::new(CpuSpeed::Fixed(1000), None, start);
         clock.icount = pacer.retrace_batch_end(&clock, &CrtTiming::VGA_400, start);
         let (at, _) = pacer.deadline.unwrap();
         let waited = pacer.wait_to_present(&clock);
@@ -1053,7 +1086,7 @@ mod tests {
     fn retrace_pacing_waits_only_for_a_batch_that_got_there() {
         let start = Instant::now();
         let clock = Clock::new(1000);
-        let mut pacer = Pacer::new(CpuSpeed::Fixed(1000), start);
+        let mut pacer = Pacer::new(CpuSpeed::Fixed(1000), None, start);
         let refresh = CrtTiming::VGA_400;
         // Stopped short (a breakpoint): no waiting, and the next frame
         // comes at the usual pace.

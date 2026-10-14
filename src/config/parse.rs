@@ -203,6 +203,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Ok(speed) => config.cycles = Some(speed),
                             Err(e) => warn(e),
                         },
+                        "auto_fps" => match crate::timer::parse_auto_fps(value) {
+                            Ok(fps) => config.auto_fps = Some(fps),
+                            Err(e) => warn(e),
+                        },
                         "memsize" => match parse_memsize(value) {
                             Ok(mb) => config.memsize = Some(mb),
                             Err(e) => warn(e),

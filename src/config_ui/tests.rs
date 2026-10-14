@@ -384,6 +384,40 @@ fn status(ui: &ConfigUi) -> (&str, bool) {
 }
 
 #[test]
+fn auto_speed_target_steps_and_is_typed() {
+    let mut host = FakeHost::new();
+    let mut ui = opened(&host);
+    ui.show_page(Page::Emulator);
+    use UiKey::*;
+    // Only at auto speed.
+    assert!(ui.items().contains(&Item::AutoFps));
+    ui.settings.cycles = CpuSpeed::Fixed(3000);
+    assert!(!ui.items().contains(&Item::AutoFps));
+    ui.settings.cycles = CpuSpeed::default();
+    ui.row = ui.items().iter().position(|&i| i == Item::AutoFps).unwrap();
+    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("auto (display refresh)"));
+    // Right steps up from auto through the rates, Left back to auto.
+    keys(&mut ui, &mut host, &[Right, Right]);
+    assert_eq!(host.applied.last().unwrap().auto_fps, Some(24));
+    keys(&mut ui, &mut host, &[Left, Left, Left]);
+    assert_eq!(host.applied.last().unwrap().auto_fps, None);
+    // Any rate in range is typed, and auto again.
+    keys(&mut ui, &mut host, &[Enter, End, Backspace, Backspace, Backspace, Backspace]);
+    ui.text("33", &mut host);
+    ui.key(Enter, &mut host);
+    assert_eq!(host.applied.last().unwrap().auto_fps, Some(33));
+    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("33 fps"));
+    keys(&mut ui, &mut host, &[Enter, End, Backspace, Backspace]);
+    ui.text("5", &mut host);
+    ui.key(Enter, &mut host);
+    assert!(status(&ui).1, "{:?}", status(&ui));
+    keys(&mut ui, &mut host, &[End, Backspace]);
+    ui.text("auto", &mut host);
+    ui.key(Enter, &mut host);
+    assert_eq!(host.applied.last().unwrap().auto_fps, None);
+}
+
+#[test]
 fn settings_change_live() {
     let mut host = FakeHost::new();
     let mut ui = opened(&host);
@@ -418,13 +452,13 @@ fn settings_change_live() {
     assert_eq!(host.applied.last().unwrap().cycles, CpuSpeed::Fixed(1000));
 
     // The CPU core changes at once.
-    ui.row = Page::Emulator.items().iter().position(|&i| i == Item::Core).unwrap();
+    ui.row = ui.items().iter().position(|&i| i == Item::Core).unwrap();
     pick(&mut ui, &mut host, "dynamic recompiler");
     assert_eq!(host.applied.last().unwrap().core, crate::cpu::CoreMode::Dynamic);
     assert!(!status(&ui).0.contains("prompt"), "{:?}", status(&ui));
 
     // So does the FPU's arithmetic, exact or fast.
-    ui.row = Page::Emulator.items().iter().position(|&i| i == Item::Fpu).unwrap();
+    ui.row = ui.items().iter().position(|&i| i == Item::Fpu).unwrap();
     assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("exact"));
     pick(&mut ui, &mut host, "fast (not exact)");
     assert!(host.applied.last().unwrap().fpu_fast);

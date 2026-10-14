@@ -76,6 +76,9 @@
 # 10000 the least it runs at. Lower it for old games that run too fast.
 # --cycles overrides it.
 #cycles=auto
+# The frame rate cycles=auto aims for: auto (the default) for the
+# display's refresh rate, or 10 to 240 frames a second in its place.
+#auto_fps=auto
 # Processor: 486 (the default, a 486DX with FPU), 386, pentium (with
 # CPUID, the time stamp counter, MSRs, CMPXCHG8B and 4 MB pages),
 # pentium_mmx (that Pentium with MMX), pentium_pro (the Pentium's with

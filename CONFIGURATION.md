@@ -143,6 +143,12 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   the least `auto` goes down to, 10000. `max` runs everything as fast as
   the host keeps up with in real time. Use a number such as `3000` for a
   fixed speed. `--cycles` overrides it.
+* `auto_fps` is the frame rate `cycles=auto` aims for: `auto`, the
+  default, is the display's refresh rate (the 3dfx card's while it
+  shows), and a number from 10 to 240 takes its place. A lower one, such
+  as `30`, gives a game that would draw faster only the speed for that
+  many frames a second; a higher one lets a game go past the display's
+  rate. It applies at once, and the search for the speed starts over.
 * `cpu` is the emulated processor: `486` (the default, a 486DX with FPU),
   `386`, or `pentium`, a Pentium as DOSBox-X has one: CPUID (a
   GenuineIntel family 5), the time stamp counter, which counts the

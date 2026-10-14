@@ -67,6 +67,11 @@ fn step_number<T: PartialOrd + Copy>(values: &[T], current: T, dir: isize) -> T 
 const CYCLES: [u32; 9] = [1000, 3000, 5000, 10_000, 20_000, 50_000, 100_000, CYCLES_MAX, CYCLES_AUTO];
 const CYCLES_MAX: u32 = u32::MAX - 1;
 const CYCLES_AUTO: u32 = u32::MAX;
+/// The frame rates auto speed's target steps through: auto (the
+/// display's refresh rate), then rates games cap themselves at and common
+/// refresh rates.
+const AUTO_FPS: [u32; 13] = [AUTO_FPS_AUTO, 20, 24, 25, 30, 35, 40, 50, 60, 70, 75, 120, 144];
+const AUTO_FPS_AUTO: u32 = 0;
 const REWIND_MEMORY: [usize; 7] = [64, 128, 256, 512, 1024, 2048, 4096];
 
 /// The memory sizes the slider steps through, as far as the CPU takes
@@ -363,7 +368,7 @@ impl Item {
             PrinterTimeout => each(s, [1000, 2000, 3000, 5000, 10_000, 30_000, 0], |s, ms| s.printer.timeout = ms),
             // Slid, typed, picked from the host's files or edited, and a
             // row of several, whose fields have their own.
-            Cycles | CrtCurvature | CrtGlow | Memsize | Volume(_) | ReverbMix | ChorusMix | Deadzone | MouseSensitivity | UltraDir
+            Cycles | AutoFps | CrtCurvature | CrtGlow | Memsize | Volume(_) | ReverbMix | ChorusMix | Deadzone | MouseSensitivity | UltraDir
             | SoundFont | Mt32Roms | Awe32Rom | Awe32Download | Sc55Roms | Sc55Download | VoodooOverlay | CaptureDir | Autoexec | SbPorts | GusPorts | MacAddr
             | Rooms | Relay | Player | VrScene | VrScreenGlow | VrCenter | VrMarkKeyboard | VrSceneScale | VrSeat(_) | VrSeatTurn | VrResolution
             | Lan | LanHost | Room | Password | ModemListen | Phonebook => Vec::new(),
@@ -392,6 +397,10 @@ impl Item {
                         n => CpuSpeed::Fixed(n),
                     };
                 }
+            }
+            AutoFps => {
+                let next = step_number(&AUTO_FPS, s.auto_fps.unwrap_or(AUTO_FPS_AUTO), dir);
+                s.auto_fps = (next != AUTO_FPS_AUTO).then_some(next);
             }
             RewindMemory => s.rewind_memory = step_number(&REWIND_MEMORY, s.rewind_memory, dir),
             CrtCurvature => s.crt.curvature = step_units(s.crt.curvature, dir, 10, MAX_AMOUNT),
@@ -466,6 +475,7 @@ impl Item {
     pub(super) fn text(self, s: &Settings) -> String {
         match self {
             Item::Cycles => s.cycles.to_string(),
+            Item::AutoFps => crate::timer::auto_fps_text(s.auto_fps),
             Item::UltraDir => s.sound.gus.ultradir.clone().unwrap_or_default(),
             Item::Volume(channel) => s.mixer.level(channel).to_string(),
             Item::CaptureDir => s.capture_dir.display().to_string(),
@@ -497,6 +507,7 @@ impl Item {
         let text = text.trim();
         match self {
             Item::Cycles => s.cycles = CpuSpeed::parse(text)?,
+            Item::AutoFps => s.auto_fps = crate::timer::parse_auto_fps(text)?,
             Item::UltraDir => s.sound.gus.ultradir = (!text.is_empty()).then(|| text.to_string()),
             Item::Volume(channel) => s.mixer.set_level(channel, crate::mixer::parse_level(text)?),
             Item::CaptureDir if text.is_empty() => return Err("A capture folder, please".to_string()),

@@ -105,6 +105,8 @@ pub(super) enum Item {
     Composite,
     CompositeEra,
     Cycles,
+    /// The frame rate auto speed aims for.
+    AutoFps,
     /// What runs the instructions: interpreter or dynamic recompiler.
     Core,
     /// Exact or fast FPU arithmetic.
@@ -308,6 +310,7 @@ impl Item {
             Composite => "CGA composite colour",
             CompositeEra => "  CGA revision",
             Cycles => "CPU speed (cycles)",
+            AutoFps => "  Auto speed target",
             Core => "CPU core",
             Fpu => "FPU arithmetic",
             Cpu => "Processor",
@@ -509,6 +512,7 @@ impl Item {
             Item::ReverbMix => s.mixer.reverb != ReverbPreset::Off,
             Item::ChorusMix => s.mixer.chorus != ChorusPreset::Off,
             Item::RewindMemory => s.rewind,
+            Item::AutoFps => matches!(s.cycles, CpuSpeed::Auto(_)),
             Item::VoodooMemory | Item::VoodooRenderer | Item::VoodooTextureSampling | Item::VoodooFpsCap | Item::VoodooGamma => s.voodoo.enabled,
             Item::PowerVrFilter => s.powervr.is_some(),
             Item::Awe32Rom | Item::Awe32Ram => awe32(s),
@@ -547,7 +551,7 @@ impl Item {
             Scale | Fullscreen | Aspect | Vrr | Filter | Shader | CrtCurvature | CrtGlow | Composite | CompositeEra => {
                 Applies::Now
             }
-            Cycles | Core | Fpu | Dpmi | DosVersion | IdeHardDisks | BootCdrom | FloppyController | KeyboardLayout | MouseAutocapture | MouseCaptureMessages | MouseMenuHold | ShellSuggestions | ShellColors | SaveShellHistory | Rewind | RewindMemory
+            Cycles | AutoFps | Core | Fpu | Dpmi | DosVersion | IdeHardDisks | BootCdrom | FloppyController | KeyboardLayout | MouseAutocapture | MouseCaptureMessages | MouseMenuHold | ShellSuggestions | ShellColors | SaveShellHistory | Rewind | RewindMemory
             | VoodooRenderer | VoodooScale | VoodooScaleShader | VoodooMsaa | VoodooTextureSampling | VoodooAnisotropy | VoodooFpsCap | VoodooOverlay | PowerVrFilter => Applies::Now,
             Monochrome => Applies::NowAndAtPrompt,
             MonitorEffects => Applies::Now,
@@ -574,7 +578,7 @@ impl Item {
             }
             Item::Memsize | Item::Deadzone | Item::MouseSensitivity => Input::Slider,
             Item::VrSceneScale | Item::VrSeat(_) | Item::VrSeatTurn | Item::VrResolution => Input::Slider,
-            Item::Cycles => Input::Presets,
+            Item::Cycles | Item::AutoFps => Input::Presets,
             Item::UltraDir | Item::CaptureDir => Input::Text,
             Item::MacAddr | Item::Relay | Item::Player | Item::Lan | Item::LanHost | Item::Room | Item::Password => {
                 Input::Text
@@ -652,6 +656,10 @@ impl Item {
                 CpuSpeed::Fixed(n) => format!("{} per ms", n),
                 CpuSpeed::Auto(n) if n == CpuSpeed::default().initial_cycles() => "auto".to_string(),
                 CpuSpeed::Auto(n) => format!("auto (at least {})", n),
+            },
+            AutoFps => match s.auto_fps {
+                None => "auto (display refresh)".to_string(),
+                Some(n) => format!("{} fps", n),
             },
             Core => match s.core {
                 CoreMode::Auto => "auto (recomp. in prot. mode)",

@@ -496,6 +496,9 @@ impl Host for MainHost<'_, '_> {
                 self.cpu.bus.set_cycles_per_ms(n);
             }
         }
+        if new.auto_fps != old.auto_fps {
+            self.pacer.set_auto_fps(new.auto_fps);
+        }
         if new.core != old.core {
             self.cpu.core = new.core;
         }
