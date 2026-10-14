@@ -4,12 +4,13 @@
 //! (bus/state.rs), and the caches of decoded and translated code are
 //! thrown away after a load.
 
-use super::{Cpu, CpuFlags, CpuSnapshot, CpuState, DescTable, FpuFlags, ProcessContext, SegCache};
+use super::{Cpu, CpuFlags, CpuSnapshot, CpuState, DescTable, FpuFlags, ProcessContext, SegCache, Sse};
 use crate::savestate::{Reader, Result, State, Writer};
 
 crate::state_fields!(DescTable { base, limit });
 crate::state_enum!(CpuState { CpuState::Running, CpuState::Halted, CpuState::RebootShell });
 crate::state_fields!(CpuSnapshot { gpr, eip, flags, seg });
+crate::state_fields!(Sse { xmm, mxcsr, psn_off });
 crate::state_fields!(ProcessContext { regs, psp, child, child_at, heap_pointer, dta, program });
 
 impl State for CpuFlags {
@@ -61,9 +62,9 @@ crate::state_fields!(Cpu {
 } skip {
     // Saved in sections of its own (the injector's in savestate/machine.rs).
     bus, env_injector,
-    // In a section of its own (savestate/machine.rs), which older states
+    // In sections of their own (savestate/machine.rs), which older states
     // lack.
-    sysenter,
+    sysenter, sse,
     // Set from the configuration, which a state carries in its header.
     model, core, string_bulk, fpu_fast,
     // Caches, emptied after a load.

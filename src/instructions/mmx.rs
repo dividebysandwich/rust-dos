@@ -7,6 +7,9 @@
 //! sign and exponent to all ones, so the FPU sees a NaN there. EMMS tags
 //! all registers empty again. With CR0.EM set they raise #UD, with CR0.TS
 //! #NM, as a task's FPU state is the MMX state too.
+//!
+//! The Pentium III's SSE adds integer instructions on MMX registers
+//! (`sse_integer`), which are MMX instructions in all these ways.
 
 use iced_x86::{CpuidFeature, Instruction, Mnemonic, OpKind, Register};
 
@@ -98,6 +101,104 @@ pub fn mmx(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
     Ok(())
 }
 
+/// The integer instructions SSE adds on MMX registers (Pentium III), which
+/// `sse::sse` passes on: averages, minimums and maximums, the high words
+/// of unsigned products, sums of absolute differences, word shuffles,
+/// inserts and extracts, byte masks, and the stores that bypass the
+/// caches, MOVNTQ and MASKMOVQ.
+pub fn sse_integer(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    if cpu.cr0 & CR0_EM != 0 {
+        return Err(Fault::UD);
+    }
+    if cpu.cr0 & CR0_TS != 0 {
+        return Err(Fault::NM);
+    }
+    use Mnemonic::*;
+    let mnemonic = instr.mnemonic();
+    match mnemonic {
+        // A store of MMn, as MOVQ's.
+        Movntq => return mov(cpu, instr),
+        Maskmovq => return maskmovq(cpu, instr),
+        // A word of MMn, zero-extended into a 32-bit register.
+        Pextrw => {
+            let v = mm(cpu, instr.op1_register()) >> (16 * (instr.immediate8() & 3));
+            enter_mmx(cpu);
+            cpu.set_reg(instr.op0_register(), v as u32 & 0xFFFF);
+            return Ok(());
+        }
+        // The top bit of each byte of MMn.
+        Pmovmskb => {
+            let v = mm(cpu, instr.op1_register());
+            enter_mmx(cpu);
+            cpu.set_reg(instr.op0_register(), (0..8).fold(0, |m, i| m | ((v >> (8 * i + 7)) as u32 & 1) << i));
+            return Ok(());
+        }
+        _ => {}
+    }
+    let dst = mm(cpu, instr.op0_register());
+    let result = match mnemonic {
+        // The low word of a 32-bit register, or a word of memory, into
+        // word n of MMn.
+        Pinsrw => {
+            let word = if instr.op1_kind() == OpKind::Memory {
+                let m = mem_operand(cpu, instr, 2, Access::Read)?;
+                cpu.mem_read(m) as u64
+            } else {
+                cpu.reg(instr.op1_register()) as u64 & 0xFFFF
+            };
+            let shift = 16 * (instr.immediate8() & 3) as u32;
+            (dst & !(0xFFFF << shift)) | word << shift
+        }
+        // Word i of the result is the source's word the two bits i of
+        // the immediate name.
+        Pshufw => {
+            let src = read(cpu, instr, 1)?;
+            let n = instr.immediate8() as u32;
+            (0..4).fold(0, |r, i| r | (src >> (16 * (n >> (2 * i) & 3)) & 0xFFFF) << (16 * i))
+        }
+        _ => {
+            let src = read(cpu, instr, 1)?;
+            match mnemonic {
+                // Rounded up.
+                Pavgb => lanes::<8>(dst, src, |a, b| (a + b + 1) >> 1),
+                Pavgw => lanes::<16>(dst, src, |a, b| (a + b + 1) >> 1),
+                Pmaxsw => lanes::<16>(dst, src, |a, b| if sx::<16>(a) > sx::<16>(b) { a } else { b }),
+                Pminsw => lanes::<16>(dst, src, |a, b| if sx::<16>(a) < sx::<16>(b) { a } else { b }),
+                Pmaxub => lanes::<8>(dst, src, u64::max),
+                Pminub => lanes::<8>(dst, src, u64::min),
+                Pmulhuw => lanes::<16>(dst, src, |a, b| (a * b) >> 16),
+                // The sum of the bytes' absolute differences, in the low
+                // word; the others are 0.
+                Psadbw => (0..8).map(|i| ((dst >> (8 * i)) as u8).abs_diff((src >> (8 * i)) as u8) as u64).sum(),
+                _ => return Err(Fault::UD),
+            }
+        }
+    };
+    enter_mmx(cpu);
+    set_mm(cpu, instr.op0_register(), result);
+    Ok(())
+}
+
+/// MASKMOVQ: store the bytes of the first MMn whose byte in the second has
+/// its top bit set at DS:EDI (DS:DI with a 16-bit address size, and DS
+/// overridable). A mask of none accesses nothing.
+fn maskmovq(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    let data = mm(cpu, instr.op1_register());
+    let mask = mm(cpu, instr.op2_register());
+    let seg = mem_seg(instr);
+    let off = if instr.op0_kind() == OpKind::MemorySegDI { cpu.reg(Register::DI) } else { cpu.reg(Register::EDI) };
+    let lin = if mask & 0x8080_8080_8080_8080 != 0 { Some(cpu.check_span(seg, off, 8, Access::Write)?) } else { None };
+    enter_mmx(cpu);
+    if let Some(lin) = lin {
+        for i in 0..8 {
+            if mask >> (8 * i + 7) & 1 != 0 {
+                cpu.lin_write_8(lin as usize + i, (data >> (8 * i)) as u8);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// MOVD and MOVQ: MMn from or to a register, memory or another MMn. MOVD
 /// zero-extends a dword into MMn and stores its low dword.
 fn mov(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
@@ -150,22 +251,22 @@ fn read(cpu: &mut Cpu, instr: &Instruction, i: u32) -> CpuResult<u64> {
     })
 }
 
-fn is_mm(reg: Register) -> bool {
+pub(super) fn is_mm(reg: Register) -> bool {
     (Register::MM0..=Register::MM7).contains(&reg)
 }
 
 /// MMn: the significand of physical FPU register n.
-fn mm(cpu: &Cpu, reg: Register) -> u64 {
+pub(super) fn mm(cpu: &Cpu, reg: Register) -> u64 {
     cpu.fpu_reg(reg as usize - Register::MM0 as usize).st as u64
 }
 
-fn set_mm(cpu: &mut Cpu, reg: Register, value: u64) {
+pub(super) fn set_mm(cpu: &mut Cpu, reg: Register, value: u64) {
     cpu.fpu_set_reg(reg as usize - Register::MM0 as usize, crate::f80::F80 { st: MMX_EXPONENT | value as u128 });
 }
 
 /// What every MMX instruction but EMMS does to the FPU: top of stack 0,
 /// all registers valid.
-fn enter_mmx(cpu: &mut Cpu) {
+pub(super) fn enter_mmx(cpu: &mut Cpu) {
     cpu.fpu_top = 0;
     cpu.fpu_tags = [FPU_TAG_VALID; 8];
 }
