@@ -56,6 +56,8 @@ impl Fault {
     pub const UD: Fault = Fault::new(6);
     /// Coprocessor not available.
     pub const NM: Fault = Fault::new(7);
+    /// SIMD floating-point exception (Pentium III).
+    pub const XM: Fault = Fault::new(19);
 
     pub const fn new(vector: u8) -> Self {
         Fault { vector, kind: PLAIN, code: 0 }
@@ -151,6 +153,7 @@ pub fn exception_name(vector: u8) -> &'static str {
         14 => "#PF",
         16 => "#MF",
         17 => "#AC",
+        19 => "#XM",
         _ => "#??",
     }
 }
@@ -570,6 +573,7 @@ impl Cpu {
         self.tsc_offset = self.bus.clock.icount.wrapping_neg();
         self.perf_msrs = [0; 3];
         self.sysenter = [0; 3];
+        self.sse = super::Sse::default();
         self.reset_to_real_mode();
         self.seg[Seg::CS as usize] = super::SegCache::real(0xF000);
         self.eip = 0xFFF0;

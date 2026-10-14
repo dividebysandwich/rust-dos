@@ -158,13 +158,24 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   registers are the FPU's; `pentium_pro`, a Pentium Pro as DOSBox-X's
   `ppro_slow` (CPUID family 6, model 1): the Pentium's with CMOVcc,
   FCMOVcc, FCOMI and FUCOMI, the P6 hinting NOPs and the local APIC base
-  and microcode revision MSRs Windows 98 and ME read, without MMX; or
+  and microcode revision MSRs Windows 98 and ME read, without MMX;
   `pentium_ii`, a Pentium II as DOSBox-X's (family 6, model 3): the
-  Pentium Pro's with MMX and SYSENTER/SYSEXIT. Neither has SSE, FXSAVE,
+  Pentium Pro's with MMX and SYSENTER/SYSEXIT; or `pentium_iii`, a
+  Pentium III (Katmai, family 6, model 7): the Pentium II's with SSE,
+  FXSAVE/FXRSTOR, CR4's OSFXSR and OSXMMEXCPT, the processor serial
+  number (CPUID leaf 3, until MSR 119h switches it off) and the cache
+  descriptors of CPUID leaf 2. Its SSE arithmetic rounds as MXCSR says,
+  flushes to zero, and sets and masks the six exception flags as a
+  Pentium III does: an unmasked one raises #XM, or #UD without
+  OSXMMEXCPT. RCPPS and RSQRTPS give the exact reciprocal rounded to a
+  single, within the precision Intel specifies for them. SSE needs
+  CR4.OSFXSR, which a system that saves the SSE state sets; rust-dos's
+  DPMI host sets it for its clients on a Pentium III. None of them has
   RDPMC, a local APIC or memory type range registers, as in DOSBox-X. A
   DOSBox configuration's `cputype` of a Pentium imports as `pentium`, of
-  a Pentium MMX as `pentium_mmx`, of a Pentium Pro as `pentium_pro`, and
-  of a Pentium II or III as `pentium_ii`.
+  a Pentium MMX as `pentium_mmx`, of a Pentium Pro as `pentium_pro`, of
+  a Pentium II as `pentium_ii`, and of a Pentium III or DOSBox-X's
+  `experimental` as `pentium_iii`.
 * `core` is what runs the programs' instructions: `auto` (the default)
   runs the interpreter, and the dynamic recompiler for a program from the
   moment it switches to protected mode until it ends, as DOSBox's
@@ -300,8 +311,8 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   a recording stops at 1 GB.
 * `memsize` is the RAM in MB (default 16), from 2 to as much as
   motherboards took for the `cpu`: 64 MB for a 386, 128 MB for a 486,
-  256 MB for a Pentium and 512 MB for a Pentium MMX, Pentium Pro or
-  Pentium II. More than the CPU
+  256 MB for a Pentium and 512 MB for a Pentium MMX, Pentium Pro,
+  Pentium II or Pentium III. More than the CPU
   takes is warned about and cut to its most. Memory above the first
   megabyte is extended memory for DOS extenders and XMS; XMS 3.0's 32-bit
   functions and INT 15h E801h/E820h report all of it, HIMEM's older calls

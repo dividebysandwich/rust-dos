@@ -93,16 +93,22 @@ pub enum CpuModel {
     /// Pentium Pro's, MMX, SYSENTER/SYSEXIT with their MSRs, and CPUID
     /// saying family 6, model 3, stepping 3.
     PentiumII,
+    /// A Pentium III (Katmai): the Pentium II's, SSE with its XMM
+    /// registers and MXCSR, FXSAVE/FXRSTOR, CR4's OSFXSR and OSXMMEXCPT,
+    /// the processor serial number, and CPUID saying family 6, model 7,
+    /// stepping 3 with the cache descriptors of its 512 KB L2.
+    PentiumIII,
 }
 
 impl CpuModel {
-    pub const ALL: [CpuModel; 6] = [
+    pub const ALL: [CpuModel; 7] = [
         CpuModel::I386,
         CpuModel::I486,
         CpuModel::Pentium,
         CpuModel::PentiumMmx,
         CpuModel::PentiumPro,
         CpuModel::PentiumII,
+        CpuModel::PentiumIII,
     ];
 
     /// The EFLAGS bits a program may change beyond the 386's: AC on a 486,
@@ -126,6 +132,7 @@ impl CpuModel {
             CpuModel::PentiumMmx => 0x0543,
             CpuModel::PentiumPro => 0x0612,
             CpuModel::PentiumII => 0x0633,
+            CpuModel::PentiumIII => 0x0673,
         }
     }
 
@@ -138,20 +145,21 @@ impl CpuModel {
             CpuModel::PentiumMmx => "Pentium MMX",
             CpuModel::PentiumPro => "Pentium Pro",
             CpuModel::PentiumII => "Pentium II",
+            CpuModel::PentiumIII => "Pentium III",
         }
     }
 
     /// The most RAM in MB (`memsize`) a machine with this CPU takes, as
     /// the motherboards of its day did: 64 MB on a 386, 128 MB on a 486,
     /// 256 MB on a Pentium (430FX/VX) and 512 MB on a Pentium MMX (430HX).
-    /// A Pentium Pro or Pentium II board (440FX, 440BX) takes 1 GB, which
-    /// `MAX_MEMSIZE` keeps to 512 MB.
+    /// A Pentium Pro, Pentium II or Pentium III board (440FX, 440BX)
+    /// takes 1 GB, which `MAX_MEMSIZE` keeps to 512 MB.
     pub fn max_memsize(self) -> usize {
         match self {
             CpuModel::I386 => 64,
             CpuModel::I486 => 128,
             CpuModel::Pentium => 256,
-            CpuModel::PentiumMmx | CpuModel::PentiumPro | CpuModel::PentiumII => 512,
+            CpuModel::PentiumMmx | CpuModel::PentiumPro | CpuModel::PentiumII | CpuModel::PentiumIII => 512,
         }
     }
 
@@ -160,12 +168,18 @@ impl CpuModel {
         (self.signature() >> 8) as u8
     }
 
-    /// Whether it runs MMX instructions: a Pentium MMX or a Pentium II.
+    /// Whether it runs MMX instructions: a Pentium MMX, a Pentium II or a
+    /// Pentium III.
     pub fn has_mmx(self) -> bool {
-        matches!(self, CpuModel::PentiumMmx | CpuModel::PentiumII)
+        matches!(self, CpuModel::PentiumMmx | CpuModel::PentiumII | CpuModel::PentiumIII)
     }
 
-    /// Whether it is a P6 (family 6, a Pentium Pro or Pentium II), with
+    /// Whether it runs SSE instructions and FXSAVE/FXRSTOR: a Pentium III.
+    pub fn has_sse(self) -> bool {
+        self >= CpuModel::PentiumIII
+    }
+
+    /// Whether it is a P6 (family 6: a Pentium Pro, II or III), with
     /// CMOVcc, FCMOVcc and FCOMI.
     pub fn is_p6(self) -> bool {
         self >= CpuModel::PentiumPro
@@ -213,6 +227,25 @@ impl CoreMode {
     }
 }
 
+/// What the Pentium III adds to the CPU's state: XMM0-XMM7, MXCSR, and
+/// whether the processor serial number was switched off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sse {
+    pub xmm: [u128; 8],
+    pub mxcsr: u32,
+    /// Set by a write of bit 21 to MSR 119h, which only a reset clears:
+    /// CPUID then has no serial number (leaf 3) to give.
+    pub psn_off: bool,
+}
+
+impl Default for Sse {
+    /// The state after a reset: the registers 0, all exceptions masked,
+    /// rounding to nearest, and the serial number there.
+    fn default() -> Self {
+        Sse { xmm: [0; 8], mxcsr: crate::instructions::sse::float::MXCSR_DEFAULT, psn_off: false }
+    }
+}
+
 /// A descriptor table register (GDTR, IDTR): base address and limit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DescTable {
@@ -240,6 +273,11 @@ pub const CR0_PG: u32 = 0x8000_0000;
 /// CR4 bits (Pentium): RDTSC only at level 0 (TSD), and 4 MB pages (PSE).
 pub const CR4_TSD: u32 = 0x0000_0004;
 pub const CR4_PSE: u32 = 0x0000_0010;
+/// CR4 bits (Pentium III): the system saves the SSE state with FXSAVE, so
+/// SSE instructions run (OSFXSR), and handles #XM, so unmasked SSE
+/// exceptions raise it rather than #UD (OSXMMEXCPT).
+pub const CR4_OSFXSR: u32 = 0x0000_0200;
+pub const CR4_OSXMMEXCPT: u32 = 0x0000_0400;
 
 // FPU Tag Word Values
 pub const FPU_TAG_EMPTY: u8 = 1;
@@ -336,7 +374,8 @@ pub struct Cpu {
     pub cr0: u32,
     pub cr2: u32,
     pub cr3: u32,
-    /// CR4 (Pentium): `CR4_TSD` and `CR4_PSE`.
+    /// CR4 (Pentium): `CR4_TSD` and `CR4_PSE`, and on a Pentium III
+    /// `CR4_OSFXSR` and `CR4_OSXMMEXCPT`.
     pub cr4: u32,
     /// What the time stamp counter (Pentium) adds to the instruction
     /// clock, which it counts (see `tsc`).
@@ -348,6 +387,8 @@ pub struct Cpu {
     /// The Pentium II's SYSENTER MSRs: the code selector (174h), the stack
     /// pointer (175h) and the instruction pointer (176h) SYSENTER loads.
     pub sysenter: [u32; 3],
+    /// The Pentium III's SSE registers, MXCSR and serial number switch.
+    pub sse: Sse,
     /// Debug registers; stored, but breakpoints are not implemented.
     pub dr: [u32; 8],
     pub gdtr: DescTable,
@@ -635,6 +676,7 @@ impl Cpu {
             tsc_offset: 0,
             perf_msrs: [0; 3],
             sysenter: [0; 3],
+            sse: Sse::default(),
             dr: [0; 8],
             gdtr: DescTable { base: 0, limit: 0xFFFF },
             idtr: DescTable { base: 0, limit: 0x3FF },

@@ -347,6 +347,7 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
                 CpuModel::PentiumMmx => "pentium_mmx",
                 CpuModel::PentiumPro => "pentium_pro",
                 CpuModel::PentiumII => "pentium_ii",
+                CpuModel::PentiumIII => "pentium_iii",
             }
             .to_string()),
         ),

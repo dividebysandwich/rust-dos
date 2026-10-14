@@ -2,8 +2,9 @@
 //! registers, the machine status word, control, debug and test registers,
 //! the LDT and task registers, the protected-mode segment inspection
 //! instructions (LAR, LSL, VERR, VERW, ARPL), the 486 cache and TLB
-//! instructions, the Pentium's CPUID, time stamp counter and MSRs, and
-//! the Pentium II's SYSENTER and SYSEXIT.
+//! instructions, the Pentium's CPUID, time stamp counter and MSRs, the
+//! Pentium II's SYSENTER and SYSEXIT, and the Pentium III's CPUID leaves
+//! and MSRs.
 
 use iced_x86::{Code, Instruction, Register};
 
@@ -14,8 +15,9 @@ use crate::cpu::seg::{
     rpl, sel_error,
 };
 use crate::cpu::{
-    Access, CR0_AM, CR0_CD, CR0_EM, CR0_ET, CR0_MP, CR0_NE, CR0_NW, CR0_PE, CR0_PG, CR0_TS, CR0_WP, CR4_PSE,
-    CR4_TSD, Cpu, CpuFlags, CpuModel, CpuResult, CpuState, DescTable, Descriptor, Fault, Seg, SegCache,
+    Access, CR0_AM, CR0_CD, CR0_EM, CR0_ET, CR0_MP, CR0_NE, CR0_NW, CR0_PE, CR0_PG, CR0_TS, CR0_WP, CR4_OSFXSR,
+    CR4_OSXMMEXCPT, CR4_PSE, CR4_TSD, Cpu, CpuFlags, CpuModel, CpuResult, CpuState, DescTable, Descriptor, Fault,
+    Seg, SegCache,
 };
 
 /// Instructions only privilege level 0 may run: in protected and
@@ -165,11 +167,13 @@ fn set_cr0(cpu: &mut Cpu, value: u32) -> CpuResult {
     Ok(())
 }
 
-/// Write CR4 (Pentium). This Pentium has its TSD and PSE bits; the
-/// others, among them the virtual-8086 mode extensions, debugging
-/// extensions and machine checks CPUID doesn't report, are reserved: #GP(0).
+/// Write CR4 (Pentium). This Pentium has its TSD and PSE bits, and a
+/// Pentium III OSFXSR and OSXMMEXCPT too; the others, among them the
+/// virtual-8086 mode extensions, debugging extensions and machine checks
+/// CPUID doesn't report, are reserved: #GP(0).
 fn set_cr4(cpu: &mut Cpu, value: u32) -> CpuResult {
-    if value & !(CR4_TSD | CR4_PSE) != 0 {
+    let sse = if cpu.model.has_sse() { CR4_OSFXSR | CR4_OSXMMEXCPT } else { 0 };
+    if value & !(CR4_TSD | CR4_PSE | sse) != 0 {
         return Err(Fault::gp(0));
     }
     // The translations change with the page size.
@@ -257,6 +261,23 @@ const CPUID_CMOV: u32 = 0x0000_8000;
 /// The CPUID feature bit of SYSENTER/SYSEXIT, which a Pentium II adds.
 const CPUID_SEP: u32 = 0x0000_0800;
 
+/// The CPUID feature bits a Pentium III adds: FXSAVE/FXRSTOR (FXSR) and
+/// SSE, and the processor serial number (PSN) until it is switched off.
+const CPUID_FXSR: u32 = 0x0100_0000;
+const CPUID_SSE: u32 = 0x0200_0000;
+const CPUID_PSN: u32 = 0x0004_0000;
+
+/// What CPUID leaf 2 gives a Pentium III (Katmai) in EAX, EBX, ECX and
+/// EDX: one pass (AL 1), and the descriptors of its instruction TLBs (01h,
+/// 02h), data TLBs (03h, 04h), 16 KB L1 caches (08h, 0Ch) and 512 KB L2
+/// cache (43h). Windows XP waits forever at boot without them on a
+/// Pentium III, as DOSBox-X notes.
+const CPUID_CACHES: [u32; 4] = [0x0302_0101, 0, 0, 0x0C04_0843];
+
+/// The low 64 bits of the processor serial number CPUID leaf 3 gives in
+/// ECX and EDX ("-DOS" and "RUST"); the top 32 are the signature.
+const PSN: [u32; 2] = [0x534F_442D, 0x5453_5552];
+
 /// The features CPUID leaf 1 reports in EDX for `model`, as DOSBox-X has
 /// them (cpu.cpp, `CPU_CPUID`), less the 36-bit page size extension it
 /// gives its Pentium II, which this one doesn't have.
@@ -271,19 +292,33 @@ pub fn cpuid_features(model: CpuModel) -> u32 {
     if model >= CpuModel::PentiumII {
         features |= CPUID_SEP;
     }
+    if model.has_sse() {
+        features |= CPUID_FXSR | CPUID_SSE | CPUID_PSN;
+    }
     features
 }
 
-/// CPUID (Pentium): leaf 0 gives the highest leaf, 1, and "GenuineIntel",
-/// leaf 1 the family, model and stepping and the features. Leaves past it
-/// give zeros.
+/// CPUID (Pentium): leaf 0 gives the highest leaf and "GenuineIntel",
+/// leaf 1 the family, model and stepping and the features. A Pentium III
+/// has leaf 2, its caches and TLBs, and leaf 3, the low 64 bits of its
+/// serial number; once that is switched off (MSR 119h) leaf 3 is gone,
+/// and leaf 1 doesn't report it. Leaves past the highest give zeros.
 pub fn cpuid(cpu: &mut Cpu) -> CpuResult {
     require_pentium(cpu)?;
     let text = |s: &[u8; 4]| u32::from_le_bytes(*s);
-    let (eax, ebx, ecx, edx) = match cpu.eax() {
-        0 => (1, text(b"Genu"), text(b"ntel"), text(b"ineI")),
-        1 => (cpu.model.signature(), 0, 0, cpuid_features(cpu.model)),
-        _ => (0, 0, 0, 0),
+    let sse = cpu.model.has_sse();
+    let psn = sse && !cpu.sse.psn_off;
+    let highest = if psn { 3 } else if sse { 2 } else { 1 };
+    let leaf = cpu.eax();
+    let (eax, ebx, ecx, edx) = match leaf {
+        0 => (highest, text(b"Genu"), text(b"ntel"), text(b"ineI")),
+        _ if leaf > highest => (0, 0, 0, 0),
+        1 => {
+            let features = cpuid_features(cpu.model) & if psn { !0 } else { !CPUID_PSN };
+            (cpu.model.signature(), 0, 0, features)
+        }
+        2 => (CPUID_CACHES[0], CPUID_CACHES[1], CPUID_CACHES[2], CPUID_CACHES[3]),
+        _ => (0, 0, PSN[0], PSN[1]),
     };
     cpu.set_eax(eax);
     cpu.set_ebx(ebx);
@@ -322,6 +357,17 @@ const GLIDE_MSR_MARK: u32 = 0xDEAD_CAFE;
 /// and ME don't try to update the microcode.
 const MICROCODE_REVISION: u64 = 0x003F_003F_001E_03FF;
 
+/// What a Pentium III reads from its microcode revision MSR (8Bh) and its
+/// platform ID (17h): DOSBox-X's, from a Pentium III. Windows ME updates
+/// the microcode of a lower revision, and stops at a blue screen without
+/// the platform ID.
+const P3_MICROCODE_REVISION: u64 = 0x0000_000E_0000_0000;
+const P3_PLATFORM_ID: u64 = 0x1100_0000_0000_0000;
+
+/// The bit of the L2 cache control MSR (119h) that switches the processor
+/// serial number off.
+const BBL_CR_CTL_PSN_OFF: u64 = 0x0020_0000;
+
 /// Whether `model` has the model-specific register `msr` for a read or a
 /// write: a Pentium the machine check address and type (0, 1), the time
 /// stamp counter (10h) and its performance monitoring control and counters
@@ -331,16 +377,21 @@ const MICROCODE_REVISION: u64 = 0x003F_003F_001E_03FF;
 /// `CPU_RDMSR` and `CPU_WRMSR`): the power-on configuration (2Ah), the L2
 /// cache control registers (119h, 11Eh), the SYSENTER registers (174h to
 /// 176h), and the microcode update trigger (79h), which can only be
-/// written.
+/// written. A Pentium III adds DOSBox-X's platform ID (17h), which can only
+/// be read, the event selects of its performance counters (186h, 187h),
+/// and the miscellaneous enables (140h), which Linux reads on one.
 fn has_msr(model: CpuModel, msr: u32, write: bool) -> bool {
     let p6 = model.is_p6();
     let pentium_ii = model >= CpuModel::PentiumII;
+    let pentium_iii = model.has_sse();
     match msr {
         0x00 | 0x01 | 0x10 => true,
         0x11..=0x13 => !p6,
         0x1B | 0x8B => p6,
         0x2A | 0x119 | 0x11E | 0x174..=0x176 => pentium_ii,
         0x79 => pentium_ii && write,
+        0x17 => pentium_iii && !write,
+        0x140 | 0x186 | 0x187 => pentium_iii,
         _ => false,
     }
 }
@@ -351,7 +402,10 @@ fn has_msr(model: CpuModel, msr: u32, write: bool) -> bool {
 /// counters hold what was written to them and don't count. There is no
 /// local APIC, so its base reads 0 and a write to it changes nothing, as
 /// in DOSBox-X; the Pentium II's cache and configuration registers read 0
-/// and keep nothing, and a microcode update does nothing. Any other MSR
+/// and keep nothing, and a microcode update does nothing. A Pentium III's
+/// L2 cache control (119h) keeps the bit that switches its serial number
+/// off, which stays off until a reset; its event selects and
+/// miscellaneous enables read 0 and keep nothing. Any other MSR
 /// raises #GP(0), except with EBX DEADCAFEh: 3dfx's Glide marks its
 /// accesses to the memory type range registers so (a Pentium II's, for
 /// write-combining), for its Windows driver to catch the fault where
@@ -379,13 +433,17 @@ pub fn msr(cpu: &mut Cpu, write: bool) -> CpuResult {
             // The code selector keeps 16 bits.
             0x174 => cpu.sysenter[0] = cpu.eax() & 0xFFFF,
             0x175..=0x176 => cpu.sysenter[msr as usize - 0x174] = cpu.eax(),
+            0x119 if cpu.model.has_sse() && value & BBL_CR_CTL_PSN_OFF != 0 => cpu.sse.psn_off = true,
             _ => {}
         }
     } else {
         let value = match msr {
             0x10 => cpu.tsc(),
             0x11..=0x13 => cpu.perf_msrs[msr as usize - 0x11],
+            0x8B if cpu.model.has_sse() => P3_MICROCODE_REVISION,
             0x8B => MICROCODE_REVISION,
+            0x17 => P3_PLATFORM_ID,
+            0x119 if cpu.sse.psn_off => BBL_CR_CTL_PSN_OFF,
             0x174..=0x176 => cpu.sysenter[msr as usize - 0x174] as u64,
             _ => 0,
         };

@@ -399,6 +399,9 @@ fn cpu_model() {
     assert_eq!(config.cpu, Some(crate::cpu::CpuModel::PentiumPro));
     let config = parse("[emulator]\ncpu=pentium_ii\nmemsize=512\n", Path::new("/cfg"), None);
     assert_eq!(config.cpu, Some(crate::cpu::CpuModel::PentiumII));
+    let config = parse("[emulator]\ncpu=pentium_iii\nmemsize=512\n", Path::new("/cfg"), None);
+    assert_eq!(config.cpu, Some(crate::cpu::CpuModel::PentiumIII));
+    assert!(config.warnings.is_empty());
     assert_eq!(Settings::from_config(&config).memsize, 512);
     let config = parse("[emulator]\ncpu=8086\n", Path::new("/cfg"), None);
     assert_eq!(config.cpu, None);

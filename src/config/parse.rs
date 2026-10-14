@@ -298,8 +298,9 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             "pentium_mmx" | "pentiummmx" | "mmx" => config.cpu = Some(CpuModel::PentiumMmx),
                             "pentium_pro" | "pentiumpro" | "ppro" | "686" => config.cpu = Some(CpuModel::PentiumPro),
                             "pentium_ii" | "pentiumii" | "pentium2" => config.cpu = Some(CpuModel::PentiumII),
+                            "pentium_iii" | "pentiumiii" | "pentium3" => config.cpu = Some(CpuModel::PentiumIII),
                             _ => warn(format!(
-                                "invalid cpu '{}' (386, 486, pentium, pentium_mmx, pentium_pro or pentium_ii)",
+                                "invalid cpu '{}' (386, 486, pentium, pentium_mmx, pentium_pro, pentium_ii or pentium_iii)",
                                 value
                             )),
                         },

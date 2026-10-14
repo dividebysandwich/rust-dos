@@ -36,7 +36,7 @@ mod int31;
 mod video;
 
 use crate::bus::Bus;
-use crate::cpu::{CR0_PE, Cpu, CpuFlags, CpuModel, CpuResult, CpuState, DescTable, Seg, SegCache};
+use crate::cpu::{CR0_PE, CR4_OSFXSR, Cpu, CpuFlags, CpuModel, CpuResult, CpuState, DescTable, Seg, SegCache};
 
 /// The host's code in the BIOS ROM: segment F000, which its protected-mode
 /// code segments have as their base too.
@@ -853,7 +853,14 @@ fn enter(cpu: &mut Cpu) {
 
 /// Put the processor at level 0 in the host's code, in protected mode with
 /// the host's tables and the running client's LDT, on the level 0 stack.
+/// On a Pentium III the host lets clients run SSE instructions
+/// (CR4.OSFXSR). Their unmasked SSE exceptions raise #UD (CR4.OSXMMEXCPT
+/// stays clear), as the host passes interrupt 19 on as the BIOS's disk
+/// interrupt.
 fn host_ring0(cpu: &mut Cpu) {
+    if cpu.model.has_sse() {
+        cpu.cr4 |= CR4_OSFXSR;
+    }
     let host = cpu.bus.dpmi.host.expect("the DPMI host");
     let ldt = cpu.bus.dpmi.clients.last().map_or(0, |c| c.block);
     // The GDT's LDT descriptor is the running client's.
