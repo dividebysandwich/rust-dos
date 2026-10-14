@@ -255,11 +255,13 @@ impl Spawn {
     }
 }
 
-/// Something to pick up (see `props`): the game's manual, or a joystick.
+/// Something to pick up (see `props`): the game's manual, a joystick, or
+/// anything else of the scene's that is only moved about (`item`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PropKind {
     Manual,
     Joystick,
+    Item,
 }
 
 impl PropKind {
@@ -270,10 +272,20 @@ impl PropKind {
         match name.split('.').next().unwrap_or(&name) {
             "manual" => Some(PropKind::Manual),
             "joystick" => Some(PropKind::Joystick),
+            "item" => Some(PropKind::Item),
             _ => None,
         }
     }
+
+    /// Whether Rust-DOS has a model of its own for it, for an empty.
+    fn built_in(self) -> bool {
+        self != PropKind::Item
+    }
 }
+
+/// A hand takes a prop by its box, which is at least this thick, so that
+/// a pencil or a sheet of paper can be taken too.
+const THINNEST: f32 = 0.02;
 
 /// What a part of a prop is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -344,7 +356,10 @@ impl Prop {
             low = low.min(base);
             high = high.max(base);
         }
-        self.bounds = (low, high);
+        // Thickened across, and upwards from what it stands on.
+        let thin = (Vec3::splat(THINNEST) - (high - low)).max(Vec3::ZERO);
+        let across = Vec3::new(thin.x, 0.0, thin.z) / 2.0;
+        self.bounds = (low - across, high + across + Vec3::Y * thin.y);
         if let Some((a, b)) = self.bounds_of(|r| r == PartRole::PageRight)
             && !self.has(PartRole::SheetFront)
         {
@@ -580,6 +595,8 @@ impl Scene {
                 prop.push(PartRole::Stick, cylinder(Vec3::ZERO, 0.009, 0.13, 12, black));
                 prop.push(PartRole::Stick, cylinder(Vec3::new(0.0, 0.11, 0.0), 0.017, 0.04, 16, red));
             }
+            // The scene's own only.
+            PropKind::Item => {}
         }
         prop.finish();
         prop
@@ -931,7 +948,9 @@ impl Walk<'_> {
         let mut prop = Prop::new(kind, pose);
         self.prop_node(&mut prop, node, world, pose.inverse(), PartRole::Body)?;
         if prop.parts.is_empty() {
-            self.prop_places.push((kind, pose));
+            if kind.built_in() {
+                self.prop_places.push((kind, pose));
+            }
         } else {
             prop.finish();
             scene.props.push(prop);
@@ -1410,6 +1429,26 @@ mod tests {
         assert!(stick.vertices.iter().any(|v| v.position == [1.0, 1.0, 0.0]));
         assert!((joystick.knob.y - 0.985).abs() < 1e-4);
         assert!(scene.props.iter().any(|p| p.kind == PropKind::Manual && p.has(PartRole::PageRight)));
+    }
+
+    #[test]
+    fn gltf_items_are_props_of_their_own() {
+        // A stapler with the quad as its mesh, and an empty item, which is
+        // nothing.
+        let text = quad_gltf().replace(r#""nodes": [0, 2, 3, 4]"#, r#""nodes": [0, 2, 3, 4, 5, 6]"#).replace(
+            r#"{"name": "Light", "mesh": 0, "extras": {"rustdos_led": "hdd"}, "translation": [5, 0, 0]}"#,
+            r#"{"name": "Light", "mesh": 0, "extras": {"rustdos_led": "hdd"}, "translation": [5, 0, 0]},
+                {"name": "Stapler", "extras": {"rustdos_prop": "item"}, "mesh": 0, "translation": [1, 0.7, -0.5], "scale": [0.05, 0.001, 1]},
+                {"name": "item.001"}"#,
+        );
+        let scene = Scene::from_gltf(text.as_bytes(), Path::new(".")).unwrap();
+        let items: Vec<&Prop> = scene.props.iter().filter(|p| p.kind == PropKind::Item).collect();
+        assert_eq!(items.len(), 1);
+        assert_eq!(scene.meshes.len(), 2);
+        // Thin as it is, it is taken by a box of some thickness.
+        let (low, high) = items[0].bounds;
+        assert!((high - low).min_element() >= THINNEST - 1e-6, "{:?}", items[0].bounds);
+        assert!((high.x - low.x - 0.1).abs() < 1e-4);
     }
 
     #[test]
