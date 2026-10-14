@@ -87,7 +87,7 @@ pub fn strikes_between(from: f64, to: f64) -> Vec<Strike> {
     let last = to.ceil().max(0.0) as u64;
     for slot in first..=last {
         let h = hash(slot);
-        if h % EVERY != 0 {
+        if !h.is_multiple_of(EVERY) {
             continue;
         }
         let at = slot as f64 + (h >> 8 & 0xFF) as f64 / 256.0;

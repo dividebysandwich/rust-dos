@@ -251,11 +251,9 @@ impl Probes {
             }
             out.extend(probe.tint);
             out.push(probe.valid as u32 as f32);
-            for group in &probe.light[1..] {
-                for k in 0..6 {
-                    out.extend(group[k]);
-                    out.push(0.0);
-                }
+            for axis in probe.light[1..].iter().flatten() {
+                out.extend(axis);
+                out.push(0.0);
             }
         }
         out

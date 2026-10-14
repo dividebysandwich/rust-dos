@@ -3,6 +3,8 @@
 //! the sound device, after the machine's sound (`SdlAudio::queue`), so
 //! they are in no recording and no saved state, and come as soon as the
 //! machine's sound does.
+// (Without the 3D scene, nothing makes them.)
+#![cfg_attr(not(feature = "vr"), allow(dead_code))]
 
 /// The device's rate.
 const RATE: f32 = 44100.0;
@@ -184,8 +186,8 @@ impl RoomSound {
                 out[1] += s * (1.0 + drop.pan) * 0.5;
             }
             self.drops.retain(|d| d.level > 1e-4);
-            for c in 0..2 {
-                out[c] = self.glass[c].run(out[c], cutoff * 1.5);
+            for (o, glass) in out.iter_mut().zip(&mut self.glass) {
+                *o = glass.run(*o, cutoff * 1.5);
             }
             for playing in &mut self.playing {
                 let s = match playing {
