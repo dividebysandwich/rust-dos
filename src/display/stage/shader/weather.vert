@@ -1,7 +1,9 @@
 // The rain's streaks and the snow's flakes, an instance each, a quad of
 // two triangles from the vertex number: no vertex buffer. Each falls
 // through a box around the eyes and comes in again at its top, so that
-// there is always some around; not inside the room (`u_indoor`).
+// there is always some around; not inside the room (`u_indoor`, which
+// the fragments test: a streak's middle may be outside it, and its end
+// inside).
 
 uniform mat4 u_view_projection[VIEWS];
 uniform vec3 u_eye[VIEWS];
@@ -10,13 +12,9 @@ uniform vec3 u_box;
 uniform float u_time;
 // 1 snow, else rain.
 uniform int u_snow;
-// The inside of the room (low, high), where nothing falls; low above high
-// for none.
-uniform vec3 u_indoor_low;
-uniform vec3 u_indoor_high;
-
 out vec2 v_quad;
 out float v_fade;
+out vec3 v_world;
 
 float hash(float n) {
     return fract(sin(n * 12.9898) * 43758.5453);
@@ -48,6 +46,6 @@ void main() {
         across = normalize(cross(along, to_eye)) * 0.004;
     }
     vec3 world = p + across * corner.x + along * corner.y;
-    bool inside = all(greaterThan(p, u_indoor_low)) && all(lessThan(p, u_indoor_high));
-    gl_Position = inside ? vec4(2.0, 2.0, 2.0, 1.0) : u_view_projection[VIEW] * vec4(world, 1.0);
+    v_world = world;
+    gl_Position = u_view_projection[VIEW] * vec4(world, 1.0);
 }

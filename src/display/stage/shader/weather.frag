@@ -3,7 +3,13 @@
 
 in vec2 v_quad;
 in float v_fade;
+in vec3 v_world;
 out vec4 o_color;
+
+// The inside of the room (low, high), where nothing falls; low above high
+// for none.
+uniform vec3 u_indoor_low;
+uniform vec3 u_indoor_high;
 
 uniform int u_snow;
 // The light from all around, and how much falls (0 to 1).
@@ -11,6 +17,9 @@ uniform vec3 u_ambient;
 uniform float u_amount;
 
 void main() {
+    if (all(greaterThan(v_world, u_indoor_low)) && all(lessThan(v_world, u_indoor_high))) {
+        discard;
+    }
     float shape;
     vec3 color;
     if (u_snow == 1) {

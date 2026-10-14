@@ -28,8 +28,10 @@ pub struct SkyLook {
     pub clouds: f32,
     pub flash: f32,
     /// The light from above that isn't the sun's, and the sun's (or at
-    /// night the moon's): from `light_dir`, towards it.
+    /// night the moon's): from `light_dir`, towards it. `daylight` is the
+    /// ambient but a flash, which eyes don't get used to.
     pub ambient: Vec3,
+    pub daylight: Vec3,
     pub light: Vec3,
     pub light_dir: Vec3,
 }
@@ -64,6 +66,7 @@ pub fn look(hours: f32, latitude: f32, heading: f32) -> SkyLook {
         clouds: 0.0,
         flash: 0.0,
         ambient,
+        daylight: ambient,
         light,
         light_dir,
     }
@@ -83,6 +86,7 @@ impl SkyLook {
         self.stars *= 1.0 - amount;
         self.light *= 1.0 - amount * 0.85;
         self.ambient = grey(self.ambient, 0.75);
+        self.daylight = self.ambient;
         self.clouds = amount;
         self
     }
@@ -101,7 +105,7 @@ impl SkyLook {
     /// see it: a room lit through its windows gets a small part of the
     /// sky's light, more of it the brighter the day.
     pub fn indoor_exposure(&self) -> f32 {
-        1.0 + 10.0 * luma(self.ambient).min(0.4)
+        1.0 + 10.0 * luma(self.daylight).min(0.4)
     }
 }
 
