@@ -152,6 +152,12 @@ pub struct MouseState {
     pub last_relative_ns: Option<u64>,
 }
 
+impl Default for MouseState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MouseState {
     pub fn new() -> Self {
         MouseState {

@@ -49,6 +49,9 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use world::World;
 use std::time::SystemTime;
 
+/// A scene being read: its path, when it was written, and the result.
+type SceneLoad = (Option<PathBuf>, Option<SystemTime>, Receiver<Result<Scene, String>>);
+
 pub struct Stage {
     scene: Arc<Scene>,
     gpu: Gpu,
@@ -87,7 +90,7 @@ pub struct Stage {
     /// Written again (an update downloaded in its place), it is read again.
     scene_path: Option<PathBuf>,
     scene_written: Option<SystemTime>,
-    loading: Option<(Option<PathBuf>, Option<SystemTime>, Receiver<Result<Scene, String>>)>,
+    loading: Option<SceneLoad>,
     /// When the window's frame times were last said (RUST_DOS_VR_TIMING).
     timing_since: std::time::Instant,
     /// The props as the window shows them (where the scene has them), and

@@ -348,7 +348,7 @@ fn emulated_cursor(cpu: &mut Cpu, mut first: u8, mut last: u8) -> (u8, u8) {
         }
         if first + 2 < last {
             if first > 2 {
-                first = (height + 1) / 2;
+                first = height.div_ceil(2);
             }
             last = height;
         } else {
@@ -1021,7 +1021,7 @@ pub fn handle(cpu: &mut Cpu) {
 
                     for i in 0..16 {
                         let val = cpu.bus.guest_read_8((addr + i) as u32);
-                        cpu.bus.vga.attribute_regs[i as usize] = val;
+                        cpu.bus.vga.attribute_regs[i] = val;
                     }
                     let border = cpu.bus.guest_read_8((addr + 16) as u32);
                     cpu.bus.vga.attribute_regs[0x11] = border;
@@ -1446,8 +1446,7 @@ pub fn handle(cpu: &mut Cpu) {
                 cpu.set_reg8(Register::BL, display_combination(cpu));
                 cpu.set_reg8(Register::BH, 0x00);
             } else {
-                cpu.bus
-                    .log_string(&format!("[BIOS] Unhandled INT 10h AH=1Ah with AL != 00h"));
+                cpu.bus.log_string("[BIOS] Unhandled INT 10h AH=1Ah with AL != 00h");
             }
         }
 
@@ -1666,6 +1665,7 @@ fn read_char_at(cpu: &mut Cpu, col: u8, row: u8, page: u8) -> (u8, u8) {
 
 /// Generic Scroll Function (Handles AH=06, AH=07, AH=00, AH=0E)
 /// lines=0 means "Clear Window"
+#[allow(clippy::too_many_arguments)]
 fn scroll_area(
     cpu: &mut Cpu,
     up: bool,

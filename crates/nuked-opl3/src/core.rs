@@ -384,7 +384,7 @@ impl Chip {
     }
 
     pub(crate) fn generate_stream(&mut self, buf: &mut [i16], numsamples: usize) {
-        for frame in buf.chunks_exact_mut(2).take(numsamples) {
+        for frame in buf.as_chunks_mut::<2>().0.iter_mut().take(numsamples) {
             self.generate_resampled(frame);
         }
     }

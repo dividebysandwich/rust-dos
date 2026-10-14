@@ -786,7 +786,7 @@ fn sst386_real_mode() {
                         translated.fetch_add(machine.cpu.dynrec.stats().runs, Ordering::Relaxed);
                         *slots[i].lock().unwrap() = Some(r);
                         let n = done.fetch_add(1, Ordering::Relaxed) + 1;
-                        if n % 50 == 0 || n == files.len() {
+                        if n.is_multiple_of(50) || n == files.len() {
                             eprintln!(
                                 "[sst386] {n}/{} files, {:.1}s",
                                 files.len(),

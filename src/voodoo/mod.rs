@@ -952,7 +952,7 @@ impl Voodoo {
         for y in 0..h {
             let Some(row) = rgb.get_mut(y * width * 3..(y * width + w.min(width)) * 3) else { break };
             let src = base + y * self.fbi.rowpixels as usize;
-            for (x, out) in row.chunks_exact_mut(3).enumerate() {
+            for (x, out) in row.as_chunks_mut::<3>().0.iter_mut().enumerate() {
                 let at = src + x;
                 let pixel = if at < ram.len() { ram.get(at) } else { 0 };
                 out.copy_from_slice(&self.palette[pixel as usize]);

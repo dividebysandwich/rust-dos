@@ -404,7 +404,7 @@ mod tests {
         let mut reg = regs();
         let mut tmu = Tmu::new(2 << 20, 0x100);
         reg[0x100 + TEXTURE_MODE] = 10 << 8; // RGB565
-        reg[0x100 + T_LOD] = 8 << 8 | 0; // levels 0 to 8
+        reg[0x100 + T_LOD] = 8 << 8; // levels 0 to 8
         reg[0x100 + TEX_BASE_ADDR] = 0x100; // 800h bytes
         tmu.recompute(&reg);
         assert_eq!((tmu.wmask, tmu.hmask), (0xFF, 0xFF));

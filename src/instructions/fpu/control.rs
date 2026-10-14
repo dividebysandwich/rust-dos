@@ -62,7 +62,7 @@ pub fn fnstsw(cpu: &mut Cpu, instr: &Instruction) {
 
 pub fn ffree(cpu: &mut Cpu, instr: &Instruction) {
     let reg_offset = instr.op0_register().number() - iced_x86::Register::ST0.number();
-    let phys_idx = cpu.fpu_get_phys_index(reg_offset as usize);
+    let phys_idx = cpu.fpu_get_phys_index(reg_offset);
     
     // Mark as EMPTY
     cpu.fpu_tags[phys_idx] = crate::cpu::FPU_TAG_EMPTY;

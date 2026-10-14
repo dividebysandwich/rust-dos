@@ -244,11 +244,11 @@ impl<'a> Tsp<'a> {
         let u1 = self.fetch(map, (u + step) & 255, v, level, which.1);
         let v1 = self.fetch(map, u, (v + step) & 255, level, which.0);
         let u1v1 = self.fetch(map, (u + step) & 255, (v + step) & 255, level, which.1);
-        let lerp = |a: i32, b: i32| (a << 3) + 4 + ((b - a) * u_frac >> 2);
-        let lerp_a = |a: i32, b: i32| a + ((b - a) * u_frac >> 5);
+        let lerp = |a: i32, b: i32| (a << 3) + 4 + (((b - a) * u_frac) >> 2);
+        let lerp_a = |a: i32, b: i32| a + (((b - a) * u_frac) >> 5);
         let ab = Rgba { r: lerp(c.r, u1.r), g: lerp(c.g, u1.g), b: lerp(c.b, u1.b), a: lerp_a(c.a, u1.a) };
         let cd = Rgba { r: lerp(v1.r, u1v1.r), g: lerp(v1.g, u1v1.g), b: lerp(v1.b, u1v1.b), a: lerp_a(v1.a, u1v1.a) };
-        let mix = |a: i32, b: i32| ((b - a) * v_frac >> 5) + a;
+        let mix = |a: i32, b: i32| (((b - a) * v_frac) >> 5) + a;
         Rgba { r: mix(ab.r, cd.r), g: mix(ab.g, cd.g), b: mix(ab.b, cd.b), a: mix(ab.a, cd.a) }
     }
 
@@ -378,9 +378,9 @@ impl<'a> Tsp<'a> {
             let global_trans = (control >> 13 & 15) as i32;
             let mut t = self.texture(x, y, coeff, exp, pmip, &map, global_trans);
             if !smooth {
-                t.r = t.r * flat.0 >> 8;
-                t.g = t.g * flat.1 >> 8;
-                t.b = t.b * flat.2 >> 8;
+                t.r = (t.r * flat.0) >> 8;
+                t.g = (t.g * flat.1) >> 8;
+                t.b = (t.b * flat.2) >> 8;
             }
             next = next.wrapping_add(8);
             t
@@ -394,7 +394,7 @@ impl<'a> Tsp<'a> {
                 let (t0, t1, t2) = (int16(w0), int16(w1 >> 16), int16(w1));
                 let fraction = ((t0 << 2) + t1 * (y - y_offset) + t2 * (x - x_offset)).clamp(0, 0x10000) >> 8;
                 let (r, g, b) = from_555(w0 >> 16);
-                let scale = |c: i32| (c >> 3) * fraction >> 5;
+                let scale = |c: i32| ((c >> 3) * fraction) >> 5;
                 let bump = if fraction == 0x100 { 4 } else { 0 };
                 (scale(r) + bump, scale(g) + bump, scale(b) + bump)
             };
@@ -406,9 +406,9 @@ impl<'a> Tsp<'a> {
                 next = next.wrapping_add(2);
             }
             if textured {
-                colour.r = colour.r * hold.0 >> 8;
-                colour.g = colour.g * hold.1 >> 8;
-                colour.b = colour.b * hold.2 >> 8;
+                colour.r = (colour.r * hold.0) >> 8;
+                colour.g = (colour.g * hold.1) >> 8;
+                colour.b = (colour.b * hold.2) >> 8;
             } else {
                 colour = Rgba { r: hold.0, g: hold.1, b: hold.2, a: 0 };
             }
@@ -430,16 +430,16 @@ impl<'a> Tsp<'a> {
         }
         if control & 0x2000_0000 == 0 {
             let fog = self.fog(depth);
-            colour.r += (self.fog_colour.0 - colour.r) * fog >> 8;
-            colour.g += (self.fog_colour.1 - colour.g) * fog >> 8;
-            colour.b += (self.fog_colour.2 - colour.b) * fog >> 8;
+            colour.r += ((self.fog_colour.0 - colour.r) * fog) >> 8;
+            colour.g += ((self.fog_colour.1 - colour.g) * fog) >> 8;
+            colour.b += ((self.fog_colour.2 - colour.b) * fog) >> 8;
         }
         if control & 0x0400 != 0 {
             let alpha = if colour.a == 15 { 16 } else { colour.a };
             let (ur, ug, ub) = ((under >> 16 & 0xFF) as i32, (under >> 8 & 0xFF) as i32, (under & 0xFF) as i32);
-            colour.r = (ur * alpha >> 4) + ((16 - alpha) * colour.r >> 4);
-            colour.g = (ug * alpha >> 4) + ((16 - alpha) * colour.g >> 4);
-            colour.b = (ub * alpha >> 4) + ((16 - alpha) * colour.b >> 4);
+            colour.r = ((ur * alpha) >> 4) + (((16 - alpha) * colour.r) >> 4);
+            colour.g = ((ug * alpha) >> 4) + (((16 - alpha) * colour.g) >> 4);
+            colour.b = ((ub * alpha) >> 4) + (((16 - alpha) * colour.b) >> 4);
         }
         let c = |v: i32| v.clamp(0, 255) as u32;
         c(colour.r) << 16 | c(colour.g) << 8 | c(colour.b)

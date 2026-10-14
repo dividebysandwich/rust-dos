@@ -89,6 +89,9 @@ pub enum UiKey {
     Char(char),
 }
 
+/// A layer scaled for a screenshot: its generation and size, and the frame.
+type ScaledLayer = ((u64, (u32, u32)), Frame);
+
 /// What the frontend has that some of the settings need.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Frontend {
@@ -412,7 +415,7 @@ pub struct ConfigUi {
     layer_generation: u64,
     /// The layer scaled for a screenshot or recording (`with_layer`): by
     /// its generation and size.
-    layer_scaled: Option<((u64, (u32, u32)), Frame)>,
+    layer_scaled: Option<ScaledLayer>,
     /// The Cheats page's search.
     cheats: cheats::Cheats,
     /// The Achievements page.

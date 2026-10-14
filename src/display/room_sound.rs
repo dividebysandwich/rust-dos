@@ -154,7 +154,7 @@ impl RoomSound {
         let pan = self.ambience.pan.clamp(-1.0, 1.0);
         // More of the rain from the windows' side, but some from both.
         let side = [0.6 - 0.4 * pan, 0.6 + 0.4 * pan];
-        for frame in samples.chunks_exact_mut(2) {
+        for frame in samples.as_chunks_mut::<2>().0 {
             self.rain += (self.ambience.rain - self.rain) * 0.0002;
             let mut out = [0.0f32; 2];
             if self.rain > 1e-4 {

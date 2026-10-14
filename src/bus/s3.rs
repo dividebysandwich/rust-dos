@@ -350,21 +350,6 @@ impl Bus {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_engine_s_ports_are_the_xxe8_family() {
-        for port in [0x42E8, 0x46E8, 0x4AE8, 0x82E8, 0x9AE8, 0x9AE9, 0xBEE8, 0xE2E8, 0xE2EA] {
-            assert!(is_engine_port(port), "{:04X}", port);
-        }
-        for port in [0x02E8, 0x03E8, 0x3D4, 0x1E8, 0xC2E8, 0x82EC] {
-            assert!(!is_engine_port(port), "{:04X}", port);
-        }
-    }
-}
-
 impl Bus {
     /// Set the S3's registers for the VESA mode `mode` as its BIOS does
     /// (DOSBox-X's `FinishSetMode`): the display end and line offset for
@@ -456,5 +441,20 @@ impl Bus {
         self.vbe.bank = bank;
         self.vbe.start_high = start_high;
         self.s3_settle();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_engine_s_ports_are_the_xxe8_family() {
+        for port in [0x42E8, 0x46E8, 0x4AE8, 0x82E8, 0x9AE8, 0x9AE9, 0xBEE8, 0xE2E8, 0xE2EA] {
+            assert!(is_engine_port(port), "{:04X}", port);
+        }
+        for port in [0x02E8, 0x03E8, 0x3D4, 0x1E8, 0xC2E8, 0x82EC] {
+            assert!(!is_engine_port(port), "{:04X}", port);
+        }
     }
 }

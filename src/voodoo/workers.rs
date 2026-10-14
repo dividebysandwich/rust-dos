@@ -19,7 +19,8 @@ use super::setup::render_triangle;
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
 
-/// Something drawn.
+/// Something drawn. Not boxed: a job is made for every triangle.
+#[allow(clippy::large_enum_variant)]
 pub enum Job {
     /// A triangle with `texcount` texture units: its vertices in pixels
     /// and its parameters.

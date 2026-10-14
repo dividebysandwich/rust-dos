@@ -1152,8 +1152,8 @@ fn decode_cached<'a>(
         // Writes to the blocks the instruction is in must bump their
         // generations from now on (see `Bus::code_blocks`).
         let last = if slot.is_invalid() { 14 } else { slot.len() - 1 };
-        for block in (phys_ip >> GEN_SHIFT).saturating_sub(1)..=(phys_ip + last) >> GEN_SHIFT {
-            code_blocks[block] |= crate::bus::CODE_BLOCK;
+        for block in &mut code_blocks[(phys_ip >> GEN_SHIFT).saturating_sub(1)..=(phys_ip + last) >> GEN_SHIFT] {
+            *block |= crate::bus::CODE_BLOCK;
         }
     })
 }

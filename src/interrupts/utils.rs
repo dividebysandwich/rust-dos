@@ -29,7 +29,7 @@ pub fn pattern_to_fcb(pattern: &str) -> [u8; 11] {
         if i >= 8 { break; }
         if byte == b'*' {
             // Fill remaining name chars with '?'
-            for j in i..8 { fcb[j] = b'?'; }
+            fcb[i..8].fill(b'?');
             break;
         } else {
             fcb[i] = byte;

@@ -64,7 +64,7 @@ impl TraceEntry {
         disasm_one(bytes, self.eip, self.code32)
     }
 
-    pub fn to_json(&self) -> serde_json::Value {
+    pub fn to_json(self) -> serde_json::Value {
         let (len, text) = self.disasm();
         let h = |v: u16| format!("{:04X}", v);
         let h32 = |v: u32| format!("{:08X}", v);
@@ -85,7 +85,7 @@ impl TraceEntry {
         v
     }
 
-    pub fn to_text(&self) -> String {
+    pub fn to_text(self) -> String {
         let (len, text) = self.disasm();
         let wide = self.wide();
         let mut regs = String::new();

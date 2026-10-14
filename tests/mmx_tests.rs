@@ -156,7 +156,8 @@ fn a_faulting_operand_leaves_the_fpu_as_it_was() {
 #[test]
 fn packed_arithmetic_saturates_and_wraps() {
     let mut rig = mmx_rig();
-    let cases: [(fn(&mut CodeAssembler) -> Result<(), IcedError>, u64, u64, u64); 10] = [
+    type Emit = fn(&mut CodeAssembler) -> Result<(), IcedError>;
+    let cases: [(Emit, u64, u64, u64); 10] = [
         (|a| a.paddb(mm0, mm1), 0x7F80_FF01_0000_0000, 0x0101_0101_0000_0000, 0x8081_0002_0000_0000),
         (|a| a.paddsb(mm0, mm1), 0x7F80_FF01_0000_0000, 0x01FF_0101_0000_0000, 0x7F80_0002_0000_0000),
         (|a| a.paddusw(mm0, mm1), 0xFFFF_0001_0000_8000, 0x0001_0001_0000_8000, 0xFFFF_0002_0000_FFFF),

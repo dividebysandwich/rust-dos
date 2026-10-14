@@ -1165,7 +1165,7 @@ mod tests {
         // Small W is far away.
         assert_eq!(wfloat(0x8000), 0xFFFF);
         // 0.5: one leading zero.
-        assert_eq!(wfloat(0x8000_0000), 0x0000 | ((!0x8000_0000u32 >> 19) & 0xFFF) as i32 + 1);
+        assert_eq!(wfloat(0x8000_0000), ((!0x8000_0000u32 >> 19) & 0xFFF) as i32 + 1);
     }
 
     #[test]

@@ -243,7 +243,7 @@ impl DebugHub {
                 "samples": total,
                 "achieved_hz": (samples.rate() * 10.0).round() / 10.0,
                 "interval_us": {
-                    "mean": if samples.waits > 0 { samples.wait_sum_us / samples.waits } else { 0 },
+                    "mean": samples.wait_sum_us.checked_div(samples.waits).unwrap_or(0),
                     "min": samples.wait_min_us,
                     "p50": samples.wait_percentile_us(50.0),
                     "p90": samples.wait_percentile_us(90.0),

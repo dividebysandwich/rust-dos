@@ -81,6 +81,11 @@ pub struct Hold {
     pub at: Option<(u16, u32)>,
 }
 
+/// An observer of the log's lines (`Bus::log_hook`).
+pub type LogHook = Box<dyn FnMut(&str)>;
+/// An observer of the mixed audio (`Bus::audio_hook`).
+pub type AudioHook = Box<dyn FnMut(&[i16])>;
+
 pub struct Bus {
     ram: Vec<u8>, // System RAM, allocated once
     pub video_mode: VideoMode, // Current State
@@ -396,10 +401,10 @@ pub struct Bus {
 
     /// Optional observer for every `log_string` line. Installed by the debug
     /// server so log output can be streamed to remote clients.
-    pub log_hook: Option<Box<dyn FnMut(&str)>>,
+    pub log_hook: Option<LogHook>,
     /// Optional observer for every block of mixed audio samples produced by
     /// `pump_audio` (44.1 kHz mono i16). Used by the debug audio stream.
-    pub audio_hook: Option<Box<dyn FnMut(&[i16])>>,
+    pub audio_hook: Option<AudioHook>,
 }
 
 impl Bus {
@@ -726,8 +731,8 @@ impl Bus {
     pub fn mark_code(&mut self, start: usize, end: usize) {
         let blocks = &mut self.code_blocks;
         let last = ((end - 1) >> GEN_SHIFT).min(blocks.len() - 1);
-        for block in (start >> GEN_SHIFT).saturating_sub(1)..=last {
-            blocks[block] |= CODE_BLOCK;
+        for block in &mut blocks[(start >> GEN_SHIFT).saturating_sub(1)..=last] {
+            *block |= CODE_BLOCK;
         }
     }
 
@@ -847,7 +852,7 @@ impl Bus {
         if let Some(port) = self.s3_mmio(addr) {
             return self.mmio_peek(port, 1) as u8;
         }
-        if addr < ADDR_VGA_GRAPHICS + SIZE_GRAPHICS && addr >= ADDR_VGA_GRAPHICS {
+        if (ADDR_VGA_GRAPHICS..ADDR_VGA_GRAPHICS + SIZE_GRAPHICS).contains(&addr) {
             // VESA modes: the window onto the bank of video memory.
             if self.video_mode == VideoMode::Vesa {
                 return self.vbe.vram[self.vbe.window_offset(addr - ADDR_VGA_GRAPHICS)];
@@ -959,7 +964,7 @@ impl Bus {
             self.mmio_write(port, value as u32, 1);
             return true;
         }
-        if addr >= ADDR_VGA_GRAPHICS && addr < ADDR_VGA_GRAPHICS + SIZE_GRAPHICS {
+        if (ADDR_VGA_GRAPHICS..ADDR_VGA_GRAPHICS + SIZE_GRAPHICS).contains(&addr) {
             if self.video_mode == VideoMode::Vesa {
                 let offset = self.vbe.window_offset(addr - ADDR_VGA_GRAPHICS);
                 self.write_vram(offset, &[value]);
@@ -1496,7 +1501,7 @@ impl Bus {
         self.sb_advance();
         self.gus_advance();
         let rate = crate::opl::RATE as u64;
-        let target = crate::timer::mul_div(self.clock.now_ticks(), rate as u64, crate::timer::PIT_HZ);
+        let target = crate::timer::mul_div(self.clock.now_ticks(), rate, crate::timer::PIT_HZ);
         // After a long pause (a debugger stop, a slow host) start afresh
         // rather than render seconds of catch-up.
         if target.saturating_sub(self.audio_frames) > rate / 2 {
@@ -2336,22 +2341,23 @@ impl Bus {
                         | (0x3DA, video::adapter::Adapter::Pcjr) => Some(self.vga.tandy_video_mode()),
                         _ => None,
                     };
-                    if let Some(mode) = mode_control {
-                        if mode != self.video_mode {
-                            self.log_string(&format!("[VIDEO] Mode Control {:02X}: {:?}", value, mode));
-                            self.video_mode = mode;
-                            self.vga.mark_dirty_full();
-                        }
+                    if let Some(mode) = mode_control
+                        && mode != self.video_mode
+                    {
+                        self.log_string(&format!("[VIDEO] Mode Control {:02X}: {:?}", value, mode));
+                        self.video_mode = mode;
+                        self.vga.mark_dirty_full();
                     }
 
                     // Check if video mode changed
                     // (A VESA mode is a 256-color mode to these registers.)
-                    if let Some(new_mode) = self.vga.check_video_mode().filter(|_| self.video_mode != VideoMode::Vesa) {
-                        if self.video_mode != new_mode && new_mode == VideoMode::Graphics320x200 {
-                            self.log_string("[VGA] Switch to Graphics320x200 detected via IO");
-                            self.video_mode = new_mode;
-                            self.vga.mark_dirty_full();
-                        }
+                    if let Some(new_mode) = self.vga.check_video_mode().filter(|_| self.video_mode != VideoMode::Vesa)
+                        && self.video_mode != new_mode
+                        && new_mode == VideoMode::Graphics320x200
+                    {
+                        self.log_string("[VGA] Switch to Graphics320x200 detected via IO");
+                        self.video_mode = new_mode;
+                        self.vga.mark_dirty_full();
                     }
                 } else {
                     // Unhandled port write: log the first few to each port.

@@ -59,11 +59,7 @@ fn test_vga_initialization() {
                 // vram_text stores Char, Attribute pairs.
                 if offset < cpu.bus.vga.vram_text.len() {
                     let char_code = cpu.bus.vga.vram_text[offset];
-                    let c = if char_code >= 32 && char_code <= 126 {
-                        char_code as char
-                    } else {
-                        '.'
-                    };
+                    let c = if (32..=126).contains(&char_code) { char_code as char } else { '.' };
                     line.push(c);
                 }
             }

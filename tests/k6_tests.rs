@@ -290,7 +290,8 @@ fn three_dnow_arithmetic() {
         at += 8;
         at - 8
     };
-    let cases: Vec<(Box<dyn Fn(&mut CodeAssembler) -> Result<(), IcedError>>, u32, u32)> = vec![
+    type Emit = Box<dyn Fn(&mut CodeAssembler) -> Result<(), IcedError>>;
+    let cases: Vec<(Emit, u32, u32)> = vec![
         // dst, src -> result (MM0 gets dst, MM1 src)
         (Box::new(|a| a.pfadd(mm0, mm1)), operand(&mut rig, f(1.5), f(-2.25)), operand(&mut rig, f(0.25), f(2.25))),
         (Box::new(|a| a.pfsub(mm0, mm1)), operand(&mut rig, f(1.0), f(-0.0)), operand(&mut rig, f(3.0), f(0.0))),

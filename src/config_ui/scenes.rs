@@ -357,8 +357,8 @@ impl ConfigUi {
             (_, Some(info)) => {
                 let parts = [
                     info.description.clone(),
-                    (!info.author.is_empty()).then(|| format!("By {}.", info.author)).unwrap_or_default(),
-                    (!info.license.is_empty()).then(|| format!("Licence: {}.", info.license)).unwrap_or_default(),
+                    if !info.author.is_empty() { format!("By {}.", info.author) } else { Default::default() },
+                    if !info.license.is_empty() { format!("Licence: {}.", info.license) } else { Default::default() },
                     info.homepage.clone(),
                 ];
                 parts.iter().filter(|p| !p.is_empty()).cloned().collect::<Vec<_>>().join("  ")

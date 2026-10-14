@@ -561,7 +561,7 @@ fn call(cpu: &mut Cpu, ems: &mut Ems, function: u8) -> u8 {
             0x00 => {
                 let mut at = es_di(cpu);
                 for slot in 0..FRAME_PAGES {
-                    cpu.bus.write_16(at, FRAME_SEGMENT + (slot * PAGE >> 4) as u16);
+                    cpu.bus.write_16(at, FRAME_SEGMENT + ((slot * PAGE) >> 4) as u16);
                     cpu.bus.write_16(at + 2, slot as u16);
                     at += 4;
                 }
@@ -713,7 +713,7 @@ fn page_map(cpu: &mut Cpu, ems: &mut Ems, al: u8) -> u8 {
 /// The physical page at `segment`, one of the frame's four.
 fn slot_of_segment(segment: u16) -> Option<usize> {
     let offset = segment.wrapping_sub(FRAME_SEGMENT) as usize;
-    (segment >= FRAME_SEGMENT && offset % (PAGE >> 4) == 0 && offset / (PAGE >> 4) < FRAME_PAGES)
+    (segment >= FRAME_SEGMENT && offset.is_multiple_of(PAGE >> 4) && offset / (PAGE >> 4) < FRAME_PAGES)
         .then_some(offset / (PAGE >> 4))
 }
 
@@ -737,7 +737,7 @@ fn partial_page_map(cpu: &mut Cpu, ems: &mut Ems, al: u8) -> u8 {
             for (i, &slot) in slots.iter().enumerate() {
                 let (handle, page) = ems.mapped[slot].unwrap_or((0xFFFF, 0xFFFF));
                 let entry = at + 2 + 6 * i;
-                cpu.bus.write_16(entry, FRAME_SEGMENT + (slot * PAGE >> 4) as u16);
+                cpu.bus.write_16(entry, FRAME_SEGMENT + ((slot * PAGE) >> 4) as u16);
                 cpu.bus.write_16(entry + 2, handle);
                 cpu.bus.write_16(entry + 4, page);
             }

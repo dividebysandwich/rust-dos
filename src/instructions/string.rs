@@ -64,6 +64,7 @@ impl Addr {
 /// (down with `backward`) reaches without a fault through the segment or
 /// the addressing, and without leaving the page the first is in. 0 where
 /// the first can't go without the checks of an iteration.
+#[allow(clippy::too_many_arguments)]
 fn span(cpu: &Cpu, seg: Seg, off: u32, size: u32, max: u32, backward: bool, mask: u32, write: bool) -> u32 {
     use crate::cpu::layout::{RIGHT_READ, RIGHT_WRITE};
     let c = cpu.seg_cache(seg);

@@ -73,6 +73,7 @@ impl Area {
     }
 
     /// The address ranges it has in `len` bytes of RAM.
+    #[allow(clippy::single_range_in_vec_init)]
     fn ranges(self, len: usize) -> Vec<Range<usize>> {
         let mut ranges = vec![0x500..0xA0000.min(len)];
         if self == Area::All {

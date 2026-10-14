@@ -8,7 +8,7 @@ const STATE_SIZE: usize = 12;
 
 pub fn handle(cpu: &mut Cpu) {
     let ax = cpu.ax();
-    let func = ax & 0xFFFF;
+    let func = ax;
     let now = cpu.bus.clock.now_ns();
     cpu.bus.mouse.last_call_ns = Some(now);
     if func == 0x000B {
@@ -50,8 +50,8 @@ pub fn handle(cpu: &mut Cpu) {
             //   CX = X in virtual coords
             //   DX = Y in virtual coords
             cpu.set_bx(cpu.bus.mouse.buttons as u16);
-            cpu.set_cx((cpu.bus.mouse.x as u16) & 0xFFFF);
-            cpu.set_dx((cpu.bus.mouse.y as u16) & 0xFFFF);
+            cpu.set_cx(cpu.bus.mouse.x as u16);
+            cpu.set_dx(cpu.bus.mouse.y as u16);
         }
 
         0x0004 => {
@@ -69,8 +69,8 @@ pub fn handle(cpu: &mut Cpu) {
             let count = cpu.bus.mouse.press_count[btn];
             cpu.set_ax(cpu.bus.mouse.buttons as u16);
             cpu.set_bx(count);
-            cpu.set_cx((cpu.bus.mouse.press_x[btn] as u16) & 0xFFFF);
-            cpu.set_dx((cpu.bus.mouse.press_y[btn] as u16) & 0xFFFF);
+            cpu.set_cx(cpu.bus.mouse.press_x[btn] as u16);
+            cpu.set_dx(cpu.bus.mouse.press_y[btn] as u16);
             cpu.bus.mouse.press_count[btn] = 0;
         }
 
@@ -80,8 +80,8 @@ pub fn handle(cpu: &mut Cpu) {
             let count = cpu.bus.mouse.release_count[btn];
             cpu.set_ax(cpu.bus.mouse.buttons as u16);
             cpu.set_bx(count);
-            cpu.set_cx((cpu.bus.mouse.release_x[btn] as u16) & 0xFFFF);
-            cpu.set_dx((cpu.bus.mouse.release_y[btn] as u16) & 0xFFFF);
+            cpu.set_cx(cpu.bus.mouse.release_x[btn] as u16);
+            cpu.set_dx(cpu.bus.mouse.release_y[btn] as u16);
             cpu.bus.mouse.release_count[btn] = 0;
         }
 

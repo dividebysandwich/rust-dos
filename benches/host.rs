@@ -52,7 +52,8 @@ fn hicolor_frame(shift: usize) -> Frame {
 fn gif_capture(c: &mut Criterion) {
     let mut group = c.benchmark_group("host/gif_capture");
     group.sample_size(30);
-    let scenarios: [(&str, fn(usize) -> Frame); 2] = [("vga_640x400", vga_frame), ("hicolor_640x480", hicolor_frame)];
+    type MakeFrame = fn(usize) -> Frame;
+    let scenarios: [(&str, MakeFrame); 2] = [("vga_640x400", vga_frame), ("hicolor_640x480", hicolor_frame)];
     for (name, make) in scenarios {
         let frames: Vec<Frame> = (0..8).map(|i| make(i * 24)).collect();
         let dir = scratch(&format!("gif_capture_{name}"));

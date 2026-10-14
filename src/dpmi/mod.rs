@@ -1534,8 +1534,8 @@ fn abort(cpu: &mut Cpu, why: &str) {
         cpu.state = CpuState::RebootShell;
         return;
     };
-    let mut rm = Context::default();
-    rm.seg = [client.rm_stack, ROM_SEG, client.rm_stack, client.rm_stack, 0, 0];
+    let mut rm =
+        Context { seg: [client.rm_stack, ROM_SEG, client.rm_stack, client.rm_stack, 0, 0], ..Default::default() };
     rm.gpr[ESP] = PRIVATE_PARAS as u32 * 16;
     rm.eip = TERMINATE as u32;
     rm.eflags = 0x0202;

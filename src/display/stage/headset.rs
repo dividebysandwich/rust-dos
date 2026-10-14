@@ -172,6 +172,9 @@ pub struct Ring<F, M> {
     released: Option<F>,
 }
 
+/// What `Ring::take` hands the reader: an index, a new fence and the meta.
+type Newest<F, M> = (usize, Option<F>, M);
+
 impl<F, M> Default for Ring<F, M> {
     fn default() -> Self {
         Ring { latest: None, in_use: None, released: None }
@@ -196,7 +199,7 @@ impl<F, M: Copy> Ring<F, M> {
     /// it, the reader's `release` makes a fence after its reads of that
     /// one, for the writer (`released`); then the fence that replaces is
     /// returned too, to delete.
-    pub fn take(&mut self, release: impl FnOnce() -> Option<F>) -> (Option<(usize, Option<F>, M)>, Option<F>) {
+    pub fn take(&mut self, release: impl FnOnce() -> Option<F>) -> (Option<Newest<F, M>>, Option<F>) {
         let Some((index, fence, meta)) = self.latest.as_mut() else { return (None, None) };
         let mut stale = None;
         if self.in_use.is_some_and(|old| old != *index)

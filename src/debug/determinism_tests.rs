@@ -1039,8 +1039,8 @@ fn write_file(path: &Path, data: &[u8]) {
 /// host controllers in this mode), COM1 has a serial mouse and COM2 the
 /// modem. MIDI goes to no synthesizer: the MPU-401 is the device.
 fn settings(dir: &Path) -> rust_dos::config::Settings {
-    let mut s = rust_dos::config::Settings::default();
-    s.machine = rust_dos::video::adapter::Adapter::S3Virge;
+    let mut s =
+        rust_dos::config::Settings { machine: rust_dos::video::adapter::Adapter::S3Virge, ..Default::default() };
     s.sound.sb.model = rust_dos::sb::SbModel::Awe32;
     s.sound.midisynth = rust_dos::config::MidiSynth::None;
     s.sound.lpt_dac = rust_dos::lpt_dac::LptDacType::Disney;

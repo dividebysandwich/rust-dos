@@ -141,6 +141,12 @@ const MONO_PORTS: &[u16] = &[
 const EGA_COLOR_PORTS: &[u16] = &[0x3C0, 0x3C2, 0x3C4, 0x3C5, 0x3CE, 0x3CF, 0x3D4, 0x3D5, 0x3DA];
 const EGA_MONO_PORTS: &[u16] = &[0x3B4, 0x3B5, 0x3BA, 0x3C0, 0x3C2, 0x3C4, 0x3C5, 0x3CE, 0x3CF];
 
+impl Default for VgaCard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VgaCard {
     pub fn new() -> Self {
         let mut vga = Self {
@@ -742,11 +748,7 @@ impl VgaCard {
                     per_plane[p] = (after & bit_mask) | (latches[p] & !bit_mask);
                 }
             }
-            1 => {
-                for p in 0..4 {
-                    per_plane[p] = latches[p];
-                }
-            }
+            1 => per_plane = latches,
             2 => {
                 for p in 0..4 {
                     let data = if (value >> p) & 1 == 1 { 0xFF } else { 0x00 };
@@ -767,9 +769,9 @@ impl VgaCard {
             }
         }
 
-        for p in 0..4 {
+        for (p, &byte) in per_plane.iter().enumerate() {
             if (planes_to_write & (1 << p)) != 0 {
-                self.set_plane_byte(p, plane_offset, per_plane[p]);
+                self.set_plane_byte(p, plane_offset, byte);
             }
         }
         self.mark_dirty_full();
@@ -1048,28 +1050,25 @@ impl Device for VgaCard {
             0x3CE => self.graphics_index,
             0x3D4 => self.crtc_index,
             0x3C5 => {
-                let val = if (self.sequencer_index as usize) < self.sequencer_regs.len() {
+                if (self.sequencer_index as usize) < self.sequencer_regs.len() {
                     self.sequencer_regs[self.sequencer_index as usize]
                 } else {
                     0
-                };
-                val
+                }
             }
             0x3CF => {
-                let val = if (self.graphics_index as usize) < self.graphics_regs.len() {
+                if (self.graphics_index as usize) < self.graphics_regs.len() {
                     self.graphics_regs[self.graphics_index as usize]
                 } else {
                     0
-                };
-                val
+                }
             }
             0x3D5 => {
-                let val = if (self.crtc_index as usize) < self.crtc_regs.len() {
+                if (self.crtc_index as usize) < self.crtc_regs.len() {
                     self.crtc_regs[self.crtc_index as usize]
                 } else {
                     0
-                };
-                val
+                }
             }
             0x3C6 => self.dac_mask,
             0x3C7 => self.dac_state,

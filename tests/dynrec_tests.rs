@@ -1779,7 +1779,7 @@ fn indirect_calls_are_translated_and_linked_to_where_they_go() {
         }));
     });
     let stats = run_both(&mut a, &mut b);
-    assert_eq!(b.cpu.ebx(), 500 * 1 + 500 * 100 + 1000 * 100);
+    assert_eq!(b.cpu.ebx(), 500 + 500 * 100 + 1000 * 100);
     if AVAILABLE {
         assert!(stats.runs < 200, "the calls went through the execution loop: {:?}", stats);
     }

@@ -114,10 +114,7 @@ fn test_pit_channel_0_reset_bug() {
     // 3. Verify Latch Reset
     // If bug exists: This remains TRUE
     // If fixed: This becomes FALSE
-    assert_eq!(
-        bus.pit0_write_msb, false,
-        "PIT Channel 0 latch failed to reset after Command 0x36!"
-    );
+    assert!(!bus.pit0_write_msb, "PIT Channel 0 latch failed to reset after Command 0x36!");
 
     // 4. Verify functionality matches expectation
     // We write 0xBB.
@@ -144,18 +141,18 @@ fn test_speaker_io_port_61() {
 
     // 1. Write 0x00 (Both off)
     bus.io_write(0x61, 0x00);
-    assert_eq!(bus.speaker_on, false);
+    assert!(!bus.speaker_on);
     assert_eq!(bus.io_read(0x61) & 0x03, 0x00);
 
     // 2. Write 0x03 (Both on)
     bus.io_write(0x61, 0x03);
-    assert_eq!(bus.speaker_on, true);
+    assert!(bus.speaker_on);
     // Reading 0x61 should reflect the state (masked)
     assert_eq!(bus.io_read(0x61) & 0x03 & 0x03, 0x03);
 
     // 3. Write 0x02 (Bit 0 off)
     bus.io_write(0x61, 0x02);
-    assert_eq!(bus.speaker_on, false);
+    assert!(!bus.speaker_on);
 
     // The low four bits read back as written, the check enables too.
     bus.io_write(0x61, 0x0D);

@@ -93,8 +93,8 @@ impl Vram {
 
     /// Put `bytes` (little-endian words, as long as the memory) in it.
     pub fn load_bytes(&self, bytes: &[u8]) {
-        for (w, b) in self.words.iter().zip(bytes.chunks_exact(2)) {
-            w.store(u16::from_le_bytes([b[0], b[1]]), Relaxed);
+        for (w, b) in self.words.iter().zip(bytes.as_chunks::<2>().0) {
+            w.store(u16::from_le_bytes(*b), Relaxed);
         }
     }
 }

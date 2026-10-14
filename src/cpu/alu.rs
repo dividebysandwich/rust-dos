@@ -50,7 +50,7 @@ fn szp(size: u8, result: u32) -> u32 {
     if result & sign_bit(size) != 0 {
         f |= SF;
     }
-    if (result as u8).count_ones() % 2 == 0 {
+    if (result as u8).count_ones().is_multiple_of(2) {
         f |= PF;
     }
     f
@@ -121,7 +121,7 @@ impl Cpu {
 
     /// Set PF from the low byte of `result`.
     pub fn update_pf(&mut self, result: u32) {
-        let pf = if (result as u8).count_ones() % 2 == 0 { PF } else { 0 };
+        let pf = if (result as u8).count_ones().is_multiple_of(2) { PF } else { 0 };
         self.set_flag_bits(PF, pf);
     }
 
@@ -191,7 +191,7 @@ impl Cpu {
         // width itself (16 or 24 for a byte) leaves CF with the last bit
         // shifted out, as a shift by the width does; other counts past the
         // width shift CF out to 0. That's what a 386 does.
-        let logical_count = if count > bits && count % bits == 0 { bits } else { count };
+        let logical_count = if count > bits && count.is_multiple_of(bits) { bits } else { count };
         let (r, cf, of, szp_flags) = match op {
             ShiftOp::Shl => {
                 let wide = (value as u64) << logical_count;

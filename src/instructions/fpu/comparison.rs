@@ -83,7 +83,7 @@ pub fn fcom_registers(instr: &Instruction) -> Option<(usize, usize, u8)> {
                 reg_op1.number() - Register::ST0.number()
             } else {
                 1 // Default to ST(1) if parsing fails or implicit
-            } as usize;
+            };
             if idx > 7 {
                 return None;
             }
@@ -151,7 +151,7 @@ pub fn fxam(cpu: &mut Cpu) {
     // Clear C0, C1, C2, C3
     cpu.set_fpu_flag(FpuFlags::C3 | FpuFlags::C2 | FpuFlags::C1 | FpuFlags::C0, false);
 
-    let tag = cpu.fpu_tags[cpu.fpu_top as usize];
+    let tag = cpu.fpu_tags[cpu.fpu_top];
     let st0 = cpu.fpu_reg(cpu.fpu_top); // Access raw stack to avoid fpu_get logic
 
     // Set C1 to the Sign Bit
@@ -192,7 +192,7 @@ pub fn ftst(cpu: &mut Cpu) {
 // FCOMI/FUCOMI... (Pentium Pro+)
 // These set CPU EFLAGS (ZF, PF, CF) directly, not the FPU status word condition codes.
 pub fn fcomi_variants(cpu: &mut Cpu, instr: &Instruction) {
-    let idx = (instr.op1_register().number() - iced_x86::Register::ST0.number()) as usize;
+    let idx = instr.op1_register().number() - iced_x86::Register::ST0.number();
     let st0 = cpu.fpu_get(0);
     let sti = cpu.fpu_get(idx);
     

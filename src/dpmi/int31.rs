@@ -269,7 +269,7 @@ fn service(cpu: &mut Cpu, ctx: &mut Context, function: u16) -> Result {
             let dpmi = &mut cpu.bus.dpmi;
             let valid = ctx.reg16(ECX) == ROM_SEG
                 && ctx.reg16(EDX) >= CALLBACKS
-                && ctx.reg16(EDX) % 4 == 0
+                && ctx.reg16(EDX).is_multiple_of(4)
                 && dpmi.callbacks.get(slot).copied().flatten().is_some_and(|cb| cb.client == id);
             if !valid {
                 return Err(INVALID_CALLBACK);
@@ -544,7 +544,7 @@ pub(super) fn set_tiles(cpu: &mut Cpu, first: usize, base: u32, bytes: u32) {
     let ldt = client(cpu).block;
     for i in 0..tiles(bytes) {
         let offset = i as u32 * 0x10000;
-        let limit = (bytes - offset).min(0x10000).max(1) - 1;
+        let limit = (bytes - offset).clamp(1, 0x10000) - 1;
         write_desc(&mut cpu.bus, ldt, first + i, descriptor(base + offset, limit, DATA3, 0));
     }
 }

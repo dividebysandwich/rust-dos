@@ -21,12 +21,12 @@ const PF_USER: u32 = 0x4;
 
 const TLB_ENTRIES: usize = 1024;
 
-/// A translation, valid for reads when `read_tag` is the linear page number
-/// + 1, and for writes when `write_tag` is: a page that may not be written,
-/// or whose dirty bit isn't set yet, has a write tag of 0, so writes to it
-/// walk the page tables. `repr(C)`, and 32 bytes: the dynamic recompiler's
-/// code looks translations up itself (see `layout`), at the linear address
-/// shifted right by 7 and masked.
+/// A translation, valid for reads when `read_tag` is the linear page
+/// number + 1, and for writes when `write_tag` is: a page that may not be
+/// written, or whose dirty bit isn't set yet, has a write tag of 0, so
+/// writes to it walk the page tables. `repr(C)`, and 32 bytes: the dynamic
+/// recompiler's code looks translations up itself (see `layout`), at the
+/// linear address shifted right by 7 and masked.
 #[derive(Clone, Copy)]
 #[repr(C, align(32))]
 pub(crate) struct TlbEntry {

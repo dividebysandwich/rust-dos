@@ -176,12 +176,12 @@ fn test_fabs_fchs() {
     // FABS
     testrunners::run_fpu_code(&mut cpu, &[0xD9, 0xE1]);
     assert_eq!(cpu.fpu_get(0).get_f64(), 5.5);
-    assert_eq!(cpu.fpu_get(0).get_sign(), false);
+    assert!(!cpu.fpu_get(0).get_sign());
 
     // FCHS (change back to negative)
     testrunners::run_fpu_code(&mut cpu, &[0xD9, 0xE0]);
     assert_eq!(cpu.fpu_get(0).get_f64(), -5.5);
-    assert_eq!(cpu.fpu_get(0).get_sign(), true);
+    assert!(cpu.fpu_get(0).get_sign());
 }
 
 #[test]

@@ -426,7 +426,7 @@ impl DiskController {
             OpenData::Device(_) => None,
         };
         let t: DateTime<Local> = modified.map_or_else(crate::hosttime::now, DateTime::from);
-        let time = (t.hour() << 11 | t.minute() << 5 | t.second() / 2) as u16;
+        let time = (t.hour() << 11 | t.minute() << 5 | (t.second() / 2)) as u16;
         let year = (t.year().max(1980) - 1980) as u32;
         let date = (year << 9 | t.month() << 5 | t.day()) as u16;
         Ok((time, date))

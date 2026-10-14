@@ -223,6 +223,8 @@ fn a_write_across_the_display_start_repaints_the_top_row() {
 }
 
 #[test]
+// The literals are grouped by colour channel.
+#[allow(clippy::unusual_byte_groupings)]
 fn direct_color_pixels() {
     let mut cpu = machine();
     // 15 bits: 0RRRRRGG GGGBBBBB.

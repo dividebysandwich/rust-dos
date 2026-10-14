@@ -1443,6 +1443,7 @@ impl Cpu {
     }
 
     /// The memory of the resident TSRs, in conventional and upper memory.
+    #[allow(clippy::single_range_in_vec_init)]
     fn resident_memory(&mut self) -> Vec<std::ops::Range<usize>> {
         let mut resident = vec![(crate::mcb::first_mcb(&self.bus) as usize + 1) * 16..self.resident_end as usize * 16];
         for &psp in &self.resident_upper {

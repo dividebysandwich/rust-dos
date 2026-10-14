@@ -15,7 +15,7 @@ pub fn apply(samples: &[i16], from: Mix, to: Mix, out: &mut Vec<i16>) {
     out.clear();
     let frames = samples.len() / 2;
     out.reserve(frames * 2);
-    for (n, frame) in samples.chunks_exact(2).enumerate() {
+    for (n, frame) in samples.as_chunks::<2>().0.iter().enumerate() {
         let t = if frames > 1 { n as f32 / (frames - 1) as f32 } else { 1.0 };
         let m: [f32; 4] = std::array::from_fn(|i| from[i] + (to[i] - from[i]) * t);
         let (l, r) = (frame[0] as f32, frame[1] as f32);

@@ -32,6 +32,7 @@ pub struct Layer {
 /// its position along the axes of `basis` (+x, -x, +y, -y, +z, -z), of
 /// which those not drawn are `None` and never in shadow.
 #[derive(Clone, Debug, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum Caster {
     Single(Layer),
     Cube { basis: Mat3, faces: [Option<Layer>; 6] },
