@@ -2623,3 +2623,24 @@ fn the_modem_phonebook_lists_the_boards_and_copies_a_dial_command() {
         assert!(!ui.is_open());
         assert!(host.applied.is_empty() && host.resets == 0);
     }
+
+#[test]
+fn crowded_pages_still_show_esc() {
+    let host = FakeHost::new();
+    let mut ui = opened(&host);
+    let mut frame = Frame::new(640, 350);
+    for page in [Page::Games, Page::Drives] {
+        ui.show_page(page);
+        ui.draw(&mut frame);
+        let keys: Vec<UiKey> = ui
+            .hits
+            .iter()
+            .filter_map(|h| match h.target {
+                Target::Key(key) => Some(key),
+                _ => None,
+            })
+            .collect();
+        assert!(keys.contains(&UiKey::Esc), "{:?}: {:?}", page, keys);
+        assert!(keys.contains(&UiKey::Tab), "{:?}: {:?}", page, keys);
+    }
+}

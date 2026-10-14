@@ -4115,6 +4115,8 @@ impl ConfigUi {
         if self.help.is_none() && self.help_topic().is_some() {
             hints.push(("F1", "Help", Help));
         }
+        fit_hints(&mut hints, g.cols - 4);
+        let gap = if hints_width(&hints, 2) <= g.cols - 4 { 2 } else { 1 };
         let end = g.cols - 2;
         let mut x = 2;
         for (key, action, ui_key) in hints {
@@ -4125,8 +4127,27 @@ impl ConfigUi {
             let after = g.text(x, row, key, draw::KEY);
             g.text(after + 1, row, action, draw::TEXT);
             self.hits.push(Hit { row, col: x, width, target: Target::Key(ui_key) });
-            x += width + 2;
+            x += width + gap;
         }
+    }
+}
+
+/// The columns `hints` take with `gap` columns between them.
+fn hints_width(hints: &[(&str, &str, UiKey)], gap: usize) -> usize {
+    let words: usize = hints.iter().map(|(key, action, _)| key.chars().count() + 1 + action.len()).sum();
+    words + gap * hints.len().saturating_sub(1)
+}
+
+/// Drops hints, rightmost first, until they fit in `width` columns at the
+/// narrow gap, keeping the first one and the ones every page shares (Tab,
+/// F2, F1 and above all Esc), so a crowded page still shows how to leave.
+fn fit_hints(hints: &mut Vec<(&str, &str, UiKey)>, width: usize) {
+    use UiKey::*;
+    while hints_width(hints, 1) > width {
+        let Some(at) = (1..hints.len()).rev().find(|&i| !matches!(hints[i].2, Esc | Help | Tab | Save)) else {
+            break;
+        };
+        hints.remove(at);
     }
 }
 
