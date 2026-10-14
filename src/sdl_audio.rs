@@ -20,8 +20,6 @@ pub(crate) struct SdlAudio {
     mix: std::rc::Rc<std::cell::Cell<display::audio_mix::Mix>>,
     mixed: display::audio_mix::Mix,
     buffer: Vec<i16>,
-    /// The 3D scene's own sounds, mixed in last.
-    room: Rc<std::cell::RefCell<display::room_sound::RoomSound>>,
 }
 
 /// The sound device, playing, with a buffer of `blocksize` frames (SDL's
@@ -47,18 +45,11 @@ impl audio::AudioOutput for SdlAudio {
     fn queue(&mut self, samples: &[i16]) -> Result<(), String> {
         use display::audio_mix::{IDENTITY, apply};
         let mix = self.mix.get();
-        let mut room = self.room.borrow_mut();
-        if mix == IDENTITY && self.mixed == IDENTITY && !room.active() {
+        if mix == IDENTITY && self.mixed == IDENTITY {
             return self.queue.queue_audio(samples);
         }
-        if mix == IDENTITY && self.mixed == IDENTITY {
-            self.buffer.clear();
-            self.buffer.extend_from_slice(samples);
-        } else {
-            apply(samples, self.mixed, mix, &mut self.buffer);
-            self.mixed = mix;
-        }
-        room.mix_into(&mut self.buffer);
+        apply(samples, self.mixed, mix, &mut self.buffer);
+        self.mixed = mix;
         self.queue.queue_audio(&self.buffer)
     }
 
@@ -87,7 +78,6 @@ pub(crate) fn attach(
     audio_device: Result<(sdl2::audio::AudioQueue<i16>, sdl2::AudioSubsystem), String>,
     settings: &Settings,
     audio_mix: &Rc<Cell<display::audio_mix::Mix>>,
-    room: &Rc<std::cell::RefCell<display::room_sound::RoomSound>>,
 ) {
     match audio_device {
         Ok((queue, subsystem)) => {
@@ -100,13 +90,65 @@ pub(crate) fn attach(
                 mix,
                 mixed: display::audio_mix::IDENTITY,
                 buffer: Vec::new(),
-                room: room.clone(),
             };
             cpu.bus.audio_device = Some(Box::new(output));
         }
         Err(e) => {
             eprintln!("[AUDIO] No sound device, so no sound: {}", e);
             cpu.bus.log_string(&format!("[AUDIO] No sound device, so no sound: {}", e));
+        }
+    }
+}
+
+/// The 3D scene's own sounds (the rain, thunder, switches) on a sound
+/// device of their own, which SDL's thread pulls from as it plays: never
+/// waiting on the machine's frames, so a slow frame leaves no gap in the
+/// rain, and it goes on while the machine is paused. Opened the first time
+/// there is something to hear, paused while there is nothing.
+pub(crate) struct RoomDevice {
+    pub sound: std::sync::Arc<std::sync::Mutex<display::room_sound::RoomSound>>,
+    device: Option<sdl2::audio::AudioDevice<RoomCallback>>,
+    /// It couldn't be opened: not tried again.
+    failed: bool,
+}
+
+pub(crate) struct RoomCallback(std::sync::Arc<std::sync::Mutex<display::room_sound::RoomSound>>);
+
+impl sdl2::audio::AudioCallback for RoomCallback {
+    type Channel = i16;
+
+    fn callback(&mut self, out: &mut [i16]) {
+        out.fill(0);
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).mix_into(out);
+    }
+}
+
+impl RoomDevice {
+    pub fn new() -> Self {
+        RoomDevice { sound: Default::default(), device: None, failed: false }
+    }
+
+    /// Play while there is something to hear, on `subsystem`'s device.
+    pub fn update(&mut self, subsystem: Option<&sdl2::AudioSubsystem>) {
+        let active = self.sound.lock().unwrap_or_else(|e| e.into_inner()).active();
+        if active && self.device.is_none() && !self.failed {
+            let Some(subsystem) = subsystem else { return };
+            // (SDL converts to the device's own rate and format.)
+            let spec = sdl2::audio::AudioSpecDesired { freq: Some(44100), channels: Some(2), samples: Some(1024) };
+            match subsystem.open_playback(None, &spec, |_| RoomCallback(self.sound.clone())) {
+                Ok(device) => self.device = Some(device),
+                Err(e) => {
+                    eprintln!("[AUDIO] No sound device for the 3D scene's sounds: {}", e);
+                    self.failed = true;
+                }
+            }
+        }
+        if let Some(device) = &self.device {
+            match (active, device.status()) {
+                (true, sdl2::audio::AudioStatus::Playing) | (false, sdl2::audio::AudioStatus::Paused) => {}
+                (true, _) => device.resume(),
+                (false, _) => device.pause(),
+            }
         }
     }
 }

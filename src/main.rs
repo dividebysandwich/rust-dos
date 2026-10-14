@@ -175,8 +175,10 @@ fn main() -> Result<(), String> {
     }
     // How the sound's channels mix for the viewer in the 3D scene.
     let audio_mix = std::rc::Rc::new(std::cell::Cell::new(display::audio_mix::IDENTITY));
-    let room_sound = std::rc::Rc::new(std::cell::RefCell::new(display::room_sound::RoomSound::default()));
-    sdl_audio::attach(&mut cpu, audio_device, &settings, &audio_mix, &room_sound);
+    sdl_audio::attach(&mut cpu, audio_device, &settings, &audio_mix);
+    // The 3D scene's own sounds, on a device of their own.
+    let mut room_sound = sdl_audio::RoomDevice::new();
+    let room_audio = sdl_context.audio().ok();
     cpu.bus.log_string(&format!("[DISPLAY] {}", display.renderer()));
     if let Some(warning) = display.shader_warning() {
         config_warning(&mut cpu, warning);
@@ -1535,7 +1537,8 @@ fn main() -> Result<(), String> {
         }
         let mix = display.audio_mix().filter(|_| settings.vr.spatial_audio);
         audio_mix.set(mix.unwrap_or(display::audio_mix::IDENTITY));
-        display.room_sound(&mut room_sound.borrow_mut());
+        display.room_sound(&mut room_sound.sound.lock().unwrap_or_else(|e| e.into_inner()));
+        room_sound.update(room_audio.as_ref());
 
         // Rewind: its states start over for another game or other
         // hardware, and go when it is turned off; a state is taken every
