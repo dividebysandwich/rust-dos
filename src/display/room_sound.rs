@@ -172,7 +172,7 @@ impl RoomSound {
                     self.drops.push(Drop {
                         phase: 0.0,
                         step: pitch / RATE,
-                        level: self.noise.next().abs() * 0.12 * self.rain * glass,
+                        level: self.noise.next().abs() * 0.035 * self.rain * glass,
                         decay: (-dt / (0.004 + self.noise.next().abs() * 0.01)).exp(),
                         pan: self.noise.next() * 0.6 + pan * 0.4,
                     });
