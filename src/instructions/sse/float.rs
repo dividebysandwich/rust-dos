@@ -121,7 +121,12 @@ impl Env {
             2 => Round::Up,
             _ => Round::Zero,
         };
-        Env { round, ftz: mxcsr & FZ != 0, masked: (mxcsr >> MASK_SHIFT) & 0x3F, flags: 0 }
+        Env {
+            round,
+            ftz: mxcsr & FZ != 0,
+            masked: (mxcsr >> MASK_SHIFT) & 0x3F,
+            flags: 0,
+        }
     }
 
     /// Put the exceptions the elements raised into `mxcsr`, and say
@@ -289,7 +294,11 @@ impl Env {
         }
         self.denormals(a, b);
         let (x, y) = (value(a), value(b));
-        if (max && x > y) || (!max && x < y) { a } else { b }
+        if (max && x > y) || (!max && x < y) {
+            a
+        } else {
+            b
+        }
     }
 
     /// CMPPS's predicate `p` (its low three bits) of `a` and `b`. The
@@ -490,7 +499,11 @@ pub fn reciprocal_sqrt(a: u32) -> u32 {
 }
 
 fn approximate(x: f64, sign: u32) -> u32 {
-    if x < f32::MIN_POSITIVE as f64 { sign } else { sign | (x as f32).to_bits() }
+    if x < f32::MIN_POSITIVE as f64 {
+        sign
+    } else {
+        sign | (x as f32).to_bits()
+    }
 }
 
 #[cfg(test)]
@@ -507,7 +520,18 @@ mod tests {
 
     #[test]
     fn nearest_matches_the_host() {
-        let values = [1.0f32, 3.0, 0.1, -7.25, 1e30, 3e-39, 1.17549435e-38, 16777215.0, -0.0, 2.5e-45];
+        let values = [
+            1.0f32,
+            3.0,
+            0.1,
+            -7.25,
+            1e30,
+            3e-39,
+            f32::MIN_POSITIVE,
+            16777215.0,
+            -0.0,
+            2.5e-45,
+        ];
         for &x in &values {
             for &y in &values {
                 let mut e = env(0);
@@ -653,8 +677,14 @@ mod tests {
         assert_eq!(e.min_max(0x7FC0_0000, f(1.0), true), f(1.0));
         assert_eq!(e.min_max(f(1.0), 0x7F80_0001, true), 0x7F80_0001);
         assert_eq!(e.flags, IE);
-        assert_eq!(env(0).compare_flags(f(1.0), f(1.0), true), (true, false, false));
-        assert_eq!(env(0).compare_flags(f(1.0), f(2.0), true), (false, false, true));
+        assert_eq!(
+            env(0).compare_flags(f(1.0), f(1.0), true),
+            (true, false, false)
+        );
+        assert_eq!(
+            env(0).compare_flags(f(1.0), f(2.0), true),
+            (false, false, true)
+        );
     }
 
     /// Skipping the residual where `needs_residual` says it can't matter
@@ -673,7 +703,9 @@ mod tests {
         };
         let mut seed = 0x1234_5678_9ABC_DEF0u64;
         let mut next = || {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (seed >> 32) as u32
         };
         for i in 0..200_000 {
@@ -693,14 +725,22 @@ mod tests {
                     full.denormals(a, b);
                     let got = fast.div(a, b);
                     let want = full_div(&mut full, a, b);
-                    assert_eq!((got, fast.flags), (want, full.flags), "{a:08x} / {b:08x}, {mxcsr:04x}");
+                    assert_eq!(
+                        (got, fast.flags),
+                        (want, full.flags),
+                        "{a:08x} / {b:08x}, {mxcsr:04x}"
+                    );
                 }
                 if a_ok && a & SIGN == 0 {
                     let (mut fast, mut full) = (Env::new(mxcsr), Env::new(mxcsr));
                     full.denormals(a, 0);
                     let got = fast.sqrt(a);
                     let want = full_sqrt(&mut full, a);
-                    assert_eq!((got, fast.flags), (want, full.flags), "sqrt {a:08x}, {mxcsr:04x}");
+                    assert_eq!(
+                        (got, fast.flags),
+                        (want, full.flags),
+                        "sqrt {a:08x}, {mxcsr:04x}"
+                    );
                 }
             }
         }
