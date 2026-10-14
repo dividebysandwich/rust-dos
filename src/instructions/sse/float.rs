@@ -566,9 +566,10 @@ mod tests {
         let mut e = env(3);
         assert_eq!(e.mul(f(1e30), f(1e30)), MAX);
         // A denormal result that is exact doesn't underflow; one that isn't
-        // does. (The operand 2^-140 is a denormal.)
+        // does. (The operand 2^-140 is a denormal, given by its bits: powi
+        // gives 0 for it where it divides 1 by 2^140, which is infinite.)
         let mut e = env(0);
-        assert_eq!(e.mul(f(2f32.powi(-140)), f(2f32.powi(-5))), 1 << 4);
+        assert_eq!(e.mul(1 << 9, f(2f32.powi(-5))), 1 << 4);
         assert_eq!(e.flags, DE);
         let mut e = env(0);
         e.mul(f(1.5 * 2f32.powi(-120)), f(2f32.powi(-29)));
