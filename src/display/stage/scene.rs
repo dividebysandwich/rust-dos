@@ -1017,7 +1017,11 @@ fn rigid(world: Mat4) -> Mat4 {
 
 /// The lights of a scene are at most this many; the shader has room for
 /// no more.
-pub const MAX_LIGHTS: usize = 8;
+pub const MAX_LIGHTS: usize = 16;
+
+/// A scene's own lights at most: room is left for the sun and a camera's
+/// flash.
+const SCENE_LIGHTS: usize = MAX_LIGHTS - 2;
 
 impl Walk<'_> {
     fn node(&mut self, scene: &mut Scene, node: gltf::Node, parent: Mat4, in_screen: bool) -> Result<(), String> {
@@ -1056,7 +1060,7 @@ impl Walk<'_> {
             self.lamps.push(Lamp { name, on, lights: Vec::new(), bounds: (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)) });
         }
         if let Some(light) = node.light()
-            && scene.lights.len() < MAX_LIGHTS
+            && scene.lights.len() < SCENE_LIGHTS
         {
             if let Some(lamp) = self.lamp {
                 self.lamps[lamp].lights.push(scene.lights.len());
