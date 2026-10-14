@@ -3,9 +3,11 @@
 //! copied to the window, or straight into a headset's image: both eyes at
 //! once where OpenGL draws to two layers in one pass (GL_OVR_multiview2).
 
-use super::scene::{Alpha, Leds, Scene, Shading};
+use super::scene::{Alpha, Leds, Light, LightKind, Scene, Shading};
 use super::gi;
 use super::shadow::{self, Caster, Layer};
+use super::sky;
+use super::world::Ambience;
 use crate::video::shader::Glsl;
 use rust_dos::vr::VrQuality;
 use glam::{Mat4, Vec3};
@@ -20,6 +22,15 @@ const GRID_FRAG: &str = include_str!("shader/grid.frag");
 const GI_UPDATE_FRAG: &str = include_str!("shader/gi_update.frag");
 const AO_FRAG: &str = include_str!("shader/ao.frag");
 const AO_BLUR_FRAG: &str = include_str!("shader/ao_blur.frag");
+const PUNCH_FRAG: &str = include_str!("shader/punch.frag");
+const WEATHER_VERT: &str = include_str!("shader/weather.vert");
+const WEATHER_FRAG: &str = include_str!("shader/weather.frag");
+
+/// The rain's streaks and the snow's flakes at most, and the box around
+/// the eyes they fall through, in metres.
+const RAINDROPS: f32 = 9000.0;
+const SNOWFLAKES: f32 = 14000.0;
+const WEATHER_BOX: [f32; 3] = [16.0, 10.0, 16.0];
 
 /// What `quality` works out: the screen's light as the picture's colours
 /// in how many patches across and down, how many samples soften a shadow's
@@ -160,6 +171,76 @@ pub struct Extra {
     /// Linear RGB, and alpha.
     pub color: [f32; 4],
 }
+
+/// A window where the real world shows through the eyes' images (the
+/// headset's passthrough): `frame` takes its own metres into the scene (x
+/// across, y up, z deep; unscaled), it is `size` across and deep, and
+/// fades out over `feather` around it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Window {
+    pub frame: Mat4,
+    pub size: glam::Vec2,
+    pub feather: f32,
+}
+
+/// Where the real world shows through: nowhere, through windows, or
+/// everywhere, this much of it.
+#[derive(Clone, Copy, Debug)]
+pub enum Punch<'a> {
+    None,
+    Windows(&'a [Window]),
+    Whole(f32),
+}
+
+/// A light as it is drawn: the scene's (or the bake's), its shadow's
+/// first layer (-1: none) and whether a cube's, and for the bake the slot
+/// its light goes to.
+#[derive(Clone, Copy, Debug)]
+struct LightUse {
+    light: Light,
+    shadow: [i32; 2],
+    slot: i32,
+}
+
+/// The light bounced around, as the bake's second pass reads it: the
+/// texture, the probes' places, and how many groups' blocks it has.
+#[derive(Clone, Copy)]
+struct GiUse<'a> {
+    texture: glow::Texture,
+    layout: &'a gi::Layout,
+    slots: i32,
+}
+
+/// A prop drawn where `model` takes it, lit: a part of one of the scene's
+/// (`Scene::props`, by their indices), showing `page` where it is a
+/// manual's page; or a polaroid picture, developed this much (0 to 1).
+#[derive(Clone, Copy, Debug)]
+pub enum PropDraw {
+    Part { prop: usize, part: usize, model: Mat4, page: Option<glow::Texture> },
+    Print { model: Mat4, picture: Option<glow::Texture>, develop: f32 },
+}
+
+impl PropDraw {
+    /// The scene's prop it is part of, if it is.
+    pub fn prop(&self) -> Option<usize> {
+        match self {
+            PropDraw::Part { prop, .. } => Some(*prop),
+            PropDraw::Print { .. } => None,
+        }
+    }
+}
+
+/// The programs drawing views, for one view at a time: a camera's picture
+/// taken in the headset, whose own draw both eyes at once.
+struct OneView {
+    lit: glow::Program,
+    sky: glow::Program,
+    depth: glow::Program,
+    weather: glow::Program,
+}
+
+/// How brightly a manual's pages glow, to be read in a dark room.
+const PAGE_GLOW: f32 = 0.25;
 
 /// What a view is drawn into: its size, the colour format (RGBA8, or
 /// SRGB8_ALPHA8 which encodes linear light itself).
@@ -519,6 +600,9 @@ struct ImageDepth {
 pub struct Gpu {
     lit: glow::Program,
     sky: glow::Program,
+    /// The passthrough's windows (`Punch`), and the rain and snow.
+    punch: glow::Program,
+    weather: glow::Program,
     /// Only the depth, of what is in front: first in each view, so that
     /// the lit program works out each pixel once.
     depth: glow::Program,
@@ -546,9 +630,28 @@ pub struct Gpu {
     clock: Option<Clock>,
     /// How brightly the screen lights the room, times the scene's.
     glow: f32,
+    /// What the room looks like now (the time of day, the lamps, the
+    /// weather), the groups of lights whose bounced light the probes have
+    /// apart, and how much of each the bounced light was last made of.
+    ambience: Ambience,
+    gi_groups: Vec<gi::Group>,
+    weights: Vec<[f32; 3]>,
+    /// The way the sun's (or moon's) shadow layer was drawn from.
+    sun_drawn: Option<Vec3>,
+    /// The defines of the programs but the shadows' layers, for the bake's.
+    defines_tail: String,
     /// For the sky's triangle, made from the vertex number.
     empty: glow::VertexArray,
     meshes: Vec<GpuMesh>,
+    /// The props' parts, by prop and part, and a polaroid picture's card
+    /// and picture.
+    prop_meshes: Vec<Vec<GpuMesh>>,
+    print_meshes: [GpuMesh; 2],
+    /// What the programs are made with, for one view at a time; and those
+    /// programs, made when a camera first takes a picture in the headset.
+    glsl: Glsl,
+    one_view_defines: String,
+    one_view: Option<OneView>,
     /// The unit cube the extras are drawn with.
     cube: GpuMesh,
     /// The scene's pictures, by their index.
@@ -595,7 +698,7 @@ fn link(gl: &glow::Context, glsl: Glsl, defines: &str, vertex: &str, fragment: &
             gl.bind_attrib_location(program, 1, "a_normal");
             gl.bind_attrib_location(program, 2, "a_uv");
             gl.bind_frag_data_location(program, 0, "o_color");
-            for i in 1..5 {
+            for i in 1..8 {
                 gl.bind_frag_data_location(program, i, &format!("o_bake{}", i));
             }
             gl.link_program(program);
@@ -638,7 +741,7 @@ impl Gpu {
     pub fn delete(self, gl: &glow::Context) {
         // SAFETY: see `GlScreen`.
         unsafe {
-            for program in [self.lit, self.sky, self.depth, self.shadow, self.grid_program] {
+            for program in [self.lit, self.sky, self.punch, self.weather, self.depth, self.shadow, self.grid_program] {
                 gl.delete_program(program);
             }
             for framebuffer in self.image_framebuffers.into_values().chain(self.read_framebuffers.into_values()) {
@@ -666,7 +769,13 @@ impl Gpu {
                 clock.delete(gl);
             }
             gl.delete_vertex_array(self.empty);
-            for mesh in self.meshes.into_iter().chain([self.cube]) {
+            if let Some(one) = self.one_view {
+                for program in [one.lit, one.sky, one.depth, one.weather] {
+                    gl.delete_program(program);
+                }
+            }
+            let prints = self.print_meshes.into_iter();
+            for mesh in self.meshes.into_iter().chain(self.prop_meshes.into_iter().flatten()).chain([self.cube]).chain(prints) {
                 gl.delete_vertex_array(mesh.vao);
                 for buffer in mesh.buffers {
                     gl.delete_buffer(buffer);
@@ -702,14 +811,16 @@ impl Gpu {
         let (lights, screen) = shadow::plan(scene);
         let layers = lights.iter().map(|(_, c)| c.layers().len()).sum::<usize>()
             + screen.as_ref().map_or(0, |c| c.layers().len());
-        let defines = format!(
-            "#define SHADOW_LAYERS {}\n#define SHADOW_TAPS {}\n#define GRID_W {}\n#define GRID_H {}\n#define AO_SAMPLES {}\n",
-            layers.max(1),
+        let defines_tail = format!(
+            "#define SHADOW_TAPS {}\n#define GRID_W {}\n#define GRID_H {}\n#define AO_SAMPLES {}\n#define MAX_LIGHTS {}\n#define MAX_GROUPS {}\n",
             taps,
             grid_size.0,
             grid_size.1,
-            ao_samples.max(1)
+            ao_samples.max(1),
+            super::scene::MAX_LIGHTS,
+            gi::MAX_GROUPS
         );
+        let defines = format!("#define SHADOW_LAYERS {}\n{}", layers.max(1), defines_tail);
         // The views' programs draw both at once with `multiview`.
         let view_defines = format!("{}{}", if multiview.is_some() { TWO_VIEWS } else { ONE_VIEW }, defines);
         let defines = format!("{}{}", ONE_VIEW, defines);
@@ -721,6 +832,8 @@ impl Gpu {
             (&view_defines, MESH_VERT, SHADOW_FRAG, "depth"),
             (&defines, MESH_VERT, SHADOW_FRAG, "shadow"),
             (&defines, FULLSCREEN_VERT, GRID_FRAG, "screen light"),
+            (&view_defines, MESH_VERT, PUNCH_FRAG, "passthrough"),
+            (&view_defines, WEATHER_VERT, WEATHER_FRAG, "weather"),
         ] {
             match link(gl, glsl, defines, vertex, fragment, name) {
                 Ok(program) => programs.push(program),
@@ -733,7 +846,7 @@ impl Gpu {
                 }
             }
         }
-        let [lit, sky, depth, shadow, grid_program] = programs[..] else { unreachable!() };
+        let [lit, sky, depth, shadow, grid_program, punch, weather] = programs[..] else { unreachable!() };
         let ao = if ao_samples > 0 && scene.ao {
             let estimate = link(gl, glsl, &view_defines, FULLSCREEN_VERT, AO_FRAG, "ambient occlusion");
             let blur = link(gl, glsl, &view_defines, FULLSCREEN_VERT, AO_BLUR_FRAG, "ambient occlusion's blur");
@@ -761,10 +874,14 @@ impl Gpu {
         // SAFETY: see `GlScreen`.
         let empty = unsafe { gl.create_vertex_array()? };
         let cube = upload_mesh(gl, &super::scene::unit_cube())?;
+        let (card, picture) = super::scene::print_meshes();
+        let print_meshes = [upload_mesh(gl, &card)?, upload_mesh(gl, &picture)?];
         let grid = make_grid(gl, grid_size)?;
         let mut gpu = Gpu {
             lit,
             sky,
+            punch,
+            weather,
             depth,
             shadow,
             grid_program,
@@ -781,8 +898,18 @@ impl Gpu {
             ao,
             clock: options.timed.then(Clock::new),
             glow: 1.0,
+            ambience: Ambience::of(scene),
+            gi_groups: gi::groups(scene),
+            weights: Vec::new(),
+            sun_drawn: None,
+            defines_tail,
             empty,
             meshes: Vec::new(),
+            prop_meshes: Vec::new(),
+            print_meshes,
+            glsl,
+            one_view_defines: defines.clone(),
+            one_view: None,
             cube,
             textures: Vec::new(),
             target: None,
@@ -790,11 +917,12 @@ impl Gpu {
         };
         gpu.upload(gl, scene)?;
         if layers > 0 {
-            gpu.shadows = Some(gpu.bake_shadows(gl, scene, shadow, &lights, screen.as_ref())?);
+            gpu.shadows = Some(gpu.bake_shadows(gl, scene, shadow, scene.lights.len(), &lights, screen.as_ref())?);
+            gpu.sun_drawn = scene.sun_light.map(|i| -scene.lights[i].direction);
         }
         if scene.gi && bounce {
             let probes = scene.probes.get_or_init(|| {
-                gpu.probes(gl, glsl, &defines, scene)
+                gpu.probes(gl, glsl, scene)
                     .map_err(|e| eprintln!("[VR] The light bouncing around the scene is left out: {}", e))
                     .ok()
             });
@@ -809,17 +937,18 @@ impl Gpu {
     }
 
     /// Draw the shadows' layers: the depth of what casts shadows, as each
-    /// light sees it.
+    /// of `count` lights sees it.
     fn bake_shadows(
         &self,
         gl: &glow::Context,
         scene: &Scene,
         program: glow::Program,
+        count: usize,
         lights: &[(usize, Caster)],
         screen: Option<&Caster>,
     ) -> Result<Shadows, String> {
         let mut layers = Vec::new();
-        let mut by_light = vec![[-1, 0]; scene.lights.len()];
+        let mut by_light = vec![[-1, 0]; count];
         for (i, caster) in lights {
             by_light[*i] = [layers.len() as i32, matches!(caster, Caster::Cube { .. }) as i32];
             layers.extend(caster.layers());
@@ -834,7 +963,6 @@ impl Gpu {
         };
         // Finer when there are few.
         let size: u32 = if layers.len() <= 8 { 2048 } else { 1024 };
-        let u = |name: &'static str| uniform(gl, program, name);
         // SAFETY: see `GlScreen`.
         unsafe {
             let texture = gl.create_texture()?;
@@ -852,6 +980,33 @@ impl Gpu {
             ] {
                 gl.tex_parameter_i32(glow::TEXTURE_2D_ARRAY, key, value as i32);
             }
+            gl.bind_texture(glow::TEXTURE_2D_ARRAY, None);
+            let indices: Vec<usize> = (0..layers.len()).collect();
+            if let Err(problem) = self.draw_shadow_layers(gl, scene, program, texture, size, &layers, &indices) {
+                gl.delete_texture(texture);
+                return Err(problem);
+            }
+            Ok(Shadows { texture, size, layers, lights: by_light, screen: screen_first })
+        }
+    }
+
+    /// Draw layers `indices` of the shadows' `texture` (`size` texels
+    /// square), seeing what `layers` say.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_shadow_layers(
+        &self,
+        gl: &glow::Context,
+        scene: &Scene,
+        program: glow::Program,
+        texture: glow::Texture,
+        size: u32,
+        layers: &[Layer],
+        indices: &[usize],
+    ) -> Result<(), String> {
+        let s = size as i32;
+        let u = |name: &'static str| uniform(gl, program, name);
+        // SAFETY: see `GlScreen`.
+        unsafe {
             let framebuffer = gl.create_framebuffer()?;
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
             gl.draw_buffer(glow::NONE);
@@ -872,7 +1027,8 @@ impl Gpu {
             let (view_projection, base_color, has_base, cutoff) =
                 (u("u_view_projection"), u("u_base_color"), u("u_has_base"), u("u_cutoff"));
             let mut problem = None;
-            for (index, layer) in layers.iter().enumerate() {
+            for &index in indices {
+                let layer = &layers[index];
                 gl.framebuffer_texture_layer(glow::FRAMEBUFFER, glow::DEPTH_ATTACHMENT, Some(texture), 0, index as i32);
                 if gl.check_framebuffer_status(glow::FRAMEBUFFER) != glow::FRAMEBUFFER_COMPLETE {
                     problem = Some("OpenGL can't draw the shadows".to_string());
@@ -905,14 +1061,98 @@ impl Gpu {
             gl.draw_buffer(glow::COLOR_ATTACHMENT0);
             gl.read_buffer(glow::COLOR_ATTACHMENT0);
             gl.delete_framebuffer(framebuffer);
-            gl.bind_texture(glow::TEXTURE_2D_ARRAY, None);
+            gl.bind_texture(glow::TEXTURE_2D, None);
             restore(gl);
-            if let Some(problem) = problem {
-                gl.delete_texture(texture);
-                return Err(problem);
-            }
-            Ok(Shadows { texture, size, layers, lights: by_light, screen: screen_first })
+            problem.map_or(Ok(()), Err)
         }
+    }
+
+    /// What the room looks like from now: the time of day, the lamps, the
+    /// weather. The sun's shadow follows it, drawn again once it moved.
+    pub fn set_ambience(&mut self, gl: &glow::Context, scene: &Scene, ambience: Ambience) {
+        self.ambience = ambience;
+        let weights = self.gi_weights(scene);
+        if weights != self.weights {
+            self.weights = weights;
+            if let Some(gi) = &mut self.gi {
+                gi.stale = true;
+            }
+        }
+        let towards = self.ambience.sky.light_dir;
+        if let (Some(sun), Some(drawn)) = (scene.sun_light, self.sun_drawn)
+            && towards.dot(drawn) < (0.2f32).to_radians().cos()
+            && let Some(shadows) = &mut self.shadows
+            && let Some(&[layer, _]) = shadows.lights.get(sun)
+            && layer >= 0
+        {
+            shadows.layers[layer as usize] = shadow::directional_layer(scene, -towards);
+            let (texture, size, layers) = (shadows.texture, shadows.size, shadows.layers.clone());
+            match self.draw_shadow_layers(gl, scene, self.shadow, texture, size, &layers, &[layer as usize]) {
+                Ok(()) => self.sun_drawn = Some(towards),
+                Err(e) => {
+                    eprintln!("[VR] {}", e);
+                    self.sun_drawn = None;
+                }
+            }
+        }
+    }
+
+    /// How much of each group's bounced light there is now: what always
+    /// glows all of it, the sky's as bright as the sky, each lamp's as it
+    /// is lit, the sun's nearest directions' as bright as the sun is.
+    fn gi_weights(&self, scene: &Scene) -> Vec<[f32; 3]> {
+        let keys = sky::sun_keys();
+        let near = scene.sun_light.map(|_| sky::key_weights(self.ambience.sky.light_dir, &keys));
+        let light = self.ambience.sky.light;
+        let ambient = self.ambient(scene);
+        self.gi_groups
+            .iter()
+            .map(|group| match *group {
+                gi::Group::Fixed => [1.0; 3],
+                gi::Group::Sky => ambient.to_array(),
+                gi::Group::Lamp(i) => [self.ambience.lamps.get(i).copied().unwrap_or(1.0); 3],
+                gi::Group::Sun(k) => (light * near.as_ref().map_or(0.0, |w| w[k])).to_array(),
+            })
+            .collect()
+    }
+
+    /// The light from all around now: the sky's, or without a sky what
+    /// the scene says fills it.
+    fn ambient(&self, scene: &Scene) -> Vec3 {
+        if scene.sky { self.ambience.sky.ambient } else { scene.ambient }
+    }
+
+    /// The scene's lights as they are now: the sun where the time of day
+    /// has it, the lamps as bright as they are lit, and a camera's flash;
+    /// with their shadows' layers.
+    fn lights_now(&self, scene: &Scene) -> Vec<LightUse> {
+        let mut lights: Vec<LightUse> = scene
+            .lights
+            .iter()
+            .take(super::scene::MAX_LIGHTS)
+            .enumerate()
+            .map(|(i, light)| {
+                let mut light = *light;
+                if Some(i) == scene.sun_light {
+                    light.direction = -self.ambience.sky.light_dir;
+                    light.color = self.ambience.sky.light;
+                }
+                if let Some(lamp) = scene.lamps.iter().position(|l| l.lights.contains(&i)) {
+                    light.color *= self.ambience.lamps.get(lamp).copied().unwrap_or(1.0);
+                }
+                let shadow = self.shadows.as_ref().and_then(|s| s.lights.get(i).copied()).unwrap_or([-1, 0]);
+                LightUse { light, shadow, slot: -1 }
+            })
+            .collect();
+        if let Some((at, ahead, bright)) = self.ambience.flash
+            && lights.len() < super::scene::MAX_LIGHTS
+        {
+            // A flash lights ahead, not what is right beside it.
+            let cone = LightKind::Spot { inner_cos: 30f32.to_radians().cos(), outer_cos: 48f32.to_radians().cos() };
+            let light = Light { kind: cone, color: Vec3::splat(1.6 * bright), position: at, direction: ahead, shadow: false };
+            lights.push(LightUse { light, shadow: [-1, 0], slot: -1 });
+        }
+        lights
     }
 
     /// Take the light the screen gives from its new picture `screen`, and
@@ -986,23 +1226,37 @@ impl Gpu {
 
     /// Set the lighting's uniforms of `program` (the scene's or the bake's)
     /// in use, and bind its textures, for `scene` with `screen` showing on
-    /// its screen. `srgb`: the target encodes linear light itself.
-    fn bind_lighting(&self, gl: &glow::Context, program: glow::Program, scene: &Scene, screen: Option<glow::Texture>, srgb: bool) {
+    /// its screen, lit by `lights` with `shadows` and the light bounced
+    /// around of `gi` (the scene's own, if None), and `ambient` from all
+    /// around. `srgb`: the target encodes linear light itself.
+    #[allow(clippy::too_many_arguments)]
+    fn bind_lighting(
+        &self,
+        gl: &glow::Context,
+        program: glow::Program,
+        scene: &Scene,
+        screen: Option<glow::Texture>,
+        srgb: bool,
+        lights: &[LightUse],
+        shadows: Option<&Shadows>,
+        gi: Option<GiUse>,
+        ambient: Vec3,
+    ) {
         let u = |name: &'static str| uniform(gl, program, name);
         // SAFETY: see `GlScreen`.
         unsafe {
-            gl.uniform_3_f32_slice(u("u_sun").as_ref(), &scene.sun.to_array());
-            gl.uniform_1_i32(u("u_sky").as_ref(), scene.sky as i32);
+            self.bind_sky(gl, program, scene);
             gl.uniform_1_i32(u("u_encode").as_ref(), !srgb as i32);
-            gl.uniform_3_f32_slice(u("u_ambient").as_ref(), &scene.ambient.to_array());
-            gl.uniform_1_f32(u("u_exposure").as_ref(), scene.exposure);
-            let lights = &scene.lights[..scene.lights.len().min(super::scene::MAX_LIGHTS)];
+            gl.uniform_3_f32_slice(u("u_ambient").as_ref(), &ambient.to_array());
+            let adapted = if scene.indoor.is_some() { self.ambience.sky.indoor_exposure() } else { 1.0 };
+            gl.uniform_1_f32(u("u_exposure").as_ref(), scene.exposure * adapted);
+            let lights = &lights[..lights.len().min(super::scene::MAX_LIGHTS)];
             let mut pos = Vec::new();
             let mut color = Vec::new();
             let mut dir = Vec::new();
             let mut cone = Vec::new();
-            for light in lights {
-                use super::scene::LightKind;
+            for use_ in lights {
+                let light = &use_.light;
                 let (kind, (inner, outer)) = match light.kind {
                     LightKind::Directional => (0.0, (1.0, 0.0)),
                     LightKind::Point => (1.0, (1.0, 0.0)),
@@ -1019,6 +1273,10 @@ impl Gpu {
                 gl.uniform_3_f32_slice(u("u_light_color[0]").as_ref(), &color);
                 gl.uniform_3_f32_slice(u("u_light_dir[0]").as_ref(), &dir);
                 gl.uniform_2_f32_slice(u("u_light_cone[0]").as_ref(), &cone);
+                let flat: Vec<i32> = lights.iter().flat_map(|l| l.shadow).collect();
+                gl.uniform_2_i32_slice(u("u_light_shadow[0]").as_ref(), &flat);
+                let slots: Vec<i32> = lights.iter().map(|l| l.slot).collect();
+                gl.uniform_1_i32_slice(u("u_light_slot[0]").as_ref(), &slots);
             }
             gl.uniform_1_i32(u("u_base").as_ref(), 0);
             gl.uniform_1_i32(u("u_emissive_map").as_ref(), 1);
@@ -1038,12 +1296,8 @@ impl Gpu {
             let basis = glam::Mat3::from_cols(s.right, s.up(), s.normal);
             gl.uniform_matrix_3_f32_slice(u("u_glow_basis").as_ref(), false, &basis.to_cols_array());
             gl.uniform_2_f32_slice(u("u_glow_size").as_ref(), &s.size.to_array());
-            let mut light_shadows = vec![[-1, 0]; lights.len()];
-            match &self.shadows {
+            match shadows {
                 Some(shadows) => {
-                    for (to, from) in light_shadows.iter_mut().zip(&shadows.lights) {
-                        *to = *from;
-                    }
                     let matrices: Vec<f32> = shadows.layers.iter().flat_map(|l| l.view_projection.to_cols_array()).collect();
                     let texels: Vec<f32> = shadows.layers.iter().flat_map(|l| l.texel).collect();
                     gl.uniform_matrix_4_f32_slice(u("u_shadow_matrix[0]").as_ref(), false, &matrices);
@@ -1053,25 +1307,48 @@ impl Gpu {
                 }
                 None => gl.uniform_1_i32(u("u_glow_shadow").as_ref(), -1),
             }
-            if !lights.is_empty() {
-                let flat: Vec<i32> = light_shadows.iter().flatten().copied().collect();
-                gl.uniform_2_i32_slice(u("u_light_shadow[0]").as_ref(), &flat);
-            }
-            gl.uniform_1_i32(u("u_has_gi").as_ref(), self.gi.is_some() as i32);
-            if let Some(gi) = &self.gi {
+            let gi = gi.or_else(|| self.gi.as_ref().map(|g| GiUse { texture: g.light, layout: &g.layout, slots: 1 }));
+            gl.uniform_1_i32(u("u_has_gi").as_ref(), gi.is_some() as i32);
+            if let Some(gi) = gi {
                 let [nx, ny, nz] = gi.layout.count.map(|c| c as f32);
                 gl.uniform_3_f32_slice(u("u_gi_low").as_ref(), &gi.layout.low.to_array());
                 gl.uniform_3_f32_slice(u("u_gi_step").as_ref(), &gi.layout.step.to_array());
                 gl.uniform_3_f32_slice(u("u_gi_count").as_ref(), &[nx, ny, nz]);
+                gl.uniform_1_i32(u("u_gi_slots").as_ref(), gi.slots);
             }
             gl.active_texture(glow::TEXTURE5);
-            gl.bind_texture(glow::TEXTURE_3D, self.gi.as_ref().map(|g| g.light));
+            gl.bind_texture(glow::TEXTURE_3D, gi.map(|g| g.texture));
             gl.active_texture(glow::TEXTURE4);
-            gl.bind_texture(glow::TEXTURE_2D_ARRAY, self.shadows.as_ref().map(|s| s.texture));
+            gl.bind_texture(glow::TEXTURE_2D_ARRAY, shadows.map(|s| s.texture));
             gl.active_texture(glow::TEXTURE3);
             gl.bind_texture(glow::TEXTURE_2D, Some(self.grid.texture));
             gl.active_texture(glow::TEXTURE2);
             gl.bind_texture(glow::TEXTURE_2D, screen);
+        }
+    }
+
+    /// The sky's uniforms (common.glsl's) of `program` in use, for the
+    /// room as it is now.
+    fn bind_sky(&self, gl: &glow::Context, program: glow::Program, scene: &Scene) {
+        let u = |name: &'static str| uniform(gl, program, name);
+        let sky = &self.ambience.sky;
+        // SAFETY: see `GlScreen`.
+        unsafe {
+            gl.uniform_1_i32(u("u_sky").as_ref(), scene.sky as i32);
+            for (name, value) in [
+                ("u_sun", sky.sun),
+                ("u_moon", sky.moon),
+                ("u_zenith", sky.zenith),
+                ("u_horizon", sky.horizon),
+                ("u_band", sky.band),
+                ("u_sun_disc", sky.sun_disc),
+                ("u_moon_disc", sky.moon_disc),
+            ] {
+                gl.uniform_3_f32_slice(u(name).as_ref(), &value.to_array());
+            }
+            gl.uniform_1_f32(u("u_stars").as_ref(), sky.stars);
+            gl.uniform_1_f32(u("u_clouds").as_ref(), sky.clouds);
+            gl.uniform_1_f32(u("u_flash").as_ref(), sky.flash);
         }
     }
 
@@ -1222,8 +1499,8 @@ impl Gpu {
     }
 
     /// Set a mesh's material's uniforms, and bind its textures to units 0
-    /// and 1; glowing if `glow`.
-    fn bind_material(&self, gl: &glow::Context, at: &MaterialLocations, material: &super::scene::Material, glow: bool) {
+    /// and 1; glowing `glow` times as bright as it does (0 not at all).
+    fn bind_material(&self, gl: &glow::Context, at: &MaterialLocations, material: &super::scene::Material, glow: f32) {
         let kind = match material.shading {
             // Black, lit is only its own glow: no lighting to work out
             // (glowing panes in front of a sky, say).
@@ -1237,7 +1514,6 @@ impl Gpu {
         unsafe {
             gl.uniform_1_i32(at.shading.as_ref(), kind);
             gl.uniform_4_f32_slice(at.base_color.as_ref(), &material.base_color);
-            let glow = if glow { 1.0 } else { 0.0 };
             gl.uniform_3_f32_slice(at.emissive.as_ref(), &material.emissive.map(|c| c * glow));
             let cut = match material.alpha {
                 Alpha::Mask(cut) => cut,
@@ -1263,35 +1539,101 @@ impl Gpu {
     }
 
     /// The probes of `scene`: as worked out before for it, or from the
-    /// cache, or worked out now, in two passes: the second sees the
-    /// surfaces lit also by the light the first found bouncing around.
-    fn probes(&mut self, gl: &glow::Context, glsl: Glsl, defines: &str, scene: &Scene) -> Result<gi::Probes, String> {
+    /// cache, or worked out now. A few groups of lights at a time
+    /// (`gi::SLOTS`), in two passes: the second sees the surfaces lit also
+    /// by the light the first found bouncing around.
+    fn probes(&mut self, gl: &glow::Context, glsl: Glsl, scene: &Scene) -> Result<gi::Probes, String> {
         let (low, high) = scene.focus_bounds();
         let layout = gi::Layout::inside(low, high);
         let patches = (self.grid.size.0 * self.grid.size.1) as usize;
-        let key = gi::Probes::key(scene.source, &layout, patches);
+        let groups = self.gi_groups.clone();
+        let key = gi::Probes::key(scene.source, &layout, patches, &groups);
         let path = gi::Probes::cache_path(key);
         if let Some(probes) = path.as_ref().and_then(|p| std::fs::read(p).ok()).and_then(|b| gi::Probes::from_bytes(&b))
             && probes.layout == layout
             && probes.patches == patches
+            && probes.groups == groups.len()
         {
             return Ok(probes);
         }
         let started = std::time::Instant::now();
-        let program = link(gl, glsl, &format!("{}#define BAKE 1\n", defines), MESH_VERT, LIT_FRAG, "light bake")?;
-        let probes = self.bake_probes(gl, program, scene, layout, patches).and_then(|first| {
-            self.gi = Some(make_gi(gl, glsl, defines, &first)?);
-            self.update_gi(gl, scene);
-            let second = self.bake_probes(gl, program, scene, layout, patches);
-            if let Some(gi) = self.gi.take() {
-                delete_gi(gl, gi);
+        // Each run's lights, by the slot of their group, and shadows.
+        let runs: Vec<(Vec<gi::Group>, Vec<LightUse>)> = groups.chunks(gi::SLOTS).map(|run| (run.to_vec(), bake_lights(scene, run))).collect();
+        let plans: Vec<_> = runs
+            .iter()
+            .map(|(_, lights)| {
+                let list: Vec<Light> = lights.iter().map(|l| l.light).collect();
+                shadow::plan_lights(scene, &list, 8)
+            })
+            .collect();
+        let most = plans
+            .iter()
+            .map(|(lights, screen)| lights.iter().map(|(_, c)| c.layers().len()).sum::<usize>() + screen.as_ref().map_or(0, |c| c.layers().len()))
+            .max()
+            .unwrap_or(0);
+        let defines = format!("{}#define SHADOW_LAYERS {}\n{}#define BAKE 1\n", ONE_VIEW, most.max(1), self.defines_tail);
+        let program = link(gl, glsl, &defines, MESH_VERT, LIT_FRAG, "light bake")?;
+        let mut merged: Option<gi::Probes> = None;
+        let mut problem = None;
+        for ((run, mut lights), (casters, screen)) in runs.into_iter().zip(plans) {
+            let shadows = if casters.is_empty() && screen.is_none() {
+                None
+            } else {
+                match self.bake_shadows(gl, scene, self.shadow, lights.len(), &casters, screen.as_ref()) {
+                    Ok(shadows) => Some(shadows),
+                    Err(e) => {
+                        problem = Some(e);
+                        break;
+                    }
+                }
+            };
+            // (The plan's indices are into the run's lights.)
+            if let Some(shadows) = &shadows {
+                for (light, by) in lights.iter_mut().zip(&shadows.lights) {
+                    light.shadow = *by;
+                }
             }
-            second
-        });
+            let sky_slot = run.iter().position(|g| *g == gi::Group::Sky);
+            let baked = self.bake_probes(gl, program, scene, layout, patches, &run, &lights, shadows.as_ref(), None).and_then(|first| {
+                let texture = make_group_gi(gl, &first, sky_slot, scene.sky)?;
+                let gi = GiUse { texture, layout: &layout, slots: run.len() as i32 };
+                let second = self.bake_probes(gl, program, scene, layout, patches, &run, &lights, shadows.as_ref(), Some(gi));
+                // SAFETY: see `GlScreen`.
+                unsafe { gl.delete_texture(texture) };
+                second
+            });
+            if let Some(shadows) = shadows {
+                // SAFETY: see `GlScreen`.
+                unsafe { gl.delete_texture(shadows.texture) };
+            }
+            match baked {
+                Ok(baked) => match &mut merged {
+                    None => merged = Some(baked),
+                    Some(all) => {
+                        all.groups += baked.groups;
+                        for (to, from) in all.probes.iter_mut().zip(baked.probes) {
+                            to.light.extend(from.light);
+                        }
+                    }
+                },
+                Err(e) => {
+                    problem = Some(e);
+                    break;
+                }
+            }
+        }
         // SAFETY: see `GlScreen`.
         unsafe { gl.delete_program(program) };
-        let probes = probes?;
-        eprintln!("[VR] Worked out the light bouncing around the scene ({} probes) in {:.1} s", layout.len(), started.elapsed().as_secs_f32());
+        if let Some(problem) = problem {
+            return Err(problem);
+        }
+        let probes = merged.ok_or("the scene has no lights to bounce")?;
+        eprintln!(
+            "[VR] Worked out the light bouncing around the scene ({} probes, {} groups of lights) in {:.1} s",
+            layout.len(),
+            groups.len(),
+            started.elapsed().as_secs_f32()
+        );
         if let Some(path) = path {
             let saved = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| std::fs::write(&path, probes.to_bytes()));
             if let Err(e) = saved {
@@ -1305,20 +1647,39 @@ impl Gpu {
     }
 
     /// Draw what each probe sees around it, a batch at a time side by side
-    /// in one picture, read it back and sum it up.
-    fn bake_probes(&self, gl: &glow::Context, program: glow::Program, scene: &Scene, layout: gi::Layout, patches: usize) -> Result<gi::Probes, String> {
+    /// in one picture, read it back and sum it up: the light of the groups
+    /// of `run`, each in its slot, lit by `lights` and the light bounced
+    /// around of `gi` (the first pass's).
+    #[allow(clippy::too_many_arguments)]
+    fn bake_probes(
+        &self,
+        gl: &glow::Context,
+        program: glow::Program,
+        scene: &Scene,
+        layout: gi::Layout,
+        patches: usize,
+        run: &[gi::Group],
+        lights: &[LightUse],
+        shadows: Option<&Shadows>,
+        gi: Option<GiUse>,
+    ) -> Result<gi::Probes, String> {
         const ACROSS: usize = 16;
-        const DOWN: usize = 64;
+        const DOWN: usize = 32;
+        // The pictures: the first slot's light, the colours, the patches'
+        // three, the other slots' three.
+        const PICTURES: usize = 8;
         let face = gi::FACE;
         let (w, h) = ((ACROSS * 6 * face) as i32, (DOWN * face) as i32);
         let directions = gi::texel_directions();
         let mut probes = Vec::with_capacity(layout.len());
+        let slot_of = |group: gi::Group| run.iter().position(|g| *g == group).map_or(-1, |i| i as i32);
+        let (fixed, sky) = (slot_of(gi::Group::Fixed), slot_of(gi::Group::Sky));
         // SAFETY: see `GlScreen`.
         unsafe {
             let framebuffer = gl.create_framebuffer()?;
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
             let mut pictures = Vec::new();
-            for i in 0..5 {
+            for i in 0..PICTURES as u32 {
                 let picture = gl.create_renderbuffer()?;
                 gl.bind_renderbuffer(glow::RENDERBUFFER, Some(picture));
                 gl.renderbuffer_storage(glow::RENDERBUFFER, glow::RGBA32F, w, h);
@@ -1330,7 +1691,7 @@ impl Gpu {
             gl.renderbuffer_storage(glow::RENDERBUFFER, glow::DEPTH_COMPONENT24, w, h);
             gl.framebuffer_renderbuffer(glow::FRAMEBUFFER, glow::DEPTH_ATTACHMENT, glow::RENDERBUFFER, Some(depth));
             gl.bind_renderbuffer(glow::RENDERBUFFER, None);
-            let attachments: Vec<u32> = (0..5).map(|i| glow::COLOR_ATTACHMENT0 + i).collect();
+            let attachments: Vec<u32> = (0..PICTURES as u32).map(|i| glow::COLOR_ATTACHMENT0 + i).collect();
             gl.draw_buffers(&attachments);
             let complete = gl.check_framebuffer_status(glow::FRAMEBUFFER) == glow::FRAMEBUFFER_COMPLETE;
             let mut result = Err("OpenGL can't draw what the scene's probes see".to_string());
@@ -1344,17 +1705,28 @@ impl Gpu {
                 gl.depth_mask(true);
                 gl.color_mask(true, true, true, true);
                 gl.use_program(Some(program));
-                self.bind_lighting(gl, program, scene, None, true);
+                match gi {
+                    Some(gi) => self.bind_lighting(gl, program, scene, None, true, lights, shadows, Some(gi), Vec3::ONE),
+                    None => {
+                        self.bind_lighting(gl, program, scene, None, true, lights, shadows, None, Vec3::ONE);
+                        gl.uniform_1_i32(uniform(gl, program, "u_has_gi").as_ref(), 0);
+                        gl.active_texture(glow::TEXTURE5);
+                        gl.bind_texture(glow::TEXTURE_3D, None);
+                    }
+                }
+                gl.uniform_1_i32(uniform(gl, program, "u_sky_slot").as_ref(), sky);
+                gl.uniform_1_i32(uniform(gl, program, "u_base_slot").as_ref(), fixed);
                 gl.uniform_matrix_4_f32_slice(uniform(gl, program, "u_model").as_ref(), false, &Mat4::IDENTITY.to_cols_array());
                 let view_projection = uniform(gl, program, "u_view_projection");
                 let backs = uniform(gl, program, "u_backs");
+                let emissive_slot = uniform(gl, program, "u_emissive_slot");
                 let locations = MaterialLocations::of(gl, program);
                 let indices: Vec<usize> = (0..layout.len()).collect();
-                let mut pixels = vec![vec![0u8; (w * h * 16) as usize]; 5];
+                let mut pixels = vec![vec![0u8; (w * h * 16) as usize]; PICTURES];
                 for batch in indices.chunks(ACROSS * DOWN) {
                     gl.viewport(0, 0, w, h);
                     gl.clear_buffer_f32_slice(glow::COLOR, 0, &[0.0, 0.0, 0.0, 1.0]);
-                    for i in 1..5 {
+                    for i in 1..PICTURES as u32 {
                         gl.clear_buffer_f32_slice(glow::COLOR, i, &[0.0; 4]);
                     }
                     gl.clear_buffer_f32_slice(glow::DEPTH, 0, &[1.0]);
@@ -1370,8 +1742,14 @@ impl Gpu {
                                 if material.alpha == Alpha::Blend {
                                     continue;
                                 }
-                                // The PC's lights as when it is off.
-                                self.bind_material(gl, &locations, material, material.led.is_none());
+                                // The PC's lights as when it is off; a
+                                // lamp's glow in its group's slot.
+                                self.bind_material(gl, &locations, material, if material.led.is_none() { 1.0 } else { 0.0 });
+                                let glows = match material.lamp {
+                                    Some(lamp) => slot_of(gi::Group::Lamp(lamp)),
+                                    None => fixed,
+                                };
+                                gl.uniform_1_i32(emissive_slot.as_ref(), glows);
                                 gl.uniform_1_i32(backs.as_ref(), !material.double_sided as i32);
                                 gl.bind_vertex_array(Some(mesh.vao));
                                 gl.draw_elements(glow::TRIANGLES, mesh.count, glow::UNSIGNED_INT, 0);
@@ -1399,9 +1777,15 @@ impl Gpu {
                             patches[..4].copy_from_slice(&a);
                             patches[4..8].copy_from_slice(&b);
                             patches[8..].copy_from_slice(&c);
-                            gi::Seen { light: texel(&pixels[0], x, y), color: texel(&pixels[1], x, y), patches }
+                            let first = texel(&pixels[0], x, y);
+                            let rgb = |p: usize| {
+                                let [r, g, b, _] = texel(&pixels[p], x, y);
+                                [r, g, b]
+                            };
+                            let light = [[first[0], first[1], first[2]], rgb(5), rgb(6), rgb(7)];
+                            gi::Seen { light, kind: first[3], color: texel(&pixels[1], x, y), patches }
                         });
-                        probes.push(gi::integrate(&directions, seen, patches));
+                        probes.push(gi::integrate(&directions, seen, patches, run.len()));
                     }
                 }
                 result = Ok(());
@@ -1416,12 +1800,17 @@ impl Gpu {
             restore(gl);
             result?;
         }
-        Ok(gi::Probes { layout, patches, probes })
+        Ok(gi::Probes { layout, patches, groups: run.len(), probes })
     }
 
     /// The probes' light for the screen's picture now, if it changed.
     fn update_gi(&mut self, gl: &glow::Context, scene: &Scene) {
         let strength = self.glow_strength(scene);
+        let ambient = self.ambient(scene);
+        if self.weights.len() != self.gi_groups.len() {
+            self.weights = self.gi_weights(scene);
+        }
+        let weights = self.weights.clone();
         let Some(gi) = &mut self.gi else { return };
         if !gi.stale {
             return;
@@ -1444,9 +1833,14 @@ impl Gpu {
             gl.uniform_1_i32(u("u_probes").as_ref(), 0);
             gl.uniform_1_i32(u("u_glow_grid").as_ref(), 1);
             gl.uniform_1_f32(u("u_glow").as_ref(), strength);
-            gl.uniform_3_f32_slice(u("u_ambient").as_ref(), &scene.ambient.to_array());
+            gl.uniform_3_f32_slice(u("u_ambient").as_ref(), &ambient.to_array());
             gl.uniform_1_i32(u("u_sky").as_ref(), scene.sky as i32);
             gl.uniform_3_i32(u("u_count").as_ref(), nx, ny, nz);
+            gl.uniform_1_i32(u("u_groups").as_ref(), weights.len() as i32);
+            let flat: Vec<f32> = weights.iter().flatten().copied().collect();
+            if !flat.is_empty() {
+                gl.uniform_3_f32_slice(u("u_weight[0]").as_ref(), &flat);
+            }
             gl.active_texture(glow::TEXTURE1);
             gl.bind_texture(glow::TEXTURE_2D, Some(self.grid.texture));
             gl.active_texture(glow::TEXTURE0);
@@ -1494,7 +1888,31 @@ impl Gpu {
         for mesh in &scene.meshes {
             self.meshes.push(upload_mesh(gl, mesh)?);
         }
+        for prop in &scene.props {
+            let parts = prop.parts.iter().map(|part| upload_mesh(gl, &part.mesh)).collect::<Result<_, _>>()?;
+            self.prop_meshes.push(parts);
+        }
         Ok(())
+    }
+
+    /// A texture of a manual's page: `rgba`, `size` big, rows from the top.
+    pub fn page_texture(&self, gl: &glow::Context, rgba: &[u8], (w, h): (u32, u32)) -> Option<glow::Texture> {
+        // SAFETY: see `GlScreen`.
+        unsafe {
+            let texture = gl.create_texture().ok()?;
+            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
+            let pixels = glow::PixelUnpackData::Slice(Some(rgba));
+            gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::SRGB8_ALPHA8 as i32, w as i32, h as i32, 0, glow::RGBA, glow::UNSIGNED_BYTE, pixels);
+            gl.generate_mipmap(glow::TEXTURE_2D);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR_MIPMAP_LINEAR as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+            self.set_anisotropy(gl);
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            Some(texture)
+        }
     }
 
     /// The target for `format`, made anew if it is of another.
@@ -1519,8 +1937,10 @@ impl Gpu {
     /// Draw `scene` as `views` see it (one, or both with `Multiview`) into
     /// `dest`, its `area` from the bottom left (the whole, or less to draw
     /// less), with `screen` the picture on the screen, the PC's lights as
-    /// `leds` and `extras` over it all. An sRGB target is written linear
-    /// light, which it encodes; another sRGB values.
+    /// `leds`, the props as `props` say and `extras` over it all; the real
+    /// world through it where `punch` says (premultiplied: colour and alpha
+    /// 0 where only it shows). An sRGB target is written linear light,
+    /// which it encodes; another sRGB values.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
@@ -1531,7 +1951,9 @@ impl Gpu {
         area: (u32, u32),
         screen: Option<glow::Texture>,
         leds: Leds,
+        props: &[PropDraw],
         extras: &[Extra],
+        punch: Punch,
     ) -> Result<(), String> {
         let format = dest.format();
         let layered = matches!(dest, Dest::Image { layered: true, .. });
@@ -1604,9 +2026,14 @@ impl Gpu {
             gl.uniform_matrix_4_f32_slice(u(lit, "u_view_projection").as_ref(), false, &vp_floats);
             let model = u(lit, "u_model");
             gl.uniform_matrix_4_f32_slice(model.as_ref(), false, &Mat4::IDENTITY.to_cols_array());
-            self.bind_lighting(gl, lit, scene, screen, format.srgb);
+            let lights = self.lights_now(scene);
+            self.bind_lighting(gl, lit, scene, screen, format.srgb, &lights, self.shadows.as_ref(), None, self.ambient(scene));
             gl.uniform_3_f32_slice(u(lit, "u_eye").as_ref(), &eyes);
-            gl.uniform_1_f32(u(lit, "u_fog").as_ref(), if scene.sky { 0.02 } else { 0.0 });
+            let haze = if scene.sky { scene.haze * (1.0 + self.ambience.sky.clouds * 2.0) } else { 0.0 };
+            gl.uniform_1_f32(u(lit, "u_fog").as_ref(), haze);
+            gl.uniform_1_f32(u(lit, "u_time").as_ref(), self.ambience.seconds);
+            let rain_glass = u(lit, "u_rain_glass");
+            let rain = self.ambience.weather.rain;
             let has_ao = u(lit, "u_has_ao");
             gl.uniform_1_i32(has_ao.as_ref(), ao.is_some() as i32);
             let see_through = u(lit, "u_see_through");
@@ -1625,14 +2052,20 @@ impl Gpu {
                     gl.disable(glow::CULL_FACE);
                     gl.use_program(Some(sky));
                     gl.uniform_matrix_4_f32_slice(u(sky, "u_inverse").as_ref(), false, &sky_inverses);
-                    gl.uniform_3_f32_slice(u(sky, "u_sun").as_ref(), &scene.sun.to_array());
-                    gl.uniform_1_i32(u(sky, "u_sky").as_ref(), scene.sky as i32);
+                    self.bind_sky(gl, sky, scene);
                     gl.uniform_1_i32(u(sky, "u_encode").as_ref(), encode);
                     gl.bind_vertex_array(Some(empty));
+                    if !matches!(punch, Punch::None) {
+                        // Not over where the real world shows (premultiplied).
+                        gl.enable(glow::BLEND);
+                        gl.blend_func_separate(glow::DST_ALPHA, glow::ZERO, glow::ZERO, glow::ONE);
+                    }
                     gl.draw_arrays(glow::TRIANGLES, 0, 3);
                     gl.use_program(Some(lit));
                     gl.enable(glow::BLEND);
-                    gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+                    // (Alpha as premultiplied: over the real world, where
+                    // it shows, what is drawn is as opaque as it is.)
+                    gl.blend_func_separate(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA, glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
                     gl.uniform_1_i32(has_ao.as_ref(), 0);
                     // What is seen through is lit more cheaply: it is over
                     // other surfaces, often many and large.
@@ -1646,8 +2079,13 @@ impl Gpu {
                     if (material.alpha == Alpha::Blend) != blended {
                         continue;
                     }
-                    let glow = material.led.is_none_or(|led| super::scene::lit(leds, led));
+                    let glow = match (material.led, material.lamp) {
+                        (Some(led), _) => super::scene::lit(leds, led) as u32 as f32,
+                        (None, Some(lamp)) => self.ambience.lamps.get(lamp).copied().unwrap_or(1.0),
+                        (None, None) => 1.0,
+                    };
                     self.bind_material(gl, &locations, material, glow);
+                    gl.uniform_1_f32(rain_glass.as_ref(), if material.window { rain } else { 0.0 });
                     if material.double_sided {
                         gl.disable(glow::CULL_FACE);
                     } else {
@@ -1657,7 +2095,31 @@ impl Gpu {
                     gl.bind_vertex_array(Some(mesh.vao));
                     gl.draw_elements(glow::TRIANGLES, mesh.count, glow::UNSIGNED_INT, 0);
                 }
+                if !blended && !matches!(punch, Punch::None) {
+                    // The real world through the room's meshes, but not
+                    // through the props, nor what is seen through, nor the
+                    // extras, which are over it.
+                    self.draw_punch(gl, punch, &vp_floats);
+                    gl.use_program(Some(lit));
+                }
+                gl.uniform_1_f32(rain_glass.as_ref(), 0.0);
+                if !blended && !props.is_empty() {
+                    // The props, among the opaque meshes but not in the
+                    // depth drawn first, nor in its ambient occlusion.
+                    gl.depth_mask(true);
+                    gl.depth_func(glow::LESS);
+                    gl.uniform_1_i32(has_ao.as_ref(), 0);
+                    self.draw_props(gl, scene, &locations, model.as_ref(), props);
+                    gl.uniform_matrix_4_f32_slice(model.as_ref(), false, &Mat4::IDENTITY.to_cols_array());
+                    gl.uniform_1_i32(has_ao.as_ref(), ao.is_some() as i32);
+                    gl.depth_func(glow::LEQUAL);
+                    gl.depth_mask(false);
+                }
             }
+
+            // The rain or the snow outside, over what is behind it.
+            self.draw_weather(gl, scene, &vp_floats, &eyes, encode);
+            gl.use_program(Some(lit));
 
             // The extras, unlit, seen through where they are.
             gl.uniform_1_i32(shading.as_ref(), 1);
@@ -1689,6 +2151,247 @@ impl Gpu {
         }
         self.mark(gl, Pass::Scene);
         Ok(())
+    }
+
+    /// Take away the colour and alpha where `punch` lets the real world
+    /// show: through the windows, whatever is in front of them (the scene's
+    /// desk is seldom where the real one is), or all of it. Leaves the lit
+    /// program unbound.
+    fn draw_punch(&self, gl: &glow::Context, punch: Punch, vp_floats: &[f32]) {
+        // SAFETY: see `GlScreen`.
+        unsafe {
+            match punch {
+                Punch::None => {}
+                Punch::Windows(windows) if !windows.is_empty() => {
+                    let program = self.punch;
+                    let u = |name: &'static str| uniform(gl, program, name);
+                    gl.use_program(Some(program));
+                    gl.uniform_matrix_4_f32_slice(u("u_view_projection").as_ref(), false, vp_floats);
+                    gl.disable(glow::DEPTH_TEST);
+                    gl.enable(glow::BLEND);
+                    gl.blend_func(glow::ZERO, glow::ONE_MINUS_SRC_ALPHA);
+                    // The top of a flat box: seen from above only, once.
+                    gl.enable(glow::CULL_FACE);
+                    gl.cull_face(glow::BACK);
+                    gl.bind_vertex_array(Some(self.cube.vao));
+                    for window in windows {
+                        let around = window.size + glam::Vec2::splat(window.feather * 2.0);
+                        let model = window.frame * Mat4::from_scale(Vec3::new(around.x, 0.001, around.y));
+                        gl.uniform_matrix_4_f32_slice(u("u_model").as_ref(), false, &model.to_cols_array());
+                        gl.uniform_matrix_4_f32_slice(u("u_local").as_ref(), false, &window.frame.inverse().to_cols_array());
+                        gl.uniform_2_f32_slice(u("u_half").as_ref(), &(window.size / 2.0).to_array());
+                        gl.uniform_1_f32(u("u_feather").as_ref(), window.feather.max(1e-4));
+                        gl.draw_elements(glow::TRIANGLES, self.cube.count, glow::UNSIGNED_INT, 0);
+                    }
+                    gl.disable(glow::BLEND);
+                    gl.enable(glow::DEPTH_TEST);
+                }
+                Punch::Windows(_) => {}
+                Punch::Whole(much) => {
+                    // Any program over the whole view: only the constant
+                    // counts.
+                    gl.use_program(Some(self.sky));
+                    gl.disable(glow::DEPTH_TEST);
+                    gl.enable(glow::BLEND);
+                    gl.blend_color(0.0, 0.0, 0.0, much.clamp(0.0, 1.0));
+                    gl.blend_func(glow::ZERO, glow::ONE_MINUS_CONSTANT_ALPHA);
+                    gl.bind_vertex_array(Some(self.empty));
+                    gl.draw_arrays(glow::TRIANGLES, 0, 3);
+                    gl.disable(glow::BLEND);
+                    gl.enable(glow::DEPTH_TEST);
+                }
+            }
+        }
+    }
+
+    /// The rain or snow falling, if any, blended over the scene drawn,
+    /// not inside the room. Leaves the lit program unbound.
+    fn draw_weather(&self, gl: &glow::Context, scene: &Scene, vp_floats: &[f32], eyes: &[f32], encode: i32) {
+        let w = self.ambience.weather;
+        let (snow, amount) = if w.snow > w.rain { (true, w.snow) } else { (false, w.rain) };
+        if !scene.sky || amount < 0.01 {
+            return;
+        }
+        let count = (amount * if snow { SNOWFLAKES } else { RAINDROPS }) as i32;
+        let program = self.weather;
+        let u = |name: &'static str| uniform(gl, program, name);
+        let (low, high) = scene.indoor.unwrap_or((Vec3::ONE, Vec3::ZERO));
+        // SAFETY: see `GlScreen`.
+        unsafe {
+            gl.use_program(Some(program));
+            gl.uniform_matrix_4_f32_slice(u("u_view_projection[0]").as_ref(), false, vp_floats);
+            gl.uniform_3_f32_slice(u("u_eye[0]").as_ref(), eyes);
+            gl.uniform_3_f32_slice(u("u_box").as_ref(), &WEATHER_BOX);
+            gl.uniform_1_f32(u("u_time").as_ref(), self.ambience.seconds);
+            gl.uniform_1_i32(u("u_snow").as_ref(), snow as i32);
+            gl.uniform_3_f32_slice(u("u_indoor_low").as_ref(), &low.to_array());
+            gl.uniform_3_f32_slice(u("u_indoor_high").as_ref(), &high.to_array());
+            gl.uniform_3_f32_slice(u("u_ambient").as_ref(), &self.ambience.sky.ambient.to_array());
+            gl.uniform_1_f32(u("u_amount").as_ref(), amount);
+            gl.uniform_1_i32(u("u_encode").as_ref(), encode);
+            gl.disable(glow::CULL_FACE);
+            gl.depth_mask(false);
+            gl.enable(glow::BLEND);
+            gl.blend_func_separate(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA, glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
+            gl.bind_vertex_array(Some(self.empty));
+            gl.draw_arrays_instanced(glow::TRIANGLES, 0, 6, count);
+        }
+    }
+
+    /// The props' parts, with the lit program in use.
+    fn draw_props(&self, gl: &glow::Context, scene: &Scene, locations: &MaterialLocations, model: Option<&glow::UniformLocation>, props: &[PropDraw]) {
+        for draw in props {
+            let (prop, part, at, page) = match *draw {
+                PropDraw::Part { prop, part, model, page } => (prop, part, model, page),
+                PropDraw::Print { model: at, picture, develop } => {
+                    self.draw_print(gl, locations, model, at, picture, develop);
+                    continue;
+                }
+            };
+            let Some(mesh) = self.prop_meshes.get(prop).and_then(|parts| parts.get(part)) else { continue };
+            let material = &scene.materials[mesh.material];
+            // SAFETY: see `GlScreen`.
+            unsafe {
+                gl.uniform_matrix_4_f32_slice(model, false, &at.to_cols_array());
+                self.bind_material(gl, locations, material, 1.0);
+                if let Some(page) = page {
+                    // The page's picture, glowing a little.
+                    gl.uniform_4_f32_slice(locations.base_color.as_ref(), &[1.0; 4]);
+                    gl.uniform_3_f32_slice(locations.emissive.as_ref(), &[PAGE_GLOW; 3]);
+                    for (unit, flag) in [(0, &locations.has_base), (1, &locations.has_emissive)] {
+                        gl.uniform_1_i32(flag.as_ref(), 1);
+                        gl.active_texture(glow::TEXTURE0 + unit);
+                        gl.bind_texture(glow::TEXTURE_2D, Some(page));
+                    }
+                }
+                if material.double_sided {
+                    gl.disable(glow::CULL_FACE);
+                } else {
+                    gl.enable(glow::CULL_FACE);
+                    gl.cull_face(glow::BACK);
+                }
+                gl.bind_vertex_array(Some(mesh.vao));
+                gl.draw_elements(glow::TRIANGLES, mesh.count, glow::UNSIGNED_INT, 0);
+            }
+        }
+    }
+
+    /// A polaroid picture where `at` takes it: its white card, and its
+    /// picture coming out of the dark as it develops.
+    fn draw_print(
+        &self,
+        gl: &glow::Context,
+        locations: &MaterialLocations,
+        model: Option<&glow::UniformLocation>,
+        at: Mat4,
+        picture: Option<glow::Texture>,
+        develop: f32,
+    ) {
+        let developed = develop.clamp(0.0, 1.0);
+        // SAFETY: see `GlScreen`.
+        unsafe {
+            gl.uniform_matrix_4_f32_slice(model, false, &at.to_cols_array());
+            gl.uniform_1_i32(locations.shading.as_ref(), 0);
+            gl.uniform_1_f32(locations.cutoff.as_ref(), -1.0);
+            gl.uniform_1_i32(locations.has_emissive.as_ref(), 0);
+            gl.uniform_3_f32_slice(locations.emissive.as_ref(), &[0.0; 3]);
+            gl.uniform_1_i32(locations.has_base.as_ref(), 0);
+            gl.uniform_4_f32_slice(locations.base_color.as_ref(), &[0.86, 0.85, 0.82, 1.0]);
+            gl.enable(glow::CULL_FACE);
+            gl.cull_face(glow::BACK);
+            let [card, face] = &self.print_meshes;
+            gl.bind_vertex_array(Some(card.vao));
+            gl.draw_elements(glow::TRIANGLES, card.count, glow::UNSIGNED_INT, 0);
+            // Dark brown-green at first, the picture coming in.
+            let dark = [0.05, 0.06, 0.05];
+            let tint: Vec<f32> = dark.iter().map(|d| d + (1.0 - d) * developed).chain([1.0]).collect();
+            gl.uniform_4_f32_slice(locations.base_color.as_ref(), &tint);
+            gl.uniform_1_i32(locations.has_base.as_ref(), picture.is_some() as i32);
+            gl.uniform_3_f32_slice(locations.emissive.as_ref(), &[PAGE_GLOW * 0.4 * developed; 3]);
+            gl.uniform_1_i32(locations.has_emissive.as_ref(), picture.is_some() as i32);
+            for unit in [0, 1] {
+                gl.active_texture(glow::TEXTURE0 + unit);
+                gl.bind_texture(glow::TEXTURE_2D, picture);
+            }
+            gl.bind_vertex_array(Some(face.vao));
+            gl.draw_elements(glow::TRIANGLES, face.count, glow::UNSIGNED_INT, 0);
+        }
+    }
+
+    /// Take a picture of `scene` as `view` sees it, `size` pixels square,
+    /// with `props` (but the camera's own) and the room as it is: RGBA, rows
+    /// from the top. Drawn one view at a time, without the ambient
+    /// occlusion, into a target of its own.
+    #[allow(clippy::too_many_arguments)]
+    pub fn snapshot(
+        &mut self,
+        gl: &glow::Context,
+        scene: &Scene,
+        view: View,
+        size: u32,
+        screen: Option<glow::Texture>,
+        leds: Leds,
+        props: &[PropDraw],
+    ) -> Result<Vec<u8>, String> {
+        if self.views != 1 && self.one_view.is_none() {
+            let defines = &self.one_view_defines;
+            let made = (|| -> Result<OneView, String> {
+                Ok(OneView {
+                    lit: link(gl, self.glsl, defines, MESH_VERT, LIT_FRAG, "scene")?,
+                    sky: link(gl, self.glsl, &format!("{}#define FAR 1\n", defines), FULLSCREEN_VERT, SKY_FRAG, "sky")?,
+                    depth: link(gl, self.glsl, defines, MESH_VERT, SHADOW_FRAG, "depth")?,
+                    weather: link(gl, self.glsl, defines, WEATHER_VERT, WEATHER_FRAG, "weather")?,
+                })
+            })()?;
+            self.one_view = Some(made);
+        }
+        let format = Format { size: (size, size), srgb: false };
+        // The window's (or headset's) own, for after.
+        let (views, ao, target) = (self.views, self.ao.take(), self.target.take());
+        let swap = |gpu: &mut Gpu| {
+            if let Some(one) = &mut gpu.one_view {
+                std::mem::swap(&mut gpu.lit, &mut one.lit);
+                std::mem::swap(&mut gpu.sky, &mut one.sky);
+                std::mem::swap(&mut gpu.depth, &mut one.depth);
+                std::mem::swap(&mut gpu.weather, &mut one.weather);
+            }
+        };
+        if views != 1 {
+            swap(self);
+        }
+        self.views = 1;
+        let drawn = self.render(gl, scene, &[view], Dest::Own(format), (size, size), screen, leds, props, &[], Punch::None);
+        let mut rgba = vec![0u8; (size * size * 4) as usize];
+        if let (Ok(()), Some(target)) = (&drawn, &self.target) {
+            // SAFETY: see `GlScreen`.
+            unsafe {
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(target.resolve));
+                gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
+                let s = size as i32;
+                gl.read_pixels(0, 0, s, s, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(Some(&mut rgba)));
+                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            }
+        }
+        if let Some(own) = std::mem::replace(&mut self.target, target) {
+            // SAFETY: see `GlScreen`.
+            unsafe {
+                gl.delete_framebuffer(own.framebuffer);
+                gl.delete_framebuffer(own.resolve);
+                gl.delete_renderbuffer(own.color);
+                gl.delete_renderbuffer(own.depth);
+                gl.delete_texture(own.resolved);
+            }
+        }
+        self.views = views;
+        if views != 1 {
+            swap(self);
+        }
+        self.ao = ao;
+        drawn?;
+        // Rows from the top.
+        let row = (size * 4) as usize;
+        let flipped: Vec<u8> = rgba.chunks_exact(row).rev().flatten().copied().collect();
+        Ok(flipped)
     }
 
     /// A framebuffer drawing into the headset's image `texture`, `size`
@@ -1841,7 +2544,7 @@ fn restore(gl: &glow::Context) {
 fn make_gi(gl: &glow::Context, glsl: Glsl, defines: &str, probes: &gi::Probes) -> Result<Gi, String> {
     let program = link(gl, glsl, defines, FULLSCREEN_VERT, GI_UPDATE_FRAG, "bounced light")?;
     let [nx, ny, nz] = probes.layout.count.map(|c| c as i32);
-    let width = gi::Probes::row_texels(probes.patches) as i32;
+    let width = gi::Probes::row_texels(probes.patches, probes.groups) as i32;
     let texels: Vec<u8> = probes.texels().into_iter().flat_map(f32::to_ne_bytes).collect();
     // SAFETY: see `GlScreen`.
     unsafe {
@@ -1886,6 +2589,61 @@ fn make_gi(gl: &glow::Context, glsl: Glsl, defines: &str, probes: &gi::Probes) -
             gl.delete_program(program);
         }
         made
+    }
+}
+
+/// The lights of the groups of `run` for the bake, each with its slot:
+/// the scene's that are of them, and a white sun from each of the sun's
+/// directions among them.
+fn bake_lights(scene: &Scene, run: &[gi::Group]) -> Vec<LightUse> {
+    let slot_of = |group: gi::Group| run.iter().position(|g| *g == group);
+    let mut lights = Vec::new();
+    for (i, light) in scene.lights.iter().enumerate().take(super::scene::MAX_LIGHTS) {
+        if Some(i) == scene.sun_light {
+            continue;
+        }
+        let group = match scene.lamps.iter().position(|l| l.lights.contains(&i)) {
+            Some(lamp) => gi::Group::Lamp(lamp),
+            None => gi::Group::Fixed,
+        };
+        if let Some(slot) = slot_of(group) {
+            lights.push(LightUse { light: *light, shadow: [-1, 0], slot: slot as i32 });
+        }
+    }
+    let keys = sky::sun_keys();
+    for (k, key) in keys.iter().enumerate() {
+        if let Some(slot) = slot_of(gi::Group::Sun(k)) {
+            let light = Light { kind: LightKind::Directional, color: Vec3::ONE, position: Vec3::ZERO, direction: -*key, shadow: true };
+            lights.push(LightUse { light, shadow: [-1, 0], slot: slot as i32 });
+        }
+    }
+    lights
+}
+
+/// The light bounced around of each group of `probes` alone, for the
+/// bake's second pass: a 3D texture with a block of layers for each.
+fn make_group_gi(gl: &glow::Context, probes: &gi::Probes, sky: Option<usize>, open: bool) -> Result<glow::Texture, String> {
+    let [nx, ny, nz] = probes.layout.count.map(|c| c as i32);
+    let texels: Vec<u8> = probes.group_texels(sky, open).into_iter().flat_map(f32::to_ne_bytes).collect();
+    // SAFETY: see `GlScreen`.
+    unsafe {
+        let texture = gl.create_texture()?;
+        gl.bind_texture(glow::TEXTURE_3D, Some(texture));
+        gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
+        let pixels = glow::PixelUnpackData::Slice(Some(&texels));
+        let depth = nz * probes.groups as i32;
+        gl.tex_image_3d(glow::TEXTURE_3D, 0, glow::RGBA32F as i32, 6 * nx, ny, depth, 0, glow::RGBA, glow::FLOAT, pixels);
+        for (key, value) in [
+            (glow::TEXTURE_MIN_FILTER, glow::LINEAR),
+            (glow::TEXTURE_MAG_FILTER, glow::LINEAR),
+            (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
+            (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
+            (glow::TEXTURE_WRAP_R, glow::CLAMP_TO_EDGE),
+        ] {
+            gl.tex_parameter_i32(glow::TEXTURE_3D, key, value as i32);
+        }
+        gl.bind_texture(glow::TEXTURE_3D, None);
+        Ok(texture)
     }
 }
 

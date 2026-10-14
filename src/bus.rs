@@ -6,13 +6,18 @@ use crate::video::{self, ADDR_VGA_GRAPHICS, SIZE_GRAPHICS, VideoMode};
 
 mod guest;
 pub mod port_log;
+mod profile;
 pub mod s3;
 mod et4000;
+mod fdc;
 mod ide;
 mod net;
 mod printer;
 mod serial;
 mod state;
+mod setup;
+mod drives;
+mod sound;
 mod powervr;
 mod verite;
 mod voodoo;
@@ -53,6 +58,19 @@ pub(crate) const IRQ_READY_OFFSET: usize = std::mem::offset_of!(Bus, irq_ready);
 /// about 50 us, what the mode switches of a DOS extender's call to real
 /// mode and back take.
 const IDLE_SLICE_TICKS: u64 = 60;
+
+/// Fill `range` with elements of `size` bytes (1, 2 or 4) of `value`, as a
+/// string store does. By the element's size: a copy of a size known only
+/// at run time is a call per element.
+#[inline]
+fn fill_pattern(range: &mut [u8], size: usize, value: u32) {
+    let bytes = value.to_le_bytes();
+    match size {
+        1 => range.fill(bytes[0]),
+        2 => range.as_chunks_mut::<2>().0.fill([bytes[0], bytes[1]]),
+        _ => range.as_chunks_mut::<4>().0.fill(bytes),
+    }
+}
 
 /// A program waiting, as at a HLT, until PIT tick `until`: the code it
 /// runs stays where it was (`at`, CS and EIP, from when the loop first
@@ -105,6 +123,8 @@ pub struct Bus {
     pub port_accesses: VecDeque<crate::bios::PortAccess>,
     /// The port accesses made, while a debugger keeps a log of them.
     pub port_log: Option<port_log::PortLog>,
+    /// What the profiler counts, while a profile runs (`profile::Session`).
+    pub profile: Option<Box<crate::profile::Counters>>,
     /// The DOSCONFIG command asked for the settings window; the frontend
     /// opens it.
     pub config_ui_requested: bool,
@@ -125,6 +145,8 @@ pub struct Bus {
     /// A booted system's hard disks are ATA disks on the IDE channels too
     /// (`ide_hard_disks`).
     pub ide_hard_disks: bool,
+    /// A booted system has a floppy disk controller (`floppy_controller`).
+    pub floppy_controller: bool,
     /// A booted system has a CD-ROM drive even with no CD mounted, for one
     /// to go in later (`boot_cdrom`).
     pub boot_cdrom: bool,
@@ -190,6 +212,15 @@ pub struct Bus {
     pub pit_read_msb: bool,  // Channel 2 read LSB/MSB toggle
     pub pit_mode: u8,        // PIT Command Mode
     pub pit_write_msb: bool, // Toggle to handle 2-byte writes (LSB/MSB)
+    /// Channel 2's count and output as programs read them, with its gate.
+    pub pit2: crate::timer::Pit2,
+    /// Port 61h bit 1, the speaker data enable.
+    pub speaker_data: bool,
+    /// Port 61h bits 2 and 3 as written, the RAM parity and I/O channel
+    /// check enables, which reads give back.
+    pub ppi_checks: u8,
+    /// The `pit2_gate_at_start` setting, which a reset puts back.
+    pub pit2_gate_at_start: bool,
     /// Channel 0 count register as assembled from port 0x40 writes. A
     /// complete count is handed to `pit0`.
     pub pit0_divisor: u16,
@@ -252,8 +283,11 @@ pub struct Bus {
     /// hard disks and CD-ROM drive.
     pub ide: [Option<crate::ide::Channel>; 2],
     /// The port accesses going on are the BIOS's show of driving an IDE
-    /// disk for a V86 monitor (`ide::int13`): the disks answer at once.
-    pub ide_faked: bool,
+    /// disk (`ide::int13`) or the floppy disk controller (`interrupts::int13`)
+    /// for a V86 monitor: the disks and the controller answer at once.
+    pub faked_io: bool,
+    /// A booted system's floppy disk controller, with drives 0 and 1.
+    pub fdc: Option<crate::fdc::Fdc>,
     pub search_handles: std::collections::HashMap<u32, String>,
     /// The search ID FindFirst handed out last (the key of
     /// `search_handles`, kept in the program's DTA).
@@ -267,6 +301,9 @@ pub struct Bus {
     pub opl: crate::opl::Opl,
     /// The Sound Blaster, if one is installed.
     pub sb: Option<crate::sb::SoundBlaster>,
+    /// The ISA Plug and Play cards: the Sound Blaster when it is a
+    /// ViBRA16C (`sbtype=sb16vibra`), None for the others.
+    pub isapnp: Option<crate::isapnp::IsaPnp>,
     /// The two 8237 DMA controllers.
     pub dma: crate::dma::Dma,
     /// The MPU-401 MIDI interface at 330h.
@@ -365,376 +402,7 @@ pub struct Bus {
     pub audio_hook: Option<Box<dyn FnMut(&[i16])>>,
 }
 
-use std::path::PathBuf;
-
 impl Bus {
-    /// A machine with the default 16 MB of RAM.
-    pub fn new(root_path: PathBuf) -> Self {
-        Self::with_memory(root_path, DEFAULT_MEMORY_MB)
-    }
-
-    /// A machine with `memory_mb` MB of RAM (at least 2).
-    pub fn with_memory(root_path: PathBuf, memory_mb: usize) -> Self {
-        let ram_len = memory_mb.max(2) << 20;
-        let mut bus = Self {
-            ram: vec![0; ram_len],
-            video_mode: VideoMode::Text80x25, // Start in Text Mode (BIOS default)
-            disk: DiskController::new(root_path),
-            boot: None,
-            guest_paging: None,
-            guest_fault: None,
-            keyboard_buffer: VecDeque::new(),
-            key_waits: 0,
-            kbd: crate::keyboard::KeyboardState::default(),
-            kbc: crate::kbc::Kbc::new(),
-            kbc_release_at: None,
-            rtc_next: None,
-            a20_mask: !0x0010_0000,
-            reset_requested: false,
-            port_accesses: VecDeque::new(),
-            port_log: None,
-            rom_writes: 0,
-            config_ui_requested: false,
-            exit_requested: false,
-            config_dir: None,
-            cmos: crate::cmos::Cmos::new(((ram_len >> 10) - 1024) as u32),
-            post_code: 0,
-            debug_console: Vec::new(),
-            xms: crate::xms::Xms::new(),
-            ems: None,
-            dpmi: crate::dpmi::Dpmi::default(),
-            dos_version: crate::config::DosVersion::default(),
-            ide_hard_disks: true,
-            boot_cdrom: true,
-            idle_hint: false,
-            disk_notices: Vec::new(),
-            umb: None,
-            dos_high: true,
-            lpt_dac: None,
-            printer: None,
-            printer_dir: None,
-            printer_settings: crate::printer::PrinterSettings { output: crate::printer::PrinterOutput::None, ..Default::default() },
-            tandy_sound: crate::sn76489::Sn76489::new(crate::sn76489::Variant::Ncr8496),
-            tandy_mode: crate::sn76489::TandySound::Auto,
-            freezes: Vec::new(),
-            mixer_changed: false,
-            frames_drawn: 0,
-            activity: crate::autospeed::Activity::new(),
-            retraces: 0,
-            last_flip: None,
-            gate_array_shadow: Vec::new(),
-            gate_array_shadow_at: usize::MAX,
-            refresh_toggle: false,
-            cursor_x: 0,
-            cursor_y: 0,
-            start_time: Instant::now(),
-            joystick: crate::joystick::GamePort::default(),
-            audio_device: None,
-            speaker_on: false,
-            pit_divisor: 0xFFFF,
-            pit_mode: 0,
-            pit_write_msb: false,
-            pit_read_msb: false,
-            pit0_divisor: 0xFFFF,
-            pit0_write_msb: false,
-            pit0_read_msb: false,
-            pit0_access: 3,
-            pit0_latched: 0,
-            pit0_latched_active: false,
-            pit0: crate::timer::Pit0::new(),
-            clock: crate::timer::Clock::new(crate::timer::CpuSpeed::Max.initial_cycles()),
-            pic: crate::pic::Pic::new(),
-            audio_phase: 0.0,
-            log_file: None,
-            dta_segment: 0x1000,
-            dta_offset: 0x0000,
-            vga: crate::video::vga::VgaCard::new(),
-            vbe: crate::video::vbe::Vbe::new(),
-            s3_engine: crate::video::s3::engine::Engine::new(),
-            virge: Default::default(),
-            verite: Default::default(),
-            attribute_reset: Default::default(),
-            pci: crate::pci::Pci::default(),
-            voodoo: None,
-            powervr: None,
-            powervr_line: None,
-            hold: None,
-            notices: Vec::new(),
-            glide_hint: None,
-            ide: [None, None],
-            ide_faked: false,
-            search_handles: std::collections::HashMap::new(),
-            search_serial: 0,
-            mouse: crate::mouse::MouseState::new(),
-            opl: crate::opl::Opl::new(true),
-            sb: Some(crate::sb::SoundBlaster::new(crate::sb::SbConfig::default())),
-            dma: crate::dma::Dma::new(),
-            mpu: crate::mpu401::Mpu401::new(),
-            gus: Some(crate::gus::Gus::new(crate::gus::GusConfig::default(), 0)),
-            gus_line: None,
-            awe: None,
-            awe_rom: std::sync::Arc::from([]),
-            awe_ram_kb: crate::awe32::DEFAULT_RAM_KB,
-            net: crate::net::Net::new(),
-            serial: crate::serial::Serial::default(),
-            ultrasnd_drive: None,
-            cdaudio: crate::cdrom::audio::CdPlayer::new(),
-            disk_io: crate::diskio::DiskIo::default(),
-            disknoise: crate::disknoise::DiskNoise::new(),
-            monitor_noise: Default::default(),
-            power_ons: 0,
-            setup_requested: false,
-            drives_active: 0,
-            mscdex: Default::default(),
-            audio_out: VecDeque::new(),
-            audio_feed: crate::audio::Feed::default(),
-            audio_frames: 0,
-            audio_settled: false,
-            sb_phase: 0.0,
-            sb_frame: (0, 0),
-            beep_frames: 0,
-            mixer: crate::mixer::Mixer::default(),
-            sb_irq: (None, false, false),
-            irq_ready: false,
-            audio_peak: 0,
-            audio_underruns: 0,
-            unhandled_writes: vec![0; 0x10000],
-            page_gen: vec![0; ram_len >> GEN_SHIFT],
-            observe: crate::idle::Observe::default(),
-            code_blocks: vec![0; ram_len >> GEN_SHIFT],
-            log_hook: None,
-            audio_hook: None,
-        };
-        bus.init_dos_machine(video::adapter::VideoSetup::default());
-
-        // The default Ultrasound's software, and the equipment word, hard
-        // disk count and DPBs for the drives C:, X: and Z:.
-        let _ = bus.mount_ultrasnd(crate::gus::GusConfig::default().drive);
-        // The file table, with the standard devices open, and the XMS
-        // driver's entry.
-        crate::dos_files::write_table(&mut bus);
-        crate::xms::install_entry(&mut bus);
-
-        bus
-    }
-
-    /// The BIOS data area, the ROMs' code and the vector table, and an
-    /// empty chain of DOS memory, as the built-in DOS starts with them on
-    /// the display adapter `setup`.
-    fn init_dos_machine(&mut self, setup: video::adapter::VideoSetup) {
-        // BIOS Data Area (BDA) Initialization
-        // 0x0449: Current Video Mode (03 = 80x25 Color)
-        self.write_8(0x0449, 0x03);
-        // 0x044A: Number of Columns (80 = 0x50)
-        self.write_16(0x044A, 80);
-        // 0x044C: Video Page Size (80x25 text: 4000 bytes, rounded to 4 KB),
-        // 0x044E: the offset of the active page.
-        self.write_16(0x044C, 0x1000);
-        self.write_16(0x044E, 0);
-        // 0x0460: Cursor Shape (Start Line 13, End Line 14 for VGA)
-        self.write_16(0x0460, 0x0D0E);
-        // 0x0462: Active Page (0)
-        self.write_8(0x0462, 0);
-        // 0x0463: CRT Controller Base Address (0x3D4 for Color)
-        self.write_16(0x0463, 0x03D4);
-
-        // 0x0410: Equipment List. Bit 0 = Floppy (see `sync_drive_bda`);
-        // the video adapter's bits come with it below. Bit 2: a PS/2 mouse
-        // (INT 15h AH=C2h).
-        self.write_16(0x0410, 0x0005);
-
-        // 0x0417: Num Lock on, as the BIOS leaves it; 0x0496: an enhanced
-        // (101-key) keyboard.
-        self.write_8(0x0417, 0x20);
-        self.write_8(0x0496, crate::keyboard::ENHANCED_KEYBOARD);
-        // The keyboard buffer, from 40:1E to 40:3E, empty: DOS's keys are
-        // the host's (`keyboard_buffer`), but the machines of Windows' 386
-        // enhanced mode keep theirs there (`keyboard::bios_keystrokes`).
-        self.write_16(0x041A, 0x001E);
-        self.write_16(0x041C, 0x001E);
-        self.write_16(0x0480, 0x001E);
-        self.write_16(0x0482, 0x003E);
-
-        // 0x0484: Rows on Screen (minus 1). 24 = 25-row default.
-        self.write_8(0x0484, 24);
-        // 0x0485: Character height in scan lines. 16 = VGA 8x16 default.
-        self.write_16(0x0485, 16);
-
-        // The display adapter: its BIOS data and ROM.
-        video::bios::install(self, setup);
-
-        // The video BIOS's static functionality table at F000:E000: all
-        // modes (00-02), all scan line counts (07), 8 character blocks
-        // (0B), 2 of them active (0C); no further capabilities.
-        self.write_rom(0xFE000, &[0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 0xFF, 0, 0, 0, 0x08, 0x02, 0, 0, 0, 0]);
-
-        // BIOS ROM code and the interrupt vector table.
-        crate::bios::install(self);
-        crate::mouse::install_callback_stub(self);
-
-        // Build a baseline MCB chain — one large free block covering
-        // conventional memory. load_shell / load_exe rebuild as needed, but we
-        // still want mcb::alloc to work for tests and any early allocation.
-        crate::mcb::init_empty(self);
-    }
-
-    /// Start the built-in DOS again after the system booted from a disk
-    /// turned the machine off (`boot::power_off`): the BIOS's data and
-    /// vectors, DOS's tables and an empty memory chain as at rust-dos's
-    /// start, for the drives and devices there are now.
-    pub fn restore_dos_machine(&mut self) {
-        self.fill_ram(0..0x500, 0);
-        self.pic = crate::pic::Pic::new();
-        self.reset_voodoo();
-        self.reset_powervr();
-        self.detach_ide();
-        self.disk.drop_boot_cds();
-        self.cmos.set_hard_disks(&[]);
-        self.init_dos_machine(self.vga.setup());
-        if self.lpt1_present() {
-            self.write_lpt_bda();
-        }
-        if self.joystick.present() {
-            let equipment = self.read_16(0x0410);
-            self.write_16(0x0410, equipment | 0x1000);
-        }
-        self.write_serial_bda();
-        self.reset_serial();
-        crate::mcb::build_upper(self);
-        self.sync_drive_bda();
-        crate::dos_files::write_table(self);
-        crate::xms::install_entry(self);
-    }
-
-    /// Mount a host directory as a DOS drive and refresh the BIOS view of
-    /// the drive set. See `DiskController::mount`.
-    pub fn mount_drive(
-        &mut self,
-        drive: u8,
-        path: &std::path::Path,
-        opts: MountOptions,
-        replace: bool,
-    ) -> Result<std::path::PathBuf, String> {
-        self.shared_in_use(drive)?;
-        let boot = opts.boot;
-        // A folder mounted on the letter of a booted system's CD-ROM drive
-        // goes in as a disc made from it.
-        let mut opts = opts;
-        if self.boot.is_some() && crate::hostfs::is_dir(path) && self.booted_cd_drive() == Some(drive) {
-            opts.kind = DriveKind::CdRom;
-        }
-        let mounted = self.mount_with(drive, |disk| disk.mount(drive, path, opts, replace));
-        for note in std::mem::take(&mut self.disk.notes).into_iter().chain(crate::diskdelta::take_notes()) {
-            self.log_string(&format!("[DISK] {}", note));
-        }
-        let mounted = mounted?;
-        // One drive boots at startup.
-        if boot {
-            self.disk.set_boot_drive(Some(drive));
-        }
-        Ok(mounted)
-    }
-
-    /// Mount a disk or CD image held in memory as a DOS drive, replacing
-    /// what is there. See `DiskController::mount_memory_image`.
-    pub fn mount_memory_image(
-        &mut self,
-        drive: u8,
-        name: &str,
-        data: crate::diskimage::MemoryImage,
-        opts: MountOptions,
-    ) -> Result<(), String> {
-        self.mount_with(drive, |disk| disk.mount_memory_image(drive, name, data, opts))
-    }
-
-    /// Mount a disk image made in memory as a DOS drive, replacing what is
-    /// there. See `DiskController::mount_disk_image`.
-    pub fn mount_disk_image(
-        &mut self,
-        drive: u8,
-        image: crate::diskimage::DiskImage,
-        opts: MountOptions,
-    ) -> Result<(), String> {
-        self.mount_with(drive, |disk| disk.mount_disk_image(drive, image, opts))
-    }
-
-    /// Mount `drive` with `mount` and refresh the BIOS view of the drive set.
-    fn mount_with<T>(
-        &mut self,
-        drive: u8,
-        mount: impl FnOnce(&mut DiskController) -> Result<T, String>,
-    ) -> Result<T, String> {
-        let result = mount(&mut self.disk);
-        if result.is_ok() && self.boot.is_some() {
-            for line in self.disk.prepare_boot_cds() {
-                self.log_string(&format!("[IDE] {}", line));
-            }
-            if self.disk.boot_cd_image(drive).is_some() {
-                self.ide_cd_follows(drive);
-            }
-        }
-        if result.is_ok() {
-            // Another disc: whatever played stops, and MSCDEX and a booted
-            // system's CD-ROM drive say so.
-            self.cdaudio.stop_drive(drive);
-            self.mscdex.disc_changed(drive);
-            self.ide_media_changed(drive);
-        }
-        self.sync_drive_bda();
-        result
-    }
-
-    /// Put the Ultrasound software built into rust-dos (`gus::builtin`) on
-    /// `drive`, or with None nowhere, in place of where it was.
-    pub fn mount_ultrasnd(&mut self, drive: Option<u8>) -> Result<(), String> {
-        // Unless a MOUNT has taken its place.
-        if let Some(old) = self.ultrasnd_drive.take()
-            && self.disk.drive_kind(old) == Some(DriveKind::Virtual)
-        {
-            let _ = self.disk.unmount(old);
-        }
-        let result = match drive {
-            Some(drive) => {
-                let files = crate::ultrasnd::drive(crate::disk::drive_letter(drive));
-                self.disk.mount_memory(drive, files, crate::gus::builtin::LABEL).map(|()| {
-                    self.ultrasnd_drive = Some(drive);
-                })
-            }
-            None => Ok(()),
-        };
-        self.sync_drive_bda();
-        result
-    }
-
-    /// The layout text typed in from the host goes in as: the keyboard's,
-    /// or on a booted system, whose BIOS has none but the US one, that.
-    pub fn typing_layout(&self) -> &'static crate::keylayout::Layout {
-        if self.boot.is_some() { crate::keylayout::Layout::us() } else { self.kbd.layout }
-    }
-
-    /// Take the disk speed and noise settings.
-    pub fn set_disk_settings(&mut self, settings: crate::diskio::DiskSettings) {
-        self.audio_catch_up();
-        self.disk_io.settings = settings;
-        self.disknoise.set_modes(settings.floppy_disk_noise, settings.hard_disk_noise);
-    }
-
-    /// Take the volumes of the host's mixer, from the sound rendered next.
-    pub fn set_mixer(&mut self, settings: crate::mixer::MixerSettings) {
-        self.audio_catch_up();
-        self.mixer.set(settings);
-    }
-
-    /// Put the frozen values back (the frontends do before every frame).
-    pub fn apply_freezes(&mut self) {
-        for i in 0..self.freezes.len() {
-            let freeze = self.freezes[i];
-            for (j, byte) in freeze.width.bytes_of(freeze.value).into_iter().enumerate() {
-                self.write_8(freeze.addr + j, byte);
-            }
-        }
-    }
-
     /// Whether the Tandy's and PCjr's sound chip is there: on those
     /// machines, or on any with `tandy=on`.
     pub fn tandy_sound_enabled(&self) -> bool {
@@ -743,12 +411,6 @@ impl Bus {
             crate::sn76489::TandySound::Off => false,
             crate::sn76489::TandySound::Auto => self.vga.adapter.gate_array(),
         }
-    }
-
-    /// Set the `tandy` setting.
-    pub fn configure_tandy_sound(&mut self, mode: crate::sn76489::TandySound) {
-        self.audio_catch_up();
-        self.tandy_mode = mode;
     }
 
     /// The sound chip, the PCjr's SN76496 on a PCjr and the NCR 8496
@@ -760,211 +422,6 @@ impl Bus {
             self.tandy_sound = Sn76489::new(variant);
         }
         &mut self.tandy_sound
-    }
-
-    /// Put a DAC on LPT1 (`lpt_dac`), or take it away: the printer gives
-    /// way to it, and the BIOS data area has LPT1 while either is there.
-    pub fn configure_lpt_dac(&mut self, kind: crate::lpt_dac::LptDacType) {
-        self.audio_catch_up();
-        let present = kind != crate::lpt_dac::LptDacType::None;
-        self.lpt_dac = present.then(|| crate::lpt_dac::LptDac::new(kind));
-        self.place_printer();
-    }
-
-    /// Take the `[joystick]` settings: what the game port has plugged in,
-    /// and whether there is one, which bit 12 of the equipment word says.
-    pub fn set_joystick(&mut self, settings: crate::joystick::JoystickSettings) {
-        self.joystick.set_settings(settings);
-        if self.boot.is_some() {
-            return;
-        }
-        let equipment = self.read_16(0x0410) & !0x1000;
-        self.write_16(0x0410, equipment | if self.joystick.present() { 0x1000 } else { 0 });
-    }
-
-    /// A drive of `class` moved `bytes`: charge the time that takes at the
-    /// drive's speed, and make its noise.
-    pub fn disk_activity(&mut self, class: crate::diskio::DiskClass, bytes: u32, access: crate::disknoise::Access) {
-        self.activity.io_bytes += bytes as u64;
-        let pending = self.disk_io.charge(class, bytes);
-        self.disk_noise(class, access, pending);
-    }
-
-    /// The noise of a drive of `class` that goes on for `ns` from now.
-    pub fn disk_noise(&mut self, class: crate::diskio::DiskClass, access: crate::disknoise::Access, ns: u64) {
-        if self.disknoise.enabled(class) {
-            self.audio_catch_up();
-            let frames = crate::timer::mul_div(ns, crate::opl::RATE as u64, 1_000_000_000);
-            self.disknoise.io(class, access, frames);
-        }
-    }
-
-    /// `bytes` were moved on `drive`, if it is a floppy drive or a hard
-    /// disk.
-    pub fn drive_activity(&mut self, drive: u8, bytes: u32, access: crate::disknoise::Access) {
-        self.drives_active |= 1 << drive;
-        match self.disk.drive_kind(drive).and_then(crate::diskio::DiskClass::of) {
-            Some(class) => self.disk_activity(class, bytes, access),
-            None => self.activity.io_bytes += bytes as u64,
-        }
-    }
-
-    /// Sectors of a drive's disk image were read or written through the
-    /// BIOS or INT 25h/26h, from sector `lba` of the disk on.
-    pub fn sector_activity(&mut self, drive: u8, lba: u64, sectors: u32, _write: bool) {
-        let per_track = self.disk.bios_image(drive).map_or(1, |disk| disk.geometry().sectors.max(1) as u64);
-        let bytes = sectors.saturating_mul(crate::diskimage::SECTOR_SIZE as u32);
-        self.drive_activity(drive, bytes, crate::disknoise::Access::Track(lba / per_track));
-    }
-
-    /// Put the next image in every drive mounted from a list of images, as
-    /// Ctrl+F4 does. Returns what changed, and what went wrong.
-    pub fn swap_images(&mut self) -> Vec<String> {
-        let mut messages = Vec::new();
-        // A booted system's disc made from a host folder is made again,
-        // with what the folder holds now.
-        if let Some(drive) = self.booted_cd_drive().filter(|&d| self.boot.is_some() && self.disk.is_folder_cd(d)) {
-            match self.reinsert_cd(drive) {
-                Ok(message) => messages.push(message),
-                Err(e) => messages.push(e),
-            }
-        }
-        for drive in 0..DRIVE_SLOTS {
-            match self.disk.swap_image(drive) {
-                Ok(Some(message)) => {
-                    self.image_changed(drive);
-                    messages.push(message);
-                }
-                Ok(None) => {}
-                Err(e) => messages.push(e),
-            }
-        }
-        if !messages.is_empty() {
-            self.sync_drive_bda();
-        }
-        messages
-    }
-
-    /// Put image `index` in a drive mounted from a list of images, as
-    /// libretro's disk control does. Returns what changed, if anything.
-    pub fn select_image(&mut self, drive: u8, index: usize) -> Result<Option<String>, String> {
-        let changed = self.disk.select_image(drive, index)?;
-        if changed.is_some() {
-            self.image_changed(drive);
-            self.sync_drive_bda();
-        }
-        Ok(changed)
-    }
-
-    /// Make the disc of the host folder mounted as CD drive `drive` again,
-    /// with what the folder holds now, and put it in the booted system's
-    /// CD-ROM drive as a new disc. Returns what changed.
-    pub fn reinsert_cd(&mut self, drive: u8) -> Result<String, String> {
-        let lines = self.disk.make_boot_cd(drive)?;
-        for line in &lines {
-            self.log_string(&format!("[IDE] {}", line));
-        }
-        self.ide_cd_follows(drive);
-        self.image_changed(drive);
-        Ok(lines.into_iter().next().unwrap_or_default())
-    }
-
-    /// Tell the CD audio, MSCDEX and the IDE drive that another disk is in
-    /// `drive`.
-    fn image_changed(&mut self, drive: u8) {
-        self.cdaudio.stop_drive(drive);
-        self.mscdex.disc_changed(drive);
-        self.ide_media_changed(drive);
-    }
-
-    /// Copy what the booted system changed on the disks made of shared
-    /// host directories into them (`drive`'s, or every one's), as it runs.
-    /// Returns what happened, a line for each drive.
-    pub fn sync_shared(&mut self, drive: Option<u8>) -> Vec<String> {
-        let lines = self.disk.sync_shared(drive, false);
-        for line in &lines {
-            self.log_string(&format!("[BOOT] {}", line));
-        }
-        lines
-    }
-
-    /// Why `drive` can't be unmounted or mounted anew: it is a booted
-    /// system's hard disk made of a host directory.
-    fn shared_in_use(&self, drive: u8) -> Result<(), String> {
-        match crate::boot::drive_unit(self, drive) {
-            Some(unit) if self.boot.is_some() && self.disk.is_shared(drive) => Err(format!(
-                "Drive {}: is the booted system's hard disk {:02X}h; shut it down first",
-                crate::disk::drive_letter(drive),
-                unit
-            )),
-            _ => Ok(()),
-        }
-    }
-
-    /// Unmount a DOS drive and refresh the BIOS view of the drive set.
-    pub fn unmount_drive(&mut self, drive: u8) -> Result<(), String> {
-        self.shared_in_use(drive)?;
-        let result = self.disk.unmount(drive);
-        self.cdaudio.stop_drive(drive);
-        self.ide_media_changed(drive);
-        self.sync_drive_bda();
-        result
-    }
-
-    /// The drive `from` as `to` (REMOUNT): the same
-    /// folder or images, with their changes where they went. C:, which
-    /// stays, is left empty.
-    pub fn remount_drive(&mut self, from: u8, to: u8) -> Result<std::path::PathBuf, String> {
-        if from == to {
-            return Err("The drives are the same".to_string());
-        }
-        if self.disk.is_mounted(to) {
-            return Err(format!("Drive {}: is already mounted", crate::disk::drive_letter(to)));
-        }
-        let spec = self.disk.drive_info(from).and_then(|info| info.mount).ok_or("Drive not mounted, or not from the host")?;
-        self.shared_in_use(from)?;
-        let current = self.disk.get_current_drive() == from;
-        if from == crate::disk::DRIVE_C {
-            self.disk.empty_drive_c();
-        } else {
-            self.disk.unmount(from)?;
-        }
-        let mounted = self.mount_drive(to, &spec.path, spec.opts.clone(), false);
-        if mounted.is_err() {
-            // Back where it was.
-            let _ = self.mount_drive(from, &spec.path, spec.opts, from == crate::disk::DRIVE_C);
-        } else if current {
-            self.disk.set_current_drive(to);
-        }
-        self.cdaudio.stop_drive(from);
-        self.ide_media_changed(from);
-        self.sync_drive_bda();
-        mounted
-    }
-
-    /// Mirror the mounted drives into the BIOS data area and DOS's data
-    /// segment (`dos_data`). Must run whenever the drive set changes.
-    pub fn sync_drive_bda(&mut self) {
-        // A booted system's BIOS has its units from the start, and no
-        // built-in DOS.
-        if self.boot.is_some() {
-            return;
-        }
-        // Equipment word: bit 0 = floppy present, bits 6-7 = floppy count - 1.
-        // Only A: and B: are BIOS floppy units. Other bits are left alone.
-        let floppies = self.disk.floppy_units();
-        let mut equipment = self.read_16(0x0410) & !0x00C1;
-        if floppies > 0 {
-            equipment |= 0x0001 | ((floppies as u16 - 1) << 6);
-        }
-        self.write_16(0x0410, equipment);
-        self.cmos.set_floppies(floppies);
-
-        // 0x0475: number of fixed disks (INT 13h units 80h+).
-        let hard_disks = self.disk.hard_disk_units(|_| true).len();
-        self.write_8(0x0475, hard_disks.min(0xFF) as u8);
-
-        crate::dos_data::write(self);
     }
 
     /// Installs a Magic Trap (FE 38 <Vector> CF) at the given Physical Address
@@ -1068,8 +525,39 @@ impl Bus {
         self.load_bytes(addr, data);
     }
 
+    /// Whether the `len` bytes at `addr` are plain RAM (`is_plain_ram`),
+    /// for a `len` a program chose: one longer than RAM is not, so that
+    /// `addr + len` can't overflow a 32-bit `usize`.
+    pub(crate) fn is_plain_run(&self, addr: usize, len: usize) -> bool {
+        len <= self.ram.len() && self.is_plain_ram(addr, len)
+    }
+
+    /// Append the `len` bytes at `addr` to `out` as programs read them:
+    /// plain RAM as one slice, anything else (video memory, the ROMs,
+    /// upper memory) through `read_8`.
+    pub(crate) fn read_run(&self, addr: usize, len: usize, out: &mut Vec<u8>) {
+        if self.is_plain_run(addr, len) {
+            out.extend_from_slice(&self.ram[addr..addr + len]);
+        } else {
+            out.extend((0..len).map(|i| self.read_8(addr.wrapping_add(i))));
+        }
+    }
+
+    /// Write `data` at `addr` as programs write it, as `read_run` reads
+    /// it: plain RAM with one copy, anything else through `write_8`.
+    pub(crate) fn write_run(&mut self, addr: usize, data: &[u8]) {
+        if self.is_plain_run(addr, data.len()) {
+            self.load_bytes(addr, data);
+        } else {
+            for (i, &b) in data.iter().enumerate() {
+                self.write_8(addr.wrapping_add(i), b);
+            }
+        }
+    }
+
     /// Copy `len` bytes of RAM from `from` to `to`, bypassing the VGA
-    /// mapping, as the expanded memory manager maps its pages.
+    /// mapping, as the expanded memory manager maps its pages and the XMS
+    /// driver moves blocks. Overlapping ranges copy the source as it was.
     pub fn copy_ram(&mut self, from: usize, to: usize, len: usize) {
         let len = len.min(self.ram.len().saturating_sub(from.max(to)));
         if len == 0 {
@@ -1152,6 +640,53 @@ impl Bus {
         true
     }
 
+    /// Write the `len` bytes of plain RAM at `src` into the VESA linear
+    /// frame buffer at `dst`, as a string move's writes through `write_32`
+    /// do (a DirectDraw blit's row). Returns false, having written nothing,
+    /// where the range isn't all in the frame buffer. `size` is the
+    /// element's, for the profile's count of writes.
+    pub(crate) fn move_to_lfb(&mut self, src: usize, dst: usize, len: usize, size: usize) -> bool {
+        let Some(offset) = self.lfb_run(dst, len) else {
+            return false;
+        };
+        let _profile = self.profile.as_deref().map(|p| p.mem_run(dst, true, (len / size) as u64));
+        self.vbe.vram[offset..offset + len].copy_from_slice(&self.ram[src..src + len]);
+        self.lfb_written(dst, offset, len);
+        true
+    }
+
+    /// Fill the VESA linear frame buffer at `dst` with `count` elements of
+    /// `size` bytes of `value`, as a string store's writes do (see
+    /// `move_to_lfb`).
+    pub(crate) fn fill_lfb(&mut self, dst: usize, count: usize, size: usize, value: u32) -> bool {
+        let len = count * size;
+        let Some(offset) = self.lfb_run(dst, len) else {
+            return false;
+        };
+        let _profile = self.profile.as_deref().map(|p| p.mem_run(dst, true, count as u64));
+        fill_pattern(&mut self.vbe.vram[offset..offset + len], size, value);
+        self.lfb_written(dst, offset, len);
+        true
+    }
+
+    /// Where `len` bytes at `dst` are in the video memory, if all of them
+    /// are in the linear frame buffer.
+    fn lfb_run(&self, dst: usize, len: usize) -> Option<usize> {
+        if dst < self.ram.len() {
+            return None;
+        }
+        self.vbe.lfb_offset(dst, len)
+    }
+
+    /// The rest of `write_vram` for `len` bytes written at `offset` (at
+    /// `dst`) at once, and the hooks of the writes one by one.
+    fn lfb_written(&mut self, dst: usize, offset: usize, len: usize) {
+        if self.observe.on {
+            self.observe.mapped_write(dst, self.ram.len());
+        }
+        self.vram_written(offset, len);
+    }
+
     /// Where the byte at `addr` in the graphics window at A0000h is for
     /// the VGA's memory logic: its offset in the window, for a write or a
     /// read.
@@ -1174,15 +709,7 @@ impl Bus {
     /// `value`, as a string store does, and bump their code generations.
     /// The range is in plain RAM.
     pub(crate) fn fill_elements(&mut self, dst: usize, count: usize, size: usize, value: u32) {
-        let bytes = value.to_le_bytes();
-        let range = &mut self.ram[dst..dst + count * size];
-        // (By the element's size: a copy of a size known only at run time
-        // is a call per element.)
-        match size {
-            1 => range.fill(bytes[0]),
-            2 => range.as_chunks_mut::<2>().0.fill([bytes[0], bytes[1]]),
-            _ => range.as_chunks_mut::<4>().0.fill(bytes),
-        }
+        fill_pattern(&mut self.ram[dst..dst + count * size], size, value);
         self.bump_page_gens(dst, dst + count * size);
     }
 
@@ -1308,6 +835,12 @@ impl Bus {
 
     /// Reads of the video memory, the ROM area and past the end of RAM.
     fn read_8_mapped(&self, addr: usize) -> u8 {
+        let _profile = self.profile.as_deref().map(|p| p.mem(addr, false));
+        self.mapped_8(addr)
+    }
+
+    /// `read_8_mapped` without the profiler's count, for debuggers.
+    fn mapped_8(&self, addr: usize) -> u8 {
         if self.observe.on {
             self.observe.mapped(addr, self.ram.len());
         }
@@ -1357,7 +890,7 @@ impl Bus {
             return dword as u8;
         }
         if addr >= self.ram.len() {
-            return self.read_8_mapped(addr);
+            return self.mapped_8(addr);
         }
         if (ADDR_VGA_GRAPHICS..ADDR_VGA_GRAPHICS + SIZE_GRAPHICS).contains(&addr) && self.video_mode != VideoMode::Vesa {
             let saved = self.vga.latches.get();
@@ -1365,7 +898,8 @@ impl Bus {
             self.vga.latches.set(saved);
             return v;
         }
-        self.read_8(addr)
+        // (Not `read_8`: a profile counts the program's reads, not these.)
+        if self.is_plain_ram(addr, 1) { self.ram[addr] } else { self.mapped_8(addr) }
     }
 
     /// `write_8`, `write_16` or `write_32` (`size` bytes of `value`) at
@@ -1417,6 +951,7 @@ impl Bus {
             }
             return false;
         }
+        let _profile = self.profile.as_deref().map(|p| p.mem(addr, true));
         if self.observe.on {
             self.observe.mapped_write(addr, self.ram.len());
         }
@@ -1538,16 +1073,43 @@ impl Bus {
         }
     }
 
+    /// A write of `size` bytes of `value` at `addr` into the VESA linear
+    /// frame buffer, as `write_8`, `write_16` and `write_32` make one there.
+    /// False, having written nothing, where the bytes aren't all in it.
+    /// Keep it as their frame buffer branches, which stay inline for speed.
+    #[inline]
+    pub(crate) fn write_lfb(&mut self, addr: usize, value: u32, size: usize) -> bool {
+        if addr < self.ram.len() {
+            return false;
+        }
+        let Some(offset) = self.vbe.lfb_offset(addr, size) else {
+            return false;
+        };
+        let _profile = self.profile.as_deref().map(|p| p.mem(addr, true));
+        if self.observe.on {
+            self.observe.mapped_write(addr, self.ram.len());
+        }
+        self.write_vram(offset, &value.to_le_bytes()[..size]);
+        true
+    }
+
     /// Write VESA video memory, marking the rows of the picture it shows
     /// in for repainting.
     #[inline]
     fn write_vram(&mut self, offset: usize, bytes: &[u8]) {
         self.vbe.vram[offset..offset + bytes.len()].copy_from_slice(bytes);
-        self.note_video_write(bytes.len() as u64);
-        if self.video_mode == VideoMode::Vesa {
-            if let Some((first, last)) = self.vbe.frame_rows(offset, bytes.len()) {
-                self.vga.mark_dirty_rows(first, last);
-            }
+        self.vram_written(offset, bytes.len());
+    }
+
+    /// Count `len` bytes written to VESA video memory at `offset` and mark
+    /// the rows of the picture they show in for repainting.
+    #[inline]
+    fn vram_written(&mut self, offset: usize, len: usize) {
+        self.note_video_write(len as u64);
+        if self.video_mode == VideoMode::Vesa
+            && let Some((first, last)) = self.vbe.frame_rows(offset, len)
+        {
+            self.vga.mark_dirty_rows(first, last);
         }
     }
 
@@ -1571,6 +1133,7 @@ impl Bus {
             }
             return false;
         }
+        let _profile = self.profile.as_deref().map(|p| p.mem(addr, true));
         if self.observe.on {
             self.observe.mapped_write(addr, self.ram.len());
         }
@@ -1611,6 +1174,7 @@ impl Bus {
                 ])
             };
         }
+        let _profile = self.profile.as_deref().map(|p| p.mem(addr, false));
         if self.observe.on {
             self.observe.mapped(addr, self.ram.len());
         }
@@ -1646,6 +1210,7 @@ impl Bus {
                 ])
             };
         }
+        let _profile = self.profile.as_deref().map(|p| p.mem(addr, false));
         if self.observe.on {
             self.observe.mapped(addr, self.ram.len());
         }
@@ -1681,6 +1246,7 @@ impl Bus {
             }
             return;
         }
+        let _profile = self.profile.as_deref().map(|p| p.mem(addr, true));
         if self.observe.on {
             self.observe.mapped_write(addr, self.ram.len());
         }
@@ -1715,12 +1281,6 @@ impl Bus {
     pub fn write_64(&mut self, addr: usize, value: u64) {
         self.write_32(addr, (value & 0xFFFFFFFF) as u32);
         self.write_32(addr + 4, (value >> 32) as u32);
-    }
-
-    /// PIT channel 2's output: a square wave at the programmed frequency.
-    fn pit2_output(&self) -> bool {
-        let divisor = if self.pit_divisor == 0 { 0x10000u64 } else { self.pit_divisor as u64 };
-        self.clock.now_ticks() % divisor < divisor / 2
     }
 
     /// Start an execution batch that runs until instruction `end`.
@@ -1766,6 +1326,7 @@ impl Bus {
             self.voodoo_next_event(),
             self.powervr_next_event(),
             self.ide_next_event(),
+            self.fdc_next_event(),
             self.net_next_event(),
             self.serial_next_event(),
             self.kbc_release_at,
@@ -1803,6 +1364,9 @@ impl Bus {
         if self.ide_next_event().is_some_and(|t| t <= now) {
             self.ide_service();
         }
+        if self.fdc_next_event().is_some_and(|t| t <= now) {
+            self.fdc_service();
+        }
         if self.net_next_event().is_some_and(|t| t <= now) {
             self.net_service();
         }
@@ -1832,6 +1396,7 @@ impl Bus {
 
     /// Run the Sound Blaster's DSP up to the present.
     fn sb_advance(&mut self) {
+        let _profile = crate::profile::zone(crate::profile::Zone::SbDma);
         let now = self.clock.now_ticks();
         if let Some(sb) = &mut self.sb {
             sb.advance(now, &mut self.dma, &self.ram);
@@ -1851,6 +1416,7 @@ impl Bus {
 
     /// Run the Ultrasound up to the present and update its interrupt line.
     fn gus_advance(&mut self) {
+        let _profile = crate::profile::zone(crate::profile::Zone::Gus);
         let now = self.clock.now_ticks();
         if let Some(gus) = &mut self.gus {
             if let Some(written) = gus.advance(now, &mut self.dma, &mut self.ram) {
@@ -1922,18 +1488,11 @@ impl Bus {
         value
     }
 
-    /// Install (or with None remove) the Gravis Ultrasound.
-    pub fn configure_gus(&mut self, config: Option<crate::gus::GusConfig>) {
-        let now = self.clock.now_ticks();
-        self.gus = config.filter(|c| c.enabled).map(|c| crate::gus::Gus::new(c, now));
-        self.sync_gus_irq();
-        self.clock.schedule(self.next_event());
-    }
-
     /// Render the mixed audio of every device up to the present, so a
     /// change a program makes now (an FM register, a DAC sample, the
     /// speaker gate) is heard from now on.
     pub fn audio_catch_up(&mut self) {
+        let _profile = crate::profile::zone(crate::profile::Zone::AudioSynth);
         self.sb_advance();
         self.gus_advance();
         let rate = crate::opl::RATE as u64;
@@ -1944,6 +1503,7 @@ impl Bus {
             // A CD plays on meanwhile, and the disks spin.
             self.cdaudio.skip(target - rate / 2 - self.audio_frames);
             self.disknoise.skip(target - rate / 2 - self.audio_frames);
+            self.serial.skip_sound(target - rate / 2 - self.audio_frames);
             self.audio_frames = target - rate / 2;
         }
         let frames = target.saturating_sub(self.audio_frames) as usize;
@@ -1998,6 +1558,7 @@ impl Bus {
         use crate::mixer::Channel;
         let mut peaks = [0.0f32; crate::mixer::CHANNELS];
         let tandy_on = self.tandy_sound_enabled();
+        let modem_on = self.serial.sound_playing();
         for _ in 0..frames {
             let mut mix = crate::mixer::MixFrame::default();
             // The PC speaker, and the prompt's beep, through the speaker's
@@ -2055,6 +1616,10 @@ impl Bus {
                 let noise = self.monitor_noise.render();
                 self.mixer.add(&mut mix, &mut peaks, Channel::Monitor, (noise, noise));
             }
+            if modem_on {
+                let s = self.serial.render_sound();
+                self.mixer.add(&mut mix, &mut peaks, Channel::Modem, (s, s));
+            }
             if let Some(gus) = &mut self.gus {
                 let (gl, gr) = gus.pop_frame(crate::opl::RATE);
                 self.mixer.add(&mut mix, &mut peaks, Channel::Gus, (gl * GUS_GAIN, gr * GUS_GAIN));
@@ -2098,6 +1663,7 @@ impl Bus {
             && self.cdaudio.is_idle()
             && self.disknoise.is_silent()
             && self.monitor_noise.is_silent()
+            && !self.serial.sound_playing()
             && self.gus.as_ref().is_none_or(|g| g.is_idle())
             && self.awe.is_none()
             && self.lpt_dac.is_none()
@@ -2130,88 +1696,6 @@ impl Bus {
     /// Frames of audio rendered since start.
     pub fn audio_frames(&self) -> u64 {
         self.audio_frames
-    }
-
-    /// Replace the sound hardware: the Sound Blaster (None removes it) and
-    /// whether the FM chip is an OPL3.
-    pub fn configure_sound(&mut self, sb: Option<crate::sb::SbConfig>, opl3: bool) {
-        self.sb = sb.map(crate::sb::SoundBlaster::new);
-        self.opl = crate::opl::Opl::new(opl3);
-        self.configure_awe();
-        self.sync_sb_irq();
-        self.clock.schedule(self.next_event());
-    }
-
-    /// Power-on state of the sound hardware, when a program ends. The
-    /// Ultrasound keeps its DRAM, and when a resident program has hooked
-    /// its interrupt (a MIDI driver like ULTRAMID), its settings too: only
-    /// its voices stop.
-    pub fn reset_sound(&mut self) {
-        let config = self.sb.as_ref().map(|sb| sb.config);
-        let opl3 = self.opl.is_opl3();
-        self.configure_sound(config, opl3);
-        self.dma = crate::dma::Dma::new();
-        self.mpu.reset();
-        self.tandy_sound = crate::sn76489::Sn76489::new(self.tandy_sound.variant());
-        self.cdaudio.reset();
-        self.sb_frame = (0, 0);
-        let hooked = self.gus.as_ref().and_then(|gus| gus.irq()).is_some_and(|irq| {
-            let vector = if irq < 8 { 0x08 + irq as usize } else { 0x70 + irq as usize - 8 };
-            let entry = (self.read_16(vector * 4 + 2) as u32) << 16 | self.read_16(vector * 4) as u32;
-            entry != crate::bios::default_ivt()[vector]
-        });
-        if let Some(gus) = &mut self.gus {
-            if hooked { gus.silence() } else { gus.power_on() }
-        }
-        // The AWE32 keeps its sample RAM and settings, which drivers
-        // loaded; its voices stop.
-        if let Some(awe) = &mut self.awe {
-            awe.silence();
-        }
-        self.sync_gus_irq();
-        self.clock.schedule(self.next_event());
-    }
-
-    /// The AWE32's ROM and RAM size (KB), for the card from now on. A card
-    /// there is takes the ROM at once; a new RAM size makes a new card.
-    pub fn set_awe_setup(&mut self, rom: std::sync::Arc<[i16]>, ram_kb: u32) {
-        if let Some(awe) = &mut self.awe {
-            awe.set_rom(rom.clone());
-            if awe.ram_kb() != ram_kb.min(crate::awe32::MAX_RAM_KB) {
-                self.awe = None;
-            }
-        }
-        self.awe_rom = rom;
-        self.awe_ram_kb = ram_kb;
-        self.configure_awe();
-    }
-
-    /// Whether the AWE32 has its ROM.
-    pub fn awe_has_rom(&self) -> bool {
-        !self.awe_rom.is_empty()
-    }
-
-    /// The EMU8000 the Sound Blaster has: kept while the card stays an
-    /// AWE32 at the same base, made when it becomes one.
-    fn configure_awe(&mut self) {
-        let base = self.sb.as_ref().filter(|sb| sb.config.model == crate::sb::SbModel::Awe32).map(|sb| sb.config.base);
-        match base {
-            None => self.awe = None,
-            Some(base) if self.awe.as_ref().is_some_and(|awe| awe.base == base.wrapping_add(0x400)) => {}
-            Some(base) => {
-                let now = self.awe_frames();
-                self.awe = Some(Box::new(crate::awe32::Emu8000::new(base, self.awe_rom.clone(), self.awe_ram_kb, now)));
-            }
-        }
-    }
-
-    /// Initialise the EMU8000 as `AWEUTIL /S` does.
-    pub fn awe_init(&mut self) {
-        self.audio_catch_up();
-        let now = self.awe_frames();
-        if let Some(awe) = &mut self.awe {
-            awe.power_on(now);
-        }
     }
 
     /// Emulated time in the EMU8000's 44.1 kHz frames.
@@ -2309,25 +1793,44 @@ impl Bus {
         self.opl.write_data(bank, value, now);
     }
 
-    /// The Sound Blaster's base port, if the card is there.
-    fn sb_base(&self) -> Option<u16> {
-        self.sb.as_ref().map(|sb| sb.config.base)
+    /// The Sound Blaster's base port, if the card is there: a ViBRA16C's
+    /// is where its Plug and Play registers put it, while it is active. The
+    /// Sound Blaster's ports decode on address bits 15-4, so the low 4
+    /// bits of a base the registers have are ignored: an unaligned base
+    /// still leaves the card somewhere.
+    pub fn sb_base(&self) -> Option<u16> {
+        match &self.isapnp {
+            Some(pnp) => pnp.audio().map(|audio| audio.base & 0xFFF0).filter(|&base| base != 0),
+            None => self.sb.as_ref().map(|sb| sb.config.base),
+        }
     }
 
-    /// Power-on state of the PIT channel 0 and the PIC, so a program that
-    /// exits (or is killed) with a fast timer or masked IRQs doesn't leave
-    /// them behind for the shell and the next program.
-    pub fn reset_timers(&mut self) {
-        // Mode 3, count 65536, counting from now.
-        let now = self.clock.now_ticks();
-        self.pit0.set_mode(3, now);
-        self.pit0.write_count(0, now);
-        self.pit0_divisor = 0;
-        self.pit0_write_msb = false;
-        self.pit0_read_msb = false;
-        self.pit0_access = 3;
-        self.pit0_latched_active = false;
-        self.pic = crate::pic::Pic::new();
+    /// A write to the ISA Plug and Play WRITE_DATA port. A logical device
+    /// configured anew takes the Sound Blaster's IRQ and DMA channels
+    /// along: none while it is inactive.
+    fn isapnp_write(&mut self, value: u8) {
+        let Some(pnp) = &mut self.isapnp else { return };
+        let before = (pnp.read_port(), pnp.cards.iter().map(|c| c.csn).collect::<Vec<_>>(), pnp.audio());
+        pnp.write_data(value);
+        let after = (pnp.read_port(), pnp.cards.iter().map(|c| c.csn).collect::<Vec<_>>(), pnp.audio());
+        if after.0 != before.0 {
+            let port = after.0.map_or("none".to_string(), |p| format!("{:03X}h", p));
+            self.log_string(&format!("[ISAPNP] Read port {}", port));
+        }
+        if after.1 != before.1 {
+            self.log_string(&format!("[ISAPNP] CSNs {:?}", after.1));
+        }
+        if after.2 == before.2 {
+            return;
+        }
+        let audio = after.2;
+        let line = match audio {
+            Some(a) => format!("[ISAPNP] ViBRA16C audio at {:03X}h, IRQ {:?}, DMA {:?} and {:?}", a.base, a.irq, a.dma8, a.dma16),
+            None => "[ISAPNP] ViBRA16C audio deactivated".to_string(),
+        };
+        self.log_string(&line);
+        self.sb_advance();
+        self.route_isapnp_audio();
         self.clock.schedule(self.next_event());
     }
 
@@ -2476,6 +1979,7 @@ impl Bus {
 
     /// Write to an I/O port.
     pub fn io_write(&mut self, port: u16, value: u8) {
+        let _profile = self.profile.as_mut().map(|p| p.port(port, true));
         self.observe.port_write();
         self.clock.stall(crate::timer::IO_WRITE_NS);
         self.log_port(port, value as u32, 1, true);
@@ -2502,6 +2006,16 @@ impl Bus {
             return;
         }
         match port {
+            // ISA Plug and Play's ADDRESS and WRITE_DATA ports.
+            crate::isapnp::ADDRESS if self.isapnp.is_some() => {
+                if let Some(pnp) = &mut self.isapnp {
+                    pnp.write_address(value);
+                }
+            }
+            crate::isapnp::WRITE_DATA if self.isapnp.is_some() => self.isapnp_write(value),
+            // A booted system's floppy disk controller, ahead of the IDE
+            // channel that would have 3F7h.
+            p if self.fdc_claims(p) => self.fdc_write(p, value),
             // A booted system's IDE channels.
             p if self.ide_claims(p) => self.ide_write(p, value),
             p if self.ne2000_claims(p) => self.ne2000_write(p, value),
@@ -2606,15 +2120,27 @@ impl Bus {
                 if self.speaker_on {
                     self.audio_catch_up();
                 }
-                if !self.pit_write_msb {
-                    // Write LSB
-                    self.pit_divisor = (self.pit_divisor & 0xFF00) | (value as u16);
-                    self.pit_write_msb = true; // Next write will be MSB
-                } else {
-                    // Write MSB
-                    self.pit_divisor = (self.pit_divisor & 0x00FF) | ((value as u16) << 8);
-                    self.pit_write_msb = false; // Reset to LSB
-                    // println!("[PIT] Frequency Divisor Set to: {}", self.pit_divisor);
+                let now = self.clock.now_ticks();
+                match self.pit2.access {
+                    1 => {
+                        self.pit_divisor = value as u16;
+                        self.pit2.write_count(self.pit_divisor, now);
+                    }
+                    2 => {
+                        self.pit_divisor = (value as u16) << 8;
+                        self.pit2.write_count(self.pit_divisor, now);
+                    }
+                    _ if !self.pit_write_msb => {
+                        // Write LSB
+                        self.pit_divisor = (self.pit_divisor & 0xFF00) | (value as u16);
+                        self.pit_write_msb = true; // Next write will be MSB
+                    }
+                    _ => {
+                        // Write MSB
+                        self.pit_divisor = (self.pit_divisor & 0x00FF) | ((value as u16) << 8);
+                        self.pit_write_msb = false; // Reset to LSB
+                        self.pit2.write_count(self.pit_divisor, now);
+                    }
                 }
             }
 
@@ -2636,6 +2162,9 @@ impl Bus {
                         self.pit0_latched = self.pit0.count(self.clock.now_ticks());
                         self.pit0_latched_active = true;
                         self.pit0_read_msb = false;
+                    } else if channel == 2 && self.pit2.latched.is_none() {
+                        self.pit2.latched = Some(self.pit2.read(self.clock.now_ticks()).0);
+                        self.pit_read_msb = false;
                     }
                 } else {
                     match channel {
@@ -2648,7 +2177,12 @@ impl Bus {
                             self.pit0.set_mode((value >> 1) & 0x07, self.clock.now_ticks());
                             self.clock.schedule(self.next_event());
                         }
-                        2 => self.pit_write_msb = false, // Reset Channel 2 LSB/MSB
+                        2 => {
+                            // Reset Channel 2 LSB/MSB
+                            self.pit_write_msb = false;
+                            self.pit_read_msb = false;
+                            self.pit2.set_mode((value >> 1) & 0x07, access, self.clock.now_ticks());
+                        }
                         _ => {}
                     }
                 }
@@ -2658,6 +2192,9 @@ impl Bus {
             // Bit 0: Timer 2 Gate (Must be 1 for timer to run)
             // Bit 1: Speaker Data (Must be 1 for sound to pass to speaker)
             0x61 => {
+                self.pit2.set_gate(value & 0x01 != 0, self.clock.now_ticks());
+                self.speaker_data = value & 0x02 != 0;
+                self.ppi_checks = value & 0x0C;
                 // If both Bit 0 and Bit 1 are set, the speaker is ON
                 let enabled = (value & 0x03) == 0x03;
                 if enabled != self.speaker_on {
@@ -2836,6 +2373,7 @@ impl Bus {
     // Read from an I/O Port
     /// Read from an I/O port.
     pub fn io_read(&mut self, port: u16) -> u8 {
+        let _profile = self.profile.as_mut().map(|p| p.port(port, false));
         self.observe.port_read(port);
         // Sample the game port at the beginning of the I/O cycle. Its read
         // stall advances time for the next sample, as one polling interval.
@@ -2857,6 +2395,10 @@ impl Bus {
             return self.verite_read(reg, 1) as u8;
         }
         match port {
+            // ISA Plug and Play's READ_DATA port, wherever software put it,
+            // while a card answers there.
+            p if self.isapnp.as_ref().is_some_and(|pnp| pnp.reads(p)) => self.isapnp.as_mut().map_or(0xFF, |pnp| pnp.read_data()),
+            p if self.fdc_claims(p) => self.fdc_read(p),
             p if self.ide_claims(p) => self.ide_read(p),
             p if self.ne2000_claims(p) => self.ne2000_read(p),
             p if self.serial_claims(p) => self.serial_read(p),
@@ -2920,28 +2462,32 @@ impl Bus {
                 }
             }
 
-            // Port 0x42 — PIT channel 2 (PC speaker tone) data. Some games
-            // read this port as a cheap free-running counter for tight
-            // timing loops ("wait until count < threshold"), independent of
-            // whether they ever use the speaker. Returning a constant would
-            // hang those loops, so we synthesize the current count from the
-            // active divisor and emulated time, matching real hardware's
-            // 1.193 MHz tick rate.
+            // Port 0x42 — PIT channel 2 (PC speaker tone) data. Programs
+            // read it as a free-running counter for timing loops, or time a
+            // delay loop by gating it through port 61h bit 0.
             0x42 => {
-                let divisor = if self.pit_divisor == 0 {
-                    0x10000u32
-                } else {
-                    self.pit_divisor as u32
+                let count = match self.pit2.latched {
+                    Some(latched) => latched,
+                    None => self.pit2.read(self.clock.now_ticks()).0,
                 };
-                let ticks = self.clock.now_ticks();
-                let rem = (ticks % divisor as u64) as u32;
-                let count = ((divisor - 1 - rem) & 0xFFFF) as u16;
-                if !self.pit_read_msb {
-                    self.pit_read_msb = true;
-                    (count & 0xFF) as u8
-                } else {
-                    self.pit_read_msb = false;
-                    (count >> 8) as u8
+                match self.pit2.access {
+                    1 => {
+                        self.pit2.latched = None;
+                        (count & 0xFF) as u8
+                    }
+                    2 => {
+                        self.pit2.latched = None;
+                        (count >> 8) as u8
+                    }
+                    _ if !self.pit_read_msb => {
+                        self.pit_read_msb = true;
+                        (count & 0xFF) as u8
+                    }
+                    _ => {
+                        self.pit_read_msb = false;
+                        self.pit2.latched = None;
+                        (count >> 8) as u8
+                    }
                 }
             }
 
@@ -2985,18 +2531,22 @@ impl Bus {
                 value
             }
 
-            // Read PPI Port B: speaker gate and data, the DRAM refresh
-            // request (bit 4, toggles), and the PIT channel 2 output (bit 5).
+            // Read PPI Port B: speaker gate and data and the check enables
+            // as written, the DRAM refresh request (bit 4, toggles), and the
+            // PIT channel 2 output (bit 5).
             0x61 => {
-                let mut val = 0;
-                if self.speaker_on {
-                    val |= 0x03;
+                let mut val = self.ppi_checks;
+                if self.pit2.gate() {
+                    val |= 0x01;
+                }
+                if self.speaker_data {
+                    val |= 0x02;
                 }
                 self.refresh_toggle = !self.refresh_toggle;
                 if self.refresh_toggle {
                     val |= 0x10;
                 }
-                if self.pit2_output() {
+                if self.pit2.read(self.clock.now_ticks()).1 {
                     val |= 0x20;
                 }
                 val

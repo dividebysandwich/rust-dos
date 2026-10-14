@@ -241,6 +241,38 @@ fn sb_pro_mixer_lacks_the_sb16_registers() {
 }
 
 #[test]
+fn sb16_pro_mixer_registers_show_the_sb16_levels() {
+    let mut bus = sb16();
+    let mut mixer = |reg: u8, value: Option<u8>| {
+        bus.io_write(0x224, reg);
+        if let Some(value) = value {
+            bus.io_write(0x225, value);
+        }
+        bus.io_read(0x225)
+    };
+    // A mixer program sets the master volume through the SB16's own
+    // registers (30h/31h, five bits each); a game reading the SB Pro's
+    // master volume (22h, a nibble a side) sees the same levels.
+    mixer(0x30, Some(0x80));
+    mixer(0x31, Some(0x40));
+    assert_eq!(mixer(0x22, None), 0x84);
+    // Voice (32h/33h as 04h), FM (34h/35h as 26h), CD (36h/37h as 28h).
+    mixer(0x32, Some(0xF8));
+    mixer(0x33, Some(0x00));
+    assert_eq!(mixer(0x04, None), 0xF0);
+    mixer(0x35, Some(0x10));
+    mixer(0x34, Some(0x20));
+    assert_eq!(mixer(0x26, None), 0x21);
+    mixer(0x36, Some(0x00));
+    mixer(0x37, Some(0xF8));
+    assert_eq!(mixer(0x28, None), 0x0F);
+    // And the other way, as before.
+    mixer(0x22, Some(0x9C));
+    assert_eq!((mixer(0x30, None), mixer(0x31, None)), (0x98, 0xC8));
+    assert_eq!(mixer(0x22, None), 0x9C);
+}
+
+#[test]
 fn transfer_waits_while_its_dma_channel_is_masked() {
     let mut bus = sb16();
     reset_dsp(&mut bus);
@@ -632,4 +664,92 @@ fn a_loaded_state_starts_dma_identification_over() {
     machine::load(&mut cpu, &fresh).unwrap();
     // A fresh card answers 5Ah with 76h; the second call answers DCh.
     assert_eq!(identify_dma(&mut cpu, 0x5A).0, 0x76, "a first call's answer after the load");
+}
+
+/// The initiation key's 32 bytes, after two writes of 0.
+fn isapnp_key(bus: &mut Bus) {
+    bus.io_write(0x279, 0);
+    bus.io_write(0x279, 0);
+    for k in rust_dos::isapnp::KEY {
+        bus.io_write(0x279, k);
+    }
+}
+
+fn isapnp_write(bus: &mut Bus, reg: u8, value: u8) {
+    bus.io_write(0x279, reg);
+    bus.io_write(0xA79, value);
+}
+
+#[test]
+fn a_vibra16c_moves_where_its_plug_and_play_registers_put_it() {
+    let machine = || {
+        let mut cpu = Cpu::new(PathBuf::from("."));
+        cpu.bus.set_cycles_per_ms(1000);
+        cpu.bus.configure_sound(Some(SbConfig { model: SbModel::Sb16Vibra, ..SbConfig::default() }), true);
+        cpu.load_shell();
+        cpu
+    };
+    let mut a = machine();
+    // As the BIOS leaves it: at 220h, a DSP 4.13.
+    reset_dsp(&mut a.bus);
+    dsp_write(&mut a.bus, 0xE1);
+    assert_eq!((dsp_read(&mut a.bus), dsp_read(&mut a.bus)), (4, 13));
+    // Its mixer only reads the IRQ and DMA setup.
+    a.bus.io_write(0x224, 0x80);
+    a.bus.io_write(0x225, 0x02);
+    assert_eq!(a.bus.io_read(0x225), 0x04, "IRQ 7");
+
+    // Card 1's audio device to 240h, IRQ 5, DMA 3 and 7.
+    isapnp_key(&mut a.bus);
+    isapnp_write(&mut a.bus, 0x03, 0x01);
+    isapnp_write(&mut a.bus, 0x07, 0x00);
+    isapnp_write(&mut a.bus, 0x30, 0x00);
+    assert_eq!(a.bus.io_read(0x22E), 0xFF, "a deactivated card is off the bus");
+    for (reg, value) in [(0x60, 0x02), (0x61, 0x40), (0x70, 0x05), (0x74, 0x03), (0x75, 0x07), (0x30, 0x01)] {
+        isapnp_write(&mut a.bus, reg, value);
+    }
+    isapnp_write(&mut a.bus, 0x02, 0x02);
+    a.bus.io_write(0x246, 1);
+    a.bus.io_write(0x246, 0);
+    assert_eq!(a.bus.io_read(0x24A), 0xAA, "the DSP at 240h");
+    a.bus.io_write(0x244, 0x81);
+    assert_eq!(a.bus.io_read(0x245), 0x88, "DMA 3 and 7");
+
+    // A save state keeps the card where it is.
+    let mut b = machine();
+    machine::load(&mut b, &machine::save(&a)).unwrap();
+    b.bus.io_write(0x244, 0x80);
+    assert_eq!(b.bus.io_read(0x245), 0x02, "IRQ 5");
+    b.bus.io_write(0x246, 1);
+    b.bus.io_write(0x246, 0);
+    assert_eq!(b.bus.io_read(0x24A), 0xAA);
+    // A machine with an SB16 can't take it.
+    let mut sb16 = Cpu::new(PathBuf::from("."));
+    sb16.load_shell();
+    assert!(machine::load(&mut sb16, &machine::save(&a)).is_err());
+
+    // The debugger reports where the card answers now.
+    assert_eq!(a.bus.sb_blaster().as_deref(), Some("A240 I5 D3 H7 P330 T6"));
+    // A program's end leaves it there, as a DOS configuration tool set it.
+    a.bus.reset_sound();
+    assert_eq!(a.bus.sb_blaster().as_deref(), Some("A240 I5 D3 H7 P330 T6"));
+    reset_dsp_at(&mut a.bus, 0x240);
+    // A base with its low 4 bits set decodes as the 16-port block it is in.
+    isapnp_key(&mut a.bus);
+    isapnp_write(&mut a.bus, 0x03, 0x01);
+    isapnp_write(&mut a.bus, 0x07, 0x00);
+    isapnp_write(&mut a.bus, 0x61, 0x68);
+    isapnp_write(&mut a.bus, 0x02, 0x02);
+    reset_dsp_at(&mut a.bus, 0x260);
+    // A reboot gives it the BIOS's resources back.
+    a.bus.power_on_sound();
+    assert_eq!(a.bus.sb_blaster().as_deref(), Some("A220 I7 D1 H5 P330 T6"));
+    reset_dsp_at(&mut a.bus, 0x220);
+}
+
+/// Reset the DSP at `base` and expect its AAh.
+fn reset_dsp_at(bus: &mut Bus, base: u16) {
+    bus.io_write(base + 6, 1);
+    bus.io_write(base + 6, 0);
+    assert_eq!(bus.io_read(base + 0xA), 0xAA, "the DSP at {:03X}h", base);
 }

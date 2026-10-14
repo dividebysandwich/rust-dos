@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!-- rust-dos.exe's manifest; packaging/windows/rust-dos.rc links it in.
+     consoleAllocationPolicy "detached" (Windows 11 24H2 and later) gives the
+     program no console window of its own when Explorer or a shortcut starts
+     it: only the SDL window shows. Started from a terminal, it still writes
+     to the terminal's. Older Windows ignore it, and the program closes the
+     console it was given instead (src/main.rs). -->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <consoleAllocationPolicy xmlns="http://schemas.microsoft.com/SMI/2024/WindowsSettings">detached</consoleAllocationPolicy>
+    </windowsSettings>
+  </application>
+</assembly>

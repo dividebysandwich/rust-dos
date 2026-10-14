@@ -157,6 +157,10 @@ fn definitions() -> Vec<Definition> {
                 ("486", "486DX"),
                 ("pentium", "Pentium"),
                 ("pentium_mmx", "Pentium MMX"),
+                ("k6_2", "AMD K6-2"),
+                ("pentium_pro", "Pentium Pro"),
+                ("pentium_ii", "Pentium II"),
+                ("pentium_iii", "Pentium III"),
             ]),
         },
         Definition {
@@ -174,7 +178,7 @@ fn definitions() -> Vec<Definition> {
         Definition {
             key: "memsize",
             desc: "Memory (restart)",
-            info: "RAM in MB, up to 64 MB on a 386, 128 MB on a 486, 256 MB on a Pentium and 512 MB on a Pentium MMX. Takes effect when the content is started again.",
+            info: "RAM in MB, up to 64 MB on a 386, 128 MB on a 486, 256 MB on a Pentium and 512 MB on a Pentium MMX or later. Takes effect when the content is started again.",
             category: "system",
             target: config("emulator", "memsize"),
             values: configured(&[

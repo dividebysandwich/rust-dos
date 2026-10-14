@@ -14,6 +14,7 @@
 use super::err;
 use super::gl_frames::{Acquired, Failure};
 use super::gl_interop::Interop;
+use super::passthrough::{self, Passthrough};
 use ash::vk;
 use ash::vk::Handle as _;
 use glow::HasContext;
@@ -605,7 +606,9 @@ impl Bridge {
         blend: xr::EnvironmentBlendMode,
         space: &xr::Space,
         views: Option<&[xr::View]>,
+        passthrough: Option<&Passthrough>,
     ) -> xr::Result<()> {
+        // (No layer: the runtime shows nothing of the scene or the cameras.)
         let Some(views) = views else { return self.stream.end(time, blend, &[]) };
         let projection_views: Vec<_> = views
             .iter()
@@ -621,7 +624,7 @@ impl Bridge {
             })
             .collect();
         let layer = xr::CompositionLayerProjection::new().space(space).views(&projection_views);
-        self.stream.end(time, blend, &[&layer])
+        passthrough::end(&mut self.stream, time, blend, layer, passthrough)
     }
 
     /// Delete OpenGL's side of the images, with `gl` current: before the

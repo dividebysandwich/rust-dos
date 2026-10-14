@@ -191,6 +191,9 @@ impl Host for Machine {
                 self.cpu.bus.set_cycles_per_ms(n);
             }
         }
+        if new.auto_fps != old.auto_fps {
+            self.pacer.set_auto_fps(new.auto_fps);
+        }
         if new.core != old.core {
             self.cpu.core = new.core;
         }
@@ -198,6 +201,7 @@ impl Host for Machine {
         self.cpu.bus.dpmi.enabled = new.dpmi;
         self.cpu.bus.ide_hard_disks = new.ide_hard_disks;
         self.cpu.bus.boot_cdrom = new.boot_cdrom;
+        self.cpu.bus.floppy_controller = new.floppy_controller;
         if new.dos_version != old.dos_version {
             rust_dos::dos_data::set_version(&mut self.cpu.bus, new.dos_version);
         }

@@ -252,3 +252,109 @@ fn test_fbld_fbstp_round_trip() {
     }
     assert_eq!(cpu.fpu_tags[cpu.fpu_get_phys_index(0)], FPU_TAG_EMPTY);
 }
+
+/// 80-bit values stored as doubles round to nearest, ties to even, as an
+/// x87 with its default control word stores them (the expected doubles are
+/// what FLD TBYTE, FSTP QWORD gave on an x87).
+#[test]
+fn test_fstp_float64_rounds_to_nearest() {
+    let cases: [(u16, u64, u64); 7] = [
+        (0x3FFF, 0x8000_0000_0000_0001, 0x3FF0_0000_0000_0000), // 1 + 2^-63
+        (0x3FFF, 0x8000_0000_0000_0400, 0x3FF0_0000_0000_0000), // a tie, even below
+        (0x3FFF, 0x8000_0000_0000_0C00, 0x3FF0_0000_0000_0002), // a tie, odd below
+        (0x3FFF, 0x8000_0000_0000_0401, 0x3FF0_0000_0000_0001), // just over a tie
+        (0x3FFF, 0xFFFF_FFFF_FFFF_FFFF, 0x4000_0000_0000_0000), // up into 2
+        (0x43FE, 0xFFFF_FFFF_FFFF_FFFF, 0x7FF0_0000_0000_0000), // up past the largest
+        (0xC005, 0xA5A5_A5A5_A5A5_A5A5, 0xC054_B4B4_B4B4_B4B5), // -41.29...
+    ];
+    for (se, man, want) in cases {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.bus.write_64(0x1000, man);
+        cpu.bus.write_16(0x1008, se);
+        // DB 2E 00 10: FLD TBYTE PTR [1000]
+        run_cpu_code(&mut cpu, &[0xDB, 0x2E, 0x00, 0x10]);
+        // DD 1E 10 10: FSTP QWORD PTR [1010]
+        run_cpu_code(&mut cpu, &[0xDD, 0x1E, 0x10, 0x10]);
+        assert_eq!(cpu.bus.read_64(0x1010), want, "{:04X}:{:016X}", se, man);
+    }
+}
+
+/// 0.1 + 0.2 adds in 80 bits exactly and rounds up when stored as a
+/// double: 0.30000000000000004 on an x87.
+#[test]
+fn test_sum_stored_as_double_rounds_to_nearest() {
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    cpu.bus.write_64(0x1000, 0.1f64.to_bits());
+    cpu.bus.write_64(0x1008, 0.2f64.to_bits());
+    // DD 06 00 10: FLD QWORD PTR [1000]
+    run_cpu_code(&mut cpu, &[0xDD, 0x06, 0x00, 0x10]);
+    // DC 06 08 10: FADD QWORD PTR [1008]
+    run_cpu_code(&mut cpu, &[0xDC, 0x06, 0x08, 0x10]);
+    // DD 1E 10 10: FSTP QWORD PTR [1010]
+    run_cpu_code(&mut cpu, &[0xDD, 0x1E, 0x10, 0x10]);
+    assert_eq!(cpu.bus.read_64(0x1010), 0x3FD3_3333_3333_3334);
+}
+
+/// FISTP QWORD of 3 - 2^-60 under chop stores 2, as an x87 does: from the
+/// 80 bits, not from their double (3.0).
+#[test]
+fn test_fistp_int64_chops_the_80_bits() {
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    cpu.bus.write_64(0x1000, 0xBFFF_FFFF_FFFF_FFF0);
+    cpu.bus.write_16(0x1008, 0x4000);
+    cpu.bus.write_16(0x1020, 0x0F7F);
+    // D9 2E 20 10: FLDCW [1020]
+    run_cpu_code(&mut cpu, &[0xD9, 0x2E, 0x20, 0x10]);
+    // DB 2E 00 10: FLD TBYTE PTR [1000]
+    run_cpu_code(&mut cpu, &[0xDB, 0x2E, 0x00, 0x10]);
+    // DF 3E 10 10: FISTP QWORD PTR [1010]
+    run_cpu_code(&mut cpu, &[0xDF, 0x3E, 0x10, 0x10]);
+    assert_eq!(cpu.bus.read_64(0x1010), 2);
+}
+/// FISTP of a value that doesn't fit, or of a NaN, is an invalid operation:
+/// with it masked the FPU stores the integer indefinite and sets IE.
+#[test]
+fn test_fistp_stores_the_integer_indefinite() {
+    use rust_dos::cpu::FpuFlags;
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    let store = |cpu: &mut Cpu, value: f64, code: &[u8]| {
+        cpu.set_fpu_flags(FpuFlags::empty());
+        let mut f = F80::new();
+        f.set_f64(value);
+        cpu.fpu_push(f);
+        run_cpu_code(cpu, code);
+        cpu.get_fpu_flags().contains(FpuFlags::IE)
+    };
+    // DF 1E 00 10: FISTP WORD PTR [1000]
+    assert!(store(&mut cpu, 40000.0, &[0xDF, 0x1E, 0x00, 0x10]));
+    assert_eq!(cpu.bus.read_16(0x1000), 0x8000);
+    assert!(!store(&mut cpu, -32768.0, &[0xDF, 0x1E, 0x00, 0x10]));
+    assert_eq!(cpu.bus.read_16(0x1000), 0x8000);
+    assert!(!store(&mut cpu, -1.0, &[0xDF, 0x1E, 0x00, 0x10]));
+    assert_eq!(cpu.bus.read_16(0x1000), 0xFFFF);
+    // DB 1E 04 10: FISTP DWORD PTR [1004]
+    assert!(store(&mut cpu, 3e9, &[0xDB, 0x1E, 0x04, 0x10]));
+    assert_eq!(cpu.bus.read_32(0x1004), 0x8000_0000);
+    // DF 3E 08 10: FISTP QWORD PTR [1008]
+    assert!(store(&mut cpu, f64::NAN, &[0xDF, 0x3E, 0x08, 0x10]));
+    assert_eq!(cpu.bus.read_64(0x1008), 0x8000_0000_0000_0000);
+    assert!(store(&mut cpu, f64::INFINITY, &[0xDF, 0x3E, 0x08, 0x10]));
+    assert!(!store(&mut cpu, -9.223372036854775808e18, &[0xDF, 0x3E, 0x08, 0x10]));
+    assert_eq!(cpu.bus.read_64(0x1008), 0x8000_0000_0000_0000);
+}
+
+/// -(2^63 + 1) doesn't fit a qword, though its double (-2^63) does.
+#[test]
+fn test_fistp_int64_past_its_range_from_the_80_bits() {
+    use rust_dos::cpu::FpuFlags;
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    cpu.bus.write_64(0x1000, 0x8000_0000_0000_0001);
+    cpu.bus.write_16(0x1008, 0xC000 | (16383 + 63));
+    cpu.set_fpu_flags(FpuFlags::empty());
+    // DB 2E 00 10: FLD TBYTE PTR [1000]
+    run_cpu_code(&mut cpu, &[0xDB, 0x2E, 0x00, 0x10]);
+    // DF 3E 10 10: FISTP QWORD PTR [1010]
+    run_cpu_code(&mut cpu, &[0xDF, 0x3E, 0x10, 0x10]);
+    assert_eq!(cpu.bus.read_64(0x1010), 0x8000_0000_0000_0000);
+    assert!(cpu.get_fpu_flags().contains(FpuFlags::IE));
+}

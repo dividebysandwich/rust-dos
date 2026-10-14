@@ -26,6 +26,8 @@ const KBC_RESET: &[u8] = &[0xB0, 0xFE, 0xE6, 0x64, 0xCD, 0x20];
 const INT19: &[u8] = &[0xCD, 0x19, 0xCD, 0x20];
 /// JMP FFFF:0000.
 const JMP_RESET: &[u8] = &[0xEA, 0x00, 0x00, 0xFF, 0xFF];
+/// Counts the boots in BOOTED, one x each, and shows the count.
+const AUTOEXEC: &[u8] = b"@echo off\r\nset BOOTED=%BOOTED%x\r\necho booted %BOOTED%\r\n";
 
 fn machine(dir: &Path) -> Cpu {
     let mut cpu = Cpu::new(dir.to_path_buf());
@@ -75,7 +77,7 @@ fn screen(cpu: &Cpu) -> String {
 fn reboots_with(name: &str, program: &[u8]) {
     let dir = scratch(
         name,
-        &[("TSR.COM", TSR), ("RESET.COM", program), ("AUTOEXEC.BAT", b"@echo off\r\nset BOOTED=%BOOTED%x\r\necho booted %BOOTED%\r\n")],
+        &[("TSR.COM", TSR), ("RESET.COM", program), ("AUTOEXEC.BAT", AUTOEXEC)],
     );
     let mut cpu = machine(&dir);
     settle(&mut cpu);
@@ -117,8 +119,50 @@ fn port_cf9_reboots_dos() {
 }
 
 #[test]
+fn a_pci_probe_does_not_reboot() {
+    // Linux's pci_check_type1() and Memtest86+'s PCI probe: set CFBh to 1,
+    // read the configuration address at CF8h, write 80000000h, read it
+    // back, then write back the value read first. Without a PCI bus that
+    // is FFFFFFFFh, a doubleword write that must not reach CF9h.
+    const PROBE: &[u8] = &[
+        0xBA, 0xFB, 0x0C, // MOV DX, 0CFBh
+        0xB0, 0x01, // MOV AL, 1
+        0xEE, // OUT DX, AL
+        0xBA, 0xF8, 0x0C, // MOV DX, 0CF8h
+        0x66, 0xED, // IN EAX, DX
+        0x66, 0x89, 0xC3, // MOV EBX, EAX
+        0x66, 0xB8, 0x00, 0x00, 0x00, 0x80, // MOV EAX, 80000000h
+        0x66, 0xEF, // OUT DX, EAX
+        0x66, 0xED, // IN EAX, DX
+        0x66, 0x89, 0xD8, // MOV EAX, EBX
+        0x66, 0xEF, // OUT DX, EAX
+        0xCD, 0x20, // INT 20h
+    ];
+    does_not_reboot("pciprobe", PROBE);
+}
+
+#[test]
+fn a_word_write_over_cf9_does_not_reboot() {
+    // MOV DX, 0CF8h ; MOV AX, 0FFFFh ; OUT DX, AX ; INT 20h. The reset
+    // control register takes bytes only.
+    does_not_reboot("cf9word", &[0xBA, 0xF8, 0x0C, 0xB8, 0xFF, 0xFF, 0xEF, 0xCD, 0x20]);
+}
+
+fn does_not_reboot(name: &str, program: &[u8]) {
+    let dir = scratch(name, &[("TSR.COM", TSR), ("PROBE.COM", program), ("AUTOEXEC.BAT", AUTOEXEC)]);
+    let mut cpu = machine(&dir);
+    settle(&mut cpu);
+    assert!(screen(&cpu).contains("booted x"), "{}", screen(&cpu));
+    cpu.queue_batch_lines(["PROBE", "echo probed"]);
+    settle(&mut cpu);
+    let text = screen(&cpu);
+    assert!(text.contains("probed"), "{}", text);
+    assert!(!text.contains("booted xx"), "the machine rebooted: {}", text);
+}
+
+#[test]
 fn ctrl_alt_del_reboots_dos() {
-    let dir = scratch("ctrlaltdel", &[("TSR.COM", TSR), ("AUTOEXEC.BAT", b"@echo off\r\nset BOOTED=%BOOTED%x\r\necho booted %BOOTED%\r\n")]);
+    let dir = scratch("ctrlaltdel", &[("TSR.COM", TSR), ("AUTOEXEC.BAT", AUTOEXEC)]);
     let mut cpu = machine(&dir);
     settle(&mut cpu);
     use rust_dos::keyboard::key_event;

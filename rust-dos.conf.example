@@ -76,9 +76,16 @@
 # 10000 the least it runs at. Lower it for old games that run too fast.
 # --cycles overrides it.
 #cycles=auto
+# The frame rate cycles=auto aims for: auto (the default) for the
+# display's refresh rate, or 10 to 240 frames a second in its place.
+#auto_fps=auto
 # Processor: 486 (the default, a 486DX with FPU), 386, pentium (with
-# CPUID, the time stamp counter, MSRs, CMPXCHG8B and 4 MB pages), or
-# pentium_mmx (that Pentium with MMX).
+# CPUID, the time stamp counter, MSRs, CMPXCHG8B and 4 MB pages),
+# pentium_mmx (that Pentium with MMX), k6_2 (an AMD K6-2: the Pentium
+# MMX's with 3DNow! and SYSCALL/SYSRET), pentium_pro (the Pentium's with
+# CMOVcc, FCMOVcc and FCOMI, without MMX), pentium_ii (the Pentium
+# Pro's with MMX and SYSENTER/SYSEXIT) or pentium_iii (the Pentium II's
+# with SSE and FXSAVE/FXRSTOR).
 #cpu=486
 # What runs the programs' instructions:
 #   auto     the interpreter, and the dynamic recompiler for a program
@@ -161,7 +168,8 @@
 # while a video records.
 #record_shader=false
 # RAM in MB, from 2 to as much as the CPU's machines took: 64 on a 386,
-# 128 on a 486, 256 on a Pentium, 512 on a Pentium MMX. Memory above the
+# 128 on a 486, 256 on a Pentium, 512 on a Pentium MMX, K6-2, Pentium
+# Pro, Pentium II or Pentium III. Memory above the
 # first megabyte is extended memory for DOS extenders and XMS.
 #memsize=16
 # Expanded memory (EMS 4.0), which many games of the early 1990s need: 16 KB
@@ -194,6 +202,10 @@
 # on the IDE channels as well as through INT 13h, for its own IDE driver
 # (Windows 9x's 32-bit disk access, Linux): true (the default) or false.
 #ide_hard_disks=true
+# A system booted from a disk image (BOOT) has a floppy disk controller
+# (ports 3F0h-3F5h and 3F7h, IRQ 6, DMA channel 2) with the disks of A: and
+# B:, for its own floppy driver (Windows 9x's): true (the default) or false.
+#floppy_controller=true
 # Capture the mouse as it moves over the window while a program uses the
 # mouse driver (INT 33h), and let it go as the program's cursor leaves the
 # screen, where its cursor is rather than where the host's pointer would
@@ -239,9 +251,11 @@
 #floppy_disk_speed=maximum
 
 [sound]
-# The Sound Blaster: sb16 (the default), awe32 (an SB16 with the EMU8000
-# wavetable synthesizer), sbpro2, sb2, or none. Programs learn its settings
-# from the BLASTER environment variable, which follows these.
+# The Sound Blaster: sb16 (the default), sb16vibra (an SB16 as the ViBRA16C,
+# an ISA Plug and Play card whose resources Windows 95 sets), awe32 (an
+# SB16 with the EMU8000 wavetable synthesizer), sbpro2, sb2, or none.
+# Programs learn its settings from the BLASTER environment variable, which
+# follows these.
 #sbtype=sb16
 # Base port (hex), IRQ, 8-bit DMA channel, and the SB16's 16-bit channel.
 #sbbase=220
@@ -314,6 +328,12 @@
 # and noise: auto (the default) on those machines (machine), on on any, for
 # games that play Tandy sound with VGA graphics, or off.
 #tandy=auto
+# Start with PIT channel 2's gate (port 61h bit 0) high and its count
+# running, the speaker silent: false (the default, as on a real PC) or
+# true, for games that read the channel without setting it up, such as Bao
+# Xiao San Guo Zhi, whose random numbers come out the same every time
+# without it. A change takes effect at the DOS prompt.
+#pit2_gate_at_start=false
 # The noises the hard disks and floppy drives make: off (the default),
 # seek-only (the heads moving), or on (the disk spinning as well). They
 # sound best with the disk speeds above set lower than maximum.

@@ -429,6 +429,34 @@ impl Serial {
         self.ports.iter().any(|p| p.is_some())
     }
 
+    fn modems(&mut self) -> impl Iterator<Item = &mut modem::Modem> {
+        self.ports.iter_mut().flatten().filter_map(|port| match &mut port.backend {
+            Backend::Modem(m) => Some(&mut **m),
+            _ => None,
+        })
+    }
+
+    /// Whether a port has a modem.
+    pub fn has_modem(&self) -> bool {
+        self.ports.iter().flatten().any(|port| matches!(port.backend, Backend::Modem(_)))
+    }
+
+    /// Whether a modem's speaker plays something.
+    pub fn sound_playing(&self) -> bool {
+        self.ports.iter().flatten().any(|port| matches!(&port.backend, Backend::Modem(m) if !m.sound.is_silent()))
+    }
+
+    /// The modems' speakers' next mixer frame.
+    pub fn render_sound(&mut self) -> f32 {
+        self.modems().map(|m| m.sound.render()).sum()
+    }
+
+    pub fn skip_sound(&mut self, frames: u64) {
+        for m in self.modems() {
+            m.sound.skip(frames);
+        }
+    }
+
     /// The number of ports the BIOS lists (in its data area, without
     /// gaps): those from COM1 on up to the first missing one.
     pub fn bios_ports(&self) -> Vec<u16> {

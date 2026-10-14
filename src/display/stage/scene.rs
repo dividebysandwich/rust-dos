@@ -1,6 +1,7 @@
 //! What the 3D view shows, as plain data: the meshes with their materials
-//! and pictures, the lights, the screen the emulated picture goes on and
-//! where the viewer starts. It comes from a glTF file exported from
+//! and pictures, the lights, the screen the emulated picture goes on,
+//! where the viewer starts and the things on the desk to pick up (the
+//! game's manual and a joystick). It comes from a glTF file exported from
 //! Blender, or is the built-in test room.
 
 use glam::{Mat3, Mat4, Vec2, Vec3};
@@ -111,15 +112,20 @@ pub struct Material {
     pub alpha: Alpha,
     /// The PC's light this is, glowing with `emissive` only while lit.
     pub led: Option<Led>,
+    /// The lamp (`Scene::lamps`) this glows with, only while it is on.
+    pub lamp: Option<usize>,
+    /// A window's glass, which the rain runs down.
+    pub window: bool,
 }
 
 impl Material {
     /// Whether it casts shadows: not if it is seen through, or is a light
-    /// or a backdrop (black, and glowing).
+    /// or a backdrop (black, and glowing), or a lamp's glowing bulb (which
+    /// would be in the way of its own light).
     pub fn casts_shadow(&self) -> bool {
         let black = self.base_color[..3] == [0.0; 3];
         let glows = self.emissive != [0.0; 3] || self.emissive_texture.is_some();
-        self.alpha != Alpha::Blend && self.shading != Shading::Screen && !(black && glows)
+        self.alpha != Alpha::Blend && self.shading != Shading::Screen && !(black && glows) && self.lamp.is_none()
     }
 
     fn plain(color: [f32; 3], shading: Shading) -> Self {
@@ -132,6 +138,8 @@ impl Material {
             double_sided: false,
             alpha: Alpha::Opaque,
             led: None,
+            lamp: None,
+            window: false,
         }
     }
 
@@ -166,6 +174,26 @@ pub struct Light {
     /// Whether what is in its way casts a shadow (the light's
     /// `rustdos_shadow` custom property).
     pub shadow: bool,
+}
+
+/// A lamp of the scene's (a node with `rustdos_lamp`), switched on and off
+/// with a hand or a click: its lights, and its meshes that glow.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Lamp {
+    pub name: String,
+    /// On as the scene starts (`rustdos_lamp_on`).
+    pub on: bool,
+    /// Its lights, by their index in `Scene::lights`.
+    pub lights: Vec<usize>,
+    /// The box around its meshes, where it is switched.
+    pub bounds: (Vec3, Vec3),
+}
+
+impl Lamp {
+    #[cfg(test)]
+    pub fn test(on: bool) -> Self {
+        Lamp { name: "lamp".into(), on, lights: Vec::new(), bounds: (Vec3::ZERO, Vec3::ONE) }
+    }
 }
 
 /// The surface the emulated picture is shown on.
@@ -254,6 +282,150 @@ impl Spawn {
     }
 }
 
+/// Something to pick up (see `props`): the game's manual, a joystick, a
+/// polaroid camera, or anything else of the scene's that is only moved
+/// about (`item`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PropKind {
+    Manual,
+    Joystick,
+    Camera,
+    Item,
+}
+
+impl PropKind {
+    /// A prop by its node's name (`manual`, `joystick.001`) or custom
+    /// property's value.
+    fn parse(name: &str) -> Option<Self> {
+        let name = name.trim().to_ascii_lowercase();
+        match name.split('.').next().unwrap_or(&name) {
+            "manual" => Some(PropKind::Manual),
+            "joystick" => Some(PropKind::Joystick),
+            "camera" => Some(PropKind::Camera),
+            "item" => Some(PropKind::Item),
+            _ => None,
+        }
+    }
+
+    /// Whether Rust-DOS has a model of its own for it, for an empty.
+    fn built_in(self) -> bool {
+        self != PropKind::Item
+    }
+}
+
+/// A hand takes a prop by its box, which is at least this thick, so that
+/// a pencil or a sheet of paper can be taken too.
+const THINNEST: f32 = 0.02;
+
+/// What a part of a prop is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PartRole {
+    Body,
+    /// The manual's open pages, which show its pages' pictures: UV (0, 0)
+    /// is a page's top left.
+    PageLeft,
+    PageRight,
+    /// A page being turned, both its sides, hinged at the spine: in the
+    /// frame of `Prop::hinge`, lying along +X.
+    SheetFront,
+    SheetBack,
+    /// The joystick's stick, in the frame of `Prop::stick`.
+    Stick,
+}
+
+pub struct PropPart {
+    pub role: PartRole,
+    pub mesh: Mesh,
+}
+
+/// A prop as the scene has it, where it starts.
+pub struct Prop {
+    pub kind: PropKind,
+    /// Its frame in the scene: where it stands, +Y up and -Z away from
+    /// the player. Without scale.
+    pub pose: Mat4,
+    /// Its parts, in its frame (but the stick's and the sheet's).
+    pub parts: Vec<PropPart>,
+    /// The stick's frame in the prop's: at the pivot, +Y along the stick.
+    pub stick: Mat4,
+    /// Where a hand holds the stick, in the stick's frame.
+    pub knob: Vec3,
+    /// The spine, where a page turns about the Z axis, in the prop's frame.
+    pub hinge: Vec3,
+    /// The box around it in its frame (but the stick's): where a hand
+    /// takes it.
+    pub bounds: (Vec3, Vec3),
+    /// A camera's lens (looking along its -Z) and the slot its pictures
+    /// come out of (along its -Z, +Y the picture's up), in its frame.
+    pub lens: Option<Mat4>,
+    pub slot: Option<Mat4>,
+}
+
+impl Prop {
+    fn new(kind: PropKind, pose: Mat4) -> Self {
+        Prop {
+            kind,
+            pose,
+            parts: Vec::new(),
+            stick: Mat4::IDENTITY,
+            knob: Vec3::ZERO,
+            hinge: Vec3::ZERO,
+            bounds: (Vec3::ZERO, Vec3::ZERO),
+            lens: None,
+            slot: None,
+        }
+    }
+
+    fn push(&mut self, role: PartRole, mesh: Mesh) {
+        self.parts.push(PropPart { role, mesh });
+    }
+
+    fn has(&self, role: PartRole) -> bool {
+        self.parts.iter().any(|p| p.role == role)
+    }
+
+    /// The box around the parts of `role` in their own frame.
+    fn bounds_of(&self, role: impl Fn(PartRole) -> bool) -> Option<(Vec3, Vec3)> {
+        let points = self.parts.iter().filter(|p| role(p.role)).flat_map(|p| p.mesh.vertices.iter().map(|v| Vec3::from(v.position)));
+        points.fold(None, |b, p| Some(b.map_or((p, p), |(low, high): (Vec3, Vec3)| (low.min(p), high.max(p)))))
+    }
+
+    /// Work out where it is held, and the sheet a page turns on.
+    fn finish(&mut self) {
+        let (mut low, mut high) = self.bounds_of(|r| matches!(r, PartRole::Body | PartRole::PageLeft | PartRole::PageRight)).unwrap_or_default();
+        if let Some((_, top)) = self.bounds_of(|r| r == PartRole::Stick) {
+            // The knob: the top of the stick.
+            self.knob = Vec3::new(0.0, (top.y - 0.015).max(0.0), 0.0);
+            let base = self.stick.transform_point3(Vec3::ZERO);
+            low = low.min(base);
+            high = high.max(base);
+        }
+        // Thickened across, and upwards from what it stands on.
+        let thin = (Vec3::splat(THINNEST) - (high - low)).max(Vec3::ZERO);
+        let across = Vec3::new(thin.x, 0.0, thin.z) / 2.0;
+        self.bounds = (low - across, high + across + Vec3::Y * thin.y);
+        if self.kind == PropKind::Camera {
+            // Unless the scene says, the lens in the middle of its front
+            // (-Z), the slot low under it.
+            let (low, high) = self.bounds;
+            let front = Vec3::new((low.x + high.x) / 2.0, 0.0, low.z - 0.002);
+            self.lens.get_or_insert(Mat4::from_translation(front + Vec3::Y * (low.y + (high.y - low.y) * 0.6)));
+            self.slot.get_or_insert(Mat4::from_translation(front + Vec3::Y * (low.y + (high.y - low.y) * 0.12)));
+        }
+        if let Some((a, b)) = self.bounds_of(|r| r == PartRole::PageRight)
+            && !self.has(PartRole::SheetFront)
+        {
+            // A sheet the size of the right page, a little above it.
+            let width = b.x - a.x;
+            self.hinge = Vec3::new(a.x, b.y + 0.0006, 0.0);
+            let material = self.parts.iter().find(|p| p.role == PartRole::PageRight).map_or(0, |p| p.mesh.material);
+            for (role, up) in [(PartRole::SheetFront, 1.0), (PartRole::SheetBack, -1.0)] {
+                self.push(role, sheet(width, (a.z, b.z), up, material));
+            }
+        }
+    }
+}
+
 pub struct Scene {
     pub meshes: Vec<Mesh>,
     pub materials: Vec<Material>,
@@ -263,11 +435,22 @@ pub struct Scene {
     pub ambient: Vec3,
     pub screen: Screen,
     pub spawn: Spawn,
-    /// Whether the sunset sky is drawn around the scene, which then fades
-    /// into it with distance.
+    /// Whether the sky is drawn around the scene, which then fades into it
+    /// with distance (`haze` a metre).
     pub sky: bool,
-    /// Towards the sky's sun.
-    pub sun: Vec3,
+    pub haze: f32,
+    /// The light that is the sun (or the moon) and goes with the time of
+    /// day, by its index in `lights`.
+    pub sun_light: Option<usize>,
+    /// Where the scene's -Z points, in degrees from north (90 east): the
+    /// sun sets that way at 270 (`rustdos_heading`).
+    pub heading: f32,
+    /// The lamps to switch on and off.
+    pub lamps: Vec<Lamp>,
+    /// The inside of the room (a box, `rustdos_indoor`), where it doesn't
+    /// rain or snow; the middles of its windows' glass.
+    pub indoor: Option<(Vec3, Vec3)>,
+    pub windows: Vec<Vec3>,
     /// What the lit colours are multiplied by.
     pub exposure: f32,
     /// Where the left and right channels' sound comes from: the scene's
@@ -289,6 +472,9 @@ pub struct Scene {
     /// The light bounced around it, once the first view of it works it
     /// out: shared by the window's and the headset's.
     pub probes: std::sync::OnceLock<Option<super::gi::Probes>>,
+    /// The things to pick up, where they start: not in `meshes`, nor in
+    /// the lighting worked out for the room, since they move.
+    pub props: Vec<Prop>,
 }
 
 /// How far from the screen and the viewer's start the lighting is worked
@@ -298,10 +484,29 @@ const FOCUS: f32 = 12.0;
 /// How brightly the screen lights the room, unless the scene says.
 const SCREEN_GLOW: f32 = 5.0;
 
+/// The test room's desk: the middle of its top's top, and the top's size.
+const TEST_DESK: Vec3 = Vec3::new(0.0, 0.72, -0.55);
+const TEST_DESK_TOP: Vec3 = Vec3::new(1.2, 0.03, 0.6);
+/// Where the manual and the joystick stand on it.
+/// Where the manual, the joystick and the camera stand on it, and how far
+/// they are turned (the camera's lens to the viewer).
+const TEST_PROPS: [(PropKind, Vec3, f32); 3] = [
+    (PropKind::Manual, Vec3::new(-0.28, 0.72, -0.47), 0.0),
+    (PropKind::Joystick, Vec3::new(0.3, 0.72, -0.45), 0.0),
+    (PropKind::Camera, Vec3::new(-0.5, 0.72, -0.72), std::f32::consts::PI),
+];
+
 /// The sunset sky's sun: low, ahead and to the left.
 fn sunset_sun() -> Vec3 {
     Vec3::new(-0.45, 0.1, -1.0).normalize()
 }
+
+/// Where a scene's -Z points unless it says, in degrees from north: west,
+/// so that the sun sets ahead of the viewer, as the sunset of before.
+const HEADING: f32 = 270.0;
+
+/// How fast the scene fades into the sky with distance, unless it says.
+const HAZE: f32 = 0.02;
 
 /// The light of the sunset sky: its sun, orange, and the blue of the rest.
 fn sunset_lights() -> (Light, Vec3) {
@@ -339,6 +544,8 @@ impl Scene {
             Material::led(Led::Turbo, [1.0, 0.65, 0.05]),
             Material::led(Led::Hdd, [1.0, 0.12, 0.05]),
             Material::led(Led::Floppy, [0.1, 1.0, 0.15]),
+            // The desk.
+            Material::plain(srgb(0x6b4a30), Shading::Lit),
         ];
         let mut meshes = Vec::new();
         // The floor, so big that its edges are lost in the haze.
@@ -388,6 +595,14 @@ impl Scene {
             let x = -0.05 + i as f32 * 0.025;
             meshes.push(cuboid(on_front(x, 0.0), Vec3::new(0.008, 0.008, 0.008), material));
         }
+        // A desk in front of the viewer, its top at `DESK`'s height, for the
+        // manual and the joystick: the top and four legs.
+        let (desk, top) = (TEST_DESK, TEST_DESK_TOP);
+        meshes.push(cuboid(desk - Vec3::Y * top.y / 2.0, top, 9));
+        for (x, z) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+            let leg = Vec3::new(desk.x + x * (top.x / 2.0 - 0.04), (desk.y - top.y) / 2.0, desk.z + z * (top.z / 2.0 - 0.04));
+            meshes.push(cuboid(leg, Vec3::new(0.04, desk.y - top.y, 0.04), 9));
+        }
         let mut scene = Scene {
             meshes,
             materials,
@@ -397,7 +612,12 @@ impl Scene {
             screen: Screen::default(),
             spawn: Spawn { position: Vec3::new(0.0, 1.2, 0.0), yaw: 0.0, pitch: 0.0 },
             sky: true,
-            sun: sunset_sun(),
+            haze: HAZE,
+            sun_light: Some(0),
+            heading: HEADING,
+            lamps: Vec::new(),
+            indoor: None,
+            windows: Vec::new(),
             exposure: 1.0,
             speakers: [Vec3::ZERO; 2],
             shadows: true,
@@ -406,13 +626,120 @@ impl Scene {
             screen_glow: SCREEN_GLOW,
             source: hash(b"the test room"),
             probes: std::sync::OnceLock::new(),
+            props: Vec::new(),
         };
         let (sun, ambient) = sunset_lights();
         scene.lights.push(sun);
         scene.ambient = ambient;
         scene.collect_screen();
         scene.speakers = scene.screen_speakers();
+        for (kind, at, yaw) in TEST_PROPS {
+            let prop = scene.built_in_prop(kind, Mat4::from_translation(at) * Mat4::from_rotation_y(yaw));
+            scene.props.push(prop);
+        }
         scene
+    }
+
+    fn add_material(&mut self, material: Material) -> usize {
+        self.materials.push(material);
+        self.materials.len() - 1
+    }
+
+    /// Rust-DOS's own model of a prop, standing at `pose`.
+    fn built_in_prop(&mut self, kind: PropKind, pose: Mat4) -> Prop {
+        let mut prop = Prop::new(kind, pose);
+        match kind {
+            PropKind::Manual => {
+                // An A5 booklet, open: its cover, the pages' edges, and the
+                // two pages showing.
+                let cover = self.add_material(Material::plain(srgb(0x23325e), Shading::Lit));
+                let edges = self.add_material(Material::plain(srgb(0xdedbd0), Shading::Lit));
+                let paper = self.add_material(Material::plain(srgb(0xf4f2ec), Shading::Lit));
+                let (w, d) = (0.148, 0.21);
+                prop.push(PartRole::Body, cuboid(Vec3::new(0.0, 0.0015, 0.0), Vec3::new(2.0 * w + 0.008, 0.003, d + 0.006), cover));
+                prop.push(PartRole::Body, cuboid(Vec3::new(0.0, 0.0055, 0.0), Vec3::new(2.0 * w, 0.005, d), edges));
+                for (role, x0) in [(PartRole::PageLeft, -w), (PartRole::PageRight, 0.0)] {
+                    prop.push(role, page(Vec3::new(x0, 0.0081, -d / 2.0), w, d, paper));
+                }
+            }
+            PropKind::Joystick => {
+                // A desktop joystick: a square base with a fire button,
+                // and a stick with a red knob on it.
+                let black = self.add_material(Material::plain(srgb(0x18181b), Shading::Lit));
+                let grey = self.add_material(Material::plain(srgb(0x55575c), Shading::Lit));
+                let red = self.add_material(Material::plain(srgb(0xb3161b), Shading::Lit));
+                let (side, height) = (0.12, 0.04);
+                prop.push(PartRole::Body, cuboid(Vec3::new(0.0, height / 2.0, 0.0), Vec3::new(side, height, side), black));
+                prop.push(PartRole::Body, cylinder(Vec3::new(0.0, height, 0.0), 0.022, 0.006, 16, grey));
+                prop.push(PartRole::Body, cylinder(Vec3::new(-0.04, height, -0.04), 0.009, 0.006, 12, red));
+                prop.stick = Mat4::from_translation(Vec3::new(0.0, height + 0.004, 0.0));
+                prop.push(PartRole::Stick, cylinder(Vec3::ZERO, 0.009, 0.13, 12, black));
+                prop.push(PartRole::Stick, cylinder(Vec3::new(0.0, 0.11, 0.0), 0.017, 0.04, 16, red));
+            }
+            PropKind::Camera => {
+                // An instant camera: a box, its white front with a rainbow
+                // stripe, the lens, the viewfinder on top and a red button.
+                let body = self.add_material(Material::plain(srgb(0x2b3238), Shading::Lit));
+                let white = self.add_material(Material::plain(srgb(0xe8e6df), Shading::Lit));
+                let glass = self.add_material(Material::plain(srgb(0x0c0e12), Shading::Lit));
+                let red = self.add_material(Material::plain(srgb(0xc8231c), Shading::Lit));
+                let (w, h, d) = (0.11, 0.085, 0.1);
+                prop.push(PartRole::Body, cuboid(Vec3::new(0.0, h / 2.0, 0.0), Vec3::new(w, h, d), body));
+                prop.push(PartRole::Body, cuboid(Vec3::new(0.0, h * 0.42, -d / 2.0 - 0.003), Vec3::new(w, h * 0.84, 0.006), white));
+                for (i, hex) in [0xd9302c, 0xf2a71b, 0x3a9c4a, 0x2a6fb5].into_iter().enumerate() {
+                    let stripe = self.add_material(Material::plain(srgb(hex), Shading::Lit));
+                    let x = -0.012 + i as f32 * 0.008;
+                    prop.push(PartRole::Body, cuboid(Vec3::new(x, h * 0.3, -d / 2.0 - 0.0065), Vec3::new(0.006, h * 0.5, 0.001), stripe));
+                }
+                prop.push(PartRole::Body, cuboid(Vec3::new(0.0, h * 0.62, -d / 2.0 - 0.012), Vec3::new(0.046, 0.046, 0.016), body));
+                prop.push(PartRole::Body, cuboid(Vec3::new(0.0, h * 0.62, -d / 2.0 - 0.0205), Vec3::new(0.03, 0.03, 0.002), glass));
+                prop.push(PartRole::Body, cuboid(Vec3::new(-0.03, h + 0.012, 0.01), Vec3::new(0.035, 0.024, 0.07), body));
+                prop.push(PartRole::Body, cylinder(Vec3::new(0.038, h, -0.025), 0.007, 0.006, 12, red));
+                prop.lens = Some(Mat4::from_translation(Vec3::new(0.0, h * 0.62, -d / 2.0 - 0.022)));
+                prop.slot = Some(Mat4::from_translation(Vec3::new(0.0, 0.012, -d / 2.0 - 0.007)));
+            }
+            // The scene's own only.
+            PropKind::Item => {}
+        }
+        prop.finish();
+        prop
+    }
+
+    /// Rust-DOS's own manual and joystick, for a scene without them:
+    /// standing on what is below the viewer's hands, the manual to the
+    /// left and the joystick to the right, facing the viewer; in the air
+    /// there if nothing is.
+    fn add_missing_props(&mut self) {
+        let spawn = self.spawn;
+        let turn = Mat4::from_rotation_y(spawn.yaw);
+        for (kind, side) in [(PropKind::Manual, -0.25), (PropKind::Joystick, 0.25), (PropKind::Camera, -0.55)] {
+            if self.props.iter().any(|p| p.kind == kind) {
+                continue;
+            }
+            let over = spawn.position + turn.transform_vector3(Vec3::new(side, 0.0, -0.45));
+            let floor = self.surface_below(over, 1.2).unwrap_or(over - Vec3::Y * 0.45);
+            // (The camera's lens to the viewer.)
+            let facing = if kind == PropKind::Camera { Mat4::from_rotation_y(std::f32::consts::PI) } else { Mat4::IDENTITY };
+            let prop = self.built_in_prop(kind, Mat4::from_translation(floor) * turn * facing);
+            self.props.push(prop);
+        }
+    }
+
+    /// The first opaque surface below `point`, at most `reach` down.
+    pub fn surface_below(&self, point: Vec3, reach: f32) -> Option<Vec3> {
+        let mut nearest: Option<f32> = None;
+        for mesh in self.meshes.iter().filter(|m| self.materials[m.material].casts_shadow()) {
+            for tri in mesh.indices.chunks_exact(3) {
+                let corners = [tri[0], tri[1], tri[2]].map(|i| Vec3::from(mesh.vertices[i as usize].position));
+                if let Some((t, _, _)) = super::pick::hit_triangle(point, Vec3::NEG_Y, corners)
+                    && t <= reach
+                    && nearest.is_none_or(|n| t < n)
+                {
+                    nearest = Some(t);
+                }
+            }
+        }
+        nearest.map(|t| point - Vec3::Y * t)
     }
 
     /// The box around the meshes, cut down to `FOCUS` around the screen
@@ -517,6 +844,8 @@ impl Scene {
                         gltf::material::AlphaMode::Blend => Alpha::Blend,
                     },
                     led: None,
+                    lamp: None,
+                    window: false,
                 }
             })
             .collect();
@@ -536,7 +865,12 @@ impl Scene {
             screen: Screen::default(),
             spawn: Spawn { position: Vec3::new(0.0, 1.2, 0.0), yaw: 0.0, pitch: 0.0 },
             sky: extra(scene.extras(), "rustdos_sky").is_none_or(truthy),
-            sun: sunset_sun(),
+            haze: extra(scene.extras(), "rustdos_haze").and_then(|v| v.as_f64()).map_or(HAZE, |h| h.max(0.0) as f32),
+            sun_light: None,
+            heading: extra(scene.extras(), "rustdos_heading").and_then(|v| v.as_f64()).map_or(HEADING, |h| h as f32),
+            lamps: Vec::new(),
+            indoor: None,
+            windows: Vec::new(),
             exposure: extra(scene.extras(), "rustdos_exposure").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32,
             speakers: [Vec3::ZERO; 2],
             shadows: extra(scene.extras(), "rustdos_shadows").is_none_or(truthy),
@@ -547,6 +881,7 @@ impl Scene {
                 .map_or(SCREEN_GLOW, |g| g.max(0.0) as f32),
             source: hash(bytes),
             probes: std::sync::OnceLock::new(),
+            props: Vec::new(),
         };
         let mut walk = Walk {
             buffers: &buffers,
@@ -557,6 +892,12 @@ impl Scene {
             speakers: [None; 2],
             leds: Vec::new(),
             screen_stretch: false,
+            prop_places: Vec::new(),
+            lamp: None,
+            lamps: Vec::new(),
+            lamp_meshes: Vec::new(),
+            windows: Vec::new(),
+            indoor: None,
         };
         for node in scene.nodes() {
             walk.node(&mut loaded, node, Mat4::IDENTITY, false)?;
@@ -567,15 +908,42 @@ impl Scene {
         if loaded.meshes.iter().all(|m| m.material != screen_material) {
             return Err("no mesh is the screen: name it \"screen\", or give it the custom property rustdos_screen".into());
         }
-        // A scene without lights of its own is lit by the sunset; with
-        // some, the sky only adds a little.
+        // A scene without lights of its own is lit by the sun, and with a
+        // sky the sun lights it too; with lights, the sky (or without one,
+        // what fills the room) only adds a little.
         let (sun, ambient) = sunset_lights();
-        if loaded.lights.is_empty() {
-            loaded.lights.push(sun);
-            loaded.ambient = ambient;
-        } else {
-            loaded.ambient = ambient * 0.5;
+        loaded.ambient = if loaded.lights.is_empty() { ambient } else { ambient * 0.5 };
+        if loaded.lights.is_empty() || loaded.sky {
+            // First, the light that most wants shadows; the others after.
+            loaded.lights.insert(0, sun);
+            loaded.lights.truncate(MAX_LIGHTS);
+            for lamp in &mut walk.lamps {
+                lamp.lights.iter_mut().for_each(|i| *i += 1);
+                lamp.lights.retain(|&i| i < MAX_LIGHTS);
+            }
+            loaded.sun_light = Some(0);
         }
+        loaded.lamps = std::mem::take(&mut walk.lamps);
+        // A lamp's own copies of the materials that glow, lit or not apart
+        // from the rest using them.
+        for (mesh, lamp) in std::mem::take(&mut walk.lamp_meshes) {
+            let material = &loaded.materials[loaded.meshes[mesh].material];
+            if material.emissive == [0.0; 3] && material.emissive_texture.is_none() {
+                continue;
+            }
+            let material = Material { lamp: Some(lamp), ..material.clone() };
+            loaded.meshes[mesh].material = loaded.materials.len();
+            loaded.materials.push(material);
+        }
+        for mesh in std::mem::take(&mut walk.windows) {
+            let vertices = &loaded.meshes[mesh].vertices;
+            let middle = vertices.iter().map(|v| Vec3::from(v.position)).sum::<Vec3>() / vertices.len().max(1) as f32;
+            loaded.windows.push(middle);
+            let material = Material { window: true, ..loaded.materials[loaded.meshes[mesh].material].clone() };
+            loaded.meshes[mesh].material = loaded.materials.len();
+            loaded.materials.push(material);
+        }
+        loaded.indoor = walk.indoor;
         loaded.collect_screen();
         loaded.screen.stretch = walk.screen_stretch;
         let sides = loaded.screen_speakers();
@@ -592,6 +960,12 @@ impl Scene {
             loaded.meshes[mesh].material = loaded.materials.len();
             loaded.materials.push(material);
         }
+        // Props placed by an empty of their name: Rust-DOS's model.
+        for (kind, pose) in walk.prop_places {
+            let prop = loaded.built_in_prop(kind, pose);
+            loaded.props.push(prop);
+        }
+        loaded.add_missing_props();
         Ok(loaded)
     }
 }
@@ -611,15 +985,53 @@ struct Walk<'a> {
     leds: Vec<(usize, Led)>,
     /// A screen's `rustdos_screen_fit` is `stretch`.
     screen_stretch: bool,
+    /// Props that are only an empty: where Rust-DOS's model goes.
+    prop_places: Vec<(PropKind, Mat4)>,
+    /// The lamp being walked below, the lamps, and the meshes of each.
+    lamp: Option<usize>,
+    lamps: Vec<Lamp>,
+    lamp_meshes: Vec<(usize, usize)>,
+    /// The meshes that are a window's glass.
+    windows: Vec<usize>,
+    /// The inside of the room, from an empty's cube.
+    indoor: Option<(Vec3, Vec3)>,
+}
+
+/// What a node of a prop is, by its name or `rustdos_prop`.
+fn part_role(node: &gltf::Node) -> Option<PartRole> {
+    let named = extra(node.extras(), "rustdos_prop").and_then(|v| v.as_str().map(str::to_string)).or_else(|| node.name().map(str::to_string))?;
+    let name = named.trim().to_ascii_lowercase();
+    match name.split('.').next().unwrap_or(&name) {
+        "manual_page_left" => Some(PartRole::PageLeft),
+        "manual_page_right" => Some(PartRole::PageRight),
+        "joystick_stick" => Some(PartRole::Stick),
+        _ => None,
+    }
+}
+
+/// Where a node is, without its scale.
+fn rigid(world: Mat4) -> Mat4 {
+    let (_, rotation, position) = world.to_scale_rotation_translation();
+    Mat4::from_rotation_translation(rotation, position)
 }
 
 /// The lights of a scene are at most this many; the shader has room for
 /// no more.
-pub const MAX_LIGHTS: usize = 8;
+pub const MAX_LIGHTS: usize = 16;
+
+/// A scene's own lights at most: room is left for the sun and a camera's
+/// flash.
+const SCENE_LIGHTS: usize = MAX_LIGHTS - 2;
 
 impl Walk<'_> {
     fn node(&mut self, scene: &mut Scene, node: gltf::Node, parent: Mat4, in_screen: bool) -> Result<(), String> {
         let world = parent * Mat4::from_cols_array_2d(&node.transform().matrix());
+        let prop = extra(node.extras(), "rustdos_prop")
+            .and_then(|v| v.as_str().and_then(PropKind::parse))
+            .or_else(|| node.name().and_then(PropKind::parse));
+        if let Some(kind) = prop.filter(|_| !in_screen) {
+            return self.prop(scene, node, world, kind);
+        }
         let named = |name: Option<&str>, wanted: &str| name.is_some_and(|n| n.eq_ignore_ascii_case(wanted));
         if named(node.name(), "spawn") {
             self.spawn = Some(Spawn::from_matrix(world));
@@ -632,9 +1044,27 @@ impl Walk<'_> {
         if node.camera().is_some() && self.camera.is_none() {
             self.camera = Some(Spawn::from_matrix(world));
         }
-        if let Some(light) = node.light()
-            && scene.lights.len() < MAX_LIGHTS
+        if named(node.name(), "indoor") || extra(node.extras(), "rustdos_indoor").is_some_and(truthy) {
+            // Blender's cube empty, from -1 to 1.
+            let corners = (0..8).map(|i| world.transform_point3(Vec3::new([-1.0, 1.0][i & 1], [-1.0, 1.0][i >> 1 & 1], [-1.0, 1.0][i >> 2])));
+            self.indoor = Some(corners.fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(l, h), c| (l.min(c), h.max(c))));
+        }
+        // A lamp and all below it.
+        let outer_lamp = self.lamp;
+        if self.lamp.is_none()
+            && let Some(value) = extra(node.extras(), "rustdos_lamp").filter(|v| v.is_string() || truthy(v.clone()))
         {
+            let name = value.as_str().map(str::to_string).or_else(|| node.name().map(str::to_string)).unwrap_or_else(|| "lamp".into());
+            let on = extra(node.extras(), "rustdos_lamp_on").is_some_and(truthy);
+            self.lamp = Some(self.lamps.len());
+            self.lamps.push(Lamp { name, on, lights: Vec::new(), bounds: (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)) });
+        }
+        if let Some(light) = node.light()
+            && scene.lights.len() < SCENE_LIGHTS
+        {
+            if let Some(lamp) = self.lamp {
+                self.lamps[lamp].lights.push(scene.lights.len());
+            }
             let color = Vec3::from(light.color()) * light.intensity();
             let kind = match light.kind() {
                 gltf::khr_lights_punctual::Kind::Directional => LightKind::Directional,
@@ -666,7 +1096,109 @@ impl Walk<'_> {
             .and_then(|v| v.as_str().and_then(Led::parse))
             .or_else(|| node.name().filter(|n| n.to_ascii_lowercase().starts_with("led_")).and_then(Led::parse))
             .or_else(|| node.mesh().and_then(|m| m.name()).filter(|n| n.to_ascii_lowercase().starts_with("led_")).and_then(Led::parse));
+        let window = !screen
+            && (extra(node.extras(), "rustdos_window").is_some_and(truthy)
+                || node.name().is_some_and(is_window_name)
+                || node.mesh().is_some_and(|m| m.name().is_some_and(is_window_name)));
         if let Some(mesh) = node.mesh() {
+            for (mut read, primitive) in self.read_mesh(&mesh, world)? {
+                read.material = if screen {
+                    self.screen_material
+                } else {
+                    primitive.material().index().unwrap_or(self.default_material)
+                };
+                if let Some(led) = led.filter(|_| !screen) {
+                    self.leds.push((scene.meshes.len(), led));
+                }
+                if let Some(lamp) = self.lamp {
+                    let bounds = &mut self.lamps[lamp].bounds;
+                    for v in &read.vertices {
+                        bounds.0 = bounds.0.min(Vec3::from(v.position));
+                        bounds.1 = bounds.1.max(Vec3::from(v.position));
+                    }
+                    self.lamp_meshes.push((scene.meshes.len(), lamp));
+                }
+                if window {
+                    self.windows.push(scene.meshes.len());
+                }
+                scene.meshes.push(read);
+            }
+        }
+        for child in node.children() {
+            self.node(scene, child, world, screen)?;
+        }
+        if outer_lamp.is_none()
+            && let Some(lamp) = self.lamp.take()
+        {
+            // Without meshes, a small box around its lights.
+            let bounds = &mut self.lamps[lamp].bounds;
+            if bounds.0.x > bounds.1.x {
+                for &i in &self.lamps[lamp].lights.clone() {
+                    let at = scene.lights[i].position;
+                    let bounds = &mut self.lamps[lamp].bounds;
+                    bounds.0 = bounds.0.min(at - 0.1);
+                    bounds.1 = bounds.1.max(at + 0.1);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// A prop and what is below it: its meshes in its frame, apart from
+    /// the room's. Only an empty, it is where Rust-DOS's model goes.
+    fn prop(&mut self, scene: &mut Scene, node: gltf::Node, world: Mat4, kind: PropKind) -> Result<(), String> {
+        let pose = rigid(world);
+        let mut prop = Prop::new(kind, pose);
+        self.prop_node(&mut prop, node, world, pose.inverse(), PartRole::Body)?;
+        if prop.parts.is_empty() {
+            if kind.built_in() {
+                self.prop_places.push((kind, pose));
+            }
+        } else {
+            prop.finish();
+            scene.props.push(prop);
+        }
+        Ok(())
+    }
+
+    /// A node of a prop, its meshes taken into the frame `to` takes the
+    /// scene's coordinates to: the prop's, or below the stick, the
+    /// stick's.
+    fn prop_node(&mut self, prop: &mut Prop, node: gltf::Node, world: Mat4, mut to: Mat4, mut role: PartRole) -> Result<(), String> {
+        let frame = prop.pose.inverse() * rigid(world);
+        match node.name().map(|n| n.split('.').next().unwrap_or(n).to_ascii_lowercase()).as_deref() {
+            Some("camera_lens") => prop.lens = Some(frame),
+            Some("camera_slot") => prop.slot = Some(frame),
+            _ => {}
+        }
+        match part_role(&node) {
+            Some(PartRole::Stick) => {
+                let pivot = rigid(world);
+                prop.stick = prop.pose.inverse() * pivot;
+                to = pivot.inverse();
+                role = PartRole::Stick;
+            }
+            Some(part) => role = part,
+            None => {}
+        }
+        if let Some(mesh) = node.mesh() {
+            for (mut read, primitive) in self.read_mesh(&mesh, to * world)? {
+                read.material = primitive.material().index().unwrap_or(self.default_material);
+                prop.push(role, read);
+            }
+        }
+        for child in node.children() {
+            let child_world = world * Mat4::from_cols_array_2d(&child.transform().matrix());
+            self.prop_node(prop, child, child_world, to, role)?;
+        }
+        Ok(())
+    }
+
+    /// A mesh's triangle primitives, through `world`, with their
+    /// primitives (for the material).
+    fn read_mesh<'m>(&self, mesh: &gltf::Mesh<'m>, world: Mat4) -> Result<Vec<(Mesh, gltf::Primitive<'m>)>, String> {
+        let mut read = Vec::new();
+        {
             let normals = Mat3::from_mat4(world).inverse().transpose();
             for primitive in mesh.primitives() {
                 if primitive.mode() != gltf::mesh::Mode::Triangles {
@@ -703,22 +1235,18 @@ impl Walk<'_> {
                         uv: uvs.get(i).copied().unwrap_or([0.0, 0.0]),
                     })
                     .collect();
-                let material = if screen {
-                    self.screen_material
-                } else {
-                    primitive.material().index().unwrap_or(self.default_material)
-                };
-                if let Some(led) = led.filter(|_| !screen) {
-                    self.leds.push((scene.meshes.len(), led));
-                }
-                scene.meshes.push(Mesh { vertices, indices, material });
+                read.push((Mesh { vertices, indices, material: self.default_material }, primitive));
             }
         }
-        for child in node.children() {
-            self.node(scene, child, world, screen)?;
-        }
-        Ok(())
+        Ok(read)
     }
+}
+
+/// Whether a node or mesh is called a window's glass ("Window glass",
+/// "window_glass.001").
+fn is_window_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase().replace(['_', ' '], "");
+    name.starts_with("windowglass") || name.starts_with("windowpane")
 }
 
 /// Normals for a mesh that has none: each vertex's faces', by their area.
@@ -732,6 +1260,21 @@ fn smooth_normals(positions: &[Vec3], indices: &[u32]) -> Vec<Vec3> {
         }
     }
     normals.into_iter().map(|n| n.normalize_or(Vec3::Y)).collect()
+}
+
+/// A polaroid picture's size, across and down, in metres; and its picture's,
+/// square, from the card's top edge this far.
+pub const PRINT: Vec2 = Vec2::new(0.088, 0.107);
+pub const PRINT_PICTURE: f32 = 0.079;
+pub const PRINT_TOP: f32 = 0.007;
+
+/// A polaroid picture lying face up, its top edge away (-Z), its middle at
+/// the origin: the white card and the picture on it (UV (0, 0) at its top
+/// left), both in material 0.
+pub fn print_meshes() -> (Mesh, Mesh) {
+    let card = cuboid(Vec3::new(0.0, 0.0005, 0.0), Vec3::new(PRINT.x, 0.001, PRINT.y), 0);
+    let corner = Vec3::new(-PRINT_PICTURE / 2.0, 0.00105, -PRINT.y / 2.0 + PRINT_TOP);
+    (card, page(corner, PRINT_PICTURE, PRINT_PICTURE, 0))
 }
 
 /// The cube from -0.5 to 0.5, which the extras are drawn with.
@@ -758,6 +1301,59 @@ fn cuboid(center: Vec3, size: Vec3, material: usize) -> Mesh {
                 vertices.push(Vertex { position: p.to_array(), normal: n.to_array(), uv: [0.0, 0.0] });
             }
             indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+    }
+    Mesh { vertices, indices, material }
+}
+
+/// A page lying face up, `w` across and `d` deep from its top left
+/// corner, UV (0, 0) there.
+fn page(corner: Vec3, w: f32, d: f32, material: usize) -> Mesh {
+    let at = |x: f32, z: f32| Vertex { position: (corner + Vec3::new(x * w, 0.0, z * d)).to_array(), normal: [0.0, 1.0, 0.0], uv: [x, z] };
+    Mesh { vertices: vec![at(0.0, 0.0), at(0.0, 1.0), at(1.0, 1.0), at(1.0, 0.0)], indices: vec![0, 1, 2, 0, 2, 3], material }
+}
+
+/// A page being turned, `width` long along +X from the hinge and from
+/// `z.0` to `z.1`: its front faces +Y, its back (`up` -1) -Y, which lies
+/// face up as the left page once turned over.
+fn sheet(width: f32, (z0, z1): (f32, f32), up: f32, material: usize) -> Mesh {
+    let depth = z1 - z0;
+    let at = |x: f32, z: f32| {
+        let u = if up > 0.0 { x } else { 1.0 - x };
+        Vertex { position: [x * width, 0.0, z0 + z * depth], normal: [0.0, up, 0.0], uv: [u, z] }
+    };
+    let indices = if up > 0.0 { vec![0, 1, 2, 0, 2, 3] } else { vec![0, 2, 1, 0, 3, 2] };
+    Mesh { vertices: vec![at(0.0, 0.0), at(0.0, 1.0), at(1.0, 1.0), at(1.0, 0.0)], indices, material }
+}
+
+/// An upright cylinder from `bottom`, closed at both ends.
+fn cylinder(bottom: Vec3, radius: f32, height: f32, segments: u32, material: usize) -> Mesh {
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    let around = |i: u32| {
+        let a = i as f32 / segments as f32 * std::f32::consts::TAU;
+        Vec3::new(a.cos(), 0.0, -a.sin())
+    };
+    for i in 0..segments {
+        let base = vertices.len() as u32;
+        let (n0, n1) = (around(i), around(i + 1));
+        for (n, y) in [(n0, 0.0), (n1, 0.0), (n1, height), (n0, height)] {
+            let p = bottom + n * radius + Vec3::Y * y;
+            vertices.push(Vertex { position: p.to_array(), normal: n.to_array(), uv: [0.0, 0.0] });
+        }
+        indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    for (y, up) in [(0.0, -1.0f32), (height, 1.0)] {
+        let center = vertices.len() as u32;
+        let normal = [0.0, up, 0.0];
+        vertices.push(Vertex { position: (bottom + Vec3::Y * y).to_array(), normal, uv: [0.0, 0.0] });
+        for i in 0..segments {
+            let p = bottom + around(i) * radius + Vec3::Y * y;
+            vertices.push(Vertex { position: p.to_array(), normal, uv: [0.0, 0.0] });
+        }
+        for i in 0..segments {
+            let (a, b) = (center + 1 + i, center + 1 + (i + 1) % segments);
+            indices.extend(if up > 0.0 { [center, a, b] } else { [center, b, a] });
         }
     }
     Mesh { vertices, indices, material }
@@ -1006,6 +1602,89 @@ mod tests {
             assert!(near(a, b), "{:?}: {:?} {:?}", led, a, b);
             assert!(ea.iter().zip(eb).all(|(x, y)| (x - y).abs() < 1e-4), "{:?}: {:?} {:?}", led, ea, eb);
         }
+        // The manual and the joystick on the desk, as Rust-DOS's models.
+        assert_eq!(blend.props.len(), built.props.len());
+        for b in &built.props {
+            let a = blend.props.iter().find(|a| a.kind == b.kind).expect("the prop");
+            assert!(a.pose.abs_diff_eq(b.pose, 1e-4), "{:?}: {:?} {:?}", a.kind, a.pose, b.pose);
+            assert_eq!(a.parts.len(), b.parts.len());
+        }
+    }
+
+    #[test]
+    fn props_stand_on_the_desk_and_have_their_parts() {
+        let room = Scene::test_room();
+        let kinds: Vec<PropKind> = room.props.iter().map(|p| p.kind).collect();
+        assert_eq!(kinds, [PropKind::Manual, PropKind::Joystick, PropKind::Camera]);
+        for prop in &room.props {
+            let at = prop.pose.transform_point3(Vec3::ZERO);
+            assert_eq!(room.surface_below(at + Vec3::Y * 0.1, 1.0), Some(at), "{:?} on the desk", prop.kind);
+            assert!(prop.bounds.0.y >= -1e-4 && prop.bounds.1.y > 0.0);
+        }
+        let manual = &room.props[0];
+        for role in [PartRole::PageLeft, PartRole::PageRight, PartRole::SheetFront, PartRole::SheetBack] {
+            assert!(manual.has(role), "{:?}", role);
+        }
+        // The sheet turns about the spine, between the pages.
+        assert!(manual.hinge.x.abs() < 1e-4);
+        let joystick = &room.props[1];
+        assert!(joystick.has(PartRole::Stick) && joystick.knob.y > 0.1);
+        // A scene without them gets them where the hands are, on the floor
+        // of the glTF quad's scene (nothing is below).
+        let scene = Scene::from_gltf(quad_gltf().as_bytes(), Path::new(".")).unwrap();
+        assert_eq!(scene.props.len(), 3);
+        // The camera looks at the viewer, from the front of its box.
+        let camera = &room.props[2];
+        let lens = camera.pose * camera.lens.unwrap();
+        assert!(lens.transform_vector3(Vec3::NEG_Z).z > 0.99, "{:?}", lens);
+        assert!(camera.lens.unwrap().transform_point3(Vec3::ZERO).z <= camera.bounds.0.z + 0.01);
+    }
+
+    #[test]
+    fn gltf_props_keep_their_own_meshes() {
+        // The screen quad, and a joystick: a base with the quad as its mesh
+        // and a stick below it, moved and turned.
+        let text = quad_gltf()
+            .replace(r#""nodes": [0, 2, 3, 4]"#, r#""nodes": [0, 2, 3, 4, 5]"#)
+            .replace(
+                r#"{"name": "Light", "mesh": 0, "extras": {"rustdos_led": "hdd"}, "translation": [5, 0, 0]}"#,
+                r#"{"name": "Light", "mesh": 0, "extras": {"rustdos_led": "hdd"}, "translation": [5, 0, 0]},
+                {"name": "Stick base", "extras": {"rustdos_prop": "joystick"}, "mesh": 0, "translation": [1, 0.7, -0.5], "children": [6]},
+                {"name": "joystick_stick", "mesh": 0, "translation": [0, 0.05, 0]}"#,
+            );
+        let scene = Scene::from_gltf(text.as_bytes(), Path::new(".")).unwrap();
+        // Not in the room's meshes; and the manual is Rust-DOS's.
+        assert_eq!(scene.meshes.len(), 2);
+        let joystick = scene.props.iter().find(|p| p.kind == PropKind::Joystick).unwrap();
+        assert!(joystick.pose.transform_point3(Vec3::ZERO).abs_diff_eq(Vec3::new(1.0, 0.7, -0.5), 1e-4));
+        assert_eq!(joystick.parts.iter().filter(|p| p.role == PartRole::Body).count(), 1);
+        assert_eq!(joystick.parts.iter().filter(|p| p.role == PartRole::Stick).count(), 1);
+        assert!(joystick.stick.transform_point3(Vec3::ZERO).abs_diff_eq(Vec3::new(0.0, 0.05, 0.0), 1e-4));
+        // The stick's mesh is in its own frame: the quad, from -1 to 1.
+        let stick = &joystick.parts.iter().find(|p| p.role == PartRole::Stick).unwrap().mesh;
+        assert!(stick.vertices.iter().any(|v| v.position == [1.0, 1.0, 0.0]));
+        assert!((joystick.knob.y - 0.985).abs() < 1e-4);
+        assert!(scene.props.iter().any(|p| p.kind == PropKind::Manual && p.has(PartRole::PageRight)));
+    }
+
+    #[test]
+    fn gltf_items_are_props_of_their_own() {
+        // A stapler with the quad as its mesh, and an empty item, which is
+        // nothing.
+        let text = quad_gltf().replace(r#""nodes": [0, 2, 3, 4]"#, r#""nodes": [0, 2, 3, 4, 5, 6]"#).replace(
+            r#"{"name": "Light", "mesh": 0, "extras": {"rustdos_led": "hdd"}, "translation": [5, 0, 0]}"#,
+            r#"{"name": "Light", "mesh": 0, "extras": {"rustdos_led": "hdd"}, "translation": [5, 0, 0]},
+                {"name": "Stapler", "extras": {"rustdos_prop": "item"}, "mesh": 0, "translation": [1, 0.7, -0.5], "scale": [0.05, 0.001, 1]},
+                {"name": "item.001"}"#,
+        );
+        let scene = Scene::from_gltf(text.as_bytes(), Path::new(".")).unwrap();
+        let items: Vec<&Prop> = scene.props.iter().filter(|p| p.kind == PropKind::Item).collect();
+        assert_eq!(items.len(), 1);
+        assert_eq!(scene.meshes.len(), 2);
+        // Thin as it is, it is taken by a box of some thickness.
+        let (low, high) = items[0].bounds;
+        assert!((high - low).min_element() >= THINNEST - 1e-6, "{:?}", items[0].bounds);
+        assert!((high.x - low.x - 0.1).abs() < 1e-4);
     }
 
     #[test]

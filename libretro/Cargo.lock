@@ -3,16 +3,6 @@
 version = 4
 
 [[package]]
-name = "ab_glyph"
-version = "0.2.32"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01c0457472c38ea5bd1c3b5ada5e368271cb550be7a4ca4a0b4634e9913f6cc2"
-dependencies = [
- "ab_glyph_rasterizer",
- "owned_ttf_parser",
-]
-
-[[package]]
 name = "ab_glyph_rasterizer"
 version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -238,9 +228,9 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
 name = "chd"
-version = "0.3.4"
+version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "03e16e43ebc68e33e0c66f7158ca00f0a6eb2c1241556a8ceb36deaeb4299986"
+checksum = "400d9065552452205d0ecc7670c93477c332f0cc6c8051684c5e69ac6f83ef23"
 dependencies = [
  "arrayvec",
  "bitreader",
@@ -1107,15 +1097,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
-name = "owned_ttf_parser"
-version = "0.25.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "36820e9051aca1014ddc75770aab4d68bc1e9e632f0f5627c4086bc216fb583b"
-dependencies = [
- "ttf-parser",
-]
-
-[[package]]
 name = "peniko"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1294,9 +1275,9 @@ checksum = "cab834c73d247e67f4fae452806d17d3c7501756d98c8808d7c9c7aa7d18f973"
 
 [[package]]
 name = "rust-dos"
-version = "1.7.0"
+version = "1.7.3"
 dependencies = [
- "ab_glyph",
+ "ab_glyph_rasterizer",
  "base64",
  "bitflags 2.13.2",
  "chd",
@@ -1336,6 +1317,7 @@ dependencies = [
  "serde_json",
  "sevenz-rust2",
  "sha2",
+ "skrifa",
  "smoltcp",
  "symphonia",
  "tokio",
@@ -1345,21 +1327,21 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-audio-core"
-version = "1.7.0"
+version = "1.7.3"
 dependencies = [
  "rust-dos-savestate",
 ]
 
 [[package]]
 name = "rust-dos-dma"
-version = "1.7.0"
+version = "1.7.3"
 dependencies = [
  "rust-dos-savestate",
 ]
 
 [[package]]
 name = "rust-dos-gus"
-version = "1.7.0"
+version = "1.7.3"
 dependencies = [
  "rust-dos-audio-core",
  "rust-dos-dma",
@@ -1370,14 +1352,14 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-hostdirs"
-version = "1.7.0"
+version = "1.7.3"
 dependencies = [
  "dirs",
 ]
 
 [[package]]
 name = "rust-dos-libretro"
-version = "1.7.0"
+version = "1.7.3"
 dependencies = [
  "glow",
  "rust-dos",
@@ -1386,7 +1368,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-lpt-dac"
-version = "1.7.0"
+version = "1.7.3"
 dependencies = [
  "rust-dos-audio-core",
  "rust-dos-savestate",
@@ -1394,7 +1376,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-mpu401"
-version = "1.7.0"
+version = "1.7.3"
 dependencies = [
  "rust-dos-audio-core",
  "rust-dos-gus",
@@ -1406,7 +1388,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-mt32"
-version = "1.7.0"
+version = "1.7.3"
 dependencies = [
  "libloading",
  "rust-dos-hostdirs",
@@ -1414,7 +1396,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-opl"
-version = "1.7.0"
+version = "1.7.3"
 dependencies = [
  "nuked-opl3",
  "rust-dos-audio-core",
@@ -1423,11 +1405,11 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-savestate"
-version = "1.7.0"
+version = "1.7.3"
 
 [[package]]
 name = "rust-dos-sc55"
-version = "1.7.0"
+version = "1.7.3"
 dependencies = [
  "dirs",
  "rust-dos-hostdirs",
@@ -1437,7 +1419,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-soundblaster"
-version = "1.7.0"
+version = "1.7.3"
 dependencies = [
  "rust-dos-audio-core",
  "rust-dos-dma",
@@ -1450,7 +1432,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-tandy"
-version = "1.7.0"
+version = "1.7.3"
 dependencies = [
  "rust-dos-audio-core",
  "rust-dos-savestate",
@@ -1458,7 +1440,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-zip"
-version = "1.7.0"
+version = "1.7.3"
 dependencies = [
  "flate2",
  "zip",
@@ -1493,9 +1475,9 @@ checksum = "e3ca93af923df5fc03beddbf464242620fd24daa9e10f9ecd56eb9571eb7ba38"
 
 [[package]]
 name = "ruzstd"
-version = "0.8.3"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7c1c839d570d835527c9a5e4db7cb2198683a988cb9d7293fc8674e6bd58fc8"
+checksum = "69e4ce4a039f42bf25920b95667e4d789e98749ab11bbb8d2c2936f788421bb5"
 dependencies = [
  "twox-hash",
 ]
@@ -1915,12 +1897,6 @@ name = "toml_writer"
 version = "1.1.3+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06bdbd8cfc056b8d2e2e85f29b56a3bdbecb527cef81eb39e3e7b98af4652770"
-
-[[package]]
-name = "ttf-parser"
-version = "0.25.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 
 [[package]]
 name = "twox-hash"

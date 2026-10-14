@@ -459,6 +459,33 @@ impl CpuSpeed {
     }
 }
 
+/// The frame rates `auto_fps` takes: the frame rate `CpuSpeed::Auto` aims
+/// for in place of the display's refresh rate.
+pub const AUTO_FPS_RANGE: std::ops::RangeInclusive<u32> = 10..=240;
+
+/// Parse `auto_fps`: `auto` (None, the display's refresh rate) or a frame
+/// rate.
+pub fn parse_auto_fps(s: &str) -> Result<Option<u32>, String> {
+    let s = s.trim();
+    if s.eq_ignore_ascii_case("auto") {
+        return Ok(None);
+    }
+    match s.parse::<u32>() {
+        Ok(n) if AUTO_FPS_RANGE.contains(&n) => Ok(Some(n)),
+        _ => Err(format!(
+            "invalid auto_fps '{}': expected auto or {}-{}",
+            s,
+            AUTO_FPS_RANGE.start(),
+            AUTO_FPS_RANGE.end()
+        )),
+    }
+}
+
+/// `auto_fps` as `parse_auto_fps` reads it.
+pub fn auto_fps_text(fps: Option<u32>) -> String {
+    fps.map_or("auto".to_string(), |n| n.to_string())
+}
+
 /// Keeps emulated time in step with the wall clock, one video frame at a
 /// time, and tunes the speed in `CpuSpeed::Max` and `Auto` modes.
 pub struct Pacer {
@@ -489,10 +516,10 @@ pub struct Pacer {
 }
 
 impl Pacer {
-    pub fn new(speed: CpuSpeed, now: Instant) -> Self {
+    pub fn new(speed: CpuSpeed, auto_fps: Option<u32>, now: Instant) -> Self {
         Self {
             speed,
-            auto: AutoSpeed::new(speed.initial_cycles()),
+            auto: AutoSpeed::new(speed.initial_cycles(), auto_fps),
             protected: false,
             host_max: None,
             sample: HostSample::default(),
@@ -536,9 +563,15 @@ impl Pacer {
     /// clock's rate (`CpuSpeed::initial_cycles`).
     pub fn set_speed(&mut self, speed: CpuSpeed) {
         if let CpuSpeed::Auto(base) = speed {
-            self.auto = AutoSpeed::new(base);
+            self.auto = AutoSpeed::new(base, self.auto.target_fps());
         }
         self.speed = speed;
+    }
+
+    /// Change the frame rate `Auto` aims for (`auto_fps`), None for the
+    /// display's refresh rate; the search starts over.
+    pub fn set_auto_fps(&mut self, fps: Option<u32>) {
+        self.auto = AutoSpeed::new(self.auto.base(), fps);
     }
 
     /// The instruction count the next batch should run to, so emulated time
@@ -727,7 +760,211 @@ impl HostSample {
     }
 }
 
+/// PIT channel 2's counter, as programs read it: the count on port 42h
+/// and the output on port 61h bit 5. Its gate is port 61h bit 0. Programs
+/// time delay loops with it by raising the gate, running the loop, lowering
+/// the gate and reading the count that stopped (MS-Kermit), so the gate has
+/// to stop and restart the count as on the 8253. The speaker's tone is
+/// made from the divisor elsewhere and doesn't use this.
+#[derive(Clone, Debug)]
+pub struct Pit2 {
+    /// Counter mode, 0..=5 (6 and 7 alias 2 and 3).
+    mode: u8,
+    /// Count loaded at each reload, 1..=65536.
+    reload: u32,
+    /// Count written while a mode 2/3 period was running, and the tick the
+    /// period ends at, when it takes effect.
+    pending: Option<(u32, u64)>,
+    /// Port 61h bit 0.
+    gate: bool,
+    /// Tick the count last started from `from`.
+    start: u64,
+    /// Count at `start`: the reload value, or where a gate in mode 0 or 4
+    /// stopped it.
+    from: u32,
+    /// The count and output while the counter doesn't run: after a control
+    /// word until a count is written, with the gate low in modes 0, 2, 3
+    /// and 4, and before the gate triggers modes 1 and 5.
+    held: Option<(u16, bool)>,
+    /// Access mode from the last control word: 1 = LSB only, 2 = MSB only,
+    /// 3 = LSB then MSB.
+    pub access: u8,
+    /// Count frozen by a latch command, read until both bytes are read.
+    pub latched: Option<u16>,
+    /// A control word came and no count since: the next complete count
+    /// loads at once, even into a mode 2 or 3 period that ran on through
+    /// the control word. Saved after the PIT2 section's first fields.
+    pub count_due: bool,
+}
+
+impl Default for Pit2 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Pit2 {
+    /// Power-on state: mode 3 with the gate low.
+    pub fn new() -> Self {
+        Self {
+            mode: 3,
+            reload: 0xFFFF,
+            pending: None,
+            gate: false,
+            start: 0,
+            from: 0xFFFF,
+            held: Some((0xFFFF, true)),
+            access: 3,
+            latched: None,
+            count_due: false,
+        }
+    }
+
+    fn periodic(&self) -> bool {
+        matches!(self.mode, 2 | 3)
+    }
+
+    fn gated(&self) -> bool {
+        matches!(self.mode, 0 | 2 | 3 | 4)
+    }
+
+    pub fn gate(&self) -> bool {
+        self.gate
+    }
+
+    /// A count written in mode 2 or 3 while a period ran, taking effect
+    /// when the period ends.
+    fn apply_pending(&mut self, now: u64) {
+        if let Some((reload, at)) = self.pending
+            && at <= now
+        {
+            self.pending = None;
+            self.reload = reload;
+            self.from = reload;
+            self.start = at;
+        }
+    }
+
+    /// Control word for channel 2: set the mode and stop the counter until
+    /// a count is written, as the 8254 data sheet has it.
+    ///
+    /// A mode 2 or 3 count that runs when a control word for the same mode
+    /// comes goes on with the count it had. A switch between modes 2 and 3
+    /// stops it as any other control word does. Bao Xiao San Guo Zhi
+    /// (SANGO.EXE) makes its random numbers with `out 43h,86h; out 43h,B6h`
+    /// and two reads of port 42h, never writing a count; a stopped count
+    /// gives it the same number every time (DOSBox SVN's "every roll is
+    /// 5", DOSBox-X issue 1274).
+    pub fn set_mode(&mut self, mode: u8, access: u8, now: u64) {
+        let (count, _) = self.read(now);
+        let mode = if mode >= 6 { mode - 4 } else { mode };
+        let runs_on = self.held.is_none() && self.periodic() && mode == self.mode;
+        self.mode = mode;
+        self.access = access;
+        self.pending = None;
+        self.latched = None;
+        self.count_due = true;
+        if !runs_on {
+            // Mode 0's output goes low at the control word, the others' high.
+            self.held = Some((count, self.mode != 0));
+        }
+    }
+
+    /// A complete count was written (0 means 65536).
+    pub fn write_count(&mut self, count: u16, now: u64) {
+        let reload = if count == 0 { 0x10000 } else { count as u32 };
+        self.apply_pending(now);
+        if self.held.is_none() && self.periodic() && !self.count_due {
+            let reload_now = self.reload as u64;
+            let into = (now - self.start) % reload_now;
+            self.pending = Some((reload, now - into + reload_now));
+            return;
+        }
+        self.count_due = false;
+        self.reload = reload;
+        self.from = reload;
+        self.pending = None;
+        if matches!(self.mode, 1 | 5) {
+            // Loaded, but counting waits for the gate to trigger it.
+            self.held = Some((reload as u16, true));
+        } else if self.gate {
+            self.start = now;
+            self.held = None;
+        } else {
+            self.held = Some((reload as u16, self.mode != 0));
+        }
+    }
+
+    /// Port 61h bit 0 changed to `gate`.
+    pub fn set_gate(&mut self, gate: bool, now: u64) {
+        if gate == self.gate {
+            return;
+        }
+        self.apply_pending(now);
+        self.gate = gate;
+        if !gate {
+            if self.gated() && self.held.is_none() {
+                let (count, out) = self.read(now);
+                // Modes 2 and 3 drive their output high while stopped.
+                self.held = Some((count, out || self.periodic()));
+            }
+            return;
+        }
+        match self.mode {
+            // A rising gate reloads the count and starts a new period.
+            1 | 2 | 3 | 5 => {
+                self.from = self.reload;
+                self.start = now;
+                self.held = None;
+            }
+            // Modes 0 and 4 go on from where the gate stopped them.
+            _ => {
+                if let Some((count, _)) = self.held {
+                    self.from = if count == 0 { 0x10000 } else { count as u32 };
+                    self.start = now;
+                    self.held = None;
+                }
+            }
+        }
+    }
+
+    /// The count and output at `now`.
+    pub fn read(&mut self, now: u64) -> (u16, bool) {
+        self.apply_pending(now);
+        if let Some(held) = self.held {
+            return held;
+        }
+        let elapsed = now.saturating_sub(self.start);
+        let reload = self.reload as u64;
+        match self.mode {
+            2 => {
+                let into = elapsed % reload;
+                let count = (reload - into) as u16;
+                (count, count != 1)
+            }
+            3 => {
+                // The count runs down by two, twice a period, high for the
+                // first half.
+                let into = elapsed % reload;
+                ((reload - 2 * into % reload) as u16, into < reload.div_ceil(2))
+            }
+            // One-shot modes count down through zero and wrap: 0 and 1
+            // raise their output at the terminal count, 4 and 5 pulse it low
+            // for a tick there.
+            _ => {
+                let count = (self.from as u64).wrapping_sub(elapsed) as u16;
+                let out = match self.mode {
+                    0 | 1 => elapsed >= self.from as u64,
+                    _ => elapsed != self.from as u64,
+                };
+                (count, out)
+            }
+        }
+    }
+}
+
 crate::state_fields!(Pit0 { mode, reload, pending_reload, counting, stopped, armed, period_start, next_tc });
+crate::state_fields!(Pit2 { mode, reload, pending, gate, start, from, held, access, latched } skip { count_due });
 crate::state_fields!(Clock { icount, deadline, stalled, idle, batch_end, cycles_per_ms, base_icount, base_ticks, base_ns });
 
 #[cfg(test)]
@@ -757,7 +994,7 @@ mod tests {
     fn fast_forward_runs_ahead_and_goes_on_from_there() {
         let start = Instant::now();
         let mut clock = Clock::new(1000);
-        let mut pacer = Pacer::new(CpuSpeed::Fixed(1000), start);
+        let mut pacer = Pacer::new(CpuSpeed::Fixed(1000), None, start);
         // Normally a frame of wall time is a frame of emulated time.
         let frame_ticks = duration_to_ticks(FRAME);
         let end = pacer.batch_end(&clock, start + FRAME);
@@ -787,7 +1024,7 @@ mod tests {
     fn retrace_pacing_runs_each_batch_past_a_retrace_due_a_frame_apart() {
         let start = Instant::now();
         let mut clock = Clock::new(1000);
-        let mut pacer = Pacer::new(CpuSpeed::Fixed(1000), start);
+        let mut pacer = Pacer::new(CpuSpeed::Fixed(1000), None, start);
         let refresh = CrtTiming::VGA_400;
         let frame = refresh.frame_ns();
         let mut now = start;
@@ -817,7 +1054,7 @@ mod tests {
     fn retrace_pacing_skips_retraces_a_slow_host_missed() {
         let start = Instant::now();
         let mut clock = Clock::new(1000);
-        let mut pacer = Pacer::new(CpuSpeed::Fixed(1000), start);
+        let mut pacer = Pacer::new(CpuSpeed::Fixed(1000), None, start);
         let refresh = CrtTiming::VGA_400;
         clock.icount = pacer.retrace_batch_end(&clock, &refresh, start);
         let first = refresh.retraces(clock.now_ns());
@@ -836,7 +1073,7 @@ mod tests {
         // The frontend leaves it out of the frame's work.
         let start = Instant::now();
         let mut clock = Clock::new(1000);
-        let mut pacer = Pacer::new(CpuSpeed::Fixed(1000), start);
+        let mut pacer = Pacer::new(CpuSpeed::Fixed(1000), None, start);
         clock.icount = pacer.retrace_batch_end(&clock, &CrtTiming::VGA_400, start);
         let (at, _) = pacer.deadline.unwrap();
         let waited = pacer.wait_to_present(&clock);
@@ -849,7 +1086,7 @@ mod tests {
     fn retrace_pacing_waits_only_for_a_batch_that_got_there() {
         let start = Instant::now();
         let clock = Clock::new(1000);
-        let mut pacer = Pacer::new(CpuSpeed::Fixed(1000), start);
+        let mut pacer = Pacer::new(CpuSpeed::Fixed(1000), None, start);
         let refresh = CrtTiming::VGA_400;
         // Stopped short (a breakpoint): no waiting, and the next frame
         // comes at the usual pace.
@@ -876,6 +1113,36 @@ mod tests {
         // No slower than the slowest.
         assert_eq!(CpuSpeed::Fixed(150).stepped(150, false), CpuSpeed::Fixed(MIN_CYCLES));
         assert_eq!(CpuSpeed::Fixed(MIN_CYCLES).stepped(MIN_CYCLES, false), CpuSpeed::Fixed(MIN_CYCLES));
+    }
+
+    #[test]
+    fn channel_2_counts_only_while_its_gate_is_up() {
+        // MS-Kermit's calibration: mode 2, count 0, gate up for a delay
+        // loop, gate down, then read the count without a latch.
+        let mut pit = Pit2::new();
+        pit.set_mode(2, 3, 1000);
+        pit.write_count(0, 1010);
+        assert_eq!(pit.read(5000).0, 0);
+        pit.set_gate(true, 20_000);
+        pit.set_gate(false, 29_544);
+        assert_eq!(pit.read(90_000).0.wrapping_neg(), 9544);
+        // Raising the gate again starts a new period from the top.
+        pit.set_gate(true, 100_000);
+        assert_eq!(pit.read(100_010).0, 0xFFF6);
+    }
+
+    #[test]
+    fn channel_2_mode_0_resumes_where_the_gate_stopped_it() {
+        let mut pit = Pit2::new();
+        pit.set_gate(true, 0);
+        pit.set_mode(0, 3, 0);
+        pit.write_count(100, 10);
+        assert_eq!(pit.read(50), (60, false));
+        pit.set_gate(false, 50);
+        assert_eq!(pit.read(500), (60, false));
+        pit.set_gate(true, 1000);
+        assert_eq!(pit.read(1059), (1, false));
+        assert_eq!(pit.read(1060), (0, true));
     }
 }
 

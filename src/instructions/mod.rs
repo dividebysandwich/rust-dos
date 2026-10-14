@@ -14,8 +14,10 @@ pub mod fpu;
 pub mod logic;
 pub mod mmx;
 pub mod operand;
+pub mod sse;
 pub mod string;
 pub mod system;
+pub mod three_dnow;
 pub mod transfer;
 pub mod utils;
 
@@ -87,7 +89,8 @@ pub fn simple(instr: &Instruction, fast: bool) -> bool {
         | Test | Inc | Dec | Neg | Not | Mul | Imul | Div | Idiv | Daa | Das | Aaa | Aas | Aam | Aad | Rol
         | Ror | Rcl | Rcr | Shl | Sal | Shr | Sar | Shld | Shrd | Bt | Bts | Btr | Btc | Bsf | Bsr | Seto
         | Setno | Setb | Setae | Sete | Setne | Setbe | Seta | Sets | Setns | Setp | Setnp | Setl | Setge
-        | Setle | Setg | Ret | Jo | Jno | Jb | Jae | Je | Jne | Jbe | Ja | Js | Jns | Jp | Jnp | Jl | Jge
+        | Setle | Setg | Cmovo | Cmovno | Cmovb | Cmovae | Cmove | Cmovne | Cmovbe | Cmova | Cmovs | Cmovns
+        | Cmovp | Cmovnp | Cmovl | Cmovge | Cmovle | Cmovg | Ret | Jo | Jno | Jb | Jae | Je | Jne | Jbe | Ja | Js | Jns | Jp | Jnp | Jl | Jge
         | Jle | Jg | Jcxz | Jecxz | Loop | Loope | Loopne | Enter | Leave | Movsb | Movsw | Movsd | Cmpsb
         | Cmpsw | Cmpsd | Scasb | Scasw | Scasd | Lodsb | Lodsw | Lodsd | Stosb | Stosw | Stosd | Clc
         | Stc | Cmc | Cld | Std | Nop | Pause => !special,
@@ -125,6 +128,8 @@ pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
         Xadd => transfer::xadd(cpu, instr),
         Cmpxchg => transfer::cmpxchg(cpu, instr),
         Cmpxchg8b => transfer::cmpxchg8b(cpu, instr),
+        Cmovo | Cmovno | Cmovb | Cmovae | Cmove | Cmovne | Cmovbe | Cmova | Cmovs | Cmovns | Cmovp | Cmovnp
+        | Cmovl | Cmovge | Cmovle | Cmovg => transfer::cmov(cpu, instr),
         Cbw => arith::cbw(cpu),
         Cwde => arith::cwde(cpu),
         Cwd => arith::cwd(cpu),
@@ -194,6 +199,8 @@ pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
         Leave => control::leave(cpu, instr),
 
         // --- Strings ---
+        // SSE2's MOVSD and CMPSD on XMM registers share the mnemonics.
+        Movsd | Cmpsd if instr.op_register(0).is_xmm() || instr.op_register(1).is_xmm() => Err(Fault::UD),
         Movsb => string::string(cpu, instr, StrOp::Movs, 1),
         Movsw => string::string(cpu, instr, StrOp::Movs, 2),
         Movsd => string::string(cpu, instr, StrOp::Movs, 4),
@@ -225,7 +232,15 @@ pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
         Cli => system::cli(cpu),
         Sti => system::sti(cpu),
         Hlt => system::hlt(cpu),
+        // NOP r/m (0F 1F) is a hinting NOP of a P6, like those below.
+        Nop if instr.op_count() != 0 => system::hint_nop(cpu),
         Nop | Pause => Ok(()),
+        // The hinting NOPs of a P6 (0F 18 to 0F 1F), with the encodings
+        // later processors gave meanings: CLDEMOTE (0F 1C /0), and ENDBR32,
+        // ENDBR64 and RDSSPD (F3 0F 1E).
+        Reservednop | Prefetchnta | Prefetcht0 | Prefetcht1 | Prefetcht2 | Cldemote | Endbr32 | Endbr64 | Rdsspd => {
+            system::hint_nop(cpu)
+        }
         Wait => system::wait(cpu),
         Lgdt => system::load_table(cpu, instr, false),
         Lidt => system::load_table(cpu, instr, true),
@@ -249,6 +264,10 @@ pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
         Rdtsc => system::rdtsc(cpu),
         Rdmsr => system::msr(cpu, false),
         Wrmsr => system::msr(cpu, true),
+        Sysenter => system::sysenter(cpu),
+        Syscall => system::syscall(cpu),
+        Sysret => system::sysret(cpu),
+        Sysexit => system::sysexit(cpu),
 
         // --- FPU ---
         Fadd | Faddp | Fiadd | Fsub | Fsubp | Fsubr | Fsubrp | Fisub | Fisubr | Fmul | Fmulp
@@ -256,10 +275,18 @@ pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
         | Fprem1 | Frndint | Fxtract | Fabs | Fchs | F2xm1 | Fyl2x | Fyl2xp1 | Fsin | Fcos
         | Fsincos | Fptan | Fpatan | Fld | Fst | Fstp | Fild | Fist | Fistp | Fisttp | Fbld
         | Fbstp | Fxch | Fld1 | Fldz | Fldpi | Fldl2e | Fldl2t | Fldlg2 | Fldln2 | Fcom | Fcomp
-        | Fcompp | Ficom | Ficomp | Ftst | Fxam | Fcomi | Fcomip | Fucomi | Fucomip | Finit
+        | Fcompp | Ficom | Ficomp | Ftst | Fxam | Finit
         | Fninit | Fldcw | Fstcw | Fnstcw | Fstsw | Fnstsw | Fclex | Fnclex | Fsave | Fnsave
         | Frstor | Fstenv | Fnstenv | Fldenv | Fnop | Ffree | Fincstp | Fdecstp | Fucom | Fucomp
         | Fucompp | Fneni | Fndisi | Fnsetpm | Feni | Fdisi | Fsetpm | Fstpnce | Ffreep => {
+            fpu_instruction(cpu, instr)
+        }
+        // The P6's conditional moves and compares into EFLAGS.
+        Fcmovb | Fcmove | Fcmovbe | Fcmovu | Fcmovnb | Fcmovne | Fcmovnbe | Fcmovnu | Fcomi | Fcomip | Fucomi
+        | Fucomip => {
+            if !cpu.model.is_p6() {
+                return Err(Fault::UD);
+            }
             fpu_instruction(cpu, instr)
         }
 
@@ -269,6 +296,22 @@ pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
         | Pcmpeqd | Pcmpgtb | Pcmpgtw | Pcmpgtd | Pand | Pandn | Por | Pxor | Psllw | Pslld | Psllq
         | Psrlw | Psrld | Psrlq | Psraw | Psrad | Packsswb | Packssdw | Packuswb | Punpcklbw
         | Punpcklwd | Punpckldq | Punpckhbw | Punpckhwd | Punpckhdq => mmx::mmx(cpu, instr),
+
+        // --- SSE ---
+        Movaps | Movups | Movss | Movlps | Movhps | Movhlps | Movlhps | Movntps | Movmskps | Andps | Andnps | Orps
+        | Xorps | Unpcklps | Unpckhps | Shufps | Addps | Addss | Subps | Subss | Mulps | Mulss | Divps | Divss
+        | Sqrtps | Sqrtss | Rcpps | Rcpss | Rsqrtps | Rsqrtss | Minps | Minss | Maxps | Maxss | Cmpps | Cmpss
+        | Comiss | Ucomiss | Cvtpi2ps | Cvtsi2ss | Cvtps2pi | Cvttps2pi | Cvtss2si | Cvttss2si | Ldmxcsr | Stmxcsr
+        | Sfence | Pavgb | Pavgw | Pextrw | Pinsrw | Pmaxsw | Pmaxub | Pminsw | Pminub | Pmovmskb | Pmulhuw
+        | Psadbw | Pshufw | Maskmovq | Movntq => sse::sse(cpu, instr),
+        Fxsave => sse::fxsave(cpu, instr, false),
+        Fxrstor => sse::fxsave(cpu, instr, true),
+
+        // --- 3DNow! ---
+        Femms | Pavgusb | Pf2id | Pfacc | Pfadd | Pfcmpeq | Pfcmpge | Pfcmpgt | Pfmax | Pfmin | Pfmul | Pfrcp
+        | Pfrcpit1 | Pfrcpit2 | Pfrsqit1 | Pfrsqrt | Pfsub | Pfsubr | Pi2fd | Pmulhrw => three_dnow::three_dnow(cpu, instr),
+        // 0F 0D /2 decodes as Intel's PREFETCHWT1, a reserved type to a K6-2.
+        Prefetch | Prefetchw | Prefetchwt1 => three_dnow::prefetch(cpu),
 
         _ => Err(Fault::UD),
     }

@@ -4,9 +4,10 @@
 // it is.
 //
 // SHADOW_LAYERS (at least 1), SHADOW_TAPS (1, 6 or 12 samples softening a
-// shadow's edge), GRID_W and GRID_H (the screen's patches) are defined
-// before this. With BAKE defined, it draws what a probe sees
-// instead (see gi.rs's `Seen`).
+// shadow's edge), GRID_W and GRID_H (the screen's patches) and MAX_LIGHTS
+// are defined before this. With BAKE defined, it draws what a probe sees
+// instead (see gi.rs's `Seen`): the light of up to four groups of lights
+// at once, each in a picture of its own (a slot).
 
 in vec3 v_world;
 in vec3 v_normal;
@@ -17,8 +18,17 @@ out vec4 o_bake1;
 out vec4 o_bake2;
 out vec4 o_bake3;
 out vec4 o_bake4;
+out vec4 o_bake5;
+out vec4 o_bake6;
+out vec4 o_bake7;
 // Whether the surface's back is the inside of something.
 uniform int u_backs;
+// The slot each light's light goes to (-1: none), and the material's
+// glow, an unlit surface's colour and the light from all around (white).
+uniform int u_light_slot[MAX_LIGHTS];
+uniform int u_emissive_slot;
+uniform int u_base_slot;
+uniform int u_sky_slot;
 #endif
 
 // 0 lit, 1 unlit, 2 the screen, 3 the test room's floor.
@@ -38,15 +48,19 @@ uniform vec3 u_eye[VIEWS];
 uniform float u_fog;
 uniform int u_lights;
 // xyz the position, w the kind: 0 directional, 1 point, 2 spot.
-uniform vec4 u_light_pos[8];
-uniform vec3 u_light_color[8];
+uniform vec4 u_light_pos[MAX_LIGHTS];
+uniform vec3 u_light_color[MAX_LIGHTS];
 // Where the light shines to; a spot's cone as the cosines of its inner
 // and outer angle.
-uniform vec3 u_light_dir[8];
-uniform vec2 u_light_cone[8];
+uniform vec3 u_light_dir[MAX_LIGHTS];
+uniform vec2 u_light_cone[MAX_LIGHTS];
 // The light's first layer of the shadows, or -1 for none; 1 if it has a
 // cube's six.
-uniform ivec2 u_light_shadow[8];
+uniform ivec2 u_light_shadow[MAX_LIGHTS];
+// A window's glass with the rain running down it: how hard it rains, and
+// the time, in seconds.
+uniform float u_rain_glass;
+uniform float u_time;
 
 // How far the nearest surface is, seen from the lights and the screen;
 // what each layer sees, and a texel's width on it: x, plus y times the
@@ -78,8 +92,10 @@ uniform int u_glow_shadow;
 // The light bounced around, at the probes: for each of the axes +x, -x,
 // +y, -y, +z, -z a block of the texture as wide as the probes are across,
 // its alpha how much the probes there count, the colours times it. The
-// first probe's place, how far apart they are, and how many.
+// first probe's place, how far apart they are, and how many; for the
+// bake, a block of z layers for each of `u_gi_slots` groups.
 uniform int u_has_gi;
+uniform int u_gi_slots;
 
 // The ambient occlusion over the view (ao.frag), for the light from all
 // around: the ambient's and the bounced light. Not for surfaces seen
@@ -258,20 +274,45 @@ float screen_shadow(vec3 p, vec3 n) {
     return inside ? mix(1.0, s, smoothstep(0.02, 0.08, local.z)) : s;
 }
 
-// The probes' light along axis `k` at `g` (in probes from the first),
-// or nothing where none of the probes around counts.
-vec4 gi_axis(vec3 g, int k) {
-    vec3 uvw = vec3((float(k) * u_gi_count.x + g.x + 0.5) / (6.0 * u_gi_count.x), (g.yz + 0.5) / u_gi_count.yz);
+// The probes' light of group `slot` along axis `k` at `g` (in probes
+// from the first), or nothing where none of the probes around counts.
+vec4 gi_axis(vec3 g, int k, int slot) {
+    float slots = float(max(u_gi_slots, 1));
+    vec3 uvw = vec3((float(k) * u_gi_count.x + g.x + 0.5) / (6.0 * u_gi_count.x), (g.y + 0.5) / u_gi_count.y,
+                    (float(slot) * u_gi_count.z + g.z + 0.5) / (u_gi_count.z * slots));
     vec4 v = texture(u_gi, uvw);
     return v.a > 0.01 ? vec4(v.rgb / v.a, 1.0) : vec4(0.0);
 }
 
 // The light bounced around reaching `p`, its surface facing `n`, and how
 // much the probes say for it (0 where none counts).
-vec4 gi_light(vec3 p, vec3 n) {
+vec4 gi_light(vec3 p, vec3 n, int slot) {
     vec3 g = clamp((p + n * 0.1 - u_gi_low) / u_gi_step, vec3(0.0), u_gi_count - 1.0);
     vec3 nn = n * n;
-    return nn.x * gi_axis(g, n.x >= 0.0 ? 0 : 1) + nn.y * gi_axis(g, n.y >= 0.0 ? 2 : 3) + nn.z * gi_axis(g, n.z >= 0.0 ? 4 : 5);
+    return nn.x * gi_axis(g, n.x >= 0.0 ? 0 : 1, slot) + nn.y * gi_axis(g, n.y >= 0.0 ? 2 : 3, slot)
+        + nn.z * gi_axis(g, n.z >= 0.0 ? 4 : 5, slot);
+}
+
+// Rain on a window's glass at `p`: drops sitting on it and some running
+// down, as how much they catch the light (0 to 1).
+float rain_on_glass(vec3 p) {
+    vec2 at = vec2(p.x + p.z, p.y);
+    // Drops sitting, one now and then in cells of a centimetre, each
+    // somewhere in its cell and of its own size.
+    vec2 cell = floor(at / 0.01);
+    float h = hash3(vec3(cell, 3.0));
+    vec2 jitter = vec2(hash3(vec3(cell, 5.0)), hash3(vec3(cell, 8.0))) - 0.5;
+    vec2 inside = fract(at / 0.01) - 0.5 - jitter * 0.5;
+    float size = 0.12 + 0.2 * hash3(vec3(cell, 11.0));
+    float sitting = step(1.0 - 0.18 * u_rain_glass, h) * smoothstep(size, size * 0.4, length(inside));
+    // Drops running down in some columns, with a wet trail above them.
+    float column = floor(at.x / 0.04);
+    float c = hash3(vec3(column, 9.0, 1.0));
+    float x = fract(at.x / 0.04) - 0.5 - (c - 0.5) * 0.5 - 0.06 * sin(at.y * 40.0 + c * 6.0);
+    float y = fract(at.y / 0.7 + u_time * (0.06 + c * 0.2) + c * 7.0);
+    float running = step(1.0 - 0.3 * u_rain_glass, c) * smoothstep(0.08, 0.0, abs(x))
+        * (smoothstep(0.025, 0.0, y) + 0.25 * step(y, 0.25) * smoothstep(0.0, 0.25, y));
+    return clamp(sitting + running, 0.0, 1.0);
 }
 
 void main() {
@@ -287,7 +328,7 @@ void main() {
         // The screen's own light is in the lighting already: here it is
         // dark glass.
         o_color = vec4(0.0);
-        o_bake1 = o_bake2 = o_bake3 = o_bake4 = vec4(0.0);
+        o_bake1 = o_bake2 = o_bake3 = o_bake4 = o_bake5 = o_bake6 = o_bake7 = vec4(0.0);
         return;
     }
 #endif
@@ -301,10 +342,23 @@ void main() {
         emissive *= texture(u_emissive_map, v_uv).rgb;
     }
     vec3 color;
+#ifdef BAKE
+    float kind = !gl_FrontFacing && u_backs == 1 ? -1.0 : 0.0;
+    vec3 slot[4] = vec3[](vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0));
+    if (u_emissive_slot >= 0) {
+        slot[u_emissive_slot] += emissive;
+    }
+#endif
     if (u_shading == 1) {
         color = base.rgb + emissive;
 #ifdef BAKE
-        o_color = vec4(color, !gl_FrontFacing && u_backs == 1 ? -1.0 : 0.0);
+        if (u_base_slot >= 0) {
+            slot[u_base_slot] += base.rgb;
+        }
+        o_color = vec4(slot[0], kind);
+        o_bake5 = vec4(slot[1], 0.0);
+        o_bake6 = vec4(slot[2], 0.0);
+        o_bake7 = vec4(slot[3], 0.0);
         o_bake1 = o_bake2 = o_bake3 = o_bake4 = vec4(0.0);
         return;
 #endif
@@ -325,18 +379,37 @@ void main() {
         // The sky lights from above more than from below, unless the
         // probes know better.
         vec3 light = u_ambient * (0.65 + 0.35 * n.y);
+#ifdef BAKE
+        vec3 lit[4] = vec3[](vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0));
+        if (u_sky_slot >= 0) {
+            lit[u_sky_slot] = light;
+        }
         if (u_has_gi == 1) {
-            vec4 bounced = gi_light(v_world, n);
+            for (int s = 0; s < 4; s++) {
+                if (s < u_gi_slots) {
+                    vec4 bounced = gi_light(v_world, n, s);
+                    lit[s] = mix(lit[s], bounced.rgb, bounced.a);
+                }
+            }
+        }
+#else
+        if (u_has_gi == 1) {
+            vec4 bounced = gi_light(v_world, n, 0);
             light = mix(light, bounced.rgb, bounced.a);
         }
+#endif
 #ifndef BAKE
         if (u_has_ao == 1) {
             light *= AO_AT(u_ao, gl_FragCoord.xy / u_view_size).r;
         }
 #endif
-        for (int i = 0; i < 8; i++) {
+        for (int i = 0; i < MAX_LIGHTS; i++) {
             if (i >= u_lights) {
                 break;
+            }
+            // (A lamp switched off.)
+            if (dot(u_light_color[i], vec3(1.0)) <= 0.0) {
+                continue;
             }
             vec3 l;
             float att = 1.0;
@@ -345,7 +418,8 @@ void main() {
                 l = -u_light_dir[i];
             } else {
                 vec3 to = u_light_pos[i].xyz - v_world;
-                float d2 = max(dot(to, to), 1e-4);
+                // (No brighter than from a few centimetres.)
+                float d2 = max(dot(to, to), 2.5e-3);
                 dist = sqrt(d2);
                 l = to / dist;
                 att = 1.0 / d2;
@@ -362,7 +436,13 @@ void main() {
                 int layer = shadow.y == 1 ? shadow.x + cube_face(-l) : shadow.x;
                 lambert *= shadow_layer(layer, v_world, n, dist, 1.5);
             }
+#ifdef BAKE
+            if (u_light_slot[i] >= 0) {
+                lit[u_light_slot[i]] += u_light_color[i] * lambert;
+            }
+#else
             light += u_light_color[i] * lambert;
+#endif
         }
 #ifdef BAKE
         float f[PATCHES];
@@ -383,7 +463,10 @@ void main() {
             total += f[i];
             group[i / 4][i % 4] = f[i] * bright;
         }
-        o_color = vec4(albedo * light + emissive, !gl_FrontFacing && u_backs == 1 ? -1.0 : 0.0);
+        o_color = vec4(albedo * lit[0] + slot[0], kind);
+        o_bake5 = vec4(albedo * lit[1] + slot[1], 0.0);
+        o_bake6 = vec4(albedo * lit[2] + slot[2], 0.0);
+        o_bake7 = vec4(albedo * lit[3] + slot[3], 0.0);
         o_bake1 = vec4(albedo * total, bright * total);
         o_bake2 = group[0];
         o_bake3 = group[1];
@@ -403,11 +486,19 @@ void main() {
 #endif
         color = albedo * light + emissive;
     }
+    float alpha = u_see_through == 1 ? base.a : 1.0;
+    if (u_rain_glass > 0.0) {
+        // The drops catch the light of what is around them.
+        float drops = rain_on_glass(v_world);
+        color = mix(color, u_ambient * 1.4 + vec3(0.015), drops * 0.4);
+        alpha = mix(alpha, 1.0, drops * 0.35);
+    }
     color = tone(color * u_exposure);
     // The haze, where there is one (not in a closed room).
     if (u_fog > 0.0) {
         float dist = length(v_world - u_eye[VIEW]);
-        color = mix(color, tone(sky_color(v_world - u_eye[VIEW])), 1.0 - exp(-dist * u_fog));
+        color = mix(color, tone(sky_haze(v_world - u_eye[VIEW])), 1.0 - exp(-dist * u_fog));
     }
-    o_color = finish(color, base.a);
+    // (Opaque: alpha 1, over the real world where it shows through.)
+    o_color = finish(color, alpha);
 }

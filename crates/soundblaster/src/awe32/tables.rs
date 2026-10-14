@@ -1,5 +1,6 @@
-//! Conversion tables of the EMU8000: pitch, attenuation, envelope rates
-//! and LFO speeds. They are built once, the first time a card is made.
+//! Conversion tables of the EMU8000: pitch, attenuation, envelope rates,
+//! LFO speeds and filter coefficients. They are built once, the first time
+//! a card is made.
 
 use std::sync::OnceLock;
 
@@ -23,6 +24,9 @@ pub struct Tables {
     pub decay_step: [i32; 128],
     /// LFO frequency to the step of its 16.32 phase.
     pub lfo_speed: [u64; 256],
+    /// The filter's frequency coefficient and damping for each Q, over
+    /// its cutoff range (`voice::coeff_tables`).
+    pub filter_coeffs: Vec<[(f64, f64); super::voice::COEFF_INTERVALS + 1]>,
 }
 
 pub fn get() -> &'static Tables {
@@ -86,7 +90,9 @@ fn build() -> Tables {
         hz += 0.042;
     }
 
-    Tables { pitch, atten, db_to_volume, amplitude_to_db, attack_samples, decay_step, lfo_speed }
+    let filter_coeffs = super::voice::coeff_tables();
+
+    Tables { pitch, atten, db_to_volume, amplitude_to_db, attack_samples, decay_step, lfo_speed, filter_coeffs }
 }
 
 /// The LFOs' triangle at phase `pos` (65536 a period): from 0 up to

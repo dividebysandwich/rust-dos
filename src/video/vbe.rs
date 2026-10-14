@@ -157,13 +157,19 @@ impl Vbe {
     }
 
     /// The rows of the picture (in frame rows) that `len` bytes of video
-    /// memory at `offset` are in, as (first, after last), if they show.
+    /// memory at `offset` are in, as (first, after last), if they show. A
+    /// range that begins before the display start is in the rows of its
+    /// bytes from the start on.
     pub fn frame_rows(&self, offset: usize, len: usize) -> Option<(u32, u32)> {
         let mode = self.mode?;
         let pitch = self.pitch.max(1) as usize;
         let start = self.latched_start as usize;
-        let first = offset.checked_sub(start)? / pitch;
-        let last = (offset + len - 1 - start) / pitch;
+        let end = offset + len;
+        if end <= start {
+            return None;
+        }
+        let first = offset.saturating_sub(start) / pitch;
+        let last = (end - 1 - start) / pitch;
         if first >= mode.height as usize {
             return None;
         }

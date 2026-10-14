@@ -111,6 +111,13 @@ What a VR headset's controllers do:
 The menu button opens and closes the settings window, which the laser
 clicks in; held for a second, it centers the view.
 
+The grip button also picks up what is on the desk: the running game's
+manual, whose pages turn with that hand's thumbstick (A/X picks the next
+manual, if there are several), and the joystick. Hold the joystick by its
+stick and the stick follows your hand as the game port's joystick, the
+trigger and A/X its buttons; hold it by its base to move it. Let go and
+it settles on what is below.
+
 # Center the view {#vr-center}
 
 Puts your eyes where the scene's seat is (its `spawn`), facing the
@@ -132,6 +139,53 @@ Fine-tune where you sit in the scene, in small steps with **Left** and
 - **Seat turned to the left**: turns you, in degrees (-180 to 180).
 
 They take effect at once, and are kept with the other settings.
+
+# Show the real keyboard {#vr-keyboard}
+
+Lets the headset's cameras show your real keyboard (and your hands on
+it) through the scene, in a window on the desk with soft edges. It needs
+a headset whose cameras the program can show: the Steam Frame running
+Rust-DOS on the headset itself, Varjo's XR headsets, or a Quest through
+Link. Elsewhere the headset says it can't, and nothing changes.
+
+- **auto**: on the desk below the screen, in front of your seat. With
+  the hands tracked (controllers put down), the window moves to where your
+  fingers press keys, and is kept for the next time.
+- **marked**: where you marked it with a controller.
+- **off**: the scene only.
+
+**Mark the keyboard with a controller** shows the room through the scene.
+Put the controller's tip on one front corner of the keyboard, hold the
+trigger and move to the other front corner, let go; then touch the back
+edge and pull the trigger. The grip button cancels. What you mark is kept
+for the next time, and **Show the real keyboard** becomes **marked**.
+
+Turning it on or off starts the headset again.
+
+# Time of day {#vr-time}
+
+The time of day in the scene: where the sun and the moon are, how light
+the sky is, the stars at night. Scenes with windows show it through them.
+
+- **Time of day**: **now** follows the computer's clock; a time starts
+  the scene's day there.
+- **Time goes**: how fast the scene's day goes on: as the clock (real
+  time), faster (up to an hour a second), or **stands still**.
+- **Latitude**: how far north (or south) of the equator the scene is,
+  which sets how high the sun climbs. The sun rises at six and sets at
+  six, as at the equinox.
+
+They take effect at once.
+
+# Weather {#vr-weather}
+
+What the sky does outside: **clear**, **rain**, **thunderstorm** or
+**snow**. Rain runs down the windows, and clouds dim the sun.
+
+- **Rain and thunder volume**: how loud the rain on the windows and
+  the thunder are, 0 to 100%. The rain sounds from the windows.
+- **Lightning**: flashes in a thunderstorm, which light up the room,
+  with thunder a few seconds after.
 
 # Headset resolution {#vr-resolution}
 

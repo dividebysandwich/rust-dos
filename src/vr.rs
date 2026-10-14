@@ -371,6 +371,118 @@ impl VrFoveation {
     }
 }
 
+/// Where the headset's cameras show the real keyboard through the scene
+/// (passthrough, where the headset has it).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VrKeyboard {
+    #[default]
+    Off,
+    /// On the desk below the screen, moved to where the fingers type when
+    /// the hands are tracked.
+    Auto,
+    /// Where it was marked with a controller (as `Auto` until it is).
+    Marked,
+}
+
+impl VrKeyboard {
+    pub const ALL: [VrKeyboard; 3] = [VrKeyboard::Off, VrKeyboard::Auto, VrKeyboard::Marked];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            VrKeyboard::Off => "off",
+            VrKeyboard::Auto => "auto",
+            VrKeyboard::Marked => "marked",
+        }
+    }
+
+    pub fn describe(self) -> &'static str {
+        match self {
+            VrKeyboard::Off => "off",
+            VrKeyboard::Auto => "auto: below the screen, found by typing",
+            VrKeyboard::Marked => "where it was marked",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| value.trim().eq_ignore_ascii_case(k.name()))
+    }
+}
+
+/// The time of day in the scene: the host's clock now, or a time of the
+/// day (minutes from midnight), from which it goes on at `time_speed`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VrTime {
+    #[default]
+    Now,
+    At(u32),
+}
+
+impl VrTime {
+    pub fn name(self) -> String {
+        match self {
+            VrTime::Now => "now".to_string(),
+            VrTime::At(minutes) => format!("{:02}:{:02}", minutes / 60 % 24, minutes % 60),
+        }
+    }
+
+    /// `now`, or a time as HH:MM (or a bare hour).
+    pub fn parse(value: &str) -> Option<Self> {
+        let value = value.trim();
+        if value.eq_ignore_ascii_case("now") {
+            return Some(VrTime::Now);
+        }
+        let (h, m) = value.split_once(':').unwrap_or((value, "0"));
+        let (h, m) = (h.trim().parse::<u32>().ok()?, m.trim().parse::<u32>().ok()?);
+        (h < 24 && m < 60).then_some(VrTime::At(h * 60 + m))
+    }
+}
+
+/// The weather outside the scene's windows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VrWeather {
+    #[default]
+    Clear,
+    Rain,
+    /// Heavy rain, with thunder and lightning (if `lightning` is on).
+    Storm,
+    Snow,
+}
+
+impl VrWeather {
+    pub const ALL: [VrWeather; 4] = [VrWeather::Clear, VrWeather::Rain, VrWeather::Storm, VrWeather::Snow];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            VrWeather::Clear => "clear",
+            VrWeather::Rain => "rain",
+            VrWeather::Storm => "storm",
+            VrWeather::Snow => "snow",
+        }
+    }
+
+    pub fn describe(self) -> &'static str {
+        match self {
+            VrWeather::Clear => "clear",
+            VrWeather::Rain => "rain",
+            VrWeather::Storm => "thunderstorm",
+            VrWeather::Snow => "snow",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|w| value.trim().eq_ignore_ascii_case(w.name()))
+    }
+}
+
+/// `time_speed`'s steps: how many times faster than the clock the scene's
+/// day goes (0 stands still).
+pub const TIME_SPEEDS: [u32; 9] = [0, 1, 2, 10, 60, 120, 600, 1800, 3600];
+pub const TIME_SPEED_MAX: u32 = 3600;
+/// `weather_sound`'s range, in percent.
+pub const WEATHER_SOUND_MAX: u32 = 100;
+/// `latitude`'s range, in degrees north.
+pub const LATITUDE_MAX: i32 = 90;
+
 /// Valve's Vulkan layers that foveate render passes the size of the
 /// headset's images, eye-tracked, as Steam turns them on for its games.
 pub const FDM_LAYERS: &str = "VK_LAYER_VALVE_rpo:VK_LAYER_VALVE_fdm_injection";
@@ -752,6 +864,18 @@ pub struct VrSettings {
     pub refresh: Option<u32>,
     /// The edges of the view drawn coarser than where the eyes look.
     pub foveation: VrFoveation,
+    /// The real keyboard seen through the scene.
+    pub keyboard: VrKeyboard,
+    /// The scene's time of day and how fast it goes; where on the earth
+    /// the scene is, for the sun's way across its sky.
+    pub time: VrTime,
+    pub time_speed: u32,
+    pub latitude: i32,
+    pub weather: VrWeather,
+    /// How loud the rain and the thunder are, in percent.
+    pub weather_sound: u32,
+    /// Lightning in a storm.
+    pub lightning: bool,
 }
 
 impl Default for VrSettings {
@@ -773,6 +897,13 @@ impl Default for VrSettings {
             msaa: VrMsaa::Auto,
             refresh: None,
             foveation: VrFoveation::Auto,
+            keyboard: VrKeyboard::Off,
+            time: VrTime::Now,
+            time_speed: 1,
+            latitude: 48,
+            weather: VrWeather::Clear,
+            weather_sound: 70,
+            lightning: true,
         }
     }
 }
@@ -795,11 +926,40 @@ impl VrSettings {
                     .ok_or_else(|| format!("invalid controllers '{}' (both, pointer or gamepad)", value))?;
             }
             "spatial_audio" => {
-                self.spatial_audio = match value.trim().to_ascii_lowercase().as_str() {
-                    "true" | "on" | "yes" | "1" => true,
-                    "false" | "off" | "no" | "0" => false,
-                    _ => return Err(format!("invalid spatial_audio '{}' (true or false)", value)),
-                }
+                self.spatial_audio = parse_bool(value).ok_or_else(|| format!("invalid spatial_audio '{}' (true or false)", value))?;
+            }
+            "lightning" => {
+                self.lightning = parse_bool(value).ok_or_else(|| format!("invalid lightning '{}' (true or false)", value))?;
+            }
+            "time" => {
+                self.time = VrTime::parse(value).ok_or_else(|| format!("invalid time '{}' (now, or HH:MM)", value))?;
+            }
+            "time_speed" => {
+                self.time_speed = value
+                    .trim()
+                    .trim_end_matches(['x', 'X'])
+                    .trim()
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|s| *s <= TIME_SPEED_MAX)
+                    .ok_or_else(|| format!("invalid time_speed '{}' (0 to {} times)", value, TIME_SPEED_MAX))?;
+            }
+            "latitude" => {
+                self.latitude = parse_signed(value, "°", LATITUDE_MAX)
+                    .ok_or_else(|| format!("invalid latitude '{}' (-{} to {} degrees)", value, LATITUDE_MAX, LATITUDE_MAX))?;
+            }
+            "weather" => {
+                self.weather = VrWeather::parse(value)
+                    .ok_or_else(|| format!("invalid weather '{}' (clear, rain, storm or snow)", value))?;
+            }
+            "weather_sound" => {
+                self.weather_sound = value
+                    .trim()
+                    .trim_end_matches('%')
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|v| *v <= WEATHER_SOUND_MAX)
+                    .ok_or_else(|| format!("invalid weather_sound '{}' (0 to {} percent)", value, WEATHER_SOUND_MAX))?;
             }
             "screen_fit" => {
                 self.screen_fit = ScreenFit::parse(value)
@@ -819,6 +979,10 @@ impl VrSettings {
             "foveation" => {
                 self.foveation = VrFoveation::parse(value)
                     .ok_or_else(|| format!("invalid foveation '{}' (auto, off, low, medium or high)", value))?;
+            }
+            "keyboard" => {
+                self.keyboard = VrKeyboard::parse(value)
+                    .ok_or_else(|| format!("invalid keyboard '{}' (off, auto or marked)", value))?;
             }
             "refresh" => {
                 let value = value.trim();
@@ -912,6 +1076,13 @@ impl VrSettings {
             ("msaa", Some(self.msaa.name().to_string())),
             ("refresh", Some(self.refresh.map_or("auto".to_string(), |hz| hz.to_string()))),
             ("foveation", Some(self.foveation.name().to_string())),
+            ("keyboard", Some(self.keyboard.name().to_string())),
+            ("time", Some(self.time.name())),
+            ("time_speed", Some(self.time_speed.to_string())),
+            ("latitude", Some(self.latitude.to_string())),
+            ("weather", Some(self.weather.name().to_string())),
+            ("weather_sound", Some(self.weather_sound.to_string())),
+            ("lightning", Some(self.lightning.to_string())),
         ]
     }
 
@@ -954,6 +1125,15 @@ impl VrSettings {
             }
             None => VrResolution { percent: 100, adaptive: None },
         }
+    }
+}
+
+/// A yes or no of the file.
+fn parse_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "on" | "yes" | "1" => Some(true),
+        "false" | "off" | "no" | "0" => Some(false),
+        _ => None,
     }
 }
 
@@ -1002,6 +1182,18 @@ mod tests {
         assert!(s.set("graphics", "d3d", Path::new("/cfg")).is_err());
         assert!(s.set("resolution", "29", Path::new("/cfg")).is_err());
         assert!(s.set("resolution", "151", Path::new("/cfg")).is_err());
+        s.set("time", "7:05", Path::new("/cfg")).unwrap();
+        s.set("time_speed", "60x", Path::new("/cfg")).unwrap();
+        s.set("latitude", "-33", Path::new("/cfg")).unwrap();
+        s.set("weather", "Storm", Path::new("/cfg")).unwrap();
+        s.set("weather_sound", "40%", Path::new("/cfg")).unwrap();
+        s.set("lightning", "off", Path::new("/cfg")).unwrap();
+        assert_eq!((s.time, s.time_speed, s.latitude), (VrTime::At(7 * 60 + 5), 60, -33));
+        assert_eq!((s.weather, s.weather_sound, s.lightning), (VrWeather::Storm, 40, false));
+        assert_eq!(s.time.name(), "07:05");
+        assert!(s.set("time", "24:00", Path::new("/cfg")).is_err());
+        assert!(s.set("time_speed", "3601", Path::new("/cfg")).is_err());
+        assert!(s.set("weather", "hail", Path::new("/cfg")).is_err());
         assert_eq!(s.controllers, VrControllers::Pointer);
         assert!(!s.spatial_audio);
         assert_eq!(s.mode, VrMode::Desktop);

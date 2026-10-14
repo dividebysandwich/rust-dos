@@ -166,6 +166,37 @@ fn listed(info: &DriveInfo) -> Vec<PathBuf> {
     if info.images.is_empty() { info.image.iter().cloned().collect() } else { info.images.clone() }
 }
 
+/// A host folder as a state's media record shows it. A mounted folder
+/// drive's root is the canonical path (symbolic links and Windows' short
+/// names resolved), so this is too, without Windows' `\?\` prefix.
+fn shown_folder(path: &Path) -> String {
+    let canonical = hostfs::canonicalize(path).or_else(|_| std::path::absolute(path));
+    display_host_path(&canonical.unwrap_or_else(|_| path.to_path_buf()))
+}
+
+/// Take the folder drives of `media` that `folders` names (by drive number)
+/// as mounted from those host folders: a load that puts a state saved in
+/// one folder into a machine whose drive shows a copy of it. Refused for a
+/// drive the state hasn't as a folder drive (none, or one of images or an
+/// overlay).
+pub fn relocate(media: &mut [Medium], folders: &[(u8, PathBuf)]) -> Result<(), String> {
+    for (drive, folder) in folders {
+        let key = drive_key(*drive);
+        let name = drive_name(&key);
+        let Some(medium) = media.iter_mut().find(|m| m.drive == key) else {
+            return Err(format!("{} isn't in the state, so it can't be taken from {}", name, folder.display()));
+        };
+        if medium.folder.is_none() || !medium.images.is_empty() || medium.overlay.is_some() {
+            return Err(format!("{} isn't a folder drive in the state; folders takes only those", name));
+        }
+        if !hostfs::is_dir(folder) {
+            return Err(format!("{} isn't a folder, so {} can't be taken from it", folder.display(), name));
+        }
+        medium.folder = Some(shown_folder(folder));
+    }
+    Ok(())
+}
+
 fn medium(info: &DriveInfo) -> Option<Medium> {
     // A CUE sheet's tracks are in the files it names.
     let paths: Vec<PathBuf> = listed(info)

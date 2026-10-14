@@ -6,7 +6,7 @@
 
 ## Introduction
 
-Rust-DOS is a DOS emulator aimed at the golden age of DOS gaming from the early days up to the dawn of Windows95. It is a work in progress and some games and programs may not run yet.
+Rust-DOS is a DOS emulator aimed at the golden age of DOS gaming from the early days up to the dawn of Windows 95, which it can [boot from a disk image](CONFIGURATION.md#windows-95). It is a work in progress and some games and programs may not run yet.
 
 *Rust-DOS is looking for contributors!*
 
@@ -16,7 +16,7 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
 
 ## Features
 
-* **CPU:** 386, 486, Pentium and Pentium MMX with FPU, protected mode, paging and
+* **CPU:** 386, 486, Pentium, Pentium MMX, AMD K6-2 (with 3DNow!), Pentium Pro, Pentium II and Pentium III (with SSE) with FPU, protected mode, paging and
   virtual-8086 mode for DOS extenders such as DOS/4GW (Descent, Heretic),
   and a dynamic recompiler for x86-64 and ARM64 hosts (see
   [docs/dynrec.md](docs/dynrec.md))
@@ -44,7 +44,7 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   and FAT32 disk images (raw, VHD, and 86Box's 86F floppies), with DOSBox Staging's `MOUNT` (and `IMGMOUNT`), and emulated
   disk speeds and noises
 * **[Booting disk images](CONFIGURATION.md#booting-a-disk-image)**
-  (`BOOT`): MS-DOS, Windows 95 and other systems of their own, with a Plug
+  (`BOOT`): MS-DOS, [Windows 95](CONFIGURATION.md#windows-95) and other systems of their own, with a Plug
   and Play BIOS, APM, a PCI bus and IDE hard disks and CD-ROM drive (for
   Windows' 32-bit disk access), from the prompt, the settings window or
   [at every start](CONFIGURATION.md#booting-at-startup); your folders
@@ -131,6 +131,7 @@ debug build in `target\debug` too, so put the DLL on `PATH` for the tests.
 `cargo test` runs the tests. A few of them host a LAN relay or look for one
 by broadcast, on all of the computer's network interfaces; if your firewall
 asks about them on every run, `cargo test-local` skips those few.
+`cargo bench` runs the benchmarks ([docs/benchmarks.md](docs/benchmarks.md)).
 
 ## Configuration
 
@@ -250,6 +251,7 @@ from the history. The history is kept between sessions. The
 | Key | Action |
 |---|---|
 | Ctrl+F12 | Open or close the [settings window](CONFIGURATION.md#settings-window) |
+| Right mouse button (held still for 1.5 s) | Open the settings window without a keyboard (`mouse_menu_hold`) |
 | Ctrl+Shift+F12 | Show or hide the performance overlay: the frames a second and the host's CPU use, with small graphs, at the bottom right |
 | Ctrl+Shift+D | Degauss the monitor: the picture wobbles with colour fringes, with the coil's thump with [`monitor_effects`](CONFIGURATION.md#emulator) sound |
 | Ctrl+Shift+S | Show or hide the sound visualizer: an oscilloscope of each sound source, the FM synthesizer's channels, the Ultrasound's voices and the MIDI notes held; click one to mute it, or a source's S to hear it alone (until the visualizer closes) |
@@ -339,6 +341,11 @@ The page takes parameters: `?zip=URL` copies an archive to C: at startup,
 `?zip=games/keen.zip&run=cd%20keen&run=keen1`. `?persist=0` keeps C: in
 memory only, `?log` sends the log to the browser console, and
 `?renderer=2d` draws without WebGL 2 (and so without the CRT shaders).
+`?section.key=value` sets any [`rust-dos.conf`](CONFIGURATION.md) setting
+for that visit only, for example `?emulator.cycles=3000&sound.sbtype=sb2`:
+the browser's saved settings stay as they are, and a game profile's own
+settings still win over them (`[autoexec]` and `[drives]` can't be set
+this way).
 
 ## As a libretro core
 
@@ -388,6 +395,16 @@ curl 'localhost:8086/api/memory?addr=DS:SI&len=64'
 Set `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy` to run without a window or
 sound device. [docs/llm-debugging.md](docs/llm-debugging.md) is a guide to
 using it.
+
+## Profiling
+
+`POST /api/profile {"enabled":true}` on the debug server, or `--profile
+FILE` from startup to exit, samples where the emulator's time goes (the
+interpreter, translated code, each device's ports, drawing, sound) and which
+guest code it runs, and counts port accesses, BIOS and DOS calls and the
+recompiler's work. The report comes as JSON, a table, or folded stacks for
+flame graphs. Without a profile running it costs nothing.
+[docs/profiling.md](docs/profiling.md) describes it.
 
 ## Log file
 

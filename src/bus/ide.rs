@@ -86,7 +86,7 @@ impl Bus {
 
     /// The device configured on IRQ `irq`, which an IDE channel can't
     /// have.
-    fn irq_owner(&self, irq: u8) -> Option<&'static str> {
+    pub(super) fn irq_owner(&self, irq: u8) -> Option<&'static str> {
         if self.sb.as_ref().is_some_and(|sb| sb.config.irq == irq) {
             Some("Sound Blaster")
         } else if self.gus.as_ref().and_then(|gus| gus.irq()) == Some(irq) {
@@ -142,7 +142,7 @@ impl Bus {
         let channel = self.ide[id.index()].as_mut()?;
         let class = crate::diskio::DiskClass::HardDisk;
         let hard_disk_ns_per_sector = self.disk_io.cost_ns(class, crate::diskimage::SECTOR_SIZE as u32);
-        let faked = self.ide_faked;
+        let faked = self.faked_io;
         let mut env = Env { disks: &self.disk, player: &mut self.cdaudio, now, hard_disk_ns_per_sector, faked };
         let result = f(channel, &mut env);
         self.sync_ide(id);
