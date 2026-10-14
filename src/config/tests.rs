@@ -682,6 +682,7 @@ fn changed_settings() -> Settings {
         mouse_sensitivity: 2.3,
         mouse_capture_messages: false,
         mouse_menu_hold: false,
+        pause_in_settings: false,
         version_check: false,
         rewind: true,
         rewind_memory: 512,

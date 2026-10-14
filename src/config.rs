@@ -201,6 +201,9 @@ pub struct Config {
     /// The right button held still opening the settings window
     /// (`mouse_menu_hold`).
     pub mouse_menu_hold: Option<bool>,
+    /// The machine pausing while the settings window is open
+    /// (`pause_in_settings`).
+    pub pause_in_settings: Option<bool>,
     /// The check for a newer rust-dos at startup (`version_check`).
     pub version_check: Option<bool>,
     /// Rewind (`rewind`), and the memory its states may take in MB

@@ -395,6 +395,10 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   program sees the press, and a release as the window opens; moving the
   mouse while holding the button keeps it an ordinary press. Turn it off
   for a game that has you hold the right button still.
+* `pause_in_settings` pauses the program while the settings window is
+  open (but for the Mixer and Stats pages): `true` (the default) or
+  `false`, to let it run on behind the window. In a LAN room it always
+  runs on.
 * `version_check` asks rust-dos.com at startup whether a newer version
   is out (`https://rust-dos.com/version.json`); one that is shows in a
   notification over the picture and in a line under the box above the
@@ -925,7 +929,8 @@ Press **Ctrl+F12**, type `DOSCONFIG` at the DOS prompt, or hold the right
 mouse button still for 1.5 seconds (`mouse_menu_hold`) to open the
 settings window over the running program. The program pauses while it is
 open, except on the Mixer page, where it plays on so you hear the volumes
-as you set them, and the Stats page, which shows it running. Ctrl+F12 or
+as you set them, and the Stats page, which shows it running; with
+`pause_in_settings` off, or in a LAN room, it never pauses. Ctrl+F12 or
 Esc closes it.
 
 * **Drives:** mount a host directory, a zip or 7z archive, or a disk or

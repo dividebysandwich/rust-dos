@@ -86,6 +86,9 @@ pub struct Settings {
     /// The right mouse button held still for one and a half seconds opens the
     /// settings window.
     pub mouse_menu_hold: bool,
+    /// The machine waits while the settings window is open (but for the
+    /// Mixer and Stats pages); never while in a LAN room.
+    pub pause_in_settings: bool,
     /// Ask rust-dos.com at startup whether there is a newer version.
     pub version_check: bool,
     /// Rewind with held Alt+F11, and the memory in MB its states may take.
@@ -156,6 +159,7 @@ impl Default for Settings {
             mouse_sensitivity: 1.0,
             mouse_capture_messages: true,
             mouse_menu_hold: true,
+            pause_in_settings: true,
             version_check: true,
             rewind: false,
             rewind_memory: 256,
@@ -265,6 +269,7 @@ impl Settings {
             mouse_sensitivity: config.mouse_sensitivity.unwrap_or(default.mouse_sensitivity),
             mouse_capture_messages: config.mouse_capture_messages.unwrap_or(default.mouse_capture_messages),
             mouse_menu_hold: config.mouse_menu_hold.unwrap_or(default.mouse_menu_hold),
+            pause_in_settings: config.pause_in_settings.unwrap_or(default.pause_in_settings),
             version_check: config.version_check.unwrap_or(default.version_check),
             rewind: config.rewind.unwrap_or(default.rewind),
             rewind_memory: config.rewind_memory.unwrap_or(default.rewind_memory),
@@ -368,6 +373,7 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
         (Emulator, "mouse_sensitivity", Some(settings.mouse_sensitivity.to_string())),
         (Emulator, "mouse_capture_messages", yes_no(settings.mouse_capture_messages)),
         (Emulator, "mouse_menu_hold", yes_no(settings.mouse_menu_hold)),
+        (Emulator, "pause_in_settings", yes_no(settings.pause_in_settings)),
         (Emulator, "version_check", yes_no(settings.version_check)),
         (Emulator, "rewind", yes_no(settings.rewind)),
         (Emulator, "rewind_memory", Some(settings.rewind_memory.to_string())),

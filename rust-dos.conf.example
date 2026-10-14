@@ -218,6 +218,9 @@
 # Say over the picture when the mouse is captured or let go: true (the
 # default) or false.
 #mouse_capture_messages=true
+# Pause the program while the settings window is open (but for the Mixer
+# and Stats pages; never in a LAN room): true (the default) or false.
+#pause_in_settings=true
 # Ask rust-dos.com at startup whether a newer version is out, and say so
 # over the picture and under the box above the first prompt: true (the
 # default) or false.

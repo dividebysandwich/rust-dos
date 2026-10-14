@@ -188,7 +188,7 @@ impl Page {
                 Cycles, AutoFps, Core, Fpu, Cpu, Post, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, VoodooScaleShader, VoodooMsaa,
                 VoodooAnisotropy, VoodooTextureSampling, VoodooFpsCap, VoodooGamma, VoodooOverlay, PowerVr, PowerVrFilter, Memsize, Ems, Umb, DosHigh, Dpmi,
                 DosVersion, IdeHardDisks, BootCdrom, FloppyController, HardDiskSpeed, FloppyDiskSpeed, Joystick,
-                Deadzone, MouseSensitivity, MouseAutocapture, MouseCaptureMessages, MouseMenuHold, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, RecordShader, Autoexec,
+                Deadzone, MouseSensitivity, MouseAutocapture, MouseCaptureMessages, MouseMenuHold, PauseInSettings, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, RecordShader, Autoexec,
                 ShellSuggestions, ShellColors, SaveShellHistory, VersionCheck,
             ],
             Page::Sound => &[
@@ -547,9 +547,9 @@ impl ConfigUi {
     /// Whether the machine waits while the window is open: it does,
     /// except on the Mixer page, where it plays on to be heard, and the
     /// Stats page, which shows it running, unless a manual is open over
-    /// them.
+    /// them; never with `pause_in_settings` off.
     pub fn pauses_machine(&self) -> bool {
-        self.open && (self.manual.is_some() || self.chooser.is_some() || self.confirm_launch.is_some() || !matches!(self.page, Page::Mixer | Page::Stats))
+        self.open && self.settings.pause_in_settings && (self.manual.is_some() || self.chooser.is_some() || self.confirm_launch.is_some() || !matches!(self.page, Page::Mixer | Page::Stats))
     }
 
     /// What the window keeps up to date while it is open, for the frontend

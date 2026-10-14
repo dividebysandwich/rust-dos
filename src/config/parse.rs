@@ -251,6 +251,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Some(on) => config.mouse_menu_hold = Some(on),
                             None => warn(format!("invalid mouse_menu_hold '{}' (true or false)", value)),
                         },
+                        "pause_in_settings" => match parse_bool(value) {
+                            Some(on) => config.pause_in_settings = Some(on),
+                            None => warn(format!("invalid pause_in_settings '{}' (true or false)", value)),
+                        },
                         "version_check" => match parse_bool(value) {
                             Some(on) => config.version_check = Some(on),
                             None => warn(format!("invalid version_check '{}' (true or false)", value)),

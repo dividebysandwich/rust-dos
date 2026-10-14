@@ -162,6 +162,8 @@ pub(super) enum Item {
     MouseCaptureMessages,
     /// The right button held still opening the settings window.
     MouseMenuHold,
+    /// The machine waiting while the settings window is open.
+    PauseInSettings,
     ShellSuggestions,
     ShellColors,
     SaveShellHistory,
@@ -357,6 +359,7 @@ impl Item {
             MouseAutocapture => "Mouse auto capture",
             MouseCaptureMessages => "Mouse capture messages",
             MouseMenuHold => "Hold right button for settings",
+            PauseInSettings => "Pause in settings window",
             ShellSuggestions => "Shell suggestions",
             ShellColors => "Shell colors",
             SaveShellHistory => "Save shell history",
@@ -578,7 +581,7 @@ impl Item {
             Scale | Fullscreen | Aspect | Vrr | Filter | Shader | CrtCurvature | CrtGlow | Composite | CompositeEra => {
                 Applies::Now
             }
-            Cycles | AutoFps | Core | Fpu | Dpmi | DosVersion | IdeHardDisks | BootCdrom | FloppyController | KeyboardLayout | MouseAutocapture | MouseCaptureMessages | MouseMenuHold | ShellSuggestions | ShellColors | SaveShellHistory | Rewind | RewindMemory
+            Cycles | AutoFps | Core | Fpu | Dpmi | DosVersion | IdeHardDisks | BootCdrom | FloppyController | KeyboardLayout | MouseAutocapture | MouseCaptureMessages | MouseMenuHold | PauseInSettings | ShellSuggestions | ShellColors | SaveShellHistory | Rewind | RewindMemory
             | VoodooRenderer | VoodooScale | VoodooScaleShader | VoodooMsaa | VoodooTextureSampling | VoodooAnisotropy | VoodooFpsCap | VoodooOverlay | PowerVrFilter => Applies::Now,
             Monochrome => Applies::NowAndAtPrompt,
             MonitorEffects => Applies::Now,
@@ -768,6 +771,7 @@ impl Item {
             MouseAutocapture => on_off(s.mouse_autocapture),
             MouseCaptureMessages => on_off(s.mouse_capture_messages),
             MouseMenuHold => on_off(s.mouse_menu_hold),
+            PauseInSettings => on_off(s.pause_in_settings),
             ShellSuggestions => on_off(s.shell.autosuggest),
             ShellColors => on_off(s.shell.colors),
             SaveShellHistory => on_off(s.shell.save_history),

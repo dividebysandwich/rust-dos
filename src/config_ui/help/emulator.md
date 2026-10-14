@@ -374,6 +374,13 @@ program still sees the press, and a release as the window opens. Moving
 the mouse while holding the button keeps it an ordinary press. Turn it
 **off** for a game that has you hold the right button still.
 
+# Pause in settings window {#pause-in-settings}
+
+When **on** (the default), the program pauses while this settings
+window is open, except on the Mixer and Stats pages. Turn it **off** to
+let the program run on behind the window. In a LAN room it always runs
+on, whatever this says, as the other players' games would wait for it.
+
 # Rewind (Alt+F11) {#rewind}
 
 When **on**, Rust-DOS keeps the last minutes of play: hold **Alt+F11** to
