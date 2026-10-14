@@ -222,7 +222,7 @@ impl Core {
         let mut core = Box::new(Core {
             ui: ConfigUi::for_frontend(LIBRETRO),
             m: Machine {
-                pacer: Pacer::new(settings.cycles, Instant::now()),
+                pacer: Pacer::new(settings.cycles, settings.auto_fps, Instant::now()),
                 hardware: Hardware::of(&settings),
                 saved: settings.clone(),
                 settings,
