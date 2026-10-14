@@ -329,7 +329,7 @@ impl<'a, 'b> Context<'a, 'b> {
         // its others draw with whatever the last perspective triangle left
         // there. (sample_level still reads non-perspective U/V in the
         // perspective scale, which matches S12.8.11 only for 256x256
-        // textures, issue #124.)
+        // textures.)
         if self.persp {
             self.tbu = ((reg(0x108) & 0xF_FFFF) << 11) as i32;
             self.tbv = ((reg(0x104) & 0xF_FFFF) << 11) as i32;
