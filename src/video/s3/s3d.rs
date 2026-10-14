@@ -300,6 +300,7 @@ impl<'a, 'b> Context<'a, 'b> {
         self.filter = cmd_filter(cmd);
         self.max_d = cmd_mip_size(cmd).min(9) as i32;
         self.wrap = cmd & CMD_TWE != 0;
+        self.persp = matches!(cmd_command(cmd), LIT_TEX_TRI_PERSP | UNLIT_TEX_TRI_PERSP);
         self.palettized = self.tex_fmt == TEX_PAL8;
         // Palettized texels can only be used unfiltered (15.4.8.1).
         if self.palettized {
@@ -322,10 +323,13 @@ impl<'a, 'b> Context<'a, 'b> {
         self.flat_stride = if self.filter >= 4 { reg(0xE4) & 0xFF8 } else { 0 };
         // TBU/TBV are (4+s).(16-s), offsets for the perspective U/V, which
         // are (4+s).(27-s) and so reach only 2^(4+s) texels. Without
-        // perspective U and V are S12.8.11 (19.4), wide enough on their own,
-        // and the bases don't apply: S3's Direct3D driver writes them only
-        // for perspective triangles, and its others draw with whatever the
-        // last perspective triangle left there.
+        // perspective the databook gives U and V as S12.8.11 (19.4), with 12
+        // integer bits of their own, and the bases don't apply: S3's
+        // Direct3D driver writes them only for perspective triangles, and
+        // its others draw with whatever the last perspective triangle left
+        // there. (sample_level still reads non-perspective U/V in the
+        // perspective scale, which matches S12.8.11 only for 256x256
+        // textures, issue #124.)
         if self.persp {
             self.tbu = ((reg(0x108) & 0xF_FFFF) << 11) as i32;
             self.tbv = ((reg(0x104) & 0xF_FFFF) << 11) as i32;
@@ -487,11 +491,11 @@ impl<'a, 'b> Context<'a, 'b> {
             }
             let shift = 12 + self.max_d;
             (
-                ((at.u as i64 * w) >> shift) as i32 + self.tbu,
-                ((at.v as i64 * w) >> shift) as i32 + self.tbv,
+                (((at.u as i64 * w) >> shift) as i32).wrapping_add(self.tbu),
+                (((at.v as i64 * w) >> shift) as i32).wrapping_add(self.tbv),
             )
         } else {
-            (at.u.wrapping_add(self.tbu), at.v.wrapping_add(self.tbv))
+            (at.u, at.v)
         };
         // The mipmap level from D's integer part (S4.27).
         let mut level = self.max_d;
@@ -832,7 +836,6 @@ impl S3d {
             _ => return,
         }
         if c.textured {
-            c.persp = matches!(cmd_command(cmd), LIT_TEX_TRI_PERSP | UNLIT_TEX_TRI_PERSP);
             c.tex_blend = cmd_tex_blend(cmd);
             c.setup_texture(cmd, tri);
             c.fog = cmd & CMD_FE != 0;
@@ -1098,9 +1101,9 @@ mod tests {
             vram[tex + 8 + x * 2..tex + 8 + x * 2 + 2].copy_from_slice(&0x83E0u16.to_le_bytes());
         }
         // 16 bit destination, ARGB1555, mip size 2 (4x4), 1TPP, wrapped,
-        // no Z.
+        // no Z; lit triangles blend as decal, so they show the texel too.
         let textured = |command: u32| {
-            CMD_3D | 1 << 2 | TEX_ARGB1555 << 5 | 2 << 8 | 4 << 12 | CMD_TWE | 3 << 24 | command << 27
+            CMD_3D | 1 << 2 | TEX_ARGB1555 << 5 | 2 << 8 | 4 << 12 | 2 << 15 | CMD_TWE | 3 << 24 | command << 27
         };
         let mut s = S3d::default();
         tri(&mut s, &mut vram, 0xEC, tex as u32);
@@ -1109,10 +1112,12 @@ mod tests {
         tri(&mut s, &mut vram, 0x104, 1 << 14);
         tri(&mut s, &mut vram, 0x108, 0);
         tri(&mut s, &mut vram, 0x114, 1 << 20);
-        rectangle(&mut s, &mut vram, (0, 0, 0), 0, textured(UNLIT_TEX_TRI));
-        assert_eq!(pixel16(&vram, 15, 45), 0x7C00, "row 0 without perspective");
-        rectangle(&mut s, &mut vram, (0, 0, 0), 0, textured(UNLIT_TEX_TRI_PERSP));
-        assert_eq!(pixel16(&vram, 15, 45), 0x03E0, "row 1 with perspective");
+        for (command, want) in
+            [(UNLIT_TEX_TRI, 0x7C00), (LIT_TEX_TRI, 0x7C00), (UNLIT_TEX_TRI_PERSP, 0x03E0), (LIT_TEX_TRI_PERSP, 0x03E0)]
+        {
+            rectangle(&mut s, &mut vram, (0, 0, 0), 0, textured(command));
+            assert_eq!(pixel16(&vram, 15, 45), want, "command {command}: row 0 without perspective, row 1 with");
+        }
     }
 
     #[test]
