@@ -162,6 +162,31 @@ for the next time, and **Show the real keyboard** becomes **marked**.
 
 Turning it on or off starts the headset again.
 
+# Time of day {#vr-time}
+
+The time of day in the scene: where the sun and the moon are, how light
+the sky is, the stars at night. Scenes with windows show it through them.
+
+- **Time of day**: **now** follows the computer's clock; a time starts
+  the scene's day there.
+- **Time goes**: how fast the scene's day goes on: as the clock (real
+  time), faster (up to an hour a second), or **stands still**.
+- **Latitude**: how far north (or south) of the equator the scene is,
+  which sets how high the sun climbs. The sun rises at six and sets at
+  six, as at the equinox.
+
+They take effect at once.
+
+# Weather {#vr-weather}
+
+What the sky does outside: **clear**, **rain**, **thunderstorm** or
+**snow**. Rain runs down the windows, and clouds dim the sun.
+
+- **Rain and thunder volume**: how loud the rain on the windows and
+  the thunder are, 0 to 100%. The rain sounds from the windows.
+- **Lightning**: flashes in a thunderstorm, which light up the room,
+  with thunder a few seconds after.
+
 # Headset resolution {#vr-resolution}
 
 How sharp the headset's picture is: the size of each eye's image in

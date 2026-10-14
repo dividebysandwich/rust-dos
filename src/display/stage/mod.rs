@@ -26,7 +26,9 @@ mod props;
 mod render;
 mod scene;
 mod shadow;
+mod sky;
 mod spatial;
+mod world;
 #[cfg(xr)]
 mod xr;
 
@@ -43,6 +45,7 @@ use rust_dos::vr::{Leds, VrGraphics, VrLook};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError};
+use world::World;
 use std::time::SystemTime;
 
 pub struct Stage {
@@ -91,6 +94,9 @@ pub struct Stage {
     props: props::Props,
     manuals: Vec<PathBuf>,
     fresh_manuals: bool,
+    /// The lamps, the time of day and the weather, which the headset's
+    /// thread and the sound share.
+    world: Arc<World>,
 }
 
 /// How the window's view is drawn, as `look` says: timed with
@@ -162,6 +168,8 @@ impl Stage {
         }
         let camera = FlyCamera::at(scene.spawn);
         let props = props::Props::new(&scene);
+        let world = Arc::new(World::new(settings));
+        world.set_scene(&scene);
         #[allow(unused_mut)]
         let mut stage = Stage {
             scene,
@@ -189,6 +197,7 @@ impl Stage {
             props,
             manuals: Vec::new(),
             fresh_manuals: false,
+            world,
         };
         if settings.mode == VrMode::Headset {
             notes.extend(stage.start_headset(settings, window, main));
@@ -207,7 +216,7 @@ impl Stage {
         #[cfg(xr)]
         {
             let textures = [self.screens[0].texture, self.screens[1].texture, self.screens[2].texture];
-            match headset::Headset::start(window, main, self.glsl, self.scene.clone(), textures, settings) {
+            match headset::Headset::start(window, main, self.glsl, self.scene.clone(), textures, settings, self.world.clone()) {
                 Ok(headset) => {
                     headset.set_manuals(self.manuals.clone());
                     self.headset = Some(headset);
@@ -299,6 +308,8 @@ impl Stage {
         }
         let screen = self.latest.map(|i| self.screens[i].texture);
         self.gpu.frame_start(gl);
+        let now = std::time::Instant::now();
+        self.gpu.set_ambience(gl, &self.scene, self.world.ambience(&self.scene, now));
         if let Some(texture) = screen.filter(|_| std::mem::take(&mut self.fresh)) {
             self.gpu.prepare(gl, &self.scene, texture);
         }
@@ -443,6 +454,7 @@ impl Stage {
         self.scene = scene.clone();
         self.camera = FlyCamera::at(scene.spawn);
         self.props.reset(&scene);
+        self.world.set_scene(&scene);
         self.fresh = self.latest.is_some();
         self.shown = None;
         #[cfg(xr)]
@@ -513,6 +525,7 @@ impl Stage {
             self.mode = settings.mode;
         }
         self.fit = settings.screen_fit;
+        self.world.apply(settings);
         self.glow = glow_of(settings);
         self.gpu.set_glow(self.glow);
         self.switch_scene(settings.scene.clone());

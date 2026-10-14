@@ -112,6 +112,10 @@ pub struct Material {
     pub alpha: Alpha,
     /// The PC's light this is, glowing with `emissive` only while lit.
     pub led: Option<Led>,
+    /// The lamp (`Scene::lamps`) this glows with, only while it is on.
+    pub lamp: Option<usize>,
+    /// A window's glass, which the rain runs down.
+    pub window: bool,
 }
 
 impl Material {
@@ -133,6 +137,8 @@ impl Material {
             double_sided: false,
             alpha: Alpha::Opaque,
             led: None,
+            lamp: None,
+            window: false,
         }
     }
 
@@ -167,6 +173,26 @@ pub struct Light {
     /// Whether what is in its way casts a shadow (the light's
     /// `rustdos_shadow` custom property).
     pub shadow: bool,
+}
+
+/// A lamp of the scene's (a node with `rustdos_lamp`), switched on and off
+/// with a hand or a click: its lights, and its meshes that glow.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Lamp {
+    pub name: String,
+    /// On as the scene starts (`rustdos_lamp_on`).
+    pub on: bool,
+    /// Its lights, by their index in `Scene::lights`.
+    pub lights: Vec<usize>,
+    /// The box around its meshes, where it is switched.
+    pub bounds: (Vec3, Vec3),
+}
+
+impl Lamp {
+    #[cfg(test)]
+    pub fn test(on: bool) -> Self {
+        Lamp { name: "lamp".into(), on, lights: Vec::new(), bounds: (Vec3::ZERO, Vec3::ONE) }
+    }
 }
 
 /// The surface the emulated picture is shown on.
@@ -383,11 +409,21 @@ pub struct Scene {
     pub ambient: Vec3,
     pub screen: Screen,
     pub spawn: Spawn,
-    /// Whether the sunset sky is drawn around the scene, which then fades
-    /// into it with distance.
+    /// Whether the sky is drawn around the scene, which then fades into it
+    /// with distance (`haze` a metre).
     pub sky: bool,
-    /// Towards the sky's sun.
-    pub sun: Vec3,
+    pub haze: f32,
+    /// The light that is the sun (or the moon) and goes with the time of
+    /// day, by its index in `lights`.
+    pub sun_light: Option<usize>,
+    /// Where the scene's -Z points, in degrees from north (90 east): the
+    /// sun sets that way at 270 (`rustdos_heading`).
+    pub heading: f32,
+    /// The lamps to switch on and off.
+    pub lamps: Vec<Lamp>,
+    /// The inside of the room (a box, `rustdos_indoor`), where it doesn't
+    /// rain or snow.
+    pub indoor: Option<(Vec3, Vec3)>,
     /// What the lit colours are multiplied by.
     pub exposure: f32,
     /// Where the left and right channels' sound comes from: the scene's
@@ -431,6 +467,13 @@ const TEST_PROPS: [(PropKind, Vec3); 2] = [(PropKind::Manual, Vec3::new(-0.28, 0
 fn sunset_sun() -> Vec3 {
     Vec3::new(-0.45, 0.1, -1.0).normalize()
 }
+
+/// Where a scene's -Z points unless it says, in degrees from north: west,
+/// so that the sun sets ahead of the viewer, as the sunset of before.
+const HEADING: f32 = 270.0;
+
+/// How fast the scene fades into the sky with distance, unless it says.
+const HAZE: f32 = 0.02;
 
 /// The light of the sunset sky: its sun, orange, and the blue of the rest.
 fn sunset_lights() -> (Light, Vec3) {
@@ -536,7 +579,11 @@ impl Scene {
             screen: Screen::default(),
             spawn: Spawn { position: Vec3::new(0.0, 1.2, 0.0), yaw: 0.0, pitch: 0.0 },
             sky: true,
-            sun: sunset_sun(),
+            haze: HAZE,
+            sun_light: Some(0),
+            heading: HEADING,
+            lamps: Vec::new(),
+            indoor: None,
             exposure: 1.0,
             speakers: [Vec3::ZERO; 2],
             shadows: true,
@@ -739,6 +786,8 @@ impl Scene {
                         gltf::material::AlphaMode::Blend => Alpha::Blend,
                     },
                     led: None,
+                    lamp: None,
+                    window: false,
                 }
             })
             .collect();
@@ -758,7 +807,11 @@ impl Scene {
             screen: Screen::default(),
             spawn: Spawn { position: Vec3::new(0.0, 1.2, 0.0), yaw: 0.0, pitch: 0.0 },
             sky: extra(scene.extras(), "rustdos_sky").is_none_or(truthy),
-            sun: sunset_sun(),
+            haze: extra(scene.extras(), "rustdos_haze").and_then(|v| v.as_f64()).map_or(HAZE, |h| h.max(0.0) as f32),
+            sun_light: None,
+            heading: extra(scene.extras(), "rustdos_heading").and_then(|v| v.as_f64()).map_or(HEADING, |h| h as f32),
+            lamps: Vec::new(),
+            indoor: None,
             exposure: extra(scene.extras(), "rustdos_exposure").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32,
             speakers: [Vec3::ZERO; 2],
             shadows: extra(scene.extras(), "rustdos_shadows").is_none_or(truthy),
@@ -781,6 +834,11 @@ impl Scene {
             leds: Vec::new(),
             screen_stretch: false,
             prop_places: Vec::new(),
+            lamp: None,
+            lamps: Vec::new(),
+            lamp_meshes: Vec::new(),
+            windows: Vec::new(),
+            indoor: None,
         };
         for node in scene.nodes() {
             walk.node(&mut loaded, node, Mat4::IDENTITY, false)?;
@@ -791,15 +849,39 @@ impl Scene {
         if loaded.meshes.iter().all(|m| m.material != screen_material) {
             return Err("no mesh is the screen: name it \"screen\", or give it the custom property rustdos_screen".into());
         }
-        // A scene without lights of its own is lit by the sunset; with
-        // some, the sky only adds a little.
+        // A scene without lights of its own is lit by the sun, and with a
+        // sky the sun lights it too; with lights, the sky (or without one,
+        // what fills the room) only adds a little.
         let (sun, ambient) = sunset_lights();
-        if loaded.lights.is_empty() {
-            loaded.lights.push(sun);
-            loaded.ambient = ambient;
-        } else {
-            loaded.ambient = ambient * 0.5;
+        loaded.ambient = if loaded.lights.is_empty() { ambient } else { ambient * 0.5 };
+        if loaded.lights.is_empty() || loaded.sky {
+            // First, the light that most wants shadows; the others after.
+            loaded.lights.insert(0, sun);
+            loaded.lights.truncate(MAX_LIGHTS);
+            for lamp in &mut walk.lamps {
+                lamp.lights.iter_mut().for_each(|i| *i += 1);
+                lamp.lights.retain(|&i| i < MAX_LIGHTS);
+            }
+            loaded.sun_light = Some(0);
         }
+        loaded.lamps = std::mem::take(&mut walk.lamps);
+        // A lamp's own copies of the materials that glow, lit or not apart
+        // from the rest using them.
+        for (mesh, lamp) in std::mem::take(&mut walk.lamp_meshes) {
+            let material = &loaded.materials[loaded.meshes[mesh].material];
+            if material.emissive == [0.0; 3] && material.emissive_texture.is_none() {
+                continue;
+            }
+            let material = Material { lamp: Some(lamp), ..material.clone() };
+            loaded.meshes[mesh].material = loaded.materials.len();
+            loaded.materials.push(material);
+        }
+        for mesh in std::mem::take(&mut walk.windows) {
+            let material = Material { window: true, ..loaded.materials[loaded.meshes[mesh].material].clone() };
+            loaded.meshes[mesh].material = loaded.materials.len();
+            loaded.materials.push(material);
+        }
+        loaded.indoor = walk.indoor;
         loaded.collect_screen();
         loaded.screen.stretch = walk.screen_stretch;
         let sides = loaded.screen_speakers();
@@ -843,6 +925,14 @@ struct Walk<'a> {
     screen_stretch: bool,
     /// Props that are only an empty: where Rust-DOS's model goes.
     prop_places: Vec<(PropKind, Mat4)>,
+    /// The lamp being walked below, the lamps, and the meshes of each.
+    lamp: Option<usize>,
+    lamps: Vec<Lamp>,
+    lamp_meshes: Vec<(usize, usize)>,
+    /// The meshes that are a window's glass.
+    windows: Vec<usize>,
+    /// The inside of the room, from an empty's cube.
+    indoor: Option<(Vec3, Vec3)>,
 }
 
 /// What a node of a prop is, by its name or `rustdos_prop`.
@@ -888,9 +978,27 @@ impl Walk<'_> {
         if node.camera().is_some() && self.camera.is_none() {
             self.camera = Some(Spawn::from_matrix(world));
         }
+        if named(node.name(), "indoor") || extra(node.extras(), "rustdos_indoor").is_some_and(truthy) {
+            // Blender's cube empty, from -1 to 1.
+            let corners = (0..8).map(|i| world.transform_point3(Vec3::new([-1.0, 1.0][i & 1], [-1.0, 1.0][i >> 1 & 1], [-1.0, 1.0][i >> 2])));
+            self.indoor = Some(corners.fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(l, h), c| (l.min(c), h.max(c))));
+        }
+        // A lamp and all below it.
+        let outer_lamp = self.lamp;
+        if self.lamp.is_none()
+            && let Some(value) = extra(node.extras(), "rustdos_lamp").filter(|v| v.is_string() || truthy(v.clone()))
+        {
+            let name = value.as_str().map(str::to_string).or_else(|| node.name().map(str::to_string)).unwrap_or_else(|| "lamp".into());
+            let on = extra(node.extras(), "rustdos_lamp_on").is_some_and(truthy);
+            self.lamp = Some(self.lamps.len());
+            self.lamps.push(Lamp { name, on, lights: Vec::new(), bounds: (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)) });
+        }
         if let Some(light) = node.light()
             && scene.lights.len() < MAX_LIGHTS
         {
+            if let Some(lamp) = self.lamp {
+                self.lamps[lamp].lights.push(scene.lights.len());
+            }
             let color = Vec3::from(light.color()) * light.intensity();
             let kind = match light.kind() {
                 gltf::khr_lights_punctual::Kind::Directional => LightKind::Directional,
@@ -922,6 +1030,10 @@ impl Walk<'_> {
             .and_then(|v| v.as_str().and_then(Led::parse))
             .or_else(|| node.name().filter(|n| n.to_ascii_lowercase().starts_with("led_")).and_then(Led::parse))
             .or_else(|| node.mesh().and_then(|m| m.name()).filter(|n| n.to_ascii_lowercase().starts_with("led_")).and_then(Led::parse));
+        let window = !screen
+            && (extra(node.extras(), "rustdos_window").is_some_and(truthy)
+                || node.name().is_some_and(is_window_name)
+                || node.mesh().is_some_and(|m| m.name().is_some_and(is_window_name)));
         if let Some(mesh) = node.mesh() {
             for (mut read, primitive) in self.read_mesh(&mesh, world)? {
                 read.material = if screen {
@@ -932,11 +1044,36 @@ impl Walk<'_> {
                 if let Some(led) = led.filter(|_| !screen) {
                     self.leds.push((scene.meshes.len(), led));
                 }
+                if let Some(lamp) = self.lamp {
+                    let bounds = &mut self.lamps[lamp].bounds;
+                    for v in &read.vertices {
+                        bounds.0 = bounds.0.min(Vec3::from(v.position));
+                        bounds.1 = bounds.1.max(Vec3::from(v.position));
+                    }
+                    self.lamp_meshes.push((scene.meshes.len(), lamp));
+                }
+                if window {
+                    self.windows.push(scene.meshes.len());
+                }
                 scene.meshes.push(read);
             }
         }
         for child in node.children() {
             self.node(scene, child, world, screen)?;
+        }
+        if outer_lamp.is_none()
+            && let Some(lamp) = self.lamp.take()
+        {
+            // Without meshes, a small box around its lights.
+            let bounds = &mut self.lamps[lamp].bounds;
+            if bounds.0.x > bounds.1.x {
+                for &i in &self.lamps[lamp].lights.clone() {
+                    let at = scene.lights[i].position;
+                    let bounds = &mut self.lamps[lamp].bounds;
+                    bounds.0 = bounds.0.min(at - 0.1);
+                    bounds.1 = bounds.1.max(at + 0.1);
+                }
+            }
         }
         Ok(())
     }
@@ -1031,6 +1168,13 @@ impl Walk<'_> {
         }
         Ok(read)
     }
+}
+
+/// Whether a node or mesh is called a window's glass ("Window glass",
+/// "window_glass.001").
+fn is_window_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase().replace(['_', ' '], "");
+    name.starts_with("windowglass") || name.starts_with("windowpane")
 }
 
 /// Normals for a mesh that has none: each vertex's faces', by their area.

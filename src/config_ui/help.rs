@@ -300,6 +300,8 @@ impl Item {
             VrScreenGlow => "vr-screen-glow",
             VrCenter => "vr-center",
             VrKeyboard | VrMarkKeyboard => "vr-keyboard",
+            VrTime | VrTimeSpeed | VrLatitude => "vr-time",
+            VrWeather | VrWeatherSound | VrLightning => "vr-weather",
             VrSceneScale | VrSeat(_) | VrSeatTurn => "vr-seat",
             VrResolution => "vr-resolution",
             VrFoveation => "vr-foveation",

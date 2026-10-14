@@ -759,6 +759,12 @@ fn changed_settings() -> Settings {
             refresh: Some(90),
             foveation: crate::vr::VrFoveation::High,
             keyboard: crate::vr::VrKeyboard::Marked,
+            time: crate::vr::VrTime::At(21 * 60 + 30),
+            time_speed: 60,
+            latitude: 52,
+            weather: crate::vr::VrWeather::Snow,
+            weather_sound: 30,
+            lightning: false,
         },
     }
 }
@@ -980,7 +986,7 @@ fn saving_all_fills_in_every_setting() {
     assert!(saved.contains("\nroom=lobby\n\n[serial]\nserial1=mouse\n"), "{}", saved);
     assert!(saved.contains("\nmodemtelnet=off\n\n[printer]\noutput=pdf\n"), "{}", saved);
     assert!(saved.contains("\ntimeout=3000\n\n[achievements]\nenabled=false\nhardcore=false\n\n[shell]\nautosuggest=true\n"), "{}", saved);
-    assert!(saved.contains("\nsuggestion_color=darkgray\n\n[vr]\nmode=off\ncontrollers=both\nspatial_audio=true\nscreen_fit=auto\nquality=auto\nscreen_glow=100\nscene_scale=100\nseat_right=0\nseat_up=0\nseat_forward=0\nseat_turn=0\ngraphics=auto\nresolution=auto\nambient_occlusion=auto\nmsaa=auto\nrefresh=auto\nfoveation=auto\nkeyboard=off\n\n[autoexec]\nDIR\n"), "{}", saved);
+    assert!(saved.contains("\nsuggestion_color=darkgray\n\n[vr]\nmode=off\ncontrollers=both\nspatial_audio=true\nscreen_fit=auto\nquality=auto\nscreen_glow=100\nscene_scale=100\nseat_right=0\nseat_up=0\nseat_forward=0\nseat_turn=0\ngraphics=auto\nresolution=auto\nambient_occlusion=auto\nmsaa=auto\nrefresh=auto\nfoveation=auto\nkeyboard=off\ntime=now\ntime_speed=1\nlatitude=48\nweather=clear\nweather_sound=70\nlightning=true\n\n[autoexec]\nDIR\n"), "{}", saved);
     let config = parse(&saved, Path::new("/cfg"), Some(home));
     assert!(config.warnings.is_empty(), "{:?}", config.warnings);
     assert_eq!(Settings::from_config(&config), Settings { cycles: CpuSpeed::Max, ..settings.clone() });

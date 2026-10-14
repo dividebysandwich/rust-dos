@@ -205,6 +205,13 @@ impl Item {
             VrRefresh => each(s, std::iter::once(None).chain(crate::vr::REFRESH_RATES.map(Some)), |s, hz| s.vr.refresh = hz),
             VrFoveation => each(s, crate::vr::VrFoveation::ALL, |s, f| s.vr.foveation = f),
             VrKeyboard => each(s, crate::vr::VrKeyboard::ALL, |s, k| s.vr.keyboard = k),
+            VrTime => {
+                let times = std::iter::once(crate::vr::VrTime::Now).chain((0..24).map(|h| crate::vr::VrTime::At(h * 60)));
+                each(s, times, |s, t| s.vr.time = t)
+            }
+            VrTimeSpeed => each(s, crate::vr::TIME_SPEEDS, |s, speed| s.vr.time_speed = speed),
+            VrWeather => each(s, crate::vr::VrWeather::ALL, |s, w| s.vr.weather = w),
+            VrLightning => on_off(|s, on| s.vr.lightning = on),
             VrGraphics => each(s, crate::vr::VrGraphics::ALL, |s, g| s.vr.graphics = g),
             Filter => each(s, [crate::config::Filter::Nearest, crate::config::Filter::Linear], |s, f| s.filter = f),
             Shader => each(s, crate::video::shader::Shader::ALL, |s, shader| s.shader = shader),
@@ -371,6 +378,7 @@ impl Item {
             Cycles | AutoFps | CrtCurvature | CrtGlow | Memsize | Volume(_) | ReverbMix | ChorusMix | Deadzone | MouseSensitivity | UltraDir
             | SoundFont | Mt32Roms | Awe32Rom | Awe32Download | Sc55Roms | Sc55Download | VoodooOverlay | CaptureDir | Autoexec | SbPorts | GusPorts | MacAddr
             | Rooms | Relay | Player | VrScene | VrScreenGlow | VrCenter | VrMarkKeyboard | VrSceneScale | VrSeat(_) | VrSeatTurn | VrResolution
+            | VrLatitude | VrWeatherSound
             | Lan | LanHost | Room | Password | ModemListen | Phonebook => Vec::new(),
         }
     }
@@ -421,6 +429,14 @@ impl Item {
             VrSeatTurn => {
                 let max = crate::vr::SEAT_TURN_MAX;
                 s.vr.seat_turn = (s.vr.seat_turn + dir as i32).clamp(-max, max);
+            }
+            VrLatitude => {
+                let max = crate::vr::LATITUDE_MAX;
+                s.vr.latitude = (s.vr.latitude + dir as i32).clamp(-max, max);
+            }
+            VrWeatherSound => {
+                let max = crate::vr::WEATHER_SOUND_MAX as u16;
+                s.vr.weather_sound = step_units(s.vr.weather_sound.min(max as u32) as u16, dir, 10, max) as u32;
             }
             VrResolution => {
                 let (min, max) = (crate::vr::RESOLUTION_MIN as isize, crate::vr::RESOLUTION_MAX as isize);
@@ -488,6 +504,8 @@ impl Item {
             Item::VrSceneScale => s.vr.scene_scale.to_string(),
             Item::VrSeat(axis) => s.vr.seat[axis as usize].to_string(),
             Item::VrSeatTurn => s.vr.seat_turn.to_string(),
+            Item::VrLatitude => s.vr.latitude.to_string(),
+            Item::VrWeatherSound => s.vr.weather_sound.to_string(),
             Item::VrResolution => s.vr.resolution.map_or("auto".to_string(), |r| r.to_string()),
             Item::ReverbMix => s.mixer.reverb_mix.to_string(),
             Item::ChorusMix => s.mixer.chorus_mix.to_string(),
@@ -527,6 +545,8 @@ impl Item {
             Item::VrSceneScale => s.vr.set("scene_scale", text, std::path::Path::new(""))?,
             Item::VrSeat(axis) => s.vr.set(crate::vr::SEAT_AXES[axis as usize], text, std::path::Path::new(""))?,
             Item::VrSeatTurn => s.vr.set("seat_turn", text, std::path::Path::new(""))?,
+            Item::VrLatitude => s.vr.set("latitude", text, std::path::Path::new(""))?,
+            Item::VrWeatherSound => s.vr.set("weather_sound", text, std::path::Path::new(""))?,
             Item::VrResolution => s.vr.set("resolution", text, std::path::Path::new(""))?,
             Item::ReverbMix => s.mixer.reverb_mix = crate::mixer::parse_mix(text)?,
             Item::ChorusMix => s.mixer.chorus_mix = crate::mixer::parse_mix(text)?,
@@ -593,6 +613,14 @@ impl Item {
             }
             Item::VrSeat(axis) => std::mem::take(&mut s.vr.seat[axis as usize]) != 0,
             Item::VrSeatTurn => std::mem::take(&mut s.vr.seat_turn) != 0,
+            Item::VrLatitude => {
+                let default = crate::vr::VrSettings::default().latitude;
+                std::mem::replace(&mut s.vr.latitude, default) != default
+            }
+            Item::VrWeatherSound => {
+                let default = crate::vr::VrSettings::default().weather_sound;
+                std::mem::replace(&mut s.vr.weather_sound, default) != default
+            }
             Item::VrResolution => {
                 let default = crate::vr::VrSettings::default().resolution;
                 std::mem::replace(&mut s.vr.resolution, default) != default

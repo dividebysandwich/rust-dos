@@ -299,6 +299,7 @@ impl Headset {
         scene: Arc<Scene>,
         screens: [glow::Texture; 3],
         settings: &VrSettings,
+        world: Arc<super::world::World>,
     ) -> Result<Self, String> {
         let (controllers, glow) = (settings.controllers, settings.screen_glow as f32 / 100.0);
         let settings = settings.clone();
@@ -346,7 +347,7 @@ impl Headset {
         let thread_shared = shared.clone();
         let thread = std::thread::Builder::new()
             .name("vr-headset".into())
-            .spawn(move || run(thread_shared, raw_window, raw_context, glsl, scene, screens, settings))
+            .spawn(move || run(thread_shared, raw_window, raw_context, glsl, scene, screens, settings, world))
             .map_err(|e| e.to_string())?;
         Ok(Headset {
             shared,
@@ -544,6 +545,7 @@ fn run(
     scene: Arc<Scene>,
     screens: [glow::Texture; 3],
     settings: VrSettings,
+    world: Arc<super::world::World>,
 ) {
     // SAFETY: the window and the context are alive until the thread ends
     // (see `Headset::drop`), and the context is current nowhere else.
@@ -558,7 +560,7 @@ fn run(
                 sdl2::sys::SDL_GL_GetProcAddress(name.as_ptr()) as *const _
             })
         };
-        if let Err(e) = session(&shared, &gl, glsl, scene, screens, &settings) {
+        if let Err(e) = session(&shared, &gl, glsl, scene, screens, &settings, &world) {
             shared.note(e);
         }
         // SAFETY: as above.
@@ -580,6 +582,7 @@ fn session(
     mut scene: Arc<Scene>,
     screens: [glow::Texture; 3],
     settings: &VrSettings,
+    world: &super::world::World,
 ) -> Result<(), String> {
     let features = Features::of(gl);
     // A standalone headset's own graphics chip is gone easier on
@@ -749,6 +752,7 @@ fn session(
         }
         gpu.set_glow(glow);
         gpu.frame_start(gl);
+        gpu.set_ambience(gl, &scene, world.ambience(&scene, std::time::Instant::now()));
         if let Some((index, fence, ())) = taken {
             if let Some(Fence(fence)) = fence {
                 // SAFETY: see `GlScreen`.
