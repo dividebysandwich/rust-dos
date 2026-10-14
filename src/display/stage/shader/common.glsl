@@ -89,8 +89,10 @@ vec3 sky_color(vec3 d) {
     }
     // Below the horizon, haze going dark.
     c = mix(c, u_horizon * 0.25, smoothstep(0.0, -0.12, h));
+    // The sun: big and soft low in the haze, small and sharp up high.
     float s = max(dot(d, sun), 0.0);
-    c += u_sun_disc * (pow(s, 900.0) * 8.0 + pow(s, 30.0) * 0.3 * (1.0 - u_clouds));
+    float sharp = mix(900.0, 25000.0, smoothstep(0.12, 0.45, sun.y));
+    c += u_sun_disc * (pow(s, sharp) * 8.0 + pow(s, 30.0) * 0.3 * (1.0 - u_clouds));
     float m = max(dot(d, normalize(u_moon)), 0.0);
     c += u_moon_disc * (smoothstep(0.99985, 0.99992, m) * 1.2 + pow(m, 200.0) * 0.02);
     c += vec3(0.55, 0.6, 0.8) * u_flash * (0.6 + 0.4 * h);
