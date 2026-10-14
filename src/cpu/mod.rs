@@ -69,7 +69,8 @@ const FLAGS16_WRITABLE: u32 = 0x7FD5;
 
 /// The processor being emulated, each with what the one before it has
 /// (`model >= CpuModel::I486`), except that a Pentium Pro has no MMX
-/// (`has_mmx`).
+/// (`has_mmx`), and that the P6 has none of what the K6-2 adds to the
+/// Pentium MMX (`has_3dnow`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CpuModel {
     I386,
@@ -84,6 +85,13 @@ pub enum CpuModel {
     /// A Pentium MMX (P55C): the Pentium's, MMX, and CPUID saying family
     /// 5, model 4, stepping 3.
     PentiumMmx,
+    /// An AMD K6-2 (model 8, stepping 0): the Pentium MMX's, 3DNow! and
+    /// SYSCALL/SYSRET with their MSRs (EFER, STAR) and the K6's write
+    /// handling and test registers, and CPUID saying "AuthenticAMD",
+    /// family 5, model 8 with the extended leaves of AMD's processor
+    /// recognition note: the 3DNow! and SYSCALL features, the name and the
+    /// L1 caches. It has no CMOVcc and no P6 instructions, as the real one.
+    K6_2,
     /// A Pentium Pro as DOSBox-X's `ppro_slow` has it: the Pentium's (no
     /// MMX), CMOVcc, FCMOVcc, FCOMI/FUCOMI and their popping forms, the
     /// hinting NOPs (0F 18 to 0F 1E), the local APIC base and microcode
@@ -101,11 +109,12 @@ pub enum CpuModel {
 }
 
 impl CpuModel {
-    pub const ALL: [CpuModel; 7] = [
+    pub const ALL: [CpuModel; 8] = [
         CpuModel::I386,
         CpuModel::I486,
         CpuModel::Pentium,
         CpuModel::PentiumMmx,
+        CpuModel::K6_2,
         CpuModel::PentiumPro,
         CpuModel::PentiumII,
         CpuModel::PentiumIII,
@@ -130,6 +139,7 @@ impl CpuModel {
             CpuModel::I486 => 0x0402,
             CpuModel::Pentium => 0x0517,
             CpuModel::PentiumMmx => 0x0543,
+            CpuModel::K6_2 => 0x0580,
             CpuModel::PentiumPro => 0x0612,
             CpuModel::PentiumII => 0x0633,
             CpuModel::PentiumIII => 0x0673,
@@ -143,6 +153,7 @@ impl CpuModel {
             CpuModel::I486 => "486",
             CpuModel::Pentium => "Pentium",
             CpuModel::PentiumMmx => "Pentium MMX",
+            CpuModel::K6_2 => "K6-2",
             CpuModel::PentiumPro => "Pentium Pro",
             CpuModel::PentiumII => "Pentium II",
             CpuModel::PentiumIII => "Pentium III",
@@ -152,14 +163,19 @@ impl CpuModel {
     /// The most RAM in MB (`memsize`) a machine with this CPU takes, as
     /// the motherboards of its day did: 64 MB on a 386, 128 MB on a 486,
     /// 256 MB on a Pentium (430FX/VX) and 512 MB on a Pentium MMX (430HX).
-    /// A Pentium Pro, Pentium II or Pentium III board (440FX, 440BX)
-    /// takes 1 GB, which `MAX_MEMSIZE` keeps to 512 MB.
+    /// A K6-2's Super 7 board (MVP3, Aladdin V) and a Pentium Pro, Pentium
+    /// II or Pentium III board (440FX, 440BX) take 768 MB or 1 GB, which
+    /// `MAX_MEMSIZE` keeps to 512 MB.
     pub fn max_memsize(self) -> usize {
         match self {
             CpuModel::I386 => 64,
             CpuModel::I486 => 128,
             CpuModel::Pentium => 256,
-            CpuModel::PentiumMmx | CpuModel::PentiumPro | CpuModel::PentiumII | CpuModel::PentiumIII => 512,
+            CpuModel::PentiumMmx
+            | CpuModel::K6_2
+            | CpuModel::PentiumPro
+            | CpuModel::PentiumII
+            | CpuModel::PentiumIII => 512,
         }
     }
 
@@ -168,10 +184,22 @@ impl CpuModel {
         (self.signature() >> 8) as u8
     }
 
-    /// Whether it runs MMX instructions: a Pentium MMX, a Pentium II or a
-    /// Pentium III.
+    /// Whether it runs MMX instructions: a Pentium MMX, a K6-2, a Pentium
+    /// II or a Pentium III.
     pub fn has_mmx(self) -> bool {
-        matches!(self, CpuModel::PentiumMmx | CpuModel::PentiumII | CpuModel::PentiumIII)
+        matches!(self, CpuModel::PentiumMmx | CpuModel::K6_2 | CpuModel::PentiumII | CpuModel::PentiumIII)
+    }
+
+    /// Whether it is AMD's, which CPUID says with "AuthenticAMD" and its
+    /// extended leaves: a K6-2.
+    pub fn is_amd(self) -> bool {
+        self == CpuModel::K6_2
+    }
+
+    /// Whether it runs 3DNow! instructions, FEMMS and PREFETCH(W), and
+    /// SYSCALL/SYSRET: a K6-2.
+    pub fn has_3dnow(self) -> bool {
+        self == CpuModel::K6_2
     }
 
     /// Whether it runs SSE instructions and FXSAVE/FXRSTOR: a Pentium III.
@@ -244,6 +272,21 @@ impl Default for Sse {
     fn default() -> Self {
         Sse { xmm: [0; 8], mxcsr: crate::instructions::sse::float::MXCSR_DEFAULT, psn_off: false }
     }
+}
+
+/// The model-specific registers a K6-2 holds what was written to: the
+/// machine check address and type (0, 1), test register 12 (0Eh), the
+/// extended feature enables (EFER, C0000080h), the SYSCALL/SYSRET target
+/// (STAR, C0000081h) and the write handling control (WHCR, C0000082h).
+/// A reset clears them all.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct K6Msrs {
+    pub mcar: u64,
+    pub mctr: u64,
+    pub tr12: u64,
+    pub efer: u64,
+    pub star: u64,
+    pub whcr: u64,
 }
 
 /// A descriptor table register (GDTR, IDTR): base address and limit.
@@ -389,6 +432,8 @@ pub struct Cpu {
     pub sysenter: [u32; 3],
     /// The Pentium III's SSE registers, MXCSR and serial number switch.
     pub sse: Sse,
+    /// The K6-2's model-specific registers.
+    pub k6: K6Msrs,
     /// Debug registers; stored, but breakpoints are not implemented.
     pub dr: [u32; 8],
     pub gdtr: DescTable,
@@ -677,6 +722,7 @@ impl Cpu {
             perf_msrs: [0; 3],
             sysenter: [0; 3],
             sse: Sse::default(),
+            k6: K6Msrs::default(),
             dr: [0; 8],
             gdtr: DescTable { base: 0, limit: 0xFFFF },
             idtr: DescTable { base: 0, limit: 0x3FF },

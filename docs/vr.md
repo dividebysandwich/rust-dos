@@ -60,7 +60,9 @@ blender --background --factory-startup --python assets/vr/make_test_room.py
 | `spawn` | Empty (or a camera) | Where your eyes start, and which way they face. |
 | `speaker_left`, `speaker_right` | Empty | Where the left and right sound channels come from. |
 | `led_power`, `led_turbo`, `led_hdd`, `led_floppy` | Mesh | The PC's front-panel lights. |
-| `manual`, `joystick` | Empty, or the parent of meshes | Where the game's manual and the joystick stand, to be picked up in VR. See [Props](#props). |
+| `manual`, `joystick`, `camera` | Empty, or the parent of meshes | Where the game's manual, the joystick and the polaroid camera stand, to be picked up in VR. See [Props](#props). |
+| `indoor` | Empty (cube) | The inside of the room, where it doesn't rain or snow. See [Time of day and weather](#time-of-day-and-weather). |
+| `Window glass` | Mesh | A window's glass, which the rain runs down. |
 
 Names are not case-sensitive. LED and speaker names may carry Blender's
 copy suffix (`led_hdd.001` works). **`screen` and `spawn` must be exact**:
@@ -73,7 +75,11 @@ Properties > Custom Properties):
 |---|---|---|
 | `rustdos_screen` | `1` or `True` (a boolean) | `screen` |
 | `rustdos_led` | `power`, `turbo`, `hdd` or `floppy` (a string) | `led_…` |
-| `rustdos_prop` | `manual`, `joystick`, `manual_page_left`, `manual_page_right` or `joystick_stick` (a string) | that name |
+| `rustdos_prop` | `manual`, `joystick`, `camera`, `manual_page_left`, `manual_page_right` or `joystick_stick` (a string) | that name |
+| `rustdos_prop` | `item` (a string) | (none: anything to move about, see [Props](#props)) |
+| `rustdos_lamp` | a name, or `1` / `True` | (none: a lamp to switch, see [Lamps](#lamps)) |
+| `rustdos_indoor` | `1` or `True` | `indoor` |
+| `rustdos_window` | `1` or `True` | `Window glass` (also `window_glass`, `Window pane`) |
 
 Custom properties only reach Rust-DOS if **Include > Custom Properties** is
 ticked in the export dialog.
@@ -218,6 +224,50 @@ Everything else below the prop is its body. Props move, so they aren't in
 the shadows and the bounced light worked out for the room: they are lit
 by the lights and the screen, and cast no shadows of their own.
 
+### The polaroid camera
+
+A **camera** stands on the desk too. In VR, pick it up with the grip
+button and pull the trigger: it takes a picture of the room through its
+lens, with its flash. In the window, or with the laser, click it. The
+picture is saved as a PNG file in the capture folder (where Ctrl+F5's
+screenshots go, `rust-dos_photo_<date>_<time>.png`), and a print slides
+out of the camera's front and develops over a few seconds. Take the print
+with the grip button and put it down anywhere; the next picture pushes
+one still in the camera out. Up to eight prints lie around; the oldest
+goes.
+
+Rust-DOS brings its own camera model, for an empty named `camera`, its
+**lens along its +Y** (Blender's; away from the camera, glTF's -Z). For
+your own model, put the meshes below it, with two empties: `camera_lens`
+where it looks from (its +Y out of the lens) and `camera_slot` where the
+pictures come out (its +Y out of the camera, its +Z up). Without them, the
+lens is in the middle of the camera's front and the slot low under it.
+
+### Things to move about
+
+Give any object the custom property `rustdos_prop` = `item` to move it
+about in VR: a stapler, a mug, a pencil. Like the props, its meshes and
+those below it move with it, and its origin is where it stands. Put it
+down and it stands upright on what is below it. Small and thin things are
+taken by a box at least 2 cm thick, so a pencil or a sheet of paper can be
+picked up.
+
+## Lamps
+
+Give a lamp's object (the parent of its meshes and lights) the custom
+property `rustdos_lamp`: a name, or `True`. Its lights (point, spot or
+sun, below it) and its glowing materials (the bulb, the shade: anything
+with an emission colour) go on and off together. Switch it with a click in
+the window, the laser and the trigger, or by touching it with a
+controller and pulling the trigger. Lamps are off as the room starts,
+unless the object has `rustdos_lamp_on` set to `True`.
+
+A lamp's light bounces around the room as the other lights' do, worked out
+for each lamp on its own when the room loads. A lamp's glowing bulb casts
+no shadow (its light is inside it); give the light `rustdos_shadow` =
+`False` where a lampshade would shadow it wrongly. Only 4 lights cast
+shadows, the sun first.
+
 ## Materials
 
 Rust-DOS draws a simple version of Blender's Principled BSDF:
@@ -243,7 +293,7 @@ Textures must be **PNG or JPEG**, which is what Blender exports.
 
 ## Lights and sky
 
-- **Lights:** point, spot and sun lights are used, up to **8** of them.
+- **Lights:** point, spot and sun lights are used, up to **14** of them.
   Area lights aren't (glTF has none). Blender's export dialog has a
   **Lighting Mode**: pick **Unitless**, which keeps intensities close to
   Blender's numbers. "Standard" turns watts into much larger photometric
@@ -251,13 +301,16 @@ Textures must be **PNG or JPEG**, which is what Blender exports.
   dark overall, add a **scene** custom property `rustdos_exposure` (Scene
   Properties > Custom Properties), a number. 1 is the default, 0.5 is half
   as bright.
-- **No lights:** the room is lit by a low orange evening sun and a dim blue
-  sky light, as the test room is. With lights of its own, the room still
-  gets a little of the sky's light.
-- **Sky:** the dark blue sunset sky surrounds the room, and distant things
-  fade into it. For a **closed room**, or one with its own skybox mesh,
-  turn it off with a scene custom property `rustdos_sky` set to `0` or
-  `False`. Outside the room it is then night-dark.
+- **No lights:** the room is lit by the sun (or the moon) at the time of
+  day and a sky light, as the test room is. With lights of its own and no
+  sky, the room still gets a little light from all around.
+- **Sky:** the sky at the time of day surrounds the room, with its sun,
+  moon and stars, and distant things fade into it (a scene custom property
+  `rustdos_haze`, a number, says how fast: 0.02 a metre unless it says;
+  0.004 suits a room with a window). Its sun lights the room, through the
+  windows. For a room with its own skybox mesh, turn it off with a scene
+  custom property `rustdos_sky` set to `0` or `False`. Outside the room it
+  is then night-dark, and there is no time of day.
 - **Shadows:** the lights cast shadows: through a window, a spot or sun
   light makes a window-shaped patch with the frame's shadow in it. Up to
   **4** lights cast shadows, the first in the file. To keep a light from
@@ -282,6 +335,43 @@ Textures must be **PNG or JPEG**, which is what Blender exports.
   baked into their textures.
 - Fake light (an emissive "sunbeam" patch on a wall) isn't needed any more
   for light the scene's lights already give; it would double it.
+
+## Time of day and weather
+
+With the sky on, the scene has a time of day: the sun rises at six in the
+east and sets at six in the west (an equinox's day, as high as the
+**latitude** setting lets it), the moon stands opposite, and the stars
+come out at night. **Settings > VR**: *Time of day* (*now* follows the
+computer's clock, or pick an hour), *Time goes* (as the clock, faster, or
+standing still), *Latitude*. In the configuration file:
+
+```ini
+[vr]
+time=now          ; or 19:30
+time_speed=1      ; 0 stands still, 60 is an hour a minute (up to 3600)
+latitude=48       ; degrees north (south below 0)
+weather=clear     ; rain, storm or snow
+weather_sound=70  ; the rain's and the thunder's volume, in percent
+lightning=true    ; in a storm
+```
+
+Which way the scene faces: a **scene** custom property `rustdos_heading`,
+the compass direction of glTF's -Z (Blender's +Y) in degrees, 0 north, 90
+east. The default, 270, sets the sun ahead of the spawn, as the test room
+always had it. In a room seen from inside (with an `indoor` box), the
+picture is made brighter as the day outside is, as eyes get used to it.
+
+The sun's light bouncing around the room is worked out for a few of its
+directions when the room loads, and mixed for where it is.
+
+**Weather:** rain and snow fall outside, from a box around you: not inside
+the `indoor` box (an empty, display Cube, scaled to the inside of the
+room). Clouds dim the sun and grey the sky. Rain runs down meshes called
+`Window glass` (or with `rustdos_window`), and its sound comes from the
+nearest window, muffled while you are indoors. In a **storm**, lightning
+lights the sky and, through the windows, the room, with thunder a few
+seconds after, nearer or farther. These sounds are mixed into the sound
+device's output after the machine's: they are not in recordings.
 
 ## Exporting from Blender
 

@@ -507,7 +507,7 @@ mod tests {
 
     #[test]
     fn nearest_matches_the_host() {
-        let values = [1.0f32, 3.0, 0.1, -7.25, 1e30, 3e-39, 1.17549435e-38, 16777215.0, -0.0, 2.5e-45];
+        let values = [1.0f32, 3.0, 0.1, -7.25, 1e30, 3e-39, f32::MIN_POSITIVE, 16777215.0, -0.0, 2.5e-45];
         for &x in &values {
             for &y in &values {
                 let mut e = env(0);

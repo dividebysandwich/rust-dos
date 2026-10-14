@@ -174,7 +174,8 @@ impl Page {
             Page::Drives | Page::Games | Page::States | Page::Cheats | Page::Achievements | Page::Stats => &[],
             Page::Vr => &[
                 VrMode, VrScene, VrScreenFit, VrQuality, VrAmbientOcclusion, VrMsaa, VrScreenGlow, VrControllers, VrSpatialAudio,
-                VrCenter, VrSceneScale, VrSeat(0), VrSeat(1), VrSeat(2), VrSeatTurn, VrKeyboard, VrMarkKeyboard, VrResolution,
+                VrCenter, VrSceneScale, VrSeat(0), VrSeat(1), VrSeat(2), VrSeatTurn, VrKeyboard, VrMarkKeyboard, VrTime, VrTimeSpeed, VrLatitude,
+                VrWeather, VrWeatherSound, VrLightning, VrResolution,
                 VrFoveation, VrRefresh, VrGraphics,
             ],
             Page::Display => {

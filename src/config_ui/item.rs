@@ -83,6 +83,15 @@ pub(super) enum Item {
     /// and marking where it is with a controller.
     VrKeyboard,
     VrMarkKeyboard,
+    /// The scene's time of day, how fast it goes and where on the earth
+    /// it is (the sun's way); its weather, how loud that is and whether a
+    /// storm has lightning.
+    VrTime,
+    VrTimeSpeed,
+    VrLatitude,
+    VrWeather,
+    VrWeatherSound,
+    VrLightning,
     /// The headset's eye images, in percent of the size its runtime
     /// recommends, and its refresh rate.
     VrResolution,
@@ -296,6 +305,12 @@ impl Item {
             VrSeatTurn => "  Seat turned to the left",
             VrKeyboard => "Show the real keyboard",
             VrMarkKeyboard => "  Mark the keyboard with a controller",
+            VrTime => "Time of day",
+            VrTimeSpeed => "  Time goes",
+            VrLatitude => "  Latitude",
+            VrWeather => "Weather",
+            VrWeatherSound => "  Rain and thunder volume",
+            VrLightning => "  Lightning",
             VrResolution => "Headset resolution",
             VrFoveation => "Foveated rendering",
             VrRefresh => "Headset refresh rate",
@@ -445,6 +460,12 @@ impl Item {
             | Item::VrSeatTurn
             | Item::VrKeyboard
             | Item::VrMarkKeyboard
+            | Item::VrTime
+            | Item::VrTimeSpeed
+            | Item::VrLatitude
+            | Item::VrWeather
+            | Item::VrWeatherSound
+            | Item::VrLightning
             | Item::VrResolution
             | Item::VrFoveation
             | Item::VrRefresh
@@ -495,9 +516,15 @@ impl Item {
             | Item::VrQuality
             | Item::VrAmbientOcclusion
             | Item::VrMsaa
-            | Item::VrScreenGlow => {
+            | Item::VrScreenGlow
+            | Item::VrTime
+            | Item::VrTimeSpeed
+            | Item::VrLatitude
+            | Item::VrWeather => {
                 s.vr.mode != crate::vr::VrMode::Off
             }
+            Item::VrWeatherSound => s.vr.mode != crate::vr::VrMode::Off && s.vr.weather != crate::vr::VrWeather::Clear,
+            Item::VrLightning => s.vr.mode != crate::vr::VrMode::Off && s.vr.weather == crate::vr::VrWeather::Storm,
             Item::VrControllers
             | Item::VrCenter
             | Item::VrSceneScale
@@ -564,6 +591,7 @@ impl Item {
             Memsize | Autoexec | Lan | LanHost | VersionCheck => Applies::NextStart,
             VrMode | VrQuality | VrAmbientOcclusion | VrMsaa | VrScene | VrControllers | VrSpatialAudio | VrScreenFit | VrScreenGlow
             | VrCenter | VrSceneScale | VrSeat(_) | VrSeatTurn | VrKeyboard | VrMarkKeyboard | VrResolution | VrRefresh => Applies::Now,
+            VrTime | VrTimeSpeed | VrLatitude | VrWeather | VrWeatherSound | VrLightning => Applies::Now,
             // SDL makes the window's context as the headset needs it as it
             // starts.
             VrGraphics | VrFoveation => Applies::NextStart,
@@ -578,6 +606,7 @@ impl Item {
             }
             Item::Memsize | Item::Deadzone | Item::MouseSensitivity => Input::Slider,
             Item::VrSceneScale | Item::VrSeat(_) | Item::VrSeatTurn | Item::VrResolution => Input::Slider,
+            Item::VrLatitude | Item::VrWeatherSound => Input::Slider,
             Item::Cycles | Item::AutoFps => Input::Presets,
             Item::UltraDir | Item::CaptureDir => Input::Text,
             Item::MacAddr | Item::Relay | Item::Player | Item::Lan | Item::LanHost | Item::Room | Item::Password => {
@@ -628,6 +657,22 @@ impl Item {
             VrSceneScale => format!("{}%", s.vr.scene_scale),
             VrSeat(axis) => format!("{:+} cm", s.vr.seat[axis as usize]),
             VrSeatTurn => format!("{:+}°", s.vr.seat_turn),
+            VrTime => match s.vr.time {
+                crate::vr::VrTime::Now => "now (the computer's clock)".to_string(),
+                time => time.name(),
+            },
+            VrTimeSpeed => describe_time_speed(s.vr.time_speed),
+            VrLatitude => match s.vr.latitude {
+                0 => "0° (the equator)".to_string(),
+                l if l > 0 => format!("{}° north", l),
+                l => format!("{}° south", -l),
+            },
+            VrWeather => s.vr.weather.describe().to_string(),
+            VrWeatherSound => {
+                let level = s.vr.weather_sound.min(crate::vr::WEATHER_SOUND_MAX) as u16;
+                bar(format!("{:>3}%", level), level, crate::vr::WEATHER_SOUND_MAX as u16, 10)
+            }
+            VrLightning => on_off(s.vr.lightning),
             VrResolution => match s.vr.resolution {
                 Some(percent) => format!("{}%", percent),
                 None => "auto: adapts on a standalone headset".to_string(),
@@ -877,5 +922,16 @@ impl Item {
                 ms => format!("{} s without printing", ms as f64 / 1000.0),
             },
         }
+    }
+}
+
+/// How fast the scene's day goes, in words.
+fn describe_time_speed(speed: u32) -> String {
+    match speed {
+        0 => "stands still".to_string(),
+        1 => "as the clock (real time)".to_string(),
+        60 => "60x (an hour a minute)".to_string(),
+        3600 => "3600x (an hour a second)".to_string(),
+        n => format!("{}x", n),
     }
 }

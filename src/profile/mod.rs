@@ -515,8 +515,8 @@ pub fn thunk_now() -> Thunk {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum Cause {
-    /// A far call or jump through a call gate (vector 0), or SYSENTER
-    /// (vector 1).
+    /// A far call or jump through a call gate (vector 0), SYSENTER
+    /// (vector 1) or SYSCALL (vector 2).
     Gate = 0,
     /// INT n, INT3 or INTO.
     Int = 1,
@@ -577,6 +577,7 @@ impl Entry {
     pub fn via(self) -> String {
         match self.cause() {
             Cause::Gate if self.vector() == 1 => "sysenter".into(),
+            Cause::Gate if self.vector() == 2 => "syscall".into(),
             Cause::Gate => "call gate".into(),
             Cause::Int => format!("int {:02X}h", self.vector()),
             Cause::Exception => crate::cpu::fault::exception_name(self.vector()).into(),

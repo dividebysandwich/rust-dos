@@ -21,6 +21,7 @@ use super::controls::{Controllers, VrInput};
 use super::keyboard::Keyboard;
 use super::props::Props;
 use super::render::{Dest, Features, Format, Gpu, Multiview, Options, Pass};
+use super::pick::TargetId;
 use super::scene::{Leds, Scene, Spawn};
 use super::xr::{Xr, XrOptions, log};
 use crate::video::shader::Glsl;
@@ -233,6 +234,10 @@ struct State {
     /// The game's manuals, for the booklet, once the thread takes them.
     manuals: Option<Vec<std::path::PathBuf>>,
     recenter: bool,
+    /// Where the scene's camera saves its pictures, and the cameras the
+    /// window clicked to take one.
+    capture_dir: Option<std::path::PathBuf>,
+    shots: Vec<usize>,
     /// Where the cameras show the real keyboard, and whether it is to be
     /// marked with a controller.
     keyboard: VrKeyboard,
@@ -299,6 +304,7 @@ impl Headset {
         scene: Arc<Scene>,
         screens: [glow::Texture; 3],
         settings: &VrSettings,
+        world: Arc<super::world::World>,
     ) -> Result<Self, String> {
         let (controllers, glow) = (settings.controllers, settings.screen_glow as f32 / 100.0);
         let settings = settings.clone();
@@ -346,7 +352,7 @@ impl Headset {
         let thread_shared = shared.clone();
         let thread = std::thread::Builder::new()
             .name("vr-headset".into())
-            .spawn(move || run(thread_shared, raw_window, raw_context, glsl, scene, screens, settings))
+            .spawn(move || run(thread_shared, raw_window, raw_context, glsl, scene, screens, settings, world))
             .map_err(|e| e.to_string())?;
         Ok(Headset {
             shared,
@@ -418,6 +424,15 @@ impl Headset {
 
     pub fn recenter(&self) {
         self.shared.lock().recenter = true;
+    }
+
+    pub fn set_capture_dir(&self, dir: std::path::PathBuf) {
+        self.shared.lock().capture_dir = Some(dir);
+    }
+
+    /// Take camera `camera`'s picture (clicked in the window's mirror).
+    pub fn take_picture(&self, camera: usize) {
+        self.shared.lock().shots.push(camera);
     }
 
     pub fn set_keyboard(&self, keyboard: VrKeyboard) {
@@ -544,6 +559,7 @@ fn run(
     scene: Arc<Scene>,
     screens: [glow::Texture; 3],
     settings: VrSettings,
+    world: Arc<super::world::World>,
 ) {
     // SAFETY: the window and the context are alive until the thread ends
     // (see `Headset::drop`), and the context is current nowhere else.
@@ -558,7 +574,7 @@ fn run(
                 sdl2::sys::SDL_GL_GetProcAddress(name.as_ptr()) as *const _
             })
         };
-        if let Err(e) = session(&shared, &gl, glsl, scene, screens, &settings) {
+        if let Err(e) = session(&shared, &gl, glsl, scene, screens, &settings, &world) {
             shared.note(e);
         }
         // SAFETY: as above.
@@ -574,12 +590,13 @@ fn run(
 
 /// The headset's session, until it ends or the main thread stops it.
 fn session(
-    shared: &Shared,
+    shared: &Arc<Shared>,
     gl: &glow::Context,
     glsl: Glsl,
     mut scene: Arc<Scene>,
     screens: [glow::Texture; 3],
     settings: &VrSettings,
+    room: &super::world::World,
 ) -> Result<(), String> {
     let features = Features::of(gl);
     // A standalone headset's own graphics chip is gone easier on
@@ -749,6 +766,7 @@ fn session(
         }
         gpu.set_glow(glow);
         gpu.frame_start(gl);
+        gpu.set_ambience(gl, &scene, room.ambience(&scene, std::time::Instant::now()));
         if let Some((index, fence, ())) = taken {
             if let Some(Fence(fence)) = fence {
                 // SAFETY: see `GlScreen`.
@@ -784,7 +802,27 @@ fn session(
         let held = props.update(&scene, &tracking, now);
         // Marking, the controllers do nothing else.
         let busy = if keyboard.marking() { [true; 2] } else { held.busy };
-        let (mut input, mut extras, hold) = controllers.update(mode, &tracking, busy, &scene.screen, now);
+        let targets = props.targets(&scene);
+        let (mut input, mut extras, hold, clicked) = controllers.update(mode, &tracking, busy, &scene.screen, &targets, now);
+        let (mut shots, folder) = {
+            let mut state = shared.lock();
+            (std::mem::take(&mut state.shots), state.capture_dir.clone())
+        };
+        shots.extend(&held.shots);
+        for id in held.touched.iter().copied().chain(clicked) {
+            match id {
+                TargetId::Lamp(i) => room.toggle_lamp(i),
+                TargetId::Camera(i) => shots.push(i),
+            }
+        }
+        let picture = screen.map(|i| screens[i]);
+        for camera in shots {
+            let said = {
+                let shared = shared.clone();
+                move |note: String| shared.note(note)
+            };
+            super::photo::take(gl, &mut gpu, &scene, &mut props, room, camera, picture, leds, folder.clone(), said, now);
+        }
         extras.extend(marks);
         if held.pad.is_some() {
             input.pad = held.pad;
@@ -793,7 +831,6 @@ fn session(
             xr.recenter();
         }
         let prop_draws = props.draws(gl, &gpu, &scene, now);
-        let picture = screen.map(|i| screens[i]);
         let mut left = None;
         let drawn = xr.draw(gl, world, |target, views| {
             let format = Format { size: target.size, srgb: target.srgb };

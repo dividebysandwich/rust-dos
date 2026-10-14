@@ -4,7 +4,7 @@
 //! window, or held for a second centres the view. And what they look like:
 //! a stick for each hand, the laser and its dot.
 
-use super::pick;
+use super::pick::{self, Target, TargetId};
 use super::render::Extra;
 use super::scene::Screen;
 use glam::{Mat4, Vec2, Vec3};
@@ -70,8 +70,10 @@ use rust_dos::vr::{PAD_A, PAD_B, PAD_LEFT_SHOULDER, PAD_RIGHT_SHOULDER, PAD_X, P
 
 /// What the controllers did before, to tell presses from holds.
 pub struct Controllers {
-    /// The pointing hand: 0 left, 1 right.
+    /// The pointing hand: 0 left, 1 right; and whether its trigger was
+    /// pulled before, for a click.
     active: usize,
+    pulled: bool,
     selected: [bool; 2],
     /// Since when the menu button is held, and whether that centred the
     /// view already.
@@ -82,23 +84,24 @@ pub struct Controllers {
 
 impl Default for Controllers {
     fn default() -> Self {
-        Controllers { active: 1, selected: [false; 2], menu_since: None, centred: false, menu_presses: 0 }
+        Controllers { active: 1, pulled: false, selected: [false; 2], menu_since: None, centred: false, menu_presses: 0 }
     }
 }
 
 impl Controllers {
     /// The input of `tracking` with the controllers doing what `mode`
-    /// says, the boxes that show them, and whether to centre the view.
-    /// The `busy` hands hold a prop: they don't point, and their buttons
-    /// and stick are the prop's.
+    /// says, the boxes that show them, whether to centre the view, and
+    /// which of `targets` the laser clicked. The `busy` hands hold a prop:
+    /// they don't point, and their buttons and stick are the prop's.
     pub fn update(
         &mut self,
         mode: VrControllers,
         tracking: &Tracking,
         busy: [bool; 2],
         screen: &Screen,
+        targets: &[Target],
         now: Instant,
-    ) -> (VrInput, Vec<Extra>, bool) {
+    ) -> (VrInput, Vec<Extra>, bool, Option<TargetId>) {
         let mut hands = tracking.hands;
         for (hand, _) in hands.iter_mut().zip(busy).filter(|(_, busy)| *busy) {
             if let Some(hand) = hand {
@@ -121,13 +124,27 @@ impl Controllers {
             extras.push(Extra { model: body, color: [0.06, 0.06, 0.07, 1.0] });
         }
         let pointing = hands[self.active].filter(|_| mode.pointer() && !busy[self.active]);
+        let mut clicked = None;
+        let pulled = std::mem::replace(&mut self.pulled, pointing.is_some_and(|h| h.select));
         if let Some(hand) = pointing {
             let origin = hand.aim.transform_point3(Vec3::ZERO);
             let dir = hand.aim.transform_vector3(Vec3::NEG_Z).normalize_or(Vec3::NEG_Z);
-            let hit = pick::pick_hit(screen, origin, dir);
-            input.pointer = hit.map(|(_, uv)| uv);
-            input.buttons = [hand.select, hand.squeeze];
-            let length = hit.map_or(REACH, |(t, _)| t);
+            let mut hit = pick::pick_hit(screen, origin, dir);
+            // Something nearer than the screen (and in reach) takes the
+            // click instead.
+            let target = pick::pick_target(targets, origin, dir).filter(|&(t, _)| t < REACH && hit.is_none_or(|(s, _)| t < s));
+            if let Some((t, id)) = target {
+                hit = None;
+                if hand.select && !pulled {
+                    clicked = Some(id);
+                }
+                let at = origin + dir * t;
+                extras.push(Extra { model: Mat4::from_translation(at) * Mat4::from_scale(Vec3::splat(0.012)), color: [1.6, 1.2, 0.4, 1.0] });
+            } else {
+                input.pointer = hit.map(|(_, uv)| uv);
+                input.buttons = [hand.select, hand.squeeze];
+            }
+            let length = target.map(|(t, _)| t).or(hit.map(|(t, _)| t)).unwrap_or(REACH);
             let glow = if hand.select { 1.0 } else { 0.55 };
             let beam = hand.aim
                 * Mat4::from_translation(Vec3::new(0.0, 0.0, -length / 2.0))
@@ -167,7 +184,7 @@ impl Controllers {
             _ => {}
         }
         input.menu_presses = self.menu_presses;
-        (input, extras, recenter)
+        (input, extras, recenter, clicked)
     }
 }
 
@@ -215,24 +232,44 @@ mod tests {
         let now = Instant::now();
         let mut tracking = Tracking { head: None, hands: [Some(ahead(0.0)), Some(ahead(5.0))], ..Tracking::default() };
         // The right hand points first, past the screen: no pointer.
-        let (input, extras, _) = c.update(VrControllers::Both, &tracking, [false; 2], &room.screen, now);
+        let (input, extras, _, _) = c.update(VrControllers::Both, &tracking, [false; 2], &room.screen, &[], now);
         assert_eq!(input.pointer, None);
         assert_eq!(extras.len(), 3, "two controllers and a beam");
         // The left pulls its trigger: it points, at the screen's middle,
         // and clicks; its trigger isn't the gamepad's.
         tracking.hands[0].as_mut().unwrap().select = true;
-        let (input, extras, _) = c.update(VrControllers::Both, &tracking, [false; 2], &room.screen, now);
+        let (input, extras, _, _) = c.update(VrControllers::Both, &tracking, [false; 2], &room.screen, &[], now);
         let uv = input.pointer.unwrap();
         assert!(uv.abs_diff_eq(Vec2::new(0.5, 0.5), 1e-3), "{:?}", uv);
         assert_eq!(input.buttons, [true, false]);
         assert_eq!(extras.len(), 4, "and the dot where it meets the screen");
         assert_eq!(input.pad.unwrap().triggers, [0.0, 0.0]);
         // Laser only: no gamepad. Gamepad only: no laser, the trigger fires.
-        let (input, _, _) = c.update(VrControllers::Pointer, &tracking, [false; 2], &room.screen, now);
+        let (input, _, _, _) = c.update(VrControllers::Pointer, &tracking, [false; 2], &room.screen, &[], now);
         assert!(input.pad.is_none() && input.pointer.is_some());
-        let (input, extras, _) = c.update(VrControllers::Gamepad, &tracking, [false; 2], &room.screen, now);
+        let (input, extras, _, _) = c.update(VrControllers::Gamepad, &tracking, [false; 2], &room.screen, &[], now);
         assert!(input.pointer.is_none() && extras.len() == 2);
         assert_eq!(input.pad.unwrap().triggers, [1.0, 0.0]);
+    }
+
+    #[test]
+    fn the_laser_clicks_what_is_before_the_screen() {
+        let room = Scene::test_room();
+        let mut c = Controllers::default();
+        let now = Instant::now();
+        let lamp = Target { id: TargetId::Lamp(3), low: Vec3::new(-0.1, 1.3, -1.1), high: Vec3::new(0.1, 1.5, -0.9) };
+        let mut hand = ahead(0.0);
+        let at = |c: &mut Controllers, hand: Hand| {
+            let tracking = Tracking { head: None, hands: [None, Some(hand)], ..Tracking::default() };
+            c.update(VrControllers::Both, &tracking, [false; 2], &room.screen, &[lamp], now)
+        };
+        let (input, _, _, clicked) = at(&mut c, hand);
+        assert_eq!((input.pointer, clicked), (None, None), "on the lamp, not the screen");
+        hand.select = true;
+        let (input, _, _, clicked) = at(&mut c, hand);
+        assert_eq!(clicked, Some(TargetId::Lamp(3)));
+        assert_eq!(input.buttons, [false, false], "the machine's mouse doesn't click");
+        assert_eq!(at(&mut c, hand).3, None, "once a pull");
     }
 
     #[test]
@@ -259,7 +296,7 @@ mod tests {
         let mut hand = ahead(0.0);
         let at = |c: &mut Controllers, hand: Hand, ms: u64| {
             let tracking = Tracking { head: None, hands: [None, Some(hand)], ..Tracking::default() };
-            c.update(VrControllers::Both, &tracking, [false; 2], &room.screen, start + Duration::from_millis(ms))
+            c.update(VrControllers::Both, &tracking, [false; 2], &room.screen, &[], start + Duration::from_millis(ms))
         };
         hand.menu = true;
         assert_eq!(at(&mut c, hand, 0).0.menu_presses, 0);

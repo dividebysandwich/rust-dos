@@ -529,7 +529,9 @@ fn sse_integer_instructions_on_mmx_registers() {
     // Words: 02FF/0301 -> 0301, 0403/0102 -> 0403, 0605/FF05 -> 0605, 8070/0170 -> 0170.
     assert_eq!(q(0x40), 0x0170_0605_0403_0301);
     // |FF-01| + |02-03| + |03-02| + |04-01| + |05-05| + |06-FF| + |70-70| + |80-01|
-    assert_eq!(q(0x48), (0xFE + 1 + 1 + 3 + 0 + 0xF9 + 0 + 0x7F) as u64);
+    #[allow(clippy::identity_op)]
+    let sum = 0xFE + 1 + 1 + 3 + 0 + 0xF9 + 0 + 0x7F;
+    assert_eq!(q(0x48), sum as u64);
     assert_eq!(q(0x50), 0x02FF_0403_0605_8070);
     assert_eq!((rig.read32(DATA + 0x58), rig.read32(DATA + 0x5C)), (0x8070, 0b1000_0001));
     assert_eq!(q(0x60), 0x8070_1234_0403_02FF);
@@ -604,9 +606,9 @@ fn the_sse_state_goes_into_a_save_state() {
     cpu.sse = Default::default();
     rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
     assert_eq!(cpu.sse, saved);
-    // A state from before it (without its section, the last) loads, with
-    // the registers as after a reset.
-    let older = &state[..state.len() - (4 + 2 + 4 + 8 * 16 + 4 + 1)];
+    // A state from before it (without its section and the K6 one after
+    // it, the last) loads, with the registers as after a reset.
+    let older = &state[..state.len() - (4 + 2 + 4 + 8 * 16 + 4 + 1) - (4 + 2 + 4 + 6 * 8)];
     rust_dos::savestate::machine::load(&mut cpu, older).unwrap();
     assert_eq!(cpu.sse, Default::default());
 }
