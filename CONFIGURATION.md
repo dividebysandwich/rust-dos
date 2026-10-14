@@ -149,7 +149,15 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   instructions and so runs at the `cycles` speed, its MSRs, CMPXCHG8B and
   4 MB pages, without the virtual-8086 mode extensions; `pentium_mmx`,
   that Pentium with MMX (CPUID family 5, model 4), whose eight MM
-  registers are the FPU's; `pentium_pro`, a Pentium Pro as DOSBox-X's
+  registers are the FPU's; `k6_2`, an AMD K6-2 (CPUID AuthenticAMD
+  family 5, model 8, with AMD's extended leaves): the Pentium MMX's with
+  3DNow!, SYSCALL/SYSRET and the K6's MSRs (EFER, STAR, the write
+  handling control and test register 12), without the P6 instructions.
+  Its 3DNow! arithmetic follows AMD's manual: it rounds to nearest, gives
+  a zero below 2^-126 and the largest normal from 2^128, and has no
+  exceptions; PFRCP and PFRSQRT give the exact results rounded to a
+  single where the real one's tables give 14 and 15 bits.
+  `pentium_pro`, a Pentium Pro as DOSBox-X's
   `ppro_slow` (CPUID family 6, model 1): the Pentium's with CMOVcc,
   FCMOVcc, FCOMI and FUCOMI, the P6 hinting NOPs and the local APIC base
   and microcode revision MSRs Windows 98 and ME read, without MMX;
@@ -305,7 +313,7 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   a recording stops at 1 GB.
 * `memsize` is the RAM in MB (default 16), from 2 to as much as
   motherboards took for the `cpu`: 64 MB for a 386, 128 MB for a 486,
-  256 MB for a Pentium and 512 MB for a Pentium MMX, Pentium Pro,
+  256 MB for a Pentium and 512 MB for a Pentium MMX, K6-2, Pentium Pro,
   Pentium II or Pentium III. More than the CPU
   takes is warned about and cut to its most. Memory above the first
   megabyte is extended memory for DOS extenders and XMS; XMS 3.0's 32-bit

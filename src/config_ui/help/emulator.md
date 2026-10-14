@@ -59,14 +59,15 @@ mode.
 # Processor {#cpu}
 
 The processor games find: **386**, **486**, **Pentium**, **Pentium
-MMX**, **Pentium Pro**, **Pentium II** or **Pentium III**.
+MMX**, **K6-2**, **Pentium Pro**, **Pentium II** or **Pentium III**.
 
 **486** suits almost everything. Pick **Pentium** for late-1990s games
 that ask for one, and for 3dfx games; **Pentium MMX** for those that
 need MMX; **Pentium II** for programs built for a Pentium Pro or later,
 which use its conditional moves (CMOV); **Pentium III** for those that
-need SSE. **Pentium Pro** is the Pentium II without MMX. Takes effect at
-the DOS prompt.
+need SSE. **K6-2** is AMD's Pentium MMX with 3DNow!, for the games with
+code of their own for it. **Pentium Pro** is the Pentium II without MMX.
+Takes effect at the DOS prompt.
 
 # BIOS POST screen {#post}
 

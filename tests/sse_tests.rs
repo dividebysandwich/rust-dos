@@ -604,9 +604,9 @@ fn the_sse_state_goes_into_a_save_state() {
     cpu.sse = Default::default();
     rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
     assert_eq!(cpu.sse, saved);
-    // A state from before it (without its section, the last) loads, with
-    // the registers as after a reset.
-    let older = &state[..state.len() - (4 + 2 + 4 + 8 * 16 + 4 + 1)];
+    // A state from before it (without its section and the K6 one after
+    // it, the last) loads, with the registers as after a reset.
+    let older = &state[..state.len() - (4 + 2 + 4 + 8 * 16 + 4 + 1) - (4 + 2 + 4 + 6 * 8)];
     rust_dos::savestate::machine::load(&mut cpu, older).unwrap();
     assert_eq!(cpu.sse, Default::default());
 }

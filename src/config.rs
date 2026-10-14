@@ -1048,11 +1048,12 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             "486" => config.cpu = Some(CpuModel::I486),
                             "pentium" | "586" => config.cpu = Some(CpuModel::Pentium),
                             "pentium_mmx" | "pentiummmx" | "mmx" => config.cpu = Some(CpuModel::PentiumMmx),
+                            "k6_2" | "k6-2" | "k62" => config.cpu = Some(CpuModel::K6_2),
                             "pentium_pro" | "pentiumpro" | "ppro" | "686" => config.cpu = Some(CpuModel::PentiumPro),
                             "pentium_ii" | "pentiumii" | "pentium2" => config.cpu = Some(CpuModel::PentiumII),
                             "pentium_iii" | "pentiumiii" | "pentium3" => config.cpu = Some(CpuModel::PentiumIII),
                             _ => warn(format!(
-                                "invalid cpu '{}' (386, 486, pentium, pentium_mmx, pentium_pro, pentium_ii or pentium_iii)",
+                                "invalid cpu '{}' (386, 486, pentium, pentium_mmx, k6_2, pentium_pro, pentium_ii or pentium_iii)",
                                 value
                             )),
                         },
@@ -1665,6 +1666,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
                 CpuModel::I486 => "486",
                 CpuModel::Pentium => "pentium",
                 CpuModel::PentiumMmx => "pentium_mmx",
+                CpuModel::K6_2 => "k6_2",
                 CpuModel::PentiumPro => "pentium_pro",
                 CpuModel::PentiumII => "pentium_ii",
                 CpuModel::PentiumIII => "pentium_iii",
@@ -2535,6 +2537,8 @@ pit2_gate_at_start=maybe
         assert_eq!(config.cpu, Some(crate::cpu::CpuModel::PentiumIII));
         assert!(config.warnings.is_empty());
         assert_eq!(Settings::from_config(&config).memsize, 512);
+        let config = parse("[emulator]\ncpu=K6-2\n", Path::new("/cfg"), None);
+        assert_eq!(config.cpu, Some(crate::cpu::CpuModel::K6_2));
         let config = parse("[emulator]\ncpu=8086\n", Path::new("/cfg"), None);
         assert_eq!(config.cpu, None);
         assert!(config.warnings[0].contains("invalid cpu '8086'"));

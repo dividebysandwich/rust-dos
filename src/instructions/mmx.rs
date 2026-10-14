@@ -9,7 +9,8 @@
 //! #NM, as a task's FPU state is the MMX state too.
 //!
 //! The Pentium III's SSE adds integer instructions on MMX registers
-//! (`sse_integer`), which are MMX instructions in all these ways.
+//! (`sse_integer`), and the K6-2's 3DNow! floating-point ones
+//! (`three_dnow`), which are MMX instructions in all these ways.
 
 use iced_x86::{CpuidFeature, Instruction, Mnemonic, OpKind, Register};
 
@@ -230,7 +231,7 @@ fn mov(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
 
 /// Operand `i`: MMn, a 32-bit register, a dword or quadword in memory
 /// (checked whole before it is read), or a shift's imm8.
-fn read(cpu: &mut Cpu, instr: &Instruction, i: u32) -> CpuResult<u64> {
+pub(super) fn read(cpu: &mut Cpu, instr: &Instruction, i: u32) -> CpuResult<u64> {
     Ok(match instr.op_kind(i) {
         OpKind::Register if is_mm(instr.op_register(i)) => mm(cpu, instr.op_register(i)),
         OpKind::Register => cpu.reg(instr.op_register(i)) as u64,
@@ -277,12 +278,12 @@ fn mask(c: bool) -> u64 {
 }
 
 /// The low `W` bits of `v`, sign-extended.
-fn sx<const W: u32>(v: u64) -> i64 {
+pub(super) fn sx<const W: u32>(v: u64) -> i64 {
     ((v << (64 - W)) as i64) >> (64 - W)
 }
 
 /// `f` of each `W`-bit lane of `a` and `b` (zero-extended), cut to `W` bits.
-fn lanes<const W: u32>(a: u64, b: u64, f: impl Fn(u64, u64) -> u64) -> u64 {
+pub(super) fn lanes<const W: u32>(a: u64, b: u64, f: impl Fn(u64, u64) -> u64) -> u64 {
     let m = u64::MAX >> (64 - W);
     (0..64 / W).fold(0, |r, i| {
         let s = i * W;

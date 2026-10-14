@@ -278,6 +278,25 @@ const CPUID_CACHES: [u32; 4] = [0x0302_0101, 0, 0, 0x0C04_0843];
 /// ECX and EDX ("-DOS" and "RUST"); the top 32 are the signature.
 const PSN: [u32; 2] = [0x534F_442D, 0x5453_5552];
 
+/// The extended features (CPUID 80000001h, EDX) a K6-2 adds to those of
+/// leaf 1, as AMD's processor recognition note (20734) gives them:
+/// SYSCALL/SYSRET (bit 11) and 3DNow! (bit 31).
+const CPUID_SYSCALL: u32 = 0x0000_0800;
+const CPUID_3DNOW: u32 = 0x8000_0000;
+
+/// The highest extended leaf of a K6-2.
+const K6_HIGHEST_EXTENDED: u32 = 0x8000_0005;
+
+/// The K6-2's name, which extended leaves 80000002h to 80000004h give 16
+/// bytes at a time, padded with zeros, as AMD's note has it.
+const K6_NAME: &[u8] = b"AMD-K6(tm) 3D processor";
+
+/// What extended leaf 80000005h gives a K6-2 in EBX, ECX and EDX: its TLBs
+/// (64 data entries, 2-way; 64 instruction entries, direct-mapped) and its
+/// 32 KB data and instruction caches (2-way, 32-byte lines, 2 lines a
+/// tag), from AMD's note.
+const K6_L1: [u32; 3] = [0x0280_0140, 0x2002_0220, 0x2002_0220];
+
 /// The features CPUID leaf 1 reports in EDX for `model`, as DOSBox-X has
 /// them (cpu.cpp, `CPU_CPUID`), less the 36-bit page size extension it
 /// gives its Pentium II, which this one doesn't have.
@@ -302,7 +321,9 @@ pub fn cpuid_features(model: CpuModel) -> u32 {
 /// leaf 1 the family, model and stepping and the features. A Pentium III
 /// has leaf 2, its caches and TLBs, and leaf 3, the low 64 bits of its
 /// serial number; once that is switched off (MSR 119h) leaf 3 is gone,
-/// and leaf 1 doesn't report it. Leaves past the highest give zeros.
+/// and leaf 1 doesn't report it. A K6-2 says "AuthenticAMD" and has the
+/// extended leaves `amd_extended` gives. Leaves past the highest give
+/// zeros.
 pub fn cpuid(cpu: &mut Cpu) -> CpuResult {
     require_pentium(cpu)?;
     let text = |s: &[u8; 4]| u32::from_le_bytes(*s);
@@ -311,7 +332,9 @@ pub fn cpuid(cpu: &mut Cpu) -> CpuResult {
     let highest = if psn { 3 } else if sse { 2 } else { 1 };
     let leaf = cpu.eax();
     let (eax, ebx, ecx, edx) = match leaf {
+        0 if cpu.model.is_amd() => (highest, text(b"Auth"), text(b"cAMD"), text(b"enti")),
         0 => (highest, text(b"Genu"), text(b"ntel"), text(b"ineI")),
+        0x8000_0000.. if cpu.model.is_amd() => amd_extended(cpu.model, leaf),
         _ if leaf > highest => (0, 0, 0, 0),
         1 => {
             let features = cpuid_features(cpu.model) & if psn { !0 } else { !CPUID_PSN };
@@ -325,6 +348,36 @@ pub fn cpuid(cpu: &mut Cpu) -> CpuResult {
     cpu.set_ecx(ecx);
     cpu.set_edx(edx);
     Ok(())
+}
+
+/// The extended CPUID leaves of a K6-2, as AMD's processor recognition
+/// note (20734, table 23) gives them for model 8: 80000000h the highest,
+/// 80000001h the signature with the extended family (6) and the features
+/// with SYSCALL and 3DNow!, 80000002h to 80000004h the name, and
+/// 80000005h the L1 caches and TLBs. Those past the highest give zeros.
+fn amd_extended(model: CpuModel, leaf: u32) -> (u32, u32, u32, u32) {
+    let name = |at: usize| {
+        let mut bytes = [0; 4];
+        for (i, b) in bytes.iter_mut().enumerate() {
+            *b = K6_NAME.get(at + i).copied().unwrap_or(0);
+        }
+        u32::from_le_bytes(bytes)
+    };
+    match leaf {
+        0x8000_0000 => (K6_HIGHEST_EXTENDED, 0, 0, 0),
+        0x8000_0001 => (
+            model.signature() + 0x100,
+            0,
+            0,
+            cpuid_features(model) | CPUID_SYSCALL | CPUID_3DNOW,
+        ),
+        0x8000_0002..=0x8000_0004 => {
+            let at = (leaf - 0x8000_0002) as usize * 16;
+            (name(at), name(at + 4), name(at + 8), name(at + 12))
+        }
+        0x8000_0005 => (0, K6_L1[0], K6_L1[1], K6_L1[2]),
+        _ => (0, 0, 0, 0),
+    }
 }
 
 /// RDTSC (Pentium): the time stamp counter into EDX:EAX. CR4.TSD keeps it
@@ -368,6 +421,23 @@ const P3_PLATFORM_ID: u64 = 0x1100_0000_0000_0000;
 /// serial number off.
 const BBL_CR_CTL_PSN_OFF: u64 = 0x0020_0000;
 
+/// The K6-2's MSRs (data sheet 21850, table 5): test register 12, EFER,
+/// STAR and WHCR.
+const K6_TR12: u32 = 0x0E;
+const K6_EFER: u32 = 0xC000_0080;
+const K6_STAR: u32 = 0xC000_0081;
+const K6_WHCR: u32 = 0xC000_0082;
+
+/// The bits of the K6-2's MSRs that hold anything: of the machine check
+/// type its 5, of test register 12 its cache inhibit bit (3), of EFER its
+/// system call extension (SCE, bit 0), which enables SYSCALL and SYSRET,
+/// and of WHCR its write allocate fields and the bit after them (0 to 8).
+/// The others read 0; a 1 written to one of EFER's raises #GP(0).
+const K6_MCTR_BITS: u64 = 0x1F;
+const K6_TR12_BITS: u64 = 0x08;
+const EFER_SCE: u64 = 0x01;
+const K6_WHCR_BITS: u64 = 0x1FF;
+
 /// Whether `model` has the model-specific register `msr` for a read or a
 /// write: a Pentium the machine check address and type (0, 1), the time
 /// stamp counter (10h) and its performance monitoring control and counters
@@ -379,14 +449,18 @@ const BBL_CR_CTL_PSN_OFF: u64 = 0x0020_0000;
 /// 176h), and the microcode update trigger (79h), which can only be
 /// written. A Pentium III adds DOSBox-X's platform ID (17h), which can only
 /// be read, the event selects of its performance counters (186h, 187h),
-/// and the miscellaneous enables (140h), which Linux reads on one.
+/// and the miscellaneous enables (140h), which Linux reads on one. A K6-2
+/// has the first three, test register 12 (0Eh), and EFER, STAR and WHCR
+/// (C0000080h to C0000082h), and no performance counters.
 fn has_msr(model: CpuModel, msr: u32, write: bool) -> bool {
     let p6 = model.is_p6();
+    let k6 = model.is_amd();
     let pentium_ii = model >= CpuModel::PentiumII;
     let pentium_iii = model.has_sse();
     match msr {
         0x00 | 0x01 | 0x10 => true,
-        0x11..=0x13 => !p6,
+        K6_TR12 | K6_EFER | K6_STAR | K6_WHCR => k6,
+        0x11..=0x13 => !p6 && !k6,
         0x1B | 0x8B => p6,
         0x2A | 0x119 | 0x11E | 0x174..=0x176 => pentium_ii,
         0x79 => pentium_ii && write,
@@ -405,7 +479,9 @@ fn has_msr(model: CpuModel, msr: u32, write: bool) -> bool {
 /// and keep nothing, and a microcode update does nothing. A Pentium III's
 /// L2 cache control (119h) keeps the bit that switches its serial number
 /// off, which stays off until a reset; its event selects and
-/// miscellaneous enables read 0 and keep nothing. Any other MSR
+/// miscellaneous enables read 0 and keep nothing. A K6-2's MSRs hold what
+/// was written to their bits (`K6Msrs`), the machine check ones too, as
+/// nothing but WRMSR sets them there. Any other MSR
 /// raises #GP(0), except with EBX DEADCAFEh: 3dfx's Glide marks its
 /// accesses to the memory type range registers so (a Pentium II's, for
 /// write-combining), for its Windows driver to catch the fault where
@@ -427,6 +503,18 @@ pub fn msr(cpu: &mut Cpu, write: bool) -> CpuResult {
     }
     if write {
         let value = (cpu.edx() as u64) << 32 | cpu.eax() as u64;
+        if cpu.model.is_amd() {
+            match msr {
+                0x00 => cpu.k6.mcar = value,
+                0x01 => cpu.k6.mctr = value & K6_MCTR_BITS,
+                K6_TR12 => cpu.k6.tr12 = value & K6_TR12_BITS,
+                K6_EFER if value & !EFER_SCE != 0 => return Err(Fault::gp(0)),
+                K6_EFER => cpu.k6.efer = value,
+                K6_STAR => cpu.k6.star = value,
+                K6_WHCR => cpu.k6.whcr = value & K6_WHCR_BITS,
+                _ => {}
+            }
+        }
         match msr {
             0x10 => cpu.set_tsc(value),
             0x11..=0x13 => cpu.perf_msrs[msr as usize - 0x11] = value,
@@ -437,7 +525,14 @@ pub fn msr(cpu: &mut Cpu, write: bool) -> CpuResult {
             _ => {}
         }
     } else {
+        let k6 = cpu.model.is_amd();
         let value = match msr {
+            0x00 if k6 => cpu.k6.mcar,
+            0x01 if k6 => cpu.k6.mctr,
+            K6_TR12 => cpu.k6.tr12,
+            K6_EFER => cpu.k6.efer,
+            K6_STAR => cpu.k6.star,
+            K6_WHCR => cpu.k6.whcr,
             0x10 => cpu.tsc(),
             0x11..=0x13 => cpu.perf_msrs[msr as usize - 0x11],
             0x8B if cpu.model.has_sse() => P3_MICROCODE_REVISION,
@@ -509,6 +604,55 @@ pub fn sysexit(cpu: &mut Cpu) -> CpuResult {
     cpu.set_esp(cpu.ecx());
     cpu.set_eip(cpu.edx());
     Ok(())
+}
+
+/// SYSCALL (K6-2): a fast call to level 0, as AMD's application note
+/// (21086) has it: ECX gets the return EIP, EIP the low dword of STAR, CS
+/// the selector in STAR's bits 32 to 47 and SS the one after it, both flat
+/// and 32-bit whatever the descriptor tables hold, and IF and VM are
+/// cleared. Nothing is checked: it runs in real mode and at any level.
+/// #UD with EFER.SCE clear.
+pub fn syscall(cpu: &mut Cpu) -> CpuResult {
+    require_syscall(cpu)?;
+    let cs = (cpu.k6.star >> 32) as u16;
+    if crate::profile::any_active() && cpu.cpl != 0 {
+        let code32 = cpu.seg_cache(Seg::CS).attr & crate::cpu::ATTR_DB != 0;
+        let mode = crate::profile::Mode::of(cpu.pe(), cpu.v86(), code32);
+        crate::profile::note_entry(mode, cpu.cs(), cpu.eip(), crate::profile::Cause::Gate, 2);
+    }
+    cpu.set_ecx(cpu.eip());
+    cpu.set_cpu_flag(CpuFlags::VM, false);
+    cpu.set_cpu_flag(CpuFlags::IF, false);
+    cpu.set_seg_cache(Seg::CS, SegCache::from_descriptor(cs, 0, 0xFFFF_FFFF, SEP_CODE));
+    cpu.set_seg_cache(Seg::SS, SegCache::from_descriptor(cs.wrapping_add(8), 0, 0xFFFF_FFFF, SEP_STACK));
+    cpu.cpl = 0;
+    cpu.set_eip(cpu.k6.star as u32);
+    Ok(())
+}
+
+/// SYSRET (K6-2): the return from SYSCALL to level 3, as AMD's note has
+/// it: EIP gets ECX, CS the selector in STAR's bits 48 to 63, flat and
+/// 32-bit, and SS the selector after it with RPL 3, keeping the rest of
+/// the stack segment SYSCALL loaded; IF is set. #UD with EFER.SCE clear,
+/// #GP(0) at another level than 0.
+pub fn sysret(cpu: &mut Cpu) -> CpuResult {
+    require_syscall(cpu)?;
+    require_cpl0(cpu)?;
+    let cs = (cpu.k6.star >> 48) as u16;
+    cpu.set_seg_cache(Seg::CS, SegCache::from_descriptor(cs, 0, 0xFFFF_FFFF, SEP_CODE | SEP_DPL3));
+    let mut stack = *cpu.seg_cache(Seg::SS);
+    stack.selector = cs.wrapping_add(8) | 3;
+    cpu.set_seg_cache(Seg::SS, stack);
+    cpu.cpl = 3;
+    cpu.set_cpu_flag(CpuFlags::IF, true);
+    cpu.set_eip(cpu.ecx());
+    Ok(())
+}
+
+/// #UD unless the CPU has SYSCALL and SYSRET (a K6-2) and EFER enables
+/// them.
+fn require_syscall(cpu: &Cpu) -> CpuResult {
+    if cpu.model.has_3dnow() && cpu.k6.efer & EFER_SCE != 0 { Ok(()) } else { Err(Fault::UD) }
 }
 
 /// LLDT r/m16: load the LDT register from a GDT descriptor; a null
