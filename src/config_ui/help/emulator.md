@@ -350,7 +350,7 @@ message on the top of the screen. While helpful for new users, turning it
 
 # Hold right button for settings {#mouse-menu-hold}
 
-When **on** (the default), holding the right mouse button for **3
+When **on** (the default), holding the right mouse button for **1.5
 seconds** without moving the mouse opens this settings window, for
 setups with no keyboard or no F12 key, such as a TV with a remote. The
 program still sees the press, and a release as the window opens. Moving

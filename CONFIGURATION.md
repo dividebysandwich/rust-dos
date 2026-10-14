@@ -363,7 +363,7 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   captured (and that Ctrl+Alt lets it go) or let go: `true` (the default)
   or `false`.
 * `mouse_menu_hold` opens the settings window when the right mouse button
-  is held for three seconds without moving the mouse, for a TV or a remote
+  is held for 1.5 seconds without moving the mouse, for a TV or a remote
   with no F12 or no keyboard at all: `true` (the default) or `false`. The
   program sees the press, and a release as the window opens; moving the
   mouse while holding the button keeps it an ordinary press. Turn it off
@@ -895,7 +895,7 @@ devices and the resident programs start over, and the screen is cleared.
 ## Settings window
 
 Press **Ctrl+F12**, type `DOSCONFIG` at the DOS prompt, or hold the right
-mouse button still for three seconds (`mouse_menu_hold`) to open the
+mouse button still for 1.5 seconds (`mouse_menu_hold`) to open the
 settings window over the running program. The program pauses while it is
 open, except on the Mixer page, where it plays on so you hear the volumes
 as you set them, and the Stats page, which shows it running. Ctrl+F12 or

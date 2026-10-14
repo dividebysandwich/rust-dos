@@ -251,7 +251,7 @@ from the history. The history is kept between sessions. The
 | Key | Action |
 |---|---|
 | Ctrl+F12 | Open or close the [settings window](CONFIGURATION.md#settings-window) |
-| Right mouse button (held still for 3 s) | Open the settings window without a keyboard (`mouse_menu_hold`) |
+| Right mouse button (held still for 1.5 s) | Open the settings window without a keyboard (`mouse_menu_hold`) |
 | Ctrl+Shift+F12 | Show or hide the performance overlay: the frames a second and the host's CPU use, with small graphs, at the bottom right |
 | Ctrl+Shift+D | Degauss the monitor: the picture wobbles with colour fringes, with the coil's thump with [`monitor_effects`](CONFIGURATION.md#emulator) sound |
 | Ctrl+Shift+S | Show or hide the sound visualizer: an oscilloscope of each sound source, the FM synthesizer's channels, the Ultrasound's voices and the MIDI notes held; click one to mute it, or a source's S to hear it alone (until the visualizer closes) |

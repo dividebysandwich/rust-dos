@@ -80,7 +80,7 @@ pub struct Settings {
     pub mouse_sensitivity: f64,
     /// Say over the picture when the mouse is captured or let go.
     pub mouse_capture_messages: bool,
-    /// The right mouse button held still for three seconds opens the
+    /// The right mouse button held still for one and a half seconds opens the
     /// settings window.
     pub mouse_menu_hold: bool,
     /// Ask rust-dos.com at startup whether there is a newer version.
