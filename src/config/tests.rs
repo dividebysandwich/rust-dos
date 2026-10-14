@@ -403,6 +403,8 @@ fn cpu_model() {
     assert_eq!(config.cpu, Some(crate::cpu::CpuModel::PentiumIII));
     assert!(config.warnings.is_empty());
     assert_eq!(Settings::from_config(&config).memsize, 512);
+    let config = parse("[emulator]\ncpu=K6-2\n", Path::new("/cfg"), None);
+    assert_eq!(config.cpu, Some(crate::cpu::CpuModel::K6_2));
     let config = parse("[emulator]\ncpu=8086\n", Path::new("/cfg"), None);
     assert_eq!(config.cpu, None);
     assert!(config.warnings[0].contains("invalid cpu '8086'"));

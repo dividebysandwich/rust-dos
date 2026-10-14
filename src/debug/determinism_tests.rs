@@ -1457,6 +1457,7 @@ const STILL: &[(&str, &str)] = &[
     ("ENV", "the settings' environment variables"),
     ("SEP", "the SYSENTER MSRs, which only a Pentium II's WRMSR sets"),
     ("SSE", "the SSE registers and MXCSR, which only a Pentium III's instructions set"),
+    ("K6", "the K6-2's MSRs, which only its WRMSR sets"),
 ];
 
 /// The `Bus` fields saved as a section of their own (or in one with the

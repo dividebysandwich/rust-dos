@@ -574,6 +574,7 @@ impl Cpu {
         self.perf_msrs = [0; 3];
         self.sysenter = [0; 3];
         self.sse = super::Sse::default();
+        self.k6 = super::K6Msrs::default();
         self.reset_to_real_mode();
         self.seg[Seg::CS as usize] = super::SegCache::real(0xF000);
         self.eip = 0xFFF0;
