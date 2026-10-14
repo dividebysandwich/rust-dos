@@ -92,6 +92,18 @@ fn sign_of(x: f64) -> i64 {
     }
 }
 
+/// Whether rounding the double `x` to a single depends on the sign of what
+/// `x` leaves out of an exact result. A single keeps 24 of the double's 53
+/// bits (fewer for a denormal), and that sign only decides the rounding
+/// and the precision flag when the 29 bits below a single's last are all
+/// clear or are exactly half of it. Any other pattern rounds and flags the
+/// same whatever that sign, so `div` and `sqrt` skip the fused
+/// multiply-add, a C runtime call on hosts without FMA, for it.
+fn needs_residual(x: f64) -> bool {
+    let low = x.to_bits() & ((1 << 29) - 1);
+    low == 0 || low == 1 << 28
+}
+
 /// An instruction's view of MXCSR, and the exceptions its elements raised.
 pub struct Env {
     round: Round,
@@ -234,6 +246,9 @@ impl Env {
         }
         let (x, y) = (value(a), value(b));
         let q = x / y;
+        if !needs_residual(q) {
+            return self.round(q, 0);
+        }
         // The exact quotient is q + r / y.
         let r = (-q).mul_add(y, x);
         self.round(q, sign_of(r) * sign_of(y))
@@ -258,6 +273,9 @@ impl Env {
         }
         let x = value(a);
         let r = x.sqrt();
+        if !needs_residual(r) {
+            return self.round(r, 0);
+        }
         self.round(r, sign_of((-r).mul_add(r, x)))
     }
 
@@ -636,6 +654,55 @@ mod tests {
         assert_eq!(e.flags, IE);
         assert_eq!(env(0).compare_flags(f(1.0), f(1.0), true), (true, false, false));
         assert_eq!(env(0).compare_flags(f(1.0), f(2.0), true), (false, false, true));
+    }
+
+    /// Skipping the residual where `needs_residual` says it can't matter
+    /// gives the results and flags that always computing it gives, in
+    /// every rounding mode and with flush to zero.
+    #[test]
+    fn residual_shortcut() {
+        let full_div = |e: &mut Env, a: u32, b: u32| {
+            let (x, y) = (value(a), value(b));
+            let q = x / y;
+            e.round(q, sign_of((-q).mul_add(y, x)) * sign_of(y))
+        };
+        let full_sqrt = |e: &mut Env, a: u32| {
+            let r = value(a).sqrt();
+            e.round(r, sign_of((-r).mul_add(r, value(a))))
+        };
+        let mut seed = 0x1234_5678_9ABC_DEF0u64;
+        let mut next = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 32) as u32
+        };
+        for i in 0..200_000 {
+            // Every fourth pair is a product and one of its factors, so
+            // the quotient is exact or nearly so.
+            let b = next() & 0x7FFF_FFFF | (next() & SIGN);
+            let a = if i % 4 == 0 {
+                f(f32::from_bits(b) * f32::from_bits(next() & 0x7FFF_FFFF))
+            } else {
+                next()
+            };
+            let nonzero_finite = |x: u32| !is_nan(x) && !is_inf(x) && !is_zero(x);
+            let (a_ok, b_ok) = (nonzero_finite(a), nonzero_finite(b));
+            for mxcsr in [0x1F80u32, 0x3F80, 0x5F80, 0x7F80, 0x9F80, 0xDF80] {
+                if a_ok && b_ok {
+                    let (mut fast, mut full) = (Env::new(mxcsr), Env::new(mxcsr));
+                    full.denormals(a, b);
+                    let got = fast.div(a, b);
+                    let want = full_div(&mut full, a, b);
+                    assert_eq!((got, fast.flags), (want, full.flags), "{a:08x} / {b:08x}, {mxcsr:04x}");
+                }
+                if a_ok && a & SIGN == 0 {
+                    let (mut fast, mut full) = (Env::new(mxcsr), Env::new(mxcsr));
+                    full.denormals(a, 0);
+                    let got = fast.sqrt(a);
+                    let want = full_sqrt(&mut full, a);
+                    assert_eq!((got, fast.flags), (want, full.flags), "sqrt {a:08x}, {mxcsr:04x}");
+                }
+            }
+        }
     }
 
     #[test]

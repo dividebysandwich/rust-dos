@@ -165,10 +165,11 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   single, within the precision Intel specifies for them. SSE needs
   CR4.OSFXSR, which a system that saves the SSE state sets; rust-dos's
   DPMI host sets it for its clients on a Pentium III. None of them has
-  RDPMC, a local APIC or memory type range registers, as in DOSBox-X. A DOSBox configuration's `cputype` of a
-  Pentium imports as `pentium`, of a Pentium MMX as `pentium_mmx`, of a
-  Pentium Pro as `pentium_pro`, of a Pentium II as `pentium_ii`, and of
-  a Pentium III or DOSBox-X's `experimental` as `pentium_iii`.
+  RDPMC, a local APIC or memory type range registers, as in DOSBox-X. A
+  DOSBox configuration's `cputype` of a Pentium imports as `pentium`, of
+  a Pentium MMX as `pentium_mmx`, of a Pentium Pro as `pentium_pro`, of
+  a Pentium II as `pentium_ii`, and of a Pentium III or DOSBox-X's
+  `experimental` as `pentium_iii`.
 * `core` is what runs the programs' instructions: `auto` (the default)
   runs the interpreter, and the dynamic recompiler for a program from the
   moment it switches to protected mode until it ends, as DOSBox's

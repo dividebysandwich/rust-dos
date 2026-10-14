@@ -15,12 +15,14 @@ pub mod float;
 
 use iced_x86::{CpuidFeature, Instruction, Mnemonic, OpKind, Register};
 
+use super::fpu::control as status;
 use super::mmx;
 use super::operand::{effective_offset, mem_seg};
 use crate::cpu::{
     Access, CR0_EM, CR0_TS, CR4_OSFXSR, CR4_OSXMMEXCPT, Cpu, CpuFlags, CpuResult, FPU_TAG_EMPTY, FPU_TAG_VALID,
-    Fault, FpuFlags,
+    Fault,
 };
+use crate::f80::{F80, FPU_80_BITS_MAX};
 use float::Env;
 
 /// An SSE instruction: the SSE forms of the mnemonics (not the SSE2 ones,
@@ -285,9 +287,6 @@ fn comiss(cpu: &mut Cpu, instr: &Instruction, signaling: bool) -> CpuResult {
 fn from_int(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
     let count = if instr.mnemonic() == Mnemonic::Cvtpi2ps { 2 } else { 1 };
     let b = source(cpu, instr, 1, 4 * count as u32, false)?;
-    if instr.op1_kind() == OpKind::Register && mmx::is_mm(instr.op1_register()) {
-        mmx::enter_mmx(cpu);
-    }
     let reg = instr.op0_register();
     let a = xmm(cpu, reg);
     let mut env = Env::new(cpu.sse.mxcsr);
@@ -295,7 +294,11 @@ fn from_int(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
     for (i, r) in result.iter_mut().enumerate().take(count) {
         *r = env.from_int(lane(b, i) as i32);
     }
+    // A fault leaves the FPU as it was.
     commit(cpu, &env)?;
+    if instr.op1_kind() == OpKind::Register && mmx::is_mm(instr.op1_register()) {
+        mmx::enter_mmx(cpu);
+    }
     set_xmm(cpu, reg, lanes(result));
     Ok(())
 }
@@ -308,13 +311,15 @@ fn to_int(cpu: &mut Cpu, instr: &Instruction, truncate: bool) -> CpuResult {
     let to_mm = mmx::is_mm(dst);
     let count = if to_mm { 2 } else { 1 };
     let b = source(cpu, instr, 1, 4 * count as u32, false)?;
-    if to_mm {
-        mmx::enter_mmx(cpu);
-    }
     let mut env = Env::new(cpu.sse.mxcsr);
-    let result: Vec<u32> = (0..count).map(|i| env.to_int(lane(b, i), truncate)).collect();
+    let mut result = [0u32; 2];
+    for (i, r) in result.iter_mut().enumerate().take(count) {
+        *r = env.to_int(lane(b, i), truncate);
+    }
+    // A fault leaves the FPU as it was.
     commit(cpu, &env)?;
     if to_mm {
+        mmx::enter_mmx(cpu);
         mmx::set_mm(cpu, dst, result[0] as u64 | (result[1] as u64) << 32);
     } else {
         cpu.set_reg(dst, result[0]);
@@ -346,54 +351,45 @@ pub fn fxsave(cpu: &mut Cpu, instr: &Instruction, restore: bool) -> CpuResult {
     if cpu.cr0 & (CR0_EM | CR0_TS) != 0 {
         return Err(Fault::NM);
     }
-    let lin = span(cpu, instr, 512, if restore { Access::Read } else { Access::Write }, true)? as usize;
+    let lin = span(cpu, instr, 512, if restore { Access::Read } else { Access::Write }, true)?;
+    // ST(i) and XMMi take 16 bytes each.
+    let slot = |base: u32, i: usize| lin.wrapping_add(base + 16 * i as u32);
     if restore {
-        let mxcsr = cpu.lin_read_32(lin + FX_MXCSR as usize);
+        let mxcsr = cpu.lin_read_32(lin.wrapping_add(FX_MXCSR) as usize);
         if mxcsr & !float::MXCSR_MASK != 0 {
             return Err(Fault::gp(0));
         }
-        cpu.fpu_control = cpu.lin_read_16(lin);
-        let sw = cpu.lin_read_16(lin + 2);
-        cpu.fpu_top = ((sw >> 11) & 7) as usize;
-        cpu.set_fpu_flags(FpuFlags::from_bits_truncate(sw & !0x3800));
-        let tags = cpu.lin_read_8(lin + 4);
+        cpu.fpu_control = cpu.lin_read_16(lin as usize);
+        let sw = cpu.lin_read_16(lin as usize + 2);
+        status::set_status_word(cpu, sw);
+        let tags = cpu.lin_read_8(lin as usize + 4);
         for i in 0..8 {
             cpu.fpu_tags[i] = if tags >> i & 1 != 0 { FPU_TAG_VALID } else { FPU_TAG_EMPTY };
         }
         for i in 0..8 {
-            let mut bytes = [0u8; 10];
-            for (b, byte) in bytes.iter_mut().enumerate() {
-                *byte = cpu.lin_read_8(lin + (FX_ST + 16 * i) as usize + b);
-            }
-            let mut value = crate::f80::F80::new();
-            value.set_bytes(&bytes);
-            let phys = cpu.fpu_get_phys_index(i as usize);
-            cpu.fpu_set_reg(phys, value);
+            let st = read_mem(cpu, slot(FX_ST, i), 16) & FPU_80_BITS_MAX;
+            let phys = cpu.fpu_get_phys_index(i);
+            cpu.fpu_set_reg(phys, F80 { st });
         }
         cpu.sse.mxcsr = mxcsr;
         for i in 0..8 {
-            cpu.sse.xmm[i] = read_mem(cpu, (lin + (FX_XMM as usize) + 16 * i) as u32, 16);
+            cpu.sse.xmm[i] = read_mem(cpu, slot(FX_XMM, i), 16);
         }
     } else {
-        let sw = (cpu.get_fpu_flags().bits() & !0x3800) | ((cpu.fpu_top as u16 & 7) << 11);
+        let sw = status::status_word(cpu);
         let tags = (0..8).fold(0u32, |t, i| t | ((cpu.fpu_tags[i] != FPU_TAG_EMPTY) as u32) << i);
         let header = [cpu.fpu_control as u32 | (sw as u32) << 16, tags, 0, 0, 0, 0, cpu.sse.mxcsr, 0];
         for (i, &dword) in header.iter().enumerate() {
-            cpu.lin_write_32(lin + 4 * i, dword);
+            cpu.lin_write_32(lin as usize + 4 * i, dword);
         }
         for i in 0..8 {
-            let bytes = cpu.fpu_reg(cpu.fpu_get_phys_index(i)).get_bytes();
-            let at = lin + (FX_ST as usize) + 16 * i;
-            for (b, &byte) in bytes.iter().enumerate() {
-                cpu.lin_write_8(at + b, byte);
-            }
-            for b in 10..16 {
-                cpu.lin_write_8(at + b, 0);
-            }
+            // The 80 bits of the register, then 6 bytes of 0.
+            let st = cpu.fpu_reg(cpu.fpu_get_phys_index(i)).st & FPU_80_BITS_MAX;
+            write_mem(cpu, slot(FX_ST, i), 16, st);
         }
         for i in 0..8 {
             let value = cpu.sse.xmm[i];
-            write_mem(cpu, (lin + (FX_XMM as usize) + 16 * i) as u32, 16, value);
+            write_mem(cpu, slot(FX_XMM, i), 16, value);
         }
     }
     Ok(())

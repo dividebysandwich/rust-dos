@@ -80,8 +80,15 @@ pub fn fdecstp(cpu: &mut Cpu) {
 }
 
 /// The status word: the flags with the stack top in bits 11-13.
-fn status_word(cpu: &Cpu) -> u16 {
+pub(crate) fn status_word(cpu: &Cpu) -> u16 {
     (cpu.get_fpu_flags().bits() & !0x3800) | ((cpu.fpu_top as u16 & 0x07) << 11)
+}
+
+/// Load the status word `status_word` gives: the stack top from bits
+/// 11-13, the flags from the rest.
+pub(crate) fn set_status_word(cpu: &mut Cpu, sw: u16) {
+    cpu.fpu_top = ((sw >> 11) & 0x07) as usize;
+    cpu.set_fpu_flags(FpuFlags::from_bits_truncate(sw & !0x3800));
 }
 
 /// The tag word: two bits per physical register, 00 valid, 01 zero,
@@ -140,9 +147,7 @@ fn load_env(cpu: &mut Cpu, addr: usize, size: usize) {
     cpu.fpu_control = cpu.lin_read_16(addr);
     let sw = cpu.lin_read_16(addr + step);
     let tag_word = cpu.lin_read_16(addr + 2 * step);
-    cpu.fpu_top = ((sw >> 11) & 0x07) as usize;
-    // Mask out the TOP bits before setting flags to avoid corruption
-    cpu.set_fpu_flags(FpuFlags::from_bits_truncate(sw & !0x3800));
+    set_status_word(cpu, sw);
     for i in 0..8 {
         let tag = (tag_word >> (i * 2)) & 0x03;
         cpu.fpu_tags[i] = if tag == 0b11 { FPU_TAG_EMPTY } else { FPU_TAG_VALID };
