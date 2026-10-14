@@ -1693,3 +1693,26 @@ fn the_fpu_registers_read_back_by_model() {
     assert_eq!(fpu["xmm"][1]["ps"], json!([1.0, 1.5, 0.0, 0.0]));
     assert_eq!(fpu["mxcsr"], "00001F80");
 }
+
+#[test]
+fn an_fpu_value_beyond_a_double_reads_back_by_its_tag() {
+    let (mut cpu, mut hub) = (Cpu::new(".".into()), DebugHub::disabled());
+    for _ in 0..4 {
+        cpu.fpu_push_f64(1.0);
+    }
+    cpu.model = crate::cpu::CpuModel::PentiumIII;
+    // Physical registers 4 to 7 are ST(0) to ST(3).
+    cpu.fpu_set_reg(4, rust_dos::f80::F80 { st: 0x4530_8000_0000_0000_0000 });
+    cpu.fpu_set_reg(5, rust_dos::f80::F80 { st: 0x0000_4000_0000_0000_0000 });
+    cpu.fpu_set_reg(6, rust_dos::f80::F80 { st: 0x3FFF_4000_0000_0000_0000 });
+    cpu.sse.xmm[0] = 0x7FC0_0000;
+    let fpu = reply(&mut cpu, &mut hub, Cmd::GetFpu).unwrap();
+    assert_eq!(fpu["st"][0]["tag"], "valid");
+    assert_eq!(fpu["st"][0]["value"], Value::Null, "2^1329 is beyond a double");
+    assert_eq!(fpu["st"][1]["tag"], "special", "a denormal");
+    assert_eq!(fpu["st"][1]["value"], 0.0);
+    assert_eq!(fpu["st"][2]["tag"], "special", "an unnormal");
+    assert_eq!(fpu["st"][3]["tag"], "valid");
+    assert_eq!(fpu["tag"], "28FF", "FSTENV's tag word");
+    assert_eq!(fpu["xmm"][0]["ps"][0], Value::Null, "a NaN single");
+}

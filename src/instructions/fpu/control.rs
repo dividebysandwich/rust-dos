@@ -92,7 +92,10 @@ pub(crate) fn set_status_word(cpu: &mut Cpu, sw: u16) {
 }
 
 /// The tag word: two bits per physical register, 00 valid, 01 zero,
-/// 10 special (NaN, infinity), 11 empty.
+/// 10 special, 11 empty. Special, as on Intel's FPUs, is every nonzero
+/// value that is not a normal number: a NaN, an infinity (both exponent
+/// 7FFF), a denormal or pseudo-denormal (exponent 0) and an unnormal
+/// (integer bit clear).
 pub(crate) fn tag_word(cpu: &Cpu) -> u16 {
     let mut tag_word: u16 = 0;
     for i in 0..8 {
@@ -100,9 +103,10 @@ pub(crate) fn tag_word(cpu: &Cpu) -> u16 {
             0b11
         } else {
             let val = cpu.fpu_reg(i);
+            let exponent = val.get_exponent();
             if val.is_zero() {
                 0b01
-            } else if val.is_nan() || val.is_infinite() {
+            } else if exponent == 0x7FFF || exponent == 0 || val.get_integer_bit() == 0 {
                 0b10
             } else {
                 0b00
