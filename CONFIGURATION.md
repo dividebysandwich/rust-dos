@@ -1824,6 +1824,15 @@ card's gamma table, which games set brighter than DOSBox-X shows them.
   `fxmemmap.vxd`). SubCulture's 3dfx version installs from its CD in the
   [CD-ROM drive](#booting-a-disk-image) and plays with its CD music, with
   `machine=svga_s3`, `memsize=64` and `cpu=pentium`.
+* **Windows 98 SE** finds the card at its next start as a "3Dfx Voodoo"
+  and installs its own driver for it from the Windows 98 CD, asking for the
+  CD's `WIN98` folder (give it the drive letter the CD has in this
+  machine), without a restart. The driver gives DirectDraw and Direct3D the
+  Voodoo as a second device beside the 2D card, and Direct3D games that let
+  you choose the 3D card draw on it: Expendable does with
+  `DisplayDriver [1]` in its `config.txt`, with `machine=svga_s3virge`,
+  `cpu=pentium_ii` and `memsize=128`. While a game draws on the card,
+  `video.voodoo.output` in the debug server's `/api/status` is true.
 
 The card swaps its buffers at the vertical retrace a game asks it to wait
 for, and reports the swaps still waiting and its busy state as the real
