@@ -29,7 +29,8 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   accelerator, an [S3 ViRGE](CONFIGURATION.md#direct3d-on-an-s3-virge)
   whose 3D engine draws Direct3D in Windows 95, Hercules, the Tandy 1000's and IBM PCjr's 16-colour
   modes, and a [3dfx Voodoo Graphics](CONFIGURATION.md#3dfx-voodoo-graphics)
-  for Glide games in DOS and Windows 95, drawn by Rust-DOS or again by
+  for Glide games in DOS and Windows 95 and Direct3D games in
+  Windows 98, drawn by Rust-DOS or again by
   OpenGL at up to four times its resolution, and a
   [PowerVR PCX2](CONFIGURATION.md#powervr-pcx2) (Matrox m3D) and a
   [Rendition Vérité](CONFIGURATION.md#rendition-vérité) for DOS games'
