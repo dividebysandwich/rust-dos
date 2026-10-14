@@ -118,6 +118,21 @@ fn headset_options(settings: &VrSettings) -> (VrGraphics, Option<u32>, Option<u3
 /// Width and height.
 type Size = (u32, u32);
 
+/// Where the window's camera starts in `scene`: at its spawn, or where
+/// RUST_DOS_VR_CAMERA ("x,y,z,yaw,pitch", degrees) says, for pictures of
+/// the scene from elsewhere.
+fn start_camera(scene: &Scene) -> FlyCamera {
+    let set: Option<Vec<f32>> = std::env::var("RUST_DOS_VR_CAMERA").ok().map(|v| v.split(',').filter_map(|n| n.trim().parse().ok()).collect());
+    match set.as_deref() {
+        Some(&[x, y, z, yaw, pitch]) => FlyCamera::at(scene::Spawn {
+            position: glam::Vec3::new(x, y, z),
+            yaw: yaw.to_radians(),
+            pitch: pitch.to_radians(),
+        }),
+        _ => FlyCamera::at(scene.spawn),
+    }
+}
+
 /// What has to be done before SDL starts for a headset to work.
 #[cfg_attr(not(xr), allow(unused_variables))]
 pub fn before_sdl(settings: &VrSettings) {
@@ -166,7 +181,7 @@ impl Stage {
             gpu.set_anisotropy(gl);
             screens.push(screen);
         }
-        let camera = FlyCamera::at(scene.spawn);
+        let camera = start_camera(&scene);
         let props = props::Props::new(&scene);
         let world = Arc::new(World::new(settings));
         world.set_scene(&scene);
@@ -347,6 +362,32 @@ impl Stage {
         pick::pick(&self.scene.screen, origin, dir)
     }
 
+    /// A click of the mouse at a point of the window's drawable: a lamp
+    /// there in front of the screen is switched. Whether it was something
+    /// of the scene's (and not the screen's).
+    pub fn click(&mut self, (x, y): (f32, f32)) -> bool {
+        let Some((view_projection, (rx, ry, rw, rh))) = self.shown else { return false };
+        let ndc = Vec2::new((x - rx) / rw.max(1.0) * 2.0 - 1.0, 1.0 - (y - ry) / rh.max(1.0) * 2.0);
+        let (origin, dir) = pick::ray(view_projection.inverse(), ndc);
+        let screen = pick::pick_hit(&self.scene.screen, origin, dir).map(|(t, _)| t);
+        let targets = self.props.targets(&self.scene);
+        match pick::pick_target(&targets, origin, dir) {
+            Some((t, id)) if screen.is_none_or(|s| t < s) => {
+                self.act(id);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Do what clicking `id` does.
+    fn act(&mut self, id: pick::TargetId) {
+        match id {
+            pick::TargetId::Lamp(i) => self.world.toggle_lamp(i),
+            pick::TargetId::Camera(_) => {}
+        }
+    }
+
     /// The window's camera, to fly.
     pub fn camera_mut(&mut self) -> &mut FlyCamera {
         &mut self.camera
@@ -355,7 +396,7 @@ impl Stage {
     /// Back to where the scene starts, and the headset's view centred
     /// where it looks now.
     pub fn recenter(&mut self) {
-        self.camera = FlyCamera::at(self.scene.spawn);
+        self.camera = start_camera(&self.scene);
         #[cfg(xr)]
         if let Some(headset) = &self.headset {
             headset.recenter();
@@ -452,7 +493,7 @@ impl Stage {
         self.scene_path = path;
         self.scene_written = when;
         self.scene = scene.clone();
-        self.camera = FlyCamera::at(scene.spawn);
+        self.camera = start_camera(&scene);
         self.props.reset(&scene);
         self.world.set_scene(&scene);
         self.fresh = self.latest.is_some();

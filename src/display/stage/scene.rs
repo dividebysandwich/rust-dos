@@ -120,11 +120,12 @@ pub struct Material {
 
 impl Material {
     /// Whether it casts shadows: not if it is seen through, or is a light
-    /// or a backdrop (black, and glowing).
+    /// or a backdrop (black, and glowing), or a lamp's glowing bulb (which
+    /// would be in the way of its own light).
     pub fn casts_shadow(&self) -> bool {
         let black = self.base_color[..3] == [0.0; 3];
         let glows = self.emissive != [0.0; 3] || self.emissive_texture.is_some();
-        self.alpha != Alpha::Blend && self.shading != Shading::Screen && !(black && glows)
+        self.alpha != Alpha::Blend && self.shading != Shading::Screen && !(black && glows) && self.lamp.is_none()
     }
 
     fn plain(color: [f32; 3], shading: Shading) -> Self {

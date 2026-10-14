@@ -96,6 +96,15 @@ impl SkyLook {
     }
 }
 
+impl SkyLook {
+    /// How much brighter a room is shown than it is, as eyes used to it
+    /// see it: a room lit through its windows gets a small part of the
+    /// sky's light, more of it the brighter the day.
+    pub fn indoor_exposure(&self) -> f32 {
+        1.0 + 10.0 * luma(self.ambient).min(0.4)
+    }
+}
+
 /// The scene's sunset of before: the sky the test room had, and still has
 /// at its time.
 pub const SUNSET_HOURS: f32 = 17.43;

@@ -47,9 +47,26 @@ float hash3(vec3 p) {
     return fract((p.x + p.y) * p.z);
 }
 
-// The sky's light in direction d: the colour high up going into the
-// horizon's, the glow along the horizon brightest under the sun, the sun
-// and the moon, the stars, greyed by clouds.
+// The sky's light in direction d without the sun, the moon and the stars:
+// the colour high up going into the horizon's, the glow along the horizon
+// brightest under the sun. What the haze fades into.
+vec3 sky_haze(vec3 d) {
+    d = normalize(d);
+    if (u_sky == 0) {
+        return vec3(0.003, 0.004, 0.006);
+    }
+    vec3 sun = normalize(u_sun);
+    float h = d.y;
+    float toward = dot(normalize(d.xz + vec2(1e-5)), normalize(sun.xz + vec2(1e-5))) * 0.5 + 0.5;
+    vec3 c = mix(u_horizon, u_zenith, smoothstep(0.0, 0.7, h));
+    vec3 band = u_band * mix(0.18, 1.0, toward * toward * toward);
+    c = mix(c, band, exp(-max(h, 0.0) * mix(16.0, 6.0, toward * toward)) * min(dot(u_band, vec3(1.0)) * 4.0, 1.0));
+    c = mix(c, u_horizon * 0.25, smoothstep(0.0, -0.12, h));
+    return c + vec3(0.55, 0.6, 0.8) * u_flash * (0.6 + 0.4 * h);
+}
+
+// The sky's light in direction d: the haze's, the stars, the sun and the
+// moon, greyed by clouds.
 vec3 sky_color(vec3 d) {
     d = normalize(d);
     if (u_sky == 0) {

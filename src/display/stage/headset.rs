@@ -21,6 +21,7 @@ use super::controls::{Controllers, VrInput};
 use super::keyboard::Keyboard;
 use super::props::Props;
 use super::render::{Dest, Features, Format, Gpu, Multiview, Options, Pass};
+use super::pick::TargetId;
 use super::scene::{Leds, Scene, Spawn};
 use super::xr::{Xr, XrOptions, log};
 use crate::video::shader::Glsl;
@@ -582,7 +583,7 @@ fn session(
     mut scene: Arc<Scene>,
     screens: [glow::Texture; 3],
     settings: &VrSettings,
-    world: &super::world::World,
+    room: &super::world::World,
 ) -> Result<(), String> {
     let features = Features::of(gl);
     // A standalone headset's own graphics chip is gone easier on
@@ -752,7 +753,7 @@ fn session(
         }
         gpu.set_glow(glow);
         gpu.frame_start(gl);
-        gpu.set_ambience(gl, &scene, world.ambience(&scene, std::time::Instant::now()));
+        gpu.set_ambience(gl, &scene, room.ambience(&scene, std::time::Instant::now()));
         if let Some((index, fence, ())) = taken {
             if let Some(Fence(fence)) = fence {
                 // SAFETY: see `GlScreen`.
@@ -788,7 +789,14 @@ fn session(
         let held = props.update(&scene, &tracking, now);
         // Marking, the controllers do nothing else.
         let busy = if keyboard.marking() { [true; 2] } else { held.busy };
-        let (mut input, mut extras, hold) = controllers.update(mode, &tracking, busy, &scene.screen, now);
+        let targets = props.targets(&scene);
+        let (mut input, mut extras, hold, clicked) = controllers.update(mode, &tracking, busy, &scene.screen, &targets, now);
+        for id in held.touched.iter().copied().chain(clicked) {
+            match id {
+                TargetId::Lamp(i) => room.toggle_lamp(i),
+                TargetId::Camera(_) => {}
+            }
+        }
         extras.extend(marks);
         if held.pad.is_some() {
             input.pad = held.pad;

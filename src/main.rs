@@ -409,6 +409,8 @@ fn main() -> Result<(), String> {
     // The mouse held in SDL's relative mode while Ctrl+Shift fly the 3D
     // scene's camera, and the start of the last frame's flight.
     let mut steering_mouse = false;
+    // A click the 3D scene took, whose release the machine doesn't see.
+    let mut swallowed_click = false;
     let mut last_steer = std::time::Instant::now();
     // Ctrl+Shift held over the 3D scene: the mouse and Q, E and Home fly
     // its camera, and the machine doesn't see them.
@@ -972,6 +974,14 @@ fn main() -> Result<(), String> {
                     }
                 }
 
+                // A click on a lamp of the 3D scene (or its camera), in front
+                // of the screen.
+                Event::MouseButtonDown { mouse_btn: MouseButton::Left, x, y, .. }
+                    if !mouse_captured && !ui.is_open() && display.every_frame() && display.click_scene(x, y) =>
+                {
+                    swallowed_click = true;
+                }
+                Event::MouseButtonUp { mouse_btn: MouseButton::Left, .. } if std::mem::take(&mut swallowed_click) => {}
                 // A click on the sound visualizer's controls.
                 Event::MouseButtonDown { mouse_btn: MouseButton::Left, x, y, .. }
                     if !mouse_captured && ui.sound_viz_hit(display.to_frame(x, y)).is_some() =>

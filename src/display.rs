@@ -612,6 +612,17 @@ impl Display<'_> {
         matches!(&self.out, Output::Gl(gl) if gl.stage().is_some_and(|s| s.has_headset()))
     }
 
+    /// A click at the window's point (`x`, `y`) on something of the 3D
+    /// scene's (a lamp, a camera) rather than the screen: done, and true.
+    pub fn click_scene(&mut self, x: i32, y: i32) -> bool {
+        let Output::Gl(gl) = &mut self.out else { return false };
+        let window = gl.window();
+        let (ws, ds) = (window.size(), window.drawable_size());
+        let px = (x as f32 + 0.5) * ds.0 as f32 / ws.0.max(1) as f32;
+        let py = (y as f32 + 0.5) * ds.1 as f32 / ws.1.max(1) as f32;
+        gl.stage_mut().is_some_and(|stage| stage.click((px, py)))
+    }
+
     /// Turn the window's camera by mouse motion.
     pub fn camera_look(&mut self, dx: f32, dy: f32) {
         if let Some(stage) = self.stage_mut() {
@@ -758,6 +769,10 @@ impl Display<'_> {
     }
 
     pub fn has_headset(&self) -> bool {
+        false
+    }
+
+    pub fn click_scene(&mut self, _x: i32, _y: i32) -> bool {
         false
     }
 

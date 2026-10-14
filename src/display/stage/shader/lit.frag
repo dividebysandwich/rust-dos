@@ -492,7 +492,7 @@ void main() {
     // The haze, where there is one (not in a closed room).
     if (u_fog > 0.0) {
         float dist = length(v_world - u_eye[VIEW]);
-        color = mix(color, tone(sky_color(v_world - u_eye[VIEW])), 1.0 - exp(-dist * u_fog));
+        color = mix(color, tone(sky_haze(v_world - u_eye[VIEW])), 1.0 - exp(-dist * u_fog));
     }
     // (Opaque: alpha 1, over the real world where it shows through.)
     o_color = finish(color, alpha);

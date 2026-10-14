@@ -1198,7 +1198,8 @@ impl Gpu {
             self.bind_sky(gl, program, scene);
             gl.uniform_1_i32(u("u_encode").as_ref(), !srgb as i32);
             gl.uniform_3_f32_slice(u("u_ambient").as_ref(), &ambient.to_array());
-            gl.uniform_1_f32(u("u_exposure").as_ref(), scene.exposure);
+            let adapted = if scene.indoor.is_some() { self.ambience.sky.indoor_exposure() } else { 1.0 };
+            gl.uniform_1_f32(u("u_exposure").as_ref(), scene.exposure * adapted);
             let lights = &lights[..lights.len().min(super::scene::MAX_LIGHTS)];
             let mut pos = Vec::new();
             let mut color = Vec::new();

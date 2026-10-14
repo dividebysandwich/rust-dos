@@ -8,6 +8,7 @@
 //! needed, into textures of the context that draws them.
 
 use super::controls::{Hand, Tracking};
+use super::pick::{Target, TargetId};
 use super::render::{Gpu, PropDraw};
 use super::scene::{PartRole, Prop, PropKind, Scene};
 use glam::{Mat4, Quat, Vec3};
@@ -48,13 +49,15 @@ enum Hold {
 }
 
 /// What the props do to the machine at a frame.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct PropInput {
     /// The hands holding something, whose buttons and stick are the
     /// prop's.
     pub busy: [bool; 2],
     /// The joystick's stick, held: the game port's joystick.
     pub pad: Option<PadSnapshot>,
+    /// What a hand touched and pulled its trigger at: a lamp to switch.
+    pub touched: Vec<TargetId>,
 }
 
 pub struct Props {
@@ -64,6 +67,8 @@ pub struct Props {
     holds: [Option<Hold>; 2],
     squeezed: [bool; 2],
     pressed: [bool; 2],
+    /// Each hand's trigger, pulled before.
+    pulled: [bool; 2],
     booklet: Booklet,
 }
 
@@ -75,6 +80,7 @@ impl Props {
             holds: [None; 2],
             squeezed: [false; 2],
             pressed: [false; 2],
+            pulled: [false; 2],
             booklet: Booklet::default(),
         };
         props.reset(scene);
@@ -162,8 +168,25 @@ impl Props {
             }
             self.pressed[i] = hand.primary;
             input.busy[i] = self.holds[i].is_some();
+            // A free hand's trigger pulled at a lamp it touches switches it
+            // (and doesn't point the laser).
+            let pulled = std::mem::replace(&mut self.pulled[i], hand.select);
+            if hand.select && !pulled && self.holds[i].is_none() {
+                let points = reaching(hand);
+                let near = |low: Vec3, high: Vec3| points.iter().any(|&p| (low - p).max(p - high).max(Vec3::ZERO).length() < REACH);
+                if let Some(target) = self.targets(scene).into_iter().find(|t| near(t.low, t.high)) {
+                    input.touched.push(target.id);
+                    input.busy[i] = true;
+                }
+            }
         }
         input
+    }
+
+    /// What can be clicked with the laser or the mouse, or touched: the
+    /// lamps.
+    pub fn targets(&self, scene: &Scene) -> Vec<Target> {
+        scene.lamps.iter().enumerate().map(|(i, lamp)| Target { id: TargetId::Lamp(i), low: lamp.bounds.0, high: lamp.bounds.1 }).collect()
     }
 
     /// What `hand` takes with its grip or its controller's tip: the stick
@@ -622,6 +645,23 @@ mod tests {
             booklet.showing(at + TURN);
         }
         assert_eq!(booklet.spread, 4);
+    }
+
+    #[test]
+    fn a_lamp_is_switched_by_touching_it() {
+        let mut room = Scene::test_room();
+        let mut lamp = super::super::scene::Lamp::test(false);
+        lamp.bounds = (Vec3::new(0.5, 0.72, -0.6), Vec3::new(0.6, 1.0, -0.5));
+        room.lamps.push(lamp);
+        let mut props = Props::new(&room);
+        let now = Instant::now();
+        let mut hand = hand_at(Vec3::new(0.55, 1.02, -0.55), false);
+        assert!(props.update(&room, &tracking(hand), now).touched.is_empty());
+        hand.select = true;
+        let input = props.update(&room, &tracking(hand), now);
+        assert_eq!(input.touched, [TargetId::Lamp(0)]);
+        assert!(input.busy[1]);
+        assert!(props.update(&room, &tracking(hand), now).touched.is_empty(), "once a pull");
     }
 
     #[test]
