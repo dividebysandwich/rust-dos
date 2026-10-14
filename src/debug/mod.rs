@@ -315,6 +315,8 @@ pub enum Cmd {
     RebootShell,
     Reboot,
     GetRegs,
+    /// The FPU, MMX and SSE registers.
+    GetFpu,
     SetRegs(Map<String, Value>),
     ReadMem { addr: String, len: usize },
     /// Write `data` at an address; with `expect`, only if the bytes there

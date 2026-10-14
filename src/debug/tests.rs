@@ -1665,3 +1665,31 @@ fn log_lines_name_their_request_and_the_journal_s_entry() {
     assert!(log.iter().zip(log.iter().skip(1)).all(|(a, b)| b.n == a.n + 1), "numbered in order");
     assert_eq!(entries_of(&hub, "drive_mounted")[0]["cause"].as_u64(), Some(req));
 }
+
+#[test]
+fn the_fpu_registers_read_back_by_model() {
+    let (mut cpu, mut hub) = (Cpu::new(".".into()), DebugHub::disabled());
+    cpu.fpu_push_f64(2.0);
+    cpu.fpu_push_f64(f64::INFINITY);
+    let fpu = reply(&mut cpu, &mut hub, Cmd::GetFpu).unwrap();
+    assert_eq!(fpu["control"], "037F");
+    assert_eq!(fpu["top"], 6);
+    assert_eq!(fpu["status"], "3000", "the stack top in bits 11-13");
+    assert_eq!(fpu["st"][0]["reg"], 6);
+    assert_eq!(fpu["st"][0]["tag"], "special");
+    assert_eq!(fpu["st"][0]["value"], Value::Null, "an infinity");
+    assert_eq!(fpu["st"][1]["tag"], "valid");
+    assert_eq!(fpu["st"][1]["value"], 2.0);
+    assert_eq!(fpu["st"][1]["bits"], "40008000000000000000");
+    assert_eq!(fpu["st"][2]["tag"], "empty");
+    assert!(fpu.get("mm").is_none() && fpu.get("xmm").is_none(), "a 486 has neither");
+
+    cpu.model = crate::cpu::CpuModel::PentiumIII;
+    cpu.fpu_set_reg(3, rust_dos::f80::F80 { st: 0xFFFF_0123_4567_89AB_CDEF });
+    cpu.sse.xmm[1] = (1.5f32.to_bits() as u128) << 32 | 0x3F80_0000;
+    let fpu = reply(&mut cpu, &mut hub, Cmd::GetFpu).unwrap();
+    assert_eq!(fpu["mm"][3], "0123456789ABCDEF", "physical register 3's significand");
+    assert_eq!(fpu["xmm"][1]["bits"], "00000000000000003FC000003F800000");
+    assert_eq!(fpu["xmm"][1]["ps"], json!([1.0, 1.5, 0.0, 0.0]));
+    assert_eq!(fpu["mxcsr"], "00001F80");
+}

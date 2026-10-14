@@ -93,7 +93,7 @@ pub(crate) fn set_status_word(cpu: &mut Cpu, sw: u16) {
 
 /// The tag word: two bits per physical register, 00 valid, 01 zero,
 /// 10 special (NaN, infinity), 11 empty.
-fn tag_word(cpu: &Cpu) -> u16 {
+pub(crate) fn tag_word(cpu: &Cpu) -> u16 {
     let mut tag_word: u16 = 0;
     for i in 0..8 {
         let tag = if cpu.fpu_tags[i] == FPU_TAG_EMPTY {
