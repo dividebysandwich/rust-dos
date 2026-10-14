@@ -601,12 +601,27 @@ mod tests {
         ImageSpec { preset: preset(name), ..Default::default() }
     }
 
-    fn scratch(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("rust-dos-makeimg-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(name);
-        let _ = std::fs::remove_file(&path);
-        path
+    /// A test's own folder in the temp directory, deleted with what's in it
+    /// when the test ends, passed or failed: the images run to 500 MB.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(test: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("rust-dos-makeimg-{}-{}", std::process::id(), test));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Scratch(dir)
+        }
+
+        fn path(&self, name: &str) -> std::path::PathBuf {
+            self.0.join(name)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     #[test]
@@ -674,13 +689,14 @@ mod tests {
 
     #[test]
     fn images_mount_and_take_files() {
+        let dir = Scratch::new("mount");
         for (name, spec) in [
             ("floppy.img", ImageSpec { label: Some("disk1".into()), ..spec("fd_720kb") }),
             ("hdd.img", ImageSpec { label: Some("HARDDISK".into()), ..spec("hd_20mb") }),
             ("small.img", ImageSpec { size_mb: Some(4), ..Default::default() }),
             ("fat32.img", ImageSpec { fat: Some(32), label: Some("BIG".into()), ..spec("hd_40mb") }),
         ] {
-            let path = scratch(name);
+            let path = dir.path(name);
             let plan = plan(&spec).unwrap();
             write(&path, &plan, false).unwrap();
             assert_eq!(std::fs::metadata(&path).unwrap().len(), plan.bytes);
@@ -709,16 +725,17 @@ mod tests {
     /// blocks with sectors written.
     #[test]
     fn vhd_images_hold_the_same_disk() {
+        let dir = Scratch::new("vhd");
         // The volume serial comes from the time, and writing the raw image
         // can take long enough for the second to change before the VHDs.
         crate::hosttime::fix(chrono::NaiveDate::from_ymd_opt(1995, 4, 11).unwrap().and_hms_opt(12, 34, 56));
         let spec = ImageSpec { size_mb: Some(500), label: Some("VHD".into()), ..Default::default() };
         let plan = plan(&spec).unwrap();
-        let raw = scratch("same.img");
+        let raw = dir.path("same.img");
         write(&raw, &plan, true).unwrap();
         let raw = DiskImage::open(&raw, false, None, false).unwrap();
         for (name, format) in [("fixed.vhd", Format::VhdFixed), ("dynamic.vhd", Format::VhdDynamic)] {
-            let path = scratch(name);
+            let path = dir.path(name);
             write_as(&path, &plan, format, false).unwrap();
             assert!(write_as(&path, &plan, format, false).unwrap_err().contains("already exists"));
             let len = std::fs::metadata(&path).unwrap().len();
@@ -748,8 +765,9 @@ mod tests {
     /// tells whether the BIOS's cylinders reach its end.
     #[test]
     fn big_disks_are_fat32() {
+        let dir = Scratch::new("big");
         for (mb, kind) in [(3000, 0x0B), (9000, 0x0C)] {
-            let path = scratch(&format!("big{}.img", mb));
+            let path = dir.path(&format!("big{}.img", mb));
             let plan = plan(&ImageSpec { size_mb: Some(mb), ..Default::default() }).unwrap();
             write(&path, &plan, true).unwrap();
             let image = DiskImage::open(&path, false, None, false).unwrap();
