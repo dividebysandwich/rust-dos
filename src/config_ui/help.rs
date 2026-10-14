@@ -315,6 +315,7 @@ impl Item {
             Composite => "composite",
             CompositeEra => "composite-era",
             Cycles => "cycles",
+            AutoFps => "auto-fps",
             Core => "core",
             Fpu => "fpu",
             Cpu => "cpu",

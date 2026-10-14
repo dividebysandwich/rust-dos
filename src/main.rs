@@ -2,28 +2,33 @@ use clap::Parser;
 use sdl2::event::{Event, WindowEvent};
 use sdl2::keyboard::{Keycode, Mod, Scancode};
 use sdl2::mouse::{MouseButton, MouseWheelDirection};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::audio::pump_audio;
 use crate::config::Settings;
 use crate::config_ui::osd::Osd;
-use crate::config_ui::{ConfigUi, Host, UiKey};
-use crate::cpu::{CoreMode, Cpu};
-use crate::disk::{DRIVE_SLOTS, DriveInfo, DriveKind, LASTDRIVE};
+use crate::config_ui::{ConfigUi, Host};
+use crate::cpu::Cpu;
 use crate::display::Display;
-use crate::mount::{MountCmd, MountSpec};
 use crate::capture::avi::VideoRecorder;
 use crate::clipboard::Clipboard;
 use crate::capture::wav::WavWriter;
 use crate::recorder::ScreenRecorder;
 use crate::timer::CpuSpeed;
 
+mod args;
 mod clipboard;
+mod config_file;
 mod debug;
 mod display;
+mod input;
+mod main_host;
+mod monitor_power;
+mod sdl_audio;
 mod sdl_keys;
+mod startup;
 
 // The emulator itself is the library crate; the debug server and the
 // window's display are private to the binary. These re-exports let the
@@ -33,281 +38,25 @@ use rust_dos::{
     video,
 };
 use rust_dos::achievements::{Achievements, http::HttpTransport};
-use rust_dos::boot::{Startup, StartupItem};
-use rust_dos::games::{ActiveGame, GameEntry, NewGame};
+use rust_dos::games::ActiveGame;
 use rust_dos::hardware::Hardware;
 use rust_dos::profile::{self, Zone};
 use rust_dos::savestate::{self, slots};
 
-#[derive(Parser, Debug)]
-#[command(author, version = rust_dos::build_info::VERSION, about, long_about = None)]
-struct Args {
-    /// Window scale factor [default: 1, or the config file's scale]
-    #[arg(short, long, value_parser = clap::value_parser!(u32).range(1..=16))]
-    scale: Option<u32>,
-
-    /// Show each frame when the machine's display draws it, for a display
-    /// with a variable refresh rate (G-Sync, FreeSync) [default: the
-    /// config file's vrr]
-    #[arg(long)]
-    vrr: bool,
-
-    /// Show the picture on a screen in a 3D scene in a VR headset, through
-    /// OpenXR (SteamVR, Monado) [default: the config file's [vr] mode]
-    #[arg(long, conflicts_with = "vr_desktop")]
-    vr: bool,
-
-    /// Show the picture on a screen in a 3D scene in the window, with a
-    /// camera moved with the mouse while Ctrl+Shift is held
-    #[arg(long)]
-    vr_desktop: bool,
-
-    /// The 3D scene: a glTF file (.glb or .gltf) exported from Blender, with
-    /// the mesh the picture goes on named "screen" [default: the config
-    /// file's, or the built-in room]
-    #[arg(long, value_name = "FILE")]
-    vr_scene: Option<std::path::PathBuf>,
-
-    /// How the headset's pictures get to the OpenXR runtime: auto, gl
-    /// (GLX/WGL), egl or vulkan [default: the config file's [vr] graphics]
-    #[arg(long, value_name = "API", value_parser = parse_vr_graphics)]
-    vr_graphics: Option<rust_dos::vr::VrGraphics>,
-
-    /// The headset's eye images, in percent of the size its runtime
-    /// recommends (30 to 150) [default: the config file's [vr] resolution]
-    #[arg(long, value_name = "PERCENT", value_parser = clap::value_parser!(u32).range(30..=150))]
-    vr_resolution: Option<u32>,
-
-    /// Write what the OpenXR runtime and OpenGL offer the headset to
-    /// vr-probe.log in Rust-DOS's folder and the console, then quit
-    #[arg(long)]
-    vr_probe: bool,
-
-    /// Root directory for Drive C: [default: the config file's C:, or "."]
-    #[arg(short, long)]
-    dir: Option<String>,
-
-    /// Configuration file to use instead of ./rust-dos.conf, the one next
-    /// to the executable or the per-user default
-    #[arg(short, long, value_name = "FILE", conflicts_with = "no_config")]
-    config: Option<std::path::PathBuf>,
-
-    /// Don't read or create any configuration file
-    #[arg(long)]
-    no_config: bool,
-
-    /// Write the log to FILE, replacing it, instead of rust-dos.log in the
-    /// configuration directory, so instances running at the same time keep
-    /// separate logs
-    #[arg(long, value_name = "FILE")]
-    log: Option<std::path::PathBuf>,
-
-    /// Start at the DOS prompt, without booting the disk image that boots
-    /// at startup (`-boot` in [drives])
-    #[arg(long)]
-    no_boot: bool,
-
-    /// Start the HTTP/WebSocket debug server (local-only, unauthenticated).
-    /// Optionally takes the listen address. With port 0 the system picks a
-    /// free port, and the "Debug server listening on" line gives it.
-    #[arg(long, value_name = "ADDR", num_args = 0..=1, default_missing_value = "127.0.0.1:8086")]
-    debug_server: Option<std::net::SocketAddr>,
-
-    /// Instruction trace ring buffer capacity (entries, ~64 bytes each).
-    /// Allocated only once tracing is enabled via the debug server.
-    #[arg(long, default_value_t = 1_000_000)]
-    trace_capacity: usize,
-
-    /// Profile the emulator from startup, and write where its time went to
-    /// FILE as JSON when it exits, with a table (FILE.txt) and folded
-    /// stacks for flame graphs (FILE.folded) beside it (docs/profiling.md)
-    #[arg(long, value_name = "FILE")]
-    profile: Option<std::path::PathBuf>,
-
-    /// Samples a second for --profile (10 to 20000)
-    #[arg(long, value_name = "HZ", default_value_t = rust_dos::profile::session::DEFAULT_HZ,
-          value_parser = clap::value_parser!(u32).range(rust_dos::profile::session::MIN_HZ as i64..=rust_dos::profile::session::MAX_HZ as i64))]
-    profile_hz: u32,
-
-    /// Emulated CPU speed in instructions per millisecond, "max" for as
-    /// fast as the host keeps up with, or "auto" for the speed the running
-    /// program's frames show it needs (optionally with the least speed,
-    /// "auto 5000") [default: auto, or the config file's cycles]
-    #[arg(long, value_name = "N|max|auto", value_parser = timer::CpuSpeed::parse)]
-    cycles: Option<timer::CpuSpeed>,
-
-    /// Run on emulated time alone: the clock starts at --start-time, the
-    /// speed is fixed (--cycles N, or 3000 when it would be auto or max),
-    /// and the debug server's input arrives at emulated times. With
-    /// --debug-server the machine starts paused
-    #[arg(long)]
-    deterministic: bool,
-
-    /// The date and time the clock starts at with --deterministic
-    /// [default: 1995-04-11 12:34:56]
-    #[arg(long, value_name = "YYYY-MM-DD HH:MM:SS", requires = "deterministic", value_parser = rust_dos::deterministic::parse_start)]
-    start_time: Option<chrono::NaiveDateTime>,
-
-    /// What runs the programs' instructions: auto (the interpreter, and the
-    /// dynamic recompiler for protected-mode programs), dynamic or normal
-    /// [default: auto, or the config file's core]
-    #[arg(long, value_name = "auto|dynamic|normal", value_parser = CoreMode::parse)]
-    core: Option<CoreMode>,
-
-    /// Launch a game at startup: a profile in the games folder beside the
-    /// configuration file, by its file name or its name
-    #[arg(long, value_name = "NAME", conflicts_with = "import")]
-    game: Option<String>,
-
-    /// Import a game as a game profile, and launch it: its package (a zip
-    /// or 7z archive, or a folder with a rust-dos.conf), or a game set up
-    /// for DOSBox (a GOG install's folder, a folder with DOSBox
-    /// configuration files, or one of them)
-    #[arg(long, value_name = "PATH")]
-    import: Option<std::path::PathBuf>,
-
-    /// Relay LAN rooms for other rust-dos instances on this UDP port,
-    /// without starting the emulator
-    #[arg(long, value_name = "PORT", num_args = 0..=1, default_missing_value = "21213")]
-    relay: Option<u16>,
-
-    /// One password for all the rooms of --relay
-    #[arg(long, value_name = "PASSWORD", requires = "relay")]
-    relay_password: Option<String>,
-
-    #[command(subcommand)]
-    command: Option<Command>,
-}
-
-#[derive(clap::Subcommand, Debug)]
-enum Command {
-    /// Run a DOS program, batch file or command without a window, as a
-    /// tool of the host: what it prints goes to standard output, standard
-    /// input is typed at its keyboard, and its exit code is rust-dos's
-    Run(RunArgs),
-}
-
-#[derive(clap::Args, Debug)]
-struct RunArgs {
-    /// The folder that is drive C: [default: the current one]
-    #[arg(short, long)]
-    dir: Option<std::path::PathBuf>,
-
-    /// Instructions per emulated millisecond
-    #[arg(long, default_value_t = 100_000)]
-    cycles: u32,
-
-    /// The machine's memory in MB
-    #[arg(long, default_value_t = 16, value_parser = clap::value_parser!(u32).range(1..=256))]
-    mem: u32,
-
-    /// Print the text screen at the end when nothing was printed through
-    /// DOS, for programs that write to the screen's memory
-    #[arg(long)]
-    screen: bool,
-
-    /// The command line, as typed at the DOS prompt
-    #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
-    command: Vec<String>,
-}
-
-/// The SDL sound device, where the mixed output goes, through the 3D
-/// scene's mix of the channels for where the viewer is (`mix`, which the
-/// main loop sets), from the one of the last samples (`mixed`).
-struct SdlAudio {
-    queue: sdl2::audio::AudioQueue<i16>,
-    /// To open the device again with another buffer.
-    subsystem: sdl2::AudioSubsystem,
-    /// The queue kept on top of the device's buffer, in frames.
-    prebuffer: usize,
-    mix: std::rc::Rc<std::cell::Cell<display::audio_mix::Mix>>,
-    mixed: display::audio_mix::Mix,
-    buffer: Vec<i16>,
-}
-
-/// The sound device, playing, with a buffer of `blocksize` frames (SDL's
-/// default is 2048 frames, 46 ms of latency).
-fn open_audio(subsystem: &sdl2::AudioSubsystem, blocksize: u16) -> Result<sdl2::audio::AudioQueue<i16>, String> {
-    let desired_spec =
-        sdl2::audio::AudioSpecDesired { freq: Some(44100), channels: Some(2), samples: Some(blocksize) };
-    let device = subsystem.open_queue::<i16, _>(None, &desired_spec)?;
-    device.resume();
-    Ok(device)
-}
-
-/// The prebuffer setting's milliseconds in frames of the device.
-fn prebuffer_frames(queue: &sdl2::audio::AudioQueue<i16>, ms: u16) -> usize {
-    queue.spec().freq as usize * ms as usize / 1000
-}
-
-impl audio::AudioOutput for SdlAudio {
-    fn queued_frames(&self) -> usize {
-        self.queue.size() as usize / 4
-    }
-
-    fn queue(&mut self, samples: &[i16]) -> Result<(), String> {
-        use display::audio_mix::{IDENTITY, apply};
-        let mix = self.mix.get();
-        if mix == IDENTITY && self.mixed == IDENTITY {
-            return self.queue.queue_audio(samples);
-        }
-        apply(samples, self.mixed, mix, &mut self.buffer);
-        self.mixed = mix;
-        self.queue.queue_audio(&self.buffer)
-    }
-
-    /// The device takes its buffer from the queue at once; the prebuffer
-    /// is for a video frame that comes late.
-    fn target_frames(&self) -> usize {
-        self.queue.spec().samples as usize + self.prebuffer
-    }
-
-    /// A new block size opens the device again, which drops the little
-    /// sound waiting in it.
-    fn set_buffer(&mut self, buffer: rust_dos::audio::AudioBuffer) -> Result<(), String> {
-        if self.queue.spec().samples != buffer.blocksize {
-            let queue = open_audio(&self.subsystem, buffer.blocksize)?;
-            self.queue = queue;
-        }
-        self.prebuffer = prebuffer_frames(&self.queue, buffer.prebuffer);
-        Ok(())
-    }
-}
-
-/// What saving the settings compares against: the settings and drives as
-/// the configuration file has them, from startup or the last save. Saving
-/// writes what changed since and adds the settings the file has no line
-/// for, so the command-line options that weren't changed, drives that
-/// failed to mount and the file's own spelling of paths stay as they are.
-struct Saved {
-    file: Option<PathBuf>,
-    /// The `[autoexec]` lines, whose MOUNTs aren't copied to `[drives]`.
-    autoexec: Vec<String>,
-    settings: Settings,
-    drives: BTreeMap<u8, MountSpec>,
-}
-
-/// `--vr-graphics`'s value.
-fn parse_vr_graphics(value: &str) -> Result<rust_dos::vr::VrGraphics, String> {
-    rust_dos::vr::VrGraphics::parse(value).ok_or_else(|| "auto, gl, egl or vulkan".to_string())
-}
-
-/// Closes the console window Windows opens next to the program's own when
-/// it is started from Explorer or a shortcut: a console program gets a
-/// console of its own then, which only it is attached to. Started from a
-/// terminal, it shares the terminal's and keeps it for its output. Windows
-/// 11 24H2 and later don't open one at all (the manifest's
-/// consoleAllocationPolicy, packaging/windows/rust-dos.manifest).
+use crate::args::{Args, Command};
+use crate::config_file::{Saved, config_warning, games_dir, load_config, mounted_drives};
+use crate::input::{
+    CAPTURED, apply_keyboard_layout, chord_key, pad_snapshot, pad_state, release_input, sdl_button_to_index, step_autoinput,
+    sync_locks, ui_key,
+};
+use crate::main_host::MainHost;
+use crate::monitor_power::{power_off, power_on, resync};
+use crate::sdl_audio::open_audio;
+use crate::startup::{apply_args, create_cpu, game_to_launch, start_debug_hub, start_dos};
 #[cfg(windows)]
-fn leave_explorer_console() {
-    use windows_sys::Win32::System::Console::{FreeConsole, GetConsoleProcessList};
-    let mut pids = [0u32; 2];
-    // SAFETY: the list has room for the two entries it is given.
-    if unsafe { GetConsoleProcessList(pids.as_mut_ptr(), pids.len() as u32) } == 1 {
-        // SAFETY: nothing holds on to the console's handles.
-        unsafe { FreeConsole() };
-    }
-}
+use crate::startup::leave_explorer_console;
+#[cfg(test)]
+use crate::startup::open_log_file;
 
 fn main() -> Result<(), String> {
     let args = Args::parse();
@@ -333,66 +82,14 @@ fn main() -> Result<(), String> {
     leave_explorer_console();
     let config = load_config(&args)?;
     let mut settings = Settings::from_config(&config);
-    if let Some(scale) = args.scale {
-        settings.scale = scale;
-    }
-    if args.vrr {
-        settings.vrr = true;
-    }
-    if args.vr {
-        settings.vr.mode = rust_dos::vr::VrMode::Headset;
-    } else if args.vr_desktop {
-        settings.vr.mode = rust_dos::vr::VrMode::Desktop;
-    }
-    if let Some(graphics) = args.vr_graphics {
-        settings.vr.graphics = graphics;
-    }
-    if let Some(resolution) = args.vr_resolution {
-        settings.vr.resolution = Some(resolution);
-    }
-    if let Some(scene) = &args.vr_scene {
-        settings.vr.scene = Some(scene.clone());
-        if settings.vr.mode == rust_dos::vr::VrMode::Off {
-            settings.vr.mode = rust_dos::vr::VrMode::Desktop;
-        }
-    }
-    if let Some(cycles) = args.cycles {
-        settings.cycles = cycles;
-    }
-    if args.deterministic {
-        settings.cycles = deterministic_speed(settings.cycles, args.cycles)?;
-    }
-    if let Some(core) = args.core {
-        settings.core = core;
-    }
+    apply_args(&mut settings, &args)?;
     // Ask rust-dos.com whether there is a newer version while the window
     // opens; not in runs whose screens must come out the same.
     let mut update_check = (settings.version_check && !args.deterministic && args.debug_server.is_none())
         .then(rust_dos::version_check::Check::start);
     // A game to launch: its profile, read now so its memory size is the
     // machine's.
-    let imported = match &args.import {
-        Some(source) => {
-            let dir = games_dir(config.source.as_deref()).ok_or("--import needs a configuration file, beside which the games folder is")?;
-            let (id, name, warnings) = games::import(&dir, source, rust_dos::hostdirs::home_dir().as_deref())?;
-            println!("Imported {} as the game profile {}", name, dir.join(format!("{}.conf", id)).display());
-            for warning in warnings {
-                println!("  {}", warning);
-            }
-            Some(id)
-        }
-        None => None,
-    };
-    let startup_game = match args.game.as_ref().or(imported.as_ref()) {
-        Some(query) => Some(find_game(config.source.as_deref(), query)?),
-        None => None,
-    };
-    let memory_mb = match &startup_game {
-        Some((entry, text, dir)) => {
-            games::prepare(&entry.id, &settings, text, dir, rust_dos::hostdirs::home_dir().as_deref())?.settings.memsize
-        }
-        None => settings.memsize,
-    };
+    let (startup_game, memory_mb) = game_to_launch(&args, &config, &settings)?;
 
     let mut cursor_visible = true;
     let mut last_blink = std::time::Instant::now();
@@ -478,19 +175,7 @@ fn main() -> Result<(), String> {
     }
     // How the sound's channels mix for the viewer in the 3D scene.
     let audio_mix = std::rc::Rc::new(std::cell::Cell::new(display::audio_mix::IDENTITY));
-    match audio_device {
-        Ok((queue, subsystem)) => {
-            let mix = audio_mix.clone();
-            let prebuffer = prebuffer_frames(&queue, settings.audio_buffer.prebuffer);
-            let output =
-                SdlAudio { queue, subsystem, prebuffer, mix, mixed: display::audio_mix::IDENTITY, buffer: Vec::new() };
-            cpu.bus.audio_device = Some(Box::new(output));
-        }
-        Err(e) => {
-            eprintln!("[AUDIO] No sound device, so no sound: {}", e);
-            cpu.bus.log_string(&format!("[AUDIO] No sound device, so no sound: {}", e));
-        }
-    }
+    sdl_audio::attach(&mut cpu, audio_device, &settings, &audio_mix);
     cpu.bus.log_string(&format!("[DISPLAY] {}", display.renderer()));
     if let Some(warning) = display.shader_warning() {
         config_warning(&mut cpu, warning);
@@ -506,25 +191,7 @@ fn main() -> Result<(), String> {
         settings: settings.clone(),
         drives: mounted_drives(&cpu),
     };
-    let mut dbg = match args.debug_server {
-        Some(addr) => debug::DebugHub::start(&mut cpu, addr, args.trace_capacity, det.as_ref().map(|mode| mode.start))?,
-        None => debug::DebugHub::disabled(),
-    };
-    if args.profile.is_some() {
-        dbg.profile_at_start(&mut cpu, args.profile_hz).map_err(|e| format!("The profiler's thread can't start: {}", e))?;
-    }
-    if let Some(mode) = &det {
-        dbg.deterministic = Some(mode.start);
-        // A client sends its input before anything runs.
-        if args.debug_server.is_some() {
-            dbg.pause_at_start(&cpu);
-        }
-        cpu.bus.log_string(&format!(
-            "[DETERMINISTIC] Clock from {}, {} cycles",
-            mode.start.format("%Y-%m-%d %H:%M:%S"),
-            settings.cycles.initial_cycles()
-        ));
-    }
+    let mut dbg = start_debug_hub(&mut cpu, &args, &det, &settings)?;
     // The keys a game's profile presses, as last stepped in deterministic
     // mode, which steps them in emulated time.
     let mut det_autoinput: Option<rust_dos::autoinput::Status> = None;
@@ -536,28 +203,7 @@ fn main() -> Result<(), String> {
     achievements.hardcore_allowed = args.debug_server.is_none();
     let mut next_check = 0u64;
 
-    // Startup commands: the config's [autoexec] lines, then AUTOEXEC.BAT
-    // from the C: root if there is one, like the startup sequence a real PC
-    // would run. Each line runs as if typed at the prompt. A reboot runs
-    // them again.
-    cpu.bus.config_dir = config_dir(config.source.as_deref());
-    let mut commands = vec![StartupItem::Lines(config.autoexec.clone())];
-    // A disk image that boots at startup boots after the [autoexec] lines,
-    // which may mount more for it, in place of AUTOEXEC.BAT: the system on
-    // the disk has its own.
-    commands.push(match startup_boot(&mut cpu, args.no_boot || startup_game.is_some()) {
-        Some(drive) => StartupItem::Lines(vec![format!("BOOT -l {}", disk::drive_key(drive))]),
-        None => StartupItem::BatchFile("C:\\AUTOEXEC.BAT".to_string()),
-    });
-    // A newer version under the box: the answer if it comes in a moment,
-    // else what the last check found.
-    let update = update_check.as_mut().and_then(|check| {
-        check.wait(std::time::Duration::from_secs(1));
-        check.banner()
-    });
-    let update = update.as_deref().map(rust_dos::version_check::console_line);
-    cpu.startup = Startup { notes: banner_notes(&config, args.no_config), update, commands };
-    cpu.start_dos();
+    start_dos(&mut cpu, &config, &args, &startup_game, &mut update_check);
 
     // Cached render target. We re-render the full VGA surface only when
     // `cpu.bus.vga.dirty` is set — everything else (cursor blink, mouse
@@ -575,7 +221,7 @@ fn main() -> Result<(), String> {
 
     // Paces emulated time against the wall clock, one frame at a time.
     cpu.bus.set_cycles_per_ms(settings.cycles.initial_cycles());
-    let mut pacer = timer::Pacer::new(settings.cycles, std::time::Instant::now());
+    let mut pacer = timer::Pacer::new(settings.cycles, settings.auto_fps, std::time::Instant::now());
 
     // The settings window (Ctrl+F12, DOSCONFIG), and whether the machine
     // has been set aside for it: paused, its keys released.
@@ -2291,24 +1937,7 @@ fn main() -> Result<(), String> {
 
             // Draw Recording Indicator
             if recorder.is_active() || sound_recording.is_some() || video_recording.is_some() {
-                let radius = 5;
-                let center_x = frame_w - 15;
-                let center_y = 15;
-
-                for y in (center_y - radius)..=(center_y + radius) {
-                    for x in (center_x - radius)..=(center_x + radius) {
-                        let dx = x as isize - center_x as isize;
-                        let dy = y as isize - center_y as isize;
-                        if dx * dx + dy * dy <= (radius * radius) as isize {
-                            let idx = (y * frame_w + x) * 3;
-                            if idx + 2 < screen.rgb.len() {
-                                screen.rgb[idx] = 0xFF; // R
-                                screen.rgb[idx + 1] = 0x00; // G
-                                screen.rgb[idx + 2] = 0x00; // B
-                            }
-                        }
-                    }
-                }
+                draw_recording_indicator(&mut screen, frame_w);
             }
         }
         // Waiting for the deadline of a frame paced to the retrace is
@@ -2348,10 +1977,62 @@ fn main() -> Result<(), String> {
         profile::set_host(Zone::FrameWait);
         pacer.wait_for_next_frame();
     }
+    shut_down(
+        &args,
+        &mut dbg,
+        &mut cpu,
+        &settings,
+        &mut power,
+        &mut display,
+        &screen,
+        shutdown,
+        video_recording,
+        sound_recording,
+    )
+}
+
+/// The emulated time between the states rewind takes.
+const REWIND_INTERVAL_NS: u64 = 500_000_000;
+
+/// What a slot's message says of the state in it: when it was saved,
+/// and in which program.
+fn describe_state(header: &slots::Header) -> String {
+    match header.program.as_str() {
+        "" => header.saved.clone(),
+        program => format!("{}, {}", header.saved, program),
+    }
+}
+
+/// What the on-screen message says of a new CPU speed.
+fn speed_message(speed: CpuSpeed) -> String {
+    match speed {
+        CpuSpeed::Max => "CPU speed max".to_string(),
+        CpuSpeed::Fixed(n) => format!("CPU speed {} cycles", n),
+        CpuSpeed::Auto(n) if n == CpuSpeed::default().initial_cycles() => "CPU speed auto".to_string(),
+        CpuSpeed::Auto(n) => format!("CPU speed auto, at least {} cycles", n),
+    }
+}
+
+/// What happens once the machine stops: the profile is written, the
+/// monitor goes off, the debug server's clients are told, and the printer's
+/// page, the shared disks and the recordings are finished.
+#[allow(clippy::too_many_arguments)]
+fn shut_down(
+    args: &Args,
+    dbg: &mut debug::DebugHub,
+    cpu: &mut Cpu,
+    settings: &Settings,
+    power: &mut video::power::PowerFx,
+    display: &mut Display<'_>,
+    screen: &video::Frame,
+    shutdown: debug::ShutdownReason,
+    video_recording: Option<VideoRecorder>,
+    sound_recording: Option<WavWriter>,
+) -> Result<(), String> {
     // The profile ends with the machine's last frame, before the monitor's
     // animation, which isn't the machine's work.
     if let Some(path) = &args.profile {
-        match dbg.profile_write(&mut cpu, path) {
+        match dbg.profile_write(cpu, path) {
             Ok(files) => {
                 let names: Vec<String> = files.iter().map(|f| f.display().to_string()).collect();
                 println!("Profile written to {}", names.join(", "));
@@ -2361,12 +2042,12 @@ fn main() -> Result<(), String> {
     }
     // The monitor goes off: the picture collapses to a dot, with a thunk.
     if settings.monitor_effects != video::power::MonitorEffects::Off {
-        power_off(&mut power, &mut display, &screen, &mut cpu.bus, settings.monitor_effects)?;
+        power_off(power, display, screen, &mut cpu.bus, settings.monitor_effects)?;
     }
 
     // The journal ends, and the debug server's clients get what they
     // waited for.
-    dbg.shutdown(&cpu, shutdown, 0);
+    dbg.shutdown(cpu, shutdown, 0);
 
     // The page in the printer comes out, and the job's files are written.
     for notice in cpu.bus.finish_printing() {
@@ -2393,1386 +2074,26 @@ fn main() -> Result<(), String> {
     Ok(())
 }
 
-/// The speed in deterministic mode: the one asked for, which has to be a
-/// number of cycles on the command line; from the configuration, auto and
-/// max become `deterministic::DEFAULT_CYCLES`.
-fn deterministic_speed(speed: CpuSpeed, from_args: Option<CpuSpeed>) -> Result<CpuSpeed, String> {
-    match (speed, from_args) {
-        (CpuSpeed::Fixed(_), _) => Ok(speed),
-        (_, Some(asked)) => Err(format!("--deterministic needs a fixed speed: --cycles N, not {}", asked)),
-        _ => Ok(CpuSpeed::Fixed(rust_dos::deterministic::DEFAULT_CYCLES)),
-    }
-}
+/// The red dot in the top right corner that says something is being
+/// recorded.
+fn draw_recording_indicator(screen: &mut video::Frame, frame_w: usize) {
+    let radius = 5;
+    let center_x = frame_w - 15;
+    let center_y = 15;
 
-/// Start the keys a game's profile presses once its program started, and
-/// press the next. Returns what they are doing, None without any.
-fn step_autoinput(
-    cpu: &mut Cpu,
-    game: &mut Option<ActiveGame>,
-    autoinput: &mut Option<rust_dos::autoinput::AutoInput>,
-) -> Option<rust_dos::autoinput::Status> {
-    if autoinput.is_none()
-        && let Some(started) = game.as_mut().and_then(|g| g.take_input(cpu))
-    {
-        *autoinput = Some(started);
-    }
-    let status = autoinput.as_mut().map(|input| input.step(cpu));
-    if status == Some(rust_dos::autoinput::Status::Done) {
-        *autoinput = None;
-    }
-    status
-}
-
-/// The emulated time between the states rewind takes.
-const REWIND_INTERVAL_NS: u64 = 500_000_000;
-
-/// What a slot's message says of the state in it: when it was saved,
-/// and in which program.
-fn describe_state(header: &slots::Header) -> String {
-    match header.program.as_str() {
-        "" => header.saved.clone(),
-        program => format!("{}, {}", header.saved, program),
-    }
-}
-
-/// What the on-screen message says of a new CPU speed.
-fn speed_message(speed: CpuSpeed) -> String {
-    match speed {
-        CpuSpeed::Max => "CPU speed max".to_string(),
-        CpuSpeed::Fixed(n) => format!("CPU speed {} cycles", n),
-        CpuSpeed::Auto(n) if n == CpuSpeed::default().initial_cycles() => "CPU speed auto".to_string(),
-        CpuSpeed::Auto(n) => format!("CPU speed auto, at least {} cycles", n),
-    }
-}
-
-/// The drives the configuration file can hold, by letter: mounts of host
-/// directories and CD images, not the drives held in memory.
-fn mounted_drives(cpu: &Cpu) -> BTreeMap<u8, MountSpec> {
-    cpu.bus
-        .disk
-        .all_drives()
-        .into_iter()
-        .filter(|info| info.kind != DriveKind::Virtual)
-        .filter_map(|info| info.mount.map(|spec| (info.drive, spec)))
-        .collect()
-}
-
-/// The drives the startup commands (`[autoexec]` and C:\AUTOEXEC.BAT)
-/// mount with MOUNT or IMGMOUNT, in the configuration file in `config_dir`.
-fn startup_mounts(cpu: &Cpu, autoexec: &[String], config_dir: Option<&std::path::Path>) -> Vec<MountSpec> {
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let home = rust_dos::hostdirs::home_dir();
-    let mut lines = autoexec.to_vec();
-    if let Some(file) = cpu.bus.disk.file_data("C:\\AUTOEXEC.BAT")
-        && let Ok(bytes) = file.read()
-    {
-        lines.extend(String::from_utf8_lossy(&bytes).lines().map(str::to_string));
-    }
-    let disk = &cpu.bus.disk;
-    let locate = |path: &str| disk.resolve_path(path);
-    let paths = mount::PathContext { base: &cwd, config_dir, home: home.as_deref(), locate: &locate };
-    lines
-        .iter()
-        .filter_map(|line| {
-            let (command, args) = line.trim().trim_start_matches('@').split_once(char::is_whitespace)?;
-            if !command.eq_ignore_ascii_case("MOUNT") && !command.eq_ignore_ascii_case("IMGMOUNT") {
-                return None;
-            }
-            match mount::parse_mount_command(args, &paths) {
-                Ok(MountCmd::Mount(spec)) => Some(spec),
-                _ => None,
-            }
-        })
-        .collect()
-}
-
-/// The drives that changed since the configuration file was read or last
-/// saved, but for those the startup commands mount.
-fn drive_changes(cpu: &Cpu, saved: &Saved) -> Vec<config::DriveChange> {
-    let current = mounted_drives(cpu);
-    let startup = startup_mounts(cpu, &saved.autoexec, config_dir(saved.file.as_deref()).as_deref());
-    let same_place = |a: &MountSpec, b: &MountSpec| {
-        a.drive == b.drive && std::fs::canonicalize(&a.path).ok() == std::fs::canonicalize(&b.path).ok()
-    };
-    let mut changes = Vec::new();
-    for drive in 0..DRIVE_SLOTS {
-        let (before, now) = (saved.drives.get(&drive), current.get(&drive));
-        match now {
-            _ if before == now => {}
-            None => changes.push((drive, None)),
-            // A startup command mounts it again anyway.
-            Some(spec) if before.is_none() && startup.iter().any(|s| same_place(s, spec)) => {}
-            Some(spec) => changes.push((drive, Some(spec.clone()))),
-        }
-    }
-    changes
-}
-
-/// Save every setting, and the drives that changed since the file was read
-/// or last saved.
-fn save_config(cpu: &mut Cpu, saved: &mut Saved, settings: &Settings) -> Result<(), String> {
-    let Some(path) = saved.file.clone() else {
-        return Err("No configuration file".to_string());
-    };
-    let changes = drive_changes(cpu, saved);
-    let home = rust_dos::hostdirs::home_dir();
-    config::save(&path, &saved.settings, settings, &changes, home.as_deref(), config::Saving::All)?;
-    cpu.bus.log_string(&format!("[CONFIG] Saved the settings to {}", path.display()));
-    saved.settings = settings.clone();
-    saved.drives = mounted_drives(cpu);
-    Ok(())
-}
-
-/// The drive to boot from at startup: the disk image mounted with -boot,
-/// unless `skip` (--no-boot, or a game launched).
-fn startup_boot(cpu: &mut Cpu, skip: bool) -> Option<u8> {
-    let drive = cpu.bus.disk.boot_drive()?;
-    if skip {
-        cpu.bus.log_string(&format!("[BOOT] Not booting from drive {} at startup", disk::drive_name(drive)));
-        return None;
-    }
-    if cpu.bus.disk.bios_image(drive).is_none() {
-        config_warning(cpu, &format!("drive {} can't boot: it isn't a disk image", disk::drive_name(drive)));
-        return None;
-    }
-    cpu.bus.log_string(&format!("[BOOT] Booting from drive {} at startup", disk::drive_name(drive)));
-    Some(drive)
-}
-
-/// The folder of the game profiles: `games` beside the configuration
-/// file `config`.
-fn games_dir(config: Option<&std::path::Path>) -> Option<PathBuf> {
-    config?.parent().map(|dir| dir.join("games"))
-}
-
-/// The folder of a configuration file, which MOUNT -pr takes relative paths
-/// from.
-fn config_dir(config: Option<&std::path::Path>) -> Option<PathBuf> {
-    std::path::absolute(config?).ok()?.parent().map(std::path::Path::to_path_buf)
-}
-
-/// The game profile `query` names: its entry, its text and its folder.
-fn find_game(config: Option<&std::path::Path>, query: &str) -> Result<(GameEntry, String, PathBuf), String> {
-    let dir = games_dir(config).ok_or("--game needs a configuration file, beside which the games folder is")?;
-    let games = games::list(&dir);
-    let entries: Vec<GameEntry> = games.iter().map(|(e, _)| e.clone()).collect();
-    let entry = games::find(&entries, query)
-        .ok_or_else(|| format!("No game called {} in {}", query, dir.display()))?
-        .clone();
-    let text = games.into_iter().find(|(e, _)| e.id == entry.id).map(|(_, t)| t).unwrap_or_default();
-    Ok((entry, text, dir))
-}
-
-/// The settings window's way to the machine, the display and the speed.
-struct MainHost<'m, 'd> {
-    cpu: &'m mut Cpu,
-    display: &'m mut Display<'d>,
-    pacer: &'m mut timer::Pacer,
-    /// The settings in effect (or waiting, see `Machine`).
-    settings: &'m mut Settings,
-    machine: &'m mut Hardware,
-    saved: &'m mut Saved,
-    /// The game launched and not ended yet.
-    game: &'m mut Option<ActiveGame>,
-    /// A game whose ways to start the window is to offer.
-    choose: &'m mut Option<String>,
-    confirm_launch: &'m mut Option<String>,
-    autoinput: &'m mut Option<rust_dos::autoinput::AutoInput>,
-    autoinput_fast: &'m mut bool,
-    padmap: &'m mut Option<rust_dos::padmap::PadMapper>,
-    /// The save states: their folder, the picture the machine shows, for
-    /// theirs, and where the thread writing one says it is done.
-    states: &'m Option<PathBuf>,
-    picture: &'m video::Frame,
-    state_done: &'m std::sync::mpsc::Sender<Result<String, String>>,
-    /// The slot the hotkeys use, and whether a state was loaded (the
-    /// machine's keys and a video recording go).
-    slot: &'m mut u8,
-    state_loaded: &'m mut bool,
-    achievements: &'m mut Achievements,
-    /// Deterministic mode: the date and time its clock started at. The
-    /// speed stays fixed, and save states record the start.
-    deterministic: Option<chrono::NaiveDateTime>,
-    clipboard: &'m sdl2::clipboard::ClipboardUtil,
-}
-
-impl MainHost<'_, '_> {
-    /// The profile of the game `id`, and the games folder.
-    fn game_profile(&self, id: &str) -> Result<(String, PathBuf), String> {
-        let dir = games_dir(self.saved.file.as_deref()).ok_or("There is no configuration file for the games folder")?;
-        let path = dir.join(format!("{}.conf", id));
-        let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {}", path.display(), e))?;
-        Ok((text, dir))
-    }
-
-    /// The file the settings window saves to: the game's profile while one
-    /// plays, else the configuration file.
-    fn config_path(&self) -> Result<PathBuf, String> {
-        let file = self.saved.file.as_deref().ok_or("No configuration file")?;
-        Ok(match self.game.as_ref() {
-            Some(game) => games_dir(Some(file)).ok_or("No games folder")?.join(format!("{}.conf", game.id)),
-            None => file.to_path_buf(),
-        })
-    }
-
-    /// Launch the game `id` from its profile `text` in the folder `dir`:
-    /// its settings over these, its drives over theirs, and the commands
-    /// that start it.
-    fn start_game(&mut self, id: &str, text: &str, dir: &std::path::Path) -> Result<String, String> {
-        if let Some(previous) = self.game.take() {
-            self.end_game(previous);
-        }
-        let base = self.saved.settings.clone();
-        let mut prepared = games::prepare(id, &base, text, dir, rust_dos::hostdirs::home_dir().as_deref())?;
-        for warning in &prepared.warnings {
-            config_warning(self.cpu, &format!("games/{}.conf: {}", id, warning));
-        }
-        if let Some(saves) = self.saved.file.as_deref().and_then(|f| games_dir(Some(f))).map(|g| games::saves_dir(&g)) {
-            games::overlay_drives(&mut prepared, id, &saves)?;
-        }
-        if let Err(e) = self.apply(&prepared.settings) {
-            config_warning(self.cpu, &e);
-        }
-        let programs_before = self.cpu.programs_loaded;
-        let replaced = games::drives_before(self.cpu);
-        for spec in &prepared.drives {
-            match self.cpu.bus.mount_drive(spec.drive, &spec.path, spec.opts.clone(), true) {
-                Ok(_) => {}
-                Err(e) => config_warning(self.cpu, &format!("games/{}.conf: drive {}: {}", id, disk::drive_key(spec.drive), e)),
-            }
-        }
-        self.cpu.bus.config_dir = std::path::absolute(dir).ok();
-        self.cpu.queue_batch_lines(&prepared.autoexec);
-        self.cpu.bus.log_string(&format!("[CONFIG] Launching the game {} (games/{}.conf)", prepared.name, id));
-        // What RetroAchievements knows the game by.
-        let hash = prepared.achievements.as_deref().and_then(|value| {
-            games::achievements_hash(value, dir, rust_dos::hostdirs::home_dir().as_deref())
-                .map_err(|e| {
-                    if self.settings.achievements.enabled {
-                        config_warning(self.cpu, &format!("games/{}.conf: achievements: {}", id, e));
-                    }
-                })
-                .ok()
-        });
-        self.achievements.game_started(hash, &prepared.name);
-        let message = format!("Starting {}", prepared.name);
-        let (pad, pad_warnings) = rust_dos::padmap::PadMapping::parse(&prepared.pad);
-        let (input, warnings) = ActiveGame::input_steps(prepared.input.as_deref());
-        let warnings: Vec<String> = warnings.into_iter().chain(pad_warnings).collect();
-        for warning in warnings {
-            config_warning(self.cpu, &format!("games/{}.conf: {}", id, warning));
-        }
-        *self.game =
-            Some(ActiveGame { id: id.to_string(), name: prepared.name, base, saved: prepared.settings, replaced, programs_before, input, pad, choose_after: false, saves_lock: prepared.saves_lock });
-        Ok(message)
-    }
-
-    /// A file or folder dropped onto the window: a game set up for DOSBox
-    /// is imported and launched, a folder or disk image mounted, a CD image
-    /// put in the CD-ROM drive, a floppy in A:, and a program run from its
-    /// folder. Returns what to tell the user.
-    fn dropped(&mut self, path: &std::path::Path) -> String {
-        use rust_dos::import::drop::{DropAction, drop_action};
-        let free = |cpu: &Cpu| (3..LASTDRIVE - 1).find(|&d| !cpu.bus.disk.is_mounted(d));
-        let mount = |host: &mut Self, drive: Option<u8>, path: &std::path::Path, kind: DriveKind| -> Result<u8, String> {
-            let drive = drive.ok_or("There is no free drive letter")?;
-            let spec = MountSpec { drive, path: path.to_path_buf(), opts: disk::MountOptions { kind, ..Default::default() } };
-            host.mount(spec, true).map(|_| drive)
-        };
-        let name = |path: &std::path::Path| path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
-        let result = match drop_action(path) {
-            DropAction::ImportGame(source) => {
-                self.import_game(&source).map(|(id, imported)| self.launch_game(&id).unwrap_or(imported))
-            }
-            DropAction::MountFolder(dir) => {
-                mount(self, free(self.cpu), &dir, DriveKind::HardDisk).map(|d| format!("{}: is {}", disk::drive_letter(d), name(&dir)))
-            }
-            DropAction::Disc(image) => {
-                let drive = self.cpu.bus.disk.drives_of_kind(DriveKind::CdRom).first().copied().or_else(|| free(self.cpu));
-                mount(self, drive, &image, DriveKind::CdRom).map(|d| format!("{}: has {}", disk::drive_letter(d), name(&image)))
-            }
-            DropAction::Floppy(image) => mount(self, Some(0), &image, DriveKind::Floppy).map(|_| format!("A: has {}", name(&image))),
-            DropAction::HardDisk(image) => {
-                mount(self, free(self.cpu), &image, DriveKind::HardDisk).map(|d| format!("{}: is {}", disk::drive_letter(d), name(&image)))
-            }
-            DropAction::Run(program) => {
-                let dir = program.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
-                let mounted = self.cpu.bus.disk.mounted_drives().into_iter().find(|d| d.root.as_deref() == Some(dir.as_path()));
-                let drive = match mounted {
-                    Some(info) => Ok(info.drive),
-                    None => mount(self, free(self.cpu), &dir, DriveKind::HardDisk),
-                };
-                drive.map(|d| {
-                    if !self.cpu.shell_idle() || self.cpu.batch.is_active() || self.cpu.shell_wait.is_some() {
-                        return format!("{}: is {}; quit the program running to start {}", disk::drive_letter(d), name(&dir), name(&program));
-                    }
-                    let letter = disk::drive_letter(d);
-                    self.cpu.queue_batch_lines([format!("{}:", letter), "CD \\".to_string(), name(&program)]);
-                    format!("Starting {} from {}:", name(&program), letter)
-                })
-            }
-            DropAction::Package(package) => (|| {
-                let dir = games_dir(self.saved.file.as_deref())
-                    .ok_or("Packages become games in the games folder beside the configuration file, and there is none (--no-config)")?;
-                let (id, game, warnings) = games::add_package(&dir, &package)?;
-                for warning in &warnings {
-                    self.cpu.bus.log_string(&format!("[CONFIG] Import of {}: {}", game, warning));
-                }
-                Ok(self.launch_game(&id).unwrap_or_else(|e| format!("{} is a game on the Games page: {}", game, e)))
-            })(),
-            DropAction::Nothing(e) => Err(e),
-        };
-        result.unwrap_or_else(|e| e)
-    }
-
-    /// A game has ended: the settings and drives from before it.
-    /// The folder of the save states' slots: the game's, or the machine's
-    /// without one.
-    fn slot_dir(&self) -> Result<PathBuf, String> {
-        let root = self.states.as_deref().ok_or("There is no folder for save states")?;
-        Ok(slots::slot_dir(root, self.game.as_ref().map(|g| g.id.as_str())))
-    }
-
-    /// The machine's state now, with its header and picture.
-    fn capture_state(&mut self) -> (slots::Header, video::Frame, Vec<u8>) {
-        let game = self.game.as_ref().map(|g| (g.id.as_str(), g.name.as_str()));
-        // The hardware in place, not a change waiting for the program to end.
-        let hardware = self.machine.settings(self.settings);
-        let mut picture = self.picture.clone();
-        // The OpenGL renderer draws the 3dfx card's picture: the one in its
-        // memory for the thumbnail.
-        if let Some(v) = &mut self.cpu.bus.voodoo
-            && v.output()
-            && !v.picture_wanted()
-        {
-            v.set_software_picture(true);
-            v.prepare_display();
-            v.render(&mut picture.rgb, picture.width as usize);
-            v.set_software_picture(false);
-        }
-        let mut header = slots::header(self.cpu, &hardware, game);
-        header.deterministic = self.deterministic.map(|start| start.format("%Y-%m-%d %H:%M:%S").to_string());
-        (header, picture, savestate::machine::save(self.cpu))
-    }
-
-    /// Save the machine to slot `slot`. Its state is taken now; a thread
-    /// packs it and writes the file, and says on `state_done` when it has.
-    fn save_slot(&mut self, slot: u8) -> Result<(), String> {
-        let path = slots::slot_path(&self.slot_dir()?, slot);
-        let (header, picture, state) = self.capture_state();
-        // A booted system's disks as they are, beside its state.
-        savestate::disks::delete_copies(&path);
-        savestate::disks::save_copies(self.cpu, &path)?;
-        let done = self.state_done.clone();
-        self.cpu.bus.log_string(&format!("[STATE] Saving to {}", path.display()));
-        std::thread::spawn(move || {
-            let data = slots::encode(&header, &slots::thumbnail(&picture), &state);
-            let result = slots::write_file(&path, &data).map(|()| format!("Saved to slot {}", slot));
-            let _ = done.send(result);
-        });
-        Ok(())
-    }
-
-    /// Save the machine to the file `path`, now. Returns the state's header.
-    /// `contents` records what is on the writable drives as well, which
-    /// reads every file on them (a `check_files` save, media.rs).
-    fn save_file(&mut self, path: &std::path::Path, contents: bool) -> Result<slots::Header, String> {
-        let (mut header, picture, state) = self.capture_state();
-        savestate::disks::delete_copies(path);
-        savestate::disks::save_copies(self.cpu, path)?;
-        // After the copies, which make the state's folder.
-        if contents && let Some(media) = header.media.as_mut() {
-            savestate::media::add_contents(self.cpu, media, path, |_| true);
-        }
-        slots::write_file(path, &slots::encode(&header, &slots::thumbnail(&picture), &state))?;
-        self.cpu.bus.log_string(&format!("[STATE] Saved to {}", path.display()));
-        Ok(header)
-    }
-
-    /// Load the save state file `path`: the hardware it was saved with
-    /// first, as the settings have it, then the machine. Memory can't
-    /// change its size, so a state of another memsize is refused.
-    fn load_file(&mut self, path: &std::path::Path) -> Result<slots::Header, String> {
-        let (header, state) = self.read_state(path)?;
-        self.load_state(path, header, &state)
-    }
-
-    /// Load the save state file `path` for the debug server. Returns the
-    /// header and how the state's hardware settings and media differ from
-    /// this machine's. A plain load brings the state's own hardware, as
-    /// `load_file` does. A `strict_match` load takes only a state of this
-    /// machine: one of other hardware or media, or without a record of its
-    /// media, is refused (409) with what differs. A `check_files` load of
-    /// a state that records what was on the writable drives (a
-    /// `check_files` save's) compares them with the files now, and the
-    /// changed files are differences like the others. The third list names
-    /// the writable drives a `check_files` load couldn't check, as the
-    /// state has no record of what was on them. Without `check_files` no
-    /// file is read. `folders` takes the state's folder drives it names as
-    /// mounted from other host folders: they are compared (and with
-    /// `check_files` their files) as if the state had been saved with them,
-    /// and the load leaves the drives mounted from them. The header returned
-    /// has the folders the state records.
-    #[allow(clippy::type_complexity)]
-    fn load_for_debugger(
-        &mut self,
-        path: &std::path::Path,
-        strict_match: bool,
-        check_files: bool,
-        folders: &[(u8, PathBuf)],
-    ) -> Result<(slots::Header, Vec<String>, Vec<String>), (u16, serde_json::Value)> {
-        // Whatever failed, the machine, its settings and hardware are as they were.
-        let failed = |e: String| (400, serde_json::json!({"error": e, "loaded": false, "unchanged": true}));
-        let (mut header, state) = self.read_state(path).map_err(failed)?;
-        // A `check_files` state's media list every file: kept only when relocated.
-        let recorded = (!folders.is_empty()).then(|| header.media.clone());
-        if !folders.is_empty() {
-            let media = header.media.as_mut().ok_or_else(|| {
-                failed(format!("the state doesn't record its media (saved by rust-dos {}), so folders can't be taken", header.version))
-            })?;
-            savestate::media::relocate(media, folders).map_err(failed)?;
-        }
-        let mut differences = slots::machine_differences(&header.machine, &self.machine.settings(self.settings));
-        // The machine's clock is the mode's start plus emulated time.
-        let start = self.deterministic.map(|start| start.format("%Y-%m-%d %H:%M:%S").to_string());
-        differences.extend(slots::mode_difference(header.deterministic.as_deref(), start.as_deref()));
-        if strict_match {
-            savestate::media::forget(self.cpu);
-        }
-        let mut unchecked = Vec::new();
-        match &header.media {
-            Some(media) => {
-                let mut now = savestate::media::of(self.cpu);
-                if check_files {
-                    // What is on the drives the state has a record of.
-                    let recorded = |m: &savestate::media::Medium| {
-                        media.iter().any(|saved| saved.drive == m.drive && savestate::media::has_contents(saved))
-                    };
-                    savestate::media::add_contents(self.cpu, &mut now, path, recorded);
-                }
-                // Without `check_files` the machine's media have no record of
-                // their files, so the state's isn't compared.
-                differences.extend(savestate::media::differences(media, &now));
-                if check_files {
-                    let copied = |key: &str| savestate::disks::copy_path_of(path, key).exists();
-                    unchecked = savestate::media::unrecorded(media, copied);
+    for y in (center_y - radius)..=(center_y + radius) {
+        for x in (center_x - radius)..=(center_x + radius) {
+            let dx = x as isize - center_x as isize;
+            let dy = y as isize - center_y as isize;
+            if dx * dx + dy * dy <= (radius * radius) as isize {
+                let idx = (y * frame_w + x) * 3;
+                if idx + 2 < screen.rgb.len() {
+                    screen.rgb[idx] = 0xFF; // R
+                    screen.rgb[idx + 1] = 0x00; // G
+                    screen.rgb[idx + 2] = 0x00; // B
                 }
             }
-            None if strict_match => differences.push(format!(
-                "the state doesn't record its media (saved by rust-dos {}), so they can't be checked",
-                header.version
-            )),
-            None => {}
         }
-        if strict_match && !differences.is_empty() {
-            let error = format!("{} doesn't match this machine; nothing was loaded", path.display());
-            return Err((409, serde_json::json!({"error": error, "loaded": false, "unchanged": true, "differences": differences})));
-        }
-        self.cpu.bus.disk.folders_from_state = folders.to_vec();
-        let loaded = self.load_state(path, header, &state);
-        self.cpu.bus.disk.folders_from_state.clear();
-        let mut header = loaded.map_err(failed)?;
-        if let Some(recorded) = recorded {
-            header.media = recorded;
-        }
-        Ok((header, differences, unchecked))
-    }
-
-    /// The header and machine's state of the save state file `path`, if
-    /// this machine can take it.
-    fn read_state(&mut self, path: &std::path::Path) -> Result<(slots::Header, Vec<u8>), String> {
-        if self.achievements.hardcore_active() {
-            return Err("hardcore mode: no save states while RetroAchievements plays".to_string());
-        }
-        let data = slots::read_file(path)?;
-        let (header, state) = slots::decode(&data)?;
-        if let Some(why) = slots::refusal(&header, self.cpu.bus.ram().len() >> 20) {
-            return Err(why);
-        }
-        Ok((header, state))
-    }
-
-    /// Load the state `state` of the file `path`, with its header: the
-    /// hardware it was saved with first, then the machine. A load that
-    /// fails puts back the settings and hardware from before it, and the
-    /// machine as it was.
-    fn load_state(&mut self, path: &std::path::Path, header: slots::Header, state: &[u8]) -> Result<slots::Header, String> {
-        let (old_settings, old_hardware) = (self.settings.clone(), self.machine.clone());
-        let hardware = slots::machine_settings(&header.machine, self.settings);
-        // A failed `machine::load` puts the machine back by itself; the
-        // machine from before is needed only when the hardware changes.
-        let changes = hardware != old_settings || self.machine.differs(&hardware);
-        let before = changes.then(|| savestate::machine::save(self.cpu));
-        if let Err(e) = self.apply(&hardware) {
-            config_warning(self.cpu, &e);
-        }
-        if self.machine.differs(self.settings) {
-            for warning in self.machine.apply(self.cpu, self.settings) {
-                config_warning(self.cpu, &warning);
-            }
-        }
-        // A booted system's disks come back from their copies, if the
-        // journals don't reach back to the state.
-        savestate::disks::offer_copies(self.cpu, path);
-        let loaded = savestate::machine::load(self.cpu, state).map_err(|e| e.to_string());
-        savestate::disks::withdraw(self.cpu);
-        if let Err(e) = loaded {
-            if let Some(before) = before {
-                if let Err(e) = self.apply(&old_settings) {
-                    config_warning(self.cpu, &e);
-                }
-                savestate::machine::roll_back(self.cpu, self.machine, &old_hardware, &old_settings, &before);
-            }
-            self.cpu.bus.log_string(&format!("[STATE] {} wasn't loaded: {}", path.display(), e));
-            return Err(e);
-        }
-        // Deterministic mode runs at the speed the machine's state brought
-        // (a state saved at auto or max brings the speed it had then), so
-        // the run from the state is the same whatever this machine ran at.
-        if self.deterministic.is_some() {
-            let speed = CpuSpeed::Fixed(self.cpu.bus.clock.cycles_per_ms());
-            if self.settings.cycles != speed {
-                self.settings.cycles = speed;
-                self.pacer.set_speed(speed);
-            }
-        }
-        self.pacer.rebase(&self.cpu.bus.clock, std::time::Instant::now());
-        *self.state_loaded = true;
-        self.cpu.bus.log_string(&format!("[STATE] Loaded {} (saved {})", path.display(), header.saved));
-        Ok(header)
-    }
-
-    /// Load slot `slot`. A slot without a file is "empty", as the slot
-    /// list calls it.
-    fn load_slot(&mut self, slot: u8) -> Result<slots::Header, String> {
-        let path = slots::slot_path(&self.slot_dir()?, slot);
-        if !path.exists() {
-            return Err("empty".to_string());
-        }
-        self.load_file(&path)
-    }
-
-    /// RetroAchievements' login: kept in the settings, and in the
-    /// configuration file (not a game's profile), without the password.
-    fn keep_token(&mut self, username: &str, token: &str) -> Result<(), String> {
-        let set = |s: &mut Settings| {
-            s.achievements.username = username.to_string();
-            s.achievements.token = token.to_string();
-        };
-        set(self.settings);
-        if let Some(game) = self.game.as_mut() {
-            set(&mut game.base);
-            set(&mut game.saved);
-        }
-        let before = self.saved.settings.clone();
-        set(&mut self.saved.settings);
-        let Some(path) = self.saved.file.clone() else { return Ok(()) };
-        let home = rust_dos::hostdirs::home_dir();
-        config::save(&path, &before, &self.saved.settings, &[], home.as_deref(), config::Saving::Changes)
-    }
-
-    /// The front end's part of closing the program: the pad mapper and
-    /// autoinput stop, the game ends and every key comes up. The settings
-    /// window's close and the debug server's reboot_shell both do this.
-    fn release_program(&mut self) {
-        if let Some(mut mapper) = self.padmap.take() {
-            mapper.release(&mut self.cpu.bus);
-        }
-        if let Some(mut input) = self.autoinput.take() {
-            input.stop(self.cpu);
-        }
-        if std::mem::take(self.autoinput_fast) {
-            self.pacer.set_fast_forward(false, &self.cpu.bus.clock, std::time::Instant::now());
-            self.cpu.bus.mixer.fast_forward = false;
-        }
-        if let Some(previous) = self.game.take() {
-            self.end_game(previous);
-        }
-        keyboard::release_all(&mut self.cpu.bus);
-    }
-
-    fn end_game(&mut self, game: ActiveGame) {
-        self.cpu.bus.log_string(&format!("[CONFIG] The game {} has ended", game.name));
-        self.achievements.game_ended();
-        self.cpu.bus.config_dir = config_dir(self.saved.file.as_deref());
-        if let Err(e) = self.apply(&game.base) {
-            config_warning(self.cpu, &e);
-        }
-        for e in games::restore_drives(self.cpu, game.replaced) {
-            config_warning(self.cpu, &e);
-        }
-    }
-}
-
-impl Host for MainHost<'_, '_> {
-    fn apply(&mut self, new: &Settings) -> Result<Option<String>, String> {
-        // Deterministic mode keeps the speed it has where the settings (a
-        // game's profile, the window) ask for auto or max.
-        let pinned;
-        let new = match new.cycles {
-            CpuSpeed::Auto(_) | CpuSpeed::Max if self.deterministic.is_some() => {
-                pinned = Settings { cycles: CpuSpeed::Fixed(self.cpu.bus.clock.cycles_per_ms()), ..new.clone() };
-                &pinned
-            }
-            _ => new,
-        };
-        let old = std::mem::replace(self.settings, new.clone());
-        let shown = |s: &Settings| (s.scale, s.fullscreen, s.aspect, s.filter, s.shader, s.crt, s.monochrome, s.voodoo.scale_shader);
-        if shown(new) != shown(&old) {
-            self.display.apply(new)?;
-        }
-        // The 3D scene opened, closed or changed (a scene file is read again
-        // once it is written again, an update downloaded in its place); the
-        // first of what it has to say is shown, unless the machine has more
-        // to say.
-        let mut vr_note = None;
-        if new.vr != old.vr || new.vr.scene.is_some() {
-            for note in self.display.apply_vr(&new.vr) {
-                self.cpu.bus.log_string(&note);
-                vr_note.get_or_insert_with(|| note.trim_start_matches("[VR] ").to_string());
-            }
-        }
-        if new.cycles != old.cycles {
-            self.pacer.set_speed(new.cycles);
-            // At max, the pacer tunes the speed from the current one, and
-            // at auto, it picks the speed at the end of the frame.
-            if let CpuSpeed::Fixed(n) = new.cycles {
-                self.cpu.bus.set_cycles_per_ms(n);
-            }
-        }
-        if new.core != old.core {
-            self.cpu.core = new.core;
-        }
-        self.cpu.set_fpu_fast(new.fpu_fast);
-        self.cpu.bus.observe.enabled = new.idle_skip;
-        self.cpu.bus.idle_hint = new.idle_hint;
-        // Programs look for the host as they start.
-        self.cpu.bus.dpmi.enabled = new.dpmi;
-        // Glide's DOS overlay, once downloaded.
-        rust_dos::voodoo::overlay::provide(&mut self.cpu.bus);
-        self.cpu.bus.ide_hard_disks = new.ide_hard_disks;
-        self.cpu.bus.boot_cdrom = new.boot_cdrom;
-        self.cpu.bus.floppy_controller = new.floppy_controller;
-        if new.dos_version != old.dos_version {
-            rust_dos::dos_data::set_version(&mut self.cpu.bus, new.dos_version);
-        }
-        if new.disk != old.disk {
-            self.cpu.bus.set_disk_settings(new.disk);
-        }
-        if new.mixer != old.mixer {
-            self.cpu.bus.set_mixer(new.mixer);
-        }
-        if new.audio_buffer != old.audio_buffer
-            && let Some(device) = &mut self.cpu.bus.audio_device
-        {
-            device.set_buffer(new.audio_buffer)?;
-        }
-        if new.joystick != old.joystick {
-            self.cpu.bus.set_joystick(new.joystick);
-        }
-        if new.composite != old.composite {
-            self.cpu.bus.vga.set_composite(new.composite);
-        }
-        if new.keyboard_layout != old.keyboard_layout {
-            apply_keyboard_layout(self.cpu, new.keyboard_layout);
-        }
-        if new.achievements != old.achievements {
-            self.achievements.apply(&new.achievements);
-        }
-        if new.shell != old.shell {
-            rust_dos::cmdline::configure(self.cpu, &new.shell);
-        }
-        if !self.machine.differs(new) {
-            return Ok(vr_note);
-        }
-        if !self.cpu.shell_idle() {
-            return Ok(Some(config_ui::pending_note(self.machine.video, new).to_string()));
-        }
-        match self.machine.apply(self.cpu, new).into_iter().next() {
-            Some(problem) => Err(problem),
-            None => Ok(None),
-        }
-    }
-
-    fn mount(&mut self, spec: MountSpec, replace: bool) -> Result<PathBuf, String> {
-        self.cpu.bus.log_string(&format!(
-            "[CONFIG] Settings window: mount {} {}",
-            disk::drive_name(spec.drive),
-            spec.path.display()
-        ));
-        self.cpu.bus.mount_drive(spec.drive, &spec.path, spec.opts, replace)
-    }
-
-    fn unmount(&mut self, drive: u8) -> Result<(), String> {
-        self.cpu.bus.unmount_drive(drive)
-    }
-
-    fn drives(&self) -> Vec<DriveInfo> {
-        self.cpu.bus.disk.all_drives()
-    }
-
-    fn booted(&self) -> Option<config_ui::BootView> {
-        let bus = &self.cpu.bus;
-        bus.boot.as_ref()?;
-        let shared =
-            bus.disk.shared_drives().into_iter().filter_map(|d| Some((d, rust_dos::boot::drive_unit(bus, d)?))).collect();
-        Some(config_ui::BootView { cd_drive: bus.booted_cd_drive(), shared })
-    }
-
-    fn reset_machine(&mut self) {
-        self.cpu.bus.reset_requested = true;
-    }
-
-    fn copy_text(&mut self, text: &str) -> Result<(), String> {
-        self.clipboard.set_clipboard_text(text)
-    }
-
-    fn sync_shared(&mut self, drive: u8) -> Result<String, String> {
-        self.cpu.bus.sync_shared(Some(drive)).into_iter().next().ok_or_else(|| "Nothing is shared".to_string())
-    }
-
-    fn reinsert(&mut self, drive: u8) -> Result<String, String> {
-        self.cpu.bus.reinsert_cd(drive)
-    }
-
-    fn center_vr(&mut self) -> Result<String, String> {
-        if !self.display.has_headset() {
-            return Err("No VR headset shows the scene".to_string());
-        }
-        self.display.recenter();
-        Ok("View centered where your head is".to_string())
-    }
-
-    fn mark_vr_keyboard(&mut self) -> Result<String, String> {
-        if !self.display.mark_vr_keyboard() {
-            return Err("No VR headset shows the scene".to_string());
-        }
-        Ok("In the headset: hold the trigger along the keyboard's front edge, then click at its back edge (grip cancels)".to_string())
-    }
-
-    fn boot(&mut self, drive: u8) -> Result<String, String> {
-        self.cpu.bus.log_string(&format!("[CONFIG] Settings window: boot {}", disk::drive_name(drive)));
-        rust_dos::boot::boot_drive(self.cpu, drive)?;
-        Ok(format!("Booting from drive {}", disk::drive_name(drive)))
-    }
-
-    fn set_boot(&mut self, drive: u8, boot: bool) -> Result<(), String> {
-        self.cpu.bus.disk.set_boots(drive, boot);
-        Ok(())
-    }
-
-    fn save(&mut self, settings: &Settings) -> Result<(), String> {
-        // While a game plays, into its profile.
-        if let Some(game) = self.game.as_mut() {
-            let dir = games_dir(self.saved.file.as_deref()).ok_or("No configuration file")?;
-            let path = dir.join(format!("{}.conf", game.id));
-            config::save(&path, &game.saved, settings, &[], rust_dos::hostdirs::home_dir().as_deref(), config::Saving::Changes)?;
-            game.saved = settings.clone();
-            return Ok(());
-        }
-        save_config(self.cpu, self.saved, settings)
-    }
-
-    fn autoexec(&self) -> Result<Vec<String>, String> {
-        config::load_autoexec(&self.config_path()?)
-    }
-
-    fn save_autoexec(&mut self, lines: &[String]) -> Result<(), String> {
-        let path = self.config_path()?;
-        config::save_autoexec(&path, lines)?;
-        self.cpu.bus.log_string(&format!("[CONFIG] Saved the [autoexec] commands to {}", path.display()));
-        Ok(())
-    }
-
-    fn lan(&self) -> Option<rust_dos::net::LanView> {
-        Some(self.cpu.bus.net.view())
-    }
-
-    fn browse_rooms(&mut self, relay: Option<&str>, filter: &str) -> Result<(), String> {
-        self.cpu.bus.net.browse(relay, filter)
-    }
-
-    fn join_room(&mut self, relay: Option<&str>, room: &str, password: &str) -> Result<(), String> {
-        // As LAN JOIN does, for the games started next.
-        self.cpu.bus.install_ipx();
-        self.cpu.bus.net.join(relay, room, password)
-    }
-
-    fn leave_room(&mut self) {
-        self.cpu.bus.net.leave();
-    }
-
-    fn disband_room(&mut self) {
-        self.cpu.bus.net.disband();
-    }
-
-    fn host_room(&mut self, room: &str, password: &str) -> Result<(), String> {
-        self.cpu.bus.install_ipx();
-        self.cpu.bus.net.make_room(room, password)
-    }
-
-    fn games(&self) -> Vec<GameEntry> {
-        games_dir(self.saved.file.as_deref()).map_or_else(Vec::new, |dir| games::list(&dir).into_iter().map(|(e, _)| e).collect())
-    }
-
-    fn active_game(&self) -> Option<String> {
-        self.game.as_ref().map(|g| g.id.clone())
-    }
-
-    fn program_running(&self) -> bool {
-        !self.cpu.shell_idle() || self.cpu.batch.is_active() || self.cpu.shell_wait.is_some()
-    }
-
-    fn close_program(&mut self) {
-        self.release_program();
-        self.cpu.close_program();
-        self.cpu.load_shell();
-    }
-
-    fn launch_game(&mut self, id: &str) -> Result<String, String> {
-        // The window asks whether to close the program running first.
-        if self.program_running() {
-            *self.confirm_launch = Some(id.to_string());
-            return Ok("Choose whether to close the running program".to_string());
-        }
-        let (text, dir) = self.game_profile(id)?;
-        // One with launch configurations: the window offers them.
-        if let Some(choices) = games::launch_choices(&dir, &text) {
-            *self.choose = Some(id.to_string());
-            return Ok(format!("Choose how to start {}", choices.name));
-        }
-        self.start_game(id, &text, &dir)
-    }
-
-    fn game_pad(&self, id: &str) -> Vec<(String, String)> {
-        let Ok((text, dir)) = self.game_profile(id) else { return Vec::new() };
-        let lines = rust_dos::config::parse(&text, &dir, None).game_pad;
-        rust_dos::padmap::PadMapping::parse(&lines).0.map(|m| m.labels()).unwrap_or_default()
-    }
-
-    fn launch_choices(&self, id: &str) -> Option<games::LaunchChoices> {
-        let (text, dir) = self.game_profile(id).ok()?;
-        games::launch_choices(&dir, &text)
-    }
-
-    fn launch_variant(&mut self, id: &str, variant: Option<&str>, tool: bool) -> Result<String, String> {
-        let (text, dir) = self.game_profile(id)?;
-        let text = match variant {
-            Some(variant) => games::variant_profile(&dir, &text, variant)?,
-            None => text,
-        };
-        let message = self.start_game(id, &text, &dir)?;
-        if let Some(game) = self.game.as_mut() {
-            game.choose_after = tool;
-        }
-        Ok(message)
-    }
-
-    fn create_game(&mut self, new: &NewGame, settings: &Settings) -> Result<String, String> {
-        let dir = games_dir(self.saved.file.as_deref())
-            .ok_or("Game profiles go beside the configuration file, and there is none (--no-config)")?;
-        let taken: Vec<String> = games::list(&dir).into_iter().map(|(e, _)| e.id).collect();
-        let id = games::slug(&new.name, &taken);
-        let base = self.game.as_ref().map_or(&self.saved.settings, |g| &g.base);
-        let drives = drive_changes(self.cpu, self.saved);
-        let text = games::profile_text(new, base, settings, &drives, rust_dos::hostdirs::home_dir().as_deref())?;
-        let path = dir.join(format!("{}.conf", id));
-        std::fs::create_dir_all(&dir)
-            .and_then(|()| std::fs::write(&path, text))
-            .map_err(|e| format!("cannot write {}: {}", path.display(), e))?;
-        self.cpu.bus.log_string(&format!("[CONFIG] Made the game profile {}", path.display()));
-        Ok(id)
-    }
-
-    fn delete_game(&mut self, id: &str) -> Result<(), String> {
-        let dir = games_dir(self.saved.file.as_deref()).ok_or("There is no games folder")?;
-        let path = dir.join(format!("{}.conf", id));
-        std::fs::remove_file(&path).map_err(|e| format!("cannot delete {}: {}", path.display(), e))
-    }
-
-    fn reset_game(&mut self, id: &str) -> Result<(), String> {
-        if self.game.as_ref().is_some_and(|g| g.id == id) {
-            return Err("The game is running: reset it once it has ended".to_string());
-        }
-        let dir = games_dir(self.saved.file.as_deref()).ok_or("There is no games folder")?;
-        games::reset(&games::saves_dir(&dir), id)
-    }
-
-    fn import_game(&mut self, source: &std::path::Path) -> Result<(String, String), String> {
-        let dir = games_dir(self.saved.file.as_deref())
-            .ok_or("Game profiles go beside the configuration file, and there is none (--no-config)")?;
-        let (id, name, warnings) = games::import(&dir, source, rust_dos::hostdirs::home_dir().as_deref())?;
-        for warning in &warnings {
-            self.cpu.bus.log_string(&format!("[CONFIG] Import of {}: {}", name, warning));
-        }
-        let message = match warnings.len() {
-            0 => format!("{} is imported: Enter launches it", name),
-            n => format!("{} is imported; {} settings didn't come across (see the log)", name, n),
-        };
-        Ok((id, message))
-    }
-
-    fn current_directory(&self) -> String {
-        games::prompt_directory(self.cpu)
-    }
-
-    fn memory(&self) -> &[u8] {
-        self.cpu.bus.ram()
-    }
-
-    fn cheats_allowed(&self) -> Result<(), String> {
-        if self.achievements.hardcore_active() {
-            return Err("Hardcore mode: no cheats while RetroAchievements plays".to_string());
-        }
-        Ok(())
-    }
-
-    fn achievements(&self) -> Option<rust_dos::achievements::AchievementsView> {
-        Some(self.achievements.view())
-    }
-
-    fn achievements_login(&mut self, username: &str, password: &str) -> Result<(), String> {
-        self.achievements.login(username, password);
-        Ok(())
-    }
-
-    fn achievements_logout(&mut self) {
-        self.achievements.logout();
-    }
-
-    fn identify_game(&mut self, archive: &std::path::Path) -> Result<String, String> {
-        let Some(game) = self.game.as_ref() else {
-            return Err("Launch the game from its profile first (the Games page)".to_string());
-        };
-        let hash = rust_dos::achievements::hash::hash_archive(archive)?;
-        let dir = games_dir(self.saved.file.as_deref()).ok_or("There is no games folder")?;
-        let path = dir.join(format!("{}.conf", game.id));
-        let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {}", path.display(), e))?;
-        std::fs::write(&path, games::set_achievements(&text, &hash)).map_err(|e| format!("{}: {}", path.display(), e))?;
-        let name = game.name.clone();
-        self.achievements.game_started(Some(hash.clone()), &name);
-        Ok(format!("{} is known by {} now (hash {})", name, archive.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned()), hash))
-    }
-
-    fn manuals(&self, id: &str) -> Vec<rust_dos::manuals::Manual> {
-        let Some(dir) = games_dir(self.saved.file.as_deref()) else { return Vec::new() };
-        let text = std::fs::read_to_string(dir.join(format!("{}.conf", id))).unwrap_or_default();
-        games::manuals(&dir, id, &text, rust_dos::hostdirs::home_dir().as_deref())
-    }
-
-    fn add_manual(&mut self, id: &str, path: &std::path::Path) -> Result<(), String> {
-        let dir = games_dir(self.saved.file.as_deref()).ok_or("There is no games folder")?;
-        games::add_manual_file(&dir, id, path, rust_dos::hostdirs::home_dir().as_deref())
-    }
-
-    fn poke(&mut self, addr: usize, bytes: &[u8]) {
-        for (i, &byte) in bytes.iter().enumerate() {
-            self.cpu.bus.write_8(addr + i, byte);
-        }
-    }
-
-    fn freezes(&self) -> Vec<rust_dos::cheats::Freeze> {
-        self.cpu.bus.freezes.clone()
-    }
-
-    fn set_freezes(&mut self, freezes: Vec<rust_dos::cheats::Freeze>) {
-        self.cpu.bus.freezes = freezes;
-        self.cpu.bus.apply_freezes();
-    }
-
-    fn states_available(&self) -> bool {
-        self.states.is_some()
-    }
-
-    fn states(&self) -> Vec<config_ui::SlotView> {
-        let Ok(dir) = self.slot_dir() else { return Vec::new() };
-        slots::list(&dir)
-            .into_iter()
-            .map(|(slot, header, picture)| config_ui::SlotView {
-                slot,
-                header: Some(header),
-                picture: capture::png::decode(&picture),
-            })
-            .collect()
-    }
-
-    fn current_slot(&self) -> u8 {
-        *self.slot
-    }
-
-    fn save_state(&mut self, slot: u8) -> Result<String, String> {
-        let path = slots::slot_path(&self.slot_dir()?, slot);
-        self.save_file(&path, false)?;
-        *self.slot = slot;
-        Ok(format!("Saved to slot {}", slot))
-    }
-
-    fn load_state(&mut self, slot: u8) -> Result<String, String> {
-        let header = self.load_slot(slot)?;
-        *self.slot = slot;
-        Ok(format!("Loaded slot {}: {}", slot, describe_state(&header)))
-    }
-
-    fn delete_state(&mut self, slot: u8) -> Result<(), String> {
-        let path = slots::slot_path(&self.slot_dir()?, slot);
-        savestate::disks::delete_copies(&path);
-        std::fs::remove_file(&path).map_err(|e| format!("{}: {}", path.display(), e))
-    }
-}
-
-/// The settings window's key for a key press, if it takes it. Characters
-/// come from text input, which follows the keyboard layout.
-fn ui_key(keycode: Keycode, keymod: Mod) -> Option<UiKey> {
-    let shift = keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD);
-    let ctrl = keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD) && !keymod.intersects(Mod::LALTMOD | Mod::RALTMOD);
-    Some(match keycode {
-        Keycode::Up => UiKey::Up,
-        Keycode::Down => UiKey::Down,
-        Keycode::Left => UiKey::Left,
-        Keycode::Right => UiKey::Right,
-        Keycode::PageUp => UiKey::PageUp,
-        Keycode::PageDown => UiKey::PageDown,
-        Keycode::Home => UiKey::Home,
-        Keycode::End => UiKey::End,
-        Keycode::Return | Keycode::KpEnter => UiKey::Enter,
-        Keycode::Escape => UiKey::Esc,
-        Keycode::Tab if shift => UiKey::BackTab,
-        Keycode::Tab => UiKey::Tab,
-        Keycode::Backspace => UiKey::Backspace,
-        Keycode::Delete => UiKey::Delete,
-        Keycode::Insert => UiKey::Insert,
-        Keycode::F1 => UiKey::Help,
-        Keycode::F2 => UiKey::Save,
-        Keycode::F10 if !ctrl => UiKey::F10,
-        Keycode::S if ctrl => UiKey::Save,
-        _ => return None,
-    })
-}
-
-/// Let go of everything the machine holds as the settings window takes the
-/// keyboard and mouse: release the keys and buttons, so no game is left
-/// with Ctrl or a fire button held down.
-fn release_input(cpu: &mut Cpu, held: &mut HashMap<Scancode, (u8, bool)>) {
-    held.clear();
-    // Shift, Ctrl and Alt too; the lock states stay.
-    keyboard::release_all(&mut cpu.bus);
-    for button in 0..3 {
-        if cpu.bus.mouse.buttons & (1 << button) != 0 {
-            cpu.bus.mouse.button_up(button);
-        }
-    }
-}
-
-/// Caps Lock and Num Lock as the host's keyboard has them.
-/// The monitor coming on (`monitor_effects`): the picture warming up and
-/// degaussed, to the high voltage's crackle and the coil's thump.
-fn power_on(power: &mut video::power::PowerFx, bus: &mut rust_dos::bus::Bus, effects: video::power::MonitorEffects) {
-    use rust_dos::monitor_noise::Sound;
-    if effects.picture() {
-        power.trigger(video::power::Effect::PowerOn, std::time::Instant::now());
-    }
-    if effects.sound() {
-        bus.audio_catch_up();
-        bus.monitor_noise.play(Sound::Relay, 0);
-        bus.monitor_noise.play(Sound::Crackle, 60);
-        bus.monitor_noise.play(Sound::Degauss, 200);
-    }
-}
-
-/// The monitor syncing to another frequency: the picture blanks, the relay
-/// clicks.
-fn resync(power: &mut video::power::PowerFx, bus: &mut rust_dos::bus::Bus, effects: video::power::MonitorEffects) {
-    if effects.picture() {
-        power.trigger(video::power::Effect::Resync, std::time::Instant::now());
-    }
-    if effects.sound() {
-        bus.audio_catch_up();
-        bus.monitor_noise.play(rust_dos::monitor_noise::Sound::Relay, 0);
-    }
-}
-
-/// The monitor going off as rust-dos quits: `last`, the picture shown
-/// last, collapses to a dot, and the supply thunks, straight to the sound
-/// device, as the machine no longer runs.
-fn power_off(
-    power: &mut video::power::PowerFx,
-    display: &mut Display,
-    last: &video::Frame,
-    bus: &mut rust_dos::bus::Bus,
-    effects: video::power::MonitorEffects,
-) -> Result<(), String> {
-    use rust_dos::mixer::Channel;
-    let start = std::time::Instant::now();
-    if effects.sound() {
-        bus.monitor_noise.enabled = true;
-        bus.monitor_noise.play(rust_dos::monitor_noise::Sound::PowerOff, 0);
-        let gains = bus.mixer.gains();
-        let gain = gains[Channel::Monitor.index()] * gains[Channel::Master.index()];
-        let frames = bus.monitor_noise.take(rust_dos::opl::RATE as usize / 3);
-        let samples: Vec<i16> =
-            frames.iter().flat_map(|&s| [(s * gain).clamp(-32768.0, 32767.0) as i16; 2]).collect();
-        if let Some(device) = &mut bus.audio_device {
-            let _ = device.queue(&samples);
-        }
-    }
-    if !effects.picture() {
-        // The sound plays out before the device closes.
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        return Ok(());
-    }
-    power.trigger(video::power::Effect::PowerOff, start);
-    loop {
-        let now = std::time::Instant::now();
-        if !power.active(now) {
-            return Ok(());
-        }
-        if let Some(look) = power.look(now) {
-            let mut frame = last.clone();
-            video::power::apply(&mut frame, &look);
-            display.redraw();
-            display.present(&mut frame, None, None)?;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(15));
-    }
-}
-
-fn sync_locks(cpu: &mut Cpu, mods: Mod) {
-    // A booted system's BIOS keeps its own locks, from the keys.
-    if cpu.bus.boot.is_some() {
-        return;
-    }
-    let mut flags = cpu.bus.read_8(0x0417) & !0x60;
-    if mods.contains(Mod::CAPSMOD) {
-        flags |= 0x40;
-    }
-    if mods.contains(Mod::NUMMOD) {
-        flags |= 0x20;
-    }
-    cpu.bus.write_8(0x0417, flags);
-}
-
-/// The keyboard layout the machine types in: the setting's, or the host
-/// keyboard's for auto.
-fn apply_keyboard_layout(cpu: &mut Cpu, setting: rust_dos::keylayout::LayoutSetting) {
-    let layout = setting.layout(sdl_keys::detect_layout());
-    if !std::ptr::eq(cpu.bus.kbd.layout, layout) {
-        cpu.bus.log_string(&format!("[INPUT] Keyboard layout: {} ({})", layout.name, layout.code));
-        cpu.bus.kbd.layout = layout;
-    }
-}
-
-/// A configuration problem: shown on the terminal and written to the log.
-fn config_warning(cpu: &mut Cpu, msg: &str) {
-    eprintln!("[CONFIG] Warning: {}", msg);
-    cpu.bus.log_string(&format!("[CONFIG] Warning: {}", msg));
-}
-
-/// The note in the box above the first DOS prompt: the configuration
-/// file in use.
-fn banner_notes(config: &config::Config, no_config: bool) -> Vec<(String, String)> {
-    let file = match &config.source {
-        Some(path) => {
-            let path = mount::display_host_path(&std::path::absolute(path).unwrap_or_else(|_| path.clone()));
-            if config.created { format!("{} (new)", path) } else { path }
-        }
-        None if no_config => "none (--no-config)".to_string(),
-        None => "none".to_string(),
-    };
-    vec![("Config file: ".to_string(), file)]
-}
-
-/// Find and parse the configuration file (see config.rs for the lookup
-/// order). Problems in the file are reported but never stop the emulator;
-/// only a missing `--config` file does. The file used goes to the log once
-/// there is one (see `create_cpu`).
-fn load_config(args: &Args) -> Result<config::Config, String> {
-    if args.no_config {
-        return Ok(config::Config::default());
-    }
-    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    let config = config::load(
-        args.config.as_deref(),
-        &cwd,
-        config::exe_dir().as_deref(),
-        config::default_path(),
-        rust_dos::hostdirs::home_dir().as_deref(),
-    )?;
-    if config.created
-        && let Some(path) = &config.source
-    {
-        eprintln!("[CONFIG] Created default configuration file {}", path.display());
-    }
-    for warning in &config.warnings {
-        eprintln!("[CONFIG] Warning: {}", warning);
-    }
-    Ok(config)
-}
-
-/// Build the CPU with drive C: from `-d`, the config file or the working
-/// directory (in that order), then mount the config's other drives. Opens
-/// the log file.
-///
-/// The CPU is boxed: it is about 136 KB, and in a debug build every move of
-/// it gets its own copy in the frame of `main` and here. Unboxed, `main`'s
-/// frame was about 630 KB and startup overflowed Windows's 1 MB main thread stack.
-fn create_cpu(args: &Args, config: &config::Config, memory_mb: usize) -> Result<Box<Cpu>, String> {
-    use crate::disk::DRIVE_C;
-
-    let mut warnings = config.warnings.clone();
-    let mut warn = |msg: String| {
-        eprintln!("[CONFIG] Warning: {}", msg);
-        warnings.push(msg);
-    };
-
-    let config_c = config.drive(DRIVE_C);
-    let c_spec = match (&args.dir, config_c) {
-        (Some(_), Some(_)) => {
-            warn("-d/--dir overrides drive C: from the config file".to_string());
-            None
-        }
-        (None, Some(spec)) if !spec.path.is_dir() && !spec.path.is_file() => {
-            warn(format!(
-                "C: {} is not a directory or a disk image, using the current directory",
-                spec.path.display()
-            ));
-            None
-        }
-        (_, spec) => spec,
-    };
-    // A disk image goes in once C: is there.
-    let root_path = match (&args.dir, c_spec) {
-        (Some(dir), _) => std::path::PathBuf::from(dir),
-        (None, Some(spec)) if spec.path.is_dir() => spec.path.clone(),
-        _ => std::path::PathBuf::from("."),
-    };
-
-    let mut cpu = Box::new(Cpu::with_memory(root_path.clone(), memory_mb));
-    cpu.bus.log_file = open_log_file(args.log.as_deref())?;
-    cpu.shell_history.set_home(rust_dos::cmdline::default_history_file());
-    rust_dos::cmdline::configure(&mut cpu, &config.shell);
-    if let Some(spec) = c_spec {
-        // Remount C: to apply the config's drive type, label and -ro, or
-        // with its disk image.
-        if let Err(e) = cpu.bus.mount_drive(DRIVE_C, &spec.path, spec.opts.clone(), true) {
-            warn(format!("cannot set up drive C: {}", e));
-        }
-    }
-    for spec in config.drives.iter().filter(|s| s.drive != DRIVE_C) {
-        if let Err(e) = cpu.bus.mount_drive(spec.drive, &spec.path, spec.opts.clone(), false) {
-            warn(format!("cannot mount {}: {}", disk::drive_key(spec.drive), e));
-        }
-    }
-
-    if let Some(path) = &config.source {
-        let action = if config.created { "Created default" } else { "Using" };
-        cpu.bus
-            .log_string(&format!("[CONFIG] {} configuration file {}", action, path.display()));
-    }
-    for warning in &warnings {
-        cpu.bus.log_string(&format!("[CONFIG] Warning: {}", warning));
-    }
-    Ok(cpu)
-}
-
-/// Create the log file at `path` (`--log`), or in rust-dos's own directory
-/// (`config::user_dir`), replacing the previous run's. Without `--log` the
-/// emulator runs without a log file if it cannot create one. A `--log` file
-/// that cannot be created stops it, as a missing `--config` file does: a
-/// harness that asked for the log at that path would otherwise find none
-/// there, with only a warning on stderr to say why.
-fn open_log_file(path: Option<&std::path::Path>) -> Result<Option<rust_dos::log::LogFile>, String> {
-    if let Some(path) = path {
-        return rust_dos::log::LogFile::create(path)
-            .map(Some)
-            .map_err(|e| format!("cannot create the log file {} (--log): {}", path.display(), e));
-    }
-    let Some(path) = rust_dos::log::default_path() else {
-        return Ok(None);
-    };
-    match rust_dos::log::LogFile::create(&path) {
-        Ok(log) => Ok(Some(log)),
-        Err(e) => {
-            eprintln!("Warning: cannot create the log file {}: {}", path.display(), e);
-            Ok(None)
-        }
-    }
-}
-
-/// A game controller's sticks and buttons, as the game port takes them.
-/// All of a controller's inputs, for a game's gamepad mapping (padmap.rs).
-fn pad_snapshot(pad: &sdl2::controller::GameController) -> rust_dos::padmap::PadSnapshot {
-    use sdl2::controller::{Axis, Button};
-    let axis = |axis| pad.axis(axis) as f32 / 32767.0;
-    // In the order of padmap::INPUTS.
-    let order = [
-        Button::DPadUp,
-        Button::DPadDown,
-        Button::DPadLeft,
-        Button::DPadRight,
-        Button::A,
-        Button::B,
-        Button::X,
-        Button::Y,
-        Button::LeftShoulder,
-        Button::RightShoulder,
-    ];
-    let mut buttons = order.iter().enumerate().filter(|(_, b)| pad.button(**b)).fold(0u32, |bits, (i, _)| bits | 1 << i);
-    // L2 and R2 are axes here; L3, R3, Select and Start after them.
-    for (i, button) in [(12, Button::LeftStick), (13, Button::RightStick), (14, Button::Back), (15, Button::Start)] {
-        if pad.button(button) {
-            buttons |= 1 << i;
-        }
-    }
-    rust_dos::padmap::PadSnapshot {
-        buttons,
-        axes: [axis(Axis::LeftX), axis(Axis::LeftY), axis(Axis::RightX), axis(Axis::RightY)],
-        triggers: [axis(Axis::TriggerLeft), axis(Axis::TriggerRight)],
-    }
-}
-
-fn pad_state(pad: &sdl2::controller::GameController) -> joystick::PadState {
-    use sdl2::controller::{Axis, Button};
-    let axis = |axis| pad.axis(axis) as f32 / 32767.0;
-    let buttons = [
-        (Button::A, joystick::PAD_A),
-        (Button::B, joystick::PAD_B),
-        (Button::X, joystick::PAD_X),
-        (Button::Y, joystick::PAD_Y),
-        (Button::DPadUp, joystick::PAD_UP),
-        (Button::DPadDown, joystick::PAD_DOWN),
-        (Button::DPadLeft, joystick::PAD_LEFT),
-        (Button::DPadRight, joystick::PAD_RIGHT),
-    ]
-    .into_iter()
-    .filter(|&(button, _)| pad.button(button))
-    .fold(0, |bits, (_, bit)| bits | bit);
-    joystick::PadState {
-        axes: [axis(Axis::LeftX), axis(Axis::LeftY), axis(Axis::RightX), axis(Axis::RightY)],
-        buttons,
-    }
-}
-
-fn sdl_button_to_index(button: MouseButton) -> Option<usize> {
-    match button {
-        MouseButton::Left => Some(0),
-        MouseButton::Right => Some(1),
-        MouseButton::Middle => Some(2),
-        _ => None,
-    }
-}
-
-/// What the mouse captured says, with how to let it go.
-const CAPTURED: &str = "Mouse captured (Ctrl+Alt releases)";
-
-/// The host's key as Ctrl+Alt sees it.
-fn chord_key(scancode: Option<Scancode>) -> rust_dos::mouse_capture::ChordKey {
-    use rust_dos::mouse_capture::ChordKey;
-    match scancode {
-        Some(Scancode::LCtrl) => ChordKey::LeftCtrl,
-        Some(Scancode::RCtrl) => ChordKey::RightCtrl,
-        Some(Scancode::LAlt) => ChordKey::LeftAlt,
-        Some(Scancode::RAlt) => ChordKey::RightAlt,
-        _ => ChordKey::Other,
     }
 }
 

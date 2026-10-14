@@ -215,7 +215,7 @@ impl Machine {
         cpu.bus.set_cycles_per_ms(settings.cycles.initial_cycles());
         let blank = Frame::new(video::SCREEN_WIDTH, video::SCREEN_HEIGHT);
         Machine {
-            pacer: Pacer::new(settings.cycles, Instant::now()),
+            pacer: Pacer::new(settings.cycles, settings.auto_fps, Instant::now()),
             cpu,
             hardware: Hardware::of(&settings),
             saved: Saved { text: text.to_string(), settings: settings.clone() },
@@ -326,7 +326,7 @@ impl Machine {
             ],
         };
         self.cpu.start_dos();
-        self.pacer = Pacer::new(self.settings.cycles, Instant::now());
+        self.pacer = Pacer::new(self.settings.cycles, self.settings.auto_fps, Instant::now());
     }
 
     /// Type `line` at the DOS prompt, once the shell is back there.
@@ -1225,6 +1225,9 @@ impl Host for PageHost<'_> {
             if let CpuSpeed::Fixed(n) = new.cycles {
                 self.cpu.bus.set_cycles_per_ms(n);
             }
+        }
+        if new.auto_fps != old.auto_fps {
+            self.pacer.set_auto_fps(new.auto_fps);
         }
         if new.core != old.core {
             self.cpu.core = new.core;

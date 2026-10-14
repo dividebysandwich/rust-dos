@@ -9,7 +9,7 @@
 use std::time::{Duration, Instant};
 
 /// How long the button is held.
-pub const HOLD: Duration = Duration::from_secs(3);
+pub const HOLD: Duration = Duration::from_millis(1500);
 /// How far the mouse may get from where the press began, on either axis:
 /// window pixels, or the captured mouse's motion.
 const TRAVEL: i32 = 24;

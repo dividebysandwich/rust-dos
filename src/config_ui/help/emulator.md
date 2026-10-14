@@ -23,6 +23,21 @@ game runs too fast or too slow at auto, give it a number.
 > while a game runs, from the speed it has. At auto, they change to a
 > fixed speed.
 
+# Auto speed target {#auto-fps}
+
+The frame rate auto speed aims for, at most. **auto**, the default,
+aims for the display's refresh rate (70 for most VGA games): frames
+faster than that are never seen.
+
+A number gives games only enough speed for that many frames a second.
+A lower one, such as **30**, saves your computer's power where a game
+would draw 70 frames a second if it could, or stops one that plays too
+fast at high frame rates. A higher one, such as **120**, lets a game
+that draws frames it doesn't show go faster. Games that cap their own
+frame rate below it stay where they are.
+
+Shown only while the CPU speed is auto.
+
 # CPU core {#core}
 
 What runs the games' code:
@@ -352,7 +367,7 @@ message on the top of the screen. While helpful for new users, turning it
 
 # Hold right button for settings {#mouse-menu-hold}
 
-When **on** (the default), holding the right mouse button for **3
+When **on** (the default), holding the right mouse button for **1.5
 seconds** without moving the mouse opens this settings window, for
 setups with no keyboard or no F12 key, such as a TV with a remote. The
 program still sees the press, and a release as the window opens. Moving
