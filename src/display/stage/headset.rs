@@ -234,6 +234,10 @@ struct State {
     /// The game's manuals, for the booklet, once the thread takes them.
     manuals: Option<Vec<std::path::PathBuf>>,
     recenter: bool,
+    /// Where the scene's camera saves its pictures, and the cameras the
+    /// window clicked to take one.
+    capture_dir: Option<std::path::PathBuf>,
+    shots: Vec<usize>,
     /// Where the cameras show the real keyboard, and whether it is to be
     /// marked with a controller.
     keyboard: VrKeyboard,
@@ -422,6 +426,15 @@ impl Headset {
         self.shared.lock().recenter = true;
     }
 
+    pub fn set_capture_dir(&self, dir: std::path::PathBuf) {
+        self.shared.lock().capture_dir = Some(dir);
+    }
+
+    /// Take camera `camera`'s picture (clicked in the window's mirror).
+    pub fn take_picture(&self, camera: usize) {
+        self.shared.lock().shots.push(camera);
+    }
+
     pub fn set_keyboard(&self, keyboard: VrKeyboard) {
         self.shared.lock().keyboard = keyboard;
     }
@@ -577,7 +590,7 @@ fn run(
 
 /// The headset's session, until it ends or the main thread stops it.
 fn session(
-    shared: &Shared,
+    shared: &Arc<Shared>,
     gl: &glow::Context,
     glsl: Glsl,
     mut scene: Arc<Scene>,
@@ -791,11 +804,24 @@ fn session(
         let busy = if keyboard.marking() { [true; 2] } else { held.busy };
         let targets = props.targets(&scene);
         let (mut input, mut extras, hold, clicked) = controllers.update(mode, &tracking, busy, &scene.screen, &targets, now);
+        let (mut shots, folder) = {
+            let mut state = shared.lock();
+            (std::mem::take(&mut state.shots), state.capture_dir.clone())
+        };
+        shots.extend(&held.shots);
         for id in held.touched.iter().copied().chain(clicked) {
             match id {
                 TargetId::Lamp(i) => room.toggle_lamp(i),
-                TargetId::Camera(_) => {}
+                TargetId::Camera(i) => shots.push(i),
             }
+        }
+        let picture = screen.map(|i| screens[i]);
+        for camera in shots {
+            let said = {
+                let shared = shared.clone();
+                move |note: String| shared.note(note)
+            };
+            super::photo::take(gl, &mut gpu, &scene, &mut props, room, camera, picture, leds, folder.clone(), said, now);
         }
         extras.extend(marks);
         if held.pad.is_some() {
@@ -805,7 +831,6 @@ fn session(
             xr.recenter();
         }
         let prop_draws = props.draws(gl, &gpu, &scene, now);
-        let picture = screen.map(|i| screens[i]);
         let mut left = None;
         let drawn = xr.draw(gl, world, |target, views| {
             let format = Format { size: target.size, srgb: target.srgb };

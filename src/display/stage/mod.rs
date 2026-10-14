@@ -21,6 +21,7 @@ mod gi;
 mod headset;
 #[cfg(xr)]
 mod keyboard;
+mod photo;
 mod pick;
 mod props;
 mod render;
@@ -97,6 +98,11 @@ pub struct Stage {
     /// The lamps, the time of day and the weather, which the headset's
     /// thread and the sound share.
     world: Arc<World>,
+    /// Where the camera's pictures go, the cameras clicked to take one,
+    /// and what the threads saving them said.
+    capture_dir: Option<PathBuf>,
+    shots: Vec<usize>,
+    photo_notes: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 /// How the window's view is drawn, as `look` says: timed with
@@ -213,6 +219,9 @@ impl Stage {
             manuals: Vec::new(),
             fresh_manuals: false,
             world,
+            capture_dir: None,
+            shots: Vec::new(),
+            photo_notes: Default::default(),
         };
         if settings.mode == VrMode::Headset {
             notes.extend(stage.start_headset(settings, window, main));
@@ -234,6 +243,9 @@ impl Stage {
             match headset::Headset::start(window, main, self.glsl, self.scene.clone(), textures, settings, self.world.clone()) {
                 Ok(headset) => {
                     headset.set_manuals(self.manuals.clone());
+                    if let Some(dir) = &self.capture_dir {
+                        headset.set_capture_dir(dir.clone());
+                    }
                     self.headset = Some(headset);
                     None
                 }
@@ -334,7 +346,13 @@ impl Stage {
         if std::mem::take(&mut self.fresh_manuals) {
             self.props.set_manuals(gl, self.manuals.clone());
         }
-        let props = self.props.draws(gl, &self.gpu, &self.scene, std::time::Instant::now());
+        for camera in std::mem::take(&mut self.shots) {
+            let notes = self.photo_notes.clone();
+            let said = move |note: String| notes.lock().unwrap_or_else(|e| e.into_inner()).push(note);
+            let dir = self.capture_dir.clone();
+            photo::take(gl, &mut self.gpu, &self.scene, &mut self.props, &self.world, camera, screen, self.leds, dir, said, now);
+        }
+        let props = self.props.draws(gl, &self.gpu, &self.scene, now);
         if let Err(e) = self.gpu.render(gl, &self.scene, &[view], Dest::Own(format), drawable, screen, self.leds, &props, &[], Punch::None) {
             eprintln!("[VR] {}", e);
             clear_window(gl, drawable);
@@ -380,11 +398,30 @@ impl Stage {
         }
     }
 
-    /// Do what clicking `id` does.
+    /// Do what clicking `id` does: switch a lamp, or take a camera's
+    /// picture (in the headset, while it shows the scene).
     fn act(&mut self, id: pick::TargetId) {
         match id {
             pick::TargetId::Lamp(i) => self.world.toggle_lamp(i),
-            pick::TargetId::Camera(_) => {}
+            pick::TargetId::Camera(i) => {
+                #[cfg(xr)]
+                if let Some(headset) = self.headset.as_ref().filter(|h| h.running()) {
+                    headset.take_picture(i);
+                    return;
+                }
+                self.shots.push(i);
+            }
+        }
+    }
+
+    /// Where the camera's pictures go.
+    pub fn set_capture_dir(&mut self, dir: &std::path::Path) {
+        if self.capture_dir.as_deref() != Some(dir) {
+            self.capture_dir = Some(dir.to_path_buf());
+            #[cfg(xr)]
+            if let Some(headset) = &self.headset {
+                headset.set_capture_dir(dir.to_path_buf());
+            }
         }
     }
 
@@ -436,6 +473,7 @@ impl Stage {
     /// the one shown, with `gl` current.
     pub fn poll(&mut self, gl: &glow::Context) -> Vec<String> {
         let mut notes = self.poll_scene(gl);
+        notes.append(&mut self.photo_notes.lock().unwrap_or_else(|e| e.into_inner()));
         #[cfg(xr)]
         if let Some(headset) = &self.headset {
             let (said, ended) = headset.poll();

@@ -27,8 +27,8 @@ pub struct Ambience {
     /// Seconds since the room was first shown, for what moves by itself
     /// (rain, snow); wrapped every hour.
     pub seconds: f32,
-    /// A camera's flash: where, and how bright (0 to 1).
-    pub flash: Option<(Vec3, f32)>,
+    /// A camera's flash: where, which way, and how bright (0 to 1).
+    pub flash: Option<(Vec3, Vec3, f32)>,
 }
 
 impl Ambience {
@@ -141,7 +141,7 @@ struct State {
     /// last switched.
     scene: u64,
     lamps: Vec<(bool, Option<Instant>)>,
-    flash: Option<(Instant, Vec3)>,
+    flash: Option<(Instant, Vec3, Vec3)>,
     /// How much it rains or snows, easing towards the weather's.
     weather: Weather,
     eased: Instant,
@@ -217,10 +217,10 @@ impl World {
         }
     }
 
-    /// A camera flashed at `at`.
-    pub fn flash(&self, at: Vec3) {
+    /// A camera flashed at `at`, towards `ahead`.
+    pub fn flash(&self, at: Vec3, ahead: Vec3) {
         let mut state = self.lock();
-        state.flash = Some((Instant::now(), at));
+        state.flash = Some((Instant::now(), at, ahead));
         state.effects.push(Effect::Shutter);
     }
 
@@ -251,6 +251,7 @@ impl World {
     }
 
     /// The time of day at `now`, in hours from midnight.
+    #[cfg(test)]
     pub fn hours(&self, now: Instant) -> f64 {
         hours_at(&self.lock(), now)
     }
@@ -284,9 +285,9 @@ impl World {
                 if on { t } else { 1.0 - t }
             })
             .collect();
-        let flash = state.flash.and_then(|(at, place)| {
+        let flash = state.flash.and_then(|(at, place, ahead)| {
             let t = now.saturating_duration_since(at);
-            (t < FLASH).then(|| (place, 1.0 - t.as_secs_f32() / FLASH.as_secs_f32()))
+            (t < FLASH).then(|| (place, ahead, 1.0 - t.as_secs_f32() / FLASH.as_secs_f32()))
         });
         Ambience { sky: look, lamps, weather, seconds: (clock % 3600.0) as f32, flash }
     }

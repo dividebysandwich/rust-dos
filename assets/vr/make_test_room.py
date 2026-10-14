@@ -133,6 +133,11 @@ What Rust-DOS looks for, by object name:
   manual, joystick        where the game's manual and the joystick stand, to
                           be picked up in VR (their +Y away from you); empties
                           get Rust-DOS's models, or put your own meshes below
+  camera                  a polaroid camera, its lens along its +Y (or a child
+                          empty camera_lens's), its pictures out of camera_slot
+  rustdos_lamp            on a node: a lamp, its lights and glowing meshes
+                          below it switched on and off with a click
+  rustdos_prop "item"     on a node: something to move about in VR
 
 Export: File > Export > glTF 2.0
   Format: glTF Binary (.glb)
@@ -238,6 +243,9 @@ def build():
     # joystick: empties, so Rust-DOS's own models stand there.
     empty("manual", from_gltf(-0.28, top_y, -0.47), markers, kind="ARROWS", size=0.1)
     empty("joystick", from_gltf(0.3, top_y, -0.45), markers, kind="ARROWS", size=0.1)
+    # And a polaroid camera, its lens (Blender's +Y) turned to the viewer.
+    camera = empty("camera", from_gltf(-0.5, top_y, -0.72), markers, kind="ARROWS", size=0.1)
+    camera.rotation_euler = (0.0, 0.0, math.pi)
 
     # Where the eyes start (1.2 m up, looking at the screen along +Y), and
     # where the sound comes from: the screen's sides, as without them.

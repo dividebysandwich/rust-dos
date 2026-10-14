@@ -418,7 +418,8 @@ void main() {
                 l = -u_light_dir[i];
             } else {
                 vec3 to = u_light_pos[i].xyz - v_world;
-                float d2 = max(dot(to, to), 1e-4);
+                // (No brighter than from a few centimetres.)
+                float d2 = max(dot(to, to), 2.5e-3);
                 dist = sqrt(d2);
                 l = to / dist;
                 att = 1.0 / d2;

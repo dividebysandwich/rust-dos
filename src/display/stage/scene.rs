@@ -282,12 +282,14 @@ impl Spawn {
     }
 }
 
-/// Something to pick up (see `props`): the game's manual, a joystick, or
-/// anything else of the scene's that is only moved about (`item`).
+/// Something to pick up (see `props`): the game's manual, a joystick, a
+/// polaroid camera, or anything else of the scene's that is only moved
+/// about (`item`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PropKind {
     Manual,
     Joystick,
+    Camera,
     Item,
 }
 
@@ -299,6 +301,7 @@ impl PropKind {
         match name.split('.').next().unwrap_or(&name) {
             "manual" => Some(PropKind::Manual),
             "joystick" => Some(PropKind::Joystick),
+            "camera" => Some(PropKind::Camera),
             "item" => Some(PropKind::Item),
             _ => None,
         }
@@ -352,11 +355,25 @@ pub struct Prop {
     /// The box around it in its frame (but the stick's): where a hand
     /// takes it.
     pub bounds: (Vec3, Vec3),
+    /// A camera's lens (looking along its -Z) and the slot its pictures
+    /// come out of (along its -Z, +Y the picture's up), in its frame.
+    pub lens: Option<Mat4>,
+    pub slot: Option<Mat4>,
 }
 
 impl Prop {
     fn new(kind: PropKind, pose: Mat4) -> Self {
-        Prop { kind, pose, parts: Vec::new(), stick: Mat4::IDENTITY, knob: Vec3::ZERO, hinge: Vec3::ZERO, bounds: (Vec3::ZERO, Vec3::ZERO) }
+        Prop {
+            kind,
+            pose,
+            parts: Vec::new(),
+            stick: Mat4::IDENTITY,
+            knob: Vec3::ZERO,
+            hinge: Vec3::ZERO,
+            bounds: (Vec3::ZERO, Vec3::ZERO),
+            lens: None,
+            slot: None,
+        }
     }
 
     fn push(&mut self, role: PartRole, mesh: Mesh) {
@@ -387,6 +404,14 @@ impl Prop {
         let thin = (Vec3::splat(THINNEST) - (high - low)).max(Vec3::ZERO);
         let across = Vec3::new(thin.x, 0.0, thin.z) / 2.0;
         self.bounds = (low - across, high + across + Vec3::Y * thin.y);
+        if self.kind == PropKind::Camera {
+            // Unless the scene says, the lens in the middle of its front
+            // (-Z), the slot low under it.
+            let (low, high) = self.bounds;
+            let front = Vec3::new((low.x + high.x) / 2.0, 0.0, low.z - 0.002);
+            self.lens.get_or_insert(Mat4::from_translation(front + Vec3::Y * (low.y + (high.y - low.y) * 0.6)));
+            self.slot.get_or_insert(Mat4::from_translation(front + Vec3::Y * (low.y + (high.y - low.y) * 0.12)));
+        }
         if let Some((a, b)) = self.bounds_of(|r| r == PartRole::PageRight)
             && !self.has(PartRole::SheetFront)
         {
@@ -463,7 +488,13 @@ const SCREEN_GLOW: f32 = 5.0;
 const TEST_DESK: Vec3 = Vec3::new(0.0, 0.72, -0.55);
 const TEST_DESK_TOP: Vec3 = Vec3::new(1.2, 0.03, 0.6);
 /// Where the manual and the joystick stand on it.
-const TEST_PROPS: [(PropKind, Vec3); 2] = [(PropKind::Manual, Vec3::new(-0.28, 0.72, -0.47)), (PropKind::Joystick, Vec3::new(0.3, 0.72, -0.45))];
+/// Where the manual, the joystick and the camera stand on it, and how far
+/// they are turned (the camera's lens to the viewer).
+const TEST_PROPS: [(PropKind, Vec3, f32); 3] = [
+    (PropKind::Manual, Vec3::new(-0.28, 0.72, -0.47), 0.0),
+    (PropKind::Joystick, Vec3::new(0.3, 0.72, -0.45), 0.0),
+    (PropKind::Camera, Vec3::new(-0.5, 0.72, -0.72), std::f32::consts::PI),
+];
 
 /// The sunset sky's sun: low, ahead and to the left.
 fn sunset_sun() -> Vec3 {
@@ -602,8 +633,8 @@ impl Scene {
         scene.ambient = ambient;
         scene.collect_screen();
         scene.speakers = scene.screen_speakers();
-        for (kind, at) in TEST_PROPS {
-            let prop = scene.built_in_prop(kind, Mat4::from_translation(at));
+        for (kind, at, yaw) in TEST_PROPS {
+            let prop = scene.built_in_prop(kind, Mat4::from_translation(at) * Mat4::from_rotation_y(yaw));
             scene.props.push(prop);
         }
         scene
@@ -645,6 +676,28 @@ impl Scene {
                 prop.push(PartRole::Stick, cylinder(Vec3::ZERO, 0.009, 0.13, 12, black));
                 prop.push(PartRole::Stick, cylinder(Vec3::new(0.0, 0.11, 0.0), 0.017, 0.04, 16, red));
             }
+            PropKind::Camera => {
+                // An instant camera: a box, its white front with a rainbow
+                // stripe, the lens, the viewfinder on top and a red button.
+                let body = self.add_material(Material::plain(srgb(0x2b3238), Shading::Lit));
+                let white = self.add_material(Material::plain(srgb(0xe8e6df), Shading::Lit));
+                let glass = self.add_material(Material::plain(srgb(0x0c0e12), Shading::Lit));
+                let red = self.add_material(Material::plain(srgb(0xc8231c), Shading::Lit));
+                let (w, h, d) = (0.11, 0.085, 0.1);
+                prop.push(PartRole::Body, cuboid(Vec3::new(0.0, h / 2.0, 0.0), Vec3::new(w, h, d), body));
+                prop.push(PartRole::Body, cuboid(Vec3::new(0.0, h * 0.42, -d / 2.0 - 0.003), Vec3::new(w, h * 0.84, 0.006), white));
+                for (i, hex) in [0xd9302c, 0xf2a71b, 0x3a9c4a, 0x2a6fb5].into_iter().enumerate() {
+                    let stripe = self.add_material(Material::plain(srgb(hex), Shading::Lit));
+                    let x = -0.012 + i as f32 * 0.008;
+                    prop.push(PartRole::Body, cuboid(Vec3::new(x, h * 0.3, -d / 2.0 - 0.0065), Vec3::new(0.006, h * 0.5, 0.001), stripe));
+                }
+                prop.push(PartRole::Body, cuboid(Vec3::new(0.0, h * 0.62, -d / 2.0 - 0.012), Vec3::new(0.046, 0.046, 0.016), body));
+                prop.push(PartRole::Body, cuboid(Vec3::new(0.0, h * 0.62, -d / 2.0 - 0.0205), Vec3::new(0.03, 0.03, 0.002), glass));
+                prop.push(PartRole::Body, cuboid(Vec3::new(-0.03, h + 0.012, 0.01), Vec3::new(0.035, 0.024, 0.07), body));
+                prop.push(PartRole::Body, cylinder(Vec3::new(0.038, h, -0.025), 0.007, 0.006, 12, red));
+                prop.lens = Some(Mat4::from_translation(Vec3::new(0.0, h * 0.62, -d / 2.0 - 0.022)));
+                prop.slot = Some(Mat4::from_translation(Vec3::new(0.0, 0.012, -d / 2.0 - 0.007)));
+            }
             // The scene's own only.
             PropKind::Item => {}
         }
@@ -659,13 +712,15 @@ impl Scene {
     fn add_missing_props(&mut self) {
         let spawn = self.spawn;
         let turn = Mat4::from_rotation_y(spawn.yaw);
-        for (kind, side) in [(PropKind::Manual, -0.25), (PropKind::Joystick, 0.25)] {
+        for (kind, side) in [(PropKind::Manual, -0.25), (PropKind::Joystick, 0.25), (PropKind::Camera, -0.55)] {
             if self.props.iter().any(|p| p.kind == kind) {
                 continue;
             }
             let over = spawn.position + turn.transform_vector3(Vec3::new(side, 0.0, -0.45));
             let floor = self.surface_below(over, 1.2).unwrap_or(over - Vec3::Y * 0.45);
-            let prop = self.built_in_prop(kind, Mat4::from_translation(floor) * turn);
+            // (The camera's lens to the viewer.)
+            let facing = if kind == PropKind::Camera { Mat4::from_rotation_y(std::f32::consts::PI) } else { Mat4::IDENTITY };
+            let prop = self.built_in_prop(kind, Mat4::from_translation(floor) * turn * facing);
             self.props.push(prop);
         }
     }
@@ -1106,6 +1161,12 @@ impl Walk<'_> {
     /// scene's coordinates to: the prop's, or below the stick, the
     /// stick's.
     fn prop_node(&mut self, prop: &mut Prop, node: gltf::Node, world: Mat4, mut to: Mat4, mut role: PartRole) -> Result<(), String> {
+        let frame = prop.pose.inverse() * rigid(world);
+        match node.name().map(|n| n.split('.').next().unwrap_or(n).to_ascii_lowercase()).as_deref() {
+            Some("camera_lens") => prop.lens = Some(frame),
+            Some("camera_slot") => prop.slot = Some(frame),
+            _ => {}
+        }
         match part_role(&node) {
             Some(PartRole::Stick) => {
                 let pivot = rigid(world);
@@ -1195,6 +1256,21 @@ fn smooth_normals(positions: &[Vec3], indices: &[u32]) -> Vec<Vec3> {
         }
     }
     normals.into_iter().map(|n| n.normalize_or(Vec3::Y)).collect()
+}
+
+/// A polaroid picture's size, across and down, in metres; and its picture's,
+/// square, from the card's top edge this far.
+pub const PRINT: Vec2 = Vec2::new(0.088, 0.107);
+pub const PRINT_PICTURE: f32 = 0.079;
+pub const PRINT_TOP: f32 = 0.007;
+
+/// A polaroid picture lying face up, its top edge away (-Z), its middle at
+/// the origin: the white card and the picture on it (UV (0, 0) at its top
+/// left), both in material 0.
+pub fn print_meshes() -> (Mesh, Mesh) {
+    let card = cuboid(Vec3::new(0.0, 0.0005, 0.0), Vec3::new(PRINT.x, 0.001, PRINT.y), 0);
+    let corner = Vec3::new(-PRINT_PICTURE / 2.0, 0.00105, -PRINT.y / 2.0 + PRINT_TOP);
+    (card, page(corner, PRINT_PICTURE, PRINT_PICTURE, 0))
 }
 
 /// The cube from -0.5 to 0.5, which the extras are drawn with.
@@ -1535,7 +1611,7 @@ mod tests {
     fn props_stand_on_the_desk_and_have_their_parts() {
         let room = Scene::test_room();
         let kinds: Vec<PropKind> = room.props.iter().map(|p| p.kind).collect();
-        assert_eq!(kinds, [PropKind::Manual, PropKind::Joystick]);
+        assert_eq!(kinds, [PropKind::Manual, PropKind::Joystick, PropKind::Camera]);
         for prop in &room.props {
             let at = prop.pose.transform_point3(Vec3::ZERO);
             assert_eq!(room.surface_below(at + Vec3::Y * 0.1, 1.0), Some(at), "{:?} on the desk", prop.kind);
@@ -1552,7 +1628,12 @@ mod tests {
         // A scene without them gets them where the hands are, on the floor
         // of the glTF quad's scene (nothing is below).
         let scene = Scene::from_gltf(quad_gltf().as_bytes(), Path::new(".")).unwrap();
-        assert_eq!(scene.props.len(), 2);
+        assert_eq!(scene.props.len(), 3);
+        // The camera looks at the viewer, from the front of its box.
+        let camera = &room.props[2];
+        let lens = camera.pose * camera.lens.unwrap();
+        assert!(lens.transform_vector3(Vec3::NEG_Z).z > 0.99, "{:?}", lens);
+        assert!(camera.lens.unwrap().transform_point3(Vec3::ZERO).z <= camera.bounds.0.z + 0.01);
     }
 
     #[test]

@@ -687,6 +687,13 @@ impl Display<'_> {
         }
     }
 
+    /// Where the scene's camera saves its pictures.
+    pub fn set_capture_dir(&mut self, dir: &std::path::Path) {
+        if let Some(stage) = self.stage_mut() {
+            stage.set_capture_dir(dir);
+        }
+    }
+
     /// The running game's manuals, for the booklet in the scene.
     pub fn set_manuals(&mut self, manuals: &[std::path::PathBuf]) {
         if let Some(stage) = self.stage_mut() {
@@ -759,6 +766,8 @@ impl Display<'_> {
     pub fn set_leds(&mut self, _leds: rust_dos::vr::Leds) {}
 
     pub fn set_manuals(&mut self, _manuals: &[std::path::PathBuf]) {}
+
+    pub fn set_capture_dir(&mut self, _dir: &std::path::Path) {}
 
     pub fn apply_vr(&mut self, settings: &rust_dos::vr::VrSettings) -> Vec<String> {
         if settings.mode == rust_dos::vr::VrMode::Off {

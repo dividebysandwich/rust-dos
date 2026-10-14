@@ -211,14 +211,32 @@ struct GiUse<'a> {
     slots: i32,
 }
 
-/// A part of a prop (`Scene::props`, by their indices) drawn where `model`
-/// takes it, lit; showing `page` where it is a manual's page.
+/// A prop drawn where `model` takes it, lit: a part of one of the scene's
+/// (`Scene::props`, by their indices), showing `page` where it is a
+/// manual's page; or a polaroid picture, developed this much (0 to 1).
 #[derive(Clone, Copy, Debug)]
-pub struct PropDraw {
-    pub prop: usize,
-    pub part: usize,
-    pub model: Mat4,
-    pub page: Option<glow::Texture>,
+pub enum PropDraw {
+    Part { prop: usize, part: usize, model: Mat4, page: Option<glow::Texture> },
+    Print { model: Mat4, picture: Option<glow::Texture>, develop: f32 },
+}
+
+impl PropDraw {
+    /// The scene's prop it is part of, if it is.
+    pub fn prop(&self) -> Option<usize> {
+        match self {
+            PropDraw::Part { prop, .. } => Some(*prop),
+            PropDraw::Print { .. } => None,
+        }
+    }
+}
+
+/// The programs drawing views, for one view at a time: a camera's picture
+/// taken in the headset, whose own draw both eyes at once.
+struct OneView {
+    lit: glow::Program,
+    sky: glow::Program,
+    depth: glow::Program,
+    weather: glow::Program,
 }
 
 /// How brightly a manual's pages glow, to be read in a dark room.
@@ -625,8 +643,15 @@ pub struct Gpu {
     /// For the sky's triangle, made from the vertex number.
     empty: glow::VertexArray,
     meshes: Vec<GpuMesh>,
-    /// The props' parts, by prop and part.
+    /// The props' parts, by prop and part, and a polaroid picture's card
+    /// and picture.
     prop_meshes: Vec<Vec<GpuMesh>>,
+    print_meshes: [GpuMesh; 2],
+    /// What the programs are made with, for one view at a time; and those
+    /// programs, made when a camera first takes a picture in the headset.
+    glsl: Glsl,
+    one_view_defines: String,
+    one_view: Option<OneView>,
     /// The unit cube the extras are drawn with.
     cube: GpuMesh,
     /// The scene's pictures, by their index.
@@ -744,7 +769,13 @@ impl Gpu {
                 clock.delete(gl);
             }
             gl.delete_vertex_array(self.empty);
-            for mesh in self.meshes.into_iter().chain(self.prop_meshes.into_iter().flatten()).chain([self.cube]) {
+            if let Some(one) = self.one_view {
+                for program in [one.lit, one.sky, one.depth, one.weather] {
+                    gl.delete_program(program);
+                }
+            }
+            let prints = self.print_meshes.into_iter();
+            for mesh in self.meshes.into_iter().chain(self.prop_meshes.into_iter().flatten()).chain([self.cube]).chain(prints) {
                 gl.delete_vertex_array(mesh.vao);
                 for buffer in mesh.buffers {
                     gl.delete_buffer(buffer);
@@ -843,6 +874,8 @@ impl Gpu {
         // SAFETY: see `GlScreen`.
         let empty = unsafe { gl.create_vertex_array()? };
         let cube = upload_mesh(gl, &super::scene::unit_cube())?;
+        let (card, picture) = super::scene::print_meshes();
+        let print_meshes = [upload_mesh(gl, &card)?, upload_mesh(gl, &picture)?];
         let grid = make_grid(gl, grid_size)?;
         let mut gpu = Gpu {
             lit,
@@ -873,6 +906,10 @@ impl Gpu {
             empty,
             meshes: Vec::new(),
             prop_meshes: Vec::new(),
+            print_meshes,
+            glsl,
+            one_view_defines: defines.clone(),
+            one_view: None,
             cube,
             textures: Vec::new(),
             target: None,
@@ -1107,10 +1144,12 @@ impl Gpu {
                 LightUse { light, shadow, slot: -1 }
             })
             .collect();
-        if let Some((at, bright)) = self.ambience.flash
+        if let Some((at, ahead, bright)) = self.ambience.flash
             && lights.len() < super::scene::MAX_LIGHTS
         {
-            let light = Light { kind: LightKind::Point, color: Vec3::splat(6.0 * bright), position: at, direction: Vec3::NEG_Z, shadow: false };
+            // A flash lights ahead, not what is right beside it.
+            let cone = LightKind::Spot { inner_cos: 30f32.to_radians().cos(), outer_cos: 48f32.to_radians().cos() };
+            let light = Light { kind: cone, color: Vec3::splat(1.6 * bright), position: at, direction: ahead, shadow: false };
             lights.push(LightUse { light, shadow: [-1, 0], slot: -1 });
         }
         lights
@@ -2202,13 +2241,20 @@ impl Gpu {
     /// The props' parts, with the lit program in use.
     fn draw_props(&self, gl: &glow::Context, scene: &Scene, locations: &MaterialLocations, model: Option<&glow::UniformLocation>, props: &[PropDraw]) {
         for draw in props {
-            let Some(mesh) = self.prop_meshes.get(draw.prop).and_then(|parts| parts.get(draw.part)) else { continue };
+            let (prop, part, at, page) = match *draw {
+                PropDraw::Part { prop, part, model, page } => (prop, part, model, page),
+                PropDraw::Print { model: at, picture, develop } => {
+                    self.draw_print(gl, locations, model, at, picture, develop);
+                    continue;
+                }
+            };
+            let Some(mesh) = self.prop_meshes.get(prop).and_then(|parts| parts.get(part)) else { continue };
             let material = &scene.materials[mesh.material];
             // SAFETY: see `GlScreen`.
             unsafe {
-                gl.uniform_matrix_4_f32_slice(model, false, &draw.model.to_cols_array());
+                gl.uniform_matrix_4_f32_slice(model, false, &at.to_cols_array());
                 self.bind_material(gl, locations, material, 1.0);
-                if let Some(page) = draw.page {
+                if let Some(page) = page {
                     // The page's picture, glowing a little.
                     gl.uniform_4_f32_slice(locations.base_color.as_ref(), &[1.0; 4]);
                     gl.uniform_3_f32_slice(locations.emissive.as_ref(), &[PAGE_GLOW; 3]);
@@ -2228,6 +2274,124 @@ impl Gpu {
                 gl.draw_elements(glow::TRIANGLES, mesh.count, glow::UNSIGNED_INT, 0);
             }
         }
+    }
+
+    /// A polaroid picture where `at` takes it: its white card, and its
+    /// picture coming out of the dark as it develops.
+    fn draw_print(
+        &self,
+        gl: &glow::Context,
+        locations: &MaterialLocations,
+        model: Option<&glow::UniformLocation>,
+        at: Mat4,
+        picture: Option<glow::Texture>,
+        develop: f32,
+    ) {
+        let developed = develop.clamp(0.0, 1.0);
+        // SAFETY: see `GlScreen`.
+        unsafe {
+            gl.uniform_matrix_4_f32_slice(model, false, &at.to_cols_array());
+            gl.uniform_1_i32(locations.shading.as_ref(), 0);
+            gl.uniform_1_f32(locations.cutoff.as_ref(), -1.0);
+            gl.uniform_1_i32(locations.has_emissive.as_ref(), 0);
+            gl.uniform_3_f32_slice(locations.emissive.as_ref(), &[0.0; 3]);
+            gl.uniform_1_i32(locations.has_base.as_ref(), 0);
+            gl.uniform_4_f32_slice(locations.base_color.as_ref(), &[0.86, 0.85, 0.82, 1.0]);
+            gl.enable(glow::CULL_FACE);
+            gl.cull_face(glow::BACK);
+            let [card, face] = &self.print_meshes;
+            gl.bind_vertex_array(Some(card.vao));
+            gl.draw_elements(glow::TRIANGLES, card.count, glow::UNSIGNED_INT, 0);
+            // Dark brown-green at first, the picture coming in.
+            let dark = [0.05, 0.06, 0.05];
+            let tint: Vec<f32> = dark.iter().map(|d| d + (1.0 - d) * developed).chain([1.0]).collect();
+            gl.uniform_4_f32_slice(locations.base_color.as_ref(), &tint);
+            gl.uniform_1_i32(locations.has_base.as_ref(), picture.is_some() as i32);
+            gl.uniform_3_f32_slice(locations.emissive.as_ref(), &[PAGE_GLOW * 0.4 * developed; 3]);
+            gl.uniform_1_i32(locations.has_emissive.as_ref(), picture.is_some() as i32);
+            for unit in [0, 1] {
+                gl.active_texture(glow::TEXTURE0 + unit);
+                gl.bind_texture(glow::TEXTURE_2D, picture);
+            }
+            gl.bind_vertex_array(Some(face.vao));
+            gl.draw_elements(glow::TRIANGLES, face.count, glow::UNSIGNED_INT, 0);
+        }
+    }
+
+    /// Take a picture of `scene` as `view` sees it, `size` pixels square,
+    /// with `props` (but the camera's own) and the room as it is: RGBA, rows
+    /// from the top. Drawn one view at a time, without the ambient
+    /// occlusion, into a target of its own.
+    #[allow(clippy::too_many_arguments)]
+    pub fn snapshot(
+        &mut self,
+        gl: &glow::Context,
+        scene: &Scene,
+        view: View,
+        size: u32,
+        screen: Option<glow::Texture>,
+        leds: Leds,
+        props: &[PropDraw],
+    ) -> Result<Vec<u8>, String> {
+        if self.views != 1 && self.one_view.is_none() {
+            let defines = &self.one_view_defines;
+            let made = (|| -> Result<OneView, String> {
+                Ok(OneView {
+                    lit: link(gl, self.glsl, defines, MESH_VERT, LIT_FRAG, "scene")?,
+                    sky: link(gl, self.glsl, &format!("{}#define FAR 1\n", defines), FULLSCREEN_VERT, SKY_FRAG, "sky")?,
+                    depth: link(gl, self.glsl, defines, MESH_VERT, SHADOW_FRAG, "depth")?,
+                    weather: link(gl, self.glsl, defines, WEATHER_VERT, WEATHER_FRAG, "weather")?,
+                })
+            })()?;
+            self.one_view = Some(made);
+        }
+        let format = Format { size: (size, size), srgb: false };
+        // The window's (or headset's) own, for after.
+        let (views, ao, target) = (self.views, self.ao.take(), self.target.take());
+        let swap = |gpu: &mut Gpu| {
+            if let Some(one) = &mut gpu.one_view {
+                std::mem::swap(&mut gpu.lit, &mut one.lit);
+                std::mem::swap(&mut gpu.sky, &mut one.sky);
+                std::mem::swap(&mut gpu.depth, &mut one.depth);
+                std::mem::swap(&mut gpu.weather, &mut one.weather);
+            }
+        };
+        if views != 1 {
+            swap(self);
+        }
+        self.views = 1;
+        let drawn = self.render(gl, scene, &[view], Dest::Own(format), (size, size), screen, leds, props, &[], Punch::None);
+        let mut rgba = vec![0u8; (size * size * 4) as usize];
+        if let (Ok(()), Some(target)) = (&drawn, &self.target) {
+            // SAFETY: see `GlScreen`.
+            unsafe {
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(target.resolve));
+                gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
+                let s = size as i32;
+                gl.read_pixels(0, 0, s, s, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(Some(&mut rgba)));
+                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            }
+        }
+        if let Some(own) = std::mem::replace(&mut self.target, target) {
+            // SAFETY: see `GlScreen`.
+            unsafe {
+                gl.delete_framebuffer(own.framebuffer);
+                gl.delete_framebuffer(own.resolve);
+                gl.delete_renderbuffer(own.color);
+                gl.delete_renderbuffer(own.depth);
+                gl.delete_texture(own.resolved);
+            }
+        }
+        self.views = views;
+        if views != 1 {
+            swap(self);
+        }
+        self.ao = ao;
+        drawn?;
+        // Rows from the top.
+        let row = (size * 4) as usize;
+        let flipped: Vec<u8> = rgba.chunks_exact(row).rev().flatten().copied().collect();
+        Ok(flipped)
     }
 
     /// A framebuffer drawing into the headset's image `texture`, `size`

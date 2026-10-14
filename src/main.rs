@@ -1513,6 +1513,7 @@ fn main() -> Result<(), String> {
                     _ => hdd_light = now + Duration::from_millis(120),
                 }
             }
+            display.set_capture_dir(&settings.capture_dir);
             display.set_leds(rust_dos::vr::Leds {
                 power: true,
                 turbo: cpu.bus.clock.cycles_per_ms() > rust_dos::vr::TURBO_CYCLES,
