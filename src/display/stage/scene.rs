@@ -423,8 +423,9 @@ pub struct Scene {
     /// The lamps to switch on and off.
     pub lamps: Vec<Lamp>,
     /// The inside of the room (a box, `rustdos_indoor`), where it doesn't
-    /// rain or snow.
+    /// rain or snow; the middles of its windows' glass.
     pub indoor: Option<(Vec3, Vec3)>,
+    pub windows: Vec<Vec3>,
     /// What the lit colours are multiplied by.
     pub exposure: f32,
     /// Where the left and right channels' sound comes from: the scene's
@@ -585,6 +586,7 @@ impl Scene {
             heading: HEADING,
             lamps: Vec::new(),
             indoor: None,
+            windows: Vec::new(),
             exposure: 1.0,
             speakers: [Vec3::ZERO; 2],
             shadows: true,
@@ -813,6 +815,7 @@ impl Scene {
             heading: extra(scene.extras(), "rustdos_heading").and_then(|v| v.as_f64()).map_or(HEADING, |h| h as f32),
             lamps: Vec::new(),
             indoor: None,
+            windows: Vec::new(),
             exposure: extra(scene.extras(), "rustdos_exposure").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32,
             speakers: [Vec3::ZERO; 2],
             shadows: extra(scene.extras(), "rustdos_shadows").is_none_or(truthy),
@@ -878,6 +881,9 @@ impl Scene {
             loaded.materials.push(material);
         }
         for mesh in std::mem::take(&mut walk.windows) {
+            let vertices = &loaded.meshes[mesh].vertices;
+            let middle = vertices.iter().map(|v| Vec3::from(v.position)).sum::<Vec3>() / vertices.len().max(1) as f32;
+            loaded.windows.push(middle);
             let material = Material { window: true, ..loaded.materials[loaded.meshes[mesh].material].clone() };
             loaded.meshes[mesh].material = loaded.materials.len();
             loaded.materials.push(material);

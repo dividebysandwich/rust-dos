@@ -11,6 +11,7 @@ mod gl;
 #[path = "display/nogl.rs"]
 mod gl;
 pub mod audio_mix;
+pub mod room_sound;
 #[cfg(feature = "vr")]
 mod stage;
 
@@ -729,6 +730,21 @@ impl Display<'_> {
         }
     }
 
+    /// The scene's own sounds now (the rain, thunder, switches), for
+    /// `sound`; silence without the scene.
+    pub fn room_sound(&self, sound: &mut room_sound::RoomSound) {
+        match &self.out {
+            Output::Gl(gl) if let Some(stage) = gl.stage() => {
+                let (ambience, effects) = stage.room_sound();
+                sound.set(ambience);
+                for effect in effects {
+                    sound.play(effect);
+                }
+            }
+            _ => sound.set(room_sound::Ambience::default()),
+        }
+    }
+
     /// Draw the 3D scene again with the picture as it was: the viewer may
     /// have moved.
     pub fn refresh_stage(&mut self) {
@@ -759,6 +775,8 @@ impl Display<'_> {
     pub fn audio_mix(&self) -> Option<audio_mix::Mix> {
         None
     }
+
+    pub fn room_sound(&self, _sound: &mut room_sound::RoomSound) {}
 
     pub fn open_stage(&mut self, _settings: &rust_dos::vr::VrSettings) -> Vec<String> {
         vec!["[VR] This build has no 3D scene (the vr feature)".to_string()]

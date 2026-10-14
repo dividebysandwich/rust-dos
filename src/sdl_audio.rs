@@ -20,6 +20,8 @@ pub(crate) struct SdlAudio {
     mix: std::rc::Rc<std::cell::Cell<display::audio_mix::Mix>>,
     mixed: display::audio_mix::Mix,
     buffer: Vec<i16>,
+    /// The 3D scene's own sounds, mixed in last.
+    room: Rc<std::cell::RefCell<display::room_sound::RoomSound>>,
 }
 
 /// The sound device, playing, with a buffer of `blocksize` frames (SDL's
@@ -45,11 +47,18 @@ impl audio::AudioOutput for SdlAudio {
     fn queue(&mut self, samples: &[i16]) -> Result<(), String> {
         use display::audio_mix::{IDENTITY, apply};
         let mix = self.mix.get();
-        if mix == IDENTITY && self.mixed == IDENTITY {
+        let mut room = self.room.borrow_mut();
+        if mix == IDENTITY && self.mixed == IDENTITY && !room.active() {
             return self.queue.queue_audio(samples);
         }
-        apply(samples, self.mixed, mix, &mut self.buffer);
-        self.mixed = mix;
+        if mix == IDENTITY && self.mixed == IDENTITY {
+            self.buffer.clear();
+            self.buffer.extend_from_slice(samples);
+        } else {
+            apply(samples, self.mixed, mix, &mut self.buffer);
+            self.mixed = mix;
+        }
+        room.mix_into(&mut self.buffer);
         self.queue.queue_audio(&self.buffer)
     }
 
@@ -78,13 +87,21 @@ pub(crate) fn attach(
     audio_device: Result<(sdl2::audio::AudioQueue<i16>, sdl2::AudioSubsystem), String>,
     settings: &Settings,
     audio_mix: &Rc<Cell<display::audio_mix::Mix>>,
+    room: &Rc<std::cell::RefCell<display::room_sound::RoomSound>>,
 ) {
     match audio_device {
         Ok((queue, subsystem)) => {
             let mix = audio_mix.clone();
             let prebuffer = prebuffer_frames(&queue, settings.audio_buffer.prebuffer);
-            let output =
-                SdlAudio { queue, subsystem, prebuffer, mix, mixed: display::audio_mix::IDENTITY, buffer: Vec::new() };
+            let output = SdlAudio {
+                queue,
+                subsystem,
+                prebuffer,
+                mix,
+                mixed: display::audio_mix::IDENTITY,
+                buffer: Vec::new(),
+                room: room.clone(),
+            };
             cpu.bus.audio_device = Some(Box::new(output));
         }
         Err(e) => {

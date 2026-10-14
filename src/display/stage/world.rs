@@ -3,6 +3,7 @@
 //! of day, the weather and its lightning, a camera's flash. Each view
 //! works out from it what it draws at a moment (`Ambience`).
 
+use super::super::room_sound::Effect;
 use super::scene::Scene;
 use super::sky::{self, SkyLook};
 use glam::Vec3;
@@ -144,6 +145,10 @@ struct State {
     /// How much it rains or snows, easing towards the weather's.
     weather: Weather,
     eased: Instant,
+    /// Sounds to play once, and up to when on the room's clock the
+    /// thunder was heard.
+    effects: Vec<Effect>,
+    heard: f64,
 }
 
 pub struct World {
@@ -167,6 +172,8 @@ impl World {
                 flash: None,
                 weather,
                 eased: now,
+                effects: Vec::new(),
+                heard: 0.0,
             }),
         }
     }
@@ -206,12 +213,15 @@ impl World {
         let mut state = self.lock();
         if let Some(lamp) = state.lamps.get_mut(i) {
             *lamp = (!lamp.0, Some(Instant::now()));
+            state.effects.push(Effect::Click);
         }
     }
 
     /// A camera flashed at `at`.
     pub fn flash(&self, at: Vec3) {
-        self.lock().flash = Some((Instant::now(), at));
+        let mut state = self.lock();
+        state.flash = Some((Instant::now(), at));
+        state.effects.push(Effect::Shutter);
     }
 
     /// Seconds of the room's clock at `now` (for the lightning).
@@ -219,10 +229,25 @@ impl World {
         now.saturating_duration_since(self.start).as_secs_f64()
     }
 
-    /// The weather's sound: how loud, and the lightning's strikes on.
-    pub fn sound(&self) -> (VrWeather, f32, bool) {
-        let state = self.lock();
-        (state.settings.weather, state.settings.sound as f32 / 100.0, state.settings.lightning)
+    /// The room's sound at `now`: how loud the rain is and the thunder
+    /// would be, and the sounds to play once since last asked (the
+    /// thunder of strikes now heard among them).
+    pub fn sound(&self, now: Instant) -> (f32, f32, Vec<Effect>) {
+        let clock = self.clock(now);
+        let mut state = self.lock();
+        let volume = state.settings.sound as f32 / 100.0;
+        let mut effects = std::mem::take(&mut state.effects);
+        if state.settings.weather == VrWeather::Storm && state.settings.lightning {
+            // (Strikes up to half a minute back, whose thunder comes now.)
+            let heard = state.heard.max(clock - 1.0);
+            for strike in strikes_between(heard - 30.0, clock) {
+                if (heard..clock).contains(&strike.thunder_at()) {
+                    effects.push(Effect::Thunder(strike.distance));
+                }
+            }
+        }
+        state.heard = clock;
+        (state.weather.rain * volume, volume, effects)
     }
 
     /// The time of day at `now`, in hours from midnight.

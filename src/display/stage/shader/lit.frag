@@ -297,17 +297,21 @@ vec4 gi_light(vec3 p, vec3 n, int slot) {
 // down, as how much they catch the light (0 to 1).
 float rain_on_glass(vec3 p) {
     vec2 at = vec2(p.x + p.z, p.y);
-    // Drops sitting, in cells of a centimetre and a half.
-    vec2 cell = floor(at / 0.015);
-    vec2 inside = fract(at / 0.015) - 0.5;
+    // Drops sitting, one now and then in cells of a centimetre, each
+    // somewhere in its cell and of its own size.
+    vec2 cell = floor(at / 0.01);
     float h = hash3(vec3(cell, 3.0));
-    float sitting = step(1.0 - 0.35 * u_rain_glass, h) * smoothstep(0.35, 0.1, length(inside + (h - 0.5) * 0.3));
-    // Drops running down in columns, with a wet trail above them.
-    float column = floor(at.x / 0.03);
+    vec2 jitter = vec2(hash3(vec3(cell, 5.0)), hash3(vec3(cell, 8.0))) - 0.5;
+    vec2 inside = fract(at / 0.01) - 0.5 - jitter * 0.5;
+    float size = 0.12 + 0.2 * hash3(vec3(cell, 11.0));
+    float sitting = step(1.0 - 0.18 * u_rain_glass, h) * smoothstep(size, size * 0.4, length(inside));
+    // Drops running down in some columns, with a wet trail above them.
+    float column = floor(at.x / 0.04);
     float c = hash3(vec3(column, 9.0, 1.0));
-    float x = fract(at.x / 0.03) - 0.5 - (c - 0.5) * 0.4;
-    float y = fract(at.y / 0.6 + u_time * (0.08 + c * 0.25) + c * 7.0);
-    float running = step(1.0 - 0.6 * u_rain_glass, c) * smoothstep(0.12, 0.0, abs(x)) * (smoothstep(0.03, 0.0, y) + smoothstep(0.0, 0.3, y) * 0.3 * step(y, 0.3));
+    float x = fract(at.x / 0.04) - 0.5 - (c - 0.5) * 0.5 - 0.06 * sin(at.y * 40.0 + c * 6.0);
+    float y = fract(at.y / 0.7 + u_time * (0.06 + c * 0.2) + c * 7.0);
+    float running = step(1.0 - 0.3 * u_rain_glass, c) * smoothstep(0.08, 0.0, abs(x))
+        * (smoothstep(0.025, 0.0, y) + 0.25 * step(y, 0.25) * smoothstep(0.0, 0.25, y));
     return clamp(sitting + running, 0.0, 1.0);
 }
 
@@ -485,8 +489,8 @@ void main() {
     if (u_rain_glass > 0.0) {
         // The drops catch the light of what is around them.
         float drops = rain_on_glass(v_world);
-        color = mix(color, u_ambient * 1.5 + vec3(0.02), drops * 0.6);
-        alpha = mix(alpha, 1.0, drops * 0.5);
+        color = mix(color, u_ambient * 1.4 + vec3(0.015), drops * 0.4);
+        alpha = mix(alpha, 1.0, drops * 0.35);
     }
     color = tone(color * u_exposure);
     // The haze, where there is one (not in a closed room).

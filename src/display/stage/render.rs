@@ -23,6 +23,14 @@ const GI_UPDATE_FRAG: &str = include_str!("shader/gi_update.frag");
 const AO_FRAG: &str = include_str!("shader/ao.frag");
 const AO_BLUR_FRAG: &str = include_str!("shader/ao_blur.frag");
 const PUNCH_FRAG: &str = include_str!("shader/punch.frag");
+const WEATHER_VERT: &str = include_str!("shader/weather.vert");
+const WEATHER_FRAG: &str = include_str!("shader/weather.frag");
+
+/// The rain's streaks and the snow's flakes at most, and the box around
+/// the eyes they fall through, in metres.
+const RAINDROPS: f32 = 9000.0;
+const SNOWFLAKES: f32 = 14000.0;
+const WEATHER_BOX: [f32; 3] = [16.0, 10.0, 16.0];
 
 /// What `quality` works out: the screen's light as the picture's colours
 /// in how many patches across and down, how many samples soften a shadow's
@@ -574,8 +582,9 @@ struct ImageDepth {
 pub struct Gpu {
     lit: glow::Program,
     sky: glow::Program,
-    /// The passthrough's windows (`Punch`).
+    /// The passthrough's windows (`Punch`), and the rain and snow.
     punch: glow::Program,
+    weather: glow::Program,
     /// Only the depth, of what is in front: first in each view, so that
     /// the lit program works out each pixel once.
     depth: glow::Program,
@@ -707,7 +716,7 @@ impl Gpu {
     pub fn delete(self, gl: &glow::Context) {
         // SAFETY: see `GlScreen`.
         unsafe {
-            for program in [self.lit, self.sky, self.punch, self.depth, self.shadow, self.grid_program] {
+            for program in [self.lit, self.sky, self.punch, self.weather, self.depth, self.shadow, self.grid_program] {
                 gl.delete_program(program);
             }
             for framebuffer in self.image_framebuffers.into_values().chain(self.read_framebuffers.into_values()) {
@@ -793,6 +802,7 @@ impl Gpu {
             (&defines, MESH_VERT, SHADOW_FRAG, "shadow"),
             (&defines, FULLSCREEN_VERT, GRID_FRAG, "screen light"),
             (&view_defines, MESH_VERT, PUNCH_FRAG, "passthrough"),
+            (&view_defines, WEATHER_VERT, WEATHER_FRAG, "weather"),
         ] {
             match link(gl, glsl, defines, vertex, fragment, name) {
                 Ok(program) => programs.push(program),
@@ -805,7 +815,7 @@ impl Gpu {
                 }
             }
         }
-        let [lit, sky, depth, shadow, grid_program, punch] = programs[..] else { unreachable!() };
+        let [lit, sky, depth, shadow, grid_program, punch, weather] = programs[..] else { unreachable!() };
         let ao = if ao_samples > 0 && scene.ao {
             let estimate = link(gl, glsl, &view_defines, FULLSCREEN_VERT, AO_FRAG, "ambient occlusion");
             let blur = link(gl, glsl, &view_defines, FULLSCREEN_VERT, AO_BLUR_FRAG, "ambient occlusion's blur");
@@ -838,6 +848,7 @@ impl Gpu {
             lit,
             sky,
             punch,
+            weather,
             depth,
             shadow,
             grid_program,
@@ -2067,6 +2078,10 @@ impl Gpu {
                 }
             }
 
+            // The rain or the snow outside, over what is behind it.
+            self.draw_weather(gl, scene, &vp_floats, &eyes, encode);
+            gl.use_program(Some(lit));
+
             // The extras, unlit, seen through where they are.
             gl.uniform_1_i32(shading.as_ref(), 1);
             gl.uniform_3_f32_slice(emissive.as_ref(), &[0.0; 3]);
@@ -2147,6 +2162,40 @@ impl Gpu {
                     gl.enable(glow::DEPTH_TEST);
                 }
             }
+        }
+    }
+
+    /// The rain or snow falling, if any, blended over the scene drawn,
+    /// not inside the room. Leaves the lit program unbound.
+    fn draw_weather(&self, gl: &glow::Context, scene: &Scene, vp_floats: &[f32], eyes: &[f32], encode: i32) {
+        let w = self.ambience.weather;
+        let (snow, amount) = if w.snow > w.rain { (true, w.snow) } else { (false, w.rain) };
+        if !scene.sky || amount < 0.01 {
+            return;
+        }
+        let count = (amount * if snow { SNOWFLAKES } else { RAINDROPS }) as i32;
+        let program = self.weather;
+        let u = |name: &'static str| uniform(gl, program, name);
+        let (low, high) = scene.indoor.unwrap_or((Vec3::ONE, Vec3::ZERO));
+        // SAFETY: see `GlScreen`.
+        unsafe {
+            gl.use_program(Some(program));
+            gl.uniform_matrix_4_f32_slice(u("u_view_projection[0]").as_ref(), false, vp_floats);
+            gl.uniform_3_f32_slice(u("u_eye[0]").as_ref(), eyes);
+            gl.uniform_3_f32_slice(u("u_box").as_ref(), &WEATHER_BOX);
+            gl.uniform_1_f32(u("u_time").as_ref(), self.ambience.seconds);
+            gl.uniform_1_i32(u("u_snow").as_ref(), snow as i32);
+            gl.uniform_3_f32_slice(u("u_indoor_low").as_ref(), &low.to_array());
+            gl.uniform_3_f32_slice(u("u_indoor_high").as_ref(), &high.to_array());
+            gl.uniform_3_f32_slice(u("u_ambient").as_ref(), &self.ambience.sky.ambient.to_array());
+            gl.uniform_1_f32(u("u_amount").as_ref(), amount);
+            gl.uniform_1_i32(u("u_encode").as_ref(), encode);
+            gl.disable(glow::CULL_FACE);
+            gl.depth_mask(false);
+            gl.enable(glow::BLEND);
+            gl.blend_func_separate(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA, glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
+            gl.bind_vertex_array(Some(self.empty));
+            gl.draw_arrays_instanced(glow::TRIANGLES, 0, 6, count);
         }
     }
 

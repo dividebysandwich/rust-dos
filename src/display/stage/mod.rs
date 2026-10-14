@@ -588,14 +588,33 @@ impl Stage {
         None
     }
 
-    /// How the sound's channels mix for the listener: the headset's head
-    /// while it shows the scene, else the window's camera.
-    pub fn audio_mix(&self) -> Mix {
+    /// The room's own sounds for the listener now: the rain from the
+    /// windows' side, the thunder's loudness, and what plays once.
+    pub fn room_sound(&self) -> (super::room_sound::Ambience, Vec<super::room_sound::Effect>) {
+        let (rain, thunder, effects) = self.world.sound(std::time::Instant::now());
+        let listener = self.listener();
+        let at = listener.transform_point3(glam::Vec3::ZERO);
+        let right = listener.transform_vector3(glam::Vec3::X).normalize_or(glam::Vec3::X);
+        let nearest = self.scene.windows.iter().min_by(|a, b| a.distance(at).total_cmp(&b.distance(at)));
+        let pan = nearest.map_or(0.0, |w| (*w - at).normalize_or_zero().dot(right));
+        let indoor = self.scene.indoor.is_some_and(|(low, high)| at.cmpge(low).all() && at.cmple(high).all());
+        (super::room_sound::Ambience { rain, pan, indoor, thunder }, effects)
+    }
+
+    /// Where the listener is: the headset's head while it shows the scene,
+    /// else the window's camera.
+    fn listener(&self) -> Mat4 {
         #[cfg(xr)]
         let head = self.headset.as_ref().and_then(|h| h.input()).and_then(|(_, head)| head);
         #[cfg(not(xr))]
         let head: Option<Mat4> = None;
-        let listener = head.unwrap_or_else(|| self.camera.view().inverse());
+        head.unwrap_or_else(|| self.camera.view().inverse())
+    }
+
+    /// How the sound's channels mix for the listener: the headset's head
+    /// while it shows the scene, else the window's camera.
+    pub fn audio_mix(&self) -> Mix {
+        let listener = self.listener();
         let spawn = self.scene.spawn;
         let start = Mat4::from_translation(spawn.position) * Mat4::from_rotation_y(spawn.yaw);
         spatial::mix(listener, start, self.scene.speakers)
