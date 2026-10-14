@@ -13,6 +13,8 @@ of their own. See the [README](README.md) for everything else.
 * [Game profiles](#game-profiles) and [RetroAchievements](#retroachievements)
 * [Mounting drives](#mounting-drives), [disk images](#disk-images) and
   [disk speed and noises](#disk-speed-and-noises)
+* [Networking at a glance](#networking-at-a-glance): what the IPX driver,
+  rooms, relays and the network card each do
 * [Playing over a LAN](#playing-over-a-lan), [serial and modem
   games](#serial-and-modem-games) and [a relay on a
   server](#a-relay-on-a-server)
@@ -2002,6 +2004,123 @@ states and rewind keep the card with its texture memory.
 How the card draws follows Imagination's own driver sources and simulator
 of the chip, which they released under the MIT licence
 (github.com/powervr-graphics/PowerVR-Series1).
+
+## Networking at a glance
+
+Rust-DOS has two separate pieces of networking, and most people only ever
+need the first one:
+
+| You want to | You need | Setup |
+|---|---|---|
+| Play a DOS game in multiplayer (Doom, Duke Nukem 3D, Warcraft 2, Descent, C&C) | the **IPX driver** and a **room** | join a room, then pick the game's IPX option |
+| Play a serial or modem game with one other player | a **room** | join a room, then pick the game's null modem or modem option |
+| Browse the web, telnet, FTP or IRC from DOS, Windows 3.x or Windows 9x | the **NE2000 network card** | `ne2000=true`, plus a driver in the guest |
+| Play a Windows 9x network game, or share files between two Windows guests | the **NE2000 network card** and a **room** | both of the above |
+
+### The words
+
+* **IPX** is the network protocol most DOS games used for multiplayer on
+  1990s office networks. Games don't care whether there is a real network
+  behind it, only that an IPX driver answers. The built-in DOS has one,
+  so you don't load `IPX.COM`, `IPXODI` or anything else.
+* A **room** is a virtual network cable between rust-dos instances.
+  Everyone in a room is on the same network, as PCs plugged into one hub
+  would be. Instances in different rooms don't see each other. A room has
+  a name (`lobby` unless you choose one) and maybe a password.
+* A **relay** is the program that holds the rooms and passes traffic
+  between their members. Any rust-dos can be one (`LAN HOST`, or *Make
+  room* in the settings window), and so can `rust-dos-relay` on a server.
+  The public relay at `relay.rust-dos.com` is one that anyone can use.
+  If you have used DOSBox, the relay does what an `IPXNET` server does,
+  but the protocol is different: DOSBox and rust-dos can't play together.
+* The **NE2000** is an emulated network card, a real piece of hardware
+  that guest systems need a driver for. A system you boot from a disk
+  image (Windows 95, Windows 98, a DOS with its own network setup) only
+  sees a network through this card, never through the built-in IPX
+  driver.
+* The **router** is a small home router built into each rust-dos. It
+  sits between the NE2000 and your computer's own internet connection.
+
+### What the relay does and doesn't do
+
+The relay only passes network packets (Ethernet frames) between the
+members of a room, the way a network switch does. It doesn't hand out IP
+addresses, it isn't a name server, and it doesn't connect anybody to the
+internet. Your internet traffic never goes through it.
+
+All of that is the job of the router in your own rust-dos:
+
+```text
+  guest system (Windows 95, DOS with mTCP, ...)
+        |
+    NE2000 card ─────┬────────────── room on a relay ─── other players' instances
+        |            |               (LAN traffic only)
+  IPX driver ────────┘
+  (built-in DOS)
+        |
+  router in this rust-dos:  DHCP  10.0.2.15 for the guest
+        |                   DNS   10.0.2.3, asks your computer's resolver
+        |                   NAT   the guest's connections become your computer's
+        v
+  your computer's internet connection
+```
+
+* **DHCP:** the router gives the guest its address: 10.0.2.15, with the
+  router at 10.0.2.2 and the name server at 10.0.2.3. Leave the guest's
+  network settings on "obtain an address automatically" (DHCP or BOOTP).
+  In a room, each instance's router hands out a different address
+  (10.0.2.20 plus the member number), so guests in one room don't clash.
+* **DNS:** the router's name server looks names up with your computer's
+  own resolver, so whatever names your computer finds, the guest finds.
+* **NAT:** the guest's TCP connections and UDP packets are made by
+  rust-dos as ordinary connections of your computer. No administrator
+  rights, network bridge or TAP device are needed. 10.0.2.2 stands for
+  your computer itself: a web server on your computer's port 8080 is
+  `http://10.0.2.2:8080/` in the guest.
+
+What the router doesn't do:
+
+* **No incoming connections from the internet:** nothing outside can
+  connect to a server in the guest, and there are no port forwards.
+  (Players in the same room can connect to each other's guests, since
+  they are on the same LAN.)
+* **No ping to the internet:** only the router's own addresses (10.0.2.2
+  and 10.0.2.3) answer pings. A ping to a web site getting no reply
+  doesn't mean the internet is down; try a browser or `HTGET` instead.
+* **IPv4 only**, and name lookups for IPv4 addresses only, which is all
+  programs of the time ask for.
+* **Modern HTTPS doesn't work** in browsers of the time, which is a
+  limit of the browsers, not of rust-dos. See [Network card](#network-card).
+
+### Ports and firewalls
+
+Rooms use UDP port 21213. To find rooms on your home network, rust-dos
+broadcasts to that port, so a firewall on the computer that hosts the room
+has to let UDP 21213 in. Joining the public relay only sends from your computer, so
+it works behind a home router without any setup. Hosting a room for
+players elsewhere on the internet (`LAN HOST`, then they `LAN JOIN` your
+address) needs UDP 21213 forwarded to your computer in your router; the
+public relay or `rust-dos-relay` on a server avoids that.
+
+### Which systems can use what
+
+| System | IPX games | Internet (TCP/IP) | LAN with other instances |
+|---|---|---|---|
+| Built-in DOS | built-in IPX driver | NE2000 + packet driver + mTCP or similar | IPX; TCP/IP over the NE2000 |
+| Windows 3.1 started from the built-in DOS | DOS games in a DOS box: no IPX (see below) | NE2000 + packet driver + WINPKT + Trumpet Winsock | TCP/IP over the NE2000 |
+| Windows for Workgroups 3.11 with its own network setup | its own IPX over the NE2000 | its own NE2000 driver and TCP/IP-32 | its own networking over the NE2000 |
+| Windows 95/98 booted from an image | its IPX/SPX protocol over the NE2000 | its NE2000 driver and TCP/IP | its networking over the NE2000 |
+
+The built-in IPX driver belongs to the built-in DOS: inside Windows, and
+in systems booted from a disk image, games need that system's own IPX
+over the NE2000. The steps for each system are under [Network
+card](#network-card).
+
+Tested so far: IPX games between instances (Doom, Heretic, Descent);
+the internet from DOS with mTCP, from Windows 3.11 with Trumpet Winsock
+and Netscape, and from Windows 95 with Internet Explorer. Not tested yet:
+Windows 95's IPX against the built-in IPX driver, two Windows guests on
+one LAN, and Windows for Workgroups' own TCP/IP-32. Reports are welcome.
 
 ## Playing over a LAN
 
