@@ -544,6 +544,7 @@ impl Bus {
                 if !sb.set_high_speed(high_speed) {
                     return Err(StateError::Invalid("a Sound Blaster's high-speed mode without a transfer".into()));
                 }
+                sb.restart_dma_identification();
             }
             None if high_speed => return Err(StateError::Invalid("a Sound Blaster's high-speed mode without a Sound Blaster".into())),
             None => {}

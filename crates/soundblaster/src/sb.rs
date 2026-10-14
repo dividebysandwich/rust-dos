@@ -309,15 +309,32 @@ impl SoundBlaster {
     }
 
     /// Write the answer of command E2h to memory once the 8-bit DMA
-    /// channel is unmasked. Returns the memory written.
+    /// channel is unmasked. Returns the memory written. A channel set to
+    /// read memory or to verify takes the byte as one transfer and leaves
+    /// memory alone, as the 8237 does in those modes.
     pub fn dma_write(&mut self, dma: &mut Dma, ram: &mut [u8]) -> Option<std::ops::Range<usize>> {
         let byte = self.e2_pending?;
         let ch = self.dma8.map(usize::from).filter(|&ch| dma.ready(ch))?;
+        if dma.channel(ch).mode & 0x0C != 0x04 {
+            dma.transfer_skip(ch, 1);
+            self.e2_pending = None;
+            return None;
+        }
         let (moved, _, written) = dma.transfer_write(ch, ram, &[byte]);
         if moved == 1 {
             self.e2_pending = None;
         }
         written
+    }
+
+    /// Start command E2h's sequence over, as after a power-on. A loaded
+    /// state does this: the sequence isn't saved, and keeping the running
+    /// machine's would make the answers depend on what ran before the
+    /// load.
+    pub fn restart_dma_identification(&mut self) {
+        self.e2_value = 0xAA;
+        self.e2_count = 0;
+        self.e2_pending = None;
     }
 
     /// Whether the DSP is in high-speed mode: a transfer that a high-speed
@@ -810,8 +827,9 @@ impl SoundBlaster {
             0xE0 => self.read_buf.push_back(!self.params[0]),
             // DMA identification: a byte made from the parameter and the
             // calls before goes to memory on the 8-bit DMA channel.
-            // Creative's drivers and diagnostics check it to find the
-            // card's channel.
+            // Creative's CT-VOICE.DRV has the answers overwrite an entry
+            // of its own function table, so only a card that answers like
+            // Creative's leaves it a working play routine.
             0xE2 => {
                 let add = &E2_ADD[(self.e2_count % 4) as usize];
                 let mut value = self.e2_value as i16;
@@ -869,8 +887,8 @@ rust_dos_savestate::state_fields!(SoundBlaster {
     block_size, transfer, silence, irq8, irq16, last_ticks, frac, dac, out, out_rate, pending_left,
     mixer_index, mixer, asp_mode, asp_regs, mem8051, irq, dma8, dma16,
 } skip {
-    // E2h's state isn't kept, so states saved before it load: a load
-    // starts its sequence over.
+    // E2h's state isn't kept, so states saved before it load: the bus
+    // starts its sequence over after a load (restart_dma_identification).
     config, e2_value, e2_count, e2_pending,
 });
 

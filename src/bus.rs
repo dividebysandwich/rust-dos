@@ -1837,7 +1837,6 @@ impl Bus {
             sb.advance(now, &mut self.dma, &self.ram);
             self.sync_sb_irq();
         }
-        self.sb_dma_write();
     }
 
     /// Let the Sound Blaster write what it has for memory (the answer of

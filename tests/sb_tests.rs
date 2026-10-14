@@ -580,3 +580,56 @@ fn sb16_continue_auto_init_takes_back_an_exit() {
     wait_ms(&mut bus, 10.0);
     assert_ne!(dma1_count(&mut bus), at, "the transfer runs on");
 }
+
+/// Program 8-bit DMA channel 1 in `mode` (bits 2-3: 01 write, 10 read)
+/// for one byte at 2000:0200 and leave it masked.
+fn program_dma1_byte(bus: &mut Bus, mode: u8) {
+    bus.io_write(0x0A, 0x05);
+    bus.io_write(0x0C, 0x00);
+    bus.io_write(0x0B, 0x41 | mode);
+    bus.io_write(0x02, 0x00);
+    bus.io_write(0x02, 0x02);
+    bus.io_write(0x83, 0x02);
+    bus.io_write(0x03, 0x00);
+    bus.io_write(0x03, 0x00);
+}
+
+#[test]
+fn dsp_dma_identification_waits_for_its_channel() {
+    let mut bus = sb16();
+    reset_dsp(&mut bus);
+    bus.write_8(0x20200, 0);
+    program_dma1_byte(&mut bus, 0x04);
+    dsp_write(&mut bus, 0xE2);
+    dsp_write(&mut bus, 0xA5);
+    assert_eq!(bus.read_8(0x20200), 0, "a masked channel takes nothing");
+    bus.io_write(0x0A, 0x01);
+    assert_eq!(bus.read_8(0x20200), 0xDD, "the answer goes once the channel is unmasked");
+}
+
+#[test]
+fn dsp_dma_identification_leaves_memory_to_a_read_channel() {
+    let mut bus = sb16();
+    reset_dsp(&mut bus);
+    bus.write_8(0x20200, 0x77);
+    program_dma1_byte(&mut bus, 0x08);
+    bus.io_write(0x0A, 0x01);
+    dsp_write(&mut bus, 0xE2);
+    dsp_write(&mut bus, 0xA5);
+    assert_eq!(bus.read_8(0x20200), 0x77, "a channel reading memory writes none");
+    assert_eq!(dma1_count(&mut bus), 0xFFFF, "the channel took its one transfer");
+}
+
+#[test]
+fn a_loaded_state_starts_dma_identification_over() {
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    cpu.bus.set_cycles_per_ms(1000);
+    cpu.bus.configure_sound(Some(SbConfig::default()), true);
+    cpu.load_shell();
+    reset_dsp(&mut cpu.bus);
+    let fresh = machine::save(&cpu);
+    assert_eq!(identify_dma(&mut cpu, 0xA5).0, 0xDD);
+    machine::load(&mut cpu, &fresh).unwrap();
+    // A fresh card answers 5Ah with 76h; the second call answers DCh.
+    assert_eq!(identify_dma(&mut cpu, 0x5A).0, 0x76, "a first call's answer after the load");
+}
