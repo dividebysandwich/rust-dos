@@ -195,7 +195,8 @@ fn syscall_and_sysret_switch_levels() {
     assert_eq!(rig.read32(DATA + 0x10) & 0x200, 0, "IF cleared");
     assert_eq!(rig.cpu.cpl, 0);
 
-    // SYSRET set IF, CPL 3 and SS's RPL; at level 3 it raises #GP(0).
+    // SYSRET set IF, CPL 3 and the RPL of CS and SS, though STAR's
+    // selectors have RPL 0; at level 3 it raises #GP(0).
     let mut rig = k6_rig();
     rig.record(GP);
     rig.ring3(|a| {
@@ -204,6 +205,8 @@ fn syscall_and_sysret_switch_levels() {
         a.mov(dword_ptr(DATA), eax)?;
         a.mov(ax, ss)?;
         a.mov(dword_ptr(DATA + 4), eax)?;
+        a.mov(ax, cs)?;
+        a.mov(dword_ptr(DATA + 8), eax)?;
         a.sysret()
     });
     rig.run(|a| {
@@ -221,6 +224,7 @@ fn syscall_and_sysret_switch_levels() {
     });
     assert_eq!(rig.read32(DATA) & 0x200, 0x200, "IF set");
     assert_eq!(rig.read32(DATA + 4) & 0xFFFF, DATA32_R3 as u32);
+    assert_eq!(rig.read32(DATA + 8) & 0xFFFF, CODE32_R3 as u32);
     assert_eq!(rig.recorded().0, GP as u32);
 }
 

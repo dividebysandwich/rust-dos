@@ -235,8 +235,8 @@ late games want **32** or **64 MB**.
 
 How much there can be depends on the processor, as with the motherboards
 of its day: up to **64 MB** with a 386, **128 MB** with a 486, **256 MB**
-with a Pentium and **512 MB** with a Pentium MMX, Pentium Pro or Pentium
-II. Picking a smaller
+with a Pentium and **512 MB** with a Pentium MMX, K6-2, Pentium Pro,
+Pentium II or Pentium III. Picking a smaller
 processor brings the memory down to what it takes. Save states and rewind
 grow with the memory.
 

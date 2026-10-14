@@ -292,7 +292,7 @@ const K6_HIGHEST_EXTENDED: u32 = 0x8000_0005;
 const K6_NAME: &[u8] = b"AMD-K6(tm) 3D processor";
 
 /// What extended leaf 80000005h gives a K6-2 in EBX, ECX and EDX: its TLBs
-/// (64 data entries, 2-way; 64 instruction entries, direct-mapped) and its
+/// (128 data entries, 2-way; 64 instruction entries, direct-mapped) and its
 /// 32 KB data and instruction caches (2-way, 32-byte lines, 2 lines a
 /// tag), from AMD's note.
 const K6_L1: [u32; 3] = [0x0280_0140, 0x2002_0220, 0x2002_0220];
@@ -608,13 +608,13 @@ pub fn sysexit(cpu: &mut Cpu) -> CpuResult {
 
 /// SYSCALL (K6-2): a fast call to level 0, as AMD's application note
 /// (21086) has it: ECX gets the return EIP, EIP the low dword of STAR, CS
-/// the selector in STAR's bits 32 to 47 and SS the one after it, both flat
-/// and 32-bit whatever the descriptor tables hold, and IF and VM are
-/// cleared. Nothing is checked: it runs in real mode and at any level.
-/// #UD with EFER.SCE clear.
+/// the selector in STAR's bits 32 to 47 with RPL 0 and SS the one after
+/// it, both flat and 32-bit whatever the descriptor tables hold, and VM, IF
+/// and RF are cleared. Nothing is checked: it runs in real mode and at any
+/// level. #UD with EFER.SCE clear.
 pub fn syscall(cpu: &mut Cpu) -> CpuResult {
     require_syscall(cpu)?;
-    let cs = (cpu.k6.star >> 32) as u16;
+    let cs = (cpu.k6.star >> 32) as u16 & 0xFFFC;
     if crate::profile::any_active() && cpu.cpl != 0 {
         let code32 = cpu.seg_cache(Seg::CS).attr & crate::cpu::ATTR_DB != 0;
         let mode = crate::profile::Mode::of(cpu.pe(), cpu.v86(), code32);
@@ -623,6 +623,7 @@ pub fn syscall(cpu: &mut Cpu) -> CpuResult {
     cpu.set_ecx(cpu.eip());
     cpu.set_cpu_flag(CpuFlags::VM, false);
     cpu.set_cpu_flag(CpuFlags::IF, false);
+    cpu.set_cpu_flag(CpuFlags::RF, false);
     cpu.set_seg_cache(Seg::CS, SegCache::from_descriptor(cs, 0, 0xFFFF_FFFF, SEP_CODE));
     cpu.set_seg_cache(Seg::SS, SegCache::from_descriptor(cs.wrapping_add(8), 0, 0xFFFF_FFFF, SEP_STACK));
     cpu.cpl = 0;
@@ -631,15 +632,18 @@ pub fn syscall(cpu: &mut Cpu) -> CpuResult {
 }
 
 /// SYSRET (K6-2): the return from SYSCALL to level 3, as AMD's note has
-/// it: EIP gets ECX, CS the selector in STAR's bits 48 to 63, flat and
-/// 32-bit, and SS the selector after it with RPL 3, keeping the rest of
-/// the stack segment SYSCALL loaded; IF is set. #UD with EFER.SCE clear,
-/// #GP(0) at another level than 0.
+/// it: EIP gets ECX, CS the selector in STAR's bits 48 to 63 with RPL 3,
+/// flat and 32-bit, and SS the selector after it with RPL 3, keeping the
+/// rest of the stack segment SYSCALL loaded; IF is set. The note puts CPL
+/// at 3 whatever STAR's bits 48 and 49 hold, and those are CS's RPL bits.
+/// #UD with EFER.SCE clear, #GP(0) at another level than 0. The note's
+/// only #GP condition is the level, so SYSRET runs in real mode too (the
+/// later AMD64 manual adds a #GP there; the K6 note does not).
 pub fn sysret(cpu: &mut Cpu) -> CpuResult {
     require_syscall(cpu)?;
     require_cpl0(cpu)?;
     let cs = (cpu.k6.star >> 48) as u16;
-    cpu.set_seg_cache(Seg::CS, SegCache::from_descriptor(cs, 0, 0xFFFF_FFFF, SEP_CODE | SEP_DPL3));
+    cpu.set_seg_cache(Seg::CS, SegCache::from_descriptor(cs | 3, 0, 0xFFFF_FFFF, SEP_CODE | SEP_DPL3));
     let mut stack = *cpu.seg_cache(Seg::SS);
     stack.selector = cs.wrapping_add(8) | 3;
     cpu.set_seg_cache(Seg::SS, stack);

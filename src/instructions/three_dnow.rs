@@ -23,8 +23,8 @@
 
 use iced_x86::{CpuidFeature, Instruction, Mnemonic};
 
-use super::mmx::{enter_mmx, lanes, mm, read, set_mm, sx};
-use crate::cpu::{CR0_EM, CR0_TS, Cpu, CpuResult, FPU_TAG_EMPTY, Fault};
+use super::mmx::{enter_mmx, lanes, mm, read, require_mmx_state, set_mm, sx};
+use crate::cpu::{Cpu, CpuResult, FPU_TAG_EMPTY, Fault};
 
 const SIGN: u32 = 0x8000_0000;
 const EXPONENT: u32 = 0x7F80_0000;
@@ -36,12 +36,7 @@ pub fn three_dnow(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
     if !cpu.model.has_3dnow() || instr.cpuid_features() != [CpuidFeature::D3NOW] {
         return Err(Fault::UD);
     }
-    if cpu.cr0 & CR0_EM != 0 {
-        return Err(Fault::UD);
-    }
-    if cpu.cr0 & CR0_TS != 0 {
-        return Err(Fault::NM);
-    }
+    require_mmx_state(cpu)?;
     use Mnemonic::*;
     let mnemonic = instr.mnemonic();
     if mnemonic == Femms {
@@ -97,7 +92,7 @@ pub fn prefetch(cpu: &Cpu) -> CpuResult {
 /// `f` of the low numbers of `a` and `b` in the low half, of the high ones
 /// in the high half.
 fn pairs(a: u64, b: u64, f: impl Fn(u32, u32) -> u32) -> u64 {
-    join(f(a as u32, b as u32), f((a >> 32) as u32, (b >> 32) as u32))
+    lanes::<32>(a, b, |x, y| f(x as u32, y as u32) as u64)
 }
 
 fn join(lo: u32, hi: u32) -> u64 {

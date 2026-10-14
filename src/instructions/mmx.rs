@@ -26,12 +26,7 @@ pub fn mmx(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
     if !cpu.model.has_mmx() || instr.cpuid_features() != [CpuidFeature::MMX] {
         return Err(Fault::UD);
     }
-    if cpu.cr0 & CR0_EM != 0 {
-        return Err(Fault::UD);
-    }
-    if cpu.cr0 & CR0_TS != 0 {
-        return Err(Fault::NM);
-    }
+    require_mmx_state(cpu)?;
     use Mnemonic::*;
     let mnemonic = instr.mnemonic();
     if mnemonic == Emms {
@@ -108,12 +103,7 @@ pub fn mmx(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
 /// inserts and extracts, byte masks, and the stores that bypass the
 /// caches, MOVNTQ and MASKMOVQ.
 pub fn sse_integer(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
-    if cpu.cr0 & CR0_EM != 0 {
-        return Err(Fault::UD);
-    }
-    if cpu.cr0 & CR0_TS != 0 {
-        return Err(Fault::NM);
-    }
+    require_mmx_state(cpu)?;
     use Mnemonic::*;
     let mnemonic = instr.mnemonic();
     match mnemonic {
@@ -263,6 +253,18 @@ pub(super) fn mm(cpu: &Cpu, reg: Register) -> u64 {
 
 pub(super) fn set_mm(cpu: &mut Cpu, reg: Register, value: u64) {
     cpu.fpu_set_reg(reg as usize - Register::MM0 as usize, crate::f80::F80 { st: MMX_EXPONENT | value as u128 });
+}
+
+/// #UD with CR0.EM set and #NM with CR0.TS set, as for every MMX
+/// instruction.
+pub(super) fn require_mmx_state(cpu: &Cpu) -> CpuResult {
+    if cpu.cr0 & CR0_EM != 0 {
+        return Err(Fault::UD);
+    }
+    if cpu.cr0 & CR0_TS != 0 {
+        return Err(Fault::NM);
+    }
+    Ok(())
 }
 
 /// What every MMX instruction but EMMS does to the FPU: top of stack 0,
