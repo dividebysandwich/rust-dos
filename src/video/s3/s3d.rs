@@ -18,7 +18,8 @@
 //! two mipmap levels and V2TPP filters vertically; flat textures use
 //! DEST_SRC_STR's source stride; Gouraud triangles have no fog; and every
 //! video memory access is bounds checked, with pixels outside the 11-bit
-//! coordinate space discarded.
+//! coordinate space discarded. Unlike both, TBU and TBV offset only
+//! perspective triangles' texels.
 
 // Command Set register (B100h, B500h) fields.
 const CMD_AE: u32 = 1 << 0;
@@ -299,6 +300,7 @@ impl<'a, 'b> Context<'a, 'b> {
         self.filter = cmd_filter(cmd);
         self.max_d = cmd_mip_size(cmd).min(9) as i32;
         self.wrap = cmd & CMD_TWE != 0;
+        self.persp = matches!(cmd_command(cmd), LIT_TEX_TRI_PERSP | UNLIT_TEX_TRI_PERSP);
         self.palettized = self.tex_fmt == TEX_PAL8;
         // Palettized texels can only be used unfiltered (15.4.8.1).
         if self.palettized {
@@ -319,9 +321,19 @@ impl<'a, 'b> Context<'a, 'b> {
         }
         // Flat textures may have their own row pitch.
         self.flat_stride = if self.filter >= 4 { reg(0xE4) & 0xFF8 } else { 0 };
-        // TBU/TBV are (4+s).(16-s); the U/V accumulators are (4+s).(27-s).
-        self.tbu = ((reg(0x108) & 0xF_FFFF) << 11) as i32;
-        self.tbv = ((reg(0x104) & 0xF_FFFF) << 11) as i32;
+        // TBU/TBV are (4+s).(16-s), offsets for the perspective U/V, which
+        // are (4+s).(27-s) and so reach only 2^(4+s) texels. Without
+        // perspective the databook gives U and V as S12.8.11 (19.4), with 12
+        // integer bits of their own, and the bases don't apply: S3's
+        // Direct3D driver writes them only for perspective triangles, and
+        // its others draw with whatever the last perspective triangle left
+        // there. (sample_level still reads non-perspective U/V in the
+        // perspective scale, which matches S12.8.11 only for 256x256
+        // textures.)
+        if self.persp {
+            self.tbu = ((reg(0x108) & 0xF_FFFF) << 11) as i32;
+            self.tbv = ((reg(0x104) & 0xF_FFFF) << 11) as i32;
+        }
         self.tex_bdr_clr = reg(0xF0) & 0xFF_FFFF;
         let color = |c: u32| Color { r: (c >> 16 & 0xFF) as i32, g: (c >> 8 & 0xFF) as i32, b: (c & 0xFF) as i32, a: 255 };
         self.color0 = color(reg(0xF8));
@@ -479,11 +491,11 @@ impl<'a, 'b> Context<'a, 'b> {
             }
             let shift = 12 + self.max_d;
             (
-                ((at.u as i64 * w) >> shift) as i32 + self.tbu,
-                ((at.v as i64 * w) >> shift) as i32 + self.tbv,
+                (((at.u as i64 * w) >> shift) as i32).wrapping_add(self.tbu),
+                (((at.v as i64 * w) >> shift) as i32).wrapping_add(self.tbv),
             )
         } else {
-            (at.u.wrapping_add(self.tbu), at.v.wrapping_add(self.tbv))
+            (at.u, at.v)
         };
         // The mipmap level from D's integer part (S4.27).
         let mut level = self.max_d;
@@ -824,7 +836,6 @@ impl S3d {
             _ => return,
         }
         if c.textured {
-            c.persp = matches!(cmd_command(cmd), LIT_TEX_TRI_PERSP | UNLIT_TEX_TRI_PERSP);
             c.tex_blend = cmd_tex_blend(cmd);
             c.setup_texture(cmd, tri);
             c.fog = cmd & CMD_FE != 0;
@@ -1073,6 +1084,40 @@ mod tests {
         // Not the 3D engine's.
         assert_eq!(s.read(0xA4D8, 4), None);
         assert!(!s.write(0xA4D8, 0, 4, &mut t, &mut drew));
+    }
+
+    /// TBU and TBV (B508h, B504h) are in the (4+s).(16-s) format of the
+    /// perspective U and V, which need them (DB019-B 19.4, TBV, TBU, TdUdX).
+    /// Non-perspective U and V are S12.8.11 and take no base: S3's
+    /// Direct3D driver leaves the bases of the last perspective triangle in
+    /// place for them, and Expendable's HUD text came out a glyph row off.
+    #[test]
+    fn texture_bases_offset_only_perspective_triangles() {
+        let mut vram = vec![0u8; 1 << 20];
+        // A 4x4 ARGB1555 texture at 512 KB: row 0 red, row 1 green.
+        let tex = 0x8_0000;
+        for x in 0..4 {
+            vram[tex + x * 2..tex + x * 2 + 2].copy_from_slice(&0xFC00u16.to_le_bytes());
+            vram[tex + 8 + x * 2..tex + 8 + x * 2 + 2].copy_from_slice(&0x83E0u16.to_le_bytes());
+        }
+        // 16 bit destination, ARGB1555, mip size 2 (4x4), 1TPP, wrapped,
+        // no Z; lit triangles blend as decal, so they show the texel too.
+        let textured = |command: u32| {
+            CMD_3D | 1 << 2 | TEX_ARGB1555 << 5 | 2 << 8 | 4 << 12 | 2 << 15 | CMD_TWE | 3 << 24 | command << 27
+        };
+        let mut s = S3d::default();
+        tri(&mut s, &mut vram, 0xEC, tex as u32);
+        // U and V start at texel (0, 0); TBV is one texel down, 1.0 in
+        // (4+2).(16-2).
+        tri(&mut s, &mut vram, 0x104, 1 << 14);
+        tri(&mut s, &mut vram, 0x108, 0);
+        tri(&mut s, &mut vram, 0x114, 1 << 20);
+        for (command, want) in
+            [(UNLIT_TEX_TRI, 0x7C00), (LIT_TEX_TRI, 0x7C00), (UNLIT_TEX_TRI_PERSP, 0x03E0), (LIT_TEX_TRI_PERSP, 0x03E0)]
+        {
+            rectangle(&mut s, &mut vram, (0, 0, 0), 0, textured(command));
+            assert_eq!(pixel16(&vram, 15, 45), want, "command {command}: row 0 without perspective, row 1 with");
+        }
     }
 
     #[test]
