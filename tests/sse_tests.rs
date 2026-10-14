@@ -126,10 +126,7 @@ fn pentium_iii_msrs() {
         a.mov(dword_ptr(DATA + 8), eax)?;
         a.hlt()
     });
-    assert_eq!(
-        (rig.read32(DATA), rig.read32(DATA + 4), rig.read32(DATA + 8)),
-        (0xE, 0x1100_0000, 0)
-    );
+    assert_eq!((rig.read32(DATA), rig.read32(DATA + 4), rig.read32(DATA + 8)), (0xE, 0x1100_0000, 0));
     // The platform ID can't be written, and a Pentium II has none.
     for (model, write) in [(CpuModel::PentiumIII, true), (CpuModel::PentiumII, false)] {
         let mut rig = Rig::new();
@@ -137,11 +134,7 @@ fn pentium_iii_msrs() {
         rig.record(GP);
         rig.run(|a| {
             a.mov(ecx, 0x17u32)?;
-            if write {
-                a.wrmsr()?
-            } else {
-                a.rdmsr()?
-            }
+            if write { a.wrmsr()? } else { a.rdmsr()? }
             a.hlt()
         });
         assert_eq!(rig.recorded().0, GP as u32, "{model:?}");
@@ -196,19 +189,10 @@ fn raises(
 fn sse_needs_a_pentium_iii_osfxsr_and_no_em_or_ts() {
     let addps = |a: &mut CodeAssembler| a.addps(xmm0, xmm1);
     assert!(raises(CpuModel::PentiumII, 0, 0, UD, addps));
-    assert!(
-        raises(CpuModel::PentiumIII, 0, 0, UD, addps),
-        "without OSFXSR"
-    );
+    assert!(raises(CpuModel::PentiumIII, 0, 0, UD, addps), "without OSFXSR");
     assert!(!raises(CpuModel::PentiumIII, OSFXSR, 0, UD, addps));
-    assert!(
-        raises(CpuModel::PentiumIII, OSFXSR, 4, UD, addps),
-        "with EM"
-    );
-    assert!(
-        raises(CpuModel::PentiumIII, OSFXSR, 8, NM, addps),
-        "with TS"
-    );
+    assert!(raises(CpuModel::PentiumIII, OSFXSR, 4, UD, addps), "with EM");
+    assert!(raises(CpuModel::PentiumIII, OSFXSR, 8, NM, addps), "with TS");
     // The integer instructions on MMX registers are MMX instructions:
     // CR4 doesn't matter.
     let pavgb = |a: &mut CodeAssembler| a.pavgb(mm0, mm1);
@@ -223,8 +207,7 @@ fn sse_needs_a_pentium_iii_osfxsr_and_no_em_or_ts() {
     // SFENCE, and the prefetches, which a Pentium II runs as hinting NOPs.
     assert!(!raises(CpuModel::PentiumIII, 0, 0, UD, |a| a.sfence()));
     assert!(raises(CpuModel::PentiumII, 0, 0, UD, |a| a.sfence()));
-    assert!(!raises(CpuModel::PentiumIII, 0, 0, UD, |a| a
-        .prefetchnta(byte_ptr(0xFFFF_FFF0u32))));
+    assert!(!raises(CpuModel::PentiumIII, 0, 0, UD, |a| a.prefetchnta(byte_ptr(0xFFFF_FFF0u32))));
 }
 
 #[test]
@@ -239,10 +222,7 @@ fn sse2_is_undefined_on_a_pentium_iii() {
         &[0x66, 0x0F, 0xFC, 0xC1],
         &[0x66, 0x0F, 0xE0, 0xC1],
     ] {
-        assert!(
-            raises(CpuModel::PentiumIII, OSFXSR, 0, UD, |a| a.db(code)),
-            "{code:02X?}"
-        );
+        assert!(raises(CpuModel::PentiumIII, OSFXSR, 0, UD, |a| a.db(code)), "{code:02X?}");
     }
 }
 
@@ -280,23 +260,13 @@ fn packed_and_scalar_arithmetic() {
     for (i, b) in product.iter_mut().enumerate() {
         *b = rig.cpu.bus.read_8((DATA + 0x31) as usize + i);
     }
-    let product: Vec<f32> = product
-        .chunks(4)
-        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
-        .collect();
+    let product: Vec<f32> = product.chunks(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
     assert_eq!(product, [0.5, -8.0, 24.0, 64.0]);
     assert_eq!(read_ps(&rig, DATA + 0x50), [0.5, -2.0, 8.0 / 3.0, 4.0]);
-    assert_eq!(
-        read_ps(&rig, DATA + 0x60),
-        [1.0, 2f32.sqrt(), 3f32.sqrt(), 2.0]
-    );
+    assert_eq!(read_ps(&rig, DATA + 0x60), [1.0, 2f32.sqrt(), 3f32.sqrt(), 2.0]);
     assert_eq!(read_ps(&rig, DATA + 0x70), [0.5, 2.0, 3.0, 4.0]);
     assert_eq!(read_ps(&rig, DATA + 0x80), [0.5, -4.0, 3.0, 4.0]);
-    assert_eq!(
-        rig.cpu.sse.mxcsr,
-        0x1F80 | 0x20,
-        "8/3 and the square roots are inexact"
-    );
+    assert_eq!(rig.cpu.sse.mxcsr, 0x1F80 | 0x20, "8/3 and the square roots are inexact");
 }
 
 #[test]
@@ -312,11 +282,7 @@ fn a_misaligned_packed_operand_faults() {
         ("fxsave", &|a| a.fxsave(ptr(DATA + 8)), true),
     ];
     for (name, code, faults) in cases {
-        assert_eq!(
-            raises(CpuModel::PentiumIII, OSFXSR, 0, GP, code),
-            faults,
-            "{name}"
-        );
+        assert_eq!(raises(CpuModel::PentiumIII, OSFXSR, 0, GP, code), faults, "{name}");
     }
 }
 
@@ -324,11 +290,7 @@ fn a_misaligned_packed_operand_faults() {
 fn moves_shuffles_and_logic() {
     let mut rig = p3_rig();
     write_lanes(&mut rig, DATA, [0x11, 0x22, 0x33, 0x44]);
-    write_lanes(
-        &mut rig,
-        DATA + 0x10,
-        [0x8000_0055, 0x66, 0x8000_0077, 0x88],
-    );
+    write_lanes(&mut rig, DATA + 0x10, [0x8000_0055, 0x66, 0x8000_0077, 0x88]);
     rig.run(|a| {
         set_cr4(a, OSFXSR)?;
         a.movaps(xmm0, xmmword_ptr(DATA))?;
@@ -371,45 +333,18 @@ fn moves_shuffles_and_logic() {
         a.movaps(xmmword_ptr(DATA + 0xC0), xmm4)?;
         a.hlt()
     });
-    assert_eq!(
-        read_lanes(&rig, DATA + 0x20),
-        [0x11, 0x8000_0055, 0x22, 0x66]
-    );
-    assert_eq!(
-        read_lanes(&rig, DATA + 0x30),
-        [0x33, 0x8000_0077, 0x44, 0x88]
-    );
-    assert_eq!(
-        read_lanes(&rig, DATA + 0x40),
-        [0x44, 0x33, 0x66, 0x8000_0055]
-    );
-    assert_eq!(
-        read_lanes(&rig, DATA + 0x50),
-        [0x8000_0077, 0x88, 0x33, 0x44]
-    );
-    assert_eq!(
-        read_lanes(&rig, DATA + 0x60),
-        [0x8000_0055, 0x66, 0x11, 0x22]
-    );
-    assert_eq!(
-        read_lanes(&rig, DATA + 0x70),
-        [0x11, 0x22, 0x8000_0055, 0x66]
-    );
+    assert_eq!(read_lanes(&rig, DATA + 0x20), [0x11, 0x8000_0055, 0x22, 0x66]);
+    assert_eq!(read_lanes(&rig, DATA + 0x30), [0x33, 0x8000_0077, 0x44, 0x88]);
+    assert_eq!(read_lanes(&rig, DATA + 0x40), [0x44, 0x33, 0x66, 0x8000_0055]);
+    assert_eq!(read_lanes(&rig, DATA + 0x50), [0x8000_0077, 0x88, 0x33, 0x44]);
+    assert_eq!(read_lanes(&rig, DATA + 0x60), [0x8000_0055, 0x66, 0x11, 0x22]);
+    assert_eq!(read_lanes(&rig, DATA + 0x70), [0x11, 0x22, 0x8000_0055, 0x66]);
     assert_eq!(read_lanes(&rig, DATA + 0x80), [0x22, 0, 0, 0]);
-    assert_eq!(
-        read_lanes(&rig, DATA + 0x90),
-        [0x11, 0x66, 0x8000_0077, 0x88]
-    );
-    assert_eq!(
-        (rig.read32(DATA + 0xA0), rig.read32(DATA + 0xA4)),
-        (0x8000_0055, 0b0101)
-    );
+    assert_eq!(read_lanes(&rig, DATA + 0x90), [0x11, 0x66, 0x8000_0077, 0x88]);
+    assert_eq!((rig.read32(DATA + 0xA0), rig.read32(DATA + 0xA4)), (0x8000_0055, 0b0101));
     assert_eq!(read_lanes(&rig, DATA + 0xB0), [0x11, 0x22, 0x33, 0x00]);
     // (!a & b | a) ^ a = b & !a
-    assert_eq!(
-        read_lanes(&rig, DATA + 0xC0),
-        [0x8000_0044, 0x44, 0x8000_0044, 0x88]
-    );
+    assert_eq!(read_lanes(&rig, DATA + 0xC0), [0x8000_0044, 0x44, 0x8000_0044, 0x88]);
 }
 
 #[test]
@@ -458,17 +393,11 @@ fn compares_and_conversions() {
     });
     assert_eq!(read_lanes(&rig, DATA + 0x30), [!0, 0, 0, !0]);
     assert_eq!(read_lanes(&rig, DATA + 0x40), [0, !0, !0, !0]);
-    assert_eq!(
-        [0x50, 0x51, 0x52].map(|o| rig.read32(DATA + o) & 0xFF),
-        [1, 1, 0]
-    );
+    assert_eq!([0x50, 0x51, 0x52].map(|o| rig.read32(DATA + o) & 0xFF), [1, 1, 0]);
     assert_eq!((rig.read32(DATA + 0x54), rig.read32(DATA + 0x58)), (8, 7));
     assert_eq!(f32::from_bits(rig.read32(DATA + 0x5C)), -7.0);
     // The integers 7.5's bits make, and -7.
-    assert_eq!(
-        read_ps(&rig, DATA + 0x60)[..2],
-        [7.5f32.to_bits() as i32 as f32, -7.0]
-    );
+    assert_eq!(read_ps(&rig, DATA + 0x60)[..2], [7.5f32.to_bits() as i32 as f32, -7.0]);
     assert_eq!((rig.read32(DATA + 0x70), rig.read32(DATA + 0x74)), (1, 1));
     assert_eq!((rig.read32(DATA + 0x78), rig.read32(DATA + 0x7C)), (0, 2));
     // The NaN: LE raised the invalid flag, NEQ alone wouldn't have.
@@ -604,20 +533,12 @@ fn sse_integer_instructions_on_mmx_registers() {
     let sum = 0xFE + 1 + 1 + 3 + 0 + 0xF9 + 0 + 0x7F;
     assert_eq!(q(0x48), sum as u64);
     assert_eq!(q(0x50), 0x02FF_0403_0605_8070);
-    assert_eq!(
-        (rig.read32(DATA + 0x58), rig.read32(DATA + 0x5C)),
-        (0x8070, 0b1000_0001)
-    );
+    assert_eq!((rig.read32(DATA + 0x58), rig.read32(DATA + 0x5C)), (0x8070, 0b1000_0001));
     assert_eq!(q(0x60), 0x8070_1234_0403_02FF);
-    let mulhuw = [
-        (0x02FFu64, 0x0301u64),
-        (0x0403, 0x0102),
-        (0x0605, 0xFF05),
-        (0x8070, 0x0170),
-    ]
-    .iter()
-    .enumerate()
-    .fold(0, |r, (i, &(a, b))| r | ((a * b) >> 16) << (16 * i));
+    let mulhuw = [(0x02FFu64, 0x0301u64), (0x0403, 0x0102), (0x0605, 0xFF05), (0x8070, 0x0170)]
+        .iter()
+        .enumerate()
+        .fold(0, |r, (i, &(a, b))| r | ((a * b) >> 16) << (16 * i));
     assert_eq!(q(0x68), mulhuw);
     assert_eq!(q(0x20), 0x01FF_FFFF_FFFF_FF01);
 }
@@ -647,35 +568,14 @@ fn fxsave_and_fxrstor() {
         a.hlt()
     });
     assert_eq!(rig.read32(DATA) & 0xFFFF, 0x037F, "the control word");
-    assert_eq!(
-        rig.read32(DATA) >> 16 & 0x3800,
-        6 << 11,
-        "the top of stack in the status word"
-    );
-    assert_eq!(
-        rig.read32(DATA + 4) & 0xFF,
-        0xC0,
-        "registers 6 and 7 in use"
-    );
+    assert_eq!(rig.read32(DATA) >> 16 & 0x3800, 6 << 11, "the top of stack in the status word");
+    assert_eq!(rig.read32(DATA + 4) & 0xFF, 0xC0, "registers 6 and 7 in use");
     assert_eq!((rig.read32(DATA + 24), rig.read32(DATA + 28)), (0x7F80, 0));
     // ST0 (1.0) first: 80 bits, then 6 bytes of 0.
-    assert_eq!(
-        (
-            rig.read32(DATA + 32),
-            rig.read32(DATA + 36),
-            rig.read32(DATA + 40)
-        ),
-        (0, 0x8000_0000, 0x3FFF)
-    );
+    assert_eq!((rig.read32(DATA + 32), rig.read32(DATA + 36), rig.read32(DATA + 40)), (0, 0x8000_0000, 0x3FFF));
     assert_eq!(rig.read32(DATA + 44), 0);
     assert_eq!(read_lanes(&rig, DATA + 160 + 7 * 16), [1, 2, 3, 4]);
-    assert_eq!(
-        (
-            f32::from_bits(rig.read32(DATA + 0x430)),
-            f32::from_bits(rig.read32(DATA + 0x434))
-        ),
-        (1.0, 3.0)
-    );
+    assert_eq!((f32::from_bits(rig.read32(DATA + 0x430)), f32::from_bits(rig.read32(DATA + 0x434))), (1.0, 3.0));
     assert_eq!(read_lanes(&rig, DATA + 0x440), [1, 2, 3, 4]);
     assert_eq!(rig.read32(DATA + 0x450), 0x7F80);
 }
@@ -718,11 +618,7 @@ fn the_sse_state_goes_into_a_save_state() {
 /// instructions on MMX registers, and FXSAVE/FXRSTOR, in lockstep.
 #[test]
 fn the_recompiler_runs_sse_as_the_interpreter() {
-    rust_dos::hosttime::fix(
-        chrono::NaiveDate::from_ymd_opt(1999, 2, 26)
-            .unwrap()
-            .and_hms_opt(12, 34, 56),
-    );
+    rust_dos::hosttime::fix(chrono::NaiveDate::from_ymd_opt(1999, 2, 26).unwrap().and_hms_opt(12, 34, 56));
     let mut a = p3_rig();
     let mut b = p3_rig();
     a.cpu.core = CoreMode::Normal;

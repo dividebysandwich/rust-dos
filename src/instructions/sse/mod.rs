@@ -19,8 +19,8 @@ use super::fpu::control as status;
 use super::mmx;
 use super::operand::{effective_offset, mem_seg};
 use crate::cpu::{
-    Access, CR0_EM, CR0_TS, CR4_OSFXSR, CR4_OSXMMEXCPT, Cpu, CpuFlags, CpuResult, FPU_TAG_EMPTY,
-    FPU_TAG_VALID, Fault,
+    Access, CR0_EM, CR0_TS, CR4_OSFXSR, CR4_OSXMMEXCPT, Cpu, CpuFlags, CpuResult, FPU_TAG_EMPTY, FPU_TAG_VALID,
+    Fault,
 };
 use crate::f80::{F80, FPU_80_BITS_MAX};
 use float::Env;
@@ -34,8 +34,8 @@ pub fn sse(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
     use Mnemonic::*;
     let mnemonic = instr.mnemonic();
     match mnemonic {
-        Pavgb | Pavgw | Pextrw | Pinsrw | Pmaxsw | Pmaxub | Pminsw | Pminub | Pmovmskb
-        | Pmulhuw | Psadbw | Pshufw | Maskmovq | Movntq => return mmx::sse_integer(cpu, instr),
+        Pavgb | Pavgw | Pextrw | Pinsrw | Pmaxsw | Pmaxub | Pminsw | Pminub | Pmovmskb | Pmulhuw | Psadbw | Pshufw
+        | Maskmovq | Movntq => return mmx::sse_integer(cpu, instr),
         // Stores are done in order already.
         Sfence => return Ok(()),
         _ => {}
@@ -51,18 +51,12 @@ pub fn sse(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
         Movss => movss(cpu, instr),
         Movlps | Movhps => mov_half(cpu, instr, mnemonic == Movhps),
         Movhlps => {
-            let (a, b) = (
-                xmm(cpu, instr.op0_register()),
-                xmm(cpu, instr.op1_register()),
-            );
+            let (a, b) = (xmm(cpu, instr.op0_register()), xmm(cpu, instr.op1_register()));
             set_xmm(cpu, instr.op0_register(), (a & !LOW) | b >> 64);
             Ok(())
         }
         Movlhps => {
-            let (a, b) = (
-                xmm(cpu, instr.op0_register()),
-                xmm(cpu, instr.op1_register()),
-            );
+            let (a, b) = (xmm(cpu, instr.op0_register()), xmm(cpu, instr.op1_register()));
             set_xmm(cpu, instr.op0_register(), (a & LOW) | b << 64);
             Ok(())
         }
@@ -76,47 +70,29 @@ pub fn sse(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
         Andnps => bitwise(cpu, instr, |a, b| !a & b),
         Orps => bitwise(cpu, instr, |a, b| a | b),
         Xorps => bitwise(cpu, instr, |a, b| a ^ b),
-        Unpcklps => bitwise(cpu, instr, |a, b| {
-            lanes([lane(a, 0), lane(b, 0), lane(a, 1), lane(b, 1)])
-        }),
-        Unpckhps => bitwise(cpu, instr, |a, b| {
-            lanes([lane(a, 2), lane(b, 2), lane(a, 3), lane(b, 3)])
-        }),
+        Unpcklps => bitwise(cpu, instr, |a, b| lanes([lane(a, 0), lane(b, 0), lane(a, 1), lane(b, 1)])),
+        Unpckhps => bitwise(cpu, instr, |a, b| lanes([lane(a, 2), lane(b, 2), lane(a, 3), lane(b, 3)])),
         Shufps => {
             let n = instr.immediate8() as u32;
             let pick = move |v: u128, i: u32| lane(v, (n >> (2 * i) & 3) as usize);
-            bitwise(cpu, instr, move |a, b| {
-                lanes([pick(a, 0), pick(a, 1), pick(b, 2), pick(b, 3)])
-            })
+            bitwise(cpu, instr, move |a, b| lanes([pick(a, 0), pick(a, 1), pick(b, 2), pick(b, 3)]))
         }
         Addps | Addss => arith(cpu, instr, mnemonic == Addss, Env::add),
         Subps | Subss => arith(cpu, instr, mnemonic == Subss, Env::sub),
         Mulps | Mulss => arith(cpu, instr, mnemonic == Mulss, Env::mul),
         Divps | Divss => arith(cpu, instr, mnemonic == Divss, Env::div),
-        Minps | Minss => arith(cpu, instr, mnemonic == Minss, |e, a, b| {
-            e.min_max(a, b, false)
-        }),
-        Maxps | Maxss => arith(cpu, instr, mnemonic == Maxss, |e, a, b| {
-            e.min_max(a, b, true)
-        }),
+        Minps | Minss => arith(cpu, instr, mnemonic == Minss, |e, a, b| e.min_max(a, b, false)),
+        Maxps | Maxss => arith(cpu, instr, mnemonic == Maxss, |e, a, b| e.min_max(a, b, true)),
         Sqrtps | Sqrtss => arith(cpu, instr, mnemonic == Sqrtss, |e, _, b| e.sqrt(b)),
-        Rcpps | Rcpss => arith(cpu, instr, mnemonic == Rcpss, |_, _, b| {
-            float::reciprocal(b)
-        }),
-        Rsqrtps | Rsqrtss => arith(cpu, instr, mnemonic == Rsqrtss, |_, _, b| {
-            float::reciprocal_sqrt(b)
-        }),
+        Rcpps | Rcpss => arith(cpu, instr, mnemonic == Rcpss, |_, _, b| float::reciprocal(b)),
+        Rsqrtps | Rsqrtss => arith(cpu, instr, mnemonic == Rsqrtss, |_, _, b| float::reciprocal_sqrt(b)),
         Cmpps | Cmpss => {
             let p = instr.immediate8();
-            arith(cpu, instr, mnemonic == Cmpss, move |e, a, b| {
-                if e.compare(a, b, p) { !0 } else { 0 }
-            })
+            arith(cpu, instr, mnemonic == Cmpss, move |e, a, b| if e.compare(a, b, p) { !0 } else { 0 })
         }
         Comiss | Ucomiss => comiss(cpu, instr, mnemonic == Comiss),
         Cvtpi2ps | Cvtsi2ss => from_int(cpu, instr),
-        Cvtps2pi | Cvttps2pi | Cvtss2si | Cvttss2si => {
-            to_int(cpu, instr, matches!(mnemonic, Cvttps2pi | Cvttss2si))
-        }
+        Cvtps2pi | Cvttps2pi | Cvtss2si | Cvttss2si => to_int(cpu, instr, matches!(mnemonic, Cvttps2pi | Cvttss2si)),
         Ldmxcsr => {
             let lin = span(cpu, instr, 4, Access::Read, false)?;
             let value = cpu.lin_read_32(lin as usize);
@@ -152,20 +128,12 @@ fn lane(v: u128, i: usize) -> u32 {
 }
 
 fn lanes(l: [u32; 4]) -> u128 {
-    l.iter()
-        .enumerate()
-        .fold(0, |v, (i, &x)| v | (x as u128) << (32 * i))
+    l.iter().enumerate().fold(0, |v, (i, &x)| v | (x as u128) << (32 * i))
 }
 
 /// Check `len` bytes of the memory operand for `access`, 16-byte aligned
 /// if `aligned` (or #GP(0)), and give their linear address.
-fn span(
-    cpu: &mut Cpu,
-    instr: &Instruction,
-    len: u32,
-    access: Access,
-    aligned: bool,
-) -> CpuResult<u32> {
+fn span(cpu: &mut Cpu, instr: &Instruction, len: u32, access: Access, aligned: bool) -> CpuResult<u32> {
     let seg = mem_seg(instr);
     let off = effective_offset(cpu, instr);
     if aligned && cpu.seg_cache(seg).base.wrapping_add(off) & 15 != 0 {
@@ -175,9 +143,7 @@ fn span(
 }
 
 fn read_mem(cpu: &mut Cpu, lin: u32, len: u32) -> u128 {
-    (0..len / 4).fold(0, |v, i| {
-        v | (cpu.lin_read_32(lin.wrapping_add(4 * i) as usize) as u128) << (32 * i)
-    })
+    (0..len / 4).fold(0, |v, i| v | (cpu.lin_read_32(lin.wrapping_add(4 * i) as usize) as u128) << (32 * i))
 }
 
 fn write_mem(cpu: &mut Cpu, lin: u32, len: u32, value: u128) {
@@ -241,15 +207,8 @@ fn movss(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
             Ok(())
         }
         _ => {
-            let (a, b) = (
-                xmm(cpu, instr.op0_register()),
-                xmm(cpu, instr.op1_register()),
-            );
-            set_xmm(
-                cpu,
-                instr.op0_register(),
-                (a & !0xFFFF_FFFF) | (b & 0xFFFF_FFFF),
-            );
+            let (a, b) = (xmm(cpu, instr.op0_register()), xmm(cpu, instr.op1_register()));
+            set_xmm(cpu, instr.op0_register(), (a & !0xFFFF_FFFF) | (b & 0xFFFF_FFFF));
             Ok(())
         }
     }
@@ -292,26 +251,13 @@ fn commit(cpu: &mut Cpu, env: &Env) -> CpuResult {
 
 /// `f` of each single of the destination and the source, or of their low
 /// ones only (`scalar`, the destination's others staying).
-fn arith(
-    cpu: &mut Cpu,
-    instr: &Instruction,
-    scalar: bool,
-    f: impl Fn(&mut Env, u32, u32) -> u32,
-) -> CpuResult {
-    let b = if scalar {
-        source(cpu, instr, 1, 4, false)?
-    } else {
-        source(cpu, instr, 1, 16, true)?
-    };
+fn arith(cpu: &mut Cpu, instr: &Instruction, scalar: bool, f: impl Fn(&mut Env, u32, u32) -> u32) -> CpuResult {
+    let b = if scalar { source(cpu, instr, 1, 4, false)? } else { source(cpu, instr, 1, 16, true)? };
     let reg = instr.op0_register();
     let a = xmm(cpu, reg);
     let mut env = Env::new(cpu.sse.mxcsr);
     let mut result = [lane(a, 0), lane(a, 1), lane(a, 2), lane(a, 3)];
-    for (i, r) in result
-        .iter_mut()
-        .enumerate()
-        .take(if scalar { 1 } else { 4 })
-    {
+    for (i, r) in result.iter_mut().enumerate().take(if scalar { 1 } else { 4 }) {
         *r = f(&mut env, lane(a, i), lane(b, i));
     }
     commit(cpu, &env)?;
@@ -339,11 +285,7 @@ fn comiss(cpu: &mut Cpu, instr: &Instruction, signaling: bool) -> CpuResult {
 /// destination's other singles stay. From MMn, it is an MMX instruction
 /// to the FPU.
 fn from_int(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
-    let count = if instr.mnemonic() == Mnemonic::Cvtpi2ps {
-        2
-    } else {
-        1
-    };
+    let count = if instr.mnemonic() == Mnemonic::Cvtpi2ps { 2 } else { 1 };
     let b = source(cpu, instr, 1, 4 * count as u32, false)?;
     let reg = instr.op0_register();
     let a = xmm(cpu, reg);
@@ -409,13 +351,7 @@ pub fn fxsave(cpu: &mut Cpu, instr: &Instruction, restore: bool) -> CpuResult {
     if cpu.cr0 & (CR0_EM | CR0_TS) != 0 {
         return Err(Fault::NM);
     }
-    let lin = span(
-        cpu,
-        instr,
-        512,
-        if restore { Access::Read } else { Access::Write },
-        true,
-    )?;
+    let lin = span(cpu, instr, 512, if restore { Access::Read } else { Access::Write }, true)?;
     // ST(i) and XMMi take 16 bytes each.
     let slot = |base: u32, i: usize| lin.wrapping_add(base + 16 * i as u32);
     if restore {
@@ -428,11 +364,7 @@ pub fn fxsave(cpu: &mut Cpu, instr: &Instruction, restore: bool) -> CpuResult {
         status::set_status_word(cpu, sw);
         let tags = cpu.lin_read_8(lin as usize + 4);
         for i in 0..8 {
-            cpu.fpu_tags[i] = if tags >> i & 1 != 0 {
-                FPU_TAG_VALID
-            } else {
-                FPU_TAG_EMPTY
-            };
+            cpu.fpu_tags[i] = if tags >> i & 1 != 0 { FPU_TAG_VALID } else { FPU_TAG_EMPTY };
         }
         for i in 0..8 {
             let st = read_mem(cpu, slot(FX_ST, i), 16) & FPU_80_BITS_MAX;
@@ -445,19 +377,8 @@ pub fn fxsave(cpu: &mut Cpu, instr: &Instruction, restore: bool) -> CpuResult {
         }
     } else {
         let sw = status::status_word(cpu);
-        let tags = (0..8).fold(0u32, |t, i| {
-            t | ((cpu.fpu_tags[i] != FPU_TAG_EMPTY) as u32) << i
-        });
-        let header = [
-            cpu.fpu_control as u32 | (sw as u32) << 16,
-            tags,
-            0,
-            0,
-            0,
-            0,
-            cpu.sse.mxcsr,
-            0,
-        ];
+        let tags = (0..8).fold(0u32, |t, i| t | ((cpu.fpu_tags[i] != FPU_TAG_EMPTY) as u32) << i);
+        let header = [cpu.fpu_control as u32 | (sw as u32) << 16, tags, 0, 0, 0, 0, cpu.sse.mxcsr, 0];
         for (i, &dword) in header.iter().enumerate() {
             cpu.lin_write_32(lin as usize + 4 * i, dword);
         }
