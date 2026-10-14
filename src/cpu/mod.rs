@@ -1387,6 +1387,17 @@ impl Cpu {
         self.fpu_stack.get_f64(i)
     }
 
+    /// The FPU status word, with the stack top in bits 11-13.
+    pub fn fpu_status_word(&self) -> u16 {
+        crate::instructions::fpu::control::status_word(self)
+    }
+
+    /// The FPU tag word: two bits a physical register, 00 valid, 01 zero,
+    /// 10 special, 11 empty.
+    pub fn fpu_tag_word(&self) -> u16 {
+        crate::instructions::fpu::control::tag_word(self)
+    }
+
     /// Whether physical register `i`'s 80 bits hold more than its double
     /// (`FpuRegs::beyond_double`), whatever its tag.
     pub fn fpu_reg_beyond_double(&self, i: usize) -> bool {

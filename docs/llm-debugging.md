@@ -421,6 +421,16 @@ curl -s "$H/api/journal?after=$S&type=paused&wait=30000"   # long poll for the n
 - **Registers:** `GET /api/registers`, or
   `PUT /api/registers {"ax":"1234","flags":"0246"}`. Strings are hex; JSON
   numbers are decimal.
+- **FPU, MMX and SSE registers:** `GET /api/registers/fpu` has the x87
+  `control`, `status` and `tag` words, `top`, and `st`: ST(0) to ST(7),
+  each with the physical register it is (`reg`), its `tag` (`valid`,
+  `zero`, `special` or `empty`), its 80 `bits` and its `value` as a
+  double (null for a NaN, an infinity or a number beyond a double's range,
+  0 for one below a double's normal range). With MMX it adds `mm`, MM0 to
+  MM7 as 16 hex digits (the low 64 bits of physical registers 0 to 7,
+  whatever the stack top); with SSE, `xmm` (each register's `bits` and its
+  four singles, `ps`, low lane first, null for a NaN or an infinity) and
+  `mxcsr`. They are read only.
 - **Memory:**
   - Read with `GET /api/memory?addr=B800:0000&len=160`. `format` picks the
     reply: `hex` (the default) is a text dump in DEBUG's layout, `json` is
