@@ -16,7 +16,7 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
 
 ## Features
 
-* **CPU:** 386, 486, Pentium, Pentium MMX, Pentium Pro and Pentium II with FPU, protected mode, paging and
+* **CPU:** 386, 486, Pentium, Pentium MMX, AMD K6-2 (with 3DNow!), Pentium Pro, Pentium II and Pentium III (with SSE) with FPU, protected mode, paging and
   virtual-8086 mode for DOS extenders such as DOS/4GW (Descent, Heretic),
   and a dynamic recompiler for x86-64 and ARM64 hosts (see
   [docs/dynrec.md](docs/dynrec.md))
@@ -29,7 +29,8 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   accelerator, an [S3 ViRGE](CONFIGURATION.md#direct3d-on-an-s3-virge)
   whose 3D engine draws Direct3D in Windows 95, Hercules, the Tandy 1000's and IBM PCjr's 16-colour
   modes, and a [3dfx Voodoo Graphics](CONFIGURATION.md#3dfx-voodoo-graphics)
-  for Glide games in DOS and Windows 95, drawn by Rust-DOS or again by
+  for Glide games in DOS and Windows 95 and Direct3D games in
+  Windows 98, drawn by Rust-DOS or again by
   OpenGL at up to four times its resolution, and a
   [PowerVR PCX2](CONFIGURATION.md#powervr-pcx2) (Matrox m3D) and a
   [Rendition Vérité](CONFIGURATION.md#rendition-vérité) for DOS games'
@@ -296,8 +297,9 @@ A [game profile](CONFIGURATION.md#game-profiles) has slots of its own, in
 `states/<game>` beside the configuration file; otherwise they are in
 `states/dos`.
 
-* Loading a state puts its hardware settings back first. A state of a
-  machine with another memory size (`memsize`) isn't loaded.
+* Loading a state puts its hardware settings back first, the memory size
+  (`memsize`) and network card among them. (The libretro core loads only
+  states with its own memory size.)
 * Files on the host and in disk images aren't part of a state: what a
   program wrote since stays written, as in DOSBox. A system [booted from a
   disk image](CONFIGURATION.md#booting-a-disk-image) is the exception: its

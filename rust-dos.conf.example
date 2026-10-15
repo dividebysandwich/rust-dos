@@ -81,9 +81,11 @@
 #auto_fps=auto
 # Processor: 486 (the default, a 486DX with FPU), 386, pentium (with
 # CPUID, the time stamp counter, MSRs, CMPXCHG8B and 4 MB pages),
-# pentium_mmx (that Pentium with MMX), pentium_pro (the Pentium's with
-# CMOVcc, FCMOVcc and FCOMI, without MMX) or pentium_ii (the Pentium
-# Pro's with MMX and SYSENTER/SYSEXIT). None has SSE.
+# pentium_mmx (that Pentium with MMX), k6_2 (an AMD K6-2: the Pentium
+# MMX's with 3DNow! and SYSCALL/SYSRET), pentium_pro (the Pentium's with
+# CMOVcc, FCMOVcc and FCOMI, without MMX), pentium_ii (the Pentium
+# Pro's with MMX and SYSENTER/SYSEXIT) or pentium_iii (the Pentium II's
+# with SSE and FXSAVE/FXRSTOR).
 #cpu=486
 # What runs the programs' instructions:
 #   auto     the interpreter, and the dynamic recompiler for a program
@@ -166,8 +168,8 @@
 # while a video records.
 #record_shader=false
 # RAM in MB, from 2 to as much as the CPU's machines took: 64 on a 386,
-# 128 on a 486, 256 on a Pentium, 512 on a Pentium MMX, Pentium Pro or
-# Pentium II. Memory above the
+# 128 on a 486, 256 on a Pentium, 512 on a Pentium MMX, K6-2, Pentium
+# Pro, Pentium II or Pentium III. Memory above the
 # first megabyte is extended memory for DOS extenders and XMS.
 #memsize=16
 # Expanded memory (EMS 4.0), which many games of the early 1990s need: 16 KB
@@ -216,6 +218,9 @@
 # Say over the picture when the mouse is captured or let go: true (the
 # default) or false.
 #mouse_capture_messages=true
+# Pause the program while the settings window is open (but for the Mixer
+# and Stats pages; never in a LAN room): true (the default) or false.
+#pause_in_settings=true
 # Ask rust-dos.com at startup whether a newer version is out, and say so
 # over the picture and under the box above the first prompt: true (the
 # default) or false.

@@ -223,14 +223,8 @@ fn read_regs(id: &[u8; 4], body: &[u8], regs: &mut Regs) -> Result<(), String> {
 
 fn read_ram(body: &[u8], ram: &mut Vec<(u32, u8)>) -> Result<(), String> {
     let n = u32_at(body, 0)? as usize;
-    let entries = body
-        .get(4..4 + n * 5)
-        .ok_or_else(|| "truncated RAM chunk".to_string())?;
-    ram.extend(
-        entries
-            .chunks_exact(5)
-            .map(|e| (u32::from_le_bytes([e[0], e[1], e[2], e[3]]), e[4])),
-    );
+    let entries = body.get(4..4 + n * 5).ok_or_else(|| "truncated RAM chunk".to_string())?;
+    ram.extend(entries.as_chunks::<5>().0.iter().map(|e| (u32::from_le_bytes([e[0], e[1], e[2], e[3]]), e[4])));
     Ok(())
 }
 

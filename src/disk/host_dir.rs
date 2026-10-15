@@ -148,10 +148,11 @@ impl HostDirCache {
         // shows as a newer time on the next call.
         let entries: Rc<[(String, String)]> = read().into();
         let mut dirs = self.dirs.borrow_mut();
-        if dirs.len() >= Self::MAX_DIRS && !dirs.contains_key(dir) {
-            if let Some(dropped) = dirs.keys().next().cloned() {
-                dirs.remove(&dropped);
-            }
+        if dirs.len() >= Self::MAX_DIRS
+            && !dirs.contains_key(dir)
+            && let Some(dropped) = dirs.keys().next().cloned()
+        {
+            dirs.remove(&dropped);
         }
         dirs.insert(dir.to_path_buf(), HostDir { modified, changes, entries: entries.clone() });
         (entries, false)

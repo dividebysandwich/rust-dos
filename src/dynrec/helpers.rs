@@ -996,7 +996,7 @@ fn dev_write(cpu: &mut Cpu, ctx: &mut JitCtx, phys: u32, value: u32, size: u32) 
     guard(ctx, (), || match size {
         1 => _ = cpu.bus.write_8(p, value as u8),
         2 => _ = cpu.bus.write_16(p, value as u16),
-        _ => _ = cpu.bus.write_32(p, value),
+        _ => cpu.bus.write_32(p, value),
     });
     vga_state(cpu, ctx);
     (phys < ctx.smc_hi && phys.wrapping_add(size) > ctx.smc_lo) as u32

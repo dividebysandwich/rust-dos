@@ -568,9 +568,8 @@ mod tests {
     #[test]
     fn presets_send_the_synthesizers_and_line_out_changes_sides() {
         let mut mixer = Mixer::default();
-        let mut settings = MixerSettings::default();
-        settings.reverb = ReverbPreset::Large;
-        settings.chorus = ChorusPreset::Light;
+        let mut settings =
+            MixerSettings { reverb: ReverbPreset::Large, chorus: ChorusPreset::Light, ..Default::default() };
         mixer.set(settings);
         assert_eq!(mixer.reverb_send(Channel::Fm), 0.70);
         assert_eq!(mixer.reverb_send(Channel::Gus), 0.70);

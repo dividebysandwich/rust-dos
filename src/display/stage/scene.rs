@@ -729,7 +729,7 @@ impl Scene {
     pub fn surface_below(&self, point: Vec3, reach: f32) -> Option<Vec3> {
         let mut nearest: Option<f32> = None;
         for mesh in self.meshes.iter().filter(|m| self.materials[m.material].casts_shadow()) {
-            for tri in mesh.indices.chunks_exact(3) {
+            for tri in mesh.indices.as_chunks::<3>().0 {
                 let corners = [tri[0], tri[1], tri[2]].map(|i| Vec3::from(mesh.vertices[i as usize].position));
                 if let Some((t, _, _)) = super::pick::hit_triangle(point, Vec3::NEG_Y, corners)
                     && t <= reach
@@ -773,7 +773,7 @@ impl Scene {
             if self.materials[mesh.material].shading != Shading::Screen {
                 continue;
             }
-            for tri in mesh.indices.chunks_exact(3) {
+            for tri in mesh.indices.as_chunks::<3>().0 {
                 let corner = |i: u32| {
                     let v = &mesh.vertices[i as usize];
                     (Vec3::from(v.position), Vec2::from(v.uv))
@@ -1252,7 +1252,7 @@ fn is_window_name(name: &str) -> bool {
 /// Normals for a mesh that has none: each vertex's faces', by their area.
 fn smooth_normals(positions: &[Vec3], indices: &[u32]) -> Vec<Vec3> {
     let mut normals = vec![Vec3::ZERO; positions.len()];
-    for tri in indices.chunks_exact(3) {
+    for tri in indices.as_chunks::<3>().0 {
         let [a, b, c] = [tri[0], tri[1], tri[2]].map(|i| i as usize);
         let n = (positions[b] - positions[a]).cross(positions[c] - positions[a]);
         for i in [a, b, c] {
@@ -1428,8 +1428,10 @@ fn decode_image(data: &[u8]) -> Result<Image, String> {
         pixels.truncate(info.buffer_size());
         let rgba = match info.color_type {
             png::ColorType::Rgba => pixels,
-            png::ColorType::Rgb => pixels.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect(),
-            png::ColorType::GrayscaleAlpha => pixels.chunks_exact(2).flat_map(|p| [p[0], p[0], p[0], p[1]]).collect(),
+            png::ColorType::Rgb => pixels.as_chunks::<3>().0.iter().flat_map(|p| [p[0], p[1], p[2], 255]).collect(),
+            png::ColorType::GrayscaleAlpha => {
+                pixels.as_chunks::<2>().0.iter().flat_map(|p| [p[0], p[0], p[0], p[1]]).collect()
+            }
             png::ColorType::Grayscale => pixels.iter().flat_map(|&g| [g, g, g, 255]).collect(),
             png::ColorType::Indexed => return Err("an indexed PNG wasn't expanded".into()),
         };
@@ -1440,11 +1442,17 @@ fn decode_image(data: &[u8]) -> Result<Image, String> {
         let pixels = decoder.decode().map_err(|e| e.to_string())?;
         let info = decoder.info().ok_or("the JPEG has no header")?;
         let rgba = match info.pixel_format {
-            jpeg_decoder::PixelFormat::RGB24 => pixels.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect(),
+            jpeg_decoder::PixelFormat::RGB24 => {
+                pixels.as_chunks::<3>().0.iter().flat_map(|p| [p[0], p[1], p[2], 255]).collect()
+            }
             jpeg_decoder::PixelFormat::L8 => pixels.iter().flat_map(|&g| [g, g, g, 255]).collect(),
-            jpeg_decoder::PixelFormat::L16 => pixels.chunks_exact(2).flat_map(|p| [p[0], p[0], p[0], 255]).collect(),
+            jpeg_decoder::PixelFormat::L16 => {
+                pixels.as_chunks::<2>().0.iter().flat_map(|p| [p[0], p[0], p[0], 255]).collect()
+            }
             jpeg_decoder::PixelFormat::CMYK32 => pixels
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .flat_map(|p| {
                     let k = 255 - p[3] as u32;
                     let c = |x: u8| ((255 - x as u32) * k / 255) as u8;
@@ -1482,7 +1490,7 @@ mod tests {
     #[test]
     fn boxes_face_outwards() {
         let mesh = cuboid(Vec3::ZERO, Vec3::ONE, 0);
-        for tri in mesh.indices.chunks_exact(3) {
+        for tri in mesh.indices.as_chunks::<3>().0 {
             let [a, b, c] = [tri[0], tri[1], tri[2]].map(|i| Vec3::from(mesh.vertices[i as usize].position));
             let n = (b - a).cross(c - a);
             let mid = (a + b + c) / 3.0;

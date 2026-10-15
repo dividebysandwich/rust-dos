@@ -227,7 +227,7 @@ fn two_machines_play_over_a_null_modem_and_call_by_modem() {
             pass(bus, 1);
             pass(other, 1);
             ms += 1;
-            if ms % 10 == 0 {
+            if ms.is_multiple_of(10) {
                 std::thread::sleep(Duration::from_micros(200));
             }
             while bus.io_read(COM2 + 5) & 1 != 0 {

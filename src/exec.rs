@@ -157,8 +157,9 @@ impl Fetch {
         // SAFETY: we build a read-only view of the bus RAM that outlives the
         // mutable borrows of the CPU while instructions execute (which may
         // write RAM through `bus.write_8`). This is sound because:
-        //   1. The RAM buffer is allocated once in `Bus::new` and never
-        //      resized, so the pointer stays valid.
+        //   1. The RAM buffer is reallocated only by a state load, which
+        //      happens between batches, so the pointer stays valid while
+        //      this view lives.
         //   2. Emulation is single-threaded, so no concurrent access occurs.
         //   3. Reads go through this slice and writes through the bus, one
         //      after the other, never overlapping, and `u8` has no alignment
@@ -1152,8 +1153,8 @@ fn decode_cached<'a>(
         // Writes to the blocks the instruction is in must bump their
         // generations from now on (see `Bus::code_blocks`).
         let last = if slot.is_invalid() { 14 } else { slot.len() - 1 };
-        for block in (phys_ip >> GEN_SHIFT).saturating_sub(1)..=(phys_ip + last) >> GEN_SHIFT {
-            code_blocks[block] |= crate::bus::CODE_BLOCK;
+        for block in &mut code_blocks[(phys_ip >> GEN_SHIFT).saturating_sub(1)..=(phys_ip + last) >> GEN_SHIFT] {
+            *block |= crate::bus::CODE_BLOCK;
         }
     })
 }

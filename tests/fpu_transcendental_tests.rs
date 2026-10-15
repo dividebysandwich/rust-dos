@@ -1,6 +1,6 @@
 use rust_dos::cpu::{Cpu, FpuFlags};
 use rust_dos::f80::F80;
-use std::f64::consts::{PI, FRAC_PI_2, FRAC_PI_4};
+use std::f64::consts::{FRAC_1_SQRT_2, FRAC_PI_2, FRAC_PI_4, PI};
 
 mod testrunners;
 use testrunners::run_cpu_code;
@@ -71,10 +71,10 @@ fn test_fsincos_simultaneous() {
     run_cpu_code(&mut cpu, &[0xD9, 0xFB]);
 
     // Check Cosine at ST(0)
-    assert_f64_eq(cpu.fpu_get(0).get_f64(), 0.7071067, "ST(0) should be Cosine");
+    assert_f64_eq(cpu.fpu_get(0).get_f64(), FRAC_1_SQRT_2, "ST(0) should be Cosine");
     
     // Check Sine at ST(1)
-    assert_f64_eq(cpu.fpu_get(1).get_f64(), 0.7071067, "ST(1) should be Sine");
+    assert_f64_eq(cpu.fpu_get(1).get_f64(), FRAC_1_SQRT_2, "ST(1) should be Sine");
     
     // Check C2 cleared
     assert!(!cpu.get_fpu_flag(FpuFlags::C2));

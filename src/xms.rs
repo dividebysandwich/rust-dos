@@ -531,7 +531,7 @@ fn move_block(cpu: &mut Cpu) {
     let dst_handle = bus.read_16(params + 10);
     let dst_offset = bus.read_32(params + 12);
 
-    if length % 2 != 0 {
+    if !length.is_multiple_of(2) {
         fail(cpu, ERR_INVALID_LENGTH);
         return;
     }

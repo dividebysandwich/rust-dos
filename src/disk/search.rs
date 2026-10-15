@@ -298,7 +298,7 @@ impl DiskController {
                         if pc == '?' {
                             continue;
                         }
-                        if pc.to_ascii_uppercase() != fc.to_ascii_uppercase() {
+                        if !pc.eq_ignore_ascii_case(&fc) {
                             return false;
                         }
                     }

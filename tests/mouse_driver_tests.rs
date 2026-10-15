@@ -13,8 +13,8 @@ fn call(cpu: &mut Cpu, function: u16) {
 fn dos4gw_can_allocate_an_unused_mouse_callback_vector() {
     let cpu = Cpu::new(PathBuf::from("."));
     let ivt = rust_dos::bios::default_ivt();
-    for vector in 0x60..=0x65 {
-        assert_eq!(ivt[vector], 0);
+    for (vector, &entry) in ivt.iter().enumerate().take(0x66).skip(0x60) {
+        assert_eq!(entry, 0);
         assert_eq!(cpu.bus.read_32(vector * 4), 0);
     }
     assert_ne!(ivt[0x67], 0, "EMS remains installed");

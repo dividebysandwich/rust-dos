@@ -65,7 +65,7 @@ pub fn take(
 /// in `folder`, on a thread of its own.
 fn save(rgba: Vec<u8>, folder: PathBuf, said: impl FnOnce(String) + Send + 'static) {
     let _ = std::thread::Builder::new().name("vr-photo".into()).spawn(move || {
-        let rgb: Vec<u8> = rgba.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+        let rgb: Vec<u8> = rgba.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
         let frame = rust_dos::video::Frame::from_rgb(SIZE, SIZE, rgb);
         let saved = rust_dos::capture::capture_path(&folder, "photo", "png").and_then(|path| {
             rust_dos::capture::png::save(&frame, &path)?;

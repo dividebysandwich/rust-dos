@@ -116,10 +116,7 @@ fn find_child_load_segment(cpu: &mut Cpu) -> Option<u16> {
 
     // Grab the whole block — DOS convention is "give the child everything;
     // the child's own startup will AH=4A down to what it needs".
-    match crate::mcb::alloc(&mut cpu.bus, 0xFFFF, largest) {
-        Ok(seg) => Some(seg),
-        Err(_) => None,
-    }
+    crate::mcb::alloc(&mut cpu.bus, 0xFFFF, largest).ok()
 }
 
 /// 0-based drive for a DOS drive code where 0 = default, 1 = A:, ...
@@ -856,7 +853,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                         cpu.bus.guest_write_16(param_phys + 0x10, stack.0);
                         cpu.bus.guest_write_16(param_phys + 0x12, entry.1);
                         cpu.bus.guest_write_16(param_phys + 0x14, entry.0);
-                        let parent = cpu.process_stack.last().expect("context saved above").regs.clone();
+                        let parent = cpu.process_stack.last().expect("context saved above").regs;
                         let heap_pointer = cpu.heap_pointer;
                         cpu.restore(&parent);
                         cpu.heap_pointer = heap_pointer;
@@ -1806,7 +1803,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                     let search_drive = parse_drive_prefix(&search_pattern)
                         .0
                         .unwrap_or(cpu.bus.disk.get_current_drive());
-                    cpu.bus.guest_write_8((dta_phys + 0) as u32, search_drive + 1);
+                    cpu.bus.guest_write_8(dta_phys as u32, search_drive + 1);
                     cpu.bus.guest_write_8((dta_phys + OFFSET_ATTR_SEARCH) as u32, search_attr as u8);
                     cpu.bus.guest_write_16((dta_phys + OFFSET_INDEX) as u32, (index + 1) as u16);
 
@@ -1814,17 +1811,15 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                     // FindNext must NOT overwrite the pattern it uses for searching!
                     if ah == 0x4E {
                         // Extract filename part from search_pattern (which is raw path for 4E)
-                        let filename_part = if let Some(idx) =
-                            search_pattern.rfind(|c| c == '\\' || c == '/' || c == ':')
-                        {
+                        let filename_part = if let Some(idx) = search_pattern.rfind(['\\', '/', ':']) {
                             &search_pattern[idx + 1..]
                         } else {
                             &search_pattern
                         };
 
                         let fcb_bytes = pattern_to_fcb(filename_part);
-                        for i in 0..11 {
-                            cpu.bus.guest_write_8((dta_phys + 1 + i) as u32, fcb_bytes[i]);
+                        for (i, &byte) in fcb_bytes.iter().enumerate() {
+                            cpu.bus.guest_write_8((dta_phys + 1 + i) as u32, byte);
                         }
                     }
 
@@ -1836,10 +1831,10 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
 
                     // Store Directory Context if FindFirst (AH=4E), fully
                     // qualified with drive and current directory.
-                    if ah == 0x4E {
-                        if let Some(dir) = cpu.bus.disk.qualify_directory(&search_pattern) {
-                            cpu.bus.search_handles.insert(unique_id, dir);
-                        }
+                    if ah == 0x4E
+                        && let Some(dir) = cpu.bus.disk.qualify_directory(&search_pattern)
+                    {
+                        cpu.bus.search_handles.insert(unique_id, dir);
                     }
                     cpu.bus.guest_write_16((dta_phys + 19) as u32, (index as u16).wrapping_mul(3));
 
@@ -1858,8 +1853,8 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                     }
                     let name_bytes = entry.filename.as_bytes();
                     let len = std::cmp::min(name_bytes.len(), 12);
-                    for i in 0..len {
-                        cpu.bus.guest_write_8((name_start + i) as u32, name_bytes[i]);
+                    for (i, &byte) in name_bytes[..len].iter().enumerate() {
+                        cpu.bus.guest_write_8((name_start + i) as u32, byte);
                     }
 
                     cpu.set_reg16(Register::AX, 0);
@@ -2019,7 +2014,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 }
                 0x03 if cpu.bx() <= 1 => {
                     let on = cpu.bx() == 1;
-                    crate::mcb::link_upper(&mut cpu.bus, on).is_ok()
+                    crate::mcb::link_upper(&mut cpu.bus, on)
                 }
                 _ => false,
             };

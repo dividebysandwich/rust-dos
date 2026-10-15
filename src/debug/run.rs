@@ -501,15 +501,13 @@ impl DebugHub {
             let meta = self.meta(&ctx);
             let _ = w.send(Answer { reply: Reply::Frame(screen.clone()), meta });
         }
-        if let Some(shared) = &self.shared {
-            if shared.screen_subscribers.load(Ordering::Relaxed) > 0 {
-                if let Ok(mut frame) = shared.frame.lock() {
-                    if *frame != *screen {
-                        frame.clone_from(screen);
-                        shared.frame_seq.fetch_add(1, Ordering::Release);
-                    }
-                }
-            }
+        if let Some(shared) = &self.shared
+            && shared.screen_subscribers.load(Ordering::Relaxed) > 0
+            && let Ok(mut frame) = shared.frame.lock()
+            && *frame != *screen
+        {
+            frame.clone_from(screen);
+            shared.frame_seq.fetch_add(1, Ordering::Release);
         }
     }
 

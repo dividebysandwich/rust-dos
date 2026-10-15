@@ -416,7 +416,7 @@ impl VoodooGl {
     fn stage_rows(&mut self, key: Option<u32>, pixels: &[u16]) {
         let (w, h) = (self.width, self.height);
         let staging = self.staging(key);
-        for (out, &value) in staging.rgba.chunks_exact_mut(4).zip(pixels) {
+        for (out, &value) in staging.rgba.as_chunks_mut::<4>().0.iter_mut().zip(pixels) {
             out.copy_from_slice(&rgba(key, value));
         }
         staging.dirty = Some([0, w, 0, h]);
@@ -491,9 +491,9 @@ impl VoodooGl {
     }
 
     fn upload(&mut self, gl: &glow::Context, texture: &Texture) {
-        if !self.textures.contains_key(&texture.id) {
+        if let std::collections::hash_map::Entry::Vacant(e) = self.textures.entry(texture.id) {
             let Ok(t) = self::texture(gl, glow::NEAREST) else { return };
-            self.textures.insert(texture.id, GlTexture { texture: t, params: None, lod: None, anisotropy: None });
+            e.insert(GlTexture { texture: t, params: None, lod: None, anisotropy: None });
         }
         let Some(entry) = self.textures.get_mut(&texture.id) else { return };
         // SAFETY: see `VoodooGl`.
@@ -595,11 +595,11 @@ impl VoodooGl {
                 units |= 1 << unit;
                 gl.active_texture(glow::TEXTURE1 + unit as u32);
                 gl.bind_texture(glow::TEXTURE_2D, Some(texture.texture));
-                if let Some(anisotropy) = self.texture_anisotropy {
-                    if texture.anisotropy != Some(anisotropy) {
-                        gl.tex_parameter_f32(glow::TEXTURE_2D, TEXTURE_MAX_ANISOTROPY, anisotropy);
-                        texture.anisotropy = Some(anisotropy);
-                    }
+                if let Some(anisotropy) = self.texture_anisotropy
+                    && texture.anisotropy != Some(anisotropy)
+                {
+                    gl.tex_parameter_f32(glow::TEXTURE_2D, TEXTURE_MAX_ANISOTROPY, anisotropy);
+                    texture.anisotropy = Some(anisotropy);
                 }
                 let wrap = |clamp: bool| if clamp { glow::CLAMP_TO_EDGE } else { glow::REPEAT };
                 let (min, mag) = sampling_filters(t.mode, t.unfiltered, self.texture_anisotropy);

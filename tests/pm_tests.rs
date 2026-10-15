@@ -285,7 +285,7 @@ fn call_gate_to_ring_0_copies_parameters_and_returns_to_ring_3() {
         a.mov(es, ax)?;
         a.push(0x1111u32)?;
         a.push(0x2222u32)?;
-        a.call_far((FREE | 3) as u16, 0)?;
+        a.call_far(FREE | 3, 0)?;
         a.mov(ebx, esp)?;
         a.mov(ecx, ss)?;
         a.int(0x40)
@@ -1456,7 +1456,7 @@ fn a_segment_loaded_again_after_its_table_was_mapped_elsewhere_uses_the_new_page
         a.mov(ebx, dword_ptr(0))?;
         a.mov(ax, DATA32 as u32)?;
         a.mov(es, ax)?;
-        a.mov(dword_ptr(0x81000u64).es(), (copy | 3) as u32)?;
+        a.mov(dword_ptr(0x81000u64).es(), copy | 3)?;
         a.invlpg(ptr(GDT).es())?;
         a.mov(ax, FREE as u32)?;
         a.mov(ds, ax)?;

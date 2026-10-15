@@ -245,7 +245,23 @@ pub struct SoundBlaster {
     pub irq: Option<u8>,
     dma8: Option<u8>,
     dma16: Option<u8>,
+    /// Command E2h (DMA identification): the running value its answers
+    /// come from, the number of times it ran, and the answer waiting for
+    /// the 8-bit DMA channel to take it.
+    e2_value: u8,
+    e2_count: u8,
+    e2_pending: Option<u8>,
 }
+
+/// What each parameter bit of command E2h adds to its running value, for
+/// the four calls in turn, and what each call adds besides (the last
+/// column), as DOSBox and DOSBox-X have it from real cards.
+const E2_ADD: [[i16; 9]; 4] = [
+    [0x01, -0x02, -0x04, 0x08, -0x10, 0x20, 0x40, -0x80, -106],
+    [-0x01, 0x02, -0x04, 0x08, 0x10, -0x20, 0x40, -0x80, 165],
+    [-0x01, 0x02, 0x04, -0x08, 0x10, -0x20, -0x40, 0x80, -151],
+    [0x01, -0x02, 0x04, -0x08, -0x10, 0x20, -0x40, 0x80, 90],
+];
 
 /// While a transfer runs, emulated time is cut into slots of `BUSY_TICKS`
 /// PIT ticks (about 3.4 us), and the write status reads busy in about one
@@ -302,6 +318,9 @@ impl SoundBlaster {
             irq: Some(config.irq),
             dma8: Some(config.dma8),
             dma16: Some(config.dma16),
+            e2_value: 0xAA,
+            e2_count: 0,
+            e2_pending: None,
         };
         sb.reset_mixer();
         sb
@@ -348,6 +367,36 @@ impl SoundBlaster {
         self.sb16_rate = None;
         self.pending_left = None;
         self.dac = 0;
+        self.e2_pending = None;
+    }
+
+    /// Write the answer of command E2h to memory once the 8-bit DMA
+    /// channel is unmasked. Returns the memory written. A channel set to
+    /// read memory or to verify takes the byte as one transfer and leaves
+    /// memory alone, as the 8237 does in those modes.
+    pub fn dma_write(&mut self, dma: &mut Dma, ram: &mut [u8]) -> Option<std::ops::Range<usize>> {
+        let byte = self.e2_pending?;
+        let ch = self.dma8.map(usize::from).filter(|&ch| dma.ready(ch))?;
+        if dma.channel(ch).mode & 0x0C != 0x04 {
+            dma.transfer_skip(ch, 1);
+            self.e2_pending = None;
+            return None;
+        }
+        let (moved, _, written) = dma.transfer_write(ch, ram, &[byte]);
+        if moved == 1 {
+            self.e2_pending = None;
+        }
+        written
+    }
+
+    /// Start command E2h's sequence over, as after a power-on. A loaded
+    /// state does this: the sequence isn't saved, and keeping the running
+    /// machine's would make the answers depend on what ran before the
+    /// load.
+    pub fn restart_dma_identification(&mut self) {
+        self.e2_value = 0xAA;
+        self.e2_count = 0;
+        self.e2_pending = None;
     }
 
     /// Whether the DSP is in high-speed mode: a transfer that a high-speed
@@ -708,7 +757,7 @@ impl SoundBlaster {
             // DSP_cmd_len_sb16).
             0x04 | 0x08 | 0x0F | 0xF9 if sb16 => 1,
             0x05 | 0x0E | 0xFA if sb16 => 2,
-            0x10 | 0x38 | 0x40 | 0xE0 | 0xE4 => 1,
+            0x10 | 0x38 | 0x40 | 0xE0 | 0xE2 | 0xE4 => 1,
             0x14 | 0x16 | 0x17 | 0x24 | 0x48 | 0x74..=0x77 | 0x80 => 2,
             0x41 | 0x42 if sb16 => 2,
             0xB0..=0xCF if sb16 => 3,
@@ -832,7 +881,34 @@ impl SoundBlaster {
                     t.last_block = true;
                 }
             }
+            // Continue auto-init (SB16): take back an exit asked for with
+            // DAh (8-bit) or D9h (16-bit) while the block still runs.
+            0x45 | 0x47 if sb16 => {
+                if let Some(t) = &mut self.transfer
+                    && t.auto_init
+                    && t.bits16 == (cmd == 0x47)
+                {
+                    t.last_block = false;
+                }
+            }
             0xE0 => self.read_buf.push_back(!self.params[0]),
+            // DMA identification: a byte made from the parameter and the
+            // calls before goes to memory on the 8-bit DMA channel.
+            // Creative's CT-VOICE.DRV has the answers overwrite an entry
+            // of its own function table, so only a card that answers like
+            // Creative's leaves it a working play routine.
+            0xE2 => {
+                let add = &E2_ADD[(self.e2_count % 4) as usize];
+                let mut value = self.e2_value as i16;
+                for (bit, step) in add[..8].iter().enumerate() {
+                    if self.params[0] >> bit & 1 != 0 {
+                        value += step;
+                    }
+                }
+                self.e2_value = (value + add[8]) as u8;
+                self.e2_count = self.e2_count.wrapping_add(1);
+                self.e2_pending = Some(self.e2_value);
+            }
             0xE1 => {
                 let (major, minor) = self.config.model.dsp_version();
                 self.read_buf.push_back(major);
@@ -879,7 +955,9 @@ rust_dos_savestate::state_fields!(SoundBlaster {
     block_size, transfer, silence, irq8, irq16, last_ticks, frac, dac, out, out_rate, pending_left,
     mixer_index, mixer, asp_mode, asp_regs, mem8051, irq, dma8, dma16,
 } skip {
-    config,
+    // E2h's state isn't kept, so states saved before it load: the bus
+    // starts its sequence over after a load (restart_dma_identification).
+    config, e2_value, e2_count, e2_pending,
 });
 
 #[cfg(test)]

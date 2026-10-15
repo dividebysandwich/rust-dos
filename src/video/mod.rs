@@ -868,7 +868,7 @@ fn render_graphics_mode(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus: &B
                 *pair = [r, g, b, r, g, b];
             }
         } else {
-            for (pixel, &x) in dst.chunks_exact_mut(3).zip(&columns) {
+            for (pixel, &x) in dst.as_chunks_mut::<3>().0.iter_mut().zip(&columns) {
                 pixel.copy_from_slice(&colors[line[x] as usize]);
             }
         }
@@ -1394,8 +1394,17 @@ mod planar_tests {
                     for row in [0usize, 1, 199, 479] {
                         let mut line = vec![0u8; width + 16];
                         planar_row(&vram, plane_size, base + row * bpr, pan, width, &mut line);
-                        for x in 0..width {
-                            assert_eq!(line[x], planar_pixel(&vram, bpr, x + pan, row, base), "w {} pan {} base {:X} row {} x {}", width, pan, base, row, x);
+                        for (x, &pixel) in line.iter().enumerate().take(width) {
+                            assert_eq!(
+                                pixel,
+                                planar_pixel(&vram, bpr, x + pan, row, base),
+                                "w {} pan {} base {:X} row {} x {}",
+                                width,
+                                pan,
+                                base,
+                                row,
+                                x
+                            );
                         }
                     }
                 }

@@ -110,6 +110,7 @@ fn router(state: AppState) -> Router {
         .route("/api/control/{action}", post(control))
         .route("/api/control/wait", get(wait_pause))
         .route("/api/registers", get(regs_get).put(regs_put))
+        .route("/api/registers/fpu", get(fpu_get))
         .route("/api/memory", get(mem_get).put(mem_put))
         .route("/api/disasm", get(disasm))
         .route("/api/breakpoints", get(bp_list).post(bp_add).delete(bp_remove))
@@ -1400,6 +1401,10 @@ async fn regs_get(State(s): State<AppState>) -> ApiResult {
     s.call_json(Cmd::GetRegs, DEFAULT_TIMEOUT).await
 }
 
+async fn fpu_get(State(s): State<AppState>) -> ApiResult {
+    s.call_json(Cmd::GetFpu, DEFAULT_TIMEOUT).await
+}
+
 async fn regs_put(State(s): State<AppState>, body: Bytes) -> ApiResult {
     let Value::Object(map) = parse_body(&body)? else {
         return Err(bad("expected a JSON object of register: value"));
@@ -1487,7 +1492,7 @@ fn hex_data(h: &str) -> Result<Vec<u8>, ApiError> {
         }
         prev = Some(c);
     }
-    if clean.len() % 2 != 0 {
+    if !clean.len().is_multiple_of(2) {
         return Err(bad("hex data must have an even number of digits"));
     }
     Ok((0..clean.len()).step_by(2).map(|i| u8::from_str_radix(&clean[i..i + 2], 16).unwrap()).collect())
@@ -2191,6 +2196,8 @@ EXECUTION CONTROL
                                                      (a stop before the request is missed:
                                                      use after= or op=)
   GET  /api/registers        PUT /api/registers {"ax":"1234","flags":"0202"}
+  GET  /api/registers/fpu    the x87 words and ST(0)-ST(7), MM0-MM7 with MMX,
+                             XMM0-XMM7 and MXCSR with SSE
   GET  /api/memory?addr=DS:SI&len=256[&format=hex|json|base64|raw]
                              hex (the default): a text dump; raw: the bytes;
                              json: {"addr","len","hex":"41 1F"}; base64:
@@ -2266,8 +2273,8 @@ DRIVES
 SAVE STATES
   POST   /api/state/save {"path":"/tmp/keen.state"}  save the machine to a file
   POST   /api/state/load {"path":"/tmp/keen.state"}  load one: its hardware
-                   settings, then the machine and its drives (the same
-                   memsize only). Breakpoints and watchpoints stay.
+                   settings (memsize too), then the machine and its
+                   drives. Breakpoints and watchpoints stay.
                    "differences" lists the hardware settings, drives,
                    folders, images, files and deterministic start time
                    that differed from this machine's, if any. A failed load

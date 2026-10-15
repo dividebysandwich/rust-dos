@@ -185,7 +185,9 @@ mod tests {
 
     /// The frames of a GIF file: (width, height, delay, first pixel's
     /// palette colour).
-    fn frames_of(path: &Path) -> (u16, u16, Vec<(u16, u16, u16, [u8; 3])>) {
+    type GifFrame = (u16, u16, u16, [u8; 3]);
+
+    fn frames_of(path: &Path) -> (u16, u16, Vec<GifFrame>) {
         let mut options = gif::DecodeOptions::new();
         options.set_color_output(gif::ColorOutput::RGBA);
         let mut decoder = options.read_info(File::open(path).unwrap()).unwrap();

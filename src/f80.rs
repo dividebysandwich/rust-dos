@@ -27,6 +27,12 @@ pub struct F80 {
     pub st: u128,
 }
 
+impl Default for F80 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl F80 {
     pub fn new() -> Self {
         F80 { st: 0 }
@@ -83,8 +89,8 @@ impl F80 {
 
     pub fn get_bytes(&self) -> [u8; 10] {
         let mut bytes = [0u8; 10];
-        for i in 0..10 {
-            bytes[i] = ((self.st >> (8 * i)) & 0xFF) as u8;
+        for (i, byte) in bytes.iter_mut().enumerate() {
+            *byte = ((self.st >> (8 * i)) & 0xFF) as u8;
         }
         bytes
     }
@@ -106,7 +112,7 @@ impl F80 {
 
     #[allow(dead_code)]
     pub fn fix(&mut self) {
-        self.st = self.st & FPU_80_BITS_MAX;
+        self.st &= FPU_80_BITS_MAX;
     }
 
     pub fn is_negative(&self) -> bool {
@@ -170,7 +176,7 @@ impl F80 {
     }
 
     fn get_mantissa_with_integer_bit(&self) -> u64 {
-        let mantissa = (self.st & MANTISSA_MASK_NOINT) >> 0;
+        let mantissa = self.st & MANTISSA_MASK_NOINT;
         let int_bit = ((self.st & INT_BIT_MASK) >> 63) as u64;
         (mantissa as u64) | (int_bit << 63)
     }
@@ -210,7 +216,7 @@ impl F80 {
             }
             sign = a_sign;
         } else {
-            let difference = if a_man >= b_man { a_man - b_man } else { b_man - a_man };
+            let difference = a_man.abs_diff(b_man);
             if difference == 0 {
                 (sign, man, exp) = (false, 0, 0);
             } else {
@@ -264,13 +270,13 @@ impl F80 {
         let mut val = self.to_integer_u128();
         let mut bcd = [0u8; 10];
 
-        for i in 0..9 {
+        for byte in &mut bcd[..9] {
             let lo = (val % 10) as u8;
             val /= 10;
             let hi = (val % 10) as u8;
             val /= 10;
 
-            bcd[i] = (hi << 4) | lo;
+            *byte = (hi << 4) | lo;
         }
 
         bcd[9] = if self.is_negative() { BCD_SIGN } else { 0 };

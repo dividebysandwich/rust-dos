@@ -69,7 +69,9 @@ fn test_fcom_memory_float32() {
     let addr = 0x1000;
     let val_f32 = 10.0f32;
     let bytes = val_f32.to_le_bytes();
-    for i in 0..4 { cpu.bus.write_8(addr + i, bytes[i]); }
+    for (i, &byte) in bytes.iter().enumerate() {
+        cpu.bus.write_8(addr + i, byte);
+    }
 
     // D8 16 00 10: FCOM DWORD PTR [1000]
     // Compare 5.0 vs 10.0 -> Less Than -> C0=1
@@ -87,7 +89,9 @@ fn test_fcom_memory_float64() {
     let addr = 0x1000;
     let val_f64 = 20.0f64;
     let bytes = val_f64.to_le_bytes();
-    for i in 0..8 { cpu.bus.write_8(addr + i, bytes[i]); }
+    for (i, &byte) in bytes.iter().enumerate() {
+        cpu.bus.write_8(addr + i, byte);
+    }
 
     // DC 16 00 10: FCOM QWORD PTR [1000]
     // Compare 20.0 vs 20.0 -> Equal -> C3=1

@@ -13,6 +13,8 @@ of their own. See the [README](README.md) for everything else.
 * [Game profiles](#game-profiles) and [RetroAchievements](#retroachievements)
 * [Mounting drives](#mounting-drives), [disk images](#disk-images) and
   [disk speed and noises](#disk-speed-and-noises)
+* [Networking at a glance](#networking-at-a-glance): what the IPX driver,
+  rooms, relays and the network card each do
 * [Playing over a LAN](#playing-over-a-lan), [serial and modem
   games](#serial-and-modem-games) and [a relay on a
   server](#a-relay-on-a-server)
@@ -155,16 +157,35 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   instructions and so runs at the `cycles` speed, its MSRs, CMPXCHG8B and
   4 MB pages, without the virtual-8086 mode extensions; `pentium_mmx`,
   that Pentium with MMX (CPUID family 5, model 4), whose eight MM
-  registers are the FPU's; `pentium_pro`, a Pentium Pro as DOSBox-X's
+  registers are the FPU's; `k6_2`, an AMD K6-2 (CPUID AuthenticAMD
+  family 5, model 8, with AMD's extended leaves): the Pentium MMX's with
+  3DNow!, SYSCALL/SYSRET and the K6's MSRs (EFER, STAR, the write
+  handling control and test register 12), without the P6 instructions.
+  Its 3DNow! arithmetic follows AMD's manual: it rounds to nearest, gives
+  a zero below 2^-126 and the largest normal from 2^128, and has no
+  exceptions; PFRCP and PFRSQRT give the exact results rounded to a
+  single where the real one's tables give 14 and 15 bits.
+  `pentium_pro`, a Pentium Pro as DOSBox-X's
   `ppro_slow` (CPUID family 6, model 1): the Pentium's with CMOVcc,
   FCMOVcc, FCOMI and FUCOMI, the P6 hinting NOPs and the local APIC base
-  and microcode revision MSRs Windows 98 and ME read, without MMX; or
+  and microcode revision MSRs Windows 98 and ME read, without MMX;
   `pentium_ii`, a Pentium II as DOSBox-X's (family 6, model 3): the
-  Pentium Pro's with MMX and SYSENTER/SYSEXIT. Neither has SSE, FXSAVE,
+  Pentium Pro's with MMX and SYSENTER/SYSEXIT; or `pentium_iii`, a
+  Pentium III (Katmai, family 6, model 7): the Pentium II's with SSE,
+  FXSAVE/FXRSTOR, CR4's OSFXSR and OSXMMEXCPT, the processor serial
+  number (CPUID leaf 3, until MSR 119h switches it off) and the cache
+  descriptors of CPUID leaf 2. Its SSE arithmetic rounds as MXCSR says,
+  flushes to zero, and sets and masks the six exception flags as a
+  Pentium III does: an unmasked one raises #XM, or #UD without
+  OSXMMEXCPT. RCPPS and RSQRTPS give the exact reciprocal rounded to a
+  single, within the precision Intel specifies for them. SSE needs
+  CR4.OSFXSR, which a system that saves the SSE state sets; rust-dos's
+  DPMI host sets it for its clients on a Pentium III. None of them has
   RDPMC, a local APIC or memory type range registers, as in DOSBox-X. A
   DOSBox configuration's `cputype` of a Pentium imports as `pentium`, of
-  a Pentium MMX as `pentium_mmx`, of a Pentium Pro as `pentium_pro`, and
-  of a Pentium II or III as `pentium_ii`.
+  a Pentium MMX as `pentium_mmx`, of a Pentium Pro as `pentium_pro`, of
+  a Pentium II as `pentium_ii`, and of a Pentium III or DOSBox-X's
+  `experimental` as `pentium_iii`.
 * `core` is what runs the programs' instructions: `auto` (the default)
   runs the interpreter, and the dynamic recompiler for a program from the
   moment it switches to protected mode until it ends, as DOSBox's
@@ -300,8 +321,8 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   a recording stops at 1 GB.
 * `memsize` is the RAM in MB (default 16), from 2 to as much as
   motherboards took for the `cpu`: 64 MB for a 386, 128 MB for a 486,
-  256 MB for a Pentium and 512 MB for a Pentium MMX, Pentium Pro or
-  Pentium II. More than the CPU
+  256 MB for a Pentium and 512 MB for a Pentium MMX, K6-2, Pentium Pro,
+  Pentium II or Pentium III. More than the CPU
   takes is warned about and cut to its most. Memory above the first
   megabyte is extended memory for DOS extenders and XMS; XMS 3.0's 32-bit
   functions and INT 15h E801h/E820h report all of it, HIMEM's older calls
@@ -374,6 +395,10 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   program sees the press, and a release as the window opens; moving the
   mouse while holding the button keeps it an ordinary press. Turn it off
   for a game that has you hold the right button still.
+* `pause_in_settings` pauses the program while the settings window is
+  open (but for the Mixer and Stats pages): `true` (the default) or
+  `false`, to let it run on behind the window. In a LAN room it always
+  runs on.
 * `version_check` asks rust-dos.com at startup whether a newer version
   is out (`https://rust-dos.com/version.json`); one that is shows in a
   notification over the picture and in a line under the box above the
@@ -904,7 +929,8 @@ Press **Ctrl+F12**, type `DOSCONFIG` at the DOS prompt, or hold the right
 mouse button still for 1.5 seconds (`mouse_menu_hold`) to open the
 settings window over the running program. The program pauses while it is
 open, except on the Mixer page, where it plays on so you hear the volumes
-as you set them, and the Stats page, which shows it running. Ctrl+F12 or
+as you set them, and the Stats page, which shows it running; with
+`pause_in_settings` off, or in a LAN room, it never pauses. Ctrl+F12 or
 Esc closes it.
 
 * **Drives:** mount a host directory, a zip or 7z archive, or a disk or
@@ -1803,6 +1829,15 @@ card's gamma table, which games set brighter than DOSBox-X shows them.
   `fxmemmap.vxd`). SubCulture's 3dfx version installs from its CD in the
   [CD-ROM drive](#booting-a-disk-image) and plays with its CD music, with
   `machine=svga_s3`, `memsize=64` and `cpu=pentium`.
+* **Windows 98 SE** finds the card at its next start as a "3Dfx Voodoo"
+  and installs its own driver for it from the Windows 98 CD, asking for the
+  CD's `WIN98` folder (give it the drive letter the CD has in this
+  machine), without a restart. The driver gives DirectDraw and Direct3D the
+  Voodoo as a second device beside the 2D card, and Direct3D games that let
+  you choose the 3D card draw on it: Expendable does with
+  `DisplayDriver [1]` in its `config.txt`, with `machine=svga_s3virge`,
+  `cpu=pentium_ii` and `memsize=128`. While a game draws on the card,
+  `video.voodoo.output` in the debug server's `/api/status` is true.
 
 The card swaps its buffers at the vertical retrace a game asks it to wait
 for, and reports the swaps still waiting and its busy state as the real
@@ -1983,6 +2018,123 @@ states and rewind keep the card with its texture memory.
 How the card draws follows Imagination's own driver sources and simulator
 of the chip, which they released under the MIT licence
 (github.com/powervr-graphics/PowerVR-Series1).
+
+## Networking at a glance
+
+Rust-DOS has two separate pieces of networking, and most people only ever
+need the first one:
+
+| You want to | You need | Setup |
+|---|---|---|
+| Play a DOS game in multiplayer (Doom, Duke Nukem 3D, Warcraft 2, Descent, C&C) | the **IPX driver** and a **room** | join a room, then pick the game's IPX option |
+| Play a serial or modem game with one other player | a **room** | join a room, then pick the game's null modem or modem option |
+| Browse the web, telnet, FTP or IRC from DOS, Windows 3.x or Windows 9x | the **NE2000 network card** | `ne2000=true`, plus a driver in the guest |
+| Play a Windows 9x network game, or share files between two Windows guests | the **NE2000 network card** and a **room** | both of the above |
+
+### The words
+
+* **IPX** is the network protocol most DOS games used for multiplayer on
+  1990s office networks. Games don't care whether there is a real network
+  behind it, only that an IPX driver answers. The built-in DOS has one,
+  so you don't load `IPX.COM`, `IPXODI` or anything else.
+* A **room** is a virtual network cable between rust-dos instances.
+  Everyone in a room is on the same network, as PCs plugged into one hub
+  would be. Instances in different rooms don't see each other. A room has
+  a name (`lobby` unless you choose one) and maybe a password.
+* A **relay** is the program that holds the rooms and passes traffic
+  between their members. Any rust-dos can be one (`LAN HOST`, or *Make
+  room* in the settings window), and so can `rust-dos-relay` on a server.
+  The public relay at `relay.rust-dos.com` is one that anyone can use.
+  If you have used DOSBox, the relay does what an `IPXNET` server does,
+  but the protocol is different: DOSBox and rust-dos can't play together.
+* The **NE2000** is an emulated network card, a real piece of hardware
+  that guest systems need a driver for. A system you boot from a disk
+  image (Windows 95, Windows 98, a DOS with its own network setup) only
+  sees a network through this card, never through the built-in IPX
+  driver.
+* The **router** is a small home router built into each rust-dos. It
+  sits between the NE2000 and your computer's own internet connection.
+
+### What the relay does and doesn't do
+
+The relay only passes network packets (Ethernet frames) between the
+members of a room, the way a network switch does. It doesn't hand out IP
+addresses, it isn't a name server, and it doesn't connect anybody to the
+internet. Your internet traffic never goes through it.
+
+All of that is the job of the router in your own rust-dos:
+
+```text
+  guest system (Windows 95, DOS with mTCP, ...)
+        |
+    NE2000 card ─────┬────────────── room on a relay ─── other players' instances
+        |            |               (LAN traffic only)
+  IPX driver ────────┘
+  (built-in DOS)
+        |
+  router in this rust-dos:  DHCP  10.0.2.15 for the guest
+        |                   DNS   10.0.2.3, asks your computer's resolver
+        |                   NAT   the guest's connections become your computer's
+        v
+  your computer's internet connection
+```
+
+* **DHCP:** the router gives the guest its address: 10.0.2.15, with the
+  router at 10.0.2.2 and the name server at 10.0.2.3. Leave the guest's
+  network settings on "obtain an address automatically" (DHCP or BOOTP).
+  In a room, each instance's router hands out a different address
+  (10.0.2.20 plus the member number), so guests in one room don't clash.
+* **DNS:** the router's name server looks names up with your computer's
+  own resolver, so whatever names your computer finds, the guest finds.
+* **NAT:** the guest's TCP connections and UDP packets are made by
+  rust-dos as ordinary connections of your computer. No administrator
+  rights, network bridge or TAP device are needed. 10.0.2.2 stands for
+  your computer itself: a web server on your computer's port 8080 is
+  `http://10.0.2.2:8080/` in the guest.
+
+What the router doesn't do:
+
+* **No incoming connections from the internet:** nothing outside can
+  connect to a server in the guest, and there are no port forwards.
+  (Players in the same room can connect to each other's guests, since
+  they are on the same LAN.)
+* **No ping to the internet:** only the router's own addresses (10.0.2.2
+  and 10.0.2.3) answer pings. A ping to a web site getting no reply
+  doesn't mean the internet is down; try a browser or `HTGET` instead.
+* **IPv4 only**, and name lookups for IPv4 addresses only, which is all
+  programs of the time ask for.
+* **Modern HTTPS doesn't work** in browsers of the time, which is a
+  limit of the browsers, not of rust-dos. See [Network card](#network-card).
+
+### Ports and firewalls
+
+Rooms use UDP port 21213. To find rooms on your home network, rust-dos
+broadcasts to that port, so a firewall on the computer that hosts the room
+has to let UDP 21213 in. Joining the public relay only sends from your computer, so
+it works behind a home router without any setup. Hosting a room for
+players elsewhere on the internet (`LAN HOST`, then they `LAN JOIN` your
+address) needs UDP 21213 forwarded to your computer in your router; the
+public relay or `rust-dos-relay` on a server avoids that.
+
+### Which systems can use what
+
+| System | IPX games | Internet (TCP/IP) | LAN with other instances |
+|---|---|---|---|
+| Built-in DOS | built-in IPX driver | NE2000 + packet driver + mTCP or similar | IPX; TCP/IP over the NE2000 |
+| Windows 3.1 started from the built-in DOS | DOS games in a DOS box: no IPX (see below) | NE2000 + packet driver + WINPKT + Trumpet Winsock | TCP/IP over the NE2000 |
+| Windows for Workgroups 3.11 with its own network setup | its own IPX over the NE2000 | its own NE2000 driver and TCP/IP-32 | its own networking over the NE2000 |
+| Windows 95/98 booted from an image | its IPX/SPX protocol over the NE2000 | its NE2000 driver and TCP/IP | its networking over the NE2000 |
+
+The built-in IPX driver belongs to the built-in DOS: inside Windows, and
+in systems booted from a disk image, games need that system's own IPX
+over the NE2000. The steps for each system are under [Network
+card](#network-card).
+
+Tested so far: IPX games between instances (Doom, Heretic, Descent);
+the internet from DOS with mTCP, from Windows 3.11 with Trumpet Winsock
+and Netscape, and from Windows 95 with Internet Explorer. Not tested yet:
+Windows 95's IPX against the built-in IPX driver, two Windows guests on
+one LAN, and Windows for Workgroups' own TCP/IP-32. Reports are welcome.
 
 ## Playing over a LAN
 

@@ -280,7 +280,11 @@ fn up_and_down_step_through_the_command_history() {
     type_keys(&mut cpu, "\r");
     assert_eq!(run_until_command(&mut cpu).as_deref(), Some("ver"));
     let text = screen_text(&cpu);
-    let last = text.as_bytes().chunks(80).map(|r| String::from_utf8_lossy(r).trim_end().to_string()).filter(|r| r.starts_with("C:\\>ver")).last();
+    let last = text
+        .as_bytes()
+        .chunks(80)
+        .map(|r| String::from_utf8_lossy(r).trim_end().to_string())
+        .rfind(|r| r.starts_with("C:\\>ver"));
     assert_eq!(last.as_deref(), Some("C:\\>ver"), "{}", text);
 }
 
@@ -332,8 +336,7 @@ fn last_row_with(cpu: &Cpu, prefix: &str) -> Option<String> {
     text.as_bytes()
         .chunks(80)
         .map(|r| String::from_utf8_lossy(r).trim_end().to_string())
-        .filter(|r| r.starts_with(prefix))
-        .last()
+        .rfind(|r| r.starts_with(prefix))
 }
 
 #[test]

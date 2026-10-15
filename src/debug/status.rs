@@ -492,6 +492,55 @@ pub fn regs_json(cpu: &Cpu) -> Value {
     })
 }
 
+/// The FPU, MMX and SSE registers: the x87 control, status and tag words,
+/// ST(0)-ST(7) in stack order with the physical register each is, and,
+/// on a CPU that has them, MM0-MM7 (the physical registers' significands)
+/// and XMM0-XMM7 with MXCSR. A value is the register's double: one that
+/// JSON can't hold (a NaN, an infinity, or an extended number beyond a
+/// double's range) is null, and one below a double's normal range is 0;
+/// its bits and tag say which it is.
+pub(super) fn fpu_json(cpu: &Cpu) -> Value {
+    let number = |v: f64| if v.is_finite() { json!(v) } else { Value::Null };
+    let tags = cpu.fpu_tag_word();
+    let st: Vec<Value> = (0..8)
+        .map(|i| {
+            let reg = cpu.fpu_get_phys_index(i);
+            let tag = ["valid", "zero", "special", "empty"][(tags >> (reg * 2) & 3) as usize];
+            json!({
+                "reg": reg,
+                "tag": tag,
+                "bits": format!("{:020X}", cpu.fpu_reg(reg).st),
+                "value": number(cpu.fpu_reg_f64(reg)),
+            })
+        })
+        .collect();
+    let mut reply = json!({
+        "control": format!("{:04X}", cpu.fpu_control),
+        "status": format!("{:04X}", cpu.fpu_status_word()),
+        "tag": format!("{:04X}", tags),
+        "top": cpu.fpu_top,
+        "st": st,
+    });
+    if cpu.model.has_mmx() {
+        let mm: Vec<String> = (0..8).map(|i| format!("{:016X}", cpu.fpu_reg(i).st as u64)).collect();
+        reply["mm"] = json!(mm);
+    }
+    if cpu.model.has_sse() {
+        let xmm: Vec<Value> = cpu
+            .sse
+            .xmm
+            .iter()
+            .map(|&x| {
+                let ps: Vec<Value> = (0..4).map(|l| number(f32::from_bits((x >> (32 * l)) as u32) as f64)).collect();
+                json!({"bits": format!("{:032X}", x), "ps": ps})
+            })
+            .collect();
+        reply["xmm"] = json!(xmm);
+        reply["mxcsr"] = json!(format!("{:08X}", cpu.sse.mxcsr));
+    }
+    reply
+}
+
 pub(super) fn set_regs(cpu: &mut Cpu, map: &Map<String, Value>) -> Result<(), String> {
     // Validate everything first so a bad entry doesn't leave a partial update.
     let mut updates = Vec::new();

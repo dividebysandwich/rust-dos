@@ -418,10 +418,10 @@ impl Bus {
             disk_notices: _,
             sb_irq: _,
             irq_ready: _,
-            page_gen: _,
+            page_gen,
             observe: _,
             audio_settled: _,
-            code_blocks: _,
+            code_blocks,
             reset_requested: _,
             port_accesses: _,
             faked_io: _,
@@ -463,11 +463,14 @@ impl Bus {
         let mut section = r.section(b"RAM ", RAM_VERSION)?;
         let len = section.count()?;
         if len != ram.len() {
-            return Err(StateError::Mismatch(format!(
-                "it has {} KB of memory, this machine {} KB",
-                len / 1024,
-                ram.len() / 1024
-            )));
+            // A state of another memsize: the memory takes the state's size.
+            let mb = len >> 20;
+            if len & 0xF_FFFF != 0 || !(crate::config::MIN_MEMSIZE..=crate::config::MAX_MEMSIZE).contains(&mb) {
+                return Err(StateError::Invalid(format!("{} KB of memory", len / 1024)));
+            }
+            *ram = vec![0; len];
+            *page_gen = vec![0; len >> super::GEN_SHIFT];
+            *code_blocks = vec![0; len >> super::GEN_SHIFT];
         }
         ram.copy_from_slice(section.take(len)?);
         let mut section = r.section(b"CORE", CORE_VERSION)?;
@@ -610,6 +613,7 @@ impl Bus {
                 if !sb.set_high_speed(high_speed) {
                     return Err(StateError::Invalid("a Sound Blaster's high-speed mode without a transfer".into()));
                 }
+                sb.restart_dma_identification();
             }
             None if high_speed => return Err(StateError::Invalid("a Sound Blaster's high-speed mode without a Sound Blaster".into())),
             None => {}

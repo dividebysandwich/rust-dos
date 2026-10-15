@@ -146,12 +146,8 @@ pub fn default_ivt() -> [u32; 256] {
     // translator. It requires a null vector, not a pointer to an IRET.
     // Leave the same user-vector range available as DOSBox Staging.
     ivt[0x60..=0x65].fill(0);
-    for irq in 0x0A..=0x0F {
-        ivt[irq] = far(MASTER_EOI_HANDLER);
-    }
-    for irq in 0x70..=0x77 {
-        ivt[irq] = far(SLAVE_EOI_HANDLER);
-    }
+    ivt[0x0A..=0x0F].fill(far(MASTER_EOI_HANDLER));
+    ivt[0x70..=0x77].fill(far(SLAVE_EOI_HANDLER));
     ivt[0x71] = far(IRQ9_HANDLER);
     ivt[0x74] = far(PS2_HANDLER);
     for (i, &vector) in HLE_VECTORS.iter().enumerate() {

@@ -45,8 +45,8 @@ fn test_inc_dec_flags() {
     testrunners::run_cpu_code(&mut cpu, &code);
 
     assert_eq!(cpu.get_al(), 0xFF);
-    assert_eq!(cpu.get_cpu_flag(CpuFlags::ZF), false); 
-    assert_eq!(cpu.get_cpu_flag(CpuFlags::SF), true); // 0xFF is -1 signed
+    assert!(!cpu.get_cpu_flag(CpuFlags::ZF));
+    assert!(cpu.get_cpu_flag(CpuFlags::SF)); // 0xFF is -1 signed
 }
 
 #[test]
@@ -66,8 +66,8 @@ fn test_imul_16bit() {
     // Since 0x8000 requires 16 bits (unsigned representation), 
     // but as a signed 16-bit number it is negative, overflow flags checks 
     // depend on if the result fits in the lower half strictly.
-    // 32768 does NOT fit in a signed i16 (max 32767). 
-    assert_eq!(cpu.get_cpu_flag(CpuFlags::CF), true); 
+    // 32768 does NOT fit in a signed i16 (max 32767).
+    assert!(cpu.get_cpu_flag(CpuFlags::CF));
 }
 
 #[test]
@@ -174,7 +174,7 @@ fn test_repe_scasb_backwards_mismatch() {
     // 1. DI points to one byte BEFORE the '8' (because it decrements after the match)
     // 2. ZF is cleared (0) because '8' != '0'
     // 3. CX should be 0 because it processed all bytes or stopped at the first non-zero
-    assert_eq!(cpu.get_cpu_flag(CpuFlags::ZF), false);
+    assert!(!cpu.get_cpu_flag(CpuFlags::ZF));
     let comparison: u16 = 0x0000;
     assert_eq!(cpu.di(), comparison.wrapping_sub(1)); // Stopped at index 0, then decremented
 }
@@ -221,38 +221,38 @@ fn test_alu_sbb_comprehensive() {
 
     // --- 1. Basic Borrow Ripple (The 0x0100 - 1 Case) ---
     // Low Byte: 0x00 - 0x01 = 0xFF (CF=1)
-    let res_low = cpu.alu_sub(1, (0x00) as u32, (0x01) as u32, false);
+    let res_low = cpu.alu_sub(1, 0x00_u32, 0x01_u32, false);
     assert_eq!(res_low, 0xFF);
-    assert_eq!(cpu.get_cpu_flag(CpuFlags::CF), true);
+    assert!(cpu.get_cpu_flag(CpuFlags::CF));
 
     // High Byte: 0x01 - 0x00 - (CF=1) = 0x00 (CF=0, ZF=1)
-    let res_high = cpu.alu_sub(1, (0x01) as u32, (0x00) as u32, cpu.get_cpu_flag(CpuFlags::CF));
+    let res_high = cpu.alu_sub(1, 0x01_u32, 0x00_u32, cpu.get_cpu_flag(CpuFlags::CF));
     assert_eq!(res_high, 0x00, "High byte of 0x0100 - 1 should be 0");
-    assert_eq!(cpu.get_cpu_flag(CpuFlags::ZF), true, "ZF should be set for high byte");
-    assert_eq!(cpu.get_cpu_flag(CpuFlags::CF), false, "Borrow should be consumed");
+    assert!(cpu.get_cpu_flag(CpuFlags::ZF), "ZF should be set for high byte");
+    assert!(!cpu.get_cpu_flag(CpuFlags::CF), "Borrow should be consumed");
 
     // --- 2. The "Max Borrow" Case (0x0000 - 1) ---
     // 0x0000 - 0x0001 = 0xFFFF
     cpu.set_cpu_flag(CpuFlags::CF, false);
-    let res16 = cpu.alu_sub(2, (0x0000) as u32, (0x0001) as u32, cpu.get_cpu_flag(CpuFlags::CF));
+    let res16 = cpu.alu_sub(2, 0x0000_u32, 0x0001_u32, cpu.get_cpu_flag(CpuFlags::CF));
     assert_eq!(res16, 0xFFFF);
-    assert_eq!(cpu.get_cpu_flag(CpuFlags::CF), true);
-    assert_eq!(cpu.get_cpu_flag(CpuFlags::AF), true, "Borrow from bit 3 to 4 should set AF");
+    assert!(cpu.get_cpu_flag(CpuFlags::CF));
+    assert!(cpu.get_cpu_flag(CpuFlags::AF), "Borrow from bit 3 to 4 should set AF");
 
     // --- 3. Zero Flag Stability ---
     // 0x80 - 0x7F - (CF=1) = 0
     cpu.set_cpu_flag(CpuFlags::CF, true);
-    let res8 = cpu.alu_sub(1, (0x80) as u32, (0x7F) as u32, cpu.get_cpu_flag(CpuFlags::CF));
+    let res8 = cpu.alu_sub(1, 0x80_u32, 0x7F_u32, cpu.get_cpu_flag(CpuFlags::CF));
     assert_eq!(res8, 0);
-    assert_eq!(cpu.get_cpu_flag(CpuFlags::ZF), true);
-    assert_eq!(cpu.get_cpu_flag(CpuFlags::CF), false);
+    assert!(cpu.get_cpu_flag(CpuFlags::ZF));
+    assert!(!cpu.get_cpu_flag(CpuFlags::CF));
 
     // --- 4. Subbing with Carry-In causing a wrap ---
     // 0x00 - 0x00 - (CF=1) = 0xFF (CF=1)
     cpu.set_cpu_flag(CpuFlags::CF, true);
-    let res8_wrap = cpu.alu_sub(1, (0x00) as u32, (0x00) as u32, cpu.get_cpu_flag(CpuFlags::CF));
+    let res8_wrap = cpu.alu_sub(1, 0x00_u32, 0x00_u32, cpu.get_cpu_flag(CpuFlags::CF));
     assert_eq!(res8_wrap, 0xFF);
-    assert_eq!(cpu.get_cpu_flag(CpuFlags::CF), true);
+    assert!(cpu.get_cpu_flag(CpuFlags::CF));
 }
 
 #[test]
@@ -271,7 +271,7 @@ fn test_rcl_preserves_zf() {
     cpu.set_reg8(iced_x86::Register::AL, 0);
     testrunners::run_cpu_code(&mut cpu, &code);
 
-    assert_eq!(cpu.get_cpu_flag(CpuFlags::ZF), true, "RCL destroyed the Zero Flag!");
+    assert!(cpu.get_cpu_flag(CpuFlags::ZF), "RCL destroyed the Zero Flag!");
 }
 
 #[test]
@@ -290,7 +290,7 @@ fn test_adc_af_flag() {
     testrunners::run_cpu_code(&mut cpu, &code);
 
     assert_eq!(cpu.get_al(), 0x10);
-    assert_eq!(cpu.get_cpu_flag(CpuFlags::AF), true);
+    assert!(cpu.get_cpu_flag(CpuFlags::AF));
 }
 
 #[test]
@@ -317,7 +317,7 @@ fn test_das_instruction() {
     testrunners::run_cpu_code(&mut cpu, &code_sub_das);
     
     assert_eq!(cpu.get_al(), 0x99, "DAS failed to adjust subtraction result to BCD 99");
-    assert_eq!(cpu.get_cpu_flag(CpuFlags::CF), true, "DAS should maintain/set CF for borrows");
+    assert!(cpu.get_cpu_flag(CpuFlags::CF), "DAS should maintain/set CF for borrows");
 }
 
 #[test]
@@ -332,7 +332,7 @@ fn test_aas_instruction() {
 
     assert_eq!(cpu.get_al(), 0x09);
     assert_eq!(cpu.ax() >> 8, 0x00, "AAS failed to decrement AH on borrow");
-    assert_eq!(cpu.get_cpu_flag(CpuFlags::CF), true);
+    assert!(cpu.get_cpu_flag(CpuFlags::CF));
 }
 
 #[test]
@@ -347,8 +347,8 @@ fn test_fpu_comparison_flags() {
     let addr = 0x2000;
     let val_f32 = 10.0f32;
     let bytes = val_f32.to_le_bytes();
-    for i in 0..4 { 
-        cpu.bus.write_8(addr + i, bytes[i]); 
+    for (i, &byte) in bytes.iter().enumerate() {
+        cpu.bus.write_8(addr + i, byte);
     }
 
     let code = [
@@ -359,7 +359,7 @@ fn test_fpu_comparison_flags() {
     
     testrunners::run_cpu_code(&mut cpu, &code);
 
-    assert_eq!(cpu.get_cpu_flag(CpuFlags::CF), true, "Carry should be set (8 < 10)");
-    assert_eq!(cpu.get_cpu_flag(CpuFlags::ZF), false, "Zero should be clear (8 != 10)");
+    assert!(cpu.get_cpu_flag(CpuFlags::CF), "Carry should be set (8 < 10)");
+    assert!(!cpu.get_cpu_flag(CpuFlags::ZF), "Zero should be clear (8 != 10)");
 }
 

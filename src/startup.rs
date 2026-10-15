@@ -148,6 +148,9 @@ pub(crate) fn open_log_file(path: Option<&std::path::Path>) -> Result<Option<rus
     }
 }
 
+/// A game to launch: its entry, its text and its folder.
+type Launch = (GameEntry, String, PathBuf);
+
 /// The game to launch at startup (`--game`, or the one `--import` made a
 /// profile of): its entry, its text and its folder, and the memory size of
 /// the machine, which is the game's.
@@ -155,7 +158,7 @@ pub(crate) fn game_to_launch(
     args: &Args,
     config: &config::Config,
     settings: &Settings,
-) -> Result<(Option<(GameEntry, String, PathBuf)>, usize), String> {
+) -> Result<(Option<Launch>, usize), String> {
     let imported = match &args.import {
         Some(source) => {
             let dir = games_dir(config.source.as_deref()).ok_or("--import needs a configuration file, beside which the games folder is")?;

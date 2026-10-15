@@ -399,7 +399,12 @@ fn cpu_model() {
     assert_eq!(config.cpu, Some(crate::cpu::CpuModel::PentiumPro));
     let config = parse("[emulator]\ncpu=pentium_ii\nmemsize=512\n", Path::new("/cfg"), None);
     assert_eq!(config.cpu, Some(crate::cpu::CpuModel::PentiumII));
+    let config = parse("[emulator]\ncpu=pentium_iii\nmemsize=512\n", Path::new("/cfg"), None);
+    assert_eq!(config.cpu, Some(crate::cpu::CpuModel::PentiumIII));
+    assert!(config.warnings.is_empty());
     assert_eq!(Settings::from_config(&config).memsize, 512);
+    let config = parse("[emulator]\ncpu=K6-2\n", Path::new("/cfg"), None);
+    assert_eq!(config.cpu, Some(crate::cpu::CpuModel::K6_2));
     let config = parse("[emulator]\ncpu=8086\n", Path::new("/cfg"), None);
     assert_eq!(config.cpu, None);
     assert!(config.warnings[0].contains("invalid cpu '8086'"));
@@ -677,6 +682,7 @@ fn changed_settings() -> Settings {
         mouse_sensitivity: 2.3,
         mouse_capture_messages: false,
         mouse_menu_hold: false,
+        pause_in_settings: false,
         version_check: false,
         rewind: true,
         rewind_memory: 512,

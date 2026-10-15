@@ -324,9 +324,9 @@ impl Keyboard {
         let tip = |i: usize| hands[i].map(|h| from_scene.transform_point3(h.aim.transform_point3(Vec3::ZERO)));
         let pulled: Vec<usize> = (0..2).filter(|&i| hands[i].is_some_and(|h| h.select) && !self.triggers[i]).collect();
         let squeezed = (0..2).any(|i| hands[i].is_some_and(|h| h.squeeze) && !self.squeezes[i]);
-        for i in 0..2 {
-            self.triggers[i] = hands[i].is_some_and(|h| h.select);
-            self.squeezes[i] = hands[i].is_some_and(|h| h.squeeze);
+        for (i, hand) in hands.iter().enumerate() {
+            self.triggers[i] = hand.is_some_and(|h| h.select);
+            self.squeezes[i] = hand.is_some_and(|h| h.squeeze);
         }
         if squeezed && self.marking() {
             self.marking = Marking::Off;

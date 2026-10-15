@@ -72,8 +72,8 @@ pub fn find_mode(number: u16, packed24: bool) -> Option<VbeMode> {
 pub fn timing_for(height: u16) -> CrtTiming {
     match height {
         ..=400 => CrtTiming::VGA_400,
-        ..=480 => CrtTiming::VESA_480,
-        ..=600 => CrtTiming::VESA_600,
+        401..=480 => CrtTiming::VESA_480,
+        481..=600 => CrtTiming::VESA_600,
         _ => CrtTiming::VESA_768,
     }
 }

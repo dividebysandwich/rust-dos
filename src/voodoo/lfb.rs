@@ -34,7 +34,7 @@ impl Voodoo {
 
         let za = self.reg[ZA_COLOR];
         let mut sw = [(za & 0xFFFF) as i32; 2];
-        let mut sa = [(za >> 24) as u32; 2];
+        let mut sa = [(za >> 24); 2];
         let (mut sr, mut sg, mut sb) = ([0u32; 2], [0u32; 2], [0u32; 2]);
         let halves = [data & 0xFFFF, data >> 16];
         let mut offset = offset;
@@ -46,15 +46,15 @@ impl Voodoo {
         let mask = match lfb_mode & 0xF {
             // 16-bit colours, two pixels a dword.
             0 => {
-                for pix in 0..2 {
-                    set_rgb(pix, extract_565(halves[pix]));
+                for (pix, &half) in halves.iter().enumerate() {
+                    set_rgb(pix, extract_565(half));
                 }
                 offset <<= 1;
                 RGB | RGB << 4
             }
             1 => {
-                for pix in 0..2 {
-                    set_rgb(pix, if lanes < 2 { extract_x555(halves[pix]) } else { extract_555x(halves[pix]) });
+                for (pix, &half) in halves.iter().enumerate() {
+                    set_rgb(pix, if lanes < 2 { extract_x555(half) } else { extract_555x(half) });
                 }
                 offset <<= 1;
                 RGB | RGB << 4

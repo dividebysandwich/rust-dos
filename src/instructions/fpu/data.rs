@@ -23,8 +23,8 @@ pub fn fld(cpu: &mut Cpu, instr: &Instruction) {
             MemorySize::Float80 => {
                 // Load 10 bytes directly from memory without lossy conversion
                 let mut bytes = [0u8; 10];
-                for i in 0..10 {
-                    bytes[i] = cpu.lin_read_8(addr + i as usize);
+                for (i, byte) in bytes.iter_mut().enumerate() {
+                    *byte = cpu.lin_read_8(addr + i);
                 }
                 f.set_bytes(&bytes);
             }
@@ -38,7 +38,7 @@ pub fn fld(cpu: &mut Cpu, instr: &Instruction) {
         cpu.fpu_push(f);
     } else {
         // FLD ST(i) -> Push ST(i) onto stack
-        let reg_offset = (instr.op0_register().number() - Register::ST0.number()) as usize;
+        let reg_offset = instr.op0_register().number() - Register::ST0.number();
         let val = cpu.fpu_get(reg_offset);
         cpu.fpu_push(val);
     }
@@ -69,8 +69,8 @@ pub fn fild(cpu: &mut Cpu, instr: &Instruction) {
 pub fn fbld(cpu: &mut Cpu, instr: &Instruction) {
     let addr = calculate_addr(cpu, instr);
     let mut bcd = [0u8; 10];
-    for i in 0..10 {
-        bcd[i] = cpu.lin_read_8(addr + i as usize);
+    for (i, byte) in bcd.iter_mut().enumerate() {
+        *byte = cpu.lin_read_8(addr + i);
     }
     let mut f = F80::new();
     f.from_bcd_packed(&bcd);
@@ -229,8 +229,8 @@ pub fn fstp(cpu: &mut Cpu, instr: &Instruction) {
             }
             MemorySize::Float80 => {
                 let bytes = val.get_bytes();
-                for i in 0..10 {
-                    cpu.lin_write_8(addr + i as usize, bytes[i]);
+                for (i, &byte) in bytes.iter().enumerate() {
+                    cpu.lin_write_8(addr + i, byte);
                 }
             }
             _ => {
@@ -244,7 +244,7 @@ pub fn fstp(cpu: &mut Cpu, instr: &Instruction) {
         // FSTP ST(i)
         // Store ST(0) to ST(i), THEN pop.
         let val = cpu.fpu_get(0);
-        let idx = (instr.op0_register().number() - Register::ST0.number()) as usize;
+        let idx = instr.op0_register().number() - Register::ST0.number();
         cpu.fpu_set(idx, val);
         cpu.fpu_pop();
     }
@@ -258,8 +258,8 @@ pub fn fbstp(cpu: &mut Cpu, instr: &Instruction) {
     let bcd_bytes = val.to_bcd_packed();
 
     // Write the 10-byte BCD block to Memory
-    for i in 0..10 {
-        cpu.lin_write_8(addr + i as usize, bcd_bytes[i]);
+    for (i, &byte) in bcd_bytes.iter().enumerate() {
+        cpu.lin_write_8(addr + i, byte);
     }
 }
 
@@ -281,8 +281,8 @@ pub fn fst(cpu: &mut Cpu, instr: &Instruction) {
             }
             MemorySize::Float80 => {
                 let bytes = st0.get_bytes();
-                for i in 0..10 {
-                    cpu.lin_write_8(addr + i as usize, bytes[i]);
+                for (i, &byte) in bytes.iter().enumerate() {
+                    cpu.lin_write_8(addr + i, byte);
                 }
             }
             _ => {
@@ -294,7 +294,7 @@ pub fn fst(cpu: &mut Cpu, instr: &Instruction) {
         }
     } else if instr.op0_kind() == OpKind::Register {
         // FST ST(i)
-        let idx = (instr.op0_register().number() - Register::ST0.number()) as usize;
+        let idx = instr.op0_register().number() - Register::ST0.number();
         cpu.fpu_set(idx, st0);
     }
 }
@@ -306,7 +306,7 @@ pub fn fxch_index(instr: &Instruction) -> usize {
         let reg = instr.op_register(i);
         // Check if register is in range ST(1)..ST(7)
         if reg >= Register::ST1 && reg <= Register::ST7 {
-            return (reg.number() - Register::ST0.number()) as usize;
+            return reg.number() - Register::ST0.number();
         }
     }
     1
@@ -358,7 +358,7 @@ pub fn fcmov(cpu: &mut Cpu, instr: &Instruction) {
     if !holds {
         return;
     }
-    let idx = (instr.op1_register().number() - Register::ST0.number()) as usize & 7;
+    let idx = (instr.op1_register().number() - Register::ST0.number()) & 7;
     if cpu.fpu_fast {
         let sti = cpu.fpu_get_f64(idx);
         cpu.fpu_set_f64(0, sti);

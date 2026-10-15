@@ -533,6 +533,139 @@ fn save_states_keep_high_speed_mode() {
     assert_eq!(dma1_count(&mut b.bus), left, "D0h paused the transfer");
 }
 
+/// What a driver's DMA identification routine does: program 8-bit DMA
+/// channel 1 to write one byte at 2000:0200, send DSP command E2h with
+/// `param`, then poll the DMA status register until channel 1 reaches
+/// terminal count (or give up after 65535 polls). Runs as guest code
+/// until its HLT; returns the byte written and the polls left.
+fn identify_dma(cpu: &mut Cpu, param: u8) -> (u8, u16) {
+    #[rustfmt::skip]
+    let code = [
+        0xB0, 0x05, 0xE6, 0x0A,         // mask channel 1
+        0xB0, 0x00, 0xE6, 0x0C,         // clear the flip-flop
+        0xB0, 0x45, 0xE6, 0x0B,         // single, write to memory, channel 1
+        0xB0, 0x00, 0xE6, 0x02,         // address 0200h
+        0xB0, 0x02, 0xE6, 0x02,
+        0xB0, 0x02, 0xE6, 0x83,         // page 2
+        0xB0, 0x00, 0xE6, 0x03,         // count 0: one byte
+        0xE6, 0x03,
+        0xB0, 0x01, 0xE6, 0x0A,         // unmask channel 1
+        0xBA, 0x2C, 0x02,               // MOV DX, 22Ch
+        0xEC, 0xA8, 0x80, 0x75, 0xFB,   // wait for the DSP
+        0xB0, 0xE2, 0xEE,               // E2h
+        0xEC, 0xA8, 0x80, 0x75, 0xFB,
+        0xB0, param, 0xEE,              // its parameter
+        0xB9, 0xFF, 0xFF,               // MOV CX, FFFFh
+        0xE4, 0x08, 0xA8, 0x02,         // IN AL, 08h; TEST AL, 2
+        0x75, 0x02, 0xE2, 0xF8,         // JNZ done; LOOP poll
+        0xF4,                           // done: HLT
+    ];
+    cpu.bus.load_bytes(0x20000, &code);
+    cpu.bus.write_8(0x20200, 0);
+    cpu.set_cs(0x2000);
+    cpu.set_ip(0);
+    cpu.set_ss(0x3000);
+    cpu.set_sp(0x0400);
+    for _ in 0..10_000 {
+        if cpu.ip() == code.len() as u16 {
+            break;
+        }
+        let end = cpu.bus.clock.icount + 1000;
+        cpu.bus.start_batch(end);
+        rust_dos::exec::run_batch(cpu, &mut rust_dos::exec::NoHook, false);
+    }
+    (cpu.bus.read_8(0x20200), cpu.cx())
+}
+
+#[test]
+fn dsp_dma_identification_writes_its_byte_through_the_8bit_channel() {
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    cpu.bus.set_cycles_per_ms(1000);
+    cpu.bus.configure_sound(Some(SbConfig::default()), true);
+    reset_dsp(&mut cpu.bus);
+    // The values DOSBox's table gives for the first two calls with A5h
+    // and 5Ah: the answer depends on the calls before it.
+    let (byte, polls_left) = identify_dma(&mut cpu, 0xA5);
+    assert_eq!(byte, 0xDD, "the first answer");
+    assert!(polls_left > 0, "the transfer ended without waiting out the poll loop");
+    let (byte, _) = identify_dma(&mut cpu, 0x5A);
+    assert_eq!(byte, 0xDC, "the second answer");
+    // The parameter went to E2h: the DSP takes commands as before.
+    dsp_write(&mut cpu.bus, 0xE1);
+    assert_eq!(dsp_read(&mut cpu.bus), 4);
+}
+
+#[test]
+fn sb16_continue_auto_init_takes_back_an_exit() {
+    let mut bus = sb16();
+    reset_dsp(&mut bus);
+    program_dma1(&mut bus, 0x10000, 0x400, true);
+    // 8-bit auto-init output, mono unsigned, blocks of 100h bytes.
+    for byte in [0x41, 0x56, 0x22, 0xC6, 0x00, 0xFF, 0x00] {
+        dsp_write(&mut bus, byte);
+    }
+    dsp_write(&mut bus, 0xDA);
+    dsp_write(&mut bus, 0x45);
+    // Without 45h the transfer would stop after its first block (11 ms).
+    wait_ms(&mut bus, 40.0);
+    let at = dma1_count(&mut bus);
+    wait_ms(&mut bus, 10.0);
+    assert_ne!(dma1_count(&mut bus), at, "the transfer runs on");
+}
+
+/// Program 8-bit DMA channel 1 in `mode` (bits 2-3: 01 write, 10 read)
+/// for one byte at 2000:0200 and leave it masked.
+fn program_dma1_byte(bus: &mut Bus, mode: u8) {
+    bus.io_write(0x0A, 0x05);
+    bus.io_write(0x0C, 0x00);
+    bus.io_write(0x0B, 0x41 | mode);
+    bus.io_write(0x02, 0x00);
+    bus.io_write(0x02, 0x02);
+    bus.io_write(0x83, 0x02);
+    bus.io_write(0x03, 0x00);
+    bus.io_write(0x03, 0x00);
+}
+
+#[test]
+fn dsp_dma_identification_waits_for_its_channel() {
+    let mut bus = sb16();
+    reset_dsp(&mut bus);
+    bus.write_8(0x20200, 0);
+    program_dma1_byte(&mut bus, 0x04);
+    dsp_write(&mut bus, 0xE2);
+    dsp_write(&mut bus, 0xA5);
+    assert_eq!(bus.read_8(0x20200), 0, "a masked channel takes nothing");
+    bus.io_write(0x0A, 0x01);
+    assert_eq!(bus.read_8(0x20200), 0xDD, "the answer goes once the channel is unmasked");
+}
+
+#[test]
+fn dsp_dma_identification_leaves_memory_to_a_read_channel() {
+    let mut bus = sb16();
+    reset_dsp(&mut bus);
+    bus.write_8(0x20200, 0x77);
+    program_dma1_byte(&mut bus, 0x08);
+    bus.io_write(0x0A, 0x01);
+    dsp_write(&mut bus, 0xE2);
+    dsp_write(&mut bus, 0xA5);
+    assert_eq!(bus.read_8(0x20200), 0x77, "a channel reading memory writes none");
+    assert_eq!(dma1_count(&mut bus), 0xFFFF, "the channel took its one transfer");
+}
+
+#[test]
+fn a_loaded_state_starts_dma_identification_over() {
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    cpu.bus.set_cycles_per_ms(1000);
+    cpu.bus.configure_sound(Some(SbConfig::default()), true);
+    cpu.load_shell();
+    reset_dsp(&mut cpu.bus);
+    let fresh = machine::save(&cpu);
+    assert_eq!(identify_dma(&mut cpu, 0xA5).0, 0xDD);
+    machine::load(&mut cpu, &fresh).unwrap();
+    // A fresh card answers 5Ah with 76h; the second call answers DCh.
+    assert_eq!(identify_dma(&mut cpu, 0x5A).0, 0x76, "a first call's answer after the load");
+}
+
 /// The initiation key's 32 bytes, after two writes of 0.
 fn isapnp_key(bus: &mut Bus) {
     bus.io_write(0x279, 0);

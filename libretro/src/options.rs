@@ -157,8 +157,10 @@ fn definitions() -> Vec<Definition> {
                 ("486", "486DX"),
                 ("pentium", "Pentium"),
                 ("pentium_mmx", "Pentium MMX"),
+                ("k6_2", "AMD K6-2"),
                 ("pentium_pro", "Pentium Pro"),
                 ("pentium_ii", "Pentium II"),
+                ("pentium_iii", "Pentium III"),
             ]),
         },
         Definition {

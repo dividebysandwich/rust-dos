@@ -251,6 +251,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Some(on) => config.mouse_menu_hold = Some(on),
                             None => warn(format!("invalid mouse_menu_hold '{}' (true or false)", value)),
                         },
+                        "pause_in_settings" => match parse_bool(value) {
+                            Some(on) => config.pause_in_settings = Some(on),
+                            None => warn(format!("invalid pause_in_settings '{}' (true or false)", value)),
+                        },
                         "version_check" => match parse_bool(value) {
                             Some(on) => config.version_check = Some(on),
                             None => warn(format!("invalid version_check '{}' (true or false)", value)),
@@ -296,10 +300,12 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             "486" => config.cpu = Some(CpuModel::I486),
                             "pentium" | "586" => config.cpu = Some(CpuModel::Pentium),
                             "pentium_mmx" | "pentiummmx" | "mmx" => config.cpu = Some(CpuModel::PentiumMmx),
+                            "k6_2" | "k6-2" | "k62" => config.cpu = Some(CpuModel::K6_2),
                             "pentium_pro" | "pentiumpro" | "ppro" | "686" => config.cpu = Some(CpuModel::PentiumPro),
                             "pentium_ii" | "pentiumii" | "pentium2" => config.cpu = Some(CpuModel::PentiumII),
+                            "pentium_iii" | "pentiumiii" | "pentium3" => config.cpu = Some(CpuModel::PentiumIII),
                             _ => warn(format!(
-                                "invalid cpu '{}' (386, 486, pentium, pentium_mmx, pentium_pro or pentium_ii)",
+                                "invalid cpu '{}' (386, 486, pentium, pentium_mmx, k6_2, pentium_pro, pentium_ii or pentium_iii)",
                                 value
                             )),
                         },

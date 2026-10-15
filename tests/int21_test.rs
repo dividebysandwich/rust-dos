@@ -44,24 +44,14 @@ fn test_int21_ah29_parse_filename() {
 
     // Bytes 1-8: Name "TEST    "
     let expected_name = b"TEST    ";
-    for i in 0..8 {
-        assert_eq!(
-            cpu.bus.read_8(phys_di + 1 + i),
-            expected_name[i],
-            "Name mismatch at index {}",
-            i
-        );
+    for (i, &byte) in expected_name.iter().enumerate() {
+        assert_eq!(cpu.bus.read_8(phys_di + 1 + i), byte, "Name mismatch at index {}", i);
     }
 
     // Bytes 9-11: Ext "TXT"
     let expected_ext = b"TXT";
-    for i in 0..3 {
-        assert_eq!(
-            cpu.bus.read_8(phys_di + 9 + i),
-            expected_ext[i],
-            "Ext mismatch at index {}",
-            i
-        );
+    for (i, &byte) in expected_ext.iter().enumerate() {
+        assert_eq!(cpu.bus.read_8(phys_di + 9 + i), byte, "Ext mismatch at index {}", i);
     }
 
     // Verify AL = 0 (No wildcards)

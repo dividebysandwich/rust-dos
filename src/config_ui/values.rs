@@ -270,6 +270,7 @@ impl Item {
             MouseAutocapture => on_off(|s, on| s.mouse_autocapture = on),
             MouseCaptureMessages => on_off(|s, on| s.mouse_capture_messages = on),
             MouseMenuHold => on_off(|s, on| s.mouse_menu_hold = on),
+            PauseInSettings => on_off(|s, on| s.pause_in_settings = on),
             ShellSuggestions => on_off(|s, on| s.shell.autosuggest = on),
             ShellColors => on_off(|s, on| s.shell.colors = on),
             SaveShellHistory => on_off(|s, on| s.shell.save_history = on),

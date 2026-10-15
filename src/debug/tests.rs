@@ -1990,3 +1990,54 @@ fn frontend_execution_queue_retains_admission_and_refuses_abandoned_changes() {
     assert_eq!(shared.native_commands.available_permits(), 8);
     assert_eq!(shared.busy.load(Ordering::Acquire), 0);
 }
+
+#[test]
+fn the_fpu_registers_read_back_by_model() {
+    let (mut cpu, mut hub) = (Cpu::new(".".into()), DebugHub::disabled());
+    cpu.fpu_push_f64(2.0);
+    cpu.fpu_push_f64(f64::INFINITY);
+    let fpu = reply(&mut cpu, &mut hub, Cmd::GetFpu).unwrap();
+    assert_eq!(fpu["control"], "037F");
+    assert_eq!(fpu["top"], 6);
+    assert_eq!(fpu["status"], "3000", "the stack top in bits 11-13");
+    assert_eq!(fpu["st"][0]["reg"], 6);
+    assert_eq!(fpu["st"][0]["tag"], "special");
+    assert_eq!(fpu["st"][0]["value"], Value::Null, "an infinity");
+    assert_eq!(fpu["st"][1]["tag"], "valid");
+    assert_eq!(fpu["st"][1]["value"], 2.0);
+    assert_eq!(fpu["st"][1]["bits"], "40008000000000000000");
+    assert_eq!(fpu["st"][2]["tag"], "empty");
+    assert!(fpu.get("mm").is_none() && fpu.get("xmm").is_none(), "a 486 has neither");
+
+    cpu.model = crate::cpu::CpuModel::PentiumIII;
+    cpu.fpu_set_reg(3, rust_dos::f80::F80 { st: 0xFFFF_0123_4567_89AB_CDEF });
+    cpu.sse.xmm[1] = (1.5f32.to_bits() as u128) << 32 | 0x3F80_0000;
+    let fpu = reply(&mut cpu, &mut hub, Cmd::GetFpu).unwrap();
+    assert_eq!(fpu["mm"][3], "0123456789ABCDEF", "physical register 3's significand");
+    assert_eq!(fpu["xmm"][1]["bits"], "00000000000000003FC000003F800000");
+    assert_eq!(fpu["xmm"][1]["ps"], json!([1.0, 1.5, 0.0, 0.0]));
+    assert_eq!(fpu["mxcsr"], "00001F80");
+}
+
+#[test]
+fn an_fpu_value_beyond_a_double_reads_back_by_its_tag() {
+    let (mut cpu, mut hub) = (Cpu::new(".".into()), DebugHub::disabled());
+    for _ in 0..4 {
+        cpu.fpu_push_f64(1.0);
+    }
+    cpu.model = crate::cpu::CpuModel::PentiumIII;
+    // Physical registers 4 to 7 are ST(0) to ST(3).
+    cpu.fpu_set_reg(4, rust_dos::f80::F80 { st: 0x4530_8000_0000_0000_0000 });
+    cpu.fpu_set_reg(5, rust_dos::f80::F80 { st: 0x0000_4000_0000_0000_0000 });
+    cpu.fpu_set_reg(6, rust_dos::f80::F80 { st: 0x3FFF_4000_0000_0000_0000 });
+    cpu.sse.xmm[0] = 0x7FC0_0000;
+    let fpu = reply(&mut cpu, &mut hub, Cmd::GetFpu).unwrap();
+    assert_eq!(fpu["st"][0]["tag"], "valid");
+    assert_eq!(fpu["st"][0]["value"], Value::Null, "2^1329 is beyond a double");
+    assert_eq!(fpu["st"][1]["tag"], "special", "a denormal");
+    assert_eq!(fpu["st"][1]["value"], 0.0);
+    assert_eq!(fpu["st"][2]["tag"], "special", "an unnormal");
+    assert_eq!(fpu["st"][3]["tag"], "valid");
+    assert_eq!(fpu["tag"], "28FF", "FSTENV's tag word");
+    assert_eq!(fpu["xmm"][0]["ps"][0], Value::Null, "a NaN single");
+}

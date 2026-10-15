@@ -302,7 +302,7 @@ impl Probes {
             .filter(|e| e.path().extension().is_some_and(|x| x == "bin"))
             .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
             .collect();
-        caches.sort_by(|a, b| b.0.cmp(&a.0));
+        caches.sort_by_key(|a| std::cmp::Reverse(a.0));
         for (_, old) in caches.into_iter().skip(KEEP) {
             let _ = std::fs::remove_file(old);
         }
@@ -339,7 +339,7 @@ impl Probes {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        let mut words = bytes.strip_prefix(b"RDGI")?.chunks_exact(4).map(|w| [w[0], w[1], w[2], w[3]]);
+        let mut words = bytes.strip_prefix(b"RDGI")?.as_chunks::<4>().0.iter().map(|w| [w[0], w[1], w[2], w[3]]);
         let mut word = || words.next();
         if u32::from_le_bytes(word()?) != VERSION {
             return None;

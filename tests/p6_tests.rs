@@ -324,9 +324,9 @@ fn the_sysenter_msrs_go_into_a_save_state() {
     cpu.sysenter = [0; 3];
     rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
     assert_eq!(cpu.sysenter, [0x08, 0x7000, 0x1234]);
-    // A state from before them (without their section, the last) loads,
-    // with them 0.
-    let older = &state[..state.len() - (4 + 2 + 4 + 12)];
+    // A state from before them (without their section and the SSE and K6
+    // ones after it, the last) loads, with them 0.
+    let older = &state[..state.len() - (4 + 2 + 4 + 12) - (4 + 2 + 4 + 8 * 16 + 4 + 1) - (4 + 2 + 4 + 6 * 8)];
     rust_dos::savestate::machine::load(&mut cpu, older).unwrap();
     assert_eq!(cpu.sysenter, [0; 3]);
 }

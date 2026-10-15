@@ -1286,6 +1286,16 @@ fn the_machine_plays_on_while_the_mixer_page_shows() {
 }
 
 #[test]
+fn the_machine_runs_on_with_pause_in_settings_off() {
+    let host = FakeHost::new();
+    let mut ui = ConfigUi::new();
+    let settings = Settings { pause_in_settings: false, ..Settings::default() };
+    ui.open(&settings, None, &host);
+    ui.show_page(Page::Sound);
+    assert!(!ui.pauses_machine());
+}
+
+#[test]
 fn the_stats_page_draws_its_numbers_and_graphs() {
     let host = FakeHost::new();
     let mut ui = opened(&host);

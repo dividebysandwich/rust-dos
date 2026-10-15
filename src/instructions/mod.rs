@@ -14,8 +14,10 @@ pub mod fpu;
 pub mod logic;
 pub mod mmx;
 pub mod operand;
+pub mod sse;
 pub mod string;
 pub mod system;
+pub mod three_dnow;
 pub mod transfer;
 pub mod utils;
 
@@ -197,6 +199,8 @@ pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
         Leave => control::leave(cpu, instr),
 
         // --- Strings ---
+        // SSE2's MOVSD and CMPSD on XMM registers share the mnemonics.
+        Movsd | Cmpsd if instr.op_register(0).is_xmm() || instr.op_register(1).is_xmm() => Err(Fault::UD),
         Movsb => string::string(cpu, instr, StrOp::Movs, 1),
         Movsw => string::string(cpu, instr, StrOp::Movs, 2),
         Movsd => string::string(cpu, instr, StrOp::Movs, 4),
@@ -261,6 +265,8 @@ pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
         Rdmsr => system::msr(cpu, false),
         Wrmsr => system::msr(cpu, true),
         Sysenter => system::sysenter(cpu),
+        Syscall => system::syscall(cpu),
+        Sysret => system::sysret(cpu),
         Sysexit => system::sysexit(cpu),
 
         // --- FPU ---
@@ -290,6 +296,22 @@ pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
         | Pcmpeqd | Pcmpgtb | Pcmpgtw | Pcmpgtd | Pand | Pandn | Por | Pxor | Psllw | Pslld | Psllq
         | Psrlw | Psrld | Psrlq | Psraw | Psrad | Packsswb | Packssdw | Packuswb | Punpcklbw
         | Punpcklwd | Punpckldq | Punpckhbw | Punpckhwd | Punpckhdq => mmx::mmx(cpu, instr),
+
+        // --- SSE ---
+        Movaps | Movups | Movss | Movlps | Movhps | Movhlps | Movlhps | Movntps | Movmskps | Andps | Andnps | Orps
+        | Xorps | Unpcklps | Unpckhps | Shufps | Addps | Addss | Subps | Subss | Mulps | Mulss | Divps | Divss
+        | Sqrtps | Sqrtss | Rcpps | Rcpss | Rsqrtps | Rsqrtss | Minps | Minss | Maxps | Maxss | Cmpps | Cmpss
+        | Comiss | Ucomiss | Cvtpi2ps | Cvtsi2ss | Cvtps2pi | Cvttps2pi | Cvtss2si | Cvttss2si | Ldmxcsr | Stmxcsr
+        | Sfence | Pavgb | Pavgw | Pextrw | Pinsrw | Pmaxsw | Pmaxub | Pminsw | Pminub | Pmovmskb | Pmulhuw
+        | Psadbw | Pshufw | Maskmovq | Movntq => sse::sse(cpu, instr),
+        Fxsave => sse::fxsave(cpu, instr, false),
+        Fxrstor => sse::fxsave(cpu, instr, true),
+
+        // --- 3DNow! ---
+        Femms | Pavgusb | Pf2id | Pfacc | Pfadd | Pfcmpeq | Pfcmpge | Pfcmpgt | Pfmax | Pfmin | Pfmul | Pfrcp
+        | Pfrcpit1 | Pfrcpit2 | Pfrsqit1 | Pfrsqrt | Pfsub | Pfsubr | Pi2fd | Pmulhrw => three_dnow::three_dnow(cpu, instr),
+        // 0F 0D /2 decodes as Intel's PREFETCHWT1, a reserved type to a K6-2.
+        Prefetch | Prefetchw | Prefetchwt1 => three_dnow::prefetch(cpu),
 
         _ => Err(Fault::UD),
     }

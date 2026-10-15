@@ -8,6 +8,8 @@ use std::sync::OnceLock;
 const CPU_VERSION: u16 = 3;
 const ENV_VERSION: u16 = 1;
 const SEP_VERSION: u16 = 1;
+const SSE_VERSION: u16 = 1;
+const K6_VERSION: u16 = 1;
 
 /// The machine's state, between batches.
 pub fn save(cpu: &Cpu) -> Vec<u8> {
@@ -32,6 +34,8 @@ fn write(cpu: &Cpu, w: &mut Writer) {
     w.section(b"CPU ", CPU_VERSION, |w| cpu.save(w));
     w.section(b"ENV ", ENV_VERSION, |w| cpu.env_injector.save(w));
     w.section(b"SEP ", SEP_VERSION, |w| cpu.sysenter.save(w));
+    w.section(b"SSE ", SSE_VERSION, |w| cpu.sse.save(w));
+    w.section(b"K6  ", K6_VERSION, |w| cpu.k6.save(w));
 }
 
 /// Load a state `save` wrote into the machine, between batches. A state
@@ -94,6 +98,19 @@ fn load_sections(cpu: &mut Cpu, data: &[u8]) -> Result<Vec<String>> {
         cpu.sysenter.load(&mut r.section(b"SEP ", SEP_VERSION)?)?;
     } else {
         cpu.sysenter = [0; 3];
+    }
+    // A state from before the Pentium III has no SSE state: the registers
+    // were as after a reset.
+    if r.next_is(b"SSE ") {
+        cpu.sse.load(&mut r.section(b"SSE ", SSE_VERSION)?)?;
+    } else {
+        cpu.sse = crate::cpu::Sse::default();
+    }
+    // A state from before the K6-2 has none of its MSRs: they were 0.
+    if r.next_is(b"K6  ") {
+        cpu.k6.load(&mut r.section(b"K6  ", K6_VERSION)?)?;
+    } else {
+        cpu.k6 = crate::cpu::K6Msrs::default();
     }
     Ok(lost)
 }

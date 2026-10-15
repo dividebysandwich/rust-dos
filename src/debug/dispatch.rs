@@ -338,6 +338,7 @@ impl DebugHub {
                 Reply::Json(json!({"ok": true}))
             }
             Cmd::GetRegs => Reply::Json(regs_json(cpu)),
+            Cmd::GetFpu => Reply::Json(super::status::fpu_json(cpu)),
             Cmd::SetRegs(map) => match set_regs(cpu, &map) {
                 Ok(()) => {
                     let changed: Map<String, Value> = map.iter().map(|(k, v)| (k.to_ascii_lowercase(), v.clone())).collect();

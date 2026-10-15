@@ -66,7 +66,9 @@ fn test_fld_fstp_float80() {
     let mut f = F80::new();
     f.set_f64(1.0);
     let bytes_out = f.get_bytes();
-    for i in 0..10 { cpu.bus.write_8(addr + i, bytes_out[i]); }
+    for (i, &byte) in bytes_out.iter().enumerate() {
+        cpu.bus.write_8(addr + i, byte);
+    }
 
     // FLD TBYTE PTR [1000] (DB 2E 00 10)
     run_cpu_code(&mut cpu, &[0xDB, 0x2E, 0x00, 0x10]);
@@ -83,7 +85,9 @@ fn test_fld_fstp_float80() {
     // Read back from new address
     let mut f_read = F80::new();
     let mut read_bytes = [0u8; 10];
-    for i in 0..10 { read_bytes[i] = cpu.bus.read_8(addr + 16 + i); }
+    for (i, byte) in read_bytes.iter_mut().enumerate() {
+        *byte = cpu.bus.read_8(addr + 16 + i);
+    }
     f_read.set_bytes(&read_bytes);
     
     assert_eq!(f_read.get_f64(), 2.0);
@@ -339,7 +343,7 @@ fn test_fistp_stores_the_integer_indefinite() {
     assert!(store(&mut cpu, f64::NAN, &[0xDF, 0x3E, 0x08, 0x10]));
     assert_eq!(cpu.bus.read_64(0x1008), 0x8000_0000_0000_0000);
     assert!(store(&mut cpu, f64::INFINITY, &[0xDF, 0x3E, 0x08, 0x10]));
-    assert!(!store(&mut cpu, -9.223372036854775808e18, &[0xDF, 0x3E, 0x08, 0x10]));
+    assert!(!store(&mut cpu, -9.223_372_036_854_776e18, &[0xDF, 0x3E, 0x08, 0x10]));
     assert_eq!(cpu.bus.read_64(0x1008), 0x8000_0000_0000_0000);
 }
 

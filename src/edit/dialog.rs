@@ -281,14 +281,14 @@ impl<K> Dialog<K> {
             },
             None => {}
         }
-        if !typing && let Key::Char(c) | Key::Alt(c) = key {
-            if let Some(id) = self.controls.iter().find_map(|control| match control {
+        if !typing
+            && let Key::Char(c) | Key::Alt(c) = key
+            && let Some(id) = self.controls.iter().find_map(|control| match control {
                 Control::Button { label, id, .. } if label.as_bytes()[0].eq_ignore_ascii_case(&c) => Some(*id),
                 _ => None,
             }) {
                 return Event::Press(id);
             }
-        }
         Event::None
     }
 
@@ -315,20 +315,20 @@ impl<K> Dialog<K> {
                     self.focus = i;
                     return Event::Press(*id);
                 }
-                Control::List { row, col, width, height, items, sel, top } => {
-                    if r >= *row && r < *row + *height && c >= *col && c < *col + *width {
-                        let was_focused = self.focus == i;
-                        self.focus = i;
-                        let at = *top + (r - *row);
-                        if at < items.len() {
-                            if at == *sel && was_focused {
-                                return Event::ListEnter(i);
-                            }
-                            *sel = at;
-                            return Event::ListMove(i);
+                Control::List { row, col, width, height, items, sel, top }
+                    if r >= *row && r < *row + *height && c >= *col && c < *col + *width =>
+                {
+                    let was_focused = self.focus == i;
+                    self.focus = i;
+                    let at = *top + (r - *row);
+                    if at < items.len() {
+                        if at == *sel && was_focused {
+                            return Event::ListEnter(i);
                         }
-                        return Event::None;
+                        *sel = at;
+                        return Event::ListMove(i);
                     }
+                    return Event::None;
                 }
                 _ => {}
             }

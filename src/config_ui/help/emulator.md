@@ -74,13 +74,15 @@ mode.
 # Processor {#cpu}
 
 The processor games find: **386**, **486**, **Pentium**, **Pentium
-MMX**, **Pentium Pro** or **Pentium II**.
+MMX**, **K6-2**, **Pentium Pro**, **Pentium II** or **Pentium III**.
 
 **486** suits almost everything. Pick **Pentium** for late-1990s games
 that ask for one, and for 3dfx games; **Pentium MMX** for those that
 need MMX; **Pentium II** for programs built for a Pentium Pro or later,
-which use its conditional moves (CMOV). **Pentium Pro** is that without
-MMX. Takes effect at the DOS prompt.
+which use its conditional moves (CMOV); **Pentium III** for those that
+need SSE. **K6-2** is AMD's Pentium MMX with 3DNow!, for the games with
+code of their own for it. **Pentium Pro** is the Pentium II without MMX.
+Takes effect at the DOS prompt.
 
 # BIOS POST screen {#post}
 
@@ -233,8 +235,8 @@ late games want **32** or **64 MB**.
 
 How much there can be depends on the processor, as with the motherboards
 of its day: up to **64 MB** with a 386, **128 MB** with a 486, **256 MB**
-with a Pentium and **512 MB** with a Pentium MMX, Pentium Pro or Pentium
-II. Picking a smaller
+with a Pentium and **512 MB** with a Pentium MMX, K6-2, Pentium Pro,
+Pentium II or Pentium III. Picking a smaller
 processor brings the memory down to what it takes. Save states and rewind
 grow with the memory.
 
@@ -371,6 +373,13 @@ setups with no keyboard or no F12 key, such as a TV with a remote. The
 program still sees the press, and a release as the window opens. Moving
 the mouse while holding the button keeps it an ordinary press. Turn it
 **off** for a game that has you hold the right button still.
+
+# Pause in settings window {#pause-in-settings}
+
+When **on** (the default), the program pauses while this settings
+window is open, except on the Mixer and Stats pages. Turn it **off** to
+let the program run on behind the window. In a LAN room it always runs
+on, whatever this says, as the other players' games would wait for it.
 
 # Rewind (Alt+F11) {#rewind}
 
