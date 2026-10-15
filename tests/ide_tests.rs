@@ -227,6 +227,11 @@ fn sectors_whose_edc_fails_are_read_errors() {
         assert_eq!(packet(&mut bus, cdb, 0xFFFE), Err(0x34), "medium error, aborted: {:02X?}", cdb);
         assert_eq!(sense(&mut bus), (0x03, 0x11, 0x00), "unrecovered read error");
     }
+    // The information field names the sector that failed.
+    packet(&mut bus, read10(bad - 1, 3), 0xFFFE).unwrap_err();
+    let s = packet(&mut bus, [0x03, 0, 0, 0, 18, 0, 0, 0, 0, 0, 0, 0], 18).unwrap();
+    assert_eq!(s[0], 0xF0, "valid, current error");
+    assert_eq!(s[3..7], bad.to_be_bytes());
     // The sectors around it read.
     for lba in [bad - 1, bad + 1] {
         assert_eq!(packet(&mut bus, read10(lba, 1), 2048).unwrap(), vec![0x55; 2048]);

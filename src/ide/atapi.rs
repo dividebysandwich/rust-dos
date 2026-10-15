@@ -854,6 +854,7 @@ impl Atapi {
         let size = if raw { RAW_SECTOR } else { DATA_SECTOR };
         let supported = self.cdb[0] != 0xBE || matches!(self.sector_size as usize, DATA_SECTOR | RAW_SECTOR);
         let mut ok = supported && env.cd(self.drive).is_some();
+        let mut unreadable = None;
         if ok {
             let image = env.cd(self.drive).unwrap();
             for i in 0..self.xfer as usize {
@@ -869,6 +870,7 @@ impl Atapi {
                 if let Err(e) = read {
                     if crate::cdrom::image::is_unreadable(&e) {
                         self.log.push(format!("[IDE] CD-ROM read error: {}", e));
+                        unreadable = Some(lba);
                     }
                     ok = false;
                     break;
@@ -882,6 +884,11 @@ impl Atapi {
                 // MEDIUM ERROR, UNRECOVERED READ ERROR: what a drive says
                 // of a sector it can't read, as copy protections expect.
                 self.set_sense(0x03, 0x11, 0);
+                if let Some(lba) = unreadable {
+                    // The information field holds the sector that failed.
+                    self.sense[0] |= 0x80;
+                    self.sense[3..7].copy_from_slice(&lba.to_be_bytes());
+                }
             }
             self.buf_len = 0;
             self.remaining = 0;
