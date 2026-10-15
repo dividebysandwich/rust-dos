@@ -4,12 +4,14 @@
 //! (bus/state.rs), and the caches of decoded and translated code are
 //! thrown away after a load.
 
-use super::{Cpu, CpuFlags, CpuSnapshot, CpuState, DescTable, FpuFlags, ProcessContext, SegCache};
+use super::{Cpu, CpuFlags, CpuSnapshot, CpuState, DescTable, FpuFlags, K6Msrs, ProcessContext, SegCache, Sse};
 use crate::savestate::{Reader, Result, State, Writer};
 
 crate::state_fields!(DescTable { base, limit });
 crate::state_enum!(CpuState { CpuState::Running, CpuState::Halted, CpuState::RebootShell });
 crate::state_fields!(CpuSnapshot { gpr, eip, flags, seg });
+crate::state_fields!(Sse { xmm, mxcsr, psn_off });
+crate::state_fields!(K6Msrs { mcar, mctr, tr12, efer, star, whcr });
 crate::state_fields!(ProcessContext { regs, psp, child, child_at, heap_pointer, dta, program });
 
 impl State for CpuFlags {
@@ -61,6 +63,9 @@ crate::state_fields!(Cpu {
 } skip {
     // Saved in sections of its own (the injector's in savestate/machine.rs).
     bus, env_injector,
+    // In sections of their own (savestate/machine.rs), which older states
+    // lack.
+    sysenter, sse, k6,
     // Set from the configuration, which a state carries in its header.
     model, core, string_bulk, fpu_fast,
     // Caches, emptied after a load.
@@ -73,7 +78,8 @@ crate::state_fields!(Cpu {
     // The session's, and set only from a reset to the shell handling it.
     startup, reboot,
     // The host's, as the history.
-    edit_clipboard, mode_switches, exceptions, exception_log,
+    edit_clipboard, mode_switches, exceptions, exception_log, exception_places,
+    exception_places_per_vector,
     // Only set while a command runs, never between the batches a state
     // is saved in.
     secondary, stdout_capture, stdin_redirect,

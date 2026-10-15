@@ -64,6 +64,7 @@ impl Addr {
 /// (down with `backward`) reaches without a fault through the segment or
 /// the addressing, and without leaving the page the first is in. 0 where
 /// the first can't go without the checks of an iteration.
+#[allow(clippy::too_many_arguments)]
 fn span(cpu: &Cpu, seg: Seg, off: u32, size: u32, max: u32, backward: bool, mask: u32, write: bool) -> u32 {
     use crate::cpu::layout::{RIGHT_READ, RIGHT_WRITE};
     let c = cpu.seg_cache(seg);
@@ -104,8 +105,10 @@ enum Bulk {
 /// and segment limits their first elements are in, done at once: they are
 /// the iterations one at a time would do, with the first one's checks and
 /// page walks (the others' go through the TLB as they did, changing
-/// nothing). In plain RAM, the elements are moved together; elsewhere (the
-/// video memory) one by one through the bus, as each iteration would.
+/// nothing). In plain RAM, the elements are moved together, and so are
+/// moves from plain RAM and stores into the VGA's planes or the linear
+/// frame buffer; elsewhere one by one through the bus, as each iteration
+/// would.
 fn bulk(cpu: &mut Cpu, op: StrOp, size: u8, a: &Addr, count: u32) -> CpuResult<Bulk> {
     let backward = a.delta != size as u32;
     let bytes = size as u32;
@@ -128,7 +131,10 @@ fn bulk(cpu: &mut Cpu, op: StrOp, size: u8, a: &Addr, count: u32) -> CpuResult<B
             let src_ram = cpu.bus.is_plain_ram(range(src.phys), len);
             if src_ram && cpu.bus.is_plain_ram(range(dst.phys), len) {
                 cpu.bus.move_elements(src.phys as usize, dst.phys as usize, n as usize, size as usize, backward);
-            } else if !(src_ram && cpu.bus.move_to_vga(range(src.phys), range(dst.phys), len)) {
+            } else if !(src_ram
+                && (cpu.bus.move_to_vga(range(src.phys), range(dst.phys), len)
+                    || cpu.bus.move_to_lfb(range(src.phys), range(dst.phys), len, size as usize)))
+            {
                 for k in 0..n {
                     let value = cpu.mem_read(element(src, a.delta, k));
                     cpu.mem_write(element(dst, a.delta, k), value);
@@ -140,7 +146,9 @@ fn bulk(cpu: &mut Cpu, op: StrOp, size: u8, a: &Addr, count: u32) -> CpuResult<B
             let value = cpu.reg(accumulator(size));
             if cpu.bus.is_plain_ram(range(dst.phys), len) {
                 cpu.bus.fill_elements(range(dst.phys), n as usize, size as usize, value);
-            } else if !cpu.bus.fill_vga(range(dst.phys), n as usize, size as usize, value) {
+            } else if !(cpu.bus.fill_vga(range(dst.phys), n as usize, size as usize, value)
+                || cpu.bus.fill_lfb(range(dst.phys), n as usize, size as usize, value))
+            {
                 for k in 0..n {
                     cpu.mem_write(element(dst, a.delta, k), value);
                 }

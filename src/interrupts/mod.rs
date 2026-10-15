@@ -308,7 +308,7 @@ pub fn handle_hle(cpu: &mut Cpu, vector: u8) {
         0x33 => int33::handle(cpu),
         // The IPX driver's older interface.
         0x7A => crate::net::ipx::api(cpu),
-        0x34 | 0x35 | 0x36 | 0x37 | 0x38 | 0x39 | 0x3A | 0x3B | 0x3C | 0x3D | 0x3E | 0x3F => {
+        0x34..=0x3F => {
             /* FPU Vector - IRET */
             // TODO: Implement FPU
         }

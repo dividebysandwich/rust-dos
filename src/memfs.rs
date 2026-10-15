@@ -19,6 +19,7 @@ pub enum Node {
 
 impl Node {
     /// Length in bytes.
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> u64 {
         match self {
             Node::Bytes(data) => data.len() as u64,

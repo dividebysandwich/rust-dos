@@ -322,22 +322,22 @@ pub fn build_upper(bus: &mut Bus) {
 
 /// Link upper memory to conventional memory's chain, or unlink it
 /// (INT 21h AX=5803h): conventional memory's last block becomes an 'M' or
-/// a 'Z'. Fails without upper memory or with a broken chain.
-pub fn link_upper(bus: &mut Bus, on: bool) -> Result<(), ()> {
-    let Some(umb) = bus.umb else { return Err(()) };
+/// a 'Z'. False without upper memory or with a broken chain.
+pub fn link_upper(bus: &mut Bus, on: bool) -> bool {
+    let Some(umb) = bus.umb else { return false };
     if umb.linked == on {
-        return Ok(());
+        return true;
     }
     let chain = walk(bus);
     let cover = umb_cover_seg(bus);
-    let &(last, m) = chain.iter().take_while(|(s, _)| *s < cover).last().ok_or(())?;
+    let Some(&(last, m)) = chain.iter().take_while(|(s, _)| *s < cover).last() else { return false };
     if last as u32 + 1 + m.size as u32 != cover as u32 {
-        return Err(());
+        return false;
     }
     write_mcb(bus, last, &Mcb { signature: if on { MCB_M } else { MCB_Z }, ..m });
     bus.umb = Some(Umb { linked: on, ..umb });
     crate::dos_data::set_upper_linked(bus, on);
-    Ok(())
+    true
 }
 
 /// Free the upper memory blocks of every owner but `keep` (the resident
@@ -493,7 +493,7 @@ fn alloc_in(bus: &mut Bus, chain: Vec<(u16, Mcb)>, owner_psp: u16, paras: u16, f
     let chosen = match fit {
         Fit::First => fitting.next(),
         Fit::Best => fitting.min_by_key(|(_, m)| m.size),
-        Fit::Last => fitting.last(),
+        Fit::Last => fitting.next_back(),
     };
     let Some(&(seg, m)) = chosen else {
         return Err(max_free);

@@ -561,7 +561,7 @@ fn call(cpu: &mut Cpu, ems: &mut Ems, function: u8) -> u8 {
             0x00 => {
                 let mut at = es_di(cpu);
                 for slot in 0..FRAME_PAGES {
-                    cpu.bus.write_16(at, FRAME_SEGMENT + (slot * PAGE >> 4) as u16);
+                    cpu.bus.write_16(at, FRAME_SEGMENT + ((slot * PAGE) >> 4) as u16);
                     cpu.bus.write_16(at + 2, slot as u16);
                     at += 4;
                 }
@@ -713,7 +713,7 @@ fn page_map(cpu: &mut Cpu, ems: &mut Ems, al: u8) -> u8 {
 /// The physical page at `segment`, one of the frame's four.
 fn slot_of_segment(segment: u16) -> Option<usize> {
     let offset = segment.wrapping_sub(FRAME_SEGMENT) as usize;
-    (segment >= FRAME_SEGMENT && offset % (PAGE >> 4) == 0 && offset / (PAGE >> 4) < FRAME_PAGES)
+    (segment >= FRAME_SEGMENT && offset.is_multiple_of(PAGE >> 4) && offset / (PAGE >> 4) < FRAME_PAGES)
         .then_some(offset / (PAGE >> 4))
 }
 
@@ -737,7 +737,7 @@ fn partial_page_map(cpu: &mut Cpu, ems: &mut Ems, al: u8) -> u8 {
             for (i, &slot) in slots.iter().enumerate() {
                 let (handle, page) = ems.mapped[slot].unwrap_or((0xFFFF, 0xFFFF));
                 let entry = at + 2 + 6 * i;
-                cpu.bus.write_16(entry, FRAME_SEGMENT + (slot * PAGE >> 4) as u16);
+                cpu.bus.write_16(entry, FRAME_SEGMENT + ((slot * PAGE) >> 4) as u16);
                 cpu.bus.write_16(entry + 2, handle);
                 cpu.bus.write_16(entry + 4, page);
             }
@@ -882,6 +882,23 @@ impl Region {
         }
     }
 
+    /// The region's first `len` bytes where they are now, as runs of
+    /// consecutive addresses: (address, length). A handle's pages each make
+    /// a run of their own.
+    fn runs(&self, ems: &Ems, len: usize) -> Vec<(usize, usize)> {
+        let mut runs = Vec::new();
+        let mut i = 0;
+        while i < len {
+            let n = match *self {
+                Region::Conventional(_) => len,
+                Region::Expanded { offset, .. } => (PAGE - (offset + i) % PAGE).min(len - i),
+            };
+            runs.push((self.addr(ems, i), n));
+            i += n;
+        }
+        runs
+    }
+
     /// Where the region starts and ends, as (handle or None, first, last)
     /// in a space where two regions of one kind can be compared.
     fn span(&self, len: usize) -> (Option<u16>, usize, usize) {
@@ -892,6 +909,26 @@ impl Region {
                 (Some(handle), start, start + len)
             }
         }
+    }
+}
+
+/// The `len` bytes at `runs` (`Region::runs`), a run at a time
+/// (`Bus::read_run`), so video memory and the page frame read as programs
+/// see them.
+fn read_runs(bus: &Bus, runs: &[(usize, usize)], len: usize) -> Vec<u8> {
+    let mut data = Vec::with_capacity(len);
+    for &(addr, n) in runs {
+        bus.read_run(addr, n, &mut data);
+    }
+    data
+}
+
+/// `data` written to `runs`, as `read_runs` reads them.
+fn write_runs(bus: &mut Bus, runs: &[(usize, usize)], data: &[u8]) {
+    let mut at = 0;
+    for &(addr, n) in runs {
+        bus.write_run(addr, &data[at..at + n]);
+        at += n;
     }
 }
 
@@ -949,17 +986,15 @@ fn move_or_exchange(cpu: &mut Cpu, ems: &mut Ems, al: u8) -> u8 {
         return EXCHANGE_OVERLAP;
     }
     ems.sync_aliases(&mut cpu.bus);
-    // Through the bus, so video memory is a destination as well.
-    let from: Vec<u8> = (0..len).map(|i| cpu.bus.read_8(source.addr(ems, i))).collect();
+    // Both ends read whole before anything is written, so an overlapping
+    // move copies the source as it was.
+    let (source, dest) = (source.runs(ems, len), dest.runs(ems, len));
+    let from = read_runs(&cpu.bus, &source, len);
     if al == 1 {
-        let to: Vec<u8> = (0..len).map(|i| cpu.bus.read_8(dest.addr(ems, i))).collect();
-        for (i, b) in to.into_iter().enumerate() {
-            cpu.bus.write_8(source.addr(ems, i), b);
-        }
+        let to = read_runs(&cpu.bus, &dest, len);
+        write_runs(&mut cpu.bus, &source, &to);
     }
-    for (i, b) in from.into_iter().enumerate() {
-        cpu.bus.write_8(dest.addr(ems, i), b);
-    }
+    write_runs(&mut cpu.bus, &dest, &from);
     ems.sync_aliases(&mut cpu.bus);
     if overlap { MOVE_OVERLAP } else { OK }
 }

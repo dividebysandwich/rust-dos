@@ -57,7 +57,8 @@ pub fn save(m: &Machine, buf: &mut [u8]) -> bool {
 }
 
 /// Load the state in `buf`: the hardware it was saved with first, then
-/// the machine. A state of another memory size is refused.
+/// the machine. A state of another memory size is refused: the frontend
+/// has the memory's address (memmap.rs).
 pub fn load(m: &mut Machine, buf: &[u8]) -> Result<slots::Header, String> {
     let bad = || "not a rust-dos save state".to_string();
     if buf.get(..4) != Some(&MAGIC[..]) {
@@ -105,5 +106,7 @@ pub fn load(m: &mut Machine, buf: &[u8]) -> Result<slots::Header, String> {
         }
         return Err(e.to_string());
     }
+    // The state's time stamp counter goes on at this machine's speed.
+    m.cpu.set_tsc_speed(m.settings.cycles);
     Ok(header)
 }

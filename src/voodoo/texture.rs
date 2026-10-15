@@ -2,7 +2,10 @@
 //! mipmap levels in it from the texture registers, the NCC (YIQ) tables
 //! and the palette, and textures written by the host. From DOSBox-X's
 //! voodoo_emu.cpp: `init_tmu`, `recompute_texture_params`, `prepare_tmu`,
-//! `ncc_table_write`, `ncc_table_update` and `texture_w`.
+//! `ncc_table_write`, `ncc_table_update` and `texture_w`; a Voodoo2's
+//! 8-bit palette of 6-bit ARGB (format 6) and its separate base addresses
+//! for the first mipmap levels as MAME's `recompute_texture_params` has
+//! them.
 
 use super::mem::Vram;
 use super::regs::*;
@@ -133,8 +136,12 @@ pub struct Tmu {
 
     pub ncc: [Ncc; 2],
     /// The 256 colours of the P8 and AP88 formats, written through the
-    /// NCC table registers with bit 31 set.
+    /// NCC table registers with bit 31 set, and the same entries as 6-bit
+    /// ARGB for a Voodoo2's format 6.
     pub palette: Arc<[u32; 256]>,
+    pub palette6666: Arc<[u32; 256]>,
+    /// Whether it is a Voodoo2's, which has format 6 and tLOD bit 24.
+    pub v2: bool,
 
     /// For the OpenGL renderer's decoded textures: the palette's changes,
     /// the writes to the RAM, and for each 4 KB page of it the count of
@@ -150,7 +157,7 @@ pub const PAGE_SHIFT: u32 = 12;
 crate::state_fields!(Tmu {
     starts, startt, startw, dsdx, dtdx, dwdx, dsdy, dtdy, dwdy, ncc, palette,
 } skip {
-    ram, mask, base, regdirty,
+    ram, mask, base, regdirty, palette6666, v2,
     lodmin, lodmax, lodbias, lodmask, lodoffset, detailmax, detailbias, detailscale, wmask, hmask,
     palette_changes, writes, page_writes,
 });
@@ -183,6 +190,8 @@ impl Tmu {
             hmask: 0,
             ncc: [Ncc::default(), Ncc::default()],
             palette: Arc::new([0; 256]),
+            palette6666: Arc::new([0; 256]),
+            v2: false,
             palette_changes: 0,
             writes: 0,
             page_writes: vec![0; bytes.div_ceil(1 << PAGE_SHIFT)],
@@ -197,6 +206,7 @@ impl Tmu {
             ram: self.ram.clone(),
             mask: self.mask,
             base: self.base,
+            v2: self.v2,
             palette_changes: changes[2],
             writes: self.writes,
             page_writes: std::mem::take(&mut self.page_writes),
@@ -217,6 +227,7 @@ impl Tmu {
         for ncc in &mut self.ncc {
             ncc.rebuild();
         }
+        self.palette6666 = Arc::new(self.palette.map(argb6666));
         // The RAM and the palette came from the state.
         self.palette_changes = self.palette_changes.wrapping_add(1);
         self.writes = self.writes.wrapping_add(1);
@@ -233,6 +244,7 @@ impl Tmu {
             let color = 0xFF00_0000 | data;
             if self.palette[entry] != color {
                 Arc::make_mut(&mut self.palette)[entry] = color;
+                Arc::make_mut(&mut self.palette6666)[entry] = argb6666(color);
                 self.palette_changes = self.palette_changes.wrapping_add(1);
             }
             return;
@@ -272,12 +284,18 @@ impl Tmu {
         }
 
         let bppscale = ((mode >> 8) & 0xF) >> 3;
-        let mut base = (reg[self.base + TEX_BASE_ADDR] & TEXADDR_MASK) << TEXADDR_SHIFT;
+        let address = |r: usize| (reg[self.base + r] & TEXADDR_MASK) << TEXADDR_SHIFT;
+        let mut base = address(TEX_BASE_ADDR);
         self.lodoffset[0] = base & self.mask;
-        // The levels follow each other (the multiple base addresses of
-        // tLOD bit 24 are ignored, as DOSBox-X and MAME do).
+        // A Voodoo2 with tLOD bit 24 has levels 1 and 2 and from 3 on at
+        // addresses of their own; MAME leaves it off where bits 31:28 are
+        // set, which games leave so without meaning it. Otherwise the
+        // levels follow each other.
+        let multibase = self.v2 && lod & (1 << 24) != 0 && lod >> 28 == 0;
         for level in 1..=8usize {
-            if self.lodmask & (1 << (level - 1)) != 0 {
+            if multibase && level <= 3 {
+                base = address([TEX_BASE_ADDR_1, TEX_BASE_ADDR_2, TEX_BASE_ADDR_3_8][level - 1]);
+            } else if self.lodmask & (1 << (level - 1)) != 0 {
                 let mut size = ((self.wmask >> (level - 1)) + 1) * ((self.hmask >> (level - 1)) + 1);
                 if level >= 4 {
                     size = size.max(4);
@@ -300,6 +318,7 @@ impl Tmu {
         match (mode >> 8) & 0xF {
             1 | 9 => 1 << 40 | (table as u64) << 32 | self.ncc[table as usize].changes as u64,
             5 | 14 => 2 << 40 | self.palette_changes as u64,
+            6 if self.v2 => 3 << 40 | self.palette_changes as u64,
             _ => 0,
         }
     }
@@ -315,6 +334,7 @@ impl Tmu {
             3 | 13 => t.int8.clone(),
             4 => t.ai44.clone(),
             5 | 14 => self.palette.clone(),
+            6 if self.v2 => self.palette6666.clone(),
             10 => t.rgb565.clone(),
             11 => t.argb1555.clone(),
             12 => t.argb4444.clone(),
@@ -391,6 +411,16 @@ impl Tmu {
     }
 }
 
+/// A palette entry's 6-bit alpha, red, green and blue (bits 23:18, 17:12,
+/// 11:6 and 5:0) as 8-bit ARGB.
+fn argb6666(entry: u32) -> u32 {
+    let c = |shift: u32| {
+        let v = (entry >> shift) & 0x3F;
+        (v << 2) | (v >> 4)
+    };
+    argb(c(18), c(12), c(6), c(0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,7 +434,7 @@ mod tests {
         let mut reg = regs();
         let mut tmu = Tmu::new(2 << 20, 0x100);
         reg[0x100 + TEXTURE_MODE] = 10 << 8; // RGB565
-        reg[0x100 + T_LOD] = 8 << 8 | 0; // levels 0 to 8
+        reg[0x100 + T_LOD] = 8 << 8; // levels 0 to 8
         reg[0x100 + TEX_BASE_ADDR] = 0x100; // 800h bytes
         tmu.recompute(&reg);
         assert_eq!((tmu.wmask, tmu.hmask), (0xFF, 0xFF));
@@ -447,5 +477,30 @@ mod tests {
         // A palette write: entry (bits 30:24) << 1 | the register's parity.
         tmu.ncc_write(&mut reg, 5, 0x8000_0000 | 3 << 24 | 0x12_3456);
         assert_eq!(tmu.palette[7], 0xFF12_3456);
+        // As 6-bit ARGB: 04h, 23h, 11h and 16h.
+        assert_eq!(tmu.palette6666[7], 0x10_8E_45_59);
+    }
+
+    #[test]
+    fn multiple_base_addresses_on_a_voodoo2_only() {
+        let mut reg = regs();
+        let mut tmu = Tmu::new(2 << 20, 0x100);
+        reg[0x100 + TEXTURE_MODE] = 10 << 8;
+        reg[0x100 + T_LOD] = 1 << 24 | 8 << 8;
+        reg[0x100 + TEX_BASE_ADDR] = 0x100;
+        reg[0x100 + TEX_BASE_ADDR_1] = 0x2000;
+        reg[0x100 + TEX_BASE_ADDR_2] = 0x3000;
+        reg[0x100 + TEX_BASE_ADDR_3_8] = 0x4000;
+        tmu.recompute(&reg);
+        assert_eq!(tmu.lodoffset[1], 0x800 + 256 * 256 * 2);
+        tmu.v2 = true;
+        tmu.recompute(&reg);
+        assert_eq!(tmu.lodoffset[..4], [0x800, 0x10000, 0x18000, 0x20000]);
+        // Level 4 follows level 3, of 32x32 texels.
+        assert_eq!(tmu.lodoffset[4], 0x20000 + 32 * 32 * 2);
+        // Not with bits 31:28 set.
+        reg[0x100 + T_LOD] |= 0xF000_0000;
+        tmu.recompute(&reg);
+        assert_eq!(tmu.lodoffset[1], 0x800 + 256 * 256 * 2);
     }
 }

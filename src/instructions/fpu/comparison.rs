@@ -1,6 +1,9 @@
 use iced_x86::{Code, Instruction, Mnemonic, OpKind, MemorySize, Register};
 
+use std::cmp::Ordering;
+
 use crate::cpu::{Cpu, FpuFlags, CpuFlags, FPU_TAG_EMPTY};
+use crate::f80::F80;
 use crate::instructions::utils::calculate_addr;
 
 // Performs the FPU comparison and sets Status Word flags
@@ -20,6 +23,33 @@ fn fpu_compare_values(cpu: &mut Cpu, lhs: f64, rhs: f64) {
         cpu.set_fpu_flag(FpuFlags::C0, true);
     }
     // Greater Than: All flags 0
+}
+
+/// Compare two values by their 80 bits (`F80::compare`), given where
+/// either holds more than its double (`precise`): the doubles are rounded
+/// to nearest, so a value just below a double could compare equal to it.
+/// False where the doubles' comparison stands.
+fn fpu_compare_precise(cpu: &mut Cpu, precise: Option<(F80, F80)>) -> bool {
+    let Some(order) = precise.and_then(|(lhs, rhs)| lhs.compare(&rhs)) else {
+        return false;
+    };
+    cpu.set_fpu_flag(FpuFlags::C0 | FpuFlags::C2 | FpuFlags::C3, false);
+    match order {
+        Ordering::Equal => cpu.set_fpu_flag(FpuFlags::C3, true),
+        Ordering::Less => cpu.set_fpu_flag(FpuFlags::C0, true),
+        Ordering::Greater => {}
+    }
+    true
+}
+
+/// A double from memory as 80 bits, where a register holds it as it is (0
+/// or a normal number); None otherwise.
+fn f80_of(value: f64) -> Option<F80> {
+    (value == 0.0 || value.is_normal()).then(|| {
+        let mut f = F80::new();
+        f.set_f64(value);
+        f
+    })
 }
 
 /// The registers FCOM, FUCOM and their popping forms compare, ST(lhs)
@@ -53,7 +83,7 @@ pub fn fcom_registers(instr: &Instruction) -> Option<(usize, usize, u8)> {
                 reg_op1.number() - Register::ST0.number()
             } else {
                 1 // Default to ST(1) if parsing fails or implicit
-            } as usize;
+            };
             if idx > 7 {
                 return None;
             }
@@ -64,8 +94,13 @@ pub fn fcom_registers(instr: &Instruction) -> Option<(usize, usize, u8)> {
 }
 
 pub fn fcom_variants(cpu: &mut Cpu, instr: &Instruction) {
-    let (lhs, rhs) = match fcom_registers(instr) {
-        Some((lhs, rhs, _)) => (cpu.fpu_get_f64(lhs), cpu.fpu_get_f64(rhs)),
+    // The doubles, and the 80 bits where either register holds more.
+    let (lhs, rhs, precise) = match fcom_registers(instr) {
+        Some((lhs, rhs, _)) => {
+            let precise = (cpu.fpu_beyond_double(lhs) || cpu.fpu_beyond_double(rhs))
+                .then(|| (cpu.fpu_get(lhs), cpu.fpu_get(rhs)));
+            (cpu.fpu_get_f64(lhs), cpu.fpu_get_f64(rhs), precise)
+        }
         None => {
             // Memory Comparison is ALWAYS ST(0) vs Memory
             let val_0 = cpu.fpu_get_f64(0);
@@ -75,11 +110,14 @@ pub fn fcom_variants(cpu: &mut Cpu, instr: &Instruction) {
                 MemorySize::Float64 => f64::from_bits(cpu.lin_read_64(addr)),
                 _ => f64::NAN,
             };
-            (val_0, val_op)
+            let precise = cpu.fpu_beyond_double(0).then(|| f80_of(val_op).map(|op| (cpu.fpu_get(0), op))).flatten();
+            (val_0, val_op, precise)
         }
     };
 
-    fpu_compare_values(cpu, lhs, rhs);
+    if !fpu_compare_precise(cpu, precise) {
+        fpu_compare_values(cpu, lhs, rhs);
+    }
 
     match instr.mnemonic() {
         Mnemonic::Fcomp | Mnemonic::Fucomp => cpu.fpu_drop(),
@@ -99,7 +137,10 @@ pub fn ficom_variants(cpu: &mut Cpu, instr: &Instruction) {
         MemorySize::Int32 => (cpu.lin_read_32(addr) as i32) as f64,
         _ => 0.0,
     };
-    fpu_compare_values(cpu, st0, val);
+    let precise = cpu.fpu_beyond_double(0).then(|| f80_of(val).map(|op| (cpu.fpu_get(0), op))).flatten();
+    if !fpu_compare_precise(cpu, precise) {
+        fpu_compare_values(cpu, st0, val);
+    }
     if instr.mnemonic() == Mnemonic::Ficomp {
         cpu.fpu_pop();
     }
@@ -110,7 +151,7 @@ pub fn fxam(cpu: &mut Cpu) {
     // Clear C0, C1, C2, C3
     cpu.set_fpu_flag(FpuFlags::C3 | FpuFlags::C2 | FpuFlags::C1 | FpuFlags::C0, false);
 
-    let tag = cpu.fpu_tags[cpu.fpu_top as usize];
+    let tag = cpu.fpu_tags[cpu.fpu_top];
     let st0 = cpu.fpu_reg(cpu.fpu_top); // Access raw stack to avoid fpu_get logic
 
     // Set C1 to the Sign Bit
@@ -151,37 +192,32 @@ pub fn ftst(cpu: &mut Cpu) {
 // FCOMI/FUCOMI... (Pentium Pro+)
 // These set CPU EFLAGS (ZF, PF, CF) directly, not the FPU status word condition codes.
 pub fn fcomi_variants(cpu: &mut Cpu, instr: &Instruction) {
-    let idx = (instr.op1_register().number() - iced_x86::Register::ST0.number()) as usize;
+    let idx = instr.op1_register().number() - iced_x86::Register::ST0.number();
     let st0 = cpu.fpu_get(0);
     let sti = cpu.fpu_get(idx);
     
-    // Set ZF, PF, CF based on comparison
-    // ZF=1 if Equal, CF=1 if Less, PF=1 if NaN
-    #[allow(unused_assignments)]
-    let mut zf = false;
-    #[allow(unused_assignments)]
-    let mut pf = false;
-    #[allow(unused_assignments)]
-    let mut cf = false;
-    
-    if st0.is_nan() || sti.is_nan() {
-        zf = true; pf = true; cf = true; // "Unordered"
-    } else if st0.get() == sti.get() {
-        zf = true; pf = false; cf = false; // Equal
+    // ZF=1 if equal, CF=1 if less, all three if unordered (a NaN). The
+    // comparison is of all 80 bits, and +0 equals -0.
+    let (zf, pf, cf) = if st0.is_nan() || sti.is_nan() {
+        (true, true, true)
+    } else if st0.get() == sti.get() || (st0.is_zero() && sti.is_zero()) {
+        (true, false, false)
     } else {
-        // For magnitude comparison, get_f64 is sufficient 
-        let a = st0.get_f64();
-        let b = sti.get_f64();
-        if a < b {
-            zf = false; pf = false; cf = true;
-        } else {
-            zf = false; pf = false; cf = false;
-        }
-    }
-    
+        const MAGNITUDE: u128 = (1u128 << 79) - 1;
+        let (a, b) = (st0.get() & MAGNITUDE, sti.get() & MAGNITUDE);
+        let less = match (st0.get_sign(), sti.get_sign()) {
+            (false, false) => a < b,
+            (true, true) => a > b,
+            (negative, _) => negative,
+        };
+        (false, false, less)
+    };
+
     cpu.set_cpu_flag(CpuFlags::ZF, zf);
     cpu.set_cpu_flag(CpuFlags::PF, pf);
     cpu.set_cpu_flag(CpuFlags::CF, cf);
+    // OF, SF and AF are cleared.
+    cpu.set_cpu_flag(CpuFlags::OF | CpuFlags::SF | CpuFlags::AF, false);
 
     // Pop if P-variant (FCOMIP / FUCOMIP)
     let m = instr.mnemonic();

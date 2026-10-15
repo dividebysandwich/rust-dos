@@ -1,5 +1,5 @@
 //! Where a ray (from the eye through the mouse) meets the screen, as a
-//! point of the picture.
+//! point of the picture, or something else to click (`Target`).
 
 use super::scene::Screen;
 use glam::{Mat4, Vec2, Vec3, Vec4};
@@ -17,7 +17,7 @@ pub fn ray(inverse_view_projection: Mat4, ndc: Vec2) -> (Vec3, Vec3) {
 
 /// How far along the ray it meets the triangle, and where on it (the
 /// weights of the second and third corner), from either side.
-fn hit_triangle(origin: Vec3, dir: Vec3, [a, b, c]: [Vec3; 3]) -> Option<(f32, f32, f32)> {
+pub fn hit_triangle(origin: Vec3, dir: Vec3, [a, b, c]: [Vec3; 3]) -> Option<(f32, f32, f32)> {
     let (e1, e2) = (b - a, c - a);
     let p = dir.cross(e2);
     let det = e1.dot(p);
@@ -37,6 +37,41 @@ fn hit_triangle(origin: Vec3, dir: Vec3, [a, b, c]: [Vec3; 3]) -> Option<(f32, f
     }
     let t = e2.dot(q) * inv;
     (t > 0.0).then_some((t, u, v))
+}
+
+/// Something in the scene to click with the mouse or the laser, besides
+/// the screen: a lamp to switch, a camera to take a picture with. `id`
+/// says which; the box is where it is in the scene.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Target {
+    pub id: TargetId,
+    pub low: Vec3,
+    pub high: Vec3,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TargetId {
+    /// A lamp, by its index in `Scene::lamps`.
+    Lamp(usize),
+    /// A prop's camera, by the prop's index.
+    Camera(usize),
+}
+
+/// How far along the ray it meets the box from `low` to `high`, if it
+/// does (0 from inside it).
+pub fn hit_box(origin: Vec3, dir: Vec3, low: Vec3, high: Vec3) -> Option<f32> {
+    let inv = dir.recip();
+    let (a, b) = ((low - origin) * inv, (high - origin) * inv);
+    let (near, far) = (a.min(b).max_element(), a.max(b).min_element());
+    (far >= near.max(0.0)).then_some(near.max(0.0))
+}
+
+/// The target the ray meets first, if it does, and how far along it.
+pub fn pick_target(targets: &[Target], origin: Vec3, dir: Vec3) -> Option<(f32, TargetId)> {
+    targets
+        .iter()
+        .filter_map(|t| hit_box(origin, dir, t.low, t.high).map(|d| (d, t.id)))
+        .min_by(|a, b| a.0.total_cmp(&b.0))
 }
 
 /// The point of the picture (0 to 1 across and down) the ray meets first
@@ -89,5 +124,19 @@ mod tests {
         assert!((origin - Vec3::new(0.0, 1.4, -0.05)).length() < 1e-3, "{:?}", origin);
         let (_, right) = ray((projection * view).inverse(), Vec2::new(1.0, 0.0));
         assert!(right.x > 0.0);
+    }
+
+    #[test]
+    fn rays_meet_boxes_ahead_of_them() {
+        let (low, high) = (Vec3::new(-1.0, -1.0, -6.0), Vec3::new(1.0, 1.0, -4.0));
+        assert_eq!(hit_box(Vec3::ZERO, Vec3::NEG_Z, low, high), Some(4.0));
+        assert_eq!(hit_box(Vec3::ZERO, Vec3::Z, low, high), None, "behind");
+        assert_eq!(hit_box(Vec3::new(3.0, 0.0, 0.0), Vec3::NEG_Z, low, high), None, "beside");
+        assert_eq!(hit_box(Vec3::new(0.0, 0.0, -5.0), Vec3::NEG_Z, low, high), Some(0.0), "inside");
+        let targets = [
+            Target { id: TargetId::Lamp(0), low, high },
+            Target { id: TargetId::Lamp(1), low: low + Vec3::Z * 2.5, high: high + Vec3::Z * 2.5 },
+        ];
+        assert_eq!(pick_target(&targets, Vec3::ZERO, Vec3::NEG_Z), Some((1.5, TargetId::Lamp(1))));
     }
 }

@@ -82,6 +82,7 @@ fn router(state: AppState) -> Router {
         .route("/api/ops/{req}", get(op_get))
         .route("/api/status", get(status))
         .route("/api/stats", get(stats))
+        .route("/api/profile", get(profile_get).post(profile_post))
         .route("/api/screenshot", get(screenshot))
         .route("/api/screen/text", get(screen_text))
         .route("/api/trace", get(trace_get).post(trace_post))
@@ -98,6 +99,7 @@ fn router(state: AppState) -> Router {
         .route("/api/control/{action}", post(control))
         .route("/api/control/wait", get(wait_pause))
         .route("/api/registers", get(regs_get).put(regs_put))
+        .route("/api/registers/fpu", get(fpu_get))
         .route("/api/memory", get(mem_get).put(mem_put))
         .route("/api/disasm", get(disasm))
         .route("/api/breakpoints", get(bp_list).post(bp_add).delete(bp_remove))
@@ -786,6 +788,90 @@ async fn stats(State(s): State<AppState>) -> ApiResult {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfilePost {
+    enabled: Option<bool>,
+    hz: Option<u32>,
+    /// `sleep` or `spin`.
+    timer: Option<String>,
+    duration_ms: Option<u64>,
+}
+
+async fn profile_post(State(s): State<AppState>, body: Bytes) -> ApiResult {
+    use rust_dos::profile::sampler::Timer;
+    use rust_dos::profile::session::{MAX_HZ, MIN_HZ};
+    let p: ProfilePost = from_value(parse_body(&body)?)?;
+    let timer = match p.timer.as_deref() {
+        None => None,
+        Some("sleep") => Some(Timer::Sleep),
+        Some("spin") => Some(Timer::Spin),
+        Some(t) => return Err(bad(format!("timer '{}': sleep or spin", t))),
+    };
+    if let Some(hz) = p.hz.filter(|hz| !(MIN_HZ..=MAX_HZ).contains(hz)) {
+        return Err(bad(format!("hz {}: from {} to {}", hz, MIN_HZ, MAX_HZ)));
+    }
+    if p.duration_ms == Some(0) {
+        return Err(bad("duration_ms 0: leave it out to profile until stopped"));
+    }
+    let control = super::profile::Control { enabled: p.enabled, hz: p.hz, timer, duration_ms: p.duration_ms };
+    s.call_json(Cmd::ProfileControl(control), DEFAULT_TIMEOUT).await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileQuery {
+    /// `json` (the default), `folded` or `text`.
+    format: Option<String>,
+    top: Option<usize>,
+    zone: Option<String>,
+    bucket: Option<u32>,
+    disasm: Option<usize>,
+    timeline: Option<bool>,
+    /// Wait up to this many milliseconds for a profile with a duration to
+    /// end.
+    wait_ms: Option<u64>,
+}
+
+async fn profile_get(State(s): State<AppState>, Query(q): Query<ProfileQuery>) -> ApiResult {
+    use super::profile::Format;
+    let format = match q.format.as_deref() {
+        None | Some("json") => Format::Json,
+        Some("folded") => Format::Folded,
+        Some("text") => Format::Text,
+        Some(f) => return Err(bad(format!("format '{}': json, folded or text", f))),
+    };
+    if let Some(wait) = q.wait_ms {
+        let until = std::time::Instant::now() + Duration::from_millis(wait).min(MAX_WAIT);
+        loop {
+            let (Reply::Json(status), _) = s.call(Cmd::ProfileStatus, DEFAULT_TIMEOUT).await? else {
+                return Err(unexpected());
+            };
+            if status["running"] != json!(true) || std::time::Instant::now() >= until {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+    let defaults = rust_dos::profile::report::Query::default();
+    let query = rust_dos::profile::report::Query {
+        top: q.top.unwrap_or(defaults.top).min(1000),
+        zone: q.zone,
+        bucket: q.bucket.unwrap_or(defaults.bucket),
+        disasm: q.disasm.unwrap_or(defaults.disasm).min(32),
+        timeline: q.timeline.unwrap_or(false),
+    };
+    let (Reply::Json(v), meta) = s.call(Cmd::ProfileGet { query, format }, DEFAULT_TIMEOUT).await? else {
+        return Err(unexpected());
+    };
+    match format {
+        Format::Json => Ok(json_response(StatusCode::OK, v, &meta)),
+        Format::Folded | Format::Text => {
+            Ok(with_meta(text_response(v["text"].as_str().unwrap_or_default().to_string()), &meta))
+        }
+    }
+}
+
+#[derive(Deserialize)]
 struct FormatQuery {
     format: Option<String>,
 }
@@ -1144,14 +1230,42 @@ struct StateBody {
     /// with the record (load). Off unless asked for.
     #[serde(default)]
     check_files: bool,
+    /// A load only: folder drives of the state, by letter, to take as
+    /// mounted from these host folders instead of the ones it records.
+    #[serde(default)]
+    folders: Map<String, Value>,
+}
+
+/// A load's `folders`: each drive letter's number and its absolute host folder.
+fn state_folders(folders: Map<String, Value>) -> Result<Vec<(u8, String)>, ApiError> {
+    let mut out: Vec<(u8, String)> = Vec::new();
+    for (letter, folder) in folders {
+        let Some(drive) = crate::mount::parse_drive_letter(&letter) else {
+            return Err(bad(format!("folders: '{}' isn't a drive letter", letter)));
+        };
+        // "C" and "c" would name one drive twice.
+        if out.iter().any(|(d, _)| *d == drive) {
+            return Err(bad(format!("folders: drive {} is named twice", letter.to_ascii_uppercase())));
+        }
+        let folder = folder.as_str().ok_or_else(|| bad(format!("folders.{}: a host folder's path", letter)))?;
+        if !std::path::Path::new(folder).is_absolute() {
+            return Err(bad(format!("folders.{}: '{}' isn't an absolute path", letter, folder)));
+        }
+        out.push((drive, folder.to_string()));
+    }
+    Ok(out)
 }
 
 async fn state_file(State(s): State<AppState>, Path(action): Path<String>, body: Bytes) -> ApiResult {
     let b: StateBody = from_value(parse_body(&body)?)?;
     let (path, strict_match, check_files) = (b.path, b.strict_match, b.check_files);
     match action.as_str() {
+        "save" if !b.folders.is_empty() => Err(bad("folders is for a load: a save records the folders as they are")),
         "save" => s.call_json(Cmd::SaveState { path, strict_match, check_files }, DEFAULT_TIMEOUT).await,
-        "load" => s.call_json(Cmd::LoadState { path, strict_match, check_files }, DEFAULT_TIMEOUT).await,
+        "load" => {
+            let folders = state_folders(b.folders)?;
+            s.call_json(Cmd::LoadState { path, strict_match, check_files, folders }, DEFAULT_TIMEOUT).await
+        }
         _ => Err(ApiError::new(StatusCode::NOT_FOUND, format!("unknown action '{}' (save, load)", action))),
     }
 }
@@ -1293,6 +1407,10 @@ async fn regs_get(State(s): State<AppState>) -> ApiResult {
     s.call_json(Cmd::GetRegs, DEFAULT_TIMEOUT).await
 }
 
+async fn fpu_get(State(s): State<AppState>) -> ApiResult {
+    s.call_json(Cmd::GetFpu, DEFAULT_TIMEOUT).await
+}
+
 async fn regs_put(State(s): State<AppState>, body: Bytes) -> ApiResult {
     let Value::Object(map) = parse_body(&body)? else {
         return Err(bad("expected a JSON object of register: value"));
@@ -1380,7 +1498,7 @@ fn hex_data(h: &str) -> Result<Vec<u8>, ApiError> {
         }
         prev = Some(c);
     }
-    if clean.len() % 2 != 0 {
+    if !clean.len().is_multiple_of(2) {
         return Err(bad("hex data must have an even number of digits"));
     }
     Ok((0..clean.len()).step_by(2).map(|i| u8::from_str_radix(&clean[i..i + 2], 16).unwrap()).collect())
@@ -1988,7 +2106,21 @@ STATUS / SCREEN
   GET  /api/status                         emulator state, CS:IP, video mode, trace fill, fps, speed,
                                            and the journal: seq, first_seq, state_seq, stop, op,
                                            quiescent, instance
-  GET  /api/stats                          execution speed (MIPS) and decode-cache hit rate, per ~1 s
+  GET  /api/stats                          execution speed (MIPS) and decode-cache hit rate, per ~1 s;
+                                           frame, per 1/4 s: the Stats page's numbers and emulated_speed
+                                           (emulated s per wall s, full speed while near 1); fps the
+                                           program draws; cpu_use is the percent of one host core the
+                                           main thread is busy
+  POST /api/profile                        {"enabled":true,"hz":2000,"timer":"sleep"|"spin","duration_ms":N}
+                                           starts a profile (again, if one runs): a thread samples where
+                                           the emulation thread's host time goes, by zone and guest
+                                           CS:EIP, and the bus counts ports, services, IRQs, exceptions,
+                                           device memory and translations; {"enabled":false} stops it
+  GET  /api/profile                        the profile so far: ?format=json|text|folded (flame graph
+                                           stacks), top=25, zone=io.vga or a group (io, hle, ...),
+                                           bucket=16 (EIP rounded down), disasm=4 (lines a place),
+                                           timeline=true (zones a second), wait_ms=N (wait for a
+                                           profile with a duration to end); docs/profiling.md
   GET  /api/screenshot[?format=png|raw]    the screen with its cursors, at the picture's
                                            size: 640x400 in text modes, the mode's size
                                            (small ones doubled) otherwise (raw = RGB24
@@ -2070,6 +2202,8 @@ EXECUTION CONTROL
                                                      (a stop before the request is missed:
                                                      use after= or op=)
   GET  /api/registers        PUT /api/registers {"ax":"1234","flags":"0202"}
+  GET  /api/registers/fpu    the x87 words and ST(0)-ST(7), MM0-MM7 with MMX,
+                             XMM0-XMM7 and MXCSR with SSE
   GET  /api/memory?addr=DS:SI&len=256[&format=hex|json|base64|raw]
                              hex (the default): a text dump; raw: the bytes;
                              json: {"addr","len","hex":"41 1F"}; base64:
@@ -2145,8 +2279,8 @@ DRIVES
 SAVE STATES
   POST   /api/state/save {"path":"/tmp/keen.state"}  save the machine to a file
   POST   /api/state/load {"path":"/tmp/keen.state"}  load one: its hardware
-                   settings, then the machine and its drives (the same
-                   memsize only). Breakpoints and watchpoints stay.
+                   settings (memsize too), then the machine and its
+                   drives. Breakpoints and watchpoints stay.
                    "differences" lists the hardware settings, drives,
                    folders, images, files and deterministic start time
                    that differed from this machine's, if any. A failed load
@@ -2177,6 +2311,14 @@ SAVE STATES
                    default: files rarely affect the machine's state,
                    hashing large folders takes time, and other files on
                    the drive show up as changes.
+                   "folders":{"C":"/abs/copy"} on a load: take the
+                   state's folder drive C: as mounted from /abs/copy
+                   instead of the folder it records, to load it in
+                   another run whose C: is a copy of that folder. The
+                   media are compared, and with "check_files" the files
+                   in /abs/copy too, and the load leaves C: mounted from
+                   it. 400 for a drive the state hasn't as a folder,
+                   a path that isn't a folder, or a drive named twice.
 
 SPEED
   POST   /api/speed {"cycles":"auto"}   the CPU speed, as `cycles` takes it

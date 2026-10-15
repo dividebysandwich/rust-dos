@@ -6,7 +6,13 @@
 //! up and smoothed, prints instead, and it prints the characters a font
 //! lacks too.
 
-use ab_glyph::{Font, FontVec, OutlineCurve, OutlinedGlyph, PxScale, PxScaleFactor, point};
+use ab_glyph_rasterizer::{Point, Rasterizer, point};
+use skrifa::{
+    FontRef, MetadataProvider,
+    instance::{LocationRef, Size},
+    outline::{DrawSettings, OutlinePen},
+    raw::TableProvider,
+};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -106,10 +112,16 @@ const SLANT: f32 = 0.2;
 /// How many characters are kept drawn.
 const CACHE: usize = 4096;
 
+/// A validated font file and its unscaled line metrics.
+pub struct FontFile {
+    data: Vec<u8>,
+    metrics: skrifa::metrics::Metrics,
+}
+
 pub struct Fonts {
     fontpath: Option<PathBuf>,
     dpi: u32,
-    faces: HashMap<Face, Option<Arc<FontVec>>>,
+    faces: HashMap<Face, Option<Arc<FontFile>>>,
     /// The host's font files by their names in lower case, looked for once.
     index: Option<HashMap<String, PathBuf>>,
     cache: HashMap<GlyphKey, Arc<Glyph>>,
@@ -122,7 +134,7 @@ impl Fonts {
     }
 
     /// The font file behind `face`, or none for the ROM font.
-    pub fn file(&mut self, face: Face) -> Option<Arc<FontVec>> {
+    pub fn file(&mut self, face: Face) -> Option<Arc<FontFile>> {
         if let Some(font) = self.faces.get(&face) {
             return font.clone();
         }
@@ -131,7 +143,7 @@ impl Fonts {
         font
     }
 
-    fn load(&mut self, face: Face) -> Option<Arc<FontVec>> {
+    fn load(&mut self, face: Face) -> Option<Arc<FontFile>> {
         let files = face.files();
         // The printer's own fonts first, then the host's.
         if let Some(dir) = &self.fontpath {
@@ -150,7 +162,7 @@ impl Fonts {
     pub fn ascent(&mut self, style: &Style) -> f64 {
         let em = style.v_points / 72.0 * self.dpi as f64;
         match self.file(style.face) {
-            Some(font) => font.ascent_unscaled() as f64 / font.units_per_em().unwrap_or(1000.0) as f64 * em,
+            Some(font) => font.metrics.ascent as f64 / font.metrics.units_per_em as f64 * em,
             None => em * BITMAP_ASCENT,
         }
     }
@@ -159,7 +171,7 @@ impl Fonts {
     pub fn height(&mut self, style: &Style) -> f64 {
         let em = style.v_points / 72.0 * self.dpi as f64;
         match self.file(style.face) {
-            Some(font) => font.height_unscaled() as f64 / font.units_per_em().unwrap_or(1000.0) as f64 * em,
+            Some(font) => (font.metrics.ascent - font.metrics.descent) as f64 / font.metrics.units_per_em as f64 * em,
             None => em * 1.15,
         }
     }
@@ -185,48 +197,47 @@ impl Fonts {
     }
 
     /// `c` from the font file, if the font has it.
-    fn outline(&self, font: &FontVec, style: &Style, c: char) -> Option<Glyph> {
-        let upem = font.units_per_em().unwrap_or(1000.0);
+    fn outline(&self, file: &FontFile, style: &Style, c: char) -> Option<Glyph> {
+        let font = FontRef::from_index(&file.data, 0).ok()?;
+        let metrics = &file.metrics;
+        let upem = metrics.units_per_em as f32;
         let px_x = (style.h_points / 72.0 * self.dpi as f64) as f32;
         let px_y = (style.v_points / 72.0 * self.dpi as f64) as f32;
-        let factor = PxScaleFactor { horizontal: px_x / upem, vertical: px_y / upem };
-        let id = font.glyph_id(c);
-        if id.0 == 0 && !c.is_whitespace() {
+        let scale = point(px_x / upem, px_y / upem);
+        let id = font.charmap().map(c).unwrap_or_default();
+        if id.to_u32() == 0 && !c.is_whitespace() {
             return None;
         }
-        let advance = (font.h_advance_unscaled(id) * factor.horizontal) as f64;
-        let ascent = font.ascent_unscaled() * factor.vertical;
-        let Some(mut outline) = font.outline(id) else {
+        let glyph_metrics = font.glyph_metrics(Size::unscaled(), LocationRef::default());
+        let advance = (glyph_metrics.advance_width(id)? * scale.x) as f64;
+        let ascent = metrics.ascent * scale.y;
+        let outlines = font.outline_glyphs();
+        let Some(outline) = outlines.get(id) else {
             return Some(Glyph { advance, ..Default::default() });
         };
-        if style.italic {
-            let shear = |p: &mut ab_glyph::Point| p.x += SLANT * p.y;
-            for curve in &mut outline.curves {
-                match curve {
-                    OutlineCurve::Line(a, b) => [a, b].into_iter().for_each(shear),
-                    OutlineCurve::Quad(a, b, c) => [a, b, c].into_iter().for_each(shear),
-                    OutlineCurve::Cubic(a, b, c, d) => [a, b, c, d].into_iter().for_each(shear),
-                }
-            }
-            // The bounds' min has the top (y_max), max the bottom.
-            let b = &mut outline.bounds;
-            let (top, bottom) = (b.min.y, b.max.y);
-            b.min.x += SLANT * bottom;
-            b.max.x += SLANT * top;
+        let bounds = glyph_metrics.bounds(id)?;
+        let slant = if style.italic { SLANT } else { 0.0 };
+        let left = ((bounds.x_min + slant * bounds.y_min) * scale.x).floor();
+        let right = ((bounds.x_max + slant * bounds.y_max) * scale.x).ceil();
+        let top = (-bounds.y_max * scale.y).floor();
+        let bottom = (-bounds.y_min * scale.y).ceil();
+        let width = (right - left).max(0.0) as usize;
+        let height = (bottom - top).max(0.0) as usize;
+        if width == 0 || height == 0 {
+            return Some(Glyph { advance, ..Default::default() });
         }
-        let glyph = OutlinedGlyph::new(id.with_scale_and_position(PxScale::from(px_y), point(0.0, 0.0)), outline, factor);
-        let bounds = glyph.px_bounds();
-        let width = bounds.width().max(0.0) as usize;
-        let height = bounds.height().max(0.0) as usize;
+        let mut rasterizer = Rasterizer::new(width, height);
+        let mut pen = RasterPen::new(&mut rasterizer, scale, point(-left, -top), slant);
+        outline.draw(DrawSettings::unhinted(Size::unscaled(), LocationRef::default()), &mut pen).ok()?;
         let mut coverage = vec![0u8; width * height];
-        glyph.draw(|x, y, c| {
+        rasterizer.for_each_pixel_2d(|x, y, c| {
             if let Some(dot) = coverage.get_mut(y as usize * width + x as usize) {
                 *dot = (c.clamp(0.0, 1.0) * 255.0).round() as u8;
             }
         });
         Some(Glyph {
-            left: bounds.min.x as i64,
-            top: (ascent.round() + bounds.min.y) as i64,
+            left: left as i64,
+            top: (ascent.round() + top) as i64,
             width,
             coverage,
             advance,
@@ -310,6 +321,56 @@ fn rom_glyph(code: u8, cell_w: f64, cell_h: f64, slant: f64, edges: bool) -> (us
     (width, coverage)
 }
 
+/// Feed unhinted font coordinates into the printer's existing rasterizer.
+struct RasterPen<'a> {
+    rasterizer: &'a mut Rasterizer,
+    scale: Point,
+    offset: Point,
+    slant: f32,
+    first: Point,
+    last: Point,
+}
+
+impl<'a> RasterPen<'a> {
+    fn new(rasterizer: &'a mut Rasterizer, scale: Point, offset: Point, slant: f32) -> Self {
+        Self { rasterizer, scale, offset, slant, first: point(0.0, 0.0), last: point(0.0, 0.0) }
+    }
+
+    fn map(&self, x: f32, y: f32) -> Point {
+        point((x + self.slant * y) * self.scale.x + self.offset.x, -y * self.scale.y + self.offset.y)
+    }
+}
+
+impl OutlinePen for RasterPen<'_> {
+    fn move_to(&mut self, x: f32, y: f32) {
+        self.first = self.map(x, y);
+        self.last = self.first;
+    }
+
+    fn line_to(&mut self, x: f32, y: f32) {
+        let end = self.map(x, y);
+        self.rasterizer.draw_line(self.last, end);
+        self.last = end;
+    }
+
+    fn quad_to(&mut self, cx: f32, cy: f32, x: f32, y: f32) {
+        let end = self.map(x, y);
+        self.rasterizer.draw_quad(self.last, self.map(cx, cy), end);
+        self.last = end;
+    }
+
+    fn curve_to(&mut self, cx0: f32, cy0: f32, cx1: f32, cy1: f32, x: f32, y: f32) {
+        let end = self.map(x, y);
+        self.rasterizer.draw_cubic(self.last, self.map(cx0, cy0), self.map(cx1, cy1), end);
+        self.last = end;
+    }
+
+    fn close(&mut self) {
+        self.rasterizer.draw_line(self.last, self.first);
+        self.last = self.first;
+    }
+}
+
 /// The ROM font's cell, in ems across and down, the row of its letters'
 /// baseline, and the ascent it stands in for.
 const BITMAP_WIDTH: f64 = 0.6;
@@ -330,9 +391,17 @@ fn find_in(dir: &Path, name: &str) -> Option<PathBuf> {
         .map(|e| e.path())
 }
 
-fn read_font(path: &Path) -> Option<Arc<FontVec>> {
+fn read_font(path: &Path) -> Option<Arc<FontFile>> {
     let data = std::fs::read(path).ok()?;
-    FontVec::try_from_vec_and_index(data, 0).ok().map(Arc::new)
+    let font = FontRef::from_index(&data, 0).ok()?;
+    let upem = font.head().ok()?.units_per_em();
+    if !(16..=16384).contains(&upem) {
+        return None;
+    }
+    font.hhea().ok()?;
+    font.maxp().ok()?;
+    let metrics = font.metrics(Size::unscaled(), LocationRef::default());
+    Some(Arc::new(FontFile { data, metrics }))
 }
 
 /// The host's font files by name (in lower case), from the folders the
@@ -384,6 +453,43 @@ mod tests {
 
     fn style(face: Face) -> Style {
         Style { face, h_points: 10.5, v_points: 10.5, italic: false }
+    }
+
+    #[test]
+    fn outlines_close_and_rasterize_line_quadratic_and_cubic_segments() {
+        let mut rasterizer = Rasterizer::new(4, 4);
+        let mut pen = RasterPen::new(&mut rasterizer, point(1.0, 1.0), point(0.0, 0.0), 0.0);
+        pen.move_to(0.0, 0.0);
+        pen.line_to(4.0, 0.0);
+        pen.quad_to(4.0, -2.0, 4.0, -4.0);
+        pen.curve_to(3.0, -4.0, 1.0, -4.0, 0.0, -4.0);
+        pen.close();
+        let mut pixels = Vec::new();
+        rasterizer.for_each_pixel_2d(|_, _, coverage| pixels.push(coverage));
+        assert_eq!(pixels, vec![1.0; 16]);
+    }
+
+    #[test]
+    fn invalid_font_files_are_rejected() {
+        let path = std::env::temp_dir().join(format!("rust-dos-invalid-font-{}.ttf", std::process::id()));
+        let mut head_only = vec![0u8; 82];
+        head_only[..4].copy_from_slice(&[0, 1, 0, 0]);
+        head_only[4..6].copy_from_slice(&1u16.to_be_bytes());
+        head_only[12..16].copy_from_slice(b"head");
+        head_only[20..24].copy_from_slice(&28u32.to_be_bytes());
+        head_only[24..28].copy_from_slice(&54u32.to_be_bytes());
+        for upem in [0u16, 16385] {
+            head_only[46..48].copy_from_slice(&upem.to_be_bytes());
+            assert_eq!(FontRef::from_index(&head_only, 0).unwrap().head().unwrap().units_per_em(), upem);
+            std::fs::write(&path, &head_only).unwrap();
+            let result = read_font(&path);
+            std::fs::remove_file(&path).unwrap();
+            assert!(result.is_none());
+        }
+        std::fs::write(&path, b"not an OpenType font").unwrap();
+        let result = read_font(&path);
+        std::fs::remove_file(path).unwrap();
+        assert!(result.is_none());
     }
 
     #[test]

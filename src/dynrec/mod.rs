@@ -129,6 +129,10 @@ pub struct DynStats {
 pub struct Env {
     pub ram_len: u32,
     pub bits: u32,
+    /// While a profile runs, the profiler's word for the block
+    /// (`profile::Loc`), which its code stores in `profile::WORD` as it is
+    /// entered.
+    pub profile: Option<u64>,
 }
 
 /// Paging is on.
@@ -515,6 +519,10 @@ mod engine {
             let returns = vec![Return::NONE; 1 << RETURN_BITS].into_boxed_slice();
             let mut ctx = Box::new(JitCtx::new(base + tramp.exit));
             ctx.fpu[4] = base + tramp.addsub;
+            #[cfg(target_arch = "x86_64")]
+            for (thunk, at) in ctx.thunks.iter_mut().zip(tramp.thunks) {
+                *thunk = base + at;
+            }
             ctx.returns = returns.as_ptr();
             Ok(Engine {
                 mem,
@@ -603,14 +611,16 @@ mod engine {
 
         /// Translate the block at `at`. None if no block starts there.
         fn translate(&mut self, cpu: &mut Cpu, at: &At, key: Key, stats: &mut DynStats) -> Option<u32> {
+            let _profile = crate::profile::zone(crate::profile::Zone::Translate);
             let single = key.mode & 2 != 0;
             let pokes = self.pokes.get(&(key.phys >> 12)).map(|p| &p[..]);
             let stack32 = key.mode & 4 != 0;
             let real = key.mode & ENV_REAL != 0;
             let fast_fpu = cpu.fpu_fast;
+            let i486 = cpu.model >= CpuModel::I486;
             // The block goes on after a conditional jump its code takes.
             let side = |instr: &iced_x86::Instruction| {
-                super::translate::translate(instr, instr.next_ip32(), stack32, backend::SYSTEM, backend::SEGMENTS, backend::FPU, fast_fpu, real).is_some()
+                super::translate::translate(instr, instr.next_ip32(), stack32, backend::SYSTEM, backend::SEGMENTS, backend::FPU, fast_fpu, real, i486).is_some()
             };
             let max = if single { 1 } else { MAX_BLOCK };
             let data = BlockData::build(at, cpu.bus.ram(), &cpu.bus.page_gen, max, pokes, backend::TAIL, side)?;
@@ -618,7 +628,7 @@ mod engine {
             let mut items: Vec<_> = (0..data.count())
                 .map(|ix| {
                     let next = data.eips[ix].wrapping_add(data.instrs[ix].len() as u32);
-                    super::translate::translate(&data.instrs[ix], next, stack32, backend::SYSTEM, backend::SEGMENTS, backend::FPU, fast_fpu, real)
+                    super::translate::translate(&data.instrs[ix], next, stack32, backend::SYSTEM, backend::SEGMENTS, backend::FPU, fast_fpu, real, i486)
                 })
                 .collect();
             // Instructions whose only watched bytes are their immediate (a
@@ -649,7 +659,11 @@ mod engine {
             let native = items.iter().filter(|i| i.is_some()).count() as u64;
             let mut data = NonNull::from(Box::leak(Box::new(data)));
             // SAFETY: just made, and owned by the block from here on.
-            let env = Env { ram_len: self.ram_len, bits: key.mode };
+            let profile = cpu.bus.profile.is_some().then(|| {
+                let mode = crate::profile::Mode::of(cpu.pe(), cpu.v86(), key.mode & 1 != 0);
+                crate::profile::Loc::guest(crate::profile::Engine::Jit, mode, cpu.cs(), key.eip).0
+            });
+            let env = Env { ram_len: self.ram_len, bits: key.mode, profile };
             let code = backend::block(unsafe { data.as_ref() }, &items, !single, env);
             let base = match self.mem.add(&code.bytes) {
                 Some(base) => base,
@@ -692,6 +706,9 @@ mod engine {
                 data.sites = code.sites.into_boxed_slice();
                 data.id = index;
                 data.lag = code.lag;
+                if let Some(page) = cpu.bus.profile.as_mut().and_then(|p| p.code_page(data.phys)) {
+                    page.translated += 1;
+                }
                 stats.blocks += 1;
                 stats.instructions += data.count() as u64;
                 stats.native += native;
@@ -869,6 +886,7 @@ mod engine {
             // the execution loop, which checks the deadline first.
             let start = cpu.bus.clock.icount;
             let mut retried = false;
+            let profiling = cpu.bus.profile.is_some();
             self.ctx.ram = cpu.bus.ram().as_ptr();
             self.ctx.ram_len = cpu.bus.ram().len() as u64;
             self.ctx.tlb = cpu.tlb.entries_ptr() as *const u8;
@@ -886,6 +904,10 @@ mod engine {
                 // SAFETY: the code was generated for this trampoline, and
                 // gets the CPU and context it expects.
                 let ret = unsafe { (self.enter)(cpu, &mut *self.ctx, code) };
+                if profiling {
+                    // Back in Rust, still for the block that left.
+                    crate::profile::set_zone_here(crate::profile::Zone::JitDispatch);
+                }
                 if std::mem::take(&mut self.ctx.vga_wrote) != 0 {
                     // The code wrote the VGA's planes itself.
                     cpu.bus.vga.mark_dirty_full();
@@ -977,6 +999,9 @@ mod engine {
                     }
                     EXIT_STALE => {
                         stats.stale += 1;
+                        if let Some(page) = cpu.bus.profile.as_mut().and_then(|p| p.code_page(data.phys)) {
+                            page.stale += 1;
+                        }
                         self.note_pokes(cpu.bus.ram(), data);
                         self.retire(exited, stats);
                         if !none_ran {
@@ -1061,6 +1086,9 @@ mod engine {
                     }
                     EXIT_SMC => {
                         stats.smc += 1;
+                        if let Some(page) = cpu.bus.profile.as_mut().and_then(|p| p.code_page(data.phys)) {
+                            page.smc += 1;
+                        }
                         // The instruction is done; the rest of the block
                         // changed under it.
                         cpu.bus.clock.icount += 1;

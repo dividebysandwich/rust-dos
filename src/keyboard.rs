@@ -790,7 +790,7 @@ impl BiosBuffer {
             return None;
         }
         let (start, end) = Self::bounds(bus);
-        let in_ring = |p: u16| (start..end).contains(&p) && (p - start) % 2 == 0;
+        let in_ring = |p: u16| (start..end).contains(&p) && (p - start).is_multiple_of(2);
         if !in_ring(head) || !in_ring(tail) {
             return None;
         }
@@ -843,7 +843,7 @@ impl BiosBuffer {
     pub fn keys(bus: &mut Bus) -> Vec<u16> {
         let (start, end) = Self::bounds(bus);
         let (head, tail) = (bus.guest_read_16(0x041A), bus.guest_read_16(0x041C));
-        let in_ring = |p: u16| (start..end).contains(&p) && (p - start) % 2 == 0;
+        let in_ring = |p: u16| (start..end).contains(&p) && (p - start).is_multiple_of(2);
         if !in_ring(head) || !in_ring(tail) {
             return Vec::new();
         }

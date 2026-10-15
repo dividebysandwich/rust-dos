@@ -159,6 +159,43 @@ fn cham_q_db(q: usize, fc: f64) -> f64 {
     (1.0 - t) * q as f64 * CHAM_DB_PER_Q + t * CHAM_TOP_DB[q]
 }
 
+/// The highest cutoff, a sixth of the output rate, in octaves above
+/// `CHAM_BASE_HZ`.
+const CHAM_TOP_OCT: f64 = 6.173_793_071_813_106;
+/// Intervals of the coefficient tables over the filter's range: about 64
+/// an octave, with the top cutoff on the last entry.
+pub(super) const COEFF_INTERVALS: usize = 396;
+
+/// The filter's frequency coefficient and damping (1 / resonance) for Q
+/// `q` with the cutoff `oct` octaves above `CHAM_BASE_HZ`, clamped to the
+/// filter's range.
+fn cham_coeffs(q: usize, oct: f64) -> (f64, f64) {
+    let fc = (CHAM_BASE_HZ * oct.exp2()).clamp(CHAM_BASE_HZ, 44100.0 / 6.0);
+    let f = 2.0 * (std::f64::consts::PI * fc / 44100.0).sin();
+    let qd = 1.0 / (CHAM_Q0 * 10f64.powf(cham_q_db(q, fc) / 20.0));
+    (f, qd)
+}
+
+/// `cham_coeffs` for each Q at every 1/64 octave or so of the filter's
+/// range. The modulation envelope and LFO1 move the cutoff every sample;
+/// interpolating these costs a fraction of the four transcendentals.
+/// `tables::get()` holds them.
+pub(super) fn coeff_tables() -> Vec<[(f64, f64); COEFF_INTERVALS + 1]> {
+    let oct = |i: usize| i as f64 * CHAM_TOP_OCT / COEFF_INTERVALS as f64;
+    (0..16).map(|q| std::array::from_fn(|i| cham_coeffs(q, oct(i)))).collect()
+}
+
+/// `cham_coeffs`, interpolated from the tables.
+#[inline]
+fn cham_coeffs_fast(q: usize, oct: f64) -> (f64, f64) {
+    let table = &tables::get().filter_coeffs[q];
+    let pos = oct.clamp(0.0, CHAM_TOP_OCT) * (COEFF_INTERVALS as f64 / CHAM_TOP_OCT);
+    let i = (pos as usize).min(COEFF_INTERVALS - 1);
+    let frac = pos - i as f64;
+    let ((f0, qd0), (f1, qd1)) = (table[i], table[i + 1]);
+    (f0 + (f1 - f0) * frac, qd0 + (qd1 - qd0) * frac)
+}
+
 /// What a voice sends to the output and the effects this sample.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Sums {
@@ -483,10 +520,7 @@ impl Voice {
         let (f, qd) = match self.coeffs {
             Some((c, oct, q, f, qd)) if c == cutoff && oct == self.filter_oct && q == self.filter_q => (f, qd),
             _ => {
-                let fc = (CHAM_BASE_HZ * (cutoff as f64 * CHAM_CENTS / 1200.0 + self.filter_oct).exp2())
-                    .clamp(CHAM_BASE_HZ, 44100.0 / 6.0);
-                let f = 2.0 * (std::f64::consts::PI * fc / 44100.0).sin();
-                let qd = 1.0 / (CHAM_Q0 * 10f64.powf(cham_q_db(self.filter_q, fc) / 20.0));
+                let (f, qd) = cham_coeffs_fast(self.filter_q, cutoff as f64 * CHAM_CENTS / 1200.0 + self.filter_oct);
                 self.coeffs = Some((cutoff, self.filter_oct, self.filter_q, f, qd));
                 (f, qd)
             }
@@ -668,3 +702,31 @@ rust_dos_savestate::state_fields!(Voice {
     // Worked out again from the registers.
     coeffs,
 });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_coefficient_tables_end_at_the_top_cutoff() {
+        assert!((CHAM_TOP_OCT - (44100.0 / 6.0 / CHAM_BASE_HZ).log2()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn interpolated_coefficients_match_the_formula() {
+        let (mut worst_f, mut worst_qd) = (0f64, 0f64);
+        for q in 0..16 {
+            for step in -1000..8000 {
+                let oct = step as f64 / 1000.0;
+                let (f, qd) = cham_coeffs(q, oct);
+                let (ff, fqd) = cham_coeffs_fast(q, oct);
+                worst_f = worst_f.max(((ff - f) / f).abs());
+                worst_qd = worst_qd.max(((fqd - qd) / qd).abs());
+            }
+        }
+        // The damping is off most where the resonance curve bends (2653
+        // and 6870 Hz), by 0.014 dB: far below the 0.25 dB the measured
+        // curve is given in.
+        assert!(worst_f < 2e-5 && worst_qd < 2e-3, "f {worst_f:e}, qd {worst_qd:e}");
+    }
+}

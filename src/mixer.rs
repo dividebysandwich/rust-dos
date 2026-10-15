@@ -30,9 +30,11 @@ pub enum Channel {
     Awe,
     /// The monitor's relay clicks and degaussing (`monitor_effects`).
     Monitor,
+    /// The modem's speaker: dialing and the handshake.
+    Modem,
 }
 
-pub const CHANNELS: usize = 12;
+pub const CHANNELS: usize = 13;
 
 /// The loudest volume, in percent.
 pub const MAX_LEVEL: u16 = 200;
@@ -56,6 +58,7 @@ impl Channel {
         Channel::Tandy,
         Channel::Awe,
         Channel::Monitor,
+        Channel::Modem,
     ];
 
     /// Its key in `[mixer]`.
@@ -73,6 +76,7 @@ impl Channel {
             Channel::Tandy => "tandy",
             Channel::Awe => "awe32",
             Channel::Monitor => "monitor",
+            Channel::Modem => "modem",
         }
     }
 
@@ -95,6 +99,7 @@ impl Channel {
             Channel::Tandy => "Tandy/PCjr",
             Channel::Awe => "AWE32 wavetable",
             Channel::Monitor => "Monitor",
+            Channel::Modem => "Modem",
         }
     }
 
@@ -563,9 +568,8 @@ mod tests {
     #[test]
     fn presets_send_the_synthesizers_and_line_out_changes_sides() {
         let mut mixer = Mixer::default();
-        let mut settings = MixerSettings::default();
-        settings.reverb = ReverbPreset::Large;
-        settings.chorus = ChorusPreset::Light;
+        let mut settings =
+            MixerSettings { reverb: ReverbPreset::Large, chorus: ChorusPreset::Light, ..Default::default() };
         mixer.set(settings);
         assert_eq!(mixer.reverb_send(Channel::Fm), 0.70);
         assert_eq!(mixer.reverb_send(Channel::Gus), 0.70);

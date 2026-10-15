@@ -190,10 +190,12 @@ impl Machine {
     /// A machine set up as the configuration file text `text` (in
     /// rust-dos.conf's format) has it. There are no host directories for
     /// `[drives]` to mount: the page mounts C: (`format_c`, `mount_image`)
-    /// before `boot`.
+    /// before `boot`. `overrides`, in the same format, is laid over it for
+    /// this visit only (the page address's settings): saving from the
+    /// settings window keeps them out of the text it saves.
     #[wasm_bindgen(constructor)]
-    pub fn new(text: &str) -> Machine {
-        let config = config::parse(text, Path::new("/"), None);
+    pub fn new(text: &str, overrides: &str) -> Machine {
+        let config = config::parse(&format!("{}\n{}", text, overrides), Path::new("/"), None);
         let settings = Settings::from_config(&config);
         let mut warnings = config.warnings.clone();
         if !config.drives.is_empty() {
@@ -213,7 +215,7 @@ impl Machine {
         cpu.bus.set_cycles_per_ms(settings.cycles.initial_cycles());
         let blank = Frame::new(video::SCREEN_WIDTH, video::SCREEN_HEIGHT);
         Machine {
-            pacer: Pacer::new(settings.cycles, Instant::now()),
+            pacer: Pacer::new(settings.cycles, settings.auto_fps, Instant::now()),
             cpu,
             hardware: Hardware::of(&settings),
             saved: Saved { text: text.to_string(), settings: settings.clone() },
@@ -324,7 +326,7 @@ impl Machine {
             ],
         };
         self.cpu.start_dos();
-        self.pacer = Pacer::new(self.settings.cycles, Instant::now());
+        self.pacer = Pacer::new(self.settings.cycles, self.settings.auto_fps, Instant::now());
     }
 
     /// Type `line` at the DOS prompt, once the shell is back there.
@@ -785,6 +787,12 @@ impl Machine {
         self.cpu.bus.mouse.installed
     }
 
+    /// Whether holding the right button still opens the settings window
+    /// (`mouse_menu_hold`).
+    pub fn mouse_menu_hold(&self) -> bool {
+        self.settings.mouse_menu_hold
+    }
+
     /// The mouse moved to (`x`, `y`) on the screen, in its pixels.
     /// The captured mouse moved by (`dx`, `dy`) screen pixels: the driver's
     /// cursor stops at the edges, but its mickeys don't.
@@ -1119,16 +1127,14 @@ impl PageHost<'_> {
     }
 
     /// Load slot `slot`: the hardware it was saved with first, then the
-    /// machine. A state of another memsize is refused. A load that fails
+    /// machine, with the memory size it has. A load that fails
     /// puts back the settings and hardware from before it, and the machine
     /// as it was.
     fn load_slot(&mut self, slot: u8) -> Result<String, String> {
         let data = self.states.get(&self.state_key(slot)).ok_or("empty")?;
         let (header, state) = slots::decode(data)?;
-        if let Some(why) = slots::refusal(&header, self.cpu.bus.ram().len() >> 20) {
-            return Err(why);
-        }
-        let hardware = slots::machine_settings(&header.machine, self.settings);
+        let mut hardware = slots::machine_settings(&header.machine, self.settings);
+        hardware.memsize = header.memsize;
         // A failed `machine::load` puts the machine back by itself; the
         // machine from before is needed only when the hardware changes, to
         // put that back too.
@@ -1152,6 +1158,8 @@ impl PageHost<'_> {
             }
             return Err(e.to_string());
         }
+        // The state's time stamp counter goes on at this machine's speed.
+        self.cpu.set_tsc_speed(self.settings.cycles);
         self.pacer.rebase(&self.cpu.bus.clock, Instant::now());
         *self.slot = slot;
         Ok(format!("Loaded slot {}: {}", slot, describe_state(&header)))
@@ -1212,11 +1220,15 @@ impl Host for PageHost<'_> {
         }
         if new.cycles != old.cycles {
             self.pacer.set_speed(new.cycles);
+            self.cpu.set_tsc_speed(new.cycles);
             // At max, the pacer tunes the speed from the current one, and
             // at auto, it picks the speed at the end of the frame.
             if let CpuSpeed::Fixed(n) = new.cycles {
                 self.cpu.bus.set_cycles_per_ms(n);
             }
+        }
+        if new.auto_fps != old.auto_fps {
+            self.pacer.set_auto_fps(new.auto_fps);
         }
         if new.core != old.core {
             self.cpu.core = new.core;
@@ -1225,6 +1237,7 @@ impl Host for PageHost<'_> {
         self.cpu.bus.dpmi.enabled = new.dpmi;
         self.cpu.bus.ide_hard_disks = new.ide_hard_disks;
         self.cpu.bus.boot_cdrom = new.boot_cdrom;
+        self.cpu.bus.floppy_controller = new.floppy_controller;
         if new.dos_version != old.dos_version {
             rust_dos::dos_data::set_version(&mut self.cpu.bus, new.dos_version);
         }
@@ -1591,9 +1604,23 @@ mod tests {
     }
 
     #[test]
+    fn the_page_addresss_settings_apply_but_are_not_saved() {
+        let m = Machine::new("[emulator]\nmemsize=8\n", "[emulator]\nmemsize=32\n");
+        assert_eq!(m.settings.memsize, 32);
+        // The settings window saves as `save_settings` does, after a change
+        // to something else.
+        let mut changed = m.settings.clone();
+        changed.sound.opl3 = !changed.sound.opl3;
+        let text = config::complete_text(&m.saved.text, Path::new("/"), &m.saved.settings, &changed, &[], None);
+        let saved = Settings::from_config(&config::parse(&text, Path::new("/"), None));
+        assert_eq!(saved.memsize, 8);
+        assert_eq!(saved.sound.opl3, changed.sound.opl3);
+    }
+
+    #[test]
     fn a_slot_that_fails_to_load_leaves_the_hardware_as_it_was() {
         use rust_dos::video::adapter::Adapter;
-        let mut m = Machine::new("");
+        let mut m = Machine::new("", "");
         let (settings, hardware) = (m.settings.clone(), m.hardware.clone());
         // A state of a CGA machine without an Ultrasound, cut short, so
         // the load fails after the state's hardware is in place.

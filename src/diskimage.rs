@@ -534,6 +534,10 @@ pub struct DiskImage {
     replacement: RefCell<Option<PathBuf>>,
 }
 
+/// A checkpoint of a `Journal`, and each sector's contents before its
+/// first write after it.
+type Checkpoint = (u64, std::collections::HashMap<u64, Box<[u8]>>);
+
 /// The contents of sectors before the machine wrote them, since each of
 /// the checkpoints of its last states: what brings the disk back to how it
 /// was at one of them (`DiskImage::revert_to`). A booted system's memory
@@ -543,7 +547,7 @@ pub struct DiskImage {
 struct Journal {
     /// Oldest first: a checkpoint, and each sector's contents before its
     /// first write after it.
-    entries: std::collections::VecDeque<(u64, std::collections::HashMap<u64, Box<[u8]>>)>,
+    entries: std::collections::VecDeque<Checkpoint>,
     bytes: usize,
 }
 

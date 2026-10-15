@@ -79,6 +79,8 @@ pub struct Trampoline {
     pub exit: usize,
     /// `fpu_addsub`.
     pub addsub: usize,
+    /// The routines of `Thunk`, in its order.
+    pub thunks: [usize; THUNKS],
 }
 
 pub type Enter = unsafe extern "sysv64" fn(*mut crate::cpu::Cpu, *mut JitCtx, *const u8) -> u64;
@@ -120,7 +122,319 @@ pub fn trampoline() -> Trampoline {
     );
     let addsub = ops.offset().0;
     fpu_addsub(&mut ops);
-    Trampoline { bytes: ops.finalize().expect("trampoline"), enter, exit, addsub }
+    let mut thunks = [0; THUNKS];
+    let memref = ops.new_dynamic_label();
+    thunks[Thunk::MemRef as usize] = ops.offset().0;
+    dynasm!(ops ; .arch x64 ; =>memref);
+    memref_thunk(&mut ops);
+    thunks[Thunk::Load as usize] = ops.offset().0;
+    load_thunk(&mut ops);
+    for size in [1, 2, 4] {
+        let code = ops.new_dynamic_label();
+        thunks[Thunk::store(size) as usize] = ops.offset().0;
+        store_thunk(&mut ops, size, code);
+        dynasm!(ops ; .arch x64 ; =>code);
+        code_store_thunk(&mut ops, size);
+    }
+    for thunk in [Thunk::Dev, Thunk::DevTlbRead, Thunk::DevTlbWrite, Thunk::DevTlbUserRead, Thunk::DevTlbUserWrite] {
+        thunks[thunk as usize] = ops.offset().0;
+        dev_thunk(&mut ops, thunk.tlb(), memref);
+    }
+    Trampoline { bytes: ops.finalize().expect("trampoline"), enter, exit, addsub, thunks }
+}
+
+/// The trampoline's routines for the slow paths of memory operands, which
+/// each operand would otherwise carry a copy of: translated code calls them
+/// through `JitCtx::thunks` with its arguments in RAX, RCX and RDX, and
+/// they keep every other register but those three.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Thunk {
+    /// `jit_memref` of the offset in EDX, ECX its `memref_desc`: RAX the
+    /// handle, or negative for a fault.
+    MemRef,
+    /// EAX = the bytes (ECX of them) at handle RDX, which isn't RAM's,
+    /// through `jit_dev_read` or `jit_read`.
+    Load,
+    /// Store the byte, word or dword in ECX at handle RDX. RAX holds the
+    /// block's bytes after the instruction, `smc_lo | smc_hi << 32`. A
+    /// handle that isn't RAM's goes into the VGA's planes inline where
+    /// `vga_ok` says so, else through `jit_dev_write` or `jit_write`. A RAM
+    /// handle is one in a block with code (the inline path writes the
+    /// rest): the store, the code generations of the first and last byte's
+    /// blocks bumped, as the bus's writes bump them, and a store into the
+    /// block's later bytes noted.
+    Store1,
+    Store2,
+    Store4,
+    /// The handle of an operand at physical address EAX that isn't plain
+    /// RAM, as `MemRef` gives it for offset EDX and `memref_desc` ECX: the
+    /// address with `DEV_BIT` where the operand is within one page, else
+    /// `jit_memref`'s.
+    Dev,
+    /// The same for linear address EAX, through the TLB's set for
+    /// supervisor or user code, for a read or a write.
+    DevTlbRead,
+    DevTlbWrite,
+    DevTlbUserRead,
+    DevTlbUserWrite,
+}
+
+const _: () = assert!(Thunk::DevTlbUserWrite as usize + 1 == THUNKS);
+
+impl Thunk {
+    fn store(size: u8) -> Thunk {
+        match size {
+            1 => Thunk::Store1,
+            2 => Thunk::Store2,
+            _ => Thunk::Store4,
+        }
+    }
+
+    /// The `Dev` thunk through the TLB's set for user or supervisor code,
+    /// for a write or a read.
+    fn dev_tlb(user: bool, write: bool) -> Thunk {
+        match (user, write) {
+            (false, false) => Thunk::DevTlbRead,
+            (false, true) => Thunk::DevTlbWrite,
+            (true, false) => Thunk::DevTlbUserRead,
+            (true, true) => Thunk::DevTlbUserWrite,
+        }
+    }
+
+    /// The TLB's set and the tag's offset in an entry a `Dev` thunk uses.
+    fn tlb(self) -> Option<(i32, i32)> {
+        let (user, write) = match self {
+            Thunk::DevTlbRead => (0, false),
+            Thunk::DevTlbWrite => (0, true),
+            Thunk::DevTlbUserRead => (1, false),
+            Thunk::DevTlbUserWrite => (1, true),
+            _ => return None,
+        };
+        let tag = if write { layout::TLB_WRITE_TAG } else { layout::TLB_READ_TAG } as i32;
+        Some((user * layout::TLB_SET as i32 * TLB_ENTRY, tag))
+    }
+
+    /// Where its address is in the context: within a byte's displacement
+    /// (`helpers::CTX_THUNKS`).
+    fn slot(self) -> i8 {
+        (CTX_THUNKS + self as i32 * 8) as i8
+    }
+}
+
+/// Keep the temporaries and the cached guest registers around a thunk's
+/// call into Rust (the thunk's own call left RSP 8 off 16 bytes), with
+/// the CPU and the context as the first two arguments.
+fn thunk_save(ops: &mut Asm) {
+    push_live(ops);
+    dynasm!(ops
+        ; .arch x64
+        ; sub rsp, 8
+        ; mov rdi, rbx
+        ; mov rsi, r12
+    );
+}
+
+fn thunk_restore(ops: &mut Asm) {
+    dynasm!(ops ; .arch x64 ; add rsp, 8);
+    pop_live(ops);
+}
+
+/// Push the temporaries and the cached guest registers that Rust doesn't
+/// keep (48 bytes), and pop them back.
+fn push_live(ops: &mut Asm) {
+    dynasm!(ops
+        ; .arch x64
+        ; push r8
+        ; push r9
+        ; push r10
+        ; push r11
+        ; push rsi
+        ; push rdi
+    );
+}
+
+fn pop_live(ops: &mut Asm) {
+    dynasm!(ops
+        ; .arch x64
+        ; pop rdi
+        ; pop rsi
+        ; pop r11
+        ; pop r10
+        ; pop r9
+        ; pop r8
+    );
+}
+
+fn memref_thunk(ops: &mut Asm) {
+    thunk_save(ops);
+    dynasm!(ops ; .arch x64 ; call QWORD [r12 + CTX_MEMREF]);
+    thunk_restore(ops);
+    dynasm!(ops ; .arch x64 ; ret);
+}
+
+fn load_thunk(ops: &mut Asm) {
+    thunk_save(ops);
+    dynasm!(ops
+        ; .arch x64
+        ; bt rdx, 32
+        ; jnc >generic
+        ; call QWORD [r12 + CTX_DEV]
+        ; jmp >done
+        ; generic:
+        ; and edx, 3
+        ; call QWORD [r12 + CTX_READ]
+        ; done:
+    );
+    thunk_restore(ops);
+    dynasm!(ops ; .arch x64 ; ret);
+}
+
+/// `Thunk::Store1` and on, going on at `code` (`code_store_thunk`) with a
+/// RAM handle.
+fn store_thunk(ops: &mut Asm, size: u8, code: DynamicLabel) {
+    let s = size as i32;
+    dynasm!(ops
+        ; .arch x64
+        ; cmp rdx, RAM_HANDLES
+        ; jbe =>code
+        ; mov QWORD [r12 + CTX_SMC_LO], rax
+        ; push r8
+        ; push r9
+        // Pixels into the VGA's planes, which mode X programs write one or
+        // two at a time (see `helpers::vga_state`).
+        ; bt rdx, DEV_BIT as i8
+        ; jnc >slow
+        ; cmp BYTE [r12 + CTX_VGA_OK], 0
+        ; je >slow
+        ; mov eax, edx
+        ; sub eax, 0xA0000
+        ; cmp eax, 0x10000 - s
+        ; ja >slow
+        ; mov r8, QWORD [rbx + layout::ICOUNT as i32]
+        ; mov r9, r8
+        ; sub r9, QWORD [rbx + layout::LAST_WRITE as i32]
+        ; cmp r9, layout::BURST_GAP as i32
+        ; ja >slow
+        ; add QWORD [rbx + layout::VIDEO_BYTES as i32], s
+        ; add QWORD [rbx + layout::BURST as i32], s
+        ; mov QWORD [rbx + layout::LAST_WRITE as i32], r8
+        ; mov BYTE [r12 + CTX_VGA_WROTE], 1
+    );
+    for p in 0..4 {
+        dynasm!(ops ; .arch x64 ; mov r8, QWORD [r12 + CTX_VGA_PLANES + p * 8]);
+        match size {
+            1 => dynasm!(ops ; .arch x64 ; mov BYTE [r8 + rax], cl),
+            2 => dynasm!(ops ; .arch x64 ; mov WORD [r8 + rax], cx),
+            _ => dynasm!(ops ; .arch x64 ; mov DWORD [r8 + rax], ecx),
+        }
+    }
+    dynasm!(ops
+        ; .arch x64
+        ; pop r9
+        ; pop r8
+        ; ret
+        ; slow:
+        ; pop r9
+        ; pop r8
+    );
+    thunk_save(ops);
+    dynasm!(ops
+        ; .arch x64
+        ; bt rdx, 32
+        ; jnc >generic
+        ; mov r8d, s
+        ; call QWORD [r12 + CTX_DEV + 8]
+        ; jmp >called
+        ; generic:
+        ; and edx, 3
+        ; call QWORD [r12 + CTX_WRITE]
+        ; called:
+    );
+    thunk_restore(ops);
+    dynasm!(ops
+        ; .arch x64
+        ; or BYTE [r12 + CTX_SMC], al
+        ; ret
+    );
+}
+
+fn code_store_thunk(ops: &mut Asm, size: u8) {
+    match size {
+        1 => dynasm!(ops ; .arch x64 ; mov BYTE [r13 + rdx], cl),
+        2 => dynasm!(ops ; .arch x64 ; mov WORD [r13 + rdx], cx),
+        _ => dynasm!(ops ; .arch x64 ; mov DWORD [r13 + rdx], ecx),
+    }
+    dynasm!(ops
+        ; .arch x64
+        ; mov QWORD [r12 + CTX_SMC_LO], rax
+        ; mov rax, QWORD [r12 + CTX_PAGE_GEN]
+        ; mov ecx, edx
+        ; shr ecx, crate::bus::GEN_SHIFT as i8
+        ; add DWORD [rax + rcx * 4], 1
+    );
+    if size > 1 {
+        dynasm!(ops
+            ; .arch x64
+            ; lea ecx, [rdx + (size - 1) as i32]
+            ; shr ecx, crate::bus::GEN_SHIFT as i8
+            ; add DWORD [rax + rcx * 4], 1
+        );
+    }
+    dynasm!(ops
+        ; .arch x64
+        ; cmp edx, DWORD [r12 + CTX_SMC_HI]
+        ; jae >done
+        ; lea ecx, [rdx + size as i32]
+        ; cmp ecx, DWORD [r12 + CTX_SMC_LO]
+        ; jbe >done
+        ; mov BYTE [r12 + CTX_SMC], 1
+        ; done:
+        ; ret
+    );
+}
+
+fn dev_thunk(ops: &mut Asm, tlb: Option<(i32, i32)>, memref: DynamicLabel) {
+    dynasm!(ops
+        ; .arch x64
+        ; push rcx
+        ; push rdx
+        // The operand's size, from the `memref_desc`.
+        ; mov edx, ecx
+        ; shr edx, 4
+        ; and edx, 0xF
+        ; mov ecx, eax
+        ; and ecx, 0xFFF
+        ; add ecx, edx
+        ; cmp ecx, 0x1000
+        ; ja >slow
+    );
+    if let Some((entry, tag)) = tlb {
+        // The page's entry, whose tag must be the page + 1.
+        dynasm!(ops
+            ; .arch x64
+            ; mov edx, eax
+            ; shr edx, 12 - TLB_ENTRY_SHIFT
+            ; and edx, ((layout::TLB_SET - 1) << TLB_ENTRY_SHIFT) as i32
+            ; mov ecx, eax
+            ; shr ecx, 12
+            ; inc ecx
+            ; cmp ecx, DWORD [rbx + rdx + TLB + entry + tag]
+            ; jne >slow
+            ; and eax, 0xFFF
+            ; or eax, DWORD [rbx + rdx + TLB + entry + layout::TLB_PHYS as i32]
+        );
+    }
+    dynasm!(ops
+        ; .arch x64
+        ; add rsp, 16
+        ; mov eax, eax
+        ; bts rax, 32
+        ; ret
+        ; slow:
+        ; pop rdx
+        ; pop rcx
+        ; jmp =>memref
+    );
 }
 
 /// ST(dst) = a + b, or a - b, as `F80::add` and `F80::sub` add their 80
@@ -219,6 +533,18 @@ fn fpu_addsub(ops: &mut Asm) {
         ; btr r9, 52
         ; shl rcx, 52
         ; or r9, rcx
+        // Rounded to nearest, ties to even: up when the 11 bits cut off
+        // and the last bit kept come to more than 0x400 (a carry goes on
+        // into the exponent).
+        ; mov rdx, r8
+        ; shr rdx, 11
+        ; and edx, 1
+        ; mov ecx, r8d
+        ; and ecx, 0x7FF
+        ; add ecx, edx
+        ; cmp ecx, 0x400
+        ; seta dl
+        ; add r9, rdx
         ; mov rdx, rax
         ; shl rdx, 48
         ; or r9, rdx
@@ -387,23 +713,22 @@ fn seg_field(seg: Seg, field: usize) -> i32 {
 
 /// Code emitted after the block's instructions, reached from them.
 enum Slow {
-    /// A memory operand the inline checks didn't take.
-    MemRef { at: DynamicLabel, back: DynamicLabel, t: T, desc: u32, fail: DynamicLabel },
+    /// A memory operand the inline checks didn't take: from `at`, through
+    /// `jit_memref`; from `dev`, an operand that isn't plain RAM, with its
+    /// physical address in `addr` (`Thunk::Dev`), or with its linear
+    /// address in EAX for one of the TLB's `thunk`s: if it is within one
+    /// page (one the TLB holds), its handle is that address with
+    /// `DEV_BIT`, else it takes `jit_memref` too.
+    MemRef { at: DynamicLabel, dev: DynamicLabel, back: DynamicLabel, t: T, desc: u32, fail: DynamicLabel, addr: u8, thunk: Thunk },
     Load { at: DynamicLabel, back: DynamicLabel, dst: T, m: T, size: u8 },
     /// Where a memory reference's slow paths come back to before a load or
     /// store that takes its handle as RAM's (`Gen::ram_back`): to `slow`
     /// with one that isn't, else to the RAM access at `ram`.
     Recheck { at: DynamicLabel, m: T, slow: DynamicLabel, ram: DynamicLabel },
-    Store { at: DynamicLabel, back: DynamicLabel, m: T, src: T, size: u8, lo: u32, hi: u32 },
-    /// A memory operand that isn't plain RAM, with its physical address
-    /// in `addr`, or with `tlb` (the TLB's set, and the tag's offset in
-    /// an entry) its linear address in EAX: if it is within one page (one
-    /// the TLB holds), its handle is that address with `DEV_BIT`; else it
-    /// goes on to `slow`, the `MemRef` above.
-    Dev { at: DynamicLabel, back: DynamicLabel, slow: DynamicLabel, t: T, addr: u8, size: u8, tlb: Option<(i32, i32)> },
-    /// A store into a block of RAM with code (`Bus::code_blocks`): its
-    /// generations bumped, and a store into the rest of the block noted.
-    CodeStore { at: DynamicLabel, back: DynamicLabel, m: T, src: T, size: u8, lo: u32, hi: u32 },
+    /// A store through `thunk` (`Thunk::Store1` and on): one that isn't to
+    /// plain RAM, or one into a block of RAM with code (`Bus::code_blocks`),
+    /// its generations bumped and a store into the rest of the block noted.
+    Store { at: DynamicLabel, back: DynamicLabel, m: T, src: T, thunk: Thunk, lo: u32, hi: u32 },
     /// An instruction's fault with an exit code of its own (#GP(0), #DE).
     Fault { at: DynamicLabel, code: u32, fail: DynamicLabel },
     /// A store hit the rest of the block: it leaves after the instruction,
@@ -780,6 +1105,16 @@ impl Gen<'_> {
         let (deadline, revalidate, body) = (self.deadline, self.revalidate, self.body);
         let data_ptr = self.data_ptr;
         let limit = self.limit;
+        if let Some(word) = self.env.profile {
+            // The profiler's sampler sees the block from here on.
+            let at = &crate::profile::WORD as *const _ as i64;
+            dynasm!(self.ops
+                ; .arch x64
+                ; mov rax, QWORD word as i64
+                ; mov rcx, QWORD at
+                ; mov QWORD [rcx], rax
+            );
+        }
         dynasm!(self.ops
             ; .arch x64
             ; mov rax, QWORD [rbx + ICOUNT]
@@ -814,6 +1149,18 @@ impl Gen<'_> {
     fn end(&mut self) -> DynamicLabel {
         let ops = &mut self.ops;
         *self.end.get_or_insert_with(|| ops.new_dynamic_label())
+    }
+
+    /// A label that stops the block after the instruction being translated
+    /// (EIP at the next one), for STI and POPF to jump to.
+    fn stop_after(&mut self) -> DynamicLabel {
+        let data = self.data;
+        let next = data.eips[self.ix].wrapping_add(data.instrs[self.ix].len() as u32);
+        let at = self.ops.new_dynamic_label();
+        let fail = self.fail();
+        let code = EXIT_AFTER | if self.dirty { EXIT_FLAGS } else { 0 };
+        self.slow.push(Slow::After { at, next, code, fail });
+        at
     }
 
     /// Leave the block before the instruction being translated if any of
@@ -948,27 +1295,26 @@ impl Gen<'_> {
         }
         for slow in std::mem::take(&mut self.slow) {
             match slow {
-                Slow::MemRef { at, back, t, desc, fail } => {
+                Slow::MemRef { at, dev, back, t, desc, fail, addr, thunk } => {
+                    let tail = self.ops.new_dynamic_label();
                     dynasm!(self.ops
                         ; .arch x64
-                        ; =>at
-                        ; push r8
-                        ; push r9
-                        ; push r10
-                        ; push r11
-                        ; push rsi
-                        ; push rdi
-                        ; mov rdi, rbx
-                        ; mov rsi, r12
+                        ; =>dev
+                    );
+                    if addr != RAX {
+                        dynasm!(self.ops ; .arch x64 ; mov eax, Rd(addr));
+                    }
+                    dynasm!(self.ops
+                        ; .arch x64
                         ; mov edx, Rd(r(t))
                         ; mov ecx, desc as i32
-                        ; call QWORD [r12 + CTX_MEMREF]
-                        ; pop rdi
-                        ; pop rsi
-                        ; pop r11
-                        ; pop r10
-                        ; pop r9
-                        ; pop r8
+                        ; call QWORD [BYTE r12 + thunk.slot()]
+                        ; jmp =>tail
+                        ; =>at
+                        ; mov edx, Rd(r(t))
+                        ; mov ecx, desc as i32
+                        ; call QWORD [BYTE r12 + Thunk::MemRef.slot()]
+                        ; =>tail
                         ; test rax, rax
                         ; js >fault
                         ; mov Rq(r(t)), rax
@@ -976,40 +1322,6 @@ impl Gen<'_> {
                         ; fault:
                         ; mov eax, EXIT_FAULT as i32
                         ; jmp =>fail
-                    );
-                }
-                Slow::Dev { at, back, slow, t, addr, size, tlb } => {
-                    dynasm!(self.ops ; .arch x64 ; =>at);
-                    if size > 1 {
-                        dynasm!(self.ops
-                            ; .arch x64
-                            ; mov ecx, Rd(addr)
-                            ; and ecx, 0xFFF
-                            ; cmp ecx, 0x1000 - size as i32
-                            ; ja =>slow
-                        );
-                    }
-                    if let Some((entry, tag)) = tlb {
-                        // The page's entry, whose tag must be the page + 1.
-                        dynasm!(self.ops
-                            ; .arch x64
-                            ; mov edx, eax
-                            ; shr edx, 12 - TLB_ENTRY_SHIFT
-                            ; and edx, ((layout::TLB_SET - 1) << TLB_ENTRY_SHIFT) as i32
-                            ; mov ecx, eax
-                            ; shr ecx, 12
-                            ; inc ecx
-                            ; cmp ecx, DWORD [rbx + rdx + TLB + entry + tag]
-                            ; jne =>slow
-                            ; and eax, 0xFFF
-                            ; or eax, DWORD [rbx + rdx + TLB + entry + layout::TLB_PHYS as i32]
-                        );
-                    }
-                    dynasm!(self.ops
-                        ; .arch x64
-                        ; mov Rd(r(t)), Rd(addr)
-                        ; bts Rq(r(t)), 32
-                        ; jmp =>back
                     );
                 }
                 Slow::Recheck { at, m, slow, ram } => {
@@ -1025,45 +1337,9 @@ impl Gen<'_> {
                     dynasm!(self.ops
                         ; .arch x64
                         ; =>at
-                        ; bt Rq(r(m)), 32
-                        ; jnc >generic
-                        ; push r8
-                        ; push r9
-                        ; push r10
-                        ; push r11
-                        ; push rsi
-                        ; push rdi
-                        ; mov rdi, rbx
-                        ; mov rsi, r12
-                        ; mov edx, Rd(r(m))
+                        ; mov rdx, Rq(r(m))
                         ; mov ecx, size as i32
-                        ; call QWORD [r12 + CTX_DEV]
-                        ; pop rdi
-                        ; pop rsi
-                        ; pop r11
-                        ; pop r10
-                        ; pop r9
-                        ; pop r8
-                        ; mov Rd(r(dst)), eax
-                        ; jmp =>back
-                        ; generic:
-                        ; push r8
-                        ; push r9
-                        ; push r10
-                        ; push r11
-                        ; push rsi
-                        ; push rdi
-                        ; mov rdi, rbx
-                        ; mov rsi, r12
-                        ; mov edx, Rd(r(m))
-                        ; and edx, 3
-                        ; call QWORD [r12 + CTX_READ]
-                        ; pop rdi
-                        ; pop rsi
-                        ; pop r11
-                        ; pop r10
-                        ; pop r9
-                        ; pop r8
+                        ; call QWORD [BYTE r12 + Thunk::Load.slot()]
                         ; mov Rd(r(dst)), eax
                         ; jmp =>back
                     );
@@ -1174,79 +1450,9 @@ impl Gen<'_> {
                         ; jmp =>fail_tail
                     );
                 }
-                Slow::CodeStore { at, back, m, src, size, lo, hi } => {
-                    // The code generations of the first and last byte's
-                    // blocks, as the bus's writes bump them, and a store into
-                    // the block's later bytes noted.
-                    let m_ = r(m);
-                    dynasm!(self.ops
-                        ; .arch x64
-                        ; =>at
-                    );
-                    self.store_ram(m, src, size);
-                    dynasm!(self.ops
-                        ; .arch x64
-                        ; mov rdx, QWORD [r12 + CTX_PAGE_GEN]
-                        ; mov eax, Rd(m_)
-                        ; shr eax, crate::bus::GEN_SHIFT as i8
-                        ; add DWORD [rdx + rax * 4], 1
-                    );
-                    if size > 1 {
-                        dynasm!(self.ops
-                            ; .arch x64
-                            ; lea eax, [Rq(m_) + (size - 1) as i32]
-                            ; shr eax, crate::bus::GEN_SHIFT as i8
-                            ; add DWORD [rdx + rax * 4], 1
-                        );
-                    }
-                    if lo < hi {
-                        dynasm!(self.ops
-                            ; .arch x64
-                            ; cmp Rd(m_), hi as i32
-                            ; jae =>back
-                            ; lea eax, [Rq(m_) + size as i32]
-                            ; cmp eax, lo as i32
-                            ; jbe =>back
-                            ; mov BYTE [r12 + CTX_SMC], 1
-                        );
-                    }
-                    dynasm!(self.ops ; .arch x64 ; jmp =>back);
-                }
-                Slow::Store { at, back, m, src, size, lo, hi } => {
+                Slow::Store { at, back, m, src, thunk, lo, hi } => {
                     dynasm!(self.ops ; .arch x64 ; =>at);
-                    self.vga_store(back, m, src, size);
-                    dynasm!(self.ops
-                        ; .arch x64
-                        ; push r8
-                        ; push r9
-                        ; push r10
-                        ; push r11
-                        ; push rsi
-                        ; push rdi
-                        ; mov DWORD [r12 + CTX_SMC_LO], lo as i32
-                        ; mov DWORD [r12 + CTX_SMC_HI], hi as i32
-                        ; mov ecx, Rd(r(src))
-                        ; mov edx, Rd(r(m))
-                        ; mov rdi, rbx
-                        ; mov rsi, r12
-                        ; bt Rq(r(m)), 32
-                        ; jnc >generic
-                        ; mov r8d, size as i32
-                        ; call QWORD [r12 + CTX_DEV + 8]
-                        ; jmp >called
-                        ; generic:
-                        ; and edx, 3
-                        ; call QWORD [r12 + CTX_WRITE]
-                        ; called:
-                        ; pop rdi
-                        ; pop rsi
-                        ; pop r11
-                        ; pop r10
-                        ; pop r9
-                        ; pop r8
-                        ; or BYTE [r12 + CTX_SMC], al
-                        ; jmp =>back
-                    );
+                    self.thunk_store(thunk, m, src, lo, hi, back);
                 }
             }
         }
@@ -1288,43 +1494,21 @@ impl Gen<'_> {
         self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, wb, reload, leave });
     }
 
-    /// A store of `src` through handle `m` that isn't to plain RAM: if it is
-    /// to the VGA's graphics window, with writes there plain ones into the
-    /// planes (`JitCtx::vga_ok`), write each plane the map mask selects
-    /// and count it in the bus's activity as `Activity::video_write` does,
-    /// and go on at `back`; else (and where the write would start a burst
-    /// of its own) fall through, to `jit_dev_write`.
-    fn vga_store(&mut self, back: DynamicLabel, m: T, src: T, size: u8) {
-        let s = size as i32;
+    /// A store's slow path: ECX the value, RDX the handle and RAX the
+    /// block's bytes after the instruction for `thunk`, then on at `back`.
+    fn thunk_store(&mut self, thunk: Thunk, m: T, src: T, lo: u32, hi: u32, back: DynamicLabel) {
+        if lo == 0 && hi == 0 {
+            dynasm!(self.ops ; .arch x64 ; xor eax, eax);
+        } else {
+            dynasm!(self.ops ; .arch x64 ; mov rax, QWORD (lo as u64 | (hi as u64) << 32) as i64);
+        }
         dynasm!(self.ops
             ; .arch x64
-            ; bt Rq(r(m)), DEV_BIT as i8
-            ; jnc >slow
-            ; cmp BYTE [r12 + CTX_VGA_OK], 0
-            ; je >slow
-            ; mov eax, Rd(r(m))
-            ; sub eax, 0xA0000
-            ; cmp eax, 0x10000 - s
-            ; ja >slow
-            ; mov rcx, QWORD [rbx + layout::ICOUNT as i32]
-            ; mov rdx, rcx
-            ; sub rdx, QWORD [rbx + layout::LAST_WRITE as i32]
-            ; cmp rdx, layout::BURST_GAP as i32
-            ; ja >slow
-            ; add QWORD [rbx + layout::VIDEO_BYTES as i32], s
-            ; add QWORD [rbx + layout::BURST as i32], s
-            ; mov QWORD [rbx + layout::LAST_WRITE as i32], rcx
-            ; mov BYTE [r12 + CTX_VGA_WROTE], 1
+            ; mov rdx, Rq(r(m))
+            ; mov ecx, Rd(r(src))
+            ; call QWORD [BYTE r12 + thunk.slot()]
+            ; jmp =>back
         );
-        for p in 0..4 {
-            dynasm!(self.ops ; .arch x64 ; mov rdx, QWORD [r12 + CTX_VGA_PLANES + p * 8]);
-            match size {
-                1 => dynasm!(self.ops ; .arch x64 ; mov BYTE [rdx + rax], Rb(r(src))),
-                2 => dynasm!(self.ops ; .arch x64 ; mov WORD [rdx + rax], Rw(r(src))),
-                _ => dynasm!(self.ops ; .arch x64 ; mov DWORD [rdx + rax], Rd(r(src))),
-            }
-        }
-        dynasm!(self.ops ; .arch x64 ; jmp =>back ; slow:);
     }
 
     /// Where the instruction being translated raises a fault that has an
@@ -1450,24 +1634,25 @@ impl Gen<'_> {
                 let m_ = r(m);
                 // RAM of a block without code is written as it is, without
                 // bumping its generation, which nothing reads (see
-                // `Bus::code_blocks`).
-                let code = self.ops.new_dynamic_label();
+                // `Bus::code_blocks`). RAM of a block with code takes the
+                // same slow path as a handle that isn't RAM's: the thunk
+                // tells them apart.
                 self.ram_or(m, at);
                 dynasm!(self.ops
                     ; .arch x64
                     ; mov ecx, Rd(m_)
                     ; shr ecx, crate::bus::GEN_SHIFT as i8
                     ; cmp BYTE [r14 + rcx], 0
-                    ; jne =>code
+                    ; jne =>at
                 );
                 self.store_ram(m, src, size);
                 dynasm!(self.ops ; .arch x64 ; =>back);
                 let (lo, hi) = self.rest();
-                self.slow.push(Slow::Store { at, back, m, src, size, lo, hi });
-                self.slow.push(Slow::CodeStore { at: code, back, m, src, size, lo, hi });
+                self.slow.push(Slow::Store { at, back, m, src, thunk: Thunk::store(size), lo, hi });
             }
             Uop::Alu { op, size, a, b } => self.alu(op, size, a, b),
             Uop::Unary { op, size, t } => self.unary(op, size, t),
+            Uop::Bswap { t } => dynasm!(self.ops ; .arch x64 ; bswap Rd(r(t))),
             Uop::Shift { op, size, t, count } => self.shift(op, size, t, Some(count)),
             Uop::DoubleShift { left, size, dst, src, count } => self.double_shift(left, size, dst, src, Some(count)),
             Uop::ShiftVar { op, size, t, count } => {
@@ -1669,7 +1854,7 @@ impl Gen<'_> {
             }
             Uop::FarCallCheck { sel, off } => {
                 let (bail, fail) = (self.ops.new_dynamic_label(), self.fail());
-                self.far_call(Some((sel, off)));
+                self.far_call(Some((sel, off)), 0);
                 dynasm!(self.ops
                     ; .arch x64
                     ; test eax, eax
@@ -1683,7 +1868,7 @@ impl Gen<'_> {
                 let (wb, reload) = (self.cache.dirty, self.cache.loaded);
                 self.slow.push(Slow::Bail { at: bail, end, ix: self.ix, dirty: self.dirty, wb, reload, leave: true });
             }
-            Uop::FarCallLoad => {
+            Uop::FarCallLoad { next } => {
                 let fail = self.fail();
                 let data_ptr = self.data_ptr;
                 dynasm!(self.ops
@@ -1693,7 +1878,7 @@ impl Gen<'_> {
                     ; mov eax, DWORD [rbx + seg_field(Seg::CS, layout::SEG_BASE)]
                     ; mov DWORD [r12 + CTX_FAR_BASE], eax
                 );
-                self.far_call(None);
+                self.far_call(None, next);
                 dynasm!(self.ops ; .arch x64 ; test eax, eax ; jnz =>fail);
             }
             Uop::FarExit => {
@@ -1813,6 +1998,7 @@ impl Gen<'_> {
                 self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, wb, reload, leave: false });
             }
             Uop::FpuGuard { valid } => self.fpu_guard(valid),
+            Uop::FBailPrecise { regs, when } => self.fpu_bail_precise(regs, when),
             Uop::FGet { x, i } => {
                 self.fpu_phys(RAX, i);
                 dynasm!(self.ops ; .arch x64 ; movsd Rx(x.0), QWORD [rbx + rax * 8 + FPU_F64]);
@@ -1967,6 +2153,7 @@ impl Gen<'_> {
                 dynasm!(self.ops ; .arch x64 ; mov Rd(r(t)), eax);
             }
             Uop::FToInt { t, x, size } => self.fpu_to_int(t, x, size),
+            Uop::FToInt64 { lo, hi, x } => self.fpu_to_int64(lo, hi, x),
             Uop::FMul { a, b } => dynasm!(self.ops ; .arch x64 ; mulsd Rx(a.0), Rx(b.0)),
             Uop::FAdd { a, b, sub: false } => dynasm!(self.ops ; .arch x64 ; addsd Rx(a.0), Rx(b.0)),
             Uop::FAdd { a, b, sub: true } => dynasm!(self.ops ; .arch x64 ; subsd Rx(a.0), Rx(b.0)),
@@ -2068,14 +2255,57 @@ impl Gen<'_> {
             }
             Uop::FGetControl { t } => dynasm!(self.ops ; .arch x64 ; movzx Rd(r(t)), WORD [rbx + FPU_CONTROL]),
             Uop::FSetControl { t } => dynasm!(self.ops ; .arch x64 ; mov WORD [rbx + FPU_CONTROL], Rw(r(t))),
+            Uop::LoadFlags { t, size } => {
+                let at = self.ops.new_dynamic_label();
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; cmp BYTE [rbx + CPL], 0
+                    ; jne =>at
+                    ; mov eax, DWORD [rbx + FLAGS]
+                );
+                if size == 4 {
+                    dynasm!(self.ops
+                        ; .arch x64
+                        ; mov ecx, Rd(r(t))
+                        ; xor ecx, eax
+                        ; test ecx, POPF_KEPT as i32
+                        ; jnz =>at
+                    );
+                }
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; mov ecx, Rd(r(t))
+                    ; and ecx, POPF_RING0 as i32
+                    ; and eax, !POPF_RING0 as i32
+                    ; or eax, ecx
+                    ; or eax, 2
+                    ; mov DWORD [rbx + FLAGS], eax
+                );
+                if self.dirty {
+                    dynasm!(self.ops ; .arch x64 ; mov ebp, eax);
+                }
+                let end = self.end();
+                let (wb, reload) = (self.cache.dirty, self.cache.loaded);
+                self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, wb, reload, leave: false });
+            }
+            Uop::FlagsLoaded => {
+                let at = self.stop_after();
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; mov eax, DWORD [rbx + FLAGS]
+                    ; test eax, 0x100
+                    ; jnz =>at
+                    ; test eax, 0x200
+                    ; jz >quiet
+                    ; cmp BYTE [rbx + layout::IRQ_READY as i32], 0
+                    ; jne =>at
+                    ; quiet:
+                );
+            }
             Uop::Sti => {
                 const IF: i32 = 0x200;
                 let data = self.data;
-                let next = data.eips[self.ix].wrapping_add(data.instrs[self.ix].len() as u32);
-                let at = self.ops.new_dynamic_label();
-                let fail = self.fail();
-                let code = EXIT_AFTER | if self.dirty { EXIT_FLAGS } else { 0 };
-                self.slow.push(Slow::After { at, next, code, fail });
+                let at = self.stop_after();
                 // Interrupts are recognized after the next instruction: with
                 // one waiting, the execution loop runs that; else the shadow
                 // ends where the next instruction runs, in the block.
@@ -2145,6 +2375,78 @@ impl Gen<'_> {
         self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, wb, reload, leave: true });
     }
 
+    /// `Uop::FBailPrecise`: the handler runs the instruction where `when`
+    /// holds and one of the registers in `regs` isn't stale and has
+    /// significand bits below a double's 53.
+    fn fpu_bail_precise(&mut self, regs: u8, when: Precise) {
+        let at = self.ops.new_dynamic_label();
+        match when {
+            Precise::Directed => {
+                dynasm!(self.ops ; .arch x64 ; test WORD [rbx + FPU_CONTROL], 0xC00 ; jz >precise_done);
+            }
+            Precise::Int(x) => {
+                // A multiple of 1/2: the significand bits below 2^-1, for
+                // an exponent e from -1 to 51, are 0. (Below 1/2 the
+                // value isn't one, from 2^52 on it is.)
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; movq rax, Rx(x.0)
+                    ; mov rdx, rax
+                    ; shr rdx, 52
+                    ; and edx, 0x7FF
+                    ; cmp edx, 1023 + 52
+                    ; jae >precise_regs
+                    ; cmp edx, 1023 - 1
+                    ; jb >precise_done
+                    ; mov ecx, 1023 + 51
+                    ; sub ecx, edx
+                    ; mov edx, 1
+                    ; shl rdx, cl
+                    ; dec rdx
+                    ; test rax, rdx
+                    ; jnz >precise_done
+                );
+            }
+            Precise::Single(x) => {
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; test WORD [rbx + FPU_CONTROL], 0xC00
+                    ; jnz >precise_regs
+                    ; movq rax, Rx(x.0)
+                    ; test eax, 0x0FFF_FFFF
+                    ; jnz >precise_done
+                );
+            }
+            Precise::Equal(a, b) => {
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; ucomisd Rx(a.0), Rx(b.0)
+                    ; jne >precise_done
+                    ; jp >precise_done
+                );
+            }
+        }
+        dynasm!(self.ops ; .arch x64 ; precise_regs:);
+        dynasm!(self.ops ; .arch x64 ; mov eax, DWORD [rbx + FPU_TOP]);
+        for i in (0..8).filter(|i| regs >> i & 1 != 0) {
+            dynasm!(self.ops
+                ; .arch x64
+                ; lea ecx, [rax + i]
+                ; and ecx, 7
+                ; cmp BYTE [rbx + rcx + FPU_STALE], 0
+                ; jne >precise_next
+                ; shl ecx, 4
+                ; test WORD [rbx + rcx + FPU_X80], 0x7FF
+                ; jnz =>at
+                ; precise_next:
+            );
+        }
+        dynasm!(self.ops ; .arch x64 ; precise_done:);
+        let end = self.end();
+        let (wb, reload) = (self.cache.dirty, self.cache.loaded);
+        self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, wb, reload, leave: true });
+    }
+
     /// Make the double in XMM register `x` what an FPU register holds
     /// (`f80::canon_f64`): a denormal 0, a NaN quiet.
     fn fpu_canon(&mut self, x: u8) {
@@ -2175,7 +2477,7 @@ impl Gen<'_> {
     }
 
     /// Call `jit_far_call`: its checks of `sel:off`, or (None) its load.
-    fn far_call(&mut self, target: Option<(T, T)>) {
+    fn far_call(&mut self, target: Option<(T, T)>, next: u32) {
         self.save_for_call();
         match target {
             Some((sel, off)) => dynasm!(self.ops
@@ -2184,7 +2486,7 @@ impl Gen<'_> {
                 ; mov ecx, Rd(r(sel))
                 ; xor r8d, r8d
             ),
-            None => dynasm!(self.ops ; .arch x64 ; mov r8d, 1),
+            None => dynasm!(self.ops ; .arch x64 ; mov edx, next as i32 ; mov r8d, 1),
         }
         dynasm!(self.ops
             ; .arch x64
@@ -2270,30 +2572,44 @@ impl Gen<'_> {
         dynasm!(self.ops ; .arch x64 ; mov Rd(t_), eax ; toint_done:);
     }
 
+    /// `Uop::FToInt64`: the conversion where the control word rounds to
+    /// nearest or chops, else the handler's. A value that doesn't fit, or a
+    /// NaN, converts to the integer indefinite (i64::MIN), which goes to
+    /// the handler too.
+    fn fpu_to_int64(&mut self, lo: T, hi: T, x: X) {
+        let at = self.ops.new_dynamic_label();
+        dynasm!(self.ops
+            ; .arch x64
+            ; movzx eax, WORD [rbx + FPU_CONTROL]
+            ; and eax, 0xC00
+            ; jnz >toint64_other
+            ; cvtsd2si rcx, Rx(x.0)
+            ; jmp >toint64_check
+            ; toint64_other:
+            ; cmp eax, 0xC00
+            ; jne =>at
+            ; cvttsd2si rcx, Rx(x.0)
+            ; toint64_check:
+            // (Only i64::MIN overflows when 1 is taken from it.)
+            ; cmp rcx, 1
+            ; jo =>at
+            ; mov Rd(r(lo)), ecx
+            ; shr rcx, 32
+            ; mov Rd(r(hi)), ecx
+        );
+        let end = self.end();
+        let (wb, reload) = (self.cache.dirty, self.cache.loaded);
+        self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, wb, reload, leave: false });
+    }
+
     /// Keep the temporaries and the cached guest registers around a call
     /// into Rust, which doesn't keep them (16 bytes aligned).
     fn save_for_call(&mut self) {
-        dynasm!(self.ops
-            ; .arch x64
-            ; push r8
-            ; push r9
-            ; push r10
-            ; push r11
-            ; push rsi
-            ; push rdi
-        );
+        push_live(&mut self.ops);
     }
 
     fn restore_after_call(&mut self) {
-        dynasm!(self.ops
-            ; .arch x64
-            ; pop rdi
-            ; pop rsi
-            ; pop r11
-            ; pop r10
-            ; pop r9
-            ; pop r8
-        );
+        pop_live(&mut self.ops);
     }
 
     /// IN (into t) or OUT (of t) of `size` bytes through `jit_port`, the
@@ -2442,7 +2758,7 @@ impl Gen<'_> {
     /// segments as the block's `Env` has them.
     fn memref(&mut self, t: T, seg: Seg, size: u8, write: bool, slot: u8, known: Option<u32>) {
         let (at, back) = (self.ops.new_dynamic_label(), self.ops.new_dynamic_label());
-        // Where an operand that isn't plain RAM goes (`Slow::Dev`).
+        // Where an operand that isn't plain RAM goes (`Slow::MemRef`).
         let dev = self.ops.new_dynamic_label();
         let t_ = r(t);
         let bits = self.env.bits;
@@ -2540,8 +2856,8 @@ impl Gen<'_> {
             self.ram_back = Some((t, back));
             let desc = memref_desc(seg, size, write, slot);
             let fail = self.fail();
-            self.slow.push(Slow::Dev { at: dev, back, slow: at, t, addr: RAX, size, tlb: Some((entry, tag)) });
-            self.slow.push(Slow::MemRef { at, back, t, desc, fail });
+            let thunk = Thunk::dev_tlb(set != 0, write);
+            self.slow.push(Slow::MemRef { at, dev, back, t, desc, fail, addr: RAX, thunk });
             return;
         }
         if paging || !a20 {
@@ -2618,8 +2934,7 @@ impl Gen<'_> {
         self.ram_back = Some((t, back));
         let desc = memref_desc(seg, size, write, slot);
         let fail = self.fail();
-        self.slow.push(Slow::Dev { at: dev, back, slow: at, t, addr, size, tlb: None });
-        self.slow.push(Slow::MemRef { at, back, t, desc, fail });
+        self.slow.push(Slow::MemRef { at, dev, back, t, desc, fail, addr, thunk: Thunk::Dev });
     }
 
     /// Where a memory reference's slow paths come back to, if it is still

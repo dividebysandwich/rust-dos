@@ -73,17 +73,22 @@ pub const MEMREF_FAULT: u64 = u64::MAX;
 pub struct JitCtx {
     /// `jit_fallback`.
     pub fallback: usize,
-    /// `jit_revalidate`.
-    pub revalidate: usize,
     /// Where translated code jumps to return to the execution loop.
     pub exit: usize,
+    /// The trampoline's routines that the slow paths of memory operands
+    /// call (x86-64, `x64::Thunk`): early in the context, where the code
+    /// reaches them with a byte's displacement.
+    pub thunks: [usize; THUNKS],
+    /// Set where a store hit the running block's later bytes (x86-64):
+    /// within a byte's displacement too, for the check after each store.
+    pub smc: u8,
+    /// `jit_revalidate`.
+    pub revalidate: usize,
     /// RAM and its code generations.
     pub ram: *const u8,
     pub page_gen: *const u32,
     /// `Bus::code_blocks`.
     pub code_blocks: *const u8,
-    /// Set where a store hit the running block's later bytes (x86-64).
-    pub smc: u8,
     /// The stack's width the running blocks were translated for.
     pub stack32: bool,
     /// The `ENV_FLAT` and `ENV_PLAIN` bits now: the running blocks were translated for
@@ -200,6 +205,12 @@ pub const CTX_VGA_WROTE: i32 = offset_of!(JitCtx, vga_wrote) as i32;
 pub const CTX_VGA_PLANES: i32 = offset_of!(JitCtx, vga_planes) as i32;
 pub const CTX_REVALIDATE: i32 = offset_of!(JitCtx, revalidate) as i32;
 pub const CTX_EXIT: i32 = offset_of!(JitCtx, exit) as i32;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub const CTX_THUNKS: i32 = offset_of!(JitCtx, thunks) as i32;
+/// The number of `JitCtx::thunks`.
+pub const THUNKS: usize = 10;
+const _: () = assert!(CTX_THUNKS + 8 * THUNKS as i32 <= 128 && CTX_SMC < 128);
+const _: () = assert!(CTX_SMC_HI == CTX_SMC_LO + 4);
 pub const CTX_RAM: i32 = offset_of!(JitCtx, ram) as i32;
 pub const CTX_PAGE_GEN: i32 = offset_of!(JitCtx, page_gen) as i32;
 pub const CTX_CODE_BLOCKS: i32 = offset_of!(JitCtx, code_blocks) as i32;
@@ -268,6 +279,7 @@ impl JitCtx {
             fallback: jit_fallback as *const () as usize,
             revalidate: jit_revalidate as *const () as usize,
             exit,
+            thunks: [0; THUNKS],
             ram: std::ptr::null(),
             page_gen: std::ptr::null(),
             code_blocks: std::ptr::null(),
@@ -353,6 +365,7 @@ jit_fn! {
         // SAFETY: translated code passes the CPU and context the execution
         // loop entered it with, and its own block, which outlive the call.
         let (cpu, ctx, data) = unsafe { (&mut *cpu, &mut *ctx, &mut *data) };
+        let _profile = crate::profile::zone(crate::profile::Zone::JitFallback);
         let ix = ix as usize;
         let instr = &data.instrs[ix];
         let handler = data.handlers[ix];
@@ -488,7 +501,9 @@ jit_fn! {
     /// `Uop::FarCallCheck` (`load` 0) and `Uop::FarCallLoad` (1): a far
     /// CALL in protected mode to `selector:offset`, checked as
     /// `Cpu::call_far_pm` does before its pushes, then CS and EIP loaded
-    /// after them. Returns as `jit_far_ret`.
+    /// after them; for the load, `offset` is the return address (for the
+    /// profiler: translated code's EIP may be the block's). Returns as
+    /// `jit_far_ret`.
     fn jit_far_call(cpu: *mut Cpu, ctx: *mut JitCtx, offset: u32, selector: u32, load: u32) -> u32 {
         // SAFETY: as in `jit_fallback`.
         let (cpu, ctx) = unsafe { (&mut *cpu, &mut *ctx) };
@@ -501,9 +516,10 @@ jit_fn! {
                 ctx.far_target = (selector as u16, offset, desc.0);
                 return Ok(true);
             }
+            let next = offset;
             let (selector, offset, desc) = ctx.far_target;
             let (tr, cpl) = (cpu.tr.selector, cpu.cpl);
-            cpu.load_cs_pm(selector, &mut crate::cpu::seg::Descriptor(desc), cpl)?;
+            cpu.load_cs_pm_after(selector, &mut crate::cpu::seg::Descriptor(desc), cpl, next)?;
             cpu.set_eip(offset);
             ctx.after = far_goes_on(cpu, ctx, true, tr, cpl) as u8;
             Ok(true)
@@ -789,6 +805,7 @@ jit_fn! {
         // SAFETY: as in `jit_fallback`.
         let (cpu, ctx) = unsafe { (&mut *cpu, &mut *ctx) };
         ctx.calls.memref += 1;
+        let _profile = crate::profile::zone(crate::profile::Zone::JitSlowMem);
         let seg = Seg::ALL[(desc & 7) as usize];
         let size = (desc >> 4 & 15) as u8;
         let access = if desc & 0x100 != 0 { Access::Write } else { Access::Read };
@@ -831,6 +848,7 @@ jit_fn! {
         // SAFETY: as in `jit_fallback`.
         let (cpu, ctx) = unsafe { (&mut *cpu, &mut *ctx) };
         ctx.calls.slow += 1;
+        let _profile = crate::profile::zone(crate::profile::Zone::JitSlowMem);
         let r = ctx.refs[slot as usize & 3];
         guard(ctx, 0, || cpu.mem_read(r))
     }
@@ -843,6 +861,7 @@ jit_fn! {
         // SAFETY: as in `jit_fallback`.
         let (cpu, ctx) = unsafe { (&mut *cpu, &mut *ctx) };
         ctx.calls.slow += 1;
+        let _profile = crate::profile::zone(crate::profile::Zone::JitSlowMem);
         let r = ctx.refs[slot as usize & 3];
         guard(ctx, (), || cpu.mem_write(r, value));
         let in_first = 0x1000 - (r.phys & 0xFFF);
@@ -953,6 +972,13 @@ jit_fn! {
         // SAFETY: as in `jit_fallback`.
         let (cpu, ctx) = unsafe { (&mut *cpu, &mut *ctx) };
         ctx.calls.dev += 1;
+        // Pixels into the linear frame buffer, which DirectDraw's own copy
+        // loops write a dword at a time: nothing the VGA's state has, and
+        // nothing in RAM. (A panic in it is the store's, which isn't made
+        // again below.)
+        if guard(ctx, true, || cpu.bus.write_lfb(phys as usize, value, size as usize)) {
+            return 0;
+        }
         // Pixels into the VGA's planes, which mode X programs write one or
         // two at a time. (They can't be in the block's bytes, which are in
         // RAM.)
@@ -970,7 +996,7 @@ fn dev_write(cpu: &mut Cpu, ctx: &mut JitCtx, phys: u32, value: u32, size: u32) 
     guard(ctx, (), || match size {
         1 => _ = cpu.bus.write_8(p, value as u8),
         2 => _ = cpu.bus.write_16(p, value as u16),
-        _ => _ = cpu.bus.write_32(p, value),
+        _ => cpu.bus.write_32(p, value),
     });
     vga_state(cpu, ctx);
     (phys < ctx.smc_hi && phys.wrapping_add(size) > ctx.smc_lo) as u32

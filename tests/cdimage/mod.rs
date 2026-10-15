@@ -144,7 +144,7 @@ pub fn mode1_2352(iso: &[u8]) -> Vec<u8> {
     let mut raw = Vec::new();
     for (lba, sector) in iso.chunks(SECTOR).enumerate() {
         let frames = lba as u32 + 150;
-        let bcd = |v: u32| ((v / 10) << 4 | v % 10) as u8;
+        let bcd = |v: u32| (((v / 10) << 4) | (v % 10)) as u8;
         raw.extend([0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00]);
         raw.extend([bcd(frames / 75 / 60), bcd(frames / 75 % 60), bcd(frames % 75), 1]);
         raw.extend(sector);

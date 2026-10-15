@@ -41,3 +41,6 @@ programs/
 # The browser build (web/build.sh)
 /web/target
 /web/www/pkg
+
+# Stray process id files from test scripts
+/pid

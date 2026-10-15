@@ -59,6 +59,8 @@ pub struct DrawState {
     pub fog_mode: u32,
     pub za_color: u32,
     pub chroma_key: u32,
+    /// chromaRange, a Voodoo2's (`RasterState::chroma_rejects`).
+    pub chroma_range: u32,
     pub color0: u32,
     pub color1: u32,
     pub fog_color: u32,
@@ -70,7 +72,9 @@ pub struct DrawState {
     /// Whether there is an auxiliary (depth or alpha) buffer.
     pub aux: bool,
     pub fogblend: [u8; 64],
-    pub fogdelta: [u8; 64],
+    /// The fog table deltas as the pipeline uses them: the chip's bits,
+    /// negated where fogMode bit 7 and the delta's bit 1 say so.
+    pub fogdelta: [i16; 64],
     /// TMU 0's configuration instead of its texels (`RasterState`).
     pub send_config: Option<u32>,
     pub tmu: [Option<TexUnit>; 2],
@@ -391,6 +395,12 @@ impl Mirror {
         }));
     }
 
+    /// A rectangle of a buffer filled with one value, as a Voodoo2's
+    /// blitter fills whole pages.
+    pub(crate) fn fill(&mut self, fill: Fill) {
+        self.push(Command::Fill(fill));
+    }
+
     /// Pixel `x` of buffer row `y` is `value` after a frame buffer write:
     /// in colour buffer `dest`, or with None in the auxiliary buffer, of
     /// `width` pixels.
@@ -535,8 +545,8 @@ impl Mirror {
 
 fn draw_state(st: &RasterState, stipple: u32, tmu: [Option<TexUnit>; 2]) -> DrawState {
     let clip = (st.fbz_mode & 1 != 0).then(|| {
-        let (lr, ly) = (st.clip_left_right, st.clip_low_y_high_y);
-        [(lr >> 16) & 0x3FF, lr & 0x3FF, (ly >> 16) & 0x3FF, ly & 0x3FF]
+        let (left, right, low, high) = st.clip();
+        [left as u32, right as u32, low as u32, high as u32]
     });
     DrawState {
         dest: st.dest as u32,
@@ -546,6 +556,7 @@ fn draw_state(st: &RasterState, stipple: u32, tmu: [Option<TexUnit>; 2]) -> Draw
         fog_mode: st.fog_mode,
         za_color: st.za_color,
         chroma_key: st.chroma_key,
+        chroma_range: st.chroma_range,
         color0: st.color0,
         color1: st.color1,
         fog_color: st.fog_color,
@@ -554,7 +565,10 @@ fn draw_state(st: &RasterState, stipple: u32, tmu: [Option<TexUnit>; 2]) -> Draw
         clip,
         aux: st.aux.is_some(),
         fogblend: st.fogblend,
-        fogdelta: st.fogdelta,
+        fogdelta: st.fogdelta.map(|d| {
+            let delta = (d as i32 & st.fogdelta_mask) as i16;
+            if st.fog_mode & (1 << 7) != 0 && d & 2 != 0 { -delta } else { delta }
+        }),
         send_config: st.send_config,
         tmu,
     }

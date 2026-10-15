@@ -160,9 +160,9 @@ pub fn spills(st: &RasterState, verts: &[(f32, f32); 3], height: u32) -> bool {
     let mut reach = maxx.ceil().min(8192.0) as i32 + 2;
     let y0 = (miny.floor().max(-8192.0) as i32 - 1).max(-2048);
     let y1 = (maxy.ceil().min(8192.0) as i32 + 2).min(4096);
-    let clip_bottom = (st.clip_low_y_high_y & 0x3FF) as i32;
+    let (_, clip_right, _, clip_bottom) = st.clip();
     if st.fbz_mode & 1 != 0 {
-        reach = reach.min((st.clip_left_right & 0x3FF) as i32);
+        reach = reach.min(clip_right);
         if clip_bottom <= height as i32 {
             // No row below the clip rectangle is drawn, wherever the Y
             // origin takes the triangle's (one that reaches past the origin
@@ -206,11 +206,11 @@ pub fn triangle(layout: &TileLayout, st: &RasterState, verts: &[(f32, f32); 3]) 
     let (y0, y1) = ((clamp(miny.floor()) - 1).max(-2048), (clamp(maxy.ceil()) + 2).min(4096));
     let Some((mut r0, mut r1)) = buffer_rows(st, y0, y1) else { return Access::PINNED };
     if fbz & 1 != 0 {
-        let (lr, ly) = (st.clip_left_right, st.clip_low_y_high_y);
-        x0 = x0.max(((lr >> 16) & 0x3FF) as i32);
-        x1 = x1.min((lr & 0x3FF) as i32);
-        r0 = r0.max(((ly >> 16) & 0x3FF) as i32);
-        r1 = r1.min((ly & 0x3FF) as i32);
+        let (left, right, low, high) = st.clip();
+        x0 = x0.max(left);
+        x1 = x1.min(right);
+        r0 = r0.max(low);
+        r1 = r1.min(high);
     }
     let Some(rect) = inside(layout, x0, x1, r0, r1) else { return Access::PINNED };
     let touched = layout.tiles(rect, false);

@@ -29,6 +29,12 @@ pub struct F80 {
     pub st: u128,
 }
 
+impl Default for F80 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl F80 {
     pub fn new() -> Self {
         F80 { st: 0 }
@@ -85,8 +91,8 @@ impl F80 {
 
     pub fn get_bytes(&self) -> [u8; 10] {
         let mut bytes = [0u8; 10];
-        for i in 0..10 {
-            bytes[i] = ((self.st >> (8 * i)) & 0xFF) as u8;
+        for (i, byte) in bytes.iter_mut().enumerate() {
+            *byte = ((self.st >> (8 * i)) & 0xFF) as u8;
         }
         bytes
     }
@@ -108,7 +114,7 @@ impl F80 {
 
     #[allow(dead_code)]
     pub fn fix(&mut self) {
-        self.st = self.st & FPU_80_BITS_MAX;
+        self.st &= FPU_80_BITS_MAX;
     }
 
     pub fn is_negative(&self) -> bool {
@@ -172,7 +178,7 @@ impl F80 {
     }
 
     fn get_mantissa_with_integer_bit(&self) -> u64 {
-        let mantissa = (self.st & MANTISSA_MASK_NOINT) >> 0;
+        let mantissa = self.st & MANTISSA_MASK_NOINT;
         let int_bit = ((self.st & INT_BIT_MASK) >> 63) as u64;
         (mantissa as u64) | (int_bit << 63)
     }
@@ -212,7 +218,7 @@ impl F80 {
             }
             sign = a_sign;
         } else {
-            let difference = if a_man >= b_man { a_man - b_man } else { b_man - a_man };
+            let difference = a_man.abs_diff(b_man);
             if difference == 0 {
                 (sign, man, exp) = (false, 0, 0);
             } else {
@@ -270,13 +276,13 @@ impl F80 {
         let mut val = self.to_integer(rc).filter(|&n| n <= 999_999_999_999_999_999)?;
         let mut bcd = [0u8; 10];
 
-        for i in 0..9 {
+        for byte in &mut bcd[..9] {
             let lo = (val % 10) as u8;
             val /= 10;
             let hi = (val % 10) as u8;
             val /= 10;
 
-            bcd[i] = (hi << 4) | lo;
+            *byte = (hi << 4) | lo;
         }
 
         bcd[9] = if self.is_negative() { BCD_SIGN } else { 0 };
@@ -415,15 +421,126 @@ impl F80 {
                 (sign << 63) | (0x7FF << 52)
             } else {
                 let f64_mantissa = ((mantissa >> 11) & 0xFFFFFFFFFFFFF) as u64;
-                (sign << 63) | ((f64_exp as u64) << 52) | f64_mantissa
+                (sign << 63) | (((f64_exp as u64) << 52 | f64_mantissa) + round_up(mantissa as u64) as u64)
             }
         };
 
         f64::from_bits(f64_bits)
     }
+
+    /// Sign, unbiased exponent and significand of a normal number (an
+    /// exponent neither 0 nor all ones, and the integer bit set); None for
+    /// anything else.
+    fn normal_parts(&self) -> Option<(bool, i32, u64)> {
+        let exp = self.get_exponent();
+        let mantissa = self.st as u64;
+        (exp != 0 && exp != 0x7FFF && mantissa & INT_BIT_MASK64 != 0)
+            .then(|| (self.get_sign(), exp as i32 - F80_EXP_BIAS, mantissa))
+    }
+
+    /// The value rounded to an integer as control word rounding `rc` says
+    /// (0 nearest even, 1 down, 2 up, 3 toward zero), from all 64 bits of
+    /// the significand. None for anything but a normal number under 2^63
+    /// (a larger one is an integer already).
+    pub fn round_int(&self, rc: u16) -> Option<i128> {
+        let (sign, exp, mantissa) = self.normal_parts()?;
+        if exp >= 63 {
+            return None;
+        }
+        let (int, rest, half) = if exp < -64 {
+            // Under 2^-64: below a half, and not 0.
+            (0, 1, 2)
+        } else {
+            let shift = (63 - exp) as u32;
+            let m = mantissa as u128;
+            (m >> shift, m & ((1u128 << shift) - 1), 1u128 << (shift - 1))
+        };
+        let int = int + rounds_away(rc, sign, int & 1 != 0, rest, half) as u128;
+        Some(if sign { -(int as i128) } else { int as i128 })
+    }
+
+    /// The value rounded to a significand of `bits` bits (24 for a single,
+    /// 53 for a double) as control word rounding `rc` says, as the double
+    /// that holds it exactly. None for anything but a normal number, or
+    /// where the result is outside the normal range of the format with
+    /// `bits` (a single's exponents -126 to 127, a double's -1022 to 1023).
+    pub fn round_to(&self, bits: u32, rc: u16) -> Option<f64> {
+        let (sign, mut exp, mantissa) = self.normal_parts()?;
+        let drop = 64 - bits;
+        let mut kept = mantissa >> drop;
+        let rest = (mantissa & ((1u64 << drop) - 1)) as u128;
+        kept += rounds_away(rc, sign, kept & 1 != 0, rest, 1u128 << (drop - 1)) as u64;
+        if kept >> bits != 0 {
+            kept >>= 1;
+            exp += 1;
+        }
+        let max = if bits == 24 { 127 } else { 1023 };
+        if exp > max || exp < 1 - max {
+            return None;
+        }
+        let magnitude = kept as f64 * pow2(exp - (bits as i32 - 1));
+        Some(if sign { -magnitude } else { magnitude })
+    }
+
+    /// Compare with `other` by their 80 bits, where both are normal numbers
+    /// or zeros; None otherwise.
+    pub fn compare(&self, other: &F80) -> Option<std::cmp::Ordering> {
+        use std::cmp::Ordering;
+        // A zero as (sign, 0), a normal number as (sign, exponent and
+        // significand), which order as the magnitudes do.
+        let key = |f: &F80| -> Option<(bool, u128)> {
+            if f.is_zero() {
+                Some((false, 0))
+            } else {
+                f.normal_parts().map(|_| (f.get_sign(), f.st & !SIGN_MASK))
+            }
+        };
+        let ((a_sign, a), (b_sign, b)) = (key(self)?, key(other)?);
+        Some(match (a_sign, b_sign) {
+            (false, false) => a.cmp(&b),
+            (true, true) => b.cmp(&a),
+            // (A zero counts as positive here, so a negative number is
+            // below it.)
+            (true, false) => Ordering::Less,
+            (false, true) => Ordering::Greater,
+        })
+    }
+}
+
+/// Whether a value rounds away from zero to the next integer (or the next
+/// significand): `rest` is what is cut off, `half` what a half is in the
+/// same units, `odd` whether the part kept is odd. Rounding `rc` as the
+/// control word has it (0 nearest even, 1 down, 2 up, 3 toward zero).
+fn rounds_away(rc: u16, negative: bool, odd: bool, rest: u128, half: u128) -> bool {
+    match rc {
+        0 => rest > half || (rest == half && odd),
+        1 => negative && rest != 0,
+        2 => !negative && rest != 0,
+        _ => false,
+    }
+}
+
+/// 2^k, for k from -1074 to 1023.
+fn pow2(k: i32) -> f64 {
+    if k >= -1022 {
+        f64::from_bits(((k + 1023) as u64) << 52)
+    } else {
+        f64::from_bits(1u64 << (k + 1074))
+    }
 }
 
 crate::state_fields!(F80 { st });
+
+/// Whether a 64-bit significand cut to a double's 53 bits rounds up, to
+/// nearest with ties to even (the x87's default rounding): the 11 bits
+/// dropped are over half, or exactly half with the last bit kept odd.
+/// Added to the double's bits, a carry out of the significand goes on into
+/// the exponent, and past the largest double makes the infinity.
+#[inline]
+fn round_up(mantissa: u64) -> bool {
+    let dropped = mantissa & 0x7FF;
+    dropped > 0x400 || (dropped == 0x400 && mantissa & 0x800 != 0)
+}
 
 /// What a double is after it went into an FPU register and came back
 /// (`F80::set_f64`, then `get_f64`): a denormal is 0, and a NaN quiet.
@@ -503,6 +620,17 @@ impl FpuRegs {
     #[inline]
     pub fn get_f64(&self, i: usize) -> f64 {
         self.f64s[i]
+    }
+
+    /// Whether register `i`'s 80 bits hold more than its double does: it
+    /// isn't stale and has significand bits below a double's 53. The double
+    /// is rounded to nearest, so FIST, FST to a single (or to a double under
+    /// another rounding), FRNDINT and the compares then work from the 80
+    /// bits; the recompiler's code leaves those cases to the handlers
+    /// (`Uop::FBailPrecise`).
+    #[inline]
+    pub fn beyond_double(&self, i: usize) -> bool {
+        self.stale[i] == 0 && self.x80[i].st & 0x7FF != 0
     }
 
     /// Give register `i` a double: what `set` of an `F80` set to it

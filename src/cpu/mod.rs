@@ -67,8 +67,10 @@ fn program_paras(bytes: &[u8]) -> u16 {
 /// and NT.
 const FLAGS16_WRITABLE: u32 = 0x7FD5;
 
-/// The processor being emulated, in the order they came out: a later one
-/// has what an earlier one has (`model >= CpuModel::I486`).
+/// The processor being emulated, each with what the one before it has
+/// (`model >= CpuModel::I486`), except that a Pentium Pro has no MMX
+/// (`has_mmx`), and that the P6 has none of what the K6-2 adds to the
+/// Pentium MMX (`has_3dnow`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CpuModel {
     I386,
@@ -83,17 +85,65 @@ pub enum CpuModel {
     /// A Pentium MMX (P55C): the Pentium's, MMX, and CPUID saying family
     /// 5, model 4, stepping 3.
     PentiumMmx,
+    /// An AMD K6-2 (model 8, stepping 0): the Pentium MMX's, 3DNow! and
+    /// SYSCALL/SYSRET with their MSRs (EFER, STAR) and the K6's write
+    /// handling and test registers, and CPUID saying "AuthenticAMD",
+    /// family 5, model 8 with the extended leaves of AMD's processor
+    /// recognition note: the 3DNow! and SYSCALL features, the name and the
+    /// L1 caches. It has no CMOVcc and no P6 instructions, as the real one.
+    K6_2,
+    /// A Pentium Pro as DOSBox-X's `ppro_slow` has it: the Pentium's (no
+    /// MMX), CMOVcc, FCMOVcc, FCOMI/FUCOMI and their popping forms, the
+    /// hinting NOPs (0F 18 to 0F 1E), the local APIC base and microcode
+    /// revision MSRs, and CPUID saying family 6, model 1, stepping 2.
+    PentiumPro,
+    /// A Pentium II (Klamath) as DOSBox-X's `pentium_ii` has it: the
+    /// Pentium Pro's, MMX, SYSENTER/SYSEXIT with their MSRs, and CPUID
+    /// saying family 6, model 3, stepping 3.
+    PentiumII,
+    /// A Pentium III (Katmai): the Pentium II's, SSE with its XMM
+    /// registers and MXCSR, FXSAVE/FXRSTOR, CR4's OSFXSR and OSXMMEXCPT,
+    /// the processor serial number, and CPUID saying family 6, model 7,
+    /// stepping 3 with the cache descriptors of its 512 KB L2.
+    PentiumIII,
 }
 
 impl CpuModel {
+    pub const ALL: [CpuModel; 8] = [
+        CpuModel::I386,
+        CpuModel::I486,
+        CpuModel::Pentium,
+        CpuModel::PentiumMmx,
+        CpuModel::K6_2,
+        CpuModel::PentiumPro,
+        CpuModel::PentiumII,
+        CpuModel::PentiumIII,
+    ];
+
     /// The EFLAGS bits a program may change beyond the 386's: AC on a 486,
-    /// and ID too on a Pentium, whose toggling tells that CPUID is there.
+    /// and ID too on a Pentium and later, whose toggling tells that CPUID
+    /// is there.
     pub fn eflags_extra(self) -> u32 {
         match self {
             CpuModel::I386 => 0,
             CpuModel::I486 => CpuFlags::AC.bits(),
-            CpuModel::Pentium | CpuModel::PentiumMmx => CpuFlags::AC.bits() | CpuFlags::ID.bits(),
+            _ => CpuFlags::AC.bits() | CpuFlags::ID.bits(),
         }
+    }
+
+    /// The clock rate the time stamp counter runs at while the speed
+    /// changes as it runs (`Cpu::set_tsc_speed`): one of the fastest the
+    /// model's line came in. None without a time stamp counter.
+    pub fn tsc_hz(self) -> Option<u64> {
+        let mhz = match self {
+            CpuModel::I386 | CpuModel::I486 => return None,
+            CpuModel::Pentium | CpuModel::PentiumPro => 200,
+            CpuModel::PentiumMmx => 233,
+            CpuModel::PentiumII => 450,
+            CpuModel::K6_2 => 550,
+            CpuModel::PentiumIII => 600,
+        };
+        Some(mhz * 1_000_000)
     }
 
     /// The family, model and stepping CPUID reports, which DX also holds
@@ -104,6 +154,10 @@ impl CpuModel {
             CpuModel::I486 => 0x0402,
             CpuModel::Pentium => 0x0517,
             CpuModel::PentiumMmx => 0x0543,
+            CpuModel::K6_2 => 0x0580,
+            CpuModel::PentiumPro => 0x0612,
+            CpuModel::PentiumII => 0x0633,
+            CpuModel::PentiumIII => 0x0673,
         }
     }
 
@@ -114,24 +168,64 @@ impl CpuModel {
             CpuModel::I486 => "486",
             CpuModel::Pentium => "Pentium",
             CpuModel::PentiumMmx => "Pentium MMX",
+            CpuModel::K6_2 => "K6-2",
+            CpuModel::PentiumPro => "Pentium Pro",
+            CpuModel::PentiumII => "Pentium II",
+            CpuModel::PentiumIII => "Pentium III",
         }
     }
 
     /// The most RAM in MB (`memsize`) a machine with this CPU takes, as
     /// the motherboards of its day did: 64 MB on a 386, 128 MB on a 486,
     /// 256 MB on a Pentium (430FX/VX) and 512 MB on a Pentium MMX (430HX).
+    /// A K6-2's Super 7 board (MVP3, Aladdin V) and a Pentium Pro, Pentium
+    /// II or Pentium III board (440FX, 440BX) take 768 MB or 1 GB, which
+    /// `MAX_MEMSIZE` keeps to 512 MB.
     pub fn max_memsize(self) -> usize {
         match self {
             CpuModel::I386 => 64,
             CpuModel::I486 => 128,
             CpuModel::Pentium => 256,
-            CpuModel::PentiumMmx => 512,
+            CpuModel::PentiumMmx
+            | CpuModel::K6_2
+            | CpuModel::PentiumPro
+            | CpuModel::PentiumII
+            | CpuModel::PentiumIII => 512,
         }
     }
 
-    /// The family: 3, 4 or 5.
+    /// The family: 3, 4, 5 or 6.
     pub fn family(self) -> u8 {
         (self.signature() >> 8) as u8
+    }
+
+    /// Whether it runs MMX instructions: a Pentium MMX, a K6-2, a Pentium
+    /// II or a Pentium III.
+    pub fn has_mmx(self) -> bool {
+        matches!(self, CpuModel::PentiumMmx | CpuModel::K6_2 | CpuModel::PentiumII | CpuModel::PentiumIII)
+    }
+
+    /// Whether it is AMD's, which CPUID says with "AuthenticAMD" and its
+    /// extended leaves: a K6-2.
+    pub fn is_amd(self) -> bool {
+        self == CpuModel::K6_2
+    }
+
+    /// Whether it runs 3DNow! instructions, FEMMS and PREFETCH(W), and
+    /// SYSCALL/SYSRET: a K6-2.
+    pub fn has_3dnow(self) -> bool {
+        self == CpuModel::K6_2
+    }
+
+    /// Whether it runs SSE instructions and FXSAVE/FXRSTOR: a Pentium III.
+    pub fn has_sse(self) -> bool {
+        self >= CpuModel::PentiumIII
+    }
+
+    /// Whether it is a P6 (family 6: a Pentium Pro, II or III), with
+    /// CMOVcc, FCMOVcc and FCOMI.
+    pub fn is_p6(self) -> bool {
+        self >= CpuModel::PentiumPro
     }
 }
 
@@ -176,6 +270,40 @@ impl CoreMode {
     }
 }
 
+/// What the Pentium III adds to the CPU's state: XMM0-XMM7, MXCSR, and
+/// whether the processor serial number was switched off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sse {
+    pub xmm: [u128; 8],
+    pub mxcsr: u32,
+    /// Set by a write of bit 21 to MSR 119h, which only a reset clears:
+    /// CPUID then has no serial number (leaf 3) to give.
+    pub psn_off: bool,
+}
+
+impl Default for Sse {
+    /// The state after a reset: the registers 0, all exceptions masked,
+    /// rounding to nearest, and the serial number there.
+    fn default() -> Self {
+        Sse { xmm: [0; 8], mxcsr: crate::instructions::sse::float::MXCSR_DEFAULT, psn_off: false }
+    }
+}
+
+/// The model-specific registers a K6-2 holds what was written to: the
+/// machine check address and type (0, 1), test register 12 (0Eh), the
+/// extended feature enables (EFER, C0000080h), the SYSCALL/SYSRET target
+/// (STAR, C0000081h) and the write handling control (WHCR, C0000082h).
+/// A reset clears them all.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct K6Msrs {
+    pub mcar: u64,
+    pub mctr: u64,
+    pub tr12: u64,
+    pub efer: u64,
+    pub star: u64,
+    pub whcr: u64,
+}
+
 /// A descriptor table register (GDTR, IDTR): base address and limit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DescTable {
@@ -203,6 +331,11 @@ pub const CR0_PG: u32 = 0x8000_0000;
 /// CR4 bits (Pentium): RDTSC only at level 0 (TSD), and 4 MB pages (PSE).
 pub const CR4_TSD: u32 = 0x0000_0004;
 pub const CR4_PSE: u32 = 0x0000_0010;
+/// CR4 bits (Pentium III): the system saves the SSE state with FXSAVE, so
+/// SSE instructions run (OSFXSR), and handles #XM, so unmasked SSE
+/// exceptions raise it rather than #UD (OSXMMEXCPT).
+pub const CR4_OSFXSR: u32 = 0x0000_0200;
+pub const CR4_OSXMMEXCPT: u32 = 0x0000_0400;
 
 // FPU Tag Word Values
 pub const FPU_TAG_EMPTY: u8 = 1;
@@ -299,7 +432,8 @@ pub struct Cpu {
     pub cr0: u32,
     pub cr2: u32,
     pub cr3: u32,
-    /// CR4 (Pentium): `CR4_TSD` and `CR4_PSE`.
+    /// CR4 (Pentium): `CR4_TSD` and `CR4_PSE`, and on a Pentium III
+    /// `CR4_OSFXSR` and `CR4_OSXMMEXCPT`.
     pub cr4: u32,
     /// What the time stamp counter (Pentium) adds to the instruction
     /// clock, which it counts (see `tsc`).
@@ -308,6 +442,13 @@ pub struct Cpu {
     /// select (11h) and the two counters (12h, 13h), which hold what was
     /// written to them.
     pub perf_msrs: [u64; 3],
+    /// The Pentium II's SYSENTER MSRs: the code selector (174h), the stack
+    /// pointer (175h) and the instruction pointer (176h) SYSENTER loads.
+    pub sysenter: [u32; 3],
+    /// The Pentium III's SSE registers, MXCSR and serial number switch.
+    pub sse: Sse,
+    /// The K6-2's model-specific registers.
+    pub k6: K6Msrs,
     /// Debug registers; stored, but breakpoints are not implemented.
     pub dr: [u32; 8],
     pub gdtr: DescTable,
@@ -419,6 +560,10 @@ pub struct Cpu {
     /// Exceptions raised since start, and the most recent ones.
     pub exceptions: u64,
     pub exception_log: VecDeque<fault::ExceptionRecord>,
+    /// How many lines the log has for each place exceptions were raised
+    /// at (vector, CS, EIP), and how many places each vector has.
+    exception_places: std::collections::HashMap<(u8, u16, u32), u8>,
+    exception_places_per_vector: [u16; 32],
     /// Set by BIOS services that wait for input (INT 16h with an empty
     /// keyboard buffer). The main loop then skips ahead to the next timer
     /// event instead of spinning through the retry loop, like it does for HLT.
@@ -590,6 +735,9 @@ impl Cpu {
             cr4: 0,
             tsc_offset: 0,
             perf_msrs: [0; 3],
+            sysenter: [0; 3],
+            sse: Sse::default(),
+            k6: K6Msrs::default(),
             dr: [0; 8],
             gdtr: DescTable { base: 0, limit: 0xFFFF },
             idtr: DescTable { base: 0, limit: 0x3FF },
@@ -649,6 +797,8 @@ impl Cpu {
             mode_switches: 0,
             exceptions: 0,
             exception_log: VecDeque::with_capacity(fault::EXCEPTION_LOG_LEN),
+            exception_places: std::collections::HashMap::new(),
+            exception_places_per_vector: [0; 32],
             idle: false,
             hle_retry: false,
             core: CoreMode::initial(),
@@ -1079,16 +1229,28 @@ impl Cpu {
         self.flags = CpuFlags::from_bits_retain(keep | (value & writable) | 0x0002);
     }
 
-    /// The time stamp counter (Pentium): the instruction clock, which runs
-    /// at the `cycles` speed, as DOSBox-X's counts its cycles, and goes on
-    /// while the processor waits for an interrupt.
+    /// The time stamp counter (Pentium): at a fixed `cycles` speed the
+    /// instruction clock, as DOSBox-X's counts its cycles, at one that
+    /// changes as it runs the model's clock rate (`set_tsc_speed`). It goes
+    /// on while the processor waits for an interrupt.
     pub fn tsc(&self) -> u64 {
-        self.bus.clock.icount.wrapping_add(self.tsc_offset)
+        self.bus.clock.tsc().wrapping_add(self.tsc_offset)
     }
 
     /// Set the time stamp counter (WRMSR 10h).
     pub fn set_tsc(&mut self, value: u64) {
-        self.tsc_offset = value.wrapping_sub(self.bus.clock.icount);
+        self.tsc_offset = value.wrapping_sub(self.bus.clock.tsc());
+    }
+
+    /// Let the time stamp counter count the instructions at a fixed speed,
+    /// and at the model's clock rate at max or auto, whose speed the host
+    /// decides as it runs.
+    pub fn set_tsc_speed(&mut self, speed: crate::timer::CpuSpeed) {
+        let hz = match speed {
+            crate::timer::CpuSpeed::Fixed(_) => None,
+            crate::timer::CpuSpeed::Max | crate::timer::CpuSpeed::Auto(_) => self.model.tsc_hz(),
+        };
+        self.bus.clock.set_tsc_hz(hz);
     }
 
     /// EFLAGS as PUSHFD pushes it: VM and RF read as 0.
@@ -1252,6 +1414,30 @@ impl Cpu {
         self.fpu_stack.get_f64(i)
     }
 
+    /// The FPU status word, with the stack top in bits 11-13.
+    pub fn fpu_status_word(&self) -> u16 {
+        crate::instructions::fpu::control::status_word(self)
+    }
+
+    /// The FPU tag word: two bits a physical register, 00 valid, 01 zero,
+    /// 10 special, 11 empty.
+    pub fn fpu_tag_word(&self) -> u16 {
+        crate::instructions::fpu::control::tag_word(self)
+    }
+
+    /// Whether physical register `i`'s 80 bits hold more than its double
+    /// (`FpuRegs::beyond_double`), whatever its tag.
+    pub fn fpu_reg_beyond_double(&self, i: usize) -> bool {
+        self.fpu_stack.beyond_double(i)
+    }
+
+    /// Whether ST(i) holds more than its double: `fpu_get(i)`'s 80 bits
+    /// (an empty register is the indefinite, which a double holds).
+    pub fn fpu_beyond_double(&self, index: usize) -> bool {
+        let actual_idx = (self.fpu_top.wrapping_add(index)) & 7;
+        self.fpu_tags[actual_idx] != crate::cpu::FPU_TAG_EMPTY && self.fpu_stack.beyond_double(actual_idx)
+    }
+
     pub fn fpu_set_reg(&mut self, i: usize, val: F80) {
         self.fpu_stack.set(i, val);
     }
@@ -1284,6 +1470,7 @@ impl Cpu {
     }
 
     /// The memory of the resident TSRs, in conventional and upper memory.
+    #[allow(clippy::single_range_in_vec_init)]
     fn resident_memory(&mut self) -> Vec<std::ops::Range<usize>> {
         let mut resident = vec![(crate::mcb::first_mcb(&self.bus) as usize + 1) * 16..self.resident_end as usize * 16];
         for &psp in &self.resident_upper {

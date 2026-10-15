@@ -20,6 +20,10 @@ pub enum SbModel {
     Sb2,
     SbPro2,
     Sb16,
+    /// Creative's ViBRA16C (CTL0070), an SB16 on one chip that is an ISA
+    /// Plug and Play card: its resources are set through the PnP
+    /// registers, and its mixer's 80h and 81h only read them.
+    Sb16Vibra,
     /// An SB16 with the EMU8000 wavetable synthesizer (`crate::awe32`).
     Awe32,
 }
@@ -31,6 +35,8 @@ impl SbModel {
             SbModel::Sb2 => (2, 1),
             SbModel::SbPro2 => (3, 2),
             SbModel::Sb16 => (4, 5),
+            // The ViBRA16C's, as DOSBox-X gives it.
+            SbModel::Sb16Vibra => (4, 13),
             // A CT3990's.
             SbModel::Awe32 => (4, 13),
         }
@@ -39,7 +45,7 @@ impl SbModel {
     /// Whether the card is an SB16, as the AWE32 is too.
     #[inline]
     pub fn is_sb16(self) -> bool {
-        matches!(self, SbModel::Sb16 | SbModel::Awe32)
+        matches!(self, SbModel::Sb16 | SbModel::Sb16Vibra | SbModel::Awe32)
     }
 
     /// The T value of the BLASTER variable.
@@ -47,7 +53,7 @@ impl SbModel {
         match self {
             SbModel::Sb2 => 3,
             SbModel::SbPro2 => 4,
-            SbModel::Sb16 | SbModel::Awe32 => 6,
+            SbModel::Sb16 | SbModel::Sb16Vibra | SbModel::Awe32 => 6,
         }
     }
 
@@ -57,6 +63,7 @@ impl SbModel {
             SbModel::Sb2 => "sb2",
             SbModel::SbPro2 => "sbpro2",
             SbModel::Sb16 => "sb16",
+            SbModel::Sb16Vibra => "sb16vibra",
             SbModel::Awe32 => "awe32",
         }
     }
@@ -66,6 +73,7 @@ impl SbModel {
             "sb2" | "sb20" => Some(SbModel::Sb2),
             "sbpro2" | "sbpro" => Some(SbModel::SbPro2),
             "sb16" => Some(SbModel::Sb16),
+            "sb16vibra" | "vibra" => Some(SbModel::Sb16Vibra),
             "awe32" | "sbawe" | "awe" => Some(SbModel::Awe32),
             _ => None,
         }
@@ -148,7 +156,47 @@ const CD_R: u8 = 0x37;
 const PRO_CD: u8 = 0x28;
 /// The SB Pro's mixer registers: voice, mic, input, output, master, FM,
 /// CD and line.
+/// What an empty ASP socket's registers read (DOSBox-X's start values, from
+/// an SB16): their own number, but 0 for 00h-1Fh and 80h-83h, 01h for 05h
+/// and F8h for 09h. Windows 98's SB16.VXD fails to start (Code 10) on a
+/// card whose 09h isn't F8h.
+const EMPTY_ASP_REGS: [u8; 256] = {
+    let mut regs = [0; 256];
+    let mut i = 0x20;
+    while i < 256 {
+        if i < 0x80 || i > 0x83 {
+            regs[i] = i as u8;
+        }
+        i += 1;
+    }
+    regs[0x05] = 0x01;
+    regs[0x09] = 0xF8;
+    regs
+};
+
+/// The 8051 microcontroller's memory as an SB16 starts (DOSBox-X's values,
+/// from a card's): zeros but for 0Eh, 0Fh and 37h. Windows 98's SB16.VXD
+/// reads 0Eh, and fails to start (Code 10) where it finds 00h.
+const MEM8051_START: [u8; 256] = {
+    let mut mem = [0; 256];
+    mem[0x0E] = 0xFF;
+    mem[0x0F] = 0x07;
+    mem[0x37] = 0x38;
+    mem
+};
+
 const PRO_REGS: [u8; 9] = [0x00, 0x04, 0x0A, 0x0C, 0x0E, 0x22, 0x26, PRO_CD, 0x2E];
+
+/// The SB16 registers (left, right) that an SB Pro volume register (04h,
+/// 22h, 26h or 28h) reads and writes.
+fn pro_volume_regs(reg: u8) -> (u8, u8) {
+    match reg {
+        0x04 => (VOICE_L, VOICE_R),
+        0x22 => (MASTER_L, MASTER_R),
+        0x26 => (FM_L, FM_R),
+        _ => (CD_L, CD_R),
+    }
+}
 
 pub struct SoundBlaster {
     pub config: SbConfig,
@@ -197,7 +245,23 @@ pub struct SoundBlaster {
     pub irq: Option<u8>,
     dma8: Option<u8>,
     dma16: Option<u8>,
+    /// Command E2h (DMA identification): the running value its answers
+    /// come from, the number of times it ran, and the answer waiting for
+    /// the 8-bit DMA channel to take it.
+    e2_value: u8,
+    e2_count: u8,
+    e2_pending: Option<u8>,
 }
+
+/// What each parameter bit of command E2h adds to its running value, for
+/// the four calls in turn, and what each call adds besides (the last
+/// column), as DOSBox and DOSBox-X have it from real cards.
+const E2_ADD: [[i16; 9]; 4] = [
+    [0x01, -0x02, -0x04, 0x08, -0x10, 0x20, 0x40, -0x80, -106],
+    [-0x01, 0x02, -0x04, 0x08, 0x10, -0x20, 0x40, -0x80, 165],
+    [-0x01, 0x02, 0x04, -0x08, 0x10, -0x20, -0x40, 0x80, -151],
+    [0x01, -0x02, 0x04, -0x08, -0x10, 0x20, -0x40, 0x80, 90],
+];
 
 /// While a transfer runs, emulated time is cut into slots of `BUSY_TICKS`
 /// PIT ticks (about 3.4 us), and the write status reads busy in about one
@@ -249,14 +313,31 @@ impl SoundBlaster {
             mixer_index: 0,
             mixer: [0; 256],
             asp_mode: 0,
-            asp_regs: [0; 256],
-            mem8051: [0; 256],
+            asp_regs: EMPTY_ASP_REGS,
+            mem8051: MEM8051_START,
             irq: Some(config.irq),
             dma8: Some(config.dma8),
             dma16: Some(config.dma16),
+            e2_value: 0xAA,
+            e2_count: 0,
+            e2_pending: None,
         };
         sb.reset_mixer();
         sb
+    }
+
+    /// Route the card to an IRQ and DMA channels, as an ISA Plug and Play
+    /// configuration does (None for none). A 16-bit channel below 4 is
+    /// none: 16-bit transfers then use the 8-bit channel.
+    pub fn set_lines(&mut self, irq: Option<u8>, dma8: Option<u8>, dma16: Option<u8>) {
+        self.irq = irq;
+        self.dma8 = dma8;
+        self.dma16 = dma16.filter(|&ch| ch >= 4);
+    }
+
+    /// The 8-bit and 16-bit DMA channels the card uses now (see `irq`).
+    pub fn dma(&self) -> (Option<u8>, Option<u8>) {
+        (self.dma8, self.dma16)
     }
 
     /// Whether the card's interrupt line is up.
@@ -286,6 +367,36 @@ impl SoundBlaster {
         self.sb16_rate = None;
         self.pending_left = None;
         self.dac = 0;
+        self.e2_pending = None;
+    }
+
+    /// Write the answer of command E2h to memory once the 8-bit DMA
+    /// channel is unmasked. Returns the memory written. A channel set to
+    /// read memory or to verify takes the byte as one transfer and leaves
+    /// memory alone, as the 8237 does in those modes.
+    pub fn dma_write(&mut self, dma: &mut Dma, ram: &mut [u8]) -> Option<std::ops::Range<usize>> {
+        let byte = self.e2_pending?;
+        let ch = self.dma8.map(usize::from).filter(|&ch| dma.ready(ch))?;
+        if dma.channel(ch).mode & 0x0C != 0x04 {
+            dma.transfer_skip(ch, 1);
+            self.e2_pending = None;
+            return None;
+        }
+        let (moved, _, written) = dma.transfer_write(ch, ram, &[byte]);
+        if moved == 1 {
+            self.e2_pending = None;
+        }
+        written
+    }
+
+    /// Start command E2h's sequence over, as after a power-on. A loaded
+    /// state does this: the sequence isn't saved, and keeping the running
+    /// machine's would make the answers depend on what ran before the
+    /// load.
+    pub fn restart_dma_identification(&mut self) {
+        self.e2_value = 0xAA;
+        self.e2_count = 0;
+        self.e2_pending = None;
     }
 
     /// Whether the DSP is in high-speed mode: a transfer that a high-speed
@@ -317,11 +428,6 @@ impl SoundBlaster {
         for reg in [MASTER_L, MASTER_R, VOICE_L, VOICE_R, FM_L, FM_R, CD_L, CD_R] {
             self.mixer[reg as usize] = 0xC0;
         }
-        // SB Pro view: master, voice, FM and CD at the same levels.
-        self.mixer[0x22] = 0xCC;
-        self.mixer[0x04] = 0xCC;
-        self.mixer[0x26] = 0xCC;
-        self.mixer[PRO_CD as usize] = 0xCC;
     }
 
     /// Volume of the digital audio and of FM, as (left, right) gains
@@ -541,18 +647,15 @@ impl SoundBlaster {
         }
         match reg {
             0x00 => self.reset_mixer(),
-            // SB Pro registers: a nibble per side, mirrored into the SB16's.
+            // SB Pro volumes: a nibble per side, kept in the SB16's registers.
             0x04 | 0x22 | 0x26 | PRO_CD => {
-                self.mixer[reg as usize] = value;
-                let (l, r) = match reg {
-                    0x04 => (VOICE_L, VOICE_R),
-                    0x22 => (MASTER_L, MASTER_R),
-                    0x26 => (FM_L, FM_R),
-                    _ => (CD_L, CD_R),
-                };
+                let (l, r) = pro_volume_regs(reg);
                 self.mixer[l as usize] = (value & 0xF0) | 0x08;
                 self.mixer[r as usize] = (value << 4) | 0x08;
             }
+            // The ViBRA16C takes its interrupt and DMA channels from its
+            // Plug and Play registers only (DOSBox-X, sblaster.cpp).
+            0x80 | 0x81 if self.config.model == SbModel::Sb16Vibra => {}
             // SB16 interrupt and DMA setup, a bit per line or channel.
             0x80 => {
                 self.irq = [(0x01, 9), (0x02, 5), (0x04, 7), (0x08, 10)]
@@ -602,6 +705,19 @@ impl SoundBlaster {
                 low | high
             }
             (m, 0x82) if m.is_sb16() => (self.irq8 as u8) | (self.irq16 as u8) << 1 | 0x20,
+            // Nor does the SB16's keep registers past its own, as DOSBox-X
+            // answers them: Windows 98's SB16 driver writes and reads back
+            // 8Ch-90h and FFh, and fails to start on a card that keeps them.
+            (_, 0x30..=0x47) => self.mixer[reg as usize],
+            _ if !PRO_REGS.contains(&reg) => 0x0A,
+            // The SB Pro's volume registers read the top four of each
+            // side's five bits in the SB16's, so on an SB16 a level set
+            // through either reads back through both. An SB Pro can write
+            // only the nibbles, and reads back what it wrote.
+            (_, 0x04 | 0x22 | 0x26 | PRO_CD) => {
+                let (l, r) = pro_volume_regs(reg);
+                (self.mixer[l as usize] & 0xF0) | self.mixer[r as usize] >> 4
+            }
             _ => self.mixer[reg as usize],
         }
     }
@@ -641,7 +757,7 @@ impl SoundBlaster {
             // DSP_cmd_len_sb16).
             0x04 | 0x08 | 0x0F | 0xF9 if sb16 => 1,
             0x05 | 0x0E | 0xFA if sb16 => 2,
-            0x10 | 0x38 | 0x40 | 0xE0 | 0xE4 => 1,
+            0x10 | 0x38 | 0x40 | 0xE0 | 0xE2 | 0xE4 => 1,
             0x14 | 0x16 | 0x17 | 0x24 | 0x48 | 0x74..=0x77 | 0x80 => 2,
             0x41 | 0x42 if sb16 => 2,
             0xB0..=0xCF if sb16 => 3,
@@ -765,7 +881,34 @@ impl SoundBlaster {
                     t.last_block = true;
                 }
             }
+            // Continue auto-init (SB16): take back an exit asked for with
+            // DAh (8-bit) or D9h (16-bit) while the block still runs.
+            0x45 | 0x47 if sb16 => {
+                if let Some(t) = &mut self.transfer
+                    && t.auto_init
+                    && t.bits16 == (cmd == 0x47)
+                {
+                    t.last_block = false;
+                }
+            }
             0xE0 => self.read_buf.push_back(!self.params[0]),
+            // DMA identification: a byte made from the parameter and the
+            // calls before goes to memory on the 8-bit DMA channel.
+            // Creative's CT-VOICE.DRV has the answers overwrite an entry
+            // of its own function table, so only a card that answers like
+            // Creative's leaves it a working play routine.
+            0xE2 => {
+                let add = &E2_ADD[(self.e2_count % 4) as usize];
+                let mut value = self.e2_value as i16;
+                for (bit, step) in add[..8].iter().enumerate() {
+                    if self.params[0] >> bit & 1 != 0 {
+                        value += step;
+                    }
+                }
+                self.e2_value = (value + add[8]) as u8;
+                self.e2_count = self.e2_count.wrapping_add(1);
+                self.e2_pending = Some(self.e2_value);
+            }
             0xE1 => {
                 let (major, minor) = self.config.model.dsp_version();
                 self.read_buf.push_back(major);
@@ -784,7 +927,8 @@ impl SoundBlaster {
             // The SB16's ASP socket, empty, as Windows' driver probes it:
             // the mode (04h), a codec parameter (05h), the chip's version
             // (08h 03h: none, FFh as a card without one says) and its
-            // registers (0Eh, 0Fh). DOSBox-X's sblaster.cpp answers the same.
+            // registers (0Eh, 0Fh), which keep nothing written to them.
+            // DOSBox-X's sblaster.cpp answers the same.
             0x04 if sb16 => self.asp_mode = self.params[0],
             0x04 => self.read_buf.push_back(if self.config.model == SbModel::Sb2 { 0x88 } else { 0x7B }),
             0x05 if sb16 => {}
@@ -793,7 +937,7 @@ impl SoundBlaster {
                     self.read_buf.push_back(0xFF);
                 }
             }
-            0x0E if sb16 => self.asp_regs[self.params[0] as usize] = self.params[1],
+            0x0E if sb16 => {}
             0x0F if sb16 => self.read_buf.push_back(self.asp_regs[self.params[0] as usize]),
             // The 8051's memory.
             0xF9 if sb16 => self.read_buf.push_back(self.mem8051[self.params[0] as usize]),
@@ -811,7 +955,9 @@ rust_dos_savestate::state_fields!(SoundBlaster {
     block_size, transfer, silence, irq8, irq16, last_ticks, frac, dac, out, out_rate, pending_left,
     mixer_index, mixer, asp_mode, asp_regs, mem8051, irq, dma8, dma16,
 } skip {
-    config,
+    // E2h's state isn't kept, so states saved before it load: the bus
+    // starts its sequence over after a load (restart_dma_identification).
+    config, e2_value, e2_count, e2_pending,
 });
 
 #[cfg(test)]
@@ -835,6 +981,35 @@ mod tests {
         sb.write(0xC, 0xD0, &mut log);
         sb.write(0xC, 0xD0, &mut log);
         assert_eq!(log.len(), 2, "{:?}", log);
+    }
+
+    #[test]
+    fn sb16_answers_windows_98s_probes_as_a_card_without_an_asp() {
+        let mut sb = SoundBlaster::new(SbConfig::default());
+        let mut log = Vec::new();
+        let mut asp_reg = |sb: &mut SoundBlaster, reg: u8| {
+            for byte in [0x0F, reg] {
+                sb.write(0xC, byte, &mut log);
+            }
+            sb.read(0xA)
+        };
+        // SB16.VXD writes ASP register 05h, reads it back, and wants F8h in 09h.
+        for byte in [0x0E, 0x05, 0x03] {
+            sb.write(0xC, byte, &mut Vec::new());
+        }
+        assert_eq!(asp_reg(&mut sb, 0x05), 0x01, "an empty socket keeps nothing");
+        assert_eq!(asp_reg(&mut sb, 0x09), 0xF8);
+        // ... and its 8051's memory at 0Eh.
+        for byte in [0xF9, 0x0E] {
+            sb.write(0xC, byte, &mut Vec::new());
+        }
+        assert_eq!(sb.read(0xA), 0xFF);
+        // Mixer registers the CT1745 lacks read 0Ah, whatever was written.
+        for (reg, kept) in [(0x90, false), (0xFF, false), (0x30, true)] {
+            sb.write(0x4, reg, &mut Vec::new());
+            sb.write(0x5, 0x18, &mut Vec::new());
+            assert_eq!(sb.read(0x5) == 0x18, kept, "mixer register {:02X}h", reg);
+        }
     }
 
     #[test]

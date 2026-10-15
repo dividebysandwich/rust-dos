@@ -9,6 +9,8 @@ pub type Inputs = &'static [(Control, &'static str, &'static str)];
 #[derive(Clone, Copy)]
 pub enum Control {
     Aim,
+    /// Where the hand holds the controller, which takes things.
+    Grip,
     Select,
     Squeeze,
     Stick,
@@ -24,12 +26,14 @@ pub enum Control {
 pub const PROFILES: &[(&str, Inputs)] = &[
     (
         "/interaction_profiles/khr/simple_controller",
-        &[(Control::Aim, "", "aim/pose"), (Control::Select, "", "select/click"), (Control::Menu, "", "menu/click")],
+        &[(Control::Aim, "", "aim/pose"),
+            (Control::Grip, "", "grip/pose"), (Control::Select, "", "select/click"), (Control::Menu, "", "menu/click")],
     ),
     (
         "/interaction_profiles/valve/index_controller",
         &[
             (Control::Aim, "", "aim/pose"),
+            (Control::Grip, "", "grip/pose"),
             (Control::Select, "", "trigger/click"),
             (Control::Squeeze, "", "squeeze/value"),
             (Control::Stick, "", "thumbstick"),
@@ -42,6 +46,7 @@ pub const PROFILES: &[(&str, Inputs)] = &[
         "/interaction_profiles/oculus/touch_controller",
         &[
             (Control::Aim, "", "aim/pose"),
+            (Control::Grip, "", "grip/pose"),
             (Control::Select, "", "trigger/value"),
             (Control::Squeeze, "", "squeeze/value"),
             (Control::Stick, "", "thumbstick"),
@@ -56,6 +61,7 @@ pub const PROFILES: &[(&str, Inputs)] = &[
         "/interaction_profiles/htc/vive_controller",
         &[
             (Control::Aim, "", "aim/pose"),
+            (Control::Grip, "", "grip/pose"),
             (Control::Select, "", "trigger/click"),
             (Control::Squeeze, "", "squeeze/click"),
             (Control::Stick, "", "trackpad"),
@@ -66,6 +72,7 @@ pub const PROFILES: &[(&str, Inputs)] = &[
         "/interaction_profiles/microsoft/motion_controller",
         &[
             (Control::Aim, "", "aim/pose"),
+            (Control::Grip, "", "grip/pose"),
             (Control::Select, "", "trigger/value"),
             (Control::Squeeze, "", "squeeze/click"),
             (Control::Stick, "", "thumbstick"),
@@ -78,7 +85,8 @@ pub const PROFILES: &[(&str, Inputs)] = &[
 /// points, pinching clicks, grabbing is the second button.
 pub const HAND_PROFILE: (&str, Inputs) = (
     "/interaction_profiles/ext/hand_interaction_ext",
-    &[(Control::Aim, "", "aim/pose"), (Control::Select, "", "aim_activate_ext/value"), (Control::Squeeze, "", "grasp_ext/value")],
+    &[(Control::Aim, "", "aim/pose"),
+            (Control::Grip, "", "grip/pose"), (Control::Select, "", "aim_activate_ext/value"), (Control::Squeeze, "", "grasp_ext/value")],
 );
 
 /// The profiles to suggest bindings for: the hands' too if the runtime's

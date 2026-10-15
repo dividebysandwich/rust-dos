@@ -60,7 +60,7 @@ pub fn looked_for(cpu: &mut crate::cpu::Cpu, path: &str) {
         return;
     }
     let psp = cpu.current_psp;
-    if std::mem::replace(&mut cpu.bus.glide_hint, Some(psp)) == Some(psp) {
+    if cpu.bus.glide_hint.replace(psp) == Some(psp) {
         return;
     }
     let (title, detail) = if cpu.bus.voodoo.is_none() {

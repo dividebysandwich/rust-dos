@@ -13,6 +13,8 @@ of their own. See the [README](README.md) for everything else.
 * [Game profiles](#game-profiles) and [RetroAchievements](#retroachievements)
 * [Mounting drives](#mounting-drives), [disk images](#disk-images) and
   [disk speed and noises](#disk-speed-and-noises)
+* [Networking at a glance](#networking-at-a-glance): what the IPX driver,
+  rooms, relays and the network card each do
 * [Playing over a LAN](#playing-over-a-lan), [serial and modem
   games](#serial-and-modem-games) and [a relay on a
   server](#a-relay-on-a-server)
@@ -143,15 +145,51 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   the least `auto` goes down to, 10000. `max` runs everything as fast as
   the host keeps up with in real time. Use a number such as `3000` for a
   fixed speed. `--cycles` overrides it.
+* `auto_fps` is the frame rate `cycles=auto` aims for: `auto`, the
+  default, is the display's refresh rate (the 3dfx card's while it
+  shows), and a number from 10 to 240 takes its place. A lower one, such
+  as `30`, gives a game that would draw faster only the speed for that
+  many frames a second; a higher one lets a game go past the display's
+  rate. It applies at once, and the search for the speed starts over.
 * `cpu` is the emulated processor: `486` (the default, a 486DX with FPU),
   `386`, or `pentium`, a Pentium as DOSBox-X has one: CPUID (a
   GenuineIntel family 5), the time stamp counter, which counts the
-  instructions and so runs at the `cycles` speed, its MSRs, CMPXCHG8B and
-  4 MB pages, without the virtual-8086 mode extensions; or `pentium_mmx`,
+  instructions and so runs at a fixed `cycles` speed (at `max` and
+  `auto`, whose speed changes as they run, it runs at a clock rate of the
+  model's own: 200 MHz on a Pentium or Pentium Pro, 233 on a Pentium MMX,
+  450 on a Pentium II, 550 on a K6-2 and 600 on a Pentium III, so that
+  programs which time with it, such as 3DMark 2000, measure right), its
+  MSRs, CMPXCHG8B and 4 MB pages, without the virtual-8086 mode extensions; `pentium_mmx`,
   that Pentium with MMX (CPUID family 5, model 4), whose eight MM
-  registers are the FPU's. A DOSBox configuration's `cputype` of a
-  Pentium or Pentium Pro imports as `pentium`, of a Pentium MMX or later
-  as `pentium_mmx`.
+  registers are the FPU's; `k6_2`, an AMD K6-2 (CPUID AuthenticAMD
+  family 5, model 8, with AMD's extended leaves): the Pentium MMX's with
+  3DNow!, SYSCALL/SYSRET and the K6's MSRs (EFER, STAR, the write
+  handling control and test register 12), without the P6 instructions.
+  Its 3DNow! arithmetic follows AMD's manual: it rounds to nearest, gives
+  a zero below 2^-126 and the largest normal from 2^128, and has no
+  exceptions; PFRCP and PFRSQRT give the exact results rounded to a
+  single where the real one's tables give 14 and 15 bits.
+  `pentium_pro`, a Pentium Pro as DOSBox-X's
+  `ppro_slow` (CPUID family 6, model 1): the Pentium's with CMOVcc,
+  FCMOVcc, FCOMI and FUCOMI, the P6 hinting NOPs and the local APIC base
+  and microcode revision MSRs Windows 98 and ME read, without MMX;
+  `pentium_ii`, a Pentium II as DOSBox-X's (family 6, model 3): the
+  Pentium Pro's with MMX and SYSENTER/SYSEXIT; or `pentium_iii`, a
+  Pentium III (Katmai, family 6, model 7): the Pentium II's with SSE,
+  FXSAVE/FXRSTOR, CR4's OSFXSR and OSXMMEXCPT, the processor serial
+  number (CPUID leaf 3, until MSR 119h switches it off) and the cache
+  descriptors of CPUID leaf 2. Its SSE arithmetic rounds as MXCSR says,
+  flushes to zero, and sets and masks the six exception flags as a
+  Pentium III does: an unmasked one raises #XM, or #UD without
+  OSXMMEXCPT. RCPPS and RSQRTPS give the exact reciprocal rounded to a
+  single, within the precision Intel specifies for them. SSE needs
+  CR4.OSFXSR, which a system that saves the SSE state sets; rust-dos's
+  DPMI host sets it for its clients on a Pentium III. None of them has
+  RDPMC, a local APIC or memory type range registers, as in DOSBox-X. A
+  DOSBox configuration's `cputype` of a Pentium imports as `pentium`, of
+  a Pentium MMX as `pentium_mmx`, of a Pentium Pro as `pentium_pro`, of
+  a Pentium II as `pentium_ii`, and of a Pentium III or DOSBox-X's
+  `experimental` as `pentium_iii`.
 * `core` is what runs the programs' instructions: `auto` (the default)
   runs the interpreter, and the dynamic recompiler for a program from the
   moment it switches to protected mode until it ends, as DOSBox's
@@ -170,7 +208,14 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   sums can differ from a real machine's in the last bits, they are always
   rounded to nearest whatever the control word says, and FXCH keeps only
   the doubles of the registers it exchanges (a value loaded as 80 bits
-  loses its last bits there). Saved states load in either mode.
+  loses its last bits there). Saved states load in either mode. In both,
+  products, quotients, square roots and the transcendental functions are
+  the doubles', so they keep 53 bits of significand where a 387 keeps 64,
+  rounded to nearest whatever the control word says, and the control
+  word's precision field isn't used (a program that sets it to 53 bits,
+  as Win32 programs built with MSVC do, gets close to what a 387
+  gives). Loads, stores, integer conversions, compares and FRNDINT use
+  all 80 bits.
 * `machine` is the display adapter programs find when they look for
   one, and so the graphics they choose: `svga` (the default, a VGA with
   VESA modes up to 1024x768), `svga_s3` (an S3 Trio64 on the PCI bus,
@@ -189,7 +234,11 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   640x200, 60 Hz), `tandy` (a Tandy 1000), `pcjr` (an IBM PCjr) or
   `hercules` (a Hercules Graphics Card on a monochrome monitor: the MDA's
   text and 720x348 graphics, 50 Hz). A change takes effect at the DOS
-  prompt.
+  prompt. A DOSBox configuration's `svga_s3`, DOSBox's default, imports
+  as `svga`, which is what DOS games get from it there; one that boots a
+  hard disk keeps `svga_s3`, as the Windows on the disk was installed
+  with the S3's driver (unless the package's `os` boots another system
+  in its place).
 * With `svga_et4000` programs find a Tseng ET4000AX on the ISA bus, as
   DOS games and Windows 3.x drivers made for it detect it: its KEY
   (3BFh/3D8h), Segment Select (3CDh) with separate read and write banks,
@@ -219,11 +268,14 @@ Mistakes in the file are printed as warnings; the emulator still starts.
 * `voodoo=true` adds a 3dfx Voodoo Graphics card to any of the display
   adapters, for games that draw with Glide (see
   [3dfx Voodoo Graphics](#3dfx-voodoo-graphics)); `false` is the default.
-  `voodoo_memory` is `12` (the default: 4 MB of frame buffer and two
-  texture units with 4 MB each, as DOSBox-X's card has) or `4` (a retail
-  board: 2 MB and one texture unit with 2 MB). Both take effect at the DOS
-  prompt. `voodoo_texture_sampling` is `default` (preserves the game's
-  filtering) or `unfiltered` (nearest-neighbour sampling). With supported
+  `voodoo_model` is `voodoo1` (the Voodoo Graphics, the default) or
+  `voodoo2` (see [3dfx Voodoo2](#3dfx-voodoo2)). `voodoo_memory` is `12`
+  (the default: 4 MB of frame buffer and two texture units with 4 MB each,
+  as DOSBox-X's card has), `8` (a Voodoo2 board: 4 MB and two texture
+  units with 2 MB each; it picks `voodoo2` when `voodoo_model` is unset) or
+  `4` (a retail Voodoo Graphics: 2 MB and one texture unit with 2 MB; a
+  Voodoo2 takes it as `8`). All three take effect at the DOS prompt.
+  `voodoo_texture_sampling` is `default` (preserves the game's filtering) or `unfiltered` (nearest-neighbour sampling). With supported
   OpenGL anisotropy enabled, `unfiltered` also blends between mip levels
   and allows anisotropic filtering to reduce shimmer, which may soften
   textures; magnification stays nearest-neighbour. With anisotropy off,
@@ -276,7 +328,8 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   a recording stops at 1 GB.
 * `memsize` is the RAM in MB (default 16), from 2 to as much as
   motherboards took for the `cpu`: 64 MB for a 386, 128 MB for a 486,
-  256 MB for a Pentium and 512 MB for a Pentium MMX. More than the CPU
+  256 MB for a Pentium and 512 MB for a Pentium MMX, K6-2, Pentium Pro,
+  Pentium II or Pentium III. More than the CPU
   takes is warned about and cut to its most. Memory above the first
   megabyte is extended memory for DOS extenders and XMS; XMS 3.0's 32-bit
   functions and INT 15h E801h/E820h report all of it, HIMEM's older calls
@@ -343,6 +396,16 @@ Mistakes in the file are printed as warnings; the emulator still starts.
 * `mouse_capture_messages` says over the picture when the mouse is
   captured (and that Ctrl+Alt lets it go) or let go: `true` (the default)
   or `false`.
+* `mouse_menu_hold` opens the settings window when the right mouse button
+  is held for 1.5 seconds without moving the mouse, for a TV or a remote
+  with no F12 or no keyboard at all: `true` (the default) or `false`. The
+  program sees the press, and a release as the window opens; moving the
+  mouse while holding the button keeps it an ordinary press. Turn it off
+  for a game that has you hold the right button still.
+* `pause_in_settings` pauses the program while the settings window is
+  open (but for the Mixer and Stats pages): `true` (the default) or
+  `false`, to let it run on behind the window. In a LAN room it always
+  runs on.
 * `version_check` asks rust-dos.com at startup whether a newer version
   is out (`https://rust-dos.com/version.json`); one that is shows in a
   notification over the picture and in a line under the box above the
@@ -390,10 +453,19 @@ Mistakes in the file are printed as warnings; the emulator still starts.
 
 ### `[sound]`
 
-* `sbtype` is the Sound Blaster: `sb16` (the default), `awe32`, `sbpro2`,
-  `sb2` or `none`. `sbbase` (hex), `irq`, `dma` and `hdma` (the SB16's
-  and AWE32's 16-bit channel) set its resources; the defaults are 220, 7,
-  1 and 5. The `BLASTER` environment variable follows them.
+* `sbtype` is the Sound Blaster: `sb16` (the default), `sb16vibra`,
+  `awe32`, `sbpro2`, `sb2` or `none`. `sbbase` (hex), `irq`, `dma` and
+  `hdma` (the SB16's and AWE32's 16-bit channel) set its resources; the
+  defaults are 220, 7, 1 and 5. The `BLASTER` environment variable follows
+  them.
+* `sb16vibra` is an SB16 as Creative's ViBRA16C (CTL0070, DSP 4.13), an
+  ISA Plug and Play card, as DOSBox-X's `sbtype=sb16vibra` is. The BIOS
+  leaves it configured at the resources above, so DOS programs find it as
+  they find an SB16. Windows 95 finds it as a Plug and Play device
+  ("Creative ViBRA16C PnP", with its audio device CTL0001 and its game
+  port CTL7001) and gives it the resources it picks: the card's ports,
+  IRQ and DMA channels move there. The MPU-401 stays at 330h, the OPL3 at
+  388h and the game port at 201h whatever Windows gives those parts.
 * `awe32` is an SB16 with the AWE32's EMU8000 wavetable synthesizer at the
   base + 400h, 800h and C00h (620h, A20h and E20h), as games with AWE32
   music drivers expect it; `BLASTER` gets its `E620`. The card starts as
@@ -478,6 +550,18 @@ Mistakes in the file are printed as warnings; the emulator still starts.
 * `tandy` is the Tandy 1000's and PCjr's sound chip at port C0h, three
   square waves and noise: `auto` (the default) on those machines, `on`
   on any (for games that play Tandy sound with VGA graphics), or `off`.
+* `pit2_gate_at_start=true` starts PIT channel 2, the PC speaker's
+  timer, with its gate (port 61h bit 0) high and its count running in
+  mode 3 from FFFFh, with the speaker silent. The default, `false`, starts
+  it with the gate low and the count stopped, as on a real PC, whose BIOS
+  clears port 61h bits 0 and 1 after the POST beep, and as in DOSBox and
+  86Box. Bao Xiao San Guo Zhi (SANGO.EXE) needs `true`: it reads its
+  random numbers from the channel without setting it up or raising the
+  gate, so with the gate low every roll is the same. DOSBox-X's
+  `pcspeaker clock gate enable at startup` is the same setting and
+  imports as this one. Put it in the game's
+  [profile](#game-profiles) to have it for that game only. A change takes
+  effect at the DOS prompt.
 * `hard_disk_noise` and `floppy_disk_noise` add the drives' noises; see
   [Disk speed and noises](#disk-speed-and-noises).
 
@@ -488,7 +572,8 @@ PC speaker and the prompt's beeps), `sb` (the Sound Blaster's digital
 audio), `fm` (the FM synthesizer), `gus`, `midi`, `cdaudio`, `disknoise`,
 `lptdac` (the Covox or Disney Sound Source), `tandy` (the Tandy's and
 PCjr's sound chip), `awe32` (the AWE32's wavetable synthesizer) and
-`monitor` (the [monitor's effects](#emulator)), and `master` for all of
+`monitor` (the [monitor's effects](#emulator)), `modem` (the [modem's
+speaker](#serial-and-modem-games)), and `master` for all of
 them together. At 100, the
 default, a source plays as loud as its card makes it. The volumes apply on
 top of the Sound Blaster's own mixer, which programs set.
@@ -794,6 +879,16 @@ The picture on a screen in a 3D scene (see [3D scene and VR](#3d-scene-and-vr)).
   (`VK_LAYER_VALVE_fdm_injection`), which reach OpenGL through Zink. It does
   nothing elsewhere. While it is on, `resolution=auto` draws all of the eye
   images. It takes effect at the next start.
+* `keyboard`: shows the real keyboard (and the hands on it) through the
+  scene with the headset's cameras, in a soft-edged window on the desk:
+  `off` (the default), `auto` (below the screen, then where the fingers press
+  keys while the hands are tracked) or `marked` (where it was marked with a
+  controller from the settings window's VR page). It needs passthrough the
+  program can use: OpenXR's alpha-blended environment (the Steam Frame
+  running Rust-DOS itself, Varjo XR headsets) or `XR_FB_passthrough` (a
+  Quest through Link). The places found and marked are kept in
+  `vr-keyboard.txt` in Rust-DOS's folder. Turning it on or off starts the
+  headset again.
 * `refresh`: the headset's refresh rate in Hz, the runtime's nearest to
   it, or `auto` (the default: the runtime's own, or on a standalone headset
   the lowest from 72 Hz, for more time for each frame). Only where the
@@ -837,10 +932,12 @@ devices and the resident programs start over, and the screen is cleared.
 
 ## Settings window
 
-Press **Ctrl+F12**, or type `DOSCONFIG` at the DOS prompt, to open the
+Press **Ctrl+F12**, type `DOSCONFIG` at the DOS prompt, or hold the right
+mouse button still for 1.5 seconds (`mouse_menu_hold`) to open the
 settings window over the running program. The program pauses while it is
 open, except on the Mixer page, where it plays on so you hear the volumes
-as you set them, and the Stats page, which shows it running. Ctrl+F12 or
+as you set them, and the Stats page, which shows it running; with
+`pause_in_settings` off, or in a LAN room, it never pauses. Ctrl+F12 or
 Esc closes it.
 
 * **Drives:** mount a host directory, a zip or 7z archive, or a disk or
@@ -1427,6 +1524,23 @@ The first start of a Windows installed without the IDE controller finds it
 as new hardware and asks to restart; after that, **System Properties** →
 **Performance** shows the hard disk without "MS-DOS compatibility mode".
 
+Booted systems have a floppy controller enabled by default for images
+mounted as A: and B: (or disks 0 and 1). Their own floppy drivers can read
+and write those images directly. Changing a disk with Ctrl+F4 or
+`IMGMOUNT` signals a disk change to the guest system. The built-in DOS
+continues to access floppy images through INT 13h.
+
+The first start of a Windows installed without the floppy controller finds
+it as new hardware (**Standard Floppy Disk Controller**) and may ask to
+restart; after that, **System Properties** → **Performance** no longer lists
+A: and B: as using "MS-DOS compatibility mode". If it doesn't find it, run
+**Control Panel** → **Add New Hardware** and let it detect the hardware.
+
+Set `floppy_controller=false` in `[emulator]` to disable the controller
+and leave floppy access to the BIOS (INT 13h). The controller uses ports
+3F0h–3F5h and 3F7h, IRQ 6 and DMA channel 2. Transfers without DMA are
+not supported.
+
 ### Operating systems by name
 
 Hard disk images of installed systems in the `os` folder of rust-dos's
@@ -1535,7 +1649,9 @@ no program runs (over a booted system, it starts over from that disk).
 prompt without booting.
 
 Turning the machine off (Windows' **Shut Down**) brings back the DOS prompt;
-restarting (Ctrl+Alt+Del, or Windows' **Restart**) boots the disk again.
+restarting (Ctrl+Alt+Del, or Windows' **Restart**) boots the disk again. A
+system booted from a floppy starts from the first hard disk when the floppy
+drive is empty by then, as a PC that boots from A: and then C: does.
 Changes to the hardware settings wait for the prompt.
 
 What the system writes goes into the image, so try things on a copy (on
@@ -1560,6 +1676,16 @@ machine=svga_s3
 memsize=64
 ```
 
+A DOSBox-X configuration's `IMGMOUNT` and `BOOT` lines work as they are,
+such as these, which mount the Windows image by number and a CD on the
+secondary IDE channel:
+
+```
+imgmount 2 win95.img -size 512,63,16,520 -t hdd -fs none
+imgmount D game.iso -t cdrom -fs iso -ide 2m
+boot -l c
+```
+
 The S3 driver shows the desktop up to 1024x768 in 32 bits per pixel with
 its accelerated drawing and hardware cursor; the Sound Blaster 16 plays
 Windows' sounds and FM music; the PS/2 mouse and APM work (Shut Down turns
@@ -1567,6 +1693,81 @@ the machine off). MS-DOS Prompts run in a window or full screen
 (Alt+Enter), and **Restart in MS-DOS mode** works. Windows keeps the
 hardware it was installed on in its registry, so an image installed on
 other hardware may look for devices this machine hasn't.
+
+Windows 95, OSR2 included, is the system the booted machine was built and
+tried with, and Windows 98 SE runs too (see below). Windows 98 First Edition
+and ME have no recorded run, so try them on a copy of the image. The machine
+has APM and no ACPI, and its Sound Blaster
+is a legacy card that Windows finds at the resources [`[sound]`](#sound)
+gives it (DOSBox-X's `sbtype=sb16vibra` is an ISA Plug and Play card).
+`memsize` is capped by the CPU, at most 512 MB with `cpu=pentium_mmx` (see
+[`[emulator]`](#emulator)).
+
+### Windows 98
+
+Windows 98 SE runs on the same machine, with a Pentium Pro or Pentium II
+for its processor support:
+
+```ini
+[emulator]
+machine=svga_s3
+cpu=pentium_ii
+memsize=128
+```
+
+An image installed in DOSBox-X (archive.org has such packs, with their
+`dosbox.conf`) starts as it is, imported as a game or mounted by hand, and
+one installed in another emulator, 86Box say, as well. Windows finds this
+machine's IDE and floppy controllers as new hardware at its first start and
+asks to restart; an image installed elsewhere also asks for the Windows 98
+CD for its drivers (mount it as a CD-ROM drive, or, where Windows can't read
+it yet, copy its `WIN98` folder to `C:\WIN98` from the built-in DOS and
+give Windows that folder). After that, **System Properties** →
+**Performance** says the system is configured for optimal performance: the
+hard disk and the floppy drives in 32 bits, the Sound Blaster 16 playing,
+the S3 driver up to 1024x768 in 32 bits per pixel, MS-DOS Prompts,
+**Restart in MS-DOS mode**, Shut Down, and save states.
+
+A few things an image may bring with it:
+
+* **All drives in MS-DOS compatibility mode:** Windows switches its IDE
+  driver off for good when it fails once, as it can in other emulators,
+  with the value `NoIDE` in the registry key
+  `HKEY_LOCAL_MACHINE\System\CurrentControlSet\Services\VxD\IOS`.
+  Delete the value with `regedit` and restart.
+* **The network card:** Windows keeps the NE2000's port and interrupt as
+  the image was set up with. Give rust-dos the same ones (`nicbase`,
+  `nicirq` in [`[network]`](#network)), or change the adapter's resources
+  in Device Manager to rust-dos's, and Windows gets its address from the
+  router and reaches the internet.
+
+To install Windows 98 SE on a new disk, make the disk with `MAKEIMG` (a
+partition formatted FAT32, so Setup needn't partition and format it) and
+boot the Windows 98 boot floppy with the CD in the CD-ROM drive:
+
+```
+MAKEIMG win98.img -t hd -size 2000 -fat 32
+```
+
+```ini
+[drives]
+0=win98boot.img floppy
+2=win98.img
+D=win98se.iso cdrom
+
+[autoexec]
+boot -l A
+```
+
+Choose **Start Windows 98 Setup from CD-ROM**. When Setup offers to make a
+startup disk, cancel it and unmount drive 0 (the settings window's Drives
+page, or the debug server): its restarts then start from the hard disk.
+The installation takes about a quarter of an hour at full speed, and ends
+on the desktop with everything above working. An empty disk image works
+too: partition it with the floppy's FDISK (with the partition active),
+restart and format it with FORMAT, then run Setup from the CD (`OEMSETUP`
+in `D:\WIN98` on an OEM CD). An OEM boot floppy lacks FORMAT.COM, which
+`A:\EXTRACT /L A:\ A:\EBD.CAB FORMAT.COM` puts on the floppy.
 
 ### Direct3D on an S3 ViRGE
 
@@ -1635,6 +1836,15 @@ card's gamma table, which games set brighter than DOSBox-X shows them.
   `fxmemmap.vxd`). SubCulture's 3dfx version installs from its CD in the
   [CD-ROM drive](#booting-a-disk-image) and plays with its CD music, with
   `machine=svga_s3`, `memsize=64` and `cpu=pentium`.
+* **Windows 98 SE** finds the card at its next start as a "3Dfx Voodoo"
+  and installs its own driver for it from the Windows 98 CD, asking for the
+  CD's `WIN98` folder (give it the drive letter the CD has in this
+  machine), without a restart. The driver gives DirectDraw and Direct3D the
+  Voodoo as a second device beside the 2D card, and Direct3D games that let
+  you choose the 3D card draw on it: Expendable does with
+  `DisplayDriver [1]` in its `config.txt`, with `machine=svga_s3virge`,
+  `cpu=pentium_ii` and `memsize=128`. While a game draws on the card,
+  `video.voodoo.output` in the debug server's `/api/status` is true.
 
 The card swaps its buffers at the vertical retrace a game asks it to wait
 for, and reports the swaps still waiting and its busy state as the real
@@ -1643,6 +1853,43 @@ triangles are drawn on up to four threads of their own: rust-dos keeps
 running the game meanwhile, and the picture is the same however many
 there are. Save states and rewind keep the card with everything in its
 memory.
+
+### 3dfx Voodoo2
+
+`voodoo_model=voodoo2` makes the card a Voodoo2 (device 0002h), with
+`voodoo_memory=8` or `12`:
+
+```ini
+[emulator]
+voodoo=true
+voodoo_model=voodoo2
+voodoo_memory=12
+```
+
+Besides what the Voodoo Graphics does, it has the Voodoo2's command FIFO
+(the packets its drivers send through memory instead of register writes),
+its triangle setup engine (vertices in, triangles drawn), its 2D blitter
+(screen to screen, CPU to screen, rectangle fills), the eight-bit
+palettes with alpha (texture format 6), a base address for each mipmap
+level, the wider video fields of its resolutions up to 1024x768, fog
+dithering and the clamping of iterated colours, depth and W (fbzColorPath
+bit 28). The board is SLI-less: one card, as Glide sees a single Voodoo2.
+
+**Windows 98 SE** needs 3dfx's Voodoo2 driver, which neither Windows 98
+nor rust-dos comes with: the Windows 98 CD has drivers for the Voodoo
+Graphics and the Banshee only. Unpack 3dfx's reference driver 3.03.00
+(`rkv2dx6.exe`, which the Internet Archive keeps) into a folder Windows
+can read, such as a [host folder](#host-folders-in-a-booted-system). At
+its next start Windows finds the new PCI device and opens the Add New
+Hardware wizard: choose to search for the best driver, tick
+"Specify a location", give the folder that holds `voodoo2.inf`, and
+restart Windows when it is done. Device Manager then lists a "Voodoo2 3D
+Accelerator", and DirectDraw and Direct3D offer the card as "3dfxV2
+(Voodoo2 DirectX 6 Driver)", which Direct3D games that let you choose the
+3D card draw on.
+
+DOS games that bring the Voodoo2's `GLIDE2X.OVL` or Glide 3 run as on the
+Voodoo Graphics.
 
 `voodoo_fps_cap` caps the frames a second games show on the card, for an
 even pace without lowering `cycles`: a swap waits for the first multiple
@@ -1816,6 +2063,123 @@ How the card draws follows Imagination's own driver sources and simulator
 of the chip, which they released under the MIT licence
 (github.com/powervr-graphics/PowerVR-Series1).
 
+## Networking at a glance
+
+Rust-DOS has two separate pieces of networking, and most people only ever
+need the first one:
+
+| You want to | You need | Setup |
+|---|---|---|
+| Play a DOS game in multiplayer (Doom, Duke Nukem 3D, Warcraft 2, Descent, C&C) | the **IPX driver** and a **room** | join a room, then pick the game's IPX option |
+| Play a serial or modem game with one other player | a **room** | join a room, then pick the game's null modem or modem option |
+| Browse the web, telnet, FTP or IRC from DOS, Windows 3.x or Windows 9x | the **NE2000 network card** | `ne2000=true`, plus a driver in the guest |
+| Play a Windows 9x network game, or share files between two Windows guests | the **NE2000 network card** and a **room** | both of the above |
+
+### The words
+
+* **IPX** is the network protocol most DOS games used for multiplayer on
+  1990s office networks. Games don't care whether there is a real network
+  behind it, only that an IPX driver answers. The built-in DOS has one,
+  so you don't load `IPX.COM`, `IPXODI` or anything else.
+* A **room** is a virtual network cable between rust-dos instances.
+  Everyone in a room is on the same network, as PCs plugged into one hub
+  would be. Instances in different rooms don't see each other. A room has
+  a name (`lobby` unless you choose one) and maybe a password.
+* A **relay** is the program that holds the rooms and passes traffic
+  between their members. Any rust-dos can be one (`LAN HOST`, or *Make
+  room* in the settings window), and so can `rust-dos-relay` on a server.
+  The public relay at `relay.rust-dos.com` is one that anyone can use.
+  If you have used DOSBox, the relay does what an `IPXNET` server does,
+  but the protocol is different: DOSBox and rust-dos can't play together.
+* The **NE2000** is an emulated network card, a real piece of hardware
+  that guest systems need a driver for. A system you boot from a disk
+  image (Windows 95, Windows 98, a DOS with its own network setup) only
+  sees a network through this card, never through the built-in IPX
+  driver.
+* The **router** is a small home router built into each rust-dos. It
+  sits between the NE2000 and your computer's own internet connection.
+
+### What the relay does and doesn't do
+
+The relay only passes network packets (Ethernet frames) between the
+members of a room, the way a network switch does. It doesn't hand out IP
+addresses, it isn't a name server, and it doesn't connect anybody to the
+internet. Your internet traffic never goes through it.
+
+All of that is the job of the router in your own rust-dos:
+
+```text
+  guest system (Windows 95, DOS with mTCP, ...)
+        |
+    NE2000 card ─────┬────────────── room on a relay ─── other players' instances
+        |            |               (LAN traffic only)
+  IPX driver ────────┘
+  (built-in DOS)
+        |
+  router in this rust-dos:  DHCP  10.0.2.15 for the guest
+        |                   DNS   10.0.2.3, asks your computer's resolver
+        |                   NAT   the guest's connections become your computer's
+        v
+  your computer's internet connection
+```
+
+* **DHCP:** the router gives the guest its address: 10.0.2.15, with the
+  router at 10.0.2.2 and the name server at 10.0.2.3. Leave the guest's
+  network settings on "obtain an address automatically" (DHCP or BOOTP).
+  In a room, each instance's router hands out a different address
+  (10.0.2.20 plus the member number), so guests in one room don't clash.
+* **DNS:** the router's name server looks names up with your computer's
+  own resolver, so whatever names your computer finds, the guest finds.
+* **NAT:** the guest's TCP connections and UDP packets are made by
+  rust-dos as ordinary connections of your computer. No administrator
+  rights, network bridge or TAP device are needed. 10.0.2.2 stands for
+  your computer itself: a web server on your computer's port 8080 is
+  `http://10.0.2.2:8080/` in the guest.
+
+What the router doesn't do:
+
+* **No incoming connections from the internet:** nothing outside can
+  connect to a server in the guest, and there are no port forwards.
+  (Players in the same room can connect to each other's guests, since
+  they are on the same LAN.)
+* **No ping to the internet:** only the router's own addresses (10.0.2.2
+  and 10.0.2.3) answer pings. A ping to a web site getting no reply
+  doesn't mean the internet is down; try a browser or `HTGET` instead.
+* **IPv4 only**, and name lookups for IPv4 addresses only, which is all
+  programs of the time ask for.
+* **Modern HTTPS doesn't work** in browsers of the time, which is a
+  limit of the browsers, not of rust-dos. See [Network card](#network-card).
+
+### Ports and firewalls
+
+Rooms use UDP port 21213. To find rooms on your home network, rust-dos
+broadcasts to that port, so a firewall on the computer that hosts the room
+has to let UDP 21213 in. Joining the public relay only sends from your computer, so
+it works behind a home router without any setup. Hosting a room for
+players elsewhere on the internet (`LAN HOST`, then they `LAN JOIN` your
+address) needs UDP 21213 forwarded to your computer in your router; the
+public relay or `rust-dos-relay` on a server avoids that.
+
+### Which systems can use what
+
+| System | IPX games | Internet (TCP/IP) | LAN with other instances |
+|---|---|---|---|
+| Built-in DOS | built-in IPX driver | NE2000 + packet driver + mTCP or similar | IPX; TCP/IP over the NE2000 |
+| Windows 3.1 started from the built-in DOS | DOS games in a DOS box: no IPX (see below) | NE2000 + packet driver + WINPKT + Trumpet Winsock | TCP/IP over the NE2000 |
+| Windows for Workgroups 3.11 with its own network setup | its own IPX over the NE2000 | its own NE2000 driver and TCP/IP-32 | its own networking over the NE2000 |
+| Windows 95/98 booted from an image | its IPX/SPX protocol over the NE2000 | its NE2000 driver and TCP/IP | its networking over the NE2000 |
+
+The built-in IPX driver belongs to the built-in DOS: inside Windows, and
+in systems booted from a disk image, games need that system's own IPX
+over the NE2000. The steps for each system are under [Network
+card](#network-card).
+
+Tested so far: IPX games between instances (Doom, Heretic, Descent);
+the internet from DOS with mTCP, from Windows 3.11 with Trumpet Winsock
+and Netscape, and from Windows 95 with Internet Explorer. Not tested yet:
+Windows 95's IPX against the built-in IPX driver, two Windows guests on
+one LAN, and Windows for Workgroups' own TCP/IP-32. Reports are welcome.
+
 ## Playing over a LAN
 
 rust-dos instances on different computers play DOS games over IPX as PCs
@@ -1922,8 +2286,18 @@ default; set the game up for that port, at any speed.
   settings window's *Modem phonebook* (Serial page) lists them, fetches
   more from rust-dos.com when you ask it to, and copies the command that
   dials one. Numbers of your own go in [`[phonebook]`](#phonebook).
+* **A call sounds and takes as long as a real one:** the modem's speaker
+  plays the dial tone, the number as touch tones (`ATDT`) or pulse clicks
+  (`ATDP`), the other end ringing, and a real modem's handshake, about 25
+  seconds in all; CONNECT comes when the handshake ends. A host on the
+  internet dials a seven-digit number of its own. `ATM0` turns the speaker
+  off, `ATM3` keeps it quiet while dialing, and `ATL0`..`ATL3` set its
+  volume; the call takes as long either way. `modem` in
+  [`[mixer]`](#mixer) is its volume in the mix. A key during the dialing
+  or the handshake ends the call.
 * The modem knows the usual commands: `ATZ`, `AT&F`, `ATE`, `ATV`, `ATQ`,
-  `ATH`, `ATA`, `ATO`, `ATD`, `ATI`, `ATS0=`..`ATS15=` and `ATSn?`,
+  `ATH`, `ATA`, `ATO`, `ATD`, `ATP`, `ATT`, `ATL`, `ATM`, `ATI`,
+  `ATS0=`..`ATS15=` and `ATSn?`,
   `A/`, and the escape `+++` with a second's pause before and after; it
   answers the settings of error correction and compression with OK.
 * The link is reliable and in order over the relay's UDP, and needs a

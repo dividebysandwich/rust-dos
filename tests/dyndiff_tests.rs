@@ -312,7 +312,8 @@ fn save_screen(cpu: &mut Cpu, path: &str) {
 #[ignore]
 fn compute_speed() {
     fix_time();
-    let programs: [(&str, fn(&mut Rig)); 3] = [("crc32", crc32_program), ("sort", sort_program), ("bits", bits_program)];
+    type Program = fn(&mut Rig);
+    let programs: [(&str, Program); 3] = [("crc32", crc32_program), ("sort", sort_program), ("bits", bits_program)];
     for (name, program) in programs {
         let mut a = Rig::new();
         let mut b = Rig::new();

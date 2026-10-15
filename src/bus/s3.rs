@@ -265,6 +265,7 @@ impl Bus {
     /// the AWE32's EMU8000 a word at a time, to anything else a byte at a
     /// time, low byte first.
     pub fn io_write_wide(&mut self, port: u16, value: u32, len: u8) {
+        let _profile = self.profile.as_mut().map(|p| p.port(port, true));
         self.observe.opaque();
         // A booted system's IDE data ports, a word at a time.
         if let Some(id) = self.ide_data_port(port) {
@@ -300,11 +301,21 @@ impl Bus {
             return;
         }
         for i in 0..len {
-            self.io_write(port.wrapping_add(i as u16), (value >> (8 * i)) as u8);
+            let p = port.wrapping_add(i as u16);
+            // The reset control register at CF9h takes bytes: a word or
+            // doubleword covering it leaves it alone. (Memtest86+ and Linux
+            // probe for PCI by writing back what a doubleword read of CF8h
+            // gave, FFFFFFFFh on a machine without a PCI bus.)
+            if p == 0xCF9 {
+                self.log_port(p, value >> (8 * i) & 0xFF, 1, true);
+                continue;
+            }
+            self.io_write(p, (value >> (8 * i)) as u8);
         }
     }
 
     pub fn io_read_wide(&mut self, port: u16, len: u8) -> u32 {
+        let _profile = self.profile.as_mut().map(|p| p.port(port, false));
         self.observe.opaque();
         if let Some(id) = self.ide_data_port(port) {
             return self.ide_read_wide(id, len);
@@ -336,21 +347,6 @@ impl Bus {
             value |= (self.io_read(port.wrapping_add(i as u16)) as u32) << (8 * i);
         }
         value
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_engine_s_ports_are_the_xxe8_family() {
-        for port in [0x42E8, 0x46E8, 0x4AE8, 0x82E8, 0x9AE8, 0x9AE9, 0xBEE8, 0xE2E8, 0xE2EA] {
-            assert!(is_engine_port(port), "{:04X}", port);
-        }
-        for port in [0x02E8, 0x03E8, 0x3D4, 0x1E8, 0xC2E8, 0x82EC] {
-            assert!(!is_engine_port(port), "{:04X}", port);
-        }
     }
 }
 
@@ -445,5 +441,20 @@ impl Bus {
         self.vbe.bank = bank;
         self.vbe.start_high = start_high;
         self.s3_settle();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_engine_s_ports_are_the_xxe8_family() {
+        for port in [0x42E8, 0x46E8, 0x4AE8, 0x82E8, 0x9AE8, 0x9AE9, 0xBEE8, 0xE2E8, 0xE2EA] {
+            assert!(is_engine_port(port), "{:04X}", port);
+        }
+        for port in [0x02E8, 0x03E8, 0x3D4, 0x1E8, 0xC2E8, 0x82EC] {
+            assert!(!is_engine_port(port), "{:04X}", port);
+        }
     }
 }

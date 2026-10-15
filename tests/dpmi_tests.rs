@@ -1062,3 +1062,27 @@ fn a_16_bit_client_calls_the_video_bios_with_selectors() {
 fn a_32_bit_client_calls_the_video_bios_with_selectors() {
     check_video(true);
 }
+
+/// A client that runs SSE instructions in protected mode, then ends with
+/// code 2Ah (1 if it can't become a client).
+fn sse_program() -> Vec<u8> {
+    let main = asm16(0x100, |a| {
+        let mut fail = a.create_label();
+        enter(a, true, fail)?;
+        a.xorps(xmm0, xmm0)?;
+        a.addps(xmm0, xmm0)?;
+        a.movmskps(eax, xmm0)?;
+        exit(a, 0x2A)?;
+        a.set_label(&mut fail)?;
+        exit(a, 1)
+    });
+    com(&[(0x100, main)])
+}
+
+#[test]
+fn a_client_runs_sse_on_a_pentium_iii() {
+    let (mut cpu, psp) = machine("sse", &[("T.COM", sse_program())], "T.COM");
+    cpu.model = rust_dos::cpu::CpuModel::PentiumIII;
+    assert!(run_to_exit(&mut cpu, 2000), "the program didn't end (step {})", word(&cpu, psp, STEP));
+    assert_eq!(cpu.errorlevel, 0x2A);
+}

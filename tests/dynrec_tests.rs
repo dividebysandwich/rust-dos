@@ -740,6 +740,106 @@ fn code_traced_with_tf_takes_a_single_step_trap_after_every_instruction() {
 }
 
 #[test]
+fn popf_at_ring_0_runs_in_translated_code() {
+    // As Windows' VMM saves and restores the flags: the arithmetic flags,
+    // DF, IOPL and IF through POPFD, and the low word through POPF.
+    let (mut a, mut b) = twins(|rig| {
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.xor(ebx, ebx)?;
+            a.mov(ecx, 100u32)?;
+            let mut top = a.create_label();
+            a.set_label(&mut top)?;
+            a.stc()?;
+            a.pushfd()?;
+            a.clc()?;
+            a.popfd()?;
+            a.adc(ebx, 0)?;
+            a.pushfd()?;
+            a.or(dword_ptr(esp), 0x3400)?;
+            a.and(dword_ptr(esp), !0x200)?;
+            a.popfd()?;
+            a.pushfd()?;
+            a.pop(eax)?;
+            a.add(esi, eax)?;
+            a.pushfd()?;
+            a.and(dword_ptr(esp), !0x3401)?;
+            a.or(dword_ptr(esp), 0x200)?;
+            a.popfd()?;
+            a.cmp(ebx, ecx)?;
+            a.pushf()?;
+            a.xor(word_ptr(esp), 0x8C5)?;
+            a.popf()?;
+            a.setb(dl)?;
+            a.add(edi, edx)?;
+            a.dec(ecx)?;
+            a.jnz(top)?;
+            a.pushfd()?;
+            a.pop(ebp)?;
+            a.hlt()
+        }));
+    });
+    let stats = run_both(&mut a, &mut b);
+    assert_eq!(b.cpu.ebx(), 100);
+    assert_eq!(b.cpu.ebp() & 0x3600, 0x0200, "IOPL 0 and IF set at the end");
+    if AVAILABLE {
+        assert_eq!(untranslated(&stats), 0, "{:?}", stats);
+    }
+}
+
+#[test]
+fn popfd_that_sets_if_lets_a_waiting_interrupt_in_after_it() {
+    let (mut a, mut b) = twins(|rig| {
+        with_timer(rig, |a| {
+            a.pushfd()?;
+            a.and(dword_ptr(esp), !0x200)?;
+            a.popfd()?;
+            for _ in 0..20 {
+                a.inc(esi)?;
+            }
+            a.pushfd()?;
+            a.or(dword_ptr(esp), 0x200)?;
+            a.popfd()?;
+            a.inc(ebp)?;
+            a.add(ebx, ebp)
+        });
+    });
+    run_both(&mut a, &mut b);
+    assert!(b.cpu.edi() > 10, "IRQ 0 came {} times", b.cpu.edi());
+}
+
+#[test]
+fn popfd_where_it_cant_load_if_or_loads_id_runs_as_its_handler() {
+    // At ring 3 with IOPL 0, IF and IOPL stay as they were; at ring 0, a
+    // POPFD that flips ID (CPUID's detection, on a Pentium) goes to the
+    // handler too.
+    let (mut a, mut b) = twins(|rig| {
+        rig.cpu.model = rust_dos::cpu::CpuModel::Pentium;
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.pushfd()?;
+            a.xor(dword_ptr(esp), 0x20_0000)?;
+            a.popfd()?;
+            a.pushfd()?;
+            a.pop(esi)?;
+            a.pushfd()?;
+            a.or(dword_ptr(esp), 0x200)?;
+            a.popfd()?;
+            to_ring3(a)
+        }));
+        rig.ring3(|a| {
+            a.pushfd()?;
+            a.xor(dword_ptr(esp), 0x3201)?;
+            a.popfd()?;
+            a.pushfd()?;
+            a.pop(edi)?;
+            a.hlt()
+        });
+    });
+    run_both(&mut a, &mut b);
+    assert_eq!(b.cpu.esi() & 0x20_0000, 0x20_0000, "ID flipped");
+    assert_eq!(b.cpu.edi() & 0x3201, 0x0201, "IF and IOPL kept, CF loaded");
+}
+
+#[test]
 fn jumps_within_a_block_and_out_of_it_keep_the_counts() {
     // The block from LOOP goes on after its conditional jumps: one to a
     // later instruction in it (past two), every other time around, and one
@@ -1679,7 +1779,7 @@ fn indirect_calls_are_translated_and_linked_to_where_they_go() {
         }));
     });
     let stats = run_both(&mut a, &mut b);
-    assert_eq!(b.cpu.ebx(), 500 * 1 + 500 * 100 + 1000 * 100);
+    assert_eq!(b.cpu.ebx(), 500 + 500 * 100 + 1000 * 100);
     if AVAILABLE {
         assert!(stats.runs < 200, "the calls went through the execution loop: {:?}", stats);
     }
@@ -3099,6 +3199,140 @@ fn fpu_sums_of_80_bit_values_run_as_their_handlers() {
 }
 
 #[test]
+fn fpu_sums_of_80_bit_values_round_to_doubles_as_the_handlers_do() {
+    // The sum's double (what FMUL computes with) rounds to nearest on both
+    // cores: the 80 bits of 1 and a bit plus the others leave bits a
+    // double hasn't, which round up or not.
+    let (input, output) = (DATA, DATA + 0x8000);
+    let n = EXTENDED.len() as u32;
+    let (mut a, mut b) = twins(|rig| {
+        for k in 0..n * n {
+            let at = input + 32 * k;
+            for (o, (se, man)) in [(0, EXTENDED[(k % n) as usize]), (16, EXTENDED[(k / n) as usize])] {
+                rig.write32(at + o, man as u32);
+                rig.write32(at + o + 4, (man >> 32) as u32);
+                rig.write32(at + o + 8, se as u32);
+            }
+        }
+        rig.load(CODE, &asm32(CODE, |a| {
+            let mut again = a.create_label();
+            a.fninit()?;
+            a.mov(esi, input)?;
+            a.mov(edi, output)?;
+            a.mov(ecx, n * n)?;
+            a.set_label(&mut again)?;
+            a.fld(tword_ptr(esi + 16))?;
+            a.fld(tword_ptr(esi))?;
+            a.fadd_2(st0, st1)?;
+            a.fld1()?;
+            a.fmulp(st1, st0)?;
+            a.fstp(qword_ptr(edi))?;
+            a.fld(tword_ptr(esi))?;
+            a.fsubr_2(st0, st1)?;
+            a.fld1()?;
+            a.fmulp(st1, st0)?;
+            a.fstp(qword_ptr(edi + 8))?;
+            a.fstp(st0)?;
+            a.add(esi, 32)?;
+            a.add(edi, 16)?;
+            a.dec(ecx)?;
+            a.jnz(again)?;
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    // 1 and a bit plus 0 rounds down to 1; just under 2 plus 0, and plus
+    // 2^-64 * 1.5 (shifted out), round up to 2.
+    let at = |i: usize, j: usize| output + 16 * (j * EXTENDED.len() + i) as u32;
+    let read64 = |rig: &Rig, at: u32| rig.read32(at) as u64 | (rig.read32(at + 4) as u64) << 32;
+    assert_eq!(read64(&b, at(0, 5)), 1f64.to_bits());
+    assert_eq!(read64(&b, at(1, 5)), 2f64.to_bits());
+    assert_eq!(read64(&b, at(1, 4)), 2f64.to_bits());
+}
+
+#[test]
+fn fpu_stores_and_compares_of_80_bit_values_round_once_on_both_cores() {
+    // FIST, FST, FRNDINT and FCOM of 80 bits a double hasn't, under each
+    // rounding: from the 80 bits, not from their double (rounded to
+    // nearest), on both cores.
+    let mut values = EXTENDED.to_vec();
+    values.extend([
+        (0x4000, 0xBFFF_FFFF_FFFF_FFF0), // just under 3
+        (0xC000, 0xBFFF_FFFF_FFFF_FFF0), // just over -3
+        (0x3FFF, 0x8000_017F_FFFF_FFFF), // just under a single's tie
+        (0x3FFE, 0x8000_0000_0000_0001), // just over 0.5
+        (0x4000, 0xA000_0000_0000_0001), // just over 2.5
+    ]);
+    let (input, output, three) = (DATA, DATA + 0x8000, DATA + 0x7FF0);
+    let n = values.len() as u32 * 4;
+    let (mut a, mut b) = twins(|rig| {
+        for (k, (se, man)) in values.iter().enumerate() {
+            for rc in 0..4u32 {
+                let at = input + 16 * (4 * k as u32 + rc);
+                rig.write32(at, *man as u32);
+                rig.write32(at + 4, (man >> 32) as u32);
+                rig.write32(at + 8, *se as u32);
+                rig.write32(at + 12, 0x037F | rc << 10);
+            }
+        }
+        rig.write32(three, 0);
+        rig.write32(three + 4, (3f64.to_bits() >> 32) as u32);
+        rig.load(CODE, &asm32(CODE, |a| {
+            let mut again = a.create_label();
+            a.fninit()?;
+            a.mov(esi, input)?;
+            a.mov(edi, output)?;
+            a.mov(ecx, n)?;
+            a.set_label(&mut again)?;
+            a.fldcw(word_ptr(esi + 12))?;
+            a.fld(qword_ptr(three))?;
+            a.fld(tword_ptr(esi))?;
+            a.fist(dword_ptr(edi))?;
+            a.fist(word_ptr(edi + 4))?;
+            a.fst(dword_ptr(edi + 8))?;
+            a.fst(qword_ptr(edi + 12))?;
+            a.fcom(qword_ptr(three))?;
+            a.fnstsw(ax)?;
+            a.mov(word_ptr(edi + 20), ax)?;
+            a.fcom_2(st0, st1)?;
+            a.fnstsw(ax)?;
+            a.mov(word_ptr(edi + 24), ax)?;
+            a.fld(st0)?;
+            a.frndint()?;
+            a.fstp(qword_ptr(edi + 28))?;
+            a.fistp(dword_ptr(edi + 36))?;
+            a.fstp(st0)?;
+            a.add(esi, 16)?;
+            a.add(edi, 64)?;
+            a.dec(ecx)?;
+            a.jnz(again)?;
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    let k = |se_man: (u16, u64)| values.iter().position(|&v| v == se_man).unwrap() as u32;
+    let at = |k: u32, rc: u32| output + 64 * (4 * k + rc);
+    let read64 = |rig: &Rig, at: u32| rig.read32(at) as u64 | (rig.read32(at + 4) as u64) << 32;
+    let under_3 = k((0x4000, 0xBFFF_FFFF_FFFF_FFF0));
+    // Chopped: 2, which the double (3.0) would have made 3.
+    assert_eq!(b.read32(at(under_3, 3)), 2);
+    assert_eq!(b.read32(at(under_3, 3) + 36), 2);
+    assert_eq!(read64(&b, at(under_3, 3) + 28), 2f64.to_bits());
+    // Below 3 by the 80 bits, though its double is 3: C0 set, C3 clear.
+    assert_eq!(b.read32(at(under_3, 0) + 20) & 0x4500, 0x0100);
+    assert_eq!(b.read32(at(under_3, 0) + 24) & 0x4500, 0x0100);
+    // To nearest, the double 3.0 itself.
+    assert_eq!(read64(&b, at(under_3, 0) + 12), 3f64.to_bits());
+    // A single rounded once: 3F800001h (the double would tie and go even).
+    assert_eq!(b.read32(at(k((0x3FFF, 0x8000_017F_FFFF_FFFF)), 0) + 8), 0x3F80_0001);
+    // Just under 2, chopped to a double: 1.9999999999999998.
+    assert_eq!(read64(&b, at(k((0x3FFF, 0xFFFF_FFFF_FFFF_FFFF)), 3) + 12), 0x3FFF_FFFF_FFFF_FFFF);
+    // Just over 2.5 and 0.5, to nearest: 3 and 1, not ties going even.
+    assert_eq!(b.read32(at(k((0x4000, 0xA000_0000_0000_0001)), 0)), 3);
+    assert_eq!(b.read32(at(k((0x3FFE, 0x8000_0000_0000_0001)), 0)), 1);
+}
+
+#[test]
 fn fpu_sums_in_fast_mode_are_the_doubles_on_both_cores() {
     // The same sums come out otherwise (1 and a bit a double hasn't, ...),
     // and the cores agree on them.
@@ -3365,6 +3599,175 @@ fn fpu_doubles_in_memory_run_as_their_handlers() {
     if AVAILABLE && cfg!(target_arch = "x86_64") {
         assert!(stats.native + 20 > stats.instructions, "handlers ran them: {:?}", stats);
     }
+}
+
+#[test]
+fn fpu_qword_integer_stores_and_fwait_run_as_their_handlers() {
+    // MSVC's _ftol: FWAITs around a chopped FISTP QWORD. The products
+    // reach past 2^63 (1e10 * 1e10) and are NaN (infinity * 0), which the
+    // handler stores.
+    let (_, b, stats) = fpu_loop(|a| {
+        a.wait()?;
+        a.fld(dword_ptr(esi))?;
+        a.fld(dword_ptr(esi + 4))?;
+        a.fld(st1)?;
+        a.fistp(qword_ptr(edi))?;
+        a.wait()?;
+        a.fmul_2(st0, st1)?;
+        a.fld(st0)?;
+        a.fistp(qword_ptr(edi + 8))?;
+        a.fistp(qword_ptr(edi + 16))?;
+        a.fild(dword_ptr(esi + 8))?;
+        a.fmul(dword_ptr(esi))?;
+        a.fistp(qword_ptr(edi + 24))?;
+        a.fistp(qword_ptr(edi + 32))?;
+        // An empty ST(0), for the handler.
+        a.fistp(qword_ptr(edi + 40))?;
+        a.fnstsw(ax)?;
+        a.add(ebx, eax)
+    });
+    assert_ne!(b.read32(DATA + 0x10000), 0);
+    if AVAILABLE && cfg!(target_arch = "x86_64") {
+        // (The FNINIT before the loop.)
+        assert_eq!(untranslated(&stats), 1, "handlers ran them: {:?}", stats);
+    }
+}
+
+#[test]
+fn fpu_qword_integer_stores_round_from_the_80_bits() {
+    // Integers past a double's 53 bits load exactly and store back as they
+    // were; 2^52 + 1/2 rounds as the control word says. Neither is the
+    // register's double, so the handler stores them.
+    const VALUES: [u64; 4] = [(1 << 60) + 1, ((1u64 << 62) + 3).wrapping_neg(), (1 << 53) + 1, (1 << 53) + 3];
+    let (results, controls, half) = (DATA + 0x1000, DATA + 0x100, DATA + 0x120);
+    let (mut a, mut b) = twins(|rig| {
+        for (i, v) in VALUES.iter().enumerate() {
+            rig.write32(DATA + 8 * i as u32, *v as u32);
+            rig.write32(DATA + 8 * i as u32 + 4, (*v >> 32) as u32);
+        }
+        for rc in 0..4 {
+            rig.write32(controls + 4 * rc, 0x037F | rc << 10);
+        }
+        // 2^52 + 1/2 as 80 bits.
+        rig.write32(half, 1 << 10);
+        rig.write32(half + 4, 1 << 31);
+        rig.write32(half + 8, 16383 + 52);
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.fninit()?;
+            a.mov(ecx, 100u32)?;
+            let mut again = a.create_label();
+            a.set_label(&mut again)?;
+            for rc in 0..4u32 {
+                a.fldcw(word_ptr(controls + 4 * rc))?;
+                for i in 0..4u32 {
+                    a.fild(qword_ptr(DATA + 8 * i))?;
+                    a.fistp(qword_ptr(results + 0x40 * rc + 8 * i))?;
+                }
+                a.fld(tword_ptr(half))?;
+                a.fistp(qword_ptr(results + 0x40 * rc + 0x20))?;
+            }
+            a.dec(ecx)?;
+            a.jnz(again)?;
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    let qword = |at: u32| b.read32(at) as u64 | (b.read32(at + 4) as u64) << 32;
+    for rc in 0..4 {
+        for (i, v) in VALUES.iter().enumerate() {
+            assert_eq!(qword(results + 0x40 * rc + 8 * i as u32), *v, "RC {rc}, value {i}");
+        }
+        // Nearest (even), down, up, chop.
+        let rounded = (1u64 << 52) + [0, 0, 1, 0][rc as usize];
+        assert_eq!(qword(results + 0x40 * rc + 0x20), rounded, "RC {rc}");
+    }
+}
+
+#[test]
+fn an_fwait_with_mp_and_ts_set_faults_in_its_block() {
+    const NM: u8 = 7;
+    let (mut a, mut b) = twins(|rig| {
+        rig.record(NM);
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.fninit()?;
+            a.mov(eax, cr0)?;
+            a.or(eax, 0x0A)?; // MP and TS
+            a.mov(cr0, eax)?;
+            a.jmp(CODE as u64 + 0x100)
+        }));
+        rig.load(CODE + 0x100, &asm32(CODE + 0x100, |a| {
+            a.mov(ebx, 1u32)?;
+            a.wait()?;
+            a.mov(ebx, 2u32)?;
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    let (vector, stack) = b.recorded();
+    assert_eq!((vector, stack[0], b.cpu.ebx()), (NM as u32, CODE + 0x105, 1));
+}
+
+#[test]
+fn bswap_runs_as_its_handler() {
+    let (mut a, mut b) = twins(|rig| {
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.mov(eax, 0x1234_5678u32)?;
+            a.mov(esi, 0x8000_00FFu32)?;
+            a.mov(ecx, 100u32)?;
+            let mut again = a.create_label();
+            a.set_label(&mut again)?;
+            a.bswap(eax)?;
+            a.add(eax, ecx)?;
+            a.bswap(esi)?;
+            a.xor(esi, eax)?;
+            a.bswap(ecx)?;
+            a.bswap(ecx)?;
+            a.dec(ecx)?;
+            a.jnz(again)?;
+            a.hlt()
+        }));
+    });
+    let stats = run_both(&mut a, &mut b);
+    assert_ne!(b.cpu.esi(), 0);
+    if AVAILABLE && cfg!(target_arch = "x86_64") {
+        assert_eq!(untranslated(&stats), 0, "handlers ran them: {:?}", stats);
+    }
+}
+
+#[test]
+fn bswap_of_a_word_register_runs_through_its_handler() {
+    // A 486 clears the word; the dword around it stays.
+    let (mut a, mut b) = twins(|rig| {
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.mov(eax, 0x1234_5678u32)?;
+            a.bswap(ax)?;
+            a.bswap(eax)?;
+            a.hlt()
+        }));
+    });
+    let stats = run_both(&mut a, &mut b);
+    assert_eq!(b.cpu.eax(), 0x0000_3412);
+    if AVAILABLE && cfg!(target_arch = "x86_64") {
+        assert_eq!(untranslated(&stats), 1, "handlers ran them: {:?}", stats);
+    }
+}
+
+#[test]
+fn bswap_on_a_386_faults_in_its_block() {
+    const UD: u8 = 6;
+    let (mut a, mut b) = twins(|rig| {
+        rig.cpu.model = rust_dos::cpu::CpuModel::I386;
+        rig.record(UD);
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.mov(ebx, 1u32)?;
+            a.bswap(eax)?;
+            a.mov(ebx, 2u32)?;
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    let (vector, stack) = b.recorded();
+    assert_eq!((vector, stack[0], b.cpu.ebx()), (UD as u32, CODE + 5, 1));
 }
 
 #[test]
@@ -3664,6 +4067,70 @@ fn plain_plane_writes_in_translated_code_are_the_interpreters() {
 }
 
 #[test]
+fn stores_into_the_linear_frame_buffer_are_the_interpreters() {
+    // DirectDraw's own copy loop into a 640x480 16-bit VESA mode's frame
+    // buffer at E0000000h, and stores of each size. The last ones reach
+    // past the end of the video memory (4 MB), which ends on a page
+    // boundary: they cross a page, so translated code takes them through
+    // `jit_write` and the interpreter a byte at a time, and `write_lfb`
+    // never sees them. The display start is in the middle of a row.
+    const LFB: u32 = 0xE000_0000;
+    let (mut a, mut b) = twins(|rig| {
+        rig.cpu.set_ax(0x4F02);
+        rig.cpu.set_reg16(iced_x86::Register::BX, 0x4111);
+        rust_dos::interrupts::int10::handle(&mut rig.cpu);
+        assert_eq!(rig.cpu.ax(), 0x004F, "no VESA mode");
+        rig.cpu.bus.vbe.latched_start = 0x1234;
+        rig.cpu.bus.vga.dirty = false;
+        rig.cpu.bus.vga.dirty_y_min = u32::MAX;
+        rig.cpu.bus.vga.dirty_y_max = 0;
+        for i in 0..0x1000u32 {
+            rig.write32(DATA + 4 * i, i.wrapping_mul(0x0103_0507));
+        }
+        rig.load(CODE, &asm32(CODE, |a| {
+            let mut dword = a.create_label();
+            a.mov(edi, DATA)?;
+            a.mov(esi, LFB + 0x1000)?;
+            a.lea(edx, dword_ptr(esi + 0x4000))?;
+            a.set_label(&mut dword)?;
+            a.mov(eax, dword_ptr(edi))?;
+            a.add(edi, 4)?;
+            a.mov(dword_ptr(esi), eax)?;
+            a.add(esi, 4)?;
+            a.cmp(esi, edx)?;
+            a.jne(dword)?;
+            let mut each = a.create_label();
+            a.mov(ecx, 0x300u32)?;
+            a.set_label(&mut each)?;
+            a.mov(eax, ecx)?;
+            a.imul_3(eax, eax, 0x0301_0507)?;
+            a.mov(byte_ptr(ecx + LFB + 0x9000), al)?;
+            a.mov(word_ptr(ecx * 2 + LFB + 0xA001), ax)?;
+            a.mov(dword_ptr(ecx * 4 + LFB + 0xB003), eax)?;
+            a.add(ebx, dword_ptr(ecx * 4 + LFB + 0xB003))?;
+            a.dec(ecx)?;
+            a.jnz(each)?;
+            a.mov(eax, 0x1122_3344u32)?;
+            a.mov(dword_ptr(LFB + 0x3F_FFFE), eax)?;
+            a.mov(word_ptr(LFB + 0x3F_FFFF), ax)?;
+            a.mov(dword_ptr(LFB + 0x3F_FFFC), eax)?;
+            a.hlt()
+        }));
+    });
+    let stats = run_both(&mut a, &mut b);
+    assert!(b.cpu.bus.vbe.vram[0x1000..0x1010].iter().any(|&x| x != 0));
+    assert_eq!(b.cpu.bus.vbe.vram[0x3F_FFFC..], [0x44, 0x33, 0x22, 0x11]);
+    let shown = |rig: &Rig| {
+        let v = &rig.cpu.bus.vga;
+        (v.dirty, v.dirty_y_min, v.dirty_y_max, rig.cpu.bus.activity.video_bytes)
+    };
+    assert_eq!(shown(&a), shown(&b));
+    if AVAILABLE {
+        assert_eq!(untranslated(&stats), 0, "{:?}", stats);
+    }
+}
+
+#[test]
 fn video_memory_is_written_and_read_by_its_physical_address() {
     let (_, b) = video_memory_program(false);
     assert!(b.cpu.bus.vga.vram_graphics.iter().any(|&p| p != 0));
@@ -3674,6 +4141,112 @@ fn video_memory_is_written_and_read_by_its_physical_address() {
 fn video_memory_is_written_and_read_through_the_tlb() {
     let (_, b) = video_memory_program(true);
     assert!(b.cpu.bus.vga.vram_graphics.iter().any(|&p| p != 0));
+    assert_ne!(b.cpu.ebx(), 0);
+}
+
+/// The host code bytes one copy of `instr` adds to a block: eight copies
+/// in a loop against the empty loop, with paging on or off.
+fn host_bytes(paging: bool, instr: impl Fn(&mut CodeAssembler) -> Result<(), IcedError> + Copy) -> u64 {
+    let run = |copies: usize| {
+        let (mut a, mut b) = twins(|rig| {
+            let (dir, table) = (0x80000u32, 0x81000u32);
+            rig.write32(dir, table | 3);
+            for i in 0..1024u32 {
+                rig.write32(table + 4 * i, (i << 12) | 3);
+            }
+            rig.load(CODE, &asm32(CODE, |a| {
+                if paging {
+                    a.mov(eax, dir)?;
+                    a.mov(cr3, eax)?;
+                    a.mov(eax, cr0)?;
+                    a.or(eax, 0x8000_0000u32)?;
+                    a.mov(cr0, eax)?;
+                }
+                a.mov(esi, DATA)?;
+                a.mov(edi, DATA + 0x100)?;
+                a.xor(edx, edx)?;
+                a.mov(ecx, 4u32)?;
+                a.jmp(CODE as u64 + 0x100)
+            }));
+            rig.load(CODE + 0x100, &asm32(CODE + 0x100, |a| {
+                let mut again = a.create_label();
+                a.set_label(&mut again)?;
+                for _ in 0..copies {
+                    instr(a)?;
+                }
+                a.dec(ecx)?;
+                a.jnz(again)?;
+                a.hlt()
+            }));
+        });
+        run_both(&mut a, &mut b).code_bytes
+    };
+    (run(8) - run(0)) / 8
+}
+
+#[test]
+fn memory_operands_take_little_host_code() {
+    // Each memory operand's slow paths call the trampoline's routines
+    // (`x64::Thunk`) instead of carrying their own copies.
+    if !AVAILABLE || !cfg!(target_arch = "x86_64") {
+        return;
+    }
+    for paging in [false, true] {
+        let load = host_bytes(paging, |a| a.mov(eax, dword_ptr(esi + 4)));
+        let store = host_bytes(paging, |a| a.mov(dword_ptr(edi + 4), eax));
+        let both = host_bytes(paging, |a| a.add(dword_ptr(edi + 8), eax));
+        assert!(load < 220 && store < 280 && both < 450, "paging {paging}: {load}, {store}, {both} bytes");
+    }
+}
+
+#[test]
+fn video_memory_is_written_and_read_from_ring_3_through_the_tlb() {
+    // Ring 3 code, as a Windows game drawing into a frame buffer: the
+    // window at A0000h mapped at linear 300000h on user pages, in chain 4,
+    // with operands that reach into the next page.
+    let (mut a, mut b) = twins(|rig| {
+        let (dir, table) = (0x80000u32, 0x81000u32);
+        rig.write32(dir, table | 7);
+        for i in 0..1024u32 {
+            let page = if (0x300..0x310).contains(&i) { 0xA0 + (i - 0x300) } else { i };
+            rig.write32(table + 4 * i, (page << 12) | 7);
+        }
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.mov(eax, dir)?;
+            a.mov(cr3, eax)?;
+            a.mov(eax, cr0)?;
+            a.or(eax, 0x8000_0000u32)?;
+            a.mov(cr0, eax)?;
+            for (port, index, value) in [(0x3C4u32, 4u32, 0x0Eu32), (0x3C4, 2, 0x0F), (0x3CE, 5, 0x40), (0x3CE, 6, 0x05)] {
+                a.mov(edx, port)?;
+                a.mov(eax, index | value << 8)?;
+                a.out(dx, ax)?;
+            }
+            to_ring3(a)
+        }));
+        rig.ring3(|a| {
+            let mut pixels = a.create_label();
+            a.mov(ax, DATA32_R3 as u32)?;
+            a.mov(ds, ax)?;
+            a.xor(ebx, ebx)?;
+            a.mov(ecx, 0x900u32)?;
+            a.set_label(&mut pixels)?;
+            a.mov(eax, ecx)?;
+            a.imul_3(eax, eax, 0x0103_0507)?;
+            a.mov(byte_ptr(ecx + 0x30_0000), al)?;
+            a.mov(word_ptr(ecx * 2 + 0x30_4001), ax)?;
+            a.mov(dword_ptr(ecx * 4 + 0x30_6FFE), eax)?;
+            a.add(ebx, dword_ptr(ecx * 4 + 0x30_6FFE))?;
+            a.add(bx, word_ptr(ecx + 0x30_0FFF))?;
+            a.add(byte_ptr(ecx + 0x30_8000), bl)?;
+            a.dec(ecx)?;
+            a.jnz(pixels)?;
+            a.hlt()
+        });
+    });
+    run_both(&mut a, &mut b);
+    assert!(b.cpu.bus.vga.vram_graphics.iter().any(|&p| p != 0));
+    assert_eq!(a.cpu.bus.vga.vram_graphics, b.cpu.bus.vga.vram_graphics);
     assert_ne!(b.cpu.ebx(), 0);
 }
 

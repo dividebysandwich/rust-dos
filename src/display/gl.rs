@@ -386,7 +386,7 @@ impl GlScreen {
     pub fn present_voodoo(&mut self, screen: &Frame, base: &Frame, display: (u32, u32)) -> bool {
         let Some(voodoo) = &mut self.voodoo else { return false };
         let Some((texture, size)) = voodoo.composite(&self.gl, screen, base) else { return false };
-        let line = shader::line_scale(Some(voodoo.scale()).filter(|_| self.scale_lines));
+        let line = shader::line_scale(self.scale_lines.then_some(voodoo.scale()));
         // SAFETY: see `GlScreen`.
         unsafe {
             self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));

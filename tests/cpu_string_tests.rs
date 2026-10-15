@@ -101,7 +101,7 @@ fn test_repne_scasb_match_found() {
 
     // Memory: [00, 00, 00, 42, 00 ...]
     let base = cpu.get_physical_addr(0x1000, 0);
-    cpu.bus.write_8(base + 0, 0x00);
+    cpu.bus.write_8(base, 0x00);
     cpu.bus.write_8(base + 1, 0x00);
     cpu.bus.write_8(base + 2, 0x00);
     cpu.bus.write_8(base + 3, 0x42); // Match here (4th byte)

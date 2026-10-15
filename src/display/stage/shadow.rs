@@ -1,11 +1,12 @@
 //! Shadows: how far the nearest surface is, seen from each light and from
 //! the screen, drawn once into the layers of one depth texture, since
-//! nothing that casts a shadow moves. Directional lights see the scene's
+//! nothing that casts a shadow moves (but the sun's layer, drawn again as
+//! the sun goes across the sky). Directional lights see the scene's
 //! focus (`Scene::focus_bounds`) along their direction, narrow spots
 //! through their cone, and points, wide spots and the screen through the
 //! faces of a cube around them.
 
-use super::scene::{LightKind, Scene};
+use super::scene::{Light, LightKind, Scene};
 use glam::{Mat3, Mat4, Vec3};
 
 /// At most this many of the scene's lights cast shadows.
@@ -31,6 +32,7 @@ pub struct Layer {
 /// its position along the axes of `basis` (+x, -x, +y, -y, +z, -z), of
 /// which those not drawn are `None` and never in shadow.
 #[derive(Clone, Debug, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum Caster {
     Single(Layer),
     Cube { basis: Mat3, faces: [Option<Layer>; 6] },
@@ -39,15 +41,36 @@ pub enum Caster {
 /// The shadows' layers for `scene`: those of its first `MAX_SHADOWED`
 /// shadowed lights, by the light's index, and the screen's.
 pub fn plan(scene: &Scene) -> (Vec<(usize, Caster)>, Option<Caster>) {
-    if !scene.shadows {
-        return (Vec::new(), None);
-    }
+    plan_lights(scene, &scene.lights, MAX_SHADOWED)
+}
+
+/// The corners of the box the shadows cover.
+fn focus_corners(scene: &Scene) -> (Vec<Vec3>, Vec3, Vec3) {
     let (low, high) = scene.focus_bounds();
     let corners: Vec<Vec3> =
         (0..8).map(|i| Vec3::new([low.x, high.x][i & 1], [low.y, high.y][(i >> 1) & 1], [low.z, high.z][i >> 2])).collect();
+    (corners, low, high)
+}
+
+/// The layer of a directional light along `direction` over `scene`.
+pub fn directional_layer(scene: &Scene, direction: Vec3) -> Layer {
+    let (corners, _, _) = focus_corners(scene);
+    match directional(direction, &corners) {
+        Caster::Single(layer) => layer,
+        Caster::Cube { .. } => unreachable!("a directional light's is one layer"),
+    }
+}
+
+/// The shadows' layers of the first `max` shadowed of `lights` in
+/// `scene`, by the light's index, and the screen's.
+pub fn plan_lights(scene: &Scene, lights_of: &[Light], max: usize) -> (Vec<(usize, Caster)>, Option<Caster>) {
+    if !scene.shadows {
+        return (Vec::new(), None);
+    }
+    let (corners, low, high) = focus_corners(scene);
     let mut lights = Vec::new();
-    for (i, light) in scene.lights.iter().enumerate() {
-        if !light.shadow || lights.len() == MAX_SHADOWED {
+    for (i, light) in lights_of.iter().enumerate() {
+        if !light.shadow || lights.len() == max {
             continue;
         }
         let caster = match light.kind {

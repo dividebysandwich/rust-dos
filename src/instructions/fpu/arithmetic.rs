@@ -1,16 +1,12 @@
 use crate::cpu::{Cpu, FpuFlags};
-use crate::f80::{F80, canon_f64};
+use crate::f80::{F80, F80_EXP_BIAS, canon_f64};
 use crate::instructions::utils::calculate_addr;
 use iced_x86::{Instruction, MemorySize, OpKind, Register};
 
 // Get the destination index for Pop instructions (e.g., FADDP ST(i), ST(0))
 pub fn get_pop_dst_index(instr: &Instruction) -> usize {
     let reg = instr.op0_register();
-    if reg == Register::None || reg == Register::ST1 {
-        1
-    } else {
-        (reg.number() - Register::ST0.number()) as usize
-    }
+    if reg == Register::None || reg == Register::ST1 { 1 } else { reg.number() - Register::ST0.number() }
 }
 
 /// ST(dst) = ST(a) + ST(b), or - with `sub`, as the registers' 80 bits add
@@ -178,8 +174,8 @@ pub fn fadd(cpu: &mut Cpu, instr: &Instruction) {
     } else {
         let dst_reg = instr.op0_register();
         let src_reg = instr.op1_register();
-        let idx_src = (src_reg.number() - Register::ST0.number()) as usize;
-        let idx_dst = (dst_reg.number() - Register::ST0.number()) as usize;
+        let idx_src = src_reg.number() - Register::ST0.number();
+        let idx_dst = dst_reg.number() - Register::ST0.number();
         addsub_st(cpu, idx_dst, idx_dst, idx_src, false);
     }
 }
@@ -190,7 +186,7 @@ pub fn faddp(cpu: &mut Cpu, instr: &Instruction) {
     let idx = if dst_reg == Register::None || dst_reg == Register::ST1 {
         1
     } else {
-        (dst_reg.number() - Register::ST0.number()) as usize
+        dst_reg.number() - Register::ST0.number()
     };
 
     addsub_st(cpu, idx, idx, 0, false);
@@ -204,8 +200,8 @@ pub fn fsub(cpu: &mut Cpu, instr: &Instruction) {
         let val = real_operand(cpu, instr).unwrap_or(0.0);
         addsub_value(cpu, SUB_VALUE, val);
     } else {
-        let dst_idx = (instr.op0_register().number() - Register::ST0.number()) as usize;
-        let src_idx = (instr.op1_register().number() - Register::ST0.number()) as usize;
+        let dst_idx = instr.op0_register().number() - Register::ST0.number();
+        let src_idx = instr.op1_register().number() - Register::ST0.number();
         addsub_st(cpu, dst_idx, dst_idx, src_idx, true);
     }
 }
@@ -226,8 +222,8 @@ pub fn fsubr(cpu: &mut Cpu, instr: &Instruction) {
         let val = real_operand(cpu, instr).unwrap_or(0.0);
         addsub_value(cpu, SUBR_VALUE, val);
     } else {
-        let dst_idx = (instr.op0_register().number() - Register::ST0.number()) as usize;
-        let src_idx = (instr.op1_register().number() - Register::ST0.number()) as usize;
+        let dst_idx = instr.op0_register().number() - Register::ST0.number();
+        let src_idx = instr.op1_register().number() - Register::ST0.number();
         addsub_st(cpu, dst_idx, src_idx, dst_idx, true);
     }
 }
@@ -281,8 +277,8 @@ pub fn fmul(cpu: &mut Cpu, instr: &Instruction) {
         let product = product(cpu.fpu_get_f64(0), val);
         cpu.fpu_set_f64(0, product);
     } else {
-        let dst_idx = (instr.op0_register().number() - Register::ST0.number()) as usize;
-        let src_idx = (instr.op1_register().number() - Register::ST0.number()) as usize;
+        let dst_idx = instr.op0_register().number() - Register::ST0.number();
+        let src_idx = instr.op1_register().number() - Register::ST0.number();
         let product = product(cpu.fpu_get_f64(dst_idx), cpu.fpu_get_f64(src_idx));
         cpu.fpu_set_f64(dst_idx, product);
     }
@@ -302,8 +298,8 @@ pub fn fdiv(cpu: &mut Cpu, instr: &Instruction) {
         let divisor = canon_f64(real_operand(cpu, instr).unwrap_or(0.0));
         divide(cpu, 0, cpu.fpu_get_f64(0), divisor);
     } else {
-        let dst_idx = (instr.op0_register().number() - Register::ST0.number()) as usize;
-        let src_idx = (instr.op1_register().number() - Register::ST0.number()) as usize;
+        let dst_idx = instr.op0_register().number() - Register::ST0.number();
+        let src_idx = instr.op1_register().number() - Register::ST0.number();
         divide(cpu, dst_idx, cpu.fpu_get_f64(dst_idx), cpu.fpu_get_f64(src_idx));
     }
 }
@@ -322,8 +318,8 @@ pub fn fdivr(cpu: &mut Cpu, instr: &Instruction) {
         let val = canon_f64(real_operand(cpu, instr).unwrap_or(1.0));
         divide(cpu, 0, val, cpu.fpu_get_f64(0));
     } else {
-        let dst_idx = (instr.op0_register().number() - Register::ST0.number()) as usize;
-        let src_idx = (instr.op1_register().number() - Register::ST0.number()) as usize;
+        let dst_idx = instr.op0_register().number() - Register::ST0.number();
+        let src_idx = instr.op1_register().number() - Register::ST0.number();
         // FDIVR ST(0), ST(i) -> ST(0) = ST(i) / ST(0)
         // FDIVR ST(i), ST(0) -> ST(i) = ST(0) / ST(i)
         divide(cpu, dst_idx, cpu.fpu_get_f64(src_idx), cpu.fpu_get_f64(dst_idx));
@@ -423,8 +419,27 @@ pub fn frndint(cpu: &mut Cpu) {
     let mut st0 = cpu.fpu_get(0);
     let val = st0.get_f64();
     let rc = (cpu.fpu_control >> 10) & 0x03;
+    // Where the 80 bits hold more than the double, from them: the double
+    // is rounded to nearest, and rounding it again could cross an integer.
+    if let Some(n) = cpu.fpu_beyond_double(0).then(|| st0.round_int(rc)).flatten() {
+        let negative = st0.get_sign();
+        let magnitude = n.unsigned_abs() as u64;
+        let mut result = F80::new();
+        if magnitude != 0 {
+            let up = magnitude.leading_zeros();
+            result.set_exponent((F80_EXP_BIAS + 63 - up as i32) as u16);
+            result.set_mantissa(magnitude << up);
+        }
+        result.set_sign(negative);
+        cpu.fpu_set(0, result);
+        let (mut a, mut b) = (result, st0);
+        a.set_sign(false);
+        b.set_sign(false);
+        rounded(cpu, a.compare(&b));
+        return;
+    }
     let result = match rc {
-        0 => val.round(), // Nearest
+        0 => val.round_ties_even(), // Nearest
         1 => val.floor(), // Down
         2 => val.ceil(),  // Up
         3 => val.trunc(), // Toward Zero
@@ -432,6 +447,19 @@ pub fn frndint(cpu: &mut Cpu) {
     };
     st0.set_f64(result);
     cpu.fpu_set(0, st0);
+    rounded(cpu, result.abs().partial_cmp(&val.abs()));
+}
+
+/// The status of a value rounded to an integer, its magnitude ordered
+/// against the value's as `order` says: an inexact result sets PE, and C1
+/// says whether the magnitude went up. (None for a NaN, which is exact.)
+fn rounded(cpu: &mut Cpu, order: Option<std::cmp::Ordering>) {
+    use std::cmp::Ordering;
+    let inexact = order.is_some_and(|o| o != Ordering::Equal);
+    if inexact {
+        cpu.set_fpu_flag(FpuFlags::PE, true);
+    }
+    cpu.set_fpu_flag(FpuFlags::C1, order == Some(Ordering::Greater));
     cpu.set_fpu_flag(FpuFlags::C2, false);
 }
 

@@ -32,6 +32,7 @@ impl Voodoo {
     /// What drawing into colour buffer `dest` reads from the registers.
     pub(crate) fn raster_state(&self, dest: usize, texcount: usize) -> RasterState {
         let reg = &self.reg;
+        let chip = self.chip;
         let tmu = |unit: usize| -> Option<TmuRaster> {
             if unit >= texcount {
                 return None;
@@ -55,6 +56,7 @@ impl Voodoo {
                 wmask: t.wmask as i32,
                 hmask: t.hmask as i32,
                 lookup: t.lookup(mode),
+                bilinear_mask: chip.bilinear_mask,
             })
         };
         RasterState {
@@ -70,6 +72,10 @@ impl Voodoo {
             fog_color: reg[FOG_COLOR],
             clip_left_right: reg[CLIP_LEFT_RIGHT],
             clip_low_y_high_y: reg[CLIP_LOW_Y_HIGH_Y],
+            clip_mask: chip.clip_mask,
+            // A Voodoo Graphics hasn't the register: always 0 there.
+            chroma_range: reg[CHROMA_RANGE],
+            fogdelta_mask: chip.fogdelta_mask,
             yorigin: self.fbi.yorigin,
             rowpixels: self.fbi.rowpixels as usize,
             dest,
@@ -205,12 +211,10 @@ impl Voodoo {
         if !rgb && !aux {
             return;
         }
-        let (clip_x, clip_y) = (self.reg[CLIP_LEFT_RIGHT], self.reg[CLIP_LOW_Y_HIGH_Y]);
-        let (sx, ex) = (((clip_x >> 16) & 0x3FF) as i32, (clip_x & 0x3FF) as i32);
-        let (sy, ey) = (((clip_y >> 16) & 0x3FF) as i32, (clip_y & 0x3FF) as i32);
-
         let dest = if rgb { self.color_buffer((fbz >> 14) & 3) } else { Some(0) };
         let Some(dest) = dest else { return };
+        let st = self.raster_state(dest, 0);
+        let (sx, ex, sy, ey) = st.clip();
         // color1 through the dither matrix, 4x4 pixels.
         let mut dither = [0u16; 16];
         if rgb {
@@ -234,7 +238,6 @@ impl Voodoo {
                 }
             }
         }
-        let st = self.raster_state(dest, 0);
         if self.mirror.is_some() {
             self.mirror_sync();
             if let Some(mirror) = &mut self.mirror {

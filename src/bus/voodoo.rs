@@ -113,6 +113,7 @@ impl Bus {
     }
 
     fn voodoo_write(&mut self, offset: u32, value: u32, mask: u32) {
+        let _profile = crate::profile::zone(crate::profile::Zone::Voodoo);
         // A write behind a swap the frame rate cap holds back (the rest of
         // the code the program ran before it was held) waits for the swap.
         if let Some(due) = self.voodoo.as_ref().and_then(|v| v.deferred_swap()) {
@@ -163,6 +164,7 @@ impl Bus {
 
     /// Retire the swaps whose retraces came.
     pub(crate) fn voodoo_service(&mut self) {
+        let _profile = crate::profile::zone(crate::profile::Zone::Voodoo);
         let now = self.voodoo_now();
         if let Some(v) = &mut self.voodoo {
             v.service(now);

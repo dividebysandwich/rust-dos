@@ -50,6 +50,9 @@ pub struct StatsView {
     pub halted: f32,
     /// The share of the host's time the emulator takes, in percent.
     pub cpu_use: f32,
+    /// Emulated seconds a second of wall time: 1 keeps real time, less
+    /// falls behind.
+    pub emulated_speed: f32,
     /// Drawing the picture, in ms a frame.
     pub render_ms: f32,
     /// The recompiler's translated blocks, and their bytes of host code.
@@ -69,6 +72,8 @@ pub struct Stats {
     executed: u64,
     translated: u64,
     halted: u64,
+    emulated_ns: u64,
+    last_ns: Option<u64>,
     frames: u32,
     drawn: u64,
     last_drawn: Option<u64>,
@@ -87,6 +92,11 @@ impl Stats {
         let drawn = bus.frames_drawn;
         self.drawn += drawn - self.last_drawn.unwrap_or(drawn);
         self.last_drawn = Some(drawn);
+        // A loaded save state can take the clock back; one that takes it
+        // ahead is passed over by `clock_moved`.
+        let now = bus.clock.now_ns();
+        self.emulated_ns += now.saturating_sub(self.last_ns.unwrap_or(now));
+        self.last_ns = Some(now);
         self.wall += times.wall;
         self.busy += times.busy;
         self.render += times.render;
@@ -108,6 +118,7 @@ impl Stats {
         self.view.fps = self.drawn as f32 / seconds;
         self.view.cpu_use = (self.busy.as_secs_f32() / seconds * 100.0).min(100.0);
         self.view.mips = self.executed as f32 / seconds / 1e6;
+        self.view.emulated_speed = self.emulated_ns as f32 / 1e9 / seconds;
         let share = |part: u64, whole: u64| if whole == 0 { 0.0 } else { part as f32 * 100.0 / whole as f32 };
         self.view.recompiled = share(self.translated, self.executed);
         self.view.halted = share(self.halted, self.executed + self.halted);
@@ -124,8 +135,21 @@ impl Stats {
         self.executed = 0;
         self.translated = 0;
         self.halted = 0;
+        self.emulated_ns = 0;
         self.frames = 0;
         self.drawn = 0;
+    }
+
+    /// Start the next frame's emulated time from the clock as it is now,
+    /// after a loaded save state moved it, so a jump ahead doesn't count
+    /// as time the machine ran.
+    pub fn clock_moved(&mut self, bus: &Bus) {
+        self.last_ns = Some(bus.clock.now_ns());
+    }
+
+    /// The numbers of `view`, without the histories.
+    pub fn latest(&self) -> &StatsView {
+        &self.view
     }
 
     pub fn view(&self) -> StatsView {
@@ -165,18 +189,41 @@ mod tests {
             if i % 2 == 0 {
                 bus.frames_drawn += 1;
             }
+            // 10 ms of emulated time in each, but 2.5 ms in the last five.
+            let tenths_of_ms = if i < 20 { 100 } else { 25 };
+            bus.clock.icount += bus.clock.cycles_per_ms() as u64 * tenths_of_ms / 10;
             stats.record(&bus, frame(10, 5));
         }
         let view = stats.view();
         assert!((view.fps - 13.0 / 0.25).abs() < 1.0, "{:?}", view);
         assert!((view.cpu_use - 50.0).abs() < 0.1);
         assert!((view.mips - 10.0).abs() < 0.5);
+        assert!((view.emulated_speed - 0.85).abs() < 0.01, "212.5 ms of emulated time in 250: {:?}", view);
         assert!((view.render_ms - 0.5).abs() < 0.05);
         assert!((view.recompiled - 75.0).abs() < 0.1, "a quarter interpreted");
         assert!((view.halted - 50.0).abs() < 0.1, "as long halted as running");
         assert_eq!((view.blocks, view.code_bytes), (40, 4096));
         assert!(view.refresh_hz > 69.0 && view.refresh_hz < 71.0, "text mode at 70 Hz");
         assert_eq!((view.fps_history.len(), view.cpu_history.len()), (1, 1));
+    }
+
+    /// A save state that takes the clock ahead, as one saved later in a
+    /// game does, is not emulated time the machine ran.
+    #[test]
+    fn a_loaded_state_s_jump_ahead_is_not_speed() {
+        let mut bus = Bus::new(PathBuf::from("."));
+        let mut stats = Stats::new();
+        stats.record(&bus, FrameTimes::default());
+        for i in 0..25 {
+            if i == 10 {
+                bus.clock.icount += bus.clock.cycles_per_ms() as u64 * 600_000;
+                stats.clock_moved(&bus);
+            }
+            bus.clock.icount += bus.clock.cycles_per_ms() as u64 * 10;
+            stats.record(&bus, frame(10, 5));
+        }
+        let view = stats.view();
+        assert!((view.emulated_speed - 1.0).abs() < 0.01, "10 minutes ahead: {:?}", view);
     }
 
     #[test]

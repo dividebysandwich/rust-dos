@@ -13,8 +13,8 @@ fn call(cpu: &mut Cpu, function: u16) {
 fn dos4gw_can_allocate_an_unused_mouse_callback_vector() {
     let cpu = Cpu::new(PathBuf::from("."));
     let ivt = rust_dos::bios::default_ivt();
-    for vector in 0x60..=0x65 {
-        assert_eq!(ivt[vector], 0);
+    for (vector, &entry) in ivt.iter().enumerate().take(0x66).skip(0x60) {
+        assert_eq!(entry, 0);
         assert_eq!(cpu.bus.read_32(vector * 4), 0);
     }
     assert_ne!(ivt[0x67], 0, "EMS remains installed");
@@ -309,4 +309,186 @@ fn reflected_poll_without_matching_handler_leaves_event_pending() {
         assert_eq!(cpu.bus.mouse.pending_callback_events, 2);
         assert!(!rust_dos::mouse::callback_busy(&cpu.bus));
     }
+}
+
+/// INT 10h with AX and BX, as a program sets a video mode.
+fn int10(cpu: &mut Cpu, function: u16, mode: u16) {
+    cpu.set_ax(function);
+    cpu.set_bx(mode);
+    rust_dos::interrupts::int10::handle(cpu);
+}
+
+fn range(cpu: &mut Cpu, function: u16, min: u16, max: u16) {
+    cpu.set_cx(min);
+    cpu.set_dx(max);
+    call(cpu, function);
+}
+
+#[test]
+fn a_video_mode_set_gives_the_cursor_the_new_screens_range() {
+    // Conqueror A.D. 1086: its menus in VESA mode 101h set 0-479, its
+    // battles in mode 13h read 0-199 and set no range of their own.
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    int10(&mut cpu, 0x4F02, 0x0101);
+    assert_eq!(cpu.ax(), 0x004F);
+    call(&mut cpu, 0x0000);
+    range(&mut cpu, 0x0007, 0, 639);
+    range(&mut cpu, 0x0008, 0, 479);
+    cpu.set_cx(320);
+    cpu.set_dx(240);
+    call(&mut cpu, 0x0004);
+    call(&mut cpu, 0x0001);
+    assert_eq!(cpu.bus.mouse.hide_counter, 0);
+
+    int10(&mut cpu, 0x0013, 0);
+    let m = &cpu.bus.mouse;
+    assert_eq!(m.hide_counter, 1, "a mode set hides the cursor, as CuteMouse and DOSBox do");
+    assert_eq!((m.min_x, m.max_x, m.min_y, m.max_y), (0, 639, 0, 199));
+    assert_eq!((m.x, m.y), (320, 199), "the cursor stays, inside the new range");
+    assert_eq!(m.virtual_screen(&cpu.bus), (640, 200), "the picture's bottom row is y 199");
+    call(&mut cpu, 0x0003);
+    assert_eq!((cpu.cx(), cpu.dx()), (320, 199));
+
+    // Back in the menus, through VBE function 02h.
+    int10(&mut cpu, 0x4F02, 0x0101);
+    let m = &cpu.bus.mouse;
+    assert_eq!((m.min_x, m.max_x, m.min_y, m.max_y), (0, 639, 0, 479));
+    assert_eq!(m.virtual_screen(&cpu.bus), (640, 480));
+}
+
+#[test]
+fn setting_the_same_mode_again_keeps_the_programs_range() {
+    // Dark Sun 2: x 0-319 and y 0-199 in mode 13h, then mode 13h again,
+    // with its own cursor drawn at the driver's x as a 320-pixel position.
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    int10(&mut cpu, 0x0013, 0);
+    call(&mut cpu, 0x0000);
+    range(&mut cpu, 0x0007, 0, 0x013F);
+    range(&mut cpu, 0x0008, 0, 0x00C7);
+    cpu.set_cx(0x9F);
+    cpu.set_dx(0x63);
+    call(&mut cpu, 0x0004);
+    call(&mut cpu, 0x0001);
+
+    int10(&mut cpu, 0x0013, 0);
+    let m = &cpu.bus.mouse;
+    assert_eq!((m.min_x, m.max_x, m.min_y, m.max_y), (0, 319, 0, 199));
+    assert_eq!((m.x, m.y), (159, 99));
+    assert_eq!(m.hide_counter, 1, "the mode set still hides the cursor");
+    cpu.bus.mouse.set_position(10_000, 100);
+    call(&mut cpu, 0x0003);
+    assert_eq!(cpu.cx(), 319, "the far right is the 320-pixel screen's");
+
+    // A text font load that leaves 25 rows is the same screen too.
+    int10(&mut cpu, 0x0003, 0);
+    assert_eq!(cpu.bus.mouse.max_x, 639, "another mode resets the range");
+    range(&mut cpu, 0x0007, 0, 319);
+    int10(&mut cpu, 0x1114, 0);
+    assert_eq!(cpu.bus.mouse.max_x, 319);
+}
+
+#[test]
+fn the_no_clear_bit_and_vbe_flags_leave_the_mode_the_same() {
+    // AL bit 7 keeps video memory; it sets the same mode.
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    int10(&mut cpu, 0x0013, 0);
+    call(&mut cpu, 0x0000);
+    range(&mut cpu, 0x0007, 0, 319);
+    int10(&mut cpu, 0x0093, 0);
+    assert_eq!(cpu.bus.mouse.max_x, 319);
+
+    // VBE: bit 15 (keep memory) and bit 14 (linear frame buffer) don't
+    // change the mode either. Another VBE mode keeps the range the
+    // program set (y) and gives the other (x) the new screen.
+    call(&mut cpu, 0x0000);
+    int10(&mut cpu, 0x4F02, 0x0101);
+    range(&mut cpu, 0x0008, 0, 399);
+    int10(&mut cpu, 0x4F02, 0x8101);
+    assert_eq!(cpu.ax(), 0x004F);
+    assert_eq!(cpu.bus.mouse.max_y, 399);
+    int10(&mut cpu, 0x4F02, 0x4101);
+    assert_eq!(cpu.ax(), 0x004F);
+    assert_eq!(cpu.bus.mouse.max_y, 399);
+    int10(&mut cpu, 0x4F02, 0x0103);
+    assert_eq!(cpu.ax(), 0x004F);
+    let m = &cpu.bus.mouse;
+    assert_eq!((m.min_x, m.max_x, m.min_y, m.max_y), (0, 799, 0, 399));
+}
+
+#[test]
+fn a_vesa_mode_change_keeps_the_range_the_program_set_before_it() {
+    // Down by the Laituri: in text mode 3 it resets the driver, sets
+    // x 0-1280 and y 0-960, then VESA mode 101h and no range after it,
+    // and draws its cursor at half the driver's position.
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    int10(&mut cpu, 0x0003, 0);
+    call(&mut cpu, 0x0000);
+    range(&mut cpu, 0x0007, 0, 1280);
+    range(&mut cpu, 0x0008, 0, 960);
+    int10(&mut cpu, 0x4F02, 0x0101);
+    assert_eq!(cpu.ax(), 0x004F);
+    let m = &cpu.bus.mouse;
+    assert_eq!((m.min_x, m.max_x, m.min_y, m.max_y), (0, 1280, 0, 960));
+    assert_eq!(m.virtual_screen(&cpu.bus), (1281, 961), "the host pointer spans the whole range");
+    cpu.bus.mouse.set_position(10_000, 10_000);
+    call(&mut cpu, 0x0003);
+    assert_eq!((cpu.cx(), cpu.dx()), (1280, 960), "the bottom-right corner of its 640x480 picture");
+
+    // That mode set used the program's range up: the next VESA mode
+    // change, with no range set in between, takes the new mode's size.
+    int10(&mut cpu, 0x4F02, 0x0103);
+    let m = &cpu.bus.mouse;
+    assert_eq!((m.min_x, m.max_x, m.min_y, m.max_y), (0, 799, 0, 599));
+}
+
+#[test]
+fn a_vesa_mode_change_with_no_range_set_gives_the_modes_size() {
+    // The reset's range is the old screen's (text mode: 640x200), which
+    // the program never asked for.
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    int10(&mut cpu, 0x0003, 0);
+    call(&mut cpu, 0x0000);
+    int10(&mut cpu, 0x4F02, 0x0101);
+    let m = &cpu.bus.mouse;
+    assert_eq!((m.min_x, m.max_x, m.min_y, m.max_y), (0, 639, 0, 479));
+
+    // A range set before a standard mode change goes with it, as
+    // Conqueror A.D. 1086's battles need.
+    range(&mut cpu, 0x0008, 0, 479);
+    int10(&mut cpu, 0x0013, 0);
+    assert_eq!(cpu.bus.mouse.max_y, 199);
+
+    // The same for a standard mode set through VBE function 02h.
+    int10(&mut cpu, 0x4F02, 0x0101);
+    range(&mut cpu, 0x0008, 0, 479);
+    int10(&mut cpu, 0x4F02, 0x0013);
+    assert_eq!(cpu.ax(), 0x004F);
+    assert_eq!(cpu.bus.mouse.max_y, 199);
+}
+
+#[test]
+fn a_range_set_after_the_mode_stays() {
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    call(&mut cpu, 0x0000);
+    int10(&mut cpu, 0x0013, 0);
+    range(&mut cpu, 0x0008, 0, 399);
+    let m = &cpu.bus.mouse;
+    assert_eq!((m.min_y, m.max_y), (0, 399));
+    assert_eq!(m.virtual_screen(&cpu.bus), (640, 400), "a program that halves the coordinates");
+    // A VBE call other than a mode set leaves it.
+    int10(&mut cpu, 0x4F03, 0);
+    assert_eq!(cpu.bus.mouse.max_y, 399);
+}
+
+#[test]
+fn a_font_load_that_changes_the_rows_gives_the_new_range() {
+    // 80x25, then the 8x8 font for 80x50: CuteMouse takes AH=11h AL=10h-1Fh
+    // for a mode set.
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    int10(&mut cpu, 0x0003, 0);
+    call(&mut cpu, 0x0000);
+    assert_eq!(cpu.bus.mouse.max_y, 199);
+    int10(&mut cpu, 0x1112, 0);
+    let m = &cpu.bus.mouse;
+    assert_eq!((m.min_x, m.max_x, m.min_y, m.max_y), (0, 639, 0, 399));
 }

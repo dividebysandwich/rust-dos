@@ -185,6 +185,7 @@ fn source_label(channel: Channel) -> &'static str {
         Channel::Tandy => "Tandy",
         Channel::Awe => "AWE32",
         Channel::Monitor => "Monitor",
+        Channel::Modem => "Modem",
     }
 }
 
@@ -336,8 +337,7 @@ impl ConfigUi {
                 Part::Opl(from, to) => {
                     let Some((channels, _, mute)) = &view.opl else { continue };
                     let w = (cols - 2) / 9;
-                    for ch in from..to {
-                        let c = &channels[ch];
+                    for (ch, c) in channels.iter().enumerate().take(to).skip(from) {
                         let col = 1 + (ch - from) * w;
                         let muted = mute >> ch & 1 != 0;
                         let name = if c.drum && (6..=8).contains(&ch) { "drum".to_string() } else { fm_note(c.f_num, c.block).filter(|_| c.key_on || c.level > 0).map_or("-".into(), note_name) };

@@ -40,6 +40,27 @@ impl Gpr {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct X(pub u8);
 
+/// When rounding an FPU register's double (itself the 80 bits rounded to
+/// nearest) could give another result than rounding the 80 bits: rounding
+/// to nearest is monotonic and keeps every double, so a second rounding of
+/// the double comes out as one of the 80 bits unless the double is a
+/// boundary of the second rounding (`Uop::FBailPrecise`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Precise {
+    /// To a double, where the control word rounds other than to nearest.
+    Directed,
+    /// To an integer, where the double in x is one or halfway between two
+    /// (or is 2^52 or more, or not finite).
+    Int(X),
+    /// To a single, where the double in x has 25 significant bits or fewer
+    /// (each single, and each value halfway between two), or the control
+    /// word rounds other than to nearest (a single from the double rounds
+    /// to nearest, as `data::single_bits` has it).
+    Single(X),
+    /// Compared, where the doubles in the two are equal.
+    Equal(X, X),
+}
+
 pub const X0: X = X(0);
 pub const X1: X = X(1);
 
@@ -54,6 +75,12 @@ pub enum FKind {
 
 pub const ECX: u8 = 1;
 pub const ESP: u8 = 4;
+
+/// The flags POPF and POPFD load at CPL 0 (`Uop::LoadFlags`): CF, PF, AF,
+/// ZF, SF, TF, IF, DF, OF, IOPL and NT, as `Cpu::load_flags_pm` has them.
+pub const POPF_RING0: u32 = 0x7FD5;
+/// The flags a translated POPFD leaves as they were: AC and ID.
+pub const POPF_KEPT: u32 = 0x24_0000;
 
 /// A second operand: a register value or a constant.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -141,6 +168,8 @@ pub enum Uop {
     /// a = a OP b, and the flags as the interpreter's ALU sets them.
     Alu { op: AluOp, size: u8, a: T, b: Src },
     Unary { op: UnOp, size: u8, t: T },
+    /// Reverse the bytes of dword t, without flags (BSWAP).
+    Bswap { t: T },
     /// Shift or rotate by a count of 1 to size * 8 - 1.
     Shift { op: ShiftOp, size: u8, t: T, count: u8 },
     /// SHLD (`left`) or SHRD of `dst` by a count of 1 to size * 8 - 1,
@@ -214,7 +243,8 @@ pub enum Uop {
     /// isn't a direct call (the block stops after it); then CS and EIP
     /// loaded after the pushes.
     FarCallCheck { sel: T, off: T },
-    FarCallLoad,
+    /// `next`: the return address, for the profiler's note of a thunk.
+    FarCallLoad { next: u32 },
     /// Leave the block after `FarRetPm` or `FarCallLoad`: through the links a return takes,
     /// or back to the execution loop where `jit_far_ret` said so.
     FarExit,
@@ -233,6 +263,17 @@ pub enum Uop {
     /// the execution loop checks (see `helpers::jit_port`).
     In { size: u8, port: Src, t: T },
     Out { size: u8, port: Src, t: T },
+    /// POPF or POPFD's flags from t, a `size` byte value, as
+    /// `Cpu::load_flags_pm` loads them at CPL 0: the arithmetic flags, TF,
+    /// DF, NT, IF and IOPL. The instruction's handler runs it instead of the
+    /// operations after this one where CPL isn't 0 (or the CPU is in
+    /// virtual-8086 mode), or a POPFD would change AC or ID (as CPUID's
+    /// detection does). Nothing before it may change anything.
+    LoadFlags { t: T, size: u8 },
+    /// After `LoadFlags` and the stack pointer: the block stops after the
+    /// instruction where TF is set (its trap comes from the execution loop)
+    /// or IF is set with an interrupt waiting, as `jit_fallback` stops it.
+    FlagsLoaded,
     /// STI after its `CheckIopl`: IF set, the interrupt shadow where it was
     /// clear, and the block stopped after it where an interrupt waits.
     Sti,
@@ -257,6 +298,13 @@ pub enum Uop {
     /// reads as the real indefinite). The operations below read and write
     /// the registers as doubles (`f80::FpuRegs`), as the handlers do.
     FpuGuard { valid: u8 },
+    /// The handler runs the instruction instead of the operations after
+    /// this one where one of the registers ST(i) with bit i set in `regs`
+    /// holds more than its double (`FpuRegs::beyond_double`), which the
+    /// handler then rounds from the 80 bits, and `when` says that rounding
+    /// the double instead could come out different. Nothing before it may
+    /// change anything. The block stops after it, as after an `FpuGuard`'s.
+    FBailPrecise { regs: u8, when: Precise },
     /// x = ST(i).
     FGet { x: X, i: u8 },
     /// ST(i) = x; with `canon`, x may be a denormal or a signalling NaN
@@ -287,6 +335,11 @@ pub enum Uop {
     /// t = x as a word or dword (`size` 2 or 4), rounded as the control
     /// word says (`fpu::data::to_int`).
     FToInt { t: T, x: X, size: u8 },
+    /// lo and hi = the low and high dwords of x as a qword, where the
+    /// control word rounds to nearest or chops and the value fits; else
+    /// the instruction's handler runs it instead of the operations after
+    /// this one, as `Bail` (nothing before it may change anything).
+    FToInt64 { lo: T, hi: T, x: X },
     /// a *= b.
     FMul { a: X, b: X },
     /// a += b, or -= with `sub` (fast mode's `arithmetic::sum`).

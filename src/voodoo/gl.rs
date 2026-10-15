@@ -25,7 +25,7 @@ const DEPTH_FRAG: &str = include_str!("gl/depth.frag");
 const CLUT_FRAG: &str = include_str!("gl/clut.frag");
 
 const TRIANGLE_UNIFORMS: &[&str] = &[
-    "u_size", "u_fbzcp", "u_fbz", "u_alpha", "u_fog", "u_color0", "u_color1", "u_chroma", "u_zacolor", "u_fogcolor",
+    "u_size", "u_fbzcp", "u_fbz", "u_alpha", "u_fog", "u_color0", "u_color1", "u_chroma", "u_chroma_range", "u_zacolor", "u_fogcolor",
     "u_stipple", "u_yorigin", "u_fogblend", "u_fogdelta", "u_scale", "u_units", "u_config", "u_tmode0", "u_tmode1",
     "u_tsize0", "u_tsize1", "u_tlod0", "u_tlod1", "u_tdetail0", "u_tdetail1", "u_constant_depth",
 ];
@@ -416,7 +416,7 @@ impl VoodooGl {
     fn stage_rows(&mut self, key: Option<u32>, pixels: &[u16]) {
         let (w, h) = (self.width, self.height);
         let staging = self.staging(key);
-        for (out, &value) in staging.rgba.chunks_exact_mut(4).zip(pixels) {
+        for (out, &value) in staging.rgba.as_chunks_mut::<4>().0.iter_mut().zip(pixels) {
             out.copy_from_slice(&rgba(key, value));
         }
         staging.dirty = Some([0, w, 0, h]);
@@ -491,9 +491,9 @@ impl VoodooGl {
     }
 
     fn upload(&mut self, gl: &glow::Context, texture: &Texture) {
-        if !self.textures.contains_key(&texture.id) {
+        if let std::collections::hash_map::Entry::Vacant(e) = self.textures.entry(texture.id) {
             let Ok(t) = self::texture(gl, glow::NEAREST) else { return };
-            self.textures.insert(texture.id, GlTexture { texture: t, params: None, lod: None, anisotropy: None });
+            e.insert(GlTexture { texture: t, params: None, lod: None, anisotropy: None });
         }
         let Some(entry) = self.textures.get_mut(&texture.id) else { return };
         // SAFETY: see `VoodooGl`.
@@ -577,6 +577,7 @@ impl VoodooGl {
                 ("u_color0", s.color0),
                 ("u_color1", s.color1),
                 ("u_chroma", s.chroma_key),
+                ("u_chroma_range", s.chroma_range),
                 ("u_zacolor", s.za_color),
                 ("u_fogcolor", s.fog_color),
                 ("u_stipple", s.stipple),
@@ -595,11 +596,11 @@ impl VoodooGl {
                 units |= 1 << unit;
                 gl.active_texture(glow::TEXTURE1 + unit as u32);
                 gl.bind_texture(glow::TEXTURE_2D, Some(texture.texture));
-                if let Some(anisotropy) = self.texture_anisotropy {
-                    if texture.anisotropy != Some(anisotropy) {
-                        gl.tex_parameter_f32(glow::TEXTURE_2D, TEXTURE_MAX_ANISOTROPY, anisotropy);
-                        texture.anisotropy = Some(anisotropy);
-                    }
+                if let Some(anisotropy) = self.texture_anisotropy
+                    && texture.anisotropy != Some(anisotropy)
+                {
+                    gl.tex_parameter_f32(glow::TEXTURE_2D, TEXTURE_MAX_ANISOTROPY, anisotropy);
+                    texture.anisotropy = Some(anisotropy);
                 }
                 let wrap = |clamp: bool| if clamp { glow::CLAMP_TO_EDGE } else { glow::REPEAT };
                 let (min, mag) = sampling_filters(t.mode, t.unfiltered, self.texture_anisotropy);
@@ -1005,7 +1006,7 @@ mod tests {
             let mut renderer = VoodooGl::new(&gl, Glsl::Gl150, 1, samples, 1).unwrap();
             let state = DrawState {
                 dest: 0, fbz_color_path: 0, fbz_mode: (1 << 4) | (5 << 5) | (1 << 9) | (1 << 10) | (1 << 20),
-                alpha_mode: 0, fog_mode: 0, za_color: 0, chroma_key: 0,
+                alpha_mode: 0, fog_mode: 0, za_color: 0, chroma_key: 0, chroma_range: 0,
                 color0: 0, color1: 0, fog_color: 0, stipple: 0, yorigin: 7,
                 clip: None, aux: true, fogblend: [0; 64], fogdelta: [0; 64], send_config: None, tmu: [None; 2],
             };
@@ -1056,10 +1057,12 @@ mod tests {
         use std::{fs, path::PathBuf};
 
         let path = std::env::var_os("RUST_DOS_VOODOO_STATE").expect("RUST_DOS_VOODOO_STATE");
-        let (header, state) = slots::decode(&fs::read(path).unwrap()).unwrap();
+        let (header, state) = slots::decode(&fs::read(&path).unwrap()).unwrap();
         let settings = slots::machine_settings(&header.machine, &Default::default());
         let mut cpu = Cpu::with_memory(PathBuf::from("."), header.memsize);
         crate::hardware::configure(&mut cpu, &settings, crate::keylayout::Layout::us());
+        // A booted system's state wants its disk as it was: a copy beside it.
+        crate::savestate::disks::offer_copies(&mut cpu, std::path::Path::new(&path));
         machine::load(&mut cpu, &state).unwrap();
         cpu.bus.voodoo.as_mut().unwrap().set_mirror(true);
         cpu.bus.voodoo.as_mut().unwrap().set_software_picture(true);
@@ -1111,6 +1114,12 @@ mod tests {
                     gl.read_pixels(0, 0, w as i32, h as i32, glow::RGB, glow::UNSIGNED_BYTE,
                         glow::PixelPackData::Slice(Some(&mut rendered)));
                     assert_eq!(gl.get_error(), glow::NO_ERROR);
+                }
+                // The target holds the colours before the gamma table, which the
+                // presenting pass applies; the software picture has it applied.
+                let table = super::super::gamma_table(&renderer.clut);
+                for rgb in rendered.as_chunks_mut::<3>().0 {
+                    *rgb = [table[rgb[0] as usize][0], table[rgb[1] as usize][1], table[rgb[2] as usize][2]];
                 }
                 save(&format!("glide-{frame}-opengl"), &rendered, w, h);
                 let bad = reference.as_chunks::<3>().0.iter().zip(rendered.as_chunks::<3>().0)

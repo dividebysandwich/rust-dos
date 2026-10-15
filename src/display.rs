@@ -11,6 +11,7 @@ mod gl;
 #[path = "display/nogl.rs"]
 mod gl;
 pub mod audio_mix;
+pub mod room_sound;
 #[cfg(feature = "vr")]
 mod stage;
 
@@ -612,6 +613,17 @@ impl Display<'_> {
         matches!(&self.out, Output::Gl(gl) if gl.stage().is_some_and(|s| s.has_headset()))
     }
 
+    /// A click at the window's point (`x`, `y`) on something of the 3D
+    /// scene's (a lamp, a camera) rather than the screen: done, and true.
+    pub fn click_scene(&mut self, x: i32, y: i32) -> bool {
+        let Output::Gl(gl) = &mut self.out else { return false };
+        let window = gl.window();
+        let (ws, ds) = (window.size(), window.drawable_size());
+        let px = (x as f32 + 0.5) * ds.0 as f32 / ws.0.max(1) as f32;
+        let py = (y as f32 + 0.5) * ds.1 as f32 / ws.1.max(1) as f32;
+        gl.stage_mut().is_some_and(|stage| stage.click((px, py)))
+    }
+
     /// Turn the window's camera by mouse motion.
     pub fn camera_look(&mut self, dx: f32, dy: f32) {
         if let Some(stage) = self.stage_mut() {
@@ -647,6 +659,19 @@ impl Display<'_> {
         }
     }
 
+    /// Mark the real keyboard with a controller in the headset: false
+    /// without one.
+    pub fn mark_vr_keyboard(&mut self) -> bool {
+        self.stage_mut().is_some_and(|stage| stage.mark_keyboard())
+    }
+
+    /// A key of the host's was pressed, for the headset.
+    pub fn vr_key_pressed(&mut self) {
+        if let Some(stage) = self.stage_mut() {
+            stage.key_pressed();
+        }
+    }
+
     /// The headset's events; what is worth saying.
     pub fn poll_headset(&mut self) -> Vec<String> {
         match &mut self.out {
@@ -659,6 +684,20 @@ impl Display<'_> {
     pub fn set_leds(&mut self, leds: rust_dos::vr::Leds) {
         if let Some(stage) = self.stage_mut() {
             stage.set_leds(leds);
+        }
+    }
+
+    /// Where the scene's camera saves its pictures.
+    pub fn set_capture_dir(&mut self, dir: &std::path::Path) {
+        if let Some(stage) = self.stage_mut() {
+            stage.set_capture_dir(dir);
+        }
+    }
+
+    /// The running game's manuals, for the booklet in the scene.
+    pub fn set_manuals(&mut self, manuals: &[std::path::PathBuf]) {
+        if let Some(stage) = self.stage_mut() {
+            stage.set_manuals(manuals);
         }
     }
 
@@ -698,6 +737,21 @@ impl Display<'_> {
         }
     }
 
+    /// The scene's own sounds now (the rain, thunder, switches), for
+    /// `sound`; silence without the scene.
+    pub fn room_sound(&self, sound: &mut room_sound::RoomSound) {
+        match &self.out {
+            Output::Gl(gl) if let Some(stage) = gl.stage() => {
+                let (ambience, effects) = stage.room_sound();
+                sound.set(ambience);
+                for effect in effects {
+                    sound.play(effect);
+                }
+            }
+            _ => sound.set(room_sound::Ambience::default()),
+        }
+    }
+
     /// Draw the 3D scene again with the picture as it was: the viewer may
     /// have moved.
     pub fn refresh_stage(&mut self) {
@@ -710,6 +764,10 @@ impl Display<'_> {
 #[cfg(not(feature = "vr"))]
 impl Display<'_> {
     pub fn set_leds(&mut self, _leds: rust_dos::vr::Leds) {}
+
+    pub fn set_manuals(&mut self, _manuals: &[std::path::PathBuf]) {}
+
+    pub fn set_capture_dir(&mut self, _dir: &std::path::Path) {}
 
     pub fn apply_vr(&mut self, settings: &rust_dos::vr::VrSettings) -> Vec<String> {
         if settings.mode == rust_dos::vr::VrMode::Off {
@@ -727,6 +785,8 @@ impl Display<'_> {
         None
     }
 
+    pub fn room_sound(&self, _sound: &mut room_sound::RoomSound) {}
+
     pub fn open_stage(&mut self, _settings: &rust_dos::vr::VrSettings) -> Vec<String> {
         vec!["[VR] This build has no 3D scene (the vr feature)".to_string()]
     }
@@ -739,6 +799,10 @@ impl Display<'_> {
         false
     }
 
+    pub fn click_scene(&mut self, _x: i32, _y: i32) -> bool {
+        false
+    }
+
     pub fn camera_look(&mut self, _dx: f32, _dy: f32) {}
 
     pub fn camera_pan(&mut self, _dx: f32, _dy: f32) {}
@@ -748,6 +812,12 @@ impl Display<'_> {
     pub fn camera_rise(&mut self, _metres: f32) {}
 
     pub fn recenter(&mut self) {}
+
+    pub fn mark_vr_keyboard(&mut self) -> bool {
+        false
+    }
+
+    pub fn vr_key_pressed(&mut self) {}
 
     pub fn poll_headset(&mut self) -> Vec<String> {
         Vec::new()

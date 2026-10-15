@@ -127,16 +127,30 @@ pub fn boot_drive(cpu: &mut Cpu, drive: u8) -> Result<(), String> {
 }
 
 /// Start the booted system over from its disk, as after a reset or
-/// INT 19h. If the disk can't boot any more, the machine is turned off.
+/// INT 19h. A system booted from a floppy drive that has no disk in it
+/// now starts from the first hard disk, as a BIOS that boots from A: and
+/// then C: does: Windows 98's Setup, started from its boot disk, restarts
+/// from the hard disk it installed to once the disk is out. If the disk
+/// can't boot any more, the machine is turned off.
 pub fn restart(cpu: &mut Cpu) {
     let Some(unit) = cpu.bus.boot.as_ref().map(|b| b.unit) else {
         return;
     };
-    match boot_sector(&cpu.bus, unit) {
-        Ok(sector) => {
-            cpu.bus.log_string("[BOOT] Restarting");
+    let empty = |bus: &Bus, unit: u8| unit_drive(bus, unit).and_then(|drive| bus.disk.bios_image(drive)).is_none();
+    let found = match boot_sector(&cpu.bus, unit) {
+        Err(e) if unit < 0x80 && empty(&cpu.bus, unit) => boot_sector(&cpu.bus, 0x80).map(|sector| (0x80, sector)).map_err(|_| e),
+        found => found.map(|sector| (unit, sector)),
+    };
+    match found {
+        Ok((from, sector)) => {
+            if from == unit {
+                cpu.bus.log_string("[BOOT] Restarting");
+            } else {
+                cpu.bus.log_string("[BOOT] Restarting from the first hard disk: the floppy drive is empty");
+            }
+            // The floppy drive stays the first to boot from.
             power_on(cpu, unit);
-            start(cpu, unit, &sector);
+            start(cpu, from, &sector);
         }
         Err(e) => power_off(cpu, &e),
     }
@@ -171,13 +185,17 @@ pub fn power_on(cpu: &mut Cpu, unit: u8) {
     let bus = &mut cpu.bus;
     let hard_disks: Vec<_> = hard_disk_drives(bus)
         .into_iter()
-        .filter_map(|drive| bus.disk.bios_image(drive).map(|image| image.geometry()))
+        .filter_map(|drive| bus.disk.bios_image(drive).map(|image| (image.geometry(), image.sectors())))
         .collect();
     crate::bios::install_for_boot(bus, &hard_disks);
-    bus.cmos.set_hard_disks(&hard_disks);
+    bus.cmos.set_hard_disks(&hard_disks.iter().map(|&(chs, _)| chs).collect::<Vec<_>>());
+    // Both floppy drives, empty or not, as the equipment word has them:
+    // Windows 98's floppy driver (HSFLOP.PDR) finds the drives in the CMOS.
+    bus.cmos.set_floppies(2);
     // The hard disks and a CD image reach the system on the IDE channels
-    // too.
+    // too, and the floppies on the floppy disk controller.
     bus.attach_ide();
+    bus.attach_fdc();
     bus.refresh_irq();
 
     // The processor as after a reset, and the screen in text mode.
@@ -228,7 +246,11 @@ fn reset_machine(cpu: &mut Cpu) {
     bus.port_accesses.clear();
     crate::keyboard::reset_keystrokes(bus);
     bus.reset_timers();
-    bus.reset_sound();
+    // The BIOS clears port 61h after its beep: the speaker off, the check
+    // enables clear, and channel 2's gate as `pit2_gate_at_start` has it.
+    bus.ppi_checks = 0;
+    bus.set_pit2_gate_at_start(bus.pit2_gate_at_start);
+    bus.power_on_sound();
     bus.reset_network();
     bus.reset_ne2000();
     bus.reset_serial();

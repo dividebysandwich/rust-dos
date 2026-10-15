@@ -320,7 +320,7 @@ impl CdImage {
                 buf.fill(0);
                 buf[..12].copy_from_slice(&SYNC);
                 let (m, s, f) = super::lba_to_msf(lba);
-                let bcd = |v: u8| (v / 10) << 4 | v % 10;
+                let bcd = |v: u8| ((v / 10) << 4) | (v % 10);
                 buf[12..16].copy_from_slice(&[bcd(m), bcd(s), bcd(f), 0]);
                 if track.mode == TrackMode::Mode1_2048 {
                     buf[15] = 1;
@@ -341,9 +341,9 @@ impl CdImage {
             Some(t) if t.is_audio() => self.read_raw(lba, &mut raw)?,
             _ => {}
         }
-        out.extend(raw.chunks_exact(4).map(|c| {
-            (i16::from_le_bytes([c[0], c[1]]), i16::from_le_bytes([c[2], c[3]]))
-        }));
+        out.extend(
+            raw.as_chunks::<4>().0.iter().map(|c| (i16::from_le_bytes([c[0], c[1]]), i16::from_le_bytes([c[2], c[3]]))),
+        );
         Ok(())
     }
 }
@@ -479,7 +479,7 @@ fn out_of_range() -> io::Error {
 }
 
 fn swap_samples(buf: &mut [u8]) {
-    for pair in buf.chunks_exact_mut(2) {
+    for pair in buf.as_chunks_mut::<2>().0 {
         pair.swap(0, 1);
     }
 }

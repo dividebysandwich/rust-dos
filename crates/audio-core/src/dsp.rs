@@ -302,7 +302,7 @@ impl Reverb {
         let r = self.input_filter[1].process(r);
         let input = (l + r) * Self::INPUT_GAIN;
         let mut out = [0.0f32; 2];
-        for side in 0..2 {
+        for (side, wet) in out.iter_mut().enumerate() {
             let mut sum = 0.0;
             for comb in &mut self.combs[side] {
                 sum += comb.process(input, self.feedback, self.damp);
@@ -310,7 +310,7 @@ impl Reverb {
             for allpass in &mut self.allpasses[side] {
                 sum = allpass.process(sum);
             }
-            out[side] = sum;
+            *wet = sum;
         }
         (out[0], out[1])
     }

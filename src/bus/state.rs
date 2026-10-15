@@ -15,6 +15,7 @@ const DOS_VERSION: u16 = 6;
 const VOODOO_VERSION: u16 = 1;
 const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 2;
+const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 1;
@@ -24,6 +25,9 @@ const VERITE_VERSION: u16 = 2;
 const ET4000_VERSION: u16 = 1;
 const SHARED_VERSION: u16 = 1;
 const SB_HIGH_SPEED_VERSION: u16 = 1;
+const ISAPNP_VERSION: u16 = 1;
+const PIT2_VERSION: u16 = 1;
+const TSC_VERSION: u16 = 1;
 
 /// Save or load each of a list of fields.
 /// Each field is labelled with its name, for comparing states part by
@@ -49,6 +53,7 @@ impl Bus {
             notices: _,
             glide_hint: _,
             ide,
+            fdc,
             net,
             serial,
             keyboard_buffer,
@@ -62,6 +67,10 @@ impl Bus {
             pit_read_msb,
             pit_mode,
             pit_write_msb,
+            pit2,
+            speaker_data,
+            ppi_checks,
+            pit2_gate_at_start: _,
             pit0_divisor,
             pit0_write_msb,
             pit0_read_msb,
@@ -99,6 +108,7 @@ impl Bus {
             gate_array_shadow_at,
             opl,
             sb,
+            isapnp,
             mpu,
             gus,
             gus_line,
@@ -123,6 +133,7 @@ impl Bus {
             ultrasnd_drive: _,
             dos_version: _,
             ide_hard_disks: _,
+            floppy_controller: _,
             boot_cdrom: _,
             idle_hint: _,
             disk_notices: _,
@@ -136,8 +147,9 @@ impl Bus {
             // A service's port accesses for a V86 monitor, made within the
             // instructions after it.
             port_accesses: _,
-            ide_faked: _,
+            faked_io: _,
             port_log: _,
+            profile: _,
             guest_paging: _,
             guest_fault: _,
             // How many ignored ROM writes were logged.
@@ -190,6 +202,16 @@ impl Bus {
                 boot, pci,
             );
         });
+        // Channel 2's counter and gate, in a section of their own so states
+        // saved before it load. The fields after `speaker_data` came later:
+        // a section that ends before them loads with their defaults.
+        let pit2_count_due = &pit2.count_due;
+        w.section(b"PIT2", PIT2_VERSION, |w| {
+            save_all!(w; pit2, speaker_data, pit2_count_due, ppi_checks);
+        });
+        // The time stamp counter's clock, in a section of its own so states
+        // saved before it load (counting instructions, as it did then).
+        w.section(b"TSC ", TSC_VERSION, |w| clock.tsc.save(w));
         w.section(b"VIDE", VIDEO_VERSION, |w| {
             save_all!(w; video_mode, vga, vbe, s3_engine, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
         });
@@ -247,6 +269,10 @@ impl Bus {
         if let Some(awe) = awe {
             w.section(b"AWE ", AWE_VERSION, |w| awe.save(w));
         }
+        // The ISA Plug and Play cards (a ViBRA16C), likewise.
+        if let Some(isapnp) = isapnp {
+            w.section(b"PNP ", ISAPNP_VERSION, |w| isapnp.save(w));
+        }
         // A 3dfx card, whose memory comes first, and only on a machine
         // with one, so states of machines without load as they did.
         if let Some(voodoo) = voodoo {
@@ -262,6 +288,10 @@ impl Bus {
         // A booted system's IDE channels, likewise.
         if ide.iter().any(Option::is_some) {
             w.section(b"IDE ", IDE_VERSION, |w| ide.save(w));
+        }
+        // A booted system's floppy disk controller, likewise.
+        if let Some(fdc) = fdc {
+            w.section(b"FDC ", FDC_VERSION, |w| fdc.save(w));
         }
         // The DPMI host, while it has clients.
         if dpmi.active() {
@@ -308,6 +338,7 @@ impl Bus {
             notices: _,
             glide_hint: _,
             ide,
+            fdc,
             net,
             serial,
             keyboard_buffer,
@@ -321,6 +352,10 @@ impl Bus {
             pit_read_msb,
             pit_mode,
             pit_write_msb,
+            pit2,
+            speaker_data,
+            ppi_checks,
+            pit2_gate_at_start: _,
             pit0_divisor,
             pit0_write_msb,
             pit0_read_msb,
@@ -358,6 +393,7 @@ impl Bus {
             gate_array_shadow_at,
             opl,
             sb,
+            isapnp,
             mpu,
             gus,
             gus_line,
@@ -380,19 +416,21 @@ impl Bus {
             ultrasnd_drive: _,
             dos_version: _,
             ide_hard_disks: _,
+            floppy_controller: _,
             boot_cdrom: _,
             idle_hint: _,
             disk_notices: _,
             sb_irq: _,
             irq_ready: _,
-            page_gen: _,
+            page_gen,
             observe: _,
             audio_settled: _,
-            code_blocks: _,
+            code_blocks,
             reset_requested: _,
             port_accesses: _,
-            ide_faked: _,
+            faked_io: _,
             port_log: _,
+            profile: _,
             guest_paging: _,
             guest_fault: _,
             rom_writes: _,
@@ -429,11 +467,14 @@ impl Bus {
         let mut section = r.section(b"RAM ", RAM_VERSION)?;
         let len = section.count()?;
         if len != ram.len() {
-            return Err(StateError::Mismatch(format!(
-                "it has {} KB of memory, this machine {} KB",
-                len / 1024,
-                ram.len() / 1024
-            )));
+            // A state of another memsize: the memory takes the state's size.
+            let mb = len >> 20;
+            if len & 0xF_FFFF != 0 || !(crate::config::MIN_MEMSIZE..=crate::config::MAX_MEMSIZE).contains(&mb) {
+                return Err(StateError::Invalid(format!("{} KB of memory", len / 1024)));
+            }
+            *ram = vec![0; len];
+            *page_gen = vec![0; len >> super::GEN_SHIFT];
+            *code_blocks = vec![0; len >> super::GEN_SHIFT];
         }
         ram.copy_from_slice(section.take(len)?);
         let mut section = r.section(b"CORE", CORE_VERSION)?;
@@ -446,6 +487,28 @@ impl Bus {
             post_code, refresh_toggle, speaker_on, audio_phase, audio_frames, sb_phase, sb_frame, beep_frames,
                 boot, pci,
         );
+        if r.next_is(b"PIT2") {
+            let mut section = r.section(b"PIT2", PIT2_VERSION)?;
+            load_all!(&mut section; pit2, speaker_data);
+            pit2.count_due = false;
+            *ppi_checks = 0;
+            if !section.is_empty() {
+                load_all!(&mut section; &mut pit2.count_due, ppi_checks);
+            }
+        } else {
+            // An older state: a stopped channel 2 with the gate and the
+            // speaker as they were.
+            *pit2 = crate::timer::Pit2::new();
+            let now = clock.now_ticks();
+            pit2.write_count(*pit_divisor, now);
+            pit2.set_gate(*speaker_on, now);
+            *speaker_data = *speaker_on;
+            *ppi_checks = 0;
+        }
+        clock.tsc = Default::default();
+        if r.next_is(b"TSC ") {
+            clock.tsc.load(&mut r.section(b"TSC ", TSC_VERSION)?)?;
+        }
         let mut section = r.section(b"VIDE", VIDEO_VERSION)?;
         load_all!(&mut section; video_mode, vga, vbe, s3_engine, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
         *virge = Default::default();
@@ -491,6 +554,12 @@ impl Bus {
             (true, None) => return Err(StateError::Mismatch("it has an AWE32 and this machine hasn't".into())),
             (false, Some(_)) => return Err(StateError::Mismatch("this machine has an AWE32 and it hasn't".into())),
         }
+        match (r.next_is(b"PNP "), isapnp) {
+            (true, Some(isapnp)) => isapnp.load(&mut r.section(b"PNP ", ISAPNP_VERSION)?)?,
+            (false, None) => {}
+            (true, None) => return Err(StateError::Mismatch("it has a ViBRA16C and this machine hasn't".into())),
+            (false, Some(_)) => return Err(StateError::Mismatch("this machine has a ViBRA16C and it hasn't".into())),
+        }
         match (r.next_is(b"3DFX"), voodoo) {
             (true, Some(voodoo)) => voodoo.load(&mut r.section(b"3DFX", VOODOO_VERSION)?)?,
             (false, None) => {}
@@ -511,6 +580,14 @@ impl Bus {
         *ide = [None, None];
         if r.next_is(b"IDE ") {
             ide.load(&mut r.section(b"IDE ", IDE_VERSION)?)?;
+        }
+        // So does the floppy disk controller; a state saved before
+        // rust-dos had one has none.
+        *fdc = None;
+        if r.next_is(b"FDC ") {
+            let mut controller = crate::fdc::Fdc::new();
+            controller.load(&mut r.section(b"FDC ", FDC_VERSION)?)?;
+            *fdc = Some(controller);
         }
         dpmi.reset();
         if r.next_is(b"DPMI") {
@@ -544,6 +621,7 @@ impl Bus {
                 if !sb.set_high_speed(high_speed) {
                     return Err(StateError::Invalid("a Sound Blaster's high-speed mode without a transfer".into()));
                 }
+                sb.restart_dma_identification();
             }
             None if high_speed => return Err(StateError::Invalid("a Sound Blaster's high-speed mode without a Sound Blaster".into())),
             None => {}

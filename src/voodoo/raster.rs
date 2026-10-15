@@ -58,6 +58,9 @@ pub struct TmuRaster {
     pub wmask: i32,
     pub hmask: i32,
     pub lookup: Arc<[u32]>,
+    /// The fraction bits bilinear filtering blends with: 4 on a Voodoo
+    /// Graphics (F0h), all 8 on a Voodoo2.
+    pub bilinear_mask: i32,
 }
 
 /// The registers and memory layout a triangle, a fastfill or a pipelined
@@ -76,6 +79,14 @@ pub struct RasterState {
     pub fog_color: u32,
     pub clip_left_right: u32,
     pub clip_low_y_high_y: u32,
+    /// The bits of the clip registers' fields: 10 on a Voodoo Graphics, 12
+    /// on a Voodoo2.
+    pub clip_mask: u32,
+    /// chromaRange (Voodoo2; 0 has the range test off).
+    pub chroma_range: u32,
+    /// The bits of a fog table delta used: all on a Voodoo Graphics, the
+    /// top 6 on a Voodoo2.
+    pub fogdelta_mask: i32,
     pub yorigin: u32,
     pub rowpixels: usize,
     /// Word offsets of the colour buffer drawn into and of the auxiliary
@@ -131,6 +142,32 @@ pub struct TmuParams {
     pub dtdy: i64,
     pub dwdy: i64,
     pub lodbase: i32,
+}
+
+impl RasterState {
+    /// The clip rectangle: left, right, low Y and high Y.
+    pub fn clip(&self) -> (i32, i32, i32, i32) {
+        let (lr, ly, m) = (self.clip_left_right, self.clip_low_y_high_y, self.clip_mask);
+        (((lr >> 16) & m) as i32, (lr & m) as i32, ((ly >> 16) & m) as i32, (ly & m) as i32)
+    }
+
+    /// Whether the chroma key rejects `color` (`chroma_key_test`): the key
+    /// itself, or with chromaRange bit 28 (a Voodoo2's) its range test,
+    /// each component between the key's and the range's, or outside with
+    /// its exclusive bit, and all of them or (union mode) any.
+    pub fn chroma_rejects(&self, color: u32) -> bool {
+        let range = self.chroma_range;
+        if range & (1 << 28) == 0 {
+            return (color ^ self.chroma_key) & 0xFF_FFFF == 0;
+        }
+        let mut results = 0;
+        for (i, shift) in [0u32, 8, 16].into_iter().enumerate() {
+            let (low, high, test) = ((self.chroma_key >> shift) & 0xFF, (range >> shift) & 0xFF, (color >> shift) & 0xFF);
+            let inside = (low <= test && test <= high) as u32;
+            results |= (inside ^ ((range >> (24 + i)) & 1)) << i;
+        }
+        if range & (1 << 27) != 0 { results != 0 } else { results == 7 }
+    }
 }
 
 // The register fields the pipeline tests.
@@ -380,7 +417,7 @@ impl<'a> Row<'a> {
     /// alpha.
     fn tests(&self, color: u32, alpha: i32, stats: &mut Stats) -> bool {
         let (st, m) = (self.st, self.m);
-        if bit(m.fbz, 1) && ((color ^ st.chroma_key) & 0xFF_FFFF) == 0 {
+        if bit(m.fbz, 1) && st.chroma_rejects(color) {
             stats.chroma_fail += 1;
             return false;
         }
@@ -437,7 +474,7 @@ impl<'a> Row<'a> {
                     0 => {
                         let w = wfloat(iterw);
                         let delta = st.fogdelta[(w >> 10) as usize] as i32;
-                        let mut deltaval = (delta & 0xFF) * ((w >> 2) & 0xFF);
+                        let mut deltaval = (delta & st.fogdelta_mask) * ((w >> 2) & 0xFF);
                         if bit(fog, 7) && delta & 2 != 0 {
                             deltaval = -deltaval;
                         }
@@ -648,9 +685,10 @@ fn texture(t: &TmuRaster, mode: u32, x: i32, dither4: Option<&[u8]>, cother: u32
         tc >>= ilod + 10;
         s -= 0x80;
         tc -= 0x80;
-        // A Voodoo Graphics filters with 4 bits of fraction.
-        let sfrac = (s & 0xF0) as u32;
-        let tfrac = (tc & 0xF0) as u32;
+        // A Voodoo Graphics filters with 4 bits of fraction, a Voodoo2
+        // with 8.
+        let sfrac = (s & t.bilinear_mask) as u32;
+        let tfrac = (tc & t.bilinear_mask) as u32;
         s >>= 8;
         tc >>= 8;
         let (mut s1, mut t1) = (s + 1, tc + 1);
@@ -755,7 +793,7 @@ fn color_combine(row: &Row, iterargb: u32, texel: u32, iterz: i32, iterw: i64, s
         _ => 0,
     };
     // The chroma key tests c_other before its alpha is chosen.
-    if bit(row.m.fbz, 1) && ((c_other ^ st.chroma_key) & 0xFF_FFFF) == 0 {
+    if bit(row.m.fbz, 1) && st.chroma_rejects(c_other) {
         stats.chroma_fail += 1;
         return None;
     }
@@ -983,17 +1021,16 @@ pub fn scanline<const TMUS: usize, S: Spec>(st: &RasterState, p: &TriParams, y: 
     let scry = screen_y(st, y, bit(st.fbz_mode, 17));
     if bit(st.fbz_mode, 0) {
         // Clipping: a row outside takes the whole scanline.
-        if scry < ((st.clip_low_y_high_y >> 16) & 0x3FF) as i32 || scry >= (st.clip_low_y_high_y & 0x3FF) as i32 {
+        let (left, right, low, high) = st.clip();
+        if scry < low || scry >= high {
             stats.pixels_in += stopx - startx;
             stats.clip_fail += stopx - startx;
             return;
         }
-        let left = ((st.clip_left_right >> 16) & 0x3FF) as i32;
         if startx < left {
             stats.pixels_in += left - startx;
             startx = left;
         }
-        let right = (st.clip_left_right & 0x3FF) as i32;
         if stopx >= right {
             stats.pixels_in += stopx - right;
             stopx = right - 1;
@@ -1082,12 +1119,8 @@ pub fn scanline<const TMUS: usize, S: Spec>(st: &RasterState, p: &TriParams, y: 
 /// texture in this path. `depth` is the write's depth (or zaColor's).
 pub fn lfb_pixel(st: &RasterState, x: i32, y: i32, color: u32, depth: i32, stipple: &mut u32, stats: &mut Stats) {
     let scry = screen_y(st, y, bit(st.fbz_mode, 17));
-    if bit(st.fbz_mode, 0)
-        && (x < ((st.clip_left_right >> 16) & 0x3FF) as i32
-            || x >= (st.clip_left_right & 0x3FF) as i32
-            || scry < ((st.clip_low_y_high_y >> 16) & 0x3FF) as i32
-            || scry >= (st.clip_low_y_high_y & 0x3FF) as i32)
-    {
+    let (left, right, low, high) = st.clip();
+    if bit(st.fbz_mode, 0) && (x < left || x >= right || scry < low || scry >= high) {
         stats.pixels_in += 1;
         stats.clip_fail += 1;
         return;
@@ -1165,7 +1198,7 @@ mod tests {
         // Small W is far away.
         assert_eq!(wfloat(0x8000), 0xFFFF);
         // 0.5: one leading zero.
-        assert_eq!(wfloat(0x8000_0000), 0x0000 | ((!0x8000_0000u32 >> 19) & 0xFFF) as i32 + 1);
+        assert_eq!(wfloat(0x8000_0000), ((!0x8000_0000u32 >> 19) & 0xFFF) as i32 + 1);
     }
 
     #[test]

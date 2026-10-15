@@ -120,22 +120,22 @@ pub fn push(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
 /// addressed through ESP is addressed with the incremented ESP.
 pub fn pop(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
     let size = stack_size(instr);
-    if instr.op0_kind() == OpKind::Register {
-        if let Some(seg) = Seg::from_register(instr.op0_register()) {
-            // A segment register pop reads only the selector word, also
-            // with a 32-bit operand size, then releases the whole slot.
-            let selector = cpu.stack_read(0, 2)? as u16;
-            // The stack pointer moves by the width of the stack popped,
-            // also when POP SS switches to a stack of the other width.
-            let stack32 = cpu.stack32();
-            load_seg(cpu, seg, selector)?;
-            if stack32 {
-                cpu.set_esp(cpu.esp().wrapping_add(size as u32));
-            } else {
-                cpu.set_sp(cpu.sp().wrapping_add(size as u16));
-            }
-            return Ok(());
+    if instr.op0_kind() == OpKind::Register
+        && let Some(seg) = Seg::from_register(instr.op0_register())
+    {
+        // A segment register pop reads only the selector word, also
+        // with a 32-bit operand size, then releases the whole slot.
+        let selector = cpu.stack_read(0, 2)? as u16;
+        // The stack pointer moves by the width of the stack popped,
+        // also when POP SS switches to a stack of the other width.
+        let stack32 = cpu.stack32();
+        load_seg(cpu, seg, selector)?;
+        if stack32 {
+            cpu.set_esp(cpu.esp().wrapping_add(size as u32));
+        } else {
+            cpu.set_sp(cpu.sp().wrapping_add(size as u16));
         }
+        return Ok(());
     }
     let value = cpu.pop_sized(size)?;
     match instr.op0_kind() {
@@ -302,6 +302,19 @@ pub fn require_486(cpu: &Cpu) -> CpuResult {
 /// Raise #UD for Pentium instructions on a 386 or 486.
 pub fn require_pentium(cpu: &Cpu) -> CpuResult {
     if cpu.model < CpuModel::Pentium { Err(Fault::UD) } else { Ok(()) }
+}
+
+/// CMOVcc r, r/m (P6): the source into the register if the condition
+/// holds. A memory source is read, and can fault, either way.
+pub fn cmov(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    if !cpu.model.is_p6() {
+        return Err(Fault::UD);
+    }
+    let value = read_op(cpu, instr, 1, op_size(instr, 0))?;
+    if super::logic::condition(cpu, instr.condition_code()) {
+        cpu.set_reg(instr.op0_register(), value);
+    }
+    Ok(())
 }
 
 /// BSWAP r32 (486).

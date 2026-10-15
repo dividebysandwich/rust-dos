@@ -33,6 +33,7 @@ fn channel_named(name: &str) -> Option<Channel> {
         "TANDY" | "PCJR" | "PSG" => Channel::Tandy,
         "AWE32" | "AWE" | "EMU8000" => Channel::Awe,
         "MONITOR" => Channel::Monitor,
+        "MODEM" => Channel::Modem,
         _ => return None,
     })
 }
@@ -52,12 +53,13 @@ fn display_name(channel: Channel) -> &'static str {
         Channel::Tandy => "TANDY",
         Channel::Awe => "AWE32",
         Channel::Monitor => "MONITOR",
+        Channel::Modem => "MODEM",
     }
 }
 
 /// Whether a channel has two sides, which line-out and crossfeed need.
 fn stereo(channel: Channel) -> bool {
-    !matches!(channel, Channel::Master | Channel::Speaker | Channel::DiskNoise | Channel::LptDac | Channel::Tandy | Channel::Monitor)
+    !matches!(channel, Channel::Master | Channel::Speaker | Channel::DiskNoise | Channel::LptDac | Channel::Tandy | Channel::Monitor | Channel::Modem)
 }
 
 /// The channels that play here: the master, the speaker, and the sound
@@ -73,6 +75,7 @@ pub fn active_channels(cpu: &Cpu) -> Vec<Channel> {
             Channel::LptDac => bus.lpt_dac.is_some(),
             Channel::Tandy => bus.tandy_sound_enabled(),
             Channel::Monitor => bus.monitor_noise.enabled,
+            Channel::Modem => bus.serial.has_modem(),
             Channel::DiskNoise => bus.disknoise.enabled(crate::diskio::DiskClass::HardDisk)
                 || bus.disknoise.enabled(crate::diskio::DiskClass::Floppy),
             _ => true,

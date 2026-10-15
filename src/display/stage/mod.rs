@@ -9,7 +9,8 @@
 //! shows; the scene itself is drawn every frame, since the viewer moves.
 //! The PC in the scene has its lights lit as the machine's would be, the
 //! sound comes from the screen's sides, and the headset's controllers
-//! point at the screen as the mouse and are a gamepad.
+//! point at the screen as the mouse and are a gamepad. The game's manual
+//! and a joystick lie on the desk, to be picked up in the headset.
 
 mod camera;
 mod controls;
@@ -18,11 +19,17 @@ mod foveation;
 mod gi;
 #[cfg(xr)]
 mod headset;
+#[cfg(xr)]
+mod keyboard;
+mod photo;
 mod pick;
+mod props;
 mod render;
 mod scene;
 mod shadow;
+mod sky;
 mod spatial;
+mod world;
 #[cfg(xr)]
 mod xr;
 
@@ -32,13 +39,18 @@ pub use controls::VrInput;
 use super::audio_mix::Mix;
 use glam::{Mat4, Vec2};
 use glow::HasContext;
-use render::{Dest, Format, Gpu, Options, Pass, ScreenTarget, View};
+use render::{Dest, Format, Gpu, Options, Pass, Punch, ScreenTarget, View};
 use rust_dos::vr::{ScreenFit, VrMode, VrSettings};
 use scene::Scene;
 use rust_dos::vr::{Leds, VrGraphics, VrLook};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError};
+use world::World;
+use std::time::SystemTime;
+
+/// A scene being read: its path, when it was written, and the result.
+type SceneLoad = (Option<PathBuf>, Option<SystemTime>, Receiver<Result<Scene, String>>);
 
 pub struct Stage {
     scene: Arc<Scene>,
@@ -69,15 +81,31 @@ pub struct Stage {
     look: VrLook,
     mobile: bool,
     /// How the headset's session draws, its eyes' resolution and its
-    /// refresh rate, which it is started again for.
-    headset_options: (VrGraphics, Option<u32>, Option<u32>),
+    /// refresh rate, and whether the cameras show the keyboard, which it
+    /// is started again for.
+    headset_options: (VrGraphics, Option<u32>, Option<u32>, bool),
     glow: f32,
-    /// The scene file shown (None: the test room), and the one being read
-    /// on a thread of its own to take its place.
+    /// The scene file shown (None: the test room) and when it was written,
+    /// and the one being read on a thread of its own to take its place.
+    /// Written again (an update downloaded in its place), it is read again.
     scene_path: Option<PathBuf>,
-    loading: Option<(Option<PathBuf>, Receiver<Result<Scene, String>>)>,
+    scene_written: Option<SystemTime>,
+    loading: Option<SceneLoad>,
     /// When the window's frame times were last said (RUST_DOS_VR_TIMING).
     timing_since: std::time::Instant,
+    /// The props as the window shows them (where the scene has them), and
+    /// the game's manuals, which they haven't taken yet if `fresh_manuals`.
+    props: props::Props,
+    manuals: Vec<PathBuf>,
+    fresh_manuals: bool,
+    /// The lamps, the time of day and the weather, which the headset's
+    /// thread and the sound share.
+    world: Arc<World>,
+    /// Where the camera's pictures go, the cameras clicked to take one,
+    /// and what the threads saving them said.
+    capture_dir: Option<PathBuf>,
+    shots: Vec<usize>,
+    photo_notes: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 /// How the window's view is drawn, as `look` says: timed with
@@ -91,8 +119,28 @@ fn window_options(look: VrLook) -> Options {
     }
 }
 
+/// What the headset's session is started again for when it changes.
+fn headset_options(settings: &VrSettings) -> (VrGraphics, Option<u32>, Option<u32>, bool) {
+    (settings.graphics, settings.resolution, settings.refresh, settings.keyboard != rust_dos::vr::VrKeyboard::Off)
+}
+
 /// Width and height.
 type Size = (u32, u32);
+
+/// Where the window's camera starts in `scene`: at its spawn, or where
+/// RUST_DOS_VR_CAMERA ("x,y,z,yaw,pitch", degrees) says, for pictures of
+/// the scene from elsewhere.
+fn start_camera(scene: &Scene) -> FlyCamera {
+    let set: Option<Vec<f32>> = std::env::var("RUST_DOS_VR_CAMERA").ok().map(|v| v.split(',').filter_map(|n| n.trim().parse().ok()).collect());
+    match set.as_deref() {
+        Some(&[x, y, z, yaw, pitch]) => FlyCamera::at(scene::Spawn {
+            position: glam::Vec3::new(x, y, z),
+            yaw: yaw.to_radians(),
+            pitch: pitch.to_radians(),
+        }),
+        _ => FlyCamera::at(scene.spawn),
+    }
+}
 
 /// What has to be done before SDL starts for a headset to work.
 #[cfg_attr(not(xr), allow(unused_variables))]
@@ -142,7 +190,10 @@ impl Stage {
             gpu.set_anisotropy(gl);
             screens.push(screen);
         }
-        let camera = FlyCamera::at(scene.spawn);
+        let camera = start_camera(&scene);
+        let props = props::Props::new(&scene);
+        let world = Arc::new(World::new(settings));
+        world.set_scene(&scene);
         #[allow(unused_mut)]
         let mut stage = Stage {
             scene,
@@ -161,11 +212,19 @@ impl Stage {
             mode: settings.mode,
             look,
             mobile,
-            headset_options: (settings.graphics, settings.resolution, settings.refresh),
+            headset_options: headset_options(settings),
             glow: glow_of(settings),
             scene_path: settings.scene.clone(),
+            scene_written: written(settings.scene.as_deref()),
             loading: None,
             timing_since: std::time::Instant::now(),
+            props,
+            manuals: Vec::new(),
+            fresh_manuals: false,
+            world,
+            capture_dir: None,
+            shots: Vec::new(),
+            photo_notes: Default::default(),
         };
         if settings.mode == VrMode::Headset {
             notes.extend(stage.start_headset(settings, window, main));
@@ -184,8 +243,12 @@ impl Stage {
         #[cfg(xr)]
         {
             let textures = [self.screens[0].texture, self.screens[1].texture, self.screens[2].texture];
-            match headset::Headset::start(window, main, self.glsl, self.scene.clone(), textures, settings) {
+            match headset::Headset::start(window, main, self.glsl, self.scene.clone(), textures, settings, self.world.clone()) {
                 Ok(headset) => {
+                    headset.set_manuals(self.manuals.clone());
+                    if let Some(dir) = &self.capture_dir {
+                        headset.set_capture_dir(dir.clone());
+                    }
                     self.headset = Some(headset);
                     None
                 }
@@ -211,6 +274,7 @@ impl Stage {
     /// `gl` current. (A scene still being read is let go of.)
     pub fn close(mut self, gl: &glow::Context) {
         self.stop_headset(gl);
+        self.props.delete(gl);
         self.gpu.delete(gl);
         for screen in self.screens {
             screen.delete(gl);
@@ -274,13 +338,25 @@ impl Stage {
         }
         let screen = self.latest.map(|i| self.screens[i].texture);
         self.gpu.frame_start(gl);
+        let now = std::time::Instant::now();
+        self.gpu.set_ambience(gl, &self.scene, self.world.ambience(&self.scene, now));
         if let Some(texture) = screen.filter(|_| std::mem::take(&mut self.fresh)) {
             self.gpu.prepare(gl, &self.scene, texture);
         }
         let aspect = drawable.0 as f32 / drawable.1 as f32;
         let view = View { view: self.camera.view(), projection: self.camera.projection(aspect) };
         let format = Format { size: drawable, srgb: false };
-        if let Err(e) = self.gpu.render(gl, &self.scene, &[view], Dest::Own(format), drawable, screen, self.leds, &[]) {
+        if std::mem::take(&mut self.fresh_manuals) {
+            self.props.set_manuals(gl, self.manuals.clone());
+        }
+        for camera in std::mem::take(&mut self.shots) {
+            let notes = self.photo_notes.clone();
+            let said = move |note: String| notes.lock().unwrap_or_else(|e| e.into_inner()).push(note);
+            let dir = self.capture_dir.clone();
+            photo::take(gl, &mut self.gpu, &self.scene, &mut self.props, &self.world, camera, screen, self.leds, dir, said, now);
+        }
+        let props = self.props.draws(gl, &self.gpu, &self.scene, now);
+        if let Err(e) = self.gpu.render(gl, &self.scene, &[view], Dest::Own(format), drawable, screen, self.leds, &props, &[], Punch::None) {
             eprintln!("[VR] {}", e);
             clear_window(gl, drawable);
             return;
@@ -307,6 +383,51 @@ impl Stage {
         pick::pick(&self.scene.screen, origin, dir)
     }
 
+    /// A click of the mouse at a point of the window's drawable: a lamp
+    /// there in front of the screen is switched. Whether it was something
+    /// of the scene's (and not the screen's).
+    pub fn click(&mut self, (x, y): (f32, f32)) -> bool {
+        let Some((view_projection, (rx, ry, rw, rh))) = self.shown else { return false };
+        let ndc = Vec2::new((x - rx) / rw.max(1.0) * 2.0 - 1.0, 1.0 - (y - ry) / rh.max(1.0) * 2.0);
+        let (origin, dir) = pick::ray(view_projection.inverse(), ndc);
+        let screen = pick::pick_hit(&self.scene.screen, origin, dir).map(|(t, _)| t);
+        let targets = self.props.targets(&self.scene);
+        match pick::pick_target(&targets, origin, dir) {
+            Some((t, id)) if screen.is_none_or(|s| t < s) => {
+                self.act(id);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Do what clicking `id` does: switch a lamp, or take a camera's
+    /// picture (in the headset, while it shows the scene).
+    fn act(&mut self, id: pick::TargetId) {
+        match id {
+            pick::TargetId::Lamp(i) => self.world.toggle_lamp(i),
+            pick::TargetId::Camera(i) => {
+                #[cfg(xr)]
+                if let Some(headset) = self.headset.as_ref().filter(|h| h.running()) {
+                    headset.take_picture(i);
+                    return;
+                }
+                self.shots.push(i);
+            }
+        }
+    }
+
+    /// Where the camera's pictures go.
+    pub fn set_capture_dir(&mut self, dir: &std::path::Path) {
+        if self.capture_dir.as_deref() != Some(dir) {
+            self.capture_dir = Some(dir.to_path_buf());
+            #[cfg(xr)]
+            if let Some(headset) = &self.headset {
+                headset.set_capture_dir(dir.to_path_buf());
+            }
+        }
+    }
+
     /// The window's camera, to fly.
     pub fn camera_mut(&mut self) -> &mut FlyCamera {
         &mut self.camera
@@ -315,10 +436,30 @@ impl Stage {
     /// Back to where the scene starts, and the headset's view centred
     /// where it looks now.
     pub fn recenter(&mut self) {
-        self.camera = FlyCamera::at(self.scene.spawn);
+        self.camera = start_camera(&self.scene);
         #[cfg(xr)]
         if let Some(headset) = &self.headset {
             headset.recenter();
+        }
+    }
+
+    /// Mark the real keyboard with a controller, in the headset: false
+    /// without one.
+    pub fn mark_keyboard(&mut self) -> bool {
+        #[cfg(xr)]
+        if let Some(headset) = &self.headset {
+            headset.mark_keyboard();
+            return true;
+        }
+        false
+    }
+
+    /// A key of the host's was pressed (where the fingers are finds the
+    /// keyboard).
+    pub fn key_pressed(&self) {
+        #[cfg(xr)]
+        if let Some(headset) = &self.headset {
+            headset.key_pressed();
         }
     }
 
@@ -335,6 +476,7 @@ impl Stage {
     /// the one shown, with `gl` current.
     pub fn poll(&mut self, gl: &glow::Context) -> Vec<String> {
         let mut notes = self.poll_scene(gl);
+        notes.append(&mut self.photo_notes.lock().unwrap_or_else(|e| e.into_inner()));
         #[cfg(xr)]
         if let Some(headset) = &self.headset {
             let (said, ended) = headset.poll();
@@ -349,8 +491,9 @@ impl Stage {
     /// Read the scene `path` (None: the test room) on a thread of its own,
     /// to show once it is read.
     fn switch_scene(&mut self, path: Option<PathBuf>) {
-        let wanted = self.loading.as_ref().map_or(&self.scene_path, |(path, _)| path);
-        if *wanted == path {
+        let when = written(path.as_deref());
+        let wanted = self.loading.as_ref().map_or((&self.scene_path, self.scene_written), |(path, when, _)| (path, *when));
+        if wanted == (&path, when) {
             return;
         }
         let (done, result) = std::sync::mpsc::channel();
@@ -360,20 +503,20 @@ impl Stage {
         });
         // (Without a thread, the scene stays.)
         if spawned.is_ok() {
-            self.loading = Some((path, result));
+            self.loading = Some((path, when, result));
         }
     }
 
     /// The scene read, in place of the one shown: in the window, and in
     /// the headset. Kept if it can't be drawn.
     fn poll_scene(&mut self, gl: &glow::Context) -> Vec<String> {
-        let Some((path, result)) = &self.loading else { return Vec::new() };
+        let Some((path, when, result)) = &self.loading else { return Vec::new() };
         let read = match result.try_recv() {
             Ok(read) => read,
             Err(TryRecvError::Empty) => return Vec::new(),
             Err(TryRecvError::Disconnected) => Err("reading it stopped".to_string()),
         };
-        let path = path.clone();
+        let (path, when) = (path.clone(), *when);
         self.loading = None;
         let scene = match read.and_then(|scene| Ok((Gpu::new(gl, self.glsl, &scene, self.look.quality, window_options(self.look))?, scene))) {
             Ok((gpu, scene)) => {
@@ -382,14 +525,18 @@ impl Stage {
                 Arc::new(scene)
             }
             Err(e) => {
-                // Tried again when it is chosen again.
+                // Tried again when it is chosen again, or written again.
                 self.scene_path = path;
+                self.scene_written = when;
                 return vec![format!("The scene can't be shown: {}", e)];
             }
         };
         self.scene_path = path;
+        self.scene_written = when;
         self.scene = scene.clone();
-        self.camera = FlyCamera::at(scene.spawn);
+        self.camera = start_camera(&scene);
+        self.props.reset(&scene);
+        self.world.set_scene(&scene);
         self.fresh = self.latest.is_some();
         self.shown = None;
         #[cfg(xr)]
@@ -406,6 +553,19 @@ impl Stage {
         #[cfg(xr)]
         if let Some(headset) = &self.headset {
             headset.set_leds(leds);
+        }
+    }
+
+    /// The game's manuals, for the booklet on the desk: none hides it.
+    pub fn set_manuals(&mut self, manuals: &[PathBuf]) {
+        if manuals == self.manuals.as_slice() {
+            return;
+        }
+        self.manuals = manuals.to_vec();
+        self.fresh_manuals = true;
+        #[cfg(xr)]
+        if let Some(headset) = &self.headset {
+            headset.set_manuals(self.manuals.clone());
         }
     }
 
@@ -435,8 +595,8 @@ impl Stage {
                 Err(e) => notes.push(format!("[VR] The lighting can't be changed: {}", e)),
             }
         }
-        if (settings.graphics, settings.resolution, settings.refresh) != self.headset_options {
-            self.headset_options = (settings.graphics, settings.resolution, settings.refresh);
+        if headset_options(settings) != self.headset_options {
+            self.headset_options = headset_options(settings);
             restart |= self.has_headset();
         }
         if settings.mode != self.mode || restart {
@@ -447,6 +607,7 @@ impl Stage {
             self.mode = settings.mode;
         }
         self.fit = settings.screen_fit;
+        self.world.apply(settings);
         self.glow = glow_of(settings);
         self.gpu.set_glow(self.glow);
         self.switch_scene(settings.scene.clone());
@@ -455,6 +616,7 @@ impl Stage {
             headset.set_controllers(settings.controllers);
             headset.set_glow(glow_of(settings));
             headset.set_placement(headset::Placement::of(settings));
+            headset.set_keyboard(settings.keyboard);
         }
         notes
     }
@@ -467,14 +629,33 @@ impl Stage {
         None
     }
 
-    /// How the sound's channels mix for the listener: the headset's head
-    /// while it shows the scene, else the window's camera.
-    pub fn audio_mix(&self) -> Mix {
+    /// The room's own sounds for the listener now: the rain from the
+    /// windows' side, the thunder's loudness, and what plays once.
+    pub fn room_sound(&self) -> (super::room_sound::Ambience, Vec<super::room_sound::Effect>) {
+        let (rain, thunder, effects) = self.world.sound(std::time::Instant::now());
+        let listener = self.listener();
+        let at = listener.transform_point3(glam::Vec3::ZERO);
+        let right = listener.transform_vector3(glam::Vec3::X).normalize_or(glam::Vec3::X);
+        let nearest = self.scene.windows.iter().min_by(|a, b| a.distance(at).total_cmp(&b.distance(at)));
+        let pan = nearest.map_or(0.0, |w| (*w - at).normalize_or_zero().dot(right));
+        let indoor = self.scene.indoor.is_some_and(|(low, high)| at.cmpge(low).all() && at.cmple(high).all());
+        (super::room_sound::Ambience { rain, pan, indoor, thunder }, effects)
+    }
+
+    /// Where the listener is: the headset's head while it shows the scene,
+    /// else the window's camera.
+    fn listener(&self) -> Mat4 {
         #[cfg(xr)]
         let head = self.headset.as_ref().and_then(|h| h.input()).and_then(|(_, head)| head);
         #[cfg(not(xr))]
         let head: Option<Mat4> = None;
-        let listener = head.unwrap_or_else(|| self.camera.view().inverse());
+        head.unwrap_or_else(|| self.camera.view().inverse())
+    }
+
+    /// How the sound's channels mix for the listener: the headset's head
+    /// while it shows the scene, else the window's camera.
+    pub fn audio_mix(&self) -> Mix {
+        let listener = self.listener();
         let spawn = self.scene.spawn;
         let start = Mat4::from_translation(spawn.position) * Mat4::from_rotation_y(spawn.yaw);
         spatial::mix(listener, start, self.scene.speakers)
@@ -482,6 +663,11 @@ impl Stage {
 }
 
 /// The scene of the file `path`, or the test room.
+/// When the scene file `path` was last written, if it can be said.
+fn written(path: Option<&std::path::Path>) -> Option<SystemTime> {
+    std::fs::metadata(path?).and_then(|m| m.modified()).ok()
+}
+
 fn load(path: Option<&std::path::Path>) -> Result<Scene, String> {
     match path {
         Some(path) => Scene::load(path),

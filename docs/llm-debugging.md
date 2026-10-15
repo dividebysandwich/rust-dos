@@ -113,7 +113,9 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
 - **Check sound with `/api/status` → `audio`.** `peak` is the loudest
   sample since the previous status request (0 means silence), `underruns`
   counts how often the output device ran dry, and `sound_blaster` is the
-  card's BLASTER string (null without one). To listen or analyse, record
+  card's BLASTER string for where it answers now, after a driver or a Plug
+  and Play configuration moved it (null without a card, or while a
+  ViBRA16C's audio device is inactive). To listen or analyse, record
   `/ws/audio`: a JSON format header, then s16le stereo PCM at 44.1 kHz
   (`curl -s --max-time 3 ws://localhost:8086/ws/audio -o audio.bin`).
   `ultrasound` is the ULTRASND string, and `midi_synth` says what plays the
@@ -419,6 +421,16 @@ curl -s "$H/api/journal?after=$S&type=paused&wait=30000"   # long poll for the n
 - **Registers:** `GET /api/registers`, or
   `PUT /api/registers {"ax":"1234","flags":"0246"}`. Strings are hex; JSON
   numbers are decimal.
+- **FPU, MMX and SSE registers:** `GET /api/registers/fpu` has the x87
+  `control`, `status` and `tag` words, `top`, and `st`: ST(0) to ST(7),
+  each with the physical register it is (`reg`), its `tag` (`valid`,
+  `zero`, `special` or `empty`), its 80 `bits` and its `value` as a
+  double (null for a NaN, an infinity or a number beyond a double's range,
+  0 for one below a double's normal range). With MMX it adds `mm`, MM0 to
+  MM7 as 16 hex digits (the low 64 bits of physical registers 0 to 7,
+  whatever the stack top); with SSE, `xmm` (each register's `bits` and its
+  four singles, `ps`, low lane first, null for a NaN or an infinity) and
+  `mxcsr`. They are read only.
 - **Memory:**
   - Read with `GET /api/memory?addr=B800:0000&len=160`. `format` picks the
     reply: `hex` (the default) is a text dump in DEBUG's layout, `json` is
@@ -510,7 +522,8 @@ A plain save or load is carried out at the end of the frame, whether the
 machine runs or is paused (in deterministic mode a load waits for a pause,
 see "Deterministic runs"). A load puts in the hardware settings the state
 was saved with, then the machine, which mounts the drives as the state had
-them and unmounts the others; a state of another `memsize` is refused.
+them and unmounts the others; a state of another `memsize` brings its
+memory size as well.
 Breakpoints, watchpoints and `break_on` stops stay, and keys held down
 through `/api/input` or the window go up.
 
@@ -722,13 +735,40 @@ counts as a change. Labels, the files' times
 and read-only folders' contents aren't compared. Z: and X:, which the
 machine makes itself, aren't listed.
 
+#### Loading a state in another run
+
+A state records a folder drive by its host folder, so a load in another
+run whose C: shows another folder (a fresh copy for each run, say) finds
+a different folder: a strict-match load refuses it, and a plain load
+mounts the state's folder again. `"folders"` on a load names the folder
+drives to take from other host folders, by letter, each an absolute path:
+
+```sh
+cp -r /runs/1/c /runs/2/c   # C: as it was when the state was saved
+curl -s $J -XPOST -d '{"path":"/work/a.state","strict_match":true,"check_files":true,"folders":{"C":"/runs/2/c"}}' $H/api/state/load
+```
+
+The load then takes the state as if it had been saved with C: mounted
+from `/runs/2/c`: the media are compared with that folder, a
+`check_files` load compares the files in it with the state's record, and
+the load leaves C: mounted from it, with the files the state had open
+opened again there. A strict-match load with `check_files` thereby
+loads the state only onto a copy holding what C: held at the save. The
+reply and the journal's `state_loaded` entry have `folders`, the folders
+taken; the reply's header keeps the folders the state records. A drive
+the state hasn't as a folder drive (none, or one of disk images or with
+an overlay), a path that isn't an existing folder, and a drive named twice
+(`"C"` and `"c"`) are refused with 400 and nothing is loaded, as is a save
+with `folders`. The folder is compared by its canonical path, as a
+mounted drive's is, so a symbolic link to the copy matches it.
+
 #### Replies
 
 A save replies `{"saved": path, "format", "emulator", "header"}` and a load
 `{"loaded": path, "format", "emulator", "header"}`, with `differences`
 after a plain load that found some, `debugger_reset` after a strict-match
-load, and `unchecked` after a `check_files` load of a state without a
-record of the files.
+load, `unchecked` after a `check_files` load of a state without a
+record of the files, and `folders` after a load that took some.
 
 - `format`: the version of the file's layout.
 - `emulator`: the version of the running rust-dos.
@@ -739,7 +779,7 @@ record of the files.
   - `program`: the program that ran, as DOS started it; empty at the prompt.
   - `machine`: the hardware settings, as configuration text with only the
     settings that aren't the defaults (empty if all are).
-  - `memsize`: the memory in MB, which the loading machine must have.
+  - `memsize`: the memory in MB, which the loading machine takes on.
   - `emulated_ns`: the emulated time.
   - `media`: a list of the mounted drives, each with `drive`, `kind`,
     `read_only`, and `folder`, `overlay` and `images` where it has them;
@@ -767,8 +807,9 @@ record of the files.
 Errors:
 
 - **400** `{"error", "loaded":false, "unchanged":true}`: the load failed (no
-  such file, which reads `empty`, a file that isn't a state, a state of
-  another `memsize`, a drive of the state that can't be mounted,
+  such file, which reads `empty`, a file that isn't a state, a drive of
+  the state that can't be mounted, a `folders` drive the state hasn't as
+  a folder drive or a `folders` path that isn't a folder,
   RetroAchievements hardcore mode) and the machine, its
   settings and its hardware are as they were. A save that can't write its
   file, and a body without `path`, get a 400 with only `error`.
@@ -899,6 +940,13 @@ the system writes its disk (`cp --reflink=auto` on btrfs takes no room).
   (`{"enabled":true,"ports":"1F0-1F7"}` for the primary channel): READ
   SECTORS (20h) and WRITE SECTORS (30h) at 1F7h, the address at 1F3h-1F6h
   (1F6h's bit 6 set for LBA), the data words at 1F0h.
+- **Floppy controller:** a floppy driver's commands show in the port log
+  (`"ports":"3F0-3F7"`): the command bytes written to 3F5h and the result
+  bytes read from it, with 3F4h's status between them (80h idle, 90h
+  taking a command, D0h handing out a result), 3F2h's resets and motors,
+  and 3F7h's disk change line (bit 7). E6h is READ DATA, C5h WRITE DATA,
+  4Ah READ ID, 0Fh SEEK, 08h SENSE INTERRUPT STATUS. The log's `[FDC]`
+  lines name commands it doesn't know.
 
 ### 3dfx (Glide) games
 
@@ -968,6 +1016,27 @@ a game's frame rate at a few fixed speeds shows where it stops growing.
 Start the emulator with `RUST_DOS_AUTO_TRACE=1` to have every measurement
 and the speed it chose printed to stderr.
 
+### Where the emulator's time goes (profiling)
+
+`POST /api/profile {"enabled":true,"duration_ms":30000}` samples which
+part of the emulator runs and which guest code, 2000 times a second, and
+counts port accesses, BIOS and DOS calls, interrupts and the recompiler's
+work meanwhile. Send the input to measure, then read it once:
+
+```sh
+curl -s -X POST $H/api/profile -H 'content-type: application/json'      -d '{"enabled":true,"duration_ms":30000}'
+curl -s -X POST $H/api/input/batch -H 'content-type: application/json' -d @input.json
+curl -s "$H/api/profile?wait_ms=40000&format=text"
+```
+
+Read the `busy_pct` shares (of the time the emulator works, not waiting
+for the next frame), then the hottest guest places with their
+disassembly, the ports and the services. `?zone=io` (or `dynrec`, `hle`,
+`io.vga`) narrows the places to what spent time there; `?format=folded`
+gives flame graph stacks. To compare two builds, load the same save state
+in each and send the same input. [profiling.md](profiling.md) has the
+whole report.
+
 ### Protected-mode programs (DOS extenders)
 
 Programs built with DOS/4GW, DOS/32A, PMODE or Borland's RTM switch the CPU
@@ -1001,8 +1070,13 @@ access rights.
 - **Exceptions:** `GET /api/exceptions` lists the last 64 (vector, error
   code, `CS:EIP`, CR2 for page faults). Page faults (`#PF`, vector 0E) are
   normal under DOS/4GW, whose virtual memory manager loads pages on demand.
-  The log also has a line for each of the first 200 exceptions
-  (`?grep=%23GP`; `#` must be written `%23` in a URL).
+  The log also has lines for exceptions (`?grep=%23GP`; `#` must be
+  written `%23` in a URL): the first 3 at each place (`CS:EIP`), at the
+  first 200 places for each exception. Systems raise many exceptions on
+  purpose from a few places, such as Windows 9x's ARPL breakpoints, the
+  ports and IOPL-sensitive instructions it emulates in virtual-8086 mode
+  and the pages it fills on demand; the limit per place keeps them from
+  hiding the rest.
 - **Break on an exception:** `POST /api/breakpoints {"exception":"0D"}`
   (or `"any"`) pauses at the first instruction of the handler after the CPU
   raises it; the pause reply includes the exception. `{"mode_switch":true}`
@@ -1059,7 +1133,15 @@ address mapped to when it was set.
   instruction terms, but a timer interrupt can arrive between any two steps.
 - **Measuring speed.** `/api/stats` reports `mips` (host speed while
   executing guest code), `emulated_mips` (guest instructions per wall-clock
-  second) and the decode-cache hit rate, averaged over about a second. Use a
+  second) and the decode-cache hit rate, averaged over about a second. Its
+  `frame` object has the settings window's Stats page numbers and the
+  emulated speed over the last quarter second: the game runs at full speed
+  when `emulated_speed` (emulated seconds a wall second) stays near 1,
+  `frame.fps` is the frames the program draws a second (the top-level `fps`
+  counts the window's frames), and `cpu_use` is the percent of the wall
+  time the emulator's main thread works (running the machine and drawing
+  the picture), so 100 minus it is that thread's time to spare, on one host
+  core. Use a
   release build and a CPU-bound scene, such as the Stunts intro, when
   comparing emulator changes.
 - **Coarse timestamps.** Trace times are sampled once per frame (about

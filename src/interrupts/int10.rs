@@ -261,8 +261,10 @@ fn tseng_hicolor(cpu: &mut Cpu) {
     let bl = cpu.get_reg8(Register::BL);
     match cpu.get_al() {
         0xF0 => {
+            let before = mouse_screen(cpu);
             if set_hicolor_mode(cpu, bl, 15) {
                 cpu.set_ax(0x0010);
+                mode_set_for_mouse(cpu, before, false);
             }
         }
         0xF1 => {
@@ -346,7 +348,7 @@ fn emulated_cursor(cpu: &mut Cpu, mut first: u8, mut last: u8) -> (u8, u8) {
         }
         if first + 2 < last {
             if first > 2 {
-                first = (height + 1) / 2;
+                first = height.div_ceil(2);
             }
             last = height;
         } else {
@@ -389,6 +391,32 @@ pub fn assume_machine_display(cpu: &mut Cpu) {
     let page = active_page(cpu);
     let (col, row) = get_cursor(cpu, page);
     set_cursor(cpu, col, row, page);
+}
+
+/// What the mouse driver compares across a mode set: the BIOS mode number,
+/// the VBE mode if one is set, and the cursor's screen (`driver_screen`).
+type MouseScreen = (u8, Option<u16>, (i32, i32));
+
+fn mouse_screen(cpu: &mut Cpu) -> MouseScreen {
+    let bios_mode = cpu.bus.guest_read_8(0x0449) & 0x7F;
+    let vbe_mode = cpu.bus.vbe.mode.as_ref().map(|mode| mode.number);
+    (bios_mode, vbe_mode, crate::mouse::driver_screen(&cpu.bus))
+}
+
+/// Tell the mouse driver a program set a video mode, as a driver hooking
+/// INT 10h sees it (see `MouseState::video_mode_set`). `before` is the
+/// screen before the call: when the mode and the screen are the same, the
+/// program's range stays. `vesa`: the call was VBE function 02h with a
+/// VESA mode number (100h and up).
+fn mode_set_for_mouse(cpu: &mut Cpu, before: MouseScreen, vesa: bool) {
+    use crate::mouse::ModeSet;
+    let after = mouse_screen(cpu);
+    let change = match (after == before, vesa) {
+        (true, _) => ModeSet::Same,
+        (false, true) => ModeSet::Vesa,
+        (false, false) => ModeSet::Standard,
+    };
+    cpu.bus.mouse.video_mode_set(after.2, change);
 }
 
 /// INT 10h AH=00h: set the standard video mode AL (bit 7: keep the
@@ -658,7 +686,11 @@ pub fn handle(cpu: &mut Cpu) {
 
     match ah {
         // AH = 00h: Set Video Mode
-        0x00 => set_mode(cpu, cpu.get_al()),
+        0x00 => {
+            let before = mouse_screen(cpu);
+            set_mode(cpu, cpu.get_al());
+            mode_set_for_mouse(cpu, before, false);
+        }
 
         // AH = 01h: Set Cursor Type
         0x01 => {
@@ -989,7 +1021,7 @@ pub fn handle(cpu: &mut Cpu) {
 
                     for i in 0..16 {
                         let val = cpu.bus.guest_read_8((addr + i) as u32);
-                        cpu.bus.vga.attribute_regs[i as usize] = val;
+                        cpu.bus.vga.attribute_regs[i] = val;
                     }
                     let border = cpu.bus.guest_read_8((addr + 16) as u32);
                     cpu.bus.vga.attribute_regs[0x11] = border;
@@ -1171,6 +1203,9 @@ pub fn handle(cpu: &mut Cpu) {
         // AH = 11h: Character Generator
         0x11 => {
             let al = cpu.get_al();
+            // A text font load (AL=10h-1Fh) can change the rows, and
+            // CuteMouse treats it as a mode set: 80x50 gets 0-399.
+            let before = (0x10..=0x1F).contains(&al).then(|| mouse_screen(cpu));
             match al {
                 // AL=10h/11h/12h/14h: load a font and take its height: as
                 // many rows as fit in the text mode's scanlines (on a VGA's
@@ -1250,6 +1285,9 @@ pub fn handle(cpu: &mut Cpu) {
                     cpu.bus
                         .log_string(&format!("[BIOS] Unhandled INT 10h AH=11h AL={:02X}", al));
                 }
+            }
+            if let Some(before) = before {
+                mode_set_for_mouse(cpu, before, false);
             }
         }
 
@@ -1408,8 +1446,7 @@ pub fn handle(cpu: &mut Cpu) {
                 cpu.set_reg8(Register::BL, display_combination(cpu));
                 cpu.set_reg8(Register::BH, 0x00);
             } else {
-                cpu.bus
-                    .log_string(&format!("[BIOS] Unhandled INT 10h AH=1Ah with AL != 00h"));
+                cpu.bus.log_string("[BIOS] Unhandled INT 10h AH=1Ah with AL != 00h");
             }
         }
 
@@ -1496,7 +1533,20 @@ pub fn handle(cpu: &mut Cpu) {
         }
 
         // AH = 4Fh: VESA BIOS Extensions
-        0x4F => super::vbe::handle(cpu),
+        0x4F => {
+            // Only function 02h sets a mode: the other calls (window
+            // switches among them) skip the mouse's bookkeeping. A mode
+            // number below 100h is a standard mode, set as AH=00h sets it,
+            // and changes the range as AH=00h does.
+            let before = (cpu.get_al() == 0x02).then(|| mouse_screen(cpu));
+            let vesa = cpu.bx() & 0x1FF >= 0x100;
+            super::vbe::handle(cpu);
+            if let Some(before) = before
+                && cpu.ax() == 0x004F
+            {
+                mode_set_for_mouse(cpu, before, vesa);
+            }
+        }
         0x15 if cpu.bus.verite() => crate::bus::verite_bios(cpu),
 
         // AH = 0Ch: Write Graphics Pixel, in any standard graphics mode
@@ -1615,6 +1665,7 @@ fn read_char_at(cpu: &mut Cpu, col: u8, row: u8, page: u8) -> (u8, u8) {
 
 /// Generic Scroll Function (Handles AH=06, AH=07, AH=00, AH=0E)
 /// lines=0 means "Clear Window"
+#[allow(clippy::too_many_arguments)]
 fn scroll_area(
     cpu: &mut Cpu,
     up: bool,

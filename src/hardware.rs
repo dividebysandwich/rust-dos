@@ -38,6 +38,7 @@ pub struct Hardware {
 /// serial ports. Returns the problems with the settings.
 pub fn configure(cpu: &mut Cpu, settings: &Settings, host_layout: &'static crate::keylayout::Layout) -> Vec<String> {
     cpu.model = settings.cpu;
+    cpu.set_tsc_speed(settings.cycles);
     cpu.core = settings.core;
     cpu.post_mode = settings.post;
     cpu.set_fpu_fast(settings.fpu_fast);
@@ -60,6 +61,7 @@ pub fn configure(cpu: &mut Cpu, settings: &Settings, host_layout: &'static crate
     crate::dos_data::set_version(&mut cpu.bus, settings.dos_version);
     cpu.bus.ide_hard_disks = settings.ide_hard_disks;
     cpu.bus.boot_cdrom = settings.boot_cdrom;
+    cpu.bus.floppy_controller = settings.floppy_controller;
     warnings.extend(crate::sound::apply_config(cpu, &settings.sound, None));
     cpu.bus.configure_network(&settings.network);
     cpu.bus.configure_serial(&settings.serial);
@@ -122,6 +124,7 @@ impl Hardware {
     /// Put the settings' hardware in place. Returns the problems with it.
     pub fn apply(&mut self, cpu: &mut Cpu, settings: &Settings) -> Vec<String> {
         cpu.model = settings.cpu;
+        cpu.set_tsc_speed(settings.cycles);
         let mut warnings = if settings.sound != self.sound {
             cpu.bus.log_string("[CONFIG] The sound settings changed");
             crate::sound::apply_config(cpu, &settings.sound, Some(&self.sound))
@@ -143,7 +146,7 @@ impl Hardware {
         let voodoo = settings.voodoo.board();
         if voodoo != self.voodoo {
             match voodoo {
-                Some(board) => cpu.bus.log_string(&format!("[CONFIG] A 3dfx Voodoo Graphics with {} MB", board.megabytes())),
+                Some(board) => cpu.bus.log_string(&format!("[CONFIG] A 3dfx {}", board.describe())),
                 None => cpu.bus.log_string("[CONFIG] No 3dfx card"),
             }
             cpu.bus.configure_voodoo(voodoo);

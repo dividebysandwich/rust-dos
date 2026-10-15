@@ -221,6 +221,14 @@ fn fpu_addsub(ops: &mut Asm) {
         ; b.hi =>slow
         ; ubfx x7, x2, 11, 52
         ; orr x7, x7, x5, lsl 52
+        // Rounded to nearest, ties to even: up when the 11 bits cut off
+        // and the last bit kept come to more than 0x400 (a carry goes on
+        // into the exponent).
+        ; ubfx x6, x2, 11, 1
+        ; and x5, x2, 0x7FF
+        ; add x5, x5, x6
+        ; cmp x5, 0x400
+        ; cinc x7, x7, hi
         ; orr x7, x7, x0, lsl 48
         ; b >store
         ; zero:
@@ -292,6 +300,21 @@ fn mov32(ops: &mut Asm, reg: u8, v: u32) {
     dynasm!(ops ; .arch aarch64 ; movz W(reg), v & 0xFFFF);
     if v >> 16 != 0 {
         dynasm!(ops ; .arch aarch64 ; movk W(reg), v >> 16, lsl 16);
+    }
+}
+
+/// X`reg` = `v`.
+fn mov64(ops: &mut Asm, reg: u8, v: u64) {
+    let part = |shift: u32| (v >> shift & 0xFFFF) as u32;
+    dynasm!(ops ; .arch aarch64 ; movz X(reg), part(0));
+    if part(16) != 0 {
+        dynasm!(ops ; .arch aarch64 ; movk X(reg), part(16), lsl 16);
+    }
+    if part(32) != 0 {
+        dynasm!(ops ; .arch aarch64 ; movk X(reg), part(32), lsl 32);
+    }
+    if part(48) != 0 {
+        dynasm!(ops ; .arch aarch64 ; movk X(reg), part(48), lsl 48);
     }
 }
 
@@ -998,6 +1021,79 @@ impl Gen<'_> {
         self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, leave: true });
     }
 
+    /// `Uop::FBailPrecise` (see `x64::Gen::fpu_bail_precise`).
+    fn fpu_bail_precise(&mut self, regs: u8, when: Precise) {
+        let at = self.ops.new_dynamic_label();
+        match when {
+            Precise::Directed => {
+                self.field(Access::Ldr16, 0, layout::fpu::CONTROL);
+                dynasm!(self.ops ; .arch aarch64 ; tst w0, 0xC00 ; b.eq >precise_done);
+            }
+            Precise::Int(x) => {
+                // As x86-64's.
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; fmov x0, D(d(x))
+                    ; ubfx x2, x0, 52, 11
+                    ; cmp w2, 1023 + 52
+                    ; b.hs >precise_regs
+                    ; cmp w2, 1023 - 1
+                    ; b.lo >precise_done
+                    ; mov w3, 1023 + 51
+                    ; sub w3, w3, w2
+                    ; mov x2, 1
+                    ; lsl x2, x2, x3
+                    ; sub x2, x2, 1
+                    ; tst x0, x2
+                    ; b.ne >precise_done
+                );
+            }
+            Precise::Single(x) => {
+                self.field(Access::Ldr16, 0, layout::fpu::CONTROL);
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; tst w0, 0xC00
+                    ; b.ne >precise_regs
+                    ; fmov x0, D(d(x))
+                    ; tst w0, 0x0FFF_FFFF
+                    ; b.ne >precise_done
+                );
+            }
+            Precise::Equal(a, b) => {
+                // Not equal where unordered either.
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; fcmp D(d(a)), D(d(b))
+                    ; b.ne >precise_done
+                );
+            }
+        }
+        dynasm!(self.ops ; .arch aarch64 ; precise_regs:);
+        self.field(Access::Ldr64, 1, layout::fpu::TOP);
+        for i in (0..8).filter(|i| regs >> i & 1 != 0) {
+            self.cpu_addr(2, layout::fpu::STALE);
+            dynasm!(self.ops
+                ; .arch aarch64
+                ; add w3, w1, i
+                ; and w3, w3, 7
+                ; ldrb w0, [x2, x3]
+                ; cbnz w0, >precise_next
+            );
+            self.cpu_addr(2, layout::fpu::X80);
+            dynasm!(self.ops
+                ; .arch aarch64
+                ; add x2, x2, x3, lsl 4
+                ; ldr x0, [x2]
+                ; tst x0, 0x7FF
+                ; b.ne =>at
+                ; precise_next:
+            );
+        }
+        dynasm!(self.ops ; .arch aarch64 ; precise_done:);
+        let end = self.end();
+        self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, leave: true });
+    }
+
     /// `Uop::FToInt`: the conversion inline where the control word rounds
     /// to nearest or chops and the result fits, else through
     /// `jit_fpu_to_int`. (AArch64's conversions saturate and make a NaN 0,
@@ -1045,6 +1141,40 @@ impl Gen<'_> {
         );
     }
 
+    /// `Uop::FToInt64`: the conversion where the control word rounds to
+    /// nearest or chops, else the handler's. AArch64's conversions saturate
+    /// and make a NaN 0: a NaN and the limits go to the handler too.
+    fn fpu_to_int64(&mut self, lo: T, hi: T, x: X) {
+        let x_ = d(x);
+        let at = self.ops.new_dynamic_label();
+        self.field(Access::Ldr16, 0, layout::fpu::CONTROL);
+        dynasm!(self.ops
+            ; .arch aarch64
+            ; fcmp D(x_), D(x_)
+            ; b.vs =>at
+            ; and w0, w0, 0xC00
+            ; cbnz w0, >toint64_other
+            ; fcvtns x1, D(x_)
+            ; b >toint64_check
+            ; toint64_other:
+            ; cmp w0, 0xC00
+            ; b.ne =>at
+            ; fcvtzs x1, D(x_)
+            ; toint64_check:
+            ; movz x2, 0x8000, lsl 48
+            ; cmp x1, x2
+            ; b.eq =>at
+            ; sub x2, x2, 1
+            ; cmp x1, x2
+            ; b.eq =>at
+            ; mov W(r(lo)), w1
+            ; lsr x1, x1, 32
+            ; mov W(r(hi)), w1
+        );
+        let end = self.end();
+        self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, leave: false });
+    }
+
     /// Add `v` to the u64 CPU field at `off`.
     fn add_field64(&mut self, off: usize, v: u32) {
         if v == 0 {
@@ -1087,6 +1217,18 @@ impl Gen<'_> {
         *self.end.get_or_insert_with(|| ops.new_dynamic_label())
     }
 
+    /// As x86-64's: a label that stops the block after the instruction
+    /// being translated, for STI and POPF to jump to.
+    fn stop_after(&mut self) -> DynamicLabel {
+        let data = self.data;
+        let next = data.eips[self.ix].wrapping_add(data.instrs[self.ix].len() as u32);
+        let at = self.ops.new_dynamic_label();
+        let fail = self.fail();
+        let code = EXIT_AFTER | if self.dirty { EXIT_FLAGS } else { 0 };
+        self.slow.push(Slow::After { at, next, code, fail });
+        at
+    }
+
     /// X1 = the block's data.
     fn data_x1(&mut self) {
         let lit = self.data_lit;
@@ -1107,6 +1249,12 @@ impl Gen<'_> {
         let data = self.data;
         let n = data.count() as u32;
         let (deadline, revalidate, limit, body) = (self.deadline, self.revalidate, self.limit, self.body);
+        if let Some(word) = self.env.profile {
+            // The profiler's sampler sees the block from here on.
+            mov64(&mut self.ops, 0, word);
+            mov64(&mut self.ops, 1, &crate::profile::WORD as *const _ as u64);
+            dynasm!(self.ops ; .arch aarch64 ; str x0, [x1]);
+        }
         self.field(Access::Ldr64, 0, layout::ICOUNT);
         self.field(Access::Ldr64, 1, layout::DEADLINE);
         dynasm!(self.ops
@@ -1608,6 +1756,7 @@ impl Gen<'_> {
             }
             Uop::Alu { op, size, a, b } => self.alu(op, size, a, b),
             Uop::Unary { op, size, t } => self.unary(op, size, t),
+            Uop::Bswap { t } => dynasm!(self.ops ; .arch aarch64 ; rev W(r(t)), W(r(t))),
             Uop::Shift { op, size, t, count } => self.shift(op, size, t, Some(count)),
             Uop::DoubleShift { left, size, dst, src, count } => self.double_shift(left, size, dst, src, Some(count)),
             Uop::ShiftVar { op, size, t, count } => {
@@ -1795,12 +1944,13 @@ impl Gen<'_> {
                 let end = self.end();
                 self.slow.push(Slow::Bail { at: bail, end, ix: self.ix, dirty: self.dirty, leave: true });
             }
-            Uop::FarCallLoad => {
+            Uop::FarCallLoad { next } => {
                 let fail = self.fail();
                 self.data_x1();
                 dynasm!(self.ops ; .arch aarch64 ; str x1, [x20, CTX_FAR_BLOCK as u32]);
                 self.field(Access::Ldr32, 0, seg_field(Seg::CS, layout::SEG_BASE));
                 dynasm!(self.ops ; .arch aarch64 ; str w0, [x20, CTX_FAR_BASE as u32] ; movz w4, 1);
+                self.mov32(2, next);
                 self.far_call();
                 dynasm!(self.ops ; .arch aarch64 ; cbnz w0, =>fail);
             }
@@ -1868,17 +2018,53 @@ impl Gen<'_> {
             }
             Uop::In { size, port, t } => self.port_io(false, size, port, t),
             Uop::Out { size, port, t } => self.port_io(true, size, port, t),
+            Uop::LoadFlags { t, size } => {
+                // As x86-64's.
+                let t_ = r(t);
+                let at = self.ops.new_dynamic_label();
+                self.field(Access::Ldr8, 1, layout::CPL);
+                dynasm!(self.ops ; .arch aarch64 ; cbnz w1, =>at);
+                self.field(Access::Ldr32, 0, layout::FLAGS);
+                if size == 4 {
+                    self.mov32(2, POPF_KEPT);
+                    dynasm!(self.ops
+                        ; .arch aarch64
+                        ; eor w1, W(t_), w0
+                        ; tst w1, w2
+                        ; b.ne =>at
+                    );
+                }
+                self.mov32(2, POPF_RING0);
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; and w1, W(t_), w2
+                    ; bic w0, w0, w2
+                    ; orr w0, w0, w1
+                    ; orr w0, w0, 2
+                );
+                self.field(Access::Str32, 0, layout::FLAGS);
+                if self.dirty {
+                    dynasm!(self.ops ; .arch aarch64 ; mov w28, w0);
+                }
+                let end = self.end();
+                self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, leave: false });
+            }
+            Uop::FlagsLoaded => {
+                // As x86-64's.
+                let at = self.stop_after();
+                let quiet = self.ops.new_dynamic_label();
+                self.field(Access::Ldr32, 0, layout::FLAGS);
+                dynasm!(self.ops ; .arch aarch64 ; tst w0, 0x100 ; b.ne =>at ; tbz w0, 9, =>quiet);
+                self.field(Access::Ldr8, 2, layout::IRQ_READY);
+                dynasm!(self.ops ; .arch aarch64 ; cbnz w2, =>at ; =>quiet);
+            }
             Uop::Sti => {
                 // As x86-64's: interrupts are recognized after the next
                 // instruction; with one waiting the execution loop runs
                 // that, else the shadow ends where the next instruction
                 // runs, in the block.
                 let data = self.data;
-                let next = data.eips[self.ix].wrapping_add(data.instrs[self.ix].len() as u32);
-                let at = self.ops.new_dynamic_label();
-                let fail = self.fail();
-                let code = EXIT_AFTER | if self.dirty { EXIT_FLAGS } else { 0 };
-                self.slow.push(Slow::After { at, next, code, fail });
+                let at = self.stop_after();
                 self.field(Access::Ldr32, 0, layout::FLAGS);
                 dynasm!(self.ops ; .arch aarch64 ; orr w1, w0, 0x200);
                 self.field(Access::Str32, 1, layout::FLAGS);
@@ -1928,6 +2114,7 @@ impl Gen<'_> {
                 self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, leave: false });
             }
             Uop::FpuGuard { valid } => self.fpu_guard(valid),
+            Uop::FBailPrecise { regs, when } => self.fpu_bail_precise(regs, when),
             Uop::FGet { x, i } => {
                 self.fpu_phys(1, i);
                 self.cpu_addr(2, layout::fpu::F64);
@@ -2064,6 +2251,7 @@ impl Gen<'_> {
                 }
             }
             Uop::FToInt { t, x, size } => self.fpu_to_int(t, x, size),
+            Uop::FToInt64 { lo, hi, x } => self.fpu_to_int64(lo, hi, x),
             Uop::FMul { a, b } => dynasm!(self.ops ; .arch aarch64 ; fmul D(d(a)), D(d(a)), D(d(b))),
             Uop::FAdd { a, b, sub: false } => dynasm!(self.ops ; .arch aarch64 ; fadd D(d(a)), D(d(a)), D(d(b))),
             Uop::FAdd { a, b, sub: true } => dynasm!(self.ops ; .arch aarch64 ; fsub D(d(a)), D(d(a)), D(d(b))),

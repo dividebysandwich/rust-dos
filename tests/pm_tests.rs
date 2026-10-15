@@ -8,6 +8,7 @@ use pmrig::*;
 use rust_dos::cpu::CpuFlags;
 
 const GP: u8 = 13;
+const UD: u8 = 6;
 const NP: u8 = 11;
 const SS: u8 = 12;
 const PF: u8 = 14;
@@ -284,7 +285,7 @@ fn call_gate_to_ring_0_copies_parameters_and_returns_to_ring_3() {
         a.mov(es, ax)?;
         a.push(0x1111u32)?;
         a.push(0x2222u32)?;
-        a.call_far((FREE | 3) as u16, 0)?;
+        a.call_far(FREE | 3, 0)?;
         a.mov(ebx, esp)?;
         a.mov(ecx, ss)?;
         a.int(0x40)
@@ -604,6 +605,83 @@ fn virtual_8086_mode_with_iopl_0_traps_cli() {
     });
     let (vector, stack) = rig.recorded();
     assert_eq!((vector, stack[0], stack[1], stack[2]), (GP as u32, 0, 0, 0x3000));
+}
+
+/// Run virtual-8086 code at 3000:0000 with IOPL 0 under a monitor that
+/// steps over the one-byte instruction raising a #GP, until a #UD, and
+/// return the rig and the log's exception lines.
+fn run_v86_logging_exceptions(v86: &[u8]) -> (Rig, Vec<String>) {
+    let mut rig = Rig::new();
+    rig.load(0x30000, v86);
+    rig.handler(GP, 0, |a| {
+        a.add(dword_ptr(esp + 4), 1)?;
+        a.add(esp, 4)?;
+        a.iretd()
+    });
+    rig.record(UD);
+    let lines = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let log = lines.clone();
+    rig.cpu.bus.log_hook = Some(Box::new(move |line: &str| {
+        if line.starts_with("[CPU] #") {
+            log.borrow_mut().push(line.to_string());
+        }
+    }));
+    rig.run(|a| {
+        for v in [0u32, 0, 0, 0, 0x2000, 0xFFFE, 0x0002_0002, 0x3000, 0] {
+            a.push(v)?;
+        }
+        a.iretd()
+    });
+    assert_eq!(rig.recorded().0, UD as u32, "the run got to the UD2");
+    rig.cpu.bus.log_hook = None;
+    let lines = lines.take();
+    (rig, lines)
+}
+
+#[test]
+fn the_log_has_3_lines_for_each_place_exceptions_are_raised_at() {
+    // With IOPL 0, CLI and STI fault in virtual-8086 mode, as under a
+    // monitor that keeps the virtual interrupt flag. The CLI faults 300
+    // times.
+    let v86 = asm16(0x30000, |a| {
+        let mut again = a.create_label();
+        a.mov(cx, 300u32)?;
+        a.set_label(&mut again)?;
+        a.cli()?;
+        a.loop_(again)?;
+        a.sti()?;
+        a.ud2()
+    });
+    let (rig, lines) = run_v86_logging_exceptions(&v86);
+    assert_eq!(rig.cpu.exceptions, 302, "every exception is counted");
+    assert_eq!(
+        lines,
+        [
+            "[CPU] #GP(0000) at 3000:00000003 in virtual-8086 mode",
+            "[CPU] #GP(0000) at 3000:00000003 in virtual-8086 mode",
+            "[CPU] #GP(0000) at 3000:00000003 in virtual-8086 mode (later ones here not logged)",
+            "[CPU] #GP(0000) at 3000:00000006 in virtual-8086 mode",
+            "[CPU] #UD at 3000:00000007 in virtual-8086 mode",
+        ]
+    );
+}
+
+#[test]
+fn an_exception_raised_at_many_places_leaves_the_log_to_the_others() {
+    // 250 CLIs, each a place of its own, then a UD2.
+    let v86 = asm16(0x30000, |a| {
+        for _ in 0..250 {
+            a.cli()?;
+        }
+        a.ud2()
+    });
+    let (_, lines) = run_v86_logging_exceptions(&v86);
+    assert_eq!(lines.len(), 201, "200 places of the #GP, and the #UD");
+    assert_eq!(
+        lines[199],
+        "[CPU] #GP(0000) at 3000:000000C7 in virtual-8086 mode (last place logged for this exception)"
+    );
+    assert_eq!(lines[200], "[CPU] #UD at 3000:000000FA in virtual-8086 mode");
 }
 
 #[test]
@@ -1378,7 +1456,7 @@ fn a_segment_loaded_again_after_its_table_was_mapped_elsewhere_uses_the_new_page
         a.mov(ebx, dword_ptr(0))?;
         a.mov(ax, DATA32 as u32)?;
         a.mov(es, ax)?;
-        a.mov(dword_ptr(0x81000u64).es(), (copy | 3) as u32)?;
+        a.mov(dword_ptr(0x81000u64).es(), copy | 3)?;
         a.invlpg(ptr(GDT).es())?;
         a.mov(ax, FREE as u32)?;
         a.mov(ds, ax)?;
@@ -1548,10 +1626,192 @@ fn the_bios_replay_of_an_ide_read_runs_through() {
     let (vector, stack) = rig.recorded();
     assert_eq!((vector, stack[1]), (0x40, 0x3000), "back in the V86 code after the replay");
     assert!(rig.cpu.bus.port_accesses.is_empty());
-    assert!(!rig.cpu.bus.ide_faked);
+    assert!(!rig.cpu.bus.faked_io);
     assert!(stack[2] & 0x200 != 0, "the caller's IF, back from the IRET");
     // The disk read the sector for the replay and is done.
     let status = rig.cpu.bus.io_read(0x3F6);
     assert_eq!(status & 0x89, 0, "not busy, no data left, no error: {:02X}", status);
     assert_eq!((rig.cpu.bus.io_read(0x1F3), rig.cpu.bus.io_read(0x1F2)), (1, 0));
+}
+
+/// The profiler's words are the process's: one test at a time uses them.
+static ONE_PROFILE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[test]
+fn a_profile_charges_ring_0_to_the_entry_and_16_bit_code_to_its_32_bit_caller() {
+    use rust_dos::profile::{self, Cause, Entry, Loc, Mode};
+    use std::sync::atomic::Ordering;
+    let _one = ONE_PROFILE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut rig = Rig::new();
+    rig.handler(0x40, 3, |a| a.hlt());
+    // 16-bit ring 3 code that enters ring 0 with INT 40h, called from
+    // 32-bit ring 3 code: a Win32 program's thunk to Win16 code.
+    let code16_at = RING3 + 0x1000;
+    rig.set_gdt(FREE, seg_desc(code16_at, 0xFFFF, CODE_R3, 0));
+    rig.load(code16_at, &asm16(0, |a| a.int(0x40)));
+    // Called from a routine with an EBP frame, which its caller called
+    // with EBP 0 (the outermost frame).
+    rig.ring3(|a| {
+        let mut routine = a.create_label();
+        a.xor(ebp, ebp)?;
+        a.call(routine)?;
+        a.hlt()?;
+        a.set_label(&mut routine)?;
+        a.push(ebp)?;
+        a.mov(ebp, esp)?;
+        a.call_far(FREE | 3, 0)
+    });
+    profile::set_active(true);
+    rig.run(to_ring3);
+    let entry = Entry::of(profile::ENTRY.load(Ordering::Relaxed));
+    let thunk = profile::thunk_now();
+    profile::set_active(false);
+    let entry = entry.expect("the INT 40h from ring 3 is an entry");
+    assert_eq!(entry.cause(), Cause::Int);
+    assert_eq!(entry.via(), "int 40h");
+    assert_eq!(entry.place().mode(), Mode::Pm16);
+    assert_eq!(entry.place().cs_eip(), Some((FREE | 3, 2)), "the return address, after INT 40h");
+    assert_eq!(Loc(thunk[0]).mode(), Mode::Pm32);
+    let (sel, eip) = Loc(thunk[0]).cs_eip().unwrap();
+    assert_eq!(sel, CODE32_R3);
+    assert_eq!(rig.cpu.bus.read_8((eip - 7) as usize), 0x9A, "the return address of the far call");
+    let (_, ret) = Loc(thunk[1]).cs_eip().expect("the caller up the EBP chain");
+    assert_eq!(rig.cpu.bus.read_8((ret - 5) as usize), 0xE8, "right after the routine's CALL");
+    assert_eq!(thunk[2], 0, "the chain ends at a saved EBP of 0");
+}
+
+#[test]
+fn a_profile_notes_call_gates_and_forgets_a_thunk_back_in_32_bit_code() {
+    use rust_dos::profile::{self, Cause, Entry};
+    use std::sync::atomic::Ordering;
+    let _one = ONE_PROFILE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut rig = Rig::new();
+    let routine = asm32(HANDLERS, |a| a.hlt());
+    rig.load(HANDLERS, &routine);
+    rig.set_gdt(FREE, gate_desc(CODE32, HANDLERS, CALL_GATE32, 3, 0));
+    // 16-bit ring 3 code that returns to 32-bit code at once.
+    let code16_at = RING3 + 0x1000;
+    rig.set_gdt(FREE + 8, seg_desc(code16_at, 0xFFFF, CODE_R3, 0));
+    // o32 RETF: the 32-bit return address the far call pushed.
+    rig.load(code16_at, &[0x66, 0xCB]);
+    rig.ring3(|a| {
+        a.call_far((FREE + 8) | 3, 0)?;
+        a.call_far(FREE | 3, 0)
+    });
+    profile::set_active(true);
+    rig.run(to_ring3);
+    let entry = Entry::of(profile::ENTRY.load(Ordering::Relaxed));
+    let thunk = profile::thunk_now();
+    profile::set_active(false);
+    let entry = entry.expect("the call gate to ring 0 is an entry");
+    assert_eq!(entry.cause(), Cause::Gate);
+    assert_eq!(entry.via(), "call gate");
+    assert_eq!(entry.place().cs_eip(), Some((CODE32_R3, RING3 + 14)));
+    assert_eq!(thunk, [0; 4], "the 16-bit code returned to 32-bit code");
+}
+
+#[test]
+fn a_thunk_without_ebp_frames_finds_its_callers_on_the_stack() {
+    use rust_dos::profile::{self, Loc};
+    let _one = ONE_PROFILE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut rig = Rig::new();
+    rig.handler(0x40, 3, |a| a.hlt());
+    let code16_at = RING3 + 0x1000;
+    rig.set_gdt(FREE, seg_desc(code16_at, 0xFFFF, CODE_R3, 0));
+    rig.load(code16_at, &asm16(0, |a| a.int(0x40)));
+    // A stub without a frame (EBP 0), called with a value on the stack
+    // above the return address that no CALL left there.
+    rig.ring3(|a| {
+        let mut stub = a.create_label();
+        a.xor(ebp, ebp)?;
+        a.push(RING3 + 2)?;
+        a.call(stub)?;
+        a.hlt()?;
+        a.set_label(&mut stub)?;
+        a.call_far(FREE | 3, 0)
+    });
+    profile::set_active(true);
+    rig.run(to_ring3);
+    let thunk = profile::thunk_now();
+    profile::set_active(false);
+    let (_, ret) = Loc(thunk[1]).cs_eip().expect("the stub's caller, from the stack");
+    assert_eq!(rig.cpu.bus.read_8((ret - 5) as usize), 0xE8);
+    assert_eq!(thunk[2], 0, "RING3+2 follows no CALL");
+}
+
+/// A ring 3 program that goes through every place the profiler notes:
+/// 32-bit code with an EBP frame calls 16-bit code, which enters ring 0
+/// with INT 41h and returns to 32-bit code, which calls ring 0 through a
+/// call gate; fifty times. Run as the emulator runs programs, in batches,
+/// with or without a profile. Returns the registers and the memory it
+/// used.
+fn ring_changes(profiled: bool) -> (Vec<u64>, Vec<u8>) {
+    use rust_dos::profile::session::{Options, Session};
+    let mut rig = Rig::new();
+    rig.load(HANDLERS, &asm32(HANDLERS, |a| {
+        a.add(ebx, 0x100u32)?;
+        a.retf()
+    }));
+    rig.set_gdt(FREE, gate_desc(CODE32, HANDLERS, CALL_GATE32, 3, 0));
+    let code16_at = RING3 + 0x1000;
+    rig.set_gdt(FREE + 8, seg_desc(code16_at, 0xFFFF, CODE_R3, 0));
+    let mut code16 = asm16(0, |a| {
+        a.int(0x41)?;
+        a.add(si, 3)
+    });
+    // o32 RETF: back to the 32-bit caller.
+    code16.extend_from_slice(&[0x66, 0xCB]);
+    rig.load(code16_at, &code16);
+    rig.handler(0x41, 3, |a| {
+        a.inc(edx)?;
+        a.iretd()
+    });
+    rig.handler(0x40, 3, |a| a.hlt());
+    rig.ring3(|a| {
+        let mut routine = a.create_label();
+        let mut again = a.create_label();
+        a.mov(ax, DATA32_R3 as u32)?;
+        a.mov(ds, ax)?;
+        a.xor(ebp, ebp)?;
+        a.mov(ecx, 50u32)?;
+        a.set_label(&mut again)?;
+        a.call(routine)?;
+        a.add(dword_ptr(DATA), ecx)?;
+        a.dec(ecx)?;
+        a.jnz(again)?;
+        a.int(0x40)?;
+        a.set_label(&mut routine)?;
+        a.push(ebp)?;
+        a.mov(ebp, esp)?;
+        a.call_far((FREE + 8) | 3, 0)?;
+        a.call_far(FREE | 3, 0)?;
+        a.pop(ebp)?;
+        a.ret()
+    });
+    let mut session = profiled.then(|| Session::start(&mut rig.cpu, Options::default()).unwrap());
+    rig.run_batched(to_ring3);
+    if let Some(s) = &mut session {
+        s.stop(&mut rig.cpu);
+    }
+    let c = &rig.cpu;
+    let regs = [c.eax(), c.ebx(), c.ecx(), c.edx(), c.esi(), c.edi(), c.esp(), c.ebp(), c.eip()];
+    let mut regs: Vec<u64> = regs.iter().map(|&r| r as u64).collect();
+    regs.extend([c.cs() as u64, c.ss() as u64, c.cpl as u64, c.executed]);
+    let mut memory = Vec::new();
+    for (from, len) in [(DATA, 16), (STACK3_TOP - 0x100, 0x100), (STACK0_TOP - 0x100, 0x100)] {
+        memory.extend((from..from + len).map(|at| c.bus.read_8(at as usize)));
+    }
+    (regs, memory)
+}
+
+/// A profile only watches: the ring changes, thunks to 16-bit code and
+/// stack walks it notes leave the program as it would be without one.
+#[test]
+fn a_profile_leaves_ring_changes_as_they_would_be() {
+    let _one = ONE_PROFILE.lock().unwrap_or_else(|e| e.into_inner());
+    let plain = ring_changes(false);
+    assert_eq!(plain.0[1], 0x100 * 50, "the call gate's routine ran each time");
+    assert_eq!(plain.0[3], 50, "so did the INT 41h handler");
+    assert_eq!(plain.1[..4], (1u32..=50).sum::<u32>().to_le_bytes(), "the loop's sum");
+    assert_eq!(ring_changes(true), plain);
 }

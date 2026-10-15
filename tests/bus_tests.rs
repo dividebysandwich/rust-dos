@@ -69,27 +69,18 @@ fn test_little_endian_read_write() {
 #[test]
 fn test_pit_channel_2_latch_logic() {
     let mut bus = Bus::new(std::path::PathBuf::from("."));
-
-    // PIT Channel 2 (Speaker) uses port 0x42
-    // It has a MSB/LSB flip-flop.
-
-    // 1. Initialize Divisor to known state (0xFFFF)
-    bus.pit_divisor = 0xFFFF;
-    bus.pit_write_msb = false; // Expecting LSB next
-
-    // 2. Write LSB (0x12)
+    // Channel 2, LSB then MSB, square wave: the count takes effect once
+    // both bytes are in.
+    bus.io_write(0x43, 0xB6);
     bus.io_write(0x42, 0x12);
-    // Divisor should now be 0xFF12 (LSB changed, MSB kept from init)
-    assert_eq!(bus.pit_divisor, 0xFF12);
-    // Toggle should have flipped
-    assert_eq!(bus.pit_write_msb, true);
-
-    // 3. Write MSB (0x34)
     bus.io_write(0x42, 0x34);
-    // Divisor should now be 0x3412
     assert_eq!(bus.pit_divisor, 0x3412);
-    // Toggle should have flipped back
-    assert_eq!(bus.pit_write_msb, false);
+    // A control word starts the byte sequence over.
+    bus.io_write(0x42, 0x56);
+    bus.io_write(0x43, 0xB6);
+    bus.io_write(0x42, 0x78);
+    bus.io_write(0x42, 0x02);
+    assert_eq!(bus.pit_divisor, 0x0278);
 }
 
 #[test]
@@ -123,10 +114,7 @@ fn test_pit_channel_0_reset_bug() {
     // 3. Verify Latch Reset
     // If bug exists: This remains TRUE
     // If fixed: This becomes FALSE
-    assert_eq!(
-        bus.pit0_write_msb, false,
-        "PIT Channel 0 latch failed to reset after Command 0x36!"
-    );
+    assert!(!bus.pit0_write_msb, "PIT Channel 0 latch failed to reset after Command 0x36!");
 
     // 4. Verify functionality matches expectation
     // We write 0xBB.
@@ -153,18 +141,22 @@ fn test_speaker_io_port_61() {
 
     // 1. Write 0x00 (Both off)
     bus.io_write(0x61, 0x00);
-    assert_eq!(bus.speaker_on, false);
+    assert!(!bus.speaker_on);
     assert_eq!(bus.io_read(0x61) & 0x03, 0x00);
 
     // 2. Write 0x03 (Both on)
     bus.io_write(0x61, 0x03);
-    assert_eq!(bus.speaker_on, true);
+    assert!(bus.speaker_on);
     // Reading 0x61 should reflect the state (masked)
     assert_eq!(bus.io_read(0x61) & 0x03 & 0x03, 0x03);
 
     // 3. Write 0x02 (Bit 0 off)
     bus.io_write(0x61, 0x02);
-    assert_eq!(bus.speaker_on, false);
+    assert!(!bus.speaker_on);
+
+    // The low four bits read back as written, the check enables too.
+    bus.io_write(0x61, 0x0D);
+    assert_eq!(bus.io_read(0x61) & 0x0F, 0x0D);
 }
 
 #[test]

@@ -270,8 +270,8 @@ fn set_szp8(cpu: &mut Cpu, al: u8) {
     cpu.update_pf(al as u32);
 }
 
-/// The flags the BCD adjustments leave undefined are set the way a 386 sets
-/// them (see test386.asm, validated against a 386SX).
+// The flags the BCD adjustments leave undefined are set the way a 386 sets
+// them (see test386.asm, validated against a 386SX).
 
 /// OF of adding (or subtracting) the adjustment `adj` to AL `old`.
 fn bcd_overflow(old: u8, adj: u8, sub: bool) -> bool {
@@ -354,7 +354,7 @@ pub fn aaa(cpu: &mut Cpu) -> CpuResult {
     if al == 0 && !zf_forced_clear {
         f |= ZF;
     }
-    if al.count_ones() % 2 == 0 {
+    if al.count_ones().is_multiple_of(2) {
         f |= PF;
     }
     cpu.set_flag_bits(ARITH, f);
@@ -387,7 +387,7 @@ pub fn aas(cpu: &mut Cpu) -> CpuResult {
     if al == 0 {
         f |= ZF;
     }
-    if al.count_ones() % 2 == 0 {
+    if al.count_ones().is_multiple_of(2) {
         f |= PF;
     }
     cpu.set_flag_bits(ARITH, f);

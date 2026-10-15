@@ -2,25 +2,13 @@ use crate::cpu::Cpu;
 use crate::mouse::{BUTTON_LEFT, BUTTON_MIDDLE, BUTTON_RIGHT};
 use iced_x86::Register;
 
-/// Return (width, height) in driver virtual units for the current video mode.
-/// For graphics modes the driver historically reports X in pixels but rounded
-/// up to multiples that match the internal mouse resolution. We keep it simple
-/// and use the mode's native pixel grid, except for 320-wide modes where the
-/// x range is doubled (convention for the DOS mouse driver). Text modes count
-/// 8 a character (see `mouse::screen_size`).
-fn virtual_screen_dims(bus: &crate::bus::Bus) -> (i32, i32) {
-    let (w, h) = crate::mouse::screen_size(bus);
-    let virt_w = if w < 640 { 640 } else { w as i32 };
-    (virt_w, h as i32)
-}
-
 /// Bytes of driver state AX=16h saves: the event handler's mask and
 /// address, the show/hide counter and the position.
 const STATE_SIZE: usize = 12;
 
 pub fn handle(cpu: &mut Cpu) {
     let ax = cpu.ax();
-    let func = ax & 0xFFFF;
+    let func = ax;
     let now = cpu.bus.clock.now_ns();
     cpu.bus.mouse.last_call_ns = Some(now);
     if func == 0x000B {
@@ -37,7 +25,7 @@ pub fn handle(cpu: &mut Cpu) {
             // that isn't leaves AX alone). BX = button count for both: HelpPC
             // lists BX=2 for AX=0021h, but RBIL, CuteMouse and DOSBox-X
             // return the button count there too.
-            let (w, h) = virtual_screen_dims(&cpu.bus);
+            let (w, h) = crate::mouse::driver_screen(&cpu.bus);
             cpu.bus.mouse.reset(w, h);
             crate::mouse::clear_callback_busy(&mut cpu.bus);
             cpu.set_ax(0xFFFF);
@@ -62,8 +50,8 @@ pub fn handle(cpu: &mut Cpu) {
             //   CX = X in virtual coords
             //   DX = Y in virtual coords
             cpu.set_bx(cpu.bus.mouse.buttons as u16);
-            cpu.set_cx((cpu.bus.mouse.x as u16) & 0xFFFF);
-            cpu.set_dx((cpu.bus.mouse.y as u16) & 0xFFFF);
+            cpu.set_cx(cpu.bus.mouse.x as u16);
+            cpu.set_dx(cpu.bus.mouse.y as u16);
         }
 
         0x0004 => {
@@ -81,8 +69,8 @@ pub fn handle(cpu: &mut Cpu) {
             let count = cpu.bus.mouse.press_count[btn];
             cpu.set_ax(cpu.bus.mouse.buttons as u16);
             cpu.set_bx(count);
-            cpu.set_cx((cpu.bus.mouse.press_x[btn] as u16) & 0xFFFF);
-            cpu.set_dx((cpu.bus.mouse.press_y[btn] as u16) & 0xFFFF);
+            cpu.set_cx(cpu.bus.mouse.press_x[btn] as u16);
+            cpu.set_dx(cpu.bus.mouse.press_y[btn] as u16);
             cpu.bus.mouse.press_count[btn] = 0;
         }
 
@@ -92,8 +80,8 @@ pub fn handle(cpu: &mut Cpu) {
             let count = cpu.bus.mouse.release_count[btn];
             cpu.set_ax(cpu.bus.mouse.buttons as u16);
             cpu.set_bx(count);
-            cpu.set_cx((cpu.bus.mouse.release_x[btn] as u16) & 0xFFFF);
-            cpu.set_dx((cpu.bus.mouse.release_y[btn] as u16) & 0xFFFF);
+            cpu.set_cx(cpu.bus.mouse.release_x[btn] as u16);
+            cpu.set_dx(cpu.bus.mouse.release_y[btn] as u16);
             cpu.bus.mouse.release_count[btn] = 0;
         }
 
@@ -104,6 +92,7 @@ pub fn handle(cpu: &mut Cpu) {
             let (min, max) = if lo <= hi { (lo, hi) } else { (hi, lo) };
             cpu.bus.mouse.min_x = min;
             cpu.bus.mouse.max_x = max;
+            cpu.bus.mouse.range_set.x = true;
             // Also clamp current position.
             let cx = cpu.bus.mouse.x;
             let cy = cpu.bus.mouse.y;
@@ -117,6 +106,7 @@ pub fn handle(cpu: &mut Cpu) {
             let (min, max) = if lo <= hi { (lo, hi) } else { (hi, lo) };
             cpu.bus.mouse.min_y = min;
             cpu.bus.mouse.max_y = max;
+            cpu.bus.mouse.range_set.y = true;
             let cx = cpu.bus.mouse.x;
             let cy = cpu.bus.mouse.y;
             cpu.bus.mouse.warp(cx, cy);

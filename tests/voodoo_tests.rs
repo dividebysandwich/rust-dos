@@ -121,8 +121,8 @@ fn init(bus: &mut Bus) {
     w(bus, FBI_INIT2, 150 << 11);
     w(bus, FBI_INIT3, 0);
     w(bus, BACK_PORCH, 2 << 16 | 40);
-    w(bus, H_SYNC, 800 - 96 - 2 << 16 | 96 - 1);
-    w(bus, V_SYNC, 525 - 2 << 16 | 2);
+    w(bus, H_SYNC, ((800 - 96 - 2) << 16) | (96 - 1));
+    w(bus, V_SYNC, (525 - 2) << 16 | 2);
     w(bus, VIDEO_DIMENSIONS, 479 << 16 | 639);
     cfg_write(bus, 0, 0xC0, 0);
     w(bus, FBI_INIT0, 1);
@@ -484,7 +484,7 @@ fn clipping_and_the_y_origin() {
     let mut bus = bus(Board::Standard);
     init(&mut bus);
     w(&mut bus, CLIP_LEFT_RIGHT, 2 << 16 | 6);
-    w(&mut bus, CLIP_LOW_Y_HIGH_Y, 0 << 16 | 480);
+    w(&mut bus, CLIP_LOW_Y_HIGH_Y, 480);
     w(&mut bus, FBZ_MODE, RGB_WRITE | CLIPPING);
     flat(&mut bus, 255, 255, 255, 0);
     triangle(&mut bus, [(0.0, 0.0), (16.0, 0.0), (0.0, 16.0)]);
@@ -540,9 +540,9 @@ fn point_sampled_textures() {
     let mut bus = bus(Board::Standard);
     init(&mut bus);
     // RGB565 texels: red rising with X, blue with Y.
-    textured_square(&mut bus, 10, false, |x, y| (x * 4) << 11 | y * 4);
+    textured_square(&mut bus, 10, false, |x, y| ((x * 4) << 11) | (y * 4));
     for (x, y) in [(0, 0), (3, 2), (7, 7)] {
-        assert_eq!(pixel(&bus, 0, x, y), ((x as u16 * 4) << 11 | y as u16 * 4), "texel {},{}", x, y);
+        assert_eq!(pixel(&bus, 0, x, y), (((x as u16 * 4) << 11) | (y as u16 * 4)), "texel {},{}", x, y);
     }
 }
 
@@ -867,7 +867,7 @@ fn scene(bus: &mut Bus) {
     w(bus, COLOR1, 0x0020_4060);
     w(bus, FBZ_MODE, RGB_WRITE | AUX_WRITE | 1 << 8);
     w(bus, FASTFILL_CMD, 0);
-    textured_square(bus, 10, true, |x, y| (x * 7 + y * 3) << 11 | (y * 5) << 5 | x * 3);
+    textured_square(bus, 10, true, |x, y| (x * 7 + y * 3) << 11 | (y * 5) << 5 | (x * 3));
     for i in 0..40 {
         let y = (i * 11 % 400) as f32;
         let x = (i * 37 % 500) as f32;
@@ -982,7 +982,7 @@ fn benchmark_rasterizer() {
         let mut bus = bus(Board::Standard);
         bus.voodoo = Some(rust_dos::voodoo::Voodoo::with_workers(Board::Standard, workers));
         init(&mut bus);
-        textured_square(&mut bus, 10, true, |x, y| (x * 7 + y * 3) << 11 | x * 3);
+        textured_square(&mut bus, 10, true, |x, y| ((x * 7 + y * 3) << 11) | (x * 3));
         w(&mut bus, FOG_MODE, 1);
         w(&mut bus, FBZ_MODE, RGB_WRITE | AUX_WRITE | DEPTH_TEST | 7 << 5 | 1 << 8);
         w(&mut bus, D_S_DX, 1 << 17);
@@ -1025,12 +1025,13 @@ fn replays_a_dosbox_x_trace() {
     let now = rust_dos::voodoo::Now::default();
     let fnv = |bytes: &[u8]| bytes.iter().fold(2166136261u32, |h, &b| (h ^ b as u32).wrapping_mul(16777619));
     let (mut swaps, mut bad_swaps, mut reads, mut bad_reads) = (0, 0, 0, 0);
-    for (i, record) in data.chunks_exact(13).enumerate() {
+    for (i, record) in data.as_chunks::<13>().0.iter().enumerate() {
         let word = |n: usize| u32::from_le_bytes(record[1 + 4 * n..5 + 4 * n].try_into().unwrap());
         match record[0] {
-            // A recording of rust-dos's own starts with the board.
+            // A recording of rust-dos's own starts with the board, its
+            // number in `Board::ALL`.
             b'B' => {
-                let board = if word(0) == 1 { Board::Max } else { Board::Standard };
+                let board = Board::ALL.get(word(0) as usize).copied().unwrap_or(Board::Max);
                 v = rust_dos::voodoo::Voodoo::with_workers(board, workers);
             }
             b'P' => {
@@ -1260,7 +1261,7 @@ fn the_opengl_renderer_gets_the_textures_as_the_card_reads_them() {
     init(&mut bus);
     bus.voodoo.as_mut().unwrap().set_mirror(true);
     take_mirror(&mut bus);
-    textured_square(&mut bus, 10, false, |x, y| (x * 4) << 11 | y * 4);
+    textured_square(&mut bus, 10, false, |x, y| ((x * 4) << 11) | (y * 4));
     let frame = take_mirror(&mut bus);
     let decoded = textures(&frame);
     assert_eq!(decoded.len(), 1, "one texture for both triangles");
@@ -1501,7 +1502,7 @@ fn held_back_drawing_leaves_the_memory_as_drawing_at_once() {
         cfg_write(bus, 0, 0x40, 1);
         w(bus, FBI_INIT3, 479 << 22);
         cfg_write(bus, 0, 0x40, 0);
-        textured_square(bus, 10, true, |x, y| (x * 7 + y * 3) << 11 | x * 3);
+        textured_square(bus, 10, true, |x, y| ((x * 7 + y * 3) << 11) | (x * 3));
     }
     for step in 0..6000 {
         let op = rand(100);

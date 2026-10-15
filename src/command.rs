@@ -116,11 +116,11 @@ impl CommandDispatcher {
             return true;
         }
         // "PATH=C:\DOS" is PATH with its argument after the '='.
-        if let Some((name, value)) = command.split_once('=') {
-            if name.eq_ignore_ascii_case("PATH") {
-                PathCommand.execute(cpu, &format!("{} {}", value, args));
-                return true;
-            }
+        if let Some((name, value)) = command.split_once('=')
+            && name.eq_ignore_ascii_case("PATH")
+        {
+            PathCommand.execute(cpu, &format!("{} {}", value, args));
+            return true;
         }
         let Some(cmd) = builtin(command) else {
             return false;
@@ -375,13 +375,11 @@ fn format_dos_timestamp(date: u16, time: u16) -> String {
 pub(crate) fn format_size(n: u64) -> String {
     let s = n.to_string();
     let mut result = String::new();
-    let mut count = 0;
-    for c in s.chars().rev() {
+    for (count, c) in s.chars().rev().enumerate() {
         if count > 0 && count % 3 == 0 {
             result.push(',');
         }
         result.push(c);
-        count += 1;
     }
     result.chars().rev().collect()
 }

@@ -203,6 +203,28 @@ fn scan_lines_and_display_start() {
 }
 
 #[test]
+fn a_write_across_the_display_start_repaints_the_top_row() {
+    let mut cpu = machine();
+    set_mode(&mut cpu, 0x111);
+    cpu.bus.vbe.latched_start = 0x1202;
+    let clean = |cpu: &mut Cpu| {
+        cpu.bus.vga.dirty = false;
+        cpu.bus.vga.dirty_y_min = u32::MAX;
+        cpu.bus.vga.dirty_y_max = 0;
+    };
+    let rows = |cpu: &Cpu| (cpu.bus.vga.dirty, cpu.bus.vga.dirty_y_min, cpu.bus.vga.dirty_y_max);
+    // Wholly before the display start: not shown.
+    clean(&mut cpu);
+    cpu.bus.write_32(LFB_BASE + 0x11FC, 0x1234_5678);
+    assert_eq!(rows(&cpu), (false, u32::MAX, 0));
+    // Its last two bytes are the top row's first pixel.
+    cpu.bus.write_32(LFB_BASE + 0x1200, 0x1234_5678);
+    assert_eq!(rows(&cpu), (true, 0, 1));
+}
+
+#[test]
+// The literals are grouped by colour channel.
+#[allow(clippy::unusual_byte_groupings)]
 fn direct_color_pixels() {
     let mut cpu = machine();
     // 15 bits: 0RRRRRGG GGGBBBBB.

@@ -15,7 +15,9 @@ this if you or your friends run a relay of your own.
 
 # Find or make a LAN room {#rooms}
 
-Multiplayer in three steps:
+A room is a network cable between Rust-DOS players: everyone in the
+same room is on one network, as PCs on one hub would be. Multiplayer in
+three steps:
 
 - Everybody opens this and joins the same room (Enter), or one player
   makes one (**Ins**) and the others join it.
@@ -56,6 +58,11 @@ DOS internet programs with a packet driver. It reaches the internet
 through your computer, and the other players' cards in a LAN room.
 
 DOS games don't need it for multiplayer: the *IPX driver* does that.
+
+Rust-DOS has a small router of its own that gives the guest its address
+(DHCP: leave the guest on "obtain automatically"), looks up names and
+takes it to the internet. A LAN room doesn't: it only links the players'
+cards together.
 
 # NE2000 port {#nic-base}
 

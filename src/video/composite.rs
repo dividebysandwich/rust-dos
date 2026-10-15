@@ -217,6 +217,12 @@ impl Decoder {
         }
     }
 
+    /// What the decoder is made from (the era and the burst setting), as
+    /// bytes, for renderers that keep what they drew lines from.
+    pub fn id(&self) -> [u8; 2] {
+        [(self.era == CompositeEra::New) as u8, self.bw as u8]
+    }
+
     /// Whether this decoder is the one for `era` and the burst setting.
     pub fn is_for(&self, era: CompositeEra, bw: bool) -> bool {
         self.era == era && self.bw == bw

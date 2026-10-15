@@ -250,6 +250,18 @@ pub fn run(gl: &glow::Context, sdl_driver: &str, settings: &VrSettings) {
     }
     if let Ok(modes) = instance.enumerate_environment_blend_modes(system, view) {
         report.line(format!("Blend modes: {:?}", modes));
+        // What `[vr] keyboard` would see the real keyboard through.
+        report.line(format!(
+            "Passthrough: {}; hand tracking {}",
+            if modes.contains(&xr::EnvironmentBlendMode::ALPHA_BLEND) {
+                "alpha blending"
+            } else if available.fb_passthrough {
+                "XR_FB_passthrough"
+            } else {
+                "none"
+            },
+            if available.ext_hand_tracking { "offered" } else { "not offered" }
+        ));
     }
     if wanted.khr_opengl_enable {
         match instance.graphics_requirements::<xr::OpenGL>(system) {
