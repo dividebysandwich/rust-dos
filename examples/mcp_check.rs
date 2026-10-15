@@ -1235,6 +1235,265 @@ async fn data_readiness() -> io::Result<()> {
     )
 }
 
+// Keep the local verification pipeline out of the portable CLI's poll frame.
+// In debug builds, combining all routes exceeded Windows' 1 MiB main stack.
+async fn verify_implementation_phase(phase: u8) -> io::Result<()> {
+    if phase >= 3 {
+        observation_contract_documents()?;
+    }
+    data_readiness().await?;
+    surface().await?;
+    baseline().await?;
+    for toolchain in ["+1.95.0", "+1.98.1"] {
+        cargo_check(
+            &[
+                toolchain,
+                "test",
+                "--locked",
+                "--features",
+                "mcp",
+                "--example",
+                "mcp_check",
+                "--test",
+                "mcp_foundation",
+            ],
+            true,
+        )
+        .await?;
+        cargo_check(
+            &[
+                toolchain,
+                "check",
+                "--locked",
+                "--no-default-features",
+                "--lib",
+            ],
+            false,
+        )
+        .await?;
+        cargo_check(
+            &[toolchain, "check", "--locked", "--features", "mcp"],
+            false,
+        )
+        .await?;
+    }
+    let mut format = Command::new("rustup");
+    format.args([
+        "run",
+        "1.98.1",
+        "rustfmt",
+        "--edition",
+        "2024",
+        "--check",
+        "examples/mcp_check.rs",
+        "examples/mcp_check/acquisition.rs",
+        "examples/mcp_check/assets.rs",
+        "examples/mcp_check/replay.rs",
+        "examples/mcp_check/protocol.rs",
+        "examples/mcp_check/coverage.rs",
+        "examples/mcp_check/runtime_coverage.rs",
+        "examples/mcp_check/native.rs",
+        "examples/mcp_check/native/catalog.rs",
+        "src/debug/control.rs",
+        "src/debug/control/service.rs",
+        "src/debug/mcp/mod.rs",
+        "src/debug/mcp/transport.rs",
+        "src/debug/mcp/sessions.rs",
+        "src/debug/mcp/diagnostics.rs",
+        "tests/mcp_foundation.rs",
+    ]);
+    if phase >= 4 {
+        format.args([
+            "src/debug/control/input.rs",
+            "src/debug/mcp/keyboard.rs",
+            "examples/mcp_check/replay/frontend.rs",
+        ]);
+    }
+    if phase >= 5 {
+        format.args([
+            "src/debug/control/mouse.rs",
+            "src/debug/mcp/mouse.rs",
+            "src/debug/mcp/schemas.rs",
+        ]);
+    }
+    if phase == 6 {
+        format.args([
+            "examples/mcp_check/client.rs",
+            "src/debug/control/metrics.rs",
+            "src/debug/mcp/metrics.rs",
+            "tests/mcp_metrics.rs",
+        ]);
+    }
+    run(format, Duration::from_secs(60), 1024 * 1024).await?;
+    cargo_check(
+        &[
+            "+1.98.1",
+            "clippy",
+            "--locked",
+            "--no-deps",
+            "--example",
+            "mcp_check",
+            "--test",
+            "mcp_foundation",
+        ],
+        false,
+    )
+    .await?;
+    coverage::verify(std::path::Path::new(
+        "docs/mcp/execution/tooling-coverage.json",
+    ))?;
+    if phase >= 3 {
+        cargo_check(
+            &[
+                "+1.98.1",
+                "test",
+                "--locked",
+                "--features",
+                "mcp",
+                "--bin",
+                "rust-dos",
+            ],
+            true,
+        )
+        .await?;
+        cargo_check(
+            &[
+                "+1.98.1",
+                "clippy",
+                "--locked",
+                "--no-deps",
+                "--features",
+                "mcp",
+                "--bin",
+                "rust-dos",
+                "--example",
+                "mcp_check",
+                "--test",
+                "mcp_foundation",
+            ],
+            false,
+        )
+        .await?;
+        runtime_coverage::verify(std::path::Path::new(
+            "docs/mcp/execution/runtime-coverage.json",
+        ))?;
+        for defect in [
+            Defect::BypassLocalAccess,
+            Defect::BypassInputLimit,
+            Defect::LogRequestContents,
+        ] {
+            policy_seed(defect).await?;
+        }
+        if phase >= 4 {
+            for defect in [
+                Defect::ReplayTimedOutInput,
+                Defect::ReportQueuedInputDelivered,
+                Defect::ReleaseForeignHold,
+                Defect::ExecuteExpiredDown,
+            ] {
+                policy_seed(defect).await?;
+            }
+            for case in ["key", "type", "holds", "delivery"] {
+                cargo_check(
+                    &[
+                        "+1.98.1",
+                        "run",
+                        "--locked",
+                        "--example",
+                        "mcp_check",
+                        "--",
+                        "--case",
+                        case,
+                    ],
+                    false,
+                )
+                .await?;
+            }
+        }
+        if phase >= 5 {
+            for defect in [Defect::UseVirtualCoordinates, Defect::OmitDragRelease] {
+                policy_seed(defect).await?;
+            }
+            for case in ["mouse", "drag", "mouse-errors"] {
+                cargo_check(
+                    &[
+                        "+1.98.1",
+                        "run",
+                        "--locked",
+                        "--example",
+                        "mcp_check",
+                        "--",
+                        "--case",
+                        case,
+                    ],
+                    false,
+                )
+                .await?;
+            }
+        }
+        let mut revision = Command::new("git");
+        revision.args(["rev-parse", "HEAD"]);
+        let output = run(revision, Duration::from_secs(10), 8192).await?;
+        let revision = std::str::from_utf8(&output.bytes)
+            .map_err(io::Error::other)?
+            .trim();
+        if phase >= 5 {
+            native::verify_mouse_evidence(
+                std::path::Path::new("docs/mcp/execution/native-mouse.json"),
+                revision,
+            )?;
+            native::verify_frontend_mouse_evidence(
+                std::path::Path::new("docs/mcp/execution/frontend-mouse.json"),
+                revision,
+            )?;
+        }
+        native::challenge_metadata(
+            std::path::Path::new("docs/mcp/execution/native-captures.json"),
+            revision,
+        )?;
+        if phase == 6 {
+            verify_docs(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))?;
+            client::verify_catalog(
+                std::path::Path::new("docs/mcp/execution/client-loop.json"),
+                revision,
+            )?;
+            for features in ["sdl", "mcp"] {
+                cargo_check(
+                    &[
+                        "+1.98.1",
+                        "check",
+                        "--locked",
+                        "--no-default-features",
+                        "--features",
+                        features,
+                        "--bin",
+                        "rust-dos",
+                    ],
+                    false,
+                )
+                .await?;
+            }
+            cargo_check(
+                &[
+                    "+1.98.1",
+                    "run",
+                    "--locked",
+                    "--example",
+                    "mcp_check",
+                    "--",
+                    "--case",
+                    "metrics",
+                ],
+                false,
+            )
+            .await?;
+            verify_final_hardening().await?;
+        }
+        review_phase(phase).await?;
+    }
+    Ok(())
+}
+
 async fn dispatch(cli: Cli) -> io::Result<()> {
     if matches!(
         cli.case,
@@ -1439,262 +1698,7 @@ async fn dispatch(cli: Cli) -> io::Result<()> {
         Target::Baseline => baseline().await,
         Target::Phase {
             number: phase @ (2..=6),
-        } => {
-            if phase >= 3 {
-                observation_contract_documents()?;
-            }
-            data_readiness().await?;
-            surface().await?;
-            baseline().await?;
-            for toolchain in ["+1.95.0", "+1.98.1"] {
-                cargo_check(
-                    &[
-                        toolchain,
-                        "test",
-                        "--locked",
-                        "--features",
-                        "mcp",
-                        "--example",
-                        "mcp_check",
-                        "--test",
-                        "mcp_foundation",
-                    ],
-                    true,
-                )
-                .await?;
-                cargo_check(
-                    &[
-                        toolchain,
-                        "check",
-                        "--locked",
-                        "--no-default-features",
-                        "--lib",
-                    ],
-                    false,
-                )
-                .await?;
-                cargo_check(
-                    &[toolchain, "check", "--locked", "--features", "mcp"],
-                    false,
-                )
-                .await?;
-            }
-            let mut format = Command::new("rustup");
-            format.args([
-                "run",
-                "1.98.1",
-                "rustfmt",
-                "--edition",
-                "2024",
-                "--check",
-                "examples/mcp_check.rs",
-                "examples/mcp_check/acquisition.rs",
-                "examples/mcp_check/assets.rs",
-                "examples/mcp_check/replay.rs",
-                "examples/mcp_check/protocol.rs",
-                "examples/mcp_check/coverage.rs",
-                "examples/mcp_check/runtime_coverage.rs",
-                "examples/mcp_check/native.rs",
-                "examples/mcp_check/native/catalog.rs",
-                "src/debug/control.rs",
-                "src/debug/control/service.rs",
-                "src/debug/mcp/mod.rs",
-                "src/debug/mcp/transport.rs",
-                "src/debug/mcp/sessions.rs",
-                "src/debug/mcp/diagnostics.rs",
-                "tests/mcp_foundation.rs",
-            ]);
-            if phase >= 4 {
-                format.args([
-                    "src/debug/control/input.rs",
-                    "src/debug/mcp/keyboard.rs",
-                    "examples/mcp_check/replay/frontend.rs",
-                ]);
-            }
-            if phase >= 5 {
-                format.args([
-                    "src/debug/control/mouse.rs",
-                    "src/debug/mcp/mouse.rs",
-                    "src/debug/mcp/schemas.rs",
-                ]);
-            }
-            if phase == 6 {
-                format.args([
-                    "examples/mcp_check/client.rs",
-                    "src/debug/control/metrics.rs",
-                    "src/debug/mcp/metrics.rs",
-                    "tests/mcp_metrics.rs",
-                ]);
-            }
-            run(format, Duration::from_secs(60), 1024 * 1024).await?;
-            cargo_check(
-                &[
-                    "+1.98.1",
-                    "clippy",
-                    "--locked",
-                    "--no-deps",
-                    "--example",
-                    "mcp_check",
-                    "--test",
-                    "mcp_foundation",
-                ],
-                false,
-            )
-            .await?;
-            coverage::verify(std::path::Path::new(
-                "docs/mcp/execution/tooling-coverage.json",
-            ))?;
-            if phase >= 3 {
-                cargo_check(
-                    &[
-                        "+1.98.1",
-                        "test",
-                        "--locked",
-                        "--features",
-                        "mcp",
-                        "--bin",
-                        "rust-dos",
-                    ],
-                    true,
-                )
-                .await?;
-                cargo_check(
-                    &[
-                        "+1.98.1",
-                        "clippy",
-                        "--locked",
-                        "--no-deps",
-                        "--features",
-                        "mcp",
-                        "--bin",
-                        "rust-dos",
-                        "--example",
-                        "mcp_check",
-                        "--test",
-                        "mcp_foundation",
-                    ],
-                    false,
-                )
-                .await?;
-                runtime_coverage::verify(std::path::Path::new(
-                    "docs/mcp/execution/runtime-coverage.json",
-                ))?;
-                for defect in [
-                    Defect::BypassLocalAccess,
-                    Defect::BypassInputLimit,
-                    Defect::LogRequestContents,
-                ] {
-                    policy_seed(defect).await?;
-                }
-                if phase >= 4 {
-                    for defect in [
-                        Defect::ReplayTimedOutInput,
-                        Defect::ReportQueuedInputDelivered,
-                        Defect::ReleaseForeignHold,
-                        Defect::ExecuteExpiredDown,
-                    ] {
-                        policy_seed(defect).await?;
-                    }
-                    for case in ["key", "type", "holds", "delivery"] {
-                        cargo_check(
-                            &[
-                                "+1.98.1",
-                                "run",
-                                "--locked",
-                                "--example",
-                                "mcp_check",
-                                "--",
-                                "--case",
-                                case,
-                            ],
-                            false,
-                        )
-                        .await?;
-                    }
-                }
-                if phase >= 5 {
-                    for defect in [Defect::UseVirtualCoordinates, Defect::OmitDragRelease] {
-                        policy_seed(defect).await?;
-                    }
-                    for case in ["mouse", "drag", "mouse-errors"] {
-                        cargo_check(
-                            &[
-                                "+1.98.1",
-                                "run",
-                                "--locked",
-                                "--example",
-                                "mcp_check",
-                                "--",
-                                "--case",
-                                case,
-                            ],
-                            false,
-                        )
-                        .await?;
-                    }
-                }
-                let mut revision = Command::new("git");
-                revision.args(["rev-parse", "HEAD"]);
-                let output = run(revision, Duration::from_secs(10), 8192).await?;
-                let revision = std::str::from_utf8(&output.bytes)
-                    .map_err(io::Error::other)?
-                    .trim();
-                if phase >= 5 {
-                    native::verify_mouse_evidence(
-                        std::path::Path::new("docs/mcp/execution/native-mouse.json"),
-                        revision,
-                    )?;
-                    native::verify_frontend_mouse_evidence(
-                        std::path::Path::new("docs/mcp/execution/frontend-mouse.json"),
-                        revision,
-                    )?;
-                }
-                native::challenge_metadata(
-                    std::path::Path::new("docs/mcp/execution/native-captures.json"),
-                    revision,
-                )?;
-                if phase == 6 {
-                    verify_docs(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))?;
-                    client::verify_catalog(
-                        std::path::Path::new("docs/mcp/execution/client-loop.json"),
-                        revision,
-                    )?;
-                    for features in ["sdl", "mcp"] {
-                        cargo_check(
-                            &[
-                                "+1.98.1",
-                                "check",
-                                "--locked",
-                                "--no-default-features",
-                                "--features",
-                                features,
-                                "--bin",
-                                "rust-dos",
-                            ],
-                            false,
-                        )
-                        .await?;
-                    }
-                    cargo_check(
-                        &[
-                            "+1.98.1",
-                            "run",
-                            "--locked",
-                            "--example",
-                            "mcp_check",
-                            "--",
-                            "--case",
-                            "metrics",
-                        ],
-                        false,
-                    )
-                    .await?;
-                    verify_final_hardening().await?;
-                }
-                review_phase(phase).await?;
-            }
-            Ok(())
-        }
+        } => verify_implementation_phase(phase).await,
         Target::Phase { number: 1 } => {
             for path in [
                 "docs/mcp/decisions.md",
@@ -1923,6 +1927,25 @@ async fn dispatch(cli: Cli) -> io::Result<()> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn cli_dispatch_runs_on_windows_sized_stack() {
+        let mut cli = Cli::try_parse_from(["mcp_check", "foundation"]).unwrap();
+        cli.target = None;
+        std::thread::Builder::new()
+            .stack_size(1024 * 1024)
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let error = runtime.block_on(dispatch(cli)).unwrap_err();
+                assert_eq!(error.to_string(), "a verification target is required");
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
 
     #[test]
     fn pinned_program_acquisition_requires_an_explicit_private_output() {
