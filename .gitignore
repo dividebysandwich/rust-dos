@@ -44,3 +44,7 @@ programs/
 
 # Stray process id files from test scripts
 /pid
+# MCP captures stay private until individually approved for publication.
+/docs/mcp/captures/
+/tests/fixtures/approved/mcp/*
+!/tests/fixtures/approved/mcp/manifest.json

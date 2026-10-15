@@ -58,6 +58,8 @@ impl DebugHub {
         let reply = match result {
             Err((status, body)) => Reply::ErrorJson(status, body),
             Ok(mut value) if request.load => {
+                #[cfg(feature = "mcp")]
+                if !request.strict_match { self.invalidate_owned_after_load(cpu); }
                 self.told_starts = cpu.programs.started;
                 self.told_ends = cpu.programs.ended;
                 let reset = request.strict_match.then(|| self.reset_after_load(cpu));
@@ -112,6 +114,10 @@ impl DebugHub {
     /// operations it cancelled: the control operation under way, a `run`
     /// waiting for its program, and queued input.
     pub fn reset_after_load(&mut self, cpu: &Cpu) -> (Value, Vec<u64>) {
+        let input = self.input_pending();
+        let held_keys = self.remote_held.len();
+        #[cfg(feature = "mcp")]
+        let native_cancelled = self.native_invalidate_restored(cpu);
         let break_on: Vec<&str> = [
             (self.break_exceptions != 0, "exceptions"),
             (self.break_mode_switch, "mode_switch"),
@@ -131,11 +137,13 @@ impl DebugHub {
             // The control operation that was to end with a stop.
             "pause_waits": cancelled.len(),
             "run": self.run_wait.is_some(),
-            "input": self.input_pending(),
-            "held_keys": self.remote_held.len(),
+            "input": input,
+            "held_keys": held_keys,
             // Deterministic mode: a resume's stop at an emulated time.
             "until_ms": self.stop_at_ns.take().is_some(),
         });
+        #[cfg(feature = "mcp")]
+        cancelled.extend(native_cancelled);
         self.once.clear();
         // Keys held before the load are forgotten without a release: the
         // restored keyboard has the keys of the moment it was saved, and
@@ -150,6 +158,8 @@ impl DebugHub {
                 cancelled.push(req);
             }
         }
+        #[cfg(feature = "mcp")]
+        { self.owned_input.spans.clear(); self.owned_input.wait_owner = None; }
         cancelled.sort_unstable();
         cancelled.dedup();
         self.input_wait_until = None;

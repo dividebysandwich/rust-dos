@@ -1,13 +1,18 @@
 //! Request handling: dispatching commands from the server.
 
 use std::path::PathBuf;
+use std::time::Instant;
+#[cfg(feature = "mcp")]
+use std::sync::atomic::Ordering;
+#[cfg(feature = "mcp")]
+use super::owned_input;
 
 use serde_json::{Map, Value, json};
 
 use super::input::expand_input;
 use super::journal::{Kind, OpKind, OpState};
 use super::status::{at_idle_prompt, bytes_record, drives_json, ivt_json, net_json, printer_json, screen_text, serial_json, set_regs, sound_json, stop_reply};
-use super::{Cmd, Ctx, DebugHub, LowInput, Need, PauseReason, Reply, Request, RunWait, SpeedRequest, StateRequest, Watch, journal, parse_addr, pm, regs_json, trace};
+use super::{Cmd, Ctx, DebugHub, LowInput, Need, PauseReason, Reply, Request, RunWait, SpeedRequest, StateRequest, Watch, parse_addr, pm, regs_json, trace};
 use crate::cpu::Cpu;
 use crate::disk::{DriveKind, MountOptions};
 use crate::mount::{parse_drive_name, parse_kind};
@@ -17,10 +22,40 @@ impl DebugHub {
     // ----- request handling --------------------------------------------------
 
     pub(super) fn handle(&mut self, cpu: &mut Cpu, req: Request) {
+        #[cfg(feature = "mcp")]
+        if let (Some(queued_at), Some(shared)) = (req.queued_at, &self.shared) {
+            shared.metrics.queue.record(queued_at.elapsed());
+        }
+        if req
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            let context = Ctx {
+                req: req.req,
+                tag: req.tag,
+                seq: None,
+                op: None,
+                capture: None,
+            };
+            self.answer(
+                &context,
+                req.reply,
+                Reply::Error(408, "the request deadline expired before acceptance".into()),
+            );
+            return;
+        }
         // A stop comes before anything this request does.
         self.flush_stop(cpu);
-        let Request { cmd, reply: tx, req, tag, if_state } = req;
-        let ctx = Ctx { req, tag, seq: None, op: None };
+        let Request { cmd, reply: tx, req, tag, if_state,
+            deadline: _,
+            #[cfg(feature = "mcp")]
+            queued_at: _,
+            capture,
+            _native_admission,
+        } = req;
+        let ctx = Ctx { req, tag, seq: None, op: None,
+            capture,
+        };
         if self.quit.is_some() {
             self.answer(&ctx, tx, Reply::Error(503, "the emulator is shutting down".into()));
             return;
@@ -72,6 +107,10 @@ impl DebugHub {
     /// Carry out a command the hub answers at once.
     fn dispatch(&mut self, cpu: &mut Cpu, cmd: Cmd) -> Reply {
         match cmd {
+            #[cfg(feature = "mcp")]
+            Cmd::NativeInput { input, job } => self.native_input(cpu, input, job),
+            #[cfg(feature = "mcp")]
+            Cmd::NativeOperation(id) => self.native_operation(cpu, id),
             Cmd::Status => {
                 let status = self.status(cpu);
                 cpu.bus.audio_peak = 0;
@@ -85,6 +124,8 @@ impl DebugHub {
                 unreachable!("answered later, by `handle`'s arrangement")
             }
             Cmd::Quit => {
+                #[cfg(feature = "mcp")]
+                self.release_owned_input(cpu);
                 self.quit = self.cur.clone();
                 Reply::Json(json!({"ok": true, "shutting_down": true}))
             }
@@ -159,23 +200,27 @@ impl DebugHub {
             },
             Cmd::Input { events, wait } => {
                 // Pending operations are never evicted: this bounds them.
-                let pending = self.with_journal(|j| j.pending_ops(|k| k == OpKind::Input).len()).unwrap_or(0);
-                if pending >= journal::PENDING_INPUT_CAPACITY {
-                    return Reply::Error(
-                        429,
-                        format!("{} input requests are still being typed: wait for some (or DELETE /api/input)", pending),
-                    );
-                }
+                if let Err(reply) = self.check_input_capacity() { return reply; }
                 let mut low = Vec::new();
                 for ev in &events {
                     if let Err(e) = expand_input(ev, cpu.bus.typing_layout(), &mut low) {
                         return Reply::bad(e);
                     }
                 }
+                #[cfg(feature = "mcp")]
+                if self.native_legacy_conflict(&low) {
+                    return Reply::Error(409, "owned input modifier or key conflict".into());
+                }
+                #[cfg(feature = "mcp")]
+                let remaining = low.len() + 1;
                 self.input.extend(low);
                 // Every input request is an operation, done once its last
                 // event is delivered (`input_delivered`).
                 let req = self.cur.as_ref().map_or(0, |c| c.req);
+                #[cfg(feature = "mcp")]
+                if self.shared.as_ref().is_some_and(|shared| shared.native_enabled.load(Ordering::Acquire)) {
+                    self.owned_input.spans.push_back(owned_input::Span { req, remaining, _job: None, delivered: Vec::new(), borrowed: Vec::new(), button: None, button_delivered: false, picture: None });
+                }
                 self.input.push_back(LowInput::End { req });
                 let tag = self.cur.as_ref().and_then(|c| c.tag.clone());
                 let fields = json!({"events": events.len(), "wait": wait});
@@ -190,14 +235,24 @@ impl DebugHub {
                 Reply::Json(json!({"ok": true, "queued": self.input_pending(), "held": held}))
             }
             Cmd::InputClear => {
-                let mut cancelled = Vec::new();
-                for ev in self.input.drain(..) {
-                    if let LowInput::End { req } = ev {
-                        cancelled.push(req);
+                let cancelled: Vec<u64> = self.input.iter().filter_map(|event| match event {
+                    LowInput::End { req } => {
+                        // A completed native down can still await its queue marker.
+                        #[cfg(feature = "mcp")]
+                        if self.owned_input.holds.iter().any(|hold| {
+                            hold.handle.operation.request == *req && hold.state == rust_dos::control::HoldState::Delivered
+                        }) { return None; }
+                        Some(*req)
                     }
-                }
+                    _ => None,
+                }).collect();
+                #[cfg(feature = "mcp")]
+                self.release_owned_input(cpu);
+                self.input.clear();
                 self.input_wait_until = None;
                 self.input_wait_ns = None;
+                #[cfg(feature = "mcp")]
+                { self.owned_input.spans.clear(); self.owned_input.wait_owner = None; }
                 let ids = cancelled.clone();
                 let cause = self.cur.as_ref().map(|c| c.req);
                 self.append_then(cpu, Kind::InputCleared, cause, json!({"cancelled": cancelled}), |j, seq| {
@@ -581,6 +636,16 @@ impl DebugHub {
 /// Commands that change the machine (its input, memory, registers, drives,
 /// speed or state), which deterministic mode takes only while it is paused.
 fn changes_machine(cmd: &Cmd) -> bool {
+    #[cfg(feature = "mcp")]
+    {
+        use rust_dos::control::{GuestInput, MouseInput};
+        if matches!(cmd, Cmd::NativeInput { input:
+            GuestInput::Press { .. } | GuestInput::Down { .. } | GuestInput::Type { .. }
+            | GuestInput::Mouse(MouseInput::Move { .. } | MouseInput::Click { .. }
+                | MouseInput::Down { .. } | MouseInput::Drag { .. }), .. }) {
+            return true;
+        }
+    }
     matches!(
         cmd,
         Cmd::Input { .. }

@@ -1,10 +1,11 @@
 use super::dispatch::step_over_len;
 use super::journal::{OpLookup, OpState};
-use super::{Answer, Cmd, DebugHub, InputEvent, LowInput, Reply, StateRequest, TraceQuery, keys_for_char};
 use super::trace::TraceEntry;
-use rust_dos::deterministic::Deterministic;
+use super::{Answer, Cmd, DebugHub, InputEvent, LowInput, Reply, StateRequest, TraceQuery, keys_for_char,
+};
 use crate::cpu::{Cpu, CpuState};
 use crate::exec::{self, StopReason};
+use rust_dos::deterministic::Deterministic;
 use rust_dos::keylayout::Layout;
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
@@ -280,25 +281,310 @@ fn machine(name: &str) -> (Cpu, DebugHub) {
     (cpu, hub)
 }
 
-/// Run `frames` frames of a few thousand instructions, as the main loop
-/// does: the hub's requests first, nothing while it is paused.
+#[test]
+fn expired_observation_is_rejected_before_actor_work() {
+    let (mut cpu, mut hub) = machine("expired-observation");
+    cpu.bus.audio_peak = 750;
+    let (mut request, mut reply) = hub.request(Cmd::Status);
+    request.deadline = Some(std::time::Instant::now() - std::time::Duration::from_millis(1));
+    hub.handle(&mut cpu, request);
+    let answer = reply.try_recv().unwrap();
+    assert!(
+        matches!(answer.reply, Reply::Error(408, _)),
+        "expired unaccepted work is refused"
+    );
+    assert_eq!(
+        cpu.bus.audio_peak, 750,
+        "expired status must not run its metric-reset side effect"
+    );
+}
+
+#[test]
+fn native_capture_bounds_are_checked_before_copying_the_frame() {
+    let (mut cpu, mut hub) = machine("capture-frame-bound");
+    let (width, height) = crate::video::frame_size(&cpu.bus);
+    let mut rendered = crate::video::Frame::new(width, height);
+    crate::video::render_screen(&mut rendered, &cpu.bus);
+    for damage in ["zero-width", "zero-height", "wide", "tall", "short-rgb"] {
+        let (mut request, mut reply) = hub.request(Cmd::Screenshot);
+        request.capture = Some(super::control::CapturePolicy {
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(2),
+            _retention: std::sync::Arc::new(()),
+        });
+        hub.handle(&mut cpu, request);
+        let mut frame = rendered.clone();
+        match damage {
+            "zero-width" => frame.width = 0,
+            "zero-height" => frame.height = 0,
+            "wide" => frame.width = 2049,
+            "tall" => frame.height = 2049,
+            _ => { frame.rgb.pop().expect("actual rendered RGB is nonempty"); }
+        }
+        hub.capture_frame(&frame);
+        assert!(matches!(reply.try_recv().unwrap().reply, Reply::Error(413, _)),
+            "{damage}: malformed actual frame is rejected before clone");
+    }
+}
+
+#[test]
+fn expired_accepted_capture_is_rejected_before_frame_copy() {
+    let (mut cpu, mut hub) = machine("expired-capture-copy");
+    let (mut request, mut reply) = hub.request(Cmd::Screenshot);
+    request.capture = Some(super::control::CapturePolicy {
+        deadline: std::time::Instant::now() - std::time::Duration::from_millis(1),
+        _retention: std::sync::Arc::new(()),
+    });
+    hub.handle(&mut cpu, request);
+    let (width, height) = crate::video::frame_size(&cpu.bus);
+    let mut frame = crate::video::Frame::new(width, height);
+    crate::video::render_screen(&mut frame, &cpu.bus);
+    hub.capture_frame(&frame);
+    assert!(
+        matches!(reply.try_recv().unwrap().reply, Reply::Error(408, _)),
+        "expired queued capture starts no copy"
+    );
+}
+
+#[test]
+fn queued_capture_keeps_capacity_after_its_caller_drops() {
+    let (mut cpu, mut hub) = machine("capture-retention");
+    let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+    let permit = std::sync::Arc::new(slots.clone().try_acquire_owned().unwrap());
+    let (mut request, reply) = hub.request(Cmd::Screenshot);
+    request.capture = Some(super::control::CapturePolicy {
+        deadline: std::time::Instant::now() + std::time::Duration::from_secs(2),
+        _retention: permit.clone(),
+    });
+    hub.handle(&mut cpu, request);
+    drop(permit);
+    drop(reply);
+    assert_eq!(
+        slots.available_permits(),
+        0,
+        "the queued actor still owns capture capacity"
+    );
+    let (width, height) = crate::video::frame_size(&cpu.bus);
+    let mut frame = crate::video::Frame::new(width, height);
+    crate::video::render_screen(&mut frame, &cpu.bus);
+    hub.capture_frame(&frame);
+    assert_eq!(
+        slots.available_permits(),
+        1,
+        "retiring the abandoned frame releases only its capacity"
+    );
+}
+
+#[test]
+fn native_capture_expiry_retires_work_without_a_rendered_frame() {
+    let (mut cpu, mut hub) = machine("capture-queue-expiry");
+    let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+    let permit = std::sync::Arc::new(slots.clone().try_acquire_owned().unwrap());
+    let (mut request, mut reply) = hub.request(Cmd::Screenshot);
+    request.capture = Some(super::control::CapturePolicy {
+        deadline: std::time::Instant::now() - std::time::Duration::from_millis(1),
+        _retention: permit.clone(),
+    });
+    hub.handle(&mut cpu, request);
+    drop(permit);
+    hub.poll(&mut cpu);
+    assert!(
+        matches!(
+            reply.try_recv(),
+            Ok(super::Answer {
+                reply: Reply::Error(408, _),
+                ..
+            })
+        ),
+        "expired native capture retires without waiting for render"
+    );
+    assert_eq!(slots.available_permits(), 1);
+}
+
+#[test]
+fn native_capture_cleanup_preserves_live_and_legacy_waiters() {
+    let (mut cpu, mut hub) = machine("capture-mixed-expiry");
+    let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(3));
+    let (legacy, mut legacy_reply) = hub.request(Cmd::Screenshot);
+    hub.handle(&mut cpu, legacy);
+    let mut retained = Vec::new();
+    for expired in [false, false, true] {
+        let (mut request, reply) = hub.request(Cmd::Screenshot);
+        let now = std::time::Instant::now();
+        request.capture = Some(super::control::CapturePolicy {
+            deadline: if expired { now - std::time::Duration::from_millis(1) }
+                else { now + std::time::Duration::from_secs(2) },
+            _retention: std::sync::Arc::new(slots.clone().try_acquire_owned().unwrap()),
+        });
+        hub.handle(&mut cpu, request);
+        retained.push(reply);
+    }
+    let mut expired_reply = retained.pop().unwrap();
+    drop(retained.pop().unwrap());
+    let mut live_reply = retained.pop().unwrap();
+    assert_eq!(slots.available_permits(), 0);
+    hub.poll(&mut cpu);
+    assert!(matches!(expired_reply.try_recv().unwrap().reply, Reply::Error(408, _)));
+    assert_eq!(slots.available_permits(), 2, "poll retires only dropped and expired native work");
+    assert_eq!(hub.frame_waiters.len(), 2, "live native and legacy work survives cleanup");
+    assert!(legacy_reply.try_recv().is_err() && live_reply.try_recv().is_err());
+    let (width, height) = crate::video::frame_size(&cpu.bus);
+    let mut frame = crate::video::Frame::new(width, height);
+    crate::video::render_screen(&mut frame, &cpu.bus);
+    hub.capture_frame(&frame);
+    assert!(matches!(legacy_reply.try_recv().unwrap().reply, Reply::Frame(_)));
+    assert!(matches!(live_reply.try_recv().unwrap().reply, Reply::Frame(_)));
+    assert_eq!(slots.available_permits(), 3);
+}
+
+#[test]
+fn native_expired_screenshot_creates_no_frame_waiter() {
+    let (mut cpu, mut hub) = machine("capture-expired-admission");
+    let (mut request, mut reply) = hub.request(Cmd::Screenshot);
+    request.deadline = Some(std::time::Instant::now() - std::time::Duration::from_millis(1));
+    hub.handle(&mut cpu, request);
+    assert!(matches!(reply.try_recv().unwrap().reply, Reply::Error(408, _)));
+    assert!(hub.frame_waiters.is_empty(), "expired actor work never starts a frame wait");
+}
+
+#[test]
+fn native_dispatch_budget_preserves_fifo_and_guest_progress() {
+    let (mut cpu, mut hub) = machine("native-dispatch-budget");
+    hub.shared
+        .as_ref()
+        .unwrap()
+        .native_enabled
+        .store(true, std::sync::atomic::Ordering::Release);
+    let (send, receive) = std::sync::mpsc::channel();
+    hub.rx = Some(receive);
+    let mut replies = Vec::new();
+    for _ in 0..32 {
+        let (request, reply) = hub.request(Cmd::Status);
+        send.send(request).unwrap();
+        replies.push(reply);
+    }
+    hub.poll(&mut cpu);
+    let mut completed = 0;
+    let mut pending = false;
+    for reply in &mut replies {
+        if reply.try_recv().is_ok() {
+            assert!(!pending, "ready replies form a FIFO prefix");
+            completed += 1;
+        } else {
+            pending = true;
+        }
+    }
+    assert!(
+        (1..=16).contains(&completed),
+        "a ready queue is not drained past its dispatch budget"
+    );
+    let before = cpu.executed;
+    guest_batch(&mut cpu, &mut hub);
+    assert!(
+        cpu.executed > before,
+        "the guest advances while commands remain ready"
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    for reply in replies.iter_mut().skip(completed) {
+        loop {
+            if reply.try_recv().is_ok() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "all retained work remains deliverable"
+            );
+            run(&mut cpu, &mut hub, 1);
+        }
+    }
+}
+
+#[test]
+fn native_time_budget_leaves_legacy_work_for_the_next_guest_pass() {
+    use std::{sync::atomic::Ordering, time::{Duration, Instant}};
+    let (mut cpu, mut hub) = machine("native-expensive-legacy-work");
+    hub.shared.as_ref().unwrap().native_enabled.store(true, Ordering::Release);
+    let (send, receive) = std::sync::mpsc::channel();
+    hub.rx = Some(receive);
+    // The existing HTTP memory endpoint permits a real 1 MiB guest read.
+    let (read, mut read_reply) = hub.request(Cmd::ReadMem { addr: "0".into(), len: 1 << 20 });
+    let (status, mut status_reply) = hub.request(Cmd::Status);
+    send.send(read).unwrap();
+    send.send(status).unwrap();
+    let started = Instant::now();
+    hub.poll(&mut cpu);
+    assert!(matches!(read_reply.try_recv().unwrap().reply, Reply::Bytes { data, .. } if data.len() == 1 << 20));
+    assert!(started.elapsed() >= Duration::from_millis(1), "actual legacy read must exercise the time-budget class");
+    assert!(status_reply.try_recv().is_err(), "time budget stops before the next request, below the count limit");
+    let before = cpu.executed;
+    guest_batch(&mut cpu, &mut hub);
+    assert!(cpu.executed > before, "the guest progresses before queued legacy work completes");
+    assert!(status_reply.try_recv().is_err(), "guest execution does not consume queued actor work");
+    hub.poll(&mut cpu);
+    assert!(matches!(status_reply.try_recv().unwrap().reply, Reply::Json(_)));
+}
+
+#[test]
+fn native_dispatch_budget_bounds_ready_legacy_captures() {
+    use std::{sync::atomic::Ordering, time::{Duration, Instant}};
+    let (mut cpu, mut hub) = machine("native-ready-legacy-captures");
+    hub.shared.as_ref().unwrap().native_enabled.store(true, Ordering::Release);
+    let (send, receive) = std::sync::mpsc::channel();
+    hub.rx = Some(receive);
+    let mut replies = Vec::new();
+    for _ in 0..32 {
+        let (request, reply) = hub.request(Cmd::Screenshot);
+        send.send(request).unwrap();
+        replies.push(reply);
+    }
+    hub.poll(&mut cpu);
+    assert!((1..=16).contains(&hub.frame_waiters.len()), "legacy traffic shares the enabled native dispatch budget");
+    println!("native legacy capture dispatch prefix={}", hub.frame_waiters.len());
+    assert!(replies.iter_mut().all(|reply| reply.try_recv().is_err()));
+    let before = cpu.executed;
+    guest_batch(&mut cpu, &mut hub);
+    assert!(cpu.executed > before);
+    assert!(replies.iter_mut().all(|reply| reply.try_recv().is_err()));
+    let (width, height) = crate::video::frame_size(&cpu.bus);
+    let mut frame = crate::video::Frame::new(width, height);
+    crate::video::render_screen(&mut frame, &cpu.bus);
+    hub.capture_frame(&frame);
+    let deadline = Instant::now() + Duration::from_secs(1);
+    for reply in &mut replies {
+        loop {
+            if let Ok(answer) = reply.try_recv() {
+                assert!(matches!(answer.reply, Reply::Frame(_)));
+                break;
+            }
+            assert!(Instant::now() < deadline, "retained legacy captures remain deliverable");
+            run(&mut cpu, &mut hub, 1);
+            crate::video::render_screen(&mut frame, &cpu.bus);
+            hub.capture_frame(&frame);
+        }
+    }
+}
+
 fn run(cpu: &mut Cpu, hub: &mut DebugHub, frames: usize) {
     for _ in 0..frames {
         hub.poll(cpu);
-        if hub.paused {
-            continue;
-        }
-        let hot = hub.begin_batch(cpu);
-        let end = cpu.bus.clock.icount + 5000;
-        cpu.bus.start_batch(end);
-        while cpu.bus.clock.icount < end {
-            match exec::run_batch(cpu, hub, hot) {
-                StopReason::BatchEnd | StopReason::Paused | StopReason::Exit | StopReason::Hook => break,
-                StopReason::ShellReloaded => cpu.bus.start_batch(end),
-            }
-        }
-        hub.end_batch(cpu);
+        guest_batch(cpu, hub);
     }
+}
+
+/// Execute the actual guest between actor polls, as the frontend does.
+fn guest_batch(cpu: &mut Cpu, hub: &mut DebugHub) {
+    if hub.paused {
+        return;
+    }
+    let hot = hub.begin_batch(cpu);
+    let end = cpu.bus.clock.icount + 5000;
+    cpu.bus.start_batch(end);
+    while cpu.bus.clock.icount < end {
+        match exec::run_batch(cpu, hub, hot) {
+            StopReason::BatchEnd | StopReason::Paused | StopReason::Exit | StopReason::Hook => break,
+            StopReason::ShellReloaded => cpu.bus.start_batch(end),
+        }
+    }
+    hub.end_batch(cpu);
 }
 
 /// A request sent to the hub: what the server waits for after the

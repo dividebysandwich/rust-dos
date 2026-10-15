@@ -259,8 +259,16 @@ pub(crate) fn start_debug_hub(
     det: &Option<rust_dos::deterministic::Deterministic>,
     settings: &Settings,
 ) -> Result<debug::DebugHub, String> {
+    #[cfg(not(feature = "mcp"))]
+    let mcp_enabled = false;
+    #[cfg(feature = "mcp")]
+    let mcp_enabled = args.mcp;
+    #[cfg(feature = "mcp")]
+    if mcp_enabled {
+        debug::init_mcp_diagnostics()?;
+    }
     let mut dbg = match args.debug_server {
-        Some(addr) => debug::DebugHub::start(cpu, addr, args.trace_capacity, det.as_ref().map(|mode| mode.start))?,
+        Some(addr) => debug::DebugHub::start(cpu, addr, args.trace_capacity, det.as_ref().map(|mode| mode.start), mcp_enabled)?,
         None => debug::DebugHub::disabled(),
     };
     if args.profile.is_some() {

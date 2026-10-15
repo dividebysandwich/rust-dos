@@ -5,6 +5,13 @@ built-in debug server to run DOS programs, see what they do, and find
 emulator bugs. For the full endpoint reference, run `curl localhost:8086/`.
 This file covers how to use the endpoints well.
 
+For native MCP clients, build with the optional `mcp` feature and explicitly
+start with `--mcp --debug-server 127.0.0.1:0`. The printed address's `/mcp`
+endpoint shares the control service used by HTTP. See the [native MCP guide](mcp/README.md)
+for verified Codex configuration, screenshots, held input, operation delivery and limits.
+The compile feature alone does not expose MCP; ordinary builds and HTTP settings retain
+their existing behavior. Input can change files in mounted guest drives.
+
 ## 1. Start the emulator
 
 ```sh

@@ -1,0 +1,551 @@
+{
+   "$schema" : "https://json-schema.org/draft/2020-12/schema",
+   "additionalProperties" : false,
+   "allOf" : [
+      {
+         "oneOf" : [
+            {
+               "not" : {
+                  "anyOf" : [
+                     {
+                        "required" : [
+                           "dx"
+                        ]
+                     },
+                     {
+                        "required" : [
+                           "dy"
+                        ]
+                     }
+                  ]
+               },
+               "required" : [
+                  "x",
+                  "y"
+               ]
+            },
+            {
+               "not" : {
+                  "anyOf" : [
+                     {
+                        "required" : [
+                           "x"
+                        ]
+                     },
+                     {
+                        "required" : [
+                           "y"
+                        ]
+                     }
+                  ]
+               },
+               "required" : [
+                  "dx",
+                  "dy"
+               ]
+            },
+            {
+               "not" : {
+                  "anyOf" : [
+                     {
+                        "required" : [
+                           "x"
+                        ]
+                     },
+                     {
+                        "required" : [
+                           "y"
+                        ]
+                     },
+                     {
+                        "required" : [
+                           "dx"
+                        ]
+                     },
+                     {
+                        "required" : [
+                           "dy"
+                        ]
+                     }
+                  ]
+               }
+            }
+         ]
+      }
+   ],
+   "oneOf" : [
+      {
+         "anyOf" : [
+            {
+               "required" : [
+                  "x",
+                  "y"
+               ]
+            },
+            {
+               "required" : [
+                  "dx",
+                  "dy"
+               ]
+            }
+         ],
+         "not" : {
+            "anyOf" : [
+               {
+                  "required" : [
+                     "button"
+                  ]
+               },
+               {
+                  "required" : [
+                     "hold_ms"
+                  ]
+               },
+               {
+                  "required" : [
+                     "lease_ms"
+                  ]
+               },
+               {
+                  "required" : [
+                     "path"
+                  ]
+               }
+            ]
+         },
+         "properties" : {
+            "action" : {
+               "const" : "move"
+            }
+         },
+         "required" : [
+            "picture"
+         ]
+      },
+      {
+         "not" : {
+            "anyOf" : [
+               {
+                  "required" : [
+                     "handle"
+                  ]
+               },
+               {
+                  "required" : [
+                     "lease_ms"
+                  ]
+               },
+               {
+                  "required" : [
+                     "path"
+                  ]
+               }
+            ]
+         },
+         "properties" : {
+            "action" : {
+               "const" : "click"
+            }
+         },
+         "required" : [
+            "picture",
+            "action"
+         ]
+      },
+      {
+         "not" : {
+            "anyOf" : [
+               {
+                  "required" : [
+                     "handle"
+                  ]
+               },
+               {
+                  "required" : [
+                     "hold_ms"
+                  ]
+               },
+               {
+                  "required" : [
+                     "path"
+                  ]
+               }
+            ]
+         },
+         "properties" : {
+            "action" : {
+               "const" : "down"
+            }
+         },
+         "required" : [
+            "picture",
+            "lease_ms",
+            "action"
+         ]
+      },
+      {
+         "not" : {
+            "anyOf" : [
+               {
+                  "required" : [
+                     "picture"
+                  ]
+               },
+               {
+                  "required" : [
+                     "x"
+                  ]
+               },
+               {
+                  "required" : [
+                     "y"
+                  ]
+               },
+               {
+                  "required" : [
+                     "dx"
+                  ]
+               },
+               {
+                  "required" : [
+                     "dy"
+                  ]
+               },
+               {
+                  "required" : [
+                     "button"
+                  ]
+               },
+               {
+                  "required" : [
+                     "hold_ms"
+                  ]
+               },
+               {
+                  "required" : [
+                     "lease_ms"
+                  ]
+               },
+               {
+                  "required" : [
+                     "path"
+                  ]
+               }
+            ]
+         },
+         "properties" : {
+            "action" : {
+               "const" : "up"
+            }
+         },
+         "required" : [
+            "handle",
+            "action"
+         ]
+      },
+      {
+         "not" : {
+            "anyOf" : [
+               {
+                  "required" : [
+                     "picture"
+                  ]
+               },
+               {
+                  "required" : [
+                     "x"
+                  ]
+               },
+               {
+                  "required" : [
+                     "y"
+                  ]
+               },
+               {
+                  "required" : [
+                     "dx"
+                  ]
+               },
+               {
+                  "required" : [
+                     "dy"
+                  ]
+               },
+               {
+                  "required" : [
+                     "button"
+                  ]
+               },
+               {
+                  "required" : [
+                     "hold_ms"
+                  ]
+               },
+               {
+                  "required" : [
+                     "path"
+                  ]
+               }
+            ]
+         },
+         "properties" : {
+            "action" : {
+               "const" : "renew"
+            }
+         },
+         "required" : [
+            "handle",
+            "lease_ms",
+            "action"
+         ]
+      },
+      {
+         "not" : {
+            "anyOf" : [
+               {
+                  "required" : [
+                     "handle"
+                  ]
+               },
+               {
+                  "required" : [
+                     "hold_ms"
+                  ]
+               },
+               {
+                  "required" : [
+                     "lease_ms"
+                  ]
+               },
+               {
+                  "required" : [
+                     "x"
+                  ]
+               },
+               {
+                  "required" : [
+                     "y"
+                  ]
+               },
+               {
+                  "required" : [
+                     "dx"
+                  ]
+               },
+               {
+                  "required" : [
+                     "dy"
+                  ]
+               }
+            ]
+         },
+         "properties" : {
+            "action" : {
+               "const" : "drag"
+            }
+         },
+         "required" : [
+            "picture",
+            "path",
+            "action"
+         ]
+      }
+   ],
+   "properties" : {
+      "action" : {
+         "default" : "move",
+         "enum" : [
+            "move",
+            "click",
+            "down",
+            "up",
+            "renew",
+            "drag"
+         ],
+         "type" : "string"
+      },
+      "button" : {
+         "enum" : [
+            "left",
+            "right",
+            "middle"
+         ],
+         "type" : "string"
+      },
+      "dx" : {
+         "maximum" : 32767,
+         "minimum" : -32767,
+         "type" : "integer"
+      },
+      "dy" : {
+         "maximum" : 32767,
+         "minimum" : -32767,
+         "type" : "integer"
+      },
+      "handle" : {
+         "pattern" : "^[0-9a-f]{16}\\.[0-9a-f]{16}\\.[0-9a-f]{16}$",
+         "type" : "string"
+      },
+      "hold_ms" : {
+         "maximum" : 5000,
+         "minimum" : 1,
+         "type" : "integer"
+      },
+      "lease_ms" : {
+         "maximum" : 30000,
+         "minimum" : 1,
+         "type" : "integer"
+      },
+      "path" : {
+         "description" : "Use one coordinate form throughout. The actor also checks that all delays total at most 5000 ms.",
+         "maxItems" : 256,
+         "minItems" : 1,
+         "oneOf" : [
+            {
+               "items" : {
+                  "additionalProperties" : false,
+                  "allOf" : [
+                     {
+                        "not" : {
+                           "anyOf" : [
+                              {
+                                 "required" : [
+                                    "dx"
+                                 ]
+                              },
+                              {
+                                 "required" : [
+                                    "dy"
+                                 ]
+                              }
+                           ]
+                        },
+                        "required" : [
+                           "x",
+                           "y"
+                        ]
+                     }
+                  ],
+                  "properties" : {
+                     "delay_ms" : {
+                        "maximum" : 5000,
+                        "minimum" : 0,
+                        "type" : "integer"
+                     },
+                     "dx" : {
+                        "maximum" : 32767,
+                        "minimum" : -32767,
+                        "type" : "integer"
+                     },
+                     "dy" : {
+                        "maximum" : 32767,
+                        "minimum" : -32767,
+                        "type" : "integer"
+                     },
+                     "x" : {
+                        "minimum" : 0,
+                        "type" : "integer"
+                     },
+                     "y" : {
+                        "minimum" : 0,
+                        "type" : "integer"
+                     }
+                  },
+                  "type" : "object"
+               }
+            },
+            {
+               "items" : {
+                  "additionalProperties" : false,
+                  "allOf" : [
+                     {
+                        "not" : {
+                           "anyOf" : [
+                              {
+                                 "required" : [
+                                    "x"
+                                 ]
+                              },
+                              {
+                                 "required" : [
+                                    "y"
+                                 ]
+                              }
+                           ]
+                        },
+                        "required" : [
+                           "dx",
+                           "dy"
+                        ]
+                     }
+                  ],
+                  "properties" : {
+                     "delay_ms" : {
+                        "maximum" : 5000,
+                        "minimum" : 0,
+                        "type" : "integer"
+                     },
+                     "dx" : {
+                        "maximum" : 32767,
+                        "minimum" : -32767,
+                        "type" : "integer"
+                     },
+                     "dy" : {
+                        "maximum" : 32767,
+                        "minimum" : -32767,
+                        "type" : "integer"
+                     },
+                     "x" : {
+                        "minimum" : 0,
+                        "type" : "integer"
+                     },
+                     "y" : {
+                        "minimum" : 0,
+                        "type" : "integer"
+                     }
+                  },
+                  "type" : "object"
+               }
+            }
+         ],
+         "type" : "array"
+      },
+      "picture" : {
+         "additionalProperties" : false,
+         "properties" : {
+            "height" : {
+               "minimum" : 1,
+               "type" : "integer"
+            },
+            "instance" : {
+               "pattern" : "^[0-9a-f]{16}$",
+               "type" : "string"
+            },
+            "mode_epoch" : {
+               "minimum" : 1,
+               "type" : "integer"
+            },
+            "width" : {
+               "minimum" : 1,
+               "type" : "integer"
+            }
+         },
+         "required" : [
+            "instance",
+            "mode_epoch",
+            "width",
+            "height"
+         ],
+         "type" : "object"
+      },
+      "x" : {
+         "minimum" : 0,
+         "type" : "integer"
+      },
+      "y" : {
+         "minimum" : 0,
+         "type" : "integer"
+      }
+   },
+   "type" : "object"
+}

@@ -1193,6 +1193,11 @@ fn main() -> Result<(), String> {
         dbg.divert = ui.is_open();
         dbg.rewinding = rewinding.is_some();
         profile::set_host(Zone::Debug);
+        #[cfg(feature = "mcp")]
+        if state_loaded {
+            dbg.invalidate_owned_after_load(&cpu);
+            if args.mcp { dbg.forget_keys_after_load(); }
+        }
         dbg.poll(&mut cpu);
         profile::set_host(Zone::Frontend);
         if dbg.quit_requested() {
@@ -1294,7 +1299,10 @@ fn main() -> Result<(), String> {
             stats.clock_moved(&cpu.bus);
             rewinder.clear();
             achievements.reset();
-            if strict_match_loaded {
+            let preserve_keyboard = strict_match_loaded;
+            #[cfg(feature = "mcp")]
+            let preserve_keyboard = preserve_keyboard || args.mcp;
+            if preserve_keyboard {
                 held.clear();
             } else {
                 release_input(&mut cpu, &mut held);
@@ -1566,6 +1574,8 @@ fn main() -> Result<(), String> {
                 match rewinder.step_back() {
                     Some((at, state)) => match savestate::machine::load(&mut cpu, &state) {
                         Ok(()) => {
+                            #[cfg(feature = "mcp")]
+                            dbg.invalidate_owned_after_load(&cpu);
                             if let Some(mode) = &mut det {
                                 mode.resync(&cpu);
                             }
@@ -1579,9 +1589,12 @@ fn main() -> Result<(), String> {
         }
 
         let exec_time = batch_start.elapsed();
-        let stalled = cpu.bus.clock.stalled - batch_stalled;
-        let idle = cpu.bus.clock.idle - batch_idle;
-        let executed = cpu.bus.clock.icount - batch_icount - idle - stalled;
+        let stalled = cpu.bus.clock.stalled.saturating_sub(batch_stalled);
+        let idle = cpu.bus.clock.idle.saturating_sub(batch_idle);
+        let executed = cpu.bus.clock.icount
+            .saturating_sub(batch_icount)
+            .saturating_sub(idle)
+            .saturating_sub(stalled);
         dbg.record_batch(
             executed,
             exec_time,
@@ -2063,6 +2076,8 @@ fn shut_down(
 
     // The journal ends, and the debug server's clients get what they
     // waited for.
+    #[cfg(feature = "mcp")]
+    dbg.release_owned_input(cpu);
     dbg.shutdown(cpu, shutdown, 0);
 
     // The page in the printer comes out, and the job's files are written.

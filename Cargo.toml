@@ -115,6 +115,13 @@ sdl2 = { version = "0.38", optional = true }
 # The window's OpenGL, which draws the CRT shaders.
 glow = { version = "0.18.0", optional = true }
 axum = { version = "0.8", features = ["ws"], optional = true }
+rmcp = { version = "=3.5.1", default-features = false, features = ["server", "transport-streamable-http-server"], optional = true }
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "registry"], optional = true }
+http-body = { version = "1", optional = true }
+futures-util = { version = "0.3", default-features = false, features = ["std"], optional = true }
+tokio-util = { version = "0.7", features = ["rt"], optional = true }
+tower-service = { version = "0.3", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros", "io-util"] }
 # Libraries loaded when wanted, by the VR headset view (src/display/stage).
 libloading = "0.9.0"
@@ -161,11 +168,16 @@ libc = "0.2"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_Memory", "Win32_System_Diagnostics_Debug", "Win32_System_Threading", "Win32_System_Console"] }
 
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_JobObjects", "Win32_Security", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading"] }
+
 [features]
 default = ["sdl", "gl", "vr", "midi", "hostmidi", "cdaudio", "chd", "sevenz", "manuals"]
 # The rust-dos program: its window and sound device, its debug server and
 # its connection to RetroAchievements.
 sdl = ["dep:sdl2", "dep:axum", "dep:ureq", "rust-dos-soundblaster/download", "rust-dos-sc55/download"]
+# Native MCP adapter, compiled only when requested; listener opt-in is separate.
+mcp = ["sdl", "dep:rmcp", "dep:http-body", "dep:futures-util", "dep:tokio-util", "dep:tower-service", "dep:tracing", "dep:tracing-subscriber"]
 # The window drawn with OpenGL 3: the CRT shaders, and the 3dfx card at
 # higher resolutions. Without it (as on Redox), SDL's renderer draws the
 # picture, without them.
@@ -201,6 +213,13 @@ skip-host-network-tests = []
 embed-resource = "3"
 
 [dev-dependencies]
+jsonschema = { version = "=0.58.6", default-features = false }
+reqwest = { version = "0.13.2", default-features = false }
+sse-stream = "0.2.4"
+# Reference SDK acquisition is tooling only; production MCP stays server-only.
+rmcp = { version = "=3.5.1", default-features = false, features = ["server", "client", "transport-streamable-http-server", "transport-streamable-http-client-reqwest"] }
+http-body-util = "0.1"
+tokio = { version = "1", features = ["process"] }
 # Writes the zip archives of the tests.
 rust-dos-zip = { path = "crates/zip", features = ["test-util"] }
 # Writes the 7z archives of src/archive's tests.
