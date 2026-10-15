@@ -154,8 +154,12 @@ Mistakes in the file are printed as warnings; the emulator still starts.
 * `cpu` is the emulated processor: `486` (the default, a 486DX with FPU),
   `386`, or `pentium`, a Pentium as DOSBox-X has one: CPUID (a
   GenuineIntel family 5), the time stamp counter, which counts the
-  instructions and so runs at the `cycles` speed, its MSRs, CMPXCHG8B and
-  4 MB pages, without the virtual-8086 mode extensions; `pentium_mmx`,
+  instructions and so runs at a fixed `cycles` speed (at `max` and
+  `auto`, whose speed changes as they run, it runs at a clock rate of the
+  model's own: 200 MHz on a Pentium or Pentium Pro, 233 on a Pentium MMX,
+  450 on a Pentium II, 550 on a K6-2 and 600 on a Pentium III, so that
+  programs which time with it, such as 3DMark 2000, measure right), its
+  MSRs, CMPXCHG8B and 4 MB pages, without the virtual-8086 mode extensions; `pentium_mmx`,
   that Pentium with MMX (CPUID family 5, model 4), whose eight MM
   registers are the FPU's; `k6_2`, an AMD K6-2 (CPUID AuthenticAMD
   family 5, model 8, with AMD's extended leaves): the Pentium MMX's with

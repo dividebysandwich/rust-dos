@@ -132,6 +132,22 @@ pub struct Clock {
     /// `base_ticks` in nanoseconds, for events finer than a PIT tick
     /// (838 ns), such as the scanlines of the display.
     base_ns: u64,
+    /// The time stamp counter's clock.
+    pub tsc: Tsc,
+}
+
+/// The clock the time stamp counter counts: the instructions (the `cycles`
+/// speed), or a fixed rate in emulated time, which a speed that changes as
+/// it runs (`cycles=max` and `auto`) needs: a program that measures the
+/// counter's rate once and times with it later would otherwise time wrong
+/// (3DMark 2000 reported a quarter of its frame rates).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Tsc {
+    /// The count at instruction count `icount`.
+    pub base: u64,
+    pub icount: u64,
+    /// Counts a second, or None for one an instruction.
+    pub hz: Option<u64>,
 }
 
 impl Clock {
@@ -146,6 +162,7 @@ impl Clock {
             base_icount: 0,
             base_ticks: 0,
             base_ns: 0,
+            tsc: Tsc::default(),
         }
     }
 
@@ -195,10 +212,38 @@ impl Clock {
     /// Change the speed from the current instruction onwards. Callers on the
     /// bus must recompute the deadline afterwards (`Bus::set_cycles_per_ms`).
     pub fn set_cycles_per_ms(&mut self, cycles_per_ms: u32) {
+        if self.tsc.hz.is_some() {
+            self.rebase_tsc();
+        }
         self.base_ticks = self.now_ticks();
         self.base_ns = self.now_ns();
         self.base_icount = self.icount;
         self.cycles_per_ms = cycles_per_ms.clamp(MIN_CYCLES, MAX_CYCLES);
+    }
+
+    /// The time stamp counter, before the processor's offset: it goes on
+    /// while the processor waits for an interrupt.
+    pub fn tsc(&self) -> u64 {
+        let delta = self.icount.saturating_sub(self.tsc.icount);
+        let counts = match self.tsc.hz {
+            None => delta,
+            Some(hz) => mul_div(delta, hz, self.instructions_per_second()),
+        };
+        self.tsc.base.wrapping_add(counts)
+    }
+
+    /// Make the time stamp counter count `hz` a second of emulated time
+    /// from now on, or the instructions (None), going on from where it is.
+    pub fn set_tsc_hz(&mut self, hz: Option<u64>) {
+        if hz != self.tsc.hz {
+            self.rebase_tsc();
+            self.tsc.hz = hz;
+        }
+    }
+
+    fn rebase_tsc(&mut self) {
+        self.tsc.base = self.tsc();
+        self.tsc.icount = self.icount;
     }
 
     pub fn batch_end(&self) -> u64 {
@@ -965,7 +1010,8 @@ impl Pit2 {
 
 crate::state_fields!(Pit0 { mode, reload, pending_reload, counting, stopped, armed, period_start, next_tc });
 crate::state_fields!(Pit2 { mode, reload, pending, gate, start, from, held, access, latched } skip { count_due });
-crate::state_fields!(Clock { icount, deadline, stalled, idle, batch_end, cycles_per_ms, base_icount, base_ticks, base_ns });
+crate::state_fields!(Clock { icount, deadline, stalled, idle, batch_end, cycles_per_ms, base_icount, base_ticks, base_ns } skip { tsc });
+crate::state_fields!(Tsc { base, icount, hz });
 
 #[cfg(test)]
 mod tests {
@@ -988,6 +1034,50 @@ mod tests {
         assert_eq!(overhead_ns, 800_000.0);
         // And starts over.
         assert_eq!(sample.add(50_000, ms(1), Duration::ZERO), None);
+    }
+
+    #[test]
+    fn the_time_stamp_counter_counts_instructions_at_a_fixed_speed() {
+        let mut clock = Clock::new(1000);
+        clock.icount = 5000;
+        assert_eq!(clock.tsc(), 5000);
+        // A speed set by hand changes the counter's rate with it.
+        clock.set_cycles_per_ms(3000);
+        clock.icount = 8000;
+        assert_eq!(clock.tsc(), 8000);
+    }
+
+    #[test]
+    fn the_time_stamp_counter_keeps_its_rate_while_the_speed_changes() {
+        // 3DMark 2000 measures the counter's rate once and times its
+        // frames with it: at max the rate must not follow the speed.
+        let mut clock = Clock::new(10_000);
+        clock.icount = 1000;
+        clock.set_tsc_hz(Some(200_000_000));
+        assert_eq!(clock.tsc(), 1000, "it goes on from where it was");
+        // 1 ms at 10000 instructions a ms.
+        clock.icount += 10_000;
+        assert_eq!(clock.tsc(), 1000 + 200_000);
+        // 1 ms at 50000 counts as much, and at 3000.
+        clock.set_cycles_per_ms(50_000);
+        clock.icount += 50_000;
+        assert_eq!(clock.tsc(), 1000 + 400_000);
+        clock.set_cycles_per_ms(3000);
+        clock.icount += 1500;
+        assert_eq!(clock.tsc(), 1000 + 500_000);
+        // It never goes back, however the rate rounds.
+        clock.set_cycles_per_ms(7);
+        let mut last = clock.tsc();
+        for _ in 0..20 {
+            clock.icount += 1;
+            assert!(clock.tsc() > last);
+            last = clock.tsc();
+            clock.set_cycles_per_ms(if clock.cycles_per_ms() == 7 { 13 } else { 7 });
+        }
+        // Back to counting instructions, from there on.
+        clock.set_tsc_hz(None);
+        clock.icount += 10;
+        assert_eq!(clock.tsc(), last + 10);
     }
 
     #[test]

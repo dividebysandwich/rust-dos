@@ -1158,6 +1158,8 @@ impl PageHost<'_> {
             }
             return Err(e.to_string());
         }
+        // The state's time stamp counter goes on at this machine's speed.
+        self.cpu.set_tsc_speed(self.settings.cycles);
         self.pacer.rebase(&self.cpu.bus.clock, Instant::now());
         *self.slot = slot;
         Ok(format!("Loaded slot {}: {}", slot, describe_state(&header)))
@@ -1218,6 +1220,7 @@ impl Host for PageHost<'_> {
         }
         if new.cycles != old.cycles {
             self.pacer.set_speed(new.cycles);
+            self.cpu.set_tsc_speed(new.cycles);
             // At max, the pacer tunes the speed from the current one, and
             // at auto, it picks the speed at the end of the frame.
             if let CpuSpeed::Fixed(n) = new.cycles {

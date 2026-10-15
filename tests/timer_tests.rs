@@ -872,7 +872,7 @@ fn a_due_count_and_port_61h_survive_a_save_state() {
     // A PIT2 section that ends before the flag, as states saved before it
     // was kept, loads without it.
     let range = |name: &str| parts.iter().find(|(n, _)| n == name).unwrap_or_else(|| panic!("no {}", name)).1.clone();
-    let later = range("PIT2.pit2_count_due").start..range("VIDE").start;
+    let later = range("PIT2.pit2_count_due").start..range("TSC").start;
     let mut old = bytes[..later.start].to_vec();
     old.extend_from_slice(&bytes[later.end..]);
     // The section's length follows its tag and version.
@@ -884,6 +884,40 @@ fn a_due_count_and_port_61h_survive_a_save_state() {
     machine::load(&mut c, &old).unwrap();
     assert!(!c.bus.pit2.count_due);
     assert_eq!(c.bus.io_read(0x61) & 0x0C, 0);
+}
+
+#[test]
+fn the_time_stamp_counter_survives_a_save_state() {
+    use rust_dos::savestate::machine;
+    let machine = || {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.model = rust_dos::cpu::CpuModel::PentiumII;
+        cpu.bus.set_cycles_per_ms(20_000);
+        cpu.load_shell();
+        cpu
+    };
+    let mut a = machine();
+    a.bus.clock.icount += 1_000;
+    a.set_tsc_speed(CpuSpeed::Max);
+    a.bus.set_cycles_per_ms(30_000);
+    a.bus.clock.icount += 30_000;
+    let tsc = a.tsc();
+    let (bytes, parts) = machine::save_parts(&a);
+    let mut b = machine();
+    machine::load(&mut b, &bytes).unwrap();
+    assert_eq!(b.tsc(), tsc);
+    b.bus.clock.icount += 30_000;
+    assert_eq!(b.tsc(), tsc + 450_000_000 / 1000, "1 ms more at the Pentium II's clock");
+
+    // A state saved before the section counted instructions.
+    let range = |name: &str| parts.iter().find(|(n, _)| n == name).unwrap_or_else(|| panic!("no {}", name)).1.clone();
+    let tsc_section = range("TSC").start..range("VIDE").start;
+    let mut old = bytes[..tsc_section.start].to_vec();
+    old.extend_from_slice(&bytes[tsc_section.end..]);
+    let mut c = machine();
+    machine::load(&mut c, &old).unwrap();
+    assert_eq!(c.bus.clock.tsc.hz, None);
+    assert_eq!(c.tsc(), a.bus.clock.icount.wrapping_add(a.tsc_offset));
 }
 
 #[test]

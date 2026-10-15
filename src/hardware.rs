@@ -38,6 +38,7 @@ pub struct Hardware {
 /// serial ports. Returns the problems with the settings.
 pub fn configure(cpu: &mut Cpu, settings: &Settings, host_layout: &'static crate::keylayout::Layout) -> Vec<String> {
     cpu.model = settings.cpu;
+    cpu.set_tsc_speed(settings.cycles);
     cpu.core = settings.core;
     cpu.post_mode = settings.post;
     cpu.set_fpu_fast(settings.fpu_fast);
@@ -123,6 +124,7 @@ impl Hardware {
     /// Put the settings' hardware in place. Returns the problems with it.
     pub fn apply(&mut self, cpu: &mut Cpu, settings: &Settings) -> Vec<String> {
         cpu.model = settings.cpu;
+        cpu.set_tsc_speed(settings.cycles);
         let mut warnings = if settings.sound != self.sound {
             cpu.bus.log_string("[CONFIG] The sound settings changed");
             crate::sound::apply_config(cpu, &settings.sound, Some(&self.sound))

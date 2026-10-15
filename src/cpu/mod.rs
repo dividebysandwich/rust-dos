@@ -131,6 +131,21 @@ impl CpuModel {
         }
     }
 
+    /// The clock rate the time stamp counter runs at while the speed
+    /// changes as it runs (`Cpu::set_tsc_speed`): one of the fastest the
+    /// model's line came in. None without a time stamp counter.
+    pub fn tsc_hz(self) -> Option<u64> {
+        let mhz = match self {
+            CpuModel::I386 | CpuModel::I486 => return None,
+            CpuModel::Pentium | CpuModel::PentiumPro => 200,
+            CpuModel::PentiumMmx => 233,
+            CpuModel::PentiumII => 450,
+            CpuModel::K6_2 => 550,
+            CpuModel::PentiumIII => 600,
+        };
+        Some(mhz * 1_000_000)
+    }
+
     /// The family, model and stepping CPUID reports, which DX also holds
     /// after a reset.
     pub fn signature(self) -> u32 {
@@ -1214,16 +1229,28 @@ impl Cpu {
         self.flags = CpuFlags::from_bits_retain(keep | (value & writable) | 0x0002);
     }
 
-    /// The time stamp counter (Pentium): the instruction clock, which runs
-    /// at the `cycles` speed, as DOSBox-X's counts its cycles, and goes on
-    /// while the processor waits for an interrupt.
+    /// The time stamp counter (Pentium): at a fixed `cycles` speed the
+    /// instruction clock, as DOSBox-X's counts its cycles, at one that
+    /// changes as it runs the model's clock rate (`set_tsc_speed`). It goes
+    /// on while the processor waits for an interrupt.
     pub fn tsc(&self) -> u64 {
-        self.bus.clock.icount.wrapping_add(self.tsc_offset)
+        self.bus.clock.tsc().wrapping_add(self.tsc_offset)
     }
 
     /// Set the time stamp counter (WRMSR 10h).
     pub fn set_tsc(&mut self, value: u64) {
-        self.tsc_offset = value.wrapping_sub(self.bus.clock.icount);
+        self.tsc_offset = value.wrapping_sub(self.bus.clock.tsc());
+    }
+
+    /// Let the time stamp counter count the instructions at a fixed speed,
+    /// and at the model's clock rate at max or auto, whose speed the host
+    /// decides as it runs.
+    pub fn set_tsc_speed(&mut self, speed: crate::timer::CpuSpeed) {
+        let hz = match speed {
+            crate::timer::CpuSpeed::Fixed(_) => None,
+            crate::timer::CpuSpeed::Max | crate::timer::CpuSpeed::Auto(_) => self.model.tsc_hz(),
+        };
+        self.bus.clock.set_tsc_hz(hz);
     }
 
     /// EFLAGS as PUSHFD pushes it: VM and RF read as 0.

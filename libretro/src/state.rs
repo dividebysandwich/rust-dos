@@ -106,5 +106,7 @@ pub fn load(m: &mut Machine, buf: &[u8]) -> Result<slots::Header, String> {
         }
         return Err(e.to_string());
     }
+    // The state's time stamp counter goes on at this machine's speed.
+    m.cpu.set_tsc_speed(m.settings.cycles);
     Ok(header)
 }

@@ -570,7 +570,7 @@ impl Cpu {
         self.flags = CpuFlags::R1;
         // The time stamp counter starts from 0, and the performance
         // counters are cleared.
-        self.tsc_offset = self.bus.clock.icount.wrapping_neg();
+        self.tsc_offset = self.bus.clock.tsc().wrapping_neg();
         self.perf_msrs = [0; 3];
         self.sysenter = [0; 3];
         self.sse = super::Sse::default();
