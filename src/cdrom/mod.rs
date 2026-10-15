@@ -64,8 +64,14 @@ pub fn edc_fails(raw: &[u8; RAW_SECTOR]) -> bool {
     };
     match raw[15] {
         1 => check(0..2064),
-        // XA sectors repeat their subheader; the submode's bit 5 is Form 2.
-        2 if raw[16..20] == raw[20..24] => check(if raw[18] & 0x20 == 0 { 16..2072 } else { 16..2348 }),
+        // XA sectors repeat their subheader, and the submode of one that
+        // carries anything says video, audio or data (bits 1-3); its bit 5
+        // is Form 2. A Mode 2 sector without that (formless, 2336 bytes of
+        // data, or an empty XA gap) has no EDC to check: taking data that
+        // happens to repeat for a subheader would fail a good sector.
+        2 if raw[16..20] == raw[20..24] && raw[18] & 0x0E != 0 => {
+            check(if raw[18] & 0x20 == 0 { 16..2072 } else { 16..2348 })
+        }
         _ => false,
     }
 }
@@ -107,6 +113,20 @@ pub struct Extent {
     pub hidden: bool,
 }
 
+/// Mode 1 sector `lba` whose data is all `fill`, with its EDC.
+#[cfg(test)]
+pub(crate) fn mode1_sector(lba: u32, fill: u8) -> [u8; RAW_SECTOR] {
+    let mut raw = [0u8; RAW_SECTOR];
+    raw[..12].copy_from_slice(&SYNC);
+    let (m, s, f) = lba_to_msf(lba);
+    let bcd = |v: u8| ((v / 10) << 4) | (v % 10);
+    raw[12..16].copy_from_slice(&[bcd(m), bcd(s), bcd(f), 1]);
+    raw[16..16 + DATA_SECTOR].fill(fill);
+    let edc = edc(&raw[..2064]);
+    raw[2064..2068].copy_from_slice(&edc.to_le_bytes());
+    raw
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,13 +144,7 @@ mod tests {
     /// A Mode 1 sector at 00:02:16 (LBA 16) whose data is `fill`, with its
     /// EDC.
     fn mode1(fill: u8) -> [u8; RAW_SECTOR] {
-        let mut raw = [0u8; RAW_SECTOR];
-        raw[..12].copy_from_slice(&SYNC);
-        raw[12..16].copy_from_slice(&[0x00, 0x02, 0x16, 1]);
-        raw[16..16 + DATA_SECTOR].fill(fill);
-        let edc = edc(&raw[..2064]);
-        raw[2064..2068].copy_from_slice(&edc.to_le_bytes());
-        raw
+        mode1_sector(16, fill)
     }
 
     #[test]
@@ -167,5 +181,13 @@ mod tests {
             raw[30] ^= 0x80;
             assert!(edc_fails(&raw), "submode {:02X}", submode);
         }
+
+        // A formless Mode 2 sector whose data starts with 8 zero bytes
+        // looks like a subheader with submode 0; its bytes at 2072 are data.
+        let mut raw = [0x33u8; RAW_SECTOR];
+        raw[..12].copy_from_slice(&SYNC);
+        raw[15] = 2;
+        raw[16..24].fill(0);
+        assert!(!edc_fails(&raw), "formless Mode 2");
     }
 }

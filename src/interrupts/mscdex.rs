@@ -35,8 +35,8 @@ const CRC_ERROR: u16 = 0x8104;
 const SECTOR_NOT_FOUND: u16 = 0x8108;
 const GENERAL_FAILURE: u16 = 0x810C;
 
-/// Errors of the INT 2Fh calls, in AX with CF set: DOS's error codes,
-/// which are the device's plus 19.
+/// Errors of the INT 2Fh calls, in AX with CF set: DOS's error codes.
+/// NOT_READY and DATA_ERROR are the device's errors 2 and 4 plus 19.
 const INVALID_DRIVE: u16 = 15;
 const NOT_READY: u16 = 21;
 const DATA_ERROR: u16 = 23;

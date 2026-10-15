@@ -739,23 +739,10 @@ mod tests {
         assert_eq!(raw[0], 3);
     }
 
-    /// Mode 1 sector `lba` with its EDC, its data all `fill`.
-    fn mode1(lba: u32, fill: u8) -> Vec<u8> {
-        let mut raw = vec![0u8; RAW_SECTOR];
-        raw[..12].copy_from_slice(&SYNC);
-        let (m, s, f) = crate::cdrom::lba_to_msf(lba);
-        let bcd = |v: u8| ((v / 10) << 4) | (v % 10);
-        raw[12..16].copy_from_slice(&[bcd(m), bcd(s), bcd(f), 1]);
-        raw[16..16 + DATA_SECTOR].fill(fill);
-        let edc = crate::cdrom::edc(&raw[..2064]);
-        raw[2064..2068].copy_from_slice(&edc.to_le_bytes());
-        raw
-    }
-
     #[test]
     fn sectors_whose_edc_fails_cant_be_read() {
         let dir = scratch("unreadable");
-        let mut data: Vec<u8> = (0..10).flat_map(|lba| mode1(lba, lba as u8)).collect();
+        let mut data: Vec<u8> = (0..10).flat_map(|lba| crate::cdrom::mode1_sector(lba, lba as u8)).collect();
         // Sector 5 as copy protections master it: its data doesn't match
         // its EDC.
         data[5 * RAW_SECTOR + 16..5 * RAW_SECTOR + 16 + DATA_SECTOR].fill(0x55);

@@ -883,18 +883,12 @@ impl Atapi {
                 // of a sector it can't read, as copy protections expect.
                 self.set_sense(0x03, 0x11, 0);
             }
-            // The sense key, and the command aborted.
-            self.feature = (self.sense[2] & 0xF) << 4 | 0x04;
-            self.count = 0x03;
             self.buf_len = 0;
             self.remaining = 0;
             self.xfer = 0;
-            self.state = State::Ready;
-            self.status = DRDY | ERR;
             self.lba[1] = 0;
             self.lba[2] = 0;
-            self.raise_irq();
-            self.allow_writing = true;
+            self.sense_error();
             return false;
         }
         self.prepare_read((self.xfer as usize * size).min(self.max_bytes as usize));
