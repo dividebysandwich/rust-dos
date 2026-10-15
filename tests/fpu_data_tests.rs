@@ -280,33 +280,27 @@ const FBSTP: [u8; 4] = [0xDF, 0x36, 0x10, 0x10];
 /// its exceptions masked does (the expected values are an x87's).
 #[test]
 fn test_fistp_out_of_range_stores_the_indefinite() {
-    let cases: [(u16, u64, &[u8; 4], u64); 8] = [
-        (0x400E, 0x9C40_0000_0000_0000, &FISTP16, 0x8000), // 40000
-        (0xC00E, 0x9C40_0000_0000_0000, &FISTP16, 0x8000), // -40000
-        (0x401E, 0xB2D0_5E00_0000_0000, &FISTP32, 0x8000_0000), // 3e9
-        (0x7FFF, 0xC000_0000_0000_0000, &FISTP32, 0x8000_0000), // a NaN
-        (0x7FFF, 0x8000_0000_0000_0000, &FISTP16, 0x8000), // infinity
-        (0x403F + 1, 0x8000_0000_0000_0000, &FISTP64, 0x8000_0000_0000_0000), // 2^64
-        (0x3FFF + 200, 0x8000_0000_0000_0000, &FISTP64, 0x8000_0000_0000_0000), // 2^200
-        (0x7FFF, 0xC000_0000_0000_0000, &FISTP64, 0x8000_0000_0000_0000), // a NaN
+    // (FLD's sign and exponent, its significand, the store, how many bits
+    // it stores, and what it stores.)
+    let cases: [(u16, u64, &[u8; 4], u32, u64); 8] = [
+        (0x400E, 0x9C40_0000_0000_0000, &FISTP16, 16, 0x8000), // 40000
+        (0xC00E, 0x9C40_0000_0000_0000, &FISTP16, 16, 0x8000), // -40000
+        (0x401E, 0xB2D0_5E00_0000_0000, &FISTP32, 32, 0x8000_0000), // 3e9
+        (0x7FFF, 0xC000_0000_0000_0000, &FISTP32, 32, 0x8000_0000), // a NaN
+        (0x7FFF, 0x8000_0000_0000_0000, &FISTP16, 16, 0x8000), // infinity
+        (0x403F, 0x8000_0000_0000_0000, &FISTP64, 64, 0x8000_0000_0000_0000), // 2^64
+        (0x3FFF + 200, 0x8000_0000_0000_0000, &FISTP64, 64, 0x8000_0000_0000_0000), // 2^200
+        (0x7FFF, 0xC000_0000_0000_0000, &FISTP64, 64, 0x8000_0000_0000_0000), // a NaN
     ];
-    for (se, man, store, want) in cases {
+    for (se, man, store, bits, want) in cases {
         let (cpu, ie) = store_extended(se, man, store);
-        assert_eq!(cpu.bus.read_64(0x1010) & u64::MAX >> (64 - 16 * store_size(store)), want, "{:04X}:{:016X}", se, man);
+        assert_eq!(cpu.bus.read_64(0x1010) & u64::MAX >> (64 - bits), want, "{:04X}:{:016X}", se, man);
         assert!(ie, "IE for {:04X}:{:016X}", se, man);
     }
     // The ones that fit set no IE.
     let (cpu, ie) = store_extended(0xC00E, 0x9C40_0000_0000_0000, &FISTP32);
     assert_eq!(cpu.bus.read_32(0x1010), 0xFFFF_63C0);
     assert!(!ie);
-}
-
-fn store_size(store: &[u8; 4]) -> u32 {
-    match store[0] {
-        0xDF if store[1] == 0x1E => 1,
-        0xDB => 2,
-        _ => 4,
-    }
 }
 
 /// FISTP QWORD stores the register's 64-bit integer whole: FILD QWORD,
@@ -329,14 +323,15 @@ fn test_fild_fistp_qword_keeps_all_64_bits() {
 #[test]
 fn test_fbstp_rounds_and_stores_the_indefinite() {
     let indefinite = [0, 0, 0, 0, 0, 0, 0, 0xC0, 0xFF, 0xFF];
-    let cases: [(u16, u64, [u8; 10], bool); 7] = [
+    let cases: [(u16, u64, [u8; 10], bool); 8] = [
         (0x4000, 0xA000_0000_0000_0000, [2, 0, 0, 0, 0, 0, 0, 0, 0, 0], false), // 2.5
         (0x4000, 0xE000_0000_0000_0000, [4, 0, 0, 0, 0, 0, 0, 0, 0, 0], false), // 3.5
         (0xBFFE, 0xC000_0000_0000_0000, [1, 0, 0, 0, 0, 0, 0, 0, 0, 0x80], false), // -0.75
         (0x403A, 0xDE0B_6B3A_7640_0000, indefinite, true), // 10^18
-        (0x403F + 1, 0x8000_0000_0000_0000, indefinite, true), // 2^64
+        (0x403F, 0x8000_0000_0000_0000, indefinite, true), // 2^64
         (0x3FFF + 200, 0x8000_0000_0000_0000, indefinite, true), // 2^200
         (0x7FFF, 0x8000_0000_0000_0000, indefinite, true), // infinity
+        (0x7FFF, 0xC000_0000_0000_0000, indefinite, true), // a NaN
     ];
     for (se, man, want, want_ie) in cases {
         let (cpu, ie) = store_extended(se, man, &FBSTP);

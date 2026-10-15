@@ -135,23 +135,25 @@ fn x87_round(f_val: f64, rc: u16) -> f64 {
 
 // FISTP: Store Integer and Pop
 pub fn fistp(cpu: &mut Cpu, instr: &Instruction) {
-    // (The register's value whatever its tag.)
-    let val = cpu.fpu_reg_f64(cpu.fpu_top);
-    let val80 = cpu.fpu_reg(cpu.fpu_top);
+    // (The register's value whatever its tag: dropping it leaves its bits.)
+    let reg = cpu.fpu_top;
     cpu.fpu_drop();
     let addr = calculate_addr(cpu, instr);
 
     match instr.memory_size() {
         MemorySize::Int16 => {
+            let val = cpu.fpu_reg_f64(reg);
             let int = to_int(cpu, val, 2);
             cpu.lin_write_16(addr, int as u16);
         }
         MemorySize::Int32 => {
+            let val = cpu.fpu_reg_f64(reg);
             let int = to_int(cpu, val, 4);
             cpu.lin_write_32(addr, int);
         }
         MemorySize::Int64 => {
-            let int = to_int64(cpu, val80);
+            let val = cpu.fpu_reg(reg);
+            let int = to_int64(cpu, val);
             cpu.lin_write_64(addr, int);
         }
         _ => {}
@@ -348,13 +350,7 @@ pub fn fldln2(cpu: &mut Cpu) {
 pub fn fist(cpu: &mut Cpu, instr: &Instruction) {
     let val = cpu.fpu_get(0);
     let addr = calculate_addr(cpu, instr);
-
-    // Extract Rounding Control (RC) - Bits 10 and 11
-    let rc = (cpu.fpu_control >> 10) & 0x03;
-
-    // Use the x87-compliant rounding helper
     let f_val = val.get_f64();
-    let _ = rc;
 
     match instr.memory_size() {
         MemorySize::Int16 => {
