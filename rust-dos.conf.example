@@ -128,6 +128,10 @@
 # 4 MB (2 MB, one texture unit). Changes take effect at the DOS prompt.
 #voodoo=false
 #voodoo_memory=12
+# The chip: voodoo1 (the Voodoo Graphics, the default) or voodoo2, with
+# voodoo_memory 8 (4 MB frame buffer, two 2 MB texture units) or 12.
+# voodoo_memory=8 picks voodoo2 when voodoo_model is not set.
+#voodoo_model=voodoo1
 # What draws the card's picture in the window: software (rust-dos) or
 # opengl, which draws it again at voodoo_scale (1 to 4) times the card's
 # resolution. Screenshots show the software picture either way.

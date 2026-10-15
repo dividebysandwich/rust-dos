@@ -118,7 +118,10 @@ fn apply(imported: &mut Imported, key: &str, value: &str, package: &Path) {
         "video_voodoo" => match lower.as_str() {
             "v1_8mb" | "v1_4mb" => {
                 imported.set("emulator", "voodoo", "true");
-                imported.set("emulator", "voodoo_memory", if lower == "v1_4mb" { "4" } else { "8" });
+                // An 8 MB Voodoo Graphics has two texture units: the
+                // 12 MB board is the nearest.
+                imported.set("emulator", "voodoo_model", "voodoo1");
+                imported.set("emulator", "voodoo_memory", if lower == "v1_4mb" { "4" } else { "12" });
             }
             "none" => imported.set("emulator", "voodoo", "false"),
             _ => skipped(imported),

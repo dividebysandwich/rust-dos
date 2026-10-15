@@ -264,10 +264,13 @@ Mistakes in the file are printed as warnings; the emulator still starts.
 * `voodoo=true` adds a 3dfx Voodoo Graphics card to any of the display
   adapters, for games that draw with Glide (see
   [3dfx Voodoo Graphics](#3dfx-voodoo-graphics)); `false` is the default.
-  `voodoo_memory` is `12` (the default: 4 MB of frame buffer and two
-  texture units with 4 MB each, as DOSBox-X's card has) or `4` (a retail
-  board: 2 MB and one texture unit with 2 MB). Both take effect at the DOS
-  prompt. `voodoo_texture_sampling` is `default` (preserves the game's
+  `voodoo_model` is `voodoo1` (the Voodoo Graphics, the default) or
+  `voodoo2` (see [3dfx Voodoo2](#3dfx-voodoo2)). `voodoo_memory` is `12`
+  (the default: 4 MB of frame buffer and two texture units with 4 MB each,
+  as DOSBox-X's card has), `8` (a Voodoo2 board: 4 MB and two texture
+  units with 2 MB each; it picks `voodoo2` when `voodoo_model` is unset) or
+  `4` (a retail Voodoo Graphics: 2 MB and one texture unit with 2 MB; a
+  Voodoo2 takes it as `8`). All three take effect at the DOS prompt. `voodoo_texture_sampling` is `default` (preserves the game's
   filtering) or `unfiltered` (nearest-neighbour sampling). With supported
   OpenGL anisotropy enabled, `unfiltered` also blends between mip levels
   and allows anisotropic filtering to reduce shimmer, which may soften
@@ -1846,6 +1849,43 @@ triangles are drawn on up to four threads of their own: rust-dos keeps
 running the game meanwhile, and the picture is the same however many
 there are. Save states and rewind keep the card with everything in its
 memory.
+
+### 3dfx Voodoo2
+
+`voodoo_model=voodoo2` makes the card a Voodoo2 (device 0002h), with
+`voodoo_memory=8` or `12`:
+
+```ini
+[emulator]
+voodoo=true
+voodoo_model=voodoo2
+voodoo_memory=12
+```
+
+Besides what the Voodoo Graphics does, it has the Voodoo2's command FIFO
+(the packets its drivers send through memory instead of register writes),
+its triangle setup engine (vertices in, triangles drawn), its 2D blitter
+(screen to screen, CPU to screen, rectangle fills), the eight-bit
+palettes with alpha (texture format 6), a base address for each mipmap
+level, the wider video fields of its resolutions up to 1024x768, fog
+dithering and the clamping of iterated colours, depth and W (fbzColorPath
+bit 28). The board is SLI-less: one card, as Glide sees a single Voodoo2.
+
+**Windows 98 SE** needs 3dfx's Voodoo2 driver, which neither Windows 98
+nor rust-dos comes with: the Windows 98 CD has drivers for the Voodoo
+Graphics and the Banshee only. Unpack 3dfx's reference driver 3.03.00
+(`rkv2dx6.exe`, which the Internet Archive keeps) into a folder Windows
+can read, such as a [host folder](#host-folders-in-a-booted-system). At its next
+start Windows finds the new PCI device and opens the Add New Hardware
+wizard: choose to search for the best driver, tick
+"Specify a location", give the folder that holds `voodoo2.inf`, and
+restart Windows when it is done. Device Manager then lists a "Voodoo2 3D
+Accelerator", and DirectDraw and Direct3D offer the card as "3dfxV2
+(Voodoo2 DirectX 6 Driver)", which Direct3D games that let you choose the
+3D card draw on.
+
+DOS games that bring the Voodoo2's `GLIDE2X.OVL` or Glide 3 run as on the
+Voodoo Graphics.
 
 `voodoo_fps_cap` caps the frames a second games show on the card, for an
 even pace without lowering `cycles`: a swap waits for the first multiple

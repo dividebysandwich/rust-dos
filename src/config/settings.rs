@@ -236,7 +236,13 @@ impl Settings {
             machine: config.machine.unwrap_or(default.machine),
             voodoo: crate::voodoo::VoodooSettings {
                 enabled: config.voodoo.unwrap_or(default.voodoo.enabled),
-                board: config.voodoo_memory.unwrap_or(default.voodoo.board),
+                board: {
+                    // The memory asked for on the chip asked for, or the
+                    // one the memory comes with.
+                    let memory = config.voodoo_memory.unwrap_or(default.voodoo.board);
+                    let model = config.voodoo_model.unwrap_or(memory.model());
+                    crate::voodoo::Board::of(model, memory.megabytes())
+                },
                 renderer: config.voodoo_renderer.unwrap_or(default.voodoo.renderer),
                 texture_sampling: config.voodoo_texture_sampling.unwrap_or(default.voodoo.texture_sampling),
                 scale: config.voodoo_scale.unwrap_or(default.voodoo.scale),
@@ -316,6 +322,7 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
         (Emulator, "composite_era", Some(settings.composite.era.name().to_string())),
         (Emulator, "machine", Some(settings.machine.name().to_string())),
         (Emulator, "voodoo", yes_no(settings.voodoo.enabled)),
+        (Emulator, "voodoo_model", Some(settings.voodoo.board.model().name().to_string())),
         (Emulator, "voodoo_memory", Some(settings.voodoo.board.megabytes().to_string())),
         (Emulator, "voodoo_renderer", Some(settings.voodoo.renderer.name().to_string())),
         (Emulator, "voodoo_texture_sampling", Some(settings.voodoo.texture_sampling.name().to_string())),

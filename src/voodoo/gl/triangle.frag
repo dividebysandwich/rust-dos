@@ -20,6 +20,7 @@ uniform int u_fog;
 uniform int u_color0;
 uniform int u_color1;
 uniform int u_chroma;
+uniform int u_chroma_range;
 uniform int u_zacolor;
 uniform int u_fogcolor;
 uniform int u_stipple;
@@ -57,6 +58,25 @@ bool bit(int v, int n) {
 // A register's colour: red, green, blue and alpha.
 ivec4 argb(int c) {
     return ivec4((c >> 16) & 255, (c >> 8) & 255, c & 255, (c >> 24) & 255);
+}
+
+// The chroma key test: the key, or a Voodoo2's range test with chromaRange
+// bit 28 (each component between the key's and the range's, or outside
+// with its exclusive bit; all of them, or any in union mode).
+bool chromaRejects(ivec3 c) {
+    ivec3 key = argb(u_chroma).rgb;
+    if (!bit(u_chroma_range, 28)) {
+        return c == key;
+    }
+    ivec3 high = argb(u_chroma_range).rgb;
+    int results = 0;
+    for (int i = 0; i < 3; i++) {
+        bool inside = key[i] <= c[i] && c[i] <= high[i];
+        if (inside != bit(u_chroma_range, 26 - i)) {
+            results++;
+        }
+    }
+    return bit(u_chroma_range, 27) ? results != 0 : results == 3;
 }
 
 // An iterated colour component as 8 bits: the integer part wraps, with the
@@ -319,11 +339,8 @@ ivec3 fog(ivec3 c, int itera) {
         if (source == 0) {
             int w = wfloat(v_zw.y);
             int i = w >> 10;
-            int delta = u_fogdelta[i];
-            int deltaval = (delta & 0xFF) * ((w >> 2) & 0xFF);
-            if (bit(u_fog, 7) && (delta & 2) != 0) {
-                deltaval = -deltaval;
-            }
+            // The delta comes masked and signed (`DrawState::fogdelta`).
+            int deltaval = u_fogdelta[i] * ((w >> 2) & 0xFF);
             blend = u_fogblend[i] + (deltaval >> 10);
         } else if (source == 1) {
             blend = itera;
@@ -375,7 +392,7 @@ void main() {
     int select = u_fbzcp & 3;
     ivec4 other = select == 0 ? iter : select == 1 ? texel : select == 2 ? argb(u_color1) : ivec4(0);
     // The chroma key tests c_other before its alpha is chosen.
-    if (bit(u_fbz, 1) && other.rgb == argb(u_chroma).rgb) {
+    if (bit(u_fbz, 1) && chromaRejects(other.rgb)) {
         discard;
     }
     select = (u_fbzcp >> 2) & 3;

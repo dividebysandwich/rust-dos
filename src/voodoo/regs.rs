@@ -1,10 +1,13 @@
-//! The Voodoo Graphics' registers: their numbers (the dword index in the
-//! register space), who may read and write them, the alternate map of the
-//! first 64 that fbiInit3 selects, and their names for the debugger.
-//! From DOSBox-X's voodoo_def.h (MAME's SST-1 emulation by Aaron Giles).
+//! The Voodoo Graphics' and Voodoo2's registers: their numbers (the dword
+//! index in the register space), who may read and write them, the
+//! alternate map of the first 64 that fbiInit3 selects, and their names
+//! for the debugger. From DOSBox-X's voodoo_def.h (MAME's SST-1 emulation
+//! by Aaron Giles), the Voodoo2's from MAME's voodoo_2.cpp register table.
 
 // FBI registers.
 pub const STATUS: usize = 0; // 000h
+/// Voodoo2: the interrupt control.
+pub const INTR_CTRL: usize = 1; // 004h
 pub const VERTEX_AX: usize = 0x008 / 4;
 pub const VERTEX_AY: usize = 0x00C / 4;
 pub const VERTEX_BX: usize = 0x010 / 4;
@@ -80,8 +83,10 @@ pub const SWAPBUFFER_CMD: usize = 0x128 / 4;
 pub const FOG_COLOR: usize = 0x12C / 4;
 pub const ZA_COLOR: usize = 0x130 / 4;
 pub const CHROMA_KEY: usize = 0x134 / 4;
-/// Voodoo 2 and later; always 0 here (no range test).
+/// Voodoo2: the chroma key's range test.
 pub const CHROMA_RANGE: usize = 0x138 / 4;
+/// Voodoo2: a user interrupt.
+pub const USER_INTR_CMD: usize = 0x13C / 4;
 pub const STIPPLE: usize = 0x140 / 4;
 pub const COLOR0: usize = 0x144 / 4;
 pub const COLOR1: usize = 0x148 / 4;
@@ -91,6 +96,14 @@ pub const FBI_ZFUNC_FAIL: usize = 0x154 / 4;
 pub const FBI_AFUNC_FAIL: usize = 0x158 / 4;
 pub const FBI_PIXELS_OUT: usize = 0x15C / 4;
 pub const FOG_TABLE: usize = 0x160 / 4;
+// Voodoo2: the command FIFO.
+pub const CMDFIFO_BASE_ADDR: usize = 0x1E0 / 4;
+pub const CMDFIFO_BUMP: usize = 0x1E4 / 4;
+pub const CMDFIFO_RD_PTR: usize = 0x1E8 / 4;
+pub const CMDFIFO_AMIN: usize = 0x1EC / 4;
+pub const CMDFIFO_AMAX: usize = 0x1F0 / 4;
+pub const CMDFIFO_DEPTH: usize = 0x1F4 / 4;
+pub const CMDFIFO_HOLES: usize = 0x1F8 / 4;
 pub const FBI_INIT4: usize = 0x200 / 4;
 pub const V_RETRACE: usize = 0x204 / 4;
 pub const BACK_PORCH: usize = 0x208 / 4;
@@ -103,8 +116,52 @@ pub const H_SYNC: usize = 0x220 / 4;
 pub const V_SYNC: usize = 0x224 / 4;
 pub const CLUT_DATA: usize = 0x228 / 4;
 pub const DAC_DATA: usize = 0x22C / 4;
-/// Voodoo 2: the triangle counter.
+pub const MAX_RGB_DELTA: usize = 0x230 / 4;
+// Voodoo2.
+pub const H_BORDER: usize = 0x234 / 4;
+pub const V_BORDER: usize = 0x238 / 4;
+pub const BORDER_COLOR: usize = 0x23C / 4;
+pub const HV_RETRACE: usize = 0x240 / 4;
+pub const FBI_INIT5: usize = 0x244 / 4;
+pub const FBI_INIT6: usize = 0x248 / 4;
+pub const FBI_INIT7: usize = 0x24C / 4;
+pub const FBI_SWAP_HISTORY: usize = 0x258 / 4;
+/// The triangle counter.
 pub const FBI_TRIANGLES_OUT: usize = 0x25C / 4;
+// The triangle setup engine.
+pub const S_SETUP_MODE: usize = 0x260 / 4;
+pub const S_VX: usize = 0x264 / 4;
+pub const S_VY: usize = 0x268 / 4;
+pub const S_ARGB: usize = 0x26C / 4;
+pub const S_RED: usize = 0x270 / 4;
+pub const S_GREEN: usize = 0x274 / 4;
+pub const S_BLUE: usize = 0x278 / 4;
+pub const S_ALPHA: usize = 0x27C / 4;
+pub const S_VZ: usize = 0x280 / 4;
+pub const S_WB: usize = 0x284 / 4;
+pub const S_WTMU0: usize = 0x288 / 4;
+pub const S_S_W0: usize = 0x28C / 4;
+pub const S_T_W0: usize = 0x290 / 4;
+pub const S_WTMU1: usize = 0x294 / 4;
+pub const S_S_WTMU1: usize = 0x298 / 4;
+pub const S_T_WTMU1: usize = 0x29C / 4;
+pub const S_DRAW_TRI_CMD: usize = 0x2A0 / 4;
+pub const S_BEGIN_TRI_CMD: usize = 0x2A4 / 4;
+// The 2D blitter.
+pub const BLT_SRC_BASE_ADDR: usize = 0x2C0 / 4;
+pub const BLT_DST_BASE_ADDR: usize = 0x2C4 / 4;
+pub const BLT_XY_STRIDES: usize = 0x2C8 / 4;
+pub const BLT_SRC_CHROMA_RANGE: usize = 0x2CC / 4;
+pub const BLT_DST_CHROMA_RANGE: usize = 0x2D0 / 4;
+pub const BLT_CLIP_X: usize = 0x2D4 / 4;
+pub const BLT_CLIP_Y: usize = 0x2D8 / 4;
+pub const BLT_SRC_XY: usize = 0x2E0 / 4;
+pub const BLT_DST_XY: usize = 0x2E4 / 4;
+pub const BLT_SIZE: usize = 0x2E8 / 4;
+pub const BLT_ROP: usize = 0x2EC / 4;
+pub const BLT_COLOR: usize = 0x2F0 / 4;
+pub const BLT_COMMAND: usize = 0x2F8 / 4;
+pub const BLT_DATA: usize = 0x2FC / 4;
 
 // TMU registers.
 pub const TEXTURE_MODE: usize = 0x300 / 4;
@@ -177,6 +234,47 @@ pub const ACCESS: [u8; 0x100] = {
     table
 };
 
+/// Who may read and write each register of a Voodoo2 (MAME's
+/// `voodoo_2_device::s_register_table`): the Voodoo Graphics' and what it
+/// added. The command FIFO's registers, intrCtrl and the init and video
+/// registers don't go through the FIFO, so they still work while the
+/// command FIFO takes the others.
+pub const ACCESS_V2: [u8; 0x100] = {
+    let mut table = ACCESS;
+    table[INTR_CTRL] = RW;
+    table[CHROMA_RANGE] = WF;
+    table[USER_INTR_CMD] = WF;
+    let mut i = CMDFIFO_BASE_ADDR;
+    while i <= CMDFIFO_HOLES {
+        table[i] = RW;
+        i += 1;
+    }
+    table[MAX_RGB_DELTA] = W;
+    table[H_BORDER] = W;
+    table[V_BORDER] = W;
+    table[BORDER_COLOR] = W;
+    table[HV_RETRACE] = R;
+    table[FBI_INIT5] = RW;
+    table[FBI_INIT6] = RW;
+    table[FBI_INIT7] = RW;
+    table[FBI_SWAP_HISTORY] = R;
+    table[FBI_TRIANGLES_OUT] = R;
+    let mut i = S_SETUP_MODE;
+    while i <= S_BEGIN_TRI_CMD {
+        table[i] = WF;
+        i += 1;
+    }
+    let mut i = BLT_SRC_BASE_ADDR;
+    while i <= BLT_COMMAND {
+        if i != 0x2DC / 4 && i != 0x2F4 / 4 {
+            table[i] = RWF;
+        }
+        i += 1;
+    }
+    table[BLT_DATA] = WF;
+    table
+};
+
 /// With fbiInit3 bit 0, the first 64 registers in the upper half of the
 /// register space (address bit 21) are these, in the order Glide's
 /// triangle setup writes them (`register_alias_map`).
@@ -219,11 +317,21 @@ pub fn name(n: usize) -> &'static str {
         "fogTable", "fogTable", "fogTable", "fogTable", "fogTable", "fogTable", "fogTable", "fogTable",
         "fogTable", "fogTable", "fogTable", "fogTable", "fogTable", "fogTable", "fogTable", "fogTable",
         "fogTable", "fogTable", "fogTable", "fogTable", "fogTable", "fogTable", "fogTable", "fogTable",
-        "reserved1e0", "reserved1e4", "reserved1e8", "reserved1ec", "reserved1f0", "reserved1f4", "reserved1f8", "reserved1fc",
+        "cmdFifoBaseAddr", "cmdFifoBump", "cmdFifoRdPtr", "cmdFifoAMin", "cmdFifoAMax", "cmdFifoDepth", "cmdFifoHoles", "reserved1fc",
     ];
     const INIT: [&str; 16] = [
         "fbiInit4", "vRetrace", "backPorch", "videoDimensions", "fbiInit0", "fbiInit1", "fbiInit2", "fbiInit3",
-        "hSync", "vSync", "clutData", "dacData", "maxRgbDelta", "reserved234", "reserved238", "reserved23c",
+        "hSync", "vSync", "clutData", "dacData", "maxRgbDelta", "hBorder", "vBorder", "borderColor",
+    ];
+    const V2: [&str; 32] = [
+        "hvRetrace", "fbiInit5", "fbiInit6", "fbiInit7", "reserved250", "reserved254", "fbiSwapHistory", "fbiTrianglesOut",
+        "sSetupMode", "sVx", "sVy", "sARGB", "sRed", "sGreen", "sBlue", "sAlpha",
+        "sVz", "sWb", "sWtmu0", "sS_W0", "sT_W0", "sWtmu1", "sS_Wtmu1", "sT_Wtmu1",
+        "sDrawTriCMD", "sBeginTriCMD", "reserved2a8", "reserved2ac", "reserved2b0", "reserved2b4", "reserved2b8", "reserved2bc",
+    ];
+    const BLT: [&str; 16] = [
+        "bltSrcBaseAddr", "bltDstBaseAddr", "bltXYStrides", "bltSrcChromaRange", "bltDstChromaRange", "bltClipX", "bltClipY",
+        "reserved2dc", "bltSrcXY", "bltDstXY", "bltSize", "bltRop", "bltColor", "reserved2f4", "bltCommand", "bltData",
     ];
     const TMU: [&str; 9] = [
         "textureMode", "tLOD", "tDetail", "texBaseAddr", "texBaseAddr_1", "texBaseAddr_2", "texBaseAddr_3_8",
@@ -232,6 +340,8 @@ pub fn name(n: usize) -> &'static str {
     match n {
         0..0x80 => NAMES[n],
         0x80..0x90 => INIT[n - 0x80],
+        0x90..0xB0 => V2[n - 0x90],
+        0xB0..0xC0 => BLT[n - 0xB0],
         0xC0..0xC9 => TMU[n - 0xC0],
         0xC9..0xE1 => "nccTable",
         _ => "reserved",
@@ -257,5 +367,22 @@ mod tests {
         assert_eq!(ALIAS[9], D_R_DX as u8);
         assert_eq!(name(FBI_INIT3), "fbiInit3");
         assert_eq!(name(T_LOD), "tLOD");
+    }
+
+    #[test]
+    fn access_rights_of_the_voodoo2() {
+        assert_eq!(ACCESS_V2[STATUS], READ);
+        assert_eq!(ACCESS_V2[INTR_CTRL], READ | WRITE, "outside the FIFO");
+        assert_eq!(ACCESS_V2[CHROMA_RANGE], WRITE | FIFO);
+        assert_eq!(ACCESS_V2[CMDFIFO_RD_PTR], READ | WRITE);
+        assert_eq!(ACCESS_V2[FBI_INIT7], READ | WRITE);
+        assert_eq!(ACCESS_V2[S_DRAW_TRI_CMD], WRITE | FIFO);
+        assert_eq!(ACCESS_V2[BLT_COMMAND], READ | WRITE | FIFO);
+        assert_eq!(ACCESS_V2[BLT_DATA], WRITE | FIFO);
+        assert_eq!(ACCESS_V2[0x2F4 / 4], 0);
+        assert_eq!(ACCESS_V2[FBZ_COLOR_PATH], ACCESS[FBZ_COLOR_PATH]);
+        assert_eq!(name(FBI_INIT7), "fbiInit7");
+        assert_eq!(name(BLT_DATA), "bltData");
+        assert_eq!(name(CMDFIFO_HOLES), "cmdFifoHoles");
     }
 }

@@ -2,11 +2,14 @@
 //! float formats, the modes, the commands, the init registers and the
 //! DAC behind them, the video timing, the NCC and fog tables. From
 //! DOSBox-X's `register_w` and `register_r` (voodoo_emu.cpp); the gamma
-//! table and vRetrace as MAME has them.
+//! table and vRetrace as MAME has them, and the Voodoo2's registers as
+//! MAME's voodoo_2.cpp has them: their decoding (`map_register_w`), the
+//! fbiInit5-7, command FIFO, setup engine and blitter registers.
 
 use super::regs::*;
 use super::tables::{float_to_int32, float_to_int64};
-use super::{Effect, Now, Voodoo};
+use super::chip::fields;
+use super::{Effect, LOG_IGNORED, Now, Voodoo};
 
 /// A 24-bit signed value in the low bits.
 fn s24(data: u32) -> i32 {
@@ -27,15 +30,49 @@ impl Voodoo {
             chips = 0xF;
         }
         chips &= self.chipmask;
-        let regnum = if offset & 0x800C0 == 0x80000 && self.alt_regmap() {
-            ALIAS[(offset & 0x3F) as usize] as usize
+        let (regnum, data) = if self.chip.v2() {
+            // Address bit 21 is the command FIFO's while it is on.
+            if offset & 0x8_0000 != 0 && self.cmdfifo_on() {
+                self.cmdfifo_write(offset, data, now, effect);
+                return true;
+            }
+            // Address bit 20 swaps the bytes, if fbiInit0 bit 3 lets it.
+            let swizzle = offset & 0x4_0000 != 0 && self.reg[FBI_INIT0] & (1 << 3) != 0;
+            (self.regnum(offset), if swizzle { data.swap_bytes() } else { data })
         } else {
-            (offset & 0xFF) as usize
+            (self.regnum(offset), data)
         };
-        let access = ACCESS[regnum];
+        let access = self.chip.access[regnum];
         if access & WRITE == 0 {
             return false;
         }
+        // The command FIFO takes what goes through the memory FIFO. Glide
+        // also writes swapbufferCMD here, which on the card only counts
+        // the swap as pending; the swap itself comes through the command
+        // FIFO, which runs it and counts it then.
+        if access & FIFO != 0 && self.cmdfifo_on() {
+            if regnum != SWAPBUFFER_CMD {
+                self.log_once(LOG_IGNORED, "[3DFX] Register writes outside the command FIFO are ignored while it is on");
+            }
+            return false;
+        }
+        self.register_to(regnum, chips, data, now, effect);
+        access & FIFO != 0
+    }
+
+    /// The register at dword `offset`: with address bit 21 and fbiInit3
+    /// bit 0, the triangle registers in their aliased order.
+    fn regnum(&self, offset: u32) -> usize {
+        if offset & 0x800C0 == 0x80000 && self.alt_regmap() {
+            ALIAS[(offset & 0x3F) as usize] as usize
+        } else {
+            (offset & 0xFF) as usize
+        }
+    }
+
+    /// Register `regnum` of the chips `chips` selects written: from the
+    /// window or a command FIFO packet.
+    pub(crate) fn register_to(&mut self, regnum: usize, chips: u32, data: u32, now: Now, effect: &mut Effect) {
         let (fbi, tmu0, tmu1) = (chips & 1 != 0, chips & 2 != 0, chips & 4 != 0);
         let fixed = |bits: i32| float_to_int32(data, bits) as u32;
         match regnum {
@@ -124,20 +161,20 @@ impl Voodoo {
                     }
                 }
             }
-            // Bits a Voodoo Graphics hasn't.
+            // The bits the chip has.
             FBZ_COLOR_PATH => {
                 if fbi {
-                    self.reg[regnum] = data & 0x0FFF_FFFF;
+                    self.reg[regnum] = data & self.chip.fbz_color_path_mask;
                 }
             }
             FBZ_MODE => {
                 if fbi {
-                    self.reg[regnum] = data & 0x001F_FFFF;
+                    self.reg[regnum] = data & self.chip.fbz_mode_mask;
                 }
             }
             FOG_MODE => {
                 if fbi {
-                    self.reg[regnum] = data & 0x3F;
+                    self.reg[regnum] = data & self.chip.fog_mode_mask;
                 }
             }
             TRIANGLE_CMD | FTRIANGLE_CMD => self.triangle(),
@@ -176,8 +213,8 @@ impl Voodoo {
                 if fbi {
                     self.reg[regnum] = data;
                     if self.reg[H_SYNC] != 0 && self.reg[V_SYNC] != 0 && self.reg[VIDEO_DIMENSIONS] != 0 {
-                        let dims = self.reg[VIDEO_DIMENSIONS];
-                        let (width, height) = (((dims & 0x3FF) + 1) & !1, (((dims >> 16) & 0x3FF) + 1) & !1);
+                        let (xwidth, yheight) = fields(self.reg[VIDEO_DIMENSIONS], self.chip.video.dimensions);
+                        let (width, height) = ((xwidth + 1) & !1, (yheight + 1) & !1);
                         if (width, height) != (self.fbi.width, self.fbi.height) {
                             (self.fbi.width, self.fbi.height) = (width, height);
                             self.display_dirty = true;
@@ -217,6 +254,33 @@ impl Voodoo {
                     self.recompute_video_memory();
                 }
             }
+            FBI_INIT5 | FBI_INIT6 | FBI_INIT7 => {
+                if fbi && self.init_writes() {
+                    // fbiInit5's straps stay (86Box).
+                    let keep = if regnum == FBI_INIT5 { 0x41E6 } else { 0 };
+                    self.reg[regnum] = (data & !keep) | (self.reg[regnum] & keep);
+                    self.recompute_video_memory();
+                    self.display_dirty = true;
+                    self.cmdfifo.enabled = self.reg[FBI_INIT7] & (1 << 8) != 0;
+                    self.cmdfifo.count_holes = self.reg[FBI_INIT7] & (1 << 10) == 0;
+                }
+            }
+            CMDFIFO_BASE_ADDR | CMDFIFO_RD_PTR | CMDFIFO_AMIN | CMDFIFO_AMAX | CMDFIFO_DEPTH | CMDFIFO_HOLES => {
+                if fbi {
+                    self.reg[regnum] = data;
+                    self.cmdfifo_set(regnum, data);
+                }
+            }
+            S_ARGB => self.setup_argb(data),
+            S_DRAW_TRI_CMD => self.draw_triangle(),
+            S_BEGIN_TRI_CMD => self.begin_triangle(),
+            BLT_DATA => self.blit_data(data),
+            BLT_DST_XY | BLT_SIZE | BLT_COMMAND => {
+                self.reg[regnum] = data;
+                if data & (1 << 31) != 0 {
+                    self.blit_start();
+                }
+            }
             n if (NCC_TABLE..NCC_TABLE + 24).contains(&n) => {
                 for (unit, on) in [(0, tmu0), (1, tmu1)] {
                     if on && unit < self.tmu.len() {
@@ -249,7 +313,6 @@ impl Voodoo {
             }
             _ => self.store(regnum, data, chips),
         }
-        access & FIFO != 0
     }
 
     /// Feed a register to the chips `chips` selects.
@@ -289,7 +352,7 @@ impl Voodoo {
     /// Register read at dword `offset` of the window (`register_r`).
     pub(crate) fn register_read(&self, offset: u32, now: Now) -> u32 {
         let regnum = (offset & 0xFF) as usize;
-        if ACCESS[regnum] & READ == 0 {
+        if self.chip.access[regnum] & READ == 0 {
             return 0xFFFF_FFFF;
         }
         // A program that reads the counters wants every pixel counted:
@@ -302,6 +365,15 @@ impl Voodoo {
         match regnum {
             STATUS => self.status(now),
             V_RETRACE => self.scanline(now) & 0x1FFF,
+            HV_RETRACE => self.hv_retrace(now),
+            CMDFIFO_RD_PTR => self.cmdfifo.read,
+            CMDFIFO_AMIN => self.cmdfifo.amin,
+            CMDFIFO_AMAX => self.cmdfifo.amax,
+            CMDFIFO_DEPTH => self.cmdfifo.depth,
+            CMDFIFO_HOLES => self.cmdfifo.holes,
+            // The board's ID straps read 0 (86Box's reads).
+            FBI_INIT5 => self.reg[regnum] & !0x1FF,
+            FBI_INIT7 => self.reg[regnum] & !0xFF,
             // initEnable bit 2 reads the DAC through fbiInit2.
             FBI_INIT2 if self.pci.init_enable & 4 != 0 => self.dac_read as u32,
             FBI_PIXELS_IN => counter(regnum, counted().pixels_in),

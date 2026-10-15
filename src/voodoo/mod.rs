@@ -20,8 +20,18 @@
 //! `voodoo_memory` gives it DOSBox-X's `voodoo_maxmem` board, a 4 MB frame
 //! buffer and two texture units with 4 MB each, or a retail board's 2 MB
 //! frame buffer and one texture unit with 2 MB.
+//!
+//! `voodoo_model=voodoo2` makes it a Voodoo2 (device 0002h, 8 or 12 MB),
+//! which DOSBox-X doesn't have. Its parts come from the Voodoo2 Graphics
+//! specification (revision 1.16), 3dfx's Glide 3 sources for it (cvg),
+//! 86Box's Voodoo2 and MAME's voodoo_2 device: the command FIFO
+//! (`cmdfifo`), the triangle setup engine (`tsu`), the 2D blitter
+//! (`blit`), and the constants where the two chips differ (`chip`).
 
 pub mod backlog;
+pub mod blit;
+pub mod chip;
+pub mod cmdfifo;
 #[cfg(feature = "voodoo-gl")]
 pub mod gl;
 pub mod lfb;
@@ -34,6 +44,7 @@ pub mod regs;
 pub mod setup;
 pub mod tables;
 pub mod texture;
+pub mod tsu;
 pub mod workers;
 
 use crate::savestate::{Reader, Result, State, StateError, Writer};
@@ -53,7 +64,35 @@ pub const WINDOW: u32 = 16 << 20;
 /// Where the BIOS puts it (DOSBox-X's `VOODOO_INITIAL_LFB`).
 pub const INITIAL_BASE: u32 = 0xD000_0000;
 
-/// The two boards.
+/// The chip a board carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Model {
+    /// The Voodoo Graphics (SST-1).
+    #[default]
+    Voodoo1,
+    /// The Voodoo2 (CVG): its command FIFO, triangle setup engine, 2D
+    /// blitter and the rest it added.
+    Voodoo2,
+}
+
+impl Model {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "voodoo1" | "voodoo" | "1" => Some(Model::Voodoo1),
+            "voodoo2" | "2" => Some(Model::Voodoo2),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Model::Voodoo1 => "voodoo1",
+            Model::Voodoo2 => "voodoo2",
+        }
+    }
+}
+
+/// The boards: a Voodoo Graphics with 4 or 12 MB, a Voodoo2 with 8 or 12.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Board {
     /// 2 MB frame buffer, one texture unit with 2 MB (4 MB in all).
@@ -61,45 +100,89 @@ pub enum Board {
     /// 4 MB frame buffer, two texture units with 4 MB each (12 MB).
     #[default]
     Max,
+    /// A Voodoo2: 4 MB frame buffer, two texture units with 2 MB each (8 MB).
+    Voodoo2,
+    /// A Voodoo2: 4 MB frame buffer, two texture units with 4 MB each (12 MB).
+    Voodoo2Max,
 }
 
-crate::state_enum!(Board { Board::Standard, Board::Max });
+crate::state_enum!(Board { Board::Standard, Board::Max, Board::Voodoo2, Board::Voodoo2Max });
 
 impl Board {
+    /// The boards in the order saves and recordings number them.
+    pub const ALL: [Board; 4] = [Board::Standard, Board::Max, Board::Voodoo2, Board::Voodoo2Max];
+
+    /// The board `voodoo_memory` names ("4", "8" or "12"), before
+    /// `voodoo_model` picks the chip (`of`).
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "4" | "4mb" => Some(Board::Standard),
+            "8" | "8mb" => Some(Board::Voodoo2),
             "12" | "12mb" => Some(Board::Max),
             _ => None,
         }
+    }
+
+    /// How the settings menu names it.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Board::Standard => "Voodoo Graphics, 4 MB (one texture unit)",
+            Board::Max => "Voodoo Graphics, 12 MB (two texture units)",
+            Board::Voodoo2 => "Voodoo2, 8 MB",
+            Board::Voodoo2Max => "Voodoo2, 12 MB",
+        }
+    }
+
+    /// The board of `model` with `megabytes` of memory: the nearest it
+    /// comes in (a Voodoo Graphics 4 or 12 MB, a Voodoo2 8 or 12).
+    pub fn of(model: Model, megabytes: u32) -> Self {
+        match (model, megabytes) {
+            (Model::Voodoo1, ..=4) => Board::Standard,
+            (Model::Voodoo1, _) => Board::Max,
+            (Model::Voodoo2, ..=8) => Board::Voodoo2,
+            (Model::Voodoo2, _) => Board::Voodoo2Max,
+        }
+    }
+
+    pub fn model(self) -> Model {
+        match self {
+            Board::Standard | Board::Max => Model::Voodoo1,
+            Board::Voodoo2 | Board::Voodoo2Max => Model::Voodoo2,
+        }
+    }
+
+    /// Its number in `ALL`.
+    pub fn index(self) -> u32 {
+        Self::ALL.iter().position(|&b| b == self).unwrap_or(0) as u32
     }
 
     /// The memory in MB, as `voodoo_memory` names it.
     pub fn megabytes(self) -> u32 {
         match self {
             Board::Standard => 4,
-            Board::Max => 12,
+            Board::Max | Board::Voodoo2Max => 12,
+            Board::Voodoo2 => 8,
         }
     }
 
     fn frame_buffer(self) -> usize {
         match self {
             Board::Standard => 2 << 20,
-            Board::Max => 4 << 20,
+            _ => 4 << 20,
         }
     }
 
     fn texture_units(self) -> usize {
         match self {
             Board::Standard => 1,
-            Board::Max => 2,
+            _ => 2,
         }
     }
 
     fn texture_memory(self) -> usize {
         match self {
-            Board::Standard => 2 << 20,
-            Board::Max => 4 << 20,
+            Board::Standard | Board::Voodoo2 => 2 << 20,
+            Board::Max | Board::Voodoo2Max => 4 << 20,
         }
     }
 }
@@ -373,6 +456,9 @@ impl Default for PciConfig {
 /// The card.
 pub struct Voodoo {
     pub board: Board,
+    /// What the board's chip is: its register map, field widths, IDs
+    /// and power-on values.
+    pub(crate) chip: &'static chip::Chip,
     /// A host rendering preference, not a guest register or saved state.
     texture_sampling: TextureSampling,
     chipmask: u32,
@@ -445,6 +531,13 @@ pub struct Voodoo {
     recorder: std::cell::RefCell<Option<std::io::BufWriter<std::fs::File>>>,
     /// Lines for the log, which the bus writes out.
     pub log: Vec<String>,
+    /// A Voodoo2's command FIFO, the setup engine's vertices (the last
+    /// three, and how many since the strip or fan began) and its
+    /// blitter's CPU-to-screen copy.
+    pub(crate) cmdfifo: cmdfifo::CmdFifo,
+    pub(crate) svert: [tsu::Vertex; 3],
+    pub(crate) sverts: u32,
+    pub(crate) blt: blit::Blit,
 }
 
 /// Frame buffer writes that go out to the workers together.
@@ -454,6 +547,7 @@ const WORDS_A_JOB: usize = 4096;
 const LOG_BYTE: u32 = 1;
 const LOG_RESERVED: u32 = 2;
 const LOG_DIRECT: u32 = 4;
+pub(crate) const LOG_IGNORED: u32 = 8;
 
 impl Voodoo {
     pub fn new(board: Board) -> Self {
@@ -463,17 +557,25 @@ impl Voodoo {
     /// A card that draws with `workers` threads (0: none).
     pub fn with_workers(board: Board, workers: usize) -> Self {
         let units = board.texture_units();
+        let chip = chip::Chip::of(board.model());
         let mut v = Self {
             board,
+            chip,
             texture_sampling: TextureSampling::Default,
             chipmask: if units == 2 { 0x07 } else { 0x03 },
-            tmu_config: if units == 2 { 0xD1 } else { 0x11 },
+            tmu_config: chip.tmu_config[units - 1],
             reg: Box::new([0; 0x400]),
             pci: PciConfig::default(),
             dac: [0; 8],
             dac_read: 0,
             fbi: Fbi::new(board.frame_buffer()),
-            tmu: (0..units).map(|i| Tmu::new(board.texture_memory(), 0x100 * (i + 1))).collect(),
+            tmu: (0..units)
+                .map(|i| {
+                    let mut tmu = Tmu::new(board.texture_memory(), 0x100 * (i + 1));
+                    tmu.v2 = chip.v2();
+                    tmu
+                })
+                .collect(),
             send_config: false,
             stats: Stats::default(),
             clut: default_clut(),
@@ -503,6 +605,10 @@ impl Voodoo {
             logged: 0,
             recorder: std::cell::RefCell::new(None),
             log: Vec::new(),
+            cmdfifo: Default::default(),
+            svert: Default::default(),
+            sverts: 0,
+            blt: Default::default(),
         };
         v.reset();
         v
@@ -540,11 +646,15 @@ impl Voodoo {
         for tmu in &mut self.tmu {
             tmu.reset();
         }
-        self.reg[FBI_INIT0] = (1 << 4) | (0x10 << 6);
-        self.reg[FBI_INIT1] = (1 << 1) | (1 << 8) | (1 << 12) | (2 << 20);
-        self.reg[FBI_INIT2] = (1 << 6) | (0x100 << 23);
-        self.reg[FBI_INIT3] = (2 << 13) | (0xF << 17);
-        self.reg[FBI_INIT4] = 1;
+        let init = [FBI_INIT0, FBI_INIT1, FBI_INIT2, FBI_INIT3, FBI_INIT4, FBI_INIT5, FBI_INIT6, FBI_INIT7];
+        for (reg, value) in init.into_iter().zip(self.chip.fbi_init) {
+            // fbiInit5-7 are a Voodoo2's, 0 on a Voodoo Graphics.
+            self.reg[reg] = value;
+        }
+        self.cmdfifo = Default::default();
+        self.svert = Default::default();
+        self.sverts = 0;
+        self.blt = Default::default();
         self.fbi.yorigin = 0;
         self.recompute_video_memory();
         self.timing = CrtTiming::VESA_480;
@@ -560,12 +670,14 @@ impl Voodoo {
     /// A byte of the configuration space.
     pub fn config_read(&self, reg: u8) -> u8 {
         let dword = match reg & 0xFC {
-            0x00 => 0x0001_121A,
+            0x00 => (self.chip.device_id as u32) << 16 | 0x121A,
             0x04 => 0x0080_0000 | self.pci.command as u32,
             // Revision 2, a multimedia video device.
             0x08 => 0x0400_0002,
             0x10 => self.pci.bar | 0x08,
             0x3C => 0x0000_00FF,
+            // A Voodoo2 reads 5 in bits 15:12 (86Box).
+            0x40 if self.chip.v2() => (self.pci.init_enable & 0xFFFF_0FFF) | 0x5000,
             0x40 => self.pci.init_enable,
             _ => 0,
         };
@@ -606,7 +718,13 @@ impl Voodoo {
         (self.pci.bar != 0).then_some(self.pci.bar)
     }
 
-    /// Whether writes to fbiInit0-4 are allowed (initEnable bit 0).
+    /// Whether the card is a Voodoo2.
+    pub(crate) fn v2(&self) -> bool {
+        self.chip.v2()
+    }
+
+    /// Whether writes to the fbiInit registers are allowed (initEnable
+    /// bit 0).
     fn init_writes(&self) -> bool {
         self.pci.init_enable & 1 != 0
     }
@@ -644,7 +762,7 @@ impl Voodoo {
     /// board.
     pub fn record_into(&mut self, path: &std::path::Path) -> std::io::Result<()> {
         *self.recorder.borrow_mut() = Some(std::io::BufWriter::new(std::fs::File::create(path)?));
-        self.record(b'B', [(self.board == Board::Max) as u32, 0, 0]);
+        self.record(b'B', [self.board.index(), 0, 0]);
         Ok(())
     }
 
@@ -826,7 +944,7 @@ impl Voodoo {
             self.flush();
         }
         if self.reg[self.tmu[unit].base + T_LOD] & (1 << 27) != 0 {
-            self.log_once(LOG_DIRECT, "[3DFX] Direct texture writes (a Voodoo 2's) are ignored");
+            self.log_once(LOG_DIRECT, "[3DFX] Direct texture writes are ignored");
             return;
         }
         let seq8 = self.reg[0x100 + TEXTURE_MODE] & 0x8000_0000 != 0;
@@ -836,23 +954,50 @@ impl Voodoo {
 
     // --- Video memory layout and output ---
 
-    /// Where the buffers are, from fbiInit1, 2 and 4 (`recompute_video_memory`).
+    /// A Voodoo Graphics' buffers: two colour buffers and an auxiliary
+    /// one, or three colour buffers (fbiInit2 bit 4), rows of 64-pixel
+    /// tiles (fbiInit1 bits 7:4).
+    fn layout_v1(&self) -> (u32, u32) {
+        ((self.reg[FBI_INIT2] >> 4) & 1, 64 * ((self.reg[FBI_INIT1] >> 4) & 0xF))
+    }
+
+    /// A Voodoo2's: fbiInit5 bits 10:9 can also ask for three colour
+    /// buffers and an auxiliary one, and its tiles are 32 pixels wide, with
+    /// two more bits of their count in fbiInit1 bit 24 and fbiInit6 bit 30
+    /// (MAME's `voodoo_2_device::recompute_video_memory`).
+    fn layout_v2(&self) -> (u32, u32) {
+        let config = if self.reg[FBI_INIT2] & (1 << 4) != 0 { 1 } else { (self.reg[FBI_INIT5] >> 9) & 3 };
+        let init1 = self.reg[FBI_INIT1];
+        let xtiles = (self.reg[FBI_INIT6] >> 30) & 1 | ((init1 >> 4) & 0xF) << 1 | ((init1 >> 24) & 1) << 5;
+        (config, 32 * xtiles)
+    }
+
+    /// Where the buffers are, from the fbiInit registers (`recompute_video_memory`).
     pub(crate) fn recompute_video_memory(&mut self) {
+        let (config, rowpixels) = if self.v2() { self.layout_v2() } else { self.layout_v1() };
         let buffer_pages = (self.reg[FBI_INIT2] >> 11) & 0x1FF;
         let fifo_start = (self.reg[FBI_INIT4] >> 8) & 0x3FF;
         let mut fifo_last = (self.reg[FBI_INIT4] >> 18) & 0x3FF;
         let fbi = &mut self.fbi;
-        fbi.rowpixels = 64 * ((self.reg[FBI_INIT1] >> 4) & 0xF);
+        fbi.rowpixels = rowpixels;
         fbi.rgboffs[0] = 0;
         fbi.rgboffs[1] = buffer_pages * 0x1000;
-        if (self.reg[FBI_INIT2] >> 4) & 1 == 0 {
-            // Two colour buffers and an auxiliary buffer.
-            fbi.rgboffs[2] = NONE;
-            fbi.auxoffs = 2 * buffer_pages * 0x1000;
-        } else {
+        match config {
             // Three colour buffers and none.
-            fbi.rgboffs[2] = 2 * buffer_pages * 0x1000;
-            fbi.auxoffs = NONE;
+            1 => {
+                fbi.rgboffs[2] = 2 * buffer_pages * 0x1000;
+                fbi.auxoffs = NONE;
+            }
+            // Three colour buffers and an auxiliary buffer.
+            2 => {
+                fbi.rgboffs[2] = 2 * buffer_pages * 0x1000;
+                fbi.auxoffs = 3 * buffer_pages * 0x1000;
+            }
+            // Two colour buffers and an auxiliary buffer (3 is reserved).
+            _ => {
+                fbi.rgboffs[2] = NONE;
+                fbi.auxoffs = 2 * buffer_pages * 0x1000;
+            }
         }
         for offs in &mut fbi.rgboffs {
             if *offs != NONE && *offs > fbi.mask {
@@ -892,10 +1037,10 @@ impl Voodoo {
         }
     }
 
-    /// Whether the card drives the monitor: its video clock runs and
-    /// fbiInit0 turns off the VGA pass-through.
+    /// Whether the card drives the monitor: fbiInit0 turns off the VGA
+    /// pass-through, and on a Voodoo Graphics its video clock runs.
     pub fn output(&self) -> bool {
-        self.pci.clock_enabled && self.reg[FBI_INIT0] & 1 != 0
+        (self.pci.clock_enabled || !self.chip.pci_video_clock) && self.reg[FBI_INIT0] & 1 != 0
     }
 
     /// The size of the picture it shows.
@@ -986,15 +1131,17 @@ impl Voodoo {
     /// what DOSBox-X always runs the card at.
     fn update_timing(&mut self) {
         let (h, v, dims) = (self.reg[H_SYNC], self.reg[V_SYNC], self.reg[VIDEO_DIMENSIONS]);
-        let vtotal = ((v >> 16) & 0xFFF) + (v & 0xFFF);
-        let vvis = (dims >> 16) & 0x3FF;
+        let video = self.chip.video;
+        let (vsync_on, vsync_off) = chip::fields(v, video.vsync);
+        let (xwidth, vvis) = chip::fields(dims, video.dimensions);
+        let vtotal = vsync_off + vsync_on;
         if h == 0 || v == 0 || dims == 0 || vvis == 0 || vtotal <= vvis {
             return;
         }
         let line_ns = (1_000_000_000 / 60 / vtotal as u64) as u32;
-        let htotal = ((h >> 16) & 0x3FF) + 1 + (h & 0xFF) + 1;
-        let hvis = (dims & 0x3FF).min(htotal);
-        let sync = (v & 0xFFF).clamp(1, vtotal - vvis);
+        let htotal = self.htotal();
+        let hvis = xwidth.min(htotal);
+        let sync = vsync_on.clamp(1, vtotal - vvis);
         self.timing = CrtTiming {
             line_ns,
             hdisplay_ns: (line_ns as u64 * hvis as u64 / htotal.max(1) as u64) as u32,
@@ -1003,6 +1150,19 @@ impl Voodoo {
             retrace_start: vvis,
             retrace_end: vvis + sync,
         };
+    }
+
+    /// The pixels of a line, sync included, from hSync.
+    fn htotal(&self) -> u32 {
+        let (on, off) = chip::fields(self.reg[H_SYNC], self.chip.video.hsync);
+        off + 1 + on + 1
+    }
+
+    /// hvRetrace: the line in bits 12:0 and the pixel in it in bits 26:16.
+    pub(crate) fn hv_retrace(&self, now: Now) -> u32 {
+        let line = self.timing.line_ns.max(1) as u64;
+        let hpos = (now.ns % self.timing.frame_ns().max(1)) % line * self.htotal() as u64 / line;
+        (self.scanline(now) & 0x1FFF) | (hpos as u32 & 0x7FF) << 16
     }
 
     /// The number of retraces that began up to `ns`.
@@ -1126,7 +1286,13 @@ impl Voodoo {
         self.service(now);
         let Some(front) = self.swaps.front() else { return };
         self.fifo_writes += 1;
-        let capacity = if self.fbi.fifo_size > 0 { self.fbi.fifo_size } else { 64 };
+        let capacity = if self.cmdfifo_on() {
+            (self.cmdfifo.end.saturating_sub(self.cmdfifo.base) / 4).max(1)
+        } else if self.fbi.fifo_size > 0 {
+            self.fbi.fifo_size
+        } else {
+            64
+        };
         if self.fifo_writes > capacity {
             effect.stall_to = Some(front.due);
         }
@@ -1298,6 +1464,7 @@ impl Voodoo {
         let init: Vec<String> =
             [FBI_INIT0, FBI_INIT1, FBI_INIT2, FBI_INIT3, FBI_INIT4].iter().map(|&r| format!("{:08X}", self.reg[r])).collect();
         serde_json::json!({
+            "model": self.board.model().name(),
             "board_mb": self.board.megabytes(),
             "base": format!("{:08X}", self.pci.bar),
             "clock": self.pci.clock_enabled,
@@ -1318,6 +1485,13 @@ impl Voodoo {
             "catch_ups": self.catch_ups.get(),
             "counters_read": self.counters_read.get(),
             "software_picture": self.picture_wanted(),
+            "cmdfifo": self.cmdfifo_on().then(|| serde_json::json!({
+                "base": format!("{:06X}", self.cmdfifo.base),
+                "end": format!("{:06X}", self.cmdfifo.end),
+                "read": format!("{:06X}", self.cmdfifo.read),
+                "depth": self.cmdfifo.depth,
+                "holes": self.cmdfifo.holes,
+            })),
         })
     }
 }
@@ -1383,6 +1557,11 @@ impl State for Voodoo {
         data.save(w);
         due.save(w);
         self.capped_at.save(w);
+        // Then a Voodoo2's own.
+        self.cmdfifo.save(w);
+        self.svert.save(w);
+        self.sverts.save(w);
+        self.blt.save(w);
     }
 
     fn load(&mut self, r: &mut Reader) -> Result<()> {
@@ -1391,8 +1570,10 @@ impl State for Voodoo {
         board.load(r)?;
         if board != self.board {
             return Err(StateError::Mismatch(format!(
-                "its 3dfx card has {} MB, this one {} MB",
+                "its 3dfx card is a {} with {} MB, this one a {} with {} MB",
+                board.model().name(),
                 board.megabytes(),
+                self.board.model().name(),
                 self.board.megabytes()
             )));
         }
@@ -1426,6 +1607,16 @@ impl State for Voodoo {
             self.capped_at.load(r)?;
         }
         self.deferred = deferred.then_some((data, due));
+        self.cmdfifo = Default::default();
+        self.svert = Default::default();
+        self.sverts = 0;
+        self.blt = Default::default();
+        if !r.is_empty() {
+            self.cmdfifo.load(r)?;
+            self.svert.load(r)?;
+            self.sverts.load(r)?;
+            self.blt.load(r)?;
+        }
         self.after_load();
         Ok(())
     }

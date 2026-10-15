@@ -334,7 +334,7 @@ impl Item {
             Machine => "Video card",
             Memsize => "Memory",
             Voodoo => "3dfx Voodoo Graphics",
-            VoodooMemory => "3dfx memory",
+            VoodooMemory => "3dfx card",
             VoodooRenderer => "3dfx drawn by",
             VoodooScale => "3dfx OpenGL size",
             VoodooScaleShader => "  Sized for the CRT look",
@@ -720,10 +720,7 @@ impl Item {
             Machine => s.machine.describe().to_string(),
             Memsize => memsize_bar(s.memsize, s.cpu),
             Voodoo => on_off(s.voodoo.enabled),
-            VoodooMemory => match s.voodoo.board {
-                crate::voodoo::Board::Standard => "4 MB (one texture unit)".to_string(),
-                crate::voodoo::Board::Max => "12 MB (two texture units)".to_string(),
-            },
+            VoodooMemory => s.voodoo.board.describe().to_string(),
             VoodooRenderer => match s.voodoo.renderer {
                 crate::voodoo::Renderer::Software => "Rust-DOS".to_string(),
                 crate::voodoo::Renderer::OpenGl => "OpenGL".to_string(),
