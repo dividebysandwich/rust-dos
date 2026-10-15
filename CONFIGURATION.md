@@ -1293,6 +1293,14 @@ be Ogg Vorbis, FLAC or MP3 files (FILE ... MP3, OGG or FLAC, or WAVE as
 many sheets call them), and WAVE files at other rates: they are decoded to
 CD audio as they play. Programs run from the image as from any other drive.
 
+An image of whole 2352-byte sectors (a BIN, or a CHD) keeps each data
+sector's EDC, and a sector whose EDC doesn't match its data reads as a
+drive reads it: as an error (MEDIUM ERROR, unrecovered read error, on the
+IDE drive; a CRC error through MSCDEX). Some copy protections master such
+sectors on purpose and refuse to run when reading them succeeds, so an
+image as Redump makes it passes their check. Sectors with an EDC of 0,
+which tools that turn an ISO into a BIN leave, aren't checked.
+
 The type of a drive is the word after the path in `[drives]`, or `-t` at
 the prompt:
 
