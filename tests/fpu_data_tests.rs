@@ -286,6 +286,7 @@ const FBSTP: [u8; 4] = [0xDF, 0x36, 0x10, 0x10];
 fn test_fistp_out_of_range_stores_the_indefinite() {
     // (FLD's sign and exponent, its significand, the store, how many bits
     // it stores, and what it stores.)
+    #[rustfmt::skip]
     let cases: [(u16, u64, &[u8; 4], u32, u64); 8] = [
         (0x400E, 0x9C40_0000_0000_0000, &FISTP16, 16, 0x8000), // 40000
         (0xC00E, 0x9C40_0000_0000_0000, &FISTP16, 16, 0x8000), // -40000
@@ -298,7 +299,13 @@ fn test_fistp_out_of_range_stores_the_indefinite() {
     ];
     for (se, man, store, bits, want) in cases {
         let (cpu, ie) = store_extended(se, man, store);
-        assert_eq!(cpu.bus.read_64(0x1010) & u64::MAX >> (64 - bits), want, "{:04X}:{:016X}", se, man);
+        assert_eq!(
+            cpu.bus.read_64(0x1010) & u64::MAX >> (64 - bits),
+            want,
+            "{:04X}:{:016X}",
+            se,
+            man
+        );
         assert!(ie, "IE for {:04X}:{:016X}", se, man);
     }
     // The ones that fit set no IE.
@@ -311,7 +318,12 @@ fn test_fistp_out_of_range_stores_the_indefinite() {
 /// FISTP QWORD copies any integer (a double has only 53 bits of it).
 #[test]
 fn test_fild_fistp_qword_keeps_all_64_bits() {
-    for value in [0x1234_5678_90AB_CDEFu64, 0x8000_0000_0000_0000, 0x7FFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF] {
+    for value in [
+        0x1234_5678_90AB_CDEFu64,
+        0x8000_0000_0000_0000,
+        0x7FFF_FFFF_FFFF_FFFF,
+        0xFFFF_FFFF_FFFF_FFFF,
+    ] {
         let mut cpu = Cpu::new(std::path::PathBuf::from("."));
         cpu.bus.write_64(0x1000, value);
         // DF 2E 00 10: FILD QWORD PTR [1000]
@@ -327,6 +339,7 @@ fn test_fild_fistp_qword_keeps_all_64_bits() {
 #[test]
 fn test_fbstp_rounds_and_stores_the_indefinite() {
     let indefinite = [0, 0, 0, 0, 0, 0, 0, 0xC0, 0xFF, 0xFF];
+    #[rustfmt::skip]
     let cases: [(u16, u64, [u8; 10], bool); 8] = [
         (0x4000, 0xA000_0000_0000_0000, [2, 0, 0, 0, 0, 0, 0, 0, 0, 0], false), // 2.5
         (0x4000, 0xE000_0000_0000_0000, [4, 0, 0, 0, 0, 0, 0, 0, 0, 0], false), // 3.5

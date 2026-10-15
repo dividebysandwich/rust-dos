@@ -255,10 +255,12 @@ pub fn fbstp(cpu: &mut Cpu, instr: &Instruction) {
     let val: F80 = cpu.fpu_pop();
     let addr = calculate_addr(cpu, instr);
 
-    let bcd_bytes = val.to_bcd_packed((cpu.fpu_control >> 10) & 0x03).unwrap_or_else(|| {
-        cpu.set_fpu_flag(FpuFlags::IE, true);
-        BCD_INDEFINITE
-    });
+    let bcd_bytes = val
+        .to_bcd_packed((cpu.fpu_control >> 10) & 0x03)
+        .unwrap_or_else(|| {
+            cpu.set_fpu_flag(FpuFlags::IE, true);
+            BCD_INDEFINITE
+        });
 
     // Write the 10-byte BCD block to Memory
     for (i, &byte) in bcd_bytes.iter().enumerate() {

@@ -273,7 +273,9 @@ impl F80 {
     /// NaN, where the FPU stores the packed BCD indefinite
     /// (`BCD_INDEFINITE`).
     pub fn to_bcd_packed(&self, rc: u16) -> Option<[u8; 10]> {
-        let mut val = self.to_integer(rc).filter(|&n| n <= 999_999_999_999_999_999)?;
+        let mut val = self
+            .to_integer(rc)
+            .filter(|&n| n <= 999_999_999_999_999_999)?;
         let mut bcd = [0u8; 10];
 
         for byte in &mut bcd[..9] {
@@ -333,7 +335,11 @@ impl F80 {
             (man >> s, man << (64 - s))
         } else {
             let s = (-e - 1) as u32;
-            if s >= 64 { (0, (man != 0) as u64) } else { (0, man >> s | (man & ((1u64 << s) - 1) != 0) as u64) }
+            if s >= 64 {
+                (0, (man != 0) as u64)
+            } else {
+                (0, man >> s | (man & ((1u64 << s) - 1) != 0) as u64)
+            }
         };
         let half = 1u64 << 63;
         let up = match rc & 3 {
