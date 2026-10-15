@@ -1881,8 +1881,8 @@ wizard: choose to search for the best driver, tick
 "Specify a location", give the folder that holds `voodoo2.inf`, and
 restart Windows when it is done. Device Manager then lists a "Voodoo2 3D
 Accelerator", and DirectDraw and Direct3D offer the card as "3dfxV2
-(Voodoo2 DirectX 6 Driver)". Incoming plays on it, menus and missions,
-with `machine=svga_s3virge`, `cpu=pentium_ii` and `memsize=128`.
+(Voodoo2 DirectX 6 Driver)", which Direct3D games that let you choose the
+3D card draw on.
 
 DOS games that bring the Voodoo2's `GLIDE2X.OVL` or Glide 3 run as on the
 Voodoo Graphics.
