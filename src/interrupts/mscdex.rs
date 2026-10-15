@@ -9,7 +9,7 @@
 
 use crate::bus::Bus;
 use crate::cdrom::audio::PlayState;
-use crate::cdrom::image::{is_unreadable, CdImage};
+use crate::cdrom::image::{CdImage, is_unreadable};
 use crate::cdrom::{self, DATA_SECTOR, RAW_SECTOR};
 use crate::cpu::{Cpu, CpuFlags};
 use crate::disk::DriveKind;
@@ -158,7 +158,14 @@ pub fn handle(cpu: &mut Cpu, function: u8) {
                 let mut sector = [0u8; DATA_SECTOR];
                 for i in 0..cpu.dx() as u32 {
                     if let Err(e) = image.read_data(start + i, &mut sector) {
-                        set_error(cpu, if is_unreadable(&e) { DATA_ERROR } else { NOT_READY });
+                        set_error(
+                            cpu,
+                            if is_unreadable(&e) {
+                                DATA_ERROR
+                            } else {
+                                NOT_READY
+                            },
+                        );
                         return;
                     }
                     let at = es_bx + i as usize * DATA_SECTOR;
@@ -393,7 +400,11 @@ fn read_long(cpu: &mut Cpu, image: &CdImage, buffer: usize, start: u32, count: u
             image.read_data(start + i, (&mut data[..DATA_SECTOR]).try_into().unwrap())
         };
         if let Err(e) = read {
-            return if is_unreadable(&e) { CRC_ERROR } else { SECTOR_NOT_FOUND };
+            return if is_unreadable(&e) {
+                CRC_ERROR
+            } else {
+                SECTOR_NOT_FOUND
+            };
         }
         let at = buffer + i as usize * size;
         for (j, &b) in data[..size].iter().enumerate() {

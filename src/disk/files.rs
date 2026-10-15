@@ -527,7 +527,13 @@ impl DiskController {
                     // other failure is a read fault.
                     let n = image
                         .read_extent(extent, pos.get(), &mut buffer)
-                        .map_err(|e| if crate::cdrom::image::is_unreadable(&e) { 0x17u16 } else { 0x1E })?;
+                        .map_err(|e| {
+                            if crate::cdrom::image::is_unreadable(&e) {
+                                0x17u16
+                            } else {
+                                0x1E
+                            }
+                        })?;
                     buffer.truncate(n);
                     pos.set(pos.get() + n as u64);
                     return Ok(buffer);

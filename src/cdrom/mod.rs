@@ -22,7 +22,9 @@ pub const FRAMES_PER_SECOND: u32 = 75;
 pub const LBA_OFFSET: u32 = 150;
 
 /// The sync pattern that starts every raw data sector.
-pub const SYNC: [u8; 12] = [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00];
+pub const SYNC: [u8; 12] = [
+    0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00,
+];
 
 /// The EDC's CRC table: polynomial x^32 + x^31 + x^16 + x^15 + x^4 + x^3
 /// + x + 1, bit-reversed.
@@ -44,7 +46,9 @@ const EDC_TABLE: [u32; 256] = {
 
 /// The error detection code a data sector stores over `data`.
 pub fn edc(data: &[u8]) -> u32 {
-    data.iter().fold(0, |e, &b| (e >> 8) ^ EDC_TABLE[((e ^ b as u32) & 0xFF) as usize])
+    data.iter().fold(0, |e, &b| {
+        (e >> 8) ^ EDC_TABLE[((e ^ b as u32) & 0xFF) as usize]
+    })
 }
 
 /// Whether a drive can't read this whole data sector: its sync and header
@@ -69,9 +73,11 @@ pub fn edc_fails(raw: &[u8; RAW_SECTOR]) -> bool {
         // is Form 2. A Mode 2 sector without that (formless, 2336 bytes of
         // data, or an empty XA gap) has no EDC to check: taking data that
         // happens to repeat for a subheader would fail a good sector.
-        2 if raw[16..20] == raw[20..24] && raw[18] & 0x0E != 0 => {
-            check(if raw[18] & 0x20 == 0 { 16..2072 } else { 16..2348 })
-        }
+        2 if raw[16..20] == raw[20..24] && raw[18] & 0x0E != 0 => check(if raw[18] & 0x20 == 0 {
+            16..2072
+        } else {
+            16..2348
+        }),
         _ => false,
     }
 }
