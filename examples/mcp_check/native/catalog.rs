@@ -17,6 +17,8 @@ const SOURCES: &[&str] = &[
     "examples/mcp_check/runtime_coverage.rs",
     "examples/mcp_check/coverage.rs",
     "src/main.rs",
+    "src/playback.rs",
+    "src/debug/mcp/playback.rs",
     "src/capture/png.rs",
     "src/debug/mod.rs",
     "src/debug/input.rs",

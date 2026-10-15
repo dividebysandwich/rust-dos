@@ -12,7 +12,7 @@ use serde_json::{Map, Value, json};
 use super::input::expand_input;
 use super::journal::{Kind, OpKind, OpState};
 use super::status::{at_idle_prompt, bytes_record, drives_json, ivt_json, net_json, printer_json, screen_text, serial_json, set_regs, sound_json, stop_reply};
-use super::{Cmd, Ctx, DebugHub, LowInput, Need, PauseReason, Reply, Request, RunWait, SpeedRequest, StateRequest, Watch, parse_addr, pm, regs_json, trace};
+use super::{Cmd, Ctx, DebugHub, LowInput, Need, PauseReason, Reply, Request, RunWait, PlaybackRequest, StateRequest, Watch, parse_addr, pm, regs_json, trace};
 use crate::cpu::Cpu;
 use crate::disk::{DriveKind, MountOptions};
 use crate::mount::{parse_drive_name, parse_kind};
@@ -47,7 +47,7 @@ impl DebugHub {
         // A stop comes before anything this request does.
         self.flush_stop(cpu);
         let Request { cmd, reply: tx, req, tag, if_state,
-            deadline: _,
+            deadline,
             #[cfg(feature = "mcp")]
             queued_at: _,
             capture,
@@ -88,7 +88,14 @@ impl DebugHub {
                 return;
             }
             Cmd::Speed { cycles } => {
-                self.speed_requests.push(SpeedRequest { cycles, ctx, if_state, reply: tx });
+                let busy = deadline.and_then(|_| self.shared.as_ref().map(super::control::Busy::new));
+                self.playback_requests.push(PlaybackRequest { action: crate::playback::Action::Speed(Some(cycles)), deadline, _native_admission, _busy: busy, ctx, if_state, reply: tx });
+                return;
+            }
+            #[cfg(feature = "mcp")]
+            Cmd::Playback { action } => {
+                let busy = deadline.and_then(|_| self.shared.as_ref().map(super::control::Busy::new));
+                self.playback_requests.push(PlaybackRequest { action, deadline, _native_admission, _busy: busy, ctx, if_state, reply: tx });
                 return;
             }
             Cmd::Screenshot => {
@@ -117,6 +124,8 @@ impl DebugHub {
                 Reply::Json(status)
             }
             Cmd::Stats => Reply::Json(self.stats_json(cpu)),
+            #[cfg(feature = "mcp")]
+            Cmd::Playback { .. } => unreachable!("frontend requests are queued before dispatch"),
             Cmd::ProfileControl(c) => self.profile_control(cpu, c),
             Cmd::ProfileStatus => Reply::Json(self.profile_status(cpu)),
             Cmd::ProfileGet { query, format } => self.profile_report(cpu, &query, format),
@@ -636,6 +645,10 @@ impl DebugHub {
 /// Commands that change the machine (its input, memory, registers, drives,
 /// speed or state), which deterministic mode takes only while it is paused.
 fn changes_machine(cmd: &Cmd) -> bool {
+    #[cfg(feature = "mcp")]
+    if let Cmd::Playback { action } = cmd {
+        return action.changes_machine();
+    }
     #[cfg(feature = "mcp")]
     {
         use rust_dos::control::{GuestInput, MouseInput};

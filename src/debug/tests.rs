@@ -1786,9 +1786,10 @@ fn requests_sent_together_take_effect_in_the_order_sent() {
             };
             hub.state_done(&cpu, request, result);
         }
-        while let Some(request) = hub.next_speed_request() {
-            let cycles = request.cycles.clone();
-            hub.speed_done(&cpu, request, Ok(serde_json::json!({"cycles": cycles})));
+        while let Some(request) = hub.next_playback_request() {
+            let crate::playback::Action::Speed(Some(cycles)) = &request.action else { panic!("speed mutation expected") };
+            let cycles = cycles.clone();
+            hub.playback_done(&cpu, request, Ok(serde_json::json!({"cycles": cycles})));
         }
     }
     let statuses: Vec<u16> = answers
@@ -1950,4 +1951,42 @@ fn log_lines_name_their_request_and_the_journal_s_entry() {
     assert_eq!((line.cause, line.at), (Some(req), before));
     assert!(log.iter().zip(log.iter().skip(1)).all(|(a, b)| b.n == a.n + 1), "numbered in order");
     assert_eq!(entries_of(&hub, "drive_mounted")[0]["cause"].as_u64(), Some(req));
+}
+
+#[cfg(feature = "mcp")]
+#[test]
+fn frontend_execution_queue_retains_admission_and_refuses_abandoned_changes() {
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+    let mut cpu = Cpu::new(".".into());
+    let mut hub = DebugHub::for_tests(&cpu);
+    let shared = hub.shared.as_ref().unwrap().clone();
+    let (mut request, receive) = hub.request(Cmd::Playback { action: crate::playback::Action::Speed(Some("20000".into())) });
+    request.deadline = Some(Instant::now() + Duration::from_secs(10));
+    request._native_admission = Some(shared.native_commands.clone().try_acquire_owned().unwrap());
+    hub.handle(&mut cpu, request);
+    assert_eq!(shared.native_commands.available_permits(), 7);
+    assert_eq!(shared.busy.load(Ordering::Acquire), 1);
+    drop(receive);
+    assert!(hub.next_playback_request().is_none(), "a lost caller cannot leave an abandoned queued mutation");
+    assert_eq!(shared.native_commands.available_permits(), 8);
+    assert_eq!(shared.busy.load(Ordering::Acquire), 0);
+
+    let (mut request, mut receive) = hub.request(Cmd::Playback { action: crate::playback::Action::FastForward(crate::playback::FastForwardAction::Start(Duration::from_millis(100))) });
+    request.deadline = Some(Instant::now() + Duration::from_secs(10));
+    request._native_admission = Some(shared.native_commands.clone().try_acquire_owned().unwrap());
+    hub.handle(&mut cpu, request);
+    hub.playback_requests[0].deadline = Some(Instant::now());
+    assert!(hub.next_playback_request().is_none());
+    assert!(matches!(receive.try_recv().unwrap().reply, Reply::Error(408, _)));
+    assert_eq!(shared.native_commands.available_permits(), 8);
+
+    let (mut request, mut receive) = hub.request(Cmd::Playback { action: crate::playback::Action::Speed(None) });
+    request.deadline = Some(Instant::now() + Duration::from_secs(10));
+    request._native_admission = Some(shared.native_commands.clone().try_acquire_owned().unwrap());
+    hub.handle(&mut cpu, request);
+    hub.shutdown(&cpu, super::ShutdownReason::Quit, 0);
+    assert!(matches!(receive.try_recv().unwrap().reply, Reply::Error(503, _)));
+    assert_eq!(shared.native_commands.available_permits(), 8);
+    assert_eq!(shared.busy.load(Ordering::Acquire), 0);
 }

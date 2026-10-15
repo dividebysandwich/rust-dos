@@ -185,6 +185,12 @@ impl DebugHub {
             self.input_wait_ns = None;
         }
         while !self.input.is_empty() {
+            // Tests can hold an actual queued End marker across a lifecycle
+            // transition without depending on the host scheduler's frame time.
+            #[cfg(all(test, feature = "mcp"))]
+            if self.input_steps.as_ref().is_some_and(|steps| steps.load(std::sync::atomic::Ordering::Acquire) == 0) {
+                return;
+            }
             #[cfg(feature = "mcp")]
             if self.native_cancel_expired_borrow(cpu) { continue; }
             let ev = self.input.front().unwrap();
@@ -409,6 +415,10 @@ impl DebugHub {
 
     pub(super) fn pop_input(&mut self) -> Option<LowInput> {
         let event = self.input.pop_front()?;
+        #[cfg(all(test, feature = "mcp"))]
+        if let Some(steps) = &self.input_steps {
+            let _ = steps.fetch_update(std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Acquire, |remaining| remaining.checked_sub(1));
+        }
         #[cfg(feature = "mcp")]
         {
             self.owned_input.consumed();

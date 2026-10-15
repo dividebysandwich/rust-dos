@@ -62,7 +62,7 @@ impl DebugHub {
             .is_some_and(|shared| shared.native_enabled.load(Ordering::Acquire));
         let started = Instant::now();
         let mut handled = 0;
-        while self.state_requests.is_empty() && self.speed_requests.is_empty() && self.quit.is_none() {
+        while self.state_requests.is_empty() && self.playback_requests.is_empty() && self.quit.is_none() {
             if bounded
                 && (handled >= 16 || (handled > 0 && started.elapsed() >= Duration::from_millis(1)))
             {

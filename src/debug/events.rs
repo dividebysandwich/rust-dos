@@ -295,6 +295,9 @@ impl DebugHub {
         for (ctx, tx) in std::mem::take(&mut self.frame_waiters) {
             self.answer(&ctx, tx, gone());
         }
+        for request in std::mem::take(&mut self.playback_requests) {
+            self.answer(&request.ctx, request.reply, gone());
+        }
         // Requests still queued get 503, and the channel closes: one sent
         // later fails at once, and the server answers it with 503 too.
         if let Some(rx) = self.rx.take() {

@@ -33,6 +33,8 @@ pub(super) const REQUIRED: &[&str] = &[
     "Cargo.lock",
     "tests/fixtures/mcp/mouse.schema.json",
     "src/main.rs",
+    "src/playback.rs",
+    "src/debug/mcp/playback.rs",
     "src/startup.rs",
     "src/debug/mod.rs",
     "src/debug/run.rs",

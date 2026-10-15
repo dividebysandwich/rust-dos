@@ -346,7 +346,17 @@ pub(super) fn discovery_contract(discovery: &ListToolsResult) -> io::Result<()> 
         .collect();
     names.sort();
     require(
-        names == ["capture", "key", "mouse", "operation", "status", "type"],
+        names
+            == [
+                "capture",
+                "fast_forward",
+                "key",
+                "mouse",
+                "operation",
+                "speed",
+                "status",
+                "type",
+            ],
         "native discovery advertises unsupported tools",
     )?;
     for tool in &discovery.tools {
@@ -380,6 +390,13 @@ pub(super) fn discovery_contract(discovery: &ListToolsResult) -> io::Result<()> 
                 serde_json::from_str(include_str!("../../tests/fixtures/mcp/mouse.schema.json"))
                     .map_err(io::Error::other)?
             }
+            "speed" => {
+                serde_json::json!({"type":"object","additionalProperties":false,"properties":{"cycles":{"type":"string","minLength":1,"maxLength":32}}})
+            }
+            "fast_forward" => serde_json::json!({
+                "type":"object","additionalProperties":false,"properties":{"action":{"enum":["get","start","stop"]},"duration_ms":{"type":"integer","minimum":1,"maximum":5000}},"required":["action"],
+                "oneOf":[{"properties":{"action":{"enum":["get","stop"]}},"not":{"required":["duration_ms"]}},{"properties":{"action":{"const":"start"}},"required":["duration_ms"]}]
+            }),
             _ => {
                 return Err(io::Error::other(
                     "native discovery advertises unsupported tools",

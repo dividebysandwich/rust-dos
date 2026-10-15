@@ -160,6 +160,7 @@ struct Options {
     shutdown_flags: Option<Arc<std::sync::atomic::AtomicUsize>>,
     shutdown_mouse: Option<Arc<std::sync::atomic::AtomicUsize>>,
     actor_gate: Option<Arc<std::sync::atomic::AtomicBool>>,
+    input_steps: Option<Arc<std::sync::atomic::AtomicUsize>>,
     frontend_action: Option<Arc<std::sync::atomic::AtomicUsize>>,
     observed_modifiers: Option<Arc<std::sync::atomic::AtomicUsize>>,
     observed_power_ons: Option<Arc<std::sync::atomic::AtomicUsize>>,
@@ -177,6 +178,7 @@ impl Default for Options {
             shutdown_flags: None,
             shutdown_mouse: None,
             actor_gate: None,
+            input_steps: None,
             frontend_action: None,
             observed_modifiers: None,
             observed_power_ons: None,
@@ -336,6 +338,8 @@ fn run_machine(dir: std::path::PathBuf, rx: mpsc::Receiver<super::super::Request
     let hook = shared.clone();
     cpu.bus.log_hook = Some(Box::new(move |line: &str| hook.log_line(line)));
     let mut hub = DebugHub::new(Some(rx), Some(shared), 1000);
+    #[cfg(feature = "mcp")]
+    { hub.input_steps = options.input_steps.clone(); }
     hub.deterministic = mode.as_ref().map(|m| m.start);
     hub.announce(&cpu);
     if mode.is_some() {
@@ -345,6 +349,9 @@ fn run_machine(dir: std::path::PathBuf, rx: mpsc::Receiver<super::super::Request
     // The Stats page's numbers, recorded each frame as the front end does.
     let mut stats = rust_dos::stats::Stats::new();
     let mut frame_start = Instant::now();
+    let mut playback_cycles = crate::timer::CpuSpeed::Fixed(3000);
+    let mut playback_pacer = crate::timer::Pacer::new(playback_cycles, None, Instant::now());
+    let mut fast_forward = crate::playback::FastForward::default();
     loop {
         if options.actor_gate.as_ref().is_some_and(|gate| !gate.load(std::sync::atomic::Ordering::Acquire)) {
             std::thread::sleep(Duration::from_millis(1));
@@ -352,6 +359,12 @@ fn run_machine(dir: std::path::PathBuf, rx: mpsc::Receiver<super::super::Request
         }
         if let Some(action) = &options.frontend_action {
             match action.swap(0, std::sync::atomic::Ordering::AcqRel) {
+                #[cfg(feature = "mcp")]
+                8 => {
+                    for hold in &mut hub.owned_input.holds {
+                        hold.deadline = Instant::now();
+                    }
+                }
                 1 => { hub.divert = true; hub.release_keys(&mut cpu); }
                 3 => { hub.divert = true; }
                 4 => { hub.rewinding = true; }
@@ -410,10 +423,27 @@ fn run_machine(dir: std::path::PathBuf, rx: mpsc::Receiver<super::super::Request
             };
             hub.state_done(&cpu, request, result);
         }
-        while let Some(request) = hub.next_speed_request() {
-            let cycles = request.cycles.clone();
-            hub.speed_done(&cpu, request, Ok(json!({"cycles": cycles})));
+        while let Some(request) = hub.next_playback_request() {
+            let result = match &request.action {
+                crate::playback::Action::Speed(cycles) => {
+                    let previous = playback_cycles;
+                    cycles.as_deref().map(crate::timer::CpuSpeed::parse).transpose().and_then(|cycles| {
+                        if let Some(cycles) = cycles {
+                            if mode.is_some() && !matches!(cycles, crate::timer::CpuSpeed::Fixed(_)) {
+                                return Err("deterministic mode runs at a fixed speed".into());
+                            }
+                            playback_cycles = cycles;
+                            cpu.bus.set_cycles_per_ms(cycles.initial_cycles());
+                            playback_pacer.set_speed(cycles);
+                        }
+                        Ok(json!({"previous_cycles":previous.to_string(),"cycles":playback_cycles.to_string(),"cycles_per_ms":cpu.bus.clock.cycles_per_ms()}))
+                    })
+                }
+                crate::playback::Action::FastForward(action) => fast_forward.request(*action, &mut cpu, &mut playback_pacer, Instant::now(), hub.paused || hub.divert || hub.rewinding, mode.is_some()),
+            };
+            hub.playback_done(&cpu, request, result);
         }
+        fast_forward.poll(&mut cpu, &mut playback_pacer, Instant::now(), hub.paused || hub.divert || hub.rewinding);
         if !hub.paused {
             let hot = hub.begin_batch(&cpu);
             match (&mut mode, options.deterministic) {
@@ -811,7 +841,7 @@ fn native_mcp_discovery_and_shell_capture() {
             names.sort();
             assert_eq!(
                 names,
-                ["capture", "key", "mouse", "operation", "status", "type"],
+                ["capture", "fast_forward", "key", "mouse", "operation", "speed", "status", "type"],
                 "only implemented native tools are advertised"
             );
             let status = client
@@ -3307,7 +3337,7 @@ async fn native_keyboard_accepted(
     let response = client.call_tool(request).await;
     assert!(response.is_ok(), "native {tool} must reach the actual guest: {response:?}");
     let response = response.unwrap();
-    assert_ne!(response.is_error, Some(true), "native {tool} accepts the approved action");
+    assert_ne!(response.is_error, Some(true), "native {tool} accepts the approved action: {response:?}");
     response
 }
 
@@ -4890,7 +4920,7 @@ fn native_mcp_keyboard_discovery_advertises_exact_implemented_contracts() {
             let tools = client.list_all_tools().await.unwrap();
             let mut names = tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
             names.sort_unstable();
-            assert_eq!(names, ["capture", "key", "mouse", "operation", "status", "type"], "native discovery exposes exactly its real contracts");
+            assert_eq!(names, ["capture", "fast_forward", "key", "mouse", "operation", "speed", "status", "type"], "native discovery exposes exactly its real contracts");
             for tool in &tools {
                 let hints = tool.annotations.as_ref().expect("native tools describe their side effects");
                 let read_only = matches!(tool.name.as_ref(), "status" | "capture" | "operation");
@@ -5396,14 +5426,16 @@ fn native_mcp_target_transition_preserves_an_already_delivered_down() {
     use rmcp::model::ProtocolVersion;
     let action = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let steps = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let rig = Rig::with("native-delivered-transition", Options {
-        mcp: true, sleep: Duration::from_millis(200), frontend_action: Some(action.clone()),
+        mcp: true, input_steps: Some(steps.clone()), frontend_action: Some(action.clone()),
         observed_modifiers: Some(observed.clone()), ..Options::default()
     });
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
         let down = native_keyboard_accepted(&client, "key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await.structured_content.unwrap();
+            steps.store(1, std::sync::atomic::Ordering::Release);
         let deadline = Instant::now() + Duration::from_secs(10);
         while observed.load(std::sync::atomic::Ordering::Acquire) & (1 << 4) == 0 {
             assert!(Instant::now() < deadline);
@@ -5465,13 +5497,15 @@ fn native_mcp_restore_detaches_an_active_native_wait_without_break_codes() {
 fn native_mcp_admin_clear_preserves_an_already_delivered_down() {
     use rmcp::model::ProtocolVersion;
     let observed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let steps = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let rig = Rig::with("native-delivered-admin-clear", Options {
-        mcp: true, sleep: Duration::from_millis(200), observed_modifiers: Some(observed.clone()), ..Options::default()
+        mcp: true, input_steps: Some(steps.clone()), observed_modifiers: Some(observed.clone()), ..Options::default()
     });
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
         let down = native_keyboard_accepted(&client, "key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await.structured_content.unwrap();
+            steps.store(1, std::sync::atomic::Ordering::Release);
         let deadline = Instant::now() + Duration::from_secs(5);
         while observed.load(std::sync::atomic::Ordering::Acquire) & (1 << 4) == 0 {
             assert!(Instant::now() < deadline);
@@ -5618,8 +5652,9 @@ fn native_mcp_restore_preserves_delivery_before_the_hold_end_marker() {
     for strict in [false, true] {
         let action = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let steps = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let rig = Rig::with(if strict { "native-delivered-strict-restore" } else { "native-delivered-frontend-restore" }, Options {
-            mcp: true, sleep: Duration::from_millis(200), frontend_action: Some(action.clone()),
+            mcp: true, input_steps: Some(steps.clone()), frontend_action: Some(action.clone()),
             observed_modifiers: Some(observed.clone()), ..Options::default()
         });
         assert_eq!(rig.post("/api/control/pause", json!({})).status, 200);
@@ -5629,6 +5664,7 @@ fn native_mcp_restore_preserves_delivery_before_the_hold_end_marker() {
         runtime.block_on(async {
             let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
             let down = native_keyboard_accepted(&client, "key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await.structured_content.unwrap();
+            steps.store(1, std::sync::atomic::Ordering::Release);
             let deadline = Instant::now() + Duration::from_secs(10);
             while observed.load(std::sync::atomic::Ordering::Acquire) & (1 << 4) == 0 {
                 assert!(Instant::now() < deadline);
@@ -5854,13 +5890,31 @@ fn native_mcp_evicted_operation_does_not_revoke_a_live_hold() {
 fn native_mcp_expiry_after_all_downs_preserves_delivered_operation() {
     use rmcp::model::ProtocolVersion;
     let observed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let rig = Rig::with("native-delivered-expiry", Options { mcp: true, sleep: Duration::from_millis(50), observed_modifiers: Some(observed.clone()), ..Options::default() });
+    let steps = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let action = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let rig = Rig::with("native-delivered-expiry", Options { mcp: true, input_steps: Some(steps.clone()), frontend_action: Some(action.clone()), observed_modifiers: Some(observed.clone()), ..Options::default() });
     assert_eq!(rig.post("/api/control/run", json!({"command":"LOOP.COM"})).status, 200);
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-        let down = native_keyboard_accepted(&client, "key", json!({"action":"down","key":"a","mods":["ctrl"],"lease_ms":75})).await.structured_content.unwrap();
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        let down = native_keyboard_accepted(&client, "key", json!({"action":"down","key":"a","mods":["ctrl"],"lease_ms":30000})).await.structured_content.unwrap();
+        steps.store(2, std::sync::atomic::Ordering::Release);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while steps.load(std::sync::atomic::Ordering::Acquire) != 0 {
+            assert!(Instant::now() < deadline, "two actual make events must retire before forced lease expiry");
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        while native_keyboard_bytes(&rig, "0040:001E", 2) != [1, 0x1e] {
+            assert!(Instant::now() < deadline, "the real BIOS must consume Ctrl+A before expiry");
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        action.store(8, std::sync::atomic::Ordering::Release);
+        loop {
+            let expired = native_keyboard_accepted(&client, "operation", json!({"instance":down["instance"],"op":down["op"]})).await.structured_content.unwrap();
+            if expired["hold"]["state"] == "expired" { break; }
+            assert!(Instant::now() < deadline, "actual expiry must retire the hold");
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
         assert_ne!(observed.load(std::sync::atomic::Ordering::Acquire) & (1 << 4), 0, "the real Ctrl make reached the guest");
         assert_eq!(native_keyboard_bytes(&rig, "0040:001E", 2), [1, 0x1e], "the real Ctrl+A make reached the BIOS");
         assert_eq!(native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 4, 0);
@@ -5879,14 +5933,28 @@ fn native_mcp_expiry_after_all_downs_preserves_delivered_operation() {
 fn native_mcp_partial_down_expiry_releases_only_delivered_modifiers() {
     use rmcp::model::ProtocolVersion;
     let observed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let rig = Rig::with("native-partial-expiry", Options { mcp: true, sleep: Duration::from_millis(50), observed_modifiers: Some(observed.clone()), ..Options::default() });
+    let steps = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let action = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let rig = Rig::with("native-partial-expiry", Options { mcp: true, input_steps: Some(steps.clone()), frontend_action: Some(action.clone()), observed_modifiers: Some(observed.clone()), ..Options::default() });
     assert_eq!(rig.post("/api/control/run", json!({"command":"LOOP.COM"})).status, 200);
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
         let tail = native_keyboard_bytes(&rig, "0040:001C", 2);
-        let down = native_keyboard_accepted(&client, "key", json!({"action":"down","key":"a","mods":["ctrl","shift"],"lease_ms":75})).await.structured_content.unwrap();
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        let down = native_keyboard_accepted(&client, "key", json!({"action":"down","key":"a","mods":["ctrl","shift"],"lease_ms":30000})).await.structured_content.unwrap();
+        steps.store(2, std::sync::atomic::Ordering::Release);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while steps.load(std::sync::atomic::Ordering::Acquire) != 0 {
+            assert!(Instant::now() < deadline, "two actual make events must retire before forced lease expiry");
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        action.store(8, std::sync::atomic::Ordering::Release);
+        loop {
+            let expired = native_keyboard_accepted(&client, "operation", json!({"instance":down["instance"],"op":down["op"]})).await.structured_content.unwrap();
+            if expired["hold"]["state"] == "expired" { break; }
+            assert!(Instant::now() < deadline, "actual expiry must retire the hold");
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
         let seen = observed.load(std::sync::atomic::Ordering::Acquire);
         assert_ne!(seen & (1 << 4), 0, "the real Ctrl make was observed");
         assert_ne!(seen & (1 << 6), 0, "the real Shift make was observed before expiry");
@@ -6529,5 +6597,117 @@ fn transport_neutral_input_without_a_job_preserves_actual_core_delivery() {
     assert_eq!(snapshot["input"]["accepted"], 0, "only actual admitted native jobs are counted");
     assert_eq!(snapshot["input"]["completed"], 0);
     assert_eq!(snapshot["input"]["failed"], 0);
+    rig.until_idle();
+}
+
+#[cfg(feature = "mcp")]
+#[test]
+fn native_mcp_execution_controls_advertise_strict_contracts() {
+    let rig = Rig::with("native-execution-discovery", Options { mcp: true, ..Options::default() });
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let client = native_keyboard_client(&rig, rmcp::model::ProtocolVersion::V_2026_07_28).await;
+        let tools = client.list_all_tools().await.unwrap();
+        for name in ["speed", "fast_forward"] {
+            let tool = tools.iter().find(|tool| tool.name == name).expect("execution control must be discoverable");
+            assert_eq!(tool.input_schema["additionalProperties"], false);
+            assert_eq!(tool.annotations.as_ref().unwrap().read_only_hint, Some(false));
+            assert!(tool.output_schema.is_some());
+        }
+        client.cancel().await.unwrap();
+    });
+    rig.until_idle();
+}
+
+#[cfg(feature = "mcp")]
+#[test]
+fn native_mcp_execution_controls_apply_speed_and_bound_fast_forward() {
+    use rmcp::model::{CallToolRequestParams, ProtocolVersion};
+    let rig = Rig::with("native-execution-controls", Options { mcp: true, ..Options::default() });
+    let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+    runtime.block_on(async {
+        for version in [ProtocolVersion::V_2025_11_25, ProtocolVersion::V_2026_07_28] {
+            let client = native_keyboard_client(&rig, version).await;
+            let tools = client.list_all_tools().await.unwrap();
+            let validators = tools.into_iter().filter(|tool| matches!(tool.name.as_ref(), "speed" | "fast_forward")).map(|tool| (tool.name.to_string(), jsonschema::validator_for(&Value::Object((*tool.output_schema.unwrap()).clone())).unwrap())).collect::<std::collections::HashMap<_, _>>();
+            for args in [json!({}), json!({"cycles":"max"}), json!({"cycles":"auto 5000"}), json!({"cycles":"20000"})] {
+                let reply = native_keyboard_accepted(&client, "speed", args).await.structured_content.unwrap();
+                assert!(validators["speed"].is_valid(&reply), "actual speed reply matches discovery: {reply}");
+            }
+            assert_eq!(rig.get("/api/status").json()["cycles_per_ms"], 20000, "the actor changed the actual guest clock rate");
+            let before = rig.shared.next_req.load(std::sync::atomic::Ordering::Acquire);
+            for (name, args) in [
+                ("speed", json!({"cycles":null})), ("speed", json!({"cycles":20000})),
+                ("speed", json!({"cycles":"99"})), ("speed", json!({"cycles":"2000001"})),
+                ("speed", json!({"cycles":"invalid"})), ("speed", json!({"extra":true})),
+                ("fast_forward", json!({})), ("fast_forward", json!({"action":"start"})),
+                ("fast_forward", json!({"action":"start","duration_ms":0})),
+                ("fast_forward", json!({"action":"start","duration_ms":5001})),
+                ("fast_forward", json!({"action":"get","duration_ms":1})),
+                ("fast_forward", json!({"action":"stop","duration_ms":1})),
+                ("fast_forward", json!({"action":"start","duration_ms":null})),
+            ] {
+                let mut request = CallToolRequestParams::new(name);
+                request.arguments = Some(args.as_object().unwrap().clone());
+                assert!(client.call_tool(request).await.is_err(), "invalid {name} input must fail before actor submission");
+            }
+            assert_eq!(rig.shared.next_req.load(std::sync::atomic::Ordering::Acquire), before);
+            let started = native_keyboard_accepted(&client, "fast_forward", json!({"action":"start","duration_ms":5000})).await.structured_content.unwrap();
+            assert!(validators["fast_forward"].is_valid(&started));
+            assert_eq!(started["enabled"], true);
+            assert_eq!(started["agent_active"], true);
+            assert_eq!(started["multiplier"], crate::timer::Pacer::fast_forward_multiplier());
+            let mut conflict = CallToolRequestParams::new("fast_forward");
+            conflict.arguments = Some(json!({"action":"start","duration_ms":5000}).as_object().unwrap().clone());
+            let rejected = client.call_tool(conflict).await.unwrap();
+            assert_eq!(rejected.is_error, Some(true));
+            assert!(validators["fast_forward"].is_valid(rejected.structured_content.as_ref().unwrap()));
+            let stopped = native_keyboard_accepted(&client, "fast_forward", json!({"action":"stop"})).await.structured_content.unwrap();
+            assert_eq!(stopped["enabled"], false);
+            assert_eq!(stopped["agent_active"], false);
+            native_keyboard_accepted(&client, "fast_forward", json!({"action":"start","duration_ms":25})).await;
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let state = native_keyboard_accepted(&client, "fast_forward", json!({"action":"get"})).await.structured_content.unwrap();
+                assert!(validators["fast_forward"].is_valid(&state));
+                if state["agent_active"] == false { assert_eq!(state["enabled"], false); break; }
+                assert!(Instant::now() < deadline);
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            native_keyboard_accepted(&client, "fast_forward", json!({"action":"start","duration_ms":5000})).await;
+            assert_eq!(rig.post("/api/control/pause", json!({})).status, 200);
+            rig.until_paused();
+            let paused = native_keyboard_accepted(&client, "fast_forward", json!({"action":"get"})).await.structured_content.unwrap();
+            assert_eq!(paused["agent_active"], false);
+            assert_eq!(paused["enabled"], false);
+            assert_eq!(rig.post("/api/control/resume", json!({})).status, 200);
+            client.cancel().await.unwrap();
+        }
+    });
+    rig.until_idle();
+}
+
+#[cfg(feature = "mcp")]
+#[test]
+fn native_mcp_execution_controls_preserve_deterministic_pause_policy() {
+    let rig = Rig::with("native-execution-deterministic", Options { mcp: true, deterministic: Some(10), ..Options::default() });
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let client = native_keyboard_client(&rig, rmcp::model::ProtocolVersion::V_2026_07_28).await;
+        let fixed = native_keyboard_accepted(&client, "speed", json!({"cycles":"20000"})).await.structured_content.unwrap();
+        assert_eq!(fixed["cycles"], "20000");
+        for (name, args) in [("speed", json!({"cycles":"max"})), ("fast_forward", json!({"action":"start","duration_ms":100}))] {
+            let mut request = rmcp::model::CallToolRequestParams::new(name);
+            request.arguments = Some(args.as_object().unwrap().clone());
+            assert_eq!(client.call_tool(request).await.unwrap().is_error, Some(true));
+        }
+        assert_eq!(rig.post("/api/control/resume", json!({})).status, 200);
+        let mut change = rmcp::model::CallToolRequestParams::new("speed");
+        change.arguments = Some(json!({"cycles":"30000"}).as_object().unwrap().clone());
+        assert_eq!(client.call_tool(change).await.unwrap().is_error, Some(true));
+        let state = native_keyboard_accepted(&client, "speed", json!({})).await.structured_content.unwrap();
+        assert_eq!(state["cycles"], "20000", "a running deterministic guest cannot be mutated by speed control");
+        client.cancel().await.unwrap();
+    });
     rig.until_idle();
 }

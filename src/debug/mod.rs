@@ -429,8 +429,10 @@ pub enum Cmd {
     SaveState { path: String, strict_match: bool, check_files: bool },
     LoadState { path: String, strict_match: bool, check_files: bool, folders: Vec<(u8, String)> },
     /// Change the CPU speed (`cycles`) as the settings window does, which
-    /// the front end does (`next_speed_request`).
+    /// the front end does (`next_playback_request`).
     Speed { cycles: String },
+    #[cfg(feature = "mcp")]
+    Playback { action: crate::playback::Action },
     /// Turn the emulator off: the front end leaves its loop, and the
     /// journal ends with `shutdown`.
     Quit,
@@ -461,9 +463,12 @@ pub struct StateRequest {
 }
 
 /// A CPU speed to change to, which the front end carries out
-/// (`DebugHub::next_speed_request`) and answers (`DebugHub::speed_done`).
-pub struct SpeedRequest {
-    pub cycles: String,
+/// (`DebugHub::next_playback_request`) and answers (`DebugHub::playback_done`).
+pub struct PlaybackRequest {
+    pub action: crate::playback::Action,
+    deadline: Option<Instant>,
+    _native_admission: Option<tokio::sync::OwnedSemaphorePermit>,
+    _busy: Option<control::Busy>,
     ctx: Ctx,
     if_state: Option<u64>,
     reply: oneshot::Sender<Answer>,
@@ -720,6 +725,8 @@ pub struct DebugHub {
     input: VecDeque<LowInput>,
     #[cfg(feature = "mcp")]
     owned_input: owned_input::Inputs,
+    #[cfg(all(test, feature = "mcp"))]
+    input_steps: Option<Arc<AtomicUsize>>,
     input_wait_until: Option<Instant>,
     /// In deterministic mode: the date and time the clock started at.
     /// Input is then delivered by `feed_input` at emulated times, and its
@@ -747,7 +754,7 @@ pub struct DebugHub {
     closed_program: bool,
     /// Save states to save or load, for the front end.
     state_requests: Vec<StateRequest>,
-    speed_requests: Vec<SpeedRequest>,
+    playback_requests: Vec<PlaybackRequest>,
     /// Shift, Ctrl and Alt bits (as at 40:17h) the remote client holds.
     remote_mods: u8,
     /// Keys the remote client holds down on the machine.
@@ -849,6 +856,8 @@ impl DebugHub {
             input: VecDeque::new(),
             #[cfg(feature = "mcp")]
             owned_input: owned_input::Inputs::default(),
+            #[cfg(all(test, feature = "mcp"))]
+            input_steps: None,
             input_wait_until: None,
             deterministic: None,
             input_wait_ns: None,
@@ -862,7 +871,7 @@ impl DebugHub {
             sound_viz_key: false,
             closed_program: false,
             state_requests: Vec::new(),
-            speed_requests: Vec::new(),
+            playback_requests: Vec::new(),
             remote_mods: 0,
             remote_held: Vec::new(),
             frame_waiters: Vec::new(),

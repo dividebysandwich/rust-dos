@@ -1,6 +1,6 @@
 # Native MCP build and verification
 
-Native MCP is an optional compiled component. Build with `cargo check --locked --features mcp`; ordinary builds exclude the rmcp dependency. The selected SDK uses server-only features. Start the development endpoint with `cargo run --locked --features mcp -- --no-config --debug-server 127.0.0.1:0 --mcp`, then connect to `/mcp` at the printed listener address. The build feature alone does not start a listener. The current tools are `status`, `capture`, `key`, `type`, `mouse` and `operation`.
+Native MCP is an optional compiled component. Build with `cargo check --locked --features mcp`; ordinary builds exclude the rmcp dependency. The selected SDK uses server-only features. Start the development endpoint with `cargo run --locked --features mcp -- --no-config --debug-server 127.0.0.1:0 --mcp`, then connect to `/mcp` at the printed listener address. The build feature alone does not start a listener. The current tools are `status`, `capture`, `key`, `type`, `mouse`, `operation`, `speed` and `fast_forward`.
 
 `mouse` accepts absolute integer picture pixels or guest-relative deltas. Pass the capture's `mouse_picture` to move, click, press a button, or drag; stale pictures reject with `stale_picture` and `capture_again` recovery. A button down requires a lease of at most 30 seconds. Retain its opaque handle to move during the hold, renew its lease, or release it. A finite drag accepts at most 256 points using one coordinate form and at most 5000 ms total delay. Input acceptance can precede delivery: query `operation` until `delivery` is `delivered` before depending on completion. Do not replay input after uncertain acceptance.
 
@@ -46,7 +46,7 @@ With `--mcp`, stderr diagnostics contain Rust-DOS observation context only. The 
 
 `coverage` verifies the local source-bound LLVM receipt independently of the full gate. The receipt and report remain local and uncommitted. Run the full `phase 2` gate without inherited coverage compiler wrappers: nightly branch-instrumentation flags cannot be passed to the scoped stable compiler checks. Instrumentation of the helper is separate from those compatibility checks.
 
-Native observation catalogs retain each protocol's actual discovery response as well as captures and status. Validation requires exactly `status`, `capture`, `key`, `type`, `mouse` and `operation`, with each input schema matching the independent contract. Observation tools retain empty object inputs; all tools reject additional properties. The metadata challenge alters these acquired schemas and tool names to verify that incompatible discovery is rejected; it does not generate replacement discovery fixtures.
+Native observation catalogs retain each protocol's actual discovery response as well as captures and status. Validation requires exactly `status`, `capture`, `key`, `type`, `mouse`, `operation`, `speed` and `fast_forward`, with each input schema matching the independent contract. Observation tools retain empty object inputs; all tools reject additional properties. The metadata challenge alters these acquired schemas and tool names to verify that incompatible discovery is rejected; it does not generate replacement discovery fixtures.
 
 Acquisition-only tooling coverage must preserve the accepted 612/914 branch baseline (approximately 66.96%) across the measured helper scope, with actual nonempty execution of every required helper file. This proportional tooling policy is separate from the 95% critical runtime threshold; a nonzero helper hit count alone cannot close the gate. Native status observations also retain paused HTTP status oracles for program, instruction count and driver mouse state.
 
@@ -114,6 +114,50 @@ visible dragging and release. Grafx2's DOS port retains a coordinate convention 
 can produce painting displaced from requested picture pixels. Local Dungeon Master II
 intro/title input worked; the tested `SKULL.EXE` returned to DOS. These observations
 do not establish universal game or video compatibility.
+
+## CPU speed and temporary fast-forward
+
+These controls change different things. `speed` configures CPU throughput; it accepts
+the same values as the settings window and existing HTTP speed endpoint:
+
+```json
+{}
+{"cycles":"auto"}
+{"cycles":"auto 5000"}
+{"cycles":"max"}
+{"cycles":"20000"}
+```
+
+An empty object reads the configuration. Responses include `cycles`,
+`previous_cycles`, and effective `cycles_per_ms`. Fixed values use the emulator's
+existing range of 100 to 2000000 instructions per emulated millisecond. Deterministic
+mode accepts fixed changes only while paused. Reading speed emits no speed-change
+event; setting it uses the existing frontend settings path and journal event.
+
+`fast_forward` temporarily advances emulated time at the existing multiplier
+(currently 8), subject to host capacity:
+
+```json
+{"action":"get"}
+{"action":"start","duration_ms":5000}
+{"action":"stop"}
+```
+
+Start requires a running real-time guest outside settings or rewind, a duration of
+1 to 5000 milliseconds, and no existing manual, game-profile or agent acceleration.
+There is no indefinite enable, multiplier setting, or automatic renewal. The reply
+reports `enabled`, `agent_active`, `remaining_ms`, and `multiplier`. The frontend
+checks a monotonic deadline each loop and restores normal pacing and audio on
+expiry. Pause, settings, focus loss, restore, rewind, reboot and shutdown cancel the
+agent's interval. Physical Alt+F12 can take ownership; later agent stop/expiry then
+leaves that manual acceleration alone. These are host scheduling bounds, not a
+hard real-time deadline or an end-to-end performance guarantee.
+
+CPU settings persist until another frontend, HTTP or MCP change, or a state load.
+Fast-forward ownership is transient and is not saved in machine state. If a reply
+is lost or times out, read the corresponding setting before deciding what to do;
+do not blindly replay a mutation. Queued requests that expire or lose their caller
+before frontend application are discarded.
 
 ## Internal metrics and repeatable client verification
 

@@ -119,6 +119,9 @@ fn observed(properties: Value, required: &[&str]) -> Value {
 }
 
 pub(super) fn output(name: &str) -> Value {
+    if matches!(name, "speed" | "fast_forward") {
+        return super::playback::output(name);
+    }
     let success = match name {
         "status" => observed(
             json!({

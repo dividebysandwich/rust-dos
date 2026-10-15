@@ -33,10 +33,11 @@ jobs:
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
         run: |
-          curl -fsSL -o SDL2-devel-VC.zip https://github.com/libsdl-org/SDL/releases/download/release-2.30.0/SDL2-devel-VC.zip
+          curl -fsSL -o SDL2-devel-VC.zip https://github.com/libsdl-org/SDL/releases/download/release-2.30.0/SDL2-devel-2.30.0-VC.zip
           unzip -q SDL2-devel-VC.zip
           mv SDL2-2.30.0 SDL2
           echo "LIB=${{ github.workspace }}/SDL2/lib/x64" >> "$GITHUB_ENV"
+          echo "INCLUDE=${{ github.workspace }}/SDL2/include" >> "$GITHUB_ENV"
           echo "${{ github.workspace }}/SDL2/lib/x64" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -54,5 +55,5 @@ jobs:
       - name: Scoped format and lint (pinned compiler)
         if: matrix.rust == '1.98.1'
         run: |
-          rustfmt --edition 2024 --check examples/mcp_check.rs src/debug/control.rs src/debug/control/service.rs src/debug/control/input.rs src/debug/control/mouse.rs src/debug/mcp/mod.rs src/debug/mcp/mouse.rs src/debug/mcp/schemas.rs tests/mcp_foundation.rs
+          rustfmt --edition 2024 --check examples/mcp_check.rs src/playback.rs src/debug/control.rs src/debug/control/service.rs src/debug/control/input.rs src/debug/control/mouse.rs src/debug/mcp/mod.rs src/debug/mcp/mouse.rs src/debug/mcp/playback.rs src/debug/mcp/schemas.rs tests/mcp_foundation.rs
           cargo clippy --locked --no-deps --features mcp --bin rust-dos --example mcp_check --test mcp_foundation

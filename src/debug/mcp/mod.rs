@@ -25,6 +25,7 @@ mod keyboard;
 #[cfg(test)]
 pub(crate) mod metrics;
 mod mouse;
+mod playback;
 mod schemas;
 mod sessions;
 pub(super) fn install_diagnostics() -> Result<(), String> {
@@ -66,6 +67,21 @@ impl ServerHandler for NativeObservations {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
+        if matches!(request.name.as_ref(), "speed" | "fast_forward") {
+            let action = playback::parse(&request)
+                .inspect_err(|_| self.control.shared.metrics.rejected())?;
+            let _busy = Busy::new(&self.control.shared);
+            let deadline = context
+                .extensions
+                .get::<axum::http::request::Parts>()
+                .and_then(|parts| parts.extensions.get::<Deadline>())
+                .ok_or_else(|| ErrorData::internal_error("native deadline missing", None))?;
+            let result = playback::call(&self.control, action, deadline.0).await;
+            if result.is_error == Some(true) {
+                self.control.shared.metrics.rejected();
+            }
+            return Ok(result.into());
+        }
         if request.name == "operation" {
             use rust_dos::control::OperationQuery;
             let id = keyboard::operation(&request)
@@ -542,6 +558,7 @@ fn tools() -> Vec<Tool> {
     ];
     tools.extend(keyboard::tools());
     tools.push(mouse::tool());
+    tools.extend(playback::tools());
     for tool in &mut tools {
         tool.output_schema = Some(Arc::new(
             schemas::output(&tool.name)

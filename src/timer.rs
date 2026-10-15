@@ -516,6 +516,10 @@ pub struct Pacer {
 }
 
 impl Pacer {
+    /// Emulated frames advanced per host frame while fast-forwarding.
+    pub const fn fast_forward_multiplier() -> u32 {
+        FAST_FORWARD_FRAMES
+    }
     pub fn new(speed: CpuSpeed, auto_fps: Option<u32>, now: Instant) -> Self {
         Self {
             speed,
