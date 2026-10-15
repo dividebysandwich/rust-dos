@@ -1047,7 +1047,7 @@ fn native_mcp_continuous_capture_pressure_preserves_status_and_guest_progress() 
             while Instant::now() < end {
                 let start = Instant::now();
                 let status = tokio::time::timeout(Duration::from_secs(1), client.call_tool(CallToolRequestParams::new("status"))).await.expect("status stays within ADR caller budget under continuous capture pressure").unwrap();
-                assert_ne!(status.is_error, Some(true));
+                assert_ne!(status.is_error, Some(true), "status under capture pressure: {:?}", status.structured_content);
                 max_status = max_status.max(start.elapsed());
                 after = status.structured_content.unwrap()["instructions"].as_u64().unwrap();
                 samples += 1;
