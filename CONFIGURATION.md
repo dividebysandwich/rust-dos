@@ -270,8 +270,8 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   as DOSBox-X's card has), `8` (a Voodoo2 board: 4 MB and two texture
   units with 2 MB each; it picks `voodoo2` when `voodoo_model` is unset) or
   `4` (a retail Voodoo Graphics: 2 MB and one texture unit with 2 MB; a
-  Voodoo2 takes it as `8`). All three take effect at the DOS prompt. `voodoo_texture_sampling` is `default` (preserves the game's
-  filtering) or `unfiltered` (nearest-neighbour sampling). With supported
+  Voodoo2 takes it as `8`). All three take effect at the DOS prompt.
+  `voodoo_texture_sampling` is `default` (preserves the game's filtering) or `unfiltered` (nearest-neighbour sampling). With supported
   OpenGL anisotropy enabled, `unfiltered` also blends between mip levels
   and allows anisotropic filtering to reduce shimmer, which may soften
   textures; magnification stays nearest-neighbour. With anisotropy off,
@@ -1875,9 +1875,9 @@ bit 28). The board is SLI-less: one card, as Glide sees a single Voodoo2.
 nor rust-dos comes with: the Windows 98 CD has drivers for the Voodoo
 Graphics and the Banshee only. Unpack 3dfx's reference driver 3.03.00
 (`rkv2dx6.exe`, which the Internet Archive keeps) into a folder Windows
-can read, such as a [host folder](#host-folders-in-a-booted-system). At its next
-start Windows finds the new PCI device and opens the Add New Hardware
-wizard: choose to search for the best driver, tick
+can read, such as a [host folder](#host-folders-in-a-booted-system). At
+its next start Windows finds the new PCI device and opens the Add New
+Hardware wizard: choose to search for the best driver, tick
 "Specify a location", give the folder that holds `voodoo2.inf`, and
 restart Windows when it is done. Device Manager then lists a "Voodoo2 3D
 Accelerator", and DirectDraw and Direct3D offer the card as "3dfxV2
