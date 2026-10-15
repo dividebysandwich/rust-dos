@@ -1445,6 +1445,7 @@ const STILL: &[(&str, &str)] = &[
     ("CORE.pit_write_msb", "channel 2's write flip-flop, at rest after a whole write"),
     ("PIT2.pit2_count_due", "a control word's count, written before the stops"),
     ("PIT2.ppi_checks", "port 61h's check enables, which DOS programs leave alone"),
+    ("TSC", "the time stamp counter's own clock, only at max or auto: deterministic runs have a fixed speed"),
     ("CORE.pit0_read_msb", "channel 0's read flip-flop, at rest after a whole read"),
     ("CORE.pit0_write_msb", "channel 0's write flip-flop, at rest after a whole write"),
     ("CORE.pit0_latched_active", "channel 0's latch, read out"),

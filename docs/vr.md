@@ -200,10 +200,15 @@ button: the **manual** of the game that runs (from its profile's manuals
 and extras, while it has one; with several, the A/X button picks the
 next), whose pages turn with the thumbstick of the hand holding it, and a
 **joystick**. Held by its stick, the joystick is the game port's joystick:
-the stick tilts with your hand, the trigger is its first button and A/X
-its second. Held by its base, it moves. Whatever you put down settles
-upright on what is below it. In the window (`mode=desktop`) they stand
-where the scene has them.
+the stick tilts as you tilt the controller, the trigger is its first
+button and A/X its second. However the controller is turned when you take
+the stick is upright; only turning it from there tilts the stick, moving
+your hand doesn't. Held by its base, it moves. Whatever you let go falls,
+thrown as fast as your hand moved: it bounces off and slides on the
+scene's surfaces (those that cast shadows) and the other props, and comes
+to rest on them. Something that falls out of the scene goes back where it
+started. In the window (`mode=desktop`) they stand where the scene has
+them.
 
 Rust-DOS brings its own models of both. Place them with **empties** named
 `manual` and `joystick`, standing on the desk, their **+Y pointing away
@@ -247,10 +252,10 @@ lens is in the middle of the camera's front and the slot low under it.
 
 Give any object the custom property `rustdos_prop` = `item` to move it
 about in VR: a stapler, a mug, a pencil. Like the props, its meshes and
-those below it move with it, and its origin is where it stands. Put it
-down and it stands upright on what is below it. Small and thin things are
-taken by a box at least 2 cm thick, so a pencil or a sheet of paper can be
-picked up.
+those below it move with it, and its origin is where it stands. Let go,
+it falls like the props, as a box around its meshes. Small and thin
+things are taken by a box at least 2 cm thick, so a pencil or a sheet of
+paper can be picked up (they still fall as thin as they are).
 
 ## Lamps
 
