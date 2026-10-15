@@ -262,9 +262,13 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         if: ${{ !matrix.win7 }}
-      - uses: dtolnay/rust-toolchain@nightly
+      # A dated nightly: nightly-2026-10-15's std doesn't build for the
+      # Windows 7 target (is_console is missing). Move it on when a later one
+      # does.
+      - uses: dtolnay/rust-toolchain@master
         if: matrix.win7
         with:
+          toolchain: nightly-2026-10-14
           components: rust-src
       - uses: Swatinem/rust-cache@v2
         with:
