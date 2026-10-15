@@ -2,7 +2,7 @@
 //! describes them, and sector reads from the files behind them.
 
 use super::cue::{parse_cue, CueSheet, FileFormat, TrackMode};
-use super::{Extent, DATA_SECTOR, RAW_SECTOR, SYNC};
+use super::{DATA_SECTOR, Extent, RAW_SECTOR, SYNC};
 use crate::diskimage::MemoryImage;
 use std::cell::RefCell;
 use crate::hostfs::{self, File};
@@ -74,7 +74,11 @@ pub struct UnreadableSector(pub u32);
 
 impl std::fmt::Display for UnreadableSector {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "sector {} can't be read: its EDC doesn't match its data", self.0)
+        write!(
+            f,
+            "sector {} can't be read: its EDC doesn't match its data",
+            self.0
+        )
     }
 }
 
@@ -89,7 +93,10 @@ pub fn is_unreadable(error: &io::Error) -> bool {
 /// Fail reading `raw`, sector `lba`, if a drive couldn't read it.
 fn check_readable(lba: u32, raw: &[u8; RAW_SECTOR]) -> io::Result<()> {
     match super::edc_fails(raw) {
-        true => Err(io::Error::new(io::ErrorKind::InvalidData, UnreadableSector(lba))),
+        true => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            UnreadableSector(lba),
+        )),
         false => Ok(()),
     }
 }
@@ -742,12 +749,18 @@ mod tests {
     #[test]
     fn sectors_whose_edc_fails_cant_be_read() {
         let dir = scratch("unreadable");
-        let mut data: Vec<u8> = (0..10).flat_map(|lba| crate::cdrom::mode1_sector(lba, lba as u8)).collect();
+        let mut data: Vec<u8> = (0..10)
+            .flat_map(|lba| crate::cdrom::mode1_sector(lba, lba as u8))
+            .collect();
         // Sector 5 as copy protections master it: its data doesn't match
         // its EDC.
         data[5 * RAW_SECTOR + 16..5 * RAW_SECTOR + 16 + DATA_SECTOR].fill(0x55);
         fs::write(dir.join("disc.bin"), data).unwrap();
-        fs::write(dir.join("disc.cue"), "FILE \"disc.bin\" BINARY\n TRACK 01 MODE1/2352\n  INDEX 01 00:00:00\n").unwrap();
+        fs::write(
+            dir.join("disc.cue"),
+            "FILE \"disc.bin\" BINARY\n TRACK 01 MODE1/2352\n  INDEX 01 00:00:00\n",
+        )
+        .unwrap();
         let image = CdImage::open(&dir.join("disc.cue")).unwrap();
 
         let mut data = [0u8; DATA_SECTOR];
@@ -762,10 +775,25 @@ mod tests {
             assert_eq!(raw[16], lba as u8);
         }
         // A file over it fails there; one before it reads.
-        let extent = |lba, size| Extent { lba, size, time: 0, date: 0, hidden: false };
+        let extent = |lba, size| Extent {
+            lba,
+            size,
+            time: 0,
+            date: 0,
+            hidden: false,
+        };
         let mut buf = vec![0u8; 3 * DATA_SECTOR];
-        assert!(image.read_extent(&extent(4, 3 * DATA_SECTOR as u32), 0, &mut buf).is_err());
-        assert_eq!(image.read_extent(&extent(2, 3 * DATA_SECTOR as u32), 0, &mut buf).unwrap(), buf.len());
+        assert!(
+            image
+                .read_extent(&extent(4, 3 * DATA_SECTOR as u32), 0, &mut buf)
+                .is_err()
+        );
+        assert_eq!(
+            image
+                .read_extent(&extent(2, 3 * DATA_SECTOR as u32), 0, &mut buf)
+                .unwrap(),
+            buf.len()
+        );
         // Past the disc is another error.
         assert!(!is_unreadable(&image.read_data(10, &mut data).unwrap_err()));
     }
