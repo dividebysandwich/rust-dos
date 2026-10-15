@@ -355,6 +355,8 @@ pub struct Prop {
     /// The box around it in its frame (but the stick's): where a hand
     /// takes it.
     pub bounds: (Vec3, Vec3),
+    /// That box as thin as the prop is: what it is to what it falls on.
+    pub solid: (Vec3, Vec3),
     /// A camera's lens (looking along its -Z) and the slot its pictures
     /// come out of (along its -Z, +Y the picture's up), in its frame.
     pub lens: Option<Mat4>,
@@ -371,6 +373,7 @@ impl Prop {
             knob: Vec3::ZERO,
             hinge: Vec3::ZERO,
             bounds: (Vec3::ZERO, Vec3::ZERO),
+            solid: (Vec3::ZERO, Vec3::ZERO),
             lens: None,
             slot: None,
         }
@@ -400,6 +403,7 @@ impl Prop {
             low = low.min(base);
             high = high.max(base);
         }
+        self.solid = (low, high);
         // Thickened across, and upwards from what it stands on.
         let thin = (Vec3::splat(THINNEST) - (high - low)).max(Vec3::ZERO);
         let across = Vec3::new(thin.x, 0.0, thin.z) / 2.0;

@@ -1,15 +1,16 @@
 //! The things on the desk to pick up (`Scene::props`): the game's manual,
 //! a booklet whose pages turn with the thumbstick of the hand holding it,
-//! a joystick, whose stick, held, follows the hand and is the game port's
-//! joystick, and whose base moves it, and a polaroid camera, which takes a
-//! picture when its trigger is pulled: the picture comes out of its slot
-//! and develops, to be taken and put down too. What is put down settles
-//! upright on what is below it.
+//! a joystick, whose stick, held, tilts as the hand does and is the game
+//! port's joystick, and whose base moves it, and a polaroid camera, which
+//! takes a picture when its trigger is pulled: the picture comes out of
+//! its slot and develops, to be taken and put down too. What is let go
+//! falls (`physics`), thrown as the hand moved.
 //!
 //! The manual's pages are rendered on a thread of their own, as they are
 //! needed, into textures of the context that draws them.
 
 use super::controls::{Hand, Tracking};
+use super::physics::{self, Body, Colliders, Moved, Obstacle, Shape};
 use super::pick::{Target, TargetId};
 use super::render::{Gpu, PropDraw};
 use super::scene::{PRINT, PartRole, Prop, PropKind, Scene};
@@ -44,15 +45,23 @@ const PRINTS: usize = 8;
 const PAGE_HEIGHT: u32 = 1024;
 /// How far from the pages shown the textures of others are kept.
 const KEEP: usize = 6;
+/// How far back the hands' moves are kept, for how fast a thing let go was
+/// thrown.
+const THROW: Duration = Duration::from_millis(80);
+/// How near another thing has to be to one taken to fall, then, too.
+const NEAR: f32 = 0.03;
+/// How thick a picture is to the simulation.
+const PRINT_THICKNESS: f32 = 0.001;
 
 /// What a hand holds.
 #[derive(Clone, Copy, Debug)]
 enum Hold {
     /// A prop, where it is in the hand's frame.
     Body { prop: usize, offset: Mat4 },
-    /// The joystick's stick, the hand where it was in the stick's frame
-    /// when it took it, by the controller's tip or by the grip.
-    Stick { prop: usize, from: Vec3, tip: bool },
+    /// The joystick's stick, the way the hand was turned in the stick's
+    /// frame when it took it: upright. Only the hand's turn from that
+    /// tilts the stick, not where it moves.
+    Stick { prop: usize, neutral: Quat },
     /// A camera's picture (`Props::prints`), where it is in the hand's frame.
     Print { print: usize, offset: Mat4 },
 }
@@ -64,6 +73,8 @@ struct Print {
     camera: Option<usize>,
     taken: Instant,
     picture: Option<glow::Texture>,
+    /// Falling, let go.
+    body: Option<Body>,
 }
 
 /// What the props do to the machine at a frame.
@@ -94,6 +105,13 @@ pub struct Props {
     prints: Vec<Print>,
     /// Pictures' textures to delete where `gl` is at hand.
     stale: Vec<glow::Texture>,
+    /// Each prop, falling.
+    falling: Vec<Option<Body>>,
+    colliders: Colliders,
+    /// The hands' grips of late, and when.
+    moves: [Vec<(Instant, Mat4)>; 2],
+    /// Up to when the falling has been simulated.
+    simulated: Option<Instant>,
 }
 
 impl Props {
@@ -108,6 +126,10 @@ impl Props {
             booklet: Booklet::default(),
             prints: Vec::new(),
             stale: Vec::new(),
+            falling: Vec::new(),
+            colliders: Colliders::default(),
+            moves: [Vec::new(), Vec::new()],
+            simulated: None,
         };
         props.reset(scene);
         props
@@ -118,6 +140,9 @@ impl Props {
         self.poses = scene.props.iter().map(|p| p.pose).collect();
         self.tilts = vec![Vec3::Y; scene.props.len()];
         self.holds = [None; 2];
+        self.falling = vec![None; scene.props.len()];
+        self.colliders = Colliders::new(scene);
+        self.moves = [Vec::new(), Vec::new()];
         self.stale.extend(self.prints.drain(..).filter_map(|p| p.picture));
         self.booklet.canvas = scene.props.iter().find(|p| p.kind == PropKind::Manual).map_or((768, PAGE_HEIGHT), page_canvas);
     }
@@ -141,16 +166,22 @@ impl Props {
     /// `tracking`.
     pub fn update(&mut self, scene: &Scene, tracking: &Tracking, now: Instant) -> PropInput {
         let mut input = PropInput::default();
+        self.fall(scene, now);
         for (i, hand) in tracking.hands.iter().enumerate() {
             let Some(hand) = hand else {
-                // Out of sight: what it held is put down.
+                // Out of sight: what it held drops.
+                self.moves[i].clear();
                 self.release(scene, i);
                 self.squeezed[i] = false;
                 continue;
             };
+            self.moves[i].retain(|&(at, _)| now.saturating_duration_since(at) <= THROW);
+            self.moves[i].push((now, hand.grip));
             let pulled = std::mem::replace(&mut self.pulled[i], hand.select);
             if hand.squeeze && !self.squeezed[i] && self.holds[i].is_none() {
                 self.holds[i] = self.take(scene, hand, now);
+                // Thrown as it moved since.
+                self.moves[i] = vec![(now, hand.grip)];
                 // Taken from the other hand.
                 if let Some(Hold::Body { prop, .. }) = self.holds[i]
                     && let Some(Hold::Body { prop: other, .. }) = self.holds[1 - i]
@@ -186,10 +217,12 @@ impl Props {
                         }
                     }
                 }
-                Some(Hold::Stick { prop, from, tip }) => {
-                    let frame = self.poses[prop] * scene.props[prop].stick;
-                    let to = frame.inverse().transform_point3(reaching(hand)[tip as usize]);
-                    let tilt = clamp_tilt(Quat::from_rotation_arc(from.normalize_or(Vec3::Y), to.normalize_or(Vec3::Y)) * Vec3::Y);
+                Some(Hold::Stick { prop, neutral }) => {
+                    // The hand's turn since it took the stick, in the
+                    // stick's frame, turns the stick from upright; turned
+                    // about the stick, it stays put.
+                    let turned = self.stick_turn(scene, prop, hand) * neutral.inverse();
+                    let tilt = clamp_tilt(turned * Vec3::Y);
                     self.tilts[prop] = tilt;
                     // Pushed away is up, as on a joystick; the trigger is the
                     // first button, the primary the second.
@@ -246,7 +279,7 @@ impl Props {
             if self.prints[i].camera == Some(camera) {
                 self.prints[i].pose = self.print_pose(scene, i, now);
                 self.prints[i].camera = None;
-                self.settle_print(scene, i);
+                self.drop_print(i);
             }
         }
         if self.prints.len() >= PRINTS {
@@ -263,7 +296,7 @@ impl Props {
                 }
             }
         }
-        self.prints.push(Print { pose: Mat4::IDENTITY, camera: Some(camera), taken: now, picture });
+        self.prints.push(Print { pose: Mat4::IDENTITY, camera: Some(camera), taken: now, picture, body: None });
     }
 
     /// Where picture `i` is at `now`: coming out of its camera's slot, or
@@ -278,9 +311,9 @@ impl Props {
         self.poses[camera] * slot * Mat4::from_translation(Vec3::new(0.0, 0.0, PRINT.y / 2.0 - out * PRINT.y))
     }
 
-    /// Picture `i`, let go, lies down on what is below it.
-    fn settle_print(&mut self, scene: &Scene, i: usize) {
-        self.prints[i].pose = settle(scene, self.prints[i].pose, 0.05);
+    /// Picture `i`, out of its camera, falls.
+    fn drop_print(&mut self, i: usize) {
+        self.prints[i].body = Some(Body::new(Self::print_shape(), self.prints[i].pose, Vec3::ZERO, Vec3::ZERO));
     }
 
     /// What `hand` takes with its grip or its controller's tip: the stick
@@ -291,14 +324,13 @@ impl Props {
         let mut best: Option<(f32, Hold)> = None;
         for (i, prop) in scene.props.iter().enumerate().filter(|(_, p)| self.shown(p)) {
             let pose = self.poses[i];
-            for (tip, &point) in points.iter().enumerate() {
-                let tip = tip == 1;
+            for &point in &points {
                 if prop.parts.iter().any(|p| p.role == PartRole::Stick) {
                     let frame = pose * prop.stick;
                     let knob = frame.transform_point3(self.tilt_matrix(i).transform_point3(prop.knob));
                     let distance = point.distance(knob);
                     if distance < KNOB_REACH && stick.is_none_or(|(d, _)| distance < d) {
-                        stick = Some((distance, Hold::Stick { prop: i, from: frame.inverse().transform_point3(point), tip }));
+                        stick = Some((distance, Hold::Stick { prop: i, neutral: self.stick_turn(scene, i, hand) }));
                     }
                 }
                 let local = pose.inverse().transform_point3(point);
@@ -321,23 +353,143 @@ impl Props {
             }
         }
         let hold = stick.or(best).map(|(_, hold)| hold);
-        if let Some(Hold::Print { print, .. }) = hold {
-            // Out of the camera, into the hand.
-            self.prints[print].pose = self.print_pose(scene, print, now);
-            self.prints[print].camera = None;
+        match hold {
+            Some(Hold::Print { print, .. }) => {
+                // Out of the camera (or the air), into the hand.
+                self.prints[print].pose = self.print_pose(scene, print, now);
+                self.prints[print].camera = None;
+                self.prints[print].body = None;
+            }
+            Some(Hold::Body { prop, .. }) => {
+                self.falling[prop] = None;
+                // What it held up falls.
+                let (low, high) = self.world_box(self.poses[prop], scene.props[prop].solid);
+                self.wake(scene, prop, low - Vec3::splat(NEAR), high + Vec3::splat(NEAR));
+            }
+            _ => {}
         }
         hold
     }
 
-    /// Hand `i` lets go: a prop settles upright on what is below it; a
-    /// stick springs back.
+    /// The way `hand` is turned in the frame of prop `prop`'s stick.
+    fn stick_turn(&self, scene: &Scene, prop: usize, hand: &Hand) -> Quat {
+        let (_, frame, _) = (self.poses[prop] * scene.props[prop].stick).to_scale_rotation_translation();
+        let (_, grip, _) = hand.grip.to_scale_rotation_translation();
+        (frame.inverse() * grip).normalize()
+    }
+
+    /// The box around `bounds` at `pose`, in the scene.
+    fn world_box(&self, pose: Mat4, (low, high): (Vec3, Vec3)) -> (Vec3, Vec3) {
+        let corners = (0..8).map(|c| pose.transform_point3(Vec3::new([low.x, high.x][c & 1], [low.y, high.y][c >> 1 & 1], [low.z, high.z][c >> 2])));
+        corners.fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(l, h), p| (l.min(p), h.max(p)))
+    }
+
+    fn held(&self, prop: usize) -> bool {
+        self.holds.iter().any(|h| matches!(h, Some(Hold::Body { prop: p, .. } | Hold::Stick { prop: p, .. }) if *p == prop))
+    }
+
+    fn print_held(&self, print: usize) -> bool {
+        self.holds.iter().any(|h| matches!(h, Some(Hold::Print { print: p, .. }) if *p == print))
+    }
+
+    fn print_shape() -> Shape {
+        let half = Vec3::new(PRINT.x / 2.0, PRINT_THICKNESS / 2.0, PRINT.y / 2.0);
+        Shape::of_box(-half, half)
+    }
+
+    /// What lies still (not held, nor prop `taken`) in the box from `low`
+    /// to `high` falls, should nothing be under it any more.
+    fn wake(&mut self, scene: &Scene, taken: usize, low: Vec3, high: Vec3) {
+        let overlaps = |(l, h): (Vec3, Vec3)| l.cmple(high).all() && h.cmpge(low).all();
+        for i in 0..scene.props.len() {
+            if i != taken && self.falling[i].is_none() && !self.held(i) && self.shown(&scene.props[i]) {
+                let solid = scene.props[i].solid;
+                if overlaps(self.world_box(self.poses[i], solid)) {
+                    self.falling[i] = Some(Body::new(Shape::of_box(solid.0, solid.1), self.poses[i], Vec3::ZERO, Vec3::ZERO));
+                }
+            }
+        }
+        for i in 0..self.prints.len() {
+            let print = &self.prints[i];
+            if print.camera.is_none() && print.body.is_none() && !self.print_held(i) {
+                let shape = Self::print_shape();
+                if overlaps(self.world_box(print.pose, (shape.middle - shape.half, shape.middle + shape.half))) {
+                    self.prints[i].body = Some(Body::new(shape, print.pose, Vec3::ZERO, Vec3::ZERO));
+                }
+            }
+        }
+    }
+
+    /// How fast hand `hand` moved, of late, what it holds at `offset` in
+    /// its frame (`middle` in that thing's frame).
+    fn throw(&self, hand: usize, offset: Mat4, middle: Vec3) -> (Vec3, Vec3) {
+        let moves = &self.moves[hand];
+        let (Some(&(t0, from)), Some(&(t1, to))) = (moves.first(), moves.last()) else { return (Vec3::ZERO, Vec3::ZERO) };
+        physics::motion(from * offset, to * offset, middle, t1.saturating_duration_since(t0).as_secs_f32())
+    }
+
+    /// The boxes of the props shown but `except`, in the way of what falls.
+    fn obstacles(&self, scene: &Scene, except: Option<usize>) -> Vec<Obstacle> {
+        let shown = scene.props.iter().enumerate().filter(|&(i, p)| Some(i) != except && self.shown(p));
+        shown.map(|(i, p)| Obstacle { pose: self.poses[i], low: p.solid.0, high: p.solid.1 }).collect()
+    }
+
+    /// What falls, simulated up to `now`.
+    fn fall(&mut self, scene: &Scene, now: Instant) {
+        let since = self.simulated.replace(now).map_or(0.0, |at| now.saturating_duration_since(at).as_secs_f32());
+        let falling = self.falling.iter().any(Option::is_some) || self.prints.iter().any(|p| p.body.is_some());
+        if !falling || since <= 0.0 {
+            return;
+        }
+        let steps = (since.min(physics::MAX_LAG) / physics::STEP).ceil() as usize;
+        for i in 0..self.falling.len() {
+            let Some(mut body) = self.falling[i] else { continue };
+            let obstacles = self.obstacles(scene, Some(i));
+            let mut moved = Moved::Moving;
+            for _ in 0..steps {
+                moved = body.step(&self.colliders, &obstacles, physics::STEP);
+                if moved != Moved::Moving {
+                    break;
+                }
+            }
+            match moved {
+                // Lost, it is back where it started.
+                Moved::Lost => self.poses[i] = scene.props[i].pose,
+                _ => self.poses[i] = body.pose(),
+            }
+            self.falling[i] = (moved == Moved::Moving).then_some(body);
+        }
+        let obstacles = self.obstacles(scene, None);
+        for print in &mut self.prints {
+            let Some(mut body) = print.body else { continue };
+            let mut moved = Moved::Moving;
+            for _ in 0..steps {
+                moved = body.step(&self.colliders, &obstacles, physics::STEP);
+                if moved != Moved::Moving {
+                    break;
+                }
+            }
+            if moved != Moved::Lost {
+                print.pose = body.pose();
+            }
+            print.body = (moved == Moved::Moving).then_some(body);
+        }
+    }
+
+    /// Hand `i` lets go: a prop or a picture falls, thrown as the hand
+    /// moved; a stick springs back.
     fn release(&mut self, scene: &Scene, i: usize) {
         match self.holds[i].take() {
-            Some(Hold::Body { prop, .. }) => {
-                self.poses[prop] = settle(scene, self.poses[prop], scene.props[prop].bounds.1.y.max(0.05));
+            Some(Hold::Body { prop, offset }) => {
+                let shape = Shape::of_box(scene.props[prop].solid.0, scene.props[prop].solid.1);
+                let (velocity, spin) = self.throw(i, offset, shape.middle);
+                self.falling[prop] = Some(Body::new(shape, self.poses[prop], velocity, spin));
             }
             Some(Hold::Stick { prop, .. }) => self.tilts[prop] = Vec3::Y,
-            Some(Hold::Print { print, .. }) => self.settle_print(scene, print),
+            Some(Hold::Print { print, offset }) => {
+                let (velocity, spin) = self.throw(i, offset, Vec3::ZERO);
+                self.prints[print].body = Some(Body::new(Self::print_shape(), self.prints[print].pose, velocity, spin));
+            }
             None => {}
         }
     }
@@ -391,23 +543,13 @@ impl Props {
     }
 }
 
-/// Something at `pose`, let go, upright (as it faced, about the vertical)
-/// on what is below it, looked for from `lift` above it.
-fn settle(scene: &Scene, pose: Mat4, lift: f32) -> Mat4 {
-    let (_, rotation, position) = pose.to_scale_rotation_translation();
-    let ahead = rotation * Vec3::NEG_Z;
-    let yaw = if ahead.x.abs() + ahead.z.abs() > 1e-4 { (-ahead.x).atan2(-ahead.z) } else { 0.0 };
-    let at = scene.surface_below(position + Vec3::Y * lift, 3.0).unwrap_or(position);
-    Mat4::from_translation(at) * Mat4::from_rotation_y(yaw)
-}
-
-/// `tilt` no further than `MAX_TILT` from upright.
 /// Where a hand takes things: its grip, and the tip of the controller
 /// drawn for it (see `controls`), which is where it points from.
 fn reaching(hand: &Hand) -> [Vec3; 2] {
     [hand.grip.transform_point3(Vec3::ZERO), hand.aim.transform_point3(Vec3::ZERO)]
 }
 
+/// `tilt` no further than `MAX_TILT` from upright.
 fn clamp_tilt(tilt: Vec3) -> Vec3 {
     let tilt = tilt.normalize_or(Vec3::Y);
     let angle = tilt.y.clamp(-1.0, 1.0).acos();
@@ -688,22 +830,54 @@ mod tests {
         Tracking { head: None, hands: [None, Some(right)], ..Tracking::default() }
     }
 
+    /// `hand` turned about where it is by `turn`.
+    fn turned(mut hand: Hand, turn: Quat) -> Hand {
+        let at = hand.grip.transform_point3(Vec3::ZERO);
+        let about = |m: Mat4| Mat4::from_translation(at) * Mat4::from_quat(turn) * Mat4::from_translation(-at) * m;
+        hand.grip = about(hand.grip);
+        hand.aim = about(hand.aim);
+        hand
+    }
+
+    /// Simulated from `now` for `seconds`, the hands as `tracking` has them.
+    fn run(props: &mut Props, room: &Scene, tracking: &Tracking, now: Instant, seconds: f32) -> Instant {
+        let mut at = now;
+        for _ in 0..(seconds * 90.0) as usize {
+            at += Duration::from_secs_f32(1.0 / 90.0);
+            props.update(room, tracking, at);
+        }
+        at
+    }
+
     #[test]
-    fn the_joystick_is_taken_by_its_stick_and_follows_the_hand() {
+    fn the_joystick_is_taken_by_its_stick_and_tilts_as_the_hand_does() {
         let room = Scene::test_room();
         let mut props = Props::new(&room);
         let now = Instant::now();
         let j = room.props.iter().position(|p| p.kind == PropKind::Joystick).unwrap();
         let prop = &room.props[j];
         let knob = (prop.pose * prop.stick).transform_point3(prop.knob);
-        let input = props.update(&room, &tracking(hand_at(knob, true)), now);
+        // Taken by a hand turned some way: that is upright.
+        let hand = turned(hand_at(knob, true), Quat::from_rotation_x(0.4) * Quat::from_rotation_y(0.7));
+        let input = props.update(&room, &tracking(hand), now);
         assert!(input.busy[1]);
         let pad = input.pad.unwrap();
         assert!(pad.axes[0].abs() < 1e-3 && pad.axes[1].abs() < 1e-3, "{:?}", pad.axes);
-        // Pushed away (-Z) and to the right: up and right, at full tilt.
-        let input = props.update(&room, &tracking(hand_at(knob + Vec3::new(0.08, 0.0, -0.08), true)), now);
+        // Moved, not turned, it stays upright.
+        let mut moved = hand;
+        moved.grip = Mat4::from_translation(Vec3::new(0.08, 0.0, -0.08)) * moved.grip;
+        let pad = props.update(&room, &tracking(moved), now).pad.unwrap();
+        assert!(pad.axes[0].abs() < 1e-3 && pad.axes[1].abs() < 1e-3, "{:?}", pad.axes);
+        // Turned about the stick, too.
+        let pad = props.update(&room, &tracking(turned(hand, Quat::from_rotation_y(0.5))), now).pad.unwrap();
+        assert!(pad.axes[0].abs() < 1e-3 && pad.axes[1].abs() < 1e-3, "{:?}", pad.axes);
+        // Tipped away (its top to -Z) and rolled right: up and right, at
+        // full tilt.
+        let tipped = turned(hand, Quat::from_rotation_z(-0.3) * Quat::from_rotation_x(-0.3));
+        let input = props.update(&room, &tracking(tipped), now);
         let pad = input.pad.unwrap();
         assert!(pad.axes[0] > 0.85 && pad.axes[1] < -0.85, "{:?}", pad.axes);
+        let knob = (prop.pose * prop.stick).transform_point3(prop.knob);
         // Let go, it stands up again and isn't the joystick any more.
         let input = props.update(&room, &tracking(hand_at(knob, false)), now);
         assert!(input.pad.is_none() && !input.busy[1]);
@@ -724,14 +898,13 @@ mod tests {
         let input = props.update(&room, &tracking(hand), now);
         let pad = input.pad.unwrap();
         assert!(pad.axes[0].abs() < 1e-3 && pad.axes[1].abs() < 1e-3, "{:?}", pad.axes);
-        // The tip, not the grip, moves the stick.
-        hand.aim = Mat4::from_translation(knob + Vec3::new(0.08, 0.0, -0.08));
-        let pad = props.update(&room, &tracking(hand), now).pad.unwrap();
-        assert!(pad.axes[0] > 0.85 && pad.axes[1] < -0.85, "{:?}", pad.axes);
+        // Turning the hand tilts it.
+        let pad = props.update(&room, &tracking(turned(hand, Quat::from_rotation_x(-0.4))), now).pad.unwrap();
+        assert!(pad.axes[0].abs() < 1e-3 && pad.axes[1] < -0.85, "{:?}", pad.axes);
     }
 
     #[test]
-    fn props_put_down_stand_on_what_is_below() {
+    fn props_let_go_fall_onto_what_is_below() {
         let room = Scene::test_room();
         let mut props = Props::new(&room);
         let now = Instant::now();
@@ -742,12 +915,28 @@ mod tests {
         let moved = base + Vec3::new(-0.4, 0.3, -0.1);
         let mut hand = hand_at(moved, true);
         hand.grip *= Mat4::from_rotation_x(0.3) * Mat4::from_rotation_y(0.5);
-        props.update(&room, &tracking(hand), now);
-        props.update(&room, &tracking(hand_at(moved, false)), now);
+        // (Held still a while: not thrown.)
+        let now = run(&mut props, &room, &tracking(hand), now, 0.2);
+        hand.squeeze = false;
+        let later = run(&mut props, &room, &tracking(hand), now, 3.0);
+        assert!(props.falling[j].is_none(), "lies still");
         let (_, rotation, at) = props.poses[j].to_scale_rotation_translation();
-        assert!((at.y - 0.72).abs() < 1e-3, "on the desk: {:?}", at);
-        assert!((at.x - (base.x - 0.4)).abs() < 0.05);
-        assert!((rotation * Vec3::Y).dot(Vec3::Y) > 0.9999, "upright");
+        assert!((at.y - 0.72).abs() < 0.005, "on the desk: {:?}", at);
+        assert!((at.x - (base.x - 0.4)).abs() < 0.08);
+        assert!((rotation * Vec3::Y).dot(Vec3::Y) > 0.99, "upright");
+        // Thrown off the desk, it is on the floor.
+        let at = props.poses[j].transform_point3(Vec3::new(0.0, 0.02, 0.0));
+        let now = later;
+        props.update(&room, &tracking(hand_at(at, true)), now);
+        let throw = Vec3::new(0.0, 0.1, 2.0) / 90.0;
+        let mut at_frame = now;
+        for k in 1..=4 {
+            at_frame += Duration::from_secs_f32(1.0 / 90.0);
+            props.update(&room, &tracking(hand_at(at + throw * k as f32, true)), at_frame);
+        }
+        run(&mut props, &room, &tracking(hand_at(at + throw * 4.0, false)), at_frame, 4.0);
+        let landed = props.poses[j].transform_point3(Vec3::ZERO);
+        assert!(landed.y < 0.1, "on the floor: {:?}", landed);
     }
 
     #[test]
@@ -820,9 +1009,9 @@ mod tests {
         assert!(matches!(props.holds[1], Some(Hold::Print { print: 0, .. })));
         // Let go over the desk, it lies on it.
         let over = Vec3::new(0.0, 1.0, -0.5);
-        props.update(&room, &tracking(hand_at(over, true)), later);
-        props.update(&room, &tracking(hand_at(over, false)), later);
-        assert!((props.prints[0].pose.transform_point3(Vec3::ZERO).y - 0.72).abs() < 1e-3);
+        let later = run(&mut props, &room, &tracking(hand_at(over, true)), later, 0.2);
+        run(&mut props, &room, &tracking(hand_at(over, false)), later, 3.0);
+        assert!((props.prints[0].pose.transform_point3(Vec3::ZERO).y - 0.72).abs() < 0.003);
     }
 
     #[test]
