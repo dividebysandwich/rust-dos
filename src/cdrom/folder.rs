@@ -675,6 +675,10 @@ mod tests {
     fn joliet_has_the_long_names() {
         let root = scratch("joliet");
         fs::write(root.join("Übersicht der Dateien.txt"), b"1").unwrap();
+        // Joliet doesn't allow * / : ; ? \. Windows doesn't allow most of
+        // them in a file name either, but it does allow ";".
+        fs::write(root.join("a;b.txt"), b"2").unwrap();
+        #[cfg(not(windows))]
         fs::write(root.join("a:b?.txt"), b"2").unwrap();
         let long = format!("{}.document", "x".repeat(80));
         fs::write(root.join(&long), b"3").unwrap();
@@ -682,7 +686,9 @@ mod tests {
         let image = CdImage::from_folder(build(&root, "Stuff").unwrap(), &root).unwrap();
         let names = joliet_listing(&image);
         assert!(names.contains(&"Übersicht der Dateien.txt".to_string()), "{:?}", names);
-        assert!(names.contains(&"a_b_.txt".to_string()));
+        assert!(names.contains(&"a_b.txt".to_string()), "{:?}", names);
+        #[cfg(not(windows))]
+        assert!(names.contains(&"a_b_.txt".to_string()), "{:?}", names);
         assert!(names.contains(&"Saved Games".to_string()));
         let cut = format!("{}~1.document", "x".repeat(64 - 2 - 9));
         assert!(names.contains(&cut), "{:?}", names);
