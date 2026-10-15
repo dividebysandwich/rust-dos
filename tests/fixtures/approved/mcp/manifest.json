@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "asset_policy": {
+    "repository": "acquisition metadata only",
+    "program_files": "temporary test guests only; preserve bundled source and notices",
+    "observations": "generate from live emulator and SDK; retain locally only",
+    "release_assets": "exclude downloaded programs, sources and observations"
+  },
+  "programs": [
+    {
+      "id": "grafx2",
+      "version": "2.2",
+      "url": "https://www.ibiblio.org/pub/micro/pc-stuff/freedos/files/repositories/latest/apps/grafx2.zip",
+      "sha256": "fb3742af89d9702bd3d6758bc3744b554cf3437bb82dd3281d2d15da6af440e3",
+      "program_license": "GPL-2.0-only",
+      "license_notice": "SOURCE/GRAFX2/SOURCES.ZIP:grafx2/doc/gpl-2_0.txt",
+      "source_archive": {
+        "path": "SOURCE/GRAFX2/SOURCES.ZIP",
+        "sha256": "5d79e7c8817f70cd0f6954f520a58aebe8cc2a95f60e063d77436a7860a6a354"
+      },
+      "application_root": "APPS/GRAFX2",
+      "working_directory": "BIN",
+      "command": "GRAFX2.EXE /mode 320x200",
+      "configuration": {
+        "path": "SHARE/GRAFX2/GFX2DEF.INI",
+        "settings": { "Skin_file": "SKIN_DPA.PNG", "Font_file": "FONT_DPA.PNG" },
+        "sha256": "a6d96735d1d9c9003b72bdf36a01fb2f70a4f1b317bebbf307f85d0c33769772"
+      }
+    },
+    {
+      "id": "seal",
+      "version": "2.0.11a",
+      "url": "https://www.ibiblio.org/pub/micro/pc-stuff/freedos/files/repositories/latest/gui/seal.zip",
+      "sha256": "c11010585d8de33bdeb2db471881b1bc1e89e367817f95b1b29c8487d88e8c19",
+      "program_license": "GPL-2.0-or-later",
+      "license_notice": "GUI/SEAL/DOCS/LICENSE.TXT",
+      "source_archive": {
+        "path": "SOURCE/SEAL/SOURCES.ZIP",
+        "sha256": "c697e28e0cc2fa240244a891860cdfae6a60099e70c19f63389132395470bfca"
+      },
+      "application_root": "GUI/SEAL",
+      "working_directory": ".",
+      "command": "SEAL.EXE",
+      "configuration": {
+        "path": "ALLEGRO.CFG",
+        "settings": { "sound.digi_card": "0", "sound.midi_card": "0", "mouse.mouse": "POLL" },
+        "sha256": "17b5693f9d1909715359ebc5856a80f6daf6d20ac4cb9c88d4492a470cd95ba7"
+      }
+    }
+  ]
+}

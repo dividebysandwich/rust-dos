@@ -24,7 +24,9 @@ use axum::routing::{get, post, put};
 use base64::Engine;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::broadcast;
+
+use super::control::{Busy, ControlClient as AppState, RequestContext as Ctx, SubmissionError};
 
 use super::journal::{self, Filter, Journal, Kind, OpKind, OpLookup, OpState};
 use super::trace::{self, TraceEntry};
@@ -38,15 +40,17 @@ const INPUT_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
 /// The longest a long poll (`wait=`) waits.
 const MAX_WAIT: Duration = Duration::from_secs(600);
 
-#[derive(Clone)]
-struct AppState {
-    tx: mpsc::Sender<Request>,
-    shared: Arc<Shared>,
-}
-
 /// Start the server on `addr`, and return the address it listens on. With
 /// port 0 the system picks a free port, and the returned address has it.
-pub fn spawn(addr: SocketAddr, tx: mpsc::Sender<Request>, shared: Arc<Shared>) -> Result<SocketAddr, String> {
+pub fn spawn(addr: SocketAddr, tx: mpsc::Sender<Request>, shared: Arc<Shared>,
+    mcp_enabled: bool,
+) -> Result<SocketAddr, String> {
+    if mcp_enabled && (!cfg!(feature = "mcp") || !addr.ip().is_loopback()) {
+        return Err("MCP requires the native build feature and a loopback debug listener".into());
+    }
+    if mcp_enabled {
+        shared.native_enabled.store(true, Ordering::Release);
+    }
     // Bind synchronously so a port conflict is reported at startup rather
     // than silently in the background thread.
     let listener = std::net::TcpListener::bind(addr).map_err(|e| format!("debug server: cannot bind {}: {}", addr, e))?;
@@ -62,7 +66,14 @@ pub fn spawn(addr: SocketAddr, tx: mpsc::Sender<Request>, shared: Arc<Shared>) -
                 .expect("debug server runtime");
             rt.block_on(async move {
                 let listener = tokio::net::TcpListener::from_std(listener).expect("debug listener");
-                let app = router(AppState { tx, shared });
+                let state = AppState { tx, shared };
+                let app = router(state.clone());
+                #[cfg(feature = "mcp")]
+                let app = if mcp_enabled {
+                    super::mcp::attach(app, state, bound)
+                } else {
+                    app
+                };
                 if let Err(e) = axum::serve(listener, app).await {
                     eprintln!("[DEBUG] server error: {}", e);
                 }
@@ -134,14 +145,6 @@ fn router(state: AppState) -> Router {
 // Request numbers, tags and preconditions
 // ---------------------------------------------------------------------------
 
-/// What a request carries to the emulator thread besides its command.
-#[derive(Clone, Debug)]
-struct Ctx {
-    req: u64,
-    tag: Option<Arc<str>>,
-    if_state: Option<u64>,
-}
-
 tokio::task_local! {
     static CTX: Ctx;
 }
@@ -150,22 +153,6 @@ impl Ctx {
     /// The context of the HTTP request being answered.
     fn current() -> Option<Ctx> {
         CTX.try_with(Ctx::clone).ok()
-    }
-}
-
-/// Counts a request or stream in flight, which the shutdown waits for.
-struct Busy(Arc<Shared>);
-
-impl Busy {
-    fn new(shared: &Arc<Shared>) -> Self {
-        shared.busy.fetch_add(1, Ordering::AcqRel);
-        Busy(shared.clone())
-    }
-}
-
-impl Drop for Busy {
-    fn drop(&mut self) {
-        self.0.busy.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -198,7 +185,10 @@ fn context(req: u64, headers: &HeaderMap) -> Result<Ctx, ApiError> {
         ),
         None => None,
     };
-    Ok(Ctx { req, tag, if_state })
+    Ok(Ctx { req, tag, if_state,
+        deadline: None,
+        capture: None,
+    })
 }
 
 /// Number every request, take its `X-Request-Id` and `If-State-Seq`, and
@@ -387,34 +377,30 @@ fn unknown_op(req: u64) -> ApiError {
 }
 
 impl AppState {
-    /// A context for a request outside HTTP (a `/ws/input` message).
-    fn context(&self, tag: Option<Arc<str>>, if_state: Option<u64>) -> Ctx {
-        Ctx { req: self.shared.next_req.fetch_add(1, Ordering::Relaxed), tag, if_state }
-    }
-
     async fn call(&self, cmd: Cmd, timeout: Duration) -> Result<(Reply, Meta), ApiError> {
         let ctx = Ctx::current().unwrap_or_else(|| self.context(None, None));
         self.call_with(&ctx, cmd, timeout).await
     }
 
-    async fn call_with(&self, ctx: &Ctx, cmd: Cmd, timeout: Duration) -> Result<(Reply, Meta), ApiError> {
-        if self.shared.closed.load(Ordering::Acquire) {
-            return Err(shutting_down());
-        }
-        let (reply, rx) = oneshot::channel();
-        let request = Request { cmd, reply, req: ctx.req, tag: ctx.tag.clone(), if_state: ctx.if_state };
-        self.tx.send(request).map_err(|_| shutting_down())?;
-        match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(Answer { reply: Reply::Error(code, msg), meta })) => {
-                Err(ApiError { status: status_of(code), body: json!({"error": msg}), meta: Some(meta) })
-            }
-            Ok(Ok(Answer { reply: Reply::ErrorJson(code, body), meta })) => {
-                Err(ApiError { status: status_of(code), body, meta: Some(meta) })
-            }
-            Ok(Ok(Answer { reply, meta })) => Ok((reply, meta)),
-            Ok(Err(_)) if self.shared.closed.load(Ordering::Acquire) => Err(shutting_down()),
-            Ok(Err(_)) => Err(ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "request dropped")),
-            Err(_) => Err(ApiError::new(StatusCode::GATEWAY_TIMEOUT, "timed out waiting for the emulator loop")),
+    async fn call_with(&self, ctx: &Ctx, cmd: Cmd, timeout: Duration,
+    ) -> Result<(Reply, Meta), ApiError> {
+        match self.submit(ctx, cmd, timeout).await {
+            Ok(Answer { reply: Reply::Error(code, msg), meta,
+            }) => Err(ApiError { status: status_of(code), body: json!({"error": msg}), meta: Some(meta),
+            }),
+            Ok(Answer { reply: Reply::ErrorJson(code, body), meta,
+            }) => Err(ApiError { status: status_of(code), body, meta: Some(meta),
+            }),
+            Ok(Answer { reply, meta }) => Ok((reply, meta)),
+            Err(SubmissionError::Closed) => Err(shutting_down()),
+            Err(SubmissionError::Dropped) => Err(ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "request dropped",
+            )),
+            Err(SubmissionError::Timeout) => Err(ApiError::new(StatusCode::GATEWAY_TIMEOUT, "timed out waiting for the emulator loop",
+            )),
+            Err(SubmissionError::Busy) => Err(ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "native request admission full",
+            )),
         }
     }
 
@@ -429,7 +415,10 @@ impl AppState {
     /// The journal's state now, with what a request did.
     fn meta_now(&self, seq: Option<u64>, op: Option<u64>) -> Meta {
         let j = self.shared.journal.lock().unwrap_or_else(|e| e.into_inner());
-        Meta { state_seq: j.state_seq, stop_seq: j.stop_seq, last: j.last(), seq, op }
+        Meta { state_seq: j.state_seq, stop_seq: j.stop_seq, last: j.last(), seq, op,
+            #[cfg(feature = "mcp")]
+            mouse_picture: None,
+        }
     }
 }
 
@@ -1147,7 +1136,10 @@ async fn input_post(
     let default_type = match kind.as_str() {
         "key" | "type" | "mouse" | "wait" => Some(kind.as_str()),
         "batch" => None,
-        _ => return Err(ApiError::new(StatusCode::NOT_FOUND, format!("unknown input kind '{}'", kind))),
+        _ => {
+            return Err(ApiError::new(StatusCode::NOT_FOUND, format!("unknown input kind '{}'", kind),
+            ));
+        }
     };
     let events = parse_events(parse_body(&body)?, default_type)?;
     let wait = q.wait.unwrap_or(true);
@@ -1370,7 +1362,9 @@ async fn wait_pause(State(s): State<AppState>, Query(q): Query<PauseWaitQuery>) 
             after
         }
         None => match s.call(Cmd::WaitPause, DEFAULT_TIMEOUT).await? {
-            (Reply::Json(v), meta) if v["paused"] == true => return Ok(json_response(StatusCode::OK, v, &meta)),
+            (Reply::Json(v), meta) if v["paused"] == true => {
+                return Ok(json_response(StatusCode::OK, v, &meta));
+            }
             (Reply::Json(_), meta) => meta.last,
             _ => return Err(unexpected()),
         },
@@ -2345,11 +2339,12 @@ WEBSOCKETS
 "#;
 
 #[cfg(test)]
-mod http_tests;
+pub(super) mod http_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::{Answer, Cmd, Meta, Reply, Request, Shared, hex_data, json, json_body, with_field_hint};
+    use super::{Answer, Cmd, Meta, Reply, Request, Shared, hex_data, json, json_body, with_field_hint,
+    };
     use std::io::{Read, Write};
     use std::net::SocketAddr;
     use std::sync::{Arc, mpsc};
@@ -2393,7 +2388,9 @@ mod tests {
     fn spawn_on_port_0_returns_the_port_it_listens_on() {
         let (tx, _rx) = mpsc::channel::<Request>();
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let bound = super::spawn(addr, tx, Arc::new(Shared::new(std::time::Instant::now()))).unwrap();
+        let bound = super::spawn(addr, tx, Arc::new(Shared::new(std::time::Instant::now())),
+            false,
+        ).unwrap();
         assert_eq!(bound.ip(), addr.ip());
         assert_ne!(bound.port(), 0);
         // `/api` is the help text, which the server answers without the emulator.
@@ -2406,7 +2403,9 @@ mod tests {
     fn spawn_on_port_0_passes_requests_to_the_emulator() {
         let (tx, rx) = mpsc::channel::<Request>();
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let addr = super::spawn(addr, tx, Arc::new(Shared::new(std::time::Instant::now()))).unwrap();
+        let addr = super::spawn(addr, tx, Arc::new(Shared::new(std::time::Instant::now())),
+            false,
+        ).unwrap();
         std::thread::spawn(move || {
             for req in rx {
                 let status = matches!(req.cmd, Cmd::Status);

@@ -4,9 +4,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 
-use super::journal::{Kind, OpState};
+use super::journal::{self, Kind, OpKind, OpState};
 use super::keys::{self, PcKey};
-use super::{Coords, DEFAULT_HOLD_MS, DebugHub, InputEvent, KeyAction, LowInput, MouseAction, UiInput};
+use super::{Coords, DEFAULT_HOLD_MS, DebugHub, InputEvent, KeyAction, LowInput, MouseAction, Reply, UiInput};
 use crate::config_ui::UiKey;
 use crate::cpu::Cpu;
 use crate::keyboard;
@@ -158,6 +158,13 @@ impl DebugHub {
     // ----- input ------------------------------------------------------------
 
     pub(super) fn process_input(&mut self, cpu: &mut Cpu) {
+        #[cfg(feature = "mcp")]
+        {
+            self.native_sync_picture(cpu);
+            self.native_guard_target(cpu);
+            self.native_mouse_guard(cpu);
+            self.native_expire(cpu);
+        }
         let now = Instant::now();
         let now_ns = cpu.bus.clock.now_ns();
         if let Some(t) = self.input_wait_until {
@@ -177,7 +184,16 @@ impl DebugHub {
             }
             self.input_wait_ns = None;
         }
-        while let Some(ev) = self.input.front() {
+        while !self.input.is_empty() {
+            // Tests can hold an actual queued End marker across a lifecycle
+            // transition without depending on the host scheduler's frame time.
+            #[cfg(all(test, feature = "mcp"))]
+            if self.input_steps.as_ref().is_some_and(|steps| steps.load(std::sync::atomic::Ordering::Acquire) == 0) {
+                return;
+            }
+            #[cfg(feature = "mcp")]
+            if self.native_cancel_expired_borrow(cpu) { continue; }
+            let ev = self.input.front().unwrap();
             match ev {
                 LowInput::KeyDown { .. } | LowInput::KeyUp { .. } => {
                     // Let the program catch up with the keyboard controller's
@@ -189,9 +205,29 @@ impl DebugHub {
                         return;
                     }
                     self.key_stall_frames = 0;
-                    match self.input.pop_front().unwrap() {
-                        LowInput::KeyDown { key, ascii } => self.key_down(cpu, key, ascii),
-                        LowInput::KeyUp { key } => self.key_up(cpu, key),
+                    #[cfg(feature = "mcp")]
+                    let native = self.owned_input.spans.front().is_some_and(|span| span._job.is_some());
+                    match self.pop_input().unwrap() {
+                        LowInput::KeyDown { key, ascii } => {
+                            #[cfg(feature = "mcp")]
+                            if native && !self.divert {
+                                self.guest_key_down(cpu, key, ascii);
+                                if let Some(span) = self.owned_input.spans.front_mut() {
+                                    if !span.delivered.contains(&key) { span.delivered.push(key); }
+                                    let req = span.req;
+                                    self.owned_input.note_key(req, key);
+                                }
+                            } else { self.key_down(cpu, key, ascii); }
+                            #[cfg(not(feature = "mcp"))]
+                            self.key_down(cpu, key, ascii);
+                        }
+                        LowInput::KeyUp { key } => {
+                            self.key_up(cpu, key);
+                            #[cfg(feature = "mcp")]
+                            if native && let Some(span) = self.owned_input.spans.front_mut() {
+                                span.delivered.retain(|held| held != &key);
+                            }
+                        }
                         _ => unreachable!(),
                     }
                     // One scan code per frame.
@@ -199,17 +235,21 @@ impl DebugHub {
                 }
                 LowInput::Wait(d) if self.deterministic.is_some() && !self.divert => {
                     self.input_wait_ns = Some(now_ns + d.as_nanos() as u64);
-                    self.input.pop_front();
+                    #[cfg(feature = "mcp")]
+                    { self.owned_input.wait_owner = self.owned_input.owner(); }
+                    self.pop_input();
                     return;
                 }
                 LowInput::Wait(d) => {
                     self.input_wait_until = Some(now + *d);
-                    self.input.pop_front();
+                    #[cfg(feature = "mcp")]
+                    { self.owned_input.wait_owner = self.owned_input.owner(); }
+                    self.pop_input();
                     return;
                 }
                 _ => {}
             }
-            match self.input.pop_front().unwrap() {
+            match self.pop_input().unwrap() {
                 // Typed as Alt and the keypad type it: a keystroke with no
                 // scan code.
                 LowInput::Char(byte) if !self.divert => {
@@ -232,6 +272,8 @@ impl DebugHub {
                 // the edges of the cursor's window too.
                 LowInput::MouseRel { dx, dy } => cpu.bus.mouse.move_by(dx as f64, dy as f64),
                 LowInput::Button { idx, down } => {
+                    #[cfg(feature = "mcp")]
+                    self.owned_input.delivered_button(idx, down);
                     if down {
                         cpu.bus.mouse.button_down(idx);
                     } else {
@@ -239,9 +281,7 @@ impl DebugHub {
                     }
                 }
                 LowInput::End { req } => {
-                    self.append_then(cpu, Kind::InputDelivered, Some(req), json!({}), |j, seq| {
-                        j.end_op(req, OpState::Done, Some(seq));
-                    });
+                    self.input_delivered(cpu, req);
                 }
                 _ => unreachable!(),
             }
@@ -261,15 +301,12 @@ impl DebugHub {
         } else if self.divert {
             self.ui_input.extend(ui_key(key, ascii, self.remote_mods).map(UiInput::Key));
         } else {
-            keyboard::apply_key(&mut cpu.bus, key, ascii, true);
-            if !self.remote_held.iter().any(|k| same_key(k, &key)) {
-                self.remote_held.push(key);
-            }
+            self.guest_key_down(cpu, key, ascii);
         }
     }
 
     /// A remote key release. Only keys the machine saw go down come up.
-    fn key_up(&mut self, cpu: &mut Cpu, key: PcKey) {
+    pub(super) fn key_up(&mut self, cpu: &mut Cpu, key: PcKey) {
         self.remote_mods &= !key.modifier;
         if let Some(i) = self.remote_held.iter().position(|k| same_key(k, &key)) {
             self.remote_held.remove(i);
@@ -280,6 +317,8 @@ impl DebugHub {
     /// Release the keys the remote client holds on the machine, as the
     /// settings window opens and takes the keyboard.
     pub fn release_keys(&mut self, cpu: &mut Cpu) {
+        #[cfg(feature = "mcp")]
+        self.release_owned_input(cpu);
         for key in std::mem::take(&mut self.remote_held) {
             keyboard::apply_key(&mut cpu.bus, key, 0, false);
         }
@@ -363,4 +402,45 @@ fn screen_to_virtual_mouse(cpu: &Cpu, x: i32, y: i32) -> (i32, i32) {
         }
     };
     (axis(px, w, virt_w, cpu.bus.mouse.max_x), axis(py, h, virt_h, cpu.bus.mouse.max_y))
+}
+
+impl DebugHub {
+    pub(super) fn check_input_capacity(&self) -> Result<(), Reply> {
+        let pending = self.with_journal(|j| j.pending_ops(|k| k == OpKind::Input).len()).unwrap_or(0);
+        if pending >= journal::PENDING_INPUT_CAPACITY {
+            return Err(Reply::Error(429, format!("{} input requests are still being typed: wait for some (or DELETE /api/input)", pending)));
+        }
+        Ok(())
+    }
+
+    pub(super) fn pop_input(&mut self) -> Option<LowInput> {
+        let event = self.input.pop_front()?;
+        #[cfg(all(test, feature = "mcp"))]
+        if let Some(steps) = &self.input_steps {
+            let _ = steps.fetch_update(std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Acquire, |remaining| remaining.checked_sub(1));
+        }
+        #[cfg(feature = "mcp")]
+        {
+            self.owned_input.consumed();
+        }
+        Some(event)
+    }
+
+    pub(super) fn input_delivered(&mut self, cpu: &Cpu, req: u64) {
+        self.append_then(cpu, Kind::InputDelivered, Some(req), json!({}), |j, seq| {
+            j.end_op(req, OpState::Done, Some(seq));
+        });
+    }
+
+    pub(super) fn guest_key_down(&mut self, cpu: &mut Cpu, key: PcKey, ascii: u8) {
+        self.remote_mods |= key.modifier;
+        keyboard::apply_key(&mut cpu.bus, key, ascii, true);
+        if !self.remote_held.iter().any(|k| same_key(k, &key)) { self.remote_held.push(key); }
+    }
+
+    #[cfg(feature = "mcp")]
+    pub(crate) fn forget_keys_after_load(&mut self) {
+        self.remote_held.clear();
+        self.remote_mods = 0;
+    }
 }

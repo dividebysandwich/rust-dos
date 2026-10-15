@@ -83,6 +83,8 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   a file of what the program sent
 * Runs in a **[web browser](#running-in-a-browser)** as WebAssembly
 * A web-based **[debugger](#debug--remote-control-server)** and HTTP API
+* An optional native **[MCP interface](docs/mcp/README.md)** for agent screenshots,
+  keyboard input, persistent mouse holds and dragging, using the same control service
 * **VR support**: Model your childhood bedroom in Blender and play your favorite
   DOS games in an OpenXR VR headset or in 2D mode  ([more](CONFIGURATION.md#3d-scene-and-vr))
 

@@ -79,6 +79,11 @@ pub(crate) struct Args {
     #[arg(long, value_name = "ADDR", num_args = 0..=1, default_missing_value = "127.0.0.1:8086")]
     pub(crate) debug_server: Option<std::net::SocketAddr>,
 
+    /// Enable native MCP tools on the local debug listener at /mcp.
+    #[cfg(feature = "mcp")]
+    #[arg(long, requires = "debug_server")]
+    pub(crate) mcp: bool,
+
     /// Instruction trace ring buffer capacity (entries, ~64 bytes each).
     /// Allocated only once tracing is enabled via the debug server.
     #[arg(long, default_value_t = 1_000_000)]

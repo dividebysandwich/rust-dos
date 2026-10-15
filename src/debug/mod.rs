@@ -6,9 +6,23 @@
 //! `DebugHub::poll` once per frame, and data flows back through oneshot
 //! replies, broadcast channels, and a shared frame snapshot.
 
+#[path = "control/service.rs"]
+mod control;
+#[cfg(feature = "mcp")]
+#[path = "control/input.rs"]
+mod owned_input;
+#[cfg(feature = "mcp")]
+#[path = "control/mouse.rs"]
+mod owned_mouse;
 pub mod heat;
 pub mod journal;
 pub mod keys;
+#[cfg(feature = "mcp")]
+mod mcp;
+#[cfg(feature = "mcp")]
+pub fn init_mcp_diagnostics() -> Result<(), String> {
+    mcp::install_diagnostics()
+}
 pub mod pm;
 pub mod profile;
 pub mod server;
@@ -34,6 +48,10 @@ use serde_json::{Map, Value, json};
 use tokio::sync::{broadcast, oneshot, watch};
 
 use journal::{Journal, Kind, Stamp};
+#[cfg(feature = "mcp")]
+use journal::{OpKind, OpState};
+#[cfg(feature = "mcp")]
+use input::expand_input;
 
 use crate::config_ui::UiKey;
 use crate::cpu::Cpu;
@@ -90,6 +108,12 @@ pub struct Shared {
     /// HTTP requests and event streams in flight, which the shutdown
     /// gives a moment to finish.
     pub busy: AtomicUsize,
+    pub native_enabled: AtomicBool,
+    pub native_commands: Arc<tokio::sync::Semaphore>,
+    #[cfg(feature = "mcp")]
+    pub native_jobs: Arc<tokio::sync::Semaphore>,
+    #[cfg(feature = "mcp")]
+    pub(crate) metrics: control::Metrics,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -145,6 +169,12 @@ impl Shared {
             current: Mutex::new(None),
             closed: AtomicBool::new(false),
             busy: AtomicUsize::new(0),
+            native_enabled: AtomicBool::new(false),
+            native_commands: Arc::new(tokio::sync::Semaphore::new(8)),
+            #[cfg(feature = "mcp")]
+            native_jobs: Arc::new(tokio::sync::Semaphore::new(8)),
+            #[cfg(feature = "mcp")]
+            metrics: control::Metrics::default(),
         }
     }
 
@@ -197,6 +227,8 @@ impl Shared {
 /// What the hub tells about the journal with every answer.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Meta {
+    #[cfg(feature = "mcp")]
+    pub mouse_picture: Option<(u64, u32, u32)>,
     pub state_seq: u64,
     pub stop_seq: Option<u64>,
     /// The journal's last entry.
@@ -243,6 +275,12 @@ pub struct Request {
     /// `If-State-Seq`: carry the request out only if the machine is still
     /// stopped in the state of that entry.
     pub if_state: Option<u64>,
+    /// Optional native request deadline; legacy requests leave it unset.
+    pub deadline: Option<Instant>,
+    #[cfg(feature = "mcp")]
+    queued_at: Option<Instant>,
+    capture: Option<control::CapturePolicy>,
+    _native_admission: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 /// The request being carried out, and what it did to the journal.
@@ -254,6 +292,7 @@ struct Ctx {
     seq: Option<u64>,
     /// The operation it started.
     op: Option<u64>,
+    capture: Option<control::CapturePolicy>,
 }
 
 /// What a request needs of the machine to be carried out (`DebugHub::check`).
@@ -289,6 +328,13 @@ pub struct TraceQuery {
 }
 
 pub enum Cmd {
+    #[cfg(feature = "mcp")]
+    NativeInput {
+        input: rust_dos::control::GuestInput,
+        job: Option<Arc<owned_input::Job>>,
+    },
+    #[cfg(feature = "mcp")]
+    NativeOperation(rust_dos::control::OperationId),
     Status,
     Stats,
     Screenshot,
@@ -385,8 +431,10 @@ pub enum Cmd {
     SaveState { path: String, strict_match: bool, check_files: bool },
     LoadState { path: String, strict_match: bool, check_files: bool, folders: Vec<(u8, String)> },
     /// Change the CPU speed (`cycles`) as the settings window does, which
-    /// the front end does (`next_speed_request`).
+    /// the front end does (`next_playback_request`).
     Speed { cycles: String },
+    #[cfg(feature = "mcp")]
+    Playback { action: crate::playback::Action },
     /// Turn the emulator off: the front end leaves its loop, and the
     /// journal ends with `shutdown`.
     Quit,
@@ -417,9 +465,12 @@ pub struct StateRequest {
 }
 
 /// A CPU speed to change to, which the front end carries out
-/// (`DebugHub::next_speed_request`) and answers (`DebugHub::speed_done`).
-pub struct SpeedRequest {
-    pub cycles: String,
+/// (`DebugHub::next_playback_request`) and answers (`DebugHub::playback_done`).
+pub struct PlaybackRequest {
+    pub action: crate::playback::Action,
+    deadline: Option<Instant>,
+    _native_admission: Option<tokio::sync::OwnedSemaphorePermit>,
+    _busy: Option<control::Busy>,
     ctx: Ctx,
     if_state: Option<u64>,
     reply: oneshot::Sender<Answer>,
@@ -674,6 +725,10 @@ pub struct DebugHub {
     batch_t_us: u64,
 
     input: VecDeque<LowInput>,
+    #[cfg(feature = "mcp")]
+    owned_input: owned_input::Inputs,
+    #[cfg(all(test, feature = "mcp"))]
+    input_steps: Option<Arc<AtomicUsize>>,
     input_wait_until: Option<Instant>,
     /// In deterministic mode: the date and time the clock started at.
     /// Input is then delivered by `feed_input` at emulated times, and its
@@ -701,7 +756,7 @@ pub struct DebugHub {
     closed_program: bool,
     /// Save states to save or load, for the front end.
     state_requests: Vec<StateRequest>,
-    speed_requests: Vec<SpeedRequest>,
+    playback_requests: Vec<PlaybackRequest>,
     /// Shift, Ctrl and Alt bits (as at 40:17h) the remote client holds.
     remote_mods: u8,
     /// Keys the remote client holds down on the machine.
@@ -801,6 +856,10 @@ impl DebugHub {
             tracing_now: false,
             batch_t_us: 0,
             input: VecDeque::new(),
+            #[cfg(feature = "mcp")]
+            owned_input: owned_input::Inputs::default(),
+            #[cfg(all(test, feature = "mcp"))]
+            input_steps: None,
             input_wait_until: None,
             deterministic: None,
             input_wait_ns: None,
@@ -814,7 +873,7 @@ impl DebugHub {
             sound_viz_key: false,
             closed_program: false,
             state_requests: Vec::new(),
-            speed_requests: Vec::new(),
+            playback_requests: Vec::new(),
             remote_mods: 0,
             remote_held: Vec::new(),
             frame_waiters: Vec::new(),
@@ -837,11 +896,12 @@ impl DebugHub {
         addr: SocketAddr,
         trace_capacity: usize,
         deterministic: Option<chrono::NaiveDateTime>,
+        mcp_enabled: bool,
     ) -> Result<Self, String> {
         let shared = Arc::new(Shared::new(cpu.bus.start_time));
         let (tx, rx) = mpsc::channel();
         // With port 0 in `addr`, this is the free port the system picked.
-        let addr = server::spawn(addr, tx, shared.clone())?;
+        let addr = server::spawn(addr, tx, shared.clone(), mcp_enabled)?;
         if !addr.ip().is_loopback() {
             eprintln!(
                 "[DEBUG] WARNING: debug server bound to non-loopback address {}. It has no authentication!",
@@ -895,7 +955,14 @@ impl DebugHub {
     fn request(&self, cmd: Cmd) -> (Request, oneshot::Receiver<Answer>) {
         let req = self.shared.as_ref().map_or(1, |s| s.next_req.fetch_add(1, Ordering::Relaxed));
         let (reply, rx) = oneshot::channel();
-        (Request { cmd, reply, req, tag: None, if_state: None }, rx)
+        (Request { cmd, reply, req, tag: None, if_state: None,
+                deadline: None,
+                #[cfg(feature = "mcp")]
+                queued_at: None,
+                capture: None,
+                _native_admission: None,
+            }, rx,
+        )
     }
 
     fn emit(&self, v: Value) {
@@ -978,7 +1045,10 @@ impl DebugHub {
     /// The journal's state for an answer to `ctx`'s request.
     fn meta(&self, ctx: &Ctx) -> Meta {
         let (state_seq, stop_seq, last) = self.with_journal(|j| (j.state_seq, j.stop_seq, j.last())).unwrap_or_default();
-        Meta { state_seq, stop_seq, last, seq: ctx.seq, op: ctx.op }
+        Meta { state_seq, stop_seq, last, seq: ctx.seq, op: ctx.op,
+            #[cfg(feature = "mcp")]
+            mouse_picture: self.owned_input.picture.map(|mode| (self.owned_input.mode_epoch, mode.width, mode.height)),
+        }
     }
 
     /// Start carrying out a request: log lines name it from now on.

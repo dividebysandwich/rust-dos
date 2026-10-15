@@ -3,7 +3,7 @@
 use serde_json::{Value, json};
 
 use super::journal::{Kind, OpState};
-use super::{DebugHub, LowInput, Need, PauseReason, Reply, SpeedRequest, StateRequest};
+use super::{DebugHub, LowInput, Need, PauseReason, Reply, PlaybackRequest, StateRequest};
 use crate::cpu::Cpu;
 
 impl DebugHub {
@@ -58,6 +58,8 @@ impl DebugHub {
         let reply = match result {
             Err((status, body)) => Reply::ErrorJson(status, body),
             Ok(mut value) if request.load => {
+                #[cfg(feature = "mcp")]
+                if !request.strict_match { self.invalidate_owned_after_load(cpu); }
                 self.told_starts = cpu.programs.started;
                 self.told_ends = cpu.programs.ended;
                 let reset = request.strict_match.then(|| self.reset_after_load(cpu));
@@ -112,6 +114,10 @@ impl DebugHub {
     /// operations it cancelled: the control operation under way, a `run`
     /// waiting for its program, and queued input.
     pub fn reset_after_load(&mut self, cpu: &Cpu) -> (Value, Vec<u64>) {
+        let input = self.input_pending();
+        let held_keys = self.remote_held.len();
+        #[cfg(feature = "mcp")]
+        let native_cancelled = self.native_invalidate_restored(cpu);
         let break_on: Vec<&str> = [
             (self.break_exceptions != 0, "exceptions"),
             (self.break_mode_switch, "mode_switch"),
@@ -131,11 +137,13 @@ impl DebugHub {
             // The control operation that was to end with a stop.
             "pause_waits": cancelled.len(),
             "run": self.run_wait.is_some(),
-            "input": self.input_pending(),
-            "held_keys": self.remote_held.len(),
+            "input": input,
+            "held_keys": held_keys,
             // Deterministic mode: a resume's stop at an emulated time.
             "until_ms": self.stop_at_ns.take().is_some(),
         });
+        #[cfg(feature = "mcp")]
+        cancelled.extend(native_cancelled);
         self.once.clear();
         // Keys held before the load are forgotten without a release: the
         // restored keyboard has the keys of the moment it was saved, and
@@ -150,6 +158,8 @@ impl DebugHub {
                 cancelled.push(req);
             }
         }
+        #[cfg(feature = "mcp")]
+        { self.owned_input.spans.clear(); self.owned_input.wait_owner = None; }
         cancelled.sort_unstable();
         cancelled.dedup();
         self.input_wait_until = None;
@@ -173,14 +183,23 @@ impl DebugHub {
         (cleared, cancelled)
     }
 
-    /// The next CPU speed a remote client asked for, for the front end to
-    /// change to and answer with `speed_done`. One that can't be changed to
+    /// The next execution control a remote client asked for, for the front end
+    /// to apply and answer with `playback_done`. One that can't be applied
     /// now (deterministic mode running, or its `If-State-Seq` no longer
     /// holding) is refused here.
-    pub fn next_speed_request(&mut self) -> Option<SpeedRequest> {
-        while !self.speed_requests.is_empty() {
-            let request = self.speed_requests.remove(0);
-            let refusal = self.check(Need::Paused).and_then(|_| request.if_state.map_or(Ok(()), |n| self.check(Need::State(n))));
+    pub fn next_playback_request(&mut self) -> Option<PlaybackRequest> {
+        while !self.playback_requests.is_empty() {
+            let request = self.playback_requests.remove(0);
+            if self.quit.is_some() || self.shared.as_ref().is_some_and(|shared| shared.closed.load(std::sync::atomic::Ordering::Acquire)) {
+                self.answer(&request.ctx, request.reply, Reply::Error(503, "the emulator is shutting down".into()));
+                continue;
+            }
+            if request.deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline || request.reply.is_closed()) {
+                self.answer(&request.ctx, request.reply, Reply::Error(408, "the request expired before frontend application".into()));
+                continue;
+            }
+            let changes_machine = request.action.changes_machine();
+            let refusal = (if changes_machine { self.check(Need::Paused) } else { Ok(()) }).and_then(|_| request.if_state.map_or(Ok(()), |n| self.check(Need::State(n))));
             match refusal {
                 Err(body) => self.answer(&request.ctx, request.reply, Reply::ErrorJson(409, body)),
                 Ok(()) => {
@@ -192,12 +211,14 @@ impl DebugHub {
         None
     }
 
-    /// The front end carried out `request`: `result` is the speed now, or
-    /// why it can't be. A change appends `speed_changed`.
-    pub fn speed_done(&mut self, cpu: &Cpu, request: SpeedRequest, result: Result<Value, String>) {
+    /// The front end carried out `request`: `result` is the current control
+    /// state or a rejection. A CPU-speed mutation appends `speed_changed`.
+    pub fn playback_done(&mut self, cpu: &Cpu, request: PlaybackRequest, result: Result<Value, String>) {
         let reply = match result {
             Ok(value) => {
-                self.record(cpu, Kind::SpeedChanged, json!({"cycles": value.get("cycles"), "source": "debugger"}));
+                if matches!(request.action, crate::playback::Action::Speed(Some(_))) {
+                    self.record(cpu, Kind::SpeedChanged, json!({"cycles": value.get("cycles"), "source": "debugger"}));
+                }
                 Reply::Json(value)
             }
             Err(e) => Reply::bad(e),

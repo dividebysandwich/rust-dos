@@ -6,20 +6,28 @@ use std::path::Path;
 /// `frame` as a PNG file's bytes.
 pub fn encode(frame: &Frame) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
-    {
-        let mut encoder = png::Encoder::new(&mut out, frame.width, frame.height);
-        encoder.set_color(png::ColorType::Rgb);
-        encoder.set_depth(png::BitDepth::Eight);
-        encoder.set_compression(png::Compression::Fast);
-        let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
-        writer.write_image_data(&frame.rgb).map_err(|e| e.to_string())?;
-    }
+    encode_to(frame, &mut out)?;
     Ok(out)
+}
+
+/// Encode through the supplied sink, including its write and size errors.
+pub fn encode_to(frame: &Frame, out: impl std::io::Write) -> Result<(), String> {
+    let mut encoder = png::Encoder::new(out, frame.width, frame.height);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.set_compression(png::Compression::Fast);
+    let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
+    writer
+        .write_image_data(&frame.rgb)
+        .map_err(|e| e.to_string())?;
+    writer.finish().map_err(|e| e.to_string())
 }
 
 /// The picture in PNG file bytes, as RGB, if it is one.
 pub fn decode(bytes: &[u8]) -> Option<Frame> {
-    let mut reader = png::Decoder::new(std::io::Cursor::new(bytes)).read_info().ok()?;
+    let mut reader = png::Decoder::new(std::io::Cursor::new(bytes))
+        .read_info()
+        .ok()?;
     let mut pixels = vec![0; reader.output_buffer_size()?];
     let info = reader.next_frame(&mut pixels).ok()?;
     if info.color_type != png::ColorType::Rgb || info.bit_depth != png::BitDepth::Eight {

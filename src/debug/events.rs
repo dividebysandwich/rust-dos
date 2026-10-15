@@ -265,7 +265,8 @@ impl DebugHub {
     /// ends with `shutdown`, requests still coming get 503, and the server
     /// gets a moment to send what it has.
     pub fn shutdown(&mut self, cpu: &Cpu, reason: ShutdownReason, exit_code: i32) {
-        let Some(shared) = self.shared.clone() else { return };
+        let Some(shared) = self.shared.clone() else { return;
+        };
         let by = self.quit.take();
         let cancelled = self.with_journal(|j| j.pending_ops(|_| true)).unwrap_or_default();
         self.current_op = None;
@@ -293,6 +294,9 @@ impl DebugHub {
         let gone = || Reply::Error(503, "the emulator is shutting down".into());
         for (ctx, tx) in std::mem::take(&mut self.frame_waiters) {
             self.answer(&ctx, tx, gone());
+        }
+        for request in std::mem::take(&mut self.playback_requests) {
+            self.answer(&request.ctx, request.reply, gone());
         }
         // Requests still queued get 503, and the channel closes: one sent
         // later fails at once, and the server answers it with 503 too.
@@ -326,6 +330,8 @@ impl DebugHub {
     /// A save state was loaded otherwise than through the debug server:
     /// from the window (`source` "window") or by rewinding ("rewind").
     pub fn state_loaded_elsewhere(&mut self, cpu: &Cpu, source: &str) {
+        #[cfg(feature = "mcp")]
+        self.invalidate_owned_after_load(cpu);
         self.told_starts = cpu.programs.started;
         self.told_ends = cpu.programs.ended;
         self.append(cpu, Kind::StateLoaded, None, json!({"source": source}));

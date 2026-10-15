@@ -21,14 +21,56 @@ impl DebugHub {
     pub fn poll(&mut self, cpu: &mut Cpu) {
         // (A profile from `--profile` runs without the server.)
         self.profile_poll(cpu);
+        #[cfg(feature = "mcp")]
+        {
+            self.native_sync_picture(cpu);
+            self.native_guard_target(cpu);
+            self.native_mouse_guard(cpu);
+            self.native_expire(cpu);
+        }
+        if self.frame_waiters.iter().any(|(ctx, reply)| {
+            ctx.capture
+                .as_ref()
+                .is_some_and(|policy| reply.is_closed() || Instant::now() >= policy.deadline)
+        }) {
+            let waiters = std::mem::take(&mut self.frame_waiters);
+            for (ctx, reply) in waiters {
+                if let Some(policy) = &ctx.capture {
+                    if reply.is_closed() {
+                        continue;
+                    }
+                    if Instant::now() >= policy.deadline {
+                        self.answer(
+                            &ctx,
+                            reply,
+                            Reply::Error(408, "the queued capture expired".into()),
+                        );
+                        continue;
+                    }
+                }
+                self.frame_waiters.push((ctx, reply));
+            }
+        }
         let Some(rx) = self.rx.take() else { return };
         // A save state or speed request is carried out by the front end
         // after this, before any request behind it, so that requests take
         // effect in the order they came: those behind it wait a frame. After
         // a quit nothing more is carried out.
-        while self.state_requests.is_empty() && self.speed_requests.is_empty() && self.quit.is_none() {
+        let bounded = self
+            .shared
+            .as_ref()
+            .is_some_and(|shared| shared.native_enabled.load(Ordering::Acquire));
+        let started = Instant::now();
+        let mut handled = 0;
+        while self.state_requests.is_empty() && self.playback_requests.is_empty() && self.quit.is_none() {
+            if bounded
+                && (handled >= 16 || (handled > 0 && started.elapsed() >= Duration::from_millis(1)))
+            {
+                break;
+            }
             let Ok(req) = rx.try_recv() else { break };
             self.handle(cpu, req);
+            handled += 1;
         }
         self.rx = Some(rx);
         self.update_heat(cpu);
@@ -426,6 +468,36 @@ impl DebugHub {
             return;
         }
         for (ctx, w) in std::mem::take(&mut self.frame_waiters) {
+            if let Some(policy) = &ctx.capture {
+                if w.is_closed() {
+                    continue;
+                }
+                if Instant::now() >= policy.deadline {
+                    self.answer(
+                        &ctx,
+                        w,
+                        Reply::Error(408, "the capture deadline expired before copying".into()),
+                    );
+                    continue;
+                }
+                let rgb_size = (screen.width as usize)
+                    .checked_mul(screen.height as usize)
+                    .and_then(|pixels| pixels.checked_mul(3));
+                if screen.width == 0
+                    || screen.height == 0
+                    || screen.width > 2048
+                    || screen.height > 2048
+                    || rgb_size
+                        .is_none_or(|size| size > 12 * 1024 * 1024 || size != screen.rgb.len())
+                {
+                    self.answer(
+                        &ctx,
+                        w,
+                        Reply::Error(413, "the native capture frame exceeds its bounds".into()),
+                    );
+                    continue;
+                }
+            }
             let meta = self.meta(&ctx);
             let _ = w.send(Answer { reply: Reply::Frame(screen.clone()), meta });
         }

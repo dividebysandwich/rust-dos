@@ -26,6 +26,7 @@ mod display;
 mod input;
 mod main_host;
 mod monitor_power;
+mod playback;
 mod sdl_audio;
 mod sdl_keys;
 mod startup;
@@ -247,6 +248,7 @@ fn main() -> Result<(), String> {
     // turned on fast forward to get through a wait.
     let mut autoinput: Option<rust_dos::autoinput::AutoInput> = None;
     let mut autoinput_fast = false;
+    let mut agent_fast_forward = playback::FastForward::default();
     // The game's gamepad mapping at work on the first pad, and its action
     // wheel while it is open.
     let mut padmap: Option<rust_dos::padmap::PadMapper> = None;
@@ -530,6 +532,7 @@ fn main() -> Result<(), String> {
                     ..
                 } => display.redraw(),
                 Event::Window { win_event: WindowEvent::FocusLost, .. } => {
+                    agent_fast_forward.poll(&mut cpu, &mut pacer, std::time::Instant::now(), true);
                     release_input(&mut cpu, &mut held);
                     ctrl_alt.reset();
                     focused = false;
@@ -747,6 +750,7 @@ fn main() -> Result<(), String> {
                     // Staging, until F12 comes up.
                     if keycode == Keycode::F12 && alt && !ctrl {
                         if !repeat && !paused {
+                            agent_fast_forward.handoff();
                             pacer.set_fast_forward(true, &cpu.bus.clock, std::time::Instant::now());
                             cpu.bus.mixer.fast_forward = true;
                             osd.show_lasting("Fast forward");
@@ -911,6 +915,7 @@ fn main() -> Result<(), String> {
                         capture_message!(if mouse_captured { CAPTURED } else { "Mouse released (Ctrl+Alt captures it)" });
                     }
                     if keycode == Keycode::F12 && pacer.fast_forward() {
+                        agent_fast_forward.handoff();
                         pacer.set_fast_forward(false, &cpu.bus.clock, std::time::Instant::now());
                         cpu.bus.mixer.fast_forward = false;
                         osd.clear_lasting();
@@ -1193,6 +1198,11 @@ fn main() -> Result<(), String> {
         dbg.divert = ui.is_open();
         dbg.rewinding = rewinding.is_some();
         profile::set_host(Zone::Debug);
+        #[cfg(feature = "mcp")]
+        if state_loaded {
+            dbg.invalidate_owned_after_load(&cpu);
+            if args.mcp { dbg.forget_keys_after_load(); }
+        }
         dbg.poll(&mut cpu);
         profile::set_host(Zone::Frontend);
         if dbg.quit_requested() {
@@ -1207,6 +1217,7 @@ fn main() -> Result<(), String> {
             osd.show(message);
         }
         if dbg.take_closed_program() {
+            agent_fast_forward.poll(&mut cpu, &mut pacer, std::time::Instant::now(), true);
             host!().release_program();
         }
         // A strict-match load brings a state of this machine and this
@@ -1252,16 +1263,34 @@ fn main() -> Result<(), String> {
             // a strict-match load, the journal and the reply) follows.
             dbg.state_done(&cpu, request, result);
         }
-        while let Some(request) = dbg.next_speed_request() {
-            let result = CpuSpeed::parse(&request.cycles).and_then(|cycles| {
-                if det.is_some() && !matches!(cycles, CpuSpeed::Fixed(_)) {
-                    return Err("deterministic mode runs at a fixed speed: give a number of cycles".to_string());
+        while let Some(request) = dbg.next_playback_request() {
+            let result = match &request.action {
+                playback::Action::Speed(cycles) => {
+                    let previous = settings.cycles;
+                    let parsed = cycles.as_deref().map(CpuSpeed::parse).transpose();
+                    parsed.and_then(|cycles| {
+                        if let Some(cycles) = cycles {
+                            if det.is_some() && !matches!(cycles, CpuSpeed::Fixed(_)) {
+                                return Err("deterministic mode runs at a fixed speed: give a number of cycles".to_string());
+                            }
+                            let new = Settings { cycles, ..settings.clone() };
+                            host!().apply(&new)?;
+                        }
+                        Ok(serde_json::json!({"previous_cycles": previous.to_string(), "cycles": settings.cycles.to_string(), "cycles_per_ms": cpu.bus.clock.cycles_per_ms()}))
+                    })
                 }
-                let new = Settings { cycles, ..settings.clone() };
-                host!().apply(&new)?;
-                Ok(serde_json::json!({"cycles": cycles.to_string()}))
-            });
-            dbg.speed_done(&cpu, request, result);
+                playback::Action::FastForward(action) => {
+                    if matches!(action, playback::FastForwardAction::Start(_)) && autoinput_fast {
+                        Err("the game profile already owns fast-forward".into())
+                    } else {
+                        agent_fast_forward.request(
+                            *action, &mut cpu, &mut pacer, std::time::Instant::now(),
+                            paused || dbg.paused || ui.is_open() || rewinding.is_some(), det.is_some(),
+                        )
+                    }
+                }
+            };
+            dbg.playback_done(&cpu, request, result);
             told_cycles = settings.cycles;
         }
         for input in dbg.take_ui_input() {
@@ -1276,6 +1305,7 @@ fn main() -> Result<(), String> {
         // and mouse buttons the state was saved with: the keys held before it are
         // forgotten without a key-up reaching the restored machine.
         if std::mem::take(&mut state_loaded) {
+            agent_fast_forward.poll(&mut cpu, &mut pacer, std::time::Instant::now(), true);
             // The debug server's loads are in its journal already.
             if !debugger_loaded {
                 dbg.state_loaded_elsewhere(&cpu, "window");
@@ -1294,7 +1324,10 @@ fn main() -> Result<(), String> {
             stats.clock_moved(&cpu.bus);
             rewinder.clear();
             achievements.reset();
-            if strict_match_loaded {
+            let preserve_keyboard = strict_match_loaded;
+            #[cfg(feature = "mcp")]
+            let preserve_keyboard = preserve_keyboard || args.mcp;
+            if preserve_keyboard {
                 held.clear();
             } else {
                 release_input(&mut cpu, &mut held);
@@ -1349,6 +1382,7 @@ fn main() -> Result<(), String> {
         // the others' games would wait for it, or drop it.
         let ui_pauses = ui.pauses_machine() && cpu.bus.net.status().joined().is_none();
         let waiting = dbg.paused || ui_pauses || paused || rewinding.is_some();
+        agent_fast_forward.poll(&mut cpu, &mut pacer, std::time::Instant::now(), waiting || ui.is_open());
         // Pasted keys go once the keys held are up: the Ctrl and Shift of
         // Ctrl+Shift+V would change them.
         if !waiting && !ui.is_open() && held.is_empty() {
@@ -1566,6 +1600,8 @@ fn main() -> Result<(), String> {
                 match rewinder.step_back() {
                     Some((at, state)) => match savestate::machine::load(&mut cpu, &state) {
                         Ok(()) => {
+                            #[cfg(feature = "mcp")]
+                            dbg.invalidate_owned_after_load(&cpu);
                             if let Some(mode) = &mut det {
                                 mode.resync(&cpu);
                             }
@@ -1579,9 +1615,12 @@ fn main() -> Result<(), String> {
         }
 
         let exec_time = batch_start.elapsed();
-        let stalled = cpu.bus.clock.stalled - batch_stalled;
-        let idle = cpu.bus.clock.idle - batch_idle;
-        let executed = cpu.bus.clock.icount - batch_icount - idle - stalled;
+        let stalled = cpu.bus.clock.stalled.saturating_sub(batch_stalled);
+        let idle = cpu.bus.clock.idle.saturating_sub(batch_idle);
+        let executed = cpu.bus.clock.icount
+            .saturating_sub(batch_icount)
+            .saturating_sub(idle)
+            .saturating_sub(stalled);
         dbg.record_batch(
             executed,
             exec_time,
@@ -1993,6 +2032,7 @@ fn main() -> Result<(), String> {
         profile::set_host(Zone::FrameWait);
         pacer.wait_for_next_frame();
     }
+    agent_fast_forward.poll(&mut cpu, &mut pacer, std::time::Instant::now(), true);
     shut_down(
         &args,
         &mut dbg,
@@ -2063,6 +2103,8 @@ fn shut_down(
 
     // The journal ends, and the debug server's clients get what they
     // waited for.
+    #[cfg(feature = "mcp")]
+    dbg.release_owned_input(cpu);
     dbg.shutdown(cpu, shutdown, 0);
 
     // The page in the printer comes out, and the job's files are written.

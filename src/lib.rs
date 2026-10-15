@@ -25,6 +25,8 @@ pub mod command_com;
 pub mod config;
 pub mod config_ui;
 pub mod cpu;
+#[path = "debug/control.rs"]
+pub mod control;
 pub mod d86f;
 pub mod deterministic;
 pub mod disk;
