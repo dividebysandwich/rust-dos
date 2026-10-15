@@ -8,14 +8,13 @@
 use super::Model;
 use super::regs;
 
-/// The fields of hSync, vSync, videoDimensions and backPorch: the bits
-/// of the low field and of the high one (at bit 16).
+/// The fields of hSync, vSync and videoDimensions: the bits of the low
+/// field and of the high one (at bit 16).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VideoFields {
     pub hsync: (u32, u32),
     pub vsync: (u32, u32),
     pub dimensions: (u32, u32),
-    pub back_porch: (u32, u32),
 }
 
 /// A chip's constants.
@@ -59,7 +58,7 @@ pub const VOODOO1: Chip = Chip {
     clip_mask: 0x3FF,
     bilinear_mask: 0xF0,
     fogdelta_mask: 0xFF,
-    video: VideoFields { hsync: (8, 10), vsync: (12, 12), dimensions: (10, 10), back_porch: (8, 8) },
+    video: VideoFields { hsync: (8, 10), vsync: (12, 12), dimensions: (10, 10) },
     tmu_config: [0x11, 0xD1],
     fbi_init: [(1 << 4) | (0x10 << 6), (1 << 1) | (1 << 8) | (1 << 12) | (2 << 20), (1 << 6) | (0x100 << 23), (2 << 13) | (0xF << 17), 1, 0, 0, 0],
     pci_video_clock: true,
@@ -79,7 +78,7 @@ pub const VOODOO2: Chip = Chip {
     clip_mask: 0xFFF,
     bilinear_mask: 0xFF,
     fogdelta_mask: 0xFC,
-    video: VideoFields { hsync: (9, 11), vsync: (13, 13), dimensions: (11, 11), back_porch: (9, 9) },
+    video: VideoFields { hsync: (9, 11), vsync: (13, 13), dimensions: (11, 11) },
     // MAME's Voodoo Graphics value with bit 11, which the Voodoo2 adds.
     tmu_config: [0x811, 0x8D1],
     fbi_init: [0x0000_1C10, 0x0020_1102, 0x8000_0040, 0x001E_4040, 1, 0x0840_8000, 0, 0],

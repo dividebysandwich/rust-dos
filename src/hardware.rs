@@ -144,7 +144,7 @@ impl Hardware {
         let voodoo = settings.voodoo.board();
         if voodoo != self.voodoo {
             match voodoo {
-                Some(board) => cpu.bus.log_string(&format!("[CONFIG] A 3dfx Voodoo Graphics with {} MB", board.megabytes())),
+                Some(board) => cpu.bus.log_string(&format!("[CONFIG] A 3dfx {}", board.describe())),
                 None => cpu.bus.log_string("[CONFIG] No 3dfx card"),
             }
             cpu.bus.configure_voodoo(voodoo);

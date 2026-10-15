@@ -339,11 +339,8 @@ ivec3 fog(ivec3 c, int itera) {
         if (source == 0) {
             int w = wfloat(v_zw.y);
             int i = w >> 10;
-            int delta = u_fogdelta[i];
-            int deltaval = (delta & 0xFF) * ((w >> 2) & 0xFF);
-            if (bit(u_fog, 7) && (delta & 2) != 0) {
-                deltaval = -deltaval;
-            }
+            // The delta comes masked and signed (`DrawState::fogdelta`).
+            int deltaval = u_fogdelta[i] * ((w >> 2) & 0xFF);
             blend = u_fogblend[i] + (deltaval >> 10);
         } else if (source == 1) {
             blend = itera;

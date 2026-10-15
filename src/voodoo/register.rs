@@ -265,20 +265,10 @@ impl Voodoo {
                     self.cmdfifo.count_holes = self.reg[FBI_INIT7] & (1 << 10) == 0;
                 }
             }
-            CMDFIFO_BASE_ADDR | CMDFIFO_AMIN | CMDFIFO_AMAX => {
+            CMDFIFO_BASE_ADDR | CMDFIFO_RD_PTR | CMDFIFO_AMIN | CMDFIFO_AMAX | CMDFIFO_DEPTH | CMDFIFO_HOLES => {
                 if fbi {
                     self.reg[regnum] = data;
-                    self.cmdfifo_registers();
-                }
-            }
-            CMDFIFO_RD_PTR | CMDFIFO_DEPTH | CMDFIFO_HOLES => {
-                if fbi {
-                    self.reg[regnum] = data;
-                    match regnum {
-                        CMDFIFO_RD_PTR => self.cmdfifo.read = data,
-                        CMDFIFO_DEPTH => self.cmdfifo.depth = data & 0xF_FFFF,
-                        _ => self.cmdfifo.holes = data & 0xF_FFFF,
-                    }
+                    self.cmdfifo_set(regnum, data);
                 }
             }
             S_ARGB => self.setup_argb(data),
@@ -377,6 +367,8 @@ impl Voodoo {
             V_RETRACE => self.scanline(now) & 0x1FFF,
             HV_RETRACE => self.hv_retrace(now),
             CMDFIFO_RD_PTR => self.cmdfifo.read,
+            CMDFIFO_AMIN => self.cmdfifo.amin,
+            CMDFIFO_AMAX => self.cmdfifo.amax,
             CMDFIFO_DEPTH => self.cmdfifo.depth,
             CMDFIFO_HOLES => self.cmdfifo.holes,
             // The board's ID straps read 0 (86Box's reads).

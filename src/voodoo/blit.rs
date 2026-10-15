@@ -217,11 +217,19 @@ impl Voodoo {
                 }
             }
         }
-        self.mirror_fill(page * 2048 + 4 * column, (page + pages + 1) * 2048, color);
+        if pages == 0 || (column == 0 && last == 511) {
+            // One run of words: from the first column of the first page to
+            // the last column of the last.
+            self.mirror_fill(page * 2048 + 4 * column, (page + pages) * 2048 + 4 * (last + 1), color);
+        } else if let Some(mirror) = &mut self.mirror {
+            // The same columns of several pages: a snapshot takes them.
+            mirror.invalidate();
+        }
     }
 
     /// Tell the OpenGL renderer's recording about an SGRAM fill of the
-    /// words `first..end`: the rows of each buffer it covers, as fills.
+    /// words `first..end`: the rows of each buffer it covers, as fills, or
+    /// a snapshot where it covers part of a row.
     fn mirror_fill(&mut self, first: u32, end: u32, color: u16) {
         if self.mirror.is_none() {
             return;
@@ -240,8 +248,14 @@ impl Voodoo {
             if start >= stop {
                 continue;
             }
-            // Whole rows only; a row partly covered is left to a snapshot.
-            let (top, bottom) = ((start - base).div_ceil(row), (stop - base) / row);
+            if (start - base) % row != 0 || (stop - base) % row != 0 {
+                // A row partly covered: a snapshot takes the fill.
+                if let Some(mirror) = &mut self.mirror {
+                    mirror.invalidate();
+                }
+                return;
+            }
+            let (top, bottom) = ((start - base) / row, (stop - base) / row);
             if top < bottom {
                 fills.push((base, colour, top, bottom));
             }
@@ -281,6 +295,12 @@ impl Voodoo {
         let (dst_base, dst_stride) = self.blt_dst();
         let (fg, bg) = (self.reg[BLT_COLOR] as u16, (self.reg[BLT_COLOR] >> 16) as u16);
         let format = (command >> 3) & 7;
+        if format <= 1 {
+            // Monochrome data has its leftmost pixel in each byte's top
+            // bit (the spec's table of bit positions): reverse each byte so
+            // the pixels come out from bit 0 up.
+            data = data.reverse_bits().swap_bytes();
+        }
         let lanes = (command >> 6) & 3;
         let mut bits = 32;
         while bits > 0 && self.blt.column <= size_x && self.blt.active {
@@ -342,10 +362,14 @@ impl Voodoo {
                 if self.blt.rows < 0 {
                     self.blt.active = false;
                 }
-                // A row starts on a new word.
-                if format >= 2 {
+                // A row starts on a new word, or with byte-packed
+                // monochrome data (format 1) on a new byte.
+                if format != 1 {
                     break;
                 }
+                let skip = bits % 8;
+                data >>= skip;
+                bits -= skip;
             }
         }
         self.display_dirty = true;
@@ -409,6 +433,26 @@ mod tests {
         let px = |x: usize, y: usize| v.fbi.ram.get(y * 1024 + x);
         assert_eq!([px(10, 1), px(11, 1), px(12, 1), px(13, 1)], [0x1111, 0x2222, 0x3333, 0]);
         assert_eq!([px(10, 2), px(11, 2), px(12, 2)], [0x4444, 0x5555, 0x6666]);
+    }
+
+    #[test]
+    fn monochrome_rows_start_on_a_new_word_or_byte() {
+        // The leftmost pixel is each byte's top bit.
+        for (format, second_row) in [(0u32, 0x0000_0080), (1, 0x0000_8000)] {
+            let mut v = card();
+            write(&mut v, BLT_XY_STRIDES, 2048 << 16);
+            write(&mut v, BLT_COLOR, 0x0000_FFFF);
+            // Two pixels wide, two rows: the first row's set, then the
+            // second's first pixel set where its row starts.
+            write(&mut v, BLT_SIZE, 1 << 16 | 1);
+            write(&mut v, BLT_COMMAND, 1 << 31 | format << 3 | CPU_TO_SCREEN);
+            if format == 0 {
+                write(&mut v, BLT_DATA, 0xC0);
+            }
+            write(&mut v, BLT_DATA, if format == 0 { second_row } else { second_row | 0xC0 });
+            let px = |x: usize, y: usize| v.fbi.ram.get(y * 1024 + x);
+            assert_eq!([px(0, 0), px(1, 0), px(0, 1), px(1, 1)], [0xFFFF, 0xFFFF, 0xFFFF, 0], "format {format}");
+        }
     }
 
     #[test]

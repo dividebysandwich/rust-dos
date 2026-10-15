@@ -61,10 +61,11 @@ impl CmdFifo {
                 self.depth += self.amax.wrapping_sub(self.amin) / 4;
                 self.amin = self.amax;
             }
-        } else {
-            self.holes += (addr - self.amax) / 4 - 1;
+        } else if addr > self.amax {
+            self.holes += ((addr - self.amax) / 4).saturating_sub(1);
             self.amax = addr;
         }
+        // The highest word written again changes nothing.
     }
 }
 
@@ -99,7 +100,7 @@ impl Voodoo {
     /// Whether the command FIFO takes the writes to the upper half of the
     /// register space.
     pub(crate) fn cmdfifo_on(&self) -> bool {
-        self.v2() && self.reg[FBI_INIT7] & (1 << 8) != 0
+        self.v2() && self.cmdfifo.enabled
     }
 
     /// A write to the command FIFO at dword `index` of the window: the
@@ -194,11 +195,16 @@ impl Voodoo {
     /// A register written by a packet: `target` is the register with the
     /// chip select bits above it, as in the register space.
     fn cmdfifo_register(&mut self, target: u32, data: u32, now: Now, effect: &mut Effect) {
+        let regnum = (target & 0xFF) as usize;
+        // The read-only and reserved registers stay as they are.
+        if self.chip.access[regnum] & WRITE == 0 {
+            return;
+        }
         let mut chips = (target >> 8) & 0xF;
         if chips == 0 {
             chips = 0xF;
         }
-        self.register_to((target & 0xFF) as usize, chips & self.chipmask, data, now, effect);
+        self.register_to(regnum, chips & self.chipmask, data, now, effect);
     }
 
     /// Packet type 0: a NOP or a jump (JSR, RET and the AGP jump are a
@@ -333,13 +339,22 @@ impl Voodoo {
         }
     }
 
-    /// cmdFifoBaseAddr, cmdFifoAMin or cmdFifoAMax written (`reg_cmdfifo_w`).
-    pub(crate) fn cmdfifo_registers(&mut self) {
-        let base = self.reg[CMDFIFO_BASE_ADDR];
-        self.cmdfifo.base = (base & 0x3FF) << 12;
-        self.cmdfifo.end = (((base >> 16) & 0x3FF) + 1) << 12;
-        self.cmdfifo.amin = self.reg[CMDFIFO_AMIN];
-        self.cmdfifo.amax = self.reg[CMDFIFO_AMAX];
+    /// Command FIFO register `regnum` written (`reg_cmdfifo_w`): each
+    /// sets its own part of where the FIFO is.
+    pub(crate) fn cmdfifo_set(&mut self, regnum: usize, data: u32) {
+        let f = &mut self.cmdfifo;
+        match regnum {
+            CMDFIFO_BASE_ADDR => {
+                f.base = (data & 0x3FF) << 12;
+                f.end = (((data >> 16) & 0x3FF) + 1) << 12;
+            }
+            CMDFIFO_RD_PTR => f.read = data,
+            CMDFIFO_AMIN => f.amin = data,
+            CMDFIFO_AMAX => f.amax = data,
+            CMDFIFO_DEPTH => f.depth = data & 0xF_FFFF,
+            CMDFIFO_HOLES => f.holes = data & 0xF_FFFF,
+            _ => {}
+        }
     }
 }
 
@@ -454,5 +469,25 @@ mod tests {
         // Back to the start of the ring.
         f.count(0x1000);
         assert_eq!((f.depth, f.holes, f.amin), (4, 0, 0x1000));
+    }
+
+    #[test]
+    fn the_last_word_written_again_changes_nothing() {
+        let mut f = CmdFifo { count_holes: true, base: 0x1000, end: 0x2000, amin: 0xFFC, amax: 0xFFC, ..Default::default() };
+        f.count(0x1000);
+        f.count(0x1008);
+        f.count(0x1008);
+        assert_eq!((f.depth, f.holes, f.amax), (1, 1, 0x1008));
+        f.count(0x1004);
+        assert_eq!((f.depth, f.holes), (3, 0));
+    }
+
+    #[test]
+    fn the_pointer_registers_set_their_own_parts() {
+        let mut v = card();
+        v.cmdfifo.amax = 0x100010;
+        v.write((CMDFIFO_AMIN as u32) << 2, 0x100008, !0, Now::default());
+        assert_eq!((v.cmdfifo.amin, v.cmdfifo.amax), (0x100008, 0x100010));
+        assert_eq!(v.read((CMDFIFO_AMAX as u32) << 2, Now::default()), 0x100010);
     }
 }

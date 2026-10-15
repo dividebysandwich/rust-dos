@@ -1161,9 +1161,8 @@ impl Voodoo {
     /// hvRetrace: the line in bits 12:0 and the pixel in it in bits 26:16.
     pub(crate) fn hv_retrace(&self, now: Now) -> u32 {
         let line = self.timing.line_ns.max(1) as u64;
-        let at = now.ns % self.timing.frame_ns().max(1);
-        let hpos = (at % line) * self.htotal() as u64 / line;
-        ((at / line) as u32 & 0x1FFF) | (hpos as u32 & 0x7FF) << 16
+        let hpos = (now.ns % self.timing.frame_ns().max(1)) % line * self.htotal() as u64 / line;
+        (self.scanline(now) & 0x1FFF) | (hpos as u32 & 0x7FF) << 16
     }
 
     /// The number of retraces that began up to `ns`.

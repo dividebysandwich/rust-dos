@@ -72,7 +72,9 @@ pub struct DrawState {
     /// Whether there is an auxiliary (depth or alpha) buffer.
     pub aux: bool,
     pub fogblend: [u8; 64],
-    pub fogdelta: [u8; 64],
+    /// The fog table deltas as the pipeline uses them: the chip's bits,
+    /// negated where fogMode bit 7 and the delta's bit 1 say so.
+    pub fogdelta: [i16; 64],
     /// TMU 0's configuration instead of its texels (`RasterState`).
     pub send_config: Option<u32>,
     pub tmu: [Option<TexUnit>; 2],
@@ -563,7 +565,10 @@ fn draw_state(st: &RasterState, stipple: u32, tmu: [Option<TexUnit>; 2]) -> Draw
         clip,
         aux: st.aux.is_some(),
         fogblend: st.fogblend,
-        fogdelta: st.fogdelta.map(|d| d & st.fogdelta_mask as u8),
+        fogdelta: st.fogdelta.map(|d| {
+            let delta = (d as i32 & st.fogdelta_mask) as i16;
+            if st.fog_mode & (1 << 7) != 0 && d & 2 != 0 { -delta } else { delta }
+        }),
         send_config: st.send_config,
         tmu,
     }
