@@ -37,7 +37,7 @@ pub(super) fn parse(request: &CallToolRequestParams) -> Result<GuestInput, Error
         return Err(invalid());
     }
     let args = Value::Object(args);
-    if request.name == "dos_type" {
+    if request.name == "type" {
         let args: TextArgs = serde_json::from_value(args).map_err(|_| invalid())?;
         if args.text.len() > 4096
             || args.delay_ms.is_some_and(|delay| delay > 5000)
@@ -157,9 +157,9 @@ pub(super) fn value(outcome: InputOutcome) -> Value {
 
 pub(super) fn tools() -> Vec<Tool> {
     vec![
-        Tool::new("dos_operation", "Observe input delivery and owned hold lifetime without sending input. Use the returned instance and operation IDs to inspect accepted input before continuing; queued input is not yet delivered.", json!({"type":"object","additionalProperties":false,"properties":{"instance":{"type":"string","pattern":"^[0-9a-f]{16}$"},"op":{"type":"integer","minimum":1}},"required":["instance","op"]}).as_object().unwrap().clone()),
-        Tool::new("dos_key", "Send a canonical DOS key; default action is press. Down retains a key and modifiers with a renewable lease of at most 30 seconds. Use the returned opaque handle to renew or release explicitly. Input may run commands or write mounted drives. Acceptance is not delivery; inspect dos_operation. Do not replay input after uncertain acceptance.", json!({"type":"object","additionalProperties":false,"properties":{"action":{"type":"string","enum":["press","down","up","renew"]},"key":{"type":"string"},"mods":{"type":"array","items":{"type":"string"},"maxItems":4,"uniqueItems":true},"hold_ms":{"type":"integer","minimum":1,"maximum":5000},"lease_ms":{"type":"integer","minimum":1,"maximum":30000},"handle":{"type":"string","maxLength":50}}}).as_object().unwrap().clone()),
-        Tool::new("dos_type", "Type supported text into the actual DOS guest, at most 4096 bytes. Input may run commands or write mounted drives. Acceptance is not delivery; inspect dos_operation before continuing. Do not replay text after uncertain acceptance.", json!({"type":"object","additionalProperties":false,"properties":{"text":{"type":"string","maxLength":4096},"delay_ms":{"type":"integer","minimum":0,"maximum":5000}},"required":["text"]}).as_object().unwrap().clone()),
+        Tool::new("operation", "Observe input delivery and owned hold lifetime without sending input. Use the returned instance and operation IDs to inspect accepted input before continuing; queued input is not yet delivered.", json!({"type":"object","additionalProperties":false,"properties":{"instance":{"type":"string","pattern":"^[0-9a-f]{16}$"},"op":{"type":"integer","minimum":1}},"required":["instance","op"]}).as_object().unwrap().clone()),
+        Tool::new("key", "Send a canonical DOS key; default action is press. Down retains a key and modifiers with a renewable lease of at most 30 seconds. Use the returned opaque handle to renew or release explicitly. Input may run commands or write mounted drives. Acceptance is not delivery; inspect operation. Do not replay input after uncertain acceptance.", json!({"type":"object","additionalProperties":false,"properties":{"action":{"type":"string","enum":["press","down","up","renew"]},"key":{"type":"string"},"mods":{"type":"array","items":{"type":"string"},"maxItems":4,"uniqueItems":true},"hold_ms":{"type":"integer","minimum":1,"maximum":5000},"lease_ms":{"type":"integer","minimum":1,"maximum":30000},"handle":{"type":"string","maxLength":50}}}).as_object().unwrap().clone()),
+        Tool::new("type", "Type supported text into the actual DOS guest, at most 4096 bytes. Input may run commands or write mounted drives. Acceptance is not delivery; inspect operation before continuing. Do not replay text after uncertain acceptance.", json!({"type":"object","additionalProperties":false,"properties":{"text":{"type":"string","maxLength":4096},"delay_ms":{"type":"integer","minimum":0,"maximum":5000}},"required":["text"]}).as_object().unwrap().clone()),
     ]
 }
 

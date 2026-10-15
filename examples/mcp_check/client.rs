@@ -121,14 +121,7 @@ pub(super) fn verify_records(root: &Path, program: &str) -> io::Result<usize> {
             require(
                 matches!(
                     call["tool"].as_str(),
-                    Some(
-                        "dos_capture"
-                            | "dos_status"
-                            | "dos_key"
-                            | "dos_type"
-                            | "dos_mouse"
-                            | "dos_operation"
-                    )
+                    Some("capture" | "status" | "key" | "type" | "mouse" | "operation")
                 ),
                 "unexpected Codex tool",
             )?;
@@ -141,7 +134,7 @@ pub(super) fn verify_records(root: &Path, program: &str) -> io::Result<usize> {
                 "Codex response order or identity changed",
             )?;
             previous_request = request;
-            if call["tool"] == "dos_capture" {
+            if call["tool"] == "capture" {
                 capture(&call)?;
             }
             calls.push(call);
@@ -166,7 +159,7 @@ pub(super) fn verify_records(root: &Path, program: &str) -> io::Result<usize> {
 
     let down = calls
         .iter()
-        .position(|call| call["tool"] == "dos_mouse" && call["arguments"]["action"] == "down")
+        .position(|call| call["tool"] == "mouse" && call["arguments"]["action"] == "down")
         .ok_or_else(|| io::Error::other("Codex persistent down missing"))?;
     let down_result = result(&calls[down])?;
     let handle = down_result["hold"]["handle"]
@@ -176,7 +169,7 @@ pub(super) fn verify_records(root: &Path, program: &str) -> io::Result<usize> {
     let instance = &down_result["instance"];
     let before = calls[..down]
         .iter()
-        .rposition(|call| call["tool"] == "dos_capture")
+        .rposition(|call| call["tool"] == "capture")
         .ok_or_else(|| io::Error::other("Codex pre-down observation missing"))?;
     let (before_meta, before_pixels) = capture(&calls[before])?;
     require(
@@ -193,7 +186,7 @@ pub(super) fn verify_records(root: &Path, program: &str) -> io::Result<usize> {
         |start: usize, end: usize, operation: &Value, held: Option<&str>| -> io::Result<()> {
             require(
                 calls[start..end].iter().any(|call| {
-                    call["tool"] == "dos_operation"
+                    call["tool"] == "operation"
                         && call["arguments"]["instance"] == *instance
                         && call["arguments"]["op"] == operation["op"]
                         && result(call).is_ok_and(|observed| {
@@ -214,7 +207,7 @@ pub(super) fn verify_records(root: &Path, program: &str) -> io::Result<usize> {
             .enumerate()
             .skip(start)
             .find_map(|(index, call)| {
-                (call["tool"] == "dos_mouse"
+                (call["tool"] == "mouse"
                     && call["arguments"]["action"] == action
                     && call["arguments"]["handle"] == handle)
                     .then_some(index)
@@ -228,7 +221,7 @@ pub(super) fn verify_records(root: &Path, program: &str) -> io::Result<usize> {
     require(
         calls[down + 1..renew]
             .iter()
-            .any(|call| call["tool"] == "dos_capture"),
+            .any(|call| call["tool"] == "capture"),
         "Codex did not observe while held",
     )?;
     let renewal = result(&calls[renew])?;
@@ -240,7 +233,7 @@ pub(super) fn verify_records(root: &Path, program: &str) -> io::Result<usize> {
     )?;
     let latest = calls[..movement]
         .iter()
-        .rposition(|call| call["tool"] == "dos_capture")
+        .rposition(|call| call["tool"] == "capture")
         .ok_or_else(|| io::Error::other("Codex motion observation missing"))?;
     let (motion_meta, _) = capture(&calls[latest])?;
     require(
@@ -251,7 +244,7 @@ pub(super) fn verify_records(root: &Path, program: &str) -> io::Result<usize> {
     require(
         calls[movement + 1..up]
             .iter()
-            .any(|call| call["tool"] == "dos_capture"),
+            .any(|call| call["tool"] == "capture"),
         "Codex did not observe held drag effect",
     )?;
     let released = result(&calls[up])?;
@@ -262,7 +255,7 @@ pub(super) fn verify_records(root: &Path, program: &str) -> io::Result<usize> {
     delivery(up + 1, calls.len(), released, Some("released"))?;
     let final_index = calls
         .iter()
-        .rposition(|call| call["tool"] == "dos_capture")
+        .rposition(|call| call["tool"] == "capture")
         .ok_or_else(|| io::Error::other("Codex final capture missing"))?;
     require(final_index > up, "Codex post-release observation missing")?;
     let (final_meta, final_pixels) = capture(&calls[final_index])?;
@@ -424,7 +417,7 @@ pub(super) async fn run_client(
         "Type cd APPS\\GRAFX2\\BIN followed by newline, query delivery, then GRAFX2.EXE /mode 320x200 followed by newline and query delivery. Capture/read status until the actual painting canvas is ready, at most40 captures and120seconds. Screenshots can be doubled640x400. Capture the black canvas. Use picture pixels (140,110) for down and (260,110) for motion. After release move the cursor away to(630,390) using a fresh picture and capture the painted line. Do not save files."
     };
     let prompt = format!(
-        "Operate this actual DOS guest only through rust_dos MCP tools, no shell/files/other services. Finish within150seconds, no indefinite retries. {setup} For all mouse movement/down use input field picture equal to the exact capture.mouse_picture object, not an input field named mouse_picture. Perform persistent left-button down with lease_ms30000, query dos_operation until delivered, retain the actual returned handle. Capture separately while held, renew that handle to30000, then handle-qualified move with a fresh picture to the specified motion point. Query delivered, capture held drag, explicitly up the samehandle, query delivered and capture released. Finish the setup's post-release action, read status and report only observed effects/limits. Stop on rejected/uncertain input without replay. Never invent pictures/handles/results."
+        "Operate this actual DOS guest only through rust_dos MCP tools, no shell/files/other services. Finish within150seconds, no indefinite retries. {setup} For all mouse movement/down use input field picture equal to the exact capture.mouse_picture object, not an input field named mouse_picture. Perform persistent left-button down with lease_ms30000, query operation until delivered, retain the actual returned handle. Capture separately while held, renew that handle to30000, then handle-qualified move with a fresh picture to the specified motion point. Query delivered, capture held drag, explicitly up the samehandle, query delivered and capture released. Finish the setup's post-release action, read status and report only observed effects/limits. Stop on rejected/uncertain input without replay. Never invent pictures/handles/results."
     );
     std::fs::write(root.join("prompt.txt"), &prompt)?;
     let args = vec![
@@ -590,7 +583,7 @@ pub(super) async fn benchmark(url: &str, root: &Path) -> io::Result<()> {
         let start = Instant::now();
         let capture = tokio::time::timeout(
             Duration::from_secs(10),
-            client.call_tool(CallToolRequestParams::new("dos_capture")),
+            client.call_tool(CallToolRequestParams::new("capture")),
         )
         .await
         .map_err(io::Error::other)?
@@ -617,7 +610,7 @@ pub(super) async fn benchmark(url: &str, root: &Path) -> io::Result<()> {
             captures.push(elapsed);
         }
         if round % 2 == 0 {
-            let mut request = CallToolRequestParams::new("dos_key");
+            let mut request = CallToolRequestParams::new("key");
             request.arguments = Some(
                 serde_json::json!({"key":"shift","hold_ms":20})
                     .as_object()
@@ -642,7 +635,7 @@ pub(super) async fn benchmark(url: &str, root: &Path) -> io::Result<()> {
                 root.join(format!("input-{round}-accepted.json")),
                 serde_json::to_vec(&accepted).map_err(io::Error::other)?,
             )?;
-            let mut query = CallToolRequestParams::new("dos_operation");
+            let mut query = CallToolRequestParams::new("operation");
             query.arguments = Some(
                 serde_json::json!({"instance":value["instance"],"op":value["op"]})
                     .as_object()
@@ -679,7 +672,7 @@ pub(super) async fn benchmark(url: &str, root: &Path) -> io::Result<()> {
         }
         let status = tokio::time::timeout(
             Duration::from_secs(10),
-            client.call_tool(CallToolRequestParams::new("dos_status")),
+            client.call_tool(CallToolRequestParams::new("status")),
         )
         .await
         .map_err(io::Error::other)?

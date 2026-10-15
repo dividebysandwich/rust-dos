@@ -248,7 +248,7 @@ mod tests {
     }
 
     fn decode(args: Value) -> Result<GuestInput, ErrorData> {
-        let mut request = CallToolRequestParams::new("dos_mouse");
+        let mut request = CallToolRequestParams::new("mouse");
         request.arguments = Some(args.as_object().unwrap().clone());
         parse(&request)
     }
@@ -349,8 +349,8 @@ mod tests {
 
 pub(super) fn tool() -> Tool {
     Tool::new(
-        "dos_mouse",
-        "Move using capture picture pixels or guest-relative deltas; default action is move. Click, drag, or retain a button with a renewable lease (maximum 30 seconds). Use the capture\'s mouse_picture; recapture after mode/replacement changes. Movement during a hold requires its opaque handle. Finite paths use one coordinate form, at most 256 points and 5000 ms total. Input may activate controls or write mounted drives. Acceptance is not delivery. Do not replay uncertain acceptance; inspect dos_operation.",
+        "mouse",
+        "Move using capture picture pixels or guest-relative deltas; default action is move. Click, drag, or retain a button with a renewable lease (maximum 30 seconds). Use the capture\'s mouse_picture; recapture after mode/replacement changes. Movement during a hold requires its opaque handle. Finite paths use one coordinate form, at most 256 points and 5000 ms total. Input may activate controls or write mounted drives. Acceptance is not delivery. Do not replay uncertain acceptance; inspect operation.",
         super::schemas::mouse_input()
             .as_object()
             .expect("mouse schema object")

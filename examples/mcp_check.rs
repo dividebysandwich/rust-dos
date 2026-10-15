@@ -1121,7 +1121,7 @@ fn verify_docs(root: &std::path::Path) -> io::Result<()> {
                 "tool_timeout_sec=15",
                 "picture",
                 "mouse_picture",
-                "dos_operation",
+                "operation",
                 "stale_picture",
                 "30-second",
                 "256",

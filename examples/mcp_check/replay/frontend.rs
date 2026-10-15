@@ -167,7 +167,7 @@ async fn mouse_call(
     label: &str,
     args: Value,
 ) -> io::Result<Value> {
-    let mut request = CallToolRequestParams::new("dos_mouse");
+    let mut request = CallToolRequestParams::new("mouse");
     request.arguments = Some(
         args.as_object()
             .ok_or_else(|| io::Error::other("mouse arguments missing"))?
@@ -197,7 +197,7 @@ async fn mouse_hold(
     label: &str,
 ) -> io::Result<Value> {
     let capture = client
-        .call_tool(CallToolRequestParams::new("dos_capture"))
+        .call_tool(CallToolRequestParams::new("capture"))
         .await
         .map_err(io::Error::other)?;
     require(
@@ -232,7 +232,7 @@ async fn mouse_restored(
     held: &Value,
     label: &str,
 ) -> io::Result<()> {
-    let mut query = CallToolRequestParams::new("dos_operation");
+    let mut query = CallToolRequestParams::new("operation");
     query.arguments = Some(
         json!({"instance":held["instance"],"op":held["op"]})
             .as_object()
@@ -263,7 +263,7 @@ async fn mouse_restored(
         if action == "renew" {
             args["lease_ms"] = 30000.into();
         }
-        let mut request = CallToolRequestParams::new("dos_mouse");
+        let mut request = CallToolRequestParams::new("mouse");
         request.arguments = Some(args.as_object().unwrap().clone());
         let refused = client.call_tool(request).await.map_err(io::Error::other)?;
         require(
@@ -322,7 +322,7 @@ pub(super) async fn journey(
     let result = tokio::time::timeout(Duration::from_secs(45), async {
         settings_transition(provider, &client, display, &window).await?;
         let mouse = mouse_hold(provider, &client, "frontend-mouse-down").await?;
-        let mut request = CallToolRequestParams::new("dos_key");
+        let mut request = CallToolRequestParams::new("key");
         request.arguments = Some(
             json!({"action":"down","key":"shift","lease_ms":30000})
                 .as_object()
@@ -347,7 +347,7 @@ pub(super) async fn journey(
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         for key in ["f12", "s"] {
-            let mut request = CallToolRequestParams::new("dos_key");
+            let mut request = CallToolRequestParams::new("key");
             request.arguments = Some(json!({"key":key,"mods":["ctrl","shift"],"hold_ms":1}).as_object().unwrap().clone());
             let accepted = client.call_tool(request).await.map_err(io::Error::other)?;
             require(accepted.is_error != Some(true), "native guest shortcut rejected")?;
@@ -379,7 +379,7 @@ pub(super) async fn journey(
             )?;
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        let mut query = CallToolRequestParams::new("dos_operation");
+        let mut query = CallToolRequestParams::new("operation");
         query.arguments = Some(
             json!({"instance":down["instance"],"op":down["op"]})
                 .as_object()
@@ -403,7 +403,7 @@ pub(super) async fn journey(
             "old native cleanup released Shift into the rewound guest",
         )?;
         mouse_restored(provider, &client, &mouse, "frontend-mouse-rewind").await?;
-        let mut up = CallToolRequestParams::new("dos_key");
+        let mut up = CallToolRequestParams::new("key");
         up.arguments = Some(
             json!({"action":"up","handle":down["hold"]["handle"]})
                 .as_object()
@@ -493,7 +493,7 @@ async fn queued_drag_restore(
         "queued drag setup did not release the live button",
     )?;
     let capture = client
-        .call_tool(CallToolRequestParams::new("dos_capture"))
+        .call_tool(CallToolRequestParams::new("capture"))
         .await
         .map_err(io::Error::other)?;
     require(
@@ -649,7 +649,7 @@ async fn settings_transition(
 ) -> io::Result<()> {
     let held_mouse = mouse_hold(provider, client, "frontend-settings-mouse-held").await?;
     let capture = client
-        .call_tool(CallToolRequestParams::new("dos_capture"))
+        .call_tool(CallToolRequestParams::new("capture"))
         .await
         .map_err(io::Error::other)?;
     require(
@@ -667,10 +667,10 @@ async fn settings_transition(
     )?;
     let mut operations = Vec::new();
     for (tool, args) in [
-        ("dos_key", json!({"key":"a"})),
-        ("dos_type", json!({"text":"dir"})),
+        ("key", json!({"key":"a"})),
+        ("type", json!({"text":"dir"})),
         (
-            "dos_mouse",
+            "mouse",
             json!({"action":"down","picture":picture,"button":"right","lease_ms":30000}),
         ),
     ] {
@@ -697,7 +697,7 @@ async fn settings_transition(
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     for (index, operation) in operations.iter().enumerate() {
-        let mut request = CallToolRequestParams::new("dos_operation");
+        let mut request = CallToolRequestParams::new("operation");
         request.arguments = Some(
             json!({"instance":operation["instance"],"op":operation["op"]})
                 .as_object()
@@ -727,7 +727,7 @@ async fn settings_transition(
         mouse_buttons(provider, "frontend-settings-mouse-released")? == 0,
         "settings diversion must release only the delivered native mouse claim",
     )?;
-    let mut query = CallToolRequestParams::new("dos_operation");
+    let mut query = CallToolRequestParams::new("operation");
     query.arguments = Some(
         json!({"instance":held_mouse["instance"],"op":held_mouse["op"]})
             .as_object()
@@ -803,7 +803,7 @@ async fn slot_load(
         json!({"action":"renew","handle":mouse["hold"]["handle"],"lease_ms":10}),
     )
     .await?;
-    let mut renew = CallToolRequestParams::new("dos_key");
+    let mut renew = CallToolRequestParams::new("key");
     renew.arguments = Some(
         json!({"action":"renew","handle":down["hold"]["handle"],"lease_ms":10})
             .as_object()
@@ -836,7 +836,7 @@ async fn slot_load(
         "old hold expiry released Shift into the frontend-loaded guest",
     )?;
     mouse_restored(provider, client, mouse, "frontend-mouse-load").await?;
-    let mut query = CallToolRequestParams::new("dos_operation");
+    let mut query = CallToolRequestParams::new("operation");
     query.arguments = Some(
         json!({"instance":down["instance"],"op":down["op"]})
             .as_object()
@@ -861,7 +861,7 @@ async fn slot_load(
         json!({"action":"up","handle":down["hold"]["handle"]}),
         json!({"action":"renew","handle":down["hold"]["handle"],"lease_ms":30000}),
     ] {
-        let mut request = CallToolRequestParams::new("dos_key");
+        let mut request = CallToolRequestParams::new("key");
         request.arguments = Some(args.as_object().unwrap().clone());
         require(
             client

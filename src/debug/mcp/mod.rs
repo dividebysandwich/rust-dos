@@ -66,7 +66,7 @@ impl ServerHandler for NativeObservations {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
-        if request.name == "dos_operation" {
+        if request.name == "operation" {
             use rust_dos::control::OperationQuery;
             let id = keyboard::operation(&request)
                 .inspect_err(|_| self.control.shared.metrics.rejected())?;
@@ -91,9 +91,9 @@ impl ServerHandler for NativeObservations {
             };
             return Ok(result.into());
         }
-        if matches!(request.name.as_ref(), "dos_key" | "dos_type" | "dos_mouse") {
+        if matches!(request.name.as_ref(), "key" | "type" | "mouse") {
             use rust_dos::control::GuestInputService;
-            let decoded = if request.name == "dos_mouse" {
+            let decoded = if request.name == "mouse" {
                 mouse::parse(&request)
             } else {
                 keyboard::parse(&request)
@@ -121,8 +121,8 @@ impl ServerHandler for NativeObservations {
             return Ok(result.into());
         }
         let capture_requested = match request.name.as_ref() {
-            "dos_status" => false,
-            "dos_capture" => true,
+            "status" => false,
+            "capture" => true,
             _ => {
                 self.control.shared.metrics.rejected();
                 return Err(ErrorData::invalid_params("unknown native tool", None));
@@ -363,7 +363,7 @@ mod tests {
                 RequestContext::new(rmcp::model::RequestId::Number(1), server.peer().clone());
             context.extensions.insert(parts);
             let response = handler
-                .call_tool(CallToolRequestParams::new("dos_capture"), context)
+                .call_tool(CallToolRequestParams::new("capture"), context)
                 .await
                 .unwrap();
             let CallToolResponse::Complete(result) = response else {
@@ -530,12 +530,12 @@ fn tools() -> Vec<Tool> {
         .clone();
     let mut tools = vec![
         Tool::new(
-            "dos_status",
+            "status",
             "Observe the running DOS machine and driver state",
             schema.clone(),
         ),
         Tool::new(
-            "dos_capture",
+            "capture",
             "Capture the actual DOS picture as a PNG image",
             schema,
         ),
@@ -549,10 +549,7 @@ fn tools() -> Vec<Tool> {
                 .expect("output schema object")
                 .clone(),
         ));
-        let read_only = matches!(
-            tool.name.as_ref(),
-            "dos_status" | "dos_capture" | "dos_operation"
-        );
+        let read_only = matches!(tool.name.as_ref(), "status" | "capture" | "operation");
         tool.annotations = Some(ToolAnnotations::from_raw(
             None,
             Some(read_only),

@@ -1,8 +1,8 @@
 # Native MCP build and verification
 
-Native MCP is an optional compiled component. Build with `cargo check --locked --features mcp`; ordinary builds exclude the rmcp dependency. The selected SDK uses server-only features. Start the development endpoint with `cargo run --locked --features mcp -- --no-config --debug-server 127.0.0.1:0 --mcp`, then connect to `/mcp` at the printed listener address. The build feature alone does not start a listener. The current tools are `dos_status`, `dos_capture`, `dos_key`, `dos_type`, `dos_mouse` and `dos_operation`.
+Native MCP is an optional compiled component. Build with `cargo check --locked --features mcp`; ordinary builds exclude the rmcp dependency. The selected SDK uses server-only features. Start the development endpoint with `cargo run --locked --features mcp -- --no-config --debug-server 127.0.0.1:0 --mcp`, then connect to `/mcp` at the printed listener address. The build feature alone does not start a listener. The current tools are `status`, `capture`, `key`, `type`, `mouse` and `operation`.
 
-`dos_mouse` accepts absolute integer picture pixels or guest-relative deltas. Pass the capture's `mouse_picture` to move, click, press a button, or drag; stale pictures reject with `stale_picture` and `capture_again` recovery. A button down requires a lease of at most 30 seconds. Retain its opaque handle to move during the hold, renew its lease, or release it. A finite drag accepts at most 256 points using one coordinate form and at most 5000 ms total delay. Input acceptance can precede delivery: query `dos_operation` until `delivery` is `delivered` before depending on completion. Do not replay input after uncertain acceptance.
+`mouse` accepts absolute integer picture pixels or guest-relative deltas. Pass the capture's `mouse_picture` to move, click, press a button, or drag; stale pictures reject with `stale_picture` and `capture_again` recovery. A button down requires a lease of at most 30 seconds. Retain its opaque handle to move during the hold, renew its lease, or release it. A finite drag accepts at most 256 points using one coordinate form and at most 5000 ms total delay. Input acceptance can precede delivery: query `operation` until `delivery` is `delivered` before depending on completion. Do not replay input after uncertain acceptance.
 
 Tool annotations identify observations as read-only and guest input as potentially destructive and non-idempotent: keys and mouse events can modify files in mounted directories. Every tool advertises a JSON Schema 2020-12 output contract. Execution failures provide an `error` object with `code`, `message` and `recovery`, alongside a serialized JSON text result. Malformed arguments are protocol errors. The test-only JSON Schema validator checks real SDK results and uses no network or file resolution features. This local endpoint uses no credentials; existing local access guards still apply.
 
@@ -46,7 +46,7 @@ With `--mcp`, stderr diagnostics contain Rust-DOS observation context only. The 
 
 `coverage` verifies the local source-bound LLVM receipt independently of the full gate. The receipt and report remain local and uncommitted. Run the full `phase 2` gate without inherited coverage compiler wrappers: nightly branch-instrumentation flags cannot be passed to the scoped stable compiler checks. Instrumentation of the helper is separate from those compatibility checks.
 
-Native observation catalogs retain each protocol's actual discovery response as well as captures and status. Validation requires exactly `dos_status`, `dos_capture`, `dos_key`, `dos_type`, `dos_mouse` and `dos_operation`, with each input schema matching the independent contract. Observation tools retain empty object inputs; all tools reject additional properties. The metadata challenge alters these acquired schemas and tool names to verify that incompatible discovery is rejected; it does not generate replacement discovery fixtures.
+Native observation catalogs retain each protocol's actual discovery response as well as captures and status. Validation requires exactly `status`, `capture`, `key`, `type`, `mouse` and `operation`, with each input schema matching the independent contract. Observation tools retain empty object inputs; all tools reject additional properties. The metadata challenge alters these acquired schemas and tool names to verify that incompatible discovery is rejected; it does not generate replacement discovery fixtures.
 
 Acquisition-only tooling coverage must preserve the accepted 612/914 branch baseline (approximately 66.96%) across the measured helper scope, with actual nonempty execution of every required helper file. This proportional tooling policy is separate from the 95% critical runtime threshold; a nonzero helper hit count alone cannot close the gate. Native status observations also retain paused HTTP status oracles for program, instruction count and driver mouse state.
 
@@ -87,14 +87,14 @@ overwrite or delete guest files. Use an isolated test guest for automated operat
 
 ## Observe, act and hand off
 
-Read `dos_status` and `dos_capture` before acting. For mouse input, set the argument
+Read `status` and `capture` before acting. For mouse input, set the argument
 named `picture` to the returned `mouse_picture` object. Use integer screenshot pixels,
 including doubled pictures, or one relative delta pair; do not convert to virtual DOS
 driver coordinates. Recapture on `stale_picture`. The image and debugger sequence fields
 do not promise an atomic render epoch.
 
 Acceptance and delivery are separate. Keep returned `instance`/`op` and query
-`dos_operation` until delivery is `delivered`; unknown acceptance ends the caller's wait
+`operation` until delivery is `delivered`; unknown acceptance ends the caller's wait
 and must not trigger replay. Cancellation or disconnect does not undo delivered input.
 Persistent key/button down returns an opaque handle. Observe while held, renew before
 its lease expires, qualify mouse motion with that same handle, and explicitly release

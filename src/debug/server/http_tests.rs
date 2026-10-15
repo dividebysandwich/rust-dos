@@ -49,12 +49,12 @@ pub(crate) mod recorded_sdk {
             let value = serde_json::to_value(&message).unwrap();
             let post = Post { uri: uri.clone(), message: message.clone(), session: session.clone(), headers: headers.clone() };
             *self.last.lock().unwrap() = Some(post.clone());
-            if value["params"]["name"] == "dos_capture" {
+            if value["params"]["name"] == "capture" {
                 *self.capture.lock().unwrap() = Some(post.clone());
             }
             let mut response = self.inner.post_message(uri, message, session, auth, headers).await?;
             let initializing = value["method"] == "initialize";
-            if initializing || value["params"]["name"] == "dos_capture" {
+            if initializing || value["params"]["name"] == "capture" {
                 response = match response {
                     StreamableHttpPostResponse::Json(reply, session) => {
                         *self.response.lock().unwrap() = Some(reply.clone());
@@ -103,7 +103,7 @@ pub(crate) async fn native_guard_sdk_capture_post() -> (recorded_sdk::Post, reco
     let transport = StreamableHttpClientTransport::with_client(recorded.clone(), StreamableHttpClientTransportConfig::with_uri(format!("http://{}/mcp", rig.addr)));
     let client = ClientConfig::default().with_protocol_version(ProtocolVersion::V_2025_11_25)
         .serve_with_lifecycle(transport, ClientLifecycleMode::Initialize).await.unwrap();
-    let result = client.call_tool(CallToolRequestParams::new("dos_capture")).await.unwrap();
+    let result = client.call_tool(CallToolRequestParams::new("capture")).await.unwrap();
     assert_ne!(result.is_error, Some(true));
     assert!(result.content.iter().any(|content| content.as_image().is_some()), "producer captured actual guest pixels");
     let post = recorded.capture.lock().unwrap().take().unwrap();
@@ -790,7 +790,7 @@ fn native_mcp_discovery_and_shell_capture() {
             assert_eq!(client.peer_info().unwrap().protocol_version, version);
             let tools = client.list_all_tools().await.unwrap();
             for tool in &tools {
-                if matches!(tool.name.as_ref(), "dos_status" | "dos_capture") {
+                if matches!(tool.name.as_ref(), "status" | "capture") {
                     assert_eq!(tool.input_schema.len(), 2, "observation schema is an empty object");
                 }
                 assert_eq!(
@@ -811,11 +811,11 @@ fn native_mcp_discovery_and_shell_capture() {
             names.sort();
             assert_eq!(
                 names,
-                ["dos_capture", "dos_key", "dos_mouse", "dos_operation", "dos_status", "dos_type"],
+                ["capture", "key", "mouse", "operation", "status", "type"],
                 "only implemented native tools are advertised"
             );
             let status = client
-                .call_tool(CallToolRequestParams::new("dos_status"))
+                .call_tool(CallToolRequestParams::new("status"))
                 .await
                 .unwrap();
             assert_eq!(
@@ -824,7 +824,7 @@ fn native_mcp_discovery_and_shell_capture() {
             );
             assert_eq!(status.structured_content.as_ref().unwrap()["paused"], true);
             let capture = client
-                .call_tool(CallToolRequestParams::new("dos_capture"))
+                .call_tool(CallToolRequestParams::new("capture"))
                 .await
                 .unwrap();
             assert_ne!(capture.is_error, Some(true));
@@ -900,7 +900,7 @@ fn native_mcp_incomplete_uploads_expire_and_restore_admission() {
             .expect("admission recovers after uploads expire");
         assert_eq!(client.peer_info().unwrap().protocol_version, ProtocolVersion::V_2026_07_28);
         let status = client
-            .call_tool(CallToolRequestParams::new("dos_status"))
+            .call_tool(CallToolRequestParams::new("status"))
             .await
             .unwrap();
         assert_ne!(status.is_error, Some(true));
@@ -919,7 +919,7 @@ fn native_mcp_invalid_observation_calls_reject_before_actor_allocation() {
             .serve_with_lifecycle(StreamableHttpClientTransport::from_uri(format!("http://{}/mcp", rig.addr)), ClientLifecycleMode::Discover { preferred_versions: vec![ProtocolVersion::V_2026_07_28] }).await.unwrap();
         assert_eq!(client.peer_info().unwrap().protocol_version, ProtocolVersion::V_2026_07_28);
         let tools = client.list_all_tools().await.unwrap();
-        let actual = client.call_tool(CallToolRequestParams::new("dos_status")).await.unwrap();
+        let actual = client.call_tool(CallToolRequestParams::new("status")).await.unwrap();
         let mut arguments = actual.structured_content.unwrap().as_object().unwrap().clone();
         arguments.retain(|key, _| key == "req");
         assert_eq!(arguments.len(), 1, "derive invalid arguments from actual observation");
@@ -951,7 +951,7 @@ fn native_mcp_duplicate_legacy_request_preserves_original_capture() {
             .serve_with_lifecycle(transport, ClientLifecycleMode::Initialize).await.unwrap();
         let before = rig.shared.next_req.load(std::sync::atomic::Ordering::Acquire);
         let peer = client.peer().clone();
-        let original = tokio::spawn(async move { peer.call_tool(CallToolRequestParams::new("dos_capture")).await });
+        let original = tokio::spawn(async move { peer.call_tool(CallToolRequestParams::new("capture")).await });
         let deadline = Instant::now() + Duration::from_secs(1);
         while rig.shared.next_req.load(std::sync::atomic::Ordering::Acquire) == before {
             assert!(Instant::now() < deadline, "original capture enters actor service");
@@ -967,7 +967,7 @@ fn native_mcp_duplicate_legacy_request_preserves_original_capture() {
         let capture = original.await.unwrap().unwrap();
         assert_ne!(capture.is_error, Some(true), "original capture ticket survives duplicate rejection");
         assert!(capture.content.iter().any(|content| content.as_image().is_some()));
-        let next = client.call_tool(CallToolRequestParams::new("dos_capture")).await.unwrap();
+        let next = client.call_tool(CallToolRequestParams::new("capture")).await.unwrap();
         assert_ne!(next.is_error, Some(true), "terminal delivery restores capture admission: {:?}", next.content.iter().filter_map(|content| content.as_text()).map(|text| text.text.as_str()).collect::<Vec<_>>());
         client.cancel().await.unwrap();
     });
@@ -989,7 +989,7 @@ fn native_mcp_continuous_capture_pressure_preserves_status_and_guest_progress() 
             let client = ClientConfig::default().with_protocol_version(version.clone())
                 .serve_with_lifecycle(StreamableHttpClientTransport::from_uri(format!("http://{}/mcp", rig.addr)), lifecycle).await.unwrap();
             assert_eq!(client.peer_info().unwrap().protocol_version, version, "pressure must exercise the requested protocol");
-            let first = client.call_tool(CallToolRequestParams::new("dos_status")).await.unwrap();
+            let first = client.call_tool(CallToolRequestParams::new("status")).await.unwrap();
             let before = first.structured_content.unwrap()["instructions"].as_u64().unwrap();
             let end = Instant::now() + Duration::from_millis(500);
             let mut workers = Vec::new();
@@ -999,7 +999,7 @@ fn native_mcp_continuous_capture_pressure_preserves_status_and_guest_progress() 
                     let mut completed = 0;
                     let mut busy = 0;
                     while Instant::now() < end {
-                        let capture = peer.call_tool(CallToolRequestParams::new("dos_capture")).await.unwrap();
+                        let capture = peer.call_tool(CallToolRequestParams::new("capture")).await.unwrap();
                         if capture.is_error == Some(true) {
                             assert_eq!(capture.structured_content.unwrap()["error"]["code"], "capture_busy", "pressure rejects before actor admission");
                             busy += 1;
@@ -1016,7 +1016,7 @@ fn native_mcp_continuous_capture_pressure_preserves_status_and_guest_progress() 
             let mut after = before;
             while Instant::now() < end {
                 let start = Instant::now();
-                let status = tokio::time::timeout(Duration::from_secs(1), client.call_tool(CallToolRequestParams::new("dos_status"))).await.expect("status stays within ADR caller budget under continuous capture pressure").unwrap();
+                let status = tokio::time::timeout(Duration::from_secs(1), client.call_tool(CallToolRequestParams::new("status"))).await.expect("status stays within ADR caller budget under continuous capture pressure").unwrap();
                 assert_ne!(status.is_error, Some(true));
                 max_status = max_status.max(start.elapsed());
                 after = status.structured_content.unwrap()["instructions"].as_u64().unwrap();
@@ -1069,7 +1069,7 @@ fn native_mcp_diagnostics_keep_context_without_guest_payloads() {
         let private = !logs.contains("MCP_PRIVACY_GUEST_01") && !logs.contains("MCP_PRIVACY_INPUT_01") && !logs.contains(&image[..128]);
         if mode == "filtered" {
             assert!(private, "diagnostics exposed actual guest payload: {root:?}");
-            assert!(logs.contains("observation completed") && logs.contains("dos_capture") && logs.contains("request="), "context diagnostics missing");
+            assert!(logs.contains("observation completed") && logs.contains("capture") && logs.contains("request="), "context diagnostics missing");
         } else {
             assert!(!private, "raw SDK tracing mutation must expose the actual capture and fail the same privacy oracle");
             assert!(logs.contains("MCP_PRIVACY_INPUT_01"), "raw SDK tracing must also expose actual native input to prove input sensitivity");
@@ -1101,14 +1101,14 @@ fn native_mcp_diagnostic_privacy_worker() {
         let client = ClientConfig::default().with_protocol_version(ProtocolVersion::V_2026_07_28)
             .serve_with_lifecycle(StreamableHttpClientTransport::from_uri(format!("http://{}/mcp", rig.addr)), ClientLifecycleMode::Discover { preferred_versions: vec![ProtocolVersion::V_2026_07_28] }).await.unwrap();
         assert_eq!(client.peer_info().unwrap().protocol_version, ProtocolVersion::V_2026_07_28);
-        native_keyboard_accepted(&client, "dos_type", json!({"text":"echo MCP_PRIVACY_INPUT_01"})).await;
-        native_keyboard_accepted(&client, "dos_key", json!({"key":"enter"})).await;
+        native_keyboard_accepted(&client, "type", json!({"text":"echo MCP_PRIVACY_INPUT_01"})).await;
+        native_keyboard_accepted(&client, "key", json!({"key":"enter"})).await;
         let deadline = Instant::now() + Duration::from_secs(5);
         while !rig.get("/api/screen/text?format=json").body.contains("MCP_PRIVACY_INPUT_01") {
             assert!(Instant::now() < deadline, "actual native input not observed");
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        let capture = client.call_tool(CallToolRequestParams::new("dos_capture")).await.unwrap();
+        let capture = client.call_tool(CallToolRequestParams::new("capture")).await.unwrap();
         assert_ne!(capture.is_error, Some(true));
         let image = capture.content.iter().find_map(|content| content.as_image()).unwrap();
         std::fs::write(std::env::var_os("RUST_DOS_MCP_PRIVACY_PAYLOAD").unwrap(), &image.data).unwrap();
@@ -1161,7 +1161,7 @@ fn native_mcp_rejects_deep_actual_sdk_metadata_before_actor_admission() {
             client.peer_info().unwrap().protocol_version,
             ProtocolVersion::V_2026_07_28
         );
-        let mut request = CallToolRequestParams::new("dos_status");
+        let mut request = CallToolRequestParams::new("status");
         request.meta = Some(RequestMetaObject(MetaObject(
             json!({"validation-marker": "native-depth-probe"})
                 .as_object()
@@ -1302,7 +1302,7 @@ fn native_mcp_rejects_oversized_sdk_metadata() {
             )
             .await
             .unwrap();
-        let mut request = CallToolRequestParams::new("dos_status");
+        let mut request = CallToolRequestParams::new("status");
         let admitted_before = rig
             .shared
             .next_req
@@ -1498,7 +1498,7 @@ fn native_mcp_capture_admission_precedes_a_second_frame_request() {
             .load(std::sync::atomic::Ordering::Relaxed);
         let first = tokio::spawn(async move {
             first_peer
-                .call_tool(CallToolRequestParams::new("dos_capture"))
+                .call_tool(CallToolRequestParams::new("capture"))
                 .await
         });
         let wait = tokio::time::Instant::now() + Duration::from_secs(1);
@@ -1523,7 +1523,7 @@ fn native_mcp_capture_admission_precedes_a_second_frame_request() {
         assert_eq!(active_metrics["capture"]["peak"], 1);
         let second = tokio::time::timeout(
             Duration::from_millis(500),
-            client.call_tool(CallToolRequestParams::new("dos_capture")),
+            client.call_tool(CallToolRequestParams::new("capture")),
         )
         .await;
         gate.store(false, std::sync::atomic::Ordering::Release);
@@ -3152,7 +3152,7 @@ fn native_mcp_enter_delivers_owned_operation_to_real_shell() {
                 .count();
             let typed = rig.post("/api/input/type?wait=true", json!({"text":"echo MCP_SHELL_OBS_01"}));
             assert_eq!(typed.status, 200, "approved shell setup succeeds");
-            let mut request = CallToolRequestParams::new("dos_key");
+            let mut request = CallToolRequestParams::new("key");
             request.arguments = Some(json!({"key":"enter","hold_ms":50}).as_object().unwrap().clone());
             let response = client.call_tool(request).await;
             assert!(response.is_ok(), "native Enter must be available and reach the actual guest: {response:?}");
@@ -3207,7 +3207,7 @@ fn native_mcp_typing_delivers_real_shell_output_and_journal() {
             let client = native_keyboard_client(&rig, version).await;
             let before_echoed = rig.get("/api/screen/text").json()["lines"].as_array().unwrap().iter()
                 .filter(|line| line.as_str().is_some_and(|line| line.trim() == "MCP_SHELL_OBS_01")).count();
-            let mut request = CallToolRequestParams::new("dos_type");
+            let mut request = CallToolRequestParams::new("type");
             request.arguments = Some(json!({"text":"echo MCP_SHELL_OBS_01"}).as_object().unwrap().clone());
             let response = client.call_tool(request).await;
             assert!(response.is_ok(), "native typing must reach the actual guest: {response:?}");
@@ -3247,7 +3247,7 @@ fn native_mcp_ctrl_hold_survives_protocol_disconnect_and_renews_then_releases() 
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     runtime.block_on(async {
         let legacy = native_keyboard_client(&rig, ProtocolVersion::V_2025_11_25).await;
-        let mut down = CallToolRequestParams::new("dos_key");
+        let mut down = CallToolRequestParams::new("key");
         down.arguments = Some(json!({"action":"down","key":"ctrl","lease_ms":30000}).as_object().unwrap().clone());
         let response = legacy.call_tool(down).await;
         assert!(response.is_ok(), "persistent Ctrl down must reach the actual guest: {response:?}");
@@ -3262,12 +3262,12 @@ fn native_mcp_ctrl_hold_survives_protocol_disconnect_and_renews_then_releases() 
         legacy.cancel().await.unwrap();
         assert_ne!(flags() & 0x04, 0, "session loss does not release the hold");
         let current = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-        let mut renew = CallToolRequestParams::new("dos_key");
+        let mut renew = CallToolRequestParams::new("key");
         renew.arguments = Some(json!({"action":"renew","handle":handle,"lease_ms":30000}).as_object().unwrap().clone());
         let renewed = current.call_tool(renew).await.unwrap();
         assert_ne!(renewed.is_error, Some(true));
         assert_ne!(flags() & 0x04, 0, "renewal retains actual Ctrl state");
-        let mut up = CallToolRequestParams::new("dos_key");
+        let mut up = CallToolRequestParams::new("key");
         up.arguments = Some(json!({"action":"up","handle":handle}).as_object().unwrap().clone());
         let released = current.call_tool(up).await.unwrap();
         assert_ne!(released.is_error, Some(true));
@@ -3319,9 +3319,9 @@ fn native_mcp_mouse_full_job_capacity_allows_up_and_renew_without_clearing_keys(
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-        let picture = native_keyboard_accepted(&client, "dos_capture", json!({})).await
+        let picture = native_keyboard_accepted(&client, "capture", json!({})).await
             .structured_content.unwrap()["mouse_picture"].clone();
-        let down = native_keyboard_accepted(&client, "dos_mouse",
+        let down = native_keyboard_accepted(&client, "mouse",
             json!({"action":"down","picture":picture,"button":"left","lease_ms":30000})).await.structured_content.unwrap();
         rig.until_idle();
         assert_eq!(rig.get("/api/status").json()["mouse"]["buttons"], 1);
@@ -3329,17 +3329,17 @@ fn native_mcp_mouse_full_job_capacity_allows_up_and_renew_without_clearing_keys(
         assert_eq!(rig.post("/api/input/wait?wait=false", json!({"ms":8000})).status, 200);
         let mut operations = Vec::new();
         for _ in 0..8 {
-            let queued = native_keyboard_accepted(&client, "dos_key", json!({"key":"b"})).await.structured_content.unwrap();
+            let queued = native_keyboard_accepted(&client, "key", json!({"key":"b"})).await.structured_content.unwrap();
             operations.push(queued["op"].as_u64().unwrap());
         }
         assert_eq!(rig.shared.native_jobs.available_permits(), 0);
         let queued = native_queued_input(&rig);
-        let mut excess = CallToolRequestParams::new("dos_key");
+        let mut excess = CallToolRequestParams::new("key");
         excess.arguments = Some(json!({"key":"b"}).as_object().unwrap().clone());
         let refused = client.call_tool(excess).await.unwrap();
         assert_eq!(refused.structured_content.as_ref().unwrap()["error"]["code"], "capacity");
-        native_keyboard_accepted(&client, "dos_mouse", json!({"action":"renew","handle":down["hold"]["handle"],"lease_ms":30000})).await;
-        native_keyboard_accepted(&client, "dos_mouse", json!({"action":"up","handle":down["hold"]["handle"]})).await;
+        native_keyboard_accepted(&client, "mouse", json!({"action":"renew","handle":down["hold"]["handle"],"lease_ms":30000})).await;
+        native_keyboard_accepted(&client, "mouse", json!({"action":"up","handle":down["hold"]["handle"]})).await;
         assert_eq!(rig.get("/api/status").json()["mouse"]["buttons"], 0, "release is available with all eight native jobs occupied");
         assert_eq!(native_queued_input(&rig), queued, "targeted mouse release preserves unrelated queued keys");
         assert_eq!(rig.shared.native_jobs.available_permits(), 0);
@@ -3365,12 +3365,12 @@ fn native_mcp_mouse_stale_partial_drag_releases_only_its_button() {
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-        let ctrl = native_keyboard_accepted(&client, "dos_key",
+        let ctrl = native_keyboard_accepted(&client, "key",
             json!({"action":"down","key":"ctrl","lease_ms":30000})).await.structured_content.unwrap();
         rig.until_idle();
-        let picture = native_keyboard_accepted(&client, "dos_capture", json!({})).await
+        let picture = native_keyboard_accepted(&client, "capture", json!({})).await
             .structured_content.unwrap()["mouse_picture"].clone();
-        let dragged = native_keyboard_accepted(&client, "dos_mouse",
+        let dragged = native_keyboard_accepted(&client, "mouse",
             json!({"action":"drag","picture":picture,"path":[
                 {"x":20,"y":20,"delay_ms":1000},{"x":40,"y":40}]})).await.structured_content.unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -3381,7 +3381,7 @@ fn native_mcp_mouse_stale_partial_drag_releases_only_its_button() {
         assert_eq!(native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 4, 4);
         action.store(5, std::sync::atomic::Ordering::Release);
         loop {
-            let operation = native_keyboard_accepted(&client, "dos_operation",
+            let operation = native_keyboard_accepted(&client, "operation",
                 json!({"instance":dragged["instance"],"op":dragged["op"]})).await.structured_content.unwrap();
             if operation["delivery"] == "cancelled" { break; }
             assert!(Instant::now() < deadline, "mode change cancels the old finite drag");
@@ -3391,11 +3391,11 @@ fn native_mcp_mouse_stale_partial_drag_releases_only_its_button() {
             "stale finite drag cleanup releases its delivered button");
         assert_eq!(native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 4, 4,
             "targeted drag cleanup preserves an independent modifier");
-        native_keyboard_accepted(&client, "dos_key", json!({"action":"up","handle":ctrl["hold"]["handle"]})).await;
+        native_keyboard_accepted(&client, "key", json!({"action":"up","handle":ctrl["hold"]["handle"]})).await;
         rig.until_idle();
-        let current = native_keyboard_accepted(&client, "dos_capture", json!({})).await
+        let current = native_keyboard_accepted(&client, "capture", json!({})).await
             .structured_content.unwrap()["mouse_picture"].clone();
-        native_keyboard_accepted(&client, "dos_mouse", json!({"action":"click","picture":current,"hold_ms":20})).await;
+        native_keyboard_accepted(&client, "mouse", json!({"action":"click","picture":current,"hold_ms":20})).await;
         client.cancel().await.unwrap();
     });
     rig.until_idle();
@@ -3411,7 +3411,7 @@ fn native_mcp_mouse_invalid_requests_have_no_queued_or_guest_prefix() {
     runtime.block_on(async {
         for version in [ProtocolVersion::V_2025_11_25, ProtocolVersion::V_2026_07_28] {
             let client = native_keyboard_client(&rig, version).await;
-            let picture = native_keyboard_accepted(&client, "dos_capture", json!({})).await
+            let picture = native_keyboard_accepted(&client, "capture", json!({})).await
                 .structured_content.unwrap()["mouse_picture"].clone();
             let before = rig.get("/api/status").json()["mouse"].clone();
             let queued = rig.journal().iter().filter(|entry| entry["type"] == "input_queued").count();
@@ -3425,7 +3425,7 @@ fn native_mcp_mouse_invalid_requests_have_no_queued_or_guest_prefix() {
             ] {
                 let mut args = args;
                 args["picture"] = picture.clone();
-                let mut request = CallToolRequestParams::new("dos_mouse");
+                let mut request = CallToolRequestParams::new("mouse");
                 request.arguments = Some(args.as_object().unwrap().clone());
                 match client.call_tool(request).await {
                     Ok(refused) => {
@@ -3459,29 +3459,29 @@ fn native_mcp_output_schemas_validate_real_guest_results_and_errors() {
                 let validator = jsonschema::validator_for(&Value::Object((*schema).clone())).unwrap();
                 (tool.name.to_string(), validator)
             }).collect::<std::collections::HashMap<_, _>>();
-        let capture = native_keyboard_accepted(&client, "dos_capture", json!({})).await;
+        let capture = native_keyboard_accepted(&client, "capture", json!({})).await;
         let picture = capture.structured_content.as_ref().unwrap()["mouse_picture"].clone();
-            validators["dos_capture"].validate(capture.structured_content.as_ref().unwrap()).unwrap();
-            let status = native_keyboard_accepted(&client, "dos_status", json!({})).await;
-            validators["dos_status"].validate(status.structured_content.as_ref().unwrap()).unwrap();
+            validators["capture"].validate(capture.structured_content.as_ref().unwrap()).unwrap();
+            let status = native_keyboard_accepted(&client, "status", json!({})).await;
+            validators["status"].validate(status.structured_content.as_ref().unwrap()).unwrap();
             let mut wrong_dimensions = capture.structured_content.clone().unwrap();
             wrong_dimensions["width"] = "640".into();
-            assert!(!validators["dos_capture"].is_valid(&wrong_dimensions), "the schema rejects a typed mutation of an actual capture");
+            assert!(!validators["capture"].is_valid(&wrong_dimensions), "the schema rejects a typed mutation of an actual capture");
             for (tool, args) in [
-                ("dos_key", json!({"action":"press","key":"b", "hold_ms":20})),
-                ("dos_type", json!({"text":"b","delay_ms":0})),
-                ("dos_mouse", json!({"action":"click","picture":picture,"hold_ms":20})),
+                ("key", json!({"action":"press","key":"b", "hold_ms":20})),
+                ("type", json!({"text":"b","delay_ms":0})),
+                ("mouse", json!({"action":"click","picture":picture,"hold_ms":20})),
             ] {
                 let accepted = native_keyboard_accepted(&client, tool, args).await;
                 let value = accepted.structured_content.as_ref().unwrap();
                 validators[tool].validate(value).unwrap();
-                let operation = native_keyboard_accepted(&client, "dos_operation", json!({"instance":value["instance"],"op":value["op"]})).await;
-                validators["dos_operation"].validate(operation.structured_content.as_ref().unwrap()).unwrap();
+                let operation = native_keyboard_accepted(&client, "operation", json!({"instance":value["instance"],"op":value["op"]})).await;
+                validators["operation"].validate(operation.structured_content.as_ref().unwrap()).unwrap();
                 rig.until_idle();
             }
             for (tool, args) in [
-                ("dos_mouse", json!({"action":"move","picture":{"instance":picture["instance"],"mode_epoch":picture["mode_epoch"].as_u64().unwrap()+1,"width":picture["width"],"height":picture["height"]},"x":0,"y":0})),
-                ("dos_operation", json!({"instance":picture["instance"],"op":u64::MAX})),
+                ("mouse", json!({"action":"move","picture":{"instance":picture["instance"],"mode_epoch":picture["mode_epoch"].as_u64().unwrap()+1,"width":picture["width"],"height":picture["height"]},"x":0,"y":0})),
+                ("operation", json!({"instance":picture["instance"],"op":u64::MAX})),
             ] {
             let mut request = CallToolRequestParams::new(tool);
             request.arguments = Some(args.as_object().unwrap().clone());
@@ -3509,9 +3509,9 @@ fn native_mcp_mouse_restore_detaches_old_authority_without_button_up() {
         let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
         runtime.block_on(async {
             let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-            let picture = native_keyboard_accepted(&client, "dos_capture", json!({})).await
+            let picture = native_keyboard_accepted(&client, "capture", json!({})).await
                 .structured_content.unwrap()["mouse_picture"].clone();
-            let held = native_keyboard_accepted(&client, "dos_mouse",
+            let held = native_keyboard_accepted(&client, "mouse",
                 json!({"action":"down","picture":picture,"button":"left","lease_ms":2000})).await
                 .structured_content.unwrap();
             rig.until_idle();
@@ -3536,7 +3536,7 @@ fn native_mcp_mouse_restore_detaches_old_authority_without_button_up() {
             for action in ["up", "renew"] {
                 let mut args = json!({"action":action,"handle":held["hold"]["handle"]});
                 if action == "renew" { args["lease_ms"] = 30000.into(); }
-                let mut request = CallToolRequestParams::new("dos_mouse");
+                let mut request = CallToolRequestParams::new("mouse");
                 request.arguments = Some(args.as_object().unwrap().clone());
                 let refused = client.call_tool(request).await.unwrap();
                 assert_eq!(refused.is_error, Some(true), "restoration invalidates old mouse authority");
@@ -3544,7 +3544,7 @@ fn native_mcp_mouse_restore_detaches_old_authority_without_button_up() {
             }
             tokio::time::sleep(Duration::from_millis(2250)).await;
             assert_eq!(rig.get("/api/status").json()["mouse"]["buttons"], 1, "old lease expiry sends no release into restored mouse state");
-            let current = native_keyboard_accepted(&client, "dos_capture", json!({})).await
+            let current = native_keyboard_accepted(&client, "capture", json!({})).await
                 .structured_content.unwrap()["mouse_picture"].clone();
             assert_ne!((&current["instance"], &current["mode_epoch"]), (&picture["instance"], &picture["mode_epoch"]));
             assert_eq!(rig.post("/api/input/mouse", json!({"action":"up","button":"left"})).status, 200);
@@ -3578,10 +3578,10 @@ fn native_mcp_mouse_restore_cancels_queued_drag_and_preserves_saved_buttons() {
             assert_eq!(rig.get("/api/status").json()["mouse"]["buttons"], 0);
             assert_eq!(rig.post("/api/control/pause", json!({})).status, 200);
             rig.until_paused();
-            let picture = native_keyboard_accepted(&client, "dos_capture", json!({})).await
+            let picture = native_keyboard_accepted(&client, "capture", json!({})).await
                 .structured_content.unwrap()["mouse_picture"].clone();
             assert_eq!(rig.post("/api/input/wait?wait=false", json!({"ms":1000})).status, 200);
-            let drag = native_keyboard_accepted(&client, "dos_mouse", json!({
+            let drag = native_keyboard_accepted(&client, "mouse", json!({
                 "action":"drag","picture":picture,"button":"left",
                 "path":[{"x":3,"y":4,"delay_ms":1},{"x":20,"y":20,"delay_ms":1}]
             })).await.structured_content.unwrap();
@@ -3610,11 +3610,11 @@ fn native_mcp_mouse_and_key_handles_remain_device_specific_after_release() {
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-        let picture = native_keyboard_accepted(&client, "dos_capture", json!({})).await
+        let picture = native_keyboard_accepted(&client, "capture", json!({})).await
             .structured_content.unwrap()["mouse_picture"].clone();
         for (owner, other, args) in [
-            ("dos_mouse", "dos_key", json!({"action":"down","picture":picture,"button":"left","lease_ms":30000})),
-            ("dos_key", "dos_mouse", json!({"action":"down","key":"ctrl","lease_ms":30000})),
+            ("mouse", "key", json!({"action":"down","picture":picture,"button":"left","lease_ms":30000})),
+            ("key", "mouse", json!({"action":"down","key":"ctrl","lease_ms":30000})),
         ] {
             let held = native_keyboard_accepted(&client, owner, args).await.structured_content.unwrap();
             rig.until_idle();
@@ -3651,9 +3651,9 @@ fn native_mcp_mouse_expiry_preserves_an_independent_modifier_hold() {
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2025_11_25).await;
-        let picture = native_keyboard_accepted(&client, "dos_capture", json!({})).await
+        let picture = native_keyboard_accepted(&client, "capture", json!({})).await
             .structured_content.unwrap()["mouse_picture"].clone();
-        let down = native_keyboard_accepted(&client, "dos_mouse",
+        let down = native_keyboard_accepted(&client, "mouse",
             json!({"action":"down","picture":picture,"button":"left","lease_ms":750})).await
             .structured_content.unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -3661,7 +3661,7 @@ fn native_mcp_mouse_expiry_preserves_an_independent_modifier_hold() {
             assert!(Instant::now() < deadline);
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        let mut request = CallToolRequestParams::new("dos_key");
+        let mut request = CallToolRequestParams::new("key");
         request.arguments = Some(json!({"action":"down","key":"ctrl","lease_ms":30000}).as_object().unwrap().clone());
         let ctrl = client.call_tool(request).await.unwrap();
         assert_ne!(ctrl.is_error, Some(true), "a mouse hold must not reserve keyboard modifier state");
@@ -3676,10 +3676,10 @@ fn native_mcp_mouse_expiry_preserves_an_independent_modifier_hold() {
         }
         assert_eq!(native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 4, 4,
             "mouse expiry preserves the actual guest's independently held Ctrl");
-        let ended = native_keyboard_accepted(&client, "dos_operation",
+        let ended = native_keyboard_accepted(&client, "operation",
             json!({"instance":down["instance"],"op":down["op"]})).await.structured_content.unwrap();
         assert_eq!(ended["hold"]["state"], "expired");
-        native_keyboard_accepted(&client, "dos_key", json!({"action":"up","handle":ctrl["hold"]["handle"]})).await;
+        native_keyboard_accepted(&client, "key", json!({"action":"up","handle":ctrl["hold"]["handle"]})).await;
         client.cancel().await.unwrap();
     });
     rig.until_idle();
@@ -3706,14 +3706,14 @@ fn native_mcp_mouse_mode_change_retires_a_reserved_button_claim() {
         .unwrap();
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-        let picture = native_keyboard_accepted(&client, "dos_capture", json!({}))
+        let picture = native_keyboard_accepted(&client, "capture", json!({}))
             .await
             .structured_content
             .unwrap()["mouse_picture"]
             .clone();
         let accepted = native_keyboard_accepted(
             &client,
-            "dos_mouse",
+            "mouse",
             json!({"action":"down","picture":picture,"lease_ms":30000}),
         )
         .await
@@ -3726,7 +3726,7 @@ fn native_mcp_mouse_mode_change_retires_a_reserved_button_claim() {
         loop {
             let operation = native_keyboard_accepted(
                 &client,
-                "dos_operation",
+                "operation",
                 json!({"instance":accepted["instance"],"op":accepted["op"]}),
             )
             .await
@@ -3744,7 +3744,7 @@ fn native_mcp_mouse_mode_change_retires_a_reserved_button_claim() {
         }
         assert_eq!(rig.shared.native_jobs.available_permits(), 8);
         assert_eq!(rig.get("/api/status").json()["mouse"]["buttons"], 0);
-        let mut request = CallToolRequestParams::new("dos_mouse");
+        let mut request = CallToolRequestParams::new("mouse");
         request.arguments = Some(
             json!({"action":"up","handle":accepted["hold"]["handle"]})
                 .as_object()
@@ -3770,23 +3770,23 @@ fn native_mcp_mouse_mode_change_cancels_queued_picture_before_delivery() {
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-        let picture = native_keyboard_accepted(&client, "dos_capture", json!({})).await
+        let picture = native_keyboard_accepted(&client, "capture", json!({})).await
             .structured_content.unwrap()["mouse_picture"].clone();
-        let accepted = native_keyboard_accepted(&client, "dos_mouse",
+        let accepted = native_keyboard_accepted(&client, "mouse",
             json!({"action":"click","picture":picture,"x":100,"y":80,"hold_ms":1000})).await
             .structured_content.unwrap();
         assert_eq!(accepted["held"], true, "the actual deterministic guest retains queued input");
         action.store(5, std::sync::atomic::Ordering::Release);
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
-            let state = native_keyboard_accepted(&client, "dos_operation",
+            let state = native_keyboard_accepted(&client, "operation",
                 json!({"instance":accepted["instance"],"op":accepted["op"]})).await
                 .structured_content.unwrap();
             if state["delivery"] == "cancelled" { break; }
             assert!(Instant::now() < deadline, "a BIOS mode change must cancel stale queued picture input before delivery");
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        let current = native_keyboard_accepted(&client, "dos_capture", json!({})).await
+        let current = native_keyboard_accepted(&client, "capture", json!({})).await
             .structured_content.unwrap()["mouse_picture"].clone();
         assert!(current["mode_epoch"].as_u64().unwrap() > picture["mode_epoch"].as_u64().unwrap());
         assert_eq!(rig.get("/api/status").json()["mouse"]["buttons"], 0);
@@ -3802,10 +3802,10 @@ fn native_mcp_mouse_rejects_null_path_fields_before_acceptance() {
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2025_11_25).await;
-        let picture = native_keyboard_accepted(&client, "dos_capture", json!({})).await
+        let picture = native_keyboard_accepted(&client, "capture", json!({})).await
             .structured_content.unwrap()["mouse_picture"].clone();
         let queued = rig.journal().iter().filter(|entry| entry["type"] == "input_queued").count();
-        let mut request = CallToolRequestParams::new("dos_mouse");
+        let mut request = CallToolRequestParams::new("mouse");
         request.arguments = Some(json!({"action":"drag","picture":picture,
             "path":[{"x":40,"y":40,"delay_ms":null}]}).as_object().unwrap().clone());
         assert!(client.call_tool(request).await.is_err(), "explicit null must not become a default delay");
@@ -3823,12 +3823,12 @@ fn native_mcp_mouse_stale_picture_reports_recapture_without_queue_effects() {
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2025_11_25).await;
-        let mut picture = native_keyboard_accepted(&client, "dos_capture", json!({})).await
+        let mut picture = native_keyboard_accepted(&client, "capture", json!({})).await
             .structured_content.unwrap()["mouse_picture"].clone();
         picture["mode_epoch"] = (picture["mode_epoch"].as_u64().unwrap() + 1).into();
         let before = rig.get("/api/status").json()["mouse"].clone();
         let queued = rig.journal().iter().filter(|entry| entry["type"] == "input_queued").count();
-        let mut request = CallToolRequestParams::new("dos_mouse");
+        let mut request = CallToolRequestParams::new("mouse");
         request.arguments = Some(json!({"action":"move","picture":picture,"x":100,"y":80}).as_object().unwrap().clone());
         let rejected = client.call_tool(request).await.unwrap();
         assert_eq!(rejected.is_error, Some(true));
@@ -3855,8 +3855,8 @@ fn native_mcp_mouse_shutdown_releases_only_native_buttons_before_immutable_shutd
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-        let picture = native_keyboard_accepted(&client, "dos_capture", json!({})).await.structured_content.unwrap()["mouse_picture"].clone();
-        native_keyboard_accepted(&client, "dos_mouse", json!({"action":"down","picture":picture,"button":"left","lease_ms":30000})).await;
+        let picture = native_keyboard_accepted(&client, "capture", json!({})).await.structured_content.unwrap()["mouse_picture"].clone();
+        native_keyboard_accepted(&client, "mouse", json!({"action":"down","picture":picture,"button":"left","lease_ms":30000})).await;
         rig.until_idle();
         assert_eq!(rig.get("/api/status").json()["mouse"]["buttons"], 3,
             "both independent button states reach the actual guest");
@@ -3879,30 +3879,30 @@ fn native_mcp_mouse_delivered_hold_survives_mode_change_and_requires_recapture()
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-        let picture = native_keyboard_accepted(&client, "dos_capture", json!({})).await.structured_content.unwrap()["mouse_picture"].clone();
-        let held = native_keyboard_accepted(&client, "dos_mouse",
+        let picture = native_keyboard_accepted(&client, "capture", json!({})).await.structured_content.unwrap()["mouse_picture"].clone();
+        let held = native_keyboard_accepted(&client, "mouse",
             json!({"action":"down","picture":picture,"lease_ms":30000})).await.structured_content.unwrap();
         rig.until_idle();
         assert_eq!(rig.get("/api/status").json()["mouse"]["buttons"], 1);
         action.store(5, std::sync::atomic::Ordering::Release);
         let deadline = Instant::now() + Duration::from_secs(5);
         let current = loop {
-            let capture = native_keyboard_accepted(&client, "dos_capture", json!({})).await.structured_content.unwrap()["mouse_picture"].clone();
+            let capture = native_keyboard_accepted(&client, "capture", json!({})).await.structured_content.unwrap()["mouse_picture"].clone();
             if capture["mode_epoch"] != picture["mode_epoch"] { break capture; }
             assert!(Instant::now() < deadline, "BIOS mode change is observed before recapture");
             tokio::time::sleep(Duration::from_millis(5)).await;
         };
-        let mut stale = CallToolRequestParams::new("dos_mouse");
+        let mut stale = CallToolRequestParams::new("mouse");
         stale.arguments = Some(json!({"action":"move","picture":picture,"handle":held["hold"]["handle"],"x":100,"y":80}).as_object().unwrap().clone());
         let refused = client.call_tool(stale).await.unwrap();
         assert_eq!(refused.structured_content.as_ref().unwrap()["error"]["code"], "stale_picture");
         assert_eq!(rig.get("/api/status").json()["mouse"]["buttons"], 1,
             "mode change preserves an already delivered button on the same guest");
-        native_keyboard_accepted(&client, "dos_mouse", json!({"action":"renew","handle":held["hold"]["handle"],"lease_ms":30000})).await;
-        native_keyboard_accepted(&client, "dos_mouse", json!({"action":"move","picture":current,"handle":held["hold"]["handle"],"x":100,"y":80})).await;
+        native_keyboard_accepted(&client, "mouse", json!({"action":"renew","handle":held["hold"]["handle"],"lease_ms":30000})).await;
+        native_keyboard_accepted(&client, "mouse", json!({"action":"move","picture":current,"handle":held["hold"]["handle"],"x":100,"y":80})).await;
         rig.until_idle();
         assert_eq!(rig.get("/api/status").json()["mouse"]["buttons"], 1);
-        native_keyboard_accepted(&client, "dos_mouse", json!({"action":"up","handle":held["hold"]["handle"]})).await;
+        native_keyboard_accepted(&client, "mouse", json!({"action":"up","handle":held["hold"]["handle"]})).await;
         assert_eq!(rig.get("/api/status").json()["mouse"]["buttons"], 0);
         client.cancel().await.unwrap();
     });
@@ -3923,26 +3923,26 @@ fn native_mcp_mouse_vbe_mode_identity_invalidates_same_geometry_picture() {
         action.store(6, std::sync::atomic::Ordering::Release);
         let deadline = Instant::now() + Duration::from_secs(5);
         let first = loop {
-            let capture = native_keyboard_accepted(&client, "dos_capture", json!({})).await.structured_content.unwrap();
+            let capture = native_keyboard_accepted(&client, "capture", json!({})).await.structured_content.unwrap();
             if capture["width"] == 640 && capture["height"] == 480 { break capture["mouse_picture"].clone(); }
             assert!(Instant::now() < deadline, "the actual BIOS enters 640x480 VBE mode");
             tokio::time::sleep(Duration::from_millis(5)).await;
         };
-        let queued = native_keyboard_accepted(&client, "dos_mouse",
+        let queued = native_keyboard_accepted(&client, "mouse",
             json!({"action":"move","picture":first,"x":100,"y":80})).await.structured_content.unwrap();
         action.store(7, std::sync::atomic::Ordering::Release);
         while action.load(std::sync::atomic::Ordering::Acquire) != 0 {
             assert!(Instant::now() < deadline);
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        let next = native_keyboard_accepted(&client, "dos_capture", json!({})).await.structured_content.unwrap()["mouse_picture"].clone();
+        let next = native_keyboard_accepted(&client, "capture", json!({})).await.structured_content.unwrap()["mouse_picture"].clone();
         assert_eq!((&first["width"], &first["height"]), (&next["width"], &next["height"]));
         assert!(next["mode_epoch"].as_u64().unwrap() > first["mode_epoch"].as_u64().unwrap(),
             "different VBE mode identities invalidate a picture even at identical geometry");
-        let operation = native_keyboard_accepted(&client, "dos_operation",
+        let operation = native_keyboard_accepted(&client, "operation",
             json!({"instance":queued["instance"],"op":queued["op"]})).await.structured_content.unwrap();
         assert_eq!(operation["delivery"], "cancelled");
-        let mut stale = CallToolRequestParams::new("dos_mouse");
+        let mut stale = CallToolRequestParams::new("mouse");
         stale.arguments = Some(json!({"action":"move","picture":first,"x":100,"y":80}).as_object().unwrap().clone());
         let rejected = client.call_tool(stale).await.unwrap();
         assert_eq!(rejected.structured_content.as_ref().unwrap()["error"]["code"], "stale_picture");
@@ -3962,7 +3962,7 @@ fn native_mcp_mouse_maximum_path_admission_and_storage_are_bounded() {
     runtime.block_on(async {
         for version in [ProtocolVersion::V_2025_11_25, ProtocolVersion::V_2026_07_28] {
             let client = native_keyboard_client(&rig, version.clone()).await;
-            let picture = native_keyboard_accepted(&client, "dos_capture", json!({})).await
+            let picture = native_keyboard_accepted(&client, "capture", json!({})).await
                 .structured_content.unwrap()["mouse_picture"].clone();
             let path = (0..256).map(|index| json!({"x":20 + index % 2,"y":20,
                 "delay_ms":if index == 255 {155} else {19}})).collect::<Vec<_>>();
@@ -3970,7 +3970,7 @@ fn native_mcp_mouse_maximum_path_admission_and_storage_are_bounded() {
             let mut retained_capacity = None;
             for _ in 0..32 {
                 let started = Instant::now();
-                let accepted = native_keyboard_accepted(&client, "dos_mouse",
+                let accepted = native_keyboard_accepted(&client, "mouse",
                     json!({"action":"drag","picture":picture,"path":path})).await.structured_content.unwrap();
                 samples.push(started.elapsed().as_micros());
                 assert_eq!(accepted["held"], true);
@@ -4012,15 +4012,15 @@ fn native_mcp_mouse_maximum_path_plays_once_after_backlog_and_disconnect() {
             rig.until_idle();
             let producer = native_keyboard_client(&rig, version.clone()).await;
             let observer = native_keyboard_client(&rig, version).await;
-            let picture = native_keyboard_accepted(&producer, "dos_capture", json!({})).await
+            let picture = native_keyboard_accepted(&producer, "capture", json!({})).await
                 .structured_content.unwrap()["mouse_picture"].clone();
             let backlog = rig.post("/api/input/wait?wait=false", json!({"ms":1000})).json()["op"].as_u64().unwrap();
             let path = (0..256).map(|index| json!({"x":20 + index,"y":20,
                 "delay_ms":if index == 255 {155} else {19}})).collect::<Vec<_>>();
             let started = Instant::now();
-            let drag = native_keyboard_accepted(&producer, "dos_mouse",
+            let drag = native_keyboard_accepted(&producer, "mouse",
                 json!({"action":"drag","picture":picture,"path":path})).await.structured_content.unwrap();
-            let trailing = native_keyboard_accepted(&observer, "dos_key", json!({"key":"b"})).await
+            let trailing = native_keyboard_accepted(&observer, "key", json!({"key":"b"})).await
                 .structured_content.unwrap();
             assert_eq!(rig.get("/api/status").json()["mouse"]["buttons"], 0,
                 "the existing HTTP wait keeps the drag queued before its first button event");
@@ -4029,7 +4029,7 @@ fn native_mcp_mouse_maximum_path_plays_once_after_backlog_and_disconnect() {
             let mut positions = std::collections::BTreeSet::new();
             let mut last_x = 20;
             loop {
-                let operation = native_keyboard_accepted(&observer, "dos_operation",
+                let operation = native_keyboard_accepted(&observer, "operation",
                     json!({"instance":drag["instance"],"op":drag["op"]})).await.structured_content.unwrap();
                 let mouse = rig.get("/api/status").json()["mouse"].clone();
                 let x = mouse["x"].as_i64().unwrap();
@@ -4069,14 +4069,14 @@ fn native_mcp_mouse_input_schema_expresses_action_and_coordinate_requirements() 
     runtime.block_on(async {
         for version in [ProtocolVersion::V_2025_11_25, ProtocolVersion::V_2026_07_28] {
             let client = native_keyboard_client(&rig, version).await;
-            let tool = client.list_all_tools().await.unwrap().into_iter().find(|tool| tool.name == "dos_mouse").unwrap();
+            let tool = client.list_all_tools().await.unwrap().into_iter().find(|tool| tool.name == "mouse").unwrap();
             println!("native mouse schema={}", Value::Object((*tool.input_schema).clone()));
             let frozen: Value = serde_json::from_str(include_str!("../../../tests/fixtures/mcp/mouse.schema.json")).unwrap();
             assert_eq!(Value::Object((*tool.input_schema).clone()), frozen, "native discovery preserves the frozen mouse input contract");
             let validator = jsonschema::validator_for(&Value::Object((*tool.input_schema).clone())).unwrap();
-            let picture = native_keyboard_accepted(&client, "dos_capture", json!({})).await
+            let picture = native_keyboard_accepted(&client, "capture", json!({})).await
                 .structured_content.unwrap()["mouse_picture"].clone();
-            let held = native_keyboard_accepted(&client, "dos_mouse",
+            let held = native_keyboard_accepted(&client, "mouse",
                 json!({"action":"down","picture":picture,"lease_ms":30000})).await.structured_content.unwrap();
             let handle = held["hold"]["handle"].clone();
             for valid in [
@@ -4106,7 +4106,7 @@ fn native_mcp_mouse_input_schema_expresses_action_and_coordinate_requirements() 
             ] {
                 assert!(!validator.is_valid(&invalid), "the advertised schema must reject an unsupported action form: {invalid}");
             }
-            native_keyboard_accepted(&client, "dos_mouse", json!({"action":"up","handle":handle})).await;
+            native_keyboard_accepted(&client, "mouse", json!({"action":"up","handle":handle})).await;
             client.cancel().await.unwrap();
         }
     });
@@ -4126,14 +4126,14 @@ fn native_mcp_mouse_rejects_motion_during_an_http_button_hold() {
     runtime.block_on(async {
         for version in [ProtocolVersion::V_2025_11_25, ProtocolVersion::V_2026_07_28] {
             let client = native_keyboard_client(&rig, version).await;
-            let picture = native_keyboard_accepted(&client, "dos_capture", json!({})).await
+            let picture = native_keyboard_accepted(&client, "capture", json!({})).await
                 .structured_content.unwrap()["mouse_picture"].clone();
             let queued = rig.journal().iter().filter(|entry| entry["type"] == "input_queued").count();
             for motion in [json!({"x":100,"y":80}), json!({"dx":5,"dy":-3})] {
                 let mut args = motion;
                 args["action"] = "move".into();
                 args["picture"] = picture.clone();
-                let mut request = CallToolRequestParams::new("dos_mouse");
+                let mut request = CallToolRequestParams::new("mouse");
                 request.arguments = Some(args.as_object().unwrap().clone());
                 let refused = client.call_tool(request).await.unwrap();
                 assert_eq!(refused.is_error, Some(true), "native movement must not take over an HTTP-owned drag");
@@ -4156,9 +4156,9 @@ fn native_mcp_mouse_hold_rejects_unowned_http_pointer_events() {
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2025_11_25).await;
-        let picture = native_keyboard_accepted(&client, "dos_capture", json!({})).await
+        let picture = native_keyboard_accepted(&client, "capture", json!({})).await
             .structured_content.unwrap()["mouse_picture"].clone();
-        let down = native_keyboard_accepted(&client, "dos_mouse",
+        let down = native_keyboard_accepted(&client, "mouse",
             json!({"action":"down","picture":picture,"button":"left","lease_ms":30000})).await;
         let deadline = Instant::now() + Duration::from_secs(10);
         while rig.get("/api/status").json()["mouse"]["buttons"].as_u64().unwrap() & 1 == 0 {
@@ -4179,7 +4179,7 @@ fn native_mcp_mouse_hold_rejects_unowned_http_pointer_events() {
         }
         assert_eq!(rig.post("/api/input/key", json!({"key":"b","mods":["ctrl"],"hold_ms":20})).status, 200,
             "an owned mouse button permits independent keyboard input");
-        native_keyboard_accepted(&client, "dos_mouse",
+        native_keyboard_accepted(&client, "mouse",
             json!({"action":"up","handle":down.structured_content.unwrap()["hold"]["handle"]})).await;
         client.cancel().await.unwrap();
     });
@@ -4201,15 +4201,15 @@ fn native_mcp_mouse_uses_real_captured_text_picture_coordinates() {
         for version in [ProtocolVersion::V_2025_11_25, ProtocolVersion::V_2026_07_28] {
             let client = native_keyboard_client(&rig, version).await;
             let tools = client.list_all_tools().await.unwrap();
-            assert!(tools.iter().any(|tool| tool.name == "dos_mouse"),
+            assert!(tools.iter().any(|tool| tool.name == "mouse"),
                 "native mouse must be advertised for the actual text-mode guest");
-            let capture = native_keyboard_accepted(&client, "dos_capture", json!({})).await;
+            let capture = native_keyboard_accepted(&client, "capture", json!({})).await;
             let picture = capture.structured_content.unwrap()["mouse_picture"].clone();
             assert!(picture["mode_epoch"].as_u64().is_some(), "actual capture supplies the mouse picture basis");
             let reset = json!({"action":"move","x":20,"y":20,"coords":"screen"});
             assert_eq!(rig.post("/api/input/mouse", reset).status, 200);
             rig.until_idle();
-            let moved = native_keyboard_accepted(&client, "dos_mouse",
+            let moved = native_keyboard_accepted(&client, "mouse",
                 json!({"action":"move","picture":picture,"x":reference["x"],"y":reference["y"]})).await;
             let operation = moved.structured_content.unwrap()["op"].as_u64().unwrap();
             let deadline = Instant::now() + Duration::from_secs(10);
@@ -4234,12 +4234,12 @@ fn native_mcp_mouse_button_claim_survives_disconnect_and_qualifies_motion() {
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     runtime.block_on(async {
         let legacy = native_keyboard_client(&rig, ProtocolVersion::V_2025_11_25).await;
-        assert!(legacy.list_all_tools().await.unwrap().iter().any(|tool| tool.name == "dos_mouse"),
+        assert!(legacy.list_all_tools().await.unwrap().iter().any(|tool| tool.name == "mouse"),
             "persistent native mouse control must be advertised");
-        let captured = native_keyboard_accepted(&legacy, "dos_capture", json!({})).await;
+        let captured = native_keyboard_accepted(&legacy, "capture", json!({})).await;
         let picture = captured.structured_content.unwrap()["mouse_picture"].clone();
         assert!(picture["mode_epoch"].as_u64().is_some());
-        let down = native_keyboard_accepted(&legacy, "dos_mouse",
+        let down = native_keyboard_accepted(&legacy, "mouse",
             json!({"action":"down","button":"left","lease_ms":30000,"picture":picture,"x":100,"y":80})).await;
         let handle = down.structured_content.unwrap()["hold"]["handle"].as_str().unwrap().to_owned();
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -4251,14 +4251,14 @@ fn native_mcp_mouse_button_claim_survives_disconnect_and_qualifies_motion() {
         assert_ne!(rig.get("/api/status").json()["mouse"]["buttons"].as_u64().unwrap() & 1, 0,
             "disconnect retains the actual owned button");
         let current = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-        let renewed = native_keyboard_accepted(&current, "dos_mouse",
+        let renewed = native_keyboard_accepted(&current, "mouse",
             json!({"action":"renew","handle":handle,"lease_ms":30000})).await;
         assert_eq!(renewed.structured_content.unwrap()["hold"]["state"], "delivered");
-        native_keyboard_accepted(&current, "dos_mouse",
+        native_keyboard_accepted(&current, "mouse",
             json!({"action":"move","handle":handle,"picture":picture,"x":140,"y":100})).await;
         assert_ne!(rig.get("/api/status").json()["mouse"]["buttons"].as_u64().unwrap() & 1, 0,
             "handle-qualified movement preserves its button down");
-        native_keyboard_accepted(&current, "dos_mouse", json!({"action":"up","handle":handle})).await;
+        native_keyboard_accepted(&current, "mouse", json!({"action":"up","handle":handle})).await;
         let deadline = Instant::now() + Duration::from_secs(10);
         while rig.get("/api/status").json()["mouse"]["buttons"].as_u64().unwrap() & 1 != 0 {
             assert!(Instant::now() < deadline, "matching handle releases the real button");
@@ -4278,13 +4278,13 @@ fn native_mcp_mouse_supported_buttons_and_clicks_observe_real_guest_state() {
     runtime.block_on(async {
         for version in [ProtocolVersion::V_2025_11_25, ProtocolVersion::V_2026_07_28] {
             let client = native_keyboard_client(&rig, version).await;
-            assert!(client.list_all_tools().await.unwrap().iter().any(|tool| tool.name == "dos_mouse"),
+            assert!(client.list_all_tools().await.unwrap().iter().any(|tool| tool.name == "mouse"),
                 "all approved native mouse buttons must be advertised");
-            let capture = native_keyboard_accepted(&client, "dos_capture", json!({})).await;
+            let capture = native_keyboard_accepted(&client, "capture", json!({})).await;
             let picture = capture.structured_content.unwrap()["mouse_picture"].clone();
             assert!(picture["mode_epoch"].as_u64().is_some());
             for (button, bit) in [("left",1), ("right",2), ("middle",4)] {
-                let down = native_keyboard_accepted(&client, "dos_mouse",
+                let down = native_keyboard_accepted(&client, "mouse",
                     json!({"action":"down","picture":picture,"button":button,"lease_ms":30000})).await;
                 let handle = down.structured_content.unwrap()["hold"]["handle"].as_str().unwrap().to_owned();
                 let deadline = Instant::now() + Duration::from_secs(10);
@@ -4294,10 +4294,10 @@ fn native_mcp_mouse_supported_buttons_and_clicks_observe_real_guest_state() {
                     assert!(Instant::now() < deadline, "native {button} reaches only its real guest button bit");
                     tokio::time::sleep(Duration::from_millis(5)).await;
                 }
-                native_keyboard_accepted(&client, "dos_mouse", json!({"action":"up","handle":handle})).await;
+                native_keyboard_accepted(&client, "mouse", json!({"action":"up","handle":handle})).await;
                 rig.until_idle();
                 assert_eq!(rig.get("/api/status").json()["mouse"]["buttons"], 0);
-                let clicked = native_keyboard_accepted(&client, "dos_mouse",
+                let clicked = native_keyboard_accepted(&client, "mouse",
                     json!({"action":"click","picture":picture,"button":button,"hold_ms":150})).await;
                 let op = clicked.structured_content.unwrap()["op"].as_u64().unwrap();
                 let deadline = Instant::now() + Duration::from_secs(10);
@@ -4326,8 +4326,8 @@ fn native_mcp_canonical_dir_and_enter_show_actual_guest_files() {
             let client = native_keyboard_client(&rig, version).await;
             let before = rig.get("/api/screen/text").json()["lines"].as_array().unwrap().iter()
                 .filter(|line| line.as_str().is_some_and(|line| line.contains("PROBE"))).count();
-            let typed = native_keyboard_accepted(&client, "dos_type", json!({"text":"dir"})).await;
-            let entered = native_keyboard_accepted(&client, "dos_key", json!({"key":"enter"})).await;
+            let typed = native_keyboard_accepted(&client, "type", json!({"text":"dir"})).await;
+            let entered = native_keyboard_accepted(&client, "key", json!({"key":"enter"})).await;
             let operations = [typed.structured_content.unwrap()["op"].as_u64().unwrap(), entered.structured_content.unwrap()["op"].as_u64().unwrap()];
             let deadline = Instant::now() + Duration::from_secs(10);
             loop {
@@ -4360,7 +4360,7 @@ fn native_mcp_selected_modifiers_reach_real_bios_and_release() {
         for (modifier, expected) in [("ctrl", 0x1e01u16), ("shift", 0x1e41), ("alt", 0x1e00)] {
             let pointers = native_keyboard_bytes(&rig, "0040:001A", 4);
             let tail = u16::from_le_bytes([pointers[2], pointers[3]]);
-            let result = native_keyboard_accepted(&client, "dos_key", json!({"key":"a","mods":[modifier],"hold_ms":50})).await;
+            let result = native_keyboard_accepted(&client, "key", json!({"key":"a","mods":[modifier],"hold_ms":50})).await;
             let operation = result.structured_content.unwrap()["op"].as_u64().unwrap();
             let deadline = Instant::now() + Duration::from_secs(10);
             loop {
@@ -4387,7 +4387,7 @@ fn native_mcp_foreign_plain_input_conflicts_with_owned_ctrl_and_shift() {
         let owner = native_keyboard_client(&rig, ProtocolVersion::V_2025_11_25).await;
         let foreign = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
         for (key, bit) in [("ctrl", 0x04u8), ("shift", 0x02)] {
-            let down = native_keyboard_accepted(&owner, "dos_key", json!({"action":"down","key":key,"lease_ms":30000})).await;
+            let down = native_keyboard_accepted(&owner, "key", json!({"action":"down","key":key,"lease_ms":30000})).await;
             let handle = down.structured_content.unwrap()["hold"]["handle"].as_str().unwrap().to_owned();
             let deadline = Instant::now() + Duration::from_secs(10);
             while native_keyboard_bytes(&rig, "0040:0017", 1)[0] & bit == 0 {
@@ -4395,7 +4395,7 @@ fn native_mcp_foreign_plain_input_conflicts_with_owned_ctrl_and_shift() {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
             let queued = rig.journal().iter().filter(|entry| entry["type"] == "input_queued").count();
-            for (tool, args) in [("dos_key", json!({"key":"a"})), ("dos_type", json!({"text":"a"}))] {
+            for (tool, args) in [("key", json!({"key":"a"})), ("type", json!({"text":"a"}))] {
                 let mut request = CallToolRequestParams::new(tool);
                 request.arguments = Some(args.as_object().unwrap().clone());
                 let refused = foreign.call_tool(request).await.unwrap();
@@ -4407,16 +4407,16 @@ fn native_mcp_foreign_plain_input_conflicts_with_owned_ctrl_and_shift() {
                 assert_eq!(native_keyboard_bytes(&rig, "0040:0017", 1)[0] & bit, bit);
             }
             assert_eq!(rig.journal().iter().filter(|entry| entry["type"] == "input_queued").count(), queued);
-            native_keyboard_accepted(&foreign, "dos_key", json!({"key":"a","mods":[key]})).await;
+            native_keyboard_accepted(&foreign, "key", json!({"key":"a","mods":[key]})).await;
             assert_eq!(native_keyboard_bytes(&rig, "0040:0017", 1)[0] & bit, bit, "explicitly compatible press neither releases nor reasserts the retained modifier");
             if key == "ctrl" {
-                let mut request = CallToolRequestParams::new("dos_key");
+                let mut request = CallToolRequestParams::new("key");
                 request.arguments = Some(json!({"action":"down","key":"shift","mods":["ctrl"],"lease_ms":30000}).as_object().unwrap().clone());
                 assert_eq!(foreign.call_tool(request).await.unwrap().is_error, Some(true), "a second persistent modifier claim cannot borrow the first owner's modifier");
-                let mut request = CallToolRequestParams::new("dos_key");
+                let mut request = CallToolRequestParams::new("key");
                 request.arguments = Some(json!({"action":"down","key":"a","mods":["ctrl"],"lease_ms":30000}).as_object().unwrap().clone());
                 assert_eq!(foreign.call_tool(request).await.unwrap().is_error, Some(true), "a persistent chord cannot claim another owner's retained modifier");
-                let balanced = native_keyboard_accepted(&foreign, "dos_key", json!({"key":"a","mods":["ctrl","shift"]})).await.structured_content.unwrap();
+                let balanced = native_keyboard_accepted(&foreign, "key", json!({"key":"a","mods":["ctrl","shift"]})).await.structured_content.unwrap();
                 let deadline = Instant::now() + Duration::from_secs(5);
                 while rig.get(&format!("/api/ops/{}", balanced["op"].as_u64().unwrap())).json()["state"] != "done" {
                     assert!(Instant::now() < deadline);
@@ -4424,7 +4424,7 @@ fn native_mcp_foreign_plain_input_conflicts_with_owned_ctrl_and_shift() {
                 }
                 assert_eq!(native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 6, 4, "the compatible press releases only its own added Shift");
             }
-            native_keyboard_accepted(&owner, "dos_key", json!({"action":"up","handle":handle})).await;
+            native_keyboard_accepted(&owner, "key", json!({"action":"up","handle":handle})).await;
         }
         foreign.cancel().await.unwrap();
         owner.cancel().await.unwrap();
@@ -4442,17 +4442,17 @@ fn native_mcp_queued_holds_and_legacy_modifier_reservations_conflict_before_effe
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
         let wait = rig.post("/api/input/wait?wait=false", json!({"ms":8000}));
         assert_eq!(wait.status, 200);
-        let down = native_keyboard_accepted(&client, "dos_key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await;
+        let down = native_keyboard_accepted(&client, "key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await;
         let handle = down.structured_content.unwrap()["hold"]["handle"].as_str().unwrap().to_owned();
         assert_eq!(native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 0x04, 0, "owned down is still behind the actual wait");
         assert_eq!(rig.post("/api/input/type", json!({"text":"a"})).status, 409, "queued native modifier already reserves its effective state");
-        native_keyboard_accepted(&client, "dos_key", json!({"action":"up","handle":handle})).await;
+        native_keyboard_accepted(&client, "key", json!({"action":"up","handle":handle})).await;
         let legacy = rig.post("/api/input/key?wait=false", json!({"key":"ctrl","action":"down"}));
         assert_eq!(legacy.status, 200);
         assert_eq!(rig.post("/api/input/key?wait=false", json!({"key":"ctrl","action":"down"})).status, 200, "legacy repeated makes retain their upstream queue behavior");
         let queued = native_queued_input(&rig);
         for args in [json!({"action":"down","key":"ctrl","lease_ms":30000}), json!({"key":"a"})] {
-            let mut request = CallToolRequestParams::new("dos_key");
+            let mut request = CallToolRequestParams::new("key");
             request.arguments = Some(args.as_object().unwrap().clone());
             let refused = client.call_tool(request).await.unwrap();
             assert_eq!(refused.is_error, Some(true), "ordered queued legacy Ctrl prevents conflicting native input");
@@ -4471,16 +4471,16 @@ fn native_mcp_explicit_null_keyboard_fields_allocate_no_actor_work() {
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-        native_keyboard_accepted(&client, "dos_key", json!({"key":"enter"})).await;
-        let down = native_keyboard_accepted(&client, "dos_key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await.structured_content.unwrap();
+        native_keyboard_accepted(&client, "key", json!({"key":"enter"})).await;
+        let down = native_keyboard_accepted(&client, "key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await.structured_content.unwrap();
         for (tool, args) in [
-            ("dos_key", json!({"key":"enter","mods":["ctrl"],"action":null})),
-            ("dos_key", json!({"key":"enter","mods":["ctrl"],"hold_ms":null})),
-            ("dos_key", json!({"key":"enter","mods":["ctrl"],"lease_ms":null})),
-            ("dos_key", json!({"key":"enter","mods":["ctrl"],"handle":null})),
-            ("dos_key", json!({"action":"up","handle":down["hold"]["handle"],"key":null})),
-            ("dos_key", json!({"action":"up","handle":down["hold"]["handle"],"hold_ms":null})),
-            ("dos_type", json!({"text":"dir","delay_ms":null})),
+            ("key", json!({"key":"enter","mods":["ctrl"],"action":null})),
+            ("key", json!({"key":"enter","mods":["ctrl"],"hold_ms":null})),
+            ("key", json!({"key":"enter","mods":["ctrl"],"lease_ms":null})),
+            ("key", json!({"key":"enter","mods":["ctrl"],"handle":null})),
+            ("key", json!({"action":"up","handle":down["hold"]["handle"],"key":null})),
+            ("key", json!({"action":"up","handle":down["hold"]["handle"],"hold_ms":null})),
+            ("type", json!({"text":"dir","delay_ms":null})),
         ] {
             let queued = rig.journal().iter().filter(|entry| entry["type"] == "input_queued").count();
             let before = rig.shared.next_req.load(std::sync::atomic::Ordering::Relaxed);
@@ -4490,7 +4490,7 @@ fn native_mcp_explicit_null_keyboard_fields_allocate_no_actor_work() {
             assert_eq!(rig.shared.next_req.load(std::sync::atomic::Ordering::Relaxed), before, "null fields allocate no actor request");
             assert_eq!(rig.journal().iter().filter(|entry| entry["type"] == "input_queued").count(), queued, "null fields enqueue no guest input");
         }
-        native_keyboard_accepted(&client, "dos_key", json!({"action":"up","handle":down["hold"]["handle"]})).await;
+        native_keyboard_accepted(&client, "key", json!({"action":"up","handle":down["hold"]["handle"]})).await;
         client.cancel().await.unwrap();
     });
     rig.until_idle();
@@ -4504,28 +4504,28 @@ fn native_mcp_invalid_keyboard_requests_allocate_no_actor_work() {
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-        native_keyboard_accepted(&client, "dos_key", json!({"key":"enter"})).await;
+        native_keyboard_accepted(&client, "key", json!({"key":"enter"})).await;
         for (tool, args) in [
-            ("dos_key", json!({"key":"not-a-key"})),
-            ("dos_key", json!({"key":"a","mods":["not-a-modifier"]})),
-            ("dos_key", json!({"key":"a","mods":["ctrl","ctrl"]})),
-            ("dos_key", json!({"key":"ctrl","mods":["ctrl"]})),
-            ("dos_key", json!({"key":"a","mods":["a"]})),
-            ("dos_key", json!({"key":"a","mods":["ctrl","shift","alt","ctrl","shift"]})),
-            ("dos_key", json!({"action":"press"})),
-            ("dos_key", json!({"action":"click","key":"a"})),
-            ("dos_key", json!({"key":"a","lease_ms":50})),
-            ("dos_key", json!({"action":"down","key":"ctrl","lease_ms":100,"hold_ms":50})),
-            ("dos_key", json!({"action":"down","key":"ctrl"})),
-            ("dos_key", json!({"key":"a","hold_ms":0})),
-            ("dos_key", json!({"key":"a","hold_ms":5001})),
-            ("dos_key", json!({"action":"down","key":"ctrl","lease_ms":0})),
-            ("dos_key", json!({"action":"down","key":"ctrl","lease_ms":30001})),
-            ("dos_type", json!({"text":"dir🙂"})),
-            ("dos_type", json!({"text":"dir".repeat(1366)})),
-            ("dos_type", json!({"text":"dir","unexpected":true})),
-            ("dos_type", json!({"text":"dir","delay_ms":5001})),
-            ("dos_type", json!({"text":1})),
+            ("key", json!({"key":"not-a-key"})),
+            ("key", json!({"key":"a","mods":["not-a-modifier"]})),
+            ("key", json!({"key":"a","mods":["ctrl","ctrl"]})),
+            ("key", json!({"key":"ctrl","mods":["ctrl"]})),
+            ("key", json!({"key":"a","mods":["a"]})),
+            ("key", json!({"key":"a","mods":["ctrl","shift","alt","ctrl","shift"]})),
+            ("key", json!({"action":"press"})),
+            ("key", json!({"action":"click","key":"a"})),
+            ("key", json!({"key":"a","lease_ms":50})),
+            ("key", json!({"action":"down","key":"ctrl","lease_ms":100,"hold_ms":50})),
+            ("key", json!({"action":"down","key":"ctrl"})),
+            ("key", json!({"key":"a","hold_ms":0})),
+            ("key", json!({"key":"a","hold_ms":5001})),
+            ("key", json!({"action":"down","key":"ctrl","lease_ms":0})),
+            ("key", json!({"action":"down","key":"ctrl","lease_ms":30001})),
+            ("type", json!({"text":"dir🙂"})),
+            ("type", json!({"text":"dir".repeat(1366)})),
+            ("type", json!({"text":"dir","unexpected":true})),
+            ("type", json!({"text":"dir","delay_ms":5001})),
+            ("type", json!({"text":1})),
         ] {
             let before = rig.shared.next_req.load(std::sync::atomic::Ordering::Relaxed);
             let mut request = CallToolRequestParams::new(tool);
@@ -4547,7 +4547,7 @@ fn native_mcp_invalid_hold_and_operation_requests_preserve_live_authority() {
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-        let down = native_keyboard_accepted(&client, "dos_key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await.structured_content.unwrap();
+        let down = native_keyboard_accepted(&client, "key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await.structured_content.unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         while rig.get(&format!("/api/ops/{}", down["op"].as_u64().unwrap())).json()["state"] != "done" {
             assert!(Instant::now() < deadline);
@@ -4561,23 +4561,23 @@ fn native_mcp_invalid_hold_and_operation_requests_preserve_live_authority() {
         misplaced_separator.remove(16);
         misplaced_separator.insert(17, '.');
         for (tool, args) in [
-            ("dos_key", json!({"action":"up"})),
-            ("dos_key", json!({"action":"up","handle":&handle[..49]})),
-            ("dos_key", json!({"action":"up","handle":handle.replace('.', "_")})),
-            ("dos_key", json!({"action":"up","handle":invalid_hex})),
-            ("dos_key", json!({"action":"up","handle":misplaced_separator})),
-            ("dos_key", json!({"action":"up","handle":handle,"key":"ctrl"})),
-            ("dos_key", json!({"action":"up","handle":handle,"mods":["ctrl"]})),
-            ("dos_key", json!({"action":"up","handle":handle,"hold_ms":1})),
-            ("dos_key", json!({"action":"up","handle":handle,"lease_ms":1})),
-            ("dos_key", json!({"action":"renew","handle":handle})),
-            ("dos_key", json!({"action":"renew","handle":handle,"lease_ms":0})),
-            ("dos_key", json!({"action":"renew","handle":handle,"lease_ms":30001})),
-            ("dos_key", json!({"key":"a","handle":handle})),
-            ("dos_operation", json!({"instance":&instance[..15],"op":down["op"]})),
-            ("dos_operation", json!({"instance":format!("g{}", &instance[1..]),"op":down["op"]})),
-            ("dos_operation", json!({"instance":instance,"op":0})),
-            ("dos_operation", json!({"instance":instance,"op":down["op"],"unexpected":true})),
+            ("key", json!({"action":"up"})),
+            ("key", json!({"action":"up","handle":&handle[..49]})),
+            ("key", json!({"action":"up","handle":handle.replace('.', "_")})),
+            ("key", json!({"action":"up","handle":invalid_hex})),
+            ("key", json!({"action":"up","handle":misplaced_separator})),
+            ("key", json!({"action":"up","handle":handle,"key":"ctrl"})),
+            ("key", json!({"action":"up","handle":handle,"mods":["ctrl"]})),
+            ("key", json!({"action":"up","handle":handle,"hold_ms":1})),
+            ("key", json!({"action":"up","handle":handle,"lease_ms":1})),
+            ("key", json!({"action":"renew","handle":handle})),
+            ("key", json!({"action":"renew","handle":handle,"lease_ms":0})),
+            ("key", json!({"action":"renew","handle":handle,"lease_ms":30001})),
+            ("key", json!({"key":"a","handle":handle})),
+            ("operation", json!({"instance":&instance[..15],"op":down["op"]})),
+            ("operation", json!({"instance":format!("g{}", &instance[1..]),"op":down["op"]})),
+            ("operation", json!({"instance":instance,"op":0})),
+            ("operation", json!({"instance":instance,"op":down["op"],"unexpected":true})),
         ] {
             let before = rig.shared.next_req.load(std::sync::atomic::Ordering::Relaxed);
             let mut request = CallToolRequestParams::new(tool);
@@ -4592,14 +4592,14 @@ fn native_mcp_invalid_hold_and_operation_requests_preserve_live_authority() {
         let mut unknown = handle.to_owned();
         unknown.replace_range(49..50, if &handle[49..50] == "0" { "1" } else { "0" });
         for (handle, expected) in [(stale, "stale_instance"), (unknown, "unknown_hold")] {
-            let mut request = CallToolRequestParams::new("dos_key");
+            let mut request = CallToolRequestParams::new("key");
             request.arguments = Some(json!({"action":"up","handle":handle}).as_object().unwrap().clone());
             let refused = client.call_tool(request).await.unwrap();
             assert_eq!(refused.is_error, Some(true));
             assert_eq!(refused.structured_content.as_ref().unwrap()["error"]["code"], expected);
             assert_eq!(native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 4, 4);
         }
-        let status = native_keyboard_accepted(&client, "dos_status", json!({})).await.structured_content.unwrap();
+        let status = native_keyboard_accepted(&client, "status", json!({})).await.structured_content.unwrap();
         let run = rig.post("/api/control/run", json!({"command":"LOOP.COM"}));
         assert_eq!(run.status, 200, "{}", run.body);
         for (instance, op, expected) in [
@@ -4607,14 +4607,14 @@ fn native_mcp_invalid_hold_and_operation_requests_preserve_live_authority() {
             (instance.to_owned(), status["req"].clone(), "unknown_operation"),
             (instance.to_owned(), run.json()["op"].clone(), "unknown_operation"),
         ] {
-            let mut request = CallToolRequestParams::new("dos_operation");
+            let mut request = CallToolRequestParams::new("operation");
             request.arguments = Some(json!({"instance":instance,"op":op}).as_object().unwrap().clone());
             let refused = client.call_tool(request).await.unwrap();
             assert_eq!(refused.is_error, Some(true));
             assert_eq!(refused.structured_content.as_ref().unwrap()["error"]["code"], expected, "operation lookup preserves its declared error");
             assert_eq!(native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 4, 4);
         }
-        native_keyboard_accepted(&client, "dos_key", json!({"action":"up","handle":down["hold"]["handle"]})).await;
+        native_keyboard_accepted(&client, "key", json!({"action":"up","handle":down["hold"]["handle"]})).await;
         client.cancel().await.unwrap();
     });
     rig.until_idle();
@@ -4630,7 +4630,7 @@ fn native_mcp_live_hold_capacity_is_separate_from_delivered_job_capacity() {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
         let mut holds = Vec::new();
         for key in ["f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8"] {
-            let down = native_keyboard_accepted(&client, "dos_key", json!({"action":"down","key":key,"lease_ms":30000})).await.structured_content.unwrap();
+            let down = native_keyboard_accepted(&client, "key", json!({"action":"down","key":key,"lease_ms":30000})).await.structured_content.unwrap();
             let deadline = Instant::now() + Duration::from_secs(5);
             while rig.get(&format!("/api/ops/{}", down["op"].as_u64().unwrap())).json()["state"] != "done" {
                 assert!(Instant::now() < deadline);
@@ -4640,7 +4640,7 @@ fn native_mcp_live_hold_capacity_is_separate_from_delivered_job_capacity() {
             assert_eq!(rig.shared.native_jobs.available_permits(), 8, "delivered down frees its job while retaining its hold");
         }
         let before = rig.journal().iter().filter(|entry| entry["type"] == "input_queued").count();
-        let mut request = CallToolRequestParams::new("dos_key");
+        let mut request = CallToolRequestParams::new("key");
         request.arguments = Some(json!({"action":"down","key":"f9","lease_ms":30000}).as_object().unwrap().clone());
         let refused = client.call_tool(request).await.unwrap();
         assert_eq!(refused.is_error, Some(true));
@@ -4653,11 +4653,11 @@ fn native_mcp_live_hold_capacity_is_separate_from_delivered_job_capacity() {
         assert_eq!(rig.post("/api/input/key", json!({"key":"a","action":"up"})).status, 200, "an unrelated legacy release preserves native claims");
         assert_eq!(rig.post("/api/input/type", json!({"text":"é"})).status, 200, "supported character fallback preserves unrelated holds");
         for hold in &holds {
-            let observed = native_keyboard_accepted(&client, "dos_operation", json!({"instance":hold["instance"],"op":hold["op"]})).await.structured_content.unwrap();
+            let observed = native_keyboard_accepted(&client, "operation", json!({"instance":hold["instance"],"op":hold["op"]})).await.structured_content.unwrap();
             assert_eq!(observed["hold"]["state"], "delivered", "capacity rejection preserves each existing hold");
-            native_keyboard_accepted(&client, "dos_key", json!({"action":"up","handle":hold["hold"]["handle"]})).await;
+            native_keyboard_accepted(&client, "key", json!({"action":"up","handle":hold["hold"]["handle"]})).await;
         }
-        native_keyboard_accepted(&client, "dos_key", json!({"action":"down","key":"f9","lease_ms":30000})).await;
+        native_keyboard_accepted(&client, "key", json!({"action":"down","key":"f9","lease_ms":30000})).await;
         assert_eq!(http(rig.addr, "DELETE", "/api/input", &[], None).status, 200);
         client.cancel().await.unwrap();
     });
@@ -4674,24 +4674,24 @@ fn native_mcp_ended_hold_eviction_cannot_release_a_new_owner() {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
         let mut first = None;
         for _ in 0..=super::super::journal::OPS_CAPACITY {
-            let down = native_keyboard_accepted(&client, "dos_key", json!({"action":"down","key":"f1","lease_ms":30000})).await.structured_content.unwrap();
+            let down = native_keyboard_accepted(&client, "key", json!({"action":"down","key":"f1","lease_ms":30000})).await.structured_content.unwrap();
             if first.is_none() { first = Some(down.clone()); }
-            native_keyboard_accepted(&client, "dos_key", json!({"action":"up","handle":down["hold"]["handle"]})).await;
+            native_keyboard_accepted(&client, "key", json!({"action":"up","handle":down["hold"]["handle"]})).await;
         }
-        let live = native_keyboard_accepted(&client, "dos_key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await.structured_content.unwrap();
+        let live = native_keyboard_accepted(&client, "key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await.structured_content.unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         while rig.get(&format!("/api/ops/{}", live["op"].as_u64().unwrap())).json()["state"] != "done" {
             assert!(Instant::now() < deadline);
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        let mut request = CallToolRequestParams::new("dos_key");
+        let mut request = CallToolRequestParams::new("key");
         request.arguments = Some(json!({"action":"up","handle":first.unwrap()["hold"]["handle"]}).as_object().unwrap().clone());
         let refused = client.call_tool(request).await.unwrap();
         assert_eq!(refused.is_error, Some(true));
         assert_eq!(refused.structured_content.as_ref().unwrap()["error"]["code"], "unknown_hold", "ended history has a bounded retention window");
         assert_eq!(native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 4, 4, "evicted authority cannot release a current owner's Ctrl");
         assert_eq!(rig.shared.native_jobs.available_permits(), 8);
-        native_keyboard_accepted(&client, "dos_key", json!({"action":"up","handle":live["hold"]["handle"]})).await;
+        native_keyboard_accepted(&client, "key", json!({"action":"up","handle":live["hold"]["handle"]})).await;
         client.cancel().await.unwrap();
     });
     rig.until_idle();
@@ -4706,7 +4706,7 @@ fn native_mcp_wrong_and_old_released_handles_preserve_new_same_key_hold() {
     runtime.block_on(async {
         let owner = native_keyboard_client(&rig, ProtocolVersion::V_2025_11_25).await;
         let foreign = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-        let down = native_keyboard_accepted(&owner, "dos_key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await;
+        let down = native_keyboard_accepted(&owner, "key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await;
         let handle = down.structured_content.unwrap()["hold"]["handle"].as_str().unwrap().to_owned();
         let deadline = Instant::now() + Duration::from_secs(10);
         while native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 0x04 == 0 {
@@ -4718,19 +4718,19 @@ fn native_mcp_wrong_and_old_released_handles_preserve_new_same_key_hold() {
         *last = if *last == b'0' { b'1' } else { b'0' };
         let wrong = String::from_utf8(wrong).unwrap();
         for args in [json!({"action":"up","handle":wrong}), json!({"action":"renew","handle":wrong,"lease_ms":30000}), json!({"action":"down","key":"ctrl","lease_ms":30000})] {
-            let mut request = CallToolRequestParams::new("dos_key");
+            let mut request = CallToolRequestParams::new("key");
             request.arguments = Some(args.as_object().unwrap().clone());
             let refused = foreign.call_tool(request).await.unwrap();
             assert_eq!(refused.is_error, Some(true), "wrong ownership or duplicate key claim rejects");
             assert_ne!(native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 0x04, 0, "rejection preserves the real owned Ctrl");
         }
-        native_keyboard_accepted(&owner, "dos_key", json!({"action":"up","handle":handle})).await;
+        native_keyboard_accepted(&owner, "key", json!({"action":"up","handle":handle})).await;
         let deadline = Instant::now() + Duration::from_secs(10);
         while native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 0x04 != 0 {
             assert!(Instant::now() < deadline, "matching original up delivers");
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        let next = native_keyboard_accepted(&foreign, "dos_key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await;
+        let next = native_keyboard_accepted(&foreign, "key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await;
         let next_handle = next.structured_content.unwrap()["hold"]["handle"].as_str().unwrap().to_owned();
         assert_ne!(next_handle, handle, "new claim has a distinct authoritative handle");
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -4738,10 +4738,10 @@ fn native_mcp_wrong_and_old_released_handles_preserve_new_same_key_hold() {
             assert!(Instant::now() < deadline, "new owned Ctrl delivers");
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        let duplicate = native_keyboard_accepted(&owner, "dos_key", json!({"action":"up","handle":handle})).await;
+        let duplicate = native_keyboard_accepted(&owner, "key", json!({"action":"up","handle":handle})).await;
         assert_eq!(duplicate.structured_content.unwrap()["hold"]["state"], "released");
         assert_ne!(native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 0x04, 0, "old duplicate up never releases a newer same-key owner");
-        native_keyboard_accepted(&foreign, "dos_key", json!({"action":"up","handle":next_handle})).await;
+        native_keyboard_accepted(&foreign, "key", json!({"action":"up","handle":next_handle})).await;
         foreign.cancel().await.unwrap();
         owner.cancel().await.unwrap();
     });
@@ -4758,7 +4758,7 @@ fn native_mcp_modifier_sides_cannot_share_or_toggle_an_owned_effect() {
         runtime.block_on(async {
             let owner = native_keyboard_client(&rig, ProtocolVersion::V_2025_11_25).await;
             let foreign = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-            let down = native_keyboard_accepted(&owner, "dos_key", json!({"action":"down","key":held,"lease_ms":30000})).await.structured_content.unwrap();
+            let down = native_keyboard_accepted(&owner, "key", json!({"action":"down","key":held,"lease_ms":30000})).await.structured_content.unwrap();
             let deadline = Instant::now() + Duration::from_secs(5);
             while native_keyboard_bytes(&rig, "0040:0017", 1)[0] & mask == 0 {
                 assert!(Instant::now() < deadline);
@@ -4767,13 +4767,13 @@ fn native_mcp_modifier_sides_cannot_share_or_toggle_an_owned_effect() {
             let before = native_keyboard_bytes(&rig, "0040:0017", 2);
             let enhanced = native_keyboard_bytes(&rig, "0040:0096", 1);
             for args in [json!({"action":"down","key":other,"lease_ms":30000}), json!({"key":"a","mods":[other]})] {
-                let mut request = CallToolRequestParams::new("dos_key");
+                let mut request = CallToolRequestParams::new("key");
                 request.arguments = Some(args.as_object().unwrap().clone());
                 assert_eq!(foreign.call_tool(request).await.unwrap().is_error, Some(true), "same modifier effect cannot be independently owned or toggled");
                 assert_eq!(native_keyboard_bytes(&rig, "0040:0017", 2), before);
                 assert_eq!(native_keyboard_bytes(&rig, "0040:0096", 1), enhanced);
             }
-            let borrowed = native_keyboard_accepted(&foreign, "dos_key", json!({"key":"a","mods":[held]})).await.structured_content.unwrap();
+            let borrowed = native_keyboard_accepted(&foreign, "key", json!({"key":"a","mods":[held]})).await.structured_content.unwrap();
             let deadline = Instant::now() + Duration::from_secs(5);
             while rig.get(&format!("/api/ops/{}", borrowed["op"].as_u64().unwrap())).json()["state"] != "done" {
                 assert!(Instant::now() < deadline, "exact physical modifier borrowing must deliver");
@@ -4781,7 +4781,7 @@ fn native_mcp_modifier_sides_cannot_share_or_toggle_an_owned_effect() {
             }
             assert_eq!(native_keyboard_bytes(&rig, "0040:0017", 2), before);
             assert_eq!(native_keyboard_bytes(&rig, "0040:0096", 1), enhanced);
-            native_keyboard_accepted(&owner, "dos_key", json!({"action":"up","handle":down["hold"]["handle"]})).await;
+            native_keyboard_accepted(&owner, "key", json!({"action":"up","handle":down["hold"]["handle"]})).await;
             foreign.cancel().await.unwrap();
             owner.cancel().await.unwrap();
         });
@@ -4802,7 +4802,7 @@ fn native_mcp_projects_remaining_legacy_modifier_sides_after_a_release() {
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-        let mut request = CallToolRequestParams::new("dos_key");
+        let mut request = CallToolRequestParams::new("key");
         request.arguments = Some(json!({"key":"a"}).as_object().unwrap().clone());
         assert_eq!(client.call_tool(request).await.unwrap().is_error, Some(true), "remaining physical Ctrl prevents unmodified native input");
         client.cancel().await.unwrap();
@@ -4826,13 +4826,13 @@ fn native_mcp_queued_legacy_modifier_sides_keep_exact_borrowing() {
         runtime.block_on(async {
             let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
             let before = native_queued_input(&rig);
-            for (tool, args) in [("dos_key", json!({"key":"a"})), ("dos_type", json!({"text":"dir"}))] {
+            for (tool, args) in [("key", json!({"key":"a"})), ("type", json!({"text":"dir"}))] {
                 let mut request = CallToolRequestParams::new(tool);
                 request.arguments = Some(args.as_object().unwrap().clone());
                 assert_eq!(client.call_tool(request).await.unwrap().is_error, Some(true), "queued remaining modifier preserves unmodified key/text semantics");
             }
             assert_eq!(native_queued_input(&rig), before);
-            let borrowed = native_keyboard_accepted(&client, "dos_key", json!({"key":"a","mods":[held]})).await.structured_content.unwrap();
+            let borrowed = native_keyboard_accepted(&client, "key", json!({"key":"a","mods":[held]})).await.structured_content.unwrap();
             assert_eq!(borrowed["held"], true);
             assert_eq!(rig.post("/api/control/resume", json!({})).status, 200);
             let deadline = Instant::now() + Duration::from_secs(5);
@@ -4859,19 +4859,19 @@ fn native_mcp_typing_cannot_release_a_retained_character_key() {
     runtime.block_on(async {
         let owner = native_keyboard_client(&rig, ProtocolVersion::V_2025_11_25).await;
         let foreign = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-        let down = native_keyboard_accepted(&owner, "dos_key", json!({"action":"down","key":"a","lease_ms":30000})).await.structured_content.unwrap();
+        let down = native_keyboard_accepted(&owner, "key", json!({"action":"down","key":"a","lease_ms":30000})).await.structured_content.unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         while rig.get(&format!("/api/ops/{}", down["op"].as_u64().unwrap())).json()["state"] != "done" {
             assert!(Instant::now() < deadline);
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         let queued = rig.journal().iter().filter(|entry| entry["type"] == "input_queued").count();
-        let mut request = CallToolRequestParams::new("dos_type");
+        let mut request = CallToolRequestParams::new("type");
         request.arguments = Some(json!({"text":"ba"}).as_object().unwrap().clone());
         assert_eq!(foreign.call_tool(request).await.unwrap().is_error, Some(true), "typing must not make and release another owner's character key");
         assert_eq!(rig.journal().iter().filter(|entry| entry["type"] == "input_queued").count(), queued, "the whole text must reject before its prefix");
-        native_keyboard_accepted(&foreign, "dos_type", json!({"text":"b"})).await;
-        native_keyboard_accepted(&owner, "dos_key", json!({"action":"up","handle":down["hold"]["handle"]})).await;
+        native_keyboard_accepted(&foreign, "type", json!({"text":"b"})).await;
+        native_keyboard_accepted(&owner, "key", json!({"action":"up","handle":down["hold"]["handle"]})).await;
         foreign.cancel().await.unwrap();
         owner.cancel().await.unwrap();
     });
@@ -4890,10 +4890,10 @@ fn native_mcp_keyboard_discovery_advertises_exact_implemented_contracts() {
             let tools = client.list_all_tools().await.unwrap();
             let mut names = tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
             names.sort_unstable();
-            assert_eq!(names, ["dos_capture", "dos_key", "dos_mouse", "dos_operation", "dos_status", "dos_type"], "native discovery exposes exactly its real contracts");
+            assert_eq!(names, ["capture", "key", "mouse", "operation", "status", "type"], "native discovery exposes exactly its real contracts");
             for tool in &tools {
                 let hints = tool.annotations.as_ref().expect("native tools describe their side effects");
-                let read_only = matches!(tool.name.as_ref(), "dos_status" | "dos_capture" | "dos_operation");
+                let read_only = matches!(tool.name.as_ref(), "status" | "capture" | "operation");
                 assert_eq!(hints.read_only_hint, Some(read_only));
                 assert_eq!(hints.open_world_hint, Some(false));
                 if !read_only {
@@ -4902,11 +4902,11 @@ fn native_mcp_keyboard_discovery_advertises_exact_implemented_contracts() {
                 }
                 assert_eq!(tool.input_schema.get("type").and_then(Value::as_str), Some("object"));
                 assert_eq!(tool.input_schema.get("additionalProperties"), Some(&Value::Bool(false)));
-                if matches!(tool.name.as_ref(), "dos_status" | "dos_capture") {
+                if matches!(tool.name.as_ref(), "status" | "capture") {
                     assert_eq!(tool.input_schema.len(), 2, "observation inputs remain empty objects");
                 }
             }
-            let key = tools.iter().find(|tool| tool.name == "dos_key").unwrap();
+            let key = tools.iter().find(|tool| tool.name == "key").unwrap();
             assert_eq!(key.input_schema["properties"]["action"]["enum"], json!(["press", "down", "up", "renew"]));
             assert_eq!(key.input_schema["properties"]["hold_ms"]["maximum"], 5000);
             assert_eq!(key.input_schema["properties"]["lease_ms"]["maximum"], 30000);
@@ -4951,20 +4951,20 @@ fn native_mcp_operation_distinguishes_delivered_down_from_retained_hold() {
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-        let down = native_keyboard_accepted(&client, "dos_key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await.structured_content.unwrap();
+        let down = native_keyboard_accepted(&client, "key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await.structured_content.unwrap();
         let operation = down["op"].as_u64().unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         while rig.get(&format!("/api/ops/{operation}")).json()["state"] != "done" {
             assert!(Instant::now() < deadline);
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        let observed = native_keyboard_accepted(&client, "dos_operation", json!({"instance":down["instance"],"op":operation})).await.structured_content.unwrap();
+        let observed = native_keyboard_accepted(&client, "operation", json!({"instance":down["instance"],"op":operation})).await.structured_content.unwrap();
         assert_eq!(observed["delivery"], "delivered");
         assert_eq!(observed["hold"]["state"], "delivered");
         assert_eq!(observed["hold"]["handle"], down["hold"]["handle"]);
         assert_ne!(native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 0x04, 0, "delivered down does not mean released");
-        let up = native_keyboard_accepted(&client, "dos_key", json!({"action":"up","handle":down["hold"]["handle"]})).await.structured_content.unwrap();
-        let released = native_keyboard_accepted(&client, "dos_operation", json!({"instance":up["instance"],"op":up["op"]})).await.structured_content.unwrap();
+        let up = native_keyboard_accepted(&client, "key", json!({"action":"up","handle":down["hold"]["handle"]})).await.structured_content.unwrap();
+        let released = native_keyboard_accepted(&client, "operation", json!({"instance":up["instance"],"op":up["op"]})).await.structured_content.unwrap();
         assert_eq!(released["delivery"], "delivered", "release has its own truthful operation");
         assert_eq!(released["hold"]["state"], "released");
         client.cancel().await.unwrap();
@@ -4980,7 +4980,7 @@ fn native_mcp_strict_restore_reports_all_input_without_inventing_pause_waits() {
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-        let down = native_keyboard_accepted(&client, "dos_key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await.structured_content.unwrap();
+        let down = native_keyboard_accepted(&client, "key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await.structured_content.unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         while rig.get(&format!("/api/ops/{}", down["op"].as_u64().unwrap())).json()["state"] != "done" {
             assert!(Instant::now() < deadline);
@@ -4992,7 +4992,7 @@ fn native_mcp_strict_restore_reports_all_input_without_inventing_pause_waits() {
         for _ in 0..2 {
             assert_eq!(rig.post("/api/input/wait?wait=false", json!({"ms":60000})).status, 200);
         }
-        native_keyboard_accepted(&client, "dos_key", json!({"key":"a","mods":["ctrl"]})).await;
+        native_keyboard_accepted(&client, "key", json!({"key":"a","mods":["ctrl"]})).await;
         let blocked = rig.post("/api/state/save", json!({"path":"counts-blocked.state","strict_match":true}));
         assert_eq!(blocked.status, 409);
         let queued = blocked.json()["input_queued"].as_u64().unwrap();
@@ -5023,18 +5023,18 @@ fn native_mcp_strict_restore_clears_legacy_spans_before_new_native_input() {
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-        let down = native_keyboard_accepted(&client, "dos_key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await.structured_content.unwrap();
+        let down = native_keyboard_accepted(&client, "key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await.structured_content.unwrap();
         assert_eq!(rig.post("/api/control/resume", json!({})).status, 200);
         let deadline = Instant::now() + Duration::from_secs(10);
         while rig.get(&format!("/api/ops/{}", down["op"].as_u64().unwrap())).json()["state"] != "done" {
             assert!(Instant::now() < deadline, "new native input completes after strict restore");
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        let operation = native_keyboard_accepted(&client, "dos_operation", json!({"instance":down["instance"],"op":down["op"]})).await.structured_content.unwrap();
+        let operation = native_keyboard_accepted(&client, "operation", json!({"instance":down["instance"],"op":down["op"]})).await.structured_content.unwrap();
         assert_eq!(operation["hold"]["state"], "delivered", "strict restore discards legacy ownership spans before new native input");
         assert_ne!(native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 0x04, 0, "new native Ctrl reaches actual guest keyboard");
         assert_eq!(rig.shared.native_jobs.available_permits(), 8, "completed native input recovers every job permit");
-        native_keyboard_accepted(&client, "dos_key", json!({"action":"up","handle":down["hold"]["handle"]})).await;
+        native_keyboard_accepted(&client, "key", json!({"action":"up","handle":down["hold"]["handle"]})).await;
         assert_eq!(native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 0x04, 0, "matching up releases the new hold");
         client.cancel().await.unwrap();
     });
@@ -5050,7 +5050,7 @@ fn native_mcp_saved_keyboard_restore_invalidates_old_handle_without_break_codes(
         let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
         runtime.block_on(async {
             let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-            let down = native_keyboard_accepted(&client, "dos_key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await.structured_content.unwrap();
+            let down = native_keyboard_accepted(&client, "key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await.structured_content.unwrap();
             let deadline = Instant::now() + Duration::from_secs(10);
             while native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 0x04 == 0 {
                 assert!(Instant::now() < deadline);
@@ -5065,7 +5065,7 @@ fn native_mcp_saved_keyboard_restore_invalidates_old_handle_without_break_codes(
             assert_eq!(loaded.status, 200, "{}", loaded.body);
             assert_eq!(native_keyboard_bytes(&rig, "0040:0017", 1), saved_flags, "restored keyboard bytes remain intact");
             for args in [json!({"action":"up","handle":down["hold"]["handle"]}), json!({"action":"renew","handle":down["hold"]["handle"],"lease_ms":30000})] {
-                let mut request = CallToolRequestParams::new("dos_key");
+                let mut request = CallToolRequestParams::new("key");
                 request.arguments = Some(args.as_object().unwrap().clone());
                 let refused = client.call_tool(request).await.unwrap();
                 assert_eq!(refused.is_error, Some(true), "same-instance restore invalidates old authority");
@@ -5087,7 +5087,7 @@ fn native_mcp_expired_modifier_borrow_never_delivers_a_late_key() {
     runtime.block_on(async {
         let owner = native_keyboard_client(&rig, ProtocolVersion::V_2025_11_25).await;
         let foreign = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-        native_keyboard_accepted(&owner, "dos_key", json!({"action":"down","key":"ctrl","lease_ms":250})).await;
+        native_keyboard_accepted(&owner, "key", json!({"action":"down","key":"ctrl","lease_ms":250})).await;
         let deadline = Instant::now() + Duration::from_secs(10);
         while native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 0x04 == 0 {
             assert!(Instant::now() < deadline);
@@ -5095,7 +5095,7 @@ fn native_mcp_expired_modifier_borrow_never_delivers_a_late_key() {
         }
         let tail = native_keyboard_bytes(&rig, "0040:001C", 2);
         assert_eq!(rig.post("/api/input/wait?wait=false", json!({"ms":1000})).status, 200);
-        let accepted = native_keyboard_accepted(&foreign, "dos_key", json!({"key":"a","mods":["ctrl"]})).await.structured_content.unwrap();
+        let accepted = native_keyboard_accepted(&foreign, "key", json!({"key":"a","mods":["ctrl"]})).await.structured_content.unwrap();
         let operation = accepted["op"].as_u64().unwrap();
         tokio::time::sleep(Duration::from_millis(1200)).await;
         let state = rig.get(&format!("/api/ops/{operation}")).json()["state"].clone();
@@ -5117,13 +5117,13 @@ fn native_mcp_admin_clear_invalidates_queued_hold_and_releases_job_capacity() {
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
         assert_eq!(rig.post("/api/input/wait?wait=false", json!({"ms":8000})).status, 200);
-        let down = native_keyboard_accepted(&client, "dos_key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await.structured_content.unwrap();
+        let down = native_keyboard_accepted(&client, "key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await.structured_content.unwrap();
         assert_eq!(down["hold"]["state"], "reserved");
         let cleared = http(rig.addr, "DELETE", "/api/input", &[], None);
         assert_eq!(cleared.status, 200);
         assert!(cleared.json()["cancelled"].as_array().unwrap().contains(&down["op"]), "admin clear reports the native operation it cancelled");
         assert_eq!(rig.shared.native_jobs.available_permits(), 8, "admin clear retires actual queued job ownership");
-        let mut request = CallToolRequestParams::new("dos_key");
+        let mut request = CallToolRequestParams::new("key");
         request.arguments = Some(json!({"action":"renew","handle":down["hold"]["handle"],"lease_ms":30000}).as_object().unwrap().clone());
         let refused = client.call_tool(request).await.unwrap();
         assert_eq!(refused.is_error, Some(true), "cleared queued handle is invalidated");
@@ -5141,7 +5141,7 @@ fn native_mcp_deterministic_held_input_survives_client_wait_and_is_queryable() {
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     runtime.block_on(async {
         let first = native_keyboard_client(&rig, ProtocolVersion::V_2025_11_25).await;
-        let accepted = native_keyboard_accepted(&first, "dos_type", json!({"text":"dir"})).await.structured_content.unwrap();
+        let accepted = native_keyboard_accepted(&first, "type", json!({"text":"dir"})).await.structured_content.unwrap();
         assert_eq!(accepted["held"], true);
         assert_eq!(accepted["acceptance"], "accepted");
         assert_eq!(accepted["wait"], "pending", "held input is pending until actual delivery");
@@ -5149,7 +5149,7 @@ fn native_mcp_deterministic_held_input_survives_client_wait_and_is_queryable() {
         assert_eq!(rig.get(&format!("/api/ops/{operation}")).json()["state"], "pending");
         first.cancel().await.unwrap();
         let next = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-        let pending = native_keyboard_accepted(&next, "dos_operation", json!({"instance":accepted["instance"],"op":operation})).await.structured_content.unwrap();
+        let pending = native_keyboard_accepted(&next, "operation", json!({"instance":accepted["instance"],"op":operation})).await.structured_content.unwrap();
         assert_eq!(pending["delivery"], "pending", "dropping caller does not clear accepted input");
         assert_eq!(rig.post("/api/control/resume", json!({})).status, 200);
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -5157,7 +5157,7 @@ fn native_mcp_deterministic_held_input_survives_client_wait_and_is_queryable() {
             assert!(Instant::now() < deadline, "operation: {}; guest: {}", rig.get(&format!("/api/ops/{operation}")).body, rig.get("/api/status").body);
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        let delivered = native_keyboard_accepted(&next, "dos_operation", json!({"instance":accepted["instance"],"op":operation})).await.structured_content.unwrap();
+        let delivered = native_keyboard_accepted(&next, "operation", json!({"instance":accepted["instance"],"op":operation})).await.structured_content.unwrap();
         assert_eq!(delivered["delivery"], "delivered");
         next.cancel().await.unwrap();
     });
@@ -5173,7 +5173,7 @@ fn native_mcp_shutdown_releases_owned_keyboard_before_immutable_shutdown() {
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-        native_keyboard_accepted(&client, "dos_key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await;
+        native_keyboard_accepted(&client, "key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await;
         let deadline = Instant::now() + Duration::from_secs(10);
         while native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 0x04 == 0 {
             assert!(Instant::now() < deadline);
@@ -5197,7 +5197,7 @@ fn native_mcp_mouse_running_deterministic_input_respects_existing_pause_policy()
     runtime.block_on(async {
         for version in [ProtocolVersion::V_2025_11_25, ProtocolVersion::V_2026_07_28] {
             let client = native_keyboard_client(&rig, version).await;
-            let picture = native_keyboard_accepted(&client, "dos_capture", json!({})).await
+            let picture = native_keyboard_accepted(&client, "capture", json!({})).await
                 .structured_content.unwrap()["mouse_picture"].clone();
             assert_eq!(rig.post("/api/control/resume", json!({"until_ms":100000})).status, 200);
             let deadline = Instant::now() + Duration::from_secs(10);
@@ -5213,7 +5213,7 @@ fn native_mcp_mouse_running_deterministic_input_respects_existing_pause_policy()
                 json!({"action":"drag","path":[{"x":100,"y":80},{"x":120,"y":80}]})] {
                 let mut args = args;
                 args["picture"] = picture.clone();
-                let mut request = CallToolRequestParams::new("dos_mouse");
+                let mut request = CallToolRequestParams::new("mouse");
                 request.arguments = Some(args.as_object().unwrap().clone());
                 let refused = client.call_tool(request.clone()).await.unwrap();
                 assert_eq!(refused.is_error, Some(true), "native mouse preserves running deterministic pause policy");
@@ -5222,7 +5222,7 @@ fn native_mcp_mouse_running_deterministic_input_respects_existing_pause_policy()
             }
             assert_eq!(rig.post("/api/control/pause", json!({})).status, 200);
             rig.until_paused();
-            let accepted = native_keyboard_accepted(&client, "dos_mouse",
+            let accepted = native_keyboard_accepted(&client, "mouse",
                 json!({"action":"down","picture":picture,"lease_ms":30000})).await.structured_content.unwrap();
             assert_eq!(accepted["held"], true, "paused deterministic mouse input is held for resume");
             assert_eq!(rig.post("/api/control/resume", json!({"until_ms":100000})).status, 200);
@@ -5230,9 +5230,9 @@ fn native_mcp_mouse_running_deterministic_input_respects_existing_pause_policy()
                 assert!(Instant::now() < deadline, "paused admission reaches the guest after resume");
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
-            native_keyboard_accepted(&client, "dos_mouse",
+            native_keyboard_accepted(&client, "mouse",
                 json!({"action":"renew","handle":accepted["hold"]["handle"],"lease_ms":30000})).await;
-            native_keyboard_accepted(&client, "dos_mouse",
+            native_keyboard_accepted(&client, "mouse",
                 json!({"action":"up","handle":accepted["hold"]["handle"]})).await;
             while rig.get("/api/status").json()["mouse"]["buttons"] != 0 {
                 assert!(Instant::now() < deadline, "up remains available while deterministic mode runs");
@@ -5261,7 +5261,7 @@ fn native_mcp_running_deterministic_input_respects_existing_pause_policy() {
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
         let queued = rig.journal().iter().filter(|entry| entry["type"] == "input_queued").count();
-        let mut request = CallToolRequestParams::new("dos_type");
+        let mut request = CallToolRequestParams::new("type");
         request.arguments = Some(json!({"text":"dir"}).as_object().unwrap().clone());
         let refused = client.call_tool(request).await.unwrap();
         assert_eq!(refused.is_error, Some(true), "native mutation preserves deterministic paused-only admission");
@@ -5280,11 +5280,11 @@ fn native_mcp_late_actor_timeout_reports_unknown_without_replaying_input() {
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-        let schema = client.list_all_tools().await.unwrap().into_iter().find(|tool| tool.name == "dos_key").unwrap().output_schema.unwrap();
+        let schema = client.list_all_tools().await.unwrap().into_iter().find(|tool| tool.name == "key").unwrap().output_schema.unwrap();
         let validator = jsonschema::validator_for(&Value::Object((*schema).clone())).unwrap();
         let before = rig.journal().iter().filter(|entry| entry["type"] == "input_queued").count();
         gate.store(false, std::sync::atomic::Ordering::Release);
-        let mut request = rmcp::model::CallToolRequestParams::new("dos_key");
+        let mut request = rmcp::model::CallToolRequestParams::new("key");
         request.arguments = Some(json!({"action":"down","key":"ctrl","lease_ms":30000}).as_object().unwrap().clone());
         let response = client.call_tool(request).await;
         gate.store(true, std::sync::atomic::Ordering::Release);
@@ -5315,14 +5315,14 @@ fn native_mcp_settings_handoff_resets_owned_jobs_and_handles() {
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-        let down = native_keyboard_accepted(&client, "dos_key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await.structured_content.unwrap();
+        let down = native_keyboard_accepted(&client, "key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await.structured_content.unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         while native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 0x04 == 0 {
             assert!(Instant::now() < deadline);
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         assert_eq!(rig.post("/api/input/wait?wait=false", json!({"ms":8000})).status, 200);
-        let queued = native_keyboard_accepted(&client, "dos_key", json!({"key":"a","mods":["ctrl"]})).await.structured_content.unwrap();
+        let queued = native_keyboard_accepted(&client, "key", json!({"key":"a","mods":["ctrl"]})).await.structured_content.unwrap();
         assert_eq!(rig.shared.native_jobs.available_permits(), 7);
         action.store(1, std::sync::atomic::Ordering::Release);
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -5332,9 +5332,9 @@ fn native_mcp_settings_handoff_resets_owned_jobs_and_handles() {
         }
         assert_eq!(native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 0x04, 0);
         assert_eq!(rig.shared.native_jobs.available_permits(), 8, "settings handoff cancels only owned queued jobs");
-        let operation = native_keyboard_accepted(&client, "dos_operation", json!({"instance":queued["instance"],"op":queued["op"]})).await.structured_content.unwrap();
+        let operation = native_keyboard_accepted(&client, "operation", json!({"instance":queued["instance"],"op":queued["op"]})).await.structured_content.unwrap();
         assert_eq!(operation["delivery"], "cancelled", "settings handoff is a cancellation, not a failed delivery");
-        let mut request = CallToolRequestParams::new("dos_key");
+        let mut request = CallToolRequestParams::new("key");
         request.arguments = Some(json!({"action":"renew","handle":down["hold"]["handle"],"lease_ms":30000}).as_object().unwrap().clone());
         assert_eq!(client.call_tool(request).await.unwrap().is_error, Some(true), "settings handoff invalidates old hold authority");
         client.cancel().await.unwrap();
@@ -5354,31 +5354,31 @@ fn native_mcp_target_transition_cancels_pending_input_before_dispatch() {
         let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
         runtime.block_on(async {
             let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-            let down = native_keyboard_accepted(&client, "dos_key", json!({"action":"down","key":"f1","lease_ms":30000})).await.structured_content.unwrap();
+            let down = native_keyboard_accepted(&client, "key", json!({"action":"down","key":"f1","lease_ms":30000})).await.structured_content.unwrap();
             let deadline = Instant::now() + Duration::from_secs(10);
             while rig.get(&format!("/api/ops/{}", down["op"].as_u64().unwrap())).json()["state"] != "done" {
                 assert!(Instant::now() < deadline);
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
             let legacy = rig.post("/api/input/wait?wait=false", json!({"ms":8000})).json();
-            let key = native_keyboard_accepted(&client, "dos_key", json!({"key":"a"})).await.structured_content.unwrap();
-            let text = native_keyboard_accepted(&client, "dos_type", json!({"text":"dir"})).await.structured_content.unwrap();
+            let key = native_keyboard_accepted(&client, "key", json!({"key":"a"})).await.structured_content.unwrap();
+            let text = native_keyboard_accepted(&client, "type", json!({"text":"dir"})).await.structured_content.unwrap();
             action.store(transition, std::sync::atomic::Ordering::Release);
             let deadline = Instant::now() + Duration::from_secs(3);
             loop {
-                let operation = native_keyboard_accepted(&client, "dos_operation", json!({"instance":key["instance"],"op":key["op"]})).await.structured_content.unwrap();
+                let operation = native_keyboard_accepted(&client, "operation", json!({"instance":key["instance"],"op":key["op"]})).await.structured_content.unwrap();
                 if operation["delivery"] == "cancelled" { break; }
                 assert!(Instant::now() < deadline, "native input is cancelled before a target transition can dispatch it: {operation}");
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
-            let operation = native_keyboard_accepted(&client, "dos_operation", json!({"instance":text["instance"],"op":text["op"]})).await.structured_content.unwrap();
+            let operation = native_keyboard_accepted(&client, "operation", json!({"instance":text["instance"],"op":text["op"]})).await.structured_content.unwrap();
             assert_eq!(operation["delivery"], "cancelled");
-            let operation = native_keyboard_accepted(&client, "dos_operation", json!({"instance":down["instance"],"op":down["op"]})).await.structured_content.unwrap();
+            let operation = native_keyboard_accepted(&client, "operation", json!({"instance":down["instance"],"op":down["op"]})).await.structured_content.unwrap();
             assert_eq!(operation["hold"]["state"], "reset");
             assert_eq!(native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 0x04, 0);
             assert_eq!(rig.shared.native_jobs.available_permits(), 8);
             let before = rig.journal().iter().filter(|entry| entry["type"] == "input_queued").count();
-            let mut request = rmcp::model::CallToolRequestParams::new("dos_key");
+            let mut request = rmcp::model::CallToolRequestParams::new("key");
             request.arguments = Some(json!({"key":"a"}).as_object().unwrap().clone());
             assert_eq!(client.call_tool(request).await.unwrap().is_error, Some(true), "new native work cannot be admitted to an unavailable guest target");
             assert_eq!(rig.journal().iter().filter(|entry| entry["type"] == "input_queued").count(), before);
@@ -5403,7 +5403,7 @@ fn native_mcp_target_transition_preserves_an_already_delivered_down() {
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-        let down = native_keyboard_accepted(&client, "dos_key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await.structured_content.unwrap();
+        let down = native_keyboard_accepted(&client, "key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await.structured_content.unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         while observed.load(std::sync::atomic::Ordering::Acquire) & (1 << 4) == 0 {
             assert!(Instant::now() < deadline);
@@ -5411,7 +5411,7 @@ fn native_mcp_target_transition_preserves_an_already_delivered_down() {
         }
         assert_eq!(rig.shared.native_jobs.available_permits(), 7, "the make was applied while the End marker is still queued");
         action.store(3, std::sync::atomic::Ordering::Release);
-        let operation = native_keyboard_accepted(&client, "dos_operation", json!({"instance":down["instance"],"op":down["op"]})).await.structured_content.unwrap();
+        let operation = native_keyboard_accepted(&client, "operation", json!({"instance":down["instance"],"op":down["op"]})).await.structured_content.unwrap();
         assert_eq!(operation["hold"]["state"], "reset");
         assert_eq!(operation["delivery"], "delivered", "reset must not relabel an already applied make as cancellation");
         assert_eq!(native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 4, 0);
@@ -5430,7 +5430,7 @@ fn native_mcp_restore_detaches_an_active_native_wait_without_break_codes() {
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-        let press = native_keyboard_accepted(&client, "dos_key", json!({"key":"ctrl","hold_ms":5000})).await.structured_content.unwrap();
+        let press = native_keyboard_accepted(&client, "key", json!({"key":"ctrl","hold_ms":5000})).await.structured_content.unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         while native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 4 == 0 {
             assert!(Instant::now() < deadline);
@@ -5444,11 +5444,11 @@ fn native_mcp_restore_detaches_an_active_native_wait_without_break_codes() {
             assert!(Instant::now() < deadline);
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        let observed = native_keyboard_accepted(&client, "dos_operation", json!({"instance":press["instance"],"op":press["op"]})).await.structured_content.unwrap();
+        let observed = native_keyboard_accepted(&client, "operation", json!({"instance":press["instance"],"op":press["op"]})).await.structured_content.unwrap();
         assert_eq!(observed["delivery"], "cancelled");
         assert_eq!(native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 4, 4, "the restored guest keeps its Ctrl state");
         assert_eq!(rig.shared.native_jobs.available_permits(), 8);
-        let typed = native_keyboard_accepted(&client, "dos_type", json!({"text":"é"})).await.structured_content.unwrap();
+        let typed = native_keyboard_accepted(&client, "type", json!({"text":"é"})).await.structured_content.unwrap();
         let deadline = Instant::now() + Duration::from_millis(500);
         while rig.get(&format!("/api/ops/{}", typed["op"].as_u64().unwrap())).json()["state"] != "done" {
             assert!(Instant::now() < deadline, "the removed native timer cannot delay new input after restore");
@@ -5471,7 +5471,7 @@ fn native_mcp_admin_clear_preserves_an_already_delivered_down() {
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-        let down = native_keyboard_accepted(&client, "dos_key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await.structured_content.unwrap();
+        let down = native_keyboard_accepted(&client, "key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await.structured_content.unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         while observed.load(std::sync::atomic::Ordering::Acquire) & (1 << 4) == 0 {
             assert!(Instant::now() < deadline);
@@ -5480,7 +5480,7 @@ fn native_mcp_admin_clear_preserves_an_already_delivered_down() {
         assert_eq!(rig.shared.native_jobs.available_permits(), 7, "actual make applied before the End marker");
         let cleared = http(rig.addr, "DELETE", "/api/input", &[], None);
         assert_eq!(cleared.status, 200);
-        let operation = native_keyboard_accepted(&client, "dos_operation", json!({"instance":down["instance"],"op":down["op"]})).await.structured_content.unwrap();
+        let operation = native_keyboard_accepted(&client, "operation", json!({"instance":down["instance"],"op":down["op"]})).await.structured_content.unwrap();
         assert_eq!(operation["delivery"], "delivered", "admin clear cannot undo an already applied down");
         assert_eq!(operation["hold"]["state"], "reset");
         assert_eq!(cleared.json()["cancelled"], json!([]), "the delivered down is not listed as cancelled");
@@ -5500,31 +5500,31 @@ fn native_mcp_guest_ctrl_alt_delete_invalidates_old_hold_authority() {
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2025_11_25).await;
-        let down = native_keyboard_accepted(&client, "dos_key", json!({"action":"down","key":"ctrl","mods":["alt"],"lease_ms":30000})).await.structured_content.unwrap();
+        let down = native_keyboard_accepted(&client, "key", json!({"action":"down","key":"ctrl","mods":["alt"],"lease_ms":30000})).await.structured_content.unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         while rig.get(&format!("/api/ops/{}", down["op"].as_u64().unwrap())).json()["state"] != "done" {
             assert!(Instant::now() < deadline);
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         let before = power.load(std::sync::atomic::Ordering::Acquire);
-        native_keyboard_accepted(&client, "dos_key", json!({"key":"delete","mods":["ctrl","alt"]})).await;
+        native_keyboard_accepted(&client, "key", json!({"key":"delete","mods":["ctrl","alt"]})).await;
         while power.load(std::sync::atomic::Ordering::Acquire) == before {
             assert!(Instant::now() < deadline, "real guest Ctrl+Alt+Delete reboots through the BIOS");
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        let held = native_keyboard_accepted(&client, "dos_operation", json!({"instance":down["instance"],"op":down["op"]})).await.structured_content.unwrap();
+        let held = native_keyboard_accepted(&client, "operation", json!({"instance":down["instance"],"op":down["op"]})).await.structured_content.unwrap();
         assert_eq!(held["hold"]["state"], "reset", "guest-triggered reset uses the same ownership invalidation boundary");
         assert_eq!(native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 12, 0);
-        let fresh = native_keyboard_accepted(&client, "dos_key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await.structured_content.unwrap();
+        let fresh = native_keyboard_accepted(&client, "key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await.structured_content.unwrap();
         while native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 4 == 0 {
             assert!(Instant::now() < deadline);
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        let mut request = CallToolRequestParams::new("dos_key");
+        let mut request = CallToolRequestParams::new("key");
         request.arguments = Some(json!({"action":"up","handle":down["hold"]["handle"]}).as_object().unwrap().clone());
         assert_eq!(client.call_tool(request).await.unwrap().is_error, Some(true));
         assert_ne!(native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 4, 0, "old authority cannot release a new same-key owner after reboot");
-        native_keyboard_accepted(&client, "dos_key", json!({"action":"up","handle":fresh["hold"]["handle"]})).await;
+        native_keyboard_accepted(&client, "key", json!({"action":"up","handle":fresh["hold"]["handle"]})).await;
         assert_eq!(rig.shared.native_jobs.available_permits(), 8);
         client.cancel().await.unwrap();
     });
@@ -5551,13 +5551,13 @@ fn native_mcp_bios_reboot_forgets_legacy_physical_modifiers() {
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-        let enter = native_keyboard_accepted(&client, "dos_key", json!({"key":"enter"})).await.structured_content.unwrap();
+        let enter = native_keyboard_accepted(&client, "key", json!({"key":"enter"})).await.structured_content.unwrap();
         while rig.get(&format!("/api/ops/{}", enter["op"].as_u64().unwrap())).json()["state"] != "done" {
             assert!(Instant::now() < deadline);
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         for (args, expected) in [(json!({"key":"a","mods":["ctrl"]}), 0x1e01u16), (json!({"key":"a"}), 0x1e61u16)] {
-            let result = native_keyboard_accepted(&client, "dos_key", args).await.structured_content.unwrap();
+            let result = native_keyboard_accepted(&client, "key", args).await.structured_content.unwrap();
             while rig.get(&format!("/api/ops/{}", result["op"].as_u64().unwrap())).json()["state"] != "done" {
                 assert!(Instant::now() < deadline);
                 tokio::time::sleep(Duration::from_millis(5)).await;
@@ -5579,7 +5579,7 @@ fn native_mcp_bios_reboot_invalidates_old_holds_and_queued_input() {
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-        let down = native_keyboard_accepted(&client, "dos_key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await.structured_content.unwrap();
+        let down = native_keyboard_accepted(&client, "key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await.structured_content.unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         while rig.get(&format!("/api/ops/{}", down["op"].as_u64().unwrap())).json()["state"] != "done" {
             assert!(Instant::now() < deadline);
@@ -5587,19 +5587,19 @@ fn native_mcp_bios_reboot_invalidates_old_holds_and_queued_input() {
         }
         let before = power.load(std::sync::atomic::Ordering::Acquire);
         assert_eq!(rig.post("/api/input/wait?wait=false", json!({"ms":60000})).status, 200);
-        let queued = native_keyboard_accepted(&client, "dos_key", json!({"key":"a","mods":["ctrl"]})).await.structured_content.unwrap();
+        let queued = native_keyboard_accepted(&client, "key", json!({"key":"a","mods":["ctrl"]})).await.structured_content.unwrap();
         assert_eq!(rig.post("/api/control/reboot", json!({})).status, 200);
         while power.load(std::sync::atomic::Ordering::Acquire) == before {
             assert!(Instant::now() < deadline, "actual BIOS reboot increments the machine power counter");
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        let operation = native_keyboard_accepted(&client, "dos_operation", json!({"instance":queued["instance"],"op":queued["op"]})).await.structured_content.unwrap();
+        let operation = native_keyboard_accepted(&client, "operation", json!({"instance":queued["instance"],"op":queued["op"]})).await.structured_content.unwrap();
         assert_eq!(operation["delivery"], "cancelled", "BIOS reboot detaches native work queued for the old guest");
-        let held = native_keyboard_accepted(&client, "dos_operation", json!({"instance":down["instance"],"op":down["op"]})).await.structured_content.unwrap();
+        let held = native_keyboard_accepted(&client, "operation", json!({"instance":down["instance"],"op":down["op"]})).await.structured_content.unwrap();
         assert_eq!(held["delivery"], "delivered");
         assert_eq!(held["hold"]["state"], "reset");
         for args in [json!({"action":"renew","handle":down["hold"]["handle"],"lease_ms":30000}), json!({"action":"up","handle":down["hold"]["handle"]})] {
-            let mut request = CallToolRequestParams::new("dos_key");
+            let mut request = CallToolRequestParams::new("key");
             request.arguments = Some(args.as_object().unwrap().clone());
             assert_eq!(client.call_tool(request).await.unwrap().is_error, Some(true), "old authority cannot reach the rebooted guest");
         }
@@ -5628,7 +5628,7 @@ fn native_mcp_restore_preserves_delivery_before_the_hold_end_marker() {
         let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
         runtime.block_on(async {
             let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-            let down = native_keyboard_accepted(&client, "dos_key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await.structured_content.unwrap();
+            let down = native_keyboard_accepted(&client, "key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await.structured_content.unwrap();
             let deadline = Instant::now() + Duration::from_secs(10);
             while observed.load(std::sync::atomic::Ordering::Acquire) & (1 << 4) == 0 {
                 assert!(Instant::now() < deadline);
@@ -5644,7 +5644,7 @@ fn native_mcp_restore_preserves_delivery_before_the_hold_end_marker() {
                     tokio::time::sleep(Duration::from_millis(2)).await;
                 }
             }
-            let operation = native_keyboard_accepted(&client, "dos_operation", json!({"instance":down["instance"],"op":down["op"]})).await.structured_content.unwrap();
+            let operation = native_keyboard_accepted(&client, "operation", json!({"instance":down["instance"],"op":down["op"]})).await.structured_content.unwrap();
             assert_eq!(operation["delivery"], "delivered", "restore preserves a key already delivered before its End marker");
             assert_eq!(operation["hold"]["state"], "reset");
             assert_eq!(native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 0x04, if strict { 0 } else { 4 }, "restored keyboard receives no old-owner break code");
@@ -5665,14 +5665,14 @@ fn native_mcp_frontend_restore_hook_detaches_old_keys_without_break_codes() {
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-        let down = native_keyboard_accepted(&client, "dos_key", json!({"action":"down","key":"ctrl","lease_ms":1000})).await.structured_content.unwrap();
+        let down = native_keyboard_accepted(&client, "key", json!({"action":"down","key":"ctrl","lease_ms":1000})).await.structured_content.unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         while native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 0x04 == 0 {
             assert!(Instant::now() < deadline);
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         assert_eq!(rig.post("/api/input/wait?wait=false", json!({"ms":8000})).status, 200);
-        let queued = native_keyboard_accepted(&client, "dos_key", json!({"key":"a","mods":["ctrl"]})).await.structured_content.unwrap();
+        let queued = native_keyboard_accepted(&client, "key", json!({"key":"a","mods":["ctrl"]})).await.structured_content.unwrap();
         let restored_flags = native_keyboard_bytes(&rig, "0040:0017", 1);
         action.store(2, std::sync::atomic::Ordering::Release);
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -5682,10 +5682,10 @@ fn native_mcp_frontend_restore_hook_detaches_old_keys_without_break_codes() {
         }
         assert_eq!(native_keyboard_bytes(&rig, "0040:0017", 1), restored_flags);
         assert_eq!(rig.shared.native_jobs.available_permits(), 8);
-        let operation = native_keyboard_accepted(&client, "dos_operation", json!({"instance":queued["instance"],"op":queued["op"]})).await.structured_content.unwrap();
+        let operation = native_keyboard_accepted(&client, "operation", json!({"instance":queued["instance"],"op":queued["op"]})).await.structured_content.unwrap();
         assert_eq!(operation["delivery"], "cancelled");
         for args in [json!({"action":"up","handle":down["hold"]["handle"]}), json!({"action":"renew","handle":down["hold"]["handle"],"lease_ms":1000})] {
-            let mut request = CallToolRequestParams::new("dos_key");
+            let mut request = CallToolRequestParams::new("key");
             request.arguments = Some(args.as_object().unwrap().clone());
             assert_eq!(client.call_tool(request).await.unwrap().is_error, Some(true));
         }
@@ -5723,7 +5723,7 @@ fn native_mcp_maximum_text_jobs_remain_bounded_and_clear_reclaims_capacity() {
         let before = native_keyboard_bytes(&rig, "0040:0017", 1);
         let mut operations = Vec::new();
         for _ in 0..8 {
-            let accepted = native_keyboard_accepted(&client, "dos_type", json!({"text":"{".repeat(4096),"delay_ms":5000})).await.structured_content.unwrap();
+            let accepted = native_keyboard_accepted(&client, "type", json!({"text":"{".repeat(4096),"delay_ms":5000})).await.structured_content.unwrap();
             assert_eq!(accepted["held"], true);
             operations.push(accepted["op"].as_u64().unwrap());
         }
@@ -5732,7 +5732,7 @@ fn native_mcp_maximum_text_jobs_remain_bounded_and_clear_reclaims_capacity() {
         let allocated = capacity.load(std::sync::atomic::Ordering::Acquire);
         assert!(allocated >= queued as usize && allocated <= 2 * 8 * 28673, "actual queue capacity: {allocated}");
         assert_eq!(rig.shared.native_jobs.available_permits(), 0);
-        let mut extra = CallToolRequestParams::new("dos_type");
+        let mut extra = CallToolRequestParams::new("type");
         extra.arguments = Some(json!({"text":"dir"}).as_object().unwrap().clone());
         assert_eq!(client.call_tool(extra).await.unwrap().is_error, Some(true));
         assert_eq!(native_queued_input(&rig), queued);
@@ -5763,7 +5763,7 @@ fn native_mcp_input_respects_shared_pending_operation_capacity() {
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
         let before = rig.journal().iter().filter(|entry| entry["type"] == "input_queued").count();
-        let mut request = CallToolRequestParams::new("dos_key");
+        let mut request = CallToolRequestParams::new("key");
         request.arguments = Some(json!({"key":"a"}).as_object().unwrap().clone());
         assert_eq!(client.call_tool(request).await.unwrap().is_error, Some(true), "native admission must not exceed the shared pending operation bound");
         assert_eq!(rig.shared.native_jobs.available_permits(), 8);
@@ -5781,7 +5781,7 @@ fn native_mcp_full_job_capacity_still_allows_targeted_hold_control() {
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-        let down = native_keyboard_accepted(&client, "dos_key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await.structured_content.unwrap();
+        let down = native_keyboard_accepted(&client, "key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await.structured_content.unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         while native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 4 == 0 {
             assert!(Instant::now() < deadline);
@@ -5790,17 +5790,17 @@ fn native_mcp_full_job_capacity_still_allows_targeted_hold_control() {
         let tail = native_keyboard_bytes(&rig, "0040:001C", 2);
         assert_eq!(rig.post("/api/input/wait?wait=false", json!({"ms":8000})).status, 200);
         for _ in 0..8 {
-            native_keyboard_accepted(&client, "dos_key", json!({"key":"a","mods":["ctrl"]})).await;
+            native_keyboard_accepted(&client, "key", json!({"key":"a","mods":["ctrl"]})).await;
         }
         assert_eq!(rig.shared.native_jobs.available_permits(), 0);
         let queued = rig.journal().iter().filter(|entry| entry["type"] == "input_queued").count();
-        let mut extra = CallToolRequestParams::new("dos_key");
+        let mut extra = CallToolRequestParams::new("key");
         extra.arguments = Some(json!({"key":"a","mods":["ctrl"]}).as_object().unwrap().clone());
         assert_eq!(client.call_tool(extra).await.unwrap().is_error, Some(true));
         assert_eq!(rig.journal().iter().filter(|entry| entry["type"] == "input_queued").count(), queued);
-        native_keyboard_accepted(&client, "dos_key", json!({"action":"renew","handle":down["hold"]["handle"],"lease_ms":30000})).await;
+        native_keyboard_accepted(&client, "key", json!({"action":"renew","handle":down["hold"]["handle"],"lease_ms":30000})).await;
         assert_ne!(native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 4, 0);
-        native_keyboard_accepted(&client, "dos_key", json!({"action":"up","handle":down["hold"]["handle"]})).await;
+        native_keyboard_accepted(&client, "key", json!({"action":"up","handle":down["hold"]["handle"]})).await;
         assert_eq!(native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 4, 0, "targeted up remains available at full job capacity");
         let deadline = Instant::now() + Duration::from_secs(10);
         while rig.shared.native_jobs.available_permits() != 8 {
@@ -5821,7 +5821,7 @@ fn native_mcp_evicted_operation_does_not_revoke_a_live_hold() {
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-        let down = native_keyboard_accepted(&client, "dos_key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await.structured_content.unwrap();
+        let down = native_keyboard_accepted(&client, "key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await.structured_content.unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         while native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 4 == 0 {
             assert!(Instant::now() < deadline);
@@ -5829,20 +5829,20 @@ fn native_mcp_evicted_operation_does_not_revoke_a_live_hold() {
         }
         let mut latest = Value::Null;
         for _ in 0..super::super::journal::OPS_CAPACITY {
-            latest = native_keyboard_accepted(&client, "dos_key", json!({"action":"renew","handle":down["hold"]["handle"],"lease_ms":30000})).await.structured_content.unwrap();
+            latest = native_keyboard_accepted(&client, "key", json!({"action":"renew","handle":down["hold"]["handle"],"lease_ms":30000})).await.structured_content.unwrap();
         }
         assert_eq!(rig.get(&format!("/api/ops/{}", down["op"].as_u64().unwrap())).status, 410);
-        let mut query = CallToolRequestParams::new("dos_operation");
+        let mut query = CallToolRequestParams::new("operation");
         query.arguments = Some(json!({"instance":down["instance"],"op":down["op"]}).as_object().unwrap().clone());
         let evicted = client.call_tool(query).await.unwrap();
         assert_eq!(evicted.is_error, Some(true));
         assert_eq!(evicted.structured_content.as_ref().unwrap()["error"]["code"], "evicted_operation", "native operation query preserves authoritative eviction");
-        let retained = native_keyboard_accepted(&client, "dos_operation", json!({"instance":latest["instance"],"op":latest["op"]})).await.structured_content.unwrap();
+        let retained = native_keyboard_accepted(&client, "operation", json!({"instance":latest["instance"],"op":latest["op"]})).await.structured_content.unwrap();
         assert_eq!(retained["delivery"], "delivered");
         assert_eq!(retained["hold"]["handle"], down["hold"]["handle"]);
         assert_eq!(retained["hold"]["state"], "delivered");
         assert_ne!(native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 4, 0);
-        native_keyboard_accepted(&client, "dos_key", json!({"action":"up","handle":down["hold"]["handle"]})).await;
+        native_keyboard_accepted(&client, "key", json!({"action":"up","handle":down["hold"]["handle"]})).await;
         assert_eq!(native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 4, 0);
         client.cancel().await.unwrap();
     });
@@ -5859,12 +5859,12 @@ fn native_mcp_expiry_after_all_downs_preserves_delivered_operation() {
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-        let down = native_keyboard_accepted(&client, "dos_key", json!({"action":"down","key":"a","mods":["ctrl"],"lease_ms":75})).await.structured_content.unwrap();
+        let down = native_keyboard_accepted(&client, "key", json!({"action":"down","key":"a","mods":["ctrl"],"lease_ms":75})).await.structured_content.unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert_ne!(observed.load(std::sync::atomic::Ordering::Acquire) & (1 << 4), 0, "the real Ctrl make reached the guest");
         assert_eq!(native_keyboard_bytes(&rig, "0040:001E", 2), [1, 0x1e], "the real Ctrl+A make reached the BIOS");
         assert_eq!(native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 4, 0);
-        let operation = native_keyboard_accepted(&client, "dos_operation", json!({"instance":down["instance"],"op":down["op"]})).await.structured_content.unwrap();
+        let operation = native_keyboard_accepted(&client, "operation", json!({"instance":down["instance"],"op":down["op"]})).await.structured_content.unwrap();
         assert_eq!(operation["hold"]["state"], "expired");
         assert_eq!(operation["delivery"], "delivered", "expiry after every make must not relabel actual delivery as cancellation");
         assert_eq!(rig.shared.native_jobs.available_permits(), 8);
@@ -5885,14 +5885,14 @@ fn native_mcp_partial_down_expiry_releases_only_delivered_modifiers() {
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
         let tail = native_keyboard_bytes(&rig, "0040:001C", 2);
-        let down = native_keyboard_accepted(&client, "dos_key", json!({"action":"down","key":"a","mods":["ctrl","shift"],"lease_ms":75})).await.structured_content.unwrap();
+        let down = native_keyboard_accepted(&client, "key", json!({"action":"down","key":"a","mods":["ctrl","shift"],"lease_ms":75})).await.structured_content.unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
         let seen = observed.load(std::sync::atomic::Ordering::Acquire);
         assert_ne!(seen & (1 << 4), 0, "the real Ctrl make was observed");
         assert_ne!(seen & (1 << 6), 0, "the real Shift make was observed before expiry");
         assert_eq!(native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 6, 0);
         assert_eq!(native_keyboard_bytes(&rig, "0040:001C", 2), tail, "the queued letter never reached the real BIOS");
-        let operation = native_keyboard_accepted(&client, "dos_operation", json!({"instance":down["instance"],"op":down["op"]})).await.structured_content.unwrap();
+        let operation = native_keyboard_accepted(&client, "operation", json!({"instance":down["instance"],"op":down["op"]})).await.structured_content.unwrap();
         assert_eq!(operation["hold"]["state"], "expired");
         assert_eq!(operation["delivery"], "cancelled");
         assert_eq!(rig.shared.native_jobs.available_permits(), 8);
@@ -5909,21 +5909,21 @@ fn native_mcp_ended_hold_errors_distinguish_expired_and_released() {
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-        let expired = native_keyboard_accepted(&client, "dos_key", json!({"action":"down","key":"ctrl","lease_ms":50})).await.structured_content.unwrap();
+        let expired = native_keyboard_accepted(&client, "key", json!({"action":"down","key":"ctrl","lease_ms":50})).await.structured_content.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
         for action in ["up", "renew"] {
             let mut args = json!({"action":action,"handle":expired["hold"]["handle"]});
             if action == "renew" { args["lease_ms"] = 30000.into(); }
-            let mut request = CallToolRequestParams::new("dos_key");
+            let mut request = CallToolRequestParams::new("key");
             request.arguments = Some(args.as_object().unwrap().clone());
             let result = client.call_tool(request).await.unwrap();
             assert_eq!(result.is_error, Some(true));
             assert_eq!(result.structured_content.as_ref().unwrap()["error"]["code"], "expired_hold", "expired authority has its declared typed error");
         }
-        let released = native_keyboard_accepted(&client, "dos_key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await.structured_content.unwrap();
-        native_keyboard_accepted(&client, "dos_key", json!({"action":"up","handle":released["hold"]["handle"]})).await;
-        native_keyboard_accepted(&client, "dos_key", json!({"action":"up","handle":released["hold"]["handle"]})).await;
-        let mut renew = CallToolRequestParams::new("dos_key");
+        let released = native_keyboard_accepted(&client, "key", json!({"action":"down","key":"ctrl","lease_ms":30000})).await.structured_content.unwrap();
+        native_keyboard_accepted(&client, "key", json!({"action":"up","handle":released["hold"]["handle"]})).await;
+        native_keyboard_accepted(&client, "key", json!({"action":"up","handle":released["hold"]["handle"]})).await;
+        let mut renew = CallToolRequestParams::new("key");
         renew.arguments = Some(json!({"action":"renew","handle":released["hold"]["handle"],"lease_ms":30000}).as_object().unwrap().clone());
         let result = client.call_tool(renew).await.unwrap();
         assert_eq!(result.is_error, Some(true));
@@ -5952,7 +5952,7 @@ fn native_mcp_mouse_respects_key_hold_capacity_and_projected_legacy_buttons() {
         .unwrap();
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-        let picture = native_keyboard_accepted(&client, "dos_capture", json!({}))
+        let picture = native_keyboard_accepted(&client, "capture", json!({}))
             .await
             .structured_content
             .unwrap()["mouse_picture"]
@@ -5961,7 +5961,7 @@ fn native_mcp_mouse_respects_key_hold_capacity_and_projected_legacy_buttons() {
         for key in ["f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8"] {
             let down = native_keyboard_accepted(
                 &client,
-                "dos_key",
+                "key",
                 json!({"action":"down","key":key,"lease_ms":30000}),
             )
             .await
@@ -5977,7 +5977,7 @@ fn native_mcp_mouse_respects_key_hold_capacity_and_projected_legacy_buttons() {
             );
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        let mut request = CallToolRequestParams::new("dos_mouse");
+        let mut request = CallToolRequestParams::new("mouse");
         request.arguments = Some(
             json!({"action":"down","picture":picture,"lease_ms":30000})
                 .as_object()
@@ -5991,7 +5991,7 @@ fn native_mcp_mouse_respects_key_hold_capacity_and_projected_legacy_buttons() {
         );
         assert_eq!(rig.get("/api/status").json()["mouse"]["buttons"], 0);
         for handle in holds {
-            native_keyboard_accepted(&client, "dos_key", json!({"action":"up","handle":handle}))
+            native_keyboard_accepted(&client, "key", json!({"action":"up","handle":handle}))
                 .await;
         }
         rig.until_idle();
@@ -6012,7 +6012,7 @@ fn native_mcp_mouse_respects_key_hold_capacity_and_projected_legacy_buttons() {
         );
         let down = native_keyboard_accepted(
             &client,
-            "dos_mouse",
+            "mouse",
             json!({"action":"down","picture":picture,"button":"right","lease_ms":30000}),
         )
         .await
@@ -6028,7 +6028,7 @@ fn native_mcp_mouse_respects_key_hold_capacity_and_projected_legacy_buttons() {
         }
         native_keyboard_accepted(
             &client,
-            "dos_mouse",
+            "mouse",
             json!({"action":"up","handle":down["hold"]["handle"]}),
         )
         .await;
@@ -6046,7 +6046,7 @@ fn native_mcp_mouse_respects_key_hold_capacity_and_projected_legacy_buttons() {
             .status,
             200
         );
-        let mut request = CallToolRequestParams::new("dos_mouse");
+        let mut request = CallToolRequestParams::new("mouse");
         request.arguments = Some(
             json!({"action":"down","picture":picture,"lease_ms":30000})
                 .as_object()
@@ -6085,9 +6085,9 @@ fn native_mcp_mouse_owners_and_queued_spans_reject_foreign_motion() {
     runtime.block_on(async {
         let first = native_keyboard_client(&rig, ProtocolVersion::V_2025_11_25).await;
         let second = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-        let picture = native_keyboard_accepted(&first, "dos_capture", json!({})).await
+        let picture = native_keyboard_accepted(&first, "capture", json!({})).await
             .structured_content.unwrap()["mouse_picture"].clone();
-        let left = native_keyboard_accepted(&first, "dos_mouse",
+        let left = native_keyboard_accepted(&first, "mouse",
             json!({"action":"down","picture":picture,"lease_ms":30000})).await.structured_content.unwrap();
         rig.until_idle();
         assert_eq!(rig.get("/api/status").json()["mouse"]["buttons"], 1);
@@ -6095,7 +6095,7 @@ fn native_mcp_mouse_owners_and_queued_spans_reject_foreign_motion() {
         for args in [json!({"action":"move","picture":picture,"x":100,"y":80}),
             json!({"action":"click","picture":picture,"button":"right","x":100,"y":80}),
             json!({"action":"down","picture":picture,"lease_ms":30000})] {
-            let mut request = CallToolRequestParams::new("dos_mouse");
+            let mut request = CallToolRequestParams::new("mouse");
             request.arguments = Some(args.as_object().unwrap().clone());
             let rejected = second.call_tool(request).await.unwrap();
             assert_eq!(rejected.is_error, Some(true));
@@ -6103,27 +6103,27 @@ fn native_mcp_mouse_owners_and_queued_spans_reject_foreign_motion() {
             assert_eq!(native_queued_input(&rig), queued);
             assert_eq!(rig.get("/api/status").json()["mouse"]["buttons"], 1);
         }
-        let right = native_keyboard_accepted(&second, "dos_mouse",
+        let right = native_keyboard_accepted(&second, "mouse",
             json!({"action":"down","picture":picture,"button":"right","lease_ms":30000})).await.structured_content.unwrap();
         rig.until_idle();
         assert_eq!(rig.get("/api/status").json()["mouse"]["buttons"], 3);
-        let mut request = CallToolRequestParams::new("dos_mouse");
+        let mut request = CallToolRequestParams::new("mouse");
         request.arguments = Some(json!({"action":"move","picture":picture,
             "handle":right["hold"]["handle"],"x":120,"y":80}).as_object().unwrap().clone());
         assert_eq!(second.call_tool(request).await.unwrap().is_error, Some(true),
             "one handle cannot authorize movement affecting another button claim");
-        native_keyboard_accepted(&second, "dos_mouse", json!({"action":"up","handle":right["hold"]["handle"]})).await;
+        native_keyboard_accepted(&second, "mouse", json!({"action":"up","handle":right["hold"]["handle"]})).await;
         assert_eq!(rig.get("/api/status").json()["mouse"]["buttons"], 1);
         assert_eq!(rig.post("/api/input/wait?wait=false", json!({"ms":400})).status, 200);
-        native_keyboard_accepted(&first, "dos_mouse",
+        native_keyboard_accepted(&first, "mouse",
             json!({"action":"move","picture":picture,"handle":left["hold"]["handle"],"x":100,"y":80})).await;
-        native_keyboard_accepted(&first, "dos_mouse", json!({"action":"up","handle":left["hold"]["handle"]})).await;
+        native_keyboard_accepted(&first, "mouse", json!({"action":"up","handle":left["hold"]["handle"]})).await;
         assert_eq!(rig.get("/api/status").json()["mouse"]["buttons"], 0);
         assert_eq!(http(rig.addr, "DELETE", "/api/input", &[], None).status, 200);
         assert_eq!(rig.post("/api/input/wait?wait=false", json!({"ms":400})).status, 200);
-        native_keyboard_accepted(&first, "dos_mouse", json!({"action":"move","picture":picture,"x":40,"y":40})).await;
+        native_keyboard_accepted(&first, "mouse", json!({"action":"move","picture":picture,"x":40,"y":40})).await;
         let queued = native_queued_input(&rig);
-        let mut request = CallToolRequestParams::new("dos_mouse");
+        let mut request = CallToolRequestParams::new("mouse");
         request.arguments = Some(json!({"action":"move","picture":picture,"x":60,"y":40}).as_object().unwrap().clone());
         assert_eq!(second.call_tool(request).await.unwrap().is_error, Some(true),
             "queued pointer motion reserves the pointer before any button is held");
@@ -6156,7 +6156,7 @@ fn native_mouse_port_rejects_unbounded_gestures_before_any_guest_effect() {
         .unwrap();
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-        let observed = native_keyboard_accepted(&client, "dos_capture", json!({}))
+        let observed = native_keyboard_accepted(&client, "capture", json!({}))
             .await
             .structured_content
             .unwrap()["mouse_picture"]
@@ -6309,14 +6309,14 @@ fn native_mouse_port_rejects_unbounded_gestures_before_any_guest_effect() {
         }
         let key = native_keyboard_accepted(
             &client,
-            "dos_key",
+            "key",
             json!({"action":"down","key":"ctrl","lease_ms":30000}),
         )
         .await
         .structured_content
         .unwrap();
         rig.until_idle();
-        let mut request = rmcp::model::CallToolRequestParams::new("dos_mouse");
+        let mut request = rmcp::model::CallToolRequestParams::new("mouse");
         request.arguments = Some(
             json!({"action":"move","picture":observed,
             "handle":key["hold"]["handle"],"x":10,"y":20})
@@ -6333,23 +6333,23 @@ fn native_mouse_port_rejects_unbounded_gestures_before_any_guest_effect() {
         assert_eq!(native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 4, 4);
         native_keyboard_accepted(
             &client,
-            "dos_key",
+            "key",
             json!({"action":"up","handle":key["hold"]["handle"]}),
         )
         .await;
         let mouse = native_keyboard_accepted(
             &client,
-            "dos_mouse",
+            "mouse",
             json!({"action":"down","picture":observed,"lease_ms":30000}),
         ).await.structured_content
         .unwrap();
         native_keyboard_accepted(
             &client,
-            "dos_mouse",
+            "mouse",
             json!({"action":"up","handle":mouse["hold"]["handle"]}),
         )
         .await;
-        let mut request = rmcp::model::CallToolRequestParams::new("dos_mouse");
+        let mut request = rmcp::model::CallToolRequestParams::new("mouse");
         request.arguments = Some(
             json!({"action":"move","picture":observed,
             "handle":mouse["hold"]["handle"],"x":10,"y":20})
@@ -6436,7 +6436,7 @@ fn native_mcp_guest_shortcuts_reach_bios_without_frontend_hotkeys() {
         let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
         runtime.block_on(async {
             let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-            let down = native_keyboard_accepted(&client, "dos_key", json!({"action":"down","key":key,"mods":mods,"lease_ms":30000})).await.structured_content.unwrap();
+            let down = native_keyboard_accepted(&client, "key", json!({"action":"down","key":key,"mods":mods,"lease_ms":30000})).await.structured_content.unwrap();
             let deadline = Instant::now() + Duration::from_secs(10);
             while rig.get(&format!("/api/ops/{}", down["op"].as_u64().unwrap())).json()["state"] != "done" {
                 assert!(Instant::now() < deadline);
@@ -6444,9 +6444,9 @@ fn native_mcp_guest_shortcuts_reach_bios_without_frontend_hotkeys() {
             }
             assert_eq!(observed.load(std::sync::atomic::Ordering::Acquire), 0, "native guest delivery must not invoke frontend hotkeys");
             assert_eq!(native_keyboard_bytes(&rig, "0040:001E", 2), expected, "native key chord reached the real BIOS");
-            let operation = native_keyboard_accepted(&client, "dos_operation", json!({"instance":down["instance"],"op":down["op"]})).await.structured_content.unwrap();
+            let operation = native_keyboard_accepted(&client, "operation", json!({"instance":down["instance"],"op":down["op"]})).await.structured_content.unwrap();
             assert_eq!(operation["hold"]["state"], "delivered");
-            native_keyboard_accepted(&client, "dos_key", json!({"action":"up","handle":down["hold"]["handle"]})).await;
+            native_keyboard_accepted(&client, "key", json!({"action":"up","handle":down["hold"]["handle"]})).await;
             assert_eq!(native_keyboard_bytes(&rig, "0040:0017", 1)[0] & 15, 0);
             client.cancel().await.unwrap();
         });
@@ -6463,27 +6463,27 @@ fn native_mcp_metrics_observe_actual_outcomes_and_bounded_labels() {
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     runtime.block_on(async {
         let client = native_keyboard_client(&rig, ProtocolVersion::V_2026_07_28).await;
-        let accepted = native_keyboard_accepted(&client, "dos_type", json!({"text":"echo MCP_METRICS\n"})).await.structured_content.unwrap();
+        let accepted = native_keyboard_accepted(&client, "type", json!({"text":"echo MCP_METRICS\n"})).await.structured_content.unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            let observed = native_keyboard_accepted(&client, "dos_operation", json!({"instance":accepted["instance"],"op":accepted["op"]})).await.structured_content.unwrap();
+            let observed = native_keyboard_accepted(&client, "operation", json!({"instance":accepted["instance"],"op":accepted["op"]})).await.structured_content.unwrap();
             if observed["delivery"] == "delivered" { break; }
             assert!(Instant::now() < deadline, "actual input completed");
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         assert!(rig.get("/api/screen/text").json()["lines"].as_array().unwrap().iter().any(|line| line.as_str().is_some_and(|line| line.contains("MCP_METRICS"))));
-        let capture = client.call_tool(CallToolRequestParams::new("dos_capture")).await.unwrap();
+        let capture = client.call_tool(CallToolRequestParams::new("capture")).await.unwrap();
         assert_ne!(capture.is_error, Some(true));
         assert!(capture.content.iter().any(|content| content.as_image().is_some()));
-        let mut malformed = CallToolRequestParams::new("dos_mouse");
+        let mut malformed = CallToolRequestParams::new("mouse");
         malformed.arguments = Some(json!({"action":"move","x":1}).as_object().unwrap().clone());
         assert!(client.call_tool(malformed).await.is_err(), "real decoder rejects malformed input");
         let expired = rig.client.inputs(Instant::now() - Duration::from_millis(1)).input(GuestInput::Type { text: "EXPIRED_METRIC_INPUT".into(), delay: Duration::ZERO }).await;
         assert!(matches!(expired, Err(InputError::ExpiredBeforeAcceptance)), "real pre-acceptance expiry: {expired:?}");
         assert_eq!(rig.post("/api/input/wait?wait=false", json!({"ms":8000})).status, 200);
-        let cancelled = native_keyboard_accepted(&client, "dos_type", json!({"text":"CANCELLED_METRIC_INPUT"})).await.structured_content.unwrap();
+        let cancelled = native_keyboard_accepted(&client, "type", json!({"text":"CANCELLED_METRIC_INPUT"})).await.structured_content.unwrap();
         assert_eq!(http(rig.addr, "DELETE", "/api/input", &[], None).status, 200);
-        let observed = native_keyboard_accepted(&client, "dos_operation", json!({"instance":cancelled["instance"],"op":cancelled["op"]})).await.structured_content.unwrap();
+        let observed = native_keyboard_accepted(&client, "operation", json!({"instance":cancelled["instance"],"op":cancelled["op"]})).await.structured_content.unwrap();
         assert_eq!(observed["delivery"], "cancelled");
         client.cancel().await.unwrap();
     });

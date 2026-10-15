@@ -120,7 +120,7 @@ fn observed(properties: Value, required: &[&str]) -> Value {
 
 pub(super) fn output(name: &str) -> Value {
     let success = match name {
-        "dos_status" => observed(
+        "status" => observed(
             json!({
                 "paused":{"type":"boolean"},"program":{"type":"string"},
                 "instructions":{"type":"integer","minimum":0},
@@ -135,20 +135,20 @@ pub(super) fn output(name: &str) -> Value {
             }),
             &["paused", "program", "instructions", "video", "mouse"],
         ),
-        "dos_capture" => observed(
+        "capture" => observed(
             json!({
                 "width":{"type":"integer","minimum":1},"height":{"type":"integer","minimum":1}
             }),
             &["width", "height"],
         ),
-        "dos_operation" => observed(
+        "operation" => observed(
             json!({
                 "op":{"type":"integer","minimum":1},
                 "delivery":{"enum":["pending","delivered","cancelled","failed"]},"hold":hold()
             }),
             &["op", "delivery"],
         ),
-        "dos_key" | "dos_type" | "dos_mouse" => json!({"oneOf":[
+        "key" | "type" | "mouse" => json!({"oneOf":[
             observed(json!({
                 "op":{"type":"integer","minimum":1},"acceptance":{"const":"accepted"},
                 "wait":{"enum":["pending","delivered","timed_out"]},

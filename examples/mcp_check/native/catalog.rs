@@ -212,12 +212,12 @@ pub(crate) fn verify_mouse_catalog(path: &Path, revision: &str, program: &str) -
             let queried = request(label, &format!("{name}-operation-request.json"))?;
             let delivered = response(label, &format!("{name}-operation-result.json"))?;
             require(
-                action["name"] == "dos_mouse"
+                action["name"] == "mouse"
                     && action["arguments"]["action"] == expected_action
                     && accepted["acceptance"] == "accepted"
                     && accepted["instance"].is_string()
                     && accepted["op"].as_u64().is_some()
-                    && queried["name"] == "dos_operation"
+                    && queried["name"] == "operation"
                     && queried["arguments"]["instance"] == accepted["instance"]
                     && queried["arguments"]["op"] == accepted["op"]
                     && delivered["instance"] == accepted["instance"]

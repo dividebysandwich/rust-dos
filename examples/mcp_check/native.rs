@@ -67,12 +67,12 @@ async fn mouse_call(
         serde_json::to_vec(&reply).map_err(io::Error::other)?,
     )?;
     require(reply.is_error != Some(true), "native mouse action rejected")?;
-    if tool == "dos_mouse" {
+    if tool == "mouse" {
         let accepted = reply
             .structured_content
             .as_ref()
             .ok_or_else(|| io::Error::other("mouse acceptance metadata missing"))?;
-        let mut operation = CallToolRequestParams::new("dos_operation");
+        let mut operation = CallToolRequestParams::new("operation");
         operation.arguments = Some(
             serde_json::json!({
                 "instance": accepted["instance"], "op": accepted["op"]
@@ -145,14 +145,14 @@ pub(super) async fn mouse(
                 serde_json::to_vec(&discovery).map_err(io::Error::other)?,
             )?;
             require(
-                discovery.tools.iter().any(|tool| tool.name == "dos_mouse"),
+                discovery.tools.iter().any(|tool| tool.name == "mouse"),
                 "native mouse tool missing for the actual graphics application",
             )?;
             let capture = mouse_call(
                 &client,
                 root,
                 &format!("mouse-{label}-capture"),
-                "dos_capture",
+                "capture",
                 json!({}),
             )
             .await?;
@@ -183,7 +183,7 @@ pub(super) async fn mouse(
                 &client,
                 root,
                 &format!("mouse-{label}-down"),
-                "dos_mouse",
+                "mouse",
                 json!({"action":"down","picture":picture,"button":"left",
                     "x":start.0,"y":start.1 + shift,"lease_ms":30000}),
             )
@@ -200,7 +200,7 @@ pub(super) async fn mouse(
                 &client,
                 root,
                 &format!("mouse-{label}-move"),
-                "dos_mouse",
+                "mouse",
                 json!({"action":"move","picture":picture,"handle":handle,
                     "x":end.0,"y":end.1 + shift}),
             )
@@ -210,7 +210,7 @@ pub(super) async fn mouse(
                 &client,
                 root,
                 &format!("mouse-{label}-up"),
-                "dos_mouse",
+                "mouse",
                 json!({"action":"up","handle":handle}),
             )
             .await?;
@@ -218,7 +218,7 @@ pub(super) async fn mouse(
                 &client,
                 root,
                 &format!("mouse-{label}-cursor-away"),
-                "dos_mouse",
+                "mouse",
                 json!({"action":"move","picture":picture,"x":630,"y":390}),
             )
             .await?;
@@ -242,7 +242,7 @@ pub(super) async fn mouse(
                     &client,
                     root,
                     &format!("mouse-{label}-finite"),
-                    "dos_mouse",
+                    "mouse",
                     json!({"action":"drag","picture":picture,"button":"left","path":[
                         {"x":end.0,"y":end.1,"delay_ms":150},
                         {"x":start.0,"y":start.1,"delay_ms":300}]}),
@@ -252,7 +252,7 @@ pub(super) async fn mouse(
                     &client,
                     root,
                     &format!("mouse-{label}-finite-away"),
-                    "dos_mouse",
+                    "mouse",
                     json!({"action":"move","picture":picture,"x":630,"y":390}),
                 )
                 .await?;
@@ -263,7 +263,7 @@ pub(super) async fn mouse(
                     &client,
                     root,
                     &format!("mouse-{label}-finite"),
-                    "dos_mouse",
+                    "mouse",
                     json!({"action":"drag","picture":picture,"button":"left","path":[
                         {"x":80,"y":140 + shift,"delay_ms":150},
                         {"x":120,"y":160 + shift,"delay_ms":300}]}),
@@ -281,7 +281,7 @@ pub(super) async fn mouse(
                 &client,
                 root,
                 &format!("mouse-{label}-click"),
-                "dos_mouse",
+                "mouse",
                 json!({"action":"click","picture":picture,"button":"left",
                     "x":if program == "seal" {450} else {140},
                     "y":if program == "seal" {300} else {180},"hold_ms":150}),
@@ -291,7 +291,7 @@ pub(super) async fn mouse(
                 &client,
                 root,
                 &format!("mouse-{label}-relative-before"),
-                "dos_status",
+                "status",
                 json!({}),
             )
             .await?
@@ -301,7 +301,7 @@ pub(super) async fn mouse(
                 &client,
                 root,
                 &format!("mouse-{label}-relative"),
-                "dos_mouse",
+                "mouse",
                 json!({"action":"move","picture":picture,"dx":5,"dy":-3}),
             )
             .await?;
@@ -309,7 +309,7 @@ pub(super) async fn mouse(
                 &client,
                 root,
                 &format!("mouse-{label}-relative-after"),
-                "dos_status",
+                "status",
                 json!({}),
             )
             .await?
@@ -346,23 +346,15 @@ pub(super) fn discovery_contract(discovery: &ListToolsResult) -> io::Result<()> 
         .collect();
     names.sort();
     require(
-        names
-            == [
-                "dos_capture",
-                "dos_key",
-                "dos_mouse",
-                "dos_operation",
-                "dos_status",
-                "dos_type",
-            ],
+        names == ["capture", "key", "mouse", "operation", "status", "type"],
         "native discovery advertises unsupported tools",
     )?;
     for tool in &discovery.tools {
         let expected = match tool.name.as_ref() {
-            "dos_status" | "dos_capture" => {
+            "status" | "capture" => {
                 serde_json::json!({"type":"object","additionalProperties":false})
             }
-            "dos_key" => {
+            "key" => {
                 serde_json::json!({"type":"object","additionalProperties":false,"properties":{
                     "action":{"type":"string","enum":["press","down","up","renew"]},
                     "key":{"type":"string"},
@@ -372,19 +364,19 @@ pub(super) fn discovery_contract(discovery: &ListToolsResult) -> io::Result<()> 
                     "handle":{"type":"string","maxLength":50}
                 }})
             }
-            "dos_type" => {
+            "type" => {
                 serde_json::json!({"type":"object","additionalProperties":false,"properties":{
                 "text":{"type":"string","maxLength":4096},
                 "delay_ms":{"type":"integer","minimum":0,"maximum":5000}
             },"required":["text"]})
             }
-            "dos_operation" => {
+            "operation" => {
                 serde_json::json!({"type":"object","additionalProperties":false,"properties":{
                 "instance":{"type":"string","pattern":"^[0-9a-f]{16}$"},
                 "op":{"type":"integer","minimum":1}
             },"required":["instance","op"]})
             }
-            "dos_mouse" => {
+            "mouse" => {
                 serde_json::from_str(include_str!("../../tests/fixtures/mcp/mouse.schema.json"))
                     .map_err(io::Error::other)?
             }
@@ -492,7 +484,7 @@ pub(super) async fn capture(
             let mut previous_request = None;
             for round in 0..2 {
             let status = client
-                .call_tool(CallToolRequestParams::new("dos_status"))
+                .call_tool(CallToolRequestParams::new("status"))
                 .await
                 .map_err(io::Error::other)?;
             require(
@@ -518,7 +510,7 @@ pub(super) async fn capture(
                 "native paused application dimensions mismatch",
             )?;
             let capture = client
-                .call_tool(CallToolRequestParams::new("dos_capture"))
+                .call_tool(CallToolRequestParams::new("capture"))
                 .await
                 .map_err(io::Error::other)?;
             require(
