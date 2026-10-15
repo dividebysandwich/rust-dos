@@ -1028,9 +1028,10 @@ fn replays_a_dosbox_x_trace() {
     for (i, record) in data.as_chunks::<13>().0.iter().enumerate() {
         let word = |n: usize| u32::from_le_bytes(record[1 + 4 * n..5 + 4 * n].try_into().unwrap());
         match record[0] {
-            // A recording of rust-dos's own starts with the board.
+            // A recording of rust-dos's own starts with the board, its
+            // number in `Board::ALL`.
             b'B' => {
-                let board = if word(0) == 1 { Board::Max } else { Board::Standard };
+                let board = Board::ALL.get(word(0) as usize).copied().unwrap_or(Board::Max);
                 v = rust_dos::voodoo::Voodoo::with_workers(board, workers);
             }
             b'P' => {

@@ -229,7 +229,7 @@ impl Item {
             Machine => each(s, crate::video::adapter::Adapter::ALL, |s, machine| s.machine = machine),
             Voodoo => on_off(|s, on| s.voodoo.enabled = on),
             VoodooMemory => {
-                each(s, [crate::voodoo::Board::Standard, crate::voodoo::Board::Max], |s, board| s.voodoo.board = board)
+                each(s, crate::voodoo::Board::ALL, |s, board| s.voodoo.board = board)
             }
             VoodooRenderer => each(s, [crate::voodoo::Renderer::Software, crate::voodoo::Renderer::OpenGl], |s, r| {
                 s.voodoo.renderer = r

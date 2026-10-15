@@ -132,12 +132,14 @@ pub struct Config {
     pub composite_era: Option<CompositeEra>,
     /// The display adapter (`machine`).
     pub machine: Option<Adapter>,
-    /// The 3dfx card (`voodoo`), its memory (`voodoo_memory`), what draws
+    /// The 3dfx card (`voodoo`), its chip (`voodoo_model`), its memory
+    /// (`voodoo_memory`), what draws
     /// for it (`voodoo_renderer`), at what size (`voodoo_scale`) and with
     /// how many samples a pixel (`voodoo_msaa`), texture anisotropy
     /// (`voodoo_anisotropy`), and the most frames a second programs may show
     /// on it (`voodoo_fps_cap`, 0 for no cap).
     pub voodoo: Option<bool>,
+    pub voodoo_model: Option<crate::voodoo::Model>,
     pub voodoo_memory: Option<crate::voodoo::Board>,
     pub voodoo_renderer: Option<crate::voodoo::Renderer>,
     pub voodoo_texture_sampling: Option<crate::voodoo::TextureSampling>,

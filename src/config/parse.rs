@@ -135,9 +135,13 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Some(filter) => config.powervr_filter = Some(filter),
                             None => warn(format!("invalid powervr_filter '{}' (auto, point or bilinear)", value)),
                         },
+                        "voodoo_model" => match crate::voodoo::Model::parse(value) {
+                            Some(model) => config.voodoo_model = Some(model),
+                            None => warn(format!("invalid voodoo_model '{}' (voodoo1 or voodoo2)", value)),
+                        },
                         "voodoo_memory" => match crate::voodoo::Board::parse(value) {
                             Some(board) => config.voodoo_memory = Some(board),
-                            None => warn(format!("invalid voodoo_memory '{}' (4 or 12)", value)),
+                            None => warn(format!("invalid voodoo_memory '{}' (4, 8 or 12)", value)),
                         },
                         "voodoo_renderer" => match crate::voodoo::Renderer::parse(value) {
                             Some(renderer) => config.voodoo_renderer = Some(renderer),
