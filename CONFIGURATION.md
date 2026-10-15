@@ -1871,11 +1871,19 @@ level, the wider video fields of its resolutions up to 1024x768, fog
 dithering and the clamping of iterated colours, depth and W (fbzColorPath
 bit 28). The board is SLI-less: one card, as Glide sees a single Voodoo2.
 
-**Windows 98 SE** with 3dfx's Voodoo2 driver (3.03.00, "Voodoo2 3D
-Accelerator") gives DirectDraw and Direct3D the card as "3dfxV2 (Voodoo2
-DirectX 6 Driver)": Incoming plays on it, menus and missions, with
-`machine=svga_s3virge`, `cpu=pentium_ii` and `memsize=128`. The driver
-is 3dfx's and doesn't come with Windows 98 or rust-dos.
+**Windows 98 SE** needs 3dfx's Voodoo2 driver, which neither Windows 98
+nor rust-dos comes with: the Windows 98 CD has drivers for the Voodoo
+Graphics and the Banshee only. Unpack 3dfx's reference driver 3.03.00
+(`rkv2dx6.exe`, which the Internet Archive keeps) into a folder Windows
+can read, such as a [host folder](#host-folders-in-a-booted-system). At its next
+start Windows finds the new PCI device and opens the Add New Hardware
+wizard: choose to search for the best driver, tick
+"Specify a location", give the folder that holds `voodoo2.inf`, and
+restart Windows when it is done. Device Manager then lists a "Voodoo2 3D
+Accelerator", and DirectDraw and Direct3D offer the card as "3dfxV2
+(Voodoo2 DirectX 6 Driver)". Incoming plays on it, menus and missions,
+with `machine=svga_s3virge`, `cpu=pentium_ii` and `memsize=128`.
+
 DOS games that bring the Voodoo2's `GLIDE2X.OVL` or Glide 3 run as on the
 Voodoo Graphics.
 
