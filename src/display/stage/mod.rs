@@ -22,6 +22,7 @@ mod headset;
 #[cfg(xr)]
 mod keyboard;
 mod photo;
+mod physics;
 mod pick;
 mod props;
 mod render;
