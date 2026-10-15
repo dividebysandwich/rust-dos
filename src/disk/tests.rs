@@ -1225,6 +1225,8 @@ fn a_state_whose_cd_image_moved_says_the_image_is_gone() {
     // The sheet is there, its track isn't.
     fs::create_dir_all(base.join("cd")).unwrap();
     fs::copy(base.join("moved/GAME.CUE"), base.join("cd/GAME.CUE")).unwrap();
-    let message = load().unwrap_err().to_string();
-    assert!(message.ends_with("GAME.ISO not found"), "{}", message);
+    let e = load().unwrap_err();
+    assert!(matches!(e, crate::savestate::StateError::Media(_)), "{:?}", e);
+    let message = e.to_string();
+    assert!(message.ends_with("GAME.ISO not found (moved or deleted since the state was saved?)"), "{}", message);
 }

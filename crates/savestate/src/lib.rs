@@ -26,7 +26,8 @@ pub enum StateError {
     /// Its machine differs from this one in a way loading can't change.
     Mismatch(String),
     /// A drive it has can't be mounted from the host's files as they are
-    /// now: an image or folder moved or deleted since the save.
+    /// now. Most often an image or folder moved or was deleted since the
+    /// save, but any failed mount of a drive during a load is one.
     Media(String),
 }
 
