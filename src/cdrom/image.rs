@@ -575,11 +575,13 @@ fn find_file(dir: &Path, name: &str) -> Result<PathBuf, String> {
         }
     }
     find_in(dir, file, is_file).ok_or_else(|| {
-        let beside = dir.join(file);
+        // The sheet's path is canonical: without Windows' `\\?\`.
+        let shown = crate::mount::display_host_path;
+        let beside = shown(&dir.join(file));
         if below_sheet {
-            format!("{} not found, nor {}", dir.join(parts.join(std::path::MAIN_SEPARATOR_STR)).display(), beside.display())
+            format!("{} not found, nor {}", shown(&dir.join(parts.join(std::path::MAIN_SEPARATOR_STR))), beside)
         } else {
-            format!("{} not found", beside.display())
+            format!("{} not found", beside)
         }
     })
 }

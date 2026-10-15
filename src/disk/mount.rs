@@ -85,9 +85,15 @@ impl DiskController {
             path = &archive_path;
             overlaid = Some(o);
         }
+        if !hostfs::exists(path) {
+            return Err(format!("{} isn't there", path.display()));
+        }
         if hostfs::is_file(path) {
             let mut images = Vec::new();
             for image in std::iter::once(path).chain(more_images.iter().map(PathBuf::as_path)) {
+                if !hostfs::exists(image) {
+                    return Err(format!("{} isn't there", image.display()));
+                }
                 if !hostfs::is_file(image) {
                     return Err(format!("{} is not a disk or CD image", image.display()));
                 }

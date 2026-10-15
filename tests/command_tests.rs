@@ -145,7 +145,7 @@ fn mount_lists_mounts_and_unmounts() {
         &format!("MOUNT e {}", base.join("nope").display()),
     );
     assert!(
-        out.replace('\n', "").ends_with("is not a directory or a disk or CD image"),
+        out.replace('\n', "").ends_with("nope isn't there"),
         "{}",
         out
     );

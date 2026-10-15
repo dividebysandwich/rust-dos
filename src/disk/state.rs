@@ -227,8 +227,15 @@ impl DiskController {
         if let Some(text) = mount.as_ref().filter(|&text| now.as_ref() != Some(text)) {
             let mut spec = spec_of(text)?;
             spec.opts.boot = self.boot_drive() == Some(drive);
-            self.mount(drive, &spec.path, spec.opts, true)
-                .map_err(|e| StateError::Mismatch(format!("drive {} can't be mounted: {}", name, e)))?;
+            // An image or folder moved or deleted since the save is named
+            // as such, not as a machine of other hardware.
+            let gone = std::iter::once(&spec.path)
+                .chain(&spec.opts.more_images)
+                .any(|p| !crate::hostfs::exists(p) && crate::archive::split(p).is_none());
+            self.mount(drive, &spec.path, spec.opts, true).map_err(|e| {
+                let hint = if gone { " (moved or deleted since the state was saved?)" } else { "" };
+                StateError::Media(format!("drive {} can't be mounted: {}{}", name, e, hint))
+            })?;
         }
         let images = match self.drive(drive) {
             Some(d) => d.images.len(),
