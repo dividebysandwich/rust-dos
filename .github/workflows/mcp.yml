@@ -52,7 +52,8 @@ jobs:
         # Each actor test owns guest/HTTP threads and real request deadlines.
         # Keep unrelated guests out of the capture-pressure test's host budget;
         # that test still runs its own concurrent clients against a live guest.
-        run: cargo test --locked --features mcp --bin rust-dos --test mcp_foundation --example mcp_check -- --test-threads=1
+        # Optimized emulation is required for the real-time latency assertions.
+        run: cargo test --release --locked --features mcp --bin rust-dos --test mcp_foundation --example mcp_check -- --test-threads=1
       - name: Portable verification entrypoint
         run: cargo run --locked --example mcp_check -- foundation
       - name: Scoped format and lint (pinned compiler)
