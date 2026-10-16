@@ -30,6 +30,7 @@
 //! and vidProcCfg bit 0 are set, in the size the CRTC registers give.
 
 pub mod blit2d;
+pub mod ddc;
 pub mod display;
 pub mod fifo;
 pub mod render3d;
@@ -238,6 +239,8 @@ pub struct Banshee {
     pub overlay_queue: VecDeque<u32>,
     /// Writes to swapPending not yet matched by a swap.
     pub swap_count: u32,
+    /// The monitor on the DDC lines.
+    pub ddc: ddc::Ddc,
     /// What the display needs to hear: the picture changed, the palette
     /// changed.
     pub dirty: bool,
@@ -246,7 +249,7 @@ pub struct Banshee {
 crate::state_fields!(Banshee {
     pci, ext, clut, crtc, misc_output, seq01, intr_ctrl, agp, fifo, engine,
     overlay_addr, overlay_queue, swap_count,
-} skip { kind, dirty });
+} skip { kind, ddc, dirty });
 
 impl Banshee {
     pub fn new(kind: Kind) -> Self {
@@ -265,6 +268,7 @@ impl Banshee {
             overlay_addr: 0,
             overlay_queue: VecDeque::new(),
             swap_count: 0,
+            ddc: ddc::Ddc::default(),
             dirty: true,
         };
         b.reset();
@@ -291,6 +295,7 @@ impl Banshee {
             overlay_addr: 0,
             overlay_queue: VecDeque::new(),
             swap_count: 0,
+            ddc: ddc::Ddc::default(),
             dirty: true,
         };
         self.ext[(DRAM_INIT0 / 4) as usize] = (1 << 27) | (1 << 26);
@@ -501,6 +506,12 @@ impl Banshee {
                 return false;
             }
             VID_DESKTOP_START_ADDR => self.set_reg(offset, value & 0xFF_FFFF),
+            VID_SERIAL_PARALLEL_PORT => {
+                self.set_reg(offset, value);
+                self.ddc
+                    .drive(value & DDC_CLOCK_W != 0, value & DDC_DATA_W != 0);
+                return false;
+            }
             _ => self.set_reg(offset, value),
         }
         self.dirty = true;
@@ -525,12 +536,14 @@ impl Banshee {
             STRAP_INFO => 0x0000_0040,
             DAC_DATA => self.clut[(self.reg(DAC_ADDR) & 0x1FF) as usize],
             VID_SERIAL_PARALLEL_PORT => {
-                // Nothing on the buses: the lines read as they are driven.
+                // The monitor on the DDC lines; nothing on the I2C bus,
+                // whose lines read as they are driven.
                 let v = self.reg(offset) & !(DDC_CLOCK_R | DDC_DATA_R | I2C_CLOCK_R | I2C_DATA_R);
                 let mut lines = 0;
                 if v & DDC_ENABLE != 0 {
-                    lines |= if v & DDC_CLOCK_W != 0 { DDC_CLOCK_R } else { 0 };
-                    lines |= if v & DDC_DATA_W != 0 { DDC_DATA_R } else { 0 };
+                    let (scl, sda) = self.ddc.lines();
+                    lines |= if scl { DDC_CLOCK_R } else { 0 };
+                    lines |= if sda { DDC_DATA_R } else { 0 };
                 }
                 if v & I2C_ENABLE != 0 {
                     lines |= if v & I2C_CLOCK_W != 0 { I2C_CLOCK_R } else { 0 };
@@ -830,5 +843,9 @@ mod tests {
         let v = b.ext_read(VID_SERIAL_PARALLEL_PORT);
         assert_ne!(v & DDC_CLOCK_R, 0);
         assert_eq!(v & DDC_DATA_R, 0);
+        // Disabled, they read low.
+        b.ext_write(VID_SERIAL_PARALLEL_PORT, DDC_CLOCK_W | DDC_DATA_W);
+        let v = b.ext_read(VID_SERIAL_PARALLEL_PORT);
+        assert_eq!(v & (DDC_CLOCK_R | DDC_DATA_R), 0);
     }
 }

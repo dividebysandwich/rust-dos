@@ -200,9 +200,29 @@ pub fn handle(cpu: &mut Cpu) {
             cpu.set_cx(pm_table().len() as u16);
             SUCCESS
         }
+        // VBE/DDC, on a Voodoo3 with its monitor's EDID.
+        0x15 if cpu.bus.banshee().is_some() => ddc(cpu, es_di),
         _ => FAILED,
     };
     cpu.set_ax(status);
+}
+
+/// Function 15h, VBE/DDC: BL=00h reports DDC2 transfers, which take
+/// no time here; BL=01h reads EDID block DX (only block 0 exists) into
+/// ES:DI.
+fn ddc(cpu: &mut Cpu, addr: usize) -> u16 {
+    match cpu.get_reg8(Register::BL) {
+        0x00 => {
+            cpu.set_bx(0x0002);
+            SUCCESS
+        }
+        0x01 if cpu.dx() == 0 => {
+            let edid = crate::voodoo::banshee::ddc::edid();
+            write_bytes(&mut cpu.bus, addr, &edid);
+            SUCCESS
+        }
+        _ => FAILED,
+    }
 }
 
 /// Function 00h: the VbeInfoBlock. Callers asking for VBE 2.0 (with "VBE2"
