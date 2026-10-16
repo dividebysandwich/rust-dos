@@ -405,6 +405,24 @@ mod tests {
     }
 
     #[test]
+    fn states_keep_the_card_and_the_driver() {
+        let mut vfx1 = Vfx1::new(0x260);
+        vfx1.write(0x260, PSR as u8);
+        vfx1.write(0x261, 0x10);
+        vfx1.driver.video_mode = 2;
+        vfx1.glasses = bios3d::GLASSES;
+        let mut w = crate::savestate::Writer::new();
+        vfx1.save(&mut w);
+        let mut back = Vfx1::new(0x260);
+        back.load(&mut crate::savestate::Reader::new(&w.buf))
+            .unwrap();
+        assert_eq!(back.activity().page_select, 0x10);
+        assert_eq!(back.activity().video_mode, 2);
+        assert!(back.activity().glasses);
+        assert_eq!(back.read(0x260), PSR as u8);
+    }
+
+    #[test]
     fn vip_registers() {
         let mut vip = Vfx1::new(0x260);
         assert!(vip.claims(0x260) && vip.claims(0x26F) && vip.claims(0x303));
