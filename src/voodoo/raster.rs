@@ -988,11 +988,11 @@ const fn full(tmus: usize, [fbz, cp, am, fog, t0, t1]: [u32; 6]) -> [(u32, u32);
 const TC_FIXED: u32 = 0x3FFF_F000;
 
 /// A variant that fixes only fbzColorPath (as `CP_FIXED` says) and the
-/// texture combine of the units used, and leaves fbzMode, alphaMode, fogMode and the texture
-/// filtering as the triangle has them. Those cost a variant little against
-/// the generic code, the combines most of the difference, so one of these
-/// covers the depth, blending and fog settings a game draws a colour path
-/// with.
+/// texture combine of the units used, and leaves fbzMode, alphaMode,
+/// fogMode and the texture filtering as the triangle has them. Those cost
+/// a variant little against the generic code, the combines most of the
+/// difference, so one of these covers the depth, blending and fog settings
+/// a game draws a colour path with.
 const fn combine_only(tmus: usize, [cp, t0, t1]: [u32; 3]) -> [(u32, u32); 6] {
     [
         (0, 0),
@@ -1288,7 +1288,9 @@ mod tests {
                 lodmax: 8 << 8,
                 lodbias: 0,
                 lodmask: 0x1FF,
-                lodoffset: [0, 0x20000, 0x28000, 0x2A000, 0x2A800, 0x2AA00, 0x2AA80, 0x2AAA0, 0x2AAA8],
+                lodoffset: [
+                    0, 0x20000, 0x28000, 0x2A000, 0x2A800, 0x2AA00, 0x2AA80, 0x2AAA0, 0x2AAA8,
+                ],
                 detailmax: 0,
                 detailbias: 0,
                 detailscale: 0,
