@@ -1188,3 +1188,84 @@ fn a_create_over_an_existing_file_keeps_the_folders() {
     disk.close_file(handle);
     assert_ne!(disk.host_dirs.changes.get(), changes);
 }
+
+#[test]
+fn a_state_whose_cd_image_moved_says_the_image_is_gone() {
+    let base = scratch("moved_cue_state");
+    fs::create_dir_all(base.join("c")).unwrap();
+    fs::create_dir_all(base.join("disc")).unwrap();
+    fs::write(base.join("disc/DATA.DAT"), b"on the disc").unwrap();
+    let folder = CdImage::from_folder(
+        crate::cdrom::folder::build(&base.join("disc"), "GAMECD").unwrap(),
+        &base.join("disc"),
+    )
+    .unwrap();
+    let mut iso = Vec::new();
+    for lba in 0..folder.leadout() {
+        let mut sector = [0u8; crate::cdrom::DATA_SECTOR];
+        folder.read_data(lba, &mut sector).unwrap();
+        iso.extend_from_slice(&sector);
+    }
+    fs::create_dir_all(base.join("cd")).unwrap();
+    fs::write(base.join("cd/GAME.ISO"), &iso).unwrap();
+    fs::write(
+        base.join("cd/GAME.CUE"),
+        b"FILE \"GAME.ISO\" BINARY\r\n  TRACK 01 MODE1/2048\r\n    INDEX 01 00:00:00\r\n",
+    )
+    .unwrap();
+    let mut disk = DiskController::new(base.join("c"));
+    disk.mount(3, &base.join("cd/GAME.CUE"), cdrom(), false)
+        .unwrap();
+    let mut w = crate::savestate::Writer::new();
+    disk.save_state(&mut w);
+    // Windows won't move the files while the image is open.
+    drop(disk);
+    let load = || {
+        DiskController::new(base.join("c"))
+            .load_state(&mut crate::savestate::Reader::new(&w.buf))
+            .map(|_| ())
+    };
+    assert_eq!(
+        load(),
+        Ok(()),
+        "a fresh machine mounts the disc as the state has it"
+    );
+
+    // The sheet moved with its track: the load names the sheet.
+    fs::rename(base.join("cd"), base.join("moved")).unwrap();
+    let e = load().unwrap_err();
+    assert!(
+        matches!(e, crate::savestate::StateError::Media(_)),
+        "{:?}",
+        e
+    );
+    let message = e.to_string();
+    assert!(
+        message.starts_with(
+            "the saved state's drives can't be mounted here: drive D: can't be mounted: "
+        ),
+        "{}",
+        message
+    );
+    assert!(
+        message.ends_with("GAME.CUE isn't there (moved or deleted since the state was saved?)"),
+        "{}",
+        message
+    );
+
+    // The sheet is there, its track isn't.
+    fs::create_dir_all(base.join("cd")).unwrap();
+    fs::copy(base.join("moved/GAME.CUE"), base.join("cd/GAME.CUE")).unwrap();
+    let e = load().unwrap_err();
+    assert!(
+        matches!(e, crate::savestate::StateError::Media(_)),
+        "{:?}",
+        e
+    );
+    let message = e.to_string();
+    assert!(
+        message.ends_with("GAME.ISO not found (moved or deleted since the state was saved?)"),
+        "{}",
+        message
+    );
+}

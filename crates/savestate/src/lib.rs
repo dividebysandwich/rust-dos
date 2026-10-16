@@ -25,6 +25,10 @@ pub enum StateError {
     Invalid(String),
     /// Its machine differs from this one in a way loading can't change.
     Mismatch(String),
+    /// A drive it has can't be mounted from the host's files as they are
+    /// now. Most often an image or folder moved or was deleted since the
+    /// save, but any failed mount of a drive during a load is one.
+    Media(String),
 }
 
 impl std::fmt::Display for StateError {
@@ -33,6 +37,11 @@ impl std::fmt::Display for StateError {
             StateError::Truncated => write!(f, "the saved state is cut short or damaged"),
             StateError::Invalid(what) => write!(f, "the saved state has {}", what),
             StateError::Mismatch(what) => write!(f, "the saved state is of another machine: {}", what),
+            StateError::Media(what) => write!(
+                f,
+                "the saved state's drives can't be mounted here: {}",
+                what
+            ),
         }
     }
 }

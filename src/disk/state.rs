@@ -227,8 +227,26 @@ impl DiskController {
         if let Some(text) = mount.as_ref().filter(|&text| now.as_ref() != Some(text)) {
             let mut spec = spec_of(text)?;
             spec.opts.boot = self.boot_drive() == Some(drive);
-            self.mount(drive, &spec.path, spec.opts, true)
-                .map_err(|e| StateError::Mismatch(format!("drive {} can't be mounted: {}", name, e)))?;
+            // A mount that fails with an image or folder of the state gone
+            // from the host (and not inside an archive that is there), or a
+            // CUE sheet's track file gone, says it may have moved since the
+            // save.
+            let more_images = spec.opts.more_images.clone();
+            self.mount(drive, &spec.path, spec.opts, true).map_err(|e| {
+                let missing = |p: &PathBuf| {
+                    crate::hostfs::metadata(p)
+                        .is_err_and(|err| err.kind() == std::io::ErrorKind::NotFound)
+                        && crate::archive::split(p).is_none()
+                };
+                let gone = std::iter::once(&spec.path).chain(&more_images).any(missing)
+                    || crate::cdrom::image::cue_lacks_a_file(&spec.path);
+                let hint = if gone {
+                    " (moved or deleted since the state was saved?)"
+                } else {
+                    ""
+                };
+                StateError::Media(format!("drive {} can't be mounted: {}{}", name, e, hint))
+            })?;
         }
         let images = match self.drive(drive) {
             Some(d) => d.images.len(),

@@ -554,6 +554,19 @@ pub fn cue_files(path: &Path) -> Vec<PathBuf> {
     sheet.files.iter().filter_map(|f| find_file(dir, &f.name).ok()).collect()
 }
 
+/// Whether `path` is a CUE sheet `CdImage::open` reads as one that names a
+/// track file that isn't there.
+pub fn cue_lacks_a_file(path: &Path) -> bool {
+    let Some(Ok(sheet)) = sheet(path) else {
+        return false;
+    };
+    let dir = path
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    sheet.files.iter().any(|f| find_file(dir, &f.name).is_err())
+}
+
 /// A file named in a CUE sheet: below the sheet's folder by its relative
 /// path (some sheets keep their audio tracks in a folder), else next to the
 /// sheet, each part by the name as written or by any case of it (sheets
@@ -575,11 +588,18 @@ fn find_file(dir: &Path, name: &str) -> Result<PathBuf, String> {
         }
     }
     find_in(dir, file, is_file).ok_or_else(|| {
-        let beside = dir.join(file);
+        // The sheet's path is canonical, which on Windows starts with
+        // `\\?\`; the message leaves that out.
+        let shown = crate::mount::display_host_path;
+        let beside = shown(&dir.join(file));
         if below_sheet {
-            format!("{} not found, nor {}", dir.join(parts.join(std::path::MAIN_SEPARATOR_STR)).display(), beside.display())
+            format!(
+                "{} not found, nor {}",
+                shown(&dir.join(parts.join(std::path::MAIN_SEPARATOR_STR))),
+                beside
+            )
         } else {
-            format!("{} not found", beside.display())
+            format!("{} not found", beside)
         }
     })
 }
