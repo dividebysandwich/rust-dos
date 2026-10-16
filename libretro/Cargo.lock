@@ -1275,7 +1275,7 @@ checksum = "cab834c73d247e67f4fae452806d17d3c7501756d98c8808d7c9c7aa7d18f973"
 
 [[package]]
 name = "rust-dos"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "ab_glyph_rasterizer",
  "base64",
@@ -1327,21 +1327,21 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-audio-core"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "rust-dos-savestate",
 ]
 
 [[package]]
 name = "rust-dos-dma"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "rust-dos-savestate",
 ]
 
 [[package]]
 name = "rust-dos-gus"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "rust-dos-audio-core",
  "rust-dos-dma",
@@ -1352,14 +1352,14 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-hostdirs"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "dirs",
 ]
 
 [[package]]
 name = "rust-dos-libretro"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "glow",
  "rust-dos",
@@ -1368,7 +1368,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-lpt-dac"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "rust-dos-audio-core",
  "rust-dos-savestate",
@@ -1376,7 +1376,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-mpu401"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "rust-dos-audio-core",
  "rust-dos-gus",
@@ -1388,7 +1388,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-mt32"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "libloading",
  "rust-dos-hostdirs",
@@ -1396,7 +1396,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-opl"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "nuked-opl3",
  "rust-dos-audio-core",
@@ -1405,11 +1405,11 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-savestate"
-version = "1.7.3"
+version = "1.7.4"
 
 [[package]]
 name = "rust-dos-sc55"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "dirs",
  "rust-dos-hostdirs",
@@ -1419,7 +1419,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-soundblaster"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "rust-dos-audio-core",
  "rust-dos-dma",
@@ -1432,7 +1432,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-tandy"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "rust-dos-audio-core",
  "rust-dos-savestate",
@@ -1440,7 +1440,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-zip"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "flate2",
  "zip",
