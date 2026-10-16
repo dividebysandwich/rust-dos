@@ -256,7 +256,9 @@ Each instruction becomes one of two things:
   - BT, BTS, BTR and BTC of a register, or of memory with an immediate bit
     offset (CF, and OF as a 386 leaves it);
   - the FPU instructions programs run all the time (see
-    [The FPU](#the-fpu)).
+    [The FPU](#the-fpu));
+  - on x86-64 hosts, most MMX and SSE instructions (see
+    [MMX and SSE](#mmx-and-sse)).
 
   Each does what the instruction's interpreter handler does, in the same
   order, flags included. Where a form has rare cases the operations don't
@@ -428,11 +430,44 @@ Registers while translated code runs:
 | the guest's arithmetic flags | EBP | W28 |
 | the operations' temporaries | R8–R10 (saved around calls) | W24–W26 (kept by calls) |
 | an FPU instruction's doubles | XMM0, XMM1 | D8, D9 (kept by calls) |
+| an MMX or SSE instruction's operands | XMM0, XMM1 (XMM2 scratch) | |
 | the guest registers the block uses most | R11, RSI, RDI (saved around calls), R15 (kept by calls) | |
 
 On x86-64, calls into Rust use the System V convention, which Rust offers
 on every x86-64 host, Windows included; on ARM64 the platform's own. ARM64
 code never touches X18, which macOS reserves.
+
+### MMX and SSE
+
+On x86-64 hosts, `dynrec/simd.rs` translates the MMX and SSE
+instructions that games' inner loops are made of into the host's SSE2
+instructions on XMM0 and XMM1: MOVD, MOVQ and the packed integer
+instructions on MMX registers, with SSE's additions to them (PSHUFW,
+PAVGB, PMOVMSKB and the rest but PINSRW and MASKMOVQ), the moves,
+logical instructions and shuffles on XMM registers, and the arithmetic
+on singles: ADD, SUB, MUL, DIV, MIN, MAX, SQRT and CMP, packed and
+scalar, CVTPS2PI, CVTTPS2PI and CVTPI2PS. The arithmetic runs with the
+host's MXCSR set to the guest's rounding and flush to zero, every
+exception masked, and the exceptions it raised are added to the guest's
+MXCSR; where one of them is unmasked in the guest's MXCSR, the handler
+runs the instruction instead and raises it. The host's MXCSR is then set
+back to Rust's. The approximations of RCPSS, RCPPS, RSQRTSS and RSQRTPS,
+which the host's don't match, the compares into EFLAGS and the
+conversions to and from 32-bit registers go through their handlers, and
+so does everything on ARM64 hosts.
+
+An MMX register is the significand of an FPU register, and a write gives
+the register its 80 bits and the double they come to, as `mmx::set_mm`
+does. Each instruction starts with a `SimdGuard`, which leaves CR0's EM
+and TS, CR4's OSFXSR clear and an MMX register whose 80 bits the FPU left
+to be made from its double (`f80::FpuRegs`) to the handler. A memory
+operand of 8 or 16 bytes is read and written by the code where it is
+plain RAM within a page (written, without code in its block of RAM),
+else by the handler; a 16-byte operand that must be aligned and isn't
+goes to the handler, which raises #GP(0).
+
+The lockstep tests compare the XMM registers, MXCSR and the FPU
+registers' doubles too.
 
 ### Environments
 
@@ -622,7 +657,7 @@ The host's time is fixed for both (`hosttime::fix`).
 | Test | Checks |
 |---|---|
 | `tests/dyndiff_tests.rs` | A protected-mode program with a fast timer interrupt |
-| `tests/dynrec_tests.rs` | Stores into the rest of a block, faults and page faults in the middle of one, interrupt shadows, an interrupt a POPF lets through, a switch to a stack of another width, timer reads, a full code memory, the auto latch, rewriting a linked block, a RET poked into an unrolled loop, immediates poked before each loop, the translated FPU instructions on singles of every kind under each rounding mode, on empty registers, without the coprocessor and past a segment's limit, returns and indirect calls to several places, a return to more places than it has links, indirect jumps, flags set in one block and read in the next, stack operations faulting after the instructions before them, REP MOVS and STOS of a few elements, faulting part of the way, over the rest of their block and into the video memory, video memory, ROMs and unmapped addresses read and written with paging off and through the TLB, PUSHAD and POPAD past the stack's limit, a smaller CS limit under a link, conditional jumps within a block and out of it (counts, cached registers, a fault after one), STI ending a full block, and plain writes into the VGA's planes as the map mask and write mode change, far calls, returns and interrupts in real and protected mode going on in translated code, segment loads in big real mode, and a link to a page the TLB lost |
+| `tests/dynrec_tests.rs` | Stores into the rest of a block, faults and page faults in the middle of one, interrupt shadows, an interrupt a POPF lets through, a switch to a stack of another width, timer reads, a full code memory, the auto latch, rewriting a linked block, a RET poked into an unrolled loop, immediates poked before each loop, the translated FPU instructions on singles of every kind under each rounding mode, on empty registers, without the coprocessor and past a segment's limit, returns and indirect calls to several places, a return to more places than it has links, indirect jumps, flags set in one block and read in the next, stack operations faulting after the instructions before them, REP MOVS and STOS of a few elements, faulting part of the way, over the rest of their block and into the video memory, video memory, ROMs and unmapped addresses read and written with paging off and through the TLB, PUSHAD and POPAD past the stack's limit, a smaller CS limit under a link, conditional jumps within a block and out of it (counts, cached registers, a fault after one), STI ending a full block, and plain writes into the VGA's planes as the map mask and write mode change, far calls, returns and interrupts in real and protected mode going on in translated code, segment loads in big real mode, a link to a page the TLB lost, and the translated MMX and SSE instructions on singles of every kind under each rounding mode and flush to zero, with exceptions MXCSR unmasks, misaligned operands, MMX registers the FPU left stale, and stores into video memory and a block of RAM with code |
 
 Local DOS programs run in lockstep opt-in, from the git-ignored
 `programs/` directory:

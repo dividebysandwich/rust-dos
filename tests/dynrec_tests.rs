@@ -16,6 +16,7 @@ use rust_dos::dynrec::{AVAILABLE, DynStats};
 
 const GP: u8 = 13;
 const PF: u8 = 14;
+const UD: u8 = 6;
 
 /// Two rigs set up by `setup`, the second on the recompiler, both in
 /// protected mode at CODE. They see the same fixed time: DOS stamps its
@@ -4284,4 +4285,341 @@ fn watched_writes_bump_every_blocks_generation_on_the_recompiler_too() {
         let (_, translated) = data_stores(false);
         assert!(translated < interpreted, "the recompiler bumped {} times without watching", translated);
     }
+}
+
+/// Check that the recompiler's machine ran no instruction through its
+/// handler but those that set the rig up, LDMXCSR and STMXCSR, and those
+/// of `expected` up to the times given.
+fn assert_handled_only(rig: &Rig, expected: &[(iced_x86::Mnemonic, u64)]) {
+    use iced_x86::Mnemonic::*;
+    // (ARM64's code generator doesn't translate them.)
+    if !cfg!(target_arch = "x86_64") {
+        return;
+    }
+    let Some(calls) = rig.cpu.dynrec.calls() else { return };
+    let names: Vec<_> = iced_x86::Mnemonic::values().collect();
+    let ran = calls.fallback.iter().enumerate().filter(|&(_, &n)| n != 0);
+    let unexpected: Vec<_> = ran
+        .map(|(m, &n)| (names[m], n))
+        .filter(|&(m, n)| {
+            let setup = matches!(m, Fninit | Jmp | Lgdt | Lidt | Ltr | Mov | Ldmxcsr | Stmxcsr);
+            !setup && !expected.iter().any(|&(e, most)| e == m && n <= most)
+        })
+        .collect();
+    assert!(unexpected.is_empty(), "the handlers ran {:?}", unexpected);
+}
+
+/// MXCSR values for the SSE tests: rounding to nearest, down, up and
+/// toward zero, and flush to zero, every exception masked.
+const MXCSRS: [u32; 5] = [0x1F80, 0x3F80, 0x5F80, 0x7F80, 0x9F80];
+/// The iterations of `sse_loop`.
+const SSE_COUNT: u32 = (SINGLES.len() * SINGLES.len() * MXCSRS.len()) as u32;
+
+/// Run `body` on a Pentium III with SSE enabled once for every pair of
+/// `SINGLES` and value of `MXCSRS`: ESI points at four singles (16 bytes
+/// aligned), MXCSR's value, two dwords of `INTS`, and at ESI + 32 four
+/// more singles; EDI at 64 bytes for results (16 bytes aligned); EBX is
+/// the body's to sum into. The registers hold what the iteration before
+/// left.
+fn sse_loop(
+    body: impl Fn(&mut CodeAssembler) -> Result<(), IcedError> + Copy,
+) -> (Rig, Rig, DynStats) {
+    let (input, output) = (DATA, DATA + 0x20000);
+    let n = SINGLES.len() as u32;
+    let count = SSE_COUNT;
+    let top = CODE + 0x40;
+    let (mut a, mut b) = twins(|rig| {
+        rig.cpu.model = rust_dos::cpu::CpuModel::PentiumIII;
+        // OSFXSR.
+        rig.cpu.cr4 |= 0x200;
+        for k in 0..count {
+            let (i, j, m) = (k % n, k / n % n, k / (n * n));
+            let at = input + 48 * k;
+            let picks = [i, j, (i + j) % n, (7 * i + 3 * j) % n];
+            for (o, p) in picks.into_iter().enumerate() {
+                rig.write32(at + 4 * o as u32, SINGLES[p as usize]);
+                rig.write32(at + 32 + 4 * o as u32, SINGLES[((p + 5) % n) as usize]);
+            }
+            rig.write32(at + 16, MXCSRS[m as usize]);
+            rig.write32(at + 20, INTS[(k % 8) as usize]);
+            rig.write32(at + 24, INTS[((k + 3) % 8) as usize]);
+        }
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.fninit()?;
+            a.mov(esi, input)?;
+            a.mov(edi, output)?;
+            a.xor(ebx, ebx)?;
+            a.mov(ecx, count)?;
+            a.jmp(top as u64)
+        }));
+        rig.load(top, &asm32(top, |a| {
+            let mut again = a.create_label();
+            a.set_label(&mut again)?;
+            a.ldmxcsr(dword_ptr(esi + 16))?;
+            body(a)?;
+            a.add(esi, 48)?;
+            a.add(edi, 64)?;
+            a.and(edi, (output | 0xFFFF) as i32)?;
+            a.dec(ecx)?;
+            a.jnz(again)?;
+            a.hlt()
+        }));
+    });
+    let stats = run_both(&mut a, &mut b);
+    (a, b, stats)
+}
+
+#[test]
+fn sse_arithmetic_runs_as_its_handlers() {
+    let (_, b, _) = sse_loop(|a| {
+        a.movups(xmm0, xmmword_ptr(esi))?;
+        a.movaps(xmm1, xmmword_ptr(esi + 32))?;
+        a.movaps(xmm2, xmm0)?;
+        a.addps(xmm2, xmm1)?;
+        a.mulps(xmm0, xmmword_ptr(esi + 32))?;
+        a.subps(xmm2, xmm0)?;
+        a.divps(xmm1, xmm2)?;
+        a.minps(xmm1, xmmword_ptr(esi))?;
+        a.maxps(xmm2, xmm1)?;
+        a.sqrtps(xmm3, xmm0)?;
+        a.movaps(xmm4, xmm0)?;
+        a.cmpps(xmm4, xmm1, 1)?;
+        a.movmskps(eax, xmm4)?;
+        a.add(ebx, eax)?;
+        a.cmpps(xmm3, xmmword_ptr(esi), 3)?;
+        a.movmskps(eax, xmm3)?;
+        a.add(ebx, eax)?;
+        a.movss(xmm5, dword_ptr(esi + 4))?;
+        a.addss(xmm5, dword_ptr(esi + 8))?;
+        a.mulss(xmm5, xmm0)?;
+        a.subss(xmm5, xmm1)?;
+        a.divss(xmm5, dword_ptr(esi + 12))?;
+        a.minss(xmm5, xmm2)?;
+        a.maxss(xmm5, dword_ptr(esi + 32))?;
+        a.sqrtss(xmm6, xmm5)?;
+        a.cmpss(xmm6, xmm0, 6)?;
+        a.movss(xmm7, xmm5)?;
+        a.movss(dword_ptr(edi + 48), xmm6)?;
+        a.movups(xmmword_ptr(edi), xmm2)?;
+        a.movaps(xmmword_ptr(edi + 16), xmm5)?;
+        a.cvtps2pi(mm0, xmm2)?;
+        a.cvttps2pi(mm1, qword_ptr(esi + 32))?;
+        a.cvtpi2ps(xmm7, mm0)?;
+        a.cvtpi2ps(xmm6, qword_ptr(esi + 20))?;
+        a.movq(qword_ptr(edi + 32), mm1)?;
+        a.movups(xmmword_ptr(edi + 32), xmm7)?;
+        a.movups(xmm0, xmm6)?;
+        a.emms()?;
+        a.stmxcsr(dword_ptr(edi + 52))?;
+        a.add(ebx, dword_ptr(edi + 52))
+    });
+    assert_ne!(b.read32(DATA + 0x20000), 0);
+    assert_handled_only(&b, &[]);
+}
+
+#[test]
+fn sse_moves_logic_and_shuffles_run_as_their_handlers() {
+    let (_, b, _) = sse_loop(|a| {
+        a.movaps(xmm0, xmmword_ptr(esi))?;
+        a.movups(xmm1, xmmword_ptr(esi + 32))?;
+        a.xorps(xmm2, xmm2)?;
+        a.orps(xmm2, xmm0)?;
+        a.andps(xmm2, xmmword_ptr(esi + 32))?;
+        a.andnps(xmm1, xmm0)?;
+        a.xorps(xmm1, xmmword_ptr(esi))?;
+        a.shufps(xmm0, xmm1, 0x1B)?;
+        a.shufps(xmm1, xmmword_ptr(esi + 32), 0xC6)?;
+        a.unpcklps(xmm2, xmm0)?;
+        a.unpckhps(xmm3, xmmword_ptr(esi))?;
+        a.movhlps(xmm4, xmm0)?;
+        a.movlhps(xmm4, xmm1)?;
+        a.movlps(xmm5, qword_ptr(esi + 8))?;
+        a.movhps(xmm5, qword_ptr(esi + 36))?;
+        a.movlps(qword_ptr(edi), xmm4)?;
+        a.movhps(qword_ptr(edi + 8), xmm5)?;
+        a.movss(xmm6, xmm0)?;
+        a.movss(dword_ptr(edi + 16), xmm1)?;
+        a.movaps(xmmword_ptr(edi + 32), xmm2)?;
+        a.movntps(xmmword_ptr(edi + 48), xmm3)?;
+        a.movmskps(eax, xmm6)?;
+        a.add(ebx, eax)
+    });
+    assert_ne!(b.read32(DATA + 0x20000), 0);
+    assert_handled_only(&b, &[]);
+}
+
+#[test]
+fn mmx_instructions_run_as_their_handlers() {
+    let (_, b, _) = sse_loop(|a| {
+        a.movq(mm0, qword_ptr(esi))?;
+        a.movq(mm1, qword_ptr(esi + 8))?;
+        a.movd(mm2, dword_ptr(esi + 20))?;
+        a.movd(mm3, ebx)?;
+        a.paddb(mm0, mm1)?;
+        a.paddsw(mm1, qword_ptr(esi + 32))?;
+        a.paddusb(mm3, mm0)?;
+        a.psubd(mm3, mm2)?;
+        a.psubsb(mm1, mm0)?;
+        a.psubusw(mm2, qword_ptr(esi))?;
+        a.pmullw(mm1, mm0)?;
+        a.pmulhw(mm2, mm1)?;
+        a.pmaddwd(mm3, qword_ptr(esi + 32))?;
+        a.pcmpeqb(mm3, mm1)?;
+        a.pcmpgtw(mm2, mm0)?;
+        a.pcmpgtd(mm2, qword_ptr(esi + 8))?;
+        a.pand(mm0, mm1)?;
+        a.pandn(mm1, mm2)?;
+        a.por(mm2, mm3)?;
+        a.pxor(mm3, qword_ptr(esi))?;
+        a.packssdw(mm0, mm1)?;
+        a.packsswb(mm1, qword_ptr(esi + 32))?;
+        a.packuswb(mm2, mm3)?;
+        a.punpcklbw(mm3, mm0)?;
+        a.punpcklwd(mm0, dword_ptr(esi + 20))?;
+        a.punpckhdq(mm1, mm2)?;
+        a.punpckhbw(mm2, qword_ptr(esi + 8))?;
+        a.psllw(mm0, 3)?;
+        a.psrad(mm1, 31)?;
+        a.psrlq(mm2, mm3)?;
+        a.pslld(mm3, qword_ptr(esi + 20))?;
+        a.psraw(mm0, mm2)?;
+        a.pshufw(mm4, mm0, 0x1B)?;
+        a.pshufw(mm5, qword_ptr(esi + 32), 0x93)?;
+        a.pavgb(mm4, mm1)?;
+        a.pavgw(mm5, qword_ptr(esi))?;
+        a.pminub(mm4, mm5)?;
+        a.pmaxsw(mm5, mm2)?;
+        a.pmulhuw(mm4, mm3)?;
+        a.psadbw(mm5, mm4)?;
+        a.pmovmskb(eax, mm4)?;
+        a.add(ebx, eax)?;
+        a.pextrw(eax, mm1, 2)?;
+        a.add(ebx, eax)?;
+        a.movd(eax, mm2)?;
+        a.add(ebx, eax)?;
+        a.movq(qword_ptr(edi), mm0)?;
+        a.movd(dword_ptr(edi + 8), mm1)?;
+        a.movntq(qword_ptr(edi + 16), mm4)?;
+        a.movq(mm6, mm5)?;
+        a.movq(qword_ptr(edi + 24), mm6)?;
+        a.emms()?;
+        // A register the FPU gave a double, read as MM7: the handler makes
+        // its 80 bits.
+        a.fld(dword_ptr(esi))?;
+        a.fstp(dword_ptr(edi + 32))?;
+        a.fld(dword_ptr(esi + 4))?;
+        a.movq(qword_ptr(edi + 40), mm7)?;
+        a.movd(dword_ptr(edi + 48), mm7)?;
+        a.emms()
+    });
+    assert_ne!(b.read32(DATA + 0x20000), 0);
+    // The two reads of MM7.
+    let reads = SSE_COUNT as u64;
+    let expected = [(iced_x86::Mnemonic::Movq, reads), (iced_x86::Mnemonic::Movd, reads)];
+    assert_handled_only(&b, &expected);
+}
+
+/// A loop of 100 iterations on a Pentium III with SSE enabled, recording
+/// `vector`: ESI steps through 16 bytes an iteration from DATA, EBX counts
+/// the iterations done, and `body` runs in each.
+fn sse_fault_loop(
+    vector: u8,
+    data: impl Fn(&mut Rig),
+    body: impl Fn(&mut CodeAssembler) -> Result<(), IcedError> + Copy,
+) -> Rig {
+    let top = CODE + 0x40;
+    let (mut a, mut b) = twins(|rig| {
+        rig.cpu.model = rust_dos::cpu::CpuModel::PentiumIII;
+        rig.cpu.cr4 |= 0x200;
+        rig.record(vector);
+        data(rig);
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.mov(esi, DATA)?;
+            a.xor(ebx, ebx)?;
+            a.mov(ecx, 100u32)?;
+            a.jmp(top as u64)
+        }));
+        rig.load(top, &asm32(top, |a| {
+            let mut again = a.create_label();
+            a.set_label(&mut again)?;
+            body(a)?;
+            a.inc(ebx)?;
+            a.add(esi, 16)?;
+            a.dec(ecx)?;
+            a.jnz(again)?;
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    b
+}
+
+#[test]
+fn sse_exceptions_mxcsr_unmasks_go_through_the_handlers() {
+    // Division by 0 with ZE unmasked: #UD (CR4's OSXMMEXCPT is clear),
+    // XMM0 as it was and ZE set, on the 100th iteration.
+    let b = sse_fault_loop(
+        UD,
+        |rig| {
+            for k in 0..100 {
+                let divisor = if k == 99 { 0 } else { 0x4000_0000 };
+                for o in 0..4 {
+                    rig.write32(DATA + 16 * k + 4 * o, divisor);
+                }
+            }
+            rig.write32(DATA + 0x1000, 0x1D80);
+            for o in 0..4 {
+                rig.write32(DATA + 0x1010 + 4 * o, 0x3F80_0000);
+            }
+        },
+        |a| {
+            a.ldmxcsr(dword_ptr(DATA + 0x1000))?;
+            a.movaps(xmm0, xmmword_ptr(DATA + 0x1010))?;
+            a.divps(xmm0, xmmword_ptr(esi))
+        },
+    );
+    assert_eq!((b.recorded().0, b.cpu.ebx()), (UD as u32, 99));
+    assert_eq!(b.cpu.sse.xmm[0], 0x3F80_0000_3F80_0000_3F80_0000_3F80_0000);
+    assert_eq!(b.cpu.sse.mxcsr, 0x1D84);
+}
+
+#[test]
+fn sse_misaligned_operands_fault_as_the_handlers_fault() {
+    // The 100th MOVAPS reads 8 bytes off alignment: #GP(0).
+    let b = sse_fault_loop(
+        GP,
+        |_| {},
+        |a| {
+            a.lea(edx, dword_ptr(esi + 8))?;
+            a.cmp(ebx, 99)?;
+            a.cmove(esi, edx)?;
+            a.movaps(xmm1, xmmword_ptr(esi))
+        },
+    );
+    assert_eq!((b.recorded().0, b.cpu.ebx()), (GP as u32, 99));
+}
+
+#[test]
+fn sse_stores_to_video_memory_and_code_pages_go_through_the_handlers() {
+    let b = sse_fault_loop(
+        UD,
+        |rig| {
+            for k in 0..400 {
+                rig.write32(DATA + 4 * k, 0x0101_0101u32.wrapping_mul(k));
+            }
+        },
+        |a| {
+            a.movups(xmm0, xmmword_ptr(esi))?;
+            a.movq(mm0, qword_ptr(esi + 4))?;
+            a.mov(edi, ebx)?;
+            a.shl(edi, 4)?;
+            a.movups(xmmword_ptr(edi + 0xA0000), xmm0)?;
+            a.movq(qword_ptr(edi + 0xA0800), mm0)?;
+            // Into the block of RAM with the code that started the loop.
+            a.movups(xmmword_ptr(CODE + 0x20), xmm0)?;
+            a.movq(qword_ptr(CODE + 0x30), mm0)
+        },
+    );
+    assert_eq!(b.cpu.ebx(), 100);
+    assert_eq!(b.read32(CODE + 0x20), 0x0101_0101u32.wrapping_mul(396));
 }

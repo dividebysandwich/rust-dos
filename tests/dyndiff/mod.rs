@@ -28,6 +28,11 @@ pub struct State {
     /// The FPU: the registers' 80 bits, their tags, the stack top, and the
     /// status and control words.
     pub fpu: ([u128; 8], [u8; 8], usize, u16, u16),
+    /// The registers' doubles (`f80::FpuRegs`), which the FPU's
+    /// instructions compute with.
+    pub fpu_doubles: [u64; 8],
+    /// XMM0-XMM7 and MXCSR.
+    pub sse: ([u128; 8], u32),
 }
 
 impl State {
@@ -51,6 +56,8 @@ impl State {
                 cpu.get_fpu_flags().bits(),
                 cpu.fpu_control,
             ),
+            fpu_doubles: std::array::from_fn(|i| cpu.fpu_reg_f64(i).to_bits()),
+            sse: (cpu.sse.xmm, cpu.sse.mxcsr),
         }
     }
 

@@ -24,7 +24,8 @@ const DF: u32 = 0x0400;
 /// registers in protected mode too (in real mode it always has them).
 /// With `fpu`, FPU instructions are translated, for `fast_fpu`'s arithmetic
 /// (`Cpu::fpu_fast`) if set. `i486`: the CPU is a 486 or later, which
-/// has BSWAP (a 386 faults on it).
+/// has BSWAP (a 386 faults on it). `simd`: MMX and SSE instructions the
+/// CPU has (`simd::MMX`, `simd::SSE`) are translated.
 #[allow(clippy::too_many_arguments)]
 pub fn translate(
     instr: &Instruction,
@@ -36,6 +37,7 @@ pub fn translate(
     fast_fpu: bool,
     real: bool,
     i486: bool,
+    simd: u8,
 ) -> Option<Vec<Uop>> {
     use Mnemonic::*;
     let mut u = Vec::with_capacity(8);
@@ -128,6 +130,7 @@ pub fn translate(
         Jcxz | Jecxz => jcxz(instr, next, &mut u),
         Call => call(instr, next, stack32, &mut u),
         Ret => ret(instr, stack32, &mut u),
+        _ if simd != 0 && super::simd::translate(instr, simd, &mut u) => true,
         _ => fpu && super::fpu::translate(instr, fast_fpu, &mut u),
     };
     ok.then_some(u)
@@ -172,7 +175,7 @@ fn size_mask(size: u8) -> u32 {
 /// Emit the offset of the memory operand into `t`, and return its segment.
 /// None for the SIB byte with no index but a scale, which means something
 /// else on a 386 (see `operand::effective_offset`).
-fn ea(instr: &Instruction, t: T, u: &mut Vec<Uop>) -> Option<Seg> {
+pub(super) fn ea(instr: &Instruction, t: T, u: &mut Vec<Uop>) -> Option<Seg> {
     let (base, index) = (instr.memory_base(), instr.memory_index());
     let scale = instr.memory_index_scale() as u8;
     if index == Register::None && scale != 1 {

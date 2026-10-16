@@ -39,6 +39,9 @@ const FPU_CONTROL: i32 = layout::fpu::CONTROL as i32;
 const FPU_F64: i32 = layout::fpu::F64 as i32;
 const FPU_X80: i32 = layout::fpu::X80 as i32;
 const FPU_STALE: i32 = layout::fpu::STALE as i32;
+const CR4: i32 = layout::CR4 as i32;
+const XMM: i32 = layout::XMM as i32;
+const MXCSR: i32 = layout::MXCSR as i32;
 const FPU_EMPTY: i8 = crate::cpu::FPU_TAG_EMPTY as i8;
 const FPU_VALID: i8 = crate::cpu::FPU_TAG_VALID as i8;
 
@@ -100,6 +103,8 @@ pub fn trampoline() -> Trampoline {
         ; sub rsp, 8
         ; mov rbx, rdi
         ; mov r12, rsi
+        // The host's MXCSR, which `Uop::VFloat` puts back.
+        ; stmxcsr [r12 + CTX_MXCSR + 4]
         ; mov r13, QWORD [r12 + CTX_RAM]
         ; mov r14, QWORD [r12 + CTX_CODE_BLOCKS]
         ; mov ebp, DWORD [rbx + FLAGS]
@@ -401,7 +406,7 @@ fn dev_thunk(ops: &mut Asm, tlb: Option<(i32, i32)>, memref: DynamicLabel) {
         // The operand's size, from the `memref_desc`.
         ; mov edx, ecx
         ; shr edx, 4
-        ; and edx, 0xF
+        ; and edx, 0x1F
         ; mov ecx, eax
         ; and ecx, 0xFFF
         ; add ecx, edx
@@ -782,6 +787,7 @@ struct Merge {
     synced: i32,
     fpu_cr0_checked: bool,
     fpu_known: u8,
+    osfxsr_checked: bool,
     /// Set where `to` is translated: where its code starts, and the
     /// counts, cached registers and flags there.
     entry: Option<(DynamicLabel, i32, Cache, bool)>,
@@ -870,6 +876,9 @@ struct Gen<'a> {
     /// them (it may be an FPU instruction's).
     fpu_cr0_checked: bool,
     fpu_known: u8,
+    /// Whether an SSE instruction of the block has checked CR4's OSFXSR,
+    /// which doesn't change within it.
+    osfxsr_checked: bool,
 }
 
 /// A translated block's code, where its links' stubs are in it, and how
@@ -902,6 +911,8 @@ pub const SYSTEM: bool = true;
 pub const SEGMENTS: bool = true;
 /// And those of FPU instructions.
 pub const FPU: bool = true;
+/// And those of MMX and SSE instructions.
+pub const SIMD: bool = true;
 
 /// Point the link jump at `site` (`Code::sites`) at `to`.
 pub fn patch_link(mem: &mut super::codemem::CodeMemory, site: *const u8, to: *const u8) {
@@ -958,6 +969,7 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
         loaded_segs: 0,
         fpu_cr0_checked: false,
         fpu_known: 0,
+        osfxsr_checked: false,
     };
     g.prologue();
     let mut synced = 0;
@@ -1544,6 +1556,8 @@ impl Gen<'_> {
                     _ => None,
                 };
             }
+            // (It only reads t, for the `MemRef` after it.)
+            Uop::BailMisaligned { .. } => self.known = known,
             _ => {}
         }
         match *uop {
@@ -2255,6 +2269,75 @@ impl Gen<'_> {
             }
             Uop::FGetControl { t } => dynasm!(self.ops ; .arch x64 ; movzx Rd(r(t)), WORD [rbx + FPU_CONTROL]),
             Uop::FSetControl { t } => dynasm!(self.ops ; .arch x64 ; mov WORD [rbx + FPU_CONTROL], Rw(r(t))),
+            Uop::SimdGuard { xmm, mm } => self.simd_guard(xmm, mm),
+            Uop::BailMisaligned { t, seg } => {
+                let at = self.ops.new_dynamic_label();
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; mov eax, DWORD [rbx + seg_field(seg, layout::SEG_BASE)]
+                    ; add eax, Rd(r(t))
+                    ; test al, 15
+                    ; jnz =>at
+                );
+                self.bail(at, false);
+            }
+            Uop::BailUnlessPlain { t } => {
+                let at = self.ops.new_dynamic_label();
+                let t_ = r(t);
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; cmp Rq(t_), RAM_HANDLES
+                    ; ja =>at
+                    ; mov ecx, Rd(t_)
+                    ; shr ecx, crate::bus::GEN_SHIFT as i8
+                    ; cmp BYTE [r14 + rcx], 0
+                    ; jne =>at
+                );
+                self.bail(at, false);
+            }
+            Uop::VLoad { x, src } => self.vload(x, src),
+            Uop::VOp { op, a, b } => self.vop(op, a.0, b.0),
+            Uop::VFloat { op, scalar, a, b } => self.vfloat(op, scalar, a.0, b.0),
+            Uop::VToT { t, x, op } => {
+                let (t, x) = (r(t), x.0);
+                match op {
+                    VExtract::Low => dynasm!(self.ops ; .arch x64 ; movd Rd(t), Rx(x)),
+                    VExtract::Movmskps => dynasm!(self.ops ; .arch x64 ; movmskps Rd(t), Rx(x)),
+                    VExtract::Pmovmskb => {
+                        dynasm!(self.ops ; .arch x64 ; pmovmskb Rd(t), Rx(x) ; movzx Rd(t), Rb(t))
+                    }
+                    VExtract::Word(n) => {
+                        dynasm!(self.ops ; .arch x64 ; pextrw Rd(t), Rx(x), n as i8)
+                    }
+                }
+            }
+            Uop::VSet { dst, x } => self.vset(dst, x.0),
+            Uop::VStore { m, x, size } => {
+                let (m, x) = (r(m), x.0);
+                if size == 8 {
+                    dynasm!(self.ops ; .arch x64 ; movq QWORD [r13 + Rq(m)], Rx(x));
+                } else {
+                    dynasm!(self.ops ; .arch x64 ; movups [r13 + Rq(m)], Rx(x));
+                }
+            }
+            Uop::EnterMmx => {
+                // (FPU_TAG_VALID is 0.)
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; mov QWORD [rbx + FPU_TOP], 0
+                    ; mov QWORD [rbx + FPU_TAGS], 0
+                );
+                self.fpu_known = 0xFF;
+            }
+            Uop::Emms => {
+                let empty = 0x0101_0101_0101_0101 * FPU_EMPTY as i64;
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; mov rax, QWORD empty
+                    ; mov QWORD [rbx + FPU_TAGS], rax
+                );
+                self.fpu_known = 0;
+            }
             Uop::LoadFlags { t, size } => {
                 let at = self.ops.new_dynamic_label();
                 dynasm!(self.ops
@@ -2373,6 +2456,248 @@ impl Gen<'_> {
         let end = self.end();
         let (wb, reload) = (self.cache.dirty, self.cache.loaded);
         self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, wb, reload, leave: true });
+    }
+
+    /// The handler runs the instruction being translated from `at`, and the
+    /// code goes on after it (`Uop::Bail`), or with `leave` the block stops
+    /// after it.
+    fn bail(&mut self, at: DynamicLabel, leave: bool) {
+        let end = self.end();
+        let (wb, reload) = (self.cache.dirty, self.cache.loaded);
+        let (ix, dirty) = (self.ix, self.dirty);
+        self.slow.push(Slow::Bail { at, end, ix, dirty, wb, reload, leave });
+    }
+
+    /// `Uop::SimdGuard`: the handler runs the instruction after all where
+    /// CR0 has EM or TS set, with `xmm` where CR4's OSFXSR is clear, or
+    /// where one of the MMX registers in `mm` is stale.
+    fn simd_guard(&mut self, xmm: bool, mm: u8) {
+        const EM_TS: i8 = 0x0C;
+        // CR0 and CR4 don't change within a block (writes to them end it):
+        // each is checked once.
+        let osfxsr = xmm && !self.osfxsr_checked;
+        if self.fpu_cr0_checked && !osfxsr && mm == 0 {
+            return;
+        }
+        let at = self.ops.new_dynamic_label();
+        if !self.fpu_cr0_checked {
+            dynasm!(self.ops ; .arch x64 ; test BYTE [rbx + CR0], EM_TS ; jnz =>at);
+        }
+        if osfxsr {
+            // OSFXSR is bit 9.
+            dynasm!(self.ops ; .arch x64 ; test BYTE [rbx + CR4 + 1], 2 ; jz =>at);
+        }
+        for n in (0..8).filter(|n| mm >> n & 1 != 0) {
+            dynasm!(self.ops ; .arch x64 ; cmp BYTE [rbx + FPU_STALE + n], 0 ; jne =>at);
+        }
+        self.fpu_cr0_checked = true;
+        self.osfxsr_checked |= xmm;
+        // As after an `FpuGuard`'s handler call, the block stops after it.
+        self.bail(at, true);
+    }
+
+    /// `Uop::VLoad`.
+    fn vload(&mut self, x: X, src: VSrc) {
+        let x = x.0;
+        match src {
+            VSrc::R(Vr::Mm(n)) => {
+                let at = FPU_X80 + 16 * n as i32;
+                dynasm!(self.ops ; .arch x64 ; movq Rx(x), QWORD [rbx + at]);
+            }
+            VSrc::R(Vr::Xmm(n)) => {
+                let at = XMM + 16 * n as i32;
+                dynasm!(self.ops ; .arch x64 ; movups Rx(x), [rbx + at]);
+            }
+            VSrc::T(t) => dynasm!(self.ops ; .arch x64 ; movd Rx(x), Rd(r(t))),
+            VSrc::Mem { m, size: 8 } => {
+                dynasm!(self.ops ; .arch x64 ; movq Rx(x), QWORD [r13 + Rq(r(m))]);
+            }
+            VSrc::Mem { m, .. } => dynasm!(self.ops ; .arch x64 ; movups Rx(x), [r13 + Rq(r(m))]),
+        }
+    }
+
+    /// `Uop::VSet`. MMn is the significand of physical FPU register n, whose
+    /// sign and exponent become all ones (`mmx::set_mm`); its double is
+    /// then a NaN, or an infinity where the significand's top 53 bits are
+    /// 0 (`F80::get_f64`).
+    fn vset(&mut self, dst: Vr, x: u8) {
+        match dst {
+            Vr::Xmm(n) => {
+                let at = XMM + 16 * n as i32;
+                dynasm!(self.ops ; .arch x64 ; movups [rbx + at], Rx(x));
+            }
+            Vr::Mm(n) => {
+                let (at, n) = (FPU_X80 + 16 * n as i32, n as i32);
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; movq rax, Rx(x)
+                    ; mov QWORD [rbx + at], rax
+                    ; mov QWORD [rbx + at + 8], 0xFFFF
+                    ; mov BYTE [rbx + FPU_STALE + n], 0
+                    ; shr rax, 11
+                    ; mov rcx, QWORD 0xFFF0_0000_0000_0000u64 as i64
+                    ; mov rdx, QWORD 0xFFF8_0000_0000_0000u64 as i64
+                    ; test rax, rax
+                    ; cmovnz rcx, rdx
+                    ; or rax, rcx
+                    ; mov QWORD [rbx + FPU_F64 + 8 * n], rax
+                );
+            }
+        }
+    }
+
+    /// `Uop::VOp`.
+    fn vop(&mut self, op: VOp, a: u8, b: u8) {
+        macro_rules! op {
+            ($($t:tt)*) => { dynasm!(self.ops ; .arch x64 ; $($t)*) };
+        }
+        match op {
+            VOp::Andps => op!(andps Rx(a), Rx(b)),
+            VOp::Andnps => op!(andnps Rx(a), Rx(b)),
+            VOp::Orps => op!(orps Rx(a), Rx(b)),
+            VOp::Xorps => op!(xorps Rx(a), Rx(b)),
+            VOp::Unpcklps => op!(unpcklps Rx(a), Rx(b)),
+            VOp::Unpckhps => op!(unpckhps Rx(a), Rx(b)),
+            VOp::Shufps(n) => op!(shufps Rx(a), Rx(b), n as i8),
+            VOp::Movss => op!(movss Rx(a), Rx(b)),
+            VOp::Movsd => op!(movsd Rx(a), Rx(b)),
+            VOp::Movlhps => op!(movlhps Rx(a), Rx(b)),
+            VOp::Movhlps => op!(movhlps Rx(a), Rx(b)),
+            VOp::Paddb => op!(paddb Rx(a), Rx(b)),
+            VOp::Paddw => op!(paddw Rx(a), Rx(b)),
+            VOp::Paddd => op!(paddd Rx(a), Rx(b)),
+            VOp::Paddsb => op!(paddsb Rx(a), Rx(b)),
+            VOp::Paddsw => op!(paddsw Rx(a), Rx(b)),
+            VOp::Paddusb => op!(paddusb Rx(a), Rx(b)),
+            VOp::Paddusw => op!(paddusw Rx(a), Rx(b)),
+            VOp::Psubb => op!(psubb Rx(a), Rx(b)),
+            VOp::Psubw => op!(psubw Rx(a), Rx(b)),
+            VOp::Psubd => op!(psubd Rx(a), Rx(b)),
+            VOp::Psubsb => op!(psubsb Rx(a), Rx(b)),
+            VOp::Psubsw => op!(psubsw Rx(a), Rx(b)),
+            VOp::Psubusb => op!(psubusb Rx(a), Rx(b)),
+            VOp::Psubusw => op!(psubusw Rx(a), Rx(b)),
+            VOp::Pmullw => op!(pmullw Rx(a), Rx(b)),
+            VOp::Pmulhw => op!(pmulhw Rx(a), Rx(b)),
+            VOp::Pmulhuw => op!(pmulhuw Rx(a), Rx(b)),
+            VOp::Pmaddwd => op!(pmaddwd Rx(a), Rx(b)),
+            VOp::Pcmpeqb => op!(pcmpeqb Rx(a), Rx(b)),
+            VOp::Pcmpeqw => op!(pcmpeqw Rx(a), Rx(b)),
+            VOp::Pcmpeqd => op!(pcmpeqd Rx(a), Rx(b)),
+            VOp::Pcmpgtb => op!(pcmpgtb Rx(a), Rx(b)),
+            VOp::Pcmpgtw => op!(pcmpgtw Rx(a), Rx(b)),
+            VOp::Pcmpgtd => op!(pcmpgtd Rx(a), Rx(b)),
+            VOp::Pand => op!(pand Rx(a), Rx(b)),
+            VOp::Pandn => op!(pandn Rx(a), Rx(b)),
+            VOp::Por => op!(por Rx(a), Rx(b)),
+            VOp::Pxor => op!(pxor Rx(a), Rx(b)),
+            VOp::Pavgb => op!(pavgb Rx(a), Rx(b)),
+            VOp::Pavgw => op!(pavgw Rx(a), Rx(b)),
+            VOp::Pminub => op!(pminub Rx(a), Rx(b)),
+            VOp::Pmaxub => op!(pmaxub Rx(a), Rx(b)),
+            VOp::Pminsw => op!(pminsw Rx(a), Rx(b)),
+            VOp::Pmaxsw => op!(pmaxsw Rx(a), Rx(b)),
+            VOp::Psadbw => op!(psadbw Rx(a), Rx(b)),
+            VOp::Psllw => op!(psllw Rx(a), Rx(b)),
+            VOp::Pslld => op!(pslld Rx(a), Rx(b)),
+            VOp::Psllq => op!(psllq Rx(a), Rx(b)),
+            VOp::Psrlw => op!(psrlw Rx(a), Rx(b)),
+            VOp::Psrld => op!(psrld Rx(a), Rx(b)),
+            VOp::Psrlq => op!(psrlq Rx(a), Rx(b)),
+            VOp::Psraw => op!(psraw Rx(a), Rx(b)),
+            VOp::Psrad => op!(psrad Rx(a), Rx(b)),
+            VOp::ShiftImm(shift, n) => {
+                let n = n as i8;
+                match shift {
+                    VShift::Psllw => op!(psllw Rx(a), n),
+                    VShift::Pslld => op!(pslld Rx(a), n),
+                    VShift::Psllq => op!(psllq Rx(a), n),
+                    VShift::Psrlw => op!(psrlw Rx(a), n),
+                    VShift::Psrld => op!(psrld Rx(a), n),
+                    VShift::Psrlq => op!(psrlq Rx(a), n),
+                    VShift::Psraw => op!(psraw Rx(a), n),
+                    VShift::Psrad => op!(psrad Rx(a), n),
+                }
+            }
+            // The two quadwords side by side, packed into the low one.
+            VOp::Packsswb => op!(punpcklqdq Rx(a), Rx(b) ; packsswb Rx(a), Rx(a)),
+            VOp::Packssdw => op!(punpcklqdq Rx(a), Rx(b) ; packssdw Rx(a), Rx(a)),
+            VOp::Packuswb => op!(punpcklqdq Rx(a), Rx(b) ; packuswb Rx(a), Rx(a)),
+            VOp::Punpcklbw => op!(punpcklbw Rx(a), Rx(b)),
+            VOp::Punpcklwd => op!(punpcklwd Rx(a), Rx(b)),
+            VOp::Punpckldq => op!(punpckldq Rx(a), Rx(b)),
+            // Interleaving the whole quadwords leaves the high dwords' lanes
+            // in the high quadword.
+            VOp::Punpckhbw => op!(punpcklbw Rx(a), Rx(b) ; psrldq Rx(a), 8),
+            VOp::Punpckhwd => op!(punpcklwd Rx(a), Rx(b) ; psrldq Rx(a), 8),
+            VOp::Punpckhdq => op!(punpckldq Rx(a), Rx(b) ; psrldq Rx(a), 8),
+            VOp::Pshufw(n) => op!(pshuflw Rx(a), Rx(b), n as i8),
+        }
+    }
+
+    /// `Uop::VFloat`: the operation under the guest's rounding and flush to
+    /// zero with every exception masked, its exceptions added to the
+    /// guest's MXCSR, and the host's MXCSR back as Rust has it. An exception
+    /// the guest doesn't mask goes to the handler, which raises it.
+    fn vfloat(&mut self, op: VFloatOp, scalar: bool, a: u8, b: u8) {
+        macro_rules! op {
+            ($($t:tt)*) => { dynasm!(self.ops ; .arch x64 ; $($t)*) };
+        }
+        let at = self.ops.new_dynamic_label();
+        dynasm!(self.ops
+            ; .arch x64
+            ; mov eax, DWORD [rbx + MXCSR]
+            ; and eax, 0xFFC0
+            ; or eax, 0x1F80
+            ; mov DWORD [r12 + CTX_MXCSR], eax
+            ; ldmxcsr [r12 + CTX_MXCSR]
+        );
+        match (op, scalar) {
+            (VFloatOp::Add, false) => op!(addps Rx(a), Rx(b)),
+            (VFloatOp::Add, true) => op!(addss Rx(a), Rx(b)),
+            (VFloatOp::Sub, false) => op!(subps Rx(a), Rx(b)),
+            (VFloatOp::Sub, true) => op!(subss Rx(a), Rx(b)),
+            (VFloatOp::Mul, false) => op!(mulps Rx(a), Rx(b)),
+            (VFloatOp::Mul, true) => op!(mulss Rx(a), Rx(b)),
+            (VFloatOp::Div, false) => op!(divps Rx(a), Rx(b)),
+            (VFloatOp::Div, true) => op!(divss Rx(a), Rx(b)),
+            (VFloatOp::Min, false) => op!(minps Rx(a), Rx(b)),
+            (VFloatOp::Min, true) => op!(minss Rx(a), Rx(b)),
+            (VFloatOp::Max, false) => op!(maxps Rx(a), Rx(b)),
+            (VFloatOp::Max, true) => op!(maxss Rx(a), Rx(b)),
+            (VFloatOp::Sqrt, false) => op!(sqrtps Rx(a), Rx(b)),
+            (VFloatOp::Sqrt, true) => op!(sqrtss Rx(a), Rx(b)),
+            (VFloatOp::Cmp(p), false) => op!(cmpps Rx(a), Rx(b), p as i8),
+            (VFloatOp::Cmp(p), true) => op!(cmpss Rx(a), Rx(b), p as i8),
+            // Of the low two singles only: the high ones 0, which convert
+            // without an exception.
+            (VFloatOp::ToInt { truncate: false }, _) => {
+                op!(movq xmm2, Rx(b) ; cvtps2dq Rx(a), xmm2)
+            }
+            (VFloatOp::ToInt { truncate: true }, _) => {
+                op!(movq xmm2, Rx(b) ; cvttps2dq Rx(a), xmm2)
+            }
+            (VFloatOp::FromInt, _) => {
+                op!(movq xmm2, Rx(b) ; cvtdq2ps xmm2, xmm2 ; movsd Rx(a), xmm2)
+            }
+        }
+        dynasm!(self.ops
+            ; .arch x64
+            ; stmxcsr [r12 + CTX_MXCSR]
+            ; ldmxcsr [r12 + CTX_MXCSR + 4]
+            ; mov eax, DWORD [r12 + CTX_MXCSR]
+            ; and eax, 0x3F
+            ; jz >vfloat_done
+            // The exceptions raised that the guest doesn't mask.
+            ; mov ecx, DWORD [rbx + MXCSR]
+            ; shr ecx, 7
+            ; not ecx
+            ; and ecx, eax
+            ; jnz =>at
+            ; or DWORD [rbx + MXCSR], eax
+            ; vfloat_done:
+        );
+        self.bail(at, false);
     }
 
     /// `Uop::FBailPrecise`: the handler runs the instruction where `when`
@@ -3639,6 +3964,7 @@ impl Gen<'_> {
                 synced: self.synced[self.ix],
                 fpu_cr0_checked: self.fpu_cr0_checked,
                 fpu_known: self.fpu_known,
+                osfxsr_checked: self.osfxsr_checked,
                 entry: None,
             });
         } else if side {
@@ -3696,6 +4022,7 @@ impl Gen<'_> {
             m.entry = Some((entry, synced, self.cache, self.dirty));
             self.fpu_cr0_checked &= m.fpu_cr0_checked;
             self.fpu_known &= m.fpu_known;
+            self.osfxsr_checked &= m.osfxsr_checked;
         }
     }
 

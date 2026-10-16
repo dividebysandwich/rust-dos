@@ -64,6 +64,155 @@ pub enum Precise {
 pub const X0: X = X(0);
 pub const X1: X = X(1);
 
+/// An MMX or SSE register: MMn (the significand of physical FPU register
+/// n) or XMMn.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Vr {
+    Mm(u8),
+    Xmm(u8),
+}
+
+/// What `Uop::VLoad` puts in a host register, zero-extended to 128 bits.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum VSrc {
+    /// The register's 64 or 128 bits.
+    R(Vr),
+    /// A dword.
+    T(T),
+    /// The `size` bytes (8 or 16) at handle m, which is RAM's
+    /// (`BailUnlessRam`).
+    Mem { m: T, size: u8 },
+}
+
+/// Operations on two host registers' bits that leave MXCSR alone
+/// (`Uop::VOp`): a = a OP b, as the SSE2 instruction of the name does it
+/// on 128 bits, but where said. An MMX instruction's operands are in the
+/// low quadwords, and only its result's low quadword counts.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum VOp {
+    Andps,
+    Andnps,
+    Orps,
+    Xorps,
+    Unpcklps,
+    Unpckhps,
+    Shufps(u8),
+    /// MOVSS between registers: b's low single into a.
+    Movss,
+    /// b's low quadword into a's (MOVLPS from memory).
+    Movsd,
+    Movlhps,
+    Movhlps,
+    Paddb,
+    Paddw,
+    Paddd,
+    Paddsb,
+    Paddsw,
+    Paddusb,
+    Paddusw,
+    Psubb,
+    Psubw,
+    Psubd,
+    Psubsb,
+    Psubsw,
+    Psubusb,
+    Psubusw,
+    Pmullw,
+    Pmulhw,
+    Pmulhuw,
+    Pmaddwd,
+    Pcmpeqb,
+    Pcmpeqw,
+    Pcmpeqd,
+    Pcmpgtb,
+    Pcmpgtw,
+    Pcmpgtd,
+    Pand,
+    Pandn,
+    Por,
+    Pxor,
+    Pavgb,
+    Pavgw,
+    Pminub,
+    Pmaxub,
+    Pminsw,
+    Pmaxsw,
+    Psadbw,
+    /// Shifts by b's low quadword.
+    Psllw,
+    Pslld,
+    Psllq,
+    Psrlw,
+    Psrld,
+    Psrlq,
+    Psraw,
+    Psrad,
+    /// Shifts of a by a constant (b unused).
+    ShiftImm(VShift, u8),
+    /// The MMX packs: a's low quadword's lanes, then b's, each saturated
+    /// into a lane half as wide.
+    Packsswb,
+    Packssdw,
+    Packuswb,
+    /// The MMX unpacks: a's and b's low (or `high`) dwords' lanes,
+    /// interleaved.
+    Punpcklbw,
+    Punpcklwd,
+    Punpckldq,
+    Punpckhbw,
+    Punpckhwd,
+    Punpckhdq,
+    /// PSHUFW: a's low four words, from b's as the constant names them.
+    Pshufw(u8),
+}
+
+/// The shift of `VOp::ShiftImm`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum VShift {
+    Psllw,
+    Pslld,
+    Psllq,
+    Psrlw,
+    Psrld,
+    Psrlq,
+    Psraw,
+    Psrad,
+}
+
+/// Floating-point operations on two host registers (`Uop::VFloat`): a = a
+/// OP b, as the SSE instruction does it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum VFloatOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Min,
+    Max,
+    Sqrt,
+    /// CMPPS and CMPSS with predicate 0 to 7.
+    Cmp(u8),
+    /// CVTPS2PI and CVTTPS2PI (`truncate`): b's low two singles into
+    /// dwords in a's low quadword (`scalar` is false).
+    ToInt { truncate: bool },
+    /// CVTPI2PS: the two dwords in b's low quadword into a's low two
+    /// singles (`scalar` is false).
+    FromInt,
+}
+
+/// What `Uop::VToT` takes from a host register.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum VExtract {
+    /// The low dword.
+    Low,
+    /// The sign bits of the four singles (MOVMSKPS).
+    Movmskps,
+    /// The top bits of the low quadword's bytes (PMOVMSKB).
+    Pmovmskb,
+    /// Word n (0 to 3), zero-extended (PEXTRW).
+    Word(u8),
+}
+
 /// What `Uop::FFromT` makes a double of, and `Uop::FToT` of a double.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FKind {
@@ -364,4 +513,43 @@ pub enum Uop {
     /// t = the control word, and the control word = t's low word.
     FGetControl { t: T },
     FSetControl { t: T },
+    /// The start of an MMX or SSE instruction: its handler runs it instead
+    /// of the operations after this one where CR0's EM or TS is set, or
+    /// with `xmm` CR4's OSFXSR is clear, or one of MMn with bit n set in
+    /// `mm` is stale (`f80::FpuRegs`: its 80 bits are made from its double,
+    /// which the handler does). The block stops after it, as after an
+    /// `FpuGuard`'s.
+    SimdGuard { xmm: bool, mm: u8 },
+    /// Before the `MemRef` of a 16-byte operand that must be aligned: the
+    /// handler runs the instruction instead where segment `seg`'s base plus
+    /// offset t isn't a multiple of 16 (#GP(0)). Nothing before it may
+    /// change anything.
+    BailMisaligned { t: T, seg: Seg },
+    /// As `BailUnlessRam`, and also where handle t is in a block of RAM
+    /// that holds code (`Bus::code_blocks`): an operand of 8 or 16 bytes
+    /// the code may then store itself (`VStore`).
+    BailUnlessPlain { t: T },
+    /// x = the source, zero-extended to 128 bits.
+    VLoad { x: X, src: VSrc },
+    /// a = a OP b.
+    VOp { op: VOp, a: X, b: X },
+    /// a = a OP b, on all four singles or the low one (`scalar`), rounded
+    /// and flushed as MXCSR says, with the exceptions raised added to its
+    /// flags. Where one of them isn't masked, the handler runs the
+    /// instruction instead of the operations after this one (it raises
+    /// #XM), as `Bail`: nothing before it may change anything.
+    VFloat { op: VFloatOp, scalar: bool, a: X, b: X },
+    /// t = what `op` takes from x.
+    VToT { t: T, x: X, op: VExtract },
+    /// The register = x: all of it for XMMn; for MMn, the low quadword, as
+    /// `mmx::set_mm` sets it.
+    VSet { dst: Vr, x: X },
+    /// Store x's low `size` bytes (8 or 16) at handle m, which is RAM's
+    /// without code (`BailUnlessPlain`).
+    VStore { m: T, x: X, size: u8 },
+    /// What every MMX instruction but EMMS does to the FPU: the stack top
+    /// 0, all registers valid (`mmx::enter_mmx`).
+    EnterMmx,
+    /// EMMS: all FPU registers empty.
+    Emms,
 }

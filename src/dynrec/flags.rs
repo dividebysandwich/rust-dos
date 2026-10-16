@@ -73,7 +73,11 @@ impl Uop {
             | Uop::Forward
             | Uop::FpuGuard { .. }
             | Uop::FBailPrecise { .. }
-            | Uop::FToInt64 { .. } => ARITH,
+            | Uop::FToInt64 { .. }
+            | Uop::SimdGuard { .. }
+            | Uop::BailMisaligned { .. }
+            | Uop::BailUnlessPlain { .. }
+            | Uop::VFloat { .. } => ARITH,
             Uop::MemRef { .. }
             | Uop::LoadSeg { .. }
             | Uop::In { .. }
