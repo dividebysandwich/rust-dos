@@ -2077,18 +2077,33 @@ tried), which the Windows 98 CD doesn't have. Unpack its `driver9x`
 folder where Windows can read it. At the next start Windows finds a
 "Standard PCI Graphics Adapter (VGA)": choose to search for the best
 driver, tick "Specify a location", give the folder that holds
-`Voodoo3.inf`, and restart Windows when it is done. The card reports no
-monitor through DDC, so Windows calls it "Default Monitor" and offers
-640x480 only: under Display Properties, Settings, Advanced, Monitor,
-Change, pick a monitor from "(Standard monitor types)", such as "Super
-VGA 1024x768", and the bigger modes become available. The desktop was
-tried at 1024x768 in High Color. The 3D engine doesn't draw on this card
-yet: its buffer registers and swaps through the overlay are still to
-come, so Direct3D and OpenGL programs don't show their picture.
+`Voodoo3.inf`, and restart Windows when it is done. Windows then finds a
+"Plug and Play Monitor": the card answers on its DDC lines with an EDID
+for a CRT that takes up to 1600x1200 (DxDiag calls it "rust-dos CRT"),
+and the VESA BIOS hands the same EDID to programs that ask through
+4F15h. The card's interrupt, the vertical retrace one, is IRQ 11. The
+desktop was tried at 640x480 and 1024x768 in High Color.
+
+The 3D engine draws into the buffers the driver points it at, linear or
+tiled, and a swap shows the buffer through the video processor. These
+were tried on Windows 98 SE with the 1.07.00 driver:
+
+* OpenGL through the ICD: the "3D Flying Objects" screen saver, and
+  Oni (2001), which runs its menus and its first level. A game set up
+  for a Voodoo2 may have 3dfx's MiniGL as `opengl32.dll` in its own
+  folder; take that away, so the game gets Windows' `opengl32.dll` and
+  the ICD.
+* DxDiag's DirectDraw tests, windowed and full screen, and its
+  Direct3D test with software rendering.
+* DxDiag's Direct3D test with hardware rendering doesn't work yet: the
+  window stays white and the card draws no triangles. From a 1024x768
+  desktop, DxDiag's DirectDraw can't switch to 640x480 for its full
+  screen tests ("Invalid mode"), although Display Properties can.
 
 The card is a port of 86Box's Banshee and Voodoo3 emulation
-(`vid_voodoo_banshee.c` and its 2D engine, by Sarah Walker, GPLv2),
-checked against 3dfx's Voodoo3 specification.
+(`vid_voodoo_banshee.c` and its 2D engine, by Sarah Walker, GPLv2, and
+the I2C code in `i2c_gpio.c` and `i2c_eeprom.c` for the DDC), checked
+against 3dfx's Voodoo3 specification.
 
 ## Rendition Vérité
 
