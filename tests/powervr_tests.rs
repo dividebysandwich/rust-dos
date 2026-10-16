@@ -76,7 +76,7 @@ fn bars_size_and_move() {
     let mut bus = bus();
     cfg_write(&mut bus, 2, 0x10, 0xFFFF_FFFF);
     cfg_write(&mut bus, 2, 0x14, 0xFFFF_FFFF);
-    assert_eq!(cfg_read(&mut bus, 2, 0x10), 0xFFFF_0000, "64 KB of registers");
+    assert_eq!(cfg_read(&mut bus, 2, 0x10), 0xFFFF_F000, "4 KB of registers");
     assert_eq!(cfg_read(&mut bus, 2, 0x14), 0xFFC0_0008, "4 MB of texture memory");
     cfg_write(&mut bus, 2, 0x10, 0xE900_0000);
     cfg_write(&mut bus, 2, 0x14, 0xE940_0000);
@@ -108,6 +108,39 @@ fn a_render_ends_and_the_reset_pulse_clears_its_status() {
     assert_ne!(r(&bus, regs::INTSTATUS) & regs::END_OF_RENDER, 0);
     w(&mut bus, regs::SOFTRESET, 1);
     assert_eq!(r(&bus, regs::INTSTATUS) & regs::END_OF_RENDER, 0);
+}
+
+#[test]
+fn the_card_is_revision_1_as_the_windows_driver_wants() {
+    let mut bus = bus();
+    assert_eq!(cfg_read(&mut bus, 2, 0x08) & 0xFF, 1);
+    assert_eq!(r(&bus, regs::REVISION), 1);
+}
+
+#[test]
+fn reading_the_status_acknowledges_it() {
+    let mut bus = bus();
+    w(&mut bus, regs::STARTRENDER, 0);
+    wait_ms(&mut bus, 1.0);
+    assert_ne!(r(&bus, regs::INTSTATUS) & regs::END_OF_RENDER, 0);
+    assert_eq!(r(&bus, regs::INTSTATUS), 0, "the read cleared it");
+}
+
+#[test]
+fn each_render_interrupts_when_the_handler_only_reads_the_status() {
+    let mut bus = bus();
+    w(&mut bus, regs::INTMASK, regs::END_OF_RENDER);
+    for n in 0..2 {
+        w(&mut bus, regs::STARTRENDER, 0);
+        wait_ms(&mut bus, 1.0);
+        assert!(bus.pic.busy(11), "render {} interrupts", n);
+        bus.pic.acknowledge(11);
+        // The handler (dos32/isr.asm): read INTSTATUS, end the interrupt.
+        assert_ne!(r(&bus, regs::INTSTATUS) & regs::END_OF_RENDER, 0);
+        bus.io_write_wide(0xA0, 0x20, 1);
+        bus.io_write_wide(0x20, 0x20, 1);
+        assert!(!bus.pic.busy(11));
+    }
 }
 
 #[test]
@@ -187,11 +220,24 @@ const FRAME: u32 = 0x30_0000;
 struct Scene {
     planes: Vec<[u32; 4]>,
     pointers: Vec<u32>,
+    /// The TLB's page size, and whether its entries are addresses rather
+    /// than page numbers.
+    page: u32,
+    addresses: bool,
+    /// The object list in the machine's memory, at `PARAMS` + 1000h,
+    /// rather than in the parameter space.
+    physical_list: bool,
 }
 
 impl Scene {
     fn new() -> Self {
-        Self { planes: Vec::new(), pointers: Vec::new() }
+        Self {
+            planes: Vec::new(),
+            pointers: Vec::new(),
+            page: 0x4000,
+            addresses: false,
+            physical_list: false,
+        }
     }
 
     /// An object of these planes (A, B, C, instruction, tag).
@@ -210,8 +256,9 @@ impl Scene {
     }
 
     fn start(self, bus: &mut Bus) {
-        for page in 0..128 {
-            w(bus, regs::TLB + page, (PARAMS >> 12) + 4 * page as u32);
+        for page in 0..(0x20_0000 / self.page).min(256) {
+            let at = PARAMS + page * self.page;
+            w(bus, regs::TLB + page as usize, if self.addresses { at } else { at >> 12 });
         }
         for (i, plane) in self.planes.iter().enumerate() {
             for (j, word) in plane.iter().enumerate() {
@@ -225,7 +272,7 @@ impl Scene {
             let last = if i + 1 == n { 0x8000_0000 } else { 0 };
             bus.write_32((PARAMS + 0x1004 + 4 * i as u32) as usize, p | last);
         }
-        w(bus, regs::OBJECT_OFFSET, 0x1000 | 1);
+        w(bus, regs::OBJECT_OFFSET, if self.physical_list { PARAMS + 0x1000 } else { 0x1000 | 1 });
         w(bus, regs::PACKMODE, 2);
         w(bus, regs::SOFADDR, FRAME);
         w(bus, regs::LSTRIDE, 64);
@@ -321,4 +368,41 @@ fn a_render_takes_the_time_its_planes_and_pixels_take() {
     assert_eq!(r(&bus, regs::INTSTATUS) & regs::END_OF_RENDER, 0, "still under way");
     wait_ms(&mut bus, 0.02);
     assert_ne!(r(&bus, regs::INTSTATUS) & regs::END_OF_RENDER, 0, "done");
+}
+
+#[test]
+fn tlb_pages_of_4_kb_and_entries_that_are_addresses() {
+    for (page, addresses) in [(0x1000, false), (0x2000, true), (0x4000, true)] {
+        let mut bus = bus();
+        flat(&mut bus, 4, (0, 0, 255));
+        flat(&mut bus, 6, (255, 0, 0));
+        let mut scene = triangle_scene(0.5);
+        (scene.page, scene.addresses) = (page, addresses);
+        scene.render(&mut bus);
+        assert_eq!(pixel(&bus, 8, 8), 0xF800, "{:X}-byte pages", page);
+        assert_eq!(pixel(&bus, 2, 2), 0x001F, "{:X}-byte pages", page);
+    }
+}
+
+#[test]
+fn an_object_list_in_the_machines_memory() {
+    let mut bus = bus();
+    flat(&mut bus, 4, (0, 0, 255));
+    flat(&mut bus, 6, (255, 0, 0));
+    let mut scene = triangle_scene(0.5);
+    scene.physical_list = true;
+    scene.render(&mut bus);
+    assert_eq!(pixel(&bus, 8, 8), 0xF800);
+}
+
+#[test]
+fn the_last_object_of_a_region_is_drawn_without_a_plane_after_it() {
+    let mut bus = bus();
+    flat(&mut bus, 4, (0, 0, 255));
+    flat(&mut bus, 6, (255, 0, 0));
+    let mut scene = triangle_scene(0.5);
+    scene.pointers.pop();
+    scene.render(&mut bus);
+    assert_eq!(pixel(&bus, 8, 8), 0xF800, "the triangle, last in the list");
+    assert_eq!(pixel(&bus, 2, 2), 0x001F);
 }

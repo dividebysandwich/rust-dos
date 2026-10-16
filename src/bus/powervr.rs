@@ -59,6 +59,10 @@ impl Bus {
         match window {
             Window::Textures => p.write_texture(offset, value, len),
             Window::Registers => {
+                if p.take_acknowledge() {
+                    self.sync_powervr_irq();
+                }
+                let Some(p) = &mut self.powervr else { return };
                 let shift = 8 * (offset & 3);
                 let mask = if len == 4 { u32::MAX } else { ((1 << (8 * len)) - 1) << shift };
                 if p.write_register(offset & !3, value << shift, mask) {
@@ -118,6 +122,11 @@ impl Bus {
     pub(crate) fn powervr_service(&mut self) {
         let _profile = crate::profile::zone(crate::profile::Zone::PowerVr);
         let now = self.clock.now_ticks();
+        if let Some(p) = &mut self.powervr
+            && p.take_acknowledge()
+        {
+            self.sync_powervr_irq();
+        }
         if let Some(p) = &mut self.powervr
             && p.service(now)
         {
