@@ -95,6 +95,26 @@ impl Banshee {
         }
     }
 
+    /// Whether a surface from byte `addr` on, as big as the desktop, is
+    /// in memory the picture shows: the desktop's or the overlay's.
+    pub fn shows(&self, addr: u32) -> bool {
+        let f = self.frame();
+        let rows = if f.tiled {
+            f.height.div_ceil(32)
+        } else {
+            f.height
+        } as u64;
+        let tiled = f.cfg & VIDPROC_OVERLAY_TILED != 0;
+        let overlay_stride = (self.reg(VID_DESKTOP_OVERLAY_STRIDE) >> 16) & 0x7FFF;
+        let overlay_stride = if tiled { overlay_stride * TILE } else { overlay_stride };
+        let span = f.stride.max(overlay_stride).max(1) as u64 * rows.max(1);
+        let overlaps = |start: u32| {
+            let (a, s) = (addr as u64, start as u64);
+            a < s + span && s < a + span
+        };
+        overlaps(f.start) || f.cfg & VIDPROC_OVERLAY_ENABLE != 0 && overlaps(self.overlay_addr)
+    }
+
     /// Draw the desktop, the overlay and the cursor into `out` (RGB24,
     /// `pitch` pixels a row), as big as `desktop_size` says.
     pub fn render(&self, ram: &Vram, out: &mut [u8], pitch: usize) {
@@ -310,6 +330,22 @@ mod tests {
         let at = (2 * 1024 + 3) * 3;
         assert_eq!(&out[at..at + 3], &[0xFF, 0, 0]);
         assert_eq!(&out[at + 3..at + 6], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn what_the_picture_shows() {
+        // A 1024x768 desktop at 1 MB, 2048 bytes a row: 1.5 MB of it.
+        let mut b = card_1024x768(1 << 18);
+        b.ext_write(VID_DESKTOP_START_ADDR, 0x10_0000);
+        b.ext_write(VID_DESKTOP_OVERLAY_STRIDE, 2048);
+        assert!(b.shows(0x10_0000));
+        assert!(b.shows(0x20_0000));
+        assert!(!b.shows(0x28_0000));
+        // The overlay's buffer, while the overlay is on.
+        b.overlay_addr = 0x40_0000;
+        assert!(!b.shows(0x40_0000));
+        b.ext_write(VID_PROC_CFG, VIDPROC_ENABLE | 1 << 18 | VIDPROC_OVERLAY_ENABLE);
+        assert!(b.shows(0x40_0000));
     }
 
     #[test]

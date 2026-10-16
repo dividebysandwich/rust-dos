@@ -199,9 +199,14 @@ impl Voodoo {
     }
 
     /// Something was drawn into colour buffer `dest`: the display changes
-    /// if it is the one shown.
+    /// if it is the one shown (on a Banshee, if the desktop or the overlay
+    /// shows its memory).
     pub(crate) fn mark_drawn(&mut self, dest: usize) {
-        if self.color_buffer(0) == Some(dest) {
+        let shown = match &self.banshee {
+            Some(b) => b.shows(dest as u32 * 2),
+            None => self.color_buffer(0) == Some(dest),
+        };
+        if shown {
             self.display_dirty = true;
         }
         if !self.drawn_to.contains(&dest) {

@@ -1162,10 +1162,13 @@ impl Voodoo {
         }
         if let Some(b) = &mut self.banshee {
             let dirty = std::mem::take(&mut b.dirty);
-            if self.writes_queue() {
+            let draw = changed || switched || dirty;
+            // Jobs may still be drawing into what it shows. Those that draw
+            // elsewhere, into the next frame, go on beside the program.
+            if draw && self.writes_queue() {
                 self.flush();
             }
-            return changed || switched || dirty;
+            return draw;
         }
         if !self.picture_wanted() {
             // The OpenGL renderer draws it: nothing needs the memory.
