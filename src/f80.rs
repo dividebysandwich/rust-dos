@@ -12,6 +12,8 @@ pub const INT_BIT_MASK: u128 = 1 << 63;
 pub const INT_BIT_MASK64: u64 = 1 << 63;
 // Packed BCD keeps its sign in the top bit of the last byte.
 pub const BCD_SIGN: u8 = 0x80;
+/// The packed BCD indefinite FBSTP stores for what it can't.
+pub const BCD_INDEFINITE: [u8; 10] = [0, 0, 0, 0, 0, 0, 0, 0xC0, 0xFF, 0xFF];
 pub const F64_EXP_BIAS: i32 = 1023;
 pub const F80_EXP_BIAS: i32 = 16383;
 #[allow(dead_code)]
@@ -266,8 +268,14 @@ impl F80 {
         exponent == 0x7FFF && mantissa != 0
     }
 
-    pub fn to_bcd_packed(&self) -> [u8; 10] {
-        let mut val = self.to_integer_u128();
+    /// The value as FBSTP stores it, rounded as `rc` (the control word's RC
+    /// field) says: None for what doesn't fit 18 digits, an infinity or a
+    /// NaN, where the FPU stores the packed BCD indefinite
+    /// (`BCD_INDEFINITE`).
+    pub fn to_bcd_packed(&self, rc: u16) -> Option<[u8; 10]> {
+        let mut val = self
+            .to_integer(rc)
+            .filter(|&n| n <= 999_999_999_999_999_999)?;
         let mut bcd = [0u8; 10];
 
         for byte in &mut bcd[..9] {
@@ -281,7 +289,7 @@ impl F80 {
 
         bcd[9] = if self.is_negative() { BCD_SIGN } else { 0 };
 
-        bcd
+        Some(bcd)
     }
 
     pub fn from_bcd_packed(&mut self, bcd: &[u8; 10]) {
@@ -303,24 +311,44 @@ impl F80 {
         self.st = F80::encode_from_u128(value, is_negative);
     }
 
-    pub fn to_integer_u128(&self) -> u128 {
+    /// The magnitude of the value rounded to an integer as `rc` (the
+    /// control word's RC field: nearest with ties to even, down, up, toward
+    /// 0) says, from all 64 bits of the significand; None for an infinity,
+    /// a NaN, or 2^64 and more.
+    pub fn to_integer(&self, rc: u16) -> Option<u64> {
         let exp = self.get_exponent();
-        if exp == 0 || exp == 0x7FFF {
-            return 0; // NaN, infinite, or cero
+        if exp == 0x7FFF {
+            return None;
         }
-
-        let bias = 16383;
-        let actual_exp = exp as i32 - bias;
-        if actual_exp < 0 {
-            return 0; // less than 1
+        // (A denormal's exponent is that of the smallest normal.)
+        let e = exp.max(1) as i32 - F80_EXP_BIAS;
+        if e >= 64 {
+            return None;
         }
-
-        let mantissa = self.get_mantissa_with_integer_bit() as u128;
-        if actual_exp > 63 {
-            mantissa << (actual_exp as u32 - 63)
+        let man = self.get_mantissa_with_integer_bit();
+        // The integer part, and the fraction as 64 bits below the point,
+        // with bit 0 set for any bits shifted out below them.
+        let (int, frac) = if e >= 63 {
+            (man, 0)
+        } else if e >= 0 {
+            let s = 63 - e as u32;
+            (man >> s, man << (64 - s))
         } else {
-            mantissa >> (63 - actual_exp) as u32
-        }
+            let s = (-e - 1) as u32;
+            if s >= 64 {
+                (0, (man != 0) as u64)
+            } else {
+                (0, man >> s | (man & ((1u64 << s) - 1) != 0) as u64)
+            }
+        };
+        let half = 1u64 << 63;
+        let up = match rc & 3 {
+            0 => frac > half || (frac == half && int & 1 != 0),
+            1 => self.is_negative() && frac != 0,
+            2 => !self.is_negative() && frac != 0,
+            _ => false,
+        };
+        int.checked_add(up as u64)
     }
 
     pub fn encode_from_u128(value: u128, is_negative: bool) -> u128 {

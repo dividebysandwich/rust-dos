@@ -1,5 +1,5 @@
-use crate::cpu::Cpu;
-use crate::f80::F80;
+use crate::cpu::{Cpu, FpuFlags};
+use crate::f80::{BCD_INDEFINITE, F80};
 use crate::instructions::utils::calculate_addr;
 use iced_x86::{Instruction, MemorySize, OpKind, Register};
 
@@ -102,7 +102,7 @@ fn int_or_indefinite(cpu: &mut Cpu, n: Option<i128>, size: u8) -> u64 {
     match n {
         Some(n) if n >= min && n < -min => n as u64 & (u64::MAX >> (64 - bits)),
         _ => {
-            cpu.set_fpu_flag(crate::cpu::FpuFlags::IE, true);
+            cpu.set_fpu_flag(FpuFlags::IE, true);
             min as u64 & (u64::MAX >> (64 - bits))
         }
     }
@@ -255,7 +255,12 @@ pub fn fbstp(cpu: &mut Cpu, instr: &Instruction) {
     let val: F80 = cpu.fpu_pop();
     let addr = calculate_addr(cpu, instr);
 
-    let bcd_bytes = val.to_bcd_packed();
+    let bcd_bytes = val
+        .to_bcd_packed((cpu.fpu_control >> 10) & 0x03)
+        .unwrap_or_else(|| {
+            cpu.set_fpu_flag(FpuFlags::IE, true);
+            BCD_INDEFINITE
+        });
 
     // Write the 10-byte BCD block to Memory
     for (i, &byte) in bcd_bytes.iter().enumerate() {

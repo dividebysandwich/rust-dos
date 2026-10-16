@@ -257,6 +257,107 @@ fn test_fbld_fbstp_round_trip() {
     assert_eq!(cpu.fpu_tags[cpu.fpu_get_phys_index(0)], FPU_TAG_EMPTY);
 }
 
+/// FLD TBYTE of (sign << 15 | exponent, significand), then `store`, an
+/// instruction that stores ST(0) at [1010]; whether it set IE.
+fn store_extended(se: u16, man: u64, store: &[u8]) -> (Cpu, bool) {
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    cpu.bus.write_64(0x1000, man);
+    cpu.bus.write_16(0x1008, se);
+    // DB 2E 00 10: FLD TBYTE PTR [1000]
+    run_cpu_code(&mut cpu, &[0xDB, 0x2E, 0x00, 0x10]);
+    run_cpu_code(&mut cpu, store);
+    let ie = cpu.get_fpu_flag(rust_dos::cpu::FpuFlags::IE);
+    (cpu, ie)
+}
+
+// DF 1E 10 10: FISTP WORD PTR [1010]
+const FISTP16: [u8; 4] = [0xDF, 0x1E, 0x10, 0x10];
+// DB 1E 10 10: FISTP DWORD PTR [1010]
+const FISTP32: [u8; 4] = [0xDB, 0x1E, 0x10, 0x10];
+// DF 3E 10 10: FISTP QWORD PTR [1010]
+const FISTP64: [u8; 4] = [0xDF, 0x3E, 0x10, 0x10];
+// DF 36 10 10: FBSTP TBYTE PTR [1010]
+const FBSTP: [u8; 4] = [0xDF, 0x36, 0x10, 0x10];
+
+/// Integers that don't fit (and infinities and NaNs) store the integer
+/// indefinite, the smallest negative integer, with IE set, as an x87 with
+/// its exceptions masked does (the expected values are an x87's).
+#[test]
+fn test_fistp_out_of_range_stores_the_indefinite() {
+    // (FLD's sign and exponent, its significand, the store, how many bits
+    // it stores, and what it stores.)
+    #[rustfmt::skip]
+    let cases: [(u16, u64, &[u8; 4], u32, u64); 8] = [
+        (0x400E, 0x9C40_0000_0000_0000, &FISTP16, 16, 0x8000), // 40000
+        (0xC00E, 0x9C40_0000_0000_0000, &FISTP16, 16, 0x8000), // -40000
+        (0x401E, 0xB2D0_5E00_0000_0000, &FISTP32, 32, 0x8000_0000), // 3e9
+        (0x7FFF, 0xC000_0000_0000_0000, &FISTP32, 32, 0x8000_0000), // a NaN
+        (0x7FFF, 0x8000_0000_0000_0000, &FISTP16, 16, 0x8000), // infinity
+        (0x403F, 0x8000_0000_0000_0000, &FISTP64, 64, 0x8000_0000_0000_0000), // 2^64
+        (0x3FFF + 200, 0x8000_0000_0000_0000, &FISTP64, 64, 0x8000_0000_0000_0000), // 2^200
+        (0x7FFF, 0xC000_0000_0000_0000, &FISTP64, 64, 0x8000_0000_0000_0000), // a NaN
+    ];
+    for (se, man, store, bits, want) in cases {
+        let (cpu, ie) = store_extended(se, man, store);
+        assert_eq!(
+            cpu.bus.read_64(0x1010) & u64::MAX >> (64 - bits),
+            want,
+            "{:04X}:{:016X}",
+            se,
+            man
+        );
+        assert!(ie, "IE for {:04X}:{:016X}", se, man);
+    }
+    // The ones that fit set no IE.
+    let (cpu, ie) = store_extended(0xC00E, 0x9C40_0000_0000_0000, &FISTP32);
+    assert_eq!(cpu.bus.read_32(0x1010), 0xFFFF_63C0);
+    assert!(!ie);
+}
+
+/// FISTP QWORD stores the register's 64-bit integer whole: FILD QWORD,
+/// FISTP QWORD copies any integer (a double has only 53 bits of it).
+#[test]
+fn test_fild_fistp_qword_keeps_all_64_bits() {
+    for value in [
+        0x1234_5678_90AB_CDEFu64,
+        0x8000_0000_0000_0000,
+        0x7FFF_FFFF_FFFF_FFFF,
+        0xFFFF_FFFF_FFFF_FFFF,
+    ] {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.bus.write_64(0x1000, value);
+        // DF 2E 00 10: FILD QWORD PTR [1000]
+        run_cpu_code(&mut cpu, &[0xDF, 0x2E, 0x00, 0x10]);
+        run_cpu_code(&mut cpu, &FISTP64);
+        assert_eq!(cpu.bus.read_64(0x1010), value);
+    }
+}
+
+/// FBSTP rounds as the control word says (to nearest here), and stores the
+/// packed BCD indefinite for what has more than 18 digits, an infinity or a
+/// NaN, with IE set (the expected bytes are an x87's).
+#[test]
+fn test_fbstp_rounds_and_stores_the_indefinite() {
+    let indefinite = [0, 0, 0, 0, 0, 0, 0, 0xC0, 0xFF, 0xFF];
+    #[rustfmt::skip]
+    let cases: [(u16, u64, [u8; 10], bool); 8] = [
+        (0x4000, 0xA000_0000_0000_0000, [2, 0, 0, 0, 0, 0, 0, 0, 0, 0], false), // 2.5
+        (0x4000, 0xE000_0000_0000_0000, [4, 0, 0, 0, 0, 0, 0, 0, 0, 0], false), // 3.5
+        (0xBFFE, 0xC000_0000_0000_0000, [1, 0, 0, 0, 0, 0, 0, 0, 0, 0x80], false), // -0.75
+        (0x403A, 0xDE0B_6B3A_7640_0000, indefinite, true), // 10^18
+        (0x403F, 0x8000_0000_0000_0000, indefinite, true), // 2^64
+        (0x3FFF + 200, 0x8000_0000_0000_0000, indefinite, true), // 2^200
+        (0x7FFF, 0x8000_0000_0000_0000, indefinite, true), // infinity
+        (0x7FFF, 0xC000_0000_0000_0000, indefinite, true), // a NaN
+    ];
+    for (se, man, want, want_ie) in cases {
+        let (cpu, ie) = store_extended(se, man, &FBSTP);
+        let got: Vec<u8> = (0..10).map(|i| cpu.bus.read_8(0x1010 + i)).collect();
+        assert_eq!(got, want, "{:04X}:{:016X}", se, man);
+        assert_eq!(ie, want_ie, "IE for {:04X}:{:016X}", se, man);
+    }
+}
+
 /// 80-bit values stored as doubles round to nearest, ties to even, as an
 /// x87 with its default control word stores them (the expected doubles are
 /// what FLD TBYTE, FSTP QWORD gave on an x87).
