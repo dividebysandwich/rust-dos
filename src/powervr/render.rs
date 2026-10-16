@@ -20,9 +20,8 @@ use super::tsp::{Shader, Tsp};
 /// The tile width: the ISP's cells.
 pub const CELLS: usize = 32;
 
-/// The parameter space the TLB maps: 128 pages of 16 KB.
-const PAGE_SHIFT: u32 = 14;
-const PAGES: usize = 128;
+/// The TLB's entries.
+const PAGES: usize = 256;
 
 /// Object pointers.
 const TILE_HEADER: u32 = 1 << 30;
@@ -45,16 +44,52 @@ impl Memory<'_> {
 /// The parameter space, through the TLB.
 struct Params<'a> {
     tlb: [u32; PAGES],
+    page_shift: u32,
     mem: Memory<'a>,
 }
 
-impl Params<'_> {
-    /// The dword at byte `addr` of the parameter space. A TLB entry holds
-    /// its page's physical address in 4 KB units; the pages need not be
-    /// 16 KB aligned.
+impl<'a> Params<'a> {
+    fn new(registers: &[u32], mem: Memory<'a>) -> Self {
+        let mut tlb = [0; PAGES];
+        for (entry, &raw) in tlb.iter_mut().zip(&registers[regs::TLB..regs::TLB + PAGES]) {
+            *entry = page_address(raw);
+        }
+        // The driver fills the entries with blocks of the page size that
+        // follow each other in memory, so the first two give the size.
+        // Tomb Raider's are 16 KB, as PAGE_CTRL doesn't tell.
+        let page_shift = match tlb[1].wrapping_sub(tlb[0]) {
+            0x1000 if registers[regs::TLB + 1] != 0 => 12,
+            0x2000 if registers[regs::TLB + 1] != 0 => 13,
+            _ => 14,
+        };
+        Self { tlb, page_shift, mem }
+    }
+
+    /// The dword at byte `addr` of the parameter space. The pages need
+    /// not be aligned to their size.
     fn dword(&self, addr: u32) -> u32 {
-        let page = (addr >> PAGE_SHIFT) as usize % PAGES;
-        self.mem.read((self.tlb[page] << 12).wrapping_add(addr & ((1 << PAGE_SHIFT) - 1)))
+        let page = (addr >> self.page_shift) as usize % PAGES;
+        self.mem.read(self.tlb[page].wrapping_add(addr & ((1 << self.page_shift) - 1)))
+    }
+}
+
+/// A TLB entry's page: its physical address in 4 KB units, or the address
+/// itself where it is one (4 KB aligned and at 1 MB or above, which no
+/// page number in 4 GB is).
+fn page_address(entry: u32) -> u32 {
+    if entry & 0xFFF == 0 && entry >= 0x10_0000 { entry } else { entry << 12 }
+}
+
+/// Where the object list is: the parameter space when OBJECT_OFFSET's bit
+/// 0 is set, as Tomb Raider has it, otherwise the machine's memory.
+struct Objects<'p, 'a> {
+    params: &'p Params<'a>,
+    physical: bool,
+}
+
+impl Objects<'_, '_> {
+    fn dword(&self, addr: u32) -> u32 {
+        if self.physical { self.params.mem.read(addr) } else { self.params.dword(addr) }
     }
 }
 
@@ -90,9 +125,8 @@ pub struct Rendered {
 
 /// Render the scene the registers describe.
 pub fn render(registers: &[u32], textures: &[u8], mem: Memory, shader: &Shader) -> Rendered {
-    let mut tlb = [0; PAGES];
-    tlb.copy_from_slice(&registers[regs::TLB..regs::TLB + PAGES]);
-    let params = Params { tlb, mem };
+    let params = Params::new(registers, mem);
+    let objects = Objects { params: &params, physical: registers[regs::OBJECT_OFFSET] & 1 == 0 };
     let tsp = Tsp::new(registers, textures, shader);
     // The tiles and their planes first, then the tiles rendered, each by
     // itself, so on as many threads as there are.
@@ -101,7 +135,7 @@ pub fn render(registers: &[u32], textures: &[u8], mem: Memory, shader: &Shader) 
     // The list: a tile header, then pointers to the tile's objects; links
     // continue it elsewhere.
     let mut at = registers[regs::OBJECT_OFFSET] & !3;
-    let mut word = params.dword(at);
+    let mut word = objects.dword(at);
     let mut steps = 0;
     while steps < 1 << 20 {
         steps += 1;
@@ -112,8 +146,14 @@ pub fn render(registers: &[u32], textures: &[u8], mem: Memory, shader: &Shader) 
         let first_plane = planes.len();
         let mut last = false;
         loop {
+            // A list that never ends (or a runaway) stops the render.
+            steps += 1;
+            if steps >= 1 << 20 || planes.len() >= 1 << 22 {
+                last = true;
+                break;
+            }
             at = at.wrapping_add(4);
-            word = params.dword(at);
+            word = objects.dword(at);
             // A translucent pass's start, which the cells see in its planes.
             if word & VERY_LAST != 0 && word & LINK != 0 {
                 word &= !(VERY_LAST | LINK);
@@ -121,7 +161,7 @@ pub fn render(registers: &[u32], textures: &[u8], mem: Memory, shader: &Shader) 
             let mut links = 0;
             while word & LINK != 0 && word & TILE_HEADER == 0 && links < 10 {
                 at = (word & 0x00FF_FFFF) << 2;
-                word = params.dword(at);
+                word = objects.dword(at);
                 links += 1;
             }
             if word & TILE_HEADER != 0 {
@@ -496,6 +536,18 @@ fn render_tile(header: u32, planes: &[Plane], tsp: &Tsp, shaded: &mut u64) -> Ti
             *shaded += shade(&cells, tsp, x0, y0, w, &mut pixels);
         }
     }
+    // After the region's last object a flush down the pipeline puts what
+    // the cells look at in front, if it is, as the next object would.
+    let flush = Control {
+        i_load: LoadI::Nop,
+        u_load: LoadU::Closer,
+        test_shad: TestShad::Nop,
+        visible: true,
+        clear_u_id: false,
+        perpendicular: false,
+        mux_u: true,
+    };
+    cells.process(flush, 0, |_| 0.0);
     *shaded += shade(&cells, tsp, x0, y0, w, &mut pixels);
     Tile { x: x0, y: y0, width, height, pixels }
 }

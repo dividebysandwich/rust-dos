@@ -772,6 +772,15 @@ fn changed_settings() -> Settings {
             weather_sound: 30,
             lightning: false,
         },
+        vfx1: crate::vfx1::Vfx1Settings {
+            enabled: true,
+            port: 0x2A0,
+            stereo: crate::vfx1::Vfx1Stereo::Lines,
+            swap_eyes: true,
+            view_size: 50,
+            steer: true,
+            stereo_bios: false,
+        },
     }
 }
 
@@ -992,7 +1001,7 @@ fn saving_all_fills_in_every_setting() {
     assert!(saved.contains("\nroom=lobby\n\n[serial]\nserial1=mouse\n"), "{}", saved);
     assert!(saved.contains("\nmodemtelnet=off\n\n[printer]\noutput=pdf\n"), "{}", saved);
     assert!(saved.contains("\ntimeout=3000\n\n[achievements]\nenabled=false\nhardcore=false\n\n[shell]\nautosuggest=true\n"), "{}", saved);
-    assert!(saved.contains("\nsuggestion_color=darkgray\n\n[vr]\nmode=off\ncontrollers=both\nspatial_audio=true\nscreen_fit=auto\nquality=auto\nscreen_glow=100\nscene_scale=100\nseat_right=0\nseat_up=0\nseat_forward=0\nseat_turn=0\ngraphics=auto\nresolution=auto\nambient_occlusion=auto\nmsaa=auto\nrefresh=auto\nfoveation=auto\nkeyboard=off\ntime=now\ntime_speed=1\nlatitude=48\nweather=clear\nweather_sound=70\nlightning=true\n\n[autoexec]\nDIR\n"), "{}", saved);
+    assert!(saved.contains("\nsuggestion_color=darkgray\n\n[vr]\nmode=off\ncontrollers=both\nspatial_audio=true\nscreen_fit=auto\nquality=auto\nscreen_glow=100\nscene_scale=100\nseat_right=0\nseat_up=0\nseat_forward=0\nseat_turn=0\ngraphics=auto\nresolution=auto\nambient_occlusion=auto\nmsaa=auto\nrefresh=auto\nfoveation=auto\nkeyboard=off\ntime=now\ntime_speed=1\nlatitude=48\nweather=clear\nweather_sound=70\nlightning=true\n\n[vfx1]\nenabled=false\nport=260\nstereo=auto\nswap_eyes=false\nview_size=36\nsteer=false\nstereo_bios=true\n\n[autoexec]\nDIR\n"), "{}", saved);
     let config = parse(&saved, Path::new("/cfg"), Some(home));
     assert!(config.warnings.is_empty(), "{:?}", config.warnings);
     assert_eq!(Settings::from_config(&config), Settings { cycles: CpuSpeed::Max, ..settings.clone() });

@@ -294,6 +294,12 @@ fn key_id(scan: u8, extended: bool) -> usize {
 }
 
 impl KeyboardState {
+    /// The keys held, a bit for each by its scan code, and 256 on for the
+    /// extended ones (E0).
+    pub fn held_keys(&self) -> [u64; 8] {
+        self.held
+    }
+
     fn is_held(&self, id: usize) -> bool {
         self.held[id / 64] & 1 << (id % 64) != 0
     }
@@ -305,6 +311,13 @@ impl KeyboardState {
             self.held[id / 64] &= !(1 << (id % 64));
         }
     }
+}
+
+/// The keyboard's lights: bit 0 Scroll Lock, bit 1 Num Lock, bit 2 Caps
+/// Lock; as the system set them, or else as the BIOS's flags have the
+/// locks.
+pub fn lock_lights(bus: &Bus) -> u8 {
+    bus.kbc.lights.unwrap_or_else(|| bus.read_8(FLAGS) >> 4 & 0x07)
 }
 
 /// BDA 40:17h: the shift keys and locks.

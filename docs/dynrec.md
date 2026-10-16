@@ -62,18 +62,19 @@ Everything else goes through `locate`, whose page walks, Accessed bits,
 CR2 and tripwire the recompiler never needs to reproduce.
 
 On x86-64 hosts a block goes on into the page's last 15 bytes, with the
-instructions that end in the page (`BlockData::in_tail`). There
-`locate` looks the next page up for an instruction, in case it runs on
-into it, which with paging may walk the page tables (setting their
-Accessed bits and filling the TLB). With paging on, the code leaves the
-block before such an instruction (`EXIT_NEXT_PAGE`) unless the TLB holds
-the next page, where the lookup changes nothing, and the interpreter runs
-it. Code at the end of a page then runs in blocks and their links rather
-than in the interpreter, where DOS extenders map a program's pages apart
-from each other in physical memory, as through VCPI. Blocks aren't
-made in the shell's code, or in the page of the mouse driver's stub, which
-clears a byte of RAM that decides whether the next mouse event can be
-delivered.
+instructions that end in the page (`BlockData::in_tail`), and may start
+there too, where `locate` found the instruction. There `locate` looks
+the next page up for an instruction, in case it runs on into it, which
+with paging may walk the page tables (setting their Accessed bits and
+filling the TLB). With paging on, the code leaves the block before such
+an instruction (`EXIT_NEXT_PAGE`) unless the TLB holds the next page,
+where the lookup changes nothing, and the interpreter runs it. Code at
+the end of a page then runs in blocks and their links rather than in the
+interpreter, where DOS extenders map a program's pages apart from each
+other in physical memory, as through VCPI, and a function that returns
+to a place in the tail returns through a link. Blocks aren't made in the
+shell's code, or in the page of the mouse driver's stub, which clears a
+byte of RAM that decides whether the next mouse event can be delivered.
 
 A block stops **before** an instruction the interpreter must run itself:
 an invalid encoding (the emulator's service traps, FE 38/39, are ones) and
@@ -239,7 +240,7 @@ Each instruction becomes one of two things:
   - SHLD and SHRD by a constant or CL;
   - MUL and IMUL in all their forms, DIV and IDIV;
   - LEA, MOVZX, MOVSX, XCHG, CBW, CWD, CWDE and CDQ;
-  - the flag instructions, and SETcc;
+  - the flag instructions, SAHF and SETcc;
   - PUSH and POP of registers, memory (not addressed through ESP, for POP)
     and constants, PUSHA and POPA, ENTER with nesting level 0 (but a 32-bit
     frame pointer on a 16-bit stack) and LEAVE;
@@ -290,6 +291,8 @@ compute what the handlers' own doubles do there), as their handlers do:
 - FILD, FIST and FISTP of a word and a dword (converted inline where the
   control word rounds to nearest or chops and the result fits, else by
   the handler's own `fpu::data::to_int`);
+- FILD of a qword within 2^53 either way, which a double holds exactly
+  (a larger one goes to the handler, which keeps all 64 bits);
 - FMUL, FDIV, FDIVR and their popping forms, with a single or ST(i) (a
   division by 0 through `fpu::arithmetic::divided_by_zero`);
 - FADD, FSUB, FSUBR and their popping forms: calls of the handlers' own
@@ -453,7 +456,12 @@ MXCSR; where one of them is unmasked in the guest's MXCSR, the handler
 runs the instruction instead and raises it. With underflow unmasked, an
 exact tiny result underflows too, which the host doesn't report, so ADD,
 SUB, MUL and DIV go to the handler. The host's MXCSR is then set back to
-Rust's. The approximations of RCPSS, RCPPS, RSQRTSS and RSQRTPS,
+Rust's, with its exception flags clear. Loading MXCSR is slow, so where
+the guest masks every exception and has the host's rounding, flush to
+zero and DAZ, and every flag set in the host's MXCSR is set in the
+guest's too, the operation runs under the host's MXCSR as it is, without
+either load: the flags it sets that the guest hasn't are those it
+raised. The approximations of RCPSS, RCPPS, RSQRTSS and RSQRTPS,
 which the host's don't match, the compares into EFLAGS and the
 conversions to and from 32-bit registers go through their handlers, and
 so does everything on ARM64 hosts.

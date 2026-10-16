@@ -7,7 +7,9 @@
 //! it waits for each of the
 //! headset's frames, reads the controllers, draws the eyes with the newest
 //! picture the main thread finished, and leaves the left eye's view for
-//! the window.
+//! the window. Wearing the VFX1 on the desk (`[vfx1]`), the eyes see the
+//! pictures the main thread took from the game's for each, and the head
+//! is the VFX1's head tracker.
 //!
 //! Pictures go between the threads in rings of three textures: the drawing
 //! side draws into one that is neither the newest nor the one the other
@@ -23,6 +25,8 @@ use super::props::Props;
 use super::render::{Dest, Features, Format, Gpu, Multiview, Options, Pass};
 use super::pick::TargetId;
 use super::scene::{Leds, Scene, Spawn};
+use super::typing::KeyEvent;
+use super::visor::Visor;
 use super::xr::{Xr, XrOptions, log};
 use crate::video::shader::Glsl;
 use glam::{Mat4, Vec3};
@@ -222,11 +226,22 @@ impl<F, M: Copy> Ring<F, M> {
     }
 }
 
+/// How long the eyes take to come up out of black, the VFX1 put on.
+const WEAR_FADE: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// The VFX1's eyes' pictures the main thread finished: how wide they look,
+/// in degrees.
+pub type EyesMeta = f32;
+
 /// What the threads share.
 #[derive(Default)]
 struct State {
     // To the headset.
     screen: Ring<Fence, ()>,
+    /// The VFX1 is on the desk, and its eyes' pictures (two textures to
+    /// each of the ring's).
+    vfx1: bool,
+    eyes: Ring<Fence, EyesMeta>,
     leds: Leds,
     controllers: VrControllers,
     /// How brightly the screen lights the scene (`Gpu::set_glow`).
@@ -241,6 +256,8 @@ struct State {
     /// window clicked to take one.
     capture_dir: Option<std::path::PathBuf>,
     shots: Vec<usize>,
+    /// The keyboard's keys the window clicked.
+    taps: Vec<usize>,
     /// Where the cameras show the real keyboard, and whether it is to be
     /// marked with a controller.
     keyboard: VrKeyboard,
@@ -251,7 +268,11 @@ struct State {
     mirror_textures: Vec<glow::Texture>,
     mirror_size: (u32, u32),
     input: VrInput,
+    /// The keyboard's keys gone down and come up, for the machine.
+    keys: Vec<KeyEvent>,
     head: Option<Mat4>,
+    /// The VFX1's head tracker and puck, while it is worn.
+    vfx1_tracking: Option<rust_dos::vfx1::Tracking>,
     notes: Vec<String>,
     running: bool,
     ended: bool,
@@ -299,13 +320,16 @@ pub struct Headset {
 
 impl Headset {
     /// Start the thread, with a context made for it sharing `main`'s
-    /// textures, drawing `scene` with the screen's `screens`.
+    /// textures, drawing `scene` with the screen's `screens` and the
+    /// VFX1's `eyes`.
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         window: &sdl2::video::Window,
         main: &sdl2::video::GLContext,
         glsl: Glsl,
         scene: Arc<Scene>,
         screens: [glow::Texture; 3],
+        eyes: [[glow::Texture; 2]; 3],
         settings: &VrSettings,
         world: Arc<super::world::World>,
     ) -> Result<Self, String> {
@@ -355,7 +379,10 @@ impl Headset {
         let thread_shared = shared.clone();
         let thread = std::thread::Builder::new()
             .name("vr-headset".into())
-            .spawn(move || run(thread_shared, raw_window, raw_context, glsl, scene, screens, settings, world))
+            .spawn(move || {
+                let textures = (screens, eyes);
+                run(thread_shared, raw_window, raw_context, glsl, scene, textures, settings, world)
+            })
             .map_err(|e| e.to_string())?;
         Ok(Headset {
             shared,
@@ -382,6 +409,49 @@ impl Headset {
             }
         }
         in_use
+    }
+
+    /// The VFX1's eyes' textures the headset reads, as `screen_in_use`.
+    pub fn eyes_in_use(&self, gl: &glow::Context) -> Option<usize> {
+        let (in_use, released) = {
+            let mut state = self.shared.lock();
+            (state.eyes.in_use(), state.eyes.released())
+        };
+        if let Some(Fence(fence)) = released {
+            // SAFETY: see `GlScreen`.
+            unsafe {
+                gl.wait_sync(fence, 0, glow::TIMEOUT_IGNORED);
+                gl.delete_sync(fence);
+            }
+        }
+        in_use
+    }
+
+    /// The VFX1's eyes' textures `index` are finished, by the commands
+    /// sent so far, to be shown `width` degrees across.
+    pub fn publish_eyes(&self, gl: &glow::Context, index: usize, width: EyesMeta) {
+        // SAFETY: see `GlScreen`.
+        let Ok(fence) = (unsafe { gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0) }) else {
+            return;
+        };
+        // SAFETY: see `GlScreen`.
+        unsafe { gl.flush() };
+        let old = self.shared.lock().eyes.publish(index, Fence(fence), width);
+        if let Some(Fence(old)) = old {
+            // SAFETY: see `GlScreen`.
+            unsafe { gl.delete_sync(old) };
+        }
+    }
+
+    /// The VFX1 on the desk (`[vfx1]`) or not.
+    pub fn set_vfx1(&self, there: bool) {
+        self.shared.lock().vfx1 = there;
+    }
+
+    /// The VFX1's head tracker and puck, while it is worn.
+    pub fn vfx1(&self) -> Option<rust_dos::vfx1::Tracking> {
+        let state = self.shared.lock();
+        state.vfx1_tracking.filter(|_| state.running)
     }
 
     /// The screen's texture `index` is finished, by the commands sent so
@@ -436,6 +506,16 @@ impl Headset {
     /// Take camera `camera`'s picture (clicked in the window's mirror).
     pub fn take_picture(&self, camera: usize) {
         self.shared.lock().shots.push(camera);
+    }
+
+    /// Press the keyboard's key `k` for a moment (clicked in the mirror).
+    pub fn tap_key(&self, k: usize) {
+        self.shared.lock().taps.push(k);
+    }
+
+    /// The keys typed on the keyboard in the scene since, for the machine.
+    pub fn take_keys(&self) -> Vec<KeyEvent> {
+        std::mem::take(&mut self.shared.lock().keys)
     }
 
     pub fn set_keyboard(&self, keyboard: VrKeyboard) {
@@ -560,7 +640,7 @@ fn run(
     context: Raw,
     glsl: Glsl,
     scene: Arc<Scene>,
-    screens: [glow::Texture; 3],
+    screens: ([glow::Texture; 3], [[glow::Texture; 2]; 3]),
     settings: VrSettings,
     world: Arc<super::world::World>,
 ) {
@@ -589,6 +669,7 @@ fn run(
     let mut state = shared.lock();
     state.running = false;
     state.ended = true;
+    state.vfx1_tracking = None;
 }
 
 /// The headset's session, until it ends or the main thread stops it.
@@ -597,7 +678,7 @@ fn session(
     gl: &glow::Context,
     glsl: Glsl,
     mut scene: Arc<Scene>,
-    screens: [glow::Texture; 3],
+    (screens, eye_textures): ([glow::Texture; 3], [[glow::Texture; 2]; 3]),
     settings: &VrSettings,
     room: &super::world::World,
 ) -> Result<(), String> {
@@ -688,6 +769,14 @@ fn session(
     }
     let mut controllers = Controllers::default();
     let mut props = Props::new(&scene);
+    let visor = Visor::new(gl, glsl)?;
+    // The VFX1: since when it is worn, where the head and the puck were
+    // then (its zero), and the eyes' pictures shown and how wide.
+    let mut worn_since: Option<std::time::Instant> = None;
+    let mut vfx1_zero: Option<(rust_dos::vfx1::pose::Quat, [f64; 2])> = None;
+    let mut eyes: Option<(usize, EyesMeta)> = None;
+    // Worn from the start, to try it without hands (RUST_DOS_VR_WEAR=1).
+    let mut wear = std::env::var("RUST_DOS_VR_WEAR").is_ok_and(|v| v == "1");
     // The real keyboard through the scene, where the headset's cameras can
     // show it (else the windows would be black).
     if settings.keyboard != VrKeyboard::Off && !xr.passthrough() {
@@ -726,6 +815,7 @@ fn session(
         }
         if lost {
             props.delete(gl);
+            visor.delete(gl);
             xr.close(gl);
             return Ok(());
         }
@@ -744,6 +834,26 @@ fn session(
             if let Some(Fence(stale)) = stale {
                 // SAFETY: see `GlScreen`.
                 unsafe { gl.delete_sync(stale) };
+            }
+            props.set_vfx1(state.vfx1);
+            props.set_machine_keys(state.leds.keys);
+            for k in std::mem::take(&mut state.taps) {
+                props.tap(k, std::time::Instant::now());
+            }
+            let (taken_eyes, stale) = state.eyes.take(|| release(gl));
+            if let Some(Fence(stale)) = stale {
+                // SAFETY: see `GlScreen`.
+                unsafe { gl.delete_sync(stale) };
+            }
+            if let Some((index, fence, width)) = taken_eyes {
+                if let Some(Fence(fence)) = fence {
+                    // SAFETY: see `GlScreen`.
+                    unsafe {
+                        gl.wait_sync(fence, 0, glow::TIMEOUT_IGNORED);
+                        gl.delete_sync(fence);
+                    }
+                }
+                eyes = Some((index, width));
             }
             let (mirror_index, mirror_released) = (state.mirror.free(), state.mirror.released());
             (
@@ -802,9 +912,18 @@ fn session(
         let dt = now.duration_since(last_frame).as_secs_f32();
         last_frame = now;
         let (windows, whole, marks) = keyboard.update(&scene, world, &tracking, presses, dt);
+        // The real keyboard seen, the scene's is gone.
+        props.hide_keyboard(!windows.is_empty() || whole.is_some());
+        if std::mem::take(&mut wear) {
+            props.set_vfx1(true);
+            props.wear();
+        }
         let held = props.update(&scene, &tracking, now);
-        // Marking, the controllers do nothing else.
+        let vfx1 = wearing(held.worn, &tracking, world, &mut worn_since, &mut vfx1_zero, now);
+        // Marking, the controllers do nothing else; wearing the VFX1, they
+        // point at nothing seen.
         let busy = if keyboard.marking() { [true; 2] } else { held.busy };
+        let mode = if held.worn { VrControllers::Gamepad } else { mode };
         let targets = props.targets(&scene);
         let (mut input, mut extras, hold, clicked) = controllers.update(mode, &tracking, busy, &scene.screen, &targets, now);
         let (mut shots, folder) = {
@@ -816,6 +935,7 @@ fn session(
             match id {
                 TargetId::Lamp(i) => room.toggle_lamp(i),
                 TargetId::Camera(i) => shots.push(i),
+                TargetId::Key(k) => props.tap(k, now),
             }
         }
         let picture = screen.map(|i| screens[i]);
@@ -830,21 +950,60 @@ fn session(
         if held.pad.is_some() {
             input.pad = held.pad;
         }
+        for (i, _) in held.keyed.iter().enumerate().filter(|(_, keyed)| **keyed) {
+            xr.buzz(i);
+        }
+        let typed = props.take_key_events(now);
         if hold {
             xr.recenter();
         }
         let prop_draws = props.draws(gl, &gpu, &scene, now);
         let mut left = None;
+        let fade = worn_since.map_or(1.0, |since| {
+            now.duration_since(since).as_secs_f32() / WEAR_FADE.as_secs_f32()
+        });
         let drawn = xr.draw(gl, world, |target, views| {
-            let format = Format { size: target.size, srgb: target.srgb };
-            let dest = Dest::Image { texture: target.texture, format, layered: target.layered };
-            if let Err(e) = gpu.render(gl, &scene, views, dest, target.area, picture, leds, &prop_draws, &extras, Keyboard::punch(&windows, whole)) {
-                // (Once, not every frame.)
-                if failed.as_ref() != Some(&e) {
-                    log::line(&e);
-                    failed = Some(e);
+            if held.worn {
+                // Each eye its picture, ahead of it as the head turns.
+                let head = tracking.head.unwrap_or(world);
+                for (k, view) in views.iter().enumerate() {
+                    let layer = target.layered.then_some(k as i32);
+                    let Some(framebuffer) = gpu.read_framebuffer(gl, target.texture, layer) else {
+                        continue;
+                    };
+                    let at = view.view.inverse().transform_point3(Vec3::ZERO);
+                    let eye = head.inverse().transform_point3(at);
+                    let side = (target.first + k).min(1);
+                    let picture = eyes.map(|(index, _)| eye_textures[index][side]);
+                    let width = eyes.map_or(36.0, |(_, width)| width);
+                    let to_clip = view.projection * view.view * head;
+                    let (area, srgb) = (target.area, target.srgb);
+                    visor.draw(gl, framebuffer, area, srgb, to_clip, eye, picture, width, fade);
                 }
-                return;
+            } else {
+                let format = Format { size: target.size, srgb: target.srgb };
+                let dest = Dest::Image { texture: target.texture, format, layered: target.layered };
+                let punch = Keyboard::punch(&windows, whole);
+                let rendered = gpu.render(
+                    gl,
+                    &scene,
+                    views,
+                    dest,
+                    target.area,
+                    picture,
+                    leds,
+                    &prop_draws,
+                    &extras,
+                    punch,
+                );
+                if let Err(e) = rendered {
+                    // (Once, not every frame.)
+                    if failed.as_ref() != Some(&e) {
+                        log::line(&e);
+                        failed = Some(e);
+                    }
+                    return;
+                }
             }
             let (aw, ah) = (target.area.0 as i32, target.area.1 as i32);
             if target.first == 0
@@ -898,11 +1057,50 @@ fn session(
             unsafe { gl.delete_sync(old) };
         }
         state.input = input;
+        state.keys.extend(typed);
         state.head = tracking.head;
+        state.vfx1_tracking = vfx1;
     }
     props.delete(gl);
+    visor.delete(gl);
     xr.close(gl);
     Ok(())
+}
+
+/// The VFX1's head tracker and puck at a frame, while it is `worn`: the
+/// head's turn and the right controller's tilt in the seat's frame
+/// (`world`) from where they were as it was put on, which is their zero.
+fn wearing(
+    worn: bool,
+    tracking: &super::controls::Tracking,
+    world: Mat4,
+    since: &mut Option<std::time::Instant>,
+    zero: &mut Option<(rust_dos::vfx1::pose::Quat, [f64; 2])>,
+    now: std::time::Instant,
+) -> Option<rust_dos::vfx1::Tracking> {
+    use rust_dos::vfx1::pose;
+    if !worn {
+        *since = None;
+        *zero = None;
+        return None;
+    }
+    since.get_or_insert(now);
+    let turn = |m: Mat4| {
+        let (_, q, _) = (world.inverse() * m).to_scale_rotation_translation();
+        [q.w as f64, q.x as f64, q.y as f64, q.z as f64]
+    };
+    let head = tracking.head.map_or(pose::IDENTITY, turn);
+    let hand = tracking.hands[1];
+    let puck = hand.map_or(pose::IDENTITY, |h| turn(h.grip));
+    let (head_zero, puck_zero) = *zero.get_or_insert((head, pose::tilt(puck)));
+    let buttons = hand.map_or(0, |h| {
+        u8::from(h.select) | u8::from(h.squeeze) << 1 | u8::from(h.primary) << 2
+    });
+    Some(rust_dos::vfx1::Tracking {
+        head: pose::head(head_zero, head),
+        puck: pose::puck(puck_zero, puck),
+        buttons,
+    })
 }
 
 /// How often the part of the eyes' images drawn may change.

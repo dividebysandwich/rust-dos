@@ -388,6 +388,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "cfg_aliases"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
+
+[[package]]
 name = "chd"
 version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1703,6 +1709,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27b02d87554356db9e9a873add8782d4ea6e3e58ea071a9adb9a2e8ddb884a8b"
 
 [[package]]
+name = "nix"
+version = "0.31.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
+dependencies = [
+ "bitflags 2.13.2",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
+]
+
+[[package]]
 name = "nuked-opl3"
 version = "0.1.0"
 
@@ -2118,7 +2136,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "ab_glyph_rasterizer",
  "ash",
@@ -2179,21 +2197,21 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-audio-core"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "rust-dos-savestate",
 ]
 
 [[package]]
 name = "rust-dos-dma"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "rust-dos-savestate",
 ]
 
 [[package]]
 name = "rust-dos-gus"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "rust-dos-audio-core",
  "rust-dos-dma",
@@ -2204,14 +2222,14 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-hostdirs"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "dirs",
 ]
 
 [[package]]
 name = "rust-dos-lpt-dac"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "rust-dos-audio-core",
  "rust-dos-savestate",
@@ -2219,7 +2237,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-mpu401"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "midir",
  "rust-dos-audio-core",
@@ -2232,7 +2250,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-mt32"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "libloading 0.9.0",
  "rust-dos-hostdirs",
@@ -2240,7 +2258,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-opl"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "nuked-opl3",
  "rust-dos-audio-core",
@@ -2249,11 +2267,11 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-savestate"
-version = "1.7.3"
+version = "1.7.4"
 
 [[package]]
 name = "rust-dos-sc55"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "dirs",
  "rust-dos-hostdirs",
@@ -2264,7 +2282,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-soundblaster"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "rust-dos-audio-core",
  "rust-dos-dma",
@@ -2278,7 +2296,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-tandy"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "rust-dos-audio-core",
  "rust-dos-savestate",
@@ -2286,7 +2304,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-zip"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "flate2",
  "zip",
@@ -3612,13 +3630,14 @@ checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
 
 [[package]]
 name = "zip"
-version = "8.6.0"
+version = "9.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b"
+checksum = "a954114b47a54df49f83d2722814e86b23d4bb1b54a1b90fb7d92b41619ddc22"
 dependencies = [
  "crc32fast",
  "indexmap",
  "memchr",
+ "nix",
  "typed-path",
 ]
 

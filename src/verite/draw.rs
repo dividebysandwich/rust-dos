@@ -10,6 +10,13 @@
 //! and F alpha and fog of 0-255, Z a depth of 0-65535. The state commands'
 //! meanings come from Rendition's library (VLIB), which Tomb Raider's
 //! Vérité version links whole, and from what the game sends.
+//!
+//! A state command writes a field of one of the pixel engine's registers:
+//! its low 7 bits are the register's number, bits 7-11 where the field
+//! starts in it, and bits 12-15 how many words follow. That puts the
+//! commands beside the registers as DOSBox-X's emulation of the V1000
+//! (LeonG-ZA's `verite` branch) names them, for the fields VLIB alone
+//! doesn't.
 
 /// RRedline's pixel formats (`V_PIXFMT_*`), as the library numbers them.
 pub mod fmt {
@@ -19,7 +26,9 @@ pub mod fmt {
     pub const P565: u32 = 4;
     pub const P4444: u32 = 5;
     pub const P1555: u32 = 6;
+    /// The library's number for 8888; the chip's is 0Ch.
     pub const P8888: u32 = 7;
+    pub const P8888_CHIP: u32 = 0xC;
     /// 4 bits a texel into a palette of 16 565, 4444 or 1555 entries.
     pub const I4_565: u32 = 8;
     pub const I4_4444: u32 = 9;
@@ -29,17 +38,19 @@ pub mod fmt {
 /// The state the drawing commands use.
 #[derive(Clone, Debug)]
 pub struct DrawState {
-    /// Where pixels go (1004h), bytes a line (143Bh, coded), the clip
-    /// (100Eh, 100Fh: width and height) and the pixel format (1006h).
+    /// Where pixels go (1004h), bytes a line (143Bh, coded), the scissors
+    /// (100Eh, 100Fh: the first column or line drawn in bits 16-27, the
+    /// first past the end in 0-11) and the pixel format (1006h).
     pub dst_base: u32,
     pub dst_stride: u32,
-    pub width: u32,
-    pub height: u32,
+    pub scissor_x: u32,
+    pub scissor_y: u32,
     pub dst_format: u32,
     /// The current texture (4000h): base, bytes a line, its last U and V
-    /// (its size less 1: Quake's surfaces and skins aren't powers of two),
-    /// and what U and V are multiplied by into texels (16.16; 5028h, 5029h
-    /// too); its pixel format (1030h), whether its colours
+    /// (its size less 1: Quake's surfaces and skins aren't powers of two;
+    /// the chip's U and V masks, which 1038h and 1839h set too), and what
+    /// U and V are multiplied by into texels (16.16; 5028h, 5029h too);
+    /// its pixel format (1030h), whether its colours
     /// are BGR (16B7h), and the palette of the 4-bit formats (7020h).
     pub tex_base: u32,
     pub tex_stride: u32,
@@ -60,14 +71,11 @@ pub struct DrawState {
     /// vertices' colour, 1 the texture's, 2 the texture's over the
     /// vertices' by its alpha, 3 the texture's times the vertices'.
     pub src_mode: u32,
-    /// Texture clamping (17BEh, 183Fh) to the largest U and V (1038h,
-    /// 1839h).
+    /// Texture clamping (17BEh, 183Fh) to the last U and V.
     pub clamp_u: bool,
     pub clamp_v: bool,
-    pub max_u: u32,
-    pub max_v: u32,
     /// Chroma keying (15B5h): texels of this colour (1017h) under this
-    /// mask (101Ah) aren't drawn.
+    /// mask (101Ah) are transparent black, for the alpha test to drop.
     pub chroma: bool,
     pub chroma_colour: u32,
     pub chroma_mask: u32,
@@ -75,15 +83,25 @@ pub struct DrawState {
     /// (1241h, 1442h: RRedline's VL_SetBlendSrcFunc and VL_SetBlendDstFunc,
     /// numbered in the order the Programming Guide lists them), and the
     /// alpha of vertices without one (2055h, bits 16-23... of 0-255).
+    /// Factors past the guide's list: 10 and 11 the source's and the
+    /// destination's colour the other way round, 15 a signed add.
     pub blend: bool,
     pub blend_src: u32,
     pub blend_dst: u32,
     pub alpha: u32,
-    /// Whether the destination is read for blending (1CCCh, set to
+    /// Whether the destination is read for blending (1BCAh, set to
     /// VL_SetDstRdDisable's not), and the colour used when it isn't
-    /// (1015h, ARGB).
+    /// (1016h, ARGB).
     pub dst_read: bool,
     pub dst_colour: u32,
+    /// The alpha test (1CCCh): pixels whose alpha is no more than the
+    /// threshold (101Dh) aren't drawn. Tomb Raider's cut-out textures are
+    /// chroma keyed with the test on at 128.
+    pub alpha_test: bool,
+    pub alpha_threshold: u32,
+    /// The 4x4 ordered dither (AA47h) where the destination has fewer
+    /// than 8 bits a channel.
+    pub dither: bool,
     /// The colour of vertices without one (3013h, ARGB).
     pub fg: u32,
     /// The Z buffer (1010h, 183Ch: base and coded bytes a line), its
@@ -94,7 +112,7 @@ pub struct DrawState {
     pub z_mode: u32,
     pub z_write: bool,
     pub z: u32,
-    /// Fog (AA47h) of this colour (1016h, RGB), and the fog of vertices
+    /// Fog (1AC8h) of this colour (1015h, RGB), and the fog of vertices
     /// without one (205Bh, 16.16: 255 none, 0 all fog).
     pub fog: bool,
     pub fog_colour: u32,
@@ -106,8 +124,8 @@ impl Default for DrawState {
         Self {
             dst_base: 0,
             dst_stride: 1280,
-            width: 640,
-            height: 480,
+            scissor_x: 640,
+            scissor_y: 480,
             dst_format: fmt::P565,
             tex_base: 0,
             tex_stride: 512,
@@ -124,8 +142,6 @@ impl Default for DrawState {
             src_mode: 0,
             clamp_u: false,
             clamp_v: false,
-            max_u: u32::MAX,
-            max_v: u32::MAX,
             chroma: false,
             chroma_colour: 0,
             chroma_mask: u32::MAX,
@@ -135,6 +151,9 @@ impl Default for DrawState {
             alpha: 0xFF,
             dst_read: true,
             dst_colour: 0,
+            alpha_test: false,
+            alpha_threshold: 0,
+            dither: false,
             fg: 0x00FF_FFFF,
             z_base: 0,
             z_stride: 1280,
@@ -149,19 +168,26 @@ impl Default for DrawState {
 }
 
 crate::state_fields!(DrawState {
-    dst_base, dst_stride, width, height, dst_format, tex_base, tex_stride, tex_last_u, tex_last_v, scale_u, scale_v,
-    src_format, src_bgr, palette, filter, s_offset, t_offset, src_mode, clamp_u, clamp_v, max_u, max_v, chroma,
-    chroma_colour, chroma_mask, blend, blend_src, blend_dst, alpha, dst_read, dst_colour, fg, z_base, z_stride,
-    z_mode, z_write, z, fog, fog_colour, fog_default
+    dst_base, dst_stride, scissor_x, scissor_y, dst_format, tex_base, tex_stride, tex_last_u,
+    tex_last_v, scale_u, scale_v, src_format, src_bgr, palette, filter, s_offset, t_offset,
+    src_mode, clamp_u, clamp_v, chroma, chroma_colour, chroma_mask, blend, blend_src, blend_dst,
+    alpha, dst_read, dst_colour, alpha_test, alpha_threshold, dither, fg, z_base, z_stride, z_mode,
+    z_write, z, fog, fog_colour, fog_default
 });
 
 /// A stride as the microcode takes it: the sum of the high nibble's and
 /// the low nibble's parts, as Rendition's library (VLIB) turns a code
-/// back into bytes.
+/// back into bytes. Low parts 4-7 (4, 768, 576, 1152), which VLIB doesn't
+/// make, are the pixel engine's, as DOSBox-X has them.
 pub fn stride(code: u32) -> u32 {
-    const HIGH: [u32; 16] = [0, 16, 32, 64, 128, 1024, 2048, 4096, 0, 0, 0, 0, 0, 0, 0, 0];
-    const LOW: [u32; 16] = [0, 256, 512, 1024, 2048, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    HIGH[(code >> 4 & 15) as usize] + LOW[(code & 15) as usize]
+    const HIGH: [u32; 8] = [0, 16, 32, 64, 128, 1024, 2048, 4096];
+    const LOW: [u32; 8] = [0, 256, 512, 1024, 4, 768, 576, 1152];
+    HIGH[(code >> 4 & 7) as usize] + LOW[(code & 7) as usize]
+}
+
+/// A scissor's first and past-the-end column or line.
+fn scissor(word: u32) -> (i32, i32) {
+    ((word >> 16 & 0xFFF) as i32, (word & 0xFFF) as i32)
 }
 
 /// A vertex, its attributes as floats.
@@ -276,7 +302,7 @@ pub fn bits(format: u32) -> u32 {
     match format {
         fmt::I4_565..=fmt::I4_1555 => 4,
         fmt::P332..=fmt::A8 => 8,
-        fmt::P8888 => 32,
+        fmt::P8888 | fmt::P8888_CHIP => 32,
         _ => 16,
     }
 }
@@ -311,7 +337,9 @@ pub fn decode(format: u32, raw: u32, palette: &[u32]) -> Rgba {
         fmt::A8 => (255.0, 255.0, 255.0, (raw & 0xFF) as f32),
         fmt::P4444 => (widen(raw >> 8, 4), widen(raw >> 4, 4), widen(raw, 4), widen(raw >> 12, 4)),
         fmt::P1555 => (widen(raw >> 10, 5), widen(raw >> 5, 5), widen(raw, 5), widen(raw >> 15, 1)),
-        fmt::P8888 => (widen(raw >> 16, 8), widen(raw >> 8, 8), widen(raw, 8), widen(raw >> 24, 8)),
+        fmt::P8888 | fmt::P8888_CHIP => {
+            (widen(raw >> 16, 8), widen(raw >> 8, 8), widen(raw, 8), widen(raw >> 24, 8))
+        }
         fmt::I4_565..=fmt::I4_1555 => {
             let entry = palette.get(raw as usize & 15).copied().unwrap_or(0) & 0xFFFF;
             return decode(format - fmt::I4_565 + fmt::P565, entry, palette);
@@ -321,16 +349,29 @@ pub fn decode(format: u32, raw: u32, palette: &[u32]) -> Rgba {
     [r, g, b, a]
 }
 
+/// The pixel engine's 4x4 dither, 16ths of the least step of a channel,
+/// by line and column.
+const DITHER: [[u32; 4]; 4] = [[0, 12, 3, 15], [7, 11, 4, 8], [2, 13, 1, 14], [10, 6, 9, 5]];
+
 /// RGBA as a pixel of `format`.
-pub fn encode(format: u32, [r, g, b, a]: Rgba) -> u32 {
-    let c = |v: f32, n: u32| (v.clamp(0.0, 255.0) as u32) >> (8 - n);
+pub fn encode(format: u32, colour: Rgba) -> u32 {
+    encode_dithered(format, colour, 0)
+}
+
+/// RGBA as a pixel of `format`, with `dither` sixteenths of each
+/// channel's least step added before it is cut to its bits.
+fn encode_dithered(format: u32, [r, g, b, a]: Rgba, dither: u32) -> u32 {
+    let c = |v: f32, n: u32| {
+        let step = dither << (8 - n) >> 4;
+        (v.clamp(0.0, 255.0) as u32 + step).min(255) >> (8 - n)
+    };
     match format {
         fmt::P332 => c(r, 3) << 5 | c(g, 3) << 2 | c(b, 2),
-        fmt::I8 => c((r + g + b) / 3.0, 8),
+        fmt::I8 => c((r * 77.0 + g * 151.0 + b * 28.0) / 256.0, 8),
         fmt::A8 => c(a, 8),
         fmt::P4444 => c(a, 4) << 12 | c(r, 4) << 8 | c(g, 4) << 4 | c(b, 4),
         fmt::P1555 => c(a, 1) << 15 | c(r, 5) << 10 | c(g, 5) << 5 | c(b, 5),
-        fmt::P8888 => c(a, 8) << 24 | c(r, 8) << 16 | c(g, 8) << 8 | c(b, 8),
+        fmt::P8888 | fmt::P8888_CHIP => c(a, 8) << 24 | c(r, 8) << 16 | c(g, 8) << 8 | c(b, 8),
         _ => c(r, 5) << 11 | c(g, 6) << 5 | c(b, 5),
     }
 }
@@ -347,10 +388,10 @@ impl DrawState {
     /// The raw texel at whole texel coordinates, clamped or wrapped.
     fn texel(&self, vram: &[u8], mut u: i32, mut v: i32) -> u32 {
         if self.clamp_u {
-            u = u.clamp(0, self.max_u.min(0xFFFF) as i32);
+            u = u.clamp(0, self.tex_last_u as i32);
         }
         if self.clamp_v {
-            v = v.clamp(0, self.max_v.min(0xFFFF) as i32);
+            v = v.clamp(0, self.tex_last_v as i32);
         }
         // Wrapped around the size, which is a mask for powers of two.
         let u = u.rem_euclid(self.tex_last_u as i32 + 1) as u32;
@@ -381,36 +422,33 @@ impl DrawState {
         c
     }
 
+    /// A raw texel's colour, or transparent black where it is the chroma
+    /// key.
+    fn keyed_colour(&self, raw: u32) -> Rgba {
+        if self.keyed(raw) { [0.0; 4] } else { self.colour(raw) }
+    }
+
     /// The texture's colour at u, v (texels before scaling), point sampled
-    /// or filtered from the four texels around it; `None` where the chroma
-    /// key hides it.
-    fn sample(&self, vram: &[u8], u: f32, v: f32) -> Option<Rgba> {
+    /// or filtered from the four texels around it. Keyed texels are
+    /// filtered in as transparent black, as the chip does.
+    fn sample(&self, vram: &[u8], u: f32, v: f32) -> Rgba {
         let s = u * fixed(self.scale_u) + fixed(self.s_offset);
         let t = v * fixed(self.scale_v) + fixed(self.t_offset);
         let (s0, t0) = (s.floor(), t.floor());
         let (x, y) = (s0 as i32, t0 as i32);
         if !self.filter {
-            let raw = self.texel(vram, x, y);
-            return (!self.keyed(raw)).then(|| self.colour(raw));
+            return self.keyed_colour(self.texel(vram, x, y));
         }
-        // Keyed texels leave the filter: the others are weighted up to
-        // make the whole, unless the keyed ones weigh half or more.
         let (fs, ft) = (s - s0, t - t0);
         let taps = [(0, 0, (1.0 - fs) * (1.0 - ft)), (1, 0, fs * (1.0 - ft)), (0, 1, (1.0 - fs) * ft), (1, 1, fs * ft)];
         let mut sum = [0.0; 4];
-        let mut weight = 0.0;
         for (dx, dy, w) in taps {
-            let raw = self.texel(vram, x + dx, y + dy);
-            if self.keyed(raw) {
-                continue;
-            }
-            let c = self.colour(raw);
+            let c = self.keyed_colour(self.texel(vram, x + dx, y + dy));
             for k in 0..4 {
                 sum[k] += w * c[k];
             }
-            weight += w;
         }
-        (weight > 0.5).then(|| sum.map(|c| c / weight))
+        sum
     }
 
     /// Whether a pixel of depth `new` passes over `old`: the mode's bits
@@ -449,10 +487,11 @@ impl DrawState {
         if area == 0.0 || !area.is_finite() {
             return;
         }
-        let x0 = a.x.min(b.x).min(c.x).floor().max(0.0) as i32;
-        let x1 = a.x.max(b.x).max(c.x).ceil().min(self.width as f32) as i32;
-        let y0 = a.y.min(b.y).min(c.y).floor().max(0.0) as i32;
-        let y1 = a.y.max(b.y).max(c.y).ceil().min(self.height as f32) as i32;
+        let ((left, right), (top, bottom)) = (scissor(self.scissor_x), scissor(self.scissor_y));
+        let x0 = (a.x.min(b.x).min(c.x).floor() as i32).max(left);
+        let x1 = (a.x.max(b.x).max(c.x).ceil() as i32).min(right);
+        let y0 = (a.y.min(b.y).min(c.y).floor() as i32).max(top);
+        let y1 = (a.y.max(b.y).max(c.y).ceil() as i32).min(bottom);
         let textured = self.src_mode != 0;
         let z_on = self.z_mode != 0 || self.z_write;
         // Attributes the vertices lack take the state's defaults.
@@ -494,7 +533,7 @@ impl DrawState {
                     } else {
                         (lerp(&|v| v.u), lerp(&|v| v.v))
                     };
-                    let Some(texel) = self.sample(vram, u, v) else { continue };
+                    let texel = self.sample(vram, u, v);
                     pixel = match self.src_mode {
                         // Decal: the texture over the colour by its alpha.
                         2 => {
@@ -527,9 +566,15 @@ impl DrawState {
         c
     }
 
+    /// Whether pixel x, y is inside the scissors.
+    fn inside(&self, x: i32, y: i32) -> bool {
+        let ((left, right), (top, bottom)) = (scissor(self.scissor_x), scissor(self.scissor_y));
+        (left..right).contains(&x) && (top..bottom).contains(&y)
+    }
+
     /// A pixel drawn, blended if blending is on; whether it was inside.
     fn plot(&self, vram: &mut [u8], x: i32, y: i32, mut src: Rgba) -> bool {
-        if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
+        if !self.inside(x, y) || self.alpha_test && src[3] <= self.alpha_threshold as f32 {
             return false;
         }
         let n = bits(self.dst_format);
@@ -546,31 +591,36 @@ impl DrawState {
                 argb(self.dst_colour)
             };
             let (sa, da) = (src[3] / 255.0, dst[3] / 255.0);
-            let src_factor = |k: usize| match self.blend_src {
-                0 => dst[k] / 255.0,
-                1 => 1.0 - dst[k] / 255.0,
+            // The factors, the same for both sides but for the colours:
+            // 0 and 1 are the other side's, 10 and 11 its own. Saturate
+            // (8, 9) leaves the alpha channel whole (or none).
+            let factor = |f: u32, k: usize, own: &Rgba, other: &Rgba| match f {
+                0 => other[k] / 255.0,
+                1 => 1.0 - other[k] / 255.0,
                 2 => sa,
                 3 => 1.0 - sa,
                 4 => da,
                 5 => 1.0 - da,
                 6 => 0.0,
+                8 if k == 3 => 1.0,
                 8 => sa.min(1.0 - da),
+                9 if k == 3 => 0.0,
                 9 => 1.0 - sa.min(1.0 - da),
+                10 => own[k] / 255.0,
+                11 => 1.0 - own[k] / 255.0,
                 _ => 1.0,
             };
-            let dst_factor = |k: usize| match self.blend_dst {
-                0 => src[k] / 255.0,
-                1 => 1.0 - src[k] / 255.0,
-                2 => sa,
-                3 => 1.0 - sa,
-                4 => da,
-                5 => 1.0 - da,
-                6 => 0.0,
-                _ => 1.0,
+            src = if self.blend_src == 15 || self.blend_dst == 15 {
+                [0, 1, 2, 3].map(|k| src[k] + dst[k] - 128.0)
+            } else {
+                [0, 1, 2, 3].map(|k| {
+                    factor(self.blend_src, k, &src, &dst) * src[k]
+                        + factor(self.blend_dst, k, &dst, &src) * dst[k]
+                })
             };
-            src = [0, 1, 2, 3].map(|k| src_factor(k) * src[k] + dst_factor(k) * dst[k]);
         }
-        write(vram, at, n, encode(self.dst_format, src));
+        let dither = if self.dither { DITHER[(y & 3) as usize][(x & 3) as usize] } else { 0 };
+        write(vram, at, n, encode_dithered(self.dst_format, src, dither));
         true
     }
 
@@ -631,7 +681,11 @@ impl DrawState {
                     continue;
                 }
                 let depth = (at(3) / 65536.0).clamp(0.0, 65535.0) as u32;
-                let Some(texel) = self.sample(vram, at(0) / zi, at(1) / zi) else { continue };
+                let texel = self.sample(vram, at(0) / zi, at(1) / zi);
+                // A keyed texel isn't drawn here, test or no test.
+                if self.chroma && texel[3] == 0.0 && texel[..3] == [0.0; 3] {
+                    continue;
+                }
                 self.plot_z(vram, x0 + i, y, depth, texel);
             }
         }
@@ -665,7 +719,7 @@ impl DrawState {
             for (col, &index) in line.iter().take(w).enumerate() {
                 let x = x0 + col as i32;
                 let raw = self.texel(vram, index as i32, 0);
-                if self.keyed(raw) || x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
+                if self.keyed(raw) || !self.inside(x, y) {
                     continue;
                 }
                 let at = self.dst_base + y as u32 * self.dst_stride + x as u32 * n / 8;
@@ -684,7 +738,10 @@ impl DrawState {
         for y in 0..h {
             for x in 0..w {
                 let texel = read16(vram, self.tex_base + (sy + y) * self.tex_stride + (sx + x) * 2);
-                if self.chroma && texel & self.chroma_mask & 0xFFFF == self.chroma_colour & self.chroma_mask & 0xFFFF {
+                let key = self.chroma_colour & self.chroma_mask & 0xFFFF;
+                if self.chroma && texel & self.chroma_mask & 0xFFFF == key
+                    || !self.inside((dx + x) as i32, (dy + y) as i32)
+                {
                     continue;
                 }
                 write16(vram, self.dst_base + (dy + y) * self.dst_stride + (dx + x) * 2, texel);
@@ -705,6 +762,49 @@ mod tests {
         assert_eq!(stride(0x20), 32);
         assert_eq!(stride(0x41), 384);
         assert_eq!(stride(0x53), 2048);
+        assert_eq!(stride(0x05), 768);
+        assert_eq!(stride(0x16), 16 + 576);
+    }
+
+    #[test]
+    fn scissors_clip_to_their_first_and_past_the_end_pixels() {
+        let mut vram = vec![0u8; 1280 * 480];
+        let s = DrawState { scissor_x: 4 << 16 | 8, scissor_y: 2 << 16 | 6, ..Default::default() };
+        let v = |x: f32, y: f32| Vertex {
+            x,
+            y,
+            r: 255.0,
+            has_colour: true,
+            q: 1.0,
+            ..Default::default()
+        };
+        s.triangle(&mut vram, &v(0.0, 0.0), &v(32.0, 0.0), &v(0.0, 32.0));
+        assert_eq!(read16(&vram, 4 * 2 + 2 * 1280), 0xF800);
+        assert_eq!(read16(&vram, 7 * 2 + 5 * 1280), 0xF800);
+        assert_eq!(read16(&vram, 3 * 2 + 2 * 1280), 0, "left of the scissor");
+        assert_eq!(read16(&vram, 8 * 2 + 2 * 1280), 0, "the column past the end");
+        assert_eq!(read16(&vram, 4 * 2 + 6 * 1280), 0, "the line past the end");
+    }
+
+    #[test]
+    fn blending_by_the_sides_own_colour_and_signed_add() {
+        let mut vram = vec![0u8; 1280 * 480];
+        for x in 0..16 {
+            for y in 0..16 {
+                write16(&mut vram, x * 2 + y * 1280, 0x8410); // grey, 132 each
+            }
+        }
+        // The source by its own colour, the destination not: red squared.
+        let s = DrawState { blend: true, blend_src: 10, blend_dst: 6, ..Default::default() };
+        corner(&s, &mut vram, flat(128.0, 0.0, 0.0));
+        let (r, g, _) = from565(read16(&vram, 4 + 2 * 1280));
+        assert!((56.0..72.0).contains(&r) && g == 0.0, "{} {}", r, g);
+        // Signed add: grey plus (red - 128).
+        write16(&mut vram, 4 + 2 * 1280, 0x8410);
+        let s = DrawState { blend: true, blend_src: 15, blend_dst: 15, ..Default::default() };
+        corner(&s, &mut vram, flat(255.0, 0.0, 0.0));
+        let (r, g, _) = from565(read16(&vram, 4 + 2 * 1280));
+        assert!(r == 255.0 && (0.0..8.0).contains(&g), "{} {}", r, g);
     }
 
     #[test]
@@ -784,8 +884,6 @@ mod tests {
             tex_last_v: 1,
             clamp_u: true,
             clamp_v: true,
-            max_u: 1,
-            max_v: 1,
             src_format: format,
             src_mode: 1,
             ..Default::default()
@@ -796,13 +894,42 @@ mod tests {
     #[test]
     fn bilinear_filtering_mixes_neighbouring_texels() {
         let (mut s, vram) = two_texels(fmt::P565, RED, BLUE);
-        assert_eq!(s.sample(&vram, 0.5, 0.0), Some(decode(fmt::P565, RED, &[])), "point sampled");
+        assert_eq!(s.sample(&vram, 0.5, 0.0), decode(fmt::P565, RED, &[]), "point sampled");
         s.filter = true;
-        let mid = s.sample(&vram, 0.5, 0.0).unwrap();
+        let mid = s.sample(&vram, 0.5, 0.0);
         assert!((mid[0] - 127.5).abs() < 1.0 && (mid[2] - 127.5).abs() < 1.0, "{:?}", mid);
         // The offset of half a texel back puts texel centres on whole texels.
         s.s_offset = (-0.5f32 * 65536.0) as i32 as u32;
-        assert_eq!(s.sample(&vram, 0.5, 0.0), Some(decode(fmt::P565, RED, &[])));
+        assert_eq!(s.sample(&vram, 0.5, 0.0), decode(fmt::P565, RED, &[]));
+    }
+
+    #[test]
+    fn keyed_texels_are_transparent_black_for_the_alpha_test() {
+        let (mut s, mut vram) = two_texels(fmt::P565, RED, BLUE);
+        (s.chroma, s.chroma_colour, s.chroma_mask) = (true, BLUE, 0xFFFF);
+        s.filter = true;
+        let mid = s.sample(&vram, 0.5, 0.0);
+        let half = |c: f32| (c - 127.5).abs() < 1.0;
+        assert!(half(mid[0]) && mid[2] == 0.0 && half(mid[3]), "{:?}", mid);
+        // Tomb Raider's: the test at 128 drops what is half keyed or more.
+        (s.alpha_test, s.alpha_threshold) = (true, 128);
+        s.filter = false;
+        s.clamp_u = false;
+        let v = |u: f32| Vertex { u, q: 1.0, ..Default::default() };
+        let at = |x: f32, y: f32, u: f32| Vertex { x, y, ..v(u) };
+        s.triangle(&mut vram, &at(0.0, 0.0, 0.0), &at(16.0, 0.0, 0.0), &at(0.0, 16.0, 0.0));
+        assert_eq!(read16(&vram, 4 + 2 * 1280), RED);
+        s.triangle(&mut vram, &at(0.0, 0.0, 1.0), &at(16.0, 0.0, 1.0), &at(0.0, 16.0, 1.0));
+        assert_eq!(read16(&vram, 4 + 2 * 1280), RED, "the keyed texel left it");
+    }
+
+    #[test]
+    fn dithering_adds_part_of_a_step_before_cutting_bits() {
+        // 3 short of a 565 red step: the dither's larger values round up.
+        let c = [5.0, 0.0, 0.0, 255.0];
+        assert_eq!(encode_dithered(fmt::P565, c, 0) >> 11, 0);
+        assert_eq!(encode_dithered(fmt::P565, c, 15) >> 11, 1);
+        assert_eq!(encode_dithered(fmt::P565, c, 3) >> 11, 0);
     }
 
     #[test]

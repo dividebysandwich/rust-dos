@@ -118,6 +118,13 @@ stick and the stick follows your hand as the game port's joystick, the
 trigger and A/X its buttons; hold it by its base to move it. Let go and
 it settles on what is below.
 
+Type on the keyboard on the desk with the controllers' tips: push a tip
+down into a key, and bring it up over the keys again for the next one.
+The laser and the trigger press a key for a moment; Shift, Ctrl or Alt
+pressed so stays down for the next key. Take the keyboard by its case to
+move it. It is hidden while **Show the real keyboard** shows the real
+one.
+
 # Center the view {#vr-center}
 
 Puts your eyes where the scene's seat is (its `spawn`), facing the
@@ -244,3 +251,61 @@ The sound comes from the screen's left and right sides (or the scene's
 speakers), as if from the monitor: turn your head or the camera and it
 moves; come closer and it gets louder. From where the scene starts, it
 sounds as it does without the scene. It adds no delay.
+
+# VFX1 headset {#vfx1}
+
+Puts a Forte VFX1, a VR headset from 1995, on the desk of the scene, and
+its card and driver in the PC for games that know it: Descent, Descent 2,
+System Shock, MechWarrior 2 and Quake (through VFX1QK) among them.
+
+Pick the headset up with the grip button and bring it to your face,
+whichever way round: it goes on, and you see what the game draws for each
+eye, with your head turning the game's view. To take it off, grip at your
+head and pull it away; put it down on the desk or throw it anywhere. On
+the floor, out of reach, it is back on the desk.
+
+- **Card port**: where the card is, which `VIPPORT` tells games (set for
+  them as `VIPPORT=260 I5`). The card also answers at 300h, where some
+  games look for it.
+- **Swap the eyes**: for a game that draws them the other way round.
+
+Turning it on or off, or another port, takes effect at the DOS prompt.
+Start the game with its VFX1 switches, as `DESCENT -vfx -vfxtrak`.
+
+# VFX1 stereo {#vfx1-stereo}
+
+How the eyes' pictures are taken from the screen:
+
+- **auto**: as the game tells the headset, or else, while it reads the
+  head tracker, **VFX1 pages** on a 640x480 screen and **interlaced
+  lines** on one of 400 lines (Comanche 3); the whole screen for both
+  eyes for its menus.
+- **VFX1 pages**: the VFX1's own stereo, which most of its games draw:
+  the left eye on the left half of the screen, the right on the right,
+  each page on every other line.
+- **interlaced lines**: even lines the left eye, odd lines the right, as
+  i-glasses! and CyberMaxx games and Quake's `lcd_x` draw.
+- **side by side**: the left half of the screen the left eye.
+- **off**: the whole screen for both eyes.
+
+# VFX1 picture size {#vfx1-view-size}
+
+How wide the picture looks, in degrees. The VFX1's was 36°, like a
+120 inch screen seen from 11 feet; more makes it fill more of the view.
+
+# Head turns steer {#vfx1-steer}
+
+For games that turn by how far the head moved since their last frame,
+as Descent turns the ship: makes the movement larger as the game draws
+more than 30 frames a second, so the ship turns as fast as it did then.
+Leave it off for games where the head just looks around.
+
+# Shutter glasses' 3D BIOS {#vfx1-stereo-bios}
+
+Answers games as the 3D BIOS of shutter glasses did (Kasan's 3DMax, the
+LCDBIOS of SimulEyes and others), so that a game set up for them draws
+its eyes on alternate lines, which the VFX1 shows with **Stereo** on
+**auto**. Some draw more than the VFX1's own stereo: Descent 2 with
+`VR_type=6` and `VR_resolution=4` in DESCENT.CFG draws 800x300 for each
+eye, where its VFX1 setting draws 320x200. Without the VFX1's head
+tracker, though: the game reads it only in its VFX1 setting.

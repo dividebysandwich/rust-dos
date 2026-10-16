@@ -383,7 +383,7 @@ jobs:
       - name: Package (macOS)
         if: runner.os == 'macOS'
         run: |
-          cargo install cargo-bundle
+          cargo install cargo-bundle --locked
           cargo bundle --release
           APP_DIR=target/release/bundle/osx
           APP=$(find "$APP_DIR" -maxdepth 1 -name "*.app" -exec basename {} \;)

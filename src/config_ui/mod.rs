@@ -178,8 +178,9 @@ impl Page {
             Page::Vr => &[
                 VrMode, VrScene, VrScreenFit, VrQuality, VrAmbientOcclusion, VrMsaa, VrScreenGlow, VrControllers, VrSpatialAudio,
                 VrCenter, VrSceneScale, VrSeat(0), VrSeat(1), VrSeat(2), VrSeatTurn, VrKeyboard, VrMarkKeyboard, VrTime, VrTimeSpeed, VrLatitude,
-                VrWeather, VrWeatherSound, VrLightning, VrResolution,
-                VrFoveation, VrRefresh, VrGraphics,
+                VrWeather, VrWeatherSound, VrLightning, Vfx1, Vfx1Port, Vfx1Stereo, Vfx1SwapEyes,
+                Vfx1ViewSize, Vfx1Steer, Vfx1StereoBios,
+                VrResolution, VrFoveation, VrRefresh, VrGraphics,
             ],
             Page::Display => {
                 &[Scale, Fullscreen, Aspect, Vrr, Filter, Shader, CrtCurvature, CrtGlow, Monochrome, MonitorEffects, Composite, CompositeEra]

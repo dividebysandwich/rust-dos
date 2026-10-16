@@ -569,6 +569,14 @@ impl GlScreen {
         self.stage.as_deref_mut()
     }
 
+    /// The pictures the VFX1's eyes see, to the headset.
+    #[cfg(feature = "vr")]
+    pub fn show_vfx1_eyes(&mut self, left: &Frame, right: &Frame, width: f32) {
+        if let Some(stage) = &mut self.stage {
+            stage.show_eyes(&self.gl, left, right, width);
+        }
+    }
+
     /// Draw the 3D scene again, with the picture its screen has, and show
     /// it: the viewer may have moved.
     #[cfg(feature = "vr")]

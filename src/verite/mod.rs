@@ -364,8 +364,8 @@ impl Verite {
             cmd::op::SYNC_AND_RESPOND => self.output.push_back(0),
             0x1004 => d.dst_base = arg,
             0x143B => d.dst_stride = draw::stride(arg),
-            0x100E => d.width = arg,
-            0x100F => d.height = arg,
+            0x100E => d.scissor_x = arg,
+            0x100F => d.scissor_y = arg,
             0x4000 => {
                 d.tex_base = words[1];
                 d.tex_stride = draw::stride(words[2]);
@@ -379,8 +379,9 @@ impl Verite {
             0x5029 => d.scale_v = arg,
             0x17BE => d.clamp_u = arg != 0,
             0x183F => d.clamp_v = arg != 0,
-            0x1038 => d.max_u = arg,
-            0x1839 => d.max_v = arg,
+            // The U and V masks, which 4000h sets too.
+            0x1038 => d.tex_last_u = arg & 0x7FF,
+            0x1839 => d.tex_last_v = arg & 0x7FF,
             0x15B5 => d.chroma = arg != 0,
             0x1017 => d.chroma_colour = arg,
             0x101A => d.chroma_mask = arg,
@@ -403,15 +404,18 @@ impl Verite {
             0x13B2 => d.filter = arg != 0,
             0x602A => d.s_offset = arg,
             0x602B => d.t_offset = arg,
-            0x1CCC => d.dst_read = arg == 0,
-            0x1015 => d.dst_colour = arg,
+            0x1CCC => d.alpha_test = arg != 0,
+            0x101D => d.alpha_threshold = arg & 0xFF,
+            0x1BCA => d.dst_read = arg == 0,
+            0x1016 => d.dst_colour = arg,
             0x1010 => d.z_base = arg,
             0x183C => d.z_stride = draw::stride(arg),
             0x1643 => d.z_mode = arg & 7,
             0x1844 => d.z_write = arg != 0,
             0x205A => d.z = arg,
-            0xAA47 => d.fog = arg != 0,
-            0x1016 => d.fog_colour = arg,
+            0xAA47 => d.dither = arg != 0,
+            0x1AC8 => d.fog = arg != 0,
+            0x1015 => d.fog_colour = arg,
             0x205B => d.fog_default = arg,
             cmd::op::TRIANGLE | cmd::op::TRIFAN | cmd::op::TRISTRIP => {
                 if let Some(fields) = cmd::vertex_fields(vtype) {

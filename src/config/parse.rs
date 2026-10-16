@@ -71,6 +71,7 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
             | Section::Achievements
             | Section::Shell
             | Section::Vr
+            | Section::Vfx1
             | Section::Game
             | Section::Gamepad => {
                 let Some((key, value)) = line.split_once('=') else {
@@ -453,6 +454,13 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
 
                 if section == Section::Shell {
                     if let Err(e) = config.shell.set(key, value) {
+                        warn(e);
+                    }
+                    continue;
+                }
+
+                if section == Section::Vfx1 {
+                    if let Err(e) = config.vfx1.set(key, value) {
                         warn(e);
                     }
                     continue;
