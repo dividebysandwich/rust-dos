@@ -120,8 +120,9 @@ it settles on what is below.
 
 Type on the keyboard on the desk with the controllers' tips: push a tip
 down into a key, and bring it up over the keys again for the next one.
-The laser and the trigger press a key for a moment; Shift, Ctrl or Alt
-pressed so stays down for the next key. Take the keyboard by its case to
+The laser and the trigger press a key for a moment (the key it points
+at lights up); Shift, Ctrl or Alt pressed so stays down for the next
+key. Take the keyboard by its case to
 move it. It is hidden while **Show the real keyboard** shows the real
 one.
 

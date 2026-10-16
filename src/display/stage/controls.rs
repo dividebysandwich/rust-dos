@@ -80,11 +80,21 @@ pub struct Controllers {
     menu_since: Option<Instant>,
     centred: bool,
     menu_presses: u32,
+    /// What the laser points at, of the targets, at the last update.
+    pointed: Option<TargetId>,
 }
 
 impl Default for Controllers {
     fn default() -> Self {
-        Controllers { active: 1, pulled: false, selected: [false; 2], menu_since: None, centred: false, menu_presses: 0 }
+        Controllers {
+            active: 1,
+            pulled: false,
+            selected: [false; 2],
+            menu_since: None,
+            centred: false,
+            menu_presses: 0,
+            pointed: None,
+        }
     }
 }
 
@@ -125,6 +135,7 @@ impl Controllers {
         }
         let pointing = hands[self.active].filter(|_| mode.pointer() && !busy[self.active]);
         let mut clicked = None;
+        self.pointed = None;
         let pulled = std::mem::replace(&mut self.pulled, pointing.is_some_and(|h| h.select));
         if let Some(hand) = pointing {
             let origin = hand.aim.transform_point3(Vec3::ZERO);
@@ -135,6 +146,7 @@ impl Controllers {
             let target = pick::pick_target(targets, origin, dir).filter(|&(t, _)| t < REACH && hit.is_none_or(|(s, _)| t < s));
             if let Some((t, id)) = target {
                 hit = None;
+                self.pointed = Some(id);
                 if hand.select && !pulled {
                     clicked = Some(id);
                 }
@@ -185,6 +197,12 @@ impl Controllers {
         }
         input.menu_presses = self.menu_presses;
         (input, extras, recenter, clicked)
+    }
+
+    /// What the laser pointed at, of the targets, at the last update: what
+    /// its trigger would click.
+    pub fn pointed(&self) -> Option<TargetId> {
+        self.pointed
     }
 }
 
@@ -265,6 +283,7 @@ mod tests {
         };
         let (input, _, _, clicked) = at(&mut c, hand);
         assert_eq!((input.pointer, clicked), (None, None), "on the lamp, not the screen");
+        assert_eq!(c.pointed(), Some(TargetId::Lamp(3)));
         hand.select = true;
         let (input, _, _, clicked) = at(&mut c, hand);
         assert_eq!(clicked, Some(TargetId::Lamp(3)));
