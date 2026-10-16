@@ -146,6 +146,10 @@ pub struct Props {
     typing: Typing,
     keyboard_hidden: bool,
     machine_keys: [u64; 8],
+    /// The keys the laser points at and each free hand touches, which
+    /// the trigger would press: shown lit.
+    pointed_key: Option<usize>,
+    touched_keys: [Option<usize>; 2],
 }
 
 impl Props {
@@ -172,6 +176,8 @@ impl Props {
             typing: Typing::default(),
             keyboard_hidden: false,
             machine_keys: [0; 8],
+            pointed_key: None,
+            touched_keys: [None; 2],
         };
         props.reset(scene);
         props
@@ -230,6 +236,30 @@ impl Props {
                 }
             }
         }
+    }
+
+    /// The target nearest `hand`'s grip or tip, within reach of either.
+    fn touching(&self, scene: &Scene, hand: &Hand) -> Option<TargetId> {
+        let points = reaching(hand);
+        let away = |t: &Target| {
+            let outside = |p: Vec3| (t.low - p).max(p - t.high).max(Vec3::ZERO).length();
+            points.iter().map(|&p| outside(p)).fold(f32::MAX, f32::min)
+        };
+        let targets = self.targets(scene).into_iter();
+        let near = targets.map(|t| (away(&t), t.id)).filter(|&(d, _)| d < REACH);
+        near.min_by(|a, b| a.0.total_cmp(&b.0)).map(|(_, id)| id)
+    }
+
+    /// The keyboard's key the laser points at (its trigger would press
+    /// it), shown lit, or none.
+    pub fn set_pointed_key(&mut self, key: Option<usize>) {
+        self.pointed_key = key;
+    }
+
+    /// Whether key `k` is shown lit: the laser points at it, or a free
+    /// hand touches it, and the trigger would press it.
+    fn lit_key(&self, k: usize) -> bool {
+        self.pointed_key == Some(k) || self.touched_keys.contains(&Some(k))
     }
 
     /// The keys the machine has down (`Leds::keys`), shown down too.
@@ -314,12 +344,14 @@ impl Props {
         self.fall(scene, now);
         for (i, hand) in tracking.hands.iter().enumerate() {
             let Some(hand) = hand else {
+                self.touched_keys[i] = None;
                 // Out of sight: what it held drops.
                 self.moves[i].clear();
                 self.release(scene, i);
                 self.squeezed[i] = false;
                 continue;
             };
+            self.touched_keys[i] = None;
             self.moves[i].retain(|&(at, _)| now.saturating_duration_since(at) <= THROW);
             self.moves[i].push((now, hand.grip));
             let pulled = std::mem::replace(&mut self.pulled[i], hand.select);
@@ -398,13 +430,17 @@ impl Props {
             }
             self.pressed[i] = hand.primary;
             input.busy[i] = self.holds[i].is_some();
-            // A free hand's trigger pulled at a lamp it touches switches it
-            // (and doesn't point the laser).
-            if hand.select && !pulled && self.holds[i].is_none() {
-                let points = reaching(hand);
-                let near = |low: Vec3, high: Vec3| points.iter().any(|&p| (low - p).max(p - high).max(Vec3::ZERO).length() < REACH);
-                if let Some(target) = self.targets(scene).into_iter().find(|t| near(t.low, t.high)) {
-                    input.touched.push(target.id);
+            // A free hand's trigger pulled at a lamp (or a key) it touches
+            // switches it (and doesn't point the laser); the key it would
+            // press shows.
+            if self.holds[i].is_none()
+                && let Some(id) = self.touching(scene, hand)
+            {
+                if let TargetId::Key(k) = id {
+                    self.touched_keys[i] = Some(k);
+                }
+                if hand.select && !pulled {
+                    input.touched.push(id);
                     input.busy[i] = true;
                 }
             }
@@ -708,7 +744,8 @@ impl Props {
         });
         let mut rows = [false; 8];
         if let Some(k) = self.keyboard {
-            for (key, _) in scene.props[k].keys.iter().zip(&down).filter(|(_, d)| **d) {
+            let keys = scene.props[k].keys.iter().enumerate();
+            for (_, key) in keys.filter(|&(i, _)| down[i] || self.lit_key(i)) {
                 rows[key.row.min(7)] = true;
             }
         }
@@ -716,6 +753,7 @@ impl Props {
         for (i, prop) in scene.props.iter().enumerate().filter(|(_, p)| self.shown(p)) {
             let pose = self.poses[i];
             for (part, p) in prop.parts.iter().enumerate() {
+                let mut lit = false;
                 let (model, page) = match p.role {
                     PartRole::KeyRow(row) if Some(i) == self.keyboard && rows[row.min(7)] => {
                         continue;
@@ -726,6 +764,7 @@ impl Props {
                             continue;
                         }
                         let travel = if down[k] { keycaps::TRAVEL } else { 0.0 };
+                        lit = self.lit_key(k);
                         (pose * Mat4::from_translation(Vec3::new(0.0, -travel, 0.0)), None)
                     }
                     PartRole::Body => (pose, None),
@@ -738,7 +777,7 @@ impl Props {
                     }
                     PartRole::Stick => (pose * prop.stick * self.tilt_matrix(i), None),
                 };
-                draws.push(PropDraw::Part { prop: i, part, model, page });
+                draws.push(PropDraw::Part { prop: i, part, model, page, lit });
             }
         }
         for i in 0..self.prints.len() {
@@ -1348,11 +1387,18 @@ mod tests {
             ..Hand::default()
         };
         let now = Instant::now();
+        let q_index = room.props[k].keys.iter().position(|key| key.legend == "Q").unwrap();
         props.update(&room, &tracking(tip(over_q(0.02))), now);
+        // Touching it, Q is the key the trigger would press: lit.
+        assert!(props.lit_key(q_index) && (0..101).filter(|&i| props.lit_key(i)).count() == 1);
         let input = props.update(&room, &tracking(tip(over_q(-0.004))), now);
         assert!(input.keyed[1] && input.busy[1]);
         let q_key = |down| KeyEvent { scan: 0x10, extended: false, down };
         assert_eq!(props.take_key_events(now), [q_key(true)]);
+        // The laser's key is lit too.
+        props.set_pointed_key(Some(0));
+        assert!(props.lit_key(0) && props.lit_key(q_index));
+        props.set_pointed_key(None);
         // The real keyboard seen, it is gone: Q comes up, and no key is
         // there to click.
         props.hide_keyboard(true);

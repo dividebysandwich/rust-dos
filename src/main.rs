@@ -474,7 +474,14 @@ fn main() -> Result<(), String> {
                 {
                     menu_hold.press(std::time::Instant::now());
                 }
-                Event::MouseMotion { xrel, yrel, .. } => menu_hold.motion(*xrel, *yrel),
+                Event::MouseMotion { x, y, xrel, yrel, .. } => {
+                    menu_hold.motion(*xrel, *yrel);
+                    // A key of the scene's keyboard under the mouse shows
+                    // lit, as a click would press it.
+                    if !mouse_captured && !ui.is_open() && display.every_frame() {
+                        display.hover_scene(*x, *y);
+                    }
+                }
                 Event::MouseButtonUp { mouse_btn: MouseButton::Right, .. } if menu_hold.release() => continue,
                 _ => {}
             }

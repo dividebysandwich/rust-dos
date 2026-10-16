@@ -591,7 +591,8 @@ pub struct Cpu {
     /// program that keeps it from halting for one at work. Goes with
     /// `pm_latched`, and into save states.
     pub os_idles: bool,
-    /// REP MOVS and STOS do the iterations that stay in plain RAM at once
+    /// REP MOVS and STOS do the iterations that stay in plain RAM at once,
+    /// and so does REP INSW or INSD of an IDE hard disk's block into it
     /// (`instructions::string`). Off, they go one at a time, which tests
     /// compare them with.
     pub string_bulk: bool,

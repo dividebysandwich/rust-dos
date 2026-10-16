@@ -525,9 +525,9 @@ const TEST_DESK_TOP: Vec3 = Vec3::new(1.2, 0.03, 0.6);
 /// VFX1's front to the viewer).
 const TEST_PROPS: [(PropKind, Vec3, f32); 5] = [
     (PropKind::Manual, Vec3::new(-0.42, 0.72, -0.55), 0.0),
-    (PropKind::Joystick, Vec3::new(0.31, 0.72, -0.52), 0.0),
+    (PropKind::Joystick, Vec3::new(0.24, 0.72, -0.53), 0.0),
     (PropKind::Camera, Vec3::new(-0.5, 0.72, -0.74), std::f32::consts::PI),
-    (PropKind::Vfx1, Vec3::new(0.48, 0.72, -0.64), std::f32::consts::PI),
+    (PropKind::Vfx1, Vec3::new(0.45, 0.72, -0.61), std::f32::consts::PI),
     (PropKind::Keyboard, Vec3::new(0.0, 0.72, -0.345), 0.0),
 ];
 
@@ -733,46 +733,7 @@ impl Scene {
                 prop.lens = Some(Mat4::from_translation(Vec3::new(0.0, h * 0.62, -d / 2.0 - 0.022)));
                 prop.slot = Some(Mat4::from_translation(Vec3::new(0.0, 0.012, -d / 2.0 - 0.007)));
             }
-            PropKind::Vfx1 => {
-                // Forte's VFX1: a big visor before the eyes, its black
-                // front with the name across it, and the headband round
-                // the head to a pad at the back. The eyes are at
-                // `VFX1_EYES` in its frame, worn.
-                let grey = self.add_material(Material::plain(srgb(0x2e3034), Shading::Lit));
-                let black = self.add_material(Material::plain(srgb(0x0e0f11), Shading::Lit));
-                let light = self.add_material(Material::plain(srgb(0xb9bdc6), Shading::Lit));
-                let purple = self.add_material(Material::plain(srgb(0x5a3d8c), Shading::Lit));
-                let (w, h, d) = (0.19, 0.1, 0.11);
-                let visor = Vec3::new(0.0, h / 2.0, -0.07);
-                prop.push(PartRole::Body, cuboid(visor, Vec3::new(w, h, d), grey));
-                let front = visor.z - d / 2.0;
-                let panel = Vec3::new(0.0, h * 0.55, front - 0.003);
-                let panel_size = Vec3::new(w - 0.02, h * 0.7, 0.006);
-                prop.push(PartRole::Body, cuboid(panel, panel_size, black));
-                let name = Vec3::new(0.0, h * 0.16, front - 0.004);
-                prop.push(PartRole::Body, cuboid(name, Vec3::new(0.11, 0.009, 0.004), light));
-                let mark = Vec3::new(0.065, h * 0.16, front - 0.004);
-                prop.push(PartRole::Body, cuboid(mark, Vec3::new(0.012, 0.009, 0.004), purple));
-                // The headband: an oval of segments from the visor's sides
-                // round the back of the head.
-                let (band, rx, rz, centre_z) = (0.035, 0.1, 0.12, 0.05);
-                let at = |a: f32| Vec3::new(rx * a.sin(), h * 0.6, centre_z + rz * a.cos());
-                let segments = 14;
-                for i in 0..segments {
-                    let (a0, a1) = (
-                        -2.0 + 4.0 * i as f32 / segments as f32,
-                        -2.0 + 4.0 * (i + 1) as f32 / segments as f32,
-                    );
-                    let (p0, p1) = (at(a0), at(a1));
-                    let along = p1 - p0;
-                    let turn = Mat4::from_rotation_y(along.x.atan2(along.z));
-                    let size = Vec3::new(0.012, band, along.length() + 0.004);
-                    let at = Mat4::from_translation((p0 + p1) / 2.0) * turn;
-                    prop.push(PartRole::Body, turned(at, size, black));
-                }
-                let pad = Vec3::new(0.0, h * 0.6, centre_z + rz + 0.012);
-                prop.push(PartRole::Body, cuboid(pad, Vec3::new(0.08, 0.06, 0.025), grey));
-            }
+            PropKind::Vfx1 => self.vfx1_model(&mut prop),
             PropKind::Keyboard => {
                 let model = keycaps::model();
                 let image = self.images.len();
@@ -795,6 +756,119 @@ impl Scene {
         }
         prop.finish();
         prop
+    }
+
+    /// Forte's VFX1, all matt black: the visor before the eyes, wide and
+    /// squared off at the front with the name across it in yellow, which
+    /// rises to its hinge above the forehead; the broad shell from there
+    /// over the head and down the back, padded inside; a hoop round the
+    /// back of the head; and the round headphones on it, with Forte's
+    /// mark. The eyes are at `VFX1_EYES` in its frame, worn.
+    fn vfx1_model(&mut self, prop: &mut Prop) {
+        let shell = self.add_material(Material::plain(srgb(0x26272a), Shading::Lit));
+        let foam = self.add_material(Material::plain(srgb(0x0b0b0c), Shading::Lit));
+        let leather = self.add_material(Material::plain(srgb(0x151517), Shading::Lit));
+        let screw = self.add_material(Material::plain(srgb(0x4a4c50), Shading::Lit));
+        let yellow = self.add_material(Material::plain(srgb(0xd9d23c), Shading::Lit));
+
+        // The visor from the side, (z, y) round from the bottom of its
+        // back, and how far it reaches either way across there.
+        let profile = [
+            (-0.015, 0.0, 0.092),
+            (-0.135, 0.0, 0.1),
+            (-0.122, 0.095, 0.1),
+            (-0.075, 0.122, 0.092),
+            (-0.022, 0.152, 0.075),
+            (0.006, 0.148, 0.075),
+        ];
+        prop.push(PartRole::Body, loft(&profile, shell));
+        for side in [-1.0, 1.0] {
+            let at = Mat4::from_translation(Vec3::new(0.075 * side, 0.133, -0.02))
+                * Mat4::from_rotation_z(-side * std::f32::consts::FRAC_PI_2);
+            prop.push(PartRole::Body, moved(cylinder(Vec3::ZERO, 0.006, 0.004, 12, screw), at));
+        }
+
+        // The shell, from the hinge over the head and down the back, and
+        // the padding inside it.
+        let middle = Vec3::new(0.0, 0.06, 0.09);
+        let over = |radius: f32, (from, to): (f32, f32)| -> Vec<(Vec3, Vec3, Vec3)> {
+            (0..=16)
+                .map(|i| {
+                    let a = (from + (to - from) * i as f32 / 16.0).to_radians();
+                    let out = Vec3::new(0.0, a.cos(), -a.sin());
+                    (middle + out * radius, out, Vec3::X)
+                })
+                .collect()
+        };
+        prop.push(PartRole::Body, band(&over(0.13, (55.0, -110.0)), Vec2::new(0.05, 0.011), shell));
+        prop.push(PartRole::Body, band(&over(0.112, (50.0, -105.0)), Vec2::new(0.042, 0.007), foam));
+
+        // The hoop round the back of the head, from ear to ear.
+        let (rx, rz, y) = (0.098, 0.125, 0.05);
+        let hoop: Vec<_> = (0..=20)
+            .map(|i| {
+                let a = -0.35 + (std::f32::consts::PI + 0.7) * i as f32 / 20.0;
+                let at = Vec3::new(rx * a.cos(), y, middle.z + rz * a.sin());
+                let out = Vec3::new(a.cos() / rx, 0.0, a.sin() / rz).normalize();
+                (at, out, Vec3::Y)
+            })
+            .collect();
+        prop.push(PartRole::Body, band(&hoop, Vec2::new(0.02, 0.008), shell));
+
+        // The headphones on it, each a cushion, a cup and a cap, with
+        // Forte's "f" in a ring on the cap.
+        for side in [-1.0f32, 1.0] {
+            let outward = |x: f32| {
+                Mat4::from_translation(Vec3::new(side * x, 0.048, 0.1))
+                    * Mat4::from_rotation_z(-side * std::f32::consts::FRAC_PI_2)
+            };
+            let parts = [
+                (0.084, 0.044, 0.02, leather),
+                (0.104, 0.046, 0.03, shell),
+                (0.134, 0.038, 0.008, shell),
+                (0.142, 0.024, 0.0006, yellow),
+                (0.1426, 0.021, 0.0006, shell),
+            ];
+            for (x, radius, depth, material) in parts {
+                prop.push(PartRole::Body, moved(cylinder(Vec3::ZERO, radius, depth, 24, material), outward(x)));
+            }
+            // The cap's face, as seen from beside it: X across, Y up.
+            let out = Vec3::X * side;
+            let middle = outward(0.1432).transform_point3(Vec3::ZERO);
+            let face = Mat4::from_cols(Vec3::Y.cross(out).extend(0.0), Vec3::Y.extend(0.0), out.extend(0.0), middle.extend(1.0));
+            let strokes = [[(0.6, 1.0), (0.4, 0.0)], [(0.6, 1.0), (0.9, 0.9)], [(0.25, 0.55), (0.75, 0.55)]];
+            for [a, b] in strokes {
+                let at = |(u, v): (f32, f32)| Vec2::new(-0.015 + 0.03 * u, -0.017 + 0.034 * v);
+                prop.push(PartRole::Body, stroke(face, at(a), at(b), 0.0022, yellow));
+            }
+        }
+
+        // The name across the visor's front, from its bottom middle,
+        // across to the viewer's right and up the front.
+        let up = Vec3::new(0.0, 0.095, 0.013).normalize();
+        let out = Vec3::NEG_X.cross(up);
+        let face = Mat4::from_cols(Vec3::NEG_X.extend(0.0), up.extend(0.0), out.extend(0.0), Vec3::new(0.0, 0.0, -0.135).extend(1.0));
+        let mut write = |text: &str, (width, height): (f32, f32), gap: f32, (base, thick): (f32, f32), dots: bool| {
+            let advance = |c: char| if c == '1' { width * 0.55 } else { width };
+            let dot = if dots { gap * 2.0 + thick } else { 0.0 };
+            let total: f32 = text.chars().map(|c| advance(c) + gap + dot).sum::<f32>() - gap - dot;
+            let mut left = -total / 2.0;
+            for (i, c) in text.chars().enumerate() {
+                for &[a, b] in glyph(c) {
+                    // Leaning forwards, as Forte's name does.
+                    let at = |(u, v): (f32, f32)| Vec2::new(left + u * advance(c) + 0.2 * v * height, base + v * height);
+                    prop.push(PartRole::Body, stroke(face, at(a), at(b), thick, yellow));
+                }
+                left += advance(c) + gap;
+                if dots && i + 1 < text.len() {
+                    let at = Vec2::new(left, base + height / 2.0);
+                    prop.push(PartRole::Body, stroke(face, at, at, thick, yellow));
+                    left += dot;
+                }
+            }
+        };
+        write("VFX1", (0.021, 0.03), 0.004, (0.045, 0.0045), false);
+        write("HEADGEAR", (0.0065, 0.009), 0.0032, (0.022, 0.0014), true);
     }
 
     /// Rust-DOS's own manual and joystick, for a scene without them:
@@ -1381,12 +1455,131 @@ pub fn print_meshes() -> (Mesh, Mesh) {
 
 /// A box of `size` around the origin of the frame `at`, in the material.
 fn turned(at: Mat4, size: Vec3, material: usize) -> Mesh {
-    let mut mesh = cuboid(Vec3::ZERO, size, material);
+    moved(cuboid(Vec3::ZERO, size, material), at)
+}
+
+/// A mesh moved into the frame `at` (turned and moved only).
+fn moved(mut mesh: Mesh, at: Mat4) -> Mesh {
     for vertex in &mut mesh.vertices {
         vertex.position = at.transform_point3(Vec3::from(vertex.position)).to_array();
         vertex.normal = at.transform_vector3(Vec3::from(vertex.normal)).to_array();
     }
     mesh
+}
+
+/// A flat face with these corners, in order round it, wound and lit to
+/// face away from `inside`.
+fn add_face(mesh: &mut Mesh, corners: &[Vec3], inside: Vec3) {
+    let middle = corners.iter().sum::<Vec3>() / corners.len() as f32;
+    let mut normal = Vec3::ZERO;
+    for (i, a) in corners.iter().enumerate() {
+        normal += (*a - middle).cross(corners[(i + 1) % corners.len()] - middle);
+    }
+    let away = normal.dot(middle - inside) >= 0.0;
+    let normal = if away { normal } else { -normal }.normalize_or(Vec3::Y);
+    let base = mesh.vertices.len() as u32;
+    for corner in corners {
+        mesh.vertices.push(Vertex { position: corner.to_array(), normal: normal.to_array(), uv: [0.0, 0.0] });
+    }
+    for i in 1..corners.len() as u32 - 1 {
+        mesh.indices.extend(if away { [base, base + i, base + i + 1] } else { [base, base + i + 1, base + i] });
+    }
+}
+
+/// A solid the same either side of X = 0: its outline from the side,
+/// convex, as (z, y) and how far it reaches either way across there.
+fn loft(profile: &[(f32, f32, f32)], material: usize) -> Mesh {
+    let mut mesh = Mesh { vertices: Vec::new(), indices: Vec::new(), material };
+    let at = |&(z, y, x): &(f32, f32, f32), side: f32| Vec3::new(x * side, y, z);
+    let inside = profile.iter().map(|&(z, y, _)| Vec3::new(0.0, y, z)).sum::<Vec3>() / profile.len() as f32;
+    for side in [-1.0, 1.0] {
+        let corners: Vec<_> = profile.iter().map(|p| at(p, side)).collect();
+        add_face(&mut mesh, &corners, inside);
+    }
+    for (i, a) in profile.iter().enumerate() {
+        let b = &profile[(i + 1) % profile.len()];
+        add_face(&mut mesh, &[at(a, -1.0), at(a, 1.0), at(b, 1.0), at(b, -1.0)], inside);
+    }
+    mesh
+}
+
+/// A band along a path of (middle, outwards, across): `half.x` either
+/// way across and `half.y` either way outwards, smooth along it, closed
+/// at its ends.
+fn band(path: &[(Vec3, Vec3, Vec3)], half: Vec2, material: usize) -> Mesh {
+    let mut mesh = Mesh { vertices: Vec::new(), indices: Vec::new(), material };
+    let corners = |&(middle, out, across): &(Vec3, Vec3, Vec3)| {
+        let (out, across) = (out * half.y, across * half.x);
+        [middle + out - across, middle + out + across, middle - out + across, middle - out - across]
+    };
+    for side in 0..4 {
+        let base = mesh.vertices.len() as u32;
+        for ring in path {
+            let c = corners(ring);
+            let (a, b) = (c[side], c[(side + 1) % 4]);
+            let normal = ((a + b) / 2.0 - ring.0).normalize_or(Vec3::Y);
+            for p in [a, b] {
+                mesh.vertices.push(Vertex { position: p.to_array(), normal: normal.to_array(), uv: [0.0, 0.0] });
+            }
+        }
+        for i in 0..path.len() as u32 - 1 {
+            let [a, b, c, d] = [0, 1, 3, 2].map(|k| base + 2 * i + k);
+            let pos = |k: u32| Vec3::from(mesh.vertices[k as usize].position);
+            let facing = (pos(b) - pos(a)).cross(pos(c) - pos(a));
+            let out = Vec3::from(mesh.vertices[a as usize].normal);
+            mesh.indices.extend(if facing.dot(out) >= 0.0 { [a, b, c, a, c, d] } else { [a, c, b, a, d, c] });
+        }
+    }
+    for (end, next) in [(0, 1), (path.len() - 1, path.len() - 2)] {
+        add_face(&mut mesh, &corners(&path[end]), path[next].0);
+    }
+    mesh
+}
+
+/// A painted stroke from `a` to `b` on the face `face` (X across, Y up,
+/// Z out of it), `thick` wide, standing a little out of it.
+fn stroke(face: Mat4, a: Vec2, b: Vec2, thick: f32, material: usize) -> Mesh {
+    let along = b - a;
+    let middle = (a + b) / 2.0;
+    let at = face * Mat4::from_translation(middle.extend(0.0004)) * Mat4::from_rotation_z(along.y.atan2(along.x));
+    turned(at, Vec3::new(along.length() + thick, thick, 0.0012), material)
+}
+
+/// A capital's strokes in a box from (0, 0) at its bottom left to (1, 1),
+/// for the VFX1's name.
+fn glyph(c: char) -> &'static [[(f32, f32); 2]] {
+    match c {
+        'V' => &[[(0.0, 1.0), (0.5, 0.0)], [(0.5, 0.0), (1.0, 1.0)]],
+        'F' => &[[(0.0, 0.0), (0.0, 1.0)], [(0.0, 1.0), (1.0, 1.0)], [(0.0, 0.55), (0.75, 0.55)]],
+        'X' => &[[(0.0, 0.0), (1.0, 1.0)], [(0.0, 1.0), (1.0, 0.0)]],
+        '1' => &[[(0.65, 0.0), (0.65, 1.0)], [(0.65, 1.0), (0.1, 0.75)]],
+        'H' => &[[(0.0, 0.0), (0.0, 1.0)], [(1.0, 0.0), (1.0, 1.0)], [(0.0, 0.5), (1.0, 0.5)]],
+        'E' => &[[(0.0, 0.0), (0.0, 1.0)], [(0.0, 1.0), (1.0, 1.0)], [(0.0, 0.5), (0.8, 0.5)], [(0.0, 0.0), (1.0, 0.0)]],
+        'A' => &[[(0.0, 0.0), (0.5, 1.0)], [(0.5, 1.0), (1.0, 0.0)], [(0.25, 0.45), (0.75, 0.45)]],
+        'D' => &[
+            [(0.0, 0.0), (0.0, 1.0)],
+            [(0.0, 1.0), (0.6, 1.0)],
+            [(0.6, 1.0), (1.0, 0.7)],
+            [(1.0, 0.7), (1.0, 0.3)],
+            [(1.0, 0.3), (0.6, 0.0)],
+            [(0.6, 0.0), (0.0, 0.0)],
+        ],
+        'G' => &[
+            [(1.0, 1.0), (0.0, 1.0)],
+            [(0.0, 1.0), (0.0, 0.0)],
+            [(0.0, 0.0), (1.0, 0.0)],
+            [(1.0, 0.0), (1.0, 0.45)],
+            [(1.0, 0.45), (0.55, 0.45)],
+        ],
+        'R' => &[
+            [(0.0, 0.0), (0.0, 1.0)],
+            [(0.0, 1.0), (1.0, 1.0)],
+            [(1.0, 1.0), (1.0, 0.5)],
+            [(1.0, 0.5), (0.0, 0.5)],
+            [(0.4, 0.5), (1.0, 0.0)],
+        ],
+        _ => &[],
+    }
 }
 
 /// The cube from -0.5 to 0.5, which the extras are drawn with.

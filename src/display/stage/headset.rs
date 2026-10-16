@@ -957,6 +957,12 @@ fn session(
         if hold {
             xr.recenter();
         }
+        // The key the laser's trigger would press shows lit.
+        let pointed = match controllers.pointed() {
+            Some(TargetId::Key(k)) => Some(k),
+            _ => None,
+        };
+        props.set_pointed_key(pointed);
         let prop_draws = props.draws(gl, &gpu, &scene, now);
         let mut left = None;
         let fade = worn_since.map_or(1.0, |since| {
