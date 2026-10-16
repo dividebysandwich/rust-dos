@@ -30,8 +30,7 @@ use sdl2::surface::Surface;
 use sdl2::video::{FullscreenType, Window, WindowContext, WindowPos};
 use std::cell::OnceCell;
 
-/// The window's icon: packaging/linux/rust-dos.svg drawn at 128x128 with
-/// `rsvg-convert -w 128 -h 128`.
+/// The window's icon: packaging/linux/rust-dos.png scaled to 128x128.
 static ICON_PNG: &[u8] = include_bytes!("../assets/rust-dos.png");
 
 /// The size the picture is shown at, in the renderer's logical pixels: the
@@ -1059,8 +1058,8 @@ mod tests {
         let (width, height, pixels) = icon().unwrap();
         assert_eq!((width, height), (128, 128));
         assert_eq!(pixels.len(), 128 * 128 * 4);
-        // Transparent in the corner, the opaque orange monitor in the middle
-        // of its top edge.
+        // Transparent in the corner, the opaque orange gear in the middle of
+        // its top edge.
         assert_eq!(pixels[3], 0);
         let top = (12 * 128 + 64) * 4;
         assert!(pixels[top + 3] == 255 && pixels[top] > pixels[top + 2]);
