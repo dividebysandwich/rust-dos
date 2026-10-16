@@ -241,6 +241,8 @@ pub struct Config {
     pub shell: crate::cmdline::settings::ShellSettings,
     /// `[vr]`: the picture in a 3D scene.
     pub vr: crate::vr::VrSettings,
+    /// `[vfx1]`: the Forte VFX1 headset.
+    pub vfx1: crate::vfx1::Vfx1Settings,
     /// `[drives]` entries in file order, at most one per drive.
     pub drives: Vec<MountSpec>,
     /// `[autoexec]` command lines in file order.
@@ -296,6 +298,7 @@ enum Section {
     Achievements,
     Shell,
     Vr,
+    Vfx1,
     Drives,
     Autoexec,
     /// A game profile's (games.rs).
@@ -319,6 +322,7 @@ pub fn has_own_sections(text: &str) -> bool {
                 | Section::Achievements
                 | Section::Shell
                 | Section::Vr
+                | Section::Vfx1
                 | Section::Drives
                 | Section::Game
                 | Section::Gamepad
@@ -340,6 +344,7 @@ impl Section {
             "achievements" => Section::Achievements,
             "shell" => Section::Shell,
             "vr" => Section::Vr,
+            "vfx1" => Section::Vfx1,
             "drives" => Section::Drives,
             "autoexec" => Section::Autoexec,
             "game" => Section::Game,
@@ -361,6 +366,7 @@ impl Section {
             Section::Achievements => "achievements",
             Section::Shell => "shell",
             Section::Vr => "vr",
+            Section::Vfx1 => "vfx1",
             Section::Drives => "drives",
             Section::Autoexec => "autoexec",
             Section::Game => "game",

@@ -211,6 +211,8 @@ pub struct Bus {
     pub start_time: Instant, // System timer
     /// The game port at 201h and the joysticks on it (see joystick.rs).
     pub joystick: crate::joystick::GamePort,
+    /// The Forte VFX1's card and driver (`[vfx1]`, vfx1/).
+    pub vfx1: Option<crate::vfx1::Vfx1>,
     pub audio_device: Option<Box<dyn crate::audio::AudioOutput>>,
     pub speaker_on: bool,    // Is the speaker playing?
     pub pit_divisor: u16,    // Current Frequency Divisor
@@ -2273,6 +2275,13 @@ impl Bus {
             // The printer on the parallel port.
             p if self.printer_claims(p) => self.printer_write(p, value),
 
+            // The VFX1's card.
+            p if self.vfx1.as_ref().is_some_and(|v| v.claims(p)) => {
+                if let Some(vfx1) = &mut self.vfx1 {
+                    vfx1.write(p, value);
+                }
+            }
+
             // The DAC on the parallel port, heard from now on.
             crate::lpt_dac::DATA if self.lpt_dac.is_some() => {
                 self.audio_catch_up();
@@ -2455,6 +2464,11 @@ impl Bus {
 
             // The printer on the parallel port.
             p if self.printer_claims(p) => self.printer_read(p),
+
+            // The VFX1's card.
+            p if self.vfx1.as_ref().is_some_and(|v| v.claims(p)) => {
+                self.vfx1.as_ref().map_or(0xFF, |v| v.read(p))
+            }
 
             // The DAC on the parallel port: the Disney's FIFO empties as
             // it plays.

@@ -244,3 +244,49 @@ The sound comes from the screen's left and right sides (or the scene's
 speakers), as if from the monitor: turn your head or the camera and it
 moves; come closer and it gets louder. From where the scene starts, it
 sounds as it does without the scene. It adds no delay.
+
+# VFX1 headset {#vfx1}
+
+Puts a Forte VFX1, a VR headset from 1995, on the desk of the scene, and
+its card and driver in the PC for games that know it: Descent, Descent 2,
+System Shock, MechWarrior 2 and Quake (through VFX1QK) among them.
+
+Pick the headset up with the grip button, bring it to your face and let
+go: you wear it, and see what the game draws for each eye, with your head
+turning the game's view. To take it off, grip at your head and pull it
+away; put it down on the desk or throw it anywhere.
+
+- **Card port**: where the card is, which `VIPPORT` tells games (set for
+  them as `VIPPORT=260 I5`). The card also answers at 300h, where some
+  games look for it.
+- **Swap the eyes**: for a game that draws them the other way round.
+
+Turning it on or off, or another port, takes effect at the DOS prompt.
+Start the game with its VFX1 switches, as `DESCENT -vfx -vfxtrak`.
+
+# VFX1 stereo {#vfx1-stereo}
+
+How the eyes' pictures are taken from the screen:
+
+- **auto**: as the game tells the headset, or else **VFX1 pages** while
+  it reads the head tracker on a 640x480 screen, and the whole screen for
+  both eyes for its menus.
+- **VFX1 pages**: the VFX1's own stereo, which most of its games draw:
+  the left eye on the left half of the screen, the right on the right,
+  each page on every other line.
+- **interlaced lines**: even lines the left eye, odd lines the right, as
+  i-glasses! and CyberMaxx games and Quake's `lcd_x` draw.
+- **side by side**: the left half of the screen the left eye.
+- **off**: the whole screen for both eyes.
+
+# VFX1 picture size {#vfx1-view-size}
+
+How wide the picture looks, in degrees. The VFX1's was 36°, like a
+120 inch screen seen from 11 feet; more makes it fill more of the view.
+
+# Head turns steer {#vfx1-steer}
+
+For games that turn by how far the head moved since their last frame,
+as Descent turns the ship: makes the movement larger as the game draws
+more than 30 frames a second, so the ship turns as fast as it did then.
+Leave it off for games where the head just looks around.

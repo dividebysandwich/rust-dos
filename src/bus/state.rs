@@ -19,6 +19,7 @@ const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 1;
+const VFX1_VERSION: u16 = 1;
 const AWE_VERSION: u16 = 1;
 const VIRGE_VERSION: u16 = 1;
 const VERITE_VERSION: u16 = 2;
@@ -82,6 +83,7 @@ impl Bus {
             pic,
             dma,
             joystick,
+            vfx1,
             dta_segment,
             dta_offset,
             search_handles,
@@ -312,6 +314,10 @@ impl Bus {
         if serial.any() {
             w.section(b"SER ", SERIAL_VERSION, |w| serial.save(w));
         }
+        // The VFX1's card and driver, only with one.
+        if let Some(vfx1) = vfx1 {
+            w.section(b"VFX1", VFX1_VERSION, |w| vfx1.save(w));
+        }
         // The Sound Blaster's high-speed mode, an empty section that is
         // there only while the mode runs, so states saved before rust-dos
         // kept the mode load as they did, into a DSP out of it. It comes
@@ -367,6 +373,7 @@ impl Bus {
             pic,
             dma,
             joystick,
+            vfx1,
             dta_segment,
             dta_offset,
             search_handles,
@@ -611,6 +618,14 @@ impl Bus {
         } else {
             serial.ports = Default::default();
             serial.pic_lines = 0;
+        }
+        // The VFX1's card is the settings': a state's goes to it if it is
+        // there, and a state without one leaves it as it was set up.
+        if r.next_is(b"VFX1") {
+            let mut section = r.section(b"VFX1", VFX1_VERSION)?;
+            if let Some(vfx1) = vfx1 {
+                vfx1.load(&mut section)?;
+            }
         }
         let high_speed = r.next_is(b"SBHS");
         if high_speed {
