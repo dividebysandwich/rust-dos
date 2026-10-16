@@ -703,6 +703,11 @@ impl Bus {
         self.sb_irq = self.sb_irq_now();
         self.refresh_irq();
         self.vga.after_load();
+        // A Banshee's video timing, which its swaps wait on, isn't in the
+        // state: it comes from its VGA core's registers.
+        if self.banshee().is_some() {
+            self.banshee_settle();
+        }
         if let Some(awe) = &mut self.awe {
             awe.after_load();
         }
