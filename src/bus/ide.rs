@@ -192,6 +192,8 @@ impl Bus {
     /// The data port, 2 or 4 bytes at a time.
     pub(crate) fn ide_read_wide(&mut self, id: ChannelId, len: u8) -> u32 {
         self.clock.stall(DATA_PORT_NS * (len as u64 / 2));
+        // Data moved on a drive, which `cycles=auto` goes by.
+        self.activity.io_bytes += len as u64;
         let value = self.with_ide(id, |channel, env| channel.read_wide(len, env)).unwrap_or(0xFFFF_FFFF);
         self.log_port(id.base(), value, len, false);
         value
@@ -199,6 +201,7 @@ impl Bus {
 
     pub(crate) fn ide_write_wide(&mut self, id: ChannelId, value: u32, len: u8) {
         self.clock.stall(DATA_PORT_NS * (len as u64 / 2));
+        self.activity.io_bytes += len as u64;
         self.log_port(id.base(), value, len, true);
         self.with_ide(id, |channel, env| channel.write_wide(value, len, env));
     }

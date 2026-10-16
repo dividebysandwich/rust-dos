@@ -27,6 +27,12 @@
 //! time their delay loops right after loading, and a loop timed at all the
 //! host has waits for ever (Sam & Max's General MIDI driver counts to a
 //! million in a timer tick, and hangs if it gets there first).
+//!
+//! An operating system with an idle loop (Windows, OS/2, Linux) halts
+//! whenever it has nothing to run. Once one has been seen to, the time it
+//! doesn't spend halted is a program's work, even without frames or reads
+//! and writes to go by (a scene drawn in software, a level decompressed),
+//! and gets all the host has.
 
 use crate::bus::Bus;
 use crate::video::VideoMode;
@@ -84,6 +90,9 @@ const PROTECTED_LEAST: u32 = 20_000;
 /// Bytes a second written to video memory and moved on drives above which
 /// a program without frames is at work.
 const WORKING: f64 = 32768.0;
+/// The share of the time halted at which a protected-mode program is
+/// waiting, and which shows an operating system that idles with HLT.
+const HALTED: f64 = 0.5;
 /// Emulated time without reads and writes after which a program that got
 /// all the host has for them goes back to the speed it had: less than the
 /// four timer ticks a delay loop's timing waits for.
@@ -290,11 +299,26 @@ pub struct AutoSpeed {
     working: Option<u32>,
     /// The bytes it had read and written, and when that last changed.
     output: (u64, u64),
+    /// The protected-mode program halted most of a measurement's time at
+    /// some point since it started: it is an operating system that idles
+    /// with HLT. Kept through `reset`, as after a save state of the same
+    /// system is loaded.
+    os_idles: bool,
 }
 
 impl AutoSpeed {
     pub fn new(base: u32, target_fps: Option<u32>) -> Self {
-        Self { base, target_fps, mark: None, settle_until: 0, unsettled: None, step: Step::Start, working: None, output: (0, 0) }
+        Self {
+            base,
+            target_fps,
+            mark: None,
+            settle_until: 0,
+            unsettled: None,
+            step: Step::Start,
+            working: None,
+            output: (0, 0),
+            os_idles: false,
+        }
     }
 
     pub fn base(&self) -> u32 {
@@ -313,6 +337,13 @@ impl AutoSpeed {
         self.unsettled = None;
         self.step = Step::Start;
         self.working = None;
+    }
+
+    /// The protected-mode program ended: what runs next hasn't been seen
+    /// to idle.
+    pub fn program_ended(&mut self) {
+        self.reset();
+        self.os_idles = false;
     }
 
     /// After a frame: once a measurement is complete, the speed it asks
@@ -407,17 +438,23 @@ impl AutoSpeed {
             self.step = Step::Start;
             return clamp(c * WAITING_STEP);
         }
+        if protected && m.halted >= HALTED {
+            self.os_idles = true;
+        }
         let Some(fps) = m.fps else {
             self.step = Step::Start;
             // A protected-mode program at work without frames loads, or
             // compiles, or is Windows: it reads and writes. One that does
-            // neither spins in a loop, as a game's menu does.
+            // neither spins in a loop, as a game's menu does, unless it
+            // runs under an operating system that halts when it waits.
             return if !protected {
                 base
-            } else if m.halted >= 0.5 {
+            } else if m.halted >= HALTED {
                 clamp(c)
             } else if m.output >= WORKING {
                 self.working = Some(clamp(c));
+                top
+            } else if self.os_idles {
                 top
             } else {
                 clamp(c * WAITING_STEP)
@@ -602,6 +639,27 @@ mod tests {
         // Spinning without doing anything, it gets less.
         let mut auto = AutoSpeed::new(3000, None);
         assert_eq!(auto.decide(100_000, &nothing(0.0, 100.0)(0), true, HOST), 80_000);
+    }
+
+    #[test]
+    fn under_a_system_that_idles_with_hlt_a_program_without_frames_gets_the_host() {
+        let nothing = |halted| Measurement { fps: None, polling: 0.0, halted, output: 0.0, refresh: 70.0 };
+        let mut auto = AutoSpeed::new(3000, None);
+        // The desktop, halted most of the time, then a program that
+        // computes without frames or reads and writes.
+        assert_eq!(auto.decide(50_000, &nothing(0.95), true, HOST), 50_000);
+        assert_eq!(auto.decide(50_000, &nothing(0.0), true, HOST), HOST);
+        assert_eq!(auto.decide(HOST, &nothing(0.2), true, HOST), HOST);
+        assert_eq!(auto.working, None, "nothing to go back to");
+        // A save state loaded: still the same system.
+        auto.reset();
+        assert_eq!(auto.decide(50_000, &nothing(0.0), true, HOST), HOST);
+        // Once the system ends, a DOS program's menu that spins without
+        // ever halting gets less, as before.
+        auto.program_ended();
+        assert_eq!(auto.decide(100_000, &nothing(0.0), true, HOST), 80_000);
+        // So does one that halts only a little.
+        assert_eq!(auto.decide(80_000, &nothing(0.3), true, HOST), 64_000);
     }
 
     #[test]

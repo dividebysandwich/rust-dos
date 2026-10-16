@@ -730,7 +730,11 @@ impl Pacer {
                 let host_max = self.host_max.map_or(MAX_CYCLES, |max| (max as u32).clamp(MIN_CYCLES, MAX_CYCLES));
                 if protected != self.protected {
                     self.protected = protected;
-                    self.auto.reset();
+                    if protected {
+                        self.auto.reset();
+                    } else {
+                        self.auto.program_ended();
+                    }
                     // The protected-mode program ended: whatever runs next
                     // starts from the real-mode speed.
                     if !protected {
