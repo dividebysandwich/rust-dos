@@ -126,6 +126,8 @@ pub(super) enum Item {
     Cycles,
     /// The frame rate auto speed aims for.
     AutoFps,
+    /// Auto speed gives a program that keeps Windows busy all there is.
+    AutoBusyOs,
     /// What runs the instructions: interpreter or dynamic recompiler.
     Core,
     /// Exact or fast FPU arithmetic.
@@ -345,6 +347,7 @@ impl Item {
             CompositeEra => "  CGA revision",
             Cycles => "CPU speed (cycles)",
             AutoFps => "  Auto speed target",
+            AutoBusyOs => "  Auto: busy Windows at full",
             Core => "CPU core",
             Fpu => "FPU arithmetic",
             Cpu => "Processor",
@@ -573,7 +576,7 @@ impl Item {
             Item::ReverbMix => s.mixer.reverb != ReverbPreset::Off,
             Item::ChorusMix => s.mixer.chorus != ChorusPreset::Off,
             Item::RewindMemory => s.rewind,
-            Item::AutoFps => matches!(s.cycles, CpuSpeed::Auto(_)),
+            Item::AutoFps | Item::AutoBusyOs => matches!(s.cycles, CpuSpeed::Auto(_)),
             Item::VoodooMemory | Item::VoodooRenderer | Item::VoodooTextureSampling | Item::VoodooFpsCap | Item::VoodooGamma => s.voodoo.enabled,
             Item::PowerVrFilter => s.powervr.is_some(),
             Item::Awe32Rom | Item::Awe32Ram => awe32(s),
@@ -612,7 +615,7 @@ impl Item {
             Scale | Fullscreen | Aspect | Vrr | Filter | Shader | CrtCurvature | CrtGlow | Composite | CompositeEra => {
                 Applies::Now
             }
-            Cycles | AutoFps | Core | Fpu | Dpmi | DosVersion | IdeHardDisks | BootCdrom | FloppyController | KeyboardLayout | MouseAutocapture | MouseCaptureMessages | MouseMenuHold | PauseInSettings | ShellSuggestions | ShellColors | SaveShellHistory | Rewind | RewindMemory
+            Cycles | AutoFps | AutoBusyOs | Core | Fpu | Dpmi | DosVersion | IdeHardDisks | BootCdrom | FloppyController | KeyboardLayout | MouseAutocapture | MouseCaptureMessages | MouseMenuHold | PauseInSettings | ShellSuggestions | ShellColors | SaveShellHistory | Rewind | RewindMemory
             | VoodooRenderer | VoodooScale | VoodooScaleShader | VoodooMsaa | VoodooTextureSampling | VoodooAnisotropy | VoodooFpsCap | VoodooOverlay | PowerVrFilter => Applies::Now,
             Monochrome => Applies::NowAndAtPrompt,
             MonitorEffects => Applies::Now,
@@ -752,6 +755,7 @@ impl Item {
                 None => "auto (display refresh)".to_string(),
                 Some(n) => format!("{} fps", n),
             },
+            AutoBusyOs => if s.auto_busy_os { "on" } else { "off" }.to_string(),
             Core => match s.core {
                 CoreMode::Auto => "auto (recomp. in prot. mode)",
                 CoreMode::Dynamic => "dynamic recompiler",

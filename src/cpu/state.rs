@@ -65,7 +65,7 @@ crate::state_fields!(Cpu {
     bus, env_injector,
     // In sections of their own (savestate/machine.rs), which older states
     // lack.
-    sysenter, sse, k6,
+    sysenter, sse, k6, os_idles,
     // Set from the configuration, which a state carries in its header.
     model, core, string_bulk, fpu_fast,
     // Caches, emptied after a load.

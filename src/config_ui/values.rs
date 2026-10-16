@@ -284,6 +284,7 @@ impl Item {
             Rewind => on_off(|s, on| s.rewind = on),
             RecordUi => on_off(|s, on| s.record_ui = on),
             RecordShader => on_off(|s, on| s.record_shader = on),
+            AutoBusyOs => on_off(|s, on| s.auto_busy_os = on),
             RewindMemory => each(s, REWIND_MEMORY, |s, mb| s.rewind_memory = mb),
             SbType => {
                 let models = [Some(SbModel::Sb16), Some(SbModel::Awe32), Some(SbModel::SbPro2), Some(SbModel::Sb2), Some(SbModel::Sb16Vibra), None];

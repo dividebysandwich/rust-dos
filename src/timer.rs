@@ -608,7 +608,7 @@ impl Pacer {
     /// clock's rate (`CpuSpeed::initial_cycles`).
     pub fn set_speed(&mut self, speed: CpuSpeed) {
         if let CpuSpeed::Auto(base) = speed {
-            self.auto = AutoSpeed::new(base, self.auto.target_fps());
+            self.auto = self.auto.with(base, self.auto.target_fps());
         }
         self.speed = speed;
     }
@@ -616,7 +616,31 @@ impl Pacer {
     /// Change the frame rate `Auto` aims for (`auto_fps`), None for the
     /// display's refresh rate; the search starts over.
     pub fn set_auto_fps(&mut self, fps: Option<u32>) {
-        self.auto = AutoSpeed::new(self.auto.base(), fps);
+        self.auto = self.auto.with(self.auto.base(), fps);
+    }
+
+    /// The emulated CPU model, whose clock sets how slow `Auto` lets a
+    /// protected-mode program go (`CpuModel::auto_least`).
+    pub fn set_cpu_model(&mut self, model: crate::cpu::CpuModel) {
+        self.auto.set_protected_least(model.auto_least());
+    }
+
+    /// Whether `Auto` gives a program that keeps an idling protected-mode
+    /// system busy all the host has (`auto_busy_os`).
+    pub fn set_busy_os(&mut self, on: bool) {
+        self.auto.set_busy_os(on);
+    }
+
+    /// Whether `Auto` saw the protected-mode system idle (`Cpu::os_idles`,
+    /// which the machine keeps and save states carry).
+    pub fn os_idles(&self) -> bool {
+        self.auto.idles()
+    }
+
+    /// What the machine knows of its system's idling (`Cpu::os_idles`),
+    /// before `end_frame`.
+    pub fn set_os_idles(&mut self, idles: bool) {
+        self.auto.set_idles(idles);
     }
 
     /// The instruction count the next batch should run to, so emulated time
@@ -730,10 +754,14 @@ impl Pacer {
                 let host_max = self.host_max.map_or(MAX_CYCLES, |max| (max as u32).clamp(MIN_CYCLES, MAX_CYCLES));
                 if protected != self.protected {
                     self.protected = protected;
-                    self.auto.reset();
-                    // The protected-mode program ended: whatever runs next
-                    // starts from the real-mode speed.
-                    if !protected {
+                    // A program switched to protected mode: the search
+                    // starts over. The protected-mode program ended (or
+                    // the machine rebooted): whatever runs next starts
+                    // from the real-mode speed, with no idle loop seen.
+                    if protected {
+                        self.auto.reset();
+                    } else {
+                        self.auto.left_protected_mode();
                         let base = self.auto.base();
                         return (base != current).then_some(base);
                     }

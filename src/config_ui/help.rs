@@ -323,6 +323,7 @@ impl Item {
             CompositeEra => "composite-era",
             Cycles => "cycles",
             AutoFps => "auto-fps",
+            AutoBusyOs => "auto-busy-os",
             Core => "core",
             Fpu => "fpu",
             Cpu => "cpu",

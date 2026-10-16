@@ -38,6 +38,16 @@ frame rate below it stay where they are.
 
 Shown only while the CPU speed is auto.
 
+# Auto: busy Windows at full {#auto-busy-os}
+
+Windows 95 and 98 halt the processor while nothing runs. Once auto
+speed has seen that, a program that keeps it from halting for a whole
+measurement, such as a 3D game building its scene, gets all the speed
+your computer has. **off** treats it as any other program that draws
+no frames, which auto speed slows down to a spinning menu's speed.
+
+Shown only while the CPU speed is auto.
+
 # CPU core {#core}
 
 What runs the games' code:

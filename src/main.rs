@@ -225,6 +225,7 @@ fn main() -> Result<(), String> {
     // Paces emulated time against the wall clock, one frame at a time.
     cpu.bus.set_cycles_per_ms(settings.cycles.initial_cycles());
     let mut pacer = timer::Pacer::new(settings.cycles, settings.auto_fps, std::time::Instant::now());
+    pacer.set_busy_os(settings.auto_busy_os);
 
     // The settings window (Ctrl+F12, DOSCONFIG), and whether the machine
     // has been set aside for it: paused, its keys released.
@@ -2012,9 +2013,14 @@ fn main() -> Result<(), String> {
 
         profile::set_host(Zone::Frontend);
         let overhead = frame_start.elapsed().saturating_sub(exec_time + waited);
+        // The settings window can change the model, and a state loaded
+        // brings whether its system idles.
+        pacer.set_cpu_model(cpu.model);
+        pacer.set_os_idles(cpu.os_idles);
         if let Some(cycles) = pacer.end_frame(&cpu.bus, cpu.pm_latched, executed, exec_time, overhead) {
             cpu.bus.set_cycles_per_ms(cycles);
         }
+        cpu.os_idles = pacer.os_idles();
         let busy = frame_start.elapsed().saturating_sub(waited);
         let code = cpu.dynrec.counts();
         last_frame = Some((
