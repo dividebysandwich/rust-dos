@@ -2094,12 +2094,17 @@ were tried on Windows 98 SE with the 1.07.00 driver:
   for a Voodoo2 may have 3dfx's MiniGL as `opengl32.dll` in its own
   folder; take that away, so the game gets Windows' `opengl32.dll` and
   the ICD.
-* DxDiag's DirectDraw tests, windowed and full screen, and its
-  Direct3D test with software rendering.
-* DxDiag's Direct3D test with hardware rendering doesn't work yet: the
-  window stays white and the card draws no triangles. From a 1024x768
-  desktop, DxDiag's DirectDraw can't switch to 640x480 for its full
-  screen tests ("Invalid mode"), although Display Properties can.
+* DxDiag's DirectDraw and Direct3D tests, windowed and full screen,
+  with software and hardware rendering, from a 640x480 and a 1024x768
+  desktop.
+* Direct3D: Incoming (the GOG release, run without GOG's wrapper DLLs),
+  its menus and the first level of its arcade game.
+
+Direct3D needs DirectX 7, as the driver's readme says; Windows 98 SE
+comes with 6.1. With 6.1 the driver takes the structure DirectDraw gives
+it when a program starts Direct3D for the one DirectX 7 has, and faults:
+the program's window stays white and the card draws nothing. Install
+DirectX 7.0 (`dx70eng.exe`) or later first.
 
 The card is a port of 86Box's Banshee and Voodoo3 emulation
 (`vid_voodoo_banshee.c` and its 2D engine, by Sarah Walker, GPLv2, and
