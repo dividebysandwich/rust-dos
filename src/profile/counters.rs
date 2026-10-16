@@ -132,13 +132,19 @@ impl Counters {
     /// outermost.
     #[inline(always)]
     pub fn port(&mut self, port: u16, write: bool) -> ZoneGuard {
+        self.ports(port, write, 1)
+    }
+
+    /// `port` for `n` accesses of the port made at once.
+    #[inline(always)]
+    pub fn ports(&mut self, port: u16, write: bool, n: u64) -> ZoneGuard {
         if super::now().zone().is_io() {
             return ZoneGuard { prev: None };
         }
         if write {
-            self.port_writes[port as usize] += 1;
+            self.port_writes[port as usize] += n;
         } else {
-            self.port_reads[port as usize] += 1;
+            self.port_reads[port as usize] += n;
         }
         super::zone(self.port_zone(port))
     }

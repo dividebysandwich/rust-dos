@@ -502,6 +502,26 @@ impl Stage {
         }
     }
 
+    /// The mouse at a point of the window's drawable: a key of the
+    /// keyboard there, in front of the screen, shows lit, as a click
+    /// would press it. (In the headset, the laser does that.)
+    pub fn hover(&mut self, (x, y): (f32, f32)) {
+        #[cfg(xr)]
+        if self.headset.as_ref().is_some_and(|h| h.running()) {
+            return;
+        }
+        let Some((view_projection, (rx, ry, rw, rh))) = self.shown else { return };
+        let ndc = Vec2::new((x - rx) / rw.max(1.0) * 2.0 - 1.0, 1.0 - (y - ry) / rh.max(1.0) * 2.0);
+        let (origin, dir) = pick::ray(view_projection.inverse(), ndc);
+        let screen = pick::pick_hit(&self.scene.screen, origin, dir).map(|(t, _)| t);
+        let targets = self.props.targets(&self.scene);
+        let key = match pick::pick_target(&targets, origin, dir) {
+            Some((t, pick::TargetId::Key(k))) if screen.is_none_or(|s| t < s) => Some(k),
+            _ => None,
+        };
+        self.props.set_pointed_key(key);
+    }
+
     /// Do what clicking `id` does: switch a lamp, or take a camera's
     /// picture (in the headset, while it shows the scene).
     fn act(&mut self, id: pick::TargetId) {

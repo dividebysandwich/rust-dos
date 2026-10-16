@@ -206,6 +206,41 @@ impl Bus {
         self.with_ide(id, |channel, env| channel.write_wide(value, len, env));
     }
 
+    /// How many bytes reads of channel `id`'s data port give from here on
+    /// before its selected device's state changes (`Channel::data_run`).
+    /// 0 while ports are logged, as each read's entry has its own time.
+    pub(crate) fn ide_data_run(&self, id: ChannelId) -> usize {
+        if self.port_log.is_some() {
+            return 0;
+        }
+        self.ide[id.index()]
+            .as_ref()
+            .map_or(0, |channel| channel.data_run().len())
+    }
+
+    /// `count` reads of channel `id`'s data port, `len` bytes wide, at
+    /// most `ide_data_run` bytes in all, stored one after another into the
+    /// plain RAM at `dst`: what `count` reads through `io_read_wide` and
+    /// writes of what they gave do, in one go. The device's state changes
+    /// only with the last one, so its interrupt line and timer are
+    /// followed once, after it.
+    pub(crate) fn ide_read_run(&mut self, id: ChannelId, dst: usize, count: usize, len: u8) {
+        let _profile = self
+            .profile
+            .as_mut()
+            .map(|p| p.ports(id.base(), false, count as u64));
+        self.observe.opaque();
+        self.clock
+            .stall_times(DATA_PORT_NS * (len as u64 / 2), count as u64);
+        let bytes = count * len as usize;
+        let Some(channel) = &self.ide[id.index()] else {
+            return;
+        };
+        self.ram[dst..dst + bytes].copy_from_slice(&channel.data_run()[..bytes]);
+        self.bump_page_gens(dst, dst + bytes);
+        self.with_ide(id, |channel, env| channel.skip_data_run(bytes, env));
+    }
+
     /// What the BIOS's INT 13h did to the disk in `slot` of channel `id`,
     /// done to it at once (`ide::int13`).
     pub(crate) fn ide_bios_access(&mut self, id: ChannelId, slot: usize, access: crate::ide::int13::BiosAccess) {
