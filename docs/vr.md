@@ -60,7 +60,7 @@ blender --background --factory-startup --python assets/vr/make_test_room.py
 | `spawn` | Empty (or a camera) | Where your eyes start, and which way they face. |
 | `speaker_left`, `speaker_right` | Empty | Where the left and right sound channels come from. |
 | `led_power`, `led_turbo`, `led_hdd`, `led_floppy` | Mesh | The PC's front-panel lights. |
-| `manual`, `joystick`, `camera`, `vfx1` | Empty, or the parent of meshes | Where the game's manual, the joystick, the polaroid camera and the VFX1 headset stand, to be picked up in VR. See [Props](#props). |
+| `manual`, `joystick`, `camera`, `vfx1`, `keyboard` | Empty, or the parent of meshes | Where the game's manual, the joystick, the polaroid camera, the VFX1 headset and the keyboard stand, to be picked up (and typed on) in VR. See [Props](#props). |
 | `indoor` | Empty (cube) | The inside of the room, where it doesn't rain or snow. See [Time of day and weather](#time-of-day-and-weather). |
 | `Window glass` | Mesh | A window's glass, which the rain runs down. |
 
@@ -75,7 +75,7 @@ Properties > Custom Properties):
 |---|---|---|
 | `rustdos_screen` | `1` or `True` (a boolean) | `screen` |
 | `rustdos_led` | `power`, `turbo`, `hdd` or `floppy` (a string) | `led_…` |
-| `rustdos_prop` | `manual`, `joystick`, `camera`, `vfx1`, `manual_page_left`, `manual_page_right` or `joystick_stick` (a string) | that name |
+| `rustdos_prop` | `manual`, `joystick`, `camera`, `vfx1`, `keyboard`, `manual_page_left`, `manual_page_right` or `joystick_stick` (a string) | that name |
 | `rustdos_prop` | `item` (a string) | (none: anything to move about, see [Props](#props)) |
 | `rustdos_lamp` | a name, or `1` / `True` | (none: a lamp to switch, see [Lamps](#lamps)) |
 | `rustdos_indoor` | `1` or `True` | `indoor` |
@@ -262,6 +262,32 @@ the meshes below it: the eyes are 6 cm above the origin and half a
 centimetre ahead of it, which is where the head's eyes are when it is
 put on, and where it is put when taken off. A scene without one gets it
 to the right of the joystick.
+
+### The keyboard
+
+The PC's keyboard lies on the desk too: a 101-key keyboard of the late
+eighties, with the lock lights over the keypad lit as the machine sets
+them. Type on it with the controllers' tips (where the laser comes from):
+push a tip down into a key and it goes down on the machine, and comes up
+as the tip comes up out of it; held, it repeats. The controller gives a
+short tap as a key goes down. To press the next key, bring the tip up
+over the keys first: sliding over them presses nothing. Hold Shift with
+one hand to type capitals with the other. The laser and the trigger, or
+touching a key and pulling the trigger, press a key for a moment, as a
+click in the window does; Shift, Ctrl or Alt clicked stays down until
+the next key clicked. Keys the machine has down, from the real keyboard
+too, are shown down.
+
+Take it by its case with the grip button to move it; the hand holding
+it doesn't type. Coming to rest out of reach, it is back where it
+started. While the headset's cameras show the real keyboard
+([`[vr] keyboard`](../CONFIGURATION.md)), it is hidden.
+
+Rust-DOS brings its own model, for an empty named `keyboard`, its rows
+across, its **function keys along its +Y** (Blender's; away from you),
+its origin under the middle of its case. A scene without one gets it in
+front of the spawn. A mesh of the scene's own named `keyboard` is only
+moved about: it has no keys to press.
 
 ### Things to move about
 

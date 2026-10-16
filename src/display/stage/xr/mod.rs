@@ -59,6 +59,8 @@ struct Controls {
     primary: xr::Action<bool>,
     secondary: xr::Action<bool>,
     menu: xr::Action<bool>,
+    /// The controllers' rumble, felt as a key is pressed.
+    haptic: xr::Action<xr::Haptic>,
     /// /user/hand/left and /user/hand/right.
     hands: [xr::Path; 2],
     /// Where each hand points from, its -Z the way.
@@ -589,6 +591,16 @@ impl Xr {
         Ok(())
     }
 
+    /// A short tap felt in hand `hand`'s controller (0 left, 1 right).
+    pub fn buzz(&self, hand: usize) {
+        let Some(controls) = &self.controls else { return };
+        let tap = xr::HapticVibration::new()
+            .amplitude(0.4)
+            .duration(xr::Duration::from_nanos(15_000_000))
+            .frequency(xr::FREQUENCY_UNSPECIFIED);
+        let _ = controls.haptic.apply_feedback(&self.session, controls.hands[hand], &tap);
+    }
+
     /// The head and the controllers at the frame's time.
     pub fn track(&mut self, world: Mat4) -> Tracking {
         let mut tracking = Tracking::default();
@@ -789,8 +801,16 @@ fn make_controls(
     let primary = set.create_action::<bool>("primary", "Joystick button A / X", &hands).map_err(&made)?;
     let secondary = set.create_action::<bool>("secondary", "Joystick button B / Y", &hands).map_err(&made)?;
     let menu = set.create_action::<bool>("menu", "Settings window", &hands).map_err(&made)?;
+    let haptic = set.create_action::<xr::Haptic>("haptic", "Key pressed", &hands).map_err(&made)?;
     for (profile, inputs) in profiles::profiles(hand_interaction) {
         let mut bindings = Vec::new();
+        // (Hands tracked have nothing to feel with.)
+        if profile != profiles::HAND_PROFILE.0 {
+            for side in ["left", "right"] {
+                let at = path(&format!("/user/hand/{}/output/haptic", side))?;
+                bindings.push(xr::Binding::new(&haptic, at));
+            }
+        }
         for &(control, hand, input) in inputs {
             for side in ["left", "right"].into_iter().filter(|side| hand.is_empty() || hand == *side) {
                 let at = path(&format!("/user/hand/{}/input/{}", side, input))?;
@@ -818,7 +838,21 @@ fn make_controls(
         spaces.push(aim.create_space(session, hand, xr::Posef::IDENTITY).map_err(&made)?);
         grips.push(grip.create_space(session, hand, xr::Posef::IDENTITY).map_err(&made)?);
     }
-    Ok(Controls { set, _aim: aim, _grip: grip, grips, select, squeeze, stick, primary, secondary, menu, hands, spaces })
+    Ok(Controls {
+        set,
+        _aim: aim,
+        _grip: grip,
+        grips,
+        select,
+        squeeze,
+        stick,
+        primary,
+        secondary,
+        menu,
+        haptic,
+        hands,
+        spaces,
+    })
 }
 
 /// Ask for the refresh rate `options` want, out of those the session's

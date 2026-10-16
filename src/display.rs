@@ -731,6 +731,11 @@ impl Display<'_> {
         Some(VrControl { pointer, buttons: input.buttons, pad: input.pad, menu_presses: input.menu_presses, vfx1 })
     }
 
+    /// The keys typed on the keyboard in the scene since, for the machine.
+    pub fn vr_keys(&mut self) -> Vec<rust_dos::vr::KeyEvent> {
+        self.stage_mut().map_or_else(Vec::new, |stage| stage.take_keys())
+    }
+
     /// The VFX1 on the desk of the scene (`[vfx1]`), or not.
     pub fn set_vfx1(&mut self, there: bool) {
         if let Some(stage) = self.stage_mut() {
@@ -839,6 +844,10 @@ impl Display<'_> {
     }
 
     pub fn vr_key_pressed(&mut self) {}
+
+    pub fn vr_keys(&mut self) -> Vec<rust_dos::vr::KeyEvent> {
+        Vec::new()
+    }
 
     pub fn poll_headset(&mut self) -> Vec<String> {
         Vec::new()

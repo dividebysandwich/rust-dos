@@ -25,6 +25,7 @@ use super::props::Props;
 use super::render::{Dest, Features, Format, Gpu, Multiview, Options, Pass};
 use super::pick::TargetId;
 use super::scene::{Leds, Scene, Spawn};
+use super::typing::KeyEvent;
 use super::visor::Visor;
 use super::xr::{Xr, XrOptions, log};
 use crate::video::shader::Glsl;
@@ -255,6 +256,8 @@ struct State {
     /// window clicked to take one.
     capture_dir: Option<std::path::PathBuf>,
     shots: Vec<usize>,
+    /// The keyboard's keys the window clicked.
+    taps: Vec<usize>,
     /// Where the cameras show the real keyboard, and whether it is to be
     /// marked with a controller.
     keyboard: VrKeyboard,
@@ -265,6 +268,8 @@ struct State {
     mirror_textures: Vec<glow::Texture>,
     mirror_size: (u32, u32),
     input: VrInput,
+    /// The keyboard's keys gone down and come up, for the machine.
+    keys: Vec<KeyEvent>,
     head: Option<Mat4>,
     /// The VFX1's head tracker and puck, while it is worn.
     vfx1_tracking: Option<rust_dos::vfx1::Tracking>,
@@ -501,6 +506,16 @@ impl Headset {
     /// Take camera `camera`'s picture (clicked in the window's mirror).
     pub fn take_picture(&self, camera: usize) {
         self.shared.lock().shots.push(camera);
+    }
+
+    /// Press the keyboard's key `k` for a moment (clicked in the mirror).
+    pub fn tap_key(&self, k: usize) {
+        self.shared.lock().taps.push(k);
+    }
+
+    /// The keys typed on the keyboard in the scene since, for the machine.
+    pub fn take_keys(&self) -> Vec<KeyEvent> {
+        std::mem::take(&mut self.shared.lock().keys)
     }
 
     pub fn set_keyboard(&self, keyboard: VrKeyboard) {
@@ -821,6 +836,10 @@ fn session(
                 unsafe { gl.delete_sync(stale) };
             }
             props.set_vfx1(state.vfx1);
+            props.set_machine_keys(state.leds.keys);
+            for k in std::mem::take(&mut state.taps) {
+                props.tap(k, std::time::Instant::now());
+            }
             let (taken_eyes, stale) = state.eyes.take(|| release(gl));
             if let Some(Fence(stale)) = stale {
                 // SAFETY: see `GlScreen`.
@@ -893,6 +912,8 @@ fn session(
         let dt = now.duration_since(last_frame).as_secs_f32();
         last_frame = now;
         let (windows, whole, marks) = keyboard.update(&scene, world, &tracking, presses, dt);
+        // The real keyboard seen, the scene's is gone.
+        props.hide_keyboard(!windows.is_empty() || whole.is_some());
         if std::mem::take(&mut wear) {
             props.set_vfx1(true);
             props.wear();
@@ -914,6 +935,7 @@ fn session(
             match id {
                 TargetId::Lamp(i) => room.toggle_lamp(i),
                 TargetId::Camera(i) => shots.push(i),
+                TargetId::Key(k) => props.tap(k, now),
             }
         }
         let picture = screen.map(|i| screens[i]);
@@ -928,6 +950,10 @@ fn session(
         if held.pad.is_some() {
             input.pad = held.pad;
         }
+        for (i, _) in held.keyed.iter().enumerate().filter(|(_, keyed)| **keyed) {
+            xr.buzz(i);
+        }
+        let typed = props.take_key_events(now);
         if hold {
             xr.recenter();
         }
@@ -1031,6 +1057,7 @@ fn session(
             unsafe { gl.delete_sync(old) };
         }
         state.input = input;
+        state.keys.extend(typed);
         state.head = tracking.head;
         state.vfx1_tracking = vfx1;
     }

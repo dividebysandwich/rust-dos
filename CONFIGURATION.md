@@ -887,8 +887,9 @@ The picture on a screen in a 3D scene (see [3D scene and VR](#3d-scene-and-vr)).
   program can use: OpenXR's alpha-blended environment (the Steam Frame
   running Rust-DOS itself, Varjo XR headsets) or `XR_FB_passthrough` (a
   Quest through Link). The places found and marked are kept in
-  `vr-keyboard.txt` in Rust-DOS's folder. Turning it on or off starts the
-  headset again.
+  `vr-keyboard.txt` in Rust-DOS's folder. While it shows the real keyboard,
+  the scene's keyboard (the one to type on with the controllers) is hidden.
+  Turning it on or off starts the headset again.
 * `refresh`: the headset's refresh rate in Hz, the runtime's nearest to
   it, or `auto` (the default: the runtime's own, or on a standalone headset
   the lowest from 72 Hz, for more time for each frame). Only where the

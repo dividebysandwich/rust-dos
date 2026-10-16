@@ -14,6 +14,22 @@ pub struct Leds {
     pub hdd: bool,
     /// Lit while a floppy disk is.
     pub floppy: bool,
+    /// The keyboard's lock lights.
+    pub num: bool,
+    pub caps: bool,
+    pub scroll: bool,
+    /// The keyboard's keys the machine has down, a bit for each by its
+    /// scan code, 256 on for the extended ones (E0): shown pressed.
+    pub keys: [u64; 8],
+}
+
+/// A key of the keyboard in the scene going down or coming up on the
+/// machine: its scan code, and whether E0 comes first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeyEvent {
+    pub scan: u8,
+    pub extended: bool,
+    pub down: bool,
 }
 
 /// The speed (instructions a millisecond) above which the turbo light is

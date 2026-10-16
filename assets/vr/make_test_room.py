@@ -130,11 +130,14 @@ What Rust-DOS looks for, by object name:
   speaker_left/right      where the left and right sound comes from
   led_power, led_turbo,   the PC's lights: they glow in their material's
   led_hdd, led_floppy     emission colour while the emulated PC's are lit
-  manual, joystick        where the game's manual and the joystick stand, to
-                          be picked up in VR (their +Y away from you); empties
-                          get Rust-DOS's models, or put your own meshes below
+  manual, joystick,       where the game's manual, the joystick and the
+  keyboard                keyboard stand, to be picked up (and typed on) in
+                          VR (their +Y away from you); empties get Rust-DOS's
+                          models, or put your own meshes below
   camera                  a polaroid camera, its lens along its +Y (or a child
                           empty camera_lens's), its pictures out of camera_slot
+  vfx1                    the VFX1 headset, shown with [vfx1], its front along
+                          its +Y
   rustdos_lamp            on a node: a lamp, its lights and glowing meshes
                           below it switched on and off with a click
   rustdos_prop "item"     on a node: something to move about in VR
@@ -239,13 +242,17 @@ def build():
     for i, (x, z) in enumerate([(-1, -1), (1, -1), (1, 1), (-1, 1)]):
         leg = from_gltf(desk_x + x * (top[0] / 2 - 0.04), (top_y - top[1]) / 2, desk_z + z * (top[2] / 2 - 0.04))
         cuboid(f"Desk leg {i + 1}", leg, (0.04, 0.04, top_y - top[1]), wood, desk)
-    # On it, the manual (shown while a game with one runs) and the
-    # joystick: empties, so Rust-DOS's own models stand there.
-    empty("manual", from_gltf(-0.28, top_y, -0.47), markers, kind="ARROWS", size=0.1)
-    empty("joystick", from_gltf(0.3, top_y, -0.45), markers, kind="ARROWS", size=0.1)
-    # And a polaroid camera, its lens (Blender's +Y) turned to the viewer.
-    camera = empty("camera", from_gltf(-0.5, top_y, -0.72), markers, kind="ARROWS", size=0.1)
+    # On it, the manual (shown while a game with one runs), the joystick
+    # and the keyboard: empties, so Rust-DOS's own models stand there.
+    empty("manual", from_gltf(-0.42, top_y, -0.55), markers, kind="ARROWS", size=0.1)
+    empty("joystick", from_gltf(0.31, top_y, -0.52), markers, kind="ARROWS", size=0.1)
+    empty("keyboard", from_gltf(0.0, top_y, -0.345), markers, kind="ARROWS", size=0.1)
+    # And a polaroid camera and the VFX1 (shown with [vfx1]), their fronts
+    # (Blender's +Y) turned to the viewer.
+    camera = empty("camera", from_gltf(-0.5, top_y, -0.74), markers, kind="ARROWS", size=0.1)
     camera.rotation_euler = (0.0, 0.0, math.pi)
+    vfx1 = empty("vfx1", from_gltf(0.48, top_y, -0.64), markers, kind="ARROWS", size=0.1)
+    vfx1.rotation_euler = (0.0, 0.0, math.pi)
 
     # Where the eyes start (1.2 m up, looking at the screen along +Y), and
     # where the sound comes from: the screen's sides, as without them.

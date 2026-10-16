@@ -2109,7 +2109,7 @@ impl Gpu {
                     gl.depth_mask(true);
                     gl.depth_func(glow::LESS);
                     gl.uniform_1_i32(has_ao.as_ref(), 0);
-                    self.draw_props(gl, scene, &locations, model.as_ref(), props);
+                    self.draw_props(gl, scene, &locations, model.as_ref(), props, leds);
                     gl.uniform_matrix_4_f32_slice(model.as_ref(), false, &Mat4::IDENTITY.to_cols_array());
                     gl.uniform_1_i32(has_ao.as_ref(), ao.is_some() as i32);
                     gl.depth_func(glow::LEQUAL);
@@ -2238,8 +2238,17 @@ impl Gpu {
         }
     }
 
-    /// The props' parts, with the lit program in use.
-    fn draw_props(&self, gl: &glow::Context, scene: &Scene, locations: &MaterialLocations, model: Option<&glow::UniformLocation>, props: &[PropDraw]) {
+    /// The props' parts, with the lit program in use, their lights lit as
+    /// `leds` says.
+    fn draw_props(
+        &self,
+        gl: &glow::Context,
+        scene: &Scene,
+        locations: &MaterialLocations,
+        model: Option<&glow::UniformLocation>,
+        props: &[PropDraw],
+        leds: Leds,
+    ) {
         for draw in props {
             let (prop, part, at, page) = match *draw {
                 PropDraw::Part { prop, part, model, page } => (prop, part, model, page),
@@ -2253,7 +2262,9 @@ impl Gpu {
             // SAFETY: see `GlScreen`.
             unsafe {
                 gl.uniform_matrix_4_f32_slice(model, false, &at.to_cols_array());
-                self.bind_material(gl, locations, material, 1.0);
+                let lit = |led| super::scene::lit(leds, led) as u32 as f32;
+                let glow = material.led.map_or(1.0, lit);
+                self.bind_material(gl, locations, material, glow);
                 if let Some(page) = page {
                     // The page's picture, glowing a little.
                     gl.uniform_4_f32_slice(locations.base_color.as_ref(), &[1.0; 4]);

@@ -118,6 +118,13 @@ stick and the stick follows your hand as the game port's joystick, the
 trigger and A/X its buttons; hold it by its base to move it. Let go and
 it settles on what is below.
 
+Type on the keyboard on the desk with the controllers' tips: push a tip
+down into a key, and bring it up over the keys again for the next one.
+The laser and the trigger press a key for a moment; Shift, Ctrl or Alt
+pressed so stays down for the next key. Take the keyboard by its case to
+move it. It is hidden while **Show the real keyboard** shows the real
+one.
+
 # Center the view {#vr-center}
 
 Puts your eyes where the scene's seat is (its `spawn`), facing the

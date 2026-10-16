@@ -21,6 +21,7 @@ mod foveation;
 mod gi;
 #[cfg(xr)]
 mod headset;
+mod keycaps;
 #[cfg(xr)]
 mod keyboard;
 mod photo;
@@ -32,6 +33,7 @@ mod scene;
 mod shadow;
 mod sky;
 mod spatial;
+mod typing;
 #[cfg(xr)]
 mod visor;
 mod world;
@@ -41,6 +43,7 @@ mod xr;
 use crate::video::shader::Glsl;
 use camera::FlyCamera;
 pub use controls::VrInput;
+pub use typing::KeyEvent;
 use super::audio_mix::Mix;
 use glam::{Mat4, Vec2};
 use glow::HasContext;
@@ -512,7 +515,26 @@ impl Stage {
                 }
                 self.shots.push(i);
             }
+            pick::TargetId::Key(k) => {
+                #[cfg(xr)]
+                if let Some(headset) = self.headset.as_ref().filter(|h| h.running()) {
+                    headset.tap_key(k);
+                    return;
+                }
+                self.props.tap(k, std::time::Instant::now());
+            }
         }
+    }
+
+    /// The keys typed on the keyboard in the scene since, for the machine.
+    pub fn take_keys(&mut self) -> Vec<KeyEvent> {
+        #[allow(unused_mut)]
+        let mut keys = self.props.take_key_events(std::time::Instant::now());
+        #[cfg(xr)]
+        if let Some(headset) = &self.headset {
+            keys.extend(headset.take_keys());
+        }
+        keys
     }
 
     /// Where the camera's pictures go.
@@ -648,6 +670,7 @@ impl Stage {
     /// The PC's lights, as the machine's are.
     pub fn set_leds(&mut self, leds: Leds) {
         self.leds = leds;
+        self.props.set_machine_keys(leds.keys);
         #[cfg(xr)]
         if let Some(headset) = &self.headset {
             headset.set_leds(leds);
