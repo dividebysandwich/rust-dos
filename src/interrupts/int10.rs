@@ -432,8 +432,6 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
     }
     cpu.bus.vbe.reset();
     let adapter = cpu.bus.vga.adapter;
-    // A Banshee's own modes end; the VGA's registers make the picture.
-    cpu.bus.banshee_mode_set();
     if adapter.is_s3() {
         cpu.bus.s3_program_standard();
     }
@@ -466,6 +464,10 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
             }
         }
     }
+    // A Banshee's own modes end; the VGA's registers make the picture,
+    // its timing worked out from the ones the mode just set (the clock
+    // select among them).
+    cpu.bus.banshee_mode_set();
 
     // Clear the mode's memory, unless AL bit 7 asks to keep it: spaces in
     // light grey in the text modes, 0 in the graphics modes. The Tandy's

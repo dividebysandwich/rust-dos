@@ -67,7 +67,9 @@ impl Bus {
         }
         let target = match device {
             // A Banshee is the display adapter, where the S3 would be.
-            VOODOO_DEVICE if self.voodoo.as_ref().is_some_and(|v| v.banshee.is_none()) => Target::Voodoo,
+            VOODOO_DEVICE if self.voodoo.as_ref().is_some_and(|v| v.banshee.is_none()) => {
+                Target::Voodoo
+            }
             S3_DEVICE if self.banshee().is_some() => Target::Voodoo,
             S3_DEVICE if self.s3() => Target::S3,
             S3_DEVICE if self.verite() => Target::Verite,

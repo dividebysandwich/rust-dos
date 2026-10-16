@@ -133,7 +133,9 @@ impl Adapter {
 
     /// Whether the BIOS has the VESA extensions (INT 10h AH=4Fh).
     pub fn has_vbe(self) -> bool {
-        matches!(self, Adapter::Svga | Adapter::Et4000 | Adapter::Verite) || self.is_s3() || self.is_banshee()
+        matches!(self, Adapter::Svga | Adapter::Et4000 | Adapter::Verite)
+            || self.is_s3()
+            || self.is_banshee()
     }
 
     /// Whether the adapter is a 3dfx Banshee or Voodoo3, the card in
@@ -175,7 +177,9 @@ impl Adapter {
     /// Whether the BIOS has the VGA's functions: the display combination
     /// code (INT 10h AH=1Ah), the state information (AH=1Bh) and the DAC.
     pub fn vga_bios(self) -> bool {
-        matches!(self, Adapter::Svga | Adapter::Vga | Adapter::Et4000 | Adapter::Verite) || self.is_s3() || self.is_banshee()
+        matches!(self, Adapter::Svga | Adapter::Vga | Adapter::Et4000 | Adapter::Verite)
+            || self.is_s3()
+            || self.is_banshee()
     }
 
     /// Whether the BIOS has the EGA's functions: the palette registers

@@ -577,9 +577,11 @@ impl Banshee {
     }
 
     /// The BIOS set a VGA or VESA mode: the video processor and the
-    /// extended shift out off, as the card's BIOS leaves them.
+    /// extended shift out off and the DAC back to 6 bits, as the card's
+    /// BIOS leaves them.
     pub fn bios_mode_set(&mut self) {
-        let init0 = self.reg(VGA_INIT0) & !VGAINIT0_EXTENDED_SHIFT_OUT;
+        let init0 =
+            self.reg(VGA_INIT0) & !(VGAINIT0_EXTENDED_SHIFT_OUT | VGAINIT0_DAC_8BIT);
         self.set_reg(VGA_INIT0, init0);
         let cfg =
             self.reg(VID_PROC_CFG) & !(VIDPROC_ENABLE | VIDPROC_CURSOR | VIDPROC_OVERLAY_ENABLE);
@@ -674,7 +676,8 @@ impl Voodoo {
     pub fn banshee_vint_due(&self) -> Option<u64> {
         let b = self.banshee.as_ref()?;
         let armed = b.vint?;
-        (b.irq_up.is_none() && self.banshee_vint_enabled())
+        // No line to raise (`banshee_irq`), nothing to wait for.
+        (b.irq_up.is_none() && b.pci.interrupt_line < 16 && self.banshee_vint_enabled())
             .then(|| self.retrace_ticks(armed + 1))
     }
 

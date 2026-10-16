@@ -13,6 +13,7 @@ impl Bus {
         if self.voodoo.as_ref().map(|v| v.board) == board {
             return;
         }
+        self.lower_banshee_irq();
         self.voodoo = board.map(Voodoo::new);
         if board.is_some_and(|b| b.banshee().is_some()) {
             self.banshee_settle();
@@ -32,6 +33,7 @@ impl Bus {
 
     /// A PCI reset of the 3dfx card, as at power-on.
     pub fn reset_voodoo(&mut self) {
+        self.lower_banshee_irq();
         if let Some(v) = &mut self.voodoo {
             v.reset();
             self.vga.mark_dirty_full();

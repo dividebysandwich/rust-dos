@@ -322,8 +322,8 @@ fn set_mode(cpu: &mut Cpu, bx: u16) -> u16 {
         return FAILED;
     };
     let mode = &mode;
-    cpu.bus.banshee_mode_set();
     enter_mode(&mut cpu.bus, mode, bx & 0x4000 != 0, keep);
+    cpu.bus.banshee_mode_set();
     // BIOS data area: the mode byte S3 BIOSes use (68h-80h), and the text
     // grid of 8x16 characters.
     cpu.bus.guest_write_8(0x0449, (mode.number - 0x98) as u8);

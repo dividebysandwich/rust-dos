@@ -117,7 +117,14 @@ pub enum Board {
     Voodoo3,
 }
 
-crate::state_enum!(Board { Board::Standard, Board::Max, Board::Voodoo2, Board::Voodoo2Max, Board::Banshee, Board::Voodoo3 });
+crate::state_enum!(Board {
+    Board::Standard,
+    Board::Max,
+    Board::Voodoo2,
+    Board::Voodoo2Max,
+    Board::Banshee,
+    Board::Voodoo3,
+});
 
 impl Board {
     /// The boards in the order saves and recordings number them.
@@ -1729,6 +1736,7 @@ impl State for Voodoo {
         }
         if let Some(b) = &mut self.banshee {
             b.load(r)?;
+            b.engine.after_load();
             b.dirty = true;
         }
         self.after_load();

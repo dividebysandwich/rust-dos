@@ -579,6 +579,27 @@ impl Engine {
         }
     }
 
+    /// After a load: what writing the registers works out from them,
+    /// which a save doesn't keep; a command under way starts over.
+    pub fn after_load(&mut self) {
+        self.bres_error_0 = (self.bres_error0 & 0xFFFF) as i32;
+        let style = self.line_style;
+        self.line_rep_cnt = style & 0xFF;
+        self.line_bit_mask_size = (style >> 8) & 0x1F;
+        self.line_pix_pos = (style >> 16) & 0xFF;
+        self.line_bit_pos = (style >> 24) & 0x1F;
+        self.src_size_x = (self.src_size & 0x1FFF) as i32;
+        self.src_size_y = ((self.src_size >> 16) & 0x1FFF) as i32;
+        self.dst_size_x = (self.dst_size & 0x1FFF) as i32;
+        self.dst_size_y = ((self.dst_size >> 16) & 0x1FFF) as i32;
+        (self.src_x, self.src_y) = xy(self.src_xy);
+        (self.dst_x, self.dst_y) = xy(self.dst_xy);
+        self.update_packing();
+        self.launch_pending = true;
+        self.cur_y = 0;
+        self.host_data_count = 0;
+    }
+
     fn update_dst_stride(&mut self) {
         let stride = self.dst_format & STRIDE_MASK;
         self.dst_stride = if self.dst_tiled {

@@ -936,9 +936,16 @@ impl VgaCard {
                 };
                 CrtTiming::from_extended_registers(self.misc_output_reg, self.sequencer_regs[1], &self.crtc_regs, &ext)
             }
-            super::adapter::Adapter::Voodoo3 | super::adapter::Adapter::Banshee if self.svga_ext.is_some() => {
+            super::adapter::Adapter::Voodoo3 | super::adapter::Adapter::Banshee
+                if self.svga_ext.is_some() =>
+            {
                 let ext = self.svga_ext.unwrap_or_default();
-                CrtTiming::from_extended_registers(self.misc_output_reg, self.sequencer_regs[1], &self.crtc_regs, &ext)
+                CrtTiming::from_extended_registers(
+                    self.misc_output_reg,
+                    self.sequencer_regs[1],
+                    &self.crtc_regs,
+                    &ext,
+                )
             }
             _ => CrtTiming::from_registers(self.misc_output_reg, self.sequencer_regs[1], &self.crtc_regs),
         }

@@ -2,7 +2,7 @@
 //! address A0h holding a 128-byte EDID, which the driver reads by
 //! bit-banging the clock and data lines, so Windows finds a Plug and Play
 //! monitor and the modes it takes. The EDID describes a CRT that takes up
-//! to 1600x1200 at 85 Hz and prefers 1024x768 at 60 Hz.
+//! to 1600x1200 at 60 Hz and prefers 1024x768 at 60 Hz.
 //!
 //! The protocol follows the I2C specification (start and stop conditions,
 //! eight data bits, an acknowledge from the receiver) and the EEPROM's
@@ -207,9 +207,10 @@ pub fn edid() -> [u8; 128] {
         0x64, 0x19, 0x00, 0x40, 0x41, 0x00, 0x26, 0x30, 0x18, 0x88, 0x36, 0x00, 0x40, 0xF0, 0x10,
         0x00, 0x00, 0x18,
     ]);
-    // The range limits: 50-120 Hz, 30-96 kHz, 160 MHz, GTF.
+    // The range limits: 50-120 Hz, 30-96 kHz, GTF, and 170 MHz, room for
+    // 1600x1200 at 60 Hz's 162 MHz.
     e[72..90].copy_from_slice(&[
-        0x00, 0x00, 0x00, 0xFD, 0x00, 50, 120, 30, 96, 16, 0x00, 0x0A, 0x20, 0x20, 0x20, 0x20,
+        0x00, 0x00, 0x00, 0xFD, 0x00, 50, 120, 30, 96, 17, 0x00, 0x0A, 0x20, 0x20, 0x20, 0x20,
         0x20, 0x20,
     ]);
     // The monitor's name.

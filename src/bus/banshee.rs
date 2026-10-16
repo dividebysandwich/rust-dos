@@ -20,6 +20,11 @@ impl Bus {
         let Some(v) = &self.voodoo else {
             return u32::MAX;
         };
+        if vga_in_bar0(offset, len) {
+            return (0..len)
+                .map(|i| (self.banshee_vga_peek(offset + i) as u32) << (8 * i))
+                .sum();
+        }
         let now = self.voodoo_now();
         let shift = 8 * (offset & 3);
         let mut value = (v.read(offset & !3, now) as u64) >> shift;
@@ -37,6 +42,18 @@ impl Bus {
     /// `len` bytes of `value` written to the card's window at `offset`,
     /// as the dword writes with byte enables the card takes.
     pub(crate) fn banshee_write_bytes(&mut self, offset: u32, value: u32, len: u32) {
+        if vga_in_bar0(offset, len) {
+            for i in 0..len {
+                let at = (offset + i) & 0xFF;
+                let byte = (value >> (8 * i)) as u8;
+                if (0xB0..0xE0).contains(&at) {
+                    self.io_write(0x300 + at as u16, byte);
+                } else {
+                    self.banshee_port_write(at, byte);
+                }
+            }
+            return;
+        }
         let shift = 8 * (offset & 3);
         let bytes = if len >= 4 {
             u32::MAX as u64
@@ -51,6 +68,24 @@ impl Bus {
                 (data >> 32) as u32,
                 (mask >> 32) as u32,
             );
+        }
+    }
+
+    /// A byte of the VGA's ports in BAR0 as a read of the port gives it,
+    /// without what reading it does: reads of memory can't change the
+    /// machine (`mmio_peek` does the same for the ViRGE).
+    fn banshee_vga_peek(&self, offset: u32) -> u8 {
+        let at = offset & 0xFF;
+        if !(0xB0..0xE0).contains(&at) {
+            let Some(v) = &self.voodoo else { return 0xFF };
+            return (v.banshee_ext_read(at & !3, self.voodoo_now()) >> (8 * (at & 3))) as u8;
+        }
+        let port = 0x300 + at as u16;
+        match port {
+            0x3B5 | 0x3D5 if self.vga.crtc_index >= 0x19 => {
+                self.banshee_crtc_read(self.vga.crtc_index)
+            }
+            _ => self.vga_peek(port),
         }
     }
 
@@ -85,7 +120,7 @@ impl Bus {
     /// A word or dword of the I/O BAR written at once, which goes to one
     /// init register; the VGA's ports a byte at a time.
     pub(crate) fn banshee_port_write_wide(&mut self, offset: u32, value: u32, len: u8) {
-        if (0xB0..0xE0).contains(&offset) || offset & 3 != 0 && len == 4 {
+        if (0xB0..0xE0).contains(&offset) || (offset & 3) + len as u32 > 4 {
             for i in 0..len as u32 {
                 self.banshee_port_write(offset + i, (value >> (8 * i)) as u8);
             }
@@ -97,7 +132,7 @@ impl Bus {
     }
 
     pub(crate) fn banshee_port_read_wide(&mut self, offset: u32, len: u8, now_ns: u64) -> u32 {
-        if (0xB0..0xE0).contains(&offset) || offset & 3 != 0 && len == 4 {
+        if (0xB0..0xE0).contains(&offset) || (offset & 3) + len as u32 > 4 {
             return (0..len as u32)
                 .map(|i| (self.banshee_port_read(offset + i, now_ns) as u32) << (8 * i))
                 .sum();
@@ -138,6 +173,9 @@ impl Bus {
                     b.vga_palette_written(index, rgb);
                 }
             }
+            // The cursor's shape and place and the start address (0Ah-0Fh)
+            // change neither the timing nor the desktop's size.
+            0x3B5 | 0x3D5 if (0x0A..=0x0F).contains(&self.vga.crtc_index) => {}
             0x3C2 | 0x3C5 | 0x3B5 | 0x3D5 => self.banshee_settle(),
             _ => {}
         }
@@ -213,6 +251,16 @@ impl Bus {
         self.refresh_irq();
     }
 
+    /// Withdraw the request the card has up, before a reset or the card
+    /// going away forgets it.
+    pub(crate) fn lower_banshee_irq(&mut self) {
+        let up = self.banshee_mut().and_then(|b| b.irq_up.take());
+        if let Some(irq) = up {
+            self.pic.lower(irq);
+            self.refresh_irq();
+        }
+    }
+
     /// When the card's vertical retrace interrupt comes up, if it is
     /// armed.
     pub(crate) fn banshee_next_event(&self) -> Option<u64> {
@@ -244,5 +292,35 @@ impl Bus {
             b.bios_mode_set();
             self.banshee_settle();
         }
+    }
+}
+
+/// Whether an access of `len` bytes at `offset` of BAR0 touches the
+/// VGA's ports in the init registers' space (B0h-DFh of every 256 bytes
+/// below 80000h), which the card passes to 3B0h-3DFh as its I/O BAR does.
+fn vga_in_bar0(offset: u32, len: u32) -> bool {
+    offset < 0x8_0000 && (0..len).any(|i| (0xB0..0xE0).contains(&((offset + i) & 0xFF)))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::cpu::Cpu;
+    use crate::voodoo::Board;
+
+    #[test]
+    fn bar0_reaches_the_vga_ports() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.bus.configure_voodoo(Some(Board::Voodoo3));
+        let bus = &mut cpu.bus;
+        // CRTC index and data in one word, as at 3D4h.
+        bus.voodoo_write_16(0xD4, 0x2A13);
+        assert_eq!(bus.vga.crtc_regs[0x13], 0x2A);
+        assert_eq!(bus.voodoo_read_8(0xD5), 0x2A);
+        // The same 256 bytes again higher up, and the card's own CRTC
+        // registers past 18h.
+        bus.voodoo_write_8(0x1_00D4, 0x1A);
+        bus.voodoo_write_8(0x1_00D5, 0x04);
+        assert_eq!(bus.banshee_crtc_read(0x1A), 0x04);
+        assert_eq!(bus.voodoo_read_16(0xD4), 0x041A);
     }
 }

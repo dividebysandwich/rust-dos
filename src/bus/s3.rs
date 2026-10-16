@@ -197,7 +197,7 @@ impl Bus {
     /// A VGA register as a read of its port gives it, for the ViRGE's
     /// memory-mapped copies: the CRTC, the sequencer's and graphics
     /// controller's indexes and data, and Input Status 1.
-    fn vga_peek(&self, port: u16) -> u8 {
+    pub(crate) fn vga_peek(&self, port: u16) -> u8 {
         let vga = &self.vga;
         match port {
             0x3D4 | 0x3B4 => vga.crtc_index,
