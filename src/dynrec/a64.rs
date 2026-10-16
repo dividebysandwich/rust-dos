@@ -1839,6 +1839,14 @@ impl Gen<'_> {
                     self.flag_op(arith, set, self.dirty);
                 }
             }
+            Uop::FlagsFrom { t, mask } => {
+                // As x86-64's.
+                if self.live_after & mask != 0 {
+                    self.mov32(9, mask);
+                    dynasm!(self.ops ; .arch aarch64 ; and w5, W(r(t)), w9);
+                    self.merge(mask);
+                }
+            }
             Uop::CheckIopl => {
                 let (gp, ok) = (self.fault_exit(EXIT_GP0), self.ops.new_dynamic_label());
                 self.field(Access::Ldr32, 0, layout::CR0);
@@ -2244,6 +2252,21 @@ impl Gen<'_> {
                 if canon {
                     self.fpu_canon(d(x));
                 }
+            }
+            Uop::FLoadInt64 { x, m } => {
+                // As x86-64's.
+                let at = self.ops.new_dynamic_label();
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; ldr x1, [x21, X(r(m))]
+                    ; asr x2, x1, 53
+                    ; add x2, x2, 1
+                    ; cmp x2, 1
+                    ; b.hi =>at
+                    ; scvtf D(d(x)), x1
+                );
+                let end = self.end();
+                self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, leave: false });
             }
             Uop::FToHalf { t, x, high } => {
                 dynasm!(self.ops ; .arch aarch64 ; fmov X(r(t)), D(d(x)));

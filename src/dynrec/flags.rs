@@ -49,7 +49,7 @@ impl Uop {
             Uop::Imul { .. } | Uop::MulWide { .. } | Uop::BitOp { .. } => CF | OF,
             // As a 486 leaves them (instructions/arith.rs `division_flags`).
             Uop::DivWide { .. } => ARITH,
-            Uop::Flag { mask, .. } => mask & ARITH,
+            Uop::Flag { mask, .. } | Uop::FlagsFrom { mask, .. } => mask & ARITH,
             Uop::LoadFlags { .. } => ARITH,
             _ => 0,
         }
@@ -74,6 +74,7 @@ impl Uop {
             | Uop::FpuGuard { .. }
             | Uop::FBailPrecise { .. }
             | Uop::FToInt64 { .. }
+            | Uop::FLoadInt64 { .. }
             | Uop::SimdGuard { .. }
             | Uop::BailMisaligned { .. }
             | Uop::BailUnlessPlain { .. }

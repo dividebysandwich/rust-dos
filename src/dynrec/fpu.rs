@@ -261,6 +261,15 @@ pub fn translate(instr: &Instruction, fast: bool, u: &mut Vec<Uop>) -> bool {
             }
             u.push(Uop::Store { m: T1, src: T0, size: 4 });
         }
+        Fild_m64int => {
+            guard(u, 0);
+            if mem(instr, T1, 8, false, u).is_none() {
+                return false;
+            }
+            u.push(Uop::BailUnlessRam { t: T1 });
+            u.push(Uop::FLoadInt64 { x: X0, m: T1 });
+            u.push(Uop::FPush { x: X0, canon: false });
+        }
         Fist_m16int | Fist_m32int | Fistp_m16int | Fistp_m32int => {
             let size = if matches!(instr.code(), Fist_m16int | Fistp_m16int) { 2 } else { 4 };
             guard(u, 1);

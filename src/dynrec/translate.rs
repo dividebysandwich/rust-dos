@@ -6,7 +6,7 @@ use iced_x86::{Code, ConditionCode, Instruction, Mnemonic, OpKind, Register};
 
 use super::uop::*;
 use crate::cpu::Seg;
-use crate::cpu::alu::ShiftOp;
+use crate::cpu::alu::{ARITH, OF, ShiftOp};
 use crate::instructions::operand::{addr_size, mem_seg};
 
 /// Flags bits the flag instructions change.
@@ -88,6 +88,11 @@ pub fn translate(
         Clc => flag(CF, Some(false), &mut u),
         Stc => flag(CF, Some(true), &mut u),
         Cmc => flag(CF, None, &mut u),
+        Sahf => {
+            u.push(Uop::Get { t: T0, r: Gpr { index: 0, high: true, size: 1 } });
+            u.push(Uop::FlagsFrom { t: T0, mask: ARITH & !OF });
+            true
+        }
         Cld => flag(DF, Some(false), &mut u),
         Cli => {
             // (Clearing IF makes no interrupt deliverable: the block goes on.)

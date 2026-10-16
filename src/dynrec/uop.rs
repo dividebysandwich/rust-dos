@@ -353,6 +353,9 @@ pub enum Uop {
     DivWide { signed: bool, size: u8, t: T },
     /// Set (Some(true)), clear or complement (None) the flags in `mask`.
     Flag { mask: u32, set: Option<bool> },
+    /// The arithmetic flags in `mask` = those bits of t, the others as
+    /// they were (SAHF).
+    FlagsFrom { t: T, mask: u32 },
     /// t = 1 if condition `cc` holds on the flags, else 0 (SETcc).
     SetCond { t: T, cc: ConditionCode },
     /// BT, BTS, BTR or BTC of bit `bit` (modulo size * 8) of t, a `size`
@@ -474,6 +477,11 @@ pub enum Uop {
     /// x = the double at handle m, which is RAM's (`BailUnlessRam`); with
     /// `canon` as `FSet` makes one (the handlers' `canon_f64` of an operand).
     FLoad64 { x: X, m: T, canon: bool },
+    /// x = the signed qword at handle m, which is RAM's (`BailUnlessRam`),
+    /// where the double holds it exactly (below 2^53 either way); else the
+    /// instruction's handler runs it instead of the operations after this
+    /// one, as `Bail`.
+    FLoadInt64 { x: X, m: T },
     /// t = the low dword of x's bits, or the high one with `high`.
     FToHalf { t: T, x: X, high: bool },
     /// t = x as a single's bits.
