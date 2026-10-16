@@ -165,6 +165,12 @@ impl Bus {
     pub(crate) fn banshee_settle(&mut self) {
         let crtc = self.vga.crtc_regs;
         let (misc, seq01) = (self.vga.misc_output_reg, self.vga.sequencer_regs[1]);
+        let now = self.voodoo_now();
+        if let Some(v) = &mut self.voodoo
+            && v.banshee().is_some_and(|b| b.crtc[0x11] != crtc[0x11])
+        {
+            v.banshee_crtc11(crtc[0x11], now);
+        }
         let Some(b) = self.banshee_mut() else { return };
         b.crtc[..crtc.len()].copy_from_slice(&crtc);
         b.misc_output = misc;
@@ -181,6 +187,45 @@ impl Bus {
         }
         if extended {
             self.vga.mark_dirty_full();
+        }
+        self.sync_banshee_irq();
+    }
+
+    /// Drive the card's interrupt line, the vertical retrace interrupt's:
+    /// raise the request when it goes up, withdraw it when it drops.
+    pub(crate) fn sync_banshee_irq(&mut self) {
+        let now = self.voodoo_now();
+        let Some(v) = &mut self.voodoo else { return };
+        let line = v.banshee_irq(now);
+        let Some(b) = v.banshee.as_deref_mut() else { return };
+        let old = std::mem::replace(&mut b.irq_up, line);
+        // An interrupt armed is among the timer events.
+        self.clock.schedule(self.next_event());
+        if old == line {
+            return;
+        }
+        if let Some(old) = old {
+            self.pic.lower(old);
+        }
+        if let Some(irq) = line {
+            self.pic.raise(irq);
+        }
+        self.refresh_irq();
+    }
+
+    /// When the card's vertical retrace interrupt comes up, if it is
+    /// armed.
+    pub(crate) fn banshee_next_event(&self) -> Option<u64> {
+        self.voodoo.as_ref()?.banshee_vint_due()
+    }
+
+    /// Input Status 0 with the card's: bit 7, a vertical retrace
+    /// interrupt pending.
+    pub(crate) fn banshee_input_status(&mut self, value: u8) -> u8 {
+        let now = self.voodoo_now();
+        match &self.voodoo {
+            Some(v) if v.banshee_vint_pending(now) => value | 0x80,
+            _ => value,
         }
     }
 

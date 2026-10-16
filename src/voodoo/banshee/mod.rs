@@ -47,6 +47,8 @@ pub const LINEAR: u32 = BAR_SIZE;
 pub const INITIAL_BAR0: u32 = 0xD000_0000;
 pub const INITIAL_BAR1: u32 = 0xD200_0000;
 pub const INITIAL_IO: u32 = 0xD000;
+/// The interrupt line the BIOS routes INTA# to.
+pub const IRQ: u8 = 11;
 /// The memory: 16 MB of SGRAM.
 pub const MEMORY: usize = 16 << 20;
 
@@ -187,7 +189,7 @@ impl Default for Pci {
             bar0: INITIAL_BAR0,
             bar1: INITIAL_BAR1,
             io: INITIAL_IO,
-            interrupt_line: 0xFF,
+            interrupt_line: IRQ,
         }
     }
 }
@@ -229,6 +231,12 @@ pub struct Banshee {
     pub seq01: u8,
     /// intrCtrl.
     pub intr_ctrl: u32,
+    /// The VGA's vertical retrace interrupt, which CRTC register 11h's
+    /// bit 4 arms: armed at retrace `r`, it is pending from retrace
+    /// `r + 1` until the bit is written 0. None while it is held clear.
+    pub vint: Option<u64>,
+    /// The interrupt request the card has up.
+    pub irq_up: Option<u8>,
     pub agp: Agp,
     pub fifo: [fifo::Fifo; 2],
     pub engine: blit2d::Engine,
@@ -247,8 +255,8 @@ pub struct Banshee {
 }
 
 crate::state_fields!(Banshee {
-    pci, ext, clut, crtc, misc_output, seq01, intr_ctrl, agp, fifo, engine,
-    overlay_addr, overlay_queue, swap_count,
+    pci, ext, clut, crtc, misc_output, seq01, intr_ctrl, vint, irq_up, agp,
+    fifo, engine, overlay_addr, overlay_queue, swap_count,
 } skip { kind, ddc, dirty });
 
 impl Banshee {
@@ -262,6 +270,8 @@ impl Banshee {
             misc_output: 0,
             seq01: 0,
             intr_ctrl: 0,
+            vint: None,
+            irq_up: None,
             agp: Agp::default(),
             fifo: Default::default(),
             engine: Default::default(),
@@ -289,6 +299,8 @@ impl Banshee {
             misc_output: 0,
             seq01: 0,
             intr_ctrl: 0,
+            vint: None,
+            irq_up: None,
             agp: Agp::default(),
             fifo: Default::default(),
             engine: blit2d::Engine::default(),
@@ -327,8 +339,8 @@ impl Banshee {
 
     /// A byte of the configuration space: a VGA-compatible display
     /// controller (class 0300h), the BARs, the subsystem, and the power
-    /// management capability at 60h (86Box's `banshee_pci_read`). No
-    /// interrupt pin: the machine routes none.
+    /// management capability at 60h (86Box's `banshee_pci_read`), and
+    /// INTA# for the vertical retrace interrupt.
     pub fn config_read(&self, reg: u8) -> u8 {
         let dword = match reg & 0xFC {
             0x00 => (self.kind.device_id() as u32) << 16 | 0x121A,
@@ -340,7 +352,8 @@ impl Banshee {
             0x18 => self.pci.io | 0x01,
             0x2C => self.kind.subsystem(),
             0x34 => 0x60,
-            0x3C => self.pci.interrupt_line as u32,
+            // INTA#, routed to `interrupt_line`.
+            0x3C => 0x0100 | self.pci.interrupt_line as u32,
             0x40 => 0x01,
             // Power management, version 1.1, no next capability.
             0x60 => 0x0021_0001,
@@ -617,6 +630,54 @@ impl Voodoo {
         b.status(in_retrace, self.outstanding.get())
     }
 
+    /// CRTC register 11h now holds `value`: bit 4 written 0 clears the
+    /// vertical retrace interrupt and holds it clear, written 1 arms it
+    /// for the next retrace (86Box's `banshee_out`).
+    pub fn banshee_crtc11(&mut self, value: u8, now: Now) {
+        let current = self.retraces(now.ns);
+        let Some(b) = &mut self.banshee else { return };
+        if value & 0x10 == 0 {
+            b.vint = None;
+        } else if b.vint.is_none() {
+            b.vint = Some(current);
+        }
+    }
+
+    /// Whether a vertical retrace interrupt is pending: Input Status 0's
+    /// bit 7.
+    pub fn banshee_vint_pending(&self, now: Now) -> bool {
+        let current = self.retraces(now.ns);
+        self.banshee
+            .as_ref()
+            .and_then(|b| b.vint)
+            .is_some_and(|armed| current > armed)
+    }
+
+    /// Whether the card may interrupt: CRTC register 11h's bit 5 clear
+    /// and pciInit0's bit 18 set.
+    fn banshee_vint_enabled(&self) -> bool {
+        self.banshee.as_ref().is_some_and(|b| {
+            b.crtc[0x11] & 0x20 == 0 && b.reg(PCI_INIT0) & (1 << 18) != 0
+        })
+    }
+
+    /// The interrupt line the card drives now, if it drives one.
+    pub fn banshee_irq(&self, now: Now) -> Option<u8> {
+        let b = self.banshee.as_ref()?;
+        let line = b.pci.interrupt_line;
+        (line < 16 && self.banshee_vint_enabled() && self.banshee_vint_pending(now))
+            .then_some(line)
+    }
+
+    /// When, in PIT ticks, the armed interrupt becomes pending, while it
+    /// isn't yet up.
+    pub fn banshee_vint_due(&self) -> Option<u64> {
+        let b = self.banshee.as_ref()?;
+        let armed = b.vint?;
+        (b.irq_up.is_none() && self.banshee_vint_enabled())
+            .then(|| self.retrace_ticks(armed + 1))
+    }
+
     /// The init register at byte `offset` (I/O BAR or BAR0), as the CPU
     /// reads it.
     pub fn banshee_ext_read(&self, offset: u32, now: Now) -> u32 {
@@ -681,6 +742,10 @@ impl Voodoo {
                     && let Some(b) = &self.banshee
                 {
                     self.fbi.yorigin = b.y_origin();
+                }
+                // pciInit0 lets the interrupt out or holds it in.
+                if offset & 0xFC == PCI_INIT0 {
+                    effect.settle = true;
                 }
                 self.display_dirty = true;
             }

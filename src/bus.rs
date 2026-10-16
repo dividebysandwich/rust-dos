@@ -1336,6 +1336,7 @@ impl Bus {
             sb,
             gus,
             self.voodoo_next_event(),
+            self.banshee_next_event(),
             self.powervr_next_event(),
             self.ide_next_event(),
             self.fdc_next_event(),
@@ -1369,6 +1370,9 @@ impl Bus {
         }
         if self.voodoo_next_event().is_some_and(|t| t <= now) {
             self.voodoo_service();
+        }
+        if self.banshee_next_event().is_some_and(|t| t <= now) {
+            self.sync_banshee_irq();
         }
         if self.powervr_next_event().is_some_and(|t| t <= now) {
             self.powervr_service();
@@ -2426,6 +2430,10 @@ impl Bus {
             return self.banshee_port_read(offset, now_ns);
         }
         match port {
+            0x3C2 if self.banshee().is_some() => {
+                let value = self.vga.io_read(port);
+                self.banshee_input_status(value)
+            }
             // ISA Plug and Play's READ_DATA port, wherever software put it,
             // while a card answers there.
             p if self.isapnp.as_ref().is_some_and(|pnp| pnp.reads(p)) => self.isapnp.as_mut().map_or(0xFF, |pnp| pnp.read_data()),
