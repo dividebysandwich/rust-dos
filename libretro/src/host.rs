@@ -195,6 +195,9 @@ impl Host for Machine {
         if new.auto_fps != old.auto_fps {
             self.pacer.set_auto_fps(new.auto_fps);
         }
+        if new.auto_busy_os != old.auto_busy_os {
+            self.pacer.set_busy_os(new.auto_busy_os);
+        }
         if new.core != old.core {
             self.cpu.core = new.core;
         }

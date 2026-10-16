@@ -151,15 +151,13 @@ mod tests {
 
     #[test]
     fn whether_the_system_idles_goes_into_the_state() {
-        let dir = std::env::temp_dir().join(format!("rust-dos-idle-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut cpu = Cpu::new(dir);
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
         cpu.os_idles = true;
         let (state, parts) = save_parts(&cpu);
         cpu.os_idles = false;
         load(&mut cpu, &state).unwrap();
         assert!(cpu.os_idles);
-        // A state from before the section, which is the last, has none seen.
+        // A state from before the section (the last) has none seen.
         let idle = parts.iter().find(|(name, _)| name == "IDLE").expect("the section").1.clone();
         assert_eq!(idle.end, state.len());
         load(&mut cpu, &state[..idle.start]).unwrap();

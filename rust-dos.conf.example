@@ -79,6 +79,10 @@
 # The frame rate cycles=auto aims for: auto (the default) for the
 # display's refresh rate, or 10 to 240 frames a second in its place.
 #auto_fps=auto
+# Whether cycles=auto runs a program at max while it keeps a system that
+# idles (Windows 95 and 98) from halting the processor, as a 3D
+# benchmark building its next scene does: true (the default) or false.
+#auto_busy_os=true
 # Processor: 486 (the default, a 486DX with FPU), 386, pentium (with
 # CPUID, the time stamp counter, MSRs, CMPXCHG8B and 4 MB pages),
 # pentium_mmx (that Pentium with MMX), k6_2 (an AMD K6-2: the Pentium

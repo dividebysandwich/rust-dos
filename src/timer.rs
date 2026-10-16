@@ -619,10 +619,11 @@ impl Pacer {
         self.auto = self.auto.with(self.auto.base(), fps);
     }
 
-    /// The emulated CPU model, whose clock sets how slow `Auto` lets a
-    /// protected-mode program go (`CpuModel::auto_least`).
-    pub fn set_cpu_model(&mut self, model: crate::cpu::CpuModel) {
-        self.auto.set_protected_least(model.auto_least());
+    /// A pacer for `settings`' speed, `auto_fps` and `auto_busy_os`.
+    pub fn for_settings(settings: &crate::config::Settings, now: Instant) -> Self {
+        let mut pacer = Self::new(settings.cycles, settings.auto_fps, now);
+        pacer.set_busy_os(settings.auto_busy_os);
+        pacer
     }
 
     /// Whether `Auto` gives a program that keeps an idling protected-mode
@@ -631,16 +632,23 @@ impl Pacer {
         self.auto.set_busy_os(on);
     }
 
-    /// Whether `Auto` saw the protected-mode system idle (`Cpu::os_idles`,
-    /// which the machine keeps and save states carry).
-    pub fn os_idles(&self) -> bool {
-        self.auto.idles()
-    }
-
-    /// What the machine knows of its system's idling (`Cpu::os_idles`),
-    /// before `end_frame`.
-    pub fn set_os_idles(&mut self, idles: bool) {
-        self.auto.set_idles(idles);
+    /// `end_frame` for `cpu`'s machine. `Auto` takes its CPU model, whose
+    /// clock sets how slow a protected-mode program may go
+    /// (`CpuModel::auto_least`) and which the settings window can change,
+    /// and whether its system was seen idling (`Cpu::os_idles`, which a
+    /// state loaded brings); the machine keeps what `Auto` saw.
+    pub fn end_cpu_frame(
+        &mut self,
+        cpu: &mut crate::cpu::Cpu,
+        executed: u64,
+        exec: Duration,
+        overhead: Duration,
+    ) -> Option<u32> {
+        self.auto.set_protected_least(cpu.model.auto_least());
+        self.auto.set_idles(cpu.os_idles);
+        let next = self.end_frame(&cpu.bus, cpu.pm_latched, executed, exec, overhead);
+        cpu.os_idles = self.auto.idles();
+        next
     }
 
     /// The instruction count the next batch should run to, so emulated time
