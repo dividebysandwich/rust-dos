@@ -27,6 +27,13 @@ pub const AR_DATA_RW: u16 = super::regs::AR_DATA_RW;
 pub const RIGHT_READ: u8 = super::regs::RIGHT_READ;
 pub const RIGHT_WRITE: u8 = super::regs::RIGHT_WRITE;
 pub const CR0: usize = offset_of!(Cpu, cr0);
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub const CR4: usize = offset_of!(Cpu, cr4);
+/// XMM0-XMM7 (16 bytes each) and MXCSR.
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub const XMM: usize = offset_of!(Cpu, sse.xmm);
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub const MXCSR: usize = offset_of!(Cpu, sse.mxcsr);
 pub const CPL: usize = offset_of!(Cpu, cpl);
 pub const EXECUTED: usize = offset_of!(Cpu, executed);
 pub const ICOUNT: usize = offset_of!(Cpu, bus.clock.icount);

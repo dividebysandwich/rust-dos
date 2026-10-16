@@ -27,6 +27,8 @@ mod fpu;
 #[cfg(dynrec)]
 mod helpers;
 #[cfg(dynrec)]
+mod simd;
+#[cfg(dynrec)]
 mod translate;
 #[cfg(dynrec)]
 mod uop;
@@ -618,17 +620,27 @@ mod engine {
             let real = key.mode & ENV_REAL != 0;
             let fast_fpu = cpu.fpu_fast;
             let i486 = cpu.model >= CpuModel::I486;
-            // The block goes on after a conditional jump its code takes.
-            let side = |instr: &iced_x86::Instruction| {
-                super::translate::translate(instr, instr.next_ip32(), stack32, backend::SYSTEM, backend::SEGMENTS, backend::FPU, fast_fpu, real, i486).is_some()
+            let simd = if backend::SIMD {
+                let mmx = if cpu.model.has_mmx() { super::simd::MMX } else { 0 };
+                mmx | if cpu.model.has_sse() { super::simd::SSE } else { 0 }
+            } else {
+                0
             };
+            let (system, segments, fpu) = (backend::SYSTEM, backend::SEGMENTS, backend::FPU);
+            // An instruction's operations, as `translate::translate` gives them.
+            let uops = |instr: &iced_x86::Instruction, next: u32| {
+                use super::translate::translate;
+                translate(instr, next, stack32, system, segments, fpu, fast_fpu, real, i486, simd)
+            };
+            // The block goes on after a conditional jump its code takes.
+            let side = |instr: &iced_x86::Instruction| uops(instr, instr.next_ip32()).is_some();
             let max = if single { 1 } else { MAX_BLOCK };
             let data = BlockData::build(at, cpu.bus.ram(), &cpu.bus.page_gen, max, pokes, backend::TAIL, side)?;
             cpu.bus.mark_code(data.phys as usize, (data.phys + data.len) as usize);
             let mut items: Vec<_> = (0..data.count())
                 .map(|ix| {
                     let next = data.eips[ix].wrapping_add(data.instrs[ix].len() as u32);
-                    super::translate::translate(&data.instrs[ix], next, stack32, backend::SYSTEM, backend::SEGMENTS, backend::FPU, fast_fpu, real, i486)
+                    uops(&data.instrs[ix], next)
                 })
                 .collect();
             // Instructions whose only watched bytes are their immediate (a

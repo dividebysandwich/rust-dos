@@ -105,6 +105,9 @@ pub struct JitCtx {
     pub far_base: u32,
     /// Values kept for `Uop::Spill`.
     pub scratch: [u32; 2],
+    /// Where `Uop::VFloat` puts the host's MXCSR as it runs the operation,
+    /// and the host's own (x86-64).
+    pub mxcsr: [u32; 2],
     /// The block the code returned from.
     pub exit_data: *mut BlockData,
     /// `jit_memref`, `jit_read` and `jit_write`.
@@ -201,6 +204,8 @@ pub const CTX_VGA_OK: i32 = offset_of!(JitCtx, vga_ok) as i32;
 pub const CTX_FAR_BLOCK: i32 = offset_of!(JitCtx, far_block) as i32;
 pub const CTX_FAR_BASE: i32 = offset_of!(JitCtx, far_base) as i32;
 pub const CTX_SCRATCH: i32 = offset_of!(JitCtx, scratch) as i32;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub const CTX_MXCSR: i32 = offset_of!(JitCtx, mxcsr) as i32;
 pub const CTX_VGA_WROTE: i32 = offset_of!(JitCtx, vga_wrote) as i32;
 pub const CTX_VGA_PLANES: i32 = offset_of!(JitCtx, vga_planes) as i32;
 pub const CTX_REVALIDATE: i32 = offset_of!(JitCtx, revalidate) as i32;
@@ -289,6 +294,7 @@ impl JitCtx {
             far_block: std::ptr::null(),
             far_base: 0,
             scratch: [0; 2],
+            mxcsr: [0, crate::instructions::sse::float::MXCSR_DEFAULT],
             stack32: false,
             exit_data: std::ptr::null_mut(),
             memref: jit_memref as *const () as usize,
@@ -790,8 +796,8 @@ fn guard<R>(ctx: &mut JitCtx, fallback: R, f: impl FnOnce() -> R) -> R {
 /// How a MemRef's operand is described to `jit_memref`: the segment, the
 /// size, whether it is written, and the slot.
 pub fn memref_desc(seg: Seg, size: u8, write: bool, slot: u8) -> u32 {
-    debug_assert!(size < 16);
-    seg as u32 | (size as u32) << 4 | (write as u32) << 8 | (slot as u32) << 9
+    debug_assert!(size <= 16);
+    seg as u32 | (size as u32) << 4 | (write as u32) << 9 | (slot as u32) << 10
 }
 
 jit_fn! {
@@ -807,9 +813,9 @@ jit_fn! {
         ctx.calls.memref += 1;
         let _profile = crate::profile::zone(crate::profile::Zone::JitSlowMem);
         let seg = Seg::ALL[(desc & 7) as usize];
-        let size = (desc >> 4 & 15) as u8;
-        let access = if desc & 0x100 != 0 { Access::Write } else { Access::Read };
-        let slot = (desc >> 9 & 3) as usize;
+        let size = (desc >> 4 & 31) as u8;
+        let access = if desc & 0x200 != 0 { Access::Write } else { Access::Read };
+        let slot = (desc >> 10 & 3) as usize;
         // (The operand goes straight into its slot: handed back through
         // the guard, its two dwords would be stored apart and loaded as
         // one, which the host can't forward.)

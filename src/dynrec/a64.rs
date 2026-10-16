@@ -529,6 +529,9 @@ pub const SYSTEM: bool = true;
 pub const SEGMENTS: bool = true;
 /// Whether it has those of FPU instructions.
 pub const FPU: bool = true;
+/// Not those of MMX and SSE instructions, which go through their
+/// handlers.
+pub const SIMD: bool = false;
 
 pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: super::Env) -> Code {
     let mut ops = Asm::new(0);
@@ -2340,6 +2343,18 @@ impl Gen<'_> {
             }
             Uop::FGetControl { t } => self.field(Access::Ldr16, r(t), layout::fpu::CONTROL),
             Uop::FSetControl { t } => self.field(Access::Str16, r(t), layout::fpu::CONTROL),
+            // (`SIMD` is false: the handlers run these instructions.)
+            Uop::SimdGuard { .. }
+            | Uop::BailMisaligned { .. }
+            | Uop::BailUnlessPlain { .. }
+            | Uop::VLoad { .. }
+            | Uop::VOp { .. }
+            | Uop::VFloat { .. }
+            | Uop::VToT { .. }
+            | Uop::VSet { .. }
+            | Uop::VStore { .. }
+            | Uop::EnterMmx
+            | Uop::Emms => unreachable!("MMX and SSE aren't translated for ARM64"),
         }
     }
 
