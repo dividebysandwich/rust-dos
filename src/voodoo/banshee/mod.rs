@@ -464,9 +464,11 @@ impl Banshee {
 
     /// The swap count, pending swaps and busy bits of the status register
     /// (86Box's `banshee_status`) but for the retrace (`in_retrace`).
+    /// The PCI FIFO is always empty; bit 6 is set outside the vertical
+    /// retrace, as the specification's section 16.1 says.
     pub fn status(&self, in_retrace: bool, busy: bool) -> u32 {
-        let mut status = 0x1F | 0x20;
-        if in_retrace {
+        let mut status = 0x1F;
+        if !in_retrace {
             status |= 1 << 6;
         }
         let fifo_busy = [0, 1].map(|n| self.fifo[n].enabled && self.fifo[n].depth > 0);
