@@ -593,6 +593,27 @@
 #seat_forward=0
 #seat_turn=0
 
+[vfx1]
+# The Forte VFX1 headset of 1995: its card (VIPPORT) and driver in the
+# machine, and the headset on the desk of the 3D scene, to put on in a VR
+# headset.
+#enabled=false
+# The card's port: 260, 280, 2A0 or 2C0.
+#port=260
+# How each eye's picture is taken from the screen: auto, pages (the VFX1's
+# own, halves of a 640x480 screen on every other line), lines (even lines
+# left, odd right), side (left and right halves) or mono.
+#stereo=auto
+#swap_eyes=false
+# How wide the pictures look, in degrees (20 to 110; the VFX1's was 36).
+#view_size=36
+# The head's movement made larger as a game draws more than 30 frames a
+# second, for games that turn by it (Descent).
+#steer=false
+# Answer as the 3D BIOS of shutter glasses too, for games that draw
+# interlaced stereo for them (Descent 2 in 800x600).
+#stereo_bios=true
+
 [drives]
 # Mount host directories, or floppy, hard disk or CD images, as DOS drives
 # A: to Y:

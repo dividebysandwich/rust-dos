@@ -657,6 +657,10 @@ fn gate_array_palette_function(cpu: &mut Cpu) {
 }
 
 pub fn handle(cpu: &mut Cpu) {
+    // The 3D BIOS of shutter glasses, for the VFX1 (AX=4ED0h, 4FD0h).
+    if crate::vfx1::bios3d::handle(cpu) {
+        return;
+    }
     let ah = cpu.get_ah();
     let adapter = cpu.bus.vga.adapter;
 

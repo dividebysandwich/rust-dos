@@ -115,6 +115,7 @@ pub mod timer;
 pub mod ultrasnd;
 pub mod verite;
 pub mod version_check;
+pub mod vfx1;
 pub mod vhd;
 pub mod video;
 pub mod voodoo;

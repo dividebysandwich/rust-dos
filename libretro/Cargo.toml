@@ -4,7 +4,7 @@ description = "rust-dos as a libretro core, for RetroArch and the other libretro
 authors = ["dividebysandwich"]
 repository = "https://github.com/dividebysandwich/rust-dos"
 license = "GPL-2.0-or-later"
-version = "1.7.3"
+version = "1.7.4"
 edition = "2024"
 publish = false
 
@@ -24,7 +24,7 @@ glow = "0.18.0"
 
 [dev-dependencies]
 # To make a game's zip in the tests.
-zip = { version = "8.6", default-features = false }
+zip = { version = "9.0.4", default-features = false }
 
 # A workspace of its own, for a release profile that doesn't change the
 # rust-dos program's builds.

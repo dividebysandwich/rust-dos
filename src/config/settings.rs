@@ -117,6 +117,8 @@ pub struct Settings {
     pub shell: crate::cmdline::settings::ShellSettings,
     /// `[vr]`: the picture in a 3D scene.
     pub vr: crate::vr::VrSettings,
+    /// `[vfx1]`: the Forte VFX1 headset.
+    pub vfx1: crate::vfx1::Vfx1Settings,
 }
 
 impl Default for Settings {
@@ -176,6 +178,7 @@ impl Default for Settings {
             achievements: Default::default(),
             shell: Default::default(),
             vr: Default::default(),
+            vfx1: Default::default(),
         }
     }
 }
@@ -210,6 +213,7 @@ impl Settings {
     pub fn environment(&self) -> Vec<crate::env_inject::Rule> {
         let mut rules = Vec::new();
         rules.extend(self.voodoo.environment());
+        rules.extend(self.vfx1.environment());
         rules
     }
 
@@ -293,6 +297,7 @@ impl Settings {
             achievements: config.achievements.clone(),
             shell: config.shell,
             vr: config.vr.clone(),
+            vfx1: config.vfx1,
         }
     }
 }
@@ -442,5 +447,7 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
     entries.extend(settings.achievements.entries().into_iter().map(|(key, value)| (Section::Achievements, key, value)));
     entries.extend(settings.shell.entries().into_iter().map(|(key, value)| (Section::Shell, key, value)));
     entries.extend(settings.vr.entries().into_iter().map(|(key, value)| (Section::Vr, key, value)));
+    let vfx1 = settings.vfx1.entries().into_iter();
+    entries.extend(vfx1.map(|(key, value)| (Section::Vfx1, key, value)));
     entries
 }

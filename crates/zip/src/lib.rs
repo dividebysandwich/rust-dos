@@ -65,7 +65,8 @@ pub fn central_directory<F: Read + Seek>(file: &mut F) -> Result<Vec<ZipEntry>, 
             .map(|i| {
                 let file = archive.by_index_raw(i).map_err(|e| format!("a damaged ZIP entry: {}", e))?;
                 let raw_name = file.name_raw().to_vec();
-                let path = file.name().replace('\\', "/").trim_end_matches('/').to_string();
+                let name = file.name().map_err(|e| format!("a damaged ZIP entry: {}", e))?;
+                let path = name.replace('\\', "/").trim_end_matches('/').to_string();
                 let dir = file.is_dir() || raw_name.last() == Some(&b'\\');
                 headers.push(file.central_header_start());
                 let (date, time) = file.last_modified().map_or((0, 0), |t| (t.datepart(), t.timepart()));
@@ -81,7 +82,7 @@ pub fn central_directory<F: Read + Seek>(file: &mut F) -> Result<Vec<ZipEntry>, 
                     crc: file.crc32(),
                     compressed: file.compressed_size(),
                     size: file.size(),
-                    data_at: file.data_start().ok_or_else(|| format!("{}: damaged", file.name()))?,
+                    data_at: file.data_start().ok_or_else(|| format!("{}: damaged", name))?,
                     time,
                     date,
                     raw_name,

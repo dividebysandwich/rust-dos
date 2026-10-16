@@ -97,12 +97,22 @@ impl Bt485 {
         self.command[0] & 0x80 != 0 && self.address == 1
     }
 
-    /// The cursor RAM's address: bits 8-9 from command register 3.
+    /// The cursor RAM's address: bits 8-9 from command register 3 for a
+    /// 64x64 cursor. A 32x32 one has 256 bytes, as the Bt484's, and the
+    /// address wraps from FFh to 0: the Windows drivers load both planes
+    /// in one run from 80h.
     fn cursor_ram_address(&self) -> usize {
+        if self.command[3] & 0x04 == 0 {
+            return self.address as usize;
+        }
         ((self.command[3] as usize & 3) << 8) | self.address as usize
     }
 
     fn advance_cursor_ram(&mut self) {
+        if self.command[3] & 0x04 == 0 {
+            self.address = self.address.wrapping_add(1);
+            return;
+        }
         let next = (self.cursor_ram_address() + 1) & 0x3FF;
         self.address = next as u8;
         self.command[3] = (self.command[3] & !3) | (next >> 8) as u8;
@@ -292,6 +302,20 @@ mod tests {
         assert_eq!(dac.cursor_size(), Some(64));
         assert_eq!(dac.cursor_origin(), Some((100, 50)));
         assert_eq!(dac.cursor_pixel(63, 63), CursorPixel::Colour(1));
+    }
+
+    #[test]
+    fn a_32x32_cursors_ram_wraps_at_its_256_bytes() {
+        let (mut dac, mut palette) = (Bt485::default(), vec![0u8; 768]);
+        // Plane 1 from 80h, then on round to plane 0 at 0.
+        dac.write(0x0, 0x80, &mut palette);
+        for i in 0..256 {
+            dac.write(0xB, if i < 128 { 0x00 } else { 0xFF }, &mut palette);
+        }
+        dac.write(0x9, 0x02, &mut palette);
+        assert_eq!(dac.cursor_size(), Some(32));
+        assert_eq!(dac.cursor_pixel(0, 0), CursorPixel::Colour(2), "plane 0 set, plane 1 clear");
+        assert!(dac.cursor_ram[0x100..].iter().all(|&b| b == 0));
     }
 
     #[test]

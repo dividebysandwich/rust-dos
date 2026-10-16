@@ -213,6 +213,12 @@ impl Item {
             VrWeather => each(s, crate::vr::VrWeather::ALL, |s, w| s.vr.weather = w),
             VrLightning => on_off(|s, on| s.vr.lightning = on),
             VrGraphics => each(s, crate::vr::VrGraphics::ALL, |s, g| s.vr.graphics = g),
+            Vfx1 => on_off(|s, on| s.vfx1.enabled = on),
+            Vfx1Port => each(s, crate::vfx1::VIP_BASES, |s, port| s.vfx1.port = port),
+            Vfx1Stereo => each(s, crate::vfx1::Vfx1Stereo::ALL, |s, stereo| s.vfx1.stereo = stereo),
+            Vfx1SwapEyes => on_off(|s, on| s.vfx1.swap_eyes = on),
+            Vfx1Steer => on_off(|s, on| s.vfx1.steer = on),
+            Vfx1StereoBios => on_off(|s, on| s.vfx1.stereo_bios = on),
             Filter => each(s, [crate::config::Filter::Nearest, crate::config::Filter::Linear], |s, f| s.filter = f),
             Shader => each(s, crate::video::shader::Shader::ALL, |s, shader| s.shader = shader),
             Monochrome => each(s, crate::video::mono::Monochrome::ALL, |s, mono| s.monochrome = mono),
@@ -379,7 +385,7 @@ impl Item {
             Cycles | AutoFps | CrtCurvature | CrtGlow | Memsize | Volume(_) | ReverbMix | ChorusMix | Deadzone | MouseSensitivity | UltraDir
             | SoundFont | Mt32Roms | Awe32Rom | Awe32Download | Sc55Roms | Sc55Download | VoodooOverlay | CaptureDir | Autoexec | SbPorts | GusPorts | MacAddr
             | Rooms | Relay | Player | VrScene | VrScreenGlow | VrCenter | VrMarkKeyboard | VrSceneScale | VrSeat(_) | VrSeatTurn | VrResolution
-            | VrLatitude | VrWeatherSound
+            | VrLatitude | VrWeatherSound | Vfx1ViewSize
             | Lan | LanHost | Room | Password | ModemListen | Phonebook => Vec::new(),
         }
     }
@@ -434,6 +440,11 @@ impl Item {
             VrLatitude => {
                 let max = crate::vr::LATITUDE_MAX;
                 s.vr.latitude = (s.vr.latitude + dir as i32).clamp(-max, max);
+            }
+            Vfx1ViewSize => {
+                let (min, max) = (crate::vfx1::VIEW_SIZE_MIN, crate::vfx1::VIEW_SIZE_MAX);
+                let (min, max) = (min as isize, max as isize);
+                s.vfx1.view_size = (s.vfx1.view_size as isize + dir).clamp(min, max) as u32;
             }
             VrWeatherSound => {
                 let max = crate::vr::WEATHER_SOUND_MAX as u16;
@@ -507,6 +518,7 @@ impl Item {
             Item::VrSeatTurn => s.vr.seat_turn.to_string(),
             Item::VrLatitude => s.vr.latitude.to_string(),
             Item::VrWeatherSound => s.vr.weather_sound.to_string(),
+            Item::Vfx1ViewSize => s.vfx1.view_size.to_string(),
             Item::VrResolution => s.vr.resolution.map_or("auto".to_string(), |r| r.to_string()),
             Item::ReverbMix => s.mixer.reverb_mix.to_string(),
             Item::ChorusMix => s.mixer.chorus_mix.to_string(),
@@ -548,6 +560,7 @@ impl Item {
             Item::VrSeatTurn => s.vr.set("seat_turn", text, std::path::Path::new(""))?,
             Item::VrLatitude => s.vr.set("latitude", text, std::path::Path::new(""))?,
             Item::VrWeatherSound => s.vr.set("weather_sound", text, std::path::Path::new(""))?,
+            Item::Vfx1ViewSize => s.vfx1.set("view_size", text)?,
             Item::VrResolution => s.vr.set("resolution", text, std::path::Path::new(""))?,
             Item::ReverbMix => s.mixer.reverb_mix = crate::mixer::parse_mix(text)?,
             Item::ChorusMix => s.mixer.chorus_mix = crate::mixer::parse_mix(text)?,

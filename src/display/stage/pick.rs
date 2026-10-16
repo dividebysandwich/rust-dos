@@ -55,6 +55,8 @@ pub enum TargetId {
     Lamp(usize),
     /// A prop's camera, by the prop's index.
     Camera(usize),
+    /// A key of the keyboard's, by its index in its `Prop::keys`.
+    Key(usize),
 }
 
 /// How far along the ray it meets the box from `low` to `high`, if it

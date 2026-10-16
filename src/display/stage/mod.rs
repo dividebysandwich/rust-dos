@@ -10,7 +10,9 @@
 //! The PC in the scene has its lights lit as the machine's would be, the
 //! sound comes from the screen's sides, and the headset's controllers
 //! point at the screen as the mouse and are a gamepad. The game's manual
-//! and a joystick lie on the desk, to be picked up in the headset.
+//! and a joystick lie on the desk, to be picked up in the headset, and
+//! with `[vfx1]` a VFX1 headset to put on, which shows each eye the
+//! picture the game draws for it.
 
 mod camera;
 mod controls;
@@ -19,6 +21,7 @@ mod foveation;
 mod gi;
 #[cfg(xr)]
 mod headset;
+mod keycaps;
 #[cfg(xr)]
 mod keyboard;
 mod photo;
@@ -30,6 +33,9 @@ mod scene;
 mod shadow;
 mod sky;
 mod spatial;
+mod typing;
+#[cfg(xr)]
+mod visor;
 mod world;
 #[cfg(xr)]
 mod xr;
@@ -37,6 +43,7 @@ mod xr;
 use crate::video::shader::Glsl;
 use camera::FlyCamera;
 pub use controls::VrInput;
+pub use typing::KeyEvent;
 use super::audio_mix::Mix;
 use glam::{Mat4, Vec2};
 use glow::HasContext;
@@ -107,6 +114,12 @@ pub struct Stage {
     capture_dir: Option<PathBuf>,
     shots: Vec<usize>,
     photo_notes: Arc<std::sync::Mutex<Vec<String>>>,
+    /// The VFX1 on the desk (`[vfx1]`), and its eyes' pictures for the
+    /// headset, left and right, three of each as the screen's, and the
+    /// newest.
+    vfx1: bool,
+    eyes: [[glow::Texture; 2]; 3],
+    eyes_latest: Option<usize>,
 }
 
 /// How the window's view is drawn, as `look` says: timed with
@@ -194,6 +207,24 @@ impl Stage {
         let camera = start_camera(&scene);
         let props = props::Props::new(&scene);
         let world = Arc::new(World::new(settings));
+        let eye = || -> Result<glow::Texture, String> {
+            // SAFETY: see `GlScreen`.
+            unsafe {
+                let texture = gl.create_texture()?;
+                gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+                for (name, value) in [
+                    (glow::TEXTURE_MIN_FILTER, glow::LINEAR),
+                    (glow::TEXTURE_MAG_FILTER, glow::LINEAR),
+                    (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
+                    (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
+                ] {
+                    gl.tex_parameter_i32(glow::TEXTURE_2D, name, value as i32);
+                }
+                gl.bind_texture(glow::TEXTURE_2D, None);
+                Ok(texture)
+            }
+        };
+        let eyes = [[eye()?, eye()?], [eye()?, eye()?], [eye()?, eye()?]];
         world.set_scene(&scene);
         #[allow(unused_mut)]
         let mut stage = Stage {
@@ -226,6 +257,9 @@ impl Stage {
             capture_dir: None,
             shots: Vec::new(),
             photo_notes: Default::default(),
+            vfx1: false,
+            eyes,
+            eyes_latest: None,
         };
         if settings.mode == VrMode::Headset {
             notes.extend(stage.start_headset(settings, window, main));
@@ -244,9 +278,14 @@ impl Stage {
         #[cfg(xr)]
         {
             let textures = [self.screens[0].texture, self.screens[1].texture, self.screens[2].texture];
-            match headset::Headset::start(window, main, self.glsl, self.scene.clone(), textures, settings, self.world.clone()) {
+            let (scene, world) = (self.scene.clone(), self.world.clone());
+            let started = headset::Headset::start(
+                window, main, self.glsl, scene, textures, self.eyes, settings, world,
+            );
+            match started {
                 Ok(headset) => {
                     headset.set_manuals(self.manuals.clone());
+                    headset.set_vfx1(self.vfx1);
                     if let Some(dir) = &self.capture_dir {
                         headset.set_capture_dir(dir.clone());
                     }
@@ -279,6 +318,67 @@ impl Stage {
         self.gpu.delete(gl);
         for screen in self.screens {
             screen.delete(gl);
+        }
+        for texture in self.eyes.into_iter().flatten() {
+            // SAFETY: see `GlScreen`.
+            unsafe { gl.delete_texture(texture) };
+        }
+    }
+
+    /// The VFX1 on the desk (`[vfx1]`), or not.
+    pub fn set_vfx1(&mut self, there: bool) {
+        if there == self.vfx1 {
+            return;
+        }
+        self.vfx1 = there;
+        self.props.set_vfx1(there);
+        #[cfg(xr)]
+        if let Some(headset) = &self.headset {
+            headset.set_vfx1(there);
+        }
+    }
+
+    /// The VFX1's head tracker and puck, while the headset wears it.
+    pub fn vfx1(&self) -> Option<rust_dos::vfx1::Tracking> {
+        #[cfg(xr)]
+        return self.headset.as_ref().and_then(|h| h.vfx1());
+        #[cfg(not(xr))]
+        None
+    }
+
+    /// The pictures the VFX1's eyes see, `width` degrees across, for the
+    /// headset to show.
+    #[cfg_attr(not(xr), allow(unused_variables))]
+    pub fn show_eyes(
+        &mut self,
+        gl: &glow::Context,
+        left: &crate::video::Frame,
+        right: &crate::video::Frame,
+        width: f32,
+    ) {
+        #[cfg(xr)]
+        if let Some(headset) = &self.headset {
+            let in_use = headset.eyes_in_use(gl);
+            let free = (0..3)
+                .find(|&i| Some(i) != self.eyes_latest && Some(i) != in_use)
+                .unwrap_or(0);
+            for (texture, frame) in self.eyes[free].iter().zip([left, right]) {
+                let (w, h) = (frame.width.max(1) as i32, frame.height.max(1) as i32);
+                let pixels = (frame.rgb.len() >= (w * h * 3) as usize).then_some(&frame.rgb[..]);
+                // SAFETY: see `GlScreen`.
+                unsafe {
+                    gl.bind_texture(glow::TEXTURE_2D, Some(*texture));
+                    gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+                    let data = glow::PixelUnpackData::Slice(pixels);
+                    let (format, kind) = (glow::RGB, glow::UNSIGNED_BYTE);
+                    let internal = glow::RGB8 as i32;
+                    gl.tex_image_2d(glow::TEXTURE_2D, 0, internal, w, h, 0, format, kind, data);
+                    gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
+                    gl.bind_texture(glow::TEXTURE_2D, None);
+                }
+            }
+            headset.publish_eyes(gl, free, width);
+            self.eyes_latest = Some(free);
         }
     }
 
@@ -415,7 +515,26 @@ impl Stage {
                 }
                 self.shots.push(i);
             }
+            pick::TargetId::Key(k) => {
+                #[cfg(xr)]
+                if let Some(headset) = self.headset.as_ref().filter(|h| h.running()) {
+                    headset.tap_key(k);
+                    return;
+                }
+                self.props.tap(k, std::time::Instant::now());
+            }
         }
+    }
+
+    /// The keys typed on the keyboard in the scene since, for the machine.
+    pub fn take_keys(&mut self) -> Vec<KeyEvent> {
+        #[allow(unused_mut)]
+        let mut keys = self.props.take_key_events(std::time::Instant::now());
+        #[cfg(xr)]
+        if let Some(headset) = &self.headset {
+            keys.extend(headset.take_keys());
+        }
+        keys
     }
 
     /// Where the camera's pictures go.
@@ -551,6 +670,7 @@ impl Stage {
     /// The PC's lights, as the machine's are.
     pub fn set_leds(&mut self, leds: Leds) {
         self.leds = leds;
+        self.props.set_machine_keys(leds.keys);
         #[cfg(xr)]
         if let Some(headset) = &self.headset {
             headset.set_leds(leds);

@@ -7,6 +7,10 @@ use iced_x86::Register;
 const STATE_SIZE: usize = 12;
 
 pub fn handle(cpu: &mut Cpu) {
+    // The VFX1's driver shares the interrupt (AH=60h..70h).
+    if crate::vfx1::sense::handle(cpu) {
+        return;
+    }
     let ax = cpu.ax();
     let func = ax;
     let now = cpu.bus.clock.now_ns();

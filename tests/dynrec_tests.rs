@@ -12,7 +12,7 @@ use dyndiff::lockstep_with;
 use iced_x86::code_asm::*;
 use pmrig::*;
 use rust_dos::cpu::{CoreMode, Cpu};
-use rust_dos::dynrec::{AVAILABLE, DynStats};
+use rust_dos::dynrec::{AVAILABLE, DynStats, TAIL_STARTS};
 
 const GP: u8 = 13;
 const PF: u8 = 14;
@@ -2693,6 +2693,102 @@ fn a_block_into_its_pages_tail_looks_the_next_page_up_as_the_interpreter_does() 
     assert_eq!(loop_in_a_page_tail(false), 0);
 }
 
+/// A loop that calls a function in another page 1000 times from a call
+/// whose return address is in the last 15 bytes of its page (30FF6h), as
+/// compiled code's calls often are, with paging on and the next page's
+/// table entry `next` (31003h: present, after it in RAM). Returns the
+/// recompiler's counts and the entry after the run.
+fn returns_into_a_page_tail(next: u32) -> (DynStats, u32) {
+    let (dir, table) = (0x80000u32, 0x81000u32);
+    let (mut a, mut b) = twins(|rig| {
+        rig.write32(dir, table | 3);
+        for i in 0..1024u32 {
+            rig.write32(table + 4 * i, (i << 12) | 3);
+        }
+        rig.write32(table + 0x31 * 4, next);
+        rig.load(0x32000, &asm32(0x32000, |a| {
+            a.add(ebx, ecx)?;
+            a.ret()
+        }));
+        let body = asm32(0x30FE8, |a| {
+            let mut top = a.create_label();
+            a.set_label(&mut top)?;
+            a.push(ebp)?;
+            a.mov(ebp, esp)?;
+            a.add(esi, 2)?;
+            a.add(edi, 3)?;
+            a.inc(edx)?;
+            a.call(0x32000u64)?;
+            // 30FF6h: the return site, and the loop's end.
+            a.pop(ebp)?;
+            a.dec(ecx)?;
+            a.jnz(top)?;
+            a.jmp(CODE as u64 + 0x100)
+        });
+        assert_eq!(body.len(), 0x31000 - 0x30FE8, "the loop ends at the page's end");
+        rig.load(0x30FE8, &body);
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.mov(eax, dir)?;
+            a.mov(cr3, eax)?;
+            a.mov(eax, cr0)?;
+            a.or(eax, 0x8000_0000u32)?;
+            a.mov(cr0, eax)?;
+            a.mov(ecx, 1000u32)?;
+            a.jmp(0x30FE8u64)
+        }));
+        rig.load(CODE + 0x100, &asm32(CODE + 0x100, |a| a.hlt()));
+    });
+    let stats = run_both(&mut a, &mut b);
+    assert_eq!((b.cpu.ebx(), b.cpu.edx()), ((1..=1000u32).sum(), 1000));
+    (stats, b.read32(table + 0x31 * 4))
+}
+
+#[test]
+fn a_return_into_a_pages_tail_goes_on_in_a_block_there() {
+    // The next page after this one in RAM, elsewhere (as a DLL's pages
+    // under Windows mostly are), and not there.
+    for (next, after) in [(0x31003, 0x31023), (0x35003, 0x35023), (0, 0)] {
+        let (stats, entry) = returns_into_a_page_tail(next);
+        assert_eq!(entry, after, "the fetch sets the next page's accessed bit");
+        if TAIL_STARTS && next != 0 {
+            // The return links to a block at 30FF6h, whose jump goes back
+            // to the loop's: the loop runs without the execution loop.
+            assert!(stats.runs < 100, "the returns went through the execution loop: {:?}", stats);
+        }
+    }
+}
+
+#[test]
+fn a_block_starts_in_the_tail_of_rams_last_page() {
+    // Paging maps the page at 31000h to RAM's last one, and the code
+    // starts 14 bytes before its end: the block's start is in the tail,
+    // and the next page's bytes would be past the end of RAM.
+    let (dir, table) = (0x80000u32, 0x81000u32);
+    let (mut a, mut b) = twins(|rig| {
+        let top = rig.cpu.bus.ram().len() as u32 - 0x1000;
+        rig.write32(dir, table | 3);
+        for i in 0..1024u32 {
+            rig.write32(table + 4 * i, (i << 12) | 3);
+        }
+        rig.write32(table + 0x31 * 4, top | 3);
+        rig.load(top + 0xFF2, &asm32(0x31FF2, |a| {
+            a.inc(edx)?;
+            a.jmp(CODE as u64 + 0x100)
+        }));
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.mov(eax, dir)?;
+            a.mov(cr3, eax)?;
+            a.mov(eax, cr0)?;
+            a.or(eax, 0x8000_0000u32)?;
+            a.mov(cr0, eax)?;
+            a.jmp(0x31FF2u64)
+        }));
+        rig.load(CODE + 0x100, &asm32(CODE + 0x100, |a| a.hlt()));
+    });
+    run_both(&mut a, &mut b);
+    assert_eq!(b.cpu.edx(), a.cpu.edx());
+}
+
 #[test]
 fn a_segment_load_that_changes_which_segments_are_flat_goes_on_in_its_block() {
     let (mut a, mut b) = twins(|rig| {
@@ -3174,6 +3270,60 @@ fn fpu_integer_operands_run_as_their_handlers() {
     if AVAILABLE && cfg!(target_arch = "x86_64") {
         assert!(stats.native + 20 > stats.instructions, "handlers ran them: {:?}", stats);
     }
+}
+/// FCOM, FNSTSW AX, SAHF and a branch on the flags, as MSVC compiles a
+/// float compare, with OF set or clear before the SAHF (it stays), and a
+/// FILD of a qword: of `fpu_loop`'s second single and integer, or with
+/// `small` of the integer's top 21 bits, within 2^53 either way.
+fn sahf_and_fild_qword(small: bool) -> DynStats {
+    let (_, b, stats) = fpu_loop(|a| {
+        let mut skip = a.create_label();
+        if small {
+            a.mov(eax, dword_ptr(esi + 8))?;
+            a.sar(eax, 11)?;
+            a.mov(dword_ptr(edi + 24), eax)?;
+            a.mov(eax, dword_ptr(esi + 4))?;
+            a.mov(dword_ptr(edi + 20), eax)?;
+            a.fild(qword_ptr(edi + 20))?;
+        } else {
+            a.fild(qword_ptr(esi + 4))?;
+        }
+        a.fst(qword_ptr(edi))?;
+        a.fld(dword_ptr(esi))?;
+        a.fcom_2(st0, st1)?;
+        a.fnstsw(ax)?;
+        a.mov(edx, ecx)?;
+        a.shl(edx, 25)?;
+        a.add(edx, edx)?;
+        a.sahf()?;
+        a.pushfd()?;
+        a.pop(edx)?;
+        a.and(edx, 0x8D5)?;
+        a.add(ebx, edx)?;
+        a.fcomp_2(st0, st1)?;
+        a.fnstsw(ax)?;
+        a.sahf()?;
+        a.jbe(skip)?;
+        a.add(ebx, 0x100)?;
+        a.set_label(&mut skip)?;
+        a.fstp(qword_ptr(edi + 8))?;
+        a.mov(dword_ptr(edi + 16), ebx)
+    });
+    assert_ne!(b.cpu.ebx(), 0);
+    stats
+}
+
+#[test]
+fn sahf_and_fild_of_a_qword_run_in_translated_code() {
+    let stats = sahf_and_fild_qword(true);
+    if AVAILABLE && cfg!(target_arch = "x86_64") {
+        assert!(stats.native + 20 > stats.instructions, "handlers ran them: {:?}", stats);
+    }
+}
+
+#[test]
+fn fild_of_a_qword_past_2_to_the_53_is_the_handlers() {
+    sahf_and_fild_qword(false);
 }
 
 /// 80-bit values for the sums: (sign << 15 | exponent, mantissa).
@@ -4414,6 +4564,37 @@ fn sse_arithmetic_runs_as_its_handlers() {
         a.add(ebx, dword_ptr(edi + 52))
     });
     assert_ne!(b.read32(DATA + 0x20000), 0);
+    assert_handled_only(&b, &[]);
+}
+
+#[test]
+fn sse_exception_flags_are_the_handlers_after_every_operation() {
+    // A run of operations without LDMXCSR between them, the flags read
+    // after each: each must add exactly the flags it raises, whether the
+    // flags before it were set by the guest or not.
+    let (_, b, _) = sse_loop(|a| {
+        a.movups(xmm0, xmmword_ptr(esi))?;
+        a.movups(xmm1, xmmword_ptr(esi + 32))?;
+        type Op = fn(&mut CodeAssembler) -> Result<(), IcedError>;
+        let ops: [Op; 8] = [
+            |a| a.addps(xmm0, xmm1),
+            |a| a.mulss(xmm1, xmm0),
+            |a| a.divps(xmm1, xmm0),
+            |a| a.subss(xmm0, xmm1),
+            |a| a.sqrtps(xmm2, xmm1),
+            |a| a.divss(xmm0, xmm2),
+            |a| a.cvtps2pi(mm0, xmm0),
+            |a| a.maxps(xmm1, xmm0),
+        ];
+        for (k, op) in ops.iter().enumerate() {
+            op(a)?;
+            a.stmxcsr(dword_ptr(edi + 4 * k as i32))?;
+            a.add(ebx, dword_ptr(edi + 4 * k as i32))?;
+            a.rol(ebx, 3)?;
+        }
+        a.emms()
+    });
+    assert_ne!(b.cpu.ebx(), 0);
     assert_handled_only(&b, &[]);
 }
 

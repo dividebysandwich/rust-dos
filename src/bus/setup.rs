@@ -69,6 +69,7 @@ impl Bus {
             cursor_y: 0,
             start_time: Instant::now(),
             joystick: crate::joystick::GamePort::default(),
+            vfx1: None,
             audio_device: None,
             speaker_on: false,
             pit_divisor: 0xFFFF,
@@ -306,6 +307,18 @@ impl Bus {
             self.pit_read_msb = false;
             self.io_write(0x61, self.ppi_checks | 0x01);
         }
+    }
+
+    /// Put the VFX1's card in (`[vfx1]`) at its port, or take it out.
+    pub fn configure_vfx1(&mut self, settings: &crate::vfx1::Vfx1Settings) {
+        let base = settings.enabled.then_some(settings.port);
+        if self.vfx1.as_ref().map(|v| v.base) == base {
+            return;
+        }
+        self.vfx1 = base.map(|base| {
+            self.log_string(&format!("[VFX1] The VIP card at {:X}h", base));
+            crate::vfx1::Vfx1::new(base)
+        });
     }
 
     /// Put a DAC on LPT1 (`lpt_dac`), or take it away: the printer gives

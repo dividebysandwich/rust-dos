@@ -402,7 +402,10 @@ fn main() -> Result<(), String> {
     // screen, the mouse's buttons it held, and its menu button's presses.
     let mut vr_pointer: Option<(i32, i32)> = None;
     let mut vr_buttons = [false; 2];
+    // The keys of the keyboard in the scene the machine has down.
+    let mut vr_keys_held: std::collections::HashSet<(u8, bool)> = Default::default();
     let mut vr_menu = 0u32;
+    let mut vfx1_host = rust_dos::vfx1::host::Host::default();
     // Until when the scene's PC shows its hard disk and floppy lights.
     let mut hdd_light = std::time::Instant::now();
     let mut floppy_light = std::time::Instant::now();
@@ -1121,8 +1124,10 @@ fn main() -> Result<(), String> {
         // the settings window; the laser is the mouse where it meets the
         // screen, and clicks in the settings window; the rest is a gamepad.
         let mut vr_pad: Option<rust_dos::padmap::PadSnapshot> = None;
+        let mut vfx1_worn: Option<rust_dos::vfx1::Tracking> = None;
         match display.vr_input() {
             Some(vr) => {
+                vfx1_worn = vr.vfx1;
                 for _ in vr_menu..vr.menu_presses {
                     toggle_ui!();
                 }
@@ -1160,6 +1165,28 @@ fn main() -> Result<(), String> {
                     }
                 }
             }
+        }
+        // The keys typed on the keyboard in the scene, as the host's: but
+        // in the settings window or paused; those the machine saw go down
+        // come up for it.
+        for key in display.vr_keys() {
+            let id = (key.scan, key.extended);
+            if key.down {
+                if ui.is_open() || paused {
+                    continue;
+                }
+                if let Some(mut input) = autoinput.take() {
+                    input.stop(&mut cpu);
+                }
+                if clipboard.pasting() {
+                    clipboard.stop_paste(&mut cpu);
+                }
+                vr_keys_held.insert(id);
+            } else if !vr_keys_held.remove(&id) {
+                continue;
+            }
+            keyboard::key_event(&mut cpu.bus, key.scan, key.extended, key.down, None);
+            host_keys = true;
         }
 
         if host_keys || (cpu.bus.mouse.x, cpu.bus.mouse.y, cpu.bus.mouse.buttons) != mouse_before {
@@ -1419,6 +1446,9 @@ fn main() -> Result<(), String> {
             let pad = pad.map(|pad| if waiting { joystick::PadState::default() } else { pad }).filter(|_| det.is_none());
             cpu.bus.joystick.set_pad(slot, pad);
         }
+        // The VFX1 on the desk of the 3D scene, and the head wearing it.
+        display.set_vfx1(settings.vfx1.enabled);
+        vfx1_host.track(&mut cpu.bus, vfx1_worn, &settings.vfx1, waiting || det.is_some());
         cpu.bus.set_voodoo_fps_cap(settings.voodoo.fps_cap);
         cpu.bus.set_voodoo_texture_sampling(settings.voodoo.texture_sampling);
         cpu.bus.set_powervr_filter(settings.powervr_filter);
@@ -1516,11 +1546,16 @@ fn main() -> Result<(), String> {
                 }
             }
             display.set_capture_dir(&settings.capture_dir);
+            let locks = keyboard::lock_lights(&cpu.bus);
             display.set_leds(rust_dos::vr::Leds {
                 power: true,
                 turbo: cpu.bus.clock.cycles_per_ms() > rust_dos::vr::TURBO_CYCLES,
                 hdd: now < hdd_light,
                 floppy: now < floppy_light,
+                num: locks & 0x02 != 0,
+                caps: locks & 0x04 != 0,
+                scroll: locks & 0x01 != 0,
+                keys: cpu.bus.kbd.held_keys(),
             });
             if vr_manuals.0.as_deref() != game.as_ref().map(|g| g.id.as_str()) {
                 vr_manuals.0 = game.as_ref().map(|g| g.id.clone());
@@ -1782,6 +1817,11 @@ fn main() -> Result<(), String> {
         }
         let render_time = render_start.elapsed();
         profile::set_host(Zone::FrameCompose);
+        // Each eye's picture, for the VFX1 worn in the headset.
+        let worn = vfx1_worn.is_some();
+        if let Some(eyes) = vfx1_host.eyes(&cpu.bus, &cached_frame, &settings.vfx1, worn) {
+            display.show_vfx1_eyes(&eyes.left, &eyes.right, settings.vfx1.view_size as f32);
+        }
 
         // The picture shown already, where nothing in it changed: neither
         // the machine's nor anything drawn over it. Composing it, comparing
