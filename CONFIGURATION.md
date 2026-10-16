@@ -1888,6 +1888,52 @@ Accelerator", and DirectDraw and Direct3D offer the card as "3dfxV2
 (Voodoo2 DirectX 6 Driver)", which Direct3D games that let you choose the
 3D card draw on.
 
+#### OpenGL games under Windows
+
+Windows' OpenGL never uses the Voodoo2 by itself, and a game that draws
+with OpenGL gets Microsoft's software renderer instead: it runs, but at a
+frame every few seconds, and the card draws nothing (the debug server's
+`/api/status` shows `video.voodoo.triangles` at 0). A real Voodoo2 had
+the same problem. `OPENGL32.DLL` asks the desktop's display driver which
+OpenGL driver to load and looks the name up under
+`HKLM\Software\Microsoft\Windows\CurrentVersion\OpenGLDrivers`. The
+Voodoo2 is a 3D card beside the display adapter, not one itself: the
+desktop runs on the S3 (or whichever card `machine` gives), whose driver
+names no OpenGL driver. 3dfx's driver copies its OpenGL driver to
+`C:\WINDOWS\SYSTEM\3DFXVGL.DLL` but can't make Windows pick it.
+
+Glide games and Direct3D games don't go through `OPENGL32.DLL` and need
+none of this. An OpenGL game reaches the card in one of three ways:
+
+- Games that let you name the OpenGL driver, such as Quake III Arena
+  (`r_glDriver 3dfxvgl`), load `3DFXVGL.DLL` themselves.
+- For a game without such a setting (Oni, for one), copy `3DFXVGL.DLL`
+  into the game's folder as `OPENGL32.DLL`. Windows loads a program's
+  DLLs from its own folder before `WINDOWS\SYSTEM`, so only that game
+  uses the card. This is what 3dfx's users did.
+- Copying it over `C:\WINDOWS\SYSTEM\OPENGL32.DLL` sends every OpenGL
+  program to the card, which only draws full screen: programs that draw
+  OpenGL in a window no longer can.
+
+The copy into the game's folder can be made by the game's configuration,
+which leaves the disk image as it is. With the image mounted with
+[`-overlay`](#mounting-drives), the built-in DOS copies the file before
+the system boots, and the copy goes into the overlay's `.rdelta` file:
+
+```ini
+[drives]
+C=~/images/win98.img -overlay saves/oni -boot
+D=~/cds/oni.cue cdrom
+
+[autoexec]
+copy c:\windows\system\3dfxvgl.dll c:\progra~1\oni\opengl32.dll
+```
+
+The built-in DOS sees the disk's short names (`dir c:\progra~1` lists the
+folders under `Program Files`). The copy runs at every start and
+overwrites the one the last start made, so the setup needs nothing else,
+and the image under it can stay the base of other games' setups.
+
 DOS games that bring the Voodoo2's `GLIDE2X.OVL` or Glide 3 run as on the
 Voodoo Graphics.
 
