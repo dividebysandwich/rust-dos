@@ -2075,13 +2075,17 @@ The commands are RRedline's (its Programming Guide documents them for
 programmers); their encoding in the FIFO comes from Rendition's library
 itself, which Tomb Raider's Vérité executable links whole, from DOSBox's
 Rendition fork (dosbox-staging-rendition), and from what the games send.
-RReady, the wrapper that fork passes them to, isn't used. Rust-DOS draws
-Z-buffered, bilinear-filtered textures in all of RRedline's formats
-(332, 8-bit intensity and alpha, 565, 4444, 1555, 8888 and 4-bit
-paletted), with their alpha blended, and vQuake's own commands: Quake's
-spans with perspective, its 8-bit pictures through a colour table, and
-particles. Fog follows the Programming Guide, but its commands are
-guessed: no game on hand uses it.
+RReady, the wrapper that fork passes them to, isn't used. The state
+commands each set a field of one of the chip's pixel engine registers,
+whose layout comes from LeonG-ZA's DOSBox-X emulation of the V1000.
+Rust-DOS draws Z-buffered, bilinear-filtered textures in all of
+RRedline's formats (332, 8-bit intensity and alpha, 565, 4444, 1555,
+8888 and 4-bit paletted), with their alpha blended, scissored, dithered
+where the game asks, and chroma-keyed texels transparent black for the
+alpha test to drop, as Tomb Raider and vQuake set it up. It also draws
+vQuake's own commands: Quake's spans with perspective, its 8-bit
+pictures through a colour table, and particles. Fog follows the
+Programming Guide; no game on hand uses it.
 
 ### Windows 95 on the Vérité
 
