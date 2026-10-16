@@ -72,10 +72,9 @@ where the lookup changes nothing, and the interpreter runs it. Code at
 the end of a page then runs in blocks and their links rather than in the
 interpreter, where DOS extenders map a program's pages apart from each
 other in physical memory, as through VCPI, and a function that returns
-to a place in the tail returns through a link. Blocks aren't
-made in the shell's code, or in the page of the mouse driver's stub, which
-clears a byte of RAM that decides whether the next mouse event can be
-delivered.
+to a place in the tail returns through a link. Blocks aren't made in the
+shell's code, or in the page of the mouse driver's stub, which clears a
+byte of RAM that decides whether the next mouse event can be delivered.
 
 A block stops **before** an instruction the interpreter must run itself:
 an invalid encoding (the emulator's service traps, FE 38/39, are ones) and

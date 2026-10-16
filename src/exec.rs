@@ -920,7 +920,7 @@ fn dynamic<const HOT: bool, const PROF: bool>(
     // the next page as the fetch does.)
     let translatable = (at.in_window
         || fetch.window.phys(cpu, at.eip, at.lin_ip, at.cs_limit).is_some()
-        || crate::dynrec::TAIL_STARTS && in_tail(&at, fetch.ram.len()))
+        || crate::dynrec::TAIL_STARTS && in_tail(cpu, &at, fetch.ram.len()))
         && at.phys_ip >> 12 != crate::mouse::CALLBACK_STUB >> 12
         && !cpu.in_shell_code()
         && !is_service_trap(fetch.ram, at.phys_ip);
@@ -953,14 +953,18 @@ fn dynamic<const HOT: bool, const PROF: bool>(
 
 /// Whether the instruction `locate` found at `at` is in the last 15 bytes
 /// of a page all in RAM (`ram_len` bytes): where the code window would
-/// have it if it went on to the page's end (see `CodeWindow::open`). The
-/// next page needn't follow it in RAM: a block holds only the instructions
-/// that end in their page.
-fn in_tail(at: &At, ram_len: usize) -> bool {
+/// have it if it went on to the page's end (see `CodeWindow::open`), and
+/// the TLB holds the next page (with paging), which `locate` has just
+/// looked up: where it doesn't, that lookup failed, and the block's code
+/// would leave before its first instruction (`EXIT_NEXT_PAGE`). The next
+/// page needn't follow it in RAM: a block holds only the instructions that
+/// end in their page.
+fn in_tail(cpu: &Cpu, at: &At, ram_len: usize) -> bool {
     at.lin_ip >= 0x1000
         && at.lin_ip & 0xFFF >= 0x1000 - PAGE_TAIL
         && at.eip as u64 + PAGE_TAIL as u64 - 1 <= at.cs_limit as u64
         && (at.phys_ip | 0xFFF) < ram_len
+        && cpu.translated((at.lin_ip | 0xFFF).wrapping_add(1), cpu.cpl == 3).is_some()
 }
 
 /// Find the instruction at CS:EIP: in the code window, or else through

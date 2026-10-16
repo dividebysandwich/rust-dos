@@ -12,7 +12,7 @@ use dyndiff::lockstep_with;
 use iced_x86::code_asm::*;
 use pmrig::*;
 use rust_dos::cpu::{CoreMode, Cpu};
-use rust_dos::dynrec::{AVAILABLE, DynStats};
+use rust_dos::dynrec::{AVAILABLE, DynStats, TAIL_STARTS};
 
 const GP: u8 = 13;
 const PF: u8 = 14;
@@ -2750,12 +2750,43 @@ fn a_return_into_a_pages_tail_goes_on_in_a_block_there() {
     for (next, after) in [(0x31003, 0x31023), (0x35003, 0x35023), (0, 0)] {
         let (stats, entry) = returns_into_a_page_tail(next);
         assert_eq!(entry, after, "the fetch sets the next page's accessed bit");
-        if AVAILABLE && cfg!(target_arch = "x86_64") && next != 0 {
+        if TAIL_STARTS && next != 0 {
             // The return links to a block at 30FF6h, whose jump goes back
             // to the loop's: the loop runs without the execution loop.
             assert!(stats.runs < 100, "the returns went through the execution loop: {:?}", stats);
         }
     }
+}
+
+#[test]
+fn a_block_starts_in_the_tail_of_rams_last_page() {
+    // Paging maps the page at 31000h to RAM's last one, and the code
+    // starts 14 bytes before its end: the block's start is in the tail,
+    // and the next page's bytes would be past the end of RAM.
+    let (dir, table) = (0x80000u32, 0x81000u32);
+    let (mut a, mut b) = twins(|rig| {
+        let top = rig.cpu.bus.ram().len() as u32 - 0x1000;
+        rig.write32(dir, table | 3);
+        for i in 0..1024u32 {
+            rig.write32(table + 4 * i, (i << 12) | 3);
+        }
+        rig.write32(table + 0x31 * 4, top | 3);
+        rig.load(top + 0xFF2, &asm32(0x31FF2, |a| {
+            a.inc(edx)?;
+            a.jmp(CODE as u64 + 0x100)
+        }));
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.mov(eax, dir)?;
+            a.mov(cr3, eax)?;
+            a.mov(eax, cr0)?;
+            a.or(eax, 0x8000_0000u32)?;
+            a.mov(cr0, eax)?;
+            a.jmp(0x31FF2u64)
+        }));
+        rig.load(CODE + 0x100, &asm32(CODE + 0x100, |a| a.hlt()));
+    });
+    run_both(&mut a, &mut b);
+    assert_eq!(b.cpu.edx(), a.cpu.edx());
 }
 
 #[test]
