@@ -62,15 +62,17 @@ Everything else goes through `locate`, whose page walks, Accessed bits,
 CR2 and tripwire the recompiler never needs to reproduce.
 
 On x86-64 hosts a block goes on into the page's last 15 bytes, with the
-instructions that end in the page (`BlockData::in_tail`). There
-`locate` looks the next page up for an instruction, in case it runs on
-into it, which with paging may walk the page tables (setting their
-Accessed bits and filling the TLB). With paging on, the code leaves the
-block before such an instruction (`EXIT_NEXT_PAGE`) unless the TLB holds
-the next page, where the lookup changes nothing, and the interpreter runs
-it. Code at the end of a page then runs in blocks and their links rather
-than in the interpreter, where DOS extenders map a program's pages apart
-from each other in physical memory, as through VCPI. Blocks aren't
+instructions that end in the page (`BlockData::in_tail`), and may start
+there too, where `locate` found the instruction. There `locate` looks
+the next page up for an instruction, in case it runs on into it, which
+with paging may walk the page tables (setting their Accessed bits and
+filling the TLB). With paging on, the code leaves the block before such
+an instruction (`EXIT_NEXT_PAGE`) unless the TLB holds the next page,
+where the lookup changes nothing, and the interpreter runs it. Code at
+the end of a page then runs in blocks and their links rather than in the
+interpreter, where DOS extenders map a program's pages apart from each
+other in physical memory, as through VCPI, and a function that returns
+to a place in the tail returns through a link. Blocks aren't
 made in the shell's code, or in the page of the mouse driver's stub, which
 clears a byte of RAM that decides whether the next mouse event can be
 delivered.

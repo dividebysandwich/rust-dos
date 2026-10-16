@@ -40,6 +40,10 @@ mod a64;
 /// Whether this build has a code generator for its host.
 pub const AVAILABLE: bool = cfg!(dynrec);
 
+/// Whether blocks may start in a page's last 15 bytes, as the x86-64 code
+/// generator's may (`x64::TAIL`, `BlockData::in_tail`).
+pub const TAIL_STARTS: bool = cfg!(all(dynrec, target_arch = "x86_64"));
+
 /// Whether translated code can run here: the build has a code generator
 /// and the host lets it make memory executable (iOS and tvOS do only for a
 /// JIT a debugger enabled). Where not, the interpreter runs everything.
@@ -1155,7 +1159,8 @@ mod engine {
         let eip = cpu.eip();
         let cs = cpu.seg_cache(Seg::CS);
         let lin_ip = cs.base.wrapping_add(eip);
-        if eip as u64 + PAGE_TAIL as u64 - 1 > cs.limit as u64 || lin_ip < 0x1000 || lin_ip & 0xFFF >= 0x1000 - PAGE_TAIL {
+        let tail = lin_ip & 0xFFF >= 0x1000 - PAGE_TAIL;
+        if eip as u64 + PAGE_TAIL as u64 - 1 > cs.limit as u64 || lin_ip < 0x1000 || tail && !backend::TAIL {
             return None;
         }
         let phys_ip = cpu.translated(lin_ip, cpu.cpl == 3)? as usize;

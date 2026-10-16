@@ -914,8 +914,13 @@ fn dynamic<const HOT: bool, const PROF: bool>(
     if HOT && hook.before_exec(cpu, at.phys_ip, fetch.ram) {
         return Some(StopReason::Paused);
     }
-    // (Outside the code window `locate` just opened one there.)
-    let translatable = (at.in_window || fetch.window.phys(cpu, at.eip, at.lin_ip, at.cs_limit).is_some())
+    // (Outside the code window `locate` just opened one there. An
+    // instruction in the page's last 15 bytes is never in it: `locate` has
+    // found it, and blocks may start there where the code generator checks
+    // the next page as the fetch does.)
+    let translatable = (at.in_window
+        || fetch.window.phys(cpu, at.eip, at.lin_ip, at.cs_limit).is_some()
+        || crate::dynrec::TAIL_STARTS && in_tail(&at, fetch.ram.len()))
         && at.phys_ip >> 12 != crate::mouse::CALLBACK_STUB >> 12
         && !cpu.in_shell_code()
         && !is_service_trap(fetch.ram, at.phys_ip);
@@ -944,6 +949,18 @@ fn dynamic<const HOT: bool, const PROF: bool>(
         }
         Run::Panic(payload) => std::panic::resume_unwind(payload),
     }
+}
+
+/// Whether the instruction `locate` found at `at` is in the last 15 bytes
+/// of a page all in RAM (`ram_len` bytes): where the code window would
+/// have it if it went on to the page's end (see `CodeWindow::open`). The
+/// next page needn't follow it in RAM: a block holds only the instructions
+/// that end in their page.
+fn in_tail(at: &At, ram_len: usize) -> bool {
+    at.lin_ip >= 0x1000
+        && at.lin_ip & 0xFFF >= 0x1000 - PAGE_TAIL
+        && at.eip as u64 + PAGE_TAIL as u64 - 1 <= at.cs_limit as u64
+        && (at.phys_ip | 0xFFF) < ram_len
 }
 
 /// Find the instruction at CS:EIP: in the code window, or else through
