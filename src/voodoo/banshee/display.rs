@@ -113,6 +113,26 @@ impl Banshee {
             };
             let line = if f.half { y as u32 / 2 } else { y as u32 };
             let at = |x: u32| surface_addr(f.start, x, line, f.stride, f.tiled);
+            if format == 1 {
+                // 16 bits a pixel, the usual desktop and what the 3D engine
+                // shows: the words of a run (a row, or a tile's 64 pixels)
+                // follow each other, so only its first needs the address.
+                let clut = (!bypass).then_some(desktop_clut);
+                let pixels = row.as_chunks_mut::<3>().0;
+                let words = mask >> 1;
+                let mut x = 0;
+                while x < pixels.len() {
+                    let run = if f.tiled { 64 - (x & 63) } else { pixels.len() - x };
+                    let end = (x + run).min(pixels.len());
+                    let mut w = (at(2 * x as u32) & mask) >> 1;
+                    for px in &mut pixels[x..end] {
+                        *px = rgb565(ram.get(w as usize), clut);
+                        w = (w + 1) & words;
+                    }
+                    x = end;
+                }
+                continue;
+            }
             for (x, px) in row.as_chunks_mut::<3>().0.iter_mut().enumerate() {
                 let x = x as u32;
                 *px = match format {
