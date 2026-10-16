@@ -3175,6 +3175,60 @@ fn fpu_integer_operands_run_as_their_handlers() {
         assert!(stats.native + 20 > stats.instructions, "handlers ran them: {:?}", stats);
     }
 }
+/// FCOM, FNSTSW AX, SAHF and a branch on the flags, as MSVC compiles a
+/// float compare, with OF set or clear before the SAHF (it stays), and a
+/// FILD of a qword: of `fpu_loop`'s second single and integer, or with
+/// `small` of the integer's top 21 bits, within 2^53 either way.
+fn sahf_and_fild_qword(small: bool) -> DynStats {
+    let (_, b, stats) = fpu_loop(|a| {
+        let mut skip = a.create_label();
+        if small {
+            a.mov(eax, dword_ptr(esi + 8))?;
+            a.sar(eax, 11)?;
+            a.mov(dword_ptr(edi + 24), eax)?;
+            a.mov(eax, dword_ptr(esi + 4))?;
+            a.mov(dword_ptr(edi + 20), eax)?;
+            a.fild(qword_ptr(edi + 20))?;
+        } else {
+            a.fild(qword_ptr(esi + 4))?;
+        }
+        a.fst(qword_ptr(edi))?;
+        a.fld(dword_ptr(esi))?;
+        a.fcom_2(st0, st1)?;
+        a.fnstsw(ax)?;
+        a.mov(edx, ecx)?;
+        a.shl(edx, 25)?;
+        a.add(edx, edx)?;
+        a.sahf()?;
+        a.pushfd()?;
+        a.pop(edx)?;
+        a.and(edx, 0x8D5)?;
+        a.add(ebx, edx)?;
+        a.fcomp_2(st0, st1)?;
+        a.fnstsw(ax)?;
+        a.sahf()?;
+        a.jbe(skip)?;
+        a.add(ebx, 0x100)?;
+        a.set_label(&mut skip)?;
+        a.fstp(qword_ptr(edi + 8))?;
+        a.mov(dword_ptr(edi + 16), ebx)
+    });
+    assert_ne!(b.cpu.ebx(), 0);
+    stats
+}
+
+#[test]
+fn sahf_and_fild_of_a_qword_run_in_translated_code() {
+    let stats = sahf_and_fild_qword(true);
+    if AVAILABLE && cfg!(target_arch = "x86_64") {
+        assert!(stats.native + 20 > stats.instructions, "handlers ran them: {:?}", stats);
+    }
+}
+
+#[test]
+fn fild_of_a_qword_past_2_to_the_53_is_the_handlers() {
+    sahf_and_fild_qword(false);
+}
 
 /// 80-bit values for the sums: (sign << 15 | exponent, mantissa).
 const EXTENDED: [(u16, u64); 14] = [

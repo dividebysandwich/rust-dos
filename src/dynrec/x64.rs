@@ -1767,6 +1767,11 @@ impl Gen<'_> {
                     self.flag_op(arith, set, self.dirty);
                 }
             }
+            Uop::FlagsFrom { t, mask } => {
+                if self.wanted(mask) {
+                    self.merge_from(r(t), mask, mask);
+                }
+            }
             Uop::CheckIopl => {
                 let (gp, ok) = (self.fault_exit(EXIT_GP0), self.ops.new_dynamic_label());
                 dynasm!(self.ops
@@ -2158,6 +2163,23 @@ impl Gen<'_> {
                 if canon {
                     self.fpu_canon(x.0);
                 }
+            }
+            Uop::FLoadInt64 { x, m } => {
+                let at = self.ops.new_dynamic_label();
+                // Within 2^53 either way, the qword shifted right by 53 is
+                // 0 or -1.
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; mov rax, QWORD [r13 + Rq(r(m))]
+                    ; mov rcx, rax
+                    ; sar rcx, 53
+                    ; add rcx, 1
+                    ; cmp rcx, 1
+                    ; ja =>at
+                    ; pxor Rx(x.0), Rx(x.0)
+                    ; cvtsi2sd Rx(x.0), rax
+                );
+                self.bail(at, false);
             }
             Uop::FToHalf { t, x, high } => {
                 dynasm!(self.ops ; .arch x64 ; movq rax, Rx(x.0));

@@ -239,7 +239,7 @@ Each instruction becomes one of two things:
   - SHLD and SHRD by a constant or CL;
   - MUL and IMUL in all their forms, DIV and IDIV;
   - LEA, MOVZX, MOVSX, XCHG, CBW, CWD, CWDE and CDQ;
-  - the flag instructions, and SETcc;
+  - the flag instructions, SAHF and SETcc;
   - PUSH and POP of registers, memory (not addressed through ESP, for POP)
     and constants, PUSHA and POPA, ENTER with nesting level 0 (but a 32-bit
     frame pointer on a 16-bit stack) and LEAVE;
@@ -290,6 +290,8 @@ compute what the handlers' own doubles do there), as their handlers do:
 - FILD, FIST and FISTP of a word and a dword (converted inline where the
   control word rounds to nearest or chops and the result fits, else by
   the handler's own `fpu::data::to_int`);
+- FILD of a qword within 2^53 either way, which a double holds exactly
+  (a larger one goes to the handler, which keeps all 64 bits);
 - FMUL, FDIV, FDIVR and their popping forms, with a single or ST(i) (a
   division by 0 through `fpu::arithmetic::divided_by_zero`);
 - FADD, FSUB, FSUBR and their popping forms: calls of the handlers' own
