@@ -285,7 +285,8 @@ impl Voodoo {
         loop {
             let Some(b) = &self.banshee else { return };
             let f = b.fifo[n];
-            if !f.enabled {
+            // A swap waiting for its retrace holds the FIFO up.
+            if !f.enabled || self.banshee_fifo_waits() {
                 return;
             }
             let header = self.fifo_word(f.read);
@@ -411,7 +412,7 @@ impl Voodoo {
                     _ => {
                         for _ in 0..count {
                             let data = self.fifo_take(n);
-                            self.texture_write(0x80_0000 / 4 + ((addr & 0x1F_FFFC) >> 2), data);
+                            self.banshee_texture_write(addr, data);
                             addr += 4;
                         }
                     }

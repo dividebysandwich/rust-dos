@@ -36,6 +36,7 @@ pub mod render3d;
 
 use super::{Effect, Now, Voodoo};
 use crate::video::crt::Extension;
+use std::collections::VecDeque;
 
 /// The size of BAR0 and of BAR1.
 pub const BAR_SIZE: u32 = 32 << 20;
@@ -231,8 +232,10 @@ pub struct Banshee {
     pub fifo: [fifo::Fifo; 2],
     pub engine: blit2d::Engine,
     /// The buffer the overlay shows, which a swap sets from
-    /// leftOverlayBuf.
+    /// leftOverlayBuf, and the buffers of the swaps waiting for their
+    /// retraces.
     pub overlay_addr: u32,
+    pub overlay_queue: VecDeque<u32>,
     /// Writes to swapPending not yet matched by a swap.
     pub swap_count: u32,
     /// What the display needs to hear: the picture changed, the palette
@@ -242,7 +245,7 @@ pub struct Banshee {
 
 crate::state_fields!(Banshee {
     pci, ext, clut, crtc, misc_output, seq01, intr_ctrl, agp, fifo, engine,
-    overlay_addr, swap_count,
+    overlay_addr, overlay_queue, swap_count,
 } skip { kind, dirty });
 
 impl Banshee {
@@ -260,6 +263,7 @@ impl Banshee {
             fifo: Default::default(),
             engine: Default::default(),
             overlay_addr: 0,
+            overlay_queue: VecDeque::new(),
             swap_count: 0,
             dirty: true,
         };
@@ -285,6 +289,7 @@ impl Banshee {
             fifo: Default::default(),
             engine: blit2d::Engine::default(),
             overlay_addr: 0,
+            overlay_queue: VecDeque::new(),
             swap_count: 0,
             dirty: true,
         };
@@ -297,6 +302,12 @@ impl Banshee {
         for fifo in &mut self.fifo {
             fifo.status = 1 << 28;
         }
+    }
+
+    /// The line the 3D engine's Y origin at the bottom is: miscInit0
+    /// bits 29:18.
+    pub fn y_origin(&self) -> u32 {
+        (self.reg(MISC_INIT0) >> 18) & 0xFFF
     }
 
     pub fn reg(&self, offset: u32) -> u32 {
@@ -651,6 +662,11 @@ impl Voodoo {
                 {
                     effect.settle = true;
                 }
+                if offset & 0xFC == MISC_INIT0
+                    && let Some(b) = &self.banshee
+                {
+                    self.fbi.yorigin = b.y_origin();
+                }
                 self.display_dirty = true;
             }
             0x000_0000 => self.banshee_cmd_write(offset, data, now, &mut effect),
@@ -716,13 +732,6 @@ impl Voodoo {
         if mask == 0xFFFF_FFFF {
             self.banshee_fifo_written(addr, now, effect);
         }
-    }
-
-    /// Texture downloads through BAR0 from 600000h: TMU 0's texture
-    /// space, as the Voodoo2's.
-    fn banshee_texture_write(&mut self, offset: u32, data: u32) {
-        let index = (offset & 0x1F_FFFC) >> 2;
-        self.texture_write(0x80_0000 / 4 + index, data);
     }
 }
 

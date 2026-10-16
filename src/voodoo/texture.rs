@@ -140,8 +140,11 @@ pub struct Tmu {
     /// ARGB for a Voodoo2's format 6.
     pub palette: Arc<[u32; 256]>,
     pub palette6666: Arc<[u32; 256]>,
-    /// Whether it is a Voodoo2's, which has format 6 and tLOD bit 24.
+    /// Whether it is a Voodoo2's, which has format 6 and tLOD bit 24,
+    /// and whether texBaseAddr is in bytes, as on a Banshee, rather than
+    /// in units of 8 bytes.
     pub v2: bool,
+    pub byte_base: bool,
 
     /// For the OpenGL renderer's decoded textures: the palette's changes,
     /// the writes to the RAM, and for each 4 KB page of it the count of
@@ -157,7 +160,7 @@ pub const PAGE_SHIFT: u32 = 12;
 crate::state_fields!(Tmu {
     starts, startt, startw, dsdx, dtdx, dwdx, dsdy, dtdy, dwdy, ncc, palette,
 } skip {
-    ram, mask, base, regdirty, palette6666, v2,
+    ram, mask, base, regdirty, palette6666, v2, byte_base,
     lodmin, lodmax, lodbias, lodmask, lodoffset, detailmax, detailbias, detailscale, wmask, hmask,
     palette_changes, writes, page_writes,
 });
@@ -192,6 +195,7 @@ impl Tmu {
             palette: Arc::new([0; 256]),
             palette6666: Arc::new([0; 256]),
             v2: false,
+            byte_base: false,
             palette_changes: 0,
             writes: 0,
             page_writes: vec![0; bytes.div_ceil(1 << PAGE_SHIFT)],
@@ -207,6 +211,7 @@ impl Tmu {
             mask: self.mask,
             base: self.base,
             v2: self.v2,
+            byte_base: self.byte_base,
             palette_changes: changes[2],
             writes: self.writes,
             page_writes: std::mem::take(&mut self.page_writes),
@@ -284,7 +289,13 @@ impl Tmu {
         }
 
         let bppscale = ((mode >> 8) & 0xF) >> 3;
-        let address = |r: usize| (reg[self.base + r] & TEXADDR_MASK) << TEXADDR_SHIFT;
+        let address = |r: usize| {
+            if self.byte_base {
+                reg[self.base + r] & 0xFF_FFF0
+            } else {
+                (reg[self.base + r] & TEXADDR_MASK) << TEXADDR_SHIFT
+            }
+        };
         let mut base = address(TEX_BASE_ADDR);
         self.lodoffset[0] = base & self.mask;
         // A Voodoo2 with tLOD bit 24 has levels 1 and 2 and from 3 on at

@@ -134,7 +134,9 @@ fn buffer_rows(st: &RasterState, y0: i32, y1: i32) -> Option<(i32, i32)> {
     }
     let origin = st.yorigin as i32;
     let (r0, r1) = (origin - (y1 - 1), origin - y0 + 1);
-    (r0 >= 0 && r1 <= 0x400).then_some((r0, r1))
+    // A Banshee's rows don't wrap around: those above the origin aren't
+    // drawn.
+    (st.ymask != 0x3FF || r0 >= 0 && r1 <= 0x400).then_some((r0, r1))
 }
 
 /// The rectangle `x0..x1` by buffer rows `r0..r1` in pixels of the

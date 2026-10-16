@@ -358,6 +358,12 @@ pub struct Fbi {
     pub width: u32,
     pub height: u32,
     pub rowpixels: u32,
+    /// How the rows of the colour buffers and of the auxiliary buffer lie
+    /// in memory (a Banshee's own, or `rowpixels` apart), and the bits of
+    /// a row counted from the Y origin.
+    pub stride: raster::Stride,
+    pub aux_stride: raster::Stride,
+    pub ymask: i32,
     /// The memory FIFO's size in entries, 0 when it is off.
     pub fifo_size: u32,
 
@@ -400,7 +406,7 @@ crate::state_fields!(Fbi {
     startr, startg, startb, starta, startz, startw,
     drdx, dgdx, dbdx, dadx, dzdx, dwdx, drdy, dgdy, dbdy, dady, dzdy, dwdy,
     fogblend, fogdelta,
-} skip { mask, rgboffs, auxoffs, yorigin, rowpixels, fifo_size });
+} skip { mask, rgboffs, auxoffs, yorigin, rowpixels, stride, aux_stride, ymask, fifo_size });
 
 impl State for Vram {
     fn save(&self, w: &mut Writer) {
@@ -434,6 +440,9 @@ impl Fbi {
             width: 640,
             height: 480,
             rowpixels: 640,
+            stride: raster::Stride::linear(640),
+            aux_stride: raster::Stride::linear(640),
+            ymask: 0x3FF,
             fifo_size: 0,
             ax: 0,
             ay: 0,
@@ -643,8 +652,11 @@ impl Voodoo {
                 let mut tmu = Tmu::new(board.texture_memory(), 0x100 * (i + 1));
                 tmu.v2 = chip.v2();
                 if v.banshee.is_some() {
-                    // One memory for everything.
+                    // One memory for everything, a Voodoo2's texture
+                    // formats, and base addresses in bytes.
                     tmu.ram = v.fbi.ram.clone();
+                    tmu.v2 = true;
+                    tmu.byte_base = true;
                 }
                 tmu
             })
@@ -686,7 +698,9 @@ impl Voodoo {
             tmu.reset();
         }
         let init = [FBI_INIT0, FBI_INIT1, FBI_INIT2, FBI_INIT3, FBI_INIT4, FBI_INIT5, FBI_INIT6, FBI_INIT7];
-        for (reg, value) in init.into_iter().zip(self.chip.fbi_init) {
+        // A Banshee has none: its buffers are where its 3D registers say.
+        let values = if self.banshee.is_some() { [0; 8] } else { self.chip.fbi_init };
+        for (reg, value) in init.into_iter().zip(values) {
             // fbiInit5-7 are a Voodoo2's, 0 on a Voodoo Graphics.
             self.reg[reg] = value;
         }
@@ -1028,12 +1042,18 @@ impl Voodoo {
 
     /// Where the buffers are, from the fbiInit registers (`recompute_video_memory`).
     pub(crate) fn recompute_video_memory(&mut self) {
+        if self.banshee.is_some() {
+            self.banshee_buffers();
+            return;
+        }
         let (config, rowpixels) = if self.v2() { self.layout_v2() } else { self.layout_v1() };
         let buffer_pages = (self.reg[FBI_INIT2] >> 11) & 0x1FF;
         let fifo_start = (self.reg[FBI_INIT4] >> 8) & 0x3FF;
         let mut fifo_last = (self.reg[FBI_INIT4] >> 18) & 0x3FF;
         let fbi = &mut self.fbi;
         fbi.rowpixels = rowpixels;
+        fbi.stride = raster::Stride::linear(rowpixels as usize);
+        fbi.aux_stride = fbi.stride;
         fbi.rgboffs[0] = 0;
         fbi.rgboffs[1] = buffer_pages * 0x1000;
         match config {
@@ -1346,6 +1366,7 @@ impl Voodoo {
             self.swap_now(data, now, &mut Effect::default());
         }
         let ticks = now.ticks;
+        let mut retired = 0;
         while let Some(front) = self.swaps.front().copied() {
             if front.due > ticks {
                 break;
@@ -1353,6 +1374,10 @@ impl Voodoo {
             self.swaps.pop_front();
             self.last_swap = front.retrace;
             self.fifo_writes = 0;
+            retired += 1;
+        }
+        if self.banshee.is_some() {
+            self.banshee_swaps_done(retired, now);
         }
     }
 
@@ -1404,7 +1429,10 @@ impl Voodoo {
     /// After a load: what is worked out from the registers.
     pub fn after_load(&mut self) {
         self.recompute_video_memory();
-        self.fbi.yorigin = (self.reg[FBI_INIT3] >> 22) & 0x3FF;
+        self.fbi.yorigin = match &self.banshee {
+            Some(b) => b.y_origin(),
+            None => (self.reg[FBI_INIT3] >> 22) & 0x3FF,
+        };
         let reg = self.reg.clone();
         for tmu in &mut self.tmu {
             tmu.rebuild(&reg[..]);
@@ -1562,6 +1590,7 @@ impl Voodoo {
             "counters_read": self.counters_read.get(),
             "software_picture": self.picture_wanted(),
             "banshee": self.banshee.as_ref().map(|b| b.describe()),
+            "banshee_3d": self.banshee.is_some().then(|| self.banshee_3d_describe()),
             "cmdfifo": self.cmdfifo_on().then(|| serde_json::json!({
                 "base": format!("{:06X}", self.cmdfifo.base),
                 "end": format!("{:06X}", self.cmdfifo.end),
