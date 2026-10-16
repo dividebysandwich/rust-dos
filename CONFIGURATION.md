@@ -1923,9 +1923,9 @@ the system boots, and the copy goes into the overlay's `.rdelta` file:
 ```ini
 [drives]
 # Windows 98 with 3dfx's Voodoo2 driver and the game installed. The image
-# stays as it is: what is written to it goes into the folder saves/oni
-# (made if it isn't there), as saves/oni/win98.img.rdelta.
-C=~/images/win98.img -overlay saves/oni -boot
+# stays as it is: what is written to it goes into the folder overlays/oni
+# (made if it isn't there), as overlays/oni/win98.img.rdelta.
+C=~/images/win98.img -overlay overlays/oni -boot
 D=~/cds/oni.cue cdrom
 
 [autoexec]
