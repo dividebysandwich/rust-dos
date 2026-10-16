@@ -917,9 +917,10 @@ headset.
   default), `280`, `2A0` or `2C0`. The card answers at `300` too, where
   some games look for it.
 * `stereo`: how each eye's picture is taken from the screen:
-  * `auto` (the default): as the game tells the driver, or else VFX1
-    pages while the game reads the head tracker on a 640x480 screen, and
-    the whole screen for both eyes otherwise (menus).
+  * `auto` (the default): as the game tells the driver or the 3D BIOS
+    (`stereo_bios`), or else, while the game reads the head tracker, VFX1
+    pages on a 640x480 screen and lines on one of 400 lines; and the
+    whole screen for both eyes otherwise (menus).
   * `pages`: the VFX1's own stereo, which most of its games draw: the
     left eye on the left half of a 640x480 screen and the right eye on
     the right, each page on every other line.
@@ -2732,27 +2733,29 @@ Start a game with its VFX1 switches:
 | Game | Command | Notes |
 |---|---|---|
 | Descent (1.4 and later) | `DESCENT -vfx -vfxtrak` | Set `steer=true`. Enter re-centres the head, Shift+F7 swaps the eyes, Shift+F6 changes the detail |
-| Descent 2 | `DESCENT2 -vfx -vfxtrack` | Set `steer=true` |
+| Descent 2 | `VR_type=1`, `VR_tracking=1` in DESCENT.CFG (its SETUP) | Set `steer=true`; see below for more pixels |
+| Comanche 3 | `C3`; in flight, Video > Stereoscopic, then Alt+F12 | Interlaced 320x400, which `auto` shows as lines |
 | Quake 1.08 | `VFX1QK QUAKE.EXE +vid_mode 7 +lcd_x 1` | VFX1QK from forte-vfx1-vr; `stereo=lines` |
 | System Shock (CD) | `CDSHOCK`, VFX1 in its options | Full-screen view |
 | MechWarrior 2 | VFX-1 under Cockpit Controls | Head tracking |
 | Magic Carpet | `-vfx` | Head pitch and roll only |
 
-Descent 2 sets up its headset in DESCENT.CFG, which its SETUP writes:
-`VR_type=1` is the VFX1, and draws 320x200 for each eye, with the head
-tracker (`VR_tracking=1`). Its shutter glasses' setting draws far more:
-with `VR_type=6` (LCDBIOS) and `VR_resolution=4` it draws 800x300 for
-each eye in an 800x600 mode (`3` is 640x240 in 640x480), which the VFX1
-shows through `stereo_bios`, though without its head tracker, which
+[docs/vfx1.md](docs/vfx1.md) has how many pixels each eye gets in these
+games, and how to get more. Descent 2 sets up its headset in DESCENT.CFG,
+which its SETUP writes: `VR_type=1` is the VFX1, and draws 320x200 for each
+eye, with the head tracker (`VR_tracking=1`). Its shutter glasses' setting
+draws far more: with `VR_type=6` (LCDBIOS) and `VR_resolution=4` it draws
+800x300 for each eye in an 800x600 mode (`3` is 640x240 in 640x480), which
+the VFX1 shows through `stereo_bios`, though without its head tracker, which
 Descent 2 reads only in its VFX1 setting.
 
-Descent was tried with rust-dos; the other games are as the
-[forte-vfx1-vr](https://github.com/LeonG-ZA/forte-vfx1-vr) project found
-them. Descent draws its heads-up display in the left eye only, as it did
-on a VFX1. Without a headset, `RUST_DOS_VFX1_HEAD=yaw,pitch,roll` (in
-degrees) holds the head turned, and `RUST_DOS_VFX1_DUMP=<folder>` writes
-the eyes' pictures there as `left.png` and `right.png` once a second, to
-try a game out; `RUST_DOS_VR_WEAR=1` starts with the VFX1 on.
+Descent, Descent 2 and Comanche 3 were tried with rust-dos; the other games
+are as the [forte-vfx1-vr](https://github.com/LeonG-ZA/forte-vfx1-vr)
+project found them. Descent draws its heads-up display in the left eye only,
+as it did on a VFX1. Without a headset, `RUST_DOS_VFX1_HEAD=yaw,pitch,roll`
+(in degrees) holds the head turned, and `RUST_DOS_VFX1_DUMP=<folder>` writes
+the eyes' pictures there as `left.png` and `right.png` once a second, to try
+a game out; `RUST_DOS_VR_WEAR=1` starts with the VFX1 on.
 
 ## Command-line options
 

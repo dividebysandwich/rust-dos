@@ -268,9 +268,10 @@ Start the game with its VFX1 switches, as `DESCENT -vfx -vfxtrak`.
 
 How the eyes' pictures are taken from the screen:
 
-- **auto**: as the game tells the headset, or else **VFX1 pages** while
-  it reads the head tracker on a 640x480 screen, and the whole screen for
-  both eyes for its menus.
+- **auto**: as the game tells the headset, or else, while it reads the
+  head tracker, **VFX1 pages** on a 640x480 screen and **interlaced
+  lines** on one of 400 lines (Comanche 3); the whole screen for both
+  eyes for its menus.
 - **VFX1 pages**: the VFX1's own stereo, which most of its games draw:
   the left eye on the left half of the screen, the right on the right,
   each page on every other line.
