@@ -12,7 +12,7 @@ use dyndiff::lockstep_with;
 use iced_x86::code_asm::*;
 use pmrig::*;
 use rust_dos::cpu::{CoreMode, Cpu};
-use rust_dos::dynrec::{AVAILABLE, DynStats};
+use rust_dos::dynrec::{AVAILABLE, DynStats, TAIL_STARTS};
 
 const GP: u8 = 13;
 const PF: u8 = 14;
@@ -2691,6 +2691,102 @@ fn loop_in_a_page_tail(next_present: bool) -> u32 {
 fn a_block_into_its_pages_tail_looks_the_next_page_up_as_the_interpreter_does() {
     assert_eq!(loop_in_a_page_tail(true), 0x31023, "the fetch set the next page's accessed bit");
     assert_eq!(loop_in_a_page_tail(false), 0);
+}
+
+/// A loop that calls a function in another page 1000 times from a call
+/// whose return address is in the last 15 bytes of its page (30FF6h), as
+/// compiled code's calls often are, with paging on and the next page's
+/// table entry `next` (31003h: present, after it in RAM). Returns the
+/// recompiler's counts and the entry after the run.
+fn returns_into_a_page_tail(next: u32) -> (DynStats, u32) {
+    let (dir, table) = (0x80000u32, 0x81000u32);
+    let (mut a, mut b) = twins(|rig| {
+        rig.write32(dir, table | 3);
+        for i in 0..1024u32 {
+            rig.write32(table + 4 * i, (i << 12) | 3);
+        }
+        rig.write32(table + 0x31 * 4, next);
+        rig.load(0x32000, &asm32(0x32000, |a| {
+            a.add(ebx, ecx)?;
+            a.ret()
+        }));
+        let body = asm32(0x30FE8, |a| {
+            let mut top = a.create_label();
+            a.set_label(&mut top)?;
+            a.push(ebp)?;
+            a.mov(ebp, esp)?;
+            a.add(esi, 2)?;
+            a.add(edi, 3)?;
+            a.inc(edx)?;
+            a.call(0x32000u64)?;
+            // 30FF6h: the return site, and the loop's end.
+            a.pop(ebp)?;
+            a.dec(ecx)?;
+            a.jnz(top)?;
+            a.jmp(CODE as u64 + 0x100)
+        });
+        assert_eq!(body.len(), 0x31000 - 0x30FE8, "the loop ends at the page's end");
+        rig.load(0x30FE8, &body);
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.mov(eax, dir)?;
+            a.mov(cr3, eax)?;
+            a.mov(eax, cr0)?;
+            a.or(eax, 0x8000_0000u32)?;
+            a.mov(cr0, eax)?;
+            a.mov(ecx, 1000u32)?;
+            a.jmp(0x30FE8u64)
+        }));
+        rig.load(CODE + 0x100, &asm32(CODE + 0x100, |a| a.hlt()));
+    });
+    let stats = run_both(&mut a, &mut b);
+    assert_eq!((b.cpu.ebx(), b.cpu.edx()), ((1..=1000u32).sum(), 1000));
+    (stats, b.read32(table + 0x31 * 4))
+}
+
+#[test]
+fn a_return_into_a_pages_tail_goes_on_in_a_block_there() {
+    // The next page after this one in RAM, elsewhere (as a DLL's pages
+    // under Windows mostly are), and not there.
+    for (next, after) in [(0x31003, 0x31023), (0x35003, 0x35023), (0, 0)] {
+        let (stats, entry) = returns_into_a_page_tail(next);
+        assert_eq!(entry, after, "the fetch sets the next page's accessed bit");
+        if TAIL_STARTS && next != 0 {
+            // The return links to a block at 30FF6h, whose jump goes back
+            // to the loop's: the loop runs without the execution loop.
+            assert!(stats.runs < 100, "the returns went through the execution loop: {:?}", stats);
+        }
+    }
+}
+
+#[test]
+fn a_block_starts_in_the_tail_of_rams_last_page() {
+    // Paging maps the page at 31000h to RAM's last one, and the code
+    // starts 14 bytes before its end: the block's start is in the tail,
+    // and the next page's bytes would be past the end of RAM.
+    let (dir, table) = (0x80000u32, 0x81000u32);
+    let (mut a, mut b) = twins(|rig| {
+        let top = rig.cpu.bus.ram().len() as u32 - 0x1000;
+        rig.write32(dir, table | 3);
+        for i in 0..1024u32 {
+            rig.write32(table + 4 * i, (i << 12) | 3);
+        }
+        rig.write32(table + 0x31 * 4, top | 3);
+        rig.load(top + 0xFF2, &asm32(0x31FF2, |a| {
+            a.inc(edx)?;
+            a.jmp(CODE as u64 + 0x100)
+        }));
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.mov(eax, dir)?;
+            a.mov(cr3, eax)?;
+            a.mov(eax, cr0)?;
+            a.or(eax, 0x8000_0000u32)?;
+            a.mov(cr0, eax)?;
+            a.jmp(0x31FF2u64)
+        }));
+        rig.load(CODE + 0x100, &asm32(CODE + 0x100, |a| a.hlt()));
+    });
+    run_both(&mut a, &mut b);
+    assert_eq!(b.cpu.edx(), a.cpu.edx());
 }
 
 #[test]
