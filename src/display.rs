@@ -580,6 +580,8 @@ pub struct VrControl {
     /// The menu button's presses so far: each opens or closes the
     /// settings window.
     pub menu_presses: u32,
+    /// The VFX1's head tracker and puck, while the headset wears it.
+    pub vfx1: Option<rust_dos::vfx1::Tracking>,
 }
 
 /// The 3D scene (`[vr]`).
@@ -725,7 +727,22 @@ impl Display<'_> {
             let flat = CrtSettings { curvature: 0, ..self.crt };
             screen_to_frame((uv.x, uv.y), texture, display, self.frame, (gl.active(), flat))
         });
-        Some(VrControl { pointer, buttons: input.buttons, pad: input.pad, menu_presses: input.menu_presses })
+        let vfx1 = stage.vfx1();
+        Some(VrControl { pointer, buttons: input.buttons, pad: input.pad, menu_presses: input.menu_presses, vfx1 })
+    }
+
+    /// The VFX1 on the desk of the scene (`[vfx1]`), or not.
+    pub fn set_vfx1(&mut self, there: bool) {
+        if let Some(stage) = self.stage_mut() {
+            stage.set_vfx1(there);
+        }
+    }
+
+    /// The pictures the VFX1's eyes see, `width` degrees across.
+    pub fn show_vfx1_eyes(&mut self, left: &Frame, right: &Frame, width: f32) {
+        if let Output::Gl(gl) = &mut self.out {
+            gl.show_vfx1_eyes(left, right, width);
+        }
     }
 
     /// How the sound's channels mix for where the viewer is in the scene,
@@ -766,6 +783,10 @@ impl Display<'_> {
     pub fn set_leds(&mut self, _leds: rust_dos::vr::Leds) {}
 
     pub fn set_manuals(&mut self, _manuals: &[std::path::PathBuf]) {}
+
+    pub fn set_vfx1(&mut self, _there: bool) {}
+
+    pub fn show_vfx1_eyes(&mut self, _left: &Frame, _right: &Frame, _width: f32) {}
 
     pub fn set_capture_dir(&mut self, _dir: &std::path::Path) {}
 

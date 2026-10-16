@@ -4,7 +4,9 @@
 //! port's joystick, and whose base moves it, and a polaroid camera, which
 //! takes a picture when its trigger is pulled: the picture comes out of
 //! its slot and develops, to be taken and put down too. What is let go
-//! falls (`physics`), thrown as the hand moved.
+//! falls (`physics`), thrown as the hand moved. The VFX1 headset
+//! (`[vfx1]`), let go at the face, is worn, and gripped at the head taken
+//! off again.
 //!
 //! The manual's pages are rendered on a thread of their own, as they are
 //! needed, into textures of the context that draws them.
@@ -13,7 +15,7 @@ use super::controls::{Hand, Tracking};
 use super::physics::{self, Body, Colliders, Moved, Obstacle, Shape};
 use super::pick::{Target, TargetId};
 use super::render::{Gpu, PropDraw};
-use super::scene::{PRINT, PartRole, Prop, PropKind, Scene};
+use super::scene::{PRINT, PartRole, Prop, PropKind, Scene, VFX1_EYES};
 use glam::{Mat4, Quat, Vec3};
 use glow::HasContext;
 use rust_dos::padmap::PadSnapshot;
@@ -52,6 +54,10 @@ const THROW: Duration = Duration::from_millis(80);
 const NEAR: f32 = 0.03;
 /// How thick a picture is to the simulation.
 const PRINT_THICKNESS: f32 = 0.001;
+/// How near the eyes the VFX1's have to be when it is let go for it to be
+/// worn, and a hand to the head to take it off, in metres.
+const PUT_ON: f32 = 0.2;
+const TAKE_OFF: f32 = 0.25;
 
 /// What a hand holds.
 #[derive(Clone, Copy, Debug)]
@@ -90,6 +96,8 @@ pub struct PropInput {
     /// The cameras (by their prop) whose trigger was pulled: a picture to
     /// take.
     pub shots: Vec<usize>,
+    /// The VFX1 is worn.
+    pub worn: bool,
 }
 
 pub struct Props {
@@ -112,6 +120,11 @@ pub struct Props {
     moves: [Vec<(Instant, Mat4)>; 2],
     /// Up to when the falling has been simulated.
     simulated: Option<Instant>,
+    /// The VFX1 is there (`[vfx1]`), and worn; and the head, at the
+    /// frame.
+    vfx1: bool,
+    worn: bool,
+    head: Option<Mat4>,
 }
 
 impl Props {
@@ -130,6 +143,9 @@ impl Props {
             colliders: Colliders::default(),
             moves: [Vec::new(), Vec::new()],
             simulated: None,
+            vfx1: false,
+            worn: false,
+            head: None,
         };
         props.reset(scene);
         props
@@ -143,6 +159,7 @@ impl Props {
         self.falling = vec![None; scene.props.len()];
         self.colliders = Colliders::new(scene);
         self.moves = [Vec::new(), Vec::new()];
+        self.worn = false;
         self.stale.extend(self.prints.drain(..).filter_map(|p| p.picture));
         self.booklet.canvas = scene.props.iter().find(|p| p.kind == PropKind::Manual).map_or((768, PAGE_HEIGHT), page_canvas);
     }
@@ -157,15 +174,64 @@ impl Props {
         }
     }
 
-    /// Whether prop `i` is shown: the manual only with manuals to show.
+    /// Whether prop `i` is shown: the manual only with manuals to show,
+    /// the VFX1 while there is one and it isn't worn.
     fn shown(&self, prop: &Prop) -> bool {
-        prop.kind != PropKind::Manual || !self.booklet.manuals.is_empty()
+        match prop.kind {
+            PropKind::Manual => !self.booklet.manuals.is_empty(),
+            PropKind::Vfx1 => self.vfx1 && !self.worn,
+            _ => true,
+        }
+    }
+
+    /// The VFX1 there (`[vfx1]`) or not: taken away, it is taken off too.
+    pub fn set_vfx1(&mut self, there: bool) {
+        self.vfx1 = there;
+        if !there {
+            self.worn = false;
+            for hold in &mut self.holds {
+                if matches!(hold, Some(Hold::Body { .. })) {
+                    *hold = None;
+                }
+            }
+        }
+    }
+
+    /// Put the VFX1 on, as though it had been (`RUST_DOS_VR_WEAR`).
+    pub fn wear(&mut self) {
+        self.worn = self.vfx1;
+    }
+
+    /// Whether the VFX1 let go now at `pose` is worn: its eyes near the
+    /// head's, and it facing the way the head does.
+    fn on_head(&self, pose: Mat4) -> bool {
+        let Some(head) = self.head else { return false };
+        let eyes = pose.transform_point3(VFX1_EYES);
+        let facing = pose.transform_vector3(Vec3::NEG_Z).normalize_or_zero();
+        let looking = head.transform_vector3(Vec3::NEG_Z).normalize_or_zero();
+        eyes.distance(head.transform_point3(Vec3::ZERO)) < PUT_ON && facing.dot(looking) > 0.0
+    }
+
+    /// The worn VFX1 taken off by `hand` gripping at the head.
+    fn take_off(&mut self, scene: &Scene, hand: &Hand) -> Option<Hold> {
+        let head = self.head.filter(|_| self.worn)?;
+        let grip = hand.grip.transform_point3(Vec3::ZERO);
+        if grip.distance(head.transform_point3(Vec3::ZERO)) > TAKE_OFF {
+            return None;
+        }
+        let prop = scene.props.iter().position(|p| p.kind == PropKind::Vfx1)?;
+        self.worn = false;
+        self.falling[prop] = None;
+        // Where it was on the head.
+        self.poses[prop] = head * Mat4::from_translation(-VFX1_EYES);
+        Some(Hold::Body { prop, offset: hand.grip.inverse() * self.poses[prop] })
     }
 
     /// Take, move, put down and work the props with the hands of
     /// `tracking`.
     pub fn update(&mut self, scene: &Scene, tracking: &Tracking, now: Instant) -> PropInput {
         let mut input = PropInput::default();
+        self.head = tracking.head;
         self.fall(scene, now);
         for (i, hand) in tracking.hands.iter().enumerate() {
             let Some(hand) = hand else {
@@ -179,7 +245,10 @@ impl Props {
             self.moves[i].push((now, hand.grip));
             let pulled = std::mem::replace(&mut self.pulled[i], hand.select);
             if hand.squeeze && !self.squeezed[i] && self.holds[i].is_none() {
-                self.holds[i] = self.take(scene, hand, now);
+                self.holds[i] = match self.take_off(scene, hand) {
+                    Some(hold) => Some(hold),
+                    None => self.take(scene, hand, now),
+                };
                 // Thrown as it moved since.
                 self.moves[i] = vec![(now, hand.grip)];
                 // Taken from the other hand.
@@ -251,6 +320,7 @@ impl Props {
                 }
             }
         }
+        input.worn = self.worn;
         input
     }
 
@@ -480,6 +550,12 @@ impl Props {
     /// moved; a stick springs back.
     fn release(&mut self, scene: &Scene, i: usize) {
         match self.holds[i].take() {
+            Some(Hold::Body { prop, .. })
+                if scene.props[prop].kind == PropKind::Vfx1 && self.on_head(self.poses[prop]) =>
+            {
+                self.worn = true;
+                self.falling[prop] = None;
+            }
             Some(Hold::Body { prop, offset }) => {
                 let shape = Shape::of_box(scene.props[prop].solid.0, scene.props[prop].solid.1);
                 let (velocity, spin) = self.throw(i, offset, shape.middle);
@@ -531,6 +607,12 @@ impl Props {
             draws.push(PropDraw::Print { model: self.print_pose(scene, i, now), picture: print.picture, develop });
         }
         draws
+    }
+
+    /// Whether prop `prop` is left out of what is drawn.
+    #[cfg(test)]
+    fn draws_nothing_of(&self, scene: &Scene, prop: usize) -> bool {
+        !self.shown(&scene.props[prop])
     }
 
     /// Delete the pages' textures, with `gl` current.
@@ -1012,6 +1094,48 @@ mod tests {
         let later = run(&mut props, &room, &tracking(hand_at(over, true)), later, 0.2);
         run(&mut props, &room, &tracking(hand_at(over, false)), later, 3.0);
         assert!((props.prints[0].pose.transform_point3(Vec3::ZERO).y - 0.72).abs() < 0.003);
+    }
+
+    #[test]
+    fn the_vfx1_is_put_on_at_the_face_and_taken_off_at_the_head() {
+        let room = Scene::test_room();
+        let mut props = Props::new(&room);
+        let v = room.props.iter().position(|p| p.kind == PropKind::Vfx1).unwrap();
+        let body = room.props[v].pose.transform_point3(Vec3::new(0.0, 0.05, -0.07));
+        let head = Mat4::from_translation(Vec3::new(0.0, 1.2, 0.0));
+        let with_head = |hand: Hand| Tracking { head: Some(head), ..tracking(hand) };
+        let now = Instant::now();
+        // Not there, it can't be taken.
+        props.update(&room, &with_head(hand_at(body, true)), now);
+        assert!(props.holds[1].is_none());
+        props.set_vfx1(true);
+        props.update(&room, &with_head(hand_at(body, false)), now);
+        props.update(&room, &with_head(hand_at(body, true)), now);
+        assert!(matches!(props.holds[1], Some(Hold::Body { prop, .. }) if prop == v));
+        // Brought to the face facing the way the head does (it stands on
+        // the desk facing the viewer), and let go: worn.
+        let Some(Hold::Body { offset, .. }) = props.holds[1] else { unreachable!() };
+        let worn = head * Mat4::from_translation(-VFX1_EYES);
+        let mut hand = hand_at(Vec3::ZERO, true);
+        hand.grip = worn * offset.inverse();
+        hand.aim = hand.grip;
+        props.update(&room, &with_head(hand), now);
+        hand.squeeze = false;
+        assert!(props.update(&room, &with_head(hand), now).worn);
+        assert!(props.draws_nothing_of(&room, v));
+        // Gripped far from the head, nothing; at the head, it comes off
+        // into the hand.
+        let far = Vec3::new(0.0, 0.8, -0.5);
+        assert!(props.update(&room, &with_head(hand_at(far, true)), now).worn);
+        props.update(&room, &with_head(hand_at(far, false)), now);
+        let at_head = Vec3::new(0.1, 1.25, 0.0);
+        let input = props.update(&room, &with_head(hand_at(at_head, true)), now);
+        assert!(!input.worn && input.busy[1]);
+        // Let go away from the face, it falls.
+        let away = hand_at(Vec3::new(0.3, 1.0, -0.5), true);
+        props.update(&room, &with_head(away), now);
+        let input = props.update(&room, &with_head(Hand { squeeze: false, ..away }), now);
+        assert!(!input.worn && props.falling[v].is_some());
     }
 
     #[test]

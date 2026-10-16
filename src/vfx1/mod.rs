@@ -10,6 +10,7 @@
 //! pictures each eye gets are taken from the screen on the host's side
 //! (stereo.rs), as some games never tell the card what they draw.
 
+pub mod host;
 pub mod pose;
 pub mod sense;
 pub mod stereo;

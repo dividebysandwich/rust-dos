@@ -283,13 +283,14 @@ impl Spawn {
 }
 
 /// Something to pick up (see `props`): the game's manual, a joystick, a
-/// polaroid camera, or anything else of the scene's that is only moved
-/// about (`item`).
+/// polaroid camera, a VFX1 headset to put on (`[vfx1]`), or anything else
+/// of the scene's that is only moved about (`item`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PropKind {
     Manual,
     Joystick,
     Camera,
+    Vfx1,
     Item,
 }
 
@@ -302,6 +303,7 @@ impl PropKind {
             "manual" => Some(PropKind::Manual),
             "joystick" => Some(PropKind::Joystick),
             "camera" => Some(PropKind::Camera),
+            "vfx1" => Some(PropKind::Vfx1),
             "item" => Some(PropKind::Item),
             _ => None,
         }
@@ -312,6 +314,10 @@ impl PropKind {
         self != PropKind::Item
     }
 }
+
+/// Where the eyes are in the frame of Rust-DOS's own VFX1, worn: behind
+/// its visor.
+pub const VFX1_EYES: Vec3 = Vec3::new(0.0, 0.06, -0.005);
 
 /// A hand takes a prop by its box, which is at least this thick, so that
 /// a pencil or a sheet of paper can be taken too.
@@ -492,12 +498,14 @@ const SCREEN_GLOW: f32 = 5.0;
 const TEST_DESK: Vec3 = Vec3::new(0.0, 0.72, -0.55);
 const TEST_DESK_TOP: Vec3 = Vec3::new(1.2, 0.03, 0.6);
 /// Where the manual and the joystick stand on it.
-/// Where the manual, the joystick and the camera stand on it, and how far
-/// they are turned (the camera's lens to the viewer).
-const TEST_PROPS: [(PropKind, Vec3, f32); 3] = [
+/// Where the manual, the joystick, the camera and the VFX1 stand on it,
+/// and how far they are turned (the camera's lens and the VFX1's front to
+/// the viewer).
+const TEST_PROPS: [(PropKind, Vec3, f32); 4] = [
     (PropKind::Manual, Vec3::new(-0.28, 0.72, -0.47), 0.0),
     (PropKind::Joystick, Vec3::new(0.3, 0.72, -0.45), 0.0),
     (PropKind::Camera, Vec3::new(-0.5, 0.72, -0.72), std::f32::consts::PI),
+    (PropKind::Vfx1, Vec3::new(0.5, 0.72, -0.45), std::f32::consts::PI),
 ];
 
 /// The sunset sky's sun: low, ahead and to the left.
@@ -702,6 +710,46 @@ impl Scene {
                 prop.lens = Some(Mat4::from_translation(Vec3::new(0.0, h * 0.62, -d / 2.0 - 0.022)));
                 prop.slot = Some(Mat4::from_translation(Vec3::new(0.0, 0.012, -d / 2.0 - 0.007)));
             }
+            PropKind::Vfx1 => {
+                // Forte's VFX1: a big visor before the eyes, its black
+                // front with the name across it, and the headband round
+                // the head to a pad at the back. The eyes are at
+                // `VFX1_EYES` in its frame, worn.
+                let grey = self.add_material(Material::plain(srgb(0x2e3034), Shading::Lit));
+                let black = self.add_material(Material::plain(srgb(0x0e0f11), Shading::Lit));
+                let light = self.add_material(Material::plain(srgb(0xb9bdc6), Shading::Lit));
+                let purple = self.add_material(Material::plain(srgb(0x5a3d8c), Shading::Lit));
+                let (w, h, d) = (0.19, 0.1, 0.11);
+                let visor = Vec3::new(0.0, h / 2.0, -0.07);
+                prop.push(PartRole::Body, cuboid(visor, Vec3::new(w, h, d), grey));
+                let front = visor.z - d / 2.0;
+                let panel = Vec3::new(0.0, h * 0.55, front - 0.003);
+                let panel_size = Vec3::new(w - 0.02, h * 0.7, 0.006);
+                prop.push(PartRole::Body, cuboid(panel, panel_size, black));
+                let name = Vec3::new(0.0, h * 0.16, front - 0.004);
+                prop.push(PartRole::Body, cuboid(name, Vec3::new(0.11, 0.009, 0.004), light));
+                let mark = Vec3::new(0.065, h * 0.16, front - 0.004);
+                prop.push(PartRole::Body, cuboid(mark, Vec3::new(0.012, 0.009, 0.004), purple));
+                // The headband: an oval of segments from the visor's sides
+                // round the back of the head.
+                let (band, rx, rz, centre_z) = (0.035, 0.1, 0.12, 0.05);
+                let at = |a: f32| Vec3::new(rx * a.sin(), h * 0.6, centre_z + rz * a.cos());
+                let segments = 14;
+                for i in 0..segments {
+                    let (a0, a1) = (
+                        -2.0 + 4.0 * i as f32 / segments as f32,
+                        -2.0 + 4.0 * (i + 1) as f32 / segments as f32,
+                    );
+                    let (p0, p1) = (at(a0), at(a1));
+                    let along = p1 - p0;
+                    let turn = Mat4::from_rotation_y(along.x.atan2(along.z));
+                    let size = Vec3::new(0.012, band, along.length() + 0.004);
+                    let at = Mat4::from_translation((p0 + p1) / 2.0) * turn;
+                    prop.push(PartRole::Body, turned(at, size, black));
+                }
+                let pad = Vec3::new(0.0, h * 0.6, centre_z + rz + 0.012);
+                prop.push(PartRole::Body, cuboid(pad, Vec3::new(0.08, 0.06, 0.025), grey));
+            }
             // The scene's own only.
             PropKind::Item => {}
         }
@@ -716,14 +764,23 @@ impl Scene {
     fn add_missing_props(&mut self) {
         let spawn = self.spawn;
         let turn = Mat4::from_rotation_y(spawn.yaw);
-        for (kind, side) in [(PropKind::Manual, -0.25), (PropKind::Joystick, 0.25), (PropKind::Camera, -0.55)] {
+        let props = [
+            (PropKind::Manual, -0.25),
+            (PropKind::Joystick, 0.25),
+            (PropKind::Camera, -0.55),
+            (PropKind::Vfx1, 0.5),
+        ];
+        for (kind, side) in props {
             if self.props.iter().any(|p| p.kind == kind) {
                 continue;
             }
             let over = spawn.position + turn.transform_vector3(Vec3::new(side, 0.0, -0.45));
             let floor = self.surface_below(over, 1.2).unwrap_or(over - Vec3::Y * 0.45);
-            // (The camera's lens to the viewer.)
-            let facing = if kind == PropKind::Camera { Mat4::from_rotation_y(std::f32::consts::PI) } else { Mat4::IDENTITY };
+            // (The camera's lens and the VFX1's front to the viewer.)
+            let facing = match kind {
+                PropKind::Camera | PropKind::Vfx1 => Mat4::from_rotation_y(std::f32::consts::PI),
+                _ => Mat4::IDENTITY,
+            };
             let prop = self.built_in_prop(kind, Mat4::from_translation(floor) * turn * facing);
             self.props.push(prop);
         }
@@ -1281,6 +1338,16 @@ pub fn print_meshes() -> (Mesh, Mesh) {
     (card, page(corner, PRINT_PICTURE, PRINT_PICTURE, 0))
 }
 
+/// A box of `size` around the origin of the frame `at`, in the material.
+fn turned(at: Mat4, size: Vec3, material: usize) -> Mesh {
+    let mut mesh = cuboid(Vec3::ZERO, size, material);
+    for vertex in &mut mesh.vertices {
+        vertex.position = at.transform_point3(Vec3::from(vertex.position)).to_array();
+        vertex.normal = at.transform_vector3(Vec3::from(vertex.normal)).to_array();
+    }
+    mesh
+}
+
 /// The cube from -0.5 to 0.5, which the extras are drawn with.
 pub fn unit_cube() -> Mesh {
     cuboid(Vec3::ZERO, Vec3::ONE, 0)
@@ -1627,7 +1694,7 @@ mod tests {
     fn props_stand_on_the_desk_and_have_their_parts() {
         let room = Scene::test_room();
         let kinds: Vec<PropKind> = room.props.iter().map(|p| p.kind).collect();
-        assert_eq!(kinds, [PropKind::Manual, PropKind::Joystick, PropKind::Camera]);
+        assert_eq!(kinds, [PropKind::Manual, PropKind::Joystick, PropKind::Camera, PropKind::Vfx1]);
         for prop in &room.props {
             let at = prop.pose.transform_point3(Vec3::ZERO);
             assert_eq!(room.surface_below(at + Vec3::Y * 0.1, 1.0), Some(at), "{:?} on the desk", prop.kind);
@@ -1644,12 +1711,17 @@ mod tests {
         // A scene without them gets them where the hands are, on the floor
         // of the glTF quad's scene (nothing is below).
         let scene = Scene::from_gltf(quad_gltf().as_bytes(), Path::new(".")).unwrap();
-        assert_eq!(scene.props.len(), 3);
+        assert_eq!(scene.props.len(), 4);
         // The camera looks at the viewer, from the front of its box.
         let camera = &room.props[2];
         let lens = camera.pose * camera.lens.unwrap();
         assert!(lens.transform_vector3(Vec3::NEG_Z).z > 0.99, "{:?}", lens);
         assert!(camera.lens.unwrap().transform_point3(Vec3::ZERO).z <= camera.bounds.0.z + 0.01);
+        // The VFX1's front faces the viewer too, its eyes inside it.
+        let vfx1 = &room.props[3];
+        assert!(vfx1.pose.transform_vector3(Vec3::NEG_Z).z > 0.99);
+        let (low, high) = vfx1.bounds;
+        assert!(VFX1_EYES.cmpge(low).all() && VFX1_EYES.cmple(high).all());
     }
 
     #[test]
