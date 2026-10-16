@@ -537,7 +537,8 @@ pub enum Uop {
     /// and flushed as MXCSR says, with the exceptions raised added to its
     /// flags. Where one of them isn't masked, the handler runs the
     /// instruction instead of the operations after this one (it raises
-    /// #XM), as `Bail`: nothing before it may change anything.
+    /// #XM), as `Bail`: nothing before it may change anything. So does
+    /// ADD, SUB, MUL or DIV with underflow unmasked.
     VFloat { op: VFloatOp, scalar: bool, a: X, b: X },
     /// t = what `op` takes from x.
     VToT { t: T, x: X, op: VExtract },

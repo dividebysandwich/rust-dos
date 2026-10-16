@@ -4584,6 +4584,35 @@ fn sse_exceptions_mxcsr_unmasks_go_through_the_handlers() {
 }
 
 #[test]
+fn sse_exact_underflow_with_ue_unmasked_goes_through_the_handler() {
+    // 2^-63 * 2^-64 is an exact denormal, which underflows only with UE
+    // unmasked: #UD on the 100th iteration, XMM0 as it was and UE set.
+    let b = sse_fault_loop(
+        UD,
+        |rig| {
+            for k in 0..100 {
+                let factor = if k == 99 { 0x1F80_0000 } else { 0x3F80_0000 };
+                for o in 0..4 {
+                    rig.write32(DATA + 16 * k + 4 * o, factor);
+                }
+            }
+            rig.write32(DATA + 0x1000, 0x1780);
+            for o in 0..4 {
+                rig.write32(DATA + 0x1010 + 4 * o, 0x2000_0000);
+            }
+        },
+        |a| {
+            a.ldmxcsr(dword_ptr(DATA + 0x1000))?;
+            a.movaps(xmm0, xmmword_ptr(DATA + 0x1010))?;
+            a.mulps(xmm0, xmmword_ptr(esi))
+        },
+    );
+    assert_eq!((b.recorded().0, b.cpu.ebx()), (UD as u32, 99));
+    assert_eq!(b.cpu.sse.xmm[0], 0x2000_0000_2000_0000_2000_0000_2000_0000);
+    assert_eq!(b.cpu.sse.mxcsr, 0x1790);
+}
+
+#[test]
 fn sse_misaligned_operands_fault_as_the_handlers_fault() {
     // The 100th MOVAPS reads 8 bytes off alignment: #GP(0).
     let b = sse_fault_loop(

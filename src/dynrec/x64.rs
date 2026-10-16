@@ -2644,6 +2644,11 @@ impl Gen<'_> {
             ($($t:tt)*) => { dynasm!(self.ops ; .arch x64 ; $($t)*) };
         }
         let at = self.ops.new_dynamic_label();
+        // With underflow unmasked, an exact tiny result underflows too,
+        // which the host's masked UE doesn't report: the handler runs it.
+        if let VFloatOp::Add | VFloatOp::Sub | VFloatOp::Mul | VFloatOp::Div = op {
+            dynasm!(self.ops ; .arch x64 ; test DWORD [rbx + MXCSR], 0x800 ; jz =>at);
+        }
         dynasm!(self.ops
             ; .arch x64
             ; mov eax, DWORD [rbx + MXCSR]

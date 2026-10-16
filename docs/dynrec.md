@@ -450,8 +450,10 @@ scalar, CVTPS2PI, CVTTPS2PI and CVTPI2PS. The arithmetic runs with the
 host's MXCSR set to the guest's rounding and flush to zero, every
 exception masked, and the exceptions it raised are added to the guest's
 MXCSR; where one of them is unmasked in the guest's MXCSR, the handler
-runs the instruction instead and raises it. The host's MXCSR is then set
-back to Rust's. The approximations of RCPSS, RCPPS, RSQRTSS and RSQRTPS,
+runs the instruction instead and raises it. With underflow unmasked, an
+exact tiny result underflows too, which the host doesn't report, so ADD,
+SUB, MUL and DIV go to the handler. The host's MXCSR is then set back to
+Rust's. The approximations of RCPSS, RCPPS, RSQRTSS and RSQRTPS,
 which the host's don't match, the compares into EFLAGS and the
 conversions to and from 32-bit registers go through their handlers, and
 so does everything on ARM64 hosts.
