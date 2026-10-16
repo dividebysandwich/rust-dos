@@ -389,8 +389,9 @@ fn rep_ins_from_an_ide_disk_is_the_iterations_one_at_a_time() {
     assert_eq!(b.cpu.bus.read_8(0x100000), byte(5 * 512));
     assert_eq!(b.read32(0x300000 + 512), 0x0080_0080);
     assert_ne!(b.read32(0x400000 + 2 * 1023), 0);
-    // The bytes moved count as disk I/O for `cycles=auto` either way.
+    // The 16 sectors moved count as disk I/O for `cycles=auto` either
+    // way, and the reads while the disk was busy or done don't.
     let io = |rig: &Rig| rig.cpu.bus.activity.io_bytes;
     assert_eq!(io(&a), io(&b));
-    assert!(io(&b) >= 16 * 512, "{}", io(&b));
+    assert_eq!(io(&b), 16 * 512);
 }

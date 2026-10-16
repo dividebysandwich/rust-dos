@@ -143,8 +143,17 @@ impl Bus {
         let class = crate::diskio::DiskClass::HardDisk;
         let hard_disk_ns_per_sector = self.disk_io.cost_ns(class, crate::diskimage::SECTOR_SIZE as u32);
         let faked = self.faked_io;
-        let mut env = Env { disks: &self.disk, player: &mut self.cdaudio, now, hard_disk_ns_per_sector, faked };
+        let mut env = Env {
+            disks: &self.disk,
+            player: &mut self.cdaudio,
+            now,
+            hard_disk_ns_per_sector,
+            faked,
+            moved: 0,
+        };
         let result = f(channel, &mut env);
+        // Data moved on a drive, which `cycles=auto` goes by.
+        self.activity.io_bytes += env.moved;
         self.sync_ide(id);
         Some(result)
     }
@@ -192,8 +201,6 @@ impl Bus {
     /// The data port, 2 or 4 bytes at a time.
     pub(crate) fn ide_read_wide(&mut self, id: ChannelId, len: u8) -> u32 {
         self.clock.stall(DATA_PORT_NS * (len as u64 / 2));
-        // Data moved on a drive, which `cycles=auto` goes by.
-        self.activity.io_bytes += len as u64;
         let value = self.with_ide(id, |channel, env| channel.read_wide(len, env)).unwrap_or(0xFFFF_FFFF);
         self.log_port(id.base(), value, len, false);
         value
@@ -201,7 +208,6 @@ impl Bus {
 
     pub(crate) fn ide_write_wide(&mut self, id: ChannelId, value: u32, len: u8) {
         self.clock.stall(DATA_PORT_NS * (len as u64 / 2));
-        self.activity.io_bytes += len as u64;
         self.log_port(id.base(), value, len, true);
         self.with_ide(id, |channel, env| channel.write_wide(value, len, env));
     }
@@ -233,7 +239,6 @@ impl Bus {
         self.clock
             .stall_times(DATA_PORT_NS * (len as u64 / 2), count as u64);
         let bytes = count * len as usize;
-        self.activity.io_bytes += bytes as u64;
         let Some(channel) = &self.ide[id.index()] else {
             return;
         };

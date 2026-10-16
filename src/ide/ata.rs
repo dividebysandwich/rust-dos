@@ -273,6 +273,7 @@ impl Ata {
     /// leaves it.
     pub fn skip_data_run(&mut self, len: usize, env: &mut Env) {
         debug_assert!(len <= self.data_run().len());
+        env.moved += len as u64;
         self.buf_pos += len;
         if self.buf_pos >= self.buf_len {
             self.io_completion(env);
@@ -692,6 +693,7 @@ impl Ata {
         if self.state != State::DataRead || self.status & DRQ == 0 || self.buf_pos >= self.buf_len {
             return 0xFFFF;
         }
+        env.moved += len as u64;
         let mut value = 0u32;
         for i in 0..len as usize {
             value |= (*self.buf.get(self.buf_pos + i).unwrap_or(&0) as u32) << (8 * i);
@@ -708,6 +710,7 @@ impl Ata {
         if self.state != State::DataWrite || self.status & DRQ == 0 || self.buf_pos + len as usize > self.buf_len {
             return;
         }
+        env.moved += len as u64;
         for i in 0..len as usize {
             self.buf[self.buf_pos + i] = (value >> (8 * i)) as u8;
         }
