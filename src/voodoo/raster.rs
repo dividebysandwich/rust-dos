@@ -719,8 +719,13 @@ fn texture(t: &TmuRaster, mode: u32, x: i32, dither4: Option<&[u8]>, cother: u32
         let (s, s1, tc, t1) = (s & smax, s1 & smax, tc & tmax, t1 & tmax);
         bilinear(fetch(s, tc), fetch(s1, tc), fetch(s, t1), fetch(s1, t1), sfrac, tfrac)
     };
+    texture_combine(t, mode, lod, cother, c_local)
+}
 
-    // The texture combine unit.
+/// The texture combine unit of textureMode `mode`: the unit's texel
+/// `c_local` with `cother`, at level of detail `lod`.
+#[inline(always)]
+fn texture_combine(t: &TmuRaster, mode: u32, lod: i32, cother: u32, c_local: u32) -> u32 {
     let (mut tr, mut tg, mut tb) = if !bit(mode, 12) { (r_of(cother), g_of(cother), b_of(cother)) } else { (0, 0, 0) };
     let mut ta = if !bit(mode, 21) { a_of(cother) } else { 0 };
     if bit(mode, 13) {
@@ -959,14 +964,19 @@ impl Spec for Generic {
 /// them. alphaMode's: all but the reference value of the alpha test.
 const FBZ_FIXED: u32 = 1 << 2 | 1 << 3 | 1 << 4 | 1 << 8 | 1 << 11 | 1 << 12 | 1 << 16 | 1 << 18 | 1 << 19 | 1 << 20 | 1 << 21;
 const AM_FIXED: u32 = 0x00FF_FFFF;
+/// fbzColorPath's: all the raster reads, that is all but the subpixel
+/// adjustment (26, applied at setup), the texture enable (27, which the
+/// unit count stands for) and anti-aliasing (29).
+const CP_FIXED: u32 = 0x13FF_FFFF;
 
 /// A variant that fixes every bit that chooses a stage or a source:
-/// fbzMode and alphaMode as `FBZ_FIXED` and `AM_FIXED` say, and all of
-/// fbzColorPath, fogMode and the textureMode of the units used.
+/// fbzMode, alphaMode and fbzColorPath as `FBZ_FIXED`, `AM_FIXED` and
+/// `CP_FIXED` say, and all of fogMode and the textureMode of the units
+/// used.
 const fn full(tmus: usize, [fbz, cp, am, fog, t0, t1]: [u32; 6]) -> [(u32, u32); 6] {
     [
         (FBZ_FIXED, fbz & FBZ_FIXED),
-        (u32::MAX, cp),
+        (CP_FIXED, cp & CP_FIXED),
         (AM_FIXED, am & AM_FIXED),
         (u32::MAX, fog),
         (if tmus >= 1 { u32::MAX } else { 0 }, t0),
@@ -977,8 +987,8 @@ const fn full(tmus: usize, [fbz, cp, am, fog, t0, t1]: [u32; 6]) -> [(u32, u32);
 /// The bits of textureMode that choose the texture combine (12-29).
 const TC_FIXED: u32 = 0x3FFF_F000;
 
-/// A variant that fixes only fbzColorPath and the texture combine of the
-/// units used, and leaves fbzMode, alphaMode, fogMode and the texture
+/// A variant that fixes only fbzColorPath (as `CP_FIXED` says) and the
+/// texture combine of the units used, and leaves fbzMode, alphaMode, fogMode and the texture
 /// filtering as the triangle has them. Those cost a variant little against
 /// the generic code, the combines most of the difference, so one of these
 /// covers the depth, blending and fog settings a game draws a colour path
@@ -986,7 +996,7 @@ const TC_FIXED: u32 = 0x3FFF_F000;
 const fn combine_only(tmus: usize, [cp, t0, t1]: [u32; 3]) -> [(u32, u32); 6] {
     [
         (0, 0),
-        (u32::MAX, cp),
+        (CP_FIXED, cp & CP_FIXED),
         (0, 0),
         (0, 0),
         (if tmus >= 1 { TC_FIXED } else { 0 }, t0 & TC_FIXED),
@@ -1321,6 +1331,40 @@ mod tests {
     }
 
     #[test]
+    fn texture_combines_without_local_ignore_the_texel() {
+        let t = TmuRaster {
+            ram: Vram::new(2),
+            mask: 1,
+            mode: 0,
+            unfiltered: false,
+            lodmin: 0,
+            lodmax: 8 << 8,
+            lodbias: 0,
+            lodmask: 0x1FF,
+            lodoffset: [0; 9],
+            detailmax: 0xFF,
+            detailbias: 0x400,
+            detailscale: 2,
+            wmask: 255,
+            hmask: 255,
+            lookup: Arc::new([0; 256]),
+            bilinear_mask: 0xFF,
+        };
+        let (lod, cother) = (0x123, 0x9A3C_E571);
+        for tc in 0..1u32 << 18 {
+            let mode = tc << 12;
+            if uses_local(mode) {
+                continue;
+            }
+            let a = texture_combine(&t, mode, lod, cother, 0);
+            for c_local in [0xFFFF_FFFF, 0x8040_C020] {
+                let b = texture_combine(&t, mode, lod, cother, c_local);
+                assert_eq!(a, b, "textureMode {mode:08X} reads c_local");
+            }
+        }
+    }
+
+    #[test]
     fn combine_only_variants_draw_as_the_generic_code() {
         // The states Oni draws with through 3dfx's OpenGL driver, which
         // differ in fbzMode, alphaMode and the texture formats as well.
@@ -1331,6 +1375,10 @@ mod tests {
             [0x0009_4371, 0x0C48_2405, 0x0000_4110, 0xC0, 0x8000_0006, 0x8C26_1CCF],
             [0x0009_4771, 0x0D42_2409, 0x0000_0410, 0xC0, 0x8000_0006, 0x8C26_1A0F],
             [0x0009_4771, 0x0C48_2405, 0x0000_1410, 0xC0, 0x8000_0006, 0x8C26_1C0F],
+            // And two with the colour path bits the raster doesn't read
+            // changed: no subpixel adjustment, and anti-aliasing on.
+            [0x0009_4771, 0x0942_2409, 0x0000_5110, 0xC0, 0x8000_0006, 0x8C26_1A0F],
+            [0x0008_43E1, 0x2C48_2405, 0x0000_5110, 0xC0, 0x8000_0006, 0x8C26_1C0F],
         ];
         let tp = TmuParams {
             starts: 10 << 32,
@@ -1366,7 +1414,11 @@ mod tests {
         for regs in states {
             let st = two_unit_state(regs);
             let v = variant(&st, 2);
-            assert!(v.is_some(), "no variant for {regs:08X?}");
+            let combine_only = [C0::FIXED, C1::FIXED];
+            assert!(
+                v.is_some_and(|i| combine_only.contains(&VARIANTS[i].1)),
+                "no combine-only variant for {regs:08X?}"
+            );
             let generic = two_unit_state(regs);
             let (mut a, mut b) = (0, 0);
             let (mut sa, mut sb) = (Stats::default(), Stats::default());
