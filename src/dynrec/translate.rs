@@ -6,11 +6,10 @@ use iced_x86::{Code, ConditionCode, Instruction, Mnemonic, OpKind, Register};
 
 use super::uop::*;
 use crate::cpu::Seg;
-use crate::cpu::alu::{ARITH, OF, ShiftOp};
+use crate::cpu::alu::{AF, CF, PF, SF, ShiftOp, ZF};
 use crate::instructions::operand::{addr_size, mem_seg};
 
-/// Flags bits the flag instructions change.
-const CF: u32 = 0x0001;
+/// Flags bits the flag instructions change, besides CF.
 const IF: u32 = 0x0200;
 const DF: u32 = 0x0400;
 
@@ -90,7 +89,7 @@ pub fn translate(
         Cmc => flag(CF, None, &mut u),
         Sahf => {
             u.push(Uop::Get { t: T0, r: Gpr { index: 0, high: true, size: 1 } });
-            u.push(Uop::FlagsFrom { t: T0, mask: ARITH & !OF });
+            u.push(Uop::FlagsFrom { t: T0, mask: SF | ZF | AF | PF | CF });
             true
         }
         Cld => flag(DF, Some(false), &mut u),

@@ -79,15 +79,22 @@ pub fn translate(instr: &Instruction, fast: bool, u: &mut Vec<Uop>) -> bool {
         u.push(Uop::FFromT { x: X0, t: T0, kind: FKind::Int });
         true
     };
-    // A double in memory, into X0, where it is plain RAM (else the handler
-    // runs the instruction, which checks the operand as a whole as well).
-    // (`canon` as the handler makes the operand: multiplications and
-    // divisions do.)
-    let double = |u: &mut Vec<Uop>, canon: bool| -> bool {
+    // A qword in memory, its handle into T1, where it is plain RAM (else
+    // the handler runs the instruction, which checks the operand as a
+    // whole as well).
+    let qword = |u: &mut Vec<Uop>| -> bool {
         if mem(instr, T1, 8, false, u).is_none() {
             return false;
         }
         u.push(Uop::BailUnlessRam { t: T1 });
+        true
+    };
+    // A double in memory, into X0 (`qword`). (`canon` as the handler
+    // makes the operand: multiplications and divisions do.)
+    let double = |u: &mut Vec<Uop>, canon: bool| -> bool {
+        if !qword(u) {
+            return false;
+        }
         u.push(Uop::FLoad64 { x: X0, m: T1, canon });
         true
     };
@@ -263,10 +270,9 @@ pub fn translate(instr: &Instruction, fast: bool, u: &mut Vec<Uop>) -> bool {
         }
         Fild_m64int => {
             guard(u, 0);
-            if mem(instr, T1, 8, false, u).is_none() {
+            if !qword(u) {
                 return false;
             }
-            u.push(Uop::BailUnlessRam { t: T1 });
             u.push(Uop::FLoadInt64 { x: X0, m: T1 });
             u.push(Uop::FPush { x: X0, canon: false });
         }

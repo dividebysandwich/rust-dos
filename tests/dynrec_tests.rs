@@ -3179,7 +3179,7 @@ fn fpu_integer_operands_run_as_their_handlers() {
 /// float compare, with OF set or clear before the SAHF (it stays), and a
 /// FILD of a qword: of `fpu_loop`'s second single and integer, or with
 /// `small` of the integer's top 21 bits, within 2^53 either way.
-fn sahf_and_fild_qword(small: bool) -> (Rig, DynStats) {
+fn sahf_and_fild_qword(small: bool) -> DynStats {
     let (_, b, stats) = fpu_loop(|a| {
         let mut skip = a.create_label();
         if small {
@@ -3214,12 +3214,12 @@ fn sahf_and_fild_qword(small: bool) -> (Rig, DynStats) {
         a.mov(dword_ptr(edi + 16), ebx)
     });
     assert_ne!(b.cpu.ebx(), 0);
-    (b, stats)
+    stats
 }
 
 #[test]
 fn sahf_and_fild_of_a_qword_run_in_translated_code() {
-    let (_, stats) = sahf_and_fild_qword(true);
+    let stats = sahf_and_fild_qword(true);
     if AVAILABLE && cfg!(target_arch = "x86_64") {
         assert!(stats.native + 20 > stats.instructions, "handlers ran them: {:?}", stats);
     }

@@ -2179,9 +2179,7 @@ impl Gen<'_> {
                     ; pxor Rx(x.0), Rx(x.0)
                     ; cvtsi2sd Rx(x.0), rax
                 );
-                let end = self.end();
-                let (wb, reload) = (self.cache.dirty, self.cache.loaded);
-                self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, wb, reload, leave: false });
+                self.bail(at, false);
             }
             Uop::FToHalf { t, x, high } => {
                 dynasm!(self.ops ; .arch x64 ; movq rax, Rx(x.0));

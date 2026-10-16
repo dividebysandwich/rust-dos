@@ -2266,7 +2266,8 @@ impl Gen<'_> {
                     ; scvtf D(d(x)), x1
                 );
                 let end = self.end();
-                self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, leave: false });
+                let (ix, dirty) = (self.ix, self.dirty);
+                self.slow.push(Slow::Bail { at, end, ix, dirty, leave: false });
             }
             Uop::FToHalf { t, x, high } => {
                 dynasm!(self.ops ; .arch aarch64 ; fmov X(r(t)), D(d(x)));
