@@ -904,6 +904,39 @@ The settings window's VR page has them all, and a **Center the view where
 you sit now** button. Its Left and Right keys step the scale by 1%, the seat
 by 1 cm and the turn by 1°, which take effect at once.
 
+### `[vfx1]`
+
+The Forte VFX1, a VR headset of 1995, for the games that support it (see
+[The VFX1 headset](#the-vfx1-headset)): its card and driver in the
+machine, and the headset on the desk of the 3D scene, to put on in a VR
+headset.
+
+* `enabled`: `true` puts the card in and the headset on the desk; `false`
+  (the default) neither. With it, `VIPPORT` is set for games.
+* `port`: the card's base port, which `VIPPORT` tells games: `260` (the
+  default), `280`, `2A0` or `2C0`. The card answers at `300` too, where
+  some games look for it.
+* `stereo`: how each eye's picture is taken from the screen:
+  * `auto` (the default): as the game tells the driver, or else VFX1
+    pages while the game reads the head tracker on a 640x480 screen, and
+    the whole screen for both eyes otherwise (menus).
+  * `pages`: the VFX1's own stereo, which most of its games draw: the
+    left eye on the left half of a 640x480 screen and the right eye on
+    the right, each page on every other line.
+  * `lines`: even lines the left eye, odd lines the right, as games for
+    the i-glasses! and the CyberMaxx draw (Quake's `lcd_x` too).
+  * `side`: the left half of the screen the left eye.
+  * `mono`: the whole screen for both eyes.
+* `swap_eyes`: `true` swaps the eyes' pictures; `false` is the default.
+* `view_size`: how wide the pictures look, in degrees, 20 to 110. The
+  default, 36, is the VFX1's own; more fills more of the view.
+* `steer`: `true` makes the head's movement between the game's frames
+  larger as it draws more than 30 frames a second, for games that turn
+  by it, as Descent turns the ship; `false` (the default) passes the head
+  as it is.
+
+`enabled` and `port` take effect at the DOS prompt; the others at once.
+
 ### `[drives]`
 
 Each line is `LETTER = PATH [more images] [floppy|hdd|cdrom] [-label NAME] [-ro] [-chs C,H,S] [-boot] [-overlay DIR]`,
@@ -2670,6 +2703,43 @@ buttons and the triggers its triggers. With `controllers=pointer` they only
 point and click; with `gamepad` both hands are the gamepad, triggers and
 grips included. Keyboard and mouse input go to the window, which has to
 keep the focus.
+
+### The VFX1 headset
+
+With [`[vfx1]`](#vfx1) `enabled=true`, the machine has a Forte VFX1: the
+VIP card at `VIPPORT` and the VFX1.COM driver's interface on INT 33h,
+which games find without a driver of their own. Its head tracker and
+CyberPuck are your headset and right controller. The VFX1 itself lies on
+the desk of the 3D scene, beside the joystick.
+
+In the headset, take the VFX1 with the grip button, bring it to your face
+and let go: you wear it. The room goes away, each eye sees the picture
+the game draws for it, ahead of it wherever you turn, on black, as the
+VFX1's two screens showed it, and your head is the game's head tracker,
+level and ahead where you were as you put it on. To take it off, grip
+next to your head and pull it away, then put it down or throw it. While
+you wear it, the controllers are a gamepad and point at nothing; the
+right controller is the CyberPuck as well, its tilt the puck's and its
+trigger, grip and A button the puck's three buttons.
+
+Start a game with its VFX1 switches:
+
+| Game | Command | Notes |
+|---|---|---|
+| Descent (1.4 and later) | `DESCENT -vfx -vfxtrak` | Set `steer=true`. Enter re-centres the head, Shift+F7 swaps the eyes, Shift+F6 changes the detail |
+| Descent 2 | `DESCENT2 -vfx -vfxtrack` | Set `steer=true` |
+| Quake 1.08 | `VFX1QK QUAKE.EXE +vid_mode 7 +lcd_x 1` | VFX1QK from forte-vfx1-vr; `stereo=lines` |
+| System Shock (CD) | `CDSHOCK`, VFX1 in its options | Full-screen view |
+| MechWarrior 2 | VFX-1 under Cockpit Controls | Head tracking |
+| Magic Carpet | `-vfx` | Head pitch and roll only |
+
+Descent was tried with rust-dos; the other games are as the
+[forte-vfx1-vr](https://github.com/LeonG-ZA/forte-vfx1-vr) project found
+them. Descent draws its heads-up display in the left eye only, as it did
+on a VFX1. Without a headset, `RUST_DOS_VFX1_HEAD=yaw,pitch,roll` (in
+degrees) holds the head turned, and `RUST_DOS_VFX1_DUMP=<folder>` writes
+the eyes' pictures there as `left.png` and `right.png` once a second, to
+try a game out; `RUST_DOS_VR_WEAR=1` starts with the VFX1 on.
 
 ## Command-line options
 

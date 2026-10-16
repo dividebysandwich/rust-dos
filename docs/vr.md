@@ -60,7 +60,7 @@ blender --background --factory-startup --python assets/vr/make_test_room.py
 | `spawn` | Empty (or a camera) | Where your eyes start, and which way they face. |
 | `speaker_left`, `speaker_right` | Empty | Where the left and right sound channels come from. |
 | `led_power`, `led_turbo`, `led_hdd`, `led_floppy` | Mesh | The PC's front-panel lights. |
-| `manual`, `joystick`, `camera` | Empty, or the parent of meshes | Where the game's manual, the joystick and the polaroid camera stand, to be picked up in VR. See [Props](#props). |
+| `manual`, `joystick`, `camera`, `vfx1` | Empty, or the parent of meshes | Where the game's manual, the joystick, the polaroid camera and the VFX1 headset stand, to be picked up in VR. See [Props](#props). |
 | `indoor` | Empty (cube) | The inside of the room, where it doesn't rain or snow. See [Time of day and weather](#time-of-day-and-weather). |
 | `Window glass` | Mesh | A window's glass, which the rain runs down. |
 
@@ -75,7 +75,7 @@ Properties > Custom Properties):
 |---|---|---|
 | `rustdos_screen` | `1` or `True` (a boolean) | `screen` |
 | `rustdos_led` | `power`, `turbo`, `hdd` or `floppy` (a string) | `led_…` |
-| `rustdos_prop` | `manual`, `joystick`, `camera`, `manual_page_left`, `manual_page_right` or `joystick_stick` (a string) | that name |
+| `rustdos_prop` | `manual`, `joystick`, `camera`, `vfx1`, `manual_page_left`, `manual_page_right` or `joystick_stick` (a string) | that name |
 | `rustdos_prop` | `item` (a string) | (none: anything to move about, see [Props](#props)) |
 | `rustdos_lamp` | a name, or `1` / `True` | (none: a lamp to switch, see [Lamps](#lamps)) |
 | `rustdos_indoor` | `1` or `True` | `indoor` |
@@ -247,6 +247,20 @@ your own model, put the meshes below it, with two empties: `camera_lens`
 where it looks from (its +Y out of the lens) and `camera_slot` where the
 pictures come out (its +Y out of the camera, its +Z up). Without them, the
 lens is in the middle of the camera's front and the slot low under it.
+
+### The VFX1 headset
+
+With `[vfx1] enabled=true`, a Forte VFX1 headset lies on the desk too,
+to put on in VR (see CONFIGURATION.md's "The VFX1 headset"): let go of it
+at your face and you wear it, grip at your head to take it off.
+
+Rust-DOS brings its own model, for an empty named `vfx1`, its **front
+along its +Y** (Blender's; away from the face wearing it, glTF's -Z), its
+origin under the middle of the visor's bottom. For your own model, put
+the meshes below it: the eyes are 6 cm above the origin and half a
+centimetre ahead of it, which is where the head's eyes are when it is
+put on, and where it is put when taken off. A scene without one gets it
+to the right of the joystick.
 
 ### Things to move about
 
