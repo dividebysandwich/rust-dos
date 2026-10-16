@@ -307,10 +307,14 @@ fn ide_command(a: &mut CodeAssembler, command: u8, lba: u8, count: u8) -> Result
 
 #[test]
 fn rep_ins_from_an_ide_disk_is_the_iterations_one_at_a_time() {
-    use rust_dos::diskimage::Chs;
     use rust_dos::disk::{MountOptions, numbered_drive};
+    use rust_dos::diskimage::Chs;
     use rust_dos::ide::{Ata, Channel, ChannelId, Device};
-    const GEOMETRY: Chs = Chs { cylinders: 20, heads: 4, sectors: 17 };
+    const GEOMETRY: Chs = Chs {
+        cylinders: 20,
+        heads: 4,
+        sectors: 17,
+    };
     const SECTORS: usize = 20 * 4 * 17;
     let dir = std::path::PathBuf::from("target/test_string_bulk/ide");
     std::fs::create_dir_all(&dir).unwrap();
@@ -320,7 +324,10 @@ fn rep_ins_from_an_ide_disk_is_the_iterations_one_at_a_time() {
     std::fs::write(&image, bytes).unwrap();
     let (mut a, mut b) = pair(|rig| {
         let drive = numbered_drive(2);
-        let opts = MountOptions { geometry: Some(GEOMETRY), ..Default::default() };
+        let opts = MountOptions {
+            geometry: Some(GEOMETRY),
+            ..Default::default()
+        };
         rig.cpu.bus.mount_drive(drive, &image, opts, false).unwrap();
         let mut channel = Channel::new(ChannelId::Primary);
         channel.devices[0] = Some(Device::Ata(Ata::new(drive, GEOMETRY, SECTORS as u64)));
