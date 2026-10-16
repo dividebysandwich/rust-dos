@@ -103,8 +103,11 @@ pub fn trampoline() -> Trampoline {
         ; sub rsp, 8
         ; mov rbx, rdi
         ; mov r12, rsi
-        // The host's MXCSR, which `Uop::VFloat` puts back.
+        // The host's MXCSR, which `Uop::VFloat` puts back, without the
+        // exception flags, which nothing on the host reads: with them
+        // clear, VFloat finds them set only by the guest's operations.
         ; stmxcsr [r12 + CTX_MXCSR + 4]
+        ; and DWORD [r12 + CTX_MXCSR + 4], !0x3F
         ; mov r13, QWORD [r12 + CTX_RAM]
         ; mov r14, QWORD [r12 + CTX_CODE_BLOCKS]
         ; mov ebp, DWORD [rbx + FLAGS]
@@ -2639,11 +2642,18 @@ impl Gen<'_> {
     /// zero with every exception masked, its exceptions added to the
     /// guest's MXCSR, and the host's MXCSR back as Rust has it. An exception
     /// the guest doesn't mask goes to the handler, which raises it.
+    ///
+    /// Loading MXCSR is slow, and an SSE loop pays for two loads an
+    /// operation. Most of the time neither is needed: where the guest
+    /// masks every exception and has the host's rounding, flush to zero and
+    /// DAZ, and has every exception flag the host's MXCSR has set already,
+    /// the operation runs under the host's MXCSR as it is, and the flags
+    /// set after it that the guest doesn't have yet are exactly those it
+    /// raised. (The host's flags are cleared where the slow way puts its
+    /// MXCSR back, so after that they come from the guest's operations,
+    /// and the FPU's, which mostly set the guest's too.)
     fn vfloat(&mut self, op: VFloatOp, scalar: bool, a: u8, b: u8) {
-        macro_rules! op {
-            ($($t:tt)*) => { dynasm!(self.ops ; .arch x64 ; $($t)*) };
-        }
-        let at = self.ops.new_dynamic_label();
+        let (at, slow) = (self.ops.new_dynamic_label(), self.ops.new_dynamic_label());
         // With underflow unmasked, an exact tiny result underflows too,
         // which the host's masked UE doesn't report: the handler runs it.
         if let VFloatOp::Add | VFloatOp::Sub | VFloatOp::Mul | VFloatOp::Div = op {
@@ -2651,12 +2661,66 @@ impl Gen<'_> {
         }
         dynasm!(self.ops
             ; .arch x64
+            ; stmxcsr [r12 + CTX_MXCSR]
+            ; mov ecx, DWORD [r12 + CTX_MXCSR]
+            ; mov eax, DWORD [rbx + MXCSR]
+            // The same rounding, flush to zero, DAZ and masks,
+            ; mov edx, ecx
+            ; xor edx, eax
+            ; test edx, 0xFFC0
+            ; jnz =>slow
+            // all exceptions masked,
+            ; mov edx, eax
+            ; and edx, 0x1F80
+            ; cmp edx, 0x1F80
+            ; jne =>slow
+            // and no flag the host has that the guest hasn't.
+            ; not eax
+            ; and eax, ecx
+            ; test eax, 0x3F
+            ; jnz =>slow
+        );
+        self.vfloat_op(op, scalar, a, b);
+        dynasm!(self.ops
+            ; .arch x64
+            ; stmxcsr [r12 + CTX_MXCSR]
+            ; mov eax, DWORD [r12 + CTX_MXCSR]
+            ; and eax, 0x3F
+            ; or DWORD [rbx + MXCSR], eax
+            ; jmp >vfloat_done
+            ; =>slow
             ; mov eax, DWORD [rbx + MXCSR]
             ; and eax, 0xFFC0
             ; or eax, 0x1F80
             ; mov DWORD [r12 + CTX_MXCSR], eax
             ; ldmxcsr [r12 + CTX_MXCSR]
         );
+        self.vfloat_op(op, scalar, a, b);
+        dynasm!(self.ops
+            ; .arch x64
+            ; stmxcsr [r12 + CTX_MXCSR]
+            ; ldmxcsr [r12 + CTX_MXCSR + 4]
+            ; mov eax, DWORD [r12 + CTX_MXCSR]
+            ; and eax, 0x3F
+            ; jz >vfloat_done
+            // The exceptions raised that the guest doesn't mask.
+            ; mov ecx, DWORD [rbx + MXCSR]
+            ; shr ecx, 7
+            ; not ecx
+            ; and ecx, eax
+            ; jnz =>at
+            ; or DWORD [rbx + MXCSR], eax
+            ; vfloat_done:
+        );
+        self.bail(at, false);
+    }
+
+    /// The host instruction of `Uop::VFloat`'s operation, on host registers
+    /// XMM`a` and XMM`b`.
+    fn vfloat_op(&mut self, op: VFloatOp, scalar: bool, a: u8, b: u8) {
+        macro_rules! op {
+            ($($t:tt)*) => { dynasm!(self.ops ; .arch x64 ; $($t)*) };
+        }
         match (op, scalar) {
             (VFloatOp::Add, false) => op!(addps Rx(a), Rx(b)),
             (VFloatOp::Add, true) => op!(addss Rx(a), Rx(b)),
@@ -2686,23 +2750,6 @@ impl Gen<'_> {
                 op!(movq xmm2, Rx(b) ; cvtdq2ps xmm2, xmm2 ; movsd Rx(a), xmm2)
             }
         }
-        dynasm!(self.ops
-            ; .arch x64
-            ; stmxcsr [r12 + CTX_MXCSR]
-            ; ldmxcsr [r12 + CTX_MXCSR + 4]
-            ; mov eax, DWORD [r12 + CTX_MXCSR]
-            ; and eax, 0x3F
-            ; jz >vfloat_done
-            // The exceptions raised that the guest doesn't mask.
-            ; mov ecx, DWORD [rbx + MXCSR]
-            ; shr ecx, 7
-            ; not ecx
-            ; and ecx, eax
-            ; jnz =>at
-            ; or DWORD [rbx + MXCSR], eax
-            ; vfloat_done:
-        );
-        self.bail(at, false);
     }
 
     /// `Uop::FBailPrecise`: the handler runs the instruction where `when`

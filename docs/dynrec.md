@@ -453,7 +453,12 @@ MXCSR; where one of them is unmasked in the guest's MXCSR, the handler
 runs the instruction instead and raises it. With underflow unmasked, an
 exact tiny result underflows too, which the host doesn't report, so ADD,
 SUB, MUL and DIV go to the handler. The host's MXCSR is then set back to
-Rust's. The approximations of RCPSS, RCPPS, RSQRTSS and RSQRTPS,
+Rust's, with its exception flags clear. Loading MXCSR is slow, so where
+the guest masks every exception and has the host's rounding, flush to
+zero and DAZ, and every flag set in the host's MXCSR is set in the
+guest's too, the operation runs under the host's MXCSR as it is, without
+either load: the flags it sets that the guest hasn't are those it
+raised. The approximations of RCPSS, RCPPS, RSQRTSS and RSQRTPS,
 which the host's don't match, the compares into EFLAGS and the
 conversions to and from 32-bit registers go through their handlers, and
 so does everything on ARM64 hosts.

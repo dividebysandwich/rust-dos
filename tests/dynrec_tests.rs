@@ -4418,6 +4418,37 @@ fn sse_arithmetic_runs_as_its_handlers() {
 }
 
 #[test]
+fn sse_exception_flags_are_the_handlers_after_every_operation() {
+    // A run of operations without LDMXCSR between them, the flags read
+    // after each: each must add exactly the flags it raises, whether the
+    // flags before it were set by the guest or not.
+    let (_, b, _) = sse_loop(|a| {
+        a.movups(xmm0, xmmword_ptr(esi))?;
+        a.movups(xmm1, xmmword_ptr(esi + 32))?;
+        type Op = fn(&mut CodeAssembler) -> Result<(), IcedError>;
+        let ops: [Op; 8] = [
+            |a| a.addps(xmm0, xmm1),
+            |a| a.mulss(xmm1, xmm0),
+            |a| a.divps(xmm1, xmm0),
+            |a| a.subss(xmm0, xmm1),
+            |a| a.sqrtps(xmm2, xmm1),
+            |a| a.divss(xmm0, xmm2),
+            |a| a.cvtps2pi(mm0, xmm0),
+            |a| a.maxps(xmm1, xmm0),
+        ];
+        for (k, op) in ops.iter().enumerate() {
+            op(a)?;
+            a.stmxcsr(dword_ptr(edi + 4 * k as i32))?;
+            a.add(ebx, dword_ptr(edi + 4 * k as i32))?;
+            a.rol(ebx, 3)?;
+        }
+        a.emms()
+    });
+    assert_ne!(b.cpu.ebx(), 0);
+    assert_handled_only(&b, &[]);
+}
+
+#[test]
 fn sse_moves_logic_and_shuffles_run_as_their_handlers() {
     let (_, b, _) = sse_loop(|a| {
         a.movaps(xmm0, xmmword_ptr(esi))?;
