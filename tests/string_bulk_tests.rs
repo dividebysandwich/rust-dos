@@ -1,9 +1,9 @@
 //! REP MOVS and REP STOS do the iterations that stay in plain RAM at once
-//! (`instructions::string`, `Cpu::string_bulk`). Each case here runs on a
-//! machine with that and one without, in lockstep (tests/dyndiff): they
-//! must agree after every batch, overlapping moves, the direction flag,
-//! page and segment ends, faults part of the way and video memory
-//! included.
+//! (`instructions::string`, `Cpu::string_bulk`), and so do REP INSW and
+//! INSD of an IDE hard disk's block. Each case here runs on a machine with
+//! that and one without, in lockstep (tests/dyndiff): they must agree
+//! after every batch, overlapping moves, the direction flag, page and
+//! segment ends, faults part of the way and video memory included.
 
 mod dyndiff;
 mod pmrig;
@@ -271,4 +271,115 @@ fn moves_and_stores_into_the_linear_frame_buffer_are_the_iterations_one_at_a_tim
     };
     assert_eq!(shown(&a), shown(&b));
     assert!(shown(&b).0);
+}
+
+/// Wait in the program until the primary IDE channel's disk isn't busy
+/// and has data (DRQ).
+fn wait_drq(a: &mut CodeAssembler) -> Result<(), IcedError> {
+    let mut wait = a.create_label();
+    a.mov(dx, 0x1F7u32)?;
+    a.set_label(&mut wait)?;
+    a.in_(al, dx)?;
+    a.test(al, 0x80)?;
+    a.jnz(wait)?;
+    a.test(al, 0x08)?;
+    a.jz(wait)?;
+    a.mov(dx, 0x1F0u32)
+}
+
+/// Set the primary master's task file to `count` sectors from `lba` and
+/// give it `command`.
+fn ide_command(a: &mut CodeAssembler, command: u8, lba: u8, count: u8) -> Result<(), IcedError> {
+    for (port, value) in [
+        (0x1F6u32, 0xE0u32),
+        (0x1F2, count as u32),
+        (0x1F3, lba as u32),
+        (0x1F4, 0),
+        (0x1F5, 0),
+        (0x1F7, command as u32),
+    ] {
+        a.mov(dx, port)?;
+        a.mov(al, value)?;
+        a.out(dx, al)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn rep_ins_from_an_ide_disk_is_the_iterations_one_at_a_time() {
+    use rust_dos::diskimage::Chs;
+    use rust_dos::disk::{MountOptions, numbered_drive};
+    use rust_dos::ide::{Ata, Channel, ChannelId, Device};
+    const GEOMETRY: Chs = Chs { cylinders: 20, heads: 4, sectors: 17 };
+    const SECTORS: usize = 20 * 4 * 17;
+    let dir = std::path::PathBuf::from("target/test_string_bulk/ide");
+    std::fs::create_dir_all(&dir).unwrap();
+    let image = std::fs::canonicalize(&dir).unwrap().join("hdd.img");
+    let byte = |i: usize| (i * 7 + i / 512 * 13 + i / 251) as u8;
+    let bytes: Vec<u8> = (0..SECTORS * 512).map(byte).collect();
+    std::fs::write(&image, bytes).unwrap();
+    let (mut a, mut b) = pair(|rig| {
+        let drive = numbered_drive(2);
+        let opts = MountOptions { geometry: Some(GEOMETRY), ..Default::default() };
+        rig.cpu.bus.mount_drive(drive, &image, opts, false).unwrap();
+        let mut channel = Channel::new(ChannelId::Primary);
+        channel.devices[0] = Some(Device::Ata(Ata::new(drive, GEOMETRY, SECTORS as u64)));
+        rig.cpu.bus.ide[0] = Some(channel);
+        let code = asm32(CODE, |a| {
+            a.cld()?;
+            // READ SECTORS, a sector at a time: whole, past its end into
+            // the disk's status while it reads the next, and as dwords
+            // across a page and past the last sector's end into nothing.
+            ide_command(a, 0x20, 5, 3)?;
+            wait_drq(a)?;
+            a.mov(edi, 0x100000u32)?;
+            a.mov(ecx, 256u32)?;
+            a.rep().insw()?;
+            wait_drq(a)?;
+            a.mov(edi, 0x300000u32)?;
+            a.mov(ecx, 300u32)?;
+            a.rep().insw()?;
+            wait_drq(a)?;
+            a.mov(edi, 0x200F10u32)?;
+            a.mov(ecx, 140u32)?;
+            a.rep().insd()?;
+            // SET MULTIPLE to 4 sectors, then READ MULTIPLE: a block into
+            // the video memory, a block in two parts with one odd word, and
+            // one down (DF).
+            ide_command(a, 0xC6, 0, 4)?;
+            a.mov(dx, 0x1F7u32)?;
+            a.in_(al, dx)?;
+            ide_command(a, 0xC4, 20, 12)?;
+            wait_drq(a)?;
+            a.mov(edi, 0x9FF00u32)?;
+            a.mov(ecx, 1024u32)?;
+            a.rep().insw()?;
+            wait_drq(a)?;
+            a.mov(edi, 0x400000u32)?;
+            a.mov(ecx, 301u32)?;
+            a.rep().insw()?;
+            a.mov(ecx, 723u32)?;
+            a.rep().insw()?;
+            wait_drq(a)?;
+            a.std()?;
+            a.mov(edi, 0x500FFEu32)?;
+            a.mov(ecx, 1024u32)?;
+            a.rep().insw()?;
+            a.cld()?;
+            // 16-bit addressing, DI wrapping around at 64 KB.
+            ide_command(a, 0x20, 40, 1)?;
+            wait_drq(a)?;
+            a.mov(edi, 0x6000_FF00u32)?;
+            a.mov(ecx, 0x100u32)?;
+            a.db(&[0x67, 0xF3, 0x66, 0x6D])?;
+            a.hlt()
+        });
+        rig.load(CODE, &code);
+    });
+    run(&mut a, &mut b);
+    // Sector 5's first byte, the busy status read after sector 6, and the
+    // last word of the block read in two parts.
+    assert_eq!(b.cpu.bus.read_8(0x100000), byte(5 * 512));
+    assert_eq!(b.read32(0x300000 + 512), 0x0080_0080);
+    assert_ne!(b.read32(0x400000 + 2 * 1023), 0);
 }

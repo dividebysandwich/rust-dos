@@ -9,6 +9,7 @@ use iced_x86::{Instruction, OpKind, Register};
 
 use super::operand::mem_seg;
 use crate::cpu::{Access, Cpu, CpuFlags, CpuResult, MemRef, Seg};
+use crate::ide::ChannelId;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StrOp {
@@ -163,6 +164,36 @@ fn bulk(cpu: &mut Cpu, op: StrOp, size: u8, a: &Addr, count: u32) -> CpuResult<B
     Ok(Bulk::Done(n))
 }
 
+/// The iterations of a REP INSW or INSD going up from here on that read
+/// the data port of IDE channel `id` while its hard disk has that many
+/// words of a block left to give, into plain RAM in the page and segment
+/// limit the first element is in, done at once (`Bus::ide_read_run`). The
+/// disk's state changes only with the block's last word, so this is what
+/// the iterations one at a time do.
+fn ins_run(cpu: &mut Cpu, id: ChannelId, size: u8, a: &Addr, count: u32) -> CpuResult<Bulk> {
+    let max = count.min((cpu.bus.ide_data_run(id) / size as usize) as u32);
+    if max < 2 {
+        return Ok(Bulk::One);
+    }
+    let di = a.get(cpu, Register::EDI);
+    let n = span(cpu, Seg::ES, di, size as u32, max, false, a.mask, true);
+    if n < 2 {
+        return Ok(Bulk::One);
+    }
+    cpu.check_io(id.base(), size)?;
+    let dst = cpu.mem_ref(Seg::ES, di, size, Access::Write)?;
+    let (phys, len) = (dst.phys as usize, (n * size as u32) as usize);
+    if !cpu.bus.is_plain_ram(phys, len) {
+        return Ok(Bulk::One);
+    }
+    cpu.bus.ide_read_run(id, phys, n as usize, size);
+    let full = cpu.reg(Register::EDI);
+    let moved = a.delta.wrapping_mul(n);
+    let next = (full & !a.mask) | (full.wrapping_add(moved) & a.mask);
+    cpu.set_reg(Register::EDI, next);
+    Ok(Bulk::Done(n))
+}
+
 /// One iteration: the memory and port accesses, then the index updates.
 fn iteration(cpu: &mut Cpu, op: StrOp, size: u8, a: &Addr) -> CpuResult {
     let (si, di) = (Register::ESI, Register::EDI);
@@ -270,6 +301,12 @@ fn repeated(cpu: &mut Cpu, instr: &Instruction, op: StrOp, size: u8) -> CpuResul
     // back to the instruction while iterations remain.
     let traced = cpu.get_cpu_flag(CpuFlags::TF);
     let bulky = !traced && cpu.string_bulk && matches!(op, StrOp::Movs | StrOp::Stos);
+    // The IDE channel of a REP INSW or INSD going up from its data port,
+    // whose blocks can go at once (DX stays put).
+    let forward = addr.delta == size as u32;
+    let ins_ide = (!traced && cpu.string_bulk && op == StrOp::Ins && size > 1 && forward)
+        .then(|| cpu.bus.ide_data_port(cpu.dx()))
+        .flatten();
     loop {
         let count = cpu.reg(counter);
         if count == 0 {
@@ -277,6 +314,15 @@ fn repeated(cpu: &mut Cpu, instr: &Instruction, op: StrOp, size: u8) -> CpuResul
         }
         if bulky {
             match bulk(cpu, op, size, &addr, count)? {
+                Bulk::Done(n) => {
+                    cpu.set_reg(counter, count - n);
+                    continue;
+                }
+                Bulk::One => {}
+            }
+        }
+        if let Some(id) = ins_ide {
+            match ins_run(cpu, id, size, &addr, count)? {
                 Bulk::Done(n) => {
                     cpu.set_reg(counter, count - n);
                     continue;
