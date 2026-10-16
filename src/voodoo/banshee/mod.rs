@@ -797,7 +797,13 @@ impl Voodoo {
     ) {
         let Some(b) = &self.banshee else { return };
         let addr = b.linear_addr(offset);
-        if self.writes_queue() {
+        // A command FIFO's ring is memory nothing draws into or shows: the
+        // packets written there needn't wait for the triangles before
+        // them, which would keep the workers from drawing while the
+        // program builds the next ones.
+        let in_ring = mask == 0xFFFF_FFFF
+            && b.fifo.iter().any(|f| f.enabled && (f.base..f.end).contains(&addr));
+        if self.writes_queue() && !in_ring {
             self.catch_up();
         }
         let ram = &self.fbi.ram;
@@ -811,9 +817,10 @@ impl Voodoo {
                 }
             }
         }
-        self.display_dirty = true;
-        if mask == 0xFFFF_FFFF {
+        if in_ring {
             self.banshee_fifo_written(addr, now, effect);
+        } else {
+            self.display_dirty = true;
         }
     }
 }
