@@ -73,11 +73,16 @@ impl Fifo {
         }
     }
 
+    /// Whether memory address `addr` is in the ring, while it is on.
+    pub fn holds(&self, addr: u32) -> bool {
+        self.enabled && (self.base..self.end).contains(&addr)
+    }
+
     /// A dword written at memory address `addr`: in its ring, in order or
     /// opening or filling holes (86Box's `banshee_write_linear_l`). True
     /// if it was in the ring.
     pub fn written(&mut self, addr: u32) -> bool {
-        if !self.enabled || addr < self.base || addr >= self.end {
+        if !self.holds(addr) {
             return false;
         }
         if addr == self.base && self.holes == 0 {
@@ -402,12 +407,13 @@ impl Voodoo {
                         self.display_dirty = true;
                     }
                     2 => {
+                        // The display changes if the buffer written is
+                        // shown (`mark_drawn`).
                         for _ in 0..count {
                             let data = self.fifo_take(n);
                             self.lfb_write(addr >> 2, data, 0xFFFF_FFFF);
                             addr += 4;
                         }
-                        self.display_dirty = true;
                     }
                     _ => {
                         for _ in 0..count {

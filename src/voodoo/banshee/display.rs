@@ -99,20 +99,30 @@ impl Banshee {
     /// in memory the picture shows: the desktop's or the overlay's.
     pub fn shows(&self, addr: u32) -> bool {
         let f = self.frame();
-        let rows = if f.tiled {
-            f.height.div_ceil(32)
-        } else {
-            f.height
-        } as u64;
-        let tiled = f.cfg & VIDPROC_OVERLAY_TILED != 0;
-        let overlay_stride = (self.reg(VID_DESKTOP_OVERLAY_STRIDE) >> 16) & 0x7FFF;
-        let overlay_stride = if tiled { overlay_stride * TILE } else { overlay_stride };
-        let span = f.stride.max(overlay_stride).max(1) as u64 * rows.max(1);
-        let overlaps = |start: u32| {
-            let (a, s) = (addr as u64, start as u64);
-            a < s + span && s < a + span
+        // A surface's bytes: its stride times its rows, or its rows of
+        // tiles, each counted as the surface itself is laid out.
+        let span = |stride: u32, tiled: bool| {
+            let rows = if tiled {
+                f.height.div_ceil(32)
+            } else {
+                f.height
+            };
+            stride.max(1) as u64 * rows.max(1) as u64
         };
-        overlaps(f.start) || f.cfg & VIDPROC_OVERLAY_ENABLE != 0 && overlaps(self.overlay_addr)
+        let desktop = (f.start, span(f.stride, f.tiled));
+        let overlay = (f.cfg & VIDPROC_OVERLAY_ENABLE != 0).then(|| {
+            let tiled = f.cfg & VIDPROC_OVERLAY_TILED != 0;
+            let stride = (self.reg(VID_DESKTOP_OVERLAY_STRIDE) >> 16) & 0x7FFF;
+            let stride = if tiled { stride * TILE } else { stride };
+            (self.overlay_addr, span(stride, tiled))
+        });
+        // The surface drawn, as big as the bigger of the two.
+        let drawn = overlay.map_or(desktop.1, |o| o.1.max(desktop.1));
+        let a = addr as u64;
+        [Some(desktop), overlay]
+            .into_iter()
+            .flatten()
+            .any(|(start, span)| a < start as u64 + span && (start as u64) < a + drawn)
     }
 
     /// Draw the desktop, the overlay and the cursor into `out` (RGB24,
@@ -142,7 +152,11 @@ impl Banshee {
                 let words = mask >> 1;
                 let mut x = 0;
                 while x < pixels.len() {
-                    let run = if f.tiled { 64 - (x & 63) } else { pixels.len() - x };
+                    let run = if f.tiled {
+                        64 - (x & 63)
+                    } else {
+                        pixels.len() - x
+                    };
                     let end = (x + run).min(pixels.len());
                     let mut w = (at(2 * x as u32) & mask) >> 1;
                     for px in &mut pixels[x..end] {
@@ -164,10 +178,6 @@ impl Banshee {
                             rgb(desktop_clut[i])
                         }
                     }
-                    1 => rgb565(
-                        word(ram, at(2 * x), mask),
-                        (!bypass).then_some(desktop_clut),
-                    ),
                     2 => {
                         let a = 3 * x;
                         [
@@ -344,7 +354,10 @@ mod tests {
         // The overlay's buffer, while the overlay is on.
         b.overlay_addr = 0x40_0000;
         assert!(!b.shows(0x40_0000));
-        b.ext_write(VID_PROC_CFG, VIDPROC_ENABLE | 1 << 18 | VIDPROC_OVERLAY_ENABLE);
+        b.ext_write(
+            VID_PROC_CFG,
+            VIDPROC_ENABLE | 1 << 18 | VIDPROC_OVERLAY_ENABLE,
+        );
         assert!(b.shows(0x40_0000));
     }
 

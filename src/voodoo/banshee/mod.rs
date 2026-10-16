@@ -580,8 +580,7 @@ impl Banshee {
     /// extended shift out off and the DAC back to 6 bits, as the card's
     /// BIOS leaves them.
     pub fn bios_mode_set(&mut self) {
-        let init0 =
-            self.reg(VGA_INIT0) & !(VGAINIT0_EXTENDED_SHIFT_OUT | VGAINIT0_DAC_8BIT);
+        let init0 = self.reg(VGA_INIT0) & !(VGAINIT0_EXTENDED_SHIFT_OUT | VGAINIT0_DAC_8BIT);
         self.set_reg(VGA_INIT0, init0);
         let cfg =
             self.reg(VID_PROC_CFG) & !(VIDPROC_ENABLE | VIDPROC_CURSOR | VIDPROC_OVERLAY_ENABLE);
@@ -658,17 +657,16 @@ impl Voodoo {
     /// Whether the card may interrupt: CRTC register 11h's bit 5 clear
     /// and pciInit0's bit 18 set.
     fn banshee_vint_enabled(&self) -> bool {
-        self.banshee.as_ref().is_some_and(|b| {
-            b.crtc[0x11] & 0x20 == 0 && b.reg(PCI_INIT0) & (1 << 18) != 0
-        })
+        self.banshee
+            .as_ref()
+            .is_some_and(|b| b.crtc[0x11] & 0x20 == 0 && b.reg(PCI_INIT0) & (1 << 18) != 0)
     }
 
     /// The interrupt line the card drives now, if it drives one.
     pub fn banshee_irq(&self, now: Now) -> Option<u8> {
         let b = self.banshee.as_ref()?;
         let line = b.pci.interrupt_line;
-        (line < 16 && self.banshee_vint_enabled() && self.banshee_vint_pending(now))
-            .then_some(line)
+        (line < 16 && self.banshee_vint_enabled() && self.banshee_vint_pending(now)).then_some(line)
     }
 
     /// When, in PIT ticks, the armed interrupt becomes pending, while it
@@ -764,10 +762,9 @@ impl Voodoo {
             }
             0x020_0000..=0x050_0000 => self.banshee_3d_write(offset, data, now, &mut effect),
             0x060_0000 | 0x070_0000 => self.banshee_texture_write(offset, data),
-            0x100_0000..=0x1F0_0000 => {
-                self.lfb_write((offset & 0xFF_FFFC) >> 2, data, mask);
-                self.display_dirty = true;
-            }
+            // The display changes if the buffer written is shown
+            // (`mark_drawn`).
+            0x100_0000..=0x1F0_0000 => self.lfb_write((offset & 0xFF_FFFC) >> 2, data, mask),
             _ => {}
         }
         effect
@@ -801,8 +798,7 @@ impl Voodoo {
         // packets written there needn't wait for the triangles before
         // them, which would keep the workers from drawing while the
         // program builds the next ones.
-        let in_ring = mask == 0xFFFF_FFFF
-            && b.fifo.iter().any(|f| f.enabled && (f.base..f.end).contains(&addr));
+        let in_ring = mask == 0xFFFF_FFFF && b.fifo.iter().any(|f| f.holds(addr));
         if self.writes_queue() && !in_ring {
             self.catch_up();
         }

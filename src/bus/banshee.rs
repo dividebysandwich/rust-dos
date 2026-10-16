@@ -221,7 +221,7 @@ impl Bus {
         }
         let timing = self.vga.timing();
         if let Some(v) = &mut self.voodoo {
-            v.set_timing(timing);
+            v.set_timing(timing, now);
         }
         if extended {
             self.vga.mark_dirty_full();
@@ -235,7 +235,9 @@ impl Bus {
         let now = self.voodoo_now();
         let Some(v) = &mut self.voodoo else { return };
         let line = v.banshee_irq(now);
-        let Some(b) = v.banshee.as_deref_mut() else { return };
+        let Some(b) = v.banshee.as_deref_mut() else {
+            return;
+        };
         let old = std::mem::replace(&mut b.irq_up, line);
         // An interrupt armed is among the timer events.
         self.clock.schedule(self.next_event());

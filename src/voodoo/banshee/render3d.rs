@@ -399,6 +399,30 @@ mod tests {
     }
 
     #[test]
+    fn a_lower_refresh_rate_doesnt_put_swaps_off() {
+        // A swap at once after ten minutes at 70 Hz, then a mode at 60
+        // Hz: the next swap at a retrace waits about a frame, not for the
+        // 6000 retraces 70 Hz counted past what 60 Hz has.
+        use crate::timer::PIT_HZ;
+        use crate::video::crt::CrtTiming;
+        let mut v = card();
+        let now = Now {
+            ns: 600_000_000_000,
+            ticks: 600 * PIT_HZ,
+        };
+        let swap = |v: &mut Voodoo, data: u32| {
+            let at = 0x20_0000 + 4 * SWAPBUFFER_CMD as u32;
+            v.write(at, data, 0xFFFF_FFFF, now);
+        };
+        v.set_timing(CrtTiming::VGA_400, now);
+        swap(&mut v, 0);
+        v.set_timing(CrtTiming::VESA_480, now);
+        swap(&mut v, 1 << 1 | 1);
+        let due = v.next_event().expect("the swap waits for a retrace");
+        assert!(due - now.ticks < PIT_HZ / 30);
+    }
+
+    #[test]
     fn texture_base_addresses_are_bytes() {
         let mut v = card();
         reg3d(&mut v, TEX_BASE_ADDR, 0x0050_0010);

@@ -1146,8 +1146,22 @@ impl Voodoo {
     }
 
     /// A Banshee's video timing, which its VGA core's registers give.
-    pub fn set_timing(&mut self, timing: CrtTiming) {
+    /// Retraces are counted from time 0 at the timing's rate, so the
+    /// swaps' retrace numbers are counted again at the new one: a mode
+    /// with a lower refresh rate would otherwise put the next swap as far
+    /// ahead as the old rate had counted past the new one, minutes after
+    /// a long session, and hold the command FIFOs up until then.
+    pub fn set_timing(&mut self, timing: CrtTiming, now: Now) {
+        let changed = timing != self.timing;
         self.timing = timing;
+        if !changed || timing.frame_ns() == 0 {
+            return;
+        }
+        self.last_swap = self.last_swap.min(timing.retraces(now.ns));
+        for s in &mut self.swaps {
+            let ns = (s.due as u128 * 1_000_000_000 / PIT_HZ as u128) as u64;
+            s.retrace = timing.retraces(ns);
+        }
     }
 
     /// Get the picture ready to be drawn (the gamma table's colours), and
