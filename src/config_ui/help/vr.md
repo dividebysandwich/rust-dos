@@ -251,10 +251,11 @@ Puts a Forte VFX1, a VR headset from 1995, on the desk of the scene, and
 its card and driver in the PC for games that know it: Descent, Descent 2,
 System Shock, MechWarrior 2 and Quake (through VFX1QK) among them.
 
-Pick the headset up with the grip button, bring it to your face and let
-go: you wear it, and see what the game draws for each eye, with your head
-turning the game's view. To take it off, grip at your head and pull it
-away; put it down on the desk or throw it anywhere.
+Pick the headset up with the grip button and bring it to your face,
+whichever way round: it goes on, and you see what the game draws for each
+eye, with your head turning the game's view. To take it off, grip at your
+head and pull it away; put it down on the desk or throw it anywhere. On
+the floor, out of reach, it is back on the desk.
 
 - **Card port**: where the card is, which `VIPPORT` tells games (set for
   them as `VIPPORT=260 I5`). The card also answers at 300h, where some

@@ -251,8 +251,9 @@ lens is in the middle of the camera's front and the slot low under it.
 ### The VFX1 headset
 
 With `[vfx1] enabled=true`, a Forte VFX1 headset lies on the desk too,
-to put on in VR (see CONFIGURATION.md's "The VFX1 headset"): let go of it
-at your face and you wear it, grip at your head to take it off.
+to put on in VR (see CONFIGURATION.md's "The VFX1 headset"): bring it to
+your face and you wear it, grip at your head to take it off. Coming to
+rest out of reach, it is back where it started.
 
 Rust-DOS brings its own model, for an empty named `vfx1`, its **front
 along its +Y** (Blender's; away from the face wearing it, glTF's -Z), its

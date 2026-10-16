@@ -2722,15 +2722,18 @@ which games find without a driver of their own. Its head tracker and
 CyberPuck are your headset and right controller. The VFX1 itself lies on
 the desk of the 3D scene, beside the joystick.
 
-In the headset, take the VFX1 with the grip button, bring it to your face
-and let go: you wear it. The room goes away, each eye sees the picture
-the game draws for it, ahead of it wherever you turn, on black, as the
-VFX1's two screens showed it, and your head is the game's head tracker,
-level and ahead where you were as you put it on. To take it off, grip
-next to your head and pull it away, then put it down or throw it. While
-you wear it, the controllers are a gamepad and point at nothing; the
-right controller is the CyberPuck as well, its tilt the puck's and its
-trigger, grip and A button the puck's three buttons.
+In the headset, take the VFX1 with the grip button and bring it to your
+face, whichever way round: it goes on as it comes to your eyes (or as
+you let go of it near them). The room goes away, each eye sees the
+picture the game draws for it, ahead of it wherever you turn, on black,
+as the VFX1's two screens showed it, and your head is the game's head
+tracker, level and ahead where you were as you put it on. To take it
+off, grip next to your head and pull it away, then put it down or throw
+it; it goes on again only once it has been away from your head. Should
+it come to rest out of reach, on the floor, it is back on the desk.
+While you wear it, the controllers are a gamepad and point at nothing;
+the right controller is the CyberPuck as well, its tilt the puck's and
+its trigger, grip and A button the puck's three buttons.
 
 Start a game with its VFX1 switches:
 

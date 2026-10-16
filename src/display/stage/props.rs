@@ -54,10 +54,16 @@ const THROW: Duration = Duration::from_millis(80);
 const NEAR: f32 = 0.03;
 /// How thick a picture is to the simulation.
 const PRINT_THICKNESS: f32 = 0.001;
-/// How near the eyes the VFX1's have to be when it is let go for it to be
-/// worn, and a hand to the head to take it off, in metres.
-const PUT_ON: f32 = 0.2;
+/// How near the eyes the VFX1's have to come, held, for it to go on, or
+/// be when it is let go; how near the head a hand takes it off; and how
+/// far from the eyes it has to have been, taken off, to go on again.
+const SNAP_ON: f32 = 0.12;
+const PUT_ON: f32 = 0.3;
 const TAKE_OFF: f32 = 0.25;
+const AWAY: f32 = 0.35;
+/// Below the seat's eyes and away from them, out of reach: the VFX1
+/// coming to rest further than this goes back where it started.
+const OUT_OF_REACH: (f32, f32) = (0.9, 1.3);
 
 /// What a hand holds.
 #[derive(Clone, Copy, Debug)]
@@ -125,6 +131,9 @@ pub struct Props {
     vfx1: bool,
     worn: bool,
     head: Option<Mat4>,
+    /// The VFX1 has been away from the head since it was taken off, and
+    /// can go on again.
+    armed: bool,
 }
 
 impl Props {
@@ -146,6 +155,7 @@ impl Props {
             vfx1: false,
             worn: false,
             head: None,
+            armed: true,
         };
         props.reset(scene);
         props
@@ -202,14 +212,11 @@ impl Props {
         self.worn = self.vfx1;
     }
 
-    /// Whether the VFX1 let go now at `pose` is worn: its eyes near the
-    /// head's, and it facing the way the head does.
-    fn on_head(&self, pose: Mat4) -> bool {
-        let Some(head) = self.head else { return false };
-        let eyes = pose.transform_point3(VFX1_EYES);
-        let facing = pose.transform_vector3(Vec3::NEG_Z).normalize_or_zero();
-        let looking = head.transform_vector3(Vec3::NEG_Z).normalize_or_zero();
-        eyes.distance(head.transform_point3(Vec3::ZERO)) < PUT_ON && facing.dot(looking) > 0.0
+    /// How far the VFX1's eyes at `pose` are from the head's, if it is
+    /// tracked. Which way it is turned doesn't matter: it goes on right.
+    fn eyes_apart(&self, pose: Mat4) -> Option<f32> {
+        let head = self.head?;
+        Some(pose.transform_point3(VFX1_EYES).distance(head.transform_point3(Vec3::ZERO)))
     }
 
     /// The worn VFX1 taken off by `hand` gripping at the head.
@@ -221,6 +228,7 @@ impl Props {
         }
         let prop = scene.props.iter().position(|p| p.kind == PropKind::Vfx1)?;
         self.worn = false;
+        self.armed = false;
         self.falling[prop] = None;
         // Where it was on the head.
         self.poses[prop] = head * Mat4::from_translation(-VFX1_EYES);
@@ -273,6 +281,16 @@ impl Props {
                 Some(Hold::Print { print, offset }) => self.prints[print].pose = hand.grip * offset,
                 Some(Hold::Body { prop, offset }) => {
                     self.poses[prop] = hand.grip * offset;
+                    // The VFX1 brought to the eyes goes on.
+                    if scene.props[prop].kind == PropKind::Vfx1
+                        && let Some(distance) = self.eyes_apart(self.poses[prop])
+                    {
+                        self.armed |= distance > AWAY;
+                        if self.armed && distance < SNAP_ON {
+                            self.holds[i] = None;
+                            self.worn = true;
+                        }
+                    }
                     // A camera's trigger takes a picture.
                     if scene.props[prop].kind == PropKind::Camera && hand.select && !pulled {
                         input.shots.push(prop);
@@ -527,6 +545,17 @@ impl Props {
                 Moved::Lost => self.poses[i] = scene.props[i].pose,
                 _ => self.poses[i] = body.pose(),
             }
+            // The VFX1 resting out of reach of the seat (on the floor) is
+            // back on the desk, as it can't be done without.
+            if moved != Moved::Moving && scene.props[i].kind == PropKind::Vfx1 {
+                let at = self.poses[i].transform_point3(Vec3::ZERO);
+                let seat = scene.spawn.position;
+                let across = Vec3::new(at.x - seat.x, 0.0, at.z - seat.z).length();
+                if at.y < seat.y - OUT_OF_REACH.0 || across > OUT_OF_REACH.1 {
+                    self.poses[i] = scene.props[i].pose;
+                }
+                self.armed = true;
+            }
             self.falling[i] = (moved == Moved::Moving).then_some(body);
         }
         let obstacles = self.obstacles(scene, None);
@@ -551,7 +580,9 @@ impl Props {
     fn release(&mut self, scene: &Scene, i: usize) {
         match self.holds[i].take() {
             Some(Hold::Body { prop, .. })
-                if scene.props[prop].kind == PropKind::Vfx1 && self.on_head(self.poses[prop]) =>
+                if scene.props[prop].kind == PropKind::Vfx1
+                    && self.armed
+                    && self.eyes_apart(self.poses[prop]).is_some_and(|d| d < PUT_ON) =>
             {
                 self.worn = true;
                 self.falling[prop] = None;
@@ -1136,6 +1167,50 @@ mod tests {
         props.update(&room, &with_head(away), now);
         let input = props.update(&room, &with_head(Hand { squeeze: false, ..away }), now);
         assert!(!input.worn && props.falling[v].is_some());
+    }
+
+    #[test]
+    fn the_vfx1_goes_on_brought_to_the_face_as_it_was_picked_up() {
+        let room = Scene::test_room();
+        let mut props = Props::new(&room);
+        props.set_vfx1(true);
+        let v = room.props.iter().position(|p| p.kind == PropKind::Vfx1).unwrap();
+        let body = room.props[v].pose.transform_point3(Vec3::new(0.0, 0.05, -0.07));
+        let head = Mat4::from_translation(Vec3::new(0.0, 1.2, 0.0));
+        let with_head = |hand: Hand| Tracking { head: Some(head), ..tracking(hand) };
+        let now = Instant::now();
+        props.update(&room, &with_head(hand_at(body, false)), now);
+        props.update(&room, &with_head(hand_at(body, true)), now);
+        // Moved, not turned, until its eyes are at the head's: its front
+        // faces the viewer, the wrong way round, and it goes on all the
+        // same, held.
+        let eyes = room.props[v].pose.transform_point3(VFX1_EYES);
+        let to_head = Vec3::new(0.0, 1.2, 0.0) - eyes;
+        let mut worn = false;
+        for step in 1..=20 {
+            let at = body + to_head * step as f32 / 20.0;
+            worn |= props.update(&room, &with_head(hand_at(at, true)), now).worn;
+        }
+        assert!(worn);
+        // Taken off, it doesn't go on again at once, held at the head nor
+        // let go there: it falls.
+        let at_head = Vec3::new(0.05, 1.2, 0.0);
+        props.update(&room, &with_head(hand_at(at_head, false)), now);
+        assert!(!props.update(&room, &with_head(hand_at(at_head, true)), now).worn);
+        assert!(!props.update(&room, &with_head(hand_at(at_head, true)), now).worn);
+        assert!(!props.update(&room, &with_head(hand_at(at_head, false)), now).worn);
+        // Fallen to the floor, out of reach, it is back on the desk.
+        let later = run(&mut props, &room, &with_head(hand_at(at_head, false)), now, 4.0);
+        assert!(props.falling[v].is_none());
+        assert!(props.poses[v].abs_diff_eq(room.props[v].pose, 1e-4), "{:?}", props.poses[v]);
+        // And can be put on again.
+        props.update(&room, &with_head(hand_at(body, true)), later);
+        let mut worn = false;
+        for step in 1..=20 {
+            let at = body + to_head * step as f32 / 20.0;
+            worn |= props.update(&room, &with_head(hand_at(at, true)), later).worn;
+        }
+        assert!(worn);
     }
 
     #[test]
