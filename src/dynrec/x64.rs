@@ -751,6 +751,19 @@ enum Slow {
     /// The instruction is done and stops the block after it with `code`:
     /// EIP on `next`.
     After { at: DynamicLabel, next: u32, code: u32, fail: DynamicLabel },
+    /// `Uop::VFloat`'s operation `op` on XMM`a` and XMM`b` where the fast
+    /// path can't run it: under the guest's MXCSR with every exception
+    /// masked, the host's put back after it. An exception the guest
+    /// doesn't mask goes to `bail`; anything else goes on at `back`.
+    VFloat {
+        at: DynamicLabel,
+        back: DynamicLabel,
+        bail: DynamicLabel,
+        op: VFloatOp,
+        scalar: bool,
+        a: u8,
+        b: u8,
+    },
     /// Instruction `ix` runs through its handler after all (`Uop::Bail`),
     /// with the flags in EBP there (`dirty`), and goes on at `end`.
     /// The cached guest registers in `wb` go back into the CPU before the
@@ -1421,6 +1434,34 @@ impl Gen<'_> {
                         ; mov DWORD [rbx + EIP], next as i32
                         ; mov eax, code as i32
                         ; jmp =>fail
+                    );
+                }
+                Slow::VFloat { at, back, bail, op, scalar, a, b } => {
+                    dynasm!(self.ops
+                        ; .arch x64
+                        ; =>at
+                        ; mov eax, DWORD [rbx + MXCSR]
+                        ; and eax, 0xFFC0
+                        ; or eax, 0x1F80
+                        ; mov DWORD [r12 + CTX_MXCSR], eax
+                        ; ldmxcsr [r12 + CTX_MXCSR]
+                    );
+                    self.vfloat_op(op, scalar, a, b);
+                    dynasm!(self.ops
+                        ; .arch x64
+                        ; stmxcsr [r12 + CTX_MXCSR]
+                        ; ldmxcsr [r12 + CTX_MXCSR + 4]
+                        ; mov eax, DWORD [r12 + CTX_MXCSR]
+                        ; and eax, 0x3F
+                        ; jz =>back
+                        // The exceptions raised that the guest doesn't mask.
+                        ; mov ecx, DWORD [rbx + MXCSR]
+                        ; shr ecx, 7
+                        ; not ecx
+                        ; and ecx, eax
+                        ; jnz =>bail
+                        ; or DWORD [rbx + MXCSR], eax
+                        ; jmp =>back
                     );
                 }
                 Slow::Bail { at, end, ix, dirty, wb, reload, leave } => {
@@ -2640,8 +2681,9 @@ impl Gen<'_> {
 
     /// `Uop::VFloat`: the operation under the guest's rounding and flush to
     /// zero with every exception masked, its exceptions added to the
-    /// guest's MXCSR, and the host's MXCSR back as Rust has it. An exception
-    /// the guest doesn't mask goes to the handler, which raises it.
+    /// guest's MXCSR, and the host's MXCSR back as Rust has it, with its
+    /// exception flags clear. An exception the guest doesn't mask goes to
+    /// the handler, which raises it.
     ///
     /// Loading MXCSR is slow, and an SSE loop pays for two loads an
     /// operation. Most of the time neither is needed: where the guest
@@ -2670,48 +2712,26 @@ impl Gen<'_> {
             ; test edx, 0xFFC0
             ; jnz =>slow
             // all exceptions masked,
-            ; mov edx, eax
-            ; and edx, 0x1F80
-            ; cmp edx, 0x1F80
-            ; jne =>slow
-            // and no flag the host has that the guest hasn't.
             ; not eax
+            ; test eax, 0x1F80
+            ; jnz =>slow
+            // and no flag the host has that the guest hasn't.
             ; and eax, ecx
             ; test eax, 0x3F
             ; jnz =>slow
         );
         self.vfloat_op(op, scalar, a, b);
+        let back = self.ops.new_dynamic_label();
         dynasm!(self.ops
             ; .arch x64
             ; stmxcsr [r12 + CTX_MXCSR]
             ; mov eax, DWORD [r12 + CTX_MXCSR]
             ; and eax, 0x3F
             ; or DWORD [rbx + MXCSR], eax
-            ; jmp >vfloat_done
-            ; =>slow
-            ; mov eax, DWORD [rbx + MXCSR]
-            ; and eax, 0xFFC0
-            ; or eax, 0x1F80
-            ; mov DWORD [r12 + CTX_MXCSR], eax
-            ; ldmxcsr [r12 + CTX_MXCSR]
+            ; =>back
         );
-        self.vfloat_op(op, scalar, a, b);
-        dynasm!(self.ops
-            ; .arch x64
-            ; stmxcsr [r12 + CTX_MXCSR]
-            ; ldmxcsr [r12 + CTX_MXCSR + 4]
-            ; mov eax, DWORD [r12 + CTX_MXCSR]
-            ; and eax, 0x3F
-            ; jz >vfloat_done
-            // The exceptions raised that the guest doesn't mask.
-            ; mov ecx, DWORD [rbx + MXCSR]
-            ; shr ecx, 7
-            ; not ecx
-            ; and ecx, eax
-            ; jnz =>at
-            ; or DWORD [rbx + MXCSR], eax
-            ; vfloat_done:
-        );
+        // The slow way, which loads MXCSR, goes after the block's code.
+        self.slow.push(Slow::VFloat { at: slow, back, bail: at, op, scalar, a, b });
         self.bail(at, false);
     }
 
