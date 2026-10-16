@@ -210,7 +210,9 @@ impl Bus {
         if self.port_log.is_some() {
             return 0;
         }
-        self.ide[id.index()].as_ref().map_or(0, Channel::data_run)
+        self.ide[id.index()]
+            .as_ref()
+            .map_or(0, |channel| channel.data_run().len())
     }
 
     /// `count` reads of channel `id`'s data port, `len` bytes wide, at
@@ -220,22 +222,20 @@ impl Bus {
     /// only with the last one, so its interrupt line and timer are
     /// followed once, after it.
     pub(crate) fn ide_read_run(&mut self, id: ChannelId, dst: usize, count: usize, len: u8) {
-        let port = id.base();
-        let _profile = self.profile.as_mut().map(|p| p.ports(port, false, count as u64));
+        let _profile = self
+            .profile
+            .as_mut()
+            .map(|p| p.ports(id.base(), false, count as u64));
         self.observe.opaque();
-        for _ in 0..count {
-            self.clock.stall(DATA_PORT_NS * (len as u64 / 2));
-        }
+        self.clock
+            .stall_times(DATA_PORT_NS * (len as u64 / 2), count as u64);
         let bytes = count * len as usize;
-        let Some(channel) = self.ide[id.index()].as_mut() else { return };
-        let now = self.clock.now_ticks();
-        let class = crate::diskio::DiskClass::HardDisk;
-        let hard_disk_ns_per_sector = self.disk_io.cost_ns(class, crate::diskimage::SECTOR_SIZE as u32);
-        let faked = self.faked_io;
-        let mut env = Env { disks: &self.disk, player: &mut self.cdaudio, now, hard_disk_ns_per_sector, faked };
-        channel.read_data_run(&mut self.ram[dst..dst + bytes], &mut env);
+        let Some(channel) = &self.ide[id.index()] else {
+            return;
+        };
+        self.ram[dst..dst + bytes].copy_from_slice(&channel.data_run()[..bytes]);
         self.bump_page_gens(dst, dst + bytes);
-        self.sync_ide(id);
+        self.with_ide(id, |channel, env| channel.skip_data_run(bytes, env));
     }
 
     /// What the BIOS's INT 13h did to the disk in `slot` of channel `id`,

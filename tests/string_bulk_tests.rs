@@ -290,7 +290,14 @@ fn wait_drq(a: &mut CodeAssembler) -> Result<(), IcedError> {
 /// Set the primary master's task file to `count` sectors from `lba` and
 /// give it `command`.
 fn ide_command(a: &mut CodeAssembler, command: u8, lba: u8, count: u8) -> Result<(), IcedError> {
-    for (port, value) in [(0x1F6u32, 0xE0u32), (0x1F2, count as u32), (0x1F3, lba as u32), (0x1F4, 0), (0x1F5, 0), (0x1F7, command as u32)] {
+    for (port, value) in [
+        (0x1F6u32, 0xE0u32),
+        (0x1F2, count as u32),
+        (0x1F3, lba as u32),
+        (0x1F4, 0),
+        (0x1F5, 0),
+        (0x1F7, command as u32),
+    ] {
         a.mov(dx, port)?;
         a.mov(al, value)?;
         a.out(dx, al)?;
@@ -308,7 +315,8 @@ fn rep_ins_from_an_ide_disk_is_the_iterations_one_at_a_time() {
     let dir = std::path::PathBuf::from("target/test_string_bulk/ide");
     std::fs::create_dir_all(&dir).unwrap();
     let image = std::fs::canonicalize(&dir).unwrap().join("hdd.img");
-    let bytes: Vec<u8> = (0..SECTORS * 512).map(|i| (i * 7 + i / 512 * 13 + i / 251) as u8).collect();
+    let byte = |i: usize| (i * 7 + i / 512 * 13 + i / 251) as u8;
+    let bytes: Vec<u8> = (0..SECTORS * 512).map(byte).collect();
     std::fs::write(&image, bytes).unwrap();
     let (mut a, mut b) = pair(|rig| {
         let drive = numbered_drive(2);
@@ -319,22 +327,22 @@ fn rep_ins_from_an_ide_disk_is_the_iterations_one_at_a_time() {
         rig.cpu.bus.ide[0] = Some(channel);
         let code = asm32(CODE, |a| {
             a.cld()?;
-            // READ SECTORS, a sector at a time: whole, as dwords across a
-            // page, and past its end into the disk's status and then
-            // nothing.
+            // READ SECTORS, a sector at a time: whole, past its end into
+            // the disk's status while it reads the next, and as dwords
+            // across a page and past the last sector's end into nothing.
             ide_command(a, 0x20, 5, 3)?;
             wait_drq(a)?;
             a.mov(edi, 0x100000u32)?;
             a.mov(ecx, 256u32)?;
             a.rep().insw()?;
             wait_drq(a)?;
-            a.mov(edi, 0x200F10u32)?;
-            a.mov(ecx, 128u32)?;
-            a.rep().insd()?;
-            wait_drq(a)?;
             a.mov(edi, 0x300000u32)?;
             a.mov(ecx, 300u32)?;
             a.rep().insw()?;
+            wait_drq(a)?;
+            a.mov(edi, 0x200F10u32)?;
+            a.mov(ecx, 140u32)?;
+            a.rep().insd()?;
             // SET MULTIPLE to 4 sectors, then READ MULTIPLE: a block into
             // the video memory, a block in two parts with one odd word, and
             // one down (DF).
@@ -369,7 +377,9 @@ fn rep_ins_from_an_ide_disk_is_the_iterations_one_at_a_time() {
         rig.load(CODE, &code);
     });
     run(&mut a, &mut b);
-    // Sector 5's first word, and the status after sector 7.
-    assert_eq!(b.cpu.bus.read_8(0x100000), (5 * 512 * 7 + 5 * 13 + 5 * 512 / 251) as u8);
+    // Sector 5's first byte, the busy status read after sector 6, and the
+    // last word of the block read in two parts.
+    assert_eq!(b.cpu.bus.read_8(0x100000), byte(5 * 512));
+    assert_eq!(b.read32(0x300000 + 512), 0x0080_0080);
     assert_ne!(b.read32(0x400000 + 2 * 1023), 0);
 }

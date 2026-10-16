@@ -268,6 +268,14 @@ impl Clock {
         self.stalled += n;
     }
 
+    /// `stall` for `ns` nanoseconds, `times` over: port accesses made at
+    /// once.
+    pub fn stall_times(&mut self, ns: u64, times: u64) {
+        let n = self.stall_count(ns) * times;
+        self.icount += n;
+        self.stalled += n;
+    }
+
     /// The instruction count `stall` adds for `ns` nanoseconds.
     pub fn stall_count(&self, ns: u64) -> u64 {
         self.cycles_per_ms as u64 * ns / 1_000_000
