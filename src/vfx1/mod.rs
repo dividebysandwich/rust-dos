@@ -10,6 +10,7 @@
 //! pictures each eye gets are taken from the screen on the host's side
 //! (stereo.rs), as some games never tell the card what they draw.
 
+pub mod bios3d;
 pub mod host;
 pub mod pose;
 pub mod sense;
@@ -110,6 +111,9 @@ pub struct Vfx1Settings {
     /// than 30 per second, for games that steer by the head's movement
     /// between frames (Descent).
     pub steer: bool,
+    /// The 3D BIOS of shutter glasses answers too (bios3d.rs), for games
+    /// that draw interlaced stereo for it in modes larger than the VFX1's.
+    pub stereo_bios: bool,
 }
 
 impl Default for Vfx1Settings {
@@ -121,6 +125,7 @@ impl Default for Vfx1Settings {
             swap_eyes: false,
             view_size: 36,
             steer: false,
+            stereo_bios: true,
         }
     }
 }
@@ -166,6 +171,7 @@ impl Vfx1Settings {
                     })?;
             }
             "steer" => self.steer = bool_of("steer")?,
+            "stereo_bios" => self.stereo_bios = bool_of("stereo_bios")?,
             _ => return Err(format!("unknown setting '{}'", key)),
         }
         Ok(())
@@ -179,6 +185,7 @@ impl Vfx1Settings {
             ("swap_eyes", Some(self.swap_eyes.to_string())),
             ("view_size", Some(self.view_size.to_string())),
             ("steer", Some(self.steer.to_string())),
+            ("stereo_bios", Some(self.stereo_bios.to_string())),
         ]
     }
 
@@ -213,6 +220,8 @@ pub struct Activity {
     /// they only count up.
     pub page_writes: u32,
     pub polls: u32,
+    /// The 3D BIOS's interlaced display or glasses are on.
+    pub glasses: bool,
 }
 
 /// The card and the driver's state.
@@ -229,6 +238,10 @@ pub struct Vfx1 {
     tracking: Tracking,
     steer: Option<pose::Steer>,
     pub(crate) activity: Activity,
+    /// The 3D BIOS answers (`Vfx1Settings::stereo_bios`), and what it has
+    /// on (`bios3d::INTERLACE`, `GLASSES`).
+    pub stereo_bios: bool,
+    pub(crate) glasses: u8,
 }
 
 impl Vfx1 {
@@ -244,6 +257,8 @@ impl Vfx1 {
             tracking: Tracking::default(),
             steer: None,
             activity: Activity::default(),
+            stereo_bios: true,
+            glasses: 0,
         }
     }
 
@@ -314,6 +329,7 @@ impl Vfx1 {
     pub fn activity(&self) -> Activity {
         Activity {
             video_mode: self.driver.video_mode,
+            glasses: self.glasses != 0,
             ..self.activity
         }
     }
@@ -330,6 +346,8 @@ impl State for Vfx1 {
             tracking: _,
             steer: _,
             activity,
+            stereo_bios: _,
+            glasses,
         } = self;
         base.save(w);
         air.save(w);
@@ -337,6 +355,7 @@ impl State for Vfx1 {
         ports.save(w);
         driver.save(w);
         activity.page_select.save(w);
+        glasses.save(w);
     }
 
     fn load(&mut self, r: &mut Reader) -> Result<()> {
@@ -348,6 +367,7 @@ impl State for Vfx1 {
         self.ports.load(r)?;
         self.driver.load(r)?;
         self.activity.page_select.load(r)?;
+        self.glasses.load(r)?;
         self.steer = None;
         Ok(())
     }
@@ -367,6 +387,7 @@ mod tests {
             ("swap_eyes", "yes"),
             ("view_size", "60"),
             ("steer", "on"),
+            ("stereo_bios", "false"),
         ] {
             settings.set(key, value).unwrap();
         }

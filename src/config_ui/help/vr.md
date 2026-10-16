@@ -290,3 +290,13 @@ For games that turn by how far the head moved since their last frame,
 as Descent turns the ship: makes the movement larger as the game draws
 more than 30 frames a second, so the ship turns as fast as it did then.
 Leave it off for games where the head just looks around.
+
+# Shutter glasses' 3D BIOS {#vfx1-stereo-bios}
+
+Answers games as the 3D BIOS of shutter glasses did (Kasan's 3DMax, the
+LCDBIOS of SimulEyes and others), so that a game set up for them draws
+its eyes on alternate lines, which the VFX1 shows with **Stereo** on
+**auto**. Some draw more than the VFX1's own stereo: Descent 2 with
+`VR_type=6` and `VR_resolution=4` in DESCENT.CFG draws 800x300 for each
+eye, where its VFX1 setting draws 320x200. Without the VFX1's head
+tracker, though: the game reads it only in its VFX1 setting.

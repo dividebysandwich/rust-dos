@@ -63,6 +63,7 @@ impl Host {
         frozen: bool,
     ) {
         let Some(vfx1) = &mut bus.vfx1 else { return };
+        vfx1.stereo_bios = settings.stereo_bios;
         let mut tracking = worn.filter(|_| !frozen).unwrap_or_default();
         if let Some(head) = self.head {
             tracking.head = head;

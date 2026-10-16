@@ -934,6 +934,11 @@ headset.
   larger as it draws more than 30 frames a second, for games that turn
   by it, as Descent turns the ship; `false` (the default) passes the head
   as it is.
+* `stereo_bios`: `true` (the default) also answers games as the 3D BIOS
+  of shutter glasses (Kasan's 3DMax, the LCDBIOS of SimulEyes and
+  others: INT 10h AX=4ED0h and 4FD0h), so that the VFX1 shows what they
+  draw for those, with `stereo=auto` as interlaced lines; `false` leaves
+  them without one.
 
 `enabled` and `port` take effect at the DOS prompt; the others at once.
 
@@ -2732,6 +2737,14 @@ Start a game with its VFX1 switches:
 | System Shock (CD) | `CDSHOCK`, VFX1 in its options | Full-screen view |
 | MechWarrior 2 | VFX-1 under Cockpit Controls | Head tracking |
 | Magic Carpet | `-vfx` | Head pitch and roll only |
+
+Descent 2 sets up its headset in DESCENT.CFG, which its SETUP writes:
+`VR_type=1` is the VFX1, and draws 320x200 for each eye, with the head
+tracker (`VR_tracking=1`). Its shutter glasses' setting draws far more:
+with `VR_type=6` (LCDBIOS) and `VR_resolution=4` it draws 800x300 for
+each eye in an 800x600 mode (`3` is 640x240 in 640x480), which the VFX1
+shows through `stereo_bios`, though without its head tracker, which
+Descent 2 reads only in its VFX1 setting.
 
 Descent was tried with rust-dos; the other games are as the
 [forte-vfx1-vr](https://github.com/LeonG-ZA/forte-vfx1-vr) project found

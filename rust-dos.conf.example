@@ -610,6 +610,9 @@
 # The head's movement made larger as a game draws more than 30 frames a
 # second, for games that turn by it (Descent).
 #steer=false
+# Answer as the 3D BIOS of shutter glasses too, for games that draw
+# interlaced stereo for them (Descent 2 in 800x600).
+#stereo_bios=true
 
 [drives]
 # Mount host directories, or floppy, hard disk or CD images, as DOS drives

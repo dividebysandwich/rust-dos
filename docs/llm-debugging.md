@@ -109,7 +109,11 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   and the log has a `Switch to Tseng mode` line for each. `pic` shows both
   interrupt controllers' vector bases and their request (`irr`), mask
   (`imr`) and in-service (`isr`) registers, master first: a request that
-  stays set under a mask bit is an IRQ the program has turned off.
+  stays set under a mask bit is an IRQ the program has turned off. With
+  `[vfx1]`, `vfx1` has the VFX1's port, the driver's video mode (0 mono,
+  1 pages, 2 lines), the page select register, how often it was written
+  and how often the game read the head tracker (`polls`), and whether the
+  shutter glasses' 3D BIOS has its glasses on.
 - **Check sound with `/api/status` → `audio`.** `peak` is the loudest
   sample since the previous status request (0 means silence), `underruns`
   counts how often the output device ran dry, and `sound_blaster` is the

@@ -61,8 +61,9 @@ pub struct Splitter {
 
 impl Splitter {
     /// The layout `stereo` asks for: for `auto`, the driver's video mode,
-    /// or pages on a 640x480 screen while the game uses the headset, or
-    /// else none. `now` is the host's clock in seconds.
+    /// or lines while the 3D BIOS has its glasses on, or pages on a
+    /// 640x480 screen while the game uses the headset, or else none. `now`
+    /// is the host's clock in seconds.
     pub fn layout(
         &mut self,
         stereo: Vfx1Stereo,
@@ -83,6 +84,7 @@ impl Splitter {
             Vfx1Stereo::Auto => match activity.video_mode {
                 1 => Layout::Pages,
                 2 => Layout::Lines,
+                _ if activity.glasses => Layout::Lines,
                 _ if size == (640, 480)
                     && self.active_at.is_some_and(|at| now - at < ACTIVE_FOR) =>
                 {
@@ -406,6 +408,14 @@ mod tests {
         assert_eq!(
             s.layout(Vfx1Stereo::Auto, polled, (640, 480), 2.0),
             Layout::Mono
+        );
+        let glasses = Activity {
+            glasses: true,
+            ..quiet
+        };
+        assert_eq!(
+            s.layout(Vfx1Stereo::Auto, glasses, (800, 600), 2.5),
+            Layout::Lines
         );
         let lines = Activity {
             video_mode: 2,

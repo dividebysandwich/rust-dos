@@ -171,6 +171,20 @@ impl DebugHub {
                     })
                 }),
             },
+            // The VFX1 (`[vfx1]`): what the game told it, how often it wrote
+            // the page select register and read the head tracker, and
+            // whether the 3D BIOS has its glasses on.
+            "vfx1": cpu.bus.vfx1.as_ref().map(|vfx1| {
+                let activity = vfx1.activity();
+                json!({
+                    "port": format!("{:X}", vfx1.base),
+                    "video_mode": activity.video_mode,
+                    "page_select": format!("{:02X}", activity.page_select),
+                    "page_writes": activity.page_writes,
+                    "polls": activity.polls,
+                    "glasses": activity.glasses,
+                })
+            }),
             // The keyboard controller: its output buffer and queues.
             "kbc": cpu.bus.kbc.debug_json(),
             "mouse": {

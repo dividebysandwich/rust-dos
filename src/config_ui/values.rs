@@ -218,6 +218,7 @@ impl Item {
             Vfx1Stereo => each(s, crate::vfx1::Vfx1Stereo::ALL, |s, stereo| s.vfx1.stereo = stereo),
             Vfx1SwapEyes => on_off(|s, on| s.vfx1.swap_eyes = on),
             Vfx1Steer => on_off(|s, on| s.vfx1.steer = on),
+            Vfx1StereoBios => on_off(|s, on| s.vfx1.stereo_bios = on),
             Filter => each(s, [crate::config::Filter::Nearest, crate::config::Filter::Linear], |s, f| s.filter = f),
             Shader => each(s, crate::video::shader::Shader::ALL, |s, shader| s.shader = shader),
             Monochrome => each(s, crate::video::mono::Monochrome::ALL, |s, mono| s.monochrome = mono),

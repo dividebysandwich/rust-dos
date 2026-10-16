@@ -108,6 +108,7 @@ pub(super) enum Item {
     Vfx1SwapEyes,
     Vfx1ViewSize,
     Vfx1Steer,
+    Vfx1StereoBios,
     Filter,
     Shader,
     /// How far the CRT look's tube bends and how much it glows, shown
@@ -332,6 +333,7 @@ impl Item {
             Vfx1SwapEyes => "  Swap the eyes",
             Vfx1ViewSize => "  Picture size",
             Vfx1Steer => "  Head turns steer",
+            Vfx1StereoBios => "  Shutter glasses' 3D BIOS",
             Filter => "Scaling filter",
             Shader => "CRT shader",
             CrtCurvature => "  Curvature",
@@ -493,7 +495,8 @@ impl Item {
             | Item::Vfx1Stereo
             | Item::Vfx1SwapEyes
             | Item::Vfx1ViewSize
-            | Item::Vfx1Steer => frontend.window && cfg!(feature = "vr"),
+            | Item::Vfx1Steer
+            | Item::Vfx1StereoBios => frontend.window && cfg!(feature = "vr"),
             Item::SoundFont => soundfonts(frontend),
             Item::Mt32Roms | Item::Mt32Model => mt32(frontend),
             Item::Sc55Roms | Item::Sc55Model => frontend.host_files,
@@ -565,7 +568,8 @@ impl Item {
             | Item::Vfx1Stereo
             | Item::Vfx1SwapEyes
             | Item::Vfx1ViewSize
-            | Item::Vfx1Steer => s.vr.mode == crate::vr::VrMode::Headset && s.vfx1.enabled,
+            | Item::Vfx1Steer
+            | Item::Vfx1StereoBios => s.vr.mode == crate::vr::VrMode::Headset && s.vfx1.enabled,
             Item::ReverbMix => s.mixer.reverb != ReverbPreset::Off,
             Item::ChorusMix => s.mixer.chorus != ChorusPreset::Off,
             Item::RewindMemory => s.rewind,
@@ -623,7 +627,7 @@ impl Item {
             | VrCenter | VrSceneScale | VrSeat(_) | VrSeatTurn | VrKeyboard | VrMarkKeyboard | VrResolution | VrRefresh => Applies::Now,
             VrTime | VrTimeSpeed | VrLatitude | VrWeather | VrWeatherSound | VrLightning => Applies::Now,
             // The card is hardware; how its pictures are shown is the host's.
-            Vfx1Stereo | Vfx1SwapEyes | Vfx1ViewSize | Vfx1Steer => Applies::Now,
+            Vfx1Stereo | Vfx1SwapEyes | Vfx1ViewSize | Vfx1Steer | Vfx1StereoBios => Applies::Now,
             // SDL makes the window's context as the headset needs it as it
             // starts.
             VrGraphics | VrFoveation => Applies::NextStart,
@@ -724,6 +728,7 @@ impl Item {
                 degrees => format!("{}°", degrees),
             },
             Vfx1Steer => on_off(s.vfx1.steer),
+            Vfx1StereoBios => on_off(s.vfx1.stereo_bios),
             Filter => match s.filter {
                 crate::config::Filter::Nearest => "nearest (sharp)",
                 crate::config::Filter::Linear => "linear (smooth)",

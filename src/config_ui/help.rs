@@ -311,6 +311,7 @@ impl Item {
             Vfx1Stereo => "vfx1-stereo",
             Vfx1ViewSize => "vfx1-view-size",
             Vfx1Steer => "vfx1-steer",
+            Vfx1StereoBios => "vfx1-stereo-bios",
             Filter => "filter",
             Shader => "shader",
             CrtCurvature => "crt-curvature",
