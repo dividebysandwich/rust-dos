@@ -163,6 +163,36 @@ fn bulk(cpu: &mut Cpu, op: StrOp, size: u8, a: &Addr, count: u32) -> CpuResult<B
     Ok(Bulk::Done(n))
 }
 
+/// The iterations of a REP INSW or INSD from here on that read the data
+/// port of an IDE channel whose hard disk has that many words of a block
+/// left to give, into plain RAM in the page and segment limit the first
+/// element is in, done at once (`Bus::ide_read_run`). The disk's state
+/// changes only with the block's last word, so this is what the
+/// iterations one at a time do.
+fn ins_run(cpu: &mut Cpu, size: u8, a: &Addr, count: u32) -> CpuResult<Bulk> {
+    let port = cpu.dx();
+    let Some(id) = cpu.bus.ide_data_port(port) else { return Ok(Bulk::One) };
+    if a.delta != size as u32 {
+        return Ok(Bulk::One);
+    }
+    let run = (cpu.bus.ide_data_run(id) / size as usize) as u32;
+    let di = a.get(cpu, Register::EDI);
+    let n = span(cpu, Seg::ES, di, size as u32, count.min(run), false, a.mask, true);
+    if n < 2 {
+        return Ok(Bulk::One);
+    }
+    cpu.check_io(port, size)?;
+    let dst = cpu.mem_ref(Seg::ES, di, size, Access::Write)?;
+    if !cpu.bus.is_plain_ram(dst.phys as usize, (n * size as u32) as usize) {
+        return Ok(Bulk::One);
+    }
+    cpu.bus.ide_read_run(id, dst.phys as usize, n as usize, size);
+    let full = cpu.reg(Register::EDI);
+    let moved = a.delta.wrapping_mul(n);
+    cpu.set_reg(Register::EDI, (full & !a.mask) | (full.wrapping_add(moved) & a.mask));
+    Ok(Bulk::Done(n))
+}
+
 /// One iteration: the memory and port accesses, then the index updates.
 fn iteration(cpu: &mut Cpu, op: StrOp, size: u8, a: &Addr) -> CpuResult {
     let (si, di) = (Register::ESI, Register::EDI);
@@ -270,6 +300,7 @@ fn repeated(cpu: &mut Cpu, instr: &Instruction, op: StrOp, size: u8) -> CpuResul
     // back to the instruction while iterations remain.
     let traced = cpu.get_cpu_flag(CpuFlags::TF);
     let bulky = !traced && cpu.string_bulk && matches!(op, StrOp::Movs | StrOp::Stos);
+    let ins_runs = !traced && cpu.string_bulk && op == StrOp::Ins && size > 1;
     loop {
         let count = cpu.reg(counter);
         if count == 0 {
@@ -277,6 +308,15 @@ fn repeated(cpu: &mut Cpu, instr: &Instruction, op: StrOp, size: u8) -> CpuResul
         }
         if bulky {
             match bulk(cpu, op, size, &addr, count)? {
+                Bulk::Done(n) => {
+                    cpu.set_reg(counter, count - n);
+                    continue;
+                }
+                Bulk::One => {}
+            }
+        }
+        if ins_runs {
+            match ins_run(cpu, size, &addr, count)? {
                 Bulk::Done(n) => {
                     cpu.set_reg(counter, count - n);
                     continue;

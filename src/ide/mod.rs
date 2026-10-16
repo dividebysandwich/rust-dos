@@ -411,6 +411,24 @@ impl Channel {
         }
     }
 
+    /// How many bytes reads of the data port give from here on before the
+    /// selected device's state changes (`Ata::data_run`). 0 where there
+    /// is no hard disk selected.
+    pub fn data_run(&self) -> usize {
+        match &self.devices[self.select as usize] {
+            Some(Device::Ata(disk)) => disk.data_run(),
+            _ => 0,
+        }
+    }
+
+    /// The next `out.len()` bytes of the data port, at most `data_run` of
+    /// them, read at once (`Ata::read_data_run`).
+    pub fn read_data_run(&mut self, out: &mut [u8], env: &mut Env) {
+        if let Some(Device::Ata(disk)) = self.selected() {
+            disk.read_data_run(out, env);
+        }
+    }
+
     /// A byte written at `port`, one of the channel's.
     pub fn write(&mut self, port: u16, value: u8, env: &mut Env) {
         let alt = self.id.alt();

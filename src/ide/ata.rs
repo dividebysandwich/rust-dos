@@ -257,6 +257,30 @@ impl Ata {
         self.data_read(2, env)
     }
 
+    /// How many bytes the data port gives from here on, read a word at a
+    /// time, before the disk's state changes: the rest of the block in
+    /// its buffer, whose last word ends the block. 0 where a read isn't
+    /// data from the buffer.
+    pub fn data_run(&self) -> usize {
+        if self.status & BSY != 0 || self.state != State::DataRead || self.status & DRQ == 0 {
+            return 0;
+        }
+        self.buf_len.saturating_sub(self.buf_pos)
+    }
+
+    /// The next `out.len()` bytes of the data port, at most `data_run`
+    /// of them, read at once: what reading them a word at a time gives,
+    /// leaving the disk as that would.
+    pub fn read_data_run(&mut self, out: &mut [u8], env: &mut Env) {
+        debug_assert!(out.len() <= self.data_run());
+        let len = out.len();
+        out.copy_from_slice(&self.buf[self.buf_pos..self.buf_pos + len]);
+        self.buf_pos += len;
+        if self.buf_pos >= self.buf_len {
+            self.io_completion(env);
+        }
+    }
+
     /// A byte written to task file register `reg` (0-5, 7) while the disk
     /// is selected and not busy.
     pub fn write_register(&mut self, reg: u16, value: u8, env: &mut Env) {
