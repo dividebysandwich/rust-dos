@@ -2,7 +2,7 @@
 //! describes them, and sector reads from the files behind them.
 
 use super::cue::{parse_cue, CueSheet, FileFormat, TrackMode};
-use super::{Extent, DATA_SECTOR, RAW_SECTOR};
+use super::{DATA_SECTOR, Extent, RAW_SECTOR, SYNC};
 use crate::diskimage::MemoryImage;
 use std::cell::RefCell;
 use crate::hostfs::{self, File};
@@ -67,8 +67,39 @@ pub struct CdImage {
     tracks: Vec<Track>,
 }
 
-/// The sync pattern that starts every raw data sector.
-const SYNC: [u8; 12] = [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00];
+/// The error of reading a sector a drive can't read: one whose EDC
+/// doesn't match its data (`super::edc_fails`).
+#[derive(Debug)]
+pub struct UnreadableSector(pub u32);
+
+impl std::fmt::Display for UnreadableSector {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "sector {} can't be read: its EDC doesn't match its data",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for UnreadableSector {}
+
+/// Whether a read failed on a sector a drive can't read, rather than on
+/// the image file or an address past the disc.
+pub fn is_unreadable(error: &io::Error) -> bool {
+    error.get_ref().is_some_and(|e| e.is::<UnreadableSector>())
+}
+
+/// Fail reading `raw`, sector `lba`, if a drive couldn't read it.
+fn check_readable(lba: u32, raw: &[u8; RAW_SECTOR]) -> io::Result<()> {
+    match super::edc_fails(raw) {
+        true => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            UnreadableSector(lba),
+        )),
+        false => Ok(()),
+    }
+}
 
 impl CdImage {
     /// Open a CD image: a CUE sheet, a CHD file, or a bare image of one
@@ -275,9 +306,18 @@ impl CdImage {
         file.read_at(at, buf)
     }
 
-    /// The 2048 bytes of user data of data sector `lba`.
+    /// The 2048 bytes of user data of data sector `lba`. Fails with
+    /// `UnreadableSector` on a sector a drive can't read.
     pub fn read_data(&self, lba: u32, buf: &mut [u8; DATA_SECTOR]) -> io::Result<()> {
         let track = self.track_at(lba).filter(|t| !t.is_audio()).ok_or_else(out_of_range)?;
+        if let TrackMode::Mode1_2352 | TrackMode::Mode2_2352 = track.mode {
+            let mut raw = [0u8; RAW_SECTOR];
+            self.read_stored(track, lba, 0, &mut raw)?;
+            check_readable(lba, &raw)?;
+            let at = track.mode.data_offset() as usize;
+            buf.copy_from_slice(&raw[at..at + DATA_SECTOR]);
+            return Ok(());
+        }
         self.read_stored(track, lba, track.mode.data_offset(), buf)
     }
 
@@ -305,16 +345,21 @@ impl CdImage {
 
     /// The whole 2352 bytes of sector `lba`. Sectors the image stores
     /// without sync and header get them, as a drive reads them off the disc
-    /// (the error correction codes stay zero).
+    /// (the error correction codes stay zero). Fails with `UnreadableSector`
+    /// on a data sector a drive can't read.
     pub fn read_raw(&self, lba: u32, buf: &mut [u8; RAW_SECTOR]) -> io::Result<()> {
         let track = self.track_at(lba).ok_or_else(out_of_range)?;
         match track.mode {
-            TrackMode::Audio | TrackMode::Mode1_2352 | TrackMode::Mode2_2352 => {
+            TrackMode::Audio => {
                 self.read_stored(track, lba, 0, buf)?;
-                if track.is_audio() && self.files[track.file].swap {
+                if self.files[track.file].swap {
                     swap_samples(buf);
                 }
                 Ok(())
+            }
+            TrackMode::Mode1_2352 | TrackMode::Mode2_2352 => {
+                self.read_stored(track, lba, 0, buf)?;
+                check_readable(lba, buf)
             }
             TrackMode::Mode1_2048 | TrackMode::Mode2_2336 => {
                 buf.fill(0);
@@ -719,6 +764,58 @@ mod tests {
         let mut raw = [0u8; RAW_SECTOR];
         image.read_raw(image.tracks()[0].start, &mut raw).unwrap();
         assert_eq!(raw[0], 3);
+    }
+
+    #[test]
+    fn sectors_whose_edc_fails_cant_be_read() {
+        let dir = scratch("unreadable");
+        let mut data: Vec<u8> = (0..10)
+            .flat_map(|lba| crate::cdrom::mode1_sector(lba, lba as u8))
+            .collect();
+        // Sector 5 as copy protections master it: its data doesn't match
+        // its EDC.
+        data[5 * RAW_SECTOR + 16..5 * RAW_SECTOR + 16 + DATA_SECTOR].fill(0x55);
+        fs::write(dir.join("disc.bin"), data).unwrap();
+        fs::write(
+            dir.join("disc.cue"),
+            "FILE \"disc.bin\" BINARY\n TRACK 01 MODE1/2352\n  INDEX 01 00:00:00\n",
+        )
+        .unwrap();
+        let image = CdImage::open(&dir.join("disc.cue")).unwrap();
+
+        let mut data = [0u8; DATA_SECTOR];
+        let mut raw = [0u8; RAW_SECTOR];
+        let error = image.read_data(5, &mut data).unwrap_err();
+        assert!(is_unreadable(&error), "{}", error);
+        assert!(is_unreadable(&image.read_raw(5, &mut raw).unwrap_err()));
+        for lba in [4, 6] {
+            image.read_data(lba, &mut data).unwrap();
+            assert!(data.iter().all(|&b| b == lba as u8));
+            image.read_raw(lba, &mut raw).unwrap();
+            assert_eq!(raw[16], lba as u8);
+        }
+        // A file over it fails there; one before it reads.
+        let extent = |lba, size| Extent {
+            lba,
+            size,
+            time: 0,
+            date: 0,
+            hidden: false,
+        };
+        let mut buf = vec![0u8; 3 * DATA_SECTOR];
+        assert!(
+            image
+                .read_extent(&extent(4, 3 * DATA_SECTOR as u32), 0, &mut buf)
+                .is_err()
+        );
+        assert_eq!(
+            image
+                .read_extent(&extent(2, 3 * DATA_SECTOR as u32), 0, &mut buf)
+                .unwrap(),
+            buf.len()
+        );
+        // Past the disc is another error.
+        assert!(!is_unreadable(&image.read_data(10, &mut data).unwrap_err()));
     }
 
     #[test]

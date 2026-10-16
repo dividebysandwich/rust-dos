@@ -9,7 +9,7 @@
 
 use crate::bus::Bus;
 use crate::cdrom::audio::PlayState;
-use crate::cdrom::image::CdImage;
+use crate::cdrom::image::{CdImage, is_unreadable};
 use crate::cdrom::{self, DATA_SECTOR, RAW_SECTOR};
 use crate::cpu::{Cpu, CpuFlags};
 use crate::disk::DriveKind;
@@ -31,12 +31,15 @@ const DONE: u16 = 0x0100;
 const BUSY: u16 = 0x0200;
 const UNKNOWN_UNIT: u16 = 0x8101;
 const UNKNOWN_COMMAND: u16 = 0x8103;
+const CRC_ERROR: u16 = 0x8104;
 const SECTOR_NOT_FOUND: u16 = 0x8108;
 const GENERAL_FAILURE: u16 = 0x810C;
 
-/// Errors of the INT 2Fh calls, in AX with CF set.
+/// Errors of the INT 2Fh calls, in AX with CF set: DOS's error codes.
+/// NOT_READY and DATA_ERROR are the device's errors 2 and 4 plus 19.
 const INVALID_DRIVE: u16 = 15;
 const NOT_READY: u16 = 21;
+const DATA_ERROR: u16 = 23;
 const FILE_NOT_FOUND: u16 = 2;
 
 /// Device status (IOCTL input 06h): cooked and raw reads, data and audio,
@@ -154,8 +157,15 @@ pub fn handle(cpu: &mut Cpu, function: u8) {
                 let start = (cpu.si() as u32) << 16 | cpu.di() as u32;
                 let mut sector = [0u8; DATA_SECTOR];
                 for i in 0..cpu.dx() as u32 {
-                    if image.read_data(start + i, &mut sector).is_err() {
-                        set_error(cpu, NOT_READY);
+                    if let Err(e) = image.read_data(start + i, &mut sector) {
+                        set_error(
+                            cpu,
+                            if is_unreadable(&e) {
+                                DATA_ERROR
+                            } else {
+                                NOT_READY
+                            },
+                        );
                         return;
                     }
                     let at = es_bx + i as usize * DATA_SECTOR;
@@ -389,8 +399,12 @@ fn read_long(cpu: &mut Cpu, image: &CdImage, buffer: usize, start: u32, count: u
         } else {
             image.read_data(start + i, (&mut data[..DATA_SECTOR]).try_into().unwrap())
         };
-        if read.is_err() {
-            return SECTOR_NOT_FOUND;
+        if let Err(e) = read {
+            return if is_unreadable(&e) {
+                CRC_ERROR
+            } else {
+                SECTOR_NOT_FOUND
+            };
         }
         let at = buffer + i as usize * size;
         for (j, &b) in data[..size].iter().enumerate() {

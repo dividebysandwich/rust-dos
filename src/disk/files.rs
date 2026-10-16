@@ -522,7 +522,18 @@ impl DiskController {
                 }
                 OpenData::Image(image, extent, pos) => {
                     let mut buffer = vec![0u8; count];
-                    let n = image.read_extent(extent, pos.get(), &mut buffer).map_err(|_| 0x1Eu16)?;
+                    // A sector a drive can't read is a data (CRC) error,
+                    // device error 4 plus 19, as MSCDEX reports it; any
+                    // other failure is a read fault.
+                    let n = image
+                        .read_extent(extent, pos.get(), &mut buffer)
+                        .map_err(|e| {
+                            if crate::cdrom::image::is_unreadable(&e) {
+                                0x17u16
+                            } else {
+                                0x1E
+                            }
+                        })?;
                     buffer.truncate(n);
                     pos.set(pos.get() + n as u64);
                     return Ok(buffer);

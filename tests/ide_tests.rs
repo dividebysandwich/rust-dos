@@ -198,6 +198,66 @@ fn reads_come_in_blocks_the_host_allows() {
 }
 
 #[test]
+fn sectors_whose_edc_fails_are_read_errors() {
+    let dir = cdimage::scratch("ide_unreadable");
+    fs::create_dir_all(dir.join("c")).unwrap();
+    // Three sectors after the file system, the middle one as copy
+    // protections master it: an EDC that doesn't match its data.
+    let mut image = iso("TESTDISC", &[file("HELLO.TXT", b"hello")]);
+    let bad = (image.len() / 2048 + 1) as u32;
+    image.extend(vec![0x55; 3 * 2048]);
+    let mut raw = cdimage::mode1_2352(&image);
+    let at = bad as usize * 2352 + 2064;
+    raw[at..at + 4].copy_from_slice(&[0x55; 4]);
+    fs::write(dir.join("GAME.BIN"), raw).unwrap();
+    let cue = dir.join("GAME.CUE");
+    fs::write(
+        &cue,
+        "FILE \"GAME.BIN\" BINARY\r\n  TRACK 01 MODE1/2352\r\n    INDEX 01 00:00:00\r\n",
+    )
+    .unwrap();
+    let mut bus = Bus::new(dir.join("c"));
+    bus.mount_drive(3, &cue, MountOptions::default(), false)
+        .unwrap();
+    bus.set_cycles_per_ms(1000);
+    bus.attach_ide();
+
+    // READ CD as protections send it: any sector type, sync, header, user
+    // data, EDC and ECC.
+    let read_cd = |lba: u32| {
+        let l = lba.to_be_bytes();
+        [0xBE, 0, l[0], l[1], l[2], l[3], 0, 0, 1, 0xF8, 0, 0]
+    };
+    for cdb in [read_cd(bad), read10(bad, 1), read10(bad - 1, 3)] {
+        assert_eq!(
+            packet(&mut bus, cdb, 0xFFFE),
+            Err(0x34),
+            "medium error, aborted: {:02X?}",
+            cdb
+        );
+        assert_eq!(
+            sense(&mut bus),
+            (0x03, 0x11, 0x00),
+            "unrecovered read error"
+        );
+    }
+    // The information field names the sector that failed.
+    packet(&mut bus, read10(bad - 1, 3), 0xFFFE).unwrap_err();
+    let s = packet(&mut bus, [0x03, 0, 0, 0, 18, 0, 0, 0, 0, 0, 0, 0], 18).unwrap();
+    assert_eq!(s[0], 0xF0, "valid, current error");
+    assert_eq!(s[3..7], bad.to_be_bytes());
+    // The sectors around it read.
+    for lba in [bad - 1, bad + 1] {
+        assert_eq!(
+            packet(&mut bus, read10(lba, 1), 2048).unwrap(),
+            vec![0x55; 2048]
+        );
+        assert_eq!(packet(&mut bus, read_cd(lba), 2352).unwrap().len(), 2352);
+        assert_eq!(sense(&mut bus), (0, 0, 0));
+    }
+}
+
+#[test]
 fn the_table_of_contents_and_capacity() {
     let (mut bus, image) = drive("toc");
     let data_sectors = (image.len() / 2048) as u32;

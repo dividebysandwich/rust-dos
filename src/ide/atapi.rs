@@ -854,6 +854,7 @@ impl Atapi {
         let size = if raw { RAW_SECTOR } else { DATA_SECTOR };
         let supported = self.cdb[0] != 0xBE || matches!(self.sector_size as usize, DATA_SECTOR | RAW_SECTOR);
         let mut ok = supported && env.cd(self.drive).is_some();
+        let mut unreadable = None;
         if ok {
             let image = env.cd(self.drive).unwrap();
             for i in 0..self.xfer as usize {
@@ -866,7 +867,11 @@ impl Atapi {
                     let mut sector = [0u8; DATA_SECTOR];
                     image.read_data(lba, &mut sector).map(|()| self.buf[at..at + DATA_SECTOR].copy_from_slice(&sector))
                 };
-                if read.is_err() {
+                if let Err(e) = read {
+                    if crate::cdrom::image::is_unreadable(&e) {
+                        self.log.push(format!("[IDE] CD-ROM read error: {}", e));
+                        unreadable = Some(lba);
+                    }
                     ok = false;
                     break;
                 }
@@ -876,19 +881,21 @@ impl Atapi {
             if env.cd(self.drive).is_none() {
                 self.set_sense(0x02, 0x3A, 0);
             } else {
+                // MEDIUM ERROR, UNRECOVERED READ ERROR: what a drive says
+                // of a sector it can't read, as copy protections expect.
                 self.set_sense(0x03, 0x11, 0);
+                if let Some(lba) = unreadable {
+                    // The information field holds the sector that failed.
+                    self.sense[0] |= 0x80;
+                    self.sense[3..7].copy_from_slice(&lba.to_be_bytes());
+                }
             }
-            self.feature = 0xF4;
-            self.count = 0x03;
             self.buf_len = 0;
             self.remaining = 0;
             self.xfer = 0;
-            self.state = State::Ready;
-            self.status = DRDY | ERR;
             self.lba[1] = 0;
             self.lba[2] = 0;
-            self.raise_irq();
-            self.allow_writing = true;
+            self.sense_error();
             return false;
         }
         self.prepare_read((self.xfer as usize * size).min(self.max_bytes as usize));
