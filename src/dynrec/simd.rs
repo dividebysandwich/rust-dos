@@ -18,17 +18,23 @@ use super::uop::*;
 pub const MMX: u8 = 1;
 pub const SSE: u8 = 2;
 
-/// The operations of MMX or SSE instruction `instr`, or false if its
-/// handler runs it. `simd` says which the CPU has.
+/// The operations of MMX or SSE instruction `instr`, or false, with `u`
+/// as it was, if its handler runs it. `simd` says which the CPU has.
 pub fn translate(instr: &Instruction, simd: u8, u: &mut Vec<Uop>) -> bool {
     let features = instr.cpuid_features();
-    if features == [CpuidFeature::MMX] {
+    let start = u.len();
+    let ok = if features == [CpuidFeature::MMX] {
         simd & MMX != 0 && mmx(instr, u).is_some()
     } else if features == [CpuidFeature::SSE] {
         simd & SSE != 0 && sse(instr, u).is_some()
     } else {
         false
+    };
+    if !ok {
+        // (A form ruled out partway through has pushed some already.)
+        u.truncate(start);
     }
+    ok
 }
 
 fn mm(reg: Register) -> Option<u8> {
@@ -76,11 +82,10 @@ fn mem_checked(
     aligned: bool,
     u: &mut Vec<Uop>,
 ) -> Option<()> {
-    if !aligned {
-        return mem(instr, T1, size, write, u);
-    }
     let seg = ea(instr, T1, u)?;
-    u.push(Uop::BailMisaligned { t: T1, seg });
+    if aligned {
+        u.push(Uop::BailMisaligned { t: T1, seg });
+    }
     u.push(Uop::MemRef {
         t: T1,
         seg,

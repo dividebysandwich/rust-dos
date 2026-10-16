@@ -103,6 +103,8 @@ pub fn trampoline() -> Trampoline {
         ; sub rsp, 8
         ; mov rbx, rdi
         ; mov r12, rsi
+        // The host's MXCSR, which `Uop::VFloat` puts back.
+        ; stmxcsr [r12 + CTX_MXCSR + 4]
         ; mov r13, QWORD [r12 + CTX_RAM]
         ; mov r14, QWORD [r12 + CTX_CODE_BLOCKS]
         ; mov ebp, DWORD [rbx + FLAGS]
@@ -785,6 +787,7 @@ struct Merge {
     synced: i32,
     fpu_cr0_checked: bool,
     fpu_known: u8,
+    osfxsr_checked: bool,
     /// Set where `to` is translated: where its code starts, and the
     /// counts, cached registers and flags there.
     entry: Option<(DynamicLabel, i32, Cache, bool)>,
@@ -873,6 +876,9 @@ struct Gen<'a> {
     /// them (it may be an FPU instruction's).
     fpu_cr0_checked: bool,
     fpu_known: u8,
+    /// Whether an SSE instruction of the block has checked CR4's OSFXSR,
+    /// which doesn't change within it.
+    osfxsr_checked: bool,
 }
 
 /// A translated block's code, where its links' stubs are in it, and how
@@ -963,6 +969,7 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
         loaded_segs: 0,
         fpu_cr0_checked: false,
         fpu_known: 0,
+        osfxsr_checked: false,
     };
     g.prologue();
     let mut synced = 0;
@@ -1549,6 +1556,8 @@ impl Gen<'_> {
                     _ => None,
                 };
             }
+            // (It only reads t, for the `MemRef` after it.)
+            Uop::BailMisaligned { .. } => self.known = known,
             _ => {}
         }
         match *uop {
@@ -2270,7 +2279,7 @@ impl Gen<'_> {
                     ; test al, 15
                     ; jnz =>at
                 );
-                self.bail(at);
+                self.bail(at, false);
             }
             Uop::BailUnlessPlain { t } => {
                 let at = self.ops.new_dynamic_label();
@@ -2284,7 +2293,7 @@ impl Gen<'_> {
                     ; cmp BYTE [r14 + rcx], 0
                     ; jne =>at
                 );
-                self.bail(at);
+                self.bail(at, false);
             }
             Uop::VLoad { x, src } => self.vload(x, src),
             Uop::VOp { op, a, b } => self.vop(op, a.0, b.0),
@@ -2450,12 +2459,13 @@ impl Gen<'_> {
     }
 
     /// The handler runs the instruction being translated from `at`, and the
-    /// code goes on after it (`Uop::Bail`).
-    fn bail(&mut self, at: DynamicLabel) {
+    /// code goes on after it (`Uop::Bail`), or with `leave` the block stops
+    /// after it.
+    fn bail(&mut self, at: DynamicLabel, leave: bool) {
         let end = self.end();
         let (wb, reload) = (self.cache.dirty, self.cache.loaded);
         let (ix, dirty) = (self.ix, self.dirty);
-        self.slow.push(Slow::Bail { at, end, ix, dirty, wb, reload, leave: false });
+        self.slow.push(Slow::Bail { at, end, ix, dirty, wb, reload, leave });
     }
 
     /// `Uop::SimdGuard`: the handler runs the instruction after all where
@@ -2463,15 +2473,17 @@ impl Gen<'_> {
     /// where one of the MMX registers in `mm` is stale.
     fn simd_guard(&mut self, xmm: bool, mm: u8) {
         const EM_TS: i8 = 0x0C;
-        // CR0 and CR4 don't change within a block (writes to them end it).
-        if self.fpu_cr0_checked && !xmm && mm == 0 {
+        // CR0 and CR4 don't change within a block (writes to them end it):
+        // each is checked once.
+        let osfxsr = xmm && !self.osfxsr_checked;
+        if self.fpu_cr0_checked && !osfxsr && mm == 0 {
             return;
         }
         let at = self.ops.new_dynamic_label();
         if !self.fpu_cr0_checked {
             dynasm!(self.ops ; .arch x64 ; test BYTE [rbx + CR0], EM_TS ; jnz =>at);
         }
-        if xmm {
+        if osfxsr {
             // OSFXSR is bit 9.
             dynasm!(self.ops ; .arch x64 ; test BYTE [rbx + CR4 + 1], 2 ; jz =>at);
         }
@@ -2479,11 +2491,9 @@ impl Gen<'_> {
             dynasm!(self.ops ; .arch x64 ; cmp BYTE [rbx + FPU_STALE + n], 0 ; jne =>at);
         }
         self.fpu_cr0_checked = true;
+        self.osfxsr_checked |= xmm;
         // As after an `FpuGuard`'s handler call, the block stops after it.
-        let end = self.end();
-        let (wb, reload) = (self.cache.dirty, self.cache.loaded);
-        let (ix, dirty) = (self.ix, self.dirty);
-        self.slow.push(Slow::Bail { at, end, ix, dirty, wb, reload, leave: true });
+        self.bail(at, true);
     }
 
     /// `Uop::VLoad`.
@@ -2687,7 +2697,7 @@ impl Gen<'_> {
             ; or DWORD [rbx + MXCSR], eax
             ; vfloat_done:
         );
-        self.bail(at);
+        self.bail(at, false);
     }
 
     /// `Uop::FBailPrecise`: the handler runs the instruction where `when`
@@ -3954,6 +3964,7 @@ impl Gen<'_> {
                 synced: self.synced[self.ix],
                 fpu_cr0_checked: self.fpu_cr0_checked,
                 fpu_known: self.fpu_known,
+                osfxsr_checked: self.osfxsr_checked,
                 entry: None,
             });
         } else if side {
@@ -4011,6 +4022,7 @@ impl Gen<'_> {
             m.entry = Some((entry, synced, self.cache, self.dirty));
             self.fpu_cr0_checked &= m.fpu_cr0_checked;
             self.fpu_known &= m.fpu_known;
+            self.osfxsr_checked &= m.osfxsr_checked;
         }
     }
 

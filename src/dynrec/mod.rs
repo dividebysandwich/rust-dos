@@ -627,7 +627,8 @@ mod engine {
                 0
             };
             let (system, segments, fpu) = (backend::SYSTEM, backend::SEGMENTS, backend::FPU);
-            // An instruction's operations, as `translate::translate` gives them.
+            // An instruction's operations, as `translate::translate` gives
+            // them.
             let uops = |instr: &iced_x86::Instruction, next: u32| {
                 use super::translate::translate;
                 translate(instr, next, stack32, system, segments, fpu, fast_fpu, real, i486, simd)
