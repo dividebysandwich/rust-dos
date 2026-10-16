@@ -233,11 +233,18 @@ impl DiskController {
             // save.
             let more_images = spec.opts.more_images.clone();
             self.mount(drive, &spec.path, spec.opts, true).map_err(|e| {
-                let gone = std::iter::once(&spec.path).chain(&more_images).any(|p| {
-                    matches!(crate::hostfs::metadata(p), Err(err) if err.kind() == std::io::ErrorKind::NotFound)
+                let missing = |p: &PathBuf| {
+                    crate::hostfs::metadata(p)
+                        .is_err_and(|err| err.kind() == std::io::ErrorKind::NotFound)
                         && crate::archive::split(p).is_none()
-                }) || crate::cdrom::image::cue_lacks_a_file(&spec.path);
-                let hint = if gone { " (moved or deleted since the state was saved?)" } else { "" };
+                };
+                let gone = std::iter::once(&spec.path).chain(&more_images).any(missing)
+                    || crate::cdrom::image::cue_lacks_a_file(&spec.path);
+                let hint = if gone {
+                    " (moved or deleted since the state was saved?)"
+                } else {
+                    ""
+                };
                 StateError::Media(format!("drive {} can't be mounted: {}{}", name, e, hint))
             })?;
         }

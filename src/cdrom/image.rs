@@ -557,8 +557,13 @@ pub fn cue_files(path: &Path) -> Vec<PathBuf> {
 /// Whether `path` is a CUE sheet `CdImage::open` reads as one that names a
 /// track file that isn't there.
 pub fn cue_lacks_a_file(path: &Path) -> bool {
-    let Some(Ok(sheet)) = sheet(path) else { return false };
-    let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let Some(Ok(sheet)) = sheet(path) else {
+        return false;
+    };
+    let dir = path
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
     sheet.files.iter().any(|f| find_file(dir, &f.name).is_err())
 }
 
@@ -588,7 +593,11 @@ fn find_file(dir: &Path, name: &str) -> Result<PathBuf, String> {
         let shown = crate::mount::display_host_path;
         let beside = shown(&dir.join(file));
         if below_sheet {
-            format!("{} not found, nor {}", shown(&dir.join(parts.join(std::path::MAIN_SEPARATOR_STR))), beside)
+            format!(
+                "{} not found, nor {}",
+                shown(&dir.join(parts.join(std::path::MAIN_SEPARATOR_STR))),
+                beside
+            )
         } else {
             format!("{} not found", beside)
         }

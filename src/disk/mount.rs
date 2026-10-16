@@ -528,7 +528,13 @@ impl DiskController {
 /// it is in, and without Windows' `\?\`.
 fn not_there(path: &Path, overlaid: Option<&Overlaid>) -> Option<String> {
     let e = hostfs::metadata(path).err()?;
-    let shown = overlaid.and_then(|o| o.shown(path)).unwrap_or_else(|| path.to_path_buf());
+    let shown = overlaid
+        .and_then(|o| o.shown(path))
+        .unwrap_or_else(|| path.to_path_buf());
     let shown = crate::mount::display_host_path(&shown);
-    Some(if e.kind() == std::io::ErrorKind::NotFound { format!("{} isn't there", shown) } else { format!("{}: {}", shown, e) })
+    Some(if e.kind() == std::io::ErrorKind::NotFound {
+        format!("{} isn't there", shown)
+    } else {
+        format!("{}: {}", shown, e)
+    })
 }
