@@ -233,6 +233,7 @@ impl Bus {
         self.clock
             .stall_times(DATA_PORT_NS * (len as u64 / 2), count as u64);
         let bytes = count * len as usize;
+        self.activity.io_bytes += bytes as u64;
         let Some(channel) = &self.ide[id.index()] else {
             return;
         };
