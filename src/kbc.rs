@@ -76,6 +76,9 @@ pub struct Kbc {
     aux_irq: bool,
     /// The CPU read a keyboard byte: the next one waits until `release`.
     held: bool,
+    /// The keyboard's lights as the system last set them (command ED):
+    /// bit 0 Scroll Lock, bit 1 Num Lock, bit 2 Caps Lock.
+    pub lights: Option<u8>,
 }
 
 impl Default for Kbc {
@@ -115,6 +118,7 @@ impl Kbc {
             output_aux: false,
             aux_irq: false,
             held: false,
+            lights: None,
         }
     }
 
@@ -307,7 +311,9 @@ impl Kbc {
         }
         if let Some(command) = self.pending_kbd.take() {
             // The parameter of ED (LEDs) or F3 (typematic rate).
-            let _ = command;
+            if command == 0xED {
+                self.lights = Some(value & 0x07);
+            }
             self.reply(0xFA);
             return effects;
         }
@@ -337,4 +343,4 @@ impl Kbc {
 crate::state_fields!(Kbc {
     queue, output, last, command_byte, output_port, pending_command, pending_kbd, last_was_command, irq,
     aux, output_aux, aux_irq,
-} skip { held });
+} skip { held, lights });

@@ -6,7 +6,8 @@
 //! its slot and develops, to be taken and put down too. What is let go
 //! falls (`physics`), thrown as the hand moved. The VFX1 headset
 //! (`[vfx1]`), let go at the face, is worn, and gripped at the head taken
-//! off again.
+//! off again. The keyboard is typed on with the controllers' tips
+//! (`typing`), and hidden while the headset's cameras show the real one.
 //!
 //! The manual's pages are rendered on a thread of their own, as they are
 //! needed, into textures of the context that draws them.
@@ -15,7 +16,9 @@ use super::controls::{Hand, Tracking};
 use super::physics::{self, Body, Colliders, Moved, Obstacle, Shape};
 use super::pick::{Target, TargetId};
 use super::render::{Gpu, PropDraw};
+use super::keycaps;
 use super::scene::{PRINT, PartRole, Prop, PropKind, Scene, VFX1_EYES};
+use super::typing::{KeyEvent, Typing};
 use glam::{Mat4, Quat, Vec3};
 use glow::HasContext;
 use rust_dos::padmap::PadSnapshot;
@@ -54,10 +57,17 @@ const THROW: Duration = Duration::from_millis(80);
 const NEAR: f32 = 0.03;
 /// How thick a picture is to the simulation.
 const PRINT_THICKNESS: f32 = 0.001;
-/// How near the eyes the VFX1's have to be when it is let go for it to be
-/// worn, and a hand to the head to take it off, in metres.
-const PUT_ON: f32 = 0.2;
+/// How near the eyes the VFX1's have to come, held, for it to go on, or
+/// be when it is let go; how near the head a hand takes it off; and how
+/// far from the eyes it has to have been, taken off, to go on again.
+const SNAP_ON: f32 = 0.12;
+const PUT_ON: f32 = 0.3;
 const TAKE_OFF: f32 = 0.25;
+const AWAY: f32 = 0.35;
+/// Below the seat's eyes and away from them, out of reach: the VFX1 or
+/// the keyboard coming to rest further than this goes back where it
+/// started.
+const OUT_OF_REACH: (f32, f32) = (0.9, 1.3);
 
 /// What a hand holds.
 #[derive(Clone, Copy, Debug)]
@@ -98,6 +108,8 @@ pub struct PropInput {
     pub shots: Vec<usize>,
     /// The VFX1 is worn.
     pub worn: bool,
+    /// The hands whose tip pressed a key, to feel it.
+    pub keyed: [bool; 2],
 }
 
 pub struct Props {
@@ -125,6 +137,15 @@ pub struct Props {
     vfx1: bool,
     worn: bool,
     head: Option<Mat4>,
+    /// The VFX1 has been away from the head since it was taken off, and
+    /// can go on again.
+    armed: bool,
+    /// The keyboard (by its prop), typed on, and whether it is hidden
+    /// (the real one is seen); the keys the machine has down.
+    keyboard: Option<usize>,
+    typing: Typing,
+    keyboard_hidden: bool,
+    machine_keys: [u64; 8],
 }
 
 impl Props {
@@ -146,6 +167,11 @@ impl Props {
             vfx1: false,
             worn: false,
             head: None,
+            armed: true,
+            keyboard: None,
+            typing: Typing::default(),
+            keyboard_hidden: false,
+            machine_keys: [0; 8],
         };
         props.reset(scene);
         props
@@ -160,6 +186,10 @@ impl Props {
         self.colliders = Colliders::new(scene);
         self.moves = [Vec::new(), Vec::new()];
         self.worn = false;
+        let typed = |p: &Prop| p.kind == PropKind::Keyboard && !p.keys.is_empty();
+        self.keyboard = scene.props.iter().position(typed);
+        let keys = self.keyboard.map_or(&[][..], |k| &scene.props[k].keys);
+        self.typing.rebuild(keys, Instant::now());
         self.stale.extend(self.prints.drain(..).filter_map(|p| p.picture));
         self.booklet.canvas = scene.props.iter().find(|p| p.kind == PropKind::Manual).map_or((768, PAGE_HEIGHT), page_canvas);
     }
@@ -180,8 +210,59 @@ impl Props {
         match prop.kind {
             PropKind::Manual => !self.booklet.manuals.is_empty(),
             PropKind::Vfx1 => self.vfx1 && !self.worn,
+            PropKind::Keyboard => !self.keyboard_hidden,
             _ => true,
         }
+    }
+
+    /// The keyboard hidden while the real one is seen, or shown: hidden,
+    /// its keys come up and a hand holding it lets go.
+    pub fn hide_keyboard(&mut self, hidden: bool) {
+        if hidden == self.keyboard_hidden {
+            return;
+        }
+        self.keyboard_hidden = hidden;
+        if hidden {
+            self.typing.release_all(Instant::now());
+            for hold in &mut self.holds {
+                if matches!(hold, Some(Hold::Body { prop, .. }) if Some(*prop) == self.keyboard) {
+                    *hold = None;
+                }
+            }
+        }
+    }
+
+    /// The keys the machine has down (`Leds::keys`), shown down too.
+    pub fn set_machine_keys(&mut self, keys: [u64; 8]) {
+        self.machine_keys = keys;
+    }
+
+    /// The keyboard's key `k` clicked: down for a moment.
+    pub fn tap(&mut self, k: usize, now: Instant) {
+        if self.keyboard.is_some() && !self.keyboard_hidden {
+            self.typing.tap(k, now);
+        }
+    }
+
+    /// The keys gone down and come up since, for the machine; clicks over
+    /// let go.
+    pub fn take_key_events(&mut self, now: Instant) -> Vec<KeyEvent> {
+        self.typing.settle(now);
+        self.typing.take_events()
+    }
+
+    /// The hands' tips type on the keyboard: but the one holding it.
+    fn type_on(&mut self, scene: &Scene, tracking: &Tracking, now: Instant) -> [bool; 2] {
+        let Some(k) = self.keyboard.filter(|_| !self.keyboard_hidden) else { return [false; 2] };
+        let from = self.poses[k].inverse();
+        let mut tips = [None; 2];
+        for (i, hand) in tracking.hands.iter().enumerate() {
+            let holding = matches!(self.holds[i], Some(Hold::Body { prop, .. }) if prop == k);
+            if let Some(hand) = hand.filter(|_| !holding) {
+                tips[i] = Some(from.transform_point3(hand.aim.transform_point3(Vec3::ZERO)));
+            }
+        }
+        self.typing.strike(&scene.props[k].keys, tips, now)
     }
 
     /// The VFX1 there (`[vfx1]`) or not: taken away, it is taken off too.
@@ -202,14 +283,11 @@ impl Props {
         self.worn = self.vfx1;
     }
 
-    /// Whether the VFX1 let go now at `pose` is worn: its eyes near the
-    /// head's, and it facing the way the head does.
-    fn on_head(&self, pose: Mat4) -> bool {
-        let Some(head) = self.head else { return false };
-        let eyes = pose.transform_point3(VFX1_EYES);
-        let facing = pose.transform_vector3(Vec3::NEG_Z).normalize_or_zero();
-        let looking = head.transform_vector3(Vec3::NEG_Z).normalize_or_zero();
-        eyes.distance(head.transform_point3(Vec3::ZERO)) < PUT_ON && facing.dot(looking) > 0.0
+    /// How far the VFX1's eyes at `pose` are from the head's, if it is
+    /// tracked. Which way it is turned doesn't matter: it goes on right.
+    fn eyes_apart(&self, pose: Mat4) -> Option<f32> {
+        let head = self.head?;
+        Some(pose.transform_point3(VFX1_EYES).distance(head.transform_point3(Vec3::ZERO)))
     }
 
     /// The worn VFX1 taken off by `hand` gripping at the head.
@@ -221,6 +299,7 @@ impl Props {
         }
         let prop = scene.props.iter().position(|p| p.kind == PropKind::Vfx1)?;
         self.worn = false;
+        self.armed = false;
         self.falling[prop] = None;
         // Where it was on the head.
         self.poses[prop] = head * Mat4::from_translation(-VFX1_EYES);
@@ -273,6 +352,16 @@ impl Props {
                 Some(Hold::Print { print, offset }) => self.prints[print].pose = hand.grip * offset,
                 Some(Hold::Body { prop, offset }) => {
                     self.poses[prop] = hand.grip * offset;
+                    // The VFX1 brought to the eyes goes on.
+                    if scene.props[prop].kind == PropKind::Vfx1
+                        && let Some(distance) = self.eyes_apart(self.poses[prop])
+                    {
+                        self.armed |= distance > AWAY;
+                        if self.armed && distance < SNAP_ON {
+                            self.holds[i] = None;
+                            self.worn = true;
+                        }
+                    }
                     // A camera's trigger takes a picture.
                     if scene.props[prop].kind == PropKind::Camera && hand.select && !pulled {
                         input.shots.push(prop);
@@ -320,13 +409,27 @@ impl Props {
                 }
             }
         }
+        input.keyed = self.type_on(scene, tracking, now);
+        for (i, busy) in input.busy.iter_mut().enumerate() {
+            *busy |= self.typing.on_key(i);
+        }
         input.worn = self.worn;
         input
     }
 
     /// What can be clicked with the laser or the mouse, or touched: the
-    /// lamps; and the cameras, where they are.
+    /// lamps; and the cameras and the keyboard's keys, where they are.
     pub fn targets(&self, scene: &Scene) -> Vec<Target> {
+        let keys = self.keyboard.filter(|_| !self.keyboard_hidden).into_iter().flat_map(|k| {
+            let pose = self.poses[k];
+            scene.props[k].keys.iter().enumerate().map(move |(i, key)| {
+                let (c, h) = (key.center, key.half);
+                let low = Vec3::new(c.x - h.x, key.top - keycaps::TRAVEL, c.y - h.y);
+                let high = Vec3::new(c.x + h.x, key.top, c.y + h.y);
+                let (low, high) = self.world_box(pose, (low, high));
+                Target { id: TargetId::Key(i), low, high }
+            })
+        });
         let lamps = scene.lamps.iter().enumerate().map(|(i, lamp)| Target { id: TargetId::Lamp(i), low: lamp.bounds.0, high: lamp.bounds.1 });
         let cameras = scene.props.iter().enumerate().filter(|(_, p)| p.kind == PropKind::Camera).map(|(i, prop)| {
             let (low, high) = prop.bounds;
@@ -334,7 +437,7 @@ impl Props {
             let (low, high) = corners.fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(l, h), p| (l.min(p), h.max(p)));
             Target { id: TargetId::Camera(i), low, high }
         });
-        lamps.chain(cameras).collect()
+        lamps.chain(cameras).chain(keys).collect()
     }
 
     /// Where prop `i` is now.
@@ -527,6 +630,18 @@ impl Props {
                 Moved::Lost => self.poses[i] = scene.props[i].pose,
                 _ => self.poses[i] = body.pose(),
             }
+            // The VFX1 or the keyboard resting out of reach of the seat (on
+            // the floor) is back on the desk, as it can't be done without.
+            let needed = matches!(scene.props[i].kind, PropKind::Vfx1 | PropKind::Keyboard);
+            if moved != Moved::Moving && needed {
+                let at = self.poses[i].transform_point3(Vec3::ZERO);
+                let seat = scene.spawn.position;
+                let across = Vec3::new(at.x - seat.x, 0.0, at.z - seat.z).length();
+                if at.y < seat.y - OUT_OF_REACH.0 || across > OUT_OF_REACH.1 {
+                    self.poses[i] = scene.props[i].pose;
+                }
+                self.armed |= scene.props[i].kind == PropKind::Vfx1;
+            }
             self.falling[i] = (moved == Moved::Moving).then_some(body);
         }
         let obstacles = self.obstacles(scene, None);
@@ -551,7 +666,9 @@ impl Props {
     fn release(&mut self, scene: &Scene, i: usize) {
         match self.holds[i].take() {
             Some(Hold::Body { prop, .. })
-                if scene.props[prop].kind == PropKind::Vfx1 && self.on_head(self.poses[prop]) =>
+                if scene.props[prop].kind == PropKind::Vfx1
+                    && self.armed
+                    && self.eyes_apart(self.poses[prop]).is_some_and(|d| d < PUT_ON) =>
             {
                 self.worn = true;
                 self.falling[prop] = None;
@@ -582,11 +699,35 @@ impl Props {
             unsafe { gl.delete_texture(texture) };
         }
         let pages = self.booklet.showing(now);
+        // The keys down, and the rows they are in, which are drawn a key at
+        // a time.
+        let down: Vec<bool> = self.keyboard.map_or(Vec::new(), |k| {
+            let keys = &scene.props[k].keys;
+            let down = |i: usize| self.typing.down(i) || machine_has(self.machine_keys, keys[i].scan);
+            (0..keys.len()).map(down).collect()
+        });
+        let mut rows = [false; 8];
+        if let Some(k) = self.keyboard {
+            for (key, _) in scene.props[k].keys.iter().zip(&down).filter(|(_, d)| **d) {
+                rows[key.row.min(7)] = true;
+            }
+        }
         let mut draws = Vec::new();
         for (i, prop) in scene.props.iter().enumerate().filter(|(_, p)| self.shown(p)) {
             let pose = self.poses[i];
             for (part, p) in prop.parts.iter().enumerate() {
                 let (model, page) = match p.role {
+                    PartRole::KeyRow(row) if Some(i) == self.keyboard && rows[row.min(7)] => {
+                        continue;
+                    }
+                    PartRole::KeyRow(_) => (pose, None),
+                    PartRole::Key(k) => {
+                        if Some(i) != self.keyboard || !rows[prop.keys[k].row.min(7)] {
+                            continue;
+                        }
+                        let travel = if down[k] { keycaps::TRAVEL } else { 0.0 };
+                        (pose * Mat4::from_translation(Vec3::new(0.0, -travel, 0.0)), None)
+                    }
                     PartRole::Body => (pose, None),
                     PartRole::PageLeft => (pose, self.booklet.texture(pages.left)),
                     PartRole::PageRight => (pose, self.booklet.texture(pages.right)),
@@ -623,6 +764,13 @@ impl Props {
             unsafe { gl.delete_texture(texture) };
         }
     }
+}
+
+/// Whether the machine has the key that sends `scan` down (`Leds::keys`).
+fn machine_has(keys: [u64; 8], scan: Option<(u8, bool)>) -> bool {
+    let Some((scan, extended)) = scan else { return false };
+    let id = (scan & 0x7F) as usize | (extended as usize) << 8;
+    keys[id / 64] & 1 << (id % 64) != 0
 }
 
 /// Where a hand takes things: its grip, and the tip of the controller
@@ -1006,11 +1154,11 @@ mod tests {
         assert!((at.y - 0.72).abs() < 0.005, "on the desk: {:?}", at);
         assert!((at.x - (base.x - 0.4)).abs() < 0.08);
         assert!((rotation * Vec3::Y).dot(Vec3::Y) > 0.99, "upright");
-        // Thrown off the desk, it is on the floor.
+        // Thrown off the desk (up over the keyboard), it is on the floor.
         let at = props.poses[j].transform_point3(Vec3::new(0.0, 0.02, 0.0));
         let now = later;
         props.update(&room, &tracking(hand_at(at, true)), now);
-        let throw = Vec3::new(0.0, 0.1, 2.0) / 90.0;
+        let throw = Vec3::new(0.0, 1.0, 2.0) / 90.0;
         let mut at_frame = now;
         for k in 1..=4 {
             at_frame += Duration::from_secs_f32(1.0 / 90.0);
@@ -1136,6 +1284,98 @@ mod tests {
         props.update(&room, &with_head(away), now);
         let input = props.update(&room, &with_head(Hand { squeeze: false, ..away }), now);
         assert!(!input.worn && props.falling[v].is_some());
+    }
+
+    #[test]
+    fn the_vfx1_goes_on_brought_to_the_face_as_it_was_picked_up() {
+        let room = Scene::test_room();
+        let mut props = Props::new(&room);
+        props.set_vfx1(true);
+        let v = room.props.iter().position(|p| p.kind == PropKind::Vfx1).unwrap();
+        let body = room.props[v].pose.transform_point3(Vec3::new(0.0, 0.05, -0.07));
+        let head = Mat4::from_translation(Vec3::new(0.0, 1.2, 0.0));
+        let with_head = |hand: Hand| Tracking { head: Some(head), ..tracking(hand) };
+        let now = Instant::now();
+        props.update(&room, &with_head(hand_at(body, false)), now);
+        props.update(&room, &with_head(hand_at(body, true)), now);
+        // Moved, not turned, until its eyes are at the head's: its front
+        // faces the viewer, the wrong way round, and it goes on all the
+        // same, held.
+        let eyes = room.props[v].pose.transform_point3(VFX1_EYES);
+        let to_head = Vec3::new(0.0, 1.2, 0.0) - eyes;
+        let mut worn = false;
+        for step in 1..=20 {
+            let at = body + to_head * step as f32 / 20.0;
+            worn |= props.update(&room, &with_head(hand_at(at, true)), now).worn;
+        }
+        assert!(worn);
+        // Taken off, it doesn't go on again at once, held at the head nor
+        // let go there: it falls.
+        let at_head = Vec3::new(0.05, 1.2, 0.0);
+        props.update(&room, &with_head(hand_at(at_head, false)), now);
+        assert!(!props.update(&room, &with_head(hand_at(at_head, true)), now).worn);
+        assert!(!props.update(&room, &with_head(hand_at(at_head, true)), now).worn);
+        assert!(!props.update(&room, &with_head(hand_at(at_head, false)), now).worn);
+        // Fallen to the floor, out of reach, it is back on the desk.
+        let later = run(&mut props, &room, &with_head(hand_at(at_head, false)), now, 4.0);
+        assert!(props.falling[v].is_none());
+        assert!(props.poses[v].abs_diff_eq(room.props[v].pose, 1e-4), "{:?}", props.poses[v]);
+        // And can be put on again.
+        props.update(&room, &with_head(hand_at(body, true)), later);
+        let mut worn = false;
+        for step in 1..=20 {
+            let at = body + to_head * step as f32 / 20.0;
+            worn |= props.update(&room, &with_head(hand_at(at, true)), later).worn;
+        }
+        assert!(worn);
+    }
+
+    #[test]
+    fn the_keyboard_is_typed_on_with_a_tip_and_moved_by_its_case() {
+        let room = Scene::test_room();
+        let mut props = Props::new(&room);
+        let k = room.props.iter().position(|p| p.kind == PropKind::Keyboard).unwrap();
+        let q = room.props[k].keys.iter().find(|key| key.legend == "Q").unwrap();
+        let pose = room.props[k].pose;
+        let over_q = |height: f32| {
+            pose.transform_point3(Vec3::new(q.center.x, q.top + height, q.center.y))
+        };
+        // The controller's tip (where it points from) in Q, its grip
+        // behind it.
+        let tip = |p: Vec3| Hand {
+            aim: Mat4::from_translation(p),
+            grip: Mat4::from_translation(p + Vec3::Z * 0.1),
+            ..Hand::default()
+        };
+        let now = Instant::now();
+        props.update(&room, &tracking(tip(over_q(0.02))), now);
+        let input = props.update(&room, &tracking(tip(over_q(-0.004))), now);
+        assert!(input.keyed[1] && input.busy[1]);
+        let q_key = |down| KeyEvent { scan: 0x10, extended: false, down };
+        assert_eq!(props.take_key_events(now), [q_key(true)]);
+        // The real keyboard seen, it is gone: Q comes up, and no key is
+        // there to click.
+        props.hide_keyboard(true);
+        assert_eq!(props.take_key_events(now), [q_key(false)]);
+        assert!(!props.targets(&room).iter().any(|t| matches!(t.id, TargetId::Key(_))));
+        props.hide_keyboard(false);
+        let key = |t: &Target| matches!(t.id, TargetId::Key(_));
+        assert_eq!(props.targets(&room).iter().filter(|t| key(t)).count(), 101);
+        // Clicked, a key goes down for a moment.
+        props.tap(0, now);
+        assert_eq!(props.take_key_events(now).len(), 1);
+        assert_eq!(props.take_key_events(now + Duration::from_secs(1)).len(), 1);
+        // Gripped by its case, it moves with the hand, which doesn't type
+        // on it while it holds it.
+        let case = pose.transform_point3(Vec3::new(-0.2, 0.01, 0.07));
+        props.update(&room, &tracking(hand_at(case, false)), now);
+        props.update(&room, &tracking(hand_at(case, true)), now);
+        assert!(matches!(props.holds[1], Some(Hold::Body { prop, .. }) if prop == k));
+        let by = Vec3::new(0.1, 0.05, 0.0);
+        props.update(&room, &tracking(hand_at(case + by, true)), now);
+        let moved = props.poses[k].transform_point3(Vec3::ZERO);
+        assert!(moved.abs_diff_eq(pose.transform_point3(Vec3::ZERO) + by, 1e-4), "{:?}", moved);
+        assert!(props.take_key_events(now).is_empty());
     }
 
     #[test]

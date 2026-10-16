@@ -40,6 +40,15 @@ mod a64;
 /// Whether this build has a code generator for its host.
 pub const AVAILABLE: bool = cfg!(dynrec);
 
+/// Whether blocks may start in a page's last 15 bytes: where the code
+/// generator has them go on there (`TAIL`, `BlockData::in_tail`).
+#[cfg(all(dynrec, target_arch = "x86_64"))]
+pub const TAIL_STARTS: bool = x64::TAIL;
+#[cfg(all(dynrec, target_arch = "aarch64"))]
+pub const TAIL_STARTS: bool = a64::TAIL;
+#[cfg(not(dynrec))]
+pub const TAIL_STARTS: bool = false;
+
 /// Whether translated code can run here: the build has a code generator
 /// and the host lets it make memory executable (iOS and tvOS do only for a
 /// JIT a debugger enabled). Where not, the interpreter runs everything.
@@ -452,9 +461,11 @@ mod engine {
     }
 
     /// The code generations of the chunks an instruction at `phys` can be
-    /// in (it is at most 15 bytes long).
+    /// in (it is at most 15 bytes long), up to the end of RAM: a block may
+    /// start in the last 15 bytes of RAM's last page.
     fn instr_gens(page_gen: &[u32], phys: u32) -> u32 {
-        let (first, last) = (phys as usize >> crate::bus::GEN_SHIFT, (phys as usize + 14) >> crate::bus::GEN_SHIFT);
+        let first = phys as usize >> crate::bus::GEN_SHIFT;
+        let last = ((phys as usize + 14) >> crate::bus::GEN_SHIFT).min(page_gen.len() - 1);
         page_gen[first].wrapping_add(page_gen[last])
     }
 
@@ -1149,13 +1160,19 @@ mod engine {
     /// Where the instruction at CS:EIP is, as the execution loop would find
     /// it in a code window for its page (`exec::fetch_location`) and leave
     /// it to translated code, where that takes no page walk (the TLB has
-    /// the page): None where the loop has to look.
+    /// the page): None where the loop has to look. In the page's last 15
+    /// bytes, where the loop's fetch also looks the next page up, only
+    /// where the code generator checks the TLB for it (`TAIL`).
     fn here(cpu: &Cpu) -> Option<At> {
         const PAGE_TAIL: u32 = 15;
         let eip = cpu.eip();
         let cs = cpu.seg_cache(Seg::CS);
         let lin_ip = cs.base.wrapping_add(eip);
-        if eip as u64 + PAGE_TAIL as u64 - 1 > cs.limit as u64 || lin_ip < 0x1000 || lin_ip & 0xFFF >= 0x1000 - PAGE_TAIL {
+        let tail = lin_ip & 0xFFF >= 0x1000 - PAGE_TAIL;
+        if eip as u64 + PAGE_TAIL as u64 - 1 > cs.limit as u64
+            || lin_ip < 0x1000
+            || tail && !backend::TAIL
+        {
             return None;
         }
         let phys_ip = cpu.translated(lin_ip, cpu.cpl == 3)? as usize;

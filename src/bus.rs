@@ -900,6 +900,11 @@ impl Bus {
         if let Some(dword) = self.voodoo_peek_32(addr) {
             return dword as u8;
         }
+        if let Some((crate::powervr::Window::Registers, offset)) = self.powervr_at(addr)
+            && let Some(p) = &self.powervr
+        {
+            return (p.peek_register(offset & !3) >> (8 * (offset & 3))) as u8;
+        }
         if addr >= self.ram.len() {
             return self.mapped_8(addr);
         }

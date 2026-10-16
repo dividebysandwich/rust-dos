@@ -669,6 +669,19 @@ fn fetch_texel_in(t: &TmuRaster, mode: u32, texbase: u32, smax: i32, s: i32, tc:
     }
 }
 
+/// Whether the texture combine of textureMode `mode` reads the unit's own
+/// texel (c_local). A unit that only passes on the colour of the one
+/// before it, as TMU 0 does under 3dfx's OpenGL driver with one texture,
+/// doesn't.
+const fn uses_local(mode: u32) -> bool {
+    bit(mode, 13)
+        || matches!((mode >> 14) & 7, 1 | 3)
+        || matches!((mode >> 18) & 3, 1 | 2)
+        || bit(mode, 22)
+        || matches!((mode >> 23) & 7, 1 | 3)
+        || (mode >> 27) & 3 != 0
+}
+
 /// A texture unit's colour for a pixel, combined with `cother`, the
 /// colour of the unit before it (`TEXTURE_PIPELINE`).
 #[inline(always)]
@@ -716,7 +729,10 @@ fn texture(t: &TmuRaster, mode: u32, x: i32, dither4: Option<&[u8]>, cother: u32
     let fetch = |s: i32, tc: i32| fetch_texel_in(t, mode, texbase, smax, s, tc);
 
     let point = (lod == t.lodmin && !bit(mode, 2)) || (lod != t.lodmin && !bit(mode, 1));
-    let c_local = if point {
+    let c_local = if !uses_local(mode) {
+        // Nothing reads it: skip the lookups.
+        0
+    } else if point {
         s >>= ilod + 18;
         tc >>= ilod + 18;
         if bit(mode, 6) {
@@ -749,8 +765,13 @@ fn texture(t: &TmuRaster, mode: u32, x: i32, dither4: Option<&[u8]>, cother: u32
         let (s, s1, tc, t1) = (s & smax, s1 & smax, tc & tmax, t1 & tmax);
         bilinear(fetch(s, tc), fetch(s1, tc), fetch(s, t1), fetch(s1, t1), sfrac, tfrac)
     };
+    texture_combine(t, mode, lod, cother, c_local)
+}
 
-    // The texture combine unit.
+/// The texture combine unit of textureMode `mode`: the unit's texel
+/// `c_local` with `cother`, at level of detail `lod`.
+#[inline(always)]
+fn texture_combine(t: &TmuRaster, mode: u32, lod: i32, cother: u32, c_local: u32) -> u32 {
     let (mut tr, mut tg, mut tb) = if !bit(mode, 12) { (r_of(cother), g_of(cother), b_of(cother)) } else { (0, 0, 0) };
     let mut ta = if !bit(mode, 21) { a_of(cother) } else { 0 };
     if bit(mode, 13) {
@@ -989,25 +1010,55 @@ impl Spec for Generic {
 /// them. alphaMode's: all but the reference value of the alpha test.
 const FBZ_FIXED: u32 = 1 << 2 | 1 << 3 | 1 << 4 | 1 << 8 | 1 << 11 | 1 << 12 | 1 << 16 | 1 << 18 | 1 << 19 | 1 << 20 | 1 << 21;
 const AM_FIXED: u32 = 0x00FF_FFFF;
+/// fbzColorPath's: all the raster reads, that is all but the subpixel
+/// adjustment (26, applied at setup), the texture enable (27, which the
+/// unit count stands for) and anti-aliasing (29).
+const CP_FIXED: u32 = 0x13FF_FFFF;
 
-/// The variants: textures used, and fbzMode, fbzColorPath, alphaMode,
-/// fogMode and the units' textureMode as the fixed bits have them. These
-/// are the pipelines of Quake's 3dfx renderers (lightmapped textures in two
-/// units, blended or not, and the untextured ones), which other Glide
-/// games share.
+/// A variant that fixes every bit that chooses a stage or a source:
+/// fbzMode, alphaMode and fbzColorPath as `FBZ_FIXED`, `AM_FIXED` and
+/// `CP_FIXED` say, and all of fogMode and the textureMode of the units
+/// used.
+const fn full(tmus: usize, [fbz, cp, am, fog, t0, t1]: [u32; 6]) -> [(u32, u32); 6] {
+    [
+        (FBZ_FIXED, fbz & FBZ_FIXED),
+        (CP_FIXED, cp & CP_FIXED),
+        (AM_FIXED, am & AM_FIXED),
+        (u32::MAX, fog),
+        (if tmus >= 1 { u32::MAX } else { 0 }, t0),
+        (if tmus >= 2 { u32::MAX } else { 0 }, t1),
+    ]
+}
+
+/// The bits of textureMode that choose the texture combine (12-29).
+const TC_FIXED: u32 = 0x3FFF_F000;
+
+/// A variant that fixes only fbzColorPath (as `CP_FIXED` says) and the
+/// texture combine of the units used, and leaves fbzMode, alphaMode,
+/// fogMode and the texture filtering as the triangle has them. Those cost
+/// a variant little against the generic code, the combines most of the
+/// difference, so one of these covers the depth, blending and fog settings
+/// a game draws a colour path with.
+const fn combine_only(tmus: usize, [cp, t0, t1]: [u32; 3]) -> [(u32, u32); 6] {
+    [
+        (0, 0),
+        (CP_FIXED, cp & CP_FIXED),
+        (0, 0),
+        (0, 0),
+        (if tmus >= 1 { TC_FIXED } else { 0 }, t0 & TC_FIXED),
+        (if tmus >= 2 { TC_FIXED } else { 0 }, t1 & TC_FIXED),
+    ]
+}
+
+/// The variants: textures used, and the registers' fixed bits, from
+/// `full` or `combine_only`. The first that fits a triangle draws it
+/// (`variant`).
 macro_rules! variants {
-    ($($name:ident: $tmus:literal, [$fbz:expr, $cp:expr, $am:expr, $fog:expr, $t0:expr, $t1:expr];)*) => {
+    ($($name:ident: $tmus:literal, $kind:ident [$($reg:expr),*];)*) => {
         $(
             struct $name;
             impl Spec for $name {
-                const FIXED: [(u32, u32); 6] = [
-                    (FBZ_FIXED, $fbz & FBZ_FIXED),
-                    (u32::MAX, $cp),
-                    (AM_FIXED, $am & AM_FIXED),
-                    (u32::MAX, $fog),
-                    (if $tmus >= 1 { u32::MAX } else { 0 }, $t0),
-                    (if $tmus >= 2 { u32::MAX } else { 0 }, $t1),
-                ];
+                const FIXED: [(u32, u32); 6] = $kind($tmus, [$($reg),*]);
             }
         )*
         const VARIANTS: &[(usize, [(u32, u32); 6])] = &[$(($tmus, $name::FIXED)),*];
@@ -1033,15 +1084,23 @@ macro_rules! variants {
     };
 }
 
+// V0-V7 are the pipelines of Quake's 3dfx renderers (lightmapped textures
+// in two units, blended or not, and the untextured ones), which other
+// Glide games share. C0 and C1 are 3dfx's OpenGL driver (`3DFXVGL.DLL`)
+// with one texture, which it gives TMU 1 while TMU 0 passes its colour
+// on: the texture times the iterated colour, with the iterated alpha or
+// the texture's times it. Oni draws its menu and its levels with these.
 variants! {
-    V0: 2, [0x90110, 0x0D42_0009, 0x0004_0400, 0, 0x8C26_1A0F, 0x8422_1C0F];
-    V1: 2, [0x90110, 0x0D42_0009, 0x0000_6010, 0, 0x8C26_130F, 0x8422_1C0F];
-    V2: 2, [0x90110, 0x0D42_0009, 0x0004_0409, 0, 0x8844_2A0F, 0x8C26_1A0F];
-    V3: 0, [0x90110, 0x0542_610A, 0x0004_5110, 0, 0, 0];
-    V4: 2, [0x90110, 0x0D42_0009, 0x0000_6010, 0, 0x8C26_130F, 0x8422_1A0F];
-    V5: 2, [0x90110, 0x0D42_0009, 0x0000_6010, 0, 0x8844_230F, 0x8C26_130F];
-    V6: 2, [0x90110, 0x0C00_0005, 0x0004_0409, 0, 0x8844_2A0F, 0x8C26_1C0F];
-    V7: 2, [0x90110, 0x0D42_0009, 0x0000_6010, 0, 0x8C26_130F, 0x8422_130F];
+    V0: 2, full[0x90110, 0x0D42_0009, 0x0004_0400, 0, 0x8C26_1A0F, 0x8422_1C0F];
+    V1: 2, full[0x90110, 0x0D42_0009, 0x0000_6010, 0, 0x8C26_130F, 0x8422_1C0F];
+    V2: 2, full[0x90110, 0x0D42_0009, 0x0004_0409, 0, 0x8844_2A0F, 0x8C26_1A0F];
+    V3: 0, full[0x90110, 0x0542_610A, 0x0004_5110, 0, 0, 0];
+    V4: 2, full[0x90110, 0x0D42_0009, 0x0000_6010, 0, 0x8C26_130F, 0x8422_1A0F];
+    V5: 2, full[0x90110, 0x0D42_0009, 0x0000_6010, 0, 0x8844_230F, 0x8C26_130F];
+    V6: 2, full[0x90110, 0x0C00_0005, 0x0004_0409, 0, 0x8844_2A0F, 0x8C26_1C0F];
+    V7: 2, full[0x90110, 0x0D42_0009, 0x0000_6010, 0, 0x8C26_130F, 0x8422_130F];
+    C0: 2, combine_only[0x0D42_2409, 0x8000_0006, 0x8C26_1A0F];
+    C1: 2, combine_only[0x0C48_2405, 0x8000_0006, 0x8C26_1C0F];
 }
 
 /// The variant a triangle with `texcount` units and `st`'s registers can be
@@ -1260,5 +1319,174 @@ mod tests {
         assert_eq!(combine(0, 0x80_40_20_10, 0, 0), (0x40, 0x20, 0x10, 0x80));
         // Zero other, add c_local: c_local.
         assert_eq!(combine(1 << 8 | 1 << 17 | 1 << 14 | 1 << 23, 0xFFFF_FFFF, 0x0112_2334, 0), (0x12, 0x23, 0x34, 0x01));
+    }
+
+    /// Two units with bilinear 256x256 textures of 16-bit texels, a
+    /// 1024-pixel-wide colour buffer with a depth buffer after it, and
+    /// fbzMode, fbzColorPath, alphaMode, fogMode and the units' modes from
+    /// `regs`.
+    fn two_unit_state(regs: [u32; 6]) -> RasterState {
+        let lookup: Arc<[u32]> = (0..0x10000u32).map(|i| i.wrapping_mul(0x9E37_79B9)).collect();
+        let tmu = |mode: u32| {
+            let ram = Vram::new(1 << 20);
+            for i in 0..ram.len() {
+                ram.set(i, (i as u16).wrapping_mul(40503));
+            }
+            TmuRaster {
+                ram,
+                mask: (1 << 20) - 1,
+                mode,
+                unfiltered: false,
+                lodmin: 0,
+                lodmax: 8 << 8,
+                lodbias: 0,
+                lodmask: 0x1FF,
+                lodoffset: [
+                    0, 0x20000, 0x28000, 0x2A000, 0x2A800, 0x2AA00, 0x2AA80, 0x2AAA0, 0x2AAA8,
+                ],
+                detailmax: 0,
+                detailbias: 0,
+                detailscale: 0,
+                wmask: 255,
+                hmask: 255,
+                lookup: lookup.clone(),
+                bilinear_mask: 0xFF,
+            }
+        };
+        let fb = Vram::new(4 << 20);
+        for i in 0..fb.len() {
+            fb.set(i, (i as u16).wrapping_mul(25173));
+        }
+        RasterState {
+            fb,
+            fbz_mode: regs[0],
+            fbz_color_path: regs[1],
+            alpha_mode: regs[2],
+            fog_mode: regs[3],
+            za_color: 0,
+            chroma_key: 0,
+            color0: 0x8040_2010,
+            color1: 0x1020_4080,
+            fog_color: 0x0030_3030,
+            clip_left_right: 640,
+            clip_low_y_high_y: 480,
+            clip_mask: 0xFFF,
+            chroma_range: 0,
+            fogdelta_mask: 0xFC,
+            yorigin: 479,
+            ymask: 0x3FF,
+            rowpixels: 1024,
+            stride: Stride::linear(1024),
+            aux_stride: Stride::linear(1024),
+            dest: 0,
+            aux: Some(1 << 20),
+            fogblend: std::array::from_fn(|i| (i * 4) as u8),
+            fogdelta: [4; 64],
+            send_config: None,
+            stipple: 0,
+            tmu: [Some(tmu(regs[4])), Some(tmu(regs[5]))],
+        }
+    }
+
+    #[test]
+    fn texture_combines_without_local_ignore_the_texel() {
+        let t = TmuRaster {
+            ram: Vram::new(2),
+            mask: 1,
+            mode: 0,
+            unfiltered: false,
+            lodmin: 0,
+            lodmax: 8 << 8,
+            lodbias: 0,
+            lodmask: 0x1FF,
+            lodoffset: [0; 9],
+            detailmax: 0xFF,
+            detailbias: 0x400,
+            detailscale: 2,
+            wmask: 255,
+            hmask: 255,
+            lookup: Arc::new([0; 256]),
+            bilinear_mask: 0xFF,
+        };
+        let (lod, cother) = (0x123, 0x9A3C_E571);
+        for tc in 0..1u32 << 18 {
+            let mode = tc << 12;
+            if uses_local(mode) {
+                continue;
+            }
+            let a = texture_combine(&t, mode, lod, cother, 0);
+            for c_local in [0xFFFF_FFFF, 0x8040_C020] {
+                let b = texture_combine(&t, mode, lod, cother, c_local);
+                assert_eq!(a, b, "textureMode {mode:08X} reads c_local");
+            }
+        }
+    }
+
+    #[test]
+    fn combine_only_variants_draw_as_the_generic_code() {
+        // The states Oni draws with through 3dfx's OpenGL driver, which
+        // differ in fbzMode, alphaMode and the texture formats as well.
+        let states = [
+            [0x0008_43E1, 0x0C48_2405, 0x0000_5110, 0xC0, 0x8000_0006, 0x8C26_1C0F],
+            [0x0008_43E1, 0x0D42_2409, 0x0000_5110, 0xC0, 0x8000_0006, 0x8C26_1ACF],
+            [0x0009_4771, 0x0D42_2409, 0x0000_5110, 0xC0, 0x8000_0006, 0x8C26_1A0F],
+            [0x0009_4371, 0x0C48_2405, 0x0000_4110, 0xC0, 0x8000_0006, 0x8C26_1CCF],
+            [0x0009_4771, 0x0D42_2409, 0x0000_0410, 0xC0, 0x8000_0006, 0x8C26_1A0F],
+            [0x0009_4771, 0x0C48_2405, 0x0000_1410, 0xC0, 0x8000_0006, 0x8C26_1C0F],
+            // And two with the colour path bits the raster doesn't read
+            // changed: no subpixel adjustment, and anti-aliasing on.
+            [0x0009_4771, 0x0942_2409, 0x0000_5110, 0xC0, 0x8000_0006, 0x8C26_1A0F],
+            [0x0008_43E1, 0x2C48_2405, 0x0000_5110, 0xC0, 0x8000_0006, 0x8C26_1C0F],
+        ];
+        let tp = TmuParams {
+            starts: 10 << 32,
+            startt: 20 << 32,
+            startw: 1 << 32,
+            dsdx: 3 << 28,
+            dtdx: 1 << 27,
+            dwdx: 1 << 20,
+            dsdy: 1 << 27,
+            dtdy: 3 << 28,
+            dwdy: 1 << 20,
+            lodbase: 0,
+        };
+        let p = TriParams {
+            startr: 100 << 12,
+            startg: 50 << 12,
+            startb: 20 << 12,
+            starta: 200 << 12,
+            startz: 0x4000 << 12,
+            startw: 1 << 32,
+            drdx: 1 << 10,
+            dgdx: 1 << 9,
+            dbdx: 1 << 8,
+            dadx: -(1 << 10),
+            dzdx: 1 << 14,
+            dwdx: 1 << 20,
+            drdy: 1 << 9,
+            dzdy: -(1 << 13),
+            dwdy: 1 << 20,
+            tmu: [tp, tp],
+            ..Default::default()
+        };
+        for regs in states {
+            let st = two_unit_state(regs);
+            let v = variant(&st, 2);
+            let combine_only = [C0::FIXED, C1::FIXED];
+            assert!(
+                v.is_some_and(|i| combine_only.contains(&VARIANTS[i].1)),
+                "no combine-only variant for {regs:08X?}"
+            );
+            let generic = two_unit_state(regs);
+            let (mut a, mut b) = (0, 0);
+            let (mut sa, mut sb) = (Stats::default(), Stats::default());
+            for y in 0..64 {
+                scanline_as(v, 2, &st, &p, y, 0, 320, &mut a, &mut sa);
+                scanline::<2, Generic>(&generic, &p, y, 0, 320, &mut b, &mut sb);
+            }
+            let differ = (0..st.fb.len()).find(|&i| st.fb.get(i) != generic.fb.get(i));
+            assert_eq!(differ, None, "{regs:08X?} drawn with variant {v:?}");
+            assert!(sa.pixels_out > 0 && sa.pixels_out == sb.pixels_out);
+        }
     }
 }

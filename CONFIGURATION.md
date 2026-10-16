@@ -891,8 +891,9 @@ The picture on a screen in a 3D scene (see [3D scene and VR](#3d-scene-and-vr)).
   program can use: OpenXR's alpha-blended environment (the Steam Frame
   running Rust-DOS itself, Varjo XR headsets) or `XR_FB_passthrough` (a
   Quest through Link). The places found and marked are kept in
-  `vr-keyboard.txt` in Rust-DOS's folder. Turning it on or off starts the
-  headset again.
+  `vr-keyboard.txt` in Rust-DOS's folder. While it shows the real keyboard,
+  the scene's keyboard (the one to type on with the controllers) is hidden.
+  Turning it on or off starts the headset again.
 * `refresh`: the headset's refresh rate in Hz, the runtime's nearest to
   it, or `auto` (the default: the runtime's own, or on a standalone headset
   the lowest from 72 Hz, for more time for each frame). Only where the
@@ -2145,13 +2146,17 @@ The commands are RRedline's (its Programming Guide documents them for
 programmers); their encoding in the FIFO comes from Rendition's library
 itself, which Tomb Raider's Vérité executable links whole, from DOSBox's
 Rendition fork (dosbox-staging-rendition), and from what the games send.
-RReady, the wrapper that fork passes them to, isn't used. Rust-DOS draws
-Z-buffered, bilinear-filtered textures in all of RRedline's formats
-(332, 8-bit intensity and alpha, 565, 4444, 1555, 8888 and 4-bit
-paletted), with their alpha blended, and vQuake's own commands: Quake's
-spans with perspective, its 8-bit pictures through a colour table, and
-particles. Fog follows the Programming Guide, but its commands are
-guessed: no game on hand uses it.
+RReady, the wrapper that fork passes them to, isn't used. The state
+commands each set a field of one of the chip's pixel engine registers,
+whose layout comes from LeonG-ZA's DOSBox-X emulation of the V1000.
+Rust-DOS draws Z-buffered, bilinear-filtered textures in all of
+RRedline's formats (332, 8-bit intensity and alpha, 565, 4444, 1555,
+8888 and 4-bit paletted), with their alpha blended, scissored, dithered
+where the game asks, and chroma-keyed texels transparent black for the
+alpha test to drop, as Tomb Raider and vQuake set it up. It also draws
+vQuake's own commands: Quake's spans with perspective, its 8-bit
+pictures through a colour table, and particles. Fog follows the
+Programming Guide; no game on hand uses it.
 
 ### Windows 95 on the Vérité
 
@@ -2788,15 +2793,18 @@ which games find without a driver of their own. Its head tracker and
 CyberPuck are your headset and right controller. The VFX1 itself lies on
 the desk of the 3D scene, beside the joystick.
 
-In the headset, take the VFX1 with the grip button, bring it to your face
-and let go: you wear it. The room goes away, each eye sees the picture
-the game draws for it, ahead of it wherever you turn, on black, as the
-VFX1's two screens showed it, and your head is the game's head tracker,
-level and ahead where you were as you put it on. To take it off, grip
-next to your head and pull it away, then put it down or throw it. While
-you wear it, the controllers are a gamepad and point at nothing; the
-right controller is the CyberPuck as well, its tilt the puck's and its
-trigger, grip and A button the puck's three buttons.
+In the headset, take the VFX1 with the grip button and bring it to your
+face, whichever way round: it goes on as it comes to your eyes (or as
+you let go of it near them). The room goes away, each eye sees the
+picture the game draws for it, ahead of it wherever you turn, on black,
+as the VFX1's two screens showed it, and your head is the game's head
+tracker, level and ahead where you were as you put it on. To take it
+off, grip next to your head and pull it away, then put it down or throw
+it; it goes on again only once it has been away from your head. Should
+it come to rest out of reach, on the floor, it is back on the desk.
+While you wear it, the controllers are a gamepad and point at nothing;
+the right controller is the CyberPuck as well, its tilt the puck's and
+its trigger, grip and A button the puck's three buttons.
 
 Start a game with its VFX1 switches:
 

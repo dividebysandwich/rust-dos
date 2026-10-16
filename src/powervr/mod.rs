@@ -19,11 +19,13 @@ pub mod render;
 pub mod tsp;
 
 use crate::savestate::{Reader, Result, State, StateError, Writer};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::io::Write;
 
-/// The size of BAR0, the registers' window.
-pub const REGISTER_WINDOW: u32 = 64 << 10;
+/// The size of BAR0, the registers' window: the 1024 registers. (The
+/// driver's real-mode interrupt handler moves it to B8000h for a moment,
+/// so it is no bigger than 32 KB.)
+pub const REGISTER_WINDOW: u32 = 4 << 10;
 /// The size of BAR1, the texture memory.
 pub const TEXTURE_MEMORY: u32 = 4 << 20;
 /// Where the BIOS puts the windows: above the 3dfx card's.
@@ -143,6 +145,9 @@ pub struct PowerVr {
     started: bool,
     /// When the render under way ends, in PIT ticks.
     end_at: Option<u64>,
+    /// INTSTATUS was read, which clears it: the bus settles that with
+    /// `take_acknowledge` before the card next changes.
+    acknowledged: Cell<bool>,
     /// How the host shades.
     pub shader: tsp::Shader,
     /// Lines for the emulator's log.
@@ -169,6 +174,7 @@ impl PowerVr {
             renders: 0,
             started: false,
             end_at: None,
+            acknowledged: Cell::new(false),
             shader: tsp::Shader::default(),
             log: Vec::new(),
             trace: RefCell::new(None),
@@ -191,8 +197,11 @@ impl PowerVr {
     pub fn reset(&mut self) {
         self.pci = PciConfig::default();
         self.regs.fill(0);
+        self.acknowledged.set(false);
         self.regs[regs::ID] = 0x0000_0046;
-        self.regs[regs::REVISION] = 0x0000_0002;
+        // VideoLogic's Windows 9x driver (VSGL.VXD) takes a PCX2 of
+        // revision 1 or 3 and no other.
+        self.regs[regs::REVISION] = 0x0000_0001;
     }
 
     // --- PCI ---
@@ -203,8 +212,8 @@ impl PowerVr {
             0x00 => self.chip.device_id() << 16 | 0x1033,
             // Fast back-to-back capable, medium DEVSEL.
             0x04 => 0x0280_0000 | self.pci.command as u32,
-            // Revision 2, a multimedia device of another kind.
-            0x08 => 0x0480_0002,
+            // Revision 1, a multimedia device of another kind.
+            0x08 => 0x0480_0001,
             0x10 => self.pci.bar0,
             0x14 => self.pci.bar1 | 0x08,
             // INTA#, routed to `irq_line`.
@@ -255,14 +264,37 @@ impl PowerVr {
 
     /// Whether the card asserts INTA#.
     pub fn irq_asserted(&self) -> bool {
-        self.regs[regs::INTSTATUS] & self.regs[regs::INTMASK] != 0
+        self.intstatus() & self.regs[regs::INTMASK] != 0
+    }
+
+    /// INTSTATUS, as a read since it was last set left it.
+    fn intstatus(&self) -> u32 {
+        if self.acknowledged.get() { 0 } else { self.regs[regs::INTSTATUS] }
+    }
+
+    /// Whether INTSTATUS was read since this was last asked, clearing it
+    /// for good if so.
+    pub fn take_acknowledge(&mut self) -> bool {
+        let acknowledged = self.acknowledged.take();
+        if acknowledged {
+            self.regs[regs::INTSTATUS] = 0;
+        }
+        acknowledged
     }
 
     // --- Registers ---
 
+    /// A register read. Reading INTSTATUS acknowledges the interrupt: the
+    /// driver's handler (`dos32/isr.asm`) only reads it.
     pub fn read_register(&self, offset: u32) -> u32 {
         let reg = (offset >> 2) as usize;
-        let value = self.regs.get(reg).copied().unwrap_or(0);
+        let value = if reg == regs::INTSTATUS {
+            let value = self.intstatus();
+            self.acknowledged.set(true);
+            value
+        } else {
+            self.regs.get(reg).copied().unwrap_or(0)
+        };
         self.trace_line(|| format!("r {:<18} = {:08X}", regs::name(reg), value));
         value
     }
@@ -273,6 +305,7 @@ impl PowerVr {
         if reg >= regs::COUNT {
             return false;
         }
+        self.take_acknowledge();
         let value = self.regs[reg] & !mask | value & mask;
         self.trace_line(|| format!("w {:<18} = {:08X}", regs::name(reg), value));
         match reg {
@@ -306,6 +339,7 @@ impl PowerVr {
 
     /// A render starts.
     fn start_render(&mut self) {
+        self.take_acknowledge();
         if self.end_at.take().is_some() {
             self.regs[regs::INTSTATUS] |= regs::END_OF_RENDER;
         }
@@ -343,6 +377,7 @@ impl PowerVr {
     pub fn service(&mut self, now: u64) -> bool {
         match self.end_at {
             Some(at) if at <= now => {
+                self.take_acknowledge();
                 self.end_at = None;
                 self.regs[regs::INTSTATUS] |= regs::END_OF_RENDER;
                 true
@@ -357,8 +392,9 @@ impl PowerVr {
     pub fn output(&self) -> Output {
         let pack = self.regs[regs::PACKMODE];
         let xclip = self.regs[regs::XCLIP];
-        let left = if xclip & 1 << 12 != 0 { xclip & 0x7FF } else { 0 };
-        let right = if xclip & 1 << 28 != 0 { xclip >> 16 & 0x7FF } else { u32::MAX };
+        // Ten bits each.
+        let left = if xclip & 1 << 12 != 0 { xclip & 0x3FF } else { 0 };
+        let right = if xclip & 1 << 28 != 0 { xclip >> 16 & 0x3FF } else { u32::MAX };
         Output {
             address: self.regs[regs::SOFADDR],
             stride: self.regs[regs::LSTRIDE],
@@ -403,6 +439,17 @@ impl PowerVr {
 
     // --- Debugging ---
 
+    /// A register as a read would see it, without the read's effects:
+    /// for the debugger.
+    pub fn peek_register(&self, offset: u32) -> u32 {
+        let reg = (offset >> 2) as usize;
+        if reg == regs::INTSTATUS {
+            self.intstatus()
+        } else {
+            self.regs.get(reg).copied().unwrap_or(0)
+        }
+    }
+
     pub fn registers(&self) -> &[u32] {
         &self.regs
     }
@@ -441,8 +488,9 @@ impl PowerVr {
             regs::IEEEFP,
             regs::BILINEAR,
         ];
+        let value = |r: usize| format!("{:08X}", self.peek_register(4 * r as u32));
         let registers: serde_json::Map<String, serde_json::Value> =
-            named.iter().map(|&r| (regs::name(r), format!("{:08X}", self.regs[r]).into())).collect();
+            named.iter().map(|&r| (regs::name(r), value(r).into())).collect();
         serde_json::json!({
             "chip": self.chip.name(),
             "bar0": format!("{:08X}", self.pci.bar0),
@@ -459,7 +507,13 @@ impl State for PowerVr {
         self.chip.save(w);
         // The memory first, for rewind's deltas.
         self.textures.save(w);
-        self.regs.save(w);
+        if self.acknowledged.get() {
+            let mut regs = self.regs.clone();
+            regs[regs::INTSTATUS] = 0;
+            regs.save(w);
+        } else {
+            self.regs.save(w);
+        }
         self.pci.save(w);
         self.renders.save(w);
         self.end_at.save(w);
@@ -480,6 +534,7 @@ impl State for PowerVr {
         if self.textures.len() != TEXTURE_MEMORY as usize || self.regs.len() != regs::COUNT {
             return Err(StateError::Mismatch("its PowerVR card's memory differs".into()));
         }
+        self.acknowledged.set(false);
         self.pci.load(r)?;
         self.renders.load(r)?;
         self.end_at.load(r)?;

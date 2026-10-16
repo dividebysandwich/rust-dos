@@ -106,7 +106,8 @@ pub struct JitCtx {
     /// Values kept for `Uop::Spill`.
     pub scratch: [u32; 2],
     /// Where `Uop::VFloat` puts the host's MXCSR as it runs the operation,
-    /// and the host's own, which the way in saves (x86-64).
+    /// and the host's own without its exception flags, which the way in
+    /// saves (x86-64).
     pub mxcsr: [u32; 2],
     /// The block the code returned from.
     pub exit_data: *mut BlockData,
