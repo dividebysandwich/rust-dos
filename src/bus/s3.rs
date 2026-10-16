@@ -288,6 +288,12 @@ impl Bus {
             self.verite_write(reg, value, len);
             return;
         }
+        // A Banshee's init registers, a dword at once.
+        if let Some(offset) = self.banshee_io(port) {
+            self.log_port(port, value, len, true);
+            self.banshee_port_write_wide(offset, value, len);
+            return;
+        }
         // The AWE32's EMU8000 is accessed a word at a time.
         if self.awe_claims(port) {
             self.log_port(port, value, len, true);
@@ -330,6 +336,12 @@ impl Bus {
         }
         if let Some(reg) = self.verite_port(port) {
             let value = self.verite_read(reg, len);
+            self.log_port(port, value, len, false);
+            return value;
+        }
+        if let Some(offset) = self.banshee_io(port) {
+            let now_ns = self.clock.now_ns();
+            let value = self.banshee_port_read_wide(offset, len, now_ns);
             self.log_port(port, value, len, false);
             return value;
         }

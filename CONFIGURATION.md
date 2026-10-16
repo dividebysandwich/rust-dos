@@ -226,7 +226,11 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   engine and streams processor, which Windows 95's Direct3D uses through
   S3's driver; see [Direct3D](#direct3d-on-an-s3-virge)), `svga_verite`
   (a Rendition Vérité V1000 with 4 MB on the PCI bus, for DOS games'
-  Vérité versions; see [Rendition Vérité](#rendition-vérité)), `svga_et4000`
+  Vérité versions; see [Rendition Vérité](#rendition-vérité)),
+  `svga_voodoo3` and `svga_banshee` (a 3dfx Voodoo3 3000 or Voodoo
+  Banshee with 16 MB on the PCI bus, which 3dfx's Windows drivers use for
+  the desktop, Direct3D and OpenGL; see
+  [3dfx Voodoo3](#3dfx-voodoo3-and-banshee)), `svga_et4000`
   (a Tseng Labs ET4000AX with 1 MB and a Sierra HiColor DAC, see below),
   `vga` (an IBM VGA, without VESA modes),
   `ega` (an IBM EGA with an Enhanced Color Display: 16 of 64 colours at
@@ -2034,6 +2038,57 @@ is drawn and counted (`RUST_DOS_VOODOO_PRUNE=0` in the environment draws
 everything from the start). The CRT shaders draw their scanlines over the
 bigger picture. The libretro core draws it with the frontend's OpenGL (see
 [its README](libretro/README.md#the-3dfx-voodoo-with-opengl)).
+
+## 3dfx Voodoo3 and Banshee
+
+`machine=svga_voodoo3` makes the display adapter a 3dfx Voodoo3 3000
+with 16 MB, and `machine=svga_banshee` a Voodoo Banshee:
+
+```ini
+[emulator]
+machine=svga_voodoo3
+cpu=pentium_iii
+memsize=128
+```
+
+The Voodoo Graphics and the Voodoo2 are add-on cards next to the display
+adapter, so Windows' own OpenGL and its desktop never use them. The
+Voodoo3 and the Banshee are the display adapter themselves: a VGA, a 2D
+engine, the Voodoo2's 3D engine and a video processor around one memory.
+3dfx's driver for them runs the desktop, Direct3D on the primary display
+and an OpenGL ICD (`3dfxOGL.dll`) that Windows' `opengl32.dll` hands GL
+programs to. The card has no room for `voodoo=true` next to it.
+
+On the PCI bus it is device 1 (vendor 121Ah, device 0005h, subsystem
+003Ah, the Voodoo3 3000 PCI; the Banshee is device 0003h): its registers
+at D0000000h, its memory at D2000000h and its I/O registers at D000h,
+where the BIOS leaves them. The card's VGA is rust-dos's, and so is the
+BIOS: DOS programs get the Super VGA's VESA modes, in their own memory,
+and the card's extended modes start when its driver turns them on. The
+2D engine does what the driver asks of it: fills, copies with all 256
+raster operations and colour keys, stretched copies, images from the
+CPU (one bit to 32 bits a pixel, YUV), lines, polylines and polygons,
+on linear or tiled surfaces. The video processor shows the desktop in 8,
+16, 24 or 32 bits through the colour lookup table, with the overlay and
+the hardware cursor.
+
+**Windows 98 SE** needs 3dfx's Voodoo3 driver (version 1.07.00 was
+tried), which the Windows 98 CD doesn't have. Unpack its `driver9x`
+folder where Windows can read it. At the next start Windows finds a
+"Standard PCI Graphics Adapter (VGA)": choose to search for the best
+driver, tick "Specify a location", give the folder that holds
+`Voodoo3.inf`, and restart Windows when it is done. The card reports no
+monitor through DDC, so Windows calls it "Default Monitor" and offers
+640x480 only: under Display Properties, Settings, Advanced, Monitor,
+Change, pick a monitor from "(Standard monitor types)", such as "Super
+VGA 1024x768", and the bigger modes become available. The desktop was
+tried at 1024x768 in High Color. The 3D engine doesn't draw on this card
+yet: its buffer registers and swaps through the overlay are still to
+come, so Direct3D and OpenGL programs don't show their picture.
+
+The card is a port of 86Box's Banshee and Voodoo3 emulation
+(`vid_voodoo_banshee.c` and its 2D engine, by Sarah Walker, GPLv2),
+checked against 3dfx's Voodoo3 specification.
 
 ## Rendition Vérité
 

@@ -25,6 +25,9 @@ pub struct VgaCard {
     /// The DAC takes 8 bits per color instead of 6 (VBE function 08h).
     pub dac_8bit: bool,
     pub misc_output_reg: u8,
+    /// What a 3dfx Banshee or Voodoo3 adds to the timing registers (its
+    /// PLL and CR1Ah/CR1Bh), which the bus keeps up to date.
+    pub svga_ext: Option<super::crt::Extension>,
     pub palette: Vec<u8>, // 256 * 3
     pub vram_graphics: Vec<u8>,
     pub vram_text: Vec<u8>,
@@ -165,6 +168,7 @@ impl VgaCard {
             dac_state: 0,
             dac_mask: 0xFF,
             dac_8bit: false,
+            svga_ext: None,
             misc_output_reg: 0,
             palette: VGA_DEFAULT_PALETTE.to_vec(),
             vram_graphics: vec![0; 256 * 1024], // 256KB (4 Planes x 64KB)
@@ -932,6 +936,10 @@ impl VgaCard {
                 };
                 CrtTiming::from_extended_registers(self.misc_output_reg, self.sequencer_regs[1], &self.crtc_regs, &ext)
             }
+            super::adapter::Adapter::Voodoo3 | super::adapter::Adapter::Banshee if self.svga_ext.is_some() => {
+                let ext = self.svga_ext.unwrap_or_default();
+                CrtTiming::from_extended_registers(self.misc_output_reg, self.sequencer_regs[1], &self.crtc_regs, &ext)
+            }
             _ => CrtTiming::from_registers(self.misc_output_reg, self.sequencer_regs[1], &self.crtc_regs),
         }
     }
@@ -1254,6 +1262,8 @@ crate::state_fields!(VgaCard {
     mode_switched,
     // The front end's count.
     resyncs,
+    // The bus works it out from the 3dfx card's registers.
+    svga_ext,
     // The front end's.
     blink_on,
 });

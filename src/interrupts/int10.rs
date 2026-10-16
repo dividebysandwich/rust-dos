@@ -432,6 +432,8 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
     }
     cpu.bus.vbe.reset();
     let adapter = cpu.bus.vga.adapter;
+    // A Banshee's own modes end; the VGA's registers make the picture.
+    cpu.bus.banshee_mode_set();
     if adapter.is_s3() {
         cpu.bus.s3_program_standard();
     }

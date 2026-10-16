@@ -332,7 +332,10 @@ impl<'a> Display<'a> {
     /// with OpenGL; true if its picture is the one to show
     /// (`present`'s `voodoo`). Otherwise the card stops recording.
     pub fn run_voodoo(&mut self, bus: &mut Bus, settings: &VoodooSettings) -> bool {
-        let want = settings.renderer == Renderer::OpenGl;
+        // A Banshee's picture is the whole desktop, which the OpenGL
+        // renderer doesn't draw: it always shows its memory.
+        let banshee = bus.voodoo.as_ref().is_some_and(|v| v.banshee.is_some());
+        let want = settings.renderer == Renderer::OpenGl && !banshee;
         let problem = match &mut self.out {
             Output::Gl(gl) => {
                 let Some(card) = bus.voodoo.as_mut() else {

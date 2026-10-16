@@ -20,6 +20,7 @@ mod drives;
 mod sound;
 mod powervr;
 mod verite;
+mod banshee;
 mod voodoo;
 
 pub use verite::bios as verite_bios;
@@ -880,6 +881,9 @@ impl Bus {
         if let Some(at) = self.powervr_at(addr) {
             return self.powervr_read(at, 1) as u8;
         }
+        if let Some(offset) = self.voodoo_at(addr) {
+            return self.voodoo_read_8(offset);
+        }
         if addr >= 0xFFFE_0000 {
             // The top 128 KB of the address space mirror the BIOS ROM area
             // (E0000h-FFFFFh), where a 386 fetches its first instruction
@@ -1043,8 +1047,9 @@ impl Bus {
             self.write_vram(offset, &[value]);
             return true;
         }
-        if self.voodoo_at(addr).is_some() {
-            self.voodoo_write_8();
+        if let Some(offset) = self.voodoo_at(addr) {
+            self.voodoo_write_8(offset, value);
+            return true;
         }
         if let Some(at) = self.powervr_at(addr) {
             self.powervr_write(at, value as u32, 1);
@@ -2012,6 +2017,10 @@ impl Bus {
             self.verite_write(reg, value as u32, 1);
             return;
         }
+        if let Some(offset) = self.banshee_io(port) {
+            self.banshee_port_write(offset, value);
+            return;
+        }
         match port {
             // ISA Plug and Play's ADDRESS and WRITE_DATA ports.
             crate::isapnp::ADDRESS if self.isapnp.is_some() => {
@@ -2325,6 +2334,10 @@ impl Bus {
                     if self.s3() && !matches!(port, 0x3C6..=0x3C9 | 0x3DA | 0x3BA) {
                         self.s3_settle();
                     }
+                    // And what a Banshee shows.
+                    if self.voodoo.is_some() {
+                        self.banshee_vga_written(port);
+                    }
                     // Suppress the per-write log for DAC ports (0x3C6..0x3C9):
                     // a full 256-color palette update is 1024 writes, which
                     // buries everything else in the trace. Still log the less
@@ -2408,6 +2421,9 @@ impl Bus {
         }
         if let Some(reg) = self.verite_port(port) {
             return self.verite_read(reg, 1) as u8;
+        }
+        if let Some(offset) = self.banshee_io(port) {
+            return self.banshee_port_read(offset, now_ns);
         }
         match port {
             // ISA Plug and Play's READ_DATA port, wherever software put it,
@@ -2739,6 +2755,9 @@ impl Bus {
     /// bits of the display start; the VBE protected-mode interface uses
     /// them.
     fn ext_crtc_write(&mut self, index: u8, value: u8) {
+        if self.banshee().is_some() {
+            return self.banshee_crtc_write(index, value);
+        }
         if self.s3() {
             return self.s3_crtc_write(index, value);
         }
@@ -2756,6 +2775,9 @@ impl Bus {
     }
 
     fn ext_crtc_read(&mut self, index: u8) -> u8 {
+        if self.banshee().is_some() {
+            return self.banshee_crtc_read(index);
+        }
         if self.s3() {
             return self.s3_crtc_read(index);
         }
