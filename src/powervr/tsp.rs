@@ -6,7 +6,9 @@
 //!
 //! This follows Imagination's simulator of the PCX2's TSP (`simulat3/
 //! texas.c`: `Texas`, `TexturePixel`, `AddressCalc`, `ColourConvert`),
-//! its fixed-point arithmetic included.
+//! its fixed-point arithmetic included. The PCX1's (`simulat/texas.c`)
+//! has no bilinear filter: between two mip map levels it blends a texel
+//! of each, and its maps' levels start a pixel further on.
 //!
 //! A record is at the TSP tag times two dwords from PREC_BASE. Its first
 //! dword is the control word: texturing (bit 31), smooth shading (30), no
@@ -17,6 +19,7 @@
 //! shading's origin. A textured record has six more: the texture's
 //! coefficients and map, then smooth shading's and the highlight's words.
 
+use super::Chip;
 use super::regs;
 
 /// Mip-mapped maps alternate between the halves of the memory.
@@ -24,6 +27,10 @@ const BIG_BANK: u32 = 0x10_0000;
 
 /// Where a mip-mapped map's levels start, by level (256x256 down).
 const MIP_OFFSET: [u32; 9] = [0x5555, 0x1555, 0x0555, 0x0155, 0x0055, 0x0015, 0x0005, 0x0001, 0x0000];
+/// The PCX1's, which keep each level 2-pixel aligned.
+const MIP_OFFSET_PCX1: [u32; 9] = [
+    0x5556, 0x1556, 0x0556, 0x0156, 0x0056, 0x0016, 0x0006, 0x0002, 0x0001,
+];
 /// Where U and V wrap, by map size.
 const MAP_MASK: [i32; 4] = [0xFF, 0x7F, 0x3F, 0x1F];
 
@@ -143,19 +150,23 @@ pub struct Tsp<'a> {
     fog_colour: (i32, i32, i32),
     fog_table: [i32; 128],
     bilinear: bool,
+    /// Between mip map levels, blend a texel of each (the PCX1).
+    two_level: bool,
+    mip_offset: &'static [u32; 9],
 }
 
 impl<'a> Tsp<'a> {
-    pub fn new(registers: &[u32], textures: &'a [u8], shader: &Shader) -> Self {
+    pub fn new(chip: Chip, registers: &[u32], textures: &'a [u8], shader: &Shader) -> Self {
         let fogcol = registers[regs::FOGCOL];
         let mut fog_table = [0; 128];
         for (i, entry) in fog_table.iter_mut().enumerate() {
             *entry = (registers[regs::FOG_TABLE + i] & 0xFF) as i32;
         }
-        let bilinear = match shader.filter {
-            Filter::Auto => registers[regs::BILINEAR] & 3 != 3,
-            Filter::Point => false,
-            Filter::Bilinear => true,
+        let pcx1 = chip == Chip::Pcx1;
+        let (bilinear, two_level) = match shader.filter {
+            Filter::Auto => (!pcx1 && registers[regs::BILINEAR] & 3 != 3, pcx1),
+            Filter::Point => (false, false),
+            Filter::Bilinear => (true, false),
         };
         Self {
             textures,
@@ -165,6 +176,8 @@ impl<'a> Tsp<'a> {
             fog_colour: ((fogcol >> 16 & 0xFF) as i32, (fogcol >> 8 & 0xFF) as i32, (fogcol & 0xFF) as i32),
             fog_table,
             bilinear,
+            two_level,
+            mip_offset: if pcx1 { &MIP_OFFSET_PCX1 } else { &MIP_OFFSET },
         }
     }
 
@@ -202,7 +215,9 @@ impl<'a> Tsp<'a> {
             if (map.size + level) & 1 != 0 {
                 address ^= BIG_BANK;
             }
-            address.wrapping_add(MIP_OFFSET[(map.size + level).min(8)]).wrapping_add(twiddle(u >> level, v >> level))
+            address
+                .wrapping_add(self.mip_offset[(map.size + level).min(8)])
+                .wrapping_add(twiddle(u >> level, v >> level))
         }
     }
 
@@ -292,8 +307,10 @@ impl<'a> Tsp<'a> {
         bot.m *= pmip.m;
         if bot.m & 0x8000 != 0 {
             bot.e = pmip.e - (bot.e - 2);
+            bot.m >>= 8;
         } else {
             bot.e = pmip.e - (bot.e - 1);
+            bot.m >>= 7;
         }
         let level = bot.e.clamp(0, 15);
         let mut colour = if level < 1 || !map.mip_mapped || !map.sixteen_bit {
@@ -315,6 +332,19 @@ impl<'a> Tsp<'a> {
                 u_frac = (u_frac >> compress) & 31;
                 v_frac = (v_frac >> compress) & 31;
                 self.bilinear(map, u, v, compress, 1 << compress, u_frac, v_frac, (u & 1, u & 1))
+            } else if self.two_level {
+                // The level's texel and the next smaller one's, mixed by
+                // the fraction of the level of detail (5 bits).
+                let high = self.fetch(map, u, v, compress, 0);
+                let low = self.fetch(map, u, v, compress + 1, 0);
+                let m = (bot.m & 0x7F) >> 2;
+                let mix = |h: i32, l: i32| (h << 3) + ((m * (l - h)) >> 2) + 4;
+                Rgba {
+                    r: mix(high.r, low.r),
+                    g: mix(high.g, low.g),
+                    b: mix(high.b, low.b),
+                    a: low.a,
+                }
             } else {
                 let t = self.fetch(map, u, v, compress, u & 1);
                 Rgba { r: t.r << 3 | 4, g: t.g << 3 | 4, b: t.b << 3 | 4, a: t.a }
@@ -467,5 +497,35 @@ mod tests {
         assert_eq!(p.e, 2);
         assert!(p.m < 0);
         assert_eq!(to_pfloat(0).m, 0);
+    }
+
+    #[test]
+    fn a_pcx1_aligns_its_maps_and_blends_levels_unfiltered() {
+        let mut textures = vec![0u8; 4 << 20];
+        let registers = vec![0; regs::COUNT];
+        let map = Map {
+            address: 0,
+            size: 3,
+            sixteen_bit: true,
+            mip_mapped: true,
+            alpha: false,
+            flip_uv: 0,
+        };
+        let pcx1 = Tsp::new(Chip::Pcx1, &registers, &textures, &Shader::default());
+        let pcx2 = Tsp::new(Chip::Pcx2, &registers, &textures, &Shader::default());
+        // A 32x32 map's first level: 0x156 on, in the other bank (size 3 +
+        // level 0 is odd).
+        assert_eq!(pcx1.address(&map, 0, 0, 0), BIG_BANK + 0x156);
+        assert_eq!(pcx2.address(&map, 0, 0, 0), BIG_BANK + 0x155);
+        assert!(pcx1.two_level && !pcx1.bilinear);
+        assert!(!pcx2.two_level && pcx2.bilinear);
+        // Its 16x16 level's first texel white, its 32x32's black.
+        let at = |pixel: u32| (pixel as usize >> 1) * 4 + if pixel & 1 == 0 { 2 } else { 0 };
+        let white = at(0x56);
+        textures[white..white + 2].copy_from_slice(&0x7FFFu16.to_le_bytes());
+        let pcx1 = Tsp::new(Chip::Pcx1, &registers, &textures, &Shader::default());
+        assert_eq!(pcx1.address(&map, 0, 0, 1), 0x56);
+        let t = pcx1.fetch(&map, 0, 0, 1, 0);
+        assert_eq!((t.r, t.g, t.b), (31, 31, 31));
     }
 }

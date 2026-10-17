@@ -14,6 +14,7 @@
 //! clears their surfaces (not their depths), and the pass's objects in
 //! front of what was drawn are shaded over it in turn.
 
+use super::Chip;
 use super::regs;
 use super::tsp::{Shader, Tsp};
 
@@ -81,7 +82,8 @@ fn page_address(entry: u32) -> u32 {
 }
 
 /// Where the object list is: the parameter space when OBJECT_OFFSET's bit
-/// 0 is set, as Tomb Raider has it, otherwise the machine's memory.
+/// 0 is set, as Tomb Raider has it, otherwise the machine's memory. A
+/// PCX1's is always in the machine's memory.
 struct Objects<'p, 'a> {
     params: &'p Params<'a>,
     physical: bool,
@@ -124,10 +126,24 @@ pub struct Rendered {
 }
 
 /// Render the scene the registers describe.
-pub fn render(registers: &[u32], textures: &[u8], mem: Memory, shader: &Shader) -> Rendered {
+pub fn render(
+    chip: Chip,
+    registers: &[u32],
+    textures: &[u8],
+    mem: Memory,
+    shader: &Shader,
+) -> Rendered {
     let params = Params::new(registers, mem);
-    let objects = Objects { params: &params, physical: registers[regs::OBJECT_OFFSET] & 1 == 0 };
-    let tsp = Tsp::new(registers, textures, shader);
+    let pcx2 = chip == Chip::Pcx2;
+    let physical = !pcx2 || registers[regs::OBJECT_OFFSET] & 1 == 0;
+    let objects = Objects { params: &params, physical };
+    // The PCX1's planes, and the PCX2's unless IEEEFP asks for floats.
+    let format = if pcx2 && registers[regs::IEEEFP] & 1 != 0 {
+        PlaneFormat::Float
+    } else {
+        PlaneFormat::Fixed
+    };
+    let tsp = Tsp::new(chip, registers, textures, shader);
     // The tiles and their planes first, then the tiles rendered, each by
     // itself, so on as many threads as there are.
     let mut tiles: Vec<(u32, std::ops::Range<usize>)> = Vec::new();
@@ -154,12 +170,13 @@ pub fn render(registers: &[u32], textures: &[u8], mem: Memory, shader: &Shader) 
             }
             at = at.wrapping_add(4);
             word = objects.dword(at);
-            // A translucent pass's start, which the cells see in its planes.
-            if word & VERY_LAST != 0 && word & LINK != 0 {
+            // A translucent pass's start, which the cells see in its
+            // planes. (The PCX1 has neither that nor links.)
+            if pcx2 && word & VERY_LAST != 0 && word & LINK != 0 {
                 word &= !(VERY_LAST | LINK);
             }
             let mut links = 0;
-            while word & LINK != 0 && word & TILE_HEADER == 0 && links < 10 {
+            while pcx2 && word & LINK != 0 && word & TILE_HEADER == 0 && links < 10 {
                 at = (word & 0x00FF_FFFF) << 2;
                 word = objects.dword(at);
                 links += 1;
@@ -167,7 +184,7 @@ pub fn render(registers: &[u32], textures: &[u8], mem: Memory, shader: &Shader) 
             if word & TILE_HEADER != 0 {
                 break;
             }
-            fetch_planes(&params, word, &mut planes);
+            fetch_planes(&params, format, word, &mut planes);
             if word & VERY_LAST != 0 {
                 last = true;
                 break;
@@ -219,19 +236,56 @@ fn threads() -> usize {
     std::thread::available_parallelism().map_or(1, |n| n.get().min(8))
 }
 
+/// How planes are stored.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PlaneFormat {
+    /// Four dwords: A, B and C as IEEE floats, then the instruction in
+    /// bits 0-3 and the tag above.
+    Float,
+    /// Three dwords (`pkisp.c`, `PackPlane`): A as a 20-bit float in bits
+    /// 0-19, the tag's bits 17-12 in 20-25 and the instruction in 26-29;
+    /// B as a 20-bit float with the tag's bits 11-0 in 20-31; C as an
+    /// integer.
+    Fixed,
+}
+
+/// A 20-bit float (`pto20b.h`): a 15-bit magnitude, its sign in bit 15
+/// and a left shift in bits 16-19, as a depth step. The chip adds A and B
+/// to C·256 in a 40-bit adder and compares its top 32 bits, the depths
+/// here being those as fractions of 2^31.
+fn from_20bit(raw: u32) -> f32 {
+    let magnitude = ((raw & 0x7FFF) << (raw >> 16 & 15)) as f32 / (1u64 << 39) as f32;
+    if raw & 0x8000 != 0 { -magnitude } else { magnitude }
+}
+
 /// The planes an object pointer points to.
-fn fetch_planes(params: &Params, pointer: u32, planes: &mut Vec<Plane>) {
+fn fetch_planes(params: &Params, format: PlaneFormat, pointer: u32, planes: &mut Vec<Plane>) {
     let addr = (pointer & 0x7FFFF) << 2;
     let count = pointer >> 19 & 0x3FF;
     for i in 0..count {
-        let at = addr.wrapping_add(16 * i);
-        let word = params.dword(at + 12);
-        planes.push(Plane {
-            a: f32::from_bits(params.dword(at)),
-            b: f32::from_bits(params.dword(at + 4)),
-            c: f32::from_bits(params.dword(at + 8)),
-            instr: (word & 15) as u8,
-            tag: word >> 4,
+        planes.push(match format {
+            PlaneFormat::Float => {
+                let at = addr.wrapping_add(16 * i);
+                let word = params.dword(at + 12);
+                Plane {
+                    a: f32::from_bits(params.dword(at)),
+                    b: f32::from_bits(params.dword(at + 4)),
+                    c: f32::from_bits(params.dword(at + 8)),
+                    instr: (word & 15) as u8,
+                    tag: word >> 4,
+                }
+            }
+            PlaneFormat::Fixed => {
+                let at = addr.wrapping_add(12 * i);
+                let (a, b) = (params.dword(at), params.dword(at + 4));
+                Plane {
+                    a: from_20bit(a),
+                    b: from_20bit(b),
+                    c: params.dword(at + 8) as i32 as f32 / 2_147_483_648.0,
+                    instr: (a >> 26 & 15) as u8,
+                    tag: (a >> 8 & 0x3_F000) | b >> 20,
+                }
+            }
         });
     }
 }
@@ -565,4 +619,40 @@ fn shade(cells: &Cells, tsp: &Tsp, x0: u32, y0: u32, w: usize, pixels: &mut [u32
         }
     }
     shaded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn twenty_bit_floats_are_shifted_magnitudes() {
+        assert_eq!(from_20bit(15 << 16 | 0x4000), 1.0 / 1024.0);
+        assert_eq!(from_20bit(9 << 16 | 0x4000), 1.0 / 65536.0);
+        assert_eq!(from_20bit(9 << 16 | 0x8000 | 0x4000), -1.0 / 65536.0);
+        assert_eq!(from_20bit(0), 0.0);
+    }
+
+    #[test]
+    fn fixed_planes_carry_the_tag_and_instruction_across_a_and_b() {
+        let tag = 0x2_5ABC;
+        let a = 0x0B << 26 | (tag & 0x3_F000) << 8 | 9 << 16 | 0x4000;
+        let b = tag << 20 | 0x8000 | 9 << 16 | 0x2000;
+        let c = 0x4000_0000u32;
+        let mut ram = vec![0u8; 0x2_0000];
+        for (i, w) in [a, b, c].into_iter().enumerate() {
+            ram[0x1_0000 + 4 * i..][..4].copy_from_slice(&w.to_le_bytes());
+        }
+        let mut registers = vec![0; regs::COUNT];
+        // Pages of 4 KB from 0, so the parameter space is the memory.
+        for (i, entry) in registers[regs::TLB..regs::TLB + PAGES].iter_mut().enumerate() {
+            *entry = i as u32;
+        }
+        let params = Params::new(&registers, Memory { ram: &ram });
+        let mut planes = Vec::new();
+        fetch_planes(&params, PlaneFormat::Fixed, 1 << 19 | 0x1_0000 >> 2, &mut planes);
+        let p = planes[0];
+        assert_eq!((p.instr, p.tag), (0x0B, tag));
+        assert_eq!((p.a, p.b, p.c), (1.0 / 65536.0, -1.0 / 131072.0, 0.5));
+    }
 }

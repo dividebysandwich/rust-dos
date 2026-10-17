@@ -1,5 +1,5 @@
-//! The PowerVR PCX2: its place on the PCI bus, its windows, and the
-//! render handshake Tomb Raider's PowerVR version uses.
+//! The PowerVR PCX2 and PCX1: their place on the PCI bus, their windows,
+//! and the render handshake Tomb Raider's PowerVR version uses.
 
 use rust_dos::bus::Bus;
 use rust_dos::powervr::{Chip, regs};
@@ -10,9 +10,13 @@ const TEXTURES: usize = 0xD440_0000;
 
 /// A machine with a PCX2.
 fn bus() -> Bus {
+    bus_with(Chip::Pcx2)
+}
+
+fn bus_with(chip: Chip) -> Bus {
     let mut bus = Bus::new(PathBuf::from("."));
     bus.set_cycles_per_ms(1000);
-    bus.configure_powervr(Some(Chip::Pcx2));
+    bus.configure_powervr(Some(chip));
     bus
 }
 
@@ -182,7 +186,10 @@ fn renders_a_snapshot() {
     let filter = std::env::var("RUST_DOS_POWERVR_FILTER").ok().and_then(|f| rust_dos::powervr::tsp::Filter::parse(&f));
     let shader = rust_dos::powervr::tsp::Shader { filter: filter.unwrap_or_default() };
     let start = std::time::Instant::now();
-    let rendered = rust_dos::powervr::render::render(&regs, &tex, rust_dos::powervr::render::Memory { ram: &ram }, &shader);
+    // The ID register tells the chips apart.
+    let chip = if regs[regs::ID] == 0x2A { Chip::Pcx1 } else { Chip::Pcx2 };
+    let ram = rust_dos::powervr::render::Memory { ram: &ram };
+    let rendered = rust_dos::powervr::render::render(chip, &regs, &tex, ram, &shader);
     eprintln!(
         "{} tiles, {} ISP and {} TSP clocks, {:?}",
         rendered.tiles.len(),
@@ -218,7 +225,7 @@ const FRAME: u32 = 0x30_0000;
 /// 1000h, TSP records in the texture memory; a 32x32 frame buffer in RAM,
 /// 565.
 struct Scene {
-    planes: Vec<[u32; 4]>,
+    planes: Vec<(f32, f32, f32, u32, u32)>,
     pointers: Vec<u32>,
     /// The TLB's page size, and whether its entries are addresses rather
     /// than page numbers.
@@ -227,6 +234,9 @@ struct Scene {
     /// The object list in the machine's memory, at `PARAMS` + 1000h,
     /// rather than in the parameter space.
     physical_list: bool,
+    /// Planes of three dwords, 20-bit floats and fixed point, as the
+    /// PCX1's (and the PCX2's with IEEEFP 0).
+    fixed: bool,
 }
 
 impl Scene {
@@ -237,16 +247,37 @@ impl Scene {
             page: 0x4000,
             addresses: false,
             physical_list: false,
+            fixed: false,
         }
+    }
+
+    /// A PCX1's: its planes fixed point, its list in the machine's memory.
+    fn pcx1() -> Self {
+        Self { fixed: true, physical_list: true, ..Self::new() }
     }
 
     /// An object of these planes (A, B, C, instruction, tag).
     fn object(&mut self, planes: &[(f32, f32, f32, u32, u32)]) {
-        let addr = (0x100 + 16 * self.planes.len() as u32) >> 2;
-        for &(a, b, c, instr, tag) in planes {
-            self.planes.push([a.to_bits(), b.to_bits(), c.to_bits(), instr | tag << 4]);
-        }
+        let addr = (0x100 + self.plane_bytes() * self.planes.len() as u32) >> 2;
+        self.planes.extend_from_slice(planes);
         self.pointers.push(addr | (planes.len() as u32) << 19);
+    }
+
+    fn plane_bytes(&self) -> u32 {
+        if self.fixed { 12 } else { 16 }
+    }
+
+    /// A plane's dwords.
+    fn words(&self, (a, b, c, instr, tag): (f32, f32, f32, u32, u32)) -> Vec<u32> {
+        if self.fixed {
+            vec![
+                instr << 26 | (tag & 0x3_F000) << 8 | to_20bit(a),
+                tag << 20 | to_20bit(b),
+                (c as f64 * 2_147_483_648.0) as i32 as u32,
+            ]
+        } else {
+            vec![a.to_bits(), b.to_bits(), c.to_bits(), instr | tag << 4]
+        }
     }
 
     /// Render the scene and wait for the render to end.
@@ -260,9 +291,10 @@ impl Scene {
             let at = PARAMS + page * self.page;
             w(bus, regs::TLB + page as usize, if self.addresses { at } else { at >> 12 });
         }
-        for (i, plane) in self.planes.iter().enumerate() {
-            for (j, word) in plane.iter().enumerate() {
-                bus.write_32((PARAMS + 0x100 + 16 * i as u32 + 4 * j as u32) as usize, *word);
+        for (i, &plane) in self.planes.iter().enumerate() {
+            for (j, word) in self.words(plane).into_iter().enumerate() {
+                let at = PARAMS + 0x100 + self.plane_bytes() * i as u32 + 4 * j as u32;
+                bus.write_32(at as usize, word);
             }
         }
         // One 32x32 tile at 0, 0.
@@ -280,6 +312,19 @@ impl Scene {
         w(bus, regs::SOFTRESET, 0);
         w(bus, regs::STARTRENDER, 0);
     }
+}
+
+/// A depth step as a 20-bit float: a 15-bit magnitude shifted left by
+/// bits 16-19, in 2^-39ths.
+fn to_20bit(x: f32) -> u32 {
+    let mut magnitude = (x.abs() as f64 * (1u64 << 39) as f64) as u64;
+    let mut shift = 0;
+    while magnitude >= 0x8000 {
+        magnitude >>= 1;
+        shift += 1;
+    }
+    assert!(shift <= 15, "{} is too steep for a 20-bit float", x);
+    shift << 16 | if x < 0.0 { 0x8000 } else { 0 } | magnitude as u32
 }
 
 /// A flat-shaded, unfogged TSP record for tag `tag`.
@@ -405,4 +450,73 @@ fn the_last_object_of_a_region_is_drawn_without_a_plane_after_it() {
     scene.render(&mut bus);
     assert_eq!(pixel(&bus, 8, 8), 0xF800, "the triangle, last in the list");
     assert_eq!(pixel(&bus, 2, 2), 0x001F);
+}
+
+#[test]
+fn a_pcx1_is_device_002a() {
+    let mut bus = bus_with(Chip::Pcx1);
+    assert_eq!(cfg_read(&mut bus, 2, 0x00), 0x002A_1033, "NEC PCX1");
+    assert_eq!(r(&bus, regs::ID), 0x2A);
+    assert_eq!(r(&bus, regs::IEEEFP), 0, "no floats");
+}
+
+/// `triangle_scene` with its edges scaled down to fit 20-bit floats, as
+/// only their signs count.
+fn pcx1_triangle_scene(depth: f32) -> Scene {
+    let k = 1.0 / 1024.0;
+    let mut scene = Scene::pcx1();
+    scene.object(&[(0.0, 0.0, 0.0, 8, 4)]);
+    scene.object(&[
+        (0.0, 0.0, depth, 8, 0x2_5006),
+        (k, 0.0, -4.0 * k, 2, 0),
+        (0.0, k, -4.0 * k, 2, 0),
+        (-k, -k, 32.0 * k, 2, 0),
+    ]);
+    scene.object(&[(0.0, 0.0, -1.0, 8, 0)]);
+    scene
+}
+
+#[test]
+fn a_pcx1_renders_fixed_point_planes_from_a_list_in_memory() {
+    let mut bus = bus_with(Chip::Pcx1);
+    flat(&mut bus, 4, (0, 0, 255));
+    flat(&mut bus, 0x2_5006, (255, 0, 0));
+    pcx1_triangle_scene(0.5).render(&mut bus);
+    assert_ne!(r(&bus, regs::INTSTATUS) & regs::END_OF_RENDER, 0, "the render ended");
+    assert_eq!(pixel(&bus, 8, 8), 0xF800, "the triangle, red: an 18-bit tag");
+    assert_eq!(pixel(&bus, 2, 2), 0x001F, "the background, blue");
+    assert_eq!(pixel(&bus, 30, 30), 0x001F, "past the long edge");
+}
+
+#[test]
+fn a_pcx1_compares_fixed_point_depths() {
+    let mut bus = bus_with(Chip::Pcx1);
+    flat(&mut bus, 4, (0, 0, 255));
+    flat(&mut bus, 0x2_5006, (255, 0, 0));
+    pcx1_triangle_scene(-0.5).render(&mut bus);
+    assert_eq!(pixel(&bus, 8, 8), 0x001F, "behind the background");
+}
+
+#[test]
+fn a_pcx2_reads_fixed_point_planes_when_ieeefp_is_off() {
+    let mut bus = bus();
+    w(&mut bus, regs::IEEEFP, 0);
+    flat(&mut bus, 4, (0, 0, 255));
+    flat(&mut bus, 0x2_5006, (255, 0, 0));
+    let mut scene = pcx1_triangle_scene(0.5);
+    scene.physical_list = false;
+    scene.render(&mut bus);
+    assert_eq!(pixel(&bus, 8, 8), 0xF800);
+    assert_eq!(pixel(&bus, 2, 2), 0x001F);
+}
+
+#[test]
+fn a_pcx1_state_does_not_load_into_a_pcx2() {
+    let bus1 = bus_with(Chip::Pcx1);
+    let mut w2 = rust_dos::savestate::Writer::new();
+    rust_dos::savestate::State::save(bus1.powervr.as_ref().unwrap(), &mut w2);
+    let mut other = bus();
+    let mut reader = rust_dos::savestate::Reader::new(&w2.buf);
+    let card = other.powervr.as_mut().unwrap();
+    assert!(rust_dos::savestate::State::load(card, &mut reader).is_err());
 }

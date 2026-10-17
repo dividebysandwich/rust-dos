@@ -1,5 +1,6 @@
-//! A PowerVR PCX2 (Matrox m3D, VideoLogic Apocalypse 3Dx): NEC's PCI 3D
-//! accelerator with no display of its own. The driver writes the scene
+//! A PowerVR PCX1 (VideoLogic Apocalypse 3D) or PCX2 (Matrox m3D,
+//! VideoLogic Apocalypse 3Dx): NEC's PCI 3D accelerators with no display
+//! of their own. The driver writes the scene
 //! as planes and an object list into host memory and texturing records
 //! and textures into the card's 4 MB; the card renders it a 32-pixel
 //! tile at a time and writes the finished pixels over the bus into the
@@ -9,10 +10,18 @@
 //! What the chip does comes from Imagination's driver source for the
 //! PowerVR Series1 (github.com/powervr-graphics/PowerVR-Series1, MIT
 //! licensed): the register map and the formats of the parameters it
-//! reads, and its C simulator of the PCX2 (`Source/simulat3`).
+//! reads, and its C simulators of the PCX2 (`Source/simulat3`) and the
+//! PCX1 (`Source/simulat`).
 //!
-//! The card is PCI device 2 (vendor 1033h, NEC; device 0046h), BAR0 its
-//! registers, BAR1 its texture memory.
+//! The PCX1 differs in what it reads: its planes are three dwords of
+//! fixed-point and 20-bit float values (the PCX2 also reads IEEE floats),
+//! its object list is always in physical memory and has no links, its
+//! mip-mapped maps start a pixel further up, and it has no bilinear
+//! filter: it blends two mip map levels' texels instead.
+//!
+//! The card is PCI device 2 (vendor 1033h, NEC; device 002Ah for the
+//! PCX1, 0046h for the PCX2), BAR0 its registers, BAR1 its texture
+//! memory.
 
 pub mod regs;
 pub mod render;
@@ -34,23 +43,24 @@ pub const INITIAL_REGISTERS: u32 = 0xD400_0000;
 pub const INITIAL_TEXTURES: u32 = 0xD440_0000;
 /// The interrupt line the BIOS routed the card's INTA# to.
 pub const IRQ: u8 = 11;
-/// The chip's clock, which its ISP and TSP run at.
-const CLOCK_HZ: u64 = 66_000_000;
 
 /// The chips.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Chip {
+    Pcx1,
     #[default]
     Pcx2,
 }
 
-crate::state_enum!(Chip { Chip::Pcx2 });
+// Pcx2 first: older states have only it.
+crate::state_enum!(Chip { Chip::Pcx2, Chip::Pcx1 });
 
 impl Chip {
     /// A `powervr` setting: the chip, or None for no card.
     pub fn parse(s: &str) -> Option<Option<Self>> {
         match s.trim().to_ascii_lowercase().as_str() {
             "off" | "false" | "no" | "none" => Some(None),
+            "pcx1" => Some(Some(Chip::Pcx1)),
             "pcx2" | "on" | "true" | "yes" => Some(Some(Chip::Pcx2)),
             _ => None,
         }
@@ -58,12 +68,23 @@ impl Chip {
 
     pub fn name(self) -> &'static str {
         match self {
+            Chip::Pcx1 => "pcx1",
             Chip::Pcx2 => "pcx2",
+        }
+    }
+
+    /// The clock its ISP and TSP run at: 60 MHz for the PCX1, 66 for the
+    /// PCX2.
+    fn clock_hz(self) -> u64 {
+        match self {
+            Chip::Pcx1 => 60_000_000,
+            Chip::Pcx2 => 66_000_000,
         }
     }
 
     fn device_id(self) -> u32 {
         match self {
+            Chip::Pcx1 => 0x002A,
             Chip::Pcx2 => 0x0046,
         }
     }
@@ -199,10 +220,16 @@ impl PowerVr {
         self.pci = PciConfig::default();
         self.regs.fill(0);
         self.acknowledged.set(false);
-        self.regs[regs::ID] = 0x0000_0046;
+        self.regs[regs::ID] = self.chip.device_id();
         // VideoLogic's Windows 9x driver (VSGL.VXD) takes a PCX2 of
-        // revision 1 or 3 and no other.
+        // revision 1 or 3 and no other. (Nothing reads a PCX1's.)
         self.regs[regs::REVISION] = 0x0000_0001;
+        // The driver sets IEEEFP to 7 at start (`pcx/hwregs.c`), floats
+        // on; a PCX2 is taken to come up with them on, as before IEEEFP
+        // was looked at.
+        if self.chip == Chip::Pcx2 {
+            self.regs[regs::IEEEFP] = 1;
+        }
     }
 
     // --- PCI ---
@@ -359,14 +386,14 @@ impl PowerVr {
 
     /// Render the scene from `ram`, the machine's memory.
     pub fn render(&self, ram: &[u8]) -> render::Rendered {
-        render::render(&self.regs, &self.textures, render::Memory { ram }, &self.shader)
+        render::render(self.chip, &self.regs, &self.textures, render::Memory { ram }, &self.shader)
     }
 
     /// The render took the chip `rendered`'s clocks from `now` (PIT
     /// ticks): the ISP's and the TSP's, which work at once.
     pub fn rendering(&mut self, rendered: &render::Rendered, now: u64) {
         let clocks = rendered.isp_clocks.max(rendered.tsp_clocks);
-        self.end_at = Some(now + clocks * crate::timer::PIT_HZ / CLOCK_HZ);
+        self.end_at = Some(now + clocks * crate::timer::PIT_HZ / self.chip.clock_hz());
     }
 
     /// When the render under way ends.
