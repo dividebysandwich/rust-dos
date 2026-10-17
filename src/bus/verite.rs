@@ -222,9 +222,12 @@ impl Bus {
         let _profile = crate::profile::zone(crate::profile::Zone::IoVerite);
         let now = self.clock.now_ns();
         let retraces = self.vga.timing().retraces(now);
+        // The card's own CRTC signals retraces while its vertical sync is
+        // on (CRTCCTL bit 10): not after the BIOS's AX=1582h turned it off.
+        let vsync = self.verite.read_quiet(regs::CRTCCTL) & 0x400 != 0;
         if retraces != self.verite.retraces {
             self.verite.retraces = retraces;
-            if let Some(core) = &mut self.verite.lle {
+            if let Some(core) = self.verite.lle.as_mut().filter(|_| vsync) {
                 core.vertical_retrace();
             }
         }

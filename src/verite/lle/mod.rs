@@ -337,6 +337,17 @@ impl Core {
     /// A word for the input FIFO, from the host or the DMA.
     fn push_input(&mut self, word: u32) {
         if self.in_fifo.len() >= IN_FIFO {
+            if self.intr & intr::FIFO_ERROR == 0 {
+                let line = format!(
+                    "[VERITE] Input FIFO full: {:08X} lost (RISC at {:08X}, debug {:02X}, halted {}, dma {})",
+                    word,
+                    self.pc,
+                    self.debug(),
+                    self.halted,
+                    self.dma.busy
+                );
+                self.note(line);
+            }
             self.intr |= intr::FIFO_ERROR;
             return;
         }
@@ -664,6 +675,8 @@ impl Core {
             "output": self.out_fifo.len(),
             "intr": format!("{:04X}/{:04X}", self.intr, self.dword(io::INTR_EN) as u16),
             "dma": self.dma.busy,
+            "dma_list": format!("{:08X} {:08X}+{:X}/{}", self.dma.ptr, self.dma.addr, self.dma.left, self.dma.swap),
+            "mode": self.mode(),
             "loader": self.loader.active,
             "drawctl": format!("{:04X}", self.pe.drawctl),
         })
