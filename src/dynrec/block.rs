@@ -16,7 +16,8 @@
 //! execution goes on.
 
 use iced_x86::{
-    Decoder, DecoderError, DecoderOptions, FlowControl, Instruction, InstructionInfoFactory, Mnemonic, OpAccess,
+    Decoder, DecoderError, DecoderOptions, FlowControl, Instruction, InstructionInfoFactory,
+    Mnemonic, OpAccess,
 };
 
 use crate::bus::GEN_SHIFT;
@@ -245,7 +246,8 @@ impl BlockData {
                 // It runs on into the next page: its bytes from both.
                 let mut buf = [0u8; 2 * PAGE_TAIL as usize];
                 buf[..here].copy_from_slice(&page[off as usize..]);
-                buf[here..][..PAGE_TAIL as usize].copy_from_slice(&ram[next as usize..][..PAGE_TAIL as usize]);
+                buf[here..][..PAGE_TAIL as usize]
+                    .copy_from_slice(&ram[next as usize..][..PAGE_TAIL as usize]);
                 let buf = &buf[..here + PAGE_TAIL as usize];
                 instr = Decoder::with_ip(bitness, buf, eip as u64, DecoderOptions::NONE).decode();
             }
@@ -310,7 +312,12 @@ impl BlockData {
             instrs: instrs.into_boxed_slice(),
             eips: eips.into_boxed_slice(),
             writes: writes.into_boxed_slice(),
-            bytes: [&ram[phys as usize..][..len as usize], &ram[next as usize..][..next_len as usize]].concat().into(),
+            bytes: [
+                &ram[phys as usize..][..len as usize],
+                &ram[next as usize..][..next_len as usize],
+            ]
+            .concat()
+            .into(),
             watched: watched.into_boxed_slice(),
             live_imms: Box::new([]),
         };
@@ -440,17 +447,30 @@ impl BlockData {
         self.watched.iter().map(|&w| w as usize).filter(move |w| range.contains(w))
     }
 
-    /// Offsets in `bytes` of the bytes that changed since the block was
-    /// translated, if they are few enough to be a poke (`POKE_BYTES`).
+    /// Offsets in `bytes` of the bytes in the block's page that changed
+    /// since the block was translated, if they are few enough to be a poke
+    /// (`POKE_BYTES`). A change to the bytes of the last instruction in the
+    /// next page (`crosses`) counts as one to its first byte, which has a
+    /// count of pokes: once that is watched, blocks stop before it.
     pub fn poked(&self, ram: &[u8]) -> Option<Vec<usize>> {
-        let now = &ram[self.phys as usize..][..self.len as usize];
+        let len = self.len as usize;
+        let now = &ram[self.phys as usize..][..len];
         let mut changed = Vec::new();
-        for (i, (a, b)) in now.iter().zip(&self.bytes[..]).enumerate() {
+        for (i, (a, b)) in now.iter().zip(&self.bytes[..len]).enumerate() {
             if a != b {
                 if changed.len() == POKE_BYTES {
                     return None;
                 }
                 changed.push(i);
+            }
+        }
+        if ram[self.next as usize..][..self.next_len as usize] != self.bytes[len..] {
+            let first = self.offset(self.count() - 1);
+            if !changed.contains(&first) {
+                if changed.len() == POKE_BYTES {
+                    return None;
+                }
+                changed.push(first);
             }
         }
         (!changed.is_empty()).then_some(changed)

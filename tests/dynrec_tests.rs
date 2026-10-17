@@ -2842,7 +2842,8 @@ fn across_a_page_boundary(how: Across) -> (DynStats, u32, u64) {
             a.set_label(&mut done)?;
             a.jmp(CODE as u64 + 0x100)
         });
-        assert_eq!(&body[13..16], &[0x81, 0xC3, 0x01], "the ADD starts 3 bytes before the page's end");
+        let add = &body[13..16];
+        assert_eq!(add, &[0x81, 0xC3, 0x01], "the ADD starts 3 bytes before the page's end");
         rig.load(0x30FF0, &body[..16]);
         rig.load(if how.paging { how.next } else { 0x31000 }, &body[16..]);
         if let Some(remap) = how.remap {
@@ -2882,7 +2883,7 @@ fn an_instruction_into_the_next_page_runs_translated() {
         let (stats, total, interpreted) = across_a_page_boundary(how);
         assert_eq!(total, 0x0403_0201u32.wrapping_mul(1000));
         if TAIL_STARTS {
-            assert!(interpreted < 100, "the interpreter ran {} instructions: {:?}", interpreted, stats);
+            assert!(interpreted < 100, "the interpreter ran {interpreted} instructions: {stats:?}");
             assert!(stats.runs < 100, "the loop went through the execution loop: {:?}", stats);
         }
     }
@@ -2895,7 +2896,7 @@ fn an_instruction_into_the_next_page_follows_its_remapping() {
     let sum = 0x0403_0201u32.wrapping_mul(500).wrapping_add(0x1413_1201u32.wrapping_mul(500));
     assert_eq!(total, sum, "the ADD's last bytes came from the page mapped there");
     if TAIL_STARTS {
-        assert!(interpreted < 100, "the interpreter ran {} instructions: {:?}", interpreted, stats);
+        assert!(interpreted < 100, "the interpreter ran {interpreted} instructions: {stats:?}");
     }
 }
 
@@ -2906,8 +2907,11 @@ fn a_store_into_the_next_pages_bytes_of_an_instruction_is_seen() {
     let sum = (1..=1000u32).fold(0u32, |sum, n| sum.wrapping_add(0x0003_0201 | (n & 0xFF) << 24));
     let poke = Across { poke: true, ..Across::default() };
     for how in [Across { next: 0x31000, ..poke }, Across { paging: true, next: 0x35000, ..poke }] {
-        let (_, total, _) = across_a_page_boundary(how);
+        let (stats, total, _) = across_a_page_boundary(how);
         assert_eq!(total, sum);
+        // Once its bytes there are watched, the block stops before the ADD
+        // instead of being translated again for every store.
+        assert!(stats.blocks < 100, "translated again and again: {stats:?}");
     }
 }
 

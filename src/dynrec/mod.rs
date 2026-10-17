@@ -616,9 +616,12 @@ mod engine {
                 return None;
             }
             let found = self.translate(cpu, at, key, stats);
-            // (Not for an instruction that may run on into the next page,
-            // whose translation also depends on that page.)
-            if found.is_none() && key.phys & 0xFFF <= 0x1000 - 15 {
+            // (Not for an instruction that may run on into the next page
+            // with paging on, where its translation also depends on where
+            // that page is mapped: without paging, `gens` covers its bytes
+            // there.)
+            let tail = key.phys & 0xFFF > 0x1000 - 15;
+            if found.is_none() && !(tail && key.mode & ENV_PAGING != 0) {
                 self.none[none] = Some((key, gens));
             }
             found.map(|index| (index, self.blocks[index as usize].as_ref().unwrap().code))
@@ -651,7 +654,8 @@ mod engine {
             let max = if single { 1 } else { MAX_BLOCK };
             let next = if backend::TAIL { Self::next_page(cpu, at) } else { None };
             let ram = cpu.bus.ram();
-            let data = BlockData::build(at, ram, &cpu.bus.page_gen, max, pokes, backend::TAIL, next, side)?;
+            let page_gen = &cpu.bus.page_gen;
+            let data = BlockData::build(at, ram, page_gen, max, pokes, backend::TAIL, next, side)?;
             cpu.bus.mark_code(data.phys as usize, (data.phys + data.len) as usize);
             if data.next_len != 0 {
                 cpu.bus.mark_code(data.next as usize, (data.next + data.next_len) as usize);
@@ -1159,13 +1163,13 @@ mod engine {
                         cpu.set_eip(data.eips[ix]);
                         // One that runs on into the next page, which the TLB
                         // now maps elsewhere, is translated again for it.
-                        let next = (cs_base.wrapping_add(data.eips[ix]) | 0xFFF).wrapping_add(1) >> 12;
-                        if kind == EXIT_NEXT_PAGE
-                            && data.crosses(ix)
-                            && cpu.cr0 & CR0_PG != 0
-                            && cpu.tlb.lookup(next, cpu.cpl == 3).is_some_and(|p| p != data.next)
-                        {
-                            self.retire(exited, stats);
+                        if kind == EXIT_NEXT_PAGE && data.crosses(ix) && cpu.cr0 & CR0_PG != 0 {
+                            let lin = cs_base.wrapping_add(data.eips[ix]);
+                            let next = (lin | 0xFFF).wrapping_add(1) >> 12;
+                            let user = cpu.cpl == 3;
+                            if cpu.tlb.lookup(next, user).is_some_and(|p| p != data.next) {
+                                self.retire(exited, stats);
+                            }
                         }
                         if none_ran { Run::Interpret } else { Run::Ran { page } }
                     }
@@ -1176,24 +1180,24 @@ mod engine {
 
     /// The physical address of the page after the one of the instruction at
     /// `at`, where an instruction in its last 15 bytes may run on into it
-    /// (`BlockData::crosses`), if that page is all in RAM: the next page
-    /// of RAM without paging, as the interpreter's fetch reads on there;
-    /// with paging (and the A20 gate on, as the TLB's addresses don't have
-    /// it), where the TLB or else the page tables map it. Its code checks
-    /// that the TLB does as it runs: the page tables are only looked at.
+    /// (`BlockData::crosses`), if that page is plain RAM (the interpreter's
+    /// fetch reads the video memory and the ROM area through the bus, see
+    /// `Bus::is_plain_ram`): the next page of RAM without paging, as the
+    /// interpreter's fetch reads on there; with paging (and the A20 gate
+    /// on, as the TLB's addresses don't have it), where the TLB or else the
+    /// page tables map it. Its code checks that the TLB does as it runs:
+    /// the page tables are only looked at.
     fn next_page(cpu: &Cpu, at: &At) -> Option<u32> {
         let next = if cpu.cr0 & CR0_PG == 0 {
             (at.phys_ip as u32 | 0xFFF).wrapping_add(1)
         } else if cpu.bus.a20() {
             let lin = (at.lin_ip | 0xFFF).wrapping_add(1);
-            match cpu.tlb.lookup(lin >> 12, cpu.cpl == 3) {
-                Some(phys) => phys,
-                None => cpu.peek_translate(lin)?,
-            }
+            let user = cpu.cpl == 3;
+            cpu.translated(lin, user).or_else(|| cpu.peek_translate(lin))?
         } else {
             return None;
         };
-        (next != 0 && next as usize + 0x1000 <= cpu.bus.ram().len()).then_some(next)
+        (next != 0 && cpu.bus.is_plain_ram(next as usize, 0x1000)).then_some(next)
     }
 
     /// Where the instruction at CS:EIP is, as the execution loop would find
