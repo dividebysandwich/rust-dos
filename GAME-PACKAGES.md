@@ -304,7 +304,14 @@ on rust-dos's DOS rather than a disk to boot. It is C:, the package is D:
 (or the first letter after it that the automount folder leaves free),
 and the commands run there, starting on D: (`WIN D:\GAME.EXE`). What the
 system writes goes to the game's saves folder, as the package's changes
-do.
+do. A DOSBox configuration with DOSBox's S3 (`machine=svga_s3`, or no
+`machine`, its default) gives the system `machine=svga_s3`: a Windows
+set up in DOSBox has the S3's driver.
+
+`machine=` in the `[rust-dos]` section picks the display adapter over
+what the import makes of DOSBox's, `svga_s3virge` for a Windows set up
+with the ViRGE's driver say. An `[emulator]` section's `machine=` does
+the same.
 
 A package without a configuration of its own runs in the system the
 libretro core's **Boot OS** option names, in the same way.

@@ -81,7 +81,7 @@ pub fn import_in(texts: &[&str], bases: &[PathBuf], name: &str, home: Option<&Pa
             verb == "remount"
         })
     };
-    match c_root {
+    let mut imported = match c_root {
         Some(root) if !imported.drives.iter().any(|d| d.drive == crate::disk::DRIVE_C) || remounts() => {
             let mut imported = import_from(texts, bases, name, home, Some(root));
             arrange(&mut imported, Some(root), &scan, os.as_deref());
@@ -96,7 +96,66 @@ pub fn import_in(texts: &[&str], bases: &[PathBuf], name: &str, home: Option<&Pa
             arrange(&mut imported, c_root, &scan, os.as_deref());
             imported
         }
+    };
+    // A Windows of files (3.1, say) set up in DOSBox on its S3 card has
+    // the S3's driver, as one installed on a hard disk has.
+    let machine = imported
+        .settings
+        .iter()
+        .find(|(_, k, _)| *k == "machine")
+        .map(|(_, _, v)| v.as_str());
+    if wants_s3(texts)
+        && matches!(machine, None | Some("svga"))
+        && os
+            .as_deref()
+            .is_some_and(|os| on_system_of_files(&imported, &scan, os))
+    {
+        imported.set("emulator", "machine", "svga_s3");
     }
+    // The machine rust-dos's own section (or its profiles' [emulator])
+    // asks for, over what DOSBox's became.
+    let own_section = |s: &str| s == "rust-dos" || s == "emulator";
+    let own = texts
+        .iter()
+        .flat_map(|t| parse(t).values)
+        .rfind(|(s, k, _)| own_section(s) && k == "machine")
+        .map(|(_, _, v)| v);
+    if let Some(value) = own {
+        match crate::video::adapter::Adapter::parse(&value) {
+            Some(adapter) => imported.set("emulator", "machine", adapter.name()),
+            None => imported
+                .warnings
+                .push(format!("machine={} isn't a machine rust-dos has", value)),
+        }
+    }
+    imported
+}
+
+/// Whether DOSBox's machine in `texts` is its S3, as it is when they
+/// name none.
+fn wants_s3(texts: &[&str]) -> bool {
+    let machine = texts
+        .iter()
+        .flat_map(|t| parse(t).values)
+        .rfind(|(s, k, _)| s == "dosbox" && k == "machine")
+        .map(|(_, _, v)| v);
+    machine
+        .and_then(|v| v.split_whitespace().next().map(str::to_ascii_lowercase))
+        .as_deref()
+        .is_none_or(dosbox_s3)
+}
+
+/// Whether the system `os` is files on C: (`boot_os`) rather than a
+/// disk booted.
+fn on_system_of_files(imported: &Imported, scan: &crate::automount::Scan, os: &str) -> bool {
+    let Some(system) = scan.system(os).or_else(|| crate::os_images::find(os)) else {
+        return false;
+    };
+    scan.holds_files(&system)
+        && imported
+            .drives
+            .iter()
+            .any(|d| d.drive == crate::disk::DRIVE_C && d.path == system)
 }
 
 /// A game package's `automount` folder (`scan`, of the package at `root`)
@@ -163,12 +222,10 @@ fn import_from(texts: &[&str], bases: &[PathBuf], name: &str, home: Option<&Path
     // DOSBox Staging's cycles, which the old `cycles` overrides, and the
     // palette of a monochrome machine.
     let (mut legacy_cycles, mut cpu_cycles, mut cpu_cycles_protected, mut palette) = (false, None, None, None);
-    let mut dosbox_machine: Option<String> = None;
     for conf in &confs {
         for (section, key, value) in &conf.values {
             gus_set |= section == "gus" && key == "gus";
             match (section.as_str(), key.as_str()) {
-                ("dosbox", "machine") => dosbox_machine = value.split_whitespace().next().map(str::to_ascii_lowercase),
                 ("cpu", "cycles") => legacy_cycles |= !value.is_empty(),
                 ("cpu", "cpu_cycles") => cpu_cycles = Some(value.to_ascii_lowercase()),
                 ("cpu", "cpu_cycles_protected") => cpu_cycles_protected = Some(value.to_ascii_lowercase()),
@@ -235,7 +292,7 @@ fn import_from(texts: &[&str], bases: &[PathBuf], name: &str, home: Option<&Path
     // falls back to safe mode without the card. A configuration that boots
     // a hard disk keeps the S3, which DOS games get as svga. A machine
     // its commands set (CONFIG -SET) stays.
-    let s3 = dosbox_machine.as_deref().is_none_or(dosbox_s3);
+    let s3 = wants_s3(texts);
     let machine = imported.settings.iter().find(|(_, k, _)| *k == "machine").map(|(_, _, v)| v.as_str());
     if s3 && matches!(machine, None | Some("svga")) && imported.autoexec.iter().any(|line| boots_hard_disk(line)) {
         imported.set("emulator", "machine", "svga_s3");
@@ -1163,6 +1220,36 @@ sbtype=sb16vibra
         assert_eq!(drive(crate::disk::numbered_drive(2)), None);
         assert_eq!(imported.autoexec, ["D:", "C:\\WINDOWS.BAT D:\\GAME.EXE"]);
         assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);
+        // Set up in DOSBox on its S3, as it is without a machine, it keeps
+        // the S3's driver; another card stays, and rust-dos's own section
+        // has the last word.
+        assert_eq!(get(&imported, "machine").as_deref(), Some("svga_s3"));
+        let machine = |conf: &str| {
+            get(
+                &import_in(&[conf], std::slice::from_ref(&dir), "x", None, Some(&game)),
+                "machine",
+            )
+        };
+        let s3 =
+            "[dosbox]\nmachine=svga_s3\n[rust-dos]\nos=win311test\n[autoexec]\nC:\\WINDOWS.BAT\n";
+        assert_eq!(machine(s3).as_deref(), Some("svga_s3"));
+        assert_eq!(
+            machine(&s3.replace("svga_s3", "svga_et4000")).as_deref(),
+            Some("svga_et4000")
+        );
+        assert_eq!(
+            machine(&s3.replace("os=win311test", "os=win311test\nmachine=svga_s3virge")).as_deref(),
+            Some("svga_s3virge")
+        );
+        assert_eq!(
+            machine(&format!("{}[emulator]\nmachine=svga_s3virgevx\n", s3)).as_deref(),
+            Some("svga_s3virgevx")
+        );
+        assert_eq!(
+            machine("[dosbox]\nmachine=svga_s3\n[autoexec]\ngame.exe\n").as_deref(),
+            Some("svga"),
+            "DOS games get svga"
+        );
         // A configuration of its own C: keeps it.
         let conf = "[rust-dos]\nos=win311test\n[autoexec]\nmount c sub\n";
         let imported = import_in(&[conf], std::slice::from_ref(&dir), "x", None, Some(&game));

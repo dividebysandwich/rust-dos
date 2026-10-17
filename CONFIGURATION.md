@@ -236,9 +236,10 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   text and 720x348 graphics, 50 Hz). A change takes effect at the DOS
   prompt. A DOSBox configuration's `svga_s3`, DOSBox's default, imports
   as `svga`, which is what DOS games get from it there; one that boots a
-  hard disk keeps `svga_s3`, as the Windows on the disk was installed
-  with the S3's driver (unless the package's `os` boots another system
-  in its place).
+  hard disk, or runs in a Windows of files (a package's `os=win311`),
+  keeps `svga_s3`, as that Windows was installed with the S3's driver
+  (unless the package's `os` boots another system in its place).
+  `machine=` in its `[rust-dos]` section goes over the import's.
 * With `svga_et4000` programs find a Tseng ET4000AX on the ISA bus, as
   DOS games and Windows 3.x drivers made for it detect it: its KEY
   (3BFh/3D8h), Segment Select (3CDh) with separate read and write banks,
