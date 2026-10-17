@@ -2137,7 +2137,8 @@ against 3dfx's Voodoo3 specification.
 ## Rendition Vérité
 
 `machine=svga_verite` makes the display adapter a Rendition Vérité V1000
-with 4 MB, for the DOS games that came in Vérité versions:
+with 4 MB, for the DOS games that came in Vérité versions, and for the
+games Creative wrote for its 3D Blaster PCI, which is a Vérité:
 
 ```ini
 [emulator]
@@ -2147,18 +2148,34 @@ memsize=32
 ```
 
 The Vérité is a VGA with a RISC processor that runs microcode the game
-loads into its memory: Rendition's DOS library (RRedline, "Speedy3D")
-finds the card through the BIOS (INT 10h AX=158Dh describes the board)
-and the PCI bus, loads the microcode, starts the processor, and sends it
-drawing commands through the FIFO at the card's ports or by DMA from lists
-in the PC's memory. Rust-DOS doesn't run the microcode: it carries out the
-commands as Rendition's Speedy3D microcode does (fans and strips of
-textured, lit, blended triangles; fills, copies and lines; showing a
-buffer), into the card's memory, which is the VESA linear frame buffer,
-and shows the buffer the game flips to. Its VESA modes are the Super VGA's.
+loads into its memory. The microcode takes drawing commands through the
+FIFO at the card's ports, or by DMA from lists in the PC's memory, and
+draws them with the card's pixel engine. Rust-DOS runs the RISC
+instruction by instruction, with its pixel engine, as Rendition's V2200
+Technical Specification describes the V1000's instruction set, so any
+microcode a program brings runs: Rendition's Speedy3D, the Windows
+drivers' 2D microcode, and the microcode of Creative's CGL modules.
 
-* **Tomb Raider**'s Vérité patch (`3DPATCH\RENDVRT` on the Tomb Raider Gold
-  CD: `Tomb.exe` and `spd3d.uc`, copied into the game's folder, the
+| Setting | Values | What it does |
+|---|---|---|
+| `verite_risc` | `lle` (default), `hle` | `lle` runs the RISC; `hle` carries out Speedy3D's and the Windows 2D microcode's commands without it |
+| `verite_mhz` | 1-1000 (25) | Million instructions a second the RISC runs: 25 as on the V1000 |
+| `verite_rom` | a file | A dump of a Vérité board's 128 KB ROM for the RISC; without one, Rust-DOS's own microcode loader |
+| `verite_irq` | 5, 7, 9, 10 (default), 11, 12, 15 | The card's interrupt line |
+
+They take effect at the DOS prompt. `hle` is the older way: faster, but
+only for Tomb Raider's and vQuake's kind of Speedy3D microcode and the
+Windows desktop. With `lle` the RISC is as fast as the card's, so games
+run at the frame rates they had on it.
+
+Games built on Rendition's DOS library (RRedline, "Speedy3D") find the
+card through the BIOS (INT 10h AX=158Dh describes the board), load
+`spd3d.uc`, and start the processor through the BIOS. Rust-DOS's BIOS
+has these functions; its VESA modes are the card's own, shown by its
+CRTC, with the memory's byte order set for the PC to see it linear.
+
+* **Tomb Raider**'s Vérité patch (`3DPATCH\RENDVRT` on the Tomb Raider
+  Gold CD: `Tomb.exe` and `spd3d.uc`, copied into the game's folder, the
   executable renamed so the 2D one stays) runs with `cpu=pentium` and
   `memsize=32`.
 
@@ -2170,45 +2187,55 @@ and shows the buffer the game flips to. Its VESA modes are the Super VGA's.
   walking the processor's page tables, which the built-in host doesn't
   use.
 
-The commands are RRedline's (its Programming Guide documents them for
-programmers); their encoding in the FIFO comes from Rendition's library
-itself, which Tomb Raider's Vérité executable links whole, from DOSBox's
-Rendition fork (dosbox-staging-rendition), and from what the games send.
-RReady, the wrapper that fork passes them to, isn't used. The state
-commands each set a field of one of the chip's pixel engine registers,
-whose layout comes from LeonG-ZA's DOSBox-X emulation of the V1000.
-Rust-DOS draws Z-buffered, bilinear-filtered textures in all of
-RRedline's formats (332, 8-bit intensity and alpha, 565, 4444, 1555,
-8888 and 4-bit paletted), with their alpha blended, scissored, dithered
-where the game asks, and chroma-keyed texels transparent black for the
-alpha test to drop, as Tomb Raider and vQuake set it up. It also draws
-vQuake's own commands: Quake's spans with perspective, its 8-bit
-pictures through a colour table, and particles. Fog follows the
-Programming Guide; no game on hand uses it.
+### 3D Blaster PCI games (CGL)
+
+Games for Creative's 3D Blaster PCI draw through Creative's Graphics
+Library (CGL): a module beside the game, `VRITB170.CGL`, `VRITC170.CGL`,
+`VRITE170.CGL` or `VRITI170.CGL`, runs on the PC and drives the card. It
+starts the card on a microcode loader it copies from the board's ROM,
+and sends that loader its own microcode. A dump of a real board's ROM
+(`verite_rom`) can provide the loader; without one, the ROM Rust-DOS
+gives the card has a loader of its own, which takes the microcode as the
+board's would. Copy all four modules into the game's folder: each game
+loads the one it was built for.
+
+These ran on the module's own microcode, from the 3D Blaster PCI's bonus
+CD and patches:
+
+* **Battle Arena Toshinden** Special Edition (`TSD` on the bonus CD;
+  install with its `SETUP`, choose 3D Blaster under Misc Options): menus
+  and fights.
+* **Rebel Moon** (`REBMOON` on the bonus CD; `REB3D` or `REBMOON
+  -3DBLASTER`): menus, mission briefings and the game.
+* **Flight Unlimited** (installed from `INST\INITIAL.EXE` on the bonus
+  CD): the lobby in 3D and the menus.
+* **Hi-Octane** 1.2 with its CGL executable: menus and races. Its menus
+  read the keyboard once a frame: hold the keys a little.
+
+Other games for the card (Actua Soccer, Screamer 2 and Rally, Euro 96,
+Battle Race) haven't been tried.
 
 ### Windows 95 on the Vérité
 
-Windows 95 runs on the Vérité with Rendition's V1000 reference driver
-(2.1 beta 2, `v1k_b2_1.zip`), installed with **Have Disk** under Display
-Properties, Settings, Advanced Properties, Change. The driver tests the
-card's processor and starts its 2D microcode (`v10002d.uc`) through the
-card's debug registers, sets the modes through the card's own CRTC, uses
-the Bt485 RAMDAC's palette and hardware cursor, and draws through the
-microcode: fills, copies on and between surfaces, one-bit images, text,
-brushes and clipping, which Rust-DOS carries out as the microcode does.
-The desktop, windows, MS-DOS Prompts (windowed and full screen) and Paint
+Windows 95 ran on the Vérité with `verite_risc=hle` and Rendition's
+V1000 reference driver (2.1 beta 2, `v1k_b2_1.zip`), installed with
+**Have Disk** under Display Properties, Settings, Advanced Properties,
+Change. The driver tests the card's processor and starts its 2D
+microcode (`v10002d.uc`) through the card's debug registers, sets the
+modes through the card's own CRTC, uses the Bt485 RAMDAC's palette and
+hardware cursor, and draws through the microcode: fills, copies on and
+between surfaces, one-bit images, text, brushes and clipping. The
+desktop, windows, MS-DOS Prompts (windowed and full screen) and Paint
 were tried at 800x600 in High Color and at 640x480 in 256 colours and in
-True Color.
+True Color. With `verite_risc=lle` the 2D microcode itself runs; Windows
+hasn't been tried that way yet, nor Direct3D and OpenGL, which load
+Rendition's 3D microcode the same way.
 
 The driver refuses True Color at 1024x768 at the refresh rate it picks
 (85 Hz), as it would on the card: a Windows that ran in that mode on
 another card shows a black screen after the driver is installed. Set
-another mode before restarting, or in Safe Mode. Direct3D and OpenGL
-under Windows, which load Rendition's 3D microcode the same way, aren't
-supported, nor some of the 2D microcode's rarer commands (lines, stretched
-copies, colour brushes); `RUST_DOS_VERITE_TRACE` lists the ones a program
-sends. Windows 95's own Rendition driver, from the OSR2 CD, hasn't been
-tried.
+another mode before restarting, or in Safe Mode. Windows 95's own
+Rendition driver, from the OSR2 CD, hasn't been tried.
 
 ## ATI 3D RAGE
 

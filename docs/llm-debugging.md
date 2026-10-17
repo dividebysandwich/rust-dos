@@ -997,14 +997,28 @@ renders one into `render-N.png`, and prints the time it took.
 ### Rendition Vérité games
 
 With `machine=svga_verite`, `/api/status` → `video.verite` shows the
-card: `running` (the microcode started through INT 10h AX=1583h),
+card. With its RISC emulated (`verite_risc=lle`), `chip` has its program
+counter `pc`, `debug` (2 is held), `halted`, `stalled` (waiting for the
+input FIFO, or for room in the output FIFO), `instructions` run, the
+FIFOs' words (`input`, `output`), `intr` (pending/enabled interrupts),
+the DMA (`dma`, `dma_list`: the command, the block's address and bytes
+left, and its byte swap), `mode`, `loader` (the ROM's microcode loader
+takes the FIFO) and `drawctl`. A RISC that sits at a low address with
+`stalled` waits for words the game didn't send. With `verite_risc=hle`
+there are `running` (the microcode started through INT 10h AX=1583h),
 `fifo` (words waiting for a whole command) and `output` (answers the game
 hasn't read), `commands` (each opcode/vertex type seen and how often) and
-the drawing state (`draw`: destination, texture, source and blend modes).
-A game that gives up at start says "Could not open Verite" with its
-library's error code. `RUST_DOS_VERITE_TRACE=<dir>` writes every access
-to the card's ports, BIOS call, DMA block and FIFO word to
-`<dir>/trace.txt`.
+the drawing state (`draw`). A game that gives up at start says "Could not
+open Verite" with its library's error code.
+
+`RUST_DOS_VERITE_TRACE=<dir>` writes every access to the card's ports,
+BIOS call, DMA block and FIFO word to `<dir>/trace.txt`. With the RISC
+emulated, `RUST_DOS_VERITE_RISC_TRACE=n` (or `skip:n`) logs the `n`
+instructions it runs (after the first `skip`), with the pixel engine's
+state at each draw, and `RUST_DOS_VERITE_CTL_LOG=n` the first `n` loads
+and stores of the board's and the pixel engine's registers. The log
+says when the ROM's loader starts and where the microcode it loads goes,
+the first input FIFO overflow, and instructions the V1000 doesn't have.
 
 ### ATI 3D RAGE
 

@@ -40,8 +40,9 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   [ATI 3D RAGE or 3D RAGE II](CONFIGURATION.md#ati-3d-rage) whose 2D and
   3D engines run ATI's Windows drivers, Direct3D and ATI3DCIF games, and a
   [PowerVR PCX1 or PCX2](CONFIGURATION.md#powervr-pcx1-and-pcx2) and a
-  [Rendition Vérité](CONFIGURATION.md#rendition-vérité) for DOS games'
-  PowerVR and Vérité versions
+  [Rendition Vérité](CONFIGURATION.md#rendition-vérité), its RISC
+  emulated, for DOS games' PowerVR and Vérité versions and the 3D Blaster
+  PCI's games
 * **Sound:** Sound Blaster 16, Pro 2 and 2.0 with OPL3 FM music, Gravis
   Ultrasound with a built-in patch set, General MIDI through a SoundFont,
   the Ultrasound patches, a Roland MT-32 (via munt), a Roland Sound Canvas

@@ -11,6 +11,11 @@
 //! The registers are those of the XFree86 driver for the card
 //! (xf86-video-rendition's `commonregs.h`, `v1kregs.h`), at the I/O ports
 //! BAR1 puts at E400h.
+//!
+//! By default (`verite_risc=lle`) the chip's RISC and pixel engine run
+//! the microcode itself (`lle`); this module then keeps the board's side:
+//! the CRTC, the RAMDAC and the PCI configuration. With `verite_risc=hle`
+//! the commands are carried out here without the RISC (`execute`).
 
 pub mod cmd;
 pub mod draw;
