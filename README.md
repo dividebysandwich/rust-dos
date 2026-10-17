@@ -36,7 +36,9 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   Rust-DOS or again by OpenGL at up to four times its resolution, a
   [3dfx Voodoo3 or Banshee](CONFIGURATION.md#3dfx-voodoo3-and-banshee) as
   the display adapter itself, which runs Windows' desktop, Direct3D and
-  OpenGL with 3dfx's driver, and a
+  OpenGL with 3dfx's driver, an
+  [ATI 3D RAGE or 3D RAGE II](CONFIGURATION.md#ati-3d-rage) whose 2D and
+  3D engines run ATI's Windows drivers, Direct3D and ATI3DCIF games, and a
   [PowerVR PCX2](CONFIGURATION.md#powervr-pcx2) (Matrox m3D) and a
   [Rendition Vérité](CONFIGURATION.md#rendition-vérité) for DOS games'
   PowerVR and Vérité versions

@@ -2218,18 +2218,46 @@ RAGE II (mach64 GT-B):
 ```ini
 [emulator]
 machine=svga_ati_3drage
+cpu=pentium_ii
+memsize=128
 ```
 
-The card is a VGA with ATI's accelerator CRTC, hardware cursor, 2D draw
-engine and 3D engine. Its 16 MB aperture (BAR0) holds the VESA linear
-frame buffer, and the registers in its top 2 KB; the registers below 40h
-are also ports (256 of them at BAR1, or the "sparse" ones from 2ECh
-with PCI configuration register 40h). Its BIOS has ATI's signature and
-tables in the ROM and ATI's extended services (INT 10h AH=A0h, and the
-far entry at C000:0064h that ATI's Windows driver calls), whose mode
-tables list 640x480 to 1280x1024 and the low resolutions 320x200,
-320x240, 400x300 and 512x384. VESA modes are set through the
-accelerator CRTC, as ATI's BIOS sets them.
+The card is a VGA with ATI's accelerator CRTC, hardware cursor, video
+overlay, 2D draw engine and 3D engine. Its 16 MB aperture (BAR0) holds
+the VESA linear frame buffer, and the registers in its top 2 KB; the
+registers below 40h are also ports (256 of them at BAR1, or the
+"sparse" ones from 2ECh with PCI configuration register 40h). Its BIOS
+has ATI's signature and tables in the ROM and ATI's extended services
+(INT 10h AH=A0h, and the far entry at C000:0064h that ATI's Windows
+driver calls), whose mode tables list 640x480 to 1280x1024 and the low
+resolutions 320x200, 320x240, 400x300 and 512x384. VESA modes are set
+through the accelerator CRTC, as ATI's BIOS sets them.
+
+The 2D engine draws fills, copies, one-bit images from the host or the
+memory, patterns, lines, polygons and 24-bit pixels as ATI's drivers
+use them. The 3D engine draws the trapezoids ATI's Direct3D HAL and
+ATI3DCIF send: Gouraud shading, textures in all of the chip's formats
+with mipmaps, bilinear filtering and perspective, the Z buffer, alpha
+blending, fog and the texel colour key; the scaler stretches images
+into rectangles. Everything is drawn at once, so the engine never
+keeps the program waiting.
+
+Windows 98 SE finds the card and installs its own driver for it (ATI
+Rage/Rage II PCI, `ati_m64`, from the Windows CD): the desktop at up to
+1024x768 in High Color, MS-DOS Prompts in a window and full screen, and
+DxDiag's DirectDraw and Direct3D 7 tests pass on both chips. ATI's own
+driver 4.35 (the mach64 driver CD's `WIN95` folder, with ATI3DCIF) runs
+too, but its `MACXW4.INF` leaves the 3D RAGE (device 4754h) out of its
+models list: add the line
+
+```ini
+%PCI\VEN_1002&DEV_4754_ENU.DeviceDesc%=MACXW4_PCI_English, PCI\VEN_1002&DEV_4754
+```
+
+under `[Mfg]` in a copy of the folder, and install it with **Have Disk**.
+**Wipeout for 3D Rage** (the game ATI bundled with the card) runs with
+it through ATI3DCIF. Windows sees the 3D RAGE II as new hardware after
+a switch from the 3D RAGE, as it would after changing the card.
 
 `RUST_DOS_MACH64_TRACE=<dir>` writes every register access and BIOS
 call to `<dir>/trace.txt`.
