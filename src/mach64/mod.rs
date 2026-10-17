@@ -18,6 +18,7 @@
 
 pub mod bios;
 pub mod engine;
+pub mod overlay;
 pub mod regs;
 pub mod tri;
 

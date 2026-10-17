@@ -449,6 +449,12 @@ fn render_vbe(canvas: &mut [u8], canvas_w: usize, y_min: usize, y_max: usize, bu
         .flatten()
         .filter(|o| o.y < mode.height as u32);
     let overlay_rows = overlay.map(|o| o.rows()).unwrap_or_default();
+    // A mach64's video overlay, keyed against the graphics' raw pixels.
+    let ati_overlay = bus
+        .mach64
+        .native
+        .then(|| crate::mach64::overlay::Overlay::of(&bus.mach64))
+        .flatten();
     let mut line = Vec::new();
     for fy in y_min..y_max.min(mode.height as usize * scale) {
         let dst = fy * row_bytes;
@@ -470,9 +476,27 @@ fn render_vbe(canvas: &mut [u8], canvas_w: usize, y_min: usize, y_max: usize, bu
             let six_bit = mode.bpp == 8 && !bus.vga.dac_8bit;
             o.draw_row(overlay_rows[(my - o.y) as usize], vram, &mut line, mode.width as u32, six_bit);
         }
+        let ati_over = ati_overlay.filter(|o| over.is_none() && o.covers(my));
+        if let Some(o) = ati_over {
+            line.clear();
+            line.extend((0..mode.width as usize).flat_map(|x| {
+                let (r, g, b) = pixel(row + x * bytes);
+                [r, g, b]
+            }));
+            let raw = |x: u32| {
+                let at = row + x as usize * bytes;
+                (0..bytes).map(|i| (vram[(at + i) & wrap] as u32) << (8 * i)).sum()
+            };
+            o.draw_row(vram, my, &mut line, mode.width as u32, raw);
+        }
+        let overlaid = over.is_some() || ati_over.is_some();
         let src_len = mode.width as usize * bytes;
         let out_len = mode.width as usize * scale * 3;
-        if over.is_none() && row + src_len <= wrap + 1 && wrap < vram.len() && dst + out_len <= canvas.len() {
+        if !overlaid
+            && row + src_len <= wrap + 1
+            && wrap < vram.len()
+            && dst + out_len <= canvas.len()
+        {
             // A row that doesn't wrap around the memory, its pixels
             // converted a depth at a time.
             let (src, out) = (&vram[row..row + src_len], &mut canvas[dst..dst + out_len]);
@@ -494,7 +518,7 @@ fn render_vbe(canvas: &mut [u8], canvas_w: usize, y_min: usize, y_max: usize, bu
             }
         } else {
             for x in 0..mode.width as usize {
-                let rgb = if over.is_some() {
+                let rgb = if overlaid {
                     (line[x * 3], line[x * 3 + 1], line[x * 3 + 2])
                 } else {
                     pixel(row + x * bytes)

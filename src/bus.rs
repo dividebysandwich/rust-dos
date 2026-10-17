@@ -2704,6 +2704,10 @@ impl Bus {
                     self.vga.mark_dirty_full();
                 }
             }
+            // A mach64's overlay shows memory that isn't the screen's.
+            if self.mach64.native && crate::mach64::overlay::Overlay::of(&self.mach64).is_some() {
+                self.vga.mark_dirty_full();
+            }
             let screen = crate::autospeed::screen_bytes(self);
             self.activity.set_screen(screen);
             self.settle_register_mode();
