@@ -219,13 +219,15 @@ its GLIDE2X.OVL in Rust-DOS's configuration directory. It is then on
 **Z:**, where games find it on the PATH. A GLIDE2X.OVL in the game's own
 folder comes first. A game that looks for it while it is missing says so.
 
-# PowerVR PCX2 {#powervr}
+# PowerVR card {#powervr}
 
-Adds a PowerVR PCX2 3D card, the chip of the Matrox m3D and VideoLogic
-Apocalypse 3Dx, for games with a PowerVR version, such as Tomb Raider's
-PowerVR patch (`3DPATCH\PWRVR\TOMBPCX2.EXE` on the Tomb Raider Gold
-CD). The card has no picture of its own: it draws into the VGA card's
-memory, so it works with any *Display adapter* with a VESA BIOS.
+Adds a PowerVR 3D card for games with a PowerVR version: the **PCX1** of
+the VideoLogic Apocalypse 3D, or the **PCX2** of the Matrox m3D and
+VideoLogic Apocalypse 3Dx. Tomb Raider's PowerVR patch on the Tomb Raider
+Gold CD has a program for each (`3DPATCH\PWRVR\TOMBPCX1.EXE` and
+`TOMBPCX2.EXE`). The card has no picture of its own: it draws into the
+VGA card's memory, so it works with any *Display adapter* with a VESA
+BIOS.
 
 Set *Processor* to **Pentium** and *Memory* to **32 MB**: Tomb Raider's
 PowerVR version wants 20 MB free. Takes effect at the DOS prompt.
@@ -235,7 +237,7 @@ PowerVR version wants 20 MB free. Takes effect at the DOS prompt.
 How the PowerVR card smooths textures:
 
 - **As the game sets it**: the card's own bilinear filtering, which most
-  games turn on.
+  games turn on. The PCX1 has none; it blends between mip map levels.
 - **Point**: blocky texels, as with filtering off.
 - **Bilinear**: smoothed, even where the game turns filtering off.
 

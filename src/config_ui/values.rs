@@ -252,7 +252,10 @@ impl Item {
             VoodooAnisotropy => each(s, [1, 2, 4, 8, 16], |s, n| s.voodoo.anisotropy = n),
             VoodooFpsCap => each(s, FPS_CAPS, |s, fps| s.voodoo.fps_cap = fps),
             VoodooGamma => each(s, gammas(), |s, gamma| s.voodoo.gamma = gamma),
-            PowerVr => on_off(|s, on| s.powervr = on.then_some(crate::powervr::Chip::Pcx2)),
+            PowerVr => {
+                use crate::powervr::Chip;
+                each(s, [None, Some(Chip::Pcx1), Some(Chip::Pcx2)], |s, chip| s.powervr = chip)
+            }
             PowerVrFilter => {
                 use crate::powervr::tsp::Filter;
                 each(s, [Filter::Auto, Filter::Point, Filter::Bilinear], |s, filter| s.powervr_filter = filter)

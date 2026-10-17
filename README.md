@@ -39,7 +39,7 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   OpenGL with 3dfx's driver, an
   [ATI 3D RAGE or 3D RAGE II](CONFIGURATION.md#ati-3d-rage) whose 2D and
   3D engines run ATI's Windows drivers, Direct3D and ATI3DCIF games, and a
-  [PowerVR PCX2](CONFIGURATION.md#powervr-pcx2) (Matrox m3D) and a
+  [PowerVR PCX1 or PCX2](CONFIGURATION.md#powervr-pcx1-and-pcx2) and a
   [Rendition Vérité](CONFIGURATION.md#rendition-vérité) for DOS games'
   PowerVR and Vérité versions
 * **Sound:** Sound Blaster 16, Pro 2 and 2.0 with OPL3 FM music, Gravis

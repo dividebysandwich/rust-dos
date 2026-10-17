@@ -323,10 +323,11 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   gives the card's picture (see [3dfx gamma](#3dfx-gamma));
   without OpenGL 3 (in the browser, or with SDL's dummy video driver) the
   software rasterizer's picture shows. Both change at once.
-* `powervr=pcx2` adds a PowerVR PCX2 3D card (Matrox m3D, VideoLogic
-  Apocalypse 3Dx) beside the display adapter, for games with a PowerVR
-  version (see [PowerVR PCX2](#powervr-pcx2)); `off` is the default. It
-  takes effect at the DOS prompt. `powervr_filter` is how it filters
+* `powervr=pcx1` or `pcx2` adds a PowerVR 3D card beside the display
+  adapter, for games with a PowerVR version: the PCX1 (VideoLogic
+  Apocalypse 3D) or the PCX2 (Matrox m3D, VideoLogic Apocalypse 3Dx; see
+  [PowerVR PCX1 and PCX2](#powervr-pcx1-and-pcx2)). `off` is the default.
+  It takes effect at the DOS prompt. `powervr_filter` is how it filters
   textures: `auto` (the default, as the game sets the card), `point` or
   `bilinear`; it changes at once.
 * `capture_dir` is the folder screenshots and recordings go in:
@@ -2262,11 +2263,13 @@ a switch from the 3D RAGE, as it would after changing the card.
 `RUST_DOS_MACH64_TRACE=<dir>` writes every register access and BIOS
 call to `<dir>/trace.txt`.
 
-## PowerVR PCX2
+## PowerVR PCX1 and PCX2
 
 `powervr=pcx2` in `[emulator]` puts a PowerVR PCX2 in the machine, NEC's
 3D chip on the Matrox m3D and VideoLogic Apocalypse 3Dx boards, for the
-DOS games that came in PowerVR versions:
+DOS games that came in PowerVR versions. `powervr=pcx1` puts in the chip
+before it instead, the PCX1 of the VideoLogic Apocalypse 3D and NEC's
+PC3D Engine:
 
 ```ini
 [emulator]
@@ -2285,11 +2288,12 @@ VGA card's VESA linear frame buffer. So the picture comes through the
 display adapter: any `machine` with a VESA BIOS will do, screenshots and
 recordings show it, and nothing else in the window changes.
 
-The card is on the PCI bus as device 2 (vendor 1033h, device 0046h), its
-registers at D4000000h (BAR0) and its texture memory at D4400000h (BAR1),
-INTA# on IRQ 11, which it shares with a Banshee or Voodoo3 as PCI cards
-do: the line stays up while either card holds it. A render takes the
-time the chip's 66 MHz ISP and TSP would take, then sets its
+The card is on the PCI bus as device 2 (vendor 1033h, device 0046h for
+the PCX2, 002Ah for the PCX1), its registers at D4000000h (BAR0) and its
+texture memory at D4400000h (BAR1), INTA# on IRQ 11, which it shares with
+a Banshee or Voodoo3 as PCI cards do: the line stays up while either card
+holds it. A render takes the time the chip's ISP and TSP would take (at
+66 MHz on the PCX2, 60 on the PCX1), then sets its
 end-of-render status (and interrupts, for games that unmask it); the
 tiles are drawn on as many threads as the host has, and the picture is
 the same however many there are. Save states and rewind keep the card
@@ -2313,6 +2317,16 @@ with its texture memory.
   instead, so it lives peacefully beside the others in one folder, and
   the same for Tomb Raider: Unfinished Business's PowerVR version, which
   saves as `SVUBPX.x` instead of `SAVEUB.x`.
+* The same patch's `TOMBPCX1.EXE` is the version for the PCX1, and runs
+  the same way with `powervr=pcx1`. Each version tells you if the card is
+  the other one.
+
+The PCX1 does without some of what the PCX2 added. It has no bilinear
+filtering: where a texture's two mip map levels meet, it blends a texel
+of each instead, so textures look blockier than on a PCX2
+(`powervr_filter=bilinear` smooths them anyway). Games also hand it their
+scenes in fixed point rather than in floating point; the picture is the
+same.
 
 How the card draws follows Imagination's own driver sources and simulator
 of the chip, which they released under the MIT licence

@@ -364,7 +364,7 @@ impl Item {
             VoodooFpsCap => "3dfx frame rate cap",
             VoodooGamma => "3dfx gamma",
             VoodooOverlay => "  Download Glide's DOS overlay...",
-            PowerVr => "PowerVR PCX2",
+            PowerVr => "PowerVR card",
             PowerVrFilter => "PowerVR filtering",
             Ems => "Expanded memory (EMS)",
             Umb => "Upper memory (UMB)",
@@ -795,7 +795,12 @@ impl Item {
                 None => "Off".to_string(),
                 Some(g) => format!("{}", g),
             },
-            PowerVr => on_off(s.powervr.is_some()),
+            PowerVr => match s.powervr {
+                None => "Off",
+                Some(crate::powervr::Chip::Pcx1) => "PCX1 (Apocalypse 3D)",
+                Some(crate::powervr::Chip::Pcx2) => "PCX2 (m3D, Apocalypse 3Dx)",
+            }
+            .to_string(),
             PowerVrFilter => match s.powervr_filter {
                 crate::powervr::tsp::Filter::Auto => "As the game sets it",
                 crate::powervr::tsp::Filter::Point => "Point (blocky)",

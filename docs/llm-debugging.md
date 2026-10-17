@@ -977,14 +977,14 @@ usually left `fbiInit` at their power-on values (`00000410 00201102
 
 ### PowerVR games
 
-With `powervr=pcx2` (CONFIGURATION.md's "PowerVR PCX2"), `/api/status` →
-`video.powervr` shows the card: `bar0` (registers) and `bar1` (texture
-memory), `irq`, `renders` started, and the registers a frame sets
-(`OBJECT_OFFSET`, `SOFADDR` where the pixels go, `PACKMODE`, `LSTRIDE`,
-`INTSTATUS` with bit 1 for a render done). Its picture is in the VGA's
-frame buffer, so `/api/screenshot` shows it. A game that renders nothing
-has `renders` 0; one whose picture stays black likely set `SOFADDR`
-outside the VESA linear frame buffer.
+With `powervr=pcx1` or `pcx2` (CONFIGURATION.md's "PowerVR PCX1 and
+PCX2"), `/api/status` → `video.powervr` shows the card: `chip`, `bar0`
+(registers) and `bar1` (texture memory), `irq`, `renders` started, and
+the registers a frame sets (`OBJECT_OFFSET`, `SOFADDR` where the pixels
+go, `PACKMODE`, `LSTRIDE`, `INTSTATUS` with bit 1 for a render done).
+Its picture is in the VGA's frame buffer, so `/api/screenshot` shows it.
+A game that renders nothing has `renders` 0; one whose picture stays
+black likely set `SOFADDR` outside the VESA linear frame buffer.
 
 `RUST_DOS_POWERVR_TRACE=<dir>` in the environment writes every access to
 the card into `<dir>/trace.txt`, and the registers, texture memory and

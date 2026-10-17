@@ -8,7 +8,7 @@
 //!   its memory (the VESA linear frame buffer), BAR1 its ports;
 //! * device 1 instead: the ATI mach64 GT of `svga_ati_3drage` and
 //!   `svga_ati_3drage2`, BAR0 its 16 MB aperture, BAR1 its ports;
-//! * device 2: the PowerVR PCX2 (`powervr`), when there is one;
+//! * device 2: the PowerVR PCX1 or PCX2 (`powervr`), when there is one;
 //! * device 1: the S3 Trio64 of `machine=svga_s3` (PCI\VEN_5333&DEV_8811),
 //!   or the ViRGE (DEV_5631) or ViRGE/VX (DEV_883D) of `svga_s3virge` and
 //!   `svga_s3virgevx`, whose BAR0 is the chip's linear frame buffer

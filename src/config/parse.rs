@@ -136,7 +136,9 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         },
                         "powervr" => match crate::powervr::Chip::parse(value) {
                             Some(chip) => config.powervr = Some(chip),
-                            None => warn(format!("invalid powervr '{}' (off or pcx2)", value)),
+                            None => {
+                                warn(format!("invalid powervr '{}' (off, pcx1 or pcx2)", value))
+                            }
                         },
                         "powervr_filter" => match crate::powervr::tsp::Filter::parse(value) {
                             Some(filter) => config.powervr_filter = Some(filter),
