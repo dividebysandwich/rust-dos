@@ -506,6 +506,16 @@ pub fn abandon_input(cpu: &mut Cpu) -> bool {
         return false;
     }
     crate::cmdline::finish(cpu);
+    erase_prompt(cpu);
+    cpu.set_sp(cpu.sp().wrapping_add(6));
+    cpu.set_cs(SHELL_SEGMENT);
+    cpu.set_ip(labels().after_trap);
+    true
+}
+
+/// Take the prompt and the line after it back off the screen, the cursor
+/// where the prompt began.
+fn erase_prompt(cpu: &mut Cpu) {
     if let Some((col, row)) = cpu.shell_prompt_at.take() {
         let (end_col, end_row) = cursor(cpu);
         let cols = (cpu.bus.read_16(0x044A) as usize).max(1);
@@ -519,10 +529,37 @@ pub fn abandon_input(cpu: &mut Cpu) -> bool {
         }
         at(cpu);
     }
-    cpu.set_sp(cpu.sp().wrapping_add(6));
-    cpu.set_cs(SHELL_SEGMENT);
-    cpu.set_ip(labels().after_trap);
-    true
+}
+
+/// A line from rust-dos itself (a game has ended, say) put above the
+/// prompt: before the shell shows it, or over the one it waits at with
+/// nothing typed, which is shown again under it for the drive and
+/// directory as they are now. False, and nothing printed, when the shell
+/// isn't at its prompt or something is typed there.
+pub fn print_above_prompt(cpu: &mut Cpu, text: &str) -> bool {
+    let waiting = cpu.shell_idle() && cpu.shell_wait.is_none() && !cpu.batch.is_active();
+    let line = dosstr::to_bytes(&format!("{}\r\n", text));
+    match cpu.line_editor.as_ref().map(|ed| ed.line.text.is_empty()) {
+        _ if !waiting => false,
+        None => {
+            // A program's last line may not have ended.
+            if cursor(cpu).0 != 0 {
+                teletype(cpu, b"\r\n");
+            }
+            teletype(cpu, &line);
+            true
+        }
+        Some(true) if cpu.shell_prompt_at.is_some() => {
+            crate::cmdline::finish(cpu);
+            erase_prompt(cpu);
+            teletype(cpu, &line);
+            cpu.shell_prompt_at = Some(cursor(cpu));
+            show_prompt(cpu);
+            crate::cmdline::start(cpu);
+            true
+        }
+        Some(_) => false,
+    }
 }
 
 crate::state_fields!(Choice { keys, case_sensitive, timeout });

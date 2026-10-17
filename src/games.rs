@@ -886,6 +886,15 @@ pub fn drives_before(cpu: &Cpu) -> Vec<(u8, Option<MountSpec>)> {
     (0..crate::disk::DRIVE_SLOTS).map(|d| (d, cpu.bus.disk.drive_info(d).and_then(|i| i.mount))).collect()
 }
 
+/// Say at the prompt that the game `name` has ended, its drives and
+/// settings as they were before it (`restore_drives`): otherwise a game
+/// whose program quit at once (a Windows that wouldn't start) looks as if
+/// its drives were never mounted.
+pub fn tell_ended(cpu: &mut Cpu, name: &str) {
+    let text = format!("{} has ended. Drive mounts restored.", name);
+    crate::shell::print_above_prompt(cpu, &text);
+}
+
 /// The drives as they were (`drives_before`) again, where they changed.
 /// Returns what couldn't be put back.
 pub fn restore_drives(cpu: &mut Cpu, before: Vec<(u8, Option<MountSpec>)>) -> Vec<String> {

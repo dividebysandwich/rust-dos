@@ -114,4 +114,20 @@ fn an_imported_dosbox_game_runs_and_its_drives_come_back() {
     assert_eq!(cpu.bus.disk.get_current_drive(), 3, "on D:, as DOSBox had it");
     assert!(games::restore_drives(&mut cpu, game.replaced).is_empty());
     assert!(!cpu.bus.disk.is_mounted(3), "D: is gone again");
+    // The prompt says so, above it.
+    assert!(
+        run_until(&mut cpu, 1000, |cpu| cpu.line_editor.is_some()),
+        "the prompt is back"
+    );
+    games::tell_ended(&mut cpu, &game.name);
+    let lines = rust_dos::video::text::screen_lines(&cpu.bus).unwrap();
+    let said = lines
+        .iter()
+        .position(|l| l.starts_with("thegame has ended"));
+    let prompt = lines.iter().rposition(|l| l.trim_end() == "C:\\>");
+    assert!(
+        said.is_some() && prompt == said.map(|i| i + 1),
+        "{:?}",
+        lines
+    );
 }

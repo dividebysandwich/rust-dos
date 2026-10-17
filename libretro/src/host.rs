@@ -145,6 +145,7 @@ impl Machine {
         for e in games::restore_drives(&mut self.cpu, game.replaced) {
             self.warn(&e);
         }
+        games::tell_ended(&mut self.cpu, &game.name);
     }
 
     /// The core options changed: the settings they make, under the game's.

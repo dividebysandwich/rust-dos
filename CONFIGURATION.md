@@ -1126,14 +1126,17 @@ The settings window's **Games** page lists the profiles. Enter launches a
 game at the DOS prompt: its settings apply on top of the configuration's,
 its drives are mounted, and its commands run. When they have run and the
 program they started has returned to the prompt, the settings and drives
-(those its commands changed too) are back as they were; a game whose
-commands start no program stays, with its drives, until another is
-launched. **Ins** makes a profile from the settings as they are now: only
-those that differ from the configuration file's, and the drives mounted
-since, go in it, with the game's name, its directory and the command that
-starts it. While a game plays, F2 saves the settings window's changes to
-its profile. `--game NAME` launches a game at startup, by its file name
-(`keen4`) or its name, and so does `?game=NAME` in the browser.
+(those its commands changed too) are back as they were, and a line above
+the prompt says the game has ended. A program that quits at once (a
+Windows that won't start, say) ends the game too, which is why its
+drives are gone at the prompt after it. A game whose commands start no
+program stays, with its drives, until another is launched. **Ins** makes
+a profile from the settings as they are now: only those that differ from
+the configuration file's, and the drives mounted since, go in it, with
+the game's name, its directory and the command that starts it. While a
+game plays, F2 saves the settings window's changes to its profile.
+`--game NAME` launches a game at startup, by its file name (`keen4`) or
+its name, and so does `?game=NAME` in the browser.
 
 A profile with `overlay=true` in `[game]` keeps the game's files as they
 were installed. New and imported profiles, and those of archives, have it. What the game

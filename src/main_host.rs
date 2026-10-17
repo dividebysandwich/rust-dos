@@ -456,6 +456,7 @@ impl MainHost<'_, '_> {
         for e in games::restore_drives(self.cpu, game.replaced) {
             config_warning(self.cpu, &e);
         }
+        games::tell_ended(self.cpu, &game.name);
     }
 }
 
