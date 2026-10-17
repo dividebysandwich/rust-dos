@@ -19,6 +19,7 @@
 pub mod bios;
 pub mod engine;
 pub mod regs;
+pub mod tri;
 
 use crate::savestate::{Reader, Result, State, Writer};
 use std::cell::RefCell;
@@ -57,6 +58,15 @@ pub struct Live {
     pub line: u32,
     pub vblank: bool,
     pub retraces: u64,
+}
+
+/// What the card draws into and with: its memory, and the VGA DAC's
+/// palette (3 bytes an entry, 6 or 8 bits), which 8-bit texels go
+/// through.
+pub struct Target<'a> {
+    pub vram: &'a mut [u8],
+    pub dac: &'a [u8],
+    pub dac_8bit: bool,
 }
 
 /// What a register write did beyond the register.
@@ -429,7 +439,7 @@ impl Mach64 {
     }
 
     /// Write the bytes of `value` that `mask` selects into register `reg`,
-    /// and carry out what that starts in `vram`. DAC_REGS and DAC_CNTL
+    /// and carry out what that starts in `target`. DAC_REGS and DAC_CNTL
     /// are the bus's.
     pub fn write(
         &mut self,
@@ -437,7 +447,7 @@ impl Mach64 {
         value: u32,
         mask: u32,
         live: Live,
-        vram: &mut [u8],
+        target: &mut Target,
     ) -> Effect {
         use regs::*;
         self.trace(|| format!("w {:<22} = {:08X} & {:08X}", regs::name(reg), value, mask));
@@ -504,7 +514,7 @@ impl Mach64 {
                     0xFFFF_0000 => (value >> 16, 16),
                     _ => (value, 32),
                 };
-                fx.drawn = self.host_data(data, bits, vram);
+                fx.drawn = self.host_data(data, bits, target);
                 return fx;
             }
             _ if let Some(fields) = fields(reg, self.rage2) => {
@@ -576,9 +586,15 @@ impl Mach64 {
             }
         };
         if let Some(op) = op {
-            fx.drawn = self.run(op, vram);
+            fx.drawn = self.run(op, target);
         }
         fx
+    }
+
+    /// A whole register written as a program writes it, by the engine
+    /// (a context) or the BIOS: what it starts is carried out.
+    pub fn load_reg(&mut self, reg: usize, value: u32, target: &mut Target) -> Effect {
+        self.write(reg, value, u32::MAX, Live::default(), target)
     }
 
     /// Keep the bits of `value` that `mask` and the register's own mask
@@ -589,17 +605,17 @@ impl Mach64 {
     }
 
     /// Carry out an operation the registers started.
-    fn run(&mut self, op: engine::Op, vram: &mut [u8]) -> bool {
+    fn run(&mut self, op: engine::Op, target: &mut Target) -> bool {
         let mut engine = std::mem::take(&mut self.engine);
-        let drawn = engine.start(op, self, vram);
+        let drawn = engine.start(op, self, target);
         self.engine = engine;
         drawn
     }
 
     /// Data written to HOST_DATA: `bits` of it.
-    fn host_data(&mut self, data: u32, bits: u32, vram: &mut [u8]) -> bool {
+    fn host_data(&mut self, data: u32, bits: u32, target: &mut Target) -> bool {
         let mut engine = std::mem::take(&mut self.engine);
-        let drawn = engine.host_data(data, bits, self, vram);
+        let drawn = engine.host_data(data, bits, self, target);
         self.engine = engine;
         drawn
     }
@@ -858,7 +874,15 @@ mod tests {
 
     fn write(card: &mut Mach64, reg: usize, value: u32) -> Effect {
         let mut vram = vec![0; MEMORY as usize];
-        card.write(reg, value, u32::MAX, Live::default(), &mut vram)
+        card.load_reg(
+            reg,
+            value,
+            &mut Target {
+                vram: &mut vram,
+                dac: &[],
+                dac_8bit: false,
+            },
+        )
     }
 
     #[test]

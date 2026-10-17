@@ -3,7 +3,7 @@
 //! taking the screen over from the VGA.
 
 use super::Bus;
-use crate::mach64::{Live, MEMORY, REGISTERS, regs};
+use crate::mach64::{Live, MEMORY, REGISTERS, Target, regs};
 use crate::video::VideoMode;
 use crate::video::vbe::VbeMode;
 
@@ -129,9 +129,12 @@ impl Bus {
             }
             _ => {
                 let live = self.mach64_live();
-                let fx = self
-                    .mach64
-                    .write(reg, value, mask, live, &mut self.vbe.vram);
+                let mut target = Target {
+                    vram: &mut self.vbe.vram,
+                    dac: &self.vga.palette,
+                    dac_8bit: self.vga.dac_8bit,
+                };
+                let fx = self.mach64.write(reg, value, mask, live, &mut target);
                 if fx.display {
                     self.mach64_settle();
                 }
