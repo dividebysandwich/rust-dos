@@ -28,9 +28,10 @@ use std::io::Write;
 pub const REGISTER_WINDOW: u32 = 4 << 10;
 /// The size of BAR1, the texture memory.
 pub const TEXTURE_MEMORY: u32 = 4 << 20;
-/// Where the BIOS puts the windows: above the 3dfx card's.
-pub const INITIAL_REGISTERS: u32 = 0xD100_0000;
-pub const INITIAL_TEXTURES: u32 = 0xD140_0000;
+/// Where the BIOS puts the windows: above any 3dfx card's, the
+/// Banshee's two 32 MB BARs too.
+pub const INITIAL_REGISTERS: u32 = 0xD400_0000;
+pub const INITIAL_TEXTURES: u32 = 0xD440_0000;
 /// The interrupt line the BIOS routed the card's INTA# to.
 pub const IRQ: u8 = 11;
 /// The chip's clock, which its ISP and TSP run at.

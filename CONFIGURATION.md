@@ -2230,7 +2230,7 @@ display adapter: any `machine` with a VESA BIOS will do, screenshots and
 recordings show it, and nothing else in the window changes.
 
 The card is on the PCI bus as device 2 (vendor 1033h, device 0046h), its
-registers at D1000000h (BAR0) and its texture memory at D1400000h (BAR1),
+registers at D4000000h (BAR0) and its texture memory at D4400000h (BAR1),
 INTA# on IRQ 11. A render takes the time the chip's 66 MHz ISP and TSP
 would take, then sets its end-of-render status (and interrupts, for
 games that unmask it); the tiles are drawn on as many threads as the

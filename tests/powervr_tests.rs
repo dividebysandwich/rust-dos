@@ -5,8 +5,8 @@ use rust_dos::bus::Bus;
 use rust_dos::powervr::{Chip, regs};
 use std::path::PathBuf;
 
-const REGS: usize = 0xD100_0000;
-const TEXTURES: usize = 0xD140_0000;
+const REGS: usize = 0xD400_0000;
+const TEXTURES: usize = 0xD440_0000;
 
 /// A machine with a PCX2.
 fn bus() -> Bus {
@@ -52,8 +52,8 @@ fn the_card_is_device_2_of_the_pci_bus() {
     let mut bus = bus();
     assert!(bus.pci_present());
     assert_eq!(cfg_read(&mut bus, 2, 0x00), 0x0046_1033, "NEC PCX2");
-    assert_eq!(cfg_read(&mut bus, 2, 0x10), 0xD100_0000, "BAR0, the registers");
-    assert_eq!(cfg_read(&mut bus, 2, 0x14), 0xD140_0008, "BAR1, the texture memory, prefetchable");
+    assert_eq!(cfg_read(&mut bus, 2, 0x10), 0xD400_0000, "BAR0, the registers");
+    assert_eq!(cfg_read(&mut bus, 2, 0x14), 0xD440_0008, "BAR1, the texture memory, prefetchable");
     assert_eq!(cfg_read(&mut bus, 2, 0x3C) & 0xFFFF, 0x010B, "INTA# on IRQ 11");
     assert_eq!(cfg_read(&mut bus, 0, 0x00), 0xFFFF_FFFF, "no 3dfx card");
 }
