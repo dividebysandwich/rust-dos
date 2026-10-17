@@ -89,10 +89,13 @@ impl Bus {
         }
     }
 
-    /// The register of the card's I/O BAR at `port`, if it is one.
+    /// The register of the card's I/O BAR at `port`, if it is one. With
+    /// the BAR moved to 300h its VGA ports are the VGA's own, which the
+    /// port paths reach without going round through the BAR again.
     #[inline]
     pub(crate) fn banshee_io(&self, port: u16) -> Option<u32> {
-        self.banshee()?.io_offset(port)
+        let offset = self.banshee()?.io_offset(port)?;
+        (!(0x3B0..0x3E0).contains(&port)).then_some(offset)
     }
 
     /// A byte written to the I/O BAR: its VGA ports (B0h-DFh) are the
