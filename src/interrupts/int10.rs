@@ -45,11 +45,34 @@ fn text_mode(cpu: &Cpu) -> bool {
     )
 }
 
+/// Whether the BIOS's character services write text although the
+/// registers show graphics: the BIOS data area says a text mode, as a real
+/// BIOS goes by, on an EGA or VGA that maps its memory at B8000h (or
+/// B0000h). Windows 95's IO.SYS sets mode 3 there under its boot logo and
+/// maps planes 0 and 1 at B8000h, so its messages go into the text screen
+/// behind the logo, which its mode 3 set that keeps the memory shows.
+fn text_behind_graphics(cpu: &Cpu) -> bool {
+    cpu.bus.vga.adapter.ega_bios()
+        && matches!(cpu.bus.read_8(0x0449) & 0x7F, 0x00..=0x03 | 0x07)
+        && cpu.bus.vga.graphics_regs[0x06] & 0x0C != 0x04
+        && pixels::graphics_mode(&cpu.bus)
+}
+
+/// Whether the BIOS draws characters as pixels.
+fn char_graphics(cpu: &Cpu) -> bool {
+    pixels::graphics_mode(&cpu.bus) && !text_behind_graphics(cpu)
+}
+
+/// Whether the BIOS writes characters to a text screen.
+fn char_text(cpu: &Cpu) -> bool {
+    text_mode(cpu) || text_behind_graphics(cpu)
+}
+
 /// The characters in a row of the current mode.
 fn text_cols(cpu: &Cpu) -> usize {
     match cpu.bus.video_mode {
         VideoMode::Text40x25 | VideoMode::Text40x25Color => 40,
-        _ if pixels::graphics_mode(&cpu.bus) => pixels::cells(&cpu.bus).0,
+        _ if char_graphics(cpu) => pixels::cells(&cpu.bus).0,
         _ => cpu.bus.text_cols(),
     }
 }
@@ -799,7 +822,7 @@ pub fn handle(cpu: &mut Cpu) {
         0x08 => {
             let page = cpu.get_reg8(Register::BH);
             let (col, row) = get_cursor(cpu, page);
-            let (char_code, attr) = if pixels::graphics_mode(&cpu.bus) {
+            let (char_code, attr) = if char_graphics(cpu) {
                 (pixels::read_char(&cpu.bus, col as usize, row as usize), 0)
             } else {
                 read_char_at(cpu, col, row, page)
@@ -820,7 +843,7 @@ pub fn handle(cpu: &mut Cpu) {
             for i in 0..cpu.cx() as usize {
                 let (c, r) = ((col as usize + i) % cols, row as usize + (col as usize + i) / cols);
                 if r < active_rows(cpu) as usize {
-                    let attr = if pixels::graphics_mode(&cpu.bus) {
+                    let attr = if char_graphics(cpu) {
                         color
                     } else {
                         read_page_char(cpu, page, c as u8, r as u8).1
@@ -913,7 +936,7 @@ pub fn handle(cpu: &mut Cpu) {
             let page = active_page(cpu);
             let (mut col, mut row) = get_cursor(cpu, page);
             let cols = text_cols(cpu) as u8;
-            let graphics = pixels::graphics_mode(&cpu.bus);
+            let graphics = char_graphics(cpu);
             let color = cpu.get_reg8(Register::BL);
 
             match char_code {
@@ -1649,12 +1672,12 @@ fn write_char_at(cpu: &mut Cpu, col: u8, row: u8, char_code: u8, attr: u8) {
 
 /// Writes a character and attribute to text page `page`.
 fn write_page_char(cpu: &mut Cpu, page: u8, col: u8, row: u8, char_code: u8, attr: u8) {
-    if pixels::graphics_mode(&cpu.bus) {
+    if char_graphics(cpu) {
         // `attr` is the colour, XORed with bit 7.
         pixels::draw_char(&mut cpu.bus, col as usize, row as usize, char_code, attr);
         return;
     }
-    if !text_mode(cpu) {
+    if !char_text(cpu) {
         return;
     }
     let addr = cell_addr(cpu, page, col as usize, row as usize);
@@ -1664,7 +1687,7 @@ fn write_page_char(cpu: &mut Cpu, page: u8, col: u8, row: u8, char_code: u8, att
 
 /// Reads a character and attribute from text page `page`.
 fn read_page_char(cpu: &mut Cpu, page: u8, col: u8, row: u8) -> (u8, u8) {
-    if !text_mode(cpu) {
+    if !char_text(cpu) {
         return (0, 0);
     }
     let addr = cell_addr(cpu, page, col as usize, row as usize);
@@ -1691,7 +1714,7 @@ fn scroll_area(
 ) {
     // Graphics modes scroll pixels, a character cell at a time, and fill
     // with the colour in `attr`.
-    if pixels::graphics_mode(&cpu.bus) {
+    if char_graphics(cpu) {
         let (top, left, bottom, right) = (row_start as usize, col_start as usize, row_end as usize, col_end as usize);
         pixels::scroll(&mut cpu.bus, up, lines as usize, attr, top, left, bottom, right);
         return;
