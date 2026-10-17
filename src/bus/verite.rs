@@ -285,7 +285,11 @@ impl Bus {
     /// interrupt request and the memory's byte order as the state's chip
     /// has them.
     pub(crate) fn verite_after_load(&mut self) {
-        self.verite.retraces = self.vga.timing().retraces(self.clock.now_ns());
+        if !self.verite() {
+            (self.vbe.host_xor, self.vbe.scan_xor) = (0, 0);
+            return;
+        }
+        self.verite.retraces = self.vga.peek_timing().retraces(self.clock.now_ns());
         self.verite.run_at = self.verite_run_at();
         let irq = self.verite.lle.as_ref().is_some_and(|core| core.irq());
         self.sync_verite_irq(irq);
