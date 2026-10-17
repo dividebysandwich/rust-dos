@@ -143,8 +143,17 @@ impl Bus {
         let class = crate::diskio::DiskClass::HardDisk;
         let hard_disk_ns_per_sector = self.disk_io.cost_ns(class, crate::diskimage::SECTOR_SIZE as u32);
         let faked = self.faked_io;
-        let mut env = Env { disks: &self.disk, player: &mut self.cdaudio, now, hard_disk_ns_per_sector, faked };
+        let mut env = Env {
+            disks: &self.disk,
+            player: &mut self.cdaudio,
+            now,
+            hard_disk_ns_per_sector,
+            faked,
+            moved: 0,
+        };
         let result = f(channel, &mut env);
+        // Data moved on a drive, which `cycles=auto` goes by.
+        self.activity.io_bytes += env.moved;
         self.sync_ide(id);
         Some(result)
     }

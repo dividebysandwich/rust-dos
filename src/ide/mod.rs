@@ -47,6 +47,9 @@ pub struct Env<'a> {
     /// The commands are the BIOS's show for a V86 monitor, which the disks
     /// carry out at once (DOSBox-X's `faked_command`).
     pub faked: bool,
+    /// Bytes of data moved through the data port, which `cycles=auto`
+    /// counts as disk I/O. Reads while no data is ready don't count.
+    pub moved: u64,
 }
 
 impl Env<'_> {
