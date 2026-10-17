@@ -331,7 +331,7 @@ jobs:
           ARCH=$(uname -m)
           APPDIR=AppDir
           mkdir -p $APPDIR/usr/bin $APPDIR/usr/lib/fallback $APPDIR/usr/share/applications \
-            $APPDIR/usr/share/icons/hicolor/scalable/apps $APPDIR/usr/share/doc/rust-dos
+            $APPDIR/usr/share/icons/hicolor/256x256/apps $APPDIR/usr/share/doc/rust-dos
           cp target/release/rust-dos openxr/libopenxr_loader.so.1 $APPDIR/usr/bin/
           cp -L sdl-build/libSDL2-2.0.so.0 $APPDIR/usr/lib/fallback/
           strip $APPDIR/usr/lib/fallback/libSDL2-2.0.so.0
@@ -340,9 +340,9 @@ jobs:
           cp packaging/linux/AppRun $APPDIR/
           cp packaging/linux/rust-dos.desktop $APPDIR/
           cp packaging/linux/rust-dos.desktop $APPDIR/usr/share/applications/
-          cp packaging/linux/rust-dos.svg $APPDIR/
-          cp packaging/linux/rust-dos.svg $APPDIR/usr/share/icons/hicolor/scalable/apps/
-          ln -s rust-dos.svg $APPDIR/.DirIcon
+          cp packaging/linux/rust-dos.png $APPDIR/
+          cp packaging/linux/rust-dos.png $APPDIR/usr/share/icons/hicolor/256x256/apps/
+          ln -s rust-dos.png $APPDIR/.DirIcon
           cp README.md CONFIGURATION.md LICENSE openxr/openxr-LICENSE.txt "SDL2-$SDL_VERSION/LICENSE.txt" \
             $APPDIR/usr/share/doc/rust-dos/
           mv $APPDIR/usr/share/doc/rust-dos/LICENSE.txt $APPDIR/usr/share/doc/rust-dos/SDL2-LICENSE.txt

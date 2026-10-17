@@ -37,9 +37,14 @@ recommends = "libopenxr-loader1"
 assets = [
     "$auto",
     ["packaging/linux/rust-dos.desktop", "usr/share/applications/", "644"],
-    ["packaging/linux/rust-dos.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+    ["packaging/linux/rust-dos.png", "usr/share/icons/hicolor/256x256/apps/", "644"],
     ["assets/rust-dos.png", "usr/share/icons/hicolor/128x128/apps/", "644"],
 ]
+
+# The macOS app (cargo-bundle, in the release workflow): its icon, which
+# cargo-bundle turns into the app's .icns for the Finder and the Dock.
+[package.metadata.bundle]
+icon = ["assets/rust-dos.png", "packaging/linux/rust-dos.png"]
 
 # The emulator, and in crates/ the parts of it that stand on their own:
 # the sound cards, and what they need (save states, DMA, ...). `cargo

@@ -197,8 +197,11 @@ fn read_multiple_moves_blocks() {
     wait_ready(&mut bus);
     assert_eq!(bus.io_read(COMMAND) & ERR, 0);
     lba(&mut bus, 10, 10);
+    let before = bus.activity.io_bytes;
     let data = read(&mut bus, 0xC4, 4, 10);
     assert_eq!(data, (10..20).flat_map(pattern).collect::<Vec<u8>>());
+    // The data moved, which `cycles=auto` goes by.
+    assert_eq!(bus.activity.io_bytes - before, 10 * 512);
     // 3 is not a block size.
     bus.io_write(COUNT, 3);
     bus.io_write(COMMAND, 0xC6);

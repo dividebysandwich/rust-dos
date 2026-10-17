@@ -47,6 +47,9 @@ pub struct Env<'a> {
     /// The commands are the BIOS's show for a V86 monitor, which the disks
     /// carry out at once (DOSBox-X's `faked_command`).
     pub faked: bool,
+    /// Bytes of data moved through the data port, which `cycles=auto`
+    /// counts as disk I/O. Reads while no data is ready don't count.
+    pub moved: u64,
 }
 
 impl Env<'_> {
@@ -408,6 +411,24 @@ impl Channel {
         match self.selected() {
             Some(device) => each!(device, d => d.read_data(env)),
             None => 0xFFFF,
+        }
+    }
+
+    /// What reads of the data port give from here on before the selected
+    /// device's state changes (`Ata::data_run`). Empty where there is no
+    /// hard disk selected.
+    pub fn data_run(&self) -> &[u8] {
+        match &self.devices[self.select as usize] {
+            Some(Device::Ata(disk)) => disk.data_run(),
+            _ => &[],
+        }
+    }
+
+    /// The next `len` bytes of the data port, at most `data_run`'s, read
+    /// at once from it (`Ata::skip_data_run`).
+    pub fn skip_data_run(&mut self, len: usize, env: &mut Env) {
+        if let Some(Device::Ata(disk)) = self.selected() {
+            disk.skip_data_run(len, env);
         }
     }
 

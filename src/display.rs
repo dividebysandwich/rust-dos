@@ -30,8 +30,7 @@ use sdl2::surface::Surface;
 use sdl2::video::{FullscreenType, Window, WindowContext, WindowPos};
 use std::cell::OnceCell;
 
-/// The window's icon: packaging/linux/rust-dos.svg drawn at 128x128 with
-/// `rsvg-convert -w 128 -h 128`.
+/// The window's icon: packaging/linux/rust-dos.png scaled to 128x128.
 static ICON_PNG: &[u8] = include_bytes!("../assets/rust-dos.png");
 
 /// The size the picture is shown at, in the renderer's logical pixels: the
@@ -629,6 +628,19 @@ impl Display<'_> {
         gl.stage_mut().is_some_and(|stage| stage.click((px, py)))
     }
 
+    /// The mouse at the window's point (`x`, `y`): a key of the 3D scene's
+    /// keyboard there shows lit.
+    pub fn hover_scene(&mut self, x: i32, y: i32) {
+        let Output::Gl(gl) = &mut self.out else { return };
+        let window = gl.window();
+        let (ws, ds) = (window.size(), window.drawable_size());
+        let px = (x as f32 + 0.5) * ds.0 as f32 / ws.0.max(1) as f32;
+        let py = (y as f32 + 0.5) * ds.1 as f32 / ws.1.max(1) as f32;
+        if let Some(stage) = gl.stage_mut() {
+            stage.hover((px, py));
+        }
+    }
+
     /// Turn the window's camera by mouse motion.
     pub fn camera_look(&mut self, dx: f32, dy: f32) {
         if let Some(stage) = self.stage_mut() {
@@ -827,6 +839,8 @@ impl Display<'_> {
     pub fn has_headset(&self) -> bool {
         false
     }
+
+    pub fn hover_scene(&mut self, _x: i32, _y: i32) {}
 
     pub fn click_scene(&mut self, _x: i32, _y: i32) -> bool {
         false
@@ -1047,8 +1061,8 @@ mod tests {
         let (width, height, pixels) = icon().unwrap();
         assert_eq!((width, height), (128, 128));
         assert_eq!(pixels.len(), 128 * 128 * 4);
-        // Transparent in the corner, the opaque orange monitor in the middle
-        // of its top edge.
+        // Transparent in the corner, the opaque orange gear in the middle of
+        // its top edge.
         assert_eq!(pixels[3], 0);
         let top = (12 * 128 + 64) * 4;
         assert!(pixels[top + 3] == 255 && pixels[top] > pixels[top + 2]);

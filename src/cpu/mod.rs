@@ -577,7 +577,8 @@ pub struct Cpu {
     /// runs it on the dynamic recompiler and `cycles=auto` at max speed
     /// until it ends.
     pub pm_latched: bool,
-    /// REP MOVS and STOS do the iterations that stay in plain RAM at once
+    /// REP MOVS and STOS do the iterations that stay in plain RAM at once,
+    /// and so does REP INSW or INSD of an IDE hard disk's block into it
     /// (`instructions::string`). Off, they go one at a time, which tests
     /// compare them with.
     pub string_bulk: bool,

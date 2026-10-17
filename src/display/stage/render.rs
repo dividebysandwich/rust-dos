@@ -213,10 +213,12 @@ struct GiUse<'a> {
 
 /// A prop drawn where `model` takes it, lit: a part of one of the scene's
 /// (`Scene::props`, by their indices), showing `page` where it is a
-/// manual's page; or a polaroid picture, developed this much (0 to 1).
+/// manual's page, glowing as the laser's light where it is `lit` (a key
+/// the trigger would press); or a polaroid picture, developed this much
+/// (0 to 1).
 #[derive(Clone, Copy, Debug)]
 pub enum PropDraw {
-    Part { prop: usize, part: usize, model: Mat4, page: Option<glow::Texture> },
+    Part { prop: usize, part: usize, model: Mat4, page: Option<glow::Texture>, lit: bool },
     Print { model: Mat4, picture: Option<glow::Texture>, develop: f32 },
 }
 
@@ -238,6 +240,9 @@ struct OneView {
     depth: glow::Program,
     weather: glow::Program,
 }
+
+/// How a key the trigger would press glows: as the laser's light.
+const HIGHLIGHT: [f32; 3] = [0.12, 0.3, 0.65];
 
 /// How brightly a manual's pages glow, to be read in a dark room.
 const PAGE_GLOW: f32 = 0.25;
@@ -2250,8 +2255,8 @@ impl Gpu {
         leds: Leds,
     ) {
         for draw in props {
-            let (prop, part, at, page) = match *draw {
-                PropDraw::Part { prop, part, model, page } => (prop, part, model, page),
+            let (prop, part, at, page, lit) = match *draw {
+                PropDraw::Part { prop, part, model, page, lit } => (prop, part, model, page, lit),
                 PropDraw::Print { model: at, picture, develop } => {
                     self.draw_print(gl, locations, model, at, picture, develop);
                     continue;
@@ -2262,9 +2267,12 @@ impl Gpu {
             // SAFETY: see `GlScreen`.
             unsafe {
                 gl.uniform_matrix_4_f32_slice(model, false, &at.to_cols_array());
-                let lit = |led| super::scene::lit(leds, led) as u32 as f32;
-                let glow = material.led.map_or(1.0, lit);
+                let on = |led| super::scene::lit(leds, led) as u32 as f32;
+                let glow = material.led.map_or(1.0, on);
                 self.bind_material(gl, locations, material, glow);
+                if lit {
+                    gl.uniform_3_f32_slice(locations.emissive.as_ref(), &HIGHLIGHT);
+                }
                 if let Some(page) = page {
                     // The page's picture, glowing a little.
                     gl.uniform_4_f32_slice(locations.base_color.as_ref(), &[1.0; 4]);

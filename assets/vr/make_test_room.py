@@ -245,13 +245,13 @@ def build():
     # On it, the manual (shown while a game with one runs), the joystick
     # and the keyboard: empties, so Rust-DOS's own models stand there.
     empty("manual", from_gltf(-0.42, top_y, -0.55), markers, kind="ARROWS", size=0.1)
-    empty("joystick", from_gltf(0.31, top_y, -0.52), markers, kind="ARROWS", size=0.1)
+    empty("joystick", from_gltf(0.24, top_y, -0.53), markers, kind="ARROWS", size=0.1)
     empty("keyboard", from_gltf(0.0, top_y, -0.345), markers, kind="ARROWS", size=0.1)
     # And a polaroid camera and the VFX1 (shown with [vfx1]), their fronts
     # (Blender's +Y) turned to the viewer.
     camera = empty("camera", from_gltf(-0.5, top_y, -0.74), markers, kind="ARROWS", size=0.1)
     camera.rotation_euler = (0.0, 0.0, math.pi)
-    vfx1 = empty("vfx1", from_gltf(0.48, top_y, -0.64), markers, kind="ARROWS", size=0.1)
+    vfx1 = empty("vfx1", from_gltf(0.45, top_y, -0.61), markers, kind="ARROWS", size=0.1)
     vfx1.rotation_euler = (0.0, 0.0, math.pi)
 
     # Where the eyes start (1.2 m up, looking at the screen along +Y), and

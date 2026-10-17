@@ -275,8 +275,10 @@ over the keys first: sliding over them presses nothing. Hold Shift with
 one hand to type capitals with the other. The laser and the trigger, or
 touching a key and pulling the trigger, press a key for a moment, as a
 click in the window does; Shift, Ctrl or Alt clicked stays down until
-the next key clicked. Keys the machine has down, from the real keyboard
-too, are shown down.
+the next key clicked. The key the trigger (or a click) would press, the
+one the laser or the mouse points at or a hand touches, lights up in the
+laser's blue. Keys the machine has down, from the real keyboard too, are
+shown down.
 
 Take it by its case with the grip button to move it; the hand holding
 it doesn't type. Coming to rest out of reach, it is back where it
