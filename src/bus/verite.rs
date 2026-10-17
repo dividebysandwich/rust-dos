@@ -65,13 +65,29 @@ impl Bus {
         };
         self.verite.configure(settings, rom);
         self.verite.run_at = None;
-        if self.verite() {
-            let (segment, offset) = crate::verite::BOARD_DATA;
-            let data = crate::verite::board_data(crate::video::vbe::VRAM_SIZE as u32, settings.irq);
-            self.write_rom(((segment as usize) << 4) + offset as usize, &data);
-        }
+        self.verite_board_data();
         self.sync_verite_irq(false);
         warnings
+    }
+
+    /// The board's description in the ROM, as its BARs and IRQ are now.
+    fn verite_board_data(&mut self) {
+        if !self.verite() {
+            return;
+        }
+        let (segment, offset) = crate::verite::BOARD_DATA;
+        let (irq, io, base) = (self.verite.irq_line(), self.verite.io_base(), self.verite.bar0);
+        let data = crate::verite::board_data(crate::video::vbe::VRAM_SIZE as u32, irq, io, base);
+        self.write_rom(((segment as usize) << 4) + offset as usize, &data);
+    }
+
+    /// A BAR moved: the frame buffer is where BAR0 says, while it isn't
+    /// over the RAM (or being sized), and the board's description follows.
+    pub(crate) fn verite_moved(&mut self) {
+        let base = self.verite.bar0;
+        let mapped = base != 0 && base != 0xFF00_0000 && base as usize >= self.ram.len();
+        self.vbe.lfb_base = mapped.then_some(base);
+        self.verite_board_data();
     }
 
     pub(crate) fn verite_read(&mut self, reg: u8, len: u8) -> u32 {

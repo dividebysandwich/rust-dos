@@ -227,7 +227,9 @@ pub fn install(bus: &mut Bus, setup: VideoSetup) {
     // The Vérité's board description, for its BIOS's AX=158Dh.
     if setup.adapter.is_verite() {
         let (segment, offset) = crate::verite::BOARD_DATA;
-        let data = crate::verite::board_data(super::vbe::VRAM_SIZE as u32, bus.verite.irq_line());
+        let (io, base) = (bus.verite.io_base(), bus.verite.bar0);
+        let memory = super::vbe::VRAM_SIZE as u32;
+        let data = crate::verite::board_data(memory, bus.verite.irq_line(), io, base);
         bus.write_rom(((segment as usize) << 4) + offset as usize, &data);
     }
     bus.vbe.lfb_base = if s3 || setup.adapter.is_et4000() { None } else { Some(super::vbe::LFB_BASE as u32) };

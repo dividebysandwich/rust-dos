@@ -93,11 +93,11 @@ pub const IRQS: [u8; 7] = [5, 7, 9, 10, 11, 12, 15];
 
 /// The board's description, which the BIOS's AX=158Dh points Rendition's
 /// library to: PCI vital product data (a read-only resource, tag 90h),
-/// whose "ZC" keyword holds the ports' and the memory's base (their top
-/// bytes), the interrupt line `irq`, the memory in 64 KB units, and
-/// fields the library keeps (0 here); then the end tag.
-pub fn board_data(memory: u32, irq: u8) -> Vec<u8> {
-    let mut zc = vec![(IO_BASE >> 8) as u8, (crate::video::vbe::LFB_BASE >> 24) as u8, irq];
+/// whose "ZC" keyword holds the ports' base `io` and the memory's `base`
+/// (their top bytes), the interrupt line `irq`, the memory in 64 KB units,
+/// and fields the library keeps (0 here); then the end tag.
+pub fn board_data(memory: u32, irq: u8, io: u16, base: u32) -> Vec<u8> {
+    let mut zc = vec![(io >> 8) as u8, (base >> 24) as u8, irq];
     zc.extend_from_slice(&((memory >> 16) as u16).to_le_bytes());
     zc.extend_from_slice(&[0; 2 + 2 + 4 + 2 + 1]);
     let mut vpd = vec![b'Z', b'C', zc.len() as u8];
@@ -250,6 +250,8 @@ pub struct Verite {
     /// When the low-level chip next runs without the host asking (PIT
     /// ticks), set after each run.
     pub run_at: Option<u64>,
+    /// BAR0: where the PCI configuration puts the card's 16 MB of memory.
+    pub bar0: u32,
 }
 
 impl Default for Verite {
@@ -285,6 +287,7 @@ impl Verite {
             retraces: 0,
             line: None,
             run_at: None,
+            bar0: crate::video::vbe::LFB_BASE as u32,
         };
         if let Ok(dir) = std::env::var("RUST_DOS_VERITE_TRACE") {
             let dir = std::path::PathBuf::from(dir);
@@ -704,13 +707,13 @@ impl Verite {
     // --- PCI ---
 
     /// A byte of the configuration space: Rendition's V1000 (1163h:0001h),
-    /// a VGA, BAR0 its memory at `lfb`, BAR1 its ports.
-    pub fn config_read(&self, reg: u8, lfb: u32) -> u8 {
+    /// a VGA, BAR0 its 16 MB of memory, BAR1 its 256 ports ([SPEC] 5.1).
+    pub fn config_read(&self, reg: u8) -> u8 {
         let dword = match reg & 0xFC {
             0x00 => 0x0001_1163,
             0x04 => 0x0280_0000 | self.pci.command as u32,
             0x08 => 0x0300_0002,
-            0x10 => lfb,
+            0x10 => self.bar0,
             0x14 => self.pci.bar1 | 1,
             0x3C => 0x0000_0100 | self.pci.irq_line as u32,
             _ => 0,
@@ -720,13 +723,31 @@ impl Verite {
         value
     }
 
-    pub fn config_write(&mut self, reg: u8, value: u8) {
+    /// A byte of the configuration space written. True when a BAR moved:
+    /// the sizes show as the bits that stay 0 when all 1s are written.
+    pub fn config_write(&mut self, reg: u8, value: u8) -> bool {
         self.trace(|| format!("cfg w {:02X} = {:02X}", reg, value));
+        let shift = 8 * (reg & 3);
+        let byte = |dword: u32| dword & !(0xFF << shift) | (value as u32) << shift;
         match reg {
             0x04 => self.pci.command = (self.pci.command & 0xFF00) | (value & 0x07) as u16,
             0x3C => self.pci.irq_line = value,
+            0x10..=0x13 => {
+                self.bar0 = byte(self.bar0) & 0xFF00_0000;
+                return true;
+            }
+            0x14..=0x17 => {
+                self.pci.bar1 = byte(self.pci.bar1) & 0xFF00;
+                return true;
+            }
             _ => {}
         }
+        false
+    }
+
+    /// Where BAR1 puts the ports.
+    pub fn io_base(&self) -> u16 {
+        (self.pci.bar1 & 0xFF00) as u16
     }
 
     /// The register at `port`, if it is one of the card's.
@@ -857,6 +878,7 @@ impl State for Verite {
             None => false.save(w),
         }
         self.frame_written_ns.save(w);
+        self.bar0.save(w);
     }
 
     fn load(&mut self, r: &mut Reader) -> Result<()> {
@@ -899,6 +921,10 @@ impl State for Verite {
             if !r.is_empty() {
                 self.frame_written_ns.load(r)?;
             }
+        }
+        self.bar0 = crate::video::vbe::LFB_BASE as u32;
+        if !r.is_empty() {
+            self.bar0.load(r)?;
         }
         self.lle_on = self.lle.is_some();
         self.line = None;

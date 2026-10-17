@@ -122,7 +122,7 @@ impl Bus {
             Some((Target::S3, reg)) => self.s3_config(reg + (port & 3) as u8),
             Some((Target::Voodoo, reg)) => self.voodoo.as_ref().map_or(0xFF, |v| v.config_read(reg + (port & 3) as u8)),
             Some((Target::PowerVr, reg)) => self.powervr.as_ref().map_or(0xFF, |p| p.config_read(reg + (port & 3) as u8)),
-            Some((Target::Verite, reg)) => self.verite.config_read(reg + (port & 3) as u8, self.vbe.lfb_base.unwrap_or(0)),
+            Some((Target::Verite, reg)) => self.verite.config_read(reg + (port & 3) as u8),
             Some((Target::Mach64, reg)) => self.mach64.config_read(reg + (port & 3) as u8),
             None => 0xFF,
         }
@@ -143,7 +143,9 @@ impl Bus {
             return;
         }
         if target == Target::Verite {
-            self.verite.config_write(reg, value);
+            if self.verite.config_write(reg, value) {
+                self.verite_moved();
+            }
             return;
         }
         if target == Target::Mach64 {
