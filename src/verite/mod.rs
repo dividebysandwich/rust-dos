@@ -14,6 +14,7 @@
 
 pub mod cmd;
 pub mod draw;
+pub mod lle;
 pub mod ramdac;
 pub mod regs;
 pub mod risc;
