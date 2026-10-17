@@ -503,7 +503,6 @@ impl Engine {
             }
             0x54 => {
                 self.src_format = val;
-                self.update_src_stride();
                 self.src_bpp = match val & COL_MASK {
                     COL_1BPP => 1,
                     COL_8BPP => 8,
@@ -511,6 +510,7 @@ impl Engine {
                     COL_32BPP | COL_YUYV | COL_UYVY => 32,
                     _ => 16,
                 };
+                self.update_src_stride();
             }
             0x58 => {
                 self.src_size = val;
@@ -622,14 +622,7 @@ impl Engine {
     /// The source's row strides and the host data a row takes, from the
     /// packing (86Box's `update_src_stride`).
     fn update_packing(&mut self) {
-        let bpp = match self.src_format & COL_MASK {
-            COL_1BPP => 1,
-            COL_8BPP => 8,
-            COL_16BPP => 16,
-            COL_24BPP => 24,
-            COL_32BPP | COL_YUYV | COL_UYVY => 32,
-            _ => 16,
-        };
+        let bpp = self.src_bpp;
         let (sx, dx) = (self.src_size_x as u32, self.dst_size_x as u32);
         let packed = |bits: u32, unit: u32| bits.div_ceil(unit) * (unit / 8);
         match self.src_format & PACKING_MASK {

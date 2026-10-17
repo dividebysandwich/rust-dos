@@ -656,15 +656,17 @@ impl Voodoo {
         };
         v.tmu = (0..units)
             .map(|i| {
-                let mut tmu = Tmu::new(board.texture_memory(), 0x100 * (i + 1));
-                tmu.v2 = chip.v2();
+                let base = 0x100 * (i + 1);
                 if v.banshee.is_some() {
                     // One memory for everything, a Voodoo2's texture
                     // formats, and base addresses in bytes.
-                    tmu.ram = v.fbi.ram.clone();
+                    let mut tmu = Tmu::with_ram(v.fbi.ram.clone(), base);
                     tmu.v2 = true;
                     tmu.byte_base = true;
+                    return tmu;
                 }
+                let mut tmu = Tmu::new(board.texture_memory(), base);
+                tmu.v2 = chip.v2();
                 tmu
             })
             .collect();
@@ -902,6 +904,24 @@ impl Voodoo {
         self.pool.flush();
         self.outstanding.set(false);
         self.tmu_in_use.set(0);
+    }
+
+    /// Whether the workers are still drawing, with everything queued
+    /// given to them first but without waiting for them: a Banshee's busy
+    /// bits, which a program polls until they clear.
+    pub(crate) fn drawing(&self) -> bool {
+        if !self.writes_queue() {
+            return false;
+        }
+        self.submit_words();
+        self.release_backlog();
+        self.pool.give_out();
+        let busy = self.pool.busy();
+        if !busy {
+            self.outstanding.set(false);
+            self.tmu_in_use.set(0);
+        }
+        busy
     }
 
     /// Whether jobs are held back (`backlog`): while the OpenGL renderer
@@ -1153,14 +1173,21 @@ impl Voodoo {
     /// a long session, and hold the command FIFOs up until then.
     pub fn set_timing(&mut self, timing: CrtTiming, now: Now) {
         let changed = timing != self.timing;
+        let vint_pending = changed && self.banshee_vint_pending(now);
         self.timing = timing;
         if !changed || timing.frame_ns() == 0 {
             return;
         }
-        self.last_swap = self.last_swap.min(timing.retraces(now.ns));
+        let current = timing.retraces(now.ns);
+        self.last_swap = self.last_swap.min(current);
         for s in &mut self.swaps {
             let ns = (s.due as u128 * 1_000_000_000 / PIT_HZ as u128) as u64;
             s.retrace = timing.retraces(ns);
+        }
+        // The armed retrace interrupt counts retraces the same way: it
+        // stays pending, or waits for the next retrace at the new rate.
+        if let Some(armed) = self.banshee.as_mut().and_then(|b| b.vint.as_mut()) {
+            *armed = if vint_pending { current.saturating_sub(1) } else { current };
         }
     }
 
@@ -1383,6 +1410,13 @@ impl Voodoo {
     /// Make the swap the frame rate cap held back when its turn came, and
     /// retire the swaps whose retraces came.
     pub fn service(&mut self, now: Now) {
+        self.service_into(now, &mut Effect::default());
+    }
+
+    /// `service`, with what the command FIFOs a swap held up ask for once
+    /// they go on (a Banshee's next swap among the timer events) put in
+    /// `effect`.
+    fn service_into(&mut self, now: Now, effect: &mut Effect) {
         if let Some((data, due)) = self.deferred
             && due <= now.ticks
         {
@@ -1401,14 +1435,14 @@ impl Voodoo {
             retired += 1;
         }
         if self.banshee.is_some() {
-            self.banshee_swaps_done(retired, now);
+            self.banshee_swaps_done(retired, now, effect);
         }
     }
 
     /// A write that goes through the FIFO: behind a pending swap it waits
     /// there, and a full FIFO stalls the CPU until the swap is done.
     fn fifo_write(&mut self, now: Now, effect: &mut Effect) {
-        self.service(now);
+        self.service_into(now, effect);
         let Some(front) = self.swaps.front() else { return };
         self.fifo_writes += 1;
         let capacity = if self.cmdfifo_on() {

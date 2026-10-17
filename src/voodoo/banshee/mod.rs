@@ -260,37 +260,11 @@ crate::state_fields!(Banshee {
 } skip { kind, ddc, dirty });
 
 impl Banshee {
-    pub fn new(kind: Kind) -> Self {
-        let mut b = Self {
-            kind,
-            pci: Pci::default(),
-            ext: [0; 64],
-            clut: [0; 512],
-            crtc: [0; 0x40],
-            misc_output: 0,
-            seq01: 0,
-            intr_ctrl: 0,
-            vint: None,
-            irq_up: None,
-            agp: Agp::default(),
-            fifo: Default::default(),
-            engine: Default::default(),
-            overlay_addr: 0,
-            overlay_queue: VecDeque::new(),
-            swap_count: 0,
-            ddc: ddc::Ddc::default(),
-            dirty: true,
-        };
-        b.reset();
-        b
-    }
-
     /// As at power-on and after the BIOS: 16 MB of SGRAM in dramInit0
     /// and 1 (eight 2 MB parts, as Linux's tdfxfb reads them), the DDC
     /// lines released, the command FIFOs idle.
-    pub fn reset(&mut self) {
-        let kind = self.kind;
-        *self = Self {
+    pub fn new(kind: Kind) -> Self {
+        let mut b = Self {
             kind,
             pci: Pci::default(),
             ext: [0; 64],
@@ -310,15 +284,21 @@ impl Banshee {
             ddc: ddc::Ddc::default(),
             dirty: true,
         };
-        self.ext[(DRAM_INIT0 / 4) as usize] = (1 << 27) | (1 << 26);
-        self.ext[(VID_SERIAL_PARALLEL_PORT / 4) as usize] = DDC_CLOCK_W | DDC_DATA_W;
-        for (i, c) in self.clut.iter_mut().enumerate() {
+        b.ext[(DRAM_INIT0 / 4) as usize] = (1 << 27) | (1 << 26);
+        b.ext[(VID_SERIAL_PARALLEL_PORT / 4) as usize] = DDC_CLOCK_W | DDC_DATA_W;
+        for (i, c) in b.clut.iter_mut().enumerate() {
             let v = (i & 0xFF) as u32;
             *c = v << 16 | v << 8 | v;
         }
-        for fifo in &mut self.fifo {
+        for fifo in &mut b.fifo {
             fifo.status = 1 << 28;
         }
+        b
+    }
+
+    /// A PCI reset: as `new` leaves the card.
+    pub fn reset(&mut self) {
+        *self = Self::new(self.kind);
     }
 
     /// The line the 3D engine's Y origin at the bottom is: miscInit0
@@ -628,7 +608,7 @@ impl Voodoo {
     pub(crate) fn banshee_status(&self, now: Now) -> u32 {
         let Some(b) = &self.banshee else { return 0 };
         let in_retrace = self.timing.status(now.ns) & 0x08 != 0;
-        b.status(in_retrace, self.outstanding.get())
+        b.status(in_retrace, self.drawing())
     }
 
     /// CRTC register 11h now holds `value`: bit 4 written 0 clears the

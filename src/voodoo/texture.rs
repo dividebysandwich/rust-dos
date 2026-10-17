@@ -167,8 +167,15 @@ crate::state_fields!(Tmu {
 
 impl Tmu {
     pub fn new(bytes: usize, base: usize) -> Self {
+        Self::with_ram(Vram::new(bytes), base)
+    }
+
+    /// A texture unit on `ram`, which may be another's memory (a
+    /// Banshee's units share the frame buffer's).
+    pub fn with_ram(ram: Vram, base: usize) -> Self {
+        let bytes = ram.bytes();
         Self {
-            ram: Vram::new(bytes),
+            ram,
             mask: bytes as u32 - 1,
             base,
             regdirty: true,

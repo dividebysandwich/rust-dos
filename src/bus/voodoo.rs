@@ -41,9 +41,11 @@ impl Bus {
         self.banshee_settle();
     }
 
-    /// The card's BAR0 or video clock changed.
+    /// The card's BAR0 or video clock changed, or a Banshee's BARs or
+    /// interrupt line: a request it has up moves to the new line.
     pub(crate) fn voodoo_moved(&mut self) {
         self.vga.mark_dirty_full();
+        self.sync_banshee_irq();
     }
 
     /// The time, as the card needs it.

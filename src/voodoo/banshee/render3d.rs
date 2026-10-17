@@ -78,11 +78,7 @@ impl Voodoo {
         effect: &mut Effect,
     ) {
         match ((offset >> 2) & 0xFF) as usize {
-            SWAP_PENDING => {
-                if let Some(b) = &mut self.banshee {
-                    b.swap_count += 1;
-                }
-            }
+            SWAP_PENDING => self.banshee_3d_register(offset & 0x3FFC, data, now, effect),
             INTR_CTRL => {
                 if let Some(b) = &mut self.banshee {
                     b.intr_ctrl = data & 0x0030_003F;
@@ -119,6 +115,12 @@ impl Voodoo {
                 self.reg[regnum] = data;
             }
             SWAPBUFFER_CMD => self.banshee_swap(data, now, effect),
+            // From BAR0 or from a command FIFO packet alike.
+            SWAP_PENDING => {
+                if let Some(b) = &mut self.banshee {
+                    b.swap_count += 1;
+                }
+            }
             // The Voodoo2's video and init registers aren't there.
             0x80..=0x96 => {}
             _ => {
@@ -192,7 +194,7 @@ impl Voodoo {
 
     /// `retired` swaps happened: their buffers shown, and the command
     /// FIFOs that waited for them go on.
-    pub(crate) fn banshee_swaps_done(&mut self, retired: usize, now: Now) {
+    pub(crate) fn banshee_swaps_done(&mut self, retired: usize, now: Now, effect: &mut Effect) {
         for _ in 0..retired {
             let addr = self
                 .banshee
@@ -203,9 +205,8 @@ impl Voodoo {
             }
         }
         if retired > 0 && self.swaps.is_empty() {
-            let mut effect = Effect::default();
             for n in 0..2 {
-                self.run_banshee_fifo(n, now, &mut effect);
+                self.run_banshee_fifo(n, now, effect);
             }
         }
     }
