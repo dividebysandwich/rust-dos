@@ -318,3 +318,54 @@ fn the_2d_microcode_fills_and_answers() {
     fifo(&mut cpu, &[8]);
     assert_eq!(cpu.bus.io_read_wide(port(regs::FIFOOUTVALID), 1), 1, "synced");
 }
+
+/// A Vérité whose RISC runs at a low level (`verite_risc=lle`).
+fn low_level() -> Cpu {
+    let mut cpu = machine();
+    let warnings = cpu.bus.configure_verite(&rust_dos::verite::VeriteSettings::default());
+    assert!(warnings.is_empty(), "{:?}", warnings);
+    cpu
+}
+
+#[test]
+fn the_low_level_risc_runs_what_the_bios_starts() {
+    let mut cpu = low_level();
+    int10(&mut cpu, 0x1582);
+    // At 2000h: each FIFO word, plus one, to the output FIFO, forever.
+    let program = [0x1080_2100, 0x0021_8001, 0x68FF_FFFD, 0];
+    for (k, &word) in program.iter().enumerate() {
+        rust_dos::verite::lle::write_word(&mut cpu.bus.vbe.vram, 0x2000 + 4 * k as u32, word);
+    }
+    cpu.set_cx(0x2000);
+    cpu.set_dx(0);
+    int10(&mut cpu, 0x1583);
+    fifo(&mut cpu, &[41, 99]);
+    assert_eq!(cpu.bus.io_read_wide(IO_BASE + regs::FIFOOUTVALID as u16, 1), 2);
+    assert_eq!(cpu.bus.io_read_wide(IO_BASE, 4), 42);
+    assert_eq!(cpu.bus.io_read_wide(IO_BASE, 4), 100);
+}
+
+// The Rendition BIOS's VESA modes are the card's own CRTC's, with the
+// memory's byte order set for the PC to see it linear: the display reads
+// the RISC's big-endian half-words, and so does the PC through the LFB.
+#[test]
+fn vesa_modes_set_the_native_crtc_and_byte_order() {
+    let mut cpu = low_level();
+    let mode = rust_dos::video::vbe::find_mode(0x111, false).unwrap();
+    rust_dos::interrupts::vbe::enter_mode(&mut cpu.bus, &mode, true, false);
+    assert!(cpu.bus.verite.native);
+    let mode = cpu.bus.vbe.mode.map(|m| (m.number, m.width, m.height, m.bpp));
+    assert_eq!(mode, Some((0x111, 640, 480, 16)));
+    assert_eq!((cpu.bus.vbe.host_xor, cpu.bus.vbe.scan_xor), (2, 2));
+    let lfb = rust_dos::video::vbe::LFB_BASE;
+    cpu.bus.write_16(lfb, 0x1234);
+    cpu.bus.write_16(lfb + 2, 0x5678);
+    // The RISC's half-word at 0 is the first pixel.
+    let vram = &cpu.bus.vbe.vram;
+    assert_eq!(u32::from_le_bytes([vram[0], vram[1], vram[2], vram[3]]), 0x1234_5678);
+    assert_eq!(cpu.bus.read_32(lfb), 0x5678_1234);
+    // A standard mode: the VGA shows it again.
+    rust_dos::interrupts::int10::set_mode(&mut cpu, 0x03);
+    assert!(!cpu.bus.verite.native);
+    assert_eq!((cpu.bus.vbe.host_xor, cpu.bus.vbe.scan_xor), (0, 0));
+}

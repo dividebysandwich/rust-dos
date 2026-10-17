@@ -104,6 +104,14 @@ fn definitions() -> Vec<Definition> {
             ]),
         },
         Definition {
+            key: "verite_risc",
+            desc: "Vérité RISC",
+            info: "Emulated runs the microcode programs load into the Rendition Vérité, as the card does: every Vérité game, the 3D Blaster PCI's CGL games included. Commands only carries out Speedy3D's commands without it: faster, for Tomb Raider and vQuake. Changes when no program runs.",
+            category: "video",
+            target: config("emulator", "verite_risc"),
+            values: configured(&[("lle", "Emulated"), ("hle", "Commands only")]),
+        },
+        Definition {
             key: "aspect",
             desc: "Fixed aspect ratio",
             info: "Expand the picture to the selected display ratio without cropping, or keep its native pixel ratio.",

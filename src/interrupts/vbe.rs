@@ -368,6 +368,9 @@ pub fn enter_mode(bus: &mut Bus, mode: &VbeMode, lfb: bool, keep: bool) {
     if bus.vga.adapter.is_mach64() {
         crate::mach64::bios::program_mode(bus, mode);
     }
+    if bus.vga.adapter.is_verite() {
+        bus.verite_program_mode(mode);
+    }
 }
 
 /// Function 04h: the size of the state buffer (DL=0), and saving (DL=1)
@@ -421,6 +424,7 @@ fn window(cpu: &mut Cpu) -> u16 {
             if cpu.bus.mach64() {
                 cpu.bus.mach64_set_bank(bank as u32);
             }
+            cpu.bus.verite_set_bank(bank as u32);
         }
         0x01 => cpu.set_dx(cpu.bus.vbe.bank as u16),
         _ => return FAILED,
@@ -465,6 +469,7 @@ fn scan_line_length(cpu: &mut Cpu) -> u16 {
         }
         cpu.bus.vbe.pitch = pitch;
         cpu.bus.vga.mark_dirty_full();
+        cpu.bus.verite_crtc_follow();
         // A mach64's CRTC has the pitch in units of 8 pixels.
         if cpu.bus.mach64.native {
             use crate::mach64::regs::CRTC_OFF_PITCH;
@@ -497,6 +502,7 @@ fn display_start(cpu: &mut Cpu) -> Option<u16> {
             }
             cpu.bus.vbe.start = start;
             cpu.bus.note_display_start();
+            cpu.bus.verite_crtc_follow();
             // A mach64's CRTC has the start in units of 8 bytes.
             if cpu.bus.mach64.native {
                 use crate::mach64::regs::CRTC_OFF_PITCH;

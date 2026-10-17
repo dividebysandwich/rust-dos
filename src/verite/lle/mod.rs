@@ -95,6 +95,9 @@ pub const RESET_PC: u32 = 0xFFFF_FFF0;
 /// takes a word the host writes at once when it waits for one, and owed
 /// at most after the host left it alone a while.
 const AHEAD: i64 = 2_000;
+
+/// The board register reads that end a run (`Core::polls`).
+const POLLS: u32 = 64;
 const MOST_OWED: i64 = 200_000;
 
 /// The PCI bus master: the command list ([SPEC] 6) and the block it reads.
@@ -166,12 +169,28 @@ pub struct Core {
     pub drew: bool,
     /// Instructions run, for the debugger's status.
     pub instructions: u64,
+    /// The board's registers read in this run: a RISC that polls the
+    /// CRTC for the beam waits for time to pass, which it doesn't in a
+    /// run, so the run ends after many.
+    polls: u32,
     /// Lines for the emulator's log.
     pub log: Vec<String>,
     /// Opcodes seen that the chip doesn't have, logged once each.
     undefined: Vec<u8>,
-    /// Instructions to trace into the log (`RUST_DOS_VERITE_RISC_TRACE`).
+    /// Instructions to trace into the log (`RUST_DOS_VERITE_RISC_TRACE`),
+    /// and control register accesses (`RUST_DOS_VERITE_CTL_LOG`).
     pub trace_left: u64,
+    pub ctl_left: u64,
+    /// Instructions run before the trace starts (`skip:count`).
+    pub trace_skip: u64,
+}
+
+/// A count from the environment variable `name`, for the traces: `count`,
+/// or `skip:count` for the count after the first `skip`.
+fn env_count(name: &str) -> (u64, u64) {
+    let value = std::env::var(name).unwrap_or_default();
+    let (skip, count) = value.split_once(':').unwrap_or(("0", &value));
+    (skip.parse().unwrap_or(0), count.parse().unwrap_or(0))
 }
 
 impl Core {
@@ -206,12 +225,12 @@ impl Core {
             credit: 0,
             drew: false,
             instructions: 0,
+            polls: 0,
             log: Vec::new(),
             undefined: Vec::new(),
-            trace_left: std::env::var("RUST_DOS_VERITE_RISC_TRACE")
-                .ok()
-                .and_then(|n| n.parse().ok())
-                .unwrap_or(0),
+            trace_left: env_count("RUST_DOS_VERITE_RISC_TRACE").1,
+            ctl_left: env_count("RUST_DOS_VERITE_CTL_LOG").1,
+            trace_skip: env_count("RUST_DOS_VERITE_RISC_TRACE").0,
         };
         core.reset(true);
         core
@@ -297,6 +316,11 @@ impl Core {
             && !self.stalled
             && !self.loader.active
             || self.loader.active && !self.in_fifo.is_empty()
+    }
+
+    /// Whether a vertical retrace interrupts the host or the RISC.
+    pub fn wants_retrace(&self) -> bool {
+        self.dword(io::INTR_EN) as u16 & intr::VERT != 0 || self.riscintr & 0x1_0000 != 0
     }
 
     /// The vertical retrace began: Intr's and riscintr's VertIntr.
@@ -586,7 +610,7 @@ impl Core {
             self.credit -= used as i64;
         }
         // Time the RISC spent waiting isn't owed to it.
-        if !self.runnable() {
+        if !self.runnable() || self.polls >= POLLS {
             self.timer = self.timer.wrapping_add(self.credit.max(0) as u32);
             self.credit = self.credit.min(0);
         }
@@ -597,7 +621,8 @@ impl Core {
     /// or is held. Draws count as one.
     pub fn run(&mut self, mem: &mut [u8], board: &mut dyn Board, budget: u64) -> u64 {
         let mut used = 0;
-        while used < budget {
+        self.polls = 0;
+        while used < budget && self.polls < POLLS {
             if self.dma.busy {
                 self.dma_pump(board);
             }
@@ -622,7 +647,7 @@ impl Core {
     // --- Diagnostics ---
 
     fn note(&mut self, line: String) {
-        if self.log.len() < 1000 {
+        if self.log.len() < 1000 || self.trace_left > 0 {
             self.log.push(line);
         }
     }
@@ -677,9 +702,12 @@ impl State for Core {
             credit,
             drew: _,
             instructions,
+            polls: _,
             log: _,
             undefined: _,
             trace_left: _,
+            ctl_left: _,
+            trace_skip: _,
         } = self;
         reg.save(w);
         pc.save(w);
@@ -740,6 +768,11 @@ impl State for Core {
         self.drew = true;
         Ok(())
     }
+}
+
+/// A word stored at `a` in `vram` as the RISC stores it.
+pub fn write_word(vram: &mut [u8], a: u32, word: u32) {
+    mem::write32(vram, a, word);
 }
 
 /// The RISC's view of the card's memory, `mem` (see the module's notes).

@@ -367,9 +367,22 @@ impl Core {
     /// A control register read: the board's registers (bytes where they
     /// are the RAMDAC's) and the pixel engine's state.
     fn control_read(&mut self, a: u32, len: u8, board: &mut dyn Board) -> u32 {
+        let value = self.control_value(a, len, board);
+        if self.ctl_left > 0 {
+            self.ctl_left -= 1;
+            self.note(format!(
+                "[VERITE] RISC at {:08X} reads {:08X}: {:08X}",
+                self.pc, a, value
+            ));
+        }
+        value
+    }
+
+    fn control_value(&mut self, a: u32, len: u8, board: &mut dyn Board) -> u32 {
         if (BOARD_REGS..PE_STATE).contains(&a) {
             let io = 0x80 + ((a - BOARD_REGS) >> 3) as u8;
             let len = if (0xB0..0xC0).contains(&io) { 1 } else { len };
+            self.polls += 1;
             board.ext_read(io, len)
         } else if a >= PE_STATE {
             self.pe.state(((a - PE_STATE) >> 3) as u8)
@@ -379,6 +392,13 @@ impl Core {
     }
 
     fn control_write(&mut self, a: u32, value: u32, size: u32, board: &mut dyn Board) {
+        if self.ctl_left > 0 {
+            self.ctl_left -= 1;
+            self.note(format!(
+                "[VERITE] RISC at {:08X} writes {:08X}: {:08X}",
+                self.pc, a, value
+            ));
+        }
         if a & !7 == super::loader::LOADER_PORT {
             self.loader_begin();
             return;
@@ -465,9 +485,33 @@ impl Core {
             return false;
         }
         self.stalled = false;
-        if self.trace_left > 0 {
+        if self.trace_skip > 0 {
+            self.trace_skip -= 1;
+        } else if self.trace_left > 0 {
             self.trace_left -= 1;
-            self.note(format!("[VERITE] {:08X}: {:08X}", cur, ir));
+            let pe = if ir >> 28 >= 0xE {
+                let (e, o) = (self.peek((ir >> 8) as u8), self.peek((ir >> 8) as u8 | 1));
+                let pe = &self.pe;
+                format!(
+                    " src {:08X} dst {:08X} fmt {:X} mask {:08X} u {:08X} v {:08X} \
+                     s2 {:08X} {:08X} cnt {:X} base {:08X} stride {:08X} y {:08X}",
+                    pe.src_mode,
+                    pe.dst_mode,
+                    pe.dst_fmt,
+                    pe.src_mask,
+                    pe.u,
+                    pe.v,
+                    e,
+                    o,
+                    pe.cnt,
+                    pe.dst_base,
+                    pe.stride,
+                    pe.y
+                )
+            } else {
+                String::new()
+            };
+            self.note(format!("[VERITE] {:08X}: {:08X}{}", cur, ir, pe));
         }
         self.pc = self.npc;
         self.npc = next(self.npc);

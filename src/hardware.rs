@@ -23,6 +23,8 @@ pub struct Hardware {
     pub env: Vec<crate::env_inject::Rule>,
     /// The PowerVR card.
     pub powervr: Option<crate::powervr::Chip>,
+    /// The Vérité's RISC.
+    pub verite: crate::verite::VeriteSettings,
     /// The IPX driver and the LAN.
     pub network: crate::net::NetSettings,
     /// The serial ports.
@@ -52,12 +54,13 @@ pub fn configure(cpu: &mut Cpu, settings: &Settings, host_layout: &'static crate
     cpu.set_env_rules(settings.environment());
     crate::voodoo::overlay::provide(&mut cpu.bus);
     cpu.bus.configure_powervr(settings.powervr);
+    let mut warnings = cpu.bus.configure_verite(&settings.verite);
     cpu.bus.set_disk_settings(settings.disk);
     cpu.bus.set_mixer(settings.mixer);
     cpu.bus.set_joystick(settings.joystick);
     cpu.bus.vga.set_composite(settings.composite);
     cpu.bus.kbd.layout = settings.keyboard_layout.layout(host_layout);
-    let mut warnings: Vec<String> = cpu.set_dos_high(settings.dos_high).err().into_iter().collect();
+    warnings.extend(cpu.set_dos_high(settings.dos_high).err());
     warnings.extend(cpu.set_upper_memory(settings.ems, settings.umb).err());
     cpu.bus.dpmi.enabled = settings.dpmi;
     crate::dos_data::set_version(&mut cpu.bus, settings.dos_version);
@@ -85,6 +88,7 @@ impl Hardware {
             gamma: settings.voodoo.gamma,
             env: settings.environment(),
             powervr: settings.powervr,
+            verite: settings.verite.clone(),
             network: settings.network.clone(),
             serial: settings.serial.clone(),
             printer: (settings.printer.clone(), settings.capture_dir.clone()),
@@ -114,6 +118,7 @@ impl Hardware {
                 ..settings.voodoo
             },
             powervr: self.powervr,
+            verite: self.verite.clone(),
             network: self.network.clone(),
             serial: self.serial.clone(),
             printer: self.printer.0.clone(),
@@ -171,6 +176,14 @@ impl Hardware {
                 None => cpu.bus.log_string("[CONFIG] No PowerVR card"),
             }
             cpu.bus.configure_powervr(settings.powervr);
+        }
+        if settings.verite != self.verite {
+            cpu.bus.log_string(&format!(
+                "[CONFIG] The Vérité's RISC: {}, {} MHz",
+                settings.verite.risc.name(),
+                settings.verite.mhz
+            ));
+            warnings.extend(cpu.bus.configure_verite(&settings.verite));
         }
         if (settings.ems, settings.umb, settings.dos_high) != self.memory {
             let on_off = |on| if on { "on" } else { "off" };

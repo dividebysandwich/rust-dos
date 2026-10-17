@@ -660,6 +660,12 @@ fn changed_settings() -> Settings {
         },
         powervr: Some(crate::powervr::Chip::Pcx2),
         powervr_filter: crate::powervr::tsp::Filter::Point,
+        verite: crate::verite::VeriteSettings {
+            risc: crate::verite::Risc::Hle,
+            mhz: 50,
+            rom: Some(PathBuf::from("/home/u/roms/verite.rom")),
+            irq: 5,
+        },
         capture_dir: PathBuf::from("/home/u/dos captures"),
         record_ui: true,
         record_shader: true,
@@ -991,6 +997,7 @@ fn saving_all_fills_in_every_setting() {
         let wanted = !matches!(
             key,
             "ultradir" | "awe32rom" | "mt32roms" | "mt32lib" | "sc55roms" | "midiport" | "password" | "username" | "token"
+                | "verite_rom"
                 | "docpath" | "fontpath" | "device" | "print_command" | "open_with" | "scene"
         );
         assert_eq!(has_key(&saved.lines().map(str::to_string).collect::<Vec<_>>(), section, key), wanted, "{}\n{}", key, saved);

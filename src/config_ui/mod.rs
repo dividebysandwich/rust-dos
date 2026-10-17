@@ -187,7 +187,9 @@ impl Page {
             }
             Page::Emulator => &[
                 Cycles, AutoFps, AutoBusyOs, Core, Fpu, Cpu, Post, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, VoodooScaleShader, VoodooMsaa,
-                VoodooAnisotropy, VoodooTextureSampling, VoodooFpsCap, VoodooGamma, VoodooOverlay, PowerVr, PowerVrFilter, Memsize, Ems, Umb, DosHigh, Dpmi,
+                VoodooAnisotropy, VoodooTextureSampling, VoodooFpsCap, VoodooGamma, VoodooOverlay, PowerVr, PowerVrFilter,
+                VeriteRisc, VeriteMhz, VeriteRom, VeriteIrq,
+                Memsize, Ems, Umb, DosHigh, Dpmi,
                 DosVersion, IdeHardDisks, BootCdrom, FloppyController, HardDiskSpeed, FloppyDiskSpeed, Joystick,
                 Deadzone, MouseSensitivity, MouseAutocapture, MouseCaptureMessages, MouseMenuHold, PauseInSettings, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, RecordShader, Autoexec,
                 ShellSuggestions, ShellColors, SaveShellHistory, VersionCheck,
@@ -272,6 +274,8 @@ pub(super) enum Pick {
     Mt32Roms,
     /// The AWE32's ROM file.
     Awe32Rom,
+    /// A Vérité board's ROM dump.
+    VeriteRom,
     /// The directory with the Sound Canvas's ROMs.
     Sc55Roms,
     /// A game set up for DOSBox, to import.

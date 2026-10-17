@@ -241,6 +241,38 @@ How the PowerVR card smooths textures:
 - **Point**: blocky texels, as with filtering off.
 - **Bilinear**: smoothed, even where the game turns filtering off.
 
+# Vérité RISC {#verite-risc}
+
+How the Rendition Vérité runs the microcode programs load into it:
+
+- **Emulated**: its RISC processor runs the microcode instruction by
+  instruction, as the card does. Every Vérité game and driver works this
+  way: Speedy3D games, Windows drivers, and the 3D Blaster PCI games
+  written for Creative's CGL.
+- **Commands only**: the commands of Rendition's Speedy3D and Windows 2D
+  microcode are carried out without running it. Faster, but only for
+  Tomb Raider's and vQuake's kind of microcode and the Windows desktop.
+
+Takes effect at the DOS prompt.
+
+# RISC speed {#verite-mhz}
+
+How many million instructions a second the Vérité's RISC runs: **25** as
+on the V1000. More draws faster than the card could, in games that wait
+for it.
+
+# Board ROM {#verite-rom}
+
+A dump of a Vérité board's 128 KB ROM, for its RISC. The 3D Blaster PCI
+games' CGL modules start the card with a loader they copy from the ROM.
+Without a dump, Rust-DOS's own loader does the same, so none is needed.
+Enter picks the file, Del goes back to the built-in loader.
+
+# Vérité IRQ {#verite-irq}
+
+The interrupt line of the Vérité. **10** suits most games. Battle Race
+needs one below 8 (**5** or **7**).
+
 # Memory {#memsize}
 
 The PC's RAM. **16 MB** runs nearly every DOS game. Windows 95 and a few

@@ -165,6 +165,18 @@
 # game sets it), point or bilinear.
 #powervr=off
 #powervr_filter=auto
+# With machine=svga_verite, how the Rendition Vérité runs the microcode
+# programs load into it: lle (its RISC emulated, for every Vérité game,
+# the 3D Blaster PCI's CGL games among them) or hle (Speedy3D's and the
+# Windows 2D microcode's commands carried out without it). How many
+# million instructions a second the RISC runs (25 as on the V1000); a dump
+# of a Vérité board's 128 KB ROM for the RISC (without one, Rust-DOS's own
+# microcode loader); the card's interrupt line (5, 7, 9, 10, 11, 12 or
+# 15). Changes take effect at the DOS prompt.
+#verite_risc=lle
+#verite_mhz=25
+#verite_rom=
+#verite_irq=10
 # Where screenshots (Ctrl+F5) and sound (Ctrl+F6), video (Ctrl+F7) and
 # animation (PrintScreen) recordings go: a folder, relative to the
 # directory rust-dos started in.

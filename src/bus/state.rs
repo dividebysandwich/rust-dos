@@ -723,5 +723,6 @@ impl Bus {
         if let Some(awe) = &mut self.awe {
             awe.after_load();
         }
+        self.verite_after_load();
     }
 }

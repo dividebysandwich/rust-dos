@@ -301,6 +301,9 @@ impl ConfigUi {
             }
             (UiKey::Enter, Input::File) if item == Item::Mt32Roms => self.open_browser(Pick::Mt32Roms),
             (UiKey::Enter, Input::File) if item == Item::Awe32Rom => self.open_browser(Pick::Awe32Rom),
+            (UiKey::Enter, Input::File) if item == Item::VeriteRom => {
+                self.open_browser(Pick::VeriteRom)
+            }
             (UiKey::Enter, Input::File) if item == Item::Sc55Roms => self.open_browser(Pick::Sc55Roms),
             (UiKey::Enter, Input::File) if item == Item::VrScene => self.open_scenes(),
             (UiKey::Enter, Input::File) => self.open_browser(Pick::SoundFont),

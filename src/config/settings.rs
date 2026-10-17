@@ -37,6 +37,8 @@ pub struct Settings {
     /// The PowerVR card, if there is one, and how it filters textures.
     pub powervr: Option<crate::powervr::Chip>,
     pub powervr_filter: crate::powervr::tsp::Filter,
+    /// The Rendition Vérité's RISC, its speed, board ROM and interrupt.
+    pub verite: crate::verite::VeriteSettings,
     /// Where screenshots and recordings go; relative to the working
     /// directory.
     pub capture_dir: PathBuf,
@@ -142,6 +144,7 @@ impl Default for Settings {
             voodoo: Default::default(),
             powervr: None,
             powervr_filter: Default::default(),
+            verite: Default::default(),
             capture_dir: PathBuf::from("capture"),
             record_ui: false,
             record_shader: false,
@@ -269,6 +272,12 @@ impl Settings {
             },
             powervr: config.powervr.unwrap_or(default.powervr),
             powervr_filter: config.powervr_filter.unwrap_or(default.powervr_filter),
+            verite: crate::verite::VeriteSettings {
+                risc: config.verite_risc.unwrap_or(default.verite.risc),
+                mhz: config.verite_mhz.unwrap_or(default.verite.mhz),
+                rom: config.verite_rom.clone().or(default.verite.rom),
+                irq: config.verite_irq.unwrap_or(default.verite.irq),
+            },
             capture_dir: config.capture_dir.clone().unwrap_or(default.capture_dir),
             record_ui: config.record_ui.unwrap_or(default.record_ui),
             record_shader: config.record_shader.unwrap_or(default.record_shader),
@@ -357,6 +366,10 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
         (Emulator, "voodoo_gamma", Some(settings.voodoo.gamma.map_or("off".to_string(), |g| g.to_string()))),
         (Emulator, "powervr", Some(settings.powervr.map_or("off", |chip| chip.name()).to_string())),
         (Emulator, "powervr_filter", Some(settings.powervr_filter.name().to_string())),
+        (Emulator, "verite_risc", Some(settings.verite.risc.name().to_string())),
+        (Emulator, "verite_mhz", Some(settings.verite.mhz.to_string())),
+        (Emulator, "verite_rom", settings.verite.rom.as_deref().map(|p| contract_home(p, home))),
+        (Emulator, "verite_irq", Some(settings.verite.irq.to_string())),
         (Emulator, "capture_dir", Some(contract_home(&settings.capture_dir, home))),
         (Emulator, "record_ui", yes_no(settings.record_ui)),
         (Emulator, "record_shader", yes_no(settings.record_shader)),

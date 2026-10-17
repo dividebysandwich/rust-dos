@@ -276,6 +276,17 @@ impl ConfigUi {
                 false,
                 &["raw", "rom", "bin"][..],
             ),
+            Pick::VeriteRom => (
+                "Pick a dump of a Vérité board's ROM (128 KB)",
+                self.settings
+                    .verite
+                    .rom
+                    .as_deref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+                false,
+                &["rom", "bin"][..],
+            ),
             Pick::ImportGame => (
                 "Pick a game's package, a GOG game's folder or a DOSBox .conf",
                 String::new(),
@@ -356,6 +367,17 @@ impl ConfigUi {
                             self.changed(Item::Awe32Rom, host);
                         }
                         Err(e) => self.error(e),
+                    },
+                    Pick::VeriteRom => match std::fs::metadata(&path) {
+                        Ok(m) if m.len() == crate::verite::lle::ROM_SIZE as u64 => {
+                            self.settings.verite.rom = Some(path);
+                            self.changed(Item::VeriteRom, host);
+                        }
+                        Ok(m) => self.error(format!(
+                            "{} bytes: a Vérité board's ROM has 131072",
+                            m.len()
+                        )),
+                        Err(e) => self.error(e.to_string()),
                     },
                     Pick::Manual => self.add_manual(&path, host),
                     Pick::AchievementsArchive => match host.identify_game(&path) {

@@ -140,6 +140,31 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                                 warn(format!("invalid powervr '{}' (off, pcx1 or pcx2)", value))
                             }
                         },
+                        "verite_risc" => match crate::verite::Risc::parse(value) {
+                            Some(risc) => config.verite_risc = Some(risc),
+                            None => warn(format!("invalid verite_risc '{}' (lle or hle)", value)),
+                        },
+                        "verite_mhz" => match value.parse::<u32>() {
+                            Ok(n) if (1..=1000).contains(&n) => config.verite_mhz = Some(n),
+                            _ => warn(format!("invalid verite_mhz '{}' (1 to 1000)", value)),
+                        },
+                        "verite_rom" => {
+                            let value = value.trim_matches('"');
+                            let path = match (value.strip_prefix("~/"), home) {
+                                (Some(rest), Some(h)) => h.join(rest),
+                                _ => PathBuf::from(value),
+                            };
+                            config.verite_rom = (!value.is_empty()).then_some(path);
+                        }
+                        "verite_irq" => match value.parse::<u8>() {
+                            Ok(n) if crate::verite::IRQS.contains(&n) => {
+                                config.verite_irq = Some(n)
+                            }
+                            _ => warn(format!(
+                                "invalid verite_irq '{}' (5, 7, 9, 10, 11, 12 or 15)",
+                                value
+                            )),
+                        },
                         "powervr_filter" => match crate::powervr::tsp::Filter::parse(value) {
                             Some(filter) => config.powervr_filter = Some(filter),
                             None => warn(format!("invalid powervr_filter '{}' (auto, point or bilinear)", value)),

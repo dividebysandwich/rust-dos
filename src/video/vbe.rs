@@ -99,6 +99,14 @@ pub struct Vbe {
     /// CRTC register 69h: bits 16-23 of the display start in doublewords,
     /// above the VGA's Start Address registers (as on S3 cards).
     pub start_high: u8,
+    /// What the host's byte addresses into video memory are XORed with:
+    /// a Vérité's MemEndian byte swapping for its big-endian RISC. A swap
+    /// sends wider accesses through bytes but for half-words with halves
+    /// swapped. Set from the card's registers, not saved.
+    pub host_xor: usize,
+    /// What the display's byte addresses are XORed with: a Vérité's CRTC
+    /// shows pixels in its RISC's byte order.
+    pub scan_xor: usize,
 }
 
 impl Default for Vbe {
@@ -119,6 +127,8 @@ impl Vbe {
             start: 0,
             latched_start: 0,
             start_high: 0,
+            host_xor: 0,
+            scan_xor: 0,
         }
     }
 
@@ -145,7 +155,7 @@ impl Vbe {
     /// Where a byte of the window at A0000h is in video memory.
     #[inline]
     pub fn window_offset(&self, offset: usize) -> usize {
-        (self.bank as usize * WINDOW_SIZE + offset) % VRAM_SIZE
+        ((self.bank as usize * WINDOW_SIZE + offset) % VRAM_SIZE) ^ self.host_xor
     }
 
     /// Where `len` bytes at physical address `addr` are in the linear
@@ -153,7 +163,14 @@ impl Vbe {
     #[inline]
     pub fn lfb_offset(&self, addr: usize, len: usize) -> Option<usize> {
         let offset = addr.checked_sub(self.lfb_base? as usize)?;
-        (offset + len <= VRAM_SIZE).then_some(offset)
+        if offset + len > VRAM_SIZE {
+            return None;
+        }
+        match self.host_xor {
+            0 => Some(offset),
+            x if len == 1 || x == 2 && len == 2 && offset & 1 == 0 => Some(offset ^ x),
+            _ => None,
+        }
     }
 
     /// The rows of the picture (in frame rows) that `len` bytes of video
@@ -201,7 +218,19 @@ impl Vbe {
 /// The mode is saved by its number, and found again among the modes.
 impl crate::savestate::State for Vbe {
     fn save(&self, w: &mut crate::savestate::Writer) {
-        let Vbe { vram, mode, lfb_base, lfb, bank, pitch, start, latched_start, start_high } = self;
+        let Vbe {
+            vram,
+            mode,
+            lfb_base,
+            lfb,
+            bank,
+            pitch,
+            start,
+            latched_start,
+            start_high,
+            host_xor: _,
+            scan_xor: _,
+        } = self;
         vram.save(w);
         mode.map_or(0, |m| m.number).save(w);
         mode.map_or((0, 0, 0), |m| (m.width, m.height, m.bpp)).save(w);
@@ -210,7 +239,19 @@ impl crate::savestate::State for Vbe {
         crate::savestate::State::save(&(*start, *latched_start, *start_high), w);
     }
     fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
-        let Vbe { vram, mode, lfb_base, lfb, bank, pitch, start, latched_start, start_high } = self;
+        let Vbe {
+            vram,
+            mode,
+            lfb_base,
+            lfb,
+            bank,
+            pitch,
+            start,
+            latched_start,
+            start_high,
+            host_xor: _,
+            scan_xor: _,
+        } = self;
         vram.load(r)?;
         let mut number = 0u16;
         number.load(r)?;

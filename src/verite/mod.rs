@@ -39,13 +39,60 @@ pub const IRQ: u8 = 10;
 /// segment and offset: the end of its ROM.
 pub const BOARD_DATA: (u16, u16) = (0xC000, 0x7F00);
 
+/// How the Vérité runs its microcode (`verite_risc`): its RISC emulated
+/// instruction by instruction, or Rendition's Speedy3D and Windows 2D
+/// commands carried out without it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Risc {
+    #[default]
+    Lle,
+    Hle,
+}
+
+impl Risc {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "lle" | "on" | "true" => Some(Risc::Lle),
+            "hle" | "off" | "false" => Some(Risc::Hle),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Risc::Lle => "lle",
+            Risc::Hle => "hle",
+        }
+    }
+}
+
+/// The Vérité's settings: how its RISC runs, how fast (`verite_mhz`,
+/// million instructions a second), the dump of a real board's ROM for
+/// the RISC (`verite_rom`) and the interrupt line (`verite_irq`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct VeriteSettings {
+    pub risc: Risc,
+    pub mhz: u32,
+    pub rom: Option<std::path::PathBuf>,
+    pub irq: u8,
+}
+
+impl Default for VeriteSettings {
+    fn default() -> Self {
+        Self { risc: Risc::Lle, mhz: 25, rom: None, irq: IRQ }
+    }
+}
+
+/// The interrupt lines `verite_irq` can be.
+pub const IRQS: [u8; 7] = [5, 7, 9, 10, 11, 12, 15];
+
 /// The board's description, which the BIOS's AX=158Dh points Rendition's
 /// library to: PCI vital product data (a read-only resource, tag 90h),
 /// whose "ZC" keyword holds the ports' and the memory's base (their top
-/// bytes), the interrupt line, the memory in 64 KB units, and fields the
-/// library keeps (0 here); then the end tag.
-pub fn board_data(memory: u32) -> Vec<u8> {
-    let mut zc = vec![(IO_BASE >> 8) as u8, (crate::video::vbe::LFB_BASE >> 24) as u8, IRQ];
+/// bytes), the interrupt line `irq`, the memory in 64 KB units, and
+/// fields the library keeps (0 here); then the end tag.
+pub fn board_data(memory: u32, irq: u8) -> Vec<u8> {
+    let mut zc = vec![(IO_BASE >> 8) as u8, (crate::video::vbe::LFB_BASE >> 24) as u8, irq];
     zc.extend_from_slice(&((memory >> 16) as u16).to_le_bytes());
     zc.extend_from_slice(&[0; 2 + 2 + 4 + 2 + 1]);
     let mut vpd = vec![b'Z', b'C', zc.len() as u8];
@@ -183,6 +230,18 @@ pub struct Verite {
     /// `RUST_DOS_VERITE_TRACE`: every access and FIFO word, in
     /// `trace.txt` in that folder.
     trace: RefCell<Option<std::io::BufWriter<std::fs::File>>>,
+    /// The chip run at a low level (`verite_risc=lle`): its RISC runs the
+    /// microcode, in place of `execute`.
+    pub lle: Option<Box<lle::Core>>,
+    /// Whether there is one, also while it runs, out of `lle`.
+    pub lle_on: bool,
+    /// The emulated time FRAMEBASEA was last written, for CRTCCTL's
+    /// FrameSwitched and FrameDisplayed.
+    pub frame_written_ns: u64,
+    /// The vertical retraces counted up to the chip's last run, and the
+    /// interrupt request it has up.
+    pub retraces: u64,
+    pub line: Option<u8>,
 }
 
 impl Default for Verite {
@@ -212,6 +271,11 @@ impl Verite {
             executed: 0,
             log: Vec::new(),
             trace: RefCell::new(None),
+            lle: None,
+            lle_on: false,
+            frame_written_ns: 0,
+            retraces: 0,
+            line: None,
         };
         if let Ok(dir) = std::env::var("RUST_DOS_VERITE_TRACE") {
             let dir = std::path::PathBuf::from(dir);
@@ -236,6 +300,35 @@ impl Verite {
         self.dac = Default::default();
         self.twod = Default::default();
         self.native = false;
+        self.frame_written_ns = 0;
+        if let Some(core) = &mut self.lle {
+            core.reset(true);
+        }
+    }
+
+    /// The interrupt line the BIOS routed the card's to.
+    pub fn irq_line(&self) -> u8 {
+        self.pci.irq_line
+    }
+
+    /// Put the chip's RISC in as `settings` ask: run at a low level, with
+    /// the board ROM `rom`, or not. The interrupt line too.
+    pub fn configure(&mut self, settings: &VeriteSettings, rom: Option<Vec<u8>>) {
+        match settings.risc {
+            Risc::Lle => {
+                let rom = rom.unwrap_or_else(lle::rom_image);
+                match &mut self.lle {
+                    Some(core) => core.set_rom(rom),
+                    None => self.lle = Some(Box::new(lle::Core::new(rom))),
+                }
+                if let Some(core) = &mut self.lle {
+                    core.mhz = settings.mhz.max(1);
+                }
+            }
+            Risc::Hle => self.lle = None,
+        }
+        self.lle_on = self.lle.is_some();
+        self.pci.irq_line = settings.irq;
     }
 
     /// The processor held, or started at `pc`: the microcode starts by
@@ -586,6 +679,10 @@ impl Verite {
     pub fn describe(&self) -> serde_json::Value {
         let seen: serde_json::Map<String, serde_json::Value> =
             self.seen.iter().map(|((op, vt), n)| (format!("{:04X}/{}", op, vt), (*n).into())).collect();
+        if let Some(core) = &self.lle {
+            let chip = core.describe();
+            return serde_json::json!({ "risc": "lle", "native": self.native, "chip": chip });
+        }
         serde_json::json!({
             "running": self.running,
             "fifo": self.fifo.len(),
@@ -743,6 +840,14 @@ impl State for Verite {
         self.dac.save(w);
         self.native.save(w);
         self.twod.save(w);
+        match &self.lle {
+            Some(core) => {
+                true.save(w);
+                core.save(w);
+            }
+            None => false.save(w),
+        }
+        self.frame_written_ns.save(w);
     }
 
     fn load(&mut self, r: &mut Reader) -> Result<()> {
@@ -770,6 +875,24 @@ impl State for Verite {
             self.native.load(r)?;
             self.twod.load(r)?;
         }
+        // States from before the low-level chip ran with the commands
+        // carried out without it; a state with it brings it along.
+        let mut lle = false;
+        if !r.is_empty() {
+            lle.load(r)?;
+        }
+        if lle {
+            let core = self.lle.get_or_insert_with(|| Box::new(lle::Core::new(lle::rom_image())));
+            core.load(r)?;
+            self.frame_written_ns.load(r)?;
+        } else {
+            self.lle = None;
+            if !r.is_empty() {
+                self.frame_written_ns.load(r)?;
+            }
+        }
+        self.lle_on = self.lle.is_some();
+        self.line = None;
         Ok(())
     }
 }

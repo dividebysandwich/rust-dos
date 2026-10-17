@@ -156,6 +156,13 @@ pub struct Config {
     /// its texture filtering (`powervr_filter`).
     pub powervr: Option<Option<crate::powervr::Chip>>,
     pub powervr_filter: Option<crate::powervr::tsp::Filter>,
+    /// The Vérité's RISC (`verite_risc`), its speed (`verite_mhz`), the
+    /// dump of a board's ROM it sees (`verite_rom`) and its interrupt line
+    /// (`verite_irq`).
+    pub verite_risc: Option<crate::verite::Risc>,
+    pub verite_mhz: Option<u32>,
+    pub verite_rom: Option<PathBuf>,
+    pub verite_irq: Option<u8>,
     /// Where screenshots and recordings go (`capture_dir`), and whether
     /// they show the settings window and the performance overlay
     /// (`record_ui`) and the CRT shader (`record_shader`).

@@ -1370,6 +1370,7 @@ impl Bus {
             self.voodoo_next_event(),
             self.banshee_next_event(),
             self.powervr_next_event(),
+            self.verite_next_event(),
             self.ide_next_event(),
             self.fdc_next_event(),
             self.net_next_event(),
@@ -1408,6 +1409,9 @@ impl Bus {
         }
         if self.powervr_next_event().is_some_and(|t| t <= now) {
             self.powervr_service();
+        }
+        if self.verite_next_event().is_some_and(|t| t <= now) {
+            self.verite_service();
         }
         if self.ide_next_event().is_some_and(|t| t <= now) {
             self.ide_service();
@@ -1954,7 +1958,7 @@ impl Bus {
     /// line stays up while any of them holds it.
     fn pci_holds(&self, irq: u8) -> bool {
         let banshee = self.banshee().and_then(|b| b.irq_up);
-        [banshee, self.powervr_line].contains(&Some(irq))
+        [banshee, self.powervr_line, self.verite.line].contains(&Some(irq))
     }
 
     /// A device's line `irq` dropped: withdraw its request, unless a PCI

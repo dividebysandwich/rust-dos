@@ -438,8 +438,10 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
     if adapter.is_et4000() {
         cpu.bus.et4000_program_standard();
     }
-    // A mach64's accelerator CRTC lets the VGA show the mode.
+    // A mach64's accelerator CRTC lets the VGA show the mode, and so does
+    // a Vérité's own.
     cpu.bus.mach64_mode_set();
+    cpu.bus.verite_mode_set();
 
     // Reset Cursor
     set_cursor(cpu, 0, 0, 0);

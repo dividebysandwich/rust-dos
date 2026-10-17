@@ -416,7 +416,10 @@ fn render_vbe(canvas: &mut [u8], canvas_w: usize, y_min: usize, y_max: usize, bu
     let colors: Vec<(u8, u8, u8)> = (0..=255u8).map(|i| bus.vga.get_rgb(i & bus.vga.dac_mask)).collect();
     let vram = &vbe.vram;
     let wrap = vbe::VRAM_SIZE - 1;
+    // A Vérité's pixels are in its RISC's byte order.
+    let swizzle = vbe.scan_xor;
     let pixel = |off: usize| -> (u8, u8, u8) {
+        let off = off ^ swizzle;
         let byte = |i: usize| vram[(off + i) & wrap];
         let word = || byte(0) as u16 | (byte(1) as u16) << 8;
         let five = |v: u16| ((v << 3) | (v >> 2)) as u8;
@@ -456,6 +459,7 @@ fn render_vbe(canvas: &mut [u8], canvas_w: usize, y_min: usize, y_max: usize, bu
         .then(|| crate::mach64::overlay::Overlay::of(&bus.mach64))
         .flatten();
     let mut line = Vec::new();
+    let mut swizzled = Vec::new();
     for fy in y_min..y_max.min(mode.height as usize * scale) {
         let dst = fy * row_bytes;
         // Doubled rows copy the one above.
@@ -498,8 +502,15 @@ fn render_vbe(canvas: &mut [u8], canvas_w: usize, y_min: usize, y_max: usize, bu
             && dst + out_len <= canvas.len()
         {
             // A row that doesn't wrap around the memory, its pixels
-            // converted a depth at a time.
-            let (src, out) = (&vram[row..row + src_len], &mut canvas[dst..dst + out_len]);
+            // converted a depth at a time; a Vérité's in its RISC's byte
+            // order put in the host's first.
+            let mut src = &vram[row..row + src_len];
+            if swizzle != 0 {
+                swizzled.clear();
+                swizzled.extend((row..row + src_len).map(|i| vram[(i ^ swizzle) & wrap]));
+                src = &swizzled;
+            }
+            let out = &mut canvas[dst..dst + out_len];
             match mode.bpp {
                 8 => vbe_row::<1>(src, out, scale, |p| colors[p[0] as usize]),
                 15 => vbe_row::<2>(src, out, scale, |p| {

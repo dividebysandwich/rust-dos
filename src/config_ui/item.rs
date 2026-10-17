@@ -150,6 +150,12 @@ pub(super) enum Item {
     VoodooOverlay,
     PowerVr,
     PowerVrFilter,
+    /// The Rendition Vérité's RISC: emulated or its commands carried out.
+    VeriteRisc,
+    VeriteMhz,
+    /// The dump of a Vérité board's ROM the RISC sees.
+    VeriteRom,
+    VeriteIrq,
     Memsize,
     /// Expanded memory and upper memory blocks.
     Ems,
@@ -366,6 +372,10 @@ impl Item {
             VoodooOverlay => "  Download Glide's DOS overlay...",
             PowerVr => "PowerVR card",
             PowerVrFilter => "PowerVR filtering",
+            VeriteRisc => "Vérité RISC",
+            VeriteMhz => "  RISC speed",
+            VeriteRom => "  Board ROM",
+            VeriteIrq => "  Vérité IRQ",
             Ems => "Expanded memory (EMS)",
             Umb => "Upper memory (UMB)",
             DosHigh => "DOS high",
@@ -505,7 +515,7 @@ impl Item {
             Item::Sc55Roms | Item::Sc55Model => frontend.host_files,
             Item::Sc55Download | Item::VoodooOverlay => frontend.window && cfg!(all(feature = "sdl", not(target_arch = "wasm32"))),
             // The ROM is a host file; the program downloads it.
-            Item::Awe32Rom => frontend.host_files,
+            Item::Awe32Rom | Item::VeriteRom => frontend.host_files,
             Item::Awe32Download => frontend.window && cfg!(all(feature = "sdl", not(target_arch = "wasm32"))),
             Item::MidiPort => host_midi(frontend),
             // The page records the canvas as it shows.
@@ -579,6 +589,10 @@ impl Item {
             Item::AutoFps | Item::AutoBusyOs => matches!(s.cycles, CpuSpeed::Auto(_)),
             Item::VoodooMemory | Item::VoodooRenderer | Item::VoodooTextureSampling | Item::VoodooFpsCap | Item::VoodooGamma => s.voodoo.enabled,
             Item::PowerVrFilter => s.powervr.is_some(),
+            Item::VeriteRisc | Item::VeriteIrq => s.machine.is_verite(),
+            Item::VeriteMhz | Item::VeriteRom => {
+                s.machine.is_verite() && s.verite.risc == crate::verite::Risc::Lle
+            }
             Item::Awe32Rom | Item::Awe32Ram => awe32(s),
             // Until there is a ROM.
             Item::Awe32Download => awe32(s) && crate::awe32::rom::find(s.sound.awe32rom.as_deref()).is_none(),
@@ -653,6 +667,7 @@ impl Item {
             }
             Item::ModemListen => Input::Text,
             Item::SoundFont | Item::Mt32Roms | Item::Awe32Rom | Item::Sc55Roms | Item::VrScene => Input::File,
+            Item::VeriteRom => Input::File,
             Item::Autoexec | Item::Rooms | Item::Phonebook | Item::Awe32Download | Item::Sc55Download | Item::VoodooOverlay | Item::VrCenter
             | Item::VrMarkKeyboard => {
                 Input::Link
@@ -801,6 +816,18 @@ impl Item {
                 Some(crate::powervr::Chip::Pcx2) => "PCX2 (m3D, Apocalypse 3Dx)",
             }
             .to_string(),
+            VeriteRisc => match s.verite.risc {
+                crate::verite::Risc::Lle => "Emulated (runs any microcode)",
+                crate::verite::Risc::Hle => "Commands only (faster)",
+            }
+            .to_string(),
+            VeriteMhz => format!("{} MHz", s.verite.mhz),
+            VeriteRom => match &s.verite.rom {
+                Some(path) if path.exists() => contract_home(path, home),
+                Some(path) => format!("{} (missing)", contract_home(path, home)),
+                None => "Built-in loader".to_string(),
+            },
+            VeriteIrq => s.verite.irq.to_string(),
             PowerVrFilter => match s.powervr_filter {
                 crate::powervr::tsp::Filter::Auto => "As the game sets it",
                 crate::powervr::tsp::Filter::Point => "Point (blocky)",

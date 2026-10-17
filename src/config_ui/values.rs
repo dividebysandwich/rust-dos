@@ -256,6 +256,12 @@ impl Item {
                 use crate::powervr::Chip;
                 each(s, [None, Some(Chip::Pcx1), Some(Chip::Pcx2)], |s, chip| s.powervr = chip)
             }
+            VeriteRisc => {
+                use crate::verite::Risc;
+                each(s, [Risc::Lle, Risc::Hle], |s, risc| s.verite.risc = risc)
+            }
+            VeriteMhz => each(s, [25, 50, 100, 200], |s, mhz| s.verite.mhz = mhz),
+            VeriteIrq => each(s, crate::verite::IRQS, |s, irq| s.verite.irq = irq),
             PowerVrFilter => {
                 use crate::powervr::tsp::Filter;
                 each(s, [Filter::Auto, Filter::Point, Filter::Bilinear], |s, filter| s.powervr_filter = filter)
@@ -388,6 +394,7 @@ impl Item {
             // row of several, whose fields have their own.
             Cycles | AutoFps | CrtCurvature | CrtGlow | Memsize | Volume(_) | ReverbMix | ChorusMix | Deadzone | MouseSensitivity | UltraDir
             | SoundFont | Mt32Roms | Awe32Rom | Awe32Download | Sc55Roms | Sc55Download | VoodooOverlay | CaptureDir | Autoexec | SbPorts | GusPorts | MacAddr
+            | VeriteRom
             | Rooms | Relay | Player | VrScene | VrScreenGlow | VrCenter | VrMarkKeyboard | VrSceneScale | VrSeat(_) | VrSeatTurn | VrResolution
             | VrLatitude | VrWeatherSound | Vfx1ViewSize
             | Lan | LanHost | Room | Password | ModemListen | Phonebook => Vec::new(),
@@ -592,6 +599,7 @@ impl Item {
             Item::Mt32Roms => s.sound.mt32roms.take().is_some(),
             Item::Sc55Roms => s.sound.sc55roms.take().is_some(),
             Item::Awe32Rom => s.sound.awe32rom.take().is_some(),
+            Item::VeriteRom => s.verite.rom.take().is_some(),
             Item::MidiPort => !std::mem::take(&mut s.sound.midiport).is_empty(),
             Item::CaptureDir => {
                 let default = Settings::default().capture_dir;
