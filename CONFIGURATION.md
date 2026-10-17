@@ -157,10 +157,12 @@ Mistakes in the file are printed as warnings; the emulator still starts.
 * `auto_busy_os` (`true`, the default, or `false`): whether
   `cycles=auto` gives a program all the host has while it keeps a
   system that idles busy. Windows 95 and 98 halt the processor while
-  nothing runs; once `auto` has seen the processor halted for half a
-  measurement in protected mode, a program that keeps it from halting
-  (under 5% halted, no frames, such as a 3D benchmark building its next
-  scene) runs at max instead of slowing down as a spinning menu would.
+  nothing runs; once `auto` has seen the processor idle for half a
+  measurement in protected mode (halted, waiting for a key in the BIOS
+  or in a busy-wait loop the emulator skips), a program that keeps it
+  from idling (under 5% idle, no frames, such as a 3D benchmark
+  building its next scene) runs at max instead of slowing down as a
+  spinning menu would.
   What `auto` has seen goes into save states, and is forgotten when the
   machine goes back to real mode (a reboot, a DOS program's end). It
   applies at once.

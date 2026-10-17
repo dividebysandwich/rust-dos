@@ -1635,7 +1635,8 @@ mod tests {
         let header = slots::header(&m.cpu, &theirs, None);
         let state = savestate::machine::save(&m.cpu);
         let before = state.clone();
-        m.states.insert("dos/1".to_string(), slots::encode(&header, &[], &state[..state.len() - 20]));
+        let cut = &state[..state.len() - 20];
+        m.states.insert("dos/1".to_string(), slots::encode(&header, &[], cut));
 
         assert!(m.with_ui(|_, host| host.load_slot(1)).is_err());
         assert_eq!(m.settings, settings);

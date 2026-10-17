@@ -214,7 +214,9 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         },
                         "auto_busy_os" => match parse_bool(value) {
                             Some(on) => config.auto_busy_os = Some(on),
-                            None => warn(format!("invalid auto_busy_os '{}' (true or false)", value)),
+                            None => {
+                                warn(format!("invalid auto_busy_os '{}' (true or false)", value))
+                            }
                         },
                         "memsize" => match parse_memsize(value) {
                             Ok(mb) => config.memsize = Some(mb),
