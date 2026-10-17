@@ -333,6 +333,8 @@ fn set_mode(cpu: &mut Cpu, bx: u16) -> u16 {
         return SUCCESS;
     }
     let Some(mode) = vbe::find_mode(bx, cpu.bus.vga.adapter.is_virge()) else {
+        let line = format!("[BIOS] VESA mode {:03X}h isn't one of this BIOS's", bx & 0x1FF);
+        cpu.bus.log_string(&line);
         return FAILED;
     };
     let mode = &mode;
