@@ -224,6 +224,15 @@ impl Pool {
         }
     }
 
+    /// Give out what is pending, without waiting for it to be drawn.
+    pub fn give_out(&self) {
+        if self.workers == 0 {
+            return;
+        }
+        let batch = std::mem::take(&mut *self.pending.lock().unwrap());
+        self.publish(batch);
+    }
+
     /// Whether jobs are waiting or being drawn.
     pub fn busy(&self) -> bool {
         if self.workers == 0 {

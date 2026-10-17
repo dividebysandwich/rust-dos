@@ -123,8 +123,12 @@ impl Voodoo {
             _ => return,
         };
 
-        let mut x = (offset & 0x3FF) as i32;
-        let y = ((offset >> 10) & 0x3FF) as i32;
+        // A Banshee's rows are 2048 pixels apart, a Voodoo2's 1024.
+        let (mut x, y) = if self.banshee.is_some() {
+            ((offset & 0x7FF) as i32, ((offset >> 11) & 0x7FF) as i32)
+        } else {
+            ((offset & 0x3FF) as i32, ((offset >> 10) & 0x3FF) as i32)
+        };
         let mut mask = mask;
         if mem_mask & 0xFFFF == 0 {
             mask &= !(0x0F - DEPTH_MSW);
@@ -134,6 +138,8 @@ impl Voodoo {
         }
 
         let buffer = match (lfb_mode >> 4) & 3 {
+            // A Banshee writes where colBufferAddr says.
+            _ if self.banshee.is_some() => 0,
             0 => self.fbi.frontbuf,
             1 => self.fbi.backbuf,
             _ => {
@@ -150,7 +156,14 @@ impl Voodoo {
 
         if lfb_mode & (1 << 8) == 0 {
             // Straight into the buffers, or behind the jobs queued.
-            let scry = if lfb_mode & (1 << 13) != 0 { (self.fbi.yorigin as i32 - y) & 0x3FF } else { y };
+            let scry = if lfb_mode & (1 << 13) != 0 {
+                (self.fbi.yorigin as i32 - y) & self.fbi.ymask
+            } else {
+                y
+            };
+            if scry < 0 {
+                return;
+            }
             // Right of the row or below the buffer, in other rows' memory,
             // which other workers draw: after them.
             if (x + 2 > self.fbi.rowpixels as i32 || scry >= self.fbi.height as i32) && self.writes_queue() {
@@ -164,13 +177,13 @@ impl Voodoo {
             let mut written = [(0i32, None, None); 2];
             let mut count = 0;
             let ram = &self.fbi.ram;
-            let destmax = (self.fbi.mask as usize + 1 - offs as usize) / 2;
+            let (stride, aux_stride) = (self.fbi.stride, self.fbi.aux_stride);
+            let color_row = dest + stride.row(scry as usize);
             let aux = self.fbi.auxoffs;
-            let depthmax = if aux == NONE { 0 } else { (self.fbi.mask as usize + 1 - aux as usize) / 2 };
+            let aux_row = aux as usize / 2 + aux_stride.row(scry as usize);
             let dither = fbz & (1 << 8) != 0;
             let tables = super::tables::tables();
             let lookup = if fbz & (1 << 11) == 0 { &tables.dither4 } else { &tables.dither2 };
-            let mut bufoffs = scry as usize * self.fbi.rowpixels as usize + x as usize;
             let alpha_planes = fbz & (1 << 18) != 0;
             let mut pix = 0;
             while mask != 0 {
@@ -188,7 +201,8 @@ impl Voodoo {
                         }
                     };
                     let mut color = None;
-                    if has_rgb && bufoffs < destmax {
+                    let at = color_row + stride.col(x as usize);
+                    if has_rgb && at < ram.len() {
                         let (r, g, b) = (sr[pix], sg[pix], sb[pix]);
                         let value = if dither {
                             let at = ((y & 3) as usize) << 11 | ((x & 3) as usize) << 1;
@@ -198,20 +212,20 @@ impl Voodoo {
                         } else {
                             ((r >> 3) << 11 | (g >> 2) << 5 | b >> 3) as u16
                         };
-                        put(dest + bufoffs, value);
+                        put(at, value);
                         color = Some(value);
                     }
                     let mut auxval = None;
-                    if aux != NONE && bufoffs < depthmax && (has_alpha || has_depth) {
+                    let at = aux_row + aux_stride.col(x as usize);
+                    if aux != NONE && at < ram.len() && (has_alpha || has_depth) {
                         let value = if has_alpha { sa[pix] as u16 } else { sw[pix] as u16 };
-                        put(aux as usize / 2 + bufoffs, value);
+                        put(at, value);
                         auxval = Some(value);
                     }
                     self.stats.pixels_out += 1;
                     written[count] = (x, color, auxval);
                     count += 1;
                 }
-                bufoffs += 1;
                 x += 1;
                 mask >>= 4;
                 pix += 1;
@@ -258,27 +272,38 @@ impl Voodoo {
     pub(crate) fn lfb_read(&self, offset: u32) -> u32 {
         self.catch_up();
         let lfb_mode = self.reg[LFB_MODE];
-        let x = ((offset << 1) & 0x3FE) as usize;
-        let y = ((offset >> 9) & 0x3FF) as i32;
-        let offs = match (lfb_mode >> 6) & 3 {
-            0 => self.fbi.rgboffs[self.fbi.frontbuf as usize],
-            1 => self.fbi.rgboffs[self.fbi.backbuf as usize],
-            2 => self.fbi.auxoffs,
-            _ => NONE,
+        let (x, y) = if self.banshee.is_some() {
+            (((offset << 1) & 0x7FE) as usize, ((offset >> 10) & 0x7FF) as i32)
+        } else {
+            (((offset << 1) & 0x3FE) as usize, ((offset >> 9) & 0x3FF) as i32)
+        };
+        let (offs, stride) = match (lfb_mode >> 6) & 3 {
+            0 => (self.fbi.rgboffs[self.fbi.frontbuf as usize], self.fbi.stride),
+            1 => (self.fbi.rgboffs[self.fbi.backbuf as usize], self.fbi.stride),
+            2 => (self.fbi.auxoffs, self.fbi.aux_stride),
+            _ => (NONE, self.fbi.stride),
         };
         if offs == NONE {
             return 0xFFFF_FFFF;
         }
-        let scry = if lfb_mode & (1 << 13) != 0 { (self.fbi.yorigin as i32 - y) & 0x3FF } else { y };
-        let bufmax = (self.fbi.mask as usize + 1 - offs as usize) / 2;
-        let bufoffs = scry as usize * self.fbi.rowpixels as usize + x;
-        if bufoffs >= bufmax {
+        let scry = if lfb_mode & (1 << 13) != 0 {
+            (self.fbi.yorigin as i32 - y) & self.fbi.ymask
+        } else {
+            y
+        };
+        if scry < 0 {
             return 0xFFFF_FFFF;
         }
-        let base = offs as usize / 2 + bufoffs;
+        let row = offs as usize / 2 + stride.row(scry as usize);
         let ram = &self.fbi.ram;
-        let word = |at: usize| if at < ram.len() { ram.get(at) as u32 } else { 0xFFFF };
-        let mut data = word(base) | word(base + 1) << 16;
+        let word = |x: usize| {
+            let at = row + stride.col(x);
+            if at < ram.len() { ram.get(at) as u32 } else { 0xFFFF }
+        };
+        if row + stride.col(x) >= ram.len() {
+            return 0xFFFF_FFFF;
+        }
+        let mut data = word(x) | word(x + 1) << 16;
         if lfb_mode & (1 << 15) != 0 {
             data = data.rotate_left(16);
         }

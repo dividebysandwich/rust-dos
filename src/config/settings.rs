@@ -212,6 +212,13 @@ impl Settings {
         VideoSetup { adapter: self.machine, mono_monitor }
     }
 
+    /// The 3dfx card the machine has: the display adapter itself with
+    /// `machine=svga_voodoo3` or `svga_banshee`, which leaves no room for
+    /// the add-on card `voodoo` asks for; otherwise that one, if any.
+    pub fn voodoo_board(&self) -> Option<crate::voodoo::Board> {
+        self.machine.voodoo_board().or(self.voodoo.board())
+    }
+
     /// The guest environment variables every setting asks for. A name two
     /// settings give takes the value of the later one.
     pub fn environment(&self) -> Vec<crate::env_inject::Rule> {

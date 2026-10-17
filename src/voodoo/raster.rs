@@ -88,7 +88,15 @@ pub struct RasterState {
     /// top 6 on a Voodoo2.
     pub fogdelta_mask: i32,
     pub yorigin: u32,
+    /// The bits of a row counted from the Y origin at the bottom: 10 on a
+    /// Voodoo Graphics and Voodoo2, where rows wrap around, all (-1) on a
+    /// Banshee.
+    pub ymask: i32,
+    /// The pixels in a row of the colour buffer, and how its rows and
+    /// the auxiliary buffer's lie in memory.
     pub rowpixels: usize,
+    pub stride: Stride,
+    pub aux_stride: Stride,
     /// Word offsets of the colour buffer drawn into and of the auxiliary
     /// buffer, if there is one.
     pub dest: usize,
@@ -101,6 +109,38 @@ pub struct RasterState {
     /// The stipple register, which pattern-mode stippling reads.
     pub stipple: u32,
     pub tmu: [Option<TmuRaster>; 2],
+}
+
+/// How the rows of a buffer lie in memory: one after another, `words`
+/// apart, or (a Banshee's tiled buffers) in tiles of 64 pixels by 32
+/// rows, 2048 words each, with `words` from one row of tiles to the next.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Stride {
+    pub words: usize,
+    pub tiled: bool,
+}
+
+impl Stride {
+    pub const fn linear(words: usize) -> Self {
+        Self { words, tiled: false }
+    }
+
+    /// The word offset of row `y`'s first pixel.
+    #[inline(always)]
+    pub fn row(self, y: usize) -> usize {
+        if self.tiled { (y >> 5) * self.words + (y & 31) * 64 } else { y * self.words }
+    }
+
+    /// The word offset of pixel `x` from its row's first.
+    #[inline(always)]
+    pub fn col(self, x: usize) -> usize {
+        if self.tiled { (x & 63) | (x >> 6) << 11 } else { x }
+    }
+
+    /// The pixels a row holds.
+    pub fn pixels(self) -> usize {
+        if self.tiled { self.words / 2048 * 64 } else { self.words }
+    }
 }
 
 /// A triangle's start values at vertex A and their gradients: colours
@@ -317,12 +357,12 @@ impl<'a> Row<'a> {
                 dither_lookup = Some(&tables().dither2[y3 << 11..(y3 + 1) << 11]);
             }
         }
-        let row = scry as usize * st.rowpixels;
+        let scry = scry as usize;
         Self {
             st,
             m,
-            dest: st.dest + row,
-            depth: st.aux.map(|aux| aux + row),
+            dest: st.dest + st.stride.row(scry),
+            depth: st.aux.map(|aux| aux + st.aux_stride.row(scry)),
             dither,
             dither4,
             dither_lookup,
@@ -339,8 +379,14 @@ impl<'a> Row<'a> {
         }
     }
 
+    /// The word of pixel `x` in the colour buffer's row.
+    #[inline(always)]
+    fn color_word(&self, x: i32) -> usize {
+        self.dest + self.st.stride.col(x as usize)
+    }
+
     fn depth_at(&self, x: i32) -> Option<i32> {
-        self.depth.map(|d| self.get(d + x as usize) as i32)
+        self.depth.map(|d| self.get(d + self.st.aux_stride.col(x as usize)) as i32)
     }
 
     /// Stippling, the depth value and the depth test
@@ -507,7 +553,7 @@ impl<'a> Row<'a> {
         // Alpha blending with the colour and alpha already there.
         let am = self.m.am;
         if bit(am, 4) {
-            let dpix = self.get(self.dest + x as usize) as i32;
+            let dpix = self.get(self.color_word(x)) as i32;
             let (mut dr, mut dg, mut db) = ((dpix >> 8) & 0xF8, (dpix >> 3) & 0xFC, (dpix << 3) & 0xF8);
             let da = match self.depth_at(x) {
                 Some(d) if bit(fbz, 18) => d,
@@ -572,14 +618,14 @@ impl<'a> Row<'a> {
                 }
                 None => ((r >> 3) as u16, (g >> 2) as u16, (b >> 3) as u16),
             };
-            self.set(self.dest + x as usize, r5 << 11 | g6 << 5 | b5);
+            self.set(self.color_word(x), r5 << 11 | g6 << 5 | b5);
         }
         // Depth, or alpha with the alpha planes.
         if let Some(depth) = self.depth
             && bit(fbz, 10)
         {
             let value = if bit(fbz, 18) { a } else { depthval };
-            self.set(depth + x as usize, value as u16);
+            self.set(depth + self.st.aux_stride.col(x as usize), value as u16);
         }
         stats.pixels_out += 1;
     }
@@ -1070,7 +1116,7 @@ pub fn variant(st: &RasterState, texcount: usize) -> Option<usize> {
 /// The screen row scanline `y` draws into: flipped with the Y origin at
 /// the bottom (fbzMode bit 17).
 pub(crate) fn screen_y(st: &RasterState, y: i32, flip: bool) -> i32 {
-    if flip { (st.yorigin as i32 - y) & 0x3FF } else { y }
+    if flip { (st.yorigin as i32 - y) & st.ymask } else { y }
 }
 
 /// Draw pixels `startx..stopx` of scanline `y` of a triangle with `TMUS`
@@ -1184,6 +1230,9 @@ pub fn lfb_pixel(st: &RasterState, x: i32, y: i32, color: u32, depth: i32, stipp
         stats.clip_fail += 1;
         return;
     }
+    if scry < 0 || x < 0 {
+        return;
+    }
     let row = Row::new(st, Modes::of::<Generic>(st), y, scry);
     let iterw = (depth as i64) << (30 - 16);
     let iterz = depth << 12;
@@ -1209,13 +1258,16 @@ pub fn lfb_pixel(st: &RasterState, x: i32, y: i32, color: u32, depth: i32, stipp
 /// with zaColor's depth (`raster_fastfill`).
 pub fn fastfill_row(st: &RasterState, dither: &[u16; 16], y: i32, startx: i32, stopx: i32, stats: &mut Stats) {
     let scry = screen_y(st, y, bit(st.fbz_mode, 17));
+    if scry < 0 {
+        return;
+    }
     let (startx, stopx) = (startx.max(0) as usize, stopx.max(0) as usize);
-    let row = scry as usize * st.rowpixels;
     let len = st.fb.len();
     if bit(st.fbz_mode, 9) {
         let pattern = &dither[(y as usize & 3) * 4..(y as usize & 3) * 4 + 4];
+        let row = st.dest + st.stride.row(scry as usize);
         for x in startx..stopx {
-            let at = st.dest + row + x;
+            let at = row + st.stride.col(x);
             if at < len {
                 st.fb.set(at, pattern[x & 3]);
             }
@@ -1226,8 +1278,9 @@ pub fn fastfill_row(st: &RasterState, dither: &[u16; 16], y: i32, startx: i32, s
         && let Some(aux) = st.aux
     {
         let color = st.za_color as u16;
+        let row = aux + st.aux_stride.row(scry as usize);
         for x in startx..stopx {
-            let at = aux + row + x;
+            let at = row + st.aux_stride.col(x);
             if at < len {
                 st.fb.set(at, color);
             }
@@ -1321,7 +1374,10 @@ mod tests {
             chroma_range: 0,
             fogdelta_mask: 0xFC,
             yorigin: 479,
+            ymask: 0x3FF,
             rowpixels: 1024,
+            stride: Stride::linear(1024),
+            aux_stride: Stride::linear(1024),
             dest: 0,
             aux: Some(1 << 20),
             fogblend: std::array::from_fn(|i| (i * 4) as u8),

@@ -13,7 +13,14 @@ impl Bus {
         if self.voodoo.as_ref().map(|v| v.board) == board {
             return;
         }
+        self.lower_banshee_irq();
         self.voodoo = board.map(Voodoo::new);
+        if board.is_some_and(|b| b.banshee().is_some()) {
+            self.banshee_settle();
+        } else {
+            self.vga.svga_ext = None;
+            self.vga.invalidate_timing();
+        }
         // The accesses of a session, for `tests/voodoo_tests.rs` to replay.
         if let (Some(v), Ok(path)) = (&mut self.voodoo, std::env::var("RUST_DOS_VOODOO_RECORD"))
             && let Err(e) = v.record_into(std::path::Path::new(&path))
@@ -26,19 +33,23 @@ impl Bus {
 
     /// A PCI reset of the 3dfx card, as at power-on.
     pub fn reset_voodoo(&mut self) {
+        self.lower_banshee_irq();
         if let Some(v) = &mut self.voodoo {
             v.reset();
             self.vga.mark_dirty_full();
         }
+        self.banshee_settle();
     }
 
-    /// The card's BAR0 or video clock changed.
+    /// The card's BAR0 or video clock changed, or a Banshee's BARs or
+    /// interrupt line: a request it has up moves to the new line.
     pub(crate) fn voodoo_moved(&mut self) {
         self.vga.mark_dirty_full();
+        self.sync_banshee_irq();
     }
 
     /// The time, as the card needs it.
-    fn voodoo_now(&self) -> Now {
+    pub(crate) fn voodoo_now(&self) -> Now {
         Now { ns: self.clock.now_ns(), ticks: self.clock.now_ticks() }
     }
 
@@ -47,13 +58,20 @@ impl Bus {
     /// mirror at the top.
     #[inline]
     pub fn voodoo_at(&self, addr: usize) -> Option<u32> {
-        let base = self.voodoo.as_ref()?.base()? as usize;
+        let v = self.voodoo.as_ref()?;
+        if let Some(b) = v.banshee() {
+            return b.window_at(addr as u32, self.ram.len());
+        }
+        let base = v.base()? as usize;
         (addr >= base && addr < base + WINDOW as usize && base >= self.ram.len() && addr < 0xFFFE_0000)
             .then(|| (addr - base) as u32)
     }
 
     pub(crate) fn voodoo_read_16(&self, offset: u32) -> u16 {
         let Some(v) = &self.voodoo else { return 0xFFFF };
+        if v.banshee.is_some() {
+            return self.banshee_read_bytes(offset, 2) as u16;
+        }
         if offset & 1 != 0 {
             return 0xFFFF;
         }
@@ -63,6 +81,9 @@ impl Bus {
 
     pub(crate) fn voodoo_read_32(&self, offset: u32) -> u32 {
         let Some(v) = &self.voodoo else { return 0xFFFF_FFFF };
+        if v.banshee.is_some() {
+            return self.banshee_read_bytes(offset, 4);
+        }
         let now = self.voodoo_now();
         match offset & 3 {
             0 => v.read(offset, now),
@@ -72,6 +93,10 @@ impl Bus {
     }
 
     pub(crate) fn voodoo_write_16(&mut self, offset: u32, value: u16) {
+        if self.voodoo.as_ref().is_some_and(|v| v.banshee.is_some()) {
+            self.banshee_write_bytes(offset, value as u32, 2);
+            return;
+        }
         if offset & 1 != 0 {
             return;
         }
@@ -83,6 +108,10 @@ impl Bus {
     }
 
     pub(crate) fn voodoo_write_32(&mut self, offset: u32, value: u32) {
+        if self.voodoo.as_ref().is_some_and(|v| v.banshee.is_some()) {
+            self.banshee_write_bytes(offset, value, 4);
+            return;
+        }
         match offset & 3 {
             0 => self.voodoo_write(offset, value, 0xFFFF_FFFF),
             2 => {
@@ -104,15 +133,28 @@ impl Bus {
         }
     }
 
-    /// A byte written to the window, which the card ignores.
-    pub(crate) fn voodoo_write_8(&mut self) {
+    /// A byte written to the window, which a Voodoo Graphics or Voodoo2
+    /// ignores and a Banshee takes.
+    pub(crate) fn voodoo_write_8(&mut self, offset: u32, value: u8) {
+        if self.voodoo.as_ref().is_some_and(|v| v.banshee.is_some()) {
+            self.banshee_write_bytes(offset, value as u32, 1);
+            return;
+        }
         if let Some(v) = &mut self.voodoo {
             v.byte_write();
         }
         self.voodoo_log();
     }
 
-    fn voodoo_write(&mut self, offset: u32, value: u32, mask: u32) {
+    /// A byte read from the window: a Banshee's, open bus otherwise.
+    pub(crate) fn voodoo_read_8(&self, offset: u32) -> u8 {
+        if self.voodoo.as_ref().is_some_and(|v| v.banshee.is_some()) {
+            return self.banshee_read_bytes(offset, 1) as u8;
+        }
+        0xFF
+    }
+
+    pub(crate) fn voodoo_write(&mut self, offset: u32, value: u32, mask: u32) {
         let _profile = crate::profile::zone(crate::profile::Zone::Voodoo);
         // A write behind a swap the frame rate cap holds back (the rest of
         // the code the program ran before it was held) waits for the swap.
@@ -132,7 +174,7 @@ impl Bus {
     /// Carry out what a write asked for: the CPU waiting for a full FIFO,
     /// a swap's retrace among the timer events, the program held until a
     /// swap's turn under the frame rate cap.
-    fn voodoo_effect(&mut self, effect: Effect) {
+    pub(crate) fn voodoo_effect(&mut self, effect: Effect) {
         if let Some(to) = effect.stall_to {
             self.clock.stall_to(to);
             let now = self.voodoo_now();
@@ -147,6 +189,9 @@ impl Bus {
         }
         if effect.reschedule || effect.stall_to.is_some() {
             self.clock.schedule(self.next_event());
+        }
+        if effect.settle {
+            self.banshee_settle_ext();
         }
         self.voodoo_log();
     }

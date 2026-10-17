@@ -89,7 +89,8 @@ impl Chip {
     pub fn of(model: Model) -> &'static Chip {
         match model {
             Model::Voodoo1 => &VOODOO1,
-            Model::Voodoo2 => &VOODOO2,
+            // The Banshee's 3D engine is the Voodoo2's.
+            Model::Voodoo2 | Model::Banshee => &VOODOO2,
         }
     }
 

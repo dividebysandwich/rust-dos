@@ -47,7 +47,7 @@ pub fn configure(cpu: &mut Cpu, settings: &Settings, host_layout: &'static crate
     cpu.bus.observe.enabled = settings.idle_skip;
     cpu.bus.idle_hint = settings.idle_hint;
     crate::video::bios::install(&mut cpu.bus, settings.video_setup());
-    cpu.bus.configure_voodoo(settings.voodoo.board());
+    cpu.bus.configure_voodoo(settings.voodoo_board());
     cpu.bus.set_voodoo_texture_sampling(settings.voodoo.texture_sampling);
     cpu.set_env_rules(settings.environment());
     crate::voodoo::overlay::provide(&mut cpu.bus);
@@ -152,8 +152,8 @@ impl Hardware {
             ));
             crate::video::bios::switch(cpu, setup);
         }
-        let voodoo = settings.voodoo.board();
-        if voodoo != self.voodoo {
+        let voodoo = settings.voodoo_board();
+        if voodoo != self.video.adapter.voodoo_board().or(self.voodoo) {
             match voodoo {
                 Some(board) => cpu.bus.log_string(&format!("[CONFIG] A 3dfx {}", board.describe())),
                 None => cpu.bus.log_string("[CONFIG] No 3dfx card"),

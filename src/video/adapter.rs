@@ -25,6 +25,13 @@ pub enum Adapter {
     /// BIOS modes up to 1024x768 in 256 colours, 32K and 64K colours, and
     /// VBE 1.2 through the 64 KB window its segment register banks.
     Et4000,
+    /// A 3dfx Voodoo3 3000 with 16 MB: the VGA, and the card's own modes,
+    /// 2D engine and 3D engine, which 3dfx's drivers use (Windows' with
+    /// Direct3D and an OpenGL ICD on the primary display).
+    Voodoo3,
+    /// A 3dfx Voodoo Banshee with 16 MB: the Voodoo3's registers with one
+    /// texture unit.
+    Banshee,
     /// IBM's VGA, without VESA modes.
     Vga,
     /// IBM's Enhanced Graphics Adapter with an Enhanced Color Display: 16
@@ -45,13 +52,15 @@ pub enum Adapter {
 }
 
 impl Adapter {
-    pub const ALL: [Adapter; 12] = [
+    pub const ALL: [Adapter; 14] = [
         Adapter::Svga,
         Adapter::S3,
         Adapter::S3Virge,
         Adapter::S3VirgeVx,
         Adapter::Verite,
         Adapter::Et4000,
+        Adapter::Voodoo3,
+        Adapter::Banshee,
         Adapter::Vga,
         Adapter::Ega,
         Adapter::Cga,
@@ -71,6 +80,8 @@ impl Adapter {
             "svga_s3virgevx" | "virgevx" | "s3virgevx" => Some(Adapter::S3VirgeVx),
             "svga_verite" | "verite" | "rendition" => Some(Adapter::Verite),
             "svga_et4000" | "et4000" | "tseng" => Some(Adapter::Et4000),
+            "svga_voodoo3" | "voodoo3" => Some(Adapter::Voodoo3),
+            "svga_banshee" | "banshee" => Some(Adapter::Banshee),
             "vga" | "vgaonly" => Some(Adapter::Vga),
             "ega" => Some(Adapter::Ega),
             "cga" => Some(Adapter::Cga),
@@ -89,6 +100,8 @@ impl Adapter {
             Adapter::S3VirgeVx => "svga_s3virgevx",
             Adapter::Verite => "svga_verite",
             Adapter::Et4000 => "svga_et4000",
+            Adapter::Voodoo3 => "svga_voodoo3",
+            Adapter::Banshee => "svga_banshee",
             Adapter::Vga => "vga",
             Adapter::Ega => "ega",
             Adapter::Cga => "cga",
@@ -107,6 +120,8 @@ impl Adapter {
             Adapter::S3VirgeVx => "S3 ViRGE/VX (3D)",
             Adapter::Verite => "Rendition Vérité (3D)",
             Adapter::Et4000 => "Tseng ET4000 (HiColor)",
+            Adapter::Voodoo3 => "3dfx Voodoo3 (3D)",
+            Adapter::Banshee => "3dfx Voodoo Banshee (3D)",
             Adapter::Vga => "VGA",
             Adapter::Ega => "EGA",
             Adapter::Cga => "CGA",
@@ -118,7 +133,24 @@ impl Adapter {
 
     /// Whether the BIOS has the VESA extensions (INT 10h AH=4Fh).
     pub fn has_vbe(self) -> bool {
-        matches!(self, Adapter::Svga | Adapter::Et4000 | Adapter::Verite) || self.is_s3()
+        matches!(self, Adapter::Svga | Adapter::Et4000 | Adapter::Verite)
+            || self.is_s3()
+            || self.is_banshee()
+    }
+
+    /// Whether the adapter is a 3dfx Banshee or Voodoo3, the card in
+    /// `voodoo::banshee`.
+    pub fn is_banshee(self) -> bool {
+        matches!(self, Adapter::Voodoo3 | Adapter::Banshee)
+    }
+
+    /// The 3dfx board the adapter is, if it is one.
+    pub fn voodoo_board(self) -> Option<crate::voodoo::Board> {
+        match self {
+            Adapter::Voodoo3 => Some(crate::voodoo::Board::Voodoo3),
+            Adapter::Banshee => Some(crate::voodoo::Board::Banshee),
+            _ => None,
+        }
     }
 
     /// Whether the adapter is one of S3's chips: the Trio64's registers
@@ -145,7 +177,9 @@ impl Adapter {
     /// Whether the BIOS has the VGA's functions: the display combination
     /// code (INT 10h AH=1Ah), the state information (AH=1Bh) and the DAC.
     pub fn vga_bios(self) -> bool {
-        matches!(self, Adapter::Svga | Adapter::Vga | Adapter::Et4000 | Adapter::Verite) || self.is_s3()
+        matches!(self, Adapter::Svga | Adapter::Vga | Adapter::Et4000 | Adapter::Verite)
+            || self.is_s3()
+            || self.is_banshee()
     }
 
     /// Whether the BIOS has the EGA's functions: the palette registers

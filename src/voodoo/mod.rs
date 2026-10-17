@@ -29,6 +29,7 @@
 //! (`blit`), and the constants where the two chips differ (`chip`).
 
 pub mod backlog;
+pub mod banshee;
 pub mod blit;
 pub mod chip;
 pub mod cmdfifo;
@@ -73,6 +74,9 @@ pub enum Model {
     /// The Voodoo2 (CVG): its command FIFO, triangle setup engine, 2D
     /// blitter and the rest it added.
     Voodoo2,
+    /// The Banshee and Voodoo3 (`banshee`): the Voodoo2's 3D engine on a
+    /// display adapter.
+    Banshee,
 }
 
 impl Model {
@@ -88,6 +92,7 @@ impl Model {
         match self {
             Model::Voodoo1 => "voodoo1",
             Model::Voodoo2 => "voodoo2",
+            Model::Banshee => "banshee",
         }
     }
 }
@@ -104,9 +109,22 @@ pub enum Board {
     Voodoo2,
     /// A Voodoo2: 4 MB frame buffer, two texture units with 4 MB each (12 MB).
     Voodoo2Max,
+    /// A Voodoo Banshee with 16 MB, the display adapter
+    /// (`machine=svga_banshee`), not an add-on card.
+    Banshee,
+    /// A Voodoo3 3000 with 16 MB, the display adapter
+    /// (`machine=svga_voodoo3`).
+    Voodoo3,
 }
 
-crate::state_enum!(Board { Board::Standard, Board::Max, Board::Voodoo2, Board::Voodoo2Max });
+crate::state_enum!(Board {
+    Board::Standard,
+    Board::Max,
+    Board::Voodoo2,
+    Board::Voodoo2Max,
+    Board::Banshee,
+    Board::Voodoo3,
+});
 
 impl Board {
     /// The boards in the order saves and recordings number them.
@@ -130,6 +148,8 @@ impl Board {
             Board::Max => "Voodoo Graphics, 12 MB (two texture units)",
             Board::Voodoo2 => "Voodoo2, 8 MB",
             Board::Voodoo2Max => "Voodoo2, 12 MB",
+            Board::Banshee => "Voodoo Banshee, 16 MB",
+            Board::Voodoo3 => "Voodoo3 3000, 16 MB",
         }
     }
 
@@ -141,6 +161,7 @@ impl Board {
             (Model::Voodoo1, _) => Board::Max,
             (Model::Voodoo2, ..=8) => Board::Voodoo2,
             (Model::Voodoo2, _) => Board::Voodoo2Max,
+            (Model::Banshee, _) => Board::Voodoo3,
         }
     }
 
@@ -148,6 +169,16 @@ impl Board {
         match self {
             Board::Standard | Board::Max => Model::Voodoo1,
             Board::Voodoo2 | Board::Voodoo2Max => Model::Voodoo2,
+            Board::Banshee | Board::Voodoo3 => Model::Banshee,
+        }
+    }
+
+    /// Which display adapter it is, if it is one.
+    pub fn banshee(self) -> Option<banshee::Kind> {
+        match self {
+            Board::Banshee => Some(banshee::Kind::Banshee),
+            Board::Voodoo3 => Some(banshee::Kind::Voodoo3),
+            _ => None,
         }
     }
 
@@ -162,19 +193,21 @@ impl Board {
             Board::Standard => 4,
             Board::Max | Board::Voodoo2Max => 12,
             Board::Voodoo2 => 8,
+            Board::Banshee | Board::Voodoo3 => 16,
         }
     }
 
     fn frame_buffer(self) -> usize {
         match self {
             Board::Standard => 2 << 20,
+            Board::Banshee | Board::Voodoo3 => banshee::MEMORY,
             _ => 4 << 20,
         }
     }
 
     fn texture_units(self) -> usize {
         match self {
-            Board::Standard => 1,
+            Board::Standard | Board::Banshee => 1,
             _ => 2,
         }
     }
@@ -183,6 +216,7 @@ impl Board {
         match self {
             Board::Standard | Board::Voodoo2 => 2 << 20,
             Board::Max | Board::Voodoo2Max => 4 << 20,
+            Board::Banshee | Board::Voodoo3 => banshee::MEMORY,
         }
     }
 }
@@ -298,6 +332,9 @@ pub struct Effect {
     /// A swap waits for its turn under the frame rate cap: the program
     /// waits until PIT tick `hold_to`, interrupts going on (`Bus::hold`).
     pub hold_to: Option<u64>,
+    /// A Banshee's video registers changed: the display's mode and timing
+    /// need working out again.
+    pub settle: bool,
 }
 
 /// A swap waiting for the vertical retrace it is due at: the retrace's
@@ -328,6 +365,12 @@ pub struct Fbi {
     pub width: u32,
     pub height: u32,
     pub rowpixels: u32,
+    /// How the rows of the colour buffers and of the auxiliary buffer lie
+    /// in memory (a Banshee's own, or `rowpixels` apart), and the bits of
+    /// a row counted from the Y origin.
+    pub stride: raster::Stride,
+    pub aux_stride: raster::Stride,
+    pub ymask: i32,
     /// The memory FIFO's size in entries, 0 when it is off.
     pub fifo_size: u32,
 
@@ -370,7 +413,7 @@ crate::state_fields!(Fbi {
     startr, startg, startb, starta, startz, startw,
     drdx, dgdx, dbdx, dadx, dzdx, dwdx, drdy, dgdy, dbdy, dady, dzdy, dwdy,
     fogblend, fogdelta,
-} skip { mask, rgboffs, auxoffs, yorigin, rowpixels, fifo_size });
+} skip { mask, rgboffs, auxoffs, yorigin, rowpixels, stride, aux_stride, ymask, fifo_size });
 
 impl State for Vram {
     fn save(&self, w: &mut Writer) {
@@ -404,6 +447,9 @@ impl Fbi {
             width: 640,
             height: 480,
             rowpixels: 640,
+            stride: raster::Stride::linear(640),
+            aux_stride: raster::Stride::linear(640),
+            ymask: 0x3FF,
             fifo_size: 0,
             ax: 0,
             ay: 0,
@@ -538,6 +584,9 @@ pub struct Voodoo {
     pub(crate) svert: [tsu::Vertex; 3],
     pub(crate) sverts: u32,
     pub(crate) blt: blit::Blit,
+    /// The Banshee's or Voodoo3's own state when the card is one: the
+    /// display adapter around the 3D engine, whose memory it shares.
+    pub banshee: Option<Box<banshee::Banshee>>,
 }
 
 /// Frame buffer writes that go out to the workers together.
@@ -569,13 +618,7 @@ impl Voodoo {
             dac: [0; 8],
             dac_read: 0,
             fbi: Fbi::new(board.frame_buffer()),
-            tmu: (0..units)
-                .map(|i| {
-                    let mut tmu = Tmu::new(board.texture_memory(), 0x100 * (i + 1));
-                    tmu.v2 = chip.v2();
-                    tmu
-                })
-                .collect(),
+            tmu: Vec::new(),
             send_config: false,
             stats: Stats::default(),
             clut: default_clut(),
@@ -609,7 +652,24 @@ impl Voodoo {
             svert: Default::default(),
             sverts: 0,
             blt: Default::default(),
+            banshee: board.banshee().map(|kind| Box::new(banshee::Banshee::new(kind))),
         };
+        v.tmu = (0..units)
+            .map(|i| {
+                let base = 0x100 * (i + 1);
+                if v.banshee.is_some() {
+                    // One memory for everything, a Voodoo2's texture
+                    // formats, and base addresses in bytes.
+                    let mut tmu = Tmu::with_ram(v.fbi.ram.clone(), base);
+                    tmu.v2 = true;
+                    tmu.byte_base = true;
+                    return tmu;
+                }
+                let mut tmu = Tmu::new(board.texture_memory(), base);
+                tmu.v2 = chip.v2();
+                tmu
+            })
+            .collect();
         v.reset();
         v
     }
@@ -647,7 +707,9 @@ impl Voodoo {
             tmu.reset();
         }
         let init = [FBI_INIT0, FBI_INIT1, FBI_INIT2, FBI_INIT3, FBI_INIT4, FBI_INIT5, FBI_INIT6, FBI_INIT7];
-        for (reg, value) in init.into_iter().zip(self.chip.fbi_init) {
+        // A Banshee has none: its buffers are where its 3D registers say.
+        let values = if self.banshee.is_some() { [0; 8] } else { self.chip.fbi_init };
+        for (reg, value) in init.into_iter().zip(values) {
             // fbiInit5-7 are a Voodoo2's, 0 on a Voodoo Graphics.
             self.reg[reg] = value;
         }
@@ -663,12 +725,18 @@ impl Voodoo {
         if let Some(mirror) = &mut self.mirror {
             mirror.forget_textures();
         }
+        if let Some(b) = &mut self.banshee {
+            b.reset();
+        }
     }
 
     // --- PCI ---
 
     /// A byte of the configuration space.
     pub fn config_read(&self, reg: u8) -> u8 {
+        if let Some(b) = &self.banshee {
+            return b.config_read(reg);
+        }
         let dword = match reg & 0xFC {
             0x00 => (self.chip.device_id as u32) << 16 | 0x121A,
             0x04 => 0x0080_0000 | self.pci.command as u32,
@@ -688,6 +756,9 @@ impl Voodoo {
     /// window or its video clock changed.
     pub fn config_write(&mut self, reg: u8, value: u8) -> bool {
         self.record(b'P', [reg as u32, value as u32, 0]);
+        if let Some(b) = &mut self.banshee {
+            return b.config_write(reg, value);
+        }
         match reg {
             0x04 => self.pci.command = (self.pci.command & 0xFF00) | (value & 0x23) as u16,
             0x05 => self.pci.command = (self.pci.command & 0x00FF) | ((value & 0x01) as u16) << 8,
@@ -733,6 +804,9 @@ impl Voodoo {
 
     /// A dword of the window at byte `offset`, 4-aligned (`voodoo_r`).
     pub fn read(&self, offset: u32, now: Now) -> u32 {
+        if self.banshee.is_some() {
+            return self.banshee_read(offset & !3, now);
+        }
         let index = (offset >> 2) & 0x3F_FFFF;
         if index & (0xC0_0000 / 4) == 0 {
             self.register_read(index, now)
@@ -769,6 +843,9 @@ impl Voodoo {
     /// A dword of the window written, or the half `mask` selects
     /// (`voodoo_w`).
     pub fn write(&mut self, offset: u32, data: u32, mask: u32, now: Now) -> Effect {
+        if self.banshee.is_some() {
+            return self.banshee_write(offset & !3, data, mask, now);
+        }
         let index = (offset >> 2) & 0x3F_FFFF;
         self.record(b'W', [index, data, mask]);
         let mut effect = Effect::default();
@@ -827,6 +904,24 @@ impl Voodoo {
         self.pool.flush();
         self.outstanding.set(false);
         self.tmu_in_use.set(0);
+    }
+
+    /// Whether the workers are still drawing, with everything queued
+    /// given to them first but without waiting for them: a Banshee's busy
+    /// bits, which a program polls until they clear.
+    pub(crate) fn drawing(&self) -> bool {
+        if !self.writes_queue() {
+            return false;
+        }
+        self.submit_words();
+        self.release_backlog();
+        self.pool.give_out();
+        let busy = self.pool.busy();
+        if !busy {
+            self.outstanding.set(false);
+            self.tmu_in_use.set(0);
+        }
+        busy
     }
 
     /// Whether jobs are held back (`backlog`): while the OpenGL renderer
@@ -974,12 +1069,18 @@ impl Voodoo {
 
     /// Where the buffers are, from the fbiInit registers (`recompute_video_memory`).
     pub(crate) fn recompute_video_memory(&mut self) {
+        if self.banshee.is_some() {
+            self.banshee_buffers();
+            return;
+        }
         let (config, rowpixels) = if self.v2() { self.layout_v2() } else { self.layout_v1() };
         let buffer_pages = (self.reg[FBI_INIT2] >> 11) & 0x1FF;
         let fifo_start = (self.reg[FBI_INIT4] >> 8) & 0x3FF;
         let mut fifo_last = (self.reg[FBI_INIT4] >> 18) & 0x3FF;
         let fbi = &mut self.fbi;
         fbi.rowpixels = rowpixels;
+        fbi.stride = raster::Stride::linear(rowpixels as usize);
+        fbi.aux_stride = fbi.stride;
         fbi.rgboffs[0] = 0;
         fbi.rgboffs[1] = buffer_pages * 0x1000;
         match config {
@@ -1040,11 +1141,17 @@ impl Voodoo {
     /// Whether the card drives the monitor: fbiInit0 turns off the VGA
     /// pass-through, and on a Voodoo Graphics its video clock runs.
     pub fn output(&self) -> bool {
+        if let Some(b) = &self.banshee {
+            return b.extended();
+        }
         (self.pci.clock_enabled || !self.chip.pci_video_clock) && self.reg[FBI_INIT0] & 1 != 0
     }
 
     /// The size of the picture it shows.
     pub fn size(&self) -> (u32, u32) {
+        if let Some(b) = &self.banshee {
+            return b.desktop_size();
+        }
         (self.fbi.width.max(1), self.fbi.height.max(1))
     }
 
@@ -1058,6 +1165,32 @@ impl Voodoo {
         self.timing
     }
 
+    /// A Banshee's video timing, which its VGA core's registers give.
+    /// Retraces are counted from time 0 at the timing's rate, so the
+    /// swaps' retrace numbers are counted again at the new one: a mode
+    /// with a lower refresh rate would otherwise put the next swap as far
+    /// ahead as the old rate had counted past the new one, minutes after
+    /// a long session, and hold the command FIFOs up until then.
+    pub fn set_timing(&mut self, timing: CrtTiming, now: Now) {
+        let changed = timing != self.timing;
+        let vint_pending = changed && self.banshee_vint_pending(now);
+        self.timing = timing;
+        if !changed || timing.frame_ns() == 0 {
+            return;
+        }
+        let current = timing.retraces(now.ns);
+        self.last_swap = self.last_swap.min(current);
+        for s in &mut self.swaps {
+            let ns = (s.due as u128 * 1_000_000_000 / PIT_HZ as u128) as u64;
+            s.retrace = timing.retraces(ns);
+        }
+        // The armed retrace interrupt counts retraces the same way: it
+        // stays pending, or waits for the next retrace at the new rate.
+        if let Some(armed) = self.banshee.as_mut().and_then(|b| b.vint.as_mut()) {
+            *armed = if vint_pending { current.saturating_sub(1) } else { current };
+        }
+    }
+
     /// Get the picture ready to be drawn (the gamma table's colours), and
     /// say whether the screen changed: the picture shown did, or the card
     /// took or gave back the monitor.
@@ -1067,6 +1200,16 @@ impl Voodoo {
         let changed = std::mem::take(&mut self.display_dirty);
         if !output {
             return switched;
+        }
+        if let Some(b) = &mut self.banshee {
+            let dirty = std::mem::take(&mut b.dirty);
+            let draw = changed || switched || dirty;
+            // Jobs may still be drawing into what it shows. Those that draw
+            // elsewhere, into the next frame, go on beside the program.
+            if draw && self.writes_queue() {
+                self.flush();
+            }
+            return draw;
         }
         if !self.picture_wanted() {
             // The OpenGL renderer draws it: nothing needs the memory.
@@ -1087,6 +1230,10 @@ impl Voodoo {
     /// Draw the front buffer into `rgb` (RGB24, `width` pixels a row, the
     /// card's size), through the gamma table (see `prepare_display`).
     pub fn render(&self, rgb: &mut [u8], width: usize) {
+        if let Some(b) = &self.banshee {
+            b.render(&self.fbi.ram, rgb, width);
+            return;
+        }
         let (w, h) = (self.fbi.width as usize, self.fbi.height as usize);
         let base = self.fbi.rgboffs[self.fbi.frontbuf as usize];
         if base == NONE {
@@ -1263,6 +1410,13 @@ impl Voodoo {
     /// Make the swap the frame rate cap held back when its turn came, and
     /// retire the swaps whose retraces came.
     pub fn service(&mut self, now: Now) {
+        self.service_into(now, &mut Effect::default());
+    }
+
+    /// `service`, with what the command FIFOs a swap held up ask for once
+    /// they go on (a Banshee's next swap among the timer events) put in
+    /// `effect`.
+    fn service_into(&mut self, now: Now, effect: &mut Effect) {
         if let Some((data, due)) = self.deferred
             && due <= now.ticks
         {
@@ -1270,6 +1424,7 @@ impl Voodoo {
             self.swap_now(data, now, &mut Effect::default());
         }
         let ticks = now.ticks;
+        let mut retired = 0;
         while let Some(front) = self.swaps.front().copied() {
             if front.due > ticks {
                 break;
@@ -1277,13 +1432,17 @@ impl Voodoo {
             self.swaps.pop_front();
             self.last_swap = front.retrace;
             self.fifo_writes = 0;
+            retired += 1;
+        }
+        if self.banshee.is_some() {
+            self.banshee_swaps_done(retired, now, effect);
         }
     }
 
     /// A write that goes through the FIFO: behind a pending swap it waits
     /// there, and a full FIFO stalls the CPU until the swap is done.
     fn fifo_write(&mut self, now: Now, effect: &mut Effect) {
-        self.service(now);
+        self.service_into(now, effect);
         let Some(front) = self.swaps.front() else { return };
         self.fifo_writes += 1;
         let capacity = if self.cmdfifo_on() {
@@ -1328,7 +1487,10 @@ impl Voodoo {
     /// After a load: what is worked out from the registers.
     pub fn after_load(&mut self) {
         self.recompute_video_memory();
-        self.fbi.yorigin = (self.reg[FBI_INIT3] >> 22) & 0x3FF;
+        self.fbi.yorigin = match &self.banshee {
+            Some(b) => b.y_origin(),
+            None => (self.reg[FBI_INIT3] >> 22) & 0x3FF,
+        };
         let reg = self.reg.clone();
         for tmu in &mut self.tmu {
             tmu.rebuild(&reg[..]);
@@ -1485,6 +1647,8 @@ impl Voodoo {
             "catch_ups": self.catch_ups.get(),
             "counters_read": self.counters_read.get(),
             "software_picture": self.picture_wanted(),
+            "banshee": self.banshee.as_ref().map(|b| b.describe()),
+            "banshee_3d": self.banshee.is_some().then(|| self.banshee_3d_describe()),
             "cmdfifo": self.cmdfifo_on().then(|| serde_json::json!({
                 "base": format!("{:06X}", self.cmdfifo.base),
                 "end": format!("{:06X}", self.cmdfifo.end),
@@ -1533,7 +1697,7 @@ impl State for Voodoo {
         self.catch_up();
         self.board.save(w);
         self.fbi.ram.save(w);
-        for tmu in &self.tmu {
+        for tmu in self.tmu.iter().filter(|t| !t.ram.same(&self.fbi.ram)) {
             tmu.ram.save(w);
         }
         self.reg[..].iter().for_each(|r| r.save(w));
@@ -1562,6 +1726,9 @@ impl State for Voodoo {
         self.svert.save(w);
         self.sverts.save(w);
         self.blt.save(w);
+        if let Some(b) = &self.banshee {
+            b.save(w);
+        }
     }
 
     fn load(&mut self, r: &mut Reader) -> Result<()> {
@@ -1578,7 +1745,8 @@ impl State for Voodoo {
             )));
         }
         self.fbi.ram.load(r)?;
-        for tmu in &mut self.tmu {
+        let fb = self.fbi.ram.clone();
+        for tmu in self.tmu.iter_mut().filter(|t| !t.ram.same(&fb)) {
             tmu.ram.load(r)?;
         }
         for reg in self.reg.iter_mut() {
@@ -1616,6 +1784,11 @@ impl State for Voodoo {
             self.svert.load(r)?;
             self.sverts.load(r)?;
             self.blt.load(r)?;
+        }
+        if let Some(b) = &mut self.banshee {
+            b.load(r)?;
+            b.engine.after_load();
+            b.dirty = true;
         }
         self.after_load();
         Ok(())

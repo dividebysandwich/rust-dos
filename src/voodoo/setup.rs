@@ -21,6 +21,9 @@ impl Voodoo {
     /// The word offset of a colour buffer, or None for a reserved choice.
     fn color_buffer(&self, select: u32) -> Option<usize> {
         let index = match select {
+            // A Banshee draws where colBufferAddr says, whatever fbzMode
+            // selects.
+            _ if self.banshee.is_some() => 0,
             0 => self.fbi.frontbuf,
             1 => self.fbi.backbuf,
             _ => return None,
@@ -77,7 +80,10 @@ impl Voodoo {
             chroma_range: reg[CHROMA_RANGE],
             fogdelta_mask: chip.fogdelta_mask,
             yorigin: self.fbi.yorigin,
+            ymask: self.fbi.ymask,
             rowpixels: self.fbi.rowpixels as usize,
+            stride: self.fbi.stride,
+            aux_stride: self.fbi.aux_stride,
             dest,
             aux: (self.fbi.auxoffs != NONE).then_some(self.fbi.auxoffs as usize / 2),
             fogblend: self.fbi.fogblend,
@@ -193,9 +199,14 @@ impl Voodoo {
     }
 
     /// Something was drawn into colour buffer `dest`: the display changes
-    /// if it is the one shown.
+    /// if it is the one shown (on a Banshee, if the desktop or the overlay
+    /// shows its memory).
     pub(crate) fn mark_drawn(&mut self, dest: usize) {
-        if self.color_buffer(0) == Some(dest) {
+        let shown = match &self.banshee {
+            Some(b) => b.shows(dest as u32 * 2),
+            None => self.color_buffer(0) == Some(dest),
+        };
+        if shown {
             self.display_dirty = true;
         }
         if !self.drawn_to.contains(&dest) {
