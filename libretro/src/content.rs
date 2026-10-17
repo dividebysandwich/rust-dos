@@ -30,7 +30,7 @@ pub struct Dirs {
 
 impl Dirs {
     pub fn new(system: PathBuf, save: PathBuf) -> Self {
-        Self { sys: system.join("rust-dos"), system, data: save.join("rust-dos") }
+        Self { sys: system.join("rust-dos"), system, data: data_dir(&save) }
     }
 
     /// The game profiles, and the folders of unpacked archives.
@@ -52,6 +52,25 @@ impl Dirs {
     /// The machine's C: when the content has none.
     pub fn drive_c(&self) -> PathBuf {
         self.data.join("drive_c")
+    }
+}
+
+/// The core's folder in the save directory `save`: `rust-dos` in it, or
+/// `save` itself when it is that already, as RetroArch hands it over when
+/// it sorts saves into a folder for each core. Data kept in a `rust-dos`
+/// folder inside it before stays where it is.
+fn data_dir(save: &Path) -> PathBuf {
+    let nested = save.join("rust-dos");
+    let is_core_folder = save
+        .file_name()
+        .is_some_and(|n| n.eq_ignore_ascii_case("rust-dos"));
+    let used = ["games", "saves", "imported", "drive_c"]
+        .iter()
+        .any(|d| fs::is_dir(nested.join(d)));
+    if is_core_folder && !used {
+        save.to_path_buf()
+    } else {
+        nested
     }
 }
 
@@ -454,6 +473,26 @@ mod tests {
         let (drives, commands, _) = made(super::plan(Some(&dir.join("Game")), &dirs, false, Some("win311")).unwrap());
         assert_eq!(drives, [(3, game.clone()), (DRIVE_C, os.join("Win311"))]);
         assert_eq!(commands, ["D:", "GAME.EXE"]);
+    }
+
+    #[test]
+    fn a_save_directory_sorted_by_core_is_the_core_s_folder() {
+        let dir = scratch("save-dirs");
+        assert_eq!(data_dir(&dir.join("saves")), dir.join("saves/rust-dos"));
+        assert_eq!(
+            data_dir(&dir.join("saves/rust-dos")),
+            dir.join("saves/rust-dos")
+        );
+        assert_eq!(
+            data_dir(&dir.join("saves/Rust-DOS")),
+            dir.join("saves/Rust-DOS")
+        );
+        // Where an older core kept its games, they stay.
+        fs::create_dir_all(dir.join("old/rust-dos/rust-dos/games")).unwrap();
+        assert_eq!(
+            data_dir(&dir.join("old/rust-dos")),
+            dir.join("old/rust-dos/rust-dos")
+        );
     }
 
     #[test]

@@ -51,6 +51,12 @@ starts.
 | hard disk image (`.img`, `.vhd`, `.hdd`) | C:. The image is left as it is: its changes go to a delta file in `saves/rust-dos/saves/<name>`, so one Windows install can be the base of many games (see [`-overlay`](../CONFIGURATION.md#mounting-drives)) |
 | `.m3u` | a list of disk images for one drive: the first goes in, the frontend's *Disc Control* changes them |
 
+`saves/rust-dos` is the core's folder in the frontend's save directory.
+With RetroArch's *Sort Saves into Folders by Core Name*, the directory it
+hands over is that folder already, and the core uses it as it is rather
+than making a `rust-dos` folder in it; one made there by an older core,
+with games in it, is still used.
+
 On Android, content from folders RetroArch reaches through the system's file
 picker (Storage Access Framework, `saf://` and `content://` paths) works
 through the frontend's file access (VFS): folders as C:, disk and CD images,
