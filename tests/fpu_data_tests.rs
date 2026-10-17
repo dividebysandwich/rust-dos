@@ -157,6 +157,21 @@ fn test_fxch_swap() {
 }
 
 #[test]
+fn fxch_st0_changes_nothing() {
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    let mut f1 = F80::new(); f1.set_f64(1.0);
+    let mut f2 = F80::new(); f2.set_f64(2.0);
+    cpu.fpu_push(f1);
+    cpu.fpu_push(f2);
+
+    // D9 C8: FXCH ST(0)
+    run_cpu_code(&mut cpu, &[0xD9, 0xC8]);
+
+    assert_top_f64(&cpu, 2.0);
+    assert_eq!(cpu.fpu_get(1).get_f64(), 1.0);
+}
+
+#[test]
 fn test_undocumented_fstp_and_ffreep() {
     let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     for value in [1.0, 2.0, 3.0] {

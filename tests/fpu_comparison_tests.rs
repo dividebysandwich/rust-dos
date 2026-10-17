@@ -185,3 +185,22 @@ fn djgpp_finds_a_387() {
     assert!(!flags.contains(FpuFlags::C3), "+inf and -inf are not equal: {:?}", flags);
     assert!(!flags.contains(FpuFlags::C2), "nor unordered: {:?}", flags);
 }
+
+#[test]
+fn fcom_st0_compares_st0_with_itself() {
+    // GCC tests for NaN with FUCOMP ST(0) (DD E8): a number equals itself,
+    // whatever ST(1) holds. Lua's "table index is NaN" came from comparing
+    // with an empty ST(1) instead.
+    for code in [[0xDD, 0xE8], [0xDD, 0xE0], [0xD8, 0xD0], [0xD8, 0xD8]] {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        push_val(&mut cpu, 0.5);
+        let top = cpu.fpu_top;
+        testrunners::run_fpu_code(&mut cpu, &code);
+        let flags = cpu.get_fpu_flags();
+        assert!(flags.contains(FpuFlags::C3), "{code:02X?}: 0.5 equals itself: {flags:?}");
+        assert!(!flags.contains(FpuFlags::C2), "{code:02X?}: and is ordered: {flags:?}");
+        assert!(!flags.contains(FpuFlags::C0), "{code:02X?}: {flags:?}");
+        let pops = if code == [0xDD, 0xE8] || code == [0xD8, 0xD8] { 1 } else { 0 };
+        assert_eq!(cpu.fpu_top, (top + pops) % 8, "{code:02X?}");
+    }
+}

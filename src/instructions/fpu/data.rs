@@ -306,15 +306,12 @@ pub fn fst(cpu: &mut Cpu, instr: &Instruction) {
 
 /// The register FXCH exchanges ST(0) with.
 pub fn fxch_index(instr: &Instruction) -> usize {
-    // Scan operands to find the one that isn't ST(0); ST(1) if implicit.
-    for i in 0..instr.op_count() {
-        let reg = instr.op_register(i);
-        // Check if register is in range ST(1)..ST(7)
-        if reg >= Register::ST1 && reg <= Register::ST7 {
-            return reg.number() - Register::ST0.number();
-        }
+    // The last operand, as iced lists ST(0) first; ST(1) if implicit.
+    // FXCH ST(0) exchanges ST(0) with itself.
+    match instr.op_register(instr.op_count().saturating_sub(1)) {
+        reg if (Register::ST0..=Register::ST7).contains(&reg) => reg.number() - Register::ST0.number(),
+        _ => 1,
     }
-    1
 }
 
 // FXCH: Exchange Register Contents

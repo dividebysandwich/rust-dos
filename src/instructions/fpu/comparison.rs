@@ -71,18 +71,11 @@ pub fn fcom_registers(instr: &Instruction) -> Option<(usize, usize, u8)> {
             // round (ST(i) with ST(0)).
             let dc_form = matches!(instr.code(), Code::Fcom_st0_sti_DCD0 | Code::Fcomp_st0_sti_DCD8);
 
-            // Identify the operand register index (i)
-            // iced_x86 might say "FCOM ST0, ST1" or "FCOM ST1, ST0"
-            // We need the register that is NOT ST0 to find 'i'.
-            let reg_op0 = instr.op0_register();
-            let reg_op1 = instr.op1_register();
-
-            let idx = if reg_op0 != Register::ST0 && reg_op0 != Register::None {
-                reg_op0.number() - Register::ST0.number()
-            } else if reg_op1 != Register::ST0 && reg_op1 != Register::None {
-                reg_op1.number() - Register::ST0.number()
-            } else {
-                1 // Default to ST(1) if parsing fails or implicit
+            // ST(i) is the last operand: iced lists ST(0) first. It can be
+            // ST(0) itself, as in FUCOMP ST(0), GCC's test for NaN.
+            let idx = match instr.op_register(instr.op_count().saturating_sub(1)) {
+                Register::None => 1,
+                reg => reg.number() - Register::ST0.number(),
             };
             if idx > 7 {
                 return None;
