@@ -23,8 +23,9 @@ const DF: u32 = 0x0400;
 /// registers in protected mode too (in real mode it always has them).
 /// With `fpu`, FPU instructions are translated, for `fast_fpu`'s arithmetic
 /// (`Cpu::fpu_fast`) if set. `i486`: the CPU is a 486 or later, which
-/// has BSWAP (a 386 faults on it). `simd`: MMX and SSE instructions the
-/// CPU has (`simd::MMX`, `simd::SSE`) are translated.
+/// has BSWAP (a 386 faults on it). `p6`: the CPU is a P6, which has
+/// CMOVcc. `simd`: MMX and SSE instructions the CPU has (`simd::MMX`,
+/// `simd::SSE`) are translated.
 #[allow(clippy::too_many_arguments)]
 pub fn translate(
     instr: &Instruction,
@@ -36,6 +37,7 @@ pub fn translate(
     fast_fpu: bool,
     real: bool,
     i486: bool,
+    p6: bool,
     simd: u8,
 ) -> Option<Vec<Uop>> {
     use Mnemonic::*;
@@ -130,6 +132,12 @@ pub fn translate(
         Jo | Jno | Jb | Jae | Je | Jne | Jbe | Ja | Js | Jns | Jp | Jnp | Jl | Jge | Jle | Jg => jcc(instr, next, &mut u),
         Seto | Setno | Setb | Setae | Sete | Setne | Setbe | Seta | Sets | Setns | Setp | Setnp | Setl | Setge
         | Setle | Setg => setcc(instr, &mut u),
+        Cmovo | Cmovno | Cmovb | Cmovae | Cmove | Cmovne | Cmovbe | Cmova | Cmovs | Cmovns
+        | Cmovp | Cmovnp | Cmovl | Cmovge | Cmovle | Cmovg
+            if p6 =>
+        {
+            cmov(instr, &mut u)
+        }
         Loop | Loope | Loopne => loop_op(instr, next, &mut u),
         Jcxz | Jecxz => jcxz(instr, next, &mut u),
         Call => call(instr, next, stack32, &mut u),
@@ -1118,6 +1126,31 @@ fn setcc(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
         }
         _ => return false,
     }
+    true
+}
+
+/// CMOVcc of a register from a register or memory. The source is read
+/// (and may fault) whether or not the condition holds, as the handler
+/// reads it.
+fn cmov(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
+    let Some((form, size)) = form(instr) else { return false };
+    let Some(dst) = gpr(instr.op0_register()) else { return false };
+    match form {
+        Form::RegReg => {
+            let Some(src) = gpr(instr.op1_register()) else { return false };
+            u.push(Uop::Get { t: T1, r: src });
+        }
+        Form::RegMem => {
+            if mem(instr, T2, size, false, u).is_none() {
+                return false;
+            }
+            u.push(Uop::Load { dst: T1, m: T2, size });
+        }
+        _ => return false,
+    }
+    u.push(Uop::Get { t: T0, r: dst });
+    u.push(Uop::CondMove { t: T0, src: T1, cc: instr.condition_code() });
+    u.push(Uop::Set { r: dst, t: T0 });
     true
 }
 

@@ -1800,6 +1800,14 @@ impl Gen<'_> {
                 }
                 dynasm!(self.ops ; .arch x64 ; movzx Rd(t), Rb(t));
             }
+            Uop::CondMove { t, src, cc } => {
+                let (t, src) = (r(t), r(src));
+                if self.test_condition(cc, self.dirty) {
+                    dynasm!(self.ops ; .arch x64 ; cmovnz Rd(t), Rd(src));
+                } else {
+                    dynasm!(self.ops ; .arch x64 ; cmovz Rd(t), Rd(src));
+                }
+            }
             Uop::Flag { mask, set } => {
                 // DF is always in the CPU, the arithmetic flags in EBP
                 // once the code has changed them.
@@ -2275,6 +2283,27 @@ impl Gen<'_> {
                 dynasm!(self.ops ; .arch x64 ; addsub_done:);
             }
             Uop::FChs => self.fpu_op(1 << 13, None),
+            Uop::FSqrt => {
+                const C1: i16 = 0x200;
+                // The root inline where the double is above 0, else (a
+                // zero, a negative value or a NaN) the handler's.
+                self.fpu_phys(RAX, 0);
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; movsd xmm2, QWORD [rbx + rax * 8 + FPU_F64]
+                    ; xorpd xmm3, xmm3
+                    ; ucomisd xmm2, xmm3
+                    ; jbe >fsqrt_other
+                    ; sqrtsd xmm2, xmm2
+                    ; movsd QWORD [rbx + rax * 8 + FPU_F64], xmm2
+                    ; mov BYTE [rbx + rax + FPU_STALE], 1
+                    ; and WORD [rbx + FPU_FLAGS], !C1
+                    ; jmp >fsqrt_done
+                    ; fsqrt_other:
+                );
+                self.fpu_op(4 << 13, None);
+                dynasm!(self.ops ; .arch x64 ; fsqrt_done:);
+            }
             Uop::FLoad80 { m } => self.fpu_op(2 << 13, Some(m)),
             Uop::FAddValue { kind, x } => {
                 use crate::instructions::fpu::arithmetic::{ADD_VALUE, SUB_VALUE};
