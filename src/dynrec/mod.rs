@@ -616,7 +616,9 @@ mod engine {
                 return None;
             }
             let found = self.translate(cpu, at, key, stats);
-            if found.is_none() {
+            // (Not for an instruction that may run on into the next page,
+            // whose translation also depends on that page.)
+            if found.is_none() && key.phys & 0xFFF <= 0x1000 - 15 {
                 self.none[none] = Some((key, gens));
             }
             found.map(|index| (index, self.blocks[index as usize].as_ref().unwrap().code))
@@ -647,8 +649,13 @@ mod engine {
             // The block goes on after a conditional jump its code takes.
             let side = |instr: &iced_x86::Instruction| uops(instr, instr.next_ip32()).is_some();
             let max = if single { 1 } else { MAX_BLOCK };
-            let data = BlockData::build(at, cpu.bus.ram(), &cpu.bus.page_gen, max, pokes, backend::TAIL, side)?;
+            let next = if backend::TAIL { Self::next_page(cpu, at) } else { None };
+            let ram = cpu.bus.ram();
+            let data = BlockData::build(at, ram, &cpu.bus.page_gen, max, pokes, backend::TAIL, next, side)?;
             cpu.bus.mark_code(data.phys as usize, (data.phys + data.len) as usize);
+            if data.next_len != 0 {
+                cpu.bus.mark_code(data.next as usize, (data.next + data.next_len) as usize);
+            }
             let mut items: Vec<_> = (0..data.count())
                 .map(|ix| {
                     let next = data.eips[ix].wrapping_add(data.instrs[ix].len() as u32);
@@ -1150,12 +1157,44 @@ mod engine {
                             stats.watched += 1;
                         }
                         cpu.set_eip(data.eips[ix]);
+                        // One that runs on into the next page, which the TLB
+                        // now maps elsewhere, is translated again for it.
+                        let next = (cs_base.wrapping_add(data.eips[ix]) | 0xFFF).wrapping_add(1) >> 12;
+                        if kind == EXIT_NEXT_PAGE
+                            && data.crosses(ix)
+                            && cpu.cr0 & CR0_PG != 0
+                            && cpu.tlb.lookup(next, cpu.cpl == 3).is_some_and(|p| p != data.next)
+                        {
+                            self.retire(exited, stats);
+                        }
                         if none_ran { Run::Interpret } else { Run::Ran { page } }
                     }
                     _ => unreachable!("exit code {:X}", ret),
                 };
             }
         }
+
+    /// The physical address of the page after the one of the instruction at
+    /// `at`, where an instruction in its last 15 bytes may run on into it
+    /// (`BlockData::crosses`), if that page is all in RAM: the next page
+    /// of RAM without paging, as the interpreter's fetch reads on there;
+    /// with paging (and the A20 gate on, as the TLB's addresses don't have
+    /// it), where the TLB or else the page tables map it. Its code checks
+    /// that the TLB does as it runs: the page tables are only looked at.
+    fn next_page(cpu: &Cpu, at: &At) -> Option<u32> {
+        let next = if cpu.cr0 & CR0_PG == 0 {
+            (at.phys_ip as u32 | 0xFFF).wrapping_add(1)
+        } else if cpu.bus.a20() {
+            let lin = (at.lin_ip | 0xFFF).wrapping_add(1);
+            match cpu.tlb.lookup(lin >> 12, cpu.cpl == 3) {
+                Some(phys) => phys,
+                None => cpu.peek_translate(lin)?,
+            }
+        } else {
+            return None;
+        };
+        (next != 0 && next as usize + 0x1000 <= cpu.bus.ram().len()).then_some(next)
+    }
 
     /// Where the instruction at CS:EIP is, as the execution loop would find
     /// it in a code window for its page (`exec::fetch_location`) and leave

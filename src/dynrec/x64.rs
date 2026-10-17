@@ -919,7 +919,8 @@ pub struct Code {
 /// read the time from it; the count of executed instructions is only
 /// brought up to date where the code returns.
 /// Blocks go on into the last 15 bytes of their page (see
-/// `BlockData::in_tail`), with paging checking the TLB holds the next page.
+/// `BlockData::in_tail`), with paging checking the TLB holds the next page,
+/// and their last instruction may run on into it (`BlockData::crosses`).
 pub const TAIL: bool = true;
 /// It has the operations of segment loads, port I/O and STI.
 pub const SYSTEM: bool = true;
@@ -1158,6 +1159,10 @@ impl Gen<'_> {
         for chunk in data.chunk_first + 1..=data.chunk_last {
             dynasm!(self.ops ; .arch x64 ; add eax, DWORD [rcx + (chunk * 4) as i32]);
         }
+        if data.next_len != 0 {
+            let chunk = data.next >> crate::bus::GEN_SHIFT;
+            dynasm!(self.ops ; .arch x64 ; add eax, DWORD [rcx + (chunk * 4) as i32]);
+        }
         dynasm!(self.ops
             ; .arch x64
             ; cmp eax, DWORD [rdx + DATA_GEN_SUM]
@@ -1212,28 +1217,59 @@ impl Gen<'_> {
     /// interpreter's fetch looks that up, and may walk the page tables for
     /// it, for such an instruction. Where the TLB holds it, the lookup
     /// changes nothing.
+    ///
+    /// An instruction that runs on into the next page (`BlockData::crosses`)
+    /// also leaves where the TLB maps that page elsewhere than its bytes
+    /// were read from, or where an instruction before it in the block may
+    /// have written to the chunk of its bytes there: the stores' check
+    /// (`rest`) covers only the block's own page.
     fn check_next_page(&mut self) {
         let data = self.data;
-        if !data.in_tail(self.ix) || self.env.bits & super::ENV_PAGING == 0 {
+        let paging = self.env.bits & super::ENV_PAGING != 0;
+        let crosses = data.crosses(self.ix);
+        let written = crosses && data.writes[..self.ix].contains(&true);
+        if !data.in_tail(self.ix) || !paging && !written {
             return;
         }
         let at = self.fault_exit(EXIT_NEXT_PAGE);
-        let set = if self.env.bits & super::ENV_USER != 0 { layout::TLB_SET as i32 } else { 0 };
-        let entry = set * TLB_ENTRY + layout::TLB_READ_TAG as i32;
-        dynasm!(self.ops
-            ; .arch x64
-            ; mov eax, DWORD [rbx + seg_field(Seg::CS, layout::SEG_BASE)]
-            ; add eax, data.eips[self.ix] as i32
-            ; or eax, 0xFFF
-            ; inc eax
-            ; shr eax, 12
-            ; mov edx, eax
-            ; and edx, (layout::TLB_SET - 1) as i32
-            ; shl edx, TLB_ENTRY_SHIFT
-            ; inc eax
-            ; cmp eax, DWORD [rbx + rdx + TLB + entry]
-            ; jne =>at
-        );
+        if paging {
+            let set = if self.env.bits & super::ENV_USER != 0 { layout::TLB_SET as i32 } else { 0 };
+            let entry = set * TLB_ENTRY;
+            let tag = entry + layout::TLB_READ_TAG as i32;
+            dynasm!(self.ops
+                ; .arch x64
+                ; mov eax, DWORD [rbx + seg_field(Seg::CS, layout::SEG_BASE)]
+                ; add eax, data.eips[self.ix] as i32
+                ; or eax, 0xFFF
+                ; inc eax
+                ; shr eax, 12
+                ; mov edx, eax
+                ; and edx, (layout::TLB_SET - 1) as i32
+                ; shl edx, TLB_ENTRY_SHIFT
+                ; inc eax
+                ; cmp eax, DWORD [rbx + rdx + TLB + tag]
+                ; jne =>at
+            );
+            if crosses {
+                let phys = entry + layout::TLB_PHYS as i32;
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; cmp DWORD [rbx + rdx + TLB + phys], data.next as i32
+                    ; jne =>at
+                );
+            }
+        }
+        if written {
+            let (data_ptr, chunk) = (self.data_ptr, (data.next >> crate::bus::GEN_SHIFT) as i32);
+            dynasm!(self.ops
+                ; .arch x64
+                ; mov rax, QWORD [r12 + CTX_PAGE_GEN]
+                ; mov eax, DWORD [rax + chunk * 4]
+                ; mov rdx, QWORD data_ptr
+                ; cmp eax, DWORD [rdx + DATA_NEXT_GEN]
+                ; jne =>at
+            );
+        }
     }
 
     /// Run instruction `ix` through its handler.
