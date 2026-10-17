@@ -172,7 +172,7 @@ pub const BUF1_OFFSET: usize = 0x126;
 pub const BUF1_PITCH: usize = 0x129;
 
 /// All of them: block 0, then block 1.
-pub const COUNT: usize = 0x140;
+pub const COUNT: usize = 0x200;
 
 /// The bits of each register that hold what is written, as it reads
 /// back; the others read 0. Registers not listed keep all 32.

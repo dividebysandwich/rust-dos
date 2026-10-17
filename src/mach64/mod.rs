@@ -798,7 +798,7 @@ impl Mach64 {
             "native": self.native,
             "screen": screen,
             "pixel_clock": self.pixel_clock(),
-            "cursor": self.cursor().map(|c| format!("{:?}", c)),
+            "cursor": self.cursor().map(|c| serde_json::json!({"x": c.x, "y": c.y, "skip": c.skip, "rows": c.rows, "base": c.base})),
             "engine": self.engine.describe(),
         })
     }
@@ -897,6 +897,15 @@ mod tests {
         assert_eq!(card.reg(regs::DST_CNTL), 0xFF);
         assert_eq!(card.reg(regs::PAT_CNTL), 7);
         assert_eq!(card.reg(regs::HOST_CNTL), 3);
+    }
+
+    #[test]
+    fn all_of_block_1_is_there() {
+        let mut card = Mach64::new(true);
+        let reg = card.register_at(0x3FC).unwrap();
+        assert_eq!(reg, 0x1FF);
+        write(&mut card, reg, 0x1234);
+        assert_eq!(card.read(reg, Live::default()), 0x1234);
     }
 
     #[test]
