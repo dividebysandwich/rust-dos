@@ -478,3 +478,31 @@ fn test_fistp_int64_past_its_range_from_the_80_bits() {
     assert_eq!(cpu.bus.read_64(0x1010), 0x8000_0000_0000_0000);
     assert!(cpu.get_fpu_flags().contains(FpuFlags::IE));
 }
+
+#[test]
+fn infinity_has_the_integer_bit() {
+    // A double's infinity (and NaN) in 80 bits has the integer bit set, as
+    // the 387 makes it; DJGPP's printf says "nan" for one without it.
+    for (value, top) in [(f64::INFINITY, 0x7FFFu16), (f64::NEG_INFINITY, 0xFFFF), (f64::NAN, 0x7FFF)] {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.bus.write_32(0x1000, value.to_bits() as u32);
+        cpu.bus.write_32(0x1004, (value.to_bits() >> 32) as u32);
+
+        // FLD QWORD PTR [1000], FSTP TBYTE PTR [1010]
+        run_cpu_code(&mut cpu, &[0xDD, 0x06, 0x00, 0x10]);
+        run_cpu_code(&mut cpu, &[0xDB, 0x3E, 0x10, 0x10]);
+
+        let mantissa = cpu.bus.read_32(0x1010) as u64 | (cpu.bus.read_32(0x1014) as u64) << 32;
+        assert_eq!(cpu.bus.read_16(0x1018), top, "{value}");
+        if value.is_nan() {
+            assert_eq!(mantissa, 0xC000_0000_0000_0000, "{value}");
+        } else {
+            assert_eq!(mantissa, 0x8000_0000_0000_0000, "{value}");
+        }
+
+        // FLD TBYTE PTR [1010] gives the value back.
+        run_cpu_code(&mut cpu, &[0xDB, 0x2E, 0x10, 0x10]);
+        let back = cpu.fpu_get(0).get_f64();
+        assert!(back.is_nan() == value.is_nan() && (value.is_nan() || back == value), "{value}: {back}");
+    }
+}

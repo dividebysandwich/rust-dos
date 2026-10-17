@@ -256,16 +256,17 @@ impl F80 {
         exponent == 0
     }
 
+    /// Exponent 7FFF and a fraction of 0, the integer bit set (as the FPU
+    /// makes it) or not (a pseudo-infinity).
     pub fn is_infinite(&self) -> bool {
         let exponent = (self.st >> 64) & 0x7FFF;
-        let mantissa = self.st & ((1u128 << 64) - 1);
-        exponent == 0x7FFF && mantissa == 0
+        exponent == 0x7FFF && self.st & MANTISSA_MASK_NOINT == 0
     }
 
+    /// Exponent 7FFF and a fraction other than 0, whatever the integer bit.
     pub fn is_nan(&self) -> bool {
         let exponent = (self.st >> 64) & 0x7FFF;
-        let mantissa = self.st & MANTISSA_MASK;
-        exponent == 0x7FFF && mantissa != 0
+        exponent == 0x7FFF && self.st & MANTISSA_MASK_NOINT != 0
     }
 
     /// The value as FBSTP stores it, rounded as `rc` (the control word's RC
@@ -383,12 +384,14 @@ impl F80 {
             // Subnormal or zero in f64 → represent as 0.0 en FPU
             (sign as u128) << 79
         } else if exp == 0x7FF {
-            // Inf o NaN
+            // An infinity or a NaN (made quiet), with the integer bit set:
+            // without it, it is a pseudo-infinity or pseudo-NaN, which a
+            // 387 and later don't take (DJGPP's printf says "nan").
             let is_nan = mantissa != 0;
             let extended_exp = 0x7FFFu128;
             let extended_mantissa = (mantissa as u128) << 11;
-            let nan_bit = if is_nan { 1u128 << 62 } else { 0 }; // QNaN bit (optional)
-            ((sign as u128) << 79) | (extended_exp << 64) | extended_mantissa | nan_bit
+            let nan_bit = if is_nan { 1u128 << 62 } else { 0 };
+            ((sign as u128) << 79) | (extended_exp << 64) | INT_BIT_MASK | extended_mantissa | nan_bit
         } else {
             // Normal number
             let adjusted_exp = (exp as i32 - F64_EXP_BIAS) + F80_EXP_BIAS;
@@ -411,9 +414,9 @@ impl F80 {
             // Zero or denormal extended → 0.0
             sign << 63
         } else if exp == 0x7FFF {
-            // Inf or NaN
-            let f64_mantissa = (mantissa >> 11) as u64;
-            let nan_mask = if f64_mantissa != 0 { 1 << 51 } else { 0 }; // set QNaN bit if needed
+            // Inf or NaN, by the fraction (not the integer bit)
+            let f64_mantissa = ((mantissa & MANTISSA_MASK_NOINT) >> 11) as u64;
+            let nan_mask = if mantissa & MANTISSA_MASK_NOINT != 0 { 1 << 51 } else { 0 }; // set QNaN bit if needed
             (sign << 63) | (0x7FF << 52) | f64_mantissa | nan_mask
         } else {
             let unbiased_exp = exp as i32 - F80_EXP_BIAS;

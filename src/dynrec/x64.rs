@@ -2584,8 +2584,8 @@ impl Gen<'_> {
 
     /// `Uop::VSet`. MMn is the significand of physical FPU register n, whose
     /// sign and exponent become all ones (`mmx::set_mm`); its double is
-    /// then a NaN, or an infinity where the significand's top 53 bits are
-    /// 0 (`F80::get_f64`).
+    /// then a NaN, or an infinity where its 63 bits below the integer bit
+    /// are 0 (`F80::get_f64`).
     fn vset(&mut self, dst: Vr, x: u8) {
         match dst {
             Vr::Xmm(n) => {
@@ -2600,11 +2600,12 @@ impl Gen<'_> {
                     ; mov QWORD [rbx + at], rax
                     ; mov QWORD [rbx + at + 8], 0xFFFF
                     ; mov BYTE [rbx + FPU_STALE + n], 0
-                    ; shr rax, 11
+                    ; btr rax, 63
                     ; mov rcx, QWORD 0xFFF0_0000_0000_0000u64 as i64
                     ; mov rdx, QWORD 0xFFF8_0000_0000_0000u64 as i64
                     ; test rax, rax
                     ; cmovnz rcx, rdx
+                    ; shr rax, 11
                     ; or rax, rcx
                     ; mov QWORD [rbx + FPU_F64 + 8 * n], rax
                 );
