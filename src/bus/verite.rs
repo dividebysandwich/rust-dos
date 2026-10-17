@@ -64,6 +64,7 @@ impl Bus {
             _ => None,
         };
         self.verite.configure(settings, rom);
+        self.verite.run_at = None;
         if self.verite() {
             let (segment, offset) = crate::verite::BOARD_DATA;
             let data = crate::verite::board_data(crate::video::vbe::VRAM_SIZE as u32, settings.irq);
@@ -217,6 +218,7 @@ impl Bus {
     /// since its last run, and the instructions its RISC is owed.
     pub(crate) fn verite_sync(&mut self) {
         if !self.verite_lle() || self.verite.lle.is_none() {
+            self.verite.run_at = None;
             return;
         }
         let _profile = crate::profile::zone(crate::profile::Zone::IoVerite);
@@ -252,6 +254,7 @@ impl Bus {
         for line in log {
             self.log_string(&line);
         }
+        self.verite.run_at = self.verite_run_at();
         self.clock.schedule(self.next_event());
     }
 
@@ -283,6 +286,7 @@ impl Bus {
     /// has them.
     pub(crate) fn verite_after_load(&mut self) {
         self.verite.retraces = self.vga.timing().retraces(self.clock.now_ns());
+        self.verite.run_at = self.verite_run_at();
         let irq = self.verite.lle.as_ref().is_some_and(|core| core.irq());
         self.sync_verite_irq(irq);
         self.verite_host_view();
@@ -305,9 +309,14 @@ impl Bus {
         }
     }
 
-    /// When the low-level chip next needs to run: in a millisecond while
-    /// its RISC has work, else at the next retrace if its interrupt is on.
+    /// When the low-level chip next needs to run, as its last run left it.
     pub(crate) fn verite_next_event(&self) -> Option<u64> {
+        self.verite.run_at.filter(|_| self.verite())
+    }
+
+    /// When the low-level chip is to run next: in a millisecond while its
+    /// RISC has work, else at the next retrace if its interrupt is on.
+    fn verite_run_at(&self) -> Option<u64> {
         let core = self.verite.lle.as_ref().filter(|_| self.verite())?;
         let now = self.clock.now_ticks();
         if core.busy() {

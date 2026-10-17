@@ -242,6 +242,9 @@ pub struct Verite {
     /// interrupt request it has up.
     pub retraces: u64,
     pub line: Option<u8>,
+    /// When the low-level chip next runs without the host asking (PIT
+    /// ticks), set after each run.
+    pub run_at: Option<u64>,
 }
 
 impl Default for Verite {
@@ -276,6 +279,7 @@ impl Verite {
             frame_written_ns: 0,
             retraces: 0,
             line: None,
+            run_at: None,
         };
         if let Ok(dir) = std::env::var("RUST_DOS_VERITE_TRACE") {
             let dir = std::path::PathBuf::from(dir);
