@@ -784,13 +784,17 @@ impl Engine {
     fn src_byte(&self, ram: &Vram, src: Source, offset: usize, mask: u32) -> u8 {
         match src {
             Source::Vram(addr) => ram.byte((addr.wrapping_add(offset as u32) & mask) as usize),
-            Source::Host(base) => self.host_data.get(base + offset).copied().unwrap_or(0),
+            Source::Host(base) => self
+                .host_data
+                .get(base.wrapping_add(offset))
+                .copied()
+                .unwrap_or(0),
         }
     }
 
     fn src_word(&self, ram: &Vram, src: Source, offset: usize, bytes: usize, mask: u32) -> u32 {
         (0..bytes).fold(0, |v, i| {
-            v | (self.src_byte(ram, src, offset + i, mask) as u32) << (8 * i)
+            v | (self.src_byte(ram, src, offset.wrapping_add(i), mask) as u32) << (8 * i)
         })
     }
 
@@ -1136,7 +1140,9 @@ impl Engine {
                 if self.cur_y < self.dst_size_y {
                     self.host_row(ram, mask, stretch, false);
                 }
-                if self.host_data_count > 0 {
+                // A stride the guest shrank in the middle of a command
+                // can leave more than the word just written.
+                if (1..4).contains(&self.host_data_count) {
                     let left = data >> ((4 - self.host_data_count) * 8);
                     self.host_data[0..4].copy_from_slice(&left.to_le_bytes());
                 }

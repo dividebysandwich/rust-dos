@@ -30,9 +30,12 @@ struct Frame {
 #[inline]
 fn surface_addr(start: u32, x: u32, y: u32, stride: u32, tiled: bool) -> u32 {
     if tiled {
-        start + (y & 31) * 128 + (y >> 5) * stride + (x & 127) + (x >> 7) * TILE
+        let row = (y & 31) * 128 + (y >> 5).wrapping_mul(stride);
+        start
+            .wrapping_add(row)
+            .wrapping_add((x & 127) + (x >> 7).wrapping_mul(TILE))
     } else {
-        start + y * stride + x
+        start.wrapping_add(y.wrapping_mul(stride)).wrapping_add(x)
     }
 }
 

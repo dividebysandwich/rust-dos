@@ -89,17 +89,19 @@ impl Fifo {
             // Back at the start.
             self.amin = self.base;
             self.amax = self.base;
-            self.depth += 1;
+            self.depth = self.depth.wrapping_add(1);
         } else if self.holes > 0 {
             self.holes -= 1;
             if self.holes == 0 {
-                self.depth += self.amax.wrapping_sub(self.amin) >> 2;
+                self.depth = self
+                    .depth
+                    .wrapping_add(self.amax.wrapping_sub(self.amin) >> 2);
                 self.amin = self.amax;
             }
         } else if addr == self.amax.wrapping_add(4) {
             self.amin = addr;
             self.amax = addr;
-            self.depth += 1;
+            self.depth = self.depth.wrapping_add(1);
         } else {
             if addr < self.amin {
                 // Out of order from the start: the write itself is too.
@@ -233,7 +235,7 @@ impl Voodoo {
                     0x20 => f.set_base(data),
                     0x24 => f.set_size(data),
                     // cmdBump: the host counts the words it wrote itself.
-                    0x28 => f.depth += data & 0xFFFF,
+                    0x28 => f.depth = f.depth.wrapping_add(data & 0xFFFF),
                     0x2C => f.read = data,
                     0x34 => f.amin = data,
                     0x3C => f.amax = data,
