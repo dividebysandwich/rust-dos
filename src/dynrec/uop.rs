@@ -360,7 +360,11 @@ pub enum Uop {
     SetCond { t: T, cc: ConditionCode },
     /// t = src if condition `cc` holds on the flags, else t stays
     /// (CMOVcc).
-    CondMove { t: T, src: T, cc: ConditionCode },
+    CondMove {
+        t: T,
+        src: T,
+        cc: ConditionCode,
+    },
     /// BT, BTS, BTR or BTC of bit `bit` (modulo size * 8) of t, a `size`
     /// byte value: CF the bit and OF as `logic::bit_test` sets them (the
     /// others stay), and t the value with the bit set, cleared or

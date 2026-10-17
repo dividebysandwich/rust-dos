@@ -957,7 +957,7 @@ impl Gen<'_> {
         );
     }
 
-    /// Call `jit_fpu_addsub_st` with `desc` and the handle in `arg`.
+    /// Call `jit_fpu_reg_op` with `desc` and the handle in `arg`.
     fn fpu_op(&mut self, desc: u32, arg: Option<T>) {
         if let Some(t) = arg {
             dynasm!(self.ops ; .arch aarch64 ; mov w3, W(r(t)));

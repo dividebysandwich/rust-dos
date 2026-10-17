@@ -1133,23 +1133,34 @@ fn setcc(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
 /// (and may fault) whether or not the condition holds, as the handler
 /// reads it.
 fn cmov(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
-    let Some((form, size)) = form(instr) else { return false };
-    let Some(dst) = gpr(instr.op0_register()) else { return false };
+    let Some((form, size)) = form(instr) else {
+        return false;
+    };
+    // `form` has checked that the registers are general-purpose ones.
+    let dst = gpr(instr.op0_register()).unwrap();
     match form {
-        Form::RegReg => {
-            let Some(src) = gpr(instr.op1_register()) else { return false };
-            u.push(Uop::Get { t: T1, r: src });
-        }
+        Form::RegReg => u.push(Uop::Get {
+            t: T1,
+            r: gpr(instr.op1_register()).unwrap(),
+        }),
         Form::RegMem => {
             if mem(instr, T2, size, false, u).is_none() {
                 return false;
             }
-            u.push(Uop::Load { dst: T1, m: T2, size });
+            u.push(Uop::Load {
+                dst: T1,
+                m: T2,
+                size,
+            });
         }
         _ => return false,
     }
     u.push(Uop::Get { t: T0, r: dst });
-    u.push(Uop::CondMove { t: T0, src: T1, cc: instr.condition_code() });
+    u.push(Uop::CondMove {
+        t: T0,
+        src: T1,
+        cc: instr.condition_code(),
+    });
     u.push(Uop::Set { r: dst, t: T0 });
     true
 }

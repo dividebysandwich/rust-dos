@@ -2966,7 +2966,7 @@ impl Gen<'_> {
         dynasm!(self.ops ; .arch x64 ; call QWORD [r12 + CTX_FPU + 32]);
     }
 
-    /// Call `jit_fpu_addsub_st` with `desc` and the handle in `arg`.
+    /// Call `jit_fpu_reg_op` with `desc` and the handle in `arg`.
     fn fpu_op(&mut self, desc: i32, arg: Option<T>) {
         self.save_for_call();
         if let Some(t) = arg {

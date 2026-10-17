@@ -3408,6 +3408,7 @@ fn fpu_integer_operands_run_as_their_handlers() {
         assert!(stats.native + 20 > stats.instructions, "handlers ran them: {:?}", stats);
     }
 }
+
 #[test]
 fn fpu_square_roots_run_as_their_handlers() {
     let (_, b, stats) = fpu_loop(|a| {
