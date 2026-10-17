@@ -288,6 +288,12 @@ impl Bus {
             self.verite_write(reg, value, len);
             return;
         }
+        // A mach64's registers, a dword at once.
+        if self.mach64_port(port).is_some() {
+            self.log_port(port, value, len, true);
+            self.mach64_port_write(port, value, len);
+            return;
+        }
         // A Banshee's init registers, a dword at once.
         if let Some(offset) = self.banshee_io(port) {
             self.log_port(port, value, len, true);
@@ -336,6 +342,11 @@ impl Bus {
         }
         if let Some(reg) = self.verite_port(port) {
             let value = self.verite_read(reg, len);
+            self.log_port(port, value, len, false);
+            return value;
+        }
+        if self.mach64_port(port).is_some() {
+            let value = self.mach64_port_read(port, len);
             self.log_port(port, value, len, false);
             return value;
         }

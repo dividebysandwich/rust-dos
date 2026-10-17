@@ -231,5 +231,14 @@ pub fn install(bus: &mut Bus, setup: VideoSetup) {
         bus.write_rom(((segment as usize) << 4) + offset as usize, &data);
     }
     bus.vbe.lfb_base = if s3 || setup.adapter.is_et4000() { None } else { Some(super::vbe::LFB_BASE as u32) };
+    // A mach64's BIOS: its data in the ROM, the card as its POST leaves
+    // it.
+    if setup.adapter.is_mach64() {
+        bus.mach64.rage2 = setup.adapter == Adapter::AtiRage2;
+        bus.mach64.reset();
+        crate::mach64::bios::install_rom(bus);
+        crate::mach64::bios::post(bus);
+        bus.mach64_moved();
+    }
     install_fonts(bus);
 }

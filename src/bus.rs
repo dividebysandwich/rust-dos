@@ -20,10 +20,12 @@ mod drives;
 mod sound;
 mod powervr;
 mod verite;
+mod mach64;
 mod banshee;
 mod voodoo;
 
 pub use verite::bios as verite_bios;
+pub use mach64::bios as mach64_bios;
 
 pub trait Device {
     /// Return the set of I/O ports this device owns.
@@ -266,6 +268,9 @@ pub struct Bus {
     pub virge: crate::video::s3::virge::Virge,
     /// The Rendition Vérité's registers and FIFO, on `Adapter::Verite`.
     pub verite: crate::verite::Verite,
+    /// The ATI mach64's registers and engines, on `Adapter::AtiRage` and
+    /// `AtiRage2`.
+    pub mach64: crate::mach64::Mach64,
     /// A memory-mapped read of Input Status 1 (a ViRGE's 83DAh) happened,
     /// whose reset of the attribute flip-flop is done at the next port
     /// access, as memory reads can't change the machine.
@@ -710,6 +715,7 @@ impl Bus {
         (ADDR_VGA_GRAPHICS..=ADDR_VGA_GRAPHICS + SIZE_GRAPHICS - len).contains(&dst)
             && self.video_mode != VideoMode::Vesa
             && self.s3_mmio(dst).is_none()
+            && self.mach64_mmio(dst).is_none()
             && self.vga.plain_writes()
     }
 
@@ -855,10 +861,13 @@ impl Bus {
         if let Some(port) = self.s3_mmio(addr) {
             return self.mmio_peek(port, 1) as u8;
         }
+        if let Some(at) = self.mach64_mmio(addr) {
+            return self.mach64_mmio_read(at, 1) as u8;
+        }
         if (ADDR_VGA_GRAPHICS..ADDR_VGA_GRAPHICS + SIZE_GRAPHICS).contains(&addr) {
             // VESA modes: the window onto the bank of video memory.
             if self.video_mode == VideoMode::Vesa {
-                return self.vbe.vram[self.vbe.window_offset(addr - ADDR_VGA_GRAPHICS)];
+                return self.vbe.vram[self.vesa_window(addr - ADDR_VGA_GRAPHICS, false)];
             }
             // Route through VGA so chain-4, odd/even, and Read Map Select
             // work correctly. read_graphics also latches planes, needed
@@ -975,9 +984,13 @@ impl Bus {
             self.mmio_write(port, value as u32, 1);
             return true;
         }
+        if let Some(at) = self.mach64_mmio(addr) {
+            self.mach64_mmio_write(at, value as u32, 1);
+            return true;
+        }
         if (ADDR_VGA_GRAPHICS..ADDR_VGA_GRAPHICS + SIZE_GRAPHICS).contains(&addr) {
             if self.video_mode == VideoMode::Vesa {
-                let offset = self.vbe.window_offset(addr - ADDR_VGA_GRAPHICS);
+                let offset = self.vesa_window(addr - ADDR_VGA_GRAPHICS, true);
                 self.write_vram(offset, &[value]);
                 return true;
             }
@@ -1162,6 +1175,10 @@ impl Bus {
             self.mmio_write(port, value as u32, 2);
             return true;
         }
+        if let Some(at) = self.mach64_mmio(addr) {
+            self.mach64_mmio_write(at, value as u32, 2);
+            return true;
+        }
         if let Some(offset) = self.voodoo_at(addr) {
             self.voodoo_write_16(offset, value);
             return true;
@@ -1201,6 +1218,9 @@ impl Bus {
         if let Some(port) = self.s3_mmio(addr) {
             return self.mmio_peek(port, 2) as u16;
         }
+        if let Some(at) = self.mach64_mmio(addr) {
+            return self.mach64_mmio_read(at, 2) as u16;
+        }
         if let Some(offset) = self.voodoo_at(addr) {
             return self.voodoo_read_16(offset);
         }
@@ -1238,6 +1258,9 @@ impl Bus {
         if let Some(port) = self.s3_mmio(addr) {
             return self.mmio_peek(port, 4);
         }
+        if let Some(at) = self.mach64_mmio(addr) {
+            return self.mach64_mmio_read(at, 4);
+        }
         if let Some(offset) = self.voodoo_at(addr) {
             return self.voodoo_read_32(offset);
         }
@@ -1273,6 +1296,10 @@ impl Bus {
         }
         if let Some(port) = self.s3_mmio(addr) {
             self.mmio_write(port, value, 4);
+            return;
+        }
+        if let Some(at) = self.mach64_mmio(addr) {
+            self.mach64_mmio_write(at, value, 4);
             return;
         }
         if let Some(offset) = self.voodoo_at(addr) {
@@ -2044,6 +2071,10 @@ impl Bus {
             self.verite_write(reg, value as u32, 1);
             return;
         }
+        if self.mach64_port(port).is_some() {
+            self.mach64_port_write(port, value as u32, 1);
+            return;
+        }
         if let Some(offset) = self.banshee_io(port) {
             self.banshee_port_write(offset, value);
             return;
@@ -2449,6 +2480,9 @@ impl Bus {
         if let Some(reg) = self.verite_port(port) {
             return self.verite_read(reg, 1) as u8;
         }
+        if self.mach64_port(port).is_some() {
+            return self.mach64_port_read(port, 1) as u8;
+        }
         if let Some(offset) = self.banshee_io(port) {
             return self.banshee_port_read(offset, now_ns);
         }
@@ -2800,7 +2834,12 @@ impl Bus {
                 self.vbe.start_high = value;
                 self.update_vbe_start();
             }
-            0x6A => self.vbe.bank = (value & 0x3F) as u32,
+            0x6A => {
+                self.vbe.bank = (value & 0x3F) as u32;
+                if self.mach64() {
+                    self.mach64_set_bank(self.vbe.bank);
+                }
+            }
             _ => {}
         }
     }
@@ -2826,7 +2865,7 @@ impl Bus {
     /// display start in doublewords.
     fn update_vbe_start(&mut self) {
         // A Vérité's own CRTC has its start in its own register.
-        if self.video_mode == VideoMode::Vesa && !self.verite.native {
+        if self.video_mode == VideoMode::Vesa && !self.verite.native && !self.mach64.native {
             let crtc = &self.vga.crtc_regs;
             let dwords = (self.vbe.start_high as u32) << 16 | (crtc[0x0C] as u32) << 8 | crtc[0x0D] as u32;
             self.vbe.start = dwords * 4;
@@ -2875,6 +2914,8 @@ impl Bus {
                 | video::adapter::Adapter::S3Virge
                 | video::adapter::Adapter::S3VirgeVx
                 | video::adapter::Adapter::Et4000
+                | video::adapter::Adapter::AtiRage
+                | video::adapter::Adapter::AtiRage2
         );
         if !(vga && matches!(port, 0x3DA | 0x3BA) && self.vga.decodes(port)) {
             return None;

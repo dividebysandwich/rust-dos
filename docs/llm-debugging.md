@@ -1006,6 +1006,16 @@ library's error code. `RUST_DOS_VERITE_TRACE=<dir>` writes every access
 to the card's ports, BIOS call, DMA block and FIFO word to
 `<dir>/trace.txt`.
 
+### ATI 3D RAGE
+
+With `machine=svga_ati_3drage` or `svga_ati_3drage2`, `/api/status` →
+`video.mach64` shows the card: the `chip`, where its `aperture` and
+`ports` are, whether the accelerator CRTC shows the screen (`native`)
+and what it shows (`screen`, `pixel_clock`), the hardware `cursor`, and
+the draw `engine`'s state. `RUST_DOS_MACH64_TRACE=<dir>` writes every
+register access, configuration access and BIOS call (INT 10h AH=A0h and
+the ROM's entry at C000:0064h) to `<dir>/trace.txt`.
+
 ### CPU speed (`cycles=auto`)
 
 `POST /api/speed {"cycles":"auto"}` changes the speed as the settings

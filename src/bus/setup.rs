@@ -98,6 +98,7 @@ impl Bus {
             s3_engine: crate::video::s3::engine::Engine::new(),
             virge: Default::default(),
             verite: Default::default(),
+            mach64: Default::default(),
             attribute_reset: Default::default(),
             pci: crate::pci::Pci::default(),
             voodoo: None,

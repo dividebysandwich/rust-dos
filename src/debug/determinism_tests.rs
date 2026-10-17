@@ -1430,6 +1430,7 @@ fn a_device_changed_at_host_frames_is_found() {
 const ABSENT_SECTIONS: &[(&str, &str)] = &[
     ("VRTE", "the Verite is a display adapter, as is the ViRGE the machine has"),
     ("ET4K", "the ET4000 is a display adapter, as is the ViRGE the machine has"),
+    ("MC64", "the mach64 is a display adapter, as is the ViRGE the machine has"),
     ("IDE", "the IDE channels are a booted system's"),
     ("FDC", "the floppy disk controller is a booted system's"),
     ("SHRD", "shared disks are a booted system's"),
@@ -1470,6 +1471,7 @@ const SECTION_FIELDS: &[(&str, &str)] = &[
     ("ram", "RAM"),
     ("virge", "VIRG"),
     ("verite", "VRTE"),
+    ("mach64", "MC64"),
     ("voodoo", "3DFX"),
     ("powervr", "PVR"),
     ("powervr_line", "PVR"),

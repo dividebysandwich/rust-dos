@@ -6,6 +6,8 @@
 //! * device 0: the 3dfx Voodoo Graphics (`voodoo`), when there is one;
 //! * device 1 instead: the Rendition Vérité V1000 of `svga_verite`, BAR0
 //!   its memory (the VESA linear frame buffer), BAR1 its ports;
+//! * device 1 instead: the ATI mach64 GT of `svga_ati_3drage` and
+//!   `svga_ati_3drage2`, BAR0 its 16 MB aperture, BAR1 its ports;
 //! * device 2: the PowerVR PCX2 (`powervr`), when there is one;
 //! * device 1: the S3 Trio64 of `machine=svga_s3` (PCI\VEN_5333&DEV_8811),
 //!   or the ViRGE (DEV_5631) or ViRGE/VX (DEV_883D) of `svga_s3virge` and
@@ -47,6 +49,7 @@ enum Target {
     Voodoo,
     S3,
     Verite,
+    Mach64,
     PowerVr,
 }
 
@@ -54,7 +57,11 @@ impl Bus {
     /// Whether the machine has a PCI bus: an S3, a 3dfx or a PowerVR
     /// card on it.
     pub fn pci_present(&self) -> bool {
-        self.s3() || self.verite() || self.voodoo.is_some() || self.powervr.is_some()
+        self.s3()
+            || self.verite()
+            || self.mach64()
+            || self.voodoo.is_some()
+            || self.powervr.is_some()
     }
 
     /// The card and register the address latch selects, if it is enabled
@@ -73,6 +80,7 @@ impl Bus {
             S3_DEVICE if self.banshee().is_some() => Target::Voodoo,
             S3_DEVICE if self.s3() => Target::S3,
             S3_DEVICE if self.verite() => Target::Verite,
+            S3_DEVICE if self.mach64() => Target::Mach64,
             POWERVR_DEVICE if self.powervr.is_some() => Target::PowerVr,
             _ => return None,
         };
@@ -115,6 +123,7 @@ impl Bus {
             Some((Target::Voodoo, reg)) => self.voodoo.as_ref().map_or(0xFF, |v| v.config_read(reg + (port & 3) as u8)),
             Some((Target::PowerVr, reg)) => self.powervr.as_ref().map_or(0xFF, |p| p.config_read(reg + (port & 3) as u8)),
             Some((Target::Verite, reg)) => self.verite.config_read(reg + (port & 3) as u8, self.vbe.lfb_base.unwrap_or(0)),
+            Some((Target::Mach64, reg)) => self.mach64.config_read(reg + (port & 3) as u8),
             None => 0xFF,
         }
     }
@@ -135,6 +144,12 @@ impl Bus {
         }
         if target == Target::Verite {
             self.verite.config_write(reg, value);
+            return;
+        }
+        if target == Target::Mach64 {
+            if self.mach64.config_write(reg, value) {
+                self.mach64_moved();
+            }
             return;
         }
         if target == Target::PowerVr {

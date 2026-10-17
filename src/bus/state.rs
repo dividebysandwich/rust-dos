@@ -24,6 +24,7 @@ const AWE_VERSION: u16 = 1;
 const VIRGE_VERSION: u16 = 1;
 const VERITE_VERSION: u16 = 3;
 const ET4000_VERSION: u16 = 1;
+const MACH64_VERSION: u16 = 1;
 const SHARED_VERSION: u16 = 1;
 const SB_HIGH_SPEED_VERSION: u16 = 1;
 const ISAPNP_VERSION: u16 = 1;
@@ -104,6 +105,7 @@ impl Bus {
             s3_engine,
             virge,
             verite,
+            mach64,
             retraces,
             last_flip,
             gate_array_shadow,
@@ -229,6 +231,10 @@ impl Bus {
         // The ET4000's registers, only on one, likewise.
         if vga.adapter.is_et4000() {
             w.section(b"ET4K", ET4000_VERSION, |w| vga.et4000.save(w));
+        }
+        // An ATI mach64's registers and engine, only on one, likewise.
+        if vga.adapter.is_mach64() {
+            w.section(b"MC64", MACH64_VERSION, |w| mach64.save(w));
         }
         // A booted system's disks made of shared host directories, before
         // the drives, which need them for their checkpoints; only with
@@ -394,6 +400,7 @@ impl Bus {
             s3_engine,
             virge,
             verite,
+            mach64,
             retraces,
             last_flip,
             gate_array_shadow,
@@ -529,6 +536,11 @@ impl Bus {
         vga.et4000 = Default::default();
         if r.next_is(b"ET4K") {
             vga.et4000.load(&mut r.section(b"ET4K", ET4000_VERSION)?)?;
+        }
+        mach64.reset();
+        mach64.rage2 = vga.adapter == crate::video::adapter::Adapter::AtiRage2;
+        if r.next_is(b"MC64") {
+            mach64.load(&mut r.section(b"MC64", MACH64_VERSION)?)?;
         }
         disk.shared_from_state = None;
         if r.next_is(b"SHRD") {

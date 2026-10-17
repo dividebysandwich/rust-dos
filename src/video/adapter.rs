@@ -32,6 +32,13 @@ pub enum Adapter {
     /// A 3dfx Voodoo Banshee with 16 MB: the Voodoo3's registers with one
     /// texture unit.
     Banshee,
+    /// An ATI 3D RAGE (mach64 GT) with 4 MB: the Super VGA's modes, and
+    /// ATI's accelerator CRTC, 2D engine and 3D engine, which ATI's
+    /// drivers (Windows' DirectDraw, Direct3D and ATI3DCIF) use.
+    AtiRage,
+    /// An ATI 3D RAGE II (mach64 GT-B): the 3D RAGE's registers, and a
+    /// texture palette of its own.
+    AtiRage2,
     /// IBM's VGA, without VESA modes.
     Vga,
     /// IBM's Enhanced Graphics Adapter with an Enhanced Color Display: 16
@@ -52,7 +59,7 @@ pub enum Adapter {
 }
 
 impl Adapter {
-    pub const ALL: [Adapter; 14] = [
+    pub const ALL: [Adapter; 16] = [
         Adapter::Svga,
         Adapter::S3,
         Adapter::S3Virge,
@@ -61,6 +68,8 @@ impl Adapter {
         Adapter::Et4000,
         Adapter::Voodoo3,
         Adapter::Banshee,
+        Adapter::AtiRage,
+        Adapter::AtiRage2,
         Adapter::Vga,
         Adapter::Ega,
         Adapter::Cga,
@@ -82,6 +91,8 @@ impl Adapter {
             "svga_et4000" | "et4000" | "tseng" => Some(Adapter::Et4000),
             "svga_voodoo3" | "voodoo3" => Some(Adapter::Voodoo3),
             "svga_banshee" | "banshee" => Some(Adapter::Banshee),
+            "svga_ati_3drage" | "rage" | "3drage" | "mach64" => Some(Adapter::AtiRage),
+            "svga_ati_3drage2" | "rage2" | "3drage2" => Some(Adapter::AtiRage2),
             "vga" | "vgaonly" => Some(Adapter::Vga),
             "ega" => Some(Adapter::Ega),
             "cga" => Some(Adapter::Cga),
@@ -102,6 +113,8 @@ impl Adapter {
             Adapter::Et4000 => "svga_et4000",
             Adapter::Voodoo3 => "svga_voodoo3",
             Adapter::Banshee => "svga_banshee",
+            Adapter::AtiRage => "svga_ati_3drage",
+            Adapter::AtiRage2 => "svga_ati_3drage2",
             Adapter::Vga => "vga",
             Adapter::Ega => "ega",
             Adapter::Cga => "cga",
@@ -122,6 +135,8 @@ impl Adapter {
             Adapter::Et4000 => "Tseng ET4000 (HiColor)",
             Adapter::Voodoo3 => "3dfx Voodoo3 (3D)",
             Adapter::Banshee => "3dfx Voodoo Banshee (3D)",
+            Adapter::AtiRage => "ATI 3D RAGE (3D)",
+            Adapter::AtiRage2 => "ATI 3D RAGE II (3D)",
             Adapter::Vga => "VGA",
             Adapter::Ega => "EGA",
             Adapter::Cga => "CGA",
@@ -136,6 +151,13 @@ impl Adapter {
         matches!(self, Adapter::Svga | Adapter::Et4000 | Adapter::Verite)
             || self.is_s3()
             || self.is_banshee()
+            || self.is_mach64()
+    }
+
+    /// Whether the adapter is one of ATI's mach64 GTs, the card in
+    /// `mach64`.
+    pub fn is_mach64(self) -> bool {
+        matches!(self, Adapter::AtiRage | Adapter::AtiRage2)
     }
 
     /// Whether the adapter is a 3dfx Banshee or Voodoo3, the card in
@@ -180,6 +202,7 @@ impl Adapter {
         matches!(self, Adapter::Svga | Adapter::Vga | Adapter::Et4000 | Adapter::Verite)
             || self.is_s3()
             || self.is_banshee()
+            || self.is_mach64()
     }
 
     /// Whether the BIOS has the EGA's functions: the palette registers

@@ -438,6 +438,8 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
     if adapter.is_et4000() {
         cpu.bus.et4000_program_standard();
     }
+    // A mach64's accelerator CRTC lets the VGA show the mode.
+    cpu.bus.mach64_mode_set();
 
     // Reset Cursor
     set_cursor(cpu, 0, 0, 0);
@@ -1556,6 +1558,7 @@ pub fn handle(cpu: &mut Cpu) {
             }
         }
         0x15 if cpu.bus.verite() => crate::bus::verite_bios(cpu),
+        0xA0 if cpu.bus.mach64() => crate::bus::mach64_bios(cpu),
 
         // AH = 0Ch: Write Graphics Pixel, in any standard graphics mode
         // AL = Color Value (bit 7: XOR it with the pixel's)

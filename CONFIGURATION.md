@@ -242,6 +242,9 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   S3's driver; see [Direct3D](#direct3d-on-an-s3-virge)), `svga_verite`
   (a Rendition Vérité V1000 with 4 MB on the PCI bus, for DOS games'
   Vérité versions; see [Rendition Vérité](#rendition-vérité)),
+  `svga_ati_3drage` and `svga_ati_3drage2` (an ATI 3D RAGE or 3D RAGE
+  II with 4 MB on the PCI bus, whose 2D and 3D engines ATI's Windows
+  drivers use; see [ATI 3D RAGE](#ati-3d-rage)),
   `svga_voodoo3` and `svga_banshee` (a 3dfx Voodoo3 3000 or Voodoo
   Banshee with 16 MB on the PCI bus, which 3dfx's Windows drivers use for
   the desktop, Direct3D and OpenGL; see
@@ -2205,6 +2208,31 @@ supported, nor some of the 2D microcode's rarer commands (lines, stretched
 copies, colour brushes); `RUST_DOS_VERITE_TRACE` lists the ones a program
 sends. Windows 95's own Rendition driver, from the OSR2 CD, hasn't been
 tried.
+
+## ATI 3D RAGE
+
+`machine=svga_ati_3drage` makes the display adapter an ATI 3D RAGE
+(mach64 GT) with 4 MB on the PCI bus; `svga_ati_3drage2` makes it a 3D
+RAGE II (mach64 GT-B):
+
+```ini
+[emulator]
+machine=svga_ati_3drage
+```
+
+The card is a VGA with ATI's accelerator CRTC, hardware cursor, 2D draw
+engine and 3D engine. Its 16 MB aperture (BAR0) holds the VESA linear
+frame buffer, and the registers in its top 2 KB; the registers below 40h
+are also ports (256 of them at BAR1, or the "sparse" ones from 2ECh
+with PCI configuration register 40h). Its BIOS has ATI's signature and
+tables in the ROM and ATI's extended services (INT 10h AH=A0h, and the
+far entry at C000:0064h that ATI's Windows driver calls), whose mode
+tables list 640x480 to 1280x1024 and the low resolutions 320x200,
+320x240, 400x300 and 512x384. VESA modes are set through the
+accelerator CRTC, as ATI's BIOS sets them.
+
+`RUST_DOS_MACH64_TRACE=<dir>` writes every register access and BIOS
+call to `<dir>/trace.txt`.
 
 ## PowerVR PCX2
 

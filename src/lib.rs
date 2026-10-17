@@ -62,6 +62,7 @@ pub mod kbc;
 pub mod keyboard;
 pub mod keylayout;
 pub mod log;
+pub mod mach64;
 pub mod manuals;
 #[cfg(all(feature = "hostmidi", not(target_arch = "wasm32")))]
 pub use rust_dos_mpu401::midiout;

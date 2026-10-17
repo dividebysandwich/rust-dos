@@ -58,6 +58,8 @@ pub const SERVICE_POST: u8 = 0xF0;
 /// real and protected mode: the Plug and Play BIOS's and APM's.
 pub const FAR_PNP: u8 = 0x01;
 pub const FAR_APM: u8 = 0x02;
+/// The ATI mach64 BIOS's extended services, at C000:0064h.
+pub const FAR_ATI: u8 = 0x03;
 
 /// Offsets in the F000 segment.
 const TIMER_HANDLER: u16 = 0x1100;

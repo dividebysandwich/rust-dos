@@ -531,6 +531,36 @@ fn render_vbe(canvas: &mut [u8], canvas_w: usize, y_min: usize, y_max: usize, bu
                 canvas[i..i + 3].copy_from_slice(&[rgb.0, rgb.1, rgb.2]);
             }
         }
+        // A mach64's hardware cursor over the row.
+        if let Some(cursor) = bus.mach64.cursor().filter(|_| bus.mach64.native && scale == 1) {
+            let cy = fy as i32 - cursor.y;
+            if (0..cursor.rows as i32).contains(&cy) {
+                let palette = |i: u8| colors[i as usize];
+                let palette: Option<&dyn Fn(u8) -> (u8, u8, u8)> =
+                    (mode.bpp == 8).then_some(&palette);
+                let colour = [
+                    bus.mach64.cursor_colour(0, palette),
+                    bus.mach64.cursor_colour(1, palette),
+                ];
+                for cx in cursor.skip..64 {
+                    let Ok(x) = usize::try_from(cursor.x + (cx - cursor.skip) as i32) else {
+                        continue;
+                    };
+                    if x >= mode.width as usize || x >= canvas_w {
+                        break;
+                    }
+                    let i = dst + x * 3;
+                    let rgb = match cursor.pixel(vram, cx, cy as u32) {
+                        crate::mach64::CursorPixel::Transparent => continue,
+                        crate::mach64::CursorPixel::Colour(n) => colour[n as usize],
+                        crate::mach64::CursorPixel::Invert => {
+                            (!canvas[i], !canvas[i + 1], !canvas[i + 2])
+                        }
+                    };
+                    canvas[i..i + 3].copy_from_slice(&[rgb.0, rgb.1, rgb.2]);
+                }
+            }
+        }
         // An S3's hardware cursor over the row.
         if let Some(cursor) = bus.vga.s3.cursor().filter(|_| bus.vga.adapter.is_s3() && scale == 1) {
             let y = fy as u32;

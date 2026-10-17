@@ -92,6 +92,7 @@ impl DebugHub {
                 "voodoo": cpu.bus.voodoo_status(),
                 "powervr": cpu.bus.powervr_status(),
                 "verite": cpu.bus.verite().then(|| cpu.bus.verite.describe()),
+                "mach64": cpu.bus.mach64().then(|| cpu.bus.mach64.describe()),
                 "s3": cpu.bus.vga.adapter.is_s3().then(|| {
                     let s3 = &cpu.bus.vga.s3;
                     json!({

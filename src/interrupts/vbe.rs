@@ -26,6 +26,9 @@ const OEM: &[u8] = b"rust-dos VBE 2.0\0";
 /// that look for the chip there.
 const S3_OEM: &[u8] = b"S3 Incorporated. Trio64\0";
 const S3_OEM_STRING: u16 = 0x0150;
+/// A mach64's, as ATI's BIOSes have it.
+const ATI_OEM: &[u8] = b"ATI MACH64\0";
+const ATI_OEM_STRING: u16 = 0x0170;
 const VENDOR: &[u8] = b"rust-dos\0";
 const PRODUCT: &[u8] = b"rust-dos SVGA\0";
 const REVISION: &[u8] = b"2.0\0";
@@ -45,6 +48,7 @@ pub fn install_rom(bus: &mut Bus) {
     for (offset, text) in [
         (OEM_STRING, OEM),
         (S3_OEM_STRING, S3_OEM),
+        (ATI_OEM_STRING, ATI_OEM),
         (VENDOR_NAME, VENDOR),
         (PRODUCT_NAME, PRODUCT),
         (PRODUCT_REVISION, REVISION),
@@ -111,7 +115,7 @@ const PM_SET_DISPLAY_START: &[u8] = &[
 /// Set Primary Palette in protected mode: CX entries from DX on, from
 /// ES:EDI as blue, green, red and padding.
 #[rustfmt::skip]
-const PM_SET_PALETTE: &[u8] = &[
+pub(crate) const PM_SET_PALETTE: &[u8] = &[
     0x50,                   // push eax
     0x51,                   // push ecx
     0x52,                   // push edx
@@ -193,11 +197,18 @@ pub fn handle(cpu: &mut Cpu) {
         0x06 => scan_line_length(cpu),
         0x08 => dac_width(cpu),
         0x09 => palette(cpu, es_di),
-        // The protected-mode interface: ES:DI, CX bytes long.
+        // The protected-mode interface: ES:DI, CX bytes long. A mach64's
+        // goes through its own ports, wherever they are now.
         0x0A if cpu.get_reg8(Register::BL) == 0 => {
+            let table = if cpu.bus.mach64() {
+                crate::mach64::bios::pm_table(cpu.bus.mach64.io_base())
+            } else {
+                pm_table()
+            };
+            cpu.bus.write_rom(rom(PM_TABLE), &table);
             cpu.set_es(ROM_SEGMENT);
             cpu.set_di(PM_TABLE);
-            cpu.set_cx(pm_table().len() as u16);
+            cpu.set_cx(table.len() as u16);
             SUCCESS
         }
         // VBE/DDC, on a Voodoo3 with its monitor's EDID.
@@ -233,8 +244,11 @@ fn controller_info(cpu: &mut Cpu, addr: usize) -> u16 {
     let vbe2 = (0..4).map(|i| cpu.bus.guest_read_8((addr + i) as u32)).eq(*b"VBE2");
     let (seg, off) = (cpu.es(), cpu.di());
     let far = |offset: u16| (ROM_SEGMENT as u32) << 16 | offset as u32;
-    let s3 = cpu.bus.vga.adapter.is_s3();
-    let (oem, oem_string) = if s3 { (S3_OEM, S3_OEM_STRING) } else { (OEM, OEM_STRING) };
+    let (oem, oem_string) = match cpu.bus.vga.adapter {
+        a if a.is_s3() => (S3_OEM, S3_OEM_STRING),
+        a if a.is_mach64() => (ATI_OEM, ATI_OEM_STRING),
+        _ => (OEM, OEM_STRING),
+    };
     let mut block = vec![0u8; if vbe2 { 512 } else { 256 }];
     block[0..4].copy_from_slice(b"VESA");
     block[4..6].copy_from_slice(&0x0200u16.to_le_bytes());
@@ -346,9 +360,13 @@ pub fn enter_mode(bus: &mut Bus, mode: &VbeMode, lfb: bool, keep: bool) {
     bus.vga.set_video_mode(VideoMode::Vesa);
     bus.vga.set_fixed_timing(Some(mode.timing));
     bus.vga.mark_dirty_full();
-    // An S3's own registers say the same, as its BIOS sets them.
+    // An S3's own registers say the same, as its BIOS sets them; a
+    // mach64's accelerator CRTC shows the mode.
     if bus.vga.adapter.is_s3() {
         bus.s3_program_mode(mode);
+    }
+    if bus.vga.adapter.is_mach64() {
+        crate::mach64::bios::program_mode(bus, mode);
     }
 }
 
@@ -400,6 +418,9 @@ fn window(cpu: &mut Cpu) -> u16 {
                 return FAILED;
             }
             cpu.bus.vbe.bank = bank as u32;
+            if cpu.bus.mach64() {
+                cpu.bus.mach64_set_bank(bank as u32);
+            }
         }
         0x01 => cpu.set_dx(cpu.bus.vbe.bank as u16),
         _ => return FAILED,
@@ -444,6 +465,13 @@ fn scan_line_length(cpu: &mut Cpu) -> u16 {
         }
         cpu.bus.vbe.pitch = pitch;
         cpu.bus.vga.mark_dirty_full();
+        // A mach64's CRTC has the pitch in units of 8 pixels.
+        if cpu.bus.mach64.native {
+            use crate::mach64::regs::CRTC_OFF_PITCH;
+            let pixels = (pitch / bytes_per_pixel).div_ceil(8);
+            let off_pitch = cpu.bus.mach64.reg(CRTC_OFF_PITCH) & 0xF_FFFF;
+            cpu.bus.mach64_write(CRTC_OFF_PITCH, off_pitch | pixels << 22, u32::MAX);
+        }
     }
     let pitch = cpu.bus.vbe.pitch;
     cpu.set_bx(pitch as u16);
@@ -469,6 +497,12 @@ fn display_start(cpu: &mut Cpu) -> Option<u16> {
             }
             cpu.bus.vbe.start = start;
             cpu.bus.note_display_start();
+            // A mach64's CRTC has the start in units of 8 bytes.
+            if cpu.bus.mach64.native {
+                use crate::mach64::regs::CRTC_OFF_PITCH;
+                let pitch = cpu.bus.mach64.reg(CRTC_OFF_PITCH) & 0xFFC0_0000;
+                cpu.bus.mach64_write(CRTC_OFF_PITCH, pitch | start >> 3, u32::MAX);
+            }
             if bl == 0x80 && !wait_for_retrace(cpu) {
                 return None;
             }
