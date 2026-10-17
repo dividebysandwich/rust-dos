@@ -25,13 +25,18 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   layouts, and a [DOS prompt](#the-dos-prompt) with batch files and a
   `COMMAND.COM` programs can shell out to
 * **Graphics:** text, CGA with composite artifact colours, EGA, VGA with
-  Mode X, VESA VBE 2.0 up to 1024x768, a Tseng ET4000 with HiColor, an S3 Trio64 with its 2D
-  accelerator, an [S3 ViRGE](CONFIGURATION.md#direct3d-on-an-s3-virge)
-  whose 3D engine draws Direct3D in Windows 95, Hercules, the Tandy 1000's and IBM PCjr's 16-colour
-  modes, and a [3dfx Voodoo Graphics](CONFIGURATION.md#3dfx-voodoo-graphics)
-  for Glide games in DOS and Windows 95 and Direct3D games in
-  Windows 98, drawn by Rust-DOS or again by
-  OpenGL at up to four times its resolution, and a
+  Mode X, VESA VBE 2.0 up to 1024x768, a Tseng ET4000 with HiColor, an S3
+  Trio64 with its 2D accelerator, an
+  [S3 ViRGE](CONFIGURATION.md#direct3d-on-an-s3-virge) whose 3D engine
+  draws Direct3D in Windows 95, Hercules, the Tandy 1000's and IBM PCjr's
+  16-colour modes, a
+  [3dfx Voodoo Graphics](CONFIGURATION.md#3dfx-voodoo-graphics) or
+  [Voodoo2](CONFIGURATION.md#3dfx-voodoo2) for Glide games in DOS and
+  Windows 95 and Direct3D and OpenGL games in Windows 98, drawn by
+  Rust-DOS or again by OpenGL at up to four times its resolution, a
+  [3dfx Voodoo3 or Banshee](CONFIGURATION.md#3dfx-voodoo3-and-banshee) as
+  the display adapter itself, which runs Windows' desktop, Direct3D and
+  OpenGL with 3dfx's driver, and a
   [PowerVR PCX2](CONFIGURATION.md#powervr-pcx2) (Matrox m3D) and a
   [Rendition Vérité](CONFIGURATION.md#rendition-vérité) for DOS games'
   PowerVR and Vérité versions
