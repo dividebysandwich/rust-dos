@@ -66,12 +66,16 @@ fn host_files_are_found_by_long_and_short_name() {
     let bin = disk.resolve_path(r"\cd\day of the tentacle.bin").unwrap();
     assert!(bin.ends_with("CD/Day Of The Tentacle.BIN"));
     let names: Vec<String> = disk
-        .list_directory(r"C:\CD\*.*", 0)
+        .list_directory(r"C:\CD\*.*", 0x10)
         .unwrap()
         .into_iter()
         .map(|e| e.filename)
         .collect();
     assert_eq!(names, ["..", ".", "DAYOFT~1.BIN", "DAYOFT~2.CUE"]);
+    // Without the directory attribute, files alone.
+    let files: Vec<String> =
+        disk.list_directory(r"C:\CD\*.*", 0).unwrap().into_iter().map(|e| e.filename).collect();
+    assert_eq!(files, ["DAYOFT~1.BIN", "DAYOFT~2.CUE"]);
 }
 
 #[test]

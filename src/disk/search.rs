@@ -342,12 +342,18 @@ impl DiskController {
 
     /// The ".." and "." entries of a directory below the root that match
     /// `pattern`, with the DOS time and date of each: the parent's for "..",
-    /// the directory's own for ".".
-    fn dot_entries(pattern: &str, times: [(u16, u16); 2]) -> impl Iterator<Item = DosDirEntry> + '_ {
+    /// the directory's own for ".". Being directories, they are found only
+    /// by a search whose attributes take directories (an installer copying
+    /// "*.*" with attribute 0 gets files alone).
+    fn dot_entries(
+        pattern: &str,
+        search_attr: u16,
+        times: [(u16, u16); 2],
+    ) -> impl Iterator<Item = DosDirEntry> + '_ {
         ["..", "."]
             .into_iter()
             .zip(times)
-            .filter(|(dot, _)| Self::matches_pattern(dot, pattern))
+            .filter(move |(dot, _)| search_attr & 0x10 != 0 && Self::matches_pattern(dot, pattern))
             .map(|(dot, (dos_time, dos_date))| DosDirEntry {
                 filename: dot.to_string(),
                 size: 0,
@@ -482,7 +488,8 @@ impl DiskController {
             };
             if !dir.is_empty() {
                 let parent = dir.rsplit_once('\\').map_or("", |(parent, _)| parent);
-                valid_entries.extend(Self::dot_entries(pattern, [dir_time(parent), dir_time(&dir)]));
+                let times = [dir_time(parent), dir_time(&dir)];
+                valid_entries.extend(Self::dot_entries(pattern, search_attr, times));
             }
             for (name, node) in files.list(&dir) {
                 let dir_record = match node {
@@ -522,7 +529,7 @@ impl DiskController {
         let media_ro = !drive.writable();
 
         if !is_host_root {
-            valid_entries.extend(Self::dot_entries(pattern, [(0, 0); 2]));
+            valid_entries.extend(Self::dot_entries(pattern, search_attr, [(0, 0); 2]));
         }
 
         let (mut entries, kept) = self.host_entries(&host_dir);
