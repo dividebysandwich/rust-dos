@@ -186,12 +186,12 @@ fn a_state_that_cant_be_loaded_leaves_the_machine_as_it_was() {
 
     // Cut short after its memory: the machine had taken the state's size.
     let state = machine::save(&machine_in(&dir));
-    assert_eq!(machine::load(&mut small, &state[..state.len() - 10]), Err(StateError::Truncated));
+    assert_eq!(machine::load(&mut small, &state[..state.len() - 20]), Err(StateError::Truncated));
     assert_eq!(small.bus.ram().len(), 4 << 20);
     assert!(machine::save(&small) == before, "a 16 MB state cut short leaves a 4 MB machine alone");
 
     let own = machine::save(&small);
-    assert_eq!(machine::load(&mut small, &own[..own.len() - 10]), Err(StateError::Truncated));
+    assert_eq!(machine::load(&mut small, &own[..own.len() - 20]), Err(StateError::Truncated));
     assert!(machine::save(&small) == before, "a state cut short leaves the machine alone");
 }
 
@@ -579,7 +579,7 @@ fn a_load_that_fails_takes_back_the_hardware_it_put_in_place() {
     let wanted = slots::machine_settings(&slots::machine_text(&theirs), &defaults);
     hardware.apply(&mut cpu, &wanted);
     assert!(cpu.bus.gus.is_none());
-    assert_eq!(machine::load(&mut cpu, &state[..state.len() - 10]), Err(StateError::Truncated));
+    assert_eq!(machine::load(&mut cpu, &state[..state.len() - 20]), Err(StateError::Truncated));
 
     machine::roll_back(&mut cpu, &mut hardware, &old, &defaults, &before);
     assert_eq!(hardware, old);

@@ -140,17 +140,30 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   down while the program waits for a key or calls DOS's idle interrupt.
   A real-mode program with no frames to go by (most games of the 1980s,
   which update the screen piecemeal) runs at 3000, about a 286, as in
-  DOSBox's `cycles=auto`; a protected-mode one (loading, computing,
-  Windows) runs at max. `auto 10000` makes that real-mode speed, and
-  the least `auto` goes down to, 10000. `max` runs everything as fast as
-  the host keeps up with in real time. Use a number such as `3000` for a
-  fixed speed. `--cycles` overrides it.
+  DOSBox's `cycles=auto`. A protected-mode one runs at max while it
+  reads and writes (loading, computing), and otherwise goes down to
+  20000, a 486's speed, or a quarter of a faster `cpu` model's clock
+  (50000 on a Pentium, 112500 on a Pentium II), no more than the host
+  has. `auto 10000` makes that real-mode speed, and the least `auto`
+  goes down to, 10000. `max` runs everything as fast as the host keeps
+  up with in real time. Use a number such as `3000` for a fixed speed.
+  `--cycles` overrides it.
 * `auto_fps` is the frame rate `cycles=auto` aims for: `auto`, the
   default, is the display's refresh rate (the 3dfx card's while it
   shows), and a number from 10 to 240 takes its place. A lower one, such
   as `30`, gives a game that would draw faster only the speed for that
   many frames a second; a higher one lets a game go past the display's
   rate. It applies at once, and the search for the speed starts over.
+* `auto_busy_os` (`true`, the default, or `false`): whether
+  `cycles=auto` gives a program all the host has while it keeps a
+  system that idles busy. Windows 95 and 98 halt the processor while
+  nothing runs; once `auto` has seen the processor halted for half a
+  measurement in protected mode, a program that keeps it from halting
+  (under 5% halted, no frames, such as a 3D benchmark building its next
+  scene) runs at max instead of slowing down as a spinning menu would.
+  What `auto` has seen goes into save states, and is forgotten when the
+  machine goes back to real mode (a reboot, a DOS program's end). It
+  applies at once.
 * `cpu` is the emulated processor: `486` (the default, a 486DX with FPU),
   `386`, or `pentium`, a Pentium as DOSBox-X has one: CPUID (a
   GenuineIntel family 5), the time stamp counter, which counts the

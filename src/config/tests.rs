@@ -665,6 +665,7 @@ fn changed_settings() -> Settings {
         record_shader: true,
         cycles: CpuSpeed::Fixed(3000),
         auto_fps: Some(35),
+        auto_busy_os: false,
         cpu: CpuModel::I386,
         core: CoreMode::Dynamic,
         fpu_fast: true,

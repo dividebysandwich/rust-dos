@@ -10,6 +10,7 @@ const ENV_VERSION: u16 = 1;
 const SEP_VERSION: u16 = 1;
 const SSE_VERSION: u16 = 1;
 const K6_VERSION: u16 = 1;
+const IDLE_VERSION: u16 = 1;
 
 /// The machine's state, between batches.
 pub fn save(cpu: &Cpu) -> Vec<u8> {
@@ -36,6 +37,7 @@ fn write(cpu: &Cpu, w: &mut Writer) {
     w.section(b"SEP ", SEP_VERSION, |w| cpu.sysenter.save(w));
     w.section(b"SSE ", SSE_VERSION, |w| cpu.sse.save(w));
     w.section(b"K6  ", K6_VERSION, |w| cpu.k6.save(w));
+    w.section(b"IDLE", IDLE_VERSION, |w| cpu.os_idles.save(w));
 }
 
 /// Load a state `save` wrote into the machine, between batches. A state
@@ -112,6 +114,12 @@ fn load_sections(cpu: &mut Cpu, data: &[u8]) -> Result<Vec<String>> {
     } else {
         cpu.k6 = crate::cpu::K6Msrs::default();
     }
+    // A state from before `cycles=auto` noted an idle loop has none seen.
+    if r.next_is(b"IDLE") {
+        cpu.os_idles.load(&mut r.section(b"IDLE", IDLE_VERSION)?)?;
+    } else {
+        cpu.os_idles = false;
+    }
     Ok(lost)
 }
 
@@ -135,4 +143,24 @@ pub fn reload(cpu: &mut Cpu) {
     load_sections(cpu, &state).expect("a machine loads the state it saved");
     cpu.forget_caches();
     cpu.bus.after_reload();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn whether_the_system_idles_goes_into_the_state() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.os_idles = true;
+        let (state, parts) = save_parts(&cpu);
+        cpu.os_idles = false;
+        load(&mut cpu, &state).unwrap();
+        assert!(cpu.os_idles);
+        // A state from before the section (the last) has none seen.
+        let idle = parts.iter().find(|(name, _)| name == "IDLE").expect("the section").1.clone();
+        assert_eq!(idle.end, state.len());
+        load(&mut cpu, &state[..idle.start]).unwrap();
+        assert!(!cpu.os_idles);
+    }
 }

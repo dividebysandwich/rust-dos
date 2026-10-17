@@ -228,6 +228,7 @@ fn reset_machine(cpu: &mut Cpu) {
     cpu.hle_retry = false;
     cpu.idle = false;
     cpu.pm_latched = false;
+    cpu.os_idles = false;
     cpu.dynrec.flush();
     cpu.bus.disk.close_all_files();
 

@@ -21,12 +21,16 @@
 //! speed-sensitive games of the 1980s draw without full frames. A
 //! protected-mode program gets all the host has while it reads and writes
 //! (loading, compiling, Windows), and otherwise goes down to a 486's
-//! speed: it spins in a loop, as game menus do. (It was written for a 386
-//! or better, and paces itself.) Once it stops reading and writing, it goes
-//! back to the speed it had at once, not a measurement later: programs
-//! time their delay loops right after loading, and a loop timed at all the
-//! host has waits for ever (Sam & Max's General MIDI driver counts to a
-//! million in a timer tick, and hangs if it gets there first).
+//! speed, or a quarter of a faster CPU model's clock: it spins in a loop,
+//! as game menus do. (It was written for a 386 or better, and paces
+//! itself.) Under an operating system that halts the processor when it has
+//! nothing to run (Windows, OS/2, Linux), a program that keeps it from
+//! halting is at work and gets all the host has as well. Once a program
+//! stops reading and writing, it goes back to the speed it had at once,
+//! not a measurement later: programs time their delay loops right after
+//! loading, and a loop timed at all the host has waits for ever (Sam &
+//! Max's General MIDI driver counts to a million in a timer tick, and
+//! hangs if it gets there first).
 
 use crate::bus::Bus;
 use crate::video::VideoMode;
@@ -81,6 +85,13 @@ const POLLS_PER_SECOND: f64 = 300.0;
 /// 386 or better and paces itself: about a 486 at 25 MHz. Less, a game's
 /// menus take seconds to draw.
 const PROTECTED_LEAST: u32 = 20_000;
+/// A protected-mode program halted this share of a measurement: an
+/// operating system's idle loop, which halts while nothing runs.
+const IDLES: f64 = 0.5;
+/// Under such a system, a program that leaves it halted less than this
+/// share of a measurement keeps it busy (the timer and disk interrupts
+/// still halt it a little).
+const BUSY: f64 = 0.05;
 /// Bytes a second written to video memory and moved on drives above which
 /// a program without frames is at work.
 const WORKING: f64 = 32768.0;
@@ -290,11 +301,75 @@ pub struct AutoSpeed {
     working: Option<u32>,
     /// The bytes it had read and written, and when that last changed.
     output: (u64, u64),
+    /// The least speed of a protected-mode program for the CPU model
+    /// (`CpuModel::auto_least`), when that is more than `PROTECTED_LEAST`.
+    protected_least: u32,
+    /// The protected-mode system halted at least `IDLES` of a measurement
+    /// since it started: it has an idle loop. Kept until the machine goes
+    /// back to real mode (a reboot, the program's end), and in save states
+    /// (`Cpu::os_idles`).
+    idles: bool,
+    /// Whether a program that keeps such a system busy gets all the host
+    /// has (`auto_busy_os`).
+    busy_os: bool,
 }
 
 impl AutoSpeed {
     pub fn new(base: u32, target_fps: Option<u32>) -> Self {
-        Self { base, target_fps, mark: None, settle_until: 0, unsettled: None, step: Step::Start, working: None, output: (0, 0) }
+        Self {
+            base,
+            target_fps,
+            mark: None,
+            settle_until: 0,
+            unsettled: None,
+            step: Step::Start,
+            working: None,
+            output: (0, 0),
+            protected_least: PROTECTED_LEAST,
+            idles: false,
+            busy_os: true,
+        }
+    }
+
+    /// The same search with another base and target, keeping what it knows
+    /// of the machine (the CPU model's least speed, whether the system
+    /// idles) and `busy_os`.
+    pub fn with(&self, base: u32, target_fps: Option<u32>) -> Self {
+        Self {
+            protected_least: self.protected_least,
+            idles: self.idles,
+            busy_os: self.busy_os,
+            ..Self::new(base, target_fps)
+        }
+    }
+
+    /// Whether the protected-mode system was seen idling.
+    pub fn idles(&self) -> bool {
+        self.idles
+    }
+
+    /// The system was seen idling before (a save state's, `Cpu::os_idles`),
+    /// or not.
+    pub fn set_idles(&mut self, idles: bool) {
+        self.idles = idles;
+    }
+
+    /// Give a program that keeps an idling system busy all the host has
+    /// (`auto_busy_os`), or treat it as any other.
+    pub fn set_busy_os(&mut self, on: bool) {
+        self.busy_os = on;
+    }
+
+    /// The least speed of a protected-mode program on this CPU model.
+    pub fn set_protected_least(&mut self, least: u32) {
+        self.protected_least = least.max(PROTECTED_LEAST);
+    }
+
+    /// The machine left protected mode: whatever runs next hasn't shown
+    /// an idle loop yet.
+    pub fn left_protected_mode(&mut self) {
+        self.idles = false;
+        self.reset();
     }
 
     pub fn base(&self) -> u32 {
@@ -380,7 +455,10 @@ impl AutoSpeed {
             self.working = working.or(self.working);
         }
         if trace() {
-            eprintln!("[auto] {} -> {} (host {}): {:?} {:?}", current, next, host_max, measured, self.step);
+            eprintln!(
+                "[auto] {} -> {} (host {}): {:?} {:?} idles={}",
+                current, next, host_max, measured, self.step, self.idles
+            );
         }
         if next == current {
             return None;
@@ -399,10 +477,18 @@ impl AutoSpeed {
     /// is at the speed the lower one would have grown to the higher frame
     /// rate at.
     pub fn decide(&mut self, current: u32, m: &Measurement, protected: bool, host_max: u32) -> u32 {
-        let base = if protected { self.base.max(PROTECTED_LEAST) } else { self.base };
+        // A faster model's least speed only up to what the host has.
+        let base = if protected {
+            self.base.max(PROTECTED_LEAST).max(self.protected_least.min(host_max))
+        } else {
+            self.base
+        };
         let top = host_max.max(base);
         let clamp = |speed: f64| (speed.round() as u32).clamp(base, top);
         let c = current as f64;
+        if protected && m.halted >= IDLES {
+            self.idles = true;
+        }
         if m.polling >= WAITING {
             self.step = Step::Start;
             return clamp(c * WAITING_STEP);
@@ -410,14 +496,19 @@ impl AutoSpeed {
         let Some(fps) = m.fps else {
             self.step = Step::Start;
             // A protected-mode program at work without frames loads, or
-            // compiles, or is Windows: it reads and writes. One that does
-            // neither spins in a loop, as a game's menu does.
+            // compiles, or is Windows: it reads and writes. Under a system
+            // that idles, one that keeps the processor from halting works
+            // too (3DMark 2000 builds a scene for seconds, with disk reads
+            // the emulator's own services don't see). Otherwise one that
+            // does neither spins in a loop, as a game's menu does.
             return if !protected {
                 base
-            } else if m.halted >= 0.5 {
+            } else if m.halted >= IDLES {
                 clamp(c)
             } else if m.output >= WORKING {
                 self.working = Some(clamp(c));
+                top
+            } else if self.busy_os && self.idles && m.halted < BUSY {
                 top
             } else {
                 clamp(c * WAITING_STEP)
@@ -642,6 +733,60 @@ mod tests {
         let settled = speeds[10];
         assert!((35_000..=48_000).contains(&settled), "{:?}", speeds);
         assert!(speeds[10..].iter().all(|&s| s.abs_diff(settled) < settled / 5), "{:?}", speeds);
+    }
+
+    #[test]
+    fn a_busy_program_under_a_system_that_idles_gets_all_the_host_has() {
+        let measure =
+            |halted| Measurement { fps: None, polling: 0.0, halted, output: 0.0, refresh: 60.0 };
+        // 3DMark 2000 building a scene: no frames, no I/O it can see, never
+        // halted. Before the system was seen idling, it is a spinning menu.
+        let mut auto = AutoSpeed::new(3000, None);
+        assert_eq!(auto.decide(100_000, &measure(0.0), true, HOST), 80_000);
+        // Windows' desktop halts most of the time; after that, the same
+        // program is at work.
+        assert_eq!(auto.decide(80_000, &measure(0.95), true, HOST), 80_000);
+        assert_eq!(auto.decide(80_000, &measure(0.0), true, HOST), HOST);
+        assert_eq!(auto.decide(HOST, &measure(0.01), true, HOST), HOST);
+        // One that halts some of the time isn't busy.
+        assert_eq!(auto.decide(100_000, &measure(0.2), true, HOST), 80_000);
+        // A new search (another speed, a state loaded) keeps what it knows.
+        let mut kept = auto.with(3000, None);
+        kept.reset();
+        assert_eq!(kept.decide(100_000, &measure(0.0), true, HOST), HOST);
+        // Not with `auto_busy_os=false`.
+        let mut off = kept.with(3000, None);
+        off.set_busy_os(false);
+        assert_eq!(off.decide(100_000, &measure(0.0), true, HOST), 80_000);
+        // Back in real mode, nothing is known.
+        kept.left_protected_mode();
+        assert_eq!(kept.decide(100_000, &measure(0.0), true, HOST), 80_000);
+        // A real-mode program halting says nothing.
+        let mut dos = AutoSpeed::new(3000, None);
+        dos.decide(3000, &measure(0.95), false, HOST);
+        assert_eq!(dos.decide(100_000, &measure(0.0), true, HOST), 80_000);
+    }
+
+    #[test]
+    fn a_faster_model_goes_less_far_down() {
+        let waiting =
+            Measurement { fps: None, polling: 0.5, halted: 0.0, output: 0.0, refresh: 70.0 };
+        let settle = |auto: &mut AutoSpeed, protected, host| {
+            let mut speed = 200_000;
+            for _ in 0..30 {
+                speed = auto.decide(speed, &waiting, protected, host);
+            }
+            speed
+        };
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.set_protected_least(crate::cpu::CpuModel::PentiumII.auto_least());
+        assert_eq!(settle(&mut auto, true, HOST), 112_500);
+        // Not past what the host has, and not for real-mode programs.
+        assert_eq!(settle(&mut auto, true, 60_000), 60_000);
+        assert_eq!(settle(&mut auto, false, HOST), 3000);
+        // The 486 keeps the 486's.
+        auto.set_protected_least(crate::cpu::CpuModel::I486.auto_least());
+        assert_eq!(settle(&mut auto, true, HOST), PROTECTED_LEAST);
     }
 
     #[test]

@@ -224,7 +224,7 @@ fn main() -> Result<(), String> {
 
     // Paces emulated time against the wall clock, one frame at a time.
     cpu.bus.set_cycles_per_ms(settings.cycles.initial_cycles());
-    let mut pacer = timer::Pacer::new(settings.cycles, settings.auto_fps, std::time::Instant::now());
+    let mut pacer = timer::Pacer::for_settings(&settings, std::time::Instant::now());
 
     // The settings window (Ctrl+F12, DOSCONFIG), and whether the machine
     // has been set aside for it: paused, its keys released.
@@ -2019,7 +2019,7 @@ fn main() -> Result<(), String> {
 
         profile::set_host(Zone::Frontend);
         let overhead = frame_start.elapsed().saturating_sub(exec_time + waited);
-        if let Some(cycles) = pacer.end_frame(&cpu.bus, cpu.pm_latched, executed, exec_time, overhead) {
+        if let Some(cycles) = pacer.end_cpu_frame(&mut cpu, executed, exec_time, overhead) {
             cpu.bus.set_cycles_per_ms(cycles);
         }
         let busy = frame_start.elapsed().saturating_sub(waited);

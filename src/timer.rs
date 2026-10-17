@@ -616,7 +616,7 @@ impl Pacer {
     /// clock's rate (`CpuSpeed::initial_cycles`).
     pub fn set_speed(&mut self, speed: CpuSpeed) {
         if let CpuSpeed::Auto(base) = speed {
-            self.auto = AutoSpeed::new(base, self.auto.target_fps());
+            self.auto = self.auto.with(base, self.auto.target_fps());
         }
         self.speed = speed;
     }
@@ -624,7 +624,39 @@ impl Pacer {
     /// Change the frame rate `Auto` aims for (`auto_fps`), None for the
     /// display's refresh rate; the search starts over.
     pub fn set_auto_fps(&mut self, fps: Option<u32>) {
-        self.auto = AutoSpeed::new(self.auto.base(), fps);
+        self.auto = self.auto.with(self.auto.base(), fps);
+    }
+
+    /// A pacer for `settings`' speed, `auto_fps` and `auto_busy_os`.
+    pub fn for_settings(settings: &crate::config::Settings, now: Instant) -> Self {
+        let mut pacer = Self::new(settings.cycles, settings.auto_fps, now);
+        pacer.set_busy_os(settings.auto_busy_os);
+        pacer
+    }
+
+    /// Whether `Auto` gives a program that keeps an idling protected-mode
+    /// system busy all the host has (`auto_busy_os`).
+    pub fn set_busy_os(&mut self, on: bool) {
+        self.auto.set_busy_os(on);
+    }
+
+    /// `end_frame` for `cpu`'s machine. `Auto` takes its CPU model, whose
+    /// clock sets how slow a protected-mode program may go
+    /// (`CpuModel::auto_least`) and which the settings window can change,
+    /// and whether its system was seen idling (`Cpu::os_idles`, which a
+    /// state loaded brings); the machine keeps what `Auto` saw.
+    pub fn end_cpu_frame(
+        &mut self,
+        cpu: &mut crate::cpu::Cpu,
+        executed: u64,
+        exec: Duration,
+        overhead: Duration,
+    ) -> Option<u32> {
+        self.auto.set_protected_least(cpu.model.auto_least());
+        self.auto.set_idles(cpu.os_idles);
+        let next = self.end_frame(&cpu.bus, cpu.pm_latched, executed, exec, overhead);
+        cpu.os_idles = self.auto.idles();
+        next
     }
 
     /// The instruction count the next batch should run to, so emulated time
@@ -738,10 +770,14 @@ impl Pacer {
                 let host_max = self.host_max.map_or(MAX_CYCLES, |max| (max as u32).clamp(MIN_CYCLES, MAX_CYCLES));
                 if protected != self.protected {
                     self.protected = protected;
-                    self.auto.reset();
-                    // The protected-mode program ended: whatever runs next
-                    // starts from the real-mode speed.
-                    if !protected {
+                    // A program switched to protected mode: the search
+                    // starts over. The protected-mode program ended (or
+                    // the machine rebooted): whatever runs next starts
+                    // from the real-mode speed, with no idle loop seen.
+                    if protected {
+                        self.auto.reset();
+                    } else {
+                        self.auto.left_protected_mode();
                         let base = self.auto.base();
                         return (base != current).then_some(base);
                     }

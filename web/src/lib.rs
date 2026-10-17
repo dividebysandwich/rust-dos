@@ -215,7 +215,7 @@ impl Machine {
         cpu.bus.set_cycles_per_ms(settings.cycles.initial_cycles());
         let blank = Frame::new(video::SCREEN_WIDTH, video::SCREEN_HEIGHT);
         Machine {
-            pacer: Pacer::new(settings.cycles, settings.auto_fps, Instant::now()),
+            pacer: Pacer::for_settings(&settings, Instant::now()),
             cpu,
             hardware: Hardware::of(&settings),
             saved: Saved { text: text.to_string(), settings: settings.clone() },
@@ -326,7 +326,7 @@ impl Machine {
             ],
         };
         self.cpu.start_dos();
-        self.pacer = Pacer::new(self.settings.cycles, self.settings.auto_fps, Instant::now());
+        self.pacer = Pacer::for_settings(&self.settings, Instant::now());
     }
 
     /// Type `line` at the DOS prompt, once the shell is back there.
@@ -404,7 +404,9 @@ impl Machine {
         let render = render_start.elapsed();
 
         let overhead = frame_start.elapsed().saturating_sub(exec_time);
-        if let Some(cycles) = self.pacer.end_frame(&self.cpu.bus, self.cpu.pm_latched, executed, exec_time, overhead) {
+        if let Some(cycles) =
+            self.pacer.end_cpu_frame(&mut self.cpu, executed, exec_time, overhead)
+        {
             self.cpu.bus.set_cycles_per_ms(cycles);
         }
         let busy = frame_start.elapsed();
@@ -1230,6 +1232,9 @@ impl Host for PageHost<'_> {
         if new.auto_fps != old.auto_fps {
             self.pacer.set_auto_fps(new.auto_fps);
         }
+        if new.auto_busy_os != old.auto_busy_os {
+            self.pacer.set_busy_os(new.auto_busy_os);
+        }
         if new.core != old.core {
             self.cpu.core = new.core;
         }
@@ -1630,7 +1635,7 @@ mod tests {
         let header = slots::header(&m.cpu, &theirs, None);
         let state = savestate::machine::save(&m.cpu);
         let before = state.clone();
-        m.states.insert("dos/1".to_string(), slots::encode(&header, &[], &state[..state.len() - 10]));
+        m.states.insert("dos/1".to_string(), slots::encode(&header, &[], &state[..state.len() - 20]));
 
         assert!(m.with_ui(|_, host| host.load_slot(1)).is_err());
         assert_eq!(m.settings, settings);

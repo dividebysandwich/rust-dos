@@ -146,6 +146,15 @@ impl CpuModel {
         Some(mhz * 1_000_000)
     }
 
+    /// The least speed `cycles=auto` gives a protected-mode program, in
+    /// instructions per ms: a quarter of the clock `tsc_hz` gives the
+    /// model (50,000 for a Pentium, 112,500 for a Pentium II), since its
+    /// programs were written for that much. The 386 and 486 have none
+    /// beyond `autospeed`'s own.
+    pub fn auto_least(self) -> u32 {
+        self.tsc_hz().map_or(0, |hz| (hz / 4_000) as u32)
+    }
+
     /// The family, model and stepping CPUID reports, which DX also holds
     /// after a reset.
     pub fn signature(self) -> u32 {
@@ -577,6 +586,11 @@ pub struct Cpu {
     /// runs it on the dynamic recompiler and `cycles=auto` at max speed
     /// until it ends.
     pub pm_latched: bool,
+    /// The protected-mode system halted much of the time since the program
+    /// switched (an idle loop, as Windows 9x's): `cycles=auto` then takes a
+    /// program that keeps it from halting for one at work. Goes with
+    /// `pm_latched`, and into save states.
+    pub os_idles: bool,
     /// REP MOVS and STOS do the iterations that stay in plain RAM at once,
     /// and so does REP INSW or INSD of an IDE hard disk's block into it
     /// (`instructions::string`). Off, they go one at a time, which tests
@@ -804,6 +818,7 @@ impl Cpu {
             hle_retry: false,
             core: CoreMode::initial(),
             pm_latched: false,
+            os_idles: false,
             string_bulk: true,
             // (`RUST_DOS_FPU=fast` from the environment, as `RUST_DOS_CORE`:
             // the front ends set the configured one.)
@@ -1184,6 +1199,7 @@ impl Cpu {
         // The program ended: `core=auto` goes back to the interpreter and
         // `cycles=auto` to the real-mode speed.
         self.pm_latched = false;
+        self.os_idles = false;
         self.restore(&context.regs);
         self.current_psp = context.psp;
         self.heap_pointer = context.heap_pointer; // Restore heap specifically for that process? Maybe not... but safer.
@@ -1588,6 +1604,7 @@ impl Cpu {
         // No program runs: `core=auto` is back on the interpreter, and the
         // dynamic recompiler's code for the last program goes.
         self.pm_latched = false;
+        self.os_idles = false;
         self.dynrec.flush();
         self.program.clear();
 

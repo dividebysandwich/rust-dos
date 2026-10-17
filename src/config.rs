@@ -167,6 +167,9 @@ pub struct Config {
     /// The frame rate `cycles=auto` aims for (`auto_fps`), or None for the
     /// display's refresh rate.
     pub auto_fps: Option<Option<u32>>,
+    /// Whether `cycles=auto` gives a program that keeps an idling system
+    /// (Windows) busy all the host has (`auto_busy_os`).
+    pub auto_busy_os: Option<bool>,
     /// Emulated processor (`cpu`).
     pub cpu: Option<CpuModel>,
     /// What runs the programs' instructions (`core`).

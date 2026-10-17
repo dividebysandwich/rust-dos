@@ -50,6 +50,9 @@ pub struct Settings {
     /// The frame rate `cycles=auto` aims for, or None for the display's
     /// refresh rate.
     pub auto_fps: Option<u32>,
+    /// `cycles=auto` gives a program that keeps an idling system busy all
+    /// the host has (`autospeed`).
+    pub auto_busy_os: bool,
     pub cpu: CpuModel,
     pub core: CoreMode,
     /// The FPU adds and subtracts as the host does (`fpu=fast`): faster,
@@ -144,6 +147,7 @@ impl Default for Settings {
             record_shader: false,
             cycles: CpuSpeed::default(),
             auto_fps: None,
+            auto_busy_os: true,
             cpu: CpuModel::I486,
             core: CoreMode::Auto,
             fpu_fast: false,
@@ -263,6 +267,7 @@ impl Settings {
             record_shader: config.record_shader.unwrap_or(default.record_shader),
             cycles: config.cycles.unwrap_or(default.cycles),
             auto_fps: config.auto_fps.unwrap_or(default.auto_fps),
+            auto_busy_os: config.auto_busy_os.unwrap_or(default.auto_busy_os),
             cpu: config.cpu.unwrap_or(default.cpu),
             core: config.core.unwrap_or(default.core),
             fpu_fast: config.fpu_fast.unwrap_or(default.fpu_fast),
@@ -354,6 +359,7 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
             Some(settings.cycles.to_string()),
         ),
         (Emulator, "auto_fps", Some(crate::timer::auto_fps_text(settings.auto_fps))),
+        (Emulator, "auto_busy_os", yes_no(settings.auto_busy_os)),
         (
             Emulator,
             "cpu",
