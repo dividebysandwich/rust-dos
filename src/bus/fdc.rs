@@ -28,7 +28,7 @@ impl Bus {
     /// Take the controller out.
     pub fn detach_fdc(&mut self) {
         if self.fdc.take().is_some_and(|fdc| fdc.pic_line) {
-            self.pic.lower(IRQ);
+            self.withdraw_irq(IRQ);
             self.refresh_irq();
         }
     }
@@ -86,7 +86,7 @@ impl Bus {
             if line {
                 self.pic.raise(IRQ);
             } else {
-                self.pic.lower(IRQ);
+                self.withdraw_irq(IRQ);
             }
             self.refresh_irq();
         }

@@ -1453,7 +1453,7 @@ impl Bus {
     fn sync_gus_irq(&mut self) {
         let Some(gus) = &mut self.gus else {
             if let Some(irq) = self.gus_line.take() {
-                self.pic.lower(irq);
+                self.withdraw_irq(irq);
                 self.refresh_irq();
             }
             return;
@@ -1463,7 +1463,7 @@ impl Bus {
         if let Some(old) = self.gus_line
             && line != Some(old)
         {
-            self.pic.lower(old);
+            self.withdraw_irq(old);
         }
         if let Some(irq) = line
             && (fresh || self.gus_line != line)
@@ -1875,7 +1875,7 @@ impl Bus {
             && (old8 || old16)
             && (!up || irq != old_irq)
         {
-            self.pic.lower(old);
+            self.withdraw_irq(old);
         }
         if let Some(line) = irq
             && ((irq8 && !old8) || (irq16 && !old16) || (up && irq != old_irq))
@@ -1919,6 +1919,24 @@ impl Bus {
         let vector = self.pic.acknowledge(irq);
         self.refresh_irq();
         vector
+    }
+
+    /// Whether a PCI card holds `irq` up. PCI interrupts are levels the
+    /// cards share: the BIOS (or the guest, through each card's interrupt
+    /// line register) can route several cards' INTA# to one IRQ, and the
+    /// line stays up while any of them holds it.
+    fn pci_holds(&self, irq: u8) -> bool {
+        let banshee = self.banshee().and_then(|b| b.irq_up);
+        [banshee, self.powervr_line].contains(&Some(irq))
+    }
+
+    /// A device's line `irq` dropped: withdraw its request, unless a PCI
+    /// card still holds the line, whose request stays. A device updates
+    /// what it holds before it withdraws, so that it isn't counted itself.
+    pub(crate) fn withdraw_irq(&mut self, irq: u8) {
+        if !self.pci_holds(irq) {
+            self.pic.lower(irq);
+        }
     }
 
     /// Discard a request for `irq`, for lines with no handler installed.

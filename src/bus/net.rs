@@ -93,14 +93,14 @@ impl Bus {
         if let Some(ipx) = &mut self.net.ipx {
             ipx.reset();
             let irq = ipx.irq;
-            self.pic.lower(irq);
+            self.withdraw_irq(irq);
             self.refresh_irq();
         }
     }
 
     fn remove_ipx(&mut self) {
         if let Some(ipx) = self.net.ipx.take() {
-            self.pic.lower(ipx.irq);
+            self.withdraw_irq(ipx.irq);
             self.refresh_irq();
             self.log_string("[IPX] The IPX driver is removed");
         }
@@ -221,7 +221,7 @@ impl Bus {
         if let Some(nic) = self.net.nic.take()
             && nic.pic_line
         {
-            self.pic.lower(nic.irq);
+            self.withdraw_irq(nic.irq);
         }
         if let Some((base, irq, mac)) = wanted {
             let mac = mac.unwrap_or_else(crate::net::frame::Mac::random_local);
@@ -322,7 +322,7 @@ impl Bus {
             if line {
                 self.pic.raise(irq);
             } else {
-                self.pic.lower(irq);
+                self.withdraw_irq(irq);
             }
             self.refresh_irq();
         }

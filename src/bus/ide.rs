@@ -104,7 +104,7 @@ impl Bus {
             if let Some(channel) = self.ide[id.index()].take()
                 && channel.pic_line
             {
-                self.pic.lower(id.irq());
+                self.withdraw_irq(id.irq());
                 self.refresh_irq();
             }
         }
@@ -168,7 +168,7 @@ impl Bus {
             if line {
                 self.pic.raise(id.irq());
             } else {
-                self.pic.lower(id.irq());
+                self.withdraw_irq(id.irq());
             }
             self.refresh_irq();
         }

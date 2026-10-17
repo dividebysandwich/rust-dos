@@ -2231,11 +2231,13 @@ recordings show it, and nothing else in the window changes.
 
 The card is on the PCI bus as device 2 (vendor 1033h, device 0046h), its
 registers at D4000000h (BAR0) and its texture memory at D4400000h (BAR1),
-INTA# on IRQ 11. A render takes the time the chip's 66 MHz ISP and TSP
-would take, then sets its end-of-render status (and interrupts, for
-games that unmask it); the tiles are drawn on as many threads as the
-host has, and the picture is the same however many there are. Save
-states and rewind keep the card with its texture memory.
+INTA# on IRQ 11, which it shares with a Banshee or Voodoo3 as PCI cards
+do: the line stays up while either card holds it. A render takes the
+time the chip's 66 MHz ISP and TSP would take, then sets its
+end-of-render status (and interrupts, for games that unmask it); the
+tiles are drawn on as many threads as the host has, and the picture is
+the same however many there are. Save states and rewind keep the card
+with its texture memory.
 
 * **Tomb Raider**'s PowerVR patch (`3DPATCH\PWRVR\TOMBPCX2.EXE` on the Tomb
   Raider Gold CD, copied into the game's folder) runs with `cpu=pentium`

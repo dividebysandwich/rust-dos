@@ -168,17 +168,17 @@ impl Bus {
     /// up, withdraw it when it drops.
     fn sync_powervr_irq(&mut self) {
         let line = self.powervr.as_ref().filter(|p| p.irq_asserted()).and_then(|p| p.irq());
-        if let Some(old) = self.powervr_line
+        let old = std::mem::replace(&mut self.powervr_line, line);
+        if let Some(old) = old
             && line != Some(old)
         {
-            self.pic.lower(old);
+            self.withdraw_irq(old);
         }
         if let Some(irq) = line
-            && self.powervr_line != line
+            && old != line
         {
             self.pic.raise(irq);
         }
-        self.powervr_line = line;
         self.refresh_irq();
     }
 

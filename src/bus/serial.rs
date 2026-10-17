@@ -215,7 +215,7 @@ impl Bus {
                 if lines & 1 << irq != 0 {
                     self.pic.raise(irq);
                 } else {
-                    self.pic.lower(irq);
+                    self.withdraw_irq(irq);
                 }
             }
         }

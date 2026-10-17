@@ -248,7 +248,7 @@ impl Bus {
             return;
         }
         if let Some(old) = old {
-            self.pic.lower(old);
+            self.withdraw_irq(old);
         }
         if let Some(irq) = line {
             self.pic.raise(irq);
@@ -261,7 +261,7 @@ impl Bus {
     pub(crate) fn lower_banshee_irq(&mut self) {
         let up = self.banshee_mut().and_then(|b| b.irq_up.take());
         if let Some(irq) = up {
-            self.pic.lower(irq);
+            self.withdraw_irq(irq);
             self.refresh_irq();
         }
     }
