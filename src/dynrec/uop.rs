@@ -358,6 +358,13 @@ pub enum Uop {
     FlagsFrom { t: T, mask: u32 },
     /// t = 1 if condition `cc` holds on the flags, else 0 (SETcc).
     SetCond { t: T, cc: ConditionCode },
+    /// t = src if condition `cc` holds on the flags, else t stays
+    /// (CMOVcc).
+    CondMove {
+        t: T,
+        src: T,
+        cc: ConditionCode,
+    },
     /// BT, BTS, BTR or BTC of bit `bit` (modulo size * 8) of t, a `size`
     /// byte value: CF the bit and OF as `logic::bit_test` sets them (the
     /// others stay), and t the value with the bit set, cleared or
@@ -511,6 +518,9 @@ pub enum Uop {
     FAddValue { kind: u32, x: X },
     /// FCHS: `fpu::arithmetic::fchs`.
     FChs,
+    /// FSQRT: `fpu::arithmetic::fsqrt`, which takes the root of ST(0)'s
+    /// double.
+    FSqrt,
     /// Push the 80 bits at handle m, which is RAM's (`BailUnlessRam`), as
     /// FLD's handler does.
     FLoad80 { m: T },

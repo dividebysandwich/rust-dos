@@ -207,6 +207,22 @@ pub fn translate(instr: &Instruction, fast: bool, u: &mut Vec<Uop>) -> bool {
             u.push(Uop::FMul { a: X1, b: X0 });
             u.push(Uop::FSet { i: 0, x: X1, canon: true });
         }
+        Fidiv_m16int | Fidiv_m32int | Fidivr_m16int | Fidivr_m32int => {
+            let reversed = matches!(instr.code(), Fidivr_m16int | Fidivr_m32int);
+            guard(u, 1);
+            if !int(u) {
+                return false;
+            }
+            u.push(Uop::FGet { x: X1, i: 0 });
+            let (num, den) = if reversed { (X0, X1) } else { (X1, X0) };
+            u.push(Uop::FDiv { i: 0, num, den });
+        }
+        // The handler takes the root of the double, so a register holding
+        // more than its double needs no `FBailPrecise`.
+        Fsqrt => {
+            guard(u, 1);
+            u.push(Uop::FSqrt);
+        }
         // (The integer comes to the same 80 bits as the double of it.)
         Fiadd_m16int | Fiadd_m32int | Fisub_m16int | Fisub_m32int | Fisubr_m16int | Fisubr_m32int => {
             let kind = match instr.code() {

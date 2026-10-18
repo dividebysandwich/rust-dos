@@ -62,7 +62,7 @@ impl Uop {
             Uop::Alu { op: AluOp::Adc | AluOp::Sbb, .. } => CF,
             Uop::Shift { op: ShiftOp::Rcl | ShiftOp::Rcr, .. } => CF,
             Uop::Flag { mask, set: None } => mask & ARITH,
-            Uop::SetCond { cc, .. } => cond_flags(cc),
+            Uop::SetCond { cc, .. } | Uop::CondMove { cc, .. } => cond_flags(cc),
             // A count of 0 leaves the flags as they were.
             Uop::ShiftVar { op, .. } => shift_flags(op),
             Uop::DoubleShiftVar { .. } => CF | OF | SZP,

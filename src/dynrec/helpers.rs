@@ -153,7 +153,7 @@ pub struct JitCtx {
     /// ([1]) by the NZCV flags AArch64's ADDS or SUBS left (bits 3-0):
     /// a subtraction's carry is set where nothing was borrowed.
     pub szco: [[u16; 16]; 2],
-    /// `jit_fpu_addsub_st`, `jit_fpu_addsub_value`, `jit_fpu_to_int` and
+    /// `jit_fpu_reg_op`, `jit_fpu_addsub_value`, `jit_fpu_to_int` and
     /// `jit_fpu_div_zero`; and the trampoline's own exact 80-bit sum
     /// (AArch64's `fpu_addsub`).
     pub fpu: [usize; 5],
@@ -325,7 +325,7 @@ impl JitCtx {
                 })
             }),
             fpu: [
-                jit_fpu_addsub_st as *const () as usize,
+                jit_fpu_reg_op as *const () as usize,
                 jit_fpu_addsub_value as *const () as usize,
                 jit_fpu_to_int as *const () as usize,
                 jit_fpu_div_zero as *const () as usize,
@@ -898,9 +898,9 @@ fn fpu_helper<R: Default>(cpu: *mut Cpu, ctx: *mut JitCtx, f: impl FnOnce(&mut C
 jit_fn! {
     /// The register operations `desc >> 13` says: `Uop::FAddSt` (0, `desc`
     /// is dst, a << 4, b << 8 and sub << 12), `Uop::FChs` (1),
-    /// `Uop::FLoad80` (2, from RAM at `arg`) and `Uop::FToX80` (3, `desc`'s
-    /// low bits the part, which it returns).
-    fn jit_fpu_addsub_st(cpu: *mut Cpu, ctx: *mut JitCtx, desc: u32, arg: u32) -> u32 {
+    /// `Uop::FLoad80` (2, from RAM at `arg`), `Uop::FToX80` (3, `desc`'s
+    /// low bits the part, which it returns) and `Uop::FSqrt` (4).
+    fn jit_fpu_reg_op(cpu: *mut Cpu, ctx: *mut JitCtx, desc: u32, arg: u32) -> u32 {
         use crate::instructions::fpu::arithmetic;
         let (dst, a, b) = ((desc & 7) as usize, (desc >> 4 & 7) as usize, (desc >> 8 & 7) as usize);
         fpu_helper(cpu, ctx, |cpu| match desc >> 13 {
@@ -918,6 +918,10 @@ jit_fn! {
                 let mut f = crate::f80::F80::new();
                 f.set_bytes(&bytes);
                 cpu.fpu_push(f);
+                0
+            }
+            4 => {
+                arithmetic::fsqrt(cpu);
                 0
             }
             _ => {

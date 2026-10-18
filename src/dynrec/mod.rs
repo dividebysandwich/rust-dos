@@ -631,6 +631,7 @@ mod engine {
             let real = key.mode & ENV_REAL != 0;
             let fast_fpu = cpu.fpu_fast;
             let i486 = cpu.model >= CpuModel::I486;
+            let p6 = cpu.model.is_p6();
             let simd = if backend::SIMD {
                 let mmx = if cpu.model.has_mmx() { super::simd::MMX } else { 0 };
                 mmx | if cpu.model.has_sse() { super::simd::SSE } else { 0 }
@@ -642,7 +643,9 @@ mod engine {
             // them.
             let uops = |instr: &iced_x86::Instruction, next: u32| {
                 use super::translate::translate;
-                translate(instr, next, stack32, system, segments, fpu, fast_fpu, real, i486, simd)
+                translate(
+                    instr, next, stack32, system, segments, fpu, fast_fpu, real, i486, p6, simd,
+                )
             };
             // The block goes on after a conditional jump its code takes.
             let side = |instr: &iced_x86::Instruction| uops(instr, instr.next_ip32()).is_some();
