@@ -112,23 +112,60 @@ pub fn import_in(texts: &[&str], bases: &[PathBuf], name: &str, home: Option<&Pa
     {
         imported.set("emulator", "machine", "svga_s3");
     }
-    // The machine rust-dos's own section (or its profiles' [emulator])
-    // asks for, over what DOSBox's became.
-    let own_section = |s: &str| s == "rust-dos" || s == "emulator";
-    let own = texts
-        .iter()
-        .flat_map(|t| parse(t).values)
-        .rfind(|(s, k, _)| own_section(s) && k == "machine")
-        .map(|(_, _, v)| v);
-    if let Some(value) = own {
-        match crate::video::adapter::Adapter::parse(&value) {
-            Some(adapter) => imported.set("emulator", "machine", adapter.name()),
-            None => imported
+    own_settings(&mut imported, texts);
+    imported
+}
+
+/// The sections of a profile's settings (`Imported::settings_text`), where
+/// a key in `[rust-dos]` is looked for.
+const PROFILE_SECTIONS: [&str; 7] = [
+    "emulator", "sound", "mixer", "joystick", "network", "serial", "printer",
+];
+
+/// rust-dos's own settings in `texts`, over everything the import made of
+/// DOSBox's: those in its own sections, which DOSBox has none of
+/// (`[emulator]`, `[sound]`, `[network]`), and any of a profile's in
+/// `[rust-dos]`. They are taken as rust-dos reads them, so a game set up in
+/// DOSBox can have a card or a setting DOSBox has no word for.
+fn own_settings(imported: &mut Imported, texts: &[&str]) {
+    for (section, key, value) in texts.iter().flat_map(|t| parse(t).values) {
+        let sections: &[&str] = match section.as_str() {
+            "rust-dos" if key == "os" => continue,
+            "rust-dos" => &PROFILE_SECTIONS,
+            "emulator" => &["emulator"],
+            "sound" => &["sound"],
+            "network" => &["network"],
+            _ => continue,
+        };
+        let mut errors = None;
+        let found = sections.iter().find(|s| {
+            let text = format!("[{}]\n{}={}\n", s, key, value);
+            // The line's own errors, not those between it and the defaults.
+            let config = crate::config::parse(&text, Path::new("/"), None);
+            let mut line = config
                 .warnings
-                .push(format!("machine={} isn't a machine rust-dos has", value)),
+                .iter()
+                .filter_map(|w| w.strip_prefix("line 2: "));
+            match line.next() {
+                Some(e) if e.starts_with("unknown setting") => false,
+                Some(e) => {
+                    errors = Some(e.to_string());
+                    false
+                }
+                None => true,
+            }
+        });
+        match (found, errors) {
+            (Some(found), _) => imported.set(found, &key, value),
+            (None, Some(error)) => imported.warnings.push(format!(
+                "[{}] {}={} isn't used: {}",
+                section, key, value, error
+            )),
+            (None, None) => imported
+                .warnings
+                .push(format!("[{}] {} isn't a setting of a game's", section, key)),
         }
     }
-    imported
 }
 
 /// Whether DOSBox's machine in `texts` is its S3, as it is when they
@@ -942,7 +979,13 @@ mod tests {
     fn network_settings_map_onto_rust_dos_s() {
         let conf = "[ipx]\nipx=true\n[ne2000]\nne2000=true\nnicbase=280\nnicirq=5\nmacaddr=AC:DE:48:88:99:AA\n[autoexec]\nipxnet connect 10.0.0.1\n";
         let imported = import(&[conf], &[PathBuf::from("/")], "x", None);
-        let get = |key: &str| imported.settings.iter().find(|(_, k, _)| *k == key).map(|(s, _, v)| (*s, v.as_str()));
+        let get = |key: &str| {
+            imported
+                .settings
+                .iter()
+                .find(|(_, k, _)| *k == key)
+                .map(|(s, _, v)| (s.as_str(), v.as_str()))
+        };
         assert_eq!(get("ipx"), Some(("network", "true")));
         assert_eq!(get("ne2000"), Some(("network", "true")));
         assert_eq!(get("nicbase"), Some(("network", "280")));
@@ -1004,6 +1047,63 @@ mod tests {
         assert_eq!(get("pit2_gate_at_start"), Some("true"));
         assert_eq!(get("sbtype"), None);
         assert!(imported.warnings[0].contains("sbtype=gb"), "{:?}", imported.warnings);
+    }
+
+    #[test]
+    fn rust_dos_s_own_settings_go_over_dosbox_s() {
+        let conf = "[dosbox]\nmachine=svga_s3\nmemsize=16\n[rust-dos]\nmemsize=32\nvoodoo=false\n\
+                    sb_filter=off\ndeadzone=20\nturbo=yes\n[emulator]\nmachine=svga_s3virge\n\
+                    cpu=pentium\ncycles=max\nscale=99\n[sound]\nsbtype=sb2\ngus=true\n\
+                    [mixer]\nsb_filter=auto\n[autoexec]\ngame.exe\n";
+        let imported = import(&[conf], &[PathBuf::from("/")], "x", None);
+        let get = |key: &str| {
+            imported
+                .settings
+                .iter()
+                .find(|(_, k, _)| *k == key)
+                .map(|(s, _, v)| (s.as_str(), v.as_str()))
+        };
+        assert_eq!(get("machine"), Some(("emulator", "svga_s3virge")));
+        assert_eq!(get("memsize"), Some(("emulator", "32")));
+        assert_eq!(get("voodoo"), Some(("emulator", "false")));
+        assert_eq!(get("cpu"), Some(("emulator", "pentium")));
+        assert_eq!(get("cycles"), Some(("emulator", "max")));
+        assert_eq!(get("sbtype"), Some(("sound", "sb2")));
+        // Over the import's own default of no Ultrasound.
+        assert_eq!(get("gus"), Some(("sound", "true")));
+        // In [rust-dos], a key is found in the section it is in; DOSBox's
+        // [mixer] is still DOSBox's.
+        assert_eq!(get("sb_filter"), Some(("mixer", "off")));
+        assert_eq!(get("deadzone"), Some(("joystick", "20")));
+        assert_eq!(get("os"), None);
+        assert_eq!(get("scale"), None);
+        assert_eq!(get("turbo"), None);
+        assert_eq!(imported.warnings.len(), 2, "{:?}", imported.warnings);
+        assert!(
+            imported
+                .warnings
+                .iter()
+                .any(|w| w.starts_with("[emulator] scale=99 isn't used: invalid scale"))
+        );
+        assert!(
+            imported
+                .warnings
+                .iter()
+                .any(|w| w == "[rust-dos] turbo isn't a setting of a game's")
+        );
+        // The last file's word goes.
+        let over = import(
+            &[conf, "[emulator]\nmemsize=8\n"],
+            &[PathBuf::from("/")],
+            "x",
+            None,
+        );
+        let memsize = over
+            .settings
+            .iter()
+            .find(|(_, k, _)| *k == "memsize")
+            .map(|(_, _, v)| v.as_str());
+        assert_eq!(memsize, Some("8"));
     }
 
     #[test]

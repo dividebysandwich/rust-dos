@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 pub struct Imported {
     pub name: String,
     /// (section, key, value) of the settings the configuration sets.
-    pub settings: Vec<(&'static str, &'static str, String)>,
+    pub settings: Vec<(String, String, String)>,
     pub drives: Vec<MountSpec>,
     pub autoexec: Vec<String>,
     /// The keys pressed as the game starts (`[game]`'s `input`).
@@ -29,9 +29,11 @@ pub struct Imported {
 
 impl Imported {
     /// Set a setting, in place of what an earlier file set it to.
-    fn set(&mut self, section: &'static str, key: &'static str, value: impl Into<String>) {
-        self.settings.retain(|(s, k, _)| (*s, *k) != (section, key));
-        self.settings.push((section, key, value.into()));
+    fn set(&mut self, section: &str, key: &str, value: impl Into<String>) {
+        self.settings
+            .retain(|(s, k, _)| (s.as_str(), k.as_str()) != (section, key));
+        self.settings
+            .push((section.to_string(), key.to_string(), value.into()));
     }
 
     /// The profile: the game's name, its settings, drives and commands, as
@@ -63,7 +65,7 @@ impl Imported {
     /// configuration without commands comes to).
     pub fn merge(&mut self, over: Imported) {
         for (section, key, value) in over.settings {
-            self.set(section, key, value);
+            self.set(&section, &key, value);
         }
         for spec in over.drives {
             self.drives.retain(|d| d.drive != spec.drive);

@@ -318,28 +318,6 @@ enum Section {
     Unknown,
 }
 
-/// Whether configuration text has sections of rust-dos's own, which
-/// DOSBox's files don't: `[emulator]`, `[sound]`, `[drives]` and the like.
-/// One with only `[autoexec]` (or DOSBox's sections) could be either's.
-pub fn has_own_sections(text: &str) -> bool {
-    text.lines().filter_map(|l| l.trim().strip_prefix('[')?.strip_suffix(']')).any(|name| {
-        matches!(
-            Section::parse(name),
-            Section::Emulator
-                | Section::Sound
-                | Section::Network
-                | Section::Phonebook
-                | Section::Achievements
-                | Section::Shell
-                | Section::Vr
-                | Section::Vfx1
-                | Section::Drives
-                | Section::Game
-                | Section::Gamepad
-        )
-    })
-}
-
 impl Section {
     fn parse(name: &str) -> Self {
         match name.trim().to_ascii_lowercase().as_str() {

@@ -478,11 +478,18 @@ fn package_dosbox_conf(package: &Path) -> Option<String> {
         let name = e.name.to_string_lossy().to_ascii_lowercase();
         !e.is_dir && name.strip_suffix(".conf") == Some(stem.as_str())
     })?;
-    // Not a profile of rust-dos's that happens to be there. Those beside
-    // .dosz packages often have only an [autoexec], which runs on the
-    // package as C:.
+    // Not a profile of rust-dos's that happens to be there, which has a
+    // [game] and [drives]. Those beside .dosz packages often have only an
+    // [autoexec], which runs on the package as C:, and may have rust-dos's
+    // own settings (`[rust-dos]`, `[emulator]`) over DOSBox's.
     let text = read_package_file(&beside.path).ok()?;
-    (crate::import::dosbox::is_dosbox_conf(&text) || !config::has_own_sections(&text)).then_some(text)
+    let profile = text
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix('[')?.strip_suffix(']'))
+        .any(|name| {
+            name.trim().eq_ignore_ascii_case("game") || name.trim().eq_ignore_ascii_case("drives")
+        });
+    (crate::import::dosbox::is_dosbox_conf(&text) || !profile).then_some(text)
 }
 
 /// The manuals and extras in the package `root` (a folder, or a zip or
@@ -810,7 +817,7 @@ pub fn variant_profile(dir: &Path, text: &str, variant: &str) -> Result<String, 
 
 /// How packages are imported: a profile made by an older import is made
 /// again, with what the newer one reads (DOS.YML's keys, say).
-const IMPORT_VERSION: u32 = 5;
+const IMPORT_VERSION: u32 = 6;
 
 /// What a package's profile is made from, fingerprinted: its own
 /// rust-dos.conf, a DOSBox configuration in it or beside it, its DOS.YML
@@ -1143,6 +1150,25 @@ mod tests {
         std::fs::write(dir.join("Mine.zip"), crate::archive::zip::tests::zip(&[("A.EXE", b"MZ", false), ("B.EXE", b"MZ", false)])).unwrap();
         std::fs::write(dir.join("Mine.conf"), "[game]\nname=Mine\n[autoexec]\nb.exe\n").unwrap();
         assert!(!package_has_conf(&dir.join("Mine.zip")));
+        // One with rust-dos's own settings and no DOSBox section.
+        std::fs::write(
+            dir.join("Own.zip"),
+            crate::archive::zip::tests::zip(&[("A.EXE", b"MZ", false)]),
+        )
+        .unwrap();
+        let own = "[rust-dos]\nmemsize=32\n[emulator]\nmachine=svga_s3virge\n[autoexec]\na.exe\n";
+        std::fs::write(dir.join("Own.conf"), own).unwrap();
+        let (own_id, _, _) = add_package(&games, &dir.join("Own.zip")).unwrap();
+        let text = std::fs::read_to_string(games.join(format!("{}.conf", own_id))).unwrap();
+        let prepared = prepare(&own_id, &Settings::default(), &text, &games, None).unwrap();
+        assert_eq!(
+            prepared.settings.machine,
+            crate::video::adapter::Adapter::S3Virge,
+            "{}",
+            text
+        );
+        assert_eq!(prepared.settings.memsize, 32);
+        assert_eq!(prepared.autoexec, ["C:", "a.exe"]);
 
         // Edited, it is made again under its id; left alone, it stays as
         // the player changed it.

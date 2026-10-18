@@ -261,7 +261,9 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   hard disk, or runs in a Windows of files (a package's `os=win311`),
   keeps `svga_s3`, as that Windows was installed with the S3's driver
   (unless the package's `os` boots another system in its place).
-  `machine=` in its `[rust-dos]` section goes over the import's.
+  `machine=` in its `[rust-dos]` or `[emulator]` section goes over the
+  import's, as rust-dos's other settings there do (see
+  [GAME-PACKAGES.md](GAME-PACKAGES.md#packages-made-for-dosbox)).
 * With `svga_et4000` programs find a Tseng ET4000AX on the ISA bus, as
   DOS games and Windows 3.x drivers made for it detect it: its KEY
   (3BFh/3D8h), Segment Select (3CDh) with separate read and write banks,

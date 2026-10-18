@@ -244,6 +244,34 @@ the commands run, so they can move it (`REMOUNT C D`), make one of its folders C
 then `SUBST C: X:\GAME`) or mount another C:. What doesn't come across
 goes to the log. A folder with a `dosbox.conf` is imported the same way.
 
+**rust-dos's own settings.** Settings of rust-dos's in the DOSBox
+configuration go over what the import makes of DOSBox's, so a game can
+have a card or a setting DOSBox has no word for, or another one than the
+import picks. `[emulator]`, `[sound]` and `[network]`, which DOSBox
+doesn't have, are read as in rust-dos's own configuration (see
+[CONFIGURATION.md](CONFIGURATION.md)). `[rust-dos]` takes any setting a
+game's profile can have, from whichever of those sections it is in, and
+the mixer's, joystick's, serial ports' and printer's too, whose sections
+DOSBox has its own of:
+
+```
+[dosbox]
+machine=svga_s3
+
+[rust-dos]
+os=w31_64k
+machine=svga_s3virge
+voodoo=false
+
+[sound]
+gus=true
+```
+
+A setting rust-dos doesn't have, or a value it doesn't take, goes to the
+log. A configuration beside the package can be these sections and an
+`[autoexec]` alone, without any of DOSBox's; one with a `[game]` or
+`[drives]` section is a profile of rust-dos's and is left alone.
+
 A game whose commands leave it at the prompt without starting a program
 keeps its drives until another game is launched, so its files are there
 to start by hand.
@@ -310,8 +338,8 @@ set up in DOSBox has the S3's driver.
 
 `machine=` in the `[rust-dos]` section picks the display adapter over
 what the import makes of DOSBox's, `svga_s3virge` for a Windows set up
-with the ViRGE's driver say. An `[emulator]` section's `machine=` does
-the same.
+with the ViRGE's driver say, as any of rust-dos's own settings there do
+(see [Packages made for DOSBox](#packages-made-for-dosbox)).
 
 A package without a configuration of its own runs in the system the
 libretro core's **Boot OS** option names, in the same way.
