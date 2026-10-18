@@ -226,12 +226,20 @@ fn step(cpu: &mut Cpu, shell: &mut SecondaryShell) -> Result<u8, u8> {
             // AX 0: no key came before the tick.
             let done = match cpu.ax() {
                 0 if matches!(cpu.shell_wait, Some(ShellWait::Edit(_))) => !crate::edit::tick(cpu),
+                0 if matches!(cpu.shell_wait, Some(ShellWait::Rc(_))) => {
+                    !crate::rc_command::tick(cpu)
+                }
                 0 => crate::shell::timed_out_key(cpu).is_some_and(|key| crate::shell::take_key(cpu, key as u16)),
                 key => crate::shell::take_key(cpu, key),
             };
             if !done {
                 shell.asked = Asked::Key;
                 return Ok(KEY);
+            }
+            // RC left to run a command line.
+            if let Some(line) = cpu.pending_command.take() {
+                run(cpu, shell, &line, false);
+                return Ok(next_action(cpu, shell));
             }
         }
         Asked::Line => {
@@ -272,6 +280,12 @@ fn step(cpu: &mut Cpu, shell: &mut SecondaryShell) -> Result<u8, u8> {
     cpu.batch.settle();
     if shell.once {
         return Err(cpu.errorlevel);
+    }
+    // RC left this shell to run a command line, which has run.
+    if crate::rc_command::resume(cpu, Some(shell.psp))
+        && let Some(wait) = &cpu.shell_wait
+    {
+        return Ok(wait_action(shell, wait));
     }
     if cpu.batch.echo {
         crate::shell::show_prompt(cpu);

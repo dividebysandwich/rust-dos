@@ -406,9 +406,9 @@ fn the_k6_2_msrs_go_into_a_save_state() {
     cpu.k6 = Default::default();
     rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
     assert_eq!(cpu.k6, saved);
-    // A state from before it (without its section and the IDLE one after
-    // it, the last) loads, with the MSRs as after a reset.
-    let older = &state[..state.len() - (4 + 2 + 4 + 6 * 8) - (4 + 2 + 4 + 1)];
+    // A state from before it (without its section and the IDLE and RC
+    // ones after it, the last) loads, with the MSRs as after a reset.
+    let older = &state[..state.len() - (4 + 2 + 4 + 6 * 8) - 2 * (4 + 2 + 4 + 1)];
     rust_dos::savestate::machine::load(&mut cpu, older).unwrap();
     assert_eq!(cpu.k6, Default::default());
 }

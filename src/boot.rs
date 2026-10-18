@@ -212,6 +212,7 @@ fn reset_machine(cpu: &mut Cpu) {
     cpu.batch.clear();
     cpu.pending_command = None;
     cpu.shell_wait = None;
+    cpu.rc_resume = None;
     cpu.shell_prompt_at = None;
     cpu.shell_completion = None;
     cpu.line_editor = None;

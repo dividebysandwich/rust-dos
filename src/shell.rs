@@ -258,6 +258,14 @@ pub fn prompt(cpu: &mut Cpu) {
     // The batch files have run: ECHO is as it was before them.
     cpu.batch.settle();
     cpu.shell_prompt_at = None;
+    // RC left to run a command line, which has run: RC comes back.
+    if cpu.shell_wait.is_none()
+        && cpu.pending_command.is_none()
+        && !cpu.batch.is_active()
+        && crate::rc_command::resume(cpu, None)
+    {
+        return;
+    }
     if cpu.batch.echo && cpu.shell_wait.is_none() {
         cpu.shell_prompt_at = Some(cursor(cpu));
         show_prompt(cpu);
@@ -289,6 +297,9 @@ pub enum ShellWait {
     Edit(Box<crate::edit::Editor>),
     /// The BIOS's power-on self test, before DOS starts (`post`).
     Post(Box<crate::post::Post>),
+    /// RC, Rat Commander: every key, until it ends or leaves to run a
+    /// command line.
+    Rc(Box<crate::rc_command::RcWait>),
 }
 
 /// A CHOICE waiting for a key.
@@ -347,6 +358,15 @@ pub fn take_key(cpu: &mut Cpu, key: u16) -> bool {
             None => true,
         };
     }
+    if let ShellWait::Rc(rc) = wait {
+        return match crate::rc_command::key(cpu, rc, key) {
+            Some(rc) => {
+                cpu.shell_wait = Some(ShellWait::Rc(rc));
+                false
+            }
+            None => true,
+        };
+    }
     if let ShellWait::Post(post) = wait {
         return match crate::post::key(cpu, post, key) {
             Some(post) => {
@@ -385,7 +405,7 @@ pub fn take_key(cpu: &mut Cpu, key: u16) -> bool {
                 return false;
             }
         }
-        ShellWait::Edit(_) | ShellWait::Post(_) => {}
+        ShellWait::Edit(_) | ShellWait::Post(_) | ShellWait::Rc(_) => {}
         ShellWait::Choice(choice) => match choice.index(key) {
             Some(i) => {
                 video::print_string(cpu, &format!("{}\r\n", choice.keys[i] as char));
@@ -474,6 +494,12 @@ pub fn tick(cpu: &mut Cpu) {
     // EDIT looks at the mouse, and may end on a click.
     if matches!(cpu.shell_wait, Some(ShellWait::Edit(_))) {
         if !crate::edit::tick(cpu) {
+            cpu.set_ip(labels().prompt_start);
+        }
+        return;
+    }
+    if matches!(cpu.shell_wait, Some(ShellWait::Rc(_))) {
+        if !crate::rc_command::tick(cpu) {
             cpu.set_ip(labels().prompt_start);
         }
         return;
@@ -600,6 +626,10 @@ impl crate::savestate::State for ShellWait {
                 8u8.save(w);
                 (**post).save(w);
             }
+            ShellWait::Rc(rc) => {
+                9u8.save(w);
+                (**rc).save(w);
+            }
         }
     }
     fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
@@ -641,6 +671,11 @@ impl crate::savestate::State for ShellWait {
                 let mut post = Box::<crate::post::Post>::default();
                 (*post).load(r)?;
                 ShellWait::Post(post)
+            }
+            9 => {
+                let mut rc = Box::<crate::rc_command::RcWait>::default();
+                (*rc).load(r)?;
+                ShellWait::Rc(rc)
             }
             _ => return Err(crate::savestate::StateError::Invalid("a wait of the shell it doesn't know".into())),
         };

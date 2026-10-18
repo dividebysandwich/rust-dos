@@ -254,9 +254,9 @@ breakpoints set now catch its startup code. Without `stop_at_entry` it
 replies as soon as the program started. A command line that starts no
 program (a typo, a built-in command such as `DIR`) gets HTTP 422 once the
 prompt is back, and `run` while a program runs, a batch file such as
-AUTOEXEC.BAT has lines left, or PAUSE, CHOICE or EDIT waits, gets 409. So
-does a `stop_at_entry` run whose program was closed before it reached its
-entry point.
+AUTOEXEC.BAT has lines left, or PAUSE, CHOICE, EDIT or RC waits, gets 409.
+So does a `stop_at_entry` run whose program was closed before it reached
+its entry point.
 
 - **Queued behind a busy prompt:** `"queue":true` takes the command line
   while the prompt is busy and adds it after the batch lines waiting. The

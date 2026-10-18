@@ -206,6 +206,13 @@ struct Memory {
     hma_free: bool,
 }
 
+/// Conventional memory's size and its largest free block, in bytes, as
+/// MEM counts them.
+pub fn conventional(bus: &mut Bus) -> (u32, u32) {
+    let memory = Memory::read(bus);
+    (memory.conventional, memory.largest_conventional)
+}
+
 impl Memory {
     fn read(bus: &mut Bus) -> Memory {
         let conventional = mcb::conventional_end(bus) as u32 * 16;

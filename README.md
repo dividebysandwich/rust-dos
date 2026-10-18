@@ -192,6 +192,7 @@ programs, the prompt has these commands:
 | `MORE [file]` | show text a screenful at a time |
 | `HISTORY [n] \| DELETE n \| CLEAR` | list the lines typed at the prompt, or forget them; see [The prompt](#the-prompt) |
 | `EDIT [file]` | edit a text file full-screen, as MS-DOS's EDIT: menus (Alt or F10), Open and Save As dialogs, cut, copy and paste (Shift+Del, Ctrl+Ins, Shift+Ins, or Ctrl+X, C, V), Find (F3 repeats it) and Replace; F1 lists the keys |
+| `RC` | Rat Commander, a file manager in the style of Norton Commander 4: two panels (Brief, Full, Info, Tree, Quick view, sorted by name, extension, time or size), marking (Ins, Gray + - *), copy (F5), rename or move (F6), make a directory (F7), delete (F8), view (F3), edit in `EDIT` (F4), drives (Alt+F1, Alt+F2), the menus (F9) and the mouse; its command line runs programs, and RC comes back when they end. F1 lists the keys |
 | `FIND [/V] [/C] [/N] [/I] "text" [file ...]` | the lines with the text in them (`/V` without it), numbered with `/N`, counted with `/C`, in any case with `/I`; `ERRORLEVEL` 0 if one was found, 1 if none |
 | `SORT [/R] [/+n] [file]` | lines in order, from their n-th column, backwards with `/R` |
 | `COPY source[+source...] [destination] [/A\|/B]` | copy files, with wildcards, or join them into one |

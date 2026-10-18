@@ -1462,6 +1462,7 @@ const STILL: &[(&str, &str)] = &[
     ("SSE", "the SSE registers and MXCSR, which only a Pentium III's instructions set"),
     ("K6", "the K6-2's MSRs, which only its WRMSR sets"),
     ("IDLE", "whether cycles=auto saw an idle loop: deterministic runs have a fixed speed"),
+    ("RC", "RC waiting to come back after a command line it ran, which the run doesn't start"),
 ];
 
 /// The `Bus` fields saved as a section of their own (or in one with the

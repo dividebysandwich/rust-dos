@@ -101,6 +101,7 @@ pub mod post;
 pub mod profile;
 pub mod powervr;
 pub mod printer;
+pub mod rc_command;
 pub mod recorder;
 pub mod savestate;
 pub use rust_dos_soundblaster::sb;

@@ -11,6 +11,7 @@ const SEP_VERSION: u16 = 1;
 const SSE_VERSION: u16 = 1;
 const K6_VERSION: u16 = 1;
 const IDLE_VERSION: u16 = 1;
+const RC_VERSION: u16 = 1;
 
 /// The machine's state, between batches.
 pub fn save(cpu: &Cpu) -> Vec<u8> {
@@ -38,6 +39,7 @@ fn write(cpu: &Cpu, w: &mut Writer) {
     w.section(b"SSE ", SSE_VERSION, |w| cpu.sse.save(w));
     w.section(b"K6  ", K6_VERSION, |w| cpu.k6.save(w));
     w.section(b"IDLE", IDLE_VERSION, |w| cpu.os_idles.save(w));
+    w.section(b"RC  ", RC_VERSION, |w| cpu.rc_resume.save(w));
 }
 
 /// Load a state `save` wrote into the machine, between batches. A state
@@ -120,6 +122,16 @@ fn load_sections(cpu: &mut Cpu, data: &[u8]) -> Result<Vec<String>> {
     } else {
         cpu.os_idles = false;
     }
+    // A state from before RC has none waiting to come back.
+    if r.next_is(b"RC  ") {
+        cpu.rc_resume.load(&mut r.section(b"RC  ", RC_VERSION)?)?;
+    } else {
+        cpu.rc_resume = None;
+    }
+    // Less than a section's header left: a state cut short.
+    if !r.is_empty() && r.take(10).is_err() {
+        return Err(super::StateError::Truncated);
+    }
     Ok(lost)
 }
 
@@ -157,10 +169,24 @@ mod tests {
         cpu.os_idles = false;
         load(&mut cpu, &state).unwrap();
         assert!(cpu.os_idles);
-        // A state from before the section (the last) has none seen.
+        // A state from before the section (the last then) has none seen.
         let idle = parts.iter().find(|(name, _)| name == "IDLE").expect("the section").1.clone();
-        assert_eq!(idle.end, state.len());
+        let rc = parts.iter().find(|(name, _)| name == "RC").expect("RC's section").1.clone();
+        assert_eq!((idle.end, rc.end), (rc.start, state.len()));
         load(&mut cpu, &state[..idle.start]).unwrap();
         assert!(!cpu.os_idles);
+    }
+
+    #[test]
+    fn a_state_without_rc_has_none_to_come_back() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.rc_resume = Some(Default::default());
+        let (state, parts) = save_parts(&cpu);
+        cpu.rc_resume = None;
+        load(&mut cpu, &state).unwrap();
+        assert!(cpu.rc_resume.is_some());
+        let rc = parts.iter().find(|(name, _)| name == "RC").expect("the section").1.clone();
+        load(&mut cpu, &state[..rc.start]).unwrap();
+        assert!(cpu.rc_resume.is_none());
     }
 }

@@ -120,7 +120,7 @@ pub fn run(options: RunOptions) -> i32 {
         let shell_waits = matches!(
             cpu.shell_wait,
             Some(ShellWait::Pause | ShellWait::Choice(_) | ShellWait::Line(_) | ShellWait::MakeImg(_))
-                | Some(ShellWait::More(_) | ShellWait::Edit(_))
+                | Some(ShellWait::More(_) | ShellWait::Edit(_) | ShellWait::Rc(_))
         );
         let waited = console.input_ended
             && pending.is_empty()

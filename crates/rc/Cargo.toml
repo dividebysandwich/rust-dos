@@ -1,0 +1,11 @@
+[package]
+name = "rust-dos-rc"
+description = "Rat Commander: rust-dos's built-in file manager in the style of Norton Commander 4"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+rust-dos-savestate = { path = "../savestate" }

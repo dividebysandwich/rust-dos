@@ -488,6 +488,8 @@ pub struct Cpu {
     pub shell_prompt_at: Option<(u8, u8)>,
     /// What EDIT cut or copied, for pasting in this EDIT or the next.
     pub edit_clipboard: Vec<u8>,
+    /// RC while a command line it left to run runs, to come back after.
+    pub rc_resume: Option<crate::rc_command::RcWait>,
     /// How the session started, for a reboot to start it again.
     pub startup: crate::boot::Startup,
     /// Set by a reset of the built-in DOS (`bios::post`) with the state
@@ -771,6 +773,7 @@ impl Cpu {
             shell_wait: None,
             shell_prompt_at: None,
             edit_clipboard: Vec::new(),
+            rc_resume: None,
             startup: crate::boot::Startup::default(),
             reboot: false,
             secondary_shells: Vec::new(),

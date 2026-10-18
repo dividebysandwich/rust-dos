@@ -2175,6 +2175,7 @@ dependencies = [
  "rust-dos-mpu401",
  "rust-dos-mt32",
  "rust-dos-opl",
+ "rust-dos-rc",
  "rust-dos-savestate",
  "rust-dos-sc55",
  "rust-dos-soundblaster",
@@ -2262,6 +2263,13 @@ version = "1.7.4"
 dependencies = [
  "nuked-opl3",
  "rust-dos-audio-core",
+ "rust-dos-savestate",
+]
+
+[[package]]
+name = "rust-dos-rc"
+version = "1.7.4"
+dependencies = [
  "rust-dos-savestate",
 ]
 

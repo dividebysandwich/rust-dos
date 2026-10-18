@@ -77,7 +77,7 @@ pub fn apply_template(name: &str, template: &str) -> String {
 }
 
 /// Take the time a file's reading or writing takes on its drive's disk.
-fn disk_activity(cpu: &mut Cpu, path: &str, bytes: usize, write: bool) {
+pub(crate) fn disk_activity(cpu: &mut Cpu, path: &str, bytes: usize, write: bool) {
     if let Some(drive) = cpu.bus.disk.drive_of(path) {
         let key = cpu.bus.disk.file_key(path);
         let access = crate::disknoise::Access::File { write, key };
