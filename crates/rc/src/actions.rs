@@ -144,7 +144,7 @@ impl Commander {
         match key {
             Key::F(1) => self.mode = Mode::Help(0),
             Key::F(3) | Key::AltF(3) => self.view_file(host),
-            Key::F(4) | Key::AltF(4) => return self.edit_file(),
+            Key::F(4) | Key::AltF(4) => return self.edit_file(host),
             Key::F(5) => self.copy_dialog(Kind::Copy),
             Key::F(6) => self.copy_dialog(Kind::Move),
             Key::F(7) => self.mkdir_dialog(),
@@ -247,10 +247,10 @@ impl Commander {
             Key::CtrlPgDn
                 if self.panels[a]
                     .current()
-                    .is_some_and(|i| i.is_dir() && !i.is_up())
-                => {
-                    return self.open_current(host);
-                }
+                    .is_some_and(|i| i.is_dir() && !i.is_up()) =>
+            {
+                return self.open_current(host);
+            }
             _ => {}
         }
         None
@@ -307,6 +307,7 @@ impl Commander {
 
     fn reread(&mut self, p: usize) {
         self.panels[p].stale = true;
+        self.forget_zips = true;
         let drive = self.panels[p].drive();
         self.trees.retain(|t| t.drive != drive);
         self.quick = None;
@@ -335,8 +336,7 @@ impl Commander {
             self.scroll_tree(p);
         }
         // Info and Quick view take no keys: the other panel does.
-        if matches!(view, View::Info | View::Quick) && self.active == p && self.file_view(1 - p)
-        {
+        if matches!(view, View::Info | View::Quick) && self.active == p && self.file_view(1 - p) {
             self.active = 1 - p;
         }
     }
@@ -424,11 +424,24 @@ impl Commander {
             }
             return None;
         }
+        // A zip archive opens as a directory.
+        if crate::archive::is_zip_name(&item.entry.name) {
+            let dir = path::join(&self.panels[a].dir, &item.entry.name);
+            match host.list(&dir) {
+                Ok(_) => self.panels[a].go(&dir, None),
+                Err(e) => self.error(&format!("Cannot open {}", path::shown(&dir)), e),
+            }
+            return None;
+        }
         let (_, ext) = path::split_name(&item.entry.name);
         if ["EXE", "COM", "BAT"]
             .iter()
             .any(|e| ext.eq_ignore_ascii_case(e))
         {
+            if self.in_archive(host) {
+                self.message("Archive", "Copy a program out of the archive to run it");
+                return None;
+            }
             return Some(Outcome::Run {
                 line: item.entry.name.to_ascii_lowercase(),
                 echo: true,
@@ -557,7 +570,7 @@ impl Commander {
             Action::Drive(p) => self.drive_dialog(host, p),
             Action::Help => self.mode = crate::Mode::Help(0),
             Action::ViewFile => self.view_file(host),
-            Action::Edit => return self.edit_file(),
+            Action::Edit => return self.edit_file(host),
             Action::Copy => self.copy_dialog(Kind::Copy),
             Action::Move => self.copy_dialog(Kind::Move),
             Action::Mkdir => self.mkdir_dialog(),
@@ -598,9 +611,19 @@ impl Commander {
         }
     }
 
-    fn edit_file(&mut self) -> Option<Outcome> {
+    /// Whether the active panel shows what is in a zip archive.
+    fn in_archive(&self, host: &mut dyn Host) -> bool {
+        crate::archive::split(host, &[], &self.panels[self.active].dir).is_some()
+    }
+
+    fn edit_file(&mut self, host: &mut dyn Host) -> Option<Outcome> {
         let a = self.active;
-        let item = self.panels[a].current().filter(|i| !i.is_dir())?;
+        self.panels[a].current().filter(|i| !i.is_dir())?;
+        if self.in_archive(host) {
+            self.message("Archive", "Copy a file out of the archive to edit it");
+            return None;
+        }
+        let item = self.panels[a].current()?;
         let file = path::join(&self.panels[a].dir, &item.entry.name);
         Some(Outcome::Run {
             line: format!("EDIT {}", file),
@@ -620,7 +643,7 @@ impl Commander {
         self.dialog(d, Purpose::Message);
     }
 
-    fn message(&mut self, title: &str, text: &str) {
+    pub(crate) fn message(&mut self, title: &str, text: &str) {
         let d = Dialog::message(title, &[text], &[("OK", Button::Ok)], true);
         self.dialog(d, Purpose::Message);
     }
@@ -743,7 +766,7 @@ impl Commander {
         self.dialog(d, Purpose::Delete { sources, marked });
     }
 
-    fn attributes_dialog(&mut self, host: &dyn Host) {
+    fn attributes_dialog(&mut self, host: &mut dyn Host) {
         if !self.file_view(self.active) {
             return;
         }
@@ -1385,10 +1408,9 @@ fn find_step(host: &mut dyn Host, find: &mut Find) -> bool {
                 continue;
             }
             let p = path::join(&dir, &e.name);
-            if e.is_dir()
-                && find.queue.len() < 20_000 {
-                    find.queue.push_back(p.clone());
-                }
+            if e.is_dir() && find.queue.len() < 20_000 {
+                find.queue.push_back(p.clone());
+            }
             if find
                 .mask
                 .split([' ', ',', ';'])

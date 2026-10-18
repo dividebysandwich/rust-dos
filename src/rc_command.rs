@@ -393,7 +393,7 @@ impl Host for CpuHost<'_> {
         self.0.bus.disk.remove_directory(path)
     }
 
-    fn attributes(&self, path: &str) -> Result<u8, u8> {
+    fn attributes(&mut self, path: &str) -> Result<u8, u8> {
         self.0.bus.disk.get_file_attribute(path).map(|a| a as u8)
     }
 

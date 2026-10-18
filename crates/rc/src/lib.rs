@@ -10,6 +10,7 @@
 //! line and calls [`Commander::resume`] once the prompt would come back.
 
 mod actions;
+mod archive;
 pub mod cp437;
 mod dialog;
 mod draw;
@@ -162,6 +163,10 @@ pub struct Commander {
     shift: u8,
     shown_second: Option<u8>,
     synced: String,
+    /// The zip archives read, and changes to them not yet written.
+    zips: Vec<archive::Archive>,
+    /// Ctrl+R: the archives read again.
+    forget_zips: bool,
     screen: Screen,
     cols: usize,
     rows: usize,
@@ -187,6 +192,8 @@ impl Default for Commander {
             shift: 0,
             shown_second: None,
             synced: String::new(),
+            zips: Vec::new(),
+            forget_zips: false,
             screen: Screen::default(),
             cols: 80,
             rows: 25,
@@ -199,7 +206,7 @@ rust_dos_savestate::state_fields!(Commander {
 } skip {
     // A menu or dialog open goes, and the panels are read again.
     mode, history_at, trees, tree_pos, quick, presses, last_click, shift,
-    shown_second, synced, screen, cols, rows,
+    shown_second, synced, zips, forget_zips, screen, cols, rows,
 });
 
 impl Commander {
@@ -215,8 +222,10 @@ impl Commander {
             ..Commander::default()
         };
         rc.synced = dir;
-        rc.sync(host);
-        rc.draw(host);
+        rc.with_archives(host, |rc, fs| {
+            rc.sync(fs);
+            rc.draw(fs);
+        });
         rc
     }
 
@@ -228,18 +237,67 @@ impl Commander {
         self.rows = rows;
         self.mode = Mode::Panels;
         self.presses = None;
-        let dir = current(host);
-        if !dir.eq_ignore_ascii_case(&self.synced) && self.file_view(self.active) {
-            self.panels[self.active].go(&dir, None);
+        // What ran may have changed the archives.
+        self.zips.clear();
+        self.with_archives(host, |rc, fs| {
+            let dir = current(fs);
+            // In an archive, DOS was in the archive's directory.
+            let synced = archive::outside(fs, &rc.synced);
+            if !dir.eq_ignore_ascii_case(&synced) && rc.file_view(rc.active) {
+                rc.panels[rc.active].go(&dir, None);
+                rc.synced = dir;
+            }
+            for p in &mut rc.panels {
+                p.stale = true;
+            }
+            rc.trees.clear();
+            rc.quick = None;
+            rc.sync(fs);
+            rc.draw(fs);
+        });
+    }
+
+    /// Run `f` with the machine's files and the zip archives in them.
+    fn with_archives<R>(
+        &mut self,
+        host: &mut dyn Host,
+        f: impl FnOnce(&mut Self, &mut dyn Host) -> R,
+    ) -> R {
+        let mut zips = std::mem::take(&mut self.zips);
+        let result = f(
+            self,
+            &mut archive::Fs {
+                host,
+                zips: &mut zips,
+            },
+        );
+        self.zips = zips;
+        result
+    }
+
+    /// The archives changed by what was done, written once no operation
+    /// goes on. Whether the panels changed.
+    fn write_archives(&mut self, host: &mut dyn Host) -> bool {
+        if std::mem::take(&mut self.forget_zips) {
+            self.zips.retain(|z| z.dirty);
         }
-        self.synced = dir;
+        if matches!(self.mode, Mode::Job(_)) || !self.zips.iter().any(|z| z.dirty) {
+            return false;
+        }
+        let mut zips = std::mem::take(&mut self.zips);
+        let written = archive::Fs {
+            host,
+            zips: &mut zips,
+        }
+        .flush();
+        self.zips = zips;
         for p in &mut self.panels {
             p.stale = true;
         }
-        self.trees.clear();
-        self.quick = None;
-        self.sync(host);
-        self.draw(host);
+        if let Err(e) = written {
+            self.message("Error", &e);
+        }
+        true
     }
 
     /// The screen to show.
@@ -260,6 +318,20 @@ impl Commander {
 
     /// A key, or a tick with `input.key` None.
     pub fn step(&mut self, host: &mut dyn Host, input: &Input) -> Outcome {
+        let outcome = self.with_archives(host, |rc, fs| rc.step_files(fs, input));
+        if self.write_archives(host) {
+            self.with_archives(host, |rc, fs| {
+                rc.sync(fs);
+                rc.draw(fs);
+            });
+            if let Outcome::Stay { .. } = outcome {
+                return Outcome::Stay { redraw: true };
+            }
+        }
+        outcome
+    }
+
+    fn step_files(&mut self, host: &mut dyn Host, input: &Input) -> Outcome {
         let mut redraw = false;
         if input.cols != self.cols || input.rows != self.rows {
             self.cols = input.cols.max(40);

@@ -70,7 +70,7 @@ pub trait Host {
     fn mkdir(&mut self, path: &str) -> Result<(), u8>;
     fn rmdir(&mut self, path: &str) -> Result<(), u8>;
     /// A file's or directory's attributes; Err(2) when there is none.
-    fn attributes(&self, path: &str) -> Result<u8, u8>;
+    fn attributes(&mut self, path: &str) -> Result<u8, u8>;
     fn set_attributes(&mut self, path: &str, attr: u8) -> Result<(), u8>;
     /// A drive's size and free space, in bytes.
     fn space(&self, drive: u8) -> Option<(u64, u64)>;

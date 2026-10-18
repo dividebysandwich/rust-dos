@@ -92,6 +92,7 @@ pub fn error_text(code: u8) -> String {
         0x05 => "Access denied".to_string(),
         0x10 => "Cannot remove the current directory".to_string(),
         0x11 => "Not the same device".to_string(),
+        0x0D => "Not a ZIP archive that can be read".to_string(),
         0x13 => "Disk is write-protected".to_string(),
         0x15 => "Drive not ready".to_string(),
         0x1D | 0x27 => "Disk full".to_string(),
@@ -121,11 +122,13 @@ pub fn plan_copy(
         return Err("No target was given".to_string());
     }
     let target = path::qualify(dir, typed, current);
+    // A zip archive given is copied into, as a directory is.
     let into_dir = typed.ends_with('\\')
         || typed.ends_with(':')
         || host
             .attributes(&target)
-            .is_ok_and(|a| a & attr::DIRECTORY != 0);
+            .is_ok_and(|a| a & attr::DIRECTORY != 0)
+        || (crate::archive::is_zip_name(path::name(&target)) && host.attributes(&target).is_ok());
     let wild = path::has_wildcards(path::name(&target));
     let mut steps = VecDeque::new();
     let dest = |name: &str| -> String {
@@ -422,12 +425,23 @@ impl Job {
                     }
                     // Where a drive can't move it, it is copied and the
                     // source deleted.
-                    Err(0x11) | Err(0x05) if is_dir && !exists => {
-                        let entry = Entry {
-                            name: path::name(&from).to_string(),
-                            attr: attr::DIRECTORY,
+                    // A file into or out of a zip archive likewise.
+                    Err(code)
+                        if code == 0x11 && (!is_dir || !exists)
+                            || code == 0x05 && is_dir && !exists =>
+                    {
+                        let name = path::name(&from).to_string();
+                        // A file's stamp goes with it.
+                        let listed = path::parent(&from)
+                            .and_then(|dir| host.list(&dir).ok())
+                            .and_then(|l| {
+                                l.into_iter().find(|e| e.name.eq_ignore_ascii_case(&name))
+                            });
+                        let entry = listed.unwrap_or(Entry {
+                            name,
+                            attr: if is_dir { attr::DIRECTORY } else { 0 },
                             ..Entry::default()
-                        };
+                        });
                         let src = Source {
                             path: from.clone(),
                             entry,

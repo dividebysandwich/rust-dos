@@ -284,3 +284,37 @@ fn a_save_state_keeps_rc_waiting_and_to_come_back() {
     wait_rc(&mut other, 1000);
     assert!(screen(&other).contains("1Help"), "{}", screen(&other));
 }
+
+#[test]
+fn opens_zip_archives_and_copies_and_moves_in_and_out() {
+    let archive =
+        rust_dos_zip::write(&[rust_dos_zip::pack(b"TOP.TXT", b"zipped", 0x6000, 0x2A21)]).unwrap();
+    let dir = scratch("zip", &[("ARC.ZIP", &archive)]);
+    let mut cpu = machine(&dir);
+    run(&mut cpu, 50);
+    rc(&mut cpu);
+    keys(&mut cpu, &[HOME, ENTER]);
+    assert!(rows(&cpu)[0].contains("C:\\ARC.ZIP"), "{}", screen(&cpu));
+    // TOP.TXT, after "..", out to C:\.
+    keys(&mut cpu, &[HOME, 0x50E0, F5, CTRL_Y]);
+    text(&mut cpu, "c:\\");
+    keys(&mut cpu, &[ENTER]);
+    run(&mut cpu, 100);
+    assert_eq!(fs::read(dir.join("TOP.TXT")).unwrap(), b"zipped");
+    // Back out, and TOP.TXT moved into the archive under another name.
+    keys(&mut cpu, &[HOME, ENTER, END, 0x4000, CTRL_Y]);
+    text(&mut cpu, "arc.zip\\moved.txt");
+    keys(&mut cpu, &[ENTER]);
+    run(&mut cpu, 100);
+    assert!(!dir.join("TOP.TXT").exists());
+    let data = fs::read(dir.join("ARC.ZIP")).unwrap();
+    let mut file = std::io::Cursor::new(data);
+    let entries = rust_dos_zip::central_directory(&mut file).unwrap();
+    let names: Vec<String> = entries.iter().map(|e| e.name()).collect();
+    assert_eq!(names, ["TOP.TXT", "MOVED.TXT"]);
+    assert_eq!(
+        rust_dos_zip::read(&mut file, &entries[1]).unwrap(),
+        b"zipped"
+    );
+    assert!(in_rc(&cpu));
+}

@@ -210,7 +210,7 @@ impl Host for Memory {
             .ok_or(0x03)
     }
 
-    fn attributes(&self, p: &str) -> Result<u8, u8> {
+    fn attributes(&mut self, p: &str) -> Result<u8, u8> {
         self.nodes
             .get(&p.to_ascii_uppercase())
             .map(|n| n.attr)
@@ -669,4 +669,225 @@ fn the_mouse_clicks_files_menus_and_keys() {
         },
     );
     assert!(screen_text(&rc).contains("Do you want to quit"));
+}
+
+/// An archive of files (name, contents), made with the zip crate.
+fn zip(files: &[(&str, &[u8])]) -> Vec<u8> {
+    let entries: Vec<_> = files
+        .iter()
+        .map(|(name, data)| rust_dos_zip::pack(name.as_bytes(), data, 0x6000, 0x2A21))
+        .collect();
+    rust_dos_zip::write(&entries).unwrap()
+}
+
+/// What an archive in memory has: its names, folders with a '/'.
+fn zip_names(m: &Memory, p: &str) -> Vec<String> {
+    let data = m.data(p).expect("the archive").to_vec();
+    rust_dos_zip::central_directory(&mut std::io::Cursor::new(data))
+        .unwrap()
+        .into_iter()
+        .map(|e| {
+            if e.dir {
+                format!("{}/", e.path)
+            } else {
+                e.path
+            }
+        })
+        .collect()
+}
+
+fn unzip(m: &Memory, p: &str, name: &str) -> Vec<u8> {
+    let mut file = std::io::Cursor::new(m.data(p).expect("the archive").to_vec());
+    let entries = rust_dos_zip::central_directory(&mut file).unwrap();
+    let entry = entries.iter().find(|e| e.path == name).expect(name);
+    rust_dos_zip::read(&mut file, entry).unwrap()
+}
+
+fn with_archive() -> (Memory, Commander) {
+    let (mut m, mut rc) = setup();
+    m.file(
+        "C:\\ARC.ZIP",
+        &zip(&[
+            ("TOP.TXT", b"top of the archive"),
+            ("SUB/DEEP.TXT", b"deep down"),
+        ]),
+    );
+    rc.panels[0].stale = true;
+    rc.panels[1].stale = true;
+    (m, rc)
+}
+
+#[test]
+fn enter_opens_a_zip_archive_and_views_its_files() {
+    let (mut m, mut rc) = with_archive();
+    // The archive came after RC read the panel.
+    rc.panels[0].stale = true;
+    select(&mut m, &mut rc, "ARC.ZIP");
+    press(&mut m, &mut rc, &[k::ENTER]);
+    assert_eq!(rc.panels[0].dir, "C:\\ARC.ZIP");
+    assert!(row(&rc, 0).contains("C:\\ARC.ZIP"), "{}", row(&rc, 0));
+    let names: Vec<_> = rc.panels[0]
+        .items
+        .iter()
+        .map(|i| i.entry.name.as_str())
+        .collect();
+    assert_eq!(names, ["..", "SUB", "TOP.TXT"]);
+    // DOS stays where the archive is.
+    assert_eq!(m.current, "C:\\");
+    select(&mut m, &mut rc, "TOP.TXT");
+    press(&mut m, &mut rc, &[k::F3]);
+    assert!(
+        row(&rc, 1).starts_with("top of the archive"),
+        "{}",
+        row(&rc, 1)
+    );
+    press(&mut m, &mut rc, &[k::ESC]);
+    // Into the folder only its files' paths name, and back out to the
+    // archive's directory, the cursor on the archive.
+    select(&mut m, &mut rc, "SUB");
+    press(&mut m, &mut rc, &[k::ENTER]);
+    assert_eq!(rc.panels[0].items[1].entry.name, "DEEP.TXT");
+    press(&mut m, &mut rc, &[k::HOME, k::ENTER, k::HOME, k::ENTER]);
+    assert_eq!(rc.panels[0].dir, "C:\\");
+    assert_eq!(rc.panels[0].current().unwrap().entry.name, "ARC.ZIP");
+    // Programs in an archive aren't run, files in one not edited.
+    press(&mut m, &mut rc, &[k::ENTER]);
+    select(&mut m, &mut rc, "TOP.TXT");
+    assert_eq!(
+        press(&mut m, &mut rc, &[k::F4]),
+        Outcome::Stay { redraw: true }
+    );
+    assert!(screen_text(&rc).contains("Copy a file out of the archive to edit it"));
+}
+
+#[test]
+fn copies_out_of_an_archive() {
+    let (mut m, mut rc) = with_archive();
+    rc.panels[0].go("C:\\ARC.ZIP", None);
+    press(&mut m, &mut rc, &[k::HOME]);
+    // SUB and TOP.TXT, marked.
+    press(&mut m, &mut rc, &[k::DOWN, k::INS, k::INS, k::F5]);
+    answer(&mut m, &mut rc, "c:\\target");
+    assert_eq!(
+        m.data("C:\\TARGET\\TOP.TXT"),
+        Some(&b"top of the archive"[..])
+    );
+    assert_eq!(m.data("C:\\TARGET\\SUB\\DEEP.TXT"), Some(&b"deep down"[..]));
+    assert_eq!(m.nodes["C:\\TARGET\\TOP.TXT"].stamp, (0x6000, 0x2A21));
+    // The archive is as it was.
+    assert_eq!(zip_names(&m, "C:\\ARC.ZIP"), ["TOP.TXT", "SUB/DEEP.TXT"]);
+}
+
+#[test]
+fn copies_files_and_directories_into_an_archive() {
+    let (mut m, mut rc) = with_archive();
+    select(&mut m, &mut rc, "GAMES");
+    press(&mut m, &mut rc, &[k::F5]);
+    answer(&mut m, &mut rc, "c:\\arc.zip");
+    select(&mut m, &mut rc, "README.TXT");
+    press(&mut m, &mut rc, &[k::F5]);
+    answer(&mut m, &mut rc, "c:\\arc.zip\\sub");
+    let names = zip_names(&m, "C:\\ARC.ZIP");
+    for name in [
+        "TOP.TXT",
+        "SUB/DEEP.TXT",
+        "GAMES/",
+        "GAMES/SUB/",
+        "GAMES/PLAY.EXE",
+    ] {
+        assert!(names.iter().any(|n| n == name), "{} in {:?}", name, names);
+    }
+    assert_eq!(unzip(&m, "C:\\ARC.ZIP", "GAMES/SUB/DEEP.DAT"), b"deep");
+    assert_eq!(
+        unzip(&m, "C:\\ARC.ZIP", "SUB/README.TXT"),
+        b"hello\r\nworld\r\n"
+    );
+    assert_eq!(unzip(&m, "C:\\ARC.ZIP", "TOP.TXT"), b"top of the archive");
+    // The panel in the archive shows what went in.
+    rc.panels[1].go("C:\\ARC.ZIP\\SUB", None);
+    press(&mut m, &mut rc, &[k::HOME]);
+    let names: Vec<_> = rc.panels[1]
+        .items
+        .iter()
+        .map(|i| i.entry.name.clone())
+        .collect();
+    assert!(names.contains(&"README.TXT".to_string()), "{:?}", names);
+}
+
+#[test]
+fn renames_deletes_and_moves_in_an_archive() {
+    let (mut m, mut rc) = with_archive();
+    rc.panels[0].go("C:\\ARC.ZIP", None);
+    press(&mut m, &mut rc, &[k::HOME]);
+    select(&mut m, &mut rc, "TOP.TXT");
+    press(&mut m, &mut rc, &[k::F6]);
+    answer(&mut m, &mut rc, "first.txt");
+    assert_eq!(zip_names(&m, "C:\\ARC.ZIP"), ["FIRST.TXT", "SUB/DEEP.TXT"]);
+    assert_eq!(rc.panels[0].current().unwrap().entry.name, "FIRST.TXT");
+    // A folder renamed takes its files along.
+    select(&mut m, &mut rc, "SUB");
+    press(&mut m, &mut rc, &[k::F6]);
+    answer(&mut m, &mut rc, "inner");
+    assert_eq!(
+        zip_names(&m, "C:\\ARC.ZIP"),
+        ["FIRST.TXT", "INNER/DEEP.TXT"]
+    );
+    // A new folder.
+    press(&mut m, &mut rc, &[k::F7]);
+    answer(&mut m, &mut rc, "empty");
+    assert!(zip_names(&m, "C:\\ARC.ZIP").contains(&"EMPTY/".to_string()));
+    // Moved out: copied, and gone from the archive.
+    select(&mut m, &mut rc, "FIRST.TXT");
+    press(&mut m, &mut rc, &[k::F6]);
+    answer(&mut m, &mut rc, "c:\\target");
+    assert_eq!(
+        m.data("C:\\TARGET\\FIRST.TXT"),
+        Some(&b"top of the archive"[..])
+    );
+    assert!(!zip_names(&m, "C:\\ARC.ZIP").contains(&"FIRST.TXT".to_string()));
+    // Deleted, after asking about the folder with a file in it.
+    select(&mut m, &mut rc, "INNER");
+    press(&mut m, &mut rc, &[k::F8, k::ENTER, k::ENTER]);
+    assert_eq!(zip_names(&m, "C:\\ARC.ZIP"), ["EMPTY/"]);
+}
+
+#[test]
+fn moves_a_file_into_an_archive() {
+    let (mut m, mut rc) = with_archive();
+    select(&mut m, &mut rc, "NOTES.DOC");
+    press(&mut m, &mut rc, &[k::F6]);
+    answer(&mut m, &mut rc, "c:\\arc.zip");
+    assert!(!m.has("C:\\NOTES.DOC"));
+    assert_eq!(unzip(&m, "C:\\ARC.ZIP", "NOTES.DOC"), b"notes");
+}
+
+#[test]
+fn an_archive_on_a_read_only_drive_stays_as_it_is() {
+    let (mut m, mut rc) = setup();
+    m.file("D:\\RO.ZIP", &zip(&[("A.TXT", b"a")]));
+    select(&mut m, &mut rc, "README.TXT");
+    press(&mut m, &mut rc, &[k::F5]);
+    answer(&mut m, &mut rc, "d:\\ro.zip");
+    assert!(
+        screen_text(&rc).contains("write-protected"),
+        "{}",
+        screen_text(&rc)
+    );
+    assert_eq!(zip_names(&m, "D:\\RO.ZIP"), ["A.TXT"]);
+}
+
+#[test]
+fn a_damaged_archive_is_reported() {
+    let (mut m, mut rc) = setup();
+    m.file("C:\\BAD.ZIP", b"not a zip at all");
+    rc.panels[0].stale = true;
+    press(&mut m, &mut rc, &[k::HOME]);
+    select(&mut m, &mut rc, "BAD.ZIP");
+    press(&mut m, &mut rc, &[k::ENTER]);
+    assert_eq!(rc.panels[0].dir, "C:\\");
+    assert!(
+        screen_text(&rc).contains("Not a ZIP archive"),
+        "{}",
+        screen_text(&rc)
+    );
 }

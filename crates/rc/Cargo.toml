@@ -9,3 +9,5 @@ license.workspace = true
 
 [dependencies]
 rust-dos-savestate = { path = "../savestate" }
+# Zip archives, which RC opens as directories.
+rust-dos-zip = { path = "../zip" }

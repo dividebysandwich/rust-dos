@@ -1,8 +1,13 @@
 //! Zip archives: their directory as the `zip` crate reads it (Zip64
 //! included), and their stored or deflated files, read where they are.
-//! Encrypted files can't be read.
+//! Encrypted files can't be read. Whole archives are written too
+//! (`write`).
 
 use std::io::{Read, Seek, SeekFrom};
+
+mod write;
+
+pub use write::{Packed, folder, pack, raw, write};
 
 /// A file or folder in a zip archive.
 #[derive(Clone, Debug, PartialEq, Eq)]

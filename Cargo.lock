@@ -2271,6 +2271,7 @@ name = "rust-dos-rc"
 version = "1.7.4"
 dependencies = [
  "rust-dos-savestate",
+ "rust-dos-zip",
 ]
 
 [[package]]

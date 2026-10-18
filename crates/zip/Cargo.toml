@@ -1,6 +1,6 @@
 [package]
 name = "rust-dos-zip"
-description = "A small zip archive reader: the directory, and stored or deflated files read where they are"
+description = "A small zip archive reader and writer: the directory, stored or deflated files read where they are, and whole archives written"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
