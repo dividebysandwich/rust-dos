@@ -40,8 +40,9 @@ pub const EXIT_WATCHED: u32 = 11;
 pub const EXIT_AFTER: u32 = 12;
 /// The instruction starts in the page's last 15 bytes, and with paging the
 /// TLB doesn't hold the next page, which the interpreter's fetch looks up
-/// (and may walk the page tables for): the instruction didn't run (see
-/// `BlockData::in_tail`).
+/// (and may walk the page tables for), or one that runs on into that page
+/// finds it mapped elsewhere or its bytes there written to: the
+/// instruction didn't run (see `BlockData::in_tail`, `BlockData::crosses`).
 pub const EXIT_NEXT_PAGE: u32 = 13;
 /// Done, EIP set, but the block loaded a segment register that is no
 /// longer flat or plain as the blocks it links to were translated for
@@ -258,6 +259,8 @@ pub const CTX_FETCH: i32 = offset_of!(JitCtx, fetch) as i32;
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub const DEV_BIT: u8 = 32;
 pub const DATA_GEN_SUM: i32 = offset_of!(BlockData, gen_sum) as i32;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub const DATA_NEXT_GEN: i32 = offset_of!(BlockData, next_gen) as i32;
 pub const DATA_LINKS: i32 = offset_of!(BlockData, links) as i32;
 pub const DATA_STUBS: i32 = offset_of!(BlockData, stubs) as i32;
 pub const DATA_GUARDS: i32 = offset_of!(BlockData, guards) as i32;
@@ -730,7 +733,7 @@ fn loop_would_act(cpu: &Cpu, time: (u64, u32), left: u64) -> bool {
 fn written(cpu: &Cpu, data: &mut BlockData, ix: usize) -> u32 {
     let ram = cpu.bus.ram();
     if data.unchanged_from(ram, 0) {
-        data.gen_sum = data.gens_now(&cpu.bus.page_gen);
+        data.note_gens(&cpu.bus.page_gen);
         0
     } else if data.unchanged_from(ram, ix + 1) {
         0
@@ -748,7 +751,7 @@ jit_fn! {
         let (cpu, ctx, data) = unsafe { (&*cpu, &mut *ctx, &mut *data) };
         ctx.calls.revalidate += 1;
         if data.unchanged_from(cpu.bus.ram(), 0) {
-            data.gen_sum = data.gens_now(&cpu.bus.page_gen);
+            data.note_gens(&cpu.bus.page_gen);
             0
         } else {
             1

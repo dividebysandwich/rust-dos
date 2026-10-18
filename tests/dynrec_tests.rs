@@ -2915,6 +2915,197 @@ fn a_block_starts_in_the_tail_of_rams_last_page() {
     assert_eq!(b.cpu.edx(), a.cpu.edx());
 }
 
+/// How `across_a_page_boundary` runs its loop.
+#[derive(Clone, Copy, Default)]
+struct Across {
+    /// Paging on, the page at 31000h mapped to `next`; else at 31000h.
+    paging: bool,
+    next: u32,
+    /// The physical page the loop maps 31000h to after 500 times around,
+    /// with other bytes there for the ADD's immediate.
+    remap: Option<u32>,
+    /// Whether the loop's first instruction writes the low byte of ECX
+    /// into the ADD's last byte, in the next page.
+    poke: bool,
+}
+
+/// A loop 1000 times around, whose `ADD EBX, 04030201h` starts at 30FFDh
+/// and ends in the next page, where the loop goes on. Returns the
+/// recompiler's counts, EBX, and how many instructions the interpreter ran
+/// on the recompiler's rig.
+fn across_a_page_boundary(how: Across) -> (DynStats, u32, u64) {
+    let (dir, table) = (0x80000u32, 0x81000u32);
+    let (mut a, mut b) = twins(|rig| {
+        rig.write32(dir, table | 3);
+        for i in 0..1024u32 {
+            rig.write32(table + 4 * i, (i << 12) | 3);
+        }
+        rig.write32(table + 0x31 * 4, how.next | 3);
+        let body = asm32(0x30FF0, |a| {
+            let mut top = a.create_label();
+            let mut done = a.create_label();
+            a.set_label(&mut top)?;
+            if how.poke {
+                a.mov(byte_ptr(0x31002u64), cl)?;
+            } else {
+                a.mov(eax, 0x1111_1111u32)?;
+                a.nop()?;
+            }
+            a.add(esi, 2)?;
+            a.add(edi, 3)?;
+            a.inc(edx)?;
+            a.add(ebx, 0x0403_0201u32)?;
+            // 31003h, in the next page.
+            a.dec(ecx)?;
+            a.jz(done)?;
+            if let Some(remap) = how.remap {
+                a.cmp(ecx, 500u32)?;
+                a.jne(top)?;
+                a.mov(dword_ptr(table as u64 + 0x31 * 4), remap | 3)?;
+                a.invlpg(ptr(0x31000u64))?;
+            }
+            a.jmp(top)?;
+            a.set_label(&mut done)?;
+            a.jmp(CODE as u64 + 0x100)
+        });
+        let add = &body[13..16];
+        assert_eq!(add, &[0x81, 0xC3, 0x01], "the ADD starts 3 bytes before the page's end");
+        rig.load(0x30FF0, &body[..16]);
+        rig.load(if how.paging { how.next } else { 0x31000 }, &body[16..]);
+        if let Some(remap) = how.remap {
+            let mut there = body[16..].to_vec();
+            there[..3].copy_from_slice(&[0x12, 0x13, 0x14]);
+            rig.load(remap, &there);
+        }
+        let code = asm32(CODE, |a| {
+            if how.paging {
+                a.mov(eax, dir)?;
+                a.mov(cr3, eax)?;
+                a.mov(eax, cr0)?;
+                a.or(eax, 0x8000_0000u32)?;
+                a.mov(cr0, eax)?;
+            }
+            a.mov(ecx, 1000u32)?;
+            a.jmp(0x30FF0u64)
+        });
+        rig.load(CODE, &code);
+        rig.load(CODE + 0x100, &asm32(CODE + 0x100, |a| a.hlt()));
+    });
+    let stats = run_both(&mut a, &mut b);
+    assert_eq!(b.cpu.edx(), 1000);
+    let interpreted = b.cpu.executed - b.cpu.dynrec.counts().executed;
+    (stats, b.cpu.ebx(), interpreted)
+}
+
+#[test]
+fn an_instruction_into_the_next_page_runs_translated() {
+    // Without paging, and with paging the next page after this one in RAM
+    // and elsewhere.
+    for how in [
+        Across { next: 0x31000, ..Across::default() },
+        Across { paging: true, next: 0x31000, ..Across::default() },
+        Across { paging: true, next: 0x35000, ..Across::default() },
+    ] {
+        let (stats, total, interpreted) = across_a_page_boundary(how);
+        assert_eq!(total, 0x0403_0201u32.wrapping_mul(1000));
+        if TAIL_STARTS {
+            assert!(interpreted < 100, "the interpreter ran {interpreted} instructions: {stats:?}");
+            assert!(stats.runs < 100, "the loop went through the execution loop: {:?}", stats);
+        }
+    }
+}
+
+#[test]
+fn an_instruction_into_the_next_page_follows_its_remapping() {
+    let how = Across { paging: true, next: 0x35000, remap: Some(0x36000), ..Across::default() };
+    let (stats, total, interpreted) = across_a_page_boundary(how);
+    let sum = 0x0403_0201u32.wrapping_mul(500).wrapping_add(0x1413_1201u32.wrapping_mul(500));
+    assert_eq!(total, sum, "the ADD's last bytes came from the page mapped there");
+    if TAIL_STARTS {
+        assert!(interpreted < 100, "the interpreter ran {interpreted} instructions: {stats:?}");
+    }
+}
+
+#[test]
+fn a_store_into_the_next_pages_bytes_of_an_instruction_is_seen() {
+    // The loop writes the ADD's last byte, in the next page, from the
+    // block the ADD is in.
+    let sum = (1..=1000u32).fold(0u32, |sum, n| sum.wrapping_add(0x0003_0201 | (n & 0xFF) << 24));
+    let poke = Across { poke: true, ..Across::default() };
+    for how in [Across { next: 0x31000, ..poke }, Across { paging: true, next: 0x35000, ..poke }] {
+        let (stats, total, _) = across_a_page_boundary(how);
+        assert_eq!(total, sum);
+        // Once its bytes there are watched, the block stops before the ADD
+        // instead of being translated again for every store.
+        assert!(stats.blocks < 100, "translated again and again: {stats:?}");
+    }
+}
+
+#[test]
+fn an_instruction_into_a_next_page_made_not_present_faults_on_it() {
+    // A loop whose ADD runs on from 30FFDh into page 31000h, mapped to
+    // 35000h. After 500 times around, the loop marks 31000h not present
+    // (in the ADD's block, before it): the ADD's fetch then faults, with
+    // CR2 on the next page, EIP on the ADD, and EBX as the 500th ADD left
+    // it.
+    let (dir, table) = (0x80000u32, 0x81000u32);
+    let pte = table + 0x31 * 4;
+    let before = |a: &mut CodeAssembler| {
+        let mut on = a.create_label();
+        a.cmp(ecx, 500u32)?;
+        a.jne(on)?;
+        a.mov(dword_ptr(pte as u64), 0u32)?;
+        a.invlpg(ptr(0x31000u64))?;
+        a.set_label(&mut on)?;
+        a.inc(edx)
+    };
+    let top = 0x30FFD - asm32(0x30F00, before).len() as u32;
+    let (mut a, mut b) = twins(|rig| {
+        rig.write32(dir, table | 3);
+        for i in 0..1024u32 {
+            rig.write32(table + 4 * i, (i << 12) | 3);
+        }
+        rig.write32(pte, 0x35000 | 3);
+        rig.record(PF);
+        let body = asm32(top, |a| {
+            before(a)?;
+            a.add(ebx, 0x0403_0201u32)?;
+            a.dec(ecx)?;
+            a.jmp(top as u64)
+        });
+        let add = (0x30FFD - top) as usize;
+        assert_eq!(&body[add..add + 3], &[0x81, 0xC3, 0x01]);
+        rig.load(top, &body[..add + 3]);
+        rig.load(0x35000, &body[add + 3..]);
+        rig.load(
+            CODE,
+            &asm32(CODE, |a| {
+                a.mov(eax, dir)?;
+                a.mov(cr3, eax)?;
+                a.mov(eax, cr0)?;
+                a.or(eax, 0x8000_0000u32)?;
+                a.mov(cr0, eax)?;
+                a.mov(ecx, 1000u32)?;
+                a.jmp(top as u64)
+            }),
+        );
+    });
+    run_both(&mut a, &mut b);
+    let (vector, stack) = b.recorded();
+    // A fetch at level 0 from a page not present: error code 0.
+    assert_eq!((vector, stack[0], stack[1]), (PF as u32, 0, 0x30FFD));
+    assert_eq!(b.cpu.cr2, 0x31000);
+    assert_eq!(b.cpu.edx(), 501);
+    assert_eq!(b.cpu.ebx(), 0x0403_0201u32.wrapping_mul(500));
+    if TAIL_STARTS {
+        let interpreted = b.cpu.executed - b.cpu.dynrec.counts().executed;
+        assert!(
+            interpreted < 100,
+            "the interpreter ran {interpreted} instructions"
+        );
+    }
+}
+
 #[test]
 fn a_segment_load_that_changes_which_segments_are_flat_goes_on_in_its_block() {
     let (mut a, mut b) = twins(|rig| {

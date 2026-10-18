@@ -4,14 +4,21 @@
 //! A block holds exactly the instructions the interpreter would fetch
 //! through its code window after the first one: all in one page, none
 //! starting in the page's last 15 bytes or less than 15 bytes before the
-//! CS limit (see `exec::CodeWindow`). It stops before an instruction the
-//! interpreter must run itself (an invalid encoding, which may be an
-//! emulator service trap, and HLT), and after one that may change what
-//! the execution loop checks between instructions: whether an interrupt
-//! can be delivered, the mode, CS, SS, the page tables or CR0, I/O ports
-//! (and with them the timer deadline), or where execution goes on.
+//! CS limit (see `exec::CodeWindow`). Where the code generator checks the
+//! next page as the interpreter's fetch looks it up, it may go on into
+//! the last 15 bytes, its last instruction running on into the next page
+//! (`BlockData::in_tail`, `BlockData::crosses`). It stops before an
+//! instruction the interpreter must run itself (an invalid encoding,
+//! which may be an emulator service trap, and HLT), and after one that
+//! may change what the execution loop checks between instructions:
+//! whether an interrupt can be delivered, the mode, CS, SS, the page
+//! tables or CR0, I/O ports (and with them the timer deadline), or where
+//! execution goes on.
 
-use iced_x86::{Decoder, DecoderOptions, FlowControl, Instruction, InstructionInfoFactory, Mnemonic, OpAccess};
+use iced_x86::{
+    Decoder, DecoderError, DecoderOptions, FlowControl, Instruction, InstructionInfoFactory,
+    Mnemonic, OpAccess,
+};
 
 use crate::bus::GEN_SHIFT;
 use crate::exec::At;
@@ -107,14 +114,22 @@ pub struct BlockData {
     /// First and last chunk.
     pub chunk_first: u32,
     pub chunk_last: u32,
-    /// Physical address and length of the block's bytes, and the EIP of
-    /// its first instruction.
+    /// Physical address and length of the block's bytes in its page, and
+    /// the EIP of its first instruction.
     pub phys: u32,
     pub len: u32,
     pub eip: u32,
     /// The block's index in the translator's table. (These first fields
     /// share a cache line, which the execution loop reads after a block.)
     pub id: u32,
+    /// Where the block's last instruction runs on into the next page
+    /// (`crosses`): the physical address of that page, how many of its
+    /// first bytes the instruction has (after the `len` in its own page,
+    /// in `bytes`), and the code generation of their chunk when they were
+    /// last found unchanged. `next_len` is 0 for the other blocks.
+    pub next: u32,
+    pub next_len: u32,
+    pub next_gen: u32,
     /// The instructions, their EIPs and handlers, and whether each may
     /// write memory (and with it the block's own bytes).
     pub instrs: Box<[Instruction]>,
@@ -155,11 +170,13 @@ impl BlockData {
     /// Decode a block from the instruction at `at`, which is in the code
     /// window, with at most `max` instructions, and `watch` the changes of
     /// its page's bytes (see `WATCH_AFTER`). With `tail`, the block may go
-    /// on into the page's last 15 bytes, with instructions that end in the
-    /// page (see `in_tail`). The block goes on after the conditional jumps
-    /// that `side` says its code takes, up to `SIDE_EXITS` of them that
-    /// leave it. None if no block can start there: the interpreter runs
-    /// that instruction itself.
+    /// on into the page's last 15 bytes (see `in_tail`), and with `next`,
+    /// the physical address of the next page, all in `ram`, its last
+    /// instruction may run on into that page (see `crosses`). The block
+    /// goes on after the conditional jumps that `side` says its code takes,
+    /// up to `SIDE_EXITS` of them that leave it. None if no block can start
+    /// there: the interpreter runs that instruction itself.
+    #[allow(clippy::too_many_arguments)]
     pub fn build(
         at: &At,
         ram: &[u8],
@@ -167,6 +184,7 @@ impl BlockData {
         max: usize,
         watch: Option<&[u8]>,
         tail: bool,
+        next: Option<u32>,
         side: impl Fn(&Instruction) -> bool,
     ) -> Option<BlockData> {
         // Jumps forward in the page may stay in the block; where too many
@@ -175,7 +193,7 @@ impl BlockData {
         // starts a block of its own: the block stops before it.
         let mut max = max;
         loop {
-            let data = Self::build_up_to(at, ram, page_gen, max, watch, tail, &side)?;
+            let data = Self::build_up_to(at, ram, page_gen, max, watch, tail, next, &side)?;
             let n = data.count();
             let back = (0..n).filter_map(|ix| {
                 let t = jump_target(&data.instrs[ix])?;
@@ -194,6 +212,7 @@ impl BlockData {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_up_to(
         at: &At,
         ram: &[u8],
@@ -201,13 +220,16 @@ impl BlockData {
         max: usize,
         watch: Option<&[u8]>,
         tail: bool,
+        next: Option<u32>,
         side: &impl Fn(&Instruction) -> bool,
     ) -> Option<BlockData> {
+        let next = next.filter(|_| tail);
         // Linear and physical addresses are the same within a page.
         let page_off = at.phys_ip as u32 & 0xFFF;
         let page_phys = at.phys_ip - page_off as usize;
         let page = &ram[page_phys..page_phys + 0x1000];
-        let mut decoder = Decoder::new(if at.code32 { 32 } else { 16 }, page, DecoderOptions::NONE);
+        let bitness = if at.code32 { 32 } else { 16 };
+        let mut decoder = Decoder::new(bitness, page, DecoderOptions::NONE);
         let mut info = InstructionInfoFactory::new();
         let (mut instrs, mut eips, mut writes, mut watched) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         let (mut off, mut eip, mut sides) = (page_off, at.eip, 0);
@@ -215,19 +237,33 @@ impl BlockData {
         while off < end && eip as u64 + PAGE_TAIL as u64 - 1 <= at.cs_limit as u64 {
             decoder.set_position(off as usize).unwrap();
             decoder.set_ip(eip as u64);
-            let instr = decoder.decode();
+            let mut instr = decoder.decode();
+            let here = 0x1000 - off as usize;
+            if let Some(next) = next
+                && here < PAGE_TAIL as usize
+                && decoder.last_error() == DecoderError::NoMoreBytes
+            {
+                // It runs on into the next page: its bytes from both.
+                let mut buf = [0u8; 2 * PAGE_TAIL as usize];
+                buf[..here].copy_from_slice(&page[off as usize..]);
+                buf[here..][..PAGE_TAIL as usize]
+                    .copy_from_slice(&ram[next as usize..][..PAGE_TAIL as usize]);
+                let buf = &buf[..here + PAGE_TAIL as usize];
+                instr = Decoder::with_ip(bitness, buf, eip as u64, DecoderOptions::NONE).decode();
+            }
             if instr.is_invalid() || instr.mnemonic() == Mnemonic::Hlt {
                 break;
             }
             let ends = ends_block(&instr);
-            let bytes = off as usize..off as usize + instr.len();
+            let bytes = off as usize..(off as usize + instr.len()).min(0x1000);
             if let Some(watch) = watch
                 && watch[bytes.clone()].iter().any(|&n| n >= WATCH_AFTER)
             {
                 // A RET poked over an instruction ends the blocks translated
                 // while it is there: the block stops before it instead, and
-                // the interpreter runs whichever is there.
-                if ends && watch[off as usize] >= WATCH_AFTER {
+                // the interpreter runs whichever is there. So does one that
+                // runs on into the next page, which has no watched bytes.
+                if (ends && watch[off as usize] >= WATCH_AFTER) || instr.len() > here {
                     break;
                 }
                 watched.extend(bytes.filter(|&i| watch[i] >= WATCH_AFTER).map(|i| (i - page_off as usize) as u16));
@@ -251,7 +287,8 @@ impl BlockData {
             return None;
         }
         let phys = at.phys_ip as u32;
-        let len = off - page_off;
+        let len = off.min(0x1000) - page_off;
+        let (next, next_len) = (next.unwrap_or(0), off.saturating_sub(0x1000));
         let (chunk_first, chunk_last) = (phys >> GEN_SHIFT, (phys + len - 1) >> GEN_SHIFT);
         let mut data = BlockData {
             gen_sum: 0,
@@ -268,25 +305,40 @@ impl BlockData {
             guards: [Guard::default(); LINKS],
             sites: Box::new([]),
             id: 0,
+            next,
+            next_len,
+            next_gen: 0,
             lag: Box::new([]),
             instrs: instrs.into_boxed_slice(),
             eips: eips.into_boxed_slice(),
             writes: writes.into_boxed_slice(),
-            bytes: ram[phys as usize..(phys + len) as usize].into(),
+            bytes: [
+                &ram[phys as usize..][..len as usize],
+                &ram[next as usize..][..next_len as usize],
+            ]
+            .concat()
+            .into(),
             watched: watched.into_boxed_slice(),
             live_imms: Box::new([]),
         };
-        data.gen_sum = data.gens_now(page_gen);
+        data.note_gens(page_gen);
         Some(data)
     }
 
     /// Whether instruction `ix` starts in the page's last 15 bytes, where the
     /// interpreter's fetch looks at the next page too (with paging, its
-    /// translation), in case the instruction runs on into it. The decoder
-    /// found the instruction ends in the page.
+    /// translation), in case the instruction runs on into it.
     #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     pub fn in_tail(&self, ix: usize) -> bool {
         self.phys_of(ix) & 0xFFF >= 0x1000 - PAGE_TAIL as usize
+    }
+
+    /// Whether instruction `ix` runs on into the next page: the block's
+    /// last, whose bytes there are at `next`. With paging, its code checks
+    /// that the TLB maps the next page there as it did.
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+    pub fn crosses(&self, ix: usize) -> bool {
+        self.next_len != 0 && ix + 1 == self.count()
     }
 
     /// Where conditional jump `ix` goes in the block, if it isn't its last
@@ -317,11 +369,24 @@ impl BlockData {
         self.instrs.len()
     }
 
-    /// The sum of the chunks' generations now.
+    /// The sum of the chunks' generations now, with that of the chunk of
+    /// the bytes in the next page.
     pub fn gens_now(&self, page_gen: &[u32]) -> u32 {
         page_gen[self.chunk_first as usize..=self.chunk_last as usize]
             .iter()
-            .fold(0u32, |sum, g| sum.wrapping_add(*g))
+            .fold(self.next_gen_now(page_gen), |sum, g| sum.wrapping_add(*g))
+    }
+
+    /// The generation of the chunk of the bytes in the next page now (0
+    /// where there are none).
+    fn next_gen_now(&self, page_gen: &[u32]) -> u32 {
+        if self.next_len == 0 { 0 } else { page_gen[(self.next >> GEN_SHIFT) as usize] }
+    }
+
+    /// Note the generations now, the bytes being as translated.
+    pub fn note_gens(&mut self, page_gen: &[u32]) {
+        self.gen_sum = self.gens_now(page_gen);
+        self.next_gen = self.next_gen_now(page_gen);
     }
 
     /// Where instruction `ix` starts in the block's bytes.
@@ -353,7 +418,11 @@ impl BlockData {
         if ix >= self.count() {
             return true;
         }
-        let now = &ram[self.phys as usize..][..self.len as usize];
+        let len = self.len as usize;
+        if ram[self.next as usize..][..self.next_len as usize] != self.bytes[len..] {
+            return false;
+        }
+        let now = &ram[self.phys as usize..][..len];
         let mut from = self.offset(ix);
         for &w in &self.watched {
             let w = w as usize;
@@ -364,7 +433,7 @@ impl BlockData {
                 from = w + 1;
             }
         }
-        now[from..] == self.bytes[from..]
+        now[from..] == self.bytes[from..len]
     }
 
     /// Whether instruction `ix` reads its watched immediate from RAM.
@@ -378,17 +447,30 @@ impl BlockData {
         self.watched.iter().map(|&w| w as usize).filter(move |w| range.contains(w))
     }
 
-    /// Offsets in `bytes` of the bytes that changed since the block was
-    /// translated, if they are few enough to be a poke (`POKE_BYTES`).
+    /// Offsets in `bytes` of the bytes in the block's page that changed
+    /// since the block was translated, if they are few enough to be a poke
+    /// (`POKE_BYTES`). A change to the bytes of the last instruction in the
+    /// next page (`crosses`) counts as one to its first byte, which has a
+    /// count of pokes: once that is watched, blocks stop before it.
     pub fn poked(&self, ram: &[u8]) -> Option<Vec<usize>> {
-        let now = &ram[self.phys as usize..][..self.len as usize];
+        let len = self.len as usize;
+        let now = &ram[self.phys as usize..][..len];
         let mut changed = Vec::new();
-        for (i, (a, b)) in now.iter().zip(&self.bytes[..]).enumerate() {
+        for (i, (a, b)) in now.iter().zip(&self.bytes[..len]).enumerate() {
             if a != b {
                 if changed.len() == POKE_BYTES {
                     return None;
                 }
                 changed.push(i);
+            }
+        }
+        if ram[self.next as usize..][..self.next_len as usize] != self.bytes[len..] {
+            let first = self.offset(self.count() - 1);
+            if !changed.contains(&first) {
+                if changed.len() == POKE_BYTES {
+                    return None;
+                }
+                changed.push(first);
             }
         }
         (!changed.is_empty()).then_some(changed)

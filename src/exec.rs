@@ -957,8 +957,8 @@ fn dynamic<const HOT: bool, const PROF: bool>(
 /// the TLB holds the next page (with paging), which `locate` has just
 /// looked up: where it doesn't, that lookup failed, and the block's code
 /// would leave before its first instruction (`EXIT_NEXT_PAGE`). The next
-/// page needn't follow it in RAM: a block holds only the instructions that
-/// end in their page.
+/// page needn't follow it in RAM: an instruction that runs on into it
+/// takes its bytes there from where the TLB maps it (`BlockData::crosses`).
 fn in_tail(cpu: &Cpu, at: &At, ram_len: usize) -> bool {
     at.lin_ip >= 0x1000
         && at.lin_ip & 0xFFF >= 0x1000 - PAGE_TAIL
