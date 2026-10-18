@@ -186,17 +186,22 @@ impl F80 {
     /// Add `b`, as 80-bit numbers: the smaller's significand shifted down
     /// to the larger's exponent (its low bits dropped), the significands
     /// added or subtracted, and the result brought back to 64 bits.
-    pub fn add(&mut self, b: F80) {
-        self.add_signed(b, b.get_sign());
+    /// True for an invalid operation (IE): a signalling NaN, or infinities
+    /// of opposite signs, whose result is the real indefinite.
+    pub fn add(&mut self, b: F80) -> bool {
+        self.add_signed(b, b.get_sign())
     }
 
     /// Subtract `b`: add it with its sign turned.
-    pub fn sub(&mut self, b: F80) {
-        self.add_signed(b, !b.get_sign());
+    pub fn sub(&mut self, b: F80) -> bool {
+        self.add_signed(b, !b.get_sign())
     }
 
     #[inline]
-    fn add_signed(&mut self, b: F80, b_sign: bool) {
+    fn add_signed(&mut self, b: F80, b_sign: bool) -> bool {
+        if self.get_exponent() == 0x7FFF || b.get_exponent() == 0x7FFF {
+            return self.add_special(b, b_sign);
+        }
         let a_sign = self.get_sign();
         let (mut exp, b_exp) = (self.get_exponent(), b.get_exponent());
         let (mut a_man, mut b_man) = (self.st as u64, b.st as u64);
@@ -207,7 +212,7 @@ impl F80 {
             a_man = shifted(a_man, b_exp - exp);
             exp = b_exp;
         }
-        let (sign, man);
+        let (sign, mut man);
         if a_sign == b_sign {
             let (sum, carry) = a_man.overflowing_add(b_man);
             if carry {
@@ -228,11 +233,59 @@ impl F80 {
                 sign = if a_man >= b_man { a_sign } else { b_sign };
             }
         }
-        // (An exponent that wrapped around reaches into the sign, as it
-        // always did.)
+        if exp >= 0x7FFF && a_sign == b_sign {
+            // Overflow, masked: the infinity.
+            (exp, man) = (0x7FFF, INT_BIT_MASK64);
+        }
+        // (An exponent that wrapped around below 0 reaches into the sign,
+        // as it always did.)
         let st = (self.st & !SIGN_MASK) | (sign as u128) << SIGN_SHIFT;
         let st = (st & !EXP_MASK2) | (exp as u128) << EXP_SHIFT;
         self.st = (st & !MANTISSA_MASK) | man as u128;
+        false
+    }
+
+    /// `add_signed` where either is a NaN or an infinity, as the FPU with
+    /// its exceptions masked: a NaN goes through quieted (of two, the
+    /// quiet one, else the larger significand, else the positive one),
+    /// infinities of opposite signs make the real indefinite.
+    #[cold]
+    fn add_special(&mut self, b: F80, b_sign: bool) -> bool {
+        const QUIET: u128 = 1 << 62;
+        let mut b = b;
+        b.set_sign(b_sign);
+        let (a_nan, b_nan) = (self.is_nan(), b.is_nan());
+        if a_nan || b_nan {
+            let signalling = |x: &F80| x.is_nan() && x.st & QUIET == 0;
+            let invalid = signalling(self) || signalling(&b);
+            if a_nan && b_nan {
+                let (a_quiet, b_quiet) = (!signalling(self), !signalling(&b));
+                let (a_man, b_man) = (self.st as u64 & !(1 << 62), b.st as u64 & !(1 << 62));
+                let take_b = if a_quiet != b_quiet {
+                    b_quiet
+                } else if a_man != b_man {
+                    b_man > a_man
+                } else {
+                    !b.get_sign()
+                };
+                if take_b {
+                    *self = b;
+                }
+            } else if b_nan {
+                *self = b;
+            }
+            self.st |= QUIET | INT_BIT_MASK;
+            return invalid;
+        }
+        if self.is_infinite() && b.is_infinite() {
+            if self.get_sign() != b.get_sign() {
+                self.set_real_indefinite();
+                return true;
+            }
+        } else if b.is_infinite() {
+            *self = b;
+        }
+        false
     }
 
     #[allow(dead_code)]
@@ -928,6 +981,10 @@ mod tests {
         for (i, &a) in values.iter().enumerate() {
             for &b in values.iter().skip(i % 7).step_by(7) {
                 for (a, b) in [(a, b), (b, a), (a, a), (a, F80 { st: a.st ^ SIGN_MASK }), (a, F80 { st: a.st ^ 1 })] {
+                    // The reference knows no NaNs, infinities or overflow.
+                    if a.get_exponent() >= 0x7FFE || b.get_exponent() >= 0x7FFE {
+                        continue;
+                    }
                     let (mut sum, mut reference) = (a, a);
                     sum.add(b);
                     reference.add_reference(b);

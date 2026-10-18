@@ -20,10 +20,9 @@ pub fn addsub_st(cpu: &mut Cpu, dst: usize, a: usize, b: usize, sub: bool) {
     }
     let mut x = cpu.fpu_get(a);
     let y = cpu.fpu_get(b);
-    if sub {
-        x.sub(y);
-    } else {
-        x.add(y);
+    let invalid = if sub { x.sub(y) } else { x.add(y) };
+    if invalid {
+        cpu.set_fpu_flag(FpuFlags::IE, true);
     }
     cpu.fpu_set(dst, x);
 }
@@ -49,13 +48,17 @@ pub fn addsub_value(cpu: &mut Cpu, kind: u32, value: f64) {
     let mut val = F80::new();
     val.set_f64(value);
     let mut st0 = cpu.fpu_get(0);
-    match kind {
+    let invalid = match kind {
         ADD_VALUE => st0.add(val),
         SUB_VALUE => st0.sub(val),
         _ => {
-            val.sub(st0);
+            let invalid = val.sub(st0);
             st0 = val;
+            invalid
         }
+    };
+    if invalid {
+        cpu.set_fpu_flag(FpuFlags::IE, true);
     }
     cpu.fpu_set(0, st0);
 }
@@ -106,7 +109,9 @@ pub fn fiadd(cpu: &mut Cpu, instr: &Instruction) {
     }
     let val = cpu.load_int_to_f80(addr, instr.memory_size());
     let mut st0 = cpu.fpu_get(0);
-    st0.add(val);
+    if st0.add(val) {
+        cpu.set_fpu_flag(FpuFlags::IE, true);
+    }
     cpu.fpu_set(0, st0);
 }
 
@@ -121,7 +126,9 @@ pub fn fisub(cpu: &mut Cpu, instr: &Instruction) {
     }
     let val = cpu.load_int_to_f80(addr, instr.memory_size());
     let mut st0 = cpu.fpu_get(0);
-    st0.sub(val);
+    if st0.sub(val) {
+        cpu.set_fpu_flag(FpuFlags::IE, true);
+    }
     cpu.fpu_set(0, st0);
 }
 
@@ -136,7 +143,9 @@ pub fn fisubr(cpu: &mut Cpu, instr: &Instruction) {
     }
     let mut val = cpu.load_int_to_f80(addr, instr.memory_size());
     let st0 = cpu.fpu_get(0);
-    val.sub(st0);
+    if val.sub(st0) {
+        cpu.set_fpu_flag(FpuFlags::IE, true);
+    }
     cpu.fpu_set(0, val);
 }
 

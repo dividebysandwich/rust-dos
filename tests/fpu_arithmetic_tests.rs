@@ -373,3 +373,40 @@ fn test_frndint_from_the_80_bits_reports_the_rounding() {
     let flags = cpu.get_fpu_flags();
     assert!(flags.contains(FpuFlags::PE | FpuFlags::C1));
 }
+
+#[test]
+fn fadd_fsub_of_infinities_and_nans() {
+    // (ST(1), ST(0), FADD or FSUB ST(0),ST(1), the result's 80 bits, IE)
+    let inf = 0x7FFF_8000_0000_0000_0000u128;
+    let ninf = 0xFFFF_8000_0000_0000_0000u128;
+    let indefinite = 0xFFFF_C000_0000_0000_0000u128;
+    let qnan = 0x7FFF_C000_0000_0000_1234u128;
+    let snan = 0x7FFF_8000_0000_0000_1234u128;
+    let one = 0x3FFF_8000_0000_0000_0000u128;
+    let max = 0x7FFE_FFFF_FFFF_FFFF_FFFFu128;
+    let cases = [
+        (inf, inf, [0xD8, 0xC1], inf, false),
+        (ninf, ninf, [0xD8, 0xC1], ninf, false),
+        (inf, ninf, [0xD8, 0xC1], indefinite, true),
+        (inf, inf, [0xD8, 0xE1], indefinite, true),
+        (one, inf, [0xD8, 0xC1], inf, false),
+        (inf, one, [0xD8, 0xE1], ninf, false),
+        (qnan, one, [0xD8, 0xC1], qnan, false),
+        (one, qnan, [0xD8, 0xC1], qnan, false),
+        (snan, one, [0xD8, 0xC1], qnan, true),
+        (qnan, qnan, [0xD8, 0xC1], qnan, false),
+        (max, max, [0xD8, 0xC1], inf, false),
+    ];
+    for (st1, st0, code, result, ie) in cases {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        for v in [st1, st0] {
+            let mut f = F80::new();
+            f.set(v);
+            cpu.fpu_push(f);
+        }
+        testrunners::run_fpu_code(&mut cpu, &code);
+        let what = format!("{st0:020X} {code:02X?} {st1:020X}");
+        assert_eq!(cpu.fpu_get(0).get(), result, "{what}");
+        assert_eq!(cpu.get_fpu_flag(FpuFlags::IE), ie, "{what}: IE");
+    }
+}
