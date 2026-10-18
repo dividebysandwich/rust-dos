@@ -1180,6 +1180,11 @@ pub fn print_banner(cpu: &mut Cpu, notes: &[(String, String)], update: Option<&s
         ("DOSCONFIG".to_string(), HIGHLIGHT),
         (" to open the settings.".to_string(), TEXT),
     ]);
+    lines.push(vec![
+        ("Type ".to_string(), TEXT),
+        ("RC".to_string(), HIGHLIGHT),
+        (" to run Rat-Commander.".to_string(), TEXT),
+    ]);
     let len = |line: &[(String, u8)]| line.iter().map(|(text, _)| text.chars().count()).sum::<usize>();
     let width = lines.iter().map(|line| len(line)).max().unwrap_or(0);
 
