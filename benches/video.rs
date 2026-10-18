@@ -7,6 +7,8 @@
 //! render, as the main loop does it (`render_screen`, then `clear_dirty`).
 
 mod common;
+#[path = "video/voodoo.rs"]
+mod voodoo;
 
 use common::*;
 use criterion::{Criterion, criterion_group, criterion_main};
@@ -288,5 +290,13 @@ fn cga_composite(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, planar_sprite, planar_scroll, planar_program, cga_composite);
+criterion_group!(
+    benches,
+    planar_sprite,
+    planar_scroll,
+    planar_program,
+    cga_composite,
+    voodoo::pipelines,
+    voodoo::frames
+);
 criterion_main!(benches);
