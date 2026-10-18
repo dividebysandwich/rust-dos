@@ -26,20 +26,21 @@ fn test_fcompp_stack_cleanup() {
 }
 
 #[test]
-fn test_fcom_reverse_opcode_dc() {
-    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
-    
-    // Scenario: ST(0)=8.0, ST(1)=10.0
-    push_val(&mut cpu, 10.0); // ST(1)
-    push_val(&mut cpu, 8.0);  // ST(0)
+fn test_fcom_alias_opcode_dc() {
+    // DC D0+i, DC D8+i and DE D0+i are aliases of D8 D0+i and D8 D8+i:
+    // ST(0) with ST(i), C0 set for 8.0 < 10.0.
+    for (code, pops) in [([0xDC, 0xD1], 0), ([0xDC, 0xD9], 1), ([0xDE, 0xD1], 1)] {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        push_val(&mut cpu, 10.0); // ST(1)
+        push_val(&mut cpu, 8.0); // ST(0)
+        let top = cpu.fpu_top;
 
-    // DC D1: FCOM ST(1), ST(0) -> Compare ST(1) [LHS] with ST(0) [RHS]
-    // Is 10.0 < 8.0? -> NO. 
-    testrunners::run_fpu_code(&mut cpu, &[0xDC, 0xD1]);
+        testrunners::run_fpu_code(&mut cpu, &code);
 
-    let flags = cpu.get_fpu_flags();
-    if flags.contains(FpuFlags::C0) {
-        panic!("FATAL: FCOM logic is swapped! 10.0 < 8.0 returned TRUE.");
+        let flags = cpu.get_fpu_flags();
+        assert!(flags.contains(FpuFlags::C0), "{code:02X?}: 8.0 < 10.0 should set C0");
+        assert!(!flags.contains(FpuFlags::C3), "{code:02X?}: not equal");
+        assert_eq!(cpu.fpu_top, (top + pops) & 7, "{code:02X?}: pops");
     }
 }
 

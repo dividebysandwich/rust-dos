@@ -1,4 +1,4 @@
-use iced_x86::{Code, Instruction, Mnemonic, OpKind, MemorySize, Register};
+use iced_x86::{Instruction, Mnemonic, OpKind, MemorySize, Register};
 
 use std::cmp::Ordering;
 
@@ -67,10 +67,9 @@ pub fn fcom_registers(instr: &Instruction) -> Option<(usize, usize, u8)> {
     match instr.op0_kind() {
         OpKind::Memory => None,
         OpKind::Register => {
-            // The DC D0+i and DC D8+i encodings compare the other way
-            // round (ST(i) with ST(0)).
-            let dc_form = matches!(instr.code(), Code::Fcom_st0_sti_DCD0 | Code::Fcomp_st0_sti_DCD8);
-
+            // The undocumented DC D0+i, DC D8+i and DE D0+i encodings are
+            // aliases of FCOM/FCOMP ST(i): ST(0) with ST(i), as on real
+            // CPUs.
             // ST(i) is the last operand: iced lists ST(0) first. It can be
             // ST(0) itself, as in FUCOMP ST(0), GCC's test for NaN.
             let idx = match instr.op_register(instr.op_count().saturating_sub(1)) {
@@ -80,7 +79,7 @@ pub fn fcom_registers(instr: &Instruction) -> Option<(usize, usize, u8)> {
             if idx > 7 {
                 return None;
             }
-            Some(if dc_form { (idx, 0, pops) } else { (0, idx, pops) })
+            Some((0, idx, pops))
         }
         _ => Some((0, 1, pops)),
     }
