@@ -477,3 +477,56 @@ fn fyl2x_of_zero_and_negative_values() {
     let r = cpu.fpu_get(0).get_f64();
     assert!((r / (2f64.powi(-60) * std::f64::consts::LOG2_E) - 1.0).abs() < 1e-12, "{r}");
 }
+
+#[test]
+fn fscale_fxtract_fchs_and_trigonometry_edges() {
+    let fresh = |values: &[u128]| {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        for &v in values {
+            let mut f = F80::new();
+            f.set(v);
+            cpu.fpu_push(f);
+        }
+        cpu
+    };
+    let bits = |v: f64| {
+        let mut f = F80::new();
+        f.set_f64(v);
+        f.get()
+    };
+
+    // FSCALE (D9 FD) keeps all 64 bits and goes past a double's range.
+    let x = 0x3FFF_8000_0000_0000_0001u128;
+    let mut cpu = fresh(&[bits(-2000.0), x]);
+    testrunners::run_fpu_code(&mut cpu, &[0xD9, 0xFD]);
+    assert_eq!(cpu.fpu_get(0).get(), x - (2000 << 64));
+
+    // FXTRACT (D9 F4) of -0: ST(1) -infinity, ST(0) -0, ZE.
+    let mut cpu = fresh(&[bits(-0.0)]);
+    testrunners::run_fpu_code(&mut cpu, &[0xD9, 0xF4]);
+    assert_eq!(cpu.fpu_get(0).get(), bits(-0.0));
+    assert_eq!(cpu.fpu_get(1).get(), bits(f64::NEG_INFINITY));
+    assert!(cpu.get_fpu_flag(FpuFlags::ZE));
+
+    // FCHS (D9 E0) clears C1.
+    let mut cpu = fresh(&[bits(1.0)]);
+    testrunners::run_fpu_code(&mut cpu, &[0xD9, 0xE0]);
+    assert!(!cpu.get_fpu_flag(FpuFlags::C1));
+
+    // FSIN (D9 FE) and FPTAN (D9 F2) of 2^63: C2, nothing changed.
+    for code in [[0xD9, 0xFE], [0xD9, 0xF2]] {
+        let big = 0x403E_8000_0000_0000_0000u128;
+        let mut cpu = fresh(&[big]);
+        let top = cpu.fpu_top;
+        testrunners::run_fpu_code(&mut cpu, &code);
+        assert!(cpu.get_fpu_flag(FpuFlags::C2), "{code:02X?}");
+        assert_eq!(cpu.fpu_get(0).get(), big, "{code:02X?}");
+        assert_eq!(cpu.fpu_top, top, "{code:02X?}");
+    }
+
+    // FSIN of an infinity: the real indefinite, IE.
+    let mut cpu = fresh(&[bits(f64::INFINITY)]);
+    testrunners::run_fpu_code(&mut cpu, &[0xD9, 0xFE]);
+    assert_eq!(cpu.fpu_get(0).get(), 0xFFFF_C000_0000_0000_0000);
+    assert!(cpu.get_fpu_flag(FpuFlags::IE));
+}

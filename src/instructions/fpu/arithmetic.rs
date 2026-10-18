@@ -472,7 +472,7 @@ pub fn fchs(cpu: &mut Cpu) {
     let mut st0 = cpu.fpu_get(0);
     st0.neg();
     cpu.fpu_set(0, st0);
-    cpu.set_fpu_flag(FpuFlags::C1, st0.get_sign());
+    cpu.set_fpu_flag(FpuFlags::C1, false);
 }
 
 // FSCALE: Scale by 2^trunc(ST(1))
@@ -480,6 +480,14 @@ pub fn fchs(cpu: &mut Cpu) {
 pub fn fscale(cpu: &mut Cpu) {
     let mut st0 = cpu.fpu_get(0);
     let st1 = cpu.fpu_get(1).get_f64().trunc();
+    // A normal number whose result is one: only the exponent changes, as
+    // on the FPU, with all 64 bits and the 80 bits' range.
+    let exp = st0.get_exponent() as f64;
+    if st0.is_normal() && st0.get_integer_bit() != 0 && (1.0..=32766.0).contains(&(exp + st1)) {
+        st0.set_exponent((exp + st1) as u16);
+        cpu.fpu_set(0, st0);
+        return;
+    }
     let res = st0.get_f64() * 2.0_f64.powf(st1);
     st0.set_f64(res);
     cpu.fpu_set(0, st0);
@@ -519,19 +527,19 @@ pub fn fsqrt(cpu: &mut Cpu) {
 // ST(0) becomes Exponent (unbiased), Push Significand.
 pub fn fxtract(cpu: &mut Cpu) {
     let val = cpu.fpu_get(0);
-    let f_val = val.get_f64();
 
-    // Handle Zero case
-    if f_val == 0.0 {
-        // ST(0) = -Infinity
-        let mut neg_inf = F80::new();
-        neg_inf.set_f64(f64::NEG_INFINITY);
-        cpu.fpu_set(0, neg_inf);
-
-        // Push 0.0
-        let mut zero = F80::new();
-        zero.set_f64(0.0);
-        cpu.fpu_push(zero);
+    // A zero: the exponent -infinity (ZE), the zero as it was. An
+    // infinity: the exponent +infinity, the infinity. A NaN: both it.
+    if val.is_zero() || val.is_infinite() || val.is_nan() {
+        let mut exponent = val;
+        if val.is_zero() {
+            exponent.set_f64(f64::NEG_INFINITY);
+            cpu.set_fpu_flag(FpuFlags::ZE, true);
+        } else if val.is_infinite() {
+            exponent.set_f64(f64::INFINITY);
+        }
+        cpu.fpu_set(0, exponent);
+        cpu.fpu_push(val);
         return;
     }
 
