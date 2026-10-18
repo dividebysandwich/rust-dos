@@ -739,7 +739,15 @@ enum Slow {
     Store { at: DynamicLabel, back: DynamicLabel, m: T, src: T, thunk: Thunk, lo: u32, hi: u32 },
     /// `Uop::VStore` of XMM`x`'s low `size` bytes at a handle with
     /// `DEV_BIT`: through `Thunk::Store4` a dword at a time, as `Store`.
-    VStore { at: DynamicLabel, back: DynamicLabel, m: T, x: u8, size: u8, lo: u32, hi: u32 },
+    VStore {
+        at: DynamicLabel,
+        back: DynamicLabel,
+        m: T,
+        x: u8,
+        size: u8,
+        lo: u32,
+        hi: u32,
+    },
     /// An instruction's fault with an exit code of its own (#GP(0), #DE).
     Fault { at: DynamicLabel, code: u32, fail: DynamicLabel },
     /// A store hit the rest of the block: it leaves after the instruction,
@@ -1080,7 +1088,10 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
                         ; go_on:
                     );
                 }
-                if uops.iter().any(|u| matches!(u, Uop::Store { .. } | Uop::VStore { .. })) {
+                if uops
+                    .iter()
+                    .any(|u| matches!(u, Uop::Store { .. } | Uop::VStore { .. }))
+                {
                     // A store hit the rest of the block: leave after this
                     // instruction.
                     let at = g.ops.new_dynamic_label();
@@ -1513,9 +1524,18 @@ impl Gen<'_> {
                     dynasm!(self.ops ; .arch x64 ; =>at);
                     self.thunk_store(thunk, m, src, lo, hi, back);
                 }
-                Slow::VStore { at, back, m, x, size, lo, hi } => {
+                Slow::VStore {
+                    at,
+                    back,
+                    m,
+                    x,
+                    size,
+                    lo,
+                    hi,
+                } => {
                     // The calls into Rust don't keep the XMM registers, so
-                    // the bytes go on the stack first (16 keeps it aligned).
+                    // the bytes go on the stack first (16 keeps it
+                    // aligned).
                     dynasm!(self.ops
                         ; .arch x64
                         ; =>at
@@ -1523,12 +1543,8 @@ impl Gen<'_> {
                         ; movups [rsp], Rx(x)
                     );
                     for i in 0..size as i32 / 4 {
-                        if lo == 0 && hi == 0 {
-                            dynasm!(self.ops ; .arch x64 ; xor eax, eax);
-                        } else {
-                            let rest = (lo as u64 | (hi as u64) << 32) as i64;
-                            dynasm!(self.ops ; .arch x64 ; mov rax, QWORD rest);
-                        }
+                        // (The thunk changes RAX.)
+                        self.rest_into_rax(lo, hi);
                         dynasm!(self.ops
                             ; .arch x64
                             ; lea rdx, [Rq(r(m)) + 4 * i]
@@ -1585,11 +1601,7 @@ impl Gen<'_> {
     /// A store's slow path: ECX the value, RDX the handle and RAX the
     /// block's bytes after the instruction for `thunk`, then on at `back`.
     fn thunk_store(&mut self, thunk: Thunk, m: T, src: T, lo: u32, hi: u32, back: DynamicLabel) {
-        if lo == 0 && hi == 0 {
-            dynasm!(self.ops ; .arch x64 ; xor eax, eax);
-        } else {
-            dynasm!(self.ops ; .arch x64 ; mov rax, QWORD (lo as u64 | (hi as u64) << 32) as i64);
-        }
+        self.rest_into_rax(lo, hi);
         dynasm!(self.ops
             ; .arch x64
             ; mov rdx, Rq(r(m))
@@ -1597,6 +1609,17 @@ impl Gen<'_> {
             ; call QWORD [BYTE r12 + thunk.slot()]
             ; jmp =>back
         );
+    }
+
+    /// RAX = the block's bytes after the instruction (`rest`) as the store
+    /// thunks take them: `lo | hi << 32`.
+    fn rest_into_rax(&mut self, lo: u32, hi: u32) {
+        if lo == 0 && hi == 0 {
+            dynasm!(self.ops ; .arch x64 ; xor eax, eax);
+        } else {
+            let rest = (lo as u64 | (hi as u64) << 32) as i64;
+            dynasm!(self.ops ; .arch x64 ; mov rax, QWORD rest);
+        }
     }
 
     /// Where the instruction being translated raises a fault that has an
@@ -2428,7 +2451,15 @@ impl Gen<'_> {
                 }
                 dynasm!(self.ops ; .arch x64 ; =>back);
                 let (lo, hi) = self.rest();
-                self.slow.push(Slow::VStore { at, back, m, x, size, lo, hi });
+                self.slow.push(Slow::VStore {
+                    at,
+                    back,
+                    m,
+                    x,
+                    size,
+                    lo,
+                    hi,
+                });
             }
             Uop::EnterMmx => {
                 // (FPU_TAG_VALID is 0.)

@@ -4301,45 +4301,68 @@ fn mmx_and_sse_stores_into_the_linear_frame_buffer_are_translated() {
         for i in 0..0x1000u32 {
             rig.write32(DATA + 4 * i, i.wrapping_mul(0x0103_0507));
         }
-        rig.load(CODE, &asm32(CODE, |a| {
-            let mut copy = a.create_label();
-            a.mov(esi, DATA)?;
-            a.mov(edi, LFB + 0x1000)?;
-            a.mov(ecx, 0x200u32)?;
-            a.set_label(&mut copy)?;
-            a.movq(mm0, qword_ptr(esi))?;
-            a.movq(mm1, qword_ptr(esi + 8))?;
-            a.movq(qword_ptr(edi), mm0)?;
-            a.movq(qword_ptr(edi + 8), mm1)?;
-            a.add(esi, 16)?;
-            a.add(edi, 16)?;
-            a.dec(ecx)?;
-            a.jnz(copy)?;
-            a.movups(xmm0, xmmword_ptr(DATA + 0x40))?;
-            a.movups(xmmword_ptr(LFB + 0x8004), xmm0)?;
-            a.movaps(xmmword_ptr(LFB + 0x8010), xmm0)?;
-            a.movlps(qword_ptr(LFB + 0x8020), xmm0)?;
-            a.movhps(qword_ptr(LFB + 0x8028), xmm0)?;
-            a.movq(qword_ptr(LFB + 0x8FFC), mm1)?;
-            a.movups(xmmword_ptr(LFB + 0x3F_FFF8), xmm0)?;
-            a.emms()?;
-            a.hlt()
-        }));
+        rig.load(
+            CODE,
+            &asm32(CODE, |a| {
+                let mut copy = a.create_label();
+                a.mov(esi, DATA)?;
+                a.mov(edi, LFB + 0x1000)?;
+                a.mov(ecx, 0x200u32)?;
+                a.set_label(&mut copy)?;
+                a.movq(mm0, qword_ptr(esi))?;
+                a.movq(mm1, qword_ptr(esi + 8))?;
+                a.movq(qword_ptr(edi), mm0)?;
+                a.movq(qword_ptr(edi + 8), mm1)?;
+                a.add(esi, 16)?;
+                a.add(edi, 16)?;
+                a.dec(ecx)?;
+                a.jnz(copy)?;
+                a.movups(xmm0, xmmword_ptr(DATA + 0x40))?;
+                a.movups(xmmword_ptr(LFB + 0x8004), xmm0)?;
+                a.movaps(xmmword_ptr(LFB + 0x8010), xmm0)?;
+                a.movlps(qword_ptr(LFB + 0x8020), xmm0)?;
+                a.movhps(qword_ptr(LFB + 0x8028), xmm0)?;
+                a.movq(qword_ptr(LFB + 0x8FFC), mm1)?;
+                a.movups(xmmword_ptr(LFB + 0x3F_FFF8), xmm0)?;
+                a.emms()?;
+                a.hlt()
+            }),
+        );
     });
     let stats = run_both(&mut a, &mut b);
     assert_eq!(b.cpu.bus.vbe.vram[0x1000..0x1004], [0, 0, 0, 0]);
-    assert_eq!(b.cpu.bus.vbe.vram[0x1004..0x1008], 0x0103_0507u32.to_le_bytes());
-    assert_eq!(b.cpu.bus.vbe.vram[0x8010..0x8014], 0x0103_0507u32.wrapping_mul(16).to_le_bytes());
-    assert!(a.cpu.bus.vbe.vram == b.cpu.bus.vbe.vram, "the frame buffers differ");
+    assert_eq!(
+        b.cpu.bus.vbe.vram[0x1004..0x1008],
+        0x0103_0507u32.to_le_bytes()
+    );
+    assert_eq!(
+        b.cpu.bus.vbe.vram[0x8010..0x8014],
+        0x0103_0507u32.wrapping_mul(16).to_le_bytes()
+    );
+    assert!(
+        a.cpu.bus.vbe.vram == b.cpu.bus.vbe.vram,
+        "the frame buffers differ"
+    );
     let shown = |rig: &Rig| {
         let v = &rig.cpu.bus.vga;
-        (v.dirty, v.dirty_y_min, v.dirty_y_max, rig.cpu.bus.activity.video_bytes)
+        (
+            v.dirty,
+            v.dirty_y_min,
+            v.dirty_y_max,
+            rig.cpu.bus.activity.video_bytes,
+        )
     };
     assert_eq!(shown(&a), shown(&b));
     if AVAILABLE {
         assert_eq!(untranslated(&stats), 0, "{:?}", stats);
     }
-    assert_handled_only(&b, &[(iced_x86::Mnemonic::Movq, 1), (iced_x86::Mnemonic::Movups, 1)]);
+    assert_handled_only(
+        &b,
+        &[
+            (iced_x86::Mnemonic::Movq, 1),
+            (iced_x86::Mnemonic::Movups, 1),
+        ],
+    );
 }
 
 #[test]

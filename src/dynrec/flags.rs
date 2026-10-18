@@ -114,7 +114,10 @@ pub fn live(items: &[Option<Vec<Uop>>]) -> Vec<Vec<u32>> {
             live = ARITH;
             continue;
         };
-        if uops.iter().any(|u| matches!(u, Uop::Store { .. })) {
+        if uops
+            .iter()
+            .any(|u| matches!(u, Uop::Store { .. } | Uop::VStore { .. }))
+        {
             // The block may stop after a store into its later bytes.
             live = ARITH;
         }
