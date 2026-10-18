@@ -59,7 +59,7 @@ impl TraceEntry {
     pub fn disasm(&self) -> (usize, String) {
         let bytes = self.code_bytes();
         if let Some(name) = trap_name(bytes, Some(self.gpr[0] as u16), self.pm) {
-            return (3, name);
+            return (trap_len(bytes), name);
         }
         disasm_one(bytes, self.eip, self.code32)
     }
@@ -129,12 +129,16 @@ pub fn hex_bytes(bytes: &[u8]) -> String {
 }
 
 /// What the emulator's service trap at the start of `bytes` runs (the
-/// `FE 38..3B vv` kinds of `exec::service_trap`), or None if it holds none.
+/// `FE 38..3B vv` and `FE 3E nn nn` kinds of `exec::service_trap`), or
+/// None if it holds none.
 /// An interrupt's line gives AX, its function, when `ax` is known. In
 /// protected mode (`pm`) `FE 38` and `FE 39` are the invalid FE /7 opcode
 /// they encode, as `exec::service_trap` runs them only in real and
 /// virtual-8086 mode.
 pub fn trap_name(bytes: &[u8], ax: Option<u16>, pm: bool) -> Option<String> {
+    if let &[0xFE, rust_dos::win32::TRAP, lo, hi, ..] = bytes {
+        return Some(rust_dos::win32::trap_name(u16::from_le_bytes([lo, hi])));
+    }
     let &[0xFE, kind @ 0x38..=0x3B, vv, ..] = bytes else {
         return None;
     };
@@ -151,10 +155,17 @@ pub fn trap_name(bytes: &[u8], ax: Option<u16>, pm: bool) -> Option<String> {
     })
 }
 
+/// How many bytes the service trap at the start of `bytes` has: the
+/// built-in Windows's have a word after their kind, the others a byte.
+pub fn trap_len(bytes: &[u8]) -> usize {
+    if bytes.get(1) == Some(&rust_dos::win32::TRAP) { 4 } else { 3 }
+}
+
 /// Whether `bytes` start with a service trap that `trap_name` names, in
 /// protected mode (`pm`) or outside it, without building the name.
 fn is_trap(bytes: &[u8], pm: bool) -> bool {
-    matches!(bytes, &[0xFE, kind @ 0x38..=0x3B, _, ..] if !(pm && kind <= 0x39))
+    matches!(bytes, &[0xFE, rust_dos::win32::TRAP, _, _, ..])
+        || matches!(bytes, &[0xFE, kind @ 0x38..=0x3B, _, ..] if !(pm && kind <= 0x39))
 }
 
 /// Disassemble one instruction of 16-bit or 32-bit code. Returns (length,

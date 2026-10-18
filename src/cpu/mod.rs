@@ -1021,8 +1021,10 @@ impl Cpu {
         self.last_child_exit = code as u16;
         self.note_exit(code, false);
         let psp = self.current_psp;
-        // Its DPMI clients end with it, and its IPX sockets.
+        // Its DPMI clients end with it, its Win32 program, and its IPX
+        // sockets.
         crate::dpmi::process_ended(self, psp);
+        crate::win32::process_ended(self, psp);
         if let Some(ipx) = &mut self.bus.net.ipx {
             ipx.program_ended(psp);
         }
@@ -1750,6 +1752,7 @@ impl Cpu {
         // a cold boot.
         let a20 = self.bus.xms.program_ended();
         self.bus.dpmi.reset();
+        self.bus.win32.reset();
         // The addresses of its values mean nothing to the next program.
         self.bus.freezes.clear();
         if self.bus.ems.is_some() {
@@ -1782,7 +1785,7 @@ impl Cpu {
     /// The contents of a program or batch file, on any drive: a host
     /// directory, a disk or CD image or a drive held in memory. Reading it
     /// takes the time the drive's speed says.
-    fn read_program_file(&mut self, filename: &str) -> Option<crate::memfs::Bytes> {
+    pub(crate) fn read_program_file(&mut self, filename: &str) -> Option<crate::memfs::Bytes> {
         let bytes = self.bus.disk.file_data(filename)?.read().ok()?;
         if let Some(drive) = self.bus.disk.drive_of(filename) {
             let key = self.bus.disk.file_key(filename);
@@ -1896,7 +1899,13 @@ impl Cpu {
 
         // Check for EXE Signature ("MZ")
         let loaded = if bytes.len() > 2 && bytes[0] == 0x4D && bytes[1] == 0x5A {
-            self.load_exe(bytes, placement)
+            let loaded = self.load_exe(bytes, placement);
+            // A Win32 program, with the built-in Windows on, starts from
+            // its DOS stub's place, in its DOS process.
+            if loaded {
+                crate::win32::prepare(self, filename, bytes);
+            }
+            loaded
         } else {
             self.load_com(bytes, placement)
         };

@@ -17,6 +17,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 2;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
+const WIN32_VERSION: u16 = 1;
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 1;
 const VFX1_VERSION: u16 = 1;
@@ -125,6 +126,7 @@ impl Bus {
             xms,
             ems,
             dpmi,
+            win32,
             umb,
             dos_high,
             mouse,
@@ -305,6 +307,10 @@ impl Bus {
         if dpmi.active() {
             w.section(b"DPMI", DPMI_VERSION, |w| dpmi.save(w));
         }
+        // The built-in Windows, while it runs a program or is about to.
+        if win32.active() || win32.pending() {
+            w.section(b"W32 ", WIN32_VERSION, |w| win32.save(w));
+        }
         // The IPX driver, once installed, and the network card. The LAN
         // isn't part of the machine: frames in flight are lost with a load.
         if net.ipx.is_some() || net.nic.is_some() {
@@ -420,6 +426,7 @@ impl Bus {
             xms,
             ems,
             dpmi,
+            win32,
             umb,
             dos_high,
             mouse,
@@ -612,8 +619,13 @@ impl Bus {
         if r.next_is(b"DPMI") {
             dpmi.load(&mut r.section(b"DPMI", DPMI_VERSION)?)?;
         }
-        // The extended memory it holds.
+        win32.reset();
+        if r.next_is(b"W32 ") {
+            win32.load(&mut r.section(b"W32 ", WIN32_VERSION)?)?;
+        }
+        // The extended memory they hold.
         xms.dpmi = dpmi.reservations();
+        xms.dpmi.extend(win32.reservations());
         // The IPX driver and the network card come and go with the state.
         if r.next_is(b"NET ") {
             let mut section = r.section(b"NET ", NET_VERSION)?;

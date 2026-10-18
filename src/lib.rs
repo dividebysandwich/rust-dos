@@ -123,6 +123,7 @@ pub mod video;
 pub mod voodoo;
 pub mod vr;
 pub mod vr_scenes;
+pub mod win32;
 pub mod xms;
 
 // The save state macros, at the crate root as `crate::state_fields!`.

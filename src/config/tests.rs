@@ -679,6 +679,7 @@ fn changed_settings() -> Settings {
         ems: false,
         umb: false,
         dpmi: false,
+        win32: true,
         dos_high: false,
         dos_version: DosVersion::new(7, 10),
         ide_hard_disks: false,

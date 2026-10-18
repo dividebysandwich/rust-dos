@@ -1326,6 +1326,7 @@ dependencies = [
  "rust-dos-mpu401",
  "rust-dos-mt32",
  "rust-dos-opl",
+ "rust-dos-pe",
  "rust-dos-rc",
  "rust-dos-savestate",
  "rust-dos-sc55",
@@ -1421,6 +1422,10 @@ dependencies = [
  "rust-dos-audio-core",
  "rust-dos-savestate",
 ]
+
+[[package]]
+name = "rust-dos-pe"
+version = "1.7.5"
 
 [[package]]
 name = "rust-dos-rc"

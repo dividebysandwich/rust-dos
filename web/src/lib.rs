@@ -1240,6 +1240,7 @@ impl Host for PageHost<'_> {
         }
         // Programs look for the host as they start.
         self.cpu.bus.dpmi.enabled = new.dpmi;
+        self.cpu.bus.win32.enabled = new.win32;
         self.cpu.bus.ide_hard_disks = new.ide_hard_disks;
         self.cpu.bus.boot_cdrom = new.boot_cdrom;
         self.cpu.bus.floppy_controller = new.floppy_controller;

@@ -185,6 +185,7 @@ zones! {
     HleInline = "hle.inline",
     HleFar = "hle.far",
     Dpmi = "hle.dpmi",
+    Win32 = "hle.win32",
     // Port accesses, by the device that has the port.
     IoVga = "io.vga",
     IoPic = "io.pic",

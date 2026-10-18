@@ -68,6 +68,9 @@ pub struct Settings {
     pub umb: bool,
     /// The DPMI host for DOS extenders.
     pub dpmi: bool,
+    /// The built-in Windows runs Win32 console programs (`win32`), the
+    /// start of the work in docs/native-windows.md.
+    pub win32: bool,
     /// DOS's tables packed below the first MCB, as DOS=HIGH leaves
     /// conventional memory, rather than spread out up to 64 KB.
     pub dos_high: bool,
@@ -158,6 +161,7 @@ impl Default for Settings {
             ems: true,
             umb: true,
             dpmi: true,
+            win32: false,
             dos_high: true,
             dos_version: DosVersion::default(),
             ide_hard_disks: true,
@@ -291,6 +295,7 @@ impl Settings {
             ems: config.ems.unwrap_or(default.ems),
             umb: config.umb.unwrap_or(default.umb),
             dpmi: config.dpmi.unwrap_or(default.dpmi),
+            win32: config.win32.unwrap_or(default.win32),
             dos_high: config.dos_high.unwrap_or(default.dos_high),
             dos_version: config.dos_version.unwrap_or(default.dos_version),
             ide_hard_disks: config.ide_hard_disks.unwrap_or(default.ide_hard_disks),
@@ -401,6 +406,7 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
         (Emulator, "ems", yes_no(settings.ems)),
         (Emulator, "umb", yes_no(settings.umb)),
         (Emulator, "dpmi", yes_no(settings.dpmi)),
+        (Emulator, "win32", yes_no(settings.win32)),
         (Emulator, "dos_high", yes_no(settings.dos_high)),
         (Emulator, "dos_version", Some(settings.dos_version.name())),
         (Emulator, "ide_hard_disks", yes_no(settings.ide_hard_disks)),
