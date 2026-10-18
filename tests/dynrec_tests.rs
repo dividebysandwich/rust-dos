@@ -4282,6 +4282,67 @@ fn stores_into_the_linear_frame_buffer_are_the_interpreters() {
 }
 
 #[test]
+fn mmx_and_sse_stores_into_the_linear_frame_buffer_are_translated() {
+    // DirectDraw's MMX copy loop into a 640x480 16-bit VESA mode's frame
+    // buffer, then the SSE stores of 16 and 8 bytes. The last two cross a
+    // page, one of them at the end of the video memory: those go to the
+    // handlers.
+    const LFB: u32 = 0xE000_0000;
+    let (mut a, mut b) = twins(|rig| {
+        rig.cpu.model = rust_dos::cpu::CpuModel::PentiumIII;
+        rig.cpu.cr4 |= 0x200;
+        rig.cpu.set_ax(0x4F02);
+        rig.cpu.set_reg16(iced_x86::Register::BX, 0x4111);
+        rust_dos::interrupts::int10::handle(&mut rig.cpu);
+        assert_eq!(rig.cpu.ax(), 0x004F, "no VESA mode");
+        rig.cpu.bus.vga.dirty = false;
+        rig.cpu.bus.vga.dirty_y_min = u32::MAX;
+        rig.cpu.bus.vga.dirty_y_max = 0;
+        for i in 0..0x1000u32 {
+            rig.write32(DATA + 4 * i, i.wrapping_mul(0x0103_0507));
+        }
+        rig.load(CODE, &asm32(CODE, |a| {
+            let mut copy = a.create_label();
+            a.mov(esi, DATA)?;
+            a.mov(edi, LFB + 0x1000)?;
+            a.mov(ecx, 0x200u32)?;
+            a.set_label(&mut copy)?;
+            a.movq(mm0, qword_ptr(esi))?;
+            a.movq(mm1, qword_ptr(esi + 8))?;
+            a.movq(qword_ptr(edi), mm0)?;
+            a.movq(qword_ptr(edi + 8), mm1)?;
+            a.add(esi, 16)?;
+            a.add(edi, 16)?;
+            a.dec(ecx)?;
+            a.jnz(copy)?;
+            a.movups(xmm0, xmmword_ptr(DATA + 0x40))?;
+            a.movups(xmmword_ptr(LFB + 0x8004), xmm0)?;
+            a.movaps(xmmword_ptr(LFB + 0x8010), xmm0)?;
+            a.movlps(qword_ptr(LFB + 0x8020), xmm0)?;
+            a.movhps(qword_ptr(LFB + 0x8028), xmm0)?;
+            a.movq(qword_ptr(LFB + 0x8FFC), mm1)?;
+            a.movups(xmmword_ptr(LFB + 0x3F_FFF8), xmm0)?;
+            a.emms()?;
+            a.hlt()
+        }));
+    });
+    let stats = run_both(&mut a, &mut b);
+    assert_eq!(b.cpu.bus.vbe.vram[0x1000..0x1004], [0, 0, 0, 0]);
+    assert_eq!(b.cpu.bus.vbe.vram[0x1004..0x1008], 0x0103_0507u32.to_le_bytes());
+    assert_eq!(b.cpu.bus.vbe.vram[0x8010..0x8014], 0x0103_0507u32.wrapping_mul(16).to_le_bytes());
+    assert!(a.cpu.bus.vbe.vram == b.cpu.bus.vbe.vram, "the frame buffers differ");
+    let shown = |rig: &Rig| {
+        let v = &rig.cpu.bus.vga;
+        (v.dirty, v.dirty_y_min, v.dirty_y_max, rig.cpu.bus.activity.video_bytes)
+    };
+    assert_eq!(shown(&a), shown(&b));
+    if AVAILABLE {
+        assert_eq!(untranslated(&stats), 0, "{:?}", stats);
+    }
+    assert_handled_only(&b, &[(iced_x86::Mnemonic::Movq, 1), (iced_x86::Mnemonic::Movups, 1)]);
+}
+
+#[test]
 fn video_memory_is_written_and_read_by_its_physical_address() {
     let (_, b) = video_memory_program(false);
     assert!(b.cpu.bus.vga.vram_graphics.iter().any(|&p| p != 0));
@@ -4810,7 +4871,9 @@ fn sse_misaligned_operands_fault_as_the_handlers_fault() {
 }
 
 #[test]
-fn sse_stores_to_video_memory_and_code_pages_go_through_the_handlers() {
+fn sse_stores_to_video_memory_and_code_pages_are_the_handlers() {
+    // Video memory through `jit_dev_write`, the code's block through the
+    // handlers.
     let b = sse_fault_loop(
         UD,
         |rig| {

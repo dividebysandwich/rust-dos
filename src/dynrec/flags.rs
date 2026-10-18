@@ -77,7 +77,7 @@ impl Uop {
             | Uop::FLoadInt64 { .. }
             | Uop::SimdGuard { .. }
             | Uop::BailMisaligned { .. }
-            | Uop::BailUnlessPlain { .. }
+            | Uop::BailUnlessStorable { .. }
             | Uop::VFloat { .. } => ARITH,
             Uop::MemRef { .. }
             | Uop::LoadSeg { .. }

@@ -533,10 +533,12 @@ pub enum Uop {
     /// offset t isn't a multiple of 16 (#GP(0)). Nothing before it may
     /// change anything.
     BailMisaligned { t: T, seg: Seg },
-    /// As `BailUnlessRam`, and also where handle t is in a block of RAM
-    /// that holds code (`Bus::code_blocks`): an operand of 8 or 16 bytes
-    /// the code may then store itself (`VStore`).
-    BailUnlessPlain { t: T },
+    /// The handler runs the instruction instead unless handle t is one
+    /// `VStore` takes: RAM of a block without code (not one in
+    /// `Bus::code_blocks`), or an operand within one page that isn't
+    /// plain RAM (`DEV_BIT`), such as the linear frame buffer. Nothing
+    /// before it may change anything.
+    BailUnlessStorable { t: T },
     /// x = the source, zero-extended to 128 bits.
     VLoad { x: X, src: VSrc },
     /// a = a OP b.
@@ -553,8 +555,10 @@ pub enum Uop {
     /// The register = x: all of it for XMMn; for MMn, the low quadword, as
     /// `mmx::set_mm` sets it.
     VSet { dst: Vr, x: X },
-    /// Store x's low `size` bytes (8 or 16) at handle m, which is RAM's
-    /// without code (`BailUnlessPlain`).
+    /// Store x's low `size` bytes (8 or 16) at handle m, which
+    /// `BailUnlessStorable` let through: into RAM as they are, or with
+    /// `DEV_BIT` a dword at a time from the lowest, as the handlers write
+    /// them (`Cpu::lin_write_32` each), through `jit_dev_write`.
     VStore { m: T, x: X, size: u8 },
     /// What every MMX instruction but EMMS does to the FPU: the stack top
     /// 0, all registers valid (`mmx::enter_mmx`).

@@ -737,6 +737,9 @@ enum Slow {
     /// plain RAM, or one into a block of RAM with code (`Bus::code_blocks`),
     /// its generations bumped and a store into the rest of the block noted.
     Store { at: DynamicLabel, back: DynamicLabel, m: T, src: T, thunk: Thunk, lo: u32, hi: u32 },
+    /// `Uop::VStore` of XMM`x`'s low `size` bytes at a handle with
+    /// `DEV_BIT`: through `Thunk::Store4` a dword at a time, as `Store`.
+    VStore { at: DynamicLabel, back: DynamicLabel, m: T, x: u8, size: u8, lo: u32, hi: u32 },
     /// An instruction's fault with an exit code of its own (#GP(0), #DE).
     Fault { at: DynamicLabel, code: u32, fail: DynamicLabel },
     /// A store hit the rest of the block: it leaves after the instruction,
@@ -1077,7 +1080,7 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
                         ; go_on:
                     );
                 }
-                if uops.iter().any(|u| matches!(u, Uop::Store { .. })) {
+                if uops.iter().any(|u| matches!(u, Uop::Store { .. } | Uop::VStore { .. })) {
                     // A store hit the rest of the block: leave after this
                     // instruction.
                     let at = g.ops.new_dynamic_label();
@@ -1509,6 +1512,35 @@ impl Gen<'_> {
                 Slow::Store { at, back, m, src, thunk, lo, hi } => {
                     dynasm!(self.ops ; .arch x64 ; =>at);
                     self.thunk_store(thunk, m, src, lo, hi, back);
+                }
+                Slow::VStore { at, back, m, x, size, lo, hi } => {
+                    // The calls into Rust don't keep the XMM registers, so
+                    // the bytes go on the stack first (16 keeps it aligned).
+                    dynasm!(self.ops
+                        ; .arch x64
+                        ; =>at
+                        ; sub rsp, 16
+                        ; movups [rsp], Rx(x)
+                    );
+                    for i in 0..size as i32 / 4 {
+                        if lo == 0 && hi == 0 {
+                            dynasm!(self.ops ; .arch x64 ; xor eax, eax);
+                        } else {
+                            let rest = (lo as u64 | (hi as u64) << 32) as i64;
+                            dynasm!(self.ops ; .arch x64 ; mov rax, QWORD rest);
+                        }
+                        dynasm!(self.ops
+                            ; .arch x64
+                            ; lea rdx, [Rq(r(m)) + 4 * i]
+                            ; mov ecx, DWORD [rsp + 4 * i]
+                            ; call QWORD [BYTE r12 + Thunk::Store4.slot()]
+                        );
+                    }
+                    dynasm!(self.ops
+                        ; .arch x64
+                        ; add rsp, 16
+                        ; jmp =>back
+                    );
                 }
             }
         }
@@ -2347,17 +2379,24 @@ impl Gen<'_> {
                 );
                 self.bail(at, false);
             }
-            Uop::BailUnlessPlain { t } => {
+            Uop::BailUnlessStorable { t } => {
                 let at = self.ops.new_dynamic_label();
                 let t_ = r(t);
+                // (`SLOW`'s handles, which an operand across a page gets,
+                // don't have `DEV_BIT`.)
                 dynasm!(self.ops
                     ; .arch x64
                     ; cmp Rq(t_), RAM_HANDLES
-                    ; ja =>at
+                    ; ja >dev
                     ; mov ecx, Rd(t_)
                     ; shr ecx, crate::bus::GEN_SHIFT as i8
                     ; cmp BYTE [r14 + rcx], 0
                     ; jne =>at
+                    ; jmp >ok
+                    ; dev:
+                    ; bt Rq(t_), DEV_BIT as i8
+                    ; jnc =>at
+                    ; ok:
                 );
                 self.bail(at, false);
             }
@@ -2379,12 +2418,17 @@ impl Gen<'_> {
             }
             Uop::VSet { dst, x } => self.vset(dst, x.0),
             Uop::VStore { m, x, size } => {
-                let (m, x) = (r(m), x.0);
+                let (at, back) = (self.ops.new_dynamic_label(), self.ops.new_dynamic_label());
+                let (m_, x) = (r(m), x.0);
+                dynasm!(self.ops ; .arch x64 ; cmp Rq(m_), RAM_HANDLES ; ja =>at);
                 if size == 8 {
-                    dynasm!(self.ops ; .arch x64 ; movq QWORD [r13 + Rq(m)], Rx(x));
+                    dynasm!(self.ops ; .arch x64 ; movq QWORD [r13 + Rq(m_)], Rx(x));
                 } else {
-                    dynasm!(self.ops ; .arch x64 ; movups [r13 + Rq(m)], Rx(x));
+                    dynasm!(self.ops ; .arch x64 ; movups [r13 + Rq(m_)], Rx(x));
                 }
+                dynasm!(self.ops ; .arch x64 ; =>back);
+                let (lo, hi) = self.rest();
+                self.slow.push(Slow::VStore { at, back, m, x, size, lo, hi });
             }
             Uop::EnterMmx => {
                 // (FPU_TAG_VALID is 0.)
