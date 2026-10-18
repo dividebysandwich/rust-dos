@@ -291,6 +291,15 @@ impl Bus {
         self.banshee_settle();
     }
 
+    /// Put back the registers a video BIOS service changed (`mode_regs`),
+    /// and the display they make with the VGA's.
+    pub(crate) fn banshee_restore_mode_regs(&mut self, regs: &banshee::ModeRegs) {
+        if let Some(b) = self.banshee_mut() {
+            b.restore_mode_regs(regs);
+            self.banshee_settle();
+        }
+    }
+
     /// The BIOS set a VGA or VESA mode: the card's own modes end.
     pub(crate) fn banshee_mode_set(&mut self) {
         if let Some(b) = self.banshee_mut() {
@@ -327,5 +336,28 @@ mod tests {
         bus.voodoo_write_8(0x1_00D5, 0x04);
         assert_eq!(bus.banshee_crtc_read(0x1A), 0x04);
         assert_eq!(bus.voodoo_read_16(0xD4), 0x041A);
+    }
+
+    #[test]
+    fn a_service_for_a_dos_box_in_a_window_keeps_the_desktop() {
+        use crate::video::echo::Display;
+        use crate::voodoo::banshee::{VGA_INIT0, VID_PROC_CFG};
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.bus.configure_voodoo(Some(Board::Voodoo3));
+        let bus = &mut cpu.bus;
+        bus.voodoo_write_32(VGA_INIT0, 0x0000_1140);
+        bus.voodoo_write_32(VID_PROC_CFG, 0x0904_0081);
+        bus.banshee_crtc_write(0x1A, 0x40);
+        assert!(bus.banshee().unwrap().extended());
+        // A mode set for a DOS box whose ports Windows traps works on the
+        // card, which is then put back as it was.
+        let display = Display::of(bus);
+        bus.banshee_mode_set();
+        assert!(!bus.banshee().unwrap().extended());
+        display.restore(bus);
+        let b = bus.banshee().unwrap();
+        assert!(b.extended());
+        assert_eq!(b.reg(VID_PROC_CFG), 0x0904_0081);
+        assert_eq!(bus.banshee_crtc_read(0x1A), 0x40);
     }
 }

@@ -214,6 +214,15 @@ crate::state_fields!(Agp {
     move_cmd
 });
 
+/// The registers of the card's that a mode set of the BIOS changes:
+/// vgaInit0, vidProcCfg and the CRTC's.
+#[derive(Clone)]
+pub struct ModeRegs {
+    vga_init0: u32,
+    vid_proc_cfg: u32,
+    crtc: [u8; 0x40],
+}
+
 /// The card's own state, beside the 3D engine's (`Voodoo`).
 #[derive(Clone, Debug)]
 pub struct Banshee {
@@ -567,6 +576,25 @@ impl Banshee {
         self.set_reg(VID_PROC_CFG, cfg);
         self.crtc[0x1A] = 0;
         self.crtc[0x1B] = 0;
+        self.dirty = true;
+    }
+
+    /// The registers a mode set of the BIOS changes (`bios_mode_set`), to
+    /// put back after a video BIOS service for a DOS box whose display
+    /// Windows keeps.
+    pub fn mode_regs(&self) -> ModeRegs {
+        ModeRegs {
+            vga_init0: self.reg(VGA_INIT0),
+            vid_proc_cfg: self.reg(VID_PROC_CFG),
+            crtc: self.crtc,
+        }
+    }
+
+    /// Put back what `mode_regs` saved.
+    pub fn restore_mode_regs(&mut self, regs: &ModeRegs) {
+        self.set_reg(VGA_INIT0, regs.vga_init0);
+        self.set_reg(VID_PROC_CFG, regs.vid_proc_cfg);
+        self.crtc = regs.crtc;
         self.dirty = true;
     }
 

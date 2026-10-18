@@ -90,11 +90,12 @@ impl Registers {
     }
 }
 
-/// All of the display but its memory: the VGA's registers, the S3's, the
-/// VESA mode and what the screen shows. A video BIOS service for a DOS box
-/// whose video ports Windows traps (one in a window) leaves the card as it
-/// was: Windows keeps that machine's display itself, from the port writes
-/// the service makes (`writes`).
+/// All of the display but its memory: the VGA's registers, the S3's, a
+/// Voodoo3's or Banshee's mode registers, the VESA mode and what the
+/// screen shows. A video BIOS service for a DOS box whose video ports
+/// Windows traps (one in a window) leaves the card as it was: Windows
+/// keeps that machine's display itself, from the port writes the service
+/// makes (`writes`).
 pub struct Display {
     registers: Registers,
     attribute_index: u8,
@@ -104,6 +105,7 @@ pub struct Display {
     latched_start_addr: usize,
     fixed_timing: Option<super::crt::CrtTiming>,
     s3: super::s3::S3,
+    banshee: Option<crate::voodoo::banshee::ModeRegs>,
     vbe: (Option<super::vbe::VbeMode>, Option<u32>, bool, u32, u32, u32, u32, u8),
     video_mode: super::VideoMode,
 }
@@ -120,6 +122,7 @@ impl Display {
             latched_start_addr: vga.latched_start_addr,
             fixed_timing: vga.fixed_timing(),
             s3: vga.s3.clone(),
+            banshee: bus.banshee().map(|b| b.mode_regs()),
             vbe: (vbe.mode, vbe.lfb_base, vbe.lfb, vbe.bank, vbe.pitch, vbe.start, vbe.latched_start, vbe.start_high),
             video_mode: bus.video_mode,
         }
@@ -139,6 +142,11 @@ impl Display {
         let vbe = &mut bus.vbe;
         (vbe.mode, vbe.lfb_base, vbe.lfb, vbe.bank, vbe.pitch, vbe.start, vbe.latched_start, vbe.start_high) = self.vbe;
         bus.video_mode = self.video_mode;
+        // A Voodoo3's or Banshee's desktop stays on, with the timing its
+        // registers and the VGA's make.
+        if let Some(regs) = &self.banshee {
+            bus.banshee_restore_mode_regs(regs);
+        }
     }
 }
 
