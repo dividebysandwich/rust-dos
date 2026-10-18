@@ -410,3 +410,32 @@ fn fadd_fsub_of_infinities_and_nans() {
         assert_eq!(cpu.get_fpu_flag(FpuFlags::IE), ie, "{what}: IE");
     }
 }
+
+#[test]
+fn fprem_quotient_bits_are_the_magnitudes_and_fprem1_ties_to_even() {
+    // (ST(0), ST(1), FPREM (D9 F8) or FPREM1 (D9 F5), remainder, quotient)
+    let cases = [
+        (-5.0, 4.0, [0xD9, 0xF8], -1.0, 1),
+        (5.0, -4.0, [0xD9, 0xF8], 1.0, 1),
+        (-14.0, 4.0, [0xD9, 0xF8], -2.0, 3),
+        (5.0, 2.0, [0xD9, 0xF5], 1.0, 2),
+        (7.0, 2.0, [0xD9, 0xF5], -1.0, 4),
+        (-7.0, 2.0, [0xD9, 0xF5], 1.0, 4),
+        (-5.0, 4.0, [0xD9, 0xF5], -1.0, 1),
+        (23.0, 3.0, [0xD9, 0xF5], -1.0, 0),
+    ];
+    for (st0, st1, code, rem, q) in cases {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        for v in [st1, st0] {
+            let mut f = F80::new();
+            f.set_f64(v);
+            cpu.fpu_push(f);
+        }
+        testrunners::run_fpu_code(&mut cpu, &code);
+        let what = format!("{st0} {code:02X?} {st1}");
+        assert_eq!(cpu.fpu_get(0).get_f64(), rem, "{what}");
+        let bits = [FpuFlags::C0, FpuFlags::C3, FpuFlags::C1].map(|f| cpu.get_fpu_flag(f) as u32);
+        assert_eq!(bits[0] << 2 | bits[1] << 1 | bits[2], q, "{what}: quotient bits");
+        assert!(!cpu.get_fpu_flag(FpuFlags::C2), "{what}: complete");
+    }
+}

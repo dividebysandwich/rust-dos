@@ -365,30 +365,17 @@ pub fn fprem_internal(cpu: &mut Cpu, ieee: bool) {
     // we perform a "complete" reduction immediately using the underlying f64 remainder.
     // This is compliant as long as we clear C2 (indicating completion).
 
-    let (remainder, q_bits) = if ieee {
-        // FPREM1: Round to nearest
-        let quotient = st0 / st1;
-        let q_rnd = quotient.round();
-        let rem = st0 - q_rnd * st1;
-        (rem, q_rnd as i64)
-    } else {
-        // FPREM: Round toward zero (Truncate)
-        // Use f64 standard remainder (%) which is truncating
-        let rem = st0 % st1;
-
-        // Calculate quotient bits (Q2, Q1, Q0) without full quotient overflow
-        // Q = trunc(ST0 / ST1). We need Q % 8.
-        // Q % 8 = trunc( (ST0 % (8 * ST1)) / ST1 )
-        let st0_abs = st0.abs();
-        let st1_abs = st1.abs();
-        let st0_mod8 = st0_abs % (8.0 * st1_abs);
-        let q_mod8 = (st0_mod8 / st1_abs).trunc() as i64;
-
-        let sign_diff = st0.is_sign_negative() ^ st1.is_sign_negative();
-        let q_final = if sign_diff { -q_mod8 } else { q_mod8 };
-
-        (rem, q_final)
-    };
+    // From the magnitudes, as the FPU does: `%` is exact, and so is the
+    // quotient's low bits from it; FPREM1 then rounds the quotient to
+    // nearest, even on a tie. The remainder has ST(0)'s sign.
+    let (a, b) = (st0.abs(), st1.abs());
+    let mut rem = a % b;
+    let mut q_bits = ((a % (8.0 * b) - rem) / b).round() as i64;
+    if ieee && (2.0 * rem > b || (2.0 * rem == b && q_bits & 1 != 0)) {
+        rem -= b;
+        q_bits += 1;
+    }
+    let remainder = if st0.is_sign_negative() { -rem } else { rem };
 
     let mut res = F80::new();
     res.set_f64(remainder);
