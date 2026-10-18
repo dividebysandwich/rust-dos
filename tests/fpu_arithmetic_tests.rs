@@ -439,3 +439,41 @@ fn fprem_quotient_bits_are_the_magnitudes_and_fprem1_ties_to_even() {
         assert!(!cpu.get_fpu_flag(FpuFlags::C2), "{what}: complete");
     }
 }
+
+#[test]
+fn fyl2x_of_zero_and_negative_values() {
+    // (y, x, the result's 80 bits, ZE, IE)
+    let indefinite = 0xFFFF_C000_0000_0000_0000u128;
+    let ninf = 0xFFFF_8000_0000_0000_0000u128;
+    let inf = 0x7FFF_8000_0000_0000_0000u128;
+    let cases = [
+        (2.0, 0.0, ninf, true, false),
+        (-2.0, -0.0, inf, true, false),
+        (0.0, 0.0, indefinite, false, true),
+        (2.0, -1.0, indefinite, false, true),
+        (f64::INFINITY, 1.0, indefinite, false, true),
+    ];
+    for (y, x, result, ze, ie) in cases {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        for v in [y, x] {
+            let mut f = F80::new();
+            f.set_f64(v);
+            cpu.fpu_push(f);
+        }
+        testrunners::run_fpu_code(&mut cpu, &[0xD9, 0xF1]);
+        assert_eq!(cpu.fpu_get(0).get(), result, "{y} * log2({x})");
+        assert_eq!(cpu.get_fpu_flag(FpuFlags::ZE), ze, "{y} * log2({x}): ZE");
+        assert_eq!(cpu.get_fpu_flag(FpuFlags::IE), ie, "{y} * log2({x}): IE");
+    }
+
+    // FYL2XP1 (D9 F9) keeps a tiny x: 1 * log2(1 + 2^-60).
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    for v in [1.0, 2f64.powi(-60)] {
+        let mut f = F80::new();
+        f.set_f64(v);
+        cpu.fpu_push(f);
+    }
+    testrunners::run_fpu_code(&mut cpu, &[0xD9, 0xF9]);
+    let r = cpu.fpu_get(0).get_f64();
+    assert!((r / (2f64.powi(-60) * std::f64::consts::LOG2_E) - 1.0).abs() < 1e-12, "{r}");
+}

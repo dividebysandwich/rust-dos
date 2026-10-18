@@ -557,13 +557,28 @@ pub fn f2xm1(cpu: &mut Cpu) {
 
 // FYL2X: y * log2(x)
 // ST(1) = ST(1) * log2(ST(0)); Pop ST(0)
+/// A NaN goes through (x's first); x < 0, 0 * infinity and infinity * 0
+/// are invalid, the real indefinite with IE; x = ±0 with y not 0 is the
+/// infinity of y's other sign, with ZE.
 pub fn fyl2x(cpu: &mut Cpu) {
-    let x = cpu.fpu_get(0).get_f64();
-    let mut y = cpu.fpu_get(1);
-    if x > 0.0 {
-        y.set_f64(y.get_f64() * x.log2());
+    let (x80, mut y) = (cpu.fpu_get(0), cpu.fpu_get(1));
+    let (x, yf) = (x80.get_f64(), y.get_f64());
+    if x80.is_nan() {
+        y = x80;
+        y.set(y.get() | 1 << 62);
+    } else if y.is_nan() {
+        y.set(y.get() | 1 << 62);
     } else {
-        y.set_QNaN();
+        let result = yf * x.log2();
+        if x < 0.0 || result.is_nan() {
+            y.set_real_indefinite();
+            cpu.set_fpu_flag(FpuFlags::IE, true);
+        } else {
+            if x == 0.0 {
+                cpu.set_fpu_flag(FpuFlags::ZE, true);
+            }
+            y.set_f64(result);
+        }
     }
     cpu.fpu_set(1, y);
     cpu.fpu_pop();
@@ -573,7 +588,8 @@ pub fn fyl2x(cpu: &mut Cpu) {
 pub fn fyl2xp1(cpu: &mut Cpu) {
     let x = cpu.fpu_get(0).get_f64();
     let mut y = cpu.fpu_get(1);
-    y.set_f64(y.get_f64() * (x + 1.0).log2());
+    // (ln_1p keeps the small x the instruction is for.)
+    y.set_f64(y.get_f64() * x.ln_1p() * std::f64::consts::LOG2_E);
     cpu.fpu_set(1, y);
     cpu.fpu_pop();
 }
