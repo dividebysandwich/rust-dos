@@ -2916,6 +2916,71 @@ fn a_store_into_the_next_pages_bytes_of_an_instruction_is_seen() {
 }
 
 #[test]
+fn an_instruction_into_a_next_page_made_not_present_faults_on_it() {
+    // A loop whose ADD runs on from 30FFDh into page 31000h, mapped to
+    // 35000h. After 500 times around, the loop marks 31000h not present
+    // (in the ADD's block, before it): the ADD's fetch then faults, with
+    // CR2 on the next page, EIP on the ADD, and EBX as the 500th ADD left
+    // it.
+    let (dir, table) = (0x80000u32, 0x81000u32);
+    let pte = table + 0x31 * 4;
+    let before = |a: &mut CodeAssembler| {
+        let mut on = a.create_label();
+        a.cmp(ecx, 500u32)?;
+        a.jne(on)?;
+        a.mov(dword_ptr(pte as u64), 0u32)?;
+        a.invlpg(ptr(0x31000u64))?;
+        a.set_label(&mut on)?;
+        a.inc(edx)
+    };
+    let top = 0x30FFD - asm32(0x30F00, before).len() as u32;
+    let (mut a, mut b) = twins(|rig| {
+        rig.write32(dir, table | 3);
+        for i in 0..1024u32 {
+            rig.write32(table + 4 * i, (i << 12) | 3);
+        }
+        rig.write32(pte, 0x35000 | 3);
+        rig.record(PF);
+        let body = asm32(top, |a| {
+            before(a)?;
+            a.add(ebx, 0x0403_0201u32)?;
+            a.dec(ecx)?;
+            a.jmp(top as u64)
+        });
+        let add = (0x30FFD - top) as usize;
+        assert_eq!(&body[add..add + 3], &[0x81, 0xC3, 0x01]);
+        rig.load(top, &body[..add + 3]);
+        rig.load(0x35000, &body[add + 3..]);
+        rig.load(
+            CODE,
+            &asm32(CODE, |a| {
+                a.mov(eax, dir)?;
+                a.mov(cr3, eax)?;
+                a.mov(eax, cr0)?;
+                a.or(eax, 0x8000_0000u32)?;
+                a.mov(cr0, eax)?;
+                a.mov(ecx, 1000u32)?;
+                a.jmp(top as u64)
+            }),
+        );
+    });
+    run_both(&mut a, &mut b);
+    let (vector, stack) = b.recorded();
+    // A fetch at level 0 from a page not present: error code 0.
+    assert_eq!((vector, stack[0], stack[1]), (PF as u32, 0, 0x30FFD));
+    assert_eq!(b.cpu.cr2, 0x31000);
+    assert_eq!(b.cpu.edx(), 501);
+    assert_eq!(b.cpu.ebx(), 0x0403_0201u32.wrapping_mul(500));
+    if TAIL_STARTS {
+        let interpreted = b.cpu.executed - b.cpu.dynrec.counts().executed;
+        assert!(
+            interpreted < 100,
+            "the interpreter ran {interpreted} instructions"
+        );
+    }
+}
+
+#[test]
 fn a_segment_load_that_changes_which_segments_are_flat_goes_on_in_its_block() {
     let (mut a, mut b) = twins(|rig| {
         // DS for 64 KB at 40000h: not flat.
