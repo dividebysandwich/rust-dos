@@ -1415,6 +1415,19 @@ impl Cpu {
         self.fpu_stack.set(actual_idx, val);
     }
 
+    /// Whether ST(i)'s tag is empty.
+    pub fn fpu_is_empty(&self, index: usize) -> bool {
+        self.fpu_tags[(self.fpu_top + index) & 7] == FPU_TAG_EMPTY
+    }
+
+    /// Set ST(i) and mark it valid, as FST ST(i) and FXCH do to a
+    /// register that may be empty.
+    pub fn fpu_set_valid(&mut self, index: usize, val: F80) {
+        let actual_idx = (self.fpu_top + index) & 7;
+        self.fpu_stack.set(actual_idx, val);
+        self.fpu_tags[actual_idx] = FPU_TAG_VALID;
+    }
+
     /// Set ST(i) to a double: `fpu_set` of an `F80` set to it.
     pub fn fpu_set_f64(&mut self, index: usize, val: f64) {
         let actual_idx = (self.fpu_top + index) & 7;

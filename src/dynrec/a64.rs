@@ -2175,7 +2175,10 @@ impl Gen<'_> {
                 self.field(Access::Ldr64, 0, layout::fpu::TOP);
                 dynasm!(self.ops ; .arch aarch64 ; add w1, w0, src as u32 ; and w1, w1, 7);
                 match dst {
-                    Some(dst) => dynasm!(self.ops ; .arch aarch64 ; add w3, w0, dst as u32 ; and w3, w3, 7),
+                    Some(dst) => {
+                        dynasm!(self.ops ; .arch aarch64 ; add w3, w0, dst as u32 ; and w3, w3, 7);
+                        self.fpu_tag(3, FPU_VALID);
+                    }
                     None => {
                         self.fpu_known = self.fpu_known << 1 | 1;
                         dynasm!(self.ops ; .arch aarch64 ; sub w3, w0, 1 ; and w3, w3, 7);

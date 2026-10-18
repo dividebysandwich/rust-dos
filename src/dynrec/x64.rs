@@ -2167,7 +2167,12 @@ impl Gen<'_> {
                     self.fpu_known = self.fpu_known << 1 | 1;
                 }
                 match dst {
-                    Some(dst) => dynasm!(self.ops ; .arch x64 ; lea edx, [rax + dst as i32] ; and edx, 7),
+                    Some(dst) => dynasm!(self.ops
+                        ; .arch x64
+                        ; lea edx, [rax + dst as i32]
+                        ; and edx, 7
+                        ; mov BYTE [rbx + rdx + FPU_TAGS], FPU_VALID
+                    ),
                     None => dynasm!(self.ops
                         ; .arch x64
                         ; lea edx, [rax - 1]

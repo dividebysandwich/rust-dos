@@ -245,7 +245,7 @@ pub fn fstp(cpu: &mut Cpu, instr: &Instruction) {
         // Store ST(0) to ST(i), THEN pop.
         let val = cpu.fpu_get(0);
         let idx = instr.op0_register().number() - Register::ST0.number();
-        cpu.fpu_set(idx, val);
+        cpu.fpu_set_valid(idx, val);
         cpu.fpu_pop();
     }
 }
@@ -300,7 +300,7 @@ pub fn fst(cpu: &mut Cpu, instr: &Instruction) {
     } else if instr.op0_kind() == OpKind::Register {
         // FST ST(i)
         let idx = instr.op0_register().number() - Register::ST0.number();
-        cpu.fpu_set(idx, st0);
+        cpu.fpu_set_valid(idx, st0);
     }
 }
 
@@ -323,7 +323,14 @@ pub fn fxch(cpu: &mut Cpu, instr: &Instruction) {
         return;
     }
 
-    if cpu.fpu_fast {
+    // An empty register reads as the real indefinite (a masked stack
+    // underflow, IE), and both come out valid.
+    if cpu.fpu_is_empty(0) || cpu.fpu_is_empty(idx) {
+        let (st0, sti) = (cpu.fpu_get(0), cpu.fpu_get(idx));
+        cpu.fpu_set_valid(0, sti);
+        cpu.fpu_set_valid(idx, st0);
+        cpu.set_fpu_flag(FpuFlags::IE | FpuFlags::SF, true);
+    } else if cpu.fpu_fast {
         // Only the doubles: the 80 bits become theirs.
         let st0 = cpu.fpu_get_f64(0);
         let sti = cpu.fpu_get_f64(idx);

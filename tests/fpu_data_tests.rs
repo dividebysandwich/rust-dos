@@ -506,3 +506,32 @@ fn infinity_has_the_integer_bit() {
         assert!(back.is_nan() == value.is_nan() && (value.is_nan() || back == value), "{value}: {back}");
     }
 }
+
+#[test]
+fn fst_sti_and_fxch_make_their_registers_valid() {
+    let push = |cpu: &mut Cpu, v: f64| {
+        let mut f = F80::new();
+        f.set_f64(v);
+        cpu.fpu_push(f);
+    };
+    // FST ST(2) (DD D2), FSTP ST(2) (DD DA) and its alias DF D2, from 3.0
+    // into an empty ST(2).
+    for (code, pops) in [([0xDD, 0xD2], 0), ([0xDD, 0xDA], 1), ([0xDF, 0xD2], 1)] {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        push(&mut cpu, 3.0);
+        testrunners::run_fpu_code(&mut cpu, &code);
+        assert_eq!(cpu.fpu_get(2 - pops).get_f64(), 3.0, "{code:02X?}");
+    }
+
+    // FXCH ST(1) with ST(1) empty: ST(0) the indefinite, ST(1) the value,
+    // both valid, IE and SF.
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    push(&mut cpu, 3.0);
+    testrunners::run_fpu_code(&mut cpu, &[0xD9, 0xC9]);
+    assert_eq!(cpu.fpu_get(0).get(), 0xFFFF_C000_0000_0000_0000);
+    assert_eq!(cpu.fpu_get(1).get_f64(), 3.0);
+    let physical = |i: usize| (cpu.fpu_top + i) & 7;
+    assert_ne!(cpu.fpu_tags[physical(0)], FPU_TAG_EMPTY);
+    assert_ne!(cpu.fpu_tags[physical(1)], FPU_TAG_EMPTY);
+    assert!(cpu.get_fpu_flag(rust_dos::cpu::FpuFlags::IE | rust_dos::cpu::FpuFlags::SF));
+}

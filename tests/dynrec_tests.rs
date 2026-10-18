@@ -3497,6 +3497,22 @@ fn fpu_loads_stores_and_products_run_as_their_handlers() {
 }
 
 #[test]
+fn fpu_stores_into_empty_registers_make_them_valid_on_both_cores() {
+    let (_, b, _) = fpu_loop(|a| {
+        a.fld(dword_ptr(esi))?;
+        // FST ST(2) and FSTP ST(1) into empty registers, then both read.
+        a.fst(st2)?;
+        a.fstp(st1)?;
+        a.fadd_2(st0, st1)?;
+        a.fstp(dword_ptr(edi))?;
+        a.fstp(dword_ptr(edi + 4))?;
+        a.fnstsw(ax)?;
+        a.add(ebx, eax)
+    });
+    assert_ne!(b.read32(DATA + 0x10000 + 4), 0xFFC0_0000);
+}
+
+#[test]
 fn fpu_quotients_sums_and_comparisons_run_as_their_handlers() {
     let (_, b, _) = fpu_loop(|a| {
         a.fnclex()?;
