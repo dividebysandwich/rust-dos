@@ -4353,7 +4353,8 @@ fn mmx_and_sse_stores_into_the_linear_frame_buffer_are_translated() {
         )
     };
     assert_eq!(shown(&a), shown(&b));
-    if AVAILABLE {
+    // (ARM64's code generator doesn't translate them.)
+    if AVAILABLE && cfg!(target_arch = "x86_64") {
         assert_eq!(untranslated(&stats), 0, "{:?}", stats);
     }
     assert_handled_only(
