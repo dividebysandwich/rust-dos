@@ -31,7 +31,12 @@
 //! **Where loops come from.** A head is armed at the service trap where the
 //! BIOS keyboard's status call found no key many times in a row, and where
 //! two timer events in a row found the CPU at the same instruction with the
-//! same registers (a tight loop). Failed proofs make the next tries rarer.
+//! same flags and registers but for one (a loop, whose register may be a
+//! time read that the event between moved on). A head whose passes were
+//! skipped is armed again at the next event, as its loop usually goes on
+//! after it, and whenever an event finds the CPU there later, as a game
+//! comes back to its frame limiter every frame. Failed proofs at a head
+//! make the next tries at it rarer.
 
 use std::cell::Cell;
 
@@ -50,6 +55,11 @@ const VISITS: usize = 64;
 const CHUNKS: usize = 256;
 /// Keyboard status calls finding no key at one place before it is armed.
 const POLLS: u32 = 8;
+/// Heads whose failed proofs are remembered, to arm them less often.
+const BACKOFF_HEADS: usize = 8;
+/// Heads whose passes were skipped that are remembered, to arm them when
+/// an event finds the CPU there.
+const KNOWN_HEADS: usize = 16;
 /// Reads of the VGA's status in a row before the loop is armed.
 const STATUS_POLLS: u32 = 64;
 /// Bytes of RAM a pass may change and still be skipped, as counters (see
@@ -213,6 +223,33 @@ pub struct IdleStats {
     pub skipped: u64,
     /// Why the last proof failed.
     pub failure: &'static str,
+    /// Heads armed, chances to arm one let pass after failed proofs,
+    /// proofs started at one, and proofs a timer event or an interrupt
+    /// ended before they came to anything.
+    pub arms: u64,
+    pub backed_off: u64,
+    pub starts: u64,
+    pub cut: u64,
+    /// The failures by why, in the order the reasons first came up (an
+    /// empty one is a free slot).
+    pub failed_by: [(&'static str, u64); 16],
+    /// The same counts by head, for the first heads armed.
+    pub heads: [HeadStats; 16],
+}
+
+/// `IdleStats` of one head: its CS:EIP and mode, and the last reason a
+/// proof at it failed. A free slot has no arms.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HeadStats {
+    pub cs: u16,
+    pub eip: u32,
+    pub pe: bool,
+    pub arms: u64,
+    pub starts: u64,
+    pub proofs: u64,
+    pub failures: u64,
+    pub cut: u64,
+    pub failure: &'static str,
 }
 
 /// The prover's state. It is the bus's, whose memory and port accesses
@@ -235,6 +272,11 @@ pub struct Observe {
     /// Where the CPU was at the last timer event, with its general
     /// registers and flags.
     last_event: Option<(Head, [u32; 8], u32)>,
+    /// The head whose passes were skipped up to the next event.
+    proven: Option<Head>,
+    /// The last `KNOWN_HEADS` heads whose passes were skipped, oldest
+    /// first.
+    known: Vec<Head>,
     /// The port the instruction about to run may read: an IN AL of a port
     /// `Bus::idle_port` knows.
     port_ok: Option<u16>,
@@ -252,10 +294,18 @@ pub struct Observe {
     al_read: u64,
     /// Reads of the VGA's status port in a row, which arm the loop.
     polls: u32,
-    /// Chances to arm a head to let pass, after failed proofs.
-    backoff: u32,
-    failures_in_row: u32,
+    /// The heads whose last proofs failed, the most recent `BACKOFF_HEADS`.
+    backoffs: Vec<Backoff>,
     pub stats: IdleStats,
+}
+
+/// Chances to arm `head` to let pass (`left`), after `in_row` failed proofs
+/// at it in a row. Each head has its own, so a loop that fails (as the
+/// BIOS's at boot) doesn't keep the detector from another one.
+struct Backoff {
+    head: Head,
+    left: u32,
+    in_row: u32,
 }
 
 impl Default for Observe {
@@ -269,6 +319,8 @@ impl Default for Observe {
             phase: Phase::Off,
             poll: (None, 0),
             last_event: None,
+            proven: None,
+            known: Vec::new(),
             port_ok: None,
             ports: Vec::new(),
             first_read: None,
@@ -276,8 +328,7 @@ impl Default for Observe {
             al_port: 0,
             al_read: 0,
             polls: 0,
-            backoff: 0,
-            failures_in_row: 0,
+            backoffs: Vec::new(),
             stats: IdleStats::default(),
         }
     }
@@ -363,10 +414,6 @@ impl Observe {
         if !self.enabled || self.watching() {
             return;
         }
-        if self.backoff > 0 {
-            self.backoff -= 1;
-            return;
-        }
         self.phase = Phase::ArmHere;
     }
 
@@ -391,13 +438,11 @@ impl Observe {
     }
 
     fn arm(&mut self, head: Head, now: u64) {
-        if !self.enabled || self.watching() {
+        if !self.enabled || self.watching() || self.backs_off(head) {
             return;
         }
-        if self.backoff > 0 {
-            self.backoff -= 1;
-            return;
-        }
+        self.stats.arms += 1;
+        self.tally(Some(head), |h| h.arms += 1);
         self.phase = Phase::Armed { head, until: now + ARM_LIMIT };
     }
 
@@ -426,14 +471,95 @@ impl Observe {
         }
     }
 
+    /// The head armed or proven at, if any.
+    fn head(&self) -> Option<Head> {
+        match &self.phase {
+            Phase::Off | Phase::ArmHere => None,
+            Phase::Armed { head, .. }
+            | Phase::Learn { head, .. }
+            | Phase::Verify { head, .. }
+            | Phase::Count { head, .. } => Some(*head),
+        }
+    }
+
+    /// Count something for `head` in `stats.heads`, if it has a slot.
+    fn tally(&mut self, head: Option<Head>, f: impl FnOnce(&mut HeadStats)) {
+        let Some(head) = head else { return };
+        let slot = self
+            .stats
+            .heads
+            .iter_mut()
+            .find(|h| (h.cs, h.eip, h.pe) == (head.cs, head.eip, head.pe) || h.arms == 0);
+        if let Some(h) = slot {
+            (h.cs, h.eip, h.pe) = (head.cs, head.eip, head.pe);
+            f(h);
+        }
+    }
+
+    /// A timer event or an interrupt ended the proof running.
+    fn cut(&mut self) {
+        self.stats.cut += 1;
+        self.tally(self.head(), |h| h.cut += 1);
+        self.stop();
+    }
+
+    /// Whether a chance to arm `head` is let pass, after failed proofs at
+    /// it.
+    fn backs_off(&mut self, head: Head) -> bool {
+        let Some(b) = self.backoffs.iter_mut().find(|b| b.head == head) else {
+            return false;
+        };
+        if b.left == 0 {
+            return false;
+        }
+        b.left -= 1;
+        self.stats.backed_off += 1;
+        true
+    }
+
     fn fail(&mut self, why: &'static str) {
+        let head = self.head();
+        self.tally(head, |h| {
+            h.failures += 1;
+            h.failure = why;
+        });
         self.stop();
         self.stats.failures += 1;
         self.stats.failure = why;
+        if let Some(slot) = self
+            .stats
+            .failed_by
+            .iter_mut()
+            .find(|(w, _)| *w == why || w.is_empty())
+        {
+            *slot = (why, slot.1 + 1);
+        }
         // (A loop that changes something every pass, as DOS 7's keyboard
         // poll counts down, is looked at about once in 64K arms.)
-        self.failures_in_row = (self.failures_in_row + 1).min(16);
-        self.backoff = 1 << self.failures_in_row;
+        let Some(head) = head else { return };
+        let at = match self.backoffs.iter().position(|b| b.head == head) {
+            Some(at) => at,
+            None => {
+                if self.backoffs.len() == BACKOFF_HEADS {
+                    self.backoffs.remove(0);
+                }
+                self.backoffs.push(Backoff {
+                    head,
+                    left: 0,
+                    in_row: 0,
+                });
+                self.backoffs.len() - 1
+            }
+        };
+        let b = &mut self.backoffs[at];
+        b.in_row = (b.in_row + 1).min(16);
+        b.left = 1 << b.in_row;
+    }
+
+    /// A proof at `head` came through: it is armed as often as it comes up
+    /// again.
+    fn succeed(&mut self, head: Option<Head>) {
+        self.backoffs.retain(|b| Some(b.head) != head);
     }
 
     /// The blocks written since the last look, each once.
@@ -497,23 +623,33 @@ pub fn keyboard_poll(cpu: &mut Cpu, cs: u16, eip: u32) {
 }
 
 /// A timer event is due. A proof running ends, as the event may change what
-/// the loop sees (it is tried again after it); a CPU at the same instruction
-/// with the same registers as at the last event arms that instruction.
+/// the loop sees (it is tried again after it). The head of passes skipped up
+/// to it is armed again. Else the CPU's instruction is armed when passes
+/// were skipped from it before (a game's frame limiter, which it comes back
+/// to every frame), or when the last event found the CPU there with the
+/// same flags and all its registers but one the same. That one may be what
+/// a loop reads of a time the event between moved on: `GetTickCount`'s
+/// count on Windows 98 (#160).
 #[cold]
 pub fn at_event(cpu: &mut Cpu) {
     if !cpu.bus.observe.enabled {
         return;
     }
     if cpu.bus.observe.on {
-        cpu.bus.observe.stop();
+        cpu.bus.observe.cut();
     }
     let regs = cpu.snapshot();
     let here = (head_of(cpu), regs.gpr, regs.flags.bits());
     let now = cpu.bus.clock.icount;
     let o = &mut cpu.bus.observe;
-    let same = o.last_event == Some(here);
+    let near = o.last_event.is_some_and(|(head, gpr, flags)| {
+        let differ = gpr.iter().zip(&here.1).filter(|(a, b)| a != b).count();
+        head == here.0 && flags == here.2 && differ <= 1
+    });
     o.last_event = Some(here);
-    if same {
+    if let Some(head) = o.proven.take() {
+        o.arm(head, now);
+    } else if near || o.known.contains(&here.0) {
         o.arm(here.0, now);
     }
 }
@@ -522,7 +658,7 @@ pub fn at_event(cpu: &mut Cpu) {
 #[cold]
 pub fn interrupted(cpu: &mut Cpu) {
     if cpu.bus.observe.on {
-        cpu.bus.observe.stop();
+        cpu.bus.observe.cut();
     }
 }
 
@@ -556,6 +692,11 @@ fn visit(cpu: &mut Cpu, now: u64) {
         return o.fail(why);
     }
     if matches!(o.phase, Phase::ArmHere) {
+        if o.backs_off(here) {
+            return o.stop();
+        }
+        o.stats.arms += 1;
+        o.tally(Some(here), |h| h.arms += 1);
         o.phase = Phase::Armed { head: here, until: now + ARM_LIMIT };
     }
     let (head, until) = match &o.phase {
@@ -590,6 +731,8 @@ fn visit(cpu: &mut Cpu, now: u64) {
     };
     match step {
         Step::Start => {
+            o.stats.starts += 1;
+            o.tally(Some(head), |h| h.starts += 1);
             o.on = true;
             o.failed.set(None);
             o.chunks.clear();
@@ -700,8 +843,9 @@ fn finish(cpu: &mut Cpu, visit: &Visit, base: u64, executed: u64, counted: Optio
     // what comes after it may: it is made what the last pass skipped read.
     let held = cpu.bus.observe.tainted.then_some((cpu.bus.observe.al_port, cpu.bus.observe.al_read));
     let o = &mut cpu.bus.observe;
+    let head = o.head();
     o.stop();
-    o.failures_in_row = 0;
+    o.succeed(head);
     if period > 0 && limit > visit.icount {
         let mut passes = u64::MAX;
         if let Some(pass) = counted {
@@ -713,6 +857,18 @@ fn finish(cpu: &mut Cpu, visit: &Visit, base: u64, executed: u64, counted: Optio
             passes = same;
         }
         let skipped = skip(cpu, period, executed, limit, passes);
+        if skipped > 0 {
+            let o = &mut cpu.bus.observe;
+            o.tally(head, |h| h.proofs += 1);
+            o.proven = head;
+            if let Some(head) = head {
+                o.known.retain(|&k| k != head);
+                if o.known.len() == KNOWN_HEADS {
+                    o.known.remove(0);
+                }
+                o.known.push(head);
+            }
+        }
         if let Some((port, read)) = held
             && skipped > 0
         {
