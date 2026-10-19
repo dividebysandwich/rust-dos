@@ -33,7 +33,7 @@ kernel32/environ: skipped environ.c:387
 kernel32/environ: skipped environ.c:468
 kernel32/fiber: fiber: 0 tests executed (0 marked as todo, 0 failures), 1 skipped.
 kernel32/fiber: skipped fiber.c:190
-kernel32/file: file: 489792 tests executed (0 marked as todo, 1 failure), 16 skipped.
+kernel32/file: file: 489791 tests executed (0 marked as todo, 1 failure), 16 skipped.
 kernel32/file: failed file.c:350
 kernel32/file: skipped file.c:757
 kernel32/file: skipped file.c:924 (x2)

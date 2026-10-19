@@ -252,6 +252,9 @@ fn wine_conformance_tests_give_the_expected_results() {
     let mut actual = Vec::new();
     for (dll, units) in units() {
         let dir = PathBuf::from(format!("{OUT}/{dll}"));
+        // Each run starts from an empty drive: files an earlier run left
+        // (file.c makes WIN.INI) change what directory listings count.
+        let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         for unit in units {
             let name = program_name(&unit);
