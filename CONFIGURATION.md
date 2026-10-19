@@ -2139,6 +2139,11 @@ were tried on Windows 98 SE with the 1.07.00 driver:
 * Direct3D: Incoming (the GOG release, run without GOG's wrapper DLLs),
   its menus and the first level of its arcade game.
 
+The software rasterizer always draws this card's picture, in the window
+and in the libretro core: `voodoo_renderer=opengl` does nothing here.
+The picture is the whole desktop, with the overlay and the hardware
+cursor, and only the card's memory has those.
+
 Direct3D needs DirectX 7, as the driver's readme says; Windows 98 SE
 comes with 6.1. With 6.1 the driver takes the structure DirectDraw gives
 it when a program starts Direct3D for the one DirectX 7 has, and faults:

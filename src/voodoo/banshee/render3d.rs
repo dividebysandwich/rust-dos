@@ -294,6 +294,52 @@ mod tests {
     }
 
     #[test]
+    fn gl_display_leaves_jobs_until_a_software_picture_is_requested() {
+        use super::super::{VGA_INIT0, VGAINIT0_EXTENDED_SHIFT_OUT, VID_PROC_CFG, VIDPROC_ENABLE};
+
+        for board in [Board::Banshee, Board::Voodoo3] {
+            let mut v = Voodoo::with_workers(board, 4);
+            v.write(VGA_INIT0, VGAINIT0_EXTENDED_SHIFT_OUT, u32::MAX, Now::default());
+            v.write(VID_PROC_CFG, VIDPROC_ENABLE, u32::MAX, Now::default());
+            reg3d(&mut v, COL_BUFFER_ADDR, 0);
+            reg3d(&mut v, COL_BUFFER_STRIDE, 1280);
+            reg3d(&mut v, AUX_BUFFER_ADDR, 0x20_0000);
+            reg3d(&mut v, AUX_BUFFER_STRIDE, 1280);
+            reg3d(&mut v, FBZ_MODE, 1 << 9);
+            v.set_mirror(true);
+            v.set_software_picture(false);
+            // Consume the initial snapshot before queuing any drawing.
+            v.take_mirror();
+            assert!(v.output());
+            assert!(v.prepare_display(), "switching output still signals a change");
+            rectangle(&mut v, (0.0, 0.0, 16.0, 16.0), (255.0, 0.0, 0.0));
+            assert!(v.writes_queue());
+            assert_eq!(v.fbi.ram.get(0), 0, "the batch has not been sent yet");
+            assert!(!v.prepare_display());
+            assert_eq!(v.fbi.ram.get(0), 0, "GL scanout must not flush the batch");
+            assert!(v.display_dirty);
+            assert!(v.banshee.as_ref().unwrap().dirty);
+
+            // Screenshots, the debugger and renderer failure request the
+            // software picture through the same switch.
+            v.set_software_picture(true);
+            assert!(v.prepare_display());
+            assert!(!v.writes_queue());
+            assert_eq!(v.fbi.ram.get(0), 0xF800);
+            assert!(!v.prepare_display());
+
+            // A change confined to the video processor is retained too.
+            v.set_software_picture(false);
+            v.banshee.as_mut().unwrap().dirty = true;
+            assert!(!v.prepare_display());
+            assert!(v.banshee.as_ref().unwrap().dirty);
+            v.set_mirror(false);
+            assert!(v.prepare_display());
+            assert!(!v.banshee.as_ref().unwrap().dirty);
+        }
+    }
+
+    #[test]
     fn triangles_draw_into_a_tiled_colour_buffer() {
         let mut v = card();
         // The colour buffer at 1 MB, 16 tiles (1024 pixels) a row of tiles.

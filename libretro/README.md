@@ -126,7 +126,9 @@ resolution (`voodoo_scale`), with **3dfx OpenGL antialiasing**
 (`voodoo_msaa`). That needs RetroArch's `glcore` or `gl` video driver
 (OpenGL 3, not OpenGL ES). The renderer is picked when content is loaded;
 without such a driver, the software renderer draws the card, as it does by
-default. Save states and the settings window
+default. A Voodoo3 or Banshee is always drawn in software: its picture is
+the whole desktop, with the video overlay and the hardware cursor, which
+the OpenGL renderer doesn't draw. Save states and the settings window
 work as with the software renderer; while the settings window or the
 performance overlay is open, the card's picture is the software one.
 
