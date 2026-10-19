@@ -248,16 +248,18 @@ pub(super) fn terminate_process(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// SuspendThread(handle): its count before. A thread that suspends
-/// itself stops here.
+/// itself stops here; one that ended gives -1 with ERROR_ACCESS_DENIED.
 pub(super) fn suspend_thread(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(at) = thread_of(cpu, args[0]) else {
         return Some(0xFFFF_FFFF);
     };
     let thread = thread_at(cpu, at);
-    let before = thread.suspended;
-    if thread.exit_code.is_none() {
-        thread.suspended += 1;
+    if thread.exit_code.is_some() {
+        set_error(cpu, ERROR_ACCESS_DENIED);
+        return Some(0xFFFF_FFFF);
     }
+    let before = thread.suspended;
+    thread.suspended += 1;
     if is_running(cpu, at) {
         cpu.set_eax(before);
         thread::reschedule(cpu);
@@ -266,11 +268,16 @@ pub(super) fn suspend_thread(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(before)
 }
 
-/// ResumeThread(handle): its count before.
+/// ResumeThread(handle): its count before. Of a thread that ended,
+/// -1, as on Windows 9x.
 pub(super) fn resume_thread(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(at) = thread_of(cpu, args[0]) else {
         return Some(0xFFFF_FFFF);
     };
+    if thread_at(cpu, at).exit_code.is_some() {
+        set_error(cpu, ERROR_ACCESS_DENIED);
+        return Some(0xFFFF_FFFF);
+    }
     let thread = thread_at(cpu, at);
     let before = thread.suspended;
     thread.suspended = before.saturating_sub(1);

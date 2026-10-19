@@ -239,6 +239,12 @@ static APIS: &[Api] = &[
     stdcall("GetProcessVersion", 501, 1, process::get_process_version),
     stdcall("FatalAppExitA", 502, 2, process::fatal_app_exit),
     stdcall("FatalExit", 503, 1, process::fatal_exit),
+    stdcall("CreateEventW", 504, 4, not_implemented),
+    stdcall("CreateMutexW", 505, 3, not_implemented),
+    stdcall("CreateSemaphoreW", 506, 4, not_implemented),
+    stdcall("OpenEventW", 507, 3, not_implemented),
+    stdcall("OpenMutexW", 508, 3, not_implemented),
+    stdcall("OpenSemaphoreW", 509, 3, not_implemented),
 
     stdcall("VirtualAlloc", 200, 4, virtual_memory::virtual_alloc),
     stdcall("VirtualFree", 201, 3, virtual_memory::virtual_free),
@@ -516,6 +522,11 @@ const THREAD_RETURN: usize = 46;
 /// Where calls into the program return to (call.rs).
 pub fn call_return_address() -> u32 {
     super::stubs::stub_address(0, CALL_RETURN)
+}
+
+/// Let go of the file mappings no handle or view holds any more.
+pub fn sweep_mappings(cpu: &mut Cpu) {
+    mapping::sweep(cpu);
 }
 
 /// Where the main thread starts when DLLs' entry points run first.

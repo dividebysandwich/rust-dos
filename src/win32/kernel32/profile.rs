@@ -10,6 +10,10 @@ use crate::cpu::Cpu;
 /// The Windows directory, where WIN.INI is.
 pub(super) const WINDOWS_DIRECTORY: &str = "C:\\WINDOWS";
 
+const FILE_SHARE_READ: u32 = 1;
+const FILE_SHARE_WRITE: u32 = 2;
+const ERROR_SHARING_VIOLATION: u32 = 32;
+
 /// A line of a section: a key and its value, or a line without '=',
 /// whose value is None.
 struct Entry {
@@ -34,7 +38,9 @@ fn parse(text: &[u8]) -> Vec<Section> {
         name: None,
         entries: Vec::new(),
     }];
-    for line in text.split(|&b| b == b'\n' || b == b'\r') {
+    // The text ends at a zero, as Windows reads it as a string.
+    let end = text.iter().position(|&b| b == 0).unwrap_or(text.len());
+    for line in text[..end].split(|&b| b == b'\n' || b == b'\r') {
         let line = trim(line);
         if line.is_empty() {
             continue;
@@ -124,8 +130,12 @@ fn path_of(name: Option<&[u8]>) -> String {
     }
 }
 
-/// The text of the file at `path`, or None if it can't be read.
+/// The text of the file at `path`, or None if it can't be read: also
+/// when a program has it open without FILE_SHARE_READ.
 fn read_file(cpu: &mut Cpu, path: &str) -> Option<Vec<u8>> {
+    if super::path::open_sharing(cpu, path).is_some_and(|s| s & FILE_SHARE_READ == 0) {
+        return None;
+    }
     let owner = cpu.bus.win32.psp;
     let disk = &mut cpu.bus.disk;
     let handle = disk.open_file(path, 0, owner).ok()?;
@@ -408,7 +418,9 @@ pub(super) fn get_private_profile_section_names_a(cpu: &mut Cpu, args: &[u32]) -
 }
 
 /// Write the profile `file` back if `change` changed its sections:
-/// FALSE with DOS's error if it can't be written.
+/// FALSE with DOS's error if it can't be written, or with
+/// ERROR_SHARING_VIOLATION if a program has it open without sharing it
+/// for reading and writing.
 fn store(
     cpu: &mut Cpu,
     file: Option<Vec<u8>>,
@@ -419,6 +431,11 @@ fn store(
         return Some(FALSE);
     }
     let path = path_of(file.as_deref());
+    let both = FILE_SHARE_READ | FILE_SHARE_WRITE;
+    if super::path::open_sharing(cpu, &path).is_some_and(|s| s & both != both) {
+        set_error(cpu, ERROR_SHARING_VIOLATION);
+        return Some(FALSE);
+    }
     let mut sections = parse(&read_file(cpu, &path).unwrap_or_default());
     if !change(&mut sections) {
         return Some(TRUE);

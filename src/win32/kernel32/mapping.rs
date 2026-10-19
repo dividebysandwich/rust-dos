@@ -73,7 +73,7 @@ fn write_back(cpu: &mut Cpu, index: usize) {
 /// Let go of the mappings whose objects are gone and that no running
 /// process has a view of: their pages go back to the pool, their files
 /// written back.
-fn sweep(cpu: &mut Cpu) {
+pub(super) fn sweep(cpu: &mut Cpu) {
     let running: Vec<u32> = cpu.bus.win32.processes.iter().map(|p| p.id).collect();
     for index in 0..cpu.bus.win32.sections.len() {
         let win32 = &mut cpu.bus.win32;

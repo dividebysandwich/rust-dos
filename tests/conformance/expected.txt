@@ -33,10 +33,9 @@ kernel32/environ: skipped environ.c:387
 kernel32/environ: skipped environ.c:468
 kernel32/fiber: fiber: 0 tests executed (0 marked as todo, 0 failures), 1 skipped.
 kernel32/fiber: skipped fiber.c:190
-kernel32/file: ended: FILE.EXE needs KERNEL32.DLL's function CreateSemaphoreW
+kernel32/file: file: 489792 tests executed (0 marked as todo, 1 failure), 16 skipped.
 kernel32/file: failed file.c:350
 kernel32/file: skipped file.c:757
-kernel32/file: failed file.c:844
 kernel32/file: skipped file.c:924 (x2)
 kernel32/file: skipped file.c:926 (x3)
 kernel32/file: skipped file.c:976
@@ -44,16 +43,10 @@ kernel32/file: skipped file.c:1059
 kernel32/file: skipped file.c:1153
 kernel32/file: skipped file.c:1169
 kernel32/file: skipped file.c:1316
-kernel32/file: failed file.c:1397
-kernel32/file: failed file.c:1398
-kernel32/file: failed file.c:1410
-kernel32/file: failed file.c:1413
-kernel32/file: failed file.c:1417
-kernel32/file: failed file.c:1418
 kernel32/file: skipped file.c:1486
 kernel32/file: skipped file.c:2185 (x2)
-kernel32/file: failed file.c:1882
-kernel32/file: exit code 255
+kernel32/file: skipped file.c:2828
+kernel32/file: skipped file.c:3036
 kernel32/format_msg: format_msg: 190 tests executed (0 marked as todo, 0 failures), 2 skipped.
 kernel32/format_msg: skipped format_msg.c:724
 kernel32/format_msg: skipped format_msg.c:1639
@@ -93,12 +86,8 @@ kernel32/path: skipped path.c:1398
 kernel32/path: skipped path.c:1550
 kernel32/path: skipped path.c:1602
 kernel32/path: skipped path.c:1661
-kernel32/profile: profile: 194 tests executed (0 marked as todo, 16 failures), 3 skipped.
-kernel32/profile: failed profile.c:222
+kernel32/profile: profile: 200 tests executed (0 marked as todo, 0 failures), 3 skipped.
 kernel32/profile: skipped profile.c:317
-kernel32/profile: failed profile.c:402 (x6)
-kernel32/profile: failed profile.c:408 (x6)
-kernel32/profile: failed profile.c:432 (x3)
 kernel32/profile: skipped profile.c:549
 kernel32/profile: skipped profile.c:909
 kernel32/sync: sync: 35 tests executed (0 marked as todo, 0 failures), 4 skipped.
@@ -106,9 +95,11 @@ kernel32/sync: skipped sync.c:223
 kernel32/sync: skipped sync.c:396
 kernel32/sync: skipped sync.c:458
 kernel32/sync: skipped sync.c:648
-kernel32/thread: ended: THREAD.EXE ended: page fault (exception 0Eh, error 4, address DEADBEEF)
+kernel32/thread: thread: 194 tests executed (0 marked as todo, 0 failures), 4 skipped.
 kernel32/thread: skipped thread.c:302
-kernel32/thread: exit code 255
+kernel32/thread: skipped thread.c:763
+kernel32/thread: skipped thread.c:1020
+kernel32/thread: skipped thread.c:1248
 kernel32/time: time: 40 tests executed (0 marked as todo, 0 failures), 2 skipped.
 kernel32/time: skipped time.c:297
 kernel32/time: skipped time.c:428
@@ -116,12 +107,9 @@ kernel32/timer: timer: 0 tests executed (0 marked as todo, 0 failures), 1 skippe
 kernel32/timer: skipped timer.c:42
 kernel32/version: version: 10 tests executed (0 marked as todo, 0 failures), 1 skipped.
 kernel32/version: skipped version.c:110
-kernel32/virtual: virtual: 148 tests executed (0 marked as todo, 3 failures), 6 skipped.
+kernel32/virtual: virtual: 148 tests executed (0 marked as todo, 0 failures), 6 skipped.
 kernel32/virtual: skipped virtual.c:69
 kernel32/virtual: skipped virtual.c:431
-kernel32/virtual: failed virtual.c:531
-kernel32/virtual: failed virtual.c:535
-kernel32/virtual: failed virtual.c:536
 kernel32/virtual: skipped virtual.c:609
 kernel32/virtual: skipped virtual.c:634
 kernel32/virtual: skipped virtual.c:795

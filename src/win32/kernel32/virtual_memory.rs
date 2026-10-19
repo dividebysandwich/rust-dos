@@ -406,7 +406,7 @@ fn page_allows(cpu: &Cpu, page: u32, write: bool) -> bool {
 }
 
 /// Whether the program may reach the `len` bytes at `at`.
-fn allows(cpu: &Cpu, at: u32, len: u32, write: bool) -> bool {
+pub(super) fn allows(cpu: &Cpu, at: u32, len: u32, write: bool) -> bool {
     if len == 0 {
         return true;
     }

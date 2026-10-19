@@ -6,6 +6,7 @@
 //! DOS process the programs run in.
 
 use super::path::{self, ERROR_FILE_EXISTS, ERROR_FILENAME_EXCED_RANGE};
+use super::virtual_memory::allows;
 use super::{
     ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_CALL_NOT_IMPLEMENTED, ERROR_INVALID_HANDLE,
     ERROR_INVALID_PARAMETER, FALSE, INVALID_HANDLE_VALUE, TRUE, set_error, string_at,
@@ -308,6 +309,19 @@ pub(super) fn read_console_line(cpu: &mut Cpu, n: u32) -> Option<Vec<u8>> {
     line
 }
 
+/// ReadFile's and WriteFile's answer to a buffer the program can't
+/// reach: nothing done, ERROR_INVALID_PARAMETER.
+fn bad_buffer(cpu: &mut Cpu, done: u32) -> Option<u32> {
+    if done != 0 {
+        cpu.bus.guest_write_32(done, 0);
+        if cpu.bus.guest_faulted() {
+            return None;
+        }
+    }
+    set_error(cpu, ERROR_INVALID_PARAMETER);
+    Some(FALSE)
+}
+
 /// ReadFile(handle, buffer, n, read, overlapped): up to `n` bytes, the
 /// count read to `*read`. At the end of a file it reads none and
 /// succeeds. From the console it reads a line, as DOS does. Windows 95
@@ -316,6 +330,10 @@ pub(super) fn read_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[handle, buffer, n, read, overlapped] = args else {
         unreachable!()
     };
+    // Windows 9x checks the buffer first, without a page fault.
+    if n != 0 && (buffer == 0 || !allows(cpu, buffer, n, true)) {
+        return bad_buffer(cpu, read);
+    }
     let Some(open) = open_or_fail(cpu, handle) else {
         return Some(FALSE);
     };
@@ -387,6 +405,17 @@ pub(super) fn write_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[handle, buffer, n, written, overlapped] = args else {
         unreachable!()
     };
+    // Windows 9x checks the buffer first, without a page fault. It
+    // reports writing all of a NULL buffer, and writes nothing here.
+    if n != 0 && buffer == 0 && open_or_fail(cpu, handle).is_some() {
+        if written != 0 {
+            cpu.bus.guest_write_32(written, n);
+        }
+        return Some(TRUE);
+    }
+    if n != 0 && buffer != 0 && !allows(cpu, buffer, n, false) {
+        return bad_buffer(cpu, written);
+    }
     let Some(open) = open_or_fail(cpu, handle) else {
         return Some(FALSE);
     };
@@ -910,8 +939,6 @@ pub(super) fn open_file_16(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     let drive = full.as_bytes()[0].to_ascii_uppercase().wrapping_sub(b'A');
     let fixed = cpu.bus.disk.drive_kind(drive) == Some(crate::disk::DriveKind::HardDisk);
-    cpu.bus.guest_write_8(of, OFSTRUCT as u8);
-    cpu.bus.guest_write_8(of + 1, fixed as u8);
     let mut bytes = crate::dosstr::to_bytes(&full);
     bytes.push(0);
     cpu.bus.guest_write_bytes(of + 8, &bytes);
@@ -942,10 +969,13 @@ pub(super) fn open_file_16(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
     match result {
         Ok(handle) => {
+            cpu.bus.guest_write_8(of, OFSTRUCT as u8);
+            cpu.bus.guest_write_8(of + 1, fixed as u8);
             cpu.bus.guest_write_16(of + 2, 0);
             Some(handle)
         }
         Err(code) => {
+            // The structure's size and drive stay as they were.
             set_error(cpu, code);
             cpu.bus.guest_write_16(of + 2, code as u16);
             Some(HFILE_ERROR)

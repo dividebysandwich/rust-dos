@@ -639,8 +639,27 @@ pub(super) fn copy_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
 }
 
+/// The sharing that the handles CreateFileA opened of the file at `path`
+/// all allow (FILE_SHARE_READ, FILE_SHARE_WRITE), or None if none has it
+/// open.
+pub(super) fn open_sharing(cpu: &Cpu, path: &str) -> Option<u32> {
+    let disk = &cpu.bus.disk;
+    let path = disk.qualify_path(path)?;
+    let objects = cpu.bus.win32.objects.objects.iter().flatten();
+    objects
+        .filter_map(|o| match o.kind {
+            Kind::File { sft, share, .. } => disk
+                .open_path(sft)
+                .is_some_and(|p| p.eq_ignore_ascii_case(&path))
+                .then_some(share),
+            _ => None,
+        })
+        .reduce(|a, b| a & b)
+}
+
 /// MoveFileA(from, to): a file or directory renamed, or a file moved to
-/// another drive (copied, then deleted). The new name mustn't be there.
+/// another drive (copied, then deleted). The new name mustn't be there,
+/// and Windows 9x refuses to move a file a program has open.
 pub(super) fn move_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(from) = path_arg(cpu, args[0])? else {
         return Some(FALSE);
@@ -662,6 +681,11 @@ pub(super) fn move_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if from_full.eq_ignore_ascii_case(&to_full) {
         return Some(TRUE);
     }
+    if open_sharing(cpu, &from).is_some() {
+        set_error(cpu, ERROR_ACCESS_DENIED);
+        return Some(FALSE);
+    }
+    let disk = &mut cpu.bus.disk;
     if disk.exists(&to) {
         set_error(cpu, ERROR_ALREADY_EXISTS);
         return Some(FALSE);

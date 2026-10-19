@@ -262,14 +262,14 @@ pub(super) fn is_dbcs_lead_byte_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// The length of the string at `args[0]`, 0 for NULL.
-pub(super) fn lstrlen_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+fn lstrlen_a_unguarded(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if args[0] == 0 {
         return Some(0);
     }
     Some(read_string(cpu, args[0])?.len() as u32)
 }
 
-pub(super) fn lstrlen_w(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+fn lstrlen_w_unguarded(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if args[0] == 0 {
         return Some(0);
     }
@@ -278,7 +278,7 @@ pub(super) fn lstrlen_w(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// Copy the string at `args[1]` to `args[0]`: `args[0]`, or NULL when
 /// either is NULL.
-pub(super) fn lstrcpy_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+fn lstrcpy_a_unguarded(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[to, from] = args else { unreachable!() };
     if to == 0 || from == 0 {
         return Some(0);
@@ -291,7 +291,7 @@ pub(super) fn lstrcpy_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// Copy at most `args[2]` - 1 characters of the string at `args[1]` to
 /// `args[0]`, and a zero if there is room for one.
-pub(super) fn lstrcpyn_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+fn lstrcpyn_a_unguarded(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[to, from, n] = args else { unreachable!() };
     if to == 0 || from == 0 {
         return Some(0);
@@ -309,7 +309,7 @@ pub(super) fn lstrcpyn_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// Add the string at `args[1]` to the end of the one at `args[0]`.
-pub(super) fn lstrcat_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+fn lstrcat_a_unguarded(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[to, from] = args else { unreachable!() };
     if to == 0 || from == 0 {
         return Some(0);
@@ -339,4 +339,36 @@ pub(super) fn lstrcmp_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 pub(super) fn lstrcmpi_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     lstrcmp(cpu, args, super::sort::NORM_IGNORECASE)
+}
+
+pub(super) fn lstrlen_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    guarded(cpu, args, lstrlen_a_unguarded)
+}
+
+pub(super) fn lstrlen_w(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    guarded(cpu, args, lstrlen_w_unguarded)
+}
+
+pub(super) fn lstrcpy_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    guarded(cpu, args, lstrcpy_a_unguarded)
+}
+
+pub(super) fn lstrcpyn_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    guarded(cpu, args, lstrcpyn_a_unguarded)
+}
+
+pub(super) fn lstrcat_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    guarded(cpu, args, lstrcat_a_unguarded)
+}
+
+/// Run the string function `f`, which Windows runs inside an exception
+/// handler: a pointer that faults makes it return 0 (NULL) instead of
+/// raising an exception in the program.
+fn guarded(cpu: &mut Cpu, args: &[u32], f: fn(&mut Cpu, &[u32]) -> Option<u32>) -> Option<u32> {
+    let result = f(cpu, args);
+    if cpu.bus.guest_faulted() {
+        cpu.bus.guest_fault = None;
+        return Some(0);
+    }
+    result
 }
