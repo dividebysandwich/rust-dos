@@ -219,9 +219,10 @@ impl DrawnFrom {
     /// Make room for `len` bytes of rows drawn under `key`, forgetting the
     /// rows kept under another key. True if the rows kept are still those
     /// on the canvas.
-    fn reuse(&mut self, key: Vec<u8>, len: usize) -> bool {
+    fn reuse(&mut self, key: &[u8], len: usize) -> bool {
         if self.key != key {
-            self.key = key;
+            self.key.clear();
+            self.key.extend_from_slice(key);
             self.rows.clear();
         }
         let known = self.rows.len() == len;
@@ -413,7 +414,8 @@ fn render_vbe(canvas: &mut [u8], canvas_w: usize, y_min: usize, y_max: usize, bu
     let Some(mode) = vbe.mode else {
         return;
     };
-    let colors: Vec<(u8, u8, u8)> = (0..=255u8).map(|i| bus.vga.get_rgb(i & bus.vga.dac_mask)).collect();
+    let colors: [(u8, u8, u8); 256] =
+        std::array::from_fn(|i| bus.vga.get_rgb(i as u8 & bus.vga.dac_mask));
     let vram = &vbe.vram;
     let wrap = vbe::VRAM_SIZE - 1;
     // A Vérité's pixels are in its RISC's byte order.
@@ -702,10 +704,24 @@ fn render_planar(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus: &Bus, dra
     // it changes its panning, and its bytes may be the same on both sides.)
     let spans = |pan: usize| (pan % 8 + width).div_ceil(8);
     let span = spans(pan).max(spans(split_pan));
-    let mut key = vec![b'P'];
-    key.extend(colors.iter().flat_map(|&(r, g, b)| [r, g, b]));
-    key.extend([width, rows, canvas_w, canvas_h, pan, split_pan, split.min(rows)].iter().flat_map(|v| (*v as u32).to_le_bytes()));
-    let known = drawn_from.reuse(key, 4 * span * rows);
+    let mut key = [0u8; 1 + 16 * 3 + 7 * 4];
+    key[0] = b'P';
+    key[1..49].copy_from_slice(colors.map(|(r, g, b)| [r, g, b]).as_flattened());
+    for (value, out) in [
+        width,
+        rows,
+        canvas_w,
+        canvas_h,
+        pan,
+        split_pan,
+        split.min(rows),
+    ]
+    .into_iter()
+    .zip(key[49..].as_chunks_mut::<4>().0)
+    {
+        *out = (value as u32).to_le_bytes();
+    }
+    let known = drawn_from.reuse(&key, 4 * span * rows);
     let mask = plane_size - 1;
     let mut source = vec![0u8; 4 * span];
 
@@ -890,20 +906,24 @@ fn render_graphics_mode(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus: &B
     let pan = bus.vga.pixel_panning();
     let split_pan = if bus.vga.attribute_regs[0x10] & 0x20 != 0 { 0 } else { pan };
     // VGA hardware ANDs each pixel with the PEL mask before the DAC lookup.
-    let colors: Vec<[u8; 3]> = (0..=255u8)
-        .map(|i| {
-            let (r, g, b) = bus.vga.get_rgb(i & bus.vga.dac_mask);
-            [r, g, b]
-        })
-        .collect();
+    let colors: [[u8; 3]; 256] = std::array::from_fn(|i| {
+        let (r, g, b) = bus.vga.get_rgb(i as u8 & bus.vga.dac_mask);
+        [r, g, b]
+    });
     let canvas_h = canvas.len() / (canvas_w * 3);
     let row_bytes = canvas_w * 3;
 
     // The rows drawn before are still there if the colors and the shape
     // are the same.
-    let mut key = colors.concat();
-    key.extend([width, rows, canvas_w, canvas_h].iter().flat_map(|v| (*v as u32).to_le_bytes()));
-    let known = drawn_from.reuse(key, width * rows);
+    let mut key = [0u8; 256 * 3 + 4 * 4];
+    key[..768].copy_from_slice(colors.as_flattened());
+    for (value, out) in [width, rows, canvas_w, canvas_h]
+        .into_iter()
+        .zip(key[768..].as_chunks_mut::<4>().0)
+    {
+        *out = (value as u32).to_le_bytes();
+    }
+    let known = drawn_from.reuse(&key, width * rows);
 
     // The source pixel of each column of the canvas.
     let columns: Vec<usize> = (0..canvas_w).map(|tx| tx * width / canvas_w).collect();
@@ -1068,11 +1088,15 @@ fn render_cga_composite(
     samples: impl Fn(u8, &mut [u8]),
 ) {
     let width = SCREEN_WIDTH as usize;
-    let mut key = vec![b'C', border];
-    key.extend(decoder.id());
-    key.extend(colors);
-    key.extend((canvas.len() as u32).to_le_bytes());
-    let known = drawn_from.reuse(key, 200 * 80);
+    // The two CGA callers supply at most five mode/colour bytes.
+    debug_assert!(colors.len() <= 5);
+    let mut key = [0u8; 4 + 5 + 4];
+    let id = decoder.id();
+    key[..4].copy_from_slice(&[b'C', border, id[0], id[1]]);
+    key[4..4 + colors.len()].copy_from_slice(colors);
+    let end = 4 + colors.len();
+    key[end..end + 4].copy_from_slice(&(canvas.len() as u32).to_le_bytes());
+    let known = drawn_from.reuse(&key[..end + 4], 200 * 80);
     let mut bytes = [0u8; 80];
     let mut line = [0u8; 640];
     let mut rgb = [0u8; 640 * 3];
