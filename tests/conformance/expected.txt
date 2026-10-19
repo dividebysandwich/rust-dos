@@ -1,0 +1,17 @@
+# The results of Wine's conformance tests under the built-in Windows, as
+# tests/conformance_tests.rs makes them: for each test file its summary,
+# the checks that failed and the tests skipped (by file and line), or how
+# the program ended before its summary. Write them anew with
+# CONFORMANCE_BLESS=1 cargo test --test conformance_tests.
+kernel32/drive: drive: 62 tests executed (0 marked as todo, 0 failures), 2 skipped.
+kernel32/drive: skipped drive.c:68
+kernel32/drive: skipped drive.c:174
+kernel32/fiber: fiber: 0 tests executed (0 marked as todo, 0 failures), 1 skipped.
+kernel32/fiber: skipped fiber.c:190
+kernel32/time: time: 40 tests executed (0 marked as todo, 0 failures), 2 skipped.
+kernel32/time: skipped time.c:297
+kernel32/time: skipped time.c:428
+kernel32/timer: timer: 0 tests executed (0 marked as todo, 0 failures), 1 skipped.
+kernel32/timer: skipped timer.c:42
+kernel32/version: version: 10 tests executed (0 marked as todo, 0 failures), 1 skipped.
+kernel32/version: skipped version.c:110
