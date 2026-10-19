@@ -7,6 +7,8 @@
 //! render, as the main loop does it (`render_screen`, then `clear_dirty`).
 
 mod common;
+#[path = "video/voodoo_dispatch.rs"]
+mod voodoo_dispatch;
 #[path = "video/voodoo.rs"]
 mod voodoo;
 
@@ -297,6 +299,7 @@ criterion_group!(
     planar_program,
     cga_composite,
     voodoo::pipelines,
-    voodoo::frames
+    voodoo::frames,
+    voodoo_dispatch::lookup
 );
 criterion_main!(benches);
