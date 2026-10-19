@@ -243,6 +243,9 @@ fn build(
     // The stack: the reserve, its top committed.
     let reserve = image.headers.stack_reserve.clamp(GRANULARITY, 0x100_0000);
     process.stack_reserve = reserve;
+    let headers = &image.headers;
+    process.subsystem_version =
+        (headers.major_subsystem as u32) << 16 | headers.minor_subsystem as u32;
     let stack = memory.reserve(None, reserve, PRIVATE, SHARED)?;
     let reserve = reserve.next_multiple_of(GRANULARITY);
     let commit = reserve.min(MAX_STACK_COMMIT);

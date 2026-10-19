@@ -32,7 +32,7 @@ const TIB_TLS_ARRAY: u32 = 0x2C;
 /// The thread a handle names (its process's place and its own), or None
 /// with the last error set. A thread that ended with its process is
 /// gone.
-fn thread_of(cpu: &mut Cpu, handle: u32) -> Option<(usize, usize)> {
+pub(super) fn thread_of(cpu: &mut Cpu, handle: u32) -> Option<(usize, usize)> {
     let found = match object::kind_of(cpu, handle) {
         Some(Kind::Thread { id, .. }) => thread::find(&cpu.bus.win32, id),
         _ => None,
@@ -65,7 +65,7 @@ fn exit_code_of(cpu: &mut Cpu, handle: u32, process: bool) -> Option<Option<u32>
 }
 
 /// The place of the process a handle names, if it runs.
-fn process_of(cpu: &mut Cpu, handle: u32) -> Option<usize> {
+pub(super) fn process_of(cpu: &mut Cpu, handle: u32) -> Option<usize> {
     let Some(Kind::Process { id, .. }) = object::kind_of(cpu, handle) else {
         return None;
     };

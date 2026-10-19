@@ -576,3 +576,162 @@ fn a_program_uses_the_heap_tls_environment_and_exports() {
     );
     assert_eq!(code, 0x3F, "the checks that failed: {:06b}", !code & 0x3F);
 }
+
+#[test]
+fn a_program_starts_another_and_waits_for_its_exit_code() {
+    // C.EXE says hello and ends with 7.
+    let child = {
+        let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["ExitProcess"])];
+        program(BASE, false, imports, &[0; 4], |a, l| {
+            a.push(7)?;
+            a.call(l.import(0))?;
+            a.int3()
+        })
+    };
+    let names: &[&str] = &[
+        "CreateProcessA",
+        "WaitForSingleObject",
+        "GetExitCodeProcess",
+        "CloseHandle",
+        "ExitProcess",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The command line, STARTUPINFO at 0x40, PROCESS_INFORMATION at 0x90,
+    // the exit code at 0xA0.
+    let mut data = b"C.EXE an argument\0".to_vec();
+    data.resize(0xB0, 0);
+    data[0x40] = 68;
+    let parent = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.push(l.at(0x90) as i32)?;
+        a.push(l.at(0x40) as i32)?;
+        for _ in 0..6 {
+            a.push(0)?;
+        }
+        a.push(l.at(0) as i32)?;
+        a.push(0)?;
+        a.call(f("CreateProcessA"))?;
+        a.mov(ebx, eax)?;
+        a.push(-1)?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(f("WaitForSingleObject"))?;
+        a.shl(eax, 1)?;
+        a.or(ebx, eax)?;
+        a.push(l.at(0xA0) as i32)?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(f("GetExitCodeProcess"))?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(f("CloseHandle"))?;
+        a.push(dword_ptr(l.at(0x94)))?;
+        a.call(f("CloseHandle"))?;
+        // 1 for CreateProcessA, the wait's result above it, and the
+        // child's exit code in the high nibble.
+        a.mov(eax, dword_ptr(l.at(0xA0)))?;
+        a.shl(eax, 4)?;
+        a.or(eax, ebx)?;
+        a.push(eax)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let mut cpu = Cpu::new(scratch(
+        "child_process",
+        &[("T.EXE", parent), ("C.EXE", child)],
+    ));
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    assert!(run_to_exit(&mut cpu, 200), "{}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 0x71, "{}", printed(&cpu));
+    assert!(!cpu.bus.win32.active());
+}
+
+#[test]
+fn threads_take_turns_wait_for_each_other_and_share_a_critical_section() {
+    let names: &[&str] = &[
+        "CreateThread",
+        "WaitForSingleObject",
+        "GetExitCodeThread",
+        "InitializeCriticalSection",
+        "EnterCriticalSection",
+        "LeaveCriticalSection",
+        "Sleep",
+        "ExitProcess",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The critical section at 0, a counter at 0x20, the thread's exit
+    // code at 0x24, a flag the thread waits for at 0x28.
+    let data = vec![0; 0x40];
+    let (code, out) = run(
+        "threads",
+        program(BASE, false, imports, &data, |a, l| {
+            let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+            let mut over = a.create_label();
+            let mut spin = a.create_label();
+            let mut add = a.create_label();
+            a.push(l.at(0) as i32)?;
+            a.call(f("InitializeCriticalSection"))?;
+            // The thread, with 1000 as its argument.
+            a.push(0)?;
+            a.push(0)?;
+            a.push(1000)?;
+            // Its address, which the CALL over it pushes.
+            a.call(over)?;
+            // The thread: count its argument's times, wait for the flag
+            // with Sleep(0), return 5.
+            a.push(ebx)?;
+            a.mov(ebx, dword_ptr(esp + 8))?;
+            let mut again = a.create_label();
+            a.set_label(&mut again)?;
+            a.push(l.at(0) as i32)?;
+            a.call(f("EnterCriticalSection"))?;
+            a.add(dword_ptr(l.at(0x20)), 1)?;
+            a.push(l.at(0) as i32)?;
+            a.call(f("LeaveCriticalSection"))?;
+            a.dec(ebx)?;
+            a.jnz(again)?;
+            a.set_label(&mut spin)?;
+            a.push(0)?;
+            a.call(f("Sleep"))?;
+            a.cmp(dword_ptr(l.at(0x28)), 0)?;
+            a.je(spin)?;
+            a.pop(ebx)?;
+            a.mov(eax, 5)?;
+            a.ret_1(4)?;
+            a.set_label(&mut over)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.call(f("CreateThread"))?;
+            a.mov(esi, eax)?;
+            // The main thread adds 1000 too, in the section.
+            a.mov(edi, 1000)?;
+            a.set_label(&mut add)?;
+            a.push(l.at(0) as i32)?;
+            a.call(f("EnterCriticalSection"))?;
+            a.add(dword_ptr(l.at(0x20)), 1)?;
+            a.push(l.at(0) as i32)?;
+            a.call(f("LeaveCriticalSection"))?;
+            a.dec(edi)?;
+            a.jnz(add)?;
+            // Let the thread go on, which spins until then.
+            a.mov(dword_ptr(l.at(0x28)), 1)?;
+            a.push(-1)?;
+            a.push(esi)?;
+            a.call(f("WaitForSingleObject"))?;
+            a.mov(ebx, eax)?;
+            a.push(l.at(0x24) as i32)?;
+            a.push(esi)?;
+            a.call(f("GetExitCodeThread"))?;
+            // 5: the count less 2000, plus the thread's exit code and
+            // the wait's WAIT_OBJECT_0.
+            a.mov(eax, dword_ptr(l.at(0x20)))?;
+            a.sub(eax, 2000)?;
+            a.add(eax, dword_ptr(l.at(0x24)))?;
+            a.add(eax, ebx)?;
+            a.push(eax)?;
+            a.call(f("ExitProcess"))?;
+            a.int3()
+        }),
+    );
+    assert_eq!(code, 5, "{}", out);
+}

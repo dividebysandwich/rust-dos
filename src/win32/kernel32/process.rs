@@ -1,13 +1,18 @@
 //! Processes: starting a program as a process of its own, finding one by
 //! its id, and what a process learns of how it was started.
 
-use super::{ERROR_INVALID_PARAMETER, FALSE, TRUE, set_error, string_at};
+use super::threads::{process_of, thread_of};
+use super::{
+    ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, FALSE, TRUE, set_error, string_at,
+};
 use crate::cpu::Cpu;
+use crate::win32::memory::{PAGE, PRIVATE, SYSTEM};
 use crate::win32::object;
 use crate::win32::{create_process, process};
 
 const ERROR_FILE_NOT_FOUND: u32 = 2;
 const ERROR_BAD_EXE_FORMAT: u32 = 193;
+const ERROR_NOACCESS: u32 = 998;
 
 const CREATE_SUSPENDED: u32 = 4;
 const STARTF_USESTDHANDLES: u32 = 0x100;
@@ -221,4 +226,182 @@ pub(super) fn get_startup_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return None;
     }
     Some(0)
+}
+
+
+/// GetProcessAffinityMask(process, process mask, system mask): one
+/// processor.
+pub(super) fn get_process_affinity_mask(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    if process_of(cpu, args[0]).is_none() {
+        set_error(cpu, ERROR_INVALID_HANDLE);
+        return Some(FALSE);
+    }
+    if !cpu.bus.guest_probe(args[1], 4, true) || !cpu.bus.guest_probe(args[2], 4, true) {
+        return None;
+    }
+    cpu.bus.guest_write_32(args[1], 1);
+    cpu.bus.guest_write_32(args[2], 1);
+    Some(TRUE)
+}
+
+/// SetThreadAffinityMask(thread, mask): the mask before, 1, when `mask`
+/// names the one processor and no other; else 0.
+pub(super) fn set_thread_affinity_mask(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    if thread_of(cpu, args[0]).is_none() {
+        return Some(0);
+    }
+    if args[1] != 1 {
+        set_error(cpu, ERROR_INVALID_PARAMETER);
+        return Some(0);
+    }
+    Some(1)
+}
+
+/// The priority classes.
+const NORMAL_PRIORITY_CLASS: u32 = 0x20;
+const IDLE_PRIORITY_CLASS: u32 = 0x40;
+const HIGH_PRIORITY_CLASS: u32 = 0x80;
+const REALTIME_PRIORITY_CLASS: u32 = 0x100;
+
+/// GetPriorityClass(process).
+pub(super) fn get_priority_class(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    match process_of(cpu, args[0]) {
+        Some(p) => Some(cpu.bus.win32.processes[p].priority_class),
+        None => {
+            set_error(cpu, ERROR_INVALID_HANDLE);
+            Some(0)
+        }
+    }
+}
+
+/// SetPriorityClass(process, class): kept; threads take turns whatever
+/// their priority.
+pub(super) fn set_priority_class(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let Some(p) = process_of(cpu, args[0]) else {
+        set_error(cpu, ERROR_INVALID_HANDLE);
+        return Some(FALSE);
+    };
+    let classes = [
+        NORMAL_PRIORITY_CLASS,
+        IDLE_PRIORITY_CLASS,
+        HIGH_PRIORITY_CLASS,
+        REALTIME_PRIORITY_CLASS,
+    ];
+    if !classes.contains(&args[1]) {
+        set_error(cpu, ERROR_INVALID_PARAMETER);
+        return Some(FALSE);
+    }
+    cpu.bus.win32.processes[p].priority_class = args[1];
+    Some(TRUE)
+}
+
+/// The physical address of `lin` in the process `p`'s memory, where the
+/// program may reach it.
+fn user_page(cpu: &Cpu, p: usize, lin: u32) -> Option<u32> {
+    if !(PRIVATE..SYSTEM).contains(&lin) {
+        return None;
+    }
+    cpu.bus.win32.processes[p]
+        .memory
+        .translate(&cpu.bus, lin)
+}
+
+/// ReadProcessMemory(process, address, buffer, size, read) and
+/// WriteProcessMemory: `size` bytes between another process's memory
+/// and the caller's. Fails with ERROR_NOACCESS, having copied the bytes
+/// before, where the other process has no page.
+fn process_memory(cpu: &mut Cpu, args: &[u32], write: bool) -> Option<u32> {
+    let &[handle, address, buffer, size, done_at] = args else {
+        unreachable!()
+    };
+    let Some(p) = process_of(cpu, handle) else {
+        set_error(cpu, ERROR_INVALID_HANDLE);
+        return Some(FALSE);
+    };
+    if !cpu.bus.guest_probe(buffer, size as usize, !write) {
+        return None;
+    }
+    if done_at != 0 && !cpu.bus.guest_probe(done_at, 4, true) {
+        return None;
+    }
+    let mut done = 0;
+    while done < size {
+        let lin = address.wrapping_add(done);
+        let Some(phys) = user_page(cpu, p, lin) else {
+            break;
+        };
+        let len = (PAGE - (lin & (PAGE - 1))).min(size - done);
+        let mut bytes = vec![0; len as usize];
+        if write {
+            cpu.bus.guest_read_bytes(buffer + done, &mut bytes);
+            for (i, &b) in bytes.iter().enumerate() {
+                cpu.bus.write_8(phys as usize + i, b);
+            }
+        } else {
+            for (i, b) in bytes.iter_mut().enumerate() {
+                *b = cpu.bus.read_8(phys as usize + i);
+            }
+            cpu.bus.guest_write_bytes(buffer + done, &bytes);
+        }
+        done += len;
+    }
+    if done_at != 0 {
+        cpu.bus.guest_write_32(done_at, done);
+    }
+    if done < size {
+        set_error(cpu, ERROR_NOACCESS);
+        return Some(FALSE);
+    }
+    Some(TRUE)
+}
+
+pub(super) fn read_process_memory(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    process_memory(cpu, args, false)
+}
+
+pub(super) fn write_process_memory(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    process_memory(cpu, args, true)
+}
+
+/// FlushInstructionCache(process, address, size): nothing to do, as the
+/// processor sees code written as it runs.
+pub(super) fn flush_instruction_cache(_: &mut Cpu, _: &[u32]) -> Option<u32> {
+    Some(TRUE)
+}
+
+/// SetErrorMode(mode): the mode before. There are no dialogs for errors
+/// to turn off.
+pub(super) fn set_error_mode(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let process = process(cpu);
+    Some(std::mem::replace(&mut process.error_mode, args[0]))
+}
+
+/// GetProcessVersion(id): the Windows version the program was made for,
+/// from its header, as major << 16 | minor. 0 for no such process.
+pub(super) fn get_process_version(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let id = match args[0] {
+        0 => process(cpu).id,
+        id => id,
+    };
+    match cpu.bus.win32.processes.iter().find(|p| p.id == id) {
+        Some(p) => Some(p.subsystem_version),
+        None => {
+            set_error(cpu, ERROR_INVALID_PARAMETER);
+            Some(0)
+        }
+    }
+}
+
+/// FatalAppExitA(flags, message): the program ends with the message on
+/// standard error, as no message box can show it.
+pub(super) fn fatal_app_exit(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let message = string_at(cpu, args[1]).unwrap_or_default();
+    crate::win32::fatal(cpu, &format!("FatalAppExit: {}", message), None);
+    None
+}
+
+/// FatalExit(code): the program ends.
+pub(super) fn fatal_exit(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    crate::win32::fatal(cpu, &format!("FatalExit({})", args[0]), None);
+    None
 }

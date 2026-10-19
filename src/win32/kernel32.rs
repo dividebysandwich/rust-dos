@@ -197,6 +197,35 @@ static APIS: &[Api] = &[
     stdcall("CreateProcessA", 87, 10, process::create_process_a),
     stdcall("OpenProcess", 88, 3, process::open_process),
     stdcall("GetStartupInfoA", 89, 1, process::get_startup_info),
+    stdcall("CreateRemoteThread", 90, 7, not_implemented),
+    stdcall("GetThreadTimes", 91, 5, not_implemented),
+    stdcall("GetProcessTimes", 92, 5, not_implemented),
+    stdcall(
+        "GetProcessAffinityMask",
+        93,
+        3,
+        process::get_process_affinity_mask,
+    ),
+    stdcall(
+        "SetThreadAffinityMask",
+        94,
+        2,
+        process::set_thread_affinity_mask,
+    ),
+    stdcall("GetPriorityClass", 95, 1, process::get_priority_class),
+    stdcall("SetPriorityClass", 96, 2, process::set_priority_class),
+    stdcall("ReadProcessMemory", 97, 5, process::read_process_memory),
+    stdcall("WriteProcessMemory", 98, 5, process::write_process_memory),
+    stdcall(
+        "FlushInstructionCache",
+        99,
+        3,
+        process::flush_instruction_cache,
+    ),
+    stdcall("SetErrorMode", 500, 1, process::set_error_mode),
+    stdcall("GetProcessVersion", 501, 1, process::get_process_version),
+    stdcall("FatalAppExitA", 502, 2, process::fatal_app_exit),
+    stdcall("FatalExit", 503, 1, process::fatal_exit),
 ];
 
 /// The places in `APIS` of the system's own stubs.

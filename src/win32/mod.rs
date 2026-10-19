@@ -165,6 +165,13 @@ pub struct Process {
     /// The STARTUPINFO its parent gave, which GetStartupInfoA returns:
     /// empty for the process DOS started.
     startup: Vec<u8>,
+    /// Its priority class, which only GetPriorityClass reads, and its
+    /// error mode, which only SetErrorMode does.
+    priority_class: u32,
+    error_mode: u32,
+    /// The version of Windows its header says it was made for, as
+    /// major << 16 | minor.
+    subsystem_version: u32,
 }
 
 impl Process {
@@ -444,6 +451,7 @@ fn create_process(
     let mut process = loaded.process;
     process.environment = environment;
     process.path = path.to_string();
+    process.priority_class = 0x20;
     let return_address = stubs::stub_address(0, kernel32::PROCESS_RETURN);
     let esp = loaded.stack_top - 4;
     process.memory.write_32(&mut cpu.bus, esp, return_address);
@@ -750,6 +758,9 @@ crate::state_fields!(Process {
     environment,
     heap,
     startup,
+    priority_class,
+    error_mode,
+    subsystem_version,
 });
 crate::state_fields!(Win32 {
     pending,
