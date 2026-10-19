@@ -256,7 +256,8 @@ fn signaled(objects: &Objects, id: u32, tid: u32) -> bool {
         Some(Kind::Thread { exit_code, .. } | Kind::Process { exit_code, .. }) => {
             exit_code.is_some()
         }
-        Some(Kind::Dos { .. }) => true,
+        Some(Kind::Dos { .. } | Kind::File { .. }) => true,
+        Some(Kind::Find { .. }) => false,
         None => false,
     }
 }

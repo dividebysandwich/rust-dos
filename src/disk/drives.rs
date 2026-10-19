@@ -433,6 +433,11 @@ impl DiskController {
         })
     }
 
+    /// The fully qualified DOS path the open file `sft` was opened by.
+    pub fn open_path(&self, sft: u16) -> Option<String> {
+        self.open_files.get(&sft).map(|f| f.path.clone())
+    }
+
     /// Where in the open file `sft` the next read or write goes.
     pub fn position(&self, sft: u16) -> Option<u64> {
         match &self.open_files.get(&sft)?.data {

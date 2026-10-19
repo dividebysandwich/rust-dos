@@ -1,9 +1,12 @@
 //! KERNEL32.DLL: the process, its console and the table of functions;
 //! the other parts in the modules below.
 
+mod console;
 mod disk;
+mod file;
 mod memory;
 mod module;
+mod path;
 mod process;
 mod sync;
 mod text;
@@ -43,8 +46,8 @@ static APIS: &[Api] = &[
     stdcall("ProcessReturn", 0, 0, process_return),
     stdcall("ExitProcess", 1, 1, exit_process),
     stdcall("GetStdHandle", 2, 1, get_std_handle),
-    stdcall("WriteFile", 3, 5, write_file),
-    stdcall("WriteConsoleA", 4, 5, write_file),
+    stdcall("WriteFile", 3, 5, file::write_file),
+    stdcall("WriteConsoleA", 4, 5, file::write_file),
     stdcall("GetCommandLineA", 5, 0, get_command_line),
     stdcall("GetVersion", 6, 0, get_version),
     stdcall("GetModuleHandleA", 7, 1, get_module_handle),
@@ -197,6 +200,92 @@ static APIS: &[Api] = &[
     stdcall("CreateProcessA", 87, 10, process::create_process_a),
     stdcall("OpenProcess", 88, 3, process::open_process),
     stdcall("GetStartupInfoA", 89, 1, process::get_startup_info),
+    // Files, directories, paths and the console.
+    stdcall("CreateFileA", 100, 7, file::create_file),
+    stdcall("CreateFileW", 101, 7, not_implemented_handle),
+    stdcall("ReadFile", 102, 5, file::read_file),
+    stdcall("SetFilePointer", 103, 4, file::set_file_pointer),
+    stdcall("GetFileSize", 104, 2, file::get_file_size),
+    stdcall("GetFileType", 105, 1, file::get_file_type),
+    stdcall("FlushFileBuffers", 106, 1, file::flush_file_buffers),
+    stdcall("SetEndOfFile", 107, 1, file::set_end_of_file),
+    stdcall("GetFileInformationByHandle", 108, 2, file::get_file_information_by_handle),
+    stdcall("GetFileTime", 109, 4, file::get_file_time),
+    stdcall("SetFileTime", 110, 4, file::set_file_time),
+    stdcall("LockFile", 111, 5, file::lock_file),
+    stdcall("UnlockFile", 112, 5, file::unlock_file),
+    stdcall("LockFileEx", 113, 6, file::lock_file_ex),
+    stdcall("UnlockFileEx", 114, 5, file::lock_file_ex),
+    stdcall("GetOverlappedResult", 115, 4, file::get_overlapped_result),
+    stdcall("ReadFileEx", 116, 5, file::file_ex),
+    stdcall("WriteFileEx", 117, 5, file::file_ex),
+    stdcall("_lopen", 118, 2, file::lopen),
+    stdcall("_lcreat", 119, 2, file::lcreat),
+    stdcall("_lclose", 120, 1, file::lclose),
+    stdcall("_lread", 121, 3, file::lread),
+    stdcall("_hread", 122, 3, file::lread),
+    stdcall("_lwrite", 123, 3, file::lwrite),
+    stdcall("_hwrite", 124, 3, file::lwrite),
+    stdcall("_llseek", 125, 3, file::llseek),
+    stdcall("OpenFile", 126, 3, file::open_file_16),
+    stdcall("SetHandleCount", 127, 1, file::set_handle_count),
+    stdcall("DeleteFileA", 128, 1, path::delete_file),
+    stdcall("DeleteFileW", 129, 1, not_implemented),
+    stdcall("MoveFileA", 130, 2, path::move_file),
+    stdcall("MoveFileW", 131, 2, not_implemented),
+    stdcall("CopyFileA", 132, 3, path::copy_file),
+    stdcall("CopyFileW", 133, 3, not_implemented),
+    stdcall("GetFileAttributesA", 134, 1, path::get_file_attributes),
+    stdcall("GetFileAttributesW", 135, 1, not_implemented_handle),
+    stdcall("SetFileAttributesA", 136, 2, path::set_file_attributes),
+    stdcall("SetFileAttributesW", 137, 2, not_implemented),
+    stdcall("FindFirstFileA", 138, 2, path::find_first_file),
+    stdcall("FindFirstFileW", 139, 2, not_implemented_handle),
+    stdcall("FindNextFileA", 140, 2, path::find_next_file),
+    stdcall("FindNextFileW", 141, 2, not_implemented),
+    stdcall("FindClose", 142, 1, path::find_close),
+    stdcall("CreateDirectoryA", 143, 2, path::create_directory),
+    stdcall("CreateDirectoryW", 144, 2, not_implemented),
+    stdcall("RemoveDirectoryA", 145, 1, path::remove_directory),
+    stdcall("RemoveDirectoryW", 146, 1, not_implemented),
+    stdcall("GetCurrentDirectoryA", 147, 2, path::get_current_directory),
+    stdcall("GetCurrentDirectoryW", 148, 2, not_implemented),
+    stdcall("SetCurrentDirectoryA", 149, 1, path::set_current_directory),
+    stdcall("SetCurrentDirectoryW", 150, 1, not_implemented),
+    stdcall("GetFullPathNameA", 151, 4, path::get_full_path_name),
+    stdcall("GetFullPathNameW", 152, 4, not_implemented),
+    stdcall("GetShortPathNameA", 153, 3, path::get_short_path_name),
+    stdcall("GetShortPathNameW", 154, 3, not_implemented),
+    stdcall("GetTempPathA", 155, 2, path::get_temp_path),
+    stdcall("GetTempPathW", 156, 2, not_implemented),
+    stdcall("GetTempFileNameA", 157, 4, path::get_temp_file_name),
+    stdcall("GetTempFileNameW", 158, 4, not_implemented),
+    stdcall("SearchPathA", 159, 6, path::search_path),
+    stdcall("SearchPathW", 160, 6, not_implemented),
+    stdcall("GetWindowsDirectoryA", 161, 2, path::get_windows_directory),
+    stdcall("GetWindowsDirectoryW", 162, 2, not_implemented),
+    stdcall("GetSystemDirectoryA", 163, 2, path::get_system_directory),
+    stdcall("GetSystemDirectoryW", 164, 2, not_implemented),
+    stdcall("ReadConsoleA", 165, 5, console::read_console),
+    stdcall("GetConsoleMode", 166, 2, console::get_console_mode),
+    stdcall("SetConsoleMode", 167, 2, console::set_console_mode),
+    stdcall("SetConsoleCtrlHandler", 168, 2, console::set_console_ctrl_handler),
+    stdcall("GetConsoleScreenBufferInfo", 169, 2, console::get_console_screen_buffer_info),
+    stdcall("SetConsoleCursorPosition", 170, 2, console::set_console_cursor_position),
+    stdcall("FillConsoleOutputCharacterA", 171, 5, console::fill_console_output_character),
+    stdcall("FillConsoleOutputAttribute", 172, 5, console::fill_console_output_attribute),
+    stdcall("WriteConsoleOutputA", 173, 5, console::write_console_output),
+    stdcall("SetConsoleTextAttribute", 174, 2, console::set_console_text_attribute),
+    stdcall("AllocConsole", 175, 0, console::alloc_console),
+    stdcall("FreeConsole", 176, 0, console::free_console),
+    stdcall("GetConsoleCP", 177, 0, console::get_console_cp),
+    stdcall("GetConsoleOutputCP", 178, 0, console::get_console_cp),
+    stdcall("SetStdHandle", 179, 2, console::set_std_handle),
+    stdcall("GetNumberOfConsoleInputEvents", 180, 2, console::get_number_of_console_input_events),
+    stdcall("PeekConsoleInputA", 181, 4, console::peek_console_input),
+    stdcall("ReadConsoleInputA", 182, 4, console::read_console_input),
+    stdcall("FlushConsoleInputBuffer", 183, 1, console::flush_console_input_buffer),
+    stdcall("SetConsoleTitleA", 184, 1, console::set_console_title),
 ];
 
 /// The places in `APIS` of the system's own stubs.
@@ -249,6 +338,7 @@ const INVALID_HANDLE_VALUE: u32 = 0xFFFF_FFFF;
 const ERROR_PATH_NOT_FOUND: u32 = 3;
 const ERROR_ACCESS_DENIED: u32 = 5;
 const ERROR_INVALID_HANDLE: u32 = 6;
+const ERROR_ALREADY_EXISTS: u32 = 183;
 const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
 const ERROR_INVALID_DRIVE: u32 = 15;
 const ERROR_INVALID_PARAMETER: u32 = 87;
@@ -268,6 +358,13 @@ fn set_error(cpu: &mut Cpu, code: u32) {
 fn not_implemented(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     set_error(cpu, ERROR_CALL_NOT_IMPLEMENTED);
     Some(FALSE)
+}
+
+/// `not_implemented` for a function that fails with -1:
+/// INVALID_HANDLE_VALUE, INVALID_FILE_ATTRIBUTES.
+fn not_implemented_handle(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    set_error(cpu, ERROR_CALL_NOT_IMPLEMENTED);
+    Some(INVALID_HANDLE_VALUE)
 }
 
 /// The string at `at`, read as ANSI text into a Rust string one char per
@@ -299,59 +396,6 @@ fn get_std_handle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         _ => {
             process.last_error = ERROR_INVALID_HANDLE;
             Some(INVALID_HANDLE_VALUE)
-        }
-    }
-}
-
-/// How much of a WriteFile's buffer goes to DOS at a time: DOS counts
-/// bytes in 16 bits, and the program's length is its own.
-const WRITE_CHUNK: u32 = 0x8000;
-
-/// WriteFile and WriteConsoleA: `n` bytes at `buffer` to `handle`, the
-/// count written to `*written` (when it isn't NULL).
-fn write_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let &[handle, buffer, n, written, _] = args else {
-        unreachable!()
-    };
-    let Some(super::object::Kind::Dos { handle: dos }) = super::object::kind_of(cpu, handle) else {
-        super::process(cpu).last_error = ERROR_INVALID_HANDLE;
-        return Some(FALSE);
-    };
-    let mut count = 0u32;
-    let mut error = None;
-    loop {
-        let len = (n - count).min(WRITE_CHUNK);
-        let mut data = vec![0u8; len as usize];
-        cpu.bus
-            .guest_read_bytes(buffer.wrapping_add(count), &mut data);
-        if cpu.bus.guest_faulted() {
-            return None;
-        }
-        let result = super::dos(cpu, |cpu| {
-            crate::interrupts::int21::write_handle(cpu, dos, &data)
-        });
-        match result {
-            Ok(done) => {
-                count += done as u32;
-                // A short write is a full disk: the rest isn't written.
-                if (done as u32) < len || count == n {
-                    break;
-                }
-            }
-            Err(code) => {
-                error = Some(code);
-                break;
-            }
-        }
-    }
-    if written != 0 {
-        cpu.bus.guest_write_32(written, count);
-    }
-    match error {
-        None => Some(TRUE),
-        Some(code) => {
-            super::process(cpu).last_error = code as u32;
-            Some(FALSE)
         }
     }
 }

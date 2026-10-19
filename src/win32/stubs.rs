@@ -160,6 +160,8 @@ pub fn call(cpu: &mut Cpu, id: u16) {
     let caller = cpu.bus.logs().then(|| super::peek_32(cpu, esp));
     let caller = caller.flatten().unwrap_or(0);
     let result = (api.handler)(cpu, &args);
+    // Files whose last handle the function closed close in DOS.
+    super::object::close_files(&mut cpu.bus);
     if cpu.bus.guest_faulted() {
         return;
     }

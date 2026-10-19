@@ -625,6 +625,36 @@ static void assert_failed(const char *what, const char *file, unsigned line)
 
 void (*imp_assert)(const char *, const char *, unsigned) __asm__("__imp___assert") = assert_failed;
 
+/* MSVCRT's random numbers, which the tests seed with the time. */
+static unsigned long rand_next = 1;
+
+void srand(unsigned int seed)
+{
+    rand_next = seed;
+}
+
+int rand(void)
+{
+    rand_next = rand_next * 214013 + 2531011;
+    return (rand_next >> 16) & 0x7FFF;
+}
+
+/* The seconds since 1970, from the system time as a FILETIME. */
+static long time32(long *out)
+{
+    SYSTEMTIME st;
+    FILETIME ft;
+    long now;
+    GetSystemTime(&st);
+    SystemTimeToFileTime(&st, &ft);
+    now = (long)((((unsigned long long)ft.dwHighDateTime << 32 | ft.dwLowDateTime)
+                  - 116444736000000000ULL) / 10000000);
+    if (out) *out = now;
+    return now;
+}
+
+long (*imp_time32)(long *) __asm__("__imp___time32") = time32;
+
 /* GCC calls this from main for the program's constructors; there are none. */
 void __main(void)
 {

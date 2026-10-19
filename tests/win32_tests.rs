@@ -576,3 +576,194 @@ fn a_program_uses_the_heap_tls_environment_and_exports() {
     );
     assert_eq!(code, 0x3F, "the checks that failed: {:06b}", !code & 0x3F);
 }
+
+/// An argument a test program passes: a value, or ESI.
+#[derive(Clone, Copy)]
+enum Arg {
+    I(u32),
+    Esi,
+}
+
+/// Call the import `slot` with `args`, pushed last first.
+fn call_with(a: &mut CodeAssembler, slot: AsmMemoryOperand, args: &[Arg]) -> Result<(), IcedError> {
+    for arg in args.iter().rev() {
+        match *arg {
+            Arg::I(value) => a.push(value as i32)?,
+            Arg::Esi => a.push(esi)?,
+        }
+    }
+    a.call(slot)
+}
+
+/// Set bit `bit` of EBX if the flags say not equal (`ne`) or equal.
+fn check(a: &mut CodeAssembler, ne: bool, bit: u32) -> Result<(), IcedError> {
+    if ne {
+        a.setne(al)?;
+    } else {
+        a.sete(al)?;
+    }
+    a.movzx(eax, al)?;
+    a.shl(eax, bit)?;
+    a.or(ebx, eax)
+}
+
+/// Put `bytes` at `offset` of `data`.
+fn put(data: &mut [u8], offset: usize, bytes: &[u8]) {
+    data[offset..offset + bytes.len()].copy_from_slice(bytes);
+}
+
+#[test]
+fn a_program_makes_reads_finds_moves_and_deletes_files() {
+    use Arg::{Esi, I};
+    let names: &[&str] = &[
+        "CreateDirectoryA",
+        "CreateFileA",
+        "WriteFile",
+        "CloseHandle",
+        "GetFileSize",
+        "SetFilePointer",
+        "ReadFile",
+        "FindFirstFileA",
+        "FindClose",
+        "MoveFileA",
+        "DeleteFileA",
+        "RemoveDirectoryA",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The directory, the file, a pattern, the new name, the text; a count
+    // at 50h, a buffer at 60h, WIN32_FIND_DATA at 100h.
+    let mut data = vec![0; 0x300];
+    put(&mut data, 0, b"D\0");
+    put(&mut data, 0x10, b"D\\F.TXT\0");
+    put(&mut data, 0x20, b"D\\*.TXT\0");
+    put(&mut data, 0x30, b"G.TXT\0");
+    put(&mut data, 0x40, b"hello");
+    let mut cpu = machine(
+        "files",
+        program(BASE, false, imports, &data, |a, l| {
+            let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+            let at = |offset: u32| I(l.at(offset) as u32);
+            let (file, count, buffer) = (at(0x10), at(0x50), at(0x60));
+            a.xor(ebx, ebx)?;
+            call_with(a, f("CreateDirectoryA"), &[at(0), I(0)])?;
+            a.test(eax, eax)?;
+            check(a, true, 0)?;
+            // Five bytes written to a new file.
+            let new = [file, I(0x4000_0000), I(0), I(0), I(1), I(0x80), I(0)];
+            call_with(a, f("CreateFileA"), &new)?;
+            a.mov(esi, eax)?;
+            call_with(a, f("WriteFile"), &[Esi, at(0x40), I(5), count, I(0)])?;
+            a.cmp(dword_ptr(l.at(0x50)), 5)?;
+            check(a, false, 1)?;
+            call_with(a, f("CloseHandle"), &[Esi])?;
+            // Read back from the second byte on.
+            let open = [file, I(0x8000_0000), I(1), I(0), I(3), I(0x80), I(0)];
+            call_with(a, f("CreateFileA"), &open)?;
+            a.mov(esi, eax)?;
+            call_with(a, f("GetFileSize"), &[Esi, I(0)])?;
+            a.cmp(eax, 5)?;
+            check(a, false, 2)?;
+            call_with(a, f("SetFilePointer"), &[Esi, I(1), I(0), I(0)])?;
+            a.cmp(eax, 1)?;
+            check(a, false, 3)?;
+            call_with(a, f("ReadFile"), &[Esi, buffer, I(8), count, I(0)])?;
+            a.cmp(dword_ptr(l.at(0x60)), u32::from_le_bytes(*b"ello") as i32)?;
+            check(a, false, 4)?;
+            call_with(a, f("CloseHandle"), &[Esi])?;
+            // A search finds it, five bytes long.
+            call_with(a, f("FindFirstFileA"), &[at(0x20), at(0x100)])?;
+            a.mov(esi, eax)?;
+            call_with(a, f("FindClose"), &[Esi])?;
+            a.cmp(dword_ptr(l.at(0x100 + 32)), 5)?;
+            check(a, false, 5)?;
+            // Moved out of the directory, deleted, and the directory gone.
+            call_with(a, f("MoveFileA"), &[file, at(0x30)])?;
+            a.test(eax, eax)?;
+            check(a, true, 6)?;
+            call_with(a, f("DeleteFileA"), &[at(0x30)])?;
+            call_with(a, f("RemoveDirectoryA"), &[at(0)])?;
+            a.test(eax, eax)?;
+            check(a, true, 7)?;
+            a.mov(eax, ebx)?;
+            a.ret()
+        }),
+    );
+    assert!(
+        run_to_exit(&mut cpu, 200),
+        "the program didn't end: {:?}",
+        printed(&cpu)
+    );
+    let code = cpu.errorlevel;
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+    let dir = PathBuf::from("target/test_win32/files");
+    assert!(!dir.join("D").exists() && !dir.join("G.TXT").exists());
+}
+
+#[test]
+fn a_program_finds_its_paths_and_console() {
+    use Arg::{Esi, I};
+    let names: &[&str] = &[
+        "GetWindowsDirectoryA",
+        "GetFullPathNameA",
+        "GetCurrentDirectoryA",
+        "GetStdHandle",
+        "GetConsoleMode",
+        "GetConsoleScreenBufferInfo",
+        "GetTempFileNameA",
+        "DeleteFileA",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // A relative path, the temporary directory and prefix; a pointer at
+    // 30h, a buffer at 40h, CONSOLE_SCREEN_BUFFER_INFO at 100h.
+    let mut data = vec![0; 0x200];
+    put(&mut data, 0, b"x\\..\\a.b\0");
+    put(&mut data, 0x10, b".\0");
+    put(&mut data, 0x18, b"pfx\0");
+    let (code, _) = run(
+        "paths",
+        program(BASE, false, imports, &data, |a, l| {
+            let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+            let at = |offset: u32| I(l.at(offset) as u32);
+            let buffer = at(0x40);
+            a.xor(ebx, ebx)?;
+            // C:\WINDOWS.
+            call_with(a, f("GetWindowsDirectoryA"), &[buffer, I(0x40)])?;
+            a.cmp(eax, 10)?;
+            check(a, false, 0)?;
+            // C:\a.b, its name from the fourth character.
+            let full = [at(0), I(0x40), buffer, at(0x30)];
+            call_with(a, f("GetFullPathNameA"), &full)?;
+            a.cmp(eax, 6)?;
+            check(a, false, 1)?;
+            a.cmp(dword_ptr(l.at(0x30)), (l.at(0x40) + 3) as i32)?;
+            check(a, false, 2)?;
+            // C:\.
+            call_with(a, f("GetCurrentDirectoryA"), &[I(0x40), buffer])?;
+            a.cmp(eax, 3)?;
+            check(a, false, 3)?;
+            // The console's input has a mode, its output 80 columns.
+            call_with(a, f("GetStdHandle"), &[I(-10i32 as u32)])?;
+            a.mov(esi, eax)?;
+            call_with(a, f("GetConsoleMode"), &[Esi, at(0x30)])?;
+            a.test(eax, eax)?;
+            check(a, true, 4)?;
+            let output = I(STD_OUTPUT_HANDLE as u32);
+            call_with(a, f("GetStdHandle"), &[output])?;
+            a.mov(esi, eax)?;
+            call_with(a, f("GetConsoleScreenBufferInfo"), &[Esi, at(0x100)])?;
+            a.cmp(word_ptr(l.at(0x100)), 80)?;
+            check(a, false, 5)?;
+            // A temporary file made, and deleted.
+            let temp = [at(0x10), at(0x18), I(0), buffer];
+            call_with(a, f("GetTempFileNameA"), &temp)?;
+            a.test(eax, eax)?;
+            check(a, true, 6)?;
+            call_with(a, f("DeleteFileA"), &[buffer])?;
+            a.test(eax, eax)?;
+            check(a, true, 7)?;
+            a.mov(eax, ebx)?;
+            a.ret()
+        }),
+    );
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+}
