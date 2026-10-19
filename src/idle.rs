@@ -1042,8 +1042,11 @@ fn rflags(bits: u32) -> u32 {
 fn count(cpu: &mut Cpu, visit: Visit) {
     let chunks = cpu.bus.observe.take_chunks();
     let o = &mut cpu.bus.observe;
-    let Phase::Count { base, copies, pass, .. } = std::mem::take(&mut o.phase) else { return };
-    o.phase = Phase::Off;
+    let Phase::Count { head, base, copies, pass, until } = std::mem::take(&mut o.phase) else {
+        return;
+    };
+    // The head stays known, so `fail` backs off and `finish` remembers it.
+    o.phase = Phase::Armed { head, until };
     let ram = cpu.bus.ram();
     let fail = |cpu: &mut Cpu, why| {
         cpu.bus.observe.on = true;
