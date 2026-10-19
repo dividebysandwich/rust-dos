@@ -3,11 +3,20 @@
 # the checks that failed and the tests skipped (by file and line), or how
 # the program ended before its summary. Write them anew with
 # CONFORMANCE_BLESS=1 cargo test --test conformance_tests.
+advapi32/registry: ended: REGISTRY.EXE needs KERNEL32.DLL's function lstrlenA
+advapi32/registry: exit code 255
 kernel32/drive: drive: 62 tests executed (0 marked as todo, 0 failures), 2 skipped.
 kernel32/drive: skipped drive.c:68
 kernel32/drive: skipped drive.c:174
 kernel32/fiber: fiber: 0 tests executed (0 marked as todo, 0 failures), 1 skipped.
 kernel32/fiber: skipped fiber.c:190
+kernel32/sync: sync: 35 tests executed (0 marked as todo, 0 failures), 4 skipped.
+kernel32/sync: skipped sync.c:223
+kernel32/sync: skipped sync.c:396
+kernel32/sync: skipped sync.c:458
+kernel32/sync: skipped sync.c:648
+kernel32/thread: thread: 1 tests executed (0 marked as todo, 0 failures), 0 skipped.
+kernel32/thread: ended: THREAD.EXE needs KERNEL32.DLL's function CreateRemoteThread
 kernel32/time: time: 40 tests executed (0 marked as todo, 0 failures), 2 skipped.
 kernel32/time: skipped time.c:297
 kernel32/time: skipped time.c:428

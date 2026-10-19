@@ -232,9 +232,17 @@ exceptions run as the program's own code on top of that.
   have them (`INT 21h` AX=71xxh returns 7100h, `int21.rs:2178`), so
   kernel32 works on host directories' names directly, and `fat.rs` needs
   to read and write LFN entries for images.
-- The registry is a tree in Rust, seeded with the keys games read
-  (`HKLM\Software\Microsoft\Windows\CurrentVersion`, DirectX's version,
-  the display and sound settings) and saved per game through `hostfs`.
+- The registry is a tree in Rust (`src/win32/registry.rs`), the
+  system's, shared by the processes and kept in save states. It is seeded
+  with the keys games read (`HKLM\Software\Microsoft\Windows\CurrentVersion`
+  with VersionNumber 4.00.950, DirectX's version, the display settings,
+  the user and computer names) and kept on drive C: as
+  `C:\REGISTRY.REG`, a REGEDIT4 file that can be read and edited by hand.
+  A program's first registry call reads the seed with the file's keys
+  and values over it; changes are written back when a key is closed or
+  flushed and when the last process ends. Without a writable C: the
+  registry lasts until then. A game's profile brings its keys as a .reg
+  file, which the same import puts in (`[-key]` and `"name"=-` delete).
 - `GetVersion` and `GetVersionEx` say Windows 95 (4.0.950, platform 1),
   later configurable to 98 (4.10.1998).
 

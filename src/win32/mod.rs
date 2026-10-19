@@ -21,6 +21,7 @@ mod kernel32;
 mod loader;
 mod memory;
 mod object;
+mod registry;
 mod seh;
 pub mod snapshot;
 mod stubs;
@@ -248,6 +249,8 @@ pub struct Win32 {
     ids: u32,
     /// The id of the process DOS started, whose exit code DOS gets.
     root: u32,
+    /// The registry, which ADVAPI32's functions work on.
+    registry: registry::Registry,
 }
 
 impl Win32 {
@@ -605,6 +608,7 @@ fn end_process(cpu: &mut Cpu, index: usize, code: u32) {
     ));
     let process = cpu.bus.win32.processes.remove(index);
     process.memory.release(&mut cpu.bus);
+    registry::process_ended(cpu, process.id);
     let win32 = &mut cpu.bus.win32;
     if win32.running != index {
         // Another process's thread runs on.
@@ -703,6 +707,7 @@ pub fn process_ended(cpu: &mut Cpu, psp: u16) {
         let a20 = win32.a20;
         for process in std::mem::take(&mut win32.processes) {
             process.memory.release(&mut cpu.bus);
+            registry::process_ended(cpu, process.id);
         }
         if let Some(pool) = cpu.bus.win32.pool.take() {
             pool.release(&mut cpu.bus);
@@ -779,4 +784,5 @@ crate::state_fields!(Win32 {
     slice_start,
     ids,
     root,
+    registry,
 } skip { enabled });

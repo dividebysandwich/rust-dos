@@ -894,3 +894,121 @@ fn a_snapshot_shows_the_processes_threads_and_handles() {
     // The handle, and the wait's hold.
     assert_eq!(event.object.refs, 2);
 }
+
+/// The registry: a key made and a value set under HKEY_CURRENT_USER,
+/// which the file on drive C: gets when the key closes; Windows 95's
+/// version in the keys every registry starts with; and a key the file
+/// had before the program started. A bit each in the exit code.
+#[test]
+fn a_program_reads_and_writes_the_registry() {
+    const HKEY_CURRENT_USER: i32 = 0x8000_0001u32 as i32;
+    const HKEY_LOCAL_MACHINE: i32 = 0x8000_0002u32 as i32;
+    let names: &[&str] = &[
+        "RegCreateKeyA",
+        "RegSetValueExA",
+        "RegCloseKey",
+        "RegOpenKeyExA",
+        "RegQueryValueExA",
+        "RegOpenKeyA",
+    ];
+    let imports: &[(&str, &[&str])] = &[("ADVAPI32.DLL", names)];
+    // Strings at 0, 0x10, 0x14, 0x40 and 0x80; handles at 0x50, 0x54
+    // and 0x90; a DWORD to store at 0x58, a size at 0x5C and a buffer at
+    // 0x60.
+    let mut data = b"Software\\Test\0\0\0V\0\0\0".to_vec();
+    data.extend(b"Software\\Microsoft\\Windows\\CurrentVersion\0");
+    data.resize(0x40, 0);
+    data.extend(b"VersionNumber\0");
+    data.resize(0x58, 0);
+    data.extend(0x1234_5678u32.to_le_bytes());
+    data.resize(0x80, 0);
+    data.extend(b"Software\\Pre\0");
+    data.resize(0xA0, 0);
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let bit = |a: &mut CodeAssembler, n: u32| -> Result<(), IcedError> {
+            a.sete(al)?;
+            a.movzx(eax, al)?;
+            a.shl(eax, n)?;
+            a.or(ebx, eax)
+        };
+        a.xor(ebx, ebx)?;
+        a.push(l.at(0x50) as i32)?;
+        a.push(l.at(0) as i32)?;
+        a.push(HKEY_CURRENT_USER)?;
+        a.call(f("RegCreateKeyA"))?;
+        a.test(eax, eax)?;
+        bit(a, 0)?;
+        a.push(4)?;
+        a.push(l.at(0x58) as i32)?;
+        a.push(4)?;
+        a.push(0)?;
+        a.push(l.at(0x10) as i32)?;
+        a.push(dword_ptr(l.at(0x50)))?;
+        a.call(f("RegSetValueExA"))?;
+        a.test(eax, eax)?;
+        bit(a, 1)?;
+        a.push(dword_ptr(l.at(0x50)))?;
+        a.call(f("RegCloseKey"))?;
+        a.test(eax, eax)?;
+        bit(a, 2)?;
+        a.push(l.at(0x54) as i32)?;
+        a.push(0x2_0019)?;
+        a.push(0)?;
+        a.push(l.at(0x14) as i32)?;
+        a.push(HKEY_LOCAL_MACHINE)?;
+        a.call(f("RegOpenKeyExA"))?;
+        a.test(eax, eax)?;
+        bit(a, 3)?;
+        a.mov(dword_ptr(l.at(0x5C)), 32)?;
+        a.push(l.at(0x5C) as i32)?;
+        a.push(l.at(0x60) as i32)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(l.at(0x40) as i32)?;
+        a.push(dword_ptr(l.at(0x54)))?;
+        a.call(f("RegQueryValueExA"))?;
+        a.test(eax, eax)?;
+        bit(a, 4)?;
+        // "4.00.950" and its zero.
+        a.cmp(dword_ptr(l.at(0x5C)), 9)?;
+        bit(a, 5)?;
+        // The value set is in another key.
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(l.at(0x10) as i32)?;
+        a.push(dword_ptr(l.at(0x54)))?;
+        a.call(f("RegQueryValueExA"))?;
+        a.cmp(eax, 2)?;
+        bit(a, 6)?;
+        a.push(l.at(0x90) as i32)?;
+        a.push(l.at(0x80) as i32)?;
+        a.push(HKEY_CURRENT_USER)?;
+        a.call(f("RegOpenKeyA"))?;
+        a.test(eax, eax)?;
+        bit(a, 7)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let before = b"REGEDIT4\r\n\r\n[HKEY_CURRENT_USER\\Software\\Pre]\r\n\"P\"=dword:7\r\n";
+    let dir = scratch(
+        "registry",
+        &[("T.EXE", exe), ("REGISTRY.REG", before.to_vec())],
+    );
+    let mut cpu = Cpu::new(dir.clone());
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
+    let code = cpu.errorlevel;
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+    let saved = fs::read_to_string(dir.join("REGISTRY.REG")).unwrap();
+    assert!(saved.starts_with("REGEDIT4\r\n"));
+    let test = "[HKEY_USERS\\.Default\\Software\\Test]\r\n\"V\"=dword:12345678\r\n";
+    assert!(saved.contains(test), "{}", saved);
+    let pre = "[HKEY_USERS\\.Default\\Software\\Pre]\r\n\"P\"=dword:00000007\r\n";
+    assert!(saved.contains(pre), "{}", saved);
+}
