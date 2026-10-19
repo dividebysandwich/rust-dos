@@ -27,6 +27,8 @@ pub struct RunOptions {
     /// Print the text screen at the end if nothing went through DOS's
     /// console: for programs that write to the screen's memory.
     pub screen: bool,
+    /// Win32 console programs run with the built-in Windows.
+    pub win32: bool,
 }
 
 /// The exit code when the program waits for input after the host's
@@ -54,7 +56,11 @@ pub fn run(options: RunOptions) -> i32 {
         return ABORTED;
     }
     let mut cpu = Box::new(Cpu::with_memory(options.dir.clone(), options.memory_mb));
-    let settings = Settings { memsize: options.memory_mb, ..Settings::default() };
+    let settings = Settings {
+        memsize: options.memory_mb,
+        win32: options.win32,
+        ..Settings::default()
+    };
     for warning in crate::hardware::configure(&mut cpu, &settings, crate::keylayout::Layout::us()) {
         cpu.bus.log_string(&format!("[RUN] {}", warning));
     }

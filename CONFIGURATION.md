@@ -397,6 +397,16 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   clients can call DOS with INT 21h in protected mode, with selectors
   for their buffers. Off, they run as they do on plain DOS with HIMEM. A
   change takes effect for the programs started after it.
+* `win32` turns on the built-in Windows: `true` or `false` (the
+  default). A Win32 console program, a Windows 95 .EXE, then runs from
+  the DOS prompt in protected mode with paging, as Windows 95 runs it,
+  with the KERNEL32 functions written into the emulator, and ends back
+  at the prompt. Only a few functions exist so far: writing to the
+  console, the command line, the version, the tick count and ending
+  the process. A program that calls another ends with a message naming
+  it, and one that imports another DLL is refused. Off, such a program
+  runs its DOS stub, which says it needs Windows. The plan is in
+  [docs/native-windows.md](docs/native-windows.md).
 * `dos_version` is the DOS version programs are told (INT 21h AH=30h,
   AX=3306h and the PSP's), such as `5.00` (the default), `6.22` or
   `7.10`; `7.1` is 7.10, as DOSBox's `ver` has it. From 7.00 on, DOS
@@ -3014,3 +3024,4 @@ It reads no configuration file, and the machine has the default hardware.
 | `--cycles N` | Instructions per emulated millisecond (default 100000); the run doesn't wait for real time |
 | `--mem MB` | The machine's memory, 1 to 256 MB (default 16) |
 | `--screen` | Print the text screen at the end when nothing was printed through DOS, for programs that write to the screen's memory |
+| `--win32` | Run Win32 console programs with the built-in Windows, as `win32=true` does |

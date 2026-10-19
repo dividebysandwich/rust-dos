@@ -67,6 +67,7 @@ fn main() -> Result<(), String> {
             cycles: run.cycles,
             memory_mb: run.mem as usize,
             screen: run.screen,
+            win32: run.win32,
         }));
     }
     if let Some(port) = args.relay {

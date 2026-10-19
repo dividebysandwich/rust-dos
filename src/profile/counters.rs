@@ -91,6 +91,8 @@ pub struct Counters {
     pub hle: Box<[u64]>,
     /// The other services, by kind and number.
     pub services: [[u64; 256]; SERVICE_KINDS],
+    /// Calls of the built-in Windows's functions and traps, by id.
+    pub win32: Box<[u64]>,
     /// Hardware interrupts delivered, by IRQ line.
     pub irqs: [u64; 16],
     /// Exceptions the CPU raised, by vector.
@@ -113,6 +115,7 @@ impl Counters {
             port_zone: (0..=0xFFFFu16).map(|p| zone_of(p) as u8).collect(),
             hle: vec![0; 0x10000].into_boxed_slice(),
             services: [[0; 256]; SERVICE_KINDS],
+            win32: vec![0; 0x10000].into_boxed_slice(),
             irqs: [0; 16],
             exceptions: [0; 32],
             mem_reads: Default::default(),

@@ -70,6 +70,72 @@ fn set_result(cpu: &mut Cpu, result: Result<u16, u8>) {
     }
 }
 
+/// Write `data` to handle `handle` of the running program: a file, the
+/// screen, a serial port or the printer. Returns how many bytes were
+/// written, or DOS's error code. Kernel32's WriteFile writes so to the
+/// DOS handles it has.
+pub(crate) fn write_handle(cpu: &mut Cpu, handle: u16, data: &[u8]) -> Result<u16, u8> {
+    let sft = file_of(cpu, handle).ok_or(0x06)?;
+    if data.is_empty() {
+        return Ok(0);
+    }
+    write_open_file(cpu, handle, sft, data)
+}
+
+/// Write `data` to the open file `sft`, handle `handle` of the running
+/// program (AH=40h with bytes to write).
+fn write_open_file(cpu: &mut Cpu, handle: u16, sft: u16, data: &[u8]) -> Result<u16, u8> {
+    let count = data.len();
+    if let Some(n) = cpu.bus.disk.handle_device(sft).and_then(|d| d.com_port())
+        && cpu.bus.serial.ports[n].is_some()
+    {
+        // A serial port: out through its UART.
+        for &byte in data {
+            cpu.bus.serial_send(n, byte);
+        }
+        Ok(count as u16)
+    } else if cpu.bus.disk.handle_device(sft) == Some(CharDevice::Prn) {
+        // The printer, or nowhere without one.
+        for &byte in data {
+            cpu.bus.printer_put(byte);
+        }
+        Ok(count as u16)
+    } else if cpu.bus.disk.handle_device(sft) == Some(CharDevice::Con) {
+        // STDOUT/STDERR, or CON opened by name
+        for &byte in data {
+            if byte == 0x07 {
+                play_sdl_beep(&mut cpu.bus);
+            }
+        }
+        let visible: Vec<u8> = data.iter().copied().filter(|&b| b != 0x07).collect();
+        // Handle 2 is standard error on the host's terminal.
+        let stderr = handle == 2;
+        if let Some(console) = cpu.host_console.as_mut() {
+            console.to_stderr = stderr;
+        }
+        crate::video::print_cp437(cpu, &visible, 0x07);
+        if let Some(console) = cpu.host_console.as_mut() {
+            console.to_stderr = false;
+        }
+        Ok(count as u16)
+    } else {
+        match cpu.bus.disk.write_file(sft, data) {
+            Ok(written) => {
+                file_io(cpu, sft, written as u32, Some(true));
+                Ok(written)
+            }
+            Err(code) => {
+                // e.g. 05h on a file opened read-only (CD-ROM)
+                cpu.bus.log_string(&format!(
+                    "[DOS] Write Handle {:04X} Failed, Error={:02X}",
+                    handle, code
+                ));
+                Err(code)
+            }
+        }
+    }
+}
+
 /// The country information for the USA: m/d/y dates, "$" currency, ","
 /// thousands, "." decimals, 12-hour clock. Its first `len` bytes of 34:
 /// AH=38h copies the 24 before the 10 reserved ones, as MS-DOS does, so a
@@ -1320,58 +1386,10 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             if cpu.bus.guest_faulted() {
                 return;
             }
-
-            if let Some(n) = cpu.bus.disk.handle_device(sft).and_then(|d| d.com_port())
-                && cpu.bus.serial.ports[n].is_some()
-            {
-                // A serial port: out through its UART.
-                for &byte in &data {
-                    cpu.bus.serial_send(n, byte);
-                }
-                cpu.set_ax(count as u16);
-                cpu.set_cpu_flag(CpuFlags::CF, false);
-            } else if cpu.bus.disk.handle_device(sft) == Some(CharDevice::Prn) {
-                // The printer, or nowhere without one.
-                for &byte in &data {
-                    cpu.bus.printer_put(byte);
-                }
-                cpu.set_ax(count as u16);
-                cpu.set_cpu_flag(CpuFlags::CF, false);
-            } else if console {
-                // STDOUT/STDERR, or CON opened by name
-                for &byte in &data {
-                    if byte == 0x07 {
-                        play_sdl_beep(&mut cpu.bus);
-                    }
-                }
-                let visible: Vec<u8> = data.iter().copied().filter(|&b| b != 0x07).collect();
-                // Handle 2 is standard error on the host's terminal.
-                let stderr = handle == 2;
-                if let Some(console) = cpu.host_console.as_mut() {
-                    console.to_stderr = stderr;
-                }
-                crate::video::print_cp437(cpu, &visible, 0x07);
-                if let Some(console) = cpu.host_console.as_mut() {
-                    console.to_stderr = false;
-                }
-                cpu.set_ax(count as u16);
-            } else {
-                match cpu.bus.disk.write_file(sft, &data) {
-                    Ok(written) => {
-                        file_io(cpu, sft, written as u32, Some(true));
-                        cpu.set_ax(written);
-                        cpu.set_cpu_flag(CpuFlags::CF, false);
-                    }
-                    Err(code) => {
-                        // e.g. 05h on a file opened read-only (CD-ROM)
-                        cpu.bus.log_string(&format!(
-                            "[DOS] Write Handle {:04X} Failed, Error={:02X}",
-                            handle, code
-                        ));
-                        cpu.set_ax(code as u16);
-                        cpu.set_cpu_flag(CpuFlags::CF, true);
-                    }
-                }
+            match write_open_file(cpu, handle, sft, &data) {
+                // The screen's writes leave CF as it was.
+                Ok(written) if console => cpu.set_ax(written),
+                result => set_result(cpu, result),
             }
         }
 

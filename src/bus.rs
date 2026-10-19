@@ -148,6 +148,8 @@ pub struct Bus {
     pub ems: Option<crate::ems::Ems>,
     /// The DPMI host (INT 2Fh AX=1687h, INT 31h) and its clients.
     pub dpmi: crate::dpmi::Dpmi,
+    /// The built-in Windows (`win32`) and its running Win32 program.
+    pub win32: crate::win32::Win32,
     /// The DOS version programs are told (`dos_version`).
     pub dos_version: crate::config::DosVersion,
     /// A booted system's hard disks are ATA disks on the IDE channels too
@@ -2952,6 +2954,12 @@ impl Bus {
             video::adapter::Adapter::Hercules => video::hercules::status(&timing, now),
             _ => timing.status(now),
         }
+    }
+
+    /// Whether log lines go anywhere, for callers whose lines take work
+    /// to make.
+    pub fn logs(&self) -> bool {
+        self.log_file.is_some() || self.log_hook.is_some()
     }
 
     /// Write a line to the log file and the debug server's log.

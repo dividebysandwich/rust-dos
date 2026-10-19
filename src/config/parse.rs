@@ -262,6 +262,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Some(on) => config.dpmi = Some(on),
                             None => warn(format!("invalid {} '{}' (true or false)", key, value)),
                         },
+                        "win32" => match parse_bool(value) {
+                            Some(on) => config.win32 = Some(on),
+                            None => warn(format!("invalid win32 '{}' (true or false)", value)),
+                        },
                         "ide_hard_disks" => match parse_bool(value) {
                             Some(on) => config.ide_hard_disks = Some(on),
                             None => warn(format!("invalid ide_hard_disks '{}' (true or false)", value)),

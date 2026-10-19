@@ -1,0 +1,174 @@
+//! A Win32 process's memory: physical pages from a block of extended
+//! memory the process takes from the XMS pool when it starts, and the
+//! page tables that put them at the linear addresses Windows 95 has its
+//! parts at. The first megabyte (DOS, the BIOS and video memory) is there
+//! as it is in physical memory, for the system only.
+
+use crate::bus::Bus;
+
+pub const PAGE: u32 = 0x1000;
+
+/// Page table entry bits.
+pub const PRESENT: u32 = 0x001;
+pub const WRITABLE: u32 = 0x002;
+pub const USER: u32 = 0x004;
+
+/// Windows 95's arenas: the private one of each process from 4 MB to
+/// 2 GB, the shared one (system DLLs, memory-mapped files) to 3 GB, the
+/// system's above.
+pub const PRIVATE: u32 = 0x0040_0000;
+pub const SHARED: u32 = 0x8000_0000;
+pub const SYSTEM: u32 = 0xC000_0000;
+
+/// Linear address space is given out in 64 KB pieces, as by Windows.
+pub const GRANULARITY: u32 = 0x1_0000;
+
+#[derive(Clone, Debug, Default)]
+pub struct Memory {
+    /// The block of extended memory: its physical address and length.
+    pub base: u32,
+    pub len: u32,
+    /// The offset of the first page in it never used yet.
+    next: u32,
+    /// The page directory's physical address.
+    pub cr3: u32,
+    /// Reserved linear address ranges, as (start, length), in order.
+    regions: Vec<(u32, u32)>,
+}
+
+impl Memory {
+    /// Take the largest free block of extended memory, if it is at least
+    /// `min` bytes, and make an empty page directory with the first
+    /// megabyte mapped for the system.
+    pub fn new(bus: &mut Bus, min: u32) -> Option<Memory> {
+        let end = bus.ram().len() as u32;
+        let (largest, _) = bus.xms.dpmi_free(end);
+        if largest < min {
+            return None;
+        }
+        let base = bus.xms.take_dpmi(largest, end)?;
+        let mut memory = Memory {
+            base,
+            len: largest,
+            ..Memory::default()
+        };
+        memory.cr3 = memory.page(bus)?;
+        for page in 0..0x100 {
+            memory.map(bus, page * PAGE, page * PAGE, WRITABLE)?;
+        }
+        Some(memory)
+    }
+
+    /// Give the block back to the XMS pool.
+    pub fn release(&self, bus: &mut Bus) {
+        bus.xms.release_dpmi(self.base);
+    }
+
+    /// A zeroed physical page.
+    pub fn page(&mut self, bus: &mut Bus) -> Option<u32> {
+        self.pages(bus, 1)
+    }
+
+    /// `count` zeroed physical pages in a row, from memory never used yet.
+    pub fn pages(&mut self, bus: &mut Bus, count: u32) -> Option<u32> {
+        let len = count * PAGE;
+        if self.next + len > self.len {
+            return None;
+        }
+        let first = self.base + self.next;
+        self.next += len;
+        bus.fill_ram(first as usize..(first + len) as usize, 0);
+        Some(first)
+    }
+
+    /// Map the physical page `phys` at `lin`, with the entry bits `flags`
+    /// (present added), making its page table if there is none yet.
+    pub fn map(&mut self, bus: &mut Bus, lin: u32, phys: u32, flags: u32) -> Option<()> {
+        let pde = (self.cr3 + 4 * (lin >> 22)) as usize;
+        let mut table = bus.read_32(pde);
+        if table & PRESENT == 0 {
+            // Directory entries allow everything; the pages' entries say
+            // what each allows.
+            table = self.page(bus)? | PRESENT | WRITABLE | USER;
+            bus.write_32(pde, table);
+        }
+        let pte = ((table & !0xFFF) + 4 * ((lin >> 12) & 0x3FF)) as usize;
+        bus.write_32(pte, phys & !0xFFF | flags | PRESENT);
+        Some(())
+    }
+
+    /// The physical address `lin` is mapped to, if it is.
+    pub fn translate(&self, bus: &Bus, lin: u32) -> Option<u32> {
+        let table = bus.read_32((self.cr3 + 4 * (lin >> 22)) as usize);
+        if table & PRESENT == 0 {
+            return None;
+        }
+        let entry = bus.read_32(((table & !0xFFF) + 4 * ((lin >> 12) & 0x3FF)) as usize);
+        (entry & PRESENT != 0).then_some(entry & !0xFFF | lin & 0xFFF)
+    }
+
+    /// Back `len` bytes at `lin` (page aligned) with zeroed pages.
+    pub fn commit(&mut self, bus: &mut Bus, lin: u32, len: u32, flags: u32) -> Option<()> {
+        for page in (lin..lin + len).step_by(PAGE as usize) {
+            let phys = self.page(bus)?;
+            self.map(bus, page, phys, flags)?;
+        }
+        Some(())
+    }
+
+    /// Reserve `len` bytes of linear address space in `lo..hi`: at `at`,
+    /// None if that isn't free there, or with no `at` at the lowest free
+    /// place. Returns where.
+    pub fn reserve(&mut self, at: Option<u32>, len: u32, lo: u32, hi: u32) -> Option<u32> {
+        let len = len.checked_add(GRANULARITY - 1)? & !(GRANULARITY - 1);
+        let free = |start: u32| {
+            let end = start as u64 + len as u64;
+            start >= lo
+                && end <= hi as u64
+                && self
+                    .regions
+                    .iter()
+                    .all(|&(s, l)| end <= s as u64 || start as u64 >= s as u64 + l as u64)
+        };
+        let start = match at {
+            Some(at) if at % GRANULARITY == 0 && free(at) => at,
+            Some(_) => return None,
+            None => std::iter::once(lo)
+                .chain(
+                    self.regions
+                        .iter()
+                        .map(|&(s, l)| (s + l).next_multiple_of(GRANULARITY)),
+                )
+                .filter(|&start| free(start))
+                .min()?,
+        };
+        let i = self.regions.partition_point(|&(s, _)| s < start);
+        self.regions.insert(i, (start, len));
+        Some(start)
+    }
+
+    /// Write `data` at `lin`, which is mapped.
+    pub fn write(&self, bus: &mut Bus, lin: u32, data: &[u8]) -> Option<()> {
+        let mut done = 0;
+        while done < data.len() {
+            let at = lin.wrapping_add(done as u32);
+            let run = ((PAGE - (at & 0xFFF)) as usize).min(data.len() - done);
+            let phys = self.translate(bus, at)? as usize;
+            bus.write_run(phys, &data[done..done + run]);
+            done += run;
+        }
+        Some(())
+    }
+
+    pub fn write_32(&self, bus: &mut Bus, lin: u32, value: u32) -> Option<()> {
+        self.write(bus, lin, &value.to_le_bytes())
+    }
+}
+
+crate::state_fields!(Memory {
+    base,
+    len,
+    next,
+    cr3,
+    regions
+});

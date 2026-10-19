@@ -42,6 +42,7 @@ impl Bus {
             xms: crate::xms::Xms::new(),
             ems: None,
             dpmi: crate::dpmi::Dpmi::default(),
+            win32: crate::win32::Win32::default(),
             dos_version: crate::config::DosVersion::default(),
             ide_hard_disks: true,
             floppy_controller: true,

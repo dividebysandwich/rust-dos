@@ -315,7 +315,7 @@ impl DebugHub {
                 .map(|i| start.byte(cpu, at + i).map_or(0xFF, |a| cpu.bus.peek_8(a)))
                 .collect();
             let (len, text) = if let Some(name) = trace::trap_name(&bytes, None, cpu.pm()) {
-                (3, name)
+                (trace::trap_len(&bytes), name)
             } else {
                 let ip = start.segoff.map_or(at as u32, |(_, off)| off.wrapping_add(at as u32));
                 trace::disasm_one(&bytes, ip, code32)

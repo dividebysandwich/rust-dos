@@ -172,6 +172,11 @@ pub(crate) struct RunArgs {
     #[arg(long)]
     pub(crate) screen: bool,
 
+    /// Run Win32 console programs with the built-in Windows (the config
+    /// file's win32)
+    #[arg(long)]
+    pub(crate) win32: bool,
+
     /// The command line, as typed at the DOS prompt
     #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
     pub(crate) command: Vec<String>,

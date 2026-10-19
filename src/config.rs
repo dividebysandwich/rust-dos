@@ -191,6 +191,8 @@ pub struct Config {
     pub umb: Option<bool>,
     /// The DPMI host (`dpmi`).
     pub dpmi: Option<bool>,
+    /// The built-in Windows (`win32`).
+    pub win32: Option<bool>,
     /// DOS's tables packed low, as DOS=HIGH has them (`dos_high`).
     pub dos_high: Option<bool>,
     /// The DOS version programs are told (`dos_version`).

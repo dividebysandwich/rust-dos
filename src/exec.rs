@@ -1293,7 +1293,7 @@ fn locate(cpu: &mut Cpu, fetch: &mut Fetch, eip: u32, lin_ip: u32, cs_limit: u32
 /// that poll the keyboard through the BIOS get here millions of times.
 #[inline(always)]
 pub(crate) fn is_service_trap(ram: &[u8], phys_ip: usize) -> bool {
-    matches!(ram.get(phys_ip..phys_ip + 2), Some(&[0xFE, 0x38..=0x3B]))
+    matches!(ram.get(phys_ip..phys_ip + 2), Some(&[0xFE, 0x38..=0x3B | crate::win32::TRAP]))
 }
 
 /// Run the emulator service ("BOP") at `phys_ip`, if there is one. BOPs use
@@ -1307,11 +1307,17 @@ pub(crate) fn is_service_trap(ram: &[u8], phys_ip: usize) -> bool {
 ///   after it (the Plug and Play BIOS's and APM's entry points).
 /// * `FE 3B vv`: the DPMI host's entry points in the ROM (`dpmi::service`),
 ///   in the modes and at the privilege levels each is for.
+/// * `FE 3E nn nn`: the built-in Windows's (`win32::service`): its DLLs'
+///   functions, and its system's traps in the ROM, the function's id the
+///   word after it.
 fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
     if phys_ip + 3 > ram.len() || ram[phys_ip] != 0xFE {
         return false;
     }
     let vector = ram[phys_ip + 2];
+    if ram[phys_ip + 1] == crate::win32::TRAP {
+        return win32_trap(cpu, ram, phys_ip);
+    }
     // The far-call services work in any mode, from the ROM (the Plug and
     // Play BIOS's and APM's protected-mode entry points); the others in
     // real and virtual-8086 mode.
@@ -1429,6 +1435,40 @@ fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
         cpu.bus.clock.skip_to_deadline();
     }
     // Services change what may interrupt (INT 33h's mouse event mask).
+    cpu.bus.refresh_irq();
+    true
+}
+
+/// A trap of the built-in Windows (`service_trap`).
+fn win32_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
+    let Some(&[lo, hi]) = ram.get(phys_ip + 2..phys_ip + 4) else {
+        return false;
+    };
+    let id = u16::from_le_bytes([lo, hi]);
+    if !crate::win32::accepts(cpu, phys_ip, id) {
+        return false;
+    }
+    if cpu.bus.observe.on {
+        cpu.bus.observe.opaque();
+    }
+    let _profile = profile::zone(profile::Zone::Win32);
+    if let Some(p) = &mut cpu.bus.profile {
+        p.win32[id as usize] += 1;
+    }
+    // The program's memory is reached through its page tables, as it
+    // reaches it itself.
+    let paged = cpu.cr0 & crate::cpu::CR0_PG != 0;
+    let before = paged.then(|| {
+        cpu.bus.guest_paging = Some(cpu.guest_paging(cpu.cpl == 3));
+        (cpu.snapshot(), cpu.bus.port_accesses.len())
+    });
+    crate::win32::service(cpu, id);
+    if let Some(before) = &before
+        && guest_page_fault(cpu, before)
+    {
+        return true;
+    }
+    cpu.bus.guest_paging = None;
     cpu.bus.refresh_irq();
     true
 }
