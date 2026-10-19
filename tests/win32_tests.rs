@@ -444,3 +444,103 @@ fn hardware_interrupts_reach_dos_while_a_program_runs_and_a_state_resumes_it() {
     assert_eq!(cpu.errorlevel, 0x2A);
     assert!(!cpu.bus.win32.active());
 }
+
+/// The process heap, a TLS slot, an environment variable and
+/// GetProcAddress, a bit each in the exit code.
+#[test]
+fn a_program_uses_the_heap_tls_environment_and_exports() {
+    let names: &[&str] = &[
+        "GetProcessHeap",
+        "HeapAlloc",
+        "HeapReAlloc",
+        "HeapSize",
+        "HeapFree",
+        "TlsAlloc",
+        "TlsSetValue",
+        "TlsGetValue",
+        "SetEnvironmentVariableA",
+        "GetEnvironmentVariableA",
+        "GetModuleHandleA",
+        "GetProcAddress",
+        "GetTickCount",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // Strings: the variable's name and value, the module and the function;
+    // a buffer at 0x40.
+    let mut data = b"RD_TEST\0value\0KERNEL32\0GetTickCount\0".to_vec();
+    data.resize(0x80, 0);
+    let (code, _) = run(
+        "services",
+        program(BASE, false, imports, &data, |a, l| {
+            let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+            a.xor(ebx, ebx)?;
+            // 100 zeroed bytes, grown to 5000.
+            a.call(f("GetProcessHeap"))?;
+            a.mov(esi, eax)?;
+            a.push(100)?;
+            a.push(8)?;
+            a.push(esi)?;
+            a.call(f("HeapAlloc"))?;
+            a.mov(edi, eax)?;
+            a.cmp(dword_ptr(edi + 96), 0)?;
+            a.sete(bl)?;
+            a.push(5000)?;
+            a.push(edi)?;
+            a.push(0)?;
+            a.push(esi)?;
+            a.call(f("HeapReAlloc"))?;
+            a.mov(edi, eax)?;
+            a.push(edi)?;
+            a.push(0)?;
+            a.push(esi)?;
+            a.call(f("HeapSize"))?;
+            a.cmp(eax, 5000)?;
+            a.sete(al)?;
+            a.shl(al, 1)?;
+            a.or(bl, al)?;
+            a.push(edi)?;
+            a.push(0)?;
+            a.push(esi)?;
+            a.call(f("HeapFree"))?;
+            a.shl(al, 2)?;
+            a.or(bl, al)?;
+            // A TLS slot keeps its value.
+            a.call(f("TlsAlloc"))?;
+            a.mov(esi, eax)?;
+            a.push(0x1234)?;
+            a.push(esi)?;
+            a.call(f("TlsSetValue"))?;
+            a.push(esi)?;
+            a.call(f("TlsGetValue"))?;
+            a.cmp(eax, 0x1234)?;
+            a.sete(al)?;
+            a.shl(al, 3)?;
+            a.or(bl, al)?;
+            // A variable set reads back, five characters long.
+            a.push(l.at(8) as i32)?;
+            a.push(l.at(0) as i32)?;
+            a.call(f("SetEnvironmentVariableA"))?;
+            a.push(0x40)?;
+            a.push(l.at(0x40) as i32)?;
+            a.push(l.at(0) as i32)?;
+            a.call(f("GetEnvironmentVariableA"))?;
+            a.cmp(eax, 5)?;
+            a.sete(al)?;
+            a.shl(al, 4)?;
+            a.or(bl, al)?;
+            // GetProcAddress finds what the import table has.
+            a.push(l.at(14) as i32)?;
+            a.call(f("GetModuleHandleA"))?;
+            a.push(l.at(23) as i32)?;
+            a.push(eax)?;
+            a.call(f("GetProcAddress"))?;
+            a.cmp(eax, f("GetTickCount"))?;
+            a.sete(al)?;
+            a.shl(al, 5)?;
+            a.or(bl, al)?;
+            a.mov(eax, ebx)?;
+            a.ret()
+        }),
+    );
+    assert_eq!(code, 0x3F, "the checks that failed: {:06b}", !code & 0x3F);
+}

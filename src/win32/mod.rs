@@ -13,6 +13,8 @@
 //! ExitProcess goes back to real mode and ends the DOS process with
 //! INT 21h AH=4Ch, so the shell or the program that started it goes on.
 
+mod convert;
+mod heap;
 mod kernel32;
 mod loader;
 mod memory;
@@ -115,8 +117,12 @@ pub struct Process {
     last_error: u32,
     command_line: u32,
     tib: u32,
-    /// TLS slots in use.
-    tls_used: u32,
+    /// TLS slots in use, a bit each.
+    tls_used: u128,
+    /// The environment, as "NAME=value" strings: DOS's when it started.
+    environment: Vec<String>,
+    /// The process heap (GetProcessHeap).
+    heap: heap::Heap,
 }
 
 impl Process {
@@ -207,6 +213,14 @@ impl Win32 {
 
 fn process(cpu: &mut Cpu) -> &mut Process {
     cpu.bus.win32.process.as_mut().expect("a Win32 process")
+}
+
+/// Run `f` with the process and the bus, for work on the process's memory.
+fn with_process<T>(cpu: &mut Cpu, f: impl FnOnce(&mut Process, &mut crate::bus::Bus) -> T) -> T {
+    let mut process = cpu.bus.win32.process.take().expect("a Win32 process");
+    let result = f(&mut process, &mut cpu.bus);
+    cpu.bus.win32.process = Some(process);
+    result
 }
 
 /// Write the ROM's part: the traps, and INT 21h for the end of a process.
@@ -301,6 +315,7 @@ fn start(cpu: &mut Cpu) {
     };
     let mut process = loaded.process;
     process.psp = cpu.current_psp;
+    process.environment = dos_environment(cpu, process.psp);
     process.rm_stack = (cpu.ss(), cpu.sp());
     process.a20 = cpu.bus.a20();
     process.cr4 = cpu.cr4;
@@ -333,6 +348,30 @@ fn start(cpu: &mut Cpu) {
         0,
     ];
     system::enter_user(cpu, &ctx);
+}
+
+/// The environment of the DOS process `psp`, as "NAME=value" strings.
+fn dos_environment(cpu: &mut Cpu, psp: u16) -> Vec<String> {
+    let segment = cpu.bus.read_16(psp as usize * 16 + 0x2C) as usize;
+    let mut strings = Vec::new();
+    if segment == 0 {
+        return strings;
+    }
+    let mut at = segment * 16;
+    // An environment is at most 32 KB.
+    let end = at + 0x8000;
+    while at < end {
+        let bytes: Vec<u8> = (at..end)
+            .map(|a| cpu.bus.read_8(a))
+            .take_while(|&b| b != 0)
+            .collect();
+        if bytes.is_empty() {
+            break;
+        }
+        at += bytes.len() + 1;
+        strings.push(crate::dosstr::from_bytes(&bytes));
+    }
+    strings
 }
 
 /// End the process with exit code `code`: back in real mode, the DOS
@@ -463,5 +502,7 @@ crate::state_fields!(Process {
     command_line,
     tib,
     tls_used,
+    environment,
+    heap,
 });
 crate::state_fields!(Win32 { pending, process } skip { enabled });

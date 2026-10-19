@@ -2,6 +2,7 @@
 //! it imports from, the program's image at its image base (or relocated),
 //! its imports bound, its static TLS, its stack and its thread's TIB.
 
+use super::heap::Heap;
 use super::memory::{GRANULARITY, Memory, PAGE, PRIVATE, SHARED, SYSTEM, USER, WRITABLE};
 use super::stubs::{self, STUB};
 use super::system::{self, SYSTEM_BLOCK_PAGES};
@@ -15,8 +16,11 @@ const MIN_MEMORY: u32 = 0x40_0000;
 /// stays reserved, with no pages behind it.
 const MAX_STACK_COMMIT: u32 = 0x10_0000;
 /// Where the TLS slot array is in the TIB's page (`fs:[2Ch]` points at
-/// it). Windows 95 has 80 slots.
-const TLS_ARRAY: u32 = 0x100;
+/// it), and how many slots it has, as on Windows 95.
+pub(super) const TLS_ARRAY: u32 = 0x100;
+pub(super) const TLS_SLOTS: u32 = 80;
+/// The address space the process heap can grow to.
+const HEAP_RESERVE: u32 = 0x100_0000;
 
 /// The TIB's fields.
 const TIB_EXCEPTION_LIST: u32 = 0x00;
@@ -237,6 +241,10 @@ fn build(
     let commit = reserve.min(MAX_STACK_COMMIT);
     let stack_top = stack + reserve;
     memory.commit(bus, stack_top - commit, commit, USER | WRITABLE)?;
+
+    // The process heap.
+    let heap = memory.reserve(None, HEAP_RESERVE, PRIVATE, SHARED)?;
+    process.heap = Heap::new(heap, HEAP_RESERVE);
 
     // The command line, in a block of the process's own.
     let data = memory.reserve(None, GRANULARITY, PRIVATE, SHARED)?;
