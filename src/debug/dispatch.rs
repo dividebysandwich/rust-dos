@@ -531,6 +531,7 @@ impl DebugHub {
                 None => serde_json::json!({ "installed": false }),
             }),
             Cmd::Exceptions => Reply::Json(pm::exceptions_json(cpu)),
+            Cmd::Win32 => Reply::Json(super::win32::win32_json(cpu)),
             Cmd::Drives => Reply::Json(drives_json(cpu)),
             Cmd::SyncShared => {
                 let messages = cpu.bus.sync_shared(None);

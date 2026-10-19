@@ -360,7 +360,8 @@ Each phase ends with programs that run, checked by tests.
 - Structured exceptions.
 - advapi32's registry.
 - Enough of `msvcrt.dll` for programs that link the CRT dynamically.
-- A debug server endpoint for processes, modules, threads and handles.
+- A debug server endpoint for processes, modules, threads and handles
+  (`GET /api/win32`, described in `docs/llm-debugging.md`).
 
 Milestone: console programs built with MSVC 4 to 6, Watcom and Borland
 run, as do HX's sample programs.

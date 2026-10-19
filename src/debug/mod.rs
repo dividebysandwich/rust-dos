@@ -13,6 +13,7 @@ pub mod pm;
 pub mod profile;
 pub mod server;
 pub mod trace;
+pub mod win32;
 
 mod dispatch;
 mod events;
@@ -356,6 +357,8 @@ pub enum Cmd {
     /// The printer; `eject` ends the job and waits for its files.
     Printer { eject: bool },
     Exceptions,
+    /// The built-in Windows's processes, modules, threads and handles.
+    Win32,
     Gus,
     Sound,
     Awe32,
