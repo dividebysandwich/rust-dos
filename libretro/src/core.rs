@@ -350,9 +350,12 @@ impl Core {
         m.cpu.bus.start_batch(batch_end);
         let clock = &m.cpu.bus.clock;
         let (icount, stalled, idle) = (clock.icount, clock.stalled, clock.idle);
+        // The instructions the dynamic recompiler's code runs, of all.
+        let translated = m.cpu.dynrec.counts().executed;
         let batch_start = Instant::now();
         exec::run_batch(&mut m.cpu, &mut NoHook, false);
         let exec_time = batch_start.elapsed();
+        let translated = m.cpu.dynrec.counts().executed.saturating_sub(translated);
         let clock = &m.cpu.bus.clock;
         let halted = clock.idle - idle;
         let executed = clock.icount - icount - halted - (clock.stalled - stalled);
@@ -392,7 +395,17 @@ impl Core {
             m.cpu.bus.set_cycles_per_ms(cycles);
         }
         let render = render.saturating_sub(self.frontend - audio_wait);
-        let times = FrameTimes { wall: busy, busy, render, executed, halted, ..FrameTimes::default() };
+        let code = m.cpu.dynrec.counts();
+        let times = FrameTimes {
+            wall: busy,
+            busy,
+            render,
+            executed,
+            translated,
+            halted,
+            blocks: code.live_blocks,
+            code_bytes: code.code_bytes,
+        };
         self.last_frame = Some((frame_start, times));
     }
 
