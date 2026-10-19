@@ -407,7 +407,9 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   exceptions, child processes, the registry and the C runtime. A
   program that calls a function they don't have ends with a message
   naming it, and one that imports another system DLL (USER32, GDI32) is
-  refused. Off, such a program runs its DOS stub, which says it needs
+  refused. The registry is kept in `C:\REGISTRY.REG`, which is made the
+  first time a program uses it, so a host folder mounted as C: gets that
+  file. Off, such a program runs its DOS stub, which says it needs
   Windows. The plan is in [docs/native-windows.md](docs/native-windows.md).
 * `dos_version` is the DOS version programs are told (INT 21h AH=30h,
   AX=3306h and the PSP's), such as `5.00` (the default), `6.22` or
