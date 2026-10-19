@@ -735,3 +735,38 @@ fn threads_take_turns_wait_for_each_other_and_share_a_critical_section() {
     );
     assert_eq!(code, 5, "{}", out);
 }
+
+#[test]
+fn a_handler_on_the_exception_chain_resumes_after_a_divide_error() {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["ExitProcess"])];
+    let (code, out) = run(
+        "seh",
+        program(BASE, false, imports, &[0; 4], |a, l| {
+            let mut over = a.create_label();
+            // The handler's address, which the CALL over it pushes.
+            a.call(over)?;
+            // The handler: the faulting DIV is two bytes long; go on
+            // after it with EAX 42 (CONTEXT's Eip at B8h, Eax at B0h).
+            a.mov(eax, dword_ptr(esp + 12))?;
+            a.add(dword_ptr(eax + 0xB8), 2)?;
+            a.mov(dword_ptr(eax + 0xB0), 42)?;
+            a.xor(eax, eax)?;
+            a.ret()?;
+            a.set_label(&mut over)?;
+            // A registration on the stack: the next one, then the
+            // handler, which is on the stack already.
+            a.push(dword_ptr(0).fs())?;
+            a.mov(dword_ptr(0).fs(), esp)?;
+            a.xor(edx, edx)?;
+            a.xor(ecx, ecx)?;
+            a.mov(eax, 1)?;
+            a.div(ecx)?;
+            a.pop(dword_ptr(0).fs())?;
+            a.add(esp, 4)?;
+            a.push(eax)?;
+            a.call(l.import(0))?;
+            a.int3()
+        }),
+    );
+    assert_eq!(code, 42, "{}", out);
+}
