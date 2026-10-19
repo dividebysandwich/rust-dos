@@ -19,6 +19,7 @@ mod convert;
 mod heap;
 mod kernel32;
 mod loader;
+mod mapping;
 mod memory;
 mod object;
 mod seh;
@@ -162,6 +163,10 @@ pub struct Process {
     environment: Vec<String>,
     /// The process heap (GetProcessHeap).
     heap: heap::Heap,
+    /// The heaps HeapCreate made, and the handles of GlobalAlloc's and
+    /// LocalAlloc's moveable blocks.
+    heaps: Vec<heap::Heap>,
+    moveables: Vec<heap::Moveable>,
     /// The STARTUPINFO its parent gave, which GetStartupInfoA returns:
     /// empty for the process DOS started.
     startup: Vec<u8>,
@@ -239,6 +244,8 @@ pub struct Win32 {
     ids: u32,
     /// The id of the process DOS started, whose exit code DOS gets.
     root: u32,
+    /// The file mappings' memory, by the index their objects keep.
+    sections: Vec<Option<mapping::Section>>,
 }
 
 impl Win32 {
@@ -749,6 +756,8 @@ crate::state_fields!(Process {
     tls_used,
     environment,
     heap,
+    heaps,
+    moveables,
     startup,
 });
 crate::state_fields!(Win32 {
@@ -766,4 +775,5 @@ crate::state_fields!(Win32 {
     slice_start,
     ids,
     root,
+    sections,
 } skip { enabled });

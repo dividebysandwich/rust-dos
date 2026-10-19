@@ -573,6 +573,26 @@ pub fn raise_exception(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     None
 }
 
+/// Raise the exception `code`, with no parameters, from the function the
+/// running stub is of, which takes `args` arguments: at the caller's
+/// context after the call, as if it had called RaiseException there.
+/// (HeapAlloc's HEAP_GENERATE_EXCEPTIONS.)
+pub fn raise_on_return(cpu: &mut Cpu, args: u32, code: u32) -> Option<u32> {
+    let mut ctx = Context::of(cpu);
+    let esp = cpu.esp();
+    ctx.eip = cpu.bus.guest_read_32(esp);
+    if cpu.bus.guest_faulted() {
+        return None;
+    }
+    ctx.gpr[ESP] = esp.wrapping_add(4 + 4 * args);
+    if let Some(thread) = process(cpu).current_thread_mut() {
+        thread.fault.clear();
+    }
+    let fpu = control::save_image(cpu);
+    raise(cpu, ctx, &fpu, code, 0, ctx.eip, &[]);
+    None
+}
+
 /// RtlUnwind(frame, ip, record, value): call the handlers from the first
 /// to (not with) `frame` again, unwinding, taking each off the chain, then
 /// return `value`. With no frame, the whole chain unwinds.
