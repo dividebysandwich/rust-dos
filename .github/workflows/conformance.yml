@@ -1,0 +1,67 @@
+name: Conformance
+
+# Wine's conformance tests under the built-in Windows
+# (tests/conformance_tests.rs). They need MinGW, so they run in a job of
+# their own: on changes to what they test, every night, and by hand.
+on:
+  push:
+    paths: &paths
+      - "src/win32/**"
+      - "crates/pe/**"
+      - "src/exec.rs"
+      - "src/cpu/**"
+      - "src/dynrec/**"
+      - "src/bus/guest.rs"
+      - "src/interrupts/int21.rs"
+      - "tests/conformance/**"
+      - "tests/conformance_tests.rs"
+      - ".github/workflows/conformance.yml"
+  pull_request:
+    paths: *paths
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    # Ubuntu 22.04's MinGW (GCC 10.3, mingw-w64 8.0), the one
+    # tests/conformance/expected.txt was made with: another version's
+    # headers and code can give other results.
+    container: ubuntu:22.04
+    steps:
+      # The container has no sudo, git or compiler; see rust.yml's compat
+      # builds.
+      - name: Install build environment
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            git ca-certificates curl zstd build-essential pkg-config libsdl2-dev libasound2-dev \
+            gcc-mingw-w64-i686-win32
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: conformance
+
+      - name: Run the conformance tests
+        env:
+          CONFORMANCE_CC: i686-w64-mingw32-gcc-win32
+          CONFORMANCE_REQUIRED: "1"
+        run: cargo test --locked --test conformance_tests
+
+      # What each test program printed, to look at when they fail.
+      - name: Keep the test programs' output
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: conformance-logs
+          path: target/conformance/**/*.log

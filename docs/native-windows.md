@@ -347,6 +347,10 @@ Each phase ends with programs that run, checked by tests.
   of a built-in function.
 - Test programs are built in the tests with a small PE writer and
   `code_asm`, so no binaries are checked in.
+- Wine's conformance tests (see Testing) with the kernel32 functions
+  their framework and first files need: the environment, TLS, the
+  process heap, GetProcAddress, GetVersionExA, drives, times and code
+  page conversions.
 
 **Phase 1: the runtime.**
 
@@ -443,19 +447,35 @@ traces call, not whole DLLs.
 - Comparisons with the same game on a booted Windows 95 image
   (`C:\sources\win98` has the setup for that), using the debug server to
   compare screens and the API trace to find where they part.
-- Wine's conformance tests (`dlls/*/tests/*.c`). They are Win32
-  programs that check the API's behaviour against real Windows, print
-  their results to the console and end with the number of failures, so
-  `rust-dos run` can run them as they are. They are built with MinGW as
-  i686 programs by a script under `tools/`, from a pinned Wine tree, and
-  aren't checked in: they run as guest programs, so their LGPL license
-  asks nothing of rust-dos. Wine tested on Windows 9x until about 2010,
-  and its tests of that time accept 9x's results (`broken()`,
-  `win_skip`), so a Wine 1.x tree is the one to take for the Win9x
-  behaviour; later trees expect NT's in places. Each DLL's tests become
-  a target once the DLL has their imports: kernel32's `file`, `heap`,
-  `sync`, `thread` and `process` in phase 1, user32's `msg` and `win`
-  in phase 2, ddraw's and dsound's in phase 3.
+- Wine's conformance tests (`dlls/*/tests/*.c`), in
+  `tests/conformance/`. They are Win32 programs that check the API's
+  behaviour against what real Windows returned. These rules apply:
+  - They are kept in the repository, copied from one pinned Wine tree,
+    so CI fetches nothing and they change only in a commit. Any patch
+    one needs is listed in the folder's README.
+  - The tree is Wine 1.2.3. Wine tested on Windows 9x until about 2010,
+    and its tests of that time accept 9x's results (`broken()`,
+    `win_skip`); later trees expect NT's in places.
+  - A test file is copied once the built-in DLL has the functions it
+    calls directly, so the set grows with the DLLs: kernel32's `drive`,
+    `fiber`, `time`, `timer` and `version` now; its `file`, `heap`,
+    `sync`, `thread` and `process` in phase 1; user32's `msg` and `win`
+    in phase 2; ddraw's and dsound's in phase 3.
+  - `tests/conformance_tests.rs` builds them with MinGW as 486 code,
+    linked with a small C runtime of rust-dos's own on KERNEL32 until
+    there is an MSVCRT, and runs each under the built-in Windows. No
+    binaries are checked in.
+  - Their results (each file's summary, the places of the checks that
+    fail and the tests skipped, or how a program ended early) must be
+    those in `expected.txt`. Any difference, better or worse, fails the
+    test, so every change to them shows in that file's diff.
+  - CI runs them in a workflow of their own with Ubuntu 22.04's MinGW,
+    the one the expected results were made with: on changes to the
+    built-in Windows, the PE crate, the processor and recompiler, DOS's
+    file writes or the tests, and every night. Without MinGW the test
+    passes with a note, so `cargo test` works on any machine.
+  - They are under the LGPL 2.1 or later, kept with their notices,
+    which rust-dos's GPL-2.0-or-later allows.
 - The same test programs on the booted Windows 95 and 98 images give
   the expected output where Wine's tests don't say what 9x does: a test
   passes when the built-in layer prints what Windows printed.
