@@ -5,18 +5,23 @@
 # CONFORMANCE_BLESS=1 cargo test --test conformance_tests.
 advapi32/registry: ended: REGISTRY.EXE needs KERNEL32.DLL's function lstrlenA
 advapi32/registry: exit code 255
+kernel32/alloc: alloc: 54 tests executed (0 marked as todo, 0 failures), 0 skipped.
 kernel32/drive: drive: 62 tests executed (0 marked as todo, 0 failures), 2 skipped.
 kernel32/drive: skipped drive.c:68
 kernel32/drive: skipped drive.c:174
 kernel32/fiber: fiber: 0 tests executed (0 marked as todo, 0 failures), 1 skipped.
 kernel32/fiber: skipped fiber.c:190
+kernel32/heap: heap: 364 tests executed (0 marked as todo, 0 failures), 2 skipped.
+kernel32/heap: skipped heap.c:478
+kernel32/heap: skipped heap.c:848
 kernel32/sync: sync: 35 tests executed (0 marked as todo, 0 failures), 4 skipped.
 kernel32/sync: skipped sync.c:223
 kernel32/sync: skipped sync.c:396
 kernel32/sync: skipped sync.c:458
 kernel32/sync: skipped sync.c:648
-kernel32/thread: thread: 1 tests executed (0 marked as todo, 0 failures), 0 skipped.
-kernel32/thread: ended: THREAD.EXE needs KERNEL32.DLL's function CreateRemoteThread
+kernel32/thread: ended: THREAD.EXE needs KERNEL32.DLL's function lstrlenA
+kernel32/thread: skipped thread.c:302
+kernel32/thread: exit code 255
 kernel32/time: time: 40 tests executed (0 marked as todo, 0 failures), 2 skipped.
 kernel32/time: skipped time.c:297
 kernel32/time: skipped time.c:428
@@ -24,3 +29,6 @@ kernel32/timer: timer: 0 tests executed (0 marked as todo, 0 failures), 1 skippe
 kernel32/timer: skipped timer.c:42
 kernel32/version: version: 10 tests executed (0 marked as todo, 0 failures), 1 skipped.
 kernel32/version: skipped version.c:110
+kernel32/virtual: ended: VIRTUAL.EXE needs KERNEL32.DLL's function CreateFileA
+kernel32/virtual: skipped virtual.c:69
+kernel32/virtual: exit code 255

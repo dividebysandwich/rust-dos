@@ -9,12 +9,18 @@ where they differ from NT's.
 ## Where they come from
 
 `wine/` holds files from Wine 1.2.3 (tag `wine-1.2.3`, commit
-`9dc5af175a5537b1f98af34cdcbdc22639b36d53`), unchanged:
+`9dc5af175a5537b1f98af34cdcbdc22639b36d53`), unchanged but for the
+change listed below:
 
 - `include/wine/test.h`, the test framework;
-- `kernel32/`: `drive.c`, `fiber.c`, `time.c`, `timer.c`, `version.c`
-  from `dlls/kernel32/tests/`;
+- `kernel32/`: `alloc.c`, `drive.c`, `fiber.c`, `heap.c`, `sync.c`,
+  `thread.c`, `time.c`, `timer.c`, `version.c`, `virtual.c` from
+  `dlls/kernel32/tests/`;
 - `advapi32/`: `registry.c` from `dlls/advapi32/tests/`.
+
+`heap.c` has the values of the `FLG_HEAP_*` and `FLG_POOL_ENABLE_TAGGING`
+flags defined after its includes, from Wine's `winternl.h`, as MinGW's
+lacks them.
 
 Of the 1.x releases compared (1.0.1, 1.2.3, 1.4.1, 1.6.2, 1.8.7), 1.2.3's
 kernel32 tests mention Windows 9x the most: later releases took many of

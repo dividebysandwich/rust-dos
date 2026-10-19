@@ -257,7 +257,7 @@ fn signaled(objects: &Objects, id: u32, tid: u32) -> bool {
             exit_code.is_some()
         }
         Some(Kind::Dos { .. }) => true,
-        None => false,
+        Some(Kind::Mapping { .. }) | None => false,
     }
 }
 

@@ -19,6 +19,7 @@ mod convert;
 mod heap;
 mod kernel32;
 mod loader;
+mod mapping;
 mod memory;
 mod object;
 mod registry;
@@ -165,6 +166,10 @@ pub struct Process {
     environment: Vec<String>,
     /// The process heap (GetProcessHeap).
     heap: heap::Heap,
+    /// The heaps HeapCreate made, and the handles of GlobalAlloc's and
+    /// LocalAlloc's moveable blocks.
+    heaps: Vec<heap::Heap>,
+    moveables: Vec<heap::Moveable>,
     /// The STARTUPINFO its parent gave, which GetStartupInfoA returns:
     /// empty for the process DOS started.
     startup: Vec<u8>,
@@ -251,6 +256,9 @@ pub struct Win32 {
     root: u32,
     /// The registry, which ADVAPI32's functions work on.
     registry: registry::Registry,
+
+    /// The file mappings' memory, by the index their objects keep.
+    sections: Vec<Option<mapping::Section>>,
 }
 
 impl Win32 {
@@ -630,6 +638,7 @@ fn end_process(cpu: &mut Cpu, index: usize, code: u32) {
         pool.release(&mut cpu.bus);
     }
     cpu.bus.win32.objects = object::Objects::default();
+    cpu.bus.win32.sections.clear();
     cpu.bus.set_a20(a20);
     cpu.set_ax(0x4C00 | (code & 0xFF) as u16);
     if cpu.state == CpuState::Halted {
@@ -713,6 +722,7 @@ pub fn process_ended(cpu: &mut Cpu, psp: u16) {
             pool.release(&mut cpu.bus);
         }
         cpu.bus.win32.objects = object::Objects::default();
+        cpu.bus.win32.sections.clear();
         cpu.bus.set_a20(a20);
     }
     cpu.bus.win32.pending = None;
@@ -764,6 +774,8 @@ crate::state_fields!(Process {
     tls_used,
     environment,
     heap,
+    heaps,
+    moveables,
     startup,
     priority_class,
     error_mode,
@@ -785,4 +797,6 @@ crate::state_fields!(Win32 {
     ids,
     root,
     registry,
+
+    sections,
 } skip { enabled });

@@ -259,7 +259,7 @@ fn build(
 
     // The process heap.
     let heap = memory.reserve(None, HEAP_RESERVE, PRIVATE, SHARED)?;
-    process.heap = Heap::new(heap, HEAP_RESERVE);
+    process.heap = Heap::new(heap, HEAP_RESERVE, true);
 
     // The command line, in a block of the process's own.
     let data = memory.reserve(None, GRANULARITY, PRIVATE, SHARED)?;

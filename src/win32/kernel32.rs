@@ -2,6 +2,8 @@
 //! the other parts in the modules below.
 
 mod disk;
+mod global;
+mod mapping;
 mod memory;
 mod module;
 mod process;
@@ -9,6 +11,7 @@ mod sync;
 mod text;
 mod threads;
 mod time;
+mod virtual_memory;
 
 use super::stubs::{Api, Conv, Dll};
 use crate::cpu::Cpu;
@@ -226,6 +229,66 @@ static APIS: &[Api] = &[
     stdcall("GetProcessVersion", 501, 1, process::get_process_version),
     stdcall("FatalAppExitA", 502, 2, process::fatal_app_exit),
     stdcall("FatalExit", 503, 1, process::fatal_exit),
+
+    stdcall("VirtualAlloc", 200, 4, virtual_memory::virtual_alloc),
+    stdcall("VirtualFree", 201, 3, virtual_memory::virtual_free),
+    stdcall("VirtualProtect", 202, 4, virtual_memory::virtual_protect),
+    stdcall("VirtualProtectEx", 203, 5, virtual_memory::virtual_protect_ex),
+    stdcall("VirtualQuery", 204, 3, virtual_memory::virtual_query),
+    stdcall("VirtualQueryEx", 205, 4, virtual_memory::virtual_query_ex),
+    stdcall("VirtualLock", 206, 2, virtual_memory::virtual_lock),
+    stdcall("VirtualUnlock", 207, 2, virtual_memory::virtual_lock),
+    stdcall("HeapCreate", 208, 3, memory::heap_create),
+    stdcall("HeapDestroy", 209, 1, memory::heap_destroy),
+    stdcall("HeapValidate", 210, 3, memory::heap_validate),
+    stdcall("HeapCompact", 211, 2, memory::heap_compact),
+    stdcall("HeapLock", 212, 1, memory::heap_lock),
+    stdcall("HeapUnlock", 213, 1, memory::heap_lock),
+    stdcall("HeapWalk", 214, 2, not_implemented),
+    stdcall("GetProcessHeaps", 215, 2, memory::get_process_heaps),
+    stdcall("GlobalAlloc", 216, 2, global::global_alloc),
+    stdcall("GlobalFree", 217, 1, global::global_free),
+    stdcall("GlobalReAlloc", 218, 3, global::global_realloc),
+    stdcall("GlobalSize", 219, 1, global::global_size),
+    stdcall("GlobalLock", 220, 1, global::global_lock),
+    stdcall("GlobalUnlock", 221, 1, global::global_unlock),
+    stdcall("GlobalHandle", 222, 1, global::global_handle),
+    stdcall("GlobalFlags", 223, 1, global::global_flags),
+    stdcall("GlobalMemoryStatus", 224, 1, global::global_memory_status),
+    stdcall("GlobalCompact", 225, 1, global::global_compact),
+    stdcall("GlobalFix", 226, 1, global::global_fix),
+    stdcall("GlobalUnfix", 227, 1, global::global_unfix),
+    stdcall("GlobalWire", 228, 1, global::global_fix),
+    stdcall("GlobalUnWire", 229, 1, global::global_unfix),
+    stdcall("LocalAlloc", 230, 2, global::global_alloc),
+    stdcall("LocalFree", 231, 1, global::global_free),
+    stdcall("LocalReAlloc", 232, 3, global::global_realloc),
+    stdcall("LocalSize", 233, 1, global::global_size),
+    stdcall("LocalLock", 234, 1, global::global_lock),
+    stdcall("LocalUnlock", 235, 1, global::global_unlock),
+    stdcall("LocalHandle", 236, 1, global::global_handle),
+    stdcall("LocalFlags", 237, 1, global::global_flags),
+    stdcall("LocalCompact", 238, 1, global::global_compact),
+    stdcall("LocalShrink", 239, 2, global::local_shrink),
+    stdcall("IsBadReadPtr", 240, 2, virtual_memory::is_bad_read_ptr),
+    stdcall("IsBadWritePtr", 241, 2, virtual_memory::is_bad_write_ptr),
+    stdcall("IsBadCodePtr", 242, 1, virtual_memory::is_bad_code_ptr),
+    stdcall("IsBadStringPtrA", 243, 2, virtual_memory::is_bad_string_ptr_a),
+    stdcall("IsBadStringPtrW", 244, 2, virtual_memory::is_bad_string_ptr_w),
+    stdcall("IsBadHugeReadPtr", 245, 2, virtual_memory::is_bad_read_ptr),
+    stdcall("IsBadHugeWritePtr", 246, 2, virtual_memory::is_bad_write_ptr),
+    stdcall("RtlMoveMemory", 247, 3, virtual_memory::rtl_move_memory),
+    stdcall("RtlFillMemory", 248, 3, virtual_memory::rtl_fill_memory),
+    stdcall("RtlZeroMemory", 249, 2, virtual_memory::rtl_zero_memory),
+    stdcall("GetSystemInfo", 250, 1, virtual_memory::get_system_info),
+    stdcall("CreateFileMappingA", 251, 6, mapping::create_file_mapping_a),
+    stdcall("CreateFileMappingW", 252, 6, not_implemented),
+    stdcall("OpenFileMappingA", 253, 3, mapping::open_file_mapping_a),
+    stdcall("OpenFileMappingW", 254, 3, not_implemented),
+    stdcall("MapViewOfFile", 255, 5, mapping::map_view_of_file),
+    stdcall("MapViewOfFileEx", 256, 6, mapping::map_view_of_file_ex),
+    stdcall("UnmapViewOfFile", 257, 1, mapping::unmap_view_of_file),
+    stdcall("FlushViewOfFile", 258, 2, mapping::flush_view_of_file),
 ];
 
 /// The places in `APIS` of the system's own stubs.
