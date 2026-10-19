@@ -196,8 +196,10 @@ fn build(cc: &str, dll: &str, unit: &str, runtime: &str, program: &str) -> Resul
     .unwrap();
     let source = format!("{ROOT}/wine/{dll}/{unit}.c");
     let include = format!("-I{ROOT}/wine/include");
+    let compat = format!("{ROOT}/runtime/compat.h");
     let mut args = CFLAGS.to_vec();
-    args.extend([include.as_str(), "-nostdlib", "-Wl,-e,_mainCRTStartup"]);
+    args.extend([include.as_str(), "-include", compat.as_str()]);
+    args.extend(["-nostdlib", "-Wl,-e,_mainCRTStartup"]);
     args.extend([source.as_str(), list.as_str(), runtime]);
     args.extend(LIBS);
     args.extend(["-lgcc", "-o", program]);

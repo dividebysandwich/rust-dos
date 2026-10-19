@@ -576,3 +576,179 @@ fn a_program_uses_the_heap_tls_environment_and_exports() {
     );
     assert_eq!(code, 0x3F, "the checks that failed: {:06b}", !code & 0x3F);
 }
+
+/// A profile written through DOS's files reads back, and is on the disk
+/// as Windows writes it; a bit each in the exit code.
+#[test]
+fn a_program_writes_and_reads_a_profile() {
+    let names: &[&str] = &[
+        "WritePrivateProfileStringA",
+        "GetPrivateProfileIntA",
+        "GetPrivateProfileStringA",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The section, key, value and file; a buffer at 0x20.
+    let mut data = b"App\0key\x0042\0.\\T.INI\0".to_vec();
+    data.resize(0x40, 0);
+    let (code, _) = run(
+        "profile",
+        program(BASE, false, imports, &data, |a, l| {
+            let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+            a.xor(ebx, ebx)?;
+            a.push(l.at(0x0B) as i32)?;
+            a.push(l.at(0x08) as i32)?;
+            a.push(l.at(0x04) as i32)?;
+            a.push(l.at(0x00) as i32)?;
+            a.call(f("WritePrivateProfileStringA"))?;
+            a.cmp(eax, 1)?;
+            a.sete(bl)?;
+            // The value as a number.
+            a.push(l.at(0x0B) as i32)?;
+            a.push(7)?;
+            a.push(l.at(0x04) as i32)?;
+            a.push(l.at(0x00) as i32)?;
+            a.call(f("GetPrivateProfileIntA"))?;
+            a.cmp(eax, 42)?;
+            a.sete(al)?;
+            a.shl(al, 1)?;
+            a.or(bl, al)?;
+            // The section's keys: "key" and its zero, 4 bytes.
+            a.push(l.at(0x0B) as i32)?;
+            a.push(0x20)?;
+            a.push(l.at(0x20) as i32)?;
+            a.push(l.at(0x0A) as i32)?;
+            a.push(0)?;
+            a.push(l.at(0x00) as i32)?;
+            a.call(f("GetPrivateProfileStringA"))?;
+            a.cmp(eax, 4)?;
+            a.sete(al)?;
+            a.shl(al, 2)?;
+            a.or(bl, al)?;
+            // A key that isn't there gives the default.
+            a.push(l.at(0x0B) as i32)?;
+            a.push(7)?;
+            a.push(l.at(0x00) as i32)?;
+            a.push(l.at(0x00) as i32)?;
+            a.call(f("GetPrivateProfileIntA"))?;
+            a.cmp(eax, 7)?;
+            a.sete(al)?;
+            a.shl(al, 3)?;
+            a.or(bl, al)?;
+            a.mov(eax, ebx)?;
+            a.ret()
+        }),
+    );
+    assert_eq!(code, 0xF, "the checks that failed: {:04b}", !code & 0xF);
+    let file = fs::read("target/test_win32/profile/T.INI").unwrap();
+    assert_eq!(file, b"[App]\r\nkey=42\r\n");
+}
+
+/// FormatMessageA's inserts, EnumSystemLocalesA calling the program
+/// back, MulDiv, GetDateFormatA, the performance counter's rate and
+/// lstrcmpiA; a bit each in the exit code.
+#[test]
+fn a_program_formats_text_and_enumerates_locales() {
+    let names: &[&str] = &[
+        "FormatMessageA",
+        "EnumSystemLocalesA",
+        "MulDiv",
+        "GetDateFormatA",
+        "QueryPerformanceFrequency",
+        "lstrcmpiA",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The message, its string insert, two strings to compare, a date
+    // picture and the date (2 January 2000); the inserts' array at 0x40,
+    // the callback's count at 0x48, the rate at 0x50 and buffers at 0x60
+    // and 0xA0.
+    let mut data = vec![0u8; 0xC0];
+    data[0x00..0x09].copy_from_slice(b"%1!d!-%2\0");
+    data[0x10..0x12].copy_from_slice(b"x\0");
+    data[0x14..0x18].copy_from_slice(b"abc\0");
+    data[0x18..0x1C].copy_from_slice(b"ABC\0");
+    data[0x20..0x2F].copy_from_slice(b"yyyy-MM-dd ddd\0");
+    data[0x30..0x38].copy_from_slice(&[0xD0, 0x07, 1, 0, 0, 0, 2, 0]);
+    data[0x40] = 5;
+    let (code, _) = run(
+        "format",
+        program(BASE, false, imports, &data, |a, l| {
+            let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+            a.xor(ebx, ebx)?;
+            // "%1!d!-%2" with 5 and "x" from an array: "5-x".
+            a.mov(dword_ptr(l.at(0x44)), l.at(0x10) as u32)?;
+            a.push(l.at(0x40) as i32)?;
+            a.push(0x40)?;
+            a.push(l.at(0x60) as i32)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.push(l.at(0x00) as i32)?;
+            a.push(0x2400)?;
+            a.call(f("FormatMessageA"))?;
+            a.cmp(eax, 3)?;
+            a.sete(bl)?;
+            a.cmp(dword_ptr(l.at(0x60)), 0x0078_2D35)?;
+            a.sete(al)?;
+            a.and(bl, al)?;
+            // One locale, then TRUE. The call over the callback pushes its
+            // address, the first argument.
+            let mut enumerate = a.create_label();
+            a.push(1)?;
+            a.call(enumerate)?;
+            // The callback: counts its calls and goes on.
+            a.add(dword_ptr(l.at(0x48)), 1)?;
+            a.mov(eax, 1)?;
+            a.ret_1(4)?;
+            a.set_label(&mut enumerate)?;
+            a.call(f("EnumSystemLocalesA"))?;
+            a.cmp(dword_ptr(l.at(0x48)), 1)?;
+            a.sete(cl)?;
+            a.cmp(eax, 1)?;
+            a.sete(al)?;
+            a.and(al, cl)?;
+            a.shl(al, 1)?;
+            a.or(bl, al)?;
+            // 10 * 3 / 4 = 7.5, rounded up.
+            a.push(4)?;
+            a.push(3)?;
+            a.push(10)?;
+            a.call(f("MulDiv"))?;
+            a.cmp(eax, 8)?;
+            a.sete(al)?;
+            a.shl(al, 2)?;
+            a.or(bl, al)?;
+            // "2000-01-02 Sun", the day of the week worked out.
+            a.push(0x20)?;
+            a.push(l.at(0xA0) as i32)?;
+            a.push(l.at(0x20) as i32)?;
+            a.push(l.at(0x30) as i32)?;
+            a.push(0)?;
+            a.push(0x409)?;
+            a.call(f("GetDateFormatA"))?;
+            a.cmp(eax, 15)?;
+            a.sete(cl)?;
+            a.cmp(dword_ptr(l.at(0xAB)), 0x006E_7553)?;
+            a.sete(al)?;
+            a.and(al, cl)?;
+            a.shl(al, 3)?;
+            a.or(bl, al)?;
+            // The PIT's rate.
+            a.push(l.at(0x50) as i32)?;
+            a.call(f("QueryPerformanceFrequency"))?;
+            a.cmp(dword_ptr(l.at(0x50)), 1_193_182)?;
+            a.sete(al)?;
+            a.shl(al, 4)?;
+            a.or(bl, al)?;
+            // The same but for case.
+            a.push(l.at(0x18) as i32)?;
+            a.push(l.at(0x14) as i32)?;
+            a.call(f("lstrcmpiA"))?;
+            a.test(eax, eax)?;
+            a.sete(al)?;
+            a.shl(al, 5)?;
+            a.or(bl, al)?;
+            a.mov(eax, ebx)?;
+            a.ret()
+        }),
+    );
+    assert_eq!(code, 0x3F, "the checks that failed: {:06b}", !code & 0x3F);
+}

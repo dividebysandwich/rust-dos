@@ -39,6 +39,7 @@ pub static THENS: &[Then] = &[
     seh::unwind_handler_returned,
     seh::filter_returned,
     super::thread::attached,
+    super::kernel32::enum_returned,
 ];
 
 /// The `THENS` places, by name.
@@ -46,6 +47,7 @@ pub const SEH_HANDLER: u16 = 0;
 pub const SEH_UNWIND: u16 = 1;
 pub const SEH_FILTER: u16 = 2;
 pub const THREAD_ATTACHED: u16 = 3;
+pub const ENUM_STRINGS: u16 = 4;
 
 /// Call the program's function at `target` with `args` (the first pushed
 /// last, as C does), on the running thread's stack below ESP. When it

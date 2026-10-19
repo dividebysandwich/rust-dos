@@ -13,7 +13,9 @@ where they differ from NT's.
 
 - `include/wine/test.h`, the test framework;
 - `kernel32/`: `drive.c`, `fiber.c`, `time.c`, `timer.c`, `version.c`
-  from `dlls/kernel32/tests/`.
+  from `dlls/kernel32/tests/`;
+- `kernel32/`: `codepage.c`, `environ.c`, `format_msg.c`, `locale.c`,
+  `profile.c` from `dlls/kernel32/tests/`.
 
 Of the 1.x releases compared (1.0.1, 1.2.3, 1.4.1, 1.6.2, 1.8.7), 1.2.3's
 kernel32 tests mention Windows 9x the most: later releases took many of
@@ -23,6 +25,11 @@ file is listed here.
 They are under the LGPL, version 2.1 or later (`wine/COPYING.LIB`), with
 their copyright notices. rust-dos is GPL-2.0-or-later, which LGPL code
 may be used under.
+
+`runtime/compat.h` is rust-dos's own: the few names the tests take from
+Wine's headers that MinGW's lack (`__ms_va_list` and its macros,
+`LOCALE_RETURN_GENITIVE_NAMES`). Each test file is built with it
+included first, so the files stay unchanged.
 
 `runtime/runtime.c` is rust-dos's own: the C runtime the tests link in
 place of MSVCRT.DLL, which the built-in Windows doesn't have yet. It has
