@@ -478,6 +478,11 @@ pub(super) fn rtl_move_memory(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[to, from, len] = args else {
         unreachable!()
     };
+    if !cpu.bus.guest_probe(from, len as usize, false)
+        || !cpu.bus.guest_probe(to, len as usize, true)
+    {
+        return None;
+    }
     let mut data = vec![0; len as usize];
     cpu.bus.guest_read_bytes(from, &mut data);
     if cpu.bus.guest_faulted() {

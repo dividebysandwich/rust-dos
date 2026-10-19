@@ -36,7 +36,7 @@ const MAX_DIGITS: usize = 17;
 
 /// The most digits a number's precision asks for that MSVCRT gives: its
 /// buffer's size, MAXPRECISION.
-const MAX_PRECISION: usize = 512;
+pub(super) const MAX_PRECISION: usize = 512;
 
 /// The widest a field gets here. MSVCRT has no limit and writes a width
 /// of 2^31 - 1 out space by space; this stops at 16 M characters, so a
@@ -190,7 +190,7 @@ fn integer(out: &mut Vec<u16>, spec: &Spec, value: u64, negative: bool, conv: u8
 }
 
 /// MSVCRT's text for an infinity or NaN with `precision` digits.
-fn special(v: f64, precision: usize) -> String {
+pub(super) fn special(v: f64, precision: usize) -> String {
     let name = if v.is_infinite() {
         "1#INF"
     } else if v.is_sign_negative() {

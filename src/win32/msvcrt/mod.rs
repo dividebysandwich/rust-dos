@@ -315,8 +315,11 @@ fn wstr_n(cpu: &mut Cpu, at: u32, max: usize) -> Option<Vec<u16>> {
     Some(chars)
 }
 
-/// `len` bytes at `at`.
+/// `len` bytes at `at`, all of them there before any is read.
 fn bytes(cpu: &mut Cpu, at: u32, len: u32) -> Option<Vec<u8>> {
+    if !cpu.bus.guest_probe(at, len as usize, false) {
+        return None;
+    }
     let mut data = vec![0; len as usize];
     cpu.bus.guest_read_bytes(at, &mut data);
     (!cpu.bus.guest_faulted()).then_some(data)

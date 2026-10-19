@@ -347,6 +347,9 @@ pub fn mbsnbcpy(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if n == 0 {
         return Some(to);
     }
+    if !cpu.bus.guest_probe(to, n, true) {
+        return None;
+    }
     let s = cstr_n(cpu, from, n)?;
     let mut lead = false;
     for &b in &s {

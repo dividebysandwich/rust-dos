@@ -40,25 +40,45 @@ fn order(o: std::cmp::Ordering) -> u32 {
     o as i32 as u32
 }
 
+/// `count` bytes in pieces of a page or less, as (offset, length), so
+/// that memchr and memcmp read little past where they stop, as C's do.
+fn pieces(count: u32) -> impl Iterator<Item = (u32, u32)> {
+    (0..count).step_by(0x1000).map(move |at| (at, (count - at).min(0x1000)))
+}
+
 /// memcmp(a, b, count).
 pub fn memcmp(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let a = bytes(cpu, args[0], args[2])?;
-    let b = bytes(cpu, args[1], args[2])?;
-    Some(order(a.cmp(&b)))
+    for (at, len) in pieces(args[2]) {
+        let a = bytes(cpu, args[0].wrapping_add(at), len)?;
+        let b = bytes(cpu, args[1].wrapping_add(at), len)?;
+        if a != b {
+            return Some(order(a.cmp(&b)));
+        }
+    }
+    Some(0)
 }
 
 /// _memicmp(a, b, count).
 pub fn memicmp(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let a = bytes(cpu, args[0], args[2])?;
-    let b = bytes(cpu, args[1], args[2])?;
-    Some(order(lower(&a).cmp(&lower(&b))))
+    for (at, len) in pieces(args[2]) {
+        let a = lower(&bytes(cpu, args[0].wrapping_add(at), len)?);
+        let b = lower(&bytes(cpu, args[1].wrapping_add(at), len)?);
+        if a != b {
+            return Some(order(a.cmp(&b)));
+        }
+    }
+    Some(0)
 }
 
 /// memchr(at, byte, count).
 pub fn memchr(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let data = bytes(cpu, args[0], args[2])?;
-    let found = data.iter().position(|&b| b == args[1] as u8);
-    Some(found.map_or(0, |i| args[0] + i as u32))
+    for (at, len) in pieces(args[2]) {
+        let data = bytes(cpu, args[0].wrapping_add(at), len)?;
+        if let Some(i) = data.iter().position(|&b| b == args[1] as u8) {
+            return Some(args[0].wrapping_add(at + i as u32));
+        }
+    }
+    Some(0)
 }
 
 /// _memccpy(to, from, byte, count): copies up to and with `byte`; the
@@ -114,6 +134,9 @@ pub fn strcpy(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// strncpy(to, from, count): zeros after the string to `count`.
 pub fn strncpy(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    if !cpu.bus.guest_probe(args[0], args[2] as usize, true) {
+        return None;
+    }
     let mut s = cstr_n(cpu, args[1], args[2] as usize)?;
     s.resize(args[2] as usize, 0);
     put(cpu, args[0], &s)?;
@@ -390,6 +413,10 @@ pub fn wcscpy(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 pub fn wcsncpy(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let room = (args[2] as usize).saturating_mul(2);
+    if !cpu.bus.guest_probe(args[0], room, true) {
+        return None;
+    }
     let mut s = wstr_n(cpu, args[1], args[2] as usize)?;
     s.resize(args[2] as usize, 0);
     let data: Vec<u8> = s.iter().flat_map(|c| c.to_le_bytes()).collect();
@@ -1132,10 +1159,26 @@ fn give_cvt(cpu: &mut Cpu, digits: &[u8], decpt: i32, negative: bool, args: &[u3
     Some(at)
 }
 
+/// The count of _ecvt or _fcvt, within what printf would give.
+fn cvt_count(args: &[u32]) -> i32 {
+    let most = format::MAX_PRECISION as i32;
+    (args[2] as i32).clamp(-most, most)
+}
+
+/// _ecvt or _fcvt of infinity or a NaN: printf's text without the point,
+/// with the point after its first digit.
+fn cvt_special(cpu: &mut Cpu, v: f64, count: i32, args: &[u32]) -> Option<u32> {
+    let text = format::special(v, count.max(1) as usize - 1).replace('.', "");
+    give_cvt(cpu, text.as_bytes(), 1, v.is_sign_negative(), args)
+}
+
 /// _ecvt(value, count, decpt, sign): `count` significant digits.
 pub fn ecvt(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let v = f64_arg(args, 0);
-    let count = args[2] as i32;
+    let count = cvt_count(args);
+    if !v.is_finite() {
+        return cvt_special(cpu, v, count, args);
+    }
     let negative = v.is_sign_negative() && v != 0.0;
     if v == 0.0 {
         let digits = vec![b'0'; count.max(0) as usize];
@@ -1160,7 +1203,10 @@ pub fn ecvt(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// (before it, when negative).
 pub fn fcvt(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let v = f64_arg(args, 0);
-    let count = args[2] as i32;
+    let count = cvt_count(args);
+    if !v.is_finite() {
+        return cvt_special(cpu, v, count, args);
+    }
     let negative = v.is_sign_negative() && v != 0.0;
     if v == 0.0 {
         let digits = vec![b'0'; count.max(0) as usize];
@@ -1194,7 +1240,12 @@ pub fn gcvt(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_errno(cpu, ERANGE);
         return Some(0);
     }
-    let mut text = format::g_text(v.abs(), count as usize, false, false);
+    let count = (count as usize).min(format::MAX_PRECISION);
+    let mut text = if v.is_finite() {
+        format::g_text(v.abs(), count, false, false)
+    } else {
+        format::special(v, count.max(1) - 1)
+    };
     if v.is_sign_negative() && v != 0.0 {
         text.insert(0, '-');
     }

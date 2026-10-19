@@ -255,7 +255,7 @@ pub(super) fn create_file_mapping_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> 
     let size = contents.as_ref().map_or(size, |c| c.len() as u32);
     let count = size.div_ceil(PAGE);
     let reserve = protect & SEC_RESERVE != 0 && contents.is_none();
-    let Some(base) = place(cpu, count * PAGE) else {
+    let Some(base) = count.checked_mul(PAGE).and_then(|len| place(cpu, len)) else {
         set_error(cpu, ERROR_NOT_ENOUGH_MEMORY);
         return Some(0);
     };
