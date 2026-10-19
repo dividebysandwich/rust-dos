@@ -21,6 +21,7 @@ mod kernel32;
 mod loader;
 mod mapping;
 mod memory;
+mod msvcrt;
 mod object;
 mod registry;
 mod seh;
@@ -522,6 +523,21 @@ fn create_process(
             process.handles.add(id)
         }),
     };
+    // The built-in DLLs' variables, which the standard handles go in.
+    if stubs::init_process(&mut cpu.bus, &mut process).is_none() {
+        let objects = &mut cpu.bus.win32.objects;
+        for (_, id) in process.handles.iter() {
+            objects.release(id);
+        }
+        objects.release(process.object);
+        process.memory.release(&mut cpu.bus);
+        return Err(format!(
+            "There isn't enough extended memory to run {}.",
+            process.name
+        ));
+    }
+    let win32 = &mut cpu.bus.win32;
+    let objects = &mut win32.objects;
     // The main thread, which runs the program's entry point, after the
     // entry points of the DLLs it came with when there are any: from
     // KERNEL32's process start, with the entry point in EAX.

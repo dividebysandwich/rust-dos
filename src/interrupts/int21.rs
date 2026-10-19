@@ -354,7 +354,8 @@ fn edit_line(cpu: &mut Cpu, max: usize, buffer: (u16, u16)) -> Option<Vec<u8>> {
 /// handed out with its CR LF over as many reads as it takes. The end of
 /// the host's standard input (`rust-dos run`) is the end of the file: no
 /// bytes. None while it waits for keys (`edit_line`, with `buffer`).
-/// Kernel32's ReadFile and ReadConsoleA read the console so too.
+/// Kernel32's ReadFile and ReadConsoleA and the built-in Windows's C
+/// runtime read the console so too.
 pub(crate) fn read_console(cpu: &mut Cpu, count: usize, buffer: (u16, u16)) -> Option<Vec<u8>> {
     if cpu.con_pending.is_empty() && count > 0 {
         if cpu.host_console.as_ref().is_some_and(|c| c.input_ended)

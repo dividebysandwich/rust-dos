@@ -114,3 +114,44 @@ kernel32/virtual: skipped virtual.c:609
 kernel32/virtual: skipped virtual.c:634
 kernel32/virtual: skipped virtual.c:795
 kernel32/virtual: skipped virtual.c:952
+msvcrt/data: data: 7 tests executed (0 marked as todo, 0 failures), 1 skipped.
+msvcrt/data: skipped data.c:96
+msvcrt/dir: dir: 53 tests executed (0 marked as todo, 0 failures), 1 skipped.
+msvcrt/dir: skipped dir.c:225
+msvcrt/environ: environ: 10 tests executed (0 marked as todo, 1 failure), 0 skipped.
+msvcrt/environ: failed environ.c:51
+msvcrt/file: ended: FILE.EXE ended: page fault (exception 0Eh, error 5, address 00000000)
+msvcrt/file: failed file.c:1021
+msvcrt/file: failed file.c:1023
+msvcrt/file: failed file.c:988 (x3)
+msvcrt/file: failed file.c:994 (x3)
+msvcrt/file: failed file.c:850
+msvcrt/file: failed file.c:851
+msvcrt/file: failed file.c:1241
+msvcrt/file: failed file.c:1265
+msvcrt/file: skipped file.c:1289
+msvcrt/file: failed file.c:63
+msvcrt/file: failed file.c:65
+msvcrt/file: failed file.c:1175
+msvcrt/file: exit code 255
+msvcrt/heap: heap: 5 tests executed (0 marked as todo, 0 failures), 1 skipped.
+msvcrt/heap: skipped heap.c:249
+msvcrt/printf: printf: 354 tests executed (0 marked as todo, 0 failures), 3 skipped.
+msvcrt/printf: skipped printf.c:844
+msvcrt/printf: skipped printf.c:871
+msvcrt/printf: skipped printf.c:902
+msvcrt/scanf: scanf: 69 tests executed (0 marked as todo, 0 failures), 1 skipped.
+msvcrt/scanf: skipped scanf.c:210
+msvcrt/signal: signal: 3 tests executed (0 marked as todo, 0 failures), 0 skipped.
+msvcrt/string: string: 1234 tests executed (0 marked as todo, 0 failures), 9 skipped.
+msvcrt/string: skipped string.c:430
+msvcrt/string: skipped string.c:484
+msvcrt/string: skipped string.c:548
+msvcrt/string: skipped string.c:595
+msvcrt/string: skipped string.c:642
+msvcrt/string: skipped string.c:926
+msvcrt/string: skipped string.c:957
+msvcrt/string: skipped string.c:1128
+msvcrt/string: skipped string.c:1201
+msvcrt/time: time: 29 tests executed (0 marked as todo, 0 failures), 1 skipped.
+msvcrt/time: skipped time.c:66

@@ -22,6 +22,7 @@ mod time;
 mod virtual_memory;
 
 pub(super) use locale::enum_returned;
+pub(super) use path::{change_directory, current_directory, full_path};
 
 use super::stubs::{Api, Conv, Dll};
 use crate::cpu::Cpu;
@@ -32,6 +33,8 @@ pub static DLL: Dll = Dll {
     name: "KERNEL32.DLL",
     base: 0xBFF7_0000,
     apis: APIS,
+    vars: &[],
+    init: None,
 };
 
 const fn stdcall(

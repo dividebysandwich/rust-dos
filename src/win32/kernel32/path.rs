@@ -71,7 +71,7 @@ fn drive_of(full: &str) -> u8 {
 /// The current directory of the drive `drive`, fully qualified ("C:\" or
 /// "C:\GAMES"): as SetCurrentDirectoryA was given it, with long names,
 /// while DOS's is still that directory.
-pub(super) fn current_directory(cpu: &Cpu, drive: u8) -> String {
+pub(crate) fn current_directory(cpu: &Cpu, drive: u8) -> String {
     let dir = cpu
         .bus
         .disk
@@ -90,7 +90,7 @@ pub(super) fn current_directory(cpu: &Cpu, drive: u8) -> String {
 /// names or the current one, from its root or that drive's current
 /// directory, with "." and ".." taken out. It ends with a backslash when
 /// `path` does. Network paths ("\\server\share") stay as they are.
-pub(super) fn full_path(cpu: &Cpu, path: &str) -> String {
+pub(crate) fn full_path(cpu: &Cpu, path: &str) -> String {
     let path = path.replace('/', "\\");
     if path.starts_with("\\\\") {
         return path;
@@ -209,13 +209,22 @@ pub(super) fn set_current_directory(cpu: &mut Cpu, args: &[u32]) -> Option<u32> 
         set_error(cpu, ERROR_PATH_NOT_FOUND);
         return Some(FALSE);
     }
-    let full = full_path(cpu, &dos_path(&name));
+    if let Err(code) = change_directory(cpu, &name) {
+        set_error(cpu, code);
+        return Some(FALSE);
+    }
+    Some(TRUE)
+}
+
+/// Make the directory `name` and its drive the current ones, as
+/// SetCurrentDirectoryA and MSVCRT's _chdir do: the error code when it
+/// isn't there.
+pub(crate) fn change_directory(cpu: &mut Cpu, name: &str) -> Result<(), u32> {
+    let full = full_path(cpu, &dos_path(name));
     let full = trim_slash(&full).to_string();
     let disk = &mut cpu.bus.disk;
     if !disk.is_directory(&full) || !disk.set_current_directory(&full) {
-        let code = not_found(cpu, &full);
-        set_error(cpu, code);
-        return Some(FALSE);
+        return Err(not_found(cpu, &full));
     }
     let drive = drive_of(&full);
     disk.set_current_drive(drive);
@@ -233,7 +242,7 @@ pub(super) fn set_current_directory(cpu: &mut Cpu, args: &[u32]) -> Option<u32> 
     if !short.eq_ignore_ascii_case(&full) {
         long_dirs.push((short, full));
     }
-    Some(TRUE)
+    Ok(())
 }
 
 /// GetFullPathNameA(path, size, buffer, filepart).

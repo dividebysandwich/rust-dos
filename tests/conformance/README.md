@@ -18,7 +18,11 @@ change listed below:
   `loader.c`, `locale.c`, `module.c`, `path.c`, `profile.c`, `sync.c`,
   `thread.c`, `time.c`, `timer.c`, `version.c`, `virtual.c` from
   `dlls/kernel32/tests/`;
-- `advapi32/`: `registry.c` from `dlls/advapi32/tests/`.
+- `advapi32/`: `registry.c` from `dlls/advapi32/tests/`;
+- `msvcrt/`: `data.c`, `dir.c`, `environ.c`, `file.c`, `heap.c`,
+  `printf.c`, `scanf.c`, `signal.c`, `string.c`, `time.c` from
+  `dlls/msvcrt/tests/`. `misc.c` is left out: it includes Wine's own
+  `msvcrt.h`, which isn't among these files.
 
 `heap.c` has the values of the `FLG_HEAP_*` and `FLG_POOL_ENABLE_TAGGING`
 flags defined after its includes, from Wine's `winternl.h`, as MinGW's
@@ -38,10 +42,23 @@ Wine's headers that MinGW's lack (`__ms_va_list` and its macros,
 `LOCALE_RETURN_GENITIVE_NAMES`). Each test file is built with it
 included first, so the files stay unchanged.
 
-`runtime/runtime.c` is rust-dos's own: the C runtime the tests link in
-place of MSVCRT.DLL, which the built-in Windows doesn't have yet. It has
-the startup code and the parts of the C library that the framework and
-the tests use, written on KERNEL32 alone.
+`runtime/runtime.c` is rust-dos's own: the C runtime the kernel32
+tests link in place of MSVCRT.DLL, so that they test KERNEL32 alone. It
+has the startup code and the parts of the C library that the framework
+and the tests use, written on KERNEL32 alone.
+
+The msvcrt tests test the built-in MSVCRT.DLL, so they are linked as
+MinGW links any program: its startup code (`crt2.o`) and `-lmsvcrt`,
+without `runtime.c`. They are built with two more options:
+
+- `-fno-printf-return-value`, so that GCC calls sprintf for what it
+  returns instead of counting it by C99's rules, which MSVCRT's
+  formats (`%I64d`, `%lld`) don't follow;
+- `-D__NO_ISOCEXT`, so that MinGW's headers keep MSVCRT's strtod
+  instead of putting MinGW's own in its place.
+
+`crt2.o` uses CMOVcc, so these programs run on a Pentium Pro; the
+kernel32 ones on a 486.
 
 ## Running them
 
@@ -82,6 +99,16 @@ the file's diff. When it is right, write the results anew:
 ```sh
 CONFORMANCE_BLESS=1 cargo test --test conformance_tests
 ```
+
+The msvcrt results that aren't clean, and why:
+
+- `environ.c:51` and `file.c:1021`, `file.c:1023`: `system` and the
+  `_spawn` functions only fail with ENOENT, as the built-in Windows
+  can't start a command interpreter. `system(NULL)` still returns 1,
+  as Windows 95's does, since there is one there.
+- `dir` and `file` end where they call KERNEL32's file functions
+  (`GetCurrentDirectoryA`, `CreateFileA`), which the built-in KERNEL32
+  doesn't have yet. The built-in MSVCRT's own file functions use DOS.
 
 ## Adding tests
 

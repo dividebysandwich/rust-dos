@@ -9,7 +9,9 @@
 //! kernel32's (module.rs), once the loader is done.
 
 use super::heap::Heap;
-use super::memory::{GRANULARITY, Memory, PAGE, PRIVATE, SHARED, SYSTEM, USER, WRITABLE};
+use super::memory::{
+    GRANULARITY, Memory, PAGE, PAGE_READWRITE, PRIVATE, SHARED, SYSTEM, USER, WRITABLE,
+};
 use super::stubs::{self, STUB};
 use super::system::{self, SYSTEM_BLOCK_PAGES};
 use super::{FIRST_MISSING, MAX_MISSING, Module, Process};
@@ -540,6 +542,15 @@ pub(super) fn map_builtin(
     memory.reserve(Some(dll.base), size, SHARED, SYSTEM)?;
     memory.commit(bus, dll.base, size.next_multiple_of(PAGE), USER)?;
     memory.write(bus, dll.base, &built.data)?;
+    // Read only but for its variables.
+    for section in built.headers.sections.iter().filter(|s| s.writable()) {
+        let end = section.rva + section.mapped_size();
+        for page in (section.rva..end).step_by(PAGE as usize) {
+            if !memory.set_protection(bus, dll.base + page, PAGE_READWRITE) {
+                return None;
+            }
+        }
+    }
     for page in (dll.base..dll.base + size).step_by(PAGE as usize) {
         process.stub_pages.push(memory.translate(bus, page)? >> 12);
     }
@@ -553,6 +564,13 @@ pub(super) fn map_builtin(
         flags: BUILTIN,
         deps: Vec::new(),
     });
+    // Its variables: for a process that runs already (LoadLibrary);
+    // `create_process` fills those of the DLLs a program starts with.
+    if !process.threads.is_empty()
+        && let Some(init) = dll.init
+    {
+        init(bus, process)?;
+    }
     Some(dll.base)
 }
 
