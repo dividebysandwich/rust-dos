@@ -7,6 +7,7 @@
 //! FlushViewOfFile. Windows 95 doesn't check a handle's access; the
 //! mapping's protection says what views may do.
 
+use super::file::{GENERIC_READ, GENERIC_WRITE};
 use super::{
     ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, ERROR_NOT_ENOUGH_MEMORY,
     FALSE, INVALID_HANDLE_VALUE, TRUE, set_error, string_at,
@@ -41,7 +42,7 @@ fn section_of(cpu: &mut Cpu, handle: u32) -> Option<usize> {
 }
 
 /// DOS's open file (its SFT entry) of a DOS handle.
-fn sft(cpu: &mut Cpu, dos: u16) -> Option<u16> {
+fn sft_of_handle(cpu: &mut Cpu, dos: u16) -> Option<u16> {
     let psp = cpu.current_psp;
     crate::dos_files::sft_of(&mut cpu.bus, psp, dos)
 }
@@ -51,7 +52,7 @@ fn write_back(cpu: &mut Cpu, index: usize) {
     let Some(Some(section)) = cpu.bus.win32.sections.get(index) else {
         return;
     };
-    let (Some((_, dos)), PAGE_READWRITE) = (section.file, section.protect) else {
+    let (Some((_, sft)), PAGE_READWRITE) = (section.file, section.protect) else {
         return;
     };
     let mut data = Vec::with_capacity(section.size as usize);
@@ -59,9 +60,6 @@ fn write_back(cpu: &mut Cpu, index: usize) {
         let len = (section.size - i as u32 * PAGE).min(PAGE);
         data.extend((0..len).map(|b| cpu.bus.read_8((phys + b) as usize)));
     }
-    let Some(sft) = sft(cpu, dos) else {
-        return;
-    };
     let disk = &mut cpu.bus.disk;
     let Ok(position) = disk.seek_file(sft, 0, 1) else {
         return;
@@ -133,11 +131,10 @@ fn place(cpu: &mut Cpu, len: u32) -> Option<u32> {
     }
 }
 
-/// The contents of the file `dos` (DOS's handle) from its start, `len`
+/// The contents of the file `sft` (DOS's open file) from its start, `len`
 /// bytes of it, the file made that long first when `grow` (with zeroes);
 /// its size when `len` is None.
-fn read_file(cpu: &mut Cpu, dos: u16, len: Option<u32>, grow: bool) -> Result<Vec<u8>, u32> {
-    let sft = sft(cpu, dos).ok_or(ERROR_INVALID_HANDLE)?;
+fn read_file(cpu: &mut Cpu, sft: u16, len: Option<u32>, grow: bool) -> Result<Vec<u8>, u32> {
     let disk = &mut cpu.bus.disk;
     let position = disk
         .seek_file(sft, 0, 1)
@@ -211,24 +208,38 @@ pub(super) fn create_file_mapping_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> 
             set_error(cpu, ERROR_INVALID_HANDLE);
             return Some(0);
         };
-        let Some(Kind::Dos { handle: dos }) = object::kind_of(cpu, file) else {
+        // The file's entry in DOS's file table, and whether it was
+        // opened for reading and for writing.
+        let (sft, read, write) = match object::kind_of(cpu, file) {
+            Some(Kind::File { sft, access, .. }) => (
+                Some(sft),
+                access & GENERIC_READ != 0,
+                access & GENERIC_WRITE != 0,
+            ),
+            Some(Kind::Dos { handle }) => {
+                let sft = sft_of_handle(cpu, handle);
+                // What it was opened for: 0 reading, 1 writing, 2 both.
+                let mode = sft
+                    .and_then(|sft| cpu.bus.disk.open_mode(sft))
+                    .map_or(0, |m| m & 3);
+                (sft, mode != 1, mode != 0)
+            }
+            _ => (None, false, false),
+        };
+        let Some(sft) = sft else {
             set_error(cpu, ERROR_INVALID_HANDLE);
             return Some(0);
         };
-        // What the file was opened for: 0 reading, 1 writing, 2 both.
-        let mode = sft(cpu, dos)
-            .and_then(|sft| cpu.bus.disk.open_mode(sft))
-            .map_or(0, |m| m & 3);
         let allowed = match access {
-            PAGE_READWRITE => mode == 2,
-            _ => mode != 1,
+            PAGE_READWRITE => read && write,
+            _ => read,
         };
         if !allowed {
             set_error(cpu, ERROR_ACCESS_DENIED);
             return Some(0);
         }
         let len = (size != 0).then_some(size);
-        let data = match read_file(cpu, dos, len, access == PAGE_READWRITE) {
+        let data = match read_file(cpu, sft, len, access == PAGE_READWRITE) {
             Ok(data) => data,
             Err(error) => {
                 set_error(cpu, error);
@@ -239,7 +250,7 @@ pub(super) fn create_file_mapping_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> 
             set_error(cpu, ERROR_FILE_INVALID);
             return Some(0);
         }
-        (Some(data), Some((id, dos)))
+        (Some(data), Some((id, sft)))
     };
     let size = contents.as_ref().map_or(size, |c| c.len() as u32);
     let count = size.div_ceil(PAGE);

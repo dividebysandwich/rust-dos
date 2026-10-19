@@ -99,6 +99,8 @@ fn program_name(unit: &str) -> String {
 /// run, as Wine's runner passes it: what it printed, and its exit code if
 /// it ended.
 fn run(dir: &Path, name: &str, unit: &str) -> (String, Option<u8>) {
+    // The Windows and system directories the built-in Windows names.
+    fs::create_dir_all(dir.join("WINDOWS").join("SYSTEM")).unwrap();
     let mut cpu = Cpu::new(dir.to_path_buf());
     cpu.bus.win32.enabled = true;
     cpu.host_console = Some(HostConsole::default());

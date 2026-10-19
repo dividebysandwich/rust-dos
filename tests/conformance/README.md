@@ -13,9 +13,9 @@ where they differ from NT's.
 change listed below:
 
 - `include/wine/test.h`, the test framework;
-- `kernel32/`: `alloc.c`, `drive.c`, `fiber.c`, `heap.c`, `sync.c`,
-  `thread.c`, `time.c`, `timer.c`, `version.c`, `virtual.c` from
-  `dlls/kernel32/tests/`;
+- `kernel32/`: `alloc.c`, `directory.c`, `drive.c`, `fiber.c`, `file.c`,
+  `heap.c`, `path.c`, `sync.c`, `thread.c`, `time.c`, `timer.c`,
+  `version.c`, `virtual.c` from `dlls/kernel32/tests/`;
 - `advapi32/`: `registry.c` from `dlls/advapi32/tests/`.
 
 `heap.c` has the values of the `FLG_HEAP_*` and `FLG_POOL_ENABLE_TAGGING`

@@ -40,6 +40,33 @@ pub enum Kind {
     Process { id: u32, exit_code: Option<u32> },
     /// A file mapping: its memory, `Win32::sections[section]`.
     Mapping { section: u32 },
+
+    /// A file or device CreateFileA opened through DOS: its entry in DOS's
+    /// file table, which it holds until the object goes, and the access it
+    /// was opened for (GENERIC_READ, GENERIC_WRITE) and the sharing it
+    /// allows (FILE_SHARE_READ, FILE_SHARE_WRITE); the ranges LockFile
+    /// locked, as (offset, length).
+    File {
+        sft: u16,
+        access: u32,
+        share: u32,
+        locks: Vec<(u32, u32)>,
+    },
+    /// A search of FindFirstFileA: the entries it has still to give.
+    Find { entries: Vec<FindEntry> },
+}
+
+/// A file or directory a search found, as WIN32_FIND_DATA has it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FindEntry {
+    pub attributes: u32,
+    /// Its DOS date and time.
+    pub date: u16,
+    pub time: u16,
+    pub size: u32,
+    pub name: String,
+    /// Its 8.3 name when that isn't `name`, or empty.
+    pub short: String,
 }
 
 impl Default for Kind {
@@ -64,6 +91,9 @@ pub struct Object {
 #[derive(Clone, Debug, Default)]
 pub struct Objects {
     pub objects: Vec<Option<Object>>,
+    /// The DOS file table entries of files whose objects went, which
+    /// `close_files` closes.
+    pub closed: Vec<u16>,
 }
 
 impl Objects {
@@ -107,6 +137,9 @@ impl Objects {
         {
             object.refs = object.refs.saturating_sub(1);
             if object.refs == 0 {
+                if let Kind::File { sft, .. } = object.kind {
+                    self.closed.push(sft);
+                }
                 *slot = None;
             }
         }
@@ -209,10 +242,30 @@ pub fn close(cpu: &mut Cpu, handle: u32) -> bool {
     match super::process(cpu).handles.remove(handle) {
         Some(id) => {
             objects(cpu).release(id);
+            close_files(&mut cpu.bus);
             true
         }
         None => false,
     }
+}
+
+/// Close in DOS the files whose objects went.
+pub fn close_files(bus: &mut crate::bus::Bus) {
+    for sft in std::mem::take(&mut bus.win32.objects.closed) {
+        bus.disk.close_file(sft);
+    }
+}
+
+/// Close in DOS the files of all objects, which go with the last
+/// process.
+pub fn close_all_files(bus: &mut crate::bus::Bus) {
+    let objects = &mut bus.win32.objects;
+    for object in objects.objects.iter().flatten() {
+        if let Kind::File { sft, .. } = object.kind {
+            objects.closed.push(sft);
+        }
+    }
+    close_files(bus);
 }
 
 /// The object a handle of the running thread's names: its process's
@@ -244,7 +297,23 @@ crate::win32::state_variants!(Kind {
     Thread { id, exit_code },
     Process { id, exit_code },
     Mapping { section },
+
+    File {
+        sft,
+        access,
+        share,
+        locks
+    },
+    Find { entries },
+});
+crate::state_fields!(FindEntry {
+    attributes,
+    date,
+    time,
+    size,
+    name,
+    short
 });
 crate::state_fields!(Object { kind, name, refs });
-crate::state_fields!(Objects { objects });
+crate::state_fields!(Objects { objects, closed });
 crate::state_fields!(Handles { handles });

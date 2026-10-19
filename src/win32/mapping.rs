@@ -25,8 +25,8 @@ pub struct Section {
     /// Each page's physical page, or 0 where none is committed.
     pub pages: Vec<u32>,
     /// The file it maps, as the object of the program's handle of it,
-    /// which the mapping holds, and DOS's handle; or None for a mapping
-    /// of the swap file.
+    /// which the mapping holds, and its entry in DOS's file table; or
+    /// None for a mapping of the swap file.
     pub file: Option<(u32, u16)>,
     /// Its views: the process's id and the view's address.
     pub views: Vec<(u32, u32)>,

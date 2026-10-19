@@ -259,6 +259,13 @@ pub struct Win32 {
 
     /// The file mappings' memory, by the index their objects keep.
     sections: Vec<Option<mapping::Section>>,
+
+    /// The current directories SetCurrentDirectoryA was given with long
+    /// names, as (the directory in short names, as DOS has it; as given).
+    long_dirs: Vec<(String, String)>,
+    /// The console's input and output modes (SetConsoleMode), or None
+    /// for those it starts with.
+    console_mode: Option<(u32, u32)>,
 }
 
 impl Win32 {
@@ -637,6 +644,7 @@ fn end_process(cpu: &mut Cpu, index: usize, code: u32) {
     if let Some(pool) = cpu.bus.win32.pool.take() {
         pool.release(&mut cpu.bus);
     }
+    object::close_all_files(&mut cpu.bus);
     cpu.bus.win32.objects = object::Objects::default();
     cpu.bus.win32.sections.clear();
     cpu.bus.set_a20(a20);
@@ -721,6 +729,7 @@ pub fn process_ended(cpu: &mut Cpu, psp: u16) {
         if let Some(pool) = cpu.bus.win32.pool.take() {
             pool.release(&mut cpu.bus);
         }
+        object::close_all_files(&mut cpu.bus);
         cpu.bus.win32.objects = object::Objects::default();
         cpu.bus.win32.sections.clear();
         cpu.bus.set_a20(a20);
@@ -799,4 +808,7 @@ crate::state_fields!(Win32 {
     registry,
 
     sections,
+
+    long_dirs,
+    console_mode,
 } skip { enabled });

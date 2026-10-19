@@ -97,6 +97,24 @@ impl DiskController {
         }
     }
 
+    /// The names of the entries of the directory `dos_dir` on a host
+    /// drive, as (host name, DOS name): the host's are the long names
+    /// Windows has. None on other drives, where names are 8.3 alone, and
+    /// for a directory that isn't there.
+    pub fn long_names(&self, dos_dir: &str) -> Option<Vec<(String, String)>> {
+        let normalized = dos_dir.replace('/', "\\");
+        let (drive_num, rest) = self.split_drive(&normalized)?;
+        let drive = self.drive(drive_num)?;
+        drive.host_root()?;
+        let rest = if rest.is_empty() { "." } else { rest };
+        let dir = self.resolve_on(drive_num, rest)?;
+        if !hostfs::is_dir(&dir) {
+            return None;
+        }
+        let (entries, _) = self.host_entries(&dir);
+        Some(entries.to_vec())
+    }
+
     /// Fully qualified DOS directory for the directory part of a search spec,
     /// e.g. "*.EXE" on C: in GAMES -> "C:\GAMES", "D:SUB\*.*" -> "D:\SUB".
     /// Purely logical; the directory need not exist.
