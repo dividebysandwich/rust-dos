@@ -576,3 +576,127 @@ fn a_program_uses_the_heap_tls_environment_and_exports() {
     );
     assert_eq!(code, 0x3F, "the checks that failed: {:06b}", !code & 0x3F);
 }
+
+/// What a debugger sees of a program whose main thread spins while a
+/// second thread waits for an event and a third was made suspended.
+#[test]
+fn a_snapshot_shows_the_processes_threads_and_handles() {
+    use rust_dos::win32::snapshot::{Field, Registers, ThreadState};
+    let names: &[&str] = &[
+        "CreateEventA",
+        "CreateThread",
+        "WaitForSingleObject",
+        "SetLastError",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // A flag nothing sets at 0, the event's handle at 0x10.
+    let data = [0u8; 0x20];
+    let image = program(BASE, false, imports, &data, |a, l| {
+        let mut main = a.create_label();
+        let mut spin = a.create_label();
+        // The worker, whose address the call leaves on the stack.
+        a.call(main)?;
+        a.push(-1)?;
+        a.push(dword_ptr(l.at(0x10)))?;
+        a.call(l.import(2))?;
+        a.ret_1(4)?;
+        a.set_label(&mut main)?;
+        a.pop(esi)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(1)?;
+        a.push(0)?;
+        a.call(l.import(0))?;
+        a.mov(dword_ptr(l.at(0x10)), eax)?;
+        // One thread that runs, one suspended (CREATE_SUSPENDED).
+        for flags in [0, 4] {
+            a.push(0)?;
+            a.push(flags)?;
+            a.push(0)?;
+            a.push(esi)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.call(l.import(1))?;
+        }
+        a.push(0x57)?;
+        a.call(l.import(3))?;
+        a.set_label(&mut spin)?;
+        a.cmp(dword_ptr(l.at(0)), 0)?;
+        a.je(spin)?;
+        a.ret()
+    });
+    let mut cpu = machine("snapshot", image);
+    let waiting = |cpu: &Cpu| {
+        let s = rust_dos::win32::snapshot(cpu);
+        s.processes.first().is_some_and(|p| {
+            p.threads.len() == 3
+                && p.threads[1].state == ThreadState::Waiting
+                && p.threads[0].state == ThreadState::Running
+        })
+    };
+    let mut batches = 0;
+    while !waiting(&cpu) {
+        batches += 1;
+        assert!(batches < 2000, "the second thread didn't wait");
+        cpu.bus.start_batch(cpu.bus.clock.icount + 10_000);
+        run_batch(&mut cpu, &mut NoHook, false);
+    }
+    let s = rust_dos::win32::snapshot(&cpu);
+    assert!(s.enabled && s.active && s.pending.is_none());
+    assert_eq!(s.processes.len(), 1);
+    let p = &s.processes[0];
+    assert_eq!(p.name, "T.EXE");
+    assert!(p.path.ends_with("T.EXE"), "{}", p.path);
+    assert!(
+        p.command_line
+            .as_deref()
+            .is_some_and(|c| c.contains("T.EXE")),
+        "{:?}",
+        p.command_line
+    );
+    assert_eq!(p.image_base, BASE);
+    assert!(p.running && p.root && p.exit_code.is_none());
+
+    let module = |name: &str| p.modules.iter().find(|m| m.name == name).unwrap();
+    assert!(!module("T.EXE").builtin);
+    assert_eq!(module("T.EXE").base, BASE);
+    assert!(module("KERNEL32.DLL").builtin);
+
+    let (main, worker, suspended) = (&p.threads[0], &p.threads[1], &p.threads[2]);
+    assert!(matches!(
+        main.registers,
+        Registers::Cpu | Registers::Interrupted
+    ));
+    assert!(
+        (BASE..BASE + 0x10000).contains(&main.eip),
+        "{:08X}",
+        main.eip
+    );
+    assert_eq!(main.last_error, 0x57);
+    assert_ne!(main.tib, worker.tib);
+    assert_eq!(worker.registers, Registers::Saved);
+    let wait = worker.wait.as_ref().unwrap();
+    assert_eq!(wait.timeout_ms, None);
+    assert_eq!(wait.objects.len(), 1);
+    let (handle, event) = &wait.objects[0];
+    assert_eq!(event.kind, "event");
+    let event_handle = handle.unwrap();
+    assert_eq!(suspended.state, ThreadState::Suspended);
+    assert_eq!(suspended.suspended, 1);
+    assert!(suspended.wait.is_none());
+
+    let kinds: Vec<(&str, u32)> = p
+        .handles
+        .iter()
+        .map(|h| (h.object.kind, h.handle))
+        .collect();
+    assert_eq!(kinds.iter().filter(|(k, _)| *k == "dos").count(), 3);
+    assert_eq!(kinds.iter().filter(|(k, _)| *k == "thread").count(), 2);
+    let event = p.handles.iter().find(|h| h.handle == event_handle).unwrap();
+    assert_eq!(event.object.kind, "event");
+    let state = &event.object.state;
+    assert!(state.contains(&("manual", Field::Bool(true))));
+    assert!(state.contains(&("signaled", Field::Bool(false))));
+    // The handle, and the wait's hold.
+    assert_eq!(event.object.refs, 2);
+}

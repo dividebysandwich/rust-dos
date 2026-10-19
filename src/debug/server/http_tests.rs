@@ -1698,6 +1698,7 @@ fn if_state_seq_guards_every_request_the_emulator_carries_out() {
         ("GET", "/api/gus".into(), None),
         ("GET", "/api/awe32".into(), None),
         ("GET", "/api/exceptions".into(), None),
+        ("GET", "/api/win32".into(), None),
     ];
     for (method, path, body) in &requests {
         if rig.get("/api/status").json()["paused"] != true {

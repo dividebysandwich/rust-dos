@@ -1716,3 +1716,89 @@ fn an_fpu_value_beyond_a_double_reads_back_by_its_tag() {
     assert_eq!(fpu["tag"], "28FF", "FSTENV's tag word");
     assert_eq!(fpu["xmm"][0]["ps"][0], Value::Null, "a NaN single");
 }
+
+#[test]
+fn win32_without_a_program_has_no_processes() {
+    let (mut cpu, mut hub) = (Cpu::new(".".into()), DebugHub::disabled());
+    cpu.bus.win32.enabled = true;
+    let v = reply(&mut cpu, &mut hub, Cmd::Win32).unwrap();
+    let expected = json!({"enabled": true, "active": false, "pending": null, "processes": []});
+    assert_eq!(v, expected);
+}
+
+#[test]
+fn win32_snapshot_reads_as_json() {
+    use rust_dos::win32::snapshot::*;
+    let event = ObjectInfo {
+        id: 7,
+        kind: "event",
+        state: vec![("manual", Field::Bool(false)), ("signaled", Field::Bool(true))],
+        name: Some("go".into()),
+        refs: 2,
+    };
+    let thread = ObjectInfo {
+        id: 3,
+        kind: "thread",
+        state: vec![("id", Field::Id(0xFFF0_0048)), ("exit_code", Field::Code(None))],
+        name: None,
+        refs: 2,
+    };
+    let snapshot = Snapshot {
+        enabled: true,
+        active: true,
+        pending: None,
+        processes: vec![ProcessInfo {
+            id: 0xFFF0_0024,
+            name: "T.EXE".into(),
+            path: "C:\\T.EXE".into(),
+            command_line: Some("T.EXE /x".into()),
+            image_base: 0x40_0000,
+            running: true,
+            root: true,
+            std: [4, 8, 12],
+            modules: vec![ModuleInfo {
+                name: "KERNEL32.DLL".into(),
+                base: 0xBFF7_0000,
+                size: 0x1_0000,
+                entry: 0,
+                builtin: true,
+            }],
+            threads: vec![ThreadInfo {
+                id: 0xFFF0_0048,
+                state: ThreadState::Waiting,
+                eip: 0x40_1000,
+                esp: 0x6F_FF00,
+                last_error: 6,
+                suspended: 0,
+                wait: Some(WaitInfo {
+                    objects: vec![(Some(16), event.clone())],
+                    timeout_ms: Some(500),
+                    ..WaitInfo::default()
+                }),
+                ..ThreadInfo::default()
+            }],
+            handles: vec![
+                HandleInfo { handle: 16, object: event },
+                HandleInfo { handle: 20, object: thread },
+            ],
+            ..ProcessInfo::default()
+        }],
+    };
+    let v = super::win32::snapshot_json(&snapshot);
+    let p = &v["processes"][0];
+    assert_eq!(p["id"], "FFF00024");
+    assert_eq!(p["command_line"], "T.EXE /x");
+    assert_eq!(p["exit_code"], Value::Null);
+    assert_eq!(p["modules"][0], json!({"name": "KERNEL32.DLL", "base": "BFF70000", "size": "00010000", "entry": null, "builtin": true}));
+    let t = &p["threads"][0];
+    assert_eq!((t["state"].as_str(), t["registers"].as_str()), (Some("waiting"), Some("saved")));
+    assert_eq!((t["eip"].as_str(), t["esp"].as_str()), (Some("00401000"), Some("006FFF00")));
+    assert_eq!(t["last_error"], 6);
+    assert_eq!(t["wait"]["timeout_ms"], 500);
+    assert_eq!(t["wait"]["critical_section"], Value::Null);
+    assert_eq!(t["wait"]["objects"][0]["handle"], 16);
+    assert_eq!(t["wait"]["objects"][0]["kind"], "event");
+    let event = json!({"handle": 16, "object": 7, "kind": "event", "state": {"manual": false, "signaled": true}, "name": "go", "refs": 2});
+    assert_eq!(p["handles"][0], event);
+    assert_eq!(p["handles"][1]["state"], json!({"id": "FFF00048", "exit_code": null}));
+}

@@ -1128,6 +1128,38 @@ access rights.
 - **Disassembly and traces** use the code segment's size (16 or 32-bit), and
   the trace records it per instruction.
 
+### Win32 programs (the built-in Windows)
+
+With `win32` on, a Win32 console program runs on the built-in Windows
+(`docs/native-windows.md`). `GET /api/win32` shows it:
+
+- `enabled`, `active` (a Win32 program runs) and `pending` (DOS loaded
+  one that hasn't started yet).
+- `processes`, the one DOS started first (`root`): `id`, `name`, `path`,
+  `command_line`, `image_base`, `exit_code` and `running` (its thread, or
+  its idle loop when no thread can run, is in the processor).
+- Each process's `modules`: `name`, `base`, `size`, `entry` (DllMain, or
+  null) and `builtin` (a built-in DLL; otherwise loaded from a file).
+- Its `threads`: `id`, `state` (`running`, `ready`, `waiting`,
+  `suspended` or `ended`), `cs`, `eip` and `esp`, `tib` and its selector
+  `fs`, `stack`, `last_error`, `priority`, `suspend_count`, `exit_code`
+  and `wait`: the `objects` waited for (with the process's handle of
+  each), whether it waits for `all`, `timeout_ms` left (null for
+  INFINITE) and the `critical_section` it waits to enter. `registers`
+  says where CS:EIP and ESP come from: `cpu` for the running thread,
+  `interrupted` while a hardware interrupt's real-mode handler runs in
+  its place, `saved` for the context kept while another thread runs.
+- Its `handles`: `handle`, `object` (its number in the system's table,
+  the same in every process), `kind` (`dos`, `event`, `mutex`,
+  `semaphore`, `thread`, `process`), `state` (an event's `signaled`, a
+  mutex's `owner` and `count`, a thread's `exit_code`...), `name` and
+  `refs` (handles of it and the system's holds). `std` lists the handles
+  of standard input, output and error.
+
+Ids, addresses and exit codes are 8-digit hex strings; handles and
+`last_error` are numbers. Pause the machine first for a view that
+holds still: the threads take turns as the timer's interrupts come.
+
 ## 5. Addresses
 
 Addresses are always hex, as in DEBUG.COM:

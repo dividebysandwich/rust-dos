@@ -22,10 +22,12 @@ mod loader;
 mod memory;
 mod object;
 mod seh;
+pub mod snapshot;
 mod stubs;
 mod system;
 mod thread;
 
+pub use snapshot::snapshot;
 pub use stubs::function_name;
 
 /// `State` for an enum whose variants have named fields (or `{}`), as the

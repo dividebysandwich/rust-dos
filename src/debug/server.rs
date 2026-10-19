@@ -119,6 +119,7 @@ fn router(state: AppState) -> Router {
         .route("/api/sound", get(sound))
         .route("/api/awe32", get(awe32))
         .route("/api/exceptions", get(exceptions))
+        .route("/api/win32", get(win32))
         .route("/ws/trace", get(ws_trace))
         .route("/ws/events", get(ws_events))
         .route("/ws/screen", get(ws_screen))
@@ -1685,6 +1686,10 @@ async fn exceptions(State(s): State<AppState>) -> ApiResult {
     s.call_json(Cmd::Exceptions, DEFAULT_TIMEOUT).await
 }
 
+async fn win32(State(s): State<AppState>) -> ApiResult {
+    s.call_json(Cmd::Win32, DEFAULT_TIMEOUT).await
+}
+
 // ---------------------------------------------------------------------------
 // WebSockets
 // ---------------------------------------------------------------------------
@@ -2244,6 +2249,14 @@ PROTECTED MODE
                              whether a job is printing, the last file written
   POST /api/printer/eject    Eject the page and end the print job; returns once
                              its files are written
+
+BUILT-IN WINDOWS
+  GET  /api/win32            whether it is on and a Win32 program runs; each process
+                             (id, path, command line, image base) with its modules
+                             (base, size, entry point, built-in or from a file), its
+                             threads (state, wait objects and timeout, CS:EIP, ESP,
+                             TIB, last error, priority, suspend count) and its handles
+                             (object kind, state, name, reference count)
 
 MEMORY HEATMAP
   GET  /api/heat             the address ranges written in about the last second, while
