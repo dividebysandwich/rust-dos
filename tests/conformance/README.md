@@ -13,9 +13,10 @@ where they differ from NT's.
 change listed below:
 
 - `include/wine/test.h`, the test framework;
-- `kernel32/`: `alloc.c`, `directory.c`, `drive.c`, `fiber.c`, `file.c`,
-  `heap.c`, `loader.c`, `module.c`, `path.c`, `sync.c`, `thread.c`,
-  `time.c`, `timer.c`, `version.c`, `virtual.c` from
+- `kernel32/`: `alloc.c`, `codepage.c`, `directory.c`, `drive.c`,
+  `environ.c`, `fiber.c`, `file.c`, `format_msg.c`, `heap.c`,
+  `loader.c`, `locale.c`, `module.c`, `path.c`, `profile.c`, `sync.c`,
+  `thread.c`, `time.c`, `timer.c`, `version.c`, `virtual.c` from
   `dlls/kernel32/tests/`;
 - `advapi32/`: `registry.c` from `dlls/advapi32/tests/`.
 
@@ -31,6 +32,11 @@ file is listed here.
 They are under the LGPL, version 2.1 or later (`wine/COPYING.LIB`), with
 their copyright notices. rust-dos is GPL-2.0-or-later, which LGPL code
 may be used under.
+
+`runtime/compat.h` is rust-dos's own: the few names the tests take from
+Wine's headers that MinGW's lack (`__ms_va_list` and its macros,
+`LOCALE_RETURN_GENITIVE_NAMES`). Each test file is built with it
+included first, so the files stay unchanged.
 
 `runtime/runtime.c` is rust-dos's own: the C runtime the tests link in
 place of MSVCRT.DLL, which the built-in Windows doesn't have yet. It has

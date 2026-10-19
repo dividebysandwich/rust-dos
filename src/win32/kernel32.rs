@@ -3,19 +3,25 @@
 
 mod console;
 mod disk;
-mod global;
-mod mapping;
-
+mod env;
 mod file;
+mod global;
+mod locale;
+mod mapping;
 mod memory;
+mod message;
 pub(super) mod module;
 mod path;
 mod process;
+mod profile;
+mod sort;
 mod sync;
 mod text;
 mod threads;
 mod time;
 mod virtual_memory;
+
+pub(super) use locale::enum_returned;
 
 use super::stubs::{Api, Conv, Dll};
 use crate::cpu::Cpu;
@@ -293,6 +299,7 @@ static APIS: &[Api] = &[
     stdcall("MapViewOfFileEx", 256, 6, mapping::map_view_of_file_ex),
     stdcall("UnmapViewOfFile", 257, 1, mapping::unmap_view_of_file),
     stdcall("FlushViewOfFile", 258, 2, mapping::flush_view_of_file),
+
     // Files, directories, paths and the console.
     stdcall("CreateFileA", 100, 7, file::create_file),
     stdcall("CreateFileW", 101, 7, not_implemented_handle),
@@ -411,6 +418,93 @@ static APIS: &[Api] = &[
     stdcall("LoadLibraryW", 315, 1, not_implemented),
     stdcall("LoadLibraryExW", 316, 3, not_implemented),
     stdcall("GetModuleHandleW", 317, 1, not_implemented),
+
+    stdcall("lstrlenA", 400, 1, text::lstrlen_a),
+    stdcall("lstrcpyA", 401, 2, text::lstrcpy_a),
+    stdcall("lstrcpynA", 402, 3, text::lstrcpyn_a),
+    stdcall("lstrcatA", 403, 2, text::lstrcat_a),
+    stdcall("lstrcmpA", 404, 2, text::lstrcmp_a),
+    stdcall("lstrcmpiA", 405, 2, text::lstrcmpi_a),
+    stdcall("lstrlenW", 406, 1, text::lstrlen_w),
+    stdcall("lstrcpyW", 407, 2, not_implemented),
+    stdcall("lstrcpynW", 408, 3, not_implemented),
+    stdcall("lstrcatW", 409, 2, not_implemented),
+    stdcall("lstrcmpW", 410, 2, not_implemented),
+    stdcall("lstrcmpiW", 411, 2, not_implemented),
+    stdcall("GetACP", 412, 0, text::get_acp),
+    stdcall("GetOEMCP", 413, 0, text::get_oem_cp),
+    stdcall("GetCPInfo", 414, 2, text::get_cp_info),
+    stdcall("IsValidCodePage", 415, 1, text::is_valid_code_page),
+    stdcall("IsDBCSLeadByte", 416, 1, text::is_dbcs_lead_byte),
+    stdcall("IsDBCSLeadByteEx", 417, 2, text::is_dbcs_lead_byte_ex),
+    stdcall("GetStringTypeA", 418, 5, sort::get_string_type_a),
+    stdcall("GetStringTypeExA", 419, 5, sort::get_string_type_a),
+    stdcall("GetStringTypeW", 420, 4, not_implemented),
+    stdcall("GetStringTypeExW", 421, 5, not_implemented),
+    stdcall("CompareStringA", 422, 6, sort::compare_string_a),
+    stdcall("CompareStringW", 423, 6, not_implemented),
+    stdcall("LCMapStringA", 424, 6, sort::lc_map_string_a),
+    stdcall("LCMapStringW", 425, 6, not_implemented),
+    stdcall("GetLocaleInfoA", 426, 4, locale::get_locale_info_a),
+    stdcall("GetLocaleInfoW", 427, 4, not_implemented),
+    stdcall("SetLocaleInfoA", 428, 3, locale::set_locale_info_a),
+    stdcall("GetUserDefaultLCID", 429, 0, locale::get_default_lcid),
+    stdcall("GetSystemDefaultLCID", 430, 0, locale::get_default_lcid),
+    stdcall("GetUserDefaultLangID", 431, 0, locale::get_default_lang_id),
+    stdcall("GetSystemDefaultLangID", 432, 0, locale::get_default_lang_id),
+    stdcall("GetThreadLocale", 433, 0, locale::get_default_lcid),
+    stdcall("SetThreadLocale", 434, 1, locale::set_thread_locale),
+    stdcall("IsValidLocale", 435, 2, locale::is_valid_locale),
+    stdcall("ConvertDefaultLocale", 436, 1, locale::convert_default_locale),
+    stdcall("EnumSystemLocalesA", 437, 2, locale::enum_system_locales_a),
+    stdcall("EnumDateFormatsA", 438, 3, locale::enum_date_formats_a),
+    stdcall("EnumTimeFormatsA", 439, 3, locale::enum_time_formats_a),
+    stdcall("GetDateFormatA", 440, 6, locale::get_date_format_a),
+    stdcall("GetDateFormatW", 441, 6, not_implemented),
+    stdcall("GetTimeFormatA", 442, 6, locale::get_time_format_a),
+    stdcall("GetTimeFormatW", 443, 6, not_implemented),
+    stdcall("GetNumberFormatA", 444, 6, locale::get_number_format_a),
+    stdcall("GetNumberFormatW", 445, 6, not_implemented),
+    stdcall("GetCurrencyFormatA", 446, 6, locale::get_currency_format_a),
+    stdcall("GetCurrencyFormatW", 447, 6, not_implemented),
+    stdcall("FormatMessageA", 448, 7, message::format_message_a),
+    stdcall("FormatMessageW", 449, 7, not_implemented),
+    stdcall("GetEnvironmentStrings", 450, 0, env::get_environment_strings),
+    stdcall("GetEnvironmentStringsA", 451, 0, env::get_environment_strings),
+    stdcall("GetEnvironmentStringsW", 452, 0, not_implemented),
+    stdcall("FreeEnvironmentStringsA", 453, 1, env::free_environment_strings_a),
+    stdcall("FreeEnvironmentStringsW", 454, 1, not_implemented),
+    stdcall("ExpandEnvironmentStringsA", 455, 3, env::expand_environment_strings_a),
+    stdcall("ExpandEnvironmentStringsW", 456, 3, not_implemented),
+    stdcall("GetEnvironmentVariableW", 457, 3, not_implemented),
+    stdcall("SetEnvironmentVariableW", 458, 2, not_implemented),
+    stdcall("GetComputerNameA", 459, 2, env::get_computer_name_a),
+    stdcall("GetComputerNameW", 460, 2, not_implemented),
+    stdcall("SetComputerNameA", 461, 1, env::set_computer_name_a),
+    stdcall("GetPrivateProfileStringA", 462, 6, profile::get_private_profile_string_a),
+    stdcall("GetPrivateProfileStringW", 463, 6, not_implemented),
+    stdcall("WritePrivateProfileStringA", 464, 4, profile::write_private_profile_string_a),
+    stdcall("WritePrivateProfileStringW", 465, 4, not_implemented),
+    stdcall("GetPrivateProfileIntA", 466, 4, profile::get_private_profile_int_a),
+    stdcall("GetProfileIntA", 467, 3, profile::get_profile_int_a),
+    stdcall("GetProfileStringA", 468, 5, profile::get_profile_string_a),
+    stdcall("WriteProfileStringA", 469, 3, profile::write_profile_string_a),
+    stdcall("GetPrivateProfileSectionA", 470, 4, profile::get_private_profile_section_a),
+    stdcall("GetProfileSectionA", 471, 3, profile::get_profile_section_a),
+    stdcall("GetPrivateProfileSectionNamesA", 472, 3, profile::get_private_profile_section_names_a),
+    stdcall("GetPrivateProfileSectionNamesW", 473, 3, not_implemented),
+    stdcall("WritePrivateProfileSectionA", 474, 3, profile::write_private_profile_section_a),
+    stdcall("WriteProfileSectionA", 475, 2, profile::write_profile_section_a),
+    stdcall("OutputDebugStringA", 476, 1, env::output_debug_string_a),
+    stdcall("OutputDebugStringW", 477, 1, not_implemented),
+    stdcall("Beep", 478, 2, env::beep),
+    stdcall("GetSystemTimeAsFileTime", 479, 1, time::get_system_time_as_file_time),
+    stdcall("QueryPerformanceCounter", 480, 1, env::query_performance_counter),
+    stdcall("QueryPerformanceFrequency", 481, 1, env::query_performance_frequency),
+    stdcall("CompareFileTime", 482, 2, time::compare_file_time),
+    stdcall("SetSystemTime", 483, 1, time::set_system_time),
+    stdcall("SetLocalTime", 484, 1, time::set_system_time),
+    stdcall("MulDiv", 485, 3, env::mul_div),
 ];
 
 /// The places in `APIS` of the system's own stubs.
@@ -587,11 +681,15 @@ fn variable(process: &super::Process, name: &str) -> Option<usize> {
 
 /// The value of the variable at `args[0]` into the buffer at `args[1]` of
 /// `args[2]` bytes: its length, or when the buffer is too small, the size
-/// it needs.
+/// it needs. No name is found for NULL.
 fn get_environment_variable(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[name, buffer, size] = args else {
         unreachable!()
     };
+    if name == 0 {
+        set_error(cpu, ERROR_ENVVAR_NOT_FOUND);
+        return Some(0);
+    }
     let name = string_at(cpu, name)?;
     let process = super::process(cpu);
     let Some(i) = variable(process, &name) else {
@@ -612,12 +710,12 @@ fn get_environment_variable(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// Set the variable at `args[0]` to the string at `args[1]`, or with NULL
-/// remove it.
+/// or, as on Windows 95, an empty string remove it.
 fn set_environment_variable(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let name = string_at(cpu, args[0])?;
     let value = match args[1] {
         0 => None,
-        at => Some(string_at(cpu, at)?),
+        at => Some(string_at(cpu, at)?).filter(|v| !v.is_empty()),
     };
     if name.is_empty() || name.contains('=') {
         set_error(cpu, ERROR_INVALID_PARAMETER);
