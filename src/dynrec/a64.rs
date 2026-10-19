@@ -2413,7 +2413,7 @@ impl Gen<'_> {
             // (`SIMD` is false: the handlers run these instructions.)
             Uop::SimdGuard { .. }
             | Uop::BailMisaligned { .. }
-            | Uop::BailUnlessPlain { .. }
+            | Uop::BailUnlessStorable { .. }
             | Uop::VLoad { .. }
             | Uop::VOp { .. }
             | Uop::VFloat { .. }

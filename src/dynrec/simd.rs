@@ -4,7 +4,10 @@
 //! with a `SimdGuard`, which leaves the rare cases (CR0's EM or TS set, SSE
 //! not enabled in CR4, an MMX register the FPU left stale) to the handler,
 //! and an operand of 8 or 16 bytes that isn't plain RAM within a page goes
-//! to the handler too (`BailUnlessRam`). RCPPS, RSQRTPS and their scalar
+//! to the handler too (`BailUnlessRam`), but for a store into something
+//! else within a page, such as the linear frame buffer that DirectDraw's
+//! MMX blits write, which goes a dword at a time through `jit_dev_write`
+//! (`BailUnlessStorable`, `VStore`). RCPPS, RSQRTPS and their scalar
 //! forms, whose approximations the host's don't match, the compares into
 //! EFLAGS, the conversions to and from 32-bit registers, PINSRW and
 //! MASKMOVQ go through their handlers.
@@ -153,7 +156,7 @@ fn store(
     value: impl FnOnce(&mut Vec<Uop>),
 ) -> Option<()> {
     mem_checked(instr, size, true, aligned, u)?;
-    u.push(Uop::BailUnlessPlain { t: T1 });
+    u.push(Uop::BailUnlessStorable { t: T1 });
     value(u);
     u.push(Uop::VStore { m: T1, x: X0, size });
     Some(())
