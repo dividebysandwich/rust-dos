@@ -4,6 +4,7 @@
 mod disk;
 mod memory;
 mod module;
+mod process;
 mod sync;
 mod text;
 mod threads;
@@ -193,6 +194,9 @@ static APIS: &[Api] = &[
         1,
         super::seh::set_unhandled_exception_filter,
     ),
+    stdcall("CreateProcessA", 87, 10, process::create_process_a),
+    stdcall("OpenProcess", 88, 3, process::open_process),
+    stdcall("GetStartupInfoA", 89, 1, process::get_startup_info),
 ];
 
 /// The places in `APIS` of the system's own stubs.

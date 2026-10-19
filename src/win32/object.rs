@@ -143,6 +143,23 @@ impl Handles {
         (i as u32 + 1) * 4
     }
 
+    /// The handle `handle` of the object `id`, as a process inherits it,
+    /// if that handle is free (the caller has counted the hold).
+    pub fn add_at(&mut self, handle: u32, id: u32) -> bool {
+        if !handle.is_multiple_of(4) || handle == 0 {
+            return false;
+        }
+        let i = (handle / 4 - 1) as usize;
+        if self.handles.len() <= i {
+            self.handles.resize(i + 1, None);
+        }
+        if self.handles[i].is_some() {
+            return false;
+        }
+        self.handles[i] = Some(id);
+        true
+    }
+
     /// The object of the handle `handle` (not a pseudo-handle).
     pub fn of(&self, handle: u32) -> Option<u32> {
         if !handle.is_multiple_of(4) || handle == 0 {

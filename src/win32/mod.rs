@@ -162,6 +162,9 @@ pub struct Process {
     environment: Vec<String>,
     /// The process heap (GetProcessHeap).
     heap: heap::Heap,
+    /// The STARTUPINFO its parent gave, which GetStartupInfoA returns:
+    /// empty for the process DOS started.
+    startup: Vec<u8>,
 }
 
 impl Process {
@@ -234,6 +237,8 @@ pub struct Win32 {
     slice_start: u64,
     /// How many process and thread ids have been given out.
     ids: u32,
+    /// The id of the process DOS started, whose exit code DOS gets.
+    root: u32,
 }
 
 impl Win32 {
@@ -389,8 +394,9 @@ fn start(cpu: &mut Cpu) {
     win32.cr4 = cr4;
     let environment = dos_environment(cpu, cpu.current_psp);
     let line = loader::dos_command_line(cpu, &path);
-    match create_process(cpu, &path, &line, environment, None, false) {
-        Ok(_) => {
+    match create_process(cpu, &path, &line, environment, Vec::new(), None, false) {
+        Ok(created) => {
+            cpu.bus.win32.root = created.process.1;
             cpu.bus.set_a20(true);
             thread::reschedule(cpu);
         }
@@ -415,14 +421,16 @@ pub struct Created {
 
 /// Make a process of the program at `path`, with the command line `line`
 /// and the environment `environment`, and its main thread, ready to run
-/// or suspended. Its standard input, output and error are DOS's handles
-/// 0, 1 and 2, or the objects `std` names. Fails with a message for the
-/// user.
+/// or suspended. It inherits the handles `inherited`, as (handle,
+/// object). Its standard input, output and error are DOS's handles 0, 1
+/// and 2, or the objects `std` names, by the handles it inherited of them
+/// where it did. Fails with a message for the user.
 fn create_process(
     cpu: &mut Cpu,
     path: &str,
     line: &str,
     environment: Vec<String>,
+    inherited: Vec<(u32, u32)>,
     std: Option<[u32; 3]>,
     suspended: bool,
 ) -> Result<Created, String> {
@@ -457,18 +465,25 @@ fn create_process(
         },
         None,
     );
-    let std = match std {
-        Some(ids) => {
-            for id in ids {
-                objects.hold(id);
-            }
-            ids
+    for (handle, id) in inherited {
+        if process.handles.add_at(handle, id) {
+            objects.hold(id);
         }
-        None => [0, 1, 2].map(|handle| objects.add(object::Kind::Dos { handle }, None)),
-    };
-    for (slot, id) in process.std.iter_mut().zip(std) {
-        *slot = process.handles.add(id);
     }
+    process.std = match std {
+        Some(ids) => ids.map(|id| {
+            let found = process.handles.iter().find(|&(_, o)| o == id);
+            if let Some((handle, _)) = found {
+                return handle;
+            }
+            objects.hold(id);
+            process.handles.add(id)
+        }),
+        None => [0, 1, 2].map(|handle| {
+            let id = objects.add(object::Kind::Dos { handle }, None);
+            process.handles.add(id)
+        }),
+    };
     // The main thread, which runs the program's entry point.
     let mut ctx = Context {
         eip: loaded.entry,
@@ -571,7 +586,7 @@ fn end_process(cpu: &mut Cpu, index: usize, code: u32) {
         *exit_code = Some(code);
     }
     win32.objects.release(own);
-    if index == 0 {
+    if process.id == win32.root {
         win32.exit_code = code;
     }
     cpu.bus.log_string(&format!(
@@ -734,6 +749,7 @@ crate::state_fields!(Process {
     tls_used,
     environment,
     heap,
+    startup,
 });
 crate::state_fields!(Win32 {
     pending,
@@ -749,4 +765,5 @@ crate::state_fields!(Win32 {
     exit_code,
     slice_start,
     ids,
+    root,
 } skip { enabled });

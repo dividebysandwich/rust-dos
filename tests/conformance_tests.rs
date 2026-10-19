@@ -95,14 +95,16 @@ fn program_name(unit: &str) -> String {
     format!("{}.EXE", unit[..unit.len().min(8)].to_ascii_uppercase())
 }
 
-/// Run the program `name` in `dir` until it ends: what it printed, and
-/// its exit code if it ended.
-fn run(dir: &Path, name: &str) -> (String, Option<u8>) {
+/// Run the program `name` in `dir` with the argument `unit`, the test to
+/// run, as Wine's runner passes it: what it printed, and its exit code if
+/// it ended.
+fn run(dir: &Path, name: &str, unit: &str) -> (String, Option<u8>) {
     let mut cpu = Cpu::new(dir.to_path_buf());
     cpu.bus.win32.enabled = true;
     cpu.host_console = Some(HostConsole::default());
     cpu.load_shell();
     assert!(cpu.load_executable(name, None), "{} didn't load", name);
+    cpu.set_command_tail(cpu.current_psp, unit);
     let mut ended = false;
     for _ in 0..BATCHES {
         cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
@@ -235,7 +237,7 @@ fn wine_conformance_tests_give_the_expected_results() {
             let program = format!("{OUT}/{dll}/{name}");
             let lines = match build(&cc, &dll, &unit, &runtime, &program) {
                 Ok(()) => {
-                    let (output, exit) = run(&dir, &name);
+                    let (output, exit) = run(&dir, &name, &unit);
                     fs::write(dir.join(format!("{}.log", unit)), &output).unwrap();
                     results(&output, exit)
                 }
