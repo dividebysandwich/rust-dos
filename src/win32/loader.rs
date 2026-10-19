@@ -1,12 +1,19 @@
-//! Making a process of a program: its memory and tables, the built-in DLLs
-//! it imports from, the program's image at its image base (or relocated),
-//! its imports bound, its static TLS, its stack and its thread's TIB.
+//! Making a process of a program: its memory and tables, the program's
+//! image at its image base (or relocated), the DLLs it imports, its
+//! imports bound, its static TLS, its stack and its thread's TIB.
+//!
+//! DLLs are loaded here too, for the program and for LoadLibrary: the
+//! built-in ones mapped where Windows 95 has them, and DLL files found on
+//! the search path, mapped, relocated when their base is taken, and their
+//! own imports loaded and bound in turn. Calling their entry points is
+//! kernel32's (module.rs), once the loader is done.
 
 use super::heap::Heap;
 use super::memory::{GRANULARITY, Memory, PAGE, PRIVATE, SHARED, SYSTEM, USER, WRITABLE};
 use super::stubs::{self, STUB};
 use super::system::{self, SYSTEM_BLOCK_PAGES};
 use super::{FIRST_MISSING, MAX_MISSING, Module, Process};
+use crate::bus::Bus;
 use crate::cpu::Cpu;
 use rust_dos_pe as pe;
 
@@ -29,6 +36,37 @@ const TIB_STACK_LIMIT: u32 = 0x08;
 const TIB_SELF: u32 = 0x18;
 const TIB_TLS_ARRAY: u32 = 0x2C;
 
+/// Windows 95's directories, where the built-in DLLs are said to be and
+/// which the search for a DLL goes through.
+pub(super) const WINDOWS_DIR: &str = "C:\\WINDOWS";
+pub(super) const SYSTEM_DIR: &str = "C:\\WINDOWS\\SYSTEM";
+
+/// What a module is (`Module::flags`): a built-in DLL, a DLL that came
+/// with the program (neither is ever unloaded), one mapped as data, one
+/// whose imports weren't loaded, one whose entry point returned TRUE to
+/// DLL_PROCESS_ATTACH, and one that DisableThreadLibraryCalls was called
+/// for.
+pub(super) const BUILTIN: u32 = 0x01;
+pub(super) const STATIC: u32 = 0x02;
+pub(super) const DATAFILE: u32 = 0x04;
+pub(super) const UNRESOLVED: u32 = 0x08;
+pub(super) const ATTACHED: u32 = 0x10;
+pub(super) const NO_THREAD_CALLS: u32 = 0x20;
+
+/// LoadLibraryExA's flags.
+pub(super) const DONT_RESOLVE_DLL_REFERENCES: u32 = 0x01;
+pub(super) const LOAD_LIBRARY_AS_DATAFILE: u32 = 0x02;
+pub(super) const LOAD_WITH_ALTERED_SEARCH_PATH: u32 = 0x08;
+
+/// The errors a load fails with (GetLastError).
+const ERROR_FILE_NOT_FOUND: u32 = 2;
+const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
+const ERROR_BAD_FORMAT: u32 = 11;
+const ERROR_GEN_FAILURE: u32 = 31;
+const ERROR_PROC_NOT_FOUND: u32 = 127;
+pub(super) const ERROR_DLL_INIT_FAILED: u32 = 1114;
+const ERROR_DLL_NOT_FOUND: u32 = 1157;
+
 /// What the loader made: the process, and where the program starts.
 pub struct Loaded {
     pub process: Process,
@@ -39,9 +77,16 @@ pub struct Loaded {
     pub stack: (u32, u32),
 }
 
-/// Make the process of the program `path`, whose file is `file`. Fails
+/// Make the process of the program `path`, whose file is `file`, with
+/// `environment`, whose PATH the search for its DLLs goes through. Fails
 /// with a message for the user; then nothing is left taken.
-pub fn load(cpu: &mut Cpu, path: &str, line: &str, file: &[u8]) -> Result<Loaded, String> {
+pub fn load(
+    cpu: &mut Cpu,
+    path: &str,
+    line: &str,
+    file: &[u8],
+    environment: Vec<String>,
+) -> Result<Loaded, String> {
     let name = path
         .rsplit(['\\', '/', ':'])
         .next()
@@ -55,28 +100,23 @@ pub fn load(cpu: &mut Cpu, path: &str, line: &str, file: &[u8]) -> Result<Loaded
     let imports = image
         .imports()
         .map_err(|e| format!("{}'s imports can't be read: {}.", name, e))?;
-    let mut dlls = vec![0];
-    for dll in &imports {
-        let index = stubs::find_dll(&dll.name).ok_or_else(|| {
-            format!(
-                "{} needs {}, which the built-in Windows doesn't have yet.",
-                name, dll.name
-            )
-        })?;
-        if !dlls.contains(&index) {
-            dlls.push(index);
-        }
-    }
     let mut memory = Memory::new(&mut cpu.bus).ok_or_else(|| {
         format!(
             "There isn't enough extended memory to run {} (it needs 4 MB).",
             name
         )
     })?;
-    let loaded = build(cpu, &mut memory, &name, line, &mut image, &imports, &dlls);
+    let mut process = Process {
+        name: name.clone(),
+        path: path.to_string(),
+        environment,
+        ..Process::default()
+    };
+    let loaded = build(cpu, &mut memory, &mut process, line, &mut image, &imports);
     match loaded {
         Some(Ok(mut loaded)) => {
-            loaded.process.memory = memory;
+            process.memory = memory;
+            loaded.process = process;
             Ok(loaded)
         }
         result => {
@@ -89,21 +129,18 @@ pub fn load(cpu: &mut Cpu, path: &str, line: &str, file: &[u8]) -> Result<Loaded
     }
 }
 
-/// `load`'s work once the memory is taken. None when it runs out.
+/// `load`'s work once the memory is taken. None when it runs out. The
+/// `Loaded` it returns has an empty process: the process is `process`.
 fn build(
     cpu: &mut Cpu,
     memory: &mut Memory,
-    name: &str,
+    process: &mut Process,
     line: &str,
     image: &mut pe::Image,
     imports: &[pe::ImportedDll],
-    dlls: &[usize],
 ) -> Option<Result<Loaded, String>> {
+    let name = process.name.clone();
     let bus = &mut cpu.bus;
-    let mut process = Process {
-        name: name.to_string(),
-        ..Process::default()
-    };
 
     // The thread's TIB, and the system's tables.
     let tib = memory.reserve(None, GRANULARITY, SHARED, SYSTEM)?;
@@ -113,26 +150,9 @@ fn build(
     system::build_tables(cpu, memory, process.system, tib)?;
     let bus = &mut cpu.bus;
 
-    // The built-in DLLs, read only.
-    let mut exports = Vec::new();
-    for &index in dlls {
-        let dll = stubs::DLLS[index];
-        let built = stubs::image(index);
-        let size = built.headers.size_of_image;
-        memory.reserve(Some(dll.base), size, SHARED, SYSTEM)?;
-        memory.commit(bus, dll.base, size.next_multiple_of(PAGE), USER)?;
-        memory.write(bus, dll.base, &built.data)?;
-        for page in (dll.base..dll.base + size).step_by(PAGE as usize) {
-            process.stub_pages.push(memory.translate(bus, page)? >> 12);
-        }
-        process.modules.push(Module {
-            name: dll.name.to_string(),
-            base: dll.base,
-            size,
-            entry: 0,
-        });
-        exports.push((index, built.exports().ok().flatten().unwrap_or_default()));
-    }
+    // KERNEL32, which has the system's own stubs, whatever the program
+    // imports.
+    map_builtin(bus, memory, process, 0)?;
 
     // The program, where it wants to be, or where there is room when its
     // relocations let it move.
@@ -158,41 +178,15 @@ fn build(
         0,
         Module {
             name: name.to_string(),
+            path: process.path.clone(),
             base,
             size,
             entry: 0,
+            refs: 0,
+            flags: STATIC,
+            deps: Vec::new(),
         },
     );
-
-    // Its imports: the built-in functions' stubs, and for the functions
-    // the built-in DLLs don't have yet, stubs that say so.
-    for dll in imports {
-        let index = stubs::find_dll(&dll.name).expect("checked by load");
-        let (_, table) = exports
-            .iter()
-            .find(|(i, _)| *i == index)
-            .expect("loaded above");
-        for (slot, import) in &dll.functions {
-            let found = match import {
-                pe::Import::Name { name, .. } => table.by_name(name),
-                pe::Import::Ordinal(ordinal) => table.by_ordinal(*ordinal),
-            };
-            let address = match found.map(|e| &e.target) {
-                Some(pe::ExportTarget::Rva(rva)) => stubs::DLLS[index].base + rva,
-                _ => {
-                    let what = match import {
-                        pe::Import::Name { name, .. } => name.clone(),
-                        pe::Import::Ordinal(ordinal) => format!("#{}", ordinal),
-                    };
-                    missing_stub(cpu, memory, &mut process, stubs::DLLS[index].name, &what)?
-                }
-            };
-            if image.set_u32(*slot, address).is_err() {
-                return Some(Err(format!("{}'s import table is damaged.", name)));
-            }
-        }
-    }
-    let bus = &mut cpu.bus;
 
     // Static TLS: the template's copy for the thread, in slot 0, which the
     // program finds in its index variable.
@@ -224,21 +218,27 @@ fn build(
     }
 
     // The image's pages, writable where a section is.
-    for page in (0..size).step_by(PAGE as usize) {
-        let writable = image
-            .headers
-            .sections
-            .iter()
-            .any(|s| s.writable() && page < s.rva + s.mapped_size() && s.rva < page + PAGE);
-        let phys = memory.page(bus)?;
-        memory.map(
-            bus,
-            base + page,
-            phys,
-            USER | if writable { WRITABLE } else { 0 },
-        )?;
+    map_image(bus, memory, image, base, false)?;
+
+    // The DLLs it imports, and its imports bound: the built-in functions'
+    // stubs, and for the functions the built-in DLLs don't have yet, stubs
+    // that say so.
+    let mut loader = Loader {
+        bus,
+        memory,
+        process,
+        static_load: true,
+        first_dir: String::new(),
+        mapped: Vec::new(),
+        raised: Vec::new(),
+    };
+    loader.first_dir = directory_of(&loader.process.path);
+    match bind_imports(&mut loader, base, imports, &name) {
+        Ok(deps) => loader.process.modules[0].deps = deps,
+        Err(e) if e.code == ERROR_NOT_ENOUGH_MEMORY => return None,
+        Err(e) => return Some(Err(e.message)),
     }
-    memory.write(bus, base, &image.data)?;
+    let bus = &mut cpu.bus;
 
     // The stack: the reserve, its top committed.
     let reserve = image.headers.stack_reserve.clamp(GRANULARITY, 0x100_0000);
@@ -289,11 +289,40 @@ fn build(
         return Some(Err(format!("{} has no entry point.", name)));
     }
     Some(Ok(Loaded {
-        process,
+        process: Process::default(),
         entry: base + image.headers.entry,
         stack_top,
         stack: (stack, stack_top),
     }))
+}
+
+/// Map the pages of `image` at `base`, which is reserved for it, and
+/// write the image there: writable where a section is, or with
+/// `read_only` none of them.
+fn map_image(
+    bus: &mut Bus,
+    memory: &mut Memory,
+    image: &pe::Image,
+    base: u32,
+    read_only: bool,
+) -> Option<()> {
+    let size = image.headers.size_of_image;
+    for page in (0..size).step_by(PAGE as usize) {
+        let writable = !read_only
+            && image
+                .headers
+                .sections
+                .iter()
+                .any(|s| s.writable() && page < s.rva + s.mapped_size() && s.rva < page + PAGE);
+        let phys = memory.page(bus)?;
+        memory.map(
+            bus,
+            base + page,
+            phys,
+            USER | if writable { WRITABLE } else { 0 },
+        )?;
+    }
+    memory.write(bus, base, &image.data)
 }
 
 /// The command line of a program DOS started: its path and the PSP's
@@ -309,13 +338,12 @@ pub fn dos_command_line(cpu: &mut Cpu, path: &str) -> String {
 /// yet: calling it ends the program, saying what it needed. Returns the
 /// stub's address.
 fn missing_stub(
-    cpu: &mut Cpu,
+    bus: &mut Bus,
     memory: &mut Memory,
     process: &mut Process,
     dll: &str,
     function: &str,
 ) -> Option<u32> {
-    let bus = &mut cpu.bus;
     let index = process.missing.len() as u32;
     if index >= MAX_MISSING {
         return None;
@@ -336,4 +364,701 @@ fn missing_stub(
         .missing
         .push((dll.to_string(), function.to_string()));
     Some(address)
+}
+
+/// Why a load failed: the error LoadLibrary gives, and the message the
+/// program that can't start ends with.
+pub(super) struct LoadError {
+    pub code: u32,
+    pub message: String,
+}
+
+fn out_of_memory(name: &str) -> LoadError {
+    LoadError {
+        code: ERROR_NOT_ENOUGH_MEMORY,
+        message: format!("There isn't enough extended memory to run {}.", name),
+    }
+}
+
+/// A load of DLLs into a process: what it works on, and what it did.
+pub(super) struct Loader<'a> {
+    pub bus: &'a mut Bus,
+    pub memory: &'a mut Memory,
+    pub process: &'a mut Process,
+    /// Whether the DLLs come with the program, which keeps them while it
+    /// runs, rather than with LoadLibrary.
+    pub static_load: bool,
+    /// The directory searched first: the program's, or with
+    /// LOAD_WITH_ALTERED_SEARCH_PATH the DLL's.
+    pub first_dir: String,
+    /// The DLLs it mapped, each after the DLLs it imports from: the order
+    /// their entry points learn they are loaded in.
+    pub mapped: Vec<u32>,
+    /// The modules loaded before whose count it raised.
+    pub raised: Vec<u32>,
+}
+
+/// A function a module exports, as it is asked for.
+#[derive(Clone, Debug)]
+pub(super) enum Wanted {
+    Name(String),
+    Ordinal(u16),
+}
+
+impl std::fmt::Display for Wanted {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Wanted::Name(name) => write!(f, "{}", name),
+            Wanted::Ordinal(ordinal) => write!(f, "#{}", ordinal),
+        }
+    }
+}
+
+/// Where an export leads: an address, or another DLL's export, as
+/// "DLL.Function" or "DLL.#ordinal".
+enum Target {
+    Address(u32),
+    Forward(String),
+}
+
+/// The file name a module is known by: `name` without its directory,
+/// with ".DLL" added when it has no extension (a final dot says it has
+/// none), in capitals.
+pub(super) fn module_file_name(name: &str) -> String {
+    let file = name.rsplit(['\\', '/', ':']).next().unwrap_or(name);
+    let file = file.trim_end_matches(' ');
+    let file = match file.strip_suffix('.') {
+        Some(bare) => bare.to_string(),
+        None if !file.contains('.') && !file.is_empty() => format!("{}.DLL", file),
+        None => file.to_string(),
+    };
+    file.to_ascii_uppercase()
+}
+
+/// The directory of the DOS path `path`, without a final backslash.
+pub(super) fn directory_of(path: &str) -> String {
+    match path.rfind('\\') {
+        Some(i) => path[..i].to_string(),
+        None => String::new(),
+    }
+}
+
+/// `dir` and `file` joined with a backslash.
+fn join(dir: &str, file: &str) -> String {
+    if dir.ends_with('\\') {
+        format!("{}{}", dir, file)
+    } else {
+        format!("{}\\{}", dir, file)
+    }
+}
+
+/// The DLL file `name` (`file` without its directory) on the disks: the
+/// path it names, or without one the first found in the program's
+/// directory, the current directory, the system and Windows directories
+/// and the directories in PATH, as Windows 95 searches. Its full DOS path.
+fn find_file(l: &Loader, name: &str, file: &str) -> Option<String> {
+    let disk = &l.bus.disk;
+    if name.contains(['\\', '/', ':']) {
+        let name = name.trim_end_matches(' ');
+        let path = disk.qualify_path(name)?;
+        let path = join(&directory_of(&path), file);
+        return disk.is_file(&path).then_some(path);
+    }
+    let mut dirs = vec![l.first_dir.clone()];
+    dirs.extend(disk.qualify_directory("X"));
+    dirs.push(SYSTEM_DIR.to_string());
+    dirs.push(WINDOWS_DIR.to_string());
+    let path = l.process.environment.iter().find_map(|s| {
+        s.split_once('=')
+            .filter(|(n, _)| n.eq_ignore_ascii_case("PATH"))
+            .map(|(_, v)| v.to_string())
+    });
+    if let Some(path) = path {
+        dirs.extend(
+            path.split(';')
+                .map(str::trim)
+                .filter(|d| !d.is_empty())
+                .map(str::to_string),
+        );
+    }
+    dirs.into_iter()
+        .filter(|d| !d.is_empty())
+        .map(|d| join(&d, file))
+        .find(|p| disk.is_file(p))
+        .and_then(|p| disk.qualify_path(&p))
+}
+
+/// The contents of the file at the DOS path `path`.
+fn read_file(bus: &mut Bus, path: &str) -> Option<crate::memfs::Bytes> {
+    let bytes = bus.disk.file_data(path)?.read().ok()?;
+    if let Some(drive) = bus.disk.drive_of(path) {
+        let key = bus.disk.file_key(path);
+        let access = crate::disknoise::Access::File { write: false, key };
+        bus.drive_activity(
+            drive,
+            crate::diskio::OPEN_BYTES + bytes.len() as u32,
+            access,
+        );
+    }
+    Some(bytes)
+}
+
+/// The error a file that isn't an image Windows 95 can load gives: one
+/// with no PE header is in a bad format, and Windows 95 fails one whose
+/// PE header it can't take with ERROR_GEN_FAILURE, as Wine's tests found.
+fn bad_image_error(file: &[u8]) -> u32 {
+    let at = |i: usize| {
+        file.get(i..i + 4)
+            .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+    };
+    let pe = file
+        .starts_with(b"MZ")
+        .then(|| at(0x3C))
+        .flatten()
+        .and_then(|offset| file.get(offset as usize..offset as usize + 4));
+    if pe == Some(b"PE\0\0") {
+        ERROR_GEN_FAILURE
+    } else {
+        ERROR_BAD_FORMAT
+    }
+}
+
+/// Map the built-in DLL `index` where Windows 95 has it, read only.
+/// Its base.
+pub(super) fn map_builtin(
+    bus: &mut Bus,
+    memory: &mut Memory,
+    process: &mut Process,
+    index: usize,
+) -> Option<u32> {
+    let dll = stubs::DLLS[index];
+    if let Some(m) = process.modules.iter().find(|m| m.base == dll.base) {
+        return Some(m.base);
+    }
+    let built = stubs::image(index);
+    let size = built.headers.size_of_image;
+    memory.reserve(Some(dll.base), size, SHARED, SYSTEM)?;
+    memory.commit(bus, dll.base, size.next_multiple_of(PAGE), USER)?;
+    memory.write(bus, dll.base, &built.data)?;
+    for page in (dll.base..dll.base + size).step_by(PAGE as usize) {
+        process.stub_pages.push(memory.translate(bus, page)? >> 12);
+    }
+    process.modules.push(Module {
+        name: dll.name.to_string(),
+        path: join(SYSTEM_DIR, dll.name),
+        base: dll.base,
+        size,
+        entry: 0,
+        refs: 0,
+        flags: BUILTIN,
+        deps: Vec::new(),
+    });
+    Some(dll.base)
+}
+
+/// Load the module `name` for `importer` (the program, or a DLL that
+/// imports from it), as LoadLibraryExA with `flags` does: a built-in DLL,
+/// one loaded already (its count raised), or the DLL file found on the
+/// search path, mapped, and unless the flags say otherwise its imports
+/// loaded and bound. Its base.
+pub(super) fn load_module(
+    l: &mut Loader,
+    name: &str,
+    flags: u32,
+    importer: &str,
+) -> Result<u32, LoadError> {
+    let file = module_file_name(name);
+    let datafile = flags & LOAD_LIBRARY_AS_DATAFILE != 0;
+    let not_found = || LoadError {
+        code: if datafile {
+            ERROR_FILE_NOT_FOUND
+        } else {
+            ERROR_DLL_NOT_FOUND
+        },
+        message: format!(
+            "{} needs {}, which the built-in Windows doesn't have yet.",
+            importer, name
+        ),
+    };
+    if file.is_empty() {
+        return Err(not_found());
+    }
+
+    // A built-in DLL, by its name alone or in the system directory.
+    let has_path = name.contains(['\\', '/', ':']);
+    let in_system = || {
+        l.bus
+            .disk
+            .qualify_path(name.trim_end_matches(' '))
+            .is_some_and(|p| directory_of(&p).eq_ignore_ascii_case(SYSTEM_DIR))
+    };
+    if let Some(index) = stubs::find_dll(&file)
+        && (!has_path || in_system())
+    {
+        return map_builtin(l.bus, l.memory, l.process, index)
+            .ok_or_else(|| out_of_memory(importer));
+    }
+
+    // One loaded already, known by its file name as on Windows 95. A
+    // path elsewhere doesn't name a built-in DLL, and one to map as data
+    // names that file only.
+    let qualified = if has_path {
+        l.bus.disk.qualify_path(name.trim_end_matches(' '))
+    } else {
+        None
+    };
+    let loaded = l.process.modules.iter_mut().find(|m| {
+        let same_file = qualified
+            .as_deref()
+            .is_some_and(|p| p.eq_ignore_ascii_case(&m.path));
+        let by_name = m.name.eq_ignore_ascii_case(&file)
+            && !(has_path && (datafile || m.flags & BUILTIN != 0));
+        (same_file || by_name) && (datafile || m.flags & DATAFILE == 0)
+    });
+    if let Some(m) = loaded {
+        if m.flags & (BUILTIN | STATIC) == 0 {
+            m.refs += 1;
+            if !l.mapped.contains(&m.base) {
+                l.raised.push(m.base);
+            }
+        }
+        return Ok(m.base);
+    }
+
+    let path = find_file(l, name, &file).ok_or_else(not_found)?;
+    let bytes = read_file(l.bus, &path).ok_or_else(not_found)?;
+    let mut image = pe::Image::load(&bytes).map_err(|e| LoadError {
+        code: bad_image_error(&bytes),
+        message: format!("{} can't be loaded: {}.", file, e),
+    })?;
+    let (preferred, size) = (image.headers.image_base, image.headers.size_of_image);
+    if size == 0 {
+        return Err(LoadError {
+            code: bad_image_error(&bytes),
+            message: format!("{} can't be loaded: it is empty.", file),
+        });
+    }
+
+    // As data: the image as it is, where there is room.
+    if datafile {
+        let base = l
+            .memory
+            .reserve(Some(preferred), size, PRIVATE, SHARED)
+            .or_else(|| l.memory.reserve(None, size, PRIVATE, SHARED))
+            .ok_or_else(|| out_of_memory(importer))?;
+        map_image(l.bus, l.memory, &image, base, true).ok_or_else(|| out_of_memory(importer))?;
+        l.process.modules.push(Module {
+            name: file,
+            path,
+            base,
+            size,
+            entry: 0,
+            refs: 1,
+            flags: DATAFILE,
+            deps: Vec::new(),
+        });
+        return Ok(base);
+    }
+
+    // Where it wants to be, in the private or the shared arena, or
+    // relocated where there is room.
+    let base = match l.memory.reserve(Some(preferred), size, PRIVATE, SYSTEM) {
+        Some(base) => base,
+        None if image.headers.relocatable() => {
+            let base = l
+                .memory
+                .reserve(None, size, PRIVATE, SHARED)
+                .ok_or_else(|| out_of_memory(importer))?;
+            if let Err(e) = image.relocate(base) {
+                l.memory.unreserve(base);
+                return Err(LoadError {
+                    code: ERROR_BAD_FORMAT,
+                    message: format!("{} can't be relocated: {}.", file, e),
+                });
+            }
+            base
+        }
+        None => {
+            return Err(LoadError {
+                code: ERROR_NOT_ENOUGH_MEMORY,
+                message: format!(
+                    "{} must be loaded at {:08X}h, where Windows 95 has no room for it.",
+                    file, preferred
+                ),
+            });
+        }
+    };
+    let resolve = flags & DONT_RESOLVE_DLL_REFERENCES == 0;
+    let entry = if image.headers.is_dll() && image.headers.entry != 0 && resolve {
+        base + image.headers.entry
+    } else {
+        0
+    };
+    let mut module_flags = if l.static_load { STATIC } else { 0 };
+    if !resolve {
+        module_flags |= UNRESOLVED;
+    }
+    l.process.modules.push(Module {
+        name: file.clone(),
+        path,
+        base,
+        size,
+        entry,
+        refs: 1,
+        flags: module_flags,
+        deps: Vec::new(),
+    });
+    map_image(l.bus, l.memory, &image, base, false).ok_or_else(|| out_of_memory(importer))?;
+
+    if resolve {
+        let imports = image.imports().map_err(|e| LoadError {
+            code: ERROR_BAD_FORMAT,
+            message: format!("{}'s imports can't be read: {}.", file, e),
+        })?;
+        let deps = bind_imports(l, base, &imports, &file)?;
+        if let Some(m) = l.process.modules.iter_mut().find(|m| m.base == base) {
+            m.deps = deps;
+        }
+        dll_tls(l, &image, &file)?;
+    }
+
+    // After the DLLs it imports from, which it needs first.
+    if let Some(i) = l.process.modules.iter().position(|m| m.base == base) {
+        let module = l.process.modules.remove(i);
+        l.process.modules.push(module);
+    }
+    l.mapped.push(base);
+    Ok(base)
+}
+
+/// The static TLS of the DLL `image`, which `load_module` mapped: with the
+/// program, a slot of the process's, whose number goes to its index
+/// variable, and the main thread's copy of its template there; threads
+/// that start later get theirs (`tls_blocks`). Windows 95 can't give one
+/// to a DLL LoadLibrary loads, and fails the load.
+fn dll_tls(l: &mut Loader, image: &pe::Image, file: &str) -> Result<(), LoadError> {
+    let damaged = |e: pe::Error| LoadError {
+        code: ERROR_BAD_FORMAT,
+        message: format!("{}'s TLS directory is damaged: {}.", file, e),
+    };
+    let Some(tls) = image.tls().map_err(damaged)? else {
+        return Ok(());
+    };
+    if !l.static_load {
+        return Err(LoadError {
+            code: ERROR_DLL_INIT_FAILED,
+            message: format!("{} has static TLS, which LoadLibrary can't give it.", file),
+        });
+    }
+    let template = image.tls_template(&tls).map_err(damaged)?;
+    let used = l.process.tls_used;
+    let Some(slot) = (0..TLS_SLOTS).find(|&i| used & 1 << i == 0) else {
+        return Err(LoadError {
+            code: ERROR_DLL_INIT_FAILED,
+            message: format!("{} needs a TLS slot, and there are none left.", file),
+        });
+    };
+    let (bus, memory) = (&mut *l.bus, &mut *l.memory);
+    memory
+        .write_32(bus, tls.index_address, slot)
+        .ok_or_else(|| LoadError {
+            code: ERROR_BAD_FORMAT,
+            message: format!("{}'s TLS index is outside it.", file),
+        })?;
+    let tib = l.process.tib;
+    tls_block(bus, memory, tib, slot, &template).ok_or_else(|| out_of_memory(file))?;
+    l.process.tls_used |= 1 << slot;
+    l.process.dll_tls.push((slot, template));
+    Ok(())
+}
+
+/// A copy of the TLS template `template` for the thread whose TIB is at
+/// `tib`, in its slot `slot`.
+fn tls_block(
+    bus: &mut Bus,
+    memory: &mut Memory,
+    tib: u32,
+    slot: u32,
+    template: &[u8],
+) -> Option<()> {
+    let len = (template.len() as u32).max(1).next_multiple_of(PAGE);
+    let block = memory.reserve(None, len, PRIVATE, SHARED)?;
+    memory.commit(bus, block, len, USER | WRITABLE)?;
+    memory.write(bus, block, template)?;
+    memory.write_32(bus, tib + TLS_ARRAY + 4 * slot, block)
+}
+
+/// The copies of the static TLS of the process's DLLs for a new thread,
+/// whose TIB is at `tib`.
+pub(super) fn tls_blocks(bus: &mut Bus, process: &mut Process, tib: u32) -> Option<()> {
+    for (slot, template) in process.dll_tls.clone() {
+        tls_block(bus, &mut process.memory, tib, slot, &template)?;
+    }
+    Some(())
+}
+
+/// Load the DLLs `imports` names for the module at `base` (`importer`),
+/// and write the addresses of the functions it imports to its import
+/// address table. The functions of the built-in DLLs that they don't have
+/// yet get stubs that say so; a DLL file without a function fails the
+/// load. The modules it took a reference on.
+fn bind_imports(
+    l: &mut Loader,
+    base: u32,
+    imports: &[pe::ImportedDll],
+    importer: &str,
+) -> Result<Vec<u32>, LoadError> {
+    let mut deps = Vec::new();
+    for dll in imports {
+        let dep = load_module(l, &dll.name, 0, importer)?;
+        deps.push(dep);
+        let builtin = l
+            .process
+            .modules
+            .iter()
+            .find(|m| m.base == dep && m.flags & BUILTIN != 0)
+            .map(|m| m.name.clone());
+        for (slot, import) in &dll.functions {
+            let wanted = match import {
+                pe::Import::Name { name, .. } => Wanted::Name(name.clone()),
+                pe::Import::Ordinal(ordinal) => Wanted::Ordinal(*ordinal),
+            };
+            let found = resolve_export(l, dep, &wanted, importer, &mut deps, 0)?;
+            let address = match (found, &builtin) {
+                (Some(address), _) => address,
+                (None, Some(builtin)) => {
+                    let what = wanted.to_string();
+                    missing_stub(l.bus, l.memory, l.process, builtin, &what)
+                        .ok_or_else(|| out_of_memory(importer))?
+                }
+                (None, None) => {
+                    return Err(LoadError {
+                        code: ERROR_PROC_NOT_FOUND,
+                        message: format!(
+                            "{} is linked to missing export {}:{}.",
+                            importer,
+                            module_file_name(&dll.name),
+                            wanted
+                        ),
+                    });
+                }
+            };
+            l.memory
+                .write_32(l.bus, base.wrapping_add(*slot), address)
+                .ok_or_else(|| LoadError {
+                    code: ERROR_BAD_FORMAT,
+                    message: format!("{}'s import table is damaged.", importer),
+                })?;
+        }
+    }
+    Ok(deps)
+}
+
+/// The address of the export `wanted` of the module at `base`, following
+/// forwarders to other DLLs, which are loaded for it (and kept in
+/// `deps`). None if there is no such export.
+fn resolve_export(
+    l: &mut Loader,
+    base: u32,
+    wanted: &Wanted,
+    importer: &str,
+    deps: &mut Vec<u32>,
+    depth: u32,
+) -> Result<Option<u32>, LoadError> {
+    match export_target(l.bus, l.memory, base, wanted) {
+        None => Ok(None),
+        Some(Target::Address(address)) => Ok(Some(address)),
+        Some(Target::Forward(forward)) => {
+            let Some((dll, function)) = forward.rsplit_once('.').filter(|_| depth < 8) else {
+                return Ok(None);
+            };
+            let dep = load_module(l, dll, 0, importer)?;
+            deps.push(dep);
+            resolve_export(l, dep, &forwarded(function), importer, deps, depth + 1)
+        }
+    }
+}
+
+/// The function a forwarder's "Function" or "#ordinal" names.
+fn forwarded(function: &str) -> Wanted {
+    match function.strip_prefix('#').and_then(|n| n.parse().ok()) {
+        Some(ordinal) => Wanted::Ordinal(ordinal),
+        None => Wanted::Name(function.to_string()),
+    }
+}
+
+/// The address of the export `wanted` of the module at `base`, for
+/// GetProcAddress: forwarders are followed to DLLs the process has
+/// already, and to built-in ones, which are mapped for it.
+pub(super) fn find_export(
+    bus: &mut Bus,
+    process: &mut Process,
+    base: u32,
+    wanted: &Wanted,
+) -> Option<u32> {
+    let (mut base, mut wanted) = (base, wanted.clone());
+    for _ in 0..8 {
+        match export_target(bus, &process.memory, base, &wanted)? {
+            Target::Address(address) => return Some(address),
+            Target::Forward(forward) => {
+                let (dll, function) = forward.rsplit_once('.')?;
+                base = match process.module(dll) {
+                    Some(base) => base,
+                    None => {
+                        let index = stubs::find_dll(&module_file_name(dll))?;
+                        let mut memory = std::mem::take(&mut process.memory);
+                        let mapped = map_builtin(bus, &mut memory, process, index);
+                        process.memory = memory;
+                        mapped?
+                    }
+                };
+                wanted = forwarded(function);
+            }
+        }
+    }
+    None
+}
+
+/// `len` bytes at `lin` in `memory`, read through its page tables
+/// without a page fault: None where a page isn't there.
+pub(super) fn peek(bus: &Bus, memory: &Memory, lin: u32, len: usize) -> Option<Vec<u8>> {
+    (0..len as u32)
+        .map(|i| {
+            let phys = memory.translate(bus, lin.wrapping_add(i))?;
+            Some(bus.read_8(phys as usize))
+        })
+        .collect()
+}
+
+pub(super) fn peek_32(bus: &Bus, memory: &Memory, lin: u32) -> Option<u32> {
+    let bytes = peek(bus, memory, lin, 4)?;
+    Some(u32::from_le_bytes(bytes.try_into().ok()?))
+}
+
+/// The NUL-terminated string at `lin`, at most `max` bytes of it.
+pub(super) fn peek_string(bus: &Bus, memory: &Memory, lin: u32, max: usize) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    while bytes.len() < max {
+        let phys = memory.translate(bus, lin.wrapping_add(bytes.len() as u32))?;
+        match bus.read_8(phys as usize) {
+            0 => break,
+            b => bytes.push(b),
+        }
+    }
+    Some(bytes)
+}
+
+/// The address a data directory of the image at `base` gives, and its
+/// size: 0 for one it doesn't have.
+pub(super) fn directory(bus: &Bus, memory: &Memory, base: u32, index: u32) -> Option<(u32, u32)> {
+    let pe = base.wrapping_add(peek_32(bus, memory, base + 0x3C)?);
+    let count = peek_32(bus, memory, pe + 0x74)?;
+    if index >= count {
+        return Some((0, 0));
+    }
+    let rva = peek_32(bus, memory, pe + 0x78 + 8 * index)?;
+    let size = peek_32(bus, memory, pe + 0x7C + 8 * index)?;
+    Some((rva, size))
+}
+
+/// Where the export `wanted` of the module at `base` leads, read from its
+/// export directory in memory as Windows reads it.
+fn export_target(bus: &Bus, memory: &Memory, base: u32, wanted: &Wanted) -> Option<Target> {
+    let (dir, dir_size) = directory(bus, memory, base, 0)?;
+    if dir == 0 {
+        return None;
+    }
+    let field = |offset: u32| peek_32(bus, memory, base.wrapping_add(dir).wrapping_add(offset));
+    let ordinal_base = field(16)?;
+    let functions = field(20)?;
+    let names = field(24)?;
+    let function_table = base.wrapping_add(field(28)?);
+    let name_table = base.wrapping_add(field(32)?);
+    let ordinal_table = base.wrapping_add(field(36)?);
+    let index = match wanted {
+        Wanted::Ordinal(ordinal) => (*ordinal as u32).checked_sub(ordinal_base)?,
+        Wanted::Name(name) => {
+            let name = crate::dosstr::to_bytes(name);
+            (0..names).find_map(|i| {
+                let at = base.wrapping_add(peek_32(bus, memory, name_table + 4 * i)?);
+                if peek_string(bus, memory, at, 256)? != name {
+                    return None;
+                }
+                let index = peek(bus, memory, ordinal_table + 2 * i, 2)?;
+                Some(u16::from_le_bytes([index[0], index[1]]) as u32)
+            })?
+        }
+    };
+    if index >= functions {
+        return None;
+    }
+    let rva = peek_32(bus, memory, function_table + 4 * index)?;
+    if rva == 0 {
+        return None;
+    }
+    if (dir..dir.wrapping_add(dir_size)).contains(&rva) {
+        let text = peek_string(bus, memory, base.wrapping_add(rva), 256)?;
+        return Some(Target::Forward(crate::dosstr::from_bytes(&text)));
+    }
+    Some(Target::Address(base.wrapping_add(rva)))
+}
+
+/// Take a reference on the module at `base` away (FreeLibrary): the
+/// modules whose last reference went, it first and then those it imported
+/// from, are added to `freed`. The built-in DLLs and those that came with
+/// the program stay.
+pub(super) fn release(process: &mut Process, base: u32, freed: &mut Vec<u32>) {
+    let Some(module) = process.modules.iter_mut().find(|m| m.base == base) else {
+        return;
+    };
+    if module.flags & (BUILTIN | STATIC) != 0 || module.refs == 0 {
+        return;
+    }
+    module.refs -= 1;
+    if module.refs > 0 {
+        return;
+    }
+    let deps = module.deps.clone();
+    freed.push(base);
+    for dep in deps {
+        release(process, dep, freed);
+    }
+}
+
+/// Take the module at `base` out of the process: its pages and address
+/// space are given back.
+pub(super) fn unmap(bus: &mut Bus, memory: &mut Memory, process: &mut Process, base: u32) {
+    let Some(i) = process.modules.iter().position(|m| m.base == base) else {
+        return;
+    };
+    let module = process.modules.remove(i);
+    for page in (base..base + module.size.next_multiple_of(PAGE)).step_by(PAGE as usize) {
+        memory.unmap(bus, page);
+    }
+    memory.unreserve(base);
+}
+
+/// Undo a LoadLibrary that failed: the modules it mapped (those not in
+/// `before`) go, and the counts it raised go down again.
+pub(super) fn roll_back(
+    bus: &mut Bus,
+    memory: &mut Memory,
+    process: &mut Process,
+    before: &[u32],
+    raised: &[u32],
+) {
+    let new: Vec<u32> = process
+        .modules
+        .iter()
+        .map(|m| m.base)
+        .filter(|b| !before.contains(b))
+        .collect();
+    for base in new {
+        unmap(bus, memory, process, base);
+    }
+    for &base in raised {
+        if let Some(m) = process.modules.iter_mut().find(|m| m.base == base) {
+            m.refs = m.refs.saturating_sub(1);
+        }
+    }
 }

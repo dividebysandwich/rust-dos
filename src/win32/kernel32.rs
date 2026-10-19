@@ -8,7 +8,7 @@ mod mapping;
 
 mod file;
 mod memory;
-mod module;
+pub(super) mod module;
 mod path;
 mod process;
 mod sync;
@@ -293,7 +293,6 @@ static APIS: &[Api] = &[
     stdcall("MapViewOfFileEx", 256, 6, mapping::map_view_of_file_ex),
     stdcall("UnmapViewOfFile", 257, 1, mapping::unmap_view_of_file),
     stdcall("FlushViewOfFile", 258, 2, mapping::flush_view_of_file),
-
     // Files, directories, paths and the console.
     stdcall("CreateFileA", 100, 7, file::create_file),
     stdcall("CreateFileW", 101, 7, not_implemented_handle),
@@ -380,6 +379,38 @@ static APIS: &[Api] = &[
     stdcall("ReadConsoleInputA", 182, 4, console::read_console_input),
     stdcall("FlushConsoleInputBuffer", 183, 1, console::flush_console_input_buffer),
     stdcall("SetConsoleTitleA", 184, 1, console::set_console_title),
+
+    // Where the main thread starts when DLLs that came with the program
+    // have entry points, which run before the program's.
+    stdcall("ProcessStart", 0, 0, module::process_start),
+    stdcall("LoadLibraryA", 300, 1, module::load_library),
+    stdcall("LoadLibraryExA", 301, 3, module::load_library_ex),
+    stdcall("FreeLibrary", 302, 1, module::free_library),
+    stdcall(
+        "FreeLibraryAndExitThread",
+        303,
+        2,
+        module::free_library_and_exit_thread,
+    ),
+    stdcall("GetModuleFileNameA", 304, 3, module::get_module_file_name),
+    stdcall("GetModuleFileNameW", 305, 3, not_implemented),
+    stdcall(
+        "DisableThreadLibraryCalls",
+        306,
+        1,
+        module::disable_thread_library_calls,
+    ),
+    stdcall("FindResourceA", 307, 3, module::find_resource),
+    stdcall("FindResourceExA", 308, 4, module::find_resource_ex),
+    stdcall("LoadResource", 309, 2, module::load_resource),
+    stdcall("LockResource", 310, 1, module::lock_resource),
+    stdcall("SizeofResource", 311, 2, module::sizeof_resource),
+    stdcall("FreeResource", 312, 1, module::free_resource),
+    stdcall("EnumResourceTypesA", 313, 3, module::enum_resource_types),
+    stdcall("EnumResourceNamesA", 314, 4, module::enum_resource_names),
+    stdcall("LoadLibraryW", 315, 1, not_implemented),
+    stdcall("LoadLibraryExW", 316, 3, not_implemented),
+    stdcall("GetModuleHandleW", 317, 1, not_implemented),
 ];
 
 /// The places in `APIS` of the system's own stubs.
@@ -391,6 +422,12 @@ const THREAD_RETURN: usize = 46;
 /// Where calls into the program return to (call.rs).
 pub fn call_return_address() -> u32 {
     super::stubs::stub_address(0, CALL_RETURN)
+}
+
+/// Where the main thread starts when DLLs' entry points run first.
+pub fn process_start_address() -> u32 {
+    let index = APIS.iter().position(|a| a.name == "ProcessStart");
+    super::stubs::stub_address(0, index.expect("ProcessStart"))
 }
 
 /// The idle loop's stub (thread.rs).
@@ -472,12 +509,13 @@ fn string_at(cpu: &mut Cpu, at: u32) -> Option<String> {
 /// value it returned, and with it the process, unless other threads run.
 fn process_return(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     let code = cpu.eax();
-    super::thread::exit_current(cpu, code);
+    module::exit_thread(cpu, code);
     None
 }
 
+/// ExitProcess: the DLLs learn that the process ends, then it does.
 fn exit_process(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    super::exit(cpu, args[0]);
+    module::exit_process(cpu, args[0]);
     None
 }
 
@@ -504,7 +542,8 @@ fn get_version(_: &mut Cpu, _: &[u32]) -> Option<u32> {
 }
 
 /// The module named `name` (with ".DLL" when it has no extension), or
-/// with NULL the program's.
+/// with NULL the program's. Windows 95 knows modules by their file
+/// names: a directory in `name` doesn't matter.
 fn get_module_handle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if args[0] == 0 {
         return Some(super::process(cpu).image_base);

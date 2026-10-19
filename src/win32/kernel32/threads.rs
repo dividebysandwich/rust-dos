@@ -110,6 +110,9 @@ pub(super) fn create_thread(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             memory.write(bus, block, &p.tls_template)?;
             memory.write_32(bus, tib + TLS_ARRAY, block)?;
         }
+        // And of its DLLs'.
+        crate::win32::loader::tls_blocks(bus, p, tib)?;
+        let memory = &mut p.memory;
         // The return address that ends it, and its argument.
         let esp = top - 8;
         memory.write_32(bus, esp, super::thread_return_address())?;
@@ -149,15 +152,16 @@ pub(super) fn create_thread(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(handle)
 }
 
-/// ExitThread(code), and where a thread's function returns to.
+/// ExitThread(code), and where a thread's function returns to: the DLLs
+/// learn that the thread ends, then it does.
 pub(super) fn exit_thread(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    thread::exit_current(cpu, args[0]);
+    super::module::exit_thread(cpu, args[0]);
     None
 }
 
 pub(super) fn thread_return(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     let code = cpu.eax();
-    thread::exit_current(cpu, code);
+    super::module::exit_thread(cpu, code);
     None
 }
 

@@ -109,7 +109,7 @@ const ESP: usize = 4;
 /// The exit code of a program that ended because of an error.
 const FAILED: u32 = 0xFF;
 
-//// A module in the process: the program or a DLL.
+/// A module in the process: the program or a DLL.
 #[derive(Clone, Debug, Default)]
 pub struct Module {
     pub name: String,
@@ -118,6 +118,15 @@ pub struct Module {
     /// Its entry point (DllMain), or 0 for the program's and the
     /// built-in DLLs', which have none to call.
     pub entry: u32,
+    /// Its file's DOS path, as GetModuleFileNameA gives it.
+    pub path: String,
+    /// How many LoadLibrary calls hold it (not counted for the modules
+    /// that stay while the program runs).
+    pub refs: u32,
+    /// What it is (loader.rs: `BUILTIN`, `STATIC` and the others).
+    pub flags: u32,
+    /// The modules it imports from, each holding a reference of its own.
+    pub deps: Vec<u32>,
 }
 
 /// A running Win32 program.
@@ -180,6 +189,12 @@ pub struct Process {
     /// The version of Windows its header says it was made for, as
     /// major << 16 | minor.
     subsystem_version: u32,
+
+    /// The static TLS of the DLLs that came with the program: each one's
+    /// slot and template, which each thread gets a copy of.
+    dll_tls: Vec<(u32, Vec<u8>)>,
+    /// Whether ExitProcess is ending it, telling the DLLs.
+    exiting: bool,
 }
 
 impl Process {
@@ -191,28 +206,25 @@ impl Process {
         self.threads.get_mut(self.current?)
     }
 
-    /// The DLLs with entry points, as (base, entry point), in the order
-    /// they were loaded in.
+    /// The DLLs whose entry points learn of threads that start and end,
+    /// as (base, entry point), in the order they were loaded in.
     fn entry_points(&self) -> Vec<(u32, u32)> {
+        let flags = loader::ATTACHED | loader::NO_THREAD_CALLS;
         self.modules
             .iter()
-            .filter(|m| m.entry != 0)
+            .filter(|m| m.entry != 0 && m.flags & flags == loader::ATTACHED)
             .map(|m| (m.base, m.entry))
             .collect()
     }
 
     /// The base of the module `name`, ".DLL" added to a name without an
-    /// extension.
+    /// extension, known by its file name as on Windows 95. Modules mapped
+    /// as data aren't found.
     fn module(&self, name: &str) -> Option<u32> {
-        let file = name.rsplit(['\\', '/']).next().unwrap_or(name);
-        let file = if file.contains('.') {
-            file.to_string()
-        } else {
-            format!("{}.DLL", file)
-        };
+        let file = loader::module_file_name(name);
         self.modules
             .iter()
-            .find(|m| m.name.eq_ignore_ascii_case(&file))
+            .find(|m| m.name.eq_ignore_ascii_case(&file) && m.flags & loader::DATAFILE == 0)
             .map(|m| m.base)
     }
 }
@@ -467,10 +479,8 @@ fn create_process(
     if cpu.bus.win32.pool.is_none() {
         cpu.bus.win32.pool = memory::Pool::take(&mut cpu.bus, loader::MIN_MEMORY);
     }
-    let loaded = loader::load(cpu, path, line, &file)?;
+    let loaded = loader::load(cpu, path, line, &file, environment)?;
     let mut process = loaded.process;
-    process.environment = environment;
-    process.path = path.to_string();
     process.priority_class = 0x20;
     let return_address = stubs::stub_address(0, kernel32::PROCESS_RETURN);
     let esp = loaded.stack_top - 4;
@@ -512,12 +522,20 @@ fn create_process(
             process.handles.add(id)
         }),
     };
-    // The main thread, which runs the program's entry point.
+    // The main thread, which runs the program's entry point, after the
+    // entry points of the DLLs it came with when there are any: from
+    // KERNEL32's process start, with the entry point in EAX.
+    let attach = process.modules.iter().any(|m| m.entry != 0);
     let mut ctx = Context {
-        eip: loaded.entry,
+        eip: if attach {
+            kernel32::process_start_address()
+        } else {
+            loaded.entry
+        },
         eflags: 0x0202,
         ..Context::default()
     };
+    ctx.gpr[0] = loaded.entry;
     ctx.gpr[ESP] = esp;
     ctx.seg = [
         system::DATA3,
@@ -755,7 +773,11 @@ crate::state_fields!(Module {
     name,
     base,
     size,
-    entry
+    entry,
+    path,
+    refs,
+    flags,
+    deps
 });
 crate::state_fields!(Process {
     id,
@@ -789,6 +811,9 @@ crate::state_fields!(Process {
     priority_class,
     error_mode,
     subsystem_version,
+
+    dll_tls,
+    exiting,
 });
 crate::state_fields!(Win32 {
     pending,
