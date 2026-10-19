@@ -1,12 +1,13 @@
 //! Kernel objects and the handles of them: what CloseHandle,
-//! DuplicateHandle and the wait functions work on. An object lives while
-//! a handle or the system holds it (`refs`); a handle is its index in the
-//! process's table, times four from 4 on, as Windows 95's are small
-//! multiples of four.
+//! DuplicateHandle and the wait functions work on. The objects are the
+//! system's, shared by its processes (`Objects`); each process has its own
+//! handles of them (`Handles`). An object lives while a handle or the
+//! system holds it (`refs`). A handle is its index in the process's table,
+//! times four from 4 on, as Windows 95's are small multiples of four.
 //!
-//! Events, mutexes and semaphores may have a name, which the Open
-//! functions and a second Create find them by, in one namespace for all
-//! kinds.
+//! Events, mutexes, semaphores and file mappings may have a name, which
+//! the Open functions and a second Create find them by, in one namespace
+//! for all kinds and processes.
 
 use crate::cpu::Cpu;
 
@@ -32,15 +33,19 @@ pub enum Kind {
         abandoned: bool,
     },
     Semaphore { count: u32, max: u32 },
-    /// The thread at `index` in the process's list.
-    Thread { index: u32 },
-    /// The process.
-    Process {},
+    /// The thread with the id `id`, and its exit code once it ended,
+    /// which signals it.
+    Thread { id: u32, exit_code: Option<u32> },
+    /// The process with the id `id`, the same.
+    Process { id: u32, exit_code: Option<u32> },
 }
 
 impl Default for Kind {
     fn default() -> Self {
-        Kind::Process {}
+        Kind::Event {
+            manual: false,
+            signaled: false,
+        }
     }
 }
 
@@ -53,12 +58,10 @@ pub struct Object {
     pub refs: u32,
 }
 
-/// The objects and the handles of them.
+/// The system's objects.
 #[derive(Clone, Debug, Default)]
 pub struct Objects {
     pub objects: Vec<Option<Object>>,
-    /// Each handle's object, by its index.
-    handles: Vec<Option<u32>>,
 }
 
 impl Objects {
@@ -107,9 +110,26 @@ impl Objects {
         }
     }
 
+    /// The object with the name `name`, whatever its kind.
+    pub fn named(&self, name: &str) -> Option<u32> {
+        self.objects
+            .iter()
+            .position(|o| o.as_ref().is_some_and(|o| o.name.as_deref() == Some(name)))
+            .map(|i| i as u32)
+    }
+}
+
+/// A process's handles.
+#[derive(Clone, Debug, Default)]
+pub struct Handles {
+    /// Each handle's object, by its index.
+    handles: Vec<Option<u32>>,
+}
+
+impl Handles {
     /// A new handle of the object `id`, which it holds (the caller has
     /// counted the hold).
-    pub fn handle(&mut self, id: u32) -> u32 {
+    pub fn add(&mut self, id: u32) -> u32 {
         let i = match self.handles.iter().position(Option::is_none) {
             Some(i) => {
                 self.handles[i] = Some(id);
@@ -131,26 +151,16 @@ impl Objects {
         self.handles.get((handle / 4 - 1) as usize).copied().flatten()
     }
 
-    /// Close the handle: its object's hold goes. False if there is none.
-    pub fn close(&mut self, handle: u32) -> bool {
-        let Some(id) = self.of(handle) else {
-            return false;
-        };
+    /// Take the handle away: its object, whose hold the caller lets go
+    /// of. None if there is no such handle.
+    pub fn remove(&mut self, handle: u32) -> Option<u32> {
+        let id = self.of(handle)?;
         self.handles[(handle / 4 - 1) as usize] = None;
-        self.release(id);
-        true
+        Some(id)
     }
 
-    /// The object with the name `name`, whatever its kind.
-    pub fn named(&self, name: &str) -> Option<u32> {
-        self.objects
-            .iter()
-            .position(|o| o.as_ref().is_some_and(|o| o.name.as_deref() == Some(name)))
-            .map(|i| i as u32)
-    }
-
-    /// The handles there are, with their objects, for debuggers.
-    pub fn handles(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
+    /// The handles there are, with their objects.
+    pub fn iter(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
         self.handles
             .iter()
             .enumerate()
@@ -158,21 +168,49 @@ impl Objects {
     }
 }
 
-/// The object a handle of the current thread's names: its own handles,
-/// and the pseudo-handles of itself and its process.
+/// The system's objects.
+pub fn objects(cpu: &mut Cpu) -> &mut Objects {
+    &mut cpu.bus.win32.objects
+}
+
+/// A new handle in the running process of the object `id`, which it
+/// holds.
+pub fn new_handle(cpu: &mut Cpu, id: u32) -> u32 {
+    super::process(cpu).handles.add(id)
+}
+
+/// A new object of `kind`, and a handle of it in the running process.
+pub fn create(cpu: &mut Cpu, kind: Kind, name: Option<String>) -> u32 {
+    let id = objects(cpu).add(kind, name);
+    new_handle(cpu, id)
+}
+
+/// Close the running process's handle `handle`. False if there is none.
+pub fn close(cpu: &mut Cpu, handle: u32) -> bool {
+    match super::process(cpu).handles.remove(handle) {
+        Some(id) => {
+            objects(cpu).release(id);
+            true
+        }
+        None => false,
+    }
+}
+
+/// The object a handle of the running thread's names: its process's
+/// handles, and the pseudo-handles of itself and its process.
 pub fn resolve(cpu: &mut Cpu, handle: u32) -> Option<u32> {
     let process = super::process(cpu);
     match handle {
         CURRENT_PROCESS => Some(process.object),
         CURRENT_THREAD => process.current_thread().map(|t| t.object),
-        _ => process.objects.of(handle),
+        _ => process.handles.of(handle),
     }
 }
 
 /// The kind of the object `handle` names, if it is one.
 pub fn kind_of(cpu: &mut Cpu, handle: u32) -> Option<Kind> {
     let id = resolve(cpu, handle)?;
-    Some(super::process(cpu).objects.get(id)?.kind.clone())
+    Some(objects(cpu).get(id)?.kind.clone())
 }
 
 crate::win32::state_variants!(Kind {
@@ -184,8 +222,9 @@ crate::win32::state_variants!(Kind {
         abandoned
     },
     Semaphore { count, max },
-    Thread { index },
-    Process {},
+    Thread { id, exit_code },
+    Process { id, exit_code },
 });
 crate::state_fields!(Object { kind, name, refs });
-crate::state_fields!(Objects { objects, handles });
+crate::state_fields!(Objects { objects });
+crate::state_fields!(Handles { handles });

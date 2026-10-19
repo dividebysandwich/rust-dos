@@ -131,7 +131,7 @@ pub fn set_tib(cpu: &mut Cpu, phys: u32, selector: u16, tib: u32) {
 /// Put the processor in the program's context `ctx`, from wherever it is:
 /// protected mode with paging, the process's tables, level 3.
 pub fn enter_user(cpu: &mut Cpu, ctx: &Context) {
-    let process = cpu.bus.win32.process.as_ref().expect("a Win32 process");
+    let process = super::running(cpu).expect("a Win32 process");
     let cr3 = process.memory.cr3;
     // The threads' TIB selectors.
     let tibs: Vec<(u16, u32)> = process
@@ -186,12 +186,12 @@ pub fn enter_user(cpu: &mut Cpu, ctx: &Context) {
 /// Put the processor in real mode at `cs:ip`, on the stack `ss:sp`, with
 /// DS and ES the process's PSP and the flags `flags`.
 pub fn enter_real(cpu: &mut Cpu, (cs, ip): (u16, u16), (ss, sp): (u16, u16), flags: u32) {
-    let (psp, cr4) = cpu
-        .bus
-        .win32
-        .process
-        .as_ref()
-        .map_or((cpu.current_psp, cpu.cr4), |p| (p.psp, p.cr4));
+    let win32 = &cpu.bus.win32;
+    let (psp, cr4) = if win32.psp != 0 {
+        (win32.psp, win32.cr4)
+    } else {
+        (cpu.current_psp, cpu.cr4)
+    };
     if cpu.pe() {
         cpu.note_mode_switch(false);
     }
@@ -275,9 +275,9 @@ fn exception_entry(cpu: &mut Cpu, vector: u8, error: Option<u32>, ctx: Context) 
 /// handler runs, on the DOS program's stack, and returns to the trap at
 /// `IRQ_RETURN`, which goes on with the program.
 fn reflect(cpu: &mut Cpu, vector: u8, ctx: Context) {
-    let process = cpu.bus.win32.process.as_mut().expect("a Win32 process");
-    process.interrupted = Some(ctx);
-    let (ss, sp) = process.rm_stack;
+    let win32 = &mut cpu.bus.win32;
+    win32.interrupted = Some(ctx);
+    let (ss, sp) = win32.rm_stack;
     let handler = cpu.bus.read_32(vector as usize * 4);
     enter_real(
         cpu,
@@ -293,8 +293,12 @@ fn reflect(cpu: &mut Cpu, vector: u8, ctx: Context) {
 
 /// The trap the real-mode handler of a hardware interrupt returned to.
 pub fn irq_return(cpu: &mut Cpu) {
-    let process = cpu.bus.win32.process.as_mut().expect("a Win32 process");
-    let ctx = process.interrupted.take().expect("an interrupted program");
+    let ctx = cpu
+        .bus
+        .win32
+        .interrupted
+        .take()
+        .expect("an interrupted program");
     super::thread::after_interrupt(cpu, ctx);
 }
 

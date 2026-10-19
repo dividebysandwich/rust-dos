@@ -137,7 +137,7 @@ pub fn read_context(cpu: &mut Cpu, at: u32, ctx: &mut Context, fpu: &mut [u8; 10
 /// Whether the `len` bytes at `lin` have pages behind them, looked up
 /// without recording a page fault.
 fn present(cpu: &Cpu, lin: u32, len: u32) -> bool {
-    let process = cpu.bus.win32.process.as_ref().expect("a Win32 process");
+    let process = super::running(cpu).expect("a Win32 process");
     let last = lin.wrapping_add(len.saturating_sub(1));
     last >= lin
         && (lin & !(PAGE - 1)..=last)
@@ -213,7 +213,7 @@ fn fault_exception(cpu: &Cpu, vector: u8, error: Option<u32>) -> (u32, Vec<u32>,
 /// Whether the instruction that faulted is one only the system may run:
 /// HLT, CLI, STI, IN or OUT, or a move to or from a control register.
 fn privileged(cpu: &Cpu) -> bool {
-    let process = cpu.bus.win32.process.as_ref().expect("a Win32 process");
+    let process = super::running(cpu).expect("a Win32 process");
     let Some(phys) = process.memory.translate(&cpu.bus, cpu.eip()) else {
         return false;
     };

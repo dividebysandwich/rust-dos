@@ -1,8 +1,9 @@
-//! A Win32 process's memory: physical pages from a block of extended
-//! memory the process takes from the XMS pool when it starts, and the
-//! page tables that put them at the linear addresses Windows 95 has its
-//! parts at. The first megabyte (DOS, the BIOS and video memory) is there
-//! as it is in physical memory, for the system only.
+//! A Win32 process's memory: physical pages from the pool all processes
+//! share (`Pool`), a block of extended memory taken from the XMS pool when
+//! the first process starts, and the page tables that put them at the
+//! linear addresses Windows 95 has its parts at. The first megabyte (DOS,
+//! the BIOS and video memory) is there as it is in physical memory, for
+//! the system only.
 
 use crate::bus::Bus;
 
@@ -23,40 +24,33 @@ pub const SYSTEM: u32 = 0xC000_0000;
 /// Linear address space is given out in 64 KB pieces, as by Windows.
 pub const GRANULARITY: u32 = 0x1_0000;
 
+/// The physical pages the processes take theirs from.
 #[derive(Clone, Debug, Default)]
-pub struct Memory {
+pub struct Pool {
     /// The block of extended memory: its physical address and length.
     pub base: u32,
     pub len: u32,
-    /// The offset of the first page in it never used yet.
+    /// The offset of the first page in it never used yet, and the pages
+    /// given back.
     next: u32,
-    /// The page directory's physical address.
-    pub cr3: u32,
-    /// Reserved linear address ranges, as (start, length), in order.
-    regions: Vec<(u32, u32)>,
+    free: Vec<u32>,
 }
 
-impl Memory {
+impl Pool {
     /// Take the largest free block of extended memory, if it is at least
-    /// `min` bytes, and make an empty page directory with the first
-    /// megabyte mapped for the system.
-    pub fn new(bus: &mut Bus, min: u32) -> Option<Memory> {
+    /// `min` bytes.
+    pub fn take(bus: &mut Bus, min: u32) -> Option<Pool> {
         let end = bus.ram().len() as u32;
         let (largest, _) = bus.xms.dpmi_free(end);
         if largest < min {
             return None;
         }
         let base = bus.xms.take_dpmi(largest, end)?;
-        let mut memory = Memory {
+        Some(Pool {
             base,
             len: largest,
-            ..Memory::default()
-        };
-        memory.cr3 = memory.page(bus)?;
-        for page in 0..0x100 {
-            memory.map(bus, page * PAGE, page * PAGE, WRITABLE)?;
-        }
-        Some(memory)
+            ..Pool::default()
+        })
     }
 
     /// Give the block back to the XMS pool.
@@ -64,21 +58,148 @@ impl Memory {
         bus.xms.release_dpmi(self.base);
     }
 
+    /// Whether the physical address `phys` is in the pool.
+    fn has(&self, phys: u32) -> bool {
+        (self.base..self.base + self.len).contains(&phys)
+    }
+
+    /// The bytes of the pages it has left.
+    pub fn available(&self) -> u32 {
+        self.len - self.next + self.free.len() as u32 * PAGE
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Memory {
+    /// The page directory's physical address.
+    pub cr3: u32,
+    /// Reserved linear address ranges, as (start, length), in order.
+    regions: Vec<(u32, u32)>,
+}
+
+impl Memory {
+    /// An empty page directory with the first megabyte mapped for the
+    /// system, its pages from the pool.
+    pub fn new(bus: &mut Bus) -> Option<Memory> {
+        let mut memory = Memory::default();
+        memory.cr3 = memory.page(bus)?;
+        for page in 0..0x100 {
+            memory.map(bus, page * PAGE, page * PAGE, WRITABLE)?;
+        }
+        Some(memory)
+    }
+
+    /// Give every page it has back to the pool: the pages mapped, the
+    /// page tables and the directory.
+    pub fn release(&self, bus: &mut Bus) {
+        let Some(pool) = bus.win32.pool.as_ref() else {
+            return;
+        };
+        let pool = pool.clone();
+        let mut pages = Vec::new();
+        for pde in 0..1024u32 {
+            let table = bus.read_32((self.cr3 + 4 * pde) as usize);
+            if table & PRESENT == 0 {
+                continue;
+            }
+            let table = table & !0xFFF;
+            for pte in 0..1024u32 {
+                let entry = bus.read_32((table + 4 * pte) as usize);
+                if entry & PRESENT != 0 && pool.has(entry & !0xFFF) {
+                    pages.push(entry & !0xFFF);
+                }
+            }
+            pages.push(table);
+        }
+        pages.push(self.cr3);
+        if let Some(pool) = bus.win32.pool.as_mut() {
+            pool.free.extend(pages);
+        }
+    }
+
     /// A zeroed physical page.
     pub fn page(&mut self, bus: &mut Bus) -> Option<u32> {
-        self.pages(bus, 1)
+        let pool = bus.win32.pool.as_mut()?;
+        let page = match pool.free.pop() {
+            Some(page) => page,
+            None if pool.next + PAGE <= pool.len => {
+                pool.next += PAGE;
+                pool.base + pool.next - PAGE
+            }
+            None => return None,
+        };
+        bus.fill_ram(page as usize..(page + PAGE) as usize, 0);
+        Some(page)
     }
 
     /// `count` zeroed physical pages in a row, from memory never used yet.
     pub fn pages(&mut self, bus: &mut Bus, count: u32) -> Option<u32> {
+        let pool = bus.win32.pool.as_mut()?;
         let len = count * PAGE;
-        if self.next + len > self.len {
+        if pool.next + len > pool.len {
             return None;
         }
-        let first = self.base + self.next;
-        self.next += len;
+        let first = pool.base + pool.next;
+        pool.next += len;
         bus.fill_ram(first as usize..(first + len) as usize, 0);
         Some(first)
+    }
+
+    /// Take the page at `lin` away, giving it back to the pool. Its
+    /// physical address, if one was there.
+    pub fn unmap(&mut self, bus: &mut Bus, lin: u32) -> Option<u32> {
+        let table = bus.read_32((self.cr3 + 4 * (lin >> 22)) as usize);
+        if table & PRESENT == 0 {
+            return None;
+        }
+        let pte = ((table & !0xFFF) + 4 * ((lin >> 12) & 0x3FF)) as usize;
+        let entry = bus.read_32(pte);
+        if entry & PRESENT == 0 {
+            return None;
+        }
+        bus.write_32(pte, 0);
+        let phys = entry & !0xFFF;
+        if let Some(pool) = bus.win32.pool.as_mut()
+            && pool.has(phys)
+        {
+            pool.free.push(phys);
+        }
+        Some(phys)
+    }
+
+    /// The page table entry of `lin`, if its page table is there.
+    pub fn entry(&self, bus: &Bus, lin: u32) -> Option<u32> {
+        let table = bus.read_32((self.cr3 + 4 * (lin >> 22)) as usize);
+        (table & PRESENT != 0)
+            .then(|| bus.read_32(((table & !0xFFF) + 4 * ((lin >> 12) & 0x3FF)) as usize))
+    }
+
+    /// Set the entry bits (`USER`, `WRITABLE`) of the page at `lin`, which
+    /// is mapped.
+    pub fn protect(&mut self, bus: &mut Bus, lin: u32, flags: u32) -> Option<()> {
+        let table = bus.read_32((self.cr3 + 4 * (lin >> 22)) as usize);
+        if table & PRESENT == 0 {
+            return None;
+        }
+        let pte = ((table & !0xFFF) + 4 * ((lin >> 12) & 0x3FF)) as usize;
+        let entry = bus.read_32(pte);
+        if entry & PRESENT == 0 {
+            return None;
+        }
+        bus.write_32(pte, entry & !(USER | WRITABLE) | flags | PRESENT);
+        Some(())
+    }
+
+    /// The reserved ranges, as (start, length), in order.
+    pub fn regions(&self) -> &[(u32, u32)] {
+        &self.regions
+    }
+
+    /// Take the reservation that starts at `start` away. Its length, if
+    /// there was one.
+    pub fn unreserve(&mut self, start: u32) -> Option<u32> {
+        let i = self.regions.iter().position(|&(s, _)| s == start)?;
+        Some(self.regions.remove(i).1)
     }
 
     /// Map the physical page `phys` at `lin`, with the entry bits `flags`
@@ -165,10 +286,10 @@ impl Memory {
     }
 }
 
-crate::state_fields!(Memory {
+crate::state_fields!(Pool {
     base,
     len,
     next,
-    cr3,
-    regions
+    free
 });
+crate::state_fields!(Memory { cr3, regions });

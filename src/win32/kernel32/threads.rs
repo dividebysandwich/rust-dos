@@ -1,7 +1,9 @@
 //! Threads and the process: making and ending threads, their state, and
 //! the handles of objects.
 
-use super::{ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, FALSE, TRUE, set_error};
+use super::{
+    ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, FALSE, TRUE, set_error,
+};
 use crate::cpu::Cpu;
 use crate::instructions::fpu::control;
 use crate::win32::loader::{TLS_ARRAY, TLS_SLOTS};
@@ -27,16 +29,47 @@ const TIB_STACK_LIMIT: u32 = 0x08;
 const TIB_SELF: u32 = 0x18;
 const TIB_TLS_ARRAY: u32 = 0x2C;
 
-/// The thread a handle names (its index), or None with the last error
-/// set.
-fn thread_of(cpu: &mut Cpu, handle: u32) -> Option<usize> {
-    match object::kind_of(cpu, handle) {
-        Some(Kind::Thread { index }) => Some(index as usize),
-        _ => {
-            set_error(cpu, ERROR_INVALID_HANDLE);
-            None
-        }
+/// The thread a handle names (its process's place and its own), or None
+/// with the last error set. A thread that ended with its process is
+/// gone.
+fn thread_of(cpu: &mut Cpu, handle: u32) -> Option<(usize, usize)> {
+    let found = match object::kind_of(cpu, handle) {
+        Some(Kind::Thread { id, .. }) => thread::find(&cpu.bus.win32, id),
+        _ => None,
+    };
+    if found.is_none() {
+        set_error(cpu, ERROR_INVALID_HANDLE);
     }
+    found
+}
+
+/// The thread `(p, t)`.
+fn thread_at(cpu: &mut Cpu, (p, t): (usize, usize)) -> &mut Thread {
+    &mut cpu.bus.win32.processes[p].threads[t]
+}
+
+/// Whether `(p, t)` is the running thread.
+fn is_running(cpu: &Cpu, (p, t): (usize, usize)) -> bool {
+    let win32 = &cpu.bus.win32;
+    win32.running == p && win32.processes[p].current == Some(t)
+}
+
+/// The exit code of the thread or process a handle names: None if it
+/// names neither.
+fn exit_code_of(cpu: &mut Cpu, handle: u32, process: bool) -> Option<Option<u32>> {
+    match object::kind_of(cpu, handle)? {
+        Kind::Thread { exit_code, .. } if !process => Some(exit_code),
+        Kind::Process { exit_code, .. } if process => Some(exit_code),
+        _ => None,
+    }
+}
+
+/// The place of the process a handle names, if it runs.
+fn process_of(cpu: &mut Cpu, handle: u32) -> Option<usize> {
+    let Some(Kind::Process { id, .. }) = object::kind_of(cpu, handle) else {
+        return None;
+    };
+    cpu.bus.win32.processes.iter().position(|p| p.id == id)
 }
 
 /// CreateThread(attributes, stack, start, parameter, flags, id): a thread
@@ -89,17 +122,18 @@ pub(super) fn create_thread(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
     let system = process(cpu).system;
     crate::win32::system::set_tib(cpu, system, selector, tib);
-    let process = process(cpu);
-    let object = process.objects.add(
+    let id = cpu.bus.win32.new_id();
+    let objects = object::objects(cpu);
+    let object = objects.add(
         Kind::Thread {
-            index: index as u32,
+            id,
+            exit_code: None,
         },
         None,
     );
-    process.objects.hold(object);
-    let handle = process.objects.handle(object);
-    let id = thread::id_of(index);
-    process.threads.push(Thread {
+    objects.hold(object);
+    let handle = object::new_handle(cpu, object);
+    process(cpu).threads.push(Thread {
         id,
         object,
         tib,
@@ -140,82 +174,87 @@ pub(super) fn get_current_process(_: &mut Cpu, _: &[u32]) -> Option<u32> {
 }
 
 /// The process's id: as on Windows 95, a large number.
-pub(super) fn get_current_process_id(_: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(PROCESS_ID)
+pub(super) fn get_current_process_id(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    Some(process(cpu).id)
 }
-
-pub const PROCESS_ID: u32 = 0xFFF4_0F1D;
 
 /// GetExitCodeThread(handle, code): STILL_ACTIVE while it runs.
 pub(super) fn get_exit_code_thread(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let Some(index) = thread_of(cpu, args[0]) else {
-        return Some(FALSE);
-    };
-    let code = process(cpu).threads[index]
-        .exit_code
-        .unwrap_or(STILL_ACTIVE);
-    cpu.bus.guest_write_32(args[1], code);
-    Some(TRUE)
+    get_exit_code(cpu, args, false)
 }
 
-/// GetExitCodeProcess(handle, code): the process runs, as it is the only
-/// one.
+/// GetExitCodeProcess(handle, code): STILL_ACTIVE while it runs.
 pub(super) fn get_exit_code_process(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    if !matches!(object::kind_of(cpu, args[0]), Some(Kind::Process {})) {
+    get_exit_code(cpu, args, true)
+}
+
+fn get_exit_code(cpu: &mut Cpu, args: &[u32], process: bool) -> Option<u32> {
+    let Some(code) = exit_code_of(cpu, args[0], process) else {
         set_error(cpu, ERROR_INVALID_HANDLE);
         return Some(FALSE);
+    };
+    cpu.bus
+        .guest_write_32(args[1], code.unwrap_or(STILL_ACTIVE));
+    if cpu.bus.guest_faulted() {
+        return None;
     }
-    cpu.bus.guest_write_32(args[1], STILL_ACTIVE);
     Some(TRUE)
 }
 
 /// TerminateThread(handle, code): it ends where it is.
 pub(super) fn terminate_thread(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let Some(index) = thread_of(cpu, args[0]) else {
+    let Some((p, t)) = thread_of(cpu, args[0]) else {
         return Some(FALSE);
     };
-    let process = process(cpu);
-    if process.current == Some(index) {
+    if is_running(cpu, (p, t)) {
         thread::exit_current(cpu, args[1]);
         return None;
     }
-    let others = process
+    let others = cpu.bus.win32.processes[p]
         .threads
         .iter()
         .enumerate()
-        .any(|(i, t)| i != index && t.exit_code.is_none());
+        .any(|(i, thread)| i != t && thread.exit_code.is_none());
     if !others {
-        crate::win32::exit(cpu, args[1]);
-        return None;
+        if !crate::win32::terminate(cpu, p, args[1]) {
+            return None;
+        }
+        return Some(TRUE);
     }
-    thread::end(process, index, args[1]);
+    thread::end(&mut cpu.bus.win32, p, t, args[1]);
     thread::wake(cpu);
     Some(TRUE)
 }
 
 /// TerminateProcess(handle, code): the process ends.
 pub(super) fn terminate_process(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    if !matches!(object::kind_of(cpu, args[0]), Some(Kind::Process {})) {
-        set_error(cpu, ERROR_INVALID_HANDLE);
+    let Some(p) = process_of(cpu, args[0]) else {
+        // A process that ended already ends again without fuss.
+        if exit_code_of(cpu, args[0], true).is_some() {
+            set_error(cpu, ERROR_ACCESS_DENIED);
+        } else {
+            set_error(cpu, ERROR_INVALID_HANDLE);
+        }
         return Some(FALSE);
+    };
+    if !crate::win32::terminate(cpu, p, args[1]) {
+        return None;
     }
-    crate::win32::exit(cpu, args[1]);
-    None
+    Some(TRUE)
 }
 
 /// SuspendThread(handle): its count before. A thread that suspends
 /// itself stops here.
 pub(super) fn suspend_thread(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let Some(index) = thread_of(cpu, args[0]) else {
+    let Some(at) = thread_of(cpu, args[0]) else {
         return Some(0xFFFF_FFFF);
     };
-    let process = process(cpu);
-    let thread = &mut process.threads[index];
+    let thread = thread_at(cpu, at);
     let before = thread.suspended;
     if thread.exit_code.is_none() {
         thread.suspended += 1;
     }
-    if process.current == Some(index) {
+    if is_running(cpu, at) {
         cpu.set_eax(before);
         thread::reschedule(cpu);
         return None;
@@ -225,26 +264,26 @@ pub(super) fn suspend_thread(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// ResumeThread(handle): its count before.
 pub(super) fn resume_thread(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let Some(index) = thread_of(cpu, args[0]) else {
+    let Some(at) = thread_of(cpu, args[0]) else {
         return Some(0xFFFF_FFFF);
     };
-    let thread = &mut process(cpu).threads[index];
+    let thread = thread_at(cpu, at);
     let before = thread.suspended;
     thread.suspended = before.saturating_sub(1);
     Some(before)
 }
 
 pub(super) fn get_thread_priority(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let Some(index) = thread_of(cpu, args[0]) else {
+    let Some(at) = thread_of(cpu, args[0]) else {
         return Some(0x7FFF_FFFF);
     };
-    Some(process(cpu).threads[index].priority as u32)
+    Some(thread_at(cpu, at).priority as u32)
 }
 
 /// SetThreadPriority(handle, priority): kept; threads take turns
 /// whatever their priority.
 pub(super) fn set_thread_priority(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let Some(index) = thread_of(cpu, args[0]) else {
+    let Some(at) = thread_of(cpu, args[0]) else {
         return Some(FALSE);
     };
     let priority = args[1] as i32;
@@ -252,14 +291,14 @@ pub(super) fn set_thread_priority(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_error(cpu, ERROR_INVALID_PARAMETER);
         return Some(FALSE);
     }
-    process(cpu).threads[index].priority = priority;
+    thread_at(cpu, at).priority = priority;
     Some(TRUE)
 }
 
 /// GetThreadContext(handle, context): the thread's registers, as it was
 /// when it last stopped, or for the running thread, as it calls.
 pub(super) fn get_thread_context(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let Some(index) = thread_of(cpu, args[0]) else {
+    let Some(which) = thread_of(cpu, args[0]) else {
         return Some(FALSE);
     };
     let at = args[1];
@@ -267,10 +306,10 @@ pub(super) fn get_thread_context(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if !cpu.bus.guest_probe(at, CONTEXT_SIZE as usize, true) {
         return None;
     }
-    let (ctx, fpu) = if process(cpu).current == Some(index) {
+    let (ctx, fpu) = if is_running(cpu, which) {
         (Context::of(cpu), control::save_image(cpu))
     } else {
-        let thread = &process(cpu).threads[index];
+        let thread = thread_at(cpu, which);
         let fpu = <[u8; 108]>::try_from(thread.fpu.as_slice()).unwrap_or([0; 108]);
         (thread.ctx, fpu)
     };
@@ -281,14 +320,14 @@ pub(super) fn get_thread_context(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// SetThreadContext(handle, context): the parts of the thread's registers
 /// the context's flags name. Not for the running thread.
 pub(super) fn set_thread_context(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let Some(index) = thread_of(cpu, args[0]) else {
+    let Some(which) = thread_of(cpu, args[0]) else {
         return Some(FALSE);
     };
-    if process(cpu).current == Some(index) {
+    if is_running(cpu, which) {
         set_error(cpu, ERROR_INVALID_PARAMETER);
         return Some(FALSE);
     }
-    let thread = &process(cpu).threads[index];
+    let thread = thread_at(cpu, which);
     let mut ctx = thread.ctx;
     let mut fpu = <[u8; 108]>::try_from(thread.fpu.as_slice()).unwrap_or([0; 108]);
     let had_fpu = !thread.fpu.is_empty();
@@ -296,7 +335,7 @@ pub(super) fn set_thread_context(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if cpu.bus.guest_faulted() {
         return None;
     }
-    let thread = &mut process(cpu).threads[index];
+    let thread = thread_at(cpu, which);
     thread.ctx = ctx;
     if had_fpu || fpu != [0; 108] {
         thread.fpu = fpu.to_vec();
@@ -310,7 +349,7 @@ pub(super) fn close_handle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if handle == CURRENT_PROCESS || handle == object::CURRENT_THREAD {
         return Some(TRUE);
     }
-    if process(cpu).objects.close(handle) {
+    if object::close(cpu, handle) {
         Some(TRUE)
     } else {
         set_error(cpu, ERROR_INVALID_HANDLE);
@@ -319,27 +358,33 @@ pub(super) fn close_handle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// DuplicateHandle(from process, handle, to process, new, access, inherit,
-/// options): another handle of the object, in the one process there is.
+/// options): another handle of the object, in the process `to` names.
 /// The pseudo-handles of the process and thread give real ones.
 pub(super) fn duplicate_handle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[from, handle, to, new_at, _, _, options] = args else {
         unreachable!()
     };
-    let is_process =
-        |cpu: &mut Cpu, h: u32| matches!(object::kind_of(cpu, h), Some(Kind::Process {}));
-    if !is_process(cpu, from) || !is_process(cpu, to) {
-        set_error(cpu, ERROR_INVALID_HANDLE);
-        return Some(FALSE);
-    }
-    let Some(id) = object::resolve(cpu, handle) else {
+    let (Some(source), Some(target)) = (process_of(cpu, from), process_of(cpu, to)) else {
         set_error(cpu, ERROR_INVALID_HANDLE);
         return Some(FALSE);
     };
-    let process = process(cpu);
-    process.objects.hold(id);
-    let new = process.objects.handle(id);
-    if options & DUPLICATE_CLOSE_SOURCE != 0 {
-        process.objects.close(handle);
+    let win32 = &cpu.bus.win32;
+    let id = if source == win32.running {
+        object::resolve(cpu, handle)
+    } else {
+        win32.processes[source].handles.of(handle)
+    };
+    let Some(id) = id else {
+        set_error(cpu, ERROR_INVALID_HANDLE);
+        return Some(FALSE);
+    };
+    let win32 = &mut cpu.bus.win32;
+    win32.objects.hold(id);
+    let new = win32.processes[target].handles.add(id);
+    if options & DUPLICATE_CLOSE_SOURCE != 0
+        && let Some(id) = win32.processes[source].handles.remove(handle)
+    {
+        win32.objects.release(id);
     }
     if new_at != 0 {
         cpu.bus.guest_write_32(new_at, new);

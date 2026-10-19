@@ -8,7 +8,7 @@ use super::{
 use crate::cpu::Cpu;
 use crate::win32::object::{self, Kind};
 use crate::win32::thread::{self, WAIT_TIMEOUT, Wait};
-use crate::win32::{process, with_process};
+use crate::win32::process;
 
 const INFINITE: u32 = 0xFFFF_FFFF;
 const WAIT_FAILED: u32 = 0xFFFF_FFFF;
@@ -33,24 +33,23 @@ fn name_at(cpu: &mut Cpu, at: u32) -> Option<Option<String>> {
 /// same kind has already, a handle of that one (the last error then says
 /// so). Fails with ERROR_INVALID_HANDLE if another kind has the name.
 fn create(cpu: &mut Cpu, kind: Kind, name: Option<String>) -> u32 {
-    let process = process(cpu);
+    let objects = object::objects(cpu);
     if let Some(name) = &name
-        && let Some(id) = process.objects.named(name)
+        && let Some(id) = objects.named(name)
     {
-        let same = process.objects.get(id).is_some_and(|o| {
+        let same = objects.get(id).is_some_and(|o| {
             std::mem::discriminant(&o.kind) == std::mem::discriminant(&kind)
         });
         if !same {
-            process.last_error = ERROR_INVALID_HANDLE;
+            set_error(cpu, ERROR_INVALID_HANDLE);
             return 0;
         }
-        process.objects.hold(id);
-        process.last_error = ERROR_ALREADY_EXISTS;
-        return process.objects.handle(id);
+        objects.hold(id);
+        set_error(cpu, ERROR_ALREADY_EXISTS);
+        return object::new_handle(cpu, id);
     }
-    let id = process.objects.add(kind, name);
-    process.last_error = 0;
-    process.objects.handle(id)
+    set_error(cpu, 0);
+    object::create(cpu, kind, name)
 }
 
 /// A handle of the object named at `at`, if it is of the kind `same`
@@ -60,18 +59,18 @@ fn open(cpu: &mut Cpu, at: u32, same: fn(&Kind) -> bool) -> Option<u32> {
         set_error(cpu, ERROR_INVALID_PARAMETER);
         return Some(0);
     };
-    let process = process(cpu);
-    match process.objects.named(&name) {
-        Some(id) if process.objects.get(id).is_some_and(|o| same(&o.kind)) => {
-            process.objects.hold(id);
-            Some(process.objects.handle(id))
+    let objects = object::objects(cpu);
+    match objects.named(&name) {
+        Some(id) if objects.get(id).is_some_and(|o| same(&o.kind)) => {
+            objects.hold(id);
+            Some(object::new_handle(cpu, id))
         }
         Some(_) => {
-            process.last_error = ERROR_INVALID_HANDLE;
+            set_error(cpu, ERROR_INVALID_HANDLE);
             Some(0)
         }
         None => {
-            process.last_error = ERROR_FILE_NOT_FOUND;
+            set_error(cpu, ERROR_FILE_NOT_FOUND);
             Some(0)
         }
     }
@@ -140,14 +139,13 @@ fn change(cpu: &mut Cpu, handle: u32, f: impl FnOnce(&mut Kind, u32) -> Result<(
         set_error(cpu, ERROR_INVALID_HANDLE);
         return FALSE;
     };
-    let process = process(cpu);
-    let tid = process.current_thread().map_or(0, |t| t.id);
-    let Some(object) = process.objects.get_mut(id) else {
-        process.last_error = ERROR_INVALID_HANDLE;
+    let tid = process(cpu).current_thread().map_or(0, |t| t.id);
+    let Some(object) = object::objects(cpu).get_mut(id) else {
+        set_error(cpu, ERROR_INVALID_HANDLE);
         return FALSE;
     };
     if let Err(error) = f(&mut object.kind, tid) {
-        process.last_error = error;
+        set_error(cpu, error);
         return FALSE;
     }
     thread::wake(cpu);
@@ -382,14 +380,16 @@ pub(super) fn leave_critical_section(cpu: &mut Cpu, args: &[u32]) -> Option<u32>
         cpu.bus.guest_write_32(at + RECURSION_COUNT, count - 1);
         return Some(0);
     }
-    let next = with_process(cpu, |p, _| {
-        let index = p
-            .threads
-            .iter()
-            .position(|t| t.wait.as_ref().is_some_and(|w| w.section == at))?;
-        thread::end_wait(p, index, 0);
-        Some(p.threads[index].id)
-    });
+    let win32 = &mut cpu.bus.win32;
+    let p = win32.running;
+    let next = win32.processes[p]
+        .threads
+        .iter()
+        .position(|t| t.wait.as_ref().is_some_and(|w| w.section == at))
+        .map(|t| {
+            thread::end_wait(win32, (p, t), 0);
+            win32.processes[p].threads[t].id
+        });
     cpu.bus.guest_write_32(at + OWNING_THREAD, next.unwrap_or(0));
     cpu.bus
         .guest_write_32(at + RECURSION_COUNT, next.is_some() as u32);

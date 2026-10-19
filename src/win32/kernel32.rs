@@ -243,6 +243,7 @@ const FALSE: u32 = 0;
 const INVALID_HANDLE_VALUE: u32 = 0xFFFF_FFFF;
 /// Error codes (GetLastError).
 const ERROR_PATH_NOT_FOUND: u32 = 3;
+const ERROR_ACCESS_DENIED: u32 = 5;
 const ERROR_INVALID_HANDLE: u32 = 6;
 const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
 const ERROR_INVALID_DRIVE: u32 = 15;
@@ -308,7 +309,7 @@ fn write_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[handle, buffer, n, written, _] = args else {
         unreachable!()
     };
-    let Some(dos) = super::process(cpu).dos_of(handle) else {
+    let Some(super::object::Kind::Dos { handle: dos }) = super::object::kind_of(cpu, handle) else {
         super::process(cpu).last_error = ERROR_INVALID_HANDLE;
         return Some(FALSE);
     };

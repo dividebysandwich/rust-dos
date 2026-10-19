@@ -11,7 +11,7 @@ use crate::cpu::Cpu;
 use rust_dos_pe as pe;
 
 /// A process needs at least this much extended memory to start.
-const MIN_MEMORY: u32 = 0x40_0000;
+pub const MIN_MEMORY: u32 = 0x40_0000;
 /// The largest stack committed when the process starts; a larger reserve
 /// stays reserved, with no pages behind it.
 const MAX_STACK_COMMIT: u32 = 0x10_0000;
@@ -41,7 +41,7 @@ pub struct Loaded {
 
 /// Make the process of the program `path`, whose file is `file`. Fails
 /// with a message for the user; then nothing is left taken.
-pub fn load(cpu: &mut Cpu, path: &str, file: &[u8]) -> Result<Loaded, String> {
+pub fn load(cpu: &mut Cpu, path: &str, line: &str, file: &[u8]) -> Result<Loaded, String> {
     let name = path
         .rsplit(['\\', '/', ':'])
         .next()
@@ -67,13 +67,13 @@ pub fn load(cpu: &mut Cpu, path: &str, file: &[u8]) -> Result<Loaded, String> {
             dlls.push(index);
         }
     }
-    let mut memory = Memory::new(&mut cpu.bus, MIN_MEMORY).ok_or_else(|| {
+    let mut memory = Memory::new(&mut cpu.bus).ok_or_else(|| {
         format!(
             "There isn't enough extended memory to run {} (it needs 4 MB).",
             name
         )
     })?;
-    let loaded = build(cpu, &mut memory, &name, path, &mut image, &imports, &dlls);
+    let loaded = build(cpu, &mut memory, &name, line, &mut image, &imports, &dlls);
     match loaded {
         Some(Ok(mut loaded)) => {
             loaded.process.memory = memory;
@@ -94,7 +94,7 @@ fn build(
     cpu: &mut Cpu,
     memory: &mut Memory,
     name: &str,
-    path: &str,
+    line: &str,
     image: &mut pe::Image,
     imports: &[pe::ImportedDll],
     dlls: &[usize],
@@ -261,7 +261,7 @@ fn build(
     // The command line, in a block of the process's own.
     let data = memory.reserve(None, GRANULARITY, PRIVATE, SHARED)?;
     memory.commit(bus, data, PAGE, USER | WRITABLE)?;
-    let mut line = crate::dosstr::to_bytes(&command_line(cpu, path));
+    let mut line = crate::dosstr::to_bytes(line);
     let bus = &mut cpu.bus;
     line.truncate(PAGE as usize - 1);
     line.push(0);
@@ -293,8 +293,9 @@ fn build(
     }))
 }
 
-/// The command line: the program's path and the PSP's command tail.
-fn command_line(cpu: &mut Cpu, path: &str) -> String {
+/// The command line of a program DOS started: its path and the PSP's
+/// command tail.
+pub fn dos_command_line(cpu: &mut Cpu, path: &str) -> String {
     let psp = cpu.current_psp as usize * 16;
     let len = (cpu.bus.read_8(psp + 0x80) as usize).min(0x7E);
     let tail: Vec<u8> = (0..len).map(|i| cpu.bus.read_8(psp + 0x81 + i)).collect();

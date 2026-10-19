@@ -105,7 +105,7 @@ const ESP: usize = 4;
 /// The exit code of a program that ended because of an error.
 const FAILED: u32 = 0xFF;
 
-/// A module in the process: the program or a DLL.
+//// A module in the process: the program or a DLL.
 #[derive(Clone, Debug, Default)]
 pub struct Module {
     pub name: String,
@@ -119,21 +119,15 @@ pub struct Module {
 /// A running Win32 program.
 #[derive(Clone, Debug, Default)]
 pub struct Process {
-    /// Its file's name.
+    /// Its id, and its object, which it holds while it runs.
+    id: u32,
+    object: u32,
+    /// Its file's name, and its path as DOS has it.
     name: String,
+    path: String,
     memory: Memory,
     /// The system block's physical address (system.rs).
     system: u32,
-    /// The DOS process it runs in, and the stack its DOS stub had, where
-    /// real-mode handlers of hardware interrupts run.
-    psp: u16,
-    rm_stack: (u16, u16),
-    /// The A20 gate and CR4 before it started.
-    a20: bool,
-    cr4: u32,
-    /// The program's context while the real-mode handler of a hardware
-    /// interrupt runs.
-    interrupted: Option<Context>,
     modules: Vec<Module>,
     image_base: u32,
     /// The physical pages of the built-in DLLs' stubs: the traps there are
@@ -143,17 +137,12 @@ pub struct Process {
     /// are.
     missing: Vec<(String, String)>,
     missing_base: u32,
-    /// Its kernel objects and their handles, its own object, and the
-    /// handles of standard input, output and error.
-    objects: object::Objects,
-    object: u32,
+    /// Its handles, and those of standard input, output and error.
+    handles: object::Handles,
     std: [u32; 3],
-    /// Its threads, and which of them runs (None while it idles).
+    /// Its threads, and which of them runs, if the process does.
     threads: Vec<thread::Thread>,
     current: Option<usize>,
-    /// When the running thread's turn started, by the clock's
-    /// microseconds.
-    slice_start: u64,
     /// The top of the idle loop's stack.
     idle_stack: u32,
     /// The running thread's last error and TIB, kept in its entry while
@@ -176,14 +165,6 @@ pub struct Process {
 }
 
 impl Process {
-    /// The DOS handle the handle `handle` is of, if it is one's.
-    fn dos_of(&self, handle: u32) -> Option<u16> {
-        match self.objects.get(self.objects.of(handle)?)?.kind {
-            object::Kind::Dos { handle } => Some(handle),
-            _ => None,
-        }
-    }
-
     pub fn current_thread(&self) -> Option<&thread::Thread> {
         self.threads.get(self.current?)
     }
@@ -226,7 +207,33 @@ pub struct Win32 {
     pub enabled: bool,
     /// The program DOS loaded, which starts at `START`.
     pending: Option<String>,
-    process: Option<Process>,
+    /// The processes, the one DOS started first. They run in that DOS
+    /// process, which waits for the last of them to end.
+    processes: Vec<Process>,
+    /// The process whose thread runs, or whose idle loop.
+    running: usize,
+    /// Where the processes' pages come from.
+    pool: Option<memory::Pool>,
+    /// The kernel objects, which the processes' handles are of.
+    objects: object::Objects,
+    /// The DOS process the programs run in, and the stack its DOS stub
+    /// had, where real-mode handlers of hardware interrupts run.
+    psp: u16,
+    rm_stack: (u16, u16),
+    /// The A20 gate and CR4 before the first program started.
+    a20: bool,
+    cr4: u32,
+    /// The program's context while the real-mode handler of a hardware
+    /// interrupt runs.
+    interrupted: Option<Context>,
+    /// The exit code of the program DOS started, which DOS gets when the
+    /// last program ends.
+    exit_code: u32,
+    /// When the running thread's turn started, by the clock's
+    /// microseconds.
+    slice_start: u64,
+    /// How many process and thread ids have been given out.
+    ids: u32,
 }
 
 impl Win32 {
@@ -240,7 +247,7 @@ impl Win32 {
 
     /// Whether a Win32 program is running.
     pub fn active(&self) -> bool {
-        self.process.is_some()
+        !self.processes.is_empty()
     }
 
     /// Whether DOS loaded a Win32 program that hasn't started yet.
@@ -248,33 +255,50 @@ impl Win32 {
         self.pending.is_some()
     }
 
-    /// The extended memory the process holds, as (address, bytes): for the
-    /// XMS pool after a state is loaded.
+    /// The extended memory the processes hold, as (address, bytes): for
+    /// the XMS pool after a state is loaded.
     pub fn reservations(&self) -> Vec<(u32, u32)> {
-        self.process
-            .iter()
-            .map(|p| (p.memory.base, p.memory.len))
-            .collect()
+        self.pool.iter().map(|p| (p.base, p.len)).collect()
     }
 
     /// The running program's modules (name, base, size), for debuggers.
     pub fn modules(&self) -> Vec<(String, u32, u32)> {
-        self.process
+        self.processes
+            .get(self.running)
             .iter()
             .flat_map(|p| p.modules.iter().map(|m| (m.name.clone(), m.base, m.size)))
             .collect()
     }
+
+    /// A new process or thread id: as on Windows 95, a large number,
+    /// which programs only compare.
+    fn new_id(&mut self) -> u32 {
+        self.ids += 1;
+        0xFFF0_0000 + self.ids * 0x24
+    }
 }
 
+/// The running process.
 fn process(cpu: &mut Cpu) -> &mut Process {
-    cpu.bus.win32.process.as_mut().expect("a Win32 process")
+    let win32 = &mut cpu.bus.win32;
+    win32
+        .processes
+        .get_mut(win32.running)
+        .expect("a Win32 process")
 }
 
-/// Run `f` with the process and the bus, for work on the process's memory.
+/// The running process, if there is one, for what only reads it.
+fn running(cpu: &Cpu) -> Option<&Process> {
+    cpu.bus.win32.processes.get(cpu.bus.win32.running)
+}
+
+/// Run `f` with the running process and the bus, for work on the
+/// process's memory.
 fn with_process<T>(cpu: &mut Cpu, f: impl FnOnce(&mut Process, &mut crate::bus::Bus) -> T) -> T {
-    let mut process = cpu.bus.win32.process.take().expect("a Win32 process");
+    let index = cpu.bus.win32.running;
+    let mut process = std::mem::take(&mut cpu.bus.win32.processes[index]);
     let result = f(&mut process, &mut cpu.bus);
-    cpu.bus.win32.process = Some(process);
+    cpu.bus.win32.processes[index] = process;
     result
 }
 
@@ -329,18 +353,12 @@ pub fn accepts(cpu: &Cpu, phys_ip: usize, id: u16) -> bool {
             return false;
         }
         return match id {
-            ID_START => !cpu.pe() && win32.pending.is_some() && win32.process.is_none(),
-            ID_IRQ_RETURN => {
-                !cpu.pe()
-                    && win32
-                        .process
-                        .as_ref()
-                        .is_some_and(|p| p.interrupted.is_some())
-            }
-            _ => id & 0xFF00 == ID_IDT && cpu.pm() && cpu.cpl == 0 && win32.process.is_some(),
+            ID_START => !cpu.pe() && win32.pending.is_some() && !win32.active(),
+            ID_IRQ_RETURN => !cpu.pe() && win32.interrupted.is_some(),
+            _ => id & 0xFF00 == ID_IDT && cpu.pm() && cpu.cpl == 0 && win32.active(),
         };
     }
-    let Some(process) = &win32.process else {
+    let Some(process) = running(cpu) else {
         return false;
     };
     cpu.pm() && cpu.cpl == 3 && process.stub_pages.contains(&((phys_ip >> 12) as u32))
@@ -363,41 +381,94 @@ fn start(cpu: &mut Cpu) {
     let Some(path) = cpu.bus.win32.pending.take() else {
         return;
     };
-    let loaded = match cpu.read_program_file(&path) {
-        Some(file) => loader::load(cpu, &path, &file),
-        None => Err(format!("{} can't be read.", path)),
-    };
-    let loaded = match loaded {
-        Ok(loaded) => loaded,
+    let (psp, rm_stack, a20, cr4) = (cpu.current_psp, (cpu.ss(), cpu.sp()), cpu.bus.a20(), cpu.cr4);
+    let win32 = &mut cpu.bus.win32;
+    win32.psp = psp;
+    win32.rm_stack = rm_stack;
+    win32.a20 = a20;
+    win32.cr4 = cr4;
+    let environment = dos_environment(cpu, cpu.current_psp);
+    let line = loader::dos_command_line(cpu, &path);
+    match create_process(cpu, &path, &line, environment, None, false) {
+        Ok(_) => {
+            cpu.bus.set_a20(true);
+            thread::reschedule(cpu);
+        }
         Err(message) => {
             cpu.bus.log_string(&format!("[W32] {}", message));
             say(cpu, &message);
+            if let Some(pool) = cpu.bus.win32.pool.take() {
+                pool.release(&mut cpu.bus);
+            }
             cpu.set_ax(0x4C01);
             cpu.set_ip(EXIT);
-            return;
         }
-    };
+    }
+}
+
+/// What `create_process` made: the process's object and id, and its main
+/// thread's.
+pub struct Created {
+    pub process: (u32, u32),
+    pub thread: (u32, u32),
+}
+
+/// Make a process of the program at `path`, with the command line `line`
+/// and the environment `environment`, and its main thread, ready to run
+/// or suspended. Its standard input, output and error are DOS's handles
+/// 0, 1 and 2, or the objects `std` names. Fails with a message for the
+/// user.
+fn create_process(
+    cpu: &mut Cpu,
+    path: &str,
+    line: &str,
+    environment: Vec<String>,
+    std: Option<[u32; 3]>,
+    suspended: bool,
+) -> Result<Created, String> {
+    let file = cpu
+        .read_program_file(path)
+        .ok_or_else(|| format!("{} can't be read.", path))?;
+    if cpu.bus.win32.pool.is_none() {
+        cpu.bus.win32.pool = memory::Pool::take(&mut cpu.bus, loader::MIN_MEMORY);
+    }
+    let loaded = loader::load(cpu, path, line, &file)?;
     let mut process = loaded.process;
-    process.psp = cpu.current_psp;
-    process.environment = dos_environment(cpu, process.psp);
-    process.rm_stack = (cpu.ss(), cpu.sp());
-    process.a20 = cpu.bus.a20();
-    process.cr4 = cpu.cr4;
+    process.environment = environment;
+    process.path = path.to_string();
     let return_address = stubs::stub_address(0, kernel32::PROCESS_RETURN);
     let esp = loaded.stack_top - 4;
     process.memory.write_32(&mut cpu.bus, esp, return_address);
     cpu.bus.log_string(&format!(
-        "[W32] Started {} at {:08X}, image at {:08X}, {} KB of memory",
+        "[W32] Started {} at {:08X}, image at {:08X}, {} KB of memory left",
         process.name,
         loaded.entry,
         process.image_base,
-        process.memory.len / 1024
+        cpu.bus.win32.pool.as_ref().map_or(0, |p| p.available()) / 1024
     ));
-    process.object = process.objects.add(object::Kind::Process {}, None);
-    process.std = [0, 1, 2].map(|handle| {
-        let id = process.objects.add(object::Kind::Dos { handle }, None);
-        process.objects.handle(id)
-    });
+    let win32 = &mut cpu.bus.win32;
+    process.id = win32.new_id();
+    let tid = win32.new_id();
+    let objects = &mut win32.objects;
+    process.object = objects.add(
+        object::Kind::Process {
+            id: process.id,
+            exit_code: None,
+        },
+        None,
+    );
+    let std = match std {
+        Some(ids) => {
+            for id in ids {
+                objects.hold(id);
+            }
+            ids
+        }
+        None => [0, 1, 2].map(|handle| objects.add(object::Kind::Dos { handle }, None)),
+    };
+    for (slot, id) in process.std.iter_mut().zip(std) {
+        *slot = process.handles.add(id);
+    }
     // The main thread, which runs the program's entry point.
     let mut ctx = Context {
         eip: loaded.entry,
@@ -413,21 +484,29 @@ fn start(cpu: &mut Cpu) {
         system::TIB3,
         0,
     ];
-    let main = thread::Thread {
-        id: thread::id_of(0),
-        object: process
-            .objects
-            .add(object::Kind::Thread { index: 0 }, None),
+    let thread_object = objects.add(
+        object::Kind::Thread {
+            id: tid,
+            exit_code: None,
+        },
+        None,
+    );
+    process.threads.push(thread::Thread {
+        id: tid,
+        object: thread_object,
         tib: process.tib,
         selector: system::TIB3,
         stack: loaded.stack,
         ctx,
+        suspended: suspended as u32,
         ..thread::Thread::default()
+    });
+    let created = Created {
+        process: (process.object, process.id),
+        thread: (thread_object, tid),
     };
-    process.threads.push(main);
-    cpu.bus.win32.process = Some(process);
-    cpu.bus.set_a20(true);
-    thread::reschedule(cpu);
+    win32.processes.push(process);
+    Ok(created)
 }
 
 /// The environment of the DOS process `psp`, as "NAME=value" strings.
@@ -454,21 +533,75 @@ fn dos_environment(cpu: &mut Cpu, psp: u16) -> Vec<String> {
     strings
 }
 
-/// End the process with exit code `code`: back in real mode, the DOS
-/// process ends with the low byte as its exit code.
+/// End the running process with exit code `code`: its threads end, its
+/// handles close and its memory goes back to the pool. Another process's
+/// thread runs on; when there is none, back in real mode, the DOS process
+/// ends with the exit code of the program it started.
 fn exit(cpu: &mut Cpu, code: u32) {
-    let Some(process) = cpu.bus.win32.process.as_ref() else {
+    let index = cpu.bus.win32.running;
+    end_process(cpu, index, code);
+}
+
+/// End the process at `index` with exit code `code`, as `exit`. Whether
+/// the running thread goes on: false when it was one of the process's.
+fn terminate(cpu: &mut Cpu, index: usize, code: u32) -> bool {
+    let running = cpu.bus.win32.running == index;
+    end_process(cpu, index, code);
+    !running
+}
+
+fn end_process(cpu: &mut Cpu, index: usize, code: u32) {
+    let win32 = &mut cpu.bus.win32;
+    let Some(process) = win32.processes.get(index) else {
         return;
     };
-    let rm_stack = process.rm_stack;
+    let (name, threads) = (process.name.clone(), process.threads.len());
+    for i in 0..threads {
+        thread::end(win32, index, i, code);
+    }
+    let process = &mut win32.processes[index];
+    let handles: Vec<u32> = process.handles.iter().map(|(_, id)| id).collect();
+    let own = process.object;
+    for id in handles {
+        win32.objects.release(id);
+    }
+    if let Some(object) = win32.objects.get_mut(own)
+        && let object::Kind::Process { exit_code, .. } = &mut object.kind
+    {
+        *exit_code = Some(code);
+    }
+    win32.objects.release(own);
+    if index == 0 {
+        win32.exit_code = code;
+    }
     cpu.bus.log_string(&format!(
         "[W32] {} ended with exit code {:X}",
-        process.name, code
+        name, code
     ));
-    system::enter_real(cpu, (ROM_SEG, EXIT), rm_stack, 0x0202);
-    let process = cpu.bus.win32.process.take().expect("the process");
+    let process = cpu.bus.win32.processes.remove(index);
     process.memory.release(&mut cpu.bus);
-    cpu.bus.set_a20(process.a20);
+    let win32 = &mut cpu.bus.win32;
+    if win32.running != index {
+        // Another process's thread runs on.
+        if win32.running > index {
+            win32.running -= 1;
+        }
+        thread::wake(cpu);
+        return;
+    }
+    win32.running = 0;
+    if !win32.processes.is_empty() {
+        thread::wake(cpu);
+        thread::run_next(cpu);
+        return;
+    }
+    let (rm_stack, a20, code) = (win32.rm_stack, win32.a20, win32.exit_code);
+    system::enter_real(cpu, (ROM_SEG, EXIT), rm_stack, 0x0202);
+    if let Some(pool) = cpu.bus.win32.pool.take() {
+        pool.release(&mut cpu.bus);
+    }
+    cpu.bus.win32.objects = object::Objects::default();
+    cpu.bus.set_a20(a20);
     cpu.set_ax(0x4C00 | (code & 0xFF) as u16);
     if cpu.state == CpuState::Halted {
         cpu.state = CpuState::Running;
@@ -478,12 +611,7 @@ fn exit(cpu: &mut Cpu, code: u32) {
 /// End the program because of `what` (where `ctx` says, if it was in the
 /// program), saying so on standard error.
 fn fatal(cpu: &mut Cpu, what: &str, ctx: Option<&Context>) {
-    let name = cpu
-        .bus
-        .win32
-        .process
-        .as_ref()
-        .map_or(String::new(), |p| p.name.clone());
+    let name = running(cpu).map_or(String::new(), |p| p.name.clone());
     let place = match ctx {
         Some(ctx) => format!(" at {:04X}:{:08X}", ctx.seg[Seg::CS as usize], ctx.eip),
         None => format!(" at {:04X}:{:08X}", cpu.cs(), cpu.eip()),
@@ -494,13 +622,12 @@ fn fatal(cpu: &mut Cpu, what: &str, ctx: Option<&Context>) {
     exit(cpu, FAILED);
 }
 
-/// The 32-bit value at `lin` in the process's memory, read through its
-/// page tables without a page fault: None where no page is there. For
-/// what a message or a log line says, which mustn't fault a function that
-/// has already ended the process.
+/// The 32-bit value at `lin` in the running process's memory, read
+/// through its page tables without a page fault: None where no page is
+/// there. For what a message or a log line says, which mustn't fault a
+/// function that has already ended the process.
 fn peek_32(cpu: &Cpu, lin: u32) -> Option<u32> {
-    let process = cpu.bus.win32.process.as_ref()?;
-    let phys = process.memory.translate(&cpu.bus, lin)?;
+    let phys = running(cpu)?.memory.translate(&cpu.bus, lin)?;
     Some(cpu.bus.read_32(phys as usize))
 }
 
@@ -543,12 +670,20 @@ fn dos<T>(cpu: &mut Cpu, f: impl FnOnce(&mut Cpu) -> T) -> T {
     result
 }
 
-/// DOS ended the process `psp`: a Win32 process in it, if any, goes too.
+/// DOS ended the process `psp`: the Win32 processes in it, if any, go
+/// too.
 pub fn process_ended(cpu: &mut Cpu, psp: u16) {
-    if cpu.bus.win32.process.as_ref().is_some_and(|p| p.psp == psp) {
-        let process = cpu.bus.win32.process.take().expect("the process");
-        process.memory.release(&mut cpu.bus);
-        cpu.bus.set_a20(process.a20);
+    let win32 = &mut cpu.bus.win32;
+    if win32.active() && win32.psp == psp {
+        let a20 = win32.a20;
+        for process in std::mem::take(&mut win32.processes) {
+            process.memory.release(&mut cpu.bus);
+        }
+        if let Some(pool) = cpu.bus.win32.pool.take() {
+            pool.release(&mut cpu.bus);
+        }
+        cpu.bus.win32.objects = object::Objects::default();
+        cpu.bus.set_a20(a20);
     }
     cpu.bus.win32.pending = None;
 }
@@ -574,25 +709,21 @@ crate::state_fields!(Module {
     entry
 });
 crate::state_fields!(Process {
+    id,
+    object,
     name,
+    path,
     memory,
     system,
-    psp,
-    rm_stack,
-    a20,
-    cr4,
-    interrupted,
     modules,
     image_base,
     stub_pages,
     missing,
     missing_base,
-    objects,
-    object,
+    handles,
     std,
     threads,
     current,
-    slice_start,
     idle_stack,
     last_error,
     tib,
@@ -604,4 +735,18 @@ crate::state_fields!(Process {
     environment,
     heap,
 });
-crate::state_fields!(Win32 { pending, process } skip { enabled });
+crate::state_fields!(Win32 {
+    pending,
+    processes,
+    running,
+    pool,
+    objects,
+    psp,
+    rm_stack,
+    a20,
+    cr4,
+    interrupted,
+    exit_code,
+    slice_start,
+    ids,
+} skip { enabled });

@@ -1,10 +1,11 @@
 //! Threads: saved processor contexts, switched on the one host thread.
 //! The running thread's context is in the processor; the others' are in
-//! their entries. A thread that waits (`block`) is switched out at once;
-//! the others share the processor in turns of `SLICE`, switched when the
-//! timer's interrupt comes (`after_interrupt`), since programs spin on
-//! flags that another thread sets. When no thread can run, the processor
-//! runs the idle loop, a trap in KERNEL32 that lets time pass to the next
+//! their entries. Threads of all processes take turns: a thread that waits
+//! (`block`) is switched out at once, and one that runs gives way to
+//! another that is ready after `SLICE`, switched when the timer's
+//! interrupt comes (`after_interrupt`), since programs spin on flags that
+//! another thread sets. When no thread can run, the processor runs the
+//! idle loop, a trap in KERNEL32 that lets time pass to the next
 //! interrupt.
 //!
 //! Waits are kept with the threads (`Wait`). Whatever may end one (an
@@ -13,8 +14,8 @@
 //! for (an auto-reset event's signal, a semaphore's count, a mutex).
 
 use super::call::{self, THREAD_ATTACHED};
-use super::object::Kind;
-use super::{Context, ESP, process};
+use super::object::{Kind, Objects};
+use super::{Context, ESP, Win32, process};
 use crate::cpu::Cpu;
 use crate::instructions::fpu::control;
 
@@ -86,17 +87,31 @@ impl Thread {
     }
 }
 
-/// The id of the thread at `index`: as on Windows 95, a large number,
-/// which programs only compare.
-pub fn id_of(index: usize) -> u32 {
-    0xFFF5_0000 + (index as u32 + 1) * 0x40
+/// A thread by its process's place and its own in that process's list.
+type At = (usize, usize);
+
+/// The running thread, if one runs.
+fn current(win32: &Win32) -> Option<At> {
+    let process = win32.processes.get(win32.running)?;
+    Some((win32.running, process.current?))
+}
+
+/// The thread with the id `id`.
+pub fn find(win32: &Win32, id: u32) -> Option<At> {
+    win32.processes.iter().enumerate().find_map(|(p, process)| {
+        let t = process.threads.iter().position(|t| t.id == id)?;
+        Some((p, t))
+    })
 }
 
 /// Keep the running thread's state in its entry: the context `ctx` (the
 /// processor's, or the one an interrupt left), the FPU's, its last error.
 fn save(cpu: &mut Cpu, ctx: Context) {
     let fpu = control::save_image(cpu).to_vec();
-    let process = process(cpu);
+    let win32 = &mut cpu.bus.win32;
+    let Some(process) = win32.processes.get_mut(win32.running) else {
+        return;
+    };
     let last_error = process.last_error;
     if let Some(thread) = process.current_thread_mut() {
         thread.ctx = ctx;
@@ -105,13 +120,18 @@ fn save(cpu: &mut Cpu, ctx: Context) {
     }
 }
 
-/// Run the thread at `index`, from its saved state.
-fn enter(cpu: &mut Cpu, index: usize) {
+/// Run the thread `at`, from its saved state.
+fn enter(cpu: &mut Cpu, (p, t): At) {
     let now = cpu.bus.clock.now_micros();
-    let process = process(cpu);
-    process.current = Some(index);
-    process.slice_start = now;
-    let thread = &process.threads[index];
+    let win32 = &mut cpu.bus.win32;
+    if let Some(process) = win32.processes.get_mut(win32.running) {
+        process.current = None;
+    }
+    win32.running = p;
+    win32.slice_start = now;
+    let process = &mut win32.processes[p];
+    process.current = Some(t);
+    let thread = &process.threads[t];
     let (ctx, fpu, last_error, tib) = (
         thread.ctx,
         thread.fpu.clone(),
@@ -131,29 +151,46 @@ fn enter(cpu: &mut Cpu, index: usize) {
     super::system::enter_user(cpu, &ctx);
 }
 
-/// The next thread after `after` in turn that can run, if one can.
-fn next_ready(process: &super::Process, after: Option<usize>) -> Option<usize> {
-    let n = process.threads.len();
-    let start = after.map_or(0, |i| i + 1);
-    (0..n)
-        .map(|k| (start + k) % n)
-        .find(|&i| process.threads[i].ready())
+/// The next thread after `after` in turn that can run, if one can: the
+/// threads of all processes, in order.
+fn next_ready(win32: &Win32, after: Option<At>) -> Option<At> {
+    let all: Vec<At> = win32
+        .processes
+        .iter()
+        .enumerate()
+        .flat_map(|(p, process)| (0..process.threads.len()).map(move |t| (p, t)))
+        .collect();
+    let start = after
+        .and_then(|a| all.iter().position(|&x| x == a))
+        .map_or(0, |i| i + 1);
+    (0..all.len())
+        .map(|k| all[(start + k) % all.len()])
+        .find(|&(p, t)| win32.processes[p].threads[t].ready())
 }
 
 /// The running thread doesn't go on for now (it waits, was suspended or
-/// ended, or gives up its turn): the next one that can run does, or else
-/// the idle loop.
+/// gave up its turn): the next one that can run does, or else the idle
+/// loop.
 pub fn reschedule(cpu: &mut Cpu) {
     let ctx = Context::of(cpu);
     save(cpu, ctx);
-    let process = process(cpu);
-    match next_ready(process, process.current) {
-        Some(index) => enter(cpu, index),
+    let win32 = &cpu.bus.win32;
+    match next_ready(win32, current(win32)) {
+        Some(at) => enter(cpu, at),
         None => idle(cpu),
     }
 }
 
-/// Run the idle loop: no thread runs.
+/// Run the first thread that can run, or else the idle loop, with nothing
+/// running to save (its process ended).
+pub fn run_next(cpu: &mut Cpu) {
+    match next_ready(&cpu.bus.win32, None) {
+        Some(at) => enter(cpu, at),
+        None => idle(cpu),
+    }
+}
+
+/// Run the idle loop, in the running process: no thread runs.
 fn idle(cpu: &mut Cpu) {
     let process = process(cpu);
     process.current = None;
@@ -178,8 +215,8 @@ fn idle(cpu: &mut Cpu) {
 /// the next interrupt.
 pub fn idle_trap(cpu: &mut Cpu) {
     wake(cpu);
-    match next_ready(process(cpu), None) {
-        Some(index) => enter(cpu, index),
+    match next_ready(&cpu.bus.win32, None) {
+        Some(at) => enter(cpu, at),
         None => cpu.idle = true,
     }
 }
@@ -190,20 +227,20 @@ pub fn idle_trap(cpu: &mut Cpu) {
 pub fn after_interrupt(cpu: &mut Cpu, ctx: Context) {
     wake(cpu);
     let now = cpu.bus.clock.now_micros();
-    let process = process(cpu);
-    match process.current {
-        None => match next_ready(process, None) {
-            Some(index) => enter(cpu, index),
+    let win32 = &mut cpu.bus.win32;
+    match current(win32) {
+        None => match next_ready(win32, None) {
+            Some(at) => enter(cpu, at),
             None => super::system::enter_user(cpu, &ctx),
         },
-        Some(current) => {
-            if now.saturating_sub(process.slice_start) >= SLICE {
-                if let Some(next) = next_ready(process, Some(current)).filter(|&n| n != current) {
+        Some(running) => {
+            if now.saturating_sub(win32.slice_start) >= SLICE {
+                if let Some(next) = next_ready(win32, Some(running)).filter(|&n| n != running) {
                     save(cpu, ctx);
                     enter(cpu, next);
                     return;
                 }
-                process.slice_start = now;
+                win32.slice_start = now;
             }
             super::system::enter_user(cpu, &ctx);
         }
@@ -211,25 +248,24 @@ pub fn after_interrupt(cpu: &mut Cpu, ctx: Context) {
 }
 
 /// Whether the object `id` is signaled for the thread `tid`.
-fn signaled(process: &super::Process, id: u32, tid: u32) -> bool {
-    match process.objects.get(id).map(|o| &o.kind) {
+fn signaled(objects: &Objects, id: u32, tid: u32) -> bool {
+    match objects.get(id).map(|o| &o.kind) {
         Some(Kind::Event { signaled, .. }) => *signaled,
         Some(Kind::Mutex { owner, .. }) => *owner == 0 || *owner == tid,
         Some(Kind::Semaphore { count, .. }) => *count > 0,
-        Some(Kind::Thread { index }) => process
-            .threads
-            .get(*index as usize)
-            .is_none_or(|t| t.exit_code.is_some()),
+        Some(Kind::Thread { exit_code, .. } | Kind::Process { exit_code, .. }) => {
+            exit_code.is_some()
+        }
         Some(Kind::Dos { .. }) => true,
-        Some(Kind::Process {}) | None => false,
+        None => false,
     }
 }
 
 /// Take what a wait of the thread `tid` was satisfied by: an auto-reset
 /// event's signal, a semaphore's count, a mutex. Whether a mutex was
 /// abandoned.
-fn take(process: &mut super::Process, id: u32, tid: u32) -> bool {
-    let Some(object) = process.objects.get_mut(id) else {
+fn take(objects: &mut Objects, id: u32, tid: u32) -> bool {
+    let Some(object) = objects.get_mut(id) else {
         return false;
     };
     match &mut object.kind {
@@ -256,21 +292,20 @@ fn take(process: &mut super::Process, id: u32, tid: u32) -> bool {
     }
 }
 
-/// What a wait of the thread at `index` for `wait` returns if it ends
-/// now (having taken what it waited for), or None if it goes on.
-fn try_wait(process: &mut super::Process, index: usize, wait: &Wait) -> Option<u32> {
-    let tid = process.threads[index].id;
+/// What a wait of the thread `tid` for `wait` returns if it ends now
+/// (having taken what it waited for), or None if it goes on.
+fn try_wait(objects: &mut Objects, tid: u32, wait: &Wait) -> Option<u32> {
     if wait.section != 0 {
         return None;
     }
     if wait.all {
-        if wait.objects.is_empty() || !wait.objects.iter().all(|&o| signaled(process, o, tid)) {
+        if wait.objects.is_empty() || !wait.objects.iter().all(|&o| signaled(objects, o, tid)) {
             return None;
         }
         let abandoned = wait
             .objects
             .iter()
-            .fold(false, |a, &o| take(process, o, tid) | a);
+            .fold(false, |a, &o| take(objects, o, tid) | a);
         return Some(if abandoned {
             WAIT_ABANDONED_0
         } else {
@@ -280,71 +315,77 @@ fn try_wait(process: &mut super::Process, index: usize, wait: &Wait) -> Option<u
     let i = wait
         .objects
         .iter()
-        .position(|&o| signaled(process, o, tid))?;
-    let abandoned = take(process, wait.objects[i], tid);
-    Some(i as u32 + if abandoned {
-        WAIT_ABANDONED_0
-    } else {
-        WAIT_OBJECT_0
-    })
+        .position(|&o| signaled(objects, o, tid))?;
+    let abandoned = take(objects, wait.objects[i], tid);
+    Some(
+        i as u32
+            + if abandoned {
+                WAIT_ABANDONED_0
+            } else {
+                WAIT_OBJECT_0
+            },
+    )
 }
 
-/// What a wait for `wait` returns at once, if it doesn't have to wait,
-/// for the running thread.
+/// What a wait for `wait` returns at once, if the running thread doesn't
+/// have to wait.
 pub fn wait_now(cpu: &mut Cpu, wait: &Wait) -> Option<u32> {
-    let process = process(cpu);
-    let index = process.current?;
-    try_wait(process, index, wait)
+    let tid = process(cpu).current_thread()?.id;
+    try_wait(&mut cpu.bus.win32.objects, tid, wait)
 }
 
 /// The running thread waits for `wait`, and another runs meanwhile. What
 /// the wait returns is in EAX when it goes on.
 pub fn block(cpu: &mut Cpu, wait: Wait) {
-    let process = process(cpu);
     for &id in &wait.objects {
-        process.objects.hold(id);
+        cpu.bus.win32.objects.hold(id);
     }
-    if let Some(thread) = process.current_thread_mut() {
+    if let Some(thread) = process(cpu).current_thread_mut() {
         thread.wait = Some(wait);
     }
     reschedule(cpu);
 }
 
-/// End the wait of the thread at `index`, which returns `result`.
-pub fn end_wait(process: &mut super::Process, index: usize, result: u32) {
-    let thread = &mut process.threads[index];
+/// End the wait of the thread `at`, which returns `result`.
+pub fn end_wait(win32: &mut Win32, (p, t): At, result: u32) {
+    let thread = &mut win32.processes[p].threads[t];
     let Some(wait) = thread.wait.take() else {
         return;
     };
     thread.ctx.gpr[EAX] = result;
     for id in wait.objects {
-        process.objects.release(id);
+        win32.objects.release(id);
     }
 }
 
 /// End the waits that can end now.
 pub fn wake(cpu: &mut Cpu) {
     let now = cpu.bus.clock.now_micros();
-    let process = process(cpu);
-    for index in 0..process.threads.len() {
-        let Some(wait) = process.threads[index].wait.clone() else {
-            continue;
-        };
-        if process.current == Some(index) {
-            continue;
-        }
-        let result = try_wait(process, index, &wait).or_else(|| {
-            wait.deadline
-                .filter(|&d| now >= d)
-                .map(|_| wait.timeout_result)
-        });
-        if let Some(result) = result {
-            end_wait(process, index, result);
+    let win32 = &mut cpu.bus.win32;
+    let running = current(win32);
+    for p in 0..win32.processes.len() {
+        for t in 0..win32.processes[p].threads.len() {
+            let thread = &win32.processes[p].threads[t];
+            let Some(wait) = thread.wait.clone() else {
+                continue;
+            };
+            if running == Some((p, t)) {
+                continue;
+            }
+            let tid = thread.id;
+            let result = try_wait(&mut win32.objects, tid, &wait).or_else(|| {
+                wait.deadline
+                    .filter(|&d| now >= d)
+                    .map(|_| wait.timeout_result)
+            });
+            if let Some(result) = result {
+                end_wait(win32, (p, t), result);
+            }
         }
     }
 }
 
-/// The running thread's TIB selector for the thread at `index`.
+/// The TIB selector of the thread at `index` in its process's list.
 pub fn selector_of(index: usize) -> u16 {
     super::system::TIB3 + 8 * index as u16
 }
@@ -411,56 +452,61 @@ pub fn initial_context(index: usize, start: u32, param: u32, esp: u32) -> Contex
     ctx
 }
 
-/// End the running thread with exit code `code`. The last thread to end
-/// ends the process.
+/// End the running thread with exit code `code`. The last thread of a
+/// process to end ends the process.
 pub fn exit_current(cpu: &mut Cpu, code: u32) {
-    let process = process(cpu);
-    let Some(index) = process.current else {
+    let Some((p, t)) = current(&cpu.bus.win32) else {
         return;
     };
-    let others = process
+    let others = cpu.bus.win32.processes[p]
         .threads
         .iter()
         .enumerate()
-        .any(|(i, t)| i != index && t.exit_code.is_none());
+        .any(|(i, thread)| i != t && thread.exit_code.is_none());
     if !others {
         super::exit(cpu, code);
         return;
     }
-    end(process, index, code);
+    end(&mut cpu.bus.win32, p, t, code);
     wake(cpu);
     reschedule(cpu);
 }
 
-/// The thread at `index` ends with `code`: its mutexes are abandoned, and
-/// it lets go of its object.
-pub fn end(process: &mut super::Process, index: usize, code: u32) {
-    let thread = &mut process.threads[index];
+/// The thread `t` of the process `p` ends with `code`: its object is
+/// signaled, its mutexes are abandoned, and it lets go of its object.
+pub fn end(win32: &mut Win32, p: usize, t: usize, code: u32) {
+    let thread = &mut win32.processes[p].threads[t];
     if thread.exit_code.is_some() {
         return;
     }
     thread.exit_code = Some(code);
     thread.calls.clear();
-    let (tid, object) = (thread.id, thread.object);
-    if let Some(wait) = thread.wait.take() {
-        for id in wait.objects {
-            process.objects.release(id);
+    let (tid, own) = (thread.id, thread.object);
+    let wait = thread.wait.take();
+    let objects = &mut win32.objects;
+    for id in wait.into_iter().flat_map(|w| w.objects) {
+        objects.release(id);
+    }
+    for object in objects.objects.iter_mut().flatten() {
+        match &mut object.kind {
+            Kind::Mutex {
+                owner,
+                count,
+                abandoned,
+            } if *owner == tid => {
+                *owner = 0;
+                *count = 0;
+                *abandoned = true;
+            }
+            _ => {}
         }
     }
-    for object in process.objects.objects.iter_mut().flatten() {
-        if let Kind::Mutex {
-            owner,
-            count,
-            abandoned,
-        } = &mut object.kind
-            && *owner == tid
-        {
-            *owner = 0;
-            *count = 0;
-            *abandoned = true;
-        }
+    if let Some(object) = objects.get_mut(own)
+        && let Kind::Thread { exit_code, .. } = &mut object.kind
+    {
+        *exit_code = Some(code);
     }
-    process.objects.release(object);
+    objects.release(own);
 }
 
 crate::state_fields!(Wait {
