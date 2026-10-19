@@ -12,8 +12,8 @@ where they differ from NT's.
 `9dc5af175a5537b1f98af34cdcbdc22639b36d53`), unchanged:
 
 - `include/wine/test.h`, the test framework;
-- `kernel32/`: `drive.c`, `fiber.c`, `time.c`, `timer.c`, `version.c`
-  from `dlls/kernel32/tests/`.
+- `kernel32/`: `drive.c`, `fiber.c`, `loader.c`, `module.c`, `time.c`,
+  `timer.c`, `version.c` from `dlls/kernel32/tests/`.
 
 Of the 1.x releases compared (1.0.1, 1.2.3, 1.4.1, 1.6.2, 1.8.7), 1.2.3's
 kernel32 tests mention Windows 9x the most: later releases took many of

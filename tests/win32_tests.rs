@@ -576,3 +576,545 @@ fn a_program_uses_the_heap_tls_environment_and_exports() {
     );
     assert_eq!(code, 0x3F, "the checks that failed: {:06b}", !code & 0x3F);
 }
+
+/// Code for a module's function, which may use the module's layout.
+type Function<'a> = (
+    &'a str,
+    &'a dyn Fn(&mut CodeAssembler, &Layout) -> Result<(), IcedError>,
+);
+
+/// A DLL named `dll` (or with None a program) at `base`, importing
+/// `imports`, with `data`, the functions `functions`, each in a section
+/// of its own, and the resources `resources` (type, name, language,
+/// data). The first function is the entry point; a DLL exports the others
+/// by name, from ordinal 1. It has relocations for the addresses in its
+/// code and data that point into it, found by their values.
+fn module_image(
+    base: u32,
+    dll: Option<&str>,
+    imports: &[(&str, &[&str])],
+    data: &[u8],
+    functions: &[Function],
+    resources: &[(u16, u16, u16, &[u8])],
+) -> Vec<u8> {
+    let mut b = match dll {
+        Some(name) => Builder::dll(base, name),
+        None => Builder::exe(base),
+    };
+    let lists: Vec<Vec<Imp>> = imports
+        .iter()
+        .map(|(_, names)| names.iter().map(|n| Imp::Name(n)).collect())
+        .collect();
+    let dlls: Vec<(&str, &[Imp])> = imports
+        .iter()
+        .zip(&lists)
+        .map(|((dll, _), list)| (*dll, list.as_slice()))
+        .collect();
+    let iat = if dlls.is_empty() {
+        Vec::new()
+    } else {
+        b.imports(&dlls).concat()
+    };
+    let data_rva = b.section(
+        ".data",
+        data,
+        pe::SCN_INITIALIZED_DATA | pe::SCN_READ | pe::SCN_WRITE,
+    );
+    let layout = Layout {
+        data: base + data_rva,
+        iat,
+    };
+    let mut sections = vec![(data_rva, data.to_vec())];
+    for (i, (name, f)) in functions.iter().enumerate() {
+        let rva = b.next_rva();
+        let mut a = CodeAssembler::new(32).unwrap();
+        f(&mut a, &layout).unwrap();
+        let code = a.assemble((base + rva) as u64).unwrap();
+        b.section(
+            &format!(".t{}", i),
+            &code,
+            pe::SCN_CODE | pe::SCN_EXECUTE | pe::SCN_READ,
+        );
+        if i == 0 {
+            b.entry(rva);
+        } else if dll.is_some() {
+            b.export(Some(name), i as u16, rva);
+        }
+        sections.push((rva, code));
+    }
+    let end = b.next_rva();
+    for (rva, bytes) in &sections {
+        for i in 0..bytes.len().saturating_sub(3) {
+            let value = u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap());
+            if (base..base + end).contains(&value) {
+                b.reloc(rva + i as u32);
+            }
+        }
+    }
+    for &(kind, name, language, data) in resources {
+        b.resource(kind, name, language, data);
+    }
+    b.build()
+}
+
+/// Run T.EXE from a folder with `files` to its end; its exit code and
+/// what it printed.
+fn run_files(test: &str, files: &[(&str, Vec<u8>)]) -> (u8, String) {
+    let mut cpu = Cpu::new(scratch(test, files));
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    assert!(
+        run_to_exit(&mut cpu, 400),
+        "the program didn't end: {:?}",
+        printed(&cpu)
+    );
+    assert!(!cpu.bus.win32.active());
+    (cpu.errorlevel, printed(&cpu))
+}
+
+/// The test programs' data, when they import functions: after the import
+/// section. The DLLs count their entry points' calls there, by reason:
+/// B.DLL's at 100h, A.DLL's at 110h, and at 120h what B.DLL's count of
+/// DLL_PROCESS_ATTACH was when A.DLL's ran.
+const PROGRAM_DATA: u32 = BASE + 0x2000;
+const B_COUNTS: u32 = PROGRAM_DATA + 0x100;
+const A_COUNTS: u32 = PROGRAM_DATA + 0x110;
+const B_FIRST: u32 = PROGRAM_DATA + 0x120;
+/// Both DLLs want to be at 5A000000h, so the second loaded is relocated.
+/// (Bytes of the base's address in code are told from others by it.)
+const DLL_BASE: u32 = 0x5A00_0000;
+
+/// B.DLL: counts its entry point's calls in the program's data, and says
+/// "B detached" when it is; exports Seven, which returns 7.
+fn dll_b() -> Vec<u8> {
+    let mut data = b"B detached\r\n".to_vec();
+    data.resize(0x40, 0);
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["GetStdHandle", "WriteFile"])];
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        let mut done = a.create_label();
+        a.mov(eax, dword_ptr(esp + 8))?;
+        a.inc(dword_ptr(eax * 4 + B_COUNTS as i32))?;
+        a.test(eax, eax)?;
+        a.jne(done)?;
+        a.push(STD_OUTPUT_HANDLE)?;
+        a.call(l.import(0))?;
+        a.push(0)?;
+        a.push(l.at(0x20) as i32)?;
+        a.push(12)?;
+        a.push(l.at(0) as i32)?;
+        a.push(eax)?;
+        a.call(l.import(1))?;
+        a.set_label(&mut done)?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    let seven = |a: &mut CodeAssembler, _: &Layout| {
+        a.mov(eax, 7)?;
+        a.ret()
+    };
+    module_image(
+        DLL_BASE,
+        Some("B.DLL"),
+        imports,
+        &data,
+        &[("", &main), ("Seven", &seven)],
+        &[],
+    )
+}
+
+/// A.DLL: imports B.DLL, counts its entry point's calls, and exports
+/// Value, which returns B's Seven plus 35, read through a pointer that a
+/// relocation moves with it.
+fn dll_a() -> Vec<u8> {
+    let mut data = vec![0u8; 0x10];
+    data[0..4].copy_from_slice(&(DLL_BASE + 0x2004).to_le_bytes());
+    data[4..8].copy_from_slice(&35u32.to_le_bytes());
+    let imports: &[(&str, &[&str])] = &[("B.DLL", &["Seven"])];
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        assert_eq!(l.data, DLL_BASE + 0x2000);
+        let mut done = a.create_label();
+        a.mov(eax, dword_ptr(esp + 8))?;
+        a.inc(dword_ptr(eax * 4 + A_COUNTS as i32))?;
+        a.cmp(eax, 1)?;
+        a.jne(done)?;
+        a.mov(eax, dword_ptr((B_COUNTS + 4) as u64))?;
+        a.mov(dword_ptr(B_FIRST as u64), eax)?;
+        a.set_label(&mut done)?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    let value = |a: &mut CodeAssembler, l: &Layout| {
+        a.call(l.import(0))?;
+        a.mov(ecx, dword_ptr(l.at(0)))?;
+        a.add(eax, dword_ptr(ecx))?;
+        a.ret()
+    };
+    module_image(
+        DLL_BASE,
+        Some("A.DLL"),
+        imports,
+        &data,
+        &[("", &main), ("Value", &value)],
+        &[],
+    )
+}
+
+/// Set bit `bit` of EBX when ZF is set.
+fn check(a: &mut CodeAssembler, bit: u32) -> Result<(), IcedError> {
+    a.sete(al)?;
+    a.movzx(eax, al)?;
+    a.shl(eax, bit)?;
+    a.or(ebx, eax)
+}
+
+/// A DLL the program imports, which imports another, both with entry
+/// points, one relocated: the entry points run before the program's,
+/// those a DLL imports from first, and learn of the process's end.
+#[test]
+fn a_program_imports_dlls_from_disk() {
+    let imports: &[(&str, &[&str])] = &[("A.DLL", &["Value"])];
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        assert_eq!(l.data, PROGRAM_DATA);
+        a.xor(ebx, ebx)?;
+        a.call(l.import(0))?;
+        a.cmp(eax, 42)?;
+        check(a, 0)?;
+        a.cmp(dword_ptr((A_COUNTS + 4) as u64), 1)?;
+        check(a, 1)?;
+        a.cmp(dword_ptr((B_COUNTS + 4) as u64), 1)?;
+        check(a, 2)?;
+        a.cmp(dword_ptr(B_FIRST as u64), 1)?;
+        check(a, 3)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    let exe = module_image(BASE, None, imports, &[0; 0x200], &[("", &main)], &[]);
+    let (code, text) = run_files(
+        "dll_static",
+        &[("T.EXE", exe), ("A.DLL", dll_a()), ("B.DLL", dll_b())],
+    );
+    assert_eq!(
+        code,
+        0x0F,
+        "the checks that failed: {:04b} {}",
+        !code & 0x0F,
+        text
+    );
+    assert_eq!(text, "B detached\r\n");
+}
+
+/// LoadLibraryA of a DLL that imports another, GetProcAddress, threads
+/// that the DLLs' entry points learn of (but not B.DLL's, after
+/// DisableThreadLibraryCalls), and FreeLibrary, which frees both.
+#[test]
+fn a_program_loads_and_frees_dlls() {
+    let names: &[&str] = &[
+        "LoadLibraryA",
+        "GetProcAddress",
+        "FreeLibrary",
+        "GetModuleHandleA",
+        "GetLastError",
+        "CreateThread",
+        "WaitForSingleObject",
+        "DisableThreadLibraryCalls",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = b"NOPE.DLL\0A.DLL\0Value\0B\0".to_vec();
+    data.resize(0x200, 0);
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        assert_eq!(l.data, PROGRAM_DATA);
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut after = a.create_label();
+        a.xor(ebx, ebx)?;
+        // A DLL that isn't there: Windows 95's ERROR_DLL_NOT_FOUND.
+        a.push(l.at(0) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.mov(esi, eax)?;
+        a.call(f("GetLastError"))?;
+        // (The machine is a 486, without CMOV.)
+        let mut wrong = a.create_label();
+        a.cmp(eax, 1157)?;
+        a.jne(wrong)?;
+        a.test(esi, esi)?;
+        a.set_label(&mut wrong)?;
+        check(a, 0)?;
+        // A.DLL, and B.DLL with it.
+        a.push(l.at(9) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.mov(esi, eax)?;
+        a.push(l.at(15) as i32)?;
+        a.push(esi)?;
+        a.call(f("GetProcAddress"))?;
+        a.call(eax)?;
+        a.cmp(eax, 42)?;
+        check(a, 1)?;
+        a.mov(eax, dword_ptr((A_COUNTS + 4) as u64))?;
+        a.add(eax, dword_ptr((B_COUNTS + 4) as u64))?;
+        a.add(eax, dword_ptr(B_FIRST as u64))?;
+        a.cmp(eax, 3)?;
+        check(a, 2)?;
+        // A thread.
+        a.push(l.at(21) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.push(eax)?;
+        a.call(f("DisableThreadLibraryCalls"))?;
+        // The thread's function, whose address the call leaves.
+        a.call(after)?;
+        a.xor(eax, eax)?;
+        a.ret_1(4)?;
+        a.set_label(&mut after)?;
+        a.pop(eax)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(eax)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(f("CreateThread"))?;
+        a.push(-1)?;
+        a.push(eax)?;
+        a.call(f("WaitForSingleObject"))?;
+        a.mov(eax, dword_ptr((A_COUNTS + 8) as u64))?;
+        a.add(eax, dword_ptr((A_COUNTS + 12) as u64))?;
+        a.add(eax, dword_ptr((B_COUNTS + 8) as u64))?;
+        a.add(eax, dword_ptr((B_COUNTS + 12) as u64))?;
+        a.cmp(eax, 2)?;
+        check(a, 3)?;
+        // Freed, both.
+        a.push(esi)?;
+        a.call(f("FreeLibrary"))?;
+        a.add(eax, dword_ptr(A_COUNTS as u64))?;
+        a.add(eax, dword_ptr(B_COUNTS as u64))?;
+        a.cmp(eax, 3)?;
+        check(a, 4)?;
+        a.push(l.at(21) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.test(eax, eax)?;
+        check(a, 5)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    let exe = module_image(BASE, None, imports, &data, &[("", &main)], &[]);
+    let (code, text) = run_files(
+        "dll_dynamic",
+        &[("T.EXE", exe), ("A.DLL", dll_a()), ("B.DLL", dll_b())],
+    );
+    assert_eq!(code, 0x3F, "the checks that failed: {:06b}", !code & 0x3F);
+    assert_eq!(text, "B detached\r\n");
+}
+
+/// C.DLL, whose entry point returns FALSE, and exports F.
+fn dll_c() -> Vec<u8> {
+    let main = |a: &mut CodeAssembler, _: &Layout| {
+        a.xor(eax, eax)?;
+        a.ret_1(12)
+    };
+    let f = |a: &mut CodeAssembler, _: &Layout| a.ret();
+    module_image(
+        DLL_BASE,
+        Some("C.DLL"),
+        &[],
+        &[0; 4],
+        &[("", &main), ("F", &f)],
+        &[],
+    )
+}
+
+#[test]
+fn a_dll_whose_entry_point_fails_is_not_loaded() {
+    let names: &[&str] = &["LoadLibraryA", "GetLastError", "GetModuleHandleA"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        a.xor(ebx, ebx)?;
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(0))?;
+        a.test(eax, eax)?;
+        check(a, 0)?;
+        a.call(l.import(1))?;
+        a.cmp(eax, 1114)?;
+        check(a, 1)?;
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(2))?;
+        a.test(eax, eax)?;
+        check(a, 2)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    let exe = module_image(BASE, None, imports, b"C.DLL\0", &[("", &main)], &[]);
+    let (code, _) = run_files("dll_fails", &[("T.EXE", exe), ("C.DLL", dll_c())]);
+    assert_eq!(code, 7, "the checks that failed: {:03b}", !code & 7);
+
+    // One the program imports ends it before it starts.
+    let imports: &[(&str, &[&str])] = &[("C.DLL", &["F"])];
+    let main = |a: &mut CodeAssembler, _: &Layout| {
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    };
+    let exe = module_image(BASE, None, imports, &[0; 4], &[("", &main)], &[]);
+    let (code, text) = run_files("dll_fails_static", &[("T.EXE", exe), ("C.DLL", dll_c())]);
+    assert_eq!(code, 0xFF);
+    assert!(
+        text.contains("Initialization of the dynamic link library C:\\C.DLL failed"),
+        "{}",
+        text
+    );
+}
+
+#[test]
+fn a_program_missing_a_dll_function_is_refused() {
+    let imports: &[(&str, &[&str])] = &[("C.DLL", &["G"])];
+    let main = |a: &mut CodeAssembler, _: &Layout| a.ret();
+    let exe = module_image(BASE, None, imports, &[0; 4], &[("", &main)], &[]);
+    let (code, text) = run_files("dll_missing", &[("T.EXE", exe), ("C.DLL", dll_c())]);
+    assert_eq!(code, 1);
+    assert!(
+        text.contains("T.EXE is linked to missing export C.DLL:G"),
+        "{}",
+        text
+    );
+}
+
+/// A resource of the program found, loaded and measured, one that isn't
+/// there, the types enumerated, and the program's file name.
+#[test]
+fn a_program_reads_its_resources_and_file_name() {
+    let names: &[&str] = &[
+        "FindResourceA",
+        "LoadResource",
+        "LockResource",
+        "SizeofResource",
+        "GetLastError",
+        "GetModuleFileNameA",
+        "EnumResourceTypesA",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    const RT_RCDATA: u16 = 10;
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut after = a.create_label();
+        a.xor(ebx, ebx)?;
+        a.push(RT_RCDATA as i32)?;
+        a.push(5)?;
+        a.push(0)?;
+        a.call(f("FindResourceA"))?;
+        a.mov(esi, eax)?;
+        a.push(esi)?;
+        a.push(0)?;
+        a.call(f("SizeofResource"))?;
+        a.cmp(eax, 5)?;
+        check(a, 0)?;
+        a.push(esi)?;
+        a.push(0)?;
+        a.call(f("LoadResource"))?;
+        a.push(eax)?;
+        a.call(f("LockResource"))?;
+        a.cmp(dword_ptr(eax), 0x6C6C6568)?;
+        check(a, 1)?;
+        a.push(RT_RCDATA as i32)?;
+        a.push(6)?;
+        a.push(0)?;
+        a.call(f("FindResourceA"))?;
+        a.mov(esi, eax)?;
+        a.call(f("GetLastError"))?;
+        // (The machine is a 486, without CMOV.)
+        let mut wrong = a.create_label();
+        a.cmp(eax, 1814)?;
+        a.jne(wrong)?;
+        a.test(esi, esi)?;
+        a.set_label(&mut wrong)?;
+        check(a, 2)?;
+        // "C:\T.EXE", and cut to fit 4 bytes with its NUL.
+        a.push(0x100)?;
+        a.push(l.at(0) as i32)?;
+        a.push(0)?;
+        a.call(f("GetModuleFileNameA"))?;
+        a.cmp(eax, 8)?;
+        check(a, 3)?;
+        a.push(4)?;
+        a.push(l.at(0x100) as i32)?;
+        a.push(0)?;
+        a.call(f("GetModuleFileNameA"))?;
+        a.cmp(eax, 3)?;
+        check(a, 4)?;
+        // The callback, whose address the call leaves: it keeps the type.
+        a.call(after)?;
+        a.mov(eax, dword_ptr(esp + 8))?;
+        a.mov(dword_ptr(l.at(0x180)), eax)?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)?;
+        a.set_label(&mut after)?;
+        a.pop(eax)?;
+        a.push(0)?;
+        a.push(eax)?;
+        a.push(0)?;
+        a.call(f("EnumResourceTypesA"))?;
+        a.cmp(dword_ptr(l.at(0x180)), RT_RCDATA as i32)?;
+        check(a, 5)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    let exe = module_image(
+        BASE,
+        None,
+        imports,
+        &[0; 0x200],
+        &[("", &main)],
+        &[(RT_RCDATA, 5, 0x409, b"hello")],
+    );
+    let (code, _) = run_files("resources", &[("T.EXE", exe)]);
+    assert_eq!(code, 0x3F, "the checks that failed: {:06b}", !code & 0x3F);
+}
+
+/// LoadLibraryA of files Windows 95 can't load: an empty one is in a bad
+/// format, and one whose PE header has no optional header gives
+/// ERROR_GEN_FAILURE, as Wine's loader test found on Windows 9x.
+#[test]
+fn a_dll_that_is_not_an_image_is_refused() {
+    let mut bad = vec![0u8; 0x40];
+    bad[..2].copy_from_slice(b"MZ");
+    bad[0x3C] = 0x40;
+    bad.extend_from_slice(b"PE\0\0");
+    let mut header = [0u8; 20];
+    header[..2].copy_from_slice(&0x14Cu16.to_le_bytes());
+    header[2] = 1;
+    header[18..].copy_from_slice(&0x2002u16.to_le_bytes());
+    bad.extend_from_slice(&header);
+    let mut section = [0u8; 40];
+    section[..7].copy_from_slice(b".rodata");
+    bad.extend_from_slice(&section);
+    bad.extend_from_slice(b"section data\0\0\0\0");
+    let names: &[&str] = &["LoadLibraryA", "GetLastError"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        a.xor(ebx, ebx)?;
+        for (bit, (at, error)) in [(0u32, 11u32), (10, 31)].into_iter().enumerate() {
+            let mut wrong = a.create_label();
+            a.push(l.at(at) as i32)?;
+            a.call(l.import(0))?;
+            a.mov(esi, eax)?;
+            a.call(l.import(1))?;
+            a.cmp(eax, error as i32)?;
+            a.jne(wrong)?;
+            a.test(esi, esi)?;
+            a.set_label(&mut wrong)?;
+            check(a, bit as u32)?;
+        }
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    let exe = module_image(
+        BASE,
+        None,
+        imports,
+        b"EMPTY.DLL\0BAD.DLL\0",
+        &[("", &main)],
+        &[],
+    );
+    let (code, _) = run_files(
+        "dll_bad",
+        &[("T.EXE", exe), ("EMPTY.DLL", Vec::new()), ("BAD.DLL", bad)],
+    );
+    assert_eq!(code, 3, "the checks that failed: {:02b}", !code & 3);
+}
