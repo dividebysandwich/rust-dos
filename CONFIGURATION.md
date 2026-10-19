@@ -400,13 +400,15 @@ Mistakes in the file are printed as warnings; the emulator still starts.
 * `win32` turns on the built-in Windows: `true` or `false` (the
   default). A Win32 console program, a Windows 95 .EXE, then runs from
   the DOS prompt in protected mode with paging, as Windows 95 runs it,
-  with the KERNEL32 functions written into the emulator, and ends back
-  at the prompt. Only a few functions exist so far: writing to the
-  console, the command line, the version, the tick count and ending
-  the process. A program that calls another ends with a message naming
-  it, and one that imports another DLL is refused. Off, such a program
-  runs its DOS stub, which says it needs Windows. The plan is in
-  [docs/native-windows.md](docs/native-windows.md).
+  with KERNEL32, ADVAPI32 and MSVCRT written into the emulator, and ends
+  back at the prompt. They have what console programs use: heaps and
+  virtual memory, files and directories, the environment, modules and
+  the program's own DLLs, threads and their synchronization, structured
+  exceptions, child processes, the registry and the C runtime. A
+  program that calls a function they don't have ends with a message
+  naming it, and one that imports another system DLL (USER32, GDI32) is
+  refused. Off, such a program runs its DOS stub, which says it needs
+  Windows. The plan is in [docs/native-windows.md](docs/native-windows.md).
 * `dos_version` is the DOS version programs are told (INT 21h AH=30h,
   AX=3306h and the PSP's), such as `5.00` (the default), `6.22` or
   `7.10`; `7.1` is 7.10, as DOSBox's `ver` has it. From 7.00 on, DOS

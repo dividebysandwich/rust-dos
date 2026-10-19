@@ -434,7 +434,7 @@ fn start(cpu: &mut Cpu) {
     win32.cr4 = cr4;
     let environment = dos_environment(cpu, cpu.current_psp);
     let line = loader::dos_command_line(cpu, &path);
-    match create_process(cpu, &path, &line, environment, Vec::new(), None, false) {
+    match create_process(cpu, &path, &line, environment, Vec::new(), None, Vec::new(), false) {
         Ok(created) => {
             cpu.bus.win32.root = created.process.1;
             cpu.bus.set_a20(true);
@@ -464,7 +464,9 @@ pub struct Created {
 /// or suspended. It inherits the handles `inherited`, as (handle,
 /// object). Its standard input, output and error are DOS's handles 0, 1
 /// and 2, or the objects `std` names, by the handles it inherited of them
-/// where it did. Fails with a message for the user.
+/// where it did. `startup` is what GetStartupInfoA gives it. Fails with a
+/// message for the user.
+#[allow(clippy::too_many_arguments)]
 fn create_process(
     cpu: &mut Cpu,
     path: &str,
@@ -472,6 +474,7 @@ fn create_process(
     environment: Vec<String>,
     inherited: Vec<(u32, u32)>,
     std: Option<[u32; 3]>,
+    startup: Vec<u8>,
     suspended: bool,
 ) -> Result<Created, String> {
     let file = cpu
@@ -483,6 +486,7 @@ fn create_process(
     let loaded = loader::load(cpu, path, line, &file, environment)?;
     let mut process = loaded.process;
     process.priority_class = 0x20;
+    process.startup = startup;
     let return_address = stubs::stub_address(0, kernel32::PROCESS_RETURN);
     let esp = loaded.stack_top - 4;
     process.memory.write_32(&mut cpu.bus, esp, return_address);

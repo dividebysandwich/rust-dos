@@ -538,7 +538,8 @@ fn tell_stream(cpu: &mut Cpu, at: u32) -> Option<Option<u64>> {
     }
     if f.flag & IOREAD != 0 && f.cnt > 0 {
         let extra = lfs(cpu, f.ptr, f.cnt as u32)?;
-        return Some(Some(pos.saturating_sub(f.cnt as u64 + extra)));
+        // Below 0 when the file had bare LFs, as MSVCRT counts it.
+        return Some(Some(pos.wrapping_sub(f.cnt as u64 + extra)));
     }
     Some(Some(pos))
 }
@@ -729,6 +730,10 @@ fn attach(cpu: &mut Cpu, at: u32, fd: u32, flag: u32) -> Option<u32> {
 /// fopen(name, mode) and _fsopen(name, mode, share): the stream, or
 /// NULL with errno set.
 pub fn fopen(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    if args[0] == 0 {
+        set_errno(cpu, EINVAL);
+        return Some(0);
+    }
     let name = cstr(cpu, args[0])?;
     let mode = cstr(cpu, args[1])?;
     let Some((flags, flag)) = parse_mode(&mode) else {

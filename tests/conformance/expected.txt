@@ -120,20 +120,11 @@ msvcrt/dir: dir: 53 tests executed (0 marked as todo, 0 failures), 1 skipped.
 msvcrt/dir: skipped dir.c:225
 msvcrt/environ: environ: 10 tests executed (0 marked as todo, 1 failure), 0 skipped.
 msvcrt/environ: failed environ.c:51
-msvcrt/file: ended: FILE.EXE ended: page fault (exception 0Eh, error 5, address 00000000)
-msvcrt/file: failed file.c:1021
-msvcrt/file: failed file.c:1023
-msvcrt/file: failed file.c:988 (x3)
-msvcrt/file: failed file.c:994 (x3)
-msvcrt/file: failed file.c:850
-msvcrt/file: failed file.c:851
-msvcrt/file: failed file.c:1241
-msvcrt/file: failed file.c:1265
+msvcrt/file: file: 3 tests executed (0 marked as todo, 0 failures), 0 skipped.
+msvcrt/file: file: 1 tests executed (0 marked as todo, 0 failures), 0 skipped.
+msvcrt/file: file: 502 tests executed (0 marked as todo, 1 failure), 1 skipped.
 msvcrt/file: skipped file.c:1289
-msvcrt/file: failed file.c:63
-msvcrt/file: failed file.c:65
-msvcrt/file: failed file.c:1175
-msvcrt/file: exit code 255
+msvcrt/file: failed file.c:1339
 msvcrt/heap: heap: 5 tests executed (0 marked as todo, 0 failures), 1 skipped.
 msvcrt/heap: skipped heap.c:249
 msvcrt/printf: printf: 354 tests executed (0 marked as todo, 0 failures), 3 skipped.

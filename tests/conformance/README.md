@@ -100,15 +100,21 @@ the file's diff. When it is right, write the results anew:
 CONFORMANCE_BLESS=1 cargo test --test conformance_tests
 ```
 
-The msvcrt results that aren't clean, and why:
+The results that aren't clean, and why:
 
-- `environ.c:51` and `file.c:1021`, `file.c:1023`: `system` and the
-  `_spawn` functions only fail with ENOENT, as the built-in Windows
-  can't start a command interpreter. `system(NULL)` still returns 1,
-  as Windows 95's does, since there is one there.
-- `dir` and `file` end where they call KERNEL32's file functions
-  (`GetCurrentDirectoryA`, `CreateFileA`), which the built-in KERNEL32
-  doesn't have yet. The built-in MSVCRT's own file functions use DOS.
+- kernel32 `file.c:350`: FindFirstFileA gives "testfile.xxx" back as
+  "TESTFILE.XXX": without long file names, which the built-in Windows
+  doesn't have yet, DOS keeps names in upper case.
+- kernel32 `module.c:259`, `270`, `282`: LoadLibraryExA of an empty
+  file that another handle has open for writing fails with
+  ERROR_BAD_FORMAT; Windows 9x's loader can't open it, and says
+  ERROR_FILE_NOT_FOUND. `367` and `370`: COMCTL32.DLL isn't there to
+  load.
+- msvcrt `environ.c:51`: `system` can't start a command interpreter,
+  which is a DOS program. `system(NULL)` still returns 1, as Windows
+  95's does, since there is one there.
+- msvcrt `file.c:1339`: `_pipe` fails with EMFILE, as KERNEL32 has no
+  anonymous pipes yet.
 
 ## Adding tests
 

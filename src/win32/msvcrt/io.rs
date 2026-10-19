@@ -3,18 +3,20 @@
 //! directories and their names (`_stat`, `_findfirst`, `_mkdir`,
 //! `_getcwd`).
 //!
-//! The handles are KERNEL32's objects of DOS file handles (`Kind::Dos`),
-//! as the standard ones are. KERNEL32 has no CreateFileA or ReadFile yet,
-//! so files are opened, read and moved in here through DOS's tables
-//! (`dos_open`, `dos_read`); once it has them, these are what call them.
+//! The handles are KERNEL32's: its file objects, opened as CreateFileA
+//! opens them, or the standard handles, which are DOS's. They are read,
+//! written and moved through DOS's file table (`dos_read`, `dos_write`)
+//! as KERNEL32's ReadFile and WriteFile do.
 
 use super::*;
 use crate::disk::{CharDevice, DosDirEntry};
+use crate::win32::kernel32;
 use crate::win32::object::{self, Kind};
 
 /// A descriptor's flags (`ioinfo.osfile`).
 pub const FOPEN: u32 = 0x01;
 pub const FEOFLAG: u32 = 0x02;
+pub const FNOINHERIT: u32 = 0x10;
 pub const FAPPEND: u32 = 0x20;
 pub const FDEV: u32 = 0x40;
 pub const FTEXT: u32 = 0x80;
@@ -24,6 +26,7 @@ const O_WRONLY: u32 = 0x0001;
 const O_RDWR: u32 = 0x0002;
 const O_APPEND: u32 = 0x0008;
 const O_TEMPORARY: u32 = 0x0040;
+const O_NOINHERIT: u32 = 0x0080;
 const O_CREAT: u32 = 0x0100;
 const O_TRUNC: u32 = 0x0200;
 const O_EXCL: u32 = 0x0400;
@@ -46,13 +49,17 @@ pub fn is_device(bus: &mut Bus, process: &super::super::Process, handle: u32) ->
     let Some(id) = process.handles.of(handle) else {
         return false;
     };
-    let Some(Kind::Dos { handle: dos }) = bus.win32.objects.get(id).map(|o| o.kind.clone()) else {
-        return false;
+    let sft = match bus.win32.objects.get(id).map(|o| o.kind.clone()) {
+        Some(Kind::File { sft, .. }) => Some(sft),
+        Some(Kind::Dos { handle: dos }) => {
+            let psp = bus.win32.psp;
+            let paging = bus.guest_paging.take();
+            let sft = crate::dos_files::sft_of(bus, psp, dos);
+            bus.guest_paging = paging;
+            sft
+        }
+        _ => None,
     };
-    let psp = bus.win32.psp;
-    let paging = bus.guest_paging.take();
-    let sft = crate::dos_files::sft_of(bus, psp, dos);
-    bus.guest_paging = paging;
     sft.is_some_and(|sft| bus.disk.handle_device(sft).is_some())
 }
 
@@ -95,19 +102,9 @@ fn new_fd(cpu: &mut Cpu, handle: u32, flags: u32, from: u32) -> Option<u32> {
     None
 }
 
-/// The DOS handle of the object `handle` names, if it is one.
-fn dos_handle(cpu: &mut Cpu, handle: u32) -> Option<u16> {
-    match object::kind_of(cpu, handle) {
-        Some(Kind::Dos { handle }) => Some(handle),
-        _ => None,
-    }
-}
-
-/// The open file (SFT entry) of the object `handle`.
+/// The open file (SFT entry) of the handle `handle`.
 fn sft_of(cpu: &mut Cpu, handle: u32) -> Option<u16> {
-    let dos = dos_handle(cpu, handle)?;
-    let psp = cpu.bus.win32.psp;
-    crate::win32::dos(cpu, |cpu| crate::dos_files::sft_of(&mut cpu.bus, psp, dos))
+    kernel32::open_of(cpu, handle).map(|open| open.sft)
 }
 
 /// A DOS path as programs write it: slashes either way.
@@ -115,35 +112,33 @@ fn dos_path(name: &[u8]) -> String {
     crate::dosstr::from_bytes(name).replace('/', "\\")
 }
 
-/// Open the file `path` through DOS, for reading (`access` 0), writing
-/// (1) or both (2); with `create` a missing one is made, with `truncate`
-/// one there is emptied, with `exclusive` one there is an error. A new
-/// handle of it, or DOS's error.
+/// Open the file `path` as CreateFileA does, for reading (`access` 0),
+/// writing (1) or both (2), shared as `share` (FILE_SHARE_READ and
+/// FILE_SHARE_WRITE) allows; with `create` a missing one is made, with
+/// `truncate` one there is emptied, with `exclusive` one there is an
+/// error. A new handle of it, or the error.
 fn dos_open(
     cpu: &mut Cpu,
     path: &str,
-    access: u8,
+    (access, share): (u8, u32),
     create: bool,
     truncate: bool,
     exclusive: bool,
 ) -> Result<u32, u32> {
-    let psp = cpu.bus.win32.psp;
-    let disk = &mut cpu.bus.disk;
-    let exists = disk.is_file(path) || disk.device(path).is_some();
-    if disk.is_directory(path) {
-        return Err(5);
-    }
-    let opened = match (exists, create) {
-        (true, true) if exclusive => Err(80),
-        (false, false) => Err(2),
-        (false, true) => disk.create_file(path, psp),
-        (true, _) if truncate => disk.create_file(path, psp),
-        (true, _) => disk.open_file(path, access, psp),
+    let access = match access {
+        0 => kernel32::GENERIC_READ,
+        1 => kernel32::GENERIC_WRITE,
+        _ => kernel32::GENERIC_READ | kernel32::GENERIC_WRITE,
     };
-    let sft = opened.map_err(u32::from)?;
-    let dos = crate::win32::dos(cpu, |cpu| crate::dos_files::attach(&mut cpu.bus, psp, sft));
-    let dos = dos.map_err(u32::from)?;
-    Ok(object::create(cpu, Kind::Dos { handle: dos }, None))
+    let disposition = match (create, truncate) {
+        (true, _) if exclusive => kernel32::CREATE_NEW,
+        (true, true) => kernel32::CREATE_ALWAYS,
+        (true, false) => kernel32::OPEN_ALWAYS,
+        (false, true) => kernel32::TRUNCATE_EXISTING,
+        (false, false) => kernel32::OPEN_EXISTING,
+    };
+    let (sft, _) = kernel32::open_file(cpu, path, access, share, disposition)?;
+    Ok(kernel32::new_file(cpu, sft, access, share))
 }
 
 /// What a read gives: bytes (none at the end of the file), DOS's error,
@@ -179,11 +174,15 @@ fn dos_read(cpu: &mut Cpu, handle: u32, count: u32) -> Read {
 
 /// Write `data` to `handle`: how many bytes were, or DOS's error.
 fn dos_write(cpu: &mut Cpu, handle: u32, data: &[u8]) -> Result<u32, u32> {
-    let dos = dos_handle(cpu, handle).ok_or(6u32)?;
+    let open = kernel32::open_of(cpu, handle).ok_or(6u32)?;
+    if open.access & kernel32::GENERIC_WRITE == 0 {
+        return Err(5);
+    }
     let mut done = 0;
     for chunk in data.chunks(0x8000) {
+        let (dos, sft) = (open.dos, open.sft);
         let result = crate::win32::dos(cpu, |cpu| {
-            crate::interrupts::int21::write_handle(cpu, dos, chunk)
+            crate::interrupts::int21::write_open_file(cpu, dos, sft, chunk)
         });
         let n = result.map_err(u32::from)? as usize;
         done += n;
@@ -224,13 +223,14 @@ fn dos_size(cpu: &mut Cpu, handle: u32) -> Option<u32> {
     cpu.bus.disk.sft_entry(sft).map(|e| e.size)
 }
 
-/// Close `handle`, and with its last handle its DOS file.
+/// Close `handle`, and with its last handle its file: a standard one's
+/// DOS handle here, a file object's in KERNEL32.
 fn dos_close(cpu: &mut Cpu, handle: u32) -> bool {
     let Some(id) = object::resolve(cpu, handle) else {
         return false;
     };
     let last = object::objects(cpu).get(id).is_some_and(|o| o.refs == 1);
-    if last && let Some(dos) = dos_handle(cpu, handle) {
+    if last && let Some(Kind::Dos { handle: dos }) = object::kind_of(cpu, handle) {
         let psp = cpu.bus.win32.psp;
         let _ = crate::win32::dos(cpu, |cpu| crate::dos_files::close(&mut cpu.bus, psp, dos));
     }
@@ -247,7 +247,14 @@ pub fn open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 pub fn sopen(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let name = cstr(cpu, args[0])?;
-    Some(open_path(cpu, &name, args[1]).unwrap_or(EOF))
+    // _SH_DENYRW, _SH_DENYWR, _SH_DENYRD, and _SH_DENYNO.
+    let share = match args[2] {
+        0x10 => 0,
+        0x20 => kernel32::FILE_SHARE_READ,
+        0x30 => kernel32::FILE_SHARE_WRITE,
+        _ => kernel32::FILE_SHARE_READ | kernel32::FILE_SHARE_WRITE,
+    };
+    Some(open_shared(cpu, &name, args[1], share).unwrap_or(EOF))
 }
 
 /// _creat(path, mode): _open with O_CREAT, O_TRUNC and O_RDWR.
@@ -258,6 +265,18 @@ pub fn creat(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// Open the file `name` as `_open`'s `flags` say.
 pub fn open_path(cpu: &mut Cpu, name: &[u8], flags: u32) -> Option<u32> {
+    let share = kernel32::FILE_SHARE_READ | kernel32::FILE_SHARE_WRITE;
+    open_shared(cpu, name, flags, share)
+}
+
+/// Open the file `name` as `_open`'s `flags` say, shared as `share`
+/// allows.
+fn open_shared(cpu: &mut Cpu, name: &[u8], flags: u32, share: u32) -> Option<u32> {
+    if name.is_empty() {
+        set_errno(cpu, ENOENT);
+        set_doserrno(cpu, 2);
+        return None;
+    }
     let path = dos_path(name);
     let access = match flags & 3 {
         0 => 0,
@@ -267,7 +286,7 @@ pub fn open_path(cpu: &mut Cpu, name: &[u8], flags: u32) -> Option<u32> {
     let opened = dos_open(
         cpu,
         &path,
-        access,
+        (access, share),
         flags & O_CREAT != 0,
         flags & O_TRUNC != 0,
         flags & O_CREAT != 0 && flags & O_EXCL != 0,
@@ -296,6 +315,9 @@ pub fn open_path(cpu: &mut Cpu, name: &[u8], flags: u32) -> Option<u32> {
     }
     if device {
         fd_flags |= FDEV;
+    }
+    if flags & O_NOINHERIT != 0 {
+        fd_flags |= FNOINHERIT;
     }
     let _ = flags & O_TEMPORARY;
     match new_fd(cpu, handle, fd_flags, 0) {
@@ -362,12 +384,9 @@ pub fn read_fd(cpu: &mut Cpu, fd: u32, count: u32) -> FdRead {
     while i < raw.len() {
         match raw[i] {
             0x1A => {
+                // The end, though the file's position stays past what
+                // was read after it, as MSVCRT leaves it.
                 set_flags(cpu, fd, flags | FEOFLAG);
-                // The rest isn't read: the file goes on after the Ctrl-Z.
-                let back = (raw.len() - i) as i64;
-                if flags & FDEV == 0 {
-                    let _ = dos_seek(cpu, handle, -back, 1);
-                }
                 break;
             }
             b'\r' if i + 1 < raw.len() => {
@@ -390,7 +409,11 @@ pub fn read_fd(cpu: &mut Cpu, fd: u32, count: u32) -> FdRead {
                     _ => None,
                 };
                 match next {
-                    Some(b'\n') => out.push(b'\n'),
+                    // The LF is read next time, unless it is all there is.
+                    Some(b'\n') if out.is_empty() => out.push(b'\n'),
+                    Some(b'\n') => {
+                        let _ = dos_seek(cpu, handle, -1, 1);
+                    }
                     Some(_) => {
                         out.push(b'\r');
                         let _ = dos_seek(cpu, handle, -1, 1);
@@ -784,17 +807,16 @@ pub fn fstat(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             let mode = S_IFREG | S_IREAD | S_IWRITE;
             let mode = mode | (mode & 0x1C0) >> 3 | (mode & 0x1C0) >> 6;
             let time = super::time::dos_to_time_t(info.date, info.time);
-            out[0..4].copy_from_slice(&(info.drive as u32).to_le_bytes());
             out[6..8].copy_from_slice(&(mode as u16).to_le_bytes());
             out[8..10].copy_from_slice(&1u16.to_le_bytes());
-            out[16..20].copy_from_slice(&(info.drive as u32).to_le_bytes());
             out[20..24].copy_from_slice(&info.size.to_le_bytes());
             for field in [24, 28, 32] {
                 out[field..field + 4].copy_from_slice(&time.to_le_bytes());
             }
         }
         _ => {
-            let mode = S_IFCHR | S_IREAD | S_IWRITE;
+            // A device's: its descriptor, as st_dev and st_rdev.
+            let mode = S_IFCHR;
             out[0..4].copy_from_slice(&args[0].to_le_bytes());
             out[6..8].copy_from_slice(&(mode as u16).to_le_bytes());
             out[8..10].copy_from_slice(&1u16.to_le_bytes());
@@ -1134,10 +1156,22 @@ fn base32(mut n: u32) -> String {
     String::from_utf8(out).unwrap()
 }
 
-/// tmpnam(buffer): "\s" and a number, a file in the root that isn't
-/// there, in `buffer` or the thread's own.
+/// tmpnam(buffer): a file in the root that isn't there, in `buffer` or
+/// the thread's own: "\s", the process id and a dot, as MSVCRT names
+/// it, with a number after the dot from the second call on.
 pub fn tmpnam(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let name = temp_name(cpu, "\\", "s");
+    let base = format!("\\s{}.",base32(super::super::process(cpu).id));
+    let name = loop {
+        let n = state(cpu, S_TMPNAM_COUNT);
+        set_state(cpu, S_TMPNAM_COUNT, n.wrapping_add(1));
+        let name = match n {
+            0 => base.clone(),
+            n => format!("{}{}", base, base32(n)),
+        };
+        if !cpu.bus.disk.exists(name.trim_end_matches('.')) {
+            break name;
+        }
+    };
     let at = match args[0] {
         0 => thread_field(cpu, T_TMPNAM)?,
         at => at,

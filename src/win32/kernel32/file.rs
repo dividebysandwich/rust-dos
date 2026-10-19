@@ -16,19 +16,19 @@ use crate::disk::CharDevice;
 use crate::win32::object::{self, Kind};
 use crate::win32::thread::{self, Wait};
 
-pub(super) const GENERIC_READ: u32 = 0x8000_0000;
-pub(super) const GENERIC_WRITE: u32 = 0x4000_0000;
+pub(crate) const GENERIC_READ: u32 = 0x8000_0000;
+pub(crate) const GENERIC_WRITE: u32 = 0x4000_0000;
 
 /// CreateFileA's dispositions.
-const CREATE_NEW: u32 = 1;
-const CREATE_ALWAYS: u32 = 2;
-const OPEN_EXISTING: u32 = 3;
-const OPEN_ALWAYS: u32 = 4;
-const TRUNCATE_EXISTING: u32 = 5;
+pub(crate) const CREATE_NEW: u32 = 1;
+pub(crate) const CREATE_ALWAYS: u32 = 2;
+pub(crate) const OPEN_EXISTING: u32 = 3;
+pub(crate) const OPEN_ALWAYS: u32 = 4;
+pub(crate) const TRUNCATE_EXISTING: u32 = 5;
 
 /// FILE_SHARE_READ and FILE_SHARE_WRITE, and DOS's sharing modes.
-const FILE_SHARE_READ: u32 = 1;
-const FILE_SHARE_WRITE: u32 = 2;
+pub(crate) const FILE_SHARE_READ: u32 = 1;
+pub(crate) const FILE_SHARE_WRITE: u32 = 2;
 
 /// GetFileType's answers.
 const FILE_TYPE_UNKNOWN: u32 = 0;
@@ -61,7 +61,7 @@ const KEY_POLL: u64 = 10_000;
 
 /// What a handle of a file or device is.
 #[derive(Clone, Copy)]
-pub(super) struct Open {
+pub(crate) struct Open {
     /// Its entry in DOS's file table.
     pub sft: u16,
     /// GENERIC_READ and GENERIC_WRITE, as it was opened.
@@ -72,7 +72,7 @@ pub(super) struct Open {
 
 /// The open file or device `handle` is a handle of: a file CreateFileA
 /// opened or one of DOS's handles.
-pub(super) fn open_of(cpu: &mut Cpu, handle: u32) -> Option<Open> {
+pub(crate) fn open_of(cpu: &mut Cpu, handle: u32) -> Option<Open> {
     match object::kind_of(cpu, handle)? {
         Kind::File { sft, access, .. } => Some(Open {
             sft,
@@ -117,7 +117,7 @@ pub(super) fn dos_error(cpu: &mut Cpu, code: u8) -> u32 {
 /// Open the file `name` through DOS as CreateFileA does, with `access`,
 /// `share` and `disposition`, as its file table's entry and whether it was
 /// there already; or the error.
-pub(super) fn open_file(
+pub(crate) fn open_file(
     cpu: &mut Cpu,
     name: &str,
     access: u32,
@@ -187,7 +187,7 @@ pub(super) fn open_file(
 }
 
 /// A handle of a new file object for the open file `sft`.
-fn new_file(cpu: &mut Cpu, sft: u16, access: u32, share: u32) -> u32 {
+pub(crate) fn new_file(cpu: &mut Cpu, sft: u16, access: u32, share: u32) -> u32 {
     let kind = Kind::File {
         sft,
         access: access & (GENERIC_READ | GENERIC_WRITE),

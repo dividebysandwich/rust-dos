@@ -5,6 +5,7 @@
 //! heap functions and the locale.
 
 use super::*;
+use crate::win32::object;
 
 const EOF: u32 = u32::MAX;
 
@@ -1124,10 +1125,147 @@ pub fn system(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(EOF)
 }
 
-/// The _spawn and _exec functions: no new processes from here yet.
-pub fn spawn(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    set_errno(cpu, ENOENT);
-    Some(EOF)
+/// _spawn's modes.
+const P_WAIT: u32 = 0;
+const P_NOWAIT: u32 = 1;
+const P_OVERLAY: u32 = 2;
+
+/// WaitForSingleObject's wait without end.
+const INFINITE: u32 = 0xFFFF_FFFF;
+
+/// The strings of the NULL-ended list of pointers at `at`.
+fn string_list(cpu: &mut Cpu, mut at: u32) -> Option<Vec<String>> {
+    let mut list = Vec::new();
+    loop {
+        let s = read32(cpu, at)?;
+        if s == 0 {
+            return Some(list);
+        }
+        list.push(crate::dosstr::from_bytes(&cstr(cpu, s)?));
+        at = at.wrapping_add(4);
+    }
+}
+
+/// The C runtime's block of the descriptors a child inherits, which
+/// goes in lpReserved2: their count, their flags, their handles. Those
+/// opened with O_NOINHERIT are left out.
+fn inherit_block(cpu: &mut Cpu) -> Vec<u8> {
+    let fds: Vec<(u8, u32)> = (0..MAX_FDS)
+        .map(|fd| match io::fd_info(cpu, fd) {
+            Some((handle, flags)) if flags & io::FNOINHERIT == 0 => (flags as u8, handle),
+            _ => (0, u32::MAX),
+        })
+        .collect();
+    let count = fds.iter().rposition(|&(flags, _)| flags != 0).map_or(0, |i| i + 1);
+    let mut block = (count as u32).to_le_bytes().to_vec();
+    block.extend(fds[..count].iter().map(|&(flags, _)| flags));
+    block.extend(fds[..count].iter().flat_map(|&(_, handle)| handle.to_le_bytes()));
+    block
+}
+
+/// Start the program `path` with the arguments `argv`, joined by spaces
+/// as MSVCRT joins them, and the environment `envp` (NULL for the
+/// running one's), as `mode` says: _P_WAIT waits for it and gives its
+/// exit code, _P_NOWAIT gives its process handle, _P_OVERLAY ends this
+/// process; the others start it and give 0. -1, errno set, when it
+/// can't start.
+fn spawn(cpu: &mut Cpu, mode: u32, path: u32, argv: u32, envp: u32) -> Option<u32> {
+    let path = crate::dosstr::from_bytes(&cstr(cpu, path)?);
+    let line = string_list(cpu, argv)?.join(" ");
+    let environment = match envp {
+        0 => None,
+        at => Some(string_list(cpu, at)?),
+    };
+    if mode > 4 {
+        set_errno(cpu, EINVAL);
+        return Some(EOF);
+    }
+    let size = super::super::kernel32::STARTUPINFO_SIZE;
+    let mut startup = vec![0u8; size as usize];
+    startup[..4].copy_from_slice(&size.to_le_bytes());
+    startup.extend(inherit_block(cpu));
+    let started = super::super::kernel32::spawn(
+        cpu,
+        Some(&path),
+        Some(&line),
+        environment,
+        true,
+        0,
+        startup,
+    );
+    let [process, thread, _, _] = match started {
+        Ok(info) => info,
+        Err(code) => {
+            set_doserrno(cpu, code);
+            set_errno(cpu, if code == 193 { ENOEXEC } else { ENOENT });
+            return Some(EOF);
+        }
+    };
+    object::close(cpu, thread);
+    match mode {
+        P_WAIT => {
+            // KERNEL32's wait, as the program would call it, which lets
+            // the child run; `spawned` goes on when it is done.
+            let wait = kernel32_stub("WaitForSingleObject")?;
+            let resume = call::here(cpu);
+            if call_program(cpu, wait, &[process, INFINITE], C_SPAWNED, resume, &[process]) {
+                return None;
+            }
+            object::close(cpu, process);
+            set_errno(cpu, ENOMEM);
+            Some(EOF)
+        }
+        P_NOWAIT => Some(process),
+        P_OVERLAY => {
+            object::close(cpu, process);
+            let _ = super::stdio::flush_all(cpu);
+            exit_now(cpu, &[0])
+        }
+        _ => {
+            object::close(cpu, process);
+            Some(0)
+        }
+    }
+}
+
+/// The child _P_WAIT waited for ended: its exit code.
+pub fn spawned(cpu: &mut Cpu, _: u32, call: Call) {
+    let &[process] = call.data.as_slice() else {
+        return;
+    };
+    let code = match object::kind_of(cpu, process) {
+        Some(object::Kind::Process { exit_code, .. }) => exit_code.unwrap_or(0),
+        _ => 0,
+    };
+    object::close(cpu, process);
+    call::finish(cpu, call.resume, code);
+}
+
+/// _spawnv(mode, path, argv) and _spawnvp, which looks in PATH too.
+pub fn spawnv(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    spawn(cpu, args[0], args[1], args[2], 0)
+}
+
+/// _spawnve(mode, path, argv, envp).
+pub fn spawnve(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    spawn(cpu, args[0], args[1], args[2], args[3])
+}
+
+/// _spawnl(mode, path, arg0, ..., NULL) and _spawnlp.
+pub fn spawnl(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let argv = varargs(cpu, 2);
+    spawn(cpu, args[0], args[1], argv, 0)
+}
+
+/// _execv(path, argv) and _execvp: the program in this one's place.
+pub fn execv(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    spawn(cpu, P_OVERLAY, args[0], args[1], 0)
+}
+
+/// _execl(path, arg0, ..., NULL) and _execlp.
+pub fn execl(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let argv = varargs(cpu, 1);
+    spawn(cpu, P_OVERLAY, args[0], argv, 0)
 }
 
 // The heap.
@@ -1306,9 +1444,10 @@ pub fn zero(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(0)
 }
 
-/// _setmaxstdio(count): the streams there can be, at most 512.
+/// _setmaxstdio(count): the streams there can be, at most 2048 as
+/// MSVCRT 6 allows; past the 512 there are, fopen fails with EMFILE.
 pub fn setmaxstdio(_: &mut Cpu, args: &[u32]) -> Option<u32> {
-    Some(if (20..=MAX_STREAMS).contains(&args[0]) {
+    Some(if (20..=2048).contains(&args[0]) {
         args[0]
     } else {
         EOF

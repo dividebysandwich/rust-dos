@@ -170,6 +170,8 @@ const S_TEMP_COUNT: u32 = 0x24;
 const S_MBCP: u32 = 0x28;
 /// When the process started, by GetTickCount, for `clock`.
 const S_START: u32 = 0x2C;
+/// tmpnam's calls so far.
+const S_TMPNAM_COUNT: u32 = 0x30;
 const S_SIGNALS: u32 = 0x80;
 
 /// A thread's block: its errno and _doserrno, rand's seed, strtok's
@@ -193,6 +195,7 @@ const THREAD_BLOCK: u32 = 0x400;
 
 /// errno's values.
 const ENOENT: u32 = 2;
+const ENOEXEC: u32 = 8;
 const EBADF: u32 = 9;
 const EAGAIN: u32 = 11;
 const ENOMEM: u32 = 12;
@@ -240,6 +243,13 @@ fn kernel32_fn(name: &str) -> Option<Handler> {
         .iter()
         .find(|api| api.name == name)
         .map(|api| api.handler)
+}
+
+/// The address of the stub of the KERNEL32 function `name`, for calling
+/// it as the program does.
+fn kernel32_stub(name: &str) -> Option<u32> {
+    let api = super::kernel32::DLL.apis.iter().position(|api| api.name == name)?;
+    Some(super::stubs::stub_address(0, api))
 }
 
 /// Call the KERNEL32 function `name` with `args`. None if KERNEL32 doesn't
@@ -492,6 +502,7 @@ static CONTS: &[call::Then] = &[
     startup::finally_returned,
     startup::rtl_unwound,
     string::lfind_returned,
+    startup::spawned,
 ];
 
 const C_INITTERM: u32 = 0;
@@ -503,6 +514,7 @@ const C_FILTER: u32 = 5;
 const C_FINALLY: u32 = 6;
 const C_UNWOUND: u32 = 7;
 const C_LFIND: u32 = 8;
+const C_SPAWNED: u32 = 9;
 
 /// Call the program's function at `target` with `args`; when it returns,
 /// `CONTS[cont]` runs with the call, whose data is `data` after the
@@ -650,8 +662,46 @@ fn init(bus: &mut Bus, process: &mut super::Process) -> Option<()> {
             w.u32(file + stdio::F_FILE, u32::MAX)?;
         }
     }
+    for fd in 0..MAX_FDS {
+        w.u32(var_at(V_FDS) + FD_SIZE * fd, u32::MAX)?;
+        w.u32(var_at(V_FDS) + FD_SIZE * fd + 4, 0)?;
+    }
+    // The descriptors the parent's C runtime passed in lpReserved2: their
+    // count, a byte of flags each, then a handle each. The standard ones
+    // it didn't pass are the standard handles.
+    let size = super::kernel32::STARTUPINFO_SIZE as usize;
+    let block = w.process.startup.get(size..).unwrap_or(&[]).to_vec();
+    let word = |at: usize| {
+        block
+            .get(at..at + 4)
+            .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+    };
+    let count = word(0).unwrap_or(0) as usize;
+    let mut passed = [false; 3];
+    for fd in 0..count.min(MAX_FDS as usize) {
+        let (Some(&flags), Some(handle)) = (block.get(4 + fd), word(4 + count + 4 * fd)) else {
+            break;
+        };
+        let flags = flags as u32;
+        if flags & io::FOPEN == 0 || w.process.handles.of(handle).is_none() {
+            continue;
+        }
+        let mut flags = flags & !(io::FDEV | io::FNOINHERIT);
+        if io::is_device(w.bus, w.process, handle) {
+            flags |= io::FDEV;
+        }
+        let entry = var_at(V_FDS) + FD_SIZE * fd as u32;
+        w.u32(entry, handle)?;
+        w.u32(entry + 4, flags)?;
+        if let Some(p) = passed.get_mut(fd) {
+            *p = true;
+        }
+    }
     let std = w.process.std;
     for (fd, handle) in std.into_iter().enumerate() {
+        if passed[fd] {
+            continue;
+        }
         let flags = io::FOPEN
             | io::FTEXT
             | if io::is_device(w.bus, w.process, handle) {
@@ -662,9 +712,6 @@ fn init(bus: &mut Bus, process: &mut super::Process) -> Option<()> {
         let entry = var_at(V_FDS) + FD_SIZE * fd as u32;
         w.u32(entry, handle)?;
         w.u32(entry + 4, flags)?;
-    }
-    for fd in std.len() as u32..MAX_FDS {
-        w.u32(var_at(V_FDS) + FD_SIZE * fd, u32::MAX)?;
     }
 
     // The character classes, and the case map of the multibyte code page.

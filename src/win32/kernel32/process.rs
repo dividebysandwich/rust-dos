@@ -18,11 +18,12 @@ const CREATE_SUSPENDED: u32 = 4;
 const STARTF_USESTDHANDLES: u32 = 0x100;
 
 /// STARTUPINFOA's size and fields.
-const STARTUPINFO_SIZE: u32 = 68;
+pub(crate) const STARTUPINFO_SIZE: u32 = 68;
 const SI_RESERVED: u32 = 4;
 const SI_DESKTOP: u32 = 8;
 const SI_TITLE: u32 = 12;
 const SI_FLAGS: u32 = 44;
+const SI_CB_RESERVED2: u32 = 50;
 const SI_RESERVED2: u32 = 52;
 const SI_STD_INPUT: u32 = 56;
 
@@ -104,6 +105,17 @@ pub(super) fn create_process_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if startup_at != 0 {
         cpu.bus.guest_read_bytes(startup_at, &mut startup);
     }
+    // The C runtime's block (lpReserved2) goes to the child after it.
+    let field = |i: u32| u32::from_le_bytes(startup[i as usize..][..4].try_into().unwrap());
+    let size = u16::from_le_bytes([startup[50], startup[51]]) as usize;
+    if field(SI_RESERVED2) != 0 && size != 0 {
+        let mut block = vec![0u8; size];
+        cpu.bus.guest_read_bytes(field(SI_RESERVED2), &mut block);
+        startup.extend_from_slice(&block);
+    }
+    if cpu.bus.guest_faulted() {
+        return None;
+    }
     let environment = match env_at {
         0 => None,
         at => Some(environment_at(cpu, at)?),
@@ -111,28 +123,56 @@ pub(super) fn create_process_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if !cpu.bus.guest_probe(info_at, 16, true) {
         return None;
     }
-    let name = match (&app, &line) {
-        (Some(app), _) => app.clone(),
-        (None, Some(line)) => first_word(line).to_string(),
-        (None, None) => {
-            set_error(cpu, ERROR_INVALID_PARAMETER);
-            return Some(FALSE);
+    let (app, line) = (app.as_deref(), line.as_deref());
+    match spawn(cpu, app, line, environment, inherit != 0, flags, startup) {
+        Ok(info) => {
+            for (i, value) in info.into_iter().enumerate() {
+                cpu.bus.guest_write_32(info_at + 4 * i as u32, value);
+            }
+            set_error(cpu, 0);
+            Some(TRUE)
         }
+        Err(code) => {
+            set_error(cpu, code);
+            Some(FALSE)
+        }
+    }
+}
+
+/// Start the program `app`, or the one the command line `line` names
+/// first, as CreateProcessA does, with `environment` or the running
+/// process's, all its handles if `inherit`, and `startup`: a STARTUPINFOA
+/// and after it the C runtime's block that lpReserved2 points to, if
+/// there is one. The handles of the process and its main thread, and
+/// their ids; or the error.
+pub(crate) fn spawn(
+    cpu: &mut Cpu,
+    app: Option<&str>,
+    line: Option<&str>,
+    environment: Option<Vec<String>>,
+    inherit: bool,
+    flags: u32,
+    mut startup: Vec<u8>,
+) -> Result<[u32; 4], u32> {
+    let name = match (app, line) {
+        (Some(app), _) => app,
+        (None, Some(line)) => first_word(line),
+        (None, None) => return Err(ERROR_INVALID_PARAMETER),
     };
-    let Some(path) = find_program(cpu, &name) else {
-        set_error(cpu, ERROR_FILE_NOT_FOUND);
-        return Some(FALSE);
-    };
-    let line = line.unwrap_or_else(|| path.clone());
+    let path = find_program(cpu, name).ok_or(ERROR_FILE_NOT_FOUND)?;
+    let line = line.map_or_else(|| path.clone(), str::to_string);
     let environment = environment.unwrap_or_else(|| process(cpu).environment.clone());
     let fields = startup.clone();
     let field = |i: u32| u32::from_le_bytes(fields[i as usize..][..4].try_into().unwrap());
-    // The child's own copy: no strings or data of the parent's.
+    // The child's own copy: no strings or data of the parent's, and the
+    // C runtime's block where GetStartupInfoA puts it.
     for i in [SI_RESERVED, SI_DESKTOP, SI_TITLE, SI_RESERVED2] {
         startup[i as usize..i as usize + 4].fill(0);
     }
     startup[..4].copy_from_slice(&STARTUPINFO_SIZE.to_le_bytes());
-    let inherited: Vec<(u32, u32)> = if inherit != 0 {
+    let block = (startup.len() - STARTUPINFO_SIZE as usize) as u16;
+    startup[SI_CB_RESERVED2 as usize..][..2].copy_from_slice(&block.to_le_bytes());
+    let inherited: Vec<(u32, u32)> = if inherit {
         process(cpu).handles.iter().collect()
     } else {
         Vec::new()
@@ -158,18 +198,11 @@ pub(super) fn create_process_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
     let std = std.filter(|ids| ids.iter().all(|&id| object::objects(cpu).get(id).is_some()));
     let suspended = flags & CREATE_SUSPENDED != 0;
-    let created = match create_process(cpu, &path, &line, environment, inherited, std, suspended)
-    {
-        Ok(created) => created,
-        Err(message) => {
+    let created = create_process(cpu, &path, &line, environment, inherited, std, startup, suspended)
+        .map_err(|message| {
             cpu.bus.log_string(&format!("[W32] {}", message));
-            set_error(cpu, ERROR_BAD_EXE_FORMAT);
-            return Some(FALSE);
-        }
-    };
-    if let Some(child) = cpu.bus.win32.processes.last_mut() {
-        child.startup = startup;
-    }
+            ERROR_BAD_EXE_FORMAT
+        })?;
     let (process_object, pid) = created.process;
     let (thread_object, tid) = created.thread;
     let objects = object::objects(cpu);
@@ -177,11 +210,7 @@ pub(super) fn create_process_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     objects.hold(thread_object);
     let process_handle = object::new_handle(cpu, process_object);
     let thread_handle = object::new_handle(cpu, thread_object);
-    for (i, value) in [process_handle, thread_handle, pid, tid].into_iter().enumerate() {
-        cpu.bus.guest_write_32(info_at + 4 * i as u32, value);
-    }
-    set_error(cpu, 0);
-    Some(TRUE)
+    Ok([process_handle, thread_handle, pid, tid])
 }
 
 /// OpenProcess(access, inherit, id): a handle of the process with the id
@@ -204,15 +233,32 @@ pub(super) fn open_process(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// GetStartupInfoA(info): what the parent gave CreateProcessA, or for the
-/// process DOS started, nothing but the standard handles.
+/// process DOS started, nothing but the standard handles. The C
+/// runtime's block the parent passed is copied to the process heap the
+/// first time.
 pub(super) fn get_startup_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let at = args[0];
+    let size = STARTUPINFO_SIZE as usize;
     let process = process(cpu);
+    if process.startup.len() > size && process.startup[SI_RESERVED2 as usize..][..4] == [0; 4] {
+        let block = process.startup[size..].to_vec();
+        let placed = crate::win32::with_process(cpu, |p, bus| {
+            let to = p.heap.alloc(&mut p.memory, bus, block.len() as u32)?;
+            p.memory.write(bus, to, &block)?;
+            Some(to)
+        });
+        if let Some(to) = placed {
+            let field = &mut crate::win32::process(cpu).startup[SI_RESERVED2 as usize..][..4];
+            field.copy_from_slice(&to.to_le_bytes());
+        }
+    }
+    let process = crate::win32::process(cpu);
     let mut info = process.startup.clone();
     if info.is_empty() {
-        info = vec![0; STARTUPINFO_SIZE as usize];
+        info = vec![0; size];
         info[..4].copy_from_slice(&STARTUPINFO_SIZE.to_le_bytes());
     }
+    info.truncate(size);
     if u32::from_le_bytes(info[SI_FLAGS as usize..][..4].try_into().unwrap()) & STARTF_USESTDHANDLES
         == 0
     {
