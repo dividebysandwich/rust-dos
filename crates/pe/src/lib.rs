@@ -463,14 +463,22 @@ impl Image {
         Ok(rva)
     }
 
-    fn dir(&self, index: usize) -> Option<DataDir> {
+    /// Data directory `index`, if there is one. It must start in the image,
+    /// so that the fields read from it can't run past 4 GB.
+    fn dir(&self, index: usize) -> Result<Option<DataDir>> {
         let dir = self.headers.dirs[index];
-        (dir.rva != 0 && dir.size != 0).then_some(dir)
+        if dir.rva == 0 || dir.size == 0 {
+            return Ok(None);
+        }
+        if dir.rva >= self.headers.size_of_image {
+            return Err(Error::Truncated("data directory"));
+        }
+        Ok(Some(dir))
     }
 
     /// The DLLs and functions the image imports.
     pub fn imports(&self) -> Result<Vec<ImportedDll>> {
-        let Some(dir) = self.dir(DIR_IMPORT) else {
+        let Some(dir) = self.dir(DIR_IMPORT)? else {
             return Ok(Vec::new());
         };
         let mut dlls = Vec::new();
@@ -511,7 +519,7 @@ impl Image {
 
     /// What the image exports, if it has an export directory.
     pub fn exports(&self) -> Result<Option<Exports>> {
-        let Some(dir) = self.dir(DIR_EXPORT) else {
+        let Some(dir) = self.dir(DIR_EXPORT)? else {
             return Ok(None);
         };
         let field = |offset| self.u32_at(dir.rva + offset);
@@ -544,7 +552,7 @@ impl Image {
                 ExportTarget::Rva(rva)
             };
             exports.push(Export {
-                ordinal: (base + i as u32) as u16,
+                ordinal: base.wrapping_add(i as u32) as u16,
                 name,
                 target,
             });
@@ -563,13 +571,13 @@ impl Image {
 
     /// The base relocations, padding left out.
     pub fn relocations(&self) -> Result<Vec<Relocation>> {
-        let Some(dir) = self.dir(DIR_BASERELOC) else {
+        let Some(dir) = self.dir(DIR_BASERELOC)? else {
             return Ok(Vec::new());
         };
         let mut relocations = Vec::new();
         let mut at = dir.rva;
         let end = dir.rva.saturating_add(dir.size);
-        while at + 8 <= end {
+        while at.saturating_add(8) <= end {
             let page = self.u32_at(at)?;
             let size = self.u32_at(at + 4)?;
             if size < 8 {
@@ -580,12 +588,15 @@ impl Image {
                 let kind = (entry >> 12) as u8;
                 if kind != REL_ABSOLUTE {
                     relocations.push(Relocation {
-                        rva: page + (entry & 0xFFF) as u32,
+                        rva: page.wrapping_add((entry & 0xFFF) as u32),
                         kind,
                     });
                 }
             }
-            at += size;
+            let Some(next) = at.checked_add(size) else {
+                break;
+            };
+            at = next;
         }
         Ok(relocations)
     }
@@ -625,7 +636,7 @@ impl Image {
 
     /// The TLS directory, if there is one.
     pub fn tls(&self) -> Result<Option<Tls>> {
-        let Some(dir) = self.dir(DIR_TLS) else {
+        let Some(dir) = self.dir(DIR_TLS)? else {
             return Ok(None);
         };
         let field = |offset| self.u32_at(dir.rva + offset);
@@ -677,7 +688,7 @@ impl Image {
 
     /// Every resource, by type, name and language.
     pub fn resources(&self) -> Result<Vec<Resource>> {
-        let Some(dir) = self.dir(DIR_RESOURCE) else {
+        let Some(dir) = self.dir(DIR_RESOURCE)? else {
             return Ok(Vec::new());
         };
         let subdir = |node: Node, what: &str| match node {
