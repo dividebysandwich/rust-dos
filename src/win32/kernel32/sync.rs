@@ -2,13 +2,11 @@
 //! Sleep, and critical sections. The objects are kernel objects
 //! (object.rs); the waits are the threads' (thread.rs).
 
-use super::{
-    ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, FALSE, TRUE, set_error, string_at,
-};
+use super::{ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, FALSE, TRUE, set_error, string_at};
 use crate::cpu::Cpu;
 use crate::win32::object::{self, Kind};
-use crate::win32::thread::{self, WAIT_TIMEOUT, Wait};
 use crate::win32::process;
+use crate::win32::thread::{self, WAIT_TIMEOUT, Wait};
 
 const INFINITE: u32 = 0xFFFF_FFFF;
 const WAIT_FAILED: u32 = 0xFFFF_FFFF;
@@ -37,9 +35,9 @@ fn create(cpu: &mut Cpu, kind: Kind, name: Option<String>) -> u32 {
     if let Some(name) = &name
         && let Some(id) = objects.named(name)
     {
-        let same = objects.get(id).is_some_and(|o| {
-            std::mem::discriminant(&o.kind) == std::mem::discriminant(&kind)
-        });
+        let same = objects
+            .get(id)
+            .is_some_and(|o| std::mem::discriminant(&o.kind) == std::mem::discriminant(&kind));
         if !same {
             set_error(cpu, ERROR_INVALID_HANDLE);
             return 0;
@@ -328,11 +326,14 @@ pub(super) fn enter_critical_section(cpu: &mut Cpu, args: &[u32]) -> Option<u32>
     if cpu.bus.guest_faulted() {
         return None;
     }
-    cpu.bus.guest_write_32(at + LOCK_COUNT, lock.wrapping_add(1));
+    cpu.bus
+        .guest_write_32(at + LOCK_COUNT, lock.wrapping_add(1));
     if owner == 0 || owner == tid || count == 0 {
         cpu.bus.guest_write_32(at + OWNING_THREAD, tid);
-        cpu.bus
-            .guest_write_32(at + RECURSION_COUNT, if owner == tid { count + 1 } else { 1 });
+        cpu.bus.guest_write_32(
+            at + RECURSION_COUNT,
+            if owner == tid { count + 1 } else { 1 },
+        );
         return Some(0);
     }
     thread::block(
@@ -375,7 +376,8 @@ pub(super) fn leave_critical_section(cpu: &mut Cpu, args: &[u32]) -> Option<u32>
     if owner != tid || count == 0 {
         return Some(0);
     }
-    cpu.bus.guest_write_32(at + LOCK_COUNT, lock.wrapping_sub(1));
+    cpu.bus
+        .guest_write_32(at + LOCK_COUNT, lock.wrapping_sub(1));
     if count > 1 {
         cpu.bus.guest_write_32(at + RECURSION_COUNT, count - 1);
         return Some(0);
@@ -390,7 +392,8 @@ pub(super) fn leave_critical_section(cpu: &mut Cpu, args: &[u32]) -> Option<u32>
             thread::end_wait(win32, (p, t), 0);
             win32.processes[p].threads[t].id
         });
-    cpu.bus.guest_write_32(at + OWNING_THREAD, next.unwrap_or(0));
+    cpu.bus
+        .guest_write_32(at + OWNING_THREAD, next.unwrap_or(0));
     cpu.bus
         .guest_write_32(at + RECURSION_COUNT, next.is_some() as u32);
     Some(0)

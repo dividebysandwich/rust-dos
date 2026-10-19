@@ -159,10 +159,10 @@ fn build(
     // The program, where it wants to be, or where there is room when its
     // relocations let it move.
     let (preferred, size) = (image.headers.image_base, image.headers.size_of_image);
-    let base = match memory.reserve(Some(preferred), size, PRIVATE, SHARED) {
+    let base = match memory.reserve_image(Some(preferred), size, PRIVATE, SHARED) {
         Some(base) => base,
         None if image.headers.relocatable() => {
-            let base = memory.reserve(None, size, PRIVATE, SHARED)?;
+            let base = memory.reserve_image(None, size, PRIVATE, SHARED)?;
             if let Err(e) = image.relocate(base) {
                 return Some(Err(format!("{} can't be relocated: {}.", name, e)));
             }
@@ -539,7 +539,7 @@ pub(super) fn map_builtin(
     }
     let built = stubs::image(index);
     let size = built.headers.size_of_image;
-    memory.reserve(Some(dll.base), size, SHARED, SYSTEM)?;
+    memory.reserve_image(Some(dll.base), size, SHARED, SYSTEM)?;
     memory.commit(bus, dll.base, size.next_multiple_of(PAGE), USER)?;
     memory.write(bus, dll.base, &built.data)?;
     // Read only but for its variables.
@@ -661,8 +661,8 @@ pub(super) fn load_module(
     if datafile {
         let base = l
             .memory
-            .reserve(Some(preferred), size, PRIVATE, SHARED)
-            .or_else(|| l.memory.reserve(None, size, PRIVATE, SHARED))
+            .reserve_image(Some(preferred), size, PRIVATE, SHARED)
+            .or_else(|| l.memory.reserve_image(None, size, PRIVATE, SHARED))
             .ok_or_else(|| out_of_memory(importer))?;
         map_image(l.bus, l.memory, &image, base, true).ok_or_else(|| out_of_memory(importer))?;
         l.process.modules.push(Module {
@@ -680,12 +680,12 @@ pub(super) fn load_module(
 
     // Where it wants to be, in the private or the shared arena, or
     // relocated where there is room.
-    let base = match l.memory.reserve(Some(preferred), size, PRIVATE, SYSTEM) {
+    let base = match l.memory.reserve_image(Some(preferred), size, PRIVATE, SYSTEM) {
         Some(base) => base,
         None if image.headers.relocatable() => {
             let base = l
                 .memory
-                .reserve(None, size, PRIVATE, SHARED)
+                .reserve_image(None, size, PRIVATE, SHARED)
                 .ok_or_else(|| out_of_memory(importer))?;
             if let Err(e) = image.relocate(base) {
                 l.memory.unreserve(base);

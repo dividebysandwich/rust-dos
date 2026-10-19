@@ -21,10 +21,15 @@ pub const CURRENT_THREAD: u32 = 0xFFFF_FFFE;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Kind {
     /// A DOS file handle: the console's, or a file opened through DOS.
-    Dos { handle: u16 },
+    Dos {
+        handle: u16,
+    },
     /// Signaled until a wait takes it (auto reset), or until ResetEvent
     /// (manual).
-    Event { manual: bool, signaled: bool },
+    Event {
+        manual: bool,
+        signaled: bool,
+    },
     /// Owned by the thread `owner` (0 when free) `count` times; abandoned
     /// when that thread ended without releasing it.
     Mutex {
@@ -32,14 +37,25 @@ pub enum Kind {
         count: u32,
         abandoned: bool,
     },
-    Semaphore { count: u32, max: u32 },
+    Semaphore {
+        count: u32,
+        max: u32,
+    },
     /// The thread with the id `id`, and its exit code once it ended,
     /// which signals it.
-    Thread { id: u32, exit_code: Option<u32> },
+    Thread {
+        id: u32,
+        exit_code: Option<u32>,
+    },
     /// The process with the id `id`, the same.
-    Process { id: u32, exit_code: Option<u32> },
+    Process {
+        id: u32,
+        exit_code: Option<u32>,
+    },
     /// A file mapping: its memory, `Win32::sections[section]`.
-    Mapping { section: u32 },
+    Mapping {
+        section: u32,
+    },
 
     /// A file or device CreateFileA opened through DOS: its entry in DOS's
     /// file table, which it holds until the object goes, and the access it
@@ -53,7 +69,9 @@ pub enum Kind {
         locks: Vec<(u32, u32)>,
     },
     /// A search of FindFirstFileA: the entries it has still to give.
-    Find { entries: Vec<FindEntry> },
+    Find {
+        entries: Vec<FindEntry>,
+    },
 }
 
 /// A file or directory a search found, as WIN32_FIND_DATA has it.
@@ -200,7 +218,10 @@ impl Handles {
         if !handle.is_multiple_of(4) || handle == 0 {
             return None;
         }
-        self.handles.get((handle / 4 - 1) as usize).copied().flatten()
+        self.handles
+            .get((handle / 4 - 1) as usize)
+            .copied()
+            .flatten()
     }
 
     /// Take the handle away: its object, whose hold the caller lets go

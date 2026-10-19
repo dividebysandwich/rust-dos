@@ -152,6 +152,11 @@ fn load_env(cpu: &mut Cpu, addr: usize, size: usize) {
     let sw = cpu.lin_read_16(addr + step);
     let tag_word = cpu.lin_read_16(addr + 2 * step);
     set_status_word(cpu, sw);
+    set_tag_word(cpu, tag_word);
+}
+
+/// Load the tag word `tag_word` gives: empty or not, per register.
+fn set_tag_word(cpu: &mut Cpu, tag_word: u16) {
     for i in 0..8 {
         let tag = (tag_word >> (i * 2)) & 0x03;
         cpu.fpu_tags[i] = if tag == 0b11 { FPU_TAG_EMPTY } else { FPU_TAG_VALID };
@@ -206,11 +211,7 @@ pub fn load_image(cpu: &mut Cpu, image: &[u8; 108]) {
     let word = |i: usize| u16::from_le_bytes([image[4 * i], image[4 * i + 1]]);
     cpu.fpu_control = word(0);
     set_status_word(cpu, word(1));
-    let tag_word = word(2);
-    for i in 0..8 {
-        let tag = (tag_word >> (i * 2)) & 0x03;
-        cpu.fpu_tags[i] = if tag == 0b11 { FPU_TAG_EMPTY } else { FPU_TAG_VALID };
-    }
+    set_tag_word(cpu, word(2));
     for i in 0..8 {
         let mut value = F80::new();
         value.set_bytes(image[28 + 10 * i..38 + 10 * i].try_into().unwrap());

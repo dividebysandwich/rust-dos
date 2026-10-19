@@ -34,6 +34,15 @@ impl Args {
 /// 2.25 with one decimal is 2.3.
 const MAX_DIGITS: usize = 17;
 
+/// The most digits a number's precision asks for that MSVCRT gives: its
+/// buffer's size, MAXPRECISION.
+const MAX_PRECISION: usize = 512;
+
+/// The widest a field gets here. MSVCRT has no limit and writes a width
+/// of 2^31 - 1 out space by space; this stops at 16 M characters, so a
+/// width the program got wrong can't take the host's memory.
+const MAX_WIDTH: usize = 0x100_0000;
+
 /// Round the digits `digits` (of a number whose point is after `decpt` of
 /// them) to their first `keep`, half up: the digits and point after. A
 /// carry past the first digit adds a digit in front.
@@ -155,7 +164,7 @@ fn integer(out: &mut Vec<u16>, spec: &Spec, value: u64, negative: bool, conv: u8
     if spec.precision == Some(0) && value == 0 {
         digits.clear();
     }
-    let precision = spec.precision.unwrap_or(0);
+    let precision = spec.precision.unwrap_or(0).min(MAX_PRECISION);
     if digits.len() < precision {
         digits = "0".repeat(precision - digits.len()) + &digits;
     }
@@ -271,7 +280,7 @@ pub fn g_text(v: f64, precision: usize, alt: bool, upper: bool) -> String {
 
 /// Format a double for %e, %f or %g.
 fn float(out: &mut Vec<u16>, spec: &Spec, v: f64, conv: u8) {
-    let precision = spec.precision.unwrap_or(6);
+    let precision = spec.precision.unwrap_or(6).min(MAX_PRECISION);
     let body = if !v.is_finite() {
         special(v, precision)
     } else {
@@ -341,10 +350,14 @@ pub fn printf(cpu: &mut Cpu, format: &[u16], args: &mut Args, wide: bool) -> Opt
             i += 1;
         } else {
             while at(i).is_ascii_digit() {
-                spec.width = spec.width * 10 + (at(i) - b'0') as usize;
+                spec.width = spec
+                    .width
+                    .saturating_mul(10)
+                    .saturating_add((at(i) - b'0') as usize);
                 i += 1;
             }
         }
+        spec.width = spec.width.min(MAX_WIDTH);
         if at(i) == b'.' {
             i += 1;
             let mut precision = 0;
@@ -355,7 +368,9 @@ pub fn printf(cpu: &mut Cpu, format: &[u16], args: &mut Args, wide: bool) -> Opt
                 spec.precision = (p >= 0).then_some(precision);
             } else {
                 while at(i).is_ascii_digit() {
-                    precision = precision * 10 + (at(i) - b'0') as usize;
+                    precision = precision
+                        .saturating_mul(10)
+                        .saturating_add((at(i) - b'0') as usize);
                     i += 1;
                 }
                 spec.precision = Some(precision);
@@ -636,7 +651,9 @@ pub fn scanf(
         }
         let mut width = 0usize;
         while at(i).is_ascii_digit() {
-            width = width * 10 + (at(i) - b'0') as usize;
+            width = width
+                .saturating_mul(10)
+                .saturating_add((at(i) - b'0') as usize);
             i += 1;
         }
         let width = if width == 0 { usize::MAX } else { width };

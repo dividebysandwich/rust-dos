@@ -39,6 +39,7 @@ const PROTECTION_SHIFT: u32 = 9;
 /// Region types (VirtualQuery's MEM_ values).
 pub const MEM_PRIVATE: u32 = 0x2_0000;
 pub const MEM_MAPPED: u32 = 0x4_0000;
+pub const MEM_IMAGE: u32 = 0x100_0000;
 
 /// A reserved range of linear address space.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -46,7 +47,8 @@ pub struct Region {
     pub start: u32,
     pub len: u32,
     /// The protection it was reserved with (0 for the system's own), and
-    /// its type: MEM_PRIVATE, or MEM_MAPPED for a view of a file mapping.
+    /// its type: MEM_PRIVATE, MEM_MAPPED for a view of a file mapping, or
+    /// MEM_IMAGE for a module's image.
     pub protect: u32,
     pub kind: u32,
 }
@@ -340,6 +342,22 @@ impl Memory {
         self.reserve_region(at, len, lo, hi, 0, MEM_PRIVATE)
     }
 
+    /// Reserve `len` bytes for a module's image, as `reserve` does.
+    pub fn reserve_image(&mut self, at: Option<u32>, len: u32, lo: u32, hi: u32) -> Option<u32> {
+        let len = len.checked_add(GRANULARITY - 1)? & !(GRANULARITY - 1);
+        self.reserve_region(at, len, lo, hi, 0, MEM_IMAGE)
+    }
+
+    /// Give back the reservation that starts at `start` and the pages
+    /// committed in it. Its length, if there was one.
+    pub fn release_region(&mut self, bus: &mut Bus, start: u32) -> Option<u32> {
+        let len = self.region(start).filter(|r| r.start == start)?.len;
+        for page in (start..start + len).step_by(PAGE as usize) {
+            self.unmap(bus, page);
+        }
+        self.unreserve(start)
+    }
+
     /// Reserve `len` bytes (whole pages) as `reserve` does, the region
     /// starting at a multiple of 64 KB, with the protection and type
     /// VirtualQuery says it has.
@@ -403,6 +421,11 @@ impl Memory {
 
     pub fn write_32(&self, bus: &mut Bus, lin: u32, value: u32) -> Option<()> {
         self.write(bus, lin, &value.to_le_bytes())
+    }
+
+    /// The double word at `lin` (a multiple of 4), if it is mapped.
+    pub fn read_32(&self, bus: &Bus, lin: u32) -> Option<u32> {
+        Some(bus.read_32(self.translate(bus, lin)? as usize))
     }
 }
 

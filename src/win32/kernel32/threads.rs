@@ -4,6 +4,7 @@
 use super::{
     ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, FALSE, TRUE, set_error,
 };
+use crate::bus::Bus;
 use crate::cpu::Cpu;
 use crate::instructions::fpu::control;
 use crate::win32::loader::{TLS_ARRAY, TLS_SLOTS};
@@ -11,7 +12,7 @@ use crate::win32::memory::{GRANULARITY, PAGE, PRIVATE, SHARED, SYSTEM, USER, WRI
 use crate::win32::object::{self, CURRENT_PROCESS, Kind};
 use crate::win32::seh::{self, CONTEXT_SIZE};
 use crate::win32::thread::{self, Thread};
-use crate::win32::{Context, process, with_process};
+use crate::win32::{Context, Process, process, with_process};
 
 const STILL_ACTIVE: u32 = 0x103;
 const CREATE_SUSPENDED: u32 = 4;
@@ -79,13 +80,29 @@ pub(super) fn create_thread(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[_, stack_size, start, param, flags, id_at] = args else {
         unreachable!()
     };
-    let index = process(cpu).threads.len();
+    // The new thread takes the place of one that ended, and its TIB's
+    // selector, giving back what the ended one had. The first thread's
+    // place stays, as the process's TIB is its.
+    let ended = process(cpu)
+        .threads
+        .iter()
+        .skip(1)
+        .position(|t| t.exit_code.is_some())
+        .map(|i| i + 1);
+    let index = ended.unwrap_or(process(cpu).threads.len());
+    if index >= thread::MAX_THREADS {
+        set_error(cpu, ERROR_NOT_ENOUGH_MEMORY);
+        return Some(0);
+    }
     let selector = thread::selector_of(index);
     let reserve = stack_size
         .max(process(cpu).stack_reserve)
         .clamp(GRANULARITY, 0x100_0000)
         .next_multiple_of(GRANULARITY);
     let made = with_process(cpu, |p, bus| {
+        if let Some(t) = ended {
+            release(bus, p, t);
+        }
         let memory = &mut p.memory;
         let stack = memory.reserve(None, reserve, PRIVATE, SHARED)?;
         let top = stack + reserve;
@@ -119,6 +136,9 @@ pub(super) fn create_thread(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         memory.write_32(bus, esp + 4, param)?;
         Some((stack, top, tib, esp))
     });
+    if ended.is_some() {
+        cpu.tlb.flush();
+    }
     let Some((stack, top, tib, esp)) = made else {
         set_error(cpu, ERROR_NOT_ENOUGH_MEMORY);
         return Some(0);
@@ -136,7 +156,7 @@ pub(super) fn create_thread(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     );
     objects.hold(object);
     let handle = object::new_handle(cpu, object);
-    process(cpu).threads.push(Thread {
+    let thread = Thread {
         id,
         object,
         tib,
@@ -145,11 +165,43 @@ pub(super) fn create_thread(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         ctx: thread::initial_context(index, start, param, esp),
         suspended: (flags & CREATE_SUSPENDED != 0) as u32,
         ..Thread::default()
-    });
+    };
+    let threads = &mut process(cpu).threads;
+    match threads.get_mut(index) {
+        Some(place) => *place = thread,
+        None => threads.push(thread),
+    }
     if id_at != 0 {
         cpu.bus.guest_write_32(id_at, id);
     }
     Some(handle)
+}
+
+/// Give back what the ended thread `t` of `p` had: its stack, its TIB
+/// and its copies of the static TLS. Its place keeps no addresses, so
+/// nothing is given back twice.
+fn release(bus: &mut Bus, p: &mut Process, t: usize) {
+    let thread = &mut p.threads[t];
+    let (stack, tib) = (thread.stack.0, thread.tib);
+    thread.stack = (0, 0);
+    thread.tib = 0;
+    if tib != 0 {
+        let mut slots: Vec<u32> = p.dll_tls.iter().map(|&(slot, _)| slot).collect();
+        if !p.tls_template.is_empty() {
+            slots.push(0);
+        }
+        for slot in slots {
+            if let Some(block) = p.memory.read_32(bus, tib + TLS_ARRAY + 4 * slot)
+                && block != 0
+            {
+                p.memory.release_region(bus, block);
+            }
+        }
+        p.memory.release_region(bus, tib);
+    }
+    if stack != 0 {
+        p.memory.release_region(bus, stack);
+    }
 }
 
 /// ExitThread(code), and where a thread's function returns to: the DLLs

@@ -2,9 +2,7 @@
 //! its id, and what a process learns of how it was started.
 
 use super::threads::{process_of, thread_of};
-use super::{
-    ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, FALSE, TRUE, set_error, string_at,
-};
+use super::{ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, FALSE, TRUE, set_error, string_at};
 use crate::cpu::Cpu;
 use crate::win32::memory::{PAGE, PRIVATE, SYSTEM};
 use crate::win32::object;
@@ -90,7 +88,19 @@ fn environment_at(cpu: &mut Cpu, mut at: u32) -> Option<Vec<String>> {
 /// beside its parent. The process information gets the handles of the
 /// process and its main thread, and their ids.
 pub(super) fn create_process_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let &[app_at, line_at, _, _, inherit, flags, env_at, _, startup_at, info_at] = args else {
+    let &[
+        app_at,
+        line_at,
+        _,
+        _,
+        inherit,
+        flags,
+        env_at,
+        _,
+        startup_at,
+        info_at,
+    ] = args
+    else {
         unreachable!()
     };
     let app = match app_at {
@@ -198,11 +208,20 @@ pub(crate) fn spawn(
     };
     let std = std.filter(|ids| ids.iter().all(|&id| object::objects(cpu).get(id).is_some()));
     let suspended = flags & CREATE_SUSPENDED != 0;
-    let created = create_process(cpu, &path, &line, environment, inherited, std, startup, suspended)
-        .map_err(|message| {
-            cpu.bus.log_string(&format!("[W32] {}", message));
-            ERROR_BAD_EXE_FORMAT
-        })?;
+    let created = create_process(
+        cpu,
+        &path,
+        &line,
+        environment,
+        inherited,
+        std,
+        startup,
+        suspended,
+    )
+    .map_err(|message| {
+        cpu.bus.log_string(&format!("[W32] {}", message));
+        ERROR_BAD_EXE_FORMAT
+    })?;
     let (process_object, pid) = created.process;
     let (thread_object, tid) = created.thread;
     let objects = object::objects(cpu);
@@ -273,7 +292,6 @@ pub(super) fn get_startup_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     Some(0)
 }
-
 
 /// GetProcessAffinityMask(process, process mask, system mask): one
 /// processor.
@@ -347,9 +365,7 @@ fn user_page(cpu: &Cpu, p: usize, lin: u32) -> Option<u32> {
     if !(PRIVATE..SYSTEM).contains(&lin) {
         return None;
     }
-    cpu.bus.win32.processes[p]
-        .memory
-        .translate(&cpu.bus, lin)
+    cpu.bus.win32.processes[p].memory.translate(&cpu.bus, lin)
 }
 
 /// ReadProcessMemory(process, address, buffer, size, read) and

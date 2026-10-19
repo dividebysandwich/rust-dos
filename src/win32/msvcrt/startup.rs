@@ -1156,10 +1156,17 @@ fn inherit_block(cpu: &mut Cpu) -> Vec<u8> {
             _ => (0, u32::MAX),
         })
         .collect();
-    let count = fds.iter().rposition(|&(flags, _)| flags != 0).map_or(0, |i| i + 1);
+    let count = fds
+        .iter()
+        .rposition(|&(flags, _)| flags != 0)
+        .map_or(0, |i| i + 1);
     let mut block = (count as u32).to_le_bytes().to_vec();
     block.extend(fds[..count].iter().map(|&(flags, _)| flags));
-    block.extend(fds[..count].iter().flat_map(|&(_, handle)| handle.to_le_bytes()));
+    block.extend(
+        fds[..count]
+            .iter()
+            .flat_map(|&(_, handle)| handle.to_le_bytes()),
+    );
     block
 }
 
@@ -1184,15 +1191,8 @@ fn spawn(cpu: &mut Cpu, mode: u32, path: u32, argv: u32, envp: u32) -> Option<u3
     let mut startup = vec![0u8; size as usize];
     startup[..4].copy_from_slice(&size.to_le_bytes());
     startup.extend(inherit_block(cpu));
-    let started = super::super::kernel32::spawn(
-        cpu,
-        Some(&path),
-        Some(&line),
-        environment,
-        true,
-        0,
-        startup,
-    );
+    let started =
+        super::super::kernel32::spawn(cpu, Some(&path), Some(&line), environment, true, 0, startup);
     let [process, thread, _, _] = match started {
         Ok(info) => info,
         Err(code) => {
@@ -1208,7 +1208,14 @@ fn spawn(cpu: &mut Cpu, mode: u32, path: u32, argv: u32, envp: u32) -> Option<u3
             // the child run; `spawned` goes on when it is done.
             let wait = kernel32_stub("WaitForSingleObject")?;
             let resume = call::here(cpu);
-            if call_program(cpu, wait, &[process, INFINITE], C_SPAWNED, resume, &[process]) {
+            if call_program(
+                cpu,
+                wait,
+                &[process, INFINITE],
+                C_SPAWNED,
+                resume,
+                &[process],
+            ) {
                 return None;
             }
             object::close(cpu, process);

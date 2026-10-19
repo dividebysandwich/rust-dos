@@ -15,8 +15,8 @@ use super::{ERROR_INVALID_PARAMETER, ERROR_NOT_ENOUGH_MEMORY, FALSE, TRUE, set_e
 use crate::bus::Bus;
 use crate::cpu::{Cpu, CpuModel};
 use crate::win32::memory::{
-    GRANULARITY, MEM_MAPPED, MEM_PRIVATE, Memory, PAGE, PAGE_NOACCESS, PAGE_READWRITE, PRESENT,
-    PRIVATE, SHARED, SYSTEM, USER, WRITABLE, protection,
+    GRANULARITY, MEM_IMAGE, MEM_MAPPED, MEM_PRIVATE, Memory, PAGE, PAGE_NOACCESS, PAGE_READWRITE,
+    PRESENT, PRIVATE, SHARED, SYSTEM, USER, WRITABLE, protection,
 };
 use crate::win32::object::{self, Kind};
 use crate::win32::{Process, running};
@@ -324,9 +324,10 @@ fn query(memory: &Memory, bus: &Bus, at: u32) -> [u32; 7] {
         end += PAGE;
     }
     // Windows 95's views of mappings are memory of the shared arena
-    // reserved with PAGE_NOACCESS.
+    // reserved with PAGE_NOACCESS, and it calls images private.
     let (allocation, kind) = match (region.kind, region.protect) {
         (MEM_MAPPED, _) => (PAGE_NOACCESS, MEM_PRIVATE),
+        (MEM_IMAGE, _) => (PAGE_READWRITE, MEM_PRIVATE),
         (kind, 0) => (PAGE_READWRITE, kind),
         (kind, protect) => (protect, kind),
     };

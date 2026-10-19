@@ -23,6 +23,9 @@ pub struct Call {
     /// The stack pointer before the call's arguments were pushed, which it
     /// is set to again when the call returns, whatever its convention.
     pub esp: u32,
+    /// Where its return address is: the stack pointer once its arguments
+    /// and the return address were pushed.
+    pub frame: u32,
     /// What runs when it returns: its index in `THENS`.
     pub then: u16,
     pub data: Vec<u32>,
@@ -80,9 +83,14 @@ pub fn call(
     cpu.set_esp(frame);
     cpu.set_eip(target);
     let thread = process(cpu).current_thread_mut().expect("a running thread");
+    // Calls whose frames were at or above the stack pointer won't return:
+    // the program left them, as a handler of its own C runtime does when
+    // it jumps to its __except block.
+    thread.calls.retain(|c| c.esp > esp);
     thread.calls.push(Call {
         resume,
         esp,
+        frame,
         then,
         data,
     });
@@ -106,9 +114,20 @@ pub fn here(cpu: &Cpu) -> (u32, u32) {
 /// A call returned to `CallReturn`: what it called for goes on.
 pub fn returned(cpu: &mut Cpu) {
     let value = cpu.eax();
-    let call = process(cpu)
-        .current_thread_mut()
-        .and_then(|t| t.calls.pop());
+    let esp = cpu.esp();
+    let call = process(cpu).current_thread_mut().and_then(|t| {
+        // The call whose return address the stack pointer is just past;
+        // calls after it in the list are ones the program left without
+        // returning, whose frames were below its.
+        let i = t
+            .calls
+            .iter()
+            .rposition(|c| (c.frame.wrapping_add(4)..=c.esp).contains(&esp));
+        if let Some(i) = i {
+            t.calls.truncate(i + 1);
+        }
+        t.calls.pop()
+    });
     let Some(call) = call else {
         super::fatal(cpu, "a return to the system that nothing called", None);
         return;
@@ -132,6 +151,7 @@ pub fn unwound_to(cpu: &mut Cpu, esp: u32) {
 crate::state_fields!(Call {
     resume,
     esp,
+    frame,
     then,
     data
 });

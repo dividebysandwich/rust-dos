@@ -385,8 +385,11 @@ pub fn read_fd(cpu: &mut Cpu, fd: u32, count: u32) -> FdRead {
         match raw[i] {
             0x1A => {
                 // The end, though the file's position stays past what
-                // was read after it, as MSVCRT leaves it.
-                set_flags(cpu, fd, flags | FEOFLAG);
+                // was read after it, as MSVCRT leaves it. A device's
+                // reads go on after it.
+                if flags & FDEV == 0 {
+                    set_flags(cpu, fd, flags | FEOFLAG);
+                }
                 break;
             }
             b'\r' if i + 1 < raw.len() => {
@@ -1160,7 +1163,7 @@ fn base32(mut n: u32) -> String {
 /// the thread's own: "\s", the process id and a dot, as MSVCRT names
 /// it, with a number after the dot from the second call on.
 pub fn tmpnam(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let base = format!("\\s{}.",base32(super::super::process(cpu).id));
+    let base = format!("\\s{}.", base32(super::super::process(cpu).id));
     let name = loop {
         let n = state(cpu, S_TMPNAM_COUNT);
         set_state(cpu, S_TMPNAM_COUNT, n.wrapping_add(1));

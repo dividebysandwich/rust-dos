@@ -248,7 +248,10 @@ fn kernel32_fn(name: &str) -> Option<Handler> {
 /// The address of the stub of the KERNEL32 function `name`, for calling
 /// it as the program does.
 fn kernel32_stub(name: &str) -> Option<u32> {
-    let api = super::kernel32::DLL.apis.iter().position(|api| api.name == name)?;
+    let api = super::kernel32::DLL
+        .apis
+        .iter()
+        .position(|api| api.name == name)?;
     Some(super::stubs::stub_address(0, api))
 }
 

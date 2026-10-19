@@ -18,6 +18,7 @@ use super::object::{Kind, Objects};
 use super::{Context, ESP, Win32, process};
 use crate::cpu::Cpu;
 use crate::instructions::fpu::control;
+use crate::instructions::sse::float::MXCSR_DEFAULT;
 
 /// How long a thread runs before another that is ready gets its turn, in
 /// microseconds. The timer's interrupt, which switches, comes every 55 ms.
@@ -66,6 +67,9 @@ pub struct Thread {
     /// Its FPU's state while it doesn't run, as FSAVE stores it; empty for
     /// a thread that hasn't run yet.
     pub fpu: Vec<u8>,
+    /// Its XMM registers and MXCSR while it doesn't run, on a processor
+    /// with SSE; None for a thread that hasn't run yet.
+    pub sse: Option<([u128; 8], u32)>,
     pub last_error: u32,
     /// How many times it is suspended; it runs at 0.
     pub suspended: u32,
@@ -108,6 +112,7 @@ pub fn find(win32: &Win32, id: u32) -> Option<At> {
 /// processor's, or the one an interrupt left), the FPU's, its last error.
 fn save(cpu: &mut Cpu, ctx: Context) {
     let fpu = control::save_image(cpu).to_vec();
+    let sse = cpu.model.has_sse().then_some((cpu.sse.xmm, cpu.sse.mxcsr));
     let win32 = &mut cpu.bus.win32;
     let Some(process) = win32.processes.get_mut(win32.running) else {
         return;
@@ -116,6 +121,7 @@ fn save(cpu: &mut Cpu, ctx: Context) {
     if let Some(thread) = process.current_thread_mut() {
         thread.ctx = ctx;
         thread.fpu = fpu;
+        thread.sse = sse;
         thread.last_error = last_error;
     }
 }
@@ -132,9 +138,10 @@ fn enter(cpu: &mut Cpu, (p, t): At) {
     let process = &mut win32.processes[p];
     process.current = Some(t);
     let thread = &process.threads[t];
-    let (ctx, fpu, last_error, tib) = (
+    let (ctx, fpu, sse, last_error, tib) = (
         thread.ctx,
         thread.fpu.clone(),
+        thread.sse,
         thread.last_error,
         thread.tib,
     );
@@ -147,6 +154,12 @@ fn enter(cpu: &mut Cpu, (p, t): At) {
             control::fninit(cpu);
             cpu.fpu_control = 0x027F;
         }
+    }
+    if cpu.model.has_sse() {
+        // A thread starts with its XMM registers clear.
+        let (xmm, mxcsr) = sse.unwrap_or(([0; 8], MXCSR_DEFAULT));
+        cpu.sse.xmm = xmm;
+        cpu.sse.mxcsr = mxcsr;
     }
     super::system::enter_user(cpu, &ctx);
 }
@@ -385,6 +398,11 @@ pub fn wake(cpu: &mut Cpu) {
     }
 }
 
+/// How many threads a process's list has room for: one TIB selector for
+/// each in the LDT from TIB3 on.
+pub const MAX_THREADS: usize =
+    ((8 * super::system::LDT_ENTRIES - (super::system::TIB3 & !7) as u32) / 8) as usize;
+
 /// The TIB selector of the thread at `index` in its process's list.
 pub fn selector_of(index: usize) -> u16 {
     super::system::TIB3 + 8 * index as u16
@@ -524,6 +542,7 @@ crate::state_fields!(Thread {
     stack,
     ctx,
     fpu,
+    sse,
     last_error,
     suspended,
     priority,

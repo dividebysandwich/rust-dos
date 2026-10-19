@@ -736,6 +736,67 @@ fn threads_take_turns_wait_for_each_other_and_share_a_critical_section() {
     assert_eq!(code, 5, "{}", out);
 }
 
+/// Threads started and ended one after another, more than the LDT has
+/// selectors for and more stacks than memory holds at once: each takes
+/// the place of one that ended. The exit code is the last one's.
+#[test]
+fn ended_threads_make_room_for_new_ones() {
+    let names: &[&str] = &[
+        "CreateThread",
+        "WaitForSingleObject",
+        "GetExitCodeThread",
+        "CloseHandle",
+        "ExitProcess",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let (code, out) = run(
+        "thread_places",
+        program(BASE, false, imports, &[0; 0x10], |a, l| {
+            let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+            let mut over = a.create_label();
+            let mut again = a.create_label();
+            let mut failed = a.create_label();
+            // The thread's address in EBP, which the CALL over it pushes.
+            a.call(over)?;
+            // The thread returns its argument.
+            a.mov(eax, dword_ptr(esp + 4))?;
+            a.ret_1(4)?;
+            a.set_label(&mut over)?;
+            a.pop(ebp)?;
+            a.mov(edi, 9000)?;
+            a.set_label(&mut again)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.push(edi)?;
+            a.push(ebp)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.call(f("CreateThread"))?;
+            a.test(eax, eax)?;
+            a.jz(failed)?;
+            a.mov(esi, eax)?;
+            a.push(-1)?;
+            a.push(esi)?;
+            a.call(f("WaitForSingleObject"))?;
+            a.push(l.at(0) as i32)?;
+            a.push(esi)?;
+            a.call(f("GetExitCodeThread"))?;
+            a.push(esi)?;
+            a.call(f("CloseHandle"))?;
+            a.dec(edi)?;
+            a.jnz(again)?;
+            // The last thread's argument and exit code was 1.
+            a.push(dword_ptr(l.at(0)))?;
+            a.call(f("ExitProcess"))?;
+            a.set_label(&mut failed)?;
+            a.push(99)?;
+            a.call(f("ExitProcess"))?;
+            a.int3()
+        }),
+    );
+    assert_eq!(code, 1, "{}", out);
+}
+
 #[test]
 fn a_handler_on_the_exception_chain_resumes_after_a_divide_error() {
     let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["ExitProcess"])];
@@ -2238,6 +2299,36 @@ fn a_program_prints_with_msvcrt() {
                 00001234|4294967296|4464|+5|0xff|%|";
     assert_eq!(text, format!("{}\r\n{} -2.3 abc\r\n", line, line.len()));
     assert_eq!(code, 3);
+}
+
+/// A width of 2^31 - 1 fills the buffer _snprintf has and no more, and
+/// says it didn't fit.
+#[test]
+fn a_huge_printf_width_fills_only_the_buffer() {
+    let names: &[&str] = &["_snprintf", "exit"];
+    let imports: &[(&str, &[&str])] = &[("MSVCRT.dll", names)];
+    let mut d = Data::default();
+    let format = d.text("%*d");
+    let buffer = d.add(&[b'x'; 12]);
+    let exe = program(BASE, false, imports, &d.0, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.push(1)?;
+        a.push(0x7FFF_FFFF)?;
+        a.push(l.at(format) as i32)?;
+        a.push(8)?;
+        a.push(l.at(buffer) as i32)?;
+        a.call(f("_snprintf"))?;
+        a.add(esp, 20)?;
+        // -1, and the ninth byte untouched: 0xFF ^ 'x' ^ 'x'.
+        a.movzx(ecx, byte_ptr(l.at(buffer + 8)))?;
+        a.xor(eax, ecx)?;
+        a.xor(eax, b'x' as i32)?;
+        a.push(eax)?;
+        a.call(f("exit"))?;
+        a.int3()
+    });
+    let (code, text) = run("msvcrt_width", exe);
+    assert_eq!(code, 0xFF, "{}", text);
 }
 
 #[test]

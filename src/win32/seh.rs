@@ -526,7 +526,6 @@ pub fn unhandled_exception_filter(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         ) {
             return None;
         }
-        return None;
     }
     say_unhandled(cpu, record);
     Some(FILTER_EXECUTE_HANDLER)
@@ -617,9 +616,8 @@ pub fn rtl_unwind(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     } else {
         record
     };
-    let flags = cpu.bus.guest_read_32(record + 4)
-        | UNWINDING
-        | if target == 0 { EXIT_UNWIND } else { 0 };
+    let flags =
+        cpu.bus.guest_read_32(record + 4) | UNWINDING | if target == 0 { EXIT_UNWIND } else { 0 };
     cpu.bus.guest_write_32(record + 4, flags);
     if cpu.bus.guest_faulted() {
         return None;
