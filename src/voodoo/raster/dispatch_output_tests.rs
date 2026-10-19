@@ -70,7 +70,7 @@ fn worker_dispatch_matches_whole_triangle_drawing() {
     generic[0] ^= 1 << 20;
     for mut regs in [
         VARIANTS[0].1.map(|(_, value)| value),
-        VARIANTS[8].1.map(|(_, value)| value),
+        VARIANTS[FIRST_COMBINE].1.map(|(_, value)| value),
         generic,
     ] {
         regs[0] |= 3 << 9 | 7 << 5;

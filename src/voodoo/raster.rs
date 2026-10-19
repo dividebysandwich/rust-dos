@@ -18,6 +18,10 @@ use std::sync::Arc;
 #[path = "raster/dispatch.rs"]
 mod dispatch;
 
+#[cfg(all(test, feature = "sdl"))]
+#[path = "raster/scene_profile.rs"]
+pub(super) mod scene_profile;
+
 /// The pixel counters (`stats_block`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Stats {
@@ -1125,7 +1129,8 @@ macro_rules! variants {
 
 // V0-V7 are the pipelines of Quake's 3dfx renderers (lightmapped textures
 // in two units, blended or not, and the untextured ones), which other
-// Glide games share. C0 and C1 are 3dfx's OpenGL driver (`3DFXVGL.DLL`)
+// Glide games share. V8 and V9 fix the two states observed in a 60-batch
+// Oni main-menu capture. C0 and C1 are 3dfx's OpenGL driver (`3DFXVGL.DLL`)
 // with one texture, which it gives TMU 1 while TMU 0 passes its colour
 // on: the texture times the iterated colour, with the iterated alpha or
 // the texture's times it. Oni draws its menu and its levels with these.
@@ -1138,6 +1143,8 @@ variants! {
     V5: 2, full[0x90110, 0x0D42_0009, 0x0000_6010, 0, 0x8844_230F, 0x8C26_130F];
     V6: 2, full[0x90110, 0x0C00_0005, 0x0004_0409, 0, 0x8844_2A0F, 0x8C26_1C0F];
     V7: 2, full[0x90110, 0x0D42_0009, 0x0000_6010, 0, 0x8C26_130F, 0x8422_130F];
+    V8: 2, full[0x80100, 0x0048_2405, 0x0000_5110, 0xC0, 0x8000_0006, 0x8C26_1C0F];
+    V9: 2, full[0x80100, 0x0142_2409, 0x0000_5110, 0xC0, 0x8000_0006, 0x8C26_1ACF];
     C0: 2, combine_only[0x0D42_2409, 0x8000_0006, 0x8C26_1A0F];
     C1: 2, combine_only[0x0C48_2405, 0x8000_0006, 0x8C26_1C0F];
 }
@@ -1525,8 +1532,15 @@ mod tests {
         };
         for regs in states {
             let st = two_unit_state(regs);
-            let v = variant(&st, 2);
             let combine_only = [C0::FIXED, C1::FIXED];
+            let v = combine_only
+                .iter()
+                .position(|fixed| {
+                    regs.iter()
+                        .zip(fixed)
+                        .all(|(r, (mask, value))| r & mask == *value)
+                })
+                .map(|i| FIRST_COMBINE + i);
             assert!(
                 v.is_some_and(|i| combine_only.contains(&VARIANTS[i].1)),
                 "no combine-only variant for {regs:08X?}"
@@ -1548,3 +1562,7 @@ mod tests {
 #[cfg(test)]
 #[path = "raster/dispatch_output_tests.rs"]
 mod dispatch_output_tests;
+
+#[cfg(test)]
+#[path = "raster/oni_state_tests.rs"]
+mod oni_state_tests;

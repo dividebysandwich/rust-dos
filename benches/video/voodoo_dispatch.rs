@@ -80,7 +80,7 @@ pub fn lookup(c: &mut Criterion) {
             [0x90110, 0x0D420009, 0x40400, 0, 0x8C261A0F, 0x84221C0F],
         ),
         (
-            "last_full",
+            "quake_full",
             2,
             [0x90110, 0x0D420009, 0x6010, 0, 0x8C26130F, 0x8422130F],
         ),
@@ -88,12 +88,22 @@ pub fn lookup(c: &mut Criterion) {
         (
             "combine",
             2,
-            [0x843E1, 0x0D422409, 0x5110, 0xC0, 0x80000006, 0x8C261ACF],
+            [0x843E1, 0x0D422409, 0x4110, 0xC0, 0x80000006, 0x8C261ACF],
         ),
         (
             "last_combine",
             2,
-            [0x843E1, 0x0C482405, 0x5110, 0xC0, 0x80000006, 0x8C261C0F],
+            [0x843E1, 0x0C482405, 0x4110, 0xC0, 0x80000006, 0x8C261C0F],
+        ),
+        (
+            "menu_alpha",
+            2,
+            [0x843E1, 0x00482405, 0x5110, 0xC0, 0x80000006, 0x8C261C0F],
+        ),
+        (
+            "menu_rgb",
+            2,
+            [0x843E1, 0x01422409, 0x5110, 0xC0, 0x80000006, 0x8C261ACF],
         ),
         ("generic", 2, [0; 6]),
         ("one_unit", 1, [0; 6]),
