@@ -152,6 +152,11 @@ fn load_env(cpu: &mut Cpu, addr: usize, size: usize) {
     let sw = cpu.lin_read_16(addr + step);
     let tag_word = cpu.lin_read_16(addr + 2 * step);
     set_status_word(cpu, sw);
+    set_tag_word(cpu, tag_word);
+}
+
+/// Load the tag word `tag_word` gives: empty or not, per register.
+fn set_tag_word(cpu: &mut Cpu, tag_word: u16) {
     for i in 0..8 {
         let tag = (tag_word >> (i * 2)) & 0x03;
         cpu.fpu_tags[i] = if tag == 0b11 { FPU_TAG_EMPTY } else { FPU_TAG_VALID };
@@ -184,6 +189,35 @@ pub fn fnsave(cpu: &mut Cpu, instr: &Instruction) {
         }
     }
     fninit(cpu);
+}
+
+/// The 108-byte image FSAVE stores with a 32-bit operand size, without
+/// initializing the FPU: for a system that switches threads, which keeps
+/// each thread's FPU in its own image.
+pub fn save_image(cpu: &Cpu) -> [u8; 108] {
+    let mut image = [0u8; 108];
+    for (i, w) in [cpu.fpu_control, status_word(cpu), tag_word(cpu)].into_iter().enumerate() {
+        image[4 * i..4 * i + 4].copy_from_slice(&(0xFFFF_0000 | w as u32).to_le_bytes());
+    }
+    for i in 0..8 {
+        let bytes = cpu.fpu_reg(cpu.fpu_get_phys_index(i)).get_bytes();
+        image[28 + 10 * i..38 + 10 * i].copy_from_slice(&bytes);
+    }
+    image
+}
+
+/// Load an image `save_image` (or FSAVE) made.
+pub fn load_image(cpu: &mut Cpu, image: &[u8; 108]) {
+    let word = |i: usize| u16::from_le_bytes([image[4 * i], image[4 * i + 1]]);
+    cpu.fpu_control = word(0);
+    set_status_word(cpu, word(1));
+    set_tag_word(cpu, word(2));
+    for i in 0..8 {
+        let mut value = F80::new();
+        value.set_bytes(image[28 + 10 * i..38 + 10 * i].try_into().unwrap());
+        let phys = cpu.fpu_get_phys_index(i);
+        cpu.fpu_set_reg(phys, value);
+    }
 }
 
 /// FRSTOR: load the image FSAVE stores.

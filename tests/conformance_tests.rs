@@ -10,7 +10,7 @@
 //! CONFORMANCE_REQUIRED is set, as in CI. CONFORMANCE_BLESS=1 writes the
 //! results to expected.txt instead of comparing them.
 
-use rust_dos::cpu::{Cpu, HostConsole};
+use rust_dos::cpu::{Cpu, CpuModel, HostConsole};
 use rust_dos::exec::{NoHook, StopReason, run_batch};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -95,14 +95,22 @@ fn program_name(unit: &str) -> String {
     format!("{}.EXE", unit[..unit.len().min(8)].to_ascii_uppercase())
 }
 
-/// Run the program `name` in `dir` until it ends: what it printed, and
-/// its exit code if it ended.
-fn run(dir: &Path, name: &str) -> (String, Option<u8>) {
+/// Run the program `name` in `dir` with the argument `unit`, the test to
+/// run, as Wine's runner passes it, on a processor of `model`: what it
+/// printed, and its exit code if it ended.
+fn run(dir: &Path, name: &str, unit: &str, model: CpuModel) -> (String, Option<u8>) {
+    // The Windows and system directories the built-in Windows names,
+    // and REGEDIT.EXE there, which file.c opens as a file every Windows
+    // has.
+    fs::create_dir_all(dir.join("WINDOWS").join("SYSTEM")).unwrap();
+    fs::write(dir.join("WINDOWS").join("REGEDIT.EXE"), b"").unwrap();
     let mut cpu = Cpu::new(dir.to_path_buf());
+    cpu.model = model;
     cpu.bus.win32.enabled = true;
     cpu.host_console = Some(HostConsole::default());
     cpu.load_shell();
     assert!(cpu.load_executable(name, None), "{} didn't load", name);
+    cpu.set_command_tail(cpu.current_psp, unit);
     let mut ended = false;
     for _ in 0..BATCHES {
         cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
@@ -170,6 +178,53 @@ fn results(output: &str, exit: Option<u8>) -> Vec<String> {
     lines
 }
 
+/// The DLLs the tests may import from, as MinGW names their import
+/// libraries.
+const LIBS: &[&str] = &["-lkernel32", "-ladvapi32"];
+
+/// Build the test file `unit` of `dll` into `program`, as Wine does: the
+/// file without STANDALONE, which leaves the framework out of it, and a
+/// list of its one test with STANDALONE, which brings the framework and
+/// `main` in. Some files have their own copies of the framework's
+/// helpers, which a STANDALONE build of them would have twice.
+///
+/// MSVCRT's tests test the built-in MSVCRT.DLL, so they are linked as
+/// MinGW links any program, with its startup code (crt2.o) and MSVCRT.DLL
+/// as the C library, and runtime.c left out. Their sources use Wine's
+/// names for va_list, which MinGW's headers don't have. GCC isn't to
+/// count what sprintf returns itself, as it counts C99's formats, and
+/// MinGW's headers aren't to put its own C99 functions (strtod) in place
+/// of MSVCRT's.
+fn build(cc: &str, dll: &str, unit: &str, runtime: &str, program: &str) -> Result<(), String> {
+    let list = format!("{OUT}/{dll}/{unit}_list.c");
+    fs::write(
+        &list,
+        format!(
+            "#define STANDALONE
+#include \"wine/test.h\"
+             extern void func_{unit}(void);
+             const struct test winetest_testlist[] = {{ {{ \"{unit}\", func_{unit} }}, {{ 0, 0 }} }};
+"
+        ),
+    )
+    .unwrap();
+    let source = format!("{ROOT}/wine/{dll}/{unit}.c");
+    let include = format!("-I{ROOT}/wine/include");
+    let compat = format!("{ROOT}/runtime/compat.h");
+    let mut args = CFLAGS.to_vec();
+    args.extend([include.as_str(), "-include", compat.as_str()]);
+    if dll == "msvcrt" {
+        args.extend(["-fno-printf-return-value", "-D__NO_ISOCEXT"]);
+        args.extend([source.as_str(), list.as_str(), "-lmsvcrt"]);
+    } else {
+        args.extend(["-nostdlib", "-Wl,-e,_mainCRTStartup"]);
+        args.extend([source.as_str(), list.as_str(), runtime]);
+    }
+    args.extend(LIBS);
+    args.extend(["-lgcc", "-o", program]);
+    compile(cc, &args)
+}
+
 #[test]
 fn wine_conformance_tests_give_the_expected_results() {
     let Some(cc) = compiler() else {
@@ -197,30 +252,23 @@ fn wine_conformance_tests_give_the_expected_results() {
     let mut actual = Vec::new();
     for (dll, units) in units() {
         let dir = PathBuf::from(format!("{OUT}/{dll}"));
+        // Each run starts from an empty drive: files an earlier run left
+        // (file.c makes WIN.INI) change what directory listings count.
+        let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         for unit in units {
             let name = program_name(&unit);
-            let source = format!("{ROOT}/wine/{dll}/{unit}.c");
             let program = format!("{OUT}/{dll}/{name}");
-            let include = format!("-I{ROOT}/wine/include");
-            let mut args = CFLAGS.to_vec();
-            args.extend([
-                "-DSTANDALONE",
-                &include,
-                "-nostdlib",
-                "-Wl,-e,_mainCRTStartup",
-            ]);
-            args.extend([
-                source.as_str(),
-                &runtime,
-                "-lkernel32",
-                "-lgcc",
-                "-o",
-                &program,
-            ]);
-            let lines = match compile(&cc, &args) {
+            let lines = match build(&cc, &dll, &unit, &runtime, &program) {
                 Ok(()) => {
-                    let (output, exit) = run(&dir, &name);
+                    // MinGW's startup code is built for a Pentium Pro
+                    // (CMOVcc); runtime.c for a 486.
+                    let model = if dll == "msvcrt" {
+                        CpuModel::PentiumPro
+                    } else {
+                        CpuModel::I486
+                    };
+                    let (output, exit) = run(&dir, &name, &unit, model);
                     fs::write(dir.join(format!("{}.log", unit)), &output).unwrap();
                     results(&output, exit)
                 }

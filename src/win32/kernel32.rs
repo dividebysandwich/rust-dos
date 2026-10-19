@@ -1,11 +1,33 @@
 //! KERNEL32.DLL: the process, its console and the table of functions;
 //! the other parts in the modules below.
 
+mod console;
 mod disk;
+mod env;
+mod file;
+mod global;
+mod locale;
+mod mapping;
 mod memory;
-mod module;
+mod message;
+pub(super) mod module;
+mod path;
+mod process;
+mod profile;
+mod sort;
+mod sync;
 mod text;
+mod threads;
 mod time;
+mod virtual_memory;
+
+pub(super) use locale::enum_returned;
+pub(super) use path::{change_directory, current_directory, full_path};
+pub(super) use process::{STARTUPINFO_SIZE, spawn};
+pub(super) use file::{
+    CREATE_ALWAYS, CREATE_NEW, FILE_SHARE_READ, FILE_SHARE_WRITE, GENERIC_READ, GENERIC_WRITE,
+    OPEN_ALWAYS, OPEN_EXISTING, TRUNCATE_EXISTING, new_file, open_file, open_of,
+};
 
 use super::stubs::{Api, Conv, Dll};
 use crate::cpu::Cpu;
@@ -16,6 +38,8 @@ pub static DLL: Dll = Dll {
     name: "KERNEL32.DLL",
     base: 0xBFF7_0000,
     apis: APIS,
+    vars: &[],
+    init: None,
 };
 
 const fn stdcall(
@@ -40,8 +64,8 @@ static APIS: &[Api] = &[
     stdcall("ProcessReturn", 0, 0, process_return),
     stdcall("ExitProcess", 1, 1, exit_process),
     stdcall("GetStdHandle", 2, 1, get_std_handle),
-    stdcall("WriteFile", 3, 5, write_file),
-    stdcall("WriteConsoleA", 4, 5, write_file),
+    stdcall("WriteFile", 3, 5, file::write_file),
+    stdcall("WriteConsoleA", 4, 5, file::write_file),
     stdcall("GetCommandLineA", 5, 0, get_command_line),
     stdcall("GetVersion", 6, 0, get_version),
     stdcall("GetModuleHandleA", 7, 1, get_module_handle),
@@ -105,7 +129,448 @@ static APIS: &[Api] = &[
     ),
     stdcall("WideCharToMultiByte", 41, 8, text::wide_char_to_multi_byte),
     stdcall("MultiByteToWideChar", 42, 6, text::multi_byte_to_wide_char),
+    // Where calls into the program return to (call.rs), the idle loop,
+    // and where threads start and their functions return to.
+    stdcall("CallReturn", 0, 0, call_return),
+    Api {
+        name: "Idle",
+        ordinal: 0,
+        args: 0,
+        conv: Conv::Loop,
+        handler: idle,
+    },
+    stdcall("ThreadStart", 0, 0, thread_start),
+    stdcall("ThreadReturn", 0, 0, threads::thread_return),
+    stdcall("CreateThread", 43, 6, threads::create_thread),
+    stdcall("ExitThread", 44, 1, threads::exit_thread),
+    stdcall("GetCurrentThread", 45, 0, threads::get_current_thread),
+    stdcall("GetCurrentThreadId", 46, 0, threads::get_current_thread_id),
+    stdcall("GetCurrentProcess", 47, 0, threads::get_current_process),
+    stdcall("GetCurrentProcessId", 48, 0, threads::get_current_process_id),
+    stdcall("GetExitCodeThread", 49, 2, threads::get_exit_code_thread),
+    stdcall("GetExitCodeProcess", 50, 2, threads::get_exit_code_process),
+    stdcall("TerminateThread", 51, 2, threads::terminate_thread),
+    stdcall("TerminateProcess", 52, 2, threads::terminate_process),
+    stdcall("SuspendThread", 53, 1, threads::suspend_thread),
+    stdcall("ResumeThread", 54, 1, threads::resume_thread),
+    stdcall("GetThreadPriority", 55, 1, threads::get_thread_priority),
+    stdcall("SetThreadPriority", 56, 2, threads::set_thread_priority),
+    stdcall("GetThreadContext", 57, 2, threads::get_thread_context),
+    stdcall("SetThreadContext", 58, 2, threads::set_thread_context),
+    stdcall("CloseHandle", 59, 1, threads::close_handle),
+    stdcall("DuplicateHandle", 60, 7, threads::duplicate_handle),
+    stdcall("CreateEventA", 61, 4, sync::create_event),
+    stdcall("OpenEventA", 62, 3, sync::open_event),
+    stdcall("SetEvent", 63, 1, sync::set_event),
+    stdcall("ResetEvent", 64, 1, sync::reset_event),
+    stdcall("PulseEvent", 65, 1, sync::pulse_event),
+    stdcall("CreateMutexA", 66, 3, sync::create_mutex),
+    stdcall("OpenMutexA", 67, 3, sync::open_mutex),
+    stdcall("ReleaseMutex", 68, 1, sync::release_mutex),
+    stdcall("CreateSemaphoreA", 69, 4, sync::create_semaphore),
+    stdcall("OpenSemaphoreA", 70, 3, sync::open_semaphore),
+    stdcall("ReleaseSemaphore", 71, 3, sync::release_semaphore),
+    stdcall("WaitForSingleObject", 72, 2, sync::wait_for_single_object),
+    stdcall("WaitForSingleObjectEx", 73, 3, sync::wait_for_single_object),
+    stdcall(
+        "WaitForMultipleObjects",
+        74,
+        4,
+        sync::wait_for_multiple_objects,
+    ),
+    stdcall(
+        "WaitForMultipleObjectsEx",
+        75,
+        5,
+        sync::wait_for_multiple_objects,
+    ),
+    stdcall("Sleep", 76, 1, sync::sleep),
+    stdcall("SleepEx", 77, 2, sync::sleep),
+    stdcall(
+        "InitializeCriticalSection",
+        78,
+        1,
+        sync::initialize_critical_section,
+    ),
+    stdcall("DeleteCriticalSection", 79, 1, sync::delete_critical_section),
+    stdcall("EnterCriticalSection", 80, 1, sync::enter_critical_section),
+    stdcall("LeaveCriticalSection", 81, 1, sync::leave_critical_section),
+    stdcall(
+        "TryEnterCriticalSection",
+        82,
+        1,
+        sync::try_enter_critical_section,
+    ),
+    stdcall("RaiseException", 83, 4, super::seh::raise_exception),
+    stdcall("RtlUnwind", 84, 4, super::seh::rtl_unwind),
+    stdcall(
+        "UnhandledExceptionFilter",
+        85,
+        1,
+        super::seh::unhandled_exception_filter,
+    ),
+    stdcall(
+        "SetUnhandledExceptionFilter",
+        86,
+        1,
+        super::seh::set_unhandled_exception_filter,
+    ),
+    stdcall("CreateProcessA", 87, 10, process::create_process_a),
+    stdcall("OpenProcess", 88, 3, process::open_process),
+    stdcall("GetStartupInfoA", 89, 1, process::get_startup_info),
+    stdcall("CreateRemoteThread", 90, 7, not_implemented),
+    stdcall("GetThreadTimes", 91, 5, not_implemented),
+    stdcall("GetProcessTimes", 92, 5, not_implemented),
+    stdcall(
+        "GetProcessAffinityMask",
+        93,
+        3,
+        process::get_process_affinity_mask,
+    ),
+    stdcall(
+        "SetThreadAffinityMask",
+        94,
+        2,
+        process::set_thread_affinity_mask,
+    ),
+    stdcall("GetPriorityClass", 95, 1, process::get_priority_class),
+    stdcall("SetPriorityClass", 96, 2, process::set_priority_class),
+    stdcall("ReadProcessMemory", 97, 5, process::read_process_memory),
+    stdcall("WriteProcessMemory", 98, 5, process::write_process_memory),
+    stdcall(
+        "FlushInstructionCache",
+        99,
+        3,
+        process::flush_instruction_cache,
+    ),
+    stdcall("SetErrorMode", 500, 1, process::set_error_mode),
+    stdcall("GetProcessVersion", 501, 1, process::get_process_version),
+    stdcall("FatalAppExitA", 502, 2, process::fatal_app_exit),
+    stdcall("FatalExit", 503, 1, process::fatal_exit),
+    stdcall("CreateEventW", 504, 4, not_implemented),
+    stdcall("CreateMutexW", 505, 3, not_implemented),
+    stdcall("CreateSemaphoreW", 506, 4, not_implemented),
+    stdcall("OpenEventW", 507, 3, not_implemented),
+    stdcall("OpenMutexW", 508, 3, not_implemented),
+    stdcall("OpenSemaphoreW", 509, 3, not_implemented),
+
+    stdcall("VirtualAlloc", 200, 4, virtual_memory::virtual_alloc),
+    stdcall("VirtualFree", 201, 3, virtual_memory::virtual_free),
+    stdcall("VirtualProtect", 202, 4, virtual_memory::virtual_protect),
+    stdcall("VirtualProtectEx", 203, 5, virtual_memory::virtual_protect_ex),
+    stdcall("VirtualQuery", 204, 3, virtual_memory::virtual_query),
+    stdcall("VirtualQueryEx", 205, 4, virtual_memory::virtual_query_ex),
+    stdcall("VirtualLock", 206, 2, virtual_memory::virtual_lock),
+    stdcall("VirtualUnlock", 207, 2, virtual_memory::virtual_lock),
+    stdcall("HeapCreate", 208, 3, memory::heap_create),
+    stdcall("HeapDestroy", 209, 1, memory::heap_destroy),
+    stdcall("HeapValidate", 210, 3, memory::heap_validate),
+    stdcall("HeapCompact", 211, 2, memory::heap_compact),
+    stdcall("HeapLock", 212, 1, memory::heap_lock),
+    stdcall("HeapUnlock", 213, 1, memory::heap_lock),
+    stdcall("HeapWalk", 214, 2, not_implemented),
+    stdcall("GetProcessHeaps", 215, 2, memory::get_process_heaps),
+    stdcall("GlobalAlloc", 216, 2, global::global_alloc),
+    stdcall("GlobalFree", 217, 1, global::global_free),
+    stdcall("GlobalReAlloc", 218, 3, global::global_realloc),
+    stdcall("GlobalSize", 219, 1, global::global_size),
+    stdcall("GlobalLock", 220, 1, global::global_lock),
+    stdcall("GlobalUnlock", 221, 1, global::global_unlock),
+    stdcall("GlobalHandle", 222, 1, global::global_handle),
+    stdcall("GlobalFlags", 223, 1, global::global_flags),
+    stdcall("GlobalMemoryStatus", 224, 1, global::global_memory_status),
+    stdcall("GlobalCompact", 225, 1, global::global_compact),
+    stdcall("GlobalFix", 226, 1, global::global_fix),
+    stdcall("GlobalUnfix", 227, 1, global::global_unfix),
+    stdcall("GlobalWire", 228, 1, global::global_fix),
+    stdcall("GlobalUnWire", 229, 1, global::global_unfix),
+    stdcall("LocalAlloc", 230, 2, global::global_alloc),
+    stdcall("LocalFree", 231, 1, global::global_free),
+    stdcall("LocalReAlloc", 232, 3, global::global_realloc),
+    stdcall("LocalSize", 233, 1, global::global_size),
+    stdcall("LocalLock", 234, 1, global::global_lock),
+    stdcall("LocalUnlock", 235, 1, global::global_unlock),
+    stdcall("LocalHandle", 236, 1, global::global_handle),
+    stdcall("LocalFlags", 237, 1, global::global_flags),
+    stdcall("LocalCompact", 238, 1, global::global_compact),
+    stdcall("LocalShrink", 239, 2, global::local_shrink),
+    stdcall("IsBadReadPtr", 240, 2, virtual_memory::is_bad_read_ptr),
+    stdcall("IsBadWritePtr", 241, 2, virtual_memory::is_bad_write_ptr),
+    stdcall("IsBadCodePtr", 242, 1, virtual_memory::is_bad_code_ptr),
+    stdcall("IsBadStringPtrA", 243, 2, virtual_memory::is_bad_string_ptr_a),
+    stdcall("IsBadStringPtrW", 244, 2, virtual_memory::is_bad_string_ptr_w),
+    stdcall("IsBadHugeReadPtr", 245, 2, virtual_memory::is_bad_read_ptr),
+    stdcall("IsBadHugeWritePtr", 246, 2, virtual_memory::is_bad_write_ptr),
+    stdcall("RtlMoveMemory", 247, 3, virtual_memory::rtl_move_memory),
+    stdcall("RtlFillMemory", 248, 3, virtual_memory::rtl_fill_memory),
+    stdcall("RtlZeroMemory", 249, 2, virtual_memory::rtl_zero_memory),
+    stdcall("GetSystemInfo", 250, 1, virtual_memory::get_system_info),
+    stdcall("CreateFileMappingA", 251, 6, mapping::create_file_mapping_a),
+    stdcall("CreateFileMappingW", 252, 6, not_implemented),
+    stdcall("OpenFileMappingA", 253, 3, mapping::open_file_mapping_a),
+    stdcall("OpenFileMappingW", 254, 3, not_implemented),
+    stdcall("MapViewOfFile", 255, 5, mapping::map_view_of_file),
+    stdcall("MapViewOfFileEx", 256, 6, mapping::map_view_of_file_ex),
+    stdcall("UnmapViewOfFile", 257, 1, mapping::unmap_view_of_file),
+    stdcall("FlushViewOfFile", 258, 2, mapping::flush_view_of_file),
+
+    // Files, directories, paths and the console.
+    stdcall("CreateFileA", 100, 7, file::create_file),
+    stdcall("CreateFileW", 101, 7, not_implemented_handle),
+    stdcall("ReadFile", 102, 5, file::read_file),
+    stdcall("SetFilePointer", 103, 4, file::set_file_pointer),
+    stdcall("GetFileSize", 104, 2, file::get_file_size),
+    stdcall("GetFileType", 105, 1, file::get_file_type),
+    stdcall("FlushFileBuffers", 106, 1, file::flush_file_buffers),
+    stdcall("SetEndOfFile", 107, 1, file::set_end_of_file),
+    stdcall("GetFileInformationByHandle", 108, 2, file::get_file_information_by_handle),
+    stdcall("GetFileTime", 109, 4, file::get_file_time),
+    stdcall("SetFileTime", 110, 4, file::set_file_time),
+    stdcall("LockFile", 111, 5, file::lock_file),
+    stdcall("UnlockFile", 112, 5, file::unlock_file),
+    stdcall("LockFileEx", 113, 6, file::lock_file_ex),
+    stdcall("UnlockFileEx", 114, 5, file::lock_file_ex),
+    stdcall("GetOverlappedResult", 115, 4, file::get_overlapped_result),
+    stdcall("ReadFileEx", 116, 5, file::file_ex),
+    stdcall("WriteFileEx", 117, 5, file::file_ex),
+    stdcall("_lopen", 118, 2, file::lopen),
+    stdcall("_lcreat", 119, 2, file::lcreat),
+    stdcall("_lclose", 120, 1, file::lclose),
+    stdcall("_lread", 121, 3, file::lread),
+    stdcall("_hread", 122, 3, file::lread),
+    stdcall("_lwrite", 123, 3, file::lwrite),
+    stdcall("_hwrite", 124, 3, file::lwrite),
+    stdcall("_llseek", 125, 3, file::llseek),
+    stdcall("OpenFile", 126, 3, file::open_file_16),
+    stdcall("SetHandleCount", 127, 1, file::set_handle_count),
+    stdcall("DeleteFileA", 128, 1, path::delete_file),
+    stdcall("DeleteFileW", 129, 1, not_implemented),
+    stdcall("MoveFileA", 130, 2, path::move_file),
+    stdcall("MoveFileW", 131, 2, not_implemented),
+    stdcall("CopyFileA", 132, 3, path::copy_file),
+    stdcall("CopyFileW", 133, 3, not_implemented),
+    stdcall("GetFileAttributesA", 134, 1, path::get_file_attributes),
+    stdcall("GetFileAttributesW", 135, 1, not_implemented_handle),
+    stdcall("SetFileAttributesA", 136, 2, path::set_file_attributes),
+    stdcall("SetFileAttributesW", 137, 2, not_implemented),
+    stdcall("FindFirstFileA", 138, 2, path::find_first_file),
+    stdcall("FindFirstFileW", 139, 2, not_implemented_handle),
+    stdcall("FindNextFileA", 140, 2, path::find_next_file),
+    stdcall("FindNextFileW", 141, 2, not_implemented),
+    stdcall("FindClose", 142, 1, path::find_close),
+    stdcall("CreateDirectoryA", 143, 2, path::create_directory),
+    stdcall("CreateDirectoryW", 144, 2, not_implemented),
+    stdcall("RemoveDirectoryA", 145, 1, path::remove_directory),
+    stdcall("RemoveDirectoryW", 146, 1, not_implemented),
+    stdcall("GetCurrentDirectoryA", 147, 2, path::get_current_directory),
+    stdcall("GetCurrentDirectoryW", 148, 2, not_implemented),
+    stdcall("SetCurrentDirectoryA", 149, 1, path::set_current_directory),
+    stdcall("SetCurrentDirectoryW", 150, 1, not_implemented),
+    stdcall("GetFullPathNameA", 151, 4, path::get_full_path_name),
+    stdcall("GetFullPathNameW", 152, 4, not_implemented),
+    stdcall("GetShortPathNameA", 153, 3, path::get_short_path_name),
+    stdcall("GetShortPathNameW", 154, 3, not_implemented),
+    stdcall("GetTempPathA", 155, 2, path::get_temp_path),
+    stdcall("GetTempPathW", 156, 2, not_implemented),
+    stdcall("GetTempFileNameA", 157, 4, path::get_temp_file_name),
+    stdcall("GetTempFileNameW", 158, 4, not_implemented),
+    stdcall("SearchPathA", 159, 6, path::search_path),
+    stdcall("SearchPathW", 160, 6, not_implemented),
+    stdcall("GetWindowsDirectoryA", 161, 2, path::get_windows_directory),
+    stdcall("GetWindowsDirectoryW", 162, 2, not_implemented),
+    stdcall("GetSystemDirectoryA", 163, 2, path::get_system_directory),
+    stdcall("GetSystemDirectoryW", 164, 2, not_implemented),
+    stdcall("ReadConsoleA", 165, 5, console::read_console),
+    stdcall("GetConsoleMode", 166, 2, console::get_console_mode),
+    stdcall("SetConsoleMode", 167, 2, console::set_console_mode),
+    stdcall("SetConsoleCtrlHandler", 168, 2, console::set_console_ctrl_handler),
+    stdcall("GetConsoleScreenBufferInfo", 169, 2, console::get_console_screen_buffer_info),
+    stdcall("SetConsoleCursorPosition", 170, 2, console::set_console_cursor_position),
+    stdcall("FillConsoleOutputCharacterA", 171, 5, console::fill_console_output_character),
+    stdcall("FillConsoleOutputAttribute", 172, 5, console::fill_console_output_attribute),
+    stdcall("WriteConsoleOutputA", 173, 5, console::write_console_output),
+    stdcall("SetConsoleTextAttribute", 174, 2, console::set_console_text_attribute),
+    stdcall("AllocConsole", 175, 0, console::alloc_console),
+    stdcall("FreeConsole", 176, 0, console::free_console),
+    stdcall("GetConsoleCP", 177, 0, console::get_console_cp),
+    stdcall("GetConsoleOutputCP", 178, 0, console::get_console_cp),
+    stdcall("SetStdHandle", 179, 2, console::set_std_handle),
+    stdcall("GetNumberOfConsoleInputEvents", 180, 2, console::get_number_of_console_input_events),
+    stdcall("PeekConsoleInputA", 181, 4, console::peek_console_input),
+    stdcall("ReadConsoleInputA", 182, 4, console::read_console_input),
+    stdcall("FlushConsoleInputBuffer", 183, 1, console::flush_console_input_buffer),
+    stdcall("SetConsoleTitleA", 184, 1, console::set_console_title),
+
+    // Where the main thread starts when DLLs that came with the program
+    // have entry points, which run before the program's.
+    stdcall("ProcessStart", 0, 0, module::process_start),
+    stdcall("LoadLibraryA", 300, 1, module::load_library),
+    stdcall("LoadLibraryExA", 301, 3, module::load_library_ex),
+    stdcall("FreeLibrary", 302, 1, module::free_library),
+    stdcall(
+        "FreeLibraryAndExitThread",
+        303,
+        2,
+        module::free_library_and_exit_thread,
+    ),
+    stdcall("GetModuleFileNameA", 304, 3, module::get_module_file_name),
+    stdcall("GetModuleFileNameW", 305, 3, not_implemented),
+    stdcall(
+        "DisableThreadLibraryCalls",
+        306,
+        1,
+        module::disable_thread_library_calls,
+    ),
+    stdcall("FindResourceA", 307, 3, module::find_resource),
+    stdcall("FindResourceExA", 308, 4, module::find_resource_ex),
+    stdcall("LoadResource", 309, 2, module::load_resource),
+    stdcall("LockResource", 310, 1, module::lock_resource),
+    stdcall("SizeofResource", 311, 2, module::sizeof_resource),
+    stdcall("FreeResource", 312, 1, module::free_resource),
+    stdcall("EnumResourceTypesA", 313, 3, module::enum_resource_types),
+    stdcall("EnumResourceNamesA", 314, 4, module::enum_resource_names),
+    stdcall("LoadLibraryW", 315, 1, not_implemented),
+    stdcall("LoadLibraryExW", 316, 3, not_implemented),
+    stdcall("GetModuleHandleW", 317, 1, not_implemented),
+
+    stdcall("lstrlenA", 400, 1, text::lstrlen_a),
+    stdcall("lstrcpyA", 401, 2, text::lstrcpy_a),
+    stdcall("lstrcpynA", 402, 3, text::lstrcpyn_a),
+    stdcall("lstrcatA", 403, 2, text::lstrcat_a),
+    stdcall("lstrcmpA", 404, 2, text::lstrcmp_a),
+    stdcall("lstrcmpiA", 405, 2, text::lstrcmpi_a),
+    stdcall("lstrlenW", 406, 1, text::lstrlen_w),
+    stdcall("lstrcpyW", 407, 2, not_implemented),
+    stdcall("lstrcpynW", 408, 3, not_implemented),
+    stdcall("lstrcatW", 409, 2, not_implemented),
+    stdcall("lstrcmpW", 410, 2, not_implemented),
+    stdcall("lstrcmpiW", 411, 2, not_implemented),
+    stdcall("GetACP", 412, 0, text::get_acp),
+    stdcall("GetOEMCP", 413, 0, text::get_oem_cp),
+    stdcall("GetCPInfo", 414, 2, text::get_cp_info),
+    stdcall("IsValidCodePage", 415, 1, text::is_valid_code_page),
+    stdcall("IsDBCSLeadByte", 416, 1, text::is_dbcs_lead_byte),
+    stdcall("IsDBCSLeadByteEx", 417, 2, text::is_dbcs_lead_byte_ex),
+    stdcall("GetStringTypeA", 418, 5, sort::get_string_type_a),
+    stdcall("GetStringTypeExA", 419, 5, sort::get_string_type_a),
+    stdcall("GetStringTypeW", 420, 4, not_implemented),
+    stdcall("GetStringTypeExW", 421, 5, not_implemented),
+    stdcall("CompareStringA", 422, 6, sort::compare_string_a),
+    stdcall("CompareStringW", 423, 6, not_implemented),
+    stdcall("LCMapStringA", 424, 6, sort::lc_map_string_a),
+    stdcall("LCMapStringW", 425, 6, not_implemented),
+    stdcall("GetLocaleInfoA", 426, 4, locale::get_locale_info_a),
+    stdcall("GetLocaleInfoW", 427, 4, not_implemented),
+    stdcall("SetLocaleInfoA", 428, 3, locale::set_locale_info_a),
+    stdcall("GetUserDefaultLCID", 429, 0, locale::get_default_lcid),
+    stdcall("GetSystemDefaultLCID", 430, 0, locale::get_default_lcid),
+    stdcall("GetUserDefaultLangID", 431, 0, locale::get_default_lang_id),
+    stdcall("GetSystemDefaultLangID", 432, 0, locale::get_default_lang_id),
+    stdcall("GetThreadLocale", 433, 0, locale::get_default_lcid),
+    stdcall("SetThreadLocale", 434, 1, locale::set_thread_locale),
+    stdcall("IsValidLocale", 435, 2, locale::is_valid_locale),
+    stdcall("ConvertDefaultLocale", 436, 1, locale::convert_default_locale),
+    stdcall("EnumSystemLocalesA", 437, 2, locale::enum_system_locales_a),
+    stdcall("EnumDateFormatsA", 438, 3, locale::enum_date_formats_a),
+    stdcall("EnumTimeFormatsA", 439, 3, locale::enum_time_formats_a),
+    stdcall("GetDateFormatA", 440, 6, locale::get_date_format_a),
+    stdcall("GetDateFormatW", 441, 6, not_implemented),
+    stdcall("GetTimeFormatA", 442, 6, locale::get_time_format_a),
+    stdcall("GetTimeFormatW", 443, 6, not_implemented),
+    stdcall("GetNumberFormatA", 444, 6, locale::get_number_format_a),
+    stdcall("GetNumberFormatW", 445, 6, not_implemented),
+    stdcall("GetCurrencyFormatA", 446, 6, locale::get_currency_format_a),
+    stdcall("GetCurrencyFormatW", 447, 6, not_implemented),
+    stdcall("FormatMessageA", 448, 7, message::format_message_a),
+    stdcall("FormatMessageW", 449, 7, not_implemented),
+    stdcall("GetEnvironmentStrings", 450, 0, env::get_environment_strings),
+    stdcall("GetEnvironmentStringsA", 451, 0, env::get_environment_strings),
+    stdcall("GetEnvironmentStringsW", 452, 0, not_implemented),
+    stdcall("FreeEnvironmentStringsA", 453, 1, env::free_environment_strings_a),
+    stdcall("FreeEnvironmentStringsW", 454, 1, not_implemented),
+    stdcall("ExpandEnvironmentStringsA", 455, 3, env::expand_environment_strings_a),
+    stdcall("ExpandEnvironmentStringsW", 456, 3, not_implemented),
+    stdcall("GetEnvironmentVariableW", 457, 3, not_implemented),
+    stdcall("SetEnvironmentVariableW", 458, 2, not_implemented),
+    stdcall("GetComputerNameA", 459, 2, env::get_computer_name_a),
+    stdcall("GetComputerNameW", 460, 2, not_implemented),
+    stdcall("SetComputerNameA", 461, 1, env::set_computer_name_a),
+    stdcall("GetPrivateProfileStringA", 462, 6, profile::get_private_profile_string_a),
+    stdcall("GetPrivateProfileStringW", 463, 6, not_implemented),
+    stdcall("WritePrivateProfileStringA", 464, 4, profile::write_private_profile_string_a),
+    stdcall("WritePrivateProfileStringW", 465, 4, not_implemented),
+    stdcall("GetPrivateProfileIntA", 466, 4, profile::get_private_profile_int_a),
+    stdcall("GetProfileIntA", 467, 3, profile::get_profile_int_a),
+    stdcall("GetProfileStringA", 468, 5, profile::get_profile_string_a),
+    stdcall("WriteProfileStringA", 469, 3, profile::write_profile_string_a),
+    stdcall("GetPrivateProfileSectionA", 470, 4, profile::get_private_profile_section_a),
+    stdcall("GetProfileSectionA", 471, 3, profile::get_profile_section_a),
+    stdcall("GetPrivateProfileSectionNamesA", 472, 3, profile::get_private_profile_section_names_a),
+    stdcall("GetPrivateProfileSectionNamesW", 473, 3, not_implemented),
+    stdcall("WritePrivateProfileSectionA", 474, 3, profile::write_private_profile_section_a),
+    stdcall("WriteProfileSectionA", 475, 2, profile::write_profile_section_a),
+    stdcall("OutputDebugStringA", 476, 1, env::output_debug_string_a),
+    stdcall("OutputDebugStringW", 477, 1, not_implemented),
+    stdcall("Beep", 478, 2, env::beep),
+    stdcall("GetSystemTimeAsFileTime", 479, 1, time::get_system_time_as_file_time),
+    stdcall("QueryPerformanceCounter", 480, 1, env::query_performance_counter),
+    stdcall("QueryPerformanceFrequency", 481, 1, env::query_performance_frequency),
+    stdcall("CompareFileTime", 482, 2, time::compare_file_time),
+    stdcall("SetSystemTime", 483, 1, time::set_system_time),
+    stdcall("SetLocalTime", 484, 1, time::set_system_time),
+    stdcall("MulDiv", 485, 3, env::mul_div),
 ];
+
+/// The places in `APIS` of the system's own stubs.
+const CALL_RETURN: usize = 43;
+const IDLE: usize = 44;
+const THREAD_START: usize = 45;
+const THREAD_RETURN: usize = 46;
+
+/// Where calls into the program return to (call.rs).
+pub fn call_return_address() -> u32 {
+    super::stubs::stub_address(0, CALL_RETURN)
+}
+
+/// Let go of the file mappings no handle or view holds any more.
+pub fn sweep_mappings(cpu: &mut Cpu) {
+    mapping::sweep(cpu);
+}
+
+/// Where the main thread starts when DLLs' entry points run first.
+pub fn process_start_address() -> u32 {
+    let index = APIS.iter().position(|a| a.name == "ProcessStart");
+    super::stubs::stub_address(0, index.expect("ProcessStart"))
+}
+
+/// The idle loop's stub (thread.rs).
+pub fn idle_address() -> u32 {
+    super::stubs::stub_address(0, IDLE)
+}
+
+/// Where a new thread starts, and where its function returns to.
+pub fn thread_start_address() -> u32 {
+    super::stubs::stub_address(0, THREAD_START)
+}
+
+pub fn thread_return_address() -> u32 {
+    super::stubs::stub_address(0, THREAD_RETURN)
+}
+
+fn call_return(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    super::call::returned(cpu);
+    None
+}
+
+fn idle(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    super::thread::idle_trap(cpu);
+    None
+}
+
+fn thread_start(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    super::thread::start(cpu);
+    None
+}
 
 /// The id of `ProcessReturn`, which the loader puts on the stack.
 pub const PROCESS_RETURN: usize = 0;
@@ -115,7 +580,9 @@ const FALSE: u32 = 0;
 const INVALID_HANDLE_VALUE: u32 = 0xFFFF_FFFF;
 /// Error codes (GetLastError).
 const ERROR_PATH_NOT_FOUND: u32 = 3;
+const ERROR_ACCESS_DENIED: u32 = 5;
 const ERROR_INVALID_HANDLE: u32 = 6;
+const ERROR_ALREADY_EXISTS: u32 = 183;
 const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
 const ERROR_INVALID_DRIVE: u32 = 15;
 const ERROR_INVALID_PARAMETER: u32 = 87;
@@ -137,6 +604,13 @@ fn not_implemented(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(FALSE)
 }
 
+/// `not_implemented` for a function that fails with -1:
+/// INVALID_HANDLE_VALUE, INVALID_FILE_ATTRIBUTES.
+fn not_implemented_handle(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    set_error(cpu, ERROR_CALL_NOT_IMPLEMENTED);
+    Some(INVALID_HANDLE_VALUE)
+}
+
 /// The string at `at`, read as ANSI text into a Rust string one char per
 /// byte (`dosstr`). None if a page isn't there.
 fn string_at(cpu: &mut Cpu, at: u32) -> Option<String> {
@@ -144,14 +618,17 @@ fn string_at(cpu: &mut Cpu, at: u32) -> Option<String> {
     (!cpu.bus.guest_faulted()).then(|| crate::dosstr::from_bytes(&bytes))
 }
 
+/// The program's entry point returned: its main thread ends with the
+/// value it returned, and with it the process, unless other threads run.
 fn process_return(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     let code = cpu.eax();
-    super::exit(cpu, code);
+    module::exit_thread(cpu, code);
     None
 }
 
+/// ExitProcess: the DLLs learn that the process ends, then it does.
 fn exit_process(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    super::exit(cpu, args[0]);
+    module::exit_process(cpu, args[0]);
     None
 }
 
@@ -159,67 +636,11 @@ fn exit_process(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// and -12): handles of DOS's handles 0, 1 and 2.
 fn get_std_handle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let process = super::process(cpu);
-    let dos = match args[0] as i32 {
-        -10 => 0,
-        -11 => 1,
-        -12 => 2,
+    match args[0] as i32 {
+        n @ -12..=-10 => Some(process.std[(-10 - n) as usize]),
         _ => {
             process.last_error = ERROR_INVALID_HANDLE;
-            return Some(INVALID_HANDLE_VALUE);
-        }
-    };
-    Some(process.dos_handle(dos))
-}
-
-/// How much of a WriteFile's buffer goes to DOS at a time: DOS counts
-/// bytes in 16 bits, and the program's length is its own.
-const WRITE_CHUNK: u32 = 0x8000;
-
-/// WriteFile and WriteConsoleA: `n` bytes at `buffer` to `handle`, the
-/// count written to `*written` (when it isn't NULL).
-fn write_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let &[handle, buffer, n, written, _] = args else {
-        unreachable!()
-    };
-    let Some(dos) = super::process(cpu).dos_of(handle) else {
-        super::process(cpu).last_error = ERROR_INVALID_HANDLE;
-        return Some(FALSE);
-    };
-    let mut count = 0u32;
-    let mut error = None;
-    loop {
-        let len = (n - count).min(WRITE_CHUNK);
-        let mut data = vec![0u8; len as usize];
-        cpu.bus
-            .guest_read_bytes(buffer.wrapping_add(count), &mut data);
-        if cpu.bus.guest_faulted() {
-            return None;
-        }
-        let result = super::dos(cpu, |cpu| {
-            crate::interrupts::int21::write_handle(cpu, dos, &data)
-        });
-        match result {
-            Ok(done) => {
-                count += done as u32;
-                // A short write is a full disk: the rest isn't written.
-                if (done as u32) < len || count == n {
-                    break;
-                }
-            }
-            Err(code) => {
-                error = Some(code);
-                break;
-            }
-        }
-    }
-    if written != 0 {
-        cpu.bus.guest_write_32(written, count);
-    }
-    match error {
-        None => Some(TRUE),
-        Some(code) => {
-            super::process(cpu).last_error = code as u32;
-            Some(FALSE)
+            Some(INVALID_HANDLE_VALUE)
         }
     }
 }
@@ -234,7 +655,8 @@ fn get_version(_: &mut Cpu, _: &[u32]) -> Option<u32> {
 }
 
 /// The module named `name` (with ".DLL" when it has no extension), or
-/// with NULL the program's.
+/// with NULL the program's. Windows 95 knows modules by their file
+/// names: a directory in `name` doesn't matter.
 fn get_module_handle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if args[0] == 0 {
         return Some(super::process(cpu).image_base);
@@ -278,11 +700,15 @@ fn variable(process: &super::Process, name: &str) -> Option<usize> {
 
 /// The value of the variable at `args[0]` into the buffer at `args[1]` of
 /// `args[2]` bytes: its length, or when the buffer is too small, the size
-/// it needs.
+/// it needs. No name is found for NULL.
 fn get_environment_variable(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[name, buffer, size] = args else {
         unreachable!()
     };
+    if name == 0 {
+        set_error(cpu, ERROR_ENVVAR_NOT_FOUND);
+        return Some(0);
+    }
     let name = string_at(cpu, name)?;
     let process = super::process(cpu);
     let Some(i) = variable(process, &name) else {
@@ -303,12 +729,12 @@ fn get_environment_variable(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// Set the variable at `args[0]` to the string at `args[1]`, or with NULL
-/// remove it.
+/// or, as on Windows 95, an empty string remove it.
 fn set_environment_variable(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let name = string_at(cpu, args[0])?;
     let value = match args[1] {
         0 => None,
-        at => Some(string_at(cpu, at)?),
+        at => Some(string_at(cpu, at)?).filter(|v| !v.is_empty()),
     };
     if name.is_empty() || name.contains('=') {
         set_error(cpu, ERROR_INVALID_PARAMETER);

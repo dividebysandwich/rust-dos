@@ -83,8 +83,9 @@ pub(crate) fn write_handle(cpu: &mut Cpu, handle: u16, data: &[u8]) -> Result<u1
 }
 
 /// Write `data` to the open file `sft`, handle `handle` of the running
-/// program (AH=40h with bytes to write).
-fn write_open_file(cpu: &mut Cpu, handle: u16, sft: u16, data: &[u8]) -> Result<u16, u8> {
+/// program (AH=40h with bytes to write). Kernel32's WriteFile writes so
+/// to the files it opened, which have no handle (0FFFFh).
+pub(crate) fn write_open_file(cpu: &mut Cpu, handle: u16, sft: u16, data: &[u8]) -> Result<u16, u8> {
     let count = data.len();
     if let Some(n) = cpu.bus.disk.handle_device(sft).and_then(|d| d.com_port())
         && cpu.bus.serial.ports[n].is_some()
@@ -314,9 +315,8 @@ fn con_echo(cpu: &mut Cpu, text: &[u8]) {
 /// there (a beep past that), Backspace takes one back, and Esc starts the
 /// line again after a backslash. The line once Enter is pressed; None
 /// while it waits for keys (`hle_wait`), the line so far kept for the call
-/// that goes on.
-fn edit_line(cpu: &mut Cpu, max: usize) -> Option<Vec<u8>> {
-    let buffer = (cpu.ds(), cpu.dx());
+/// that goes on, which has the same `buffer` (the caller's DS:DX).
+fn edit_line(cpu: &mut Cpu, max: usize, buffer: (u16, u16)) -> Option<Vec<u8>> {
     let mut line = cpu.con_line.take().filter(|l| l.buffer == buffer).unwrap_or(ConLine { buffer, text: Vec::new() });
     // The keys typed so far, as many as a BIOS buffer holds at a time.
     for _ in 0..BIOS_KEYS {
@@ -347,6 +347,28 @@ fn edit_line(cpu: &mut Cpu, max: usize) -> Option<Vec<u8>> {
     cpu.con_line = Some(line);
     cpu.key_wait();
     None
+}
+
+/// Read at most `count` bytes from the console as a read of CON does: a
+/// line at a time, typed and edited at the keyboard until Enter, and
+/// handed out with its CR LF over as many reads as it takes. The end of
+/// the host's standard input (`rust-dos run`) is the end of the file: no
+/// bytes. None while it waits for keys (`edit_line`, with `buffer`).
+/// Kernel32's ReadFile and ReadConsoleA and the built-in Windows's C
+/// runtime read the console so too.
+pub(crate) fn read_console(cpu: &mut Cpu, count: usize, buffer: (u16, u16)) -> Option<Vec<u8>> {
+    if cpu.con_pending.is_empty() && count > 0 {
+        if cpu.host_console.as_ref().is_some_and(|c| c.input_ended)
+            && crate::keyboard::peek_keystroke(&mut cpu.bus).is_none()
+        {
+            return Some(Vec::new());
+        }
+        let line = edit_line(cpu, 127, buffer)?;
+        con_echo(cpu, b"\r\n");
+        cpu.con_pending.extend(line);
+        cpu.con_pending.extend([0x0D, 0x0A]);
+    }
+    Some(cpu.con_pending.drain(..count.min(cpu.con_pending.len())).collect())
 }
 
 /// The keystrokes a BIOS keyboard buffer holds: what a call reading the
@@ -534,9 +556,10 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         0x0A => {
             let buffer = cpu.get_physical_addr(cpu.ds(), cpu.dx()) as u32;
             let max = cpu.bus.guest_read_8(buffer) as usize;
+            let key = (cpu.ds(), cpu.dx());
             if max > 0
                 && cpu.bus.guest_probe(buffer, max + 2, true)
-                && let Some(line) = edit_line(cpu, max - 1)
+                && let Some(line) = edit_line(cpu, max - 1, key)
             {
                 con_echo(cpu, b"\r");
                 cpu.bus.guest_write_8(buffer + 1, line.len() as u8);
@@ -1285,25 +1308,8 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 return;
             }
             if cpu.bus.disk.handle_device(sft) == Some(CharDevice::Con) {
-                // The console: read a line at a time as DOS does,
-                // waiting for Enter, and hand out the line with its CR LF
-                // over as many reads as it takes.
-                if cpu.con_pending.is_empty() && count > 0 {
-                    // The end of the host's standard input is the end of
-                    // the file (`rust-dos run`).
-                    if cpu.host_console.as_ref().is_some_and(|c| c.input_ended)
-                        && crate::keyboard::peek_keystroke(&mut cpu.bus).is_none()
-                    {
-                        cpu.set_ax(0);
-                        cpu.set_cpu_flag(CpuFlags::CF, false);
-                        return;
-                    }
-                    let Some(line) = edit_line(cpu, 127) else { return };
-                    con_echo(cpu, b"\r\n");
-                    cpu.con_pending.extend(line);
-                    cpu.con_pending.extend([0x0D, 0x0A]);
-                }
-                let taken: Vec<u8> = cpu.con_pending.drain(..count.min(cpu.con_pending.len())).collect();
+                let buffer = (cpu.ds(), cpu.dx());
+                let Some(taken) = read_console(cpu, count, buffer) else { return };
                 cpu.bus.guest_write_bytes(buf_addr, &taken);
                 cpu.set_ax(taken.len() as u16);
                 cpu.set_cpu_flag(CpuFlags::CF, false);

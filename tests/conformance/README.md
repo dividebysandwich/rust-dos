@@ -9,11 +9,24 @@ where they differ from NT's.
 ## Where they come from
 
 `wine/` holds files from Wine 1.2.3 (tag `wine-1.2.3`, commit
-`9dc5af175a5537b1f98af34cdcbdc22639b36d53`), unchanged:
+`9dc5af175a5537b1f98af34cdcbdc22639b36d53`), unchanged but for the
+change listed below:
 
 - `include/wine/test.h`, the test framework;
-- `kernel32/`: `drive.c`, `fiber.c`, `time.c`, `timer.c`, `version.c`
-  from `dlls/kernel32/tests/`.
+- `kernel32/`: `alloc.c`, `codepage.c`, `directory.c`, `drive.c`,
+  `environ.c`, `fiber.c`, `file.c`, `format_msg.c`, `heap.c`,
+  `loader.c`, `locale.c`, `module.c`, `path.c`, `profile.c`, `sync.c`,
+  `thread.c`, `time.c`, `timer.c`, `version.c`, `virtual.c` from
+  `dlls/kernel32/tests/`;
+- `advapi32/`: `registry.c` from `dlls/advapi32/tests/`;
+- `msvcrt/`: `data.c`, `dir.c`, `environ.c`, `file.c`, `heap.c`,
+  `printf.c`, `scanf.c`, `signal.c`, `string.c`, `time.c` from
+  `dlls/msvcrt/tests/`. `misc.c` is left out: it includes Wine's own
+  `msvcrt.h`, which isn't among these files.
+
+`heap.c` has the values of the `FLG_HEAP_*` and `FLG_POOL_ENABLE_TAGGING`
+flags defined after its includes, from Wine's `winternl.h`, as MinGW's
+lacks them.
 
 Of the 1.x releases compared (1.0.1, 1.2.3, 1.4.1, 1.6.2, 1.8.7), 1.2.3's
 kernel32 tests mention Windows 9x the most: later releases took many of
@@ -24,10 +37,28 @@ They are under the LGPL, version 2.1 or later (`wine/COPYING.LIB`), with
 their copyright notices. rust-dos is GPL-2.0-or-later, which LGPL code
 may be used under.
 
-`runtime/runtime.c` is rust-dos's own: the C runtime the tests link in
-place of MSVCRT.DLL, which the built-in Windows doesn't have yet. It has
-the startup code and the parts of the C library that the framework and
-the tests use, written on KERNEL32 alone.
+`runtime/compat.h` is rust-dos's own: the few names the tests take from
+Wine's headers that MinGW's lack (`__ms_va_list` and its macros,
+`LOCALE_RETURN_GENITIVE_NAMES`). Each test file is built with it
+included first, so the files stay unchanged.
+
+`runtime/runtime.c` is rust-dos's own: the C runtime the kernel32
+tests link in place of MSVCRT.DLL, so that they test KERNEL32 alone. It
+has the startup code and the parts of the C library that the framework
+and the tests use, written on KERNEL32 alone.
+
+The msvcrt tests test the built-in MSVCRT.DLL, so they are linked as
+MinGW links any program: its startup code (`crt2.o`) and `-lmsvcrt`,
+without `runtime.c`. They are built with two more options:
+
+- `-fno-printf-return-value`, so that GCC calls sprintf for what it
+  returns instead of counting it by C99's rules, which MSVCRT's
+  formats (`%I64d`, `%lld`) don't follow;
+- `-D__NO_ISOCEXT`, so that MinGW's headers keep MSVCRT's strtod
+  instead of putting MinGW's own in its place.
+
+`crt2.o` uses CMOVcc, so these programs run on a Pentium Pro; the
+kernel32 ones on a 486.
 
 ## Running them
 
@@ -68,6 +99,22 @@ the file's diff. When it is right, write the results anew:
 ```sh
 CONFORMANCE_BLESS=1 cargo test --test conformance_tests
 ```
+
+The results that aren't clean, and why:
+
+- kernel32 `file.c:350`: FindFirstFileA gives "testfile.xxx" back as
+  "TESTFILE.XXX": without long file names, which the built-in Windows
+  doesn't have yet, DOS keeps names in upper case.
+- kernel32 `module.c:259`, `270`, `282`: LoadLibraryExA of an empty
+  file that another handle has open for writing fails with
+  ERROR_BAD_FORMAT; Windows 9x's loader can't open it, and says
+  ERROR_FILE_NOT_FOUND. `367` and `370`: COMCTL32.DLL isn't there to
+  load.
+- msvcrt `environ.c:51`: `system` can't start a command interpreter,
+  which is a DOS program. `system(NULL)` still returns 1, as Windows
+  95's does, since there is one there.
+- msvcrt `file.c:1339`: `_pipe` fails with EMFILE, as KERNEL32 has no
+  anonymous pipes yet.
 
 ## Adding tests
 

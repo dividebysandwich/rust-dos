@@ -232,9 +232,17 @@ exceptions run as the program's own code on top of that.
   have them (`INT 21h` AX=71xxh returns 7100h, `int21.rs:2178`), so
   kernel32 works on host directories' names directly, and `fat.rs` needs
   to read and write LFN entries for images.
-- The registry is a tree in Rust, seeded with the keys games read
-  (`HKLM\Software\Microsoft\Windows\CurrentVersion`, DirectX's version,
-  the display and sound settings) and saved per game through `hostfs`.
+- The registry is a tree in Rust (`src/win32/registry.rs`), the
+  system's, shared by the processes and kept in save states. It is seeded
+  with the keys games read (`HKLM\Software\Microsoft\Windows\CurrentVersion`
+  with VersionNumber 4.00.950, DirectX's version, the display settings,
+  the user and computer names) and kept on drive C: as
+  `C:\REGISTRY.REG`, a REGEDIT4 file that can be read and edited by hand.
+  A program's first registry call reads the seed with the file's keys
+  and values over it; changes are written back when a key is closed or
+  flushed and when the last process ends. Without a writable C: the
+  registry lasts until then. A game's profile brings its keys as a .reg
+  file, which the same import puts in (`[-key]` and `"name"=-` delete).
 - `GetVersion` and `GetVersionEx` say Windows 95 (4.0.950, platform 1),
   later configurable to 98 (4.10.1998).
 
@@ -360,7 +368,8 @@ Each phase ends with programs that run, checked by tests.
 - Structured exceptions.
 - advapi32's registry.
 - Enough of `msvcrt.dll` for programs that link the CRT dynamically.
-- A debug server endpoint for processes, modules, threads and handles.
+- A debug server endpoint for processes, modules, threads and handles
+  (`GET /api/win32`, described in `docs/llm-debugging.md`).
 
 Milestone: console programs built with MSVC 4 to 6, Watcom and Borland
 run, as do HX's sample programs.
@@ -457,14 +466,15 @@ traces call, not whole DLLs.
     and its tests of that time accept 9x's results (`broken()`,
     `win_skip`); later trees expect NT's in places.
   - A test file is copied once the built-in DLL has the functions it
-    calls directly, so the set grows with the DLLs: kernel32's `drive`,
-    `fiber`, `time`, `timer` and `version` now; its `file`, `heap`,
-    `sync`, `thread` and `process` in phase 1; user32's `msg` and `win`
-    in phase 2; ddraw's and dsound's in phase 3.
-  - `tests/conformance_tests.rs` builds them with MinGW as 486 code,
-    linked with a small C runtime of rust-dos's own on KERNEL32 until
-    there is an MSVCRT, and runs each under the built-in Windows. No
-    binaries are checked in.
+    calls directly, so the set grows with the DLLs: twenty of
+    kernel32's files, advapi32's `registry` and ten of msvcrt's now
+    (the folder's README lists them); user32's `msg` and `win` in phase
+    2; ddraw's and dsound's in phase 3.
+  - `tests/conformance_tests.rs` builds them with MinGW and runs each
+    under the built-in Windows: kernel32's and advapi32's as 486 code
+    linked with a small C runtime of rust-dos's own on KERNEL32, so they
+    test KERNEL32 alone; msvcrt's linked with the built-in MSVCRT.DLL,
+    on a Pentium Pro. No binaries are checked in.
   - Their results (each file's summary, the places of the checks that
     fail and the tests skipped, or how a program ended early) must be
     those in `expected.txt`. Any difference, better or worse, fails the

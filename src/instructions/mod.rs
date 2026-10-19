@@ -174,8 +174,10 @@ pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
         Bts => logic::bit_test(cpu, instr, BitOp::Set),
         Btr => logic::bit_test(cpu, instr, BitOp::Reset),
         Btc => logic::bit_test(cpu, instr, BitOp::Complement),
-        Bsf => logic::bit_scan(cpu, instr, true),
-        Bsr => logic::bit_scan(cpu, instr, false),
+        // TZCNT and LZCNT are BSF and BSR with an F3 prefix, which the
+        // processors here, older than BMI1 and LZCNT, ignore.
+        Bsf | Tzcnt => logic::bit_scan(cpu, instr, true),
+        Bsr | Lzcnt => logic::bit_scan(cpu, instr, false),
         Seto | Setno | Setb | Setae | Sete | Setne | Setbe | Seta | Sets | Setns | Setp | Setnp
         | Setl | Setge | Setle | Setg => logic::setcc(cpu, instr),
 

@@ -417,6 +417,7 @@ kbd {
     <option value="xms">XMS</option>
     <option value="drive">Drives</option>
     <option value="gus">Ultrasound</option>
+    <option value="win32">Win32 processes</option>
     <option value="pagewalk">Page walk…</option>
   </select>
   <input type="text" id="table-addr" placeholder="lin:00401000" style="display:none">
@@ -1312,13 +1313,39 @@ function renderJson(v) {
   return parts;
 }
 
+// The built-in Windows: each process's fields, then its modules, threads
+// and handles as tables.
+function renderWin32(v) {
+  const parts = renderJson({ enabled: v.enabled, active: v.active, pending: v.pending });
+  const waitText = (w) => {
+    if (!w) return "";
+    const objects = w.objects.map((o) => `${o.kind} ${o.object}` + (o.handle === null ? "" : ` (handle ${o.handle})`));
+    if (w.critical_section) objects.push(`critical section ${w.critical_section}`);
+    const timeout = w.timeout_ms === null ? "" : `, ${w.timeout_ms} ms left`;
+    return (objects.length ? objects.join(w.all ? " and " : " or ") : "sleep") + timeout;
+  };
+  for (const p of v.processes) {
+    const { modules, threads, handles, ...fields } = p;
+    parts.push(el("div", { class: "subhead", textContent: `${p.name} (${p.id})` }), ...renderJson(fields));
+    const lists = [
+      ["Modules", modules],
+      ["Threads", threads.map(({ wait, ...t }) => ({ ...t, wait: waitText(wait) }))],
+      ["Handles", handles],
+    ];
+    for (const [title, list] of lists) {
+      parts.push(el("div", { class: "subhead", textContent: title }), ...renderJson(list));
+    }
+  }
+  return parts;
+}
+
 const loadTable = act(async () => {
   const kind = $("#table-kind").value;
   const path = kind === "pagewalk"
     ? `/api/pagewalk?addr=${encodeURIComponent($("#table-addr").value || "lin:0")}`
     : `/api/${kind}`;
   const v = await api(path);
-  $("#tables").replaceChildren(...renderJson(v));
+  $("#tables").replaceChildren(...(kind === "win32" ? renderWin32(v) : renderJson(v)));
 });
 
 function setupTabs() {

@@ -3,11 +3,103 @@
 # the checks that failed and the tests skipped (by file and line), or how
 # the program ended before its summary. Write them anew with
 # CONFORMANCE_BLESS=1 cargo test --test conformance_tests.
+advapi32/registry: registry: 208 tests executed (0 marked as todo, 0 failures), 17 skipped.
+advapi32/registry: skipped registry.c:234 (x8)
+advapi32/registry: skipped registry.c:539
+advapi32/registry: skipped registry.c:658
+advapi32/registry: skipped registry.c:972
+advapi32/registry: skipped registry.c:1119
+advapi32/registry: skipped registry.c:1450
+advapi32/registry: skipped registry.c:1705
+advapi32/registry: skipped registry.c:1859
+advapi32/registry: skipped registry.c:1579
+advapi32/registry: skipped registry.c:1354
+kernel32/alloc: alloc: 54 tests executed (0 marked as todo, 0 failures), 0 skipped.
+kernel32/codepage: codepage: 77 tests executed (0 marked as todo, 0 failures), 4 skipped.
+kernel32/codepage: skipped codepage.c:260 (x2)
+kernel32/codepage: skipped codepage.c:317 (x2)
+kernel32/directory: directory: 52 tests executed (0 marked as todo, 0 failures), 4 skipped.
+kernel32/directory: skipped directory.c:66
+kernel32/directory: skipped directory.c:132
+kernel32/directory: skipped directory.c:348
+kernel32/directory: skipped directory.c:455
 kernel32/drive: drive: 62 tests executed (0 marked as todo, 0 failures), 2 skipped.
 kernel32/drive: skipped drive.c:68
 kernel32/drive: skipped drive.c:174
+kernel32/environ: environ: 35 tests executed (0 marked as todo, 0 failures), 4 skipped.
+kernel32/environ: skipped environ.c:151
+kernel32/environ: skipped environ.c:362
+kernel32/environ: skipped environ.c:387
+kernel32/environ: skipped environ.c:468
 kernel32/fiber: fiber: 0 tests executed (0 marked as todo, 0 failures), 1 skipped.
 kernel32/fiber: skipped fiber.c:190
+kernel32/file: file: 489791 tests executed (0 marked as todo, 1 failure), 16 skipped.
+kernel32/file: failed file.c:350
+kernel32/file: skipped file.c:757
+kernel32/file: skipped file.c:924 (x2)
+kernel32/file: skipped file.c:926 (x3)
+kernel32/file: skipped file.c:976
+kernel32/file: skipped file.c:1059
+kernel32/file: skipped file.c:1153
+kernel32/file: skipped file.c:1169
+kernel32/file: skipped file.c:1316
+kernel32/file: skipped file.c:1486
+kernel32/file: skipped file.c:2185 (x2)
+kernel32/file: skipped file.c:2828
+kernel32/file: skipped file.c:3036
+kernel32/format_msg: format_msg: 190 tests executed (0 marked as todo, 0 failures), 2 skipped.
+kernel32/format_msg: skipped format_msg.c:724
+kernel32/format_msg: skipped format_msg.c:1639
+kernel32/heap: heap: 364 tests executed (0 marked as todo, 0 failures), 2 skipped.
+kernel32/heap: skipped heap.c:478
+kernel32/heap: skipped heap.c:848
+kernel32/loader: loader: 5 tests executed (0 marked as todo, 0 failures), 1 skipped.
+kernel32/loader: skipped loader.c:512
+kernel32/locale: locale: 398 tests executed (0 marked as todo, 0 failures), 12 skipped.
+kernel32/locale: skipped locale.c:2572
+kernel32/locale: skipped locale.c:152
+kernel32/locale: skipped locale.c:198
+kernel32/locale: skipped locale.c:553
+kernel32/locale: skipped locale.c:642
+kernel32/locale: skipped locale.c:1535
+kernel32/locale: skipped locale.c:2123
+kernel32/locale: skipped locale.c:2320
+kernel32/locale: skipped locale.c:2372
+kernel32/locale: skipped locale.c:2455
+kernel32/locale: skipped locale.c:2629
+kernel32/locale: skipped locale.c:2645
+kernel32/module: module: 43 tests executed (0 marked as todo, 5 failures), 2 skipped.
+kernel32/module: skipped module.c:392
+kernel32/module: skipped module.c:242
+kernel32/module: failed module.c:259
+kernel32/module: failed module.c:270
+kernel32/module: failed module.c:282
+kernel32/module: failed module.c:367
+kernel32/module: failed module.c:370
+kernel32/path: path: 1149 tests executed (0 marked as todo, 0 failures), 11 skipped.
+kernel32/path: skipped path.c:1708
+kernel32/path: skipped path.c:1710
+kernel32/path: skipped path.c:926 (x3)
+kernel32/path: skipped path.c:1224
+kernel32/path: skipped path.c:1371
+kernel32/path: skipped path.c:1398
+kernel32/path: skipped path.c:1550
+kernel32/path: skipped path.c:1602
+kernel32/path: skipped path.c:1661
+kernel32/profile: profile: 200 tests executed (0 marked as todo, 0 failures), 3 skipped.
+kernel32/profile: skipped profile.c:317
+kernel32/profile: skipped profile.c:549
+kernel32/profile: skipped profile.c:909
+kernel32/sync: sync: 35 tests executed (0 marked as todo, 0 failures), 4 skipped.
+kernel32/sync: skipped sync.c:223
+kernel32/sync: skipped sync.c:396
+kernel32/sync: skipped sync.c:458
+kernel32/sync: skipped sync.c:648
+kernel32/thread: thread: 194 tests executed (0 marked as todo, 0 failures), 4 skipped.
+kernel32/thread: skipped thread.c:302
+kernel32/thread: skipped thread.c:763
+kernel32/thread: skipped thread.c:1020
+kernel32/thread: skipped thread.c:1248
 kernel32/time: time: 40 tests executed (0 marked as todo, 0 failures), 2 skipped.
 kernel32/time: skipped time.c:297
 kernel32/time: skipped time.c:428
@@ -15,3 +107,42 @@ kernel32/timer: timer: 0 tests executed (0 marked as todo, 0 failures), 1 skippe
 kernel32/timer: skipped timer.c:42
 kernel32/version: version: 10 tests executed (0 marked as todo, 0 failures), 1 skipped.
 kernel32/version: skipped version.c:110
+kernel32/virtual: virtual: 148 tests executed (0 marked as todo, 0 failures), 6 skipped.
+kernel32/virtual: skipped virtual.c:69
+kernel32/virtual: skipped virtual.c:431
+kernel32/virtual: skipped virtual.c:609
+kernel32/virtual: skipped virtual.c:634
+kernel32/virtual: skipped virtual.c:795
+kernel32/virtual: skipped virtual.c:952
+msvcrt/data: data: 7 tests executed (0 marked as todo, 0 failures), 1 skipped.
+msvcrt/data: skipped data.c:96
+msvcrt/dir: dir: 53 tests executed (0 marked as todo, 0 failures), 1 skipped.
+msvcrt/dir: skipped dir.c:225
+msvcrt/environ: environ: 10 tests executed (0 marked as todo, 1 failure), 0 skipped.
+msvcrt/environ: failed environ.c:51
+msvcrt/file: file: 3 tests executed (0 marked as todo, 0 failures), 0 skipped.
+msvcrt/file: file: 1 tests executed (0 marked as todo, 0 failures), 0 skipped.
+msvcrt/file: file: 502 tests executed (0 marked as todo, 1 failure), 1 skipped.
+msvcrt/file: skipped file.c:1289
+msvcrt/file: failed file.c:1339
+msvcrt/heap: heap: 5 tests executed (0 marked as todo, 0 failures), 1 skipped.
+msvcrt/heap: skipped heap.c:249
+msvcrt/printf: printf: 354 tests executed (0 marked as todo, 0 failures), 3 skipped.
+msvcrt/printf: skipped printf.c:844
+msvcrt/printf: skipped printf.c:871
+msvcrt/printf: skipped printf.c:902
+msvcrt/scanf: scanf: 69 tests executed (0 marked as todo, 0 failures), 1 skipped.
+msvcrt/scanf: skipped scanf.c:210
+msvcrt/signal: signal: 3 tests executed (0 marked as todo, 0 failures), 0 skipped.
+msvcrt/string: string: 1234 tests executed (0 marked as todo, 0 failures), 9 skipped.
+msvcrt/string: skipped string.c:430
+msvcrt/string: skipped string.c:484
+msvcrt/string: skipped string.c:548
+msvcrt/string: skipped string.c:595
+msvcrt/string: skipped string.c:642
+msvcrt/string: skipped string.c:926
+msvcrt/string: skipped string.c:957
+msvcrt/string: skipped string.c:1128
+msvcrt/string: skipped string.c:1201
+msvcrt/time: time: 29 tests executed (0 marked as todo, 0 failures), 1 skipped.
+msvcrt/time: skipped time.c:66

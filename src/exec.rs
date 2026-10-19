@@ -1469,6 +1469,11 @@ fn win32_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
         return true;
     }
     cpu.bus.guest_paging = None;
+    if cpu.idle {
+        // No thread can run: time passes to the next timer event.
+        cpu.idle = false;
+        cpu.bus.clock.skip_to_deadline();
+    }
     cpu.bus.refresh_irq();
     true
 }

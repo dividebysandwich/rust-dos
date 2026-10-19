@@ -95,3 +95,34 @@ pub(super) fn get_time_zone_information(cpu: &mut Cpu, args: &[u32]) -> Option<u
     cpu.bus.guest_fill(args[0], TIME_ZONE_INFORMATION, 0);
     Some(TIME_ZONE_ID_UNKNOWN)
 }
+
+/// GetSystemTimeAsFileTime: the machine's clock as a FILETIME.
+pub(super) fn get_system_time_as_file_time(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let st = convert::system_time_of(cpu.bus.cmos.now());
+    let ticks = convert::system_time_to_ticks(&st).unwrap_or(0);
+    write_file_time(cpu, args[0], ticks);
+    Some(0)
+}
+
+/// CompareFileTime: -1, 0 or 1 as the first time is before, the same as
+/// or after the second.
+pub(super) fn compare_file_time(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let a = read_file_time(cpu, args[0])?;
+    let b = read_file_time(cpu, args[1])?;
+    Some(a.cmp(&b) as i32 as u32)
+}
+
+/// SetSystemTime and SetLocalTime: the machine's clock, which is both,
+/// moves to the time given, if it is one.
+pub(super) fn set_system_time(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let st = read_system_time(cpu, args[0])?;
+    let Some(at) = convert::system_time_to_ticks(&st).and_then(|_| {
+        chrono::NaiveDate::from_ymd_opt(st[0] as i32, st[1] as u32, st[3] as u32)?
+            .and_hms_milli_opt(st[4] as u32, st[5] as u32, st[6] as u32, st[7] as u32)
+    }) else {
+        super::set_error(cpu, super::ERROR_INVALID_PARAMETER);
+        return Some(FALSE);
+    };
+    cpu.bus.cmos.set_now(at);
+    Some(TRUE)
+}
