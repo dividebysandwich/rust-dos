@@ -44,7 +44,13 @@ pub(super) fn read_units(cpu: &mut Cpu, at: u32, len: u32, unit: u32) -> Option<
             }
         }
     } else {
-        units.extend((0..len).map(|i| read(cpu, i)));
+        // A length past the memory there ends at the first fault.
+        for i in 0..len {
+            units.push(read(cpu, i));
+            if cpu.bus.guest_faulted() {
+                break;
+            }
+        }
     }
     (!cpu.bus.guest_faulted()).then_some(units)
 }
