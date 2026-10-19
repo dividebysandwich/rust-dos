@@ -13,15 +13,63 @@
 //! ExitProcess goes back to real mode and ends the DOS process with
 //! INT 21h AH=4Ch, so the shell or the program that started it goes on.
 
+mod advapi32;
+mod call;
 mod convert;
 mod heap;
 mod kernel32;
 mod loader;
 mod memory;
+mod object;
+mod seh;
 mod stubs;
 mod system;
+mod thread;
 
 pub use stubs::function_name;
+
+/// `State` for an enum whose variants have named fields (or `{}`), as the
+/// variant's place in the list and then its fields.
+macro_rules! state_variants {
+    ($t:ident { $($v:ident { $($f:ident),* $(,)? }),* $(,)? }) => {
+        impl crate::savestate::State for $t {
+            #[allow(unused_assignments)]
+            fn save(&self, w: &mut crate::savestate::Writer) {
+                let mut index = 0u8;
+                $(
+                    if let $t::$v { $($f),* } = self {
+                        crate::savestate::State::save(&index, w);
+                        $( crate::savestate::State::save($f, w); )*
+                        return;
+                    }
+                    index += 1;
+                )*
+            }
+            #[allow(unused_assignments)]
+            fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
+                let mut tag = 0u8;
+                crate::savestate::State::load(&mut tag, r)?;
+                let mut index = 0u8;
+                $(
+                    if tag == index {
+                        $(
+                            let mut $f = Default::default();
+                            crate::savestate::State::load(&mut $f, r)?;
+                        )*
+                        *self = $t::$v { $($f),* };
+                        return Ok(());
+                    }
+                    index += 1;
+                )*
+                Err(crate::savestate::StateError::Invalid(format!(
+                    "a {} it doesn't know",
+                    stringify!($t)
+                )))
+            }
+        }
+    };
+}
+pub(crate) use state_variants;
 
 use crate::cpu::{Cpu, CpuState, Seg};
 // A processor context, as the DPMI host keeps its clients'.
@@ -63,6 +111,9 @@ pub struct Module {
     pub name: String,
     pub base: u32,
     pub size: u32,
+    /// Its entry point (DllMain), or 0 for the program's and the
+    /// built-in DLLs', which have none to call.
+    pub entry: u32,
 }
 
 /// A running Win32 program.
@@ -92,11 +143,30 @@ pub struct Process {
     /// are.
     missing: Vec<(String, String)>,
     missing_base: u32,
-    /// The DOS handles of its handles (`dos_handle`).
-    handles: Vec<u16>,
+    /// Its kernel objects and their handles, its own object, and the
+    /// handles of standard input, output and error.
+    objects: object::Objects,
+    object: u32,
+    std: [u32; 3],
+    /// Its threads, and which of them runs (None while it idles).
+    threads: Vec<thread::Thread>,
+    current: Option<usize>,
+    /// When the running thread's turn started, by the clock's
+    /// microseconds.
+    slice_start: u64,
+    /// The top of the idle loop's stack.
+    idle_stack: u32,
+    /// The running thread's last error and TIB, kept in its entry while
+    /// another runs.
     last_error: u32,
-    command_line: u32,
     tib: u32,
+    command_line: u32,
+    /// The program's TLS template, which each thread gets a copy of.
+    tls_template: Vec<u8>,
+    /// The filter SetUnhandledExceptionFilter set, or 0.
+    exception_filter: u32,
+    /// The stack the program's header asks for, which threads get.
+    stack_reserve: u32,
     /// TLS slots in use, a bit each.
     tls_used: u128,
     /// The environment, as "NAME=value" strings: DOS's when it started.
@@ -106,25 +176,30 @@ pub struct Process {
 }
 
 impl Process {
-    /// The handle of DOS's handle `dos`: 4, 8, 12, ...
-    fn dos_handle(&mut self, dos: u16) -> u32 {
-        let i = self
-            .handles
-            .iter()
-            .position(|&h| h == dos)
-            .unwrap_or_else(|| {
-                self.handles.push(dos);
-                self.handles.len() - 1
-            });
-        (i as u32 + 1) * 4
+    /// The DOS handle the handle `handle` is of, if it is one's.
+    fn dos_of(&self, handle: u32) -> Option<u16> {
+        match self.objects.get(self.objects.of(handle)?)?.kind {
+            object::Kind::Dos { handle } => Some(handle),
+            _ => None,
+        }
     }
 
-    /// The DOS handle of the handle `handle`.
-    fn dos_of(&self, handle: u32) -> Option<u16> {
-        if !handle.is_multiple_of(4) || handle == 0 {
-            return None;
-        }
-        self.handles.get((handle / 4 - 1) as usize).copied()
+    pub fn current_thread(&self) -> Option<&thread::Thread> {
+        self.threads.get(self.current?)
+    }
+
+    pub fn current_thread_mut(&mut self) -> Option<&mut thread::Thread> {
+        self.threads.get_mut(self.current?)
+    }
+
+    /// The DLLs with entry points, as (base, entry point), in the order
+    /// they were loaded in.
+    fn entry_points(&self) -> Vec<(u32, u32)> {
+        self.modules
+            .iter()
+            .filter(|m| m.entry != 0)
+            .map(|m| (m.base, m.entry))
+            .collect()
     }
 
     /// The base of the module `name`, ".DLL" added to a name without an
@@ -318,10 +393,12 @@ fn start(cpu: &mut Cpu) {
         process.image_base,
         process.memory.len / 1024
     ));
-    cpu.bus.win32.process = Some(process);
-    cpu.bus.set_a20(true);
-    // Win32 programs start with the FPU's precision at 53 bits.
-    cpu.fpu_control = 0x027F;
+    process.object = process.objects.add(object::Kind::Process {}, None);
+    process.std = [0, 1, 2].map(|handle| {
+        let id = process.objects.add(object::Kind::Dos { handle }, None);
+        process.objects.handle(id)
+    });
+    // The main thread, which runs the program's entry point.
     let mut ctx = Context {
         eip: loaded.entry,
         eflags: 0x0202,
@@ -336,7 +413,21 @@ fn start(cpu: &mut Cpu) {
         system::TIB3,
         0,
     ];
-    system::enter_user(cpu, &ctx);
+    let main = thread::Thread {
+        id: thread::id_of(0),
+        object: process
+            .objects
+            .add(object::Kind::Thread { index: 0 }, None),
+        tib: process.tib,
+        selector: system::TIB3,
+        stack: loaded.stack,
+        ctx,
+        ..thread::Thread::default()
+    };
+    process.threads.push(main);
+    cpu.bus.win32.process = Some(process);
+    cpu.bus.set_a20(true);
+    thread::reschedule(cpu);
 }
 
 /// The environment of the DOS process `psp`, as "NAME=value" strings.
@@ -476,7 +567,12 @@ pub fn trap_name(id: u16) -> String {
     }
 }
 
-crate::state_fields!(Module { name, base, size });
+crate::state_fields!(Module {
+    name,
+    base,
+    size,
+    entry
+});
 crate::state_fields!(Process {
     name,
     memory,
@@ -491,10 +587,19 @@ crate::state_fields!(Process {
     stub_pages,
     missing,
     missing_base,
-    handles,
+    objects,
+    object,
+    std,
+    threads,
+    current,
+    slice_start,
+    idle_stack,
     last_error,
-    command_line,
     tib,
+    command_line,
+    tls_template,
+    exception_filter,
+    stack_reserve,
     tls_used,
     environment,
     heap,

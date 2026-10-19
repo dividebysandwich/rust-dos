@@ -24,8 +24,7 @@ pub(super) fn tls_alloc(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     let Some(index) = (0..TLS_SLOTS).find(|&i| used & 1 << i == 0) else {
         return Some(TLS_OUT_OF_INDEXES);
     };
-    let at = slot(cpu, index);
-    cpu.bus.guest_write_32(at, 0);
+    super::threads::clear_tls_slot(cpu, index);
     process(cpu).tls_used |= 1 << index;
     Some(index)
 }
@@ -38,6 +37,7 @@ pub(super) fn tls_free(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(FALSE);
     }
     process.tls_used &= !(1 << index);
+    super::threads::clear_tls_slot(cpu, index);
     Some(TRUE)
 }
 

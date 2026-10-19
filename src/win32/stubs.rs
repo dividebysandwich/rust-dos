@@ -24,6 +24,9 @@ use rust_dos_pe as pe;
 pub enum Conv {
     Stdcall,
     Cdecl,
+    /// No return: the stub jumps back to its trap, which runs again (the
+    /// idle loop).
+    Loop,
 }
 
 /// A function's Rust side: the arguments as the program passed them;
@@ -50,7 +53,7 @@ pub struct Dll {
 }
 
 /// The built-in DLLs. Append only (see the module's notes).
-pub static DLLS: &[&Dll] = &[&super::kernel32::DLL];
+pub static DLLS: &[&Dll] = &[&super::kernel32::DLL, &super::advapi32::DLL];
 
 /// Bytes each function's stub takes.
 pub const STUB: u32 = 8;
@@ -97,7 +100,10 @@ pub fn stub(id: u16, args: u8, conv: Conv) -> [u8; STUB as usize] {
     let [lo, hi] = id.to_le_bytes();
     let mut code = [0x90; STUB as usize];
     code[..4].copy_from_slice(&[0xFE, TRAP, lo, hi]);
-    if conv == Conv::Stdcall && args > 0 {
+    if conv == Conv::Loop {
+        // JMP back to the trap.
+        code[4..6].copy_from_slice(&[0xEB, 0xFA]);
+    } else if conv == Conv::Stdcall && args > 0 {
         let [lo, hi] = (args as u16 * 4).to_le_bytes();
         code[4..7].copy_from_slice(&[0xC2, lo, hi]);
     } else {

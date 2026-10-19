@@ -170,6 +170,38 @@ fn results(output: &str, exit: Option<u8>) -> Vec<String> {
     lines
 }
 
+/// The DLLs the tests may import from, as MinGW names their import
+/// libraries.
+const LIBS: &[&str] = &["-lkernel32", "-ladvapi32"];
+
+/// Build the test file `unit` of `dll` into `program`, as Wine does: the
+/// file without STANDALONE, which leaves the framework out of it, and a
+/// list of its one test with STANDALONE, which brings the framework and
+/// `main` in. Some files have their own copies of the framework's
+/// helpers, which a STANDALONE build of them would have twice.
+fn build(cc: &str, dll: &str, unit: &str, runtime: &str, program: &str) -> Result<(), String> {
+    let list = format!("{OUT}/{dll}/{unit}_list.c");
+    fs::write(
+        &list,
+        format!(
+            "#define STANDALONE
+#include \"wine/test.h\"
+             extern void func_{unit}(void);
+             const struct test winetest_testlist[] = {{ {{ \"{unit}\", func_{unit} }}, {{ 0, 0 }} }};
+"
+        ),
+    )
+    .unwrap();
+    let source = format!("{ROOT}/wine/{dll}/{unit}.c");
+    let include = format!("-I{ROOT}/wine/include");
+    let mut args = CFLAGS.to_vec();
+    args.extend([include.as_str(), "-nostdlib", "-Wl,-e,_mainCRTStartup"]);
+    args.extend([source.as_str(), list.as_str(), runtime]);
+    args.extend(LIBS);
+    args.extend(["-lgcc", "-o", program]);
+    compile(cc, &args)
+}
+
 #[test]
 fn wine_conformance_tests_give_the_expected_results() {
     let Some(cc) = compiler() else {
@@ -200,25 +232,8 @@ fn wine_conformance_tests_give_the_expected_results() {
         fs::create_dir_all(&dir).unwrap();
         for unit in units {
             let name = program_name(&unit);
-            let source = format!("{ROOT}/wine/{dll}/{unit}.c");
             let program = format!("{OUT}/{dll}/{name}");
-            let include = format!("-I{ROOT}/wine/include");
-            let mut args = CFLAGS.to_vec();
-            args.extend([
-                "-DSTANDALONE",
-                &include,
-                "-nostdlib",
-                "-Wl,-e,_mainCRTStartup",
-            ]);
-            args.extend([
-                source.as_str(),
-                &runtime,
-                "-lkernel32",
-                "-lgcc",
-                "-o",
-                &program,
-            ]);
-            let lines = match compile(&cc, &args) {
+            let lines = match build(&cc, &dll, &unit, &runtime, &program) {
                 Ok(()) => {
                     let (output, exit) = run(&dir, &name);
                     fs::write(dir.join(format!("{}.log", unit)), &output).unwrap();

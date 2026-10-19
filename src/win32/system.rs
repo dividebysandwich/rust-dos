@@ -118,11 +118,27 @@ pub fn build_tables(cpu: &mut Cpu, memory: &mut Memory, phys: u32, tib: u32) -> 
     Some(())
 }
 
+/// Write the descriptor of a thread's TIB, at `tib`, with the selector
+/// `selector`, in the LDT of the system block at `phys`.
+pub fn set_tib(cpu: &mut Cpu, phys: u32, selector: u16, tib: u32) {
+    write_descriptor(
+        cpu,
+        phys + LDT + (selector & !7) as u32,
+        descriptor(tib, PAGE - 1, ACCESS_DATA3, BIG),
+    );
+}
+
 /// Put the processor in the program's context `ctx`, from wherever it is:
 /// protected mode with paging, the process's tables, level 3.
 pub fn enter_user(cpu: &mut Cpu, ctx: &Context) {
     let process = cpu.bus.win32.process.as_ref().expect("a Win32 process");
-    let (cr3, tib) = (process.memory.cr3, process.tib);
+    let cr3 = process.memory.cr3;
+    // The threads' TIB selectors.
+    let tibs: Vec<(u16, u32)> = process
+        .threads
+        .iter()
+        .map(|t| (t.selector, t.tib))
+        .collect();
     if !cpu.pe() {
         cpu.note_mode_switch(true);
     }
@@ -145,13 +161,16 @@ pub fn enter_user(cpu: &mut Cpu, ctx: &Context) {
     cpu.cpl = 3;
     let code = SegCache::from_descriptor(CODE3, 0, 0xFFFF_FFFF, attr(ACCESS_CODE3, FLAT));
     let data = SegCache::from_descriptor(DATA3, 0, 0xFFFF_FFFF, attr(ACCESS_DATA3, FLAT));
-    let tib = SegCache::from_descriptor(TIB3, tib, PAGE - 1, attr(ACCESS_DATA3, BIG));
     for seg in Seg::ALL {
         let cache = match ctx.seg[seg as usize] {
             CODE3 => code,
             DATA3 => data,
-            TIB3 => tib,
-            selector => SegCache::null(selector),
+            selector => match tibs.iter().find(|&&(s, _)| s == selector) {
+                Some(&(_, tib)) => {
+                    SegCache::from_descriptor(selector, tib, PAGE - 1, attr(ACCESS_DATA3, BIG))
+                }
+                None => SegCache::null(selector),
+            },
         };
         cpu.set_seg_cache(seg, cache);
     }
@@ -247,35 +266,9 @@ pub fn idt(cpu: &mut Cpu, vector: u8) {
     }
 }
 
-/// An exception in the program. Structured exception handling isn't
-/// there yet: the program ends, with a message saying where.
+/// An exception in the program: its handlers get it (seh.rs).
 fn exception_entry(cpu: &mut Cpu, vector: u8, error: Option<u32>, ctx: Context) {
-    let name = match vector {
-        0 => "divide error",
-        1 => "debug exception",
-        3 => "breakpoint",
-        4 => "overflow",
-        5 => "bound range exceeded",
-        6 => "invalid opcode",
-        7 => "coprocessor not available",
-        8 => "double fault",
-        12 => "stack fault",
-        13 => "general protection fault",
-        14 => "page fault",
-        16 => "floating-point error",
-        17 => "alignment check",
-        19 => "SIMD floating-point exception",
-        _ => "exception",
-    };
-    let mut what = format!("{} (exception {:02X}h", name, vector);
-    if let Some(error) = error {
-        what += &format!(", error {:X}", error);
-    }
-    if vector == 14 {
-        what += &format!(", address {:08X}", cpu.cr2);
-    }
-    what += ")";
-    super::fatal(cpu, &what, Some(&ctx));
+    super::seh::fault(cpu, vector, error, ctx);
 }
 
 /// A hardware interrupt that came while the program ran: its real-mode
@@ -302,7 +295,7 @@ fn reflect(cpu: &mut Cpu, vector: u8, ctx: Context) {
 pub fn irq_return(cpu: &mut Cpu) {
     let process = cpu.bus.win32.process.as_mut().expect("a Win32 process");
     let ctx = process.interrupted.take().expect("an interrupted program");
-    enter_user(cpu, &ctx);
+    super::thread::after_interrupt(cpu, ctx);
 }
 
 /// The trap ids of the IDT's vectors.

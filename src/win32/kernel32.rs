@@ -4,7 +4,9 @@
 mod disk;
 mod memory;
 mod module;
+mod sync;
 mod text;
+mod threads;
 mod time;
 
 use super::stubs::{Api, Conv, Dll};
@@ -105,7 +107,133 @@ static APIS: &[Api] = &[
     ),
     stdcall("WideCharToMultiByte", 41, 8, text::wide_char_to_multi_byte),
     stdcall("MultiByteToWideChar", 42, 6, text::multi_byte_to_wide_char),
+    // Where calls into the program return to (call.rs), the idle loop,
+    // and where threads start and their functions return to.
+    stdcall("CallReturn", 0, 0, call_return),
+    Api {
+        name: "Idle",
+        ordinal: 0,
+        args: 0,
+        conv: Conv::Loop,
+        handler: idle,
+    },
+    stdcall("ThreadStart", 0, 0, thread_start),
+    stdcall("ThreadReturn", 0, 0, threads::thread_return),
+    stdcall("CreateThread", 43, 6, threads::create_thread),
+    stdcall("ExitThread", 44, 1, threads::exit_thread),
+    stdcall("GetCurrentThread", 45, 0, threads::get_current_thread),
+    stdcall("GetCurrentThreadId", 46, 0, threads::get_current_thread_id),
+    stdcall("GetCurrentProcess", 47, 0, threads::get_current_process),
+    stdcall("GetCurrentProcessId", 48, 0, threads::get_current_process_id),
+    stdcall("GetExitCodeThread", 49, 2, threads::get_exit_code_thread),
+    stdcall("GetExitCodeProcess", 50, 2, threads::get_exit_code_process),
+    stdcall("TerminateThread", 51, 2, threads::terminate_thread),
+    stdcall("TerminateProcess", 52, 2, threads::terminate_process),
+    stdcall("SuspendThread", 53, 1, threads::suspend_thread),
+    stdcall("ResumeThread", 54, 1, threads::resume_thread),
+    stdcall("GetThreadPriority", 55, 1, threads::get_thread_priority),
+    stdcall("SetThreadPriority", 56, 2, threads::set_thread_priority),
+    stdcall("GetThreadContext", 57, 2, threads::get_thread_context),
+    stdcall("SetThreadContext", 58, 2, threads::set_thread_context),
+    stdcall("CloseHandle", 59, 1, threads::close_handle),
+    stdcall("DuplicateHandle", 60, 7, threads::duplicate_handle),
+    stdcall("CreateEventA", 61, 4, sync::create_event),
+    stdcall("OpenEventA", 62, 3, sync::open_event),
+    stdcall("SetEvent", 63, 1, sync::set_event),
+    stdcall("ResetEvent", 64, 1, sync::reset_event),
+    stdcall("PulseEvent", 65, 1, sync::pulse_event),
+    stdcall("CreateMutexA", 66, 3, sync::create_mutex),
+    stdcall("OpenMutexA", 67, 3, sync::open_mutex),
+    stdcall("ReleaseMutex", 68, 1, sync::release_mutex),
+    stdcall("CreateSemaphoreA", 69, 4, sync::create_semaphore),
+    stdcall("OpenSemaphoreA", 70, 3, sync::open_semaphore),
+    stdcall("ReleaseSemaphore", 71, 3, sync::release_semaphore),
+    stdcall("WaitForSingleObject", 72, 2, sync::wait_for_single_object),
+    stdcall("WaitForSingleObjectEx", 73, 3, sync::wait_for_single_object),
+    stdcall(
+        "WaitForMultipleObjects",
+        74,
+        4,
+        sync::wait_for_multiple_objects,
+    ),
+    stdcall(
+        "WaitForMultipleObjectsEx",
+        75,
+        5,
+        sync::wait_for_multiple_objects,
+    ),
+    stdcall("Sleep", 76, 1, sync::sleep),
+    stdcall("SleepEx", 77, 2, sync::sleep),
+    stdcall(
+        "InitializeCriticalSection",
+        78,
+        1,
+        sync::initialize_critical_section,
+    ),
+    stdcall("DeleteCriticalSection", 79, 1, sync::delete_critical_section),
+    stdcall("EnterCriticalSection", 80, 1, sync::enter_critical_section),
+    stdcall("LeaveCriticalSection", 81, 1, sync::leave_critical_section),
+    stdcall(
+        "TryEnterCriticalSection",
+        82,
+        1,
+        sync::try_enter_critical_section,
+    ),
+    stdcall("RaiseException", 83, 4, super::seh::raise_exception),
+    stdcall("RtlUnwind", 84, 4, super::seh::rtl_unwind),
+    stdcall(
+        "UnhandledExceptionFilter",
+        85,
+        1,
+        super::seh::unhandled_exception_filter,
+    ),
+    stdcall(
+        "SetUnhandledExceptionFilter",
+        86,
+        1,
+        super::seh::set_unhandled_exception_filter,
+    ),
 ];
+
+/// The places in `APIS` of the system's own stubs.
+const CALL_RETURN: usize = 43;
+const IDLE: usize = 44;
+const THREAD_START: usize = 45;
+const THREAD_RETURN: usize = 46;
+
+/// Where calls into the program return to (call.rs).
+pub fn call_return_address() -> u32 {
+    super::stubs::stub_address(0, CALL_RETURN)
+}
+
+/// The idle loop's stub (thread.rs).
+pub fn idle_address() -> u32 {
+    super::stubs::stub_address(0, IDLE)
+}
+
+/// Where a new thread starts, and where its function returns to.
+pub fn thread_start_address() -> u32 {
+    super::stubs::stub_address(0, THREAD_START)
+}
+
+pub fn thread_return_address() -> u32 {
+    super::stubs::stub_address(0, THREAD_RETURN)
+}
+
+fn call_return(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    super::call::returned(cpu);
+    None
+}
+
+fn idle(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    super::thread::idle_trap(cpu);
+    None
+}
+
+fn thread_start(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    super::thread::start(cpu);
+    None
+}
 
 /// The id of `ProcessReturn`, which the loader puts on the stack.
 pub const PROCESS_RETURN: usize = 0;
@@ -144,9 +272,11 @@ fn string_at(cpu: &mut Cpu, at: u32) -> Option<String> {
     (!cpu.bus.guest_faulted()).then(|| crate::dosstr::from_bytes(&bytes))
 }
 
+/// The program's entry point returned: its main thread ends with the
+/// value it returned, and with it the process, unless other threads run.
 fn process_return(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     let code = cpu.eax();
-    super::exit(cpu, code);
+    super::thread::exit_current(cpu, code);
     None
 }
 
@@ -159,16 +289,13 @@ fn exit_process(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// and -12): handles of DOS's handles 0, 1 and 2.
 fn get_std_handle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let process = super::process(cpu);
-    let dos = match args[0] as i32 {
-        -10 => 0,
-        -11 => 1,
-        -12 => 2,
+    match args[0] as i32 {
+        n @ -12..=-10 => Some(process.std[(-10 - n) as usize]),
         _ => {
             process.last_error = ERROR_INVALID_HANDLE;
-            return Some(INVALID_HANDLE_VALUE);
+            Some(INVALID_HANDLE_VALUE)
         }
-    };
-    Some(process.dos_handle(dos))
+    }
 }
 
 /// How much of a WriteFile's buffer goes to DOS at a time: DOS counts

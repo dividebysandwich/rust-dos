@@ -34,6 +34,9 @@ pub struct Loaded {
     pub process: Process,
     pub entry: u32,
     pub stack_top: u32,
+    /// The main thread's stack: the lowest address of its reserve, and
+    /// its top.
+    pub stack: (u32, u32),
 }
 
 /// Make the process of the program `path`, whose file is `file`. Fails
@@ -126,6 +129,7 @@ fn build(
             name: dll.name.to_string(),
             base: dll.base,
             size,
+            entry: 0,
         });
         exports.push((index, built.exports().ok().flatten().unwrap_or_default()));
     }
@@ -156,6 +160,7 @@ fn build(
             name: name.to_string(),
             base,
             size,
+            entry: 0,
         },
     );
 
@@ -211,6 +216,7 @@ fn build(
                 bus.log_string("[W32] The program's TLS callbacks aren't called yet");
             }
             process.tls_used = 1;
+            process.tls_template = template;
             tls_block = Some(block);
         }
         Ok(None) => {}
@@ -236,11 +242,17 @@ fn build(
 
     // The stack: the reserve, its top committed.
     let reserve = image.headers.stack_reserve.clamp(GRANULARITY, 0x100_0000);
+    process.stack_reserve = reserve;
     let stack = memory.reserve(None, reserve, PRIVATE, SHARED)?;
     let reserve = reserve.next_multiple_of(GRANULARITY);
     let commit = reserve.min(MAX_STACK_COMMIT);
     let stack_top = stack + reserve;
     memory.commit(bus, stack_top - commit, commit, USER | WRITABLE)?;
+
+    // The idle loop's stack, which only interrupts use.
+    let idle = memory.reserve(None, GRANULARITY, SHARED, SYSTEM)?;
+    memory.commit(bus, idle, PAGE, USER | WRITABLE)?;
+    process.idle_stack = idle + PAGE;
 
     // The process heap.
     let heap = memory.reserve(None, HEAP_RESERVE, PRIVATE, SHARED)?;
@@ -277,6 +289,7 @@ fn build(
         process,
         entry: base + image.headers.entry,
         stack_top,
+        stack: (stack, stack_top),
     }))
 }
 
