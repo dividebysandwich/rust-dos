@@ -38,6 +38,8 @@ pub enum Kind {
     Thread { id: u32, exit_code: Option<u32> },
     /// The process with the id `id`, the same.
     Process { id: u32, exit_code: Option<u32> },
+    /// A file mapping: its memory, `Win32::sections[section]`.
+    Mapping { section: u32 },
 }
 
 impl Default for Kind {
@@ -241,6 +243,7 @@ crate::win32::state_variants!(Kind {
     Semaphore { count, max },
     Thread { id, exit_code },
     Process { id, exit_code },
+    Mapping { section },
 });
 crate::state_fields!(Object { kind, name, refs });
 crate::state_fields!(Objects { objects });

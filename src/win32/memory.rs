@@ -195,17 +195,7 @@ impl Memory {
 
     /// A zeroed physical page.
     pub fn page(&mut self, bus: &mut Bus) -> Option<u32> {
-        let pool = bus.win32.pool.as_mut()?;
-        let page = match pool.free.pop() {
-            Some(page) => page,
-            None if pool.next + PAGE <= pool.len => {
-                pool.next += PAGE;
-                pool.base + pool.next - PAGE
-            }
-            None => return None,
-        };
-        bus.fill_ram(page as usize..(page + PAGE) as usize, 0);
-        Some(page)
+        pool_page(bus)
     }
 
     /// `count` zeroed physical pages in a row, from memory never used yet.
@@ -413,6 +403,30 @@ impl Memory {
 
     pub fn write_32(&self, bus: &mut Bus, lin: u32, value: u32) -> Option<()> {
         self.write(bus, lin, &value.to_le_bytes())
+    }
+}
+
+/// A zeroed physical page from the pool.
+pub fn pool_page(bus: &mut Bus) -> Option<u32> {
+    let pool = bus.win32.pool.as_mut()?;
+    let page = match pool.free.pop() {
+        Some(page) => page,
+        None if pool.next + PAGE <= pool.len => {
+            pool.next += PAGE;
+            pool.base + pool.next - PAGE
+        }
+        None => return None,
+    };
+    bus.fill_ram(page as usize..(page + PAGE) as usize, 0);
+    Some(page)
+}
+
+/// Give the physical page `phys` back to the pool.
+pub fn free_page(bus: &mut Bus, phys: u32) {
+    if let Some(pool) = bus.win32.pool.as_mut()
+        && pool.has(phys)
+    {
+        pool.free.push(phys);
     }
 }
 

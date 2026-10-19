@@ -15,8 +15,8 @@ use super::{ERROR_INVALID_PARAMETER, ERROR_NOT_ENOUGH_MEMORY, FALSE, TRUE, set_e
 use crate::bus::Bus;
 use crate::cpu::{Cpu, CpuModel};
 use crate::win32::memory::{
-    GRANULARITY, MEM_PRIVATE, Memory, PAGE, PAGE_NOACCESS, PAGE_READWRITE, PRESENT, PRIVATE,
-    SHARED, SYSTEM, USER, WRITABLE, protection,
+    GRANULARITY, MEM_MAPPED, MEM_PRIVATE, Memory, PAGE, PAGE_NOACCESS, PAGE_READWRITE, PRESENT,
+    PRIVATE, SHARED, SYSTEM, USER, WRITABLE, protection,
 };
 use crate::win32::object::{self, Kind};
 use crate::win32::{Process, running};
@@ -111,11 +111,25 @@ pub(super) fn virtual_alloc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(0);
     };
     let protect = protect & 0xFF;
+    if kind & MEM_RESERVE == 0 && at != 0 {
+        let region = crate::win32::process(cpu).memory.region(first).cloned();
+        if region.is_some_and(|r| r.kind == MEM_MAPPED) {
+            // A view of a mapping made with SEC_RESERVE.
+            let committed = super::mapping::commit(cpu, first, end, protect);
+            return Some(committed.unwrap_or_else(|error| {
+                set_error(cpu, error);
+                0
+            }));
+        }
+    }
     let result = crate::win32::with_process(cpu, |p, bus| {
         if kind & MEM_RESERVE != 0 || at == 0 {
             let (place, len) = match at {
                 0 => (None, end - first),
-                _ => (Some(at & !(GRANULARITY - 1)), end - (at & !(GRANULARITY - 1))),
+                _ => (
+                    Some(at & !(GRANULARITY - 1)),
+                    end - (at & !(GRANULARITY - 1)),
+                ),
             };
             let Some(start) =
                 p.memory
@@ -165,11 +179,7 @@ pub(super) fn virtual_free(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         unreachable!()
     };
     let result = crate::win32::with_process(cpu, |p, bus| {
-        let region = p
-            .memory
-            .region(at)
-            .cloned()
-            .ok_or(ERROR_INVALID_ADDRESS)?;
+        let region = p.memory.region(at).cloned().ok_or(ERROR_INVALID_ADDRESS)?;
         if region.kind != MEM_PRIVATE {
             return Err(ERROR_INVALID_PARAMETER);
         }
@@ -213,7 +223,11 @@ fn process_of(cpu: &mut Cpu, handle: u32) -> Option<usize> {
 }
 
 /// Run `f` with the process at `index` and the bus.
-fn with_process_at<T>(cpu: &mut Cpu, index: usize, f: impl FnOnce(&mut Process, &mut Bus) -> T) -> T {
+fn with_process_at<T>(
+    cpu: &mut Cpu,
+    index: usize,
+    f: impl FnOnce(&mut Process, &mut Bus) -> T,
+) -> T {
     let mut process = std::mem::take(&mut cpu.bus.win32.processes[index]);
     let result = f(&mut process, &mut cpu.bus);
     cpu.bus.win32.processes[index] = process;
@@ -309,9 +323,12 @@ fn query(memory: &Memory, bus: &Bus, at: u32) -> [u32; 7] {
     while end < region.end() && state(end) == first {
         end += PAGE;
     }
-    let allocation = match region.protect {
-        0 => PAGE_READWRITE,
-        protect => protect,
+    // Windows 95's views of mappings are memory of the shared arena
+    // reserved with PAGE_NOACCESS.
+    let (allocation, kind) = match (region.kind, region.protect) {
+        (MEM_MAPPED, _) => (PAGE_NOACCESS, MEM_PRIVATE),
+        (kind, 0) => (PAGE_READWRITE, kind),
+        (kind, protect) => (protect, kind),
     };
     let (state, protect) = match first {
         Some(protect) => (MEM_COMMIT, protect),
@@ -324,7 +341,7 @@ fn query(memory: &Memory, bus: &Bus, at: u32) -> [u32; 7] {
         end - page,
         state,
         protect,
-        region.kind,
+        kind,
     ]
 }
 
@@ -340,7 +357,8 @@ fn query_into(cpu: &mut Cpu, index: usize, at: u32, buffer: u32, len: u32) -> Op
     }
     let info = with_process_at(cpu, index, |p, bus| query(&p.memory, bus, at));
     for (i, value) in info.into_iter().enumerate() {
-        cpu.bus.guest_write_32(buffer.wrapping_add(4 * i as u32), value);
+        cpu.bus
+            .guest_write_32(buffer.wrapping_add(4 * i as u32), value);
     }
     if cpu.bus.guest_faulted() {
         return None;
@@ -515,4 +533,3 @@ pub(super) fn get_system_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     Some(0)
 }
-

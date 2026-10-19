@@ -62,10 +62,12 @@ pub(super) fn global_alloc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         0
     };
     if flags & GMEM_MOVEABLE == 0 {
-        return Some(memory::alloc(cpu, heap, zero, size).unwrap_or_else(|error| {
-            set_error(cpu, error);
-            0
-        }));
+        return Some(
+            memory::alloc(cpu, heap, zero, size).unwrap_or_else(|error| {
+                set_error(cpu, error);
+                0
+            }),
+        );
     }
     let entry = match memory::alloc(cpu, heap, HEAP_ZERO_MEMORY, 8) {
         Ok(entry) => entry,

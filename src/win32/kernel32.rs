@@ -3,6 +3,7 @@
 
 mod disk;
 mod global;
+mod mapping;
 mod memory;
 mod module;
 mod process;
@@ -250,6 +251,14 @@ static APIS: &[Api] = &[
     stdcall("RtlFillMemory", 248, 3, virtual_memory::rtl_fill_memory),
     stdcall("RtlZeroMemory", 249, 2, virtual_memory::rtl_zero_memory),
     stdcall("GetSystemInfo", 250, 1, virtual_memory::get_system_info),
+    stdcall("CreateFileMappingA", 251, 6, mapping::create_file_mapping_a),
+    stdcall("CreateFileMappingW", 252, 6, not_implemented),
+    stdcall("OpenFileMappingA", 253, 3, mapping::open_file_mapping_a),
+    stdcall("OpenFileMappingW", 254, 3, not_implemented),
+    stdcall("MapViewOfFile", 255, 5, mapping::map_view_of_file),
+    stdcall("MapViewOfFileEx", 256, 6, mapping::map_view_of_file_ex),
+    stdcall("UnmapViewOfFile", 257, 1, mapping::unmap_view_of_file),
+    stdcall("FlushViewOfFile", 258, 2, mapping::flush_view_of_file),
 ];
 
 /// The places in `APIS` of the system's own stubs.

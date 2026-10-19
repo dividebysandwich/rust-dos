@@ -299,7 +299,8 @@ pub(super) fn get_process_heaps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         .chain(process.heaps.iter().map(|h| h.base))
         .collect();
     for (i, &heap) in heaps.iter().take(count as usize).enumerate() {
-        cpu.bus.guest_write_32(array.wrapping_add(4 * i as u32), heap);
+        cpu.bus
+            .guest_write_32(array.wrapping_add(4 * i as u32), heap);
     }
     if cpu.bus.guest_faulted() {
         return None;

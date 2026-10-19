@@ -480,6 +480,12 @@ impl DiskController {
         self.open_files.get(&sft).is_some_and(|f| f.mode & 0x80 == 0 && !f.fcb)
     }
 
+    /// The access mode the open file `sft` was opened with (INT 21h
+    /// AH=3Dh's AL).
+    pub fn open_mode(&self, sft: u16) -> Option<u8> {
+        self.open_files.get(&sft).map(|f| f.mode)
+    }
+
     /// The open file `sft` is an FCB's.
     pub fn set_fcb(&mut self, sft: u16) {
         if let Some(open) = self.open_files.get_mut(&sft) {

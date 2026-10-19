@@ -70,7 +70,8 @@ impl Heap {
             max.max(initial)
         };
         let len = len.checked_add(PAGE - 1)? & !(PAGE - 1);
-        let base = memory.reserve_region(None, len, PRIVATE, SHARED, PAGE_READWRITE, MEM_PRIVATE)?;
+        let base =
+            memory.reserve_region(None, len, PRIVATE, SHARED, PAGE_READWRITE, MEM_PRIVATE)?;
         let mut heap = Heap::new(base, len, growable);
         let initial = initial.min(len).next_multiple_of(PAGE);
         if initial > 0 {

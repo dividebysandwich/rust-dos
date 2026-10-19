@@ -623,6 +623,7 @@ fn end_process(cpu: &mut Cpu, index: usize, code: u32) {
         pool.release(&mut cpu.bus);
     }
     cpu.bus.win32.objects = object::Objects::default();
+    cpu.bus.win32.sections.clear();
     cpu.bus.set_a20(a20);
     cpu.set_ax(0x4C00 | (code & 0xFF) as u16);
     if cpu.state == CpuState::Halted {
@@ -705,6 +706,7 @@ pub fn process_ended(cpu: &mut Cpu, psp: u16) {
             pool.release(&mut cpu.bus);
         }
         cpu.bus.win32.objects = object::Objects::default();
+        cpu.bus.win32.sections.clear();
         cpu.bus.set_a20(a20);
     }
     cpu.bus.win32.pending = None;

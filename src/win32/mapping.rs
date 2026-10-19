@@ -24,16 +24,18 @@ pub struct Section {
     pub reserve: bool,
     /// Each page's physical page, or 0 where none is committed.
     pub pages: Vec<u32>,
-    /// The file it maps (DOS's handle of it, kept open by the mapping),
-    /// or None for one of the swap file.
-    pub file: Option<u16>,
-    /// The processes that have a view of it, by id, once per view.
-    pub views: Vec<u32>,
+    /// The file it maps, as the object of the program's handle of it,
+    /// which the mapping holds, and DOS's handle; or None for a mapping
+    /// of the swap file.
+    pub file: Option<(u32, u16)>,
+    /// Its views: the process's id and the view's address.
+    pub views: Vec<(u32, u32)>,
 }
 
 impl Section {
+    /// The end of its place: its pages' end.
     pub fn end(&self) -> u32 {
-        self.base + self.size
+        self.base + self.pages.len() as u32 * super::memory::PAGE
     }
 }
 

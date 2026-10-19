@@ -271,7 +271,7 @@ fn returning_from_the_entry_point_ends_with_its_value() {
 
 #[test]
 fn a_function_the_built_in_windows_lacks_ends_the_program() {
-    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["GetVersion", "FlushViewOfFile"])];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["GetVersion", "VirtualAllocEx"])];
     let (code, text) = run(
         "missing",
         program(BASE, false, imports, &[0], |a, l| {
@@ -282,7 +282,7 @@ fn a_function_the_built_in_windows_lacks_ends_the_program() {
     );
     assert_eq!(code, 0xFF);
     assert!(
-        text.contains("T.EXE needs KERNEL32.DLL's function FlushViewOfFile"),
+        text.contains("T.EXE needs KERNEL32.DLL's function VirtualAllocEx"),
         "{}",
         text
     );
@@ -575,4 +575,242 @@ fn a_program_uses_the_heap_tls_environment_and_exports() {
         }),
     );
     assert_eq!(code, 0x3F, "the checks that failed: {:06b}", !code & 0x3F);
+}
+
+/// Push the arguments `args` of a stdcall function, the last first.
+fn push_args(a: &mut CodeAssembler, args: &[i32]) -> Result<(), IcedError> {
+    for &arg in args.iter().rev() {
+        a.push(arg)?;
+    }
+    Ok(())
+}
+
+/// Set bit `bit` of EBX when the flags say equal.
+fn bit_if_equal(a: &mut CodeAssembler, bit: u32) -> Result<(), IcedError> {
+    let mut skip = a.create_label();
+    a.jne(skip)?;
+    a.or(ebx, 1 << bit)?;
+    a.set_label(&mut skip)?;
+    a.nop()
+}
+
+/// A region reserved, a page of it committed, queried, protected and
+/// checked with IsBad*Ptr, then released; and GetSystemInfo. A bit each
+/// in the exit code.
+#[test]
+fn a_program_reserves_commits_and_protects_memory() {
+    const MEM_COMMIT: i32 = 0x1000;
+    const MEM_RESERVE: i32 = 0x2000;
+    const MEM_RELEASE: i32 = 0x8000;
+    const MEM_FREE: i32 = 0x1_0000;
+    const PAGE_NOACCESS: i32 = 1;
+    const PAGE_READONLY: i32 = 2;
+    const PAGE_READWRITE: i32 = 4;
+    let names: &[&str] = &[
+        "VirtualAlloc",
+        "VirtualQuery",
+        "VirtualProtect",
+        "VirtualFree",
+        "IsBadReadPtr",
+        "IsBadWritePtr",
+        "GetSystemInfo",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let (code, text) = run(
+        "virtual",
+        program(BASE, false, imports, &[0; 0x100], |a, l| {
+            let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+            let info = l.at(0x40) as i32;
+            let old = l.at(0x80) as i32;
+            a.xor(ebx, ebx)?;
+            // Three pages reserved, the second committed.
+            push_args(a, &[0, 0x3000, MEM_RESERVE, PAGE_NOACCESS])?;
+            a.call(f("VirtualAlloc"))?;
+            a.mov(esi, eax)?;
+            a.lea(edi, dword_ptr(esi + 0x1000))?;
+            push_args(a, &[0x1000, MEM_COMMIT, PAGE_READWRITE])?;
+            a.push(edi)?;
+            a.call(f("VirtualAlloc"))?;
+            a.cmp(eax, edi)?;
+            bit_if_equal(a, 0)?;
+            a.mov(dword_ptr(edi), 0x55)?;
+            // The first page is reserved, the second committed.
+            push_args(a, &[info, 28])?;
+            a.push(esi)?;
+            a.call(f("VirtualQuery"))?;
+            a.mov(eax, dword_ptr(info as u64 + 16))?;
+            a.cmp(eax, MEM_RESERVE)?;
+            bit_if_equal(a, 1)?;
+            push_args(a, &[info, 28])?;
+            a.push(edi)?;
+            a.call(f("VirtualQuery"))?;
+            a.mov(eax, dword_ptr(info as u64 + 20))?;
+            a.cmp(eax, PAGE_READWRITE)?;
+            bit_if_equal(a, 2)?;
+            // Read only now, after read and write.
+            push_args(a, &[0x1000, PAGE_READONLY, old])?;
+            a.push(edi)?;
+            a.call(f("VirtualProtect"))?;
+            a.mov(eax, dword_ptr(old as u64))?;
+            a.cmp(eax, PAGE_READWRITE)?;
+            bit_if_equal(a, 3)?;
+            // Not writable, readable; the reserved page isn't readable.
+            a.push(4)?;
+            a.push(edi)?;
+            a.call(f("IsBadWritePtr"))?;
+            a.mov(ebp, eax)?;
+            a.push(4)?;
+            a.push(edi)?;
+            a.call(f("IsBadReadPtr"))?;
+            a.shl(eax, 1)?;
+            a.or(ebp, eax)?;
+            a.push(1)?;
+            a.push(esi)?;
+            a.call(f("IsBadReadPtr"))?;
+            a.shl(eax, 2)?;
+            a.or(ebp, eax)?;
+            a.cmp(ebp, 5)?;
+            bit_if_equal(a, 4)?;
+            // Released, it is free.
+            push_args(a, &[0, MEM_RELEASE])?;
+            a.push(esi)?;
+            a.call(f("VirtualFree"))?;
+            push_args(a, &[info, 28])?;
+            a.push(esi)?;
+            a.call(f("VirtualQuery"))?;
+            a.mov(eax, dword_ptr(info as u64 + 16))?;
+            a.cmp(eax, MEM_FREE)?;
+            bit_if_equal(a, 5)?;
+            // 4 KB pages, 64 KB granularity, a 486.
+            a.push(info)?;
+            a.call(f("GetSystemInfo"))?;
+            a.mov(eax, dword_ptr(info as u64 + 4))?;
+            a.add(eax, dword_ptr(info as u64 + 28))?;
+            a.add(eax, dword_ptr(info as u64 + 24))?;
+            a.cmp(eax, 0x1000 + 0x1_0000 + 486)?;
+            bit_if_equal(a, 6)?;
+            a.mov(eax, ebx)?;
+            a.ret()
+        }),
+    );
+    assert_eq!(
+        code,
+        0x7F,
+        "the checks that failed: {:07b} {}",
+        !code & 0x7F,
+        text
+    );
+}
+
+/// A heap of its own with a maximum size, a moveable global block, and a
+/// mapping of the swap file viewed twice. A bit each in the exit code.
+#[test]
+fn a_program_uses_heaps_global_memory_and_mappings() {
+    const GMEM_MOVEABLE: i32 = 2;
+    const PAGE_READWRITE: i32 = 4;
+    const FILE_MAP_WRITE: i32 = 2;
+    const FILE_MAP_READ: i32 = 4;
+    let names: &[&str] = &[
+        "HeapCreate",
+        "HeapAlloc",
+        "HeapDestroy",
+        "GlobalAlloc",
+        "GlobalLock",
+        "GlobalFlags",
+        "CreateFileMappingA",
+        "MapViewOfFile",
+        "UnmapViewOfFile",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let (code, text) = run(
+        "heaps",
+        program(BASE, false, imports, &[0; 0x40], |a, l| {
+            let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+            a.xor(ebx, ebx)?;
+            // 64 KB at most: a larger block doesn't fit, a small one does.
+            push_args(a, &[0, 0x1000, 0x1_0000])?;
+            a.call(f("HeapCreate"))?;
+            a.mov(esi, eax)?;
+            push_args(a, &[0, 0x1_0001])?;
+            a.push(esi)?;
+            a.call(f("HeapAlloc"))?;
+            a.mov(edi, eax)?;
+            push_args(a, &[8, 0x100])?;
+            a.push(esi)?;
+            a.call(f("HeapAlloc"))?;
+            a.test(eax, eax)?;
+            a.setne(al)?;
+            a.test(edi, edi)?;
+            a.sete(ah)?;
+            a.cmp(ax, 0x0101)?;
+            bit_if_equal(a, 0)?;
+            a.push(esi)?;
+            a.call(f("HeapDestroy"))?;
+            a.cmp(eax, 1)?;
+            bit_if_equal(a, 1)?;
+            // A moveable block's handle points at its address.
+            push_args(a, &[GMEM_MOVEABLE, 16])?;
+            a.call(f("GlobalAlloc"))?;
+            a.mov(esi, eax)?;
+            a.push(esi)?;
+            a.call(f("GlobalLock"))?;
+            a.cmp(eax, dword_ptr(esi))?;
+            bit_if_equal(a, 2)?;
+            a.push(esi)?;
+            a.call(f("GlobalFlags"))?;
+            a.cmp(eax, 1)?;
+            bit_if_equal(a, 3)?;
+            // Two views of a mapping, at one address in the shared arena.
+            push_args(a, &[-1, 0, PAGE_READWRITE, 0, 0x2000, 0])?;
+            a.call(f("CreateFileMappingA"))?;
+            a.mov(ebp, eax)?;
+            push_args(a, &[FILE_MAP_WRITE, 0, 0, 0])?;
+            a.push(ebp)?;
+            a.call(f("MapViewOfFile"))?;
+            a.mov(esi, eax)?;
+            push_args(a, &[FILE_MAP_READ, 0, 0, 0])?;
+            a.push(ebp)?;
+            a.call(f("MapViewOfFile"))?;
+            a.mov(edi, eax)?;
+            a.cmp(esi, edi)?;
+            bit_if_equal(a, 4)?;
+            // The data stays while one view is left.
+            a.mov(dword_ptr(esi + 0x1000), 7)?;
+            a.push(esi)?;
+            a.call(f("UnmapViewOfFile"))?;
+            a.cmp(dword_ptr(edi + 0x1000), 7)?;
+            bit_if_equal(a, 5)?;
+            a.mov(eax, ebx)?;
+            a.ret()
+        }),
+    );
+    assert_eq!(
+        code,
+        0x3F,
+        "the checks that failed: {:06b} {}",
+        !code & 0x3F,
+        text
+    );
+}
+
+/// HeapAlloc with HEAP_GENERATE_EXCEPTIONS raises STATUS_NO_MEMORY when
+/// the heap is full; with no handler the program ends saying so.
+#[test]
+fn a_full_heap_raises_an_exception_with_heap_generate_exceptions() {
+    const HEAP_GENERATE_EXCEPTIONS: i32 = 4;
+    let names: &[&str] = &["HeapCreate", "HeapAlloc"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let (code, text) = run(
+        "heapexception",
+        program(BASE, false, imports, &[0], |a, l| {
+            push_args(a, &[HEAP_GENERATE_EXCEPTIONS, 0x1000, 0x1_0000])?;
+            a.call(l.import(0))?;
+            push_args(a, &[0, 0x2_0000])?;
+            a.push(eax)?;
+            a.call(l.import(1))?;
+            a.ret()
+        }),
+    );
+    assert_eq!(code, 0xFF);
+    assert!(text.contains("C0000017"), "{}", text);
 }
