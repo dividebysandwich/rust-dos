@@ -171,6 +171,10 @@ fn get_std_handle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(process.dos_handle(dos))
 }
 
+/// How much of a WriteFile's buffer goes to DOS at a time: DOS counts
+/// bytes in 16 bits, and the program's length is its own.
+const WRITE_CHUNK: u32 = 0x8000;
+
 /// WriteFile and WriteConsoleA: `n` bytes at `buffer` to `handle`, the
 /// count written to `*written` (when it isn't NULL).
 fn write_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -181,21 +185,39 @@ fn write_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         super::process(cpu).last_error = ERROR_INVALID_HANDLE;
         return Some(FALSE);
     };
-    let mut data = vec![0u8; n as usize];
-    cpu.bus.guest_read_bytes(buffer, &mut data);
-    if cpu.bus.guest_faulted() {
-        return None;
+    let mut count = 0u32;
+    let mut error = None;
+    loop {
+        let len = (n - count).min(WRITE_CHUNK);
+        let mut data = vec![0u8; len as usize];
+        cpu.bus
+            .guest_read_bytes(buffer.wrapping_add(count), &mut data);
+        if cpu.bus.guest_faulted() {
+            return None;
+        }
+        let result = super::dos(cpu, |cpu| {
+            crate::interrupts::int21::write_handle(cpu, dos, &data)
+        });
+        match result {
+            Ok(done) => {
+                count += done as u32;
+                // A short write is a full disk: the rest isn't written.
+                if (done as u32) < len || count == n {
+                    break;
+                }
+            }
+            Err(code) => {
+                error = Some(code);
+                break;
+            }
+        }
     }
-    let result = super::dos(cpu, |cpu| {
-        crate::interrupts::int21::write_handle(cpu, dos, &data)
-    });
-    let count = *result.as_ref().unwrap_or(&0) as u32;
     if written != 0 {
         cpu.bus.guest_write_32(written, count);
     }
-    match result {
-        Ok(_) => Some(TRUE),
-        Err(code) => {
+    match error {
+        None => Some(TRUE),
+        Some(code) => {
             super::process(cpu).last_error = code as u32;
             Some(FALSE)
         }

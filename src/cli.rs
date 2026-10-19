@@ -56,7 +56,11 @@ pub fn run(options: RunOptions) -> i32 {
         return ABORTED;
     }
     let mut cpu = Box::new(Cpu::with_memory(options.dir.clone(), options.memory_mb));
-    let settings = Settings { memsize: options.memory_mb, win32: options.win32, ..Settings::default() };
+    let settings = Settings {
+        memsize: options.memory_mb,
+        win32: options.win32,
+        ..Settings::default()
+    };
     for warning in crate::hardware::configure(&mut cpu, &settings, crate::keylayout::Layout::us()) {
         cpu.bus.log_string(&format!("[RUN] {}", warning));
     }

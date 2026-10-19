@@ -28,10 +28,8 @@ pub struct Memory {
     /// The block of extended memory: its physical address and length.
     pub base: u32,
     pub len: u32,
-    /// The offset of the first page in it never used yet, and pages
-    /// given back.
+    /// The offset of the first page in it never used yet.
     next: u32,
-    free: Vec<u32>,
     /// The page directory's physical address.
     pub cr3: u32,
     /// Reserved linear address ranges, as (start, length), in order.
@@ -68,16 +66,7 @@ impl Memory {
 
     /// A zeroed physical page.
     pub fn page(&mut self, bus: &mut Bus) -> Option<u32> {
-        let page = match self.free.pop() {
-            Some(page) => page,
-            None if self.next + PAGE <= self.len => {
-                self.next += PAGE;
-                self.base + self.next - PAGE
-            }
-            None => return None,
-        };
-        bus.fill_ram(page as usize..(page + PAGE) as usize, 0);
-        Some(page)
+        self.pages(bus, 1)
     }
 
     /// `count` zeroed physical pages in a row, from memory never used yet.
@@ -127,8 +116,9 @@ impl Memory {
         Some(())
     }
 
-    /// Reserve `len` bytes of linear address space in `lo..hi`: at `at`
-    /// if that is free, else at the lowest free place. Returns where.
+    /// Reserve `len` bytes of linear address space in `lo..hi`: at `at`,
+    /// None if that isn't free there, or with no `at` at the lowest free
+    /// place. Returns where.
     pub fn reserve(&mut self, at: Option<u32>, len: u32, lo: u32, hi: u32) -> Option<u32> {
         let len = len.checked_add(GRANULARITY - 1)? & !(GRANULARITY - 1);
         let free = |start: u32| {
@@ -179,7 +169,6 @@ crate::state_fields!(Memory {
     base,
     len,
     next,
-    free,
     cr3,
     regions
 });

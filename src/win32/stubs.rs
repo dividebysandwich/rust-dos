@@ -151,11 +151,7 @@ pub fn call(cpu: &mut Cpu, id: u16) {
     }
     // Where it was called from, for the log: read without a page fault,
     // as a function the entry point returns to has no caller there.
-    let caller = cpu.bus.logs().then(|| {
-        let process = cpu.bus.win32.process.as_ref()?;
-        let phys = process.memory.translate(&cpu.bus, esp)?;
-        Some(cpu.bus.read_32(phys as usize))
-    });
+    let caller = cpu.bus.logs().then(|| super::peek_32(cpu, esp));
     let caller = caller.flatten().unwrap_or(0);
     let result = (api.handler)(cpu, &args);
     if cpu.bus.guest_faulted() {

@@ -173,7 +173,7 @@ pub struct Context {
 
 impl Context {
     /// The processor's context as it is.
-    fn of(cpu: &Cpu) -> Self {
+    pub(crate) fn of(cpu: &Cpu) -> Self {
         Context {
             gpr: cpu.snapshot().gpr,
             eip: cpu.eip(),
@@ -570,7 +570,7 @@ fn client(cpu: &mut Cpu) -> &mut Client {
 }
 
 /// An 8-byte segment descriptor.
-fn descriptor(base: u32, limit: u32, access: u8, flags: u8) -> u64 {
+pub(crate) fn descriptor(base: u32, limit: u32, access: u8, flags: u8) -> u64 {
     let (limit, flags) = if limit > 0xF_FFFF { (limit >> 12, flags | 0x8) } else { (limit, flags & !0x8) };
     (limit as u64 & 0xFFFF)
         | ((base as u64 & 0xFF_FFFF) << 16)

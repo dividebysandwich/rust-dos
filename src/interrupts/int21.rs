@@ -126,7 +126,10 @@ fn write_open_file(cpu: &mut Cpu, handle: u16, sft: u16, data: &[u8]) -> Result<
             }
             Err(code) => {
                 // e.g. 05h on a file opened read-only (CD-ROM)
-                cpu.bus.log_string(&format!("[DOS] Write Handle {:04X} Failed, Error={:02X}", handle, code));
+                cpu.bus.log_string(&format!(
+                    "[DOS] Write Handle {:04X} Failed, Error={:02X}",
+                    handle, code
+                ));
                 Err(code)
             }
         }

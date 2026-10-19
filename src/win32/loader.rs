@@ -270,17 +270,12 @@ fn build(
         memory.write_32(bus, tib + TLS_ARRAY, block)?;
     }
 
-    let entry = if image.headers.entry != 0 {
-        base + image.headers.entry
-    } else {
-        0
-    };
-    if entry == 0 {
+    if image.headers.entry == 0 {
         return Some(Err(format!("{} has no entry point.", name)));
     }
     Some(Ok(Loaded {
         process,
-        entry,
+        entry: base + image.headers.entry,
         stack_top,
     }))
 }
