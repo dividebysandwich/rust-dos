@@ -50,10 +50,32 @@ pub struct Dll {
     /// Where it is loaded: where Windows 95 has it.
     pub base: u32,
     pub apis: &'static [Api],
+    /// Its variables, in a writable data section after the code: the C
+    /// runtime's `_iob` and `_environ`, which programs import as data.
+    pub vars: &'static [Var],
+    /// What fills the variables of a process the DLL is loaded in, once
+    /// the process has its memory, heap and environment.
+    pub init: Option<Init>,
 }
 
+/// A variable of a built-in DLL: `size` bytes of its data section, zeroed
+/// until `Dll::init` fills them. Exported by `name` unless its ordinal is
+/// 0, as the DLL's own state is.
+pub struct Var {
+    pub name: &'static str,
+    pub ordinal: u16,
+    pub size: u32,
+}
+
+/// A DLL's `init`: the process, which isn't the running one yet.
+pub type Init = fn(&mut crate::bus::Bus, &mut super::Process) -> Option<()>;
+
 /// The built-in DLLs. Append only (see the module's notes).
-pub static DLLS: &[&Dll] = &[&super::kernel32::DLL, &super::advapi32::DLL];
+pub static DLLS: &[&Dll] = &[
+    &super::kernel32::DLL,
+    &super::advapi32::DLL,
+    &super::msvcrt::DLL,
+];
 
 /// Bytes each function's stub takes.
 pub const STUB: u32 = 8;
@@ -94,6 +116,49 @@ pub fn stub_address(dll: usize, api: usize) -> u32 {
     DLLS[dll].base + CODE_RVA + api as u32 * STUB
 }
 
+/// Variables start at multiples of this in the data section.
+const VAR_ALIGN: u32 = 8;
+
+/// Where the data section of the DLL `dll` starts: the page after its
+/// stubs.
+fn data_rva(dll: &Dll) -> u32 {
+    CODE_RVA + (dll.apis.len() as u32 * STUB).next_multiple_of(0x1000)
+}
+
+/// The offset of each variable of `dll` in its data section, and the
+/// section's size.
+fn var_offsets(dll: &Dll) -> (Vec<u32>, u32) {
+    let mut at = 0;
+    let offsets = dll
+        .vars
+        .iter()
+        .map(|var| {
+            let offset = at;
+            at = (at + var.size).next_multiple_of(VAR_ALIGN);
+            offset
+        })
+        .collect();
+    (offsets, at)
+}
+
+/// The address of the variable `var` of the DLL `dll`.
+pub fn var_address(dll: usize, var: usize) -> u32 {
+    let dll = DLLS[dll];
+    dll.base + data_rva(dll) + var_offsets(dll).0[var]
+}
+
+/// Fill the variables of the built-in DLLs `process` has loaded, for it
+/// (`Dll::init`). None when it runs out of memory.
+pub fn init_process(bus: &mut crate::bus::Bus, process: &mut super::Process) -> Option<()> {
+    for dll in DLLS {
+        let loaded = process.modules.iter().any(|m| m.base == dll.base);
+        if let Some(init) = dll.init.filter(|_| loaded) {
+            init(bus, process)?;
+        }
+    }
+    Some(())
+}
+
 /// The stub of the function with id `id`, which takes `args` arguments
 /// the way `conv` says.
 pub fn stub(id: u16, args: u8, conv: Conv) -> [u8; STUB as usize] {
@@ -131,6 +196,21 @@ pub fn image(index: usize) -> pe::Image {
     for (i, api) in dll.apis.iter().enumerate() {
         if api.ordinal != 0 {
             b.export(Some(api.name), api.ordinal, rva + i as u32 * STUB);
+        }
+    }
+    if !dll.vars.is_empty() {
+        let (offsets, size) = var_offsets(dll);
+        let data = b.section_sized(
+            ".data",
+            &[],
+            size,
+            pe::SCN_INITIALIZED_DATA | pe::SCN_READ | pe::SCN_WRITE,
+        );
+        debug_assert_eq!(data, data_rva(dll));
+        for (var, offset) in dll.vars.iter().zip(offsets) {
+            if var.ordinal != 0 {
+                b.export(Some(var.name), var.ordinal, data + offset);
+            }
         }
     }
     pe::Image::load(&b.build()).expect("a built-in DLL's image")

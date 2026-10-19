@@ -113,7 +113,7 @@ fn build(
     system::build_tables(cpu, memory, process.system, tib)?;
     let bus = &mut cpu.bus;
 
-    // The built-in DLLs, read only.
+    // The built-in DLLs, read only but for their variables.
     let mut exports = Vec::new();
     for &index in dlls {
         let dll = stubs::DLLS[index];
@@ -122,6 +122,12 @@ fn build(
         memory.reserve(Some(dll.base), size, SHARED, SYSTEM)?;
         memory.commit(bus, dll.base, size.next_multiple_of(PAGE), USER)?;
         memory.write(bus, dll.base, &built.data)?;
+        for section in built.headers.sections.iter().filter(|s| s.writable()) {
+            let end = section.rva + section.mapped_size();
+            for page in (section.rva..end).step_by(PAGE as usize) {
+                memory.protect(bus, dll.base + page, USER | WRITABLE)?;
+            }
+        }
         for page in (dll.base..dll.base + size).step_by(PAGE as usize) {
             process.stub_pages.push(memory.translate(bus, page)? >> 12);
         }

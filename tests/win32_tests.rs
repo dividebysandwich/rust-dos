@@ -576,3 +576,413 @@ fn a_program_uses_the_heap_tls_environment_and_exports() {
     );
     assert_eq!(code, 0x3F, "the checks that failed: {:06b}", !code & 0x3F);
 }
+
+/// Data for a test program: strings and buffers, each at its offset.
+#[derive(Default)]
+struct Data(Vec<u8>);
+
+impl Data {
+    /// Add `bytes` on a four-byte boundary: their offset.
+    fn add(&mut self, bytes: &[u8]) -> u32 {
+        self.0.resize(self.0.len().next_multiple_of(4), 0);
+        let at = self.0.len() as u32;
+        self.0.extend_from_slice(bytes);
+        at
+    }
+
+    /// Add `text` and a 0.
+    fn text(&mut self, text: &str) -> u32 {
+        let at = self.add(text.as_bytes());
+        self.0.push(0);
+        at
+    }
+}
+
+#[test]
+fn a_program_prints_with_msvcrt() {
+    let names: &[&str] = &["printf", "exit"];
+    let imports: &[(&str, &[&str])] = &[("MSVCRT.dll", names)];
+    let format = "%d|%5i|%-5u|%x|%X|%o|%c|%s|%.2s|%08.3f|%e|%g|%p|%I64d|%hd|%+d|%#x|%%|%n\n";
+    let mut d = Data::default();
+    let format_at = d.text(format);
+    let count_format = d.text("%d %.1f %s\n");
+    let abc = d.text("abc");
+    let xyz = d.text("xyz");
+    let doubles = d.add(
+        &[1.23456f64, 12345.678, 0.0001, -2.25]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect::<Vec<u8>>(),
+    );
+    let count = d.add(&[0; 4]);
+    let exe = program(BASE, false, imports, &d.0, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let double = |a: &mut CodeAssembler, i: u32| -> Result<(), IcedError> {
+            a.push(dword_ptr(l.at(doubles + 8 * i + 4)))?;
+            a.push(dword_ptr(l.at(doubles + 8 * i)))
+        };
+        // Pushed last first.
+        a.push(l.at(count) as i32)?;
+        a.push(255)?;
+        a.push(5)?;
+        a.push(70000)?;
+        a.push(1)?;
+        a.push(0)?;
+        a.push(0x1234)?;
+        double(a, 2)?;
+        double(a, 1)?;
+        double(a, 0)?;
+        a.push(l.at(xyz) as i32)?;
+        a.push(l.at(abc) as i32)?;
+        a.push(b'A' as i32)?;
+        a.push(8)?;
+        a.push(255)?;
+        a.push(255)?;
+        a.push(7)?;
+        a.push(42)?;
+        a.push(-42)?;
+        a.push(l.at(format_at) as i32)?;
+        a.call(f("printf"))?;
+        a.add(esp, 4 * 22)?;
+        a.push(l.at(abc) as i32)?;
+        double(a, 3)?;
+        a.push(dword_ptr(l.at(count)))?;
+        a.push(l.at(count_format) as i32)?;
+        a.call(f("printf"))?;
+        a.add(esp, 20)?;
+        a.push(3)?;
+        a.call(f("exit"))?;
+        a.int3()
+    });
+    let (code, text) = run("msvcrt_printf", exe);
+    let line = "-42|   42|7    |ff|FF|10|A|abc|xy|0001.235|1.234568e+004|0.0001|\
+                00001234|4294967296|4464|+5|0xff|%|";
+    assert_eq!(text, format!("{}\r\n{} -2.3 abc\r\n", line, line.len()));
+    assert_eq!(code, 3);
+}
+
+#[test]
+fn a_program_uses_msvcrt_files_heap_and_callbacks() {
+    let names: &[&str] = &[
+        "fopen",
+        "fprintf",
+        "fputs",
+        "fclose",
+        "fread",
+        "fgets",
+        "strcmp",
+        "malloc",
+        "realloc",
+        "free",
+        "_msize",
+        "qsort",
+        "memcmp",
+        "atexit",
+        "puts",
+        "sscanf",
+        "_setjmp3",
+        "longjmp",
+        "exit",
+        "strtol",
+        "_except_handler3",
+        "_local_unwind2",
+        "printf",
+    ];
+    let imports: &[(&str, &[&str])] =
+        &[("MSVCRT.dll", names), ("KERNEL32.dll", &["RaiseException"])];
+    let mut d = Data::default();
+    let name = d.text("T.TXT");
+    let w = d.text("w");
+    let r = d.text("r");
+    let rb = d.text("rb");
+    let line_format = d.text("%s %d\n");
+    let line = d.text("line");
+    let second = d.text("second\n");
+    let first_line = d.text("line 7\n");
+    let bye = d.text("bye");
+    let bits_format = d.text("%x\n");
+    let scan_text = d.text("12 abc 0x1F");
+    let scan_format = d.text("%d %s %x");
+    let number = d.text("  -0x7fz");
+    let numbers = d.add(
+        &[5u32, 3, 9, 1, 7]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect::<Vec<u8>>(),
+    );
+    let sorted = d.add(
+        &[1u32, 3, 5, 7, 9]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect::<Vec<u8>>(),
+    );
+    let buffer = d.add(&[0; 100]);
+    let scanned = d.add(&[0; 16]);
+    let jump = d.add(&[0; 64]);
+    let scope = d.add(&[0; 24]);
+    let bits = d.add(&[0; 4]);
+    let end = d.add(&[0; 4]);
+    let data_len = d.0.len() as u32;
+    let exe = program(BASE, false, imports, &d.0, |a, l| {
+        // The code is assembled once to find where the callbacks are.
+        let code = |a: &mut CodeAssembler, at: [u32; 5]| -> Result<[CodeLabel; 5], IcedError> {
+            let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+            let mut compare = a.create_label();
+            let mut at_exit = a.create_label();
+            let mut filter = a.create_label();
+            let mut handler = a.create_label();
+            let mut finally = a.create_label();
+            let mut after_jump = a.create_label();
+            let mut after_try = a.create_label();
+            let set = |a: &mut CodeAssembler, bit: u32| a.or(dword_ptr(l.at(bits)), bit as i32);
+            // Write two lines, then read them back raw (CR LF on the disk)
+            // and as text.
+            a.push(l.at(w) as i32)?;
+            a.push(l.at(name) as i32)?;
+            a.call(f("fopen"))?;
+            a.add(esp, 8)?;
+            a.mov(esi, eax)?;
+            a.push(7)?;
+            a.push(l.at(line) as i32)?;
+            a.push(l.at(line_format) as i32)?;
+            a.push(esi)?;
+            a.call(f("fprintf"))?;
+            a.add(esp, 16)?;
+            a.push(esi)?;
+            a.push(l.at(second) as i32)?;
+            a.call(f("fputs"))?;
+            a.add(esp, 8)?;
+            a.push(esi)?;
+            a.call(f("fclose"))?;
+            a.add(esp, 4)?;
+            a.push(l.at(rb) as i32)?;
+            a.push(l.at(name) as i32)?;
+            a.call(f("fopen"))?;
+            a.add(esp, 8)?;
+            a.mov(esi, eax)?;
+            a.push(esi)?;
+            a.push(100)?;
+            a.push(1)?;
+            a.push(l.at(buffer) as i32)?;
+            a.call(f("fread"))?;
+            a.add(esp, 16)?;
+            a.cmp(eax, 16)?;
+            let mut skip = a.create_label();
+            a.jne(skip)?;
+            set(a, 1)?;
+            a.set_label(&mut skip)?;
+            a.push(esi)?;
+            a.call(f("fclose"))?;
+            a.add(esp, 4)?;
+            a.push(l.at(r) as i32)?;
+            a.push(l.at(name) as i32)?;
+            a.call(f("fopen"))?;
+            a.add(esp, 8)?;
+            a.mov(esi, eax)?;
+            a.push(esi)?;
+            a.push(100)?;
+            a.push(l.at(buffer) as i32)?;
+            a.call(f("fgets"))?;
+            a.add(esp, 12)?;
+            a.push(l.at(first_line) as i32)?;
+            a.push(l.at(buffer) as i32)?;
+            a.call(f("strcmp"))?;
+            a.add(esp, 8)?;
+            let mut skip = a.create_label();
+            a.test(eax, eax)?;
+            a.jne(skip)?;
+            set(a, 2)?;
+            a.set_label(&mut skip)?;
+            a.push(esi)?;
+            a.call(f("fclose"))?;
+            a.add(esp, 4)?;
+            // The heap: a block grown keeps its size.
+            a.push(16)?;
+            a.call(f("malloc"))?;
+            a.add(esp, 4)?;
+            a.push(3000)?;
+            a.push(eax)?;
+            a.call(f("realloc"))?;
+            a.add(esp, 8)?;
+            a.mov(esi, eax)?;
+            a.push(esi)?;
+            a.call(f("_msize"))?;
+            a.add(esp, 4)?;
+            let mut skip = a.create_label();
+            a.cmp(eax, 3000)?;
+            a.jne(skip)?;
+            set(a, 4)?;
+            a.set_label(&mut skip)?;
+            a.push(esi)?;
+            a.call(f("free"))?;
+            a.add(esp, 4)?;
+            // qsort with the program's compare function.
+            a.mov(eax, at[0])?;
+            a.push(eax)?;
+            a.push(4)?;
+            a.push(5)?;
+            a.push(l.at(numbers) as i32)?;
+            a.call(f("qsort"))?;
+            a.add(esp, 16)?;
+            a.push(20)?;
+            a.push(l.at(sorted) as i32)?;
+            a.push(l.at(numbers) as i32)?;
+            a.call(f("memcmp"))?;
+            a.add(esp, 12)?;
+            let mut skip = a.create_label();
+            a.test(eax, eax)?;
+            a.jne(skip)?;
+            set(a, 8)?;
+            a.set_label(&mut skip)?;
+            // sscanf: three conversions.
+            a.push(l.at(scanned + 4) as i32)?;
+            a.push(l.at(scanned + 8) as i32)?;
+            a.push(l.at(scanned) as i32)?;
+            a.push(l.at(scan_format) as i32)?;
+            a.push(l.at(scan_text) as i32)?;
+            a.call(f("sscanf"))?;
+            a.add(esp, 20)?;
+            let mut skip = a.create_label();
+            a.cmp(eax, 3)?;
+            a.jne(skip)?;
+            a.cmp(dword_ptr(l.at(scanned)), 12)?;
+            a.jne(skip)?;
+            a.cmp(dword_ptr(l.at(scanned + 4)), 0x1F)?;
+            a.jne(skip)?;
+            set(a, 0x10)?;
+            a.set_label(&mut skip)?;
+            // strtol: the end after the digits.
+            a.push(16)?;
+            a.push(l.at(end) as i32)?;
+            a.push(l.at(number) as i32)?;
+            a.call(f("strtol"))?;
+            a.add(esp, 12)?;
+            let mut skip = a.create_label();
+            a.cmp(eax, -0x7F)?;
+            a.jne(skip)?;
+            a.cmp(dword_ptr(l.at(end)), l.at(number + 7) as i32)?;
+            a.jne(skip)?;
+            set(a, 0x20)?;
+            a.set_label(&mut skip)?;
+            // setjmp, then longjmp back to it with 5.
+            a.push(0)?;
+            a.push(l.at(jump) as i32)?;
+            a.call(f("_setjmp3"))?;
+            a.add(esp, 8)?;
+            a.cmp(eax, 5)?;
+            a.je(after_jump)?;
+            a.push(5)?;
+            a.push(l.at(jump) as i32)?;
+            a.call(f("longjmp"))?;
+            a.int3()?;
+            a.set_label(&mut after_jump)?;
+            set(a, 0x40)?;
+            // __try with a filter and handler at level 0, a __finally at 1.
+            a.mov(eax, at[2])?;
+            a.mov(dword_ptr(l.at(scope + 4)), eax)?;
+            a.mov(eax, at[3])?;
+            a.mov(dword_ptr(l.at(scope + 8)), eax)?;
+            a.mov(dword_ptr(l.at(scope)), -1)?;
+            a.mov(dword_ptr(l.at(scope + 12)), 0)?;
+            a.mov(dword_ptr(l.at(scope + 16)), 0)?;
+            a.mov(eax, at[4])?;
+            a.mov(dword_ptr(l.at(scope + 20)), eax)?;
+            a.push(ebp)?;
+            a.mov(ebp, esp)?;
+            a.push(-1)?;
+            a.push(l.at(scope) as i32)?;
+            a.push(f("_except_handler3"))?;
+            a.push(dword_ptr(0u64).fs())?;
+            a.mov(dword_ptr(0u64).fs(), esp)?;
+            a.sub(esp, 8)?;
+            a.mov(dword_ptr(ebp - 0x18), esp)?;
+            // __finally run by _local_unwind2, as for a return from it.
+            a.mov(dword_ptr(ebp - 4), 1)?;
+            a.lea(eax, dword_ptr(ebp - 0x10))?;
+            a.push(0)?;
+            a.push(eax)?;
+            a.call(f("_local_unwind2"))?;
+            a.add(esp, 8)?;
+            a.cmp(dword_ptr(ebp - 4), 0)?;
+            let mut skip = a.create_label();
+            a.jne(skip)?;
+            set(a, 0x80)?;
+            a.set_label(&mut skip)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.push(0xE000_0001u32 as i32)?;
+            a.call(dword_ptr(l.iat[names.len()] as u64))?;
+            a.int3()?;
+            a.set_label(&mut handler)?;
+            a.mov(esp, dword_ptr(ebp - 0x18))?;
+            a.cmp(dword_ptr(ebp - 4), -1)?;
+            a.jne(after_try)?;
+            set(a, 0x100)?;
+            a.set_label(&mut after_try)?;
+            a.mov(ecx, dword_ptr(ebp - 0x10))?;
+            a.mov(dword_ptr(0u64).fs(), ecx)?;
+            a.mov(esp, ebp)?;
+            a.pop(ebp)?;
+            // atexit's function runs at exit.
+            a.mov(eax, at[1])?;
+            a.push(eax)?;
+            a.call(f("atexit"))?;
+            a.add(esp, 4)?;
+            a.push(dword_ptr(l.at(bits)))?;
+            a.push(l.at(bits_format) as i32)?;
+            a.call(f("printf"))?;
+            a.add(esp, 8)?;
+            a.push(0)?;
+            a.call(f("exit"))?;
+            a.int3()?;
+
+            a.set_label(&mut compare)?;
+            a.mov(eax, dword_ptr(esp + 4))?;
+            a.mov(eax, dword_ptr(eax))?;
+            a.mov(ecx, dword_ptr(esp + 8))?;
+            a.sub(eax, dword_ptr(ecx))?;
+            a.ret()?;
+
+            a.set_label(&mut at_exit)?;
+            a.push(l.at(bye) as i32)?;
+            a.call(f("puts"))?;
+            a.add(esp, 4)?;
+            a.ret()?;
+
+            // The filter: the handler for E0000001h, seen through the frame.
+            a.set_label(&mut filter)?;
+            a.mov(eax, dword_ptr(ebp - 0x14))?;
+            a.mov(eax, dword_ptr(eax))?;
+            a.cmp(dword_ptr(eax), 0xE000_0001u32 as i32)?;
+            a.sete(al)?;
+            a.movzx(eax, al)?;
+            a.ret()?;
+
+            a.set_label(&mut finally)?;
+            a.cmp(dword_ptr(ebp - 4), 0)?;
+            let mut skip = a.create_label();
+            a.jne(skip)?;
+            set(a, 0x200)?;
+            a.set_label(&mut skip)?;
+            a.ret()?;
+            Ok([compare, at_exit, filter, handler, finally])
+        };
+        let labels = code(a, [0; 5])?;
+        let ip = (l.data + data_len).next_multiple_of(0x1000) as u64;
+        let options = iced_x86::BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS;
+        let result = a.assemble_options(ip, options)?;
+        let mut at = [0; 5];
+        for (i, label) in labels.iter().enumerate() {
+            at[i] = result.label_ip(label)? as u32;
+        }
+        a.reset();
+        code(a, at)?;
+        Ok(())
+    });
+    let (code, text) = run("msvcrt_files", exe);
+    let file = PathBuf::from("target/test_win32/msvcrt_files/T.TXT");
+    assert_eq!(fs::read(&file).unwrap(), b"line 7\r\nsecond\r\n");
+    assert_eq!(text, "3ff\r\nbye\r\n");
+    assert_eq!(code, 0);
+}

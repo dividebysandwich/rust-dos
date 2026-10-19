@@ -10,7 +10,7 @@
 //! CONFORMANCE_REQUIRED is set, as in CI. CONFORMANCE_BLESS=1 writes the
 //! results to expected.txt instead of comparing them.
 
-use rust_dos::cpu::{Cpu, HostConsole};
+use rust_dos::cpu::{Cpu, CpuModel, HostConsole};
 use rust_dos::exec::{NoHook, StopReason, run_batch};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -96,10 +96,11 @@ fn program_name(unit: &str) -> String {
 }
 
 /// Run the program `name` in `dir` with the argument `unit`, the test to
-/// run, as Wine's runner passes it: what it printed, and its exit code if
-/// it ended.
-fn run(dir: &Path, name: &str, unit: &str) -> (String, Option<u8>) {
+/// run, as Wine's runner passes it, on a processor of `model`: what it
+/// printed, and its exit code if it ended.
+fn run(dir: &Path, name: &str, unit: &str, model: CpuModel) -> (String, Option<u8>) {
     let mut cpu = Cpu::new(dir.to_path_buf());
+    cpu.model = model;
     cpu.bus.win32.enabled = true;
     cpu.host_console = Some(HostConsole::default());
     cpu.load_shell();
@@ -181,6 +182,14 @@ const LIBS: &[&str] = &["-lkernel32", "-ladvapi32"];
 /// list of its one test with STANDALONE, which brings the framework and
 /// `main` in. Some files have their own copies of the framework's
 /// helpers, which a STANDALONE build of them would have twice.
+///
+/// MSVCRT's tests test the built-in MSVCRT.DLL, so they are linked as
+/// MinGW links any program, with its startup code (crt2.o) and MSVCRT.DLL
+/// as the C library, and runtime.c left out. Their sources use Wine's
+/// names for va_list, which MinGW's headers don't have. GCC isn't to
+/// count what sprintf returns itself, as it counts C99's formats, and
+/// MinGW's headers aren't to put its own C99 functions (strtod) in place
+/// of MSVCRT's.
 fn build(cc: &str, dll: &str, unit: &str, runtime: &str, program: &str) -> Result<(), String> {
     let list = format!("{OUT}/{dll}/{unit}_list.c");
     fs::write(
@@ -197,8 +206,20 @@ fn build(cc: &str, dll: &str, unit: &str, runtime: &str, program: &str) -> Resul
     let source = format!("{ROOT}/wine/{dll}/{unit}.c");
     let include = format!("-I{ROOT}/wine/include");
     let mut args = CFLAGS.to_vec();
-    args.extend([include.as_str(), "-nostdlib", "-Wl,-e,_mainCRTStartup"]);
-    args.extend([source.as_str(), list.as_str(), runtime]);
+    args.push(include.as_str());
+    if dll == "msvcrt" {
+        args.extend([
+            "-D__ms_va_list=va_list",
+            "-D__ms_va_start=va_start",
+            "-D__ms_va_end=va_end",
+            "-fno-printf-return-value",
+            "-D__NO_ISOCEXT",
+        ]);
+        args.extend([source.as_str(), list.as_str(), "-lmsvcrt"]);
+    } else {
+        args.extend(["-nostdlib", "-Wl,-e,_mainCRTStartup"]);
+        args.extend([source.as_str(), list.as_str(), runtime]);
+    }
     args.extend(LIBS);
     args.extend(["-lgcc", "-o", program]);
     compile(cc, &args)
@@ -237,7 +258,14 @@ fn wine_conformance_tests_give_the_expected_results() {
             let program = format!("{OUT}/{dll}/{name}");
             let lines = match build(&cc, &dll, &unit, &runtime, &program) {
                 Ok(()) => {
-                    let (output, exit) = run(&dir, &name, &unit);
+                    // MinGW's startup code is built for a Pentium Pro
+                    // (CMOVcc); runtime.c for a 486.
+                    let model = if dll == "msvcrt" {
+                        CpuModel::PentiumPro
+                    } else {
+                        CpuModel::I486
+                    };
+                    let (output, exit) = run(&dir, &name, &unit, model);
                     fs::write(dir.join(format!("{}.log", unit)), &output).unwrap();
                     results(&output, exit)
                 }

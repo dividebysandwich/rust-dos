@@ -8,6 +8,8 @@ pub static DLL: Dll = Dll {
     name: "ADVAPI32.DLL",
     base: 0xBFEC_0000,
     apis: APIS,
+    vars: &[],
+    init: None,
 };
 
 const fn stdcall(

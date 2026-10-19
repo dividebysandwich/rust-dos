@@ -19,6 +19,8 @@ pub static DLL: Dll = Dll {
     name: "KERNEL32.DLL",
     base: 0xBFF7_0000,
     apis: APIS,
+    vars: &[],
+    init: None,
 };
 
 const fn stdcall(

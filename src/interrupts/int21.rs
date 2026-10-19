@@ -349,6 +349,26 @@ fn edit_line(cpu: &mut Cpu, max: usize) -> Option<Vec<u8>> {
     None
 }
 
+/// Read up to `count` bytes from the console as AH=3Fh does: a line at a
+/// time, its CR LF handed out over as many reads as it takes, nothing at
+/// the end of the host's standard input. None while the line is still
+/// being typed: the processor waits for a key (`key_wait`) and the caller
+/// asks again. The built-in Windows's C runtime reads its console so.
+pub(crate) fn read_console(cpu: &mut Cpu, count: usize) -> Option<Vec<u8>> {
+    if cpu.con_pending.is_empty() && count > 0 {
+        if cpu.host_console.as_ref().is_some_and(|c| c.input_ended)
+            && crate::keyboard::peek_keystroke(&mut cpu.bus).is_none()
+        {
+            return Some(Vec::new());
+        }
+        let line = edit_line(cpu, 127)?;
+        con_echo(cpu, b"\r\n");
+        cpu.con_pending.extend(line);
+        cpu.con_pending.extend([0x0D, 0x0A]);
+    }
+    Some(cpu.con_pending.drain(..count.min(cpu.con_pending.len())).collect())
+}
+
 /// The keystrokes a BIOS keyboard buffer holds: what a call reading the
 /// console takes at most before it waits again.
 const BIOS_KEYS: usize = 16;
