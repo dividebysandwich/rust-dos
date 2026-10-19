@@ -454,7 +454,13 @@ fn hle_json(c: &rust_dos::profile::Counters, top: usize, per_s: &dyn Fn(u64) -> 
         .flat_map(|(k, &kind)| c.services[k].iter().enumerate().filter(|&(_, &n)| n > 0).map(move |(v, &n)| (kind, v, n)))
         .collect();
     services.sort_by_key(|&(kind, v, n)| (std::cmp::Reverse(n), kind, v));
-    let mut win32: Vec<(usize, u64)> = c.win32.iter().copied().enumerate().filter(|&(_, n)| n > 0).collect();
+    let mut win32: Vec<(usize, u64)> = c
+        .win32
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|&(_, n)| n > 0)
+        .collect();
     win32.sort_by_key(|&(id, n)| (std::cmp::Reverse(n), id));
     let win32: Vec<Value> = win32
         .iter()

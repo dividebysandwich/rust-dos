@@ -1437,6 +1437,7 @@ const ABSENT_SECTIONS: &[(&str, &str)] = &[
     ("SBHS", "the SB 2.0's and SB Pro's high-speed mode: the machine's AWE32 has none"),
     ("PNP", "the ISA Plug and Play card is a ViBRA16C: the machine's card is an AWE32"),
     ("VFX1", "the VFX1 headset is a VR headset's: its tracking is the host's, as the VR pads are"),
+    ("W32", "the built-in Windows runs Win32 programs, which the run doesn't start"),
 ];
 
 /// Parts of the save state that the run doesn't change, and why.
@@ -1484,6 +1485,7 @@ const SECTION_FIELDS: &[(&str, &str)] = &[
     ("awe", "AWE"),
     ("isapnp", "PNP"),
     ("vfx1", "VFX1"),
+    ("win32", "W32"),
 ];
 
 /// The tags of the sections the save state's code writes.

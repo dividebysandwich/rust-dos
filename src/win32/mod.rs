@@ -22,6 +22,8 @@ mod system;
 pub use stubs::function_name;
 
 use crate::cpu::{Cpu, CpuState, Seg};
+// A processor context, as the DPMI host keeps its clients'.
+use crate::dpmi::Context;
 use memory::Memory;
 
 /// The service trap's second byte: `FE 3E lo hi`.
@@ -52,28 +54,6 @@ const ESP: usize = 4;
 
 /// The exit code of a program that ended because of an error.
 const FAILED: u32 = 0xFF;
-
-/// A processor context: the registers and the segment registers'
-/// selectors.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Context {
-    pub gpr: [u32; 8],
-    pub eip: u32,
-    pub eflags: u32,
-    /// ES, CS, SS, DS, FS, GS, as `Seg` numbers them.
-    pub seg: [u16; 6],
-}
-
-impl Context {
-    fn of(cpu: &Cpu) -> Self {
-        Context {
-            gpr: cpu.snapshot().gpr,
-            eip: cpu.eip(),
-            eflags: cpu.eflags_image(),
-            seg: Seg::ALL.map(|seg| cpu.seg_cache(seg).selector),
-        }
-    }
-}
 
 /// A module in the process: the program or a DLL.
 #[derive(Clone, Debug, Default)]
@@ -231,6 +211,15 @@ pub fn prepare(cpu: &mut Cpu, filename: &str, bytes: &[u8]) -> bool {
     if !cpu.bus.win32.enabled || !rust_dos_pe::is_pe(bytes) {
         return false;
     }
+    // Under a virtual-8086 monitor (EMM386, Windows' 386 enhanced mode)
+    // the process can't take the processor (`accepts`): the stub runs.
+    if cpu.pe() {
+        cpu.bus.log_string(&format!(
+            "[W32] {} is a Win32 program, but DOS runs in virtual-8086 mode: its DOS stub runs",
+            filename
+        ));
+        return false;
+    }
     install_rom(&mut cpu.bus);
     let path = cpu.program_path(filename);
     cpu.bus
@@ -375,9 +364,19 @@ fn fatal(cpu: &mut Cpu, what: &str, ctx: Option<&Context>) {
     exit(cpu, FAILED);
 }
 
+/// The 32-bit value at `lin` in the process's memory, read through its
+/// page tables without a page fault: None where no page is there. For
+/// what a message or a log line says, which mustn't fault a function that
+/// has already ended the process.
+fn peek_32(cpu: &Cpu, lin: u32) -> Option<u32> {
+    let process = cpu.bus.win32.process.as_ref()?;
+    let phys = process.memory.translate(&cpu.bus, lin)?;
+    Some(cpu.bus.read_32(phys as usize))
+}
+
 /// The program called a function a built-in DLL doesn't have yet.
 fn missing(cpu: &mut Cpu, index: u16) {
-    let caller = cpu.bus.guest_read_32(cpu.esp());
+    let caller = peek_32(cpu, cpu.esp()).unwrap_or(0);
     let (dll, function) = process(cpu)
         .missing
         .get(index as usize)
@@ -419,6 +418,7 @@ pub fn process_ended(cpu: &mut Cpu, psp: u16) {
     if cpu.bus.win32.process.as_ref().is_some_and(|p| p.psp == psp) {
         let process = cpu.bus.win32.process.take().expect("the process");
         process.memory.release(&mut cpu.bus);
+        cpu.bus.set_a20(process.a20);
     }
     cpu.bus.win32.pending = None;
 }
@@ -437,12 +437,6 @@ pub fn trap_name(id: u16) -> String {
     }
 }
 
-crate::state_fields!(Context {
-    gpr,
-    eip,
-    eflags,
-    seg
-});
 crate::state_fields!(Module { name, base, size });
 crate::state_fields!(Process {
     name,

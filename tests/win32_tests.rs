@@ -186,6 +186,38 @@ fn a_program_writes_to_its_console_and_exits() {
 }
 
 #[test]
+fn a_write_of_more_than_64_kb_is_counted_whole() {
+    // 70000 bytes, past what DOS counts in 16 bits: the count's high word
+    // is the exit code.
+    const LEN: u32 = 70_000;
+    let mut data = vec![0u8; 0x40];
+    data.resize(0x40 + LEN as usize, b'x');
+    let imports: &[(&str, &[&str])] = &[(
+        "KERNEL32.dll",
+        &["GetStdHandle", "WriteFile", "ExitProcess"],
+    )];
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        a.push(STD_OUTPUT_HANDLE)?;
+        a.call(l.import(0))?;
+        a.push(0)?;
+        a.push(l.at(0x30) as i32)?;
+        a.push(LEN as i32)?;
+        a.push(l.at(0x40) as i32)?;
+        a.push(eax)?;
+        a.call(l.import(1))?;
+        a.mov(eax, dword_ptr(l.at(0x30)))?;
+        a.shr(eax, 16)?;
+        a.push(eax)?;
+        a.call(l.import(2))?;
+        a.int3()
+    });
+    let mut cpu = machine("write_64k", exe);
+    assert!(run_to_exit(&mut cpu, 2000), "{:?}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, (LEN >> 16) as u8);
+    assert_eq!(printed(&cpu).len(), LEN as usize);
+}
+
+#[test]
 fn a_program_runs_on_the_dynamic_recompiler() {
     let mut cpu = machine("dynamic", hello(BASE, false));
     cpu.core = CoreMode::Dynamic;

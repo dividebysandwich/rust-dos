@@ -658,6 +658,13 @@ impl Image {
             .end
             .checked_sub(tls.start)
             .ok_or(Error::Invalid("TLS template".into()))?;
+        // The zero fill is a number in the file: no more than an image.
+        if tls.zero_fill > MAX_IMAGE {
+            return Err(Error::Invalid(format!(
+                "TLS zero fill {:X}h",
+                tls.zero_fill
+            )));
+        }
         let start = self.rva_of(tls.start)? as usize;
         let mut data = self
             .data

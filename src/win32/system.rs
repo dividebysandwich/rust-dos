@@ -11,6 +11,7 @@
 use super::memory::{Memory, PAGE, SYSTEM, WRITABLE};
 use super::{Context, ESP, ID_IDT, IDT_TRAPS, IRQ_RETURN, ROM_BASE, ROM_SEG};
 use crate::cpu::{CR0_PE, CR0_PG, CR4_OSFXSR, Cpu, CpuFlags, DescTable, Seg, SegCache};
+use crate::dpmi::descriptor;
 
 /// The system block's parts, as offsets from where it is mapped.
 const GDT: u32 = 0x0000;
@@ -46,21 +47,6 @@ const ACCESS_CODE3: u8 = 0xFB;
 const ACCESS_DATA3: u8 = 0xF3;
 const FLAT: u8 = 0xC;
 const BIG: u8 = 0x4;
-
-/// An 8-byte segment descriptor.
-fn descriptor(base: u32, limit: u32, access: u8, flags: u8) -> u64 {
-    let (limit, flags) = if limit > 0xF_FFFF {
-        (limit >> 12, flags | 0x8)
-    } else {
-        (limit, flags & !0x8)
-    };
-    (limit as u64 & 0xFFFF)
-        | ((base as u64 & 0xFF_FFFF) << 16)
-        | ((access as u64) << 40)
-        | (((limit as u64 >> 16) & 0xF) << 48)
-        | ((flags as u64 & 0xF) << 52)
-        | (((base as u64 >> 24) & 0xFF) << 56)
-}
 
 fn attr(access: u8, flags: u8) -> u16 {
     access as u16 | (flags as u16) << 12
