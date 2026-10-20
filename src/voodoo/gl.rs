@@ -24,8 +24,8 @@ const TRIANGLE_FRAG: &str = include_str!("gl/triangle.frag");
 const QUAD_VERT: &str = include_str!("gl/quad.vert");
 const PIXELS_FRAG: &str = include_str!("gl/pixels.frag");
 const DEPTH_FRAG: &str = include_str!("gl/depth.frag");
-const CLUT_FRAG: &str = include_str!("gl/clut.frag");
 const FILL_FRAG: &str = include_str!("gl/fill.frag");
+const CLUT_FRAG: &str = include_str!("gl/clut.frag");
 
 const TRIANGLE_UNIFORMS: &[&str] = &[
     "u_size", "u_fbzcp", "u_fbz", "u_alpha", "u_fog", "u_color0", "u_color1", "u_chroma", "u_chroma_range", "u_zacolor", "u_fogcolor",

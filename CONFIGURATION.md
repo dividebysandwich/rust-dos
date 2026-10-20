@@ -315,6 +315,10 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   CRT looks keep one scanline per line of the card's resolution (`false`
   gives a line per pixel of the bigger picture, finer lines; it matters
   only above 1x and with a CRT look),
+  with `voodoo_dither` (`true`, the default, or `false`) whether it
+  dithers to 16 bits a pixel as the card does where the game dithers
+  (`false` gives a smoother picture; see
+  [3dfx Voodoo Graphics](#3dfx-voodoo-graphics)),
   with `voodoo_msaa` (`off`, the default, `2`, `4` or `8`) samples a
   pixel of multisampled antialiasing and `voodoo_anisotropy` (`off`, the
   default, `2`, `4`, `8` or `16`) filters textures at oblique angles;
@@ -2056,14 +2060,15 @@ puts in the variables the settings want.
 With `voodoo_renderer=opengl` the window shows the card's picture drawn
 again with OpenGL, at `voodoo_scale` times the card's resolution: the same
 triangles through the same pixel pipeline (textures, fog, blending, the
-depth buffer and the gamma table), with sharper edges and textures and 8
-bits a colour without the card's dithering. `voodoo_msaa` smooths the
-triangles' edges with multisampling (as many samples as the graphics
-card has, at most); antialiasing forced in the graphics driver's control
-panel doesn't reach the framebuffer objects it draws into. What games write into the
-frame buffer themselves (menus, movies) stays at the card's resolution.
-`voodoo_anisotropy` sharpens textures viewed at an angle, where the OpenGL
-driver supports anisotropic filtering.
+depth buffer and the gamma table), with sharper edges and textures, and
+with the card's dithering unless `voodoo_dither=false` (see below).
+`voodoo_msaa` smooths the triangles' edges with multisampling (as many
+samples as the graphics card has, at most); antialiasing forced in the
+graphics driver's control panel doesn't reach the framebuffer objects it
+draws into. What games write into the frame buffer themselves (menus,
+movies) stays at the card's resolution. `voodoo_anisotropy` sharpens
+textures viewed at an angle, where the OpenGL driver supports
+anisotropic filtering.
 The software rasterizer keeps the card's memory, which games read back
 and save states keep, but it only draws what can still be seen there:
 until something reads the memory, the drawing waits, and what a later
@@ -2078,6 +2083,47 @@ is drawn and counted (`RUST_DOS_VOODOO_PRUNE=0` in the environment draws
 everything from the start). The CRT shaders draw their scanlines over the
 bigger picture. The libretro core draws it with the frontend's OpenGL (see
 [its README](libretro/README.md#the-3dfx-voodoo-with-opengl)).
+
+The card stores 16 bits a pixel (5-6-5), and where a game turns
+dithering on (fbzMode bit 8, which Glide sets by default) it adds a 4x4
+or 2x2 ordered dither to each colour before it drops the low bits: a
+fine pattern of dots that hides most of the banding between its shades.
+The OpenGL buffers have 8 bits a component. With `voodoo_dither=true`,
+the default, the shader dithers each triangle's colour with the card's
+own matrix and rounding, and fastfills fill with the card's dithered
+colour, so at `voodoo_scale=1` an unblended triangle or a fastfill comes
+out pixel for pixel as the software rasterizer draws it. The matrix
+follows the card's pixels, so at 2x and above each dot of the pattern
+covers a block of 2x2 (or 3x3, 4x4) pixels of the bigger picture, as the
+card's picture looks enlarged. `voodoo_dither=false` keeps all 8 bits a
+colour: a cleaner, smoother picture, without the dot pattern or the
+banding the 16 bits leave. Games that don't dither look the same either
+way. It changes at once, in the settings window (*3dfx dithering*) too,
+from the next frame the game draws.
+
+Not all of the card's dithering is there. OpenGL blends after the shader,
+so a blended triangle is dithered before the blend instead of after it: it
+has the pattern, but its pixels aren't the card's, and fbzMode bit 19
+(taking the dither back out of the colour the blend reads) does nothing.
+Some games blend most of what they draw (Oni blends every triangle), so
+their pictures have the card's pattern but not its exact pixels. The
+texture units' dithered LOD isn't there either, as OpenGL picks the mipmap
+levels. Frame buffer writes and the Voodoo2's blitter show what the card's
+memory holds, dithered or not, whatever the setting. The Voodoo2's and
+Voodoo3's video output filter, which partly smooths the pattern on the
+card's own output, isn't modelled: with the setting on, the pattern shows
+as the card writes it.
+
+The dithering costs a few more instructions a pixel in the shader, and
+nothing on the host's CPU. On an Intel UHD Graphics 770 at the default
+2x, Oni (a Voodoo2 game that dithers every triangle) ran the same either
+way: 9.7 frames a second in a level and 38 in the menu, with the same
+CPU time and the same time in the 3dfx renderer's zones of the profile,
+as the emulated CPU, not the graphics card, holds it back there. Drawing
+nothing but dithered triangles, 200 screen-sized rectangles a frame at
+2x, the graphics card took 7% longer with dithering on (1083 against
+1010 ms a frame, about 0.3 ns more for each of the 246 million pixels):
+the most it costs, where filling pixels is all a frame does.
 
 ## 3dfx Voodoo3 and Banshee
 

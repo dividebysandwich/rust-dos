@@ -172,9 +172,9 @@ with a fine pattern of dots where a game turns dithering on. **On** (the
 default) gives the OpenGL picture the same pattern, so it looks like the
 card's, the dots growing with *3dfx OpenGL size*. **Off** keeps 8 bits a
 colour: a cleaner, smoother picture without the pattern or its banding.
-It costs next to nothing either way, takes effect immediately and only
-the **OpenGL** renderer uses it; **Rust-DOS** always draws what the card
-draws.
+**On** costs a little of your graphics card's time and none of the
+CPU's. It takes effect immediately, and only the **OpenGL** renderer uses
+it; **Rust-DOS** always draws what the card draws.
 
 # 3dfx anisotropic filtering {#voodoo-anisotropy}
 
