@@ -28,10 +28,15 @@ impl LogFile {
     /// Create the log file at `path`, replacing the previous run's, and
     /// start it with the emulator version and the time.
     pub fn create(path: &Path) -> io::Result<Self> {
+        Self::create_with_limit(path, MAX_BYTES)
+    }
+
+    /// The same, writing at most `limit` bytes.
+    pub fn create_with_limit(path: &Path, limit: u64) -> io::Result<Self> {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir)?;
         }
-        let mut log = Self::new(File::create(path)?, MAX_BYTES);
+        let mut log = Self::new(File::create(path)?, limit);
         log.write_line(&format!(
             "rust-dos {} started {}",
             env!("CARGO_PKG_VERSION"),

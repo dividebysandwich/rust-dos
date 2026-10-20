@@ -75,6 +75,8 @@ pub static DLLS: &[&Dll] = &[
     &super::kernel32::DLL,
     &super::advapi32::DLL,
     &super::msvcrt::DLL,
+    &super::user32::DLL,
+    &super::gdi32::DLL,
 ];
 
 /// Bytes each function's stub takes.

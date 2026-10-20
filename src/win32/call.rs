@@ -46,6 +46,7 @@ pub static THENS: &[Then] = &[
     super::kernel32::module::enumerated,
     super::kernel32::enum_returned,
     super::msvcrt::returned,
+    super::task::returned,
 ];
 
 /// The `THENS` places, by name.
@@ -57,6 +58,7 @@ pub const DLL_NOTIFIED: u16 = 4;
 pub const RESOURCE_ENUMERATED: u16 = 5;
 pub const ENUM_STRINGS: u16 = 6;
 pub const MSVCRT: u16 = 7;
+pub const TASK: u16 = 8;
 
 /// Call the program's function at `target` with `args` (the first pushed
 /// last, as C does), on the running thread's stack below ESP. When it

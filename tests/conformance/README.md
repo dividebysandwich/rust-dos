@@ -19,6 +19,12 @@ change listed below:
   `thread.c`, `time.c`, `timer.c`, `version.c`, `virtual.c` from
   `dlls/kernel32/tests/`;
 - `advapi32/`: `registry.c` from `dlls/advapi32/tests/`;
+- `user32/`: `class.c`, `dce.c`, `dialog.c`, `input.c`, `msg.c`,
+  `resource.c`, `static.c`, `text.c`, `uitools.c`, `win.c`,
+  `wsprintf.c`, and the resources they share, `resource.rc` with
+  `test_mono.bmp`, from `dlls/user32/tests/`;
+- `gdi32/`: `bitmap.c`, `brush.c`, `clipping.c`, `dc.c`, `gdiobj.c`,
+  `mapping.c`, `palette.c`, `pen.c` from `dlls/gdi32/tests/`;
 - `msvcrt/`: `data.c`, `dir.c`, `environ.c`, `file.c`, `heap.c`,
   `printf.c`, `scanf.c`, `signal.c`, `string.c`, `time.c` from
   `dlls/msvcrt/tests/`. `misc.c` is left out: it includes Wine's own
@@ -42,10 +48,18 @@ Wine's headers that MinGW's lack (`__ms_va_list` and its macros,
 `LOCALE_RETURN_GENITIVE_NAMES`). Each test file is built with it
 included first, so the files stay unchanged.
 
-`runtime/runtime.c` is rust-dos's own: the C runtime the kernel32
-tests link in place of MSVCRT.DLL, so that they test KERNEL32 alone. It
-has the startup code and the parts of the C library that the framework
-and the tests use, written on KERNEL32 alone.
+`runtime/runtime.c` is rust-dos's own: the C runtime the kernel32,
+advapi32, user32 and gdi32 tests link in place of MSVCRT.DLL, so that
+they test the DLLs alone. It has the startup code and the parts of the
+C library that the framework and the tests use, written on KERNEL32
+alone. It also has `dump_region`, which `win.c` calls and Wine has in
+`msg.c`: `win.c` is built with `-Ddump_region=conformance_dump_region`
+to call that one.
+
+The user32 and gdi32 tests link the built-in USER32.DLL and GDI32.DLL.
+Each user32 program is linked with `resource.rc`, compiled with
+MinGW's `i686-w64-mingw32-windres`, or the one `CONFORMANCE_WINDRES`
+names.
 
 The msvcrt tests test the built-in MSVCRT.DLL, so they are linked as
 MinGW links any program: its startup code (`crt2.o`) and `-lmsvcrt`,
@@ -58,7 +72,7 @@ without `runtime.c`. They are built with two more options:
   instead of putting MinGW's own in its place.
 
 `crt2.o` uses CMOVcc, so these programs run on a Pentium Pro; the
-kernel32 ones on a 486.
+others on a 486.
 
 ## Running them
 
@@ -69,7 +83,7 @@ since another version can build them into code that gives other
 results.
 
 ```sh
-CONFORMANCE_CC=i686-w64-mingw32-gcc-win32 cargo test --test conformance_tests
+CONFORMANCE_CC=i686-w64-mingw32-gcc-win32 cargo test --release --test conformance_tests
 ```
 
 Without a compiler the test says so and passes, so `cargo test` works
@@ -87,6 +101,17 @@ so they are the same in WSL:
 Each test file becomes `target/conformance/<dll>/<NAME>.EXE`, its output
 `<file>.log` beside it.
 
+A debug build runs them many times slower than a release build, which
+CI uses. To work on some of them, `CONFORMANCE_ONLY` names those to run
+(a DLL, or `user32/static`, or a comma-separated list), and prints
+their results without comparing them. `CONFORMANCE_LOG=1` writes the
+emulator's log, with every call a program makes, to
+`target/conformance/<dll>/<file>.trace`.
+
+```sh
+CONFORMANCE_ONLY=user32/dce cargo test --release --test conformance_tests -- --nocapture
+```
+
 ## The results
 
 `expected.txt` has each test file's results: its summary line, the
@@ -97,7 +122,7 @@ fails when the results differ, better or worse, so the change shows in
 the file's diff. When it is right, write the results anew:
 
 ```sh
-CONFORMANCE_BLESS=1 cargo test --test conformance_tests
+CONFORMANCE_BLESS=1 cargo test --release --test conformance_tests
 ```
 
 The results that aren't clean, and why:
@@ -115,6 +140,19 @@ The results that aren't clean, and why:
   95's does, since there is one there.
 - msvcrt `file.c:1339`: `_pipe` fails with EMFILE, as KERNEL32 has no
   anonymous pipes yet.
+- gdi32 `bitmap.c:2527`, a StretchBlt with both rectangles given
+  backwards, and `2755`, a StretchDIBits that shrinks, give other
+  pixels than Windows did. Wine marks both `todo_wine`.
+- gdi32 `dc.c:453`: DeleteDC of a class DC leaves it there, as on
+  Windows 9x, which the test allows only through `broken()`.
+- user32 `msg.c` and `win.c` compare the messages a window gets with
+  what Windows 2000 and XP sent, and many of their sequences fail: the
+  built-in USER32 doesn't match every message of those yet. Some of the
+  differences are Windows 95's own: it has no WM_UNINITMENUPOPUP,
+  WM_MENUCOMMAND or TrackMouseEvent, and keeps a BS_USERBUTTON a user
+  button where XP makes it a push button.
+- user32 `win.c:4252` and `4264`: the clip box of a CS_PARENTDC
+  window's DC, which Wine marks `todo_wine` too.
 
 ## Adding tests
 
