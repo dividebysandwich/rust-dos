@@ -30,6 +30,15 @@ pub enum Job {
     Fastfill { st: RasterState, dither: [u16; 16], x0: i32, x1: i32, y0: i32, y1: i32 },
     /// Words frame buffer writes left, in order.
     Pixels { fb: Vram, words: Vec<Word> },
+    /// Rows `rows` of the buffer at word `base`, `rowpixels` words each,
+    /// filled whole with `value` (a Voodoo2's SGRAM fill).
+    Rows {
+        fb: Vram,
+        base: usize,
+        rowpixels: usize,
+        rows: (u32, u32),
+        value: u16,
+    },
     /// A job that fails, for the tests.
     #[cfg(test)]
     Panic,
@@ -78,6 +87,20 @@ impl Job {
                 for w in words {
                     if owns(w.row as i32) && (w.at as usize) < fb.len() {
                         fb.set(w.at as usize, w.value);
+                    }
+                }
+            }
+            Job::Rows {
+                fb,
+                base,
+                rowpixels,
+                rows,
+                value,
+            } => {
+                for row in rows.0..rows.1 {
+                    if owns(row as i32) {
+                        let start = (base + row as usize * rowpixels).min(fb.len());
+                        fb.fill(start..(start + rowpixels).min(fb.len()), *value);
                     }
                 }
             }
