@@ -463,7 +463,7 @@ mod tests {
     }
 
     fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("rust-dos-printer-{}-{}", name, std::process::id()));
+        let dir = crate::test_dir::path(&format!("printer-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }

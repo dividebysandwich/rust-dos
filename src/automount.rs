@@ -414,7 +414,7 @@ mod tests {
 
     #[test]
     fn a_folder_package_is_scanned_with_its_cue_sheets_tracks() {
-        let package = std::env::temp_dir().join(format!("rust-dos-automount-{}", std::process::id()));
+        let package = crate::test_dir::path("automount");
         let _ = std::fs::remove_dir_all(&package);
         let folder = package.join("AutoMount");
         std::fs::create_dir_all(folder.join("e1[SECOND]")).unwrap();

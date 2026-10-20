@@ -65,7 +65,7 @@ impl Rig {
     }
 
     fn with(name: &str, options: Options) -> Self {
-        let dir = std::env::temp_dir().join(format!("rust-dos-http-{}-{}", name, std::process::id()));
+        let dir = crate::test_dir::path(&format!("http-{name}"));
         std::fs::create_dir_all(&dir).unwrap();
         let code: Vec<u8> = (0..PROBE.len()).step_by(2).map(|i| u8::from_str_radix(&PROBE[i..i + 2], 16).unwrap()).collect();
         std::fs::write(dir.join("PROBE.COM"), code).unwrap();
@@ -1642,7 +1642,7 @@ fn saves_loads_and_speed_changes_take_effect_in_the_order_of_the_journal() {
 fn if_state_seq_guards_every_request_the_emulator_carries_out() {
     let rig = Rig::new("if-state-all");
     rig.post("/api/control/pause", json!({}));
-    let mount = std::env::temp_dir().join(format!("rust-dos-http-if-state-mount-{}", std::process::id()));
+    let mount = crate::test_dir::path("http-if-state-mount");
     std::fs::create_dir_all(&mount).unwrap();
     let saved = rig.post("/api/state/save", json!({"path": "if.state"}));
     assert_eq!(saved.status, 200, "{}", saved.body);
@@ -1868,7 +1868,7 @@ fn the_debugger_page_gets_what_it_reads() {
     rig.post("/api/watchpoints", json!({"addr": format!("{}:0200", cs), "len": 2}));
     rig.post("/api/control/resume", json!({}));
     rig.until_paused();
-    let mount = std::env::temp_dir().join(format!("rust-dos-http-ui-mount-{}", std::process::id()));
+    let mount = crate::test_dir::path("http-ui-mount");
     std::fs::create_dir_all(&mount).unwrap();
     assert_eq!(http(rig.addr, "PUT", "/api/drive/E", &[], Some(&json!({"path": mount.display().to_string()}))).status, 200);
     let seen = read_entries(&mut events, usize::MAX, Duration::from_millis(500));

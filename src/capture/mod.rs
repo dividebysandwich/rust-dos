@@ -31,7 +31,7 @@ mod tests {
 
     #[test]
     fn names_are_new_files_in_the_folder() {
-        let dir = std::env::temp_dir().join(format!("rust-dos-capture-{}", std::process::id()));
+        let dir = crate::test_dir::path("capture");
         let _ = std::fs::remove_dir_all(&dir);
         let first = capture_path(&dir, "screenshot", "png").unwrap();
         assert!(dir.is_dir());

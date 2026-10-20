@@ -479,7 +479,7 @@ mod tests {
 
     #[test]
     fn the_name_and_the_drive_follow_the_kind_of_disk() {
-        let dir = std::env::temp_dir().join(format!("rust-dos-image-dialog-{}", std::process::id()));
+        let dir = crate::test_dir::path("image-dialog");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("floppy.img"), b"").unwrap();
         let drives = [drive(1), drive(2), drive(25)];
@@ -527,7 +527,7 @@ mod tests {
 
     #[test]
     fn hard_disks_are_made_raw_or_as_vhds() {
-        let dir = std::env::temp_dir().join(format!("rust-dos-image-dialog-vhd-{}", std::process::id()));
+        let dir = crate::test_dir::path("image-dialog-vhd");
         std::fs::create_dir_all(&dir).unwrap();
         let mut d = ImageDialog::new(&[drive(25)], &dir, None);
         assert!(!d.fields().contains(&ImageField::Format), "a floppy is raw");

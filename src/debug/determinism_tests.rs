@@ -1058,7 +1058,7 @@ fn settings(dir: &Path) -> rust_dos::config::Settings {
 /// as E:.
 fn machine(name: &str) -> (Cpu, DebugHub, Deterministic) {
     let mode = Deterministic::new(rust_dos::deterministic::default_start());
-    let dir = std::env::temp_dir().join(format!("rust-dos-determinism-{}", std::process::id())).join(name);
+    let dir = crate::test_dir::path("determinism").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("c")).unwrap();
     let files = [cdimage::file("README.TXT", b"a disc image\r\n"), cdimage::file("DATA\\BIG.DAT", &[7; 9000])];

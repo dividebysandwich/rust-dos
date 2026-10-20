@@ -74,7 +74,7 @@ mod tests {
 
     #[test]
     fn the_header_has_the_sizes() {
-        let path = std::env::temp_dir().join(format!("rust-dos-wav-{}.wav", std::process::id()));
+        let path = crate::test_dir::path("wav.wav");
         let mut wav = WavWriter::create(&path).unwrap();
         wav.write(&[1, -1, 2, -2]).unwrap();
         wav.write(&[3, -3]).unwrap();

@@ -1073,7 +1073,7 @@ mod tests {
     use super::*;
 
     fn scratch(name: &str, bytes: &[u8]) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("rust-dos-diskimage-{}", std::process::id()));
+        let dir = crate::test_dir::path("diskimage");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(name);
         std::fs::write(&path, bytes).unwrap();
@@ -1311,7 +1311,7 @@ mod tests {
         assert_eq!(std::fs::metadata(&path).unwrap().len(), bytes.len() as u64);
 
         // Over a delta, and held in memory.
-        let delta = std::env::temp_dir().join(format!("rust-dos-diskimage-{}", std::process::id())).join("disk.rdelta");
+        let delta = crate::test_dir::path("diskimage").join("disk.rdelta");
         let over = DiskImage::open_delta(&path, &delta, true, None, false).unwrap();
         assert_eq!(over.geometry(), chs);
         over.write(5, &[0xEE; 512]).unwrap();

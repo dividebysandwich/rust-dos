@@ -471,7 +471,7 @@ mod tests {
 
     #[test]
     fn invalid_font_files_are_rejected() {
-        let path = std::env::temp_dir().join(format!("rust-dos-invalid-font-{}.ttf", std::process::id()));
+        let path = crate::test_dir::path("invalid-font.ttf");
         let mut head_only = vec![0u8; 82];
         head_only[..4].copy_from_slice(&[0, 1, 0, 0]);
         head_only[4..6].copy_from_slice(&1u16.to_be_bytes());

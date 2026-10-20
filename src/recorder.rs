@@ -201,7 +201,7 @@ mod tests {
 
     #[test]
     fn a_recording_holds_the_frames_at_the_first_size() {
-        let dir = std::env::temp_dir().join(format!("rust-dos-gif-{}", std::process::id()));
+        let dir = crate::test_dir::path("gif");
         let mut recorder = ScreenRecorder::new(1000);
         let path = recorder.toggle(&dir).unwrap().unwrap();
         assert!(recorder.is_active());

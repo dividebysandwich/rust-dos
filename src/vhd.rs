@@ -527,7 +527,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn scratch(name: &str, data: &[u8]) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("rust-dos-vhd-{}-{}", std::process::id(), name));
+        let dir = crate::test_dir::path(&format!("vhd-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("disk.vhd");

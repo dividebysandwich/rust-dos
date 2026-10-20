@@ -266,7 +266,7 @@ const CRASH: [u8; 4] = [0x31, 0xC0, 0xF6, 0xF0];
 /// A machine at the prompt with PROBE.COM on C:, and a hub with no
 /// server, which takes its commands from `send`.
 fn machine(name: &str) -> (Cpu, DebugHub) {
-    let dir = std::env::temp_dir().join(format!("rust-dos-debug-{}-{}", name, std::process::id()));
+    let dir = crate::test_dir::path(&format!("debug-{name}"));
     std::fs::create_dir_all(&dir).unwrap();
     let code: Vec<u8> = (0..PROBE.len()).step_by(2).map(|i| u8::from_str_radix(&PROBE[i..i + 2], 16).unwrap()).collect();
     std::fs::write(dir.join("PROBE.COM"), code).unwrap();
@@ -516,7 +516,7 @@ fn a_queued_run_without_stopping_answers_with_its_own_program() {
 #[test]
 fn a_queued_run_leaves_the_batch_file_s_program_without_the_hook() {
     let (mut cpu, mut hub) = machine("queued-hook");
-    let dir = std::env::temp_dir().join(format!("rust-dos-debug-queued-hook-{}", std::process::id()));
+    let dir = crate::test_dir::path("debug-queued-hook");
     // mov cx,FFFFh; loop $; mov ax,4C00h; int 21h: a few frames' work.
     std::fs::write(dir.join("SPIN.COM"), [0xB9, 0xFF, 0xFF, 0xE2, 0xFE, 0xB8, 0x00, 0x4C, 0xCD, 0x21]).unwrap();
     cpu.batch.append_file("AUTOEXEC", b"@echo off\r\nSPIN.COM\r\n", "");
@@ -781,7 +781,7 @@ fn other_instructions_just_step() {
 /// as the front end has it, with PROBE.COM on C:.
 fn deterministic_machine(name: &str) -> (Cpu, DebugHub, Deterministic) {
     let mode = Deterministic::new(rust_dos::deterministic::default_start());
-    let dir = std::env::temp_dir().join(format!("rust-dos-det-{}-{}", name, std::process::id()));
+    let dir = crate::test_dir::path(&format!("det-{name}"));
     std::fs::create_dir_all(&dir).unwrap();
     let code: Vec<u8> = (0..PROBE.len()).step_by(2).map(|i| u8::from_str_radix(&PROBE[i..i + 2], 16).unwrap()).collect();
     std::fs::write(dir.join("PROBE.COM"), code).unwrap();
@@ -859,7 +859,7 @@ fn deterministic_input_gives_the_same_run_whatever_the_frames() {
 /// the instructions executed, and the journal but for the host's time.
 fn queued_run(name: &str, frame_ms: u64) -> (Value, u64, Vec<Value>) {
     let (mut cpu, mut hub, mut mode) = deterministic_machine(name);
-    let dir = std::env::temp_dir().join(format!("rust-dos-det-{}-{}", name, std::process::id()));
+    let dir = crate::test_dir::path(&format!("det-{name}"));
     std::fs::write(dir.join("TARGET.COM"), CRASH).unwrap();
     cpu.batch.append_file("AUTOEXEC", b"@echo off\r\nPROBE.COM\r\necho ready\r\n", "");
     assert!(hub.paused, "paused at the start");
@@ -1565,7 +1565,7 @@ fn stopped_by(cpu: &mut Cpu, hub: &mut DebugHub, cmd: Cmd, reason: &str) -> Valu
 #[test]
 fn every_stop_names_its_reason_and_ends_its_operation() {
     let (mut cpu, mut hub) = machine("journal-stops");
-    let dir = std::env::temp_dir().join(format!("rust-dos-debug-journal-stops-{}", std::process::id()));
+    let dir = crate::test_dir::path("debug-journal-stops");
     std::fs::write(dir.join("STOPS.COM"), STOPS).unwrap();
     let entry = stopped_by(&mut cpu, &mut hub, Cmd::Run { command: "STOPS.COM".into(), stop_at_entry: true, queue: false }, "program_start");
     let cs = entry["registers"]["cs"].as_str().unwrap().to_string();
@@ -1615,7 +1615,7 @@ fn every_stop_names_its_reason_and_ends_its_operation() {
 #[test]
 fn a_run_whose_operation_a_stop_ended_waits_no_more() {
     let (mut cpu, mut hub) = machine("journal-run-stopped");
-    let dir = std::env::temp_dir().join(format!("rust-dos-debug-journal-run-stopped-{}", std::process::id()));
+    let dir = crate::test_dir::path("debug-journal-run-stopped");
     std::fs::write(dir.join("HOLD.BAT"), "@pause\r\nPROBE.COM\r\n").unwrap();
     let op = started_op(&mut cpu, &mut hub, Cmd::Run { command: "HOLD.BAT".into(), stop_at_entry: true, queue: false });
     run(&mut cpu, &mut hub, 20);
@@ -1652,7 +1652,7 @@ fn log_lines_name_their_request_and_the_journal_s_entry() {
     let shared = hub.shared.clone().unwrap();
     let hook = shared.clone();
     cpu.bus.log_hook = Some(Box::new(move |line: &str| hook.log_line(line)));
-    let dir = std::env::temp_dir().join(format!("rust-dos-debug-log-{}", std::process::id()));
+    let dir = crate::test_dir::path("debug-log");
     std::fs::create_dir_all(&dir).unwrap();
     let before = journal_state(&hub).2;
     let mount = Cmd::Mount { drive: "D".into(), path: dir.display().to_string(), kind: None, label: None, read_only: true, images: Vec::new() };
