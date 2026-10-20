@@ -155,7 +155,17 @@ pub struct Engine {
     rx_cur: i32,
     /// Something was drawn since the display last looked.
     pub drawn: bool,
+    /// The runs of bytes drawn into since the card last looked, first to
+    /// last (exclusive), for the OpenGL renderer's recording. A run per
+    /// row (per tile row if tiled), so the recording takes the pixels
+    /// drawn and not the whole rows around them; past `MAX_RUNS` they
+    /// fold into one.
+    pub touched: Vec<(u32, u32)>,
 }
+
+/// The most runs of bytes `Engine::touched` keeps apart: a 1024x768
+/// screen blitted into tiled memory is 16 runs a row.
+const MAX_RUNS: usize = 1 << 14;
 
 /// The longest row of host data: a stride of 8191 bytes and the start's
 /// offset in its dword, with room for the dword that overflows it.
@@ -231,6 +241,7 @@ impl Default for Engine {
             lx_cur: 0,
             rx_cur: 0,
             drawn: false,
+            touched: Vec::new(),
         }
     }
 }
@@ -247,6 +258,7 @@ crate::state_fields!(Engine {
     src_size_y, src_x, src_y, dst_size_x, dst_size_y, dst_x, dst_y, launch_pending, patoff_x,
     patoff_y, cur_y, src_stride_src, src_stride_dest, host_data_size_src, host_data_size_dest,
     host_data, host_data_count, lx, ly, rx, ry, dx, dy, x_inc, error, lx_cur, rx_cur, drawn,
+    touched,
 });
 
 /// The signed 13-bit x and y of an XY register.
@@ -433,6 +445,26 @@ impl Engine {
         let value = self.mix(dest, src, pattern, src_key, self.dst_key());
         write(ram, addr, bytes as u32, value, mask);
         self.drawn = true;
+        self.touch(addr, addr + bytes as u32);
+    }
+
+    /// Bytes `start..end` drawn into: add them to `touched`.
+    fn touch(&mut self, start: u32, end: u32) {
+        if let Some(last) = self.touched.last_mut()
+            && start <= last.1
+            && end >= last.0
+        {
+            *last = (last.0.min(start), last.1.max(end));
+            return;
+        }
+        if self.touched.len() >= MAX_RUNS {
+            let first = self.touched.iter().map(|r| r.0).min().unwrap_or(start);
+            let last = self.touched.iter().map(|r| r.1).max().unwrap_or(end);
+            self.touched.clear();
+            self.touched.push((first.min(start), last.max(end)));
+            return;
+        }
+        self.touched.push((start, end));
     }
 
     /// A register of the 2D space written (at byte `addr & 1FCh`);

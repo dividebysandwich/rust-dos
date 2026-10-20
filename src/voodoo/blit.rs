@@ -261,7 +261,11 @@ impl Voodoo {
     /// None if they aren't whole rows of them.
     fn whole_rows(&self, first: u32, end: u32) -> Option<Vec<(usize, u32, u32)>> {
         let layout = self.backlog.borrow().layout;
-        let row = layout.rowpixels as usize;
+        // Rows one after another, the same for every buffer.
+        if layout.stride.tiled || layout.aux_stride != layout.stride {
+            return None;
+        }
+        let row = layout.stride.words;
         let size = row * layout.height as usize;
         let (mut at, end) = (first as usize, end as usize);
         let mut rows = Vec::new();

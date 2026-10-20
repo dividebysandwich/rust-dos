@@ -60,6 +60,7 @@ vector!([f32; 2], uniform_2_f32, [0, 1]);
 vector!([f32; 3], uniform_3_f32, [0, 1, 2]);
 vector!([f32; 4], uniform_4_f32, [0, 1, 2, 3]);
 vector!([i32; 3], uniform_3_i32, [0, 1, 2]);
+vector!([i32; 4], uniform_4_i32, [0, 1, 2, 3]);
 
 // The fog tables are kept as the draw state has them, so a draw compares
 // them without converting; they become ints only when they are sent.
@@ -132,4 +133,18 @@ locations!(Quad {
     u_rect: [f32; 4],
     u_size: [f32; 2],
     u_scale: f32
+});
+locations!(Banshee {
+    u_rect: [f32; 4],
+    u_size: [f32; 2],
+    u_scale: i32,
+    u_desk: [i32; 4],
+    u_desk_layout: [i32; 4],
+    u_ovl: [i32; 4],
+    u_ovl_layout: [i32; 4],
+    u_ovl_rect: [i32; 4],
+    u_ovl_step: [i32; 3],
+    u_cur: [i32; 4],
+    u_cur_c0: [f32; 3],
+    u_cur_c1: [f32; 3]
 });

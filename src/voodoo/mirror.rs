@@ -8,9 +8,11 @@
 //! decoded to ARGB as the card reads them, and the buffers' pixels whenever
 //! their layout changes or a state loads.
 
-use super::raster::{RasterState, TmuRaster, TriParams, fetch_texel};
+use super::NONE;
+use super::raster::{RasterState, Stride, TmuRaster, TriParams, fetch_texel};
 use super::texture::{PAGE_SHIFT, Tmu};
 use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 
 /// A vertex: where it is in the buffer in pixels, rows counted from the
 /// top of the buffer (the Y origin applied), and the values the card
@@ -111,27 +113,129 @@ pub struct Pixels {
     pub values: Vec<u16>,
 }
 
-/// Where the buffers are: their size in pixels, and the word offsets of
-/// the colour buffers and the auxiliary buffer.
+/// Where the buffers are: their size in pixels, how their rows lie in
+/// memory (the colour buffers' and the auxiliary buffer's, linear or in
+/// a Banshee's tiles), and the word offsets of the colour buffers and the
+/// auxiliary buffer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Layout {
     pub width: u32,
     pub height: u32,
-    pub rowpixels: u32,
+    pub stride: Stride,
+    pub aux_stride: Stride,
     pub color: Vec<u32>,
     pub aux: Option<u32>,
 }
 
 /// What the layout is worked out from, which the card compares on every
-/// command without building a `Layout`: the size, the row length and the
-/// byte offsets of the colour buffers and the auxiliary buffer.
+/// command without building a `Layout`: the size, the strides and the
+/// byte offsets of the colour buffers and the auxiliary buffer (`NONE`
+/// where there is none).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LayoutKey {
     pub width: u32,
     pub height: u32,
-    pub rowpixels: u32,
+    pub stride: Stride,
+    pub aux_stride: Stride,
     pub color: [u32; 3],
     pub aux: u32,
+}
+
+impl LayoutKey {
+    pub fn layout(&self) -> Layout {
+        Layout {
+            width: self.width,
+            height: self.height,
+            stride: self.stride,
+            aux_stride: self.aux_stride,
+            color: self
+                .color
+                .iter()
+                .filter(|&&offs| offs != NONE)
+                .map(|&offs| offs / 2)
+                .collect(),
+            aux: (self.aux != NONE).then_some(self.aux / 2),
+        }
+    }
+
+    /// The buffers: each one's word offset, its key in the recording (the
+    /// offset for a colour buffer, None for the auxiliary buffer) and its
+    /// stride.
+    fn buffers(&self) -> impl Iterator<Item = (u32, Option<u32>, Stride)> + '_ {
+        let color = self.color.iter().filter(|&&offs| offs != NONE);
+        let color = color.map(|&offs| (offs / 2, Some(offs / 2), self.stride));
+        let aux = (self.aux != NONE).then_some((self.aux / 2, None, self.aux_stride));
+        color.chain(aux)
+    }
+
+    /// Where word `at` of the frame buffer is in the buffers: the buffer's
+    /// key (`buffers`) and the pixel's column and row, if it is a pixel
+    /// of one.
+    pub fn locate(&self, at: u32) -> Option<(Option<u32>, u32, u32)> {
+        self.buffers().find_map(|(base, key, stride)| {
+            let (x, y) = pixel_at(stride, at.checked_sub(base)? as usize)?;
+            (x < self.width && y < self.height).then_some((key, x, y))
+        })
+    }
+
+    /// Whether bytes `start..end` of the frame buffer hold any of the
+    /// buffers' memory.
+    pub fn overlaps(&self, start: u32, end: u32) -> bool {
+        self.buffers().any(|(base, _, stride)| {
+            let (base, span) = (base as u64 * 2, span(stride, self.height) as u64 * 2);
+            (start as u64) < base + span && base < end as u64
+        })
+    }
+
+    /// The buffers' rows that bytes `start..end` of the frame buffer may
+    /// hold pixels of: the buffer's key (`buffers`) and rows `first..last`.
+    pub fn rows_in(&self, start: u32, end: u32) -> Vec<(Option<u32>, u32, u32)> {
+        self.buffers()
+            .filter_map(|(base, key, stride)| {
+                let (base, words) = (base as u64 * 2, stride.words.max(1) as u64);
+                let span = span(stride, self.height) as u64 * 2;
+                let (start, end) = ((start as u64).max(base), (end as u64).min(base + span));
+                if start >= end {
+                    return None;
+                }
+                let (w0, w1) = ((start - base) / 2, (end - base).div_ceil(2));
+                // Rows, or with tiles bands of 32 rows.
+                let (r0, r1) = (w0 / words, (w1 - 1) / words + 1);
+                let (r0, r1) = if stride.tiled {
+                    (r0 * 32, r1 * 32)
+                } else {
+                    (r0, r1)
+                };
+                let r1 = r1.min(self.height as u64);
+                (r0 < r1).then_some((key, r0 as u32, r1 as u32))
+            })
+            .collect()
+    }
+}
+
+/// The words a buffer of `height` rows of `stride` spans.
+pub fn span(stride: Stride, height: u32) -> usize {
+    if stride.tiled {
+        (height as usize).div_ceil(32) * stride.words
+    } else {
+        height as usize * stride.words
+    }
+}
+
+/// The column and row of the pixel `at` words from a buffer's first.
+pub fn pixel_at(stride: Stride, at: usize) -> Option<(u32, u32)> {
+    if stride.words == 0 {
+        return None;
+    }
+    let (x, y) = if stride.tiled {
+        // Rows of tiles of 64 pixels by 32 rows (`Stride::row`).
+        let (band, within) = (at / stride.words, at % stride.words);
+        let (tile, word) = (within / 2048, within % 2048);
+        (tile * 64 + word % 64, band * 32 + word / 64)
+    } else {
+        (at % stride.words, at / stride.words)
+    };
+    Some((x as u32, y as u32))
 }
 
 /// The buffers' pixels, `width * height` each, in `Layout` order.
@@ -181,6 +285,82 @@ pub struct Frame {
     pub height: u32,
     /// The gamma table (clutData): 33 entries of RGB.
     pub clut: [u32; 33],
+    /// A Banshee's or Voodoo3's picture, which its video processor
+    /// composes, while the card shows it.
+    pub scanout: Option<Box<Scanout>>,
+}
+
+impl Frame {
+    /// Whether the renderer's picture is the one to show: the card shows
+    /// its own output, and it is a colour buffer or a Banshee's scanout.
+    /// A frontend that can't compose a scanout never asks a Banshee to
+    /// record, so this holds for both frontends.
+    pub fn shown(&self) -> bool {
+        self.output && (self.front.is_some() || self.scanout.is_some())
+    }
+}
+
+/// A surface a Banshee's video processor shows: its first byte in the
+/// card's memory, its stride in bytes (a row's, or a row of tiles' when
+/// tiled), its pixel format (the vidProcCfg field), the CLUT half it goes
+/// through (0 or 256) unless it bypasses the CLUT, and the recording's
+/// colour buffer it is (a word offset), when the OpenGL renderer draws
+/// it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Surface {
+    pub start: u32,
+    pub stride: u32,
+    pub tiled: bool,
+    pub format: u32,
+    pub clut: u32,
+    pub bypass: bool,
+    pub buffer: Option<u32>,
+}
+
+/// The overlay window: its surface, where it is on the screen (left,
+/// top, right, bottom, all inclusive) and its scaling: the source pixels
+/// a screen pixel steps across and down, and the first row's offset, in
+/// 20-bit fractions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Overlay {
+    pub surface: Surface,
+    pub rect: [u32; 4],
+    pub dudx: u32,
+    pub dvdy: u32,
+    pub v_offset: u32,
+}
+
+/// The hardware cursor: its top left corner on the screen, whether it is
+/// in X11 mode, its two colours (RGB) and its two bit planes, 16 bytes a
+/// row of 64 pixels, 64 rows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Cursor {
+    pub x: i32,
+    pub y: i32,
+    pub x11: bool,
+    pub colors: [u32; 2],
+    pub pattern: Vec<u8>,
+}
+
+/// What a Banshee's or Voodoo3's video processor shows, for the OpenGL
+/// renderer to compose as `Banshee::render` draws it: the desktop of
+/// `width` by `height` pixels, each line twice in half mode, the overlay
+/// window over it and the cursor on top, through the CLUT (512 entries of
+/// RGB). The memory the desktop and the overlay show (bytes from their
+/// first on), where they aren't buffers the renderer draws, comes when
+/// the picture may have changed since the last frame; None keeps what
+/// came before.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Scanout {
+    pub width: u32,
+    pub height: u32,
+    pub half: bool,
+    pub desktop: Surface,
+    pub overlay: Option<Overlay>,
+    pub cursor: Option<Cursor>,
+    pub clut: Vec<u32>,
+    pub desktop_memory: Option<Vec<u8>>,
+    pub overlay_memory: Option<Vec<u8>>,
 }
 
 /// Frames a texture stays decoded without being drawn with.
@@ -199,6 +379,7 @@ struct TexKey {
     lodmask: u32,
     first: i32,
     last: i32,
+    /// The colours of its palette or NCC table, hashed (`lookup_hash`).
     lookup: u64,
 }
 
@@ -237,6 +418,9 @@ pub struct Mirror {
     open: Vec<Pixels>,
     last_open: usize,
     last_texture: [Option<LastTexture>; 2],
+    /// Each unit's look-up table as hashed last: its change count
+    /// (`Tmu::lookup_key`) and the hash of its colours.
+    lookups: [(u64, u64); 2],
 }
 
 impl Default for Mirror {
@@ -256,6 +440,7 @@ impl Mirror {
             open: Vec::new(),
             last_open: 0,
             last_texture: [None; 2],
+            lookups: [(0, 0); 2],
         }
     }
 
@@ -263,6 +448,11 @@ impl Mirror {
     /// or if one is wanted.
     pub(crate) fn needs_snapshot(&self, layout: &LayoutKey) -> bool {
         self.layout.as_ref() != Some(layout)
+    }
+
+    /// The layout of the last snapshot, while it is good.
+    pub(crate) fn layout(&self) -> Option<&LayoutKey> {
+        self.layout.as_ref()
     }
 
     pub(crate) fn resync(&mut self, snapshot: Snapshot, key: LayoutKey) {
@@ -282,6 +472,7 @@ impl Mirror {
     /// Forget the decoded textures: the TMUs start over.
     pub(crate) fn forget_textures(&mut self) {
         self.last_texture = [None; 2];
+        self.lookups = [(0, 0); 2];
         for (_, cached) in self.textures.drain() {
             self.commands.push(Command::FreeTexture(cached.id));
         }
@@ -451,7 +642,7 @@ impl Mirror {
             lodmask: t.lodmask,
             first,
             last,
-            lookup: tmu.lookup_key(t.mode),
+            lookup: self.lookup_hash(unit, t, tmu),
         };
         let frame = self.frame;
         let unit_info = |id: u32| TexUnit {
@@ -517,6 +708,29 @@ impl Mirror {
         };
         self.last_texture[unit] = Some(LastTexture { key, writes: tmu.writes, id, frame });
         unit_info(id)
+    }
+
+    /// The colours unit `unit`'s look-up table gives the texture `t`, as a
+    /// hash; 0 for a format without one. A program may load a texture's
+    /// palette each time before it draws with it. The table's change count
+    /// then goes up every time, while its colours are the ones the texture
+    /// was decoded with before.
+    fn lookup_hash(&mut self, unit: usize, t: &TmuRaster, tmu: &Tmu) -> u64 {
+        let changes = tmu.lookup_key(t.mode);
+        if changes == 0 {
+            return 0;
+        }
+        let (seen, hash) = self.lookups[unit];
+        if seen == changes {
+            return hash;
+        }
+        let mut hasher = DefaultHasher::new();
+        // The kind of table, as `lookup_key` gives it in bits 41:40.
+        (changes >> 40).hash(&mut hasher);
+        t.lookup.hash(&mut hasher);
+        let hash = hasher.finish() | 1;
+        self.lookups[unit] = (changes, hash);
+        hash
     }
 
     /// What was recorded since the last frame, the textures not drawn
@@ -598,4 +812,72 @@ pub fn decode(t: &TmuRaster, first: i32, last: i32) -> Vec<Level> {
             Level { width: width as u32, height: height as u32, argb }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A colour buffer at 64 KB, in linear rows of 100 pixels or in tiles
+    /// two a row; depth at 256 KB, linear rows of 64 pixels.
+    fn key(tiled: bool) -> LayoutKey {
+        let stride = if tiled {
+            Stride {
+                words: 2 * 2048,
+                tiled: true,
+            }
+        } else {
+            Stride::linear(100)
+        };
+        LayoutKey {
+            width: 96,
+            height: 40,
+            stride,
+            aux_stride: Stride::linear(64),
+            color: [0x1_0000, NONE, NONE],
+            aux: 0x4_0000,
+        }
+    }
+
+    #[test]
+    fn words_are_located_in_the_buffers() {
+        let linear = key(false);
+        let base = 0x1_0000 / 2;
+        assert_eq!(linear.locate(base + 3 * 100 + 7), Some((Some(base), 7, 3)));
+        // Past the row's 96 pixels, and below the last row.
+        assert_eq!(linear.locate(base + 3 * 100 + 98), None);
+        assert_eq!(linear.locate(base + 40 * 100), None);
+        assert_eq!(linear.locate(0x4_0000 / 2 + 64 + 5), Some((None, 5, 1)));
+        let tiled = key(true);
+        // Pixel (65, 33): the second tile of the second row of tiles.
+        let at = base + 2 * 2048 + 2048 + 64 + 1;
+        assert_eq!(tiled.locate(at), Some((Some(base), 65, 33)));
+        assert_eq!(tiled.locate(base - 1), None);
+    }
+
+    #[test]
+    fn byte_ranges_cover_rows() {
+        let linear = key(false);
+        let base = 0x1_0000;
+        // Bytes 10..12 of row 2 and the start of row 3.
+        assert_eq!(
+            linear.rows_in(base + 410, base + 602),
+            [(Some(base / 2), 2, 4)]
+        );
+        // From before the buffer to past its end: all its rows.
+        assert_eq!(linear.rows_in(0, 0x2_0000), [(Some(base / 2), 0, 40)]);
+        // A tiled buffer's band of 32 rows, the second cut at the height.
+        let tiled = key(true);
+        let band = base + 2 * 4096;
+        assert_eq!(
+            tiled.rows_in(band + 6, band + 8),
+            [(Some(base / 2), 32, 40)]
+        );
+        assert_eq!(tiled.rows_in(band - 2, band + 2), [(Some(base / 2), 0, 40)]);
+        assert!(tiled.rows_in(0x3_0000, 0x3_0010).is_empty());
+        assert_eq!(
+            tiled.rows_in(0x4_0000 + 128, 0x4_0000 + 130),
+            [(None, 1, 2)]
+        );
+    }
 }
