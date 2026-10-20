@@ -2145,6 +2145,20 @@ it when a program starts Direct3D for the one DirectX 7 has, and faults:
 the program's window stays white and the card draws nothing. Install
 DirectX 7.0 (`dx70eng.exe`) or later first.
 
+With `voodoo_renderer=opengl` the window's OpenGL draws the card's 3D
+again at `voodoo_scale` times its resolution, as for the Voodoo Graphics
+(see [3dfx Voodoo Graphics](#3dfx-voodoo-graphics)), and puts the picture
+together as the card's video processor does: the desktop, the overlay
+(the window or screen a game shows its 3D through, scaled and in YUV
+too) and the cursor. A desktop or overlay that is a 16-bit buffer the 3D
+draws into, laid out as the 3D draws it, comes from the bigger picture;
+anything else (the Windows desktop, 8, 24 and 32-bit modes, YUV video)
+comes from the card's memory at its own resolution, with the drawing
+still queued for it done first. The software rasterizer keeps the
+memory, so programs read back what they would on the card, and
+screenshots and recordings show the software picture. The libretro core
+draws a Banshee or Voodoo3 in software whatever `voodoo_renderer` says.
+
 The card is a port of 86Box's Banshee and Voodoo3 emulation
 (`vid_voodoo_banshee.c` and its 2D engine, by Sarah Walker, GPLv2, and
 the I2C code in `i2c_gpio.c` and `i2c_eeprom.c` for the DDC), checked

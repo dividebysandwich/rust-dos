@@ -570,6 +570,13 @@ pub struct Voodoo {
     software_picture: bool,
     /// The drawing recorded for the OpenGL renderer, while it draws.
     mirror: Option<Box<mirror::Mirror>>,
+    /// The first bytes of the memory a Banshee's desktop and overlay show
+    /// that the renderer has (`banshee_scanout`).
+    scanout_sent: [Option<u32>; 2],
+    /// A Banshee's picture changed, which the software picture took
+    /// first (`prepare_display`), so the renderer's scanout still has to
+    /// hear of it.
+    scanout_dirty: bool,
     /// Messages already logged once.
     logged: u32,
     /// Where the card's accesses are recorded (`RUST_DOS_VOODOO_RECORD`),
@@ -645,6 +652,8 @@ impl Voodoo {
             catch_ups: Cell::new(0),
             software_picture: true,
             mirror: None,
+            scanout_sent: [None; 2],
+            scanout_dirty: false,
             logged: 0,
             recorder: std::cell::RefCell::new(None),
             log: Vec::new(),
@@ -908,16 +917,20 @@ impl Voodoo {
 
     /// Whether the workers are still drawing, with everything queued
     /// given to them first but without waiting for them: a Banshee's busy
-    /// bits, which a program polls until they clear.
+    /// bits, which a program polls until they clear. Jobs held back
+    /// (`backlog`) stay held: as far as the program can tell they are
+    /// drawn, since whatever reads what they draw catches up first.
     pub(crate) fn drawing(&self) -> bool {
         if !self.writes_queue() {
             return false;
         }
-        self.submit_words();
-        self.release_backlog();
+        if !self.deferring() {
+            self.submit_words();
+            self.release_backlog();
+        }
         self.pool.give_out();
         let busy = self.pool.busy();
-        if !busy {
+        if !busy && self.words.borrow().is_empty() && self.backlog.borrow().is_empty() {
             self.outstanding.set(false);
             self.tmu_in_use.set(0);
         }
@@ -1127,11 +1140,31 @@ impl Voodoo {
 
     /// The tiles held-back jobs are worked out on, for the buffers where
     /// they are now. Jobs held back for the old ones go to the workers.
+    /// A Banshee's are the buffers the recording keeps
+    /// (`banshee_mirror_key`): the one colBufferAddr points at and those
+    /// drawn into lately, which a program swaps between, so that the
+    /// frames drawn into one stay held while it draws into another.
+    /// Without a recording, both of its colour buffers are colBufferAddr's,
+    /// and nothing is held.
     pub(crate) fn update_tiles(&mut self) {
         let fbi = &self.fbi;
         let word = |offs: u32| (offs != NONE).then_some(offs as usize / 2);
-        let bases = [word(fbi.rgboffs[0]), word(fbi.rgboffs[1]), word(fbi.rgboffs[2]), word(fbi.auxoffs)];
-        let layout = TileLayout::new(bases, fbi.width, fbi.height, fbi.rowpixels, fbi.ram.len());
+        let recorded = self.banshee.is_some().then(|| self.mirror.as_ref()?.layout()).flatten();
+        let words = fbi.ram.len();
+        let layout = match recorded {
+            Some(key) => {
+                let [a, b, c] = key.color.map(word);
+                let bases = [a, b, c, word(key.aux)];
+                let size = (key.width, key.height);
+                TileLayout::new(bases, size, key.stride, key.aux_stride, words)
+            }
+            None => {
+                let [a, b, c] = fbi.rgboffs.map(word);
+                let bases = [a, b, c, word(fbi.auxoffs)];
+                let size = (fbi.width, fbi.height);
+                TileLayout::new(bases, size, fbi.stride, fbi.aux_stride, words)
+            }
+        };
         if layout != self.backlog.borrow().layout {
             self.release_backlog();
             self.backlog.borrow_mut().layout = layout;
@@ -1201,20 +1234,29 @@ impl Voodoo {
         if !output {
             return switched;
         }
+        if !self.picture_wanted() {
+            // The OpenGL renderer draws it: nothing needs the memory. The
+            // change stays marked, and a Banshee's video processor's, for
+            // the renderer (`banshee_scanout`) or the next picture that
+            // does.
+            self.display_dirty |= changed;
+            return switched;
+        }
         if let Some(b) = &mut self.banshee {
             let dirty = std::mem::take(&mut b.dirty);
             let draw = changed || switched || dirty;
+            // The OpenGL renderer may show the picture all the same (a
+            // recording or a screenshot wants it from memory too): its
+            // scanout needs the change as well.
+            if self.mirror.is_some() {
+                self.scanout_dirty |= draw;
+            }
             // Jobs may still be drawing into what it shows. Those that draw
             // elsewhere, into the next frame, go on beside the program.
             if draw && self.writes_queue() {
                 self.flush();
             }
             return draw;
-        }
-        if !self.picture_wanted() {
-            // The OpenGL renderer draws it: nothing needs the memory.
-            self.display_dirty |= changed;
-            return switched;
         }
         // Jobs may still be drawing into the buffer shown.
         let front = self.fbi.rgboffs[self.fbi.frontbuf as usize];
@@ -1511,6 +1553,10 @@ impl Voodoo {
         if on != self.mirror.is_some() {
             self.mirror = on.then(|| Box::new(mirror::Mirror::new()));
             self.release_backlog();
+            self.update_tiles();
+            // A renderer starting over has none of the picture.
+            self.scanout_sent = [None; 2];
+            self.display_dirty = true;
         }
     }
 
@@ -1537,57 +1583,145 @@ impl Voodoo {
     /// since it last did, or it wants them.
     pub(crate) fn mirror_sync(&mut self) {
         let Some(mirror) = &self.mirror else { return };
-        let fbi = &self.fbi;
-        let key = mirror::LayoutKey { width: fbi.width, height: fbi.height, rowpixels: fbi.rowpixels, color: fbi.rgboffs, aux: fbi.auxoffs };
+        let key = self.mirror_key(mirror.layout());
         if !mirror.needs_snapshot(&key) {
             return;
         }
         self.flush();
-        let snapshot = self.snapshot(self.mirror_layout());
+        let snapshot = self.snapshot(key.layout());
         if let Some(mirror) = &mut self.mirror {
             mirror.resync(snapshot, key);
         }
+        // A Banshee's tiles follow the recording's buffers.
+        self.update_tiles();
     }
 
-    fn mirror_layout(&self) -> mirror::Layout {
+    /// The layout the drawing is in now, `old` the one recorded last.
+    fn mirror_key(&self, old: Option<&mirror::LayoutKey>) -> mirror::LayoutKey {
+        if self.banshee.is_some() {
+            return self.banshee_mirror_key(old);
+        }
         let fbi = &self.fbi;
-        mirror::Layout {
+        mirror::LayoutKey {
             width: fbi.width,
             height: fbi.height,
-            rowpixels: fbi.rowpixels,
-            color: fbi.rgboffs.iter().filter(|&&offs| offs != NONE).map(|&offs| offs / 2).collect(),
-            aux: (fbi.auxoffs != NONE).then_some(fbi.auxoffs / 2),
+            stride: fbi.stride,
+            aux_stride: fbi.aux_stride,
+            color: fbi.rgboffs,
+            aux: fbi.auxoffs,
         }
     }
 
     fn snapshot(&self, layout: mirror::Layout) -> mirror::Snapshot {
         let ram = &self.fbi.ram;
-        let (width, height, rowpixels) = (layout.width as usize, layout.height as usize, layout.rowpixels as usize);
-        let pixels = |base: u32| -> Vec<u16> {
+        let (width, height) = (layout.width as usize, layout.height as usize);
+        let pixels = |base: u32, stride: raster::Stride| -> Vec<u16> {
             let mut out = Vec::with_capacity(width * height);
             for y in 0..height {
-                let row = base as usize + y * rowpixels;
-                out.extend((row..row + width).map(|at| if at < ram.len() { ram.get(at) } else { 0 }));
+                let row = base as usize + stride.row(y);
+                out.extend((0..width).map(|x| {
+                    let at = row + stride.col(x);
+                    if at < ram.len() { ram.get(at) } else { 0 }
+                }));
             }
             out
         };
-        mirror::Snapshot { color: layout.color.iter().map(|&offs| pixels(offs)).collect(), aux: layout.aux.map(pixels), layout }
+        mirror::Snapshot {
+            color: layout
+                .color
+                .iter()
+                .map(|&offs| pixels(offs, layout.stride))
+                .collect(),
+            aux: layout.aux.map(|offs| pixels(offs, layout.aux_stride)),
+            layout,
+        }
     }
 
     /// The drawing recorded since the last frame, and what the card shows.
     pub fn take_mirror(&mut self) -> Option<mirror::Frame> {
         self.mirror_sync();
-        let front = self.fbi.rgboffs[self.fbi.frontbuf as usize];
+        let key = *self.mirror.as_ref()?.layout()?;
+        let front = match &self.banshee {
+            Some(_) => self.banshee_mirror_front(&key),
+            None => {
+                let front = self.fbi.rgboffs[self.fbi.frontbuf as usize];
+                (front != NONE).then_some(front / 2)
+            }
+        };
         let output = self.output();
+        let scanout = if output && self.banshee.is_some() {
+            self.banshee_scanout(&key)
+        } else {
+            None
+        };
         let commands = self.mirror.as_mut()?.take();
         Some(mirror::Frame {
             commands,
-            front: (front != NONE).then_some(front / 2),
+            front,
             output,
-            width: self.fbi.width,
-            height: self.fbi.height,
+            width: key.width,
+            height: key.height,
             clut: self.clut,
+            scanout,
         })
+    }
+
+    /// Bytes `start..end` of the frame buffer were written other than
+    /// through the 3D engine (the CPU through a Banshee's linear frame
+    /// buffer, its 2D engine, a command FIFO): tell the recording the
+    /// pixels of its buffers there, from memory, which has what the 3D
+    /// engine drew before (the writers catch up first).
+    pub(crate) fn mirror_memory(&mut self, start: u32, end: u32) {
+        let Some(mirror) = &mut self.mirror else {
+            return;
+        };
+        // The texture units read the same memory: what the recording
+        // decoded from there is out of date.
+        for tmu in &mut self.tmu {
+            tmu.note_written(start, end);
+        }
+        // With no layout yet, the next snapshot reads the memory.
+        let Some(key) = mirror.layout().copied() else {
+            return;
+        };
+        let ram = &self.fbi.ram;
+        let word = |at: usize| if at < ram.len() { ram.get(at) } else { 0 };
+        let by_word = |mirror: &mut mirror::Mirror| {
+            for at in start / 2..end.div_ceil(2) {
+                if let Some((dest, x, y)) = key.locate(at) {
+                    mirror.pixel(dest, x, y, word(at as usize), key.width);
+                }
+            }
+        };
+        if end.saturating_sub(start) <= 16 {
+            by_word(mirror);
+            return;
+        }
+        // The rows the bytes may touch, or the words themselves if they
+        // are fewer: a tiled buffer's rows come in bands of 32, which a
+        // burst into one tile would push whole.
+        let rows = key.rows_in(start, end);
+        let pixels: u64 = rows
+            .iter()
+            .map(|&(_, first, last)| (last - first) as u64 * key.width as u64)
+            .sum();
+        if (end - start).div_ceil(2) as u64 <= pixels {
+            by_word(mirror);
+            return;
+        }
+        for (dest, first, last) in rows {
+            let (base, stride) = match dest {
+                Some(offs) => (offs, key.stride),
+                None => (key.aux / 2, key.aux_stride),
+            };
+            for y in first..last {
+                let row = base as usize + stride.row(y as usize);
+                for x in 0..key.width {
+                    let value = word(row + stride.col(x as usize));
+                    mirror.pixel(dest, x, y, value, key.width);
+                }
+            }
+        }
     }
 
     /// Pixel `x` of buffer row `y` written through the frame buffer: tell
@@ -1596,14 +1730,18 @@ impl Voodoo {
     pub(crate) fn mirror_pixel(&mut self, dest: usize, x: i32, y: i32, color: Option<u16>, aux: Option<u16>) {
         let Some(mirror) = &mut self.mirror else { return };
         let fbi = &self.fbi;
-        if x < 0 || y < 0 || x as u32 >= fbi.width || y as u32 >= fbi.height {
+        // The recorded buffers' size: on a Banshee the 3D engine reaches
+        // further down than they go (`banshee_buffers`).
+        let (width, height) =
+            mirror.layout().map_or((fbi.width, fbi.height), |k| (k.width, k.height));
+        if x < 0 || y < 0 || x as u32 >= width || y as u32 >= height {
             return;
         }
         if let Some(value) = color {
-            mirror.pixel(Some(dest as u32), x as u32, y as u32, value, fbi.width);
+            mirror.pixel(Some(dest as u32), x as u32, y as u32, value, width);
         }
         if let Some(value) = aux {
-            mirror.pixel(None, x as u32, y as u32, value, fbi.width);
+            mirror.pixel(None, x as u32, y as u32, value, width);
         }
     }
 
@@ -1614,10 +1752,16 @@ impl Voodoo {
             return;
         }
         let fbi = &self.fbi;
-        let at = y as usize * fbi.rowpixels as usize + x as usize;
-        let word = |offs: usize| (offs + at < fbi.ram.len()).then(|| fbi.ram.get(offs + at));
-        let color = word(dest);
-        let aux = if aux && fbi.auxoffs != NONE { word(fbi.auxoffs as usize / 2) } else { None };
+        let word = |base: usize, stride: raster::Stride| {
+            let at = base + stride.row(y as usize) + stride.col(x as usize);
+            (at < fbi.ram.len()).then(|| fbi.ram.get(at))
+        };
+        let color = word(dest, fbi.stride);
+        let aux = if aux && fbi.auxoffs != NONE {
+            word(fbi.auxoffs as usize / 2, fbi.aux_stride)
+        } else {
+            None
+        };
         self.mirror_pixel(dest, x, y, color, aux);
     }
 

@@ -1287,6 +1287,49 @@ fn the_opengl_renderer_gets_the_textures_as_the_card_reads_them() {
 }
 
 #[test]
+fn a_palette_loaded_again_reuses_the_decoded_texture() {
+    use rust_dos::voodoo::mirror::Command;
+    // Palette entry `entry` through NCC table 0's I or Q registers.
+    let palette = |bus: &mut Bus, entry: u32, rgb: u32| {
+        let data = 1 << 31 | (entry >> 1) << 24 | rgb;
+        w(bus, 0x334 + 4 * (entry & 1), data);
+    };
+    // The textures decoded since the last frame, and the one drawn with.
+    let decoded = |bus: &mut Bus| -> (Vec<u32>, u32) {
+        let frame = take_mirror(bus);
+        let mut ids = Vec::new();
+        let mut drawn = 0;
+        for c in &frame.commands {
+            match c {
+                Command::Texture(t) => ids.push(t.id),
+                Command::Draw(d) => drawn = d.state.tmu[0].unwrap().texture,
+                _ => {}
+            }
+        }
+        (ids, drawn)
+    };
+    let mut bus = bus(Board::Standard);
+    init(&mut bus);
+    bus.voodoo.as_mut().unwrap().set_mirror(true);
+    take_mirror(&mut bus);
+    // An 8-bit texture of palette entry 1, as a program draws it after
+    // loading its palette each time.
+    palette(&mut bus, 1, 0xFF_0000);
+    textured_square(&mut bus, 5, false, |_, _| 0x0101);
+    let (ids, red) = decoded(&mut bus);
+    assert_eq!(ids, [red]);
+    palette(&mut bus, 1, 0x00_FF00);
+    triangle(&mut bus, [(0.0, 0.0), (8.0, 0.0), (0.0, 8.0)]);
+    let (ids, green) = decoded(&mut bus);
+    assert_eq!(ids, [green], "other colours, decoded again");
+    assert_ne!(green, red);
+    // The first palette again: the texture decoded with it is good.
+    palette(&mut bus, 1, 0xFF_0000);
+    triangle(&mut bus, [(0.0, 0.0), (8.0, 0.0), (0.0, 8.0)]);
+    assert_eq!(decoded(&mut bus), (vec![], red));
+}
+
+#[test]
 fn texture_sampling_changes_reach_both_opengl_texture_units() {
     use rust_dos::voodoo::TextureSampling;
     use rust_dos::voodoo::mirror::Command;

@@ -128,7 +128,9 @@ resolution (`voodoo_scale`), with **3dfx OpenGL antialiasing**
 without such a driver, the software renderer draws the card, as it does by
 default. Save states and the settings window
 work as with the software renderer; while the settings window or the
-performance overlay is open, the card's picture is the software one.
+performance overlay is open, the card's picture is the software one. A
+Voodoo3 or Banshee (`machine=svga_voodoo3` or `svga_banshee`) is always
+drawn in software in the core.
 
 ## Controls
 

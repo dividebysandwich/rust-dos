@@ -377,6 +377,17 @@ impl GlScreen {
                 }
             }
         }
+        // A Banshee's picture needs its compositor, which may not compile
+        // here: the software renderer draws it from then on.
+        if recording.scanout.is_some()
+            && let Some(problem) = self.voodoo.as_ref().and_then(|v| v.banshee_problem())
+        {
+            let problem = problem.to_string();
+            eprintln!("[DISPLAY] {}", problem);
+            self.voodoo_failed = Some(problem.clone());
+            self.drop_voodoo();
+            return Err(problem);
+        }
         Ok(self.voodoo.as_mut().is_some_and(|voodoo| voodoo.run(&self.gl, recording)))
     }
 
