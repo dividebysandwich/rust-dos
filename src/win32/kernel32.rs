@@ -550,6 +550,19 @@ pub fn free_pages(cpu: &mut Cpu, at: u32) {
     virtual_memory::virtual_free(cpu, &[at, 0, 0x8000]);
 }
 
+/// A thread of the running process for a built-in DLL's own work, as
+/// CreateThread(NULL, 0, start, 0, 0, NULL) makes it, its handle closed:
+/// its id, or None when there is no room for it.
+pub fn create_system_thread(cpu: &mut Cpu, start: u32) -> Option<u32> {
+    let handle = threads::create_thread(cpu, &[0, 0, start, 0, 0, 0])?;
+    if handle == 0 {
+        return None;
+    }
+    let id = threads::thread_of(cpu, handle).map(|(p, t)| cpu.bus.win32.processes[p].threads[t].id);
+    super::object::close(cpu, handle);
+    id
+}
+
 /// A writable view of the file mapping `handle` for a DIB section whose
 /// bits are in it: the view's address and the mapping's size, or None
 /// with the error set.

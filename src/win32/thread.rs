@@ -377,6 +377,7 @@ pub fn end_wait(win32: &mut Win32, (p, t): At, result: u32) {
 /// End the waits that can end now.
 pub fn wake(cpu: &mut Cpu) {
     super::user32::input::poll(cpu);
+    super::winmm::tick(cpu);
     let now = cpu.bus.clock.now_micros();
     let win32 = &mut cpu.bus.win32;
     let running = current(win32);
