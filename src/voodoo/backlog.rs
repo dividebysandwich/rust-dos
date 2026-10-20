@@ -108,10 +108,19 @@ pub struct Access {
     /// It may touch memory outside the tiles: kept, and taken to read
     /// everything.
     pub pinned: bool,
+    /// It writes memory outside the tiles but reads none: kept, and what
+    /// it does to the tiles counts as for any other job.
+    pub kept: bool,
 }
 
 impl Access {
-    const PINNED: Access = Access { reads: [0; 4], writes: [0; 4], kills: [0; 4], pinned: true };
+    const PINNED: Access = Access {
+        reads: [0; 4],
+        writes: [0; 4],
+        kills: [0; 4],
+        pinned: true,
+        kept: false,
+    };
 
     fn add(&mut self, other: &Access) {
         for r in 0..4 {
@@ -120,6 +129,7 @@ impl Access {
             self.kills[r] |= other.kills[r];
         }
         self.pinned |= other.pinned;
+        self.kept |= other.kept;
     }
 }
 
@@ -260,6 +270,26 @@ pub fn fastfill(layout: &TileLayout, st: &RasterState, (x0, x1, y0, y1): (i32, i
     access
 }
 
+/// Rows `top..bottom` of the buffer at word `base` filled whole, every
+/// word of them. With rows wider than the picture, the words right of it
+/// are outside the tiles: the job is kept, but as it reads nothing, it
+/// still hides what was drawn in the tiles before it.
+pub fn rows(layout: &TileLayout, base: usize, (top, bottom): (u32, u32)) -> Access {
+    let slot = layout.bases.iter().position(|&b| b == Some(base));
+    let Some(slot) = slot.filter(|_| layout.prunable) else {
+        return Access::PINNED;
+    };
+    if bottom > layout.height {
+        return Access::PINNED;
+    }
+    let rect = (0, layout.width, top, bottom);
+    let mut access = Access::default();
+    access.writes[slot] = layout.tiles(rect, false);
+    access.kills[slot] = layout.tiles(rect, true);
+    access.kept = layout.width < layout.rowpixels;
+    access
+}
+
 /// Frame buffer words written.
 pub fn words(layout: &TileLayout, words: &[Word]) -> Access {
     if !layout.prunable {
@@ -365,7 +395,7 @@ impl Backlog {
         for (i, (_, a)) in self.jobs.iter().enumerate().rev() {
             if a.pinned {
                 live = [ALL; 4];
-            } else if (0..4).all(|r| a.writes[r] & live[r] == 0) {
+            } else if !a.kept && (0..4).all(|r| a.writes[r] & live[r] == 0) {
                 keep[i] = false;
             } else {
                 for (r, live) in live.iter_mut().enumerate() {
@@ -482,6 +512,29 @@ mod tests {
         assert!(!l.prunable);
         let l = TileLayout::new([Some(0), None, None, None], 640, 480, 512, size);
         assert!(!l.prunable, "wider than a row");
+    }
+
+    #[test]
+    fn whole_rows_filled_kill_their_tiles() {
+        let l = layout();
+        assert_eq!(rows(&l, 640 * 480, (0, 480)), fill(1));
+        let top = rows(&l, 2 * 640 * 480, (0, 60));
+        assert_eq!((top.writes[AUX], top.kills[AUX]), (0xFF, 0xFF));
+        assert!(rows(&l, 1234, (0, 480)).pinned, "not a buffer");
+        let wide = TileLayout::new([Some(0), None, None, None], 600, 480, 640, 640 * 480);
+        let wide = rows(&wide, 0, (0, 480));
+        assert!(wide.kept && !wide.pinned, "words right of the picture");
+        assert_eq!((wide.writes[0], wide.kills[0]), (ALL, ALL));
+    }
+
+    #[test]
+    fn kept_jobs_stay_but_hide_what_is_under_them() {
+        let mut wide = fill(0);
+        wide.kept = true;
+        let mut b = backlog(&[write(0, 1), wide, fill(0)]);
+        b.prune();
+        assert_eq!(b.len(), 2, "the first job goes, the kept one stays");
+        assert_eq!(b.jobs[0].1, wide);
     }
 
     #[test]
