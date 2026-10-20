@@ -896,7 +896,8 @@ async fn screenshot(State(s): State<AppState>, Query(q): Query<FormatQuery>) -> 
                 (header::HeaderName::from_static("x-height"), frame.height.to_string()),
                 (header::HeaderName::from_static("x-pixel-format"), "RGB24".to_string()),
             ],
-            frame.rgb,
+            frame.rgba.as_chunks::<4>().0.iter()
+                .flat_map(|&[r, g, b, _]| [r, g, b]).collect::<Vec<_>>(),
         )
             .into_response(),
         f => return Err(bad(format!("unknown format '{}' (png, raw)", f))),

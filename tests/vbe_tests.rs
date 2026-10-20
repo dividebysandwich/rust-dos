@@ -39,8 +39,8 @@ fn pixel(cpu: &mut Cpu, x: usize, y: usize) -> (u8, u8, u8) {
     let mut frame = Frame::new(width, height);
     cpu.bus.vga.mark_dirty_full();
     video::render_screen(&mut frame, &cpu.bus);
-    let i = (y * width as usize + x) * 3;
-    (frame.rgb[i], frame.rgb[i + 1], frame.rgb[i + 2])
+    let i = (y * width as usize + x) * 4;
+    (frame.rgba[i], frame.rgba[i + 1], frame.rgba[i + 2])
 }
 
 #[test]
@@ -282,8 +282,12 @@ fn every_depth_is_drawn_pixel_for_pixel() {
                     16 => (five(v >> 11), (((v >> 5 & 63) << 2) | ((v >> 5 & 63) >> 4)) as u8, five(v & 31)),
                     _ => (p[2], p[1], p[0]),
                 };
-                let i = (y * fw as usize + x) * 3;
-                assert_eq!((frame.rgb[i], frame.rgb[i + 1], frame.rgb[i + 2]), want, "mode {:X} at {}, {}", mode, x, y);
+                let i = (y * fw as usize + x) * 4;
+                assert_eq!(
+                    (frame.rgba[i], frame.rgba[i + 1], frame.rgba[i + 2]),
+                    want,
+                    "mode {:X} at {}, {}", mode, x, y
+                );
             }
         }
     }

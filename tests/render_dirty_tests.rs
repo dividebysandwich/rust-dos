@@ -30,10 +30,10 @@ fn rendered_shell(name: &str) -> (Cpu, Frame) {
 
 /// True if any pixel in text row `row` is lit.
 fn row_has_pixels(frame: &Frame, row: usize) -> bool {
-    let row_bytes = SCREEN_WIDTH as usize * 3;
-    frame.rgb[row * CELL_H * row_bytes..(row + 1) * CELL_H * row_bytes]
-        .iter()
-        .any(|&b| b != 0)
+    let row_bytes = SCREEN_WIDTH as usize * 4;
+    frame.rgba[row * CELL_H * row_bytes..(row + 1) * CELL_H * row_bytes]
+        .as_chunks::<4>().0.iter()
+        .any(|p| p[..3].iter().any(|&b| b != 0))
 }
 
 #[test]
@@ -132,7 +132,9 @@ fn planar_steps(mode: u8, patterned: bool) {
     let (w, h) = video::frame_size(&cpu.bus);
     let mut frame = Frame::new(w, h);
     let mut check = |cpu: &mut Cpu, step: &str| {
-        video::render_screen(&mut frame, &cpu.bus);
+        let previous = frame.rgba.clone();
+        let rows = video::render_screen_rows(&mut frame, &cpu.bus);
+        check_untouched_rows(&previous, &frame, rows);
         cpu.bus.vga.clear_dirty();
         let mut fresh = Frame::new(w, h);
         cpu.bus.vga.mark_dirty_full();
@@ -143,10 +145,10 @@ fn planar_steps(mode: u8, patterned: bool) {
         // 2x2, which the window may show at half the size.
         assert_eq!(frame.doubled, mode == 0x0D, "mode {mode:02X} over {what}: {step}");
         if frame.doubled {
-            let row = 3 * w as usize;
-            for (y, line) in frame.rgb.chunks_exact(row).enumerate() {
-                let above = &frame.rgb[(y & !1) * row..][..row];
-                let pairs = line.as_chunks::<6>().0.iter().all(|p| p[..3] == p[3..]);
+            let row = 4 * w as usize;
+            for (y, line) in frame.rgba.chunks_exact(row).enumerate() {
+                let above = &frame.rgba[(y & !1) * row..][..row];
+                let pairs = line.as_chunks::<8>().0.iter().all(|p| p[..4] == p[4..]);
                 assert!(pairs && line == above, "mode {mode:02X} over {what}: {step}, row {y} not doubled");
             }
         }
@@ -243,7 +245,9 @@ fn cga_composite_frames_drawn_line_by_line_match_full_renders() {
         }
         let mut frame = Frame::new(SCREEN_WIDTH, SCREEN_HEIGHT);
         let mut check = |cpu: &mut Cpu, what: &str| {
-            video::render_screen(&mut frame, &cpu.bus);
+            let previous = frame.rgba.clone();
+            let rows = video::render_screen_rows(&mut frame, &cpu.bus);
+            check_untouched_rows(&previous, &frame, rows);
             cpu.bus.vga.clear_dirty();
             let mut fresh = Frame::new(SCREEN_WIDTH, SCREEN_HEIGHT);
             cpu.bus.vga.mark_dirty_full();
@@ -283,5 +287,95 @@ fn cga_composite_frames_drawn_line_by_line_match_full_renders() {
         check(&mut cpu, "video off");
         cpu.bus.io_write(0x3D8, control);
         check(&mut cpu, "video on");
+    }
+}
+
+fn check_untouched_rows(previous: &[u8], frame: &Frame, rows: std::ops::Range<usize>) {
+    let bytes = frame.width as usize * 4;
+    assert!(rows.start <= rows.end && rows.end <= frame.height as usize);
+    assert_eq!(&previous[..rows.start * bytes], &frame.rgba[..rows.start * bytes]);
+    assert_eq!(&previous[rows.end * bytes..], &frame.rgba[rows.end * bytes..]);
+}
+
+#[test]
+fn indexed_dirty_rows_include_scaled_copies_and_skip_unchanged_sources() {
+    use rust_dos::interrupts::int10;
+    let mut cpu = Cpu::new(scratch("indexed_rows"));
+    int10::set_mode(&mut cpu, 0x13);
+    let (w, h) = video::frame_size(&cpu.bus);
+    let mut frame = Frame::new(w, h);
+    assert_eq!(video::render_screen_rows(&mut frame, &cpu.bus), 0..h as usize);
+    cpu.bus.vga.mark_dirty_full();
+    assert!(video::render_screen_rows(&mut frame, &cpu.bus).is_empty());
+
+    for row in [0, 47, 199] {
+        let previous = frame.rgba.clone();
+        cpu.bus.write_8(0xA0000 + row * 320 + 3, 15);
+        let rows = video::render_screen_rows(&mut frame, &cpu.bus);
+        assert_eq!(rows, row * 2..row * 2 + 2);
+        check_untouched_rows(&previous, &frame, rows);
+        let mut fresh = Frame::new(w, h);
+        video::render_screen(&mut fresh, &cpu.bus);
+        assert_eq!(frame, fresh);
+        cpu.bus.vga.mark_dirty_full();
+        assert!(video::render_screen_rows(&mut frame, &cpu.bus).is_empty());
+    }
+    // A palette change invalidates the cached interpretation of every row.
+    cpu.bus.io_write(0x3C8, 15);
+    for component in [63, 0, 0] {
+        cpu.bus.io_write(0x3C9, component);
+    }
+    assert_eq!(video::render_screen_rows(&mut frame, &cpu.bus), 0..h as usize);
+}
+
+#[test]
+fn text_dirty_rows_leave_the_rest_of_the_composed_picture_alone() {
+    let (mut cpu, mut frame) = rendered_shell("text_rows");
+    assert!(video::render_screen_rows(&mut frame, &cpu.bus).is_empty());
+    cpu.bus.cursor_y = 10;
+    video::print_char(&mut cpu.bus, b'X');
+    let previous = frame.rgba.clone();
+    let rows = video::render_screen_rows(&mut frame, &cpu.bus);
+    assert_eq!(rows, 10 * CELL_H..11 * CELL_H);
+    check_untouched_rows(&previous, &frame, rows);
+}
+
+#[test]
+fn moving_and_blinking_cursors_match_full_composition_in_text_and_graphics() {
+    use rust_dos::interrupts::int10;
+    use rust_dos::video::{compose::Composition, mono, overlay};
+    for mode in [0x03, 0x13, 0x06] {
+        let mut cpu = Cpu::new(scratch(&format!("cursor_rows_{mode:02x}")));
+        int10::set_mode(&mut cpu, mode);
+        let (w, h) = video::frame_size(&cpu.bus);
+        let mut base = Frame::new(w, h);
+        let mut output = base.clone();
+        let mut composition = Composition::default();
+        for step in 0..60 {
+            cpu.bus.write_8(0x0450, (step % 80) as u8);
+            cpu.bus.write_8(0x0451, (step % 25) as u8);
+            cpu.bus.mouse.installed = step > 5;
+            cpu.bus.mouse.hide_counter = i32::from(step % 4 == 0);
+            let (vw, vh) = cpu.bus.mouse.virtual_screen(&cpu.bus);
+            cpu.bus.mouse.x = if step % 7 == 0 { -3 } else { step * 29 % vw };
+            cpu.bus.mouse.y = if step % 9 == 0 { vh - 1 } else { step * 13 % vh };
+            let changed = if cpu.bus.vga.dirty {
+                let rows = video::render_screen_rows(&mut base, &cpu.bus);
+                cpu.bus.vga.clear_dirty();
+                rows
+            } else {
+                0..0
+            };
+            let visible = step % 3 != 0;
+            let cursor = overlay::cursor_rows(&base, &cpu.bus, visible);
+            let monitor = mono::Monochrome::ALL[(step / 8) as usize % 4];
+            let rows = composition.restore(&mut output, &base, changed, cursor, monitor);
+            overlay::draw_cursors(&mut output, &cpu.bus, visible);
+            mono::apply_rows(&mut output, monitor, rows);
+            let mut full = base.clone();
+            overlay::draw_cursors(&mut full, &cpu.bus, visible);
+            mono::apply(&mut full, monitor);
+            assert!(output == full, "mode {mode:02x}, step {step}");
+        }
     }
 }

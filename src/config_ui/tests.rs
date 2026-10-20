@@ -1317,7 +1317,9 @@ fn the_stats_page_draws_its_numbers_and_graphs() {
         fps_history: vec![30.0, 35.0, 70.0],
         cpu_history: vec![40.0; 120],
     });
-    let has = |frame: &Frame, c: Rgb| frame.rgb.chunks(3).any(|px| px == [c.0, c.1, c.2]);
+    let has = |frame: &Frame, c: Rgb| {
+        frame.rgba.as_chunks::<4>().0.iter().any(|px| px[..3] == [c.0, c.1, c.2])
+    };
     for (width, height) in [(640, 400), (640, 350), (320, 200), (1024, 768)] {
         let mut frame = Frame::new(width, height);
         ui.draw(&mut frame);
@@ -1334,8 +1336,8 @@ fn the_stats_page_draws_its_numbers_and_graphs() {
     if let Ok(dir) = std::env::var("RUST_DOS_UI_SHOTS") {
         for (width, height) in [(640, 400), (640, 350), (320, 200), (1024, 768)] {
             let mut frame = Frame::new(width, height);
-            for (i, px) in frame.rgb.chunks_mut(3).enumerate() {
-                px.copy_from_slice(&[(i % 97) as u8, 40, 90]);
+            for (i, px) in frame.rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                px[..3].copy_from_slice(&[(i % 97) as u8, 40, 90]);
             }
             ui.draw(&mut frame);
             crate::capture::png::save(&frame, std::path::Path::new(&format!("{}/stats_{}x{}.png", dir, width, height))).unwrap();
@@ -1788,7 +1790,7 @@ fn a_games_manuals_open_over_the_picture() {
     assert!(ui.manual_page_shown());
     let mut frame = Frame::new(640, 400);
     ui.draw(&mut frame);
-    let pixel = |frame: &Frame, x: usize, y: usize| frame.rgb[(y * 640 + x) * 3..][..3].to_vec();
+    let pixel = |frame: &Frame, x: usize, y: usize| frame.rgba[(y * 640 + x) * 4..][..3].to_vec();
     assert_eq!(pixel(&frame, 320, 200), [200, 0, 0], "the page in the middle");
     assert_eq!(pixel(&frame, 20, 200), [0x18, 0x1C, 0x24], "around it");
     assert!(ui.layer().is_none());
@@ -1806,7 +1808,7 @@ fn a_games_manuals_open_over_the_picture() {
     assert_eq!(pixel(&shot, 20, 200), [0x18, 0x1C, 0x24]);
     let sharp = ui.with_layer(&frame, (2.0, 2.0)).expect("the page");
     assert_eq!((sharp.width, sharp.height), (1280, 800));
-    assert_eq!(sharp.rgb[(400 * 1280 + 640) * 3..][..3], [200, 0, 0]);
+    assert_eq!(sharp.rgba[(400 * 1280 + 640) * 4..][..3], [200, 0, 0]);
     // Taller pixels: the page is as tall as it should be still.
     ui.set_display((1.0, 1.2), false);
     ui.draw(&mut frame);
@@ -2422,19 +2424,25 @@ fn f1_shows_help_on_pages_and_dialogs() {
 fn the_help_covers_the_pictures_and_graphs_drawn_in_pixels() {
     let mut host = FakeHost::new();
     host.save_state(1).unwrap();
-    host.states[0].picture.as_mut().unwrap().rgb.fill(0xFF);
+    host.states[0].picture.as_mut().unwrap().rgba.fill(0xFF);
     let mut ui = opened(&host);
     ui.show_page(Page::States);
     let mut frame = Frame::new(640, 400);
     ui.draw(&mut frame);
     // The picture's first pixel: text is never 16 white pixels in a row.
-    let white = frame.rgb.windows(48).step_by(3).position(|run| run.iter().all(|&b| b == 0xFF)).expect("the slot's picture");
+    let white = frame.rgba.windows(64).step_by(4)
+        .position(|run| run.iter().all(|&b| b == 0xFF))
+        .expect("the slot's picture");
     ui.key(UiKey::Help, &mut host);
     let mut frame = Frame::new(640, 400);
     ui.draw(&mut frame);
-    assert_eq!(&frame.rgb[white * 3..][..3], [draw::FIELD.0, draw::FIELD.1, draw::FIELD.2], "the help's background");
+    assert_eq!(
+        &frame.rgba[white * 4..][..3],
+        [draw::FIELD.0, draw::FIELD.1, draw::FIELD.2],
+        "the help's background"
+    );
     // Below the help, the picture shows.
-    assert!(frame.rgb.chunks(3).skip(white).any(|px| px == [0xFF; 3]));
+    assert!(frame.rgba.as_chunks::<4>().0.iter().skip(white).any(|px| px[..3] == [0xFF; 3]));
 }
 
 #[test]

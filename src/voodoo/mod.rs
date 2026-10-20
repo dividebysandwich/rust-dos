@@ -1227,11 +1227,11 @@ impl Voodoo {
         changed || switched
     }
 
-    /// Draw the front buffer into `rgb` (RGB24, `width` pixels a row, the
+    /// Draw the front buffer into `rgba` (RGBA8, `width` pixels a row, the
     /// card's size), through the gamma table (see `prepare_display`).
-    pub fn render(&self, rgb: &mut [u8], width: usize) {
+    pub fn render(&self, rgba: &mut [u8], width: usize) {
         if let Some(b) = &self.banshee {
-            b.render(&self.fbi.ram, rgb, width);
+            b.render(&self.fbi.ram, rgba, width);
             return;
         }
         let (w, h) = (self.fbi.width as usize, self.fbi.height as usize);
@@ -1242,12 +1242,15 @@ impl Voodoo {
         let base = base as usize / 2;
         let ram = &self.fbi.ram;
         for y in 0..h {
-            let Some(row) = rgb.get_mut(y * width * 3..(y * width + w.min(width)) * 3) else { break };
+            let Some(row) = rgba.get_mut(y * width * 4..(y * width + w.min(width)) * 4) else {
+                break;
+            };
             let src = base + y * self.fbi.rowpixels as usize;
-            for (x, out) in row.as_chunks_mut::<3>().0.iter_mut().enumerate() {
+            for (x, out) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                 let at = src + x;
                 let pixel = if at < ram.len() { ram.get(at) } else { 0 };
-                out.copy_from_slice(&self.palette[pixel as usize]);
+                let [r, g, b] = self.palette[pixel as usize];
+                *out = [r, g, b, 255];
             }
         }
     }

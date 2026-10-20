@@ -36,8 +36,8 @@ fn picture(cpu: &mut Cpu) -> Frame {
 }
 
 fn pixel(frame: &Frame, x: usize, y: usize) -> (u8, u8, u8) {
-    let i = (y * frame.width as usize + x) * 3;
-    (frame.rgb[i], frame.rgb[i + 1], frame.rgb[i + 2])
+    let i = (y * frame.width as usize + x) * 4;
+    (frame.rgba[i], frame.rgba[i + 1], frame.rgba[i + 2])
 }
 
 #[test]
@@ -166,7 +166,9 @@ fn the_shell_runs_on_a_hercules_card() {
     video::print_string(&mut cpu, "HELLO");
     assert_eq!(cpu.bus.read_8(0xB0000), b'H');
     let frame = picture(&mut cpu);
-    assert!(frame.rgb[..720 * 14 * 3].iter().any(|&b| b != 0));
+    assert!(frame.rgba[..720 * 14 * 4]
+        .as_chunks::<4>().0.iter()
+        .any(|p| p[..3].iter().any(|&b| b != 0)));
     assert_eq!(cpu.bus.read_16(0x0460), 0x0B0C);
 }
 

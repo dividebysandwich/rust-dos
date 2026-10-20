@@ -208,7 +208,7 @@ pub fn apply(frame: &mut Frame, look: &Look) {
         return;
     }
     frame.doubled = false;
-    let source = frame.rgb.clone();
+    let source = frame.rgba.clone();
     let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
     // At least a line of 1.5 pixels and a dot of 2: the beam's spot.
     let (sx, sy) = (look.scale.0.max(2.0 / w as f32), look.scale.1.max(1.5 / h as f32));
@@ -223,21 +223,21 @@ pub fn apply(frame: &mut Frame, look: &Look) {
     let offset = look.offset_y * h as f32;
     for y in 0..h {
         let src_y = (y as f32 + 0.5 - cy - offset) / sy + cy;
-        let row = &mut frame.rgb[y * w * 3..(y + 1) * w * 3];
+        let row = &mut frame.rgba[y * w * 4..(y + 1) * w * 4];
         if !(0.0..h as f32).contains(&src_y) || gain == 0 {
-            row.fill(0);
+            row.as_chunks_mut::<4>().0.fill([0, 0, 0, 255]);
             continue;
         }
-        let src_row = &source[src_y as usize * w * 3..][..w * 3];
+        let src_row = &source[src_y as usize * w * 4..][..w * 4];
         let swing = look.wobble * (look.phase + y as f32 * 0.045).sin();
         let fringe = look.wobble * 0.35;
         for x in 0..w {
             let src_x = (x as f32 + 0.5 - cx) / sx + cx - swing;
-            let pixel = &mut row[x * 3..x * 3 + 3];
+            let pixel = &mut row[x * 4..x * 4 + 3];
             for (c, shift) in [(0, -fringe), (1, 0.0), (2, fringe)] {
                 let at = src_x + shift;
                 pixel[c] = if (0.0..w as f32).contains(&at) {
-                    (((src_row[at as usize * 3 + c] as u32 * gain) >> 8) + glow).min(255) as u8
+                    (((src_row[at as usize * 4 + c] as u32 * gain) >> 8) + glow).min(255) as u8
                 } else {
                     0
                 };
@@ -252,24 +252,24 @@ mod tests {
 
     fn white(w: u32, h: u32) -> Frame {
         let mut frame = Frame::new(w, h);
-        frame.rgb.fill(200);
+        frame.clear([200; 3]);
         frame
     }
 
     fn lit(frame: &Frame, x: usize, y: usize) -> bool {
-        frame.rgb[(y * frame.width as usize + x) * 3..][..3].iter().any(|&c| c > 0)
+        frame.rgba[(y * frame.width as usize + x) * 4..][..3].iter().any(|&c| c > 0)
     }
 
     #[test]
     fn power_on_starts_dark_and_ends_as_the_picture() {
         let mut frame = white(64, 40);
         apply(&mut frame, &look_at(Effect::PowerOn, 0.05));
-        assert!(frame.rgb.iter().all(|&c| c == 0));
+        assert!(frame.rgba.as_chunks::<4>().0.iter().all(|p| *p == [0, 0, 0, 255]));
         assert_eq!(look_at(Effect::PowerOn, 1.59).brightness, 1.0);
         assert_eq!(look_at(Effect::PowerOn, 1.59).wobble, 0.0);
         let mut frame = white(64, 40);
         apply(&mut frame, &look_at(Effect::PowerOn, 1.59));
-        assert!(frame.rgb.iter().all(|&c| c == 200));
+        assert!(frame.rgba.as_chunks::<4>().0.iter().all(|p| *p == [200, 200, 200, 255]));
     }
 
     #[test]
@@ -288,7 +288,7 @@ mod tests {
     fn a_resync_blanks_then_brings_the_picture_back() {
         let mut frame = white(64, 40);
         apply(&mut frame, &look_at(Effect::Resync, 0.1));
-        assert!(frame.rgb.iter().all(|&c| c == 0));
+        assert!(frame.rgba.as_chunks::<4>().0.iter().all(|p| *p == [0, 0, 0, 255]));
         let look = look_at(Effect::Resync, 0.2);
         assert!(look.brightness > 0.0 && look.offset_y > 0.0);
         let mut fx = PowerFx::default();

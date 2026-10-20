@@ -149,7 +149,7 @@ mod tests {
     use super::*;
 
     fn lit(frame: &Frame) -> bool {
-        frame.rgb.iter().any(|&b| b != 0)
+        frame.rgba.as_chunks::<4>().0.iter().any(|p| p[..3].iter().any(|&b| b != 0))
     }
 
     #[test]
@@ -171,7 +171,11 @@ mod tests {
         osd.draw_at(&mut frame, start);
         assert!(lit(&frame));
         // At the top, centred.
-        let row = |y: usize| frame.rgb[y * 640 * 3..(y + 1) * 640 * 3].iter().any(|&b| b != 0);
+        let row = |y: usize| {
+            frame.rgba[y * 640 * 4..(y + 1) * 640 * 4]
+                .as_chunks::<4>().0.iter()
+                .any(|p| p[..3].iter().any(|&b| b != 0))
+        };
         assert!(row(10) && !row(100));
         // Even on a tiny picture.
         osd.draw_at(&mut Frame::new(16, 8), start);
@@ -191,7 +195,11 @@ mod tests {
         osd.notify("A", "B", false);
         osd.set_corner(vec!["1:23.45".into()]);
         osd.draw_at(&mut frame, start);
-        let row = |y: usize| frame.rgb[y * 640 * 3..(y + 1) * 640 * 3].iter().any(|&b| b != 0);
+        let row = |y: usize| {
+            frame.rgba[y * 640 * 4..(y + 1) * 640 * 4]
+                .as_chunks::<4>().0.iter()
+                .any(|p| p[..3].iter().any(|&b| b != 0))
+        };
         assert!(row(350) && !row(100) && !row(10));
         osd.draw_at(&mut Frame::new(16, 8), start);
     }

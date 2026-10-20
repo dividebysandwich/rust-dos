@@ -364,14 +364,14 @@ impl Stage {
                 .unwrap_or(0);
             for (texture, frame) in self.eyes[free].iter().zip([left, right]) {
                 let (w, h) = (frame.width.max(1) as i32, frame.height.max(1) as i32);
-                let pixels = (frame.rgb.len() >= (w * h * 3) as usize).then_some(&frame.rgb[..]);
+                let pixels = (frame.rgba.len() >= (w * h * 4) as usize).then_some(&frame.rgba[..]);
                 // SAFETY: see `GlScreen`.
                 unsafe {
                     gl.bind_texture(glow::TEXTURE_2D, Some(*texture));
                     gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
                     let data = glow::PixelUnpackData::Slice(pixels);
-                    let (format, kind) = (glow::RGB, glow::UNSIGNED_BYTE);
-                    let internal = glow::RGB8 as i32;
+                    let (format, kind) = (glow::RGBA, glow::UNSIGNED_BYTE);
+                    let internal = glow::RGBA8 as i32;
                     gl.tex_image_2d(glow::TEXTURE_2D, 0, internal, w, h, 0, format, kind, data);
                     gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
                     gl.bind_texture(glow::TEXTURE_2D, None);

@@ -414,11 +414,11 @@ pub fn render_graphics(canvas: &mut [u8], bus: &Bus) {
         }
         let scale = (width / pixels.len().max(1)).max(1);
         for dy in 0..2 {
-            let row_start = (y * 2 + dy) * width * 3;
+            let row_start = (y * 2 + dy) * width * 4;
             for (x, &color) in pixels.iter().take(width / scale).enumerate() {
                 let (r, g, b) = colors[color as usize];
                 for dx in 0..scale {
-                    let i = row_start + (x * scale + dx) * 3;
+                    let i = row_start + (x * scale + dx) * 4;
                     if i + 2 < canvas.len() {
                         canvas[i] = r;
                         canvas[i + 1] = g;

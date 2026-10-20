@@ -63,10 +63,12 @@ pub fn take(
 
 /// Save the picture (RGBA, `SIZE` square, rows from the top) as a PNG file
 /// in `folder`, on a thread of its own.
-fn save(rgba: Vec<u8>, folder: PathBuf, said: impl FnOnce(String) + Send + 'static) {
+fn save(mut rgba: Vec<u8>, folder: PathBuf, said: impl FnOnce(String) + Send + 'static) {
     let _ = std::thread::Builder::new().name("vr-photo".into()).spawn(move || {
-        let rgb: Vec<u8> = rgba.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
-        let frame = rust_dos::video::Frame::from_rgb(SIZE, SIZE, rgb);
+        for pixel in rgba.as_chunks_mut::<4>().0 {
+            pixel[3] = 255;
+        }
+        let frame = rust_dos::video::Frame::from_rgba(SIZE, SIZE, rgba);
         let saved = rust_dos::capture::capture_path(&folder, "photo", "png").and_then(|path| {
             rust_dos::capture::png::save(&frame, &path)?;
             Ok(path)

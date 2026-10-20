@@ -174,16 +174,17 @@ pub fn render_area(grid: &Grid, layout: &Layout, frame: &mut Frame, alpha: u32, 
             let glyph = &font[cell.ch as usize * layout.cell_h..][..layout.cell_h];
             for (gy, bits) in glyph.iter().enumerate() {
                 let y = layout.y + row * layout.cell_h + gy;
-                let start = (y * width + layout.x + col * 8) * 3;
-                let Some(pixels) = frame.rgb.get_mut(start..start + 24) else { continue };
-                for (gx, px) in pixels.as_chunks_mut::<3>().0.iter_mut().enumerate() {
-                    *px = if bits & (0x80 >> gx) != 0 {
+                let start = (y * width + layout.x + col * 8) * 4;
+                let Some(pixels) = frame.rgba.get_mut(start..start + 32) else { continue };
+                for (gx, px) in pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                    let [r, g, b] = if bits & (0x80 >> gx) != 0 {
                         [cell.fg.0, cell.fg.1, cell.fg.2]
                     } else if let Some(bg) = cell.bg {
                         [bg.0, bg.1, bg.2]
                     } else {
-                        blend(*px, PANEL, alpha)
+                        blend([px[0], px[1], px[2]], PANEL, alpha)
                     };
+                    *px = [r, g, b, 255];
                 }
             }
         }
@@ -223,8 +224,8 @@ pub fn plot(frame: &mut Frame, layout: &Layout, cells: (usize, usize, usize, usi
                 _ if quarter => (DIM, alpha),
                 _ => (FIELD, alpha),
             };
-            let at = (y * width + x) * 3;
-            let px = &mut frame.rgb[at..at + 3];
+            let at = (y * width + x) * 4;
+            let px = &mut frame.rgba[at..at + 3];
             px.copy_from_slice(&blend([px[0], px[1], px[2]], c, a));
         }
     }
@@ -352,8 +353,8 @@ mod tests {
         let layout = Layout::for_frame(640, 400);
         plot(&mut frame, &layout, (2, 10, 20, 4), &[0.0, 50.0, 100.0], 100.0, GOOD, OPAQUE);
         let px = |x: usize, y: usize| {
-            let i = (y * 640 + x) * 3;
-            Rgb(frame.rgb[i], frame.rgb[i + 1], frame.rgb[i + 2])
+            let i = (y * 640 + x) * 4;
+            Rgb(frame.rgba[i], frame.rgba[i + 1], frame.rgba[i + 2])
         };
         let (x0, y0) = (layout.x + 16, layout.y + 10 * layout.cell_h);
         let (w, h) = (160, 4 * layout.cell_h);
@@ -368,9 +369,9 @@ mod tests {
         // Half opaque, over a white picture: the picture shows through
         // but for the values' line.
         let mut frame = Frame::new(640, 400);
-        frame.rgb.fill(0xFF);
+        frame.rgba.fill(0xFF);
         plot(&mut frame, &layout, (2, 10, 20, 4), &[100.0], 100.0, GOOD, OPAQUE / 2);
-        let px = |x: usize, y: usize| frame.rgb[(y * 640 + x) * 3..][..3].to_vec();
+        let px = |x: usize, y: usize| frame.rgba[(y * 640 + x) * 4..][..3].to_vec();
         assert_eq!(px(x0 + w - 1, y0), [GOOD.0, GOOD.1, GOOD.2]);
         assert_eq!(px(x0, y0 + h - 1), blend([0xFF; 3], FIELD, 128));
         assert_eq!(px(x0, y0 + h - 1), [0x83, 0x87, 0x95]);
@@ -406,12 +407,12 @@ mod tests {
     #[test]
     fn rendering_blends_the_panel_and_draws_glyphs() {
         let mut frame = Frame::new(640, 400);
-        frame.rgb.fill(0xFF);
+        frame.rgba.fill(0xFF);
         let layout = Layout::for_frame(640, 400);
         let mut grid = Grid::new(layout.cols, layout.rows);
         grid.text(0, 0, "\u{2588}", BRIGHT); // a solid block
         render(&grid, &layout, &mut frame);
-        let px = |x: usize, y: usize| &frame.rgb[(y * 640 + x) * 3..][..3];
+        let px = |x: usize, y: usize| &frame.rgba[(y * 640 + x) * 4..][..3];
         // Outside the panel: untouched.
         assert_eq!(px(0, 0), [0xFF, 0xFF, 0xFF]);
         // The block glyph: its colour.

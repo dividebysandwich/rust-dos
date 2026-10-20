@@ -29,7 +29,7 @@ fn cursor_lines(cpu: &Cpu) -> Vec<usize> {
     video::overlay::draw_cursors(&mut frame, &cpu.bus, true);
     let width = frame.width as usize;
     let mut lines: Vec<usize> = (0..geometry.cell_h())
-        .filter(|&y| frame.rgb[y * width * 3..y * width * 3 + 3] == [0xDD; 3])
+        .filter(|&y| frame.rgba[y * width * 4..y * width * 4 + 3] == [0xDD; 3])
         .map(|y| y / geometry.y_scale)
         .collect();
     lines.dedup();

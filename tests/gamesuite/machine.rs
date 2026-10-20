@@ -227,7 +227,10 @@ pub fn hash_frame(frame: &Frame) -> String {
     let mut h = Sha256::new();
     h.update(frame.width.to_le_bytes());
     h.update(frame.height.to_le_bytes());
-    h.update(&frame.rgb);
+    // Keep the existing visual references independent of pixel padding.
+    for pixel in frame.rgba.as_chunks::<4>().0 {
+        h.update(&pixel[..3]);
+    }
     hex(&h.finalize()[..12])
 }
 
@@ -246,7 +249,7 @@ pub fn hex(bytes: &[u8]) -> String {
 /// How many distinct colours the picture has.
 pub fn colours(frame: &Frame) -> usize {
     let mut seen = std::collections::HashSet::new();
-    for px in frame.rgb.as_chunks::<3>().0 {
+    for px in frame.rgba.as_chunks::<4>().0 {
         seen.insert((px[0], px[1], px[2]));
         if seen.len() > 64 {
             break;

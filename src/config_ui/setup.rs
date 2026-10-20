@@ -220,7 +220,7 @@ impl ConfigUi {
         let center = |g: &mut Grid, row: usize, text: &str, fg: Rgb| {
             g.text(cols.saturating_sub(text.len()) / 2, row, text, fg);
         };
-        frame.rgb.fill(0);
+        frame.clear([0, 0, 0]);
         match setup.page {
             None => {
                 center(&mut g, 1, "ROM PCI/ISA BIOS (RUST-DOS)", WHITE);
