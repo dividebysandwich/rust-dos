@@ -38,6 +38,7 @@ pub static DLL: Dll = Dll {
     apis: apis::APIS,
     vars: VARS,
     init: Some(init),
+    vtables: &[],
 };
 
 /// Streams in `_iob`, and streams there can be at all (`_NSTREAM_`).

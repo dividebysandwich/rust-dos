@@ -198,8 +198,21 @@ fn results(output: &str, exit: Option<u8>) -> Vec<String> {
 }
 
 /// The DLLs the tests may import from, as MinGW names their import
-/// libraries.
-const LIBS: &[&str] = &["-luser32", "-lgdi32", "-lkernel32", "-ladvapi32"];
+/// libraries, and the GUIDs of DirectX's and COM's interfaces, which
+/// are data in MinGW's libdxguid and libuuid.
+const LIBS: &[&str] = &[
+    "-lddraw",
+    "-ldsound",
+    "-ldinput",
+    "-lwinmm",
+    "-lole32",
+    "-luser32",
+    "-lgdi32",
+    "-lkernel32",
+    "-ladvapi32",
+    "-ldxguid",
+    "-luuid",
+];
 
 /// Build the test file `unit` of `dll` into `program`, as Wine does: the
 /// file without STANDALONE, which leaves the framework out of it, and a

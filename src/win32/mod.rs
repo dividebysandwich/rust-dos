@@ -15,7 +15,11 @@
 
 mod advapi32;
 mod call;
+mod com;
 mod convert;
+mod ddraw;
+mod dinput;
+mod dsound;
 pub mod gdi32;
 mod heap;
 mod kernel32;
@@ -24,6 +28,7 @@ mod mapping;
 mod memory;
 mod msvcrt;
 mod object;
+mod ole32;
 mod registry;
 mod seh;
 pub mod snapshot;
@@ -32,6 +37,7 @@ mod system;
 mod task;
 mod thread;
 pub mod user32;
+mod winmm;
 
 pub use snapshot::snapshot;
 pub use stubs::function_name;
@@ -287,6 +293,15 @@ pub struct Win32 {
     /// with. They are the system's, shared by the processes.
     user: user32::State,
     gdi: gdi32::State,
+
+    /// COM's and the DirectX and multimedia DLLs' state, the system's,
+    /// and how many GUIDs CoCreateGuid made.
+    ole: ole32::State,
+    ddraw: ddraw::State,
+    dsound: dsound::State,
+    dinput: dinput::State,
+    winmm: winmm::State,
+    guids: u32,
 }
 
 impl Win32 {
@@ -673,6 +688,11 @@ fn end_process(cpu: &mut Cpu, index: usize, code: u32) {
     registry::process_ended(cpu, process.id);
     user32::process_ended(cpu, process.id, &tids);
     gdi32::process_ended(cpu, process.id);
+    ole32::process_ended(cpu, process.id, &tids);
+    ddraw::process_ended(cpu, process.id, &tids);
+    dsound::process_ended(cpu, process.id, &tids);
+    dinput::process_ended(cpu, process.id, &tids);
+    winmm::process_ended(cpu, process.id, &tids);
     let win32 = &mut cpu.bus.win32;
     if win32.running != index {
         // Another process's thread runs on.
@@ -786,6 +806,11 @@ pub fn process_ended(cpu: &mut Cpu, psp: u16) {
         }
         cpu.bus.win32.user = user32::State::default();
         cpu.bus.win32.gdi = gdi32::State::default();
+        cpu.bus.win32.ole = ole32::State::default();
+        cpu.bus.win32.ddraw = ddraw::State::default();
+        cpu.bus.win32.dsound = dsound::State::default();
+        cpu.bus.win32.dinput = dinput::State::default();
+        cpu.bus.win32.winmm = winmm::State::default();
         cpu.bus.set_a20(a20);
     }
     cpu.bus.win32.pending = None;
@@ -874,4 +899,11 @@ crate::state_fields!(Win32 {
     console_mode,
     user,
     gdi,
+
+    ole,
+    ddraw,
+    dsound,
+    dinput,
+    winmm,
+    guids,
 } skip { enabled });
