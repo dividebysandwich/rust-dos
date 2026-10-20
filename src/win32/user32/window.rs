@@ -1198,21 +1198,15 @@ fn destroy_focus(cpu: &mut Cpu, list: &[u32]) {
 
 /// `hwnd` and its descendants, each before its own children.
 pub fn pre_order(state: &State, hwnd: u32) -> Vec<u32> {
-    let mut out = vec![hwnd];
-    let mut i = 0;
-    while i < out.len() {
-        let h = out[i];
+    let mut out = Vec::new();
+    // Depth first: the children go on the stack last first, so the first
+    // comes off next.
+    let mut stack = vec![hwnd];
+    while let Some(h) = stack.pop() {
+        out.push(h);
         if let Some(w) = state.window(h) {
-            let mut kids = w.children.clone();
-            // Children in order, each before its own: depth first.
-            let mut sub = Vec::new();
-            for k in kids.drain(..) {
-                sub.extend(pre_order(state, k));
-            }
-            out.splice(i + 1..i + 1, sub.iter().copied());
-            i += sub.len();
+            stack.extend(w.children.iter().rev());
         }
-        i += 1;
     }
     out
 }

@@ -594,8 +594,9 @@ fn bitmap_from_dib(cpu: &mut Cpu, at: u32, dib_section: bool) -> Option<u32> {
             .and_then(|b| b.dib.as_ref())
             .map_or(0, |d| d.bits);
         if to != 0 {
+            // No more than the section's own bits hold.
             let size = if info.image_size != 0 && info.compression != 0 {
-                info.image_size
+                info.image_size.min(info.bits_size())
             } else {
                 info.bits_size()
             };

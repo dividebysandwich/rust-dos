@@ -640,11 +640,10 @@ pub fn free(cpu: &mut Cpu, handle: u32) {
     };
     if let Kind::Bitmap { bitmap } = object.kind
         && let Some(dib) = bitmap.dib
-        && dib.section == 0
         && dib.bits != 0
         && object.pid == current_pid(cpu)
     {
-        crate::win32::kernel32::free_pages(cpu, dib.bits);
+        bitmap::free_dib_bits(cpu, dib.bits, dib.section, dib.offset);
     }
 }
 

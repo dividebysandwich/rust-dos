@@ -350,7 +350,8 @@ fn poll_keyboard(cpu: &mut Cpu) {
     let held = cpu.bus.kbd.held_keys();
     let before = user(cpu).input.held;
     let mut events = Vec::new();
-    for id in 0..512 {
+    // It runs at each wake of the threads: most often no key changed.
+    for id in (0..512).filter(|id| held[id / 64] != before[id / 64]) {
         let (was, is) = (before[id / 64] >> (id % 64) & 1, held[id / 64] >> (id % 64) & 1);
         if was != is {
             events.push((id, is != 0));

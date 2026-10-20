@@ -479,6 +479,9 @@ fn send(
     }
     let state = user(cpu);
     let Some(w) = state.window(hwnd) else {
+        if let Some(next) = resume_wait(cpu, hwnd, msg, wp, lp, timeout) {
+            return next;
+        }
         set_error(cpu, ERROR_INVALID_WINDOW_HANDLE);
         return Some(0);
     };
@@ -529,7 +532,12 @@ fn send_other(
     let waiting = state.queue_mut(me).waiting.last().copied();
     let id = match waiting {
         Some((id, _)) if id != 0 => id,
+        _ if !thread_alive(&cpu.bus.win32, tid) => {
+            // The thread whose window it is has ended: nothing replies.
+            return Some(0);
+        }
         _ => {
+            let state = user(cpu);
             state.last_sent += 1;
             let id = state.last_sent;
             let deadline = timeout.map_or(0, |(ms, _)| now + ms as u64 * 1000);
@@ -556,6 +564,54 @@ fn send_other(
         vec![hwnd, msg, wp, lp, 0, 1, id, out],
         0,
     )
+}
+
+/// Whether the thread `tid` is there and hasn't ended.
+fn thread_alive(win32: &crate::win32::Win32, tid: u32) -> bool {
+    thread::find(win32, tid).is_some_and(|(p, t)| win32.processes[p].threads[t].exit_code.is_none())
+}
+
+/// A send that waited for another thread's reply runs again, and the
+/// window is gone: the other thread destroyed it while it handled the
+/// message. The send waits on for that reply, as Windows returns it,
+/// instead of failing and leaving its wait on top of the thread's list,
+/// where the thread's next send would take the reply for its own.
+fn resume_wait(
+    cpu: &mut Cpu,
+    hwnd: u32,
+    msg: u32,
+    wp: u32,
+    lp: u32,
+    timeout: Option<(u32, u32)>,
+) -> Option<Option<u32>> {
+    let me = current_tid(cpu);
+    let q = user(cpu).queues.iter().find(|q| q.tid == me)?;
+    let &(id, _) = q.waiting.last().filter(|&&(id, _)| id != 0)?;
+    let out = timeout.map_or(0, |(_, out)| out);
+    Some(task::start(
+        cpu,
+        TASK_SEND,
+        vec![hwnd, msg, wp, lp, 0, 1, id, out],
+        0,
+    ))
+}
+
+/// The thread `tid` ended: the messages other threads sent it and wait
+/// for the reply of get 0, so that they don't wait for ever.
+pub fn thread_ended(win32: &mut crate::win32::Win32, tid: u32) {
+    let state = &mut win32.user;
+    let Some(q) = state.queues.iter_mut().find(|q| q.tid == tid) else {
+        return;
+    };
+    let pending: Vec<(u32, u32)> = q
+        .sent
+        .drain(..)
+        .filter(|s| s.kind == 0)
+        .map(|s| (s.from, s.id))
+        .collect();
+    for (from, id) in pending {
+        state.queue_mut(from).replies.push((id, 0));
+    }
 }
 
 /// SendMessageA's steps.
@@ -729,6 +785,9 @@ pub fn send_message_timeout(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         unreachable!()
     };
     if hwnd != HWND_BROADCAST && hwnd != 0xFFFF_FFFF && !user(cpu).is_window(hwnd) {
+        if let Some(next) = resume_wait(cpu, hwnd, msg, wp, lp, Some((timeout, out))) {
+            return next;
+        }
         set_error(cpu, ERROR_INVALID_WINDOW_HANDLE);
         return Some(0);
     }
@@ -767,6 +826,7 @@ pub fn send_notify_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         kind: 1,
         callback: (0, 0),
     });
+    state.queue_mut(tid).changed |= QS_SENDMESSAGE;
     thread::wake(cpu);
     Some(TRUE)
 }
@@ -811,6 +871,7 @@ pub fn send_message_callback(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         kind: 2,
         callback: (callback, data),
     });
+    state.queue_mut(tid).changed |= QS_SENDMESSAGE;
     thread::wake(cpu);
     Some(TRUE)
 }
@@ -1460,8 +1521,10 @@ fn timer(cpu: &mut Cpu, args: &[u32], system: bool) -> Option<u32> {
         }
     }
     let elapse = elapse.clamp(MIN_ELAPSE, 0x7FFF_FFFF);
-    let id = if hwnd == 0 {
-        // A timer without a window gets an id of its own.
+    let mine = |t: &Timer| t.hwnd == 0 && t.id == id && t.tid == tid && t.system == system;
+    let id = if hwnd == 0 && (id == 0 || !state.timers.iter().any(mine)) {
+        // A timer without a window gets an id of its own, unless `id` is
+        // one of the thread's, which it replaces.
         let mut new = 1;
         while state.timers.iter().any(|t| t.hwnd == 0 && t.id == new) {
             new += 1;

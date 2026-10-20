@@ -660,9 +660,11 @@ fn wsprintf_core(cpu: &mut Cpu, format: &[u16], mut args: u32, wide: bool) -> Op
             }
             i += 1;
         }
+        // A width or precision past what the output holds pads no more
+        // than it can.
         let mut width = 0usize;
         while let Some(&d) = format.get(i).filter(|&&d| (0x30..=0x39).contains(&d)) {
-            width = width * 10 + (d - 0x30) as usize;
+            width = (width * 10 + (d - 0x30) as usize).min(WSPRINTF_MAX);
             i += 1;
         }
         let mut precision = None;
@@ -670,7 +672,7 @@ fn wsprintf_core(cpu: &mut Cpu, format: &[u16], mut args: u32, wide: bool) -> Op
             i += 1;
             let mut p = 0usize;
             while let Some(&d) = format.get(i).filter(|&&d| (0x30..=0x39).contains(&d)) {
-                p = p * 10 + (d - 0x30) as usize;
+                p = (p * 10 + (d - 0x30) as usize).min(WSPRINTF_MAX);
                 i += 1;
             }
             precision = Some(p);

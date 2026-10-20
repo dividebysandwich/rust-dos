@@ -549,6 +549,18 @@ pub fn free_pages(cpu: &mut Cpu, at: u32) {
     virtual_memory::virtual_free(cpu, &[at, 0, 0x8000]);
 }
 
+/// A writable view of the file mapping `handle` for a DIB section whose
+/// bits are in it: the view's address and the mapping's size, or None
+/// with the error set.
+pub fn map_dib_view(cpu: &mut Cpu, handle: u32) -> Option<(u32, u32)> {
+    mapping::dib_view(cpu, handle)
+}
+
+/// Let go of the view `map_dib_view` gave.
+pub fn unmap_dib_view(cpu: &mut Cpu, at: u32) {
+    mapping::unmap_view_of_file(cpu, &[at]);
+}
+
 /// The data of the resource `name` of type `kind` in the module `module`
 /// (0: the program), as FindResourceA takes them: its address and size,
 /// or the error. None if a name's page isn't there.

@@ -18,6 +18,8 @@ const BI_BITFIELDS: u32 = 3;
 const DIB_RGB_COLORS: u32 = 0;
 const DIB_PAL_COLORS: u32 = 1;
 const CBM_INIT: u32 = 4;
+/// The most bytes a bitmap's pixels take.
+const MAX_BITS: usize = 64 << 20;
 
 /// A DIB's header, as a BITMAPINFO at an address says it.
 #[derive(Clone, Debug, Default)]
@@ -40,7 +42,7 @@ pub struct DibInfo {
 
 impl DibInfo {
     pub fn abs_height(&self) -> i32 {
-        self.height.abs()
+        self.height.saturating_abs()
     }
 
     pub fn top_down(&self) -> bool {
@@ -51,9 +53,10 @@ impl DibInfo {
         surface::dib_stride(self.width, self.bpp)
     }
 
-    /// The bytes of its rows.
+    /// The bytes of its rows, at most MAX_BITS + 1 (too many).
     pub fn bits_size(&self) -> u32 {
-        (self.stride() * self.abs_height() as usize) as u32
+        let size = self.stride().saturating_mul(self.abs_height() as usize);
+        size.min(MAX_BITS + 1) as u32
     }
 }
 
@@ -96,6 +99,10 @@ pub fn read_info(cpu: &mut Cpu, at: u32, usage: u32, hdc: u32) -> Option<DibInfo
     }
     info.header_size = size;
     if !matches!(info.bpp, 1 | 4 | 8 | 16 | 24 | 32) || info.width < 0 {
+        return None;
+    }
+    // Rows that take more than a bitmap may: GDI makes no room for them.
+    if info.bits_size() as usize > MAX_BITS {
         return None;
     }
     let colors_at = at + size;
@@ -211,7 +218,7 @@ fn round_depth(bpp: u32) -> Option<u16> {
 pub fn new_ddb(cpu: &mut Cpu, width: i32, height: i32, bpp: u16) -> u32 {
     let stride = surface::ddb_stride(width, bpp as u32) as u32;
     let size = stride as usize * height as usize;
-    if size > 64 << 20 {
+    if size > MAX_BITS {
         set_error(cpu, ERROR_NOT_ENOUGH_MEMORY);
         return 0;
     }
@@ -317,9 +324,12 @@ pub fn create_compatible_bitmap(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// Make a DIB section of `info`'s format: its handle and its bits'
 /// address, or (0, 0).
 fn make_dib_section(cpu: &mut Cpu, info: &DibInfo, section: u32, offset: u32) -> (u32, u32) {
-    let size = info.bits_size().max(1);
-    let Some(bits) = crate::win32::kernel32::alloc_pages(cpu, size) else {
+    if info.bits_size() as usize > MAX_BITS {
         set_error(cpu, ERROR_NOT_ENOUGH_MEMORY);
+        return (0, 0);
+    }
+    let size = info.bits_size().max(1);
+    let Some(bits) = dib_bits(cpu, size, section, offset) else {
         return (0, 0);
     };
     let mut header = vec![0u8; 40];
@@ -367,10 +377,39 @@ fn make_dib_section(cpu: &mut Cpu, info: &DibInfo, section: u32, offset: u32) ->
         },
     );
     if handle == 0 {
-        crate::win32::kernel32::free_pages(cpu, bits);
+        free_dib_bits(cpu, bits, section, offset);
         return (0, 0);
     }
     (handle, bits)
+}
+
+/// Where a DIB section's `size` bytes of bits go: pages of GDI's own, or
+/// with a file mapping `section`, a view of it from `offset` (a multiple
+/// of 4). None with the error set.
+fn dib_bits(cpu: &mut Cpu, size: u32, section: u32, offset: u32) -> Option<u32> {
+    if section == 0 {
+        let bits = crate::win32::kernel32::alloc_pages(cpu, size);
+        if bits.is_none() {
+            set_error(cpu, ERROR_NOT_ENOUGH_MEMORY);
+        }
+        return bits;
+    }
+    let (view, len) = crate::win32::kernel32::map_dib_view(cpu, section)?;
+    if !offset.is_multiple_of(4) || offset as u64 + size as u64 > len as u64 {
+        crate::win32::kernel32::unmap_dib_view(cpu, view);
+        set_error(cpu, ERROR_INVALID_PARAMETER);
+        return None;
+    }
+    Some(view + offset)
+}
+
+/// Let go of the bits `dib_bits` gave.
+pub fn free_dib_bits(cpu: &mut Cpu, bits: u32, section: u32, offset: u32) {
+    if section == 0 {
+        crate::win32::kernel32::free_pages(cpu, bits);
+    } else {
+        crate::win32::kernel32::unmap_dib_view(cpu, bits - offset);
+    }
 }
 
 /// CreateDIBSection(hdc, info, usage, bits, section, offset).
@@ -429,7 +468,7 @@ pub fn create_di_bitmap(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             cpu.bus.guest_read_32(header + 8) as i32,
         )
     };
-    let height = height.abs();
+    let height = height.saturating_abs();
     if width < 0 {
         set_error(cpu, ERROR_INVALID_PARAMETER);
         return Some(0);
@@ -755,7 +794,7 @@ pub fn read_dib(cpu: &mut Cpu, info: &DibInfo, bits: u32, start: u32, lines: u32
     let mut s = Surface::memory(info.width, lines, info.bpp, info.colors.clone(), info.masks);
     if info.compression == BI_RLE8 || info.compression == BI_RLE4 {
         let size = if info.image_size != 0 {
-            info.image_size
+            info.image_size.min(MAX_BITS as u32)
         } else {
             info.bits_size()
         };

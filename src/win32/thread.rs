@@ -511,6 +511,7 @@ pub fn end(win32: &mut Win32, p: usize, t: usize, code: u32) {
     thread.calls.clear();
     let (tid, own) = (thread.id, thread.object);
     let wait = thread.wait.take();
+    super::user32::message::thread_ended(win32, tid);
     let objects = &mut win32.objects;
     for id in wait.into_iter().flat_map(|w| w.objects) {
         objects.release(id);

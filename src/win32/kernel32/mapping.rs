@@ -444,6 +444,20 @@ fn map_view(
     Some(address)
 }
 
+/// A view of the whole mapping `handle`, with write access, for GDI: its
+/// address and the mapping's size, or None with the error set.
+pub(super) fn dib_view(cpu: &mut Cpu, handle: u32) -> Option<(u32, u32)> {
+    let size = section_of(cpu, handle)
+        .and_then(|i| cpu.bus.win32.sections[i].as_ref())
+        .map(|s| s.size);
+    let Some(size) = size else {
+        set_error(cpu, ERROR_INVALID_HANDLE);
+        return None;
+    };
+    let at = map_view(cpu, handle, FILE_MAP_WRITE, 0, 0, 0, 0)?;
+    (at != 0).then_some((at, size))
+}
+
 /// The section with a view of the running process at `at`.
 fn view_at(cpu: &mut Cpu, at: u32) -> Option<usize> {
     let id = process(cpu).id;

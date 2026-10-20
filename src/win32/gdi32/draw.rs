@@ -418,15 +418,19 @@ pub fn pen_stroke(cpu: &mut Cpu, c: &Canvas) -> Stroke {
 }
 
 /// The points of the line from (`x0`, `y0`) to (`x1`, `y1`), without the
-/// last, as Bresenham's algorithm steps.
-pub fn line_points(x0: i32, y0: i32, x1: i32, y1: i32) -> Vec<(i32, i32)> {
-    let (dx, dy) = ((x1 - x0).abs(), -(y1 - y0).abs());
+/// last, as Bresenham's algorithm steps. They come one at a time: a line
+/// with far coordinates has billions.
+pub fn line_points(x0: i32, y0: i32, x1: i32, y1: i32) -> impl Iterator<Item = (i32, i32)> {
+    let dx = (x1 as i64 - x0 as i64).abs();
+    let dy = -(y1 as i64 - y0 as i64).abs();
     let (sx, sy) = (if x0 < x1 { 1 } else { -1 }, if y0 < y1 { 1 } else { -1 });
     let mut err = dx + dy;
     let (mut x, mut y) = (x0, y0);
-    let mut out = Vec::with_capacity((dx - dy) as usize + 1);
-    while (x, y) != (x1, y1) {
-        out.push((x, y));
+    std::iter::from_fn(move || {
+        if (x, y) == (x1, y1) {
+            return None;
+        }
+        let point = (x, y);
         let e2 = 2 * err;
         if e2 >= dy {
             err += dy;
@@ -436,8 +440,8 @@ pub fn line_points(x0: i32, y0: i32, x1: i32, y1: i32) -> Vec<(i32, i32)> {
             err += dx;
             y += sy;
         }
-    }
-    out
+        Some(point)
+    })
 }
 
 impl Canvas {
