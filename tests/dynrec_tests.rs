@@ -1072,15 +1072,17 @@ fn sti_at_the_end_of_a_full_block_holds_interrupts_for_one_instruction() {
 
 /// A DOS program (`T.COM`, in real mode) on the interpreter and on the
 /// recompiler, from directories of their own, run in lockstep to its end.
-/// Returns the recompiler's counts.
-fn com_in_lockstep(test: &str, code: &[u8]) -> (Cpu, Cpu) {
+/// Returns the recompiler's counts. The machines are boxed: a debug build
+/// on Windows makes copies of a `Cpu` on the stack, and two of them by
+/// value overflow a test thread's 2 MB.
+fn com_in_lockstep(test: &str, code: &[u8]) -> (Box<Cpu>, Box<Cpu>) {
     rust_dos::hosttime::fix(NaiveDate::from_ymd_opt(1995, 4, 11).unwrap().and_hms_opt(12, 34, 56));
     let machine = |name: &str, core: CoreMode| {
         let dir = std::path::Path::new("target/dynrec_tests").join(test).join(name);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("T.COM"), code).unwrap();
-        let mut cpu = Cpu::new(dir);
+        let mut cpu = Box::new(Cpu::new(dir));
         cpu.core = core;
         cpu.load_shell();
         cpu.pending_command = Some("T".to_string());
