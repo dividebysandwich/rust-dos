@@ -6,9 +6,14 @@
 //! shows in that file's diff.
 //!
 //! The compiler is `i686-w64-mingw32-gcc`, or the one CONFORMANCE_CC
-//! names. Without one the test says so and passes, unless
-//! CONFORMANCE_REQUIRED is set, as in CI. CONFORMANCE_BLESS=1 writes the
-//! results to expected.txt instead of comparing them.
+//! names, and the resource compiler `i686-w64-mingw32-windres`, or the
+//! one CONFORMANCE_WINDRES names. Without a compiler the test says so and
+//! passes, unless CONFORMANCE_REQUIRED is set, as in CI.
+//! CONFORMANCE_BLESS=1 writes the results to expected.txt instead of
+//! comparing them. CONFORMANCE_ONLY=user32/static runs only that test
+//! (or a DLL's, or a comma-separated list of them) and prints its
+//! results. CONFORMANCE_LOG=1 writes the emulator's log, with every call
+//! a program makes, to target/conformance/<dll>/<test>.trace.
 
 use rust_dos::cpu::{Cpu, CpuModel, HostConsole};
 use rust_dos::exec::{NoHook, StopReason, run_batch};
@@ -19,7 +24,7 @@ use std::process::Command;
 const ROOT: &str = "tests/conformance";
 const OUT: &str = "target/conformance";
 /// The most batches of 100,000 instructions a test program may run for.
-const BATCHES: usize = 5000;
+const BATCHES: usize = 20000;
 
 const HEADER: &str = "\
 # The results of Wine's conformance tests under the built-in Windows, as
@@ -37,6 +42,11 @@ fn compiler() -> Option<String> {
         .output()
         .is_ok_and(|o| o.status.success());
     found.then_some(cc)
+}
+
+/// The resource compiler.
+fn windres() -> String {
+    std::env::var("CONFORMANCE_WINDRES").unwrap_or_else(|_| "i686-w64-mingw32-windres".to_string())
 }
 
 /// Run the compiler with `args`; its messages if it fails.
@@ -111,6 +121,12 @@ fn run(dir: &Path, name: &str, unit: &str, model: CpuModel) -> (String, Option<u
     cpu.load_shell();
     assert!(cpu.load_executable(name, None), "{} didn't load", name);
     cpu.set_command_tail(cpu.current_psp, unit);
+    if std::env::var_os("CONFORMANCE_LOG").is_some() {
+        let path = dir.join(format!("{}.trace", unit));
+        // A program's calls fill more than a log file usually holds.
+        let log = rust_dos::log::LogFile::create_with_limit(&path, 1 << 30);
+        cpu.bus.log_file = Some(log.unwrap());
+    }
     let mut ended = false;
     for _ in 0..BATCHES {
         cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
@@ -118,6 +134,9 @@ fn run(dir: &Path, name: &str, unit: &str, model: CpuModel) -> (String, Option<u
             ended = true;
             break;
         }
+    }
+    if let Some(log) = &mut cpu.bus.log_file {
+        log.flush();
     }
     let console = cpu.host_console.as_ref().unwrap();
     let mut text = console.stdout.clone();
@@ -180,7 +199,7 @@ fn results(output: &str, exit: Option<u8>) -> Vec<String> {
 
 /// The DLLs the tests may import from, as MinGW names their import
 /// libraries.
-const LIBS: &[&str] = &["-lkernel32", "-ladvapi32"];
+const LIBS: &[&str] = &["-luser32", "-lgdi32", "-lkernel32", "-ladvapi32"];
 
 /// Build the test file `unit` of `dll` into `program`, as Wine does: the
 /// file without STANDALONE, which leaves the framework out of it, and a
@@ -195,7 +214,14 @@ const LIBS: &[&str] = &["-lkernel32", "-ladvapi32"];
 /// count what sprintf returns itself, as it counts C99's formats, and
 /// MinGW's headers aren't to put its own C99 functions (strtod) in place
 /// of MSVCRT's.
-fn build(cc: &str, dll: &str, unit: &str, runtime: &str, program: &str) -> Result<(), String> {
+fn build(
+    cc: &str,
+    dll: &str,
+    unit: &str,
+    runtime: &str,
+    resources: Option<&str>,
+    program: &str,
+) -> Result<(), String> {
     let list = format!("{OUT}/{dll}/{unit}_list.c");
     fs::write(
         &list,
@@ -213,6 +239,10 @@ fn build(cc: &str, dll: &str, unit: &str, runtime: &str, program: &str) -> Resul
     let compat = format!("{ROOT}/runtime/compat.h");
     let mut args = CFLAGS.to_vec();
     args.extend([include.as_str(), "-include", compat.as_str()]);
+    if unit == "win" {
+        // msg.c's dump_region, which win.c calls, is runtime.c's here.
+        args.push("-Ddump_region=conformance_dump_region");
+    }
     if dll == "msvcrt" {
         args.extend(["-fno-printf-return-value", "-D__NO_ISOCEXT"]);
         args.extend([source.as_str(), list.as_str(), "-lmsvcrt"]);
@@ -220,6 +250,7 @@ fn build(cc: &str, dll: &str, unit: &str, runtime: &str, program: &str) -> Resul
         args.extend(["-nostdlib", "-Wl,-e,_mainCRTStartup"]);
         args.extend([source.as_str(), list.as_str(), runtime]);
     }
+    args.extend(resources);
     args.extend(LIBS);
     args.extend(["-lgcc", "-o", program]);
     compile(cc, &args)
@@ -249,17 +280,45 @@ fn wine_conformance_tests_give_the_expected_results() {
     ]);
     compile(&cc, &args).unwrap_or_else(|e| panic!("the runtime doesn't build:\n{}", e));
 
+    // CONFORMANCE_ONLY=user32/static (or a list, comma-separated, of
+    // DLLs and tests) runs only those and prints their results without
+    // comparing them, for working on them.
+    let only: Option<Vec<String>> = std::env::var("CONFORMANCE_ONLY")
+        .ok()
+        .map(|s| s.split(',').map(str::to_string).collect());
+    let wanted = |dll: &str, unit: &str| {
+        only.as_ref().is_none_or(|o| {
+            o.iter().any(|w| w == dll || *w == format!("{}/{}", dll, unit))
+        })
+    };
     let mut actual = Vec::new();
     for (dll, units) in units() {
+        if !units.iter().any(|u| wanted(&dll, u)) {
+            continue;
+        }
         let dir = PathBuf::from(format!("{OUT}/{dll}"));
         // Each run starts from an empty drive: files an earlier run left
         // (file.c makes WIN.INI) change what directory listings count.
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
+        // The resources the DLL's tests share (user32's resource.rc),
+        // which each of its programs is linked with.
+        let rc = format!("{ROOT}/wine/{dll}/resource.rc");
+        let resources = Path::new(&rc).exists().then(|| {
+            let object = format!("{OUT}/{dll}/resource.o");
+            let include = format!("-I{ROOT}/wine/include");
+            let args = [include.as_str(), rc.as_str(), "-O", "coff", "-o", object.as_str()];
+            compile(&windres(), &args)
+                .unwrap_or_else(|e| panic!("{} doesn't build:\n{}", rc, e));
+            object
+        });
         for unit in units {
+            if !wanted(&dll, &unit) {
+                continue;
+            }
             let name = program_name(&unit);
             let program = format!("{OUT}/{dll}/{name}");
-            let lines = match build(&cc, &dll, &unit, &runtime, &program) {
+            let lines = match build(&cc, &dll, &unit, &runtime, resources.as_deref(), &program) {
                 Ok(()) => {
                     // MinGW's startup code is built for a Pentium Pro
                     // (CMOVcc); runtime.c for a 486.
@@ -286,6 +345,10 @@ fn wine_conformance_tests_give_the_expected_results() {
     }
 
     let path = format!("{ROOT}/expected.txt");
+    if only.is_some() {
+        println!("{}", actual.join("\n"));
+        return;
+    }
     if std::env::var_os("CONFORMANCE_BLESS").is_some() {
         fs::write(&path, format!("{}{}\n", HEADER, actual.join("\n"))).unwrap();
         return;

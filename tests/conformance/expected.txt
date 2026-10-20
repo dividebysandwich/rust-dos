@@ -14,6 +14,26 @@ advapi32/registry: skipped registry.c:1705
 advapi32/registry: skipped registry.c:1859
 advapi32/registry: skipped registry.c:1579
 advapi32/registry: skipped registry.c:1354
+gdi32/bitmap: bitmap: 4312 tests executed (0 marked as todo, 2 failures), 2 skipped.
+gdi32/bitmap: skipped bitmap.c:1894
+gdi32/bitmap: failed bitmap.c:2527
+gdi32/bitmap: failed bitmap.c:2755
+gdi32/bitmap: skipped bitmap.c:2903
+gdi32/brush: brush: 32 tests executed (0 marked as todo, 0 failures), 0 skipped.
+gdi32/clipping: clipping: 78 tests executed (0 marked as todo, 0 failures), 0 skipped.
+gdi32/dc: dc: 104 tests executed (0 marked as todo, 1 failure), 3 skipped.
+gdi32/dc: skipped dc.c:208
+gdi32/dc: failed dc.c:453
+gdi32/dc: skipped dc.c:517
+gdi32/dc: skipped dc.c:540
+gdi32/gdiobj: gdiobj: 49 tests executed (0 marked as todo, 0 failures), 0 skipped.
+gdi32/mapping: mapping: 79 tests executed (0 marked as todo, 0 failures), 4 skipped.
+gdi32/mapping: skipped mapping.c:229
+gdi32/mapping: skipped mapping.c:147
+gdi32/mapping: skipped mapping.c:359
+gdi32/mapping: skipped mapping.c:470
+gdi32/palette: palette: 9 tests executed (0 marked as todo, 0 failures), 0 skipped.
+gdi32/pen: pen: 668 tests executed (0 marked as todo, 0 failures), 0 skipped.
 kernel32/alloc: alloc: 54 tests executed (0 marked as todo, 0 failures), 0 skipped.
 kernel32/codepage: codepage: 77 tests executed (0 marked as todo, 0 failures), 4 skipped.
 kernel32/codepage: skipped codepage.c:260 (x2)
@@ -146,3 +166,374 @@ msvcrt/string: skipped string.c:1128
 msvcrt/string: skipped string.c:1201
 msvcrt/time: time: 29 tests executed (0 marked as todo, 0 failures), 1 skipped.
 msvcrt/time: skipped time.c:66
+user32/class: class: 4 tests executed (0 marked as todo, 0 failures), 0 skipped.
+user32/dce: dce: 136 tests executed (0 marked as todo, 0 failures), 0 skipped.
+user32/dialog: dialog: 96 tests executed (0 marked as todo, 0 failures), 1 skipped.
+user32/dialog: skipped dialog.c:1152
+user32/input: input: 1308 tests executed (0 marked as todo, 0 failures), 5 skipped.
+user32/input: skipped input.c:910
+user32/input: skipped input.c:1154
+user32/input: skipped input.c:1263
+user32/input: skipped input.c:1529
+user32/input: skipped input.c:1597
+user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
+user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
+user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
+user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
+user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
+user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
+user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
+user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
+user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
+user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
+user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
+user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
+user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
+user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
+user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
+user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
+user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
+user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
+user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
+user32/msg: msg: 11069 tests executed (0 marked as todo, 684 failures), 6 skipped.
+user32/msg: skipped msg.c:12537
+user32/msg: failed msg.c:8462
+user32/msg: skipped msg.c:12177
+user32/msg: failed msg.c:10734 (x67)
+user32/msg: failed msg.c:10731 (x3)
+user32/msg: failed msg.c:10729 (x2)
+user32/msg: failed msg.c:9495
+user32/msg: failed msg.c:9529
+user32/msg: failed msg.c:9538
+user32/msg: skipped msg.c:9545
+user32/msg: failed msg.c:12484 (x4)
+user32/msg: failed msg.c:12493 (x21)
+user32/msg: failed msg.c:8756
+user32/msg: failed msg.c:8760
+user32/msg: failed msg.c:8781
+user32/msg: failed msg.c:8785
+user32/msg: failed msg.c:8795
+user32/msg: failed msg.c:4496
+user32/msg: failed msg.c:4503 (x3)
+user32/msg: failed msg.c:4507
+user32/msg: failed msg.c:4511 (x3)
+user32/msg: failed msg.c:4515
+user32/msg: failed msg.c:4528
+user32/msg: failed msg.c:4544 (x3)
+user32/msg: failed msg.c:4546
+user32/msg: failed msg.c:3969 (x12)
+user32/msg: failed msg.c:4011 (x12)
+user32/msg: failed msg.c:4558
+user32/msg: failed msg.c:4562 (x3)
+user32/msg: failed msg.c:4566
+user32/msg: failed msg.c:4575
+user32/msg: failed msg.c:4578 (x4)
+user32/msg: failed msg.c:4588
+user32/msg: failed msg.c:3971 (x4)
+user32/msg: failed msg.c:4013 (x4)
+user32/msg: failed msg.c:4603 (x2)
+user32/msg: failed msg.c:4654 (x3)
+user32/msg: failed msg.c:4674
+user32/msg: failed msg.c:4690
+user32/msg: failed msg.c:4693 (x7)
+user32/msg: failed msg.c:4711
+user32/msg: failed msg.c:4718
+user32/msg: failed msg.c:4733 (x7)
+user32/msg: failed msg.c:4745
+user32/msg: failed msg.c:4750
+user32/msg: failed msg.c:4766 (x6)
+user32/msg: failed msg.c:4768 (x4)
+user32/msg: failed msg.c:4774 (x3)
+user32/msg: failed msg.c:4776 (x5)
+user32/msg: failed msg.c:4783 (x3)
+user32/msg: failed msg.c:4801
+user32/msg: failed msg.c:4925 (x2)
+user32/msg: failed msg.c:4152 (x4)
+user32/msg: failed msg.c:4157 (x2)
+user32/msg: failed msg.c:4165
+user32/msg: failed msg.c:4171
+user32/msg: failed msg.c:4177
+user32/msg: failed msg.c:4205
+user32/msg: failed msg.c:4220 (x9)
+user32/msg: failed msg.c:4223
+user32/msg: failed msg.c:4239
+user32/msg: failed msg.c:4244 (x9)
+user32/msg: failed msg.c:4256 (x10)
+user32/msg: failed msg.c:4269 (x7)
+user32/msg: failed msg.c:4274 (x2)
+user32/msg: failed msg.c:4951 (x2)
+user32/msg: failed msg.c:4959 (x2)
+user32/msg: failed msg.c:4967 (x4)
+user32/msg: failed msg.c:4975 (x2)
+user32/msg: failed msg.c:4983
+user32/msg: failed msg.c:4993 (x5)
+user32/msg: failed msg.c:5001 (x2)
+user32/msg: failed msg.c:5010 (x4)
+user32/msg: failed msg.c:5020 (x2)
+user32/msg: failed msg.c:5028 (x2)
+user32/msg: failed msg.c:5037
+user32/msg: failed msg.c:5039
+user32/msg: failed msg.c:5049
+user32/msg: failed msg.c:5057
+user32/msg: failed msg.c:5065
+user32/msg: failed msg.c:5076
+user32/msg: failed msg.c:5081
+user32/msg: failed msg.c:5086
+user32/msg: failed msg.c:5093 (x3)
+user32/msg: failed msg.c:3378
+user32/msg: failed msg.c:3452 (x8)
+user32/msg: failed msg.c:3458
+user32/msg: failed msg.c:3461
+user32/msg: failed msg.c:3466
+user32/msg: failed msg.c:3488
+user32/msg: failed msg.c:3500
+user32/msg: failed msg.c:3507 (x5)
+user32/msg: failed msg.c:3513
+user32/msg: failed msg.c:3514
+user32/msg: failed msg.c:3529 (x5)
+user32/msg: failed msg.c:3536
+user32/msg: failed msg.c:3553 (x5)
+user32/msg: failed msg.c:3559 (x5)
+user32/msg: failed msg.c:3565 (x3)
+user32/msg: failed msg.c:3568
+user32/msg: failed msg.c:3576 (x6)
+user32/msg: failed msg.c:3579
+user32/msg: failed msg.c:3596 (x3)
+user32/msg: failed msg.c:3608
+user32/msg: failed msg.c:3617
+user32/msg: failed msg.c:3618
+user32/msg: failed msg.c:3627
+user32/msg: failed msg.c:3629
+user32/msg: failed msg.c:3632
+user32/msg: failed msg.c:3635
+user32/msg: failed msg.c:3636
+user32/msg: failed msg.c:3641
+user32/msg: failed msg.c:3643
+user32/msg: failed msg.c:3652
+user32/msg: failed msg.c:3662
+user32/msg: failed msg.c:3670
+user32/msg: failed msg.c:3672
+user32/msg: failed msg.c:3675
+user32/msg: failed msg.c:3678
+user32/msg: failed msg.c:3679
+user32/msg: failed msg.c:3683
+user32/msg: failed msg.c:3688
+user32/msg: failed msg.c:3691
+user32/msg: failed msg.c:3692
+user32/msg: failed msg.c:3696
+user32/msg: failed msg.c:3705
+user32/msg: failed msg.c:3716 (x3)
+user32/msg: failed msg.c:3725
+user32/msg: failed msg.c:3732 (x4)
+user32/msg: failed msg.c:3738
+user32/msg: failed msg.c:3739
+user32/msg: failed msg.c:3754
+user32/msg: failed msg.c:3763
+user32/msg: failed msg.c:3764
+user32/msg: failed msg.c:3773
+user32/msg: failed msg.c:3776
+user32/msg: failed msg.c:3779
+user32/msg: failed msg.c:3782
+user32/msg: failed msg.c:3783
+user32/msg: failed msg.c:3788 (x2)
+user32/msg: failed msg.c:3795
+user32/msg: failed msg.c:3797
+user32/msg: failed msg.c:3801 (x3)
+user32/msg: failed msg.c:3826
+user32/msg: failed msg.c:3828
+user32/msg: failed msg.c:3831
+user32/msg: failed msg.c:3835
+user32/msg: failed msg.c:3838
+user32/msg: failed msg.c:3839
+user32/msg: failed msg.c:3843
+user32/msg: failed msg.c:3847
+user32/msg: failed msg.c:3871 (x8)
+user32/msg: failed msg.c:3874 (x2)
+user32/msg: failed msg.c:3882
+user32/msg: failed msg.c:3890 (x3)
+user32/msg: failed msg.c:5455
+user32/msg: failed msg.c:5475 (x2)
+user32/msg: failed msg.c:5480 (x4)
+user32/msg: failed msg.c:5589
+user32/msg: failed msg.c:11591
+user32/msg: failed msg.c:11598
+user32/msg: failed msg.c:11604
+user32/msg: failed msg.c:11612 (x6)
+user32/msg: failed msg.c:6247
+user32/msg: failed msg.c:6263
+user32/msg: failed msg.c:6291 (x4)
+user32/msg: failed msg.c:6301 (x3)
+user32/msg: failed msg.c:6306
+user32/msg: failed msg.c:6310 (x3)
+user32/msg: failed msg.c:6316 (x2)
+user32/msg: failed msg.c:6322 (x4)
+user32/msg: failed msg.c:5906 (x10)
+user32/msg: failed msg.c:6361
+user32/msg: failed msg.c:6364
+user32/msg: failed msg.c:6383
+user32/msg: failed msg.c:6385 (x2)
+user32/msg: failed msg.c:6391
+user32/msg: failed msg.c:6395
+user32/msg: failed msg.c:6407
+user32/msg: failed msg.c:6415
+user32/msg: failed msg.c:6418
+user32/msg: failed msg.c:6427
+user32/msg: failed msg.c:6445
+user32/msg: failed msg.c:6454
+user32/msg: failed msg.c:6458
+user32/msg: failed msg.c:6462
+user32/msg: failed msg.c:6473 (x6)
+user32/msg: failed msg.c:6483 (x5)
+user32/msg: failed msg.c:6489
+user32/msg: failed msg.c:6500 (x5)
+user32/msg: failed msg.c:6510 (x5)
+user32/msg: skipped msg.c:6692
+user32/msg: failed msg.c:7171 (x6)
+user32/msg: failed msg.c:7180 (x7)
+user32/msg: failed msg.c:7280
+user32/msg: failed msg.c:7286 (x3)
+user32/msg: failed msg.c:7292
+user32/msg: failed msg.c:7300
+user32/msg: failed msg.c:7310
+user32/msg: failed msg.c:8059
+user32/msg: failed msg.c:8060
+user32/msg: failed msg.c:8090
+user32/msg: skipped msg.c:8103
+user32/msg: failed msg.c:8135
+user32/msg: failed msg.c:8138
+user32/msg: failed msg.c:8141
+user32/msg: failed msg.c:8145
+user32/msg: failed msg.c:8928 (x10)
+user32/msg: failed msg.c:8999 (x10)
+user32/msg: failed msg.c:9003 (x10)
+user32/msg: failed msg.c:9028 (x3)
+user32/msg: failed msg.c:9066
+user32/msg: failed msg.c:9076
+user32/msg: failed msg.c:9086
+user32/msg: failed msg.c:9096
+user32/msg: failed msg.c:9107
+user32/msg: failed msg.c:9304 (x2)
+user32/msg: failed msg.c:9321 (x2)
+user32/msg: failed msg.c:11071
+user32/msg: failed msg.c:11082 (x8)
+user32/msg: failed msg.c:11092
+user32/msg: failed msg.c:11098
+user32/msg: failed msg.c:10205
+user32/msg: failed msg.c:10215
+user32/msg: failed msg.c:10225
+user32/msg: failed msg.c:10239 (x4)
+user32/msg: failed msg.c:10240
+user32/msg: failed msg.c:10241 (x4)
+user32/msg: failed msg.c:10246
+user32/msg: failed msg.c:10253
+user32/msg: failed msg.c:10261
+user32/msg: failed msg.c:10262
+user32/msg: failed msg.c:10263
+user32/msg: failed msg.c:10267
+user32/msg: failed msg.c:10269 (x4)
+user32/msg: failed msg.c:10271
+user32/msg: failed msg.c:10272 (x4)
+user32/msg: failed msg.c:10278 (x4)
+user32/msg: failed msg.c:10281
+user32/msg: failed msg.c:10283 (x4)
+user32/msg: failed msg.c:10285
+user32/msg: failed msg.c:10286 (x4)
+user32/msg: failed msg.c:10289
+user32/msg: failed msg.c:10291 (x4)
+user32/msg: failed msg.c:10293
+user32/msg: failed msg.c:10294 (x4)
+user32/msg: failed msg.c:10295
+user32/msg: failed msg.c:10365
+user32/msg: failed msg.c:10369
+user32/msg: failed msg.c:10373
+user32/msg: failed msg.c:10376
+user32/msg: failed msg.c:10879 (x2)
+user32/msg: skipped msg.c:11156
+user32/msg: failed msg.c:11792 (x3)
+user32/msg: failed msg.c:11805 (x6)
+user32/msg: failed msg.c:11850
+user32/msg: failed msg.c:11887 (x5)
+user32/msg: failed msg.c:11905 (x6)
+user32/msg: failed msg.c:11915
+user32/msg: failed msg.c:11938 (x6)
+user32/msg: failed msg.c:12075
+user32/msg: failed msg.c:12077
+user32/msg: failed msg.c:12082
+user32/msg: failed msg.c:12087
+user32/msg: failed msg.c:12092
+user32/msg: failed msg.c:12093
+user32/msg: failed msg.c:12094
+user32/msg: failed msg.c:12100
+user32/msg: failed msg.c:12101
+user32/msg: failed msg.c:12106
+user32/msg: failed msg.c:12107
+user32/msg: failed msg.c:12111
+user32/msg: failed msg.c:12116
+user32/msg: failed msg.c:12125
+user32/msg: failed msg.c:12135
+user32/msg: failed msg.c:12143
+user32/resource: resource: 77 tests executed (0 marked as todo, 0 failures), 1 skipped.
+user32/resource: skipped resource.c:50
+user32/static: static: 41 tests executed (0 marked as todo, 0 failures), 0 skipped.
+user32/text: text: 197 tests executed (0 marked as todo, 0 failures), 2 skipped.
+user32/text: skipped text.c:119
+user32/text: skipped text.c:554
+user32/uitools: uitools: 6 tests executed (0 marked as todo, 0 failures), 0 skipped.
+user32/win: win: 7975 tests executed (0 marked as todo, 64 failures), 10 skipped.
+user32/win: skipped win.c:5583
+user32/win: skipped win.c:5400
+user32/win: skipped win.c:3845
+user32/win: skipped win.c:2891
+user32/win: failed win.c:4616
+user32/win: failed win.c:4620
+user32/win: failed win.c:4638
+user32/win: failed win.c:4642
+user32/win: failed win.c:4660
+user32/win: failed win.c:4664
+user32/win: failed win.c:4682
+user32/win: failed win.c:4686
+user32/win: failed win.c:4436
+user32/win: failed win.c:154 (x2)
+user32/win: failed win.c:107 (x2)
+user32/win: failed win.c:112
+user32/win: failed win.c:114
+user32/win: failed win.c:118
+user32/win: failed win.c:120
+user32/win: skipped win.c:390
+user32/win: skipped win.c:469
+user32/win: failed win.c:496
+user32/win: failed win.c:537
+user32/win: failed win.c:573
+user32/win: skipped win.c:3390
+user32/win: failed win.c:2366
+user32/win: failed win.c:2386
+user32/win: failed win.c:2397
+user32/win: failed win.c:2407
+user32/win: failed win.c:2455 (x2)
+user32/win: failed win.c:2458 (x2)
+user32/win: failed win.c:2480 (x3)
+user32/win: failed win.c:5261
+user32/win: failed win.c:3088
+user32/win: failed win.c:3094
+user32/win: failed win.c:3167
+user32/win: failed win.c:3170
+user32/win: failed win.c:3275
+user32/win: failed win.c:3285
+user32/win: failed win.c:3296
+user32/win: failed win.c:3613
+user32/win: failed win.c:3626
+user32/win: failed win.c:3644
+user32/win: failed win.c:3709
+user32/win: failed win.c:3429 (x2)
+user32/win: failed win.c:4252 (x4)
+user32/win: failed win.c:4264 (x4)
+user32/win: skipped win.c:5464
+user32/win: failed win.c:2555 (x2)
+user32/win: failed win.c:2558 (x2)
+user32/win: failed win.c:2561
+user32/win: failed win.c:832
+user32/win: failed win.c:2587 (x3)
+user32/win: failed win.c:2603 (x2)
+user32/win: skipped win.c:1057
+user32/win: skipped win.c:5990
+user32/wsprintf: wsprintf: 6 tests executed (0 marked as todo, 0 failures), 0 skipped.
