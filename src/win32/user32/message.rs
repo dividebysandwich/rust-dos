@@ -752,14 +752,18 @@ fn finish_sent(cpu: &mut Cpu, result: u32) {
     let state = user(cpu);
     let q = state.queue_mut(me);
     let id = q.in_send.pop().unwrap_or(0);
-    if id == 0 {
-        // A callback ran.
-        return;
+    let i = q.sent.iter().position(|s| s.id == id).filter(|_| id != 0);
+    let sent = i.and_then(|i| q.sent.remove(i));
+    // With none left, QS_SENDMESSAGE no longer counts as new, as in
+    // Windows: else MsgWaitForMultipleObjects would return at once for
+    // ever after a message another thread sent.
+    if q.sent.is_empty() && q.callbacks.is_empty() {
+        q.changed &= !QS_SENDMESSAGE;
     }
-    let Some(i) = q.sent.iter().position(|s| s.id == id) else {
+    // A callback ran when `id` is 0.
+    let Some(sent) = sent else {
         return;
     };
-    let sent = q.sent.remove(i).unwrap();
     match sent.kind {
         0 => {
             state.queue_mut(sent.from).replies.push((id, result));
