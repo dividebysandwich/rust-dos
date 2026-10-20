@@ -1609,7 +1609,7 @@ fn captures_show_the_window_overlay_and_shader_when_asked() {
 
 #[test]
 fn the_drives_page_makes_and_mounts_new_disk_images() {
-    let dir = std::env::temp_dir().join(format!("rust-dos-ui-makeimg-{}", std::process::id()));
+    let dir = crate::test_dir::path("ui-makeimg");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let mut host = FakeHost::new();
@@ -2443,7 +2443,7 @@ fn the_sound_canvas_download_asks_first() {
     let mut ui = opened(&host);
     use UiKey::*;
     // A folder without ROMs, so the download is offered.
-    let empty = std::env::temp_dir().join(format!("rust-dos-sc55-ui-{}", std::process::id()));
+    let empty = crate::test_dir::path("sc55-ui");
     std::fs::create_dir_all(&empty).unwrap();
     ui.settings.sound.midisynth = MidiSynth::Sc55;
     ui.settings.sound.sc55roms = Some(empty.clone());

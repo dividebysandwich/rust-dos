@@ -387,7 +387,7 @@ mod tests {
 
     #[test]
     fn downloaded_scenes_are_found_by_their_list_entry() {
-        let root = std::env::temp_dir().join(format!("rust-dos-scenes-{}", std::process::id()));
+        let root = crate::test_dir::path("scenes");
         let _ = std::fs::remove_dir_all(&root);
         for (folder, id) in [("b", "b"), ("a", "a"), ("wrong", "c")] {
             let dir = root.join(folder);
@@ -419,7 +419,7 @@ mod tests {
             Err(_) => fetch_catalog().unwrap(),
         };
         assert!(!scenes.is_empty());
-        let root = std::env::temp_dir().join(format!("rust-dos-scenes-online-{}", std::process::id()));
+        let root = crate::test_dir::path("scenes-online");
         let _ = std::fs::remove_dir_all(&root);
         for scene in &scenes {
             let progress = std::sync::atomic::AtomicU64::new(0);

@@ -278,7 +278,7 @@ mod tests {
 
     #[test]
     fn a_recording_is_an_indexed_avi() {
-        let path = std::env::temp_dir().join(format!("rust-dos-avi-{}.avi", std::process::id()));
+        let path = crate::test_dir::path("avi.avi");
         let mut recorder = VideoRecorder::start(&path, 32, 16, 0).unwrap();
         let mut frame = Frame::new(32, 16);
         // A second at 60 frames a second, in steps of a sixtieth, with the
@@ -322,7 +322,7 @@ mod tests {
 
     #[test]
     fn a_recording_goes_on_while_the_machine_stands_still() {
-        let path = std::env::temp_dir().join(format!("rust-dos-avi-still-{}.avi", std::process::id()));
+        let path = crate::test_dir::path("avi-still.avi");
         let mut recorder = VideoRecorder::start(&path, 32, 16, 1_000_000_000).unwrap();
         let frame = Frame::new(32, 16);
         let sixtieth = 1_000_000_000 / 60 + 1;

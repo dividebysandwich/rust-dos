@@ -136,7 +136,7 @@ mod tests {
 
     #[test]
     fn a_document_has_its_pages_and_a_table_of_them() {
-        let dir = std::env::temp_dir().join(format!("rust-dos-pdf-{}", std::process::id()));
+        let dir = crate::test_dir::path("pdf");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("test.pdf");
         let mut pdf = PdfWriter::create(&path).unwrap();

@@ -75,7 +75,7 @@ mod tests {
     use super::*;
 
     fn temp_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("rust-dos-log-{}-{}", std::process::id(), name))
+        crate::test_dir::path(&format!("log-{name}"))
     }
 
     #[test]

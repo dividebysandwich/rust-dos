@@ -29,6 +29,8 @@ mod monitor_power;
 mod sdl_audio;
 mod sdl_keys;
 mod startup;
+#[cfg(test)]
+mod test_dir;
 
 // The emulator itself is the library crate; the debug server and the
 // window's display are private to the binary. These re-exports let the

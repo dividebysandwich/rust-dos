@@ -325,7 +325,7 @@ mod tests {
 
     #[test]
     fn is_kept_in_a_file() {
-        let dir = std::env::temp_dir().join(format!("rust-dos-history-{}", std::process::id()));
+        let dir = crate::test_dir::path("history");
         let path = dir.join("history.txt");
         let _ = std::fs::remove_dir_all(&dir);
         let mut h = history(&["typed before"]);
