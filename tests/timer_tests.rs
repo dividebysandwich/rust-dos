@@ -472,6 +472,96 @@ fn max_speed_tracks_host_throughput() {
 }
 
 #[test]
+fn max_speed_comes_back_from_a_speed_too_low_to_time() {
+    // A host busy elsewhere pushed the speed down to where a frame runs
+    // fewer instructions than a measurement takes (Oni after a state load
+    // with the OpenGL renderer, #204): no frame measures the host any
+    // more, so the speed has to climb back by itself.
+    let start = Instant::now();
+    let mut bus = bus_at(150);
+    let mut pacer = Pacer::new(CpuSpeed::Max, None, start);
+    // A frame (1/60 s) of instructions at the speed, all of them run, on a
+    // host that takes 100 ns an instruction, with 1 ms of other work.
+    let frame = |pacer: &mut Pacer, bus: &mut Bus| {
+        let executed = bus.clock.cycles_per_ms() as u64 * 50 / 3;
+        let exec = Duration::from_nanos(executed * 100);
+        let next = pacer.end_frame(bus, true, executed, exec, Duration::from_millis(1));
+        if let Some(next) = next {
+            bus.set_cycles_per_ms(next);
+        }
+        next
+    };
+    let mut frames = 0;
+    while bus.clock.cycles_per_ms() * 50 / 3 < 10_000 {
+        let before = bus.clock.cycles_per_ms();
+        assert!(
+            frame(&mut pacer, &mut bus).is_some_and(|next| next > before),
+            "stuck at {}",
+            before
+        );
+        frames += 1;
+    }
+    assert!(frames < 20, "{} frames", frames);
+    // From there frames are timed again, and the speed settles where the
+    // host's measurements put it: 85% of a frame less the other work, at
+    // 100 ns an instruction, is about 7,900 instructions per ms.
+    for _ in 0..300 {
+        frame(&mut pacer, &mut bus);
+    }
+    let speed = bus.clock.cycles_per_ms();
+    assert!((7_500..=8_000).contains(&speed), "settled at {}", speed);
+}
+
+#[test]
+fn max_speed_comes_back_with_a_guest_that_halts_part_of_each_frame() {
+    // At 650 a frame has room for 10,833 instructions, enough to time, but
+    // a guest halted for a quarter of it runs about 8,100, and no frame is
+    // measured. The speed climbs until what the guest runs can be timed.
+    let start = Instant::now();
+    let mut bus = bus_at(650);
+    let mut pacer = Pacer::new(CpuSpeed::Max, None, start);
+    let ran = |bus: &Bus| bus.clock.cycles_per_ms() as u64 * 50 / 3 * 3 / 4;
+    let mut frames = 0;
+    while ran(&bus) < 10_000 {
+        let before = bus.clock.cycles_per_ms();
+        let executed = ran(&bus);
+        let exec = Duration::from_nanos(executed * 100);
+        let next = pacer.end_frame(&bus, true, executed, exec, Duration::from_millis(1));
+        assert!(
+            next.is_some_and(|next| next > before),
+            "stuck at {}",
+            before
+        );
+        bus.set_cycles_per_ms(next.unwrap());
+        frames += 1;
+        assert!(frames < 10, "{} frames", frames);
+    }
+    // A frame paused in the settings window runs nothing and leaves the
+    // speed alone.
+    bus.set_cycles_per_ms(200);
+    assert_eq!(
+        pacer.end_frame(&bus, true, 0, Duration::ZERO, Duration::ZERO),
+        None
+    );
+}
+
+#[test]
+fn auto_speed_is_never_capped_below_a_speed_that_can_be_timed() {
+    // `auto 300` in real mode at 2,000, on a host that measures as able to
+    // run only about 200 instructions per ms: capped there, a frame would
+    // run 3,333 instructions, too few for the host to be measured again,
+    // and the cap would stay. It stops at a speed whose frames are timed.
+    let start = Instant::now();
+    let bus = bus_at(2000);
+    let mut pacer = Pacer::new(CpuSpeed::Auto(300), None, start);
+    let executed = 2000 * 50 / 3;
+    // 4.2 us an instruction: 85% of a frame fits about 3,400 of them.
+    let exec = Duration::from_nanos(executed * 4200);
+    let next = pacer.end_frame(&bus, false, executed, exec, Duration::ZERO);
+    assert_eq!(next, Some(1200));
+}
+
+#[test]
 fn cpu_speed_parses_max_and_numbers() {
     assert_eq!(CpuSpeed::parse("max"), Ok(CpuSpeed::Max));
     assert_eq!(CpuSpeed::parse(" MAX "), Ok(CpuSpeed::Max));
