@@ -24,12 +24,8 @@ const PIXELS_FRAG: &str = include_str!("gl/pixels.frag");
 const DEPTH_FRAG: &str = include_str!("gl/depth.frag");
 const CLUT_FRAG: &str = include_str!("gl/clut.frag");
 
-const TRIANGLE_UNIFORMS: &[&str] = &[
-    "u_size", "u_fbzcp", "u_fbz", "u_alpha", "u_fog", "u_color0", "u_color1", "u_chroma", "u_chroma_range", "u_zacolor", "u_fogcolor",
-    "u_stipple", "u_yorigin", "u_fogblend", "u_fogdelta", "u_scale", "u_units", "u_config", "u_tmode0", "u_tmode1",
-    "u_tsize0", "u_tsize1", "u_tlod0", "u_tlod1", "u_tdetail0", "u_tdetail1", "u_constant_depth",
-];
-const QUAD_UNIFORMS: &[&str] = &["u_rect", "u_size", "u_scale"];
+mod uniforms;
+use uniforms::{Locations, Quad, Triangle};
 
 /// The card's depth functions as OpenGL's.
 const DEPTH_FUNCS: [u32; 8] =
@@ -38,15 +34,9 @@ const TEXTURE_MAX_ANISOTROPY: u32 = 0x84FE;
 const MAX_TEXTURE_MAX_ANISOTROPY: u32 = 0x84FF;
 
 /// A linked program and its uniforms.
-struct Program {
+struct Program<U> {
     program: glow::Program,
-    uniforms: HashMap<&'static str, glow::UniformLocation>,
-}
-
-impl Program {
-    fn at(&self, name: &str) -> Option<&glow::UniformLocation> {
-        self.uniforms.get(name)
-    }
+    uniforms: U,
 }
 
 /// A colour buffer: its texture and the framebuffer object drawing into
@@ -126,6 +116,8 @@ fn sampling_filters(mode: u32, unfiltered: bool, anisotropy: Option<f32>) -> (u3
 /// A texture of the card's, and the sampling it was last set up for.
 struct GlTexture {
     texture: glow::Texture,
+    levels: Vec<(u32, u32)>,
+    level_count: usize,
     params: Option<[u32; 4]>,
     lod: Option<[f32; 2]>,
     anisotropy: Option<f32>,
@@ -153,15 +145,16 @@ pub struct VoodooGl {
     staging: HashMap<Option<u32>, Staging>,
     staging_texture: glow::Texture,
     textures: HashMap<u32, GlTexture>,
+    texture_bytes: Vec<u8>,
     /// The gamma table as 256 entries a component, and the table it is.
     lut: glow::Texture,
     lut_of: Option<[u32; 33]>,
     /// The picture shown, and its size.
     composite: Option<(Target, (u32, u32))>,
-    triangle: Program,
-    pixels: Program,
-    depth_program: Program,
-    clut_program: Program,
+    triangle: Program<Triangle>,
+    pixels: Program<Quad>,
+    depth_program: Program<Quad>,
+    clut_program: Program<Quad>,
     vao: glow::VertexArray,
     vbo: glow::Buffer,
     /// No attributes: the quads make their corners from the vertex number.
@@ -185,21 +178,22 @@ impl VoodooGl {
             return Err("OpenGL ES has no noperspective interpolation".to_string());
         }
         let attributes = [(0, "a_pos"), (1, "a_color"), (2, "a_zw"), (3, "a_tex0"), (4, "a_tex1")];
-        let triangle = compile(gl, glsl, TRIANGLE_VERT, TRIANGLE_FRAG, &attributes, TRIANGLE_UNIFORMS)?;
-        let pixels = compile(gl, glsl, QUAD_VERT, PIXELS_FRAG, &[], QUAD_UNIFORMS)?;
-        let depth_program = compile(gl, glsl, QUAD_VERT, DEPTH_FRAG, &[], QUAD_UNIFORMS)?;
-        let clut_program = compile(gl, glsl, QUAD_VERT, CLUT_FRAG, &[], QUAD_UNIFORMS)?;
+        let triangle: Program<Triangle> =
+            compile(gl, glsl, TRIANGLE_VERT, TRIANGLE_FRAG, &attributes)?;
+        let pixels: Program<Quad> = compile(gl, glsl, QUAD_VERT, PIXELS_FRAG, &[])?;
+        let depth_program: Program<Quad> = compile(gl, glsl, QUAD_VERT, DEPTH_FRAG, &[])?;
+        let clut_program: Program<Quad> = compile(gl, glsl, QUAD_VERT, CLUT_FRAG, &[])?;
         // SAFETY: see `VoodooGl`.
         unsafe {
             for (program, samplers) in [
-                (&triangle, &[("u_tex0", 1), ("u_tex1", 2)][..]),
-                (&pixels, &[("u_src", 0)][..]),
-                (&depth_program, &[("u_src", 0)][..]),
-                (&clut_program, &[("u_src", 0), ("u_lut", 1)][..]),
+                (triangle.program, &[("u_tex0", 1), ("u_tex1", 2)][..]),
+                (pixels.program, &[("u_src", 0)][..]),
+                (depth_program.program, &[("u_src", 0)][..]),
+                (clut_program.program, &[("u_src", 0), ("u_lut", 1)][..]),
             ] {
-                gl.use_program(Some(program.program));
+                gl.use_program(Some(program));
                 for &(name, unit) in samplers {
-                    gl.uniform_1_i32(gl.get_uniform_location(program.program, name).as_ref(), unit);
+                    gl.uniform_1_i32(gl.get_uniform_location(program, name).as_ref(), unit);
                 }
             }
             gl.use_program(None);
@@ -240,6 +234,7 @@ impl VoodooGl {
                 staging: HashMap::new(),
                 staging_texture,
                 textures: HashMap::new(),
+                texture_bytes: Vec::new(),
                 lut,
                 lut_of: None,
                 composite: None,
@@ -282,8 +277,13 @@ impl VoodooGl {
             }
             gl.delete_texture(self.staging_texture);
             gl.delete_texture(self.lut);
-            for program in [&self.triangle, &self.pixels, &self.depth_program, &self.clut_program] {
-                gl.delete_program(program.program);
+            for program in [
+                self.triangle.program,
+                self.pixels.program,
+                self.depth_program.program,
+                self.clut_program.program,
+            ] {
+                gl.delete_program(program);
             }
             gl.delete_vertex_array(self.vao);
             gl.delete_vertex_array(self.quad_vao);
@@ -477,9 +477,9 @@ impl VoodooGl {
                 gl.color_mask(false, false, false, false);
             }
             gl.use_program(Some(program.program));
-            gl.uniform_4_f32(program.at("u_rect"), x0 as f32, y0 as f32, x1 as f32, y1 as f32);
-            gl.uniform_2_f32(program.at("u_size"), self.width as f32, self.height as f32);
-            gl.uniform_1_f32(program.at("u_scale"), scale as f32);
+            program.uniforms.u_rect.set(gl, [x0 as f32, y0 as f32, x1 as f32, y1 as f32]);
+            program.uniforms.u_size.set(gl, [self.width as f32, self.height as f32]);
+            program.uniforms.u_scale.set(gl, scale as f32);
             gl.bind_vertex_array(Some(self.quad_vao));
             gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
         }
@@ -493,32 +493,67 @@ impl VoodooGl {
     fn upload(&mut self, gl: &glow::Context, texture: &Texture) {
         if let std::collections::hash_map::Entry::Vacant(e) = self.textures.entry(texture.id) {
             let Ok(t) = self::texture(gl, glow::NEAREST) else { return };
-            e.insert(GlTexture { texture: t, params: None, lod: None, anisotropy: None });
+            e.insert(GlTexture {
+                texture: t,
+                levels: Vec::new(),
+                level_count: 0,
+                params: None,
+                lod: None,
+                anisotropy: None,
+            });
         }
         let Some(entry) = self.textures.get_mut(&texture.id) else { return };
         // SAFETY: see `VoodooGl`.
         unsafe {
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(entry.texture));
-            for (i, level) in texture.levels.iter().enumerate() {
-                let bytes: Vec<u8> =
-                    level.argb.iter().flat_map(|&c| [(c >> 16) as u8, (c >> 8) as u8, c as u8, (c >> 24) as u8]).collect();
-                gl.tex_image_2d(
-                    glow::TEXTURE_2D,
-                    i as i32,
-                    glow::RGBA8 as i32,
-                    level.width as i32,
-                    level.height as i32,
-                    0,
-                    glow::RGBA,
-                    glow::UNSIGNED_BYTE,
-                    glow::PixelUnpackData::Slice(Some(&bytes)),
-                );
+            if entry.levels.len() < texture.levels.len() {
+                entry.levels.resize(texture.levels.len(), (0, 0));
             }
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_BASE_LEVEL, 0);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAX_LEVEL, texture.levels.len() as i32 - 1);
-            entry.params = None;
-            entry.lod = None;
+            for (i, level) in texture.levels.iter().enumerate() {
+                self.texture_bytes.clear();
+                self.texture_bytes.extend(
+                    level
+                        .argb
+                        .iter()
+                        .flat_map(|&c| [(c >> 16) as u8, (c >> 8) as u8, c as u8, (c >> 24) as u8]),
+                );
+                let size = (level.width, level.height);
+                if entry.levels[i] == size {
+                    gl.tex_sub_image_2d(
+                        glow::TEXTURE_2D,
+                        i as i32,
+                        0,
+                        0,
+                        level.width as i32,
+                        level.height as i32,
+                        glow::RGBA,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelUnpackData::Slice(Some(&self.texture_bytes)),
+                    );
+                } else {
+                    gl.tex_image_2d(
+                        glow::TEXTURE_2D,
+                        i as i32,
+                        glow::RGBA8 as i32,
+                        level.width as i32,
+                        level.height as i32,
+                        0,
+                        glow::RGBA,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelUnpackData::Slice(Some(&self.texture_bytes)),
+                    );
+                    entry.levels[i] = size;
+                }
+            }
+            if entry.level_count != texture.levels.len() {
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MAX_LEVEL,
+                    texture.levels.len() as i32 - 1,
+                );
+                entry.level_count = texture.levels.len();
+            }
         }
     }
 
@@ -568,27 +603,27 @@ impl VoodooGl {
             }
 
             gl.use_program(Some(p.program));
-            gl.uniform_2_f32(p.at("u_size"), self.width as f32, self.height as f32);
-            for (name, value) in [
-                ("u_fbzcp", s.fbz_color_path),
-                ("u_fbz", s.fbz_mode),
-                ("u_alpha", s.alpha_mode),
-                ("u_fog", s.fog_mode),
-                ("u_color0", s.color0),
-                ("u_color1", s.color1),
-                ("u_chroma", s.chroma_key),
-                ("u_chroma_range", s.chroma_range),
-                ("u_zacolor", s.za_color),
-                ("u_fogcolor", s.fog_color),
-                ("u_stipple", s.stipple),
-                ("u_yorigin", s.yorigin),
-                ("u_config", s.send_config.unwrap_or(0)),
+            p.uniforms.u_size.set(gl, [self.width as f32, self.height as f32]);
+            for (uniform, value) in [
+                (&p.uniforms.u_fbzcp, s.fbz_color_path),
+                (&p.uniforms.u_fbz, s.fbz_mode),
+                (&p.uniforms.u_alpha, s.alpha_mode),
+                (&p.uniforms.u_fog, s.fog_mode),
+                (&p.uniforms.u_color0, s.color0),
+                (&p.uniforms.u_color1, s.color1),
+                (&p.uniforms.u_chroma, s.chroma_key),
+                (&p.uniforms.u_chroma_range, s.chroma_range),
+                (&p.uniforms.u_zacolor, s.za_color),
+                (&p.uniforms.u_fogcolor, s.fog_color),
+                (&p.uniforms.u_stipple, s.stipple),
+                (&p.uniforms.u_yorigin, s.yorigin),
+                (&p.uniforms.u_config, s.send_config.unwrap_or(0)),
             ] {
-                gl.uniform_1_i32(p.at(name), value as i32);
+                uniform.set(gl, value as i32);
             }
-            gl.uniform_1_i32_slice(p.at("u_fogblend"), &s.fogblend.map(|v| v as i32));
-            gl.uniform_1_i32_slice(p.at("u_fogdelta"), &s.fogdelta.map(|v| v as i32));
-            gl.uniform_1_f32(p.at("u_scale"), scale);
+            p.uniforms.u_fogblend.set(gl, s.fogblend);
+            p.uniforms.u_fogdelta.set(gl, s.fogdelta);
+            p.uniforms.u_scale.set(gl, scale);
             let mut units = 0;
             for (unit, t) in s.tmu.iter().enumerate() {
                 let Some(t) = t else { continue };
@@ -619,21 +654,21 @@ impl VoodooGl {
                     gl.tex_parameter_f32(glow::TEXTURE_2D, glow::TEXTURE_MAX_LOD, lod[1]);
                     texture.lod = Some(lod);
                 }
-                let [mode, size, lods, detail] = if unit == 0 {
-                    ["u_tmode0", "u_tsize0", "u_tlod0", "u_tdetail0"]
-                } else {
-                    ["u_tmode1", "u_tsize1", "u_tlod1", "u_tdetail1"]
-                };
-                gl.uniform_1_i32(p.at(mode), t.mode as i32);
-                gl.uniform_3_f32(p.at(size), t.width as f32, t.height as f32, t.lodbias as f32 / 256.0);
-                gl.uniform_3_i32(p.at(lods), t.lodmin, t.lodmax, t.lodbias);
-                gl.uniform_3_i32(p.at(detail), t.detailbias, t.detailmax, t.detailscale as i32);
+                let u = &p.uniforms;
+                let (mode, size, lods, detail) = [
+                    (&u.u_tmode0, &u.u_tsize0, &u.u_tlod0, &u.u_tdetail0),
+                    (&u.u_tmode1, &u.u_tsize1, &u.u_tlod1, &u.u_tdetail1),
+                ][unit];
+                mode.set(gl, t.mode as i32);
+                size.set(gl, [t.width as f32, t.height as f32, t.lodbias as f32 / 256.0]);
+                lods.set(gl, [t.lodmin, t.lodmax, t.lodbias]);
+                detail.set(gl, [t.detailbias, t.detailmax, t.detailscale as i32]);
             }
             if s.send_config.is_some() && units & 1 != 0 {
                 units |= 4;
             }
-            gl.uniform_1_i32(p.at("u_units"), units);
-            gl.uniform_1_i32(p.at("u_constant_depth"), constant_depth as i32);
+            p.uniforms.u_units.set(gl, units);
+            p.uniforms.u_constant_depth.set(gl, constant_depth as i32);
 
             gl.bind_vertex_array(Some(self.vao));
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.vbo));
@@ -658,7 +693,7 @@ impl VoodooGl {
                     gl.depth_func(DEPTH_FUNCS[func]);
                     gl.depth_mask(false);
                     gl.color_mask(rgb, rgb, rgb, false);
-                    gl.uniform_1_i32(p.at("u_constant_depth"), 1);
+                    p.uniforms.u_constant_depth.set(gl, 1);
                     gl.draw_arrays(glow::TRIANGLES, first, 3);
 
                     gl.stencil_mask(0);
@@ -667,7 +702,7 @@ impl VoodooGl {
                     gl.depth_func(glow::ALWAYS);
                     gl.depth_mask(true);
                     gl.color_mask(false, false, false, false);
-                    gl.uniform_1_i32(p.at("u_constant_depth"), 0);
+                    p.uniforms.u_constant_depth.set(gl, 0);
                     gl.draw_arrays(glow::TRIANGLES, first, 3);
                 }
                 gl.disable(glow::STENCIL_TEST);
@@ -760,8 +795,8 @@ impl VoodooGl {
             gl.color_mask(true, true, true, true);
             let p = &self.clut_program;
             gl.use_program(Some(p.program));
-            gl.uniform_4_f32(p.at("u_rect"), 0.0, 0.0, self.width as f32, self.height as f32);
-            gl.uniform_2_f32(p.at("u_size"), self.width as f32, self.height as f32);
+            p.uniforms.u_rect.set(gl, [0.0, 0.0, self.width as f32, self.height as f32]);
+            p.uniforms.u_size.set(gl, [self.width as f32, self.height as f32]);
             gl.active_texture(glow::TEXTURE1);
             gl.bind_texture(glow::TEXTURE_2D, Some(self.lut));
             gl.active_texture(glow::TEXTURE0);
@@ -787,9 +822,9 @@ impl VoodooGl {
                 gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, nw, nh, glow::RGBA, glow::UNSIGNED_BYTE, pixels);
                 let p = &self.pixels;
                 gl.use_program(Some(p.program));
-                gl.uniform_4_f32(p.at("u_rect"), 0.0, 0.0, self.width as f32, self.height as f32);
-                gl.uniform_2_f32(p.at("u_size"), self.width as f32, self.height as f32);
-                gl.uniform_1_f32(p.at("u_scale"), self.scale as f32);
+                p.uniforms.u_rect.set(gl, [0.0, 0.0, self.width as f32, self.height as f32]);
+                p.uniforms.u_size.set(gl, [self.width as f32, self.height as f32]);
+                p.uniforms.u_scale.set(gl, self.scale as f32);
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             }
             restore(gl);
@@ -930,14 +965,13 @@ fn target(gl: &glow::Context, (w, h): (i32, i32), samples: u32, depth: Option<De
 
 /// Compile and link a program with its attributes at their locations, and
 /// find its uniforms.
-fn compile(
+fn compile<U: Locations>(
     gl: &glow::Context,
     glsl: Glsl,
     vertex: &str,
     fragment: &str,
     attributes: &[(u32, &str)],
-    uniforms: &[&'static str],
-) -> Result<Program, String> {
+) -> Result<Program<U>, String> {
     // SAFETY: see `VoodooGl`.
     unsafe {
         let program = gl.create_program()?;
@@ -972,21 +1006,92 @@ fn compile(
             gl.delete_program(program);
             return Err(problem);
         }
-        let mut found = HashMap::new();
-        for &name in uniforms {
-            let location =
-                gl.get_uniform_location(program, name).or_else(|| gl.get_uniform_location(program, &format!("{}[0]", name)));
-            if let Some(location) = location {
-                found.insert(name, location);
-            }
-        }
-        Ok(Program { program, uniforms: found })
+        Ok(Program { program, uniforms: U::resolve(gl, program) })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::sampling_filters;
+
+    #[test]
+    #[ignore = "requires a desktop OpenGL context"]
+    fn texture_updates_replace_pixels_and_resize_mip_storage() {
+        use super::*;
+        use crate::voodoo::mirror::Level;
+        let sdl = sdl2::init().unwrap();
+        let video = sdl.video().unwrap();
+        let attrs = video.gl_attr();
+        attrs.set_context_profile(sdl2::video::GLProfile::Core);
+        attrs.set_context_version(3, 3);
+        let window = video
+            .window("Texture regression", 8, 8)
+            .opengl()
+            .hidden()
+            .build()
+            .unwrap();
+        let _context = window.gl_create_context().unwrap();
+        // SAFETY: this thread owns the current SDL OpenGL context.
+        let gl = unsafe {
+            glow::Context::from_loader_function(|name| video.gl_get_proc_address(name).cast())
+        };
+        let mut renderer = VoodooGl::new(&gl, Glsl::Gl150, 1, 1, 1).unwrap();
+        for (width, height, count, color) in [
+            (4, 4, 2, 0xFF11_2233u32),
+            (4, 4, 2, 0x8044_5566),
+            (2, 2, 1, 0x4077_8899),
+            (4, 4, 2, 0xFFAA_BBCC),
+        ] {
+            let levels: Vec<_> = (0..count)
+                .map(|i| Level {
+                    width: width >> i,
+                    height: height >> i,
+                    argb: vec![color; ((width >> i) * (height >> i)) as usize],
+                })
+                .collect();
+            renderer.upload(
+                &gl,
+                &Texture {
+                    id: 7,
+                    levels: levels.clone(),
+                },
+            );
+            let entry = &renderer.textures[&7];
+            // SAFETY: the context and texture belong to this thread.
+            unsafe {
+                gl.bind_texture(glow::TEXTURE_2D, Some(entry.texture));
+                assert_eq!(
+                    gl.get_tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAX_LEVEL),
+                    count - 1
+                );
+                for (i, level) in levels.iter().enumerate() {
+                    let mut pixels = vec![0; (level.width * level.height * 4) as usize];
+                    gl.get_tex_image(
+                        glow::TEXTURE_2D,
+                        i as i32,
+                        glow::RGBA,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelPackData::Slice(Some(&mut pixels)),
+                    );
+                    let expected = [
+                        (color >> 16) as u8,
+                        (color >> 8) as u8,
+                        color as u8,
+                        (color >> 24) as u8,
+                    ];
+                    assert!(
+                        pixels
+                            .as_chunks::<4>()
+                            .0
+                            .iter()
+                            .all(|pixel| *pixel == expected)
+                    );
+                }
+                assert_eq!(gl.get_error(), glow::NO_ERROR);
+            }
+        }
+        renderer.destroy(&gl);
+    }
 
     #[test]
     #[ignore = "requires a desktop OpenGL context"]
@@ -1047,6 +1152,7 @@ mod tests {
 
     /// Replay a saved Glide scene without changing the running game.
     /// RUST_DOS_VOODOO_STATE selects the state; images go under target/tmp.
+    /// RUST_DOS_VOODOO_DRIVE_C redirects its C: image to a scratch disk.
     #[test]
     #[ignore = "requires a saved Glide scene and a desktop OpenGL context"]
     fn replay_saved_glide_scene() {
@@ -1061,6 +1167,9 @@ mod tests {
         let settings = slots::machine_settings(&header.machine, &Default::default());
         let mut cpu = Cpu::with_memory(PathBuf::from("."), header.memsize);
         crate::hardware::configure(&mut cpu, &settings, crate::keylayout::Layout::us());
+        if let Some(image) = std::env::var_os("RUST_DOS_VOODOO_DRIVE_C") {
+            cpu.bus.disk.folders_from_state.push((crate::disk::DRIVE_C, image.into()));
+        }
         // A booted system's state wants its disk as it was: a copy beside it.
         crate::savestate::disks::offer_copies(&mut cpu, std::path::Path::new(&path));
         machine::load(&mut cpu, &state).unwrap();
