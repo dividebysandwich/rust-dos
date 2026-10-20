@@ -26,8 +26,8 @@ use super::window::{
     WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_VISIBLE, WS_VSCROLL,
 };
 use super::{
-    DESKTOP, ERROR_INVALID_PARAMETER, ERROR_INVALID_WINDOW_HANDLE, FALSE, State, TRUE,
-    address_of, current_tid, read_words, set_error, string_at, user, write_words,
+    DESKTOP, ERROR_INVALID_PARAMETER, ERROR_INVALID_WINDOW_HANDLE, FALSE, State, TRUE, address_of,
+    current_tid, read_words, set_error, string_at, user, write_words,
 };
 use crate::cpu::Cpu;
 use crate::win32::gdi32::{self, Rect};
@@ -210,10 +210,10 @@ fn vk_of(scan: u8, extended: bool, num_lock: bool) -> usize {
     const MAIN: [u8; 0x59] = [
         0, 0x1B, b'1', b'2', b'3', b'4', b'5', b'6', b'7', b'8', b'9', b'0', 0xBD, 0xBB, 0x08,
         0x09, b'Q', b'W', b'E', b'R', b'T', b'Y', b'U', b'I', b'O', b'P', 0xDB, 0xDD, 0x0D, 0x11,
-        b'A', b'S', b'D', b'F', b'G', b'H', b'J', b'K', b'L', 0xBA, 0xDE, 0xC0, 0x10, 0xDC,
-        b'Z', b'X', b'C', b'V', b'B', b'N', b'M', 0xBC, 0xBE, 0xBF, 0x10, 0x6A, 0x12, 0x20, 0x14,
-        0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x90, 0x91, 0x24, 0x26, 0x21,
-        0x6D, 0x25, 0x0C, 0x27, 0x6B, 0x23, 0x28, 0x22, 0x2D, 0x2E, 0, 0, 0xE2, 0x7A, 0x7B,
+        b'A', b'S', b'D', b'F', b'G', b'H', b'J', b'K', b'L', 0xBA, 0xDE, 0xC0, 0x10, 0xDC, b'Z',
+        b'X', b'C', b'V', b'B', b'N', b'M', 0xBC, 0xBE, 0xBF, 0x10, 0x6A, 0x12, 0x20, 0x14, 0x70,
+        0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x90, 0x91, 0x24, 0x26, 0x21, 0x6D,
+        0x25, 0x0C, 0x27, 0x6B, 0x23, 0x28, 0x22, 0x2D, 0x2E, 0, 0, 0xE2, 0x7A, 0x7B,
     ];
     if extended {
         return match scan {
@@ -352,7 +352,10 @@ fn poll_keyboard(cpu: &mut Cpu) {
     let mut events = Vec::new();
     // It runs at each wake of the threads: most often no key changed.
     for id in (0..512).filter(|id| held[id / 64] != before[id / 64]) {
-        let (was, is) = (before[id / 64] >> (id % 64) & 1, held[id / 64] >> (id % 64) & 1);
+        let (was, is) = (
+            before[id / 64] >> (id % 64) & 1,
+            held[id / 64] >> (id % 64) & 1,
+        );
         if was != is {
             events.push((id, is != 0));
         }
@@ -526,7 +529,10 @@ fn poll_mouse(cpu: &mut Cpu) {
 fn clipped(input: &Input, x: i32, y: i32) -> (i32, i32) {
     let (w, h) = screen_size();
     let r = input.clip.unwrap_or(Rect::new(0, 0, w, h));
-    (x.clamp(r.left, (r.right - 1).max(r.left)), y.clamp(r.top, (r.bottom - 1).max(r.top)))
+    (
+        x.clamp(r.left, (r.right - 1).max(r.left)),
+        y.clamp(r.top, (r.bottom - 1).max(r.top)),
+    )
 }
 
 /// The mouse button `b` (left, right, middle) went down or up.
@@ -614,9 +620,17 @@ fn mouse_event_at(cpu: &mut Cpu, message: u32, _button: u32) {
     }
     let (wparam, lparam, message) = if client {
         let (cx, cy) = state.client_origin(hwnd);
-        (mk_flags(&state.input), super::make_long(x - cx, y - cy), message)
+        (
+            mk_flags(&state.input),
+            super::make_long(x - cx, y - cy),
+            message,
+        )
     } else {
-        (hit, super::make_long(x, y), message - WM_MOUSEMOVE + WM_NCMOUSEMOVE)
+        (
+            hit,
+            super::make_long(x, y),
+            message - WM_MOUSEMOVE + WM_NCMOUSEMOVE,
+        )
     };
     let bit = if message == WM_MOUSEMOVE || message == WM_NCMOUSEMOVE {
         QS_MOUSEMOVE
@@ -1014,17 +1028,22 @@ fn activate_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                     state.input.foreground = 0;
                 }
                 // The window comes to the top.
-                let first = state
-                    .top_levels()
-                    .into_iter()
-                    .find(|&h| {
-                        state.window(h).is_some_and(|w| {
-                            w.ex_style & WS_EX_TOPMOST == 0 || h == hwnd
-                        })
-                    });
+                let first = state.top_levels().into_iter().find(|&h| {
+                    state
+                        .window(h)
+                        .is_some_and(|w| w.ex_style & WS_EX_TOPMOST == 0 || h == hwnd)
+                });
                 let is_top = state.window(hwnd).is_some_and(|w| w.style & WS_CHILD == 0);
                 if hwnd != 0 && is_top && first != Some(hwnd) {
-                    let args = [hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE];
+                    let args = [
+                        hwnd,
+                        HWND_TOP,
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE,
+                    ];
                     return Next::call(address_of("SetWindowPos"), &args, 3);
                 }
                 t.step = 3;
@@ -1133,7 +1152,11 @@ pub fn activate_other_window(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let next = if owner != 0 && usable(owner) {
         owner
     } else {
-        state.top_levels().into_iter().find(|&h| usable(h)).unwrap_or(0)
+        state
+            .top_levels()
+            .into_iter()
+            .find(|&h| usable(h))
+            .unwrap_or(0)
     };
     task::start(cpu, TASK_INPUT, vec![K_OTHER, next, 0], 0)
 }
@@ -1156,7 +1179,12 @@ pub fn set_capture(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let previous = state.input.capture;
     state.input.capture = hwnd;
     if previous != 0 && previous != hwnd && state.is_window(previous) {
-        return task::start(cpu, TASK_INPUT, vec![K_CAPTURE, previous, hwnd, previous], 0);
+        return task::start(
+            cpu,
+            TASK_INPUT,
+            vec![K_CAPTURE, previous, hwnd, previous],
+            0,
+        );
     }
     Some(own(cpu, previous))
 }
@@ -1420,7 +1448,11 @@ pub fn translate_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(tid) = user(cpu).window(m.hwnd).map(|w| w.tid) else {
         return Some(TRUE);
     };
-    let message = if m.message == WM_KEYDOWN { WM_CHAR } else { WM_SYSCHAR };
+    let message = if m.message == WM_KEYDOWN {
+        WM_CHAR
+    } else {
+        WM_SYSCHAR
+    };
     message::post(
         cpu,
         tid,
@@ -1622,7 +1654,11 @@ pub fn clip_cursor(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 pub fn get_clip_cursor(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (w, h) = screen_size();
     let r = user(cpu).input.clip.unwrap_or(Rect::new(0, 0, w, h));
-    write_words(cpu, args[0], &[r.left as u32, r.top as u32, r.right as u32, r.bottom as u32]);
+    write_words(
+        cpu,
+        args[0],
+        &[r.left as u32, r.top as u32, r.right as u32, r.bottom as u32],
+    );
     Some(TRUE)
 }
 
@@ -1666,7 +1702,17 @@ fn toggle_caret(cpu: &mut Cpu) {
         let mem = gdi32::dc::create_compatible_dc(cpu, &[hdc]).unwrap_or(0);
         if mem != 0 {
             gdi32::dc::select_object(cpu, &[mem, c.bitmap]);
-            let args = [hdc, r.left as u32, r.top as u32, c.width as u32, c.height as u32, mem, 0, 0, 0x0066_0046];
+            let args = [
+                hdc,
+                r.left as u32,
+                r.top as u32,
+                c.width as u32,
+                c.height as u32,
+                mem,
+                0,
+                0,
+                0x0066_0046,
+            ];
             gdi32::draw::bit_blt(cpu, &args);
             gdi32::dc::delete_dc(cpu, &[mem]);
         }
@@ -1858,7 +1904,12 @@ pub fn get_clipboard_data(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(0);
     }
     let clip = &user(cpu).clipboard;
-    Some(clip.formats.iter().find(|f| f.0 == args[0]).map_or(0, |f| f.1))
+    Some(
+        clip.formats
+            .iter()
+            .find(|f| f.0 == args[0])
+            .map_or(0, |f| f.1),
+    )
 }
 
 /// IsClipboardFormatAvailable(format).

@@ -138,7 +138,14 @@ const SERIF_FACE: usize = 4;
 const COURIER_FACE: usize = 5;
 
 /// A LOGFONTA, 60 bytes.
-pub fn logfont(height: i32, width: i32, weight: i32, charset: u8, pitch: u8, face: &str) -> Vec<u8> {
+pub fn logfont(
+    height: i32,
+    width: i32,
+    weight: i32,
+    charset: u8,
+    pitch: u8,
+    face: &str,
+) -> Vec<u8> {
     let mut b = vec![0u8; 60];
     b[0..4].copy_from_slice(&height.to_le_bytes());
     b[4..8].copy_from_slice(&width.to_le_bytes());
@@ -185,7 +192,10 @@ impl Log {
 
 /// The face a logical font gets.
 fn choose_face(log: &Log) -> usize {
-    if let Some(i) = FACES.iter().position(|f| f.name.eq_ignore_ascii_case(&log.face)) {
+    if let Some(i) = FACES
+        .iter()
+        .position(|f| f.name.eq_ignore_ascii_case(&log.face))
+    {
         return i;
     }
     if log.charset == OEM_CHARSET {
@@ -575,7 +585,12 @@ pub fn create_font(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         let end = name.iter().position(|&c| c == 0).unwrap_or(31).min(31);
         b[28..28 + end].copy_from_slice(&name[..end]);
     }
-    Some(add(cpu, Kind::Font { font: Font { log: b } }))
+    Some(add(
+        cpu,
+        Kind::Font {
+            font: Font { log: b },
+        },
+    ))
 }
 
 /// CreateFontIndirectA(logfont).
@@ -591,7 +606,12 @@ pub fn create_font_indirect(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     // The face name ends within its 32 bytes.
     b[59] = 0;
-    Some(add(cpu, Kind::Font { font: Font { log: b } }))
+    Some(add(
+        cpu,
+        Kind::Font {
+            font: Font { log: b },
+        },
+    ))
 }
 
 /// GetTextMetricsA(hdc, metrics).
@@ -664,7 +684,14 @@ pub fn get_text_extent_ex_point(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if dx != 0 {
         write_words(cpu, dx, &extents);
     }
-    write_size(cpu, size, (to_logical_width(&dc, total), to_logical_height(&dc, f.height)));
+    write_size(
+        cpu,
+        size,
+        (
+            to_logical_width(&dc, total),
+            to_logical_height(&dc, f.height),
+        ),
+    );
     Some(TRUE)
 }
 
@@ -752,7 +779,11 @@ pub fn draw_text(
         c.fill(within(r.offset(ox, oy)), &Fill::Solid(bk), dc::R2_COPYPEN);
     }
     if dc.attrs.bk_mode == OPAQUE {
-        c.fill(within(text_box.offset(ox, oy)), &Fill::Solid(bk), dc::R2_COPYPEN);
+        c.fill(
+            within(text_box.offset(ox, oy)),
+            &Fill::Solid(bk),
+            dc::R2_COPYPEN,
+        );
     }
     let allowed = |x: i32, y: i32| clip.is_none_or(|r| r.contains(x, y));
     let mut gx = left + ox;
@@ -919,10 +950,7 @@ pub fn get_text_charset_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         None => return Some(DEFAULT_CHARSET as u32),
     };
     if args[1] != 0 {
-        let csb = CHARSETS
-            .iter()
-            .find(|c| c.0 == charset)
-            .map_or(0, |c| c.2);
+        let csb = CHARSETS.iter().find(|c| c.0 == charset).map_or(0, |c| c.2);
         write_words(cpu, args[1], &[0, 0, 0, 0, csb, 0]);
     }
     Some(charset as u32)
@@ -1128,7 +1156,14 @@ pub fn enum_callback(cpu: &mut Cpu, t: &mut Task, at: usize) -> Next {
     t.set(CB_AT, at as u32 + 1);
     let face = &FACES[(item & 0xFF) as usize % FACES.len()];
     let charset = (item >> 8) as u8;
-    let mut log_bytes = logfont(face.cell, 0, face.weight, charset, face.pitch_family, face.name);
+    let mut log_bytes = logfont(
+        face.cell,
+        0,
+        face.weight,
+        charset,
+        face.pitch_family,
+        face.name,
+    );
     log_bytes[24] = 1; // OUT_STRING_PRECIS
     log_bytes[25] = 2; // CLIP_STROKE_PRECIS
     log_bytes[26] = 2; // PROOF_QUALITY

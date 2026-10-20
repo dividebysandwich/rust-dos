@@ -109,9 +109,19 @@ fn keep(cpu: &mut Cpu, handle: u32) {
 
 /// An icon or cursor of `w` by `h` from its pixels: None is transparent,
 /// a color is drawn. `mono` makes a monochrome one.
-fn icon_of(cpu: &mut Cpu, w: i32, h: i32, mono: bool, pixel: &dyn Fn(i32, i32) -> Option<u32>) -> Icon {
+fn icon_of(
+    cpu: &mut Cpu,
+    w: i32,
+    h: i32,
+    mono: bool,
+    pixel: &dyn Fn(i32, i32) -> Option<u32>,
+) -> Icon {
     let mask = bitmap::new_ddb(cpu, w, if mono { 2 * h } else { h }, 1);
-    let color = if mono { 0 } else { bitmap::new_ddb(cpu, w, h, 32) };
+    let color = if mono {
+        0
+    } else {
+        bitmap::new_ddb(cpu, w, h, 32)
+    };
     if let Some(mut m) = Surface::load_all(cpu, Target::Bitmap(mask)) {
         for y in 0..h {
             for x in 0..w {
@@ -195,13 +205,17 @@ fn cursor_pixel(id: u32, x: i32, y: i32) -> Option<u32> {
         // IDC_CROSS.
         32515 => ((x == 15 && y < 31) || (y == 15 && x < 31)).then_some(0),
         // IDC_SIZEWE, IDC_SIZENS, IDC_SIZEALL: lines with ends.
-        32644 => (y == 15 && (4..28).contains(&x) || (x - 4).abs() + (y - 15).abs() < 4 && x >= 4
+        32644 => (y == 15 && (4..28).contains(&x)
+            || (x - 4).abs() + (y - 15).abs() < 4 && x >= 4
             || (x - 27).abs() + (y - 15).abs() < 4 && x <= 27)
             .then_some(0),
-        32645 => (x == 15 && (4..28).contains(&y) || (y - 4).abs() + (x - 15).abs() < 4 && y >= 4
+        32645 => (x == 15 && (4..28).contains(&y)
+            || (y - 4).abs() + (x - 15).abs() < 4 && y >= 4
             || (y - 27).abs() + (x - 15).abs() < 4 && y <= 27)
             .then_some(0),
-        32646 => ((x == 15 && (2..30).contains(&y)) || (y == 15 && (2..30).contains(&x))).then_some(0),
+        32646 => {
+            ((x == 15 && (2..30).contains(&y)) || (y == 15 && (2..30).contains(&x))).then_some(0)
+        }
         // IDC_WAIT: an hourglass.
         32514 => {
             let (cx, top, bottom) = (15, 4, 27);
@@ -223,7 +237,8 @@ fn cursor_pixel(id: u32, x: i32, y: i32) -> Option<u32> {
         // IDC_NO: a ring.
         32648 => {
             let d = ((x - 15) * (x - 15) + (y - 15) * (y - 15)) as f64;
-            (d.sqrt() > 9.0 && d.sqrt() < 12.0 || (x - y).abs() < 2 && (6..25).contains(&x)).then_some(0)
+            (d.sqrt() > 9.0 && d.sqrt() < 12.0 || (x - y).abs() < 2 && (6..25).contains(&x))
+                .then_some(0)
         }
         _ => art(&ARROW, x, y),
     }
@@ -253,12 +268,20 @@ fn icon_pixel(id: u32, x: i32, y: i32) -> Option<u32> {
         // IDI_HAND: a red disc with a white cross.
         32513 => {
             let cross = ((x - y).abs() < 2 || (x + y - 30).abs() < 2) && (8..23).contains(&x);
-            if cross && disc(0).is_some() { Some(0xFF_FFFF) } else { disc(0x00_00FF) }
+            if cross && disc(0).is_some() {
+                Some(0xFF_FFFF)
+            } else {
+                disc(0x00_00FF)
+            }
         }
         // IDI_QUESTION, IDI_ASTERISK: a disc with a mark.
         32514 | 32516 => {
             let mark = (14..=16).contains(&x) && (y == 8 || y == 9 || (12..23).contains(&y));
-            if mark { Some(0xFF_FFFF) } else { disc(if id == 32514 { 0x80_0000 } else { 0xFF_0000 }) }
+            if mark {
+                Some(0xFF_FFFF)
+            } else {
+                disc(if id == 32514 { 0x80_0000 } else { 0xFF_0000 })
+            }
         }
         // IDI_EXCLAMATION: a yellow triangle with a mark.
         32515 => {
@@ -267,7 +290,11 @@ fn icon_pixel(id: u32, x: i32, y: i32) -> Option<u32> {
                 return None;
             }
             let mark = (x - 15).abs() < 2 && ((9..21).contains(&y) || (24..27).contains(&y));
-            Some(if mark || (x - 15).abs() == half || y == 29 { 0 } else { 0x00_FFFF })
+            Some(if mark || (x - 15).abs() == half || y == 29 {
+                0
+            } else {
+                0x00_FFFF
+            })
         }
         // IDI_APPLICATION, IDI_WINLOGO: a window.
         _ => {
@@ -370,7 +397,10 @@ fn from_bits(cpu: &mut Cpu, at: u32, size: u32, is_icon: bool) -> Option<Icon> {
     let and = bitmap::read_dib(cpu, &mask_info, and_at, 0, h as u32);
     let mono = info.bpp == 1
         && info.colors.first() == Some(&0)
-        && info.colors.get(1).is_some_and(|&c| c & 0xFF_FFFF == 0xFF_FFFF);
+        && info
+            .colors
+            .get(1)
+            .is_some_and(|&c| c & 0xFF_FFFF == 0xFF_FFFF);
     let pixel = |x: i32, y: i32| {
         let transparent = and.as_ref().is_some_and(|a| a.get(x, y) != 0);
         let c = xor.color_of(xor.get(x, y));
@@ -441,7 +471,11 @@ fn best_entry(cpu: &mut Cpu, dir: u32, is_icon: bool, cx: i32, cy: i32, flags: u
         };
         let id = u16::from_le_bytes([b[12], b[13]]) as u32;
         let size_off = (w - cx).abs() + (h - cy).abs();
-        let depth_off = if bpp > want_bpp { 1000 + bpp } else { want_bpp - bpp };
+        let depth_off = if bpp > want_bpp {
+            1000 + bpp
+        } else {
+            want_bpp - bpp
+        };
         let better = match best {
             None => true,
             Some((s, d, _)) => size_off < s || (size_off == s && depth_off < d),
@@ -460,7 +494,13 @@ pub fn lookup_icon_id_from_directory(cpu: &mut Cpu, args: &[u32]) -> Option<u32>
 
 /// LookupIconIdFromDirectoryEx(dir, icon, cx, cy, flags).
 pub fn lookup_icon_id_from_directory_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let (dir, is_icon, cx, cy, flags) = (args[0], args[1] != 0, args[2] as i32, args[3] as i32, args[4]);
+    let (dir, is_icon, cx, cy, flags) = (
+        args[0],
+        args[1] != 0,
+        args[2] as i32,
+        args[3] as i32,
+        args[4],
+    );
     if dir == 0 {
         return Some(0);
     }
@@ -493,7 +533,15 @@ pub fn create_icon_from_resource_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> 
 
 /// Load an icon or cursor from the resources of `module`, the best of
 /// its group for `cx` by `cy`: 0 with the error set if it isn't there.
-fn load_from_module(cpu: &mut Cpu, module: u32, name: u32, is_icon: bool, cx: i32, cy: i32, flags: u32) -> Option<u32> {
+fn load_from_module(
+    cpu: &mut Cpu,
+    module: u32,
+    name: u32,
+    is_icon: bool,
+    cx: i32,
+    cy: i32,
+    flags: u32,
+) -> Option<u32> {
     let shared = flags & LR_SHARED != 0;
     if shared {
         let found = user(cpu).icons.iter().position(|i| {
@@ -505,7 +553,11 @@ fn load_from_module(cpu: &mut Cpu, module: u32, name: u32, is_icon: bool, cx: i3
             return Some(ICON_BASE + STEP * i as u32);
         }
     }
-    let group = if is_icon { RT_GROUP_ICON } else { RT_GROUP_CURSOR };
+    let group = if is_icon {
+        RT_GROUP_ICON
+    } else {
+        RT_GROUP_CURSOR
+    };
     let (dir, _) = match kernel32::resource_data(cpu, module, group, name)? {
         Ok(found) => found,
         Err(_) => {
@@ -585,7 +637,11 @@ fn packed_bits(cpu: &mut Cpu, at: u32) -> Option<(bitmap::DibInfo, u32)> {
 /// A bitmap from the packed DIB at `at`: one of GDI's, or a DIB section.
 fn bitmap_from_dib(cpu: &mut Cpu, at: u32, dib_section: bool) -> Option<u32> {
     let Some((info, bits)) = packed_bits(cpu, at) else {
-        return if cpu.bus.guest_faulted() { None } else { Some(0) };
+        return if cpu.bus.guest_faulted() {
+            None
+        } else {
+            Some(0)
+        };
     };
     if dib_section {
         let h = bitmap::create_dib_section(cpu, &[0, at, 0, 0, 0, 0])?;
@@ -663,7 +719,8 @@ pub fn load_image(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                         bitmap_from_dib(cpu, info_at, true)
                     } else {
                         let screen = super::paint::window_dc(cpu, super::DESKTOP, 0, None);
-                        let h = bitmap::create_di_bitmap(cpu, &[screen, info_at, 4, bits, info_at, 0]);
+                        let h =
+                            bitmap::create_di_bitmap(cpu, &[screen, info_at, 4, bits, info_at, 0]);
                         super::paint::release_dc(cpu, &[0, screen]);
                         h
                     }
@@ -728,7 +785,11 @@ pub fn load_image(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         IMAGE_ICON | IMAGE_CURSOR => {
             let is_icon = kind == IMAGE_ICON;
             if module == 0 {
-                return if is_icon { load_icon(cpu, &[0, name]) } else { load_cursor(cpu, &[0, name]) };
+                return if is_icon {
+                    load_icon(cpu, &[0, name])
+                } else {
+                    load_cursor(cpu, &[0, name])
+                };
             }
             load_from_module(cpu, module, name_key(name), is_icon, cx, cy, flags)
         }
@@ -848,9 +909,17 @@ pub fn create_icon_indirect(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         width: m.width,
         height,
         cursor: !is_icon,
-        hotspot: if is_icon { (m.width / 2, height / 2) } else { (hx, hy) },
+        hotspot: if is_icon {
+            (m.width / 2, height / 2)
+        } else {
+            (hx, hy)
+        },
         mask: copy_bitmap(cpu, mask),
-        color: if color != 0 { copy_bitmap(cpu, color) } else { 0 },
+        color: if color != 0 {
+            copy_bitmap(cpu, color)
+        } else {
+            0
+        },
         pid: current_pid(cpu),
         ..Icon::default()
     };
@@ -890,7 +959,11 @@ pub fn copy_icon(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
     let copy = Icon {
         mask: copy_bitmap(cpu, ic.mask),
-        color: if ic.color != 0 { copy_bitmap(cpu, ic.color) } else { 0 },
+        color: if ic.color != 0 {
+            copy_bitmap(cpu, ic.color)
+        } else {
+            0
+        },
         shared: false,
         pid: current_pid(cpu),
         ..ic
@@ -905,7 +978,11 @@ pub fn get_icon_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(FALSE);
     };
     let mask = copy_bitmap(cpu, ic.mask);
-    let color = if ic.color != 0 { copy_bitmap(cpu, ic.color) } else { 0 };
+    let color = if ic.color != 0 {
+        copy_bitmap(cpu, ic.color)
+    } else {
+        0
+    };
     let words = [
         !ic.cursor as u32,
         ic.hotspot.0 as u32,
@@ -932,13 +1009,28 @@ pub fn copy_image(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 copy_bitmap(cpu, image)
             } else {
                 // A copy of another size: stretched.
-                let (w, h) = (if cx == 0 { b.width } else { cx }, if cy == 0 { b.height } else { cy });
+                let (w, h) = (
+                    if cx == 0 { b.width } else { cx },
+                    if cy == 0 { b.height } else { cy },
+                );
                 let new = bitmap::new_ddb(cpu, w, h, (b.bpp * b.planes).max(1));
                 let src = gdi32::dc::create_compatible_dc(cpu, &[0])?;
                 let dst = gdi32::dc::create_compatible_dc(cpu, &[0])?;
                 gdi32::dc::select_object(cpu, &[src, image]);
                 gdi32::dc::select_object(cpu, &[dst, new]);
-                let a = [dst, 0, 0, w as u32, h as u32, src, 0, 0, b.width as u32, b.height as u32, 0x00CC_0020];
+                let a = [
+                    dst,
+                    0,
+                    0,
+                    w as u32,
+                    h as u32,
+                    src,
+                    0,
+                    0,
+                    b.width as u32,
+                    b.height as u32,
+                    0x00CC_0020,
+                ];
                 gdi32::draw::stretch_blt(cpu, &a);
                 gdi32::dc::delete_dc(cpu, &[src]);
                 gdi32::dc::delete_dc(cpu, &[dst]);
@@ -999,7 +1091,11 @@ pub fn load_string(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     let bytes: Vec<u8> = units
         .iter()
-        .map(|&c| crate::win32::convert::CodePage::Ansi.byte(c).unwrap_or(b'?'))
+        .map(|&c| {
+            crate::win32::convert::CodePage::Ansi
+                .byte(c)
+                .unwrap_or(b'?')
+        })
         .collect();
     if size == 0 {
         return Some(0);

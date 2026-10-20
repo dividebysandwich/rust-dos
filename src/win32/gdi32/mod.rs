@@ -458,13 +458,12 @@ pub fn init(cpu: &mut Cpu) {
             ..Pen::default()
         },
     };
-    let font = |height: i32, width: i32, weight: i32, charset: u8, pitch: u8, face: &str| {
-        Kind::Font {
+    let font =
+        |height: i32, width: i32, weight: i32, charset: u8, pitch: u8, face: &str| Kind::Font {
             font: Font {
                 log: font::logfont(height, width, weight, charset, pitch, face),
             },
-        }
-    };
+        };
     let mut stock: Vec<Option<Kind>> = vec![
         Some(solid(0xFFFFFF)),
         Some(solid(0xC0C0C0)),
@@ -694,7 +693,13 @@ fn get_object_as(cpu: &mut Cpu, args: &[u32], wide: bool) -> Option<u32> {
     };
     let bytes: Vec<u8> = match &object.kind {
         Kind::Pen { pen } if pen.ext => {
-            let mut b = le(&[pen.style, pen.width as u32, pen.brush_style, pen.color, pen.hatch]);
+            let mut b = le(&[
+                pen.style,
+                pen.width as u32,
+                pen.brush_style,
+                pen.color,
+                pen.hatch,
+            ]);
             b.extend(le(&[pen.dashes.len() as u32]));
             b.extend(le(&pen.dashes));
             // An extended pen comes whole or not at all.
@@ -718,10 +723,7 @@ fn get_object_as(cpu: &mut Cpu, args: &[u32], wide: bool) -> Option<u32> {
         Kind::Font { font } => {
             if wide {
                 let mut b = font.log[..28].to_vec();
-                let face: Vec<u8> = font.log[28..60]
-                    .iter()
-                    .flat_map(|&c| [c, 0])
-                    .collect();
+                let face: Vec<u8> = font.log[28..60].iter().flat_map(|&c| [c, 0]).collect();
                 b.extend(face);
                 b
             } else {
@@ -1115,7 +1117,12 @@ pub fn enum_objects(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// LineDDA(x1, y1, x2, y2, proc, param): the callback for each point of
 /// the line but its last.
 pub fn line_dda(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let (x1, y1, x2, y2) = (args[0] as i32, args[1] as i32, args[2] as i32, args[3] as i32);
+    let (x1, y1, x2, y2) = (
+        args[0] as i32,
+        args[1] as i32,
+        args[2] as i32,
+        args[3] as i32,
+    );
     let mut vars = vec![CB_LINE_DDA, args[4], args[5], 0];
     let points = draw::line_points(x1, y1, x2, y2);
     for (x, y) in points.into_iter().take(0x4000) {
@@ -1163,7 +1170,12 @@ static APIS: &[Api] = &[
     stdcall("CreatePatternBrush", 15, 1, create_pattern_brush),
     stdcall("CreateBrushIndirect", 16, 1, create_brush_indirect),
     stdcall("CreateDIBPatternBrush", 17, 2, create_dib_pattern_brush),
-    stdcall("CreateDIBPatternBrushPt", 18, 2, create_dib_pattern_brush_pt),
+    stdcall(
+        "CreateDIBPatternBrushPt",
+        18,
+        2,
+        create_dib_pattern_brush_pt,
+    ),
     stdcall("SetBrushOrgEx", 19, 4, dc::set_brush_org_ex),
     stdcall("GetBrushOrgEx", 20, 2, dc::get_brush_org_ex),
     // Device contexts.
@@ -1234,9 +1246,19 @@ static APIS: &[Api] = &[
     stdcall("SelectClipPath", 84, 2, draw::select_clip_path),
     // Regions.
     stdcall("CreateRectRgn", 85, 4, rgn::create_rect_rgn),
-    stdcall("CreateRectRgnIndirect", 86, 1, rgn::create_rect_rgn_indirect),
+    stdcall(
+        "CreateRectRgnIndirect",
+        86,
+        1,
+        rgn::create_rect_rgn_indirect,
+    ),
     stdcall("CreateEllipticRgn", 87, 4, rgn::create_elliptic_rgn),
-    stdcall("CreateEllipticRgnIndirect", 88, 1, rgn::create_elliptic_rgn_indirect),
+    stdcall(
+        "CreateEllipticRgnIndirect",
+        88,
+        1,
+        rgn::create_elliptic_rgn_indirect,
+    ),
     stdcall("CreateRoundRectRgn", 89, 6, rgn::create_round_rect_rgn),
     stdcall("CreatePolygonRgn", 90, 3, rgn::create_polygon_rgn),
     stdcall("CreatePolyPolygonRgn", 91, 4, rgn::create_poly_polygon_rgn),
@@ -1285,9 +1307,24 @@ static APIS: &[Api] = &[
     stdcall("GdiGetBatchLimit", 133, 0, batch_limit),
     // Bitmaps.
     stdcall("CreateBitmap", 134, 5, bitmap::create_bitmap),
-    stdcall("CreateBitmapIndirect", 135, 1, bitmap::create_bitmap_indirect),
-    stdcall("CreateCompatibleBitmap", 136, 3, bitmap::create_compatible_bitmap),
-    stdcall("CreateDiscardableBitmap", 137, 3, bitmap::create_compatible_bitmap),
+    stdcall(
+        "CreateBitmapIndirect",
+        135,
+        1,
+        bitmap::create_bitmap_indirect,
+    ),
+    stdcall(
+        "CreateCompatibleBitmap",
+        136,
+        3,
+        bitmap::create_compatible_bitmap,
+    ),
+    stdcall(
+        "CreateDiscardableBitmap",
+        137,
+        3,
+        bitmap::create_compatible_bitmap,
+    ),
     stdcall("CreateDIBitmap", 138, 6, bitmap::create_di_bitmap),
     stdcall("CreateDIBSection", 139, 6, bitmap::create_dib_section),
     stdcall("GetBitmapBits", 140, 3, bitmap::get_bitmap_bits),
@@ -1298,15 +1335,35 @@ static APIS: &[Api] = &[
     stdcall("StretchDIBits", 145, 13, bitmap::stretch_di_bits),
     stdcall("GetDIBColorTable", 146, 4, bitmap::get_dib_color_table),
     stdcall("SetDIBColorTable", 147, 4, bitmap::set_dib_color_table),
-    stdcall("GetBitmapDimensionEx", 148, 2, bitmap::get_bitmap_dimension_ex),
-    stdcall("SetBitmapDimensionEx", 149, 4, bitmap::set_bitmap_dimension_ex),
+    stdcall(
+        "GetBitmapDimensionEx",
+        148,
+        2,
+        bitmap::get_bitmap_dimension_ex,
+    ),
+    stdcall(
+        "SetBitmapDimensionEx",
+        149,
+        4,
+        bitmap::set_bitmap_dimension_ex,
+    ),
     // Text.
     stdcall("CreateFontA", 150, 14, font::create_font),
     stdcall("CreateFontIndirectA", 151, 1, font::create_font_indirect),
     stdcall("GetTextMetricsA", 152, 2, font::get_text_metrics),
-    stdcall("GetTextExtentPoint32A", 153, 4, font::get_text_extent_point32),
+    stdcall(
+        "GetTextExtentPoint32A",
+        153,
+        4,
+        font::get_text_extent_point32,
+    ),
     stdcall("GetTextExtentPointA", 154, 4, font::get_text_extent_point32),
-    stdcall("GetTextExtentExPointA", 155, 7, font::get_text_extent_ex_point),
+    stdcall(
+        "GetTextExtentExPointA",
+        155,
+        7,
+        font::get_text_extent_ex_point,
+    ),
     stdcall("TextOutA", 156, 5, font::text_out),
     stdcall("ExtTextOutA", 157, 8, font::ext_text_out),
     stdcall("GetCharWidthA", 158, 4, font::get_char_width),
@@ -1316,8 +1373,18 @@ static APIS: &[Api] = &[
     stdcall("EnumFontFamiliesA", 162, 4, font::enum_font_families),
     stdcall("EnumFontFamiliesExA", 163, 5, font::enum_font_families_ex),
     stdcall("EnumFontsA", 164, 4, font::enum_font_families),
-    stdcall("SetTextCharacterExtra", 165, 2, dc::set_text_character_extra),
-    stdcall("GetTextCharacterExtra", 166, 1, dc::get_text_character_extra),
+    stdcall(
+        "SetTextCharacterExtra",
+        165,
+        2,
+        dc::set_text_character_extra,
+    ),
+    stdcall(
+        "GetTextCharacterExtra",
+        166,
+        1,
+        dc::get_text_character_extra,
+    ),
     stdcall("SetTextJustification", 167, 3, dc::set_text_justification),
     stdcall("GetTextCharset", 168, 1, font::get_text_charset),
     stdcall("GetTextCharsetInfo", 169, 3, font::get_text_charset_info),
@@ -1328,11 +1395,26 @@ static APIS: &[Api] = &[
     stdcall("GetFontData", 174, 5, font::get_font_data),
     stdcall("GetGlyphOutlineA", 175, 7, font::get_font_data),
     stdcall("TranslateCharsetInfo", 176, 3, font::translate_charset_info),
-    stdcall("GetCharacterPlacementA", 177, 6, font::get_character_placement),
+    stdcall(
+        "GetCharacterPlacementA",
+        177,
+        6,
+        font::get_character_placement,
+    ),
     stdcall("TextOutW", 178, 5, font::text_out_w),
     stdcall("ExtTextOutW", 179, 8, font::ext_text_out_w),
-    stdcall("GetTextExtentPoint32W", 180, 4, font::get_text_extent_point32_w),
-    stdcall("GetTextExtentPointW", 181, 4, font::get_text_extent_point32_w),
+    stdcall(
+        "GetTextExtentPoint32W",
+        180,
+        4,
+        font::get_text_extent_point32_w,
+    ),
+    stdcall(
+        "GetTextExtentPointW",
+        181,
+        4,
+        font::get_text_extent_point32_w,
+    ),
     stdcall("GetCharWidthW", 182, 4, font::get_char_width),
     stdcall("GetCharWidth32W", 183, 4, font::get_char_width),
     stdcall("CreateFontW", 184, 14, not_implemented),
@@ -1344,17 +1426,42 @@ static APIS: &[Api] = &[
     stdcall("GetRasterizerCaps", 190, 2, font::get_rasterizer_caps),
     // Palettes.
     stdcall("CreatePalette", 191, 1, palette::create_palette),
-    stdcall("CreateHalftonePalette", 192, 1, palette::create_halftone_palette),
+    stdcall(
+        "CreateHalftonePalette",
+        192,
+        1,
+        palette::create_halftone_palette,
+    ),
     stdcall("GetPaletteEntries", 193, 4, palette::get_palette_entries),
     stdcall("SetPaletteEntries", 194, 4, palette::set_palette_entries),
     stdcall("ResizePalette", 195, 2, palette::resize_palette),
     stdcall("AnimatePalette", 196, 4, palette::animate_palette),
     stdcall("SelectPalette", 197, 3, palette::select_palette),
     stdcall("RealizePalette", 198, 1, palette::realize_palette),
-    stdcall("GetSystemPaletteEntries", 199, 4, palette::get_system_palette_entries),
-    stdcall("GetSystemPaletteUse", 200, 1, palette::get_system_palette_use),
-    stdcall("SetSystemPaletteUse", 201, 2, palette::set_system_palette_use),
-    stdcall("GetNearestPaletteIndex", 202, 2, palette::get_nearest_palette_index),
+    stdcall(
+        "GetSystemPaletteEntries",
+        199,
+        4,
+        palette::get_system_palette_entries,
+    ),
+    stdcall(
+        "GetSystemPaletteUse",
+        200,
+        1,
+        palette::get_system_palette_use,
+    ),
+    stdcall(
+        "SetSystemPaletteUse",
+        201,
+        2,
+        palette::set_system_palette_use,
+    ),
+    stdcall(
+        "GetNearestPaletteIndex",
+        202,
+        2,
+        palette::get_nearest_palette_index,
+    ),
     stdcall("UpdateColors", 203, 1, succeed),
     // Color spaces, printing, OpenGL and the rest.
     stdcall("CreateColorSpaceA", 204, 1, create_color_space),
@@ -1394,9 +1501,28 @@ static APIS: &[Api] = &[
     stdcall("GetPath", 237, 4, draw::get_path),
 ];
 
-crate::state_fields!(Pen { style, width, color, ext, brush_style, hatch, dashes });
-crate::state_fields!(Pattern { width, height, pixels, mono });
-crate::state_fields!(Brush { style, color, hatch, pattern, usage });
+crate::state_fields!(Pen {
+    style,
+    width,
+    color,
+    ext,
+    brush_style,
+    hatch,
+    dashes
+});
+crate::state_fields!(Pattern {
+    width,
+    height,
+    pixels,
+    mono
+});
+crate::state_fields!(Brush {
+    style,
+    color,
+    hatch,
+    pattern,
+    usage
+});
 crate::state_fields!(Font { log });
 crate::state_fields!(Dib {
     bits,
@@ -1408,10 +1534,30 @@ crate::state_fields!(Dib {
     section,
     offset
 });
-crate::state_fields!(Bitmap { width, height, bpp, planes, stride, bits, dib, dc, dimension });
+crate::state_fields!(Bitmap {
+    width,
+    height,
+    bpp,
+    planes,
+    stride,
+    bits,
+    dib,
+    dc,
+    dimension
+});
 crate::state_fields!(Palette { entries });
-crate::state_fields!(Object { kind, stock, pid, deleted });
-crate::state_fields!(State { objects, next, system_palette, font_files });
+crate::state_fields!(Object {
+    kind,
+    stock,
+    pid,
+    deleted
+});
+crate::state_fields!(State {
+    objects,
+    next,
+    system_palette,
+    font_files
+});
 super::state_variants!(Kind {
     Pen { pen },
     Brush { brush },

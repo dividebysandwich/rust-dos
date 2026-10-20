@@ -176,8 +176,22 @@ const SYSTEM: &[(&str, u32, &str, u32, u32, u32)] = &[
         0,
     ),
     ("Edit", CS_DBLCLKS | CS_PARENTDC, "EditWndProc", 6, 32513, 0),
-    ("Static", CS_DBLCLKS | CS_PARENTDC, "StaticWndProc", 8, 32512, 0),
-    ("ListBox", CS_DBLCLKS | CS_PARENTDC, "ListBoxWndProc", 4, 32512, 0),
+    (
+        "Static",
+        CS_DBLCLKS | CS_PARENTDC,
+        "StaticWndProc",
+        8,
+        32512,
+        0,
+    ),
+    (
+        "ListBox",
+        CS_DBLCLKS | CS_PARENTDC,
+        "ListBoxWndProc",
+        4,
+        32512,
+        0,
+    ),
     (
         "ComboBox",
         CS_DBLCLKS | CS_PARENTDC | CS_VREDRAW | CS_HREDRAW,
@@ -186,7 +200,14 @@ const SYSTEM: &[(&str, u32, &str, u32, u32, u32)] = &[
         32512,
         0,
     ),
-    ("ComboLBox", CS_DBLCLKS | CS_SAVEBITS, "ComboLBoxWndProc", 4, 32512, 0),
+    (
+        "ComboLBox",
+        CS_DBLCLKS | CS_SAVEBITS,
+        "ComboLBoxWndProc",
+        4,
+        32512,
+        0,
+    ),
     (
         "ScrollBar",
         CS_DBLCLKS | CS_VREDRAW | CS_HREDRAW | CS_PARENTDC,
@@ -196,8 +217,22 @@ const SYSTEM: &[(&str, u32, &str, u32, u32, u32)] = &[
         0,
     ),
     ("MDIClient", 0, "MDIClientWndProc", 4, 32512, 13),
-    ("#32770", CS_SAVEBITS | CS_DBLCLKS, "DefDlgProcA", 30, 32512, 0),
-    ("#32768", CS_SAVEBITS | CS_DBLCLKS, "MenuWndProc", 4, 32512, 0),
+    (
+        "#32770",
+        CS_SAVEBITS | CS_DBLCLKS,
+        "DefDlgProcA",
+        30,
+        32512,
+        0,
+    ),
+    (
+        "#32768",
+        CS_SAVEBITS | CS_DBLCLKS,
+        "MenuWndProc",
+        4,
+        32512,
+        0,
+    ),
     ("#32769", CS_DBLCLKS, "DesktopWndProc", 0, 32512, 2),
     ("#32772", 0, "IconTitleWndProc", 0, 32512, 0),
 ];
@@ -252,7 +287,18 @@ pub fn register_class_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// `icon_small`.
 fn register(cpu: &mut Cpu, w: &[u32], icon_small: u32) -> Option<u32> {
     super::init(cpu);
-    let &[style, proc, cls_extra, wnd_extra, instance, icon, cursor, background, menu, name] = w
+    let &[
+        style,
+        proc,
+        cls_extra,
+        wnd_extra,
+        instance,
+        icon,
+        cursor,
+        background,
+        menu,
+        name,
+    ] = w
     else {
         unreachable!()
     };
@@ -452,7 +498,14 @@ pub fn get_class_long(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         GCL_CBWNDEXTRA => c.wnd_extra,
         GCL_CBCLSEXTRA => c.extra.len() as u32,
         GCL_WNDPROC => c.proc,
-        GCL_STYLE => c.style & !CS_GLOBALCLASS | if c.global && !c.system { CS_GLOBALCLASS } else { 0 },
+        GCL_STYLE => {
+            c.style & !CS_GLOBALCLASS
+                | if c.global && !c.system {
+                    CS_GLOBALCLASS
+                } else {
+                    0
+                }
+        }
         GCW_ATOM => c.atom as u32,
         GCL_HICONSM => c.icon_small,
         i if i >= 0 && (i as usize + 4) <= c.extra.len() => {
@@ -474,7 +527,11 @@ pub fn set_class_long(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
     let value = args[2];
     let state = user(cpu);
-    let Some(c) = state.classes.get_mut(index as usize).and_then(|c| c.as_mut()) else {
+    let Some(c) = state
+        .classes
+        .get_mut(index as usize)
+        .and_then(|c| c.as_mut())
+    else {
         return Some(0);
     };
     let old = match args[1] as i32 {
@@ -537,7 +594,11 @@ pub fn set_class_word(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(0);
     };
     let state = user(cpu);
-    let Some(c) = state.classes.get_mut(index as usize).and_then(|c| c.as_mut()) else {
+    let Some(c) = state
+        .classes
+        .get_mut(index as usize)
+        .and_then(|c| c.as_mut())
+    else {
         return Some(0);
     };
     let i = args[1] as i32;

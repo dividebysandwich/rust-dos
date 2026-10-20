@@ -10,9 +10,9 @@
 use super::dc::{self, Dc, OPAQUE};
 use super::surface::Surface;
 use super::{
-    BS_HATCHED, BS_NULL, BS_SOLID, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, FALSE, PS_ALTERNATE,
-    PS_DASH, PS_DASHDOT, PS_DASHDOTDOT, PS_DOT, PS_INSIDEFRAME, PS_NULL, PS_STYLE_MASK,
-    PS_USERSTYLE, Pattern, Rect, Region, TRUE, gdi, set_error,
+    BS_HATCHED, BS_NULL, BS_SOLID, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, FALSE,
+    PS_ALTERNATE, PS_DASH, PS_DASHDOT, PS_DASHDOTDOT, PS_DOT, PS_INSIDEFRAME, PS_NULL,
+    PS_STYLE_MASK, PS_USERSTYLE, Pattern, Rect, Region, TRUE, gdi, set_error,
 };
 use crate::cpu::Cpu;
 use crate::win32::user32::{read_words, write_words};
@@ -468,11 +468,7 @@ impl Canvas {
                 }
                 *phase += 1;
             }
-            let value = if on {
-                Some(s.value)
-            } else {
-                s.gap
-            };
+            let value = if on { Some(s.value) } else { s.gap };
             if let Some(v) = value {
                 self.dot(x, y, s.width, v, rop2);
             }
@@ -498,7 +494,13 @@ impl Canvas {
 
     /// Fill the polygons `figures` (surface points) with `fill`: by the
     /// alternate rule, or winding with `winding`.
-    pub fn fill_polygons(&mut self, figures: &[Vec<(i32, i32)>], winding: bool, fill: &Fill, rop2: u32) {
+    pub fn fill_polygons(
+        &mut self,
+        figures: &[Vec<(i32, i32)>],
+        winding: bool,
+        fill: &Fill,
+        rop2: u32,
+    ) {
         for (y, x0, x1) in polygon_spans(figures, winding) {
             self.span(x0, x1, y, fill, rop2);
         }
@@ -652,12 +654,20 @@ fn bounds_of(points: &[(i32, i32)], extra: i32) -> Rect {
 /// Draw outlines and fills: `figures` are device points; closed figures
 /// are filled with the brush, if `fill` says so, and all are stroked
 /// with the pen.
-fn draw_figures(cpu: &mut Cpu, hdc: u32, figures: &[Vec<(i32, i32)>], closed: bool, fill: bool) -> bool {
+fn draw_figures(
+    cpu: &mut Cpu,
+    hdc: u32,
+    figures: &[Vec<(i32, i32)>],
+    closed: bool,
+    fill: bool,
+) -> bool {
     let Some(dc) = dc_of(cpu, hdc) else {
         return false;
     };
     let all: Vec<(i32, i32)> = figures.iter().flatten().copied().collect();
-    let pen_width = gdi(cpu).pen(dc.attrs.pen).map_or(1, |p| dc.width_to_device(p.width));
+    let pen_width = gdi(cpu)
+        .pen(dc.attrs.pen)
+        .map_or(1, |p| dc.width_to_device(p.width));
     let bounds = bounds_of(&all, pen_width.max(1));
     let Some(mut c) = Canvas::open(cpu, hdc, bounds) else {
         return true;
@@ -867,7 +877,12 @@ pub fn poly_polygon(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// The device rectangle a shape function's logical one is: its right and
 /// bottom edges are outside it.
 fn shape_rect(dc: &Dc, args: &[u32]) -> Rect {
-    let r = Rect::new(args[1] as i32, args[2] as i32, args[3] as i32, args[4] as i32);
+    let r = Rect::new(
+        args[1] as i32,
+        args[2] as i32,
+        args[3] as i32,
+        args[4] as i32,
+    );
     dc.rect_to_device(&r)
 }
 
@@ -902,11 +917,20 @@ pub fn rectangle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if stroke.width == 0 {
         // Without a pen the brush fills one pixel less on the right and
         // at the bottom.
-        c.fill(Rect::new(s.left, s.top, s.right - 1, s.bottom - 1), &f, rop2);
+        c.fill(
+            Rect::new(s.left, s.top, s.right - 1, s.bottom - 1),
+            &f,
+            rop2,
+        );
     } else {
         let w = stroke.width;
         let (inner, outline) = if stroke.inside || w == 1 {
-            let o = Rect::new(s.left + w / 2, s.top + w / 2, s.right - 1 - (w - 1) / 2, s.bottom - 1 - (w - 1) / 2);
+            let o = Rect::new(
+                s.left + w / 2,
+                s.top + w / 2,
+                s.right - 1 - (w - 1) / 2,
+                s.bottom - 1 - (w - 1) / 2,
+            );
             (s.inflate(-w, -w), o)
         } else {
             let o = Rect::new(s.left, s.top, s.right - 1, s.bottom - 1);
@@ -1072,9 +1096,13 @@ pub fn round_rect(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         let (_, y1) = dc.to_device(0, args[6] as i32);
         (y1 - y0).abs().min(r.height()).max(1)
     };
-    let quarter = |cx: Rect, from: f64| arc_points(&cx, from, from + std::f64::consts::FRAC_PI_2, false);
+    let quarter =
+        |cx: Rect, from: f64| arc_points(&cx, from, from + std::f64::consts::FRAC_PI_2, false);
     let mut points = Vec::new();
-    points.extend(quarter(Rect::new(r.right - ew, r.top, r.right, r.top + eh), 0.0));
+    points.extend(quarter(
+        Rect::new(r.right - ew, r.top, r.right, r.top + eh),
+        0.0,
+    ));
     points.extend(quarter(
         Rect::new(r.left, r.top, r.left + ew, r.top + eh),
         std::f64::consts::FRAC_PI_2,
@@ -1207,7 +1235,10 @@ pub fn stretch_blt(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let rop = args[10];
     let dst = [args[1], args[2], args[3], args[4]].map(|v| v as i32);
     let src = if uses_source((rop >> 16) as u8) {
-        Some((args[5], [args[6], args[7], args[8], args[9]].map(|v| v as i32)))
+        Some((
+            args[5],
+            [args[6], args[7], args[8], args[9]].map(|v| v as i32),
+        ))
     } else {
         None
     };
@@ -1232,7 +1263,13 @@ pub struct Source {
 /// The blit's work: `dst` is x, y, width and height in the destination
 /// DC's logical units; `src` the source DC and its x, y, width and
 /// height. Whether it did it.
-pub fn blit(cpu: &mut Cpu, hdst: u32, dst: [i32; 4], src: Option<(u32, [i32; 4])>, rop: u32) -> bool {
+pub fn blit(
+    cpu: &mut Cpu,
+    hdst: u32,
+    dst: [i32; 4],
+    src: Option<(u32, [i32; 4])>,
+    rop: u32,
+) -> bool {
     let Some(ddc) = dc_of(cpu, hdst) else {
         return false;
     };
@@ -1251,7 +1288,11 @@ pub fn blit(cpu: &mut Cpu, hdst: u32, dst: [i32; 4], src: Option<(u32, [i32; 4])
             let (ox, oy) = place.origin;
             // A rectangle that runs backwards covers its start row and
             // those above it.
-            let (top, bottom) = if sy1 >= sy0 { (sy0, sy1) } else { (sy1 + 1, sy0 + 1) };
+            let (top, bottom) = if sy1 >= sy0 {
+                (sy0, sy1)
+            } else {
+                (sy1 + 1, sy0 + 1)
+            };
             let (top, bottom) = (top + oy, bottom + oy);
             let Some(surface) = Surface::load(cpu, place.target, top, bottom) else {
                 return false;
@@ -1325,7 +1366,11 @@ pub fn blit_from(
                         let fx = (x - ox - x0) as i64 * dw.signum();
                         let fy = (y - oy - y0) as i64 * dh.signum();
                         let map = |f: i64, s: i64, d: i64| -> i64 {
-                            if d == 0 { 0 } else { f * s.abs() / d.abs() * s.signum() }
+                            if d == 0 {
+                                0
+                            } else {
+                                f * s.abs() / d.abs() * s.signum()
+                            }
                         };
                         let sx = *sx0 as i64 + map(fx, sw, dw) + src.origin.0 as i64;
                         let sy = *sy0 as i64 + map(fy, sh, dh) + src.origin.1 as i64;
@@ -1458,7 +1503,11 @@ pub fn ext_flood_fill(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let fill = brush_fill(cpu, &c, dc.attrs.brush);
     let inside = |c: &Canvas, x: i32, y: i32| {
         let v = c.surface.get(x, y);
-        if surface_kind { v == target } else { v != target }
+        if surface_kind {
+            v == target
+        } else {
+            v != target
+        }
     };
     if !inside(&c, sx, sy) {
         return Some(FALSE);
@@ -1709,7 +1758,12 @@ fn fill_figures(cpu: &mut Cpu, hdc: u32, figures: &[Vec<(i32, i32)>]) {
         .map(|f| f.iter().map(|&(x, y)| (x + ox, y + oy)).collect())
         .collect();
     let f = brush_fill(cpu, &c, dc.attrs.brush);
-    c.fill_polygons(&figures, dc.attrs.poly_fill == dc::WINDING, &f, dc.attrs.rop2);
+    c.fill_polygons(
+        &figures,
+        dc.attrs.poly_fill == dc::WINDING,
+        &f,
+        dc.attrs.rop2,
+    );
     c.close(cpu);
 }
 
@@ -1843,7 +1897,12 @@ pub fn focus_device_rect(cpu: &mut Cpu, hdc: u32, r: Rect) {
 /// Draw the device line from `a` to `b` (without its last point) in
 /// `color` (a COLORREF) on `hdc`, for USER's frames.
 pub fn device_line(cpu: &mut Cpu, hdc: u32, a: (i32, i32), b: (i32, i32), color: u32) {
-    let bounds = Rect::new(a.0.min(b.0), a.1.min(b.1), a.0.max(b.0) + 1, a.1.max(b.1) + 1);
+    let bounds = Rect::new(
+        a.0.min(b.0),
+        a.1.min(b.1),
+        a.0.max(b.0) + 1,
+        a.1.max(b.1) + 1,
+    );
     let Some(mut c) = Canvas::open(cpu, hdc, bounds) else {
         return;
     };

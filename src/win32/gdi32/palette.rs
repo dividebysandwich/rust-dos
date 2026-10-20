@@ -181,7 +181,9 @@ pub fn select_palette(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_error(cpu, ERROR_INVALID_HANDLE);
         return Some(0);
     }
-    let old = dc::with(cpu, hdc, |d| std::mem::replace(&mut d.attrs.palette, handle));
+    let old = dc::with(cpu, hdc, |d| {
+        std::mem::replace(&mut d.attrs.palette, handle)
+    });
     match old {
         Some(old) => {
             dc::free_if_deleted(cpu, old);

@@ -342,7 +342,11 @@ fn make_dib_section(cpu: &mut Cpu, info: &DibInfo, section: u32, offset: u32) ->
         info.bits_size(),
         0,
         0,
-        if info.bpp <= 8 { info.colors.len() as u32 } else { 0 },
+        if info.bpp <= 8 {
+            info.colors.len() as u32
+        } else {
+            0
+        },
         0,
     ];
     for (i, w) in words.iter().enumerate() {
@@ -414,7 +418,8 @@ pub fn free_dib_bits(cpu: &mut Cpu, bits: u32, section: u32, offset: u32) {
 
 /// CreateDIBSection(hdc, info, usage, bits, section, offset).
 pub fn create_dib_section(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let (hdc, at, usage, out, section, offset) = (args[0], args[1], args[2], args[3], args[4], args[5]);
+    let (hdc, at, usage, out, section, offset) =
+        (args[0], args[1], args[2], args[3], args[4], args[5]);
     init(cpu);
     if out != 0 {
         cpu.bus.guest_write_32(out, 0);
@@ -453,7 +458,8 @@ fn black_and_white(info: &DibInfo) -> bool {
 
 /// CreateDIBitmap(hdc, header, init, bits, info, usage).
 pub fn create_di_bitmap(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let (hdc, header, flags, bits, at, usage) = (args[0], args[1], args[2], args[3], args[4], args[5]);
+    let (hdc, header, flags, bits, at, usage) =
+        (args[0], args[1], args[2], args[3], args[4], args[5]);
     init(cpu);
     if header == 0 {
         return Some(0);
@@ -582,10 +588,18 @@ fn row_of_scan(info: &DibInfo, height: i32, scan: i32) -> i32 {
 
 /// GetDIBits(hdc, bitmap, start, lines, bits, info, usage).
 pub fn get_di_bits(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let (hdc, handle, start, lines, out, at, usage) =
-        (args[0], args[1], args[2], args[3], args[4], args[5], args[6]);
+    let (hdc, handle, start, lines, out, at, usage) = (
+        args[0], args[1], args[2], args[3], args[4], args[5], args[6],
+    );
     if gdi(cpu).dc(hdc).is_none() {
-        set_error(cpu, if hdc == 0 { ERROR_INVALID_PARAMETER } else { ERROR_INVALID_HANDLE });
+        set_error(
+            cpu,
+            if hdc == 0 {
+                ERROR_INVALID_PARAMETER
+            } else {
+                ERROR_INVALID_HANDLE
+            },
+        );
         return Some(0);
     }
     let Some(b) = gdi(cpu).bitmap(handle).map(|b| b.clone_header()) else {
@@ -739,7 +753,16 @@ pub fn get_di_bits(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// Set rows of the bitmap `handle` from the DIB at `bits` with the header
 /// at `at`: its scan lines `start` to `start + lines`. How many it set.
 #[allow(clippy::too_many_arguments)]
-fn set_bits(cpu: &mut Cpu, handle: u32, start: u32, lines: u32, bits: u32, at: u32, usage: u32, hdc: u32) -> u32 {
+fn set_bits(
+    cpu: &mut Cpu,
+    handle: u32,
+    start: u32,
+    lines: u32,
+    bits: u32,
+    at: u32,
+    usage: u32,
+    hdc: u32,
+) -> u32 {
     let Some(info) = read_info(cpu, at, usage, hdc) else {
         set_error(cpu, ERROR_INVALID_PARAMETER);
         return 0;
@@ -761,7 +784,11 @@ fn set_bits(cpu: &mut Cpu, handle: u32, start: u32, lines: u32, bits: u32, at: u
             continue;
         }
         // The rows of `src` are in the order the bits have them.
-        let src_row = if info.top_down() { i } else { src.height - 1 - i };
+        let src_row = if info.top_down() {
+            i
+        } else {
+            src.height - 1 - i
+        };
         for x in 0..info.width.min(dst.width) {
             let v = src.get(x, src_row);
             let nv = if dst.mono && src.bpp == 1 && src.colors == [0, 0xFFFFFF] {
@@ -788,7 +815,13 @@ fn set_bits(cpu: &mut Cpu, handle: u32, start: u32, lines: u32, bits: u32, at: u
 /// (decoded from RLE) as a surface whose rows run top down: for a
 /// top-down DIB its row 0 is scan line `start`, for a bottom-up one the
 /// last scan line read. None if its memory isn't there.
-pub fn read_dib(cpu: &mut Cpu, info: &DibInfo, bits: u32, start: u32, lines: u32) -> Option<Surface> {
+pub fn read_dib(
+    cpu: &mut Cpu,
+    info: &DibInfo,
+    bits: u32,
+    start: u32,
+    lines: u32,
+) -> Option<Surface> {
     let height = info.abs_height();
     let lines = (lines as i32).min(height - start as i32).max(0);
     let mut s = Surface::memory(info.width, lines, info.bpp, info.colors.clone(), info.masks);
@@ -891,7 +924,10 @@ fn decode_rle(data: &[u8], info: &DibInfo) -> Vec<u8> {
                 let count = count as usize;
                 let bytes = if four { count.div_ceil(2) } else { count };
                 for k in 0..count {
-                    let byte = data.get(i + if four { k / 2 } else { k }).copied().unwrap_or(0);
+                    let byte = data
+                        .get(i + if four { k / 2 } else { k })
+                        .copied()
+                        .unwrap_or(0);
                     let value = if four {
                         if k % 2 == 0 { byte >> 4 } else { byte & 15 }
                     } else {
@@ -909,8 +945,9 @@ fn decode_rle(data: &[u8], info: &DibInfo) -> Vec<u8> {
 
 /// SetDIBits(hdc, bitmap, start, lines, bits, info, usage).
 pub fn set_di_bits(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let (hdc, handle, start, lines, bits, at, usage) =
-        (args[0], args[1], args[2], args[3], args[4], args[5], args[6]);
+    let (hdc, handle, start, lines, bits, at, usage) = (
+        args[0], args[1], args[2], args[3], args[4], args[5], args[6],
+    );
     if gdi(cpu).bitmap(handle).is_none() {
         set_error(cpu, ERROR_INVALID_HANDLE);
         return Some(0);
@@ -1017,7 +1054,10 @@ pub fn get_dib_color_table(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if start >= end {
         return Some(0);
     }
-    let quads: Vec<u32> = colors[start..end].iter().map(|&c| color_to_quad(c)).collect();
+    let quads: Vec<u32> = colors[start..end]
+        .iter()
+        .map(|&c| color_to_quad(c))
+        .collect();
     write_words(cpu, out, &quads);
     Some((end - start) as u32)
 }

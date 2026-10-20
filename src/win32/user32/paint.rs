@@ -15,9 +15,12 @@
 use super::message::{WM_ERASEBKGND, WM_NCPAINT, WM_PAINT};
 use super::sysparams::{self, COLOR_BACKGROUND, COLOR_BTNFACE, COLOR_WINDOW};
 use super::window::{
-    SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOREDRAW, SWP_NOSIZE, SWP_NOZORDER, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_MINIMIZE, WS_VISIBLE, Window, send,
+    SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOREDRAW, SWP_NOSIZE, SWP_NOZORDER, WS_CLIPCHILDREN,
+    WS_CLIPSIBLINGS, WS_MINIMIZE, WS_VISIBLE, Window, send,
 };
-use super::{DESKTOP, ERROR_INVALID_WINDOW_HANDLE, FALSE, State, TRUE, address_of, set_error, user};
+use super::{
+    DESKTOP, ERROR_INVALID_WINDOW_HANDLE, FALSE, State, TRUE, address_of, set_error, user,
+};
 use crate::cpu::Cpu;
 use crate::win32::gdi32::dc::{
     DCX_CACHE, DCX_CLIPCHILDREN, DCX_CLIPSIBLINGS, DCX_EXCLUDERGN, DCX_INTERSECTRGN,
@@ -132,7 +135,10 @@ pub fn visible_region(state: &State, hwnd: u32, flags: u32) -> Region {
         let mut vis = shape(state, DESKTOP);
         if flags & DCX_CLIPCHILDREN != 0 {
             for child in state.top_levels() {
-                if state.window(child).is_some_and(|c| c.style & WS_VISIBLE != 0) {
+                if state
+                    .window(child)
+                    .is_some_and(|c| c.style & WS_VISIBLE != 0)
+                {
                     vis = vis.diff(&shape(state, child));
                 }
             }
@@ -156,7 +162,10 @@ pub fn visible_region(state: &State, hwnd: u32, flags: u32) -> Region {
         && let Some(w) = state.window(hwnd)
     {
         for &child in &w.children {
-            if state.window(child).is_some_and(|c| c.style & WS_VISIBLE != 0) {
+            if state
+                .window(child)
+                .is_some_and(|c| c.style & WS_VISIBLE != 0)
+            {
                 vis = vis.diff(&shape(state, child));
             }
         }
@@ -195,7 +204,12 @@ pub fn visible_region(state: &State, hwnd: u32, flags: u32) -> Region {
 
 /// A window DC's device origin on the screen and the region it may draw
 /// on there: for GDI.
-pub fn dc_region(cpu: &mut Cpu, hwnd: u32, flags: u32, extra: Option<&Region>) -> ((i32, i32), Region) {
+pub fn dc_region(
+    cpu: &mut Cpu,
+    hwnd: u32,
+    flags: u32,
+    extra: Option<&Region>,
+) -> ((i32, i32), Region) {
     let state = user(cpu);
     let hwnd = if hwnd == 0 { DESKTOP } else { hwnd };
     if !state.is_window(hwnd) {
@@ -450,7 +464,10 @@ fn redraw_in(state: &mut State, hwnd: u32, area: &Region, flags: u32, from_paren
     }
     let inside = area.and_rect(&client);
     for child in children {
-        if state.window(child).is_some_and(|c| c.style & WS_VISIBLE != 0) {
+        if state
+            .window(child)
+            .is_some_and(|c| c.style & WS_VISIBLE != 0)
+        {
             redraw_in(state, child, &inside, flags & !RDW_NOCHILDREN, true);
         }
     }
@@ -532,7 +549,14 @@ pub fn expose(cpu: &mut Cpu, area: &Region) {
 
 /// SetWindowPos moved, sized, showed or hid `hwnd`: what it uncovered
 /// shows what is under it, and the window needs painting where it is.
-pub fn moved(cpu: &mut Cpu, hwnd: u32, old: Rect, was_visible: bool, now_visible: bool, flags: u32) {
+pub fn moved(
+    cpu: &mut Cpu,
+    hwnd: u32,
+    old: Rect,
+    was_visible: bool,
+    now_visible: bool,
+    flags: u32,
+) {
     if now_visible && !user(cpu).desktop {
         ensure_desktop(cpu);
     }
@@ -692,7 +716,8 @@ fn erase_step(cpu: &mut Cpu, t: &mut Task, value: u32, keep: bool) -> Option<Nex
                 }
                 let mut hdc = t.var(V_HDC);
                 if hdc == 0 {
-                    let flags = DCX_INTERSECTRGN | DCX_USESTYLE | if iconic { DCX_WINDOW } else { 0 };
+                    let flags =
+                        DCX_INTERSECTRGN | DCX_USESTYLE | if iconic { DCX_WINDOW } else { 0 };
                     hdc = window_dc(cpu, hwnd, flags, Some(region.clone()));
                     t.set(V_HDC, hdc);
                 }
@@ -753,7 +778,9 @@ pub fn begin_paint(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     // validated, frame and all.
     let state = user(cpu);
     let region = client_update(state, hwnd);
-    let iconic = state.window(hwnd).is_some_and(|w| w.style & WS_MINIMIZE != 0);
+    let iconic = state
+        .window(hwnd)
+        .is_some_and(|w| w.style & WS_MINIMIZE != 0);
     let flags = DCX_INTERSECTRGN | DCX_USESTYLE | if iconic { DCX_WINDOW } else { 0 };
     let hdc = window_dc(cpu, hwnd, flags, Some(region));
     if let Some(w) = user(cpu).window_mut(hwnd) {
@@ -784,7 +811,11 @@ fn write_paint_struct(cpu: &mut Cpu, hwnd: u32, hdc: u32, ps: u32) {
     let client = user(cpu).screen_client(hwnd);
     let size = Rect::new(0, 0, client.width(), client.height());
     let paint = Rect::read(cpu, ps + 8).intersect(&size);
-    let paint = if paint.is_empty() { Rect::default() } else { paint };
+    let paint = if paint.is_empty() {
+        Rect::default()
+    } else {
+        paint
+    };
     paint.write(cpu, ps + 8);
 }
 
@@ -1102,14 +1133,25 @@ pub fn pending_erase(cpu: &mut Cpu, hwnd: u32, step: u16) -> Option<Next> {
         return None;
     }
     let flags = RDW_NOINTERNALPAINT | RDW_ERASENOW | RDW_NOCHILDREN;
-    Some(Next::call(address_of("RedrawWindow"), &[hwnd, 0, 0, flags], step))
+    Some(Next::call(
+        address_of("RedrawWindow"),
+        &[hwnd, 0, 0, flags],
+        step,
+    ))
 }
 
 // Scrolling.
 
 /// Copy `rect` (or the DC's clip box) of the DC by (`dx`, `dy`) within
 /// `clip`: the logical rectangles it copied to and the part it uncovered.
-fn scroll_bits(cpu: &mut Cpu, hdc: u32, dx: i32, dy: i32, rect: Option<Rect>, clip: Option<Rect>) -> (Rect, Region) {
+fn scroll_bits(
+    cpu: &mut Cpu,
+    hdc: u32,
+    dx: i32,
+    dy: i32,
+    rect: Option<Rect>,
+    clip: Option<Rect>,
+) -> (Rect, Region) {
     let Some(dc) = gdi32::gdi(cpu).dc(hdc).cloned() else {
         return (Rect::default(), Region::new());
     };
@@ -1246,7 +1288,10 @@ fn scroll(cpu: &mut Cpu, args: &[u32], boolean: bool) -> Option<u32> {
     let mut moves = Vec::new();
     if flags & SW_SCROLLCHILDREN != 0 {
         let state = user(cpu);
-        let children = state.window(hwnd).map(|w| w.children.clone()).unwrap_or_default();
+        let children = state
+            .window(hwnd)
+            .map(|w| w.children.clone())
+            .unwrap_or_default();
         for child in children {
             let Some(c) = state.window(child) else {
                 continue;
@@ -1267,10 +1312,18 @@ fn scroll(cpu: &mut Cpu, args: &[u32], boolean: bool) -> Option<u32> {
 
 fn scroll_step(_cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
     let at = t.var(V_AT) as usize;
-    if let Some(m) = t.vars.get(V_LIST + 3 * at..V_LIST + 3 * at + 3).map(<[u32]>::to_vec) {
+    if let Some(m) = t
+        .vars
+        .get(V_LIST + 3 * at..V_LIST + 3 * at + 3)
+        .map(<[u32]>::to_vec)
+    {
         t.set(V_AT, at as u32 + 1);
         let flags = SWP_NOZORDER | SWP_NOSIZE | SWP_NOACTIVATE;
-        return Next::call(address_of("SetWindowPos"), &[m[0], 0, m[1], m[2], 0, 0, flags], 1);
+        return Next::call(
+            address_of("SetWindowPos"),
+            &[m[0], 0, m[1], m[2], 0, 0, flags],
+            1,
+        );
     }
     if t.var(V_FLAGS) & SW_ERASE != 0 && t.step != 2 {
         let rdw = RDW_ERASENOW | RDW_ALLCHILDREN;
@@ -1372,7 +1425,13 @@ fn line(cpu: &mut Cpu, hdc: u32, a: (i32, i32), b: (i32, i32), color: u32) {
         return;
     };
     let rgb = user(cpu).color(color);
-    draw::device_line(cpu, hdc, dc.to_device(a.0, a.1), dc.to_device(b.0, b.1), rgb);
+    draw::device_line(
+        cpu,
+        hdc,
+        dc.to_device(a.0, a.1),
+        dc.to_device(b.0, b.1),
+        rgb,
+    );
 }
 
 const BDR_RAISEDOUTER: u32 = 0x0001;
@@ -1407,7 +1466,9 @@ const LT_INNER_SOFT: [i8; 16] = [N, N, N, N, N, 22, 22, N, N, 16, 16, N, N, N, N
 const LT_OUTER_SOFT: [i8; 16] = [N, 20, 21, N, 22, 20, 21, N, 16, 20, 21, N, N, 20, 21, N];
 const LTRB_OUTER_MONO: [i8; 16] = [N, 6, 6, 6, 5, 6, 6, 6, 5, 6, 6, 6, 5, 6, 6, 6];
 const LTRB_INNER_MONO: [i8; 16] = [N, N, N, N, N, 5, 5, 5, N, 5, 5, 5, N, 5, 5, 5];
-const LTRB_OUTER_FLAT: [i8; 16] = [N, 16, 16, 16, 15, 16, 16, 16, 15, 16, 16, 16, 15, 16, 16, 16];
+const LTRB_OUTER_FLAT: [i8; 16] = [
+    N, 16, 16, 16, 15, 16, 16, 16, 15, 16, 16, 16, 15, 16, 16, 16,
+];
 const LTRB_INNER_FLAT: [i8; 16] = [N, N, N, N, N, 15, 15, 15, N, 15, 15, 15, N, 15, 15, 15];
 
 /// Draw an edge of the logical rectangle `r`: what DrawEdge does, with
@@ -1417,14 +1478,33 @@ pub fn edge(cpu: &mut Cpu, hdc: u32, r: Rect, kind: u32, flags: u32) -> (bool, R
     let ok = !((kind & BDR_INNER == BDR_INNER || kind & BDR_OUTER == BDR_OUTER)
         && flags & (BF_FLAT | BF_MONO) == 0);
     let (lt_in, lt_out, rb_in, rb_out) = if flags & BF_MONO != 0 {
-        (LTRB_INNER_MONO[i], LTRB_OUTER_MONO[i], LTRB_INNER_MONO[i], LTRB_OUTER_MONO[i])
+        (
+            LTRB_INNER_MONO[i],
+            LTRB_OUTER_MONO[i],
+            LTRB_INNER_MONO[i],
+            LTRB_OUTER_MONO[i],
+        )
     } else if flags & BF_FLAT != 0 {
-        let inner = if LTRB_INNER_FLAT[i] != N { COLOR_BTNFACE as i8 } else { N };
+        let inner = if LTRB_INNER_FLAT[i] != N {
+            COLOR_BTNFACE as i8
+        } else {
+            N
+        };
         (inner, LTRB_OUTER_FLAT[i], inner, LTRB_OUTER_FLAT[i])
     } else if flags & BF_SOFT != 0 {
-        (LT_INNER_SOFT[i], LT_OUTER_SOFT[i], RB_INNER_NORMAL[i], RB_OUTER_NORMAL[i])
+        (
+            LT_INNER_SOFT[i],
+            LT_OUTER_SOFT[i],
+            RB_INNER_NORMAL[i],
+            RB_OUTER_NORMAL[i],
+        )
     } else {
-        (LT_INNER_NORMAL[i], LT_OUTER_NORMAL[i], RB_INNER_NORMAL[i], RB_OUTER_NORMAL[i])
+        (
+            LT_INNER_NORMAL[i],
+            LT_OUTER_NORMAL[i],
+            RB_INNER_NORMAL[i],
+            RB_OUTER_NORMAL[i],
+        )
     };
     let all = |f: u32| (flags & f == f) as i32;
     let lb = all(BF_LEFT | BF_BOTTOM);
@@ -1443,22 +1523,47 @@ pub fn edge(cpu: &mut Cpu, hdc: u32, r: Rect, kind: u32, flags: u32) -> (bool, R
         draw(cpu, lt_out, (r.left, r.top), (r.left, r.bottom));
     }
     if flags & BF_BOTTOM != 0 {
-        draw(cpu, rb_out, (r.left, r.bottom - 1), (r.right - 1, r.bottom - 1));
+        draw(
+            cpu,
+            rb_out,
+            (r.left, r.bottom - 1),
+            (r.right - 1, r.bottom - 1),
+        );
     }
     if flags & BF_RIGHT != 0 {
         draw(cpu, rb_out, (r.right - 1, r.top), (r.right - 1, r.bottom));
     }
     if flags & BF_TOP != 0 {
-        draw(cpu, lt_in, (r.left + lt, r.top + 1), (r.right - rt, r.top + 1));
+        draw(
+            cpu,
+            lt_in,
+            (r.left + lt, r.top + 1),
+            (r.right - rt, r.top + 1),
+        );
     }
     if flags & BF_LEFT != 0 {
-        draw(cpu, lt_in, (r.left + 1, r.top + lt), (r.left + 1, r.bottom - lb));
+        draw(
+            cpu,
+            lt_in,
+            (r.left + 1, r.top + lt),
+            (r.left + 1, r.bottom - lb),
+        );
     }
     if flags & BF_BOTTOM != 0 {
-        draw(cpu, rb_in, (r.left + lb, r.bottom - 2), (r.right - 1 - rb, r.bottom - 2));
+        draw(
+            cpu,
+            rb_in,
+            (r.left + lb, r.bottom - 2),
+            (r.right - 1 - rb, r.bottom - 2),
+        );
     }
     if flags & BF_RIGHT != 0 {
-        draw(cpu, rb_in, (r.right - 2, r.top + 2 - rb), (r.right - 2, r.bottom - 2 + rt));
+        draw(
+            cpu,
+            rb_in,
+            (r.right - 2, r.top + 2 - rb),
+            (r.right - 2, r.bottom - 2 + rt),
+        );
     }
     let mut inner = r;
     if (flags & BF_MIDDLE != 0 && ok) || flags & BF_ADJUST != 0 {
@@ -1476,7 +1581,11 @@ pub fn edge(cpu: &mut Cpu, hdc: u32, r: Rect, kind: u32, flags: u32) -> (bool, R
             inner.bottom -= add;
         }
         if flags & BF_MIDDLE != 0 && ok {
-            let color = if flags & BF_MONO != 0 { COLOR_WINDOW } else { COLOR_BTNFACE };
+            let color = if flags & BF_MONO != 0 {
+                COLOR_WINDOW
+            } else {
+                COLOR_BTNFACE
+            };
             fill_color(cpu, hdc, inner, color);
         }
     }
@@ -1490,8 +1599,18 @@ pub fn draw_edge(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let r = Rect::read(cpu, at);
     if flags & BF_DIAGONAL != 0 {
         // The diagonal edges: a line across, in the outer color.
-        let color = if kind & (BDR_SUNKENOUTER | BDR_SUNKENINNER) != 0 { 16 } else { 20 };
-        line(cpu, hdc, (r.left, r.bottom - 1), (r.right - 1, r.top), color);
+        let color = if kind & (BDR_SUNKENOUTER | BDR_SUNKENINNER) != 0 {
+            16
+        } else {
+            20
+        };
+        line(
+            cpu,
+            hdc,
+            (r.left, r.bottom - 1),
+            (r.right - 1, r.top),
+            color,
+        );
         return Some(TRUE);
     }
     let (ok, out) = edge(cpu, hdc, r, kind, flags);
@@ -1560,7 +1679,11 @@ pub fn arrow(cpu: &mut Cpu, hdc: u32, r: Rect, dir: u32, color: u32) {
     for i in 0..size {
         let half = size - 1 - i;
         match dir {
-            0 => rows.push((cy - size / 2 + i, cx - (size - half) + 1, cx + (size - half))),
+            0 => rows.push((
+                cy - size / 2 + i,
+                cx - (size - half) + 1,
+                cx + (size - half),
+            )),
             1 => rows.push((cy - size / 2 + i, cx - half, cx + half + 1)),
             2 => {
                 for y in cy - i..=cy + i {
@@ -1611,7 +1734,11 @@ fn push_frame(cpu: &mut Cpu, hdc: u32, r: Rect, state: u32) -> Rect {
         EDGE_RAISED
     };
     let flags = (state & DFCS_FLAT) | BF_RECT | BF_SOFT | BF_MIDDLE | BF_ADJUST;
-    let flags = if state & DFCS_MONO != 0 { flags | BF_MONO } else { flags };
+    let flags = if state & DFCS_MONO != 0 {
+        flags | BF_MONO
+    } else {
+        flags
+    };
     edge(cpu, hdc, r, kind, flags).1
 }
 
@@ -1629,7 +1756,13 @@ pub fn draw_frame_control(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// Draw a frame control in the logical rectangle `r`: what
 /// DrawFrameControl does, with the rectangle DFCS_ADJUSTRECT makes, if
 /// it makes one.
-pub fn frame_control(cpu: &mut Cpu, hdc: u32, r: Rect, kind: u32, state: u32) -> (bool, Option<Rect>) {
+pub fn frame_control(
+    cpu: &mut Cpu,
+    hdc: u32,
+    r: Rect,
+    kind: u32,
+    state: u32,
+) -> (bool, Option<Rect>) {
     let mut adjusted = None;
     let text = if state & DFCS_INACTIVE != 0 { 16 } else { 18 };
     let ok = match kind {
@@ -1640,7 +1773,8 @@ pub fn frame_control(cpu: &mut Cpu, hdc: u32, r: Rect, kind: u32, state: u32) ->
                 if state & DFCS_ADJUSTRECT != 0 {
                     adjusted = Some(inner);
                 }
-            } else if style & (DFCS_BUTTONRADIO | DFCS_BUTTONRADIOIMAGE | DFCS_BUTTONRADIOMASK) != 0 {
+            } else if style & (DFCS_BUTTONRADIO | DFCS_BUTTONRADIOIMAGE | DFCS_BUTTONRADIOMASK) != 0
+            {
                 let s = square_in(r);
                 let rad = s.width() / 2;
                 let c = (s.left + rad, s.top + rad);
@@ -1663,8 +1797,17 @@ pub fn frame_control(cpu: &mut Cpu, hdc: u32, r: Rect, kind: u32, state: u32) ->
                 }
             } else {
                 let s = square_in(r);
-                let inner = edge(cpu, hdc, s, EDGE_SUNKEN, BF_RECT | BF_ADJUST | (state & (DFCS_FLAT | DFCS_MONO))).1;
-                let face = if state & (DFCS_PUSHED | DFCS_INACTIVE) != 0 || style & DFCS_BUTTON3STATE != 0 && state & DFCS_CHECKED != 0 {
+                let inner = edge(
+                    cpu,
+                    hdc,
+                    s,
+                    EDGE_SUNKEN,
+                    BF_RECT | BF_ADJUST | (state & (DFCS_FLAT | DFCS_MONO)),
+                )
+                .1;
+                let face = if state & (DFCS_PUSHED | DFCS_INACTIVE) != 0
+                    || style & DFCS_BUTTON3STATE != 0 && state & DFCS_CHECKED != 0
+                {
                     COLOR_BTNFACE
                 } else {
                     COLOR_WINDOW
@@ -1690,12 +1833,20 @@ pub fn frame_control(cpu: &mut Cpu, hdc: u32, r: Rect, kind: u32, state: u32) ->
                     }
                 }
                 DFCS_CAPTIONMIN => {
-                    let rows = [(s.bottom - 2, s.left + 1, s.right - 3), (s.bottom - 1, s.left + 1, s.right - 3)];
+                    let rows = [
+                        (s.bottom - 2, s.left + 1, s.right - 3),
+                        (s.bottom - 1, s.left + 1, s.right - 3),
+                    ];
                     spans(cpu, hdc, &rows, text);
                 }
                 DFCS_CAPTIONMAX => {
                     let b = Rect::new(s.left, s.top, s.right, s.bottom);
-                    spans(cpu, hdc, &[(b.top, b.left, b.right), (b.top + 1, b.left, b.right)], text);
+                    spans(
+                        cpu,
+                        hdc,
+                        &[(b.top, b.left, b.right), (b.top + 1, b.left, b.right)],
+                        text,
+                    );
                     let edges: Vec<_> = (b.top..b.bottom)
                         .flat_map(|y| [(y, b.left, b.left + 1), (y, b.right - 1, b.right)])
                         .chain([(b.bottom - 1, b.left, b.right)])
@@ -1706,12 +1857,23 @@ pub fn frame_control(cpu: &mut Cpu, hdc: u32, r: Rect, kind: u32, state: u32) ->
                     let b = Rect::new(s.left, s.top + 3, s.right - 3, s.bottom);
                     let edges: Vec<_> = (b.top..b.bottom)
                         .flat_map(|y| [(y, b.left, b.left + 1), (y, b.right - 1, b.right)])
-                        .chain([(b.top, b.left, b.right), (b.top + 1, b.left, b.right), (b.bottom - 1, b.left, b.right)])
+                        .chain([
+                            (b.top, b.left, b.right),
+                            (b.top + 1, b.left, b.right),
+                            (b.bottom - 1, b.left, b.right),
+                        ])
                         .collect();
                     spans(cpu, hdc, &edges, text);
                     let t = Rect::new(s.left + 3, s.top, s.right, s.bottom - 3);
-                    spans(cpu, hdc, &[(t.top, t.left, t.right), (t.top + 1, t.left, t.right)], text);
-                    let right: Vec<_> = (t.top..t.bottom).map(|y| (y, t.right - 1, t.right)).collect();
+                    spans(
+                        cpu,
+                        hdc,
+                        &[(t.top, t.left, t.right), (t.top + 1, t.left, t.right)],
+                        text,
+                    );
+                    let right: Vec<_> = (t.top..t.bottom)
+                        .map(|y| (y, t.right - 1, t.right))
+                        .collect();
                     spans(cpu, hdc, &right, text);
                 }
             }
@@ -1723,13 +1885,29 @@ pub fn frame_control(cpu: &mut Cpu, hdc: u32, r: Rect, kind: u32, state: u32) ->
                     fill_color(cpu, hdc, r, COLOR_BTNFACE);
                     for k in 0..3 {
                         let o = 4 * k + 2;
-                        line(cpu, hdc, (r.right - o, r.bottom), (r.right, r.bottom - o), 20);
-                        line(cpu, hdc, (r.right - o - 1, r.bottom), (r.right, r.bottom - o - 1), 16);
+                        line(
+                            cpu,
+                            hdc,
+                            (r.right - o, r.bottom),
+                            (r.right, r.bottom - o),
+                            20,
+                        );
+                        line(
+                            cpu,
+                            hdc,
+                            (r.right - o - 1, r.bottom),
+                            (r.right, r.bottom - o - 1),
+                            16,
+                        );
                     }
                 }
                 dir => {
                     let inner = push_frame(cpu, hdc, r, state);
-                    let dir = if dir == DFCS_SCROLLCOMBOBOX { 1 } else { dir & 3 };
+                    let dir = if dir == DFCS_SCROLLCOMBOBOX {
+                        1
+                    } else {
+                        dir & 3
+                    };
                     let shift = (state & DFCS_PUSHED != 0) as i32;
                     arrow(cpu, hdc, inner.offset(shift, shift), dir, text);
                 }
@@ -1742,7 +1920,13 @@ pub fn frame_control(cpu: &mut Cpu, hdc: u32, r: Rect, kind: u32, state: u32) ->
                 DFCS_MENUCHECK => check_mark(cpu, hdc, r, 7),
                 _ => {
                     let s = square_in(r);
-                    disc(cpu, hdc, (s.left + s.width() / 2, s.top + s.height() / 2), (s.width() / 6).max(1), 7);
+                    disc(
+                        cpu,
+                        hdc,
+                        (s.left + s.width() / 2, s.top + s.height() / 2),
+                        (s.width() / 6).max(1),
+                        7,
+                    );
                 }
             }
             true
@@ -1764,7 +1948,14 @@ const SRCINVERT: u32 = 0x0066_0046;
 
 /// Draw the icon or cursor `icon` at (`x`, `y`) of `hdc`, `cx` by `cy`
 /// (0: its own size): its mask by AND, then its image by XOR.
-pub fn draw_icon_at(cpu: &mut Cpu, hdc: u32, (x, y): (i32, i32), icon: u32, (cx, cy): (i32, i32), flags: u32) -> bool {
+pub fn draw_icon_at(
+    cpu: &mut Cpu,
+    hdc: u32,
+    (x, y): (i32, i32),
+    icon: u32,
+    (cx, cy): (i32, i32),
+    flags: u32,
+) -> bool {
     let Some(ic) = super::resource::icon(cpu, icon) else {
         return false;
     };
@@ -1789,7 +1980,8 @@ pub fn draw_icon_at(cpu: &mut Cpu, hdc: u32, (x, y): (i32, i32), icon: u32, (cx,
     let blt = |cpu: &mut Cpu, bitmap: u32, sy: i32, rop: u32| {
         let old = gdi32::dc::select_object(cpu, &[mem, bitmap]).unwrap_or(0);
         let args = [
-            hdc, x as u32, y as u32, cx as u32, cy as u32, mem, 0, sy as u32, w as u32, h as u32, rop,
+            hdc, x as u32, y as u32, cx as u32, cy as u32, mem, 0, sy as u32, w as u32, h as u32,
+            rop,
         ];
         draw::stretch_blt(cpu, &args);
         if old != 0 {
@@ -1815,7 +2007,14 @@ pub fn draw_icon_at(cpu: &mut Cpu, hdc: u32, (x, y): (i32, i32), icon: u32, (cx,
 /// DrawIcon(hdc, x, y, icon).
 pub fn draw_icon(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let flags = DI_NORMAL | DI_DEFAULTSIZE;
-    let ok = draw_icon_at(cpu, args[0], (args[1] as i32, args[2] as i32), args[3], (0, 0), flags);
+    let ok = draw_icon_at(
+        cpu,
+        args[0],
+        (args[1] as i32, args[2] as i32),
+        args[3],
+        (0, 0),
+        flags,
+    );
     if !ok {
         set_error(cpu, super::ERROR_INVALID_ICON_HANDLE);
     }
@@ -1835,7 +2034,11 @@ pub fn draw_icon_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         let h = if cy != 0 { cy } else { ic.height };
         fill(cpu, hdc, Rect::sized(x, y, w, h), brush);
     }
-    let flags = if flags & DI_NORMAL == 0 { flags | DI_NORMAL } else { flags };
+    let flags = if flags & DI_NORMAL == 0 {
+        flags | DI_NORMAL
+    } else {
+        flags
+    };
     Some(draw_icon_at(cpu, hdc, (x, y), icon, (cx, cy), flags) as u32)
 }
 
@@ -1852,7 +2055,10 @@ pub fn caption(cpu: &mut Cpu, hwnd: u32, hdc: u32, r: Rect, flags: u32) {
     let (bar, text_color) = if active {
         (sysparams::COLOR_ACTIVECAPTION, sysparams::COLOR_CAPTIONTEXT)
     } else {
-        (sysparams::COLOR_INACTIVECAPTION, sysparams::COLOR_INACTIVECAPTIONTEXT)
+        (
+            sysparams::COLOR_INACTIVECAPTION,
+            sysparams::COLOR_INACTIVECAPTIONTEXT,
+        )
     };
     fill_color(cpu, hdc, r, bar);
     let mut left = r.left + 2;
@@ -1868,7 +2074,13 @@ pub fn caption(cpu: &mut Cpu, hwnd: u32, hdc: u32, r: Rect, flags: u32) {
                     .classes
                     .get(w.class as usize)
                     .and_then(|c| c.as_ref())
-                    .map_or(0, |c| if c.icon_small != 0 { c.icon_small } else { c.icon })
+                    .map_or(0, |c| {
+                        if c.icon_small != 0 {
+                            c.icon_small
+                        } else {
+                            c.icon
+                        }
+                    })
             }
         });
         if icon != 0 {
@@ -1879,7 +2091,10 @@ pub fn caption(cpu: &mut Cpu, hwnd: u32, hdc: u32, r: Rect, flags: u32) {
         }
     }
     if flags & DC_TEXT != 0 {
-        let text = user(cpu).window(hwnd).map(|w| w.text.clone()).unwrap_or_default();
+        let text = user(cpu)
+            .window(hwnd)
+            .map(|w| w.text.clone())
+            .unwrap_or_default();
         if !text.is_empty() {
             let font = gdi32::gdi(cpu).stock(gdi32::SYSTEM_FONT);
             let rgb = user(cpu).color(text_color);
@@ -1891,7 +2106,9 @@ pub fn caption(cpu: &mut Cpu, hwnd: u32, hdc: u32, r: Rect, flags: u32) {
                 old
             });
             let mut tr = Rect::new(left, r.top, r.right - 2, r.bottom);
-            let fl = super::text::DT_SINGLELINE | super::text::DT_VCENTER | super::text::DT_NOPREFIX
+            let fl = super::text::DT_SINGLELINE
+                | super::text::DT_VCENTER
+                | super::text::DT_NOPREFIX
                 | super::text::DT_END_ELLIPSIS;
             super::text::draw_text_bytes(cpu, hdc, &text, &mut tr, fl);
             if let Some(old) = saved {
@@ -1921,6 +2138,11 @@ pub fn paint_desktop(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
     let (w, h) = gdi32::dc::device_size(cpu, &dc);
     let brush = sysparams::brush(cpu, COLOR_BACKGROUND);
-    draw::fill_device_rect(cpu, hdc, Rect::new(-0x4000, -0x4000, w + 0x4000, h + 0x4000), brush);
+    draw::fill_device_rect(
+        cpu,
+        hdc,
+        Rect::new(-0x4000, -0x4000, w + 0x4000, h + 0x4000),
+        brush,
+    );
     Some(TRUE)
 }

@@ -314,7 +314,10 @@ fn raise_owned(state: &mut State, hwnd: u32) {
         return;
     }
     let topmost = w.ex_style & WS_EX_TOPMOST != 0;
-    let list = state.window(DESKTOP).map(|d| d.children.clone()).unwrap_or_default();
+    let list = state
+        .window(DESKTOP)
+        .map(|d| d.children.clone())
+        .unwrap_or_default();
     let owned_by = |h: u32| {
         let mut o = state.window(h).map_or(0, |w| w.owner);
         for _ in 0..64 {
@@ -324,7 +327,10 @@ fn raise_owned(state: &mut State, hwnd: u32) {
             o = state.window(o).map_or(0, |w| w.owner);
         }
         o == hwnd
-            && (topmost || state.window(h).is_some_and(|w| w.ex_style & WS_EX_TOPMOST == 0))
+            && (topmost
+                || state
+                    .window(h)
+                    .is_some_and(|w| w.ex_style & WS_EX_TOPMOST == 0))
     };
     let (moving, mut rest): (Vec<u32>, Vec<u32>) = list.iter().partition(|&&h| owned_by(h));
     if moving.is_empty() {
@@ -446,7 +452,21 @@ const C_NOTIFY: usize = 3;
 /// CreateWindowExA(ex_style, class, name, style, x, y, width, height,
 /// parent, menu, instance, param).
 pub fn create_window_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let &[ex, class, name, style, x, y, cx, cy, parent, menu, instance, param] = args else {
+    let &[
+        ex,
+        class,
+        name,
+        style,
+        x,
+        y,
+        cx,
+        cy,
+        parent,
+        menu,
+        instance,
+        param,
+    ] = args
+    else {
         unreachable!()
     };
     super::init(cpu);
@@ -506,7 +526,10 @@ pub fn create_window_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let given = (style, fix_ex_style(style, ex));
     let (style, mut ex) = fix_styles(style, ex);
     // A window owned by a topmost one is topmost too.
-    if state.window(owner).is_some_and(|o| o.ex_style & WS_EX_TOPMOST != 0) {
+    if state
+        .window(owner)
+        .is_some_and(|o| o.ex_style & WS_EX_TOPMOST != 0)
+    {
         ex |= WS_EX_TOPMOST;
     }
     let class_info = state.classes[class_index as usize].clone().unwrap();
@@ -716,7 +739,8 @@ pub fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 let state = user(cpu);
                 let rect = state.window(hwnd).map(|w| w.rect).unwrap_or_default();
                 let origin = state.screen_client(t.var(C_PARENT));
-                rect.offset(origin.left, origin.top).write(cpu, t.scratch + CREATE_RECT);
+                rect.offset(origin.left, origin.top)
+                    .write(cpu, t.scratch + CREATE_RECT);
                 return send(hwnd, WM_NCCALCSIZE, 0, t.scratch + CREATE_RECT, 5);
             }
             5 => {
@@ -763,7 +787,11 @@ pub fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 w.style &= !(WS_MINIMIZE | WS_MAXIMIZE);
                 t.step = 30;
                 if super::hook::has(cpu, WH_CBT) {
-                    let cmd = if style & WS_MINIMIZE != 0 { SW_MINIMIZE } else { SW_MAXIMIZE };
+                    let cmd = if style & WS_MINIMIZE != 0 {
+                        SW_MINIMIZE
+                    } else {
+                        SW_MAXIMIZE
+                    };
                     return super::hook::call(WH_CBT, HCBT_MINMAX, hwnd, cmd, 30);
                 }
                 continue;
@@ -893,7 +921,11 @@ pub fn write_min_max(cpu: &mut Cpu, hwnd: u32, at: u32) {
     let (sw, sh) = super::sysparams::screen_size();
     // The maximized window's frame is off the screen; a caption's
     // border doesn't count.
-    let framed = if style & WS_CAPTION == WS_CAPTION { style & !WS_BORDER } else { style };
+    let framed = if style & WS_CAPTION == WS_CAPTION {
+        style & !WS_BORDER
+    } else {
+        style
+    };
     let frame = adjust(Rect::default(), framed, ex, false);
     let (xinc, yinc) = (-frame.left, -frame.top);
     let (max_w, max_h) = if style & WS_CHILD != 0 {
@@ -949,7 +981,11 @@ pub fn free_window(cpu: &mut Cpu, hwnd: u32) {
             other.last_popup = 0;
         }
     }
-    if let Some(c) = state.classes.get_mut(w.class as usize).and_then(|c| c.as_mut()) {
+    if let Some(c) = state
+        .classes
+        .get_mut(w.class as usize)
+        .and_then(|c| c.as_mut())
+    {
         c.windows = c.windows.saturating_sub(1);
     }
     let input = &mut state.input;
@@ -1074,11 +1110,8 @@ pub fn destroy_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     if t.var(D_CHILD) != 0 {
                         return Next::call(address_of("ShowWindow"), &[hwnd, SW_HIDE], 5);
                     }
-                    let flags = SWP_NOMOVE
-                        | SWP_NOSIZE
-                        | SWP_NOZORDER
-                        | SWP_NOACTIVATE
-                        | SWP_HIDEWINDOW;
+                    let flags =
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_HIDEWINDOW;
                     return Next::call(
                         address_of("SetWindowPos"),
                         &[hwnd, 0, 0, 0, 0, 0, flags],
@@ -1147,7 +1180,9 @@ pub fn destroy_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 };
                 t.set(D_AT, at as u32 + 1);
                 let state = user(cpu);
-                let fresh = state.window(h).is_some_and(|w| w.flags & IN_DESTROY_MSG == 0);
+                let fresh = state
+                    .window(h)
+                    .is_some_and(|w| w.flags & IN_DESTROY_MSG == 0);
                 if state.is_window(h) && (h == hwnd || fresh) {
                     if let Some(w) = user(cpu).window_mut(h) {
                         w.flags |= IN_DESTROY_MSG;
@@ -1429,7 +1464,13 @@ pub fn show_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             }
             3 => {
                 let client = user(cpu).window(hwnd).map(|w| w.client).unwrap_or_default();
-                return send(hwnd, WM_MOVE, 0, super::make_long(client.left, client.top), 4);
+                return send(
+                    hwnd,
+                    WM_MOVE,
+                    0,
+                    super::make_long(client.left, client.top),
+                    4,
+                );
             }
             _ => return Next::Done(was as u32),
         }
@@ -1463,7 +1504,11 @@ fn maximize(cpu: &mut Cpu, hwnd: u32) -> Rect {
         return Rect::default();
     };
     let (style, ex, parent) = (w.style, w.ex_style, w.parent);
-    let framed = if style & WS_CAPTION == WS_CAPTION { style & !WS_BORDER } else { style };
+    let framed = if style & WS_CAPTION == WS_CAPTION {
+        style & !WS_BORDER
+    } else {
+        style
+    };
     let frame = adjust(Rect::default(), framed, ex, false);
     let area = if style & WS_CHILD != 0 {
         state.window(parent).map(|p| p.client).unwrap_or_default()
@@ -1564,7 +1609,15 @@ pub fn set_window_pos(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             flags |= SWP_NOZORDER;
         }
     }
-    let words = [hwnd, after, x, y, cx as u32, cy as u32, flags | state_changed];
+    let words = [
+        hwnd,
+        after,
+        x,
+        y,
+        cx as u32,
+        cy as u32,
+        flags | state_changed,
+    ];
     let mut vars = vec![hwnd];
     vars.extend([rect.left, rect.top, rect.right, rect.bottom].map(|v| v as u32));
     vars.extend([client.left, client.top, client.right, client.bottom].map(|v| v as u32));
@@ -1606,7 +1659,8 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                     new.right = new.left + cx.max(0);
                     new.bottom = new.top + cy.max(0);
                 }
-                t.vars.extend([new.left, new.top, new.right, new.bottom].map(|v| v as u32));
+                t.vars
+                    .extend([new.left, new.top, new.right, new.bottom].map(|v| v as u32));
                 if flags & SWP_NOSIZE == 0 || flags & SWP_FRAMECHANGED != 0 {
                     // WM_NCCALCSIZE with the new rectangle, the old one,
                     // the old client area and the WINDOWPOS.
@@ -1623,12 +1677,16 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 // The client area moves with the window.
                 let old_client = rect_var(t, P_OLD_CLIENT);
                 let client = old_client.offset(new.left - old.left, new.top - old.top);
-                t.vars.extend([client.left, client.top, client.right, client.bottom].map(|v| v as u32));
+                t.vars.extend(
+                    [client.left, client.top, client.right, client.bottom].map(|v| v as u32),
+                );
                 t.step = 3;
             }
             2 => {
                 let client = Rect::read(cpu, t.scratch + P_CALC);
-                t.vars.extend([client.left, client.top, client.right, client.bottom].map(|v| v as u32));
+                t.vars.extend(
+                    [client.left, client.top, client.right, client.bottom].map(|v| v as u32),
+                );
                 t.step = 3;
             }
             3 => {
@@ -1717,11 +1775,8 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                     | SWP_FRAMECHANGED
                     | SWP_NOCLIENTSIZE
                     | SWP_NOCLIENTMOVE;
-                let nothing = SWP_NOSIZE
-                    | SWP_NOMOVE
-                    | SWP_NOZORDER
-                    | SWP_NOCLIENTSIZE
-                    | SWP_NOCLIENTMOVE;
+                let nothing =
+                    SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOCLIENTSIZE | SWP_NOCLIENTMOVE;
                 if flags & AGG != nothing && flags & SWP_NOSENDCHANGING == 0 {
                     return send(hwnd, WM_WINDOWPOSCHANGED, 0, winpos, 5);
                 }
@@ -1747,7 +1802,10 @@ pub fn move_window(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if args[5] == 0 {
         flags |= SWP_NOREDRAW;
     }
-    set_window_pos(cpu, &[args[0], 0, args[1], args[2], args[3], args[4], flags])
+    set_window_pos(
+        cpu,
+        &[args[0], 0, args[1], args[2], args[3], args[4], flags],
+    )
 }
 
 /// The window `hwnd`, or the last error set for a bad handle.
@@ -1885,11 +1943,19 @@ pub fn is_child(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 pub fn is_iconic(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    Some(user(cpu).window(args[0]).is_some_and(|w| w.style & WS_MINIMIZE != 0) as u32)
+    Some(
+        user(cpu)
+            .window(args[0])
+            .is_some_and(|w| w.style & WS_MINIMIZE != 0) as u32,
+    )
 }
 
 pub fn is_zoomed(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    Some(user(cpu).window(args[0]).is_some_and(|w| w.style & WS_MAXIMIZE != 0) as u32)
+    Some(
+        user(cpu)
+            .window(args[0])
+            .is_some_and(|w| w.style & WS_MAXIMIZE != 0) as u32,
+    )
 }
 
 /// GetParent: a child's parent, a popup's owner, or 0.
@@ -1977,7 +2043,9 @@ pub fn set_parent(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(0);
     }
     let old = state.parent(hwnd);
-    let visible = state.window(hwnd).is_some_and(|w| w.style & WS_VISIBLE != 0);
+    let visible = state
+        .window(hwnd)
+        .is_some_and(|w| w.style & WS_VISIBLE != 0);
     task::start(
         cpu,
         TASK_MISC,
@@ -2143,7 +2211,11 @@ pub fn set_window_long(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     let old = match index {
         GWL_STYLE | GWL_EXSTYLE => {
-            let old = if index == GWL_STYLE { w.style } else { w.ex_style };
+            let old = if index == GWL_STYLE {
+                w.style
+            } else {
+                w.ex_style
+            };
             let mut new = value;
             if index == GWL_EXSTYLE {
                 // WS_EX_WINDOWEDGE follows the frame.
@@ -2352,12 +2424,7 @@ pub fn get_window_text_length(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// The class name and window name a find matches: None matches any.
-fn finds(
-    state: &State,
-    hwnd: u32,
-    class: &Option<Name>,
-    title: &Option<Vec<u8>>,
-) -> bool {
+fn finds(state: &State, hwnd: u32, class: &Option<Name>, title: &Option<Vec<u8>>) -> bool {
     let Some(w) = state.window(hwnd) else {
         return false;
     };
@@ -2492,7 +2559,12 @@ fn props(cpu: &mut Cpu, hwnd: u32, proc: u32, param: u32, ex: bool) -> Option<u3
     if w.props.is_empty() {
         return Some(-1i32 as u32);
     }
-    let size = w.props.iter().map(|(k, _)| k.len() as u32 + 1).max().unwrap_or(0);
+    let size = w
+        .props
+        .iter()
+        .map(|(k, _)| k.len() as u32 + 1)
+        .max()
+        .unwrap_or(0);
     let vars = vec![ENUM_PROPS, proc, param, 0, hwnd, ex as u32];
     task::start(cpu, TASK_ENUM, vars, size.next_multiple_of(4))
 }
@@ -2501,12 +2573,19 @@ fn props(cpu: &mut Cpu, hwnd: u32, proc: u32, param: u32, ex: bool) -> Option<u3
 /// returns FALSE.
 pub fn enum_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     if t.step == 1 && value == 0 {
-        return Next::Done(if t.var(E_KIND) == ENUM_PROPS { 0 } else { FALSE });
+        return Next::Done(if t.var(E_KIND) == ENUM_PROPS {
+            0
+        } else {
+            FALSE
+        });
     }
     if t.var(E_KIND) == ENUM_PROPS {
         let hwnd = t.var(E_LIST);
         let at = t.var(E_AT) as usize;
-        let props = user(cpu).window(hwnd).map(|w| w.props.clone()).unwrap_or_default();
+        let props = user(cpu)
+            .window(hwnd)
+            .map(|w| w.props.clone())
+            .unwrap_or_default();
         let Some((name, data)) = props.get(at).cloned() else {
             return Next::Done(value);
         };
@@ -2700,7 +2779,15 @@ pub fn set_window_placement(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         if cmd == SW_SHOWNORMAL || cmd == SW_RESTORE {
             return set_window_pos(
                 cpu,
-                &[hwnd, 0, r.left as u32, r.top as u32, r.width() as u32, r.height() as u32, flags],
+                &[
+                    hwnd,
+                    0,
+                    r.left as u32,
+                    r.top as u32,
+                    r.width() as u32,
+                    r.height() as u32,
+                    flags,
+                ],
             );
         }
     }
@@ -2831,7 +2918,11 @@ pub fn defer_window_pos(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(0);
     }
     let state = user(cpu);
-    let Some(Some(list)) = state.input.defers.get_mut(hdwp.wrapping_sub(0xD000) as usize) else {
+    let Some(Some(list)) = state
+        .input
+        .defers
+        .get_mut(hdwp.wrapping_sub(0xD000) as usize)
+    else {
         set_error(cpu, super::ERROR_INVALID_HANDLE);
         return Some(0);
     };
@@ -2865,7 +2956,11 @@ const TASK_ENUM_DEFER: u16 = 16;
 /// EndDeferWindowPos's steps: SetWindowPos for each.
 pub fn defer_step(_cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
     let at = t.var(E_AT) as usize;
-    let Some(call) = t.vars.get(E_LIST + 7 * at..E_LIST + 7 * at + 7).map(<[u32]>::to_vec) else {
+    let Some(call) = t
+        .vars
+        .get(E_LIST + 7 * at..E_LIST + 7 * at + 7)
+        .map(<[u32]>::to_vec)
+    else {
         return Next::Done(TRUE);
     };
     t.set(E_AT, at as u32 + 1);

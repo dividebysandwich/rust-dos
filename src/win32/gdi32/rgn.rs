@@ -3,8 +3,8 @@
 
 use super::region::{ERROR, Op, RGN_AND, RGN_COPY, RGN_DIFF, RGN_OR, RGN_XOR};
 use super::{
-    ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, FALSE, Kind, Rect, Region, TRUE, add, draw,
-    gdi, region_of, set_error, set_region,
+    ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, FALSE, Kind, Rect, Region, TRUE, add, draw, gdi,
+    region_of, set_error, set_region,
 };
 use crate::cpu::Cpu;
 use crate::win32::user32::{read_words, write_words};
@@ -26,7 +26,12 @@ fn rect_region(l: i32, t: i32, r: i32, b: i32) -> Region {
 
 /// CreateRectRgn(left, top, right, bottom).
 pub fn create_rect_rgn(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let r = rect_region(args[0] as i32, args[1] as i32, args[2] as i32, args[3] as i32);
+    let r = rect_region(
+        args[0] as i32,
+        args[1] as i32,
+        args[2] as i32,
+        args[3] as i32,
+    );
     Some(new_region(cpu, r))
 }
 
@@ -73,7 +78,13 @@ pub fn round_rect_region(r: Rect, ew: i32, eh: i32) -> Region {
 
 /// CreateEllipticRgn(left, top, right, bottom).
 pub fn create_elliptic_rgn(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let r = Rect::new(args[0] as i32, args[1] as i32, args[2] as i32, args[3] as i32).ordered();
+    let r = Rect::new(
+        args[0] as i32,
+        args[1] as i32,
+        args[2] as i32,
+        args[3] as i32,
+    )
+    .ordered();
     let region = round_rect_region(r, r.width(), r.height());
     Some(new_region(cpu, region))
 }
@@ -90,7 +101,12 @@ pub fn create_elliptic_rgn_indirect(cpu: &mut Cpu, args: &[u32]) -> Option<u32> 
 
 /// CreateRoundRectRgn(left, top, right, bottom, width, height).
 pub fn create_round_rect_rgn(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let r = Rect::new(args[0] as i32, args[1] as i32, args[2] as i32, args[3] as i32);
+    let r = Rect::new(
+        args[0] as i32,
+        args[1] as i32,
+        args[2] as i32,
+        args[3] as i32,
+    );
     let region = round_rect_region(r, args[4] as i32, args[5] as i32);
     Some(new_region(cpu, region))
 }
@@ -170,14 +186,17 @@ pub fn ext_create_region(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     // shear isn't kept.
     let xform = (args[0] != 0).then(|| {
         let w = read_words(cpu, args[0], 6);
-        w.into_iter().map(|v| f32::from_bits(v) as f64).collect::<Vec<f64>>()
+        w.into_iter()
+            .map(|v| f32::from_bits(v) as f64)
+            .collect::<Vec<f64>>()
     });
     let count = header[2];
     let mut region = Region::new();
     for i in 0..count {
         let mut r = Rect::read(cpu, at + 32 + 16 * i);
         if let Some(x) = &xform {
-            let map = |v: i32, scale: f64, offset: f64| (v as f64 * scale + offset + 0.5).floor() as i32;
+            let map =
+                |v: i32, scale: f64, offset: f64| (v as f64 * scale + offset + 0.5).floor() as i32;
             let (l, rt) = (map(r.left, x[0], x[4]), map(r.right, x[0], x[4]));
             let (t, b) = (map(r.top, x[3], x[5]), map(r.bottom, x[3], x[5]));
             r = Rect::new(l.min(rt), t.min(b), l.max(rt), t.max(b));
@@ -306,7 +325,12 @@ pub fn rect_in_region(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// SetRectRgn(hrgn, left, top, right, bottom).
 pub fn set_rect_rgn(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let r = rect_region(args[1] as i32, args[2] as i32, args[3] as i32, args[4] as i32);
+    let r = rect_region(
+        args[1] as i32,
+        args[2] as i32,
+        args[3] as i32,
+        args[4] as i32,
+    );
     if !set_region(cpu, args[0], r) {
         set_error(cpu, ERROR_INVALID_HANDLE);
         return Some(FALSE);

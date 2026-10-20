@@ -364,11 +364,16 @@ pub fn wait_ready(win32: &crate::win32::Win32, tid: u32, wait: &QueueWait, now: 
     {
         return true;
     }
-    if mask & QS_INPUT != 0 && q.input.iter().any(|m| f.wants(state, m) && mask & qs_of(m.message) != 0)
+    if mask & QS_INPUT != 0
+        && q.input
+            .iter()
+            .any(|m| f.wants(state, m) && mask & qs_of(m.message) != 0)
     {
         return true;
     }
-    if mask & QS_PAINT != 0 && f.wants_message(WM_PAINT) && paint_window(state, tid, f.hwnd).is_some()
+    if mask & QS_PAINT != 0
+        && f.wants_message(WM_PAINT)
+        && paint_window(state, tid, f.hwnd).is_some()
     {
         return true;
     }
@@ -541,7 +546,10 @@ fn send_other(
             state.last_sent += 1;
             let id = state.last_sent;
             let deadline = timeout.map_or(0, |(ms, _)| now + ms as u64 * 1000);
-            state.queue_mut(me).waiting.push((id, deadline.max(1) * (timeout.is_some() as u64)));
+            state
+                .queue_mut(me)
+                .waiting
+                .push((id, deadline.max(1) * (timeout.is_some() as u64)));
             state.queue_mut(tid).sent.push_back(Sent {
                 id,
                 from: me,
@@ -558,12 +566,7 @@ fn send_other(
         }
     };
     let out = timeout.map_or(0, |(_, out)| out);
-    task::start(
-        cpu,
-        TASK_SEND,
-        vec![hwnd, msg, wp, lp, 0, 1, id, out],
-        0,
-    )
+    task::start(cpu, TASK_SEND, vec![hwnd, msg, wp, lp, 0, 1, id, out], 0)
 }
 
 /// Whether the thread `tid` is there and hasn't ended.
@@ -673,7 +676,11 @@ fn reply_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     }
                     return Next::Done(result);
                 }
-                let deadline = q.waiting.iter().find(|&&(w, _)| w == id).map_or(0, |&(_, d)| d);
+                let deadline = q
+                    .waiting
+                    .iter()
+                    .find(|&&(w, _)| w == id)
+                    .map_or(0, |&(_, d)| d);
                 if deadline != 0 && now >= deadline {
                     q.waiting.retain(|&(w, _)| w != id);
                     // The reply, if it comes, goes nowhere.
@@ -924,7 +931,14 @@ pub fn post_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             let Some(tid) = user(cpu).window(h).map(|w| w.tid) else {
                 continue;
             };
-            post(cpu, tid, Msg { hwnd: h, ..m.clone() });
+            post(
+                cpu,
+                tid,
+                Msg {
+                    hwnd: h,
+                    ..m.clone()
+                },
+            );
         }
         return Some(TRUE);
     }
@@ -1263,14 +1277,7 @@ pub fn dispatch_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     task::start(
         cpu,
         TASK_DISPATCH,
-        vec![
-            DISPATCH_NORMAL,
-            proc,
-            m.hwnd,
-            m.message,
-            m.wparam,
-            m.lparam,
-        ],
+        vec![DISPATCH_NORMAL, proc, m.hwnd, m.message, m.wparam, m.lparam],
         0,
     )
 }
@@ -1444,7 +1451,14 @@ pub fn msg_wait_for_multiple_objects_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u
     msg_wait(cpu, args[0], args[1], all, args[2], args[3])
 }
 
-fn msg_wait(cpu: &mut Cpu, count: u32, handles: u32, all: bool, timeout: u32, mask: u32) -> Option<u32> {
+fn msg_wait(
+    cpu: &mut Cpu,
+    count: u32,
+    handles: u32,
+    all: bool,
+    timeout: u32,
+    mask: u32,
+) -> Option<u32> {
     let tid = current_tid(cpu);
     let now = cpu.bus.clock.now_micros();
     let wait = QueueWait {
@@ -1573,9 +1587,9 @@ fn kill(cpu: &mut Cpu, hwnd: u32, id: u32, system: bool) -> Option<u32> {
     let tid = current_tid(cpu);
     let state = user(cpu);
     let before = state.timers.len();
-    state
-        .timers
-        .retain(|t| !(t.hwnd == hwnd && t.id == id && t.system == system && (hwnd != 0 || t.tid == tid)));
+    state.timers.retain(|t| {
+        !(t.hwnd == hwnd && t.id == id && t.system == system && (hwnd != 0 || t.tid == tid))
+    });
     if state.timers.len() == before {
         return Some(FALSE);
     }

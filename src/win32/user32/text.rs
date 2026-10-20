@@ -63,7 +63,15 @@ fn tabbed_width(cpu: &mut Cpu, hdc: u32, chars: &[u8], expand: bool, tab: i32) -
 /// Take the next line of `text` from `*pos`, as DrawTextA breaks lines:
 /// at line ends (unless DT_SINGLELINE) and, with DT_WORDBREAK, where a
 /// word doesn't fit in `width`.
-fn next_line(cpu: &mut Cpu, hdc: u32, text: &[u8], pos: &mut usize, flags: u32, width: i32, tab: i32) -> Line {
+fn next_line(
+    cpu: &mut Cpu,
+    hdc: u32,
+    text: &[u8],
+    pos: &mut usize,
+    flags: u32,
+    width: i32,
+    tab: i32,
+) -> Line {
     let expand = flags & DT_EXPANDTABS != 0;
     let prefixes = flags & DT_NOPREFIX == 0;
     // The line's characters, and for each where it is in `text`.
@@ -197,7 +205,11 @@ fn draw_line(
     tab: i32,
     ascent: i32,
 ) {
-    let options = if flags & DT_NOCLIP != 0 { 0 } else { ETO_CLIPPED };
+    let options = if flags & DT_NOCLIP != 0 {
+        0
+    } else {
+        ETO_CLIPPED
+    };
     let clip = (flags & DT_NOCLIP == 0).then_some(rect);
     let expand = flags & DT_EXPANDTABS != 0 && tab > 0;
     let mut xseg = x;
@@ -364,7 +376,16 @@ fn draw_text_core(
 /// Draw `text` in `rect` of the DC by DrawTextA's `flags`, for USER's
 /// own painting: the height it drew.
 pub fn draw_text_bytes(cpu: &mut Cpu, hdc: u32, text: &[u8], rect: &mut Rect, flags: u32) -> i32 {
-    draw_text_core(cpu, hdc, Some(text.to_vec()), text.len() as i32, rect, flags, None).0
+    draw_text_core(
+        cpu,
+        hdc,
+        Some(text.to_vec()),
+        text.len() as i32,
+        rect,
+        flags,
+        None,
+    )
+    .0
 }
 
 /// The text DrawTextA was given: `count` bytes, or with -1 to its 0.
@@ -427,9 +448,15 @@ pub fn tabbed(
 ) -> u32 {
     let start = x;
     let (mut stops, default) = match stops.len() {
-        0 => (&[][..], 8 * font::metrics(cpu, hdc).map_or(0, |m| m.average_width)),
+        0 => (
+            &[][..],
+            8 * font::metrics(cpu, hdc).map_or(0, |m| m.average_width),
+        ),
         1 => (&[][..], stops[0]),
-        _ => (stops, 8 * font::metrics(cpu, hdc).map_or(0, |m| m.average_width)),
+        _ => (
+            stops,
+            8 * font::metrics(cpu, hdc).map_or(0, |m| m.average_width),
+        ),
     };
     let mut height = font::metrics(cpu, hdc).map_or(0, |m| m.height);
     let mut rest = text;
@@ -501,7 +528,15 @@ pub fn tabbed_text_out(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [hdc, x, y, at, count, n, stops, origin] = args.try_into().unwrap();
     let text = text_arg(cpu, at, count as i32)?.unwrap_or_default();
     let stops = read_stops(cpu, n, stops);
-    Some(tabbed(cpu, hdc, (x as i32, y as i32), &text, &stops, origin as i32, true))
+    Some(tabbed(
+        cpu,
+        hdc,
+        (x as i32, y as i32),
+        &text,
+        &stops,
+        origin as i32,
+        true,
+    ))
 }
 
 /// GetTabbedTextExtentA(hdc, text, count, stops, positions).
@@ -516,13 +551,23 @@ pub fn get_tabbed_text_extent(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// the gray text color.
 fn draw_gray(cpu: &mut Cpu, hdc: u32, (x, y): (i32, i32), text: &[u8], prefix: bool) {
     let gray = user(cpu).color(super::sysparams::COLOR_GRAYTEXT);
-    let old = gdi32::dc::with(cpu, hdc, |d| std::mem::replace(&mut d.attrs.text_color, gray));
+    let old = gdi32::dc::with(cpu, hdc, |d| {
+        std::mem::replace(&mut d.attrs.text_color, gray)
+    });
     let mode = gdi32::dc::with(cpu, hdc, |d| {
         std::mem::replace(&mut d.attrs.bk_mode, gdi32::dc::TRANSPARENT)
     });
     let mut r = Rect::new(x, y, x + 0x4000, y + 0x4000);
     let flags = DT_NOCLIP | DT_SINGLELINE | if prefix { 0 } else { DT_NOPREFIX };
-    draw_text_core(cpu, hdc, Some(text.to_vec()), text.len() as i32, &mut r, flags, None);
+    draw_text_core(
+        cpu,
+        hdc,
+        Some(text.to_vec()),
+        text.len() as i32,
+        &mut r,
+        flags,
+        None,
+    );
     gdi32::dc::with(cpu, hdc, |d| {
         if let Some(c) = old {
             d.attrs.text_color = c;
@@ -587,7 +632,15 @@ pub fn draw_state(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             } else {
                 let mut r = Rect::new(x, y, x + 0x4000, y + 0x4000);
                 let f = DT_NOCLIP | DT_SINGLELINE | if prefix { 0 } else { DT_NOPREFIX };
-                draw_text_core(cpu, hdc, Some(text.clone()), text.len() as i32, &mut r, f, None);
+                draw_text_core(
+                    cpu,
+                    hdc,
+                    Some(text.clone()),
+                    text.len() as i32,
+                    &mut r,
+                    f,
+                    None,
+                );
             }
             Some(TRUE)
         }
@@ -608,7 +661,13 @@ pub fn draw_state(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// Draw the bitmap `bitmap` at (`x`, `y`) on the DC: `size` of it, or
 /// all of it for 0.
-pub fn draw_bitmap(cpu: &mut Cpu, hdc: u32, bitmap: u32, (x, y): (i32, i32), size: (i32, i32)) -> bool {
+pub fn draw_bitmap(
+    cpu: &mut Cpu,
+    hdc: u32,
+    bitmap: u32,
+    (x, y): (i32, i32),
+    size: (i32, i32),
+) -> bool {
     let Some(b) = gdi32::gdi(cpu).bitmap(bitmap).map(|b| (b.width, b.height)) else {
         return false;
     };
@@ -617,7 +676,17 @@ pub fn draw_bitmap(cpu: &mut Cpu, hdc: u32, bitmap: u32, (x, y): (i32, i32), siz
         return false;
     };
     let old = gdi32::dc::select_object(cpu, &[mem, bitmap]).unwrap_or(0);
-    let args = [hdc, x as u32, y as u32, w as u32, h as u32, mem, 0, 0, 0x00CC_0020];
+    let args = [
+        hdc,
+        x as u32,
+        y as u32,
+        w as u32,
+        h as u32,
+        mem,
+        0,
+        0,
+        0x00CC_0020,
+    ];
     gdi32::draw::bit_blt(cpu, &args);
     if old != 0 {
         gdi32::dc::select_object(cpu, &[mem, old]);
@@ -781,7 +850,12 @@ fn string_arg(cpu: &mut Cpu, at: u32, wide: bool) -> Option<Vec<u16>> {
         }
         Some(out)
     } else {
-        Some(bytes_at(cpu, at)?.into_iter().map(|b| CodePage::Ansi.char(b)).collect())
+        Some(
+            bytes_at(cpu, at)?
+                .into_iter()
+                .map(|b| CodePage::Ansi.char(b))
+                .collect(),
+        )
     }
 }
 
@@ -805,7 +879,12 @@ fn put_wide(cpu: &mut Cpu, buffer: u32, text: &[u16]) -> u32 {
 }
 
 fn ansi_format(cpu: &mut Cpu, at: u32) -> Option<Vec<u16>> {
-    Some(bytes_at(cpu, at)?.into_iter().map(|b| CodePage::Ansi.char(b)).collect())
+    Some(
+        bytes_at(cpu, at)?
+            .into_iter()
+            .map(|b| CodePage::Ansi.char(b))
+            .collect(),
+    )
 }
 
 /// wsprintfA(buffer, format, ...): cdecl, the arguments on the stack.
@@ -959,7 +1038,10 @@ fn case_buff_w(cpu: &mut Cpu, at: u32, len: u32, upper: bool) -> Option<u32> {
     if at == 0 {
         return Some(0);
     }
-    if !cpu.bus.guest_probe(at, (len as usize).saturating_mul(2), true) {
+    if !cpu
+        .bus
+        .guest_probe(at, (len as usize).saturating_mul(2), true)
+    {
         return None;
     }
     for i in 0..len {
@@ -1090,7 +1172,13 @@ fn convert(cpu: &mut Cpu, src: u32, dst: u32, len: Option<u32>, to_oem: bool) ->
     };
     let out: Vec<u8> = bytes
         .iter()
-        .map(|&b| if b < 0x80 { b } else { best_fit(from.char(b), to) })
+        .map(|&b| {
+            if b < 0x80 {
+                b
+            } else {
+                best_fit(from.char(b), to)
+            }
+        })
         .collect();
     cpu.bus.guest_write_bytes(dst, &out);
     Some(TRUE)

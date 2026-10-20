@@ -201,6 +201,9 @@ mod tests {
         let a = Rect::new(0, 0, 10, 10);
         let b = Rect::new(10, 0, 20, 10);
         assert_eq!(intersect(&a, &b), None);
-        assert_eq!(intersect(&a, &Rect::new(5, 5, 15, 15)), Some(Rect::new(5, 5, 10, 10)));
+        assert_eq!(
+            intersect(&a, &Rect::new(5, 5, 15, 15)),
+            Some(Rect::new(5, 5, 10, 10))
+        );
     }
 }

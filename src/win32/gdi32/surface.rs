@@ -166,7 +166,8 @@ impl Surface {
                             let row = if top_down { y } else { height - 1 - y };
                             let at = bits.wrapping_add(row as u32 * stride as u32);
                             let start = r as usize * stride;
-                            cpu.bus.guest_read_bytes(at, &mut data[start..start + stride]);
+                            cpu.bus
+                                .guest_read_bytes(at, &mut data[start..start + stride]);
                         }
                         if cpu.bus.guest_faulted() {
                             return None;
@@ -372,7 +373,11 @@ impl Surface {
                     }
                     let shift = mask.trailing_zeros();
                     let bits = (mask >> shift).count_ones();
-                    let v = if bits >= 8 { v << (bits - 8) } else { v >> (8 - bits) };
+                    let v = if bits >= 8 {
+                        v << (bits - 8)
+                    } else {
+                        v >> (8 - bits)
+                    };
                     (v << shift) & mask
                 };
                 channel(self.masks[0], r) | channel(self.masks[1], g) | channel(self.masks[2], b)

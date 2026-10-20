@@ -7,7 +7,9 @@
 //! What it may draw on is its visible region (USER's, for a window DC),
 //! the clip region the program selected and the meta region.
 
-use super::region::{COMPLEXREGION, ERROR, NULLREGION, Op, RGN_AND, RGN_COPY, RGN_DIFF, SIMPLEREGION};
+use super::region::{
+    COMPLEXREGION, ERROR, NULLREGION, Op, RGN_AND, RGN_COPY, RGN_DIFF, SIMPLEREGION,
+};
 use super::surface::Target;
 use super::{
     ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, FALSE, GDI_ERROR, Kind, Rect, Region, State,
@@ -131,8 +133,20 @@ impl Dc {
             (f + 0.5).floor() as i32
         };
         (
-            map(x, a.window_org.0, a.window_ext.0, a.viewport_org.0, a.viewport_ext.0),
-            map(y, a.window_org.1, a.window_ext.1, a.viewport_org.1, a.viewport_ext.1),
+            map(
+                x,
+                a.window_org.0,
+                a.window_ext.0,
+                a.viewport_org.0,
+                a.viewport_ext.0,
+            ),
+            map(
+                y,
+                a.window_org.1,
+                a.window_ext.1,
+                a.viewport_org.1,
+                a.viewport_ext.1,
+            ),
         )
     }
 
@@ -150,8 +164,20 @@ impl Dc {
             (f + 0.5).floor() as i32
         };
         (
-            map(x, a.window_org.0, a.window_ext.0, a.viewport_org.0, a.viewport_ext.0),
-            map(y, a.window_org.1, a.window_ext.1, a.viewport_org.1, a.viewport_ext.1),
+            map(
+                x,
+                a.window_org.0,
+                a.window_ext.0,
+                a.viewport_org.0,
+                a.viewport_ext.0,
+            ),
+            map(
+                y,
+                a.window_org.1,
+                a.window_ext.1,
+                a.viewport_org.1,
+                a.viewport_ext.1,
+            ),
         )
     }
 
@@ -337,7 +363,13 @@ pub fn new_dc(cpu: &mut Cpu, kind: u32) -> u32 {
 
 /// A DC of USER's for `hwnd`, with GetDCEx's flags and region (on the
 /// screen).
-pub fn new_window_dc(cpu: &mut Cpu, hwnd: u32, flags: u32, extra: Option<Region>, own: bool) -> u32 {
+pub fn new_window_dc(
+    cpu: &mut Cpu,
+    hwnd: u32,
+    flags: u32,
+    extra: Option<Region>,
+    own: bool,
+) -> u32 {
     let hdc = new_dc(cpu, WINDOW);
     with(cpu, hdc, |dc| {
         dc.hwnd = hwnd;
@@ -460,7 +492,11 @@ pub fn delete_dc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// ResetDCA: a display DC stays as it is.
 pub fn reset_dc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    Some(if gdi(cpu).dc(args[0]).is_some() { args[0] } else { 0 })
+    Some(if gdi(cpu).dc(args[0]).is_some() {
+        args[0]
+    } else {
+        0
+    })
 }
 
 /// SaveDC(hdc): how many states are saved now.
@@ -631,7 +667,9 @@ pub fn set_poly_fill_mode(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_error(cpu, ERROR_INVALID_PARAMETER);
         return Some(0);
     }
-    set_attr(cpu, args[0], 0, |a| std::mem::replace(&mut a.poly_fill, mode))
+    set_attr(cpu, args[0], 0, |a| {
+        std::mem::replace(&mut a.poly_fill, mode)
+    })
 }
 
 pub fn get_poly_fill_mode(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -701,7 +739,9 @@ pub fn get_arc_direction(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 pub fn set_mapper_flags(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let flags = args[1];
-    set_attr(cpu, args[0], GDI_ERROR, |a| std::mem::replace(&mut a.mapper, flags))
+    set_attr(cpu, args[0], GDI_ERROR, |a| {
+        std::mem::replace(&mut a.mapper, flags)
+    })
 }
 
 /// SetGraphicsMode(hdc, mode): Windows 95 has only GM_COMPATIBLE.
@@ -771,8 +811,9 @@ pub fn get_current_position_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// SetBrushOrgEx(hdc, x, y, old).
 pub fn set_brush_org_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (x, y) = (args[1] as i32, args[2] as i32);
-    let Some(old) = with(cpu, args[0], |dc| std::mem::replace(&mut dc.attrs.brush_org, (x, y)))
-    else {
+    let Some(old) = with(cpu, args[0], |dc| {
+        std::mem::replace(&mut dc.attrs.brush_org, (x, y))
+    }) else {
         return Some(FALSE);
     };
     if args[3] != 0 {
@@ -937,7 +978,12 @@ fn clip_rect(cpu: &mut Cpu, args: &[u32], mode: u32) -> Option<u32> {
     let Some(dc) = get(cpu, args[0]) else {
         return Some(ERROR);
     };
-    let r = Rect::new(args[1] as i32, args[2] as i32, args[3] as i32, args[4] as i32);
+    let r = Rect::new(
+        args[1] as i32,
+        args[2] as i32,
+        args[3] as i32,
+        args[4] as i32,
+    );
     let r = dc.rect_to_device(&r);
     Some(select_clip(cpu, args[0], Some(Region::from_rect(r)), mode))
 }
@@ -1188,12 +1234,16 @@ fn change_point(
 
 pub fn set_window_org_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let p = (args[1] as i32, args[2] as i32);
-    change_point(cpu, args[0], args[3], |a| std::mem::replace(&mut a.window_org, p))
+    change_point(cpu, args[0], args[3], |a| {
+        std::mem::replace(&mut a.window_org, p)
+    })
 }
 
 pub fn set_viewport_org_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let p = (args[1] as i32, args[2] as i32);
-    change_point(cpu, args[0], args[3], |a| std::mem::replace(&mut a.viewport_org, p))
+    change_point(cpu, args[0], args[3], |a| {
+        std::mem::replace(&mut a.viewport_org, p)
+    })
 }
 
 pub fn offset_window_org_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -1214,7 +1264,12 @@ pub fn offset_viewport_org_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     })
 }
 
-fn get_point(cpu: &mut Cpu, hdc: u32, out: u32, f: impl FnOnce(&Attrs) -> (i32, i32)) -> Option<u32> {
+fn get_point(
+    cpu: &mut Cpu,
+    hdc: u32,
+    out: u32,
+    f: impl FnOnce(&Attrs) -> (i32, i32),
+) -> Option<u32> {
     let Some(dc) = get(cpu, hdc) else {
         return Some(FALSE);
     };

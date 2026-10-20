@@ -335,10 +335,32 @@ pub fn system_parameters_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         // SPI_GETDEFAULTINPUTLANG.
         89 => put(cpu, pv, 0x0409_0409),
         // The SET actions that change nothing here.
-        4 | 6 | 7 | 12 | 18..=21 | 26 | 28..=30 | 32..=34 | 36 | 39 | 40 | 42 | 44 | 46
-        | 49..=55 | 58 | 59 | 61 | 63 | 65 | 69 | 71..=73 | 75..=82 | 85..=88 | 90..=93 | 95 => {
-            TRUE
-        }
+        4
+        | 6
+        | 7
+        | 12
+        | 18..=21
+        | 26
+        | 28..=30
+        | 32..=34
+        | 36
+        | 39
+        | 40
+        | 42
+        | 44
+        | 46
+        | 49..=55
+        | 58
+        | 59
+        | 61
+        | 63
+        | 65
+        | 69
+        | 71..=73
+        | 75..=82
+        | 85..=88
+        | 90..=93
+        | 95 => TRUE,
         _ => FALSE,
     };
     Some(result)
@@ -391,7 +413,8 @@ pub fn change_display_settings(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let width = cpu.bus.guest_read_32(at + 108) as i32;
     let height = cpu.bus.guest_read_32(at + 112) as i32;
     // DM_PELSWIDTH and DM_PELSHEIGHT.
-    let size_ok = (fields & 0x8_0000 == 0 || width == w) && (fields & 0x10_0000 == 0 || height == h);
+    let size_ok =
+        (fields & 0x8_0000 == 0 || width == w) && (fields & 0x10_0000 == 0 || height == h);
     Some(if size_ok { 0 } else { (-2i32) as u32 })
 }
 

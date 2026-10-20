@@ -772,7 +772,11 @@ pub fn get_scroll_pos(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 pub fn set_scroll_range(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (hwnd, bar, min, max, redraw) = (args[0], args[1], args[2], args[3], args[4]);
     if bar == SB_CTL {
-        let msg = if redraw != 0 { SBM_SETRANGEREDRAW } else { SBM_SETRANGE };
+        let msg = if redraw != 0 {
+            SBM_SETRANGEREDRAW
+        } else {
+            SBM_SETRANGE
+        };
         let vars = vec![hwnd, msg, min, max, 1];
         return start(cpu, SCROLLBAR, K_SEND, vars, 0);
     }
