@@ -15,6 +15,13 @@ use super::mem::Vram;
 use super::tables::{DITHER_MATRIX_2X2, DITHER_MATRIX_4X4, bilinear, tables};
 use std::sync::Arc;
 
+#[path = "raster/dispatch.rs"]
+mod dispatch;
+
+#[cfg(all(test, feature = "sdl"))]
+#[path = "raster/scene_profile.rs"]
+pub(super) mod scene_profile;
+
 /// The pixel counters (`stats_block`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Stats {
@@ -1050,6 +1057,9 @@ const fn combine_only(tmus: usize, [cp, t0, t1]: [u32; 3]) -> [(u32, u32); 6] {
     ]
 }
 
+/// A selected software scanline pipeline.
+pub(crate) type Scanline = fn(&RasterState, &TriParams, i32, i32, i32, &mut u32, &mut Stats);
+
 /// The variants: textures used, and the registers' fixed bits, from
 /// `full` or `combine_only`. The first that fits a triangle draws it
 /// (`variant`).
@@ -1061,24 +1071,57 @@ macro_rules! variants {
                 const FIXED: [(u32, u32); 6] = $kind($tmus, [$($reg),*]);
             }
         )*
+        $(
+            impl $name {
+                const KEY: dispatch::Key = dispatch::Key::$kind($tmus, [$($reg),*]);
+            }
+        )*
+        #[repr(usize)]
+        enum VariantId {
+            $($name),*
+        }
+
+        #[cfg(test)]
         const VARIANTS: &[(usize, [(u32, u32); 6])] = &[$(($tmus, $name::FIXED)),*];
+        const SCANLINES: &[Scanline] = &[$(scanline::<$tmus, $name>),*];
+
+        const VARIANT_COUNTS: usize = 0 $(| (1 << $tmus))*;
+        const FIRST_COMBINE: usize = {
+            let keys = [$($name::KEY),*];
+            let mut i = 0;
+            while i < keys.len() {
+                if matches!(keys[i], dispatch::Key::Combine(..)) {
+                    break;
+                }
+                i += 1;
+            }
+            i
+        };
+
+        #[inline(always)]
+        fn variant_index(key: dispatch::Key) -> Option<usize> {
+            match key {
+                $($name::KEY => Some(VariantId::$name as usize),)*
+                _ => None,
+            }
+        }
 
         /// Draw a scanline with variant `variant` (from `variant`), or the
         /// generic code for `texcount` units.
         #[allow(clippy::too_many_arguments)]
         pub fn scanline_as(variant: Option<usize>, texcount: usize, st: &RasterState, p: &TriParams, y: i32, startx: i32, stopx: i32, stipple: &mut u32, stats: &mut Stats) {
-            let mut k = 0usize;
-            $(
-                if variant == Some(k) {
-                    return scanline::<$tmus, $name>(st, p, y, startx, stopx, stipple, stats);
-                }
-                k += 1;
-            )*
-            let _ = k;
+            pipeline(variant, texcount)(st, p, y, startx, stopx, stipple, stats);
+        }
+
+        /// Select once for all the scanlines of a triangle.
+        pub(crate) fn pipeline(variant: Option<usize>, texcount: usize) -> Scanline {
+            if let Some(&draw) = variant.and_then(|i| SCANLINES.get(i)) {
+                return draw;
+            }
             match texcount {
-                0 => scanline::<0, Generic>(st, p, y, startx, stopx, stipple, stats),
-                1 => scanline::<1, Generic>(st, p, y, startx, stopx, stipple, stats),
-                _ => scanline::<2, Generic>(st, p, y, startx, stopx, stipple, stats),
+                0 => scanline::<0, Generic>,
+                1 => scanline::<1, Generic>,
+                _ => scanline::<2, Generic>,
             }
         }
     };
@@ -1086,7 +1129,8 @@ macro_rules! variants {
 
 // V0-V7 are the pipelines of Quake's 3dfx renderers (lightmapped textures
 // in two units, blended or not, and the untextured ones), which other
-// Glide games share. C0 and C1 are 3dfx's OpenGL driver (`3DFXVGL.DLL`)
+// Glide games share. V8 and V9 fix the two states observed in a 60-batch
+// Oni main-menu capture. C0 and C1 are 3dfx's OpenGL driver (`3DFXVGL.DLL`)
 // with one texture, which it gives TMU 1 while TMU 0 passes its colour
 // on: the texture times the iterated colour, with the iterated alpha or
 // the texture's times it. Oni draws its menu and its levels with these.
@@ -1099,6 +1143,8 @@ variants! {
     V5: 2, full[0x90110, 0x0D42_0009, 0x0000_6010, 0, 0x8844_230F, 0x8C26_130F];
     V6: 2, full[0x90110, 0x0C00_0005, 0x0004_0409, 0, 0x8844_2A0F, 0x8C26_1C0F];
     V7: 2, full[0x90110, 0x0D42_0009, 0x0000_6010, 0, 0x8C26_130F, 0x8422_130F];
+    V8: 2, full[0x80100, 0x0048_2405, 0x0000_5110, 0xC0, 0x8000_0006, 0x8C26_1C0F];
+    V9: 2, full[0x80100, 0x0142_2409, 0x0000_5110, 0xC0, 0x8000_0006, 0x8C26_1ACF];
     C0: 2, combine_only[0x0D42_2409, 0x8000_0006, 0x8C26_1A0F];
     C1: 2, combine_only[0x0C48_2405, 0x8000_0006, 0x8C26_1C0F];
 }
@@ -1106,11 +1152,26 @@ variants! {
 /// The variant a triangle with `texcount` units and `st`'s registers can be
 /// drawn with: one whose fixed bits the registers have.
 pub fn variant(st: &RasterState, texcount: usize) -> Option<usize> {
-    let tex = |i: usize| st.tmu[i].as_ref().map_or(0, |t| t.mode);
-    let regs = [st.fbz_mode, st.fbz_color_path, st.alpha_mode, st.fog_mode, tex(0), tex(1)];
-    VARIANTS.iter().position(|(tmus, fixed)| {
-        *tmus == texcount.min(2) && regs.iter().zip(fixed).all(|(r, (known, value))| r & known == *value)
-    })
+    let tmus = texcount.min(2);
+    if VARIANT_COUNTS & (1 << tmus) == 0 {
+        return None;
+    }
+    let tex = |i: usize| {
+        if i < tmus {
+            st.tmu[i].as_ref().map_or(0, |t| t.mode)
+        } else {
+            0
+        }
+    };
+    let regs = [
+        st.fbz_mode,
+        st.fbz_color_path,
+        st.alpha_mode,
+        st.fog_mode,
+        tex(0),
+        tex(1),
+    ];
+    dispatch::variant(regs, tmus)
 }
 
 /// The screen row scanline `y` draws into: flipped with the Y origin at
@@ -1325,7 +1386,7 @@ mod tests {
     /// 1024-pixel-wide colour buffer with a depth buffer after it, and
     /// fbzMode, fbzColorPath, alphaMode, fogMode and the units' modes from
     /// `regs`.
-    fn two_unit_state(regs: [u32; 6]) -> RasterState {
+    pub(super) fn two_unit_state(regs: [u32; 6]) -> RasterState {
         let lookup: Arc<[u32]> = (0..0x10000u32).map(|i| i.wrapping_mul(0x9E37_79B9)).collect();
         let tmu = |mode: u32| {
             let ram = Vram::new(1 << 20);
@@ -1471,8 +1532,15 @@ mod tests {
         };
         for regs in states {
             let st = two_unit_state(regs);
-            let v = variant(&st, 2);
             let combine_only = [C0::FIXED, C1::FIXED];
+            let v = combine_only
+                .iter()
+                .position(|fixed| {
+                    regs.iter()
+                        .zip(fixed)
+                        .all(|(r, (mask, value))| r & mask == *value)
+                })
+                .map(|i| FIRST_COMBINE + i);
             assert!(
                 v.is_some_and(|i| combine_only.contains(&VARIANTS[i].1)),
                 "no combine-only variant for {regs:08X?}"
@@ -1490,3 +1558,11 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "raster/dispatch_output_tests.rs"]
+mod dispatch_output_tests;
+
+#[cfg(test)]
+#[path = "raster/oni_state_tests.rs"]
+mod oni_state_tests;

@@ -168,6 +168,8 @@ impl Voodoo {
             };
         }
         let st = self.raster_state(dest, texcount);
+        #[cfg(all(test, feature = "sdl"))]
+        super::raster::scene_profile::record(&st, texcount, verts);
         if self.mirror.is_some() {
             self.mirror_sync();
             if let Some(mirror) = &mut self.mirror {

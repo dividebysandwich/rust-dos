@@ -412,3 +412,30 @@ let _zone = profile::zone(profile::Zone::MyDevice);
 In a hot loop, keep the guard out of the copy that runs without a profile,
 as `exec::run` does with its `PROF` parameter: a guard's drop code alone
 changes how the compiler lays out a loop.
+
+## Voodoo software pipeline states from a saved scene
+
+The ignored `profile_saved_voodoo_scene` library test records the states
+submitted by a saved game. It requires the `sdl` feature and is absent
+from normal builds. Use an optimized test build; emulating a saved
+Windows scene in an unoptimized build can take hours.
+
+Set `RUST_DOS_VOODOO_STATE` to the saved state. Create a separate output
+directory and copy its C-drive sidecar there as `run.C.img`. Set
+`RUST_DOS_VOODOO_PROFILE_DIR` to that directory. The test restores and
+writes the scratch image, so keep it separate from the original. The
+original state and its sidecars must remain available for restoration.
+
+```sh
+cargo test --release --no-default-features --features sdl --lib \
+  profile_saved_voodoo_scene -- --ignored --nocapture --test-threads 1
+```
+
+`RUST_DOS_VOODOO_BATCHES` and `RUST_DOS_VOODOO_INSTRUCTIONS` override the
+observation length, which defaults to 60 batches of 1,600,000 guest
+instructions. The output contains `voodoo-states.json` and
+`last-frame.png`. Each key fixes the same register bits as a full software
+variant. The report includes the selected pipeline, submitted triangle
+count and unclipped projected area. These are usage counts, not shaded
+pixels, CPU time or a game performance comparison. Inspect the picture
+to establish which part of the game the counts cover.
