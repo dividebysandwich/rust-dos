@@ -333,8 +333,8 @@ impl<'a> Display<'a> {
     pub fn run_voodoo(&mut self, bus: &mut Bus, settings: &VoodooSettings) -> bool {
         // A Banshee's picture is the whole desktop, which the OpenGL
         // renderer doesn't draw: it always shows its memory.
-        let banshee = bus.voodoo.as_ref().is_some_and(|v| v.banshee.is_some());
-        let want = settings.renderer == Renderer::OpenGl && !banshee;
+        let gl_scanout = bus.voodoo.as_ref().is_none_or(|v| v.gl_scanout());
+        let want = settings.renderer == Renderer::OpenGl && gl_scanout;
         let problem = match &mut self.out {
             Output::Gl(gl) => {
                 let Some(card) = bus.voodoo.as_mut() else {
