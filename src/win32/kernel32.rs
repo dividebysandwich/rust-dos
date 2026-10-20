@@ -19,7 +19,7 @@ mod sync;
 mod text;
 mod threads;
 mod time;
-mod virtual_memory;
+pub(crate) mod virtual_memory;
 
 pub(super) use locale::enum_returned;
 pub(super) use path::{change_directory, current_directory, full_path};
@@ -535,6 +535,87 @@ pub fn call_return_address() -> u32 {
 /// Let go of the file mappings no handle or view holds any more.
 pub fn sweep_mappings(cpu: &mut Cpu) {
     mapping::sweep(cpu);
+}
+
+/// Committed pages for a built-in DLL's own use, readable and writable
+/// (a DIB section's bits): their address, or None when there is no room.
+pub fn alloc_pages(cpu: &mut Cpu, size: u32) -> Option<u32> {
+    let at = virtual_memory::virtual_alloc(cpu, &[0, size, 0x3000, 4])?;
+    (at != 0).then_some(at)
+}
+
+/// Free the pages `alloc_pages` gave.
+pub fn free_pages(cpu: &mut Cpu, at: u32) {
+    virtual_memory::virtual_free(cpu, &[at, 0, 0x8000]);
+}
+
+/// The data of the resource `name` of type `kind` in the module `module`
+/// (0: the program), as FindResourceA takes them: its address and size,
+/// or the error. None if a name's page isn't there.
+pub fn resource_data(
+    cpu: &mut Cpu,
+    module: u32,
+    kind: u32,
+    name: u32,
+) -> Option<Result<(u32, u32), u32>> {
+    module::resource_data(cpu, module, kind, name)
+}
+
+/// GlobalAlloc(flags, size) for a built-in DLL (the clipboard's data):
+/// the handle, or 0.
+pub fn global_alloc(cpu: &mut Cpu, flags: u32, size: u32) -> u32 {
+    global::global_alloc(cpu, &[flags, size]).unwrap_or(0)
+}
+
+/// GlobalSize(handle): the size of its block, or 0.
+pub fn global_size(cpu: &mut Cpu, handle: u32) -> u32 {
+    global::global_size(cpu, &[handle]).unwrap_or(0)
+}
+
+/// lstrcmpiA's comparison of two ANSI strings, without their zeros.
+pub fn compare_nocase(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
+    let (a, b) = (text::ansi_to_wide(a), text::ansi_to_wide(b));
+    sort::compare(sort::NORM_IGNORECASE, &a, &b)
+}
+
+/// The address of the memory of the global handle `handle`, as
+/// GlobalLock gives it (without locking it), or 0.
+pub fn global_address(cpu: &mut Cpu, handle: u32) -> u32 {
+    let at = global::global_lock(cpu, &[handle]).unwrap_or(0);
+    if at != 0 {
+        global::global_unlock(cpu, &[handle]);
+    }
+    at
+}
+
+/// The file named by the string at `name`, read into pages
+/// `alloc_pages` gives: their address and the file's size, which the
+/// caller frees with `free_pages`. Some(None) when it can't be read, with
+/// the error set; None if a page of the name isn't there.
+pub fn read_whole_file(cpu: &mut Cpu, name: u32) -> Option<Option<(u32, u32)>> {
+    const GENERIC_READ: u32 = 0x8000_0000;
+    const OPEN_EXISTING: u32 = 3;
+    let handle = file::create_file(cpu, &[name, GENERIC_READ, 1, 0, OPEN_EXISTING, 0, 0])?;
+    if handle == 0xFFFF_FFFF {
+        return Some(None);
+    }
+    let size = file::get_file_size(cpu, &[handle, 0]).unwrap_or(0xFFFF_FFFF);
+    let pages = if size == 0xFFFF_FFFF {
+        None
+    } else {
+        alloc_pages(cpu, size + 4)
+    };
+    let mut result = None;
+    if let Some(at) = pages {
+        let read = file::read_file(cpu, &[handle, at, size, at + size, 0]).unwrap_or(0);
+        if read != 0 && cpu.bus.guest_read_32(at + size) == size {
+            result = Some((at, size));
+        } else {
+            free_pages(cpu, at);
+        }
+    }
+    threads::close_handle(cpu, &[handle]);
+    Some(result)
 }
 
 /// Where the main thread starts when DLLs' entry points run first.

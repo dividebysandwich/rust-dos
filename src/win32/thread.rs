@@ -50,6 +50,9 @@ pub struct Wait {
     /// The address of the critical section it waits to enter, or 0. The
     /// thread that leaves the section hands it over.
     pub section: u32,
+    /// What its message queue must have to end it (MsgWaitForMultipleObjects,
+    /// GetMessageA): it then returns the number of objects.
+    pub queue: Option<super::user32::message::QueueWait>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -373,6 +376,7 @@ pub fn end_wait(win32: &mut Win32, (p, t): At, result: u32) {
 
 /// End the waits that can end now.
 pub fn wake(cpu: &mut Cpu) {
+    super::user32::input::poll(cpu);
     let now = cpu.bus.clock.now_micros();
     let win32 = &mut cpu.bus.win32;
     let running = current(win32);
@@ -386,11 +390,17 @@ pub fn wake(cpu: &mut Cpu) {
                 continue;
             }
             let tid = thread.id;
-            let result = try_wait(&mut win32.objects, tid, &wait).or_else(|| {
-                wait.deadline
-                    .filter(|&d| now >= d)
-                    .map(|_| wait.timeout_result)
-            });
+            let result = try_wait(&mut win32.objects, tid, &wait)
+                .or_else(|| {
+                    let queue = wait.queue.as_ref()?;
+                    super::user32::message::wait_ready(win32, tid, queue, now)
+                        .then_some(wait.objects.len() as u32)
+                })
+                .or_else(|| {
+                    wait.deadline
+                        .filter(|&d| now >= d)
+                        .map(|_| wait.timeout_result)
+                });
             if let Some(result) = result {
                 end_wait(win32, (p, t), result);
             }
@@ -532,7 +542,8 @@ crate::state_fields!(Wait {
     all,
     deadline,
     timeout_result,
-    section
+    section,
+    queue
 });
 crate::state_fields!(Thread {
     id,

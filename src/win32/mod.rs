@@ -16,6 +16,7 @@
 mod advapi32;
 mod call;
 mod convert;
+pub mod gdi32;
 mod heap;
 mod kernel32;
 mod loader;
@@ -28,7 +29,9 @@ mod seh;
 pub mod snapshot;
 mod stubs;
 mod system;
+mod task;
 mod thread;
+pub mod user32;
 
 pub use snapshot::snapshot;
 pub use stubs::function_name;
@@ -279,6 +282,11 @@ pub struct Win32 {
     /// The console's input and output modes (SetConsoleMode), or None
     /// for those it starts with.
     console_mode: Option<(u32, u32)>,
+
+    /// USER's and GDI's state: windows, messages, and what GDI draws
+    /// with. They are the system's, shared by the processes.
+    user: user32::State,
+    gdi: gdi32::State,
 }
 
 impl Win32 {
@@ -637,6 +645,7 @@ fn end_process(cpu: &mut Cpu, index: usize, code: u32) {
         return;
     };
     let (name, threads) = (process.name.clone(), process.threads.len());
+    let tids: Vec<u32> = process.threads.iter().map(|t| t.id).collect();
     for i in 0..threads {
         thread::end(win32, index, i, code);
     }
@@ -662,6 +671,8 @@ fn end_process(cpu: &mut Cpu, index: usize, code: u32) {
     let process = cpu.bus.win32.processes.remove(index);
     process.memory.release(&mut cpu.bus);
     registry::process_ended(cpu, process.id);
+    user32::process_ended(cpu, process.id, &tids);
+    gdi32::process_ended(cpu, process.id);
     let win32 = &mut cpu.bus.win32;
     if win32.running != index {
         // Another process's thread runs on.
@@ -770,6 +781,11 @@ pub fn process_ended(cpu: &mut Cpu, psp: u16) {
         object::close_all_files(&mut cpu.bus);
         cpu.bus.win32.objects = object::Objects::default();
         cpu.bus.win32.sections.clear();
+        if cpu.bus.win32.user.desktop {
+            user32::paint::leave_desktop(cpu);
+        }
+        cpu.bus.win32.user = user32::State::default();
+        cpu.bus.win32.gdi = gdi32::State::default();
         cpu.bus.set_a20(a20);
     }
     cpu.bus.win32.pending = None;
@@ -856,4 +872,6 @@ crate::state_fields!(Win32 {
 
     long_dirs,
     console_mode,
+    user,
+    gdi,
 } skip { enabled });
