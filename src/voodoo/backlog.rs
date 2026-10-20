@@ -295,6 +295,8 @@ pub struct Backlog {
     pub layout: TileLayout,
     jobs: Vec<(Job, Access)>,
     words: usize,
+    /// Which jobs pruning keeps, held on to between prunings.
+    keep: Vec<bool>,
     /// Jobs pushed since the last pruning.
     since_prune: usize,
     /// Jobs dropped, for the debugger.
@@ -361,12 +363,13 @@ impl Backlog {
     pub fn prune(&mut self) {
         self.since_prune = 0;
         let mut live = [ALL; 4];
-        let mut keep = vec![true; self.jobs.len()];
+        self.keep.clear();
+        self.keep.resize(self.jobs.len(), true);
         for (i, (_, a)) in self.jobs.iter().enumerate().rev() {
             if a.pinned {
                 live = [ALL; 4];
             } else if (0..4).all(|r| a.writes[r] & live[r] == 0) {
-                keep[i] = false;
+                self.keep[i] = false;
             } else {
                 for (r, live) in live.iter_mut().enumerate() {
                     *live = (*live & !a.kills[r]) | a.reads[r];
@@ -374,7 +377,7 @@ impl Backlog {
             }
         }
         let before = self.jobs.len();
-        let mut k = keep.into_iter();
+        let mut k = self.keep.iter().copied();
         self.jobs.retain(|_| k.next().unwrap_or(true));
         self.pruned += (before - self.jobs.len()) as u64;
         self.count_words();
@@ -425,6 +428,9 @@ mod tests {
         assert_eq!(b.len(), 3, "the triangle in buffer 0 goes, the one in buffer 1 stays");
         assert_eq!(b.pruned, 1);
         assert_eq!(b.jobs[0].1, write(1, 1));
+        b.prune();
+        assert_eq!(b.len(), 3, "pruning again must retain the surviving jobs");
+        assert_eq!(b.pruned, 1);
     }
 
     #[test]

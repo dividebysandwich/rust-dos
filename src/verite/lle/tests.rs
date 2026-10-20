@@ -334,6 +334,56 @@ fn a_parameterized_draw_iterates_its_parameters() {
 }
 
 #[test]
+fn five_pair_draws_use_all_ten_values_and_align_register_groups() {
+    let (mut core, mut memory, _) = machine(&[HALT], 0);
+    sixteen_bit(&mut core);
+    core.pe.dst_mode = 0xC;
+    core.pe.dst_fmt = 0xC;
+    // X/R, Z/A, no parameters in pairs 3/4, then G/B in pair 5.
+    core.pe.drawctl = 6 | 1 << 4 | 5 << 9 | 5 << 13;
+    core.reg[160] = 0;
+    core.reg[161] = 20 << 16;
+    core.reg[162] = 0;
+    core.reg[163] = 255 << 16;
+    core.reg[168] = 40 << 16;
+    core.reg[169] = 60 << 16;
+    for k in 0..10 {
+        core.reg[176 + k] = (k as u32 + 1) << 16;
+    }
+    core.pe.cnt = 1;
+    // Each field is deliberately unaligned: ten values require a group
+    // aligned to sixteen registers, including the destination.
+    core.draw_param(0xFC, 199, 167, 183, &mut memory);
+    assert_eq!(mem::read32(&memory, 0x1_0000), 0xFF14_283C);
+    assert_eq!(core.reg[192], 1 << 16);
+    assert_eq!(core.reg[193], 22 << 16);
+    assert_eq!(core.reg[200], 49 << 16);
+    assert_eq!(core.reg[201], 70 << 16);
+    assert_eq!(core.pe.cnt, 0);
+}
+
+#[test]
+fn a_parameterized_draw_from_the_fifo_pops_the_values_before_the_deltas() {
+    let (mut core, mut memory, _) = machine(&[HALT], 0);
+    sixteen_bit(&mut core);
+    core.pe.dst_mode = 0xC;
+    core.pe.dst_fmt = 0xC;
+    core.pe.drawctl = 6; // pair1: X, R
+    // S2 and S1 both at the FIFO's group: SWFIFO, then FIFO.
+    let words = [
+        (1u32 << 16).swap_bytes(),
+        10 << 16,
+        (2u32 << 16).swap_bytes(),
+        20 << 16,
+    ];
+    core.in_fifo.extend(words);
+    core.pe.cnt = 1;
+    core.draw_param(0xF0, 192, 32, 32, &mut memory);
+    assert_eq!((core.reg[192], core.reg[193]), (3 << 16, 30 << 16));
+    assert!(core.in_fifo.is_empty());
+}
+
+#[test]
 fn textures_are_sampled_through_the_masks() {
     let (mut core, mut memory, _) = machine(&[HALT], 0);
     sixteen_bit(&mut core);

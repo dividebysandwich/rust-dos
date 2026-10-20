@@ -896,26 +896,24 @@ impl Core {
             v @ 0..=7 => PAIR3[v as usize],
             v => PAIR2[v as usize - 8],
         };
-        let mut params = vec![p1e, p1o];
-        if pairs >= 2 {
-            params.extend([p2.0, p2.1]);
-        }
-        if pairs >= 3 {
-            let p3 = PAIR3[(ctl >> 9 & 15) as usize];
-            params.extend([p3.0, p3.1]);
-        }
-        if pairs >= 4 {
-            let p4 = PAIR3[(ctl >> 13 & 7) as usize];
-            params.extend([p4.0, p4.1]);
-        }
-        if pairs == 5 {
-            params.extend([G, B]);
-        }
-        let count = params.len() as u8;
+        let p3 = PAIR3[(ctl >> 9 & 15) as usize];
+        let p4 = PAIR3[(ctl >> 13 & 7) as usize];
+        let params = [p1e, p1o, p2.0, p2.1, p3.0, p3.1, p4.0, p4.1, G, B];
+        let count: u8 = pairs * 2;
+        let params = &params[..count as usize];
         let align = count.next_power_of_two().max(2);
         let (d, s2, s1) = (d & !(align - 1), s2 & !(align - 1), s1 & !(align - 1));
-        let mut values: Vec<u32> = (0..count).map(|k| self.draw_reg(s2, k)).collect();
-        let deltas: Vec<u32> = (0..count).map(|k| self.draw_reg(s1, k)).collect();
+        // All the values before the deltas: a group at the FIFO pops it.
+        let mut values = [0u32; 10];
+        let mut deltas = [0u32; 10];
+        for k in 0..count {
+            values[k as usize] = self.draw_reg(s2, k);
+        }
+        for k in 0..count {
+            deltas[k as usize] = self.draw_reg(s1, k);
+        }
+        let values = &mut values[..count as usize];
+        let deltas = &deltas[..count as usize];
         let cnt = self.pe.cnt as u16 as i16;
         if cnt <= 0 {
             return;
@@ -944,7 +942,7 @@ impl Core {
                 self.pe.x_shadow = self.pe.x_shadow.wrapping_add(step);
             }
             if op & 1 != 0 && i + 1 < n {
-                for (value, delta) in values.iter_mut().zip(&deltas) {
+                for (value, delta) in values.iter_mut().zip(deltas) {
                     *value = value.wrapping_add(*delta);
                 }
             }

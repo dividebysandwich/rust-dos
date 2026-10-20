@@ -240,7 +240,17 @@ impl Decoder {
         let b = border * 68;
 
         // The signal, with the border on both sides.
-        let mut temp = vec![0i32; w + 10];
+        // A CGA scanline has 640 samples. Keep its signal and chroma on
+        // the stack; retain support for wider callers of this decoder.
+        let mut stack = [0i32; 640 * 3 + 14];
+        let mut heap = Vec::new();
+        let scratch = if w <= 640 {
+            &mut stack[..w * 3 + 14]
+        } else {
+            heap.resize(w * 3 + 14, 0);
+            &mut heap[..]
+        };
+        let (temp, chroma) = scratch.split_at_mut(w + 10);
         let mut o = 0;
         let mut push = |v: i32| {
             temp[o] = v;
@@ -272,8 +282,7 @@ impl Decoder {
 
         // The chroma, in phase and in quadrature: `ap[x]` and `bp[x]` for
         // x from -1 on, kept one along.
-        let mut ap = vec![0i32; w + 2];
-        let mut bp = vec![0i32; w + 2];
+        let (ap, bp) = chroma.split_at_mut(w + 2);
         for x in 0..w + 2 {
             let i = x + 4;
             ap[x] = temp[i - 4] - ((temp[i - 2] - temp[i] + temp[i + 2]) << 1) + temp[i + 4];
@@ -344,6 +353,21 @@ mod tests {
         for pattern in [[15, 0, 15, 0], [15, 15, 0, 0], [15, 0, 0, 0]] {
             let (r, g, b) = solid(&d, pattern);
             assert!(r == g && g == b, "{:?}: {:?}", pattern, (r, g, b));
+        }
+    }
+
+    #[test]
+    fn wider_lines_match_the_cga_signal_away_from_the_border() {
+        for era in CompositeEra::ALL {
+            for bw in [false, true] {
+                let decoder = Decoder::new(era, bw);
+                let samples: Vec<_> = (0..1024).map(|x| (x % 16) as u8).collect();
+                let mut narrow = vec![0; 640 * 3];
+                let mut wide = vec![0; 1024 * 3];
+                decoder.decode_line(&samples[..640], 5, &mut narrow);
+                decoder.decode_line(&samples, 5, &mut wide);
+                assert_eq!(&narrow[..632 * 3], &wide[..632 * 3]);
+            }
         }
     }
 
