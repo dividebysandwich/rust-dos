@@ -128,7 +128,7 @@ impl Banshee {
             .any(|(start, span)| a < start as u64 + span && (start as u64) < a + drawn)
     }
 
-    /// Draw the desktop, the overlay and the cursor into `out` (RGB24,
+    /// Draw the desktop, the overlay and the cursor into `out` (RGBA8,
     /// `pitch` pixels a row), as big as `desktop_size` says.
     pub fn render(&self, ram: &Vram, out: &mut [u8], pitch: usize) {
         let mask = (ram.bytes() - 1) as u32;
@@ -141,7 +141,7 @@ impl Banshee {
         let bypass = f.cfg & VIDPROC_DESKTOP_CLUT_BYPASS != 0;
         let format = (f.cfg >> 18) & 7;
         for y in 0..f.height {
-            let Some(row) = out.get_mut(y * pitch * 3..(y * pitch + f.width.min(pitch)) * 3) else {
+            let Some(row) = out.get_mut(y * pitch * 4..(y * pitch + f.width.min(pitch)) * 4) else {
                 break;
             };
             let line = if f.half { y as u32 / 2 } else { y as u32 };
@@ -151,7 +151,7 @@ impl Banshee {
                 // shows: the words of a run (a row, or a tile's 64 pixels)
                 // follow each other, so only its first needs the address.
                 let clut = (!bypass).then_some(desktop_clut);
-                let pixels = row.as_chunks_mut::<3>().0;
+                let pixels = row.as_chunks_mut::<4>().0;
                 let words = mask >> 1;
                 let mut x = 0;
                 while x < pixels.len() {
@@ -163,16 +163,17 @@ impl Banshee {
                     let end = (x + run).min(pixels.len());
                     let mut w = (at(2 * x as u32) & mask) >> 1;
                     for px in &mut pixels[x..end] {
-                        *px = rgb565(ram.get(w as usize), clut);
+                        let [r, g, b] = rgb565(ram.get(w as usize), clut);
+                        *px = [r, g, b, 255];
                         w = (w + 1) & words;
                     }
                     x = end;
                 }
                 continue;
             }
-            for (x, px) in row.as_chunks_mut::<3>().0.iter_mut().enumerate() {
+            for (x, px) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                 let x = x as u32;
-                *px = match format {
+                let [r, g, b] = match format {
                     0 => {
                         let i = byte(ram, at(x), mask) as usize;
                         if bypass {
@@ -198,6 +199,7 @@ impl Banshee {
                         ]
                     }
                 };
+                *px = [r, g, b, 255];
             }
         }
         if f.cfg & VIDPROC_OVERLAY_ENABLE != 0 {
@@ -266,7 +268,7 @@ impl Banshee {
                     0 => rgb(clut[byte(ram, at(sx), mask) as usize]),
                     _ => rgb565(word(ram, at(sx * 2), mask), (!bypass).then_some(clut)),
                 };
-                if let Some(o) = out.get_mut((y * pitch + x) * 3..(y * pitch + x) * 3 + 3) {
+                if let Some(o) = out.get_mut((y * pitch + x) * 4..(y * pitch + x) * 4 + 3) {
                     o.copy_from_slice(&px);
                 }
             }
@@ -296,7 +298,7 @@ impl Banshee {
                 let bit = 7 - (col & 7);
                 let p0 = byte(ram, base + (col >> 3) as u32, mask) >> bit & 1;
                 let p1 = byte(ram, base + 8 + (col >> 3) as u32, mask) >> bit & 1;
-                let at = (y as usize * pitch + x as usize) * 3;
+                let at = (y as usize * pitch + x as usize) * 4;
                 let Some(o) = out.get_mut(at..at + 3) else {
                     continue;
                 };
@@ -338,11 +340,11 @@ mod tests {
         b.ext_write(VID_DESKTOP_OVERLAY_STRIDE, 2048);
         // Pixel (3, 2): pure red.
         ram.set((0x1000 + 2 * 2048 + 3 * 2) / 2, 0xF800);
-        let mut out = vec![0; 1024 * 768 * 3];
+        let mut out = [0, 0, 0, 255].repeat(1024 * 768);
         b.render(&ram, &mut out, 1024);
-        let at = (2 * 1024 + 3) * 3;
+        let at = (2 * 1024 + 3) * 4;
         assert_eq!(&out[at..at + 3], &[0xFF, 0, 0]);
-        assert_eq!(&out[at + 3..at + 6], &[0, 0, 0]);
+        assert_eq!(&out[at + 4..at + 7], &[0, 0, 0]);
     }
 
     #[test]
@@ -373,9 +375,9 @@ mod tests {
         b.clut[7] = 0x11_2233;
         // Pixel (130, 33): tile 1 of the second row of tiles, row 1.
         ram.set_byte((8 * TILE + TILE + 128 + 2) as usize, 7);
-        let mut out = vec![0; 1024 * 768 * 3];
+        let mut out = [0, 0, 0, 255].repeat(1024 * 768);
         b.render(&ram, &mut out, 1024);
-        let at = (33 * 1024 + 130) * 3;
+        let at = (33 * 1024 + 130) * 4;
         assert_eq!(&out[at..at + 3], &[0x11, 0x22, 0x33]);
     }
 
@@ -394,12 +396,12 @@ mod tests {
         for i in 1..8 {
             ram.set_byte(0x10_0000 + i, 0xFF);
         }
-        let mut out = vec![0; 1024 * 768 * 3];
+        let mut out = [0, 0, 0, 255].repeat(1024 * 768);
         b.render(&ram, &mut out, 1024);
-        let at = (20 * 1024 + 10) * 3;
+        let at = (20 * 1024 + 10) * 4;
         assert_eq!(&out[at..at + 3], &[0, 0xFF, 0]);
-        assert_eq!(&out[at + 3..at + 6], &[0xFF, 0xFF, 0xFF]);
+        assert_eq!(&out[at + 4..at + 7], &[0xFF, 0xFF, 0xFF]);
         // Plane 0 set, plane 1 clear: transparent.
-        assert_eq!(&out[at + 6..at + 9], &[0, 0, 0]);
+        assert_eq!(&out[at + 8..at + 11], &[0, 0, 0]);
     }
 }

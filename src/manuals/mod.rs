@@ -132,12 +132,12 @@ impl Document {
                 };
                 let cache = hayro::RenderCache::new();
                 let pixmap = hayro::render(p, &cache, &Default::default(), &settings);
-                let mut frame = Frame::new(pixmap.width() as u32, pixmap.height() as u32);
                 // On white: opaque, so premultiplied is as it is.
-                for (rgb, rgba) in frame.rgb.as_chunks_mut::<3>().0.iter_mut().zip(pixmap.data_as_u8_slice().as_chunks::<4>().0.iter()) {
-                    rgb.copy_from_slice(&rgba[..3]);
-                }
-                frame
+                Frame::from_rgba(
+                    pixmap.width() as u32,
+                    pixmap.height() as u32,
+                    pixmap.data_as_u8_slice().to_vec(),
+                )
             }
         }
     }
@@ -146,7 +146,9 @@ impl Document {
 /// Pixels with an alpha channel, on white.
 fn on_white(width: u32, height: u32, rgba: &[u8]) -> Frame {
     let mut frame = Frame::new(width, height);
-    for (rgb, p) in frame.rgb.as_chunks_mut::<3>().0.iter_mut().zip(rgba.as_chunks::<4>().0.iter()) {
+    for (rgb, p) in frame.rgba.as_chunks_mut::<4>().0.iter_mut()
+        .zip(rgba.as_chunks::<4>().0.iter())
+    {
         let a = p[3] as u32;
         for i in 0..3 {
             rgb[i] = ((p[i] as u32 * a + 255 * (255 - a)) / 255) as u8;
@@ -202,21 +204,28 @@ fn decode_jpeg(data: &[u8]) -> Result<Frame, String> {
     let mut frame = Frame::new(info.width as u32, info.height as u32);
     match info.pixel_format {
         PixelFormat::RGB24 => {
-            let len = frame.rgb.len();
-            frame.rgb.copy_from_slice(&pixels[..len]);
+            for (out, pixel) in frame.rgba.as_chunks_mut::<4>().0.iter_mut()
+                .zip(pixels.as_chunks::<3>().0)
+            {
+                out[..3].copy_from_slice(pixel);
+            }
         }
         PixelFormat::L8 => {
-            for (rgb, &g) in frame.rgb.as_chunks_mut::<3>().0.iter_mut().zip(&pixels) {
-                rgb.fill(g);
+            for (rgba, &g) in frame.rgba.as_chunks_mut::<4>().0.iter_mut().zip(&pixels) {
+                *rgba = [g, g, g, 255];
             }
         }
         PixelFormat::L16 => {
-            for (rgb, g) in frame.rgb.as_chunks_mut::<3>().0.iter_mut().zip(pixels.as_chunks::<2>().0.iter()) {
-                rgb.fill(g[0]);
+            for (rgba, g) in frame.rgba.as_chunks_mut::<4>().0.iter_mut()
+                .zip(pixels.as_chunks::<2>().0.iter())
+            {
+                *rgba = [g[0], g[0], g[0], 255];
             }
         }
         PixelFormat::CMYK32 => {
-            for (rgb, p) in frame.rgb.as_chunks_mut::<3>().0.iter_mut().zip(pixels.as_chunks::<4>().0.iter()) {
+            for (rgb, p) in frame.rgba.as_chunks_mut::<4>().0.iter_mut()
+                .zip(pixels.as_chunks::<4>().0.iter())
+            {
                 let k = 255 - p[3] as u32;
                 for i in 0..3 {
                     rgb[i] = ((255 - p[i] as u32) * k / 255) as u8;
@@ -247,15 +256,15 @@ pub fn scale(picture: &Frame, width: u32, height: u32) -> Frame {
             let (x0, x1) = span(x, fx, sw);
             let mut sum = [0u32; 3];
             for sy in y0..y1 {
-                for at in (sy * sw + x0..sy * sw + x1).map(|p| p * 3) {
-                    for (s, &c) in sum.iter_mut().zip(&picture.rgb[at..at + 3]) {
+                for at in (sy * sw + x0..sy * sw + x1).map(|p| p * 4) {
+                    for (s, &c) in sum.iter_mut().zip(&picture.rgba[at..at + 3]) {
                         *s += c as u32;
                     }
                 }
             }
             let n = ((y1 - y0) * (x1 - x0)) as u32;
-            let at = (y * width as usize + x) * 3;
-            for (o, s) in out.rgb[at..at + 3].iter_mut().zip(sum) {
+            let at = (y * width as usize + x) * 4;
+            for (o, s) in out.rgba[at..at + 3].iter_mut().zip(sum) {
                 *o = (s / n) as u8;
             }
         }
@@ -270,10 +279,10 @@ pub fn crop(picture: &Frame, x: u32, y: u32, width: u32, height: u32) -> Frame {
     let width = width.min(picture.width - x);
     let height = height.min(picture.height - y);
     let mut out = Frame::new(width, height);
-    let row = width as usize * 3;
+    let row = width as usize * 4;
     for r in 0..height as usize {
-        let from = ((y as usize + r) * picture.width as usize + x as usize) * 3;
-        out.rgb[r * row..(r + 1) * row].copy_from_slice(&picture.rgb[from..from + row]);
+        let from = ((y as usize + r) * picture.width as usize + x as usize) * 4;
+        out.rgba[r * row..(r + 1) * row].copy_from_slice(&picture.rgba[from..from + row]);
     }
     out
 }
@@ -281,6 +290,12 @@ pub fn crop(picture: &Frame, x: u32, y: u32, width: u32, height: u32) -> Frame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rgb(frame: &Frame) -> Vec<u8> {
+        assert!(frame.rgba.as_chunks::<4>().0.iter().all(|p| p[3] == 255));
+        frame.rgba.as_chunks::<4>().0.iter()
+            .flat_map(|&[r, g, b, _]| [r, g, b]).collect()
+    }
 
     fn scratch(name: &str, data: &[u8]) -> PathBuf {
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-manuals");
@@ -307,11 +322,11 @@ mod tests {
         let doc = Document::open(&scratch("card.png", &png())).unwrap();
         assert_eq!((doc.pages(), doc.page_size(0)), (1, (2.0, 2.0)));
         let page = doc.render(0, 2, 2);
-        assert_eq!(page.rgb, [255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255]);
+        assert_eq!(rgb(&page), [255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255]);
         let half = doc.render(0, 1, 1);
-        assert_eq!(half.rgb, [127, 127, 127]);
+        assert_eq!(rgb(&half), [127, 127, 127]);
         let big = doc.render(0, 4, 4);
-        assert_eq!(&big.rgb[..6], [255, 0, 0, 255, 0, 0]);
+        assert_eq!(&rgb(&big)[..6], [255, 0, 0, 255, 0, 0]);
     }
 
     #[test]
@@ -324,7 +339,7 @@ mod tests {
             encoder.write_frame(&frame).unwrap();
         }
         let doc = Document::open(&scratch("map.gif", &data)).unwrap();
-        assert_eq!(doc.render(0, 2, 1).rgb, [0, 0, 0, 255, 255, 255]);
+        assert_eq!(rgb(&doc.render(0, 2, 1)), [0, 0, 0, 255, 255, 255]);
     }
 
     #[cfg(feature = "manuals")]
@@ -354,7 +369,7 @@ mod tests {
         assert_eq!((doc.pages(), doc.page_size(0)), (1, (200.0, 100.0)));
         let page = doc.render(0, 40, 20);
         assert_eq!((page.width, page.height), (40, 20));
-        let pixel = |x: usize, y: usize| &page.rgb[(y * 40 + x) * 3..][..3];
+        let pixel = |x: usize, y: usize| &page.rgba[(y * 40 + x) * 4..][..3];
         assert_eq!(pixel(5, 10), [0, 0, 0], "the square");
         assert_eq!(pixel(35, 10), [255, 255, 255], "the paper");
     }

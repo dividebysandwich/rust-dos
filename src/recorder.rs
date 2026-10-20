@@ -158,8 +158,8 @@ fn encode(writer: BufWriter<File>, frames: Receiver<Work>, last_delay: u16) -> R
             }
             None => last_delay,
         };
-        let pixels = fitted(&shown.frame, width as usize, height as usize);
-        let mut gif_frame = gif::Frame::from_rgb(width, height, &pixels);
+        let mut pixels = fitted(&shown.frame, width as usize, height as usize).into_owned();
+        let mut gif_frame = gif::Frame::from_rgba(width, height, &mut pixels);
         gif_frame.delay = delay;
         encoder.write_frame(&gif_frame).map_err(|e| e.to_string())?;
         match next {

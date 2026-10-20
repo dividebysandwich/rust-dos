@@ -42,6 +42,19 @@ impl Encoder {
     /// and whether it is a keyframe.
     pub fn encode(&mut self, rgb: &[u8]) -> (Vec<u8>, bool) {
         let pixels: Vec<u8> = rgb.as_chunks::<3>().0.iter().flat_map(|&[r, g, b]| [b, g, r, 0]).collect();
+        self.encode_pixels(pixels)
+    }
+
+    /// Encode the next canonical RGBA frame without an intermediate RGB
+    /// picture. ZMBV stores BGRX and ignores the input alpha channel.
+    pub fn encode_rgba(&mut self, rgba: &[u8]) -> (Vec<u8>, bool) {
+        assert_eq!(rgba.len(), self.width * self.height * 4);
+        let pixels = rgba.as_chunks::<4>().0.iter()
+            .flat_map(|&[r, g, b, _]| [b, g, r, 0]).collect();
+        self.encode_pixels(pixels)
+    }
+
+    fn encode_pixels(&mut self, pixels: Vec<u8>) -> (Vec<u8>, bool) {
         let keyframe = self.frames.is_multiple_of(KEYFRAME_EVERY);
         self.frames += 1;
         let mut out = Vec::new();
@@ -99,20 +112,21 @@ impl Encoder {
 }
 
 /// Scale `frame` to `width` x `height`, nearest neighbour, if it isn't that
-/// size: a recording keeps the size it started with.
+/// size: a recording keeps the size it started with. The fitted pixels
+/// are RGBA, borrowing the original picture when its size already fits.
 pub fn fitted(frame: &Frame, width: usize, height: usize) -> std::borrow::Cow<'_, [u8]> {
     if (frame.width as usize, frame.height as usize) == (width, height) {
-        return std::borrow::Cow::Borrowed(&frame.rgb);
+        return std::borrow::Cow::Borrowed(&frame.rgba);
     }
-    let mut rgb = Vec::with_capacity(width * height * 3);
+    let mut rgba = Vec::with_capacity(width * height * 4);
     for y in 0..height {
         let sy = y * frame.height as usize / height;
         for x in 0..width {
-            let at = (sy * frame.width as usize + x * frame.width as usize / width) * 3;
-            rgb.extend_from_slice(&frame.rgb[at..at + 3]);
+            let at = (sy * frame.width as usize + x * frame.width as usize / width) * 4;
+            rgba.extend_from_slice(&frame.rgba[at..at + 4]);
         }
     }
-    std::borrow::Cow::Owned(rgb)
+    std::borrow::Cow::Owned(rgba)
 }
 
 #[cfg(test)]
@@ -191,10 +205,23 @@ mod tests {
 
     #[test]
     fn frames_of_another_size_are_scaled() {
-        let mut frame = Frame::new(4, 2);
-        frame.rgb = (0..24).collect();
+        let frame = Frame::from_rgb(4, 2, (0..24).collect());
         assert!(matches!(fitted(&frame, 4, 2), std::borrow::Cow::Borrowed(_)));
         let half = fitted(&frame, 2, 1);
-        assert_eq!(&half[..], &[0, 1, 2, 6, 7, 8]);
+        assert_eq!(&half[..], &[0, 1, 2, 255, 6, 7, 8, 255]);
+    }
+
+    #[test]
+    fn rgba_input_preserves_the_original_rgb_bitstream_and_ignores_alpha() {
+        let (width, height) = (17, 19);
+        let mut old = Encoder::new(width, height);
+        let mut new = Encoder::new(width, height);
+        for frame in 0..4 {
+            let rgb: Vec<u8> = (0..width * height * 3)
+                .map(|i| (i * 7 + frame * 29) as u8).collect();
+            let rgba: Vec<_> = rgb.as_chunks::<3>().0.iter()
+                .flat_map(|&[r, g, b]| [r, g, b, frame as u8]).collect();
+            assert_eq!(new.encode_rgba(&rgba), old.encode(&rgb));
+        }
     }
 }

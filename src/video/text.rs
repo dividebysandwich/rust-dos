@@ -316,7 +316,7 @@ pub fn render(
         _ => std::array::from_fn(|attr| vga.attribute_rgb(attr as u8)),
     };
     let (cell_w, cell_h) = (g.cell_w(), g.cell_h());
-    let canvas_h = canvas.len() / (canvas_w * 3);
+    let canvas_h = canvas.len() / (canvas_w * 4);
     let row_lo = (y_min / cell_h).min(g.rows);
     let row_hi = y_max.div_ceil(cell_h).min(g.rows);
 
@@ -362,7 +362,7 @@ pub fn render(
                             if px >= canvas_w {
                                 continue;
                             }
-                            let i = (py * canvas_w + px) * 3;
+                            let i = (py * canvas_w + px) * 4;
                             canvas[i] = r;
                             canvas[i + 1] = gr;
                             canvas[i + 2] = b;

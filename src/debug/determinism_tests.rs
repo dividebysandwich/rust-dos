@@ -1151,7 +1151,7 @@ impl Snapshot {
             state,
             parts,
             segment,
-            picture: picture.rgb.clone(),
+            picture: picture.rgba.clone(),
             sound: sound.to_vec(),
         }
     }

@@ -13,56 +13,88 @@ pub fn draw_cursors(frame: &mut Frame, bus: &Bus, cursor_visible: bool) {
     if bus.voodoo_output() {
         return;
     }
-    let (width, height) = (frame.width, frame.height);
-    let buffer = &mut frame.rgb[..];
-    let frame_w = width as usize;
-
-    // The text mode cursor, at the active page's cursor position (BDA
-    // 0450h, two bytes a page). Its shape is the CRTC's on an EGA or VGA
-    // (Cursor Start and End, 0Ah and 0Bh), in the font's lines: BDA 0460h
-    // keeps the shape a program asked for, which the BIOS turns from a
-    // CGA's 8 lines into the font's (0607h is 0D0Eh in a 16-line font).
-    // The CGA's is in its 8 lines.
-    if let Some(geometry) = super::text::geometry(bus) {
-        let (cursor_col, cursor_row, cursor_shape) = if bus.boot.is_some() && bus.vga.adapter.ega_bios() {
-            crtc_cursor(bus, geometry.cols)
-        } else {
-            let page = bus.read_8(0x0462).min(7) as usize;
-            let shape = if bus.vga.adapter.ega_bios() { crtc_shape(bus) } else { bus.read_16(0x0460) };
-            (bus.read_8(0x0450 + page * 2) as usize, bus.read_8(0x0451 + page * 2) as usize, shape)
-        };
-        let start_scan = (cursor_shape >> 8) as u8;
-        let end_scan = (cursor_shape & 0xFF) as u8;
-        // Bit 5 of Start Scanline indicates "Invisible" in VGA hardware
-        let is_hidden = (start_scan & 0x20) != 0;
-
-        if cursor_visible && !is_hidden && cursor_col < geometry.cols && cursor_row < geometry.rows {
-            let (cell_w, cell_h) = (geometry.cell_w(), geometry.cell_h());
-            let max_scan = geometry.font_h.saturating_sub(1) as u8;
-            let scan_start = (start_scan & 0x1F).min(max_scan) as usize;
-            let scan_end = end_scan.min(max_scan) as usize;
-            let x0 = cursor_col * cell_w;
-            for y in scan_start * geometry.y_scale..(scan_end + 1) * geometry.y_scale {
-                let draw_y = cursor_row * cell_h + y;
-                for draw_x in x0..x0 + cell_w {
-                    let idx = (draw_y * frame_w + draw_x) * 3;
-                    if draw_x < frame_w && idx + 2 < buffer.len() {
-                        buffer[idx..idx + 3].fill(0xDD);
-                    }
-                }
+    let width = frame.width as usize;
+    if let Some((columns, rows)) = text_cursor(frame, bus, cursor_visible) {
+        for y in rows {
+            for x in columns.clone() {
+                let at = (y * width + x) * 4;
+                frame.rgba[at..at + 3].fill(0xDD);
             }
         }
     }
-
-    // Draw Mouse Cursor (software overlay) when visible and installed.
-    // The driver stores the cursor in virtual coords; map those to
-    // screen pixels over the same virtual extent the host pointer spans.
-    if bus.mouse.installed && bus.mouse.hide_counter <= 0 {
-        let (virt_w, virt_h) = bus.mouse.virtual_screen(bus);
-        let sx = (bus.mouse.x as i64 * width as i64 / virt_w as i64) as i32;
-        let sy = (bus.mouse.y as i64 * height as i64 / virt_h as i64) as i32;
-        draw_default_mouse_cursor(frame, sx, sy);
+    if let Some((x, y)) = mouse_origin(frame, bus) {
+        draw_default_mouse_cursor(frame, x, y);
     }
+}
+
+/// Rows that drawing the cursors may touch. Use the same clipped geometry
+/// as drawing, so their old rows can be restored after a move or a blink.
+pub fn cursor_rows(frame: &Frame, bus: &Bus, cursor_visible: bool) -> std::ops::Range<usize> {
+    if bus.voodoo_output() {
+        return 0..0;
+    }
+    let mut rows = text_cursor(frame, bus, cursor_visible).map_or(0..0, |(_, rows)| rows);
+    if let Some((x, y)) = mouse_origin(frame, bus) {
+        let (w, h) = (frame.width as i32, frame.height as i32);
+        if x < w && x + 16 > 0 {
+            let first = y.clamp(0, h) as usize;
+            let end = (y + CURSOR_ARROW.len() as i32).clamp(0, h) as usize;
+            rows = super::compose::union(rows, first..end);
+        }
+    }
+    rows
+}
+
+fn mouse_origin(frame: &Frame, bus: &Bus) -> Option<(i32, i32)> {
+    if !bus.mouse.installed || bus.mouse.hide_counter > 0 {
+        return None;
+    }
+    let (virt_w, virt_h) = bus.mouse.virtual_screen(bus);
+    Some((
+        (bus.mouse.x as i64 * frame.width as i64 / virt_w as i64) as i32,
+        (bus.mouse.y as i64 * frame.height as i64 / virt_h as i64) as i32,
+    ))
+}
+
+// The CRTC's shape is in font scanlines. The BIOS data area keeps the
+// requested CGA shape where the card has no EGA/VGA cursor registers.
+fn text_cursor(
+    frame: &Frame,
+    bus: &Bus,
+    visible: bool,
+) -> Option<(std::ops::Range<usize>, std::ops::Range<usize>)> {
+    if !visible {
+        return None;
+    }
+    let geometry = super::text::geometry(bus)?;
+    let (col, row, shape) = if bus.boot.is_some() && bus.vga.adapter.ega_bios() {
+        crtc_cursor(bus, geometry.cols)
+    } else {
+        let page = bus.read_8(0x0462).min(7) as usize;
+        let shape = if bus.vga.adapter.ega_bios() {
+            crtc_shape(bus)
+        } else {
+            bus.read_16(0x0460)
+        };
+        (
+            bus.read_8(0x0450 + page * 2) as usize,
+            bus.read_8(0x0451 + page * 2) as usize,
+            shape,
+        )
+    };
+    let start = (shape >> 8) as u8;
+    if start & 0x20 != 0 || col >= geometry.cols || row >= geometry.rows {
+        return None;
+    }
+    let max_scan = geometry.font_h.saturating_sub(1) as u8;
+    let first = (start & 0x1F).min(max_scan) as usize;
+    let end = (shape as u8).min(max_scan) as usize;
+    let x = col * geometry.cell_w();
+    let y = row * geometry.cell_h();
+    let columns = x.min(frame.width as usize)..(x + geometry.cell_w()).min(frame.width as usize);
+    let rows = (y + first * geometry.y_scale).min(frame.height as usize)
+        ..(y + (end + 1) * geometry.y_scale).min(frame.height as usize);
+    (!columns.is_empty() && !rows.is_empty()).then_some((columns, rows))
 }
 
 /// Whether `draw_cursors` may draw anything (a text cursor, the mouse's).
@@ -178,15 +210,15 @@ fn draw_default_mouse_cursor(frame: &mut Frame, origin_x: i32, origin_y: i32) {
             if x < 0 || y < 0 || x >= w || y >= h {
                 continue;
             }
-            let idx = (y * w + x) as usize * 3;
+            let idx = (y * w + x) as usize * 4;
             let (r, g, b) = if cell == 1 {
                 (0xFF, 0xFF, 0xFF)
             } else {
                 (0x00, 0x00, 0x00)
             };
-            frame.rgb[idx] = r;
-            frame.rgb[idx + 1] = g;
-            frame.rgb[idx + 2] = b;
+            frame.rgba[idx] = r;
+            frame.rgba[idx + 1] = g;
+            frame.rgba[idx + 2] = b;
         }
     }
 }

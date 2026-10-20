@@ -61,7 +61,9 @@ fn a_vga_with_a_monochrome_monitor() {
     let (width, height) = video::frame_size(&cpu.bus);
     let mut frame = Frame::new(width, height);
     video::render_screen(&mut frame, &cpu.bus);
-    assert!(frame.rgb[..720 * 16 * 3].iter().any(|&b| b != 0));
+    assert!(frame.rgba[..720 * 16 * 4]
+        .as_chunks::<4>().0.iter()
+        .any(|p| p[..3].iter().any(|&b| b != 0)));
     // Colour modes still work, in grey.
     int10(&mut cpu, 0x0003, 0, 0, 0);
     assert_eq!(cpu.bus.video_mode, VideoMode::Text80x25Color);
@@ -118,7 +120,7 @@ fn the_vgas_two_colour_modes() {
     cpu.bus.write_8(0xA0000, 0x80);
     let mut frame = Frame::new(640, 480);
     video::render_screen(&mut frame, &cpu.bus);
-    assert_eq!(&frame.rgb[..6], &[0xFC, 0xFC, 0xFC, 0, 0, 0]);
+    assert_eq!(&frame.rgba[..8], &[0xFC, 0xFC, 0xFC, 255, 0, 0, 0, 255]);
     // Mode 0Fh: 640x350 monochrome graphics.
     int10(&mut cpu, 0x000F, 0, 0, 0);
     assert_eq!(cpu.bus.video_mode, VideoMode::Ega640x350Mono);

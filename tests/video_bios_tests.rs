@@ -34,8 +34,8 @@ fn picture(cpu: &mut Cpu) -> Frame {
 }
 
 fn pixel(frame: &Frame, x: usize, y: usize) -> (u8, u8, u8) {
-    let i = (y * frame.width as usize + x) * 3;
-    (frame.rgb[i], frame.rgb[i + 1], frame.rgb[i + 2])
+    let i = (y * frame.width as usize + x) * 4;
+    (frame.rgba[i], frame.rgba[i + 1], frame.rgba[i + 2])
 }
 
 /// The colours in a text cell (8x16 pixels at `col`, `row`).

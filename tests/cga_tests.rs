@@ -36,8 +36,8 @@ fn picture(cpu: &mut Cpu) -> Frame {
 }
 
 fn pixel(frame: &Frame, x: usize, y: usize) -> (u8, u8, u8) {
-    let i = (y * frame.width as usize + x) * 3;
-    (frame.rgb[i], frame.rgb[i + 1], frame.rgb[i + 2])
+    let i = (y * frame.width as usize + x) * 4;
+    (frame.rgba[i], frame.rgba[i + 1], frame.rgba[i + 2])
 }
 
 #[test]
@@ -140,7 +140,7 @@ fn programs_set_the_mode_through_the_mode_control_register() {
     // Bit 3 off: no picture.
     int10(&mut cpu, 0x0941, 0x000F, 1, 0);
     cpu.bus.io_write(0x3D8, 0x21);
-    assert!(picture(&mut cpu).rgb.iter().all(|&b| b == 0));
+    assert!(picture(&mut cpu).rgba.as_chunks::<4>().0.iter().all(|p| *p == [0, 0, 0, 255]));
 }
 
 #[test]
@@ -193,7 +193,9 @@ fn the_shell_runs_on_a_cga() {
     cpu.load_shell();
     video::print_string(&mut cpu, "HELLO");
     let frame = picture(&mut cpu);
-    assert!(frame.rgb[..640 * 16 * 3].iter().any(|&b| b != 0));
+    assert!(frame.rgba[..640 * 16 * 4]
+        .as_chunks::<4>().0.iter()
+        .any(|p| p[..3].iter().any(|&b| b != 0)));
     assert_eq!(cpu.bus.read_16(0x0460), 0x0607);
     assert_eq!(cpu.bus.read_8(0x0484), 0);
 }

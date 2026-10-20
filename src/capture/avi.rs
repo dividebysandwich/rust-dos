@@ -170,7 +170,7 @@ impl AviWriter {
 /// What the recording thread gets: a frame and the sound since the last,
 /// or the end.
 enum Work {
-    Frame { rgb: Option<Vec<u8>>, sound: Vec<i16> },
+    Frame { rgba: Option<Vec<u8>>, sound: Vec<i16> },
     Stop,
 }
 
@@ -201,14 +201,14 @@ impl VideoRecorder {
         let thread = std::thread::spawn(move || {
             let mut encoder = zmbv::Encoder::new(width, height);
             let mut last = None;
-            while let Ok(Work::Frame { rgb, sound }) = jobs.recv() {
+            while let Ok(Work::Frame { rgba, sound }) = jobs.recv() {
                 avi.sound(&sound)?;
                 // No new picture: the last one again.
-                let rgb = match rgb {
-                    Some(rgb) => last.insert(rgb),
-                    None => last.get_or_insert_with(|| vec![0; width * height * 3]),
+                let rgba = match rgba {
+                    Some(rgba) => last.insert(rgba),
+                    None => last.get_or_insert_with(|| [0, 0, 0, 255].repeat(width * height)),
                 };
-                let (data, keyframe) = encoder.encode(rgb);
+                let (data, keyframe) = encoder.encode_rgba(rgba);
                 avi.video(&data, keyframe)?;
                 if avi.full() {
                     break;
@@ -241,7 +241,8 @@ impl VideoRecorder {
 
     fn send(&mut self, frame: &crate::video::Frame, silent: bool) -> bool {
         let due = (self.recorded_ns as u128 * FPS as u128 / 1_000_000_000) as u64;
-        let mut rgb = (self.frames < due).then(|| zmbv::fitted(frame, self.width, self.height).into_owned());
+        let mut rgba =
+            (self.frames < due).then(|| zmbv::fitted(frame, self.width, self.height).into_owned());
         while self.frames < due {
             // The silence a frame lasts, after the sound made before it.
             let mut sound = std::mem::take(&mut self.carry);
@@ -250,7 +251,7 @@ impl VideoRecorder {
                 sound.resize(sound.len() + 2 * (at(self.frames + 1) - at(self.frames)) as usize, 0);
             }
             self.frames += 1;
-            if self.work.send(Work::Frame { rgb: rgb.take(), sound }).is_err() {
+            if self.work.send(Work::Frame { rgba: rgba.take(), sound }).is_err() {
                 return false;
             }
         }
@@ -284,7 +285,7 @@ mod tests {
         // A second at 60 frames a second, in steps of a sixtieth, with the
         // sound of each.
         for i in 1..=60u64 {
-            frame.rgb[0] = i as u8;
+            frame.rgba[0] = i as u8;
             assert!(recorder.record(&frame, vec![i as i16; 1470], i * 1_000_000_000 / 60));
         }
         assert_eq!(recorder.stop().unwrap(), 60);

@@ -156,8 +156,9 @@ pub struct Machine {
     /// being put together.
     screen: Frame,
     next: Frame,
-    /// `screen` as the canvas takes it: RGBA.
-    rgba: Vec<u8>,
+    /// Whether `screen` has been composed once, so the page has a
+    /// picture to keep.
+    composed: bool,
     /// What the hotkeys did, over the picture, and whether the machine is
     /// paused (Alt+Pause).
     osd: Osd,
@@ -228,7 +229,7 @@ impl Machine {
             picture: blank.clone(),
             screen: blank.clone(),
             next: blank,
-            rgba: Vec::new(),
+            composed: false,
             osd: Osd::new(),
             paused: false,
             shaders: false,
@@ -442,7 +443,7 @@ impl Machine {
     /// Where the screen's pixels are in the module's memory, RGBA, as the
     /// canvas's `ImageData` takes them.
     pub fn screen_pixels(&self) -> *const u8 {
-        self.rgba.as_ptr()
+        self.screen.rgba.as_ptr()
     }
 
     /// Emulated instructions per millisecond, as the speed setting or the
@@ -1073,13 +1074,12 @@ impl Machine {
         self.ui.draw_overlay(&mut self.next);
         self.osd.draw(&mut self.next);
         let same = (self.next.width, self.next.height) == (self.screen.width, self.screen.height)
-            && self.next.rgb == self.screen.rgb;
-        if same && !self.rgba.is_empty() {
+            && self.next.rgba == self.screen.rgba;
+        if same && self.composed {
             return false;
         }
         std::mem::swap(&mut self.next, &mut self.screen);
-        self.rgba.clear();
-        self.rgba.extend(self.screen.rgb.as_chunks::<3>().0.iter().flat_map(|&[r, g, b]| [r, g, b, 0xFF]));
+        self.composed = true;
         true
     }
 }

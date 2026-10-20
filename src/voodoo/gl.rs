@@ -807,14 +807,16 @@ impl VoodooGl {
             // What is drawn over the machine's picture.
             let fits = (screen.width, screen.height) == (self.width, self.height)
                 && (base.width, base.height) == (self.width, self.height);
-            if fits && screen.rgb != base.rgb {
+            if fits && screen.rgba != base.rgba {
                 let over: Vec<u8> = screen
-                    .rgb
-                    .as_chunks::<3>()
+                    .rgba
+                    .as_chunks::<4>()
                     .0
                     .iter()
-                    .zip(base.rgb.as_chunks::<3>().0)
-                    .flat_map(|(&[r, g, b], old)| if [r, g, b] != *old { [r, g, b, 0xFF] } else { [0; 4] })
+                    .zip(base.rgba.as_chunks::<4>().0)
+                    .flat_map(|(&[r, g, b, _], old)| {
+                        if [r, g, b] != old[..3] { [r, g, b, 255] } else { [0; 4] }
+                    })
                     .collect();
                 gl.bind_texture(glow::TEXTURE_2D, Some(self.staging_texture));
                 let pixels = glow::PixelUnpackData::Slice(Some(&over));
@@ -1210,8 +1212,10 @@ mod tests {
                 let (w, h) = (card.fbi.width, card.fbi.height);
                 card.frame_buffer();
                 card.prepare_display();
-                let mut reference = vec![0; (w * h * 3) as usize];
-                card.render(&mut reference, w as usize);
+                let mut rgba = vec![0; (w * h * 4) as usize];
+                card.render(&mut rgba, w as usize);
+                let reference: Vec<_> = rgba.as_chunks::<4>().0.iter()
+                    .flat_map(|&[r, g, b, _]| [r, g, b]).collect();
                 save(&format!("glide-{frame}-software"), &reference, w, h);
                 let target = &renderer.targets[&renderer.front.unwrap()];
                 target.resolve(&gl, (w as i32, h as i32));

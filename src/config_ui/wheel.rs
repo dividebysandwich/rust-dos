@@ -18,8 +18,8 @@ const PAD_Y: usize = 4;
 
 /// Blend `color` over the pixel at (`x`, `y`).
 fn tint(frame: &mut Frame, x: usize, y: usize, color: Rgb, alpha: u32) {
-    let at = (y * frame.width as usize + x) * 3;
-    if let Some(px) = frame.rgb.get_mut(at..at + 3) {
+    let at = (y * frame.width as usize + x) * 4;
+    if let Some(px) = frame.rgba.get_mut(at..at + 3) {
         let mixed = draw::blend([px[0], px[1], px[2]], color, alpha);
         px.copy_from_slice(&mixed);
     }

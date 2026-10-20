@@ -181,7 +181,7 @@ fn profile_saved_voodoo_scene() {
     card.prepare_display();
     let (width, height) = card.size();
     let mut picture = crate::video::Frame::new(width, height);
-    card.render(&mut picture.rgb, width as usize);
+    card.render(&mut picture.rgba, width as usize);
     crate::capture::png::save(&picture, &dir.join("last-frame.png")).unwrap();
     println!(
         "{triangles} triangles in {} states; {generic} use generic",

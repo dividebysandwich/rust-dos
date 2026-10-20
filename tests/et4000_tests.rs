@@ -121,7 +121,7 @@ fn the_sierra_dac_s_command_register_turns_on_hicolor() {
     let (width, height) = video::frame_size(&cpu.bus);
     let mut frame = Frame::new(width, height);
     video::render_screen(&mut frame, &cpu.bus);
-    assert_eq!(&frame.rgb[..3], &[255, 0, 0]);
+    assert_eq!(&frame.rgba[..3], &[255, 0, 0]);
     // A BIOS mode set turns it off.
     int10::set_mode(&mut cpu, 0x13);
     assert_eq!(cpu.bus.vga.et4000.hicolor(), None);
@@ -143,12 +143,12 @@ fn picture(cpu: &mut Cpu) -> (u32, u32, Vec<u8>) {
     let mut frame = Frame::new(width, height);
     cpu.bus.vga.mark_dirty_full();
     video::render_screen(&mut frame, &cpu.bus);
-    (width, height, frame.rgb)
+    (width, height, frame.rgba)
 }
 
 fn pixel(cpu: &mut Cpu, x: usize, y: usize) -> [u8; 3] {
     let (width, _, rgb) = picture(cpu);
-    let i = (y * width as usize + x) * 3;
+    let i = (y * width as usize + x) * 4;
     [rgb[i], rgb[i + 1], rgb[i + 2]]
 }
 

@@ -676,7 +676,7 @@ fn the_front_buffer_is_what_shows() {
     bus.sync_display();
     let mut frame = rust_dos::video::Frame::new(640, 480);
     rust_dos::video::render_screen(&mut frame, &bus);
-    assert_eq!(&frame.rgb[0..3], &[0xFF, 0, 0]);
+    assert_eq!(&frame.rgba[0..3], &[0xFF, 0, 0]);
     // The output off: the VGA's picture again.
     cfg_write(&mut bus, 0, 0x40, 1);
     w(&mut bus, FBI_INIT0, 0);
@@ -700,7 +700,7 @@ fn the_gamma_table_brightens_the_picture() {
     bus.sync_display();
     let mut frame = rust_dos::video::Frame::new(640, 480);
     rust_dos::video::render_screen(&mut frame, &bus);
-    assert!(frame.rgb[0] >= 0xF0, "red {}", frame.rgb[0]);
+    assert!(frame.rgba[0] >= 0xF0, "red {}", frame.rgba[0]);
 }
 
 #[test]
@@ -1429,7 +1429,7 @@ fn the_picture_comes_back_when_wanted() {
     let v = bus.voodoo.as_mut().unwrap();
     v.set_software_picture(true);
     assert!(v.prepare_display(), "the picture changed");
-    let mut rgb = vec![0u8; 640 * 480 * 3];
+    let mut rgb = vec![0u8; 640 * 480 * 4];
     v.render(&mut rgb, 640);
     assert_eq!(&rgb[..3], &[0, 255, 0]);
     assert_eq!(status_of(&bus)["held_jobs"], 0);

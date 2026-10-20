@@ -72,13 +72,21 @@ fn ramp(phosphor: [u8; 3]) -> [[u8; 3]; 256] {
 /// Show `frame` as the monitor `mono` would. A colour monitor leaves it as
 /// it is.
 pub fn apply(frame: &mut Frame, mono: Monochrome) {
+    apply_rows(frame, mono, 0..frame.height as usize);
+}
+
+/// Apply the monitor to restored rows, leaving the rest of an already
+/// composed picture alone. Applying it twice to a tinted row darkens it.
+pub fn apply_rows(frame: &mut Frame, mono: Monochrome, rows: std::ops::Range<usize>) {
     let Some(phosphor) = mono.phosphor() else {
         return;
     };
     let ramp = ramp(phosphor);
-    for pixel in frame.rgb.as_chunks_mut::<3>().0 {
-        let [r, g, b] = *pixel;
-        *pixel = ramp[luma(r, g, b) as usize];
+    let bytes = frame.width as usize * 4;
+    for pixel in frame.rgba[rows.start * bytes..rows.end * bytes].as_chunks_mut::<4>().0 {
+        let [r, g, b, _] = *pixel;
+        let [r, g, b] = ramp[luma(r, g, b) as usize];
+        *pixel = [r, g, b, 255];
     }
 }
 
@@ -87,10 +95,9 @@ mod tests {
     use super::*;
 
     fn tinted(mono: Monochrome, pixels: &[[u8; 3]]) -> Vec<[u8; 3]> {
-        let mut frame = Frame::new(pixels.len() as u32, 1);
-        frame.rgb = pixels.concat();
+        let mut frame = Frame::from_rgb(pixels.len() as u32, 1, pixels.concat());
         apply(&mut frame, mono);
-        frame.rgb.as_chunks::<3>().0.to_vec()
+        frame.rgba.as_chunks::<4>().0.iter().map(|p| [p[0], p[1], p[2]]).collect()
     }
 
     #[test]
