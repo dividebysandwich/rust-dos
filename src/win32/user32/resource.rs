@@ -1077,6 +1077,9 @@ pub fn create_accelerator_table(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_error(cpu, ERROR_INVALID_PARAMETER);
         return Some(0);
     }
+    if !cpu.bus.guest_probe(at, 6 * count as usize, false) {
+        return None;
+    }
     let mut bytes = vec![0u8; 6 * count as usize];
     cpu.bus.guest_read_bytes(at, &mut bytes);
     if cpu.bus.guest_faulted() {

@@ -375,6 +375,9 @@ fn text_arg(cpu: &mut Cpu, at: u32, count: i32) -> Option<Option<Vec<u8>>> {
     if count < 0 {
         return Some(Some(bytes_at(cpu, at)?));
     }
+    if !cpu.bus.guest_probe(at, count as usize, false) {
+        return None;
+    }
     let mut b = vec![0u8; count as usize];
     cpu.bus.guest_read_bytes(at, &mut b);
     (!cpu.bus.guest_faulted()).then_some(Some(b))
@@ -904,6 +907,9 @@ fn case_buff_a(cpu: &mut Cpu, at: u32, len: u32, upper: bool) -> Option<u32> {
     if at == 0 {
         return Some(0);
     }
+    if !cpu.bus.guest_probe(at, len as usize, true) {
+        return None;
+    }
     let mut b = vec![0u8; len as usize];
     cpu.bus.guest_read_bytes(at, &mut b);
     if cpu.bus.guest_faulted() {
@@ -953,9 +959,13 @@ fn case_buff_w(cpu: &mut Cpu, at: u32, len: u32, upper: bool) -> Option<u32> {
     if at == 0 {
         return Some(0);
     }
+    if !cpu.bus.guest_probe(at, (len as usize).saturating_mul(2), true) {
+        return None;
+    }
     for i in 0..len {
-        let c = cpu.bus.guest_read_16(at + 2 * i);
-        cpu.bus.guest_write_16(at + 2 * i, wide_case(c, upper));
+        let p = at.wrapping_add(i.wrapping_mul(2));
+        let c = cpu.bus.guest_read_16(p);
+        cpu.bus.guest_write_16(p, wide_case(c, upper));
     }
     (!cpu.bus.guest_faulted()).then_some(len)
 }
@@ -1060,6 +1070,9 @@ fn convert(cpu: &mut Cpu, src: u32, dst: u32, len: Option<u32>, to_oem: bool) ->
     }
     let bytes = match len {
         Some(n) => {
+            if !cpu.bus.guest_probe(src, n as usize, false) {
+                return None;
+            }
             let mut b = vec![0u8; n as usize];
             cpu.bus.guest_read_bytes(src, &mut b);
             b

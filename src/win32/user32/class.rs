@@ -483,7 +483,7 @@ pub fn set_class_long(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         GCL_HCURSOR => std::mem::replace(&mut c.cursor, value),
         GCL_HICON => std::mem::replace(&mut c.icon, value),
         GCL_HMODULE => std::mem::replace(&mut c.instance, value),
-        GCL_CBWNDEXTRA => std::mem::replace(&mut c.wnd_extra, value),
+        GCL_CBWNDEXTRA => std::mem::replace(&mut c.wnd_extra, value.min(0x1000)),
         GCL_WNDPROC => std::mem::replace(&mut c.proc, value),
         GCL_STYLE => {
             let old = c.style;

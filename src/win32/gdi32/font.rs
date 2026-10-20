@@ -532,6 +532,9 @@ fn text_metric(dc: &Dc, f: &Realized) -> Vec<u8> {
 
 /// The text of a W function as ANSI.
 fn ansi_of_wide(cpu: &mut Cpu, at: u32, count: u32) -> Option<Vec<u8>> {
+    if !cpu.bus.guest_probe(at, 2 * count as usize, false) {
+        return None;
+    }
     let mut raw = vec![0u8; 2 * count as usize];
     cpu.bus.guest_read_bytes(at, &mut raw);
     if cpu.bus.guest_faulted() {
@@ -548,6 +551,9 @@ fn ansi_of_wide(cpu: &mut Cpu, at: u32, count: u32) -> Option<Vec<u8>> {
 }
 
 fn bytes_of(cpu: &mut Cpu, at: u32, count: u32) -> Option<Vec<u8>> {
+    if !cpu.bus.guest_probe(at, count as usize, false) {
+        return None;
+    }
     let mut text = vec![0u8; count as usize];
     cpu.bus.guest_read_bytes(at, &mut text);
     (!cpu.bus.guest_faulted()).then_some(text)
