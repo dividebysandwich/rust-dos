@@ -142,6 +142,8 @@ pub(super) enum Item {
     VoodooScale,
     VoodooScaleShader,
     VoodooMsaa,
+    /// OpenGL's dithering to 16 bits, as the card's.
+    VoodooDither,
     VoodooAnisotropy,
     VoodooTextureSampling,
     VoodooFpsCap,
@@ -365,6 +367,7 @@ impl Item {
             VoodooScale => "3dfx OpenGL size",
             VoodooScaleShader => "  Sized for the CRT look",
             VoodooMsaa => "3dfx antialiasing",
+            VoodooDither => "3dfx dithering",
             VoodooAnisotropy => "3dfx anisotropic filtering",
             VoodooTextureSampling => "3dfx texture sampling",
             VoodooFpsCap => "3dfx frame rate cap",
@@ -522,9 +525,12 @@ impl Item {
             Item::CaptureDir | Item::RecordUi | Item::RecordShader => frontend.host_files,
             Item::Core => crate::dynrec::AVAILABLE,
             // The browser draws with the emulator's own rasterizer only.
-            Item::VoodooRenderer | Item::VoodooScale | Item::VoodooScaleShader | Item::VoodooMsaa | Item::VoodooAnisotropy => {
-                frontend.window
-            }
+            Item::VoodooRenderer
+            | Item::VoodooScale
+            | Item::VoodooScaleShader
+            | Item::VoodooMsaa
+            | Item::VoodooDither
+            | Item::VoodooAnisotropy => frontend.window,
             // Only the window plays the monitor's effects.
             Item::MonitorEffects | Item::Post => frontend.window,
             // A thread of its own packs rewind's states.
@@ -601,7 +607,7 @@ impl Item {
             Item::Sc55Download => s.sound.midisynth == MidiSynth::Sc55 && sc55_found(s).is_none(),
             // Until it is there.
             Item::VoodooOverlay => s.voodoo.enabled && crate::voodoo::overlay::find().is_none(),
-            Item::VoodooScale | Item::VoodooMsaa | Item::VoodooAnisotropy => {
+            Item::VoodooScale | Item::VoodooMsaa | Item::VoodooDither | Item::VoodooAnisotropy => {
                 s.voodoo.enabled && s.voodoo.renderer == crate::voodoo::Renderer::OpenGl
             }
             // At 1x the lines are the card's own, whatever the look.
@@ -631,6 +637,7 @@ impl Item {
             }
             Cycles | AutoFps | AutoBusyOs | Core | Fpu | Dpmi | DosVersion | IdeHardDisks | BootCdrom | FloppyController | KeyboardLayout | MouseAutocapture | MouseCaptureMessages | MouseMenuHold | PauseInSettings | ShellSuggestions | ShellColors | SaveShellHistory | Rewind | RewindMemory
             | VoodooRenderer | VoodooScale | VoodooScaleShader | VoodooMsaa | VoodooTextureSampling | VoodooAnisotropy | VoodooFpsCap | VoodooOverlay | PowerVrFilter => Applies::Now,
+            VoodooDither => Applies::Now,
             Monochrome => Applies::NowAndAtPrompt,
             MonitorEffects => Applies::Now,
             Post => Applies::NextStart,
@@ -794,6 +801,7 @@ impl Item {
             }
             .to_string(),
             VoodooScaleShader => on_off(s.voodoo.scale_shader),
+            VoodooDither => on_off(s.voodoo.dither),
             VoodooMsaa => match s.voodoo.msaa {
                 1 => "Off".to_string(),
                 n => format!("{}x MSAA", n),

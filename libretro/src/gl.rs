@@ -195,6 +195,7 @@ impl Screen {
         let Some(recording) = card.take_mirror() else { return false };
         let shown = recording.output && recording.front.is_some();
         let Some(voodoo) = &mut self.voodoo else { return false };
+        voodoo.set_dither(settings.dither);
         voodoo.run(&self.gl, recording);
         shown
     }

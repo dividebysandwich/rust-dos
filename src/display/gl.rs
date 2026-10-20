@@ -62,6 +62,8 @@ pub struct GlScreen {
     /// The 3dfx card drawn with OpenGL, and why it can't be if it can't.
     voodoo: Option<VoodooGl>,
     voodoo_failed: Option<String>,
+    /// Whether it dithers as the card does (`voodoo_dither`).
+    voodoo_dither: bool,
     /// What screenshots and recordings of the look are drawn with, made
     /// the first time one is (`capture`).
     capture: Option<Capture>,
@@ -192,6 +194,7 @@ impl GlScreen {
             renderer,
             voodoo: None,
             voodoo_failed: (glsl == Glsl::Es300).then(|| "OpenGL ES can't draw it".to_string()),
+            voodoo_dither: true,
             capture: None,
             layer: None,
             layer_generation: None,
@@ -344,6 +347,15 @@ impl GlScreen {
         self.voodoo.as_ref().map(|v| (v.scale(), v.samples(), v.anisotropy()))
     }
 
+    /// Whether the 3dfx card's OpenGL picture dithers as the card does
+    /// (`voodoo_dither`), from the next thing it draws.
+    pub fn set_voodoo_dither(&mut self, on: bool) {
+        self.voodoo_dither = on;
+        if let Some(voodoo) = &mut self.voodoo {
+            voodoo.set_dither(on);
+        }
+    }
+
     /// Stop drawing the 3dfx card.
     pub fn drop_voodoo(&mut self) {
         if let Some(voodoo) = self.voodoo.take() {
@@ -369,7 +381,10 @@ impl GlScreen {
                 return Err(problem.clone());
             }
             match VoodooGl::new(&self.gl, self.glsl, scale, samples, anisotropy) {
-                Ok(voodoo) => self.voodoo = Some(voodoo),
+                Ok(mut voodoo) => {
+                    voodoo.set_dither(self.voodoo_dither);
+                    self.voodoo = Some(voodoo);
+                }
                 Err(e) => {
                     eprintln!("[DISPLAY] {}", e);
                     self.voodoo_failed = Some(e.clone());

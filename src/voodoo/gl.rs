@@ -5,8 +5,10 @@
 //! framebuffer object, all sharing one depth texture, the triangles go
 //! through the card's pixel pipeline in a shader (gl/triangle.frag) with
 //! OpenGL's depth test and blending, and the front buffer through the
-//! card's gamma table is the picture shown. With `voodoo_msaa`, the buffers
-//! are multisampled and resolved into their textures before they are shown.
+//! card's gamma table is the picture shown. With `voodoo_dither`, what the
+//! game draws dithered (triangles and fastfills) is dithered to 5-6-5 as
+//! the card does it (`set_dither`). With `voodoo_msaa`, the buffers are
+//! multisampled and resolved into their textures before they are shown.
 //! The software rasterizer's memory stays what screenshots, recordings and
 //! the debugger see, and what the game reads back; it only draws what those
 //! can still see (`super::backlog`).
@@ -23,11 +25,13 @@ const QUAD_VERT: &str = include_str!("gl/quad.vert");
 const PIXELS_FRAG: &str = include_str!("gl/pixels.frag");
 const DEPTH_FRAG: &str = include_str!("gl/depth.frag");
 const CLUT_FRAG: &str = include_str!("gl/clut.frag");
+const FILL_FRAG: &str = include_str!("gl/fill.frag");
 
 const TRIANGLE_UNIFORMS: &[&str] = &[
     "u_size", "u_fbzcp", "u_fbz", "u_alpha", "u_fog", "u_color0", "u_color1", "u_chroma", "u_chroma_range", "u_zacolor", "u_fogcolor",
     "u_stipple", "u_yorigin", "u_fogblend", "u_fogdelta", "u_scale", "u_units", "u_config", "u_tmode0", "u_tmode1",
     "u_tsize0", "u_tsize1", "u_tlod0", "u_tlod1", "u_tdetail0", "u_tdetail1", "u_constant_depth",
+    "u_dither",
 ];
 const QUAD_UNIFORMS: &[&str] = &["u_rect", "u_size", "u_scale"];
 
@@ -141,6 +145,8 @@ pub struct VoodooGl {
     anisotropy: u32,
     /// The effective factor when the OpenGL extension is available.
     texture_anisotropy: Option<f32>,
+    /// Whether to dither where the game dithers (`set_dither`).
+    dither: bool,
     /// The buffers' size in the card's pixels.
     width: u32,
     height: u32,
@@ -162,6 +168,7 @@ pub struct VoodooGl {
     pixels: Program,
     depth_program: Program,
     clut_program: Program,
+    fill_program: Program,
     vao: glow::VertexArray,
     vbo: glow::Buffer,
     /// No attributes: the quads make their corners from the vertex number.
@@ -186,6 +193,8 @@ impl VoodooGl {
         }
         let attributes = [(0, "a_pos"), (1, "a_color"), (2, "a_zw"), (3, "a_tex0"), (4, "a_tex1")];
         let triangle = compile(gl, glsl, TRIANGLE_VERT, TRIANGLE_FRAG, &attributes, TRIANGLE_UNIFORMS)?;
+        let fill_uniforms = &["u_rect", "u_size", "u_scale", "u_pattern"];
+        let fill_program = compile(gl, glsl, QUAD_VERT, FILL_FRAG, &[], fill_uniforms)?;
         let pixels = compile(gl, glsl, QUAD_VERT, PIXELS_FRAG, &[], QUAD_UNIFORMS)?;
         let depth_program = compile(gl, glsl, QUAD_VERT, DEPTH_FRAG, &[], QUAD_UNIFORMS)?;
         let clut_program = compile(gl, glsl, QUAD_VERT, CLUT_FRAG, &[], QUAD_UNIFORMS)?;
@@ -233,6 +242,7 @@ impl VoodooGl {
                 samples,
                 anisotropy,
                 texture_anisotropy,
+                dither: true,
                 width: 0,
                 height: 0,
                 targets: HashMap::new(),
@@ -247,6 +257,7 @@ impl VoodooGl {
                 pixels,
                 depth_program,
                 clut_program,
+                fill_program,
                 vao,
                 vbo,
                 quad_vao,
@@ -269,6 +280,13 @@ impl VoodooGl {
         self.anisotropy
     }
 
+    /// Dither to 5-6-5 as the card does where the game turns dithering on
+    /// (`voodoo_dither`, on when the renderer starts), or keep 8 bits a
+    /// colour. It applies to what is drawn from then on.
+    pub fn set_dither(&mut self, on: bool) {
+        self.dither = on;
+    }
+
     /// Give everything back to OpenGL.
     pub fn destroy(mut self, gl: &glow::Context) {
         self.drop_targets(gl);
@@ -285,6 +303,7 @@ impl VoodooGl {
             for program in [&self.triangle, &self.pixels, &self.depth_program, &self.clut_program] {
                 gl.delete_program(program.program);
             }
+            gl.delete_program(self.fill_program.program);
             gl.delete_vertex_array(self.vao);
             gl.delete_vertex_array(self.quad_vao);
             gl.delete_buffer(self.vbo);
@@ -589,6 +608,7 @@ impl VoodooGl {
             gl.uniform_1_i32_slice(p.at("u_fogblend"), &s.fogblend.map(|v| v as i32));
             gl.uniform_1_i32_slice(p.at("u_fogdelta"), &s.fogdelta.map(|v| v as i32));
             gl.uniform_1_f32(p.at("u_scale"), scale);
+            gl.uniform_1_i32(p.at("u_dither"), self.dither as i32);
             let mut units = 0;
             for (unit, t) in s.tmu.iter().enumerate() {
                 let Some(t) = t else { continue };
@@ -707,7 +727,22 @@ impl VoodooGl {
             let target = self.targets.get(&fill.dest).or_else(|| self.targets.values().next());
             let Some(target) = target else { return };
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target.draw_fbo()));
-            if let Some(color) = fill.color {
+            if let Some(pattern) = fill.pattern.filter(|_| self.dither && fill.color.is_some()) {
+                // The colour as the card dithers it, through the clip.
+                gl.color_mask(true, true, true, false);
+                gl.disable(glow::DEPTH_TEST);
+                let (w, h) = self.scaled();
+                gl.viewport(0, 0, w, h);
+                let p = &self.fill_program;
+                let size = (self.width as f32, self.height as f32);
+                gl.use_program(Some(p.program));
+                gl.uniform_4_f32(p.at("u_rect"), 0.0, 0.0, size.0, size.1);
+                gl.uniform_2_f32(p.at("u_size"), size.0, size.1);
+                gl.uniform_1_f32(p.at("u_scale"), self.scale as f32);
+                gl.uniform_1_i32_slice(p.at("u_pattern"), &pattern.map(i32::from));
+                gl.bind_vertex_array(Some(self.quad_vao));
+                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            } else if let Some(color) = fill.color {
                 gl.color_mask(true, true, true, false);
                 let c = |shift: u32| ((color >> shift) & 0xFF) as f32 / 255.0;
                 gl.clear_color(c(16), c(8), c(0), 1.0);
@@ -1154,5 +1189,338 @@ mod tests {
                 assert_eq!(sampling_filters(mode, false, anisotropy), (min, mag));
             }
         }
+    }
+
+    /// A hidden window's desktop OpenGL 3.3 context, current on this
+    /// thread, with the window and SDL that keep it.
+    struct TestContext {
+        gl: glow::Context,
+        _context: sdl2::video::GLContext,
+        _window: sdl2::video::Window,
+        _video: sdl2::VideoSubsystem,
+        _sdl: sdl2::Sdl,
+    }
+
+    fn test_context(title: &str) -> TestContext {
+        let sdl = sdl2::init().unwrap();
+        let video = sdl.video().unwrap();
+        let attrs = video.gl_attr();
+        attrs.set_context_profile(sdl2::video::GLProfile::Core);
+        attrs.set_context_version(3, 3);
+        let window = video.window(title, 8, 8).opengl().hidden().build().unwrap();
+        let context = window.gl_create_context().unwrap();
+        // SAFETY: this thread owns the current SDL OpenGL context.
+        let gl =
+            unsafe { glow::Context::from_loader_function(|s| video.gl_get_proc_address(s).cast()) };
+        TestContext {
+            gl,
+            _context: context,
+            _window: window,
+            _video: video,
+            _sdl: sdl,
+        }
+    }
+
+    const BASE: usize = 0xD000_0000;
+
+    fn w(bus: &mut crate::bus::Bus, reg: u32, value: u32) {
+        bus.write_32(BASE + reg as usize, value);
+    }
+
+    /// A Voodoo Graphics set up as Glide sets it for 640x480, with the Y
+    /// origin at row 479, recording for OpenGL.
+    fn dither_card() -> crate::bus::Bus {
+        let mut bus = crate::bus::Bus::new(std::path::PathBuf::from("."));
+        bus.set_cycles_per_ms(1000);
+        bus.configure_voodoo(Some(crate::voodoo::Board::Standard));
+        let cfg = |bus: &mut crate::bus::Bus, reg: u32, value: u32| {
+            bus.io_write_wide(0xCF8, 0x8000_0000 | reg, 4);
+            bus.io_write_wide(0xCFC, value, 4);
+        };
+        cfg(&mut bus, 0x40, 1);
+        // fbiInit1 to 3: 640 pixel rows, the second buffer after 150
+        // pages, the Y origin. Then the timing, and the output on.
+        w(&mut bus, 0x214, 10 << 4);
+        w(&mut bus, 0x218, 150 << 11);
+        w(&mut bus, 0x21C, 479 << 22);
+        w(&mut bus, 0x208, 2 << 16 | 40);
+        w(&mut bus, 0x220, ((800 - 96 - 2) << 16) | (96 - 1));
+        w(&mut bus, 0x224, (525 - 2) << 16 | 2);
+        w(&mut bus, 0x20C, 479 << 16 | 639);
+        cfg(&mut bus, 0xC0, 0);
+        w(&mut bus, 0x210, 1);
+        cfg(&mut bus, 0x40, 0);
+        // The clip rectangle: the screen.
+        w(&mut bus, 0x118, 640);
+        w(&mut bus, 0x11C, 480);
+        bus.voodoo.as_mut().unwrap().set_mirror(true);
+        bus
+    }
+
+    /// Draw with fbzMode's `fbz` bits and the colour writes: a fastfill of
+    /// the screen with a colour between 5-6-5 steps, then two triangles
+    /// making a rectangle of 256 by 64 pixels at (64, 32). With `ramp`,
+    /// its red rises and its green falls by 1 a pixel across and its blue
+    /// rises by 4 a row; without, it is one colour between steps.
+    fn draw_scene(bus: &mut crate::bus::Bus, fbz: u32, ramp: bool) {
+        w(bus, 0x110, (1 << 9) | fbz);
+        w(bus, 0x148, 0x0084_4A6B);
+        w(bus, 0x124, 0);
+        w(bus, 0x104, 0);
+        let (x0, y0, x1, y1) = (64, 32, 320, 96);
+        for verts in [
+            [(x0, y0), (x1, y0), (x0, y1)],
+            [(x1, y0), (x1, y1), (x0, y1)],
+        ] {
+            let (ax, ay) = verts[0];
+            let (dx, dy) = if ramp { (ax - x0, ay - y0) } else { (0, 0) };
+            // 12.12, half way between two values, so that both renderers
+            // take the same integer part.
+            let start = |v: i32| ((v << 12) | 0x800) as u32;
+            let (r, g, b) = if ramp {
+                (dx, 255 - dx, 4 * dy)
+            } else {
+                (123, 61, 149)
+            };
+            for (reg, v) in [(0x020, r), (0x024, g), (0x028, b), (0x030, 255)] {
+                w(bus, reg, start(v));
+            }
+            let slopes = if ramp {
+                [1, -1, 0, 0, 0, 0, 4, 0]
+            } else {
+                [0; 8]
+            };
+            for (reg, v) in [0x040, 0x044, 0x048, 0x050, 0x060, 0x064, 0x068, 0x070]
+                .into_iter()
+                .zip(slopes)
+            {
+                w(bus, reg, (v << 12) as u32);
+            }
+            for (i, (x, y)) in verts.into_iter().enumerate() {
+                w(bus, 0x008 + 8 * i as u32, (x * 16) as u32);
+                w(bus, 0x00C + 8 * i as u32, (y * 16) as u32);
+            }
+            w(bus, 0x080, 0);
+        }
+    }
+
+    /// A 5-6-5 pixel widened as the card's picture widens it.
+    fn widen(v: u16) -> [u8; 3] {
+        let (r, g, b) = ((v >> 11) as u8, (v >> 5 & 0x3F) as u8, (v & 0x1F) as u8);
+        [r << 3 | r >> 2, g << 2 | g >> 4, b << 3 | b >> 2]
+    }
+
+    /// What the software rasterizer and OpenGL at `scale` (with dithering
+    /// `on`) draw of `draw_scene`: the card's 640x480 pixels, and the
+    /// buffer's RGB, rows from the top.
+    fn both_pictures(
+        gl: &glow::Context,
+        fbz: u32,
+        ramp: bool,
+        on: bool,
+        scale: u32,
+    ) -> (Vec<u16>, Vec<[u8; 3]>) {
+        use super::*;
+        let mut bus = dither_card();
+        let card = bus.voodoo.as_mut().unwrap();
+        let resync = card.take_mirror().unwrap();
+        draw_scene(&mut bus, fbz, ramp);
+        let card = bus.voodoo.as_mut().unwrap();
+        let recording = card.take_mirror().unwrap();
+        // The software picture through frame buffer reads of the front
+        // buffer, which see everything drawn.
+        w(&mut bus, 0x114, 0);
+        let mut software = Vec::with_capacity(640 * 480);
+        for y in 0..480 {
+            for x in (0..640).step_by(2) {
+                let pair = bus.read_32(BASE + 0x40_0000 + y * 2048 + x * 2);
+                software.extend([pair as u16, (pair >> 16) as u16]);
+            }
+        }
+        let mut renderer = VoodooGl::new(gl, Glsl::Gl150, scale, 1, 1).unwrap();
+        renderer.set_dither(on);
+        renderer.run(gl, resync);
+        renderer.run(gl, recording);
+        let (w, h) = renderer.scaled();
+        let mut rgba = vec![0u8; (w * h * 4) as usize];
+        // SAFETY: the context and framebuffer belong to this thread.
+        unsafe {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(renderer.targets[&0].fbo));
+            let pixels = glow::PixelPackData::Slice(Some(&mut rgba));
+            gl.read_pixels(0, 0, w, h, glow::RGBA, glow::UNSIGNED_BYTE, pixels);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            assert_eq!(gl.get_error(), glow::NO_ERROR);
+        }
+        renderer.destroy(gl);
+        (
+            software,
+            rgba.as_chunks::<4>()
+                .0
+                .iter()
+                .map(|&[r, g, b, _]| [r, g, b])
+                .collect(),
+        )
+    }
+
+    /// The pixels where `opengl` at `scale` isn't the card's `software`
+    /// picture widened, as (x, y, card's, OpenGL's), and how many.
+    fn differences(software: &[u16], opengl: &[[u8; 3]], scale: usize) -> (usize, Vec<String>) {
+        let mut bad = Vec::new();
+        for (i, &v) in software.iter().enumerate() {
+            let (x, y) = (i % 640, i / 640);
+            for (sx, sy) in (0..scale).flat_map(|sy| (0..scale).map(move |sx| (sx, sy))) {
+                let got = opengl[(y * scale + sy) * 640 * scale + x * scale + sx];
+                if got != widen(v) {
+                    bad.push(format!("({x}, {y}) {:?} {:?}", widen(v), got));
+                }
+            }
+        }
+        (bad.len(), bad.into_iter().take(8).collect())
+    }
+
+    #[test]
+    #[ignore = "requires a desktop OpenGL context"]
+    fn dithering_matches_the_software_rasterizer() {
+        let t = test_context("Dither");
+        let gl = &t.gl;
+        let (dither, dither2, y_origin) = (1 << 8, 1 << 11, 1 << 17);
+        // At 1x, the ramp's every value at every place in the matrices is
+        // the card's, for the 4x4 and 2x2 matrices and both Y origins.
+        for (fbz, what) in [
+            (dither, "4x4"),
+            (dither | y_origin, "4x4, Y origin at the bottom"),
+            (dither | dither2, "2x2"),
+            (dither | dither2 | y_origin, "2x2, Y origin at the bottom"),
+        ] {
+            let (software, opengl) = both_pictures(gl, fbz, true, true, 1);
+            assert_eq!(differences(&software, &opengl, 1), (0, vec![]), "{what}");
+        }
+        // Above 1x a card pixel's dither covers a block of the buffer's.
+        for fbz in [dither, dither | dither2 | y_origin] {
+            let (software, opengl) = both_pictures(gl, fbz, false, true, 2);
+            assert_eq!(
+                differences(&software, &opengl, 2),
+                (0, vec![]),
+                "2x, fbzMode {fbz:X}h"
+            );
+        }
+
+        // A game that doesn't dither keeps 8 bits a colour, which the
+        // card's 5-6-5 pixels are the top bits of.
+        let (plain, opengl) = both_pictures(gl, 0, true, true, 1);
+        let truncated =
+            |&[r, g, b]: &[u8; 3]| (r as u16 >> 3) << 11 | (g as u16 >> 2) << 5 | b as u16 >> 3;
+        assert!(opengl.iter().map(truncated).eq(plain.iter().copied()));
+        assert!(
+            differences(&plain, &opengl, 1).0 > 10_000,
+            "8 bits, not 5-6-5"
+        );
+        // With voodoo_dither off, so does a game that dithers.
+        let (dithered, undithered) = both_pictures(gl, dither, true, false, 1);
+        assert!(undithered == opengl);
+        assert_ne!(dithered, plain);
+    }
+
+    /// Time OpenGL drawing many dithered Gouraud triangles at 2x, with
+    /// voodoo_dither on and off, alternately. `cargo test --release`.
+    #[test]
+    #[ignore = "a benchmark; requires a desktop OpenGL context"]
+    fn benchmark_dithering() {
+        use super::*;
+        use crate::voodoo::mirror::{DrawState, Layout};
+        let t = test_context("Dither benchmark");
+        let gl = &t.gl;
+        let state = DrawState {
+            dest: 0,
+            fbz_color_path: 0,
+            fbz_mode: (1 << 8) | (1 << 9),
+            alpha_mode: 0,
+            fog_mode: 0,
+            za_color: 0,
+            chroma_key: 0,
+            chroma_range: 0,
+            color0: 0,
+            color1: 0,
+            fog_color: 0,
+            stipple: 0,
+            yorigin: 479,
+            clip: None,
+            aux: false,
+            fogblend: [0; 64],
+            fogdelta: [0; 64],
+            send_config: None,
+            tmu: [None; 2],
+        };
+        // 200 screen-sized quads a frame, 61 million card pixels and four
+        // times as many buffer pixels at 2x.
+        let vertices: Vec<Vertex> = (0..200)
+            .flat_map(|i| {
+                let c = |x: f32, y: f32| {
+                    [
+                        (x + i as f32) % 256.0,
+                        y * 255.0 / 480.0,
+                        255.0 - x * 0.3,
+                        255.0,
+                    ]
+                };
+                let v = |x: f32, y: f32| Vertex {
+                    pos: [x, y],
+                    color: c(x, y),
+                    ..Vertex::default()
+                };
+                let (a, b, c, d) = (v(0.0, 0.0), v(640.0, 0.0), v(0.0, 480.0), v(640.0, 480.0));
+                [a, b, c, b, d, c]
+            })
+            .collect();
+        let resync = Recording {
+            commands: vec![Command::Resync(Box::new(Snapshot {
+                layout: Layout {
+                    width: 640,
+                    height: 480,
+                    rowpixels: 640,
+                    color: vec![0],
+                    aux: None,
+                },
+                color: vec![vec![0; 640 * 480]],
+                aux: None,
+            }))],
+            front: Some(0),
+            output: true,
+            width: 640,
+            height: 480,
+            clut: [0; 33],
+        };
+        let frame = Recording {
+            commands: vec![Command::Draw(Box::new(Draw { state, vertices }))],
+            ..resync.clone()
+        };
+        let mut renderer = VoodooGl::new(gl, Glsl::Gl150, 2, 1, 1).unwrap();
+        renderer.run(gl, resync);
+        let mut times = [Vec::new(), Vec::new()];
+        for round in 0..6 {
+            for on in [true, false] {
+                renderer.set_dither(on);
+                // SAFETY: the context belongs to this thread.
+                unsafe { gl.finish() };
+                let start = std::time::Instant::now();
+                for _ in 0..10 {
+                    renderer.run(gl, frame.clone());
+                }
+                // SAFETY: as above.
+                unsafe { gl.finish() };
+                let ms = start.elapsed().as_secs_f64() * 100.0;
+                if round > 0 {
+                    times[on as usize].push(ms);
+                }
+            }
+        }
+        for (on, ms) in times.iter().enumerate().rev() {
+            let mean = ms.iter().sum::<f64>() / ms.len() as f64;
+            println!(
+                "dither {}: {mean:.2} ms a frame {ms:.2?}",
+                if on == 1 { "on" } else { "off" }
+            );
+        }
+        renderer.destroy(gl);
     }
 }

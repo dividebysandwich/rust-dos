@@ -248,6 +248,7 @@ impl Item {
                 })
             }
             VoodooScaleShader => on_off(|s, on| s.voodoo.scale_shader = on),
+            VoodooDither => on_off(|s, on| s.voodoo.dither = on),
             VoodooMsaa => each(s, [1, 2, 4, 8], |s, samples| s.voodoo.msaa = samples),
             VoodooAnisotropy => each(s, [1, 2, 4, 8, 16], |s, n| s.voodoo.anisotropy = n),
             VoodooFpsCap => each(s, FPS_CAPS, |s, fps| s.voodoo.fps_cap = fps),

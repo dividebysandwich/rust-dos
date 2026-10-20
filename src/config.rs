@@ -147,6 +147,8 @@ pub struct Config {
     /// Whether the CRT look's lines follow `voodoo_scale`
     /// (`voodoo_scale_shader`).
     pub voodoo_scale_shader: Option<bool>,
+    /// Whether OpenGL dithers as the card does (`voodoo_dither`).
+    pub voodoo_dither: Option<bool>,
     pub voodoo_msaa: Option<u32>,
     pub voodoo_anisotropy: Option<u32>,
     pub voodoo_fps_cap: Option<u32>,

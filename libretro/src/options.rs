@@ -152,6 +152,14 @@ fn definitions() -> Vec<Definition> {
             values: configured(&[("off", "Off"), ("2", "2x"), ("4", "4x"), ("8", "8x")]),
         },
         Definition {
+            key: "voodoo_dither",
+            desc: "3dfx OpenGL dithering",
+            info: "On dithers the 3dfx card's OpenGL picture to 16 bits as the card does, where the game turns dithering on, so it has the card's dot pattern. Off keeps 8 bits a colour: a smoother picture without the pattern.",
+            category: "video",
+            target: config("emulator", "voodoo_dither"),
+            values: configured(&ON_OFF),
+        },
+        Definition {
             key: "cycles",
             desc: "CPU speed",
             info: "Instructions a millisecond. Max runs as fast as the host goes; auto gives a game as much as makes its frames come faster, up to the display's refresh rate.",

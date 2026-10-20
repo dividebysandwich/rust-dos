@@ -293,11 +293,26 @@ pub struct VoodooSettings {
     pub fps_cap: Option<u32>,
     /// Glide's gamma factor for the guest's SST_*GAMMA variables, if set.
     pub gamma: Option<f32>,
+    /// Whether OpenGL dithers to 5-6-5 as the card does where a game
+    /// turns dithering on (`voodoo_dither`), or keeps 8 bits a colour.
+    pub dither: bool,
 }
 
 impl Default for VoodooSettings {
     fn default() -> Self {
-        Self { enabled: false, board: Board::Max, renderer: Renderer::Software, texture_sampling: TextureSampling::Default, scale: 2, scale_shader: true, msaa: 1, anisotropy: 1, fps_cap: None, gamma: None }
+        Self {
+            enabled: false,
+            board: Board::Max,
+            renderer: Renderer::Software,
+            texture_sampling: TextureSampling::Default,
+            scale: 2,
+            scale_shader: true,
+            msaa: 1,
+            anisotropy: 1,
+            fps_cap: None,
+            gamma: None,
+            dither: true,
+        }
     }
 }
 

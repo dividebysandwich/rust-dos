@@ -153,6 +153,11 @@
 # Whether the CRT look sizes its scanlines for voodoo_scale: true or false.
 # Only the CRT look uses it, and only above 1x.
 #voodoo_scale_shader=true
+# Whether the OpenGL Voodoo renderer dithers colours to 16 bits as the card
+# does, where the game turns dithering on: true or false. false gives a
+# smoother picture without the dither pattern. Changes take effect
+# immediately.
+#voodoo_dither=true
 # Texture anisotropy for the OpenGL Voodoo renderer: off, 2, 4, 8 or 16.
 #voodoo_anisotropy=off
 # The gamma Glide applies to the 3dfx picture, as the environment variables

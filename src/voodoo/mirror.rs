@@ -98,6 +98,9 @@ pub struct Fill {
     pub aux: Option<u16>,
     /// Whether the auxiliary buffer holds alpha rather than depth.
     pub alpha_planes: bool,
+    /// With fbzMode's dithering, the 5-6-5 values the card fills a 4x4
+    /// block of pixels with, by buffer row and column (each `& 3`).
+    pub pattern: Option<[u16; 16]>,
 }
 
 /// Pixels of a row as frame buffer writes left them, 5-6-5 colours in the
@@ -374,8 +377,16 @@ impl Mirror {
     }
 
     /// A fastfill of rows `y0..y1` (as triangles count them), columns
-    /// `x0..x1`.
-    pub(crate) fn fastfill(&mut self, st: &RasterState, (x0, x1, y0, y1): (i32, i32, i32, i32), rgb: bool, aux: bool) {
+    /// `x0..x1`, with `dither` the colour's pattern if it is dithered, by
+    /// rows as triangles count them.
+    pub(crate) fn fastfill(
+        &mut self,
+        st: &RasterState,
+        (x0, x1, y0, y1): (i32, i32, i32, i32),
+        rgb: bool,
+        aux: bool,
+        dither: Option<&[u16; 16]>,
+    ) {
         let fbz = st.fbz_mode;
         let (top, bottom) = if fbz & (1 << 17) != 0 {
             (st.yorigin as i32 + 1 - y1, st.yorigin as i32 + 1 - y0)
@@ -392,6 +403,15 @@ impl Mirror {
             color: rgb.then_some(st.color1 & 0xFF_FFFF),
             aux: (aux && st.aux.is_some()).then_some(st.za_color as u16),
             alpha_planes: fbz & (1 << 18) != 0,
+            pattern: dither.filter(|_| rgb).map(|d| {
+                // Buffer row r is row yorigin - r as the card counts them.
+                let flip = fbz & (1 << 17) != 0;
+                std::array::from_fn(|i| {
+                    let (r, x) = (i as u32 >> 2, i & 3);
+                    let y = if flip { st.yorigin.wrapping_sub(r) } else { r };
+                    d[(y & 3) as usize * 4 + x]
+                })
+            }),
         }));
     }
 

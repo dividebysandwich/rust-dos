@@ -356,6 +356,7 @@ impl<'a> Display<'a> {
                         gl.drop_voodoo();
                         self.redraw = true;
                     }
+                    gl.set_voodoo_dither(settings.dither);
                     let Some(recording) = card.take_mirror() else { return false };
                     let shown = recording.output && recording.front.is_some();
                     match gl.run_voodoo(recording, settings.scale, settings.msaa, settings.anisotropy) {

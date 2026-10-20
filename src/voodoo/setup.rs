@@ -252,7 +252,8 @@ impl Voodoo {
         if self.mirror.is_some() {
             self.mirror_sync();
             if let Some(mirror) = &mut self.mirror {
-                mirror.fastfill(&st, (sx, ex, sy, ey), rgb, aux);
+                let pattern = (fbz & (1 << 8) != 0).then_some(&dither);
+                mirror.fastfill(&st, (sx, ex, sy, ey), rgb, aux, pattern);
             }
         }
         let access = self.access(|layout| backlog::fastfill(layout, &st, (sx, ex, sy, ey)));
