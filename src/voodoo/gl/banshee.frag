@@ -5,6 +5,11 @@
 // from the surface's first byte on) or, where the OpenGL renderer draws
 // it, the texture of one of its colour buffers.
 
+// OpenGL ES has no default precision for integer samplers.
+#ifdef GL_ES
+precision highp usampler2D;
+#endif
+
 uniform int u_scale;
 uniform usampler2D u_desk_mem;
 uniform sampler2D u_desk_buf;
