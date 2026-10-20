@@ -578,7 +578,12 @@ fn find_for(
 
 /// The data of a resource, for USER32: its address and size, or the
 /// error FindResourceA would set.
-pub(super) fn resource_data(cpu: &mut Cpu, module: u32, kind: u32, name: u32) -> Option<Result<(u32, u32), u32>> {
+pub(super) fn resource_data(
+    cpu: &mut Cpu,
+    module: u32,
+    kind: u32,
+    name: u32,
+) -> Option<Result<(u32, u32), u32>> {
     let kind = res_arg(cpu, kind)?;
     let name = res_arg(cpu, name)?;
     let Some(base) = resource_module(cpu, module) else {
