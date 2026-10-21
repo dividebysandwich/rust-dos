@@ -1285,10 +1285,11 @@ pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if primary && flags & DDFLIP_NOVSYNC == 0 {
         let (timing, now) = display::timing(cpu);
         let pending = state(cpu).display.flip_at;
-        if now < pending {
+        if pending.div_ceil(1000) > cpu.bus.clock.now_micros() {
             if flags & DDFLIP_WAIT == 0 {
                 return Some(super::DDERR_WASSTILLDRAWING);
             }
+            // Flip runs again when that frame begins.
             cpu.set_eip(cpu.eip().wrapping_sub(4));
             return super::directdraw::wait_until(cpu, pending, DD_OK);
         }
