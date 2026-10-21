@@ -67,6 +67,9 @@ const HANDLE_BASE: u32 = 0x5A00;
 const DEVICE_NAME: &str = "Built-in Windows sound";
 const MAPPER_NAME: &str = "Microsoft Sound Mapper";
 
+/// The times a loop of blocks plays at most (`dwLoops`).
+const MAX_LOOPS: u32 = 256;
+
 /// A part of an open device's stream: the frames of the block whose
 /// header is at `header`, from the stream's frame `start`. `last` when
 /// it is the block's last time to play (the others are earlier times of
@@ -600,9 +603,10 @@ pub fn wave_out_write(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if flags & WHDR_ENDLOOP != 0
         && let Some(start) = o.loop_start.take()
     {
-        // The loop's blocks again, for each time more it plays.
+        // The loop's blocks again, for each time more it plays, up to
+        // `MAX_LOOPS` times: programs ask for 0xFFFFFFFF to loop for ever.
         let body: Vec<Segment> = o.segments[start..].to_vec();
-        for pass in 1..o.loops.max(1) {
+        for pass in 1..o.loops.clamp(1, MAX_LOOPS) {
             for s in o.segments.iter_mut().skip(start) {
                 if body.iter().any(|b| b.header == s.header) {
                     s.last = false;
