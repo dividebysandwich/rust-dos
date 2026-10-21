@@ -120,7 +120,8 @@ fn icon_of(
     let color = if mono {
         0
     } else {
-        bitmap::new_ddb(cpu, w, h, 32)
+        let depth = gdi32::dc::device_depth(cpu) as u16;
+        bitmap::new_ddb(cpu, w, h, depth)
     };
     if let Some(mut m) = Surface::load_all(cpu, Target::Bitmap(mask)) {
         for y in 0..h {
@@ -673,7 +674,8 @@ pub fn load_bitmap(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (module, name) = (args[0], args[1]);
     if module == 0 {
         // The system's bitmaps (OBM_): an empty one of their size.
-        let h = bitmap::new_ddb(cpu, 16, 16, 32);
+        let depth = gdi32::dc::device_depth(cpu) as u16;
+        let h = bitmap::new_ddb(cpu, 16, 16, depth);
         return Some(h);
     }
     match kernel32::resource_data(cpu, module, RT_BITMAP, name)? {

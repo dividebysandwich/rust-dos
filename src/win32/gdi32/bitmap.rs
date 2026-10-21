@@ -318,7 +318,8 @@ pub fn create_compatible_bitmap(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             return Some(new_ddb(cpu, w, h, 1));
         }
     }
-    Some(new_ddb(cpu, w, h, super::dc::device_cap(12) as u16))
+    let depth = super::dc::device_depth(cpu) as u16;
+    Some(new_ddb(cpu, w, h, depth))
 }
 
 /// Make a DIB section of `info`'s format: its handle and its bits'
@@ -683,6 +684,9 @@ pub fn get_di_bits(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     // The masks are the bitmap's at its own depth, else the depth's.
     info.masks = match &b.dib {
         Some(d) if bitmap_bpp == bpp && d.compression == BI_BITFIELDS => d.masks,
+        None if bitmap_bpp == bpp && info.compression == BI_BITFIELDS => {
+            surface::ddb_masks(cpu, bpp)
+        }
         _ => surface::default_masks(bpp),
     };
     if !core {
