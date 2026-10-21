@@ -703,10 +703,7 @@ fn in_place(cpu: &mut Cpu, id: u32, key: bool) -> Option<InPlace> {
     let mut small_lod = large_lod;
     let mut next = start;
     let (mut level, mut lod) = (id, large_lod);
-    loop {
-        let Some((addr, p)) = surface::card_memory(cpu, level) else {
-            break;
-        };
+    while let Some((addr, p)) = surface::card_memory(cpu, level) {
         let (lw, lh) = api::level_size(aspect, lod);
         let fits = state(cpu)
             .surface(level)
