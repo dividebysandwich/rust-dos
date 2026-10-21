@@ -254,7 +254,10 @@ pub fn blt(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
         let r = Rect::read(cpu, dst_rect);
         let inside = surface::bounds(&d).intersect(&r) == r;
-        if r.left >= r.right || r.top >= r.bottom || (!inside && clip.is_none()) {
+        // One a clipper cuts may be outside, but no wider than an i32.
+        let huge = r.right as i64 - r.left as i64 > i32::MAX as i64
+            || r.bottom as i64 - r.top as i64 > i32::MAX as i64;
+        if r.left >= r.right || r.top >= r.bottom || huge || (!inside && clip.is_none()) {
             return Some(DDERR_INVALIDRECT);
         }
         r

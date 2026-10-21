@@ -571,6 +571,10 @@ pub fn destroyed(cpu: &mut Cpu, id: u32) {
 const PITCH_ALIGN: u32 = 4;
 
 /// The pitch of `width` pixels of `bits` bits.
+/// The most bytes of pixels a surface can have in the program's memory
+/// (`SetSurfaceDesc`).
+const MAX_GIVEN_BITS: u64 = 0x1000_0000;
+
 fn pitch_of(width: u32, bits: u32) -> u32 {
     (width * bits).div_ceil(8).next_multiple_of(PITCH_ALIGN)
 }
@@ -702,7 +706,7 @@ fn make(cpu: &mut Cpu, dd: u32, version: u32, level: u32, desc: &Desc) -> Result
         if caps[0] & DDSCAPS_COMPLEX == 0 {
             return Err(DDERR_INVALIDCAPS);
         }
-        if desc.flags & DDSD_BACKBUFFERCOUNT == 0 || desc.backbuffers == 0 {
+        if desc.flags & DDSD_BACKBUFFERCOUNT == 0 || !(1..=0xFF).contains(&desc.backbuffers) {
             return Err(DDERR_INVALIDPARAMS);
         }
         desc.backbuffers
@@ -774,7 +778,8 @@ fn make(cpu: &mut Cpu, dd: u32, version: u32, level: u32, desc: &Desc) -> Result
     let mipmap = caps[0] & DDSCAPS_MIPMAP != 0;
     let levels = if mipmap && caps[0] & DDSCAPS_COMPLEX != 0 {
         if desc.flags & DDSD_MIPMAPCOUNT != 0 {
-            if desc.mipmaps == 0 {
+            // No more levels than halving the larger side down to 1 gives.
+            if desc.mipmaps == 0 || desc.mipmaps > 32 - width.max(height).leading_zeros() {
                 return Err(DDERR_INVALIDPARAMS);
             }
             desc.mipmaps
@@ -1800,12 +1805,20 @@ pub fn set_surface_desc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     } else {
         s.height
     };
+    if width == 0 || height == 0 || width > 0x4000 || height > 0x4000 {
+        return Some(DDERR_INVALIDPARAMS);
+    }
     let pitch = if desc.flags & DDSD_PITCH != 0 {
         desc.pitch
     } else {
         pitch_of(width, format.bits)
     };
-    if width == 0 || height == 0 || pitch < (width * format.bits).div_ceil(8) {
+    // The program's memory has to hold the pixels: blits copy them whole.
+    let size = pitch as u64 * height as u64;
+    if pitch < (width * format.bits).div_ceil(8)
+        || size > MAX_GIVEN_BITS
+        || !cpu.bus.guest_probe(desc.surface, size as usize, false)
+    {
         return Some(DDERR_INVALIDPARAMS);
     }
     free_memory(cpu, id);
