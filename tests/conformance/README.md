@@ -212,9 +212,7 @@ The results that aren't clean, and why:
   -1), so the light tests skip. `d3d.c:2078`: it has no cube maps.
   `d3d.c:891` fails and `d3d.c:3532` skips: there is no RGB device, the
   software rasterizer, which the Direct3D 1 tests need and the test
-  expects among the devices. `3292`, `3295` and `3325`: DirectDraw
-  doesn't subclass the window it has in exclusive mode, nor give it the
-  focus.
+  expects among the devices.
 - ddraw `visual.c:2929`: the test draws in a 32-bit or 24-bit mode with
   a 32-bit depth buffer, and reads the pixels as 32-bit ones. The
   Voodoo3's HAL draws only into 16-bit surfaces with 16-bit depth, as

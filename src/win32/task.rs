@@ -130,6 +130,7 @@ pub static TASKS: &[Step] = &[
     super::ddraw::enumerate::step,
     super::dsound::enum_step,
     super::ddraw::d3d::direct3d::step,
+    super::ddraw::activate_step,
 ];
 
 /// The `TASKS` places of the tasks other DLLs than USER32 start.
@@ -139,6 +140,7 @@ pub const MMIO: u16 = 23;
 pub const DDRAW_ENUM: u16 = 24;
 pub const DS_ENUMERATE: u16 = 25;
 pub const D3D_ENUM: u16 = 26;
+pub const DD_ACTIVATE: u16 = 27;
 
 /// Start the task `kind` with the variables `vars` and, if `scratch` is
 /// more than 0, that many bytes of scratch space: for a function's

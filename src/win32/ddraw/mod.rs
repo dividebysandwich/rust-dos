@@ -54,6 +54,7 @@ use super::stubs::{Api, Conv, Dll, Vtable};
 use crate::cpu::Cpu;
 
 pub use display::owns_display;
+pub use directdraw::activate_step;
 
 pub static DLL: Dll = Dll {
     name: "DDRAW.DLL",
@@ -458,6 +459,7 @@ static APIS: &[Api] = &[
         3,
         gamma::set_gamma_ramp,
     ),
+    method("DDrawWndProc", 4, directdraw::window_proc),
 ];
 
 const IUNKNOWN: [&str; 3] = ["DD_QueryInterface", "DD_AddRef", "DD_Release"];

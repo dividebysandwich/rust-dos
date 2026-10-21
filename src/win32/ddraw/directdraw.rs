@@ -12,7 +12,9 @@ use super::{
     IID_DD7, Object, V_DD1, V_DD7, display, state, surface, voodoo,
 };
 use crate::cpu::Cpu;
+use crate::win32::task::{self, Next, Task};
 use crate::win32::thread::{self, Wait};
+use crate::win32::user32;
 
 /// What the DirectDraw object has of its own.
 #[derive(Clone, Debug, Default)]
@@ -30,6 +32,9 @@ pub struct DirectDraw {
     /// The 3dfx device's (`voodoo.rs`), whose display is the add-on
     /// card.
     pub card: bool,
+    /// The window procedure of the window of exclusive mode, `hwnd`,
+    /// while DirectDraw's own (`window_proc`) is in front of it; else 0.
+    pub proc: u32,
 }
 
 pub const DDSCL_FULLSCREEN: u32 = 0x1;
@@ -171,6 +176,7 @@ pub fn initialize(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// The DirectDraw object `id` goes: the display it had is given back,
 /// and what it made is left without it. Its surfaces lose their memory.
 pub fn destroyed(cpu: &mut Cpu, id: u32) {
+    subclass(cpu, id, 0);
     display::object_gone(cpu, id);
     voodoo::object_gone(cpu, id);
     let made = state(cpu).ids(|o| o.owner == id);
@@ -252,11 +258,95 @@ pub fn set_cooperative_level(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             state(cpu).display.exclusive = 0;
         }
     }
+    let exclusive = flags & DDSCL_EXCLUSIVE != 0;
+    subclass(cpu, id, if exclusive { hwnd } else { 0 });
     if let Some(d) = ddraw(cpu, id) {
         d.level = flags;
         d.hwnd = hwnd;
     }
+    // The window of exclusive mode becomes the active one, and gets the
+    // focus, as with SetActiveWindow.
+    if exclusive && flags & DDSCL_NOWINDOWCHANGES == 0 {
+        let user = &cpu.bus.win32.user;
+        let top = user.top_level(hwnd);
+        if user.input.active != top {
+            return task::start(cpu, task::DD_ACTIVATE, vec![top], 0);
+        }
+    }
     Some(DD_OK)
+}
+
+/// SetCooperativeLevel's task, which makes the window of exclusive mode
+/// (its variable) the active one and returns DD_OK.
+pub fn activate_step(_: &mut Cpu, t: &mut Task, _: u32) -> Next {
+    match t.step {
+        0 => Next::call(user32::address_of("SetActiveWindow"), &[t.var(0)], 1),
+        _ => Next::Done(DD_OK),
+    }
+}
+
+/// Put DirectDraw's window procedure in front of the procedure of
+/// `window` for the object `id`, or with `window` 0 take it away from the
+/// window it is in front of. A procedure the program set since stays.
+fn subclass(cpu: &mut Cpu, id: u32, window: u32) {
+    let ours = window_proc_address();
+    let Some(d) = ddraw(cpu, id) else {
+        return;
+    };
+    let (old, original) = (d.hwnd, d.proc);
+    if original != 0 {
+        if old == window {
+            return;
+        }
+        if let Some(w) = cpu.bus.win32.user.window_mut(old)
+            && w.proc == ours
+        {
+            w.proc = original;
+        }
+        if let Some(d) = ddraw(cpu, id) {
+            d.proc = 0;
+        }
+    }
+    if window == 0 {
+        return;
+    }
+    // Another DirectDraw object's may be in front of it already.
+    let Some(w) = cpu.bus.win32.user.window_mut(window) else {
+        return;
+    };
+    if w.proc != ours {
+        let original = std::mem::replace(&mut w.proc, ours);
+        if let Some(d) = ddraw(cpu, id) {
+            d.proc = original;
+        }
+    }
+}
+
+/// The address of `window_proc`'s stub.
+fn window_proc_address() -> u32 {
+    let index = super::DLL
+        .apis
+        .iter()
+        .position(|a| a.name == "DDrawWndProc")
+        .expect("DirectDraw's window procedure");
+    crate::win32::stubs::stub_address(super::dll_index(), index)
+}
+
+/// DirectDraw's window procedure (hwnd, message, wparam, lparam), in
+/// front of the procedure of the window of exclusive mode: it passes the
+/// messages on to the window's own.
+pub fn window_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let hwnd = args[0];
+    let original = state(cpu)
+        .objects
+        .iter()
+        .flatten()
+        .filter_map(|o| o.ddraw.as_ref())
+        .find(|d| d.proc != 0 && d.hwnd == hwnd)
+        .map(|d| d.proc);
+    let target = original.unwrap_or_else(|| user32::address_of("DefWindowProcA"));
+    let call = [target, hwnd, args[1], args[2], args[3]];
+    user32::message::call_window_proc(cpu, &call)
 }
 
 /// TestCooperativeLevel(this).
@@ -682,5 +772,6 @@ crate::state_fields!(DirectDraw {
     hwnd,
     focus,
     mode_changed,
-    card
+    card,
+    proc
 });
