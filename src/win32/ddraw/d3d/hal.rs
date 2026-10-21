@@ -37,10 +37,11 @@
 use super::super::surface::{self, DDPF_PALETTEINDEXED8, KEY_SRC_BLT, MEM_CARD, Surface};
 use super::super::{current_pid, display, state, voodoo};
 use super::device::{
-    Device, RS_FOGENABLE, RS_FOGTABLEMODE, RS_SPECULARENABLE, RS_ZENABLE, RS_ZFUNC,
-    RS_ZWRITEENABLE, TA_TEXTURE, TOP_ADD, TOP_BLENDTEXTUREALPHA, TOP_DISABLE, TOP_SELECTARG1,
-    TOP_SELECTARG2, TSS_ADDRESSU, TSS_ADDRESSV, TSS_ALPHAARG1, TSS_ALPHAARG2, TSS_ALPHAOP,
-    TSS_COLORARG1, TSS_COLORARG2, TSS_COLOROP, TSS_MAGFILTER, TSS_MINFILTER, TSS_MIPFILTER,
+    Device, RS_FOGENABLE, RS_FOGTABLEMODE, RS_SPECULARENABLE, RS_TEXTUREMAPBLEND, RS_ZENABLE,
+    RS_ZFUNC, RS_ZWRITEENABLE, TA_TEXTURE, TOP_ADD, TOP_BLENDTEXTUREALPHA, TOP_DISABLE,
+    TOP_SELECTARG1, TOP_SELECTARG2, TSS_ADDRESSU, TSS_ADDRESSV, TSS_ALPHAARG1, TSS_ALPHAARG2,
+    TSS_ALPHAOP, TSS_COLORARG1, TSS_COLORARG2, TSS_COLOROP, TSS_MAGFILTER, TSS_MINFILTER,
+    TSS_MIPFILTER,
 };
 use super::pipeline::{self, Rasterizer, ScreenVertex, Setup};
 use crate::cpu::Cpu;
@@ -90,6 +91,9 @@ pub struct Hal {
     pub clock: u32,
     /// The palette each texture unit has, by its hash.
     pub palettes: [u32; 2],
+    /// The 16-bit shadows of 24- and 32-bit render targets and depth
+    /// buffers (`shadow.rs`).
+    pub shadows: Vec<super::shadow::Shadow>,
 }
 
 crate::state_fields!(Hal {
@@ -98,7 +102,8 @@ crate::state_fields!(Hal {
     heap_len,
     textures,
     clock,
-    palettes
+    palettes,
+    shadows
 });
 
 fn hal(cpu: &mut Cpu) -> &mut Hal {
@@ -166,7 +171,9 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
     }
     let (width, height) = state(cpu).surface(d.target).map(|s| (s.width, s.height))?;
     if banshee {
-        let (target_at, target_pitch) = surface::card_memory(cpu, d.target)?;
+        // A 24- or 32-bit target is drawn in its 16-bit shadow.
+        let (target_at, target_pitch) = super::shadow::place(cpu, d.target)?;
+        super::shadow::drawn(cpu, d.target);
         if !crate::win32::glide::state(cpu).gc.active {
             api::attach(cpu, width, height);
         }
@@ -249,7 +256,9 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
     // it is the auxiliary buffer.
     let z = super::device::z_buffer(cpu, d.target).and_then(|z| {
         if banshee {
-            surface::card_memory(cpu, z).map(Some)
+            let place = super::shadow::place(cpu, z);
+            super::shadow::drawn(cpu, z);
+            place.map(Some)
         } else {
             (voodoo::card_buffer(cpu, z) == Some(api::BUFFER_AUXBUFFER)).then_some(None)
         }
@@ -369,7 +378,17 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
             api::tex_combine(cpu, 0, local(), 0, local(), 0, false, false);
         }
     }
-    fbi_combine(cpu, d, textured);
+    // D3DTBLEND_MODULATE and MODULATEMASK take the diffuse alpha for a
+    // texture without alpha, as Direct3D before 7 has them.
+    let legacy = d.version < 7
+        && matches!(d.state(RS_TEXTUREMAPBLEND), 2 | 6)
+        && d.stage(0, TSS_ALPHAOP) == TOP_SELECTARG1
+        && d.stage(0, TSS_ALPHAARG1) & 0xF == TA_TEXTURE;
+    let diffuse_alpha = legacy
+        && first
+            .and_then(|id| state(cpu).surface(id))
+            .is_some_and(|s| s.format.a == 0);
+    fbi_combine(cpu, d, textured, diffuse_alpha);
     if d.state(RS_SPECULARENABLE) != 0 {
         card.specular = if textured {
             Specular::Pass {
@@ -483,8 +502,8 @@ fn tmu_function(op: u32, d: &Device, stage: u32, alpha: bool) -> (u32, u32) {
 
 /// The color and alpha combine units for stage 0's operations: the
 /// texture units' result is the texture, the iterated color the diffuse
-/// color.
-fn fbi_combine(cpu: &mut Cpu, d: &Device, textured: bool) {
+/// color. `diffuse_alpha` makes stage 0's alpha the diffuse one.
+fn fbi_combine(cpu: &mut Cpu, d: &Device, textured: bool, diffuse_alpha: bool) {
     let it = api::COMBINE_LOCAL_ITERATED;
     let (other_tex, other_it) = (api::COMBINE_OTHER_TEXTURE, api::COMBINE_OTHER_ITERATED);
     let arg_is_texture = |arg: u32| textured && arg & 0xF == TA_TEXTURE;
@@ -538,8 +557,13 @@ fn fbi_combine(cpu: &mut Cpu, d: &Device, textured: bool) {
         d.stage(0, TSS_COLORARG2),
     );
     api::color_combine(cpu, f, factor, it, other, false);
+    let alpha_op = if diffuse_alpha {
+        TOP_SELECTARG2
+    } else {
+        d.stage(0, TSS_ALPHAOP)
+    };
     let (f, factor, other) = pick(
-        d.stage(0, TSS_ALPHAOP),
+        alpha_op,
         d.stage(0, TSS_ALPHAARG1),
         d.stage(0, TSS_ALPHAARG2),
     );
@@ -575,6 +599,8 @@ fn load(
     tmu: u32,
     key: bool,
 ) -> Option<([f32; 2], bool)> {
+    // A texture the device drew into is read from its surface.
+    super::shadow::expose(cpu, id);
     let (start, info, keyed) = match in_place(cpu, id, key) {
         Some(p) => {
             if p.info.format == api::TEXFMT_P_8 {
@@ -942,6 +968,7 @@ pub fn release(cpu: &mut Cpu, gone: u32) {
     if devices.iter().any(|&id| id != gone) {
         return;
     }
+    super::shadow::forget_all(cpu);
     let h = hal(cpu).clone();
     if h.heap_len != 0 && h.pid == current_pid(cpu) {
         display::free(cpu, h.heap);
@@ -958,6 +985,9 @@ pub fn process_ended(cpu: &mut Cpu, pid: u32) {
         let h = hal(cpu).clone();
         if h.heap_len != 0 {
             display::free(cpu, h.heap);
+        }
+        for sh in &h.shadows {
+            display::free(cpu, sh.at);
         }
         *hal(cpu) = Hal::default();
     }
@@ -1302,12 +1332,23 @@ pub fn clear(
         }
         surface::changed(cpu, id);
     };
-    if let Some(c) = target {
-        let [b, g, r, _] = c.to_le_bytes().map(u16::from);
-        let v = (r >> 3) << 11 | (g >> 2) << 5 | b >> 3;
-        fill(cpu, d.target, v);
+    // A 24- or 32-bit surface takes the exact value, its shadow the
+    // 16-bit one.
+    let shadow = super::shadow::fill;
+    if let Some(c) = target
+        && let Some(s) = state(cpu).surface(d.target).cloned()
+    {
+        let (exact, v) = super::shadow::color_values(&s, c);
+        if !shadow(cpu, d.target, rects, exact, v) {
+            fill(cpu, d.target, v);
+        }
     }
-    if let (Some(z), Some(zid)) = (depth, super::device::z_buffer(cpu, d.target)) {
-        fill(cpu, zid, (z.clamp(0.0, 1.0) * 65535.0) as u16);
+    if let (Some(z), Some(zid)) = (depth, super::device::z_buffer(cpu, d.target))
+        && let Some(s) = state(cpu).surface(zid).cloned()
+    {
+        let (exact, v) = super::shadow::depth_values(&s, z);
+        if !shadow(cpu, zid, rects, exact, v) {
+            fill(cpu, zid, v);
+        }
     }
 }

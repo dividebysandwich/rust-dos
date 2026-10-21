@@ -415,8 +415,16 @@ in the card's own memory and modes, so DirectDraw's surfaces there are
 what the 3D engine renders into, in a window too. A Voodoo Graphics or
 Voodoo2 add-on card is a second DirectDraw device, as 3dfx's driver
 made it, with the card's full-screen modes and buffers. There is no
-software rasterizer, so the RGB and Ramp devices aren't there, and
-32-bit render targets fail as they did on the cards.
+software rasterizer, so the RGB and Ramp devices aren't there. The 3D
+engine draws 16-bit color and depth only, so on a Banshee or Voodoo3 a
+24- or 32-bit render target or depth buffer is drawn into a 16-bit
+shadow of it in the card's memory, which the HAL loads from the
+surface before drawing and widens into it when the program can see it
+(Lock, GetDC, Blt, Flip, EndScene): the surface stays 32-bit, what is
+drawn has 16-bit precision, and a Clear writes its exact color. On a
+Voodoo Graphics or Voodoo2 such targets fail, as they did with 3dfx's
+driver.
+
 
 Unreal Gold runs from GOG's folder on a Voodoo2 and a Voodoo3: its
 levels with Glide, its intro and menus with Direct3D. Quake 2's 3.14

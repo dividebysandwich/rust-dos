@@ -907,11 +907,17 @@ pub struct Drawn {
 type Plane = Box<dyn Fn(&Processed) -> f32>;
 
 /// The planes primitives are clipped at: the near and far planes and
-/// the user's when the setup clips, and the guard band always.
+/// the user's when the setup clips, and the guard band always. A
+/// transformed vertex's near and far planes are z 0 and 1, as Wine's
+/// depth_clamp_test has them on Windows.
 fn clip_planes(setup: &Setup, tl: bool) -> Vec<Plane> {
     let mut planes: Vec<Plane> = Vec::new();
     let band = setup.guard_band;
     if tl {
+        if setup.clip {
+            planes.push(Box::new(|p: &Processed| p.clip[2]));
+            planes.push(Box::new(|p: &Processed| 1.0 - p.clip[2]));
+        }
         planes.push(Box::new(move |p: &Processed| p.clip[0] - band[0]));
         planes.push(Box::new(move |p: &Processed| band[2] - p.clip[0]));
         planes.push(Box::new(move |p: &Processed| p.clip[1] - band[1]));
@@ -1127,8 +1133,12 @@ fn triangle(
     } else {
         tri
     };
-    // All outside one plane of the view volume: nothing to draw.
-    if !tl && tri[0].code & tri[1].code & tri[2].code != 0 {
+    // All outside one plane of the view volume: nothing to draw. With
+    // no clipping, depth past the near and far planes is clamped, and
+    // only the sides count.
+    let sides = CLIP_LEFT | CLIP_RIGHT | CLIP_TOP | CLIP_BOTTOM;
+    let mask = if setup.clip { u32::MAX } else { sides };
+    if !tl && tri[0].code & tri[1].code & tri[2].code & mask != 0 {
         return;
     }
     let poly = vec![

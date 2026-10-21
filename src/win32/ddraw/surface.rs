@@ -581,6 +581,7 @@ pub fn destroyed(cpu: &mut Cpu, id: u32) {
         return;
     };
     end_dc(cpu, id);
+    super::d3d::shadow::forget(cpu, id);
     free_memory(cpu, id);
     for &(_, held) in &s.attached {
         if held != 0 {
@@ -1132,6 +1133,7 @@ pub fn lock(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(DDERR_INVALIDPARAMS);
     };
     let (_, id) = hr!(surface_of(cpu, this));
+    super::d3d::shadow::expose(cpu, id);
     if desc_at == 0 || !cpu.bus.guest_probe(desc_at, 4, false) {
         return Some(DDERR_INVALIDPARAMS);
     }
@@ -1370,6 +1372,9 @@ pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(DDERR_NOTFLIPPABLE);
     }
     let list = chain(cpu, id);
+    for &m in &list {
+        super::d3d::shadow::expose(cpu, m);
+    }
     let target_id = if target != 0 {
         let Ok((_, t)) = surface_of(cpu, target) else {
             return Some(DDERR_INVALIDPARAMS);
@@ -1714,6 +1719,7 @@ pub fn get_dc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(DDERR_INVALIDPARAMS);
     };
     let (_, id) = hr!(usable(cpu, this));
+    super::d3d::shadow::expose(cpu, id);
     if out == 0 || !cpu.bus.guest_probe(out, 4, true) {
         return Some(DDERR_INVALIDPARAMS);
     }

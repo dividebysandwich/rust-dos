@@ -28,8 +28,23 @@ ddraw/overlay: overlay: 0 tests executed (0 marked as todo, 0 failures), 2 skipp
 ddraw/overlay: skipped overlay.c:60
 ddraw/overlay: skipped overlay.c:220
 ddraw/refcount: refcount: 96 tests executed (0 marked as todo, 0 failures), 0 skipped.
-ddraw/visual: visual: 6 tests executed (0 marked as todo, 0 failures), 1 skipped.
-ddraw/visual: skipped visual.c:2929
+ddraw/visual: visual: 484 tests executed (0 marked as todo, 15 failures), 1 skipped.
+ddraw/visual: failed visual.c:2911
+ddraw/visual: failed visual.c:2913
+ddraw/visual: failed visual.c:2915
+ddraw/visual: failed visual.c:922
+ddraw/visual: failed visual.c:936
+ddraw/visual: failed visual.c:943
+ddraw/visual: skipped visual.c:2680
+ddraw/visual: failed visual.c:1376
+ddraw/visual: failed visual.c:1388
+ddraw/visual: failed visual.c:1509
+ddraw/visual: failed visual.c:1515
+ddraw/visual: failed visual.c:1625
+ddraw/visual: failed visual.c:1631
+ddraw/visual: failed visual.c:1637
+ddraw/visual: failed visual.c:1757
+ddraw/visual: failed visual.c:1895
 dinput/device: device: 29 tests executed (0 marked as todo, 0 failures), 0 skipped.
 dinput/joystick: joystick: 195 tests executed (0 marked as todo, 0 failures), 0 skipped.
 dinput/keyboard: keyboard: 57 tests executed (0 marked as todo, 0 failures), 0 skipped.

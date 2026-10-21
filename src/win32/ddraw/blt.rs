@@ -197,6 +197,8 @@ fn run(cpu: &mut Cpu, dst_id: u32, op: &Op) -> Result<(), u32> {
 /// The surface `this` is, if a blit can draw on it or read it.
 fn ready(cpu: &mut Cpu, this: u32) -> Result<(u32, Surface), u32> {
     let (_, id) = surface_of(cpu, this)?;
+    // What Direct3D drew in a 16-bit shadow of it, first.
+    super::d3d::shadow::expose(cpu, id);
     let s = state(cpu).surface(id).cloned().ok_or(DDERR_INVALIDOBJECT)?;
     if s.lost {
         return Err(DDERR_SURFACELOST);

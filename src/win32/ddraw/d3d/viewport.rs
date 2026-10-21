@@ -404,7 +404,12 @@ fn clear_with(
         super::material::of_handle(cpu, &d, v.background)
             .map_or(0, |m| super::pipeline::color(m.diffuse))
     });
+    let area = [v.data[0], v.data[1], v.data[2], v.data[3]];
     let list = super::device::read_rects(cpu, rects, count);
+    let list = super::device::clip_rects(list, if v.set { area } else { [0; 4] });
+    if count != 0 && list.is_empty() {
+        return Some(D3D_OK);
+    }
     let target = (flags & super::device::CLEAR_TARGET != 0).then_some(color);
     let depth = (flags & super::device::CLEAR_ZBUFFER != 0).then_some(z);
     super::hal::clear(cpu, &d, &list, target, depth);

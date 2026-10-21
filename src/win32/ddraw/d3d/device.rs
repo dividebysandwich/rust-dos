@@ -337,6 +337,11 @@ impl Device {
         for (s, v) in defaults {
             d.render[s as usize] = v;
         }
+        // A surface's device keys textures from the start, as Wine has
+        // it (D3DRENDERSTATE_COLORKEYENABLE).
+        if version == 1 {
+            d.render[41] = 1;
+        }
         // D3DCOLOR_RGB.
         d.light_states[3] = 2;
         for s in 0..STAGES {
@@ -428,7 +433,9 @@ impl Device {
 /// Whether `id` can be a render target: an error if it can't, as the
 /// HAL's driver had it. The surface is 16-bit 565 in video memory (or
 /// an add-on card's buffer) with DDSCAPS_3DDEVICE, and its depth buffer,
-/// if it has one, is 16-bit.
+/// if it has one, is 16-bit. A Banshee or Voodoo3 also draws into 24-
+/// and 32-bit targets with 24- or 32-bit depth buffers, through 16-bit
+/// shadows of them (`shadow.rs`).
 pub fn check_target(cpu: &mut Cpu, id: u32) -> Result<(), u32> {
     let s = state(cpu).surface(id).cloned().ok_or(DDERR_INVALIDPARAMS)?;
     if s.caps[0] & surface::DDSCAPS_3DDEVICE == 0 {
@@ -439,12 +446,15 @@ pub fn check_target(cpu: &mut Cpu, id: u32) -> Result<(), u32> {
         return Err(D3DERR_SURFACENOTINVIDMEM);
     }
     let f = s.format;
-    if f.flags & DDPF_RGB == 0 || f.bits != 16 || (f.r, f.g, f.b) != (0xF800, 0x07E0, 0x001F) {
+    let wide = s.memory == MEM_VIDEO && crate::win32::glide::hw::banshee(cpu);
+    let rgb565 = f.bits == 16 && (f.r, f.g, f.b) == (0xF800, 0x07E0, 0x001F);
+    let rgb = matches!(f.bits, 24 | 32) && wide;
+    if f.flags & DDPF_RGB == 0 || !(rgb565 || rgb) {
         return Err(DDERR_INVALIDPIXELFORMAT);
     }
     if let Some(z) = z_buffer(cpu, id) {
         let bits = state(cpu).surface(z).map_or(0, |z| z.format.bits);
-        if bits != 16 {
+        if bits != 16 && !(matches!(bits, 24 | 32) && wide) {
             return Err(DDERR_INVALIDPIXELFORMAT);
         }
     }
@@ -845,6 +855,8 @@ pub fn end_scene(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(D3DERR_SCENE_NOT_IN_SCENE);
     }
     d.in_scene = false;
+    let target = d.target;
+    super::shadow::expose(cpu, target);
     Some(D3D_OK)
 }
 
@@ -982,11 +994,41 @@ pub fn clear(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if flags & CLEAR_STENCIL != 0 {
         return Some(D3DERR_STENCILBUFFER_NOTPRESENT);
     }
-    let list = read_rects(cpu, rects, count);
+    let v = &d.viewport;
+    let list = clip_rects(read_rects(cpu, rects, count), [v.x, v.y, v.width, v.height]);
+    if count != 0 && list.is_empty() {
+        return Some(D3D_OK);
+    }
     let target = (flags & CLEAR_TARGET != 0).then_some(color);
     let depth = (flags & CLEAR_ZBUFFER != 0).then_some(f32::from_bits(z));
     super::hal::clear(cpu, &d, &list, target, depth);
     Some(D3D_OK)
+}
+
+/// Clear keeps to the viewport (x, y, width, height): the rectangles
+/// are cut to it, and no rectangles are the whole of it. A viewport
+/// with no size leaves them as they are.
+pub fn clip_rects(rects: Vec<[i32; 4]>, viewport: [u32; 4]) -> Vec<[i32; 4]> {
+    let [x, y, w, h] = viewport.map(|v| v.min(0x7FFF) as i32);
+    if w == 0 || h == 0 {
+        return rects;
+    }
+    let area = [x, y, x + w, y + h];
+    if rects.is_empty() {
+        return vec![area];
+    }
+    rects
+        .into_iter()
+        .map(|r| {
+            [
+                r[0].max(area[0]),
+                r[1].max(area[1]),
+                r[2].min(area[2]),
+                r[3].min(area[3]),
+            ]
+        })
+        .filter(|r| r[0] < r[2] && r[1] < r[3])
+        .collect()
 }
 
 /// `count` D3DRECTs at `at`, which the caller has probed.

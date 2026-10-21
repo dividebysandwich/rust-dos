@@ -245,17 +245,20 @@ fn render(cpu: &mut Cpu, id: u32, s: u32, value: u32) {
             // D3DTBLEND_ as the first stage's operations: the color's and
             // the alpha's, each with the texture and the diffuse color.
             let (color, alpha) = match value {
-                // DECAL, COPY, DECALMASK.
-                1 | 5 | 6 => (TOP_SELECTARG1, TOP_SELECTARG1),
+                // DECAL, DECALMASK, COPY.
+                1 | 5 | 7 => (TOP_SELECTARG1, TOP_SELECTARG1),
                 // DECALALPHA.
                 3 => (TOP_BLENDTEXTUREALPHA, TOP_SELECTARG2),
                 // MODULATEALPHA.
                 4 => (TOP_MODULATE, TOP_MODULATE),
                 // ADD.
-                7 => (TOP_ADD, TOP_SELECTARG2),
-                // MODULATE and MODULATEMASK: the texture's alpha.
+                8 => (TOP_ADD, TOP_SELECTARG2),
+                // MODULATE and MODULATEMASK: the texture's alpha, or the
+                // diffuse alpha for a texture without one, which the HAL
+                // picks when it draws (hal::bind).
                 _ => (TOP_MODULATE, TOP_SELECTARG1),
             };
+
             vec![
                 (TSS_COLOROP, color),
                 (TSS_COLORARG1, TA_TEXTURE),

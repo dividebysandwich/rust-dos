@@ -35,6 +35,7 @@ pub mod hal;
 pub mod light;
 pub mod material;
 pub mod pipeline;
+pub mod shadow;
 pub mod states;
 pub mod texture;
 pub mod vertexbuffer;

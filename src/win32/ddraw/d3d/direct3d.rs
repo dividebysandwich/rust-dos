@@ -193,7 +193,7 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         }
         kind => {
             let list = if kind == Z_FORMATS {
-                caps::z_formats()
+                caps::z_formats(cpu)
             } else {
                 caps::texture_formats()
             };

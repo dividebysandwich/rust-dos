@@ -194,7 +194,7 @@ const EXECUTE_DATA: u32 = 0x520;
 /// The 64x64 pixels a scene's target has at its top left, copied there
 /// by the program.
 const PIXELS: u32 = 0x2000;
-const DATA_SIZE: usize = 0x4000;
+const DATA_SIZE: usize = 0x6000;
 
 /// The data the programs start with: the window class's name and the
 /// interface IDs.
@@ -443,6 +443,18 @@ fn start(
     ex: bool,
     card: bool,
 ) -> Result<(), IcedError> {
+    start_in(a, l, c, ex, card, 16)
+}
+
+/// The same, with a mode of `bpp` bits a pixel.
+fn start_in(
+    a: &mut CodeAssembler,
+    l: &Layout,
+    c: &mut Calls,
+    ex: bool,
+    card: bool,
+    bpp: u32,
+) -> Result<(), IcedError> {
     c.api(
         a,
         l,
@@ -490,7 +502,7 @@ fn start(
         DD_SET_COOPERATIVE_LEVEL,
         &[Arg::Val(HWND), Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN)],
     )?;
-    let mode = [Arg::I(640), Arg::I(480), Arg::I(16), Arg::I(0), Arg::I(0)];
+    let mode = [Arg::I(640), Arg::I(480), Arg::I(bpp), Arg::I(0), Arg::I(0)];
     let args = if ex { &mode[..] } else { &mode[..3] };
     c.com(a, l, DD, DD_SET_DISPLAY_MODE, args)
 }
@@ -967,6 +979,12 @@ struct Scene {
 
 /// A program drawing `scene`, which ends with the target locked.
 fn scene_program(scene: &Scene) -> (Vec<u8>, u32) {
+    scene_program_in(scene, 16)
+}
+
+/// The same in a mode of `bpp` bits a pixel (16 or 32), whose z-buffer
+/// has as many bits (24 of them depth at 32).
+fn scene_program_in(scene: &Scene, bpp: u32) -> (Vec<u8>, u32) {
     let mut d = data();
     let size = if scene.api == Api::D3D7 { 124 } else { 108 };
     let (zw, zh) = if let Some(board) = scene.card {
@@ -1015,8 +1033,8 @@ fn scene_program(scene: &Scene) -> (Vec<u8>, u32) {
     put32(&mut d, Z_DESC + 0x0C, zw);
     put32(&mut d, Z_DESC + 0x48, 32);
     put32(&mut d, Z_DESC + 0x4C, DDPF_ZBUFFER);
-    put32(&mut d, Z_DESC + 0x54, 16);
-    put32(&mut d, Z_DESC + 0x5C, 0xFFFF);
+    put32(&mut d, Z_DESC + 0x54, bpp);
+    put32(&mut d, Z_DESC + 0x5C, if bpp == 32 { 0xFF_FFFF } else { 0xFFFF });
     put32(&mut d, Z_DESC + 0x68, DDSCAPS_ZBUFFER | DDSCAPS_VIDEOMEMORY);
     put32(&mut d, TEX_DESC, 124);
     put32(&mut d, TEX_DESC + 0x04, flags);
@@ -1060,7 +1078,7 @@ fn scene_program(scene: &Scene) -> (Vec<u8>, u32) {
     program(&[USER32, DDRAW], &d, |a, l| {
         let mut c = Calls { next: 0 };
         let add_on = scene.card.is_some_and(|b| b != Board::Voodoo3);
-        start(a, l, &mut c, ex, add_on)?;
+        start_in(a, l, &mut c, ex, add_on, bpp)?;
         let iid = if ex { IID_D3D7 } else { IID_D3D3 };
         c.com(a, l, DD, QUERY_INTERFACE, &[Arg::At(iid), Arg::At(D3D)])?;
         c.com(
@@ -1256,16 +1274,17 @@ fn scene_program(scene: &Scene) -> (Vec<u8>, u32) {
         )?;
         a.mov(dword_ptr(l.at(CALLS)), c.next)?;
         // The top left 64x64 pixels into PIXELS, a row at a time.
+        let row_bytes = 64 * bpp / 8;
         a.mov(esi, dword_ptr(l.at(LOCK_DESC + 0x24)))?;
         a.mov(edi, l.at(PIXELS) as u32)?;
         a.mov(edx, 64)?;
         a.cld()?;
         let mut row = a.create_label();
         a.set_label(&mut row)?;
-        a.mov(ecx, 32)?;
+        a.mov(ecx, row_bytes / 4)?;
         a.rep().movsd()?;
         a.add(esi, dword_ptr(l.at(LOCK_DESC + 0x10)))?;
-        a.sub(esi, 128)?;
+        a.sub(esi, row_bytes)?;
         a.dec(edx)?;
         a.jnz(row)?;
         finish(a, l)
@@ -1286,6 +1305,20 @@ fn draw_scene(test: &str, scene: &Scene) -> Vec<u16> {
             let at = data + PIXELS + 2 * i;
             (peek(&cpu, at & !3) >> (8 * (at & 2))) as u16
         })
+        .collect()
+}
+
+/// The render target's pixels after `scene` in a 32-bit mode, row
+/// after row, X8R8G8B8.
+fn draw_scene32(test: &str, scene: &Scene) -> Vec<u32> {
+    let (exe, data) = scene_program_in(scene, 32);
+    let mut cpu = machine_with(test, scene.card, exe);
+    run_until_done(&mut cpu, data);
+    let n = peek(&cpu, data + CALLS);
+    let r = results(&cpu, data, n);
+    assert!(r[1..].iter().all(|&hr| hr == 0), "results: {r:X?}");
+    (0..64 * 64)
+        .map(|i| peek(&cpu, data + PIXELS + 4 * i) & 0xFF_FFFF)
         .collect()
 }
 
@@ -1476,6 +1509,35 @@ fn a_quad_nearer_than_the_cleared_depth_passes_the_depth_test() {
         let p = draw_scene(test, &scene);
         assert_rgb(&p, 16, 30, [0, 255, 0], 0);
         assert_rgb(&p, 48, 30, [255, 0, 0], 0);
+    }
+}
+
+#[test]
+fn a_32_bit_target_keeps_its_clear_color_exactly_and_widens_drawn_pixels() {
+    // The card draws at 16 bits into a shadow of the target and its
+    // 24-bit z-buffer. Clear writes the exact color, so where nothing
+    // passes the depth test the target keeps it; drawn pixels are the
+    // card's 5-6-5 with their bits repeated.
+    for (test, api) in [("target32_d3d7", Api::D3D7), ("target32_d3d6", Api::D3D6)] {
+        let scene = Scene {
+            api,
+            card: None,
+            clear: 0xFF12_3456,
+            zbuffer: Some(0.5),
+            texture: None,
+            steps: vec![
+                Step::State(RS_ZENABLE, 1),
+                Step::State(RS_ZFUNC, 4),
+                Step::Draw(quad(0.0, 0.0, 32.0, 64.0, 0.25, 0xFF80_40C0)),
+                Step::Draw(quad(32.0, 0.0, 64.0, 64.0, 0.75, GREEN)),
+            ],
+        };
+        let p = draw_scene32(test, &scene);
+        assert_eq!(p[30 * 64 + 48], 0x12_3456, "{test}: cleared pixel");
+        let drawn = p[30 * 64 + 16];
+        let [b, g, r, _] = drawn.to_le_bytes().map(u32::from);
+        assert_eq!((r >> 5, b >> 5, g >> 6), (r & 7, b & 7, g & 3), "{test}: {drawn:06X}");
+        assert!(near([r, g, b], [0x80, 0x40, 0xC0], 8), "{test}: {drawn:06X}");
     }
 }
 
