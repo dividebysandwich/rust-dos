@@ -245,3 +245,30 @@ fn bad_images_are_refused() {
     ));
     assert_eq!(Headers::parse(b"MZ"), Err(Error::NotPe));
 }
+
+#[test]
+fn a_section_without_a_file_offset_is_zeros() {
+    // Watcom's linker gives .bss a raw size with no data in the file:
+    // offset 0. Windows' loader maps zeros there, not the file's start.
+    let mut b = Builder::exe(0x40_0000);
+    let code = b.next_rva();
+    b.section(".text", &[0xC3; 16], SCN_CODE | SCN_EXECUTE | SCN_READ);
+    let bss = b.section_sized(
+        ".bss",
+        &[],
+        0x2000,
+        SCN_UNINITIALIZED_DATA | SCN_READ | SCN_WRITE,
+    );
+    b.entry(code);
+    let mut file = b.build();
+    let pe = u32::from_le_bytes(file[0x3C..0x40].try_into().unwrap()) as usize;
+    let optional = u16::from_le_bytes([file[pe + 20], file[pe + 21]]) as usize;
+    let header = pe + 24 + optional + 40;
+    assert_eq!(&file[header..header + 4], b".bss");
+    file[header + 16..header + 20].copy_from_slice(&0x2000u32.to_le_bytes());
+    file[header + 20..header + 24].copy_from_slice(&0u32.to_le_bytes());
+
+    let image = Image::load(&file).unwrap();
+    let at = bss as usize;
+    assert!(image.data[at..at + 0x2000].iter().all(|&b| b == 0));
+}

@@ -398,19 +398,24 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   for their buffers. Off, they run as they do on plain DOS with HIMEM. A
   change takes effect for the programs started after it.
 * `win32` turns on the built-in Windows: `true` or `false` (the
-  default). A Win32 console program, a Windows 95 .EXE, then runs from
-  the DOS prompt in protected mode with paging, as Windows 95 runs it,
-  with KERNEL32, ADVAPI32 and MSVCRT written into the emulator, and ends
-  back at the prompt. They have what console programs use: heaps and
-  virtual memory, files and directories, the environment, modules and
-  the program's own DLLs, threads and their synchronization, structured
-  exceptions, child processes, the registry and the C runtime. A
-  program that calls a function they don't have ends with a message
-  naming it, and one that imports another system DLL (USER32, GDI32) is
-  refused. The registry is kept in `C:\REGISTRY.REG`, which is made the
-  first time a program uses it, so a host folder mounted as C: gets that
-  file. Off, such a program runs its DOS stub, which says it needs
-  Windows. The plan is in [docs/native-windows.md](docs/native-windows.md).
+  default). A Win32 program, a Windows 95 .EXE, then runs from the DOS
+  prompt in protected mode with paging, as Windows 95 runs it, and ends
+  back at the prompt. Its system DLLs are written into the emulator:
+  KERNEL32, ADVAPI32 and MSVCRT for heaps and virtual memory, files,
+  modules, threads, structured exceptions, child processes, the registry
+  and the C runtime; USER32 and GDI32 for windows, dialogs and drawing
+  on a 640x480 desktop in a VESA mode; DDRAW, DSOUND, DINPUT, WINMM and
+  OLE32 for DirectX 3 to 6 games: DirectDraw in full screen on the
+  card's VESA modes or in a window, DirectSound and wave audio in the
+  `windows` mixer channel, MIDI to the MPU-401's synthesizer, CD audio
+  and MIDI files through MCI, and the keyboard, mouse and joystick
+  through DirectInput. A program that calls a function they don't have
+  ends with a message naming it, and one that needs a DLL that is
+  neither among them nor beside it is refused. The registry is kept in
+  `C:\REGISTRY.REG`, which is made the first time a program uses it, so
+  a host folder mounted as C: gets that file. Off, such a program runs
+  its DOS stub, which says it needs Windows. The plan is in
+  [docs/native-windows.md](docs/native-windows.md).
 * `dos_version` is the DOS version programs are told (INT 21h AH=30h,
   AX=3306h and the PSP's), such as `5.00` (the default), `6.22` or
   `7.10`; `7.1` is 7.10, as DOSBox's `ver` has it. From 7.00 on, DOS
@@ -611,12 +616,13 @@ The volume of each sound source in percent, from 0 to 200: `speaker` (the
 PC speaker and the prompt's beeps), `sb` (the Sound Blaster's digital
 audio), `fm` (the FM synthesizer), `gus`, `midi`, `cdaudio`, `disknoise`,
 `lptdac` (the Covox or Disney Sound Source), `tandy` (the Tandy's and
-PCjr's sound chip), `awe32` (the AWE32's wavetable synthesizer) and
+PCjr's sound chip), `awe32` (the AWE32's wavetable synthesizer),
 `monitor` (the [monitor's effects](#emulator)), `modem` (the [modem's
-speaker](#serial-and-modem-games)), and `master` for all of
-them together. At 100, the
-default, a source plays as loud as its card makes it. The volumes apply on
-top of the Sound Blaster's own mixer, which programs set.
+speaker](#serial-and-modem-games)), `windows` (the built-in Windows's
+sound: DirectSound and WinMM's wave audio), and `master` for all of them
+together. At 100, the default, a source plays as loud as its card makes
+it. The volumes apply on top of the Sound Blaster's own mixer, which
+programs set.
 
 * `speaker_filter` gives the PC speaker the sound of the small speaker in
   a PC, without the harsh edges of its square wave: `on` (the default)

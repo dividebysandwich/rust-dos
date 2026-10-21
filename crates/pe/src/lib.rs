@@ -407,10 +407,12 @@ impl Image {
         data[..head].copy_from_slice(&file[..head]);
         for section in &headers.sections {
             // Raw data past the end of the file is cut short, as Windows'
-            // loader does with a last section's padding.
+            // loader does with a last section's padding. A section whose
+            // data is at offset 0 has none in the file (Watcom's .bss): it
+            // stays zeros.
             let len = section.raw_size.min(section.mapped_size()) as usize;
             let from = section.raw_offset as usize;
-            if len == 0 || from >= file.len() {
+            if len == 0 || from == 0 || from >= file.len() {
                 continue;
             }
             let len = len.min(file.len() - from);

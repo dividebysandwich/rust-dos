@@ -38,6 +38,7 @@ pub static DLL: Dll = Dll {
     apis: APIS,
     vars: &[],
     init: None,
+    vtables: &[],
 };
 
 const fn stdcall(

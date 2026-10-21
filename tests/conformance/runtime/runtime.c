@@ -745,3 +745,26 @@ void conformance_dump_region(HRGN hrgn)
 {
     (void)hrgn;
 }
+
+/* The square root, which winmm's timer.c takes of its statistics: the
+ * FPU's. */
+double sqrt(double x)
+{
+    double r;
+    __asm__("fsqrt" : "=t"(r) : "0"(x));
+    return r;
+}
+
+/* Sine and absolute value, on the x87 (dsound's and
+ * winmm's tests make sine waves to play). */
+double sin(double x)
+{
+    double result;
+    __asm__("fsin" : "=t"(result) : "0"(x));
+    return result;
+}
+
+double fabs(double x)
+{
+    return x < 0 ? -x : x;
+}

@@ -14,6 +14,32 @@ advapi32/registry: skipped registry.c:1705
 advapi32/registry: skipped registry.c:1859
 advapi32/registry: skipped registry.c:1579
 advapi32/registry: skipped registry.c:1354
+ddraw/ddrawmodes: ddrawmodes: 77 tests executed (0 marked as todo, 0 failures), 0 skipped.
+ddraw/dsurface: dsurface: 1152 tests executed (0 marked as todo, 0 failures), 5 skipped.
+ddraw/dsurface: skipped dsurface.c:1725
+ddraw/dsurface: skipped dsurface.c:2199
+ddraw/dsurface: skipped dsurface.c:3344 (x3)
+ddraw/overlay: overlay: 0 tests executed (0 marked as todo, 0 failures), 2 skipped.
+ddraw/overlay: skipped overlay.c:60
+ddraw/overlay: skipped overlay.c:220
+ddraw/refcount: refcount: 49 tests executed (0 marked as todo, 0 failures), 2 skipped.
+ddraw/refcount: skipped refcount.c:248
+ddraw/refcount: skipped refcount.c:366
+dinput/device: device: 29 tests executed (0 marked as todo, 0 failures), 0 skipped.
+dinput/joystick: joystick: 195 tests executed (0 marked as todo, 0 failures), 0 skipped.
+dinput/keyboard: keyboard: 57 tests executed (0 marked as todo, 0 failures), 0 skipped.
+dinput/mouse: mouse: 45 tests executed (0 marked as todo, 0 failures), 0 skipped.
+dsound/capture: capture: 29 tests executed (0 marked as todo, 0 failures), 0 skipped.
+dsound/ds3d: ds3d: 849 tests executed (0 marked as todo, 0 failures), 0 skipped.
+dsound/ds3d8: ds3d8: 0 tests executed (0 marked as todo, 0 failures), 1 skipped.
+dsound/ds3d8: skipped ds3d8.c:1146
+dsound/dsound: dsound: 2040 tests executed (0 marked as todo, 1 failure), 48 skipped.
+dsound/dsound: failed dsound.c:1087
+dsound/dsound: skipped dsound.c:741 (x48)
+dsound/dsound8: dsound8: 0 tests executed (0 marked as todo, 0 failures), 1 skipped.
+dsound/dsound8: skipped dsound8.c:939
+dsound/propset: propset: 25 tests executed (0 marked as todo, 1 failure), 0 skipped.
+dsound/propset: failed propset.c:215
 gdi32/bitmap: bitmap: 4312 tests executed (0 marked as todo, 2 failures), 2 skipped.
 gdi32/bitmap: skipped bitmap.c:1894
 gdi32/bitmap: failed bitmap.c:2527
@@ -532,3 +558,17 @@ user32/win: failed win.c:2603 (x2)
 user32/win: skipped win.c:1057
 user32/win: skipped win.c:5990
 user32/wsprintf: wsprintf: 6 tests executed (0 marked as todo, 0 failures), 0 skipped.
+winmm/capture: capture: 5 tests executed (0 marked as todo, 0 failures), 0 skipped.
+winmm/mci: mci: 79 tests executed (0 marked as todo, 0 failures), 4 skipped.
+winmm/mci: skipped mci.c:438
+winmm/mci: skipped mci.c:515
+winmm/mci: skipped mci.c:634
+winmm/mci: skipped mci.c:870
+winmm/midi: midi: 226 tests executed (0 marked as todo, 0 failures), 0 skipped.
+winmm/mixer: mixer: 38 tests executed (0 marked as todo, 0 failures), 0 skipped.
+winmm/mmio: mmio: 219 tests executed (0 marked as todo, 0 failures), 3 skipped.
+winmm/mmio: skipped mmio.c:77
+winmm/mmio: skipped mmio.c:244
+winmm/mmio: skipped mmio.c:497
+winmm/timer: timer: 44 tests executed (0 marked as todo, 0 failures), 0 skipped.
+winmm/wave: wave: 8497 tests executed (0 marked as todo, 0 failures), 0 skipped.

@@ -32,9 +32,12 @@ pub enum Channel {
     Monitor,
     /// The modem's speaker: dialing and the handshake.
     Modem,
+    /// The built-in Windows's sound device: DirectSound and WinMM's wave
+    /// audio.
+    Windows,
 }
 
-pub const CHANNELS: usize = 13;
+pub const CHANNELS: usize = 14;
 
 /// The loudest volume, in percent.
 pub const MAX_LEVEL: u16 = 200;
@@ -59,6 +62,7 @@ impl Channel {
         Channel::Awe,
         Channel::Monitor,
         Channel::Modem,
+        Channel::Windows,
     ];
 
     /// Its key in `[mixer]`.
@@ -77,6 +81,7 @@ impl Channel {
             Channel::Awe => "awe32",
             Channel::Monitor => "monitor",
             Channel::Modem => "modem",
+            Channel::Windows => "windows",
         }
     }
 
@@ -100,6 +105,7 @@ impl Channel {
             Channel::Awe => "AWE32 wavetable",
             Channel::Monitor => "Monitor",
             Channel::Modem => "Modem",
+            Channel::Windows => "Windows sound",
         }
     }
 
