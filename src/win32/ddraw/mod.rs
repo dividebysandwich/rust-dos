@@ -36,7 +36,7 @@ macro_rules! hr {
 mod blt;
 mod clipper;
 mod directdraw;
-mod display;
+pub(super) mod display;
 pub mod enumerate;
 mod palette;
 mod surface;
