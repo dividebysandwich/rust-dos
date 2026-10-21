@@ -1047,9 +1047,19 @@ impl Voodoo {
         if self.chipmask & (2 << unit) == 0 || unit >= self.tmu.len() {
             return;
         }
-        // Queued triangles read the texture memory as they draw.
+        // Queued triangles read the texture memory as they draw: they
+        // keep it as it is, and the write goes into a copy, which no job
+        // has yet; or they are drawn first. A Banshee's is the frame
+        // buffer, which they draw in.
         if self.tmu_in_use.get() & (1 << unit) != 0 {
-            self.flush();
+            let shared = self.tmu[unit].ram.same(&self.fbi.ram);
+            // SAFETY: the texture memory is written only here, on the
+            // emulator's thread; the workers only read it.
+            if !shared && unsafe { self.tmu[unit].detach() } {
+                self.tmu_in_use.set(self.tmu_in_use.get() & !(1 << unit));
+            } else {
+                self.flush();
+            }
         }
         if self.reg[self.tmu[unit].base + T_LOD] & (1 << 27) != 0 {
             self.log_once(LOG_DIRECT, "[3DFX] Direct texture writes are ignored");
