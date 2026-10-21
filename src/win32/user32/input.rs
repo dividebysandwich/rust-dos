@@ -341,10 +341,29 @@ fn char_of(vk: usize, keys: &dyn Fn(usize) -> u8) -> Option<u8> {
 /// up, also while the desktop isn't on the screen, when USER takes none.
 pub fn poll(cpu: &mut Cpu) {
     let desktop = cpu.bus.win32.user.desktop;
+    if steers_with_mouse(cpu) {
+        let now = cpu.bus.clock.now_ns();
+        cpu.bus.mouse.note_steering(now);
+    }
     if desktop {
         poll_mouse(cpu);
     }
     poll_keyboard(cpu, desktop);
+}
+
+/// Whether the program steers with the mouse's motion: DirectInput has
+/// the mouse exclusively, or it hid the cursor and has the capture, as
+/// games do that put the cursor back in the middle after each move
+/// (Unreal). The host's mouse then moves the emulated one by its motion
+/// (`MouseState::note_steering`); where the host's pointer is on the
+/// picture means nothing to such a program.
+fn steers_with_mouse(cpu: &mut Cpu) -> bool {
+    if crate::win32::dinput::mouse_taken(cpu) {
+        return true;
+    }
+    let state = user(cpu);
+    let input = &state.input;
+    input.cursor_count < 0 && input.capture != 0 && state.is_window(input.capture)
 }
 
 fn poll_keyboard(cpu: &mut Cpu, desktop: bool) {
@@ -2048,3 +2067,30 @@ crate::state_fields!(Clipboard {
     owner,
     formats
 });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A program that hid the cursor and took the capture steers with
+    /// the mouse: the host's mouse then counts as in use and moving by
+    /// its motion, for a second after the last poll that saw it.
+    #[test]
+    fn a_hidden_captured_cursor_steers_with_the_mouse() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let now = cpu.bus.clock.now_ns();
+        let hwnd = user(&mut cpu).new_window(window::Window::default());
+        let hwnd = hwnd.expect("a window");
+        user(&mut cpu).input.capture = hwnd;
+        poll(&mut cpu);
+        assert!(!cpu.bus.mouse.in_use(now), "the cursor shows");
+        user(&mut cpu).input.cursor_count = -1;
+        poll(&mut cpu);
+        assert!(cpu.bus.mouse.in_use(now) && cpu.bus.mouse.moves_by_motion(now));
+        assert!(!cpu.bus.mouse.moves_by_motion(now + 2_000_000_000));
+        let mut other = Cpu::new(std::path::PathBuf::from("."));
+        user(&mut other).input.cursor_count = -1;
+        poll(&mut other);
+        assert!(!other.bus.mouse.in_use(now), "no capture");
+    }
+}

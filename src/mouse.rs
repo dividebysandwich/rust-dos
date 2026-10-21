@@ -202,9 +202,20 @@ impl MouseState {
     }
 
     /// Whether a program uses the driver at `now_ns`: it has an event
-    /// handler, or called the driver in the last two seconds.
+    /// handler, or called the driver in the last two seconds, or steers
+    /// with the mouse's motion.
     pub fn in_use(&self, now_ns: u64) -> bool {
         self.installed && (self.callback_mask != 0 || recent(self.last_call_ns, now_ns, 2_000_000_000))
+            || self.moves_by_motion(now_ns)
+    }
+
+    /// A program steers with the mouse's motion at `now_ns` without
+    /// asking the driver for it: the built-in Windows says so for a
+    /// program that hides the cursor and takes the mouse, which puts the
+    /// cursor back in the middle after each move (`in_use` and
+    /// `moves_by_motion` hold for a second after).
+    pub fn note_steering(&mut self, now_ns: u64) {
+        self.last_relative_ns = Some(now_ns);
     }
 
     /// Whether the program reads the mouse's motion (AX=000Bh), as games
