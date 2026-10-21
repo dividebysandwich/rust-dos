@@ -1,8 +1,8 @@
 //! The program's start and end, and the rest of the runtime around it:
 //! the arguments and environment, `_initterm`, the `atexit` functions
 //! and `exit`, structured exception handling for `__try` (`_except_
-//! handler3` and the unwinds), setjmp and longjmp, signals, threads, the
-//! heap functions and the locale.
+//! handler3` and the unwinds), C++ exceptions, setjmp and longjmp,
+//! signals, threads, the heap functions and the locale.
 
 use super::*;
 use crate::win32::object;
@@ -1031,21 +1031,447 @@ fn long_jump(cpu: &mut Cpu, buffer: u32, value: u32) {
     cpu.set_eax(value);
 }
 
-// C++: no exceptions yet.
+// C++ exceptions, as MSVC lays them out for x86.
+//
+// A function with try blocks or objects to destroy makes, at EBP - 0Ch,
+// as `frame`:
+//   frame - 4   the stack pointer of the function's body
+//   frame + 0   the next frame
+//   frame + 4   its handler: a thunk that loads the function's FuncInfo
+//               into EAX and jumps to __CxxFrameHandler
+//   frame + 8   its state: which of its objects live, which try it is in
+// FuncInfo: a magic number, the count of states, the unwind map (8 bytes
+// a state: the state before it and the code that destroys its object),
+// the count of try blocks and their map (20 bytes each: the lowest and
+// highest state of the try, the highest of its catches, the count of
+// catches and where their handlers are). A handler (16 bytes): its
+// adjectives, the type it catches (none for "..."), where its object
+// goes from EBP, and its code, which returns where the function goes on.
+// The ThrowInfo of a throw: its attributes, the object's destructor,
+// and the types it can be caught as (28 bytes each: properties, type,
+// how to adjust the pointer, size and copy constructor).
 
-/// __CxxFrameHandler(record, frame, context, dispatcher): the frames of
-/// C++ functions don't catch anything; on.
-pub fn cxx_frame_handler(_: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(CONTINUE_SEARCH)
+const CXX_EXCEPTION: u32 = 0xE06D_7363;
+const CXX_MAGIC: u32 = 0x1993_0520;
+/// FuncInfo's magic numbers: MSVC 6's and the two later ones, which add
+/// fields after those read here.
+const CXX_MAGICS: std::ops::RangeInclusive<u32> = CXX_MAGIC..=0x1993_0522;
+
+/// A handler's adjectives, a catchable type's properties and a throw's
+/// attributes.
+const HT_CONST: u32 = 0x01;
+const HT_VOLATILE: u32 = 0x02;
+const HT_REFERENCE: u32 = 0x08;
+const CT_SIMPLE: u32 = 0x01;
+const CT_BY_REFERENCE: u32 = 0x02;
+const CT_VIRTUAL_BASE: u32 = 0x04;
+const TI_CONST: u32 = 0x01;
+const TI_VOLATILE: u32 = 0x02;
+
+/// At most this many entries of a table are read.
+const MAX_ENTRIES: u32 = 0x1000;
+
+/// What `cxx_returned` does next, by the first word of its data.
+/// X_RETURN: an unwind's objects destroyed, then ContinueSearch.
+const X_RETURN: u32 = 0;
+/// The catch's object copied: RtlUnwind.
+const X_COPIED: u32 = 1;
+/// The frames above unwound: this one's objects in the try destroyed.
+const X_GLOBAL: u32 = 2;
+/// An object of the frame destroyed: the next, then the catch block.
+const X_LOCAL: u32 = 3;
+/// The catch block returned: the exception's object destroyed.
+const X_CAUGHT: u32 = 4;
+/// The object destroyed: on after the try.
+const X_DESTROYED: u32 = 5;
+
+/// The places in `cxx_returned`'s data: the step, the frame, its
+/// FuncInfo, the state to unwind to, the try block and the handler that
+/// catches, the exception's object, ThrowInfo and code, where the
+/// function goes on, the caller's registers, and the thread's exception
+/// from before the catch.
+const D_FRAME: usize = 1;
+const D_INFO: usize = 2;
+const D_TARGET: usize = 3;
+const D_TRY: usize = 4;
+const D_HANDLER: usize = 5;
+const D_OBJECT: usize = 6;
+const D_THROW: usize = 7;
+const D_CODE: usize = 8;
+const D_GO_ON: usize = 9;
+const D_REGS: usize = 10;
+const D_OUTER: usize = 14;
+const D_LEN: usize = 17;
+
+/// __CxxFrameHandler(record, frame, context, dispatcher), with the
+/// function's FuncInfo in EAX: a catch of the function's that takes the
+/// exception runs, after the frames above are unwound, and the function
+/// goes on after it; otherwise ContinueSearch. Unwinding, the frame's
+/// objects are destroyed. A catch (...) takes exceptions other than C++
+/// ones too, as with MSVC 6.
+pub fn cxx_frame_handler(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[record, frame, _, _] = args else {
+        unreachable!()
+    };
+    let info = cpu.eax();
+    let code = read32(cpu, record)?;
+    let flags = read32(cpu, record + 4)?;
+    if !CXX_MAGICS.contains(&read32(cpu, info)?) {
+        return Some(CONTINUE_SEARCH);
+    }
+    let thrown = thrown(cpu, record, code)?;
+    let resume = call::here(cpu);
+    let mut d = vec![0; D_LEN];
+    d[D_FRAME] = frame;
+    d[D_INFO] = info;
+    d[D_CODE] = code;
+    if let Some((object, throw)) = thrown {
+        d[D_OBJECT] = object;
+        d[D_THROW] = throw;
+    }
+    d[D_REGS..D_OUTER].copy_from_slice(&saved_registers(cpu));
+    if flags & UNWINDING != 0 {
+        d[0] = X_RETURN;
+        d[D_TARGET] = TRYLEVEL_NONE;
+        cxx_unwind(cpu, resume, d);
+        return None;
+    }
+    let Some((entry, handler, catchable)) = find_catch(cpu, frame, info, thrown)? else {
+        return Some(CONTINUE_SEARCH);
+    };
+    d[D_TRY] = entry;
+    d[D_HANDLER] = handler;
+    d[D_TARGET] = read32(cpu, entry)?;
+    if catch_object(cpu, resume, &mut d, catchable)? {
+        return None;
+    }
+    unwind_above(cpu, resume, d);
+    None
 }
 
-/// _CxxThrowException(object, type): the C++ exception, E06D7363h.
+/// The object and ThrowInfo of a C++ exception, None for another.
+fn thrown(cpu: &mut Cpu, record: u32, code: u32) -> Option<Option<(u32, u32)>> {
+    if code != CXX_EXCEPTION || read32(cpu, record + 16)? < 3 {
+        return Some(None);
+    }
+    if !CXX_MAGICS.contains(&read32(cpu, record + 20)?) {
+        return Some(None);
+    }
+    let throw = read32(cpu, record + 28)?;
+    Some((throw != 0).then_some((read32(cpu, record + 24)?, throw)))
+}
+
+/// The try block, handler and catchable type (none for an exception
+/// other than C++) of the first catch of the function in the state the
+/// frame is in that takes the exception.
+fn find_catch(
+    cpu: &mut Cpu,
+    frame: u32,
+    info: u32,
+    thrown: Option<(u32, u32)>,
+) -> Option<Option<(u32, u32, Option<u32>)>> {
+    let state = read32(cpu, frame + 8)? as i32;
+    let tries = read32(cpu, info + 12)?.min(MAX_ENTRIES);
+    let map = read32(cpu, info + 16)?;
+    let types = match thrown {
+        Some((_, throw)) => {
+            let list = read32(cpu, throw + 12)?;
+            let n = read32(cpu, list)?.min(MAX_ENTRIES);
+            let mut types = Vec::new();
+            for i in 0..n {
+                types.push(read32(cpu, list + 4 + 4 * i)?);
+            }
+            types
+        }
+        None => Vec::new(),
+    };
+    for i in 0..tries {
+        let entry = map.wrapping_add(20 * i);
+        let low = read32(cpu, entry)? as i32;
+        let high = read32(cpu, entry + 4)? as i32;
+        if !(low..=high).contains(&state) {
+            continue;
+        }
+        let catches = read32(cpu, entry + 12)?.min(MAX_ENTRIES);
+        let handlers = read32(cpu, entry + 16)?;
+        for c in 0..catches {
+            let handler = handlers.wrapping_add(16 * c);
+            let Some((_, throw)) = thrown else {
+                if catches_all(cpu, handler)? {
+                    return Some(Some((entry, handler, None)));
+                }
+                continue;
+            };
+            for &catchable in &types {
+                if type_matches(cpu, handler, catchable, throw)? {
+                    return Some(Some((entry, handler, Some(catchable))));
+                }
+            }
+        }
+    }
+    Some(None)
+}
+
+/// The name of the type whose descriptor is at `at`.
+fn type_name(cpu: &mut Cpu, at: u32) -> Option<Vec<u8>> {
+    cstr_n(cpu, at.wrapping_add(8), 0x400)
+}
+
+/// Whether the handler at `handler` is a catch (...).
+fn catches_all(cpu: &mut Cpu, handler: u32) -> Option<bool> {
+    let ty = read32(cpu, handler + 4)?;
+    Some(ty == 0 || type_name(cpu, ty)?.is_empty())
+}
+
+/// Whether the handler at `handler` takes the type at `catchable` of
+/// the throw whose ThrowInfo is at `throw`: the same type, by reference
+/// if it can only be caught so, with the throw's const and volatile.
+fn type_matches(cpu: &mut Cpu, handler: u32, catchable: u32, throw: u32) -> Option<bool> {
+    if catches_all(cpu, handler)? {
+        return Some(true);
+    }
+    let adjectives = read32(cpu, handler)?;
+    let ty = read32(cpu, handler + 4)?;
+    let properties = read32(cpu, catchable)?;
+    let caught = read32(cpu, catchable + 4)?;
+    if ty != caught && type_name(cpu, ty)? != type_name(cpu, caught)? {
+        return Some(false);
+    }
+    let attributes = read32(cpu, throw)?;
+    Some(
+        (properties & CT_BY_REFERENCE == 0 || adjectives & HT_REFERENCE != 0)
+            && (attributes & TI_CONST == 0 || adjectives & HT_CONST != 0)
+            && (attributes & TI_VOLATILE == 0 || adjectives & HT_VOLATILE != 0),
+    )
+}
+
+/// `object` as the type at `catchable`: moved by the type's offset in
+/// it, and through the virtual base table where it is a virtual base.
+fn adjust(cpu: &mut Cpu, object: u32, catchable: u32) -> Option<u32> {
+    let member = read32(cpu, catchable + 8)?;
+    let base = read32(cpu, catchable + 12)? as i32;
+    let mut at = object.wrapping_add(member);
+    if base >= 0 {
+        let table = read32(cpu, object.wrapping_add(base as u32))?;
+        let entry = read32(cpu, catchable + 16)?;
+        let offset = read32(cpu, table.wrapping_add(entry))?;
+        at = at.wrapping_add(offset).wrapping_add(base as u32);
+    }
+    Some(at)
+}
+
+/// Copy `len` bytes from `from` to `to`.
+fn copy_bytes(cpu: &mut Cpu, from: u32, to: u32, len: u32) -> Option<()> {
+    let data = bytes(cpu, from, len.min(0x1_0000))?;
+    put(cpu, to, &data)
+}
+
+/// Put the exception's object where the catch has its variable: a
+/// reference to it, a copy of its bytes, or one its copy constructor
+/// makes. True when the constructor was called, which goes on in
+/// `cxx_returned`.
+fn catch_object(
+    cpu: &mut Cpu,
+    resume: (u32, u32),
+    d: &mut [u32],
+    catchable: Option<u32>,
+) -> Option<bool> {
+    let handler = d[D_HANDLER];
+    let Some(catchable) = catchable else {
+        return Some(false);
+    };
+    let adjectives = read32(cpu, handler)?;
+    let place = read32(cpu, handler + 8)?;
+    if catches_all(cpu, handler)? || place == 0 {
+        return Some(false);
+    }
+    let to = d[D_FRAME].wrapping_add(12).wrapping_add(place);
+    let object = d[D_OBJECT];
+    let properties = read32(cpu, catchable)?;
+    let size = read32(cpu, catchable + 20)?;
+    if adjectives & HT_REFERENCE != 0 {
+        let at = adjust(cpu, object, catchable)?;
+        write32(cpu, to, at)?;
+    } else if properties & CT_SIMPLE != 0 {
+        copy_bytes(cpu, object, to, size)?;
+        if size == 4 {
+            let pointer = read32(cpu, to)?;
+            if pointer != 0 {
+                let at = adjust(cpu, pointer, catchable)?;
+                write32(cpu, to, at)?;
+            }
+        }
+    } else {
+        let from = adjust(cpu, object, catchable)?;
+        let copy = read32(cpu, catchable + 24)?;
+        if copy == 0 {
+            copy_bytes(cpu, from, to, size)?;
+        } else {
+            let args: &[u32] = if properties & CT_VIRTUAL_BASE != 0 {
+                &[from, 1]
+            } else {
+                &[from]
+            };
+            d[0] = X_COPIED;
+            cpu.set_ecx(to);
+            return Some(call_program(cpu, copy, args, C_CXX, resume, d));
+        }
+    }
+    Some(false)
+}
+
+/// RtlUnwind to the frame that catches, then its objects in the try.
+fn unwind_above(cpu: &mut Cpu, resume: (u32, u32), mut d: Vec<u32>) {
+    d[0] = X_GLOBAL;
+    let frame = d[D_FRAME];
+    if !call_program(
+        cpu,
+        rtl_unwind_address(),
+        &[frame, 0, 0, 0],
+        C_CXX,
+        resume,
+        &d,
+    ) {
+        super::super::fatal(cpu, "a C++ exception, and its stack is gone", None);
+    }
+}
+
+/// Destroy the frame's objects from its state down to d[D_TARGET], each
+/// with the code its state's entry of the unwind map has, then return
+/// ContinueSearch (X_RETURN) or call the catch block.
+fn cxx_unwind(cpu: &mut Cpu, resume: (u32, u32), d: Vec<u32>) {
+    let (frame, info) = (d[D_FRAME], d[D_INFO]);
+    let target = d[D_TARGET] as i32;
+    let states = cpu.bus.guest_read_32(info + 4) as i32;
+    let map = cpu.bus.guest_read_32(info + 8);
+    for _ in 0..MAX_ENTRIES {
+        let state = cpu.bus.guest_read_32(frame + 8) as i32;
+        if cpu.bus.guest_faulted() || state <= target || state >= states {
+            break;
+        }
+        let entry = map.wrapping_add(8 * state as u32);
+        let before = cpu.bus.guest_read_32(entry);
+        let action = cpu.bus.guest_read_32(entry + 4);
+        if cpu.bus.guest_faulted() {
+            break;
+        }
+        cpu.bus.guest_write_32(frame + 8, before);
+        if action != 0 {
+            cpu.set_ebp(frame + 12);
+            if call_program(cpu, action, &[], C_CXX, resume, &d) {
+                return;
+            }
+            break;
+        }
+    }
+    if d[0] == X_RETURN {
+        restore_registers(cpu, &d[D_REGS..D_OUTER]);
+        call::finish(cpu, resume, CONTINUE_SEARCH);
+    } else {
+        call_catch(cpu, resume, d);
+    }
+}
+
+/// Call the catch block, in the state after its try, with the thread's
+/// exception this one for a `throw;` in it.
+fn call_catch(cpu: &mut Cpu, resume: (u32, u32), mut d: Vec<u32>) {
+    let frame = d[D_FRAME];
+    let high = cpu.bus.guest_read_32(d[D_TRY] + 4);
+    let block = cpu.bus.guest_read_32(d[D_HANDLER] + 12);
+    cpu.bus.guest_write_32(frame + 8, high.wrapping_add(1));
+    if let Some(at) = thread_field(cpu, T_CXX) {
+        for i in 0..3 {
+            d[D_OUTER + i] = cpu.bus.guest_read_32(at + 4 * i as u32);
+        }
+        for (i, value) in [d[D_CODE], d[D_OBJECT], d[D_THROW]].into_iter().enumerate() {
+            cpu.bus.guest_write_32(at + 4 * i as u32, value);
+        }
+    }
+    d[0] = X_CAUGHT;
+    cpu.set_ebp(frame + 12);
+    if cpu.bus.guest_faulted() || !call_program(cpu, block, &[], C_CXX, resume, &d) {
+        super::super::fatal(cpu, "a C++ exception, and its catch block is gone", None);
+    }
+}
+
+/// The catch block returned where the function goes on: the exception's
+/// object destroyed, by its destructor where it has one.
+fn destroy_object(cpu: &mut Cpu, resume: (u32, u32), mut d: Vec<u32>) {
+    d[0] = X_DESTROYED;
+    if d[D_THROW] != 0 && d[D_OBJECT] != 0 {
+        let destructor = cpu.bus.guest_read_32(d[D_THROW] + 4);
+        if !cpu.bus.guest_faulted() && destructor != 0 {
+            cpu.set_ecx(d[D_OBJECT]);
+            if call_program(cpu, destructor, &[], C_CXX, resume, &d) {
+                return;
+            }
+        }
+    }
+    go_on(cpu, &d);
+}
+
+/// On in the function after its try, with its stack and frame, and the
+/// thread's exception the one before the catch.
+fn go_on(cpu: &mut Cpu, d: &[u32]) {
+    if let Some(at) = thread_field(cpu, T_CXX) {
+        for i in 0..3 {
+            cpu.bus.guest_write_32(at + 4 * i as u32, d[D_OUTER + i]);
+        }
+    }
+    let frame = d[D_FRAME];
+    let esp = cpu.bus.guest_read_32(frame.wrapping_sub(4));
+    let tib = super::super::process(cpu)
+        .current_thread()
+        .map_or(0, |t| t.tib);
+    cpu.bus.guest_write_32(tib, frame);
+    if let Some(thread) = super::super::process(cpu).current_thread_mut() {
+        thread.fault.clear();
+    }
+    cpu.set_ebp(frame + 12);
+    cpu.set_esp(esp);
+    call::unwound_to(cpu, esp);
+    cpu.set_eip(d[D_GO_ON]);
+}
+
+/// A call `cxx_frame_handler` made returned: its next step.
+pub fn cxx_returned(cpu: &mut Cpu, value: u32, call: Call) {
+    let mut d = call.data;
+    if d.len() != D_LEN {
+        return;
+    }
+    match d[0] {
+        X_COPIED => unwind_above(cpu, call.resume, d),
+        X_GLOBAL => {
+            d[0] = X_LOCAL;
+            cxx_unwind(cpu, call.resume, d);
+        }
+        X_CAUGHT => {
+            d[D_GO_ON] = value;
+            destroy_object(cpu, call.resume, d);
+        }
+        X_DESTROYED => go_on(cpu, &d),
+        _ => cxx_unwind(cpu, call.resume, d),
+    }
+}
+
+/// _CxxThrowException(object, type): the C++ exception, E06D7363h. With
+/// no type (`throw;`), the exception the running catch block took again.
 pub fn cxx_throw_exception(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let (mut object, mut throw) = (args[0], args[1]);
+    if throw == 0 {
+        let at = thread_field(cpu, T_CXX)?;
+        let code = read32(cpu, at)?;
+        if code != 0 && code != CXX_EXCEPTION {
+            return kernel32(cpu, "RaiseException", &[code, 0, 0, 0]);
+        }
+        object = read32(cpu, at + 4)?;
+        throw = read32(cpu, at + 8)?;
+    }
     let params = thread_field(cpu, T_SCRATCH)?;
-    write32(cpu, params, 0x1993_0520)?;
-    write32(cpu, params + 4, args[0])?;
-    write32(cpu, params + 8, args[1])?;
-    kernel32(cpu, "RaiseException", &[0xE06D_7363, 1, 3, params])
+    write32(cpu, params, CXX_MAGIC)?;
+    write32(cpu, params + 4, object)?;
+    write32(cpu, params + 8, throw)?;
+    kernel32(cpu, "RaiseException", &[CXX_EXCEPTION, 1, 3, params])
 }
 
 /// Functions with nothing to do: type_info's destructor, _lock, _unlock.

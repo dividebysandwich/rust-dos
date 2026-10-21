@@ -2704,3 +2704,192 @@ fn a_program_uses_msvcrt_files_heap_and_callbacks() {
     assert_eq!(text, "3ff\r\nbye\r\n");
     assert_eq!(code, 0);
 }
+
+#[test]
+fn a_program_catches_its_cxx_exceptions() {
+    let names: &[&str] = &["__CxxFrameHandler", "_CxxThrowException", "printf", "exit"];
+    let imports: &[(&str, &[&str])] = &[("MSVCRT.dll", names)];
+    let mut d = Data::default();
+    let boom = d.text("boom");
+    let bits_format = d.text("%x\n");
+    // A char * thrown: its type, the type it can be caught as, the list
+    // of those and the ThrowInfo.
+    let char_pointer = d.add(&[0; 8]);
+    d.text(".PAD");
+    let catchable = d.add(&[0; 28]);
+    let list = d.add(&[0; 8]);
+    let throw_info = d.add(&[0; 16]);
+    let thrown = d.add(&[0; 4]);
+    // The outer function: a try (state 0) with a catch (char *) into
+    // EBP - 14h. The inner one: an object (state 0), destroyed by
+    // `destroy`, and a try (state 1) with a catch (...) that throws the
+    // exception on with `throw;`.
+    let outer = d.add(&[0; 28]);
+    let outer_unwind = d.add(&[0; 16]);
+    let outer_try = d.add(&[0; 20]);
+    let outer_handler = d.add(&[0; 16]);
+    let inner = d.add(&[0; 28]);
+    let inner_unwind = d.add(&[0; 24]);
+    let inner_try = d.add(&[0; 20]);
+    let inner_handler = d.add(&[0; 16]);
+    let destroyed = d.add(&[0; 4]);
+    let bits = d.add(&[0; 4]);
+    let data_len = d.0.len() as u32;
+    let exe = program(BASE, false, imports, &d.0, |a, l| {
+        let code = |a: &mut CodeAssembler, at: [u32; 6]| -> Result<[CodeLabel; 6], IcedError> {
+            let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+            let mut outer_thunk = a.create_label();
+            let mut inner_thunk = a.create_label();
+            let mut outer_catch = a.create_label();
+            let mut inner_catch = a.create_label();
+            let mut destroy = a.create_label();
+            let mut after = a.create_label();
+            let mut inner_function = a.create_label();
+            let mut thrower = a.create_label();
+            let set = |a: &mut CodeAssembler, bit: u32| a.or(dword_ptr(l.at(bits)), bit as i32);
+            let put = |a: &mut CodeAssembler, offset: u32, value: u32| {
+                a.mov(dword_ptr(l.at(offset)), value as i32)
+            };
+            let data = |offset: u32| l.at(offset) as u32;
+            // The tables.
+            put(a, catchable, 1)?;
+            put(a, catchable + 4, data(char_pointer))?;
+            put(a, catchable + 12, u32::MAX)?;
+            put(a, catchable + 20, 4)?;
+            put(a, list, 1)?;
+            put(a, list + 4, data(catchable))?;
+            put(a, throw_info + 12, data(list))?;
+            for (info, states, unwind, entry) in
+                [(outer, 2, outer_unwind, outer_try), (inner, 3, inner_unwind, inner_try)]
+            {
+                put(a, info, 0x1993_0520)?;
+                put(a, info + 4, states)?;
+                put(a, info + 8, data(unwind))?;
+                put(a, info + 12, 1)?;
+                put(a, info + 16, data(entry))?;
+            }
+            put(a, outer_unwind, u32::MAX)?;
+            put(a, outer_unwind + 8, u32::MAX)?;
+            put(a, outer_try + 8, 1)?;
+            put(a, outer_try + 12, 1)?;
+            put(a, outer_try + 16, data(outer_handler))?;
+            put(a, outer_handler + 4, data(char_pointer))?;
+            put(a, outer_handler + 8, -0x14i32 as u32)?;
+            put(a, outer_handler + 12, at[2])?;
+            put(a, inner_unwind, u32::MAX)?;
+            put(a, inner_unwind + 4, at[4])?;
+            put(a, inner_try, 1)?;
+            put(a, inner_try + 4, 1)?;
+            put(a, inner_try + 8, 2)?;
+            put(a, inner_try + 12, 1)?;
+            put(a, inner_try + 16, data(inner_handler))?;
+            put(a, inner_handler + 12, at[3])?;
+
+            // The outer function's frame, as MSVC makes it.
+            a.push(ebp)?;
+            a.mov(ebp, esp)?;
+            a.push(-1)?;
+            a.mov(eax, at[0])?;
+            a.push(eax)?;
+            a.push(dword_ptr(0u64).fs())?;
+            a.mov(dword_ptr(0u64).fs(), esp)?;
+            a.sub(esp, 0x10)?;
+            a.mov(dword_ptr(ebp - 0x10), esp)?;
+            a.mov(dword_ptr(ebp - 4), 0)?;
+            a.call(inner_function)?;
+            a.int3()?;
+
+            // catch (char *p): p is what was thrown.
+            a.set_label(&mut outer_catch)?;
+            a.cmp(dword_ptr(ebp - 0x14), data(boom) as i32)?;
+            let mut skip = a.create_label();
+            a.jne(skip)?;
+            set(a, 4)?;
+            a.set_label(&mut skip)?;
+            a.mov(eax, at[5])?;
+            a.ret()?;
+
+            // On after the try, with the function's stack, the inner
+            // object destroyed once.
+            a.set_label(&mut after)?;
+            let mut skip = a.create_label();
+            a.cmp(esp, dword_ptr(ebp - 0x10))?;
+            a.jne(skip)?;
+            set(a, 8)?;
+            a.set_label(&mut skip)?;
+            let mut skip = a.create_label();
+            a.cmp(dword_ptr(l.at(destroyed)), 1)?;
+            a.jne(skip)?;
+            set(a, 2)?;
+            a.set_label(&mut skip)?;
+            a.mov(ecx, dword_ptr(ebp - 0x0C))?;
+            a.mov(dword_ptr(0u64).fs(), ecx)?;
+            a.mov(esp, ebp)?;
+            a.pop(ebp)?;
+            a.push(dword_ptr(l.at(bits)))?;
+            a.push(l.at(bits_format) as i32)?;
+            a.call(f("printf"))?;
+            a.add(esp, 8)?;
+            a.push(0)?;
+            a.call(f("exit"))?;
+            a.int3()?;
+
+            a.set_label(&mut inner_function)?;
+            a.push(ebp)?;
+            a.mov(ebp, esp)?;
+            a.push(-1)?;
+            a.mov(eax, at[1])?;
+            a.push(eax)?;
+            a.push(dword_ptr(0u64).fs())?;
+            a.mov(dword_ptr(0u64).fs(), esp)?;
+            a.sub(esp, 0x10)?;
+            a.mov(dword_ptr(ebp - 0x10), esp)?;
+            a.mov(dword_ptr(ebp - 4), 0)?;
+            a.mov(dword_ptr(ebp - 4), 1)?;
+            a.call(thrower)?;
+            a.int3()?;
+
+            // catch (...): throw;
+            a.set_label(&mut inner_catch)?;
+            set(a, 1)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.call(f("_CxxThrowException"))?;
+            a.int3()?;
+
+            a.set_label(&mut destroy)?;
+            a.inc(dword_ptr(l.at(destroyed)))?;
+            a.ret()?;
+
+            // throw "boom";
+            a.set_label(&mut thrower)?;
+            put(a, thrown, data(boom))?;
+            a.push(data(throw_info) as i32)?;
+            a.push(data(thrown) as i32)?;
+            a.call(f("_CxxThrowException"))?;
+            a.int3()?;
+
+            a.set_label(&mut outer_thunk)?;
+            a.mov(eax, data(outer))?;
+            a.jmp(f("__CxxFrameHandler"))?;
+            a.set_label(&mut inner_thunk)?;
+            a.mov(eax, data(inner))?;
+            a.jmp(f("__CxxFrameHandler"))?;
+            Ok([outer_thunk, inner_thunk, outer_catch, inner_catch, destroy, after])
+        };
+        let labels = code(a, [0; 6])?;
+        let ip = (l.data + data_len).next_multiple_of(0x1000) as u64;
+        let options = iced_x86::BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS;
+        let result = a.assemble_options(ip, options)?;
+        let mut at = [0; 6];
+        for (i, label) in labels.iter().enumerate() {
+            at[i] = result.label_ip(label)? as u32;
+        }
+        a.reset();
+        code(a, at)?;
+        Ok(())
+    });
+    let (code, text) = run("msvcrt_cxx", exe);
+    assert_eq!(text, "f\r\n");
+    assert_eq!(code, 0);
+}

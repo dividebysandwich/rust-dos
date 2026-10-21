@@ -178,8 +178,9 @@ const S_SIGNALS: u32 = 0x80;
 /// A thread's block: its errno and _doserrno, rand's seed, strtok's
 /// place (_mbstok's too) and wcstok's, the floating-point error signal's
 /// code, and the buffers of gmtime, asctime, tmpnam, the ecvt family,
-/// _wasctime, and room for what a function writes for a KERNEL32 one it
-/// calls. 10h is free.
+/// _wasctime, the exception the running catch block took (its code,
+/// object and ThrowInfo, for `throw;`), and room for what a function
+/// writes for a KERNEL32 one it calls. 10h is free.
 const T_ERRNO: u32 = 0x00;
 const T_DOSERRNO: u32 = 0x04;
 const T_RAND: u32 = 0x08;
@@ -191,6 +192,7 @@ const T_ASCTIME: u32 = 0x50;
 const T_TMPNAM: u32 = 0x80;
 const T_CVT: u32 = 0x190;
 const T_WASCTIME: u32 = 0x300;
+const T_CXX: u32 = 0x334;
 const T_SCRATCH: u32 = 0x340;
 const THREAD_BLOCK: u32 = 0x400;
 
@@ -510,6 +512,7 @@ static CONTS: &[call::Then] = &[
     startup::rtl_unwound,
     string::lfind_returned,
     startup::spawned,
+    startup::cxx_returned,
 ];
 
 const C_INITTERM: u32 = 0;
@@ -522,6 +525,7 @@ const C_FINALLY: u32 = 6;
 const C_UNWOUND: u32 = 7;
 const C_LFIND: u32 = 8;
 const C_SPAWNED: u32 = 9;
+const C_CXX: u32 = 10;
 
 /// Call the program's function at `target` with `args`; when it returns,
 /// `CONTS[cont]` runs with the call, whose data is `data` after the
