@@ -586,7 +586,7 @@ fn tmus(cpu: &Cpu) -> u32 {
     hw::board(cpu).map_or(0, |b| b.tmus)
 }
 
-fn tmu_ok(cpu: &Cpu, tmu: u32) -> bool {
+pub fn tmu_ok(cpu: &Cpu, tmu: u32) -> bool {
     tmu < tmus(cpu)
 }
 
@@ -1660,7 +1660,11 @@ pub fn tex_download_level(
         format,
     };
     if hw::banshee(cpu) {
-        let (base, _) = hw::texture_memory(cpu, tmu);
+        let (base, len) = hw::texture_memory(cpu, tmu);
+        // Past the texture memory there is no texture to write.
+        if start >= len {
+            return;
+        }
         let level = base
             .wrapping_add(start)
             .wrapping_add(levels_bytes(large_lod, lod, aspect, format, even_odd));

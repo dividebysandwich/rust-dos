@@ -22,6 +22,9 @@ pub struct MipMap {
     pub trilinear: bool,
     pub width: u32,
     pub height: u32,
+    /// A YIQ texture's NCC table, its packed registers: guTexSource
+    /// downloads it again.
+    pub ncc: Option<[u32; 12]>,
 }
 
 crate::state_fields!(MipMap {
@@ -36,7 +39,8 @@ crate::state_fields!(MipMap {
     lod_bias,
     trilinear,
     width,
-    height
+    height,
+    ncc
 });
 
 crate::state_fields!(TexInfo {
@@ -410,11 +414,14 @@ pub fn draw_polygon_with_clip(cpu: &mut Cpu, vertices: &[Vertex]) {
 /// Memory for a texture (guTexAllocateMemory): its id, or NULL_MIPMAP
 /// if the unit's memory is full.
 pub fn tex_allocate(cpu: &mut Cpu, m: MipMap) -> u32 {
-    if !m.info_valid() {
+    if !m.info_valid() || !api::tmu_ok(cpu, m.tmu) {
         return NULL_MIPMAP;
     }
     let tmu = m.tmu.min(1) as usize;
     let size = api::tex_texture_mem_required(cpu, m.even_odd, &m.info);
+    if size == 0 {
+        return NULL_MIPMAP;
+    }
     let max = api::tex_max_address(cpu, m.tmu) + 8;
     let start = gu(cpu).free[tmu];
     // A texture doesn't cross a 2 MB boundary of a Voodoo's memory.
@@ -471,7 +478,23 @@ pub fn tex_source(cpu: &mut Cpu, id: u32) {
     api::tex_clamp_mode(cpu, m.tmu, m.clamp[0], m.clamp[1]);
     api::tex_filter_mode(cpu, m.tmu, m.filter[0], m.filter[1]);
     api::tex_lod_bias_value(cpu, m.tmu, m.lod_bias);
+    if let Some(packed) = m.ncc.filter(|_| yiq(&m)) {
+        api::tex_download_ncc_table(cpu, m.tmu, api::TEXTABLE_NCC0, &packed);
+        api::tex_ncc_table(cpu, m.tmu, api::TEXTABLE_NCC0);
+    }
     gu(cpu).current[m.tmu.min(1) as usize] = id;
+}
+
+/// Whether a texture's texels are YIQ, which an NCC table decodes.
+pub fn yiq(m: &MipMap) -> bool {
+    matches!(m.info.format, api::TEXFMT_YIQ_422 | api::TEXFMT_AYIQ_8422)
+}
+
+/// The NCC table guTexDownloadMipMap gave the texture `id`.
+pub fn set_ncc(cpu: &mut Cpu, id: u32, packed: [u32; 12]) {
+    if mipmap(cpu, id).is_some() {
+        gu(cpu).mipmaps[id as usize].ncc = Some(packed);
+    }
 }
 
 /// The texture a unit maps (guTexGetCurrentMipMap).

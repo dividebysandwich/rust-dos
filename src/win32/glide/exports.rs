@@ -616,7 +616,7 @@ fn gr_lfb_write_color_swizzle(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
 /// grLfbReadRegion: 16-bit pixels into rows `dst_stride` apart.
 fn gr_lfb_read_region(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     let [buffer, x, y, w, h, stride, dst] = a[..7].try_into().ok()?;
-    if w == 0 || h == 0 || w > 2048 || h > 2048 {
+    if w == 0 || h == 0 || w > 2048 || h > 2048 || x > 2048 || y > 2048 {
         return Some(FALSE);
     }
     let len = stride as usize * (h as usize - 1) + 2 * w as usize;
@@ -632,15 +632,16 @@ fn gr_lfb_read_region(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
             .flat_map(|p| p.to_le_bytes())
             .collect();
         cpu.bus
-            .guest_write_bytes(dst.wrapping_add(row * stride), &line);
+            .guest_write_bytes(dst.wrapping_add(row.wrapping_mul(stride)), &line);
     }
     Some(TRUE)
 }
 
-/// grLfbWriteRegion: pixels from rows `src_stride` apart.
+/// grLfbWriteRegion: pixels from rows `src_stride` apart, a signed
+/// stride (an image stored bottom up has a negative one).
 fn gr_lfb_write_region(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     let [buffer, x, y, format, w, h, stride, src] = a[..8].try_into().ok()?;
-    if w == 0 || h == 0 || w > 2048 || h > 2048 || stride > 0x10000 {
+    if w == 0 || h == 0 || w > 2048 || h > 2048 || x > 2048 || y > 2048 {
         return Some(FALSE);
     }
     let bpp = if matches!(format, 4 | 5 | 0xC..=0xE) {
@@ -648,9 +649,13 @@ fn gr_lfb_write_region(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     } else {
         2
     };
-    let len = stride as usize * (h as usize - 1) + bpp * w as usize;
-    let data = bytes(cpu, src, len)?;
-    Some(api::lfb_write_region(cpu, buffer, x, y, format, w, h, stride, &data) as u32)
+    let row_len = bpp * w;
+    let mut data = Vec::with_capacity((row_len * h) as usize);
+    for row in 0..h {
+        let at = src.wrapping_add(row.wrapping_mul(stride));
+        data.extend(bytes(cpu, at, row_len as usize)?);
+    }
+    Some(api::lfb_write_region(cpu, buffer, x, y, format, w, h, row_len, &data) as u32)
 }
 
 // --- Textures ---
@@ -739,6 +744,15 @@ fn gr_tex_ncc_table(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     Some(0)
 }
 
+/// The packed registers of a GuNccTable at `data`, which follow its Y,
+/// I and Q.
+fn ncc_table(cpu: &mut Cpu, data: u32) -> Option<[u32; 12]> {
+    let raw = bytes(cpu, data.wrapping_add(64), 48)?;
+    Some(std::array::from_fn(|i| {
+        u32::from_le_bytes([raw[4 * i], raw[4 * i + 1], raw[4 * i + 2], raw[4 * i + 3]])
+    }))
+}
+
 /// An NCC table (GuNccTable) or a palette (GuTexPalette) for texture
 /// unit `tmu`, entries `start` to `end` of a palette.
 fn download_table(
@@ -751,11 +765,7 @@ fn download_table(
 ) -> Option<u32> {
     match kind {
         api::TEXTABLE_NCC0 | api::TEXTABLE_NCC1 => {
-            // The packed registers follow Y, I and Q.
-            let raw = bytes(cpu, data.wrapping_add(64), 48)?;
-            let packed: [u32; 12] = std::array::from_fn(|i| {
-                u32::from_le_bytes([raw[4 * i], raw[4 * i + 1], raw[4 * i + 2], raw[4 * i + 3]])
-            });
+            let packed = ncc_table(cpu, data)?;
             api::tex_download_ncc_table(cpu, tmu, kind, &packed);
         }
         api::TEXTABLE_PALETTE => {
@@ -873,9 +883,9 @@ fn gu_draw_polygon_vertex_list_with_clip(cpu: &mut Cpu, a: &[u32]) -> Option<u32
     Some(0)
 }
 
-/// The texture of guTexAllocateMemory's and guTexChangeAttributes'
-/// arguments from the format on: format, mipmap mode, smallest and
-/// largest level, aspect, clamping and filters.
+/// The texture of guTexAllocateMemory's arguments from the format on:
+/// format, mipmap mode, smallest and largest level, aspect, clamping
+/// and filters.
 fn mipmap_from(m: &mut MipMap, a: &[u32]) {
     m.info = TexInfo {
         format: a[0],
@@ -902,11 +912,21 @@ fn gu_tex_allocate_memory(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     Some(gu::tex_allocate(cpu, m))
 }
 
+/// guTexChangeAttributes: an argument of -1 keeps what the texture had.
 fn gu_tex_change_attributes(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     let ok = gu::tex_change_attributes(cpu, a[0], |m| {
-        m.width = a[1];
-        m.height = a[2];
-        mipmap_from(m, &a[3..12]);
+        let keep = |arg: u32, old: u32| if arg == u32::MAX { old } else { arg };
+        m.width = keep(a[1], m.width);
+        m.height = keep(a[2], m.height);
+        m.info.format = keep(a[3], m.info.format);
+        m.mm_mode = keep(a[4], m.mm_mode);
+        m.info.small_lod = keep(a[5], m.info.small_lod);
+        m.info.large_lod = keep(a[6], m.info.large_lod);
+        m.info.aspect = keep(a[7], m.info.aspect);
+        for i in 0..2 {
+            m.clamp[i] = keep(a[8 + i], m.clamp[i]);
+            m.filter[i] = keep(a[10 + i], m.filter[i]);
+        }
     });
     Some(ok as u32)
 }
@@ -930,15 +950,16 @@ fn gu_tex_mem_reset(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 }
 
 /// guTexDownloadMipMap: all the texture's levels, and its NCC table
-/// for a YIQ texture.
+/// for a YIQ texture, which the texture keeps for guTexSource.
 fn gu_tex_download_mip_map(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     let Some(m) = gu::mipmap(cpu, a[0]) else {
         return Some(0);
     };
     let texels = bytes(cpu, a[1], mipmap_len(&m.info))?;
-    let yiq = matches!(m.info.format, api::TEXFMT_YIQ_422 | api::TEXFMT_AYIQ_8422);
-    if yiq && a[2] != 0 {
-        download_table(cpu, m.tmu, api::TEXTABLE_NCC0, a[2], 0, 0)?;
+    if gu::yiq(&m) && a[2] != 0 {
+        let packed = ncc_table(cpu, a[2])?;
+        gu::set_ncc(cpu, a[0], packed);
+        api::tex_download_ncc_table(cpu, m.tmu, api::TEXTABLE_NCC0, &packed);
         api::tex_ncc_table(cpu, m.tmu, api::TEXTABLE_NCC0);
     }
     api::tex_download_mipmap(cpu, m.tmu, m.start, m.even_odd, &m.info, &texels);
