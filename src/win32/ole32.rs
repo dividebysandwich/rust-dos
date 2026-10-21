@@ -363,6 +363,10 @@ fn create(cpu: &mut Cpu, index: usize, iid: &Guid, out: u32) -> u32 {
     let Some(class) = com::class_at(index) else {
         return CLASS_E_CLASSNOTAVAILABLE;
     };
+    // The class's DLL, which COM loads for its objects' methods.
+    if super::loader::map_builtin_named(cpu, class.dll).is_none() {
+        return E_OUTOFMEMORY;
+    }
     let result = (class.create)(cpu, iid, out);
     cpu.bus.log_string(&format!(
         "[W32] OLE32 makes a {} ({}): {:08X}",
@@ -376,7 +380,7 @@ fn factory_lock_server(_: &mut Cpu, _: &[u32]) -> Option<u32> {
 }
 
 /// A block of the process heap for the task allocator, or 0.
-fn task_alloc(cpu: &mut Cpu, size: u32) -> u32 {
+pub(super) fn task_alloc(cpu: &mut Cpu, size: u32) -> u32 {
     super::with_process(cpu, |p, bus| p.heap.alloc(&mut p.memory, bus, size.max(1))).unwrap_or(0)
 }
 
@@ -427,7 +431,7 @@ fn co_task_mem_free(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// CoGetMalloc(context, out): the process's task allocator.
-fn co_get_malloc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+pub(super) fn co_get_malloc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [_, out] = args[..] else {
         return Some(E_INVALIDARG);
     };

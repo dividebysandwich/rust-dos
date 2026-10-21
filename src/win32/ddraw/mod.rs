@@ -42,7 +42,7 @@ mod blt;
 mod clipper;
 pub mod d3d;
 mod directdraw;
-mod display;
+pub(super) mod display;
 pub mod enumerate;
 mod gamma;
 mod palette;

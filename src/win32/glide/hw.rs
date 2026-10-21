@@ -11,23 +11,26 @@
 //! where the fbiInit registers put them, and its linear frame buffer,
 //! 4 MB from offset 400000h of its window, has rows of 1024 pixels.
 //!
-//! A Banshee or Voodoo3 is the display adapter. Glide puts the 3D
-//! engine's colour buffers and depth buffer at the top of its 16 MB,
-//! tiled, and shows them in a mode of the card's own: the VGA's CRTC
-//! with the card's extra bits and its pixel clock for the timing, the
-//! video processor's desktop and overlay on the front buffer, which a
-//! swap moves to the next one (leftOverlayBuf). Textures take the memory
-//! below the buffers. Closing puts back the registers the mode changed,
-//! and the screen is the mode it was before. The linear frame buffer is
-//! the tiled aperture of BAR1 from the buffers' start (lfbMemoryConfig),
-//! rows of 4096 bytes, as 3dfx's library had it; writes through the
-//! pixel pipeline and in other formats go to the 3D engine's linear
-//! frame buffer in BAR0, rows of 2048 pixels.
+//! A Banshee or Voodoo3 is the display adapter. Glide takes the display
+//! from the desktop or DirectDraw (`display::take`) in a mode of the
+//! size it shows, and the rest of the card's 16 MB as a block of
+//! DirectDraw's video memory, so that no surface is put there while
+//! Glide has it. The 3D engine's colour buffers and depth buffer are at
+//! the top, tiled, and the video processor's overlay shows the front
+//! one, which a swap moves to the next one (leftOverlayBuf). Textures
+//! take the memory below the buffers. Closing gives the display back
+//! (`display::give_back`): the desktop's mode, repainted, or text mode.
+//! The linear frame buffer is the tiled aperture of BAR1 from the
+//! buffers' start (lfbMemoryConfig), rows of 4096 bytes, as 3dfx's
+//! library had it; writes through the pixel pipeline and in other
+//! formats go to the 3D engine's linear frame buffer in BAR0, rows of
+//! 2048 pixels.
 
 use super::state;
 use crate::cpu::Cpu;
 use crate::voodoo::banshee::{self as b, render3d};
 use crate::voodoo::regs::*;
+use crate::win32::ddraw::display;
 use crate::win32::memory::{MEM_MAPPED, PAGE, PAGE_READWRITE, SHARED, SYSTEM, USER, WRITABLE};
 
 /// Which chip the board has.
@@ -200,50 +203,14 @@ pub struct View {
 
 crate::state_fields!(View { at, len });
 
-/// What a Banshee's mode changed, to put back.
+/// What opening a Voodoo Graphics or Voodoo2 changed, to put back.
 #[derive(Clone, Debug, Default)]
 pub struct Saved {
-    /// The init and video registers of `SAVED_EXT`.
-    pub ext: [u32; 14],
-    /// The VGA's CRTC registers, and the card's CR1Ah and CR1Bh.
-    pub crtc: [u8; 25],
-    pub cr1a: u8,
-    pub cr1b: u8,
-    pub misc: u8,
-    pub seq01: u8,
-    pub fixed_timing: Option<crate::video::crt::CrtTiming>,
-    /// A Voodoo Graphics' or Voodoo2's initEnable.
+    /// initEnable.
     pub init_enable: u32,
 }
 
-crate::state_fields!(Saved {
-    ext,
-    crtc,
-    cr1a,
-    cr1b,
-    misc,
-    seq01,
-    fixed_timing,
-    init_enable
-});
-
-/// The init and video registers a Banshee's mode for Glide changes.
-const SAVED_EXT: [u32; 14] = [
-    b::VGA_INIT0,
-    b::VID_PROC_CFG,
-    b::VID_DESKTOP_START_ADDR,
-    b::VID_DESKTOP_OVERLAY_STRIDE,
-    b::LFB_MEMORY_CONFIG,
-    b::MISC_INIT0,
-    b::VID_OVERLAY_START_COORDS,
-    b::VID_OVERLAY_END_SCREEN_COORDS,
-    b::VID_OVERLAY_DUDX,
-    b::VID_OVERLAY_DUDX_OFFSET_SRC_WIDTH,
-    b::VID_OVERLAY_DVDY,
-    b::VID_OVERLAY_DVDY_OFFSET,
-    b::PLL_CTRL0,
-    b::DAC_MODE,
-];
+crate::state_fields!(Saved { init_enable });
 
 /// The display Glide opened and the buffers the card draws into.
 #[derive(Clone, Debug, Default)]
@@ -322,13 +289,19 @@ struct BansheeLayout {
     start: u32,
 }
 
-fn banshee_layout(width: u32, height: u32, colors: u32, auxes: u32) -> Option<BansheeLayout> {
+fn banshee_layout(
+    width: u32,
+    height: u32,
+    colors: u32,
+    auxes: u32,
+    floor: u32,
+) -> Option<BansheeLayout> {
     let tiles = (width * 2).div_ceil(128);
     let bytes = tiles * 4096 * height.div_ceil(32);
     let total = bytes * (colors + auxes);
-    // At least 1 MB for textures.
-    let start = (b::MEMORY as u32).checked_sub(total)?;
-    if start < 1 << 20 || tiles > 0x7F {
+    // At least 1 MB for textures above `floor`.
+    let start = (b::MEMORY as u32).checked_sub(total)? & !0xFFF;
+    if start < floor + (1 << 20) || tiles > 0x7F {
         return None;
     }
     let mut color = [0; 3];
@@ -362,7 +335,7 @@ pub fn open_display(
         return false;
     }
     let ok = match board.card {
-        Card::Banshee => open_banshee(cpu, width, height, refresh, colors, auxes),
+        Card::Banshee => open_banshee(cpu, width, height, colors, auxes),
         _ => open_voodoo(cpu, board, width, height, colors, auxes),
     };
     if !ok {
@@ -468,23 +441,22 @@ fn read_init(cpu: &Cpu, reg: usize) -> u32 {
     cpu.bus.voodoo.as_ref().map_or(0, |v| v.reg[reg])
 }
 
-/// A Banshee or Voodoo3: the buffers at the top of its memory, its own
-/// mode showing them.
+/// A Banshee or Voodoo3: the display taken from the desktop or
+/// DirectDraw (`display::take`) in a mode of the size Glide shows, and
+/// the rest of the card's memory a block of DirectDraw's video memory,
+/// so that no surface gets it while Glide has it. Glide's buffers are at
+/// its top, tiled, and the overlay shows the front one over the mode's
+/// picture; the textures have the memory below them.
 fn open_banshee(
     cpu: &mut Cpu,
     width: u32,
     height: u32,
-    refresh: u32,
     colors: u32,
     auxes: u32,
 ) -> bool {
     if width > 1600 || height > 1200 {
         return false;
     }
-    let Some(layout) = banshee_layout(width, height, colors, auxes) else {
-        return false;
-    };
-    save_banshee(cpu);
     // Small modes are shown doubled, as the card's library did.
     let doubled = width <= 400;
     let (dw, dh) = if doubled {
@@ -492,22 +464,30 @@ fn open_banshee(
     } else {
         (width, height)
     };
-    program_crtc(cpu, dw, dh, refresh);
+    // What the picture of the mode will take, and whether the buffers
+    // fit above it, before anything changes.
+    let floor = (dw * 2 * dh).next_multiple_of(0x1000);
+    let Some(layout) = banshee_layout(width, height, colors, auxes, floor) else {
+        return false;
+    };
+    let Some(mode) = display::take(cpu, dw, dh, 16) else {
+        return false;
+    };
+    let Ok(block) = display::alloc(cpu, b::MEMORY as u32 - floor) else {
+        display::give_back(cpu);
+        return false;
+    };
 
     let tiles = layout.tiles;
-    let stride = tiles << 16 | tiles;
-    let mut cfg = b::VIDPROC_ENABLE
-        | 1 << 18
+    let stride = tiles << 16 | (mode.pitch & 0x7FFF);
+    let mut cfg = ext(cpu, b::VID_PROC_CFG)
         | 1 << 21
-        | b::VIDPROC_DESKTOP_TILED
         | b::VIDPROC_OVERLAY_TILED
         | b::VIDPROC_OVERLAY_ENABLE
-        | b::VIDPROC_DESKTOP_CLUT_BYPASS
         | b::VIDPROC_OVERLAY_CLUT_SEL;
     if doubled {
         cfg |= b::VIDPROC_H_SCALE | b::VIDPROC_V_SCALE;
     }
-    set_ext(cpu, b::VID_DESKTOP_START_ADDR, layout.color[0]);
     set_ext(cpu, b::VID_DESKTOP_OVERLAY_STRIDE, stride);
     set_ext(cpu, b::VID_OVERLAY_START_COORDS, 0);
     set_ext(
@@ -519,7 +499,8 @@ fn open_banshee(
     set_ext(cpu, b::VID_OVERLAY_DVDY, (height << 20) / dh);
     set_ext(cpu, b::VID_OVERLAY_DVDY_OFFSET, 0);
     set_ext(cpu, b::VID_PROC_CFG, cfg);
-    // The aperture: tiled from the buffers on, rows of 4096 bytes.
+    // The aperture: tiled from the buffers on, rows of 4096 bytes; linear
+    // below them.
     set_ext(
         cpu,
         b::LFB_MEMORY_CONFIG,
@@ -527,8 +508,6 @@ fn open_banshee(
     );
     let misc = ext(cpu, b::MISC_INIT0) & !(0xFFF << 18);
     set_ext(cpu, b::MISC_INIT0, misc | (height - 1) << 18);
-    let init0 = ext(cpu, b::VGA_INIT0);
-    set_ext(cpu, b::VGA_INIT0, init0 | b::VGAINIT0_EXTENDED_SHIFT_OUT);
 
     // The 3D engine's buffers, the front one shown.
     let tiled = 1 << 15 | tiles;
@@ -545,114 +524,20 @@ fn open_banshee(
     s.aux = layout.aux;
     s.tiles = tiles;
     s.buffer_bytes = layout.bytes;
-    // The two units share the memory below the buffers: a half each.
+    // The textures from the block's start; the two units share it, a half
+    // each.
+    let room = layout.start - block;
     let tmus = board(cpu).map_or(1, |b| b.tmus);
     let s = &mut state(cpu).screen;
     if tmus > 1 {
-        let half = (layout.start / 2) & !0xFFF;
-        s.tex_base = [0, half];
-        s.tex_size = [half, layout.start - half];
+        let half = (room / 2) & !0xFFF;
+        s.tex_base = [block, block + half];
+        s.tex_size = [half, room - half];
     } else {
-        s.tex_base = [0, 0];
-        s.tex_size = [layout.start, 0];
+        s.tex_base = [block, block];
+        s.tex_size = [room, 0];
     }
     true
-}
-
-/// Keep what a Banshee's mode for Glide changes.
-fn save_banshee(cpu: &mut Cpu) {
-    let mut saved = Saved::default();
-    for (v, &offset) in saved.ext.iter_mut().zip(&SAVED_EXT) {
-        *v = ext(cpu, offset);
-    }
-    let vga = &mut cpu.bus.vga;
-    saved.crtc = vga.crtc_regs;
-    saved.misc = vga.misc_output_reg;
-    saved.seq01 = vga.sequencer_regs[1];
-    saved.fixed_timing = vga.fixed_timing();
-    saved.cr1a = cpu.bus.banshee_crtc_read(0x1A);
-    saved.cr1b = cpu.bus.banshee_crtc_read(0x1B);
-    state(cpu).screen.saved = saved;
-}
-
-/// The CRTC's registers, the card's extra bits and its pixel clock for
-/// a picture of `w` x `h` at `refresh` Hz: a quarter of the line and a
-/// twenty-fourth of the frame blanked, as 8-dot characters.
-fn program_crtc(cpu: &mut Cpu, w: u32, h: u32, refresh: u32) {
-    let chars = w / 8;
-    let htotal = chars + (chars / 4).max(10);
-    let hsync = chars + 2;
-    let hsync_end = hsync + (chars / 10).max(4);
-    let vtotal = h + (h / 24).max(12);
-    let vsync = h + 3;
-    let vsync_end = vsync + 3;
-    // The monitor takes lines at up to 70 kHz.
-    let refresh = refresh.clamp(50, 120).min(69_000 / vtotal).max(40);
-    let clock = htotal as u64 * 8 * vtotal as u64 * refresh as u64;
-    let mut crtc = [0u8; 25];
-    let h8 = |v: u32| v as u8;
-    crtc[0x00] = h8(htotal - 5);
-    crtc[0x01] = h8(chars - 1);
-    crtc[0x02] = h8(chars);
-    crtc[0x03] = 0x80 | (h8(htotal - 1) & 0x1F);
-    crtc[0x04] = h8(hsync);
-    crtc[0x05] = h8(hsync_end) & 0x1F;
-    let (vt, vd, vs, vb) = (vtotal - 2, h - 1, vsync, h);
-    crtc[0x06] = h8(vt);
-    crtc[0x07] = (((vt >> 8) & 1)
-        | ((vd >> 8) & 1) << 1
-        | ((vs >> 8) & 1) << 2
-        | ((vb >> 8) & 1) << 3
-        | 1 << 4
-        | ((vt >> 9) & 1) << 5
-        | ((vd >> 9) & 1) << 6
-        | ((vs >> 9) & 1) << 7) as u8;
-    crtc[0x09] = (((vb >> 9) & 1) << 5 | 1 << 6) as u8;
-    crtc[0x10] = h8(vs);
-    // Its vertical interrupt off.
-    crtc[0x11] = (h8(vsync_end) & 0x0F) | 0x20;
-    crtc[0x12] = h8(vd);
-    crtc[0x13] = h8((w * 2) / 8);
-    crtc[0x15] = h8(vb);
-    crtc[0x16] = h8(vtotal - 1);
-    crtc[0x17] = 0xC3;
-    crtc[0x18] = 0xFF;
-    let cr1a = ((htotal - 5) >> 8 & 1 | ((chars - 1) >> 8 & 1) << 2) as u8;
-    let cr1b = ((vt >> 10) & 1 | ((vd >> 10) & 1) << 2 | ((vs >> 10) & 1) << 6) as u8;
-
-    let vga = &mut cpu.bus.vga;
-    vga.crtc_regs = crtc;
-    // The clock from PLL 0, 8-dot characters.
-    vga.misc_output_reg |= 0x0C;
-    vga.sequencer_regs[1] = (vga.sequencer_regs[1] | 0x01) & !0x08;
-    vga.set_fixed_timing(None);
-    vga.invalidate_timing();
-    set_ext(cpu, b::PLL_CTRL0, pll(clock));
-    set_ext(cpu, b::DAC_MODE, 0);
-    cpu.bus.banshee_crtc_write(0x1A, cr1a);
-    cpu.bus.banshee_crtc_write(0x1B, cr1b);
-}
-
-/// pllCtrl0's N, M and K for the clock nearest `hz`: (N + 2) / ((M + 2)
-/// * 2^K) times 14.318 MHz.
-fn pll(hz: u64) -> u32 {
-    const REF: u64 = 14_318_180;
-    let mut best = (u64::MAX, 0);
-    for k in 0..4u64 {
-        for m in 0..64u64 {
-            // The N for this M and K, rounded.
-            let n2 = (hz * ((m + 2) << k) + REF / 2) / REF;
-            if !(2..=257).contains(&n2) {
-                continue;
-            }
-            let out = n2 * REF / ((m + 2) << k);
-            let off = out.abs_diff(hz);
-            if off < best.0 {
-                best = (off, ((n2 - 2) << 8 | m << 2 | k) as u32);
-            }
-        }
-    }
-    best.1
 }
 
 /// Close the card's display and give the screen back.
@@ -678,32 +563,10 @@ pub fn close_display(cpu: &mut Cpu) {
     s.open = false;
 }
 
-/// Put back what a Banshee's mode for Glide changed.
+/// Give the display back (`display::give_back`): the desktop's mode,
+/// repainted, or text mode, and the card's memory DirectDraw's again.
 fn close_banshee(cpu: &mut Cpu) {
-    let saved = state(cpu).screen.saved.clone();
-    // The 3D engine's buffers stay where Glide left them; the desktop's
-    // registers come back.
-    for (&offset, &v) in SAVED_EXT.iter().zip(&saved.ext) {
-        set_ext(cpu, offset, v);
-    }
-    let vga = &mut cpu.bus.vga;
-    vga.crtc_regs = saved.crtc;
-    vga.misc_output_reg = saved.misc;
-    vga.sequencer_regs[1] = saved.seq01;
-    vga.set_fixed_timing(saved.fixed_timing);
-    vga.invalidate_timing();
-    vga.mark_dirty_full();
-    cpu.bus.banshee_crtc_write(0x1A, saved.cr1a);
-    cpu.bus.banshee_crtc_write(0x1B, saved.cr1b);
-    restore_screen(cpu);
-}
-
-/// The screen Glide gave back: the desktop is painted again, as
-/// textures and buffers may have taken the memory it was in.
-fn restore_screen(cpu: &mut Cpu) {
-    if cpu.bus.win32.user.desktop {
-        crate::win32::user32::paint::redraw_screen(cpu);
-    }
+    display::give_back(cpu);
 }
 
 /// Set the gamma table: `gamma` 1.0 is linear.
