@@ -207,14 +207,18 @@ The results that aren't clean, and why:
   formats.
 - ddraw `overlay.c:60` and `220`: there are no overlays, so the test
   skips all of it.
-- ddraw `d3d.c:3512`: the desktop is 32 bits a pixel, and the HAL
-  draws only into 16-bit surfaces, so CreateDevice fails on the test's
-  surface and the Direct3D 7 tests skip. `d3d.c:3532`: the Direct3D 1
-  tests need the RGB device, a software rasterizer, which isn't there.
-  `3292`, `3295` and `3325`: DirectDraw doesn't subclass the window it
-  has in exclusive mode, nor give it the focus.
-- ddraw `visual.c:2929`: the test draws in a 32-bit mode with a 32-bit
-  depth buffer, which the HAL can't draw into, so it skips.
+- ddraw `d3d.c:377`: the Voodoo3 has no hardware transform and
+  lighting, and says so as 3dfx's driver did (dwMaxActiveLights of
+  -1), so the light tests skip. `d3d.c:2078`: it has no cube maps.
+  `d3d.c:891` fails and `d3d.c:3532` skips: there is no RGB device, the
+  software rasterizer, which the Direct3D 1 tests need and the test
+  expects among the devices. `3292`, `3295` and `3325`: DirectDraw
+  doesn't subclass the window it has in exclusive mode, nor give it the
+  focus.
+- ddraw `visual.c:2929`: the test draws in a 32-bit or 24-bit mode with
+  a 32-bit depth buffer, and reads the pixels as 32-bit ones. The
+  Voodoo3's HAL draws only into 16-bit surfaces with 16-bit depth, as
+  the card's 3D engine did, so CreateDevice fails and the test skips.
 
 - winmm `mci.c:438` skips its recording tests, as there is no wave
   input device, and `515`, `634` and `870` skip the plays of the file
