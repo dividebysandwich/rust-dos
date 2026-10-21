@@ -402,20 +402,20 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   prompt in protected mode with paging, as Windows 95 runs it, and ends
   back at the prompt. Its system DLLs are written into the emulator:
   KERNEL32, ADVAPI32 and MSVCRT for heaps and virtual memory, files,
-  modules, threads, structured exceptions, child processes, the
-  registry and the C runtime; USER32 and GDI32 for windows, dialogs and
-  drawing on a 640x480 desktop in a VESA mode; DDRAW, DSOUND, DINPUT,
-  WINMM and OLE32 for DirectX 3 to 6 games: DirectDraw in full screen
-  on the card's VESA modes or in a window, DirectSound and wave audio
-  in the `windows` mixer channel, MIDI to the MPU-401's synthesizer, CD
-  audio and MIDI files through MCI, and the keyboard, mouse and
-  joystick through DirectInput. A program that calls a function they
-  don't have ends with a message naming it, and one that needs a DLL
-  that is neither among them nor beside it is refused. The registry is
-  kept in `C:\REGISTRY.REG`, which is made the
-  first time a program uses it, so a host folder mounted as C: gets that
-  file. Off, such a program runs its DOS stub, which says it needs
-  Windows. The plan is in [docs/native-windows.md](docs/native-windows.md).
+  modules, threads, structured exceptions, child processes, the registry
+  and the C runtime; USER32 and GDI32 for windows, dialogs and drawing
+  on a 640x480 desktop in a VESA mode; DDRAW, DSOUND, DINPUT, WINMM and
+  OLE32 for DirectX 3 to 6 games: DirectDraw in full screen on the
+  card's VESA modes or in a window, DirectSound and wave audio in the
+  `windows` mixer channel, MIDI to the MPU-401's synthesizer, CD audio
+  and MIDI files through MCI, and the keyboard, mouse and joystick
+  through DirectInput. A program that calls a function they don't have
+  ends with a message naming it, and one that needs a DLL that is
+  neither among them nor beside it is refused. The registry is kept in
+  `C:\REGISTRY.REG`, which is made the first time a program uses it, so
+  a host folder mounted as C: gets that file. Off, such a program runs
+  its DOS stub, which says it needs Windows. The plan is in
+  [docs/native-windows.md](docs/native-windows.md).
 * `dos_version` is the DOS version programs are told (INT 21h AH=30h,
   AX=3306h and the PSP's), such as `5.00` (the default), `6.22` or
   `7.10`; `7.1` is 7.10, as DOSBox's `ver` has it. From 7.00 on, DOS
