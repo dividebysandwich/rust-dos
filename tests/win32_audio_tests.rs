@@ -73,13 +73,16 @@ fn program(
 }
 
 /// A machine with the built-in Windows on, on `core`, and `program`
-/// loaded from the shell as T.EXE.
-fn machine(test: &str, program: Vec<u8>, core: CoreMode) -> Cpu {
+/// loaded from the shell as T.EXE, with `files` beside it.
+fn machine(test: &str, program: Vec<u8>, core: CoreMode, files: &[(&str, Vec<u8>)]) -> Cpu {
     // Each core its own directory, as the tests run at once.
     let base = PathBuf::from("target/test_win32_audio").join(format!("{test}_{core:?}"));
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).unwrap();
     fs::write(base.join("T.EXE"), program).unwrap();
+    for (name, bytes) in files {
+        fs::write(base.join(name), bytes).unwrap();
+    }
     let mut cpu = Cpu::new(base);
     cpu.core = core;
     cpu.bus.win32.enabled = true;
@@ -291,7 +294,7 @@ fn looping_buffer(core: CoreMode) {
         a.call(l.import(SLEEP))?;
         exit(a, l, &mut fail)
     });
-    let mut cpu = machine("looping", exe, core);
+    let mut cpu = machine("looping", exe, core, &[]);
     let (code, left) = run(&mut cpu, 2000);
     assert_eq!(code, 0, "the program failed at step {code}");
     let (hz, peak) = pitch(&left);
@@ -372,7 +375,7 @@ fn notifications(core: CoreMode) {
         a.jmp(fail)?;
         exit(a, l, &mut fail)
     });
-    let mut cpu = machine("notify", exe, core);
+    let mut cpu = machine("notify", exe, core, &[]);
     let (code, _) = run(&mut cpu, 4000);
     // Half a second, to the PIT's 55 ms at worst.
     assert!((45..=56).contains(&code), "exit code {code}");
@@ -498,7 +501,7 @@ fn wave_out(core: CoreMode) {
         a.jmp(fail)?;
         exit(a, l, &mut fail)
     });
-    let mut cpu = machine("wave_out", exe, core);
+    let mut cpu = machine("wave_out", exe, core, &[]);
     let (code, left) = run(&mut cpu, 4000);
     assert!((24..=32).contains(&code), "exit code {code}");
     let (hz, peak) = pitch(&left);
@@ -514,4 +517,71 @@ fn a_wave_out_program_gets_wom_done() {
 #[test]
 fn a_wave_out_program_gets_wom_done_on_the_dynamic_recompiler() {
     wave_out(CoreMode::Dynamic);
+}
+
+/// A WAV file of `samples`, 16-bit mono at `rate`.
+fn wav_file(samples: &[u8], rate: u32) -> Vec<u8> {
+    let mut f = b"RIFF".to_vec();
+    f.extend_from_slice(&(36 + samples.len() as u32).to_le_bytes());
+    f.extend_from_slice(b"WAVEfmt ");
+    f.extend_from_slice(&16u32.to_le_bytes());
+    f.extend_from_slice(&1u16.to_le_bytes());
+    f.extend_from_slice(&1u16.to_le_bytes());
+    f.extend_from_slice(&rate.to_le_bytes());
+    f.extend_from_slice(&(rate * 2).to_le_bytes());
+    f.extend_from_slice(&2u16.to_le_bytes());
+    f.extend_from_slice(&16u16.to_le_bytes());
+    f.extend_from_slice(b"data");
+    f.extend_from_slice(&(samples.len() as u32).to_le_bytes());
+    f.extend_from_slice(samples);
+    f
+}
+
+/// MCI's waveaudio device plays a WAV file of 441 Hz, half a second of
+/// it, with "play ... wait": the exit code is how many hundredths of a
+/// second the command took, or 250 if it failed.
+fn mci_play(core: CoreMode) {
+    const COMMAND: &[u8] = b"play tone.wav wait ";
+    let mut data = vec![0u8; 0x40];
+    data.extend_from_slice(COMMAND);
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.dll", KERNEL32),
+        ("WINMM.dll", &["mciSendStringA"]),
+    ];
+    let exe = program(imports, &data, |a, l| {
+        let mut fail = a.create_label();
+        a.call(l.import(TICKS))?;
+        a.mov(dword_ptr(l.at(0)), eax)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(l.at(0x40) as i32)?;
+        a.call(l.import(OTHER))?;
+        check(a, fail, 250)?;
+        a.call(l.import(TICKS))?;
+        a.sub(eax, dword_ptr(l.at(0)))?;
+        a.xor(edx, edx)?;
+        a.mov(ecx, 10)?;
+        a.div(ecx)?;
+        a.mov(ebx, eax)?;
+        a.jmp(fail)?;
+        exit(a, l, &mut fail)
+    });
+    let tone = wav_file(&square(11025, 50), 22050);
+    let mut cpu = machine("mci_play", exe, core, &[("TONE.WAV", tone)]);
+    let (code, left) = run(&mut cpu, 4000);
+    assert!((49..=56).contains(&code), "exit code {code}");
+    let (hz, peak) = pitch(&left);
+    assert!(peak > 4000, "the loudest sample is {peak}");
+    assert!((hz - 441.0).abs() < 441.0 * 0.03, "the pitch is {hz} Hz");
+}
+
+#[test]
+fn mci_plays_a_wav_file() {
+    mci_play(CoreMode::Normal);
+}
+
+#[test]
+fn mci_plays_a_wav_file_on_the_dynamic_recompiler() {
+    mci_play(CoreMode::Dynamic);
 }

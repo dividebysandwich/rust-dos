@@ -39,6 +39,13 @@ enum Field {
     Audio,
     Type,
     Alias,
+    FormatTag,
+    Channels,
+    SamplesPerSec,
+    BitsPerSample,
+    /// A value the device works out itself (waveaudio's bytes a second
+    /// and alignment, its input and output).
+    Ignored,
 }
 
 /// A keyword: its words, the flag it sets, and what follows it. Of two
@@ -106,6 +113,16 @@ const STATUS: &[Keyword] = &[
     (&["division", "type"], MCI_STATUS_ITEM, Arg::Item(0x400A)),
     (&["start"], MCI_STATUS_START, Arg::None),
     (&["track"], MCI_TRACK, Arg::Int(Field::Track)),
+    // waveaudio's.
+    (&["format", "tag"], MCI_STATUS_ITEM, Arg::Item(0x4001)),
+    (&["channels"], MCI_STATUS_ITEM, Arg::Item(0x4002)),
+    (&["samplespersec"], MCI_STATUS_ITEM, Arg::Item(0x4003)),
+    (&["bytespersec"], MCI_STATUS_ITEM, Arg::Item(0x4004)),
+    (&["alignment"], MCI_STATUS_ITEM, Arg::Item(0x4005)),
+    (&["bitspersample"], MCI_STATUS_ITEM, Arg::Item(0x4006)),
+    (&["level"], MCI_STATUS_ITEM, Arg::Item(0x4007)),
+    (&["input"], MCI_STATUS_ITEM, Arg::Item(0x0040_0000)),
+    (&["output"], MCI_STATUS_ITEM, Arg::Item(0x0080_0000)),
 ];
 
 const SET: &[Keyword] = &[
@@ -142,6 +159,30 @@ const SET: &[Keyword] = &[
         Arg::Value(Field::Port, 65533),
     ),
     (&["port"], 0x0002_0000, Arg::Int(Field::Port)),
+    // waveaudio's (MCI_WAVE_SET_*, MCI_WAVE_INPUT and _OUTPUT).
+    (
+        &["format", "tag", "pcm"],
+        0x0001_0000,
+        Arg::Value(Field::FormatTag, 1),
+    ),
+    (&["format", "tag"], 0x0001_0000, Arg::Int(Field::FormatTag)),
+    (&["channels"], 0x0002_0000, Arg::Int(Field::Channels)),
+    (
+        &["samplespersec"],
+        0x0004_0000,
+        Arg::Int(Field::SamplesPerSec),
+    ),
+    (&["bytespersec"], 0x0008_0000, Arg::Int(Field::Ignored)),
+    (&["alignment"], 0x0010_0000, Arg::Int(Field::Ignored)),
+    (
+        &["bitspersample"],
+        0x0020_0000,
+        Arg::Int(Field::BitsPerSample),
+    ),
+    (&["any", "input"], 0x0400_0000, Arg::None),
+    (&["any", "output"], 0x0800_0000, Arg::None),
+    (&["input"], 0x0040_0000, Arg::Int(Field::Ignored)),
+    (&["output"], 0x0080_0000, Arg::Int(Field::Ignored)),
 ];
 
 const CAPABILITY: &[Keyword] = &[
@@ -190,6 +231,9 @@ const CAPABILITY: &[Keyword] = &[
         MCI_GETDEVCAPS_ITEM,
         Arg::Item(MCI_GETDEVCAPS_CAN_SAVE),
     ),
+    // waveaudio's.
+    (&["inputs"], MCI_GETDEVCAPS_ITEM, Arg::Item(0x4001)),
+    (&["outputs"], MCI_GETDEVCAPS_ITEM, Arg::Item(0x4002)),
 ];
 
 const INFO: &[Keyword] = &[
@@ -233,7 +277,11 @@ const VERBS: &[(&str, u32, &[Keyword])] = &[
     ("delete", MCI_DELETE, PLAY),
     ("step", MCI_STEP, &[]),
     ("spin", MCI_SPIN, &[]),
+    ("sound", MCI_SOUND, &[]),
 ];
+
+/// MCI_SOUND: a system sound, by its name in WIN.INI's [sounds].
+const MCI_SOUND: u32 = 0x0812;
 
 /// The words of a command string; a quoted one may have spaces.
 fn words(text: &str) -> Result<Vec<String>, u32> {
@@ -350,7 +398,11 @@ fn parse(mut rest: &[String], table: &[Keyword], p: &mut Parms) -> Result<u32, u
             Field::Tempo => p.tempo = v,
             Field::Port => p.port = v,
             Field::Audio => p.audio = v,
-            Field::Type | Field::Alias => {}
+            Field::FormatTag => p.format_tag = v,
+            Field::Channels => p.channels = v,
+            Field::SamplesPerSec => p.samples_per_sec = v,
+            Field::BitsPerSample => p.bits_per_sample = v,
+            Field::Type | Field::Alias | Field::Ignored => {}
         };
         match arg {
             Arg::None => {}
@@ -487,6 +539,14 @@ fn send_string(cpu: &mut Cpu, text: &str, ret: u32, size: u32, hwnd: u32) -> Opt
     };
     let mut id = 0;
     let error = match msg {
+        MCI_SOUND => {
+            // The system sounds play silently (wave.rs's PlaySound), and
+            // one that isn't defined plays the default sound.
+            if flags & MCI_NOTIFY != 0 {
+                post(cpu, hwnd, MCI_NOTIFY_SUCCESSFUL, 0);
+            }
+            0
+        }
         MCI_OPEN => {
             if name.eq_ignore_ascii_case("new") {
                 if flags & MCI_OPEN_ALIAS == 0 {
@@ -550,6 +610,10 @@ fn send_string(cpu: &mut Cpu, text: &str, ret: u32, size: u32, hwnd: u32) -> Opt
     };
     if error != 0 {
         return Some(error);
+    }
+    // SYSINFO's answer needs somewhere to go; the others' are dropped.
+    if msg == MCI_SYSINFO && ret == 0 {
+        return Some(MCIERR_PARAM_OVERFLOW);
     }
     if let Some(text) = return_text(&p)
         && ret != 0

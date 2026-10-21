@@ -249,12 +249,20 @@ pub fn playing(win32: &Win32) -> bool {
 
 /// The device's sound for the host's frames `first` to `first + frames`
 /// (frames at `RATE` since the machine started), on the scale of 16-bit
-/// samples: None if nothing plays then.
+/// samples, at the mixer's wave volume: None if nothing plays then.
 pub fn render(bus: &Bus, first: u64, frames: usize) -> Option<Vec<(f32, f32)>> {
     if !playing(&bus.win32) {
         return None;
     }
     let mut out = super::render(bus, first, frames).unwrap_or_else(|| vec![(0.0, 0.0); frames]);
     super::super::winmm::wave::render(bus, first, &mut out);
+    // The mixer's wave line, which DirectSound plays through too.
+    let (gl, gr) = bus.win32.winmm.mixer.gain(super::super::winmm::mixer::WAVE);
+    if (gl, gr) != (1.0, 1.0) {
+        for (l, r) in &mut out {
+            *l *= gl;
+            *r *= gr;
+        }
+    }
     Some(out)
 }

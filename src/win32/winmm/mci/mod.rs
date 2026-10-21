@@ -11,12 +11,13 @@
 //! the thread wait until it ends. The ends of plays are found on the
 //! process's multimedia thread (`poll`), at their emulated times.
 //!
-//! Wave audio's device (waveaudio) is wave audio's own: it is there when
-//! `WAVE_DRIVER` is, and until then it is not installed.
+//! Wave audio's device (waveaudio, waveaudio.rs) plays WAV files on the
+//! built-in sound device; it is installed when `WAVE_DRIVER` is set.
 
 pub mod cdaudio;
 pub mod sequencer;
 pub mod string;
+pub mod waveaudio;
 
 use super::callback;
 use super::*;
@@ -204,6 +205,11 @@ pub struct Parms {
     pub audio: u32,
     pub tempo: u32,
     pub port: u32,
+    /// MCI_WAVE_SET_PARMS's format.
+    pub format_tag: u32,
+    pub channels: u32,
+    pub samples_per_sec: u32,
+    pub bits_per_sample: u32,
     /// MCI_OPEN's device type (or its number, with MCI_OPEN_TYPE_ID),
     /// element and alias.
     pub open_type: String,
@@ -221,9 +227,9 @@ pub struct Parms {
 /// closes too.
 pub type Driver = fn(&mut Cpu, usize, u32, u32, &mut Parms) -> u32;
 
-/// The waveaudio driver, which wave audio's code has: none yet, so that
-/// waveaudio isn't installed.
-pub static WAVE_DRIVER: Option<Driver> = None;
+/// The waveaudio driver (waveaudio.rs); with None, waveaudio isn't
+/// installed.
+pub static WAVE_DRIVER: Option<Driver> = Some(waveaudio::command);
 
 /// An open device.
 #[derive(Clone, Debug, Default)]
@@ -248,8 +254,8 @@ pub struct Device {
     pub yield_data: u32,
     pub cd: cdaudio::Cd,
     pub seq: sequencer::Seq,
-    /// For the waveaudio driver's own state.
-    pub wave: u32,
+    /// The waveaudio driver's own state.
+    pub wave: waveaudio::Wav,
 }
 
 /// MCI's state.
@@ -383,6 +389,7 @@ fn busy_until(cpu: &Cpu, i: usize) -> Option<u64> {
     match d.kind {
         MCI_DEVTYPE_CD_AUDIO => d.cd.end_at,
         MCI_DEVTYPE_SEQUENCER => sequencer::end_at(d),
+        MCI_DEVTYPE_WAVEFORM_AUDIO => waveaudio::end_at(d),
         _ => None,
     }
 }
@@ -722,6 +729,18 @@ pub fn mci_send_command(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             p.audio = r(cpu, 8);
             p.tempo = r(cpu, 12);
             p.port = r(cpu, 16);
+            // A waveaudio device's MCI_WAVE_SET_PARMS, which is longer.
+            let devices = &cpu.bus.win32.winmm.mci.devices;
+            let wave = find(cpu, id).is_some_and(|i| devices[i].kind == MCI_DEVTYPE_WAVEFORM_AUDIO);
+            if wave && at != 0 && flags & waveaudio::MCI_WAVE_SET_FORMAT != 0 {
+                if !cpu.bus.guest_probe(at, 44, false) {
+                    return None;
+                }
+                p.format_tag = r(cpu, 20) & 0xFFFF;
+                p.channels = r(cpu, 24) & 0xFFFF;
+                p.samples_per_sec = r(cpu, 28);
+                p.bits_per_sample = r(cpu, 40) & 0xFFFF;
+            }
         }
         _ => {}
     }
@@ -860,6 +879,7 @@ pub fn poll(cpu: &mut Cpu, pid: u32, now: u64) {
         let ended = match d.kind {
             MCI_DEVTYPE_CD_AUDIO => cdaudio::poll(cpu, i, now),
             MCI_DEVTYPE_SEQUENCER => sequencer::poll(cpu, i, now),
+            MCI_DEVTYPE_WAVEFORM_AUDIO => waveaudio::poll(cpu, i, now),
             _ => false,
         };
         let before = mci(cpu).devices.len();
@@ -884,6 +904,7 @@ pub fn next_due(cpu: &Cpu, pid: Option<u32>) -> Option<u64> {
         .filter_map(|d| match d.kind {
             MCI_DEVTYPE_CD_AUDIO => d.cd.end_at,
             MCI_DEVTYPE_SEQUENCER => sequencer::next_due(d),
+            MCI_DEVTYPE_WAVEFORM_AUDIO => waveaudio::end_at(d),
             _ => None,
         })
         .min()
