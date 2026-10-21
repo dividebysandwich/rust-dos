@@ -20,6 +20,11 @@
 //! the mode's picture, and GDI's drawing on the screen goes nowhere until
 //! the mode is given back.
 //!
+//! A machine with a Voodoo Graphics or Voodoo2 add-on card has a second
+//! device, the 3dfx device (`voodoo.rs`), whose display is the card: in
+//! full screen its primary surface, back buffer and Z buffer are the
+//! card's buffers.
+//!
 //! (Phase 3 of docs/native-windows.md.)
 
 /// The value of a `Result` whose error is an HRESULT, or the method
@@ -42,6 +47,7 @@ pub mod enumerate;
 mod gamma;
 mod palette;
 mod surface;
+pub mod voodoo;
 
 use super::com::{self, E_INVALIDARG, E_NOINTERFACE, Guid, IID_IUNKNOWN, S_OK};
 use super::stubs::{Api, Conv, Dll, Vtable};
@@ -1030,6 +1036,8 @@ pub struct State {
     /// The display: the mode DirectDraw set and the object with exclusive
     /// mode, video memory and the processes' views of it.
     pub display: display::Display,
+    /// The 3dfx device's display: the add-on card's.
+    pub card: voodoo::CardDisplay,
     /// The last value GetUniquenessValue gave out.
     pub uniqueness: u32,
     /// Direct3D's HAL: its texture heap on the card.
@@ -1238,6 +1246,7 @@ pub fn destroy(cpu: &mut Cpu, id: u32) {
 pub fn process_ended(cpu: &mut Cpu, pid: u32, _tids: &[u32]) {
     d3d::hal::process_ended(cpu, pid);
     display::process_ended(cpu, pid);
+    voodoo::process_ended(cpu, pid);
     let blocks: Vec<u32> = state(cpu)
         .objects
         .iter()
@@ -1371,6 +1380,7 @@ crate::state_fields!(Object {
 crate::state_fields!(State {
     objects,
     display,
+    card,
     uniqueness,
     hal
 });
