@@ -31,6 +31,9 @@ change listed below:
   `printf.c`, `scanf.c`, `signal.c`, `string.c`, `time.c` from
   `dlls/msvcrt/tests/`. `misc.c` is left out: it includes Wine's own
   `msvcrt.h`, which isn't among these files.
+- `ddraw/`: `ddrawmodes.c`, `dsurface.c`, `overlay.c`, `refcount.c`
+  from `dlls/ddraw/tests/`. `d3d.c` and `visual.c` are left out: they
+  test Direct3D, which the built-in DDRAW doesn't have.
 - `winmm/`: `mci.c`, `midi.c`, `mixer.c`, `mmio.c`, `timer.c` and the
   header they share, `winmm_test.h`, from `dlls/winmm/tests/`.
   `generated.c` is left out: it checks the structures' sizes and
@@ -170,6 +173,15 @@ The results that aren't clean, and why:
   button where XP makes it a push button.
 - user32 `win.c:4252` and `4264`: the clip box of a CS_PARENTDC
   window's DC, which Wine marks `todo_wine` too.
+- ddraw `dsurface.c:1725`, `2199`, `3344`: tests of surfaces the
+  display has no hardware for skip, as on a card of Windows 95's time:
+  cube maps, DXT textures in video memory, and the R3G3B2, L8 and A8L8
+  formats.
+- ddraw `overlay.c:60` and `220`: there are no overlays, so the test
+  skips all of it.
+- ddraw `refcount.c:248` and `366`: there is no Direct3D, so
+  QueryInterface for IDirect3D7 and IDirect3D fails and the test skips
+  their reference counts.
 - winmm `mci.c` tests MCI with the waveaudio device, which wave audio
   provides (`mci::WAVE_DRIVER`) and which isn't installed without it:
   its checks of opening one, and those that need it open, fail, and

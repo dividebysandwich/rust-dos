@@ -211,6 +211,9 @@ impl Surface {
         }
         match self.target {
             Target::Memory => {}
+            // While DirectDraw has the display, GDI's drawing on the
+            // screen goes nowhere.
+            Target::Screen if crate::win32::ddraw::owns_display(cpu) => {}
             Target::Screen => {
                 let start = self.top as usize * self.stride;
                 let vram = &mut cpu.bus.vbe.vram;

@@ -14,7 +14,18 @@ advapi32/registry: skipped registry.c:1705
 advapi32/registry: skipped registry.c:1859
 advapi32/registry: skipped registry.c:1579
 advapi32/registry: skipped registry.c:1354
-dinput/device: device: 28 tests executed (0 marked as todo, 0 failures), 0 skipped.
+ddraw/ddrawmodes: ddrawmodes: 77 tests executed (0 marked as todo, 0 failures), 0 skipped.
+ddraw/dsurface: dsurface: 1152 tests executed (0 marked as todo, 0 failures), 5 skipped.
+ddraw/dsurface: skipped dsurface.c:1725
+ddraw/dsurface: skipped dsurface.c:2199
+ddraw/dsurface: skipped dsurface.c:3344 (x3)
+ddraw/overlay: overlay: 0 tests executed (0 marked as todo, 0 failures), 2 skipped.
+ddraw/overlay: skipped overlay.c:60
+ddraw/overlay: skipped overlay.c:220
+ddraw/refcount: refcount: 49 tests executed (0 marked as todo, 0 failures), 2 skipped.
+ddraw/refcount: skipped refcount.c:248
+ddraw/refcount: skipped refcount.c:366
+dinput/device: device: 29 tests executed (0 marked as todo, 0 failures), 0 skipped.
 dinput/joystick: joystick: 195 tests executed (0 marked as todo, 0 failures), 0 skipped.
 dinput/keyboard: keyboard: 57 tests executed (0 marked as todo, 0 failures), 0 skipped.
 dinput/mouse: mouse: 45 tests executed (0 marked as todo, 0 failures), 0 skipped.
