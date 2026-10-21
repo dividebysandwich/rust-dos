@@ -390,6 +390,15 @@ impl Default for Dpmi {
 
 impl Dpmi {
     /// What the real-mode vector `vector` held before the host's stub took
+    /// it over for a client's handler, if it did.
+    fn hooked_original(&self, vector: u8) -> Option<u32> {
+        self.hooks
+            .iter()
+            .find(|&&(v, _)| v == vector)
+            .map(|&(_, original)| original)
+    }
+
+    /// What the real-mode vector `vector` held before the host's stub took
     /// it over for a client's handler, if it did: where the interrupt goes
     /// on when the client passes it down.
     pub(crate) fn hooked_original_mut(&mut self, vector: u8) -> Option<&mut u32> {
@@ -658,7 +667,7 @@ fn rm_stub(vector: u8) -> u32 {
 fn real_mode_handler(cpu: &Cpu, vector: u8) -> u32 {
     let ivt = read_ivt(&cpu.bus, vector);
     if ivt == rm_stub(vector)
-        && let Some(&(_, original)) = cpu.bus.dpmi.hooks.iter().find(|&&(v, _)| v == vector)
+        && let Some(original) = cpu.bus.dpmi.hooked_original(vector)
     {
         return original;
     }
@@ -688,17 +697,22 @@ fn hook(cpu: &mut Cpu, vector: u8) {
 }
 
 /// Take the host's stub out of the real-mode vector again when no client
-/// has a handler for it any more.
+/// has a handler for it any more. When another program's handler sits in
+/// the vector by now, it may chain to the stub, so the stub stays hooked
+/// and passes the interrupt on to the original: forgetting the original
+/// would leave the stub returning without the BIOS handler, and hooking
+/// the vector again would record the chaining handler as the original.
 fn unhook(cpu: &mut Cpu, vector: u8) {
     let dpmi = &cpu.bus.dpmi;
     if dpmi.clients.iter().any(|c| c.handler(vector).is_some()) {
         return;
     }
+    if read_ivt(&cpu.bus, vector) != rm_stub(vector) {
+        return;
+    }
     let Some(i) = dpmi.hooks.iter().position(|&(v, _)| v == vector) else { return };
     let (_, original) = cpu.bus.dpmi.hooks.remove(i);
-    if read_ivt(&cpu.bus, vector) == rm_stub(vector) {
-        write_ivt(&mut cpu.bus, vector, original);
-    }
+    write_ivt(&mut cpu.bus, vector, original);
 }
 
 /// Set the running client's protected-mode handler of `vector`.
@@ -1041,7 +1055,7 @@ fn interrupt(cpu: &mut Cpu, vector: u8, ctx: Context) {
     // stack runs out. HMI's IRQ detection chains its handler down so.
     let reflecting = cpu.bus.dpmi.frames.iter().any(|f| f.kind == F_REFLECT && f.vector == vector);
     if reflecting && is_irq(cpu, vector) {
-        let original = cpu.bus.dpmi.hooks.iter().find(|&&(v, _)| v == vector).map(|&(_, original)| original);
+        let original = cpu.bus.dpmi.hooked_original(vector);
         reflect_to(cpu, vector, ctx, original.unwrap_or(0));
         return;
     }
@@ -1180,8 +1194,21 @@ fn keep_lpms(client: &mut Client, ctx: &Context) {
 /// Reflect interrupt `vector` to its real-mode handler, and go on with
 /// `ctx` afterwards: with the registers and flags the handler returns, but
 /// for a hardware interrupt, whose code the interrupt stopped anywhere.
+///
+/// An interrupt that came up from the host's stub (a protected-mode
+/// handler chaining to the default one) has been through the real-mode
+/// handlers in front of the stub already, so it goes on to what the
+/// vector held before the stub, as `rm_interrupt` does.
 fn reflect(cpu: &mut Cpu, vector: u8, ctx: Context) {
-    let target = real_mode_handler(cpu, vector);
+    let dpmi = &cpu.bus.dpmi;
+    let from_stub = dpmi
+        .frames
+        .last()
+        .is_some_and(|f| f.kind == F_HWINT && f.vector == vector);
+    let target = match dpmi.hooked_original(vector) {
+        Some(original) if from_stub => original,
+        _ => real_mode_handler(cpu, vector),
+    };
     reflect_to(cpu, vector, ctx, target);
 }
 
@@ -1276,7 +1303,9 @@ fn take_frame(cpu: &mut Cpu, kinds: &[u8]) -> Option<Frame> {
 /// An interrupt of the host's real-mode stub for `vector` (`hook`): to the
 /// running client's protected-mode handler, on its locked stack, unless it
 /// is reflecting that interrupt down to real mode itself; otherwise on to
-/// the handler the vector had.
+/// the handler the vector had before the stub. The vector may hold
+/// another program's handler by now that chains to the stub, as a child
+/// of a client installs one, and going back to it would loop.
 fn rm_interrupt(cpu: &mut Cpu, vector: u8) {
     let dpmi = &cpu.bus.dpmi;
     let reflecting = dpmi.frames.iter().any(|f| f.kind == F_REFLECT && f.vector == vector);
@@ -1308,7 +1337,7 @@ fn rm_interrupt(cpu: &mut Cpu, vector: u8) {
             resume(cpu, &ctx);
         }
         _ => {
-            let target = real_mode_handler(cpu, vector);
+            let target = cpu.bus.dpmi.hooked_original(vector).unwrap_or(0);
             if target == 0 || target == rm_stub(vector) {
                 iret_real(cpu);
             } else {
