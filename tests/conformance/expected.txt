@@ -114,14 +114,13 @@ kernel32/locale: skipped locale.c:2372
 kernel32/locale: skipped locale.c:2455
 kernel32/locale: skipped locale.c:2629
 kernel32/locale: skipped locale.c:2645
-kernel32/module: module: 43 tests executed (0 marked as todo, 5 failures), 2 skipped.
+kernel32/module: module: 44 tests executed (0 marked as todo, 4 failures), 2 skipped.
 kernel32/module: skipped module.c:392
 kernel32/module: skipped module.c:242
 kernel32/module: failed module.c:259
 kernel32/module: failed module.c:270
 kernel32/module: failed module.c:282
-kernel32/module: failed module.c:367
-kernel32/module: failed module.c:370
+kernel32/module: failed module.c:374
 kernel32/path: path: 1149 tests executed (0 marked as todo, 0 failures), 11 skipped.
 kernel32/path: skipped path.c:1708
 kernel32/path: skipped path.c:1710
@@ -222,7 +221,7 @@ user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
-user32/msg: msg: 11069 tests executed (0 marked as todo, 678 failures), 6 skipped.
+user32/msg: msg: 11048 tests executed (0 marked as todo, 656 failures), 6 skipped.
 user32/msg: skipped msg.c:12537
 user32/msg: failed msg.c:8462
 user32/msg: skipped msg.c:12177
@@ -384,8 +383,6 @@ user32/msg: failed msg.c:11591
 user32/msg: failed msg.c:11598
 user32/msg: failed msg.c:11604
 user32/msg: failed msg.c:11612 (x6)
-user32/msg: failed msg.c:6247
-user32/msg: failed msg.c:6263
 user32/msg: failed msg.c:6291 (x4)
 user32/msg: failed msg.c:6301 (x3)
 user32/msg: failed msg.c:6306
@@ -425,8 +422,6 @@ user32/msg: failed msg.c:8060
 user32/msg: failed msg.c:8090
 user32/msg: skipped msg.c:8103
 user32/msg: failed msg.c:8928 (x10)
-user32/msg: failed msg.c:8999 (x10)
-user32/msg: failed msg.c:9003 (x10)
 user32/msg: failed msg.c:9028 (x3)
 user32/msg: failed msg.c:9066
 user32/msg: failed msg.c:9076
