@@ -30,6 +30,9 @@ pub const CALLBACK_THREAD: u32 = 0x0002_0000;
 pub const CALLBACK_FUNCTION: u32 = 0x0003_0000;
 pub const CALLBACK_EVENT: u32 = 0x0005_0000;
 
+/// THREAD_PRIORITY_TIME_CRITICAL.
+const TIME_CRITICAL: i32 = 15;
+
 /// MMSYSERR_INVALFLAG and MMSYSERR_INVALPARAM.
 const MMSYSERR_INVALFLAG: u32 = 10;
 const MMSYSERR_INVALPARAM: u32 = 11;
@@ -143,6 +146,18 @@ pub fn set_event(cpu: &mut Cpu, id: u32) {
     }
 }
 
+/// Pulse the event `id`, by its object: the threads waiting for it that
+/// it can release go, and it is reset.
+pub fn pulse_event(cpu: &mut Cpu, id: u32) {
+    set_event(cpu, id);
+    thread::wake(cpu);
+    if let Some(o) = object::objects(cpu).get_mut(id)
+        && let Kind::Event { signaled, .. } = &mut o.kind
+    {
+        *signaled = false;
+    }
+}
+
 /// A process's multimedia thread: its id, and the auto-reset event that
 /// wakes it, by its object.
 #[derive(Clone, Debug, Default)]
@@ -216,6 +231,11 @@ pub fn ensure_thread(cpu: &mut Cpu) -> Option<()> {
         object::objects(cpu).release(wake);
         return None;
     };
+    // It runs at THREAD_PRIORITY_TIME_CRITICAL, as Windows 95's timer
+    // callbacks did at interrupt time, ahead of the program's threads.
+    if let Some((p, t)) = thread::find(&cpu.bus.win32, tid) {
+        cpu.bus.win32.processes[p].threads[t].priority = TIME_CRITICAL;
+    }
     state(cpu).threads.push(MmThread { pid, tid, wake });
     Some(())
 }
@@ -251,8 +271,6 @@ pub fn mm_thread(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
         thread::exit_current(cpu, 0);
         return None;
     };
-    let now = cpu.bus.clock.now_micros();
-    let mut deadline = super::poll(cpu, pid, now);
     let winmm = state(cpu);
     if let Some(i) = winmm.queued.iter().position(|q| q.pid == pid) {
         let q = winmm.queued.remove(i);
@@ -260,8 +278,11 @@ pub fn mm_thread(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
         vars.extend_from_slice(&q.args);
         return task::start(cpu, task::MM_CALLBACK, vars, 0);
     }
-    if winmm.queued.iter().any(|q| q.pid == pid) {
-        deadline = Some(now);
+    let now = cpu.bus.clock.now_micros();
+    let deadline = super::poll(cpu, pid, now);
+    if state(cpu).queued.iter().any(|q| q.pid == pid) {
+        // Calls the work queued: around the loop again.
+        return Some(0);
     }
     let wait = Wait {
         objects: vec![wake],

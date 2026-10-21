@@ -628,7 +628,7 @@ pub fn reschedule(cpu: &mut Cpu) {
         .filter(|&t| t > now)
         .min();
     state(cpu).due = due;
-    cpu.bus.reschedule();
+    cpu.bus.reschedule_timers();
 }
 
 /// When the device is next to need `tick`, in PIT ticks, for the clock.

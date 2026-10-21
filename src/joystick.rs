@@ -139,8 +139,8 @@ fn apply_deadzone(x: f32, y: f32, deadzone: f32) -> (f32, f32) {
 }
 
 /// Reads until an axis trips, at one end of its travel and past it.
-const TRIP_MIN: u32 = 10;
-const TRIP_RANGE: u32 = 440;
+pub const TRIP_MIN: u32 = 10;
+pub const TRIP_RANGE: u32 = 440;
 
 /// Emulated time per read until a trip, the read period of a 4.77 MHz PC.
 const TRIP_READ_NS: u64 = 2500;
@@ -260,6 +260,18 @@ impl GamePort {
                 ([ax, ay, bx, by], pad_buttons(first, 1, 2) | pad_buttons(second, 4, 8))
             }
             Layout::None => ([None; 4], 0),
+        }
+    }
+
+    /// The joysticks plugged in, as Windows' joystick driver has them:
+    /// the axes and buttons of each. Two of two axes take the port's
+    /// axes and buttons in halves, joystick A's first.
+    pub fn joysticks(&self) -> &'static [(u32, u32)] {
+        match self.layout() {
+            Layout::Mouse => &[(2, 2)],
+            Layout::FourAxis => &[(4, 4)],
+            Layout::TwoAxis => &[(2, 2), (2, 2)],
+            Layout::None => &[],
         }
     }
 

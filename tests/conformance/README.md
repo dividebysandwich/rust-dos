@@ -25,15 +25,23 @@ change listed below:
   `test_mono.bmp`, from `dlls/user32/tests/`;
 - `gdi32/`: `bitmap.c`, `brush.c`, `clipping.c`, `dc.c`, `gdiobj.c`,
   `mapping.c`, `palette.c`, `pen.c` from `dlls/gdi32/tests/`;
+- `dinput/`: `device.c`, `joystick.c`, `keyboard.c`, `mouse.c` from
+  `dlls/dinput/tests/`;
 - `msvcrt/`: `data.c`, `dir.c`, `environ.c`, `file.c`, `heap.c`,
   `printf.c`, `scanf.c`, `signal.c`, `string.c`, `time.c` from
   `dlls/msvcrt/tests/`. `misc.c` is left out: it includes Wine's own
-  `msvcrt.h`, which isn't among these files;
+  `msvcrt.h`, which isn't among these files.
+- `ddraw/`: `ddrawmodes.c`, `dsurface.c`, `overlay.c`, `refcount.c`
+  from `dlls/ddraw/tests/`. `d3d.c` and `visual.c` are left out: they
+  test Direct3D, which the built-in DDRAW doesn't have.
 - `dsound/`: `capture.c`, `ds3d.c`, `ds3d8.c`, `dsound.c`, `dsound8.c`,
   `propset.c` and the header they share, `dsound_test.h`, from
-  `dlls/dsound/tests/`;
-- `winmm/`: `capture.c`, `wave.c` and the header they share,
-  `winmm_test.h`, from `dlls/winmm/tests/`.
+  `dlls/dsound/tests/`.
+- `winmm/`: `capture.c`, `mci.c`, `midi.c`, `mixer.c`, `mmio.c`,
+  `timer.c`, `wave.c` and the header they share, `winmm_test.h`, from
+  `dlls/winmm/tests/`. `generated.c` is left out: it checks the
+  structures' sizes and fields, and MinGW's headers have some of the
+  MCI structures' WORD fields as UINTs, so it doesn't build.
 
 `heap.c` has the values of the `FLG_HEAP_*` and `FLG_POOL_ENABLE_TAGGING`
 flags defined after its includes, from Wine's `winternl.h`, as MinGW's
@@ -50,22 +58,32 @@ may be used under.
 
 `runtime/compat.h` is rust-dos's own: the few names the tests take from
 Wine's headers that MinGW's lack (`__ms_va_list` and its macros,
-`LOCALE_RETURN_GENITIVE_NAMES`). Each test file is built with it
-included first, so the files stay unchanged.
+`LOCALE_RETURN_GENITIVE_NAMES`, `LPMIDIEVENT`). Each test file is built
+with it included first, so the files stay unchanged.
 
 `runtime/runtime.c` is rust-dos's own: the C runtime the kernel32,
-advapi32, user32 and gdi32 tests link in place of MSVCRT.DLL, so that
-they test the DLLs alone. It has the startup code and the parts of the
-C library that the framework and the tests use, written on KERNEL32
-alone. It also has `dump_region`, which `win.c` calls and Wine has in
-`msg.c`: `win.c` is built with `-Ddump_region=conformance_dump_region`
-to call that one. `sin` and `fabs` are there for the tones the dsound
-and winmm tests make.
+advapi32, user32, gdi32, dinput and winmm tests link in place of
+MSVCRT.DLL, so that they test the DLLs alone. It has the startup code
+and the parts of the C library that the framework and the tests use,
+written on KERNEL32 alone. It also has `dump_region`, which `win.c`
+calls and Wine has in `msg.c`: `win.c` is built with
+`-Ddump_region=conformance_dump_region` to call that one. And it has
+`sqrt`, which winmm's `timer.c` takes, and `sin` and `fabs`, for the
+tones the dsound and winmm tests make.
+
+`runtime/winmm.c` is rust-dos's own too: `mmsys_error`, the names of
+the multimedia errors, which winmm's tests other than `wave.c` and
+`capture.c` take from `wave.c`, as Wine builds them into one program.
+Each of those is linked with it.
 
 The user32 and gdi32 tests link the built-in USER32.DLL and GDI32.DLL.
 Each user32 program is linked with `resource.rc`, compiled with
 MinGW's `i686-w64-mingw32-windres`, or the one `CONFORMANCE_WINDRES`
 names.
+
+The dinput tests link the built-in DINPUT.DLL. They run with the mouse
+as a joystick on the game port, so that `joystick.c`, which tests each
+joystick DirectInput finds, has one to test.
 
 The dsound tests call each other's helpers (`dsound.c` plays its
 buffers with `ds3d.c`'s `test_buffer`), and winmm's `capture.c` calls
@@ -182,6 +200,21 @@ The results that aren't clean, and why:
   formats, which Windows 95's DirectSound doesn't take either.
   `ds3d8.c` and `dsound8.c` skip all they test, as DirectSoundCreate8
   is DirectX 8's.
+- ddraw `dsurface.c:1725`, `2199`, `3344`: tests of surfaces the
+  display has no hardware for skip, as on a card of Windows 95's time:
+  cube maps, DXT textures in video memory, and the R3G3B2, L8 and A8L8
+  formats.
+- ddraw `overlay.c:60` and `220`: there are no overlays, so the test
+  skips all of it.
+- ddraw `refcount.c:248` and `366`: there is no Direct3D, so
+  QueryInterface for IDirect3D7 and IDirect3D fails and the test skips
+  their reference counts.
+- winmm `mci.c:438` skips its recording tests, as there is no wave
+  input device, and `515`, `634` and `870` skip the plays of the file
+  those tests would have saved.
+- winmm `mmio.c:77`, `244` and `497` skip: they read `msrle.avi`, a
+  file of Wine's tests built from a resource, which isn't among these
+  files.
 
 ## Adding tests
 

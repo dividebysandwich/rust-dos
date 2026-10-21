@@ -24,12 +24,10 @@ use crate::timer::PIT_HZ;
 use crate::win32::dsound::device::{self, Format, Reader, WAVE_FORMAT_PCM};
 
 /// MMSYSERR_ and WAVERR_ results.
-pub const MMSYSERR_NOERROR: u32 = 0;
-pub const MMSYSERR_BADDEVICEID: u32 = 2;
-pub const MMSYSERR_INVALHANDLE: u32 = 5;
-pub const MMSYSERR_NOTSUPPORTED: u32 = 8;
-pub const MMSYSERR_BADERRNUM: u32 = 9;
-pub const MMSYSERR_INVALPARAM: u32 = 11;
+pub use super::{
+    MMSYSERR_BADDEVICEID, MMSYSERR_BADERRNUM, MMSYSERR_INVALHANDLE, MMSYSERR_INVALPARAM,
+    MMSYSERR_NOERROR, MMSYSERR_NOTSUPPORTED,
+};
 pub const WAVERR_BADFORMAT: u32 = 32;
 pub const WAVERR_STILLPLAYING: u32 = 33;
 pub const WAVERR_UNPREPARED: u32 = 34;
@@ -254,7 +252,7 @@ fn reschedule(cpu: &mut Cpu) {
     });
     let sounds = w.sounds.iter().filter_map(Sound::end);
     w.due = outs.chain(sounds).filter(|&t| t > now).min();
-    cpu.bus.reschedule();
+    cpu.bus.reschedule_timers();
 }
 
 /// When the wave audio is next to need `tick`, in PIT ticks.

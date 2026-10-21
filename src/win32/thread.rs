@@ -263,6 +263,30 @@ pub fn after_interrupt(cpu: &mut Cpu, ctx: Context) {
     }
 }
 
+/// Time a built-in device waited for came while the running thread ran
+/// (win32::timer): waits that ended end, and a thread that is ready and
+/// of a higher priority than the running one, as the multimedia thread
+/// is, runs at once instead of at the end of its turn.
+pub fn preempt(cpu: &mut Cpu) {
+    wake(cpu);
+    let win32 = &cpu.bus.win32;
+    let Some((p, t)) = current(win32) else {
+        return;
+    };
+    let mine = win32.processes[p].threads[t].priority;
+    let higher = win32.processes.iter().enumerate().find_map(|(q, process)| {
+        let u = process
+            .threads
+            .iter()
+            .position(|th| th.ready() && th.priority > mine)?;
+        Some((q, u))
+    });
+    if let Some(next) = higher.filter(|&n| n != (p, t)) {
+        save(cpu, Context::of(cpu));
+        enter(cpu, next);
+    }
+}
+
 /// Whether the object `id` is signaled for the thread `tid`.
 fn signaled(objects: &Objects, id: u32, tid: u32) -> bool {
     match objects.get(id).map(|o| &o.kind) {
@@ -377,6 +401,7 @@ pub fn end_wait(win32: &mut Win32, (p, t): At, result: u32) {
 /// End the waits that can end now.
 pub fn wake(cpu: &mut Cpu) {
     super::user32::input::poll(cpu);
+    super::dinput::poll(cpu);
     super::winmm::tick(cpu);
     super::dsound::tick(cpu);
     let now = cpu.bus.clock.now_micros();

@@ -609,9 +609,10 @@ pub fn ensure_desktop(cpu: &mut Cpu) {
     }
     super::init(cpu);
     user(cpu).desktop = true;
-    let packed24 = cpu.bus.vga.adapter.is_virge();
-    if let Some(mode) = crate::video::vbe::find_mode(DESKTOP_MODE, packed24) {
-        crate::interrupts::vbe::enter_mode(&mut cpu.bus, &mode, true, false);
+    // A mode DirectDraw set stays, and the desktop comes back with the
+    // mode it gives back (`restore_desktop`).
+    if !crate::win32::ddraw::owns_display(cpu) {
+        enter_desktop_mode(cpu);
     }
     // The mouse moves over the whole desktop, from its middle.
     let (w, h) = sysparams::screen_size();
@@ -619,6 +620,24 @@ pub fn ensure_desktop(cpu: &mut Cpu) {
     (mouse.min_x, mouse.max_x, mouse.min_y, mouse.max_y) = (0, w - 1, 0, h - 1);
     mouse.warp(w / 2, h / 2);
     super::input::desktop_started(cpu);
+    redraw_screen(cpu);
+}
+
+/// Set the desktop's display mode.
+fn enter_desktop_mode(cpu: &mut Cpu) {
+    let packed24 = cpu.bus.vga.adapter.is_virge();
+    if let Some(mode) = crate::video::vbe::find_mode(DESKTOP_MODE, packed24) {
+        crate::interrupts::vbe::enter_mode(&mut cpu.bus, &mode, true, false);
+    }
+}
+
+/// Put the desktop back on the screen after a DirectDraw mode: its
+/// mode again, and everything painted.
+pub fn restore_desktop(cpu: &mut Cpu) {
+    if !user(cpu).desktop {
+        return;
+    }
+    enter_desktop_mode(cpu);
     redraw_screen(cpu);
 }
 
