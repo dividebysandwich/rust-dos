@@ -338,12 +338,59 @@ impl Win32 {
             .collect()
     }
 
+    /// When WinMM next has work to do (its timers, MIDI streams and MCI
+    /// devices), in PIT ticks, for the bus's timer events.
+    pub fn next_event(&self) -> Option<u64> {
+        let micros = self.winmm.due?;
+        Some(crate::timer::mul_div_ceil(micros, crate::timer::PIT_HZ, 1_000_000))
+    }
+
+    /// The scale of what the MIDI synthesizer plays (left, right): the
+    /// MIDI device's volume and the mixer's.
+    pub fn midi_gain(&self) -> (f32, f32) {
+        winmm::midi::gain(&self.winmm)
+    }
+
+    /// The scale of what the CD drive plays: the mixer's CD line.
+    pub fn cd_gain(&self) -> (f32, f32) {
+        self.winmm.mixer.cd_gain()
+    }
+
+    /// Whether that time has come at PIT tick `now` (`timer`).
+    #[inline]
+    pub fn due(&self, now: u64) -> bool {
+        self.next_event().is_some_and(|t| t <= now)
+    }
+
     /// A new process or thread id: as on Windows 95, a large number,
     /// which programs only compare.
     fn new_id(&mut self) -> u32 {
         self.ids += 1;
         0xFFF0_0000 + self.ids * 0x24
     }
+}
+
+/// WinMM's time for work came (`Win32::due`), between two instructions:
+/// the work is done, and if the program's code was running, a thread of
+/// a higher priority that it readied (the multimedia thread, whose
+/// callbacks ran at interrupt time on Windows 95) runs at once.
+pub fn timer(cpu: &mut Cpu) {
+    cpu.bus.win32.winmm.due = None;
+    if !cpu.bus.win32.active() {
+        cpu.bus.reschedule_timers();
+        return;
+    }
+    let in_program = cpu.pe()
+        && !cpu.v86()
+        && cpu.cpl == 3
+        && cpu.bus.win32.interrupted.is_none()
+        && running(cpu).is_some_and(|p| p.current.is_some());
+    if in_program {
+        thread::preempt(cpu);
+    } else {
+        winmm::tick(cpu);
+    }
+    winmm::schedule(cpu);
 }
 
 /// The running process.
