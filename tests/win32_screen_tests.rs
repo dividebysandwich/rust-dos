@@ -1327,3 +1327,35 @@ fn directdraw_draws_and_flips_on_a_voodoo_graphics() {
 fn directdraw_draws_and_flips_on_a_voodoo2() {
     draws_on_the_card("card_v2", Board::Voodoo2);
 }
+
+#[test]
+fn the_desktop_is_packed_24_bits_on_a_virge() {
+    let (program, data) = desktop_program();
+    let base = PathBuf::from("target/test_win32_screen").join("desktop_virge");
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(&base).unwrap();
+    fs::write(base.join("T.EXE"), program).unwrap();
+    let mut cpu = Cpu::new(base);
+    let setup = VideoSetup {
+        adapter: Adapter::S3Virge,
+        ..Default::default()
+    };
+    bios::install(&mut cpu.bus, setup);
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 8);
+    assert_eq!(r[1], 0, "DirectDrawCreate");
+    assert_eq!(r[3], 24, "GetDeviceCaps(BITSPIXEL)");
+    assert_eq!(r[6], 0x0012_3456, "GetPixel");
+    assert_eq!(r[7], 0, "GetDisplayMode");
+    // Three bytes a pixel, blue first, 1920 a row.
+    let at = 200 * 1920 + 300 * 3;
+    assert_eq!(cpu.bus.vbe.vram[at..at + 6], [0, 0, 0xFF, 0x12, 0x34, 0x56]);
+    assert_eq!(shown(&mut cpu, 300, 200), [0xFF, 0, 0]);
+    let mode = |o: u32| peek(&cpu, data + MODE + o);
+    assert_eq!((mode(0x0C), mode(0x08), mode(0x10)), (640, 480, 1920));
+    assert_eq!(mode(0x48 + 12), 24);
+}
