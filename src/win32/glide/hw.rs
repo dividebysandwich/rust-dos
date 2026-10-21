@@ -155,8 +155,12 @@ fn pci_read_32(cpu: &Cpu, reg: u8) -> u32 {
 /// A dword of the 3D engine's linear frame buffer: rows of 1024 pixels
 /// on a Voodoo Graphics or Voodoo2, 2048 on a Banshee.
 pub fn lfb_read(cpu: &Cpu, offset: u32) -> u32 {
-    let base = if banshee(cpu) { 0x100_0000 } else { 0x40_0000 };
-    cpu.bus.voodoo_read_32(base + (offset & 0x3F_FFFC))
+    let (base, span) = if banshee(cpu) {
+        (0x100_0000, 0xFF_FFFC)
+    } else {
+        (0x40_0000, 0x3F_FFFC)
+    };
+    cpu.bus.voodoo_read_32(base + (offset & span))
 }
 
 /// Write the bytes `mask` selects of a dword of the linear frame
