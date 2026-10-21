@@ -64,13 +64,16 @@ pub fn ddraw(cpu: &mut Cpu, id: u32) -> Option<&mut DirectDraw> {
 }
 
 /// A device GUID's pointer: NULL, or DDCREATE_HARDWAREONLY or
-/// DDCREATE_EMULATIONONLY, is the display; the 3dfx device's GUID is
-/// the add-on card, if the machine has one. Whether it is the card.
+/// DDCREATE_EMULATIONONLY, is the display, and so is GUID_NULL, which
+/// programs that keep the GUID DirectDrawEnumerate gave in a structure
+/// pass for the display's NULL (Incoming does); the 3dfx device's GUID
+/// is the add-on card, if the machine has one. Whether it is the card.
 fn check_device(cpu: &mut Cpu, guid: u32) -> Result<bool, u32> {
     if guid <= 2 {
         return Ok(false);
     }
     match Guid::read(cpu, guid) {
+        Some(g) if g == Guid::default() => Ok(false),
         Some(g) if voodoo::is_device(cpu, &g) => Ok(true),
         Some(_) => Err(DDERR_INVALIDDIRECTDRAWGUID),
         None => Err(DDERR_INVALIDPARAMS),
@@ -531,10 +534,12 @@ fn write_caps(cpu: &mut Cpu, at: u32, hal: bool, card: bool) -> Result<(), u32> 
         caps2 &= !DDCAPS2_CANRENDERWINDOWED;
         surface_caps &= !surface::DDSCAPS_PALETTE;
         palette_caps = 0;
-        if hal {
-            caps |= DDCAPS_3D | DDCAPS_ZBLTS;
-            surface_caps |= DDSCAPS_3DDEVICE | surface::DDSCAPS_ZBUFFER;
-        }
+    }
+    // Direct3D's HAL draws on the add-on card and on a Banshee or
+    // Voodoo3 display.
+    if hal && (card || crate::win32::screen::is_card(cpu)) {
+        caps |= DDCAPS_3D | DDCAPS_ZBLTS;
+        surface_caps |= DDSCAPS_3DDEVICE | surface::DDSCAPS_ZBUFFER;
     }
     let w = |cpu: &mut Cpu, offset: u32, value: u32| cpu.bus.guest_write_32(at + offset, value);
     w(cpu, 0x04, caps);
