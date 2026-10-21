@@ -1,7 +1,9 @@
 //! Blt and BltFast: copying rectangles of pixels between surfaces of one
 //! depth, stretched and mirrored, through color keys, and filling them.
 //! A destination with a clipper is drawn on only where its clip list
-//! says; BltFast takes no clipper.
+//! says; BltFast takes no clipper. On the 3dfx device's card, fills
+//! are the card's fastfills, and copies go through its linear frame
+//! buffer.
 
 use super::surface::{self, KEY_DEST_BLT, KEY_SRC_BLT, Surface, surface_of};
 use super::{
@@ -107,6 +109,11 @@ fn run(cpu: &mut Cpu, dst_id: u32, op: &Op) -> Result<(), u32> {
     };
     let rects: Vec<Rect> = rects.into_iter().filter(|r| !r.is_empty()).collect();
     if rects.is_empty() {
+        return Ok(());
+    }
+    if d.memory == surface::MEM_CARD && op.src.is_none() && op.dst_key.is_none() {
+        super::voodoo::fill(cpu, &d, &rects, op.fill);
+        surface::changed(cpu, dst_id);
         return Ok(());
     }
     let (top, bottom) = (area.top, area.bottom);
