@@ -573,20 +573,36 @@ pub fn get_device_identifier(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 // The display's timing.
 
+/// The timing of the display of the DirectDraw object `id`, and the
+/// time now: the add-on card's while the 3dfx device's mode shows, the
+/// display adapter's otherwise.
+fn timing(cpu: &mut Cpu, id: u32) -> (crate::video::crt::CrtTiming, u64) {
+    if is_card(cpu, id)
+        && let Some(t) = voodoo::timing(cpu)
+    {
+        return t;
+    }
+    display::timing(cpu)
+}
+
 /// The display's lines and the line the beam is on, in the mode's
-/// lines (a small mode's are shown twice).
-fn scan(cpu: &mut Cpu) -> (u32, bool) {
-    let (timing, now) = display::timing(cpu);
-    let (line, _) = timing.position(now);
-    let scale = crate::win32::screen::line_scale(cpu);
-    let in_blank = line >= timing.display;
+/// lines (a small mode's of the display adapter are shown twice).
+fn scan(cpu: &mut Cpu, id: u32) -> (u32, bool) {
+    let (t, now) = timing(cpu, id);
+    let (line, _) = t.position(now);
+    let scale = if is_card(cpu, id) && voodoo::timing(cpu).is_some() {
+        1
+    } else {
+        crate::win32::screen::line_scale(cpu)
+    };
+    let in_blank = line >= t.display;
     (line / scale, in_blank)
 }
 
 /// GetMonitorFrequency(this, out).
 pub fn get_monitor_frequency(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    hr!(ddraw_of(cpu, args[0]));
-    let (timing, _) = display::timing(cpu);
+    let (_, id) = hr!(ddraw_of(cpu, args[0]));
+    let (timing, _) = timing(cpu, id);
     let hz = timing.hz().round() as u32;
     if !com::write_out(cpu, args[1], hz) {
         return Some(DDERR_INVALIDPARAMS);
@@ -596,8 +612,8 @@ pub fn get_monitor_frequency(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// GetScanLine(this, out).
 pub fn get_scan_line(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    hr!(ddraw_of(cpu, args[0]));
-    let (line, in_blank) = scan(cpu);
+    let (_, id) = hr!(ddraw_of(cpu, args[0]));
+    let (line, in_blank) = scan(cpu, id);
     if !com::write_out(cpu, args[1], line) {
         return Some(DDERR_INVALIDPARAMS);
     }
@@ -610,8 +626,8 @@ pub fn get_scan_line(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// GetVerticalBlankStatus(this, out).
 pub fn get_vertical_blank_status(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    hr!(ddraw_of(cpu, args[0]));
-    let (timing, now) = display::timing(cpu);
+    let (_, id) = hr!(ddraw_of(cpu, args[0]));
+    let (timing, now) = timing(cpu, id);
     let blank = timing.status(now) & 0x08 != 0;
     if !com::write_out(cpu, args[1], blank as u32) {
         return Some(DDERR_INVALIDPARAMS);
@@ -630,8 +646,8 @@ pub fn wait_for_vertical_blank(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, flags, _] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
     };
-    hr!(ddraw_of(cpu, this));
-    let (timing, now) = display::timing(cpu);
+    let (_, id) = hr!(ddraw_of(cpu, this));
+    let (timing, now) = timing(cpu, id);
     let until = match flags {
         DDWAITVB_BLOCKBEGIN => timing.next_retrace(now),
         DDWAITVB_BLOCKEND => timing.next_display(now),

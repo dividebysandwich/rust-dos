@@ -850,6 +850,9 @@ const SYSDESC: u32 = 0x700;
 const LOCK2: u32 = 0x780;
 
 const DD_ENUM_DISPLAY_MODES: u32 = 8;
+const DD_GET_MONITOR_FREQUENCY: u32 = 15;
+const DD_GET_SCAN_LINE: u32 = 16;
+const DDERR_VERTICALBLANKINPROGRESS: u32 = 0x8876_0219;
 const S_BLT: u32 = 5;
 const S_BLT_FAST: u32 = 7;
 const S_IS_LOST: u32 = 24;
@@ -1276,6 +1279,9 @@ fn card_program() -> (Vec<u8>, u32) {
         a.mov(eax, dword_ptr(edi + esi))?;
         a.mov(dword_ptr(l.at(SEEN + 40)), eax)?;
         c.com(a, l, SYS, S_UNLOCK, &[Arg::I(0)])?;
+        // The card's own video timing.
+        c.com(a, l, DD, DD_GET_MONITOR_FREQUENCY, &[Arg::At(SEEN + 44)])?;
+        c.com(a, l, DD, DD_GET_SCAN_LINE, &[Arg::At(SEEN + 48)])?;
         wait(a, l, 1)?;
         c.com(a, l, DD, DD_RESTORE_DISPLAY_MODE, &[])?;
         c.com(a, l, FRONT, S_IS_LOST, &[])?;
@@ -1287,8 +1293,9 @@ fn draws_on_the_card(test: &str, board: Board) {
     let (program, data) = card_program();
     let mut cpu = card_machine(test, Some(board), program);
     run_until(&mut cpu, data, 1);
-    let r = results(&cpu, data, 23);
-    assert_eq!(r[1..], [0; 22], "{r:X?}");
+    let r = results(&cpu, data, 25);
+    assert_eq!(r[1..24], [0; 23], "{r:X?}");
+    assert!([0, DDERR_VERTICALBLANKINPROGRESS].contains(&r[24]));
     assert_eq!(fbi_init0(&cpu) & 1, 1, "the card has the monitor");
     let s = |slot| seen(&cpu, data, slot);
     assert_eq!(s(1), 2048, "the linear frame buffer's pitch");
@@ -1301,10 +1308,13 @@ fn draws_on_the_card(test: &str, board: Board) {
     assert_eq!(s(8) & 0xFFFF, 0x001F, "the second row");
     assert_eq!(s(9), 0x07E0_F800, "the copy to system memory");
     assert_eq!(s(10) & 0xFFFF, 0x001F);
+    // The card's frame: 60 Hz, 480 lines and the blanking after them.
+    assert_eq!(s(11), 60, "the card's refresh rate");
+    assert!(s(12) < 480 + 24, "the card's line: {}", s(12));
     go_on(&mut cpu, data);
     run_until(&mut cpu, data, 2);
-    let r = results(&cpu, data, 25);
-    assert_eq!(r[23..], [0, DDERR_SURFACELOST]);
+    let r = results(&cpu, data, 27);
+    assert_eq!(r[25..], [0, DDERR_SURFACELOST]);
     assert_eq!(fbi_init0(&cpu) & 1, 0, "the VGA has the monitor back");
 }
 
