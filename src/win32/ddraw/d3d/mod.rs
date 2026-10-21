@@ -31,6 +31,7 @@ pub mod device;
 pub mod direct3d;
 pub mod draw;
 pub mod execute;
+pub mod hal;
 pub mod light;
 pub mod material;
 pub mod pipeline;
@@ -77,7 +78,7 @@ crate::state_fields!(D3dObject {
 // HRESULTs.
 
 pub const D3D_OK: u32 = 0;
-const fn d3derr(code: u32) -> u32 {
+pub const fn d3derr(code: u32) -> u32 {
     0x8876_0000 | code
 }
 pub const D3DERR_EXECUTE_LOCKED: u32 = d3derr(714);
@@ -614,9 +615,12 @@ pub fn of(cpu: &mut Cpu, this: u32) -> Option<(usize, u32)> {
 
 /// The number of texture units of the card the DirectDraw object `dd`
 /// draws on, if Direct3D has a HAL there: the display adapter's when it
-/// is a Banshee (1) or a Voodoo3 (2). A DirectDraw object of a Voodoo
-/// or Voodoo2 add-on card is to answer here too, with that card's.
-pub fn hal(cpu: &mut Cpu, _dd: u32) -> Option<u32> {
+/// is a Banshee (1) or a Voodoo3 (2), or the add-on card's for the 3dfx
+/// device's DirectDraw object (a Voodoo Graphics or Voodoo2's).
+pub fn hal(cpu: &mut Cpu, dd: u32) -> Option<u32> {
+    if super::voodoo::is_card_object(cpu, dd) {
+        return crate::win32::glide::hw::board(cpu).map(|b| b.tmus);
+    }
     match cpu.bus.vga.adapter.voodoo_board()? {
         crate::voodoo::Board::Banshee => Some(1),
         _ => Some(2),

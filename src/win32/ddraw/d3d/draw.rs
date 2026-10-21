@@ -4,8 +4,8 @@
 //! the pipeline (`pipeline.rs`), and counts what was drawn in the
 //! device's statistics and clip status.
 //!
-//! The rasterizer is the card's. Until it is there, what comes out of the
-//! pipeline is counted (`pipeline::Counter`).
+//! The rasterizer is the card's (`hal.rs`). Without a card to draw on,
+//! what comes out of the pipeline is only counted (`pipeline::Counter`).
 
 use super::super::DDERR_INVALIDPARAMS;
 use super::caps::GUARD_BAND;
@@ -293,10 +293,35 @@ pub fn draw(
         }
     };
     let prims = pipeline::assemble(kind, order).ok_or(D3DERR_INVALIDPRIMITIVETYPE)?;
-    let mut raster = pipeline::Counter::default();
-    let drawn = pipeline::draw(&setup, &processed, &prims, &mut raster);
+    let drawn = rasterize(cpu, id, &setup, &processed, &prims);
     account(cpu, id, &setup, &processed, drawn, flags);
     Ok(())
+}
+
+/// Draw `prims` of `verts` on the card, if the device can draw there,
+/// or only count them.
+fn rasterize(
+    cpu: &mut Cpu,
+    id: u32,
+    setup: &Setup,
+    verts: &[Processed],
+    prims: &[Prim],
+) -> pipeline::Drawn {
+    let card = get(cpu, id)
+        .cloned()
+        .and_then(|d| super::hal::bind(cpu, &d, setup));
+    match card {
+        Some(card) => {
+            let mut raster = super::hal::Raster { cpu, card };
+            let drawn = pipeline::draw(setup, verts, prims, &mut raster);
+            // The target's pixels changed, for a texture made of it.
+            if let Some(target) = get(cpu, id).map(|d| d.target) {
+                super::super::surface::changed(cpu, target);
+            }
+            drawn
+        }
+        None => pipeline::draw(setup, verts, prims, &mut pipeline::Counter::default()),
+    }
 }
 
 /// Draw primitives of vertices already through the pipeline (an execute
@@ -308,8 +333,7 @@ pub fn draw_processed(
     verts: &[Processed],
     prims: &[Prim],
 ) -> pipeline::Drawn {
-    let mut raster = pipeline::Counter::default();
-    let drawn = pipeline::draw(setup, verts, prims, &mut raster);
+    let drawn = rasterize(cpu, id, setup, verts, prims);
     if let Some(d) = get(cpu, id) {
         d.stats[0] += drawn.triangles;
         d.stats[1] += drawn.lines;

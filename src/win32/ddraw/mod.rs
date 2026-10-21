@@ -1040,6 +1040,8 @@ pub struct State {
     pub card: voodoo::CardDisplay,
     /// The last value GetUniquenessValue gave out.
     pub uniqueness: u32,
+    /// Direct3D's HAL: its texture heap on the card.
+    pub hal: d3d::hal::Hal,
 }
 
 pub fn state(cpu: &mut Cpu) -> &mut State {
@@ -1242,6 +1244,7 @@ pub fn destroy(cpu: &mut Cpu, id: u32) {
 /// A process ended: its objects go, with the video memory its surfaces
 /// had, and the display it had.
 pub fn process_ended(cpu: &mut Cpu, pid: u32, _tids: &[u32]) {
+    d3d::hal::process_ended(cpu, pid);
     display::process_ended(cpu, pid);
     voodoo::process_ended(cpu, pid);
     let blocks: Vec<u32> = state(cpu)
@@ -1378,5 +1381,6 @@ crate::state_fields!(State {
     objects,
     display,
     card,
-    uniqueness
+    uniqueness,
+    hal
 });

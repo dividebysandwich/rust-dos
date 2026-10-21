@@ -11,7 +11,9 @@
 //! IDirect3DDevice, 2 and 3; one made through IDirect3D7 only
 //! IDirect3DDevice7.
 
-use super::super::surface::{self, DDPF_RGB, DDSCAPS_SYSTEMMEMORY, DDSCAPS_ZBUFFER, MEM_VIDEO};
+use super::super::surface::{
+    self, DDPF_RGB, DDSCAPS_SYSTEMMEMORY, DDSCAPS_ZBUFFER, MEM_CARD, MEM_VIDEO,
+};
 use super::super::{
     DDERR_ALREADYINITIALIZED, DDERR_INVALIDCAPS, DDERR_INVALIDOBJECT, DDERR_INVALIDPARAMS,
     DDERR_INVALIDPIXELFORMAT, V_D3D1, V_D3D2, V_D3D3, V_D3D7, V_DEVICE1, V_DEVICE2, V_DEVICE3,
@@ -424,14 +426,16 @@ impl Device {
 }
 
 /// Whether `id` can be a render target: an error if it can't, as the
-/// HAL's driver had it. The surface is 16-bit 565 in video memory with
-/// DDSCAPS_3DDEVICE, and its depth buffer, if it has one, is 16-bit.
+/// HAL's driver had it. The surface is 16-bit 565 in video memory (or
+/// an add-on card's buffer) with DDSCAPS_3DDEVICE, and its depth buffer,
+/// if it has one, is 16-bit.
 pub fn check_target(cpu: &mut Cpu, id: u32) -> Result<(), u32> {
     let s = state(cpu).surface(id).cloned().ok_or(DDERR_INVALIDPARAMS)?;
     if s.caps[0] & surface::DDSCAPS_3DDEVICE == 0 {
         return Err(DDERR_INVALIDCAPS);
     }
-    if s.memory != MEM_VIDEO || s.caps[0] & DDSCAPS_SYSTEMMEMORY != 0 {
+    let video = s.memory == MEM_VIDEO || s.memory == MEM_CARD;
+    if !video || s.caps[0] & DDSCAPS_SYSTEMMEMORY != 0 {
         return Err(D3DERR_SURFACENOTINVIDMEM);
     }
     let f = s.format;
@@ -525,6 +529,7 @@ pub fn destroyed(cpu: &mut Cpu, id: u32, d: Device) {
     for iface in held {
         super::super::release(cpu, iface);
     }
+    super::hal::release(cpu, id);
 }
 
 /// Every device forgets the handles of `kind` of `object`, which went.
@@ -953,27 +958,41 @@ pub fn get_render_target(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 // D3DCLEAR_ flags.
+pub const CLEAR_TARGET: u32 = 1;
 pub const CLEAR_ZBUFFER: u32 = 2;
 pub const CLEAR_STENCIL: u32 = 4;
 
 /// Clear(this, count, rects, flags, color, z, stencil). The depth
 /// buffer is cleared only if there is one, and there is no stencil.
 pub fn clear(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let [this, count, rects, flags, _, _, _] = args[..] else {
+    let [this, count, rects, flags, color, z, _] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
     };
     let (_, id) = hr!(device_of(cpu, this));
     if count != 0 && !probe(cpu, rects, count.saturating_mul(16), false) {
         return Some(DDERR_INVALIDPARAMS);
     }
-    let target = get(cpu, id).map_or(0, |d| d.target);
-    if flags & CLEAR_ZBUFFER != 0 && z_buffer(cpu, target).is_none() {
+    let Some(d) = get(cpu, id).cloned() else {
+        return Some(DDERR_INVALIDOBJECT);
+    };
+    if flags & CLEAR_ZBUFFER != 0 && z_buffer(cpu, d.target).is_none() {
         return Some(D3DERR_ZBUFFER_NOTPRESENT);
     }
     if flags & CLEAR_STENCIL != 0 {
         return Some(D3DERR_STENCILBUFFER_NOTPRESENT);
     }
+    let list = read_rects(cpu, rects, count);
+    let target = (flags & CLEAR_TARGET != 0).then_some(color);
+    let depth = (flags & CLEAR_ZBUFFER != 0).then_some(f32::from_bits(z));
+    super::hal::clear(cpu, &d, &list, target, depth);
     Some(D3D_OK)
+}
+
+/// `count` D3DRECTs at `at`, which the caller has probed.
+pub fn read_rects(cpu: &mut Cpu, at: u32, count: u32) -> Vec<[i32; 4]> {
+    (0..count.min(0x1000))
+        .map(|i| super::read_dwords::<4>(cpu, at + 16 * i).map(|v| v as i32))
+        .collect()
 }
 
 /// PreLoad(this, texture): textures are loaded when they are drawn
@@ -998,6 +1017,15 @@ pub fn validate_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         .count() as u32;
     if used > d.tmus {
         return Some(D3DERR_TOOMANYOPERATIONS);
+    }
+    for s in 0..used {
+        if !super::hal::can_do(d.stage(s, TSS_COLOROP)) {
+            return Some(super::d3derr(2072));
+        }
+        let alpha = d.stage(s, TSS_ALPHAOP);
+        if alpha != TOP_DISABLE && !super::hal::can_do(alpha) {
+            return Some(super::d3derr(2073));
+        }
     }
     if !com::write_out(cpu, passes, 1) {
         return Some(DDERR_INVALIDPARAMS);
