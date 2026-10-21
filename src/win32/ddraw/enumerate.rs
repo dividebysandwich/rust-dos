@@ -58,9 +58,10 @@ fn handler_address() -> u32 {
     crate::win32::stubs::stub_address(dll, index)
 }
 
-/// Whether `callback` is code the program may call.
+/// Whether `callback` is code the program may call: a pointer that
+/// isn't makes the function fail, where others fault.
 fn callable(cpu: &mut Cpu, callback: u32) -> bool {
-    callback != 0 && cpu.bus.guest_probe(callback, 1, false)
+    callback != 0 && crate::win32::kernel32::virtual_memory::allows(cpu, callback, 1, false)
 }
 
 /// DirectDrawEnumerateW and ExW: Windows 95 has no Unicode ones.

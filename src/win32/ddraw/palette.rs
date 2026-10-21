@@ -114,9 +114,7 @@ pub fn create_palette(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let mut data = vec![0u8; bytes];
     cpu.bus.guest_read_bytes(entries, &mut data);
     if len == 256 && caps & DDPCAPS_ALLOW256 == 0 {
-        // The first and last are the system's black and white.
-        data[..4].copy_from_slice(&[0, 0, 0, 0]);
-        data[1020..].copy_from_slice(&[0xFF, 0xFF, 0xFF, 0]);
+        system_colors(&mut data);
     }
     let creator = super::iface(cpu, dd, vtable);
     let id = super::add_object(
@@ -143,6 +141,13 @@ pub fn create_palette(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
     }
     Some(DD_OK)
+}
+
+/// The first and last entries of an 8-bit palette without
+/// DDPCAPS_ALLOW256 are the system's black and white.
+fn system_colors(entries: &mut [u8]) {
+    entries[..4].copy_from_slice(&[0, 0, 0, 0]);
+    entries[1020..].copy_from_slice(&[0xFF, 0xFF, 0xFF, 0]);
 }
 
 /// The palette `id` goes.
@@ -222,6 +227,9 @@ pub fn set_entries(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     cpu.bus.guest_read_bytes(entries, &mut data);
     if let Some(p) = state(cpu).object_mut(id).and_then(|o| o.palette.as_mut()) {
         p.entries[range].copy_from_slice(&data);
+        if p.caps & DDPCAPS_8BIT != 0 && p.caps & DDPCAPS_ALLOW256 == 0 {
+            system_colors(&mut p.entries);
+        }
     }
     // On the primary surface, the screen's colors change.
     let iface = state(cpu)

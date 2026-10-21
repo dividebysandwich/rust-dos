@@ -729,8 +729,10 @@ fn make(cpu: &mut Cpu, dd: u32, version: u32, level: u32, desc: &Desc) -> Result
         }
         let (w, h, bpp, p) = display::current(cpu);
         (width, height, format, pitch) = (w, h, rgb_format(bpp), p);
-        caps[0] &= !(DDSCAPS_SYSTEMMEMORY | DDSCAPS_FRONTBUFFER);
-        caps[0] |= DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM | DDSCAPS_VISIBLE;
+        // It is the screen, but says it is in system memory if it was
+        // asked to be.
+        caps[0] &= !DDSCAPS_FRONTBUFFER;
+        caps[0] |= DDSCAPS_VISIBLE;
     } else {
         if desc.flags & DDSD_WIDTH == 0 || desc.flags & DDSD_HEIGHT == 0 {
             return Err(DDERR_INVALIDPARAMS);
@@ -751,7 +753,7 @@ fn make(cpu: &mut Cpu, dd: u32, version: u32, level: u32, desc: &Desc) -> Result
         if f.flags & DDPF_FOURCC != 0 {
             // Compressed formats are in system memory, and managed.
             if caps[0] & DDSCAPS_SYSTEMMEMORY == 0 && !managed {
-                return Err(DDERR_INVALIDPIXELFORMAT);
+                return Err(DDERR_INVALIDPARAMS);
             }
         }
         (width, height, format) = (desc.width, desc.height, f);
@@ -768,12 +770,6 @@ fn make(cpu: &mut Cpu, dd: u32, version: u32, level: u32, desc: &Desc) -> Result
         if managed {
             caps[0] |= DDSCAPS_SYSTEMMEMORY;
         }
-        if caps[0] & (DDSCAPS_OFFSCREENPLAIN | DDSCAPS_TEXTURE | DDSCAPS_ZBUFFER | DDSCAPS_3DDEVICE)
-            == 0
-            && !flip
-        {
-            caps[0] |= DDSCAPS_OFFSCREENPLAIN;
-        }
     }
     // The mipmap levels.
     let mipmap = caps[0] & DDSCAPS_MIPMAP != 0;
@@ -789,7 +785,7 @@ fn make(cpu: &mut Cpu, dd: u32, version: u32, level: u32, desc: &Desc) -> Result
     } else {
         1
     };
-    let base = Surface {
+    let mut base = Surface {
         caps,
         width,
         height,
@@ -802,6 +798,12 @@ fn make(cpu: &mut Cpu, dd: u32, version: u32, level: u32, desc: &Desc) -> Result
         mipmaps: if mipmap { levels } else { 0 },
         ..Surface::default()
     };
+    for i in 0..4 {
+        if desc.flags & DDSD_CKDESTOVERLAY << i != 0 {
+            base.keys[i] = desc.keys[i];
+            base.key_set |= 1 << i;
+        }
+    }
     // The surfaces: the root, then the back buffers or the levels.
     let mut list = vec![base.clone()];
     if flip {
@@ -877,9 +879,10 @@ fn make(cpu: &mut Cpu, dd: u32, version: u32, level: u32, desc: &Desc) -> Result
             return Err(e);
         }
         if let Some(s) = surface(cpu, id) {
-            if s.memory == MEM_VIDEO {
+            let system = s.caps[0] & DDSCAPS_SYSTEMMEMORY != 0;
+            if s.memory == MEM_VIDEO && !system {
                 s.caps[0] |= DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM;
-            } else if !managed {
+            } else if s.memory == MEM_SYSTEM && !managed {
                 s.caps[0] |= DDSCAPS_SYSTEMMEMORY;
             }
         }
@@ -1049,8 +1052,8 @@ pub fn lock(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         let r = gdi32::Rect::read(cpu, rect_at);
         let inside = r.left >= 0
             && r.top >= 0
-            && r.left < r.right
-            && r.top < r.bottom
+            && r.left <= r.right
+            && r.top <= r.bottom
             && r.right as u32 <= s.width
             && r.bottom as u32 <= s.height;
         if !inside {
@@ -1074,9 +1077,6 @@ pub fn lock(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     let mut desc = s.desc(size);
     desc.surface = at;
-    if !s.compressed() {
-        desc.flags |= DDSD_LPSURFACE;
-    }
     desc.write(cpu, desc_at, size);
     if let Some(s) = surface(cpu, id) {
         s.locked = true;

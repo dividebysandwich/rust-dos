@@ -297,7 +297,7 @@ pub fn blt(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             } else if d.key_set & 1 << KEY_DEST_BLT != 0 {
                 d.keys[KEY_DEST_BLT]
             } else {
-                return Some(DDERR_INVALIDPARAMS);
+                s.keys[KEY_DEST_BLT]
             };
             op.dst_key = Some(key);
         }
