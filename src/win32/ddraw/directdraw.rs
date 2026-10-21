@@ -603,7 +603,10 @@ pub fn get_available_vid_mem(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if caps == 0 || !cpu.bus.guest_probe(caps, 4, false) {
         return Some(DDERR_INVALIDPARAMS);
     }
-    let (total, free) = if is_card(cpu, id) {
+    let texture = cpu.bus.guest_read_32(caps) & surface::DDSCAPS_TEXTURE != 0;
+    let (total, free) = if is_card(cpu, id) && texture {
+        voodoo::texture_memory(cpu, &[])
+    } else if is_card(cpu, id) {
         voodoo::video_memory(cpu)
     } else {
         display::video_memory(cpu)
@@ -657,12 +660,36 @@ pub fn get_device_identifier(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(DD_OK);
     }
     cpu.bus.guest_write_bytes(at, b"display.drv");
-    let name = cpu.bus.vga.adapter.name().as_bytes().to_vec();
+    let adapter = cpu.bus.vga.adapter;
+    let name = adapter.describe();
+    let name = name.strip_suffix(" (3D)").unwrap_or(name).as_bytes();
     cpu.bus
         .guest_write_bytes(at + 512, &name[..name.len().min(511)]);
     // The driver's version: 4.10.0.1998, Windows 98's.
     cpu.bus.guest_write_32(at + 1024, 1998);
     cpu.bus.guest_write_32(at + 1028, 4 << 16 | 10);
+    // The adapter's PCI vendor and device, which drivers of games look
+    // at to work round a card's quirks.
+    let ids = match cpu.bus.voodoo.as_ref() {
+        Some(v) if crate::win32::screen::is_card(cpu) => {
+            Some(u32::from_le_bytes(std::array::from_fn(|i| {
+                v.config_read(i as u8)
+            })))
+        }
+        _ if adapter.is_s3() => {
+            let device = match adapter {
+                crate::video::adapter::Adapter::S3Virge => 0x5631,
+                crate::video::adapter::Adapter::S3VirgeVx => 0x883D,
+                _ => 0x8811,
+            };
+            Some(device << 16 | 0x5333)
+        }
+        _ => None,
+    };
+    if let Some(ids) = ids {
+        cpu.bus.guest_write_32(at + 1032, ids & 0xFFFF);
+        cpu.bus.guest_write_32(at + 1036, ids >> 16);
+    }
     Some(DD_OK)
 }
 

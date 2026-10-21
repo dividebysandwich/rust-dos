@@ -937,6 +937,27 @@ fn make(cpu: &mut Cpu, dd: u32, version: u32, level: u32, desc: &Desc) -> Result
     // Their pixels: video memory, unless there is none and they didn't
     // ask for it.
     let wants_video = caps[0] & DDSCAPS_VIDEOMEMORY != 0;
+    let texture = caps[0] & DDSCAPS_TEXTURE != 0;
+    // The 3dfx device's textures take the card's texture memory; when
+    // there isn't room for all their levels they are in system memory,
+    // unless they asked for video memory.
+    if card && texture && caps[0] & DDSCAPS_SYSTEMMEMORY == 0 {
+        let size: u32 = ids
+            .iter()
+            .map(|&id| state(cpu).surface(id).map_or(0, |s| s.size()))
+            .sum();
+        if voodoo::texture_memory(cpu, &ids).1 < size {
+            if wants_video {
+                super::destroy(cpu, root);
+                return Err(DDERR_OUTOFVIDEOMEMORY);
+            }
+            for &id in &ids {
+                if let Some(s) = surface(cpu, id) {
+                    s.caps[0] |= DDSCAPS_SYSTEMMEMORY;
+                }
+            }
+        }
+    }
     for &id in &ids {
         let mut result = allocate(cpu, id);
         if result == Err(DDERR_OUTOFVIDEOMEMORY) && !wants_video && !primary {
@@ -955,7 +976,6 @@ fn make(cpu: &mut Cpu, dd: u32, version: u32, level: u32, desc: &Desc) -> Result
             // card's buffers are in system memory, but are what they
             // asked to be; its textures are in the card's texture memory
             // unless they asked for system memory.
-            let texture = caps[0] & DDSCAPS_TEXTURE != 0;
             let card_video = card && (wants_video || texture) && !system;
             if (s.memory == MEM_VIDEO || s.memory == MEM_CARD || card_video) && !system {
                 s.caps[0] |= DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM;
