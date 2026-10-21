@@ -30,10 +30,10 @@
 use super::super::surface::{self, DDPF_PALETTEINDEXED8, KEY_SRC_BLT, MEM_CARD, Surface};
 use super::super::{current_pid, display, state, voodoo};
 use super::device::{
-    Device, RS_FOGENABLE, RS_FOGTABLEMODE, RS_ZENABLE, RS_ZFUNC, RS_ZWRITEENABLE, TA_TEXTURE,
-    TOP_ADD, TOP_BLENDTEXTUREALPHA, TOP_DISABLE, TOP_SELECTARG1, TOP_SELECTARG2, TSS_ADDRESSU,
-    TSS_ADDRESSV, TSS_ALPHAARG1, TSS_ALPHAARG2, TSS_ALPHAOP, TSS_COLORARG1, TSS_COLORARG2,
-    TSS_COLOROP, TSS_MAGFILTER, TSS_MINFILTER, TSS_MIPFILTER,
+    Device, RS_FOGENABLE, RS_FOGTABLEMODE, RS_SPECULARENABLE, RS_ZENABLE, RS_ZFUNC,
+    RS_ZWRITEENABLE, TA_TEXTURE, TOP_ADD, TOP_BLENDTEXTUREALPHA, TOP_DISABLE, TOP_SELECTARG1,
+    TOP_SELECTARG2, TSS_ADDRESSU, TSS_ADDRESSV, TSS_ALPHAARG1, TSS_ALPHAARG2, TSS_ALPHAOP,
+    TSS_COLORARG1, TSS_COLORARG2, TSS_COLOROP, TSS_MAGFILTER, TSS_MINFILTER, TSS_MIPFILTER,
 };
 use super::pipeline::{self, Rasterizer, ScreenVertex, Setup};
 use crate::cpu::Cpu;
@@ -119,12 +119,32 @@ const HEAP_MIN: u32 = 256 << 10;
 /// How a batch of primitives is drawn: for each of the card's texture
 /// units, the factors that turn a texture coordinate into Glide's (its
 /// texture's size in Glide's 256 units) and the stage whose coordinates
-/// it takes; and whether Z carries the vertex fog.
+/// it takes; whether Z carries the vertex fog; and how the specular
+/// color is added.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Card {
     tmus: [Option<(usize, [f32; 2])>; 2],
     fog_z: bool,
     w_depth: bool,
+    specular: Specular,
+}
+
+/// How the specular color is added (D3DRENDERSTATE_SPECULARENABLE).
+/// The card iterates one color, so without a texture the diffuse and
+/// specular colors are added at the vertices. With one, the specular
+/// color is a second pass over the batch's triangles, added to what the
+/// first drew: blended with the first's source factor and ONE, the fog
+/// color black (which scales it by the fog's 1 - f), and where depth
+/// was written, only on pixels of equal depth.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+enum Specular {
+    #[default]
+    Off,
+    Vertices,
+    Pass {
+        source: u32,
+        equal: bool,
+    },
 }
 
 /// Whether the device `d` can be drawn by the card now, and the card's
@@ -238,12 +258,15 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
     }
 
     // Blending.
+    let mut source = api::BLEND_ONE;
     if d.state(RS_ALPHABLENDENABLE) != 0 {
         let (src, dst) = blend(d.state(RS_SRCBLEND), d.state(RS_DESTBLEND));
+        source = src;
         api::alpha_blend_function(cpu, src, dst, api::BLEND_ONE, api::BLEND_ZERO);
     } else {
         api::alpha_blend_function(cpu, api::BLEND_ONE, api::BLEND_ZERO, api::BLEND_ONE, 0);
     }
+    let depth_written = z.is_some() && zenable != 0 && d.state(RS_ZWRITEENABLE) != 0;
 
     // The texture stages.
     let tmus = hw::board(cpu).map_or(1, |b| b.tmus);
@@ -330,6 +353,16 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
         }
     }
     fbi_combine(cpu, d, textured);
+    if d.state(RS_SPECULARENABLE) != 0 {
+        card.specular = if textured {
+            Specular::Pass {
+                source,
+                equal: depth_written,
+            }
+        } else {
+            Specular::Vertices
+        };
+    }
 
     // The alpha test, and the keyed texels it leaves out.
     if d.state(RS_ALPHATESTENABLE) != 0 {
@@ -935,6 +968,9 @@ fn encode(data: &mut Vec<u8>, format: u32, raw: u32, s: &Surface, pal: &[u32; 25
 pub struct Raster<'a> {
     pub cpu: &'a mut Cpu,
     pub card: Card,
+    /// The triangles of the specular pass, their colors the specular
+    /// ones.
+    pub second: Vec<[Vertex; 3]>,
 }
 
 impl Raster<'_> {
@@ -944,7 +980,15 @@ impl Raster<'_> {
         } else {
             1.0
         };
-        let [b, g, r, a] = v.diffuse.to_le_bytes().map(f32::from);
+        let [mut b, mut g, mut r, a] = v.diffuse.to_le_bytes().map(f32::from);
+        if self.card.specular == Specular::Vertices {
+            let [sb, sg, sr, _] = v.specular.to_le_bytes().map(f32::from);
+            (r, g, b) = (
+                (r + sr).min(255.0),
+                (g + sg).min(255.0),
+                (b + sb).min(255.0),
+            );
+        }
         let ooz = if self.card.fog_z {
             // How much of the fog color: 1 less the vertex's fog factor.
             let f = (v.specular >> 24) as f32 / 255.0;
@@ -981,10 +1025,60 @@ impl Raster<'_> {
     }
 }
 
+impl Raster<'_> {
+    /// The card as the rasterizer of a batch, as `bind` set it up.
+    pub fn new(cpu: &mut Cpu, card: Card) -> Raster<'_> {
+        Raster {
+            cpu,
+            card,
+            second: Vec::new(),
+        }
+    }
+
+    /// The end of the batch: its specular pass, if it has one.
+    pub fn finish(self) {
+        let Specular::Pass { source, equal } = self.card.specular else {
+            return;
+        };
+        if self.second.is_empty() {
+            return;
+        }
+        let cpu = self.cpu;
+        api::color_combine(
+            cpu,
+            api::COMBINE_FUNCTION_SCALE_OTHER,
+            api::COMBINE_FACTOR_ONE,
+            api::COMBINE_LOCAL_ITERATED,
+            api::COMBINE_OTHER_ITERATED,
+            false,
+        );
+        api::alpha_blend_function(cpu, source, api::BLEND_ONE, api::BLEND_ONE, api::BLEND_ZERO);
+        api::fog_color_value(cpu, 0);
+        if equal {
+            api::depth_buffer_function(cpu, compare(3));
+            api::depth_mask(cpu, false);
+        }
+        for [a, b, c] in &self.second {
+            api::draw_triangle(cpu, a, b, c);
+        }
+    }
+}
+
 impl Rasterizer for Raster<'_> {
     fn triangle(&mut self, v: &[ScreenVertex; 3]) {
         let [a, b, c] = v.map(|v| self.vertex(&v));
         api::draw_triangle(self.cpu, &a, &b, &c);
+        if matches!(self.card.specular, Specular::Pass { .. })
+            && v.iter().any(|v| v.specular & 0xFF_FFFF != 0)
+        {
+            let lit = |mut p: Vertex, s: &ScreenVertex| {
+                let [sb, sg, sr, _] = s.specular.to_le_bytes().map(f32::from);
+                (p.r, p.g, p.b) = (sr, sg, sb);
+                p
+            };
+            self.second
+                .push([lit(a, &v[0]), lit(b, &v[1]), lit(c, &v[2])]);
+        }
     }
 
     fn line(&mut self, v: &[ScreenVertex; 2]) {

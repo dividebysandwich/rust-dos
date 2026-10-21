@@ -876,6 +876,7 @@ const RS_FOGCOLOR: u32 = 34;
 const RS_FOGTABLEMODE: u32 = 35;
 const RS_FOGSTART: u32 = 36;
 const RS_FOGEND: u32 = 37;
+const RS_SPECULARENABLE: u32 = 29;
 
 /// A D3DTLVERTEX: its position, rhw, diffuse and specular colors and
 /// texture coordinates.
@@ -1481,4 +1482,34 @@ fn the_3dfx_device_draws_on_a_voodoo2() {
 #[test]
 fn the_3dfx_device_draws_on_a_voodoo_graphics() {
     card_scene("card_v1", Board::Standard);
+}
+
+#[test]
+fn the_specular_color_adds_to_textured_and_untextured_triangles() {
+    let gray = |textured: bool| Scene {
+        api: Api::D3D7,
+        card: None,
+        clear: 0,
+        zbuffer: true,
+        texture: textured.then_some([0xFFFF; 64]),
+        steps: vec![
+            Step::State(RS_ZENABLE, 1),
+            Step::State(RS_SPECULARENABLE, 1),
+            Step::Draw(
+                quad(0.0, 0.0, 32.0, 64.0, 0.5, 0xFF80_8080)
+                    .into_iter()
+                    .map(|v| Tl {
+                        specular: 0xFF40_4040,
+                        ..v
+                    })
+                    .collect(),
+            ),
+        ],
+    };
+    // Half the white texture, or the diffuse gray, and a quarter more.
+    for (test, textured) in [("specular_textured", true), ("specular", false)] {
+        let p = draw_scene(test, &gray(textured));
+        assert_rgb(&p, 16, 30, [192, 192, 192], 8);
+        assert_rgb(&p, 48, 30, [0, 0, 0], 0);
+    }
 }
