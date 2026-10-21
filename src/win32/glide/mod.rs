@@ -21,8 +21,9 @@
 //!   a buffer.
 //! * `exports`: GLIDE2X.DLL's functions by their stdcall names
 //!   (`_grDrawTriangle@12`), which read what the program passes and call
-//!   `api`, and `gu`, Glide's utility functions (fog tables, 3DF files,
-//!   the texture memory manager, clipped triangles).
+//!   `api`, `gu`, Glide's utility functions (fog tables, the texture
+//!   memory manager, clipped triangles), and `file3df`, the 3DF texture
+//!   files gu3dfGetInfo and gu3dfLoad read.
 //!
 //! The process that opened the card (grSstWinOpen) owns it until it
 //! closes it or ends; its end gives the screen back as grSstWinClose
@@ -32,6 +33,7 @@
 
 pub mod api;
 mod exports;
+mod file3df;
 mod gu;
 pub mod hw;
 

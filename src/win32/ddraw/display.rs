@@ -36,7 +36,6 @@ const ALIGN: u32 = 64;
 
 /// The owner of a mode Glide set (`take`), which no DirectDraw object
 /// is.
-#[allow(dead_code)] // For GLIDE2X.DLL's hardware layer.
 pub const GLIDE: u32 = u32::MAX;
 
 #[derive(Clone, Debug, Default)]
@@ -129,7 +128,6 @@ fn set(cpu: &mut Cpu, owner: u32, w: u32, h: u32, bpp: u32) -> Option<Mode> {
 /// DirectDraw set ends, and its surfaces in video memory are lost; GDI
 /// draws nowhere. None if the adapter has no such mode, and nothing
 /// changes then.
-#[allow(dead_code)] // For GLIDE2X.DLL's hardware layer.
 pub fn take(cpu: &mut Cpu, w: u32, h: u32, bpp: u32) -> Option<Mode> {
     let mode = set(cpu, GLIDE, w, h, bpp)?;
     state(cpu).display.exclusive = 0;
@@ -138,7 +136,6 @@ pub fn take(cpu: &mut Cpu, w: u32, h: u32, bpp: u32) -> Option<Mode> {
 
 /// Give back the display Glide took: the desktop's mode again, repainted,
 /// or text mode when there is no desktop.
-#[allow(dead_code)] // For GLIDE2X.DLL's hardware layer.
 pub fn give_back(cpu: &mut Cpu) {
     if state(cpu).display.mode_owner == GLIDE {
         restore(cpu);

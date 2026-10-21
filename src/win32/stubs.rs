@@ -95,6 +95,10 @@ pub static DLLS: &[&Dll] = &[
     &super::winmm::DLL,
     &super::glide::DLL,
     &super::dplayx::DLL,
+    &super::shell32::DLL,
+    &super::comctl32::DLL,
+    &super::comctl32::COMDLG32,
+    &super::wsock32::DLL,
 ];
 
 /// Bytes each function's stub takes.

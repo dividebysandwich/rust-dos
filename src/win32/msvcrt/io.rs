@@ -794,6 +794,29 @@ pub fn stat(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(0)
 }
 
+/// _wstat(path, buffer): _stat of the path in ANSI, a character past
+/// Latin-1 as "?", which names no file.
+pub fn wstat(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let name: Vec<u8> = wstr(cpu, args[0])?
+        .into_iter()
+        .map(|c| u8::try_from(c).unwrap_or(b'?'))
+        .collect();
+    let path = dos_path(&name);
+    let Some(entry) = find_entry(cpu, &path) else {
+        set_errno(cpu, ENOENT);
+        set_doserrno(cpu, 2);
+        return Some(EOF);
+    };
+    let drive = drive_of(cpu, &path);
+    write_stat(cpu, args[1], &entry, drive, &path)?;
+    Some(0)
+}
+
+/// _kbhit: no key waits. The console's keys come through stdin.
+pub fn kbhit(_: &mut Cpu, _: &[u32]) -> Option<u32> {
+    Some(0)
+}
+
 /// _fstat(fd, buffer): what its open file says.
 pub fn fstat(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some((handle, flags)) = fd_info(cpu, args[0]) else {

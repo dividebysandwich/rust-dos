@@ -433,6 +433,8 @@ fn from_bits(cpu: &mut Cpu, at: u32, size: u32, is_icon: bool) -> Option<Icon> {
 /// best fits `cx` by `cy` (0: the default size) on the screen.
 fn best_entry(cpu: &mut Cpu, dir: u32, is_icon: bool, cx: i32, cy: i32, flags: u32) -> Option<u32> {
     let head = read_words(cpu, dir, 2);
+    // GRPICONDIR: reserved and type, then the count in the low half of
+    // the second word.
     let count = head[1] & 0xFFFF;
     if cpu.bus.guest_faulted() || count == 0 {
         return None;

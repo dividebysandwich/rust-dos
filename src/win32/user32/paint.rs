@@ -708,9 +708,21 @@ fn erase_step(cpu: &mut Cpu, t: &mut Task, value: u32, keep: bool) -> Option<Nex
     loop {
         match t.step {
             STEP_ERASE => {
-                let w = user(cpu).window_mut(hwnd)?;
+                let state = user(cpu);
+                let wr = state.screen_rect(hwnd);
+                let client = match state.window(hwnd)? {
+                    w if parent_dc(state, hwnd) => state.screen_client(w.parent),
+                    _ => state.screen_client(hwnd),
+                };
+                let client = client.offset(-wr.left, -wr.top);
+                let w = state.window_mut(hwnd)?;
                 if w.paint & PAINT_FRAME != 0 && hwnd != DESKTOP {
+                    // The frame is painted: what is left to update is in
+                    // the client area (`client_update`'s), or a window
+                    // that validates its client area would get WM_PAINT
+                    // forever.
                     w.paint &= !PAINT_FRAME;
+                    w.update = w.update.and_rect(&client);
                     return Some(send(hwnd, WM_NCPAINT, 1, 0, STEP_ERASE_BKGND));
                 }
                 t.step = STEP_ERASE_BKGND;
