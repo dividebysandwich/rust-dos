@@ -271,9 +271,22 @@ fn read_joysticks(cpu: &mut Cpu) {
     signal(cpu, &events);
 }
 
-crate::state_fields!(MouseSeen {
-    started,
-    presses,
-    releases,
-    buttons
-} skip { motion });
+// `motion` isn't saved, nor the mouse's own: after a load the next read
+// starts over from the mouse as it is, as the first read does.
+impl crate::savestate::State for MouseSeen {
+    fn save(&self, w: &mut crate::savestate::Writer) {
+        self.started.save(w);
+        self.presses.save(w);
+        self.releases.save(w);
+        self.buttons.save(w);
+    }
+
+    fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
+        self.started.load(r)?;
+        self.presses.load(r)?;
+        self.releases.load(r)?;
+        self.buttons.load(r)?;
+        self.started = false;
+        Ok(())
+    }
+}
