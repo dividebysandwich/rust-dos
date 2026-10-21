@@ -951,9 +951,22 @@ pub fn destroy(cpu: &mut Cpu, id: u32) {
     }
 }
 
-/// A process ended: its objects go, and the display it had.
+/// A process ended: its objects go, with the video memory its surfaces
+/// had, and the display it had.
 pub fn process_ended(cpu: &mut Cpu, pid: u32, _tids: &[u32]) {
     display::process_ended(cpu, pid);
+    let blocks: Vec<u32> = state(cpu)
+        .objects
+        .iter()
+        .flatten()
+        .filter(|o| o.pid == pid)
+        .filter_map(|o| o.surface.as_ref())
+        .filter(|s| s.memory == surface::MEM_VIDEO && s.owns_bits)
+        .map(|s| s.bits)
+        .collect();
+    for offset in blocks {
+        display::free(cpu, offset);
+    }
     let s = state(cpu);
     for slot in s.objects.iter_mut() {
         if slot.as_ref().is_some_and(|o| o.pid == pid) {

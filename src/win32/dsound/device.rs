@@ -60,9 +60,7 @@ impl Format {
 
     /// Whether the device plays it: PCM, 8 or 16 bits, mono or stereo.
     pub fn playable(&self) -> bool {
-        self.tag == WAVE_FORMAT_PCM
-            && matches!(self.bits, 8 | 16)
-            && matches!(self.channels, 1 | 2)
+        self.tag == WAVE_FORMAT_PCM && matches!(self.bits, 8 | 16) && matches!(self.channels, 1 | 2)
     }
 
     /// The WAVEFORMATEX this format is, as 18 bytes (cbSize 0).

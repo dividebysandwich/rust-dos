@@ -133,6 +133,9 @@ pub struct KeyboardState {
     pub layout: &'static Layout,
     /// One bit for each key held, by `key_id`.
     held: [u64; 8],
+    /// The keys that went down since `take_pressed` last read them, the
+    /// same way.
+    pressed: [u64; 8],
     dead: Option<char>,
     /// The keystrokes last queued for INT 16h that the BIOS's keyboard
     /// interrupt (INT 09h) hasn't run for since (`drop_unseen_keys`).
@@ -150,7 +153,15 @@ pub struct KeyboardState {
 
 impl Default for KeyboardState {
     fn default() -> Self {
-        Self { layout: Layout::us(), held: [0; 8], dead: None, unseen: 0, made: Default::default(), windows: false }
+        Self {
+            layout: Layout::us(),
+            held: [0; 8],
+            pressed: [0; 8],
+            dead: None,
+            unseen: 0,
+            made: Default::default(),
+            windows: false,
+        }
     }
 }
 
@@ -300,6 +311,12 @@ impl KeyboardState {
         self.held
     }
 
+    /// The keys that went down since this was last called, also those
+    /// that went up again since, the way `held_keys` has them.
+    pub fn take_pressed(&mut self) -> [u64; 8] {
+        std::mem::take(&mut self.pressed)
+    }
+
     fn is_held(&self, id: usize) -> bool {
         self.held[id / 64] & 1 << (id % 64) != 0
     }
@@ -307,6 +324,7 @@ impl KeyboardState {
     fn set_held(&mut self, id: usize, down: bool) {
         if down {
             self.held[id / 64] |= 1 << (id % 64);
+            self.pressed[id / 64] |= 1 << (id % 64);
         } else {
             self.held[id / 64] &= !(1 << (id % 64));
         }

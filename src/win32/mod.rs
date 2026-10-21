@@ -356,10 +356,14 @@ impl Win32 {
         self.winmm.mixer.cd_gain()
     }
 
-    /// Whether that time has come at PIT tick `now` (`timer`).
+    /// Whether that time, or the time the sound device next needs its
+    /// tick (`audio_next_event`), has come at PIT tick `now` (`timer`).
     #[inline]
     pub fn due(&self, now: u64) -> bool {
-        self.next_event().is_some_and(|t| t <= now)
+        [self.next_event(), self.dsound.due, self.winmm.wave.due]
+            .into_iter()
+            .flatten()
+            .any(|t| t <= now)
     }
 
     /// A new process or thread id: as on Windows 95, a large number,
@@ -370,13 +374,16 @@ impl Win32 {
     }
 }
 
-/// WinMM's time for work came (`Win32::due`), between two instructions:
-/// the work is done, and if the program's code was running, a thread of
-/// a higher priority that it readied (the multimedia thread, whose
-/// callbacks ran at interrupt time on Windows 95) runs at once.
+/// WinMM's or the sound device's time for work came (`Win32::due`),
+/// between two instructions: the work is done, and if the program's code
+/// was running, a thread of a higher priority that it readied (the
+/// multimedia thread, whose callbacks ran at interrupt time on Windows
+/// 95) runs at once.
 pub fn timer(cpu: &mut Cpu) {
     cpu.bus.win32.winmm.due = None;
     if !cpu.bus.win32.active() {
+        cpu.bus.win32.dsound.due = None;
+        cpu.bus.win32.winmm.wave.due = None;
         cpu.bus.reschedule_timers();
         return;
     }
@@ -389,6 +396,7 @@ pub fn timer(cpu: &mut Cpu) {
         thread::preempt(cpu);
     } else {
         winmm::tick(cpu);
+        dsound::tick(cpu);
     }
     winmm::schedule(cpu);
 }

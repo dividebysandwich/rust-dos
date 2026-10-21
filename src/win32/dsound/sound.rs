@@ -317,10 +317,10 @@ pub fn create_sound_buffer(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         if format == 0 {
             return Some(DSERR_INVALIDPARAM);
         }
-        let Some((format, align)) = Format::read(cpu, format) else {
+        let Some((format, _)) = Format::read(cpu, format) else {
             return Some(DSERR_INVALIDPARAM);
         };
-        if let Err(e) = check_format(&format, align) {
+        if let Err(e) = check_format(&format) {
             return Some(e);
         }
         if !(buffer::SIZE_MIN..=buffer::SIZE_MAX).contains(&bytes) {
@@ -339,7 +339,7 @@ pub fn create_sound_buffer(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// Whether a secondary buffer can have the format `format`: Ok, or the
 /// HRESULT DirectX 5 and 6 fail with.
-pub fn check_format(format: &Format, _align: u16) -> Result<(), u32> {
+pub fn check_format(format: &Format) -> Result<(), u32> {
     if format.tag != WAVE_FORMAT_PCM {
         return Err(DSERR_BADFORMAT);
     }

@@ -122,6 +122,30 @@ fn run(cpu: &mut Cpu, dst_id: u32, op: &Op) -> Result<(), u32> {
         None => None,
     };
     let (dw, dh) = (op.dst.width() as i64, op.dst.height() as i64);
+    // A copy of the same size, through no key and not mirrored, takes
+    // the source's rows as they are.
+    let plain = source.as_ref().filter(|(_, _, sr)| {
+        sr.width() as i64 == dw
+            && sr.height() as i64 == dh
+            && op.src_key.is_none()
+            && op.dst_key.is_none()
+            && !op.mirror_x
+            && !op.mirror_y
+    });
+    if let Some((data, s, sr)) = plain {
+        for r in &rects {
+            let len = (r.right - r.left) as usize * bytes;
+            for y in r.top..r.bottom {
+                let at = (y - top) as usize * pitch + r.left as usize * bytes;
+                let sx = (sr.left + r.left - op.dst.left) as usize;
+                let from = (y - op.dst.top) as usize * s.pitch as usize + sx * bytes;
+                out[at..at + len].copy_from_slice(&data[from..from + len]);
+            }
+        }
+        surface::write_bytes(cpu, &d, top as u32 * d.pitch, &out);
+        surface::changed(cpu, dst_id);
+        return Ok(());
+    }
     for r in &rects {
         for y in r.top..r.bottom {
             let row = (y - top) as usize * pitch;
@@ -339,13 +363,12 @@ pub fn blt_fast(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(DDERR_INVALIDPIXELFORMAT);
     }
     let r = hr!(surface::rect_in(cpu, &s, src_rect));
-    let dst = Rect::new(
-        x as i32,
-        y as i32,
-        x as i32 + r.width(),
-        y as i32 + r.height(),
-    );
-    if (x as i32) < 0 || (y as i32) < 0 || surface::bounds(&d).intersect(&dst) != dst {
+    let (x, y) = (x as i32, y as i32);
+    let (Some(right), Some(bottom)) = (x.checked_add(r.width()), y.checked_add(r.height())) else {
+        return Some(DDERR_INVALIDRECT);
+    };
+    let dst = Rect::new(x, y, right, bottom);
+    if x < 0 || y < 0 || surface::bounds(&d).intersect(&dst) != dst {
         return Some(DDERR_INVALIDRECT);
     }
     let mut op = Op {

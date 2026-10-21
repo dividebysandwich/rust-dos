@@ -79,16 +79,36 @@ static APIS: &[Api] = &[
     method("DS_QueryInterface", 3, query_interface),
     method("DS_AddRef", 1, add_ref),
     method("DS_Release", 1, release),
-    method("IDirectSound_CreateSoundBuffer", 4, sound::create_sound_buffer),
+    method(
+        "IDirectSound_CreateSoundBuffer",
+        4,
+        sound::create_sound_buffer,
+    ),
     method("IDirectSound_GetCaps", 2, sound::get_caps),
     method("IDirectSound_DuplicateSoundBuffer", 3, sound::duplicate),
-    method("IDirectSound_SetCooperativeLevel", 3, sound::set_cooperative_level),
+    method(
+        "IDirectSound_SetCooperativeLevel",
+        3,
+        sound::set_cooperative_level,
+    ),
     method("IDirectSound_Compact", 1, sound::compact),
-    method("IDirectSound_GetSpeakerConfig", 2, sound::get_speaker_config),
-    method("IDirectSound_SetSpeakerConfig", 2, sound::set_speaker_config),
+    method(
+        "IDirectSound_GetSpeakerConfig",
+        2,
+        sound::get_speaker_config,
+    ),
+    method(
+        "IDirectSound_SetSpeakerConfig",
+        2,
+        sound::set_speaker_config,
+    ),
     method("IDirectSound_Initialize", 2, sound::initialize),
     method("IDirectSoundBuffer_GetCaps", 2, buffer::get_caps),
-    method("IDirectSoundBuffer_GetCurrentPosition", 3, buffer::get_position),
+    method(
+        "IDirectSoundBuffer_GetCurrentPosition",
+        3,
+        buffer::get_position,
+    ),
     method("IDirectSoundBuffer_GetFormat", 4, buffer::get_format),
     method("IDirectSoundBuffer_GetVolume", 2, buffer::get_volume),
     method("IDirectSoundBuffer_GetPan", 2, buffer::get_pan),
@@ -97,7 +117,11 @@ static APIS: &[Api] = &[
     method("IDirectSoundBuffer_Initialize", 3, buffer::initialize),
     method("IDirectSoundBuffer_Lock", 8, buffer::lock),
     method("IDirectSoundBuffer_Play", 4, buffer::play),
-    method("IDirectSoundBuffer_SetCurrentPosition", 2, buffer::set_position),
+    method(
+        "IDirectSoundBuffer_SetCurrentPosition",
+        2,
+        buffer::set_position,
+    ),
     method("IDirectSoundBuffer_SetFormat", 2, buffer::set_format),
     method("IDirectSoundBuffer_SetVolume", 2, buffer::set_volume),
     method("IDirectSoundBuffer_SetPan", 2, buffer::set_pan),
@@ -105,44 +129,176 @@ static APIS: &[Api] = &[
     method("IDirectSoundBuffer_Stop", 1, buffer::stop),
     method("IDirectSoundBuffer_Unlock", 5, buffer::unlock),
     method("IDirectSoundBuffer_Restore", 1, buffer::restore),
-    method("IDirectSound3DBuffer_GetAllParameters", 2, ds3d::buffer_get_all),
-    method("IDirectSound3DBuffer_GetConeAngles", 3, ds3d::get_cone_angles),
-    method("IDirectSound3DBuffer_GetConeOrientation", 2, ds3d::get_cone_orientation),
-    method("IDirectSound3DBuffer_GetConeOutsideVolume", 2, ds3d::get_cone_outside_volume),
-    method("IDirectSound3DBuffer_GetMaxDistance", 2, ds3d::get_max_distance),
-    method("IDirectSound3DBuffer_GetMinDistance", 2, ds3d::get_min_distance),
+    method(
+        "IDirectSound3DBuffer_GetAllParameters",
+        2,
+        ds3d::buffer_get_all,
+    ),
+    method(
+        "IDirectSound3DBuffer_GetConeAngles",
+        3,
+        ds3d::get_cone_angles,
+    ),
+    method(
+        "IDirectSound3DBuffer_GetConeOrientation",
+        2,
+        ds3d::get_cone_orientation,
+    ),
+    method(
+        "IDirectSound3DBuffer_GetConeOutsideVolume",
+        2,
+        ds3d::get_cone_outside_volume,
+    ),
+    method(
+        "IDirectSound3DBuffer_GetMaxDistance",
+        2,
+        ds3d::get_max_distance,
+    ),
+    method(
+        "IDirectSound3DBuffer_GetMinDistance",
+        2,
+        ds3d::get_min_distance,
+    ),
     method("IDirectSound3DBuffer_GetMode", 2, ds3d::get_mode),
-    method("IDirectSound3DBuffer_GetPosition", 2, ds3d::buffer_get_position),
-    method("IDirectSound3DBuffer_GetVelocity", 2, ds3d::buffer_get_velocity),
-    method("IDirectSound3DBuffer_SetAllParameters", 3, ds3d::buffer_set_all),
-    method("IDirectSound3DBuffer_SetConeAngles", 4, ds3d::set_cone_angles),
-    method("IDirectSound3DBuffer_SetConeOrientation", 5, ds3d::set_cone_orientation),
-    method("IDirectSound3DBuffer_SetConeOutsideVolume", 3, ds3d::set_cone_outside_volume),
-    method("IDirectSound3DBuffer_SetMaxDistance", 3, ds3d::set_max_distance),
-    method("IDirectSound3DBuffer_SetMinDistance", 3, ds3d::set_min_distance),
+    method(
+        "IDirectSound3DBuffer_GetPosition",
+        2,
+        ds3d::buffer_get_position,
+    ),
+    method(
+        "IDirectSound3DBuffer_GetVelocity",
+        2,
+        ds3d::buffer_get_velocity,
+    ),
+    method(
+        "IDirectSound3DBuffer_SetAllParameters",
+        3,
+        ds3d::buffer_set_all,
+    ),
+    method(
+        "IDirectSound3DBuffer_SetConeAngles",
+        4,
+        ds3d::set_cone_angles,
+    ),
+    method(
+        "IDirectSound3DBuffer_SetConeOrientation",
+        5,
+        ds3d::set_cone_orientation,
+    ),
+    method(
+        "IDirectSound3DBuffer_SetConeOutsideVolume",
+        3,
+        ds3d::set_cone_outside_volume,
+    ),
+    method(
+        "IDirectSound3DBuffer_SetMaxDistance",
+        3,
+        ds3d::set_max_distance,
+    ),
+    method(
+        "IDirectSound3DBuffer_SetMinDistance",
+        3,
+        ds3d::set_min_distance,
+    ),
     method("IDirectSound3DBuffer_SetMode", 3, ds3d::set_mode),
-    method("IDirectSound3DBuffer_SetPosition", 5, ds3d::buffer_set_position),
-    method("IDirectSound3DBuffer_SetVelocity", 5, ds3d::buffer_set_velocity),
-    method("IDirectSound3DListener_GetAllParameters", 2, ds3d::listener_get_all),
-    method("IDirectSound3DListener_GetDistanceFactor", 2, ds3d::get_distance_factor),
-    method("IDirectSound3DListener_GetDopplerFactor", 2, ds3d::get_doppler_factor),
-    method("IDirectSound3DListener_GetOrientation", 3, ds3d::get_orientation),
-    method("IDirectSound3DListener_GetPosition", 2, ds3d::listener_get_position),
-    method("IDirectSound3DListener_GetRolloffFactor", 2, ds3d::get_rolloff_factor),
-    method("IDirectSound3DListener_GetVelocity", 2, ds3d::listener_get_velocity),
-    method("IDirectSound3DListener_SetAllParameters", 3, ds3d::listener_set_all),
-    method("IDirectSound3DListener_SetDistanceFactor", 3, ds3d::set_distance_factor),
-    method("IDirectSound3DListener_SetDopplerFactor", 3, ds3d::set_doppler_factor),
-    method("IDirectSound3DListener_SetOrientation", 8, ds3d::set_orientation),
-    method("IDirectSound3DListener_SetPosition", 5, ds3d::listener_set_position),
-    method("IDirectSound3DListener_SetRolloffFactor", 3, ds3d::set_rolloff_factor),
-    method("IDirectSound3DListener_SetVelocity", 5, ds3d::listener_set_velocity),
-    method("IDirectSound3DListener_CommitDeferredSettings", 1, ds3d::commit),
-    method("IDirectSoundNotify_SetNotificationPositions", 3, buffer::set_notifications),
+    method(
+        "IDirectSound3DBuffer_SetPosition",
+        5,
+        ds3d::buffer_set_position,
+    ),
+    method(
+        "IDirectSound3DBuffer_SetVelocity",
+        5,
+        ds3d::buffer_set_velocity,
+    ),
+    method(
+        "IDirectSound3DListener_GetAllParameters",
+        2,
+        ds3d::listener_get_all,
+    ),
+    method(
+        "IDirectSound3DListener_GetDistanceFactor",
+        2,
+        ds3d::get_distance_factor,
+    ),
+    method(
+        "IDirectSound3DListener_GetDopplerFactor",
+        2,
+        ds3d::get_doppler_factor,
+    ),
+    method(
+        "IDirectSound3DListener_GetOrientation",
+        3,
+        ds3d::get_orientation,
+    ),
+    method(
+        "IDirectSound3DListener_GetPosition",
+        2,
+        ds3d::listener_get_position,
+    ),
+    method(
+        "IDirectSound3DListener_GetRolloffFactor",
+        2,
+        ds3d::get_rolloff_factor,
+    ),
+    method(
+        "IDirectSound3DListener_GetVelocity",
+        2,
+        ds3d::listener_get_velocity,
+    ),
+    method(
+        "IDirectSound3DListener_SetAllParameters",
+        3,
+        ds3d::listener_set_all,
+    ),
+    method(
+        "IDirectSound3DListener_SetDistanceFactor",
+        3,
+        ds3d::set_distance_factor,
+    ),
+    method(
+        "IDirectSound3DListener_SetDopplerFactor",
+        3,
+        ds3d::set_doppler_factor,
+    ),
+    method(
+        "IDirectSound3DListener_SetOrientation",
+        8,
+        ds3d::set_orientation,
+    ),
+    method(
+        "IDirectSound3DListener_SetPosition",
+        5,
+        ds3d::listener_set_position,
+    ),
+    method(
+        "IDirectSound3DListener_SetRolloffFactor",
+        3,
+        ds3d::set_rolloff_factor,
+    ),
+    method(
+        "IDirectSound3DListener_SetVelocity",
+        5,
+        ds3d::listener_set_velocity,
+    ),
+    method(
+        "IDirectSound3DListener_CommitDeferredSettings",
+        1,
+        ds3d::commit,
+    ),
+    method(
+        "IDirectSoundNotify_SetNotificationPositions",
+        3,
+        buffer::set_notifications,
+    ),
     method("IKsPropertySet_Get", 8, buffer::property_get),
     method("IKsPropertySet_Set", 7, buffer::property_set),
     method("IKsPropertySet_QuerySupport", 4, buffer::property_query),
-    method("IDirectSoundCapture_CreateCaptureBuffer", 4, capture::create_buffer),
+    method(
+        "IDirectSoundCapture_CreateCaptureBuffer",
+        4,
+        capture::create_buffer,
+    ),
     method("IDirectSoundCapture_GetCaps", 2, capture::get_caps),
     method("IDirectSoundCapture_Initialize", 2, capture::initialize),
 ];
@@ -605,7 +761,12 @@ pub fn playing(ds: &State) -> bool {
 /// passed their notifications' positions set their events, and those
 /// that played to their ends stop.
 pub fn tick(cpu: &mut Cpu) {
-    if state(cpu).ticking || !playing(state(cpu)) {
+    if state(cpu).ticking {
+        return;
+    }
+    if !playing(state(cpu)) {
+        // A time a buffer released or ended while playing left is past.
+        state(cpu).due = None;
         return;
     }
     state(cpu).ticking = true;

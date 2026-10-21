@@ -411,6 +411,36 @@ fn the_keyboard_gives_its_keys_as_state_and_buffered_data() {
 }
 
 #[test]
+fn a_key_that_goes_down_and_up_between_two_reads_is_in_the_buffer() {
+    let mut d = Data::new();
+    let guid = d.guid(0x6F1D_2B61, 0xD5A0, 0x11CF);
+    let keys: Vec<(Option<u32>, u32, u32)> = (0..256)
+        .map(|i| (None, i, DIDFT_OPTIONAL | DIDFT_BUTTON | i << 8))
+        .collect();
+    let format = d.format(0, 256, &keys);
+    let buffer = d.add(&words(&[20, 16, 0, 0, EVENT_ROOM]));
+    let setup = Setup {
+        guid,
+        format,
+        state_size: 256,
+        properties: vec![(DIPROP_BUFFERSIZE, buffer)],
+    };
+    let (image, data) = program(&d, &setup);
+    let mut cpu = machine("keyboard-tap", image);
+    let data = started(&mut cpu, data);
+    until_ready(&mut cpu, data, 1);
+    // A goes down and up with no time for a read between.
+    rust_dos::keyboard::key_event(&mut cpu.bus, 0x1E, false, true, None);
+    keyboard(&mut cpu, 0x1E, false, false);
+    let r = read(&mut cpu, data, 8, 256);
+    assert_eq!(r.results, [0; 8], "{:x?}", r.results);
+    assert_eq!(r.state.iter().filter(|&&b| b != 0).count(), 0);
+    let got: Vec<(u32, u32)> = r.events.iter().map(|e| (e.0, e.1)).collect();
+    assert_eq!(got, [(0x1E, 0x80), (0x1E, 0)]);
+    in_order(&r.events);
+}
+
+#[test]
 fn the_mouse_gives_its_motion_as_relative_axes() {
     let mut d = Data::new();
     let guid = d.guid(0x6F1D_2B60, 0xD5A0, 0x11CF);

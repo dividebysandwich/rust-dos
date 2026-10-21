@@ -267,7 +267,12 @@ fn done(cpu: &mut Cpu, i: usize, header: u32) {
         (o.pid, o.handle, o.instance, o.callback.clone())
     };
     let flags = read_32(cpu, pid, header + HDR_FLAGS);
-    write_32(cpu, pid, header + HDR_FLAGS, flags & !WHDR_INQUEUE | WHDR_DONE);
+    write_32(
+        cpu,
+        pid,
+        header + HDR_FLAGS,
+        flags & !WHDR_INQUEUE | WHDR_DONE,
+    );
     callback::notify(cpu, &cb, handle, WOM_DONE, instance, header, 0);
 }
 
@@ -305,7 +310,11 @@ pub fn render(bus: &crate::bus::Bus, first: u64, out: &mut [(f32, f32)]) {
         (volume & 0xFFFF) as f32 / 65535.0,
         (volume >> 16) as f32 / 65535.0,
     );
-    for o in w.outs.iter().filter(|o| !o.segments.is_empty() && !o.paused) {
+    for o in w
+        .outs
+        .iter()
+        .filter(|o| !o.segments.is_empty() && !o.paused)
+    {
         let mut reader = Reader::new(bus, o.pid);
         let mut at = 0;
         for (n, frame) in out.iter_mut().enumerate() {

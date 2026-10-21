@@ -609,16 +609,17 @@ pub fn ensure_desktop(cpu: &mut Cpu) {
     }
     super::init(cpu);
     user(cpu).desktop = true;
-    // A mode DirectDraw set stays, and the desktop comes back with the
-    // mode it gives back (`restore_desktop`).
+    // A mode DirectDraw set stays, with the mouse's range over it, and
+    // the desktop comes back with the mode it gives back
+    // (`restore_desktop`).
     if !crate::win32::ddraw::owns_display(cpu) {
         enter_desktop_mode(cpu);
+        // The mouse moves over the whole desktop, from its middle.
+        let (w, h) = sysparams::screen_size();
+        let mouse = &mut cpu.bus.mouse;
+        (mouse.min_x, mouse.max_x, mouse.min_y, mouse.max_y) = (0, w - 1, 0, h - 1);
+        mouse.warp(w / 2, h / 2);
     }
-    // The mouse moves over the whole desktop, from its middle.
-    let (w, h) = sysparams::screen_size();
-    let mouse = &mut cpu.bus.mouse;
-    (mouse.min_x, mouse.max_x, mouse.min_y, mouse.max_y) = (0, w - 1, 0, h - 1);
-    mouse.warp(w / 2, h / 2);
     super::input::desktop_started(cpu);
     redraw_screen(cpu);
 }

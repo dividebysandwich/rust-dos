@@ -349,6 +349,7 @@ pub fn poll(cpu: &mut Cpu) {
 
 fn poll_keyboard(cpu: &mut Cpu, desktop: bool) {
     let held = cpu.bus.kbd.held_keys();
+    let pressed = cpu.bus.kbd.take_pressed();
     let before = user(cpu).input.held;
     let mut events = Vec::new();
     // It runs at each wake of the threads: most often no key changed.
@@ -366,6 +367,15 @@ fn poll_keyboard(cpu: &mut Cpu, desktop: bool) {
         crate::win32::dinput::key(cpu, id as u8 & 0x7F, id >= 256, down);
     }
     if !desktop {
+        // A key that went down and up again since the last read: USER
+        // leaves the BIOS's keystrokes to the console, so the keyboard's
+        // own record of it tells DirectInput.
+        for id in (0..512).filter(|id| pressed[id / 64] >> (id % 64) & 1 != 0) {
+            if (before[id / 64] | held[id / 64]) >> (id % 64) & 1 == 0 {
+                crate::win32::dinput::key(cpu, id as u8 & 0x7F, id >= 256, true);
+                crate::win32::dinput::key(cpu, id as u8 & 0x7F, id >= 256, false);
+            }
+        }
         return;
     }
     // The keystrokes the BIOS got: each is taken, so the buffer doesn't

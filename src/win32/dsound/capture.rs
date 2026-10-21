@@ -111,4 +111,9 @@ pub fn initialize(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(DSERR_NODRIVER)
 }
 
-crate::state_fields!(Capture { id, pid, iface, refs });
+crate::state_fields!(Capture {
+    id,
+    pid,
+    iface,
+    refs
+});

@@ -570,12 +570,19 @@ pub fn play(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
     let format = bus_format(ds, &ds.buffers[i]);
     let b = &mut ds.buffers[i];
+    let frames = b.frames(&format) as u64;
     if !b.playing {
-        let frames = b.frames(&format) as u64;
         b.pos = ((b.pos >> 32) % frames) << 32;
         b.seen = b.pos;
         b.tick = now;
         b.playing = true;
+    } else if b.looping {
+        // Anchored where it is in this time round the loop, so a buffer
+        // that stops looping plays on to its end from there.
+        let pos = device::position(b.tick, b.pos, b.frequency, now, PIT_HZ);
+        b.pos = pos % (frames << 32);
+        b.seen = b.pos;
+        b.tick = now;
     }
     b.looping = looping;
     super::reschedule(cpu);
@@ -667,7 +674,7 @@ pub fn set_format(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if level(cpu, i) < sound::DSSCL_PRIORITY {
         return Some(DSERR_PRIOLEVELNEEDED);
     }
-    if let Err(e) = sound::check_format(&format, 0) {
+    if let Err(e) = sound::check_format(&format) {
         return Some(e);
     }
     device::catch_up(cpu);
@@ -906,26 +913,17 @@ pub fn next_event(b: &Buffer) -> Option<u64> {
     let block = b.format.block();
     let frames = (b.size / block).max(1) as u64;
     let from = (b.seen >> 32) + 1;
-    let mut next: Option<u64> = None;
-    for &(offset, _) in &b.notes {
-        if offset == DSBPN_OFFSETSTOP {
-            continue;
-        }
-        let at = next_frame(from, (offset / block) as u64, frames);
-        if !b.looping && at >= frames {
-            continue;
-        }
-        let t = device::reaches(b.tick, b.pos, b.frequency, at << 32);
-        next = next.min(t).or(next).or(t);
-    }
-    if !b.looping {
-        let t = device::reaches(b.tick, b.pos, b.frequency, frames << 32);
-        next = match (next, t) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        };
-    }
-    next
+    let notes = b
+        .notes
+        .iter()
+        .filter(|&&(offset, _)| offset != DSBPN_OFFSETSTOP)
+        .map(|&(offset, _)| next_frame(from, (offset / block) as u64, frames))
+        .filter(|&at| b.looping || at < frames)
+        .filter_map(|at| device::reaches(b.tick, b.pos, b.frequency, at << 32));
+    let end = (!b.looping)
+        .then(|| device::reaches(b.tick, b.pos, b.frequency, frames << 32))
+        .flatten();
+    notes.chain(end).min()
 }
 
 /// Whether a buffer of the DirectSound object `sound` with `flags` is
@@ -966,7 +964,11 @@ fn voices(bus: &crate::bus::Bus) -> Vec<Voice> {
     let mut voices = Vec::new();
     for sound in &ds.sounds {
         let write_primary = sound.level == DSSCL_WRITEPRIMARY;
-        for b in ds.buffers.iter().filter(|b| b.sound == sound.id && b.playing) {
+        for b in ds
+            .buffers
+            .iter()
+            .filter(|b| b.sound == sound.id && b.playing)
+        {
             if b.primary != write_primary || !audible(bus, sound, b.flags) {
                 continue;
             }
@@ -1018,7 +1020,8 @@ pub fn render(bus: &crate::bus::Bus, first: u64, frames: usize) -> Option<Vec<(f
             if !v.looping && pos >= (v.frames as u64) << 32 {
                 break;
             }
-            let (l, r) = device::interpolate(&mut reader, v.addr, &v.format, v.frames, v.looping, pos);
+            let (l, r) =
+                device::interpolate(&mut reader, v.addr, &v.format, v.frames, v.looping, pos);
             out.0 += l * v.gains.0;
             out.1 += r * v.gains.1;
         }
@@ -1043,7 +1046,10 @@ pub fn render(bus: &crate::bus::Bus, first: u64, frames: usize) -> Option<Vec<(f
             let k = (x / device::RATE - k0) as usize;
             let frac = (x % device::RATE) as f32 / device::RATE as f32;
             let (a, b) = (mix[k], mix[(k + 1).min(mix.len() - 1)]);
-            ((a.0 + (b.0 - a.0) * frac) * gl, (a.1 + (b.1 - a.1) * frac) * gr)
+            (
+                (a.0 + (b.0 - a.0) * frac) * gl,
+                (a.1 + (b.1 - a.1) * frac) * gr,
+            )
         })
         .collect();
     Some(out)

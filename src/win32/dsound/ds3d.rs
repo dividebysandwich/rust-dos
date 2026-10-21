@@ -105,7 +105,10 @@ pub fn gains(params: &Params, listener: &Listener, flags: u32) -> (f32, f32) {
         (sub(params.position, listener.position), right)
     };
     let distance = dot(relative, relative).sqrt();
-    let (min, max) = (params.min_distance.max(f32::MIN_POSITIVE), params.max_distance);
+    let (min, max) = (
+        params.min_distance.max(f32::MIN_POSITIVE),
+        params.max_distance,
+    );
     if flags & DSBCAPS_MUTE3DATMAXDISTANCE != 0 && distance >= max {
         return (0.0, 0.0);
     }
