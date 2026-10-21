@@ -75,11 +75,11 @@ pub fn create_palette(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, caps, entries, out, outer] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
     };
-    let (vtable, dd) = hr!(super::ddraw::ddraw_of(cpu, this));
+    let (vtable, dd) = hr!(super::directdraw::ddraw_of(cpu, this));
     if outer != 0 {
         return Some(CLASS_E_NOAGGREGATION);
     }
-    if super::ddraw::ddraw(cpu, dd).is_none_or(|d| d.level == 0) {
+    if super::directdraw::ddraw(cpu, dd).is_none_or(|d| d.level == 0) {
         return Some(DDERR_NOCOOPERATIVELEVELSET);
     }
     let known = DDPCAPS_4BIT
@@ -236,14 +236,11 @@ pub fn set_entries(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         .object(id)
         .map(|o| o.ifaces.iter().map(|i| i.address).collect::<Vec<_>>())
         .unwrap_or_default();
-    let shown = state(cpu)
-        .ids(|o| {
-            o.surface
-                .as_ref()
-                .is_some_and(|s| s.is_primary() && iface.contains(&s.palette))
-        })
-        .len()
-        > 0;
+    let shown = state(cpu).objects.iter().flatten().any(|o| {
+        o.surface
+            .as_ref()
+            .is_some_and(|s| s.is_primary() && iface.contains(&s.palette))
+    });
     if shown {
         show(cpu, this);
     }

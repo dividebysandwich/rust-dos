@@ -55,8 +55,6 @@ pub const DDSCAPS_OVERLAY: u32 = 0x80;
 pub const DDSCAPS_PALETTE: u32 = 0x100;
 pub const DDSCAPS_PRIMARYSURFACE: u32 = 0x200;
 pub const DDSCAPS_SYSTEMMEMORY: u32 = 0x800;
-pub const DDSCAPS_TEXTURE: u32 = 0x1000;
-pub const DDSCAPS_3DDEVICE: u32 = 0x2000;
 pub const DDSCAPS_VIDEOMEMORY: u32 = 0x4000;
 pub const DDSCAPS_VISIBLE: u32 = 0x8000;
 pub const DDSCAPS_ZBUFFER: u32 = 0x2_0000;
@@ -640,7 +638,7 @@ pub fn create_surface(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, desc_at, out, outer] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
     };
-    let (vtable, dd) = hr!(super::ddraw::ddraw_of(cpu, this));
+    let (vtable, dd) = hr!(super::directdraw::ddraw_of(cpu, this));
     let version = super::version(vtable);
     if outer != 0 {
         return Some(CLASS_E_NOAGGREGATION);
@@ -650,7 +648,7 @@ pub fn create_surface(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     cpu.bus.guest_write_32(out, 0);
     let size = hr!(desc_size(cpu, desc_at, version));
-    let level = super::ddraw::ddraw(cpu, dd).map_or(0, |d| d.level);
+    let level = super::directdraw::ddraw(cpu, dd).map_or(0, |d| d.level);
     if level == 0 {
         return Some(DDERR_NOCOOPERATIVELEVELSET);
     }
@@ -718,13 +716,14 @@ fn make(cpu: &mut Cpu, dd: u32, version: u32, level: u32, desc: &Desc) -> Result
             return Err(DDERR_INVALIDPARAMS);
         }
         let exists = state(cpu)
-            .ids(|o| o.owner == dd && o.surface.as_ref().is_some_and(|s| s.is_primary()))
-            .len()
-            > 0;
+            .objects
+            .iter()
+            .flatten()
+            .any(|o| o.owner == dd && o.surface.as_ref().is_some_and(|s| s.is_primary()));
         if exists {
             return Err(DDERR_PRIMARYSURFACEALREADYEXISTS);
         }
-        if flip && level & super::ddraw::DDSCL_EXCLUSIVE == 0 {
+        if flip && level & super::directdraw::DDSCL_EXCLUSIVE == 0 {
             return Err(DDERR_NOEXCLUSIVEMODE);
         }
         let (w, h, bpp, p) = display::current(cpu);
@@ -896,7 +895,7 @@ pub fn duplicate_surface(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, src, out] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
     };
-    let (vtable, dd) = hr!(super::ddraw::ddraw_of(cpu, this));
+    let (vtable, dd) = hr!(super::directdraw::ddraw_of(cpu, this));
     let (src_vtable, id) = hr!(surface_of(cpu, src));
     if out == 0 || !cpu.bus.guest_probe(out, 4, true) {
         return Some(DDERR_INVALIDPARAMS);
@@ -1022,7 +1021,7 @@ fn restore_surface(cpu: &mut Cpu, id: u32) -> Result<(), u32> {
 
 /// RestoreAllSurfaces(this): the DirectDraw object's.
 pub fn restore_all_surfaces(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let (_, dd) = hr!(super::ddraw::ddraw_of(cpu, args[0]));
+    let (_, dd) = hr!(super::directdraw::ddraw_of(cpu, args[0]));
     for id in state(cpu).ids(|o| o.owner == dd && o.surface.as_ref().is_some_and(|s| s.root == 0)) {
         hr!(restore_surface(cpu, id));
     }
@@ -1291,7 +1290,7 @@ pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 return Some(super::DDERR_WASSTILLDRAWING);
             }
             cpu.set_eip(cpu.eip().wrapping_sub(4));
-            return super::ddraw::wait_until(cpu, pending, DD_OK);
+            return super::directdraw::wait_until(cpu, pending, DD_OK);
         }
         state(cpu).display.flip_at = timing.next_display(now);
     }
@@ -1323,7 +1322,7 @@ pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// FlipToGDISurface(this): the picture at the start of video memory,
 /// GDI's, is shown again.
 pub fn flip_to_gdi_surface(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let (_, dd) = hr!(super::ddraw::ddraw_of(cpu, args[0]));
+    let (_, dd) = hr!(super::directdraw::ddraw_of(cpu, args[0]));
     let fronts = state(cpu).ids(|o| {
         o.owner == dd
             && o.surface
@@ -1363,7 +1362,7 @@ pub fn get_gdi_surface(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, out] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
     };
-    let (_, dd) = hr!(super::ddraw::ddraw_of(cpu, this));
+    let (_, dd) = hr!(super::directdraw::ddraw_of(cpu, this));
     if out == 0 || !cpu.bus.guest_probe(out, 4, true) {
         return Some(DDERR_INVALIDPARAMS);
     }
@@ -1714,7 +1713,7 @@ pub fn get_surface_from_dc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, dc, out] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
     };
-    let (vtable, _) = hr!(super::ddraw::ddraw_of(cpu, this));
+    let (vtable, _) = hr!(super::directdraw::ddraw_of(cpu, this));
     if out == 0 || !cpu.bus.guest_probe(out, 4, true) {
         return Some(com::E_INVALIDARG);
     }

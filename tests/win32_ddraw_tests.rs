@@ -1,0 +1,733 @@
+//! The built-in Windows' DirectDraw (DDRAW.DLL): Win32 programs that set
+//! a display mode and draw on surfaces, in full screen and in a window on
+//! the desktop. The programs are PE files made with rust-dos-pe's
+//! builder, their code assembled with iced, as in win32_tests.rs. Each
+//! leaves its results in its data and spins, and the test looks at them
+//! and at the display while the program is still there.
+
+use iced_x86::code_asm::*;
+use rust_dos::cpu::{Cpu, HostConsole};
+use rust_dos::exec::{NoHook, run_batch};
+use rust_dos_pe::{self as pe, Builder, Imp};
+use std::fs;
+use std::path::PathBuf;
+
+const BASE: u32 = 0x40_0000;
+
+/// Where a test program's data and imports are, for its code.
+struct Layout {
+    data: u32,
+    iat: Vec<u32>,
+}
+
+impl Layout {
+    /// The address of byte `offset` of the data.
+    fn at(&self, offset: u32) -> u64 {
+        (self.data + offset) as u64
+    }
+
+    /// The import address table slot of the function `index`.
+    fn import(&self, index: usize) -> AsmMemoryOperand {
+        dword_ptr(self.iat[index] as u64)
+    }
+}
+
+/// A program importing `imports`, with `data` and the code `f` makes,
+/// and where its data is.
+fn program(
+    imports: &[(&str, &[&str])],
+    data: &[u8],
+    f: impl FnOnce(&mut CodeAssembler, &Layout) -> Result<(), IcedError>,
+) -> (Vec<u8>, u32) {
+    let mut b = Builder::exe(BASE);
+    let lists: Vec<Vec<Imp>> = imports
+        .iter()
+        .map(|(_, names)| names.iter().map(|n| Imp::Name(n)).collect())
+        .collect();
+    let dlls: Vec<(&str, &[Imp])> = imports
+        .iter()
+        .zip(&lists)
+        .map(|((dll, _), list)| (*dll, list.as_slice()))
+        .collect();
+    let iat = b.imports(&dlls).concat();
+    let data_rva = b.section(
+        ".data",
+        data,
+        pe::SCN_INITIALIZED_DATA | pe::SCN_READ | pe::SCN_WRITE,
+    );
+    let layout = Layout {
+        data: BASE + data_rva,
+        iat,
+    };
+    let code_rva = b.next_rva();
+    let mut a = CodeAssembler::new(32).unwrap();
+    f(&mut a, &layout).unwrap();
+    let code = a.assemble((BASE + code_rva) as u64).unwrap();
+    assert_eq!(
+        b.section(
+            ".text",
+            &code,
+            pe::SCN_CODE | pe::SCN_EXECUTE | pe::SCN_READ
+        ),
+        code_rva
+    );
+    b.entry(code_rva);
+    (b.build(), layout.data)
+}
+
+/// A machine with the built-in Windows on and `program` loaded from the
+/// shell as T.EXE.
+fn machine(test: &str, program: Vec<u8>) -> Cpu {
+    let base = PathBuf::from("target/test_win32_ddraw").join(test);
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(&base).unwrap();
+    fs::write(base.join("T.EXE"), program).unwrap();
+    let mut cpu = Cpu::new(base);
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    cpu
+}
+
+/// What the program printed.
+fn printed(cpu: &Cpu) -> String {
+    let console = cpu.host_console.as_ref().unwrap();
+    String::from_utf8_lossy(&console.stdout).into_owned()
+}
+
+/// The program's dword at `lin`, through its page tables.
+fn peek(cpu: &Cpu, lin: u32) -> u32 {
+    let pde = cpu
+        .bus
+        .read_32((cpu.cr3 & !0xFFF) as usize + 4 * (lin >> 22) as usize);
+    assert!(pde & 1 != 0, "no page table for {lin:X}");
+    let pte = cpu
+        .bus
+        .read_32((pde & !0xFFF) as usize + 4 * ((lin >> 12) & 0x3FF) as usize);
+    assert!(pte & 1 != 0, "no page at {lin:X}");
+    cpu.bus
+        .read_32((pte & !0xFFF) as usize + (lin & 0xFFF) as usize)
+}
+
+/// Run the program until it says it is done (DONE in its data), with
+/// its results there.
+fn run_until_done(cpu: &mut Cpu, layout_data: u32) {
+    for _ in 0..400 {
+        cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
+        run_batch(cpu, &mut NoHook, false);
+        // The program's memory is there while its code runs, with paging.
+        let paged = cpu.cr0 & 0x8000_0001 == 0x8000_0001;
+        if paged && peek(cpu, layout_data + DONE) == 1 {
+            return;
+        }
+    }
+    panic!(
+        "the program didn't finish: {:?}, at {:X}",
+        printed(cpu),
+        cpu.eip()
+    );
+}
+
+// The data's layout.
+
+const HWND: u32 = 0x00;
+const DD: u32 = 0x04;
+const FRONT: u32 = 0x08;
+const BACK: u32 = 0x0C;
+const PALETTE: u32 = 0x10;
+const CLIPPER: u32 = 0x14;
+const OFFSCREEN: u32 = 0x18;
+const SOURCE: u32 = 0x1C;
+/// The HRESULTs of the calls, in order.
+const RESULTS: u32 = 0x40;
+const DONE: u32 = 0xC0;
+const DESC: u32 = 0x100;
+const CAPS: u32 = 0x180;
+const LOCKED: u32 = 0x200;
+const FX: u32 = 0x280;
+const RECT: u32 = 0x300;
+const KEY: u32 = 0x310;
+const CLASS: u32 = 0x320;
+const ENTRIES: u32 = 0x400;
+const PIXELS: u32 = 0x800;
+const DATA_SIZE: usize = 0x900;
+
+/// The data the programs start with: the window class's name.
+fn data() -> Vec<u8> {
+    let mut data = vec![0u8; DATA_SIZE];
+    put(&mut data, CLASS, b"Static\0");
+    data
+}
+
+fn put(data: &mut [u8], offset: u32, bytes: &[u8]) {
+    data[offset as usize..offset as usize + bytes.len()].copy_from_slice(bytes);
+}
+
+fn put32(data: &mut [u8], offset: u32, value: u32) {
+    put(data, offset, &value.to_le_bytes());
+}
+
+/// An argument a program passes.
+#[derive(Clone, Copy)]
+enum Arg {
+    /// A value.
+    I(u32),
+    /// The address of the data's byte at an offset.
+    At(u32),
+    /// The value in the data at an offset.
+    Val(u32),
+}
+
+fn push(a: &mut CodeAssembler, l: &Layout, args: &[Arg]) -> Result<(), IcedError> {
+    for arg in args.iter().rev() {
+        match *arg {
+            Arg::I(v) => a.push(v as i32)?,
+            Arg::At(o) => a.push(l.at(o) as i32)?,
+            Arg::Val(o) => a.push(dword_ptr(l.at(o)))?,
+        }
+    }
+    Ok(())
+}
+
+/// The program's call results, one after another in RESULTS.
+struct Calls {
+    next: u32,
+}
+
+impl Calls {
+    fn keep(&mut self, a: &mut CodeAssembler, l: &Layout) -> Result<(), IcedError> {
+        a.mov(dword_ptr(l.at(RESULTS + 4 * self.next)), eax)?;
+        self.next += 1;
+        Ok(())
+    }
+
+    /// Call the import `index` with `args`.
+    fn api(
+        &mut self,
+        a: &mut CodeAssembler,
+        l: &Layout,
+        index: usize,
+        args: &[Arg],
+    ) -> Result<(), IcedError> {
+        push(a, l, args)?;
+        a.call(l.import(index))?;
+        self.keep(a, l)
+    }
+
+    /// Call method `method` of the interface whose pointer is at data
+    /// offset `object`, with `args` after `this`.
+    fn com(
+        &mut self,
+        a: &mut CodeAssembler,
+        l: &Layout,
+        object: u32,
+        method: u32,
+        args: &[Arg],
+    ) -> Result<(), IcedError> {
+        push(a, l, args)?;
+        a.mov(eax, dword_ptr(l.at(object)))?;
+        a.push(eax)?;
+        a.mov(eax, dword_ptr(eax))?;
+        a.call(dword_ptr(eax + 4 * method))?;
+        self.keep(a, l)
+    }
+}
+
+/// The end of a program: DONE set, and it spins, its memory there to
+/// look at.
+fn finish(a: &mut CodeAssembler, l: &Layout) -> Result<(), IcedError> {
+    a.mov(dword_ptr(l.at(DONE)), 1)?;
+    let mut again = a.create_label();
+    a.set_label(&mut again)?;
+    a.jmp(again)
+}
+
+/// The results of the first `n` calls, read from the program's data.
+fn results(cpu: &mut Cpu, data: u32, n: u32) -> Vec<u32> {
+    (0..n).map(|i| peek(cpu, data + RESULTS + 4 * i)).collect()
+}
+
+// Methods' places in their vtables.
+const DD_CREATE_PALETTE: u32 = 5;
+const DD_CREATE_SURFACE: u32 = 6;
+const DD_SET_COOPERATIVE_LEVEL: u32 = 20;
+const DD_SET_DISPLAY_MODE: u32 = 21;
+const S_BLT: u32 = 5;
+const S_FLIP: u32 = 11;
+const S_GET_ATTACHED_SURFACE: u32 = 12;
+const S_LOCK: u32 = 25;
+const S_SET_CLIPPER: u32 = 28;
+const S_SET_COLOR_KEY: u32 = 29;
+const S_SET_PALETTE: u32 = 31;
+const S_UNLOCK: u32 = 32;
+const PAL_SET_ENTRIES: u32 = 6;
+const CLIP_SET_HWND: u32 = 8;
+
+const DDSD_CAPS: u32 = 0x1;
+const DDSD_HEIGHT: u32 = 0x2;
+const DDSD_WIDTH: u32 = 0x4;
+const DDSD_BACKBUFFERCOUNT: u32 = 0x20;
+const DDSD_PIXELFORMAT: u32 = 0x1000;
+const DDSCAPS_BACKBUFFER: u32 = 0x4;
+const DDSCAPS_COMPLEX: u32 = 0x8;
+const DDSCAPS_FLIP: u32 = 0x10;
+const DDSCAPS_OFFSCREENPLAIN: u32 = 0x40;
+const DDSCAPS_PRIMARYSURFACE: u32 = 0x200;
+const DDSCAPS_SYSTEMMEMORY: u32 = 0x800;
+const DDSCL_FULLSCREEN: u32 = 0x1;
+const DDSCL_NORMAL: u32 = 0x8;
+const DDSCL_EXCLUSIVE: u32 = 0x10;
+const DDBLT_COLORFILL: u32 = 0x400;
+const DDBLT_KEYSRC: u32 = 0x8000;
+const DDBLT_WAIT: u32 = 0x100_0000;
+const DDCKEY_SRCBLT: u32 = 0x8;
+const DDPCAPS_8BIT: u32 = 0x4;
+const DDPCAPS_ALLOW256: u32 = 0x40;
+const WS_POPUP: u32 = 0x8000_0000;
+const WS_VISIBLE: u32 = 0x1000_0000;
+
+/// A DDSURFACEDESC at `offset` with `flags`, `caps` and the rest given.
+fn desc(data: &mut [u8], offset: u32, flags: u32, caps: u32, w: u32, h: u32, backbuffers: u32) {
+    put32(data, offset, 108);
+    put32(data, offset + 0x04, flags);
+    put32(data, offset + 0x08, h);
+    put32(data, offset + 0x0C, w);
+    put32(data, offset + 0x14, backbuffers);
+    put32(data, offset + 0x68, caps);
+}
+
+/// A 32-bit RGB pixel format in the DDSURFACEDESC at `offset`.
+fn rgb32(data: &mut [u8], offset: u32) {
+    let pf = offset + 0x48;
+    put32(data, pf, 32);
+    put32(data, pf + 4, 0x40);
+    put32(data, pf + 12, 32);
+    put32(data, pf + 16, 0xFF_0000);
+    put32(data, pf + 20, 0xFF00);
+    put32(data, pf + 24, 0xFF);
+}
+
+const USER32: (&str, &[&str]) = ("USER32.DLL", &["CreateWindowExA"]);
+const DDRAW: (&str, &[&str]) = (
+    "DDRAW.DLL",
+    &["DirectDrawCreate", "DirectDrawCreateClipper"],
+);
+const CREATE_WINDOW: usize = 0;
+const DIRECT_DRAW_CREATE: usize = 1;
+const DIRECT_DRAW_CREATE_CLIPPER: usize = 2;
+
+/// Make a window, as CreateWindowExA's arguments say, and a DirectDraw
+/// object.
+fn start(
+    a: &mut CodeAssembler,
+    l: &Layout,
+    c: &mut Calls,
+    rect: (u32, u32, u32, u32),
+) -> Result<(), IcedError> {
+    let (x, y, w, h) = rect;
+    c.api(
+        a,
+        l,
+        CREATE_WINDOW,
+        &[
+            Arg::I(0),
+            Arg::At(CLASS),
+            Arg::At(CLASS),
+            Arg::I(WS_POPUP | WS_VISIBLE),
+            Arg::I(x),
+            Arg::I(y),
+            Arg::I(w),
+            Arg::I(h),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(BASE),
+            Arg::I(0),
+        ],
+    )?;
+    a.mov(dword_ptr(l.at(HWND)), eax)?;
+    c.api(
+        a,
+        l,
+        DIRECT_DRAW_CREATE,
+        &[Arg::I(0), Arg::At(DD), Arg::I(0)],
+    )
+}
+
+/// Full screen: a 320x200 8-bit mode, a flip chain, a pixel written to
+/// the back buffer through Lock and a flip that shows it.
+fn fullscreen_program() -> (Vec<u8>, u32) {
+    let mut d = data();
+    desc(
+        &mut d,
+        DESC,
+        DDSD_CAPS | DDSD_BACKBUFFERCOUNT,
+        DDSCAPS_PRIMARYSURFACE | DDSCAPS_FLIP | DDSCAPS_COMPLEX,
+        0,
+        0,
+        1,
+    );
+    put32(&mut d, CAPS, DDSCAPS_BACKBUFFER);
+    put32(&mut d, LOCKED, 108);
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 320, 200))?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_COOPERATIVE_LEVEL,
+            &[Arg::Val(HWND), Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_DISPLAY_MODE,
+            &[Arg::I(320), Arg::I(200), Arg::I(8)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(DESC), Arg::At(FRONT), Arg::I(0)],
+        )?;
+        c.com(
+            a,
+            l,
+            FRONT,
+            S_GET_ATTACHED_SURFACE,
+            &[Arg::At(CAPS), Arg::At(BACK)],
+        )?;
+        c.com(
+            a,
+            l,
+            BACK,
+            S_LOCK,
+            &[Arg::I(0), Arg::At(LOCKED), Arg::I(1), Arg::I(0)],
+        )?;
+        // Four pixels at the start of the first row and of the second.
+        a.mov(edi, dword_ptr(l.at(LOCKED + 0x24)))?;
+        a.mov(dword_ptr(edi), 0x4433_2211)?;
+        a.add(edi, dword_ptr(l.at(LOCKED + 0x10)))?;
+        a.mov(dword_ptr(edi), 0x8877_6655u32 as i32)?;
+        c.com(a, l, BACK, S_UNLOCK, &[Arg::I(0)])?;
+        c.com(a, l, FRONT, S_FLIP, &[Arg::I(0), Arg::I(1)])?;
+        finish(a, l)
+    })
+}
+
+#[test]
+fn a_full_screen_program_draws_on_its_back_buffer_and_flips() {
+    let (program, data) = fullscreen_program();
+    let mut cpu = machine("fullscreen", program);
+    run_until_done(&mut cpu, data);
+    assert_eq!(results(&mut cpu, data, 9)[1..], [0; 8]);
+    let mode = cpu.bus.vbe.mode.expect("a VBE mode");
+    assert_eq!((mode.width, mode.height, mode.bpp), (320, 200, 8));
+    // The back buffer was after the screen's 64000 bytes; the flip shows
+    // it, and its pixels are the program's.
+    let start = cpu.bus.vbe.start as usize;
+    assert_eq!(start, 64000);
+    let pitch = cpu.bus.vbe.pitch as usize;
+    assert_eq!(pitch, 320);
+    assert_eq!(cpu.bus.vbe.vram[start..start + 4], [0x11, 0x22, 0x33, 0x44]);
+    let row = start + pitch;
+    assert_eq!(cpu.bus.vbe.vram[row..row + 4], [0x55, 0x66, 0x77, 0x88]);
+    // The pointer Lock gave is in the program's view of video memory.
+    let pointer = peek(&cpu, data + LOCKED + 0x24);
+    assert_eq!(pointer & 0x3F_FFFF, 64000);
+}
+
+/// A program in a window: an offscreen surface filled with a color and
+/// blitted to the primary surface (the desktop), clipped to the window.
+fn windowed_program() -> (Vec<u8>, u32) {
+    let mut d = data();
+    desc(&mut d, DESC, DDSD_CAPS, DDSCAPS_PRIMARYSURFACE, 0, 0, 0);
+    desc(
+        &mut d,
+        LOCKED,
+        DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT,
+        DDSCAPS_OFFSCREENPLAIN,
+        16,
+        16,
+        0,
+    );
+    put32(&mut d, FX, 100);
+    put32(&mut d, FX + 0x50, 0x00FF_0000);
+    // Half the blit is left of the window, which starts at (100, 50).
+    for (i, v) in [92u32, 50, 108, 66].iter().enumerate() {
+        put32(&mut d, RECT + 4 * i as u32, *v);
+    }
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (100, 50, 200, 100))?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_COOPERATIVE_LEVEL,
+            &[Arg::Val(HWND), Arg::I(DDSCL_NORMAL)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(DESC), Arg::At(FRONT), Arg::I(0)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(LOCKED), Arg::At(OFFSCREEN), Arg::I(0)],
+        )?;
+        c.com(
+            a,
+            l,
+            OFFSCREEN,
+            S_BLT,
+            &[
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(DDBLT_COLORFILL | DDBLT_WAIT),
+                Arg::At(FX),
+            ],
+        )?;
+        c.api(
+            a,
+            l,
+            DIRECT_DRAW_CREATE_CLIPPER,
+            &[Arg::I(0), Arg::At(CLIPPER), Arg::I(0)],
+        )?;
+        c.com(a, l, CLIPPER, CLIP_SET_HWND, &[Arg::I(0), Arg::Val(HWND)])?;
+        c.com(a, l, FRONT, S_SET_CLIPPER, &[Arg::Val(CLIPPER)])?;
+        c.com(
+            a,
+            l,
+            FRONT,
+            S_BLT,
+            &[
+                Arg::At(RECT),
+                Arg::Val(OFFSCREEN),
+                Arg::I(0),
+                Arg::I(DDBLT_WAIT),
+                Arg::I(0),
+            ],
+        )?;
+        finish(a, l)
+    })
+}
+
+#[test]
+fn a_windowed_program_blits_to_the_desktop_inside_its_window() {
+    let (program, data) = windowed_program();
+    let mut cpu = machine("windowed", program);
+    run_until_done(&mut cpu, data);
+    assert_eq!(results(&mut cpu, data, 10)[1..], [0; 9]);
+    let pitch = cpu.bus.vbe.pitch as usize;
+    let pixel = |cpu: &Cpu, x: usize, y: usize| {
+        let at = y * pitch + x * 4;
+        u32::from_le_bytes(cpu.bus.vbe.vram[at..at + 4].try_into().unwrap())
+    };
+    // In the window, red; left of it, the desktop as it was.
+    for y in [50, 65] {
+        for x in [100, 107] {
+            assert_eq!(pixel(&cpu, x, y), 0x00FF_0000, "({x}, {y})");
+        }
+        assert_ne!(pixel(&cpu, 99, y), 0x00FF_0000);
+        assert_ne!(pixel(&cpu, 92, y), 0x00FF_0000);
+    }
+    assert_ne!(pixel(&cpu, 100, 66), 0x00FF_0000);
+}
+
+/// A palette on the primary surface of an 8-bit mode, and an entry
+/// changed after.
+fn palette_program() -> (Vec<u8>, u32) {
+    let mut d = data();
+    desc(&mut d, DESC, DDSD_CAPS, DDSCAPS_PRIMARYSURFACE, 0, 0, 0);
+    for i in 0..256u32 {
+        put(&mut d, ENTRIES + 4 * i, &[i as u8, 0x40, 255 - i as u8, 0]);
+    }
+    put(&mut d, KEY, &[0x80, 0xC0, 0x10, 0]);
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 640, 480))?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_COOPERATIVE_LEVEL,
+            &[Arg::Val(HWND), Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_DISPLAY_MODE,
+            &[Arg::I(640), Arg::I(480), Arg::I(8)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(DESC), Arg::At(FRONT), Arg::I(0)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_PALETTE,
+            &[
+                Arg::I(DDPCAPS_8BIT | DDPCAPS_ALLOW256),
+                Arg::At(ENTRIES),
+                Arg::At(PALETTE),
+                Arg::I(0),
+            ],
+        )?;
+        c.com(a, l, FRONT, S_SET_PALETTE, &[Arg::Val(PALETTE)])?;
+        c.com(
+            a,
+            l,
+            PALETTE,
+            PAL_SET_ENTRIES,
+            &[Arg::I(0), Arg::I(7), Arg::I(1), Arg::At(KEY)],
+        )?;
+        finish(a, l)
+    })
+}
+
+#[test]
+fn a_palette_on_the_primary_surface_is_the_dacs() {
+    let (program, data) = palette_program();
+    let mut cpu = machine("palette", program);
+    run_until_done(&mut cpu, data);
+    assert_eq!(results(&mut cpu, data, 7)[1..], [0; 6]);
+    let dac = |cpu: &Cpu, i: usize| cpu.bus.vga.palette[i * 3..i * 3 + 3].to_vec();
+    // 6 bits a color, as the DAC has them.
+    assert_eq!(dac(&cpu, 0), [0, 0x10, 0x3F]);
+    assert_eq!(dac(&cpu, 200), [200 >> 2, 0x10, 55 >> 2]);
+    assert_eq!(dac(&cpu, 7), [0x20, 0x30, 0x04]);
+}
+
+/// A blit through the source's color key, between system memory
+/// surfaces, its result copied to PIXELS.
+fn color_key_program() -> (Vec<u8>, u32) {
+    let mut d = data();
+    for offset in [DESC, LOCKED] {
+        desc(
+            &mut d,
+            offset,
+            DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT,
+            DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY,
+            4,
+            1,
+            0,
+        );
+        rgb32(&mut d, offset);
+    }
+    put32(&mut d, FX, 100);
+    put32(&mut d, FX + 0x50, 0x0012_3456);
+    put32(&mut d, KEY, 0x00FF_00FF);
+    put32(&mut d, KEY + 4, 0x00FF_00FF);
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 64, 64))?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_COOPERATIVE_LEVEL,
+            &[Arg::Val(HWND), Arg::I(DDSCL_NORMAL)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(DESC), Arg::At(OFFSCREEN), Arg::I(0)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(LOCKED), Arg::At(SOURCE), Arg::I(0)],
+        )?;
+        // The source: the key, a color, the key, another.
+        c.com(
+            a,
+            l,
+            SOURCE,
+            S_LOCK,
+            &[Arg::I(0), Arg::At(LOCKED), Arg::I(1), Arg::I(0)],
+        )?;
+        a.mov(edi, dword_ptr(l.at(LOCKED + 0x24)))?;
+        a.mov(dword_ptr(edi), 0x00FF_00FF)?;
+        a.mov(dword_ptr(edi + 4), 0x0000_00AA)?;
+        a.mov(dword_ptr(edi + 8), 0x00FF_00FF)?;
+        a.mov(dword_ptr(edi + 12), 0x0000_BB00)?;
+        c.com(a, l, SOURCE, S_UNLOCK, &[Arg::I(0)])?;
+        c.com(
+            a,
+            l,
+            SOURCE,
+            S_SET_COLOR_KEY,
+            &[Arg::I(DDCKEY_SRCBLT), Arg::At(KEY)],
+        )?;
+        c.com(
+            a,
+            l,
+            OFFSCREEN,
+            S_BLT,
+            &[
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(DDBLT_COLORFILL | DDBLT_WAIT),
+                Arg::At(FX),
+            ],
+        )?;
+        c.com(
+            a,
+            l,
+            OFFSCREEN,
+            S_BLT,
+            &[
+                Arg::I(0),
+                Arg::Val(SOURCE),
+                Arg::I(0),
+                Arg::I(DDBLT_KEYSRC | DDBLT_WAIT),
+                Arg::I(0),
+            ],
+        )?;
+        c.com(
+            a,
+            l,
+            OFFSCREEN,
+            S_LOCK,
+            &[Arg::I(0), Arg::At(DESC), Arg::I(1), Arg::I(0)],
+        )?;
+        a.mov(esi, dword_ptr(l.at(DESC + 0x24)))?;
+        for i in 0..4 {
+            a.mov(eax, dword_ptr(esi + 4 * i))?;
+            a.mov(dword_ptr(l.at(PIXELS + 4 * i as u32)), eax)?;
+        }
+        c.com(a, l, OFFSCREEN, S_UNLOCK, &[Arg::I(0)])?;
+        finish(a, l)
+    })
+}
+
+#[test]
+fn a_blit_through_a_color_key_leaves_the_keyed_pixels() {
+    let (program, data) = color_key_program();
+    let mut cpu = machine("color_key", program);
+    run_until_done(&mut cpu, data);
+    assert_eq!(results(&mut cpu, data, 11)[1..], [0; 10]);
+    let pixels: Vec<u32> = (0..4).map(|i| peek(&cpu, data + PIXELS + 4 * i)).collect();
+    assert_eq!(pixels, [0x0012_3456, 0xAA, 0x0012_3456, 0xBB00]);
+}

@@ -87,7 +87,7 @@ pub fn create_clipper(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, _, out, outer] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
     };
-    let (vtable, dd) = hr!(super::ddraw::ddraw_of(cpu, this));
+    let (vtable, dd) = hr!(super::directdraw::ddraw_of(cpu, this));
     if outer != 0 {
         return Some(CLASS_E_NOAGGREGATION);
     }

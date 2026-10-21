@@ -35,7 +35,7 @@ macro_rules! hr {
 
 mod blt;
 mod clipper;
-mod ddraw;
+mod directdraw;
 mod display;
 pub mod enumerate;
 mod palette;
@@ -81,8 +81,13 @@ const fn method(name: &'static str, args: u8, handler: super::stubs::Handler) ->
 static APIS: &[Api] = &[
     stdcall("DllCanUnloadNow", 1, 0, dll_can_unload_now),
     stdcall("DllGetClassObject", 2, 3, dll_get_class_object),
-    stdcall("DirectDrawCreate", 3, 3, ddraw::direct_draw_create),
-    stdcall("DirectDrawCreateEx", 4, 4, ddraw::direct_draw_create_ex),
+    stdcall("DirectDrawCreate", 3, 3, directdraw::direct_draw_create),
+    stdcall(
+        "DirectDrawCreateEx",
+        4,
+        4,
+        directdraw::direct_draw_create_ex,
+    ),
     stdcall(
         "DirectDrawEnumerateA",
         5,
@@ -113,7 +118,7 @@ static APIS: &[Api] = &[
     method("DD_QueryInterface", 3, query_interface),
     method("DD_AddRef", 1, add_ref_method),
     method("DD_Release", 1, release_method),
-    method("IDirectDraw_Compact", 1, ddraw::compact),
+    method("IDirectDraw_Compact", 1, directdraw::compact),
     method("IDirectDraw_CreateClipper", 4, clipper::create_clipper),
     method("IDirectDraw_CreatePalette", 5, palette::create_palette),
     method("IDirectDraw_CreateSurface", 4, surface::create_surface),
@@ -133,43 +138,59 @@ static APIS: &[Api] = &[
         1,
         surface::flip_to_gdi_surface,
     ),
-    method("IDirectDraw_GetCaps", 3, ddraw::get_caps),
-    method("IDirectDraw_GetDisplayMode", 2, ddraw::get_display_mode),
-    method("IDirectDraw_GetFourCCCodes", 3, ddraw::get_four_cc_codes),
+    method("IDirectDraw_GetCaps", 3, directdraw::get_caps),
+    method(
+        "IDirectDraw_GetDisplayMode",
+        2,
+        directdraw::get_display_mode,
+    ),
+    method(
+        "IDirectDraw_GetFourCCCodes",
+        3,
+        directdraw::get_four_cc_codes,
+    ),
     method("IDirectDraw_GetGDISurface", 2, surface::get_gdi_surface),
     method(
         "IDirectDraw_GetMonitorFrequency",
         2,
-        ddraw::get_monitor_frequency,
+        directdraw::get_monitor_frequency,
     ),
-    method("IDirectDraw_GetScanLine", 2, ddraw::get_scan_line),
+    method("IDirectDraw_GetScanLine", 2, directdraw::get_scan_line),
     method(
         "IDirectDraw_GetVerticalBlankStatus",
         2,
-        ddraw::get_vertical_blank_status,
+        directdraw::get_vertical_blank_status,
     ),
-    method("IDirectDraw_Initialize", 2, ddraw::initialize),
+    method("IDirectDraw_Initialize", 2, directdraw::initialize),
     method(
         "IDirectDraw_RestoreDisplayMode",
         1,
-        ddraw::restore_display_mode,
+        directdraw::restore_display_mode,
     ),
     method(
         "IDirectDraw_SetCooperativeLevel",
         3,
-        ddraw::set_cooperative_level,
+        directdraw::set_cooperative_level,
     ),
-    method("IDirectDraw_SetDisplayMode", 4, ddraw::set_display_mode),
+    method(
+        "IDirectDraw_SetDisplayMode",
+        4,
+        directdraw::set_display_mode,
+    ),
     method(
         "IDirectDraw_WaitForVerticalBlank",
         3,
-        ddraw::wait_for_vertical_blank,
+        directdraw::wait_for_vertical_blank,
     ),
-    method("IDirectDraw2_SetDisplayMode", 6, ddraw::set_display_mode),
+    method(
+        "IDirectDraw2_SetDisplayMode",
+        6,
+        directdraw::set_display_mode,
+    ),
     method(
         "IDirectDraw2_GetAvailableVidMem",
         4,
-        ddraw::get_available_vid_mem,
+        directdraw::get_available_vid_mem,
     ),
     method(
         "IDirectDraw4_GetSurfaceFromDC",
@@ -184,15 +205,15 @@ static APIS: &[Api] = &[
     method(
         "IDirectDraw4_TestCooperativeLevel",
         1,
-        ddraw::test_cooperative_level,
+        directdraw::test_cooperative_level,
     ),
     method(
         "IDirectDraw4_GetDeviceIdentifier",
         3,
-        ddraw::get_device_identifier,
+        directdraw::get_device_identifier,
     ),
-    method("IDirectDraw7_StartModeTest", 4, ddraw::unsupported),
-    method("IDirectDraw7_EvaluateMode", 3, ddraw::unsupported),
+    method("IDirectDraw7_StartModeTest", 4, directdraw::unsupported),
+    method("IDirectDraw7_EvaluateMode", 3, directdraw::unsupported),
     method(
         "Surface_AddAttachedSurface",
         2,
@@ -200,7 +221,7 @@ static APIS: &[Api] = &[
     ),
     method("Surface_AddOverlayDirtyRect", 2, surface::not_overlay),
     method("Surface_Blt", 6, blt::blt),
-    method("Surface_BltBatch", 4, ddraw::unsupported),
+    method("Surface_BltBatch", 4, directdraw::unsupported),
     method("Surface_BltFast", 6, blt::blt_fast),
     method(
         "Surface_DeleteAttachedSurface",
@@ -662,7 +683,7 @@ pub static CLASSES: &[com::Class] = &[
         ),
         dll: "DDRAW.DLL",
         name: "DirectDraw",
-        create: ddraw::create_instance,
+        create: directdraw::create_instance,
     },
     com::Class {
         clsid: guid(
@@ -673,7 +694,7 @@ pub static CLASSES: &[com::Class] = &[
         ),
         dll: "DDRAW.DLL",
         name: "DirectDraw7",
-        create: ddraw::create_instance,
+        create: directdraw::create_instance,
     },
     com::Class {
         clsid: guid(
@@ -725,7 +746,7 @@ pub struct Object {
     /// Whether it holds a reference on `creator`: what IDirectDraw4 and
     /// 7 make does.
     pub holds_creator: bool,
-    pub ddraw: Option<ddraw::DirectDraw>,
+    pub ddraw: Option<directdraw::DirectDraw>,
     pub surface: Option<surface::Surface>,
     pub palette: Option<palette::Palette>,
     pub clipper: Option<clipper::Clipper>,
@@ -911,7 +932,7 @@ pub fn destroy(cpu: &mut Cpu, id: u32) {
         return;
     };
     if object.ddraw.is_some() {
-        ddraw::destroyed(cpu, id);
+        directdraw::destroyed(cpu, id);
     }
     if object.surface.is_some() {
         surface::destroyed(cpu, id);

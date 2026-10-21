@@ -100,7 +100,7 @@ pub fn enum_display_modes(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, _, desc_at, context, callback] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
     };
-    let (vtable, _) = hr!(super::ddraw::ddraw_of(cpu, this));
+    let (vtable, _) = hr!(super::directdraw::ddraw_of(cpu, this));
     if !callable(cpu, callback) {
         return Some(DDERR_INVALIDPARAMS);
     }
@@ -143,7 +143,7 @@ pub fn enum_surfaces(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, flags, desc_at, context, callback] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
     };
-    let (vtable, dd) = hr!(super::ddraw::ddraw_of(cpu, this));
+    let (vtable, dd) = hr!(super::directdraw::ddraw_of(cpu, this));
     if !callable(cpu, callback) {
         return Some(DDERR_INVALIDPARAMS);
     }
