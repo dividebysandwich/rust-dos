@@ -407,6 +407,23 @@ feedback answer as a machine without that hardware does.
 Milestone candidates: Quake 2 with 3dfx's MiniGL, the Unreal demo with
 Glide, Expendable with Direct3D.
 
+GLIDE2X.DLL drives the card's registers as 3dfx's library did, on a
+Voodoo Graphics, a Voodoo2, a Banshee and a Voodoo3, and Direct3D's HAL
+(Direct3D 1 to 7's interfaces in DDRAW.DLL) draws through the same
+code. On a Banshee or Voodoo3 the desktop is 640x480 at 16 bits a pixel
+in the card's own memory and modes, so DirectDraw's surfaces there are
+what the 3D engine renders into, in a window too. A Voodoo Graphics or
+Voodoo2 add-on card is a second DirectDraw device, as 3dfx's driver
+made it, with the card's full-screen modes and buffers. There is no
+software rasterizer, so the RGB and Ramp devices aren't there, and
+32-bit render targets fail as they did on the cards.
+
+Unreal Gold runs from GOG's folder on a Voodoo2 and a Voodoo3: its
+levels with Glide, its intro and menus with Direct3D. Incoming and
+Expendable run with Direct3D. SHELL32, COMCTL32, COMDLG32, WSOCK32 and
+DPLAYX came in for them, answering as a machine without a network
+does, with each common dialog cancelled.
+
 **Phase 5: breadth.**
 
 - 32-bit installers (InstallShield 5's 32-bit engine, Wise) and
