@@ -55,6 +55,8 @@ pub const DDSCAPS_OVERLAY: u32 = 0x80;
 pub const DDSCAPS_PALETTE: u32 = 0x100;
 pub const DDSCAPS_PRIMARYSURFACE: u32 = 0x200;
 pub const DDSCAPS_SYSTEMMEMORY: u32 = 0x800;
+pub const DDSCAPS_TEXTURE: u32 = 0x1000;
+pub const DDSCAPS_3DDEVICE: u32 = 0x2000;
 pub const DDSCAPS_VIDEOMEMORY: u32 = 0x4000;
 pub const DDSCAPS_VISIBLE: u32 = 0x8000;
 pub const DDSCAPS_ZBUFFER: u32 = 0x2_0000;
@@ -62,7 +64,7 @@ pub const DDSCAPS_MIPMAP: u32 = 0x40_0000;
 pub const DDSCAPS_LOCALVIDMEM: u32 = 0x1000_0000;
 const DDSCAPS2_TEXTUREMANAGE: u32 = 0x10;
 const DDSCAPS2_CUBEMAP: u32 = 0x200;
-const DDSCAPS2_MIPMAPSUBLEVEL: u32 = 0x1_0000;
+pub const DDSCAPS2_MIPMAPSUBLEVEL: u32 = 0x1_0000;
 const DDSCAPS2_D3DTEXTUREMANAGE: u32 = 0x2_0000;
 const DDSCAPS2_VOLUME: u32 = 0x20_0000;
 
@@ -287,6 +289,9 @@ pub struct Surface {
     pub uniqueness: u32,
     pub priority: u32,
     pub lod: u32,
+    /// The gamma ramp IDirectDrawGammaControl set: 256 red, green and
+    /// blue values, or none for the identity.
+    pub gamma: Vec<u16>,
 }
 
 impl Surface {
@@ -374,6 +379,15 @@ fn usable(cpu: &mut Cpu, this: u32) -> Result<(usize, u32), u32> {
         return Err(DDERR_SURFACELOST);
     }
     Ok((vtable, id))
+}
+
+/// Whether the surface `id` is a mipmap sublevel, through an
+/// IDirectDrawSurface7, which has no color key or palette of its own.
+fn sublevel(cpu: &mut Cpu, vtable: usize, id: u32) -> bool {
+    vtable == V_SURFACE7
+        && state(cpu)
+            .surface(id)
+            .is_some_and(|s| s.caps[1] & DDSCAPS2_MIPMAPSUBLEVEL != 0)
 }
 
 /// The surface interface vtable of the version a surface was made
@@ -1408,7 +1422,10 @@ pub fn set_color_key(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, flags, key] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
     };
-    let (_, id) = hr!(usable(cpu, this));
+    let (vtable, id) = hr!(usable(cpu, this));
+    if sublevel(cpu, vtable, id) {
+        return Some(super::d3d::DDERR_NOTONMIPMAPSUBLEVEL);
+    }
     let Some(place) = key_place(flags) else {
         return Some(DDERR_INVALIDPARAMS);
     };
@@ -1470,7 +1487,10 @@ pub fn set_palette(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, pal] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
     };
-    let (_, id) = hr!(usable(cpu, this));
+    let (vtable, id) = hr!(usable(cpu, this));
+    if sublevel(cpu, vtable, id) {
+        return Some(super::d3d::DDERR_NOTONMIPMAPSUBLEVEL);
+    }
     let Some(s) = state(cpu).surface(id).cloned() else {
         return Some(DDERR_INVALIDOBJECT);
     };
@@ -2080,5 +2100,6 @@ crate::state_fields!(Surface {
     private,
     uniqueness,
     priority,
-    lod
+    lod,
+    gamma
 });

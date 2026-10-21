@@ -35,9 +35,11 @@ macro_rules! hr {
 
 mod blt;
 mod clipper;
+pub mod d3d;
 mod directdraw;
 mod display;
 pub mod enumerate;
+mod gamma;
 mod palette;
 mod surface;
 
@@ -298,6 +300,158 @@ static APIS: &[Api] = &[
     ),
     method("Clipper_SetClipList", 3, clipper::set_clip_list),
     method("Clipper_SetHWnd", 3, clipper::set_hwnd),
+    method("IDirect3D_Initialize", 2, d3d::direct3d::initialize),
+    method("IDirect3D_EnumDevices", 3, d3d::direct3d::enum_devices),
+    method("IDirect3D_CreateLight", 3, d3d::direct3d::create_light),
+    method("IDirect3D_CreateMaterial", 3, d3d::direct3d::create_material),
+    method("IDirect3D_CreateViewport", 3, d3d::direct3d::create_viewport),
+    method("IDirect3D_FindDevice", 3, d3d::direct3d::find_device),
+    method("IDirect3D2_CreateDevice", 4, d3d::direct3d::create_device),
+    method("IDirect3D3_CreateDevice", 5, d3d::direct3d::create_device),
+    method("IDirect3D3_CreateVertexBuffer", 5, d3d::direct3d::create_vertex_buffer),
+    method("IDirect3D3_EnumZBufferFormats", 4, d3d::direct3d::enum_z_buffer_formats),
+    method("IDirect3D3_EvictManagedTextures", 1, d3d::direct3d::evict_managed_textures),
+    method("IDirect3D7_EnumDevices", 3, d3d::direct3d::enum_devices7),
+    method("IDirect3D7_CreateDevice", 4, d3d::direct3d::create_device),
+    method("IDirect3D7_CreateVertexBuffer", 4, d3d::direct3d::create_vertex_buffer),
+    method("IDirect3DDevice_Initialize", 4, d3d::device::initialize),
+    method("IDirect3DDevice_GetCaps", 3, d3d::device::get_caps),
+    method("IDirect3DDevice_SwapTextureHandles", 3, d3d::device::swap_texture_handles),
+    method("IDirect3DDevice_CreateExecuteBuffer", 4, d3d::execute::create_execute_buffer),
+    method("IDirect3DDevice_GetStats", 2, d3d::device::get_stats),
+    method("IDirect3DDevice_Execute", 4, d3d::execute::execute),
+    method("IDirect3DDevice_AddViewport", 2, d3d::device::add_viewport),
+    method("IDirect3DDevice_DeleteViewport", 2, d3d::device::delete_viewport),
+    method("IDirect3DDevice_NextViewport", 4, d3d::device::next_viewport),
+    method("IDirect3DDevice_Pick", 5, d3d::device::pick),
+    method("IDirect3DDevice_GetPickRecords", 3, d3d::device::get_pick_records),
+    method("IDirect3DDevice_EnumTextureFormats", 3, d3d::direct3d::enum_texture_formats),
+    method("IDirect3DDevice_CreateMatrix", 2, d3d::device::create_matrix),
+    method("IDirect3DDevice_SetMatrix", 3, d3d::device::set_matrix),
+    method("IDirect3DDevice_GetMatrix", 3, d3d::device::get_matrix),
+    method("IDirect3DDevice_DeleteMatrix", 2, d3d::device::delete_matrix),
+    method("IDirect3DDevice_BeginScene", 1, d3d::device::begin_scene),
+    method("IDirect3DDevice_EndScene", 1, d3d::device::end_scene),
+    method("IDirect3DDevice_GetDirect3D", 2, d3d::device::get_direct3d),
+    method("IDirect3DDevice2_SetCurrentViewport", 2, d3d::device::set_current_viewport),
+    method("IDirect3DDevice2_GetCurrentViewport", 2, d3d::device::get_current_viewport),
+    method("IDirect3DDevice2_SetRenderTarget", 3, d3d::device::set_render_target),
+    method("IDirect3DDevice2_GetRenderTarget", 2, d3d::device::get_render_target),
+    method("IDirect3DDevice2_Begin", 4, d3d::draw::begin),
+    method("IDirect3DDevice2_BeginIndexed", 6, d3d::draw::begin_indexed),
+    method("IDirect3DDevice2_Vertex", 2, d3d::draw::vertex),
+    method("IDirect3DDevice2_Index", 2, d3d::draw::index),
+    method("IDirect3DDevice2_End", 2, d3d::draw::end),
+    method("IDirect3DDevice2_GetRenderState", 3, d3d::states::get_render_state),
+    method("IDirect3DDevice2_SetRenderState", 3, d3d::states::set_render_state),
+    method("IDirect3DDevice2_GetLightState", 3, d3d::states::get_light_state),
+    method("IDirect3DDevice2_SetLightState", 3, d3d::states::set_light_state),
+    method("IDirect3DDevice2_SetTransform", 3, d3d::states::set_transform),
+    method("IDirect3DDevice2_GetTransform", 3, d3d::states::get_transform),
+    method("IDirect3DDevice2_MultiplyTransform", 3, d3d::states::multiply_transform),
+    method("IDirect3DDevice2_DrawPrimitive", 6, d3d::draw::draw_primitive),
+    method("IDirect3DDevice2_DrawIndexedPrimitive", 8, d3d::draw::draw_indexed_primitive),
+    method("IDirect3DDevice2_SetClipStatus", 2, d3d::states::set_clip_status),
+    method("IDirect3DDevice2_GetClipStatus", 2, d3d::states::get_clip_status),
+    method("IDirect3DDevice3_DrawPrimitiveStrided", 6, d3d::draw::draw_primitive_strided),
+    method(
+        "IDirect3DDevice3_DrawIndexedPrimitiveStrided",
+        8,
+        d3d::draw::draw_indexed_primitive_strided,
+    ),
+    method("IDirect3DDevice3_DrawPrimitiveVB", 6, d3d::draw::draw_primitive_vb),
+    method("IDirect3DDevice3_DrawIndexedPrimitiveVB", 6, d3d::draw::draw_indexed_primitive_vb3),
+    method("IDirect3DDevice3_ComputeSphereVisibility", 6, d3d::draw::compute_sphere_visibility),
+    method("IDirect3DDevice3_GetTexture", 3, d3d::states::get_texture),
+    method("IDirect3DDevice3_SetTexture", 3, d3d::states::set_texture),
+    method("IDirect3DDevice3_GetTextureStageState", 4, d3d::states::get_texture_stage_state),
+    method("IDirect3DDevice3_SetTextureStageState", 4, d3d::states::set_texture_stage_state),
+    method("IDirect3DDevice3_ValidateDevice", 2, d3d::device::validate_device),
+    method("IDirect3DDevice7_GetCaps", 2, d3d::device::get_caps7),
+    method("IDirect3DDevice7_Clear", 7, d3d::device::clear),
+    method("IDirect3DDevice7_SetViewport", 2, d3d::states::set_viewport),
+    method("IDirect3DDevice7_GetViewport", 2, d3d::states::get_viewport),
+    method("IDirect3DDevice7_SetMaterial", 2, d3d::states::set_material),
+    method("IDirect3DDevice7_GetMaterial", 2, d3d::states::get_material),
+    method("IDirect3DDevice7_SetLight", 3, d3d::states::set_light),
+    method("IDirect3DDevice7_GetLight", 3, d3d::states::get_light),
+    method("IDirect3DDevice7_BeginStateBlock", 1, d3d::states::begin_state_block),
+    method("IDirect3DDevice7_EndStateBlock", 2, d3d::states::end_state_block),
+    method("IDirect3DDevice7_PreLoad", 2, d3d::device::preload),
+    method("IDirect3DDevice7_DrawIndexedPrimitiveVB", 8, d3d::draw::draw_indexed_primitive_vb7),
+    method("IDirect3DDevice7_ApplyStateBlock", 2, d3d::states::apply_state_block),
+    method("IDirect3DDevice7_CaptureStateBlock", 2, d3d::states::capture_state_block),
+    method("IDirect3DDevice7_DeleteStateBlock", 2, d3d::states::delete_state_block),
+    method("IDirect3DDevice7_CreateStateBlock", 3, d3d::states::create_state_block),
+    method("IDirect3DDevice7_Load", 6, d3d::texture::load7),
+    method("IDirect3DDevice7_LightEnable", 3, d3d::states::light_enable),
+    method("IDirect3DDevice7_GetLightEnable", 3, d3d::states::get_light_enable),
+    method("IDirect3DDevice7_SetClipPlane", 3, d3d::states::set_clip_plane),
+    method("IDirect3DDevice7_GetClipPlane", 3, d3d::states::get_clip_plane),
+    method("IDirect3DDevice7_GetInfo", 4, d3d::device::get_info),
+    method("IDirect3DViewport_Initialize", 2, d3d::viewport::initialize),
+    method("IDirect3DViewport_GetViewport", 2, d3d::viewport::get_viewport),
+    method("IDirect3DViewport_SetViewport", 2, d3d::viewport::set_viewport),
+    method("IDirect3DViewport_TransformVertices", 5, d3d::viewport::transform_vertices),
+    method("IDirect3DViewport_LightElements", 3, d3d::viewport::light_elements),
+    method("IDirect3DViewport_SetBackground", 2, d3d::viewport::set_background),
+    method("IDirect3DViewport_GetBackground", 3, d3d::viewport::get_background),
+    method("IDirect3DViewport_SetBackgroundDepth", 2, d3d::viewport::set_background_depth),
+    method("IDirect3DViewport_GetBackgroundDepth", 3, d3d::viewport::get_background_depth),
+    method("IDirect3DViewport_Clear", 4, d3d::viewport::clear),
+    method("IDirect3DViewport_AddLight", 2, d3d::viewport::add_light),
+    method("IDirect3DViewport_DeleteLight", 2, d3d::viewport::delete_light),
+    method("IDirect3DViewport_NextLight", 4, d3d::viewport::next_light),
+    method("IDirect3DViewport2_GetViewport2", 2, d3d::viewport::get_viewport2),
+    method("IDirect3DViewport2_SetViewport2", 2, d3d::viewport::set_viewport2),
+    method("IDirect3DViewport3_SetBackgroundDepth2", 2, d3d::viewport::set_background_depth),
+    method("IDirect3DViewport3_GetBackgroundDepth2", 3, d3d::viewport::get_background_depth),
+    method("IDirect3DViewport3_Clear2", 7, d3d::viewport::clear2),
+    method("IDirect3DMaterial_Initialize", 2, d3d::material::initialize),
+    method("IDirect3DMaterial_SetMaterial", 2, d3d::material::set_material),
+    method("IDirect3DMaterial_GetMaterial", 2, d3d::material::get_material),
+    method("IDirect3DMaterial_GetHandle", 3, d3d::material::get_handle),
+    method("IDirect3DMaterial_Reserve", 1, d3d::material::reserve),
+    method("IDirect3DMaterial_Unreserve", 1, d3d::material::reserve),
+    method("IDirect3DLight_Initialize", 2, d3d::light::initialize),
+    method("IDirect3DLight_SetLight", 2, d3d::light::set_light),
+    method("IDirect3DLight_GetLight", 2, d3d::light::get_light),
+    method("IDirect3DExecuteBuffer_Initialize", 3, d3d::execute::initialize),
+    method("IDirect3DExecuteBuffer_Lock", 2, d3d::execute::lock),
+    method("IDirect3DExecuteBuffer_Unlock", 1, d3d::execute::unlock),
+    method("IDirect3DExecuteBuffer_SetExecuteData", 2, d3d::execute::set_execute_data),
+    method("IDirect3DExecuteBuffer_GetExecuteData", 2, d3d::execute::get_execute_data),
+    method("IDirect3DExecuteBuffer_Validate", 5, d3d::execute::validate),
+    method("IDirect3DExecuteBuffer_Optimize", 2, d3d::execute::optimize),
+    method("IDirect3DTexture_Initialize", 3, d3d::texture::initialize),
+    method("IDirect3DTexture_GetHandle", 3, d3d::texture::get_handle),
+    method("IDirect3DTexture_PaletteChanged", 3, d3d::texture::palette_changed),
+    method("IDirect3DTexture_Load", 2, d3d::texture::load),
+    method("IDirect3DTexture_Unload", 1, d3d::texture::unload),
+    method("IDirect3DVertexBuffer_Lock", 4, d3d::vertexbuffer::lock),
+    method("IDirect3DVertexBuffer_Unlock", 1, d3d::vertexbuffer::unlock),
+    method("IDirect3DVertexBuffer_ProcessVertices", 8, d3d::vertexbuffer::process_vertices),
+    method(
+        "IDirect3DVertexBuffer_GetVertexBufferDesc",
+        2,
+        d3d::vertexbuffer::get_vertex_buffer_desc,
+    ),
+    method("IDirect3DVertexBuffer_Optimize", 3, d3d::vertexbuffer::optimize),
+    method(
+        "IDirect3DVertexBuffer7_ProcessVerticesStrided",
+        8,
+        d3d::vertexbuffer::process_vertices_strided,
+    ),
+    method(
+        "DirectDrawGammaControl_GetGammaRamp",
+        3,
+        gamma::get_gamma_ramp,
+    ),
+    method(
+        "DirectDrawGammaControl_SetGammaRamp",
+        3,
+        gamma::set_gamma_ramp,
+    ),
 ];
 
 const IUNKNOWN: [&str; 3] = ["DD_QueryInterface", "DD_AddRef", "DD_Release"];
@@ -509,6 +663,90 @@ static VTABLES: &[Vtable] = &[
             "Clipper_SetHWnd",
         ],
     },
+    Vtable {
+        name: "IDirect3D",
+        methods: &d3d::D3D1,
+    },
+    Vtable {
+        name: "IDirect3D2",
+        methods: &d3d::D3D2,
+    },
+    Vtable {
+        name: "IDirect3D3",
+        methods: &d3d::D3D3,
+    },
+    Vtable {
+        name: "IDirect3D7",
+        methods: &d3d::D3D7,
+    },
+    Vtable {
+        name: "IDirect3DDevice",
+        methods: &d3d::DEVICE1,
+    },
+    Vtable {
+        name: "IDirect3DDevice2",
+        methods: &d3d::DEVICE2,
+    },
+    Vtable {
+        name: "IDirect3DDevice3",
+        methods: &d3d::DEVICE3,
+    },
+    Vtable {
+        name: "IDirect3DDevice7",
+        methods: &d3d::DEVICE7,
+    },
+    Vtable {
+        name: "IDirect3DViewport",
+        methods: &d3d::viewport::<16>(),
+    },
+    Vtable {
+        name: "IDirect3DViewport2",
+        methods: &d3d::viewport::<18>(),
+    },
+    Vtable {
+        name: "IDirect3DViewport3",
+        methods: &d3d::VIEWPORT3,
+    },
+    Vtable {
+        name: "IDirect3DMaterial",
+        methods: &d3d::MATERIAL1,
+    },
+    Vtable {
+        name: "IDirect3DMaterial2",
+        methods: &d3d::MATERIAL2,
+    },
+    Vtable {
+        name: "IDirect3DMaterial3",
+        methods: &d3d::MATERIAL2,
+    },
+    Vtable {
+        name: "IDirect3DLight",
+        methods: &d3d::LIGHT,
+    },
+    Vtable {
+        name: "IDirect3DExecuteBuffer",
+        methods: &d3d::EXECBUF,
+    },
+    Vtable {
+        name: "IDirect3DTexture",
+        methods: &d3d::TEXTURE1,
+    },
+    Vtable {
+        name: "IDirect3DTexture2",
+        methods: &d3d::TEXTURE2,
+    },
+    Vtable {
+        name: "IDirect3DVertexBuffer",
+        methods: &d3d::VB1,
+    },
+    Vtable {
+        name: "IDirect3DVertexBuffer7",
+        methods: &d3d::VB7,
+    },
+    Vtable {
+        name: "IDirectDrawGammaControl",
+        methods: &d3d::GAMMA,
+    },
 ];
 
 /// The vtables' places.
@@ -523,6 +761,27 @@ pub const V_SURFACE4: usize = 7;
 pub const V_SURFACE7: usize = 8;
 pub const V_PALETTE: usize = 9;
 pub const V_CLIPPER: usize = 10;
+pub const V_D3D1: usize = 11;
+pub const V_D3D2: usize = 12;
+pub const V_D3D3: usize = 13;
+pub const V_D3D7: usize = 14;
+pub const V_DEVICE1: usize = 15;
+pub const V_DEVICE2: usize = 16;
+pub const V_DEVICE3: usize = 17;
+pub const V_DEVICE7: usize = 18;
+pub const V_VIEWPORT1: usize = 19;
+pub const V_VIEWPORT2: usize = 20;
+pub const V_VIEWPORT3: usize = 21;
+pub const V_MATERIAL1: usize = 22;
+pub const V_MATERIAL2: usize = 23;
+pub const V_MATERIAL3: usize = 24;
+pub const V_LIGHT: usize = 25;
+pub const V_EXECBUF: usize = 26;
+pub const V_TEXTURE1: usize = 27;
+pub const V_TEXTURE2: usize = 28;
+pub const V_VB1: usize = 29;
+pub const V_VB7: usize = 30;
+pub const V_GAMMA: usize = 31;
 
 /// The version of IDirectDraw or IDirectDrawSurface a vtable is.
 pub fn version(vtable: usize) -> u32 {
@@ -730,6 +989,9 @@ pub struct Iface {
     pub vtable: u32,
     pub address: u32,
     pub refs: u32,
+    /// The interface whose count this one adds to and takes from, if
+    /// another's: IDirect3D's is its IDirectDraw's (`d3d::shares`).
+    pub counted: u32,
 }
 
 /// A DirectDraw object, a surface, a palette or a clipper: what is the
@@ -750,6 +1012,7 @@ pub struct Object {
     pub surface: Option<surface::Surface>,
     pub palette: Option<palette::Palette>,
     pub clipper: Option<clipper::Clipper>,
+    pub d3d: Option<d3d::D3dObject>,
 }
 
 impl Object {
@@ -843,6 +1106,10 @@ pub fn iface(cpu: &mut Cpu, id: u32, vtable: usize) -> u32 {
     if let Some(i) = object.ifaces.iter().find(|i| i.vtable == vtable as u32) {
         return i.address;
     }
+    let counted = match d3d::shares(cpu, id, vtable) {
+        Some(v) if v != vtable => iface(cpu, id, v),
+        _ => 0,
+    };
     let Some(address) = com::new_interface(cpu, dll_index(), vtable, id, 0) else {
         return 0;
     };
@@ -851,6 +1118,7 @@ pub fn iface(cpu: &mut Cpu, id: u32, vtable: usize) -> u32 {
             vtable: vtable as u32,
             address,
             refs: 0,
+            counted,
         });
     }
     address
@@ -886,6 +1154,10 @@ pub fn add_ref(cpu: &mut Cpu, address: u32) -> u32 {
         return 0;
     };
     match object.ifaces.iter_mut().find(|i| i.address == address) {
+        Some(i) if i.counted != 0 && i.counted != address => {
+            let counted = i.counted;
+            add_ref(cpu, counted)
+        }
         Some(i) => {
             i.refs += 1;
             i.refs
@@ -906,6 +1178,10 @@ pub fn release(cpu: &mut Cpu, address: u32) -> u32 {
     let Some(i) = object.ifaces.iter_mut().find(|i| i.address == address) else {
         return 0;
     };
+    if i.counted != 0 && i.counted != address {
+        let counted = i.counted;
+        return release(cpu, counted);
+    }
     i.refs = i.refs.saturating_sub(1);
     let refs = i.refs;
     if object.refs() == 0 {
@@ -935,7 +1211,11 @@ pub fn destroy(cpu: &mut Cpu, id: u32) {
         directdraw::destroyed(cpu, id);
     }
     if object.surface.is_some() {
+        d3d::surface_destroyed(cpu, id);
         surface::destroyed(cpu, id);
+    }
+    if object.d3d.is_some() {
+        d3d::destroyed(cpu, id);
     }
     if object.palette.is_some() {
         palette::destroyed(cpu, id);
@@ -1026,7 +1306,17 @@ fn query_interface(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if out == 0 {
         return Some(DDERR_INVALIDPARAMS);
     }
-    match vtable_for(vtable, &iid) {
+    let asked = match d3d::query(cpu, id, vtable, &iid, out) {
+        Some(Ok(v)) => Some(v),
+        Some(Err(hr)) => {
+            if hr != S_OK {
+                com::write_out(cpu, out, 0);
+            }
+            return Some(hr);
+        }
+        None => vtable_for(d3d::base_vtable(vtable), &iid),
+    };
+    match asked {
         Some(v) if v == vtable => {
             add_ref(cpu, this_);
             com::write_out(cpu, out, this_);
@@ -1060,7 +1350,8 @@ crate::state_fields!(Format {
 crate::state_fields!(Iface {
     vtable,
     address,
-    refs
+    refs,
+    counted
 });
 crate::state_fields!(Object {
     pid,
@@ -1071,7 +1362,8 @@ crate::state_fields!(Object {
     ddraw,
     surface,
     palette,
-    clipper
+    clipper,
+    d3d
 });
 crate::state_fields!(State {
     objects,
