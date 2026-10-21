@@ -433,7 +433,7 @@ pub fn read_strided_vertices(
         f32::from_le_bytes([b[4 * i], b[4 * i + 1], b[4 * i + 2], b[4 * i + 3]])
     };
     let d = |b: &[u8]| u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
-    let mut out = Vec::with_capacity(count as usize);
+    let mut out = Vec::with_capacity(count.min(0x1_0000) as usize);
     for i in 0..count {
         let n = if layout.rhw { 4 } else { 3 };
         let p = read(cpu, part(0), i, 4 * n)?;

@@ -774,6 +774,8 @@ fn in_place(cpu: &mut Cpu, id: u32, key: bool) -> Option<InPlace> {
 /// channel's bits again below them. 0RGB.
 fn expanded(raw: u32, s: &Surface) -> u32 {
     let channel = |mask: u32| {
+        // A mask past the texel's 16 bits is the program's mistake.
+        let mask = mask & 0xFFFF;
         if mask == 0 {
             return 0;
         }
@@ -1118,7 +1120,7 @@ fn argb(raw: u32, s: &Surface, pal: &[u32; 256]) -> u32 {
         }
         let v = (raw & mask) >> mask.trailing_zeros();
         let max = mask >> mask.trailing_zeros();
-        v * 255 / max
+        (v as u64 * 255 / max as u64) as u32
     };
     channel(f.a, 255) << 24 | channel(f.r, 0) << 16 | channel(f.g, 0) << 8 | channel(f.b, 0)
 }
