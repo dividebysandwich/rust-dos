@@ -14,6 +14,17 @@ advapi32/registry: skipped registry.c:1705
 advapi32/registry: skipped registry.c:1859
 advapi32/registry: skipped registry.c:1579
 advapi32/registry: skipped registry.c:1354
+dsound/capture: capture: 29 tests executed (0 marked as todo, 0 failures), 0 skipped.
+dsound/ds3d: ds3d: 849 tests executed (0 marked as todo, 0 failures), 0 skipped.
+dsound/ds3d8: ds3d8: 0 tests executed (0 marked as todo, 0 failures), 1 skipped.
+dsound/ds3d8: skipped ds3d8.c:1146
+dsound/dsound: dsound: 2040 tests executed (0 marked as todo, 1 failure), 48 skipped.
+dsound/dsound: failed dsound.c:1087
+dsound/dsound: skipped dsound.c:741 (x48)
+dsound/dsound8: dsound8: 0 tests executed (0 marked as todo, 0 failures), 1 skipped.
+dsound/dsound8: skipped dsound8.c:939
+dsound/propset: propset: 25 tests executed (0 marked as todo, 1 failure), 0 skipped.
+dsound/propset: failed propset.c:215
 gdi32/bitmap: bitmap: 4312 tests executed (0 marked as todo, 2 failures), 2 skipped.
 gdi32/bitmap: skipped bitmap.c:1894
 gdi32/bitmap: failed bitmap.c:2527
@@ -532,3 +543,5 @@ user32/win: failed win.c:2603 (x2)
 user32/win: skipped win.c:1057
 user32/win: skipped win.c:5990
 user32/wsprintf: wsprintf: 6 tests executed (0 marked as todo, 0 failures), 0 skipped.
+winmm/capture: capture: 5 tests executed (0 marked as todo, 0 failures), 0 skipped.
+winmm/wave: wave: 8497 tests executed (0 marked as todo, 0 failures), 0 skipped.

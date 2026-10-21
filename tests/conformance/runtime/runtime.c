@@ -745,3 +745,17 @@ void conformance_dump_region(HRGN hrgn)
 {
     (void)hrgn;
 }
+
+/* The two functions of math.h the tests use, on the x87 (dsound's and
+ * winmm's tests make sine waves to play). */
+double sin(double x)
+{
+    double result;
+    __asm__("fsin" : "=t"(result) : "0"(x));
+    return result;
+}
+
+double fabs(double x)
+{
+    return x < 0 ? -x : x;
+}

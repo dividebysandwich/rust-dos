@@ -212,12 +212,34 @@ const LIBS: &[&str] = &[
     "-ladvapi32",
     "-ldxguid",
     "-luuid",
+    "-lksuser",
 ];
 
-/// Build the test file `unit` of `dll` into `program`, as Wine does: the
-/// file without STANDALONE, which leaves the framework out of it, and a
-/// list of its one test with STANDALONE, which brings the framework and
-/// `main` in. Some files have their own copies of the framework's
+/// The test files of a DLL that call each other's helpers (dsound.c
+/// plays its buffers with ds3d.c's `test_buffer`): they are built into
+/// one program, named after the DLL, as Wine builds all of a DLL's, and
+/// it runs once for each, with its name as the argument.
+const SHARED: &[(&str, &[&str])] = &[
+    ("dsound", &["capture", "ds3d", "ds3d8", "dsound", "dsound8", "propset"]),
+    ("winmm", &["capture", "wave"]),
+];
+
+/// The files built with `unit` of `dll` into one program: those
+/// `SHARED` lists with it, or it alone.
+fn program_units(dll: &str, unit: &str) -> Vec<String> {
+    SHARED
+        .iter()
+        .find(|(d, units)| *d == dll && units.contains(&unit))
+        .map_or_else(
+            || vec![unit.to_string()],
+            |(_, units)| units.iter().map(|u| u.to_string()).collect(),
+        )
+}
+
+/// Build the test files `units` of `dll` into `program`, as Wine does:
+/// the files without STANDALONE, which leaves the framework out of them,
+/// and a list of their tests with STANDALONE, which brings the framework
+/// and `main` in. Some files have their own copies of the framework's
 /// helpers, which a STANDALONE build of them would have twice.
 ///
 /// MSVCRT's tests test the built-in MSVCRT.DLL, so they are linked as
@@ -230,38 +252,56 @@ const LIBS: &[&str] = &[
 fn build(
     cc: &str,
     dll: &str,
-    unit: &str,
+    units: &[String],
     runtime: &str,
     resources: Option<&str>,
     program: &str,
 ) -> Result<(), String> {
-    let list = format!("{OUT}/{dll}/{unit}_list.c");
+    let list = format!("{OUT}/{dll}/{}_list.c", units[0]);
+    let externs: String = units
+        .iter()
+        .map(|u| format!("extern void func_{u}(void);\n"))
+        .collect();
+    let entries: String = units
+        .iter()
+        .map(|u| format!("{{ \"{u}\", func_{u} }}, "))
+        .collect();
     fs::write(
         &list,
         format!(
             "#define STANDALONE
 #include \"wine/test.h\"
-             extern void func_{unit}(void);
-             const struct test winetest_testlist[] = {{ {{ \"{unit}\", func_{unit} }}, {{ 0, 0 }} }};
+{externs}const struct test winetest_testlist[] = {{ {entries}{{ 0, 0 }} }};
 "
         ),
     )
     .unwrap();
-    let source = format!("{ROOT}/wine/{dll}/{unit}.c");
+    let sources: Vec<String> = units
+        .iter()
+        .map(|u| format!("{ROOT}/wine/{dll}/{u}.c"))
+        .collect();
     let include = format!("-I{ROOT}/wine/include");
     let compat = format!("{ROOT}/runtime/compat.h");
     let mut args = CFLAGS.to_vec();
     args.extend([include.as_str(), "-include", compat.as_str()]);
-    if unit == "win" {
+    if units.iter().any(|u| u == "win") {
         // msg.c's dump_region, which win.c calls, is runtime.c's here.
         args.push("-Ddump_region=conformance_dump_region");
     }
+    if dll == "winmm" && units.iter().any(|u| u == "capture") {
+        // capture.c declares two GUIDs of mmreg.h again, without const.
+        args.extend([
+            "-DSTATIC_KSDATAFORMAT_SUBTYPE_PCM",
+            "-DSTATIC_KSDATAFORMAT_SUBTYPE_IEEE_FLOAT",
+        ]);
+    }
+    args.extend(sources.iter().map(String::as_str));
     if dll == "msvcrt" {
         args.extend(["-fno-printf-return-value", "-D__NO_ISOCEXT"]);
-        args.extend([source.as_str(), list.as_str(), "-lmsvcrt"]);
+        args.extend([list.as_str(), "-lmsvcrt"]);
     } else {
         args.extend(["-nostdlib", "-Wl,-e,_mainCRTStartup"]);
-        args.extend([source.as_str(), list.as_str(), runtime]);
+        args.extend([list.as_str(), runtime]);
     }
     args.extend(resources);
     args.extend(LIBS);
@@ -325,13 +365,25 @@ fn wine_conformance_tests_give_the_expected_results() {
                 .unwrap_or_else(|e| panic!("{} doesn't build:\n{}", rc, e));
             object
         });
+        // The programs built so far, by name, and how their builds went.
+        let mut built: Vec<(String, Result<(), String>)> = Vec::new();
         for unit in units {
             if !wanted(&dll, &unit) {
                 continue;
             }
-            let name = program_name(&unit);
-            let program = format!("{OUT}/{dll}/{name}");
-            let lines = match build(&cc, &dll, &unit, &runtime, resources.as_deref(), &program) {
+            let together = program_units(&dll, &unit);
+            let name = if together.len() > 1 {
+                program_name(&dll)
+            } else {
+                program_name(&unit)
+            };
+            if !built.iter().any(|(n, _)| *n == name) {
+                let program = format!("{OUT}/{dll}/{name}");
+                let made = build(&cc, &dll, &together, &runtime, resources.as_deref(), &program);
+                built.push((name.clone(), made));
+            }
+            let made = &built.iter().find(|(n, _)| *n == name).unwrap().1;
+            let lines = match made {
                 Ok(()) => {
                     // MinGW's startup code is built for a Pentium Pro
                     // (CMOVcc); runtime.c for a 486.
