@@ -54,6 +54,69 @@ fn both_vgas_have_the_vga_bios() {
 }
 
 #[test]
+fn the_vga_state_service_reports_support() {
+    for adapter in [
+        Adapter::Vga,
+        Adapter::Svga,
+        Adapter::S3,
+        Adapter::S3Virge,
+        Adapter::S3VirgeVx,
+        Adapter::Et4000,
+        Adapter::Verite,
+    ] {
+        let mut cpu = machine(adapter);
+        int10(&mut cpu, 0x1C00, 0, 1, 0);
+        assert_eq!(cpu.get_al(), 0x1C, "{:?}", adapter);
+        assert_eq!(
+            cpu.bx(),
+            2,
+            "two 64-byte blocks for VGA hardware state: {:?}",
+            adapter
+        );
+    }
+
+    let mut cpu = machine(Adapter::Ega);
+    int10(&mut cpu, 0x1C00, 0, 1, 0);
+    assert_eq!(cpu.ax(), 0x1C00, "EGA has no VGA state service");
+}
+
+#[test]
+fn the_vga_state_service_restores_hardware_bios_and_dac_state() {
+    let mut cpu = machine(Adapter::Vga);
+    cpu.set_es(0x3000);
+    cpu.set_bx(0);
+    cpu.set_cx(7);
+    cpu.bus.vga.sequencer_regs[1] = 0x12;
+    cpu.bus.vga.crtc_regs[0x0C] = 0x34;
+    cpu.bus.vga.palette[3..6].copy_from_slice(&[0x11, 0x22, 0x33]);
+    cpu.bus.vga.dac_mask = 0x7F;
+    cpu.bus.write_8(0x0449, 0x13);
+    cpu.bus.write_8(0x0463, 0xD4);
+    int10(&mut cpu, 0x1C00, 0, 7, 0);
+    assert_eq!(cpu.get_al(), 0x1C);
+    assert_eq!(cpu.bx(), 16, "the full state fits 16 64-byte blocks");
+    int10(&mut cpu, 0x1C01, 0, 7, 0);
+    assert_eq!(cpu.get_al(), 0x1C);
+
+    cpu.bus.vga.sequencer_regs[1] = 0xFF;
+    cpu.bus.vga.crtc_regs[0x0C] = 0xFF;
+    cpu.bus.vga.palette[3..6].copy_from_slice(&[0x3F, 0x3F, 0x3F]);
+    cpu.bus.vga.dac_mask = 0xFF;
+    cpu.bus.write_8(0x0449, 0x03);
+    cpu.bus.write_8(0x0463, 0xB4);
+
+    int10(&mut cpu, 0x1C02, 0, 7, 0);
+    assert_eq!(cpu.get_al(), 0x1C);
+    assert_eq!(cpu.bus.vga.sequencer_regs[1], 0x12);
+    assert_eq!(cpu.bus.vga.crtc_regs[0x0C], 0x34);
+    assert_eq!(&cpu.bus.vga.palette[3..6], &[0x11, 0x22, 0x33]);
+    assert_eq!(cpu.bus.vga.dac_mask, 0x7F);
+    assert_eq!(cpu.bus.read_8(0x0449), 0x13);
+    assert_eq!(cpu.bus.read_8(0x0463), 0xD4);
+    assert_eq!(cpu.bus.video_mode, video::VideoMode::Graphics320x200);
+}
+
+#[test]
 fn the_adapter_keeps_the_floppies_in_the_equipment_word() {
     let mut cpu = machine(Adapter::Vga);
     let floppies = cpu.bus.read_16(0x0410) & !0x30;
