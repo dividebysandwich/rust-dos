@@ -1,7 +1,9 @@
-//! What GDI draws on: the screen (the VESA mode's video memory), a
-//! bitmap of GDI's own, or a DIB section in the program's memory. A
-//! drawing function loads the rows it draws on into a `Surface`, works
-//! on their pixels as the bitmap stores them, and stores them back.
+//! What GDI draws on: the screen (the desktop in video memory), a bitmap
+//! of GDI's own, or a DIB section in the program's memory. A drawing
+//! function loads the rows it draws on into a `Surface`, works on their
+//! pixels as the bitmap stores them, and stores them back. The screen's
+//! rows are 32 bits a pixel here whatever the desktop's depth is: a
+//! 16-bit desktop's are converted as they are loaded and stored.
 //!
 //! Colors are COLORREFs (0x00BBGGRR); a pixel's value is what its bits
 //! say, an index into the color table for 8 bits a pixel and fewer.
@@ -44,15 +46,11 @@ pub struct Surface {
     changed: bool,
 }
 
-/// The screen's size, depth and pitch.
-pub fn screen(cpu: &Cpu) -> (i32, i32, u32, usize) {
+/// The screen's size, and the depth and pitch of its rows as GDI works
+/// on them.
+pub fn screen(_cpu: &Cpu) -> (i32, i32, u32, usize) {
     let (w, h) = crate::win32::user32::sysparams::screen_size();
-    let vbe = &cpu.bus.vbe;
-    let pitch = match vbe.mode {
-        Some(m) if m.bpp == 32 && m.width as i32 == w => vbe.pitch as usize,
-        _ => w as usize * 4,
-    };
-    (w, h, 32, pitch)
+    (w, h, 32, w as usize * 4)
 }
 
 /// The size and depth of what `target` is, if it is there.
@@ -120,11 +118,7 @@ impl Surface {
             Target::Memory => None,
             Target::Screen => {
                 let (_, _, _, pitch) = screen(cpu);
-                let mut data = vec![0u8; pitch * rows as usize];
-                let vram = &cpu.bus.vbe.vram;
-                let start = y0 as usize * pitch;
-                let end = (start + data.len()).min(vram.len());
-                data[..end - start].copy_from_slice(&vram[start..end]);
+                let data = crate::win32::screen::load_desktop(cpu, y0 as u32, rows as u32);
                 Some(Surface {
                     target,
                     width,
@@ -215,15 +209,7 @@ impl Surface {
             // screen goes nowhere.
             Target::Screen if crate::win32::ddraw::owns_display(cpu) => {}
             Target::Screen => {
-                let start = self.top as usize * self.stride;
-                let vram = &mut cpu.bus.vbe.vram;
-                let end = (start + self.data.len()).min(vram.len());
-                vram[start..end].copy_from_slice(&self.data[..end - start]);
-                if cpu.bus.vbe.mode.is_some() {
-                    let scale = cpu.bus.vbe.scale();
-                    let (y0, y1) = (self.top as u32, (self.top + self.rows) as u32);
-                    cpu.bus.vga.mark_dirty_rows(y0 * scale, y1 * scale);
-                }
+                crate::win32::screen::store_desktop(cpu, self.top as u32, &self.data);
             }
             Target::Bitmap(handle) => match self.dib {
                 Some((bits, top_down)) => {

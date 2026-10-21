@@ -495,7 +495,7 @@ pub fn get_device_identifier(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 fn scan(cpu: &mut Cpu) -> (u32, bool) {
     let (timing, now) = display::timing(cpu);
     let (line, _) = timing.position(now);
-    let scale = cpu.bus.vbe.scale().max(1);
+    let scale = crate::win32::screen::line_scale(cpu);
     let in_blank = line >= timing.display;
     (line / scale, in_blank)
 }
