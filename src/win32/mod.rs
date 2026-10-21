@@ -19,6 +19,7 @@ mod com;
 mod convert;
 mod ddraw;
 mod dinput;
+mod dplayx;
 mod dsound;
 pub mod gdi32;
 mod glide;

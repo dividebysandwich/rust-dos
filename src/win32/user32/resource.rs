@@ -433,7 +433,7 @@ fn from_bits(cpu: &mut Cpu, at: u32, size: u32, is_icon: bool) -> Option<Icon> {
 /// best fits `cx` by `cy` (0: the default size) on the screen.
 fn best_entry(cpu: &mut Cpu, dir: u32, is_icon: bool, cx: i32, cy: i32, flags: u32) -> Option<u32> {
     let head = read_words(cpu, dir, 2);
-    let count = head[1] >> 16;
+    let count = head[1] & 0xFFFF;
     if cpu.bus.guest_faulted() || count == 0 {
         return None;
     }
@@ -1323,3 +1323,25 @@ crate::state_fields!(Icon {
     pid
 });
 crate::state_fields!(Accel { virt, key, cmd });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The count of a directory's entries is its third word: entries
+    /// after it aren't looked at, though they'd fit better.
+    #[test]
+    fn only_the_directorys_entries_count() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let dir = 0x1_0000;
+        let mut bytes = vec![0, 0, 1, 0, 1, 0];
+        // 32x32 at 4 bits, id 5, then bytes that read as a 32x32 entry
+        // at 32 bits, id 9.
+        bytes.extend([32, 32, 16, 0, 1, 0, 4, 0, 0xE8, 2, 0, 0, 5, 0]);
+        bytes.extend([32, 32, 0, 0, 1, 0, 32, 0, 0xA8, 0x10, 0, 0, 9, 0]);
+        for (i, b) in bytes.iter().enumerate() {
+            cpu.bus.write_8(dir as usize + i, *b);
+        }
+        assert_eq!(best_entry(&mut cpu, dir, true, 32, 32, 0), Some(5));
+    }
+}

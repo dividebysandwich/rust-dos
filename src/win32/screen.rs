@@ -90,9 +90,16 @@ pub fn linear_memory(cpu: &mut Cpu) {
     }
 }
 
-/// The desktop's mode.
+/// The desktop's mode: 16 bits a pixel on the card, 24 (packed) on an S3
+/// ViRGE, whose VESA mode `DESKTOP_MODE` is that, else 32.
 pub fn desktop(cpu: &Cpu) -> Mode {
-    let bpp = if is_card(cpu) { 16 } else { 32 };
+    let bpp = if is_card(cpu) {
+        16
+    } else if cpu.bus.vga.adapter.is_virge() {
+        24
+    } else {
+        32
+    };
     let (width, height) = DESKTOP;
     Mode {
         width,
@@ -339,14 +346,21 @@ pub fn load_desktop(cpu: &Cpu, top: u32, rows: u32) -> Vec<u8> {
     let d = desktop(cpu);
     let mut raw = vec![0u8; (d.pitch * rows) as usize];
     read(cpu, top * d.pitch, &mut raw);
-    if d.bpp == 32 {
-        return raw;
+    match d.bpp {
+        32 => raw,
+        24 => raw
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .flat_map(|&[b, g, r]| [b, g, r, 0])
+            .collect(),
+        _ => raw
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .flat_map(|p| from_565(u16::from_le_bytes(*p)).to_le_bytes())
+            .collect(),
     }
-    let mut out = Vec::with_capacity(raw.len() * 2);
-    for p in raw.as_chunks::<2>().0 {
-        out.extend_from_slice(&from_565(u16::from_le_bytes(*p)).to_le_bytes());
-    }
-    out
 }
 
 /// Store 32-bit pixels, `width * 4` bytes a row, as the desktop's rows
@@ -357,11 +371,14 @@ pub fn store_desktop(cpu: &mut Cpu, top: u32, data: &[u8]) {
         write(cpu, top * d.pitch, data);
         return;
     }
-    let mut raw = Vec::with_capacity(data.len() / 2);
-    for p in data.as_chunks::<4>().0 {
-        let v = u32::from_le_bytes(*p);
-        raw.extend_from_slice(&to_565(v).to_le_bytes());
-    }
+    let pixels = data.as_chunks::<4>().0.iter();
+    let raw: Vec<u8> = if d.bpp == 24 {
+        pixels.flat_map(|&[b, g, r, _]| [b, g, r]).collect()
+    } else {
+        pixels
+            .flat_map(|p| to_565(u32::from_le_bytes(*p)).to_le_bytes())
+            .collect()
+    };
     write(cpu, top * d.pitch, &raw);
 }
 
