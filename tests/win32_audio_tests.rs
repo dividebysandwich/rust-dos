@@ -541,7 +541,7 @@ fn wav_file(samples: &[u8], rate: u32) -> Vec<u8> {
 /// it, with "play ... wait": the exit code is how many hundredths of a
 /// second the command took, or 250 if it failed.
 fn mci_play(core: CoreMode) {
-    const COMMAND: &[u8] = b"play tone.wav wait ";
+    const COMMAND: &[u8] = b"play tone.wav wait\0";
     let mut data = vec![0u8; 0x40];
     data.extend_from_slice(COMMAND);
     let imports: &[(&str, &[&str])] = &[
