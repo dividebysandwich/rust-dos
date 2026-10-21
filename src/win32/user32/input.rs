@@ -337,16 +337,17 @@ fn char_of(vk: usize, keys: &dyn Fn(usize) -> u8) -> Option<u8> {
 }
 
 /// Read the keyboard and the mouse: what they did since they were last
-/// read goes to the queues.
+/// read goes to the queues. DirectInput gets the keys that went down and
+/// up, also while the desktop isn't on the screen, when USER takes none.
 pub fn poll(cpu: &mut Cpu) {
-    if !cpu.bus.win32.user.desktop {
-        return;
+    let desktop = cpu.bus.win32.user.desktop;
+    if desktop {
+        poll_mouse(cpu);
     }
-    poll_mouse(cpu);
-    poll_keyboard(cpu);
+    poll_keyboard(cpu, desktop);
 }
 
-fn poll_keyboard(cpu: &mut Cpu) {
+fn poll_keyboard(cpu: &mut Cpu, desktop: bool) {
     let held = cpu.bus.kbd.held_keys();
     let before = user(cpu).input.held;
     let mut events = Vec::new();
@@ -361,6 +362,12 @@ fn poll_keyboard(cpu: &mut Cpu) {
         }
     }
     user(cpu).input.held = held;
+    for &(id, down) in &events {
+        crate::win32::dinput::key(cpu, id as u8 & 0x7F, id >= 256, down);
+    }
+    if !desktop {
+        return;
+    }
     // The keystrokes the BIOS got: each is taken, so the buffer doesn't
     // fill.
     let strokes = crate::win32::dos(cpu, |cpu| {
@@ -387,6 +394,9 @@ fn poll_keyboard(cpu: &mut Cpu) {
         } else if held[id / 64] >> (id % 64) & 1 != 0 {
             key_event(cpu, scan, id >= 256, true, true);
         } else {
+            // Down and up again since the keyboard was last read.
+            crate::win32::dinput::key(cpu, scan, id >= 256, true);
+            crate::win32::dinput::key(cpu, scan, id >= 256, false);
             key_event(cpu, scan, id >= 256, true, false);
             key_event(cpu, scan, id >= 256, false, false);
         }
@@ -495,7 +505,17 @@ fn push_input(state: &mut State, tid: u32, msg: Msg, bit: u32) {
 fn poll_mouse(cpu: &mut Cpu) {
     let mouse = &cpu.bus.mouse;
     let (x, y) = (mouse.x, mouse.y);
-    let (presses, releases) = (mouse.press_count, mouse.release_count);
+    let (presses, releases, buttons) = (mouse.press_count, mouse.release_count, mouse.buttons);
+    if crate::win32::dinput::mouse_taken(cpu) {
+        // DirectInput has the mouse exclusively: the cursor stays and no
+        // window gets its messages.
+        let input = &mut user(cpu).input;
+        input.device_pos = (x, y);
+        input.presses = presses;
+        input.releases = releases;
+        input.buttons = buttons;
+        return;
+    }
     let input = &mut user(cpu).input;
     if (x, y) != input.device_pos {
         input.device_pos = (x, y);
@@ -1338,7 +1358,7 @@ pub fn oem_key_scan(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// The keys' names, by scan code.
-fn key_name(scan: u8, extended: bool) -> Option<String> {
+pub fn key_name(scan: u8, extended: bool) -> Option<String> {
     let name = match (scan, extended) {
         (0x01, _) => "Esc",
         (0x0E, _) => "Backspace",

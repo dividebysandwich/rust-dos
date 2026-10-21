@@ -263,6 +263,18 @@ impl GamePort {
         }
     }
 
+    /// The joysticks plugged in, as Windows' joystick driver has them:
+    /// the axes and buttons of each. Two of two axes take the port's
+    /// axes and buttons in halves, joystick A's first.
+    pub fn joysticks(&self) -> &'static [(u32, u32)] {
+        match self.layout() {
+            Layout::Mouse => &[(2, 2)],
+            Layout::FourAxis => &[(4, 4)],
+            Layout::TwoAxis => &[(2, 2), (2, 2)],
+            Layout::None => &[],
+        }
+    }
+
     /// A write to 201h: the one-shots fire.
     pub fn arm(&mut self, now_ns: u64) {
         self.armed_at_ns = Some(now_ns);

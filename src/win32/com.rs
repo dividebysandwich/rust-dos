@@ -176,7 +176,7 @@ pub struct Class {
 }
 
 /// The classes of the built-in DLLs.
-pub static CLASSES: &[&[Class]] = &[];
+pub static CLASSES: &[&[Class]] = &[super::dinput::CLASSES];
 
 /// The class with CLSID `clsid`, and its place in the list of all.
 pub fn find_class(clsid: &Guid) -> Option<(usize, &'static Class)> {

@@ -125,10 +125,12 @@ pub static TASKS: &[Step] = &[
     super::user32::input::step,
     super::user32::menu::step,
     super::winmm::callback::step,
+    super::dinput::step,
 ];
 
 /// The `TASKS` places of the tasks other DLLs than USER32 start.
 pub const MM_CALLBACK: u16 = 21;
+pub const DI_ENUM: u16 = 22;
 
 /// Start the task `kind` with the variables `vars` and, if `scratch` is
 /// more than 0, that many bytes of scratch space: for a function's
