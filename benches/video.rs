@@ -7,6 +7,8 @@
 //! render, as the main loop does it (`render_screen`, then `clear_dirty`).
 
 mod common;
+#[path = "video/voodoo_dispatch.rs"]
+mod voodoo_dispatch;
 #[path = "video/voodoo.rs"]
 mod voodoo;
 
@@ -87,7 +89,7 @@ fn planar_sprite(c: &mut Criterion) {
                 step += 1;
                 sprite(&mut cpu, step % columns, (step * 3) % tops, (step % 15) as u8 + 1);
                 render(&mut cpu, &mut frame);
-                black_box(frame.rgb[0]);
+                black_box(frame.rgba[0]);
             })
         });
     }
@@ -110,7 +112,7 @@ fn planar_scroll(c: &mut Criterion) {
             cpu.bus.io_write(0x3D5, start as u8);
             cpu.bus.vga.latch_start_address();
             render(&mut cpu, &mut frame);
-            black_box(frame.rgb[0]);
+            black_box(frame.rgba[0]);
         })
     });
 }
@@ -157,7 +159,7 @@ fn emulated_frame(cpu: &mut Cpu, frame: &mut Frame) {
         cpu.bus.vga.mark_dirty_full();
     }
     render(cpu, frame);
-    black_box(frame.rgb[0]);
+    black_box(frame.rgba[0]);
 }
 
 /// The program `planar_program` runs, as a .COM file.
@@ -270,7 +272,7 @@ fn cga_composite(c: &mut Criterion) {
                 }
             }
             render(&mut cpu, &mut frame);
-            black_box(frame.rgb[0]);
+            black_box(frame.rgba[0]);
         })
     });
     // Every line new each frame: the start address a line further on.
@@ -285,7 +287,7 @@ fn cga_composite(c: &mut Criterion) {
             cpu.bus.io_write(0x3D5, start as u8);
             cpu.bus.vga.latch_start_address();
             render(&mut cpu, &mut frame);
-            black_box(frame.rgb[0]);
+            black_box(frame.rgba[0]);
         })
     });
 }
@@ -297,6 +299,7 @@ criterion_group!(
     planar_program,
     cga_composite,
     voodoo::pipelines,
-    voodoo::frames
+    voodoo::frames,
+    voodoo_dispatch::lookup
 );
 criterion_main!(benches);

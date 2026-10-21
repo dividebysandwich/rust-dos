@@ -684,3 +684,87 @@ void mainCRTStartup(void)
     argv[argc] = NULL;
     ExitProcess(main(argc, argv));
 }
+
+/* sscanf for what the tests read back: %d, %i, %u, %x, %ld and the
+ * like, %s and %c; a space skips spaces, other characters must match. */
+int sscanf(const char *str, const char *fmt, ...)
+{
+    va_list ap;
+    int count = 0;
+    va_start(ap, fmt);
+    while (*fmt)
+    {
+        if (isspace((unsigned char)*fmt))
+        {
+            while (isspace((unsigned char)*str)) str++;
+            fmt++;
+            continue;
+        }
+        if (*fmt != '%' || fmt[1] == '%')
+        {
+            if (*fmt == '%') fmt++;
+            if (*str != *fmt) break;
+            str++, fmt++;
+            continue;
+        }
+        fmt++;
+        while (*fmt == 'l' || *fmt == 'h') fmt++;
+        if (*fmt == 'c')
+        {
+            if (!*str) break;
+            *va_arg(ap, char *) = *str++;
+        }
+        else if (*fmt == 's')
+        {
+            char *to = va_arg(ap, char *);
+            while (isspace((unsigned char)*str)) str++;
+            if (!*str) break;
+            while (*str && !isspace((unsigned char)*str)) *to++ = *str++;
+            *to = 0;
+        }
+        else
+        {
+            char *end;
+            int base = *fmt == 'x' || *fmt == 'X' ? 16 : *fmt == 'i' ? 0 : 10;
+            long value = strtol(str, &end, base);
+            if (end == str) break;
+            str = end;
+            *va_arg(ap, long *) = value;
+        }
+        fmt++;
+        count++;
+    }
+    va_end(ap);
+    return count;
+}
+
+/* Wine's user32 tests are one program, and win.c calls msg.c's
+ * dump_region, which only traces a region. Built on its own, win.c
+ * calls this one instead (conformance_tests.rs renames its calls). */
+void conformance_dump_region(HRGN hrgn)
+{
+    (void)hrgn;
+}
+
+/* The square root, which winmm's timer.c takes of its statistics: the
+ * FPU's. */
+double sqrt(double x)
+{
+    double r;
+    __asm__("fsqrt" : "=t"(r) : "0"(x));
+    return r;
+}
+
+/* Sine and absolute value, on the x87 (dsound's and
+ * winmm's tests make sine waves to play). */
+double sin(double x)
+{
+    double result;
+    __asm__("fsin" : "=t"(result) : "0"(x));
+    return result;
+}
+
+double fabs(double x)
+{
+    return x < 0 ? -x : x;
+}

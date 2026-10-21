@@ -16,7 +16,9 @@
 use glow::HasContext;
 use crate::video::Frame;
 use crate::video::shader::Glsl;
-use super::mirror::{Command, Draw, Fill, Frame as Recording, Pixels, Snapshot, Texture, Vertex};
+use super::mirror::{
+    Command, Draw, Fill, Frame as Recording, Pixels, Scanout, Snapshot, Surface, Texture, Vertex,
+};
 use std::collections::HashMap;
 
 const TRIANGLE_VERT: &str = include_str!("gl/triangle.vert");
@@ -26,14 +28,13 @@ const PIXELS_FRAG: &str = include_str!("gl/pixels.frag");
 const DEPTH_FRAG: &str = include_str!("gl/depth.frag");
 const FILL_FRAG: &str = include_str!("gl/fill.frag");
 const CLUT_FRAG: &str = include_str!("gl/clut.frag");
+const BANSHEE_FRAG: &str = include_str!("gl/banshee.frag");
 
-const TRIANGLE_UNIFORMS: &[&str] = &[
-    "u_size", "u_fbzcp", "u_fbz", "u_alpha", "u_fog", "u_color0", "u_color1", "u_chroma", "u_chroma_range", "u_zacolor", "u_fogcolor",
-    "u_stipple", "u_yorigin", "u_fogblend", "u_fogdelta", "u_scale", "u_units", "u_config", "u_tmode0", "u_tmode1",
-    "u_tsize0", "u_tsize1", "u_tlod0", "u_tlod1", "u_tdetail0", "u_tdetail1", "u_constant_depth",
-    "u_dither",
-];
-const QUAD_UNIFORMS: &[&str] = &["u_rect", "u_size", "u_scale"];
+mod uniforms;
+use uniforms::{Banshee, FillQuad, Locations, Quad, Triangle};
+
+/// Bytes a row of a texture of the card's memory (`Memory`).
+const MEMORY_ROW: usize = 4096;
 
 /// The card's depth functions as OpenGL's.
 const DEPTH_FUNCS: [u32; 8] =
@@ -42,15 +43,9 @@ const TEXTURE_MAX_ANISOTROPY: u32 = 0x84FE;
 const MAX_TEXTURE_MAX_ANISOTROPY: u32 = 0x84FF;
 
 /// A linked program and its uniforms.
-struct Program {
+struct Program<U> {
     program: glow::Program,
-    uniforms: HashMap<&'static str, glow::UniformLocation>,
-}
-
-impl Program {
-    fn at(&self, name: &str) -> Option<&glow::UniformLocation> {
-        self.uniforms.get(name)
-    }
+    uniforms: U,
 }
 
 /// A colour buffer: its texture and the framebuffer object drawing into
@@ -130,9 +125,166 @@ fn sampling_filters(mode: u32, unfiltered: bool, anisotropy: Option<f32>) -> (u3
 /// A texture of the card's, and the sampling it was last set up for.
 struct GlTexture {
     texture: glow::Texture,
+    levels: Vec<(u32, u32)>,
+    level_count: usize,
     params: Option<[u32; 4]>,
     lod: Option<[f32; 2]>,
     anisotropy: Option<f32>,
+}
+
+/// Bytes of the card's memory as an integer texture, rows of
+/// `MEMORY_ROW`, and how many bytes it has.
+struct Memory {
+    texture: glow::Texture,
+    rows: usize,
+    len: usize,
+}
+
+impl Memory {
+    fn new(gl: &glow::Context) -> Result<Self, String> {
+        let mut memory = Self {
+            texture: texture(gl, glow::NEAREST)?,
+            rows: 0,
+            len: 0,
+        };
+        memory.upload(gl, &[]);
+        Ok(memory)
+    }
+
+    fn upload(&mut self, gl: &glow::Context, bytes: &[u8]) {
+        let rows = bytes.len().div_ceil(MEMORY_ROW).max(1);
+        let full = bytes.len() / MEMORY_ROW;
+        let put = |y: usize, rows: usize, data: &[u8]| {
+            let pixels = glow::PixelUnpackData::Slice(Some(data));
+            let (w, y, h) = (MEMORY_ROW as i32, y as i32, rows as i32);
+            let (format, kind) = (glow::RED_INTEGER, glow::UNSIGNED_BYTE);
+            // SAFETY: see `VoodooGl`.
+            unsafe { gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, y, w, h, format, kind, pixels) };
+        };
+        // SAFETY: see `VoodooGl`.
+        unsafe {
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.texture));
+            if rows != self.rows {
+                let none = glow::PixelUnpackData::Slice(None);
+                let (w, h) = (MEMORY_ROW as i32, rows as i32);
+                let (format, kind) = (glow::RED_INTEGER, glow::UNSIGNED_BYTE);
+                gl.tex_image_2d(
+                    glow::TEXTURE_2D,
+                    0,
+                    glow::R8UI as i32,
+                    w,
+                    h,
+                    0,
+                    format,
+                    kind,
+                    none,
+                );
+                self.rows = rows;
+            }
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+        }
+        if full > 0 {
+            put(0, full, &bytes[..full * MEMORY_ROW]);
+        }
+        if bytes.len() > full * MEMORY_ROW {
+            let mut last = bytes[full * MEMORY_ROW..].to_vec();
+            last.resize(MEMORY_ROW, 0);
+            put(full, 1, &last);
+        }
+        // SAFETY: see `VoodooGl`.
+        unsafe { gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4) };
+        self.len = bytes.len();
+    }
+}
+
+/// What composes a Banshee's or Voodoo3's picture (`compose`): the
+/// program, the memory its desktop and overlay show, its cursor's planes
+/// and its CLUT as textures, and the texture of what the frame has over
+/// the picture.
+struct BansheeGl {
+    program: Program<Banshee>,
+    desktop: Memory,
+    overlay: Memory,
+    cursor: glow::Texture,
+    clut: glow::Texture,
+    screen: Option<(glow::Texture, (u32, u32))>,
+}
+
+impl BansheeGl {
+    fn new(gl: &glow::Context, glsl: Glsl) -> Result<Self, String> {
+        let program: Program<Banshee> = compile(gl, glsl, QUAD_VERT, BANSHEE_FRAG, &[])?;
+        // SAFETY: see `VoodooGl`.
+        unsafe {
+            gl.use_program(Some(program.program));
+            for (name, unit) in [
+                ("u_desk_mem", 0),
+                ("u_desk_buf", 1),
+                ("u_ovl_mem", 2),
+                ("u_ovl_buf", 3),
+                ("u_cursor", 4),
+                ("u_clut", 5),
+            ] {
+                gl.uniform_1_i32(
+                    gl.get_uniform_location(program.program, name).as_ref(),
+                    unit,
+                );
+            }
+            gl.use_program(None);
+            let cursor = texture(gl, glow::NEAREST)?;
+            let (format, kind) = (glow::RED_INTEGER, glow::UNSIGNED_BYTE);
+            let zeros = glow::PixelUnpackData::Slice(Some(&[0u8; 1024]));
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::R8UI as i32,
+                16,
+                64,
+                0,
+                format,
+                kind,
+                zeros,
+            );
+            let clut = texture(gl, glow::NEAREST)?;
+            let zeros = glow::PixelUnpackData::Slice(Some(&[0u8; 512 * 4]));
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA8 as i32,
+                512,
+                1,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                zeros,
+            );
+            Ok(Self {
+                program,
+                desktop: Memory::new(gl)?,
+                overlay: Memory::new(gl)?,
+                cursor,
+                clut,
+                screen: None,
+            })
+        }
+    }
+
+    fn destroy(&mut self, gl: &glow::Context) {
+        // SAFETY: see `VoodooGl`.
+        unsafe {
+            gl.delete_program(self.program.program);
+            for t in [
+                self.desktop.texture,
+                self.overlay.texture,
+                self.cursor,
+                self.clut,
+            ] {
+                gl.delete_texture(t);
+            }
+            if let Some((t, _)) = self.screen.take() {
+                gl.delete_texture(t);
+            }
+        }
+    }
 }
 
 // Every `unsafe` below is a call into OpenGL on the context `GlScreen`
@@ -159,16 +311,17 @@ pub struct VoodooGl {
     staging: HashMap<Option<u32>, Staging>,
     staging_texture: glow::Texture,
     textures: HashMap<u32, GlTexture>,
+    texture_bytes: Vec<u8>,
     /// The gamma table as 256 entries a component, and the table it is.
     lut: glow::Texture,
     lut_of: Option<[u32; 33]>,
     /// The picture shown, and its size.
     composite: Option<(Target, (u32, u32))>,
-    triangle: Program,
-    pixels: Program,
-    depth_program: Program,
-    clut_program: Program,
-    fill_program: Program,
+    triangle: Program<Triangle>,
+    pixels: Program<Quad>,
+    depth_program: Program<Quad>,
+    clut_program: Program<Quad>,
+    fill_program: Program<FillQuad>,
     vao: glow::VertexArray,
     vbo: glow::Buffer,
     /// No attributes: the quads make their corners from the vertex number.
@@ -176,6 +329,11 @@ pub struct VoodooGl {
     /// What the card shows: its front buffer, and its gamma table.
     front: Option<u32>,
     clut: [u32; 33],
+    /// A Banshee's picture instead, which `banshee` composes (or the
+    /// reason it can't), without the memory, which is in `banshee`'s
+    /// textures.
+    scanout: Option<Box<Scanout>>,
+    banshee: Result<BansheeGl, String>,
 }
 
 impl VoodooGl {
@@ -192,23 +350,24 @@ impl VoodooGl {
             return Err("OpenGL ES has no noperspective interpolation".to_string());
         }
         let attributes = [(0, "a_pos"), (1, "a_color"), (2, "a_zw"), (3, "a_tex0"), (4, "a_tex1")];
-        let triangle = compile(gl, glsl, TRIANGLE_VERT, TRIANGLE_FRAG, &attributes, TRIANGLE_UNIFORMS)?;
-        let fill_uniforms = &["u_rect", "u_size", "u_scale", "u_pattern"];
-        let fill_program = compile(gl, glsl, QUAD_VERT, FILL_FRAG, &[], fill_uniforms)?;
-        let pixels = compile(gl, glsl, QUAD_VERT, PIXELS_FRAG, &[], QUAD_UNIFORMS)?;
-        let depth_program = compile(gl, glsl, QUAD_VERT, DEPTH_FRAG, &[], QUAD_UNIFORMS)?;
-        let clut_program = compile(gl, glsl, QUAD_VERT, CLUT_FRAG, &[], QUAD_UNIFORMS)?;
+        let triangle: Program<Triangle> =
+            compile(gl, glsl, TRIANGLE_VERT, TRIANGLE_FRAG, &attributes)?;
+        let fill_program: Program<FillQuad> = compile(gl, glsl, QUAD_VERT, FILL_FRAG, &[])?;
+        let pixels: Program<Quad> = compile(gl, glsl, QUAD_VERT, PIXELS_FRAG, &[])?;
+        let depth_program: Program<Quad> = compile(gl, glsl, QUAD_VERT, DEPTH_FRAG, &[])?;
+        let clut_program: Program<Quad> = compile(gl, glsl, QUAD_VERT, CLUT_FRAG, &[])?;
+        let banshee = BansheeGl::new(gl, glsl);
         // SAFETY: see `VoodooGl`.
         unsafe {
             for (program, samplers) in [
-                (&triangle, &[("u_tex0", 1), ("u_tex1", 2)][..]),
-                (&pixels, &[("u_src", 0)][..]),
-                (&depth_program, &[("u_src", 0)][..]),
-                (&clut_program, &[("u_src", 0), ("u_lut", 1)][..]),
+                (triangle.program, &[("u_tex0", 1), ("u_tex1", 2)][..]),
+                (pixels.program, &[("u_src", 0)][..]),
+                (depth_program.program, &[("u_src", 0)][..]),
+                (clut_program.program, &[("u_src", 0), ("u_lut", 1)][..]),
             ] {
-                gl.use_program(Some(program.program));
+                gl.use_program(Some(program));
                 for &(name, unit) in samplers {
-                    gl.uniform_1_i32(gl.get_uniform_location(program.program, name).as_ref(), unit);
+                    gl.uniform_1_i32(gl.get_uniform_location(program, name).as_ref(), unit);
                 }
             }
             gl.use_program(None);
@@ -250,6 +409,7 @@ impl VoodooGl {
                 staging: HashMap::new(),
                 staging_texture,
                 textures: HashMap::new(),
+                texture_bytes: Vec::new(),
                 lut,
                 lut_of: None,
                 composite: None,
@@ -263,6 +423,8 @@ impl VoodooGl {
                 quad_vao,
                 front: None,
                 clut: [0; 33],
+                scanout: None,
+                banshee,
             })
         }
     }
@@ -300,13 +462,21 @@ impl VoodooGl {
             }
             gl.delete_texture(self.staging_texture);
             gl.delete_texture(self.lut);
-            for program in [&self.triangle, &self.pixels, &self.depth_program, &self.clut_program] {
-                gl.delete_program(program.program);
+            for program in [
+                self.triangle.program,
+                self.pixels.program,
+                self.depth_program.program,
+                self.clut_program.program,
+                self.fill_program.program,
+            ] {
+                gl.delete_program(program);
             }
-            gl.delete_program(self.fill_program.program);
             gl.delete_vertex_array(self.vao);
             gl.delete_vertex_array(self.quad_vao);
             gl.delete_buffer(self.vbo);
+        }
+        if let Ok(banshee) = &mut self.banshee {
+            banshee.destroy(gl);
         }
     }
 
@@ -324,9 +494,31 @@ impl VoodooGl {
         }
     }
 
+    /// Why a Banshee's picture can't be composed here, if it can't.
+    pub fn banshee_problem(&self) -> Option<&str> {
+        self.banshee.as_ref().err().map(String::as_str)
+    }
+
     /// Draw `recording`; whether the picture may have changed with it.
-    pub fn run(&mut self, gl: &glow::Context, recording: Recording) -> bool {
-        let changed = !recording.commands.is_empty() || self.front != recording.front || self.clut != recording.clut;
+    pub fn run(&mut self, gl: &glow::Context, mut recording: Recording) -> bool {
+        let mut changed = !recording.commands.is_empty()
+            || self.front != recording.front
+            || self.clut != recording.clut;
+        if let Some(s) = &mut recording.scanout
+            && let Ok(banshee) = &mut self.banshee
+        {
+            for (memory, bytes) in [
+                (&mut banshee.desktop, &mut s.desktop_memory),
+                (&mut banshee.overlay, &mut s.overlay_memory),
+            ] {
+                if let Some(bytes) = bytes.take() {
+                    memory.upload(gl, &bytes);
+                    changed = true;
+                }
+            }
+        }
+        changed |= recording.scanout != self.scanout;
+        self.scanout = recording.scanout.take();
         for command in &recording.commands {
             match command {
                 Command::Resync(snapshot) => self.resync(gl, snapshot),
@@ -496,9 +688,9 @@ impl VoodooGl {
                 gl.color_mask(false, false, false, false);
             }
             gl.use_program(Some(program.program));
-            gl.uniform_4_f32(program.at("u_rect"), x0 as f32, y0 as f32, x1 as f32, y1 as f32);
-            gl.uniform_2_f32(program.at("u_size"), self.width as f32, self.height as f32);
-            gl.uniform_1_f32(program.at("u_scale"), scale as f32);
+            program.uniforms.u_rect.set(gl, [x0 as f32, y0 as f32, x1 as f32, y1 as f32]);
+            program.uniforms.u_size.set(gl, [self.width as f32, self.height as f32]);
+            program.uniforms.u_scale.set(gl, scale as f32);
             gl.bind_vertex_array(Some(self.quad_vao));
             gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
         }
@@ -512,32 +704,67 @@ impl VoodooGl {
     fn upload(&mut self, gl: &glow::Context, texture: &Texture) {
         if let std::collections::hash_map::Entry::Vacant(e) = self.textures.entry(texture.id) {
             let Ok(t) = self::texture(gl, glow::NEAREST) else { return };
-            e.insert(GlTexture { texture: t, params: None, lod: None, anisotropy: None });
+            e.insert(GlTexture {
+                texture: t,
+                levels: Vec::new(),
+                level_count: 0,
+                params: None,
+                lod: None,
+                anisotropy: None,
+            });
         }
         let Some(entry) = self.textures.get_mut(&texture.id) else { return };
         // SAFETY: see `VoodooGl`.
         unsafe {
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(entry.texture));
-            for (i, level) in texture.levels.iter().enumerate() {
-                let bytes: Vec<u8> =
-                    level.argb.iter().flat_map(|&c| [(c >> 16) as u8, (c >> 8) as u8, c as u8, (c >> 24) as u8]).collect();
-                gl.tex_image_2d(
-                    glow::TEXTURE_2D,
-                    i as i32,
-                    glow::RGBA8 as i32,
-                    level.width as i32,
-                    level.height as i32,
-                    0,
-                    glow::RGBA,
-                    glow::UNSIGNED_BYTE,
-                    glow::PixelUnpackData::Slice(Some(&bytes)),
-                );
+            if entry.levels.len() < texture.levels.len() {
+                entry.levels.resize(texture.levels.len(), (0, 0));
             }
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_BASE_LEVEL, 0);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAX_LEVEL, texture.levels.len() as i32 - 1);
-            entry.params = None;
-            entry.lod = None;
+            for (i, level) in texture.levels.iter().enumerate() {
+                self.texture_bytes.clear();
+                self.texture_bytes.extend(
+                    level
+                        .argb
+                        .iter()
+                        .flat_map(|&c| [(c >> 16) as u8, (c >> 8) as u8, c as u8, (c >> 24) as u8]),
+                );
+                let size = (level.width, level.height);
+                if entry.levels[i] == size {
+                    gl.tex_sub_image_2d(
+                        glow::TEXTURE_2D,
+                        i as i32,
+                        0,
+                        0,
+                        level.width as i32,
+                        level.height as i32,
+                        glow::RGBA,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelUnpackData::Slice(Some(&self.texture_bytes)),
+                    );
+                } else {
+                    gl.tex_image_2d(
+                        glow::TEXTURE_2D,
+                        i as i32,
+                        glow::RGBA8 as i32,
+                        level.width as i32,
+                        level.height as i32,
+                        0,
+                        glow::RGBA,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelUnpackData::Slice(Some(&self.texture_bytes)),
+                    );
+                    entry.levels[i] = size;
+                }
+            }
+            if entry.level_count != texture.levels.len() {
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MAX_LEVEL,
+                    texture.levels.len() as i32 - 1,
+                );
+                entry.level_count = texture.levels.len();
+            }
         }
     }
 
@@ -587,28 +814,28 @@ impl VoodooGl {
             }
 
             gl.use_program(Some(p.program));
-            gl.uniform_2_f32(p.at("u_size"), self.width as f32, self.height as f32);
-            for (name, value) in [
-                ("u_fbzcp", s.fbz_color_path),
-                ("u_fbz", s.fbz_mode),
-                ("u_alpha", s.alpha_mode),
-                ("u_fog", s.fog_mode),
-                ("u_color0", s.color0),
-                ("u_color1", s.color1),
-                ("u_chroma", s.chroma_key),
-                ("u_chroma_range", s.chroma_range),
-                ("u_zacolor", s.za_color),
-                ("u_fogcolor", s.fog_color),
-                ("u_stipple", s.stipple),
-                ("u_yorigin", s.yorigin),
-                ("u_config", s.send_config.unwrap_or(0)),
+            p.uniforms.u_size.set(gl, [self.width as f32, self.height as f32]);
+            for (uniform, value) in [
+                (&p.uniforms.u_fbzcp, s.fbz_color_path),
+                (&p.uniforms.u_fbz, s.fbz_mode),
+                (&p.uniforms.u_alpha, s.alpha_mode),
+                (&p.uniforms.u_fog, s.fog_mode),
+                (&p.uniforms.u_color0, s.color0),
+                (&p.uniforms.u_color1, s.color1),
+                (&p.uniforms.u_chroma, s.chroma_key),
+                (&p.uniforms.u_chroma_range, s.chroma_range),
+                (&p.uniforms.u_zacolor, s.za_color),
+                (&p.uniforms.u_fogcolor, s.fog_color),
+                (&p.uniforms.u_stipple, s.stipple),
+                (&p.uniforms.u_yorigin, s.yorigin),
+                (&p.uniforms.u_config, s.send_config.unwrap_or(0)),
             ] {
-                gl.uniform_1_i32(p.at(name), value as i32);
+                uniform.set(gl, value as i32);
             }
-            gl.uniform_1_i32_slice(p.at("u_fogblend"), &s.fogblend.map(|v| v as i32));
-            gl.uniform_1_i32_slice(p.at("u_fogdelta"), &s.fogdelta.map(|v| v as i32));
-            gl.uniform_1_f32(p.at("u_scale"), scale);
-            gl.uniform_1_i32(p.at("u_dither"), self.dither as i32);
+            p.uniforms.u_fogblend.set(gl, s.fogblend);
+            p.uniforms.u_fogdelta.set(gl, s.fogdelta);
+            p.uniforms.u_scale.set(gl, scale);
+            p.uniforms.u_dither.set(gl, self.dither as i32);
             let mut units = 0;
             for (unit, t) in s.tmu.iter().enumerate() {
                 let Some(t) = t else { continue };
@@ -639,21 +866,21 @@ impl VoodooGl {
                     gl.tex_parameter_f32(glow::TEXTURE_2D, glow::TEXTURE_MAX_LOD, lod[1]);
                     texture.lod = Some(lod);
                 }
-                let [mode, size, lods, detail] = if unit == 0 {
-                    ["u_tmode0", "u_tsize0", "u_tlod0", "u_tdetail0"]
-                } else {
-                    ["u_tmode1", "u_tsize1", "u_tlod1", "u_tdetail1"]
-                };
-                gl.uniform_1_i32(p.at(mode), t.mode as i32);
-                gl.uniform_3_f32(p.at(size), t.width as f32, t.height as f32, t.lodbias as f32 / 256.0);
-                gl.uniform_3_i32(p.at(lods), t.lodmin, t.lodmax, t.lodbias);
-                gl.uniform_3_i32(p.at(detail), t.detailbias, t.detailmax, t.detailscale as i32);
+                let u = &p.uniforms;
+                let (mode, size, lods, detail) = [
+                    (&u.u_tmode0, &u.u_tsize0, &u.u_tlod0, &u.u_tdetail0),
+                    (&u.u_tmode1, &u.u_tsize1, &u.u_tlod1, &u.u_tdetail1),
+                ][unit];
+                mode.set(gl, t.mode as i32);
+                size.set(gl, [t.width as f32, t.height as f32, t.lodbias as f32 / 256.0]);
+                lods.set(gl, [t.lodmin, t.lodmax, t.lodbias]);
+                detail.set(gl, [t.detailbias, t.detailmax, t.detailscale as i32]);
             }
             if s.send_config.is_some() && units & 1 != 0 {
                 units |= 4;
             }
-            gl.uniform_1_i32(p.at("u_units"), units);
-            gl.uniform_1_i32(p.at("u_constant_depth"), constant_depth as i32);
+            p.uniforms.u_units.set(gl, units);
+            p.uniforms.u_constant_depth.set(gl, constant_depth as i32);
 
             gl.bind_vertex_array(Some(self.vao));
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.vbo));
@@ -678,7 +905,7 @@ impl VoodooGl {
                     gl.depth_func(DEPTH_FUNCS[func]);
                     gl.depth_mask(false);
                     gl.color_mask(rgb, rgb, rgb, false);
-                    gl.uniform_1_i32(p.at("u_constant_depth"), 1);
+                    p.uniforms.u_constant_depth.set(gl, 1);
                     gl.draw_arrays(glow::TRIANGLES, first, 3);
 
                     gl.stencil_mask(0);
@@ -687,7 +914,7 @@ impl VoodooGl {
                     gl.depth_func(glow::ALWAYS);
                     gl.depth_mask(true);
                     gl.color_mask(false, false, false, false);
-                    gl.uniform_1_i32(p.at("u_constant_depth"), 0);
+                    p.uniforms.u_constant_depth.set(gl, 0);
                     gl.draw_arrays(glow::TRIANGLES, first, 3);
                 }
                 gl.disable(glow::STENCIL_TEST);
@@ -738,10 +965,10 @@ impl VoodooGl {
                 let p = &self.fill_program;
                 let size = (self.width as f32, self.height as f32);
                 gl.use_program(Some(p.program));
-                gl.uniform_4_f32(p.at("u_rect"), 0.0, 0.0, size.0, size.1);
-                gl.uniform_2_f32(p.at("u_size"), size.0, size.1);
-                gl.uniform_1_f32(p.at("u_scale"), self.scale as f32);
-                gl.uniform_1_i32_slice(p.at("u_pattern"), &(*pattern).map(i32::from));
+                p.uniforms.u_rect.set(gl, [0.0, 0.0, size.0, size.1]);
+                p.uniforms.u_size.set(gl, [size.0, size.1]);
+                p.uniforms.u_scale.set(gl, self.scale as f32);
+                p.uniforms.u_pattern.set(gl, *pattern);
                 gl.bind_vertex_array(Some(self.quad_vao));
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             } else if let Some(color) = fill.color {
@@ -768,6 +995,9 @@ impl VoodooGl {
     /// they differ from `base` (the settings window, messages): a texture
     /// and its size, or None if the card shows nothing.
     pub fn composite(&mut self, gl: &glow::Context, screen: &Frame, base: &Frame) -> Option<(glow::Texture, (u32, u32))> {
+        if self.scanout.is_some() {
+            return self.compose(gl, screen, base);
+        }
         let (w, h) = self.scaled();
         let front = self.targets.get(&self.front?)?;
         front.resolve(gl, (w, h));
@@ -797,38 +1027,238 @@ impl VoodooGl {
             gl.color_mask(true, true, true, true);
             let p = &self.clut_program;
             gl.use_program(Some(p.program));
-            gl.uniform_4_f32(p.at("u_rect"), 0.0, 0.0, self.width as f32, self.height as f32);
-            gl.uniform_2_f32(p.at("u_size"), self.width as f32, self.height as f32);
+            p.uniforms.u_rect.set(gl, [0.0, 0.0, self.width as f32, self.height as f32]);
+            p.uniforms.u_size.set(gl, [self.width as f32, self.height as f32]);
             gl.active_texture(glow::TEXTURE1);
             gl.bind_texture(glow::TEXTURE_2D, Some(self.lut));
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(front));
             gl.bind_vertex_array(Some(self.quad_vao));
             gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.draw_over(
+                gl,
+                screen,
+                base,
+                self.staging_texture,
+                (self.width, self.height),
+            );
+            restore(gl);
+            Some((composite.color, size))
+        }
+    }
 
-            // What is drawn over the machine's picture.
-            let fits = (screen.width, screen.height) == (self.width, self.height)
-                && (base.width, base.height) == (self.width, self.height);
-            if fits && screen.rgb != base.rgb {
-                let over: Vec<u8> = screen
-                    .rgb
-                    .as_chunks::<3>()
-                    .0
-                    .iter()
-                    .zip(base.rgb.as_chunks::<3>().0)
-                    .flat_map(|(&[r, g, b], old)| if [r, g, b] != *old { [r, g, b, 0xFF] } else { [0; 4] })
-                    .collect();
-                gl.bind_texture(glow::TEXTURE_2D, Some(self.staging_texture));
-                let pixels = glow::PixelUnpackData::Slice(Some(&over));
-                let (nw, nh) = (self.width as i32, self.height as i32);
-                gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, nw, nh, glow::RGBA, glow::UNSIGNED_BYTE, pixels);
-                let p = &self.pixels;
-                gl.use_program(Some(p.program));
-                gl.uniform_4_f32(p.at("u_rect"), 0.0, 0.0, self.width as f32, self.height as f32);
-                gl.uniform_2_f32(p.at("u_size"), self.width as f32, self.height as f32);
-                gl.uniform_1_f32(p.at("u_scale"), self.scale as f32);
-                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+    /// Draw over the picture being composed, of `size` of the card's
+    /// pixels, `screen`'s pixels where they differ from `base`, through
+    /// `texture`, as big as the picture.
+    fn draw_over(
+        &self,
+        gl: &glow::Context,
+        screen: &Frame,
+        base: &Frame,
+        texture: glow::Texture,
+        size: (u32, u32),
+    ) {
+        let fits = (screen.width, screen.height) == size && (base.width, base.height) == size;
+        if !fits || screen.rgba == base.rgba {
+            return;
+        }
+        let over: Vec<u8> = screen
+            .rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(base.rgba.as_chunks::<4>().0)
+            .flat_map(|(&[r, g, b, _], old)| {
+                if [r, g, b] != old[..3] {
+                    [r, g, b, 0xFF]
+                } else {
+                    [0; 4]
+                }
+            })
+            .collect();
+        let (w, h) = (size.0 as f32, size.1 as f32);
+        // SAFETY: see `VoodooGl`.
+        unsafe {
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            let pixels = glow::PixelUnpackData::Slice(Some(&over));
+            let (nw, nh) = size_i32(size);
+            gl.tex_sub_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                0,
+                0,
+                nw,
+                nh,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                pixels,
+            );
+            let p = &self.pixels;
+            gl.use_program(Some(p.program));
+            p.uniforms.u_rect.set(gl, [0.0, 0.0, w, h]);
+            p.uniforms.u_size.set(gl, [w, h]);
+            p.uniforms.u_scale.set(gl, self.scale as f32);
+            gl.bind_vertex_array(Some(self.quad_vao));
+            gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+        }
+    }
+
+    /// A Banshee's or Voodoo3's picture (`Scanout`), composed as its
+    /// video processor does: the desktop, the overlay and the cursor, each
+    /// surface from the buffer the renderer draws or from the memory that
+    /// came with the scanout, at `scale` times the desktop's size. Then
+    /// what `screen` has over `base`, as `composite`.
+    fn compose(
+        &mut self,
+        gl: &glow::Context,
+        screen: &Frame,
+        base: &Frame,
+    ) -> Option<(glow::Texture, (u32, u32))> {
+        let scaled = self.scaled();
+        let s = self.scanout.as_deref()?;
+        let banshee = self.banshee.as_mut().ok()?;
+        let (w, h) = (s.width.max(1), s.height.max(1));
+        let size = (w * self.scale, h * self.scale);
+        let buffer = |surface: &Surface| surface.buffer.and_then(|b| self.targets.get(&b));
+        let desktop = buffer(&s.desktop);
+        let overlay = s.overlay.as_ref().and_then(|o| buffer(&o.surface));
+        for target in [desktop, overlay].into_iter().flatten() {
+            target.resolve(gl, scaled);
+        }
+        let (desktop, overlay) = (desktop.map(|t| t.color), overlay.map(|t| t.color));
+        // SAFETY: see `VoodooGl`.
+        unsafe {
+            if self.composite.as_ref().is_none_or(|(_, old)| *old != size) {
+                if let Some((old, _)) = self.composite.take() {
+                    old.delete(gl);
+                }
+                self.composite = Some((target(gl, size_i32(size), 1, None).ok()?, size));
             }
+            if banshee
+                .screen
+                .as_ref()
+                .is_none_or(|(_, old)| *old != (w, h))
+            {
+                if let Some((old, _)) = banshee.screen.take() {
+                    gl.delete_texture(old);
+                }
+                let t = texture(gl, glow::NEAREST).ok()?;
+                let none = glow::PixelUnpackData::Slice(None);
+                let (nw, nh) = size_i32((w, h));
+                gl.tex_image_2d(
+                    glow::TEXTURE_2D,
+                    0,
+                    glow::RGBA8 as i32,
+                    nw,
+                    nh,
+                    0,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    none,
+                );
+                banshee.screen = Some((t, (w, h)));
+            }
+            // The CLUT, and the cursor's planes.
+            let clut: Vec<u8> = s
+                .clut
+                .iter()
+                .flat_map(|&c| [(c >> 16) as u8, (c >> 8) as u8, c as u8, 0xFF])
+                .collect();
+            gl.bind_texture(glow::TEXTURE_2D, Some(banshee.clut));
+            let pixels = glow::PixelUnpackData::Slice(Some(&clut));
+            gl.tex_sub_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                0,
+                0,
+                512,
+                1,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                pixels,
+            );
+            if let Some(cursor) = s.cursor.as_ref().filter(|c| c.pattern.len() == 1024) {
+                gl.bind_texture(glow::TEXTURE_2D, Some(banshee.cursor));
+                gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+                let pixels = glow::PixelUnpackData::Slice(Some(&cursor.pattern));
+                gl.tex_sub_image_2d(
+                    glow::TEXTURE_2D,
+                    0,
+                    0,
+                    0,
+                    16,
+                    64,
+                    glow::RED_INTEGER,
+                    glow::UNSIGNED_BYTE,
+                    pixels,
+                );
+                gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
+            }
+
+            let (composite, _) = self.composite.as_ref()?;
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(composite.fbo));
+            gl.viewport(0, 0, size.0 as i32, size.1 as i32);
+            gl.disable(glow::BLEND);
+            gl.disable(glow::DEPTH_TEST);
+            gl.disable(glow::SCISSOR_TEST);
+            gl.color_mask(true, true, true, true);
+            let p = &banshee.program;
+            gl.use_program(Some(p.program));
+            let u = &p.uniforms;
+            u.u_rect.set(gl, [0.0, 0.0, w as f32, h as f32]);
+            u.u_size.set(gl, [w as f32, h as f32]);
+            u.u_scale.set(gl, self.scale as i32);
+            let i = |v: u32| v as i32;
+            let d = &s.desktop;
+            let bypass = d.bypass as i32;
+            u.u_desk.set(gl, [i(d.format), i(d.clut), bypass, desktop.is_some() as i32]);
+            let len = banshee.desktop.len as i32;
+            u.u_desk_layout.set(gl, [i(d.stride), d.tiled as i32, s.half as i32, len]);
+            match &s.overlay {
+                Some(o) => {
+                    let v = &o.surface;
+                    let bypass = v.bypass as i32;
+                    u.u_ovl.set(gl, [i(v.format), i(v.clut), bypass, overlay.is_some() as i32]);
+                    let len = banshee.overlay.len as i32;
+                    u.u_ovl_layout.set(gl, [i(v.stride), v.tiled as i32, 0, len]);
+                    u.u_ovl_rect.set(gl, o.rect.map(i));
+                    u.u_ovl_step.set(gl, [i(o.dudx), i(o.dvdy), i(o.v_offset)]);
+                }
+                None => u.u_ovl.set(gl, [0, 0, 0, -1]),
+            }
+            match &s.cursor {
+                Some(c) => {
+                    u.u_cur.set(gl, [c.x, c.y, 1, c.x11 as i32]);
+                    let rgb = |c: u32| {
+                        [
+                            (c >> 16 & 0xFF) as f32 / 255.0,
+                            (c >> 8 & 0xFF) as f32 / 255.0,
+                            (c & 0xFF) as f32 / 255.0,
+                        ]
+                    };
+                    u.u_cur_c0.set(gl, rgb(c.colors[0]));
+                    u.u_cur_c1.set(gl, rgb(c.colors[1]));
+                }
+                None => u.u_cur.set(gl, [0, 0, 0, 0]),
+            }
+            // Every sampler has a texture of its kind, used or not.
+            let units = [
+                banshee.desktop.texture,
+                desktop.unwrap_or(self.lut),
+                banshee.overlay.texture,
+                overlay.unwrap_or(self.lut),
+                banshee.cursor,
+                banshee.clut,
+            ];
+            for (unit, texture) in units.into_iter().enumerate() {
+                gl.active_texture(glow::TEXTURE0 + unit as u32);
+                gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            }
+            gl.bind_vertex_array(Some(self.quad_vao));
+            gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            let screen_texture = banshee.screen.as_ref()?.0;
+            self.draw_over(gl, screen, base, screen_texture, (w, h));
             restore(gl);
             Some((composite.color, size))
         }
@@ -967,14 +1397,13 @@ fn target(gl: &glow::Context, (w, h): (i32, i32), samples: u32, depth: Option<De
 
 /// Compile and link a program with its attributes at their locations, and
 /// find its uniforms.
-fn compile(
+fn compile<U: Locations>(
     gl: &glow::Context,
     glsl: Glsl,
     vertex: &str,
     fragment: &str,
     attributes: &[(u32, &str)],
-    uniforms: &[&'static str],
-) -> Result<Program, String> {
+) -> Result<Program<U>, String> {
     // SAFETY: see `VoodooGl`.
     unsafe {
         let program = gl.create_program()?;
@@ -1009,15 +1438,7 @@ fn compile(
             gl.delete_program(program);
             return Err(problem);
         }
-        let mut found = HashMap::new();
-        for &name in uniforms {
-            let location =
-                gl.get_uniform_location(program, name).or_else(|| gl.get_uniform_location(program, &format!("{}[0]", name)));
-            if let Some(location) = location {
-                found.insert(name, location);
-            }
-        }
-        Ok(Program { program, uniforms: found })
+        Ok(Program { program, uniforms: U::resolve(gl, program) })
     }
 }
 
@@ -1027,9 +1448,89 @@ mod tests {
 
     #[test]
     #[ignore = "requires a desktop OpenGL context"]
+    fn texture_updates_replace_pixels_and_resize_mip_storage() {
+        use super::*;
+        use crate::voodoo::mirror::Level;
+        let sdl = sdl2::init().unwrap();
+        let video = sdl.video().unwrap();
+        let attrs = video.gl_attr();
+        attrs.set_context_profile(sdl2::video::GLProfile::Core);
+        attrs.set_context_version(3, 3);
+        let window = video
+            .window("Texture regression", 8, 8)
+            .opengl()
+            .hidden()
+            .build()
+            .unwrap();
+        let _context = window.gl_create_context().unwrap();
+        // SAFETY: this thread owns the current SDL OpenGL context.
+        let gl = unsafe {
+            glow::Context::from_loader_function(|name| video.gl_get_proc_address(name).cast())
+        };
+        let mut renderer = VoodooGl::new(&gl, Glsl::Gl150, 1, 1, 1).unwrap();
+        for (width, height, count, color) in [
+            (4, 4, 2, 0xFF11_2233u32),
+            (4, 4, 2, 0x8044_5566),
+            (2, 2, 1, 0x4077_8899),
+            (4, 4, 2, 0xFFAA_BBCC),
+        ] {
+            let levels: Vec<_> = (0..count)
+                .map(|i| Level {
+                    width: width >> i,
+                    height: height >> i,
+                    argb: vec![color; ((width >> i) * (height >> i)) as usize],
+                })
+                .collect();
+            renderer.upload(
+                &gl,
+                &Texture {
+                    id: 7,
+                    levels: levels.clone(),
+                },
+            );
+            let entry = &renderer.textures[&7];
+            // SAFETY: the context and texture belong to this thread.
+            unsafe {
+                gl.bind_texture(glow::TEXTURE_2D, Some(entry.texture));
+                assert_eq!(
+                    gl.get_tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAX_LEVEL),
+                    count - 1
+                );
+                for (i, level) in levels.iter().enumerate() {
+                    let mut pixels = vec![0; (level.width * level.height * 4) as usize];
+                    gl.get_tex_image(
+                        glow::TEXTURE_2D,
+                        i as i32,
+                        glow::RGBA,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelPackData::Slice(Some(&mut pixels)),
+                    );
+                    let expected = [
+                        (color >> 16) as u8,
+                        (color >> 8) as u8,
+                        color as u8,
+                        (color >> 24) as u8,
+                    ];
+                    assert!(
+                        pixels
+                            .as_chunks::<4>()
+                            .0
+                            .iter()
+                            .all(|pixel| *pixel == expected)
+                    );
+                }
+                assert_eq!(gl.get_error(), glow::NO_ERROR);
+            }
+        }
+        renderer.destroy(&gl);
+    }
+
+    #[test]
+    #[ignore = "requires a desktop OpenGL context"]
     fn constant_depth_comparison_writes_interpolated_depth() {
         use super::*;
         use crate::voodoo::mirror::{DrawState, Layout};
+        use crate::voodoo::raster::Stride;
         let t = test_context("Depth regression");
         let gl = t.gl;
         for samples in [1, 4] {
@@ -1049,12 +1550,19 @@ mod tests {
             renderer.run(&gl, Recording {
                 commands: vec![
                     Command::Resync(Box::new(Snapshot {
-                        layout: Layout { width: 8, height: 8, rowpixels: 8, color: vec![0, 64], aux: Some(128) },
+                        layout: Layout {
+                            width: 8,
+                            height: 8,
+                            stride: Stride::linear(8),
+                            aux_stride: Stride::linear(8),
+                            color: vec![0, 64],
+                            aux: Some(128),
+                        },
                         color: vec![vec![0; 64]; 2], aux: Some(vec![0xFFFF; 64]),
                     })),
                     Command::Draw(Box::new(Draw { state, vertices })),
                 ],
-                front: Some(0), output: true, width: 8, height: 8, clut: [0; 33],
+                front: Some(0), output: true, width: 8, height: 8, clut: [0; 33], scanout: None,
             });
             let target = &renderer.targets[&0];
             target.resolve(&gl, (8, 8));
@@ -1077,6 +1585,7 @@ mod tests {
 
     /// Replay a saved Glide scene without changing the running game.
     /// RUST_DOS_VOODOO_STATE selects the state; images go under target/tmp.
+    /// RUST_DOS_VOODOO_DRIVE_C redirects its C: image to a scratch disk.
     #[test]
     #[ignore = "requires a saved Glide scene and a desktop OpenGL context"]
     fn replay_saved_glide_scene() {
@@ -1091,6 +1600,9 @@ mod tests {
         let settings = slots::machine_settings(&header.machine, &Default::default());
         let mut cpu = Cpu::with_memory(PathBuf::from("."), header.memsize);
         crate::hardware::configure(&mut cpu, &settings, crate::keylayout::Layout::us());
+        if let Some(image) = std::env::var_os("RUST_DOS_VOODOO_DRIVE_C") {
+            cpu.bus.disk.folders_from_state.push((crate::disk::DRIVE_C, image.into()));
+        }
         // A booted system's state wants its disk as it was: a copy beside it.
         crate::savestate::disks::offer_copies(&mut cpu, std::path::Path::new(&path));
         machine::load(&mut cpu, &state).unwrap();
@@ -1131,8 +1643,10 @@ mod tests {
                 let (w, h) = (card.fbi.width, card.fbi.height);
                 card.frame_buffer();
                 card.prepare_display();
-                let mut reference = vec![0; (w * h * 3) as usize];
-                card.render(&mut reference, w as usize);
+                let mut rgba = vec![0; (w * h * 4) as usize];
+                card.render(&mut rgba, w as usize);
+                let reference: Vec<_> = rgba.as_chunks::<4>().0.iter()
+                    .flat_map(|&[r, g, b, _]| [r, g, b]).collect();
                 save(&format!("glide-{frame}-software"), &reference, w, h);
                 let target = &renderer.targets[&renderer.front.unwrap()];
                 target.resolve(&gl, (w as i32, h as i32));
@@ -1158,6 +1672,228 @@ mod tests {
             }
         }
         renderer.destroy(&gl);
+    }
+
+    /// A Banshee's picture composed with OpenGL is the software one, pixel
+    /// for pixel: desktops of every format, linear and tiled, the overlay
+    /// in YUV, 8 bits and 5-6-5 with and without scaling, the cursor in
+    /// both modes, and surfaces that are buffers the renderer draws.
+    #[test]
+    #[ignore = "requires a desktop OpenGL context"]
+    fn banshee_composition_matches_the_software_picture() {
+        use super::*;
+        use crate::voodoo::banshee::render3d::{
+            COL_BUFFER_ADDR, COL_BUFFER_STRIDE, LEFT_OVERLAY_BUF,
+        };
+        use crate::voodoo::banshee::*;
+        use crate::voodoo::regs::SWAPBUFFER_CMD;
+        use crate::voodoo::{Board, Now, Voodoo};
+
+        let sdl = sdl2::init().unwrap();
+        let video = sdl.video().unwrap();
+        let attrs = video.gl_attr();
+        attrs.set_context_profile(sdl2::video::GLProfile::Core);
+        attrs.set_context_version(3, 3);
+        let window = video
+            .window("Banshee composition", 8, 8)
+            .opengl()
+            .hidden()
+            .build()
+            .unwrap();
+        let _context = window.gl_create_context().unwrap();
+        // SAFETY: this thread owns the current SDL OpenGL context.
+        let gl =
+            unsafe { glow::Context::from_loader_function(|s| video.gl_get_proc_address(s).cast()) };
+
+        // A 160x100 desktop at 1000h, memory and CLUT of noise.
+        let (w, h) = (160usize, 100usize);
+        let card = |cfg: u32, stride: u32, overlay: Option<(u32, u32, [u32; 2])>| {
+            let mut v = Voodoo::with_workers(Board::Voodoo3, 0);
+            let now = Now::default();
+            let mut seed = 0x1234_5678u32;
+            let mut noise = move || {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                seed >> 24
+            };
+            for a in 0..0x10_0000 {
+                v.fbi.ram.set_byte(a, noise() as u8);
+            }
+            let b = v.banshee.as_mut().unwrap();
+            b.crtc[0x01] = (w / 8 - 1) as u8;
+            b.crtc[0x12] = (h - 1) as u8;
+            for c in b.clut.iter_mut() {
+                *c = noise() << 16 | noise() << 8 | noise();
+            }
+            let reg = |v: &mut Voodoo, r: u32, value: u32| v.write(r, value, u32::MAX, now);
+            reg(&mut v, VGA_INIT0, VGAINIT0_EXTENDED_SHIFT_OUT);
+            reg(&mut v, VID_PROC_CFG, VIDPROC_ENABLE | cfg);
+            reg(&mut v, VID_DESKTOP_START_ADDR, 0x1000);
+            reg(&mut v, HW_CUR_PAT_ADDR, 0x2_0000);
+            reg(&mut v, HW_CUR_LOC, (64 + 30) | (64 + 40) << 16);
+            reg(&mut v, HW_CUR_C0, 0x12_3456);
+            reg(&mut v, HW_CUR_C1, 0xAB_CDEF);
+            let mut strides = stride;
+            if let Some((addr, overlay_stride, [start, end])) = overlay {
+                v.banshee.as_mut().unwrap().overlay_addr = addr;
+                strides |= overlay_stride << 16;
+                reg(&mut v, VID_OVERLAY_START_COORDS, start);
+                reg(&mut v, VID_OVERLAY_END_SCREEN_COORDS, end);
+                reg(&mut v, VID_OVERLAY_DUDX, 0x8_0000);
+                reg(&mut v, VID_OVERLAY_DVDY, 0x6_0000);
+                reg(&mut v, VID_OVERLAY_DVDY_OFFSET, 0x3_0000);
+            }
+            reg(&mut v, VID_DESKTOP_OVERLAY_STRIDE, strides);
+            v
+        };
+        let at = |x: u32, y: u32| x | y << 12;
+        let scaled = VIDPROC_H_SCALE | VIDPROC_V_SCALE;
+        let cases: Vec<(&str, Voodoo)> = vec![
+            ("8 bits, linear", card(0, 200, None)),
+            (
+                "5-6-5, tiled, CLUT high",
+                card(
+                    1 << 18 | VIDPROC_DESKTOP_TILED | VIDPROC_DESKTOP_CLUT_SEL,
+                    3,
+                    None,
+                ),
+            ),
+            (
+                "24 bits, linear, half mode",
+                card(2 << 18 | VIDPROC_HALF_MODE, 496, None),
+            ),
+            (
+                "32 bits, tiled, cursor",
+                card(3 << 18 | VIDPROC_DESKTOP_TILED | VIDPROC_CURSOR, 5, None),
+            ),
+            (
+                "YUYV overlay, scaled, cursor",
+                card(
+                    1 << 18
+                        | VIDPROC_DESKTOP_CLUT_BYPASS
+                        | VIDPROC_OVERLAY_ENABLE
+                        | 5 << 21
+                        | scaled
+                        | VIDPROC_CURSOR,
+                    320,
+                    Some((0x4_0000, 400, [at(10, 20), at(120, 90)])),
+                ),
+            ),
+            (
+                "UYVY overlay, tiled, whole screen, X11 cursor",
+                card(
+                    1 << 18
+                        | VIDPROC_OVERLAY_ENABLE
+                        | 6 << 21
+                        | VIDPROC_OVERLAY_TILED
+                        | VIDPROC_CURSOR
+                        | VIDPROC_CURSOR_X11,
+                    320,
+                    Some((0x6_0000, 4, [at(0, 0), at(159, 99)])),
+                ),
+            ),
+            (
+                "8-bit overlay, CLUT high, scaled",
+                card(
+                    VIDPROC_OVERLAY_ENABLE | VIDPROC_OVERLAY_CLUT_SEL | scaled,
+                    160,
+                    Some((0x8_0000, 160, [at(40, 10), at(170, 120)])),
+                ),
+            ),
+            (
+                "5-6-5 overlay, linear, bypassed",
+                card(
+                    1 << 18 | VIDPROC_OVERLAY_ENABLE | 1 << 21 | VIDPROC_OVERLAY_CLUT_BYPASS,
+                    320,
+                    Some((0x8_0000, 320, [at(5, 5), at(100, 60)])),
+                ),
+            ),
+        ];
+        let mut cases = cases;
+        // A 3D buffer the overlay shows, as it is and scaled, and one the
+        // desktop is.
+        let reg3d = |v: &mut Voodoo, r: usize, value: u32| {
+            v.write(0x20_0000 + 4 * r as u32, value, u32::MAX, Now::default())
+        };
+        for (name, scaling) in [
+            ("5-6-5 overlay from a 3D buffer", 0),
+            ("5-6-5 overlay from a 3D buffer, scaled", scaled),
+        ] {
+            let mut overlay_buffer = card(
+                1 << 18 | VIDPROC_OVERLAY_ENABLE | 1 << 21 | VIDPROC_CURSOR | scaling,
+                320,
+                Some((0, 320, [at(8, 4), at(150, 95)])),
+            );
+            reg3d(&mut overlay_buffer, COL_BUFFER_ADDR, 0xA_0000);
+            reg3d(&mut overlay_buffer, COL_BUFFER_STRIDE, 320);
+            reg3d(&mut overlay_buffer, LEFT_OVERLAY_BUF, 0xA_0000);
+            reg3d(&mut overlay_buffer, SWAPBUFFER_CMD, 0);
+            cases.push((name, overlay_buffer));
+        }
+        let mut desktop_buffer = card(1 << 18 | VIDPROC_DESKTOP_TILED, 3, None);
+        reg3d(&mut desktop_buffer, COL_BUFFER_ADDR, 0x1000);
+        reg3d(&mut desktop_buffer, COL_BUFFER_STRIDE, 1 << 15 | 3);
+        cases.push(("tiled 5-6-5 desktop that is a 3D buffer", desktop_buffer));
+
+        let buffers = cases.len() - 3;
+        for (n, (name, mut v)) in cases.into_iter().enumerate() {
+            v.set_mirror(true);
+            v.set_software_picture(false);
+            let recording = v.take_mirror().unwrap();
+            let s = recording.scanout.as_deref().expect("a scanout");
+            let from_buffer = s.desktop.buffer.is_some()
+                || s.overlay
+                    .as_ref()
+                    .is_some_and(|o| o.surface.buffer.is_some());
+            assert_eq!(from_buffer, n >= buffers, "{name}: drawn by the renderer");
+            let mut renderer = VoodooGl::new(&gl, Glsl::Gl150, 1, 1, 1).unwrap();
+            assert!(renderer.banshee_problem().is_none());
+            renderer.run(&gl, recording);
+            // Something drawn over the picture (a message) goes on top.
+            let base = Frame::new(w as u32, h as u32);
+            let mut screen = base.clone();
+            screen.rgba[..3].copy_from_slice(&[1, 2, 3]);
+            let (_, size) = renderer.composite(&gl, &screen, &base).unwrap();
+            assert_eq!(size, (w as u32, h as u32));
+            let mut composed = vec![0; w * h * 4];
+            // SAFETY: the context and framebuffer belong to this thread.
+            unsafe {
+                gl.bind_framebuffer(
+                    glow::FRAMEBUFFER,
+                    Some(renderer.composite.as_ref().unwrap().0.fbo),
+                );
+                gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
+                let pixels = glow::PixelPackData::Slice(Some(&mut composed));
+                gl.read_pixels(
+                    0,
+                    0,
+                    w as i32,
+                    h as i32,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    pixels,
+                );
+                assert_eq!(gl.get_error(), glow::NO_ERROR);
+            }
+            v.set_software_picture(true);
+            v.prepare_display();
+            let mut reference = vec![0; w * h * 4];
+            v.render(&mut reference, w);
+            reference[..3].copy_from_slice(&[1, 2, 3]);
+            let bad: Vec<usize> = (0..w * h)
+                .filter(|&i| composed[i * 4..i * 4 + 3] != reference[i * 4..i * 4 + 3])
+                .collect();
+            if let Some(&i) = bad.first() {
+                panic!(
+                    "{name}: {} pixels differ, the first at ({}, {}): {:?} composed, {:?} in software",
+                    bad.len(),
+                    i % w,
+                    i / w,
+                    &composed[i * 4..i * 4 + 3],
+                    &reference[i * 4..i * 4 + 3],
+                );
+            }
+            renderer.destroy(&gl);
+        }
     }
 
     #[test]
@@ -1423,6 +2159,7 @@ mod tests {
     fn benchmark_dithering() {
         use super::*;
         use crate::voodoo::mirror::{DrawState, Layout};
+        use crate::voodoo::raster::Stride;
         let t = test_context("Dither benchmark");
         let gl = &t.gl;
         let state = DrawState {
@@ -1472,7 +2209,8 @@ mod tests {
                 layout: Layout {
                     width: 640,
                     height: 480,
-                    rowpixels: 640,
+                    stride: Stride::linear(640),
+                    aux_stride: Stride::linear(640),
                     color: vec![0],
                     aux: None,
                 },
@@ -1484,6 +2222,7 @@ mod tests {
             width: 640,
             height: 480,
             clut: [0; 33],
+            scanout: None,
         };
         let frame = Recording {
             commands: vec![Command::Draw(Box::new(Draw { state, vertices }))],

@@ -11,7 +11,13 @@ on:
       - "src/exec.rs"
       - "src/cpu/**"
       - "src/dynrec/**"
+      - "src/bus.rs"
       - "src/bus/guest.rs"
+      - "src/mixer.rs"
+      - "src/mouse.rs"
+      - "src/joystick.rs"
+      - "crates/mpu401/**"
+      - "src/cdrom/audio.rs"
       - "src/interrupts/int21.rs"
       - "tests/conformance/**"
       - "tests/conformance_tests.rs"
@@ -52,11 +58,13 @@ jobs:
         with:
           key: conformance
 
+      # In release: a debug build runs the user32 and gdi32 programs,
+      # msg.c and win.c above all, many times slower.
       - name: Run the conformance tests
         env:
           CONFORMANCE_CC: i686-w64-mingw32-gcc-win32
           CONFORMANCE_REQUIRED: "1"
-        run: cargo test --locked --test conformance_tests
+        run: cargo test --locked --release --test conformance_tests
 
       # What each test program printed, to look at when they fail.
       - name: Keep the test programs' output

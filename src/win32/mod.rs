@@ -15,7 +15,12 @@
 
 mod advapi32;
 mod call;
+mod com;
 mod convert;
+mod ddraw;
+mod dinput;
+mod dsound;
+pub mod gdi32;
 mod heap;
 mod kernel32;
 mod loader;
@@ -23,12 +28,16 @@ mod mapping;
 mod memory;
 mod msvcrt;
 mod object;
+mod ole32;
 mod registry;
 mod seh;
 pub mod snapshot;
 mod stubs;
 mod system;
+mod task;
 mod thread;
+pub mod user32;
+mod winmm;
 
 pub use snapshot::snapshot;
 pub use stubs::function_name;
@@ -279,6 +288,20 @@ pub struct Win32 {
     /// The console's input and output modes (SetConsoleMode), or None
     /// for those it starts with.
     console_mode: Option<(u32, u32)>,
+
+    /// USER's and GDI's state: windows, messages, and what GDI draws
+    /// with. They are the system's, shared by the processes.
+    user: user32::State,
+    gdi: gdi32::State,
+
+    /// COM's and the DirectX and multimedia DLLs' state, the system's,
+    /// and how many GUIDs CoCreateGuid made.
+    ole: ole32::State,
+    ddraw: ddraw::State,
+    dsound: dsound::State,
+    dinput: dinput::State,
+    winmm: winmm::State,
+    guids: u32,
 }
 
 impl Win32 {
@@ -315,12 +338,67 @@ impl Win32 {
             .collect()
     }
 
+    /// When WinMM next has work to do (its timers, MIDI streams and MCI
+    /// devices), in PIT ticks, for the bus's timer events.
+    pub fn next_event(&self) -> Option<u64> {
+        let micros = self.winmm.due?;
+        Some(crate::timer::mul_div_ceil(micros, crate::timer::PIT_HZ, 1_000_000))
+    }
+
+    /// The scale of what the MIDI synthesizer plays (left, right): the
+    /// MIDI device's volume and the mixer's.
+    pub fn midi_gain(&self) -> (f32, f32) {
+        winmm::midi::gain(&self.winmm)
+    }
+
+    /// The scale of what the CD drive plays: the mixer's CD line.
+    pub fn cd_gain(&self) -> (f32, f32) {
+        self.winmm.mixer.cd_gain()
+    }
+
+    /// Whether that time, or the time the sound device next needs its
+    /// tick (`audio_next_event`), has come at PIT tick `now` (`timer`).
+    #[inline]
+    pub fn due(&self, now: u64) -> bool {
+        [self.next_event(), self.dsound.due, self.winmm.wave.due]
+            .into_iter()
+            .flatten()
+            .any(|t| t <= now)
+    }
+
     /// A new process or thread id: as on Windows 95, a large number,
     /// which programs only compare.
     fn new_id(&mut self) -> u32 {
         self.ids += 1;
         0xFFF0_0000 + self.ids * 0x24
     }
+}
+
+/// WinMM's or the sound device's time for work came (`Win32::due`),
+/// between two instructions: the work is done, and if the program's code
+/// was running, a thread of a higher priority that it readied (the
+/// multimedia thread, whose callbacks ran at interrupt time on Windows
+/// 95) runs at once.
+pub fn timer(cpu: &mut Cpu) {
+    cpu.bus.win32.winmm.due = None;
+    if !cpu.bus.win32.active() {
+        cpu.bus.win32.dsound.due = None;
+        cpu.bus.win32.winmm.wave.due = None;
+        cpu.bus.reschedule_timers();
+        return;
+    }
+    let in_program = cpu.pe()
+        && !cpu.v86()
+        && cpu.cpl == 3
+        && cpu.bus.win32.interrupted.is_none()
+        && running(cpu).is_some_and(|p| p.current.is_some());
+    if in_program {
+        thread::preempt(cpu);
+    } else {
+        winmm::tick(cpu);
+        dsound::tick(cpu);
+    }
+    winmm::schedule(cpu);
 }
 
 /// The running process.
@@ -379,6 +457,8 @@ pub fn prepare(cpu: &mut Cpu, filename: &str, bytes: &[u8]) -> bool {
         return false;
     }
     install_rom(&mut cpu.bus);
+    // Keys typed before it started aren't its to read (`take_pressed`).
+    cpu.bus.kbd.take_pressed();
     let path = cpu.program_path(filename);
     cpu.bus
         .log_string(&format!("[W32] {} is a Win32 program", path));
@@ -637,6 +717,7 @@ fn end_process(cpu: &mut Cpu, index: usize, code: u32) {
         return;
     };
     let (name, threads) = (process.name.clone(), process.threads.len());
+    let tids: Vec<u32> = process.threads.iter().map(|t| t.id).collect();
     for i in 0..threads {
         thread::end(win32, index, i, code);
     }
@@ -662,6 +743,13 @@ fn end_process(cpu: &mut Cpu, index: usize, code: u32) {
     let process = cpu.bus.win32.processes.remove(index);
     process.memory.release(&mut cpu.bus);
     registry::process_ended(cpu, process.id);
+    user32::process_ended(cpu, process.id, &tids);
+    gdi32::process_ended(cpu, process.id);
+    ole32::process_ended(cpu, process.id, &tids);
+    ddraw::process_ended(cpu, process.id, &tids);
+    dsound::process_ended(cpu, process.id, &tids);
+    dinput::process_ended(cpu, process.id, &tids);
+    winmm::process_ended(cpu, process.id, &tids);
     let win32 = &mut cpu.bus.win32;
     if win32.running != index {
         // Another process's thread runs on.
@@ -754,6 +842,34 @@ fn dos<T>(cpu: &mut Cpu, f: impl FnOnce(&mut Cpu) -> T) -> T {
     result
 }
 
+/// Whether the built-in Windows's sound device plays (DirectSound's
+/// buffers, WinMM's wave audio), for the host's mixer.
+pub fn audio_playing(win32: &Win32) -> bool {
+    dsound::device::playing(win32)
+}
+
+/// The sound device's samples for the host's frames `first` to `first +
+/// frames`, if it plays (dsound/device.rs).
+pub fn audio_render(
+    bus: &crate::bus::Bus,
+    first: u64,
+    frames: usize,
+) -> Option<Vec<(f32, f32)>> {
+    dsound::device::render(bus, first, frames)
+}
+
+/// When the sound device next needs its tick (a notification, a block
+/// done), in PIT ticks after `now`.
+pub fn audio_next_event(win32: &Win32, now: u64) -> Option<u64> {
+    [
+        dsound::next_event(&win32.dsound, now),
+        winmm::wave::next_event(&win32.winmm.wave, now),
+    ]
+    .into_iter()
+    .flatten()
+    .min()
+}
+
 /// DOS ended the process `psp`: the Win32 processes in it, if any, go
 /// too.
 pub fn process_ended(cpu: &mut Cpu, psp: u16) {
@@ -770,6 +886,16 @@ pub fn process_ended(cpu: &mut Cpu, psp: u16) {
         object::close_all_files(&mut cpu.bus);
         cpu.bus.win32.objects = object::Objects::default();
         cpu.bus.win32.sections.clear();
+        if cpu.bus.win32.user.desktop {
+            user32::paint::leave_desktop(cpu);
+        }
+        cpu.bus.win32.user = user32::State::default();
+        cpu.bus.win32.gdi = gdi32::State::default();
+        cpu.bus.win32.ole = ole32::State::default();
+        cpu.bus.win32.ddraw = ddraw::State::default();
+        cpu.bus.win32.dsound = dsound::State::default();
+        cpu.bus.win32.dinput = dinput::State::default();
+        cpu.bus.win32.winmm = winmm::State::default();
         cpu.bus.set_a20(a20);
     }
     cpu.bus.win32.pending = None;
@@ -856,4 +982,13 @@ crate::state_fields!(Win32 {
 
     long_dirs,
     console_mode,
+    user,
+    gdi,
+
+    ole,
+    ddraw,
+    dsound,
+    dinput,
+    winmm,
+    guids,
 } skip { enabled });

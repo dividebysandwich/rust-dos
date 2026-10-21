@@ -34,6 +34,7 @@ fn channel_named(name: &str) -> Option<Channel> {
         "AWE32" | "AWE" | "EMU8000" => Channel::Awe,
         "MONITOR" => Channel::Monitor,
         "MODEM" => Channel::Modem,
+        "WINDOWS" | "WIN32" | "DSOUND" => Channel::Windows,
         _ => return None,
     })
 }
@@ -54,6 +55,7 @@ fn display_name(channel: Channel) -> &'static str {
         Channel::Awe => "AWE32",
         Channel::Monitor => "MONITOR",
         Channel::Modem => "MODEM",
+        Channel::Windows => "WINDOWS",
     }
 }
 
@@ -76,6 +78,7 @@ pub fn active_channels(cpu: &Cpu) -> Vec<Channel> {
             Channel::Tandy => bus.tandy_sound_enabled(),
             Channel::Monitor => bus.monitor_noise.enabled,
             Channel::Modem => bus.serial.has_modem(),
+            Channel::Windows => bus.win32.enabled,
             Channel::DiskNoise => bus.disknoise.enabled(crate::diskio::DiskClass::HardDisk)
                 || bus.disknoise.enabled(crate::diskio::DiskClass::Floppy),
             _ => true,

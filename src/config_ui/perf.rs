@@ -307,7 +307,9 @@ mod tests {
         let mut ui = ConfigUi::new();
         let view = StatsView { fps: 70.0, refresh_hz: 70.0, cpu_use: 95.0, fps_history: vec![70.0; 120], cpu_history: vec![95.0; 120], ..Default::default() };
         ui.set_stats(view);
-        let lit = |frame: &Frame, x: usize, y: usize| frame.rgb[(y * frame.width as usize + x) * 3..][..3] != [0, 0, 0];
+        let lit = |frame: &Frame, x: usize, y: usize| {
+            frame.rgba[(y * frame.width as usize + x) * 4..][..3] != [0, 0, 0]
+        };
         let mut frame = Frame::new(640, 400);
         ui.draw_overlay(&mut frame);
         assert!(!lit(&frame, 600, 380), "off");
@@ -316,18 +318,20 @@ mod tests {
         assert!(ui.overlay_shown());
         ui.draw_overlay(&mut frame);
         assert!(lit(&frame, 600, 380) && !lit(&frame, 400, 380) && !lit(&frame, 600, 300));
-        let has = |frame: &Frame, c: Rgb| frame.rgb.chunks(3).any(|px| px == [c.0, c.1, c.2]);
+        let has = |frame: &Frame, c: Rgb| {
+        frame.rgba.as_chunks::<4>().0.iter().any(|px| px[..3] == [c.0, c.1, c.2])
+    };
         assert!(has(&frame, draw::GOOD) && has(&frame, draw::KEY) && has(&frame, draw::ERROR), "graphs, and the CPU use in red");
 
         // Half as opaque as the window: over white, its panel is lighter.
         let mut white = Frame::new(640, 400);
-        white.rgb.fill(0xFF);
+        white.rgba.fill(0xFF);
         ui.draw_overlay(&mut white);
         let mut window = Frame::new(640, 400);
-        window.rgb.fill(0xFF);
+        window.rgba.fill(0xFF);
         let layout = Layout { x: 0, y: 0, cell_h: 16, cols: 1, rows: 1 };
         draw::render(&Grid::new(1, 1), &layout, &mut window);
-        let (overlay, panel) = (&white.rgb[(390 * 640 + 630) * 3..][..3], &window.rgb[..3]);
+        let (overlay, panel) = (&white.rgba[(390 * 640 + 630) * 4..][..3], &window.rgba[..3]);
         assert!(overlay.iter().zip(panel).all(|(o, p)| o > p), "{:?} over {:?}", overlay, panel);
 
         // Not over the window, and not on a picture too small for it.

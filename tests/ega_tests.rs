@@ -33,8 +33,8 @@ fn picture(cpu: &mut Cpu) -> Frame {
 }
 
 fn pixel(frame: &Frame, x: usize, y: usize) -> (u8, u8, u8) {
-    let i = (y * frame.width as usize + x) * 3;
-    (frame.rgb[i], frame.rgb[i + 1], frame.rgb[i + 2])
+    let i = (y * frame.width as usize + x) * 4;
+    (frame.rgba[i], frame.rgba[i + 1], frame.rgba[i + 2])
 }
 
 /// Pixel 0 of the top row in colour `color`, through the planes.
@@ -143,6 +143,8 @@ fn the_shell_runs_on_an_ega() {
     video::print_string(&mut cpu, "HELLO");
     assert_eq!(video::frame_size(&cpu.bus), (640, 350));
     let frame = picture(&mut cpu);
-    assert!(frame.rgb[..640 * 14 * 3].iter().any(|&b| b != 0));
+    assert!(frame.rgba[..640 * 14 * 4]
+        .as_chunks::<4>().0.iter()
+        .any(|p| p[..3].iter().any(|&b| b != 0)));
     assert_eq!(cpu.bus.read_16(0x0485), 14);
 }

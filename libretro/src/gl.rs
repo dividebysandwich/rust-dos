@@ -168,7 +168,15 @@ impl Screen {
             self.drop_voodoo();
             return false;
         };
-        if settings.renderer != Renderer::OpenGl || self.voodoo_failed.is_some() {
+        // A Banshee's or Voodoo3's picture is its whole desktop, which the
+        // video processor composes. The core has no compositor for that
+        // (the desktop frontend's is `VoodooGl::compose`), so it draws the
+        // card in software. This is the core's limit, not the card's, so
+        // the check lives here and the desktop frontend has none.
+        if settings.renderer != Renderer::OpenGl
+            || card.banshee.is_some()
+            || self.voodoo_failed.is_some()
+        {
             card.set_mirror(false);
             self.drop_voodoo();
             return false;
@@ -193,7 +201,7 @@ impl Screen {
             }
         }
         let Some(recording) = card.take_mirror() else { return false };
-        let shown = recording.output && recording.front.is_some();
+        let shown = recording.shown();
         let Some(voodoo) = &mut self.voodoo else { return false };
         voodoo.set_dither(settings.dither);
         voodoo.run(&self.gl, recording);
@@ -213,12 +221,21 @@ impl Screen {
                 Some(picture) => picture,
                 None => {
                     gl.bind_texture(glow::TEXTURE_2D, Some(*own));
-                    // Frame rows are packed, three bytes a pixel.
-                    gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
-                    let pixels = glow::PixelUnpackData::Slice(Some(&screen.rgb));
-                    let (w, h) = (screen.width as i32, screen.height as i32);
-                    gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGB8 as i32, w, h, 0, glow::RGB, glow::UNSIGNED_BYTE, pixels);
+                    // Frame rows are packed RGBA, four bytes a pixel.
                     gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
+                    let pixels = glow::PixelUnpackData::Slice(Some(&screen.rgba));
+                    let (w, h) = (screen.width as i32, screen.height as i32);
+                    gl.tex_image_2d(
+                        glow::TEXTURE_2D,
+                        0,
+                        glow::RGBA8 as i32,
+                        w,
+                        h,
+                        0,
+                        glow::RGBA,
+                        glow::UNSIGNED_BYTE,
+                        pixels,
+                    );
                     (*own, (screen.width, screen.height))
                 }
             };

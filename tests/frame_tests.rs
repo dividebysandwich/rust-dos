@@ -46,8 +46,8 @@ fn mode_12h_shows_all_480_lines() {
     let mut frame = Frame::new(width, height);
     video::render_screen(&mut frame, &cpu.bus);
     let at = |x: usize, y: usize| {
-        let i = (y * width as usize + x) * 3;
-        (frame.rgb[i], frame.rgb[i + 1], frame.rgb[i + 2])
+        let i = (y * width as usize + x) * 4;
+        (frame.rgba[i], frame.rgba[i + 1], frame.rgba[i + 2])
     };
     assert_eq!(at(0, 470), cpu.bus.vga.get_rgb(0x3F));
     assert_eq!(at(1, 470), (0, 0, 0));

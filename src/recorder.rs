@@ -158,8 +158,8 @@ fn encode(writer: BufWriter<File>, frames: Receiver<Work>, last_delay: u16) -> R
             }
             None => last_delay,
         };
-        let pixels = fitted(&shown.frame, width as usize, height as usize);
-        let mut gif_frame = gif::Frame::from_rgb(width, height, &pixels);
+        let mut pixels = fitted(&shown.frame, width as usize, height as usize).into_owned();
+        let mut gif_frame = gif::Frame::from_rgba(width, height, &mut pixels);
         gif_frame.delay = delay;
         encoder.write_frame(&gif_frame).map_err(|e| e.to_string())?;
         match next {
@@ -201,7 +201,7 @@ mod tests {
 
     #[test]
     fn a_recording_holds_the_frames_at_the_first_size() {
-        let dir = std::env::temp_dir().join(format!("rust-dos-gif-{}", std::process::id()));
+        let dir = crate::test_dir::path("gif");
         let mut recorder = ScreenRecorder::new(1000);
         let path = recorder.toggle(&dir).unwrap().unwrap();
         assert!(recorder.is_active());

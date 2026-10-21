@@ -81,14 +81,34 @@ fn two_unit_state(regs: [u32; 6]) -> RasterState {
 /// The same textured triangle through a matching variant and Generic.
 /// No register bit changes between the two measurements.
 pub fn pipelines(c: &mut Criterion) {
-    let st = two_unit_state([
-        0x0009_4771,
-        0x0D42_2409,
-        0x0000_0410,
-        0xC0,
-        0x8000_0006,
-        0x8C26_1A0F,
-    ]);
+    pipeline(
+        c,
+        "video/voodoo/pipeline",
+        [
+            0x0009_4771,
+            0x0D42_2409,
+            0x0000_0410,
+            0xC0,
+            0x8000_0006,
+            0x8C26_1A0F,
+        ],
+    );
+    // Full states observed in the saved Oni main menu. Preserve the
+    // dynamic write and comparison bits, which the profile key masks.
+    for (name, cp, texture) in [
+        ("menu-alpha", 0x0048_2405, 0x8C26_1C0F),
+        ("menu-rgb", 0x0142_2409, 0x8C26_1ACF),
+    ] {
+        pipeline(
+            c,
+            &format!("video/voodoo/{name}"),
+            [0x0008_43E1, cp, 0x0000_5110, 0xC0, 0x8000_0006, texture],
+        );
+    }
+}
+
+fn pipeline(c: &mut Criterion, name: &str, regs: [u32; 6]) {
+    let st = two_unit_state(regs);
     let tp = TmuParams {
         starts: 10 << 32,
         startt: 20 << 32,
@@ -138,7 +158,7 @@ pub fn pipelines(c: &mut Criterion) {
     assert!(generic.pixels_out > 0);
     assert_eq!(generic, specialised);
     assert!((0..st.fb.len()).all(|i| st.fb.get(i) == expected[i]));
-    let mut group = c.benchmark_group("video/voodoo/pipeline");
+    let mut group = c.benchmark_group(name);
     group.throughput(Throughput::Elements(generic.pixels_in as u64));
     for (name, variant) in [("generic", None), ("variant", Some(variant))] {
         group.bench_function(name, |b| {

@@ -292,8 +292,8 @@ fn the_cursor_shows_over_the_picture() {
     cpu.bus.vga.mark_dirty_full();
     video::render_screen(&mut frame, &cpu.bus);
     let at = |x: usize, y: usize| {
-        let i = (y * width as usize + x) * 3;
-        (frame.rgb[i], frame.rgb[i + 1], frame.rgb[i + 2])
+        let i = (y * width as usize + x) * 4;
+        (frame.rgba[i], frame.rgba[i + 1], frame.rgba[i + 2])
     };
     assert_eq!(at(50, 100), (0, 0, 0), "transparent");
     assert_eq!(at(51, 100), (255, 255, 255), "inverted black");

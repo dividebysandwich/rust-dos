@@ -598,7 +598,7 @@ mod tests {
     #[test]
     fn a_folder_and_a_read_only_image_are_recorded() {
         let _hashes = HASHES.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = std::env::temp_dir().join(format!("rust-dos-media-{}", std::process::id()));
+        let dir = crate::test_dir::path("media");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("disk.img");
         std::fs::write(&path, vec![0xF6; 4096]).unwrap();
@@ -659,7 +659,7 @@ mod tests {
     #[test]
     fn the_record_is_kept_until_the_mounts_change_or_a_strict_match_save() {
         let _hashes = HASHES.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = std::env::temp_dir().join(format!("rust-dos-media-kept-{}", std::process::id()));
+        let dir = crate::test_dir::path("media-kept");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("c")).unwrap();
         std::fs::create_dir_all(dir.join("disc")).unwrap();
@@ -781,7 +781,7 @@ mod tests {
 
     #[test]
     fn a_writable_image_and_its_delta_file_are_hashed_whole() {
-        let dir = std::env::temp_dir().join(format!("rust-dos-media-whole-{}", std::process::id()));
+        let dir = crate::test_dir::path("media-whole");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("c")).unwrap();
         let image = dir.join("floppy.img");

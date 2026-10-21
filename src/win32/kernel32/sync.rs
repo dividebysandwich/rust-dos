@@ -240,6 +240,7 @@ fn wait(cpu: &mut Cpu, handles: &[u32], all: bool, ms: u32) -> Option<u32> {
         deadline,
         timeout_result: WAIT_TIMEOUT,
         section: 0,
+        queue: None,
     };
     if let Some(result) = thread::wait_now(cpu, &wait) {
         return Some(result);

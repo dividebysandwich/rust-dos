@@ -607,7 +607,7 @@ mod tests {
 
     impl Scratch {
         fn new(test: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!("rust-dos-makeimg-{}-{}", std::process::id(), test));
+            let dir = crate::test_dir::path(&format!("makeimg-{test}"));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             Scratch(dir)

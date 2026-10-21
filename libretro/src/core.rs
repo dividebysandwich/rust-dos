@@ -576,7 +576,7 @@ impl Core {
         }
         self.xrgb.clear();
         self.xrgb.extend(
-            self.screen.rgb.as_chunks::<3>().0.iter().map(|&[r, g, b]| u32::from_be_bytes([0, r, g, b])),
+            self.screen.rgba.as_chunks::<4>().0.iter().map(|&[r, g, b, _]| u32::from_be_bytes([0, r, g, b])),
         );
         self.shown = None;
         self.set_geometry(cb);

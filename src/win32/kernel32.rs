@@ -19,7 +19,7 @@ mod sync;
 mod text;
 mod threads;
 mod time;
-mod virtual_memory;
+pub(crate) mod virtual_memory;
 
 pub(super) use locale::enum_returned;
 pub(super) use path::{change_directory, current_directory, full_path};
@@ -40,6 +40,7 @@ pub static DLL: Dll = Dll {
     apis: APIS,
     vars: &[],
     init: None,
+    vtables: &[],
 };
 
 const fn stdcall(
@@ -535,6 +536,176 @@ pub fn call_return_address() -> u32 {
 /// Let go of the file mappings no handle or view holds any more.
 pub fn sweep_mappings(cpu: &mut Cpu) {
     mapping::sweep(cpu);
+}
+
+/// Committed pages for a built-in DLL's own use, readable and writable
+/// (a DIB section's bits): their address, or None when there is no room.
+pub fn alloc_pages(cpu: &mut Cpu, size: u32) -> Option<u32> {
+    let at = virtual_memory::virtual_alloc(cpu, &[0, size, 0x3000, 4])?;
+    (at != 0).then_some(at)
+}
+
+/// Free the pages `alloc_pages` gave.
+pub fn free_pages(cpu: &mut Cpu, at: u32) {
+    virtual_memory::virtual_free(cpu, &[at, 0, 0x8000]);
+}
+
+/// A thread of the running process for a built-in DLL's own work, as
+/// CreateThread(NULL, 0, start, 0, 0, NULL) makes it, its handle closed:
+/// its id, or None when there is no room for it.
+pub fn create_system_thread(cpu: &mut Cpu, start: u32) -> Option<u32> {
+    let handle = threads::create_thread(cpu, &[0, 0, start, 0, 0, 0])?;
+    if handle == 0 {
+        return None;
+    }
+    let id = threads::thread_of(cpu, handle).map(|(p, t)| cpu.bus.win32.processes[p].threads[t].id);
+    super::object::close(cpu, handle);
+    id
+}
+
+/// A file for a built-in DLL (WINMM's multimedia files), opened as
+/// CreateFileA opens it with `access`, `share` and `disposition`: its
+/// handle, or the error.
+pub fn open_handle(
+    cpu: &mut Cpu,
+    name: &str,
+    access: u32,
+    share: u32,
+    disposition: u32,
+) -> Result<u32, u32> {
+    let (sft, _) = file::open_file(cpu, name, access, share, disposition)?;
+    Ok(file::new_file(cpu, sft, access, share))
+}
+
+/// Up to `n` bytes of the file `handle` from its pointer, or the error.
+pub fn read_file(cpu: &mut Cpu, handle: u32, n: u32) -> Result<Vec<u8>, u32> {
+    let open = file::open_of(cpu, handle).ok_or(ERROR_INVALID_HANDLE)?;
+    if open.access & file::GENERIC_READ == 0 {
+        return Err(ERROR_ACCESS_DENIED);
+    }
+    cpu.bus
+        .disk
+        .read_file(open.sft, n as usize)
+        .map_err(|e| e as u32)
+}
+
+/// Write `data` to the file `handle` at its pointer: the count written,
+/// or the error.
+pub fn write_file(cpu: &mut Cpu, handle: u32, data: &[u8]) -> Result<u32, u32> {
+    let open = file::open_of(cpu, handle).ok_or(ERROR_INVALID_HANDLE)?;
+    if open.access & file::GENERIC_WRITE == 0 {
+        return Err(ERROR_ACCESS_DENIED);
+    }
+    let (dos, sft) = (open.dos, open.sft);
+    super::dos(cpu, |cpu| crate::interrupts::int21::write_open_file(cpu, dos, sft, data))
+        .map(|n| n as u32)
+        .map_err(|e| e as u32)
+}
+
+/// Move the pointer of the file `handle` by `offset` from the start (0),
+/// the pointer (1) or the end (2): where it is then, or the error.
+pub fn seek_file(cpu: &mut Cpu, handle: u32, offset: i64, method: u32) -> Result<u32, u32> {
+    let open = file::open_of(cpu, handle).ok_or(ERROR_INVALID_HANDLE)?;
+    let disk = &mut cpu.bus.disk;
+    let base = match method {
+        0 => 0,
+        1 => disk.position(open.sft).unwrap_or(0) as i64,
+        2 => disk.sft_entry(open.sft).map_or(0, |e| e.size) as i64,
+        _ => return Err(ERROR_INVALID_PARAMETER),
+    };
+    let to = base
+        .checked_add(offset)
+        .filter(|&to| to >= 0)
+        .ok_or(ERROR_INVALID_PARAMETER)?;
+    disk.seek_file(open.sft, to, 0)
+        .map(|at| at as u32)
+        .map_err(|e| e as u32)
+}
+
+/// A Win32 path as DOS takes it (path.rs).
+pub fn dos_path(name: &str) -> String {
+    path::dos_path(name)
+}
+
+/// A writable view of the file mapping `handle` for a DIB section whose
+/// bits are in it: the view's address and the mapping's size, or None
+/// with the error set.
+pub fn map_dib_view(cpu: &mut Cpu, handle: u32) -> Option<(u32, u32)> {
+    mapping::dib_view(cpu, handle)
+}
+
+/// Let go of the view `map_dib_view` gave.
+pub fn unmap_dib_view(cpu: &mut Cpu, at: u32) {
+    mapping::unmap_view_of_file(cpu, &[at]);
+}
+
+/// The data of the resource `name` of type `kind` in the module `module`
+/// (0: the program), as FindResourceA takes them: its address and size,
+/// or the error. None if a name's page isn't there.
+pub fn resource_data(
+    cpu: &mut Cpu,
+    module: u32,
+    kind: u32,
+    name: u32,
+) -> Option<Result<(u32, u32), u32>> {
+    module::resource_data(cpu, module, kind, name)
+}
+
+/// GlobalAlloc(flags, size) for a built-in DLL (the clipboard's data):
+/// the handle, or 0.
+pub fn global_alloc(cpu: &mut Cpu, flags: u32, size: u32) -> u32 {
+    global::global_alloc(cpu, &[flags, size]).unwrap_or(0)
+}
+
+/// GlobalSize(handle): the size of its block, or 0.
+pub fn global_size(cpu: &mut Cpu, handle: u32) -> u32 {
+    global::global_size(cpu, &[handle]).unwrap_or(0)
+}
+
+/// lstrcmpiA's comparison of two ANSI strings, without their zeros.
+pub fn compare_nocase(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
+    let (a, b) = (text::ansi_to_wide(a), text::ansi_to_wide(b));
+    sort::compare(sort::NORM_IGNORECASE, &a, &b)
+}
+
+/// The address of the memory of the global handle `handle`, as
+/// GlobalLock gives it (without locking it), or 0.
+pub fn global_address(cpu: &mut Cpu, handle: u32) -> u32 {
+    let at = global::global_lock(cpu, &[handle]).unwrap_or(0);
+    if at != 0 {
+        global::global_unlock(cpu, &[handle]);
+    }
+    at
+}
+
+/// The file named by the string at `name`, read into pages
+/// `alloc_pages` gives: their address and the file's size, which the
+/// caller frees with `free_pages`. Some(None) when it can't be read, with
+/// the error set; None if a page of the name isn't there.
+pub fn read_whole_file(cpu: &mut Cpu, name: u32) -> Option<Option<(u32, u32)>> {
+    const GENERIC_READ: u32 = 0x8000_0000;
+    const OPEN_EXISTING: u32 = 3;
+    let handle = file::create_file(cpu, &[name, GENERIC_READ, 1, 0, OPEN_EXISTING, 0, 0])?;
+    if handle == 0xFFFF_FFFF {
+        return Some(None);
+    }
+    let size = file::get_file_size(cpu, &[handle, 0]).unwrap_or(0xFFFF_FFFF);
+    let pages = if size == 0xFFFF_FFFF {
+        None
+    } else {
+        alloc_pages(cpu, size + 4)
+    };
+    let mut result = None;
+    if let Some(at) = pages {
+        let read = file::read_file(cpu, &[handle, at, size, at + size, 0]).unwrap_or(0);
+        if read != 0 && cpu.bus.guest_read_32(at + size) == size {
+            result = Some((at, size));
+        } else {
+            free_pages(cpu, at);
+        }
+    }
+    threads::close_handle(cpu, &[handle]);
+    Some(result)
 }
 
 /// Where the main thread starts when DLLs' entry points run first.

@@ -697,7 +697,7 @@ mod tests {
 
     #[test]
     fn disk_images_boot_now_or_at_startup() {
-        let dir = std::env::temp_dir().join(format!("rust-dos-dialog-boot-{}", std::process::id()));
+        let dir = crate::test_dir::path("dialog-boot");
         std::fs::create_dir_all(&dir).unwrap();
         let image = dir.join("win95.img");
         std::fs::write(&image, [0u8; 512]).unwrap();

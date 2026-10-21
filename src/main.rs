@@ -29,6 +29,8 @@ mod monitor_power;
 mod sdl_audio;
 mod sdl_keys;
 mod startup;
+#[cfg(test)]
+mod test_dir;
 
 // The emulator itself is the library crate; the debug server and the
 // window's display are private to the binary. These re-exports let the
@@ -209,12 +211,9 @@ fn main() -> Result<(), String> {
 
     start_dos(&mut cpu, &config, &args, &startup_game, &mut update_check);
 
-    // Cached render target. We re-render the full VGA surface only when
-    // `cpu.bus.vga.dirty` is set — everything else (cursor blink, mouse
-    // cursor, recording indicator) is overlaid on top of this buffer each
-    // frame. For a program that isn't actively touching VRAM, the per-SDL-
-    // frame cost drops from "640×400×3 zero fill + per-pixel palette/planar
-    // lookup" to "one memcpy of the cached buffer + a tiny overlay pass".
+    // The decoded VGA picture stays separate from its overlays. Carry
+    // the rows repainted here into composition, which restores those
+    // rows and the old and new overlays from this cached picture.
     let mut cached_frame = video::Frame::new(video::SCREEN_WIDTH, video::SCREEN_HEIGHT);
     // What the picture shown last was composed from (see `still` below).
     let mut last_screen_key = None;
@@ -222,6 +221,7 @@ fn main() -> Result<(), String> {
     let mut voodoo_gl_shown = false;
     // The cached render with the cursors on top, as the screen shows it.
     let mut screen = cached_frame.clone();
+    let mut composition = video::compose::Composition::default();
 
     // Paces emulated time against the wall clock, one frame at a time.
     cpu.bus.set_cycles_per_ms(settings.cycles.initial_cycles());
@@ -1819,10 +1819,13 @@ fn main() -> Result<(), String> {
         profile::set_host(Zone::VgaRender);
         let render_start = std::time::Instant::now();
         let rendered = cpu.bus.vga.dirty;
-        if cpu.bus.vga.dirty {
-            video::render_screen(&mut cached_frame, &cpu.bus);
+        let changed = if cpu.bus.vga.dirty {
+            let rows = video::render_screen_rows(&mut cached_frame, &cpu.bus);
             cpu.bus.vga.clear_dirty();
-        }
+            rows
+        } else {
+            0..0
+        };
         let render_time = render_start.elapsed();
         profile::set_host(Zone::FrameCompose);
         // Each eye's picture, for the VFX1 worn in the headset.
@@ -1870,11 +1873,33 @@ fn main() -> Result<(), String> {
             && !dbg.wants_frame()
             && !display.wants_redraw();
         ui.set_display(display.output_scale(), true);
+        let mut composed_rows = 0..0;
         if !still {
-            // Start from the cached render; the overlays go on top. A
-            // monochrome monitor shows them in its phosphor's colour, but not
+            // Restore the affected base and overlay rows. A monochrome
+            // monitor shows the cursors in its phosphor's colour, but not
             // the settings window.
-            screen.clone_from(&cached_frame);
+            let overlay = if clipboard.draws(&cpu.bus)
+                || ui.is_open()
+                || ui.overlay_shown()
+                || ui.sound_viz_shown()
+                || power_look.is_some()
+                || wheel_view.is_some()
+                || !osd.is_empty()
+                || recorder.is_active()
+                || sound_recording.is_some()
+                || video_recording.is_some()
+            {
+                0..height as usize
+            } else {
+                video::overlay::cursor_rows(&cached_frame, &cpu.bus, cursor_visible)
+            };
+            composed_rows = composition.restore(
+                &mut screen,
+                &cached_frame,
+                changed,
+                overlay,
+                settings.monochrome,
+            );
             // (The picture stays all there at half the size, which the
             // window may show instead, only where nothing goes over it.)
             screen.doubled &= !video::overlay::draws_cursors(&cpu.bus)
@@ -1889,7 +1914,7 @@ fn main() -> Result<(), String> {
                 && sound_recording.is_none()
                 && video_recording.is_none();
             video::overlay::draw_cursors(&mut screen, &cpu.bus, cursor_visible);
-            video::mono::apply(&mut screen, settings.monochrome);
+            video::mono::apply_rows(&mut screen, settings.monochrome, composed_rows.clone());
             if let Some(look) = &power_look {
                 video::power::apply(&mut screen, look);
             }
@@ -1968,6 +1993,10 @@ fn main() -> Result<(), String> {
             if ui.is_open() || ui.overlay_shown() {
                 ui.set_stats(stats.view());
             }
+            if ui.is_open() || ui.overlay_shown() || ui.sound_viz_shown() {
+                composition.include_overlay(0..height as usize);
+                composed_rows = 0..height as usize;
+            }
             ui.draw(&mut screen);
             ui.draw_overlay(&mut screen);
             if ui.sound_viz_shown() {
@@ -1994,6 +2023,10 @@ fn main() -> Result<(), String> {
             if det.is_some() {
                 debug_frame!();
             }
+            if !osd.is_empty() {
+                composition.include_overlay(0..height as usize);
+                composed_rows = 0..height as usize;
+            }
             osd.draw(&mut screen);
             if det.is_none() {
                 debug_frame!();
@@ -2014,7 +2047,12 @@ fn main() -> Result<(), String> {
             // The 3D scene is drawn every frame: the viewer moves.
             display.refresh_stage();
         } else {
-            display.present(&mut screen, voodoo_gl.then_some(&cached_frame), ui.layer())?;
+            display.present_rows(
+                &screen,
+                voodoo_gl.then_some(&cached_frame),
+                ui.layer(),
+                composed_rows,
+            )?;
             last_screen_key = Some(screen_key);
         }
 
@@ -2150,11 +2188,11 @@ fn draw_recording_indicator(screen: &mut video::Frame, frame_w: usize) {
             let dx = x as isize - center_x as isize;
             let dy = y as isize - center_y as isize;
             if dx * dx + dy * dy <= (radius * radius) as isize {
-                let idx = (y * frame_w + x) * 3;
-                if idx + 2 < screen.rgb.len() {
-                    screen.rgb[idx] = 0xFF; // R
-                    screen.rgb[idx + 1] = 0x00; // G
-                    screen.rgb[idx + 2] = 0x00; // B
+                let idx = (y * frame_w + x) * 4;
+                if idx + 2 < screen.rgba.len() {
+                    screen.rgba[idx] = 0xFF; // R
+                    screen.rgba[idx + 1] = 0x00; // G
+                    screen.rgba[idx + 2] = 0x00; // B
                 }
             }
         }

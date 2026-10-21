@@ -151,10 +151,9 @@ impl Voodoo {
             tmu: Default::default(),
         };
         let verts = [(f.ax, f.ay), (f.bx, f.by), (f.cx, f.cy)].map(|(x, y)| (x as f32 / 16.0, y as f32 / 16.0));
-        let reg = self.reg.clone();
         for unit in 0..texcount {
             let t = &mut self.tmu[unit];
-            let lodbase = t.prepare(&reg[..]);
+            let lodbase = t.prepare(&self.reg[..]);
             p.tmu[unit] = TmuParams {
                 starts: t.starts,
                 startt: t.startt,
@@ -169,6 +168,8 @@ impl Voodoo {
             };
         }
         let st = self.raster_state(dest, texcount);
+        #[cfg(all(test, feature = "sdl"))]
+        super::raster::scene_profile::record(&st, texcount, verts);
         if self.mirror.is_some() {
             self.mirror_sync();
             if let Some(mirror) = &mut self.mirror {

@@ -144,6 +144,10 @@ pub struct MouseState {
     /// positive).
     pub serial_dx: i32,
     pub serial_dy: i32,
+    /// All the motion so far, in pixels (down positive), wrapping: the
+    /// mouse's counts, which nothing takes away, for DirectInput's
+    /// relative axes.
+    pub motion: (i32, i32),
     /// When, in emulated nanoseconds, a program last called the driver
     /// (INT 33h), and last asked it for motion rather than where the
     /// cursor is (AX=000Bh): whether a program follows the cursor, for
@@ -191,6 +195,7 @@ impl MouseState {
             ps2: Ps2Mouse::default(),
             serial_dx: 0,
             serial_dy: 0,
+            motion: (0, 0),
             last_call_ns: None,
             last_relative_ns: None,
         }
@@ -278,6 +283,8 @@ impl MouseState {
             self.ps2.dy += y - last_y;
             self.serial_dx += x - last_x;
             self.serial_dy += y - last_y;
+            self.motion.0 = self.motion.0.wrapping_add(x - last_x);
+            self.motion.1 = self.motion.1.wrapping_add(y - last_y);
         }
         let new_x = x.clamp(self.min_x, self.max_x);
         let new_y = y.clamp(self.min_y, self.max_y);
@@ -377,6 +384,8 @@ impl MouseState {
         self.ps2.last_position = None;
         self.serial_dx += dx;
         self.serial_dy += dy;
+        self.motion.0 = self.motion.0.wrapping_add(dx);
+        self.motion.1 = self.motion.1.wrapping_add(dy);
         self.add_mickeys(dx, dy);
         self.pending_callback_events |= 0x01; // motion
         self.x = (self.x + dx).clamp(self.min_x, self.max_x);
@@ -764,7 +773,7 @@ crate::state_fields!(MouseState {
     mickey_x, mickey_y, mickey_accum_x, mickey_accum_y,
     callback_mask, callback_cs, callback_ip, pending_callback_events,
     unused, rest_x, rest_y, ps2, range_set,
-} skip { serial_dx, serial_dy, last_call_ns, last_relative_ns });
+} skip { serial_dx, serial_dy, motion, last_call_ns, last_relative_ns });
 
 /// Two i16 placeholders in a saved mouse: saved as zeros, read and
 /// dropped on load.

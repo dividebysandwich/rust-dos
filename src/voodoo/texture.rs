@@ -418,6 +418,21 @@ impl Tmu {
         }
     }
 
+    /// Bytes `start..end` of the RAM were written other than through
+    /// `write`: a Banshee's units read the frame buffer's memory, which
+    /// the CPU, the 2D engine and the command FIFOs write as well.
+    pub fn note_written(&mut self, start: u32, end: u32) {
+        if start >= end {
+            return;
+        }
+        self.writes = self.writes.wrapping_add(1);
+        let last = ((end - 1) >> PAGE_SHIFT) as usize;
+        let pages = (start >> PAGE_SHIFT) as usize..=last.min(self.page_writes.len() - 1);
+        for page in self.page_writes.get_mut(pages).into_iter().flatten() {
+            *page = self.writes;
+        }
+    }
+
     /// The bytes `first` and `last` were written.
     fn count_write(&mut self, first: u32, last: u32) {
         self.writes = self.writes.wrapping_add(1);

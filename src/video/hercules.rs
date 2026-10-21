@@ -147,7 +147,7 @@ pub fn render_graphics(canvas: &mut [u8], canvas_w: usize, vga: &VgaCard) {
     if !vga.herc_video_enabled() {
         return;
     }
-    let canvas_h = canvas.len() / (canvas_w * 3);
+    let canvas_h = canvas.len() / (canvas_w * 4);
     let page = if vga.herc_mode & 0x80 != 0 { 0x8000 } else { 0 };
     let start = vga.latched_start_addr * 2;
     let vram = &vga.vram_text;
@@ -155,7 +155,7 @@ pub fn render_graphics(canvas: &mut [u8], canvas_w: usize, vga: &VgaCard) {
         let row = page + (y % banks) * 0x2000 + ((start + (y / banks) * row_bytes) & 0x1FFF);
         for x in 0..width.min(canvas_w) {
             if vram[(row + x / 8) & 0xFFFF] & (0x80 >> (x % 8)) != 0 {
-                let i = (y * canvas_w + x) * 3;
+                let i = (y * canvas_w + x) * 4;
                 canvas[i..i + 3].copy_from_slice(&[NORMAL.0, NORMAL.1, NORMAL.2]);
             }
         }

@@ -8,6 +8,7 @@
 //! swizzling and transparent monochrome bits.
 
 use super::regs::*;
+use super::workers::Job;
 use super::{NONE, Voodoo};
 
 /// A CPU-to-screen copy under way: where its next pixel goes, how many
@@ -153,10 +154,14 @@ impl Voodoo {
     /// bit 31 of bltCommand, bltDstXY or bltSize: run the blit, or for a
     /// CPU-to-screen one get ready for its data.
     pub(crate) fn blit_start(&mut self) {
+        let command = self.blt_command();
+        if command & COMMAND == SGRAM_FILL && self.sgram_fill_rows() {
+            self.display_dirty = true;
+            return;
+        }
         // After what is drawn, which may read or write the same memory.
         self.flush();
         self.mirror_sync();
-        let command = self.blt_command();
         let (size_x, size_y) = (s12(self.reg[BLT_SIZE]), s12(self.reg[BLT_SIZE] >> 16));
         let (dx, dy) = (size_x.signum().max(0) * 2 - 1, size_y.signum().max(0) * 2 - 1);
         let (dst_x, dst_y) = ((self.reg[BLT_DST_XY] & 0x7FF) as i32, ((self.reg[BLT_DST_XY] >> 16) & 0x7FF) as i32);
@@ -198,6 +203,89 @@ impl Voodoo {
         self.display_dirty = true;
     }
 
+    /// The words an SGRAM fill covers (`sgram_fill`), if they are one run:
+    /// from the first column of the first page to the last column of the
+    /// last.
+    fn sgram_run(&self) -> Option<(u32, u32)> {
+        let (dst, size) = (self.reg[BLT_DST_XY], self.reg[BLT_SIZE]);
+        let (page, column) = ((dst >> 16) & 0x3FF, dst & 0x1FF);
+        let (pages, columns) = ((size >> 16) & 0x3FF, size & 0x1FF);
+        let last = (column + columns).min(511);
+        let run = (
+            page * 2048 + 4 * column,
+            (page + pages) * 2048 + 4 * (last + 1),
+        );
+        (pages == 0 || (column == 0 && last == 511)).then_some(run)
+    }
+
+    /// An SGRAM fill of whole rows of the buffers, as Glide 3 clears a
+    /// buffer: queued as jobs behind what is drawn, rather than drawn at
+    /// once after waiting for it, so the OpenGL renderer's held-back jobs
+    /// under it can be dropped (`backlog`). False if it fills anything
+    /// else, which `sgram_fill` does, or the buffers overlap or reach past
+    /// the memory, where the workers' rows of one buffer aren't those of
+    /// another.
+    fn sgram_fill_rows(&mut self) -> bool {
+        if self.banshee.is_some() || !self.backlog.borrow().layout.prunable {
+            return false;
+        }
+        let Some((first, end)) = self.sgram_run() else {
+            return false;
+        };
+        let Some(rows) = self.whole_rows(first, end) else {
+            return false;
+        };
+        let color = self.reg[BLT_COLOR] as u16;
+        self.mirror_sync();
+        self.mirror_fill(first, end, color);
+        let rowpixels = self.fbi.rowpixels as usize;
+        for (base, top, bottom) in rows {
+            let access = self.access(|layout| super::backlog::rows(layout, base, (top, bottom)));
+            let fb = self.fbi.ram.clone();
+            let job = Job::Rows {
+                fb,
+                base,
+                rowpixels,
+                rows: (top, bottom),
+                value: color,
+            };
+            self.submit(job, access);
+            self.mark_drawn(base);
+        }
+        true
+    }
+
+    /// The words `first..end` as rows of the buffers (the colour buffers'
+    /// and the auxiliary buffer's, up to their heights, where the
+    /// backlog's tiles have them): each buffer's word offset and its rows.
+    /// None if they aren't whole rows of them.
+    fn whole_rows(&self, first: u32, end: u32) -> Option<Vec<(usize, u32, u32)>> {
+        let layout = self.backlog.borrow().layout;
+        // Rows one after another, the same for every buffer.
+        if layout.stride.tiled || layout.aux_stride != layout.stride {
+            return None;
+        }
+        let row = layout.stride.words;
+        let size = row * layout.height as usize;
+        let (mut at, end) = (first as usize, end as usize);
+        let mut rows = Vec::new();
+        while at < end {
+            let mut bases = layout.bases.into_iter().flatten();
+            let base = bases.find(|&b| b <= at && at < b + size)?;
+            let stop = end.min(base + size);
+            if (at - base) % row != 0 || (stop - base) % row != 0 {
+                return None;
+            }
+            rows.push((
+                base,
+                ((at - base) / row) as u32,
+                ((stop - base) / row) as u32,
+            ));
+            at = stop;
+        }
+        Some(rows)
+    }
+
     /// An SGRAM fill: whole 4 KB pages from bltDstXY's row (bits 24:16),
     /// columns of 64 bits (four pixels) from its column (bits 8:0), as
     /// many pages as bltSize bits 24:16 say and columns as bits 8:0, with
@@ -217,10 +305,8 @@ impl Voodoo {
                 }
             }
         }
-        if pages == 0 || (column == 0 && last == 511) {
-            // One run of words: from the first column of the first page to
-            // the last column of the last.
-            self.mirror_fill(page * 2048 + 4 * column, (page + pages) * 2048 + 4 * (last + 1), color);
+        if let Some((first, end)) = self.sgram_run() {
+            self.mirror_fill(first, end, color);
         } else if let Some(mirror) = &mut self.mirror {
             // The same columns of several pages: a snapshot takes them.
             mirror.invalidate();
@@ -417,6 +503,66 @@ mod tests {
         assert_eq!(v.fbi.ram.get(2048), 0xBEEF);
         assert_eq!(v.fbi.ram.get(3 * 2048 - 1), 0xBEEF);
         assert_eq!(v.fbi.ram.get(3 * 2048), 0);
+    }
+
+    /// A Voodoo2 with `workers` threads set up as Glide sets it for
+    /// 640x480: two colour buffers 150 pages apart, the auxiliary buffer
+    /// after them, 640-pixel rows.
+    fn glide_card(workers: usize) -> Voodoo {
+        let mut v = Voodoo::with_workers(Board::Voodoo2, workers);
+        v.reg[FBI_INIT1] = 10 << 4;
+        v.reg[FBI_INIT2] = 150 << 11;
+        v.reg[FBI_INIT5] &= !(3 << 9);
+        v.reg[FBI_INIT6] &= !(1 << 30);
+        v.recompute_video_memory();
+        v
+    }
+
+    /// Frames as Glide 3 draws them: the back buffer and the auxiliary
+    /// buffer cleared with SGRAM fills, a fastfill of part of the back
+    /// buffer, and a swap.
+    fn glide_frames(v: &mut Voodoo, count: u32) {
+        for frame in 0..count {
+            let page = 150 * v.fbi.backbuf as u32;
+            for (page, color) in [(page, 0x0841 * frame), (300, 0xFFFF)] {
+                write(v, BLT_COLOR, color);
+                write(v, BLT_DST_XY, page << 16);
+                write(v, BLT_SIZE, 149 << 16 | 511);
+                write(v, BLT_COMMAND, 1 << 31 | SGRAM_FILL);
+            }
+            write(v, FBZ_MODE, 1 | 1 << 9 | 1 << 14);
+            write(v, CLIP_LEFT_RIGHT, (10 + frame) << 16 | 300);
+            write(v, CLIP_LOW_Y_HIGH_Y, 20 << 16 | (200 + frame));
+            write(v, COLOR1, 0x0040_80C0 + frame);
+            write(v, FASTFILL_CMD, 0);
+            write(v, SWAPBUFFER_CMD, 0);
+        }
+    }
+
+    #[test]
+    fn sgram_fills_of_whole_buffers_drop_what_they_cover() {
+        // With the OpenGL renderer, a buffer cleared with an SGRAM fill
+        // makes what was drawn into it before invisible: those jobs go
+        // (Oni's menu, #204), and nothing waits for the workers.
+        let mut gl = glide_card(2);
+        gl.set_mirror(true);
+        gl.set_software_picture(false);
+        let mut sw = glide_card(0);
+        glide_frames(&mut gl, 8);
+        glide_frames(&mut sw, 8);
+        let status = gl.describe(Now::default());
+        assert!(status["pruned_jobs"].as_u64().unwrap() >= 10, "{}", status);
+        assert_eq!(status["catch_ups"], 0, "{}", status);
+        // Once something reads the memory, it is what was drawn.
+        assert!(gl.frame_buffer().to_bytes() == sw.frame_buffer().to_bytes());
+        // Fills of anything but whole rows of the buffers wait for what is
+        // drawn, as before.
+        write(&mut gl, FASTFILL_CMD, 0);
+        assert_eq!(gl.describe(Now::default())["held_jobs"], 1);
+        write(&mut gl, BLT_DST_XY, 600 << 16);
+        write(&mut gl, BLT_SIZE, 0);
+        write(&mut gl, BLT_COMMAND, 1 << 31 | SGRAM_FILL);
+        assert_eq!(gl.describe(Now::default())["held_jobs"], 0);
     }
 
     #[test]

@@ -292,14 +292,14 @@ fn a_function_the_built_in_windows_lacks_ends_the_program() {
 fn a_program_importing_an_unknown_dll_is_refused() {
     let imports: &[(&str, &[&str])] = &[
         ("KERNEL32.DLL", &["ExitProcess"]),
-        ("USER32.DLL", &["MessageBoxA"]),
+        ("NOSUCH.DLL", &["Function"]),
     ];
     let (code, text) = run(
         "unknown_dll",
         program(BASE, false, imports, &[0], |a, _| a.ret()),
     );
     assert_eq!(code, 1);
-    assert!(text.contains("T.EXE needs USER32.DLL"), "{}", text);
+    assert!(text.contains("T.EXE needs NOSUCH.DLL"), "{}", text);
 }
 
 #[test]

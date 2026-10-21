@@ -50,6 +50,9 @@ pub struct Wait {
     /// The address of the critical section it waits to enter, or 0. The
     /// thread that leaves the section hands it over.
     pub section: u32,
+    /// What its message queue must have to end it (MsgWaitForMultipleObjects,
+    /// GetMessageA): it then returns the number of objects.
+    pub queue: Option<super::user32::message::QueueWait>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -260,6 +263,30 @@ pub fn after_interrupt(cpu: &mut Cpu, ctx: Context) {
     }
 }
 
+/// Time a built-in device waited for came while the running thread ran
+/// (win32::timer): waits that ended end, and a thread that is ready and
+/// of a higher priority than the running one, as the multimedia thread
+/// is, runs at once instead of at the end of its turn.
+pub fn preempt(cpu: &mut Cpu) {
+    wake(cpu);
+    let win32 = &cpu.bus.win32;
+    let Some((p, t)) = current(win32) else {
+        return;
+    };
+    let mine = win32.processes[p].threads[t].priority;
+    let higher = win32.processes.iter().enumerate().find_map(|(q, process)| {
+        let u = process
+            .threads
+            .iter()
+            .position(|th| th.ready() && th.priority > mine)?;
+        Some((q, u))
+    });
+    if let Some(next) = higher.filter(|&n| n != (p, t)) {
+        save(cpu, Context::of(cpu));
+        enter(cpu, next);
+    }
+}
+
 /// Whether the object `id` is signaled for the thread `tid`.
 fn signaled(objects: &Objects, id: u32, tid: u32) -> bool {
     match objects.get(id).map(|o| &o.kind) {
@@ -373,6 +400,10 @@ pub fn end_wait(win32: &mut Win32, (p, t): At, result: u32) {
 
 /// End the waits that can end now.
 pub fn wake(cpu: &mut Cpu) {
+    super::user32::input::poll(cpu);
+    super::dinput::poll(cpu);
+    super::winmm::tick(cpu);
+    super::dsound::tick(cpu);
     let now = cpu.bus.clock.now_micros();
     let win32 = &mut cpu.bus.win32;
     let running = current(win32);
@@ -386,11 +417,17 @@ pub fn wake(cpu: &mut Cpu) {
                 continue;
             }
             let tid = thread.id;
-            let result = try_wait(&mut win32.objects, tid, &wait).or_else(|| {
-                wait.deadline
-                    .filter(|&d| now >= d)
-                    .map(|_| wait.timeout_result)
-            });
+            let result = try_wait(&mut win32.objects, tid, &wait)
+                .or_else(|| {
+                    let queue = wait.queue.as_ref()?;
+                    super::user32::message::wait_ready(win32, tid, queue, now)
+                        .then_some(wait.objects.len() as u32)
+                })
+                .or_else(|| {
+                    wait.deadline
+                        .filter(|&d| now >= d)
+                        .map(|_| wait.timeout_result)
+                });
             if let Some(result) = result {
                 end_wait(win32, (p, t), result);
             }
@@ -501,6 +538,7 @@ pub fn end(win32: &mut Win32, p: usize, t: usize, code: u32) {
     thread.calls.clear();
     let (tid, own) = (thread.id, thread.object);
     let wait = thread.wait.take();
+    super::user32::message::thread_ended(win32, tid);
     let objects = &mut win32.objects;
     for id in wait.into_iter().flat_map(|w| w.objects) {
         objects.release(id);
@@ -532,7 +570,8 @@ crate::state_fields!(Wait {
     all,
     deadline,
     timeout_result,
-    section
+    section,
+    queue
 });
 crate::state_fields!(Thread {
     id,

@@ -231,16 +231,26 @@ impl Decoder {
     /// Decode a scanline: `samples` are the RGBI colours (0-15) of the
     /// card's pixel clock (14.318 MHz, 640 of them across the picture, a
     /// multiple of 4), `border` the colour of the overscan around them.
-    /// Writes one RGB pixel a sample to `out`.
+    /// Writes one opaque RGBA pixel a sample to `out`.
     pub fn decode_line(&self, samples: &[u8], border: u8, out: &mut [u8]) {
         let w = samples.len();
-        debug_assert!(w.is_multiple_of(4) && out.len() >= w * 3);
+        debug_assert!(w.is_multiple_of(4) && out.len() >= w * 4);
         let t = &self.table;
         let border = border as usize & 15;
         let b = border * 68;
 
         // The signal, with the border on both sides.
-        let mut temp = vec![0i32; w + 10];
+        // A CGA scanline has 640 samples. Keep its signal and chroma on
+        // the stack; retain support for wider callers of this decoder.
+        let mut stack = [0i32; 640 * 3 + 14];
+        let mut heap = Vec::new();
+        let scratch = if w <= 640 {
+            &mut stack[..w * 3 + 14]
+        } else {
+            heap.resize(w * 3 + 14, 0);
+            &mut heap[..]
+        };
+        let (temp, chroma) = scratch.split_at_mut(w + 10);
         let mut o = 0;
         let mut push = |v: i32| {
             temp[o] = v;
@@ -265,15 +275,14 @@ impl Decoder {
                 let c = (temp[i] + temp[i]) << 3;
                 let d = (temp[i - 1] + temp[i + 1]) << 3;
                 let y = clamp(((c + d) << 8) + SHARPNESS * (c - d));
-                out[x * 3..x * 3 + 3].copy_from_slice(&[y, y, y]);
+                out[x * 4..x * 4 + 4].copy_from_slice(&[y, y, y, 255]);
             }
             return;
         }
 
         // The chroma, in phase and in quadrature: `ap[x]` and `bp[x]` for
         // x from -1 on, kept one along.
-        let mut ap = vec![0i32; w + 2];
-        let mut bp = vec![0i32; w + 2];
+        let (ap, bp) = chroma.split_at_mut(w + 2);
         for x in 0..w + 2 {
             let i = x + 4;
             ap[x] = temp[i - 4] - ((temp[i - 2] - temp[i] + temp[i + 2]) << 1) + temp[i + 4];
@@ -298,9 +307,10 @@ impl Decoder {
             let c = temp[i] + temp[i];
             let d = temp[i - 1] + temp[i + 1];
             let y = ((c + d) << 8) + SHARPNESS * (c - d);
-            out[x * 3] = clamp(y + self.ri * ii + self.rq * q);
-            out[x * 3 + 1] = clamp(y + self.gi * ii + self.gq * q);
-            out[x * 3 + 2] = clamp(y + self.bi * ii + self.bq * q);
+            out[x * 4] = clamp(y + self.ri * ii + self.rq * q);
+            out[x * 4 + 1] = clamp(y + self.gi * ii + self.gq * q);
+            out[x * 4 + 2] = clamp(y + self.bi * ii + self.bq * q);
+            out[x * 4 + 3] = 255;
         }
     }
 }
@@ -312,10 +322,10 @@ mod tests {
     /// The colour of a solid run of `pattern` (four samples repeated).
     fn solid(decoder: &Decoder, pattern: [u8; 4]) -> (u8, u8, u8) {
         let samples: Vec<u8> = (0..640).map(|x| pattern[x & 3]).collect();
-        let mut out = vec![0u8; 640 * 3];
+        let mut out = vec![0u8; 640 * 4];
         decoder.decode_line(&samples, 0, &mut out);
         let x = 320;
-        (out[x * 3], out[x * 3 + 1], out[x * 3 + 2])
+        (out[x * 4], out[x * 4 + 1], out[x * 4 + 2])
     }
 
     #[test]
@@ -344,6 +354,21 @@ mod tests {
         for pattern in [[15, 0, 15, 0], [15, 15, 0, 0], [15, 0, 0, 0]] {
             let (r, g, b) = solid(&d, pattern);
             assert!(r == g && g == b, "{:?}: {:?}", pattern, (r, g, b));
+        }
+    }
+
+    #[test]
+    fn wider_lines_match_the_cga_signal_away_from_the_border() {
+        for era in CompositeEra::ALL {
+            for bw in [false, true] {
+                let decoder = Decoder::new(era, bw);
+                let samples: Vec<_> = (0..1024).map(|x| (x % 16) as u8).collect();
+                let mut narrow = vec![0; 640 * 4];
+                let mut wide = vec![0; 1024 * 4];
+                decoder.decode_line(&samples[..640], 5, &mut narrow);
+                decoder.decode_line(&samples, 5, &mut wide);
+                assert_eq!(&narrow[..632 * 4], &wide[..632 * 4]);
+            }
         }
     }
 

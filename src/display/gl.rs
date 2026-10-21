@@ -1,5 +1,9 @@
 //! The picture drawn with OpenGL 3, as it is or through a CRT look.
 
+#[cfg(test)]
+#[path = "gl/present_tests.rs"]
+mod present_tests;
+
 use rust_dos::voodoo::gl::VoodooGl;
 use crate::config::Filter;
 use crate::video::Frame;
@@ -42,7 +46,7 @@ pub struct GlScreen {
     texture: glow::Texture,
     /// The texture's size; nothing before the first frame.
     texture_size: (u32, u32),
-    /// The rows uploaded, four bytes a pixel.
+    /// Subsampled rows when a doubled VGA picture is shown at half size.
     rgba: Vec<u8>,
     /// The looks compiled so far, or why one doesn't compile.
     programs: HashMap<Shader, Result<Program, String>>,
@@ -115,11 +119,11 @@ impl GlScreen {
         }
         attr.set_double_buffer(true);
         attr.set_depth_size(0);
-        let window = video
-            .window(title, width, height)
-            .position_centered()
-            .opengl()
-            .allow_highdpi()
+        let mut builder = video.window(title, width, height);
+        builder.position_centered().opengl().allow_highdpi();
+        #[cfg(test)]
+        builder.hidden();
+        let window = builder
             .build()
             .map_err(|e| no_gl(None, e.to_string()))?;
         let context = match window.gl_create_context() {
@@ -286,26 +290,21 @@ impl GlScreen {
         let size = (frame.width / scale, frame.height / scale);
         let (width, height) = (size.0 as i32, size.1 as i32);
         let rows = if size != self.texture_size { 0..size.1 as usize } else { rows };
-        // Four bytes a pixel, which the texture has: drivers convert three
-        // byte pixels one by one, which takes longer than the rest of a
-        // frame.
-        let row_bytes = frame.width as usize * 3;
-        if half {
+        let row_bytes = frame.width as usize * 4;
+        let pixels = if half {
             let w = size.0 as usize;
             self.rgba.resize(rows.len() * w * 4, 0);
             for (y, out) in rows.clone().zip(self.rgba.chunks_exact_mut(w * 4)) {
-                let src = frame.rgb[2 * y * row_bytes..(2 * y + 1) * row_bytes].as_chunks::<6>().0;
-                for (rgba, &[r, g, b, ..]) in out.as_chunks_mut::<4>().0.iter_mut().zip(src) {
-                    *rgba = [r, g, b, 0xFF];
+                let src = frame.rgba[2 * y * row_bytes..(2 * y + 1) * row_bytes]
+                    .as_chunks::<8>().0;
+                for (rgba, pair) in out.as_chunks_mut::<4>().0.iter_mut().zip(src) {
+                    rgba.copy_from_slice(&pair[..4]);
                 }
             }
+            &self.rgba[..]
         } else {
-            let rgb = frame.rgb[rows.start * row_bytes..rows.end * row_bytes].as_chunks::<3>().0;
-            self.rgba.resize(rgb.len() * 4, 0);
-            for (rgba, &[r, g, b]) in self.rgba.as_chunks_mut::<4>().0.iter_mut().zip(rgb) {
-                *rgba = [r, g, b, 0xFF];
-            }
-        }
+            &frame.rgba[rows.start * row_bytes..rows.end * row_bytes]
+        };
         // SAFETY: see `GlScreen`.
         unsafe {
             gl.bind_texture(glow::TEXTURE_2D, Some(self.texture));
@@ -324,7 +323,7 @@ impl GlScreen {
                 );
                 self.texture_size = size;
             }
-            let pixels = glow::PixelUnpackData::Slice(Some(&self.rgba));
+            let pixels = glow::PixelUnpackData::Slice(Some(pixels));
             let (y, h) = (rows.start as i32, (rows.end - rows.start) as i32);
             gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, y, width, h, glow::RGBA, glow::UNSIGNED_BYTE, pixels);
             if shader::needs_mipmaps(self.active) {
@@ -378,6 +377,17 @@ impl GlScreen {
                     return Err(e);
                 }
             }
+        }
+        // A Banshee's picture needs its compositor, which may not compile
+        // here: the software renderer draws it from then on.
+        if recording.scanout.is_some()
+            && let Some(problem) = self.voodoo.as_ref().and_then(|v| v.banshee_problem())
+        {
+            let problem = problem.to_string();
+            eprintln!("[DISPLAY] {}", problem);
+            self.voodoo_failed = Some(problem.clone());
+            self.drop_voodoo();
+            return Err(problem);
         }
         Ok(self.voodoo.as_mut().is_some_and(|voodoo| {
             voodoo.set_dither(dither);
@@ -483,11 +493,7 @@ impl GlScreen {
             };
             gl.bind_texture(glow::TEXTURE_2D, Some(texture));
             if self.layer_generation != Some(layer.generation) {
-                let mut rgba = Vec::with_capacity(picture.rgb.len() / 3 * 4);
-                for &[r, g, b] in picture.rgb.as_chunks::<3>().0 {
-                    rgba.extend([r, g, b, 0xFF]);
-                }
-                let pixels = glow::PixelUnpackData::Slice(Some(&rgba));
+                let pixels = glow::PixelUnpackData::Slice(Some(&picture.rgba));
                 let (w, h) = (picture.width as i32, picture.height as i32);
                 gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, w, h, 0, glow::RGBA, glow::UNSIGNED_BYTE, pixels);
                 self.layer_generation = Some(layer.generation);
@@ -615,16 +621,11 @@ impl GlScreen {
         }
         let mut capture = self.capture.take()?;
         let gl = &self.gl;
-        let pixels = &frame.rgb[..frame.height as usize * frame.width as usize * 3];
-        self.rgba.resize(pixels.len() / 3 * 4, 0);
-        for (rgba, &[r, g, b]) in self.rgba.as_chunks_mut::<4>().0.iter_mut().zip(pixels.as_chunks::<3>().0) {
-            *rgba = [r, g, b, 0xFF];
-        }
         capture.rgba.resize(w as usize * h as usize * 4, 0);
         // SAFETY: see `GlScreen`.
         let complete = unsafe {
             gl.bind_texture(glow::TEXTURE_2D, Some(capture.source));
-            let pixels = glow::PixelUnpackData::Slice(Some(&self.rgba));
+            let pixels = glow::PixelUnpackData::Slice(Some(&frame.rgba));
             let (fw, fh) = (frame.width as i32, frame.height as i32);
             let rgba8 = glow::RGBA8 as i32;
             gl.tex_image_2d(glow::TEXTURE_2D, 0, rgba8, fw, fh, 0, glow::RGBA, glow::UNSIGNED_BYTE, pixels);
@@ -652,13 +653,16 @@ impl GlScreen {
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
             complete
         };
-        // Rows from the top, three bytes a pixel.
+        // Rows from the top, four bytes a pixel.
         let shaded = complete.then(|| {
             let mut frame = Frame::new(w, h);
-            let rows = frame.rgb.chunks_exact_mut(w as usize * 3).zip(capture.rgba.chunks_exact(w as usize * 4).rev());
+            let rows = frame.rgba.chunks_exact_mut(w as usize * 4)
+                .zip(capture.rgba.chunks_exact(w as usize * 4).rev());
             for (to, from) in rows {
-                for (pixel, rgba) in to.as_chunks_mut::<3>().0.iter_mut().zip(from.as_chunks::<4>().0) {
-                    *pixel = [rgba[0], rgba[1], rgba[2]];
+                for (out, pixel) in to.as_chunks_mut::<4>().0.iter_mut()
+                    .zip(from.as_chunks::<4>().0)
+                {
+                    *out = [pixel[0], pixel[1], pixel[2], 255];
                 }
             }
             frame

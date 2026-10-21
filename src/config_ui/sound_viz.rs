@@ -186,6 +186,7 @@ fn source_label(channel: Channel) -> &'static str {
         Channel::Awe => "AWE32",
         Channel::Monitor => "Monitor",
         Channel::Modem => "Modem",
+        Channel::Windows => "Windows",
     }
 }
 
@@ -395,8 +396,8 @@ impl ConfigUi {
 fn put(frame: &mut Frame, x: usize, y: usize, color: Rgb, alpha: u32) {
     let (width, height) = (frame.width as usize, frame.height as usize);
     if x < width && y < height {
-        let at = (y * width + x) * 3;
-        let px = &mut frame.rgb[at..at + 3];
+        let at = (y * width + x) * 4;
+        let px = &mut frame.rgba[at..at + 3];
         px.copy_from_slice(&draw::blend([px[0], px[1], px[2]], color, alpha));
     }
 }

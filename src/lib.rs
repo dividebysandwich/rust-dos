@@ -112,6 +112,8 @@ pub mod shared_disk;
 pub use rust_dos_tandy as sn76489;
 pub mod sound;
 pub mod stats;
+#[cfg(test)]
+mod test_dir;
 pub mod time_commands;
 pub mod timer;
 pub mod ultrasnd;

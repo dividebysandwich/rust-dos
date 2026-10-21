@@ -48,15 +48,6 @@ pub fn display_size(width: u32, height: u32, aspect: AspectRatio) -> (u32, u32) 
     }
 }
 
-/// The rows (of `row_bytes` each) from the first to the last that differ
-/// between two pictures of the same size, if any do.
-fn changed_rows(old: &[u8], new: &[u8], row_bytes: usize) -> Option<std::ops::Range<usize>> {
-    let pairs = || old.chunks_exact(row_bytes).zip(new.chunks_exact(row_bytes));
-    let first = pairs().position(|(a, b)| a != b)?;
-    let last = pairs().rposition(|(a, b)| a != b)?;
-    Some(first..last + 1)
-}
-
 /// A coordinate in logical pixels (`logical` of them across the picture)
 /// as the frame pixel under it (`frame` of them). Positions in the black
 /// bars around the picture fall outside `0..frame`.
@@ -331,10 +322,7 @@ impl<'a> Display<'a> {
     /// with OpenGL; true if its picture is the one to show
     /// (`present`'s `voodoo`). Otherwise the card stops recording.
     pub fn run_voodoo(&mut self, bus: &mut Bus, settings: &VoodooSettings) -> bool {
-        // A Banshee's picture is the whole desktop, which the OpenGL
-        // renderer doesn't draw: it always shows its memory.
-        let banshee = bus.voodoo.as_ref().is_some_and(|v| v.banshee.is_some());
-        let want = settings.renderer == Renderer::OpenGl && !banshee;
+        let want = settings.renderer == Renderer::OpenGl;
         let problem = match &mut self.out {
             Output::Gl(gl) => {
                 let Some(card) = bus.voodoo.as_mut() else {
@@ -357,7 +345,7 @@ impl<'a> Display<'a> {
                         self.redraw = true;
                     }
                     let Some(recording) = card.take_mirror() else { return false };
-                    let shown = recording.output && recording.front.is_some();
+                    let shown = recording.shown();
                     match gl.run_voodoo(
                         recording,
                         settings.scale,
@@ -393,8 +381,7 @@ impl<'a> Display<'a> {
 
     /// Show `frame`, which must be as big as the last `set_frame_size`,
     /// if it differs from the one shown or the window needs drawing. The
-    /// display keeps the picture to compare the next one with, and leaves
-    /// the one it showed before in `frame` instead, which saves copying it.
+    /// display keeps the changed rows to compare the next picture with.
     /// With `voodoo`, the machine's picture without what is drawn over it,
     /// OpenGL shows the 3dfx card's picture it drew instead
     /// (`run_voodoo`), with what `frame` has over it.
@@ -402,19 +389,32 @@ impl<'a> Display<'a> {
     /// `layer` goes over the picture, at as many of the window's pixels as
     /// it has (`output_scale`).
     pub fn present(&mut self, frame: &mut Frame, voodoo: Option<&Frame>, layer: Option<&Layer>) -> Result<(), String> {
-        let row_bytes = frame.width as usize * 3;
+        self.present_rows(frame, voodoo, layer, 0..frame.height as usize)
+    }
+
+    /// Present a persistent composition, comparing only rows that may
+    /// have changed since the last presentation. Keep its pixels in place
+    /// so the next composition can restore just its dirty rows.
+    pub fn present_rows(
+        &mut self,
+        frame: &Frame,
+        voodoo: Option<&Frame>,
+        layer: Option<&Layer>,
+        candidates: std::ops::Range<usize>,
+    ) -> Result<(), String> {
+        let row_bytes = frame.width as usize * 4;
         // The layer covers the 3dfx card's picture.
         let voodoo = voodoo.filter(|_| layer.is_none());
         let layer_changed = layer.map(|l| l.generation) != self.layer_shown;
         self.layer_shown = layer.map(|l| l.generation);
         let rows = if self.redraw
             || layer_changed
-            || self.shown.len() != frame.rgb.len()
+            || self.shown.len() != frame.rgba.len()
             || self.voodoo_shown && voodoo.is_none()
         {
             0..frame.height as usize
         } else {
-            match changed_rows(&self.shown, &frame.rgb, row_bytes) {
+            match video::changed_rows_in(&self.shown, &frame.rgba, row_bytes, candidates) {
                 Some(rows) => rows,
                 None => {
                     // The 3D scene is drawn every frame all the same.
@@ -427,6 +427,7 @@ impl<'a> Display<'a> {
             }
         };
         self.redraw = false;
+        let updated = rows.start * row_bytes..rows.end * row_bytes;
         let display = display_size(frame.width, frame.height, self.aspect);
         let shown = match &mut self.out {
             Output::Gl(gl) => {
@@ -438,7 +439,7 @@ impl<'a> Display<'a> {
             }
             Output::Sdl { canvas, creator, texture, layer: layer_texture } => {
                 let rect = sdl2::rect::Rect::new(0, rows.start as i32, frame.width, (rows.end - rows.start) as u32);
-                let pixels = &frame.rgb[rows.start * row_bytes..rows.end * row_bytes];
+                let pixels = &frame.rgba[rows.start * row_bytes..rows.end * row_bytes];
                 texture.update(Some(rect), pixels, row_bytes).map_err(|e| e.to_string())?;
                 canvas.clear();
                 // Stretched over the whole logical size: that is the 4:3
@@ -457,7 +458,8 @@ impl<'a> Display<'a> {
                     }
                     let (t, generation) = layer_texture.as_mut().expect("the layer's texture");
                     if *generation != layer.generation {
-                        t.update(None, &picture.rgb, picture.width as usize * 3).map_err(|e| e.to_string())?;
+                        t.update(None, &picture.rgba, picture.width as usize * 4)
+                            .map_err(|e| e.to_string())?;
                         *generation = layer.generation;
                     }
                     // In logical pixels, which the picture is stretched over.
@@ -470,10 +472,10 @@ impl<'a> Display<'a> {
                 Ok(())
             }
         };
-        if self.shown.len() == frame.rgb.len() {
-            std::mem::swap(&mut self.shown, &mut frame.rgb);
+        if self.shown.len() == frame.rgba.len() {
+            self.shown[updated.clone()].copy_from_slice(&frame.rgba[updated]);
         } else {
-            self.shown.clone_from(&frame.rgb);
+            self.shown.clone_from(&frame.rgba);
         }
         shown
     }
@@ -1006,7 +1008,7 @@ fn create_texture<'a>(
     filter: Filter,
 ) -> Result<Texture<'a>, String> {
     let mut texture = creator
-        .create_texture_streaming(PixelFormatEnum::RGB24, width, height)
+        .create_texture_streaming(PixelFormatEnum::RGBA32, width, height)
         .map_err(|e| e.to_string())?;
     texture.set_scale_mode(scale_mode(filter));
     Ok(texture)

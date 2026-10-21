@@ -233,6 +233,9 @@ fn run<const HOT: bool, const DYN: bool, const PROF: bool>(cpu: &mut Cpu, fetch:
             } else {
                 cpu.bus.service_timers();
             }
+            if cpu.bus.win32.due(cpu.bus.clock.now_ticks()) {
+                crate::win32::timer(cpu);
+            }
         }
 
         if deliver_interrupts(cpu) {
@@ -331,6 +334,9 @@ impl Cpu {
     pub fn step(&mut self) {
         if self.bus.clock.icount >= self.bus.clock.deadline {
             self.bus.service_timers();
+            if self.bus.win32.due(self.bus.clock.now_ticks()) {
+                crate::win32::timer(self);
+            }
         }
         // Callers may have raised interrupts or changed the PICs directly.
         self.bus.refresh_irq();

@@ -232,7 +232,7 @@ fn picture(cpu: &mut Cpu) -> Vec<u8> {
     let mut frame = Frame::new(width, height);
     cpu.bus.vga.mark_dirty_full();
     video::render_screen(&mut frame, &cpu.bus);
-    frame.rgb
+    frame.rgba
 }
 
 /// INT 10h with AX and BX.
@@ -246,7 +246,7 @@ fn int10(cpu: &mut Cpu, ax_value: u16, bx_value: u16) {
 /// and check that it shows the same picture and saves the same state.
 fn shows_the_same_after_a_load(what: &str, adapter: Adapter, a: &mut Cpu) {
     let before = picture(a);
-    let colours: std::collections::HashSet<&[u8]> = before.chunks(3).collect();
+    let colours: std::collections::HashSet<&[u8]> = before.chunks(4).collect();
     assert!(colours.len() > 1, "{}: the picture has something in it", what);
     let state = machine::save(a);
     let mut b = video_machine(adapter);

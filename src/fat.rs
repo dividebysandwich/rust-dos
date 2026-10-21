@@ -1555,7 +1555,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn image(name: &str, bytes: usize) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("rust-dos-fat-{}", std::process::id()));
+        let dir = crate::test_dir::path("fat");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(name);
         std::fs::write(&path, vec![0u8; bytes]).unwrap();
@@ -1836,7 +1836,7 @@ mod tests {
     /// A FAT32 hard disk from MAKEIMG, of `mb` MB with clusters of `spc`
     /// sectors, and its volume.
     fn fat32(name: &str, mb: u64, spc: u32) -> (Rc<DiskImage>, FatVolume) {
-        let dir = std::env::temp_dir().join(format!("rust-dos-fat-{}", std::process::id()));
+        let dir = crate::test_dir::path("fat");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(name);
         let spec = crate::makeimg::ImageSpec {

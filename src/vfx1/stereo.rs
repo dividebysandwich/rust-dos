@@ -109,17 +109,18 @@ impl Splitter {
         let (w, h) = Self::native_size(frame);
         let (w, h) = (w as usize, h as usize);
         let rgb: &[u8] = if frame.doubled {
-            self.native.resize(w * h * 3, 0);
-            let row = frame.width as usize * 3;
+            self.native.resize(w * h * 4, 0);
+            let row = frame.width as usize * 4;
             for y in 0..h {
                 for x in 0..w {
-                    let from = 2 * y * row + 2 * x * 3;
-                    self.native[(y * w + x) * 3..][..3].copy_from_slice(&frame.rgb[from..from + 3]);
+                    let from = 2 * y * row + 2 * x * 4;
+                    let to = (y * w + x) * 4;
+                    self.native[to..to + 4].copy_from_slice(&frame.rgba[from..from + 4]);
                 }
             }
             &self.native
         } else {
-            &frame.rgb
+            &frame.rgba
         };
         if layout != Layout::Pages {
             self.flip = PageFlip::default();
@@ -166,11 +167,11 @@ fn copy_area(
 ) {
     out.resize(size.0 as u32, size.1 as u32);
     out.doubled = false;
-    let row = size.0 * 3;
+    let row = size.0 * 4;
     for y in 0..size.1 {
-        let from = ((at.1 + y * line_step) * w + at.0) * 3;
+        let from = ((at.1 + y * line_step) * w + at.0) * 4;
         if from + row <= rgb.len() {
-            out.rgb[y * row..][..row].copy_from_slice(&rgb[from..from + row]);
+            out.rgba[y * row..][..row].copy_from_slice(&rgb[from..from + row]);
         }
     }
 }
@@ -249,7 +250,7 @@ fn changed_per_parity(cur: &[u8], prev: &[u8], w: usize, h: usize) -> [usize; 2]
     let mut changed = [0; 2];
     for y in 0..h {
         for x in (0..w).step_by(STEP) {
-            if differs(cur, prev, (y * w + x) * 3) {
+            if differs(cur, prev, (y * w + x) * 4) {
                 changed[y & 1] += 1;
             }
         }
@@ -263,7 +264,7 @@ fn changed_halves(cur: &[u8], prev: &[u8], w: usize, h: usize, parity: usize) ->
     let mut halves = 0;
     for y in (parity..h).step_by(2) {
         for x in (0..w).step_by(STEP) {
-            if differs(cur, prev, (y * w + x) * 3) {
+            if differs(cur, prev, (y * w + x) * 4) {
                 halves |= if x < w / 2 { 1 } else { 2 };
             }
         }
@@ -282,7 +283,7 @@ fn palette_change(cur: &[u8], prev: &[u8], w: usize, h: usize) -> bool {
     let (mut changed, mut conflicts) = (0u32, 0u32);
     for y in 0..h {
         for x in (0..w).step_by(STEP) {
-            let i = (y * w + x) * 3;
+            let i = (y * w + x) * 4;
             let (from, to) = (colour(prev, i), colour(cur, i));
             if from == to {
                 continue;
@@ -323,7 +324,7 @@ mod tests {
     }
 
     fn shade(f: &Frame) -> u8 {
-        f.rgb[2]
+        f.rgba[2]
     }
 
     #[test]
@@ -378,7 +379,7 @@ mod tests {
         for y in 0..400 {
             let v = if (y / 2) % 2 == 0 { 50 } else { 60 };
             for x in 0..640 {
-                doubled.rgb[(y * 640 + x) * 3 + 2] = v;
+                doubled.rgba[(y * 640 + x) * 4 + 2] = v;
             }
         }
         let mut s = Splitter::default();

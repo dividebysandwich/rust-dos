@@ -56,6 +56,17 @@ pub struct Dll {
     /// What fills the variables of a process the DLL is loaded in, once
     /// the process has its memory, heap and environment.
     pub init: Option<Init>,
+    /// The tables of methods of its COM interfaces (com.rs), after the
+    /// stubs in its code section.
+    pub vtables: &'static [Vtable],
+}
+
+/// A COM interface's table of methods, which the DLL's objects of it
+/// point to: each method a function of the DLL, by its name in `apis`.
+/// Methods are stdcall, and take the object as their first argument.
+pub struct Vtable {
+    pub name: &'static str,
+    pub methods: &'static [&'static str],
 }
 
 /// A variable of a built-in DLL: `size` bytes of its data section, zeroed
@@ -75,6 +86,13 @@ pub static DLLS: &[&Dll] = &[
     &super::kernel32::DLL,
     &super::advapi32::DLL,
     &super::msvcrt::DLL,
+    &super::user32::DLL,
+    &super::gdi32::DLL,
+    &super::ole32::DLL,
+    &super::ddraw::DLL,
+    &super::dsound::DLL,
+    &super::dinput::DLL,
+    &super::winmm::DLL,
 ];
 
 /// Bytes each function's stub takes.
@@ -119,10 +137,35 @@ pub fn stub_address(dll: usize, api: usize) -> u32 {
 /// Variables start at multiples of this in the data section.
 const VAR_ALIGN: u32 = 8;
 
+/// Bytes the stubs of the DLL `dll` take, and the vtables after them.
+fn code_size(dll: &Dll) -> u32 {
+    let methods: usize = dll.vtables.iter().map(|v| v.methods.len()).sum();
+    dll.apis.len() as u32 * STUB + 4 * methods as u32
+}
+
 /// Where the data section of the DLL `dll` starts: the page after its
-/// stubs.
+/// code.
 fn data_rva(dll: &Dll) -> u32 {
-    CODE_RVA + (dll.apis.len() as u32 * STUB).next_multiple_of(0x1000)
+    CODE_RVA + code_size(dll).next_multiple_of(0x1000)
+}
+
+/// The address of the vtable `vtable` of the DLL `dll`.
+pub fn vtable_address(dll: usize, vtable: usize) -> u32 {
+    let d = DLLS[dll];
+    let before: usize = d.vtables[..vtable].iter().map(|v| v.methods.len()).sum();
+    d.base + CODE_RVA + d.apis.len() as u32 * STUB + 4 * before as u32
+}
+
+/// The place in `apis` of each method of the vtables of `dll`.
+fn vtable_methods(dll: &Dll) -> impl Iterator<Item = usize> + '_ {
+    dll.vtables.iter().flat_map(move |v| {
+        v.methods.iter().map(move |&m| {
+            dll.apis
+                .iter()
+                .position(|a| a.name == m)
+                .unwrap_or_else(|| panic!("{} has no {} for {}", dll.name, m, v.name))
+        })
+    })
 }
 
 /// The offset of each variable of `dll` in its data section, and the
@@ -181,12 +224,15 @@ pub fn stub(id: u16, args: u8, conv: Conv) -> [u8; STUB as usize] {
 pub fn image(index: usize) -> pe::Image {
     let dll = DLLS[index];
     let mut b = pe::Builder::dll(dll.base, dll.name);
-    let code: Vec<u8> = dll
+    let mut code: Vec<u8> = dll
         .apis
         .iter()
         .enumerate()
         .flat_map(|(i, api)| stub(id(index, i), api.args, api.conv))
         .collect();
+    for method in vtable_methods(dll) {
+        code.extend_from_slice(&stub_address(index, method).to_le_bytes());
+    }
     let rva = b.section(
         ".text",
         &code,

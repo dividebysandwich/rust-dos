@@ -1078,9 +1078,9 @@ fn render_page(document: &rust_dos::manuals::Document, page: usize, (cw, ch): (u
     let (x0, y0) = ((cw - fw) / 2, (ch - fh) / 2);
     for y in 0..fh {
         for x in 0..fw {
-            let from = ((y * frame.width + x) * 3) as usize;
+            let from = ((y * frame.width + x) * 4) as usize;
             let to = (((y0 + y) * cw + x0 + x) * 4) as usize;
-            rgba[to..to + 3].copy_from_slice(&frame.rgb[from..from + 3]);
+            rgba[to..to + 3].copy_from_slice(&frame.rgba[from..from + 3]);
         }
     }
     rgba

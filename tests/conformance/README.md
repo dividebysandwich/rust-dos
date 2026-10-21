@@ -19,10 +19,29 @@ change listed below:
   `thread.c`, `time.c`, `timer.c`, `version.c`, `virtual.c` from
   `dlls/kernel32/tests/`;
 - `advapi32/`: `registry.c` from `dlls/advapi32/tests/`;
+- `user32/`: `class.c`, `dce.c`, `dialog.c`, `input.c`, `msg.c`,
+  `resource.c`, `static.c`, `text.c`, `uitools.c`, `win.c`,
+  `wsprintf.c`, and the resources they share, `resource.rc` with
+  `test_mono.bmp`, from `dlls/user32/tests/`;
+- `gdi32/`: `bitmap.c`, `brush.c`, `clipping.c`, `dc.c`, `gdiobj.c`,
+  `mapping.c`, `palette.c`, `pen.c` from `dlls/gdi32/tests/`;
+- `dinput/`: `device.c`, `joystick.c`, `keyboard.c`, `mouse.c` from
+  `dlls/dinput/tests/`;
 - `msvcrt/`: `data.c`, `dir.c`, `environ.c`, `file.c`, `heap.c`,
   `printf.c`, `scanf.c`, `signal.c`, `string.c`, `time.c` from
   `dlls/msvcrt/tests/`. `misc.c` is left out: it includes Wine's own
   `msvcrt.h`, which isn't among these files.
+- `ddraw/`: `ddrawmodes.c`, `dsurface.c`, `overlay.c`, `refcount.c`
+  from `dlls/ddraw/tests/`. `d3d.c` and `visual.c` are left out: they
+  test Direct3D, which the built-in DDRAW doesn't have.
+- `dsound/`: `capture.c`, `ds3d.c`, `ds3d8.c`, `dsound.c`, `dsound8.c`,
+  `propset.c` and the header they share, `dsound_test.h`, from
+  `dlls/dsound/tests/`.
+- `winmm/`: `capture.c`, `mci.c`, `midi.c`, `mixer.c`, `mmio.c`,
+  `timer.c`, `wave.c` and the header they share, `winmm_test.h`, from
+  `dlls/winmm/tests/`. `generated.c` is left out: it checks the
+  structures' sizes and fields, and MinGW's headers have some of the
+  MCI structures' WORD fields as UINTs, so it doesn't build.
 
 `heap.c` has the values of the `FLG_HEAP_*` and `FLG_POOL_ENABLE_TAGGING`
 flags defined after its includes, from Wine's `winternl.h`, as MinGW's
@@ -39,13 +58,46 @@ may be used under.
 
 `runtime/compat.h` is rust-dos's own: the few names the tests take from
 Wine's headers that MinGW's lack (`__ms_va_list` and its macros,
-`LOCALE_RETURN_GENITIVE_NAMES`). Each test file is built with it
-included first, so the files stay unchanged.
+`LOCALE_RETURN_GENITIVE_NAMES`, `LPMIDIEVENT`). Each test file is built
+with it included first, so the files stay unchanged.
 
-`runtime/runtime.c` is rust-dos's own: the C runtime the kernel32
-tests link in place of MSVCRT.DLL, so that they test KERNEL32 alone. It
-has the startup code and the parts of the C library that the framework
-and the tests use, written on KERNEL32 alone.
+`runtime/runtime.c` is rust-dos's own: the C runtime the kernel32,
+advapi32, user32, gdi32, dinput and winmm tests link in place of
+MSVCRT.DLL, so that they test the DLLs alone. It has the startup code
+and the parts of the C library that the framework and the tests use,
+written on KERNEL32 alone. It also has `dump_region`, which `win.c`
+calls and Wine has in `msg.c`: `win.c` is built with
+`-Ddump_region=conformance_dump_region` to call that one. And it has
+`sqrt`, which winmm's `timer.c` takes, and `sin` and `fabs`, for the
+tones the dsound and winmm tests make.
+
+`runtime/winmm.c` is rust-dos's own too: `mmsys_error`, the names of
+the multimedia errors, which winmm's tests other than `wave.c` and
+`capture.c` take from `wave.c`, as Wine builds them into one program.
+Each of those is linked with it.
+
+The user32 and gdi32 tests link the built-in USER32.DLL and GDI32.DLL.
+Each user32 program is linked with `resource.rc`, compiled with
+MinGW's `i686-w64-mingw32-windres`, or the one `CONFORMANCE_WINDRES`
+names.
+
+The dinput tests link the built-in DINPUT.DLL. They run with the mouse
+as a joystick on the game port, so that `joystick.c`, which tests each
+joystick DirectInput finds, has one to test.
+
+The dsound tests call each other's helpers (`dsound.c` plays its
+buffers with `ds3d.c`'s `test_buffer`), and winmm's `capture.c` calls
+`wave.c`'s, so each of those DLLs' files is built into one program,
+named after the DLL, as Wine builds them; it runs once for each file,
+with the file's name as its argument. The winmm program is built with
+`STATIC_KSDATAFORMAT_SUBTYPE_PCM` and `_IEEE_FLOAT` defined, as
+`capture.c` declares those GUIDs of `mmreg.h` again. The dsound
+programs link MinGW's `libksuser` for the GUIDs of `ksmedia.h`.
+
+`wave.c` plays about 64 seconds of sound, in the formats WinMM takes,
+and makes each buffer before it plays it: it runs for 1.3 billion
+instructions, about 10 seconds of the suite, two thirds of the batches
+a program may run for.
 
 The msvcrt tests test the built-in MSVCRT.DLL, so they are linked as
 MinGW links any program: its startup code (`crt2.o`) and `-lmsvcrt`,
@@ -58,7 +110,7 @@ without `runtime.c`. They are built with two more options:
   instead of putting MinGW's own in its place.
 
 `crt2.o` uses CMOVcc, so these programs run on a Pentium Pro; the
-kernel32 ones on a 486.
+others on a 486.
 
 ## Running them
 
@@ -69,7 +121,7 @@ since another version can build them into code that gives other
 results.
 
 ```sh
-CONFORMANCE_CC=i686-w64-mingw32-gcc-win32 cargo test --test conformance_tests
+CONFORMANCE_CC=i686-w64-mingw32-gcc-win32 cargo test --release --test conformance_tests
 ```
 
 Without a compiler the test says so and passes, so `cargo test` works
@@ -87,6 +139,17 @@ so they are the same in WSL:
 Each test file becomes `target/conformance/<dll>/<NAME>.EXE`, its output
 `<file>.log` beside it.
 
+A debug build runs them many times slower than a release build, which
+CI uses. To work on some of them, `CONFORMANCE_ONLY` names those to run
+(a DLL, or `user32/static`, or a comma-separated list), and prints
+their results without comparing them. `CONFORMANCE_LOG=1` writes the
+emulator's log, with every call a program makes, to
+`target/conformance/<dll>/<file>.trace`.
+
+```sh
+CONFORMANCE_ONLY=user32/dce cargo test --release --test conformance_tests -- --nocapture
+```
+
 ## The results
 
 `expected.txt` has each test file's results: its summary line, the
@@ -97,7 +160,7 @@ fails when the results differ, better or worse, so the change shows in
 the file's diff. When it is right, write the results anew:
 
 ```sh
-CONFORMANCE_BLESS=1 cargo test --test conformance_tests
+CONFORMANCE_BLESS=1 cargo test --release --test conformance_tests
 ```
 
 The results that aren't clean, and why:
@@ -115,6 +178,43 @@ The results that aren't clean, and why:
   95's does, since there is one there.
 - msvcrt `file.c:1339`: `_pipe` fails with EMFILE, as KERNEL32 has no
   anonymous pipes yet.
+- gdi32 `bitmap.c:2527`, a StretchBlt with both rectangles given
+  backwards, and `2755`, a StretchDIBits that shrinks, give other
+  pixels than Windows did. Wine marks both `todo_wine`.
+- gdi32 `dc.c:453`: DeleteDC of a class DC leaves it there, as on
+  Windows 9x, which the test allows only through `broken()`.
+- user32 `msg.c` and `win.c` compare the messages a window gets with
+  what Windows 2000 and XP sent, and many of their sequences fail: the
+  built-in USER32 doesn't match every message of those yet. Some of the
+  differences are Windows 95's own: it has no WM_UNINITMENUPOPUP,
+  WM_MENUCOMMAND or TrackMouseEvent, and keeps a BS_USERBUTTON a user
+  button where XP makes it a push button.
+- user32 `win.c:4252` and `4264`: the clip box of a CS_PARENTDC
+  window's DC, which Wine marks `todo_wine` too.
+- dsound `dsound.c:1087`: DSOUND.DLL is still loaded after the last
+  object goes, as the built-in DLLs never unload.
+- dsound `propset.c:215`: OLE32's class factory gives E_POINTER for a
+  CreateInstance without a place to put the object, where the test
+  wants DSERR_INVALIDPARAM, as DirectSound's own factory gives.
+- dsound `dsound.c:741`, skipped 48 times: WAVEFORMATEXTENSIBLE primary
+  formats, which Windows 95's DirectSound doesn't take either.
+  `ds3d8.c` and `dsound8.c` skip all they test, as DirectSoundCreate8
+  is DirectX 8's.
+- ddraw `dsurface.c:1725`, `2199`, `3344`: tests of surfaces the
+  display has no hardware for skip, as on a card of Windows 95's time:
+  cube maps, DXT textures in video memory, and the R3G3B2, L8 and A8L8
+  formats.
+- ddraw `overlay.c:60` and `220`: there are no overlays, so the test
+  skips all of it.
+- ddraw `refcount.c:248` and `366`: there is no Direct3D, so
+  QueryInterface for IDirect3D7 and IDirect3D fails and the test skips
+  their reference counts.
+- winmm `mci.c:438` skips its recording tests, as there is no wave
+  input device, and `515`, `634` and `870` skip the plays of the file
+  those tests would have saved.
+- winmm `mmio.c:77`, `244` and `497` skip: they read `msrle.avi`, a
+  file of Wine's tests built from a resource, which isn't among these
+  files.
 
 ## Adding tests
 

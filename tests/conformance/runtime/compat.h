@@ -17,3 +17,6 @@
 #ifndef LOCALE_RETURN_GENITIVE_NAMES
 #define LOCALE_RETURN_GENITIVE_NAMES 0x10000000
 #endif
+
+/* A pointer type of mmsystem.h that MinGW's lacks (winmm's midi.c). */
+#define LPMIDIEVENT MIDIEVENT *

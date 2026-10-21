@@ -401,12 +401,14 @@ impl Voodoo {
                         if self.writes_queue() {
                             self.catch_up();
                         }
+                        let start = addr & self.fbi.mask;
                         for _ in 0..count {
                             let data = self.fifo_take(n);
                             super::blit2d::write(&self.fbi.ram, addr, 4, data, self.fbi.mask);
                             addr += 4;
                         }
                         self.display_dirty = true;
+                        self.mirror_memory(start, start + 4 * count);
                     }
                     2 => {
                         // The display changes if the buffer written is

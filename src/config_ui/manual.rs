@@ -182,10 +182,10 @@ impl ConfigUi {
             self.layer_scaled = Some((key, scaled));
         }
         let scaled = &self.layer_scaled.as_ref().expect("the page scaled").1;
-        let row = page.0 as usize * 3;
+        let row = page.0 as usize * 4;
         for r in 0..page.1 as usize {
-            let to = ((y0 as usize + r) * size.0 as usize + x0 as usize) * 3;
-            out.rgb[to..to + row].copy_from_slice(&scaled.rgb[r * row..(r + 1) * row]);
+            let to = ((y0 as usize + r) * size.0 as usize + x0 as usize) * 4;
+            out.rgba[to..to + row].copy_from_slice(&scaled.rgba[r * row..(r + 1) * row]);
         }
         Some(out)
     }
@@ -331,9 +331,9 @@ impl ConfigUi {
         }
         let Some(open) = self.manual.as_mut().and_then(|m| m.open.as_mut()) else { return };
         let area = (0usize, cell_h, width, (rows - 2) * cell_h);
-        for row in frame.rgb.chunks_exact_mut(width * 3).skip(area.1).take(area.3) {
-            for pixel in row.as_chunks_mut::<3>().0.iter_mut() {
-                pixel.copy_from_slice(&[0x18, 0x1C, 0x24]);
+        for row in frame.rgba.chunks_exact_mut(width * 4).skip(area.1).take(area.3) {
+            for pixel in row.as_chunks_mut::<4>().0.iter_mut() {
+                pixel.copy_from_slice(&[0x18, 0x1C, 0x24, 255]);
             }
         }
 
@@ -392,10 +392,10 @@ impl ConfigUi {
                     manuals::scale(&cropped, w as u32, h as u32)
                 };
                 for y in 0..h.min(height.saturating_sub(y0)) {
-                    let from = y * w * 3;
-                    let to = ((y0 + y) * width + x0) * 3;
-                    let n = w.min(width.saturating_sub(x0)) * 3;
-                    frame.rgb[to..to + n].copy_from_slice(&scaled.rgb[from..from + n]);
+                    let from = y * w * 4;
+                    let to = ((y0 + y) * width + x0) * 4;
+                    let n = w.min(width.saturating_sub(x0)) * 4;
+                    frame.rgba[to..to + n].copy_from_slice(&scaled.rgba[from..from + n]);
                 }
             }
         }

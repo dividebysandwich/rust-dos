@@ -207,15 +207,15 @@ pub fn thumbnail(frame: &Frame) -> Vec<u8> {
                 let mut sum = [0u32; 3];
                 for sy in y0..y1 {
                     for sx in x0..x1 {
-                        let i = ((sy * frame.width + sx) * 3) as usize;
-                        for (total, &value) in sum.iter_mut().zip(&frame.rgb[i..i + 3]) {
+                        let i = ((sy * frame.width + sx) * 4) as usize;
+                        for (total, &value) in sum.iter_mut().zip(&frame.rgba[i..i + 3]) {
                             *total += value as u32;
                         }
                     }
                 }
                 let n = (y1 - y0) * (x1 - x0);
-                let o = ((y * w + x) * 3) as usize;
-                for (pixel, total) in small.rgb[o..o + 3].iter_mut().zip(sum) {
+                let o = ((y * w + x) * 4) as usize;
+                for (pixel, total) in small.rgba[o..o + 3].iter_mut().zip(sum) {
                     *pixel = (total / n) as u8;
                 }
             }
@@ -425,13 +425,14 @@ mod tests {
     #[test]
     fn a_thumbnail_is_the_frame_made_small() {
         let mut frame = Frame::new(640, 400);
-        frame.rgb[..640 * 200 * 3].fill(0xFF);
+        frame.rgba[..640 * 200 * 4].fill(0xFF);
         let png = thumbnail(&frame);
         let decoder = png::Decoder::new(std::io::Cursor::new(png));
         let mut reader = decoder.read_info().unwrap();
         let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
         reader.next_frame(&mut pixels).unwrap();
         assert_eq!((reader.info().width, reader.info().height), THUMBNAIL);
-        assert_eq!((pixels[0], pixels[pixels.len() - 1]), (0xFF, 0));
+        assert_eq!(&pixels[..4], &[255; 4]);
+        assert_eq!(&pixels[pixels.len() - 4..], &[0, 0, 0, 255]);
     }
 }
