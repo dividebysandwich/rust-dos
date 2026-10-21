@@ -76,6 +76,20 @@ pub fn physical_base(cpu: &Cpu) -> u32 {
     }
 }
 
+/// Make the card's BAR1 linear over all of its memory, as a mode set
+/// does, if it isn't over any yet (the tile base still at 0, as at
+/// power-on): before a program reaches the memory through it.
+pub fn linear_memory(cpu: &mut Cpu) {
+    let base = cpu
+        .bus
+        .banshee()
+        .map(|b| b.reg(card::LFB_MEMORY_CONFIG) & 0x1FFF);
+    if base == Some(0) {
+        cpu.bus
+            .voodoo_write_32(card::LFB_MEMORY_CONFIG, (card::MEMORY >> 12) as u32);
+    }
+}
+
 /// The desktop's mode.
 pub fn desktop(cpu: &Cpu) -> Mode {
     let bpp = if is_card(cpu) { 16 } else { 32 };

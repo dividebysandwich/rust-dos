@@ -554,8 +554,12 @@ pub fn get_device_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if get(cpu, args[0]).is_none() {
         return Some(0);
     }
-    if args[1] == BITSPIXEL {
-        return Some(crate::win32::screen::desktop(cpu).bpp);
+    let bpp = crate::win32::screen::desktop(cpu).bpp;
+    match args[1] {
+        BITSPIXEL => return Some(bpp),
+        // COLORRES: the bits of a color the display shows.
+        108 if bpp == 16 => return Some(16),
+        _ => {}
     }
     Some(device_cap(args[1]))
 }

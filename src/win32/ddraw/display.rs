@@ -215,6 +215,7 @@ pub fn view(cpu: &mut Cpu) -> Option<u32> {
     if let Some(&(_, at)) = state(cpu).display.views.iter().find(|v| v.0 == pid) {
         return Some(at);
     }
+    screen::linear_memory(cpu);
     let lfb = screen::physical_base(cpu);
     let len = screen::memory_size(cpu);
     let at = crate::win32::with_process(cpu, |p, bus| {
