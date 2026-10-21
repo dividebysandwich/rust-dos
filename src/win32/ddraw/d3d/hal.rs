@@ -983,6 +983,21 @@ pub fn release(cpu: &mut Cpu, gone: u32) {
 
 /// A process ended: the heap it had is gone with its video memory.
 pub fn process_ended(cpu: &mut Cpu, pid: u32) {
+    // The shadows of its surfaces go even when it never had the heap,
+    // as when video memory was too full for one.
+    let gone: Vec<u32> = {
+        let s = state(cpu);
+        s.hal
+            .shadows
+            .iter()
+            .filter(|sh| s.object(sh.surface).is_none_or(|o| o.pid == pid))
+            .map(|sh| sh.at)
+            .collect()
+    };
+    for &at in &gone {
+        display::free(cpu, at);
+    }
+    hal(cpu).shadows.retain(|sh| !gone.contains(&sh.at));
     if hal(cpu).pid == pid {
         let h = hal(cpu).clone();
         if h.heap_len != 0 {
