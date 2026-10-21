@@ -1088,8 +1088,9 @@ const X_DESTROYED: u32 = 5;
 /// The places in `cxx_returned`'s data: the step, the frame, its
 /// FuncInfo, the state to unwind to, the try block and the handler that
 /// catches, the exception's object, ThrowInfo and code, where the
-/// function goes on, the caller's registers, and the thread's exception
-/// from before the catch.
+/// function goes on, the caller's registers, the thread's exception
+/// from before the catch, and the function's saved ESP from before it
+/// (a try in the catch block saves the block's own there).
 const D_FRAME: usize = 1;
 const D_INFO: usize = 2;
 const D_TARGET: usize = 3;
@@ -1101,7 +1102,8 @@ const D_CODE: usize = 8;
 const D_GO_ON: usize = 9;
 const D_REGS: usize = 10;
 const D_OUTER: usize = 14;
-const D_LEN: usize = 17;
+const D_ESP: usize = 17;
+const D_LEN: usize = 18;
 
 /// __CxxFrameHandler(record, frame, context, dispatcher), with the
 /// function's FuncInfo in EAX: a catch of the function's that takes the
@@ -1171,6 +1173,11 @@ fn find_catch(
     thrown: Option<(u32, u32)>,
 ) -> Option<Option<(u32, u32, Option<u32>)>> {
     let state = read32(cpu, frame + 8)? as i32;
+    // Built with /EHs, the function's catch (...) takes C++ exceptions
+    // only (FuncInfo's EHFlags, in MSVC 8's and later).
+    if thrown.is_none() && read32(cpu, info)? >= 0x1993_0522 && read32(cpu, info + 32)? & 1 != 0 {
+        return Some(None);
+    }
     let tries = read32(cpu, info + 12)?.min(MAX_ENTRIES);
     let map = read32(cpu, info + 16)?;
     let types = match thrown {
@@ -1349,7 +1356,7 @@ fn cxx_unwind(cpu: &mut Cpu, resume: (u32, u32), d: Vec<u32>) {
         if cpu.bus.guest_faulted() || state <= target || state >= states {
             break;
         }
-        let entry = map.wrapping_add(8 * state as u32);
+        let entry = map.wrapping_add((state as u32).wrapping_mul(8));
         let before = cpu.bus.guest_read_32(entry);
         let action = cpu.bus.guest_read_32(entry + 4);
         if cpu.bus.guest_faulted() {
@@ -1379,6 +1386,7 @@ fn call_catch(cpu: &mut Cpu, resume: (u32, u32), mut d: Vec<u32>) {
     let high = cpu.bus.guest_read_32(d[D_TRY] + 4);
     let block = cpu.bus.guest_read_32(d[D_HANDLER] + 12);
     cpu.bus.guest_write_32(frame + 8, high.wrapping_add(1));
+    d[D_ESP] = cpu.bus.guest_read_32(frame.wrapping_sub(4));
     if let Some(at) = thread_field(cpu, T_CXX) {
         for i in 0..3 {
             d[D_OUTER + i] = cpu.bus.guest_read_32(at + 4 * i as u32);
@@ -1395,10 +1403,12 @@ fn call_catch(cpu: &mut Cpu, resume: (u32, u32), mut d: Vec<u32>) {
 }
 
 /// The catch block returned where the function goes on: the exception's
-/// object destroyed, by its destructor where it has one.
+/// object destroyed, by its destructor where it has one, unless a catch
+/// around this one (which rethrew it with `throw;`) still has it.
 fn destroy_object(cpu: &mut Cpu, resume: (u32, u32), mut d: Vec<u32>) {
     d[0] = X_DESTROYED;
-    if d[D_THROW] != 0 && d[D_OBJECT] != 0 {
+    let outer_has_it = d[D_OUTER + 1] == d[D_OBJECT];
+    if d[D_THROW] != 0 && d[D_OBJECT] != 0 && !outer_has_it {
         let destructor = cpu.bus.guest_read_32(d[D_THROW] + 4);
         if !cpu.bus.guest_faulted() && destructor != 0 {
             cpu.set_ecx(d[D_OBJECT]);
@@ -1419,7 +1429,8 @@ fn go_on(cpu: &mut Cpu, d: &[u32]) {
         }
     }
     let frame = d[D_FRAME];
-    let esp = cpu.bus.guest_read_32(frame.wrapping_sub(4));
+    let esp = d[D_ESP];
+    cpu.bus.guest_write_32(frame.wrapping_sub(4), esp);
     let tib = super::super::process(cpu)
         .current_thread()
         .map_or(0, |t| t.tib);
@@ -1461,7 +1472,11 @@ pub fn cxx_throw_exception(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if throw == 0 {
         let at = thread_field(cpu, T_CXX)?;
         let code = read32(cpu, at)?;
-        if code != 0 && code != CXX_EXCEPTION {
+        // `throw;` with no exception being caught: terminate().
+        if code == 0 {
+            return abort(cpu, &[]);
+        }
+        if code != CXX_EXCEPTION {
             return kernel32(cpu, "RaiseException", &[code, 0, 0, 0]);
         }
         object = read32(cpu, at + 4)?;

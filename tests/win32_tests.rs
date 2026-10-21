@@ -2734,6 +2734,7 @@ fn a_program_catches_its_cxx_exceptions() {
     let inner_handler = d.add(&[0; 16]);
     let destroyed = d.add(&[0; 4]);
     let bits = d.add(&[0; 4]);
+    let outer_esp = d.add(&[0; 4]);
     let data_len = d.0.len() as u32;
     let exe = program(BASE, false, imports, &d.0, |a, l| {
         let code = |a: &mut CodeAssembler, at: [u32; 6]| -> Result<[CodeLabel; 6], IcedError> {
@@ -2795,12 +2796,15 @@ fn a_program_catches_its_cxx_exceptions() {
             a.mov(dword_ptr(0u64).fs(), esp)?;
             a.sub(esp, 0x10)?;
             a.mov(dword_ptr(ebp - 0x10), esp)?;
+            a.mov(dword_ptr(l.at(outer_esp)), esp)?;
             a.mov(dword_ptr(ebp - 4), 0)?;
             a.call(inner_function)?;
             a.int3()?;
 
-            // catch (char *p): p is what was thrown.
+            // catch (char *p): p is what was thrown. A try in the catch
+            // block would save the block's ESP as the function's.
             a.set_label(&mut outer_catch)?;
+            a.mov(dword_ptr(ebp - 0x10), esp)?;
             a.cmp(dword_ptr(ebp - 0x14), data(boom) as i32)?;
             let mut skip = a.create_label();
             a.jne(skip)?;
@@ -2809,10 +2813,12 @@ fn a_program_catches_its_cxx_exceptions() {
             a.mov(eax, at[5])?;
             a.ret()?;
 
-            // On after the try, with the function's stack, the inner
-            // object destroyed once.
+            // On after the try, with the function's stack from before
+            // the catch, the inner object destroyed once.
             a.set_label(&mut after)?;
             let mut skip = a.create_label();
+            a.cmp(esp, dword_ptr(l.at(outer_esp)))?;
+            a.jne(skip)?;
             a.cmp(esp, dword_ptr(ebp - 0x10))?;
             a.jne(skip)?;
             set(a, 8)?;
