@@ -195,11 +195,17 @@ pub fn present(cpu: &Cpu, version: u32) -> Vec<u32> {
     kinds
 }
 
-/// The device whose instance GUID is `guid`, if it is there.
+/// The device whose instance GUID is `guid`, if it is there. A program
+/// that passes GUID_Joystick gets the first joystick.
 pub fn kind_of(cpu: &Cpu, guid: &Guid, version: u32) -> Option<u32> {
+    let guid = if *guid == GUID_JOYSTICK {
+        joystick_guid(0)
+    } else {
+        *guid
+    };
     present(cpu, version)
         .into_iter()
-        .find(|&k| instance_guid(k) == *guid)
+        .find(|&k| instance_guid(k) == guid)
 }
 
 /// The axes and buttons of a device of `kind`, as it is now.
