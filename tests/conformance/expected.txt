@@ -14,8 +14,10 @@ advapi32/registry: skipped registry.c:1705
 advapi32/registry: skipped registry.c:1859
 advapi32/registry: skipped registry.c:1579
 advapi32/registry: skipped registry.c:1354
-ddraw/d3d: d3d: 22 tests executed (0 marked as todo, 3 failures), 2 skipped.
-ddraw/d3d: skipped d3d.c:3512
+ddraw/d3d: d3d: 514 tests executed (0 marked as todo, 4 failures), 3 skipped.
+ddraw/d3d: skipped d3d.c:377
+ddraw/d3d: failed d3d.c:891
+ddraw/d3d: skipped d3d.c:2078
 ddraw/d3d: skipped d3d.c:3532
 ddraw/d3d: failed d3d.c:3292
 ddraw/d3d: failed d3d.c:3295

@@ -600,8 +600,8 @@ fn palette(cpu: &mut Cpu, id: u32) -> [u32; 256] {
     let Some(p) = state(cpu).object(pid).and_then(|o| o.palette.as_ref()) else {
         return out;
     };
-    for (o, e) in out.iter_mut().zip(p.entries.chunks_exact(4)) {
-        *o = (e[0] as u32) << 16 | (e[1] as u32) << 8 | e[2] as u32;
+    for (o, [r, g, b, _]) in out.iter_mut().zip(p.entries.as_chunks::<4>().0) {
+        *o = (*r as u32) << 16 | (*g as u32) << 8 | *b as u32;
     }
     out
 }
