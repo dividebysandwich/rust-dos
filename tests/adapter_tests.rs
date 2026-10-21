@@ -91,18 +91,25 @@ fn the_vga_state_service_restores_hardware_bios_and_dac_state() {
     cpu.bus.vga.palette[3..6].copy_from_slice(&[0x11, 0x22, 0x33]);
     cpu.bus.vga.dac_mask = 0x7F;
     cpu.bus.write_8(0x0449, 0x13);
+    cpu.bus.write_8(0x0484, 0x2A);
+    cpu.bus.write_8(0x04A8, 0x56);
     cpu.bus.write_8(0x0463, 0xD4);
     int10(&mut cpu, 0x1C00, 0, 7, 0);
     assert_eq!(cpu.get_al(), 0x1C);
     assert_eq!(cpu.bx(), 16, "the full state fits 16 64-byte blocks");
     int10(&mut cpu, 0x1C01, 0, 7, 0);
     assert_eq!(cpu.get_al(), 0x1C);
+    let bios_state = 0x30000 + cpu.bus.read_16(0x30002) as usize;
+    assert_eq!(cpu.bus.read_8(bios_state + 0x3B), 0x2A);
+    assert_eq!(cpu.bus.read_8(bios_state + 0x5F), 0x56);
 
     cpu.bus.vga.sequencer_regs[1] = 0xFF;
     cpu.bus.vga.crtc_regs[0x0C] = 0xFF;
     cpu.bus.vga.palette[3..6].copy_from_slice(&[0x3F, 0x3F, 0x3F]);
     cpu.bus.vga.dac_mask = 0xFF;
     cpu.bus.write_8(0x0449, 0x03);
+    cpu.bus.write_8(0x0484, 0x55);
+    cpu.bus.write_8(0x04A8, 0xAA);
     cpu.bus.write_8(0x0463, 0xB4);
 
     int10(&mut cpu, 0x1C02, 0, 7, 0);
@@ -112,6 +119,8 @@ fn the_vga_state_service_restores_hardware_bios_and_dac_state() {
     assert_eq!(&cpu.bus.vga.palette[3..6], &[0x11, 0x22, 0x33]);
     assert_eq!(cpu.bus.vga.dac_mask, 0x7F);
     assert_eq!(cpu.bus.read_8(0x0449), 0x13);
+    assert_eq!(cpu.bus.read_8(0x0484), 0x2A);
+    assert_eq!(cpu.bus.read_8(0x04A8), 0x56);
     assert_eq!(cpu.bus.read_8(0x0463), 0xD4);
     assert_eq!(cpu.bus.video_mode, video::VideoMode::Graphics320x200);
 }
