@@ -175,30 +175,44 @@ fn gr_glide_get_version(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
 /// type and configuration.
 const HWCONFIG_SIZE: usize = 4 + 4 * 36;
 
-fn hwconfig(cpu: &Cpu) -> Option<[u8; HWCONFIG_SIZE]> {
+fn hwconfig(cpu: &mut Cpu) -> Option<[u8; HWCONFIG_SIZE]> {
     let board = api::query(cpu)?;
     let mut out = [0u8; HWCONFIG_SIZE];
-    // Banshees and Voodoo3s show as Voodoo2s, as their Glide 2 did.
+    // Every board shows as a Voodoo Graphics (type 0), as their Glide 2
+    // did, so that programs which know only that one run. A Voodoo2's
+    // FBI revision is raised by 80h with one TMU and 100h with two, and
+    // FX_GLIDE_REPORT_REAL_HW makes it say Voodoo2 (type 3). A Banshee's
+    // or Voodoo3's revisions are 1002h, and its memory shows as 2 MB per
+    // TMU, the rest of it as frame buffer.
+    let mb = |bytes: u32| bytes >> 20;
+    let (mut fb_mb, mut tmu_mb) = (mb(board.fb_bytes), mb(board.tmu_bytes));
+    if board.card == hw::Card::Banshee {
+        tmu_mb = 2;
+        fb_mb -= 2 * board.tmus;
+    }
     let (kind, fbi_rev, tmu_rev) = match board.card {
         hw::Card::Voodoo1 => (0, 2, 1),
-        _ => (3, 4, 2),
+        hw::Card::Voodoo2 => {
+            let real = crate::win32::kernel32::has_environment_variable(
+                cpu,
+                "FX_GLIDE_REPORT_REAL_HW",
+            );
+            let fbi_rev = 4 + if board.tmus > 1 { 0x100 } else { 0x80 };
+            (if real { 3 } else { 0 }, fbi_rev, 2)
+        }
+        _ => (0, 0x1002, 0x1002),
     };
-    let mb = |bytes: u32| bytes >> 20;
     let words = [
         1,
         kind,
-        mb(board.fb_bytes),
+        fb_mb,
         fbi_rev,
         board.tmus,
         FALSE,
         tmu_rev,
-        mb(board.tmu_bytes),
+        tmu_mb,
         if board.tmus > 1 { tmu_rev } else { 0 },
-        if board.tmus > 1 {
-            mb(board.tmu_bytes)
-        } else {
-            0
-        },
+        if board.tmus > 1 { tmu_mb } else { 0 },
     ];
     for (i, w) in words.iter().enumerate() {
         out[4 * i..4 * i + 4].copy_from_slice(&w.to_le_bytes());
