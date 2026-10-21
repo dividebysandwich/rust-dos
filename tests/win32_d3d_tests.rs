@@ -867,6 +867,7 @@ const DEV7_SET_TEXTURE: u32 = 35;
 
 // Render states.
 const RS_ZENABLE: u32 = 7;
+const RS_ZFUNC: u32 = 23;
 const RS_SHADEMODE: u32 = 9;
 const RS_SRCBLEND: u32 = 19;
 const RS_DESTBLEND: u32 = 20;
@@ -943,8 +944,9 @@ struct Scene {
     card: Option<Board>,
     /// The color the target is cleared with, ARGB.
     clear: u32,
-    /// Whether the target has a 16-bit z-buffer, cleared to 1.
-    zbuffer: bool,
+    /// The depth the target's 16-bit z-buffer is cleared to, if it has
+    /// one.
+    zbuffer: Option<f32>,
     /// An 8x8 565 texture on stage 0 (Direct3D 7).
     texture: Option<[u16; 64]>,
     steps: Vec<Step>,
@@ -1058,7 +1060,7 @@ fn scene_program(scene: &Scene) -> (Vec<u8>, u32) {
                 &[Arg::At(BACK_CAPS), Arg::At(TARGET)],
             )?;
         }
-        if scene.zbuffer {
+        if scene.zbuffer.is_some() {
             c.com(
                 a,
                 l,
@@ -1108,7 +1110,7 @@ fn scene_program(scene: &Scene) -> (Vec<u8>, u32) {
                 )?;
             }
             let mut what = D3DCLEAR_TARGET;
-            if scene.zbuffer {
+            if scene.zbuffer.is_some() {
                 what |= D3DCLEAR_ZBUFFER;
             }
             c.com(
@@ -1121,7 +1123,7 @@ fn scene_program(scene: &Scene) -> (Vec<u8>, u32) {
                     Arg::I(0),
                     Arg::I(what),
                     Arg::I(scene.clear),
-                    Arg::I(1f32.to_bits()),
+                    Arg::I(scene.zbuffer.unwrap_or(1.0).to_bits()),
                     Arg::I(0),
                 ],
             )?;
@@ -1157,7 +1159,7 @@ fn scene_program(scene: &Scene) -> (Vec<u8>, u32) {
                 &[Arg::Val(VIEWPORT)],
             )?;
             let mut what = D3DCLEAR_TARGET;
-            if scene.zbuffer {
+            if scene.zbuffer.is_some() {
                 what |= D3DCLEAR_ZBUFFER;
             }
             c.com(
@@ -1170,7 +1172,7 @@ fn scene_program(scene: &Scene) -> (Vec<u8>, u32) {
                     Arg::At(RECT),
                     Arg::I(what),
                     Arg::I(scene.clear),
-                    Arg::I(1f32.to_bits()),
+                    Arg::I(scene.zbuffer.unwrap_or(1.0).to_bits()),
                     Arg::I(0),
                 ],
             )?;
@@ -1294,7 +1296,7 @@ fn a_flat_shaded_triangle_has_its_first_vertex_color() {
         api: Api::D3D7,
         card: None,
         clear: 0xFF00_0080,
-        zbuffer: false,
+        zbuffer: None,
         texture: None,
         steps: vec![Step::State(RS_SHADEMODE, 1), Step::Draw(corners())],
     };
@@ -1313,7 +1315,7 @@ fn a_gouraud_shaded_triangle_blends_its_corners() {
         api: Api::D3D7,
         card: None,
         clear: 0,
-        zbuffer: false,
+        zbuffer: None,
         texture: None,
         steps: vec![Step::Draw(corners())],
     };
@@ -1332,7 +1334,7 @@ fn direct3d_6_clears_through_its_viewport_and_draws() {
         api: Api::D3D6,
         card: None,
         clear: 0xFF00_0080,
-        zbuffer: false,
+        zbuffer: None,
         texture: None,
         steps: vec![Step::Draw(corners())],
     };
@@ -1355,7 +1357,7 @@ fn a_textured_quad_shows_its_texels() {
         api: Api::D3D7,
         card: None,
         clear: 0,
-        zbuffer: false,
+        zbuffer: None,
         texture: Some(texels),
         steps: vec![Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.5, WHITE))],
     };
@@ -1375,7 +1377,7 @@ fn the_z_buffer_keeps_the_nearer_of_two_quads() {
         api: Api::D3D7,
         card: None,
         clear: 0,
-        zbuffer: true,
+        zbuffer: Some(1.0),
         texture: None,
         steps: vec![
             Step::State(RS_ZENABLE, 1),
@@ -1389,12 +1391,44 @@ fn the_z_buffer_keeps_the_nearer_of_two_quads() {
 }
 
 #[test]
+fn a_quad_nearer_than_the_cleared_depth_passes_the_depth_test() {
+    // Cleared to 0.5 through the viewport, as Expendable does, then
+    // with LESSEQUAL a quad at 0.25 is drawn and one at 0.75 isn't: by
+    // Z, and by W while the vertices' fog takes Z.
+    for (test, fog) in [("zclear", 0), ("zclear_fog", 1)] {
+        let at = |x0: f32, x1: f32, z: f32, rhw: f32, color: u32| {
+            quad(x0, 0.0, x1, 64.0, z, color)
+                .into_iter()
+                .map(|v| Tl { rhw, ..v })
+                .collect()
+        };
+        let scene = Scene {
+            api: Api::D3D6,
+            card: None,
+            clear: RED,
+            zbuffer: Some(0.5),
+            texture: None,
+            steps: vec![
+                Step::State(RS_ZENABLE, 1),
+                Step::State(RS_ZFUNC, 4),
+                Step::State(RS_FOGENABLE, fog),
+                Step::Draw(at(0.0, 32.0, 0.25, 4.0, GREEN)),
+                Step::Draw(at(32.0, 64.0, 0.75, 1.0 / 3.0, BLUE)),
+            ],
+        };
+        let p = draw_scene(test, &scene);
+        assert_rgb(&p, 16, 30, [0, 255, 0], 0);
+        assert_rgb(&p, 48, 30, [255, 0, 0], 0);
+    }
+}
+
+#[test]
 fn alpha_blending_mixes_with_the_target() {
     let scene = Scene {
         api: Api::D3D7,
         card: None,
         clear: BLUE,
-        zbuffer: false,
+        zbuffer: None,
         texture: None,
         steps: vec![
             Step::State(RS_ALPHABLENDENABLE, 1),
@@ -1428,7 +1462,7 @@ fn vertex_fog_and_table_fog_mix_in_the_fog_color() {
         api: Api::D3D7,
         card: None,
         clear: 0,
-        zbuffer: false,
+        zbuffer: None,
         texture: None,
         steps: vec![
             Step::State(RS_FOGENABLE, 1),
@@ -1456,7 +1490,7 @@ fn card_scene(test: &str, board: Board) {
         api: Api::D3D7,
         card: Some(board),
         clear: 0xFF00_0080,
-        zbuffer: true,
+        zbuffer: Some(1.0),
         texture: Some(texels),
         steps: vec![
             Step::State(RS_ZENABLE, 1),
@@ -1490,7 +1524,7 @@ fn the_specular_color_adds_to_textured_and_untextured_triangles() {
         api: Api::D3D7,
         card: None,
         clear: 0,
-        zbuffer: true,
+        zbuffer: Some(1.0),
         texture: textured.then_some([0xFFFF; 64]),
         steps: vec![
             Step::State(RS_ZENABLE, 1),

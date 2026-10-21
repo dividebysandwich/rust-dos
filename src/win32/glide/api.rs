@@ -110,6 +110,10 @@ pub const FOG_DISABLE: u32 = 0;
 pub const FOG_WITH_ITERATED_ALPHA: u32 = 1;
 pub const FOG_WITH_TABLE: u32 = 2;
 pub const FOG_WITH_ITERATED_Z: u32 = 3;
+/// Not one of Glide's modes: fog by the integer part of the vertices'
+/// oow (fogMode's fogZ and fogAlpha both set), for Direct3D's HAL,
+/// whose depth stays Z.
+pub const FOG_WITH_ITERATED_W: u32 = 4;
 pub const FOG_MULT2: u32 = 0x100;
 pub const FOG_ADD2: u32 = 0x200;
 /// Entries of the fog table.
@@ -1228,6 +1232,7 @@ pub fn fog_mode(cpu: &mut Cpu, mode: u32) {
     fog |= match mode & 0xFF {
         FOG_WITH_ITERATED_ALPHA => ENFOGGING | FOG_ALPHA,
         FOG_WITH_ITERATED_Z => ENFOGGING | FOG_Z,
+        FOG_WITH_ITERATED_W => ENFOGGING | FOG_Z | FOG_ALPHA,
         FOG_WITH_TABLE => ENFOGGING,
         _ => 0,
     };
@@ -1779,7 +1784,9 @@ fn params(g: &Context) -> u32 {
         };
     }
     if g.fog_mode & ENFOGGING != 0 {
-        p |= if g.fog_mode & FOG_Z != 0 {
+        p |= if g.fog_mode & (FOG_Z | FOG_ALPHA) == FOG_Z | FOG_ALPHA {
+            P_OOW_FBI
+        } else if g.fog_mode & FOG_Z != 0 {
             P_OOZ
         } else if g.fog_mode & FOG_ALPHA != 0 {
             P_ALPHA
