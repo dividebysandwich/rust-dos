@@ -270,6 +270,12 @@ fn build(
         // msg.c's dump_region, which win.c calls, is runtime.c's here.
         args.push("-Ddump_region=conformance_dump_region");
     }
+    // Wine builds winmm's tests into one program, and the others take
+    // the names of the errors from wave.c; here runtime/winmm.c has them.
+    let winmm = format!("{ROOT}/runtime/winmm.c");
+    if dll == "winmm" && unit != "wave" && unit != "capture" {
+        args.push(winmm.as_str());
+    }
     if dll == "msvcrt" {
         args.extend(["-fno-printf-return-value", "-D__NO_ISOCEXT"]);
         args.extend([source.as_str(), list.as_str(), "-lmsvcrt"]);

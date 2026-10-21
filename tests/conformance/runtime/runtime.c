@@ -745,3 +745,12 @@ void conformance_dump_region(HRGN hrgn)
 {
     (void)hrgn;
 }
+
+/* The square root, which winmm's timer.c takes of its statistics: the
+ * FPU's. */
+double sqrt(double x)
+{
+    double r;
+    __asm__("fsqrt" : "=t"(r) : "0"(x));
+    return r;
+}

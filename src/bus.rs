@@ -1352,6 +1352,13 @@ impl Bus {
         self.refresh_irq();
     }
 
+    /// Recompute when the next timer event is due, after a device's own
+    /// time for one changed outside `service_timers` (the built-in
+    /// Windows's multimedia timers).
+    pub fn reschedule_timers(&mut self) {
+        self.clock.schedule(self.next_event());
+    }
+
     /// Change the emulated CPU speed (instructions per emulated ms).
     pub fn set_cycles_per_ms(&mut self, cycles_per_ms: u32) {
         self.clock.set_cycles_per_ms(cycles_per_ms);
@@ -1360,8 +1367,9 @@ impl Bus {
 
     /// The next time (PIT ticks) a device needs attention: the timer's
     /// next IRQ 0, the end of the Sound Blaster's current block, the
-    /// Ultrasound's next timer, DMA or voice interrupt, or the retrace a
-    /// 3dfx card's swap waits for.
+    /// Ultrasound's next timer, DMA or voice interrupt, the retrace a
+    /// 3dfx card's swap waits for, or the built-in Windows's multimedia
+    /// timers and devices.
     fn next_event(&self) -> Option<u64> {
         let sb = self.sb.as_ref().and_then(|sb| sb.next_event());
         let gus = self.gus_next_event();
@@ -1379,6 +1387,7 @@ impl Bus {
             self.serial_next_event(),
             self.kbc_release_at,
             self.rtc_next,
+            self.win32.next_event(),
         ]
         .into_iter()
             .flatten()
@@ -1584,6 +1593,13 @@ impl Bus {
         let speaker = self.speaker_on && speaker_step * rate as f32 > 20.0;
         let ((vl, vr), (fl, fr)) = self.sb.as_ref().map_or(((1.0, 1.0), (1.0, 1.0)), |sb| sb.volumes());
         let (cl, cr) = self.sb.as_ref().map_or((1.0, 1.0), |sb| sb.cd_volume());
+        // The built-in Windows's mixer and MIDI volume, 1 until a program
+        // sets them.
+        let (ml, mr) = self.win32.midi_gain();
+        let (cl, cr) = {
+            let (wl, wr) = self.win32.cd_gain();
+            (cl * wl, cr * wr)
+        };
         let (sb_on, sb_step, dac) = match &self.sb {
             Some(sb) => (
                 sb.speaker_on || sb.config.model.is_sb16(),
@@ -1661,7 +1677,8 @@ impl Bus {
                     self.mixer.add(&mut mix, &mut peaks, Channel::Sb, frame);
                 }
             }
-            self.mixer.add(&mut mix, &mut peaks, Channel::Midi, self.mpu.render());
+            let (sl, sr) = self.mpu.render();
+            self.mixer.add(&mut mix, &mut peaks, Channel::Midi, (sl * ml, sr * mr));
             let (cdl, cdr) = self.cdaudio.render();
             self.mixer.add(&mut mix, &mut peaks, Channel::CdAudio, (cdl * cl, cdr * cr));
             let noise = self.disknoise.render();

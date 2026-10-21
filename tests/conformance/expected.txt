@@ -536,3 +536,27 @@ user32/win: failed win.c:2603 (x2)
 user32/win: skipped win.c:1057
 user32/win: skipped win.c:5990
 user32/wsprintf: wsprintf: 6 tests executed (0 marked as todo, 0 failures), 0 skipped.
+winmm/mci: ended: MCI.EXE needs WINMM.DLL's function waveInGetNumDevs
+winmm/mci: failed mci.c:202
+winmm/mci: failed mci.c:203
+winmm/mci: failed mci.c:205
+winmm/mci: failed mci.c:208
+winmm/mci: failed mci.c:222
+winmm/mci: failed mci.c:224
+winmm/mci: failed mci.c:232
+winmm/mci: failed mci.c:259
+winmm/mci: failed mci.c:266
+winmm/mci: failed mci.c:267
+winmm/mci: failed mci.c:272
+winmm/mci: failed mci.c:279
+winmm/mci: failed mci.c:298
+winmm/mci: failed mci.c:299
+winmm/mci: failed mci.c:308
+winmm/mci: exit code 255
+winmm/midi: midi: 226 tests executed (0 marked as todo, 0 failures), 0 skipped.
+winmm/mixer: mixer: 38 tests executed (0 marked as todo, 0 failures), 0 skipped.
+winmm/mmio: mmio: 219 tests executed (0 marked as todo, 0 failures), 3 skipped.
+winmm/mmio: skipped mmio.c:77
+winmm/mmio: skipped mmio.c:244
+winmm/mmio: skipped mmio.c:497
+winmm/timer: timer: 44 tests executed (0 marked as todo, 0 failures), 0 skipped.

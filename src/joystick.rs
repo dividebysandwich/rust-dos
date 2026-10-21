@@ -139,8 +139,8 @@ fn apply_deadzone(x: f32, y: f32, deadzone: f32) -> (f32, f32) {
 }
 
 /// Reads until an axis trips, at one end of its travel and past it.
-const TRIP_MIN: u32 = 10;
-const TRIP_RANGE: u32 = 440;
+pub const TRIP_MIN: u32 = 10;
+pub const TRIP_RANGE: u32 = 440;
 
 /// Emulated time per read until a trip, the read period of a 4.77 MHz PC.
 const TRIP_READ_NS: u64 = 2500;
