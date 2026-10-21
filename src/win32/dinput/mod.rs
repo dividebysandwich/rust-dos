@@ -322,7 +322,16 @@ fn dll_index() -> usize {
 /// the vtable `vtable`: its id.
 fn object_of(cpu: &mut Cpu, this: u32, vtable: usize) -> Option<u32> {
     match com::interface_of(cpu, dll_index(), this)? {
-        (v, id) if v == vtable && state(cpu).object(id).is_some() => Some(id),
+        // A device's interface needs a device: the id in a forged one may
+        // be that of the DirectInput object.
+        (v, id)
+            if v == vtable
+                && state(cpu)
+                    .object(id)
+                    .is_some_and(|o| v != DEVICE || o.device.is_some()) =>
+        {
+            Some(id)
+        }
         _ => None,
     }
 }

@@ -358,7 +358,11 @@ fn factory_create_instance(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// Make an object of the class at `index` of `com::CLASSES`, given as
 /// the interface `iid` at `out`: the class's HRESULT.
 fn create(cpu: &mut Cpu, index: usize, iid: &Guid, out: u32) -> u32 {
-    let class = com::class_at(index).expect("a class");
+    // The index comes from the factory's interface, which the program
+    // may have made up.
+    let Some(class) = com::class_at(index) else {
+        return CLASS_E_CLASSNOTAVAILABLE;
+    };
     let result = (class.create)(cpu, iid, out);
     cpu.bus.log_string(&format!(
         "[W32] OLE32 makes a {} ({}): {:08X}",
