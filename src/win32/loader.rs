@@ -263,14 +263,18 @@ fn build(
     let heap = memory.reserve(None, HEAP_RESERVE, PRIVATE, SHARED)?;
     process.heap = Heap::new(heap, HEAP_RESERVE, true);
 
-    // The command line, in a block of the process's own.
+    // The command line, in a block of the process's own: in ANSI, and
+    // in the page after it in Unicode (GetCommandLineW).
     let data = memory.reserve(None, GRANULARITY, PRIVATE, SHARED)?;
-    memory.commit(bus, data, PAGE, USER | WRITABLE)?;
+    memory.commit(bus, data, 2 * PAGE, USER | WRITABLE)?;
     let mut line = crate::dosstr::to_bytes(line);
     let bus = &mut cpu.bus;
-    line.truncate(PAGE as usize - 1);
+    line.truncate(PAGE as usize / 2 - 1);
     line.push(0);
     memory.write(bus, data, &line)?;
+    let wide = super::kernel32::ansi_to_wide(&line);
+    let wide: Vec<u8> = wide.iter().flat_map(|c| c.to_le_bytes()).collect();
+    memory.write(bus, data + PAGE, &wide)?;
     process.command_line = data;
 
     // The TIB.
@@ -935,6 +939,19 @@ pub(super) fn find_export(
         }
     }
     None
+}
+
+/// Map the built-in DLL named `name` in the running process if it isn't
+/// there: COM makes objects of DLLs that programs don't import, and the
+/// objects' methods are in the DLL's image. Its base, or None.
+pub(super) fn map_builtin_named(cpu: &mut crate::cpu::Cpu, name: &str) -> Option<u32> {
+    let index = stubs::find_dll(name)?;
+    super::with_process(cpu, |process, bus| {
+        let mut memory = std::mem::take(&mut process.memory);
+        let mapped = map_builtin(bus, &mut memory, process, index);
+        process.memory = memory;
+        mapped
+    })
 }
 
 /// `len` bytes at `lin` in `memory`, read through its page tables

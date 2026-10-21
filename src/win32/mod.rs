@@ -16,6 +16,7 @@
 mod advapi32;
 mod call;
 mod com;
+mod comctl32;
 mod convert;
 mod ddraw;
 mod dinput;
@@ -33,6 +34,7 @@ mod ole32;
 mod registry;
 mod screen;
 mod seh;
+mod shell32;
 pub mod snapshot;
 mod stubs;
 mod system;
@@ -40,6 +42,7 @@ mod task;
 mod thread;
 pub mod user32;
 mod winmm;
+mod wsock32;
 
 pub use snapshot::snapshot;
 pub use stubs::function_name;

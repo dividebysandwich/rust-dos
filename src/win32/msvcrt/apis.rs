@@ -512,4 +512,8 @@ pub static APIS: &[Api] = &[
     cdecl("scanf", 480, 1, stdio::scanf),
     cdecl("fwscanf", 481, 2, stdio::fwscanf),
     cdecl("wscanf", 482, 1, stdio::wscanf),
+    cdecl("_wstat", 483, 2, io::wstat),
+    cdecl("_kbhit", 484, 0, io::kbhit),
+    cdecl("_getch", 485, 0, stdio::getchar),
+    cdecl("?terminate@@YAXXZ", 486, 0, startup::abort),
 ];
