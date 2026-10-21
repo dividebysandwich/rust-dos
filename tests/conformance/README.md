@@ -31,9 +31,10 @@ change listed below:
   `printf.c`, `scanf.c`, `signal.c`, `string.c`, `time.c` from
   `dlls/msvcrt/tests/`. `misc.c` is left out: it includes Wine's own
   `msvcrt.h`, which isn't among these files.
-- `ddraw/`: `ddrawmodes.c`, `dsurface.c`, `overlay.c`, `refcount.c`
-  from `dlls/ddraw/tests/`. `d3d.c` and `visual.c` are left out: they
-  test Direct3D, which the built-in DDRAW doesn't have.
+- `ddraw/`: `d3d.c`, `ddrawmodes.c`, `dsurface.c`, `overlay.c`,
+  `refcount.c`, `visual.c` from `dlls/ddraw/tests/`. `d3d.c` and
+  `visual.c` test Direct3D, and run with a Voodoo3 as the display
+  adapter, whose HAL is Direct3D's device.
 - `dsound/`: `capture.c`, `ds3d.c`, `ds3d8.c`, `dsound.c`, `dsound8.c`,
   `propset.c` and the header they share, `dsound_test.h`, from
   `dlls/dsound/tests/`.
@@ -206,9 +207,15 @@ The results that aren't clean, and why:
   formats.
 - ddraw `overlay.c:60` and `220`: there are no overlays, so the test
   skips all of it.
-- ddraw `refcount.c:248` and `366`: there is no Direct3D, so
-  QueryInterface for IDirect3D7 and IDirect3D fails and the test skips
-  their reference counts.
+- ddraw `d3d.c:3512`: the desktop is 32 bits a pixel, and the HAL
+  draws only into 16-bit surfaces, so CreateDevice fails on the test's
+  surface and the Direct3D 7 tests skip. `d3d.c:3532`: the Direct3D 1
+  tests need the RGB device, a software rasterizer, which isn't there.
+  `3292`, `3295` and `3325`: DirectDraw doesn't subclass the window it
+  has in exclusive mode, nor give it the focus.
+- ddraw `visual.c:2929`: the test draws in a 32-bit mode with a 32-bit
+  depth buffer, which the HAL can't draw into, so it skips.
+
 - winmm `mci.c:438` skips its recording tests, as there is no wave
   input device, and `515`, `634` and `870` skip the plays of the file
   those tests would have saved.
