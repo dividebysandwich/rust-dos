@@ -62,8 +62,6 @@ pub struct GlScreen {
     /// The 3dfx card drawn with OpenGL, and why it can't be if it can't.
     voodoo: Option<VoodooGl>,
     voodoo_failed: Option<String>,
-    /// Whether it dithers as the card does (`voodoo_dither`).
-    voodoo_dither: bool,
     /// What screenshots and recordings of the look are drawn with, made
     /// the first time one is (`capture`).
     capture: Option<Capture>,
@@ -194,7 +192,6 @@ impl GlScreen {
             renderer,
             voodoo: None,
             voodoo_failed: (glsl == Glsl::Es300).then(|| "OpenGL ES can't draw it".to_string()),
-            voodoo_dither: true,
             capture: None,
             layer: None,
             layer_generation: None,
@@ -347,15 +344,6 @@ impl GlScreen {
         self.voodoo.as_ref().map(|v| (v.scale(), v.samples(), v.anisotropy()))
     }
 
-    /// Whether the 3dfx card's OpenGL picture dithers as the card does
-    /// (`voodoo_dither`), from the next thing it draws.
-    pub fn set_voodoo_dither(&mut self, on: bool) {
-        self.voodoo_dither = on;
-        if let Some(voodoo) = &mut self.voodoo {
-            voodoo.set_dither(on);
-        }
-    }
-
     /// Stop drawing the 3dfx card.
     pub fn drop_voodoo(&mut self) {
         if let Some(voodoo) = self.voodoo.take() {
@@ -364,14 +352,16 @@ impl GlScreen {
     }
 
     /// Draw what the 3dfx card recorded, at `scale` times its size with
-    /// `samples` a pixel and `anisotropy` for textures. The error says why
-    /// OpenGL can't; whether the picture may have changed.
+    /// `samples` a pixel and `anisotropy` for textures, dithering as the
+    /// card does with `dither` (`voodoo_dither`). The error says why OpenGL
+    /// can't; whether the picture may have changed.
     pub fn run_voodoo(
         &mut self,
         recording: rust_dos::voodoo::mirror::Frame,
         scale: u32,
         samples: u32,
         anisotropy: u32,
+        dither: bool,
     ) -> Result<bool, String> {
         if self.voodoo_scale().is_some_and(|now| now != (scale, samples, anisotropy)) {
             self.drop_voodoo();
@@ -381,10 +371,7 @@ impl GlScreen {
                 return Err(problem.clone());
             }
             match VoodooGl::new(&self.gl, self.glsl, scale, samples, anisotropy) {
-                Ok(mut voodoo) => {
-                    voodoo.set_dither(self.voodoo_dither);
-                    self.voodoo = Some(voodoo);
-                }
+                Ok(voodoo) => self.voodoo = Some(voodoo),
                 Err(e) => {
                     eprintln!("[DISPLAY] {}", e);
                     self.voodoo_failed = Some(e.clone());
@@ -392,7 +379,10 @@ impl GlScreen {
                 }
             }
         }
-        Ok(self.voodoo.as_mut().is_some_and(|voodoo| voodoo.run(&self.gl, recording)))
+        Ok(self.voodoo.as_mut().is_some_and(|voodoo| {
+            voodoo.set_dither(dither);
+            voodoo.run(&self.gl, recording)
+        }))
     }
 
     /// Show the 3dfx card's picture, with what `screen` has over `base`

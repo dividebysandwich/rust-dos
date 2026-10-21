@@ -2099,7 +2099,10 @@ card's picture looks enlarged. `voodoo_dither=false` keeps all 8 bits a
 colour: a cleaner, smoother picture, without the dot pattern or the
 banding the 16 bits leave. Games that don't dither look the same either
 way. It changes at once, in the settings window (*3dfx dithering*) too,
-from the next frame the game draws.
+from the next frame the game draws. When the OpenGL picture starts again
+from the card's memory (a new `voodoo_scale` or `voodoo_msaa`, a loaded
+state), it starts from the card's 16 bits, so with `voodoo_dither=false`
+the pattern shows until the game draws over it.
 
 Not all of the card's dithering is there. OpenGL blends after the shader,
 so a blended triangle is dithered before the blend instead of after it: it

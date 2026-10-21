@@ -80,11 +80,15 @@ ivec2 cardPixel() {
     return ivec2(floor(gl_FragCoord.xy / u_scale));
 }
 
-// Where in the dither matrix a pixel is: the card counts rows as it
-// iterates them, before the Y origin flips them.
+// A pixel's row as the card counts rows when it iterates them, before the
+// Y origin flips them: what the stipple and dither patterns go by.
+int iteratedRow(ivec2 pixel) {
+    return bit(u_fbz, 17) ? u_yorigin - pixel.y : pixel.y;
+}
+
+// Where in the dither matrix a pixel is.
 int ditherIndex(ivec2 pixel) {
-    int y = bit(u_fbz, 17) ? u_yorigin - pixel.y : pixel.y;
-    return ((y & 3) << 2) | (pixel.x & 3);
+    return ((iteratedRow(pixel) & 3) << 2) | (pixel.x & 3);
 }
 
 bool dithers() {
@@ -368,7 +372,7 @@ bool alphaTest(int a) {
     return true;
 }
 
-ivec3 fog(ivec3 c, int itera) {
+ivec3 fog(ivec3 c, int itera, ivec2 pixel) {
     ivec3 fc = argb(u_fogcolor).rgb;
     ivec3 f;
     if (bit(u_fog, 5)) {
@@ -388,7 +392,7 @@ ivec3 fog(ivec3 c, int itera) {
             int delta = deltaval >> 10;
             // fogMode bit 6 dithers the delta with the 4x4 matrix.
             if (dithers() && bit(u_fog, 6)) {
-                delta = ((deltaval >> 6) + DITHER4[ditherIndex(cardPixel())]) >> 4;
+                delta = ((deltaval >> 6) + DITHER4[ditherIndex(pixel)]) >> 4;
             }
             blend = u_fogblend[i] + delta;
         } else if (source == 1) {
@@ -431,8 +435,7 @@ void main() {
     // Stippling with the pattern (the rotating one draws every pixel).
     ivec2 pixel = cardPixel();
     if (bit(u_fbz, 2) && bit(u_fbz, 12)) {
-        int y = bit(u_fbz, 17) ? u_yorigin - pixel.y : pixel.y;
-        int index = ((y & 3) << 3) | (~pixel.x & 7);
+        int index = ((iteratedRow(pixel) & 3) << 3) | (~pixel.x & 7);
         if (((u_stipple >> index) & 1) == 0) {
             discard;
         }
@@ -464,7 +467,7 @@ void main() {
     int alocal = select == 0 ? iter.a : select == 1 ? color0.a : select == 2 ? clampedZ(v_zw.x) & 0xFF : clampedW(v_zw.y) & 0xFF;
     ivec4 c = combineColor(other, ivec4(local, alocal), texel);
     if (bit(u_fog, 0)) {
-        c.rgb = fog(c.rgb, iter.a);
+        c.rgb = fog(c.rgb, iter.a, pixel);
     }
 
     int depth = u_constant_depth != 0 ? u_zacolor & 0xFFFF : depthValue();

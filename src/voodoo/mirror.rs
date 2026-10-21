@@ -99,8 +99,9 @@ pub struct Fill {
     /// Whether the auxiliary buffer holds alpha rather than depth.
     pub alpha_planes: bool,
     /// With fbzMode's dithering, the 5-6-5 values the card fills a 4x4
-    /// block of pixels with, by buffer row and column (each `& 3`).
-    pub pattern: Option<[u16; 16]>,
+    /// block of pixels with, by buffer row and column (each `& 3`). Boxed,
+    /// so that it doesn't make every command bigger.
+    pub pattern: Option<Box<[u16; 16]>>,
 }
 
 /// Pixels of a row as frame buffer writes left them, 5-6-5 colours in the
@@ -406,11 +407,11 @@ impl Mirror {
             pattern: dither.filter(|_| rgb).map(|d| {
                 // Buffer row r is row yorigin - r as the card counts them.
                 let flip = fbz & (1 << 17) != 0;
-                std::array::from_fn(|i| {
+                Box::new(std::array::from_fn(|i| {
                     let (r, x) = (i as u32 >> 2, i & 3);
                     let y = if flip { st.yorigin.wrapping_sub(r) } else { r };
                     d[(y & 3) as usize * 4 + x]
-                })
+                }))
             }),
         }));
     }

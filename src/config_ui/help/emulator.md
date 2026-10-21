@@ -173,8 +173,9 @@ default) gives the OpenGL picture the same pattern, so it looks like the
 card's, the dots growing with *3dfx OpenGL size*. **Off** keeps 8 bits a
 colour: a cleaner, smoother picture without the pattern or its banding.
 **On** costs a little of your graphics card's time and none of the
-CPU's. It takes effect immediately, and only the **OpenGL** renderer uses
-it; **Rust-DOS** always draws what the card draws.
+CPU's. It applies to what the game draws next, so while the game is
+paused the picture doesn't change. Only the **OpenGL** renderer uses it;
+**Rust-DOS** always draws what the card draws.
 
 # 3dfx anisotropic filtering {#voodoo-anisotropy}
 

@@ -68,10 +68,6 @@ impl GlScreen {
         match *self {}
     }
 
-    pub fn set_voodoo_dither(&mut self, _on: bool) {
-        match *self {}
-    }
-
     pub fn drop_voodoo(&mut self) {
         match *self {}
     }
@@ -82,6 +78,7 @@ impl GlScreen {
         _scale: u32,
         _samples: u32,
         _anisotropy: u32,
+        _dither: bool,
     ) -> Result<bool, String> {
         match *self {}
     }

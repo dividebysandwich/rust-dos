@@ -727,7 +727,9 @@ impl VoodooGl {
             let target = self.targets.get(&fill.dest).or_else(|| self.targets.values().next());
             let Some(target) = target else { return };
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target.draw_fbo()));
-            if let Some(pattern) = fill.pattern.filter(|_| self.dither && fill.color.is_some()) {
+            if let Some(pattern) =
+                fill.pattern.as_deref().filter(|_| self.dither && fill.color.is_some())
+            {
                 // The colour as the card dithers it, through the clip.
                 gl.color_mask(true, true, true, false);
                 gl.disable(glow::DEPTH_TEST);
@@ -739,7 +741,7 @@ impl VoodooGl {
                 gl.uniform_4_f32(p.at("u_rect"), 0.0, 0.0, size.0, size.1);
                 gl.uniform_2_f32(p.at("u_size"), size.0, size.1);
                 gl.uniform_1_f32(p.at("u_scale"), self.scale as f32);
-                gl.uniform_1_i32_slice(p.at("u_pattern"), &pattern.map(i32::from));
+                gl.uniform_1_i32_slice(p.at("u_pattern"), &(*pattern).map(i32::from));
                 gl.bind_vertex_array(Some(self.quad_vao));
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             } else if let Some(color) = fill.color {
@@ -1028,15 +1030,8 @@ mod tests {
     fn constant_depth_comparison_writes_interpolated_depth() {
         use super::*;
         use crate::voodoo::mirror::{DrawState, Layout};
-        let sdl = sdl2::init().unwrap();
-        let video = sdl.video().unwrap();
-        let attrs = video.gl_attr();
-        attrs.set_context_profile(sdl2::video::GLProfile::Core);
-        attrs.set_context_version(3, 3);
-        let window = video.window("Depth regression", 8, 8).opengl().hidden().build().unwrap();
-        let _context = window.gl_create_context().unwrap();
-        // SAFETY: this thread owns the current SDL OpenGL context.
-        let gl = unsafe { glow::Context::from_loader_function(|s| video.gl_get_proc_address(s).cast()) };
+        let t = test_context("Depth regression");
+        let gl = t.gl;
         for samples in [1, 4] {
             let mut renderer = VoodooGl::new(&gl, Glsl::Gl150, 1, samples, 1).unwrap();
             let state = DrawState {
