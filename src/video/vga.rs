@@ -673,6 +673,18 @@ impl VgaCard {
     }
 
     pub fn write_graphics(&mut self, offset: usize, value: u8) {
+        self.write_graphics_with_rows(offset, value, None);
+    }
+
+    /// Write a graphics byte, marking only known affected output rows.
+    /// `rows` is safe only when the caller can prove the current scanout
+    /// maps this write to those rows; otherwise use `write_graphics`.
+    pub(crate) fn write_graphics_with_rows(
+        &mut self,
+        offset: usize,
+        value: u8,
+        rows: Option<(u32, u32)>,
+    ) {
         let seq_mem_mode = self.sequencer_regs[0x04];
         let chain4 = (seq_mem_mode & 0x08) != 0;
         // Sequencer Memory Mode bit 2 is "Odd/Even Disable": 1 = sequential
@@ -715,7 +727,7 @@ impl VgaCard {
                     self.set_plane_byte(p, plane_offset, value);
                 }
             }
-            self.mark_dirty_full();
+            self.mark_graphics_dirty(rows);
             return;
         }
 
@@ -778,7 +790,15 @@ impl VgaCard {
                 self.set_plane_byte(p, plane_offset, byte);
             }
         }
-        self.mark_dirty_full();
+        self.mark_graphics_dirty(rows);
+    }
+
+    fn mark_graphics_dirty(&mut self, rows: Option<(u32, u32)>) {
+        if let Some((first, end)) = rows {
+            self.mark_dirty_rows(first, end);
+        } else {
+            self.mark_dirty_full();
+        }
     }
 
     /// Snapshot CRTC Start Address High/Low into the display-latched byte
