@@ -25,6 +25,8 @@ change listed below:
   `test_mono.bmp`, from `dlls/user32/tests/`;
 - `gdi32/`: `bitmap.c`, `brush.c`, `clipping.c`, `dc.c`, `gdiobj.c`,
   `mapping.c`, `palette.c`, `pen.c` from `dlls/gdi32/tests/`;
+- `dinput/`: `device.c`, `joystick.c`, `keyboard.c`, `mouse.c` from
+  `dlls/dinput/tests/`;
 - `msvcrt/`: `data.c`, `dir.c`, `environ.c`, `file.c`, `heap.c`,
   `printf.c`, `scanf.c`, `signal.c`, `string.c`, `time.c` from
   `dlls/msvcrt/tests/`. `misc.c` is left out: it includes Wine's own
@@ -49,17 +51,21 @@ Wine's headers that MinGW's lack (`__ms_va_list` and its macros,
 included first, so the files stay unchanged.
 
 `runtime/runtime.c` is rust-dos's own: the C runtime the kernel32,
-advapi32, user32 and gdi32 tests link in place of MSVCRT.DLL, so that
-they test the DLLs alone. It has the startup code and the parts of the
-C library that the framework and the tests use, written on KERNEL32
-alone. It also has `dump_region`, which `win.c` calls and Wine has in
-`msg.c`: `win.c` is built with `-Ddump_region=conformance_dump_region`
-to call that one.
+advapi32, user32, gdi32 and dinput tests link in place of MSVCRT.DLL,
+so that they test the DLLs alone. It has the startup code and the
+parts of the C library that the framework and the tests use, written on
+KERNEL32 alone. It also has `dump_region`, which `win.c` calls and Wine
+has in `msg.c`: `win.c` is built with
+`-Ddump_region=conformance_dump_region` to call that one.
 
 The user32 and gdi32 tests link the built-in USER32.DLL and GDI32.DLL.
 Each user32 program is linked with `resource.rc`, compiled with
 MinGW's `i686-w64-mingw32-windres`, or the one `CONFORMANCE_WINDRES`
 names.
+
+The dinput tests link the built-in DINPUT.DLL. They run with the mouse
+as a joystick on the game port, so that `joystick.c`, which tests each
+joystick DirectInput finds, has one to test.
 
 The msvcrt tests test the built-in MSVCRT.DLL, so they are linked as
 MinGW links any program: its startup code (`crt2.o`) and `-lmsvcrt`,

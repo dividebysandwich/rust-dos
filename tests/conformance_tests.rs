@@ -17,6 +17,7 @@
 
 use rust_dos::cpu::{Cpu, CpuModel, HostConsole};
 use rust_dos::exec::{NoHook, StopReason, run_batch};
+use rust_dos::joystick::{JoystickSettings, JoystickType};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -106,9 +107,16 @@ fn program_name(unit: &str) -> String {
 }
 
 /// Run the program `name` in `dir` with the argument `unit`, the test to
-/// run, as Wine's runner passes it, on a processor of `model`: what it
-/// printed, and its exit code if it ended.
-fn run(dir: &Path, name: &str, unit: &str, model: CpuModel) -> (String, Option<u8>) {
+/// run, as Wine's runner passes it, on a processor of `model`, with the
+/// mouse as a joystick on the game port when `joystick`: what it printed,
+/// and its exit code if it ended.
+fn run(
+    dir: &Path,
+    name: &str,
+    unit: &str,
+    model: CpuModel,
+    joystick: bool,
+) -> (String, Option<u8>) {
     // The Windows and system directories the built-in Windows names,
     // and REGEDIT.EXE there, which file.c opens as a file every Windows
     // has.
@@ -117,6 +125,12 @@ fn run(dir: &Path, name: &str, unit: &str, model: CpuModel) -> (String, Option<u
     let mut cpu = Cpu::new(dir.to_path_buf());
     cpu.model = model;
     cpu.bus.win32.enabled = true;
+    if joystick {
+        cpu.bus.joystick.set_settings(JoystickSettings {
+            kind: JoystickType::Mouse,
+            ..Default::default()
+        });
+    }
     cpu.host_console = Some(HostConsole::default());
     cpu.load_shell();
     assert!(cpu.load_executable(name, None), "{} didn't load", name);
@@ -340,7 +354,9 @@ fn wine_conformance_tests_give_the_expected_results() {
                     } else {
                         CpuModel::I486
                     };
-                    let (output, exit) = run(&dir, &name, &unit, model);
+                    // dinput's joystick.c tests the joysticks there are.
+                    let joystick = dll == "dinput";
+                    let (output, exit) = run(&dir, &name, &unit, model, joystick);
                     fs::write(dir.join(format!("{}.log", unit)), &output).unwrap();
                     results(&output, exit)
                 }

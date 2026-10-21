@@ -14,6 +14,10 @@ advapi32/registry: skipped registry.c:1705
 advapi32/registry: skipped registry.c:1859
 advapi32/registry: skipped registry.c:1579
 advapi32/registry: skipped registry.c:1354
+dinput/device: device: 28 tests executed (0 marked as todo, 0 failures), 0 skipped.
+dinput/joystick: joystick: 195 tests executed (0 marked as todo, 0 failures), 0 skipped.
+dinput/keyboard: keyboard: 57 tests executed (0 marked as todo, 0 failures), 0 skipped.
+dinput/mouse: mouse: 45 tests executed (0 marked as todo, 0 failures), 0 skipped.
 gdi32/bitmap: bitmap: 4312 tests executed (0 marked as todo, 2 failures), 2 skipped.
 gdi32/bitmap: skipped bitmap.c:1894
 gdi32/bitmap: failed bitmap.c:2527
