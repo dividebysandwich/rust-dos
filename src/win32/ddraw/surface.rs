@@ -567,10 +567,24 @@ pub fn orphan(cpu: &mut Cpu, id: u32) {
         return;
     }
     end_dc(cpu, id);
+    end_lock(cpu, id);
     free_memory(cpu, id);
     if let Some(s) = surface(cpu, id) {
         s.lost = true;
         s.locked = false;
+    }
+}
+
+/// A card surface that goes while locked lets go of Glide's lock on
+/// its buffer, which would keep every card surface busy after it.
+fn end_lock(cpu: &mut Cpu, id: u32) {
+    let Some(s) = surface(cpu, id) else {
+        return;
+    };
+    if s.locked && s.memory == MEM_CARD {
+        s.locked = false;
+        let role = s.bits;
+        voodoo::unlock(cpu, role);
     }
 }
 
@@ -581,6 +595,7 @@ pub fn destroyed(cpu: &mut Cpu, id: u32) {
         return;
     };
     end_dc(cpu, id);
+    end_lock(cpu, id);
     super::d3d::shadow::forget(cpu, id);
     free_memory(cpu, id);
     for &(_, held) in &s.attached {
