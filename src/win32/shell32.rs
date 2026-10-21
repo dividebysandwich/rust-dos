@@ -34,39 +34,41 @@ const fn stdcall(
     }
 }
 
-/// The functions. Append only (see `stubs`).
+/// The functions. Append only (see `stubs`). Their ordinals are past
+/// those Windows 95 exports only by number (ILClone is 18, ILFree 155):
+/// a program importing one of those by number finds nothing here.
 static APIS: &[Api] = &[
-    stdcall("ShellExecuteA", 1, 6, shell_execute),
-    stdcall("ShellExecuteW", 2, 6, shell_execute),
-    stdcall("Shell_NotifyIconA", 3, 2, true_),
-    stdcall("Shell_NotifyIconW", 4, 2, true_),
+    stdcall("ShellExecuteA", 1001, 6, shell_execute),
+    stdcall("ShellExecuteW", 1002, 6, shell_execute),
+    stdcall("Shell_NotifyIconA", 1003, 2, true_),
+    stdcall("Shell_NotifyIconW", 1004, 2, true_),
     stdcall(
         "SHGetSpecialFolderLocation",
-        5,
+        1005,
         3,
         sh_get_special_folder_location,
     ),
-    stdcall("SHGetPathFromIDListA", 6, 2, sh_get_path_from_id_list),
-    stdcall("SHGetPathFromIDList", 7, 2, sh_get_path_from_id_list),
-    stdcall("SHGetSpecialFolderPathA", 8, 4, sh_get_special_folder_path),
-    stdcall("SHGetMalloc", 9, 1, sh_get_malloc),
-    stdcall("SHBrowseForFolderA", 10, 1, null),
-    stdcall("SHBrowseForFolder", 11, 1, null),
-    stdcall("DragAcceptFiles", 12, 2, nothing),
-    stdcall("DragQueryFileA", 13, 4, null),
-    stdcall("DragQueryFile", 14, 4, null),
-    stdcall("DragFinish", 15, 1, nothing),
-    stdcall("DragQueryPoint", 16, 2, null),
-    stdcall("ExtractIconA", 17, 3, null),
-    stdcall("ExtractIcon", 18, 3, null),
-    stdcall("SHFileOperationA", 19, 1, sh_file_operation),
-    stdcall("SHFileOperation", 20, 1, sh_file_operation),
-    stdcall("SHGetFileInfoA", 21, 5, null),
-    stdcall("SHGetFileInfo", 22, 5, null),
-    stdcall("ShellAboutA", 23, 4, true_),
-    stdcall("SHAddToRecentDocs", 24, 2, nothing),
-    stdcall("SHChangeNotify", 25, 4, nothing),
-    stdcall("FindExecutableA", 26, 3, shell_execute),
+    stdcall("SHGetPathFromIDListA", 1006, 2, sh_get_path_from_id_list),
+    stdcall("SHGetPathFromIDList", 1007, 2, sh_get_path_from_id_list),
+    stdcall("SHGetSpecialFolderPathA", 1008, 4, sh_get_special_folder_path),
+    stdcall("SHGetMalloc", 1009, 1, sh_get_malloc),
+    stdcall("SHBrowseForFolderA", 1010, 1, null),
+    stdcall("SHBrowseForFolder", 1011, 1, null),
+    stdcall("DragAcceptFiles", 1012, 2, nothing),
+    stdcall("DragQueryFileA", 1013, 4, null),
+    stdcall("DragQueryFile", 1014, 4, null),
+    stdcall("DragFinish", 1015, 1, nothing),
+    stdcall("DragQueryPoint", 1016, 2, null),
+    stdcall("ExtractIconA", 1017, 3, null),
+    stdcall("ExtractIcon", 1018, 3, null),
+    stdcall("SHFileOperationA", 1019, 1, sh_file_operation),
+    stdcall("SHFileOperation", 1020, 1, sh_file_operation),
+    stdcall("SHGetFileInfoA", 1021, 5, null),
+    stdcall("SHGetFileInfo", 1022, 5, null),
+    stdcall("ShellAboutA", 1023, 4, true_),
+    stdcall("SHAddToRecentDocs", 1024, 2, nothing),
+    stdcall("SHChangeNotify", 1025, 4, nothing),
+    stdcall("FindExecutableA", 1026, 3, shell_execute),
 ];
 
 const TRUE: u32 = 1;
@@ -220,6 +222,10 @@ fn sh_get_special_folder_path(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// SHGetMalloc(out): the process's task allocator, as CoGetMalloc's.
+/// Its methods are OLE32's, mapped if the program doesn't import it.
 fn sh_get_malloc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    if super::loader::map_builtin_named(cpu, "OLE32.DLL").is_none() {
+        return Some(E_OUTOFMEMORY);
+    }
     super::ole32::co_get_malloc(cpu, &[1, args[0]])
 }
