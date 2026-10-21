@@ -15,6 +15,10 @@
 //! screen. Lock gives the program its pixels in its view of video memory
 //! (`display.rs`), or a system memory surface's in its own pages; GetDC
 //! gives it a GDI memory DC with a DIB section at those pixels.
+//!
+//! The 3dfx device's primary surface, back buffer and Z buffer are the
+//! add-on card's buffers (`voodoo.rs`); its other surfaces are in system
+//! memory.
 
 use super::com::{self, CLASS_E_NOAGGREGATION, Guid};
 use super::{
@@ -26,7 +30,7 @@ use super::{
     DDERR_NOTFLIPPABLE, DDERR_NOTFOUND, DDERR_NOTLOCKED, DDERR_OUTOFVIDEOMEMORY,
     DDERR_PRIMARYSURFACEALREADYEXISTS, DDERR_SURFACEALREADYATTACHED, DDERR_SURFACEBUSY,
     DDERR_SURFACELOST, DDERR_WRONGMODE, Format, Object, V_SURFACE1, V_SURFACE4, V_SURFACE7,
-    display, palette, state,
+    display, palette, state, voodoo,
 };
 use crate::cpu::Cpu;
 use crate::win32::gdi32;
@@ -91,6 +95,8 @@ pub const KEY_SRC_BLT: usize = 3;
 pub const MEM_NONE: u32 = 0;
 pub const MEM_SYSTEM: u32 = 1;
 pub const MEM_VIDEO: u32 = 2;
+/// A buffer of the 3dfx device's card (`voodoo.rs`): `bits` is which.
+pub const MEM_CARD: u32 = 3;
 
 /// The compressed formats, which only system memory has.
 const DXT: [&[u8; 4]; 5] = [b"DXT1", b"DXT2", b"DXT3", b"DXT4", b"DXT5"];
@@ -431,6 +437,7 @@ pub fn card_memory(cpu: &mut Cpu, id: u32) -> Option<(u32, u32)> {
 pub fn read_bytes(cpu: &mut Cpu, s: &Surface, offset: u32, data: &mut [u8]) {
     match s.memory {
         MEM_VIDEO => screen::read(cpu, s.bits + offset, data),
+        MEM_CARD => voodoo::read(cpu, s, offset, data),
         MEM_SYSTEM => cpu.bus.guest_read_bytes(s.bits + offset, data),
         _ => data.fill(0),
     }
@@ -440,20 +447,47 @@ pub fn read_bytes(cpu: &mut Cpu, s: &Surface, offset: u32, data: &mut [u8]) {
 pub fn write_bytes(cpu: &mut Cpu, s: &Surface, offset: u32, data: &[u8]) {
     match s.memory {
         MEM_VIDEO => screen::write(cpu, s.bits + offset, data),
+        MEM_CARD => voodoo::write(cpu, s, offset, data),
         MEM_SYSTEM => cpu.bus.guest_write_bytes(s.bits + offset, data),
         _ => {}
     }
 }
 
+/// Whether the surface `id` is the 3dfx device's.
+fn on_card(cpu: &mut Cpu, id: u32) -> bool {
+    let owner = state(cpu).object(id).map_or(0, |o| o.owner);
+    super::directdraw::is_card(cpu, owner)
+}
+
 /// Give the surface `id` its pixels: video memory unless it asked for
 /// system memory or video memory is full and it didn't ask for that.
-/// The primary surface is the picture on the screen.
+/// The primary surface is the picture on the screen. On the 3dfx
+/// device, the card's buffer, or system memory.
 fn allocate(cpu: &mut Cpu, id: u32) -> Result<(), u32> {
     let Some(s) = state(cpu).surface(id).cloned() else {
         return Err(DDERR_INVALIDOBJECT);
     };
     let size = s.size();
-    let (memory, bits) = if s.is_primary() {
+    let card = on_card(cpu, id);
+    let (memory, bits) = if card {
+        match voodoo::role(&s) {
+            Some(role) => {
+                if !voodoo::has_buffer(cpu, role, s.width, s.height) {
+                    return Err(if role == crate::win32::glide::api::BUFFER_AUXBUFFER {
+                        DDERR_OUTOFVIDEOMEMORY
+                    } else {
+                        DDERR_WRONGMODE
+                    });
+                }
+                (MEM_CARD, role)
+            }
+            None => {
+                let bits =
+                    crate::win32::kernel32::alloc_pages(cpu, size).ok_or(com::E_OUTOFMEMORY)?;
+                (MEM_SYSTEM, bits)
+            }
+        }
+    } else if s.is_primary() {
         let (w, h, bpp, pitch) = display::current(cpu);
         if (w, h, bpp, pitch) != (s.width, s.height, s.format.bits, s.pitch) {
             return Err(DDERR_WRONGMODE);
@@ -700,13 +734,21 @@ fn make(cpu: &mut Cpu, dd: u32, version: u32, level: u32, desc: &Desc) -> Result
     if managed && caps[0] & (DDSCAPS_SYSTEMMEMORY | DDSCAPS_VIDEOMEMORY) != 0 {
         return Err(DDERR_INVALIDCAPS);
     }
+    let card = super::directdraw::is_card(cpu, dd);
     let flip = caps[0] & DDSCAPS_FLIP != 0;
+    if card && flip && caps[0] & DDSCAPS_PRIMARYSURFACE == 0 {
+        // The card's flip chain is its front and back buffers.
+        return Err(DDERR_INVALIDCAPS);
+    }
     let backbuffers = if flip {
         if caps[0] & DDSCAPS_COMPLEX == 0 {
             return Err(DDERR_INVALIDCAPS);
         }
         if desc.flags & DDSD_BACKBUFFERCOUNT == 0 || !(1..=0xFF).contains(&desc.backbuffers) {
             return Err(DDERR_INVALIDPARAMS);
+        }
+        if card && desc.backbuffers > 1 {
+            return Err(DDERR_OUTOFVIDEOMEMORY);
         }
         desc.backbuffers
     } else {
@@ -726,10 +768,14 @@ fn make(cpu: &mut Cpu, dd: u32, version: u32, level: u32, desc: &Desc) -> Result
         if exists {
             return Err(DDERR_PRIMARYSURFACEALREADYEXISTS);
         }
-        if flip && level & super::directdraw::DDSCL_EXCLUSIVE == 0 {
+        if (flip || card) && level & super::directdraw::DDSCL_EXCLUSIVE == 0 {
             return Err(DDERR_NOEXCLUSIVEMODE);
         }
-        let (w, h, bpp, p) = display::current(cpu);
+        let (w, h, bpp, p) = if card {
+            voodoo::current(cpu)
+        } else {
+            display::current(cpu)
+        };
         (width, height, format, pitch) = (w, h, rgb_format(bpp), p);
         // It is the screen, but says it is in system memory if it was
         // asked to be.
@@ -749,9 +795,15 @@ fn make(cpu: &mut Cpu, dd: u32, version: u32, level: u32, desc: &Desc) -> Result
                 return Err(DDERR_INVALIDPIXELFORMAT);
             }
             z_format(desc.mipmaps)
+        } else if card {
+            rgb_format(16)
         } else {
             rgb_format(display::current(cpu).2)
         };
+        if card && caps[0] & DDSCAPS_ZBUFFER != 0 && f.bits != 16 {
+            // The card's auxiliary buffer: 16-bit depth.
+            return Err(DDERR_INVALIDPIXELFORMAT);
+        }
         if f.flags & DDPF_FOURCC != 0 {
             // Compressed formats are in system memory, and managed.
             if caps[0] & DDSCAPS_SYSTEMMEMORY == 0 && !managed {
@@ -766,6 +818,8 @@ fn make(cpu: &mut Cpu, dd: u32, version: u32, level: u32, desc: &Desc) -> Result
                 16
             };
             width.div_ceil(4).max(1) * height.div_ceil(4).max(1) * block
+        } else if card && caps[0] & DDSCAPS_ZBUFFER != 0 {
+            voodoo::PITCH
         } else {
             pitch_of(width, f.bits)
         };
@@ -883,7 +937,11 @@ fn make(cpu: &mut Cpu, dd: u32, version: u32, level: u32, desc: &Desc) -> Result
         }
         if let Some(s) = surface(cpu, id) {
             let system = s.caps[0] & DDSCAPS_SYSTEMMEMORY != 0;
-            if s.memory == MEM_VIDEO && !system {
+            // The 3dfx device's surfaces in video memory other than the
+            // card's buffers are in system memory, but are what they
+            // asked to be.
+            let card_video = card && wants_video && !system;
+            if (s.memory == MEM_VIDEO || s.memory == MEM_CARD || card_video) && !system {
                 s.caps[0] |= DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM;
             } else if s.memory == MEM_SYSTEM && !managed {
                 s.caps[0] |= DDSCAPS_SYSTEMMEMORY;
@@ -1070,7 +1128,12 @@ pub fn lock(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if s.locked || s.dc != 0 {
         return Some(DDERR_SURFACEBUSY);
     }
-    let Some(mut at) = address(cpu, &s) else {
+    let found = if s.memory == MEM_CARD {
+        Some(hr!(voodoo::lock(cpu, id, s.bits)))
+    } else {
+        address(cpu, &s)
+    };
+    let Some(mut at) = found else {
         return Some(com::E_OUTOFMEMORY);
     };
     if let Some(r) = rect
@@ -1097,6 +1160,10 @@ pub fn unlock(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(DDERR_NOTLOCKED);
     }
     s.locked = false;
+    let (memory, role) = (s.memory, s.bits);
+    if memory == MEM_CARD {
+        voodoo::unlock(cpu, role);
+    }
     changed(cpu, id);
     Some(DD_OK)
 }
@@ -1284,6 +1351,16 @@ pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if busy {
         return Some(DDERR_SURFACEBUSY);
     }
+    if s.memory == MEM_CARD {
+        // The card swaps its buffers; the surfaces keep theirs.
+        if !voodoo::swap(cpu, flags & DDFLIP_NOVSYNC == 0, flags & DDFLIP_WAIT != 0) {
+            return Some(super::DDERR_WASSTILLDRAWING);
+        }
+        for &m in &list {
+            changed(cpu, m);
+        }
+        return Some(DD_OK);
+    }
     // A flip shown at a frame waits for the frame of the last.
     let primary = s.is_primary();
     if primary && flags & DDFLIP_NOVSYNC == 0 {
@@ -1328,6 +1405,10 @@ pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// GDI's, is shown again.
 pub fn flip_to_gdi_surface(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (_, dd) = hr!(super::directdraw::ddraw_of(cpu, args[0]));
+    if super::directdraw::is_card(cpu, dd) {
+        // GDI has nothing on the card.
+        return Some(DD_OK);
+    }
     let fronts = state(cpu).ids(|o| {
         o.owner == dd
             && o.surface
@@ -1606,7 +1687,12 @@ pub fn get_dc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let gdi_format = s.format.flags & (DDPF_RGB | DDPF_PALETTEINDEXED8) != 0
         && s.format.flags & (DDPF_FOURCC | DDPF_ZBUFFER) == 0
         && [8, 16, 24, 32].contains(&s.format.bits);
-    let at = address(cpu, &s);
+    let at = if s.memory == MEM_CARD && gdi_format {
+        // GDI draws through the card's linear frame buffer.
+        Some(hr!(voodoo::lock(cpu, id, s.bits)))
+    } else {
+        address(cpu, &s)
+    };
     let (true, Some(at)) = (gdi_format, at) else {
         cpu.bus.guest_write_32(out, 0);
         return Some(DDERR_CANTCREATEDC);
@@ -1658,6 +1744,9 @@ pub fn get_dc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         if handle != 0 {
             gdi32::delete_object_now(cpu, handle);
         }
+        if s.memory == MEM_CARD {
+            voodoo::unlock(cpu, s.bits);
+        }
         cpu.bus.guest_write_32(out, 0);
         return Some(DDERR_CANTCREATEDC);
     }
@@ -1684,6 +1773,9 @@ fn end_dc(cpu: &mut Cpu, id: u32) {
     }
     gdi32::dc::delete_dc(cpu, &[s.dc]);
     gdi32::delete_object_now(cpu, s.dc_bitmap);
+    if s.memory == MEM_CARD {
+        voodoo::unlock(cpu, s.bits);
+    }
     if let Some(s) = surface(cpu, id) {
         s.dc = 0;
         s.dc_bitmap = 0;
