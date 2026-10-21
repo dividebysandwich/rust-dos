@@ -142,6 +142,67 @@ fn planar_program(c: &mut Criterion) {
     c.bench_function("video/planar_program/12h", |b| b.iter(|| emulated_frame(&mut cpu, &mut frame)));
 }
 
+/// A tiny DOS test that toggles 64 scanlines in mode 12h each retrace. It
+/// changes a narrow row band with little guest work, making row comparisons
+/// visible in the benchmark.
+fn planar_dos_rows(c: &mut Criterion) {
+    let dir = scratch("planar_dos_rows");
+    std::fs::write(dir.join("R.COM"), row_stress_program()).unwrap();
+    let mut cpu = machine(&dir);
+    cpu.bus.set_cycles_per_ms(PROGRAM_CYCLES_PER_MS);
+    cpu.load_shell();
+    cpu.pending_command = Some("R".to_string());
+    let mut frame = Frame::new(1, 1);
+    for _ in 0..70 {
+        emulated_frame(&mut cpu, &mut frame);
+    }
+    assert_eq!(cpu.bus.video_mode, video::VideoMode::Vga640x480, "the test program didn't start");
+    c.bench_function("video/planar_dos_rows/12h", |b| {
+        b.iter(|| emulated_frame(&mut cpu, &mut frame))
+    });
+}
+
+/// A DOS program that flashes an eight-pixel stripe over the same 64 rows.
+fn row_stress_program() -> Vec<u8> {
+    let assemble = || -> Result<Vec<u8>, IcedError> {
+        let mut a = CodeAssembler::new(16)?;
+        a.mov(ax, 0x0012)?;
+        a.int(0x10)?;
+        a.mov(ax, 0xA000)?;
+        a.mov(es, ax)?;
+        a.cld()?;
+        a.mov(dx, 0x3C4)?;
+        a.mov(ax, 0x0F02)?;
+        a.out(dx, ax)?;
+        a.mov(bl, 0xFF)?;
+        let mut frame = a.create_label();
+        let mut active = a.create_label();
+        let mut retrace = a.create_label();
+        let mut row = a.create_label();
+        a.set_label(&mut frame)?;
+        a.mov(dx, 0x3DA)?;
+        a.set_label(&mut active)?;
+        a.in_(al, dx)?;
+        a.test(al, 8)?;
+        a.jnz(active)?;
+        a.set_label(&mut retrace)?;
+        a.in_(al, dx)?;
+        a.test(al, 8)?;
+        a.jz(retrace)?;
+        a.mov(al, bl)?;
+        a.mov(di, 80 * 200 + 38)?;
+        a.mov(cx, 64)?;
+        a.set_label(&mut row)?;
+        a.stosb()?;
+        a.add(di, 79)?;
+        a.loop_(row)?;
+        a.xor(bl, 0xFF)?;
+        a.jmp(frame)?;
+        a.assemble(0x100)
+    };
+    assemble().unwrap()
+}
+
 /// A 70th of a second of emulated time, then the frame rendered.
 fn emulated_frame(cpu: &mut Cpu, frame: &mut Frame) {
     let end = cpu.bus.clock.icount + PROGRAM_CYCLES_PER_MS as u64 * 1000 / 70;
@@ -297,6 +358,7 @@ criterion_group!(
     planar_sprite,
     planar_scroll,
     planar_program,
+    planar_dos_rows,
     cga_composite,
     voodoo::pipelines,
     voodoo::frames,

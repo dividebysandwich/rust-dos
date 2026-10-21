@@ -838,9 +838,16 @@ fn render_planar(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus: &Bus, dra
     let mask = plane_size - 1;
     let mut source = vec![0u8; 4 * span];
 
+    // A known cache only needs the VGA's dirty rows checked. Other planar
+    // layouts mark the full screen when their writes cannot be mapped safely.
+    let rows_to_check = if known {
+        bus.vga.dirty_y_min as usize..(bus.vga.dirty_y_max as usize).min(canvas_h)
+    } else {
+        0..canvas_h
+    };
     let mut last_y = usize::MAX;
     let mut last_drawn = false;
-    for ty in 0..canvas_h {
+    for ty in rows_to_check {
         let y = ty * rows / canvas_h;
         let dst = ty * row_bytes;
         if y == last_y {
@@ -858,8 +865,10 @@ fn render_planar(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus: &Bus, dra
         let at = first & mask;
         let drawn = &mut drawn_from.rows[y * 4 * span..(y + 1) * 4 * span];
         let mut same = known;
-        for ((plane, kept), wrapped) in
-            vram.chunks_exact(plane_size).zip(drawn.chunks_exact_mut(span)).zip(source.chunks_exact_mut(span))
+        for ((plane, kept), wrapped) in vram
+            .chunks_exact(plane_size)
+            .zip(drawn.chunks_exact_mut(span))
+            .zip(source.chunks_exact_mut(span))
         {
             // The row's bytes in this plane, gathered where they wrap
             // around its end.
@@ -1528,6 +1537,29 @@ impl crate::savestate::State for VideoMode {
 #[cfg(test)]
 mod planar_tests {
     use super::*;
+    use crate::bus::Device;
+
+    #[test]
+    fn mode_12_redraws_only_rows_changed_by_planar_writes() {
+        let mut bus = Bus::new(std::path::PathBuf::from("."));
+        bus.video_mode = VideoMode::Vga640x480;
+        bus.vga.set_video_mode(bus.video_mode);
+        let mut frame = Frame::new(640, 480);
+        render_screen_rows(&mut frame, &bus);
+        bus.vga.clear_dirty();
+        let previous = frame.rgba.clone();
+
+        bus.vga.io_write(0x3C4, 0x02);
+        bus.vga.io_write(0x3C5, 0x01);
+        bus.vga.write_graphics(80 * 100, 0xFF);
+        assert_eq!(render_screen_rows(&mut frame, &bus), 100..101);
+        assert_eq!(&frame.rgba[..100 * 640 * 4], &previous[..100 * 640 * 4]);
+        assert_ne!(
+            &frame.rgba[100 * 640 * 4..101 * 640 * 4],
+            &previous[100 * 640 * 4..101 * 640 * 4]
+        );
+        assert_eq!(&frame.rgba[101 * 640 * 4..], &previous[101 * 640 * 4..]);
+    }
 
     /// Modes 4 and 6 drawn as they were, pixel by pixel.
     fn cga_reference(canvas: &mut [u8], vram: &[u8], start: usize, colors: &[(u8, u8, u8)], bits: usize) {
