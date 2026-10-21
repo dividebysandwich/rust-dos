@@ -301,16 +301,32 @@ fn subclass(cpu: &mut Cpu, id: u32, window: u32) {
         if old == window {
             return;
         }
-        if let Some(w) = cpu.bus.win32.user.window_mut(old)
-            && w.proc == ours
-        {
-            w.proc = original;
+        match cpu.bus.win32.user.window_mut(old) {
+            Some(w) if w.proc == ours => w.proc = original,
+            // The program's procedure in front of ours passes messages
+            // on to it, which passes them on to the window's own.
+            Some(_) => {
+                let pid = super::current_pid(cpu);
+                let chained = &mut state(cpu).chained;
+                chained.retain(|c| c.1 != old);
+                chained.push((pid, old, original));
+            }
+            None => {}
         }
         if let Some(d) = ddraw(cpu, id) {
             d.proc = 0;
         }
     }
     if window == 0 {
+        return;
+    }
+    // Ours may still be behind the program's, from an object gone.
+    let chained = &mut state(cpu).chained;
+    if let Some(i) = chained.iter().position(|c| c.1 == window) {
+        let (_, _, original) = chained.remove(i);
+        if let Some(d) = ddraw(cpu, id) {
+            d.proc = original;
+        }
         return;
     }
     // Another DirectDraw object's may be in front of it already.
@@ -346,7 +362,11 @@ pub fn window_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         .flatten()
         .filter_map(|o| o.ddraw.as_ref())
         .find(|d| d.proc != 0 && d.hwnd == hwnd)
-        .map(|d| d.proc);
+        .map(|d| d.proc)
+        .or_else(|| {
+            let chained = &state(cpu).chained;
+            chained.iter().find(|c| c.1 == hwnd).map(|c| c.2)
+        });
     let target = original.unwrap_or_else(|| user32::address_of("DefWindowProcA"));
     let call = [target, hwnd, args[1], args[2], args[3]];
     user32::message::call_window_proc(cpu, &call)
