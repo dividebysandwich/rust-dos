@@ -206,6 +206,10 @@ impl File {
     /// The I/O procedure reads up to `n` bytes to `to` in the program's
     /// memory: the count, or -1.
     fn proc_read(&mut self, cpu: &mut Cpu, to: u32, n: u32) -> i32 {
+        // Before anything is read: `n` comes from the program's buffer.
+        if !cpu.bus.guest_probe(to, n as usize, true) {
+            return -1;
+        }
         let bytes = match &mut self.proc {
             Proc::Mem | Proc::Program => return 0,
             Proc::Dos { file } => match crate::win32::kernel32::read_file(cpu, *file, n) {
@@ -229,6 +233,9 @@ impl File {
         let Proc::Dos { file } = self.proc else {
             return if self.proc == Proc::Mem { 0 } else { -1 };
         };
+        if !cpu.bus.guest_probe(from, n as usize, false) {
+            return -1;
+        }
         let mut bytes = vec![0; n as usize];
         cpu.bus.guest_read_bytes(from, &mut bytes);
         match crate::win32::kernel32::write_file(cpu, file, &bytes) {
@@ -976,7 +983,12 @@ pub fn mmio_advance(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     let result = with_file(cpu, i, |cpu, f| {
         if at != 0 {
-            f.next = cpu.bus.guest_read_32(at + I_NEXT);
+            // In the buffer, as mmioSetInfo has it.
+            let next = cpu.bus.guest_read_32(at + I_NEXT);
+            if !(f.buffer..=f.buffer.wrapping_add(f.cch)).contains(&next) {
+                return MMSYSERR_INVALPARAM;
+            }
+            f.next = next;
             f.flags |= cpu.bus.guest_read_32(at + I_FLAGS) & MMIO_DIRTY;
         }
         if f.fcc == FOURCC_MEM {
@@ -1122,7 +1134,14 @@ pub fn mmio_descend(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             if (want_id == 0 || want_id == ck[0]) && (want_type == 0 || want_type == ck[2]) {
                 break;
             }
-            old = ck[3].wrapping_add(ck[1].wrapping_add(1) & !1);
+            // The next chunk is further on, or there is none: a size
+            // that wraps around would go back and look for ever.
+            let next = ck[3] as u64 + ((ck[1] as u64 + 1) & !1);
+            if next <= old as u64 || next > u32::MAX as u64 {
+                f.seek(cpu, old as i32, 0);
+                return MMIOERR_CHUNKNOTFOUND;
+            }
+            old = next as u32;
             f.seek(cpu, old as i32, 0);
         }
         ck[4] = 0;
