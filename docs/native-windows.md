@@ -425,14 +425,13 @@ drawn has 16-bit precision, and a Clear writes its exact color. On a
 Voodoo Graphics or Voodoo2 such targets fail, as they did with 3dfx's
 driver.
 
-
 Unreal Gold runs from GOG's folder on a Voodoo2 and a Voodoo3: its
 levels with Glide, its intro and menus with Direct3D. Quake 2's 3.14
 demo runs its demos through 3dfx's MiniGL on both, with the MiniGL it
 came with on the Voodoo2 and MiniGL 1.49 on the Voodoo3, as on the real
-cards. Incoming and Expendable run with Direct3D. SHELL32, COMCTL32, COMDLG32, WSOCK32 and
-DPLAYX came in for them, answering as a machine without a network
-does, with each common dialog cancelled.
+cards. Incoming and Expendable run with Direct3D. SHELL32, COMCTL32,
+COMDLG32, WSOCK32 and DPLAYX came in for them, answering as a machine
+without a network does, with each common dialog cancelled.
 
 **Phase 5: breadth.**
 
