@@ -171,6 +171,39 @@ pub fn video_memory(cpu: &mut Cpu) -> (u32, u32) {
     (b.fb_bytes, b.fb_bytes.saturating_sub(used))
 }
 
+/// The card's texture memory, its units' together, and how much of it
+/// the 3dfx device's textures in video memory leave, those in
+/// `leaving_out` not counted. They are kept in system memory, and the
+/// Direct3D HAL puts them on the card as it draws with them, but they
+/// take room here as on the card, so that a program that makes textures
+/// until there is no more room (Unreal) stops where it did on the card.
+pub fn texture_memory(cpu: &mut Cpu, leaving_out: &[u32]) -> (u32, u32) {
+    let Some(b) = board(cpu) else {
+        return (0, 0);
+    };
+    let total = b.tmus * b.tmu_bytes;
+    let st = state(cpu);
+    let used: u32 = st
+        .objects
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !leaving_out.contains(&(*i as u32 + 1)))
+        .filter_map(|(_, o)| o.as_ref())
+        .filter(|o| {
+            st.object(o.owner)
+                .and_then(|d| d.ddraw.as_ref())
+                .is_some_and(|d| d.card)
+        })
+        .filter_map(|o| o.surface.as_ref())
+        .filter(|s| {
+            s.caps[0] & surface::DDSCAPS_TEXTURE != 0
+                && s.caps[0] & surface::DDSCAPS_VIDEOMEMORY != 0
+        })
+        .map(|s| s.size())
+        .sum();
+    (total, total.saturating_sub(used))
+}
+
 /// The mode the device shows: width, height, bits a pixel and bytes a
 /// row. 640 x 480 while it has none.
 pub fn current(cpu: &mut Cpu) -> (u32, u32, u32, u32) {
