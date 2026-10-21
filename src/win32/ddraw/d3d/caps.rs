@@ -91,8 +91,20 @@ fn prim_caps() -> [u32; 13] {
 /// modulate 2x, add, and blending by diffuse, texture and current alpha.
 const TEXTURE_OPS: u32 = 0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x40 | 0x400 | 0x800 | 0x4000;
 
-/// DDBD_16: the render target's and depth buffer's depth.
-const DDBD_16: u32 = 0x400;
+/// DDBD_16, and DDBD_24 and DDBD_32 on a Banshee or Voodoo3: the
+/// render target's and depth buffer's depths. The card draws 16 bits;
+/// 24- and 32-bit surfaces have 16-bit shadows (`shadow.rs`). An add-on
+/// card's buffers are 16-bit.
+fn depths(cpu: &mut Cpu) -> u32 {
+    const DDBD_16: u32 = 0x400;
+    const DDBD_24: u32 = 0x200;
+    const DDBD_32: u32 = 0x100;
+    if crate::win32::glide::hw::banshee(cpu) {
+        DDBD_16 | DDBD_24 | DDBD_32
+    } else {
+        DDBD_16
+    }
+}
 
 /// The guard band: left, top, right, bottom.
 pub const GUARD_BAND: [f32; 4] = [-2048.0, -2048.0, 2048.0, 2048.0];
@@ -124,8 +136,8 @@ pub fn write_desc(cpu: &mut Cpu, at: u32, size: u32, hal: bool, tmus: u32) {
             words[base] = 56;
             words[base + 1..base + 14].copy_from_slice(&prim_caps());
         }
-        words[0x9C / 4] = DDBD_16;
-        words[0xA0 / 4] = DDBD_16;
+        words[0x9C / 4] = depths(cpu);
+        words[0xA0 / 4] = depths(cpu);
         words[0xA8 / 4] = 0xFFFF;
         // Direct3D 5's: the textures' sizes.
         words[0xAC / 4] = 1;
@@ -171,8 +183,8 @@ pub fn write_desc7(cpu: &mut Cpu, at: u32, tmus: u32) {
         words[base] = 56;
         words[base + 1..base + 14].copy_from_slice(&prim_caps());
     }
-    words[0x74 / 4] = DDBD_16;
-    words[0x78 / 4] = DDBD_16;
+    words[0x74 / 4] = depths(cpu);
+    words[0x78 / 4] = depths(cpu);
     words[0x7C / 4] = 1;
     words[0x80 / 4] = 1;
     words[0x84 / 4] = 256;
@@ -220,12 +232,21 @@ pub fn texture_formats() -> Vec<Format> {
     ]
 }
 
-/// The depth buffer formats: 16 bits.
-pub fn z_formats() -> Vec<Format> {
-    vec![Format {
-        flags: DDPF_ZBUFFER,
-        bits: 16,
-        g: 0xFFFF,
-        ..Format::default()
-    }]
+/// The depth buffer formats: 16 bits, and on a Banshee or Voodoo3 24
+/// and 32 with 24 of depth.
+pub fn z_formats(cpu: &mut Cpu) -> Vec<Format> {
+    let n = if crate::win32::glide::hw::banshee(cpu) {
+        3
+    } else {
+        1
+    };
+    [(16, 0xFFFF), (24, 0xFF_FFFF), (32, 0xFF_FFFF)][..n]
+        .iter()
+        .map(|&(bits, mask)| Format {
+            flags: DDPF_ZBUFFER,
+            bits,
+            g: mask,
+            ..Format::default()
+        })
+        .collect()
 }

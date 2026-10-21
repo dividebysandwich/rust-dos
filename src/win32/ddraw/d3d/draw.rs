@@ -121,7 +121,10 @@ pub fn material(w: &[u32]) -> Material {
 
 /// The view's mapping of a device of `version`: Direct3D 7's viewport,
 /// or the current viewport's for the others (the render target, if it
-/// has none).
+/// has none). Direct3D 7's viewport is drawn with no more than the
+/// part of it on the render target, as Wine has it (its
+/// WINED3D_LIMIT_VIEWPORT): a 640x480 viewport on a 128x128 target maps
+/// the view onto the 128x128.
 fn view_map(cpu: &mut Cpu, d: &Device, version: u32, viewport: u32) -> ViewMap {
     if version < 7
         && let Some(m) = super::viewport::view_map(cpu, viewport)
@@ -129,7 +132,15 @@ fn view_map(cpu: &mut Cpu, d: &Device, version: u32, viewport: u32) -> ViewMap {
         return m;
     }
     let v = &d.viewport;
-    ViewMap::dx7(v.x, v.y, v.width, v.height, v.min_z, v.max_z)
+    let (tw, th) = super::super::state(cpu)
+        .surface(d.target)
+        .map_or((u32::MAX, u32::MAX), |s| (s.width, s.height));
+    let limit = |size: u32, at: u32, most: u32| match most.saturating_sub(at) {
+        0 => size,
+        room => size.min(room),
+    };
+    let (w, h) = (limit(v.width, v.x, tw), limit(v.height, v.y, th));
+    ViewMap::dx7(v.x, v.y, w, h, v.min_z, v.max_z)
 }
 
 /// The pipeline's setup for vertices of `layout` drawn by the device
