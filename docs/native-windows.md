@@ -475,8 +475,8 @@ traces call, not whole DLLs.
     kernel32's files, advapi32's `registry`, ten of msvcrt's, eleven of
     user32's (`msg` and `win` among them), eight of gdi32's, and from
     phase 3 four of ddraw's, six of dsound's, four of dinput's and seven
-    of winmm's (the folder's README lists them). ddraw's `d3d` and
-    `visual` wait for Direct3D in phase 4.
+    of winmm's (the folder's README lists them). Phase 4 adds ddraw's
+    `d3d` and `visual`, which test Direct3D.
   - `tests/conformance_tests.rs` builds them with MinGW and runs each
     under the built-in Windows: all but msvcrt's as 486 code linked with
     a small C runtime of rust-dos's own on KERNEL32, so they test the
