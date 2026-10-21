@@ -1,14 +1,14 @@
 //! GDI32.DLL: device contexts and what they draw with (pens, brushes,
 //! fonts, bitmaps, palettes, regions), and the drawing itself, on the
-//! screen (the VESA mode USER sets for the desktop), on bitmaps in GDI's
+//! screen (the mode USER sets for the desktop), on bitmaps in GDI's
 //! memory and on DIB sections in the program's.
 //!
 //! GDI's objects are the system's, as on Windows 95, in `State`, in
 //! `Win32::gdi`; their handles are small numbers, as GDI's 16-bit heap
 //! made them. Compatible bitmaps have the desktop's depth: 32 bits a
-//! pixel, or 16 (5-6-5) on a Banshee or Voodoo3. Like Windows 95's GDI it has no world transforms
-//! (GM_ADVANCED), and of the Unicode (W) functions only those Windows 95
-//! has.
+//! pixel, or 16 (5-6-5) on a Banshee or Voodoo3. Like Windows 95's GDI
+//! it has no world transforms (GM_ADVANCED), and of the Unicode (W)
+//! functions only those Windows 95 has.
 
 pub mod bitmap;
 pub mod dc;
