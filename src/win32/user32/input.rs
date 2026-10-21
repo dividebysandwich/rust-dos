@@ -417,7 +417,14 @@ fn poll_keyboard(cpu: &mut Cpu, desktop: bool) {
         if scan == 0 || scan > 0x58 {
             continue;
         }
-        let id = scan as usize | ((key & 0xFF == 0xE0) as usize) << 8;
+        let mut id = scan as usize | ((key & 0xFF == 0xE0) as usize) << 8;
+        // A grey key's keystroke can have 0 for its character where E0h
+        // would say which key it was: the extended key of the scan code,
+        // when that one went down or is held and the other isn't.
+        let known = |id: usize| fresh.contains(&id) || held[id / 64] >> (id % 64) & 1 != 0;
+        if key & 0xFF == 0 && !known(id) && known(id | 0x100) {
+            id |= 0x100;
+        }
         if let Some(i) = fresh.iter().position(|&f| f == id) {
             fresh.remove(i);
         } else if held[id / 64] >> (id % 64) & 1 != 0 {
@@ -2092,5 +2099,27 @@ mod tests {
         user(&mut other).input.cursor_count = -1;
         poll(&mut other);
         assert!(!other.bus.mouse.in_use(now), "no capture");
+    }
+
+    /// A grey arrow held down is one WM_KEYDOWN, extended, and stays
+    /// down: its keystroke doesn't make another key go down and up.
+    #[test]
+    fn a_held_grey_arrow_stays_down() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let hwnd = user(&mut cpu).new_window(window::Window::default());
+        let hwnd = hwnd.expect("a window");
+        user(&mut cpu).desktop = true;
+        user(&mut cpu).input.focus = hwnd;
+        crate::keyboard::key_event(&mut cpu.bus, 0x48, true, true, None);
+        poll(&mut cpu);
+        assert!(user(&mut cpu).input.async_down(0x26), "Up is down");
+        let tid = user(&mut cpu).window(hwnd).map(|w| w.tid).unwrap_or(0);
+        let keys: Vec<(u32, u32)> = user(&mut cpu)
+            .queue_mut(tid)
+            .input
+            .iter()
+            .map(|m| (m.message, m.lparam))
+            .collect();
+        assert_eq!(keys, [(WM_KEYDOWN, 0x0148_0001)]);
     }
 }
