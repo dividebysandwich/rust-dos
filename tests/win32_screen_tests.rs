@@ -326,6 +326,8 @@ const DDSCAPS_OFFSCREENPLAIN: u32 = 0x40;
 const DDSCAPS_PRIMARYSURFACE: u32 = 0x200;
 const DDSCAPS_3DDEVICE: u32 = 0x2000;
 const DDSCAPS_VIDEOMEMORY: u32 = 0x4000;
+const DDSCAPS_TEXTURE: u32 = 0x1000;
+const DDSCAPS_LOCALVIDMEM: u32 = 0x1000_0000;
 const DDSCAPS_ZBUFFER: u32 = 0x2_0000;
 const DDSCL_FULLSCREEN: u32 = 0x1;
 const DDSCL_NORMAL: u32 = 0x8;
@@ -856,6 +858,7 @@ const DDERR_VERTICALBLANKINPROGRESS: u32 = 0x8876_0219;
 const S_BLT: u32 = 5;
 const S_BLT_FAST: u32 = 7;
 const S_IS_LOST: u32 = 24;
+const S_GET_SURFACE_DESC: u32 = 22;
 const DDSCAPS_SYSTEMMEMORY: u32 = 0x800;
 const DDBLT_COLORFILL: u32 = 0x400;
 const DDBLT_WAIT: u32 = 0x100_0000;
@@ -1282,6 +1285,17 @@ fn card_program() -> (Vec<u8>, u32) {
         // The card's own video timing.
         c.com(a, l, DD, DD_GET_MONITOR_FREQUENCY, &[Arg::At(SEEN + 44)])?;
         c.com(a, l, DD, DD_GET_SCAN_LINE, &[Arg::At(SEEN + 48)])?;
+        // A texture, which asks for no memory, and its caps.
+        a.mov(dword_ptr(l.at(SYSDESC + 0x68)), DDSCAPS_TEXTURE)?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(SYSDESC), Arg::At(DD2), Arg::I(0)],
+        )?;
+        c.com(a, l, DD2, S_GET_SURFACE_DESC, &[Arg::At(LOCK2)])?;
+        see(a, l, LOCK2 + 0x68, 13)?;
         wait(a, l, 1)?;
         c.com(a, l, DD, DD_RESTORE_DISPLAY_MODE, &[])?;
         c.com(a, l, FRONT, S_IS_LOST, &[])?;
@@ -1293,7 +1307,7 @@ fn draws_on_the_card(test: &str, board: Board) {
     let (program, data) = card_program();
     let mut cpu = card_machine(test, Some(board), program);
     run_until(&mut cpu, data, 1);
-    let r = results(&cpu, data, 25);
+    let r = results(&cpu, data, 27);
     assert_eq!(r[1..24], [0; 23], "{r:X?}");
     assert!([0, DDERR_VERTICALBLANKINPROGRESS].contains(&r[24]));
     assert_eq!(fbi_init0(&cpu) & 1, 1, "the card has the monitor");
@@ -1311,10 +1325,14 @@ fn draws_on_the_card(test: &str, board: Board) {
     // The card's frame: 60 Hz, 480 lines and the blanking after them.
     assert_eq!(s(11), 60, "the card's refresh rate");
     assert!(s(12) < 480 + 24, "the card's line: {}", s(12));
+    // Textures are in the card's memory.
+    assert_eq!(r[25..27], [0, 0]);
+    let texture = DDSCAPS_TEXTURE | DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM;
+    assert_eq!(s(13), texture, "the texture's caps");
     go_on(&mut cpu, data);
     run_until(&mut cpu, data, 2);
-    let r = results(&cpu, data, 27);
-    assert_eq!(r[25..], [0, DDERR_SURFACELOST]);
+    let r = results(&cpu, data, 29);
+    assert_eq!(r[27..], [0, DDERR_SURFACELOST]);
     assert_eq!(fbi_init0(&cpu) & 1, 0, "the VGA has the monitor back");
 }
 

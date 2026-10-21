@@ -953,8 +953,10 @@ fn make(cpu: &mut Cpu, dd: u32, version: u32, level: u32, desc: &Desc) -> Result
             let system = s.caps[0] & DDSCAPS_SYSTEMMEMORY != 0;
             // The 3dfx device's surfaces in video memory other than the
             // card's buffers are in system memory, but are what they
-            // asked to be.
-            let card_video = card && wants_video && !system;
+            // asked to be; its textures are in the card's texture memory
+            // unless they asked for system memory.
+            let texture = caps[0] & DDSCAPS_TEXTURE != 0;
+            let card_video = card && (wants_video || texture) && !system;
             if (s.memory == MEM_VIDEO || s.memory == MEM_CARD || card_video) && !system {
                 s.caps[0] |= DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM;
             } else if s.memory == MEM_SYSTEM && !managed {
