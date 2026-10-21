@@ -28,10 +28,6 @@ const KIND: usize = 0;
 const CALLBACK: usize = 1;
 const CONTEXT: usize = 2;
 const DESC_SIZE: usize = 3;
-/// DirectDrawEnumerateEx's flags, in the place of the size.
-const FLAGS: usize = 3;
-/// Its flag that lists 3D cards with no display of their own.
-const DDENUM_NONDISPLAYDEVICES: u32 = 4;
 const NEXT: usize = 4;
 const ITEMS: usize = 5;
 
@@ -97,7 +93,7 @@ pub fn direct_draw_enumerate_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     task::start(
         cpu,
         task::DDRAW_ENUM,
-        vec![DEVICES_EX, args[0], args[1], args[2]],
+        vec![DEVICES_EX, args[0], args[1]],
         SCRATCH,
     )
 }
@@ -240,16 +236,16 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
 
 /// The devices to the callback: the display, whose GUID is NULL, then
 /// the 3dfx device if there is one and the callback didn't stop.
-/// DirectDrawEnumerateEx lists it only when asked for devices with no
-/// display.
+/// DirectDrawEnumerateEx lists it whatever its flags say, though the
+/// documentation has DDENUM_NONDISPLAYDEVICES for such cards: Unreal
+/// Gold's D3DDrv passes 0 and, with Use3dfx set, draws on the device
+/// that isn't the "Primary" one, which it identifies as a Voodoo2.
 fn devices(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     let tib = crate::win32::process(cpu).tib;
     let frame = t.scratch + FRAME;
     let ex = t.var(KIND) == DEVICES_EX;
-    let card = !ex || t.var(FLAGS) & DDENUM_NONDISPLAYDEVICES != 0;
     if t.step == 1
         && value != 0
-        && card
         && let Some(device) = voodoo::device(cpu)
     {
         let guid = t.scratch + CARD_GUID;
