@@ -1394,6 +1394,20 @@ pub fn console_write(cpu: &mut Cpu, text: &[u8]) {
     }
 }
 
+/// The column console output goes on at and the width of a line, as
+/// `console_write` and `print_cp437` place it: the BIOS's cursor of the
+/// active page in a Windows virtual machine, `print_char`'s 80 columns
+/// from `cursor_x` elsewhere.
+pub fn console_column(cpu: &mut Cpu) -> (u16, u16) {
+    if through_video_bios(cpu) {
+        let page = cpu.bus.guest_read_8(0x0462) as u32;
+        let col = cpu.bus.guest_read_8(0x0450 + 2 * page) as u16;
+        (col, cpu.bus.guest_read_16(0x044A).max(1))
+    } else {
+        (cpu.bus.cursor_x as u16, 80)
+    }
+}
+
 fn print_cells(cpu: &mut Cpu, text: impl Iterator<Item = u8>, attr: u8) {
     // A built-in command's output redirected to a file.
     if let Some(captured) = cpu.stdout_capture.as_mut() {

@@ -19,7 +19,7 @@ impl DiskController {
     /// reference of whoever opened it.
     pub(super) fn opened(&mut self, data: OpenData, drive: u8, owner: u16, key: u64, filename: &str, mode: u8) -> OpenFile {
         let path = self.qualify_path(filename).unwrap_or_else(|| filename.to_ascii_uppercase());
-        OpenFile { data, drive, owner, key, path, mode, refs: 1, fcb: false, empty_on_use: false }
+        OpenFile { data, drive, owner, key, path, mode, refs: 1, fcb: false, empty_on_use: false, raw: false }
     }
 
     /// The lowest unused entry of the file table.

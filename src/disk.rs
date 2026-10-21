@@ -451,6 +451,8 @@ pub struct SftEntry {
     pub size: u32,
     pub time: u16,
     pub date: u16,
+    /// A device in raw mode (bit 5 of IOCTL 4400h's information word).
+    pub raw: bool,
 }
 
 struct OpenFile {
@@ -473,6 +475,9 @@ struct OpenFile {
     /// Made by a create call over a file that had bytes: they go
     /// when the program first uses the handle (`DiskController::settle`).
     empty_on_use: bool,
+    /// A device a program put in raw (binary) mode with IOCTL 4401h:
+    /// its output goes out as it is, a tab without being expanded.
+    raw: bool,
 }
 
 /// Empty a file a create call opened, which nothing has used yet.
@@ -725,6 +730,7 @@ impl DiskController {
                 refs: 0,
                 fcb: false,
                 empty_on_use: false,
+                raw: false,
             };
             self.open_files.insert(sft, file);
         }

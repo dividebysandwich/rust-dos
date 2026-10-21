@@ -430,7 +430,24 @@ impl DiskController {
             size: size.min(u32::MAX as u64) as u32,
             time,
             date,
+            raw: open.raw,
         })
+    }
+
+    /// Whether the device open at `sft` is in raw (binary) mode.
+    pub fn device_raw(&self, sft: u16) -> bool {
+        self.open_files.get(&sft).is_some_and(|f| f.raw)
+    }
+
+    /// Put the device open at `sft` in raw (binary) or cooked mode, as
+    /// IOCTL 4401h does. A file has no such mode.
+    pub fn set_device_raw(&mut self, sft: u16, raw: bool) {
+        if let Some(open) = self.open_files.get_mut(&sft)
+            && matches!(open.data, OpenData::Device(_))
+        {
+            open.raw = raw;
+            self.mark_dirty(sft);
+        }
     }
 
     /// The fully qualified DOS path the open file `sft` was opened by.

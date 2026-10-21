@@ -360,7 +360,8 @@ fn write_entry(bus: &mut Bus, sft: u16) {
                 CharDevice::Nul => 0x8084,
                 CharDevice::Com1 | CharDevice::Com2 | CharDevice::Com3 | CharDevice::Com4 => 0x80C0,
             };
-            (info, crate::dos_data::char_device(device, sft))
+            let raw = if entry.raw { 0x20 } else { 0 };
+            (info | raw, crate::dos_data::char_device(device, sft))
         }
         None => (0x0040 | entry.drive as u16 & 0x3F, crate::dos_data::far(crate::dos_data::dpb(entry.drive))),
     };
