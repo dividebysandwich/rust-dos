@@ -524,7 +524,8 @@ pub struct Context {
     pub triangles: [u32; 2],
     pub fog_table: Vec<u8>,
     /// Direct3D's buffers on a Banshee: colBufferAddr and its stride,
-    /// auxBufferAddr and its stride, or 0 for Glide's own.
+    /// auxBufferAddr and its stride; a color stride of 0 for Glide's
+    /// own (a buffer can start at 0).
     pub target: [u32; 4],
 }
 
@@ -1302,7 +1303,7 @@ pub fn render_buffer(cpu: &mut Cpu, buffer: u32) {
     gc(cpu).render = buffer;
     let fbz = gc(cpu).fbz_mode & !DRAWBUFFER;
     set_fbz_mode(cpu, fbz | buffer << 14);
-    if hw::banshee(cpu) && state(cpu).screen.open && gc(cpu).target[0] == 0 {
+    if hw::banshee(cpu) && state(cpu).screen.open && gc(cpu).target[1] == 0 {
         let addr = buffer_addr(cpu, buffer);
         hw::write(cpu, ALL, render3d::COL_BUFFER_ADDR, addr);
     }
@@ -2287,7 +2288,7 @@ pub fn lfb_read_region(
     let g = gc(cpu).clone();
     let mode = (g.lfb_mode & !(LFB_READ_BUFFER | LFB_YORIGIN)) | buffer << 6;
     hw::write(cpu, ALL, LFB_MODE, mode);
-    let banshee = hw::banshee(cpu) && state(cpu).screen.open && g.target[0] == 0;
+    let banshee = hw::banshee(cpu) && state(cpu).screen.open && g.target[1] == 0;
     if banshee && buffer != BUFFER_AUXBUFFER {
         let addr = buffer_addr(cpu, buffer);
         hw::write(cpu, ALL, render3d::COL_BUFFER_ADDR, addr);
@@ -2337,7 +2338,7 @@ pub fn lfb_write_region(
     hw::write(cpu, ALL, LFB_MODE, mode);
     let za = g.lfb_constant_depth | g.lfb_constant_alpha << 24;
     hw::write(cpu, ALL, ZA_COLOR, za);
-    let banshee = hw::banshee(cpu) && state(cpu).screen.open && g.target[0] == 0;
+    let banshee = hw::banshee(cpu) && state(cpu).screen.open && g.target[1] == 0;
     if banshee && buffer != BUFFER_AUXBUFFER {
         let addr = buffer_addr(cpu, buffer);
         hw::write(cpu, ALL, render3d::COL_BUFFER_ADDR, addr);
@@ -2375,7 +2376,8 @@ pub fn lfb_write_region(
 /// Draw into the 16-bit buffer at `addr` of a Banshee's memory, rows
 /// `stride` apart: colBufferStride's value, bytes a row (bit 15 clear)
 /// or tiles a row of tiles (bit 15 set). Clip windows as big as
-/// `width` x `height`. `addr` 0 gives drawing back to Glide's buffers.
+/// `width` x `height`. `stride` 0 gives drawing back to Glide's
+/// buffers.
 pub fn set_render_target(cpu: &mut Cpu, addr: u32, stride: u32, width: u32, height: u32) {
     if !hw::banshee(cpu) {
         return;
@@ -2383,7 +2385,7 @@ pub fn set_render_target(cpu: &mut Cpu, addr: u32, stride: u32, width: u32, heig
     let g = gc(cpu);
     g.target[0] = addr;
     g.target[1] = stride;
-    if addr == 0 {
+    if stride == 0 {
         let render = g.render;
         render_buffer(cpu, render);
         let s = &state(cpu).screen;

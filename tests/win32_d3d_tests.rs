@@ -87,15 +87,15 @@ fn machine(test: &str, program: Vec<u8>) -> Cpu {
     machine_with(test, None, program)
 }
 
-/// A machine with a Voodoo3 as its display adapter or, given `card`,
-/// its usual adapter and that add-on card.
+/// A machine with a Voodoo3 as its display adapter or, given a `card`
+/// other than the Voodoo3, its usual adapter and that add-on card.
 fn machine_with(test: &str, card: Option<Board>, program: Vec<u8>) -> Cpu {
     let base = PathBuf::from("target/test_win32_d3d").join(test);
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).unwrap();
     fs::write(base.join("T.EXE"), program).unwrap();
     let mut cpu = Cpu::new(base);
-    if card.is_none() {
+    if card.is_none_or(|c| c == Board::Voodoo3) {
         let setup = VideoSetup {
             adapter: Adapter::Voodoo3,
             mono_monitor: false,
@@ -832,6 +832,7 @@ const TEXELS: u32 = 0x880;
 const RECT: u32 = 0x900;
 const FILL_DESC: u32 = 0x910;
 const FILLED: u32 = 0x990;
+const FRONT: u32 = 0x994;
 const SCENE: u32 = 0xA00;
 
 const DDSD_PIXELFORMAT: u32 = 0x1000;
@@ -846,6 +847,8 @@ const DDSD_BACKBUFFERCOUNT: u32 = 0x20;
 const DDPF_RGB: u32 = 0x40;
 const DDPF_ZBUFFER: u32 = 0x400;
 const DDLOCK_WAIT: u32 = 1;
+const DDFLIP_WAIT: u32 = 1;
+const DDFLIP_NOVSYNC: u32 = 8;
 const D3DCLEAR_TARGET: u32 = 1;
 const D3DCLEAR_ZBUFFER: u32 = 2;
 /// D3DFVF_XYZRHW, DIFFUSE, SPECULAR and TEX1: a D3DTLVERTEX.
@@ -853,6 +856,7 @@ const TL_FVF: u32 = 0x1C4;
 
 const SURF_ADD_ATTACHED_SURFACE: u32 = 3;
 const SURF_GET_ATTACHED_SURFACE: u32 = 12;
+const SURF_FLIP: u32 = 11;
 const SURF_LOCK: u32 = 25;
 const SURF_UNLOCK: u32 = 32;
 const D3D3_CREATE_VIEWPORT: u32 = 6;
@@ -932,6 +936,8 @@ enum Step {
     /// 256x256 textures made in video memory until there is no more
     /// room (Direct3D 7), as Unreal does.
     Fill,
+    /// Flip of the flip chain, without waiting for the frame.
+    Flip,
 }
 
 /// Which Direct3D draws a scene.
@@ -1053,7 +1059,8 @@ fn scene_program(scene: &Scene) -> (Vec<u8>, u32) {
     let ex = scene.api == Api::D3D7;
     program(&[USER32, DDRAW], &d, |a, l| {
         let mut c = Calls { next: 0 };
-        start(a, l, &mut c, ex, scene.card.is_some())?;
+        let add_on = scene.card.is_some_and(|b| b != Board::Voodoo3);
+        start(a, l, &mut c, ex, add_on)?;
         let iid = if ex { IID_D3D7 } else { IID_D3D3 };
         c.com(a, l, DD, QUERY_INTERFACE, &[Arg::At(iid), Arg::At(D3D)])?;
         c.com(
@@ -1065,6 +1072,8 @@ fn scene_program(scene: &Scene) -> (Vec<u8>, u32) {
         )?;
         if scene.card.is_some() {
             // The flip chain's back buffer is the target.
+            a.mov(eax, dword_ptr(l.at(TARGET)))?;
+            a.mov(dword_ptr(l.at(FRONT)), eax)?;
             c.com(
                 a,
                 l,
@@ -1197,6 +1206,10 @@ fn scene_program(scene: &Scene) -> (Vec<u8>, u32) {
             match step {
                 Step::State(s, v) => {
                     c.com(a, l, DEVICE, set_state, &[Arg::I(*s), Arg::I(*v)])?;
+                }
+                Step::Flip => {
+                    let flags = DDFLIP_WAIT | DDFLIP_NOVSYNC;
+                    c.com(a, l, FRONT, SURF_FLIP, &[Arg::I(0), Arg::I(flags)])?;
                 }
                 Step::Fill => {
                     let mut again = a.create_label();
@@ -1404,7 +1417,7 @@ fn a_texture_draws_after_its_program_fills_video_memory() {
         api: Api::D3D7,
         card: None,
         clear: 0,
-        zbuffer: false,
+        zbuffer: None,
         texture: Some([0xF800; 64]),
         steps: vec![
             Step::Fill,
@@ -1464,6 +1477,27 @@ fn a_quad_nearer_than_the_cleared_depth_passes_the_depth_test() {
         assert_rgb(&p, 16, 30, [0, 255, 0], 0);
         assert_rgb(&p, 48, 30, [255, 0, 0], 0);
     }
+}
+
+#[test]
+fn the_voodoo3_draws_into_a_back_buffer_at_the_start_of_its_memory() {
+    // The front buffer starts at 0; after a Flip the back buffer is
+    // there, and the card draws into it.
+    let scene = Scene {
+        api: Api::D3D7,
+        card: Some(Board::Voodoo3),
+        clear: RED,
+        zbuffer: None,
+        texture: None,
+        steps: vec![
+            Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.5, GREEN)),
+            Step::Flip,
+            Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.5, BLUE)),
+        ],
+    };
+    let p = draw_scene("flip_at_0", &scene);
+    assert_rgb(&p, 10, 30, [0, 0, 255], 0);
+    assert_rgb(&p, 50, 30, [0, 0, 255], 0);
 }
 
 #[test]
