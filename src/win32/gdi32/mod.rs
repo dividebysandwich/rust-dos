@@ -5,8 +5,8 @@
 //!
 //! GDI's objects are the system's, as on Windows 95, in `State`, in
 //! `Win32::gdi`; their handles are small numbers, as GDI's 16-bit heap
-//! made them. The screen is 32 bits a pixel, so compatible bitmaps are
-//! too. Like Windows 95's GDI it has no world transforms
+//! made them. Compatible bitmaps have the desktop's depth: 32 bits a
+//! pixel, or 16 (5-6-5) on a Banshee or Voodoo3. Like Windows 95's GDI it has no world transforms
 //! (GM_ADVANCED), and of the Unicode (W) functions only those Windows 95
 //! has.
 

@@ -1,4 +1,4 @@
-//! Logical palettes. The screen is 32 bits a pixel, so a palette only
+//! Logical palettes. The screen is 16 or 32 bits a pixel, so a palette only
 //! says what PALETTEINDEX colors and DIB_PAL_COLORS tables are: realizing
 //! one changes nothing on the screen.
 

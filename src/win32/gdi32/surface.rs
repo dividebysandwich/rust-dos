@@ -86,6 +86,16 @@ pub fn default_masks(bpp: u32) -> [u32; 3] {
     if bpp == 16 { MASKS_16 } else { MASKS_32 }
 }
 
+/// The masks of a bitmap of GDI's of a depth: the display's format for
+/// its own depth (5-6-5 on a 16-bit desktop), else the depth's default.
+pub fn ddb_masks(cpu: &Cpu, bpp: u32) -> [u32; 3] {
+    if bpp == 16 && crate::win32::screen::desktop(cpu).bpp == 16 {
+        [0xF800, 0x07E0, 0x001F]
+    } else {
+        default_masks(bpp)
+    }
+}
+
 impl Surface {
     /// A surface of pixels in memory, its rows the top first.
     pub fn memory(width: i32, height: i32, bpp: u32, colors: Vec<u32>, masks: [u32; 3]) -> Surface {
@@ -151,7 +161,7 @@ impl Surface {
                         (d.colors.clone(), masks, false)
                     }
                     None if bpp == 1 => (vec![0x000000, 0xFFFFFF], MASKS_32, true),
-                    None => (Vec::new(), default_masks(bpp), false),
+                    None => (Vec::new(), ddb_masks(cpu, bpp), false),
                 };
                 match dib {
                     Some((bits, top_down)) => {
