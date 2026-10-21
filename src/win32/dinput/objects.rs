@@ -28,6 +28,10 @@ pub const DIDFT_PSHBUTTON: u32 = 0x04;
 pub const DIDFT_BUTTON: u32 = 0x0C;
 pub const DIDFT_POV: u32 = 0x10;
 const DIDFT_ANYINSTANCE: u32 = 0x00FF_FF00;
+/// DirectX 3's DIDFT_ANYINSTANCE, from when instances had 8 bits: the
+/// data formats of its dinput.lib (c_dfDIMouse) have it, and later
+/// DirectInputs take it for any instance too.
+const DIDFT_ANYINSTANCE_3: u32 = 0x0000_FF00;
 const DIDFT_FFACTUATOR: u32 = 0x0100_0000;
 const DIDFT_FFEFFECTTRIGGER: u32 = 0x0200_0000;
 const DIDFT_OPTIONAL: u32 = 0x8000_0000;
@@ -335,7 +339,9 @@ fn names(guid: Option<Guid>, ty: u32, obj: &Obj) -> bool {
         return false;
     }
     let instance = ty & DIDFT_ANYINSTANCE;
-    instance == DIDFT_ANYINSTANCE || instance >> 8 == obj.instance()
+    instance == DIDFT_ANYINSTANCE
+        || instance == DIDFT_ANYINSTANCE_3
+        || instance >> 8 == obj.instance()
 }
 
 /// Read the DIDATAFORMAT at `at` for a device with the objects `objs`:
@@ -395,4 +401,23 @@ pub fn read_format(cpu: &mut Cpu, at: u32, objs: &[Obj]) -> Result<Format, u32> 
         }
     }
     Ok(format)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn directx_3s_any_instance_names_any_object() {
+        let x = Obj {
+            guid: Guid::default(),
+            ofs: 0,
+            ty: DIDFT_AXIS | 1 << 8,
+            flags: 0,
+        };
+        assert!(names(None, DIDFT_AXIS | DIDFT_ANYINSTANCE, &x));
+        assert!(names(None, DIDFT_AXIS | DIDFT_ANYINSTANCE_3, &x));
+        assert!(names(None, DIDFT_AXIS | 1 << 8, &x));
+        assert!(!names(None, DIDFT_AXIS | 2 << 8, &x));
+    }
 }
