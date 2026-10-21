@@ -94,6 +94,7 @@ pub static DLLS: &[&Dll] = &[
     &super::dinput::DLL,
     &super::winmm::DLL,
     &super::glide::DLL,
+    &super::dplayx::DLL,
 ];
 
 /// Bytes each function's stub takes.

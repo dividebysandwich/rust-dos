@@ -326,6 +326,8 @@ const DDSCAPS_OFFSCREENPLAIN: u32 = 0x40;
 const DDSCAPS_PRIMARYSURFACE: u32 = 0x200;
 const DDSCAPS_3DDEVICE: u32 = 0x2000;
 const DDSCAPS_VIDEOMEMORY: u32 = 0x4000;
+const DDSCAPS_TEXTURE: u32 = 0x1000;
+const DDSCAPS_LOCALVIDMEM: u32 = 0x1000_0000;
 const DDSCAPS_ZBUFFER: u32 = 0x2_0000;
 const DDSCL_FULLSCREEN: u32 = 0x1;
 const DDSCL_NORMAL: u32 = 0x8;
@@ -850,9 +852,13 @@ const SYSDESC: u32 = 0x700;
 const LOCK2: u32 = 0x780;
 
 const DD_ENUM_DISPLAY_MODES: u32 = 8;
+const DD_GET_MONITOR_FREQUENCY: u32 = 15;
+const DD_GET_SCAN_LINE: u32 = 16;
+const DDERR_VERTICALBLANKINPROGRESS: u32 = 0x8876_0219;
 const S_BLT: u32 = 5;
 const S_BLT_FAST: u32 = 7;
 const S_IS_LOST: u32 = 24;
+const S_GET_SURFACE_DESC: u32 = 22;
 const DDSCAPS_SYSTEMMEMORY: u32 = 0x800;
 const DDBLT_COLORFILL: u32 = 0x400;
 const DDBLT_WAIT: u32 = 0x100_0000;
@@ -1276,6 +1282,20 @@ fn card_program() -> (Vec<u8>, u32) {
         a.mov(eax, dword_ptr(edi + esi))?;
         a.mov(dword_ptr(l.at(SEEN + 40)), eax)?;
         c.com(a, l, SYS, S_UNLOCK, &[Arg::I(0)])?;
+        // The card's own video timing.
+        c.com(a, l, DD, DD_GET_MONITOR_FREQUENCY, &[Arg::At(SEEN + 44)])?;
+        c.com(a, l, DD, DD_GET_SCAN_LINE, &[Arg::At(SEEN + 48)])?;
+        // A texture, which asks for no memory, and its caps.
+        a.mov(dword_ptr(l.at(SYSDESC + 0x68)), DDSCAPS_TEXTURE)?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(SYSDESC), Arg::At(DD2), Arg::I(0)],
+        )?;
+        c.com(a, l, DD2, S_GET_SURFACE_DESC, &[Arg::At(LOCK2)])?;
+        see(a, l, LOCK2 + 0x68, 13)?;
         wait(a, l, 1)?;
         c.com(a, l, DD, DD_RESTORE_DISPLAY_MODE, &[])?;
         c.com(a, l, FRONT, S_IS_LOST, &[])?;
@@ -1287,8 +1307,9 @@ fn draws_on_the_card(test: &str, board: Board) {
     let (program, data) = card_program();
     let mut cpu = card_machine(test, Some(board), program);
     run_until(&mut cpu, data, 1);
-    let r = results(&cpu, data, 23);
-    assert_eq!(r[1..], [0; 22], "{r:X?}");
+    let r = results(&cpu, data, 27);
+    assert_eq!(r[1..24], [0; 23], "{r:X?}");
+    assert!([0, DDERR_VERTICALBLANKINPROGRESS].contains(&r[24]));
     assert_eq!(fbi_init0(&cpu) & 1, 1, "the card has the monitor");
     let s = |slot| seen(&cpu, data, slot);
     assert_eq!(s(1), 2048, "the linear frame buffer's pitch");
@@ -1301,10 +1322,17 @@ fn draws_on_the_card(test: &str, board: Board) {
     assert_eq!(s(8) & 0xFFFF, 0x001F, "the second row");
     assert_eq!(s(9), 0x07E0_F800, "the copy to system memory");
     assert_eq!(s(10) & 0xFFFF, 0x001F);
+    // The card's frame: 60 Hz, 480 lines and the blanking after them.
+    assert_eq!(s(11), 60, "the card's refresh rate");
+    assert!(s(12) < 480 + 24, "the card's line: {}", s(12));
+    // Textures are in the card's memory.
+    assert_eq!(r[25..27], [0, 0]);
+    let texture = DDSCAPS_TEXTURE | DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM;
+    assert_eq!(s(13), texture, "the texture's caps");
     go_on(&mut cpu, data);
     run_until(&mut cpu, data, 2);
-    let r = results(&cpu, data, 25);
-    assert_eq!(r[23..], [0, DDERR_SURFACELOST]);
+    let r = results(&cpu, data, 29);
+    assert_eq!(r[27..], [0, DDERR_SURFACELOST]);
     assert_eq!(fbi_init0(&cpu) & 1, 0, "the VGA has the monitor back");
 }
 
@@ -1316,4 +1344,99 @@ fn directdraw_draws_and_flips_on_a_voodoo_graphics() {
 #[test]
 fn directdraw_draws_and_flips_on_a_voodoo2() {
     draws_on_the_card("card_v2", Board::Voodoo2);
+}
+
+#[test]
+fn the_desktop_is_packed_24_bits_on_a_virge() {
+    let (program, data) = desktop_program();
+    let base = PathBuf::from("target/test_win32_screen").join("desktop_virge");
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(&base).unwrap();
+    fs::write(base.join("T.EXE"), program).unwrap();
+    let mut cpu = Cpu::new(base);
+    let setup = VideoSetup {
+        adapter: Adapter::S3Virge,
+        ..Default::default()
+    };
+    bios::install(&mut cpu.bus, setup);
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 8);
+    assert_eq!(r[1], 0, "DirectDrawCreate");
+    assert_eq!(r[3], 24, "GetDeviceCaps(BITSPIXEL)");
+    assert_eq!(r[6], 0x0012_3456, "GetPixel");
+    assert_eq!(r[7], 0, "GetDisplayMode");
+    // Three bytes a pixel, blue first, 1920 a row.
+    let at = 200 * 1920 + 300 * 3;
+    assert_eq!(cpu.bus.vbe.vram[at..at + 6], [0, 0, 0xFF, 0x12, 0x34, 0x56]);
+    assert_eq!(shown(&mut cpu, 300, 200), [0xFF, 0, 0]);
+    let mode = |o: u32| peek(&cpu, data + MODE + o);
+    assert_eq!((mode(0x0C), mode(0x08), mode(0x10)), (640, 480, 1920));
+    assert_eq!(mode(0x48 + 12), 24);
+}
+
+// DirectPlay, with no service providers.
+
+#[test]
+fn directplay_objects_cant_be_made() {
+    const DPERR_UNAVAILABLE: u32 = 0x8877_00FA;
+    let mut d = data();
+    // CLSID_DirectPlay, and IID_IDirectPlay3A after it.
+    let clsid = [
+        0x20, 0x6D, 0xEB, 0xD1, 0x23, 0x89, 0xD0, 0x11, 0x9D, 0x97, 0x00, 0xA0, 0xC9, 0x0A, 0x43,
+        0xCB,
+    ];
+    let iid = [
+        0x41, 0xFE, 0x3E, 0x13, 0xDC, 0x32, 0xD0, 0x11, 0x9C, 0xFB, 0x00, 0xA0, 0xC9, 0x0A, 0x43,
+        0xCB,
+    ];
+    put(&mut d, DESC, &clsid);
+    put(&mut d, DESC + 16, &iid);
+    for out in [DD, FRONT, BACK] {
+        put32(&mut d, out, 0x1234_5678);
+    }
+    let dplayx: (&str, &[&str]) = (
+        "DPLAYX.DLL",
+        &[
+            "DirectPlayCreate",
+            "DirectPlayEnumerateA",
+            "DirectPlayLobbyCreateA",
+        ],
+    );
+    let ole32: (&str, &[&str]) = ("OLE32.DLL", &["CoInitialize", "CoCreateInstance"]);
+    let (program, data) = program(&[dplayx, ole32], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        let none = Arg::I(0);
+        c.api(a, l, 0, &[Arg::At(DESC), Arg::At(DD), none])?;
+        c.api(a, l, 1, &[Arg::I(BASE), none])?;
+        c.api(a, l, 2, &[none, Arg::At(FRONT), none, none, none])?;
+        c.api(a, l, 3, &[none])?;
+        let iid = Arg::At(DESC + 16);
+        c.api(
+            a,
+            l,
+            4,
+            &[Arg::At(DESC), none, Arg::I(1), iid, Arg::At(BACK)],
+        )?;
+        finish(a, l, 1)
+    });
+    let mut cpu = card_machine("directplay", None, program);
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 5);
+    assert_eq!(
+        r,
+        [
+            DPERR_UNAVAILABLE,
+            0,
+            DPERR_UNAVAILABLE,
+            0,
+            DPERR_UNAVAILABLE
+        ]
+    );
+    for out in [DD, FRONT, BACK] {
+        assert_eq!(peek(&cpu, data + out), 0);
+    }
 }

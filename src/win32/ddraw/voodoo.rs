@@ -180,6 +180,16 @@ pub fn current(cpu: &mut Cpu) -> (u32, u32, u32, u32) {
     }
 }
 
+/// The card's video timing and the time now, while the device's mode
+/// shows: its own frame, from its video registers.
+pub fn timing(cpu: &mut Cpu) -> Option<(crate::video::crt::CrtTiming, u64)> {
+    if state(cpu).card.mode.0 == 0 {
+        return None;
+    }
+    let t = cpu.bus.voodoo.as_ref()?.timing();
+    (t.frame_ns() > 0 && t.line_ns > 0).then(|| (t, cpu.bus.clock.now_ns()))
+}
+
 /// SetDisplayMode of the DirectDraw object `owner`, which is in
 /// exclusive mode: the card opens at `w` x `h`. Its surfaces are lost.
 pub fn set_mode(cpu: &mut Cpu, owner: u32, w: u32, h: u32, bpp: u32, refresh: u32) -> u32 {
