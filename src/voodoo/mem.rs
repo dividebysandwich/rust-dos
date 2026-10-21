@@ -77,6 +77,49 @@ impl Vram {
         }
     }
 
+    /// A copy of it, other memory with the same words.
+    ///
+    /// # Safety
+    ///
+    /// No other thread writes this memory while it is copied (other
+    /// threads may read it): the words are copied as plain memory.
+    pub unsafe fn copy(&self) -> Self {
+        let mut words = Arc::<[AtomicU16]>::new_uninit_slice(self.words.len());
+        let to = Arc::get_mut(&mut words).expect("a new Arc is unique");
+        // SAFETY: AtomicU16 has u16's layout, the two slices are the same
+        // length and different memory, and the caller keeps writers out,
+        // so the plain reads race with no write.
+        let words = unsafe {
+            std::ptr::copy_nonoverlapping(
+                self.words.as_ptr(),
+                to.as_mut_ptr().cast::<AtomicU16>(),
+                self.words.len(),
+            );
+            words.assume_init()
+        };
+        Self { words }
+    }
+
+    /// Words `range` of `from` copied into this.
+    ///
+    /// # Safety
+    ///
+    /// Nothing else has this memory, and no other thread writes `from`
+    /// while it is copied: the words are copied as plain memory.
+    pub unsafe fn copy_words(&self, from: &Vram, range: std::ops::Range<usize>) {
+        let (to, from) = (&self.words[range.clone()], &from.words[range]);
+        // SAFETY: the two slices are the same length and different memory
+        // (this one is the caller's alone), and the caller keeps writers
+        // out of `from`.
+        unsafe { std::ptr::copy_nonoverlapping(from.as_ptr(), to.as_ptr().cast_mut(), to.len()) };
+    }
+
+    /// Whether this is the only handle on the memory: whatever the others
+    /// did with it happened before.
+    pub fn unique(&mut self) -> bool {
+        Arc::get_mut(&mut self.words).is_some()
+    }
+
     /// Whether this and `other` are the same memory.
     pub fn same(&self, other: &Vram) -> bool {
         Arc::ptr_eq(&self.words, &other.words)
@@ -121,5 +164,19 @@ mod tests {
         other.load_bytes(&copy);
         assert_eq!(other.get(1), 0xAB34);
         assert!(!m.same(&other) && m.same(&m.clone()));
+        // SAFETY: nothing else has the memory.
+        let copied = unsafe { m.copy() };
+        assert!(!copied.same(&m) && copied.to_bytes() == m.to_bytes());
+        copied.set(1, 0);
+        assert_eq!(m.get(1), 0xAB34);
+        let mut copied = copied;
+        assert!(copied.unique());
+        // SAFETY: nothing else has either memory.
+        unsafe { copied.copy_words(&m, 1..2) };
+        assert_eq!(copied.get(1), 0xAB34);
+        let other = copied.clone();
+        assert!(!copied.unique());
+        drop(other);
+        assert!(copied.unique());
     }
 }
