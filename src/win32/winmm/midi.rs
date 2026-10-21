@@ -134,7 +134,7 @@ impl Stream {
         let div = self.timediv & 0xFFFF;
         if div & 0x8000 != 0 {
             // SMPTE: frames a second and ticks a frame.
-            let fps = (-((div >> 8) as u8 as i8) as i32).max(1) as u64;
+            let fps = (-(((div >> 8) as u8 as i8) as i32)).max(1) as u64;
             let per_frame = (div & 0xFF).max(1) as u64;
             (1_000_000, fps * per_frame)
         } else {

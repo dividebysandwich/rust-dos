@@ -584,7 +584,7 @@ fn details(cpu: &mut Cpu, at: u32) -> Option<Result<Details, u32>> {
     }
     if !cpu
         .bus
-        .guest_probe(place, (cb_details * channels) as usize, true)
+        .guest_probe(place, cb_details as usize * channels as usize, true)
     {
         return None;
     }

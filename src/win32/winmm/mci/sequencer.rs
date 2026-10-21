@@ -190,7 +190,7 @@ fn timed(data: &[u8]) -> Option<(Vec<Event>, u64, u32, u16)> {
     let smpte = division & 0x8000 != 0;
     let per_tick = |tempo: u32| -> f64 {
         if smpte {
-            let fps = -((division >> 8) as i8) as f64;
+            let fps = -(((division >> 8) as i8) as f64);
             let ticks = (division & 0xFF) as f64;
             1_000_000.0 / (fps * ticks).max(1.0)
         } else {
