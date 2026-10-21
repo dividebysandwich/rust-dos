@@ -457,6 +457,8 @@ pub fn prepare(cpu: &mut Cpu, filename: &str, bytes: &[u8]) -> bool {
         return false;
     }
     install_rom(&mut cpu.bus);
+    // Keys typed before it started aren't its to read (`take_pressed`).
+    cpu.bus.kbd.take_pressed();
     let path = cpu.program_path(filename);
     cpu.bus
         .log_string(&format!("[W32] {} is a Win32 program", path));

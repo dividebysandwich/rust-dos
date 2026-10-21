@@ -782,6 +782,7 @@ impl crate::savestate::State for KeyboardState {
         code.load(r)?;
         self.layout = Layout::by_code(&code).unwrap_or(self.layout);
         self.held.load(r)?;
+        self.pressed = [0; 8];
         self.dead.load(r)?;
         self.windows.load(r)
     }
