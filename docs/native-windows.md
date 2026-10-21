@@ -419,8 +419,10 @@ software rasterizer, so the RGB and Ramp devices aren't there, and
 32-bit render targets fail as they did on the cards.
 
 Unreal Gold runs from GOG's folder on a Voodoo2 and a Voodoo3: its
-levels with Glide, its intro and menus with Direct3D. Incoming and
-Expendable run with Direct3D. SHELL32, COMCTL32, COMDLG32, WSOCK32 and
+levels with Glide, its intro and menus with Direct3D. Quake 2's 3.14
+demo runs its demos through 3dfx's MiniGL on both, with the MiniGL it
+came with on the Voodoo2 and MiniGL 1.49 on the Voodoo3, as on the real
+cards. Incoming and Expendable run with Direct3D. SHELL32, COMCTL32, COMDLG32, WSOCK32 and
 DPLAYX came in for them, answering as a machine without a network
 does, with each common dialog cancelled.
 
