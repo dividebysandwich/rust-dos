@@ -226,8 +226,7 @@ fn co_create_instance(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(iid) = Guid::read(cpu, iid) else {
         return Some(E_INVALIDARG);
     };
-    let class = com::class_at(index).expect("a class");
-    Some((class.create)(cpu, &iid, out))
+    Some(create(cpu, index, &iid, out))
 }
 
 /// CoGetClassObject(clsid, context, server info, iid, out).
@@ -353,8 +352,19 @@ fn factory_create_instance(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(iid) = Guid::read(cpu, iid) else {
         return Some(E_INVALIDARG);
     };
+    Some(create(cpu, index, &iid, out))
+}
+
+/// Make an object of the class at `index` of `com::CLASSES`, given as
+/// the interface `iid` at `out`: the class's HRESULT.
+fn create(cpu: &mut Cpu, index: usize, iid: &Guid, out: u32) -> u32 {
     let class = com::class_at(index).expect("a class");
-    Some((class.create)(cpu, &iid, out))
+    let result = (class.create)(cpu, iid, out);
+    cpu.bus.log_string(&format!(
+        "[W32] OLE32 makes a {} ({}): {:08X}",
+        class.name, iid, result
+    ));
+    result
 }
 
 fn factory_lock_server(_: &mut Cpu, _: &[u32]) -> Option<u32> {
