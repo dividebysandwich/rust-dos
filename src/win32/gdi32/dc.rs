@@ -547,8 +547,9 @@ pub fn restore_dc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(TRUE)
 }
 
-/// an inch, with the desktop's depth: 32 bits a pixel, 24 on an S3
-/// ViRGE, or 16 on a Banshee or Voodoo3.
+/// GetDeviceCaps(hdc, index): the display's, 640x480 at 96 pixels an
+/// inch, with the desktop's depth: 32 bits a pixel, 24 on an S3 ViRGE,
+/// or 16 on a Banshee or Voodoo3.
 pub fn get_device_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if get(cpu, args[0]).is_none() {
         return Some(0);
