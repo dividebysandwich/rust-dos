@@ -688,12 +688,17 @@ fn rgb(p: u16) -> (u16, u16, u16) {
     (p >> 11, (p >> 5) & 0x3F, p & 0x1F)
 }
 
-fn draws(test: &str, board: Board) {
+/// `memory`: the frame buffer and texture unit megabytes the board
+/// reports.
+fn draws(test: &str, board: Board, memory: (u32, u32)) {
     let (program, data) = drawing_program();
     let mut cpu = machine(test, Some(board), program);
     run_until_done(&mut cpu, data);
     assert_eq!(result(&cpu, data, R_QUERY), 1, "grSstQueryHardware");
     assert_eq!(peek(&cpu, data + HWCONFIG), 1, "one board");
+    let config = |i: u32| peek(&cpu, data + HWCONFIG + 4 * i);
+    assert_eq!(config(1), 0, "shows as a Voodoo Graphics, as in Glide 2");
+    assert_eq!((config(2), config(7)), memory, "fbRam and tmuRam");
     assert_eq!(result(&cpu, data, R_OPEN), 1, "grSstWinOpen");
     assert_eq!(result(&cpu, data, R_WIDTH), 640);
     let p = |slot| pixel(&cpu, data, slot);
@@ -718,17 +723,17 @@ fn draws(test: &str, board: Board) {
 
 #[test]
 fn glide_draws_on_a_voodoo_graphics() {
-    draws("voodoo1", Board::Standard);
+    draws("voodoo1", Board::Standard, (2, 2));
 }
 
 #[test]
 fn glide_draws_on_a_voodoo2() {
-    draws("voodoo2", Board::Voodoo2);
+    draws("voodoo2", Board::Voodoo2, (4, 2));
 }
 
 #[test]
 fn glide_draws_on_a_voodoo3() {
-    draws("voodoo3", Board::Voodoo3);
+    draws("voodoo3", Board::Voodoo3, (12, 2));
 }
 
 /// A program that asks for the card and tries to open it.

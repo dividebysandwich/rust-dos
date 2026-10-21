@@ -539,6 +539,11 @@ pub fn call_return_address() -> u32 {
     super::stubs::stub_address(0, CALL_RETURN)
 }
 
+/// Whether the running process's environment has the variable `name`.
+pub fn has_environment_variable(cpu: &mut Cpu, name: &str) -> bool {
+    variable(super::process(cpu), name).is_some()
+}
+
 /// Let go of the file mappings no handle or view holds any more.
 pub fn sweep_mappings(cpu: &mut Cpu) {
     mapping::sweep(cpu);
