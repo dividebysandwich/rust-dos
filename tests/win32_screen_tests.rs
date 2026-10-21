@@ -864,7 +864,6 @@ const DDBLT_COLORFILL: u32 = 0x400;
 const DDBLT_WAIT: u32 = 0x100_0000;
 const DDFLIP_WAIT: u32 = 1;
 const DDERR_SURFACELOST: u32 = 0x8876_01C2;
-const DDERR_INVALIDDIRECTDRAWGUID: u32 = 0x8876_0231;
 
 /// A callback's code, whose address goes in CALLBACKS' slot `slot`:
 /// `body` makes it.
@@ -1073,8 +1072,8 @@ fn without_an_add_on_card_the_display_is_the_only_device() {
     run_until(&mut cpu, data, 1);
     assert_eq!(peek(&cpu, data + DEVICES), 1);
     let r = results(&cpu, data, 7);
-    assert_eq!(r[1], DDERR_INVALIDDIRECTDRAWGUID, "a GUID of zeros");
-    assert_eq!(r[4..], [0; 3], "the display's object");
+    // A GUID of zeros, GUID_NULL, is the display.
+    assert_eq!(r[1..], [0; 6], "{r:X?}");
 }
 
 /// The program that sets a mode on the card, draws through Lock, Blt
@@ -1439,4 +1438,31 @@ fn directplay_objects_cant_be_made() {
     for out in [DD, FRONT, BACK] {
         assert_eq!(peek(&cpu, data + out), 0);
     }
+}
+
+/// On a Voodoo3, DirectDraw made with GUID_NULL, as programs that keep
+/// the display's NULL GUID in a structure pass it, and its caps.
+#[test]
+fn the_voodoo3_display_has_3d_and_takes_guid_null() {
+    const DD_GET_CAPS: u32 = 11;
+    let mut d = data();
+    // DESC: GUID_NULL. CAPS: a DDCAPS of DirectX 6's size.
+    put32(&mut d, CAPS, 380);
+    let (program, data) = program(&[DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        c.api(a, l, 0, &[Arg::At(DESC), Arg::At(DD), Arg::I(0)])?;
+        c.com(a, l, DD, DD_GET_CAPS, &[Arg::At(CAPS), Arg::I(0)])?;
+        finish(a, l, 1)
+    });
+    let mut cpu = machine("voodoo3_caps", program);
+    run_until(&mut cpu, data, 1);
+    assert_eq!(results(&cpu, data, 2), [0, 0]);
+    let caps = peek(&cpu, data + CAPS + 4);
+    assert_eq!(caps & 1, 1, "DDCAPS_3D: {caps:X}");
+    let surface_caps = peek(&cpu, data + CAPS + 0x84);
+    let zbuffer = 0x2_0000;
+    assert_eq!(
+        surface_caps & (DDSCAPS_3DDEVICE | zbuffer),
+        DDSCAPS_3DDEVICE | zbuffer
+    );
 }
