@@ -5,6 +5,7 @@
 //! log their calls and return 0.
 
 use super::api::{self, LfbInfo, TexInfo, Vertex};
+use super::file3df;
 use super::gu::{self, MipMap};
 use super::{hw, state};
 use crate::cpu::Cpu;
@@ -54,8 +55,6 @@ missing!(
     missing_gr_splash "grSplash",
     missing_gr_sst_config_pipeline "grSstConfigPipeline",
     missing_gr_sst_vid_mode "grSstVidMode",
-    missing_gu3df_get_info "gu3dfGetInfo",
-    missing_gu3df_load "gu3dfLoad",
     missing_gu_encode_rle16 "guEncodeRLE16",
     missing_gu_fb_read_region "guFbReadRegion",
     missing_gu_fb_write_region "guFbWriteRegion",
@@ -1131,8 +1130,8 @@ pub static APIS: &[Api] = &[
         gr_tex_texture_mem_required,
     ),
     stdcall("_grTriStats@8", 98, 2, gr_tri_stats),
-    stdcall("_gu3dfGetInfo@8", 99, 2, missing_gu3df_get_info),
-    stdcall("_gu3dfLoad@8", 100, 2, missing_gu3df_load),
+    stdcall("_gu3dfGetInfo@8", 99, 2, file3df::get_info),
+    stdcall("_gu3dfLoad@8", 100, 2, file3df::load),
     stdcall(
         "_guAADrawTriangleWithClip@12",
         101,
