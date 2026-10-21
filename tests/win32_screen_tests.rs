@@ -1359,3 +1359,66 @@ fn the_desktop_is_packed_24_bits_on_a_virge() {
     assert_eq!((mode(0x0C), mode(0x08), mode(0x10)), (640, 480, 1920));
     assert_eq!(mode(0x48 + 12), 24);
 }
+
+// DirectPlay, with no service providers.
+
+#[test]
+fn directplay_objects_cant_be_made() {
+    const DPERR_UNAVAILABLE: u32 = 0x8877_00FA;
+    let mut d = data();
+    // CLSID_DirectPlay, and IID_IDirectPlay3A after it.
+    let clsid = [
+        0x20, 0x6D, 0xEB, 0xD1, 0x23, 0x89, 0xD0, 0x11, 0x9D, 0x97, 0x00, 0xA0, 0xC9, 0x0A, 0x43,
+        0xCB,
+    ];
+    let iid = [
+        0x41, 0xFE, 0x3E, 0x13, 0xDC, 0x32, 0xD0, 0x11, 0x9C, 0xFB, 0x00, 0xA0, 0xC9, 0x0A, 0x43,
+        0xCB,
+    ];
+    put(&mut d, DESC, &clsid);
+    put(&mut d, DESC + 16, &iid);
+    for out in [DD, FRONT, BACK] {
+        put32(&mut d, out, 0x1234_5678);
+    }
+    let dplayx: (&str, &[&str]) = (
+        "DPLAYX.DLL",
+        &[
+            "DirectPlayCreate",
+            "DirectPlayEnumerateA",
+            "DirectPlayLobbyCreateA",
+        ],
+    );
+    let ole32: (&str, &[&str]) = ("OLE32.DLL", &["CoInitialize", "CoCreateInstance"]);
+    let (program, data) = program(&[dplayx, ole32], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        let none = Arg::I(0);
+        c.api(a, l, 0, &[Arg::At(DESC), Arg::At(DD), none])?;
+        c.api(a, l, 1, &[Arg::I(BASE), none])?;
+        c.api(a, l, 2, &[none, Arg::At(FRONT), none, none, none])?;
+        c.api(a, l, 3, &[none])?;
+        let iid = Arg::At(DESC + 16);
+        c.api(
+            a,
+            l,
+            4,
+            &[Arg::At(DESC), none, Arg::I(1), iid, Arg::At(BACK)],
+        )?;
+        finish(a, l, 1)
+    });
+    let mut cpu = card_machine("directplay", None, program);
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 5);
+    assert_eq!(
+        r,
+        [
+            DPERR_UNAVAILABLE,
+            0,
+            DPERR_UNAVAILABLE,
+            0,
+            DPERR_UNAVAILABLE
+        ]
+    );
+    for out in [DD, FRONT, BACK] {
+        assert_eq!(peek(&cpu, data + out), 0);
+    }
+}

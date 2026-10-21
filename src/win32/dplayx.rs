@@ -4,6 +4,7 @@
 //! their multiplayer menus and call it at startup to see whether a lobby
 //! started them; with these answers they play alone.
 
+use super::com::{self, Guid};
 use super::stubs::{Api, Conv, Dll};
 use crate::cpu::Cpu;
 
@@ -40,6 +41,39 @@ static APIS: &[Api] = &[
     stdcall("DirectPlayLobbyCreateW", 5, 5, direct_play_lobby_create),
     stdcall("DirectPlayEnumerate", 9, 2, direct_play_enumerate),
 ];
+
+/// The classes CoCreateInstance makes of DPLAYX's (com.rs): DirectPlay
+/// and its lobby, which fail as DirectPlayCreate does.
+pub static CLASSES: &[com::Class] = &[
+    com::Class {
+        clsid: Guid::new(
+            0xD1EB_6D20,
+            0x8923,
+            0x11D0,
+            [0x9D, 0x97, 0x00, 0xA0, 0xC9, 0x0A, 0x43, 0xCB],
+        ),
+        dll: "DPLAYX.DLL",
+        name: "DirectPlay",
+        create: create_instance,
+    },
+    com::Class {
+        clsid: Guid::new(
+            0x2FE8_F810,
+            0xB2A5,
+            0x11D0,
+            [0xA7, 0x87, 0x00, 0x00, 0xF8, 0x03, 0xAB, 0xFC],
+        ),
+        dll: "DPLAYX.DLL",
+        name: "DirectPlayLobby",
+        create: create_instance,
+    },
+];
+
+/// Make a DirectPlay or lobby object for CoCreateInstance: there is no
+/// service provider to make it with.
+fn create_instance(_: &mut Cpu, _: &Guid, _: u32) -> u32 {
+    DPERR_UNAVAILABLE
+}
 
 const DP_OK: u32 = 0;
 const fn dperr(code: u32) -> u32 {
