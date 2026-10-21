@@ -274,15 +274,7 @@ pub fn show(cpu: &mut Cpu, pal: u32) {
     let Some(colors) = colors(cpu, pal) else {
         return;
     };
-    let shift = if cpu.bus.vga.dac_8bit { 0 } else { 2 };
-    let vga = &mut cpu.bus.vga;
-    for (i, c) in colors.iter().enumerate().take(256) {
-        let rgb = [*c as u8, (*c >> 8) as u8, (*c >> 16) as u8];
-        for (k, v) in rgb.iter().enumerate() {
-            vga.palette[i * 3 + k] = v >> shift;
-        }
-    }
-    vga.mark_dirty_full();
+    crate::win32::screen::set_colors(cpu, 0, &colors);
 }
 
 crate::state_fields!(Palette { caps, entries });

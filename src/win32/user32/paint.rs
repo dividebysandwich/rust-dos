@@ -58,9 +58,6 @@ const SW_SCROLLCHILDREN: u32 = 0x0001;
 const SW_INVALIDATE: u32 = 0x0002;
 const SW_ERASE: u32 = 0x0004;
 
-/// The VBE mode of the desktop: 640x480 at 32 bits a pixel.
-const DESKTOP_MODE: u16 = 0x112;
-
 /// Whether the window needs WM_PAINT.
 pub fn needs_paint(w: &Window) -> bool {
     !w.update.is_empty() || w.paint & PAINT_INTERNAL != 0
@@ -624,12 +621,9 @@ pub fn ensure_desktop(cpu: &mut Cpu) {
     redraw_screen(cpu);
 }
 
-/// Set the desktop's display mode.
+/// Set the desktop's display mode (`screen::desktop`).
 fn enter_desktop_mode(cpu: &mut Cpu) {
-    let packed24 = cpu.bus.vga.adapter.is_virge();
-    if let Some(mode) = crate::video::vbe::find_mode(DESKTOP_MODE, packed24) {
-        crate::interrupts::vbe::enter_mode(&mut cpu.bus, &mode, true, false);
-    }
+    crate::win32::screen::set_desktop_mode(cpu);
 }
 
 /// Put the desktop back on the screen after a DirectDraw mode: its
@@ -648,8 +642,7 @@ pub fn leave_desktop(cpu: &mut Cpu) {
         return;
     }
     user(cpu).desktop = false;
-    // The BIOS's data it writes is reached by its physical address.
-    crate::win32::dos(cpu, |cpu| crate::interrupts::int10::set_mode(cpu, 3));
+    crate::win32::screen::set_text_mode(cpu);
 }
 
 /// Paint the whole screen again: after the colors changed, or when the

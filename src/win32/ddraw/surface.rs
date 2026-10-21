@@ -30,6 +30,7 @@ use super::{
 };
 use crate::cpu::Cpu;
 use crate::win32::gdi32;
+use crate::win32::screen;
 
 // DDSURFACEDESC's flags.
 pub const DDSD_CAPS: u32 = 0x1;
@@ -413,17 +414,23 @@ pub fn address(cpu: &mut Cpu, s: &Surface) -> Option<u32> {
     }
 }
 
+/// Where the surface `id`'s pixels are in a Banshee's or Voodoo3's
+/// memory, for its 3D engine to draw into or read: the byte offset and
+/// the bytes a row. None if it isn't in video memory (or is lost), or
+/// the display adapter isn't one of those cards.
+#[allow(dead_code)] // For Direct3D's HAL.
+pub fn card_memory(cpu: &mut Cpu, id: u32) -> Option<(u32, u32)> {
+    if !screen::is_card(cpu) {
+        return None;
+    }
+    let s = state(cpu).surface(id)?;
+    (s.memory == MEM_VIDEO && !s.lost).then_some((s.bits, s.pitch))
+}
+
 /// Read `len` bytes of a surface's pixels from byte `offset`.
 pub fn read_bytes(cpu: &mut Cpu, s: &Surface, offset: u32, data: &mut [u8]) {
     match s.memory {
-        MEM_VIDEO => {
-            let start = (s.bits + offset) as usize;
-            let vram = &cpu.bus.vbe.vram;
-            let end = (start + data.len()).min(vram.len());
-            if start < end {
-                data[..end - start].copy_from_slice(&vram[start..end]);
-            }
-        }
+        MEM_VIDEO => screen::read(cpu, s.bits + offset, data),
         MEM_SYSTEM => cpu.bus.guest_read_bytes(s.bits + offset, data),
         _ => data.fill(0),
     }
@@ -432,15 +439,7 @@ pub fn read_bytes(cpu: &mut Cpu, s: &Surface, offset: u32, data: &mut [u8]) {
 /// Write bytes of a surface's pixels at byte `offset`.
 pub fn write_bytes(cpu: &mut Cpu, s: &Surface, offset: u32, data: &[u8]) {
     match s.memory {
-        MEM_VIDEO => {
-            let start = (s.bits + offset) as usize;
-            let vram = &mut cpu.bus.vbe.vram;
-            let end = (start + data.len()).min(vram.len());
-            if start < end {
-                vram[start..end].copy_from_slice(&data[..end - start]);
-                display::written(cpu, start as u32, (end - start) as u32);
-            }
-        }
+        MEM_VIDEO => screen::write(cpu, s.bits + offset, data),
         MEM_SYSTEM => cpu.bus.guest_write_bytes(s.bits + offset, data),
         _ => {}
     }
@@ -1583,14 +1582,7 @@ fn gdi_colors(cpu: &mut Cpu, s: &Surface) -> Vec<u32> {
     if let Some(colors) = palette::colors(cpu, pal) {
         return colors;
     }
-    let shift = if cpu.bus.vga.dac_8bit { 0 } else { 2 };
-    (0..256)
-        .map(|i| {
-            let p = &cpu.bus.vga.palette[i * 3..i * 3 + 3];
-            let [r, g, b] = [p[0] << shift, p[1] << shift, p[2] << shift];
-            r as u32 | (g as u32) << 8 | (b as u32) << 16
-        })
-        .collect()
+    screen::colors(cpu)
 }
 
 /// GetDC(this, out): a memory DC with a DIB section on the pixels.

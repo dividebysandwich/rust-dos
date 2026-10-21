@@ -31,6 +31,7 @@ mod msvcrt;
 mod object;
 mod ole32;
 mod registry;
+mod screen;
 mod seh;
 pub mod snapshot;
 mod stubs;

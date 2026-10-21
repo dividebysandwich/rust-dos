@@ -547,16 +547,24 @@ pub fn restore_dc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(TRUE)
 }
 
-/// GetDeviceCaps(hdc, index): the display's, a 32-bit 640x480 one, at 96
-/// pixels an inch.
+/// GetDeviceCaps(hdc, index): the display's, a 640x480 one at 96 pixels
+/// an inch, with the desktop's depth: 32 bits a pixel, or 16 on a
+/// Banshee or Voodoo3.
 pub fn get_device_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if get(cpu, args[0]).is_none() {
         return Some(0);
     }
+    if args[1] == BITSPIXEL {
+        return Some(crate::win32::screen::desktop(cpu).bpp);
+    }
     Some(device_cap(args[1]))
 }
 
-/// The display's capability `index`.
+/// GetDeviceCaps' index of the bits a pixel.
+const BITSPIXEL: u32 = 12;
+
+/// The display's capability `index`, the depth that of the pixels GDI
+/// works on (32 bits): its compatible bitmaps'.
 pub fn device_cap(index: u32) -> u32 {
     let (w, h) = crate::win32::user32::sysparams::screen_size();
     // Millimeters at 96 pixels an inch.

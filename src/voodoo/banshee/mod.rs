@@ -778,6 +778,41 @@ impl Voodoo {
         effect
     }
 
+    /// Bytes of the card's memory from byte `addr` on, with the drawing
+    /// queued before done: what reads through BAR1 below the tile base
+    /// give, many at once. For a driver in Rust that reads the screen.
+    pub fn banshee_memory_read(&self, addr: u32, data: &mut [u8]) {
+        if self.writes_queue() {
+            self.catch_up();
+        }
+        let mask = self.fbi.mask;
+        for (i, byte) in data.iter_mut().enumerate() {
+            *byte = self.fbi.ram.byte((addr.wrapping_add(i as u32) & mask) as usize);
+        }
+    }
+
+    /// Bytes written into the card's memory from byte `addr` on, as
+    /// writes through BAR1 below the tile base put them, after the
+    /// drawing queued before: the picture changes, and the OpenGL
+    /// recording hears of them.
+    pub fn banshee_memory_write(&mut self, addr: u32, data: &[u8]) {
+        if data.is_empty() {
+            return;
+        }
+        if self.writes_queue() {
+            self.catch_up();
+        }
+        let mask = self.fbi.mask;
+        for (i, &byte) in data.iter().enumerate() {
+            let at = addr.wrapping_add(i as u32) & mask;
+            self.fbi.ram.set_byte(at as usize, byte);
+        }
+        self.display_dirty = true;
+        let start = addr & mask;
+        let end = (start as u64 + data.len() as u64).min(mask as u64 + 1) as u32;
+        self.mirror_memory(start, end);
+    }
+
     /// A 2D register written: the engine runs commands into the memory.
     pub(crate) fn banshee_2d_write(&mut self, reg: u32, data: u32) {
         if self.writes_queue() {

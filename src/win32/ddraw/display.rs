@@ -2,40 +2,50 @@
 //! object that has exclusive mode, the card's video memory that surfaces
 //! take their pixels from, and each process's view of that memory.
 //!
-//! A mode DirectDraw sets is a VBE mode with the linear frame buffer, the
-//! VBE list's where it has one and one of DirectDraw's own (320x240, the
-//! 8-bit 320x200) where it hasn't. While it is set the display is
+//! A mode DirectDraw sets is one the display adapter has (`screen`):
+//! one of the VESA BIOS's, or of DirectDraw's own sizes, or on a Banshee
+//! or Voodoo3 the card's own. While it is set the display is
 //! DirectDraw's: GDI's drawing on the screen goes nowhere, and USER32
 //! doesn't put the desktop back when a window shows. RestoreDisplayMode,
 //! the end of exclusive mode and the end of the process give the screen
 //! back: the desktop's mode again, repainted, or text mode when there is
-//! no desktop.
+//! no desktop. Glide on a Banshee or Voodoo3 takes the display the same
+//! way (`take`, `give_back`).
 //!
-//! Video memory is the card's 4 MB. The picture on the screen is at its
-//! start (the desktop, or the mode's primary surface and the rest of its
-//! flip chain); the other surfaces in video memory take blocks of the
-//! rest. A mode change takes all of them back, and the surfaces in it are
-//! lost until restored. A process that uses DirectDraw has the whole of
-//! video memory mapped in its shared arena, where the linear frame buffer
-//! is, so that Lock gives it the pixels themselves.
+//! Video memory is the adapter's: the VESA BIOS's 4 MB, or the card's
+//! 16 MB, which its 3D engine draws into. The picture on the screen is
+//! at its start (the desktop, or the mode's primary surface and the rest
+//! of its flip chain); the other surfaces in video memory take blocks of
+//! the rest. A mode change takes all of them back, and the surfaces in it
+//! are lost until restored. A process that uses DirectDraw has the whole
+//! of video memory mapped in its shared arena, where the linear frame
+//! buffer (or the card's BAR1) is, so that Lock gives it the pixels
+//! themselves.
 
 use super::{DD_OK, DDERR_INVALIDMODE, DDERR_OUTOFVIDEOMEMORY, current_pid, state};
 use crate::cpu::Cpu;
-use crate::video::vbe::{self, LFB_BASE, VRAM_SIZE, VbeMode};
 use crate::win32::memory::{MEM_MAPPED, PAGE, PAGE_READWRITE, SHARED, SYSTEM, USER, WRITABLE};
+use crate::win32::screen::{self, Mode};
 
 /// Where a process's view of video memory goes, if that is free.
 const VIEW_AT: u32 = 0x9FC0_0000;
 
-/// What blocks of video memory are aligned to.
+/// What blocks of video memory are aligned to: more than the 16 bytes
+/// the card's 3D engine needs of a buffer's address.
 const ALIGN: u32 = 64;
+
+/// The owner of a mode Glide set (`take`), which no DirectDraw object
+/// is.
+#[allow(dead_code)] // For GLIDE2X.DLL's hardware layer.
+pub const GLIDE: u32 = u32::MAX;
 
 #[derive(Clone, Debug, Default)]
 pub struct Display {
     /// The mode DirectDraw set: width, height and bits a pixel; all 0
     /// while the display is the desktop's.
     pub mode: (u32, u32, u32),
-    /// The DirectDraw object that set it, and the one in exclusive mode.
+    /// The DirectDraw object that set it (`GLIDE` for Glide), and the
+    /// one in exclusive mode.
     pub mode_owner: u32,
     pub exclusive: u32,
     /// The blocks of video memory surfaces have: offset and length, in
@@ -48,33 +58,23 @@ pub struct Display {
     pub flip_at: u64,
 }
 
-/// Whether DirectDraw has the display: GDI doesn't draw on the screen.
+/// Whether DirectDraw (or Glide) has the display: GDI doesn't draw on
+/// the screen.
 pub fn owns_display(cpu: &mut Cpu) -> bool {
     state(cpu).display.mode.0 != 0
 }
 
-/// Whether the card is an S3 ViRGE, whose "24-bit" color is 3 bytes a
-/// pixel instead of 4.
-fn packed24(cpu: &Cpu) -> bool {
-    cpu.bus.vga.adapter.is_virge()
-}
-
-/// The sizes of the modes DirectDraw offers.
-const SIZES: [(u32, u32); 6] = [
-    (320, 200),
-    (320, 240),
-    (640, 400),
-    (640, 480),
-    (800, 600),
-    (1024, 768),
-];
-
 /// The modes DirectDraw offers, as width, height and bits a pixel, by
 /// size and then depth.
 pub fn modes(cpu: &Cpu) -> Vec<(u32, u32, u32)> {
-    let truecolor = if packed24(cpu) { 24 } else { 32 };
+    // An S3 ViRGE's "24-bit" color is 3 bytes a pixel instead of 4.
+    let truecolor = if cpu.bus.vga.adapter.is_virge() {
+        24
+    } else {
+        32
+    };
     let mut list = Vec::new();
-    for (w, h) in SIZES {
+    for (w, h) in screen::SIZES {
         for bpp in [8, 16, truecolor] {
             list.push((w, h, bpp));
         }
@@ -82,50 +82,16 @@ pub fn modes(cpu: &Cpu) -> Vec<(u32, u32, u32)> {
     list
 }
 
-/// The VBE mode of a size and depth DirectDraw offers.
-fn vbe_mode(cpu: &Cpu, w: u32, h: u32, bpp: u32) -> Option<VbeMode> {
-    if !modes(cpu).contains(&(w, h, bpp)) {
-        return None;
-    }
-    let packed = packed24(cpu);
-    let listed = vbe::MODES.iter().find(|m| {
-        let depth = match m.bpp {
-            32 if packed => 24,
-            d => d as u32,
-        };
-        m.width as u32 == w && m.height as u32 == h && depth == bpp
-    });
-    if let Some(m) = listed {
-        return vbe::find_mode(m.number, packed);
-    }
-    // One of DirectDraw's own, by a number no mode of the list has. Small
-    // modes are shown doubled, at the timing of the doubled lines.
-    let number = 0x1F0
-        + SIZES.iter().position(|&s| s == (w, h)).unwrap_or(0) as u16 * 4
-        + match bpp {
-            8 => 0,
-            16 => 1,
-            _ => 2,
-        };
-    let shown = if w < 640 { h * 2 } else { h };
-    Some(VbeMode {
-        number,
-        width: w as u16,
-        height: h as u16,
-        bpp: bpp as u8,
-        timing: vbe::timing_for(shown as u16),
-    })
-}
-
 /// The display's mode as programs see it: width, height, bits a pixel
 /// and bytes a line. The desktop's when DirectDraw hasn't set one.
 pub fn current(cpu: &mut Cpu) -> (u32, u32, u32, u32) {
     let (w, h, bpp) = state(cpu).display.mode;
     if w != 0 {
-        return (w, h, bpp, cpu.bus.vbe.pitch);
+        let pitch = screen::mode(cpu).map_or(w * bpp / 8, |m| m.pitch);
+        return (w, h, bpp, pitch);
     }
-    let (w, h, bpp, pitch) = crate::win32::gdi32::surface::screen(cpu);
-    (w as u32, h as u32, bpp, pitch as u32)
+    let d = screen::desktop(cpu);
+    (d.width, d.height, d.bpp, d.pitch)
 }
 
 /// The bytes of video memory the picture on the screen takes.
@@ -137,19 +103,46 @@ fn screen_len(cpu: &mut Cpu) -> u32 {
 /// Set the mode `w` x `h` x `bpp` for the DirectDraw object `owner`.
 /// The surfaces in video memory are lost.
 pub fn set_mode(cpu: &mut Cpu, owner: u32, w: u32, h: u32, bpp: u32) -> u32 {
-    let Some(mode) = vbe_mode(cpu, w, h, bpp) else {
+    if !modes(cpu).contains(&(w, h, bpp)) || set(cpu, owner, w, h, bpp).is_none() {
         return DDERR_INVALIDMODE;
-    };
+    }
+    DD_OK
+}
+
+/// Set the mode for `owner`, any the adapter has: the surfaces in video
+/// memory are lost, and the mouse moves over the picture.
+fn set(cpu: &mut Cpu, owner: u32, w: u32, h: u32, bpp: u32) -> Option<Mode> {
+    let mode = screen::set_mode(cpu, w, h, bpp)?;
     super::surface::video_memory_lost(cpu);
     let display = &mut state(cpu).display;
     display.blocks.clear();
     display.mode = (w, h, bpp);
     display.mode_owner = owner;
-    crate::interrupts::vbe::enter_mode(&mut cpu.bus, &mode, true, false);
-    // The mouse moves over the whole picture.
     let mouse = &mut cpu.bus.mouse;
     (mouse.min_x, mouse.max_x, mouse.min_y, mouse.max_y) = (0, w as i32 - 1, 0, h as i32 - 1);
-    DD_OK
+    Some(mode)
+}
+
+/// Take the display for Glide on a Banshee or Voodoo3: the mode `w` x
+/// `h` x `bpp` (any the adapter has) is set and its picture is at the
+/// start of video memory, which is Glide's until `give_back`. A mode
+/// DirectDraw set ends, and its surfaces in video memory are lost; GDI
+/// draws nowhere. None if the adapter has no such mode, and nothing
+/// changes then.
+#[allow(dead_code)] // For GLIDE2X.DLL's hardware layer.
+pub fn take(cpu: &mut Cpu, w: u32, h: u32, bpp: u32) -> Option<Mode> {
+    let mode = set(cpu, GLIDE, w, h, bpp)?;
+    state(cpu).display.exclusive = 0;
+    Some(mode)
+}
+
+/// Give back the display Glide took: the desktop's mode again, repainted,
+/// or text mode when there is no desktop.
+#[allow(dead_code)] // For GLIDE2X.DLL's hardware layer.
+pub fn give_back(cpu: &mut Cpu) {
+    if state(cpu).display.mode_owner == GLIDE {
+        restore(cpu);
+    }
 }
 
 /// Give the screen back to the desktop, if DirectDraw has it.
@@ -173,7 +166,7 @@ fn restore_screen(cpu: &mut Cpu) {
         let mouse = &mut cpu.bus.mouse;
         (mouse.min_x, mouse.max_x, mouse.min_y, mouse.max_y) = (0, w - 1, 0, h - 1);
     } else {
-        crate::win32::dos(cpu, |cpu| crate::interrupts::int10::set_mode(cpu, 3));
+        screen::set_text_mode(cpu);
     }
 }
 
@@ -182,6 +175,7 @@ fn restore_screen(cpu: &mut Cpu) {
 pub fn alloc(cpu: &mut Cpu, len: u32) -> Result<u32, u32> {
     let floor = screen_len(cpu).next_multiple_of(ALIGN);
     let len = len.max(1).next_multiple_of(ALIGN);
+    let size = screen::memory_size(cpu);
     let display = &mut state(cpu).display;
     let mut at = floor;
     let mut index = 0;
@@ -192,7 +186,7 @@ pub fn alloc(cpu: &mut Cpu, len: u32) -> Result<u32, u32> {
         at = at.max((start + size).next_multiple_of(ALIGN));
         index = i + 1;
     }
-    if at as u64 + len as u64 > VRAM_SIZE as u64 {
+    if at as u64 + len as u64 > size as u64 {
         return Err(DDERR_OUTOFVIDEOMEMORY);
     }
     display.blocks.insert(index, (at, len));
@@ -209,7 +203,7 @@ pub fn free(cpu: &mut Cpu, offset: u32) {
 
 /// Video memory for surfaces, and how much of it is free.
 pub fn video_memory(cpu: &mut Cpu) -> (u32, u32) {
-    let total = VRAM_SIZE as u32 - screen_len(cpu);
+    let total = screen::memory_size(cpu) - screen_len(cpu);
     let used: u32 = state(cpu).display.blocks.iter().map(|b| b.1).sum();
     (total, total.saturating_sub(used))
 }
@@ -221,8 +215,8 @@ pub fn view(cpu: &mut Cpu) -> Option<u32> {
     if let Some(&(_, at)) = state(cpu).display.views.iter().find(|v| v.0 == pid) {
         return Some(at);
     }
-    let lfb = cpu.bus.vbe.lfb_base.unwrap_or(LFB_BASE as u32);
-    let len = VRAM_SIZE as u32;
+    let lfb = screen::physical_base(cpu);
+    let len = screen::memory_size(cpu);
     let at = crate::win32::with_process(cpu, |p, bus| {
         let reserve = |p: &mut crate::win32::Process, at| {
             p.memory
@@ -272,24 +266,12 @@ pub fn process_ended(cpu: &mut Cpu, pid: u32) {
 /// The display's timing now: the frame's lines and the time in it.
 pub fn timing(cpu: &mut Cpu) -> (crate::video::crt::CrtTiming, u64) {
     let now = cpu.bus.clock.now_ns();
-    (cpu.bus.vga.timing(), now)
+    (screen::timing(cpu), now)
 }
 
 /// Show the picture at `offset` of video memory, from the next frame.
 pub fn show(cpu: &mut Cpu, offset: u32) {
-    cpu.bus.vbe.start = offset;
-    cpu.bus.note_display_start();
-    cpu.bus.vga.mark_dirty_full();
-}
-
-/// `len` bytes of video memory at `offset` were written: the rows of
-/// the picture they are in are drawn again.
-pub fn written(cpu: &mut Cpu, offset: u32, len: u32) {
-    if cpu.bus.vbe.mode.is_some()
-        && let Some((first, last)) = cpu.bus.vbe.frame_rows(offset as usize, len as usize)
-    {
-        cpu.bus.vga.mark_dirty_rows(first, last);
-    }
+    screen::show(cpu, offset);
 }
 
 crate::state_fields!(Display {
