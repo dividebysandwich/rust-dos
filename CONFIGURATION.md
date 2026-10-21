@@ -398,16 +398,21 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   for their buffers. Off, they run as they do on plain DOS with HIMEM. A
   change takes effect for the programs started after it.
 * `win32` turns on the built-in Windows: `true` or `false` (the
-  default). A Win32 console program, a Windows 95 .EXE, then runs from
-  the DOS prompt in protected mode with paging, as Windows 95 runs it,
-  with KERNEL32, ADVAPI32 and MSVCRT written into the emulator, and ends
-  back at the prompt. They have what console programs use: heaps and
-  virtual memory, files and directories, the environment, modules and
-  the program's own DLLs, threads and their synchronization, structured
-  exceptions, child processes, the registry and the C runtime. A
-  program that calls a function they don't have ends with a message
-  naming it, and one that imports another system DLL (USER32, GDI32) is
-  refused. The registry is kept in `C:\REGISTRY.REG`, which is made the
+  default). A Win32 program, a Windows 95 .EXE, then runs from the DOS
+  prompt in protected mode with paging, as Windows 95 runs it, and ends
+  back at the prompt. Its system DLLs are written into the emulator:
+  KERNEL32, ADVAPI32 and MSVCRT for heaps and virtual memory, files,
+  modules, threads, structured exceptions, child processes, the
+  registry and the C runtime; USER32 and GDI32 for windows, dialogs and
+  drawing on a 640x480 desktop in a VESA mode; DDRAW, DSOUND, DINPUT,
+  WINMM and OLE32 for DirectX 3 to 6 games: DirectDraw in full screen
+  on the card's VESA modes or in a window, DirectSound and wave audio
+  in the `windows` mixer channel, MIDI to the MPU-401's synthesizer, CD
+  audio and MIDI files through MCI, and the keyboard, mouse and
+  joystick through DirectInput. A program that calls a function they
+  don't have ends with a message naming it, and one that needs a DLL
+  that is neither among them nor beside it is refused. The registry is
+  kept in `C:\REGISTRY.REG`, which is made the
   first time a program uses it, so a host folder mounted as C: gets that
   file. Off, such a program runs its DOS stub, which says it needs
   Windows. The plan is in [docs/native-windows.md](docs/native-windows.md).
