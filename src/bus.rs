@@ -1379,10 +1379,17 @@ impl Bus {
             self.serial_next_event(),
             self.kbc_release_at,
             self.rtc_next,
+            crate::win32::audio_next_event(&self.win32, self.clock.now_ticks()),
         ]
         .into_iter()
             .flatten()
             .min()
+    }
+
+    /// Have the clock stop at the next time a device needs attention,
+    /// after one's next time changed (the built-in Windows's sound).
+    pub fn reschedule(&mut self) {
+        self.clock.schedule(self.next_event());
     }
 
     fn gus_next_event(&self) -> Option<u64> {
@@ -1613,7 +1620,8 @@ impl Bus {
         let mut peaks = [0.0f32; crate::mixer::CHANNELS];
         let tandy_on = self.tandy_sound_enabled();
         let modem_on = self.serial.sound_playing();
-        for _ in 0..frames {
+        let windows = crate::win32::audio_render(self, target - frames as u64, frames);
+        for n in 0..frames {
             let mut mix = crate::mixer::MixFrame::default();
             // The PC speaker, and the prompt's beep, through the speaker's
             // filter, which rings on a little after them.
@@ -1691,6 +1699,9 @@ impl Bus {
                 let s = self.tandy_sound.render();
                 self.mixer.add(&mut mix, &mut peaks, Channel::Tandy, (s, s));
             }
+            if let Some(frames) = &windows {
+                self.mixer.add(&mut mix, &mut peaks, Channel::Windows, frames[n]);
+            }
             let (l, r) = self.mixer.finish(mix, &mut peaks);
             settled &= l == 0.0 && r == 0.0;
             self.audio_out.push_back(l.clamp(-32768.0, 32767.0) as i16);
@@ -1718,6 +1729,7 @@ impl Bus {
             && self.disknoise.is_silent()
             && self.monitor_noise.is_silent()
             && !self.serial.sound_playing()
+            && !crate::win32::audio_playing(&self.win32)
             && self.gus.as_ref().is_none_or(|g| g.is_idle())
             && self.awe.is_none()
             && self.lpt_dac.is_none()

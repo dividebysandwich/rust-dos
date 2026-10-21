@@ -213,6 +213,7 @@ impl Page {
                 Volume(Channel::Monitor),
                 Volume(Channel::Awe),
                 Volume(Channel::Modem),
+                Volume(Channel::Windows),
                 SpeakerFilter,
                 SbFilter,
                 Reverb,

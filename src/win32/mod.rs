@@ -785,6 +785,34 @@ fn dos<T>(cpu: &mut Cpu, f: impl FnOnce(&mut Cpu) -> T) -> T {
     result
 }
 
+/// Whether the built-in Windows's sound device plays (DirectSound's
+/// buffers, WinMM's wave audio), for the host's mixer.
+pub fn audio_playing(win32: &Win32) -> bool {
+    dsound::device::playing(win32)
+}
+
+/// The sound device's samples for the host's frames `first` to `first +
+/// frames`, if it plays (dsound/device.rs).
+pub fn audio_render(
+    bus: &crate::bus::Bus,
+    first: u64,
+    frames: usize,
+) -> Option<Vec<(f32, f32)>> {
+    dsound::device::render(bus, first, frames)
+}
+
+/// When the sound device next needs its tick (a notification, a block
+/// done), in PIT ticks after `now`.
+pub fn audio_next_event(win32: &Win32, now: u64) -> Option<u64> {
+    [
+        dsound::next_event(&win32.dsound, now),
+        winmm::wave::next_event(&win32.winmm.wave, now),
+    ]
+    .into_iter()
+    .flatten()
+    .min()
+}
+
 /// DOS ended the process `psp`: the Win32 processes in it, if any, go
 /// too.
 pub fn process_ended(cpu: &mut Cpu, psp: u16) {

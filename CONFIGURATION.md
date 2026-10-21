@@ -611,12 +611,13 @@ The volume of each sound source in percent, from 0 to 200: `speaker` (the
 PC speaker and the prompt's beeps), `sb` (the Sound Blaster's digital
 audio), `fm` (the FM synthesizer), `gus`, `midi`, `cdaudio`, `disknoise`,
 `lptdac` (the Covox or Disney Sound Source), `tandy` (the Tandy's and
-PCjr's sound chip), `awe32` (the AWE32's wavetable synthesizer) and
+PCjr's sound chip), `awe32` (the AWE32's wavetable synthesizer),
 `monitor` (the [monitor's effects](#emulator)), `modem` (the [modem's
-speaker](#serial-and-modem-games)), and `master` for all of
-them together. At 100, the
-default, a source plays as loud as its card makes it. The volumes apply on
-top of the Sound Blaster's own mixer, which programs set.
+speaker](#serial-and-modem-games)), `windows` (the built-in Windows's
+sound: DirectSound and WinMM's wave audio), and `master` for all of them
+together. At 100, the default, a source plays as loud as its card makes
+it. The volumes apply on top of the Sound Blaster's own mixer, which
+programs set.
 
 * `speaker_filter` gives the PC speaker the sound of the small speaker in
   a PC, without the harsh edges of its square wave: `on` (the default)
