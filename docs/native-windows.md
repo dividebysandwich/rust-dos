@@ -14,7 +14,7 @@ DirectX 3 to 6 (DirectDraw, Direct3D immediate mode, DirectSound,
 DirectInput), WinMM and Glide. Windows 98 comes after Windows 95; the API
 the games of the two use is nearly the same.
 
-The built-in Windows was contributed by
+The built-in Windows subsystem was designed and implemented by
 [kibertoad](https://github.com/kibertoad).
 
 ## Prior art
