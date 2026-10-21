@@ -742,6 +742,16 @@ fn place(cpu: &mut Cpu, unit: u32, room: (u32, u32), size: u32) -> Option<u32> {
     }
 }
 
+/// A device is made: on a Banshee or Voodoo3 the heap is taken now,
+/// before the program fills video memory with its textures, as Unreal
+/// does until there is no more room. Taken at the first draw, there is
+/// none left for it then.
+pub fn created(cpu: &mut Cpu) {
+    if hw::banshee(cpu) {
+        heap(cpu);
+    }
+}
+
 /// The device `gone` goes: if it was the last, the heap goes back to
 /// video memory.
 pub fn release(cpu: &mut Cpu, gone: u32) {

@@ -183,7 +183,7 @@ const LOCKED: u32 = 0x200;
 const MODE: u32 = 0x280;
 const CLASS: u32 = 0x320;
 const ENTRIES: u32 = 0x400;
-const DATA_SIZE: usize = 0x900;
+const DATA_SIZE: usize = 0x1000;
 
 /// The data the programs start with: the window class's name.
 fn data() -> Vec<u8> {
@@ -1465,4 +1465,197 @@ fn the_voodoo3_display_has_3d_and_takes_guid_null() {
         surface_caps & (DDSCAPS_3DDEVICE | zbuffer),
         DDSCAPS_3DDEVICE | zbuffer
     );
+}
+
+// IDirectDraw4: its ID, and the DirectDraw object's memory and
+// identity.
+
+const QUERY_INTERFACE: u32 = 0;
+const DD4_GET_AVAILABLE_VID_MEM: u32 = 23;
+const DD4_GET_DEVICE_IDENTIFIER: u32 = 27;
+const DDERR_OUTOFVIDEOMEMORY: u32 = 0x8876_017C;
+/// A DDDEVICEIDENTIFIER, 1072 bytes.
+const IDENTIFIER: u32 = 0x900;
+/// A 256x256 texture's DDSURFACEDESC, a DDSCAPS2 of textures, the
+/// IDirectDraw4, the textures' interface and count, IDirectDraw4's ID
+/// and a surface's description.
+const TEX_DESC: u32 = 0xD40;
+const TEX_CAPS: u32 = 0xDB0;
+const DD4: u32 = 0xDC0;
+const FILLED: u32 = 0xDC4;
+const COUNT: u32 = 0xDC8;
+const IID_DD4: u32 = 0xDD0;
+const GOT_DESC: u32 = 0xE00;
+
+/// The data with IDirectDraw4's ID.
+fn data4() -> Vec<u8> {
+    let mut d = data();
+    put(
+        &mut d,
+        IID_DD4,
+        &[
+            0x9A, 0x50, 0x59, 0x9C, 0xBD, 0x39, 0xD1, 0x11, 0x8C, 0x4A, 0x00, 0xC0, 0x4F, 0xD9,
+            0x30, 0xC5,
+        ],
+    );
+    d
+}
+
+/// A Voodoo3 display's DirectDraw says what card it is, as Unreal's
+/// Direct3D renderer reads it to pick its settings.
+#[test]
+fn the_voodoo3_display_identifies_itself() {
+    let (program, data) = program(&[DDRAW], &data4(), |a, l| {
+        let mut c = Calls { next: 0 };
+        c.api(a, l, 0, &[Arg::I(0), Arg::At(DD), Arg::I(0)])?;
+        c.com(a, l, DD, QUERY_INTERFACE, &[Arg::At(IID_DD4), Arg::At(DD4)])?;
+        c.com(
+            a,
+            l,
+            DD4,
+            DD4_GET_DEVICE_IDENTIFIER,
+            &[Arg::At(IDENTIFIER), Arg::I(0)],
+        )?;
+        finish(a, l, 1)
+    });
+    let mut cpu = machine("voodoo3_identifier", program);
+    run_until(&mut cpu, data, 1);
+    assert_eq!(results(&cpu, data, 3), [0, 0, 0]);
+    assert_eq!(text(&cpu, data, IDENTIFIER + 512, 32), "3dfx Voodoo3");
+    assert_eq!(peek(&cpu, data + IDENTIFIER + 1032), 0x121A, "the vendor");
+    assert_eq!(peek(&cpu, data + IDENTIFIER + 1036), 5, "the device");
+}
+
+/// The program that makes 256x256 textures on the 3dfx device in video
+/// memory until there is no more room, asking how much there is before
+/// and after, and then one that asks for no memory in particular.
+fn textures_program() -> (Vec<u8>, u32) {
+    let mut d = data4();
+    desc(
+        &mut d,
+        TEX_DESC,
+        DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT,
+        DDSCAPS_TEXTURE | DDSCAPS_VIDEOMEMORY,
+        256,
+        256,
+        0,
+    );
+    let pf = TEX_DESC + 0x48;
+    for (i, v) in [32, 0x40, 0, 16, 0xF800, 0x07E0, 0x001F].iter().enumerate() {
+        put32(&mut d, pf + 4 * i as u32, *v);
+    }
+    put32(&mut d, TEX_CAPS, DDSCAPS_TEXTURE);
+    put32(&mut d, GOT_DESC, 108);
+    program(&[USER32, GDI32, DDRAW_CARD], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        device_callback(a, l)?;
+        c.api(
+            a,
+            l,
+            CREATE_WINDOW,
+            &[
+                Arg::I(0),
+                Arg::At(CLASS),
+                Arg::At(CLASS),
+                Arg::I(WS_POPUP | WS_VISIBLE),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(64),
+                Arg::I(64),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(BASE),
+                Arg::I(0),
+            ],
+        )?;
+        a.mov(dword_ptr(l.at(HWND)), eax)?;
+        c.api(
+            a,
+            l,
+            DIRECT_DRAW_ENUMERATE,
+            &[Arg::Val(CALLBACKS), Arg::I(0)],
+        )?;
+        c.api(
+            a,
+            l,
+            DIRECT_DRAW_CREATE,
+            &[Arg::At(DEVICE_GUID), Arg::At(DD), Arg::I(0)],
+        )?;
+        c.com(a, l, DD, QUERY_INTERFACE, &[Arg::At(IID_DD4), Arg::At(DD4)])?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_COOPERATIVE_LEVEL,
+            &[Arg::Val(HWND), Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_DISPLAY_MODE,
+            &[Arg::I(640), Arg::I(480), Arg::I(16)],
+        )?;
+        let vid_mem = |a: &mut CodeAssembler, c: &mut Calls, slot: u32| {
+            c.com(
+                a,
+                l,
+                DD4,
+                DD4_GET_AVAILABLE_VID_MEM,
+                &[
+                    Arg::At(TEX_CAPS),
+                    Arg::At(SEEN + 4 * slot),
+                    Arg::At(SEEN + 4 * slot + 4),
+                ],
+            )
+        };
+        vid_mem(a, &mut c, 0)?;
+        // Textures until one can't be made: its error in SEEN's slot 2.
+        let mut again = a.create_label();
+        let mut full = a.create_label();
+        a.set_label(&mut again)?;
+        push(a, l, &[Arg::At(TEX_DESC), Arg::At(FILLED), Arg::I(0)])?;
+        a.mov(eax, dword_ptr(l.at(DD)))?;
+        a.push(eax)?;
+        a.mov(eax, dword_ptr(eax))?;
+        a.call(dword_ptr(eax + 4 * DD_CREATE_SURFACE))?;
+        a.test(eax, eax)?;
+        a.jnz(full)?;
+        a.add(dword_ptr(l.at(COUNT)), 1)?;
+        a.cmp(dword_ptr(l.at(COUNT)), 100)?;
+        a.jb(again)?;
+        a.set_label(&mut full)?;
+        a.mov(dword_ptr(l.at(SEEN + 8)), eax)?;
+        vid_mem(a, &mut c, 3)?;
+        // One more, which may be in system memory.
+        a.mov(dword_ptr(l.at(TEX_DESC + 0x68)), DDSCAPS_TEXTURE)?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(TEX_DESC), Arg::At(FILLED), Arg::I(0)],
+        )?;
+        c.com(a, l, FILLED, S_GET_SURFACE_DESC, &[Arg::At(GOT_DESC)])?;
+        see(a, l, GOT_DESC + 0x68, 5)?;
+        finish(a, l, 1)
+    })
+}
+
+/// The 3dfx device's textures take the card's texture memory, its two
+/// units' 4 MB on a Voodoo2: when it is full, one that asks for video
+/// memory fails, and one that doesn't is in system memory.
+#[test]
+fn textures_fill_a_voodoo2s_texture_memory() {
+    let (program, data) = textures_program();
+    let mut cpu = card_machine("card_textures", Some(Board::Voodoo2), program);
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 9);
+    assert_eq!(r[1..], [0; 8], "{r:X?}");
+    let s = |slot| seen(&cpu, data, slot);
+    assert_eq!((s(0), s(1)), (4 << 20, 4 << 20), "total and free before");
+    assert_eq!(peek(&cpu, data + COUNT), 32, "128 KB textures in 4 MB");
+    assert_eq!(s(2), DDERR_OUTOFVIDEOMEMORY);
+    assert_eq!((s(3), s(4)), (4 << 20, 0), "total and free after");
+    assert_eq!(s(5) & DDSCAPS_SYSTEMMEMORY, DDSCAPS_SYSTEMMEMORY);
 }
