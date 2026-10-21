@@ -29,6 +29,11 @@ change listed below:
   `printf.c`, `scanf.c`, `signal.c`, `string.c`, `time.c` from
   `dlls/msvcrt/tests/`. `misc.c` is left out: it includes Wine's own
   `msvcrt.h`, which isn't among these files.
+- `winmm/`: `mci.c`, `midi.c`, `mixer.c`, `mmio.c`, `timer.c` and the
+  header they share, `winmm_test.h`, from `dlls/winmm/tests/`.
+  `generated.c` is left out: it checks the structures' sizes and
+  fields, and MinGW's headers have some of the MCI structures' WORD
+  fields as UINTs, so it doesn't build.
 
 `heap.c` has the values of the `FLG_HEAP_*` and `FLG_POOL_ENABLE_TAGGING`
 flags defined after its includes, from Wine's `winternl.h`, as MinGW's
@@ -45,16 +50,21 @@ may be used under.
 
 `runtime/compat.h` is rust-dos's own: the few names the tests take from
 Wine's headers that MinGW's lack (`__ms_va_list` and its macros,
-`LOCALE_RETURN_GENITIVE_NAMES`). Each test file is built with it
-included first, so the files stay unchanged.
+`LOCALE_RETURN_GENITIVE_NAMES`, `LPMIDIEVENT`). Each test file is built
+with it included first, so the files stay unchanged.
 
 `runtime/runtime.c` is rust-dos's own: the C runtime the kernel32,
-advapi32, user32 and gdi32 tests link in place of MSVCRT.DLL, so that
-they test the DLLs alone. It has the startup code and the parts of the
-C library that the framework and the tests use, written on KERNEL32
+advapi32, user32, gdi32 and winmm tests link in place of MSVCRT.DLL, so
+that they test the DLLs alone. It has the startup code and the parts of
+the C library that the framework and the tests use, written on KERNEL32
 alone. It also has `dump_region`, which `win.c` calls and Wine has in
 `msg.c`: `win.c` is built with `-Ddump_region=conformance_dump_region`
-to call that one.
+to call that one. And it has `sqrt`, which winmm's `timer.c` takes.
+
+`runtime/winmm.c` is rust-dos's own too: `mmsys_error`, the names of
+the multimedia errors, which winmm's tests other than `wave.c` and
+`capture.c` take from `wave.c`, as Wine builds them into one program.
+Each of those is linked with it.
 
 The user32 and gdi32 tests link the built-in USER32.DLL and GDI32.DLL.
 Each user32 program is linked with `resource.rc`, compiled with
@@ -153,6 +163,13 @@ The results that aren't clean, and why:
   button where XP makes it a push button.
 - user32 `win.c:4252` and `4264`: the clip box of a CS_PARENTDC
   window's DC, which Wine marks `todo_wine` too.
+- winmm `mci.c` tests MCI with the waveaudio device, which wave audio
+  provides (`mci::WAVE_DRIVER`) and which isn't installed without it:
+  its checks of opening one, and those that need it open, fail, and
+  the program ends at waveInGetNumDevs, which WINMM doesn't have yet.
+- winmm `mmio.c:77`, `244` and `497` skip: they read `msrle.avi`, a
+  file of Wine's tests built from a resource, which isn't among these
+  files.
 
 ## Adding tests
 
