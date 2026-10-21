@@ -1363,6 +1363,9 @@ fn a_textured_quad_shows_its_texels() {
     assert_rgb(&p, 48, 16, [0, 255, 0], 8);
     assert_rgb(&p, 16, 48, [0, 0, 255], 8);
     assert_rgb(&p, 48, 48, [255, 255, 255], 8);
+    // The last column and row are the quad's too.
+    assert_rgb(&p, 63, 0, [0, 255, 0], 8);
+    assert_rgb(&p, 63, 63, [255, 255, 255], 8);
 }
 
 #[test]

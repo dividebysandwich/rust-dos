@@ -573,7 +573,7 @@ impl Backlog {
             }
             let right = match job {
                 _ if access.pinned => width,
-                Job::Triangle { st, .. } if st.fbz_mode & 1 != 0 => st.clip().1 - 1,
+                Job::Triangle { st, .. } if st.fbz_mode & 1 != 0 => st.clip().1,
                 Job::Fastfill { x1, .. } => *x1,
                 _ => width,
             };
@@ -721,9 +721,7 @@ impl Cleared {
                     return;
                 }
                 x0 = x0.max(left);
-                if x1 >= right {
-                    x1 = right - 1;
-                }
+                x1 = x1.min(right);
             }
             let (x0, x1) = (x0.max(0), x1.min(w));
             if scry < 0 || scry >= h || x0 >= x1 {
