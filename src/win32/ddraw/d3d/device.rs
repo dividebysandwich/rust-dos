@@ -11,7 +11,9 @@
 //! IDirect3DDevice, 2 and 3; one made through IDirect3D7 only
 //! IDirect3DDevice7.
 
-use super::super::surface::{self, DDPF_RGB, DDSCAPS_SYSTEMMEMORY, DDSCAPS_ZBUFFER, MEM_VIDEO};
+use super::super::surface::{
+    self, DDPF_RGB, DDSCAPS_SYSTEMMEMORY, DDSCAPS_ZBUFFER, MEM_CARD, MEM_VIDEO,
+};
 use super::super::{
     DDERR_ALREADYINITIALIZED, DDERR_INVALIDCAPS, DDERR_INVALIDOBJECT, DDERR_INVALIDPARAMS,
     DDERR_INVALIDPIXELFORMAT, V_D3D1, V_D3D2, V_D3D3, V_D3D7, V_DEVICE1, V_DEVICE2, V_DEVICE3,
@@ -424,14 +426,16 @@ impl Device {
 }
 
 /// Whether `id` can be a render target: an error if it can't, as the
-/// HAL's driver had it. The surface is 16-bit 565 in video memory with
-/// DDSCAPS_3DDEVICE, and its depth buffer, if it has one, is 16-bit.
+/// HAL's driver had it. The surface is 16-bit 565 in video memory (or
+/// an add-on card's buffer) with DDSCAPS_3DDEVICE, and its depth buffer,
+/// if it has one, is 16-bit.
 pub fn check_target(cpu: &mut Cpu, id: u32) -> Result<(), u32> {
     let s = state(cpu).surface(id).cloned().ok_or(DDERR_INVALIDPARAMS)?;
     if s.caps[0] & surface::DDSCAPS_3DDEVICE == 0 {
         return Err(DDERR_INVALIDCAPS);
     }
-    if s.memory != MEM_VIDEO || s.caps[0] & DDSCAPS_SYSTEMMEMORY != 0 {
+    let video = s.memory == MEM_VIDEO || s.memory == MEM_CARD;
+    if !video || s.caps[0] & DDSCAPS_SYSTEMMEMORY != 0 {
         return Err(D3DERR_SURFACENOTINVIDMEM);
     }
     let f = s.format;

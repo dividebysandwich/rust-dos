@@ -1,10 +1,13 @@
 //! The built-in Windows' Direct3D (in DDRAW.DLL): Win32 programs that
-//! make a device on the Voodoo3's HAL in a 16-bit mode, put vertices
+//! make a device on the Voodoo3's HAL in a 16-bit mode, or on the 3dfx
+//! device of a Voodoo Graphics or Voodoo2 add-on card, put vertices
 //! through its transform and lighting, and draw with vertex buffers,
-//! DrawPrimitive and execute buffers. The programs are PE files made
-//! with rust-dos-pe's builder, their code assembled with iced, as in
-//! win32_ddraw_tests.rs. Each leaves its results in its data and spins,
-//! and the test looks at them while the program is still there.
+//! DrawPrimitive and execute buffers: flat, gouraud shaded, textured,
+//! depth tested, blended and fogged, the pixels read back with Lock.
+//! The programs are PE files made with rust-dos-pe's builder, their
+//! code assembled with iced, as in win32_ddraw_tests.rs. Each leaves its
+//! results in its data and spins, and the test looks at them while the
+//! program is still there.
 
 use iced_x86::code_asm::*;
 use rust_dos::cpu::{Cpu, HostConsole};
@@ -81,17 +84,26 @@ fn program(
 /// A machine with a Voodoo3 as its display adapter, the built-in
 /// Windows on and `program` loaded from the shell as T.EXE.
 fn machine(test: &str, program: Vec<u8>) -> Cpu {
+    machine_with(test, None, program)
+}
+
+/// A machine with a Voodoo3 as its display adapter or, given `card`,
+/// its usual adapter and that add-on card.
+fn machine_with(test: &str, card: Option<Board>, program: Vec<u8>) -> Cpu {
     let base = PathBuf::from("target/test_win32_d3d").join(test);
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).unwrap();
     fs::write(base.join("T.EXE"), program).unwrap();
     let mut cpu = Cpu::new(base);
-    let setup = VideoSetup {
-        adapter: Adapter::Voodoo3,
-        mono_monitor: false,
-    };
-    rust_dos::video::bios::install(&mut cpu.bus, setup);
-    cpu.bus.configure_voodoo(Some(Board::Voodoo3));
+    if card.is_none() {
+        let setup = VideoSetup {
+            adapter: Adapter::Voodoo3,
+            mono_monitor: false,
+        };
+        rust_dos::video::bios::install(&mut cpu.bus, setup);
+    }
+    cpu.bus
+        .configure_voodoo(Some(card.unwrap_or(Board::Voodoo3)));
     cpu.bus.win32.enabled = true;
     cpu.host_console = Some(HostConsole::default());
     cpu.load_shell();
@@ -155,15 +167,21 @@ const LOCKED: u32 = 0x1C;
 const VIEWPORT: u32 = 0x20;
 const DEVICE1: u32 = 0x24;
 const BUFFER: u32 = 0x28;
-/// The HRESULTs of the calls, in order.
-const RESULTS: u32 = 0x40;
+/// The HRESULTs of the calls, in order, and how many calls a scene
+/// made.
+const RESULTS: u32 = 0x1000;
 const DONE: u32 = 0xF0;
+const CALLS: u32 = 0xF4;
 const CLASS: u32 = 0x100;
 const IID_DD7: u32 = 0x110;
 const IID_D3D7: u32 = 0x120;
 const IID_HAL: u32 = 0x130;
 const IID_D3D2: u32 = 0x140;
 const IID_DEVICE1: u32 = 0x150;
+const IID_D3D3: u32 = 0x160;
+/// The 3dfx device's GUID, and the DDSCAPS2 of a back buffer.
+const CARD_GUID: u32 = 0x170;
+const BACK_CAPS: u32 = 0x180;
 const DESC: u32 = 0x200;
 const VB_DESC: u32 = 0x280;
 const VIEW: u32 = 0x2A0;
@@ -173,7 +191,10 @@ const STATS: u32 = 0x3E0;
 const VERTICES: u32 = 0x400;
 const EB_DESC: u32 = 0x500;
 const EXECUTE_DATA: u32 = 0x520;
-const DATA_SIZE: usize = 0x600;
+/// The 64x64 pixels a scene's target has at its top left, copied there
+/// by the program.
+const PIXELS: u32 = 0x2000;
+const DATA_SIZE: usize = 0x4000;
 
 /// The data the programs start with: the window class's name and the
 /// interface IDs.
@@ -219,6 +240,14 @@ fn data() -> Vec<u8> {
         0x957D,
         0x11D0,
         [0x89, 0xAB, 0x00, 0xA0, 0xC9, 0x05, 0x41, 0x29],
+    );
+    guid(
+        &mut data,
+        IID_D3D3,
+        0xBB22_3240,
+        0xE72B,
+        0x11D0,
+        [0xA9, 0xB4, 0x00, 0xAA, 0x00, 0xC0, 0x99, 0x3E],
     );
     data
 }
@@ -405,8 +434,15 @@ fn target_desc(data: &mut [u8], offset: u32, size: u32, w: u32, h: u32) {
 }
 
 /// Make a window, the DirectDraw object (with DirectDrawCreateEx for
-/// IDirectDraw7 when `ex`), and a 640x480 16-bit mode in full screen.
-fn start(a: &mut CodeAssembler, l: &Layout, c: &mut Calls, ex: bool) -> Result<(), IcedError> {
+/// IDirectDraw7 when `ex`; the 3dfx device's, with the GUID at
+/// CARD_GUID, when `card`), and a 640x480 16-bit mode in full screen.
+fn start(
+    a: &mut CodeAssembler,
+    l: &Layout,
+    c: &mut Calls,
+    ex: bool,
+    card: bool,
+) -> Result<(), IcedError> {
     c.api(
         a,
         l,
@@ -432,7 +468,12 @@ fn start(a: &mut CodeAssembler, l: &Layout, c: &mut Calls, ex: bool) -> Result<(
             a,
             l,
             DIRECT_DRAW_CREATE_EX,
-            &[Arg::I(0), Arg::At(DD), Arg::At(IID_DD7), Arg::I(0)],
+            &[
+                Arg::I(if card { l.at(CARD_GUID) as u32 } else { 0 }),
+                Arg::At(DD),
+                Arg::At(IID_DD7),
+                Arg::I(0),
+            ],
         )?;
     } else {
         c.api(
@@ -490,7 +531,7 @@ fn process_program() -> (Vec<u8>, u32) {
     );
     program(&[USER32, DDRAW], &d, |a, l| {
         let mut c = Calls { next: 0 };
-        start(a, l, &mut c, true)?;
+        start(a, l, &mut c, true, false)?;
         c.com(
             a,
             l,
@@ -654,9 +695,10 @@ fn execute_program() -> (Vec<u8>, u32) {
     put32(&mut d, EXECUTE_DATA + 12, 96);
     put32(&mut d, EXECUTE_DATA + 16, 36);
     put32(&mut d, STATS, 24);
+    put32(&mut d, LOCK_DESC, 108);
     program(&[USER32, DDRAW], &d, |a, l| {
         let mut c = Calls { next: 0 };
-        start(a, l, &mut c, false)?;
+        start(a, l, &mut c, false, false)?;
         c.com(
             a,
             l,
@@ -735,18 +777,705 @@ fn execute_program() -> (Vec<u8>, u32) {
         )?;
         c.com(a, l, DEVICE, DEV2_END_SCENE, &[])?;
         c.com(a, l, DEVICE, DEV2_GET_STATS, &[Arg::At(STATS)])?;
+        c.com(
+            a,
+            l,
+            TARGET,
+            SURF_LOCK,
+            &[
+                Arg::I(0),
+                Arg::At(LOCK_DESC),
+                Arg::I(DDLOCK_WAIT),
+                Arg::I(0),
+            ],
+        )?;
         finish(a, l)
     })
 }
 
 #[test]
-fn an_execute_buffer_and_draw_primitive_count_in_get_stats() {
+fn an_execute_buffer_and_draw_primitive_draw_and_count_in_get_stats() {
     let (exe, data) = execute_program();
     let mut cpu = machine("execute", exe);
     run_until_done(&mut cpu, data);
-    let r = results(&cpu, data, 21);
+    let r = results(&cpu, data, 22);
     assert!(r[1..].iter().all(|&hr| hr == 0), "results: {r:X?}");
     // D3DSTATS: triangles, lines, points, spans and vertices processed.
     let stats = [4, 8, 12, 20].map(|o| peek(&cpu, data + STATS + o));
     assert_eq!(stats, [2, 0, 0, 6]);
+    // The white triangle, on the target's black.
+    let bits = peek(&cpu, data + LOCK_DESC + 0x24);
+    let pitch = peek(&cpu, data + LOCK_DESC + 0x10);
+    let pixel = |x: u32, y: u32| {
+        let at = bits + y * pitch + 2 * x;
+        (peek(&cpu, at & !3) >> (8 * (at & 2))) as u16
+    };
+    assert_eq!(pixel(32, 20), 0xFFFF);
+    assert_eq!(pixel(32, 60), 0);
+}
+
+// Drawing: scenes of screen vertices drawn on a 64x64 target, which the
+// program then locks for the test to read its pixels.
+
+/// The DDSURFACEDESC2 of the render target's Lock, of a z-buffer, of a
+/// texture and of the texture's Lock; the z-buffer's and the texture's
+/// interfaces; the texture's texels; a D3DRECT; the scene's vertices.
+const LOCK_DESC: u32 = 0x600;
+const Z_DESC: u32 = 0x680;
+const TEX_DESC: u32 = 0x700;
+const ZBUF: u32 = 0x780;
+const TEXTURE: u32 = 0x784;
+const TEX_LOCK_DESC: u32 = 0x800;
+const TEXELS: u32 = 0x880;
+const RECT: u32 = 0x900;
+const SCENE: u32 = 0xA00;
+
+const DDSD_PIXELFORMAT: u32 = 0x1000;
+const DDSCAPS_TEXTURE: u32 = 0x1000;
+const DDSCAPS_ZBUFFER: u32 = 0x2_0000;
+const DDSCAPS_VIDEOMEMORY: u32 = 0x4000;
+const DDSCAPS_BACKBUFFER: u32 = 0x4;
+const DDSCAPS_COMPLEX: u32 = 0x8;
+const DDSCAPS_FLIP: u32 = 0x10;
+const DDSCAPS_PRIMARYSURFACE: u32 = 0x200;
+const DDSD_BACKBUFFERCOUNT: u32 = 0x20;
+const DDPF_RGB: u32 = 0x40;
+const DDPF_ZBUFFER: u32 = 0x400;
+const DDLOCK_WAIT: u32 = 1;
+const D3DCLEAR_TARGET: u32 = 1;
+const D3DCLEAR_ZBUFFER: u32 = 2;
+/// D3DFVF_XYZRHW, DIFFUSE, SPECULAR and TEX1: a D3DTLVERTEX.
+const TL_FVF: u32 = 0x1C4;
+
+const SURF_ADD_ATTACHED_SURFACE: u32 = 3;
+const SURF_GET_ATTACHED_SURFACE: u32 = 12;
+const SURF_LOCK: u32 = 25;
+const SURF_UNLOCK: u32 = 32;
+const D3D3_CREATE_VIEWPORT: u32 = 6;
+const D3D3_CREATE_DEVICE: u32 = 8;
+const DEV3_ADD_VIEWPORT: u32 = 5;
+const DEV3_BEGIN_SCENE: u32 = 9;
+const DEV3_END_SCENE: u32 = 10;
+const DEV3_SET_CURRENT_VIEWPORT: u32 = 12;
+const DEV3_SET_RENDER_STATE: u32 = 22;
+const DEV3_DRAW_PRIMITIVE: u32 = 28;
+const VP3_CLEAR2: u32 = 20;
+const DEV7_CLEAR: u32 = 10;
+const DEV7_SET_RENDER_STATE: u32 = 20;
+const DEV7_DRAW_PRIMITIVE: u32 = 25;
+const DEV7_SET_TEXTURE: u32 = 35;
+
+// Render states.
+const RS_ZENABLE: u32 = 7;
+const RS_SHADEMODE: u32 = 9;
+const RS_SRCBLEND: u32 = 19;
+const RS_DESTBLEND: u32 = 20;
+const RS_ALPHABLENDENABLE: u32 = 27;
+const RS_FOGENABLE: u32 = 28;
+const RS_FOGCOLOR: u32 = 34;
+const RS_FOGTABLEMODE: u32 = 35;
+const RS_FOGSTART: u32 = 36;
+const RS_FOGEND: u32 = 37;
+
+/// A D3DTLVERTEX: its position, rhw, diffuse and specular colors and
+/// texture coordinates.
+#[derive(Clone, Copy)]
+struct Tl {
+    x: f32,
+    y: f32,
+    z: f32,
+    rhw: f32,
+    diffuse: u32,
+    specular: u32,
+    u: f32,
+    v: f32,
+}
+
+fn tl(x: f32, y: f32, z: f32, diffuse: u32) -> Tl {
+    Tl {
+        x,
+        y,
+        z,
+        rhw: 1.0,
+        diffuse,
+        specular: 0xFF00_0000,
+        u: 0.0,
+        v: 0.0,
+    }
+}
+
+/// Two triangles covering the rectangle from (x0, y0) to (x1, y1), its
+/// texture coordinates 0 to 1, all with depth `z` and `color`.
+fn quad(x0: f32, y0: f32, x1: f32, y1: f32, z: f32, color: u32) -> Vec<Tl> {
+    let at = |x: f32, y: f32, u: f32, v: f32| Tl {
+        u,
+        v,
+        ..tl(x, y, z, color)
+    };
+    let (a, b) = (at(x0, y0, 0.0, 0.0), at(x1, y0, 1.0, 0.0));
+    let (c, d) = (at(x0, y1, 0.0, 1.0), at(x1, y1, 1.0, 1.0));
+    vec![a, b, c, b, d, c]
+}
+
+/// What a scene does after its Clear.
+enum Step {
+    /// SetRenderState.
+    State(u32, u32),
+    /// DrawPrimitive of a triangle list.
+    Draw(Vec<Tl>),
+}
+
+/// Which Direct3D draws a scene.
+#[derive(Clone, Copy, PartialEq)]
+enum Api {
+    /// Direct3D 6: IDirect3DDevice3, cleared through its viewport.
+    D3D6,
+    /// Direct3D 7: IDirect3DDevice7.
+    D3D7,
+}
+
+struct Scene {
+    api: Api,
+    /// The add-on card whose 3dfx device draws (Direct3D 7), into the
+    /// back buffer of a 640x480 flip chain; the Voodoo3's HAL if None,
+    /// into a 64x64 surface.
+    card: Option<Board>,
+    /// The color the target is cleared with, ARGB.
+    clear: u32,
+    /// Whether the target has a 16-bit z-buffer, cleared to 1.
+    zbuffer: bool,
+    /// An 8x8 565 texture on stage 0 (Direct3D 7).
+    texture: Option<[u16; 64]>,
+    steps: Vec<Step>,
+}
+
+/// A program drawing `scene`, which ends with the target locked.
+fn scene_program(scene: &Scene) -> (Vec<u8>, u32) {
+    let mut d = data();
+    let size = if scene.api == Api::D3D7 { 124 } else { 108 };
+    let (zw, zh) = if let Some(board) = scene.card {
+        let d1 = if board == Board::Voodoo2 {
+            (0x472B_EA00, 0x40DF, 0x11D1)
+        } else {
+            (0x3A0C_FD01, 0x9320, 0x11CF)
+        };
+        let d4 = if board == Board::Voodoo2 {
+            [0xA9, 0xDF, 0x00, 0x60, 0x97, 0xC2, 0xED, 0xB2]
+        } else {
+            [0xAC, 0xA1, 0x00, 0xA0, 0x24, 0x13, 0xC2, 0xE2]
+        };
+        guid(&mut d, CARD_GUID, d1.0, d1.1, d1.2, d4);
+        put32(&mut d, DESC, size);
+        put32(&mut d, DESC + 0x04, DDSD_CAPS | DDSD_BACKBUFFERCOUNT);
+        put32(&mut d, DESC + 0x14, 1);
+        let caps = DDSCAPS_PRIMARYSURFACE | DDSCAPS_FLIP | DDSCAPS_COMPLEX | DDSCAPS_3DDEVICE;
+        put32(&mut d, DESC + 0x68, caps);
+        put32(&mut d, BACK_CAPS, DDSCAPS_BACKBUFFER);
+        (640, 480)
+    } else {
+        target_desc(&mut d, DESC, size, 64, 64);
+        (64, 64)
+    };
+    put32(&mut d, LOCK_DESC, size);
+    put32(&mut d, TEX_LOCK_DESC, 124);
+    // D3DVIEWPORT7: all of the surface, depths 0 to 1; or D3DVIEWPORT2.
+    if scene.api == Api::D3D7 {
+        put32(&mut d, VIEW + 8, 64);
+        put32(&mut d, VIEW + 12, 64);
+        put_f32s(&mut d, VIEW + 16, &[0.0, 1.0]);
+    } else {
+        put32(&mut d, VIEW, 44);
+        put32(&mut d, VIEW + 12, 64);
+        put32(&mut d, VIEW + 16, 64);
+        put_f32s(&mut d, VIEW + 20, &[-1.0, 1.0, 2.0, 2.0, 0.0, 1.0]);
+    }
+    put32(&mut d, RECT + 8, 64);
+    put32(&mut d, RECT + 12, 64);
+    // The z-buffer's and the texture's DDSURFACEDESC2.
+    let flags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+    put32(&mut d, Z_DESC, size);
+    put32(&mut d, Z_DESC + 0x04, flags);
+    put32(&mut d, Z_DESC + 0x08, zh);
+    put32(&mut d, Z_DESC + 0x0C, zw);
+    put32(&mut d, Z_DESC + 0x48, 32);
+    put32(&mut d, Z_DESC + 0x4C, DDPF_ZBUFFER);
+    put32(&mut d, Z_DESC + 0x54, 16);
+    put32(&mut d, Z_DESC + 0x5C, 0xFFFF);
+    put32(&mut d, Z_DESC + 0x68, DDSCAPS_ZBUFFER | DDSCAPS_VIDEOMEMORY);
+    put32(&mut d, TEX_DESC, 124);
+    put32(&mut d, TEX_DESC + 0x04, flags);
+    put32(&mut d, TEX_DESC + 0x08, 8);
+    put32(&mut d, TEX_DESC + 0x0C, 8);
+    put32(&mut d, TEX_DESC + 0x48, 32);
+    put32(&mut d, TEX_DESC + 0x4C, DDPF_RGB);
+    put32(&mut d, TEX_DESC + 0x54, 16);
+    put32(&mut d, TEX_DESC + 0x58, 0xF800);
+    put32(&mut d, TEX_DESC + 0x5C, 0x07E0);
+    put32(&mut d, TEX_DESC + 0x60, 0x001F);
+    put32(&mut d, TEX_DESC + 0x68, DDSCAPS_TEXTURE);
+    if let Some(texels) = &scene.texture {
+        for (i, t) in texels.iter().enumerate() {
+            put(&mut d, TEXELS + 2 * i as u32, &t.to_le_bytes());
+        }
+    }
+    // The vertices of the draws, one after another.
+    let mut draws = Vec::new();
+    let mut at = SCENE;
+    for step in &scene.steps {
+        if let Step::Draw(verts) = step {
+            draws.push(at);
+            for v in verts {
+                put_f32s(&mut d, at, &[v.x, v.y, v.z, v.rhw]);
+                put32(&mut d, at + 16, v.diffuse);
+                put32(&mut d, at + 20, v.specular);
+                put_f32s(&mut d, at + 24, &[v.u, v.v]);
+                at += 32;
+            }
+        }
+    }
+    assert!(at <= RESULTS, "too many vertices");
+    let ex = scene.api == Api::D3D7;
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, ex, scene.card.is_some())?;
+        let iid = if ex { IID_D3D7 } else { IID_D3D3 };
+        c.com(a, l, DD, QUERY_INTERFACE, &[Arg::At(iid), Arg::At(D3D)])?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(DESC), Arg::At(TARGET), Arg::I(0)],
+        )?;
+        if scene.card.is_some() {
+            // The flip chain's back buffer is the target.
+            c.com(
+                a,
+                l,
+                TARGET,
+                SURF_GET_ATTACHED_SURFACE,
+                &[Arg::At(BACK_CAPS), Arg::At(TARGET)],
+            )?;
+        }
+        if scene.zbuffer {
+            c.com(
+                a,
+                l,
+                DD,
+                DD_CREATE_SURFACE,
+                &[Arg::At(Z_DESC), Arg::At(ZBUF), Arg::I(0)],
+            )?;
+            c.com(a, l, TARGET, SURF_ADD_ATTACHED_SURFACE, &[Arg::Val(ZBUF)])?;
+        }
+        let (set_state, draw) = if ex {
+            c.com(
+                a,
+                l,
+                D3D,
+                D3D7_CREATE_DEVICE,
+                &[Arg::At(IID_HAL), Arg::Val(TARGET), Arg::At(DEVICE)],
+            )?;
+            c.com(a, l, DEVICE, DEV7_SET_VIEWPORT, &[Arg::At(VIEW)])?;
+            if scene.texture.is_some() {
+                c.com(
+                    a,
+                    l,
+                    DD,
+                    DD_CREATE_SURFACE,
+                    &[Arg::At(TEX_DESC), Arg::At(TEXTURE), Arg::I(0)],
+                )?;
+                c.com(
+                    a,
+                    l,
+                    TEXTURE,
+                    SURF_LOCK,
+                    &[
+                        Arg::I(0),
+                        Arg::At(TEX_LOCK_DESC),
+                        Arg::I(DDLOCK_WAIT),
+                        Arg::I(0),
+                    ],
+                )?;
+                copy(a, l, TEXELS, TEX_LOCK_DESC + 0x24, 128)?;
+                c.com(a, l, TEXTURE, SURF_UNLOCK, &[Arg::I(0)])?;
+                c.com(
+                    a,
+                    l,
+                    DEVICE,
+                    DEV7_SET_TEXTURE,
+                    &[Arg::I(0), Arg::Val(TEXTURE)],
+                )?;
+            }
+            let mut what = D3DCLEAR_TARGET;
+            if scene.zbuffer {
+                what |= D3DCLEAR_ZBUFFER;
+            }
+            c.com(
+                a,
+                l,
+                DEVICE,
+                DEV7_CLEAR,
+                &[
+                    Arg::I(0),
+                    Arg::I(0),
+                    Arg::I(what),
+                    Arg::I(scene.clear),
+                    Arg::I(1f32.to_bits()),
+                    Arg::I(0),
+                ],
+            )?;
+            c.com(a, l, DEVICE, DEV7_BEGIN_SCENE, &[])?;
+            (DEV7_SET_RENDER_STATE, DEV7_DRAW_PRIMITIVE)
+        } else {
+            c.com(
+                a,
+                l,
+                D3D,
+                D3D3_CREATE_DEVICE,
+                &[
+                    Arg::At(IID_HAL),
+                    Arg::Val(TARGET),
+                    Arg::At(DEVICE),
+                    Arg::I(0),
+                ],
+            )?;
+            c.com(
+                a,
+                l,
+                D3D,
+                D3D3_CREATE_VIEWPORT,
+                &[Arg::At(VIEWPORT), Arg::I(0)],
+            )?;
+            c.com(a, l, DEVICE, DEV3_ADD_VIEWPORT, &[Arg::Val(VIEWPORT)])?;
+            c.com(a, l, VIEWPORT, VP2_SET_VIEWPORT2, &[Arg::At(VIEW)])?;
+            c.com(
+                a,
+                l,
+                DEVICE,
+                DEV3_SET_CURRENT_VIEWPORT,
+                &[Arg::Val(VIEWPORT)],
+            )?;
+            let mut what = D3DCLEAR_TARGET;
+            if scene.zbuffer {
+                what |= D3DCLEAR_ZBUFFER;
+            }
+            c.com(
+                a,
+                l,
+                VIEWPORT,
+                VP3_CLEAR2,
+                &[
+                    Arg::I(1),
+                    Arg::At(RECT),
+                    Arg::I(what),
+                    Arg::I(scene.clear),
+                    Arg::I(1f32.to_bits()),
+                    Arg::I(0),
+                ],
+            )?;
+            c.com(a, l, DEVICE, DEV3_BEGIN_SCENE, &[])?;
+            (DEV3_SET_RENDER_STATE, DEV3_DRAW_PRIMITIVE)
+        };
+        let mut draws = draws.iter();
+        for step in &scene.steps {
+            match step {
+                Step::State(s, v) => {
+                    c.com(a, l, DEVICE, set_state, &[Arg::I(*s), Arg::I(*v)])?;
+                }
+                Step::Draw(verts) => {
+                    let at = *draws.next().unwrap();
+                    c.com(
+                        a,
+                        l,
+                        DEVICE,
+                        draw,
+                        &[
+                            Arg::I(D3DPT_TRIANGLELIST),
+                            Arg::I(TL_FVF),
+                            Arg::At(at),
+                            Arg::I(verts.len() as u32),
+                            Arg::I(0),
+                        ],
+                    )?;
+                }
+            }
+        }
+        let end = if ex { DEV7_END_SCENE } else { DEV3_END_SCENE };
+        c.com(a, l, DEVICE, end, &[])?;
+        c.com(
+            a,
+            l,
+            TARGET,
+            SURF_LOCK,
+            &[
+                Arg::I(0),
+                Arg::At(LOCK_DESC),
+                Arg::I(DDLOCK_WAIT),
+                Arg::I(0),
+            ],
+        )?;
+        a.mov(dword_ptr(l.at(CALLS)), c.next)?;
+        // The top left 64x64 pixels into PIXELS, a row at a time.
+        a.mov(esi, dword_ptr(l.at(LOCK_DESC + 0x24)))?;
+        a.mov(edi, l.at(PIXELS) as u32)?;
+        a.mov(edx, 64)?;
+        a.cld()?;
+        let mut row = a.create_label();
+        a.set_label(&mut row)?;
+        a.mov(ecx, 32)?;
+        a.rep().movsd()?;
+        a.add(esi, dword_ptr(l.at(LOCK_DESC + 0x10)))?;
+        a.sub(esi, 128)?;
+        a.dec(edx)?;
+        a.jnz(row)?;
+        finish(a, l)
+    })
+}
+
+/// The render target's pixels after `scene`, row after row, 5-6-5,
+/// once every call in it succeeded.
+fn draw_scene(test: &str, scene: &Scene) -> Vec<u16> {
+    let (exe, data) = scene_program(scene);
+    let mut cpu = machine_with(test, scene.card, exe);
+    run_until_done(&mut cpu, data);
+    let n = peek(&cpu, data + CALLS);
+    let r = results(&cpu, data, n);
+    assert!(r[1..].iter().all(|&hr| hr == 0), "results: {r:X?}");
+    (0..64 * 64)
+        .map(|i| {
+            let at = data + PIXELS + 2 * i;
+            (peek(&cpu, at & !3) >> (8 * (at & 2))) as u16
+        })
+        .collect()
+}
+
+/// The 5-6-5 pixel at (x, y) as 8-bit red, green and blue.
+fn rgb(pixels: &[u16], x: usize, y: usize) -> [u32; 3] {
+    let p = pixels[y * 64 + x] as u32;
+    let (r, g, b) = (p >> 11, (p >> 5) & 0x3F, p & 0x1F);
+    [r << 3 | r >> 2, g << 2 | g >> 4, b << 3 | b >> 2]
+}
+
+/// Whether each channel of `got` is within `tolerance` of `want`.
+fn near(got: [u32; 3], want: [u32; 3], tolerance: u32) -> bool {
+    got.iter()
+        .zip(want)
+        .all(|(&g, w)| g.abs_diff(w) <= tolerance)
+}
+
+#[track_caller]
+fn assert_rgb(pixels: &[u16], x: usize, y: usize, want: [u32; 3], tolerance: u32) {
+    let got = rgb(pixels, x, y);
+    assert!(
+        near(got, want, tolerance),
+        "pixel ({x}, {y}): {got:?}, expected {want:?}"
+    );
+}
+
+const RED: u32 = 0xFFFF_0000;
+const GREEN: u32 = 0xFF00_FF00;
+const BLUE: u32 = 0xFF00_00FF;
+const WHITE: u32 = 0xFFFF_FFFF;
+
+/// A triangle with a red, a green and a blue corner, over most of the
+/// target's top left half.
+fn corners() -> Vec<Tl> {
+    vec![
+        tl(4.0, 4.0, 0.5, RED),
+        tl(60.0, 4.0, 0.5, GREEN),
+        tl(4.0, 60.0, 0.5, BLUE),
+    ]
+}
+
+#[test]
+fn a_flat_shaded_triangle_has_its_first_vertex_color() {
+    let scene = Scene {
+        api: Api::D3D7,
+        card: None,
+        clear: 0xFF00_0080,
+        zbuffer: false,
+        texture: None,
+        steps: vec![Step::State(RS_SHADEMODE, 1), Step::Draw(corners())],
+    };
+    let p = draw_scene("flat", &scene);
+    for (x, y) in [(8, 8), (40, 10), (10, 40), (20, 20)] {
+        assert_rgb(&p, x, y, [255, 0, 0], 0);
+    }
+    // Outside the triangle, the clear color.
+    assert_rgb(&p, 60, 60, [0, 0, 0x84], 4);
+    assert_rgb(&p, 0, 0, [0, 0, 0x84], 4);
+}
+
+#[test]
+fn a_gouraud_shaded_triangle_blends_its_corners() {
+    let scene = Scene {
+        api: Api::D3D7,
+        card: None,
+        clear: 0,
+        zbuffer: false,
+        texture: None,
+        steps: vec![Step::Draw(corners())],
+    };
+    let p = draw_scene("gouraud", &scene);
+    // Near each corner, mostly its color; between them, all three.
+    assert_rgb(&p, 5, 5, [255, 0, 0], 16);
+    assert_rgb(&p, 57, 5, [0, 255, 0], 24);
+    assert_rgb(&p, 5, 57, [0, 0, 255], 24);
+    assert_rgb(&p, 22, 22, [85, 85, 85], 24);
+    assert_rgb(&p, 60, 60, [0, 0, 0], 0);
+}
+
+#[test]
+fn direct3d_6_clears_through_its_viewport_and_draws() {
+    let scene = Scene {
+        api: Api::D3D6,
+        card: None,
+        clear: 0xFF00_0080,
+        zbuffer: false,
+        texture: None,
+        steps: vec![Step::Draw(corners())],
+    };
+    let p = draw_scene("d3d6", &scene);
+    assert_rgb(&p, 5, 5, [255, 0, 0], 16);
+    assert_rgb(&p, 22, 22, [85, 85, 85], 24);
+    assert_rgb(&p, 60, 60, [0, 0, 0x84], 4);
+}
+
+#[test]
+fn a_textured_quad_shows_its_texels() {
+    // Red, green, blue and white quarters.
+    let texels = std::array::from_fn(|i| match (i % 8 >= 4, i / 8 >= 4) {
+        (false, false) => 0xF800,
+        (true, false) => 0x07E0,
+        (false, true) => 0x001F,
+        (true, true) => 0xFFFF,
+    });
+    let scene = Scene {
+        api: Api::D3D7,
+        card: None,
+        clear: 0,
+        zbuffer: false,
+        texture: Some(texels),
+        steps: vec![Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.5, WHITE))],
+    };
+    let p = draw_scene("textured", &scene);
+    assert_rgb(&p, 16, 16, [255, 0, 0], 8);
+    assert_rgb(&p, 48, 16, [0, 255, 0], 8);
+    assert_rgb(&p, 16, 48, [0, 0, 255], 8);
+    assert_rgb(&p, 48, 48, [255, 255, 255], 8);
+}
+
+#[test]
+fn the_z_buffer_keeps_the_nearer_of_two_quads() {
+    let scene = Scene {
+        api: Api::D3D7,
+        card: None,
+        clear: 0,
+        zbuffer: true,
+        texture: None,
+        steps: vec![
+            Step::State(RS_ZENABLE, 1),
+            Step::Draw(quad(0.0, 0.0, 32.0, 64.0, 0.25, GREEN)),
+            Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.75, RED)),
+        ],
+    };
+    let p = draw_scene("ztest", &scene);
+    assert_rgb(&p, 10, 30, [0, 255, 0], 0);
+    assert_rgb(&p, 50, 30, [255, 0, 0], 0);
+}
+
+#[test]
+fn alpha_blending_mixes_with_the_target() {
+    let scene = Scene {
+        api: Api::D3D7,
+        card: None,
+        clear: BLUE,
+        zbuffer: false,
+        texture: None,
+        steps: vec![
+            Step::State(RS_ALPHABLENDENABLE, 1),
+            Step::State(RS_SRCBLEND, 5),
+            Step::State(RS_DESTBLEND, 6),
+            Step::Draw(quad(0.0, 0.0, 32.0, 64.0, 0.5, 0x80FF_0000)),
+        ],
+    };
+    let p = draw_scene("blend", &scene);
+    assert_rgb(&p, 16, 30, [128, 0, 127], 12);
+    assert_rgb(&p, 48, 30, [0, 0, 255], 0);
+}
+
+#[test]
+fn vertex_fog_and_table_fog_mix_in_the_fog_color() {
+    let fogged = |alpha: u32, x0: f32, x1: f32| {
+        quad(x0, 0.0, x1, 32.0, 0.5, WHITE)
+            .into_iter()
+            .map(|v| Tl {
+                specular: alpha << 24,
+                ..v
+            })
+            .collect()
+    };
+    // Table fog by W, linear from 0 to 4: half at W 2.
+    let table = quad(0.0, 32.0, 64.0, 64.0, 0.5, WHITE)
+        .into_iter()
+        .map(|v| Tl { rhw: 0.5, ..v })
+        .collect();
+    let scene = Scene {
+        api: Api::D3D7,
+        card: None,
+        clear: 0,
+        zbuffer: false,
+        texture: None,
+        steps: vec![
+            Step::State(RS_FOGENABLE, 1),
+            Step::State(RS_FOGCOLOR, 0x00_FF00),
+            Step::Draw(fogged(0, 0.0, 32.0)),
+            Step::Draw(fogged(0xFF, 32.0, 64.0)),
+            Step::State(RS_FOGTABLEMODE, 3),
+            Step::State(RS_FOGSTART, 0f32.to_bits()),
+            Step::State(RS_FOGEND, 4f32.to_bits()),
+            Step::Draw(table),
+        ],
+    };
+    let p = draw_scene("fog", &scene);
+    // All fog, none, and half.
+    assert_rgb(&p, 16, 16, [0, 255, 0], 8);
+    assert_rgb(&p, 48, 16, [255, 255, 255], 8);
+    assert_rgb(&p, 32, 48, [128, 255, 128], 20);
+}
+
+/// A scene with the add-on card `board`: flat, gouraud, z-tested and
+/// textured quads on its back buffer.
+fn card_scene(test: &str, board: Board) {
+    let texels = std::array::from_fn(|i| if i % 8 < 4 { 0xFFFF } else { 0x001F });
+    let scene = Scene {
+        api: Api::D3D7,
+        card: Some(board),
+        clear: 0xFF00_0080,
+        zbuffer: true,
+        texture: Some(texels),
+        steps: vec![
+            Step::State(RS_ZENABLE, 1),
+            Step::Draw(quad(0.0, 0.0, 32.0, 32.0, 0.25, GREEN)),
+            Step::Draw(quad(0.0, 0.0, 64.0, 32.0, 0.75, WHITE)),
+            Step::Draw(quad(0.0, 32.0, 64.0, 64.0, 0.5, WHITE)),
+        ],
+    };
+    let p = draw_scene(test, &scene);
+    // The nearer green quad, the texture's white and blue halves under
+    // it, and the farther quad beside it.
+    assert_rgb(&p, 8, 16, [0, 255, 0], 8);
+    assert_rgb(&p, 48, 16, [0, 0, 255], 8);
+    assert_rgb(&p, 8, 48, [255, 255, 255], 8);
+    assert_rgb(&p, 48, 48, [0, 0, 255], 8);
+}
+
+#[test]
+fn the_3dfx_device_draws_on_a_voodoo2() {
+    card_scene("card_v2", Board::Voodoo2);
+}
+
+#[test]
+fn the_3dfx_device_draws_on_a_voodoo_graphics() {
+    card_scene("card_v1", Board::Standard);
 }

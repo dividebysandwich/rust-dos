@@ -11,8 +11,14 @@
 //! operations those are. `Card` then takes the pipeline's screen
 //! vertices and draws them with Glide's triangle setup.
 //!
+//! On a Voodoo Graphics or Voodoo2 add-on card (the 3dfx device of
+//! `voodoo.rs`) the render target is the card's front or back buffer,
+//! drawn into through Glide's render buffer, and the depth buffer is
+//! its auxiliary buffer.
+//!
 //! Textures are copied into a heap of the card's memory, a block of
-//! video memory the HAL takes from DirectDraw when it first draws, in
+//! video memory the HAL takes from DirectDraw when it first draws (on
+//! an add-on card, each texture unit's own memory), in
 //! the formats the card samples (565, 1555, 4444 and 8-bit paletted),
 //! power-of-two sizes up to 256 and aspects up to 8 to 1. A texture is
 //! copied again when its surface changed (its uniqueness value, which
@@ -21,8 +27,8 @@
 //! with D3DRENDERSTATE_COLORKEYENABLE, is copied as 1555 with the keyed
 //! texels' alpha 0, and the alpha test leaves them out.
 
-use super::super::surface::{self, DDPF_PALETTEINDEXED8, KEY_SRC_BLT, Surface};
-use super::super::{current_pid, display, state};
+use super::super::surface::{self, DDPF_PALETTEINDEXED8, KEY_SRC_BLT, MEM_CARD, Surface};
+use super::super::{current_pid, display, state, voodoo};
 use super::device::{
     Device, RS_FOGENABLE, RS_FOGTABLEMODE, RS_ZENABLE, RS_ZFUNC, RS_ZWRITEENABLE, TA_TEXTURE,
     TOP_ADD, TOP_BLENDTEXTUREALPHA, TOP_DISABLE, TOP_SELECTARG1, TOP_SELECTARG2, TSS_ADDRESSU,
@@ -35,11 +41,13 @@ use crate::win32::glide::api::{self, TexInfo, TmuVertex, Vertex};
 use crate::win32::glide::hw;
 
 /// A texture in the heap: the surface it is of and its uniqueness value
-/// then, what kind of copy it is (`variant`), where it is, and when it
-/// was last drawn with.
+/// then, what kind of copy it is (`variant`), the texture unit whose
+/// memory it is in (0 on a Banshee or Voodoo3, whose units share it),
+/// where it is, and when it was last drawn with.
 #[derive(Clone, Debug, Default)]
 pub struct Cached {
     pub surface: u32,
+    pub tmu: u32,
     pub uniqueness: u32,
     pub variant: u32,
     pub start: u32,
@@ -51,6 +59,7 @@ pub struct Cached {
 
 crate::state_fields!(Cached {
     surface,
+    tmu,
     uniqueness,
     variant,
     start,
@@ -64,7 +73,8 @@ crate::state_fields!(Cached {
 #[derive(Clone, Debug, Default)]
 pub struct Hal {
     /// The process whose devices draw, and the texture heap's block of
-    /// video memory and its size (0: none).
+    /// video memory and its size (0: none). An add-on card has no block:
+    /// its texture units' memories are the heap.
     pub pid: u32,
     pub heap: u32,
     pub heap_len: u32,
@@ -121,21 +131,37 @@ pub struct Card {
 /// state for it: None draws nothing (no card, the render target isn't
 /// in its memory, or another process has Glide open).
 pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
-    if !hw::banshee(cpu) {
-        return None;
-    }
+    let banshee = hw::banshee(cpu);
     let pid = current_pid(cpu);
     let owner = crate::win32::glide::state(cpu).owner;
     if owner != 0 && owner != pid {
         return None;
     }
-    let (target_at, target_pitch) = surface::card_memory(cpu, d.target)?;
     let (width, height) = state(cpu).surface(d.target).map(|s| (s.width, s.height))?;
-    if !crate::win32::glide::state(cpu).gc.active {
-        api::attach(cpu, width, height);
+    if banshee {
+        let (target_at, target_pitch) = surface::card_memory(cpu, d.target)?;
+        if !crate::win32::glide::state(cpu).gc.active {
+            api::attach(cpu, width, height);
+        }
+        api::set_render_target(cpu, target_at, target_pitch, width, height);
+    } else {
+        // The add-on card, open for this process by SetDisplayMode.
+        let buffer = voodoo::card_buffer(cpu, d.target)?;
+        if buffer > api::BUFFER_BACKBUFFER || owner != pid {
+            return None;
+        }
+        if !crate::win32::glide::state(cpu).gc.active {
+            return None;
+        }
+        if hal(cpu).pid != pid {
+            *hal(cpu) = Hal {
+                pid,
+                ..Hal::default()
+            };
+        }
+        api::render_buffer(cpu, buffer);
     }
     hal(cpu).clock = hal(cpu).clock.wrapping_add(1);
-    api::set_render_target(cpu, target_at, target_pitch, width, height);
 
     // The viewport's rectangle.
     let m = &setup.view_map;
@@ -180,13 +206,21 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
     api::fog_color_value(cpu, d.state(RS_FOGCOLOR) & 0xFF_FFFF);
 
     // Depth: the render target's depth buffer, Z or W; W when Z carries
-    // the fog.
-    let z = super::device::z_buffer(cpu, d.target).and_then(|z| surface::card_memory(cpu, z));
+    // the fog. On an add-on card it is the auxiliary buffer.
+    let z = super::device::z_buffer(cpu, d.target).and_then(|z| {
+        if banshee {
+            surface::card_memory(cpu, z).map(Some)
+        } else {
+            (voodoo::card_buffer(cpu, z) == Some(api::BUFFER_AUXBUFFER)).then_some(None)
+        }
+    });
     let zenable = d.state(RS_ZENABLE);
     let mut w_depth = false;
     match z {
-        Some((at, pitch)) if zenable != 0 => {
-            api::set_depth_buffer(cpu, at, pitch);
+        Some(place) if zenable != 0 => {
+            if let Some((at, pitch)) = place {
+                api::set_depth_buffer(cpu, at, pitch);
+            }
             w_depth = zenable == 2 || fog_z;
             let mode = if w_depth {
                 api::DEPTHBUFFER_WBUFFER
@@ -491,7 +525,7 @@ fn load(
     tmu: u32,
     key: bool,
 ) -> Option<([f32; 2], bool)> {
-    let entry = cached(cpu, id, key)?;
+    let entry = cached(cpu, id, key, tmu)?;
     let info = TexInfo {
         small_lod: entry.info[0],
         large_lod: entry.info[1],
@@ -574,7 +608,7 @@ fn palette(cpu: &mut Cpu, id: u32) -> [u32; 256] {
 
 /// The heap's copy of the surface `id`, made if it has none that is
 /// up to date.
-fn cached(cpu: &mut Cpu, id: u32, key: bool) -> Option<Cached> {
+fn cached(cpu: &mut Cpu, id: u32, key: bool, tmu: u32) -> Option<Cached> {
     let s = state(cpu).surface(id)?.clone();
     let keyed = key && s.key_set & 1 << KEY_SRC_BLT != 0;
     let paletted = s.format.flags & DDPF_PALETTEINDEXED8 != 0;
@@ -583,25 +617,31 @@ fn cached(cpu: &mut Cpu, id: u32, key: bool) -> Option<Cached> {
     } else {
         keyed as u32
     };
-    if !heap(cpu) {
-        return None;
-    }
+    let (unit, room) = if hw::banshee(cpu) {
+        if !heap(cpu) {
+            return None;
+        }
+        let h = hal(cpu);
+        (0, (h.heap, h.heap_len))
+    } else {
+        (tmu, (0, hw::texture_memory(cpu, tmu).1))
+    };
     let clock = hal(cpu).clock;
-    if let Some(c) = hal(cpu)
-        .textures
-        .iter_mut()
-        .find(|c| c.surface == id && c.uniqueness == s.uniqueness && c.variant == variant)
-    {
+    if let Some(c) = hal(cpu).textures.iter_mut().find(|c| {
+        c.surface == id && c.tmu == unit && c.uniqueness == s.uniqueness && c.variant == variant
+    }) {
         c.used = clock;
         return Some(c.clone());
     }
-    hal(cpu).textures.retain(|c| c.surface != id);
+    hal(cpu)
+        .textures
+        .retain(|c| c.surface != id || c.tmu != unit);
     let image = image(cpu, id, keyed)?;
     let size = (image.data.len() as u32).next_multiple_of(16);
-    let start = place(cpu, size)?;
+    let start = place(cpu, unit, room, size)?;
     api::tex_download_mipmap(
         cpu,
-        0,
+        unit,
         start,
         api::MIPMAPLEVELMASK_BOTH,
         &image.info,
@@ -609,6 +649,7 @@ fn cached(cpu: &mut Cpu, id: u32, key: bool) -> Option<Cached> {
     );
     let c = Cached {
         surface: id,
+        tmu: unit,
         uniqueness: s.uniqueness,
         variant,
         start,
@@ -663,30 +704,38 @@ fn heap(cpu: &mut Cpu) -> bool {
     true
 }
 
-/// Room for `size` bytes in the heap, the least recently used textures
-/// going until there is: its card address.
-fn place(cpu: &mut Cpu, size: u32) -> Option<u32> {
+/// Room for `size` bytes in texture unit `unit`'s heap, `room` (its
+/// start and length), the least recently used textures there going
+/// until there is: its card address.
+fn place(cpu: &mut Cpu, unit: u32, room: (u32, u32), size: u32) -> Option<u32> {
     let h = hal(cpu);
-    if size > h.heap_len {
+    let (heap, heap_len) = room;
+    if size > heap_len {
         return None;
     }
     loop {
-        let mut used: Vec<(u32, u32)> = h.textures.iter().map(|c| (c.start, c.size)).collect();
+        let mut used: Vec<(u32, u32)> = h
+            .textures
+            .iter()
+            .filter(|c| c.tmu == unit)
+            .map(|c| (c.start, c.size))
+            .collect();
         used.sort();
-        let mut at = h.heap;
+        let mut at = heap;
         for (start, len) in used {
             if start >= at + size {
                 break;
             }
             at = at.max(start + len);
         }
-        if at + size <= h.heap + h.heap_len {
+        if at + size <= heap + heap_len {
             return Some(at);
         }
         let oldest = h
             .textures
             .iter()
             .enumerate()
+            .filter(|(_, c)| c.tmu == unit)
             .min_by_key(|(_, c)| c.used)
             .map(|(i, _)| i)?;
         h.textures.remove(oldest);
@@ -970,6 +1019,22 @@ pub fn clear(
         }
         let whole = [[0, 0, s.width as i32, s.height as i32]];
         let rects = if rects.is_empty() { &whole[..] } else { rects };
+        if s.memory == MEM_CARD {
+            // The add-on card's buffers, by its fastfill.
+            let list: Vec<_> = rects
+                .iter()
+                .map(|r| crate::win32::gdi32::Rect {
+                    left: r[0],
+                    top: r[1],
+                    right: r[2],
+                    bottom: r[3],
+                })
+                .collect();
+            voodoo::fill(cpu, &s, &list, value as u32);
+            surface::changed(cpu, id);
+            return;
+        }
+
         for r in rects {
             let x0 = r[0].clamp(0, s.width as i32) as u32;
             let x1 = r[2].clamp(0, s.width as i32) as u32;
