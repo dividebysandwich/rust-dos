@@ -504,6 +504,7 @@ pub fn create(
     match super::add(cpu, dd, object, vtable, out) {
         Ok(_) => {
             super::super::add_ref(cpu, target_iface);
+            super::hal::created(cpu);
             D3D_OK
         }
         Err(e) => e,

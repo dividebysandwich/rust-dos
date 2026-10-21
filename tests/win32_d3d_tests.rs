@@ -819,7 +819,9 @@ fn an_execute_buffer_and_draw_primitive_draw_and_count_in_get_stats() {
 
 /// The DDSURFACEDESC2 of the render target's Lock, of a z-buffer, of a
 /// texture and of the texture's Lock; the z-buffer's and the texture's
-/// interfaces; the texture's texels; a D3DRECT; the scene's vertices.
+/// interfaces; the texture's texels; a D3DRECT; the DDSURFACEDESC2 of
+/// the textures that fill video memory and their interface; the scene's
+/// vertices.
 const LOCK_DESC: u32 = 0x600;
 const Z_DESC: u32 = 0x680;
 const TEX_DESC: u32 = 0x700;
@@ -828,6 +830,8 @@ const TEXTURE: u32 = 0x784;
 const TEX_LOCK_DESC: u32 = 0x800;
 const TEXELS: u32 = 0x880;
 const RECT: u32 = 0x900;
+const FILL_DESC: u32 = 0x910;
+const FILLED: u32 = 0x990;
 const SCENE: u32 = 0xA00;
 
 const DDSD_PIXELFORMAT: u32 = 0x1000;
@@ -923,6 +927,9 @@ enum Step {
     State(u32, u32),
     /// DrawPrimitive of a triangle list.
     Draw(Vec<Tl>),
+    /// 256x256 textures made in video memory until there is no more
+    /// room (Direct3D 7), as Unreal does.
+    Fill,
 }
 
 /// Which Direct3D draws a scene.
@@ -1013,6 +1020,12 @@ fn scene_program(scene: &Scene) -> (Vec<u8>, u32) {
     put32(&mut d, TEX_DESC + 0x5C, 0x07E0);
     put32(&mut d, TEX_DESC + 0x60, 0x001F);
     put32(&mut d, TEX_DESC + 0x68, DDSCAPS_TEXTURE);
+    let tex_desc = d[TEX_DESC as usize..TEX_DESC as usize + 124].to_vec();
+    put(&mut d, FILL_DESC, &tex_desc);
+    put32(&mut d, FILL_DESC + 0x08, 256);
+    put32(&mut d, FILL_DESC + 0x0C, 256);
+    let fill_caps = DDSCAPS_TEXTURE | DDSCAPS_VIDEOMEMORY;
+    put32(&mut d, FILL_DESC + 0x68, fill_caps);
     if let Some(texels) = &scene.texture {
         for (i, t) in texels.iter().enumerate() {
             put(&mut d, TEXELS + 2 * i as u32, &t.to_le_bytes());
@@ -1181,6 +1194,17 @@ fn scene_program(scene: &Scene) -> (Vec<u8>, u32) {
             match step {
                 Step::State(s, v) => {
                     c.com(a, l, DEVICE, set_state, &[Arg::I(*s), Arg::I(*v)])?;
+                }
+                Step::Fill => {
+                    let mut again = a.create_label();
+                    a.set_label(&mut again)?;
+                    push(a, l, &[Arg::At(FILL_DESC), Arg::At(FILLED), Arg::I(0)])?;
+                    a.mov(eax, dword_ptr(l.at(DD)))?;
+                    a.push(eax)?;
+                    a.mov(eax, dword_ptr(eax))?;
+                    a.call(dword_ptr(eax + 4 * DD_CREATE_SURFACE))?;
+                    a.test(eax, eax)?;
+                    a.jz(again)?;
                 }
                 Step::Draw(verts) => {
                     let at = *draws.next().unwrap();
@@ -1363,6 +1387,26 @@ fn a_textured_quad_shows_its_texels() {
     assert_rgb(&p, 48, 16, [0, 255, 0], 8);
     assert_rgb(&p, 16, 48, [0, 0, 255], 8);
     assert_rgb(&p, 48, 48, [255, 255, 255], 8);
+}
+
+#[test]
+fn a_texture_draws_after_its_program_fills_video_memory() {
+    // Unreal makes textures in video memory until there is none left,
+    // after it makes its device and before it draws: the card's own
+    // copies of textures still have room.
+    let scene = Scene {
+        api: Api::D3D7,
+        card: None,
+        clear: 0,
+        zbuffer: false,
+        texture: Some([0xF800; 64]),
+        steps: vec![
+            Step::Fill,
+            Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.5, WHITE)),
+        ],
+    };
+    let p = draw_scene("fill_video_memory", &scene);
+    assert_rgb(&p, 32, 32, [255, 0, 0], 8);
 }
 
 #[test]
