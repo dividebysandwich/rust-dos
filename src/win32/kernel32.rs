@@ -525,6 +525,7 @@ static APIS: &[Api] = &[
     stdcall("GetVersionExW", 488, 1, not_implemented),
     stdcall("GlobalAddAtomW", 489, 1, not_implemented),
     stdcall("CreateProcessW", 490, 10, not_implemented),
+    stdcall("WinExec", 510, 2, process::win_exec),
 ];
 
 /// The places in `APIS` of the system's own stubs.

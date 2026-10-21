@@ -459,7 +459,13 @@ fn gr_fog_color_value(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
 }
 
 fn gr_fog_mode(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
-    api::fog_mode(cpu, a[0]);
+    // Glide 2's sources of fog end at iterated Z: a higher one, such as
+    // the HAL's own FOG_WITH_ITERATED_W, turns fog off as in Glide.
+    let mut mode = a[0];
+    if mode & 0xFF > api::FOG_WITH_ITERATED_Z {
+        mode &= !0xFF;
+    }
+    api::fog_mode(cpu, mode);
     Some(0)
 }
 

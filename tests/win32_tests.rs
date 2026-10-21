@@ -647,6 +647,54 @@ fn a_program_starts_another_and_waits_for_its_exit_code() {
 }
 
 #[test]
+fn win_exec_starts_a_program_or_says_why_not() {
+    let child = {
+        let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["ExitProcess"])];
+        program(BASE, false, imports, &[0; 4], |a, l| {
+            a.push(0)?;
+            a.call(l.import(0))?;
+            a.int3()
+        })
+    };
+    let names: &[&str] = &["WinExec", "Sleep", "ExitProcess"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = b"C.EXE an argument ".to_vec();
+    data.resize(0x20, 0);
+    data.extend_from_slice(b"NONE.EXE ");
+    data.resize(0x40, 0);
+    let parent = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        // 33 for the program started, 2 for the one not found.
+        a.push(1)?;
+        a.push(l.at(0) as i32)?;
+        a.call(f("WinExec"))?;
+        a.cmp(eax, 33)?;
+        a.sete(bl)?;
+        a.push(1)?;
+        a.push(l.at(0x20) as i32)?;
+        a.call(f("WinExec"))?;
+        a.cmp(eax, 2)?;
+        a.sete(al)?;
+        a.shl(al, 1)?;
+        a.or(bl, al)?;
+        // The child ends before the parent.
+        a.push(100)?;
+        a.call(f("Sleep"))?;
+        a.movzx(eax, bl)?;
+        a.push(eax)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let mut cpu = Cpu::new(scratch("win_exec", &[("T.EXE", parent), ("C.EXE", child)]));
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    assert!(run_to_exit(&mut cpu, 200), "{}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 3, "{}", printed(&cpu));
+}
+
+#[test]
 fn threads_take_turns_wait_for_each_other_and_share_a_critical_section() {
     let names: &[&str] = &[
         "CreateThread",
