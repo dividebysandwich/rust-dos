@@ -63,7 +63,7 @@ pub fn palette_changed(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// The next level of the mipmap `id`.
-fn next_level(cpu: &mut Cpu, id: u32) -> Option<u32> {
+pub fn next_level(cpu: &mut Cpu, id: u32) -> Option<u32> {
     let s = state(cpu).surface(id)?.clone();
     if s.caps[0] & DDSCAPS_MIPMAP == 0 {
         return None;

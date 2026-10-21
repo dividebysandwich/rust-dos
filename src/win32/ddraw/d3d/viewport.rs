@@ -364,28 +364,50 @@ pub fn get_background_depth(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// Clear(this, count, rects, flags): the viewport's rectangles to its
 /// background material's color and the depth buffer to its far end.
 pub fn clear(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let [this, count, rects, _] = args[..] else {
+    let [this, count, rects, flags] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
     };
-    clear_with(cpu, this, count, rects)
+    clear_with(cpu, this, count, rects, flags, None, 1.0)
 }
 
 /// Clear2(this, count, rects, flags, color, z, stencil).
 pub fn clear2(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let [this, count, rects, _, _, _, _] = args[..] else {
+    let [this, count, rects, flags, color, z, _] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
     };
-    clear_with(cpu, this, count, rects)
+    clear_with(cpu, this, count, rects, flags, Some(color), f32::from_bits(z))
 }
 
-fn clear_with(cpu: &mut Cpu, this: u32, count: u32, rects: u32) -> Option<u32> {
+/// Clear the rectangles of the viewport's device's render target
+/// (D3DCLEAR_TARGET) with `color`, or the background material's
+/// diffuse color, and of its depth buffer (D3DCLEAR_ZBUFFER) with `z`.
+fn clear_with(
+    cpu: &mut Cpu,
+    this: u32,
+    count: u32,
+    rects: u32,
+    flags: u32,
+    color: Option<u32>,
+    z: f32,
+) -> Option<u32> {
     let id = hr!(viewport_of(cpu, this));
-    if get(cpu, id).is_none_or(|v| v.device == 0) {
+    let Some(v) = get(cpu, id).cloned().filter(|v| v.device != 0) else {
         return Some(D3DERR_VIEWPORTHASNODEVICE);
-    }
+    };
     if count != 0 && !probe(cpu, rects, count.saturating_mul(16), false) {
         return Some(DDERR_INVALIDPARAMS);
     }
+    let Some(d) = super::device::get(cpu, v.device).cloned() else {
+        return Some(D3D_OK);
+    };
+    let color = color.unwrap_or_else(|| {
+        super::material::of_handle(cpu, &d, v.background)
+            .map_or(0, |m| super::pipeline::color(m.diffuse))
+    });
+    let list = super::device::read_rects(cpu, rects, count);
+    let target = (flags & super::device::CLEAR_TARGET != 0).then_some(color);
+    let depth = (flags & super::device::CLEAR_ZBUFFER != 0).then_some(z);
+    super::hal::clear(cpu, &d, &list, target, depth);
     Some(D3D_OK)
 }
 

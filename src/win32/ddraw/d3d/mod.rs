@@ -31,6 +31,7 @@ pub mod device;
 pub mod direct3d;
 pub mod draw;
 pub mod execute;
+pub mod hal;
 pub mod light;
 pub mod material;
 pub mod pipeline;
@@ -77,7 +78,7 @@ crate::state_fields!(D3dObject {
 // HRESULTs.
 
 pub const D3D_OK: u32 = 0;
-const fn d3derr(code: u32) -> u32 {
+pub const fn d3derr(code: u32) -> u32 {
     0x8876_0000 | code
 }
 pub const D3DERR_EXECUTE_LOCKED: u32 = d3derr(714);
