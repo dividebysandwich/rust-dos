@@ -110,6 +110,10 @@ pub const FOG_DISABLE: u32 = 0;
 pub const FOG_WITH_ITERATED_ALPHA: u32 = 1;
 pub const FOG_WITH_TABLE: u32 = 2;
 pub const FOG_WITH_ITERATED_Z: u32 = 3;
+/// Not one of Glide's modes: fog by the integer part of the vertices'
+/// oow (fogMode's fogZ and fogAlpha both set), for Direct3D's HAL,
+/// whose depth stays Z.
+pub const FOG_WITH_ITERATED_W: u32 = 4;
 pub const FOG_MULT2: u32 = 0x100;
 pub const FOG_ADD2: u32 = 0x200;
 /// Entries of the fog table.
@@ -520,7 +524,8 @@ pub struct Context {
     pub triangles: [u32; 2],
     pub fog_table: Vec<u8>,
     /// Direct3D's buffers on a Banshee: colBufferAddr and its stride,
-    /// auxBufferAddr and its stride, or 0 for Glide's own.
+    /// auxBufferAddr and its stride; a color stride of 0 for Glide's
+    /// own (a buffer can start at 0).
     pub target: [u32; 4],
 }
 
@@ -1228,6 +1233,7 @@ pub fn fog_mode(cpu: &mut Cpu, mode: u32) {
     fog |= match mode & 0xFF {
         FOG_WITH_ITERATED_ALPHA => ENFOGGING | FOG_ALPHA,
         FOG_WITH_ITERATED_Z => ENFOGGING | FOG_Z,
+        FOG_WITH_ITERATED_W => ENFOGGING | FOG_Z | FOG_ALPHA,
         FOG_WITH_TABLE => ENFOGGING,
         _ => 0,
     };
@@ -1297,7 +1303,7 @@ pub fn render_buffer(cpu: &mut Cpu, buffer: u32) {
     gc(cpu).render = buffer;
     let fbz = gc(cpu).fbz_mode & !DRAWBUFFER;
     set_fbz_mode(cpu, fbz | buffer << 14);
-    if hw::banshee(cpu) && state(cpu).screen.open && gc(cpu).target[0] == 0 {
+    if hw::banshee(cpu) && state(cpu).screen.open && gc(cpu).target[1] == 0 {
         let addr = buffer_addr(cpu, buffer);
         hw::write(cpu, ALL, render3d::COL_BUFFER_ADDR, addr);
     }
@@ -1779,7 +1785,9 @@ fn params(g: &Context) -> u32 {
         };
     }
     if g.fog_mode & ENFOGGING != 0 {
-        p |= if g.fog_mode & FOG_Z != 0 {
+        p |= if g.fog_mode & (FOG_Z | FOG_ALPHA) == FOG_Z | FOG_ALPHA {
+            P_OOW_FBI
+        } else if g.fog_mode & FOG_Z != 0 {
             P_OOZ
         } else if g.fog_mode & FOG_ALPHA != 0 {
             P_ALPHA
@@ -2280,7 +2288,7 @@ pub fn lfb_read_region(
     let g = gc(cpu).clone();
     let mode = (g.lfb_mode & !(LFB_READ_BUFFER | LFB_YORIGIN)) | buffer << 6;
     hw::write(cpu, ALL, LFB_MODE, mode);
-    let banshee = hw::banshee(cpu) && state(cpu).screen.open && g.target[0] == 0;
+    let banshee = hw::banshee(cpu) && state(cpu).screen.open && g.target[1] == 0;
     if banshee && buffer != BUFFER_AUXBUFFER {
         let addr = buffer_addr(cpu, buffer);
         hw::write(cpu, ALL, render3d::COL_BUFFER_ADDR, addr);
@@ -2330,7 +2338,7 @@ pub fn lfb_write_region(
     hw::write(cpu, ALL, LFB_MODE, mode);
     let za = g.lfb_constant_depth | g.lfb_constant_alpha << 24;
     hw::write(cpu, ALL, ZA_COLOR, za);
-    let banshee = hw::banshee(cpu) && state(cpu).screen.open && g.target[0] == 0;
+    let banshee = hw::banshee(cpu) && state(cpu).screen.open && g.target[1] == 0;
     if banshee && buffer != BUFFER_AUXBUFFER {
         let addr = buffer_addr(cpu, buffer);
         hw::write(cpu, ALL, render3d::COL_BUFFER_ADDR, addr);
@@ -2368,7 +2376,8 @@ pub fn lfb_write_region(
 /// Draw into the 16-bit buffer at `addr` of a Banshee's memory, rows
 /// `stride` apart: colBufferStride's value, bytes a row (bit 15 clear)
 /// or tiles a row of tiles (bit 15 set). Clip windows as big as
-/// `width` x `height`. `addr` 0 gives drawing back to Glide's buffers.
+/// `width` x `height`. `stride` 0 gives drawing back to Glide's
+/// buffers.
 pub fn set_render_target(cpu: &mut Cpu, addr: u32, stride: u32, width: u32, height: u32) {
     if !hw::banshee(cpu) {
         return;
@@ -2376,7 +2385,7 @@ pub fn set_render_target(cpu: &mut Cpu, addr: u32, stride: u32, width: u32, heig
     let g = gc(cpu);
     g.target[0] = addr;
     g.target[1] = stride;
-    if addr == 0 {
+    if stride == 0 {
         let render = g.render;
         render_buffer(cpu, render);
         let s = &state(cpu).screen;

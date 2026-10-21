@@ -312,8 +312,9 @@ fn rasterize(
         .and_then(|d| super::hal::bind(cpu, &d, setup));
     match card {
         Some(card) => {
-            let mut raster = super::hal::Raster { cpu, card };
+            let mut raster = super::hal::Raster::new(cpu, card);
             let drawn = pipeline::draw(setup, verts, prims, &mut raster);
+            raster.finish();
             // The target's pixels changed, for a texture made of it.
             if let Some(target) = get(cpu, id).map(|d| d.target) {
                 super::super::surface::changed(cpu, target);

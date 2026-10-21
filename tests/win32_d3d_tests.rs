@@ -87,15 +87,15 @@ fn machine(test: &str, program: Vec<u8>) -> Cpu {
     machine_with(test, None, program)
 }
 
-/// A machine with a Voodoo3 as its display adapter or, given `card`,
-/// its usual adapter and that add-on card.
+/// A machine with a Voodoo3 as its display adapter or, given a `card`
+/// other than the Voodoo3, its usual adapter and that add-on card.
 fn machine_with(test: &str, card: Option<Board>, program: Vec<u8>) -> Cpu {
     let base = PathBuf::from("target/test_win32_d3d").join(test);
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).unwrap();
     fs::write(base.join("T.EXE"), program).unwrap();
     let mut cpu = Cpu::new(base);
-    if card.is_none() {
+    if card.is_none_or(|c| c == Board::Voodoo3) {
         let setup = VideoSetup {
             adapter: Adapter::Voodoo3,
             mono_monitor: false,
@@ -832,6 +832,7 @@ const TEXELS: u32 = 0x880;
 const RECT: u32 = 0x900;
 const FILL_DESC: u32 = 0x910;
 const FILLED: u32 = 0x990;
+const FRONT: u32 = 0x994;
 const SCENE: u32 = 0xA00;
 
 const DDSD_PIXELFORMAT: u32 = 0x1000;
@@ -846,6 +847,8 @@ const DDSD_BACKBUFFERCOUNT: u32 = 0x20;
 const DDPF_RGB: u32 = 0x40;
 const DDPF_ZBUFFER: u32 = 0x400;
 const DDLOCK_WAIT: u32 = 1;
+const DDFLIP_WAIT: u32 = 1;
+const DDFLIP_NOVSYNC: u32 = 8;
 const D3DCLEAR_TARGET: u32 = 1;
 const D3DCLEAR_ZBUFFER: u32 = 2;
 /// D3DFVF_XYZRHW, DIFFUSE, SPECULAR and TEX1: a D3DTLVERTEX.
@@ -853,6 +856,7 @@ const TL_FVF: u32 = 0x1C4;
 
 const SURF_ADD_ATTACHED_SURFACE: u32 = 3;
 const SURF_GET_ATTACHED_SURFACE: u32 = 12;
+const SURF_FLIP: u32 = 11;
 const SURF_LOCK: u32 = 25;
 const SURF_UNLOCK: u32 = 32;
 const D3D3_CREATE_VIEWPORT: u32 = 6;
@@ -871,6 +875,7 @@ const DEV7_SET_TEXTURE: u32 = 35;
 
 // Render states.
 const RS_ZENABLE: u32 = 7;
+const RS_ZFUNC: u32 = 23;
 const RS_SHADEMODE: u32 = 9;
 const RS_SRCBLEND: u32 = 19;
 const RS_DESTBLEND: u32 = 20;
@@ -880,6 +885,7 @@ const RS_FOGCOLOR: u32 = 34;
 const RS_FOGTABLEMODE: u32 = 35;
 const RS_FOGSTART: u32 = 36;
 const RS_FOGEND: u32 = 37;
+const RS_SPECULARENABLE: u32 = 29;
 
 /// A D3DTLVERTEX: its position, rhw, diffuse and specular colors and
 /// texture coordinates.
@@ -930,6 +936,8 @@ enum Step {
     /// 256x256 textures made in video memory until there is no more
     /// room (Direct3D 7), as Unreal does.
     Fill,
+    /// Flip of the flip chain, without waiting for the frame.
+    Flip,
 }
 
 /// Which Direct3D draws a scene.
@@ -949,8 +957,9 @@ struct Scene {
     card: Option<Board>,
     /// The color the target is cleared with, ARGB.
     clear: u32,
-    /// Whether the target has a 16-bit z-buffer, cleared to 1.
-    zbuffer: bool,
+    /// The depth the target's 16-bit z-buffer is cleared to, if it has
+    /// one.
+    zbuffer: Option<f32>,
     /// An 8x8 565 texture on stage 0 (Direct3D 7).
     texture: Option<[u16; 64]>,
     steps: Vec<Step>,
@@ -1050,7 +1059,8 @@ fn scene_program(scene: &Scene) -> (Vec<u8>, u32) {
     let ex = scene.api == Api::D3D7;
     program(&[USER32, DDRAW], &d, |a, l| {
         let mut c = Calls { next: 0 };
-        start(a, l, &mut c, ex, scene.card.is_some())?;
+        let add_on = scene.card.is_some_and(|b| b != Board::Voodoo3);
+        start(a, l, &mut c, ex, add_on)?;
         let iid = if ex { IID_D3D7 } else { IID_D3D3 };
         c.com(a, l, DD, QUERY_INTERFACE, &[Arg::At(iid), Arg::At(D3D)])?;
         c.com(
@@ -1062,6 +1072,8 @@ fn scene_program(scene: &Scene) -> (Vec<u8>, u32) {
         )?;
         if scene.card.is_some() {
             // The flip chain's back buffer is the target.
+            a.mov(eax, dword_ptr(l.at(TARGET)))?;
+            a.mov(dword_ptr(l.at(FRONT)), eax)?;
             c.com(
                 a,
                 l,
@@ -1070,7 +1082,7 @@ fn scene_program(scene: &Scene) -> (Vec<u8>, u32) {
                 &[Arg::At(BACK_CAPS), Arg::At(TARGET)],
             )?;
         }
-        if scene.zbuffer {
+        if scene.zbuffer.is_some() {
             c.com(
                 a,
                 l,
@@ -1120,7 +1132,7 @@ fn scene_program(scene: &Scene) -> (Vec<u8>, u32) {
                 )?;
             }
             let mut what = D3DCLEAR_TARGET;
-            if scene.zbuffer {
+            if scene.zbuffer.is_some() {
                 what |= D3DCLEAR_ZBUFFER;
             }
             c.com(
@@ -1133,7 +1145,7 @@ fn scene_program(scene: &Scene) -> (Vec<u8>, u32) {
                     Arg::I(0),
                     Arg::I(what),
                     Arg::I(scene.clear),
-                    Arg::I(1f32.to_bits()),
+                    Arg::I(scene.zbuffer.unwrap_or(1.0).to_bits()),
                     Arg::I(0),
                 ],
             )?;
@@ -1169,7 +1181,7 @@ fn scene_program(scene: &Scene) -> (Vec<u8>, u32) {
                 &[Arg::Val(VIEWPORT)],
             )?;
             let mut what = D3DCLEAR_TARGET;
-            if scene.zbuffer {
+            if scene.zbuffer.is_some() {
                 what |= D3DCLEAR_ZBUFFER;
             }
             c.com(
@@ -1182,7 +1194,7 @@ fn scene_program(scene: &Scene) -> (Vec<u8>, u32) {
                     Arg::At(RECT),
                     Arg::I(what),
                     Arg::I(scene.clear),
-                    Arg::I(1f32.to_bits()),
+                    Arg::I(scene.zbuffer.unwrap_or(1.0).to_bits()),
                     Arg::I(0),
                 ],
             )?;
@@ -1194,6 +1206,10 @@ fn scene_program(scene: &Scene) -> (Vec<u8>, u32) {
             match step {
                 Step::State(s, v) => {
                     c.com(a, l, DEVICE, set_state, &[Arg::I(*s), Arg::I(*v)])?;
+                }
+                Step::Flip => {
+                    let flags = DDFLIP_WAIT | DDFLIP_NOVSYNC;
+                    c.com(a, l, FRONT, SURF_FLIP, &[Arg::I(0), Arg::I(flags)])?;
                 }
                 Step::Fill => {
                     let mut again = a.create_label();
@@ -1317,7 +1333,7 @@ fn a_flat_shaded_triangle_has_its_first_vertex_color() {
         api: Api::D3D7,
         card: None,
         clear: 0xFF00_0080,
-        zbuffer: false,
+        zbuffer: None,
         texture: None,
         steps: vec![Step::State(RS_SHADEMODE, 1), Step::Draw(corners())],
     };
@@ -1336,7 +1352,7 @@ fn a_gouraud_shaded_triangle_blends_its_corners() {
         api: Api::D3D7,
         card: None,
         clear: 0,
-        zbuffer: false,
+        zbuffer: None,
         texture: None,
         steps: vec![Step::Draw(corners())],
     };
@@ -1355,7 +1371,7 @@ fn direct3d_6_clears_through_its_viewport_and_draws() {
         api: Api::D3D6,
         card: None,
         clear: 0xFF00_0080,
-        zbuffer: false,
+        zbuffer: None,
         texture: None,
         steps: vec![Step::Draw(corners())],
     };
@@ -1378,7 +1394,7 @@ fn a_textured_quad_shows_its_texels() {
         api: Api::D3D7,
         card: None,
         clear: 0,
-        zbuffer: false,
+        zbuffer: None,
         texture: Some(texels),
         steps: vec![Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.5, WHITE))],
     };
@@ -1387,6 +1403,9 @@ fn a_textured_quad_shows_its_texels() {
     assert_rgb(&p, 48, 16, [0, 255, 0], 8);
     assert_rgb(&p, 16, 48, [0, 0, 255], 8);
     assert_rgb(&p, 48, 48, [255, 255, 255], 8);
+    // The last column and row are the quad's too.
+    assert_rgb(&p, 63, 0, [0, 255, 0], 8);
+    assert_rgb(&p, 63, 63, [255, 255, 255], 8);
 }
 
 #[test]
@@ -1398,7 +1417,7 @@ fn a_texture_draws_after_its_program_fills_video_memory() {
         api: Api::D3D7,
         card: None,
         clear: 0,
-        zbuffer: false,
+        zbuffer: None,
         texture: Some([0xF800; 64]),
         steps: vec![
             Step::Fill,
@@ -1415,7 +1434,7 @@ fn the_z_buffer_keeps_the_nearer_of_two_quads() {
         api: Api::D3D7,
         card: None,
         clear: 0,
-        zbuffer: true,
+        zbuffer: Some(1.0),
         texture: None,
         steps: vec![
             Step::State(RS_ZENABLE, 1),
@@ -1429,12 +1448,65 @@ fn the_z_buffer_keeps_the_nearer_of_two_quads() {
 }
 
 #[test]
+fn a_quad_nearer_than_the_cleared_depth_passes_the_depth_test() {
+    // Cleared to 0.5 through the viewport, as Expendable does, then
+    // with LESSEQUAL a quad at 0.25 is drawn and one at 0.75 isn't: by
+    // Z, and by W while the vertices' fog takes Z.
+    for (test, fog) in [("zclear", 0), ("zclear_fog", 1)] {
+        let at = |x0: f32, x1: f32, z: f32, rhw: f32, color: u32| {
+            quad(x0, 0.0, x1, 64.0, z, color)
+                .into_iter()
+                .map(|v| Tl { rhw, ..v })
+                .collect()
+        };
+        let scene = Scene {
+            api: Api::D3D6,
+            card: None,
+            clear: RED,
+            zbuffer: Some(0.5),
+            texture: None,
+            steps: vec![
+                Step::State(RS_ZENABLE, 1),
+                Step::State(RS_ZFUNC, 4),
+                Step::State(RS_FOGENABLE, fog),
+                Step::Draw(at(0.0, 32.0, 0.25, 4.0, GREEN)),
+                Step::Draw(at(32.0, 64.0, 0.75, 1.0 / 3.0, BLUE)),
+            ],
+        };
+        let p = draw_scene(test, &scene);
+        assert_rgb(&p, 16, 30, [0, 255, 0], 0);
+        assert_rgb(&p, 48, 30, [255, 0, 0], 0);
+    }
+}
+
+#[test]
+fn the_voodoo3_draws_into_a_back_buffer_at_the_start_of_its_memory() {
+    // The front buffer starts at 0; after a Flip the back buffer is
+    // there, and the card draws into it.
+    let scene = Scene {
+        api: Api::D3D7,
+        card: Some(Board::Voodoo3),
+        clear: RED,
+        zbuffer: None,
+        texture: None,
+        steps: vec![
+            Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.5, GREEN)),
+            Step::Flip,
+            Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.5, BLUE)),
+        ],
+    };
+    let p = draw_scene("flip_at_0", &scene);
+    assert_rgb(&p, 10, 30, [0, 0, 255], 0);
+    assert_rgb(&p, 50, 30, [0, 0, 255], 0);
+}
+
+#[test]
 fn alpha_blending_mixes_with_the_target() {
     let scene = Scene {
         api: Api::D3D7,
         card: None,
         clear: BLUE,
-        zbuffer: false,
+        zbuffer: None,
         texture: None,
         steps: vec![
             Step::State(RS_ALPHABLENDENABLE, 1),
@@ -1468,7 +1540,7 @@ fn vertex_fog_and_table_fog_mix_in_the_fog_color() {
         api: Api::D3D7,
         card: None,
         clear: 0,
-        zbuffer: false,
+        zbuffer: None,
         texture: None,
         steps: vec![
             Step::State(RS_FOGENABLE, 1),
@@ -1496,7 +1568,7 @@ fn card_scene(test: &str, board: Board) {
         api: Api::D3D7,
         card: Some(board),
         clear: 0xFF00_0080,
-        zbuffer: true,
+        zbuffer: Some(1.0),
         texture: Some(texels),
         steps: vec![
             Step::State(RS_ZENABLE, 1),
@@ -1522,4 +1594,34 @@ fn the_3dfx_device_draws_on_a_voodoo2() {
 #[test]
 fn the_3dfx_device_draws_on_a_voodoo_graphics() {
     card_scene("card_v1", Board::Standard);
+}
+
+#[test]
+fn the_specular_color_adds_to_textured_and_untextured_triangles() {
+    let gray = |textured: bool| Scene {
+        api: Api::D3D7,
+        card: None,
+        clear: 0,
+        zbuffer: Some(1.0),
+        texture: textured.then_some([0xFFFF; 64]),
+        steps: vec![
+            Step::State(RS_ZENABLE, 1),
+            Step::State(RS_SPECULARENABLE, 1),
+            Step::Draw(
+                quad(0.0, 0.0, 32.0, 64.0, 0.5, 0xFF80_8080)
+                    .into_iter()
+                    .map(|v| Tl {
+                        specular: 0xFF40_4040,
+                        ..v
+                    })
+                    .collect(),
+            ),
+        ],
+    };
+    // Half the white texture, or the diffuse gray, and a quarter more.
+    for (test, textured) in [("specular_textured", true), ("specular", false)] {
+        let p = draw_scene(test, &gray(textured));
+        assert_rgb(&p, 16, 30, [192, 192, 192], 8);
+        assert_rgb(&p, 48, 30, [0, 0, 0], 0);
+    }
 }

@@ -16,24 +16,31 @@
 //! drawn into through Glide's render buffer, and the depth buffer is
 //! its auxiliary buffer.
 //!
-//! Textures are copied into a heap of the card's memory, a block of
-//! video memory the HAL takes from DirectDraw when it first draws (on
-//! an add-on card, each texture unit's own memory), in
-//! the formats the card samples (565, 1555, 4444 and 8-bit paletted),
-//! power-of-two sizes up to 256 and aspects up to 8 to 1. A texture is
-//! copied again when its surface changed (its uniqueness value, which
-//! Unlock, Blt and Load change), and the least recently used ones make
-//! room when the heap is full. A texture with a source color key, drawn
-//! with D3DRENDERSTATE_COLORKEYENABLE, is copied as 1555 with the keyed
-//! texels' alpha 0, and the alpha test leaves them out.
+//! On a Banshee or Voodoo3 a texture surface in video memory that the
+//! card can sample as it is (565, 1555, 4444 or 8-bit paletted, a
+//! power-of-two size up to 256, aspect up to 8 to 1, rows without
+//! padding) is sampled where it is, with the mipmap levels that follow
+//! it the way the card lays them out; its color key is the card's
+//! chroma key.
+//!
+//! Other textures are copied into a heap of the card's memory, a block
+//! of video memory the HAL takes from DirectDraw when it first draws
+//! (on an add-on card, each texture unit's own memory), as 565, 1555
+//! or 4444, power-of-two sizes up to 256 and aspects up to 8 to 1. A
+//! texture is copied again when its surface changed (its uniqueness
+//! value, which Unlock, Blt and Load change), and the least recently
+//! used ones make room when the heap is full. A texture with a source
+//! color key, drawn with D3DRENDERSTATE_COLORKEYENABLE, is copied as
+//! 1555 with the keyed texels' alpha 0, and the alpha test leaves them
+//! out.
 
 use super::super::surface::{self, DDPF_PALETTEINDEXED8, KEY_SRC_BLT, MEM_CARD, Surface};
 use super::super::{current_pid, display, state, voodoo};
 use super::device::{
-    Device, RS_FOGENABLE, RS_FOGTABLEMODE, RS_ZENABLE, RS_ZFUNC, RS_ZWRITEENABLE, TA_TEXTURE,
-    TOP_ADD, TOP_BLENDTEXTUREALPHA, TOP_DISABLE, TOP_SELECTARG1, TOP_SELECTARG2, TSS_ADDRESSU,
-    TSS_ADDRESSV, TSS_ALPHAARG1, TSS_ALPHAARG2, TSS_ALPHAOP, TSS_COLORARG1, TSS_COLORARG2,
-    TSS_COLOROP, TSS_MAGFILTER, TSS_MINFILTER, TSS_MIPFILTER,
+    Device, RS_FOGENABLE, RS_FOGTABLEMODE, RS_SPECULARENABLE, RS_ZENABLE, RS_ZFUNC,
+    RS_ZWRITEENABLE, TA_TEXTURE, TOP_ADD, TOP_BLENDTEXTUREALPHA, TOP_DISABLE, TOP_SELECTARG1,
+    TOP_SELECTARG2, TSS_ADDRESSU, TSS_ADDRESSV, TSS_ALPHAARG1, TSS_ALPHAARG2, TSS_ALPHAOP,
+    TSS_COLORARG1, TSS_COLORARG2, TSS_COLOROP, TSS_MAGFILTER, TSS_MINFILTER, TSS_MIPFILTER,
 };
 use super::pipeline::{self, Rasterizer, ScreenVertex, Setup};
 use crate::cpu::Cpu;
@@ -119,12 +126,32 @@ const HEAP_MIN: u32 = 256 << 10;
 /// How a batch of primitives is drawn: for each of the card's texture
 /// units, the factors that turn a texture coordinate into Glide's (its
 /// texture's size in Glide's 256 units) and the stage whose coordinates
-/// it takes; and whether Z carries the vertex fog.
+/// it takes; whether Z or W carries the vertex fog; and how the
+/// specular color is added.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Card {
     tmus: [Option<(usize, [f32; 2])>; 2],
     fog_z: bool,
-    w_depth: bool,
+    fog_w: bool,
+    specular: Specular,
+}
+
+/// How the specular color is added (D3DRENDERSTATE_SPECULARENABLE).
+/// The card iterates one color, so without a texture the diffuse and
+/// specular colors are added at the vertices. With one, the specular
+/// color is a second pass over the batch's triangles, added to what the
+/// first drew: blended with the first's source factor and ONE, the fog
+/// color black (which scales it by the fog's 1 - f), and where depth
+/// was written, only on pixels of equal depth.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+enum Specular {
+    #[default]
+    Off,
+    Vertices,
+    Pass {
+        source: u32,
+        equal: bool,
+    },
 }
 
 /// Whether the device `d` can be drawn by the card now, and the card's
@@ -183,10 +210,13 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
         },
     );
 
-    // Fog: the table by W, or the vertices' through Z.
+    // Fog: the table by W, or the vertices' through W, the card's W
+    // being free while depth is by Z. With depth by W the vertices' fog
+    // goes through Z.
     let fog_on = d.state(RS_FOGENABLE) != 0;
     let table = d.state(RS_FOGTABLEMODE);
-    let mut fog_z = false;
+    let zenable = d.state(RS_ZENABLE);
+    let (mut fog_z, mut fog_w) = (false, false);
     if fog_on && table != pipeline::FOG_NONE {
         let (start, end) = (d.state_f(RS_FOGSTART), d.state_f(RS_FOGEND));
         let density = d.state_f(RS_FOGDENSITY);
@@ -197,16 +227,26 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
         });
         api::fog_table(cpu, &entries);
         api::fog_mode(cpu, api::FOG_WITH_TABLE);
-    } else if fog_on {
+    } else if fog_on && zenable == 2 {
         fog_z = true;
         api::fog_mode(cpu, api::FOG_WITH_ITERATED_Z);
+    } else if fog_on {
+        fog_w = true;
+        api::fog_mode(cpu, api::FOG_WITH_ITERATED_W);
     } else {
         api::fog_mode(cpu, api::FOG_DISABLE);
     }
     api::fog_color_value(cpu, d.state(RS_FOGCOLOR) & 0xFF_FFFF);
+    // The texture units' W apart from the card's when that is the fog.
+    let hint = if fog_w {
+        api::STWHINT_W_DIFF_TMU0 | api::STWHINT_W_DIFF_TMU1
+    } else {
+        0
+    };
+    api::hints(cpu, api::HINT_STWHINT, hint);
 
-    // Depth: the render target's depth buffer, Z or W; W when Z carries
-    // the fog. On an add-on card it is the auxiliary buffer.
+    // Depth: the render target's depth buffer, Z or W. On an add-on card
+    // it is the auxiliary buffer.
     let z = super::device::z_buffer(cpu, d.target).and_then(|z| {
         if banshee {
             surface::card_memory(cpu, z).map(Some)
@@ -214,15 +254,12 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
             (voodoo::card_buffer(cpu, z) == Some(api::BUFFER_AUXBUFFER)).then_some(None)
         }
     });
-    let zenable = d.state(RS_ZENABLE);
-    let mut w_depth = false;
     match z {
         Some(place) if zenable != 0 => {
             if let Some((at, pitch)) = place {
                 api::set_depth_buffer(cpu, at, pitch);
             }
-            w_depth = zenable == 2 || fog_z;
-            let mode = if w_depth {
+            let mode = if zenable == 2 {
                 api::DEPTHBUFFER_WBUFFER
             } else {
                 api::DEPTHBUFFER_ZBUFFER
@@ -238,12 +275,15 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
     }
 
     // Blending.
+    let mut source = api::BLEND_ONE;
     if d.state(RS_ALPHABLENDENABLE) != 0 {
         let (src, dst) = blend(d.state(RS_SRCBLEND), d.state(RS_DESTBLEND));
+        source = src;
         api::alpha_blend_function(cpu, src, dst, api::BLEND_ONE, api::BLEND_ZERO);
     } else {
         api::alpha_blend_function(cpu, api::BLEND_ONE, api::BLEND_ZERO, api::BLEND_ONE, 0);
     }
+    let depth_written = z.is_some() && zenable != 0 && d.state(RS_ZWRITEENABLE) != 0;
 
     // The texture stages.
     let tmus = hw::board(cpu).map_or(1, |b| b.tmus);
@@ -284,7 +324,7 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
     };
     let mut card = Card {
         fog_z,
-        w_depth,
+        fog_w,
         ..Card::default()
     };
     let mut keyed = false;
@@ -330,6 +370,16 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
         }
     }
     fbi_combine(cpu, d, textured);
+    if d.state(RS_SPECULARENABLE) != 0 {
+        card.specular = if textured {
+            Specular::Pass {
+                source,
+                equal: depth_written,
+            }
+        } else {
+            Specular::Vertices
+        };
+    }
 
     // The alpha test, and the keyed texels it leaves out.
     if d.state(RS_ALPHATESTENABLE) != 0 {
@@ -525,12 +575,32 @@ fn load(
     tmu: u32,
     key: bool,
 ) -> Option<([f32; 2], bool)> {
-    let entry = cached(cpu, id, key, tmu)?;
-    let info = TexInfo {
-        small_lod: entry.info[0],
-        large_lod: entry.info[1],
-        aspect: entry.info[2],
-        format: entry.info[3],
+    let (start, info, keyed) = match in_place(cpu, id, key) {
+        Some(p) => {
+            if p.info.format == api::TEXFMT_P_8 {
+                let pal = palette(cpu, id);
+                let hash = hash_words(&pal);
+                if hal(cpu).palettes[tmu as usize] != hash {
+                    api::tex_download_palette(cpu, tmu, &pal, 0, 255);
+                    hal(cpu).palettes[tmu as usize] = hash;
+                }
+            }
+            if let Some(color) = p.key {
+                api::chromakey_value(cpu, color);
+                api::chromakey_mode(cpu, api::CHROMAKEY_ENABLE);
+            }
+            (p.start, p.info, false)
+        }
+        None => {
+            let entry = cached(cpu, id, key, tmu)?;
+            let info = TexInfo {
+                small_lod: entry.info[0],
+                large_lod: entry.info[1],
+                aspect: entry.info[2],
+                format: entry.info[3],
+            };
+            (entry.start, info, entry.keyed)
+        }
     };
     let mip = d.stage(stage, TSS_MIPFILTER) > 1 && info.small_lod > info.large_lod;
     api::tex_mipmap_mode(
@@ -543,7 +613,7 @@ fn load(
         },
         false,
     );
-    api::tex_source(cpu, tmu, entry.start, api::MIPMAPLEVELMASK_BOTH, &info);
+    api::tex_source(cpu, tmu, start, api::MIPMAPLEVELMASK_BOTH, &info);
     let filter = |v: u32| {
         if v >= 2 {
             api::TEXTUREFILTER_BILINEAR
@@ -579,7 +649,123 @@ fn load(
         }
     }
     let (w, h) = api::level_size(info.aspect, 0);
-    Some(([w as f32, h as f32], entry.keyed))
+    Some(([w as f32, h as f32], keyed))
+}
+
+/// A texture surface in the card's memory, sampled where it is: the
+/// address of its top level, and the color its color key is, for the
+/// card's chroma key.
+struct InPlace {
+    info: TexInfo,
+    start: u32,
+    key: Option<u32>,
+}
+
+/// The surface `id` as a texture where it is, as 3dfx's driver drew
+/// textures in video memory: on a Banshee or Voodoo3, whose texture
+/// units read all of its memory, for a size and format the card
+/// samples, rows without padding. Its mipmap levels are the ones
+/// DirectDraw put where the card looks for them, each right after the
+/// one before (a Banshee has one base address for all of them).
+fn in_place(cpu: &mut Cpu, id: u32, key: bool) -> Option<InPlace> {
+    if !hw::banshee(cpu) {
+        return None;
+    }
+    let (_, pitch) = surface::card_memory(cpu, id)?;
+    let s = state(cpu).surface(id)?.clone();
+    let (w, h) = (s.width, s.height);
+    if !w.is_power_of_two() || !h.is_power_of_two() || w.max(h) > 256 {
+        return None;
+    }
+    if w > 8 * h || h > 8 * w {
+        return None;
+    }
+    let f = &s.format;
+    let paletted = f.flags & DDPF_PALETTEINDEXED8 != 0;
+    let format = match (paletted, f.bits, f.r, f.a) {
+        (true, 8, _, _) => api::TEXFMT_P_8,
+        (false, 16, 0xF800, 0) => api::TEXFMT_RGB_565,
+        (false, 16, 0x0F00, 0xF000) => api::TEXFMT_ARGB_4444,
+        (false, 16, 0x7C00, _) => api::TEXFMT_ARGB_1555,
+        _ => return None,
+    };
+    let bpp = f.bits / 8;
+    if pitch != w * bpp {
+        return None;
+    }
+    let large_lod = 8 - w.max(h).trailing_zeros();
+    let aspect = if w >= h {
+        3 - (w / h).trailing_zeros()
+    } else {
+        3 + (h / w).trailing_zeros()
+    };
+    let start = surface::card_memory(cpu, id)?.0;
+    let mut small_lod = large_lod;
+    let mut next = start;
+    let (mut level, mut lod) = (id, large_lod);
+    loop {
+        let Some((addr, p)) = surface::card_memory(cpu, level) else {
+            break;
+        };
+        let (lw, lh) = api::level_size(aspect, lod);
+        let fits = state(cpu)
+            .surface(level)
+            .is_some_and(|l| (l.width, l.height) == (lw, lh));
+        if !fits || p != lw * bpp || addr != next {
+            break;
+        }
+        // The card's level sizes, at least 4 texels.
+        next = addr + (lw * lh).max(4) * bpp;
+        small_lod = lod;
+        if lod == api::LOD_1 {
+            break;
+        }
+        match super::texture::next_level(cpu, level) {
+            Some(n) => (level, lod) = (n, lod + 1),
+            None => break,
+        }
+    }
+    let keyed = key && s.key_set & 1 << KEY_SRC_BLT != 0;
+    let key = keyed.then(|| {
+        let raw = s.keys[KEY_SRC_BLT].0;
+        if paletted {
+            palette(cpu, id)[(raw & 0xFF) as usize]
+        } else {
+            expanded(raw, &s)
+        }
+    });
+    Some(InPlace {
+        info: TexInfo {
+            small_lod,
+            large_lod,
+            aspect,
+            format,
+        },
+        start,
+
+        key,
+    })
+}
+
+/// A 16-bit texel as the texture unit makes it 8 bits a channel: each
+/// channel's bits again below them. 0RGB.
+fn expanded(raw: u32, s: &Surface) -> u32 {
+    let channel = |mask: u32| {
+        if mask == 0 {
+            return 0;
+        }
+        let bits = mask.count_ones();
+        let v = (raw & mask) >> mask.trailing_zeros();
+        let mut out = 0;
+        let mut have = 0;
+        while have < 8 {
+            out = out << bits | v;
+            have += bits;
+        }
+        out >> (have - 8)
+    };
+    let f = &s.format;
+    channel(f.r) << 16 | channel(f.g) << 8 | channel(f.b)
 }
 
 fn hash_words(words: &[u32]) -> u32 {
@@ -612,8 +798,8 @@ fn cached(cpu: &mut Cpu, id: u32, key: bool, tmu: u32) -> Option<Cached> {
     let s = state(cpu).surface(id)?.clone();
     let keyed = key && s.key_set & 1 << KEY_SRC_BLT != 0;
     let paletted = s.format.flags & DDPF_PALETTEINDEXED8 != 0;
-    let variant = if keyed && paletted {
-        hash_words(&palette(cpu, id))
+    let variant = if paletted {
+        hash_words(&palette(cpu, id)) ^ keyed as u32
     } else {
         keyed as u32
     };
@@ -865,7 +1051,7 @@ fn texture_format(s: &Surface, keyed: bool) -> u32 {
         return api::TEXFMT_ARGB_1555;
     }
     if f.flags & DDPF_PALETTEINDEXED8 != 0 {
-        return api::TEXFMT_P_8;
+        return api::TEXFMT_RGB_565;
     }
     match (f.bits, f.r, f.a) {
         (16, 0xF800, _) => api::TEXFMT_RGB_565,
@@ -912,10 +1098,6 @@ fn argb(raw: u32, s: &Surface, pal: &[u32; 256]) -> u32 {
 
 /// Put a texel in `format` at the end of `data`.
 fn encode(data: &mut Vec<u8>, format: u32, raw: u32, s: &Surface, pal: &[u32; 256], keyed: bool) {
-    if format == api::TEXFMT_P_8 {
-        data.push(raw as u8);
-        return;
-    }
     let same = match format {
         api::TEXFMT_RGB_565 => s.format.bits == 16 && s.format.r == 0xF800,
         api::TEXFMT_ARGB_4444 => s.format.bits == 16 && s.format.a == 0xF000,
@@ -945,6 +1127,9 @@ fn encode(data: &mut Vec<u8>, format: u32, raw: u32, s: &Surface, pal: &[u32; 25
 pub struct Raster<'a> {
     pub cpu: &'a mut Cpu,
     pub card: Card,
+    /// The triangles of the specular pass, their colors the specular
+    /// ones.
+    pub second: Vec<[Vertex; 3]>,
 }
 
 impl Raster<'_> {
@@ -954,14 +1139,24 @@ impl Raster<'_> {
         } else {
             1.0
         };
-        let [b, g, r, a] = v.diffuse.to_le_bytes().map(f32::from);
+        let [mut b, mut g, mut r, a] = v.diffuse.to_le_bytes().map(f32::from);
+        if self.card.specular == Specular::Vertices {
+            let [sb, sg, sr, _] = v.specular.to_le_bytes().map(f32::from);
+            (r, g, b) = (
+                (r + sr).min(255.0),
+                (g + sg).min(255.0),
+                (b + sb).min(255.0),
+            );
+        }
+        // How much of the fog color: 1 less the vertex's fog factor, in
+        // Z's top 8 bits or as W's integer part.
+        let fog = 1.0 - (v.specular >> 24) as f32 / 255.0;
         let ooz = if self.card.fog_z {
-            // How much of the fog color: 1 less the vertex's fog factor.
-            let f = (v.specular >> 24) as f32 / 255.0;
-            (1.0 - f) * 65535.0
+            fog * 65535.0
         } else {
             v.z.clamp(0.0, 1.0) * 65535.0
         };
+        let oow = if self.card.fog_w { fog * 255.0 } else { rhw };
         let mut tmu = [TmuVertex::default(); 2];
         for (t, slot) in tmu.iter_mut().zip(self.card.tmus) {
             if let Some((stage, [sw, sh])) = slot {
@@ -975,7 +1170,6 @@ impl Raster<'_> {
                 t.oow = rhw;
             }
         }
-        let _ = self.card.w_depth;
         Vertex {
             x: v.x,
             y: v.y,
@@ -985,8 +1179,48 @@ impl Raster<'_> {
             b,
             ooz,
             a,
-            oow: rhw,
+            oow,
+
             tmu,
+        }
+    }
+}
+
+impl Raster<'_> {
+    /// The card as the rasterizer of a batch, as `bind` set it up.
+    pub fn new(cpu: &mut Cpu, card: Card) -> Raster<'_> {
+        Raster {
+            cpu,
+            card,
+            second: Vec::new(),
+        }
+    }
+
+    /// The end of the batch: its specular pass, if it has one.
+    pub fn finish(self) {
+        let Specular::Pass { source, equal } = self.card.specular else {
+            return;
+        };
+        if self.second.is_empty() {
+            return;
+        }
+        let cpu = self.cpu;
+        api::color_combine(
+            cpu,
+            api::COMBINE_FUNCTION_SCALE_OTHER,
+            api::COMBINE_FACTOR_ONE,
+            api::COMBINE_LOCAL_ITERATED,
+            api::COMBINE_OTHER_ITERATED,
+            false,
+        );
+        api::alpha_blend_function(cpu, source, api::BLEND_ONE, api::BLEND_ONE, api::BLEND_ZERO);
+        api::fog_color_value(cpu, 0);
+        if equal {
+            api::depth_buffer_function(cpu, compare(3));
+            api::depth_mask(cpu, false);
+        }
+        for [a, b, c] in &self.second {
+            api::draw_triangle(cpu, a, b, c);
         }
     }
 }
@@ -995,6 +1229,17 @@ impl Rasterizer for Raster<'_> {
     fn triangle(&mut self, v: &[ScreenVertex; 3]) {
         let [a, b, c] = v.map(|v| self.vertex(&v));
         api::draw_triangle(self.cpu, &a, &b, &c);
+        if matches!(self.card.specular, Specular::Pass { .. })
+            && v.iter().any(|v| v.specular & 0xFF_FFFF != 0)
+        {
+            let lit = |mut p: Vertex, s: &ScreenVertex| {
+                let [sb, sg, sr, _] = s.specular.to_le_bytes().map(f32::from);
+                (p.r, p.g, p.b) = (sr, sg, sb);
+                p
+            };
+            self.second
+                .push([lit(a, &v[0]), lit(b, &v[1]), lit(c, &v[2])]);
+        }
     }
 
     fn line(&mut self, v: &[ScreenVertex; 2]) {
