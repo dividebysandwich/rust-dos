@@ -501,7 +501,7 @@ impl Run {
             self.data[10] = r(e[3]);
         }
         if let Some(d) = get(cpu, self.id) {
-            d.stats[4] += out.len() as u32;
+            d.stats[4] = d.stats[4].wrapping_add(out.len() as u32);
         }
         for (i, v) in out.into_iter().enumerate() {
             if let Some(slot) = self.vertices.get_mut(dest + i) {

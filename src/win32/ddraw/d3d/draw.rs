@@ -258,10 +258,10 @@ pub fn account(
     let Some(d) = get(cpu, id) else {
         return;
     };
-    d.stats[0] += drawn.triangles;
-    d.stats[1] += drawn.lines;
-    d.stats[2] += drawn.points;
-    d.stats[4] += verts.len() as u32;
+    d.stats[0] = d.stats[0].wrapping_add(drawn.triangles);
+    d.stats[1] = d.stats[1].wrapping_add(drawn.lines);
+    d.stats[2] = d.stats[2].wrapping_add(drawn.points);
+    d.stats[4] = d.stats[4].wrapping_add(verts.len() as u32);
     let cs = &mut d.clip_status;
     // D3DCLIPSTATUS_STATUS, and the union and intersection of the codes.
     if cs[0] & 1 != 0 {
@@ -347,9 +347,9 @@ pub fn draw_processed(
 ) -> pipeline::Drawn {
     let drawn = rasterize(cpu, id, setup, verts, prims);
     if let Some(d) = get(cpu, id) {
-        d.stats[0] += drawn.triangles;
-        d.stats[1] += drawn.lines;
-        d.stats[2] += drawn.points;
+        d.stats[0] = d.stats[0].wrapping_add(drawn.triangles);
+        d.stats[1] = d.stats[1].wrapping_add(drawn.lines);
+        d.stats[2] = d.stats[2].wrapping_add(drawn.points);
     }
     drawn
 }

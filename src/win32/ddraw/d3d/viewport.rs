@@ -268,8 +268,8 @@ pub fn transform_vertices(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
         let rhw = 1.0 / w;
         let out = [
-            (d[2] / 2 + d[0]) as f32 + x * rhw * scale_x,
-            (d[3] / 2 + d[1]) as f32 - y * rhw * scale_y,
+            (d[2] / 2).wrapping_add(d[0]) as f32 + x * rhw * scale_x,
+            (d[3] / 2).wrapping_add(d[1]) as f32 - y * rhw * scale_y,
             z * rhw,
             rhw,
         ];
