@@ -405,3 +405,107 @@ fn int_20h_frees_the_memory_of_a_child_program() {
     let owned: Vec<u16> = rust_dos::mcb::walk(&mut cpu.bus).into_iter().filter(|(_, m)| m.owner == child_psp).map(|(seg, _)| seg).collect();
     assert!(owned.is_empty(), "the child's blocks are free: {:X?}", owned);
 }
+
+/// An EXE file whose load module is `code`, with the header's MINALLOC
+/// and MAXALLOC.
+fn exe(code: &[u8], min_alloc: u16, max_alloc: u16) -> Vec<u8> {
+    let mut exe = vec![0u8; 0x20];
+    exe.extend_from_slice(code);
+    let len = exe.len() as u16;
+    exe[0..2].copy_from_slice(b"MZ");
+    exe[2..4].copy_from_slice(&(len % 512).to_le_bytes());
+    exe[4..6].copy_from_slice(&len.div_ceil(512).to_le_bytes());
+    exe[8..10].copy_from_slice(&2u16.to_le_bytes()); // header paragraphs
+    exe[10..12].copy_from_slice(&min_alloc.to_le_bytes());
+    exe[12..14].copy_from_slice(&max_alloc.to_le_bytes());
+    exe[14..16].copy_from_slice(&0u16.to_le_bytes()); // SS
+    exe[16..18].copy_from_slice(&0x0100u16.to_le_bytes()); // SP
+    exe
+}
+
+#[test]
+fn exec_gives_an_exe_file_no_more_than_its_maxalloc_paragraphs() {
+    #[rustfmt::skip]
+    let parent = [
+        0xB4, 0x4A,             // MOV AH,4Ah: shrink to 1000h paragraphs
+        0xBB, 0x00, 0x10,       // MOV BX,1000h
+        0xCD, 0x21,             // INT 21h
+        0xB8, 0x00, 0x4B,       // MOV AX,4B00h
+        0xBB, 0x00, 0x02,       // MOV BX,0200h
+        0xBA, 0x00, 0x03,       // MOV DX,0300h
+        0xCD, 0x21,             // INT 21h
+        0xF4,                   // HLT
+    ];
+    // Millennia's ECGAME.EXE: MINALLOC 0, MAXALLOC 1, and an EXEC of its
+    // own without shrinking its block first. Here it allocates instead.
+    #[rustfmt::skip]
+    let child = [
+        0xB4, 0x48,             // MOV AH,48h: allocate 100h paragraphs
+        0xBB, 0x00, 0x01,       // MOV BX,0100h
+        0xCD, 0x21,             // INT 21h
+        0xF4,                   // HLT
+    ];
+    let dir = scratch("exec_maxalloc", &[("PARENT.COM", &parent), ("CHILD.EXE", &exe(&child, 0, 1))]);
+    let mut cpu = Cpu::new(dir);
+    assert!(cpu.load_executable("PARENT.COM", None));
+    let psp = cpu.current_psp;
+    let base = psp as usize * 16;
+    cpu.bus.write_16(base + 0x202, 0x0280);
+    cpu.bus.write_16(base + 0x204, psp);
+    cpu.bus.load_bytes(base + 0x280, &[0x00, 0x0D]);
+    cpu.bus.load_bytes(base + 0x300, b"CHILD.EXE\0");
+
+    for _ in 0..1000 {
+        let at = cpu.get_physical_addr(cpu.cs(), cpu.ip());
+        if cpu.bus.read_8(at) == 0xF4 && cpu.current_psp != psp {
+            break;
+        }
+        cpu.step();
+    }
+    let child_psp = cpu.current_psp;
+    assert_ne!(child_psp, psp, "the child ran to its HLT");
+    assert!(!cpu.get_cpu_flag(CpuFlags::CF), "the child's allocation failed, AX={:04X}", cpu.ax());
+    // Its PSP, its one paragraph of code, and MAXALLOC's one.
+    let block = rust_dos::mcb::read_mcb(&mut cpu.bus, child_psp - 1);
+    assert_eq!(block.size, 0x12);
+    // Its PSP's top of memory is the end of that block.
+    let top = cpu.bus.read_16(child_psp as usize * 16 + 2);
+    assert_eq!(top, child_psp + 0x12);
+}
+
+#[test]
+fn exec_of_an_exe_file_too_big_for_memory_fails_with_insufficient_memory() {
+    #[rustfmt::skip]
+    let parent = [
+        0xB4, 0x4A,             // MOV AH,4Ah: shrink to 1000h paragraphs
+        0xBB, 0x00, 0x10,       // MOV BX,1000h
+        0xCD, 0x21,             // INT 21h
+        0xB8, 0x00, 0x4B,       // MOV AX,4B00h
+        0xBB, 0x00, 0x02,       // MOV BX,0200h
+        0xBA, 0x00, 0x03,       // MOV DX,0300h
+        0xCD, 0x21,             // INT 21h
+        0xF4,                   // HLT
+    ];
+    // MINALLOC F000h paragraphs: more than all of conventional memory.
+    let child = exe(&[0xF4], 0xF000, 0xF000);
+    let dir = scratch("exec_too_big", &[("PARENT.COM", &parent), ("CHILD.EXE", &child)]);
+    let mut cpu = Cpu::new(dir);
+    assert!(cpu.load_executable("PARENT.COM", None));
+    let psp = cpu.current_psp;
+    let base = psp as usize * 16;
+    cpu.bus.write_16(base + 0x202, 0x0280);
+    cpu.bus.write_16(base + 0x204, psp);
+    cpu.bus.load_bytes(base + 0x280, &[0x00, 0x0D]);
+    cpu.bus.load_bytes(base + 0x300, b"CHILD.EXE\0");
+
+    for _ in 0..1000 {
+        let at = cpu.get_physical_addr(cpu.cs(), cpu.ip());
+        if cpu.bus.read_8(at) == 0xF4 {
+            break;
+        }
+        cpu.step();
+    }
+    assert_eq!(cpu.current_psp, psp, "the parent is back at its HLT");
+    assert!(cpu.get_cpu_flag(CpuFlags::CF));
+    assert_eq!(cpu.ax(), 0x0008);
+}

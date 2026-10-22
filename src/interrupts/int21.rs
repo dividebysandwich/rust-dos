@@ -160,12 +160,13 @@ fn write_country_info(cpu: &mut Cpu, addr: usize, len: usize) {
     cpu.bus.guest_write_bytes(addr as u32, &info[..len]);
 }
 
-/// Allocate the largest available free MCB for a child process about to be
-/// loaded via EXEC, and return its first usable paragraph (the new PSP seg).
+/// Allocate a block for a child process about to be loaded via EXEC: the
+/// largest free one, or `wanted` paragraphs of it when that is less.
+/// Returns its first usable paragraph (the new PSP segment).
 /// The MCB owner is temporarily set to the placeholder 0xFFFF and must be
-/// patched to the child's PSP by the caller once load_executable sets it.
+/// patched to the child's PSP by the caller once the program is loaded.
 /// Returns None if no free memory could be allocated.
-fn find_child_load_segment(cpu: &mut Cpu) -> Option<u16> {
+fn find_child_load_segment(cpu: &mut Cpu, wanted: Option<u16>) -> Option<u16> {
     // Walk the chain to find the largest free block: in conventional
     // memory, unless the program asked for upper memory and linked it.
     let upper = cpu.alloc_strategy & 0xC0 != 0 && cpu.bus.umb.is_some_and(|u| u.linked);
@@ -181,9 +182,20 @@ fn find_child_load_segment(cpu: &mut Cpu) -> Option<u16> {
         return None;
     }
 
-    // Grab the whole block — DOS convention is "give the child everything;
-    // the child's own startup will AH=4A down to what it needs".
-    crate::mcb::alloc(&mut cpu.bus, 0xFFFF, largest).ok()
+    // The whole block, unless the program's header asks for less: DOS
+    // gives an EXE file no more than its MAXALLOC paragraphs, and a
+    // program that counts on that (Millennia's ECGAME.EXE asks for one)
+    // never shrinks its block before starting its own children. A block
+    // smaller than the largest goes where the strategy says, so a program
+    // asking for upper memory first gets it there if it fits.
+    let paras = wanted.map_or(largest, |wanted| wanted.min(largest));
+    let strategy = cpu.alloc_strategy;
+    let high = if upper {
+        crate::mcb::alloc_strategy(&mut cpu.bus, 0xFFFF, paras, strategy).ok()
+    } else {
+        None
+    };
+    high.or_else(|| crate::mcb::alloc(&mut cpu.bus, 0xFFFF, paras).ok())
 }
 
 /// 0-based drive for a DOS drive code where 0 = default, 1 = A:, ...
@@ -853,10 +865,12 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 let return_address = (cpu.bus.guest_read_16(frame), cpu.bus.guest_read_16(frame + 2));
 
                 let parent_psp_before = cpu.current_psp;
-                // Allocate the largest free MCB for the child. DOS gives the
-                // child all available conventional memory; it will shrink via
-                // AH=4A in its own startup if it wants to spawn nested children.
-                let load_segment = match find_child_load_segment(cpu) {
+                // Allocate the child's block from the largest free one: all
+                // of it for a COM file, up to what its header asks for an
+                // EXE file.
+                let program = cpu.read_program_file(&target_filename);
+                let wanted = program.as_deref().and_then(crate::cpu::exec_block_paras);
+                let load_segment = match find_child_load_segment(cpu, wanted) {
                     Some(seg) => seg,
                     None => {
                         let _ = crate::mcb::free(&mut cpu.bus, env_seg);
@@ -869,7 +883,10 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                     }
                 };
 
-                if cpu.load_executable(&target_filename, Some(load_segment)) {
+                let loaded = program
+                    .as_deref()
+                    .is_some_and(|bytes| cpu.load_child(&target_filename, bytes, load_segment));
+                if loaded {
                     let child_at = cpu.psp_address(load_segment);
                     if let Some(context) = cpu.process_stack.last_mut() {
                         context.child = load_segment;
@@ -984,11 +1001,18 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 } else {
                     // Load failed — release the MCBs we allocated, pop the
                     // context we just saved, and return an error to the parent.
+                    // An EXE file whose MINALLOC doesn't fit in the largest
+                    // free block is short of memory (08h), not missing.
+                    let block = crate::mcb::read_mcb(&mut cpu.bus, load_segment - 1).size;
+                    let short = program.as_deref().is_some_and(|bytes| {
+                        bytes.starts_with(b"MZ") && block < crate::cpu::program_paras(bytes)
+                    });
                     let _ = crate::mcb::free(&mut cpu.bus, load_segment);
                     let _ = crate::mcb::free(&mut cpu.bus, env_seg);
                     cpu.restore_process_context();
                     cpu.set_cpu_flag(CpuFlags::CF, true);
-                    cpu.set_reg16(Register::AX, 0x02); // File not found
+                    // Insufficient memory, or file not found.
+                    cpu.set_reg16(Register::AX, if short { 0x08 } else { 0x02 });
                 }
             } else if mode == 0x03 {
                 // AL=03h: Load Overlay. Loads an EXE (or raw binary) into
