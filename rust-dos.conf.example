@@ -226,6 +226,10 @@
 # emulator. Few functions exist yet; a program that calls one that doesn't
 # ends with a message naming it. true or false (the default).
 #win32=false
+# The version of Windows the built-in Windows is: 95 (the default), 98 or
+# 98se. Programs are told it, and under 98 the DLLs have Windows 98's
+# functions.
+#win32_version=95
 # The DOS version programs are told, such as 5.00 (the default), 6.22 or
 # 7.10. The FAT32 functions of MS-DOS 7 (INT 21h AX=7302h to 7305h), which
 # disk utilities use, answer from 7.00 on; FAT32 drives mount at any

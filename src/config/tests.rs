@@ -681,6 +681,9 @@ fn changed_settings() -> Settings {
         umb: false,
         dpmi: false,
         win32: true,
+        win32_dlls: None,
+        win32_dlls_replace: Vec::new(),
+        win32_version: WindowsVersion::Win98Se,
         dos_high: false,
         dos_version: DosVersion::new(7, 10),
         ide_hard_disks: false,
@@ -1008,12 +1011,14 @@ fn saving_all_fills_in_every_setting() {
     // were written, and the command line's speed isn't kept.
     for (section, key, _) in entries(&settings, Some(home)) {
         // (The file's SoundFont; no Ultrasound directory, MT-32 or
-        // Sound Canvas, LAN password, RetroAchievements account or
-        // printer paths and programs of its own.)
+        // Sound Canvas, LAN password, RetroAchievements account,
+        // printer paths and programs or Win32 DLL folder of its own.)
         let wanted = !matches!(
             key,
             "ultradir" | "awe32rom" | "mt32roms" | "mt32lib" | "sc55roms" | "midiport" | "password" | "username" | "token"
                 | "verite_rom"
+                | "win32_dlls"
+                | "win32_dlls_replace"
                 | "docpath" | "fontpath" | "device" | "print_command" | "open_with" | "scene"
         );
         assert_eq!(has_key(&saved.lines().map(str::to_string).collect::<Vec<_>>(), section, key), wanted, "{}\n{}", key, saved);
@@ -1076,4 +1081,17 @@ fn unwritable_default_is_only_a_warning() {
     assert!(!config.created);
     assert_eq!(config.warnings.len(), 1);
     assert!(config.drives.is_empty());
+}
+
+#[test]
+fn the_win32_dll_folder_and_the_dlls_it_replaces_are_read() {
+    let text = "[emulator]\nwin32_dlls=~/wine/i386-windows\n\
+                win32_dlls_replace=COMCTL32.DLL, comdlg32\n";
+    let config = parse(text, Path::new("/cfg"), Some(Path::new("/home/u")));
+    assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+    let settings = Settings::from_config(&config);
+    assert_eq!(settings.win32_dlls, Some(PathBuf::from("/home/u/wine/i386-windows")));
+    assert_eq!(settings.win32_dlls_replace, ["comctl32", "comdlg32"]);
+    let none = Settings::from_config(&parse("[emulator]\nwin32_dlls=\n", Path::new("/cfg"), None));
+    assert_eq!(none.win32_dlls, None);
 }

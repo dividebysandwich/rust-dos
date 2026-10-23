@@ -17,9 +17,11 @@ mod advapi32;
 mod call;
 mod com;
 mod comctl32;
+mod comdlg32;
 mod convert;
 mod ddraw;
 mod dinput;
+mod dmusic;
 mod dplayx;
 mod dsound;
 pub mod gdi32;
@@ -31,6 +33,7 @@ mod lz32;
 mod mapping;
 mod memory;
 mod msvcrt;
+mod ntdll;
 mod object;
 mod ole32;
 mod oleaut32;
@@ -45,6 +48,7 @@ mod system;
 mod task;
 mod thread;
 pub mod user32;
+pub mod version;
 mod verdll;
 mod winmm;
 mod wsock32;
@@ -125,6 +129,9 @@ const ID_START: u16 = 0xF300;
 
 /// The index of ESP in `Context::gpr`.
 const ESP: usize = 4;
+
+/// What a call of a function the built-in DLLs lack fails with.
+const ERROR_CALL_NOT_IMPLEMENTED: u32 = 120;
 
 /// The exit code of a program that ended because of an error.
 const FAILED: u32 = 0xFF;
@@ -257,6 +264,16 @@ pub struct Win32 {
     /// Whether PE programs run (the `win32` setting); off, their DOS stub
     /// runs as on DOS.
     pub enabled: bool,
+    /// The host folder of DLLs programs may load as guest code (the
+    /// `win32_dlls` setting), and the built-in DLLs its DLLs replace
+    /// (`win32_dlls_replace`, lowercase names without ".dll").
+    pub guest_dlls: Option<std::path::PathBuf>,
+    pub guest_replace: Vec<String>,
+    /// The version of Windows it is (the `win32_version` setting), and
+    /// the version the running processes see, which is the setting's
+    /// when the first of them started (version.rs).
+    pub version: version::WindowsVersion,
+    os: version::WindowsVersion,
     /// The program DOS loaded, which starts at `START`.
     pending: Option<String>,
     /// The processes, the one DOS started first. They run in that DOS
@@ -315,6 +332,12 @@ pub struct Win32 {
     winmm: winmm::State,
     glide: glide::State,
     guids: u32,
+    /// DirectMusic's objects (dmusic/).
+    dmusic: dmusic::State,
+    /// The common controls' state, the system's.
+    comctl32: comctl32::State,
+    /// The common dialogs' state.
+    comdlg32: comdlg32::State,
     /// SHELL32's: its shell links.
     shell: shell32::State,
     /// DDEML's instances, string and data handles and conversations.
@@ -326,6 +349,9 @@ impl Win32 {
     pub fn reset(&mut self) {
         *self = Win32 {
             enabled: self.enabled,
+            guest_dlls: self.guest_dlls.take(),
+            guest_replace: std::mem::take(&mut self.guest_replace),
+            version: self.version,
             ..Win32::default()
         };
     }
@@ -363,9 +389,12 @@ impl Win32 {
     }
 
     /// The scale of what the MIDI synthesizer plays (left, right): the
-    /// MIDI device's volume and the mixer's.
+    /// MIDI device's volume and the mixer's, and DirectMusic's master
+    /// volume.
     pub fn midi_gain(&self) -> (f32, f32) {
-        winmm::midi::gain(&self.winmm)
+        let (l, r) = winmm::midi::gain(&self.winmm);
+        let master = dmusic::gain(&self.dmusic);
+        (l * master, r * master)
     }
 
     /// The scale of what the CD drive plays: the mixer's CD line.
@@ -529,6 +558,7 @@ fn start(cpu: &mut Cpu) {
     win32.rm_stack = rm_stack;
     win32.a20 = a20;
     win32.cr4 = cr4;
+    version::start(win32);
     let environment = dos_environment(cpu, cpu.current_psp);
     let line = loader::dos_command_line(cpu, &path);
     match create_process(cpu, &path, &line, environment, Vec::new(), None, Vec::new(), false) {
@@ -768,6 +798,7 @@ fn end_process(cpu: &mut Cpu, index: usize, code: u32) {
     dinput::process_ended(cpu, process.id, &tids);
     winmm::process_ended(cpu, process.id, &tids);
     glide::process_ended(cpu, process.id, &tids);
+    dmusic::process_ended(cpu, process.id);
     shell32::process_ended(cpu, process.id);
     user32::ddeml::process_ended(cpu, process.id);
     let win32 = &mut cpu.bus.win32;
@@ -823,7 +854,22 @@ fn peek_32(cpu: &Cpu, lin: u32) -> Option<u32> {
     Some(cpu.bus.read_32(phys as usize))
 }
 
-/// The program called a function a built-in DLL doesn't have yet.
+/// Whether the running function of a built-in DLL was called from guest
+/// code (`loader::GUEST`): its return address, at ESP, is in such a DLL.
+fn called_from_guest(cpu: &Cpu) -> bool {
+    let Some(caller) = peek_32(cpu, cpu.esp()) else {
+        return false;
+    };
+    running(cpu).is_some_and(|p| {
+        p.modules
+            .iter()
+            .any(|m| m.flags & loader::GUEST != 0 && caller.wrapping_sub(m.base) < m.size)
+    })
+}
+
+/// The program called a function a built-in DLL doesn't have yet. When
+/// guest code (`loader::GUEST`) calls it, the call fails: it returns 0
+/// with ERROR_CALL_NOT_IMPLEMENTED, and its stub pops the arguments.
 fn missing(cpu: &mut Cpu, index: u16) {
     let caller = peek_32(cpu, cpu.esp()).unwrap_or(0);
     let (dll, function) = process(cpu)
@@ -831,6 +877,23 @@ fn missing(cpu: &mut Cpu, index: u16) {
         .get(index as usize)
         .cloned()
         .unwrap_or_default();
+    let guest = process(cpu)
+        .modules
+        .iter()
+        .find(|m| m.flags & loader::GUEST != 0 && caller.wrapping_sub(m.base) < m.size)
+        .map(|m| m.name.clone());
+    if let Some(module) = guest {
+        let message = format!(
+            "[W32] {} called {}'s function {} (from {:08X}), which the built-in \
+             Windows doesn't have: it fails",
+            module, dll, function, caller
+        );
+        cpu.bus.log_string(&message);
+        process(cpu).last_error = ERROR_CALL_NOT_IMPLEMENTED;
+        cpu.set_eax(0);
+        cpu.set_eip(cpu.eip().wrapping_add(4));
+        return;
+    }
     let message = format!(
         "{} needs {}'s function {} (called from {:08X}), which the built-in Windows doesn't have yet.",
         process(cpu).name,
@@ -922,6 +985,12 @@ pub fn process_ended(cpu: &mut Cpu, psp: u16) {
         cpu.bus.set_a20(a20);
     }
     cpu.bus.win32.pending = None;
+}
+
+/// Put the .reg file `text` into the registry, as a game profile's
+/// `<id>.reg` is when the game starts (games.rs).
+pub fn import_registry(cpu: &mut Cpu, text: &str) -> Result<(), String> {
+    registry::import_file(cpu, text)
 }
 
 /// What the trap with id `id` runs, for the disassembler.
@@ -1016,6 +1085,10 @@ crate::state_fields!(Win32 {
     winmm,
     glide,
     guids,
+    os,
+    dmusic,
+    comctl32,
+    comdlg32,
     shell,
     dde,
-} skip { enabled });
+} skip { enabled, guest_dlls, guest_replace, version });

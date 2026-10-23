@@ -1,7 +1,7 @@
 //! Reading configuration text into a `Config`.
 
 use super::types::parse_bool;
-use super::{AspectRatio, Config, DosVersion, Filter, Section, Settings, parse_mouse_sensitivity};
+use super::{AspectRatio, Config, DosVersion, Filter, Section, Settings, WindowsVersion, parse_mouse_sensitivity};
 use crate::cpu::{CoreMode, CpuModel};
 use crate::disk::DRIVE_Z;
 use crate::diskio::{DiskSpeed, NoiseMode};
@@ -73,7 +73,8 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
             | Section::Vr
             | Section::Vfx1
             | Section::Game
-            | Section::Gamepad => {
+            | Section::Gamepad
+            | Section::Install => {
                 let Some((key, value)) = line.split_once('=') else {
                     warn(format!("expected key=value, got '{}'", line));
                     continue;
@@ -273,6 +274,21 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Some(on) => config.win32 = Some(on),
                             None => warn(format!("invalid win32 '{}' (true or false)", value)),
                         },
+                        "win32_dlls" => {
+                            let value = value.trim_matches('"');
+                            let path = match (value.strip_prefix("~/"), home) {
+                                (Some(rest), Some(h)) => h.join(rest),
+                                _ => PathBuf::from(value),
+                            };
+                            config.win32_dlls = (!value.is_empty()).then_some(path);
+                        }
+                        "win32_dlls_replace" => {
+                            config.win32_dlls_replace = Some(super::settings::dll_names(value));
+                        }
+                        "win32_version" => match WindowsVersion::parse(value) {
+                            Some(version) => config.win32_version = Some(version),
+                            None => warn(format!("invalid win32_version '{}' (95, 98 or 98se)", value)),
+                        },
                         "ide_hard_disks" => match parse_bool(value) {
                             Some(on) => config.ide_hard_disks = Some(on),
                             None => warn(format!("invalid ide_hard_disks '{}' (true or false)", value)),
@@ -424,6 +440,11 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                     continue;
                 }
 
+                if section == Section::Install {
+                    config.game_install.push((key.to_ascii_lowercase(), value.to_string()));
+                    continue;
+                }
+
                 if section == Section::Game {
                     match key.to_ascii_lowercase().as_str() {
                         "name" if !value.is_empty() => config.game_name = Some(value.to_string()),
@@ -436,6 +457,12 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         "input" if !value.is_empty() => config.game_input = Some(value.to_string()),
                         "os" if !value.is_empty() => config.game_os = Some(value.to_string()),
                         "os" => {}
+                        "windows" => match value.to_ascii_lowercase().as_str() {
+                            "builtin" | "image" => {
+                                config.game_windows = Some(value.to_ascii_lowercase())
+                            }
+                            _ => warn(format!("invalid windows '{}' (builtin or image)", value)),
+                        },
                         "input" => {}
                         "variants" => match parse_bool(value) {
                             Some(on) => config.game_variants = on,

@@ -98,6 +98,9 @@ impl MainHost<'_, '_> {
             }
         }
         self.cpu.bus.config_dir = std::path::absolute(dir).ok();
+        for warning in games::start(self.cpu, &prepared.install, prepared.registry.as_deref()) {
+            config_warning(self.cpu, &format!("games/{}.conf: {}", id, warning));
+        }
         self.cpu.queue_batch_lines(&prepared.autoexec);
         self.cpu.bus.log_string(&format!("[CONFIG] Launching the game {} (games/{}.conf)", prepared.name, id));
         // What RetroAchievements knows the game by.
@@ -512,6 +515,9 @@ impl Host for MainHost<'_, '_> {
         // Programs look for the host as they start.
         self.cpu.bus.dpmi.enabled = new.dpmi;
         self.cpu.bus.win32.enabled = new.win32;
+        self.cpu.bus.win32.guest_dlls = new.win32_dlls.clone();
+        self.cpu.bus.win32.guest_replace = new.win32_dlls_replace.clone();
+        self.cpu.bus.win32.version = new.win32_version;
         // Glide's DOS overlay, once downloaded.
         rust_dos::voodoo::overlay::provide(&mut self.cpu.bus);
         self.cpu.bus.ide_hard_disks = new.ide_hard_disks;

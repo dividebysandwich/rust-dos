@@ -151,6 +151,34 @@ pub(crate) enum Command {
     /// tool of the host: what it prints goes to standard output, standard
     /// input is typed at its keyboard, and its exit code is rust-dos's
     Run(RunArgs),
+    /// List or extract an InstallShield installer archive: a cabinet set
+    /// by its header (data1.hdr, or a data1.cab holding one) or an
+    /// InstallShield 3 archive (_SETUP.1, a .Z file)
+    Unpack(UnpackArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct UnpackArgs {
+    /// The cabinet set's header, or the InstallShield 3 archive
+    pub(crate) archive: std::path::PathBuf,
+
+    /// List the files, the file groups and the entries that can't be read,
+    /// instead of extracting
+    #[arg(short, long)]
+    pub(crate) list: bool,
+
+    /// The folder to extract into [default: the current one]
+    #[arg(short, long, value_name = "DIR")]
+    pub(crate) to: Option<std::path::PathBuf>,
+
+    /// Extract only the files of this file group (several may be given)
+    #[arg(short, long, value_name = "NAME")]
+    pub(crate) group: Vec<String>,
+
+    /// The cabinet's compressed files are raw deflate ending each chunk
+    /// with 00 00 FF FF, as in some early sets (Unshield's -O)
+    #[arg(short = 'O', long)]
+    pub(crate) old_compression: bool,
 }
 
 #[derive(clap::Args, Debug)]

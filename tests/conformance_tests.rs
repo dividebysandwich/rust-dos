@@ -15,6 +15,7 @@
 //! results. CONFORMANCE_LOG=1 writes the emulator's log, with every call
 //! a program makes, to target/conformance/<dll>/<test>.trace.
 
+use rust_dos::config::WindowsVersion;
 use rust_dos::cpu::{Cpu, CpuModel, HostConsole};
 use rust_dos::exec::{NoHook, StopReason, run_batch};
 use rust_dos::joystick::{JoystickSettings, JoystickType};
@@ -129,6 +130,9 @@ fn run(
     let mut cpu = Cpu::new(dir.to_path_buf());
     cpu.model = model;
     cpu.bus.win32.enabled = true;
+    // Windows 98 SE, whose functions the tests use where Windows 95 has
+    // none (SendInput, GetAncestor, the monitors).
+    cpu.bus.win32.version = WindowsVersion::Win98Se;
     if joystick {
         cpu.bus.joystick.set_settings(JoystickSettings {
             kind: JoystickType::Mouse,
@@ -232,6 +236,8 @@ const LIBS: &[&str] = &[
     "-ldinput",
     "-lwinmm",
     "-lole32",
+    "-lcomctl32",
+    "-lcomdlg32",
     "-luser32",
     "-lgdi32",
     "-lkernel32",
@@ -365,6 +371,12 @@ fn build(
         args.extend([list.as_str(), runtime]);
     }
     args.extend(resources);
+    if dll == "comctl32" {
+        // Wine builds comctl32's tests into one program, which imports
+        // COMCTL32.DLL; mru.c and subclass.c, which only find its
+        // functions by ordinal, need it loaded as well.
+        args.push("-Wl,-u,_InitCommonControls@0");
+    }
     args.extend(LIBS);
     args.extend(["-lgcc", "-o", program]);
     compile(cc, &args)
@@ -416,13 +428,12 @@ fn wine_conformance_tests_give_the_expected_results() {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         // The resources the DLL's tests share (user32's resource.rc,
-        // version's version.rc), which each of its programs is linked
-        // with.
-        let rc = fs::read_dir(format!("{ROOT}/wine/{dll}"))
-            .unwrap()
-            .filter_map(|e| e.ok()?.file_name().into_string().ok())
-            .find(|name| name.ends_with(".rc"))
-            .map(|name| format!("{ROOT}/wine/{dll}/{name}"));
+        // comctl32's rsrc.rc, version's version.rc), which each of its
+        // programs is linked with.
+        let rc = ["resource.rc", "rsrc.rc", "version.rc"]
+            .iter()
+            .map(|name| format!("{ROOT}/wine/{dll}/{name}"))
+            .find(|rc| Path::new(rc).exists());
         let resources = rc.map(|rc| {
             let object = format!("{OUT}/{dll}/resource.o");
             let include = format!("-I{ROOT}/wine/include");

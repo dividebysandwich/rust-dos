@@ -116,6 +116,18 @@ pub fn initialized(cpu: &mut Cpu) -> bool {
         || apartments.iter().any(|a| a.pid == pid && a.multithreaded)
 }
 
+/// Whether the running thread is in its process's multithreaded
+/// apartment: it joined it with CoInitializeEx, or it never initialized
+/// COM and the process has one.
+pub fn in_multithreaded_apartment(cpu: &mut Cpu) -> bool {
+    let (tid, pid) = (current_tid(cpu), current_pid(cpu));
+    let apartments = &com_state(cpu).apartments;
+    match apartments.iter().find(|a| a.tid == tid) {
+        Some(a) => a.multithreaded,
+        None => apartments.iter().any(|a| a.pid == pid && a.multithreaded),
+    }
+}
+
 /// CoInitializeEx for `model`: S_FALSE when the thread had initialized
 /// COM already, RPC_E_CHANGED_MODE when it did for the other model.
 fn initialize(cpu: &mut Cpu, model: u32) -> u32 {

@@ -15,15 +15,18 @@ pub(super) mod module;
 mod path;
 mod process;
 mod profile;
+pub(in crate::win32) use profile::profile_value;
 mod sort;
 mod sync;
 mod text;
 mod threads;
 mod time;
+mod win98;
+pub use win98::is_directory;
 pub(crate) mod virtual_memory;
 
 pub(super) use locale::enum_returned;
-pub(super) use path::{change_directory, current_directory, full_path};
+pub(super) use path::{change_directory, current_directory, find_entries, full_path, matches};
 pub(super) use process::{STARTUPINFO_SIZE, spawn};
 pub(super) use file::{
     CREATE_ALWAYS, CREATE_NEW, FILE_SHARE_READ, FILE_SHARE_WRITE, GENERIC_READ, GENERIC_WRITE,
@@ -527,6 +530,13 @@ static APIS: &[Api] = &[
     stdcall("GlobalAddAtomW", 489, 1, not_implemented),
     stdcall("CreateProcessW", 490, 10, not_implemented),
     stdcall("WinExec", 510, 2, process::win_exec),
+    stdcall("GetDiskFreeSpaceExA", 511, 4, win98::get_disk_free_space_ex),
+    stdcall("IsDebuggerPresent", 512, 0, win98::is_debugger_present),
+    stdcall("InterlockedCompareExchange", 513, 3, win98::interlocked_compare_exchange),
+    stdcall("InterlockedExchangeAdd", 514, 2, win98::interlocked_exchange_add),
+    stdcall("GetFileAttributesExA", 515, 3, win98::get_file_attributes_ex),
+    stdcall("GetLongPathNameA", 516, 3, win98::get_long_path_name),
+    stdcall("GetPrivateProfileSectionW", 517, 4, profile::get_private_profile_section_w),
     stdcall("LZStart", 901, 0, lz::lz_start),
     stdcall("LZDone", 902, 0, lz::lz_done),
     stdcall("LZInit", 903, 1, lz::lz_init),
@@ -1027,9 +1037,10 @@ fn get_command_line_w(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(super::process(cpu).command_line + super::memory::PAGE)
 }
 
-/// Windows 95: version 4.0, with bit 31 saying it isn't NT.
-fn get_version(_: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(0xC000_0004)
+/// The version in the low word (minor in the high byte), and the high
+/// bits set for Windows 9x (version.rs).
+fn get_version(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    Some(super::version::info(super::version::current(cpu)).get_version)
 }
 
 /// The module named `name` (with ".DLL" when it has no extension), or

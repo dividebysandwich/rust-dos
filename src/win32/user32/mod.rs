@@ -18,6 +18,7 @@ pub mod hook;
 pub mod input;
 pub mod menu;
 pub mod message;
+pub mod monitor;
 pub mod paint;
 pub mod rect;
 pub mod resource;
@@ -790,7 +791,7 @@ static APIS: &[Api] = &[
     stdcall("GetKeyboardLayoutNameW", 202, 1, not_implemented),
     stdcall("VkKeyScanW", 203, 1, not_implemented),
     stdcall("SendInput", 204, 3, input::send_input),
-    stdcall("TrackMouseEvent", 205, 1, not_implemented),
+    stdcall("TrackMouseEvent", 205, 1, monitor::track_mouse_event),
     stdcall("RegisterHotKey", 206, 4, succeed),
     stdcall("UnregisterHotKey", 207, 2, succeed),
     // Painting.
@@ -1175,7 +1176,7 @@ static APIS: &[Api] = &[
     stdcall("GetUserObjectInformationA", 426, 5, not_implemented),
     stdcall("WinHelpA", 427, 4, succeed),
     stdcall("GetSystemDefaultLangID", 428, 0, nothing),
-    stdcall("EnumDisplayDevicesA", 429, 4, nothing),
+    stdcall("EnumDisplayDevicesA", 429, 4, monitor::enum_display_devices),
     // No monitor functions (430 to 433): they came with Windows 98, and
     // programs and Wine's tests look them up to tell Windows 95 apart.
     stdcall("SetWindowsHookW", 434, 2, not_implemented),
@@ -1224,6 +1225,14 @@ static APIS: &[Api] = &[
     stdcall("DlgDirSelectExA", 469, 4, nothing),
     stdcall("DlgDirListComboBoxA", 470, 5, nothing),
     stdcall("DlgDirSelectComboBoxExA", 471, 4, nothing),
+    stdcall("MonitorFromWindow", 472, 2, monitor::monitor_from_window),
+    stdcall("MonitorFromPoint", 473, 3, monitor::monitor_from_point),
+    stdcall("MonitorFromRect", 474, 2, monitor::monitor_from_rect),
+    stdcall("GetMonitorInfoA", 475, 2, monitor::get_monitor_info_a),
+    stdcall("GetMonitorInfoW", 476, 2, monitor::get_monitor_info_w),
+    stdcall("EnumDisplayMonitors", 477, 4, monitor::enum_display_monitors),
+    stdcall("AnimateWindow", 478, 3, monitor::animate_window),
+    stdcall("GetCursorInfo", 479, 1, monitor::get_cursor_info),
     // DDEML (ddeml.rs), numbered from 600 on.
     stdcall("DdeInitializeA", 600, 4, ddeml::dde_initialize),
     stdcall("DdeInitializeW", 601, 4, ddeml::dde_initialize),

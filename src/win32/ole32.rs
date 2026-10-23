@@ -309,6 +309,16 @@ fn co_create_instance(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             if outer != 0 {
                 return Some(CLASS_E_NOAGGREGATION);
             }
+            // DirectMusic's classes are apartment-threaded: a thread of
+            // the multithreaded apartment gets one through a proxy, which
+            // Windows 98 has only for IUnknown (REGDB_E_IIDNOTREG for the
+            // others).
+            if wanted != com::IID_IUNKNOWN
+                && compobj::in_multithreaded_apartment(cpu)
+                && com::class_at(index).is_some_and(|c| super::dmusic::is_apartment_class(&c.clsid))
+            {
+                return Some(0x8004_0155);
+            }
             Some(create(cpu, index, &wanted, out))
         }
         compobj::Source::Registered(object) => {

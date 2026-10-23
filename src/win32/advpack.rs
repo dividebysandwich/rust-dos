@@ -7,7 +7,7 @@ use crate::cpu::Cpu;
 
 pub static DLL: Dll = Dll {
     name: "ADVPACK.DLL",
-    base: 0xBFE4_0000,
+    base: 0xBFE8_0000,
     apis: APIS,
     vars: &[],
     init: None,

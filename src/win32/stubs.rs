@@ -97,8 +97,15 @@ pub static DLLS: &[&Dll] = &[
     &super::dplayx::DLL,
     &super::shell32::DLL,
     &super::comctl32::DLL,
-    &super::comctl32::COMDLG32,
+    &super::comdlg32::DLL,
     &super::wsock32::DLL,
+    &super::ntdll::DLL,
+    &super::dmusic::DMUSIC,
+    &super::dmusic::DMIME,
+    &super::dmusic::DMLOADER,
+    &super::dmusic::DMSTYLE,
+    &super::dmusic::DMBAND,
+    &super::dmusic::DMCOMPOS,
     &super::lz32::DLL,
     &super::verdll::DLL,
     &super::oleaut32::DLL,
@@ -230,8 +237,9 @@ pub fn stub(id: u16, args: u8, conv: Conv) -> [u8; STUB as usize] {
     code
 }
 
-/// The image of the built-in DLL `dll`: its stubs and export directory.
-pub fn image(index: usize) -> pe::Image {
+/// The image of the built-in DLL `dll`: its stubs and export directory,
+/// with the functions `version` of Windows has (version.rs).
+pub fn image(index: usize, version: super::version::WindowsVersion) -> pe::Image {
     let dll = DLLS[index];
     let mut b = pe::Builder::dll(dll.base, dll.name);
     let mut code: Vec<u8> = dll
@@ -250,7 +258,7 @@ pub fn image(index: usize) -> pe::Image {
     );
     debug_assert_eq!(rva, CODE_RVA);
     for (i, api) in dll.apis.iter().enumerate() {
-        if api.ordinal != 0 {
+        if api.ordinal != 0 && super::version::exports(version, dll.name, api.name) {
             b.export(Some(api.name), api.ordinal, rva + i as u32 * STUB);
         }
     }

@@ -327,6 +327,8 @@ pub struct State {
     pub mmio: mmio::Mmio,
     pub mixer: mixer::Mixer,
     pub joy: joy::Joy,
+    /// The installable drivers the processes opened (driver.rs).
+    pub drivers: Vec<driver::Driver>,
 }
 
 /// A process ended: what it had goes.
@@ -337,6 +339,7 @@ pub fn process_ended(cpu: &mut Cpu, pid: u32, _tids: &[u32]) {
     mmio::process_ended(cpu, pid);
     mixer::process_ended(cpu, pid);
     joy::process_ended(cpu, pid);
+    driver::process_ended(cpu, pid);
     callback::process_ended(cpu, pid);
     wave::process_ended(cpu, pid);
     schedule(cpu);
@@ -361,6 +364,7 @@ pub fn poll(cpu: &mut Cpu, pid: u32, now: u64) -> Option<u64> {
     midi::poll(cpu, pid, now);
     mci::poll(cpu, pid, now);
     joy::poll(cpu, pid, now);
+    super::dmusic::poll(cpu, pid, now);
     schedule(cpu);
     next_due(cpu, pid)
 }
@@ -372,6 +376,7 @@ fn next_due(cpu: &Cpu, pid: u32) -> Option<u64> {
         midi::next_due(cpu, Some(pid)),
         mci::next_due(cpu, Some(pid)),
         joy::next_due(cpu, Some(pid)),
+        super::dmusic::next_due(cpu, Some(pid)),
     ]
     .into_iter()
     .flatten()
@@ -561,5 +566,6 @@ crate::state_fields!(State {
     mmio,
     mixer,
     joy,
-    wave
+    wave,
+    drivers
 } skip { ticking });
