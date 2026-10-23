@@ -246,8 +246,18 @@ exceptions run as the program's own code on top of that.
   flushed and when the last process ends. Without a writable C: the
   registry lasts until then. A game's profile brings its keys as a .reg
   file, which the same import puts in (`[-key]` and `"name"=-` delete).
-- `GetVersion` and `GetVersionEx` say Windows 95 (4.0.950, platform 1),
-  later configurable to 98 (4.10.1998).
+- `GetVersion` and `GetVersionEx` say Windows 95 (4.0.950, platform
+  1), or with `win32_version=98` Windows 98 (4.10.1998) and with
+  `win32_version=98se` Windows 98 SE (4.10.2222, " A "), as do the
+  registry's version values and MSVCRT's `_osver`. Under 98 the
+  built-in DLLs also export the functions Windows 98 added that games
+  use (`version.rs` lists them: USER32's monitor functions,
+  `AnimateWindow`, `GetCursorInfo`, KERNEL32's `IsDebuggerPresent`,
+  `InterlockedCompareExchange`, `GetFileAttributesExA`,
+  `GetLongPathNameA` and others); under 95 a program that imports one
+  doesn't load, as on Windows 95, and `GetProcAddress` doesn't find it.
+  The setting is read when the first process starts, and kept in save
+  states.
 
 ### Video
 
@@ -294,6 +304,18 @@ All output goes through the emulated video hardware:
   Blaster. Play cursors and notifications come from emulated time.
 - **`midiOut` and MCI**: MIDI goes to the MPU-401's synthesizers
   (FluidSynth, MT-32, SC-55); MCI CD audio to the CD audio player.
+- **DirectMusic** (DirectX 6.1, `src/win32/dmusic/`): DMUSIC, DMIME,
+  DMLOADER, DMSTYLE, DMBAND and DMCOMPOS, their classes made through
+  OLE32. The loader reads segments (.sgt), MIDI files, DLS collections,
+  bands, styles and chord maps from files or memory and caches them; a
+  performance plays segments' sequence, tempo, time signature, system
+  exclusive and band tracks by the emulated clock on the process's
+  multimedia thread, with notifications. Both ports it lists (the
+  Microsoft Synthesizer and the MIDI mapper) are the MPU-401's
+  synthesizer, which plays downloaded DLS instruments by their General
+  MIDI patches. Styles' patterns, chord and command tracks and the
+  composer need the composition engine, which isn't there: they load
+  and play nothing.
 - **Input**: from the emulated 8042 keyboard, the PS/2 mouse and the game
   port, so the frontends, the debug server's input injection and key
   remapping need no changes. DirectInput and window messages both read
@@ -470,6 +492,13 @@ without a network does, with each common dialog cancelled.
 Wine's tests cover the DLLs this phase adds, but not the installers, the
 archive readers or what Windows 98 does differently from 95, so those
 are tested in other ways (see "Testing").
+
+`win32_version` picks Windows 95, 98 or 98 SE, and DirectMusic is
+there under each (see "Sound and input"). Its classes are
+apartment-threaded, as on Windows 98 SE, where a thread of the
+multithreaded apartment gets them only as IUnknown: Wine's DirectMusic
+tests ask for them that way or for DirectX 8's interfaces, so on the
+built-in Windows they skip, as they do on Windows 98 SE.
 
 **Phase 6: Win16.**
 

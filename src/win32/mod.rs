@@ -20,6 +20,7 @@ mod comctl32;
 mod convert;
 mod ddraw;
 mod dinput;
+mod dmusic;
 mod dplayx;
 mod dsound;
 pub mod gdi32;
@@ -315,6 +316,8 @@ pub struct Win32 {
     winmm: winmm::State,
     glide: glide::State,
     guids: u32,
+    /// DirectMusic's objects (dmusic/).
+    dmusic: dmusic::State,
 }
 
 impl Win32 {
@@ -360,9 +363,12 @@ impl Win32 {
     }
 
     /// The scale of what the MIDI synthesizer plays (left, right): the
-    /// MIDI device's volume and the mixer's.
+    /// MIDI device's volume and the mixer's, and DirectMusic's master
+    /// volume.
     pub fn midi_gain(&self) -> (f32, f32) {
-        winmm::midi::gain(&self.winmm)
+        let (l, r) = winmm::midi::gain(&self.winmm);
+        let master = dmusic::gain(&self.dmusic);
+        (l * master, r * master)
     }
 
     /// The scale of what the CD drive plays: the mixer's CD line.
@@ -766,6 +772,7 @@ fn end_process(cpu: &mut Cpu, index: usize, code: u32) {
     dinput::process_ended(cpu, process.id, &tids);
     winmm::process_ended(cpu, process.id, &tids);
     glide::process_ended(cpu, process.id, &tids);
+    dmusic::process_ended(cpu, process.id);
     let win32 = &mut cpu.bus.win32;
     if win32.running != index {
         // Another process's thread runs on.
@@ -1010,4 +1017,5 @@ crate::state_fields!(Win32 {
     glide,
     guids,
     os,
+    dmusic,
 } skip { enabled, version });

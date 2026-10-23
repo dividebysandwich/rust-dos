@@ -49,6 +49,13 @@ dinput/device: device: 29 tests executed (0 marked as todo, 0 failures), 0 skipp
 dinput/joystick: joystick: 195 tests executed (0 marked as todo, 0 failures), 0 skipped.
 dinput/keyboard: keyboard: 57 tests executed (0 marked as todo, 0 failures), 0 skipped.
 dinput/mouse: mouse: 45 tests executed (0 marked as todo, 0 failures), 0 skipped.
+dmime/performance: performance: 0 tests executed (0 marked as todo, 0 failures), 1 skipped.
+dmime/performance: skipped performance.c:85
+dmloader/loader: loader: 0 tests executed (0 marked as todo, 0 failures), 1 skipped.
+dmloader/loader: skipped loader.c:42
+dmusic/dmusic: dmusic: 0 tests executed (0 marked as todo, 0 failures), 2 skipped.
+dmusic/dmusic: skipped dmusic.c:67
+dmusic/dmusic: skipped dmusic.c:154
 dsound/capture: capture: 29 tests executed (0 marked as todo, 0 failures), 0 skipped.
 dsound/ds3d: ds3d: 849 tests executed (0 marked as todo, 0 failures), 0 skipped.
 dsound/ds3d8: ds3d8: 0 tests executed (0 marked as todo, 0 failures), 1 skipped.

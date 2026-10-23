@@ -3,8 +3,8 @@
 //! Windows 95 OSR2.
 
 use super::path::{
-    ERROR_FILE_NOT_FOUND, ERROR_INVALID_NAME, dos_path, find_entries, full_path, has_wildcards,
-    is_root, not_found, path_arg, put_string, trim_slash,
+    ERROR_FILE_NOT_FOUND, ERROR_INVALID_NAME, dos_path, drive_of, find_entries, full_path,
+    has_wildcards, is_root, not_found, path_arg, put_string, trim_slash,
 };
 use super::{
     ERROR_INVALID_DRIVE, ERROR_INVALID_PARAMETER, ERROR_PATH_NOT_FOUND, FALSE, TRUE, set_error,
@@ -200,4 +200,14 @@ pub(super) fn get_long_path_name(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
     }
     put_string(cpu, buffer, size, &out)
+}
+
+/// Whether `path` names a directory, from the current one, for the
+/// built-in DLLs (DirectMusic's loader).
+pub fn is_directory(cpu: &Cpu, path: &str) -> bool {
+    let full = full_path(cpu, &dos_path(path));
+    if is_root(&full) {
+        return cpu.bus.disk.is_mounted(drive_of(&full));
+    }
+    cpu.bus.disk.is_directory(trim_slash(&full))
 }

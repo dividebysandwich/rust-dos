@@ -20,6 +20,7 @@ mod text;
 mod threads;
 mod time;
 mod win98;
+pub use win98::is_directory;
 pub(crate) mod virtual_memory;
 
 pub(super) use locale::enum_returned;

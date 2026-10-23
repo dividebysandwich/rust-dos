@@ -99,6 +99,12 @@ pub static DLLS: &[&Dll] = &[
     &super::comctl32::DLL,
     &super::comctl32::COMDLG32,
     &super::wsock32::DLL,
+    &super::dmusic::DMUSIC,
+    &super::dmusic::DMIME,
+    &super::dmusic::DMLOADER,
+    &super::dmusic::DMSTYLE,
+    &super::dmusic::DMBAND,
+    &super::dmusic::DMCOMPOS,
 ];
 
 /// Bytes each function's stub takes.

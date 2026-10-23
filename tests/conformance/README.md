@@ -43,6 +43,12 @@ change listed below:
   `dlls/winmm/tests/`. `generated.c` is left out: it checks the
   structures' sizes and fields, and MinGW's headers have some of the
   MCI structures' WORD fields as UINTs, so it doesn't build.
+- `dmloader/`: `loader.c` from `dlls/dmloader/tests/`; `dmime/`:
+  `performance.c` from `dlls/dmime/tests/` of Wine 1.4.1 (tag
+  `wine-1.4.1`); `dmusic/`: `dmusic.c` from `dlls/dmusic/tests/` of
+  Wine 1.6.2 (tag `wine-1.6.2`). 1.2.3 has only DirectMusic's
+  `loader.c`, so the other two come from the first release that has
+  them.
 
 `heap.c` has the values of the `FLG_HEAP_*` and `FLG_POOL_ENABLE_TAGGING`
 flags defined after its includes, from Wine's `winternl.h`, as MinGW's
@@ -238,6 +244,13 @@ The results that aren't clean, and why:
 - winmm `mmio.c:77`, `244` and `497` skip: they read `msrle.avi`, a
   file of Wine's tests built from a resource, which isn't among these
   files.
+
+- dmloader `loader.c`, dmime `performance.c`, dmusic `dmusic.c`: all
+  skip, as on Windows 98 SE. The first two ask for DirectX 8's
+  IDirectMusicLoader8 and IDirectMusicPerformance8, which DirectX 6.1
+  doesn't have; `dmusic.c` makes DirectMusic from the multithreaded
+  apartment, where Windows 98 SE gives its apartment-threaded classes
+  only as IUnknown (REGDB_E_IIDNOTREG for IDirectMusic).
 
 ## Adding tests
 
