@@ -40,6 +40,18 @@ fn buffer(ctx: &Context, ah: u8, al: u8) -> Option<Buffer> {
         (0x13, _) => (EBP, if al & 2 != 0 { cx * 2 } else { cx }, 0),
         // The state and functionality information, 64 bytes into ES:DI.
         (0x1B, 0x00) => (EDI, 0, 64),
+        // Query uses no pointer. Save and restore use ES:BX and transfer
+        // the buffer whose size the BIOS reports in 64-byte blocks.
+        (0x1C, 0x01) => (
+            EBX,
+            0,
+            crate::interrupts::int10::video_state_buffer_size(ctx.reg16(ECX)) * 64,
+        ),
+        (0x1C, 0x02) => (
+            EBX,
+            crate::interrupts::int10::video_state_buffer_size(ctx.reg16(ECX)) * 64,
+            0,
+        ),
         _ => return None,
     };
     (reads.max(writes) <= TLB_SIZE).then_some(Buffer { reg, reads, writes })
@@ -65,6 +77,8 @@ pub(super) fn int10(cpu: &mut Cpu, ctx: Context) {
         // The address of a font, in ES:BP: a segment, which becomes a
         // selector afterwards.
         _ if ah == 0x11 && al == 0x30 => {}
+        // INT 10h AH=1Ch AL=00h only returns the required buffer size.
+        _ if ah == 0x1C && al == 0x00 => {}
         _ => return reflect(cpu, 0x10, ctx),
     }
     call_real(cpu, frame, real_mode_handler(cpu, 0x10), rm);

@@ -6,6 +6,13 @@ use crate::video::et4000;
 use crate::video::{BDA_CURSOR_MODE, BDA_CURSOR_POS, VideoMode, pixels};
 use iced_x86::Register;
 
+mod state;
+
+/// The size of the INT 10h AH=1Ch transfer buffer for the requested states.
+pub(crate) fn video_state_buffer_size(states: u16) -> u32 {
+    state::buffer_size(states)
+}
+
 /// Current number of text rows on the screen, read from BDA 0x0484.
 /// Programs that load an 8x8 or 8x14 font via INT 10h AH=11h AL=12h change
 /// this value to 43 or 50 rows; hard-coding 25 would make the renderer and
@@ -1566,6 +1573,9 @@ pub fn handle(cpu: &mut Cpu) {
             // Return Success
             cpu.set_reg8(Register::AL, 0x1B);
         }
+
+        // AH = 1Ch: Save/Restore Video State
+        0x1C => state::handle(cpu),
 
         // AH = 4Fh: VESA BIOS Extensions
         0x4F => {

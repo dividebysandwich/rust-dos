@@ -1063,6 +1063,75 @@ fn a_32_bit_client_calls_the_video_bios_with_selectors() {
     check_video(true);
 }
 
+/// Query the VGA state buffer and save it through the DPMI INT 10h bridge.
+fn video_state_program(bits32: bool) -> Vec<u8> {
+    const BUFFER: u16 = 0x24C0;
+    let main = asm16(0x100, |a| {
+        let mut fail = a.create_label();
+        enter(a, bits32, fail)?;
+        a.push(ds)?;
+        a.pop(es)?;
+        a.mov(ax, 0x1C00)?;
+        a.mov(cx, 1)?;
+        a.int(0x10)?;
+        step(a, 20)?;
+        a.mov(word_ptr(R), ax)?;
+        a.mov(word_ptr(R + 2), bx)?;
+        a.mov(bx, BUFFER as u32)?;
+        a.mov(ax, 0x1C01)?;
+        a.mov(cx, 1)?;
+        a.int(0x10)?;
+        step(a, 21)?;
+        a.mov(word_ptr(R + 4), ax)?;
+        a.mov(bx, BUFFER as u32)?;
+        a.mov(ax, 0x1C02)?;
+        a.mov(cx, 1)?;
+        a.int(0x10)?;
+        step(a, 22)?;
+        a.mov(word_ptr(R + 6), ax)?;
+        exit(a, 0x2A)?;
+        a.set_label(&mut fail)?;
+        exit(a, 0xEE)
+    });
+    com(&[(0x100, main)])
+}
+
+fn check_video_state(bits32: bool) {
+    let name = if bits32 { "video_state32" } else { "video_state16" };
+    let (mut cpu, psp) = machine(name, &[("T.COM", video_state_program(bits32))], "T.COM");
+    assert!(
+        run_to_exit(&mut cpu, 200),
+        "the program didn't end (step {})",
+        word(&cpu, psp, STEP)
+    );
+    assert_eq!(
+        cpu.errorlevel,
+        0x2A,
+        "failed at step {}",
+        word(&cpu, psp, STEP)
+    );
+    assert_eq!(word(&cpu, psp, R), 0x1C1C);
+    assert_eq!(word(&cpu, psp, R + 2), 2);
+    assert_eq!(word(&cpu, psp, R + 4), 0x1C1C);
+    assert_eq!(word(&cpu, psp, R + 6), 0x1C1C);
+    let buffer = psp as usize * 16 + 0x24C0;
+    assert_eq!(cpu.bus.read_16(buffer), 0x20);
+    assert_eq!(
+        cpu.bus.read_8(buffer + 0x20 + 0x09),
+        cpu.bus.vga.misc_output_reg
+    );
+}
+
+#[test]
+fn a_16_bit_client_queries_and_saves_vga_state() {
+    check_video_state(false);
+}
+
+#[test]
+fn a_32_bit_client_queries_and_saves_vga_state() {
+    check_video_state(true);
+}
+
 /// A client that runs SSE instructions in protected mode, then ends with
 /// code 2Ah (1 if it can't become a client).
 fn sse_program() -> Vec<u8> {
