@@ -2230,6 +2230,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust-dos-installshield"
+version = "1.7.5"
+dependencies = [
+ "flate2",
+ "md-5",
+]
+
+[[package]]
 name = "rust-dos-lpt-dac"
 version = "1.7.5"
 dependencies = [
