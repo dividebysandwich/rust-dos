@@ -448,3 +448,70 @@ fn a_dpa_keeps_its_pointers_in_order() {
     assert_eq!(&r[1..7], &[0, 0, 2, 0x222, 0x333, 0]);
     assert_eq!(r[7], 1);
 }
+
+#[test]
+fn a_sorted_report_list_view_keeps_its_items_in_order() {
+    use Arg::*;
+    const LVS_REPORT: u32 = 0x0001;
+    const LVS_SORTASCENDING: u32 = 0x0010;
+    const LVM_GETITEMCOUNT: u32 = 0x1004;
+    const LVM_INSERTITEMA: u32 = 0x1007;
+    const LVM_INSERTCOLUMNA: u32 = 0x101B;
+    const LVM_GETCOLUMNWIDTH: u32 = 0x101D;
+    const LVM_GETHEADER: u32 = 0x101F;
+    const LVM_GETITEMTEXTA: u32 = 0x102D;
+    const HDM_GETITEMCOUNT: u32 = 0x1200;
+    const S_LISTVIEW: u32 = 0x250;
+    const COLUMN: u32 = FREE;
+    const ITEMS: [u32; 2] = [FREE + 0x40, FREE + 0x80];
+    const GET: u32 = FREE + 0xC0;
+    const TEXTS: [u32; 3] = [FREE + 0x100, FREE + 0x110, FREE + 0x120];
+    const BUFFER: u32 = FREE + 0x140;
+    let calls = [
+        call("InitCommonControls", &[]),
+        parent(),
+        child(S_LISTVIEW, LVS_REPORT | LVS_SORTASCENDING, 200, 100, 1, 1),
+        send(2, LVM_INSERTCOLUMNA, I(0), At(COLUMN)),
+        send(2, LVM_INSERTITEMA, I(0), At(ITEMS[0])),
+        send(2, LVM_INSERTITEMA, I(0), At(ITEMS[1])),
+        send(2, LVM_GETITEMCOUNT, I(0), I(0)),
+        send(2, LVM_GETITEMTEXTA, I(0), At(GET)),
+        send(2, LVM_GETHEADER, I(0), I(0)),
+        call("SendMessageA", &[Res(8), I(HDM_GETITEMCOUNT), I(0), I(0)]),
+        send(2, LVM_GETCOLUMNWIDTH, I(0), I(0)),
+    ];
+    // The structures point into the data, which is where the program
+    // puts it whatever the data holds.
+    let mut d = data();
+    let (_, base) = program(&d, &calls);
+    strings(&mut d);
+    put(&mut d, S_LISTVIEW, b"SysListView32\0");
+    put(&mut d, TEXTS[0], b"Name\0");
+    put(&mut d, TEXTS[1], b"beta\0");
+    put(&mut d, TEXTS[2], b"alpha\0");
+    // LVCOLUMNA: LVCF_WIDTH | LVCF_TEXT, 80 wide.
+    for (k, v) in [6, 0, 80, base + TEXTS[0], 0, 0].into_iter().enumerate() {
+        put32(&mut d, COLUMN + 4 * k as u32, v);
+    }
+    // LVITEMA: LVIF_TEXT.
+    for (item, text) in ITEMS.into_iter().zip([TEXTS[1], TEXTS[2]]) {
+        for (k, v) in [1, 0, 0, 0, 0, base + text].into_iter().enumerate() {
+            put32(&mut d, item + 4 * k as u32, v);
+        }
+    }
+    for (k, v) in [0, 0, 0, 0, 0, base + BUFFER, 32].into_iter().enumerate() {
+        put32(&mut d, GET + 4 * k as u32, v);
+    }
+    let (cpu, at) = run("listview", &d, &calls);
+    assert_eq!(at, base);
+    let r = results(&cpu, at, calls.len());
+    assert_ne!(r[2], 0, "the list view is made");
+    assert_eq!(r[3], 0);
+    assert_eq!((r[4], r[5]), (0, 0), "alpha sorts before beta");
+    assert_eq!(r[6], 2);
+    assert_eq!(r[7], 5);
+    assert_eq!(peek_str(&cpu, at + BUFFER), "alpha");
+    assert_ne!(r[8], 0, "the report view has a header");
+    assert_eq!(r[9], 1, "the column is the header's item");
+    assert_eq!(r[10], 80);
+}
