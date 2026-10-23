@@ -467,6 +467,30 @@ without a network does, with each common dialog cancelled.
 - Game profiles that pick the layer.
 - The Wine leaf DLL experiment from above.
 
+COMCTL32 is Windows 95's version 4.70, its functions exported at their
+ordinals, for launchers and setup programs: image lists, DPAs and DSAs,
+MRU lists, and the progress bar, up-down control, trackbar, status bar,
+tooltips, toolbar, header, list view, tree view, tab control and
+property sheets with wizards, ported from Wine 1.2.3. The animation,
+hot key and ComboBoxEx classes draw their background and nothing else,
+and the date and time picker, month calendar, rebar and IP address
+controls aren't there. Functions of later versions (SetWindowSubclass,
+the DPA stream functions) and the controls' W messages are left out.
+
+COMDLG32 has GetOpenFileNameA and GetSaveFileNameA, which list the
+folders and files of the emulated drives: in the Explorer style, or in
+the old style when a program asks for multiple selection, a hook or a
+template without OFN_EXPLORER. The Explorer-style dialog's view is an
+owner-drawn list box. A hook that asks the dialog for its IShellBrowser
+gets one that gives the dialog's windows and fails the rest with
+E_NOTIMPL, and the dialogs don't take OFN_ENABLESIZING. GetFileTitleA
+and CommDlgExtendedError are there too. ChooseColorA, ChooseFontA,
+PrintDlgA and PageSetupDlgA return FALSE with no error, which is what
+they return when the user presses Cancel, so the colour, font and print
+dialogs never show. The W functions fail with
+ERROR_CALL_NOT_IMPLEMENTED, and FindTextA and ReplaceTextA make no
+window.
+
 Wine's tests cover the DLLs this phase adds, but not the installers, the
 archive readers or what Windows 98 does differently from 95, so those
 are tested in other ways (see "Testing").

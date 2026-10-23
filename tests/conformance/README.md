@@ -43,6 +43,17 @@ change listed below:
   `dlls/winmm/tests/`. `generated.c` is left out: it checks the
   structures' sizes and fields, and MinGW's headers have some of the
   MCI structures' WORD fields as UINTs, so it doesn't build.
+- `comctl32/`: `dpa.c`, `imagelist.c`, `misc.c`, `mru.c`,
+  `progress.c`, `propsheet.c`, `status.c`, `subclass.c`, `tab.c`,
+  `toolbar.c`, `tooltips.c`, `trackbar.c`, `treeview.c`, `updown.c`,
+  the headers they share (`msg.h`, `resources.h`, `v6util.h`) and their
+  resources, `rsrc.rc` with `bmp128x15.bmp` and `bmp80x15.bmp`, from
+  `dlls/comctl32/tests/`. `comboex.c`, `datetime.c`, `ipaddress.c`,
+  `monthcal.c` and `rebar.c` are left out: the built-in COMCTL32 has
+  no such controls yet.
+- `comdlg32/`: `filedlg.c` and its resources, `rsrc.rc`, from
+  `dlls/comdlg32/tests/`. `fontdlg.c` and `printdlg.c` are left out:
+  they test the font and print dialogs, which stay cancelled.
 
 `heap.c` has the values of the `FLG_HEAP_*` and `FLG_POOL_ENABLE_TAGGING`
 flags defined after its includes, from Wine's `winternl.h`, as MinGW's
@@ -81,6 +92,13 @@ The user32 and gdi32 tests link the built-in USER32.DLL and GDI32.DLL.
 Each user32 program is linked with `resource.rc`, compiled with
 MinGW's `i686-w64-mingw32-windres`, or the one `CONFORMANCE_WINDRES`
 names.
+
+The comctl32 and comdlg32 tests link the built-in COMCTL32.DLL and
+COMDLG32.DLL, and each program with its DLL's `rsrc.rc`. Wine builds
+comctl32's tests into one program, which imports COMCTL32.DLL; here
+each is a program of its own, and `mru.c`, `subclass.c` and `dpa.c`
+only find COMCTL32's functions with GetProcAddress, so they are linked
+with `-Wl,-u,_InitCommonControls@0` to import it all the same.
 
 The dinput tests link the built-in DINPUT.DLL. They run with the mouse
 as a joystick on the game port, so that `joystick.c`, which tests each
@@ -172,8 +190,8 @@ The results that aren't clean, and why:
 - kernel32 `module.c:259`, `270`, `282`: LoadLibraryExA of an empty
   file that another handle has open for writing fails with
   ERROR_BAD_FORMAT; Windows 9x's loader can't open it, and says
-  ERROR_FILE_NOT_FOUND. `367` and `370`: COMCTL32.DLL isn't there to
-  load.
+  ERROR_FILE_NOT_FOUND. `374`: a second FreeLibrary of COMCTL32.DLL
+  succeeds, as the built-in DLLs are never unloaded.
 - msvcrt `environ.c:51`: `system` can't start a command interpreter,
   which is a DOS program. `system(NULL)` still returns 1, as Windows
   95's does, since there is one there.
@@ -233,6 +251,46 @@ The results that aren't clean, and why:
 - winmm `mmio.c:77`, `244` and `497` skip: they read `msrle.avi`, a
   file of Wine's tests built from a resource, which isn't among these
   files.
+- comctl32 tests that need a later COMCTL32 than 4.70, Windows 95's,
+  skip, as the functions or messages aren't there: `dpa.c:365`
+  (DPA_Merge), `558` and `677` (DPA_LoadStream and DPA_SaveStream),
+  `mru.c:467` (EnumMRUListW), `subclass.c:301` (SetWindowSubclass, all
+  of the file), `treeview.c:1104` (TVM_GETLINECOLOR).
+  `imagelist.c`'s `v6util.h:96` skips the version 6 tests, as there are
+  no activation contexts.
+- comctl32 `tooltips.c:392` and `549` skip: USER32 has no
+  CreateWindowExW.
+- comctl32 `status.c:110` and the widths checked at `191` to `224`, and
+  8 of the 9 failures at `toolbar.c:888`: the tests make a top-level
+  window 672 or 680 pixels wide, which USER32 keeps within the 640x480
+  screen's largest tracking size, as Windows does at that resolution.
+  The client area is 644 pixels wide, and the toolbar's row of buttons
+  wraps one button sooner.
+- comctl32 `status.c:191`, `198`, `204`, `209` and `219`: the height of
+  a status bar with a 32-pixel Tahoma is 41 where the test wants 42.
+  The height is computed as Wine computes it, from the font's metrics,
+  and Wine's own comment there says Windows gives that font an odd
+  internal leading.
+- comctl32 `toolbar.c:888` (one), `895`, `899` and `917`: sizes that
+  Wine marks `todo_wine`, as Wine's toolbar, which the built-in one
+  follows, doesn't give them.
+- comctl32 `toolbar.c:985` to `1074`, 26 checks: the widths of buttons
+  with text, measured in the System font, whose glyphs are narrower
+  here than on the machine the results come from ("MMMMMMMMMMMMM" is
+  117 pixels wide here, 156 there).
+- comctl32 `trackbar.c:518` and `1000`, and `tab.c:918` and `919`:
+  message sequences Wine marks `todo_wine`. In `trackbar.c` USER32
+  activates a top-level window that SetWindowPos moves, and doesn't
+  send WM_WINDOWPOSCHANGING before WM_NCACTIVATE when one is shown; in
+  `tab.c` it sends no WM_WINDOWPOSCHANGING for a SetWindowPos that only
+  makes the tooltip topmost.
+- comctl32 `treeview.c:527`: editing a label, the tree view doesn't get
+  EN_UPDATE and EN_CHANGE for the text the edit control is made with,
+  as USER32's edit control, like Wine's, sends none for it.
+- comdlg32 `filedlg.c:141` and `153` skip: there are no wide file
+  dialogs. `184` skips: the dialog's view is a list box, and its shell
+  view has no IShellView2. `353` skips the resizing tests, as the
+  dialogs don't take OFN_ENABLESIZING, which Windows 98's do.
 
 ## Adding tests
 
