@@ -20,10 +20,20 @@
 
 pub mod dpa;
 pub mod gfx;
+pub mod header;
 pub mod imagelist;
+pub mod listview;
 pub mod misc;
+pub mod mru;
 pub mod progress;
+pub mod propsheet;
 pub mod script;
+pub mod status;
+pub mod tab;
+pub mod toolbar;
+pub mod tooltips;
+pub mod trackbar;
+pub mod treeview;
 pub mod updown;
 
 use super::stubs::{Api, Conv, Dll};
@@ -137,6 +147,40 @@ static APIS: &[Api] = &[
     stdcall("UpDownWndProc", 0, 4, updown::proc_),
     stdcall("UpDownBuddyProc", 0, 4, updown::buddy_proc),
     stdcall("CreateUpDownControl", 16, 12, updown::create_up_down_control),
+    stdcall("StatusWndProc", 0, 4, status::proc_),
+    stdcall("MenuHelp", 2, 7, status::menu_help),
+    stdcall("ShowHideMenuCtl", 3, 3, status::show_hide_menu_ctl),
+    stdcall("GetEffectiveClientRect", 4, 3, status::get_effective_client_rect),
+    stdcall("DrawStatusTextA", 5, 4, status::draw_status_text),
+    stdcall("CreateStatusWindowA", 6, 4, status::create_status_window),
+    stdcall("CreateStatusWindow", 21, 4, status::create_status_window),
+    stdcall("DrawStatusText", 27, 4, status::draw_status_text),
+    stdcall("TrackbarWndProc", 0, 4, trackbar::proc_),
+    stdcall("TooltipsWndProc", 0, 4, tooltips::proc_),
+    stdcall("ToolbarWndProc", 0, 4, toolbar::proc_),
+    stdcall("CreateToolbar", 7, 8, toolbar::create_toolbar),
+    stdcall("CreateMappedBitmap", 8, 5, toolbar::create_mapped_bitmap),
+    stdcall("CreateToolbarEx", 23, 13, toolbar::create_toolbar_ex),
+    stdcall("HeaderWndProc", 0, 4, header::proc_),
+    stdcall("ListViewWndProc", 0, 4, listview::proc_),
+    stdcall("TreeViewWndProc", 0, 4, treeview::proc_),
+    stdcall("TabWndProc", 0, 4, tab::proc_),
+    stdcall("CreatePropertySheetPage", 18, 1, propsheet::create_property_sheet_page),
+    stdcall("CreatePropertySheetPageA", 19, 1, propsheet::create_property_sheet_page),
+    stdcall("CreatePropertySheetPageW", 20, 1, propsheet::fail),
+    stdcall("DestroyPropertySheetPage", 24, 1, propsheet::destroy_property_sheet_page),
+    stdcall("PropertySheet", 86, 1, propsheet::property_sheet),
+    stdcall("PropertySheetA", 87, 1, propsheet::property_sheet),
+    stdcall("PropertySheetW", 88, 1, propsheet::fail_minus_one),
+    stdcall("CreateMRUListA", 151, 1, mru::create_mru_list),
+    stdcall("FreeMRUList", 152, 1, mru::free_mru_list),
+    stdcall("AddMRUStringA", 153, 2, mru::add_mru_string),
+    stdcall("EnumMRUListA", 154, 4, mru::enum_mru_list),
+    stdcall("FindMRUStringA", 155, 3, mru::find_mru_string),
+    stdcall("DelMRUString", 156, 2, mru::del_mru_string),
+    stdcall("CreateMRUListLazyA", 157, 4, mru::create_mru_list_lazy),
+    stdcall("AddMRUData", 167, 3, mru::add_mru_data),
+    stdcall("FindMRUData", 169, 4, mru::find_mru_data),
 ];
 
 /// COMCTL32's place in `stubs::DLLS`.
@@ -184,6 +228,16 @@ pub const PROGRESS: Module = 1;
 pub const DPA: Module = 2;
 pub const IMAGELIST: Module = 3;
 pub const UPDOWN: Module = 4;
+pub const STATUS: Module = 5;
+pub const TRACKBAR: Module = 6;
+pub const TOOLTIPS: Module = 7;
+pub const TOOLBAR: Module = 8;
+pub const HEADER: Module = 9;
+pub const LISTVIEW: Module = 10;
+pub const TREEVIEW: Module = 11;
+pub const TAB: Module = 12;
+pub const PROPSHEET: Module = 13;
+pub const MRU: Module = 14;
 
 /// The continuation that paints: the module's `draw`, with the DC
 /// BeginPaint gave.
@@ -196,6 +250,16 @@ pub fn dispatch_then(cpu: &mut Cpu, module: u32, id: u16, c: &mut Ctx) -> Vec<Op
         DPA => dpa::then_step(cpu, id, c),
         IMAGELIST => imagelist::then(cpu, id, c),
         UPDOWN => updown::then(cpu, id, c),
+        STATUS => status::then(cpu, id, c),
+        TRACKBAR => trackbar::then(cpu, id, c),
+        TOOLTIPS => tooltips::then(cpu, id, c),
+        TOOLBAR => toolbar::then(cpu, id, c),
+        HEADER => header::then(cpu, id, c),
+        LISTVIEW => listview::then(cpu, id, c),
+        TREEVIEW => treeview::then(cpu, id, c),
+        TAB => tab::then(cpu, id, c),
+        PROPSHEET => propsheet::then(cpu, id, c),
+        MRU => mru::then(cpu, id, c),
         _ => Vec::new(),
     }
 }
@@ -217,6 +281,16 @@ pub struct State {
     pub drag: imagelist::Drag,
     pub updown: BTreeMap<u32, updown::UpDown>,
     pub buddies: BTreeMap<u32, updown::Buddy>,
+    pub status: status::State,
+    pub trackbar: trackbar::State,
+    pub tooltips: tooltips::State,
+    pub toolbar: toolbar::State,
+    pub header: header::State,
+    pub listview: listview::State,
+    pub treeview: treeview::State,
+    pub tab: tab::State,
+    pub propsheet: propsheet::State,
+    pub mru: mru::State,
 }
 
 crate::state_fields!(State {
@@ -224,7 +298,17 @@ crate::state_fields!(State {
     imagelists,
     drag,
     updown,
-    buddies
+    buddies,
+    status,
+    trackbar,
+    tooltips,
+    toolbar,
+    header,
+    listview,
+    treeview,
+    tab,
+    propsheet,
+    mru,
 });
 
 /// COMCTL32's state.
@@ -251,19 +335,79 @@ const CLASSES: &[(&str, u32, &str, u32, u32, u32)] = &[
         32512,
         16,
     ),
+    (
+        "msctls_statusbar32",
+        class::CS_DBLCLKS | class::CS_VREDRAW | class::CS_HREDRAW,
+        "StatusWndProc",
+        4,
+        32512,
+        16,
+    ),
+    (
+        "msctls_trackbar32",
+        0,
+        "TrackbarWndProc",
+        4,
+        32512,
+        0,
+    ),
+    (
+        "tooltips_class32",
+        class::CS_DBLCLKS | class::CS_SAVEBITS,
+        "TooltipsWndProc",
+        4,
+        32512,
+        0,
+    ),
+    (
+        "ToolbarWindow32",
+        class::CS_DBLCLKS,
+        "ToolbarWndProc",
+        4,
+        32512,
+        16,
+    ),
+    (
+        "SysHeader32",
+        class::CS_DBLCLKS,
+        "HeaderWndProc",
+        4,
+        32512,
+        0,
+    ),
+    (
+        "SysListView32",
+        class::CS_DBLCLKS,
+        "ListViewWndProc",
+        4,
+        32512,
+        0,
+    ),
+    (
+        "SysTreeView32",
+        class::CS_DBLCLKS | class::CS_VREDRAW | class::CS_HREDRAW,
+        "TreeViewWndProc",
+        4,
+        32512,
+        0,
+    ),
+    (
+        "SysTabControl32",
+        class::CS_DBLCLKS | class::CS_VREDRAW | class::CS_HREDRAW,
+        "TabWndProc",
+        4,
+        32512,
+        16,
+    ),
 ];
 
 /// The classes Windows 95's COMCTL32 has that the built-in one doesn't
 /// draw yet: windows that draw their background and nothing else, for
 /// programs that make one they don't depend on.
 const PLACEHOLDERS: &[(&str, u32)] = &[
-    ("msctls_trackbar32", 16),
-    ("msctls_statusbar32", 16),
-    ("ToolbarWindow32", 16),
-    ("tooltips_class32", 0),
-    ("SysListView32", 6),
-    ("SysTreeView32", 6),
-    ("SysTabControl32", 16),
+    ("SysAnimate32", 0),
+    ("msctls_hotkey32", 0),
+    ("ComboBoxEx32", 0),
 ];
 
 /// Register the common controls' classes, with USER32's own: USER32's

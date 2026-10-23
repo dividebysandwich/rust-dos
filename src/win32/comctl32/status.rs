@@ -1,0 +1,51 @@
+//! The status bar (msctls_statusbar32), CreateStatusWindowA,
+//! DrawStatusTextA, MenuHelp, ShowHideMenuCtl and
+//! GetEffectiveClientRect.
+//!
+//! A placeholder: the window procedure draws nothing yet and the
+//! functions fail.
+
+use super::script::{Ctx, Op};
+use crate::cpu::Cpu;
+use crate::win32::user32::defwnd;
+
+/// What the module keeps, in COMCTL32's `State`.
+#[derive(Clone, Debug, Default)]
+pub struct State {}
+
+crate::state_fields!(State {});
+
+/// The window procedure.
+pub fn proc_(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    defwnd::def_window_proc(cpu, args)
+}
+
+/// The continuations of its scripts.
+pub fn then(_cpu: &mut Cpu, _id: u16, _c: &mut Ctx) -> Vec<Op> {
+    Vec::new()
+}
+
+/// MenuHelp.
+pub fn menu_help(_: &mut Cpu, _: &[u32]) -> Option<u32> {
+    Some(0)
+}
+
+/// ShowHideMenuCtl.
+pub fn show_hide_menu_ctl(_: &mut Cpu, _: &[u32]) -> Option<u32> {
+    Some(0)
+}
+
+/// GetEffectiveClientRect.
+pub fn get_effective_client_rect(_: &mut Cpu, _: &[u32]) -> Option<u32> {
+    Some(0)
+}
+
+/// DrawStatusTextA.
+pub fn draw_status_text(_: &mut Cpu, _: &[u32]) -> Option<u32> {
+    Some(0)
+}
+
+/// CreateStatusWindowA.
+pub fn create_status_window(_: &mut Cpu, _: &[u32]) -> Option<u32> {
+    Some(0)
+}
