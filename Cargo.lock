@@ -2171,6 +2171,7 @@ dependencies = [
  "rust-dos-dma",
  "rust-dos-gus",
  "rust-dos-hostdirs",
+ "rust-dos-installshield",
  "rust-dos-lpt-dac",
  "rust-dos-mpu401",
  "rust-dos-mt32",
