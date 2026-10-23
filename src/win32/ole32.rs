@@ -1,8 +1,11 @@
 //! OLE32.DLL: what programs of Windows 95's time call COM's library for.
-//! CoCreateInstance and CoGetClassObject make the built-in DLLs' classes
-//! (com.rs) through a class factory of OLE32's own; other classes aren't
-//! registered. There are the task allocator (CoTaskMemAlloc, CoGetMalloc)
-//! and the functions between GUIDs and their strings.
+//! CoCreateInstance and CoGetClassObject give a class object the program
+//! registered (CoRegisterClassObject), make the built-in DLLs' classes
+//! (com.rs) through a class factory of OLE32's own, or load the
+//! in-process server the registry names for the class (compobj.rs).
+//! There are the task allocator (CoTaskMemAlloc, CoGetMalloc), the
+//! functions between GUIDs, ProgIDs and their strings, streams on global
+//! memory and PROPVARIANTs.
 //!
 //! A thread has to call CoInitialize (or OleInitialize) before it makes
 //! objects, as on Windows. Each process's task allocator is one object,
@@ -11,12 +14,13 @@
 use super::com::{
     self, CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, CO_E_NOTINITIALIZED, E_INVALIDARG,
     E_NOINTERFACE, E_OUTOFMEMORY, E_POINTER, Guid, IID_ICLASSFACTORY, IID_IUNKNOWN,
-    REGDB_E_CLASSNOTREG, S_FALSE, S_OK,
+    REGDB_E_CLASSNOTREG, S_OK,
 };
 use super::stubs::{Api, Conv, Dll, Vtable};
 use crate::cpu::Cpu;
 
 mod calls;
+mod compobj;
 mod propvariant;
 mod stream;
 
@@ -51,11 +55,11 @@ const fn stdcall(
 /// The functions. Append only (see `stubs`). The methods of OLE32's own
 /// objects have ordinal 0: they aren't exported.
 static APIS: &[Api] = &[
-    stdcall("CoInitialize", 1, 1, co_initialize),
-    stdcall("CoInitializeEx", 2, 2, co_initialize),
-    stdcall("CoUninitialize", 3, 0, co_uninitialize),
-    stdcall("OleInitialize", 4, 1, co_initialize),
-    stdcall("OleUninitialize", 5, 0, co_uninitialize),
+    stdcall("CoInitialize", 1, 1, compobj::co_initialize),
+    stdcall("CoInitializeEx", 2, 2, compobj::co_initialize_ex),
+    stdcall("CoUninitialize", 3, 0, compobj::co_uninitialize),
+    stdcall("OleInitialize", 4, 1, compobj::ole_initialize),
+    stdcall("OleUninitialize", 5, 0, compobj::ole_uninitialize),
     stdcall("CoCreateInstance", 6, 5, co_create_instance),
     stdcall("CoGetClassObject", 7, 5, co_get_class_object),
     stdcall("CoTaskMemAlloc", 8, 1, co_task_mem_alloc),
@@ -71,7 +75,7 @@ static APIS: &[Api] = &[
     stdcall("CoCreateGuid", 18, 1, co_create_guid),
     stdcall("CoFreeUnusedLibraries", 19, 0, nothing),
     stdcall("CoGetCurrentProcess", 20, 0, co_get_current_process),
-    stdcall("CLSIDFromProgID", 21, 2, clsid_from_prog_id),
+    stdcall("CLSIDFromProgID", 21, 2, compobj::clsid_from_prog_id),
     stdcall(
         "IClassFactory_QueryInterface",
         0,
@@ -112,6 +116,34 @@ static APIS: &[Api] = &[
     ),
     stdcall("PropVariantClear", 26, 1, propvariant::prop_variant_clear),
     stdcall("PropVariantCopy", 27, 2, propvariant::prop_variant_copy),
+    stdcall("ProgIDFromCLSID", 28, 2, compobj::prog_id_from_clsid),
+    stdcall("CoRegisterClassObject", 29, 5, compobj::co_register_class_object),
+    stdcall("CoRevokeClassObject", 30, 1, compobj::co_revoke_class_object),
+    stdcall(
+        "CoRegisterMessageFilter",
+        31,
+        2,
+        compobj::co_register_message_filter,
+    ),
+    stdcall("CoGetPSClsid", 32, 2, compobj::co_get_ps_clsid),
+    stdcall("CoRegisterPSClsid", 33, 2, compobj::co_register_ps_clsid),
+    stdcall("CoMarshalInterface", 34, 6, compobj::co_marshal_interface),
+    stdcall("CoUnmarshalInterface", 35, 3, compobj::co_unmarshal_interface),
+    stdcall("CoReleaseMarshalData", 36, 1, compobj::co_release_marshal_data),
+    stdcall(
+        "CoMarshalInterThreadInterfaceInStream",
+        37,
+        3,
+        compobj::co_marshal_inter_thread_interface_in_stream,
+    ),
+    stdcall(
+        "CoGetInterfaceAndReleaseStream",
+        38,
+        3,
+        compobj::co_get_interface_and_release_stream,
+    ),
+    stdcall("OleSetMenuDescriptor", 39, 5, compobj::ole_set_menu_descriptor),
+    stdcall("CoGetTreatAsClass", 40, 2, compobj::co_get_treat_as_class),
     stdcall("IStream_QueryInterface", 0, 3, stream::query_interface),
     stdcall("IStream_AddRef", 0, 1, stream::add_ref),
     stdcall("IStream_Release", 0, 1, stream::release),
@@ -205,8 +237,8 @@ const CLSCTX_INPROC: u32 = 0x3;
 /// OLE32's state: the system's, kept per thread and process.
 #[derive(Clone, Debug, Default)]
 pub struct State {
-    /// The threads that called CoInitialize, with how many times.
-    initialized: Vec<(u32, u32)>,
+    /// The apartments, registered class objects and proxy/stub classes.
+    com: compobj::Com,
     /// Each process's task allocator, once it has one: (process id,
     /// address).
     mallocs: Vec<(u32, u32)>,
@@ -236,8 +268,8 @@ fn vtable(name: &str) -> usize {
 /// A process ended: its threads' initializations and its allocator go.
 pub fn process_ended(cpu: &mut Cpu, pid: u32, tids: &[u32]) {
     let ole = state(cpu);
-    ole.initialized.retain(|(t, _)| !tids.contains(t));
     ole.mallocs.retain(|&(p, _)| p != pid);
+    compobj::process_ended(cpu, pid, tids);
     stream::process_ended(cpu, pid);
 }
 
@@ -245,56 +277,18 @@ fn nothing(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(S_OK)
 }
 
-/// CoInitialize, CoInitializeEx, OleInitialize: S_FALSE when the thread
-/// had called it already.
-fn co_initialize(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    let tid = super::user32::current_tid(cpu);
-    let ole = state(cpu);
-    match ole.initialized.iter_mut().find(|(t, _)| *t == tid) {
-        Some((_, n)) => {
-            *n += 1;
-            Some(S_FALSE)
-        }
-        None => {
-            ole.initialized.push((tid, 1));
-            Some(S_OK)
-        }
-    }
-}
-
-fn co_uninitialize(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    let tid = super::user32::current_tid(cpu);
-    let ole = state(cpu);
-    if let Some(i) = ole.initialized.iter().position(|(t, _)| *t == tid) {
-        ole.initialized[i].1 -= 1;
-        if ole.initialized[i].1 == 0 {
-            ole.initialized.remove(i);
-        }
-    }
-    Some(0)
-}
-
-/// Whether the running thread called CoInitialize.
-fn initialized(cpu: &mut Cpu) -> bool {
-    let tid = super::user32::current_tid(cpu);
-    state(cpu).initialized.iter().any(|(t, _)| *t == tid)
-}
-
-/// The built-in class `clsid`, for the context `context`; or the HRESULT
-/// to fail with.
-fn class_for(cpu: &mut Cpu, clsid: u32, context: u32) -> Result<usize, u32> {
+/// Where the objects of the class at `clsid` come from, for the context
+/// `context`; or the HRESULT to fail with.
+fn class_for(cpu: &mut Cpu, clsid: u32, context: u32) -> Result<compobj::Source, u32> {
     let clsid = Guid::read(cpu, clsid).ok_or(E_INVALIDARG)?;
-    if !initialized(cpu) {
+    if !compobj::initialized(cpu) {
         return Err(CO_E_NOTINITIALIZED);
     }
-    let (index, _) = com::find_class(&clsid).ok_or(REGDB_E_CLASSNOTREG)?;
-    if context & CLSCTX_INPROC == 0 {
-        return Err(REGDB_E_CLASSNOTREG);
-    }
-    Ok(index)
+    compobj::source(cpu, &clsid, context).ok_or(REGDB_E_CLASSNOTREG)
 }
 
-/// CoCreateInstance(clsid, outer, context, iid, out).
+/// CoCreateInstance(clsid, outer, context, iid, out): an object made by
+/// the class's class object.
 fn co_create_instance(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [clsid, outer, context, iid, out] = args[..] else {
         return Some(E_INVALIDARG);
@@ -303,36 +297,52 @@ fn co_create_instance(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(E_POINTER);
     }
     com::write_out(cpu, out, 0);
-    let index = match class_for(cpu, clsid, context) {
-        Ok(index) => index,
+    let source = match class_for(cpu, clsid, context) {
+        Ok(source) => source,
         Err(e) => return Some(e),
     };
-    if outer != 0 {
-        return Some(CLASS_E_NOAGGREGATION);
-    }
-    let Some(iid) = Guid::read(cpu, iid) else {
+    let Some(wanted) = Guid::read(cpu, iid) else {
         return Some(E_INVALIDARG);
     };
-    Some(create(cpu, index, &iid, out))
+    match source {
+        compobj::Source::Builtin(index) => {
+            if outer != 0 {
+                return Some(CLASS_E_NOAGGREGATION);
+            }
+            Some(create(cpu, index, &wanted, out))
+        }
+        compobj::Source::Registered(object) => {
+            compobj::start_class(cpu, true, clsid, iid, out, outer, object)
+        }
+        compobj::Source::Server => compobj::start_class(cpu, true, clsid, iid, out, outer, 0),
+    }
 }
 
-/// CoGetClassObject(clsid, context, server info, iid, out).
+/// CoGetClassObject(clsid, context, server info, iid, out): a class
+/// object registered in the process, a built-in DLL's, or the one the
+/// in-process server the registry names gives.
 fn co_get_class_object(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [clsid, context, _, iid, out] = args[..] else {
         return Some(E_INVALIDARG);
     };
     if out == 0 {
-        return Some(E_POINTER);
+        return Some(E_INVALIDARG);
     }
     com::write_out(cpu, out, 0);
-    let index = match class_for(cpu, clsid, context) {
-        Ok(index) => index,
+    let source = match class_for(cpu, clsid, context) {
+        Ok(source) => source,
         Err(e) => return Some(e),
     };
-    let Some(iid) = Guid::read(cpu, iid) else {
+    let Some(wanted) = Guid::read(cpu, iid) else {
         return Some(E_INVALIDARG);
     };
-    Some(new_factory(cpu, index, &iid, out))
+    match source {
+        compobj::Source::Builtin(index) => Some(new_factory(cpu, index, &wanted, out)),
+        compobj::Source::Registered(object) => {
+            compobj::start_class(cpu, false, clsid, iid, out, 0, object)
+        }
+        compobj::Source::Server => compobj::start_class(cpu, false, clsid, iid, out, 0, 0),
+    }
 }
 
 /// A DLL's DllGetClassObject(clsid, iid, out), for its classes alone: the
@@ -662,7 +672,8 @@ fn clsid_from_string(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
         text.push(char::from_u32(c as u32).unwrap_or('?'));
     }
-    let Some(guid) = Guid::parse(&text) else {
+    // Not a GUID's string: a ProgID's, as Windows takes it too.
+    let Some(guid) = Guid::parse(&text).or_else(|| compobj::prog_id_class(cpu, &text)) else {
         return Some(CO_E_CLASSSTRING);
     };
     Some(if guid.write(cpu, out) {
@@ -670,11 +681,6 @@ fn clsid_from_string(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     } else {
         E_INVALIDARG
     })
-}
-
-/// CLSIDFromProgID: no class has a ProgID.
-fn clsid_from_prog_id(_: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(CO_E_CLASSSTRING)
 }
 
 fn is_equal_guid(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -712,7 +718,7 @@ fn co_get_current_process(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 }
 
 crate::state_fields!(State {
-    initialized,
+    com,
     mallocs,
     globals
 });

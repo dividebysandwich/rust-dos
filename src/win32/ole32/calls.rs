@@ -10,6 +10,9 @@ use crate::win32::task::{self, Next, Task};
 /// The functions, by the first variable.
 pub const COPY_TO: u32 = 0;
 pub const CALL_ALL: u32 = 1;
+pub const CLASS: u32 = 2;
+pub const MARSHAL: u32 = 3;
+pub const UNMARSHAL: u32 = 4;
 
 /// Start the task with `vars` (the function first) and `scratch` bytes of
 /// scratch space.
@@ -22,6 +25,9 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     match t.var(0) {
         COPY_TO => super::stream::copy_to_step(cpu, t, value),
         CALL_ALL => call_all_step(t),
+        CLASS => super::compobj::class_step(cpu, t, value),
+        MARSHAL => super::compobj::marshal_step(cpu, t, value),
+        UNMARSHAL => super::compobj::unmarshal_step(cpu, t, value),
         _ => Next::Done(crate::win32::com::E_INVALIDARG),
     }
 }
