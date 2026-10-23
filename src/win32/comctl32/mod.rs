@@ -24,6 +24,7 @@ pub mod imagelist;
 pub mod misc;
 pub mod progress;
 pub mod script;
+pub mod updown;
 
 use super::stubs::{Api, Conv, Dll};
 use crate::cpu::Cpu;
@@ -133,6 +134,9 @@ static APIS: &[Api] = &[
     stdcall("ImageList_SetImageCount", 80, 2, imagelist::il_set_image_count),
     stdcall("ImageList_SetOverlayImage", 81, 3, imagelist::il_set_overlay_image),
     stdcall("ImageList_Write", 82, 2, imagelist::il_write),
+    stdcall("UpDownWndProc", 0, 4, updown::proc_),
+    stdcall("UpDownBuddyProc", 0, 4, updown::buddy_proc),
+    stdcall("CreateUpDownControl", 16, 12, updown::create_up_down_control),
 ];
 
 /// COMCTL32's place in `stubs::DLLS`.
@@ -179,6 +183,7 @@ pub type Module = u32;
 pub const PROGRESS: Module = 1;
 pub const DPA: Module = 2;
 pub const IMAGELIST: Module = 3;
+pub const UPDOWN: Module = 4;
 
 /// The continuation that paints: the module's `draw`, with the DC
 /// BeginPaint gave.
@@ -190,6 +195,7 @@ pub fn dispatch_then(cpu: &mut Cpu, module: u32, id: u16, c: &mut Ctx) -> Vec<Op
         PROGRESS => progress::then(cpu, id, c),
         DPA => dpa::then_step(cpu, id, c),
         IMAGELIST => imagelist::then(cpu, id, c),
+        UPDOWN => updown::then(cpu, id, c),
         _ => Vec::new(),
     }
 }
@@ -209,12 +215,16 @@ pub struct State {
     pub progress: BTreeMap<u32, progress::Progress>,
     pub imagelists: BTreeMap<u32, imagelist::ImageList>,
     pub drag: imagelist::Drag,
+    pub updown: BTreeMap<u32, updown::UpDown>,
+    pub buddies: BTreeMap<u32, updown::Buddy>,
 }
 
 crate::state_fields!(State {
     progress,
     imagelists,
-    drag
+    drag,
+    updown,
+    buddies
 });
 
 /// COMCTL32's state.
@@ -224,21 +234,30 @@ pub fn state(cpu: &mut Cpu) -> &mut State {
 
 /// The classes: name, style, window procedure, extra bytes, cursor (an
 /// IDC_ id), background (a COLOR_ index + 1, or 0).
-const CLASSES: &[(&str, u32, &str, u32, u32, u32)] = &[(
-    "msctls_progress32",
-    class::CS_VREDRAW | class::CS_HREDRAW,
-    "ProgressWndProc",
-    4,
-    32512,
-    0,
-)];
+const CLASSES: &[(&str, u32, &str, u32, u32, u32)] = &[
+    (
+        "msctls_progress32",
+        class::CS_VREDRAW | class::CS_HREDRAW,
+        "ProgressWndProc",
+        4,
+        32512,
+        0,
+    ),
+    (
+        "msctls_updown32",
+        class::CS_VREDRAW | class::CS_HREDRAW,
+        "UpDownWndProc",
+        4,
+        32512,
+        16,
+    ),
+];
 
 /// The classes Windows 95's COMCTL32 has that the built-in one doesn't
 /// draw yet: windows that draw their background and nothing else, for
 /// programs that make one they don't depend on.
 const PLACEHOLDERS: &[(&str, u32)] = &[
     ("msctls_trackbar32", 16),
-    ("msctls_updown32", 16),
     ("msctls_statusbar32", 16),
     ("ToolbarWindow32", 16),
     ("tooltips_class32", 0),
