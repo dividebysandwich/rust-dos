@@ -509,3 +509,53 @@ fn exec_of_an_exe_file_too_big_for_memory_fails_with_insufficient_memory() {
     assert!(cpu.get_cpu_flag(CpuFlags::CF));
     assert_eq!(cpu.ax(), 0x0008);
 }
+
+/// Run PARENT.COM, which EXECs PLAYER.EXE and halts, in a directory with
+/// `files` too, and give the exit code it got.
+fn exec_player(name: &str, files: &[(&str, &[u8])]) -> u16 {
+    #[rustfmt::skip]
+    let parent = [
+        0xB4, 0x4A,             // MOV AH,4Ah: shrink to 1000h paragraphs
+        0xBB, 0x00, 0x10,       // MOV BX,1000h
+        0xCD, 0x21,             // INT 21h
+        0xB8, 0x00, 0x4B,       // MOV AX,4B00h
+        0xBB, 0x00, 0x02,       // MOV BX,0200h
+        0xBA, 0x00, 0x03,       // MOV DX,0300h
+        0xCD, 0x21,             // INT 21h
+        0xF4,                   // HLT
+    ];
+    let mut all: Vec<(&str, &[u8])> = vec![("PARENT.COM", &parent)];
+    all.extend_from_slice(files);
+    let mut cpu = Cpu::new(scratch(name, &all));
+    assert!(cpu.load_executable("PARENT.COM", None));
+    let psp = cpu.current_psp;
+    let base = psp as usize * 16;
+    cpu.bus.write_16(base + 0x202, 0x0280);
+    cpu.bus.write_16(base + 0x204, psp);
+    cpu.bus.load_bytes(base + 0x280, &[0x00, 0x0D]);
+    cpu.bus.load_bytes(base + 0x300, b"PLAYER.EXE\0");
+    for _ in 0..1000 {
+        let at = cpu.get_physical_addr(cpu.cs(), cpu.ip());
+        if cpu.bus.read_8(at) == 0xF4 && cpu.current_psp == psp {
+            break;
+        }
+        cpu.step();
+    }
+    assert_eq!(cpu.current_psp, psp, "back in the parent");
+    cpu.last_child_exit
+}
+
+#[test]
+fn exec_runs_a_player_exe_that_isnt_microproses() {
+    // MOV AX,4C05h; INT 21h
+    let player = [0xB8, 0x05, 0x4C, 0xCD, 0x21];
+    assert_eq!(exec_player("player_runs", &[("PLAYER.EXE", &player)]), 5);
+}
+
+#[test]
+fn exec_skips_microproses_player_exe() {
+    let player = [0xB8, 0x05, 0x4C, 0xCD, 0x21];
+    let dswap = [0xB8, 0x00, 0x4C, 0xCD, 0x21];
+    let files: [(&str, &[u8]); 2] = [("PLAYER.EXE", &player), ("DSWAP.EXE", &dswap)];
+    assert_eq!(exec_player("player_skipped", &files), 0);
+}
