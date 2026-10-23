@@ -766,6 +766,9 @@ fn package_profile(package: &Path, source: &str, variant: Option<&str>, os: Opti
     if let Some(os) = &os {
         text.push_str(&format!("os={}\n", os));
     }
+    if let Some(windows) = &conf.game_windows {
+        text.push_str(&format!("windows={}\n", windows));
+    }
     if let Some(input) = dosbox.as_ref().and_then(|d| d.input.as_ref()).or(conf.game_input.as_ref()) {
         text.push_str(&format!("input={}\n", input));
     }

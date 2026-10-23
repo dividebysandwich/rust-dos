@@ -374,7 +374,8 @@ mod tests {
         );
         fs::write(
             dir.join("goggame-1.info"),
-            r#"{"name":"Game","playTasks":[{"isPrimary":true,"path":"readme.txt","type":"FileTask"}]}"#,
+            r#"{"name":"Game","playTasks":[
+            {"isPrimary":true,"path":"readme.txt","type":"FileTask"}]}"#,
         )
         .unwrap();
         assert!(
