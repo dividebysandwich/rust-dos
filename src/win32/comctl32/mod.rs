@@ -184,6 +184,7 @@ static APIS: &[Api] = &[
     stdcall("TreeViewEditProc", 0, 4, treeview::edit_proc),
     stdcall("TooltipsSubclassProc", 0, 4, tooltips::subclass_proc),
     stdcall("PropSheetDlgProc", 0, 4, propsheet::dlg_proc),
+    stdcall("ListViewEditProc", 0, 4, listview::edit_proc),
 ];
 
 /// COMCTL32's place in `stubs::DLLS`.
