@@ -573,7 +573,7 @@ pub(super) fn delete_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 type Whole = (Vec<u8>, (u16, u16), u16);
 
 /// The file `path`, read through DOS.
-fn read_whole(cpu: &mut Cpu, path: &str) -> Result<Whole, u32> {
+pub(super) fn read_whole(cpu: &mut Cpu, path: &str) -> Result<Whole, u32> {
     let psp = cpu.bus.win32.psp;
     let disk = &mut cpu.bus.disk;
     if disk.is_directory(path) {

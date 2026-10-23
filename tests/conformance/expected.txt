@@ -575,6 +575,10 @@ user32/win: failed win.c:2603 (x2)
 user32/win: skipped win.c:1057
 user32/win: skipped win.c:5990
 user32/wsprintf: wsprintf: 6 tests executed (0 marked as todo, 0 failures), 0 skipped.
+version/info: info: 161 tests executed (0 marked as todo, 0 failures), 1 skipped.
+version/info: skipped info.c:335
+version/install: install: 17 tests executed (0 marked as todo, 1 failure), 0 skipped.
+version/install: failed install.c:162
 winmm/capture: capture: 5 tests executed (0 marked as todo, 0 failures), 0 skipped.
 winmm/mci: mci: 79 tests executed (0 marked as todo, 0 failures), 4 skipped.
 winmm/mci: skipped mci.c:438

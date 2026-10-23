@@ -44,6 +44,9 @@ change listed below:
   structures' sizes and fields, and MinGW's headers have some of the
   MCI structures' WORD fields as UINTs, so it doesn't build.
 - `lz32/`: `lzexpand_main.c` from `dlls/lz32/tests/`.
+- `version/`: `info.c`, `install.c` and `version.rc`, the resource
+  script `info.c`'s version resource is built from, from
+  `dlls/version/tests/`.
 
 `heap.c` has the values of the `FLG_HEAP_*` and `FLG_POOL_ENABLE_TAGGING`
 flags defined after its includes, from Wine's `winternl.h`, as MinGW's
@@ -234,6 +237,14 @@ The results that aren't clean, and why:
 - winmm `mmio.c:77`, `244` and `497` skip: they read `msrle.avi`, a
   file of Wine's tests built from a resource, which isn't among these
   files.
+- lz32 `lzexpand_main.c:775` and version `info.c:335` skip their
+  Unicode halves: LZOpenFileW and GetModuleFileNameW fail with
+  ERROR_CALL_NOT_IMPLEMENTED, as on Windows 95.
+- version `install.c:162`: VerFindFileA of the test program with the
+  temporary directory as the application's should find the program
+  elsewhere. The runner sets no TEMP, so GetTempPathA gives the current
+  directory, which is the program's own, and the file is where it
+  should go.
 
 ## Adding tests
 

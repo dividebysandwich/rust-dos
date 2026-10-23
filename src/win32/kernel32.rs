@@ -651,6 +651,29 @@ pub fn dos_path(name: &str) -> String {
     path::dos_path(name)
 }
 
+/// The full path of the file `name` where OpenFile looks for it: in the
+/// directory it names, or else in those SearchPathA looks in.
+pub fn search_file(cpu: &mut Cpu, name: &str) -> Option<String> {
+    path::search(cpu, None, name)
+}
+
+/// A file read whole: its bytes, its DOS time and date, and its
+/// attributes.
+pub type FileData = (Vec<u8>, (u16, u16), u16);
+
+/// The file at the Win32 path `name`, read whole, or the error.
+pub fn read_path(cpu: &mut Cpu, name: &str) -> Result<FileData, u32> {
+    let full = path::dos_path(&path::full_path(cpu, name));
+    path::read_whole(cpu, &full)
+}
+
+/// Whether a handle CreateFileA opened has the file at the Win32 path
+/// `name` open.
+pub fn path_in_use(cpu: &mut Cpu, name: &str) -> bool {
+    let full = path::dos_path(&path::full_path(cpu, name));
+    path::open_sharing(cpu, &full).is_some()
+}
+
 /// A writable view of the file mapping `handle` for a DIB section whose
 /// bits are in it: the view's address and the mapping's size, or None
 /// with the error set.
