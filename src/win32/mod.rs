@@ -17,6 +17,7 @@ mod advapi32;
 mod call;
 mod com;
 mod comctl32;
+mod comdlg32;
 mod convert;
 mod ddraw;
 mod dinput;
@@ -309,6 +310,9 @@ pub struct Win32 {
     winmm: winmm::State,
     glide: glide::State,
     guids: u32,
+
+    /// The common controls' state, the system's.
+    comctl32: comctl32::State,
 }
 
 impl Win32 {
@@ -1001,4 +1005,5 @@ crate::state_fields!(Win32 {
     winmm,
     glide,
     guids,
+    comctl32,
 } skip { enabled });

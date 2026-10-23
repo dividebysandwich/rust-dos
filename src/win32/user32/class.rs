@@ -235,18 +235,6 @@ const SYSTEM: &[(&str, u32, &str, u32, u32, u32)] = &[
     ),
     ("#32769", CS_DBLCLKS, "DesktopWndProc", 0, 32512, 2),
     ("#32772", 0, "IconTitleWndProc", 0, 32512, 0),
-    // COMCTL32's classes, which it registers as it loads on Windows 95:
-    // here windows that draw their background and nothing else, for
-    // programs that superclass them or make one they don't depend on.
-    ("msctls_trackbar32", 0, "DefWindowProcA", 4, 32512, 16),
-    ("msctls_progress32", 0, "DefWindowProcA", 4, 32512, 16),
-    ("msctls_updown32", 0, "DefWindowProcA", 4, 32512, 16),
-    ("msctls_statusbar32", 0, "DefWindowProcA", 4, 32512, 16),
-    ("ToolbarWindow32", 0, "DefWindowProcA", 4, 32512, 16),
-    ("tooltips_class32", 0, "DefWindowProcA", 4, 32512, 0),
-    ("SysListView32", 0, "DefWindowProcA", 4, 32512, 6),
-    ("SysTreeView32", 0, "DefWindowProcA", 4, 32512, 6),
-    ("SysTabControl32", 0, "DefWindowProcA", 4, 32512, 16),
 ];
 
 /// Register the system's classes.
@@ -271,6 +259,8 @@ pub fn register_system(cpu: &mut Cpu) {
         };
         user(cpu).classes.push(Some(class));
     }
+    // COMCTL32's, which it registers as it loads on Windows 95.
+    crate::win32::comctl32::register_classes(cpu);
 }
 
 /// RegisterClassA(class): its atom.
