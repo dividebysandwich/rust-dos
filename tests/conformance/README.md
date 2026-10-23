@@ -43,10 +43,11 @@ change listed below:
   `dlls/winmm/tests/`. `generated.c` is left out: it checks the
   structures' sizes and fields, and MinGW's headers have some of the
   MCI structures' WORD fields as UINTs, so it doesn't build.
-- `comctl32/`: `dpa.c`, `imagelist.c`, `misc.c`, `mru.c`,
-  `progress.c`, `propsheet.c`, `status.c`, `subclass.c`, `tab.c`,
-  `toolbar.c`, `tooltips.c`, `trackbar.c`, `treeview.c`, `updown.c`,
-  the headers they share (`msg.h`, `resources.h`, `v6util.h`) and their
+- `comctl32/`: `dpa.c`, `header.c`, `imagelist.c`, `listview.c`,
+  `misc.c`, `mru.c`, `progress.c`, `propsheet.c`, `status.c`,
+  `subclass.c`, `tab.c`, `toolbar.c`, `tooltips.c`, `trackbar.c`,
+  `treeview.c`, `updown.c`, the headers they share (`msg.h`,
+  `resources.h`, `v6util.h`) and their
   resources, `rsrc.rc` with `bmp128x15.bmp` and `bmp80x15.bmp`, from
   `dlls/comctl32/tests/`. `comboex.c`, `datetime.c`, `ipaddress.c`,
   `monthcal.c` and `rebar.c` are left out: the built-in COMCTL32 has
@@ -70,8 +71,11 @@ may be used under.
 
 `runtime/compat.h` is rust-dos's own: the few names the tests take from
 Wine's headers that MinGW's lack (`__ms_va_list` and its macros,
-`LOCALE_RETURN_GENITIVE_NAMES`, `LPMIDIEVENT`). Each test file is built
-with it included first, so the files stay unchanged.
+`LOCALE_RETURN_GENITIVE_NAMES`, `LPMIDIEVENT`, and the flags of
+Windows Vista's common controls that comctl32's `header.c` and
+`listview.c` test, which MinGW's `commctrl.h` has only for Vista on).
+Each test file is built with it included first, so the files stay
+unchanged.
 
 `runtime/runtime.c` is rust-dos's own: the C runtime the kernel32,
 advapi32, user32, gdi32, dinput and winmm tests link in place of
@@ -255,17 +259,34 @@ The results that aren't clean, and why:
   skip, as the functions or messages aren't there: `dpa.c:365`
   (DPA_Merge), `558` and `677` (DPA_LoadStream and DPA_SaveStream),
   `mru.c:467` (EnumMRUListW), `subclass.c:301` (SetWindowSubclass, all
-  of the file), `treeview.c:1104` (TVM_GETLINECOLOR).
-  `imagelist.c`'s `v6util.h:96` skips the version 6 tests, as there are
-  no activation contexts.
+  of the file), `treeview.c:1104` (TVM_GETLINECOLOR), `header.c:1011`
+  and `1017` (the filter messages), `listview.c:4330` (LVFI_SUBSTRING),
+  and `listview.c:2482` and `2520`, which skip changing LVS_OWNERDATA
+  on a list view before 5.80. `imagelist.c`, `header.c` and
+  `listview.c` skip their version 6 tests at `v6util.h:96`, as there
+  are no activation contexts.
+- comctl32 `listview.c:3769` skips the notify format tests that Windows
+  9x can't run, as GetModuleHandleW fails there.
 - comctl32 `tooltips.c:392` and `549` skip: USER32 has no
   CreateWindowExW.
-- comctl32 `status.c:110` and the widths checked at `191` to `224`, and
-  8 of the 9 failures at `toolbar.c:888`: the tests make a top-level
-  window 672 or 680 pixels wide, which USER32 keeps within the 640x480
-  screen's largest tracking size, as Windows does at that resolution.
-  The client area is 644 pixels wide, and the toolbar's row of buttons
-  wraps one button sooner.
+- comctl32 `status.c:110` and the widths checked at `191` to `224`, 8
+  of the 9 failures at `toolbar.c:888`, and `header.c:1467`: the tests
+  make a top-level window 672 or 680 pixels wide, which USER32 keeps
+  within the 640x480 screen's largest tracking size, as Windows does at
+  that resolution. The client area is 644 pixels wide, a header across
+  it 642, and the toolbar's row of buttons wraps one button sooner.
+- comctl32 `listview.c:1485`: the header in a report view gets no
+  WM_NCPAINT with its WM_PAINT, as USER32's BeginPaint sends none to a
+  window without a border.
+- comctl32 `listview.c:1856`: three items at the default spacing don't
+  fit an icon view in the test's 100x100 parent, so the list view shows
+  a scroll bar, and the message sequence has a WM_WINDOWPOSCHANGING
+  that Windows' doesn't.
+- comctl32 `listview.c:2126` and `2137`: LVM_GETSUBITEMRECT of item -1
+  gives a top of 0 where Windows gives 3. `3284`: the LVIR_LABEL
+  rectangle of an item in a report view without columns ends at 0
+  where Windows' ends at 96. `4120`: LVM_GETCOLUMNWIDTH of an empty
+  LVS_LIST view gives 96 where Windows gives 8.
 - comctl32 `status.c:191`, `198`, `204`, `209` and `219`: the height of
   a status bar with a 32-pixel Tahoma is 41 where the test wants 42.
   The height is computed as Wine computes it, from the font's metrics,
