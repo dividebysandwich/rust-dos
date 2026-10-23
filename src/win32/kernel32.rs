@@ -520,6 +520,12 @@ static APIS: &[Api] = &[
     stdcall("SetSystemTime", 483, 1, time::set_system_time),
     stdcall("SetLocalTime", 484, 1, time::set_system_time),
     stdcall("MulDiv", 485, 3, env::mul_div),
+    stdcall("GetCommandLineW", 486, 0, get_command_line_w),
+    stdcall("GetProcessWorkingSetSize", 487, 3, not_implemented),
+    stdcall("GetVersionExW", 488, 1, not_implemented),
+    stdcall("GlobalAddAtomW", 489, 1, not_implemented),
+    stdcall("CreateProcessW", 490, 10, not_implemented),
+    stdcall("WinExec", 510, 2, process::win_exec),
 ];
 
 /// The places in `APIS` of the system's own stubs.
@@ -531,6 +537,11 @@ const THREAD_RETURN: usize = 46;
 /// Where calls into the program return to (call.rs).
 pub fn call_return_address() -> u32 {
     super::stubs::stub_address(0, CALL_RETURN)
+}
+
+/// Whether the running process's environment has the variable `name`.
+pub fn has_environment_variable(cpu: &mut Cpu, name: &str) -> bool {
+    variable(super::process(cpu), name).is_some()
 }
 
 /// Let go of the file mappings no handle or view holds any more.
@@ -660,6 +671,11 @@ pub fn global_alloc(cpu: &mut Cpu, flags: u32, size: u32) -> u32 {
 /// GlobalSize(handle): the size of its block, or 0.
 pub fn global_size(cpu: &mut Cpu, handle: u32) -> u32 {
     global::global_size(cpu, &[handle]).unwrap_or(0)
+}
+
+/// ANSI text in Unicode, by the ANSI code page.
+pub fn ansi_to_wide(bytes: &[u8]) -> Vec<u16> {
+    text::ansi_to_wide(bytes)
 }
 
 /// lstrcmpiA's comparison of two ANSI strings, without their zeros.
@@ -818,6 +834,12 @@ fn get_std_handle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 fn get_command_line(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(super::process(cpu).command_line)
+}
+
+/// GetCommandLineW, which Windows 95 has: the command line in Unicode,
+/// in the page after the ANSI one.
+fn get_command_line_w(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    Some(super::process(cpu).command_line + super::memory::PAGE)
 }
 
 /// Windows 95: version 4.0, with bit 31 saying it isn't NT.

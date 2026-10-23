@@ -1197,9 +1197,11 @@ pub fn scanline<const TMUS: usize, S: Spec>(st: &RasterState, p: &TriParams, y: 
             stats.pixels_in += left - startx;
             startx = left;
         }
-        if stopx >= right {
+        // Pixels left of clipRight are drawn: Glide's clip window of
+        // the whole screen sets it to the screen's width.
+        if stopx > right {
             stats.pixels_in += stopx - right;
-            stopx = right - 1;
+            stopx = right;
         }
     }
     // Rows off the buffer, and pixels left of it, have nowhere to go.

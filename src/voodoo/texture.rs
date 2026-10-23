@@ -152,6 +152,10 @@ pub struct Tmu {
     pub palette_changes: u32,
     pub writes: u32,
     pub page_writes: Vec<u32>,
+
+    /// Copies of the RAM it had (`detach`), with its `writes` when it had
+    /// them: jobs read them, or did.
+    spares: Vec<(Vram, u32)>,
 }
 
 /// The pages `Tmu::page_writes` counts in.
@@ -162,7 +166,7 @@ crate::state_fields!(Tmu {
 } skip {
     ram, mask, base, regdirty, palette6666, v2, byte_base,
     lodmin, lodmax, lodbias, lodmask, lodoffset, detailmax, detailbias, detailscale, wmask, hmask,
-    palette_changes, writes, page_writes,
+    palette_changes, writes, page_writes, spares,
 });
 
 impl Tmu {
@@ -206,6 +210,7 @@ impl Tmu {
             palette_changes: 0,
             writes: 0,
             page_writes: vec![0; bytes.div_ceil(1 << PAGE_SHIFT)],
+            spares: Vec::new(),
         }
     }
 
@@ -244,6 +249,57 @@ impl Tmu {
         self.palette_changes = self.palette_changes.wrapping_add(1);
         self.writes = self.writes.wrapping_add(1);
         self.page_writes.fill(self.writes);
+        self.spares.clear();
+    }
+
+    /// Leave the RAM as it is to the jobs that read it, and write from now
+    /// on in other memory with the same words: a copy it had before that
+    /// no job reads any more, brought up to date by the pages written
+    /// since (`page_writes`), or a new one while it has few. False, with
+    /// nothing changed, when jobs read all of the copies it keeps: the
+    /// caller waits for the jobs instead, which gives all of them back.
+    ///
+    /// # Safety
+    ///
+    /// Nothing but `write` on this thread writes the RAM.
+    pub unsafe fn detach(&mut self) -> bool {
+        /// The most copies it keeps, the RAM jobs read included.
+        const COPIES: usize = 8;
+        let writes = self.writes;
+        // Beyond that the counts can't tell what was written since.
+        self.spares
+            .retain(|&(_, at)| writes.wrapping_sub(at) < 1 << 30);
+        let mut free = None;
+        for (i, (ram, at)) in self.spares.iter_mut().enumerate() {
+            let newer = free.is_none_or(|(_, newest): (usize, u32)| {
+                writes.wrapping_sub(*at) < writes.wrapping_sub(newest)
+            });
+            if newer && ram.unique() {
+                free = Some((i, *at));
+            }
+        }
+        let fresh = match free {
+            Some((i, at)) => {
+                let (ram, _) = self.spares.swap_remove(i);
+                let words = 1usize << (PAGE_SHIFT - 1);
+                for (page, &w) in self.page_writes.iter().enumerate() {
+                    if w.wrapping_sub(at) as i32 > 0 {
+                        let start = (page * words).min(ram.len());
+                        let end = (start + words).min(ram.len());
+                        // SAFETY: `ram` is ours alone (`unique`), and the
+                        // caller keeps other writers out of the RAM.
+                        unsafe { ram.copy_words(&self.ram, start..end) };
+                    }
+                }
+                ram
+            }
+            None if self.spares.len() + 1 >= COPIES => return false,
+            // SAFETY: the caller keeps other writers out of the RAM.
+            None => unsafe { self.ram.copy() },
+        };
+        let old = std::mem::replace(&mut self.ram, fresh);
+        self.spares.push((old, writes));
+        true
     }
 
     /// A write to NCC table register `n` (0-23: table 0's twelve, then
@@ -493,6 +549,34 @@ mod tests {
         tmu.write(&reg, 2 << 7 | 2, 0x4433_2211, false);
         let at = 2 * 256 + 4;
         assert_eq!([tmu.ram.byte(at), tmu.ram.byte(at + 3)], [0x11, 0x44]);
+    }
+
+    #[test]
+    fn detached_ram_leaves_jobs_theirs_and_comes_back_up_to_date() {
+        let mut reg = regs();
+        let mut tmu = Tmu::new(2 << 20, 0x100);
+        reg[0x100 + TEXTURE_MODE] = 10 << 8;
+        tmu.write(&reg, 0, 0x1111_1111, false);
+        let job = tmu.ram.clone();
+        // SAFETY: only this thread writes the RAM.
+        assert!(unsafe { tmu.detach() });
+        tmu.write(&reg, 0, 0x2222_2222, false);
+        assert_eq!((job.get(0), tmu.ram.get(0)), (0x1111, 0x2222));
+        // The job is done: the next detach takes its memory back, with
+        // the pages written since, one of them far from the first.
+        drop(job);
+        tmu.write(&reg, 1 << 7, 0x3333_3333, false);
+        tmu.write(&reg, 100 << 7, 0x4444_4444, false);
+        let job = tmu.ram.clone();
+        // SAFETY: as above.
+        assert!(unsafe { tmu.detach() });
+        assert_eq!(tmu.spares.len(), 1, "the first memory taken back");
+        assert!(!tmu.ram.same(&job));
+        assert_eq!(tmu.ram.to_bytes(), job.to_bytes());
+        assert_eq!(
+            [tmu.ram.get(0), tmu.ram.get(256), tmu.ram.get(100 * 256)],
+            [0x2222, 0x3333, 0x4444]
+        );
     }
 
     #[test]

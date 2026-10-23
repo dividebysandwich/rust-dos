@@ -1,5 +1,6 @@
 //! The functions that call the program back for each thing they list:
-//! DirectDrawEnumerate(Ex)A for the display devices, EnumDisplayModes,
+//! DirectDrawEnumerate(Ex)A for the display devices (the display, and
+//! the 3dfx device of an add-on card, `voodoo.rs`), EnumDisplayModes,
 //! EnumSurfaces and EnumAttachedSurfaces. Each is a task (task.rs) that
 //! calls the callback for an item after another, until the list ends or
 //! the callback says to stop.
@@ -11,7 +12,7 @@
 //! with that error.
 
 use super::surface::{self, Desc};
-use super::{DD_OK, DDERR_INVALIDPARAMS, DDERR_UNSUPPORTED, display, state};
+use super::{DD_OK, DDERR_INVALIDPARAMS, DDERR_UNSUPPORTED, display, state, voodoo};
 use crate::cpu::Cpu;
 use crate::win32::task::{self, Next, Task};
 
@@ -30,10 +31,12 @@ const DESC_SIZE: usize = 3;
 const NEXT: usize = 4;
 const ITEMS: usize = 5;
 
-/// The scratch space: a description, the device's strings, and the
-/// exception handler frame.
+/// The scratch space: a description, the device's strings, the 3dfx
+/// device's GUID and strings, and the exception handler frame.
 const SCRATCH: u32 = 256;
 const STRINGS: u32 = 128;
+const CARD_GUID: u32 = 0;
+const CARD_STRINGS: u32 = 16;
 const FRAME: u32 = 224;
 
 const DESCRIPTION: &[u8] = b"Primary Display Driver\0";
@@ -100,7 +103,7 @@ pub fn enum_display_modes(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, _, desc_at, context, callback] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
     };
-    let (vtable, _) = hr!(super::directdraw::ddraw_of(cpu, this));
+    let (vtable, id) = hr!(super::directdraw::ddraw_of(cpu, this));
     if !callable(cpu, callback) {
         return Some(DDERR_INVALIDPARAMS);
     }
@@ -116,7 +119,12 @@ pub fn enum_display_modes(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         None
     };
     let mut vars = vec![MODES, callback, context, size, 0];
-    for (w, h, bpp) in display::modes(cpu) {
+    let modes = if super::directdraw::is_card(cpu, id) {
+        voodoo::modes(cpu)
+    } else {
+        display::modes(cpu)
+    };
+    for (w, h, bpp) in modes {
         if let Some(f) = &filter {
             let unwanted = f.flags & surface::DDSD_WIDTH != 0 && f.width != w
                 || f.flags & surface::DDSD_HEIGHT != 0 && f.height != h
@@ -221,15 +229,37 @@ pub fn enum_attached_surfaces(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// The task's step.
 pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     match t.var(KIND) {
-        DEVICES | DEVICES_EX => devices(cpu, t),
+        DEVICES | DEVICES_EX => devices(cpu, t, value),
         _ => list(cpu, t, value),
     }
 }
 
-/// The display device, the only one, to the callback: its GUID is NULL.
-fn devices(cpu: &mut Cpu, t: &mut Task) -> Next {
+/// The devices to the callback: the display, whose GUID is NULL, then
+/// the 3dfx device if there is one and the callback didn't stop.
+/// DirectDrawEnumerateEx lists it whatever its flags say, though the
+/// documentation has DDENUM_NONDISPLAYDEVICES for such cards: Unreal
+/// Gold's D3DDrv passes 0 and, with Use3dfx set, draws on the device
+/// that isn't the "Primary" one, which it identifies as a Voodoo2.
+fn devices(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     let tib = crate::win32::process(cpu).tib;
     let frame = t.scratch + FRAME;
+    let ex = t.var(KIND) == DEVICES_EX;
+    if t.step == 1
+        && value != 0
+        && let Some(device) = voodoo::device(cpu)
+    {
+        let guid = t.scratch + CARD_GUID;
+        cpu.bus.guest_write_bytes(guid, &device.guid.0);
+        let description = t.scratch + CARD_STRINGS;
+        cpu.bus.guest_write_bytes(description, device.description);
+        let name = description + device.description.len() as u32;
+        cpu.bus.guest_write_bytes(name, device.name);
+        let mut args = vec![guid, description, name, t.var(CONTEXT)];
+        if ex {
+            args.push(0);
+        }
+        return Next::call(t.var(CALLBACK), &args, 2);
+    }
     if t.step == 0 {
         let strings = t.scratch + STRINGS;
         cpu.bus.guest_write_bytes(strings, DESCRIPTION);
@@ -244,7 +274,7 @@ fn devices(cpu: &mut Cpu, t: &mut Task) -> Next {
         }
         cpu.bus.guest_write_32(tib, frame);
         let mut args = vec![0, strings, name, t.var(CONTEXT)];
-        if t.var(KIND) == DEVICES_EX {
+        if ex {
             args.push(0);
         }
         return Next::call(t.var(CALLBACK), &args, 1);

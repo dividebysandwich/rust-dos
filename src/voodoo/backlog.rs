@@ -562,9 +562,8 @@ impl Backlog {
     }
 
     /// Widen `reach` to the columns `job` may draw into. A triangle with
-    /// clipping draws left of the clip rectangle's right edge less one
-    /// (`raster::scanline`), so a game clipping at the picture's width
-    /// never draws its last column.
+    /// clipping draws the columns left of the clip rectangle's right edge
+    /// (`raster::scanline`).
     fn reach(&mut self, job: &Job, access: &Access) {
         let width = self.layout.width as i32;
         for (slot, reach) in self.reach.iter_mut().enumerate() {
@@ -573,7 +572,7 @@ impl Backlog {
             }
             let right = match job {
                 _ if access.pinned => width,
-                Job::Triangle { st, .. } if st.fbz_mode & 1 != 0 => st.clip().1 - 1,
+                Job::Triangle { st, .. } if st.fbz_mode & 1 != 0 => st.clip().1,
                 Job::Fastfill { x1, .. } => *x1,
                 _ => width,
             };
@@ -721,9 +720,7 @@ impl Cleared {
                     return;
                 }
                 x0 = x0.max(left);
-                if x1 >= right {
-                    x1 = right - 1;
-                }
+                x1 = x1.min(right);
             }
             let (x0, x1) = (x0.max(0), x1.min(w));
             if scry < 0 || scry >= h || x0 >= x1 {

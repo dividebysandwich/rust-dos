@@ -9,10 +9,12 @@ use super::{
     DD_OK, DDERR_ALREADYINITIALIZED, DDERR_EXCLUSIVEMODEALREADYSET, DDERR_HWNDALREADYSET,
     DDERR_INVALIDDIRECTDRAWGUID, DDERR_INVALIDOBJECT, DDERR_INVALIDPARAMS, DDERR_NOEXCLUSIVEMODE,
     DDERR_NOTINITIALIZED, DDERR_UNSUPPORTED, DDERR_VERTICALBLANKINPROGRESS, DDERR_WRONGMODE,
-    IID_DD7, Object, V_DD1, V_DD7, display, state, surface,
+    IID_DD7, Object, V_DD1, V_DD7, display, state, surface, voodoo,
 };
 use crate::cpu::Cpu;
+use crate::win32::task::{self, Next, Task};
 use crate::win32::thread::{self, Wait};
+use crate::win32::user32;
 
 /// What the DirectDraw object has of its own.
 #[derive(Clone, Debug, Default)]
@@ -27,6 +29,12 @@ pub struct DirectDraw {
     /// The mode the program set and found after a mode change of
     /// another object's: whether TestCooperativeLevel says so.
     pub mode_changed: bool,
+    /// The 3dfx device's (`voodoo.rs`), whose display is the add-on
+    /// card.
+    pub card: bool,
+    /// The window procedure of the window of exclusive mode, `hwnd`,
+    /// while DirectDraw's own (`window_proc`) is in front of it; else 0.
+    pub proc: u32,
 }
 
 pub const DDSCL_FULLSCREEN: u32 = 0x1;
@@ -56,24 +64,45 @@ pub fn ddraw(cpu: &mut Cpu, id: u32) -> Option<&mut DirectDraw> {
 }
 
 /// A device GUID's pointer: NULL, or DDCREATE_HARDWAREONLY or
-/// DDCREATE_EMULATIONONLY, is the display. There is no other device.
-fn check_device(cpu: &mut Cpu, guid: u32) -> Result<(), u32> {
+/// DDCREATE_EMULATIONONLY, is the display, and so is GUID_NULL, which
+/// programs that keep the GUID DirectDrawEnumerate gave in a structure
+/// pass for the display's NULL (Incoming does); the 3dfx device's GUID
+/// is the add-on card, if the machine has one. Whether it is the card.
+fn check_device(cpu: &mut Cpu, guid: u32) -> Result<bool, u32> {
     if guid <= 2 {
-        return Ok(());
+        return Ok(false);
     }
     match Guid::read(cpu, guid) {
+        Some(g) if g == Guid::default() => Ok(false),
+        Some(g) if voodoo::is_device(cpu, &g) => Ok(true),
         Some(_) => Err(DDERR_INVALIDDIRECTDRAWGUID),
         None => Err(DDERR_INVALIDPARAMS),
     }
 }
 
-/// A new DirectDraw object.
-fn new_ddraw(cpu: &mut Cpu, initialized: bool) -> u32 {
+/// Whether the DirectDraw object `id` is the 3dfx device's.
+pub fn is_card(cpu: &mut Cpu, id: u32) -> bool {
+    ddraw(cpu, id).is_some_and(|d| d.card)
+}
+
+/// The object in exclusive mode on the display or on the card.
+fn exclusive_of(cpu: &mut Cpu, card: bool) -> u32 {
+    let s = state(cpu);
+    if card {
+        s.card.exclusive
+    } else {
+        s.display.exclusive
+    }
+}
+
+/// A new DirectDraw object, of the card's device if `card`.
+fn new_ddraw(cpu: &mut Cpu, initialized: bool, card: bool) -> u32 {
     super::add_object(
         cpu,
         Object {
             ddraw: Some(DirectDraw {
                 initialized,
+                card,
                 ..DirectDraw::default()
             }),
             ..Object::default()
@@ -92,8 +121,8 @@ pub fn direct_draw_create(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if out == 0 || !cpu.bus.guest_probe(out, 4, true) {
         return Some(DDERR_INVALIDPARAMS);
     }
-    hr!(check_device(cpu, guid));
-    let id = new_ddraw(cpu, true);
+    let card = hr!(check_device(cpu, guid));
+    let id = new_ddraw(cpu, true, card);
     Some(super::give(cpu, id, V_DD1, out))
 }
 
@@ -111,8 +140,8 @@ pub fn direct_draw_create_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if Guid::read(cpu, iid) != Some(IID_DD7) {
         return Some(DDERR_INVALIDPARAMS);
     }
-    hr!(check_device(cpu, guid));
-    let id = new_ddraw(cpu, true);
+    let card = hr!(check_device(cpu, guid));
+    let id = new_ddraw(cpu, true, card);
     Some(super::give(cpu, id, V_DD7, out))
 }
 
@@ -122,7 +151,7 @@ pub fn create_instance(cpu: &mut Cpu, iid: &Guid, out: u32) -> u32 {
         com::write_out(cpu, out, 0);
         return com::E_NOINTERFACE;
     };
-    let id = new_ddraw(cpu, false);
+    let id = new_ddraw(cpu, false, false);
     let hr = super::give(cpu, id, vtable, out);
     if hr != DD_OK {
         super::destroy(cpu, id);
@@ -135,7 +164,7 @@ pub fn initialize(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some((_, id)) = super::this(cpu, args[0]) else {
         return Some(DDERR_INVALIDOBJECT);
     };
-    hr!(check_device(cpu, args[1]));
+    let card = hr!(check_device(cpu, args[1]));
     let Some(d) = ddraw(cpu, id) else {
         return Some(DDERR_INVALIDOBJECT);
     };
@@ -143,13 +172,16 @@ pub fn initialize(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(DDERR_ALREADYINITIALIZED);
     }
     d.initialized = true;
+    d.card = card;
     Some(DD_OK)
 }
 
 /// The DirectDraw object `id` goes: the display it had is given back,
 /// and what it made is left without it. Its surfaces lose their memory.
 pub fn destroyed(cpu: &mut Cpu, id: u32) {
+    subclass(cpu, id, 0);
     display::object_gone(cpu, id);
+    voodoo::object_gone(cpu, id);
     let made = state(cpu).ids(|o| o.owner == id);
     for object in made {
         surface::orphan(cpu, object);
@@ -178,7 +210,8 @@ pub fn set_cooperative_level(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(DDERR_INVALIDPARAMS);
     };
     let (_, id) = hr!(ddraw_of(cpu, this));
-    let exclusive = state(cpu).display.exclusive;
+    let card = is_card(cpu, id);
+    let exclusive = exclusive_of(cpu, card);
     let window = |cpu: &mut Cpu, hwnd: u32| cpu.bus.win32.user.is_window(hwnd);
     if flags & DDSCL_SETFOCUSWINDOW != 0 {
         if flags & !(DDSCL_SETFOCUSWINDOW | DDSCL_NOWINDOWCHANGES) != 0 {
@@ -212,26 +245,138 @@ pub fn set_cooperative_level(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         if exclusive != 0 && exclusive != id {
             return Some(DDERR_EXCLUSIVEMODEALREADYSET);
         }
-        state(cpu).display.exclusive = id;
+        if card {
+            state(cpu).card.exclusive = id;
+        } else {
+            state(cpu).display.exclusive = id;
+        }
     } else {
         if hwnd != 0 && !window(cpu, hwnd) {
             return Some(DDERR_INVALIDPARAMS);
         }
-        if exclusive == id {
+        if card {
+            // The card's mode ends with exclusive mode.
+            voodoo::end_exclusive(cpu, id);
+        } else if exclusive == id {
             state(cpu).display.exclusive = 0;
         }
     }
+    let exclusive = flags & DDSCL_EXCLUSIVE != 0;
+    subclass(cpu, id, if exclusive { hwnd } else { 0 });
     if let Some(d) = ddraw(cpu, id) {
         d.level = flags;
         d.hwnd = hwnd;
     }
+    // The window of exclusive mode becomes the active one, and gets the
+    // focus, as with SetActiveWindow.
+    if exclusive && flags & DDSCL_NOWINDOWCHANGES == 0 {
+        let user = &cpu.bus.win32.user;
+        let top = user.top_level(hwnd);
+        if user.input.active != top {
+            return task::start(cpu, task::DD_ACTIVATE, vec![top], 0);
+        }
+    }
     Some(DD_OK)
+}
+
+/// SetCooperativeLevel's task, which makes the window of exclusive mode
+/// (its variable) the active one and returns DD_OK.
+pub fn activate_step(_: &mut Cpu, t: &mut Task, _: u32) -> Next {
+    match t.step {
+        0 => Next::call(user32::address_of("SetActiveWindow"), &[t.var(0)], 1),
+        _ => Next::Done(DD_OK),
+    }
+}
+
+/// Put DirectDraw's window procedure in front of the procedure of
+/// `window` for the object `id`, or with `window` 0 take it away from the
+/// window it is in front of. A procedure the program set since stays.
+fn subclass(cpu: &mut Cpu, id: u32, window: u32) {
+    let ours = window_proc_address();
+    let Some(d) = ddraw(cpu, id) else {
+        return;
+    };
+    let (old, original) = (d.hwnd, d.proc);
+    if original != 0 {
+        if old == window {
+            return;
+        }
+        match cpu.bus.win32.user.window_mut(old) {
+            Some(w) if w.proc == ours => w.proc = original,
+            // The program's procedure in front of ours passes messages
+            // on to it, which passes them on to the window's own.
+            Some(_) => {
+                let pid = super::current_pid(cpu);
+                let chained = &mut state(cpu).chained;
+                chained.retain(|c| c.1 != old);
+                chained.push((pid, old, original));
+            }
+            None => {}
+        }
+        if let Some(d) = ddraw(cpu, id) {
+            d.proc = 0;
+        }
+    }
+    if window == 0 {
+        return;
+    }
+    // Ours may still be behind the program's, from an object gone.
+    let chained = &mut state(cpu).chained;
+    if let Some(i) = chained.iter().position(|c| c.1 == window) {
+        let (_, _, original) = chained.remove(i);
+        if let Some(d) = ddraw(cpu, id) {
+            d.proc = original;
+        }
+        return;
+    }
+    // Another DirectDraw object's may be in front of it already.
+    let Some(w) = cpu.bus.win32.user.window_mut(window) else {
+        return;
+    };
+    if w.proc != ours {
+        let original = std::mem::replace(&mut w.proc, ours);
+        if let Some(d) = ddraw(cpu, id) {
+            d.proc = original;
+        }
+    }
+}
+
+/// The address of `window_proc`'s stub.
+fn window_proc_address() -> u32 {
+    let index = super::DLL
+        .apis
+        .iter()
+        .position(|a| a.name == "DDrawWndProc")
+        .expect("DirectDraw's window procedure");
+    crate::win32::stubs::stub_address(super::dll_index(), index)
+}
+
+/// DirectDraw's window procedure (hwnd, message, wparam, lparam), in
+/// front of the procedure of the window of exclusive mode: it passes the
+/// messages on to the window's own.
+pub fn window_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let hwnd = args[0];
+    let original = state(cpu)
+        .objects
+        .iter()
+        .flatten()
+        .filter_map(|o| o.ddraw.as_ref())
+        .find(|d| d.proc != 0 && d.hwnd == hwnd)
+        .map(|d| d.proc)
+        .or_else(|| {
+            let chained = &state(cpu).chained;
+            chained.iter().find(|c| c.1 == hwnd).map(|c| c.2)
+        });
+    let target = original.unwrap_or_else(|| user32::address_of("DefWindowProcA"));
+    let call = [target, hwnd, args[1], args[2], args[3]];
+    user32::message::call_window_proc(cpu, &call)
 }
 
 /// TestCooperativeLevel(this).
 pub fn test_cooperative_level(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (_, id) = hr!(ddraw_of(cpu, args[0]));
-    let exclusive = state(cpu).display.exclusive;
+    let card = is_card(cpu, id);
+    let exclusive = exclusive_of(cpu, card);
     let Some(d) = ddraw(cpu, id) else {
         return Some(DDERR_INVALIDOBJECT);
     };
@@ -253,6 +398,10 @@ pub fn test_cooperative_level(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 pub fn set_display_mode(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (_, id) = hr!(ddraw_of(cpu, args[0]));
     let (w, h, bpp) = (args[1], args[2], args[3]);
+    if is_card(cpu, id) {
+        let refresh = args.get(4).copied().unwrap_or(0);
+        return Some(voodoo::set_mode(cpu, id, w, h, bpp, refresh));
+    }
     let exclusive = state(cpu).display.exclusive;
     if exclusive != 0 && exclusive != id {
         return Some(DDERR_NOEXCLUSIVEMODE);
@@ -271,9 +420,16 @@ pub fn set_display_mode(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// RestoreDisplayMode(this).
 pub fn restore_display_mode(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (_, id) = hr!(ddraw_of(cpu, args[0]));
-    let exclusive = state(cpu).display.exclusive;
+    let card = is_card(cpu, id);
+    let exclusive = exclusive_of(cpu, card);
     if exclusive != 0 && exclusive != id {
         return Some(DDERR_NOEXCLUSIVEMODE);
+    }
+    if card {
+        if state(cpu).card.owner == id {
+            voodoo::close(cpu);
+        }
+        return Some(DD_OK);
     }
     display::restore(cpu);
     for other in state(cpu).ids(|o| o.ddraw.is_some()) {
@@ -289,9 +445,13 @@ pub fn get_display_mode(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, desc] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
     };
-    let (vtable, _) = hr!(ddraw_of(cpu, this));
+    let (vtable, id) = hr!(ddraw_of(cpu, this));
     let size = hr!(surface::desc_size(cpu, desc, super::version(vtable)));
-    let (w, h, bpp, pitch) = display::current(cpu);
+    let (w, h, bpp, pitch) = if is_card(cpu, id) {
+        voodoo::current(cpu)
+    } else {
+        display::current(cpu)
+    };
     let format = surface::rgb_format(bpp);
     let d = surface::Desc {
         flags: surface::DDSD_HEIGHT
@@ -339,9 +499,14 @@ const CAPS_DX3: u32 = 316;
 const CAPS_DX5: u32 = 364;
 const CAPS_DX6: u32 = 380;
 
+const DDCAPS_3D: u32 = 0x1;
+const DDCAPS_ZBLTS: u32 = 0x8_0000;
+const DDSCAPS_3DDEVICE: u32 = 0x2000;
+
 /// Write a DDCAPS at `at`, of the size its dwSize says: the hardware's
-/// (`hal`) or the emulation's.
-fn write_caps(cpu: &mut Cpu, at: u32, hal: bool) -> Result<(), u32> {
+/// (`hal`) or the emulation's, of the display or of the 3dfx device's
+/// card (`card`), which has no palettes or GDI, but 3D and Z buffers.
+fn write_caps(cpu: &mut Cpu, at: u32, hal: bool, card: bool) -> Result<(), u32> {
     if !cpu.bus.guest_probe(at, 4, false) {
         return Err(DDERR_INVALIDPARAMS);
     }
@@ -352,7 +517,7 @@ fn write_caps(cpu: &mut Cpu, at: u32, hal: bool) -> Result<(), u32> {
         return Err(DDERR_INVALIDPARAMS);
     }
     cpu.bus.guest_fill(at + 4, size as usize - 4, 0);
-    let caps = DDCAPS_BLT
+    let mut caps = DDCAPS_BLT
         | DDCAPS_BLTSTRETCH
         | DDCAPS_GDI
         | DDCAPS_PALETTE
@@ -362,14 +527,14 @@ fn write_caps(cpu: &mut Cpu, at: u32, hal: bool) -> Result<(), u32> {
         | DDCAPS_CANCLIPSTRETCHED
         | DDCAPS_CANBLTSYSMEM
         | if hal { DDCAPS_READSCANLINE } else { 0 };
-    let caps2 = DDCAPS2_NOPAGELOCKREQUIRED | DDCAPS2_WIDESURFACES | DDCAPS2_CANRENDERWINDOWED;
+    let mut caps2 = DDCAPS2_NOPAGELOCKREQUIRED | DDCAPS2_WIDESURFACES | DDCAPS2_CANRENDERWINDOWED;
     let ckey = DDCKEYCAPS_SRCBLT | DDCKEYCAPS_DESTBLT;
-    let (total, free) = if hal {
-        display::video_memory(cpu)
-    } else {
-        (0, 0)
+    let (total, free) = match (hal, card) {
+        (false, _) => (0, 0),
+        (true, false) => display::video_memory(cpu),
+        (true, true) => voodoo::video_memory(cpu),
     };
-    let surface_caps = surface::DDSCAPS_BACKBUFFER
+    let mut surface_caps = surface::DDSCAPS_BACKBUFFER
         | surface::DDSCAPS_COMPLEX
         | surface::DDSCAPS_FLIP
         | surface::DDSCAPS_FRONTBUFFER
@@ -383,12 +548,25 @@ fn write_caps(cpu: &mut Cpu, at: u32, hal: bool) -> Result<(), u32> {
         } else {
             0
         };
+    let mut palette_caps = DDPCAPS_8BIT | DDPCAPS_PRIMARYSURFACE;
+    if card {
+        caps &= !(DDCAPS_GDI | DDCAPS_PALETTE);
+        caps2 &= !DDCAPS2_CANRENDERWINDOWED;
+        surface_caps &= !surface::DDSCAPS_PALETTE;
+        palette_caps = 0;
+    }
+    // Direct3D's HAL draws on the add-on card and on a Banshee or
+    // Voodoo3 display.
+    if hal && (card || crate::win32::screen::is_card(cpu)) {
+        caps |= DDCAPS_3D | DDCAPS_ZBLTS;
+        surface_caps |= DDSCAPS_3DDEVICE | surface::DDSCAPS_ZBUFFER;
+    }
     let w = |cpu: &mut Cpu, offset: u32, value: u32| cpu.bus.guest_write_32(at + offset, value);
     w(cpu, 0x04, caps);
     w(cpu, 0x08, caps2);
     w(cpu, 0x0C, ckey);
     w(cpu, 0x10, DDFXCAPS);
-    w(cpu, 0x18, DDPCAPS_8BIT | DDPCAPS_PRIMARYSURFACE);
+    w(cpu, 0x18, palette_caps);
     w(cpu, 0x3C, total);
     w(cpu, 0x40, free);
     w(cpu, 0x60, 4);
@@ -422,15 +600,16 @@ pub fn get_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, hal, hel] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
     };
-    hr!(ddraw_of(cpu, this));
+    let (_, id) = hr!(ddraw_of(cpu, this));
     if hal == 0 && hel == 0 {
         return Some(DDERR_INVALIDPARAMS);
     }
+    let card = is_card(cpu, id);
     if hal != 0 {
-        hr!(write_caps(cpu, hal, true));
+        hr!(write_caps(cpu, hal, true, card));
     }
     if hel != 0 {
-        hr!(write_caps(cpu, hel, false));
+        hr!(write_caps(cpu, hel, false, card));
     }
     Some(DD_OK)
 }
@@ -440,11 +619,18 @@ pub fn get_available_vid_mem(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, caps, total_at, free_at] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
     };
-    hr!(ddraw_of(cpu, this));
+    let (_, id) = hr!(ddraw_of(cpu, this));
     if caps == 0 || !cpu.bus.guest_probe(caps, 4, false) {
         return Some(DDERR_INVALIDPARAMS);
     }
-    let (total, free) = display::video_memory(cpu);
+    let texture = cpu.bus.guest_read_32(caps) & surface::DDSCAPS_TEXTURE != 0;
+    let (total, free) = if is_card(cpu, id) && texture {
+        voodoo::texture_memory(cpu, &[])
+    } else if is_card(cpu, id) {
+        voodoo::video_memory(cpu)
+    } else {
+        display::video_memory(cpu)
+    };
     if total_at != 0 && !com::write_out(cpu, total_at, total) {
         return Some(DDERR_INVALIDPARAMS);
     }
@@ -472,38 +658,93 @@ pub fn get_device_identifier(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, at, flags] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
     };
-    let (vtable, _) = hr!(ddraw_of(cpu, this));
+    let (vtable, id) = hr!(ddraw_of(cpu, this));
     let size = if vtable == V_DD7 { 1068 } else { 1064 };
     if flags & !1 != 0 || at == 0 || !cpu.bus.guest_probe(at, size, true) {
         return Some(DDERR_INVALIDPARAMS);
     }
     cpu.bus.guest_fill(at, size, 0);
+    if is_card(cpu, id)
+        && let Some(device) = voodoo::device(cpu)
+    {
+        // The driver's name and description, and 3dfx's PCI IDs.
+        let name = device.name.strip_suffix(b"\0").unwrap_or(device.name);
+        cpu.bus.guest_write_bytes(at, name);
+        cpu.bus.guest_write_bytes(at + name.len() as u32, b".drv");
+        cpu.bus.guest_write_bytes(at + 512, device.description);
+        cpu.bus.guest_write_32(at + 1024, 1998);
+        cpu.bus.guest_write_32(at + 1028, 4 << 16 | 10);
+        let model = voodoo::pci_device(cpu);
+        cpu.bus.guest_write_32(at + 1032, 0x121A);
+        cpu.bus.guest_write_32(at + 1036, model);
+        return Some(DD_OK);
+    }
     cpu.bus.guest_write_bytes(at, b"display.drv");
-    let name = cpu.bus.vga.adapter.name().as_bytes().to_vec();
+    let adapter = cpu.bus.vga.adapter;
+    let name = adapter.describe();
+    let name = name.strip_suffix(" (3D)").unwrap_or(name).as_bytes();
     cpu.bus
         .guest_write_bytes(at + 512, &name[..name.len().min(511)]);
     // The driver's version: 4.10.0.1998, Windows 98's.
     cpu.bus.guest_write_32(at + 1024, 1998);
     cpu.bus.guest_write_32(at + 1028, 4 << 16 | 10);
+    // The adapter's PCI vendor and device, which drivers of games look
+    // at to work round a card's quirks.
+    let ids = match cpu.bus.voodoo.as_ref() {
+        Some(v) if crate::win32::screen::is_card(cpu) => {
+            Some(u32::from_le_bytes(std::array::from_fn(|i| {
+                v.config_read(i as u8)
+            })))
+        }
+        _ if adapter.is_s3() => {
+            let device = match adapter {
+                crate::video::adapter::Adapter::S3Virge => 0x5631,
+                crate::video::adapter::Adapter::S3VirgeVx => 0x883D,
+                _ => 0x8811,
+            };
+            Some(device << 16 | 0x5333)
+        }
+        _ => None,
+    };
+    if let Some(ids) = ids {
+        cpu.bus.guest_write_32(at + 1032, ids & 0xFFFF);
+        cpu.bus.guest_write_32(at + 1036, ids >> 16);
+    }
     Some(DD_OK)
 }
 
 // The display's timing.
 
+/// The timing of the display of the DirectDraw object `id`, and the
+/// time now: the add-on card's while the 3dfx device's mode shows, the
+/// display adapter's otherwise.
+fn timing(cpu: &mut Cpu, id: u32) -> (crate::video::crt::CrtTiming, u64) {
+    if is_card(cpu, id)
+        && let Some(t) = voodoo::timing(cpu)
+    {
+        return t;
+    }
+    display::timing(cpu)
+}
+
 /// The display's lines and the line the beam is on, in the mode's
-/// lines (a small mode's are shown twice).
-fn scan(cpu: &mut Cpu) -> (u32, bool) {
-    let (timing, now) = display::timing(cpu);
-    let (line, _) = timing.position(now);
-    let scale = cpu.bus.vbe.scale().max(1);
-    let in_blank = line >= timing.display;
+/// lines (a small mode's of the display adapter are shown twice).
+fn scan(cpu: &mut Cpu, id: u32) -> (u32, bool) {
+    let (t, now) = timing(cpu, id);
+    let (line, _) = t.position(now);
+    let scale = if is_card(cpu, id) && voodoo::timing(cpu).is_some() {
+        1
+    } else {
+        crate::win32::screen::line_scale(cpu)
+    };
+    let in_blank = line >= t.display;
     (line / scale, in_blank)
 }
 
 /// GetMonitorFrequency(this, out).
 pub fn get_monitor_frequency(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    hr!(ddraw_of(cpu, args[0]));
-    let (timing, _) = display::timing(cpu);
+    let (_, id) = hr!(ddraw_of(cpu, args[0]));
+    let (timing, _) = timing(cpu, id);
     let hz = timing.hz().round() as u32;
     if !com::write_out(cpu, args[1], hz) {
         return Some(DDERR_INVALIDPARAMS);
@@ -513,8 +754,8 @@ pub fn get_monitor_frequency(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// GetScanLine(this, out).
 pub fn get_scan_line(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    hr!(ddraw_of(cpu, args[0]));
-    let (line, in_blank) = scan(cpu);
+    let (_, id) = hr!(ddraw_of(cpu, args[0]));
+    let (line, in_blank) = scan(cpu, id);
     if !com::write_out(cpu, args[1], line) {
         return Some(DDERR_INVALIDPARAMS);
     }
@@ -527,8 +768,8 @@ pub fn get_scan_line(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// GetVerticalBlankStatus(this, out).
 pub fn get_vertical_blank_status(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    hr!(ddraw_of(cpu, args[0]));
-    let (timing, now) = display::timing(cpu);
+    let (_, id) = hr!(ddraw_of(cpu, args[0]));
+    let (timing, now) = timing(cpu, id);
     let blank = timing.status(now) & 0x08 != 0;
     if !com::write_out(cpu, args[1], blank as u32) {
         return Some(DDERR_INVALIDPARAMS);
@@ -547,8 +788,8 @@ pub fn wait_for_vertical_blank(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, flags, _] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
     };
-    hr!(ddraw_of(cpu, this));
-    let (timing, now) = display::timing(cpu);
+    let (_, id) = hr!(ddraw_of(cpu, this));
+    let (timing, now) = timing(cpu, id);
     let until = match flags {
         DDWAITVB_BLOCKBEGIN => timing.next_retrace(now),
         DDWAITVB_BLOCKEND => timing.next_display(now),
@@ -582,5 +823,7 @@ crate::state_fields!(DirectDraw {
     level,
     hwnd,
     focus,
-    mode_changed
+    mode_changed,
+    card,
+    proc
 });

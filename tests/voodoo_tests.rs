@@ -490,9 +490,10 @@ fn clipping_and_the_y_origin() {
     triangle(&mut bus, [(0.0, 0.0), (16.0, 0.0), (0.0, 16.0)]);
     assert_eq!(pixel(&bus, 0, 1, 1), 0);
     assert_eq!(pixel(&bus, 0, 2, 1), 0xFFFF);
-    assert_eq!(pixel(&bus, 0, 4, 1), 0xFFFF);
-    // The right clip edge stops a pixel short, as the original does.
-    assert_eq!(pixel(&bus, 0, 5, 1), 0);
+    assert_eq!(pixel(&bus, 0, 5, 1), 0xFFFF);
+    // Pixels left of clipRight are drawn, as Glide's clip window of the
+    // whole screen (clipRight the screen's width) has it.
+    assert_eq!(pixel(&bus, 0, 6, 1), 0);
     // With the Y origin at the bottom (fbiInit3's 479), row 0 is the
     // bottom row.
     cfg_write(&mut bus, 0, 0x40, 1);

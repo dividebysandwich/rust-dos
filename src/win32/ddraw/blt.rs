@@ -1,7 +1,9 @@
 //! Blt and BltFast: copying rectangles of pixels between surfaces of one
 //! depth, stretched and mirrored, through color keys, and filling them.
 //! A destination with a clipper is drawn on only where its clip list
-//! says; BltFast takes no clipper.
+//! says; BltFast takes no clipper. On the 3dfx device's card, fills
+//! are the card's fastfills, and copies go through its linear frame
+//! buffer.
 
 use super::surface::{self, KEY_DEST_BLT, KEY_SRC_BLT, Surface, surface_of};
 use super::{
@@ -109,6 +111,11 @@ fn run(cpu: &mut Cpu, dst_id: u32, op: &Op) -> Result<(), u32> {
     if rects.is_empty() {
         return Ok(());
     }
+    if d.memory == surface::MEM_CARD && op.src.is_none() && op.dst_key.is_none() {
+        super::voodoo::fill(cpu, &d, &rects, op.fill);
+        surface::changed(cpu, dst_id);
+        return Ok(());
+    }
     let (top, bottom) = (area.top, area.bottom);
     let mut out = load(cpu, &d, top, bottom);
     let pitch = d.pitch as usize;
@@ -190,6 +197,8 @@ fn run(cpu: &mut Cpu, dst_id: u32, op: &Op) -> Result<(), u32> {
 /// The surface `this` is, if a blit can draw on it or read it.
 fn ready(cpu: &mut Cpu, this: u32) -> Result<(u32, Surface), u32> {
     let (_, id) = surface_of(cpu, this)?;
+    // What Direct3D drew in a 16-bit shadow of it, first.
+    super::d3d::shadow::expose(cpu, id);
     let s = state(cpu).surface(id).cloned().ok_or(DDERR_INVALIDOBJECT)?;
     if s.lost {
         return Err(DDERR_SURFACELOST);

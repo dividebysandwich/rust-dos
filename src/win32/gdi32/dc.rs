@@ -547,16 +547,34 @@ pub fn restore_dc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(TRUE)
 }
 
-/// GetDeviceCaps(hdc, index): the display's, a 32-bit 640x480 one, at 96
-/// pixels an inch.
+/// GetDeviceCaps(hdc, index): the display's, 640x480 at 96 pixels an
+/// inch, with the desktop's depth: 32 bits a pixel, 24 on an S3 ViRGE,
+/// or 16 on a Banshee or Voodoo3.
 pub fn get_device_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if get(cpu, args[0]).is_none() {
         return Some(0);
     }
+    let bpp = crate::win32::screen::desktop(cpu).bpp;
+    match args[1] {
+        BITSPIXEL => return Some(bpp),
+        // COLORRES: the bits of a color the display shows.
+        108 if bpp == 16 => return Some(16),
+        _ => {}
+    }
     Some(device_cap(args[1]))
 }
 
-/// The display's capability `index`.
+/// GetDeviceCaps' index of the bits a pixel.
+const BITSPIXEL: u32 = 12;
+
+/// The depth of the display's bitmaps (compatible bitmaps, and those a
+/// display DC's memory DCs take): the desktop's.
+pub fn device_depth(cpu: &Cpu) -> u32 {
+    crate::win32::screen::desktop(cpu).bpp
+}
+
+/// The display's capability `index`, the depth that of the pixels GDI
+/// works on (32 bits).
 pub fn device_cap(index: u32) -> u32 {
     let (w, h) = crate::win32::user32::sysparams::screen_size();
     // Millimeters at 96 pixels an inch.
@@ -868,7 +886,7 @@ pub fn select_object(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             // A bitmap of GDI's must be monochrome or the display's
             // depth; a DIB section may be any.
             let depth = bitmap.bpp as u32 * bitmap.planes as u32;
-            if bitmap.dib.is_none() && depth != 1 && depth != device_cap(12) {
+            if bitmap.dib.is_none() && depth != 1 && depth != device_depth(cpu) {
                 return Some(0);
             }
             let old = dc.attrs.bitmap;

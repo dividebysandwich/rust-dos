@@ -388,7 +388,7 @@ pub fn enum_display_settings(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (mode, out) = (args[1], args[2]);
     let bpp = match mode {
         // ENUM_CURRENT_SETTINGS, ENUM_REGISTRY_SETTINGS.
-        0xFFFF_FFFF | 0xFFFF_FFFE => 32,
+        0xFFFF_FFFF | 0xFFFF_FFFE => crate::win32::screen::desktop(cpu).bpp,
         0 => 8,
         1 => 16,
         2 => 32,

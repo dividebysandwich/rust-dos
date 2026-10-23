@@ -16,11 +16,14 @@
 mod advapi32;
 mod call;
 mod com;
+mod comctl32;
 mod convert;
 mod ddraw;
 mod dinput;
+mod dplayx;
 mod dsound;
 pub mod gdi32;
+mod glide;
 mod heap;
 mod kernel32;
 mod loader;
@@ -30,7 +33,9 @@ mod msvcrt;
 mod object;
 mod ole32;
 mod registry;
+mod screen;
 mod seh;
+mod shell32;
 pub mod snapshot;
 mod stubs;
 mod system;
@@ -38,6 +43,7 @@ mod task;
 mod thread;
 pub mod user32;
 mod winmm;
+mod wsock32;
 
 pub use snapshot::snapshot;
 pub use stubs::function_name;
@@ -301,6 +307,7 @@ pub struct Win32 {
     dsound: dsound::State,
     dinput: dinput::State,
     winmm: winmm::State,
+    glide: glide::State,
     guids: u32,
 }
 
@@ -750,6 +757,7 @@ fn end_process(cpu: &mut Cpu, index: usize, code: u32) {
     dsound::process_ended(cpu, process.id, &tids);
     dinput::process_ended(cpu, process.id, &tids);
     winmm::process_ended(cpu, process.id, &tids);
+    glide::process_ended(cpu, process.id, &tids);
     let win32 = &mut cpu.bus.win32;
     if win32.running != index {
         // Another process's thread runs on.
@@ -896,6 +904,7 @@ pub fn process_ended(cpu: &mut Cpu, psp: u16) {
         cpu.bus.win32.dsound = dsound::State::default();
         cpu.bus.win32.dinput = dinput::State::default();
         cpu.bus.win32.winmm = winmm::State::default();
+        cpu.bus.win32.glide = glide::State::default();
         cpu.bus.set_a20(a20);
     }
     cpu.bus.win32.pending = None;
@@ -990,5 +999,6 @@ crate::state_fields!(Win32 {
     dsound,
     dinput,
     winmm,
+    glide,
     guids,
 } skip { enabled });

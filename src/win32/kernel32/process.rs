@@ -232,6 +232,32 @@ pub(crate) fn spawn(
     Ok([process_handle, thread_handle, pid, tid])
 }
 
+/// WinExec(command line, show): the program the command line names
+/// first, started by CreateProcessA with `show` for its first window.
+/// As on Windows 95, 33 once it started, or the error: 2 for a program
+/// not found, 11 for one that isn't a program.
+pub(super) fn win_exec(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    const STARTF_USESHOWWINDOW: u32 = 1;
+    const SI_SHOW_WINDOW: usize = 48;
+    const ERROR_BAD_FORMAT: u32 = 11;
+    let [line_at, show] = args[..] else {
+        unreachable!()
+    };
+    let line = string_at(cpu, line_at)?;
+    let mut startup = vec![0u8; STARTUPINFO_SIZE as usize];
+    startup[SI_FLAGS as usize..][..4].copy_from_slice(&STARTF_USESHOWWINDOW.to_le_bytes());
+    startup[SI_SHOW_WINDOW..][..2].copy_from_slice(&(show as u16).to_le_bytes());
+    match spawn(cpu, None, Some(&line), None, false, 0, startup) {
+        Ok([process, thread, _, _]) => {
+            object::close(cpu, process);
+            object::close(cpu, thread);
+            Some(33)
+        }
+        Err(ERROR_FILE_NOT_FOUND | ERROR_INVALID_PARAMETER) => Some(ERROR_FILE_NOT_FOUND),
+        Err(_) => Some(ERROR_BAD_FORMAT),
+    }
+}
+
 /// OpenProcess(access, inherit, id): a handle of the process with the id
 /// `id`, while it runs.
 pub(super) fn open_process(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {

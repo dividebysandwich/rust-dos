@@ -31,9 +31,10 @@ change listed below:
   `printf.c`, `scanf.c`, `signal.c`, `string.c`, `time.c` from
   `dlls/msvcrt/tests/`. `misc.c` is left out: it includes Wine's own
   `msvcrt.h`, which isn't among these files.
-- `ddraw/`: `ddrawmodes.c`, `dsurface.c`, `overlay.c`, `refcount.c`
-  from `dlls/ddraw/tests/`. `d3d.c` and `visual.c` are left out: they
-  test Direct3D, which the built-in DDRAW doesn't have.
+- `ddraw/`: `d3d.c`, `ddrawmodes.c`, `dsurface.c`, `overlay.c`,
+  `refcount.c`, `visual.c` from `dlls/ddraw/tests/`. `d3d.c` and
+  `visual.c` test Direct3D, and run with a Voodoo3 as the display
+  adapter, whose HAL is Direct3D's device.
 - `dsound/`: `capture.c`, `ds3d.c`, `ds3d8.c`, `dsound.c`, `dsound8.c`,
   `propset.c` and the header they share, `dsound_test.h`, from
   `dlls/dsound/tests/`.
@@ -206,9 +207,27 @@ The results that aren't clean, and why:
   formats.
 - ddraw `overlay.c:60` and `220`: there are no overlays, so the test
   skips all of it.
-- ddraw `refcount.c:248` and `366`: there is no Direct3D, so
-  QueryInterface for IDirect3D7 and IDirect3D fails and the test skips
-  their reference counts.
+- ddraw `d3d.c:377`: the Voodoo3 has no hardware transform and
+  lighting, and says so as 3dfx's driver did (dwMaxActiveLights of
+  -1), so the light tests skip. `d3d.c:2078`: it has no cube maps.
+  `d3d.c:891` fails and `d3d.c:3532` skips: there is no RGB device, the
+  software rasterizer, which the Direct3D 1 tests need and the test
+  expects among the devices.
+- ddraw `visual.c` draws in a 32-bit mode with a 24-bit depth buffer
+  and reads the pixels back as 32-bit ones. The Voodoo3's 3D engine
+  draws 16-bit 565 pixels and 16-bit depth only, so the HAL draws into
+  16-bit shadows of the surfaces and widens what it drew into them when
+  the program can see them; a Clear writes its exact color. Its 15
+  failures are checks of drawn pixels that want more than 16 bits:
+  `922`, `936`, `1376`, `1388`, `1509`, `1515`, `1625`, `1631`, `1637`,
+  `1757` and `1895` blend or modulate to a value 5 or 6 bits can't come
+  within the test's tolerance of (0x84 where it wants 0x80 to 0x82;
+  `1376` and `1388` also take the texture's 8-bit alpha as 4-bit), and
+  `2911` to `2915` want colors within 1 of 0x002B7F and 0xF9E814.
+  `943` wants destination alpha, which a 565 shadow doesn't have.
+  `2680` skips: there are no cube maps.
+
+
 - winmm `mci.c:438` skips its recording tests, as there is no wave
   input device, and `515`, `634` and `870` skip the plays of the file
   those tests would have saved.

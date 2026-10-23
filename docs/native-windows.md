@@ -14,6 +14,9 @@ DirectX 3 to 6 (DirectDraw, Direct3D immediate mode, DirectSound,
 DirectInput), WinMM and Glide. Windows 98 comes after Windows 95; the API
 the games of the two use is nearly the same.
 
+The built-in Windows subsystem was designed and implemented by
+[kibertoad](https://github.com/kibertoad).
+
 ## Prior art
 
 | Project | License | Approach | What it gives us |
@@ -407,6 +410,32 @@ feedback answer as a machine without that hardware does.
 Milestone candidates: Quake 2 with 3dfx's MiniGL, the Unreal demo with
 Glide, Expendable with Direct3D.
 
+GLIDE2X.DLL drives the card's registers as 3dfx's library did, on a
+Voodoo Graphics, a Voodoo2, a Banshee and a Voodoo3, and Direct3D's HAL
+(Direct3D 1 to 7's interfaces in DDRAW.DLL) draws through the same
+code. On a Banshee or Voodoo3 the desktop is 640x480 at 16 bits a pixel
+in the card's own memory and modes, so DirectDraw's surfaces there are
+what the 3D engine renders into, in a window too. A Voodoo Graphics or
+Voodoo2 add-on card is a second DirectDraw device, as 3dfx's driver
+made it, with the card's full-screen modes and buffers. There is no
+software rasterizer, so the RGB and Ramp devices aren't there. The 3D
+engine draws 16-bit color and depth only, so on a Banshee or Voodoo3 a
+24- or 32-bit render target or depth buffer is drawn into a 16-bit
+shadow of it in the card's memory, which the HAL loads from the
+surface before drawing and widens into it when the program can see it
+(Lock, GetDC, Blt, Flip, EndScene): the surface stays 32-bit, what is
+drawn has 16-bit precision, and a Clear writes its exact color. On a
+Voodoo Graphics or Voodoo2 such targets fail, as they did with 3dfx's
+driver.
+
+Unreal Gold runs from GOG's folder on a Voodoo2 and a Voodoo3: its
+levels with Glide, its intro and menus with Direct3D. Quake 2's 3.14
+demo runs its demos through 3dfx's MiniGL on both, with the MiniGL it
+came with on the Voodoo2 and MiniGL 1.49 on the Voodoo3, as on the real
+cards. Incoming and Expendable run with Direct3D. SHELL32, COMCTL32,
+COMDLG32, WSOCK32 and DPLAYX came in for them, answering as a machine
+without a network does, with each common dialog cancelled.
+
 **Phase 5: breadth.**
 
 - 32-bit installers (InstallShield 5's 32-bit engine, Wise) and
@@ -475,8 +504,8 @@ traces call, not whole DLLs.
     kernel32's files, advapi32's `registry`, ten of msvcrt's, eleven of
     user32's (`msg` and `win` among them), eight of gdi32's, and from
     phase 3 four of ddraw's, six of dsound's, four of dinput's and seven
-    of winmm's (the folder's README lists them). ddraw's `d3d` and
-    `visual` wait for Direct3D in phase 4.
+    of winmm's (the folder's README lists them). Phase 4 adds ddraw's
+    `d3d` and `visual`, which test Direct3D.
   - `tests/conformance_tests.rs` builds them with MinGW and runs each
     under the built-in Windows: all but msvcrt's as 486 code linked with
     a small C runtime of rust-dos's own on KERNEL32, so they test the

@@ -14,17 +14,37 @@ advapi32/registry: skipped registry.c:1705
 advapi32/registry: skipped registry.c:1859
 advapi32/registry: skipped registry.c:1579
 advapi32/registry: skipped registry.c:1354
+ddraw/d3d: d3d: 514 tests executed (0 marked as todo, 1 failure), 3 skipped.
+ddraw/d3d: skipped d3d.c:377
+ddraw/d3d: failed d3d.c:891
+ddraw/d3d: skipped d3d.c:2078
+ddraw/d3d: skipped d3d.c:3532
 ddraw/ddrawmodes: ddrawmodes: 77 tests executed (0 marked as todo, 0 failures), 0 skipped.
-ddraw/dsurface: dsurface: 1152 tests executed (0 marked as todo, 0 failures), 5 skipped.
+ddraw/dsurface: dsurface: 1163 tests executed (0 marked as todo, 0 failures), 5 skipped.
 ddraw/dsurface: skipped dsurface.c:1725
 ddraw/dsurface: skipped dsurface.c:2199
 ddraw/dsurface: skipped dsurface.c:3344 (x3)
 ddraw/overlay: overlay: 0 tests executed (0 marked as todo, 0 failures), 2 skipped.
 ddraw/overlay: skipped overlay.c:60
 ddraw/overlay: skipped overlay.c:220
-ddraw/refcount: refcount: 49 tests executed (0 marked as todo, 0 failures), 2 skipped.
-ddraw/refcount: skipped refcount.c:248
-ddraw/refcount: skipped refcount.c:366
+ddraw/refcount: refcount: 96 tests executed (0 marked as todo, 0 failures), 0 skipped.
+ddraw/visual: visual: 484 tests executed (0 marked as todo, 15 failures), 1 skipped.
+ddraw/visual: failed visual.c:2911
+ddraw/visual: failed visual.c:2913
+ddraw/visual: failed visual.c:2915
+ddraw/visual: failed visual.c:922
+ddraw/visual: failed visual.c:936
+ddraw/visual: failed visual.c:943
+ddraw/visual: skipped visual.c:2680
+ddraw/visual: failed visual.c:1376
+ddraw/visual: failed visual.c:1388
+ddraw/visual: failed visual.c:1509
+ddraw/visual: failed visual.c:1515
+ddraw/visual: failed visual.c:1625
+ddraw/visual: failed visual.c:1631
+ddraw/visual: failed visual.c:1637
+ddraw/visual: failed visual.c:1757
+ddraw/visual: failed visual.c:1895
 dinput/device: device: 29 tests executed (0 marked as todo, 0 failures), 0 skipped.
 dinput/joystick: joystick: 195 tests executed (0 marked as todo, 0 failures), 0 skipped.
 dinput/keyboard: keyboard: 57 tests executed (0 marked as todo, 0 failures), 0 skipped.
@@ -114,14 +134,13 @@ kernel32/locale: skipped locale.c:2372
 kernel32/locale: skipped locale.c:2455
 kernel32/locale: skipped locale.c:2629
 kernel32/locale: skipped locale.c:2645
-kernel32/module: module: 43 tests executed (0 marked as todo, 5 failures), 2 skipped.
+kernel32/module: module: 44 tests executed (0 marked as todo, 4 failures), 2 skipped.
 kernel32/module: skipped module.c:392
 kernel32/module: skipped module.c:242
 kernel32/module: failed module.c:259
 kernel32/module: failed module.c:270
 kernel32/module: failed module.c:282
-kernel32/module: failed module.c:367
-kernel32/module: failed module.c:370
+kernel32/module: failed module.c:374
 kernel32/path: path: 1149 tests executed (0 marked as todo, 0 failures), 11 skipped.
 kernel32/path: skipped path.c:1708
 kernel32/path: skipped path.c:1710
@@ -222,7 +241,7 @@ user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
-user32/msg: msg: 11069 tests executed (0 marked as todo, 678 failures), 6 skipped.
+user32/msg: msg: 11048 tests executed (0 marked as todo, 656 failures), 6 skipped.
 user32/msg: skipped msg.c:12537
 user32/msg: failed msg.c:8462
 user32/msg: skipped msg.c:12177
@@ -384,8 +403,6 @@ user32/msg: failed msg.c:11591
 user32/msg: failed msg.c:11598
 user32/msg: failed msg.c:11604
 user32/msg: failed msg.c:11612 (x6)
-user32/msg: failed msg.c:6247
-user32/msg: failed msg.c:6263
 user32/msg: failed msg.c:6291 (x4)
 user32/msg: failed msg.c:6301 (x3)
 user32/msg: failed msg.c:6306
@@ -425,8 +442,6 @@ user32/msg: failed msg.c:8060
 user32/msg: failed msg.c:8090
 user32/msg: skipped msg.c:8103
 user32/msg: failed msg.c:8928 (x10)
-user32/msg: failed msg.c:8999 (x10)
-user32/msg: failed msg.c:9003 (x10)
 user32/msg: failed msg.c:9028 (x3)
 user32/msg: failed msg.c:9066
 user32/msg: failed msg.c:9076
