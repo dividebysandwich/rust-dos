@@ -37,6 +37,18 @@ const TIB_STACK_TOP: u32 = 0x04;
 const TIB_STACK_LIMIT: u32 = 0x08;
 const TIB_SELF: u32 = 0x18;
 const TIB_TLS_ARRAY: u32 = 0x2C;
+/// The process's database, as Windows 95 has it (`process_block`).
+pub(super) const TIB_PROCESS: u32 = 0x30;
+
+/// Where the process's database is: in the block of the command line,
+/// after the ANSI one. Of its fields only the process heap at 18h is
+/// filled, which Windows 95 has there as Windows NT has it in the PEB
+/// that fs:[30h] points to there: Wine's DLLs read it so for
+/// GetProcessHeap.
+pub(super) fn process_block(command_line: u32) -> u32 {
+    command_line + PAGE / 2
+}
+const PROCESS_HEAP: u32 = 0x18;
 
 /// Windows 95's directories, where the built-in DLLs are said to be and
 /// which the search for a DLL goes through.
@@ -54,6 +66,10 @@ pub(super) const DATAFILE: u32 = 0x04;
 pub(super) const UNRESOLVED: u32 = 0x08;
 pub(super) const ATTACHED: u32 = 0x10;
 pub(super) const NO_THREAD_CALLS: u32 = 0x20;
+/// A DLL of the folder the `win32_dlls` setting names, guest code
+/// (`guest_file`): the functions it imports that the built-in DLLs lack
+/// fail where it calls them, rather than ending the program.
+pub(super) const GUEST: u32 = 0x40;
 
 /// LoadLibraryExA's flags.
 pub(super) const DONT_RESOLVE_DLL_REFERENCES: u32 = 0x01;
@@ -276,6 +292,7 @@ fn build(
     let wide: Vec<u8> = wide.iter().flat_map(|c| c.to_le_bytes()).collect();
     memory.write(bus, data + PAGE, &wide)?;
     process.command_line = data;
+    memory.write_32(bus, process_block(data) + PROCESS_HEAP, process.heap.base)?;
 
     // The TIB.
     for (field, value) in [
@@ -284,6 +301,7 @@ fn build(
         (TIB_STACK_LIMIT, stack_top - commit),
         (TIB_SELF, tib),
         (TIB_TLS_ARRAY, tib + TLS_ARRAY),
+        (TIB_PROCESS, process_block(data)),
     ] {
         memory.write_32(bus, tib + field, value)?;
     }
@@ -341,14 +359,16 @@ pub fn dos_command_line(cpu: &mut Cpu, path: &str) -> String {
 }
 
 /// A stub for `function` of the built-in DLL `dll`, which it doesn't have
-/// yet: calling it ends the program, saying what it needed. Returns the
-/// stub's address.
+/// yet: calling it ends the program, saying what it needed, or fails the
+/// call when guest code calls it (`super::missing`), the stub popping the
+/// `arg_bytes` of a stdcall function. Returns the stub's address.
 fn missing_stub(
     bus: &mut Bus,
     memory: &mut Memory,
     process: &mut Process,
     dll: &str,
     function: &str,
+    arg_bytes: u16,
 ) -> Option<u32> {
     let index = process.missing.len() as u32;
     if index >= MAX_MISSING {
@@ -364,7 +384,11 @@ fn missing_stub(
         process.stub_pages.push(page >> 12);
     }
     let address = process.missing_base + at;
-    let stub = stubs::stub(FIRST_MISSING + index as u16, 0, stubs::Conv::Cdecl);
+    let id = FIRST_MISSING + index as u16;
+    let stub = match u8::try_from(arg_bytes / 4) {
+        Ok(args) if args > 0 => stubs::stub(id, args, stubs::Conv::Stdcall),
+        _ => stubs::stub(id, 0, stubs::Conv::Cdecl),
+    };
     memory.write(bus, address, &stub)?;
     process
         .missing
@@ -614,7 +638,7 @@ pub(super) fn load_module(
             .qualify_path(name.trim_end_matches(' '))
             .is_some_and(|p| directory_of(&p).eq_ignore_ascii_case(SYSTEM_DIR))
     };
-    if let Some(index) = stubs::find_dll(&file)
+    if let Some(index) = builtin_for(l.bus, &file)
         && (!has_path || in_system())
     {
         return map_builtin(l.bus, l.memory, l.process, index)
@@ -647,8 +671,26 @@ pub(super) fn load_module(
         return Ok(m.base);
     }
 
-    let path = find_file(l, name, &file).ok_or_else(not_found)?;
-    let bytes = read_file(l.bus, &path).ok_or_else(not_found)?;
+    // On the disks, or else in the `win32_dlls` folder, as if it were
+    // in the system directory.
+    let (path, bytes, guest) = match find_file(l, name, &file) {
+        Some(path) => {
+            let bytes = read_file(l.bus, &path).ok_or_else(not_found)?;
+            (path, bytes, false)
+        }
+        None if !has_path || in_system() => {
+            let host = guest_file(l.bus, &file).ok_or_else(not_found)?;
+            let bytes = std::fs::read(&host).map_err(|_| not_found())?;
+            l.bus.log_string(&format!(
+                "[W32] {} loads {} from {}",
+                importer,
+                file,
+                host.display()
+            ));
+            (join(SYSTEM_DIR, &file), bytes.into(), true)
+        }
+        None => return Err(not_found()),
+    };
     let mut image = pe::Image::load(&bytes).map_err(|e| LoadError {
         code: bad_image_error(&bytes),
         message: format!("{} can't be loaded: {}.", file, e),
@@ -719,6 +761,9 @@ pub(super) fn load_module(
     let mut module_flags = if l.static_load { STATIC } else { 0 };
     if !resolve {
         module_flags |= UNRESOLVED;
+    }
+    if guest {
+        module_flags |= GUEST;
     }
     l.process.modules.push(Module {
         name: file.clone(),
@@ -831,6 +876,11 @@ fn bind_imports(
     importer: &str,
 ) -> Result<Vec<u32>, LoadError> {
     let mut deps = Vec::new();
+    let guest = l
+        .process
+        .modules
+        .iter()
+        .any(|m| m.base == base && m.flags & GUEST != 0);
     for dll in imports {
         let dep = load_module(l, &dll.name, 0, importer)?;
         deps.push(dep);
@@ -840,6 +890,9 @@ fn bind_imports(
             .iter()
             .find(|m| m.base == dep && m.flags & BUILTIN != 0)
             .map(|m| m.name.clone());
+        // The import library that says how many bytes of arguments the
+        // stdcall functions guest code imports take.
+        let mut library: Option<Vec<u8>> = None;
         for (slot, import) in &dll.functions {
             let wanted = match import {
                 pe::Import::Name { name, .. } => Wanted::Name(name.clone()),
@@ -850,7 +903,15 @@ fn bind_imports(
                 (Some(address), _) => address,
                 (None, Some(builtin)) => {
                     let what = wanted.to_string();
-                    missing_stub(l.bus, l.memory, l.process, builtin, &what)
+                    let arg_bytes = match &wanted {
+                        Wanted::Name(name) if guest => {
+                            let library = library
+                                .get_or_insert_with(|| import_library(l.bus, &dll.name));
+                            stdcall_arg_bytes(library, name).unwrap_or(0)
+                        }
+                        _ => 0,
+                    };
+                    missing_stub(l.bus, l.memory, l.process, builtin, &what, arg_bytes)
                         .ok_or_else(|| out_of_memory(importer))?
                 }
                 (None, None) => {
@@ -874,6 +935,80 @@ fn bind_imports(
         }
     }
     Ok(deps)
+}
+
+/// The built-in DLL the module `file` (as `module_file_name` gives it)
+/// names. With the `win32_dlls` setting, NTDLL.DLL is one, UCRT's
+/// ucrtbase.dll and api-ms-win-crt-*.dll are MSVCRT.DLL and
+/// KERNELBASE.DLL is KERNEL32.DLL, which Wine's DLLs import; a DLL the
+/// setting replaces, which the folder has, isn't.
+fn builtin_for(bus: &Bus, file: &str) -> Option<usize> {
+    let index = stubs::find_dll(file);
+    let win32 = &bus.win32;
+    if win32.guest_dlls.is_none() {
+        return index.filter(|&i| stubs::DLLS[i].name != super::ntdll::DLL.name);
+    }
+    let stem = file.strip_suffix(".DLL").unwrap_or(file).to_ascii_lowercase();
+    if win32.guest_replace.contains(&stem) && guest_file(bus, file).is_some() {
+        return None;
+    }
+    match stem.as_str() {
+        "ucrtbase" => stubs::find_dll("MSVCRT.DLL"),
+        _ if stem.starts_with("api-ms-win-crt-") => stubs::find_dll("MSVCRT.DLL"),
+        "kernelbase" => stubs::find_dll("KERNEL32.DLL"),
+        _ => index,
+    }
+}
+
+/// The DLL `file` in the host folder the `win32_dlls` setting names,
+/// whatever the case of its name there.
+fn guest_file(bus: &Bus, file: &str) -> Option<std::path::PathBuf> {
+    let folder = bus.win32.guest_dlls.as_ref()?;
+    std::fs::read_dir(folder)
+        .ok()?
+        .flatten()
+        .find(|entry| entry.file_name().to_string_lossy().eq_ignore_ascii_case(file))
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+}
+
+/// The import library of the DLL `dll` in the `win32_dlls` folder
+/// ("lib<name>.a", as Wine's i386-windows folder has one for each of its
+/// DLLs), or nothing.
+fn import_library(bus: &Bus, dll: &str) -> Vec<u8> {
+    let file = module_file_name(dll);
+    let stem = file.strip_suffix(".DLL").unwrap_or(&file);
+    guest_file(bus, &format!("LIB{}.A", stem))
+        .and_then(|path| std::fs::read(path).ok())
+        .unwrap_or_default()
+}
+
+/// The bytes of arguments the stdcall function `name` takes, by its
+/// decorated name "_name@bytes" in the import library `library`. None
+/// for a cdecl function, whose name has no decoration.
+fn stdcall_arg_bytes(library: &[u8], name: &str) -> Option<u16> {
+    let wanted = format!("_{}@", name);
+    let wanted = wanted.as_bytes();
+    let mut from = 0;
+    while let Some(at) = library[from..]
+        .windows(wanted.len())
+        .position(|w| w == wanted)
+        .map(|i| from + i)
+    {
+        from = at + 1;
+        // The whole name, alone or after "__imp_".
+        let alone = at == 0 || library[at - 1] == 0 || library[..at].ends_with(b"__imp_");
+        let digits: Vec<u8> = library[at + wanted.len()..]
+            .iter()
+            .copied()
+            .take_while(u8::is_ascii_digit)
+            .collect();
+        let end = at + wanted.len() + digits.len();
+        if alone && !digits.is_empty() && library.get(end) == Some(&0) {
+            return std::str::from_utf8(&digits).ok()?.parse().ok();
+        }
+    }
+    None
 }
 
 /// The address of the export `wanted` of the module at `base`, following

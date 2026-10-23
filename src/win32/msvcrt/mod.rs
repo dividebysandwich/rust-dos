@@ -25,6 +25,8 @@ mod stdio;
 mod string;
 mod time;
 
+pub(super) use stdio::vsnprintf;
+
 use super::call::{self, Call};
 use super::stubs::{Dll, Handler, Var};
 use crate::bus::Bus;

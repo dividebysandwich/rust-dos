@@ -420,6 +420,20 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   a host folder mounted as C: gets that file. Off, such a program runs
   its DOS stub, which says it needs Windows. The plan is in
   [docs/native-windows.md](docs/native-windows.md).
+* `win32_dlls` names a host folder of Win32 DLLs that programs under the
+  built-in Windows may load as their own code, such as Wine's 32-bit
+  `lib/wine/i386-windows` folder. A DLL a program needs that is neither
+  built in nor on the search path is read from there, as if it were in
+  `C:\WINDOWS\SYSTEM`. A function such a DLL imports that the built-in
+  DLLs don't have fails where it is called, returning 0, instead of
+  ending the program; the folder's import libraries (`lib<name>.a`) say
+  how many bytes of arguments each takes. Empty (the default), there is
+  no such folder. Wine's MSACM32.DLL with its ADPCM codecs runs this
+  way; see "Wine's DLLs as guest code" in
+  [docs/native-windows.md](docs/native-windows.md).
+* `win32_dlls_replace` lists the built-in DLLs that the `win32_dlls`
+  folder's DLLs of the same name replace, separated by commas, such as
+  `comctl32,comdlg32`. Empty (the default), the built-in ones are used.
 * `dos_version` is the DOS version programs are told (INT 21h AH=30h,
   AX=3306h and the PSP's), such as `5.00` (the default), `6.22` or
   `7.10`; `7.1` is 7.10, as DOSBox's `ver` has it. From 7.00 on, DOS

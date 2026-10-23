@@ -64,6 +64,8 @@ pub fn configure(cpu: &mut Cpu, settings: &Settings, host_layout: &'static crate
     warnings.extend(cpu.set_upper_memory(settings.ems, settings.umb).err());
     cpu.bus.dpmi.enabled = settings.dpmi;
     cpu.bus.win32.enabled = settings.win32;
+    cpu.bus.win32.guest_dlls = settings.win32_dlls.clone();
+    cpu.bus.win32.guest_replace = settings.win32_dlls_replace.clone();
     crate::dos_data::set_version(&mut cpu.bus, settings.dos_version);
     cpu.bus.ide_hard_disks = settings.ide_hard_disks;
     cpu.bus.boot_cdrom = settings.boot_cdrom;

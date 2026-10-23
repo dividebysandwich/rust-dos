@@ -195,6 +195,11 @@ pub struct Config {
     pub dpmi: Option<bool>,
     /// The built-in Windows (`win32`).
     pub win32: Option<bool>,
+    /// A host folder of Win32 DLLs programs may load as guest code
+    /// (`win32_dlls`), and the built-in DLLs they replace
+    /// (`win32_dlls_replace`).
+    pub win32_dlls: Option<PathBuf>,
+    pub win32_dlls_replace: Option<Vec<String>>,
     /// DOS's tables packed low, as DOS=HIGH has them (`dos_high`).
     pub dos_high: Option<bool>,
     /// The DOS version programs are told (`dos_version`).

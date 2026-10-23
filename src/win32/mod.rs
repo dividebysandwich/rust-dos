@@ -30,6 +30,7 @@ mod loader;
 mod mapping;
 mod memory;
 mod msvcrt;
+mod ntdll;
 mod object;
 mod ole32;
 mod registry;
@@ -121,6 +122,9 @@ const ID_START: u16 = 0xF300;
 
 /// The index of ESP in `Context::gpr`.
 const ESP: usize = 4;
+
+/// What a call of a function the built-in DLLs lack fails with.
+const ERROR_CALL_NOT_IMPLEMENTED: u32 = 120;
 
 /// The exit code of a program that ended because of an error.
 const FAILED: u32 = 0xFF;
@@ -251,6 +255,11 @@ pub struct Win32 {
     /// Whether PE programs run (the `win32` setting); off, their DOS stub
     /// runs as on DOS.
     pub enabled: bool,
+    /// The host folder of DLLs programs may load as guest code (the
+    /// `win32_dlls` setting), and the built-in DLLs its DLLs replace
+    /// (`win32_dlls_replace`, lowercase names without ".dll").
+    pub guest_dlls: Option<std::path::PathBuf>,
+    pub guest_replace: Vec<String>,
     /// The program DOS loaded, which starts at `START`.
     pending: Option<String>,
     /// The processes, the one DOS started first. They run in that DOS
@@ -316,6 +325,8 @@ impl Win32 {
     pub fn reset(&mut self) {
         *self = Win32 {
             enabled: self.enabled,
+            guest_dlls: self.guest_dlls.take(),
+            guest_replace: std::mem::take(&mut self.guest_replace),
             ..Win32::default()
         };
     }
@@ -811,7 +822,22 @@ fn peek_32(cpu: &Cpu, lin: u32) -> Option<u32> {
     Some(cpu.bus.read_32(phys as usize))
 }
 
-/// The program called a function a built-in DLL doesn't have yet.
+/// Whether the running function of a built-in DLL was called from guest
+/// code (`loader::GUEST`): its return address, at ESP, is in such a DLL.
+fn called_from_guest(cpu: &Cpu) -> bool {
+    let Some(caller) = peek_32(cpu, cpu.esp()) else {
+        return false;
+    };
+    running(cpu).is_some_and(|p| {
+        p.modules
+            .iter()
+            .any(|m| m.flags & loader::GUEST != 0 && caller.wrapping_sub(m.base) < m.size)
+    })
+}
+
+/// The program called a function a built-in DLL doesn't have yet. When
+/// guest code (`loader::GUEST`) calls it, the call fails: it returns 0
+/// with ERROR_CALL_NOT_IMPLEMENTED, and its stub pops the arguments.
 fn missing(cpu: &mut Cpu, index: u16) {
     let caller = peek_32(cpu, cpu.esp()).unwrap_or(0);
     let (dll, function) = process(cpu)
@@ -819,6 +845,23 @@ fn missing(cpu: &mut Cpu, index: u16) {
         .get(index as usize)
         .cloned()
         .unwrap_or_default();
+    let guest = process(cpu)
+        .modules
+        .iter()
+        .find(|m| m.flags & loader::GUEST != 0 && caller.wrapping_sub(m.base) < m.size)
+        .map(|m| m.name.clone());
+    if let Some(module) = guest {
+        let message = format!(
+            "[W32] {} called {}'s function {} (from {:08X}), which the built-in \
+             Windows doesn't have: it fails",
+            module, dll, function, caller
+        );
+        cpu.bus.log_string(&message);
+        process(cpu).last_error = ERROR_CALL_NOT_IMPLEMENTED;
+        cpu.set_eax(0);
+        cpu.set_eip(cpu.eip().wrapping_add(4));
+        return;
+    }
     let message = format!(
         "{} needs {}'s function {} (called from {:08X}), which the built-in Windows doesn't have yet.",
         process(cpu).name,
@@ -1007,4 +1050,4 @@ crate::state_fields!(Win32 {
     winmm,
     glide,
     guids,
-} skip { enabled });
+} skip { enabled, guest_dlls, guest_replace });

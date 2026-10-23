@@ -681,6 +681,118 @@ Usually that will be the latest. Wine's code may also be ported into Rust
 instead (LGPL-2.1 section 3 allows that for a GPL project), which avoids
 the import problem for DLLs that are small enough.
 
+### The experiment: imports of Wine 9.0 and 11.0
+
+The DLLs came from WineHQ's Ubuntu packages of the two stable releases,
+`wine-stable-i386` 9.0 (jammy) and 11.0 (noble), whose
+`lib/wine/i386-windows` folders hold the PE builds. Each DLL's import
+table was read and every import compared with the exports of the
+built-in DLLs. "Missing" is an import no built-in DLL exports; "stub" is
+one a built-in DLL exports as Windows 95 does, as a stub that fails
+(mostly `W` functions of USER32 and KERNEL32).
+
+| DLL            | 9.0: imports, missing, stub | 11.0: imports, missing, stub |
+|----------------|-----------------------------|------------------------------|
+| `msacm32`      | 67, 22, 9                   | 67, 22, 9                    |
+| `imaadp32.acm` | 24, 14, 1                   | 24, 14, 1                    |
+| `msadp32.acm`  | 24, 14, 1                   | 24, 14, 1                    |
+| `comctl32`     | 378, 115, 37                | 307, 79, 36                  |
+| `comdlg32`     | 297, 102, 46                | 285, 88, 46                  |
+| `quartz`       | 215, 124, 22                | 181, 64, 22                  |
+| `amstream`     | 52, 25, 5                   | 53, 8, 5                     |
+
+Wine 11.0 is the one to use. The ACM DLLs miss the same functions in
+both. Counted after the aliases described below (UCRT as MSVCRT,
+KERNELBASE as KERNEL32), 11.0 misses fewer functions for `comctl32` (13
+against 36), `comdlg32` (58 against 73) and `quartz` (63 against 94);
+only `amstream` misses more (8 against 5), and it is the smallest.
+
+Most of what the ACM DLLs miss is UCRT: Wine's DLLs import their C
+runtime from `ucrtbase.dll`, whose functions are MSVCRT's but for four
+(`__acrt_iob_func`, `__stdio_common_vsprintf`,
+`__stdio_common_vswprintf`, `_assert`). The rest is `ntdll`'s
+`_vsnprintf` and KERNEL32's `GetPrivateProfileSectionW`. None of these
+DLLs imports Wine's own `__wine_dbg_*` exports: the ACM DLLs look them
+up in `ntdll` with `GetProcAddress` and print nothing without them.
+
+### How they load
+
+The `win32_dlls` setting names a host folder, such as Wine's
+`i386-windows`, whose DLLs a program may load (CONFIGURATION.md). The
+loader (`src/win32/loader.rs`) looks there for a DLL that has no built-in
+DLL and isn't on the search path, and reads it as if it were in
+`C:\WINDOWS\SYSTEM`; `win32_dlls_replace` lets the folder's DLL replace
+a built-in one of the same name. With the setting, `ucrtbase.dll` and
+`api-ms-win-crt-*.dll` are the built-in MSVCRT, `kernelbase.dll` is
+KERNEL32, and there is a built-in NTDLL.DLL at BFE40000h with
+`_vsnprintf`; without it there is no NTDLL, as programs looking for
+Windows NT expect.
+
+A DLL from the folder is guest code (the module flag `GUEST`). A
+function it imports that no built-in DLL has gets the stub that ends a
+program, but called from guest code the stub logs the name and fails the
+call instead: it returns 0 with ERROR_CALL_NOT_IMPLEMENTED. For the stub
+to pop a stdcall function's arguments, the loader reads their size from
+the decorated names (`_Name@8`) in the folder's import libraries
+(`lib<dll>.a`), which Wine installs beside its DLLs.
+
+Wine's DLLs are built for the i686 and use CMOV, so they need
+`cpu=pentium_pro` or a later processor. They inline GetProcessHeap as a
+read of `fs:[30h]` and the field at 18h there. That is the process
+database on Windows 95 and the PEB on Windows NT, and on both the field
+is the process heap, so each TIB now points at a block of the process's
+that has it.
+
+### What ran
+
+Wine 11.0's `msacm32.dll` with its IMA ADPCM codec, `imaadp32.acm`,
+encodes 16-bit PCM to IMA ADPCM and decodes it back through
+`acmStreamOpen` and `acmStreamConvert`, and the samples match a decoder
+written from the format's definition (`tests/wine_dlls.rs`, which runs
+when WINE_DLLS names the folder). MSACM32 finds the codec in SYSTEM.INI's
+`[drivers32]` (`msacm.imaadpcm=imaadp32.acm`) and opens it with
+OpenDriver, so WINMM's installable drivers are now real: OpenDriver loads
+the DLL as LoadLibrary does, finds its alias in SYSTEM.INI, and sends its
+`DriverProc` DRV_LOAD, DRV_ENABLE and DRV_OPEN; SendDriverMessage and
+CloseDriver call it as Wine's `winmm` does.
+
+What it needed besides the loader: the four UCRT functions, NTDLL's
+`_vsnprintf`, `GetPrivateProfileSectionW`, the installable drivers, the
+process heap at `fs:[30h]`, and ADVAPI32's `Reg*W` stubs returning
+ERROR_CALL_NOT_IMPLEMENTED to guest code. Windows 95's stubs return 0
+with that error set, as Wine's registry tests find, and programs keep
+getting that; MSACM32 takes 0 as ERROR_SUCCESS and would enumerate the
+registry with a key it never got. No call failed through a guest stub
+on the way. The other stubs it met fail as on Windows 95 and MSACM32
+copes: `GetModuleHandleW` (for `ntdll`'s debug functions),
+`RegOpenKeyExW` and `RegCreateKeyW` (its driver cache, which it fills
+from the drivers instead).
+
+### What the others would take
+
+The counts after this work, with the aliases and the functions above:
+
+- `comctl32` 11.0: 13 missing, 36 stubs. The missing ones are mostly
+  Vista functions (`ResolveDelayLoadedAPI`, `DelayLoadFailureHook`,
+  `GdiAlphaBlend`, `GetMonitorInfoW`, `IsDialogMessageW`). The stubs are
+  the larger work: its window classes are written in Unicode, so
+  `CreateWindowExW`, `DefWindowProcW`, `SendMessageW` and the other `W`
+  functions of USER32 and GDI32 would have to work for guest code, with
+  windows whose procedures take Unicode messages. With the built-in
+  COMCTL32 written in Rust, it is only worth it for controls that one
+  doesn't have.
+- `comdlg32` 11.0: 58 missing, 46 stubs. It needs `comctl32`'s image
+  lists and up-down control, `shell32` and `shlwapi` for its file
+  dialogs, activation contexts and resource functions in Unicode
+  (`FindResourceW`, `EnumResourceNamesW`), `CreateDCW` for printing, and
+  `ntdll`'s Unicode strings. It would come after `comctl32`.
+- `quartz` 11.0: 63 missing, 22 stubs. It needs I/O completion ports,
+  the thread pool and condition variables of KERNEL32,
+  `DirectSoundCreate8`, OLEAUT32, RPCRT4 for its COM proxies, and
+  `msvfw32` for its codecs, which are Wine DLLs in turn. Of the three it
+  is the furthest off; `amstream` (8 missing: condition variables,
+  `InitializeCriticalSectionEx`, `__iob_func`) sits on top of it.
+
 ## Decisions
 
 1. **Direct3D**: on the emulated Banshee/Voodoo3, with its OpenGL replay
