@@ -74,6 +74,7 @@ impl Registers {
 
     /// Put the registers back as they were.
     fn restore(&self, vga: &mut VgaCard) {
+        vga.forget_layout();
         vga.misc_output_reg = self.misc;
         vga.sequencer_regs = self.sequencer;
         vga.sequencer_index = self.sequencer_index;
