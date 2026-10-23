@@ -636,8 +636,7 @@ impl Item {
                 Applies::Now
             }
             Cycles | AutoFps | AutoBusyOs | Core | Fpu | Dpmi | DosVersion | IdeHardDisks | BootCdrom | FloppyController | KeyboardLayout | MouseAutocapture | MouseCaptureMessages | MouseMenuHold | PauseInSettings | ShellSuggestions | ShellColors | SaveShellHistory | Rewind | RewindMemory
-            | VoodooRenderer | VoodooScale | VoodooScaleShader | VoodooMsaa | VoodooTextureSampling | VoodooAnisotropy | VoodooFpsCap | VoodooOverlay | PowerVrFilter => Applies::Now,
-            VoodooDither => Applies::Now,
+            | VoodooRenderer | VoodooScale | VoodooScaleShader | VoodooMsaa | VoodooDither | VoodooTextureSampling | VoodooAnisotropy | VoodooFpsCap | VoodooOverlay | PowerVrFilter => Applies::Now,
             Monochrome => Applies::NowAndAtPrompt,
             MonitorEffects => Applies::Now,
             Post => Applies::NextStart,
