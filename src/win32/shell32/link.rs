@@ -768,8 +768,10 @@ pub fn parse(b: &[u8]) -> Option<LinkData> {
             let raw = b.get(at..at + 2 * n)?;
             at += 2 * n;
             let units: Vec<u16> = raw
-                .chunks_exact(2)
-                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&c| u16::from_le_bytes(c))
                 .collect();
             wide_to_ansi(&units)
         } else {

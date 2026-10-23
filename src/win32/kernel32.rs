@@ -674,6 +674,18 @@ pub fn path_in_use(cpu: &mut Cpu, name: &str) -> bool {
     path::open_sharing(cpu, &full).is_some()
 }
 
+/// The DOS path of the running program, as GetModuleFileNameA(NULL)
+/// gives it.
+pub fn program_path(cpu: &mut Cpu) -> Option<String> {
+    let process = super::process(cpu);
+    let base = process.image_base;
+    process
+        .modules
+        .iter()
+        .find(|m| m.base == base)
+        .map(|m| m.path.clone())
+}
+
 /// The address of KERNEL32's function `name`, for a task to call.
 pub fn address_of(name: &str) -> u32 {
     let index = APIS

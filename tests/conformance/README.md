@@ -10,7 +10,7 @@ where they differ from NT's.
 
 `wine/` holds files from Wine 1.2.3 (tag `wine-1.2.3`, commit
 `9dc5af175a5537b1f98af34cdcbdc22639b36d53`), unchanged but for the
-change listed below:
+changes listed below:
 
 - `include/wine/test.h`, the test framework;
 - `kernel32/`: `alloc.c`, `codepage.c`, `directory.c`, `drive.c`,
@@ -47,12 +47,24 @@ change listed below:
 - `version/`: `info.c`, `install.c` and `version.rc`, the resource
   script `info.c`'s version resource is built from, from
   `dlls/version/tests/`.
-- `ole32/`: `hglobalstream.c` and `propvariant.c` from
-  `dlls/ole32/tests/`.
+- `ole32/`: `compobj.c`, `hglobalstream.c` and `propvariant.c` from
+  `dlls/ole32/tests/`. `storage32.c` is left out, as OLE32 has no
+  structured storage, and so is user32's `dde.c`: it tests DDE
+  conversations between the test program and a child program, and the
+  built-in DDEML talks only to the built-in Program Manager server.
+- `shell32/`: `progman_dde.c`, `shelllink.c`, `shellpath.c`,
+  `shlexec.c`, `shlfileop.c`, `string.c` and the header they share,
+  `shell32_test.h`, from `dlls/shell32/tests/`.
 
 `heap.c` has the values of the `FLG_HEAP_*` and `FLG_POOL_ENABLE_TAGGING`
 flags defined after its includes, from Wine's `winternl.h`, as MinGW's
 lacks them.
+
+`shlexec.c` doesn't call `test_dde` and `test_dde_default_app`. They
+patch the import table of SHELL32, which the built-in DLL doesn't have,
+to hook WaitForInputIdle, and then need the child program to be a DDE
+server the shell talks to; the built-in DDEML reaches only the
+built-in Program Manager server.
 
 Of the 1.x releases compared (1.0.1, 1.2.3, 1.4.1, 1.6.2, 1.8.7), 1.2.3's
 kernel32 tests mention Windows 9x the most: later releases took many of
@@ -65,8 +77,24 @@ may be used under.
 
 `runtime/compat.h` is rust-dos's own: the few names the tests take from
 Wine's headers that MinGW's lack (`__ms_va_list` and its macros,
-`LOCALE_RETURN_GENITIVE_NAMES`, `LPMIDIEVENT`). Each test file is built
-with it included first, so the files stay unchanged.
+`LOCALE_RETURN_GENITIVE_NAMES`, `LPMIDIEVENT`, `GUID_NULL` and
+`IObjContext` as an IUnknown). Each test file is built with it included
+first, so the files stay unchanged.
+
+`runtime/shell32.h` is included before each of shell32's tests. Wine
+builds them into one program that imports SHELL32; `shellpath.c` and
+`string.c` take its functions with GetProcAddress from the module
+GetModuleHandleA finds, so the header makes each program import a
+function of SHELL32 too. `runtime/shlfileop.h` is included before
+`shlfileop.c`, which declares Shell_MergeMenus as returning an HRESULT
+where MinGW's `shlobj.h` has a UINT: its calls go through a function of
+the test's own type. `shlexec.c` makes its shortcuts with
+`shelllink.c`'s `create_lnk`, so the two are built into one program,
+as dsound's are. `compobj.c` and `shellpath.c` define GUIDs that
+libuuid has too, so they are linked with `--allow-multiple-definition`,
+and `compobj.c` is built with `IID_IContextCallback` defined as
+`IID_IUnknown`, which MinGW's headers lack and only its tests of
+Windows 2000's object contexts use.
 
 `runtime/runtime.c` is rust-dos's own: the C runtime the kernel32,
 advapi32, user32, gdi32, dinput and winmm tests link in place of
@@ -76,7 +104,9 @@ written on KERNEL32 alone. It also has `dump_region`, which `win.c`
 calls and Wine has in `msg.c`: `win.c` is built with
 `-Ddump_region=conformance_dump_region` to call that one. And it has
 `sqrt`, which winmm's `timer.c` takes, and `sin` and `fabs`, for the
-tones the dsound and winmm tests make.
+tones the dsound and winmm tests make. `getenv` is there for
+`shlexec.c`, and `toupper` is exported as an import too, as `shlexec.c`
+calls it through the pointer `ctype.h` declares.
 
 `runtime/winmm.c` is rust-dos's own too: `mmsys_error`, the names of
 the multimedia errors, which winmm's tests other than `wave.c` and
@@ -252,6 +282,27 @@ The results that aren't clean, and why:
   elsewhere. The runner sets no TEMP, so GetTempPathA gives the current
   directory, which is the program's own, and the file is where it
   should go.
+- ole32 `compobj.c:1018`: CoGetClassObject from another thread of a
+  class object registered for CLSCTX_LOCAL_SERVER gives the object
+  itself, which doesn't answer for IMultiQI; Windows gives a proxy,
+  and OLE32 has no proxies. `278`, `356` and `1073` skip: Internet
+  Explorer's classes aren't installed, as on a Windows 95 without it.
+  `1117`, `1270` and `1328` skip CoGetObjectContext,
+  CoSwitchCallContext and CoGetContextToken, which came with Windows
+  2000.
+- shell32 `shlfileop.c:336`: SHGetFileInfoA with SHGFI_SYSICONINDEX
+  should give the system image list, and there is none (COMCTL32's
+  image lists aren't SHELL32's), so it gives 0. `220`, `348` and
+  `2247` skip SHGetFileInfoW and SHFileOperationW, `2046` and `2071`
+  SHCreateDirectoryExA and SHPathPrepareForWriteA, which Windows 95's
+  SHELL32 doesn't have.
+- shell32 `shelllink.c:172` and `789` skip what needs IShellLinkW,
+  which Windows 9x's shell links don't have, `631` GetLongPathNameA,
+  which came with Windows 98, and `854` SHDefExtractIconA.
+  `shellpath.c:849` skips SHGetFolderLocation and `progman_dde.c:119`
+  ReadCabinetState, which Windows 95 doesn't have.
+- shell32 `string.c` runs no checks: on Windows 9x it runs
+  `test_StrRetToStringNA`, which is empty in Wine 1.2.3 (a FIXME).
 
 ## Adding tests
 

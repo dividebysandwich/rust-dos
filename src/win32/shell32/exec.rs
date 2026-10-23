@@ -109,10 +109,35 @@ fn class_command(cpu: &mut Cpu, class: &str, verb: Option<&str>) -> Option<Strin
     class_value(cpu, &format!("{}\\shell\\{}\\command", class, verb))
 }
 
-/// The command line `format` with its escapes replaced, as Wine's
-/// SHELL_ArgifyW does: %1 and %L the file, %2 to %9 the arguments one by
-/// one, %* all of them, %I the item id list, %NAME% an environment
-/// variable. Also whether the file went in.
+/// The first argument in `args` and the text after it. Arguments are
+/// separated by spaces alone; one that starts with a quote runs to the
+/// closing quote, and two quotes inside it stand for one.
+fn next_token(args: &str) -> (String, &str) {
+    let args = args.trim_start_matches(' ');
+    let mut token = String::new();
+    if let Some(quoted) = args.strip_prefix('"') {
+        let mut chars = quoted.char_indices().peekable();
+        while let Some((at, c)) = chars.next() {
+            if c != '"' {
+                token.push(c);
+            } else if chars.peek().is_some_and(|&(_, n)| n == '"') {
+                token.push('"');
+                chars.next();
+            } else {
+                return (token, &quoted[at + 1..]);
+            }
+        }
+        return (token, "");
+    }
+    let end = args.find(' ').unwrap_or(args.len());
+    token.push_str(&args[..end]);
+    (token, &args[end..])
+}
+
+/// The command line `format` with its escapes replaced, as Windows
+/// does: %1 and %L the file, %2 to %9 the arguments one by one, %* all
+/// of them as given, %~N the text after argument N-1, %I the item id
+/// list, %NAME% an environment variable. Also whether the file went in.
 fn argify(
     cpu: &mut Cpu,
     format: &str,
@@ -123,7 +148,6 @@ fn argify(
     let mut out = String::new();
     let mut found_file = false;
     let mut done = false;
-    let mut args = args;
     let chars: Vec<char> = format.chars().collect();
     let mut i = 0;
     while i < chars.len() {
@@ -136,20 +160,24 @@ fn argify(
         let c = chars.get(i).copied().unwrap_or('\0');
         match c {
             '\0' | '%' => out.push('%'),
-            '2'..='9' | '0' | '*' if args.is_some() => {
-                let rest = args.unwrap_or("");
-                if c == '*' {
-                    out.push('"');
-                    out.push_str(rest);
-                    out.push('"');
-                    args = Some("");
-                } else {
-                    let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
-                    out.push_str(&rest[..end]);
-                    args = Some(rest[end..].trim_start());
+            '*' => out.push_str(args.unwrap_or("")),
+            '2'..='9' => {
+                let mut rest = args.unwrap_or("");
+                let mut token = String::new();
+                for _ in 0..(c as u32 - '1' as u32) {
+                    (token, rest) = next_token(rest);
                 }
+                out.push_str(&token);
             }
-            '1'..='9' | '0' | '*' => {
+            '~' if chars.get(i + 1).is_some_and(|d| ('2'..='9').contains(d)) => {
+                i += 1;
+                let mut rest = args.unwrap_or("");
+                for _ in 0..(chars[i] as u32 - '2' as u32) {
+                    rest = next_token(rest).1;
+                }
+                out.push_str(rest);
+            }
+            '1' | '0' => {
                 if !done || c == '1' {
                     let path = files::search(cpu, None, file).unwrap_or(file.to_string());
                     out.push_str(&path);
@@ -199,13 +227,15 @@ fn search(cpu: &mut Cpu, directory: &str, name: &str) -> Option<String> {
     };
     for candidate in candidates {
         let dirs = (!directory.is_empty()).then_some(directory);
-        if let Some(found) = files::search(cpu, dirs, &candidate) {
-            return Some(found);
-        }
-        if dirs.is_some()
-            && let Some(found) = files::search(cpu, None, &candidate)
-        {
-            return Some(found);
+        let found = files::search(cpu, dirs, &candidate)
+            .or_else(|| dirs.and_then(|_| files::search(cpu, None, &candidate)));
+        if let Some(found) = found {
+            // The file system drops dots at the end of a name.
+            let file = found.rsplit(['\\', '/']).next().unwrap_or(&found);
+            if file.trim_end_matches('.').is_empty() {
+                return Some(found);
+            }
+            return Some(found.trim_end_matches('.').to_string());
         }
     }
     None
@@ -282,7 +312,7 @@ fn link_target(cpu: &mut Cpu, path: &str) -> Option<link::LinkData> {
 /// handle when one was started.
 fn execute(cpu: &mut Cpu, mut request: Request) -> (u32, Option<u32>) {
     let mut singular = false;
-    if request.file.starts_with('"') {
+    while request.file.starts_with('"') {
         let inner = &request.file[1..];
         request.file = inner.strip_suffix('"').unwrap_or(inner).to_string();
         singular = true;
@@ -332,6 +362,8 @@ fn execute(cpu: &mut Cpu, mut request: Request) -> (u32, Option<u32>) {
         }
         if let Some((scheme, _)) = request.file.split_once(':')
             && scheme.len() > 1
+            && scheme.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
+            && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
         {
             return url(cpu, scheme, &request);
         }
@@ -515,7 +547,15 @@ pub fn find_executable(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(SE_ERR_FNF);
     };
     let directory = optional_string(cpu, directory)?.unwrap_or_default();
-    let Some(path) = search(cpu, &directory, &file) else {
+    let Some(path) = search(cpu, &directory, &file).or_else(|| {
+        // A folder is opened with the Folder type's command.
+        let name = match directory.as_str() {
+            "" => file.clone(),
+            d => format!("{}\\{}", d.trim_end_matches('\\'), file),
+        };
+        let path = files::full_path(cpu, &name);
+        is_directory(cpu, &path).then_some(path)
+    }) else {
         return Some(SE_ERR_FNF);
     };
     let line = match find_command(cpu, &path, None, 0, None) {
@@ -540,6 +580,111 @@ pub fn find_executable(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(STARTED)
 }
 
+/// The arguments in the Unicode command line `line`, as the C runtime
+/// splits one (Wine's CommandLineToArgvW): spaces and tabs outside
+/// quotes separate them, quotes are dropped, and backslashes are
+/// literal but before a quote, where each two stand for one and an odd
+/// one makes the quote literal.
+fn split_command_line(line: &[u16]) -> Vec<Vec<u16>> {
+    const QUOTE: u16 = b'"' as u16;
+    const BACKSLASH: u16 = b'\\' as u16;
+    let blank = |c: u16| c == b' ' as u16 || c == b'\t' as u16;
+    let mut args = Vec::new();
+    let mut arg = Vec::new();
+    let mut started = false;
+    let mut in_quotes = false;
+    let mut backslashes = 0;
+    let mut i = 0;
+    while i < line.len() {
+        let c = line[i];
+        if blank(c) && !in_quotes {
+            args.push(std::mem::take(&mut arg));
+            while i < line.len() && blank(line[i]) {
+                i += 1;
+            }
+            started = false;
+            backslashes = 0;
+            continue;
+        }
+        started = true;
+        if c == BACKSLASH {
+            arg.push(c);
+            backslashes += 1;
+        } else if c == QUOTE {
+            arg.truncate(arg.len() - backslashes / 2);
+            if backslashes % 2 == 0 {
+                in_quotes = !in_quotes;
+            } else {
+                arg.pop();
+                arg.push(QUOTE);
+            }
+            backslashes = 0;
+        } else {
+            arg.push(c);
+            backslashes = 0;
+        }
+        i += 1;
+    }
+    if started {
+        args.push(arg);
+    }
+    args
+}
+
+/// CommandLineToArgvW(line, count): the arguments of `line` in one
+/// LocalAlloc block, their pointers first, and their number in `count`.
+/// An empty line gives the program's path. Programs built for NT, as
+/// Wine's tests are, import it.
+pub fn command_line_to_argv(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[line, count] = args else {
+        return Some(0);
+    };
+    if line == 0 {
+        return Some(0);
+    }
+    let mut units = Vec::new();
+    loop {
+        let p = line.wrapping_add(2 * units.len() as u32);
+        if units.len() > 0x8000 || !cpu.bus.guest_probe(p, 2, false) {
+            return None;
+        }
+        match cpu.bus.guest_read_16(p) {
+            0 => break,
+            c => units.push(c),
+        }
+    }
+    let list = if units.is_empty() {
+        let Some(path) = crate::win32::kernel32::program_path(cpu) else {
+            return Some(0);
+        };
+        let bytes = crate::dosstr::to_bytes(&path);
+        vec![crate::win32::kernel32::ansi_to_wide(&bytes)]
+    } else {
+        split_command_line(&units)
+    };
+    let strings: usize = list.iter().map(|a| 2 * (a.len() + 1)).sum();
+    let size = (4 * list.len() + strings) as u32;
+    let block = crate::win32::kernel32::global_alloc(cpu, 0, size);
+    if block == 0 {
+        return Some(0);
+    }
+    let mut at = block + 4 * list.len() as u32;
+    for (n, arg) in list.iter().enumerate() {
+        cpu.bus.guest_write_32(block + 4 * n as u32, at);
+        for &unit in arg.iter().chain(std::iter::once(&0)) {
+            cpu.bus.guest_write_16(at, unit);
+            at += 2;
+        }
+    }
+    if count != 0 {
+        if !cpu.bus.guest_probe(count, 4, true) {
+            return None;
+        }
+        cpu.bus.guest_write_32(count, list.len() as u32);
+    }
+    Some(block)
+}
+
 #[cfg(test)]
 mod tests {
     use super::extension;
@@ -549,5 +694,30 @@ mod tests {
         assert_eq!(extension("C:\\A.B\\file"), None);
         assert_eq!(extension("C:\\A\\file.txt"), Some("txt"));
         assert_eq!(extension("C:\\A\\file."), None);
+    }
+
+    #[test]
+    fn command_lines_split_as_the_c_runtime_splits_them() {
+        let split = |line: &str| -> Vec<String> {
+            let units: Vec<u16> = line.encode_utf16().collect();
+            super::split_command_line(&units)
+                .iter()
+                .map(|a| String::from_utf16_lossy(a))
+                .collect()
+        };
+        assert_eq!(split("one two"), ["one", "two"]);
+        assert_eq!(split(" one"), ["", "one"]);
+        assert_eq!(split(r#"a="b c" d"#), ["a=b c", "d"]);
+        assert_eq!(split(r#"\"a\\" b"#), [r#""a\ b"#]);
+    }
+
+    #[test]
+    fn arguments_are_split_at_spaces_alone() {
+        assert_eq!(super::next_token("a\tb c"), ("a\tb".to_string(), " c"));
+        assert_eq!(
+            super::next_token(r#""a:""s t""" x"#),
+            (r#"a:"s t""#.to_string(), " x")
+        );
+        assert_eq!(super::next_token(r#""a:\"s"#), (r#"a:\"#.to_string(), "s"));
     }
 }

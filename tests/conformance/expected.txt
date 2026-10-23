@@ -213,10 +213,36 @@ msvcrt/string: skipped string.c:1128
 msvcrt/string: skipped string.c:1201
 msvcrt/time: time: 29 tests executed (0 marked as todo, 0 failures), 1 skipped.
 msvcrt/time: skipped time.c:66
+ole32/compobj: compobj: 125 tests executed (0 marked as todo, 1 failure), 6 skipped.
+ole32/compobj: skipped compobj.c:278
+ole32/compobj: skipped compobj.c:356
+ole32/compobj: failed compobj.c:1018
+ole32/compobj: skipped compobj.c:1073
+ole32/compobj: skipped compobj.c:1117
+ole32/compobj: skipped compobj.c:1270
+ole32/compobj: skipped compobj.c:1328
 ole32/hglobalstream: hglobalstream: 93 tests executed (0 marked as todo, 0 failures), 0 skipped.
 ole32/propvariant: propvariant: 245 tests executed (0 marked as todo, 0 failures), 53 skipped.
 ole32/propvariant: skipped propvariant.c:167 (x52)
 ole32/propvariant: skipped propvariant.c:174
+shell32/progman_dde: progman_dde: 97 tests executed (0 marked as todo, 0 failures), 1 skipped.
+shell32/progman_dde: skipped progman_dde.c:119
+shell32/shelllink: shelllink: 72 tests executed (0 marked as todo, 0 failures), 4 skipped.
+shell32/shelllink: skipped shelllink.c:172
+shell32/shelllink: skipped shelllink.c:631
+shell32/shelllink: skipped shelllink.c:789
+shell32/shelllink: skipped shelllink.c:854
+shell32/shellpath: shellpath: 116 tests executed (0 marked as todo, 0 failures), 1 skipped.
+shell32/shellpath: skipped shellpath.c:849
+shell32/shlexec: shlexec: 240 tests executed (0 marked as todo, 0 failures), 0 skipped.
+shell32/shlfileop: shlfileop: 540 tests executed (0 marked as todo, 1 failure), 5 skipped.
+shell32/shlfileop: skipped shlfileop.c:220
+shell32/shlfileop: failed shlfileop.c:336
+shell32/shlfileop: skipped shlfileop.c:348
+shell32/shlfileop: skipped shlfileop.c:2046
+shell32/shlfileop: skipped shlfileop.c:2071
+shell32/shlfileop: skipped shlfileop.c:2247
+shell32/string: string: 0 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/class: class: 4 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/dce: dce: 136 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/dialog: dialog: 96 tests executed (0 marked as todo, 0 failures), 1 skipped.

@@ -152,6 +152,7 @@ static APIS: &[Api] = &[
     stdcall("SHGetNewLinkInfoA", 1029, 5, info::sh_get_new_link_info),
     stdcall("SHGetNewLinkInfo", 179, 5, info::sh_get_new_link_info),
     stdcall("BrowseDialogProc", 0, 4, browse::dialog_proc),
+    stdcall("CommandLineToArgvW", 1030, 2, exec::command_line_to_argv),
 ];
 
 /// The vtables, by their places in this list (link.rs's constants).

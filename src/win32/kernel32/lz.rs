@@ -402,8 +402,10 @@ mod tests {
 
     #[test]
     fn expands_compress_exe_output() {
+        // The header of Wine's file says 0x1475 bytes, though it holds
+        // 20; LZRead stops at the end of the data.
         let (method, last, size) = header(&PACKED).unwrap();
-        assert_eq!((method, last, size), (b'A', b't', 20));
+        assert_eq!((method, last, size), (b'A', b't', 0x1475));
         assert_eq!(expand(&PACKED[HEADER..]), b"This is a test file.");
     }
 

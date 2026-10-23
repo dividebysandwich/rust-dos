@@ -471,6 +471,29 @@ Wine's tests cover the DLLs this phase adds, but not the installers, the
 archive readers or what Windows 98 does differently from 95, so those
 are tested in other ways (see "Testing").
 
+For setup programs, SHELL32 has shell links (CLSID_ShellLink with
+IShellLinkA and IPersistFile, reading and writing `.lnk` files as
+Windows does), SHFileOperationA, the special folders laid out as
+Windows 95 has them and made when first asked for, item id lists,
+ShellExecuteA and ShellExecuteExA (programs, documents by the types
+the registry gives their extensions, folders, URLs by their scheme's
+key) and SHBrowseForFolderA as a dialog with a list of folders.
+Program Manager's DDE server, which InstallShield 5 makes its program
+groups through, is built in, as Explorer answered for it: a group is a
+folder under the Start menu's Programs, an item a shell link in it.
+DDEML in USER32 talks to that server alone, as no program can be a
+DDE server or client of another yet. VERSION.DLL reads version
+resources and installs files with VerFindFileA and VerInstallFileA,
+and LZ32 and KERNEL32 expand files that COMPRESS.EXE packed. OLE32
+creates objects from the class objects programs register, from the
+in-process servers the registry names and from the built-in classes;
+it keeps CoInitialize's rules for apartments, maps ProgIDs to CLSIDs
+and back, and marshals an interface between threads of one process as
+its pointer. OLEAUT32 has BSTRs, and ADVPACK the three functions setup
+programs ask before they install (IsNTAdmin, NeedReboot and
+NeedRebootInit). Structured storage (compound files) is left for a
+program that needs it.
+
 **Phase 6: Win16.**
 
 Windows 3.1 games, and Windows 95 games' 16-bit setup programs, without
@@ -539,9 +562,10 @@ traces call, not whole DLLs.
     of winmm's (the folder's README lists them). Phase 4 adds ddraw's
     `d3d` and `visual`, which test Direct3D. Phase 5 adds the DLLs that
     setup programs use: comctl32's, shell32's (`shelllink`,
-    `shlfileop`, `shellpath`, and `progman_dde` for the program groups
-    InstallShield 5 makes through DDE), comdlg32's, version's (`info`,
-    `install`), lz32's and ole32's, all in the 1.2.3 tree.
+    `shlfileop`, `shellpath`, `shlexec`, `string`, and `progman_dde`
+    for the program groups InstallShield 5 makes through DDE),
+    comdlg32's, version's (`info`, `install`), lz32's and ole32's
+    (`compobj`, `hglobalstream`, `propvariant`), all in the 1.2.3 tree.
   - `tests/conformance_tests.rs` builds them with MinGW and runs each
     under the built-in Windows: all but msvcrt's as 486 code linked with
     a small C runtime of rust-dos's own on KERNEL32, so they test the

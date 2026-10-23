@@ -600,9 +600,35 @@ const M_FLAGS: usize = 4;
 /// Whether the stream goes back to its start afterwards (for
 /// CoMarshalInterThreadInterfaceInStream).
 const M_REWIND: usize = 5;
-/// The scratch space: the record, then the pointer QueryInterface gives.
+const M_RESULT: usize = 6;
+/// The scratch space: the record, the pointer QueryInterface gives, the
+/// proxy/stub factory, the stub it makes and IID_IPSFactoryBuffer.
 const S_POINTER: u32 = RECORD;
-pub const MARSHAL_SCRATCH: u32 = RECORD + 8;
+const S_PS_FACTORY: u32 = RECORD + 4;
+const S_STUB: u32 = RECORD + 8;
+const S_PS_IID: u32 = RECORD + 12;
+pub const MARSHAL_SCRATCH: u32 = RECORD + 28;
+
+const IID_IPSFACTORYBUFFER: Guid = Guid::new(
+    0xD5F5_69D0,
+    0x593B,
+    0x101A,
+    [0xB5, 0x69, 0x08, 0x00, 0x2B, 0x2D, 0xBF, 0x7A],
+);
+/// IPSFactoryBuffer::CreateStub's place in its vtable.
+const CREATE_STUB: u32 = 4;
+
+/// The object registered in this thread as the class CoRegisterPSClsid
+/// set for `iid`, if one is.
+fn ps_factory(cpu: &mut Cpu, iid: &Guid) -> Option<u32> {
+    let (tid, pid) = (current_tid(cpu), current_pid(cpu));
+    let com = com_state(cpu);
+    let class = com.ps_classes.iter().find(|p| p.tid == tid && p.iid == iid.0)?;
+    let found = com.registered.iter().find(|r| {
+        r.clsid == class.clsid && r.pid == pid && r.tid == tid
+    })?;
+    Some(found.object)
+}
 
 /// CoMarshalInterface(stream, iid, object, context, reserved, flags).
 pub fn co_marshal_interface(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -651,18 +677,50 @@ pub fn marshal_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             if value & 0x8000_0000 != 0 {
                 return Next::Done(value);
             }
+            // A proxy/stub class the program registered for the
+            // interface makes its stub, which may fail the marshalling.
             let iid = Guid::read(cpu, t.var(M_IID)).unwrap_or_default();
-            let pointer = cpu.bus.guest_read_32(s + S_POINTER);
-            cpu.bus.guest_write_32(s, SIGNATURE);
-            cpu.bus.guest_write_32(s + 4, 1);
-            cpu.bus.guest_write_bytes(s + R_IID, &iid.0);
-            cpu.bus.guest_write_32(s + R_POINTER, pointer);
-            cpu.bus.guest_write_32(s + R_FLAGS, t.var(M_FLAGS));
-            let Some(write) = super::method(cpu, stream, STREAM_WRITE) else {
-                return Next::Done(E_INVALIDARG);
+            let Some(factory) = ps_factory(cpu, &iid) else {
+                return write_record(cpu, t);
             };
-            Next::call(write, &[stream, s, RECORD, 0], 2)
+            let Some(qi) = super::method(cpu, factory, QUERY_INTERFACE) else {
+                return write_record(cpu, t);
+            };
+            IID_IPSFACTORYBUFFER.write(cpu, s + S_PS_IID);
+            Next::call(qi, &[factory, s + S_PS_IID, s + S_PS_FACTORY], 4)
         }
+        4 => {
+            let factory = cpu.bus.guest_read_32(s + S_PS_FACTORY);
+            if value & 0x8000_0000 != 0 {
+                return write_record(cpu, t);
+            }
+            let Some(create) = super::method(cpu, factory, CREATE_STUB) else {
+                return write_record(cpu, t);
+            };
+            cpu.bus.guest_write_32(s + S_STUB, 0);
+            let pointer = cpu.bus.guest_read_32(s + S_POINTER);
+            Next::call(create, &[factory, t.var(M_IID), pointer, s + S_STUB], 5)
+        }
+        5 => {
+            t.set(M_RESULT, value);
+            let factory = cpu.bus.guest_read_32(s + S_PS_FACTORY);
+            match super::method(cpu, factory, RELEASE) {
+                Some(release) => Next::call(release, &[factory], 6),
+                None => Next::call(0, &[], 6),
+            }
+        }
+        6 => {
+            let failed = t.var(M_RESULT) & 0x8000_0000 != 0;
+            let object = cpu.bus.guest_read_32(s + if failed { S_POINTER } else { S_STUB });
+            match super::method(cpu, object, RELEASE) {
+                Some(release) if object != 0 => Next::call(release, &[object], 7),
+                _ => Next::call(0, &[], 7),
+            }
+        }
+        7 => match t.var(M_RESULT) {
+            result if result & 0x8000_0000 != 0 => Next::Done(result),
+            _ => write_record(cpu, t),
+        },
         2 => {
             if value & 0x8000_0000 != 0 || t.var(M_REWIND) == 0 {
                 return Next::Done(value);
@@ -675,6 +733,23 @@ pub fn marshal_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         }
         _ => Next::Done(S_OK),
     }
+}
+
+/// Write the marshalling record to the stream, the task's step 2 next.
+fn write_record(cpu: &mut Cpu, t: &mut Task) -> Next {
+    let s = t.scratch;
+    let stream = t.var(M_STREAM);
+    let iid = Guid::read(cpu, t.var(M_IID)).unwrap_or_default();
+    let pointer = cpu.bus.guest_read_32(s + S_POINTER);
+    cpu.bus.guest_write_32(s, SIGNATURE);
+    cpu.bus.guest_write_32(s + 4, 1);
+    cpu.bus.guest_write_bytes(s + R_IID, &iid.0);
+    cpu.bus.guest_write_32(s + R_POINTER, pointer);
+    cpu.bus.guest_write_32(s + R_FLAGS, t.var(M_FLAGS));
+    let Some(write) = super::method(cpu, stream, STREAM_WRITE) else {
+        return Next::Done(E_INVALIDARG);
+    };
+    Next::call(write, &[stream, s, RECORD, 0], 2)
 }
 
 const U_STREAM: usize = 1;
