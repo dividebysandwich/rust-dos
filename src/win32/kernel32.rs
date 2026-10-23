@@ -19,6 +19,7 @@ mod sync;
 mod text;
 mod threads;
 mod time;
+mod win98;
 pub(crate) mod virtual_memory;
 
 pub(super) use locale::enum_returned;
@@ -526,6 +527,12 @@ static APIS: &[Api] = &[
     stdcall("GlobalAddAtomW", 489, 1, not_implemented),
     stdcall("CreateProcessW", 490, 10, not_implemented),
     stdcall("WinExec", 510, 2, process::win_exec),
+    stdcall("GetDiskFreeSpaceExA", 511, 4, win98::get_disk_free_space_ex),
+    stdcall("IsDebuggerPresent", 512, 0, win98::is_debugger_present),
+    stdcall("InterlockedCompareExchange", 513, 3, win98::interlocked_compare_exchange),
+    stdcall("InterlockedExchangeAdd", 514, 2, win98::interlocked_exchange_add),
+    stdcall("GetFileAttributesExA", 515, 3, win98::get_file_attributes_ex),
+    stdcall("GetLongPathNameA", 516, 3, win98::get_long_path_name),
 ];
 
 /// The places in `APIS` of the system's own stubs.

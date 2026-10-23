@@ -777,8 +777,8 @@ const OSVERSIONINFOEXA: u32 = 156;
 /// pack; all a 9x platform (VER_PLATFORM_WIN32_WINDOWS), the build
 /// number's high word the version. Windows 95 fills the whole structure;
 /// Windows 98 writes the service pack's string up to its 0 and leaves
-/// the bytes after it, and those of OSVERSIONINFOEXA's fields, as they
-/// were.
+/// the bytes after it as they were, and clears OSVERSIONINFOEXA's
+/// fields.
 pub(super) fn get_version_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let info = args[0];
     let size = cpu.bus.guest_read_32(info);
@@ -801,5 +801,9 @@ pub(super) fn get_version_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         data.len()
     };
     cpu.bus.guest_write_bytes(info, &data[..len]);
+    if size == OSVERSIONINFOEXA {
+        // No service pack, suite or product type.
+        cpu.bus.guest_write_bytes(info + OSVERSIONINFOA, &[0; 8]);
+    }
     Some(TRUE)
 }
