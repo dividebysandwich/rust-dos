@@ -55,6 +55,7 @@ const IMPORTS: &[(&str, &[&str])] = &[
             "DPA_InsertPtr",
             "DPA_GetPtr",
             "DPA_Destroy",
+            "CreateStatusWindowA",
         ],
     ),
     (
@@ -447,4 +448,79 @@ fn a_dpa_keeps_its_pointers_in_order() {
     let r = results(&cpu, at, calls.len());
     assert_eq!(&r[1..7], &[0, 0, 2, 0x222, 0x333, 0]);
     assert_eq!(r[7], 1);
+}
+
+#[test]
+fn a_status_bar_keeps_the_text_of_its_parts() {
+    use Arg::*;
+    const SB_SETTEXTA: u32 = 0x0401;
+    const SB_GETTEXTA: u32 = 0x0402;
+    const SB_SETPARTS: u32 = 0x0404;
+    const SB_GETPARTS: u32 = 0x0406;
+    const SB_GETTEXTLENGTHA: u32 = 0x0403;
+    let mut d = data();
+    strings(&mut d);
+    put(&mut d, FREE, b"Ready\0");
+    put(&mut d, FREE + 0x10, b"Two\0");
+    for (i, x) in [50u32, 100, u32::MAX].iter().enumerate() {
+        put32(&mut d, FREE + 0x20 + 4 * i as u32, *x);
+    }
+    let calls = [
+        call("InitCommonControls", &[]),
+        parent(),
+        call(
+            "CreateStatusWindowA",
+            &[I(WS_CHILD | WS_VISIBLE), At(FREE), Res(1), I(7)],
+        ),
+        send(2, SB_GETTEXTLENGTHA, I(0), I(0)),
+        send(2, SB_SETPARTS, I(3), At(FREE + 0x20)),
+        send(2, SB_GETPARTS, I(3), At(FREE + 0x40)),
+        send(2, SB_SETTEXTA, I(1), At(FREE + 0x10)),
+        send(2, SB_GETTEXTA, I(1), At(FREE + 0x60)),
+        send(2, SB_GETTEXTLENGTHA, I(2), I(0)),
+    ];
+    let (cpu, at) = run("status", &d, &calls);
+    let r = results(&cpu, at, calls.len());
+    assert_ne!(r[2], 0, "the status bar is made");
+    assert_eq!(r[3] & 0xFFFF, 5, "part 0 has the window's text");
+    assert_eq!((r[4], r[5]), (1, 3));
+    let parts: Vec<u32> = (0..3).map(|i| peek(&cpu, at + FREE + 0x40 + 4 * i)).collect();
+    assert_eq!(parts, [50, 100, u32::MAX]);
+    assert_eq!(r[7] & 0xFFFF, 3);
+    assert_eq!(peek_str(&cpu, at + FREE + 0x60), "Two");
+    assert_eq!(r[8], 0, "part 2 has no text");
+}
+
+#[test]
+fn a_trackbar_keeps_its_position_in_its_range() {
+    use Arg::*;
+    const TBS_AUTOTICKS: u32 = 0x0001;
+    const TBM_GETPOS: u32 = 0x0400;
+    const TBM_SETPOS: u32 = 0x0405;
+    const TBM_SETRANGE: u32 = 0x0406;
+    const TBM_GETNUMTICS: u32 = 0x0410;
+    const TBM_SETTICFREQ: u32 = 0x0414;
+    const TBM_GETPAGESIZE: u32 = 0x0416;
+    const S_TRACKBAR: u32 = 0x300;
+    let mut d = data();
+    strings(&mut d);
+    put(&mut d, S_TRACKBAR, b"msctls_trackbar32\0");
+    let calls = [
+        call("InitCommonControls", &[]),
+        parent(),
+        child(S_TRACKBAR, TBS_AUTOTICKS, 200, 30, 1, 1),
+        send(2, TBM_SETRANGE, I(1), I(50 << 16)),
+        send(2, TBM_SETPOS, I(1), I(80)),
+        send(2, TBM_GETPOS, I(0), I(0)),
+        send(2, TBM_GETPAGESIZE, I(0), I(0)),
+        send(2, TBM_SETTICFREQ, I(10), I(0)),
+        send(2, TBM_GETNUMTICS, I(0), I(0)),
+    ];
+    let (cpu, at) = run("trackbar", &d, &calls);
+    let r = results(&cpu, at, calls.len());
+    assert_ne!(r[2], 0, "the trackbar is made");
+    assert_eq!(r[5], 50, "a position past the range stops at its end");
+    assert_eq!(r[6], 10, "a page is a fifth of the range");
+    // Tics at 10, 20, 30 and 40, and the two ends.
+    assert_eq!(r[8], 6);
 }
