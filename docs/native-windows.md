@@ -475,7 +475,8 @@ property sheets with wizards, ported from Wine 1.2.3. The animation,
 hot key and ComboBoxEx classes draw their background and nothing else,
 and the date and time picker, month calendar, rebar and IP address
 controls aren't there. Functions of later versions (SetWindowSubclass,
-the DPA stream functions) and the controls' W messages are left out.
+the DPA stream functions) are left out, and the controls take their A
+messages, the list view and toolbar some W ones too.
 
 COMDLG32 has GetOpenFileNameA and GetSaveFileNameA, which list the
 folders and files of the emulated drives: in the Explorer style, or in
