@@ -338,6 +338,12 @@ fn build(
         args.extend([list.as_str(), runtime]);
     }
     args.extend(resources);
+    if dll == "comctl32" {
+        // Wine builds comctl32's tests into one program, which imports
+        // COMCTL32.DLL; mru.c and subclass.c, which only find its
+        // functions by ordinal, need it loaded as well.
+        args.push("-Wl,-u,_InitCommonControls@0");
+    }
     args.extend(LIBS);
     args.extend(["-lgcc", "-o", program]);
     compile(cc, &args)
