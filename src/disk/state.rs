@@ -43,6 +43,8 @@ crate::state_fields!(SavedFile { sft, refs, fcb, drive, owner, key, path, mode, 
 /// Set in `SavedFile::refs` for a file a create call left to empty on its
 /// first use, which hasn't come: older states load with it clear.
 const EMPTY_ON_USE: u16 = 0x8000;
+/// The same for a device in raw mode (`OpenFile::raw`).
+const RAW: u16 = 0x4000;
 
 impl DiskController {
     pub(crate) fn save_state(&self, w: &mut Writer) {
@@ -75,15 +77,17 @@ impl DiskController {
         entries.sort_unstable();
         entries.len().save(w);
         for sft in entries {
-            let OpenFile { data, drive, owner, key, path, mode, refs, fcb, empty_on_use } = &open_files[&sft];
+            let OpenFile { data, drive, owner, key, path, mode, refs, fcb, empty_on_use, raw } =
+                &open_files[&sft];
             let (device, position) = match data {
                 OpenData::Host(file, _) => (None, (&*file).stream_position().unwrap_or(0)),
                 OpenData::Memory(_, pos) | OpenData::Image(_, _, pos) | OpenData::Fat { pos, .. } => (None, pos.get()),
                 OpenData::Device(device) => (Some(*device), 0),
             };
+            let raw = if *raw { RAW } else { 0 };
             let saved = SavedFile {
                 sft,
-                refs: *refs | if *empty_on_use { EMPTY_ON_USE } else { 0 },
+                refs: *refs | if *empty_on_use { EMPTY_ON_USE } else { 0 } | raw,
                 fcb: *fcb,
                 drive: *drive,
                 owner: *owner,
@@ -158,7 +162,8 @@ impl DiskController {
             open.key = file.key;
             open.path = file.path;
             open.mode = file.mode;
-            open.refs = file.refs & !EMPTY_ON_USE;
+            open.refs = file.refs & !(EMPTY_ON_USE | RAW);
+            open.raw = file.refs & RAW != 0;
             if file.refs & EMPTY_ON_USE != 0 {
                 empty_on_use.push(file.sft);
             }

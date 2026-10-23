@@ -307,3 +307,115 @@ fn test_int21_ah4b_exec_inheritance() {
 
     fs::remove_dir_all(&root_path).unwrap();
 }
+
+/// DOS's console output expands a tab to the spaces up to the next column
+/// that is a multiple of eight (AH=02h, AH=09h, and AH=40h to the screen),
+/// where the BIOS would show the tab's character; AH=06h's output is raw.
+#[test]
+fn console_output_expands_tabs_to_the_next_multiple_of_eight() {
+    let root_path = PathBuf::from("target/test_int21_tabs");
+    let _ = fs::remove_dir_all(&root_path);
+    fs::create_dir_all(&root_path).unwrap();
+    let mut cpu = Cpu::new(root_path);
+    cpu.load_shell();
+    cpu.bus.cursor_x = 0;
+    cpu.bus.cursor_y = 0;
+    cpu.bus.write_8(0x0450, 0);
+    cpu.bus.write_8(0x0451, 0);
+    let cell = |cpu: &Cpu, col: usize| cpu.bus.read_8(0xB8000 + 2 * col);
+
+    // AH=09h: "A", a tab to column 8, "B".
+    cpu.set_ds(0x2000);
+    for (i, &b) in b"A\tB$".iter().enumerate() {
+        cpu.bus.write_8(0x20000 + i, b);
+    }
+    cpu.set_reg16(Register::DX, 0);
+    cpu.set_reg8(Register::AH, 0x09);
+    rust_dos::interrupts::int21::handle(&mut cpu);
+    assert_eq!(cell(&cpu, 0), b'A');
+    for col in 1..8 {
+        assert_eq!(cell(&cpu, col), b' ', "column {}", col);
+    }
+    assert_eq!(cell(&cpu, 8), b'B');
+    assert_eq!(cpu.bus.cursor_x, 9);
+
+    // AH=02h: a tab from column 9 goes to 16.
+    cpu.set_reg8(Register::AH, 0x02);
+    cpu.set_reg8(Register::DL, 0x09);
+    rust_dos::interrupts::int21::handle(&mut cpu);
+    assert_eq!(cpu.bus.cursor_x, 16);
+
+    // AH=06h: the tab's own character, one column.
+    cpu.set_reg8(Register::AH, 0x06);
+    cpu.set_reg8(Register::DL, 0x09);
+    rust_dos::interrupts::int21::handle(&mut cpu);
+    assert_eq!(cell(&cpu, 16), 0x09);
+    assert_eq!(cpu.bus.cursor_x, 17);
+
+    // AH=40h to handle 1: a tab from column 17 goes to 24, then "Z".
+    for (i, &b) in b"\tZ".iter().enumerate() {
+        cpu.bus.write_8(0x20000 + i, b);
+    }
+    cpu.set_reg8(Register::AH, 0x40);
+    cpu.set_reg16(Register::BX, 1);
+    cpu.set_reg16(Register::CX, 2);
+    cpu.set_reg16(Register::DX, 0);
+    rust_dos::interrupts::int21::handle(&mut cpu);
+    assert_eq!(cpu.get_reg16(Register::AX), 2);
+    assert_eq!(cell(&cpu, 24), b'Z');
+    assert_eq!(cpu.bus.cursor_x, 25);
+}
+
+/// A program that puts CON in raw (binary) mode with IOCTL 4401h gets its
+/// tabs written as they are by AH=40h, and 4400h reports the mode.
+#[test]
+fn raw_console_output_keeps_tabs() {
+    let root_path = PathBuf::from("target/test_int21_raw_tabs");
+    let _ = fs::remove_dir_all(&root_path);
+    fs::create_dir_all(&root_path).unwrap();
+    let mut cpu = Cpu::new(root_path);
+    cpu.load_shell();
+    cpu.bus.cursor_x = 0;
+    cpu.bus.cursor_y = 0;
+    let cell = |cpu: &Cpu, col: usize| cpu.bus.read_8(0xB8000 + 2 * col);
+    let device_info = |cpu: &mut Cpu| {
+        cpu.set_reg16(Register::AX, 0x4400);
+        cpu.set_reg16(Register::BX, 1);
+        rust_dos::interrupts::int21::handle(cpu);
+        cpu.get_reg16(Register::DX)
+    };
+    let write_a_tab_b = |cpu: &mut Cpu| {
+        cpu.set_ds(0x2000);
+        for (i, &b) in b"A\tB".iter().enumerate() {
+            cpu.bus.write_8(0x20000 + i, b);
+        }
+        cpu.set_reg8(Register::AH, 0x40);
+        cpu.set_reg16(Register::BX, 1);
+        cpu.set_reg16(Register::CX, 3);
+        cpu.set_reg16(Register::DX, 0);
+        rust_dos::interrupts::int21::handle(cpu);
+    };
+    assert_eq!(device_info(&mut cpu), 0x80D3);
+
+    // Raw mode, bit 5 of DL: the tab's own character.
+    cpu.set_reg16(Register::AX, 0x4401);
+    cpu.set_reg16(Register::BX, 1);
+    cpu.set_reg16(Register::DX, 0x00F3);
+    rust_dos::interrupts::int21::handle(&mut cpu);
+    assert_eq!(device_info(&mut cpu), 0x80F3);
+    write_a_tab_b(&mut cpu);
+    assert_eq!(cell(&cpu, 1), 0x09);
+    assert_eq!(cell(&cpu, 2), b'B');
+    assert_eq!(cpu.bus.cursor_x, 3);
+
+    // Back to cooked: from column 3, the tab goes to 8.
+    cpu.set_reg16(Register::AX, 0x4401);
+    cpu.set_reg16(Register::BX, 1);
+    cpu.set_reg16(Register::DX, 0x00D3);
+    rust_dos::interrupts::int21::handle(&mut cpu);
+    assert_eq!(device_info(&mut cpu), 0x80D3);
+    write_a_tab_b(&mut cpu);
+    assert_eq!(cell(&cpu, 4), b' ');
+    assert_eq!(cell(&cpu, 8), b'B');
+    assert_eq!(cpu.bus.cursor_x, 9);
+}
