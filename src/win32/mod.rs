@@ -45,7 +45,7 @@ mod system;
 mod task;
 mod thread;
 pub mod user32;
-mod version;
+mod verdll;
 mod winmm;
 mod wsock32;
 
