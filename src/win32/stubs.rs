@@ -97,7 +97,7 @@ pub static DLLS: &[&Dll] = &[
     &super::dplayx::DLL,
     &super::shell32::DLL,
     &super::comctl32::DLL,
-    &super::comctl32::COMDLG32,
+    &super::comdlg32::DLL,
     &super::wsock32::DLL,
     &super::ntdll::DLL,
     &super::dmusic::DMUSIC,

@@ -25,7 +25,7 @@ pub use win98::is_directory;
 pub(crate) mod virtual_memory;
 
 pub(super) use locale::enum_returned;
-pub(super) use path::{change_directory, current_directory, full_path};
+pub(super) use path::{change_directory, current_directory, find_entries, full_path, matches};
 pub(super) use process::{STARTUPINFO_SIZE, spawn};
 pub(super) use file::{
     CREATE_ALWAYS, CREATE_NEW, FILE_SHARE_READ, FILE_SHARE_WRITE, GENERIC_READ, GENERIC_WRITE,

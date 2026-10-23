@@ -17,6 +17,7 @@ mod advapi32;
 mod call;
 mod com;
 mod comctl32;
+mod comdlg32;
 mod convert;
 mod ddraw;
 mod dinput;
@@ -327,6 +328,10 @@ pub struct Win32 {
     guids: u32,
     /// DirectMusic's objects (dmusic/).
     dmusic: dmusic::State,
+    /// The common controls' state, the system's.
+    comctl32: comctl32::State,
+    /// The common dialogs' state.
+    comdlg32: comdlg32::State,
 }
 
 impl Win32 {
@@ -1067,4 +1072,6 @@ crate::state_fields!(Win32 {
     guids,
     os,
     dmusic,
+    comctl32,
+    comdlg32,
 } skip { enabled, guest_dlls, guest_replace, version });

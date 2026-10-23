@@ -14,6 +14,80 @@ advapi32/registry: skipped registry.c:1705
 advapi32/registry: skipped registry.c:1859
 advapi32/registry: skipped registry.c:1579
 advapi32/registry: skipped registry.c:1354
+comctl32/dpa: dpa: 188 tests executed (0 marked as todo, 0 failures), 3 skipped.
+comctl32/dpa: skipped dpa.c:365
+comctl32/dpa: skipped dpa.c:558
+comctl32/dpa: skipped dpa.c:677
+comctl32/header: header: 857 tests executed (0 marked as todo, 1 failure), 3 skipped.
+comctl32/header: failed header.c:1467
+comctl32/header: skipped header.c:1011
+comctl32/header: skipped header.c:1017
+comctl32/header: skipped v6util.h:96
+comctl32/imagelist: imagelist: 1592 tests executed (0 marked as todo, 0 failures), 1 skipped.
+comctl32/imagelist: skipped v6util.h:96
+comctl32/listview: listview: 1708 tests executed (0 marked as todo, 6 failures), 5 skipped.
+comctl32/listview: failed listview.c:1485
+comctl32/listview: failed listview.c:1856
+comctl32/listview: failed listview.c:3284
+comctl32/listview: failed listview.c:2126
+comctl32/listview: failed listview.c:2137
+comctl32/listview: skipped listview.c:2482
+comctl32/listview: skipped listview.c:2520
+comctl32/listview: skipped listview.c:3769
+comctl32/listview: failed listview.c:4120
+comctl32/listview: skipped listview.c:4330
+comctl32/listview: skipped v6util.h:96
+comctl32/misc: misc: 22 tests executed (0 marked as todo, 0 failures), 0 skipped.
+comctl32/mru: mru: 75 tests executed (0 marked as todo, 0 failures), 1 skipped.
+comctl32/mru: skipped mru.c:467
+comctl32/progress: progress: 19 tests executed (0 marked as todo, 0 failures), 0 skipped.
+comctl32/propsheet: propsheet: 37 tests executed (0 marked as todo, 0 failures), 0 skipped.
+comctl32/status: status: 499 tests executed (0 marked as todo, 9 failures), 0 skipped.
+comctl32/status: failed status.c:110
+comctl32/status: failed status.c:191
+comctl32/status: failed status.c:198
+comctl32/status: failed status.c:204
+comctl32/status: failed status.c:209
+comctl32/status: failed status.c:212
+comctl32/status: failed status.c:216
+comctl32/status: failed status.c:219
+comctl32/status: failed status.c:224
+comctl32/subclass: subclass: 0 tests executed (0 marked as todo, 0 failures), 1 skipped.
+comctl32/subclass: skipped subclass.c:301
+comctl32/tab: tab: 1110 tests executed (0 marked as todo, 2 failures), 0 skipped.
+comctl32/tab: failed tab.c:918
+comctl32/tab: failed tab.c:919
+comctl32/toolbar: toolbar: 1287 tests executed (0 marked as todo, 48 failures), 0 skipped.
+comctl32/toolbar: failed toolbar.c:888 (x9)
+comctl32/toolbar: failed toolbar.c:895 (x4)
+comctl32/toolbar: failed toolbar.c:899 (x5)
+comctl32/toolbar: failed toolbar.c:917 (x5)
+comctl32/toolbar: failed toolbar.c:985
+comctl32/toolbar: failed toolbar.c:987 (x3)
+comctl32/toolbar: failed toolbar.c:991
+comctl32/toolbar: failed toolbar.c:1030
+comctl32/toolbar: failed toolbar.c:1032
+comctl32/toolbar: failed toolbar.c:1034 (x6)
+comctl32/toolbar: failed toolbar.c:1037 (x6)
+comctl32/toolbar: failed toolbar.c:1044
+comctl32/toolbar: failed toolbar.c:1046
+comctl32/toolbar: failed toolbar.c:1066 (x3)
+comctl32/toolbar: failed toolbar.c:1074
+comctl32/tooltips: tooltips: 64 tests executed (0 marked as todo, 0 failures), 2 skipped.
+comctl32/tooltips: skipped tooltips.c:392
+comctl32/tooltips: skipped tooltips.c:549
+comctl32/trackbar: trackbar: 1511 tests executed (0 marked as todo, 2 failures), 0 skipped.
+comctl32/trackbar: failed trackbar.c:1000
+comctl32/trackbar: failed trackbar.c:518
+comctl32/treeview: treeview: 754 tests executed (0 marked as todo, 1 failure), 1 skipped.
+comctl32/treeview: failed treeview.c:527
+comctl32/treeview: skipped treeview.c:1104
+comctl32/updown: updown: 501 tests executed (0 marked as todo, 0 failures), 0 skipped.
+comdlg32/filedlg: filedlg: 140 tests executed (0 marked as todo, 0 failures), 9 skipped.
+comdlg32/filedlg: skipped filedlg.c:141
+comdlg32/filedlg: skipped filedlg.c:153
+comdlg32/filedlg: skipped filedlg.c:184
+comdlg32/filedlg: skipped filedlg.c:353 (x6)
 ddraw/d3d: d3d: 514 tests executed (0 marked as todo, 1 failure), 3 skipped.
 ddraw/d3d: skipped d3d.c:377
 ddraw/d3d: failed d3d.c:891

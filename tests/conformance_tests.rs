@@ -236,6 +236,8 @@ const LIBS: &[&str] = &[
     "-ldinput",
     "-lwinmm",
     "-lole32",
+    "-lcomctl32",
+    "-lcomdlg32",
     "-luser32",
     "-lgdi32",
     "-lkernel32",
@@ -340,6 +342,12 @@ fn build(
         args.extend([list.as_str(), runtime]);
     }
     args.extend(resources);
+    if dll == "comctl32" {
+        // Wine builds comctl32's tests into one program, which imports
+        // COMCTL32.DLL; mru.c and subclass.c, which only find its
+        // functions by ordinal, need it loaded as well.
+        args.push("-Wl,-u,_InitCommonControls@0");
+    }
     args.extend(LIBS);
     args.extend(["-lgcc", "-o", program]);
     compile(cc, &args)
@@ -390,10 +398,13 @@ fn wine_conformance_tests_give_the_expected_results() {
         // (file.c makes WIN.INI) change what directory listings count.
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        // The resources the DLL's tests share (user32's resource.rc),
-        // which each of its programs is linked with.
-        let rc = format!("{ROOT}/wine/{dll}/resource.rc");
-        let resources = Path::new(&rc).exists().then(|| {
+        // The resources the DLL's tests share (user32's resource.rc,
+        // comctl32's rsrc.rc), which each of its programs is linked with.
+        let rc = ["resource.rc", "rsrc.rc"]
+            .iter()
+            .map(|name| format!("{ROOT}/wine/{dll}/{name}"))
+            .find(|rc| Path::new(rc).exists());
+        let resources = rc.map(|rc| {
             let object = format!("{OUT}/{dll}/resource.o");
             let include = format!("-I{ROOT}/wine/include");
             let args = [include.as_str(), rc.as_str(), "-O", "coff", "-o", object.as_str()];
