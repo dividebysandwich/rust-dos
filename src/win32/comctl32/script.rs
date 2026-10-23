@@ -232,7 +232,7 @@ pub fn run(cpu: &mut Cpu, module: Module, script: Script) -> Option<u32> {
         }
         return Some(result);
     }
-    let mut vars = vec![module as u32, script.hwnd, V_OPS as u32, 0, script.result];
+    let mut vars = vec![module, script.hwnd, V_OPS as u32, 0, script.result];
     vars.extend(encode(&script.ops));
     task::start(cpu, task::COMCTL32, vars, script.scratch.max(4))
 }

@@ -32,8 +32,6 @@ pub const ILC_MASK: u32 = 0x0001;
 pub const ILC_COLOR: u32 = 0x0000;
 pub const ILC_COLORDDB: u32 = 0x00FE;
 pub const ILC_COLOR4: u32 = 0x0004;
-pub const ILC_COLOR8: u32 = 0x0008;
-pub const ILC_COLOR16: u32 = 0x0010;
 pub const ILC_COLOR32: u32 = 0x0020;
 
 pub const ILD_NORMAL: u32 = 0x0000;
@@ -45,7 +43,6 @@ pub const ILD_IMAGE: u32 = 0x0020;
 pub const ILD_ROP: u32 = 0x0040;
 pub const ILD_OVERLAYMASK: u32 = 0x0F00;
 pub const ILD_SELECTED: u32 = ILD_BLEND50;
-pub const ILD_FOCUS: u32 = ILD_BLEND25;
 
 const ILCF_SWAP: u32 = 1;
 const CLR_NONE: u32 = 0xFFFF_FFFF;

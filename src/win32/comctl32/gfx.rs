@@ -10,7 +10,6 @@ pub const CLR_DEFAULT: u32 = 0xFF00_0000;
 
 pub const COLOR_SCROLLBAR: u32 = 0;
 pub const COLOR_WINDOW: u32 = 5;
-pub const COLOR_WINDOWFRAME: u32 = 6;
 pub const COLOR_WINDOWTEXT: u32 = 8;
 pub const COLOR_HIGHLIGHT: u32 = 13;
 pub const COLOR_HIGHLIGHTTEXT: u32 = 14;
@@ -20,7 +19,6 @@ pub const COLOR_GRAYTEXT: u32 = 17;
 pub const COLOR_BTNTEXT: u32 = 18;
 pub const COLOR_BTNHIGHLIGHT: u32 = 20;
 pub const COLOR_3DDKSHADOW: u32 = 21;
-pub const COLOR_3DLIGHT: u32 = 22;
 pub const COLOR_INFOTEXT: u32 = 23;
 pub const COLOR_INFOBK: u32 = 24;
 
