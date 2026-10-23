@@ -8,6 +8,8 @@
 //! - InstallShield 3 archives (`Archive`): one file, `_SETUP.1` on a CD or
 //!   a `.Z` file inside a self-extractor, whose members are compressed
 //!   with PKWARE's Data Compression Library (`explode`).
+//! - The archive a setup's 32-bit engine comes in (`EngineArchive`),
+//!   `_INST32I.EX_` beside an InstallShield 3 to 5 `SETUP.EXE`.
 //!
 //! The readers follow the design of the refurbished-dinosaurs toolkit's
 //! (`RefurbishedDinosaurs.LegacyFormats`, MIT), whose decision records
@@ -31,6 +33,7 @@ use std::path::{Path, PathBuf};
 
 mod archive;
 mod cabinet;
+mod engine;
 mod explode;
 mod groups;
 mod member;
@@ -41,6 +44,7 @@ pub mod write;
 
 pub use archive::Archive;
 pub use cabinet::Cabinet;
+pub use engine::{EngineArchive, EngineFile, is_engine_archive};
 pub use explode::explode;
 pub use groups::{FileGroup, Membership, MembershipKind};
 

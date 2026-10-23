@@ -969,3 +969,53 @@ fn reads_a_set_from_a_host_folder() {
     assert_eq!(archive.members().len(), 4);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn lists_and_expands_an_engine_archive() {
+    let engine = sample(5000, 7);
+    let helper = sample(300, 9);
+    let bytes = write::engine_archive(&[
+        ("INSTALL.EXE", "_INS0432._MP", &engine),
+        ("zdata.dll", "zdata.dll", &helper),
+        ("BOOT16.EXE", "_INJ0432._MP", b"MZ"),
+    ]);
+    assert!(is_engine_archive(&bytes));
+    let archive = EngineArchive::parse(&bytes).unwrap();
+    let names: Vec<(&str, &str)> = archive
+        .files()
+        .iter()
+        .map(|f| (f.name.as_str(), f.extract_as.as_str()))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            ("INSTALL.EXE", "_INS0432._MP"),
+            ("zdata.dll", "zdata.dll"),
+            ("BOOT16.EXE", "_INJ0432._MP")
+        ]
+    );
+    let files = archive.files();
+    assert_eq!(archive.read(&bytes, &files[0]).unwrap(), engine);
+    assert_eq!(archive.read(&bytes, &files[1]).unwrap(), helper);
+    assert_eq!(files[2].size(), 2);
+}
+
+#[test]
+fn refuses_damaged_engine_archives() {
+    let bytes = write::engine_archive(&[("INSTALL.EXE", "_INS0432._MP", b"engine")]);
+    // Cut short anywhere: it doesn't open, or its file doesn't read.
+    for len in 0..bytes.len() {
+        let cut = &bytes[..len];
+        if let Ok(archive) = EngineArchive::parse(cut) {
+            assert!(archive.read(cut, &archive.files()[0]).is_err());
+        }
+    }
+    // A name with a folder in it.
+    let bad = write::engine_archive(&[("INSTALL.EXE", r"..\_INS0432._MP", b"engine")]);
+    assert!(EngineArchive::parse(&bad).is_err());
+    // Too many files.
+    let mut many = bytes.clone();
+    many[0x4E] = 200;
+    assert!(EngineArchive::parse(&many).is_err());
+    assert!(!is_engine_archive(b"MZ\x90\x00"));
+}

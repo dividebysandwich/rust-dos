@@ -28,6 +28,7 @@ pub mod gdi32;
 mod glide;
 mod heap;
 mod kernel32;
+mod launcher;
 mod loader;
 mod lz32;
 mod mapping;
@@ -51,6 +52,7 @@ pub mod user32;
 pub mod version;
 mod verdll;
 mod winmm;
+mod winspool;
 mod wsock32;
 
 pub use snapshot::snapshot;
@@ -276,6 +278,11 @@ pub struct Win32 {
     os: version::WindowsVersion,
     /// The program DOS loaded, which starts at `START`.
     pending: Option<String>,
+    /// The arguments it starts with when they aren't its PSP's: those
+    /// InstallShield's launcher gives its engine (`launcher`). Not saved
+    /// with the state: a state saved before the engine started has it
+    /// start without them.
+    pending_arguments: Option<String>,
     /// The processes, the one DOS started first. They run in that DOS
     /// process, which waits for the last of them to end.
     processes: Vec<Process>,
@@ -488,11 +495,25 @@ pub fn install_rom(bus: &mut crate::bus::Bus) {
 
 /// DOS loaded the program `filename` (its file is `bytes`) as an EXE: if
 /// it is a PE file and the built-in Windows is on, make it start as a
-/// Win32 program. Returns whether it does.
+/// Win32 program, or the engine it unpacks if it is InstallShield's setup
+/// launcher (`launcher`). Returns whether it does.
 pub fn prepare(cpu: &mut Cpu, filename: &str, bytes: &[u8]) -> bool {
-    if !cpu.bus.win32.enabled || !rust_dos_pe::is_pe(bytes) {
+    if !cpu.bus.win32.enabled {
         return false;
     }
+    // InstallShield's Windows 3.1 setup launcher starts its 32-bit
+    // engine, which runs in its place (`launcher`).
+    let (path, arguments) = if rust_dos_pe::is_pe(bytes) {
+        (cpu.program_path(filename), None)
+    } else if launcher::is_ne(bytes) && !cpu.pe() {
+        let launcher = cpu.program_path(filename);
+        match launcher::engine(cpu, &launcher, bytes) {
+            Some((engine, arguments)) => (engine, Some(arguments)),
+            None => return false,
+        }
+    } else {
+        return false;
+    };
     // Under a virtual-8086 monitor (EMM386, Windows' 386 enhanced mode)
     // the process can't take the processor (`accepts`): the stub runs.
     if cpu.pe() {
@@ -505,10 +526,10 @@ pub fn prepare(cpu: &mut Cpu, filename: &str, bytes: &[u8]) -> bool {
     install_rom(&mut cpu.bus);
     // Keys typed before it started aren't its to read (`take_pressed`).
     cpu.bus.kbd.take_pressed();
-    let path = cpu.program_path(filename);
     cpu.bus
         .log_string(&format!("[W32] {} is a Win32 program", path));
     cpu.bus.win32.pending = Some(path);
+    cpu.bus.win32.pending_arguments = arguments;
     cpu.set_cs(ROM_SEG);
     cpu.set_ip(START);
     true
@@ -560,7 +581,10 @@ fn start(cpu: &mut Cpu) {
     win32.cr4 = cr4;
     version::start(win32);
     let environment = dos_environment(cpu, cpu.current_psp);
-    let line = loader::dos_command_line(cpu, &path);
+    let line = match cpu.bus.win32.pending_arguments.take() {
+        Some(arguments) => format!("{} {}", path, arguments),
+        None => loader::dos_command_line(cpu, &path),
+    };
     match create_process(cpu, &path, &line, environment, Vec::new(), None, Vec::new(), false) {
         Ok(created) => {
             cpu.bus.win32.root = created.process.1;
@@ -985,6 +1009,7 @@ pub fn process_ended(cpu: &mut Cpu, psp: u16) {
         cpu.bus.set_a20(a20);
     }
     cpu.bus.win32.pending = None;
+    cpu.bus.win32.pending_arguments = None;
 }
 
 /// Put the .reg file `text` into the registry, as a game profile's
@@ -1091,4 +1116,4 @@ crate::state_fields!(Win32 {
     comdlg32,
     shell,
     dde,
-} skip { enabled, guest_dlls, guest_replace, version });
+} skip { enabled, guest_dlls, guest_replace, version, pending_arguments });

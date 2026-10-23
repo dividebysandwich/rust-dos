@@ -110,6 +110,7 @@ pub static DLLS: &[&Dll] = &[
     &super::verdll::DLL,
     &super::oleaut32::DLL,
     &super::advpack::DLL,
+    &super::winspool::DLL,
 ];
 
 /// Bytes each function's stub takes.
@@ -118,7 +119,8 @@ pub const STUB: u32 = 8;
 const CODE_RVA: u32 = 0x1000;
 
 /// The built-in DLL a program's import of `name` names: "KERNEL32.DLL",
-/// "kernel32.dll" and "KERNEL32" all do.
+/// "kernel32.dll" and "KERNEL32" all do, and a driver's full name,
+/// "WINSPOOL.DRV".
 pub fn find_dll(name: &str) -> Option<usize> {
     let name = name.trim();
     let split = name.len().saturating_sub(4);
@@ -126,8 +128,10 @@ pub fn find_dll(name: &str) -> Option<usize> {
         Some(ext) if ext.eq_ignore_ascii_case(".dll") => &name[..split],
         _ => name,
     };
-    DLLS.iter()
-        .position(|dll| dll.name[..dll.name.len() - 4].eq_ignore_ascii_case(base))
+    DLLS.iter().position(|dll| {
+        dll.name[..dll.name.len() - 4].eq_ignore_ascii_case(base)
+            || dll.name.eq_ignore_ascii_case(name)
+    })
 }
 
 pub fn id(dll: usize, api: usize) -> u16 {

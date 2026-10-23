@@ -801,3 +801,34 @@ fn longest_match(data: &[u8], position: usize, max_distance: usize) -> (usize, u
     }
     best
 }
+
+/// An engine archive (`_INST32I.EX_`) of `files`, each its name when
+/// built, the name it is extracted as and its data, imploded with binary
+/// literals and a 4 KB window as the real ones are.
+pub fn engine_archive(files: &[(&str, &str, &[u8])]) -> Vec<u8> {
+    let mut out = crate::engine::SIGNATURE.to_le_bytes().to_vec();
+    out.extend_from_slice(&0x100u32.to_le_bytes());
+    let mut copyright = b"Copyright (c) 1990-1995 Stirling Technologies, Inc. ".to_vec();
+    copyright.extend_from_slice(b"All Rights Reserved");
+    copyright.resize(70, 0);
+    out.extend_from_slice(&copyright);
+    out.extend_from_slice(&(files.len() as u32).to_le_bytes());
+    let packed: Vec<Vec<u8>> = files.iter().map(|f| implode(f.2, false, 6, true)).collect();
+    let table: usize = files.iter().map(|f| 24 + f.0.len() + f.1.len()).sum();
+    let mut offset = out.len() + table;
+    for (file, data) in files.iter().zip(&packed) {
+        out.extend_from_slice(&(offset as u32).to_le_bytes());
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(file.2.len() as u32).to_le_bytes());
+        out.extend_from_slice(&[0; 8]);
+        for name in [file.0, file.1] {
+            out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            out.extend_from_slice(name.as_bytes());
+        }
+        offset += data.len();
+    }
+    for data in packed {
+        out.extend_from_slice(&data);
+    }
+    out
+}
