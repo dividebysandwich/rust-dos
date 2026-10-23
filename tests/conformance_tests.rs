@@ -15,6 +15,7 @@
 //! results. CONFORMANCE_LOG=1 writes the emulator's log, with every call
 //! a program makes, to target/conformance/<dll>/<test>.trace.
 
+use rust_dos::config::WindowsVersion;
 use rust_dos::cpu::{Cpu, CpuModel, HostConsole};
 use rust_dos::exec::{NoHook, StopReason, run_batch};
 use rust_dos::joystick::{JoystickSettings, JoystickType};
@@ -129,6 +130,9 @@ fn run(
     let mut cpu = Cpu::new(dir.to_path_buf());
     cpu.model = model;
     cpu.bus.win32.enabled = true;
+    // Windows 98 SE, whose functions the tests use where Windows 95 has
+    // none (SendInput, GetAncestor, the monitors).
+    cpu.bus.win32.version = WindowsVersion::Win98Se;
     if joystick {
         cpu.bus.joystick.set_settings(JoystickSettings {
             kind: JoystickType::Mouse,

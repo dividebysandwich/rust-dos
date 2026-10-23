@@ -113,6 +113,11 @@ without `runtime.c`. They are built with two more options:
 `crt2.o` uses CMOVcc, so these programs run on a Pentium Pro; the
 others on a 486.
 
+All of them run as Windows 98 SE (`win32_version = 98se`), so the
+tests find the functions Windows 98 adds (SendInput, TrackMouseEvent,
+GetAncestor, the monitors, GetLongPathNameA); under Windows 95 they
+skip what needs them.
+
 ## Running them
 
 They need MinGW's 32-bit compiler, `i686-w64-mingw32-gcc`, or the one

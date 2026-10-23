@@ -15,6 +15,7 @@ use crate::cpu::Cpu;
 /// GetFileExInfoStandard, GetFileAttributesExA's only level.
 const GET_FILE_EX_INFO_STANDARD: u32 = 0;
 const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+const ERROR_BAD_NET_NAME: u32 = 67;
 
 /// IsDebuggerPresent: no debugger runs the programs.
 pub(super) fn is_debugger_present(_: &mut Cpu, _: &[u32]) -> Option<u32> {
@@ -154,6 +155,12 @@ pub(super) fn get_long_path_name(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let name = string_at(cpu, name)?;
     if name.is_empty() {
         set_error(cpu, ERROR_FILE_NOT_FOUND);
+        return Some(0);
+    }
+    // There is no network: Windows 98 takes no UNC name here, not even
+    // one of \\?\ or of the computer's own shares.
+    if name.starts_with("\\\\") || name.starts_with("//") {
+        set_error(cpu, ERROR_BAD_NET_NAME);
         return Some(0);
     }
     if has_wildcards(&name) {
