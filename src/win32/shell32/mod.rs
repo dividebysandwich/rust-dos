@@ -229,6 +229,12 @@ pub fn progman_request(cpu: &mut Cpu, item: &str) -> Option<String> {
     progman::request(cpu, item)
 }
 
+/// Make the directory `path` and those it is in, where they aren't
+/// (folders.rs).
+pub fn make_directories(cpu: &mut Cpu, path: &str) {
+    folders::make_directories(cpu, path);
+}
+
 /// The process `pid` ended.
 pub fn process_ended(cpu: &mut Cpu, pid: u32) {
     link::process_ended(cpu, pid);

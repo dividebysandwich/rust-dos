@@ -346,12 +346,18 @@ fn environment(cpu: &mut Cpu, name: &str) -> Option<String> {
 
 /// GetTempPathA(size, buffer): TMP's directory, or TEMP's, or the
 /// current one, as a full path ("C:" is that drive's current directory)
-/// with a backslash at its end.
+/// with a backslash at its end. A folder that isn't there is made: on
+/// Windows it always is (C:\WINDOWS\TEMP comes with Windows), but a
+/// game's C: drive starts without it, and Wise's installer stops with
+/// "Internal Error" when GetTempFileNameA can't make its file there.
 pub(super) fn get_temp_path(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let dir = environment(cpu, "TMP")
         .or_else(|| environment(cpu, "TEMP"))
         .unwrap_or_else(|| ".".to_string());
     let mut dir = full_path(cpu, &dir);
+    if super::files::attributes(cpu, &dir).is_err() {
+        crate::win32::shell32::make_directories(cpu, dir.trim_end_matches('\\'));
+    }
     if !dir.ends_with('\\') {
         dir.push('\\');
     }

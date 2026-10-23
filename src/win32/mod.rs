@@ -33,6 +33,7 @@ mod loader;
 mod lz32;
 mod mapping;
 mod memory;
+mod mpr;
 mod msvcrt;
 mod ntdll;
 mod object;
