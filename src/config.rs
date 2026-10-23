@@ -287,6 +287,12 @@ pub struct Config {
     /// A game profile's `[gamepad]` lines, as written (padmap.rs reads
     /// them).
     pub game_pad: Vec<(String, String)>,
+    /// Which Windows a game profile runs in (`[game]`'s `windows`, see
+    /// games.rs): `builtin` or `image`.
+    pub game_windows: Option<String>,
+    /// A game profile's `[install]` lines, keys lowercased (install.rs
+    /// reads them).
+    pub game_install: Vec<(String, String)>,
     /// Problems worth telling the user about; none of them are fatal.
     pub warnings: Vec<String>,
 }
@@ -319,6 +325,8 @@ enum Section {
     Game,
     /// A game profile's gamepad mapping (padmap.rs).
     Gamepad,
+    /// A game profile's installer archives (install.rs).
+    Install,
     Unknown,
 }
 
@@ -341,6 +349,7 @@ impl Section {
             "autoexec" => Section::Autoexec,
             "game" => Section::Game,
             "gamepad" => Section::Gamepad,
+            "install" => Section::Install,
             _ => Section::Unknown,
         }
     }
@@ -363,6 +372,7 @@ impl Section {
             Section::Autoexec => "autoexec",
             Section::Game => "game",
             Section::Gamepad => "gamepad",
+            Section::Install => "install",
             Section::None | Section::Unknown => "",
         }
     }

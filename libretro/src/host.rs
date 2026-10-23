@@ -115,6 +115,10 @@ impl Machine {
             }
         }
         self.cpu.bus.config_dir = fs::absolute(dir).ok();
+        let registry = prepared.registry.as_deref();
+        for warning in games::start(&mut self.cpu, &prepared.install, registry) {
+            self.warn(&format!("{}.conf: {}", id, warning));
+        }
         self.cpu.queue_batch_lines(&prepared.autoexec);
         self.cpu.bus.log_string(&format!("[CONFIG] Launching the game {} ({}.conf)", prepared.name, id));
         let message = format!("Starting {}", prepared.name);

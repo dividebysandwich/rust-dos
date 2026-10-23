@@ -350,6 +350,15 @@ Most installs can do without it:
      install folder, recorded from a real install as its registry keys
      are.
 
+   The readers are the `rust-dos-installshield` crate
+   (`crates/installshield`), pure Rust without unsafe code, with deflate
+   from flate2. `rust-dos unpack` lists or extracts a set or an archive
+   on the host, by file group if asked, and a game profile's `[install]`
+   section unpacks one from the game's drives onto them the first time
+   the game starts (`src/install.rs`), with the profile's `windows=builtin`
+   and `games/<id>.reg` doing the rest of what setup would. A GOG folder
+   whose launcher starts a Windows program imports as such a profile.
+
 With these, a Win16 layer isn't needed to start, and it comes last, in
 phase 6, for the Windows 3.1 games and the 16-bit setup programs that 1
 to 3 don't reach.
@@ -574,7 +583,23 @@ traces call, not whole DLLs.
   and a coded-literal stream pwexplode expanded to the same text. A
   game's own archive, compared entry by entry with what Unshield (or
   idecomp, for InstallShield 3) extracts, is the acceptance check. It
-  runs outside the repository, as the game suite does.
+  runs outside the repository, as the game suite does. In phase 5 it
+  covered, all files equal by SHA-1:
+  - Oni (Europe): three version 5 sets with `.hdr` files (data1, _sys1,
+    _user1), 122 files, among them paths that hold one file per language
+    and are read by group.
+  - Rent-A-Hero (Europe): version 5 with the header in `data1.cab` (129
+    files) and its `_sys1.cab` (4).
+  - WarGames (USA) v1.01: version 0 sets (`data1.cab`, 224 files, and
+    `_sys1.cab`, 4), which need the marker-delimited form; the chunked
+    one fails on them with a message that names the other.
+  - Wages of War: InstallShield 3 `_SETUP.1` (622 files) and five
+    `.Z` archives (61 files), paths equal too.
+  - Railroad Tycoon II (USA): InstallShield 3 `_SETUP.1` (63 files).
+
+  No version 6 set was found on the media at hand, so version 6 is
+  tested by the writer's sets alone. Magic: The Gathering - Battlegrounds
+  has a major version 7 header, which the reader refuses.
 - Installs: a real installer, run under the built-in Windows or
   unpacked in Rust, from media kept outside the repository as the game
   suite's are. The check is what the install leaves behind, the files

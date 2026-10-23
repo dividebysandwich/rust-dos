@@ -73,7 +73,8 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
             | Section::Vr
             | Section::Vfx1
             | Section::Game
-            | Section::Gamepad => {
+            | Section::Gamepad
+            | Section::Install => {
                 let Some((key, value)) = line.split_once('=') else {
                     warn(format!("expected key=value, got '{}'", line));
                     continue;
@@ -424,6 +425,11 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                     continue;
                 }
 
+                if section == Section::Install {
+                    config.game_install.push((key.to_ascii_lowercase(), value.to_string()));
+                    continue;
+                }
+
                 if section == Section::Game {
                     match key.to_ascii_lowercase().as_str() {
                         "name" if !value.is_empty() => config.game_name = Some(value.to_string()),
@@ -436,6 +442,12 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         "input" if !value.is_empty() => config.game_input = Some(value.to_string()),
                         "os" if !value.is_empty() => config.game_os = Some(value.to_string()),
                         "os" => {}
+                        "windows" => match value.to_ascii_lowercase().as_str() {
+                            "builtin" | "image" => {
+                                config.game_windows = Some(value.to_ascii_lowercase())
+                            }
+                            _ => warn(format!("invalid windows '{}' (builtin or image)", value)),
+                        },
                         "input" => {}
                         "variants" => match parse_bool(value) {
                             Some(on) => config.game_variants = on,

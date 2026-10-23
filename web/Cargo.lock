@@ -945,6 +945,7 @@ dependencies = [
  "rust-dos-dma",
  "rust-dos-gus",
  "rust-dos-hostdirs",
+ "rust-dos-installshield",
  "rust-dos-lpt-dac",
  "rust-dos-mpu401",
  "rust-dos-mt32",
@@ -996,6 +997,14 @@ name = "rust-dos-hostdirs"
 version = "1.7.5"
 dependencies = [
  "dirs",
+]
+
+[[package]]
+name = "rust-dos-installshield"
+version = "1.7.5"
+dependencies = [
+ "flate2",
+ "md-5",
 ]
 
 [[package]]

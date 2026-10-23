@@ -910,6 +910,12 @@ pub fn process_ended(cpu: &mut Cpu, psp: u16) {
     cpu.bus.win32.pending = None;
 }
 
+/// Put the .reg file `text` into the registry, as a game profile's
+/// `<id>.reg` is when the game starts (games.rs).
+pub fn import_registry(cpu: &mut Cpu, text: &str) -> Result<(), String> {
+    registry::import_file(cpu, text)
+}
+
 /// What the trap with id `id` runs, for the disassembler.
 pub fn trap_name(id: u16) -> String {
     match id {

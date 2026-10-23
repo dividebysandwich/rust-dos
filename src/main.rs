@@ -61,16 +61,31 @@ use crate::startup::leave_explorer_console;
 use crate::startup::open_log_file;
 
 fn main() -> Result<(), String> {
-    let args = Args::parse();
-    if let Some(Command::Run(run)) = args.command {
-        std::process::exit(rust_dos::cli::run(rust_dos::cli::RunOptions {
-            command: run.command,
-            dir: run.dir.unwrap_or_else(|| std::path::PathBuf::from(".")),
-            cycles: run.cycles,
-            memory_mb: run.mem as usize,
-            screen: run.screen,
-            win32: run.win32,
-        }));
+    let mut args = Args::parse();
+    match args.command.take() {
+        Some(Command::Run(run)) => {
+            std::process::exit(rust_dos::cli::run(rust_dos::cli::RunOptions {
+                command: run.command,
+                dir: run.dir.unwrap_or_else(|| std::path::PathBuf::from(".")),
+                cycles: run.cycles,
+                memory_mb: run.mem as usize,
+                screen: run.screen,
+                win32: run.win32,
+            }))
+        }
+        Some(Command::Unpack(unpack)) => {
+            std::process::exit(rust_dos::unpack::run(rust_dos::unpack::UnpackOptions {
+                archive: unpack.archive,
+                list: unpack.list,
+                to: unpack.to.unwrap_or_else(|| std::path::PathBuf::from(".")),
+                groups: unpack.group,
+                compression: match unpack.old_compression {
+                    true => rust_dos_installshield::Compression::Markers,
+                    false => rust_dos_installshield::Compression::Chunks,
+                },
+            }))
+        }
+        None => {}
     }
     if let Some(port) = args.relay {
         let bind = std::net::SocketAddr::from(([0, 0, 0, 0], port));

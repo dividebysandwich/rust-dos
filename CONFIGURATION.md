@@ -1169,7 +1169,11 @@ configuration that mounts no C: gets its own folder as C:, and paths it
 doesn't find from its folder are looked for in the folders up to four
 levels above, as collections such as eXoDOS run DOSBox from their root.
 [Packages](GAME-PACKAGES.md#packages-made-for-dosbox) made for DOSBox
-are imported the same way.
+are imported the same way. A GOG install whose launcher starts a Windows
+program instead of DOSBox becomes a profile for the [built-in
+Windows](#windows-games): its folder is C:, and the commands change to
+the task's working folder and run the program by its DOS names, with
+its arguments.
 
 The settings window's **Games** page lists the profiles. Enter launches a
 game at the DOS prompt: its settings apply on top of the configuration's,
@@ -1198,6 +1202,52 @@ or sync, and **R** on the Games page deletes it, taking the game back to
 how it was installed. A drive with its own `-overlay` keeps it. In the
 libretro core, `saves` is in the core's folder in the frontend's save
 directory.
+
+### Windows games
+
+`windows=` in `[game]` says which Windows the game runs in.
+`windows=builtin` runs its program in the built-in Windows, as
+[`win32=true`](#emulator) does, while the game plays. `windows=image`
+says the game runs in a Windows disk image that its `[autoexec]` boots
+(see [an operating system](GAME-PACKAGES.md#an-operating-system)), and
+the profile gets a warning when it boots nothing.
+
+A file `<profile>.reg` beside the profile (`games/oni.reg` for
+`games/oni.conf`) holds the registry keys the game reads, as REGEDIT4 or
+REGEDIT5 has them. Each time the game starts they are put into the
+built-in Windows' registry, `C:\REGISTRY.REG`, over what is there, so
+the game finds what its setup program would have written.
+
+An `[install]` section unpacks the game from its installer's archives
+onto its drives the first time it starts, without running setup: an
+InstallShield 5 or 6 cabinet set (by its `data1.hdr`, or a `data1.cab`
+that holds the header) or an InstallShield 3 archive (`_SETUP.1`, a
+`.Z` file). Each `from=` names one by its DOS path, and the lines after
+it say where its files go:
+
+```ini
+[install]
+from=D:\SETUP\DATA1.HDR
+to=C:\ONI
+group=Files (Program)
+group=Files (Data)|GameDataFolder
+```
+
+| Key | What it does |
+|---|---|
+| `from=` | The cabinet set's header or the InstallShield 3 archive, with its drive. Each starts a step of its own |
+| `to=` | The folder the files go in, with its drive |
+| `group=NAME` | Unpack the cabinet's file group `NAME` (any case) into `to=`; `NAME\|FOLDER` into that folder under it. Without `group=` lines every file goes to its own path |
+| `compression=` | `chunks` (the default) or `markers`, for version 0 sets whose compressed data ends each chunk with `00 00 FF FF` (Unshield's `-O`) |
+
+[`rust-dos unpack --list`](#unpacking-installshield-installers) shows
+a set's file groups and its files. A file a set holds more than one of
+at one path (one per language, say) is unpacked only by a group that
+places it. A step that wrote every file leaves `RUSTDOS.INS` in its
+folder and doesn't run again while that file is there; one that didn't
+says why on the screen and runs again at the next start. With
+`overlay=true` the files go to the game's saves folder, so **R** on the
+Games page takes the install away and the next start unpacks it again.
 
 ### Keys at the start
 
@@ -3098,3 +3148,31 @@ It reads no configuration file, and the machine has the default hardware.
 | `--mem MB` | The machine's memory, 1 to 256 MB (default 16) |
 | `--screen` | Print the text screen at the end when nothing was printed through DOS, for programs that write to the screen's memory |
 | `--win32` | Run Win32 console programs with the built-in Windows, as `win32=true` does |
+
+### Unpacking InstallShield installers
+
+`rust-dos unpack ARCHIVE` lists or extracts a Windows game's installer
+archives on the host, without running its setup program: an
+InstallShield 5 or 6 cabinet set by its header (`data1.hdr`, or a
+`data1.cab` that holds the header; the other `dataN.cab` volumes are
+found beside it) or an InstallShield 3 archive (`_SETUP.1`, a `.Z`
+file). Each file is checked as it is expanded, by MD5 in version 6 sets
+and by size in the others. A file the set holds more than one of at one
+path is left out unless `--group` names a group that places it.
+
+```sh
+rust-dos unpack --list /cdrom/SETUP/DATA1.HDR
+rust-dos unpack --to ~/games/oni --group "Files (Data)" /cdrom/DATA1.HDR
+rust-dos unpack --old-compression --to out /cdrom/DATA1.CAB
+```
+
+| Option | What it does |
+|---|---|
+| `-l, --list` | List the file groups, the files with their sizes, entries and groups, and the entries that can't be read, with why |
+| `-t, --to DIR` | The folder to extract into (default: the current directory) |
+| `-g, --group NAME` | Extract only the files of this file group; it may be given more than once |
+| `-O, --old-compression` | Read compressed files as raw deflate ending each chunk with `00 00 FF FF`, as some version 0 sets have them (Unshield's `-O`) |
+
+It exits with 1 when the archive doesn't open, a group isn't in it, or a
+file fails its check. A game profile's [`[install]`](#windows-games)
+section unpacks the same archives from the game's drives.
