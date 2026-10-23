@@ -711,6 +711,30 @@ impl Bus {
         if self.et4000() { self.et4000_window(offset, write) } else { offset }
     }
 
+    /// Whether mode 13h uses the standard, unscrolled 320x200 chain-4 layout.
+    pub(crate) fn mode13_scanout_is_linear(&self) -> bool {
+        let vga = &self.vga;
+        self.video_mode == VideoMode::Graphics320x200
+            && matches!(
+                vga.adapter,
+                video::adapter::Adapter::Svga | video::adapter::Adapter::Vga
+            )
+            && vga.graphics_size() == (320, 200)
+            && vga.sequencer_regs[0x04] & 0x08 != 0
+            && vga.offset_words() == 40
+            && vga.latched_start_addr == 0
+            && vga.split_row() >= 200
+            && vga.pixel_panning() == 0
+    }
+
+    fn mode13_dirty_rows(&self, offset: usize) -> Option<(u32, u32)> {
+        if !self.mode13_scanout_is_linear() {
+            return None;
+        }
+        let row = (offset >> 2) / 80;
+        (row < 200).then_some(((row * 2) as u32, (row * 2 + 2) as u32))
+    }
+
     /// Whether writes of `len` bytes at `dst` all go to the VGA's planes,
     /// plainly.
     fn plain_vga_run(&self, dst: usize, len: usize) -> bool {
@@ -1001,7 +1025,9 @@ impl Bus {
             // Return value only matters to callers that care whether the
             // write hit the active display plane, but rendering is gated
             // off vga.dirty directly, so we simplify here.
-            self.vga.write_graphics(self.vga_window(addr, true), value);
+            let offset = self.vga_window(addr, true);
+            let rows = self.mode13_dirty_rows(offset);
+            self.vga.write_graphics_with_rows(offset, value, rows);
             return matches!(
                 self.video_mode,
                 VideoMode::Graphics320x200

@@ -66,6 +66,17 @@ and confirm a large one on a quiet machine before relying on it.
 | `benches/cpu.rs` | A guest loop of arithmetic, memory accesses, calls and port writes on the interpreter and on the recompiler, each also with a profile running (`docs/profiling.md`) |
 | `benches/host.rs` | Host-side work on the emulation thread: capturing a frame of a GIF animation, a 256-colour 640x400 picture and a high-colour 640x480 one |
 
+## Mode 13h scenario
+
+`video/graphics_256_sprite/13h` measures a mode 13h screen with a patterned
+background and a changing 32x32 region. Each iteration writes the region to
+guest video memory and runs the normal renderer into the doubled 640x400
+frame.
+
+```sh
+cargo bench --bench video -- video/graphics_256_sprite/13h
+```
+
 ## Voodoo scenarios
 
 ```sh

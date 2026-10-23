@@ -117,6 +117,33 @@ fn planar_scroll(c: &mut Criterion) {
     });
 }
 
+/// A 256-colour mode 13h screen with a moving 32x32 sprite. The renderer
+/// converts each changed row into the doubled 640x400 output.
+fn graphics_256_sprite(c: &mut Criterion) {
+    let mut cpu = machine(&scratch("graphics_256_sprite"));
+    int10::set_mode(&mut cpu, 0x13);
+    for at in 0..0x10000 {
+        cpu.bus.write_8(0xA0000 + at, (at * 13) as u8);
+    }
+    let (width, height) = video::frame_size(&cpu.bus);
+    let mut frame = Frame::new(width, height);
+    render(&mut cpu, &mut frame);
+    let mut step = 0usize;
+    c.bench_function("video/graphics_256_sprite/13h", |b| {
+        b.iter(|| {
+            step += 1;
+            let (left, top) = (step % 280, (step * 3) % 160);
+            for y in top..top + 32 {
+                for x in left..left + 32 {
+                    cpu.bus.write_8(0xA0000 + y * 320 + x, step as u8);
+                }
+            }
+            render(&mut cpu, &mut frame);
+            black_box(frame.rgba[0]);
+        })
+    });
+}
+
 /// Emulated speed for the program benchmark: about a 486DX2-66's
 /// instructions per millisecond.
 const PROGRAM_CYCLES_PER_MS: u32 = 25_000;
@@ -296,6 +323,7 @@ criterion_group!(
     benches,
     planar_sprite,
     planar_scroll,
+    graphics_256_sprite,
     planar_program,
     cga_composite,
     voodoo::pipelines,

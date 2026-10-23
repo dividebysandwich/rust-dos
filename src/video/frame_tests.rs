@@ -50,6 +50,40 @@ fn clearing_invalidates_the_decoders_source_cache() {
 }
 
 #[test]
+fn mode13_sprite_writes_render_only_the_affected_rows() {
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    crate::interrupts::int10::set_mode(&mut cpu, 0x13);
+    let (width, height) = frame_size(&cpu.bus);
+    let mut frame = Frame::new(width, height);
+    render_screen_rows(&mut frame, &cpu.bus);
+    cpu.bus.vga.clear_dirty();
+
+    cpu.bus.write_8(0xA0000 + 40 * 320 + 17, 0x3F);
+    assert_eq!((cpu.bus.vga.dirty_y_min, cpu.bus.vga.dirty_y_max), (80, 82));
+
+    let changed = render_screen_rows(&mut frame, &cpu.bus);
+    let mut reference = frame.clone();
+    let reference_changed = render_screen_rows(&mut reference, &cpu.bus);
+    assert_eq!(changed, 80..82);
+    assert_eq!(reference_changed, 0..height as usize);
+    assert_eq!(frame, reference);
+}
+
+#[test]
+fn mode13_with_a_scrolled_start_keeps_full_screen_dirty_tracking() {
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    crate::interrupts::int10::set_mode(&mut cpu, 0x13);
+    let mut frame = Frame::new(frame_size(&cpu.bus).0, frame_size(&cpu.bus).1);
+    render_screen_rows(&mut frame, &cpu.bus);
+    cpu.bus.vga.clear_dirty();
+
+    cpu.bus.vga.latched_start_addr = 80;
+    cpu.bus.write_8(0xA0000 + 40 * 320 + 17, 0x3F);
+
+    assert_eq!((cpu.bus.vga.dirty_y_min, cpu.bus.vga.dirty_y_max), (0, u32::MAX));
+}
+
+#[test]
 #[should_panic]
 fn rgb_import_rejects_a_pixel_count_that_does_not_fit() {
     Frame::from_rgb(1, 1, vec![1, 2, 3, 4]);

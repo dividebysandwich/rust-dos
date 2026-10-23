@@ -221,6 +221,7 @@ struct DrawnFrom {
     key: Vec<u8>,
     rows: Vec<u8>,
     changed: std::ops::Range<usize>,
+    line: Vec<u8>,
 }
 
 impl DrawnFrom {
@@ -427,11 +428,17 @@ pub fn render_screen_rows(frame: &mut Frame, bus: &Bus) -> std::ops::Range<usize
     }
     if bus.video_mode == VideoMode::Graphics320x200 && !bus.vga.adapter.gate_array() {
         let (w, rows) = bus.vga.graphics_size();
+        let candidates = if bus.mode13_scanout_is_linear() {
+            y_min..y_max
+        } else {
+            0..frame.height as usize
+        };
         render_graphics_mode(
             &mut frame.rgba,
             width,
             &bus.vga.vram_graphics,
             bus,
+            candidates,
             &mut frame.drawn_from,
         );
         frame.doubled = (frame.width as usize, frame.height as usize) == (2 * w, 2 * rows);
@@ -1004,7 +1011,14 @@ fn planar_pixel(vram: &[u8], bytes_per_row: usize, x: usize, y: usize, base: usi
 /// 256-color modes: mode 13h and the unchained "mode X" family (320x240,
 /// 360x480, ...), whatever size the CRTC registers give them, scaled to
 /// the canvas, `canvas_w` pixels wide.
-fn render_graphics_mode(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus: &Bus, drawn_from: &mut DrawnFrom) {
+fn render_graphics_mode(
+    canvas: &mut [u8],
+    canvas_w: usize,
+    vram: &[u8],
+    bus: &Bus,
+    candidates: std::ops::Range<usize>,
+    drawn_from: &mut DrawnFrom,
+) {
     // The CRTC scans the 4 planes in parallel: pixel x of a row is in plane
     // x % 4 at Start Address + row * stride + x / 4. With Chain 4 (plain
     // mode 13h) that is where CPU address y * 320 + x lands. Unchained
@@ -1040,12 +1054,17 @@ fn render_graphics_mode(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus: &B
         *out = (value as u32).to_le_bytes();
     }
     let known = drawn_from.reuse(&key, width * rows);
+    let first_row = candidates.start * rows / canvas_h;
+    let end_row = (candidates.end * rows).div_ceil(canvas_h).min(rows);
+    let source_rows = if known { first_row..end_row } else { 0..rows };
 
-    // The source pixel of each column of the canvas.
-    let columns: Vec<usize> = (0..canvas_w).map(|tx| tx * width / canvas_w).collect();
+    // Keep the scanline for the next frame. This renderer's canvas is
+    // either the source width or twice it, so a column map isn't needed.
     let plane_size = vram.len() / 4;
-    let mut line = vec![0u8; width];
-    for y in 0..rows {
+    drawn_from.line.resize(width, 0);
+    let DrawnFrom { rows: cached_rows, line, changed, .. } = drawn_from;
+    let mut changed_rows = 0..0;
+    for y in source_rows {
         // The canvas rows showing row y.
         let (first, end) = ((y * canvas_h).div_ceil(rows), ((y + 1) * canvas_h).div_ceil(rows).min(canvas_h));
         if first >= end {
@@ -1056,22 +1075,27 @@ fn render_graphics_mode(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus: &B
             let px = x + pan;
             *index = vram[(px & 3) * plane_size + ((row + (px >> 2)) & (plane_size - 1))];
         }
-        let drawn = &mut drawn_from.rows[y * width..(y + 1) * width];
+        let drawn = &mut cached_rows[y * width..(y + 1) * width];
         if known && *drawn == line[..] {
             continue;
         }
-        drawn.copy_from_slice(&line);
-        drawn_from.changed(first..end);
+        drawn.copy_from_slice(line);
+        if changed_rows.is_empty() {
+            changed_rows = first..end;
+        } else {
+            changed_rows.start = changed_rows.start.min(first);
+            changed_rows.end = changed_rows.end.max(end);
+        }
         let dst = &mut canvas[first * row_bytes..(first + 1) * row_bytes];
         if canvas_w == 2 * width {
             // Each pixel twice: its color looked up once.
-            for (pair, &index) in dst.as_chunks_mut::<8>().0.iter_mut().zip(&line) {
+            for (pair, &index) in dst.as_chunks_mut::<8>().0.iter_mut().zip(line.iter()) {
                 let [r, g, b] = colors[index as usize];
                 *pair = [r, g, b, 255, r, g, b, 255];
             }
         } else {
-            for (pixel, &x) in dst.as_chunks_mut::<4>().0.iter_mut().zip(&columns) {
-                let [r, g, b] = colors[line[x] as usize];
+            for (pixel, &index) in dst.as_chunks_mut::<4>().0.iter_mut().zip(line.iter()) {
+                let [r, g, b] = colors[index as usize];
                 *pixel = [r, g, b, 255];
             }
         }
@@ -1079,6 +1103,7 @@ fn render_graphics_mode(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus: &B
             canvas.copy_within(first * row_bytes..(first + 1) * row_bytes, ty * row_bytes);
         }
     }
+    *changed = changed_rows;
 }
 
 /// Where CGA graphics start in memory, and whether they show at all: a
