@@ -138,3 +138,15 @@ pub fn mul_div(a: i32, b: i32, c: i32) -> i32 {
     };
     q as i32
 }
+
+/// DrawFocusRect(hdc, r): the dotted frame of a focused item, XORed
+/// onto the logical rectangle `r`.
+pub fn focus_rect(cpu: &mut Cpu, hdc: u32, r: Rect) {
+    let Some(d) = gdi32::gdi(cpu)
+        .dc(hdc)
+        .map(|dc| dc.rect_to_device(&r).ordered())
+    else {
+        return;
+    };
+    gdi32::draw::focus_device_rect(cpu, hdc, d);
+}

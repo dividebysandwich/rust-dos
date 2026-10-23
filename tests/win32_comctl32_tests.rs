@@ -57,6 +57,9 @@ const IMPORTS: &[(&str, &[&str])] = &[
             "DPA_Destroy",
             "CreateToolbarEx",
             "CreateStatusWindowA",
+            "PropertySheetA",
+            "CreatePropertySheetPageA",
+            "DestroyPropertySheetPage",
         ],
     ),
     (
@@ -798,4 +801,119 @@ fn a_trackbar_keeps_its_position_in_its_range() {
     assert_eq!(r[6], 10, "a page is a fifth of the range");
     // Tics at 10, 20, 30 and 40, and the two ends.
     assert_eq!(r[8], 6);
+}
+
+/// Where the data of a program making `calls` is: the data comes before
+/// the code, so its address doesn't change with what it holds.
+fn data_address(calls: &[Call]) -> u32 {
+    program(&data(), calls).1
+}
+
+#[test]
+fn a_tab_control_keeps_its_items_and_selection() {
+    use Arg::*;
+    const S_TAB: u32 = 0x260;
+    const TCIF_TEXT: u32 = 0x0001;
+    const TCM_GETITEMCOUNT: u32 = 0x1304;
+    const TCM_GETITEMA: u32 = 0x1305;
+    const TCM_INSERTITEMA: u32 = 0x1307;
+    const TCM_GETCURSEL: u32 = 0x130B;
+    const TCM_SETCURSEL: u32 = 0x130C;
+    let item = |text: u32| [TCIF_TEXT, 0, 0, text, 32, 0, 0];
+    let calls = [
+        call("InitCommonControls", &[]),
+        parent(),
+        child(S_TAB, 0, 200, 100, 1, 1),
+        send(2, TCM_INSERTITEMA, I(0), At(FREE)),
+        send(2, TCM_INSERTITEMA, I(1), At(FREE + 0x20)),
+        send(2, TCM_GETITEMCOUNT, I(0), I(0)),
+        send(2, TCM_GETCURSEL, I(0), I(0)),
+        send(2, TCM_SETCURSEL, I(1), I(0)),
+        send(2, TCM_GETCURSEL, I(0), I(0)),
+        send(2, TCM_SETCURSEL, I(5), I(0)),
+        send(2, TCM_GETITEMA, I(1), At(FREE + 0x40)),
+    ];
+    let base = data_address(&calls);
+    let mut d = data();
+    strings(&mut d);
+    put(&mut d, S_TAB, b"SysTabControl32\0");
+    put(&mut d, FREE + 0x100, b"One\0");
+    put(&mut d, FREE + 0x110, b"Two\0");
+    for (at, words) in [
+        (FREE, item(base + FREE + 0x100)),
+        (FREE + 0x20, item(base + FREE + 0x110)),
+        (FREE + 0x40, item(base + FREE + 0x180)),
+    ] {
+        for (i, w) in words.iter().enumerate() {
+            put32(&mut d, at + 4 * i as u32, *w);
+        }
+    }
+    let (cpu, at) = run("tab", &d, &calls);
+    assert_eq!(at, base);
+    let r = results(&cpu, at, calls.len());
+    assert_ne!(r[2], 0, "the tab control is made");
+    assert_eq!((r[3], r[4], r[5]), (0, 1, 2));
+    assert_eq!(r[6], 0, "the first item is selected");
+    assert_eq!((r[7], r[8]), (0, 1), "SETCURSEL gives the one before");
+    assert_eq!(r[9], u32::MAX, "there is no item 5");
+    assert_eq!(r[10], 1);
+    assert_eq!(peek_str(&cpu, at + FREE + 0x180), "Two");
+}
+
+#[test]
+fn a_modeless_property_sheet_shows_its_page() {
+    use Arg::*;
+    const PSP_DLGINDIRECT: u32 = 0x0001;
+    const PSH_PROPSHEETPAGE: u32 = 0x0008;
+    const PSH_MODELESS: u32 = 0x0400;
+    const PSM_PRESSBUTTON: u32 = 0x0471;
+    const PSM_GETTABCONTROL: u32 = 0x0474;
+    const PSM_GETCURRENTPAGEHWND: u32 = 0x0476;
+    const PSBTN_CANCEL: u32 = 5;
+    const TCM_GETITEMCOUNT: u32 = 0x1304;
+    const PAGE: u32 = FREE;
+    const HEADER: u32 = FREE + 0x40;
+    const TEMPLATE: u32 = FREE + 0x80;
+    const CAPTION: u32 = FREE + 0xC0;
+    const TEXT: u32 = FREE + 0x100;
+    let calls = [
+        call("InitCommonControls", &[]),
+        call("PropertySheetA", &[At(HEADER)]),
+        send(1, PSM_GETTABCONTROL, I(0), I(0)),
+        send(2, TCM_GETITEMCOUNT, I(0), I(0)),
+        send(1, PSM_GETCURRENTPAGEHWND, I(0), I(0)),
+        call("GetWindowTextA", &[Res(1), At(TEXT), I(64)]),
+        send(1, PSM_PRESSBUTTON, I(PSBTN_CANCEL), I(0)),
+        send(1, PSM_GETCURRENTPAGEHWND, I(0), I(0)),
+        call("DestroyWindow", &[Res(1)]),
+        call("CreatePropertySheetPageA", &[At(PAGE)]),
+        call("DestroyPropertySheetPage", &[Res(9)]),
+    ];
+    let base = data_address(&calls);
+    let mut d = data();
+    // A DLGTEMPLATE of a page with no controls, titled "Pg".
+    put32(&mut d, TEMPLATE, WS_CHILD);
+    put(&mut d, TEMPLATE + 8, &[0, 0, 0, 0, 0, 0, 100, 0, 50, 0]);
+    put(&mut d, TEMPLATE + 22, &[b'P', 0, b'g', 0, 0, 0]);
+    put(&mut d, CAPTION, b"Things\0");
+    let page = [40, PSP_DLGINDIRECT, 0, base + TEMPLATE, 0, 0, 0, 0, 0, 0];
+    let flags = PSH_PROPSHEETPAGE | PSH_MODELESS;
+    let header = [40, flags, 0, 0, 0, base + CAPTION, 1, 0, base + PAGE, 0];
+    for (at, words) in [(PAGE, page), (HEADER, header)] {
+        for (i, w) in words.iter().enumerate() {
+            put32(&mut d, at + 4 * i as u32, *w);
+        }
+    }
+    let (cpu, at) = run("propsheet", &d, &calls);
+    assert_eq!(at, base);
+    let r = results(&cpu, at, calls.len());
+    assert!(r[1] != 0 && r[1] != u32::MAX, "the sheet is made");
+    assert_ne!(r[2], 0, "it has a tab control");
+    assert_eq!(r[3], 1, "with a tab for the page");
+    assert_ne!(r[4], 0, "the page is made");
+    assert_eq!(peek_str(&cpu, at + TEXT), "Things");
+    assert_eq!(r[7], 0, "Cancel leaves no current page");
+    assert_eq!(r[8], 1);
+    assert_ne!(r[9], 0);
+    assert_eq!(r[10], 1);
 }
