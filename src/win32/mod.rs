@@ -34,6 +34,7 @@ mod msvcrt;
 mod object;
 mod ole32;
 mod oleaut32;
+mod advpack;
 mod registry;
 mod screen;
 mod seh;
@@ -314,6 +315,10 @@ pub struct Win32 {
     winmm: winmm::State,
     glide: glide::State,
     guids: u32,
+    /// SHELL32's: its shell links.
+    shell: shell32::State,
+    /// DDEML's instances, string and data handles and conversations.
+    dde: user32::ddeml::State,
 }
 
 impl Win32 {
@@ -763,6 +768,8 @@ fn end_process(cpu: &mut Cpu, index: usize, code: u32) {
     dinput::process_ended(cpu, process.id, &tids);
     winmm::process_ended(cpu, process.id, &tids);
     glide::process_ended(cpu, process.id, &tids);
+    shell32::process_ended(cpu, process.id);
+    user32::ddeml::process_ended(cpu, process.id);
     let win32 = &mut cpu.bus.win32;
     if win32.running != index {
         // Another process's thread runs on.
@@ -910,6 +917,8 @@ pub fn process_ended(cpu: &mut Cpu, psp: u16) {
         cpu.bus.win32.dinput = dinput::State::default();
         cpu.bus.win32.winmm = winmm::State::default();
         cpu.bus.win32.glide = glide::State::default();
+        cpu.bus.win32.shell = shell32::State::default();
+        cpu.bus.win32.dde = user32::ddeml::State::default();
         cpu.bus.set_a20(a20);
     }
     cpu.bus.win32.pending = None;
@@ -1007,4 +1016,6 @@ crate::state_fields!(Win32 {
     winmm,
     glide,
     guids,
+    shell,
+    dde,
 } skip { enabled });

@@ -674,6 +674,132 @@ pub fn path_in_use(cpu: &mut Cpu, name: &str) -> bool {
     path::open_sharing(cpu, &full).is_some()
 }
 
+/// The address of KERNEL32's function `name`, for a task to call.
+pub fn address_of(name: &str) -> u32 {
+    let index = APIS
+        .iter()
+        .position(|a| a.name == name)
+        .unwrap_or_else(|| panic!("KERNEL32 has no {}", name));
+    let dll = super::stubs::DLLS
+        .iter()
+        .position(|d| d.name == DLL.name)
+        .expect("KERNEL32 is a built-in DLL");
+    super::stubs::stub_address(dll, index)
+}
+
+/// Path operations for other DLLs (SHELL32's file operations), on Win32
+/// paths, each as the KERNEL32 function it names does it, with that
+/// function's error.
+pub mod files {
+    use super::path;
+    use crate::cpu::Cpu;
+    pub use crate::win32::object::FindEntry;
+
+    /// The full path of `name` as DOS takes it.
+    pub fn full_path(cpu: &Cpu, name: &str) -> String {
+        path::dos_path(&path::full_path(cpu, name))
+    }
+
+    /// CreateDirectoryA.
+    pub fn create_directory(cpu: &mut Cpu, name: &str) -> Result<(), u32> {
+        let full = full_path(cpu, name);
+        path::make_directory(cpu, &full)
+    }
+
+    /// RemoveDirectoryA.
+    pub fn remove_directory(cpu: &mut Cpu, name: &str) -> Result<(), u32> {
+        let full = full_path(cpu, name);
+        path::unmake_directory(cpu, &full)
+    }
+
+    /// DeleteFileA.
+    pub fn delete_file(cpu: &mut Cpu, name: &str) -> Result<(), u32> {
+        let full = full_path(cpu, name);
+        path::delete(cpu, &full)
+    }
+
+    /// CopyFileA.
+    pub fn copy_file(cpu: &mut Cpu, from: &str, to: &str, fail: bool) -> Result<(), u32> {
+        let (from, to) = (full_path(cpu, from), full_path(cpu, to));
+        path::copy_path(cpu, &from, &to, fail)
+    }
+
+    /// MoveFileA.
+    pub fn move_file(cpu: &mut Cpu, from: &str, to: &str) -> Result<(), u32> {
+        let (from, to) = (full_path(cpu, from), full_path(cpu, to));
+        path::move_path(cpu, &from, &to)
+    }
+
+    /// GetFileAttributesA.
+    pub fn attributes(cpu: &mut Cpu, name: &str) -> Result<u32, u32> {
+        let full = full_path(cpu, name);
+        path::attributes(cpu, &full)
+    }
+
+    /// SetFileAttributesA with DOS's attributes.
+    pub fn set_attributes(cpu: &mut Cpu, name: &str, attr: u32) -> Result<(), u32> {
+        let full = full_path(cpu, name);
+        path::set_attributes(cpu, &full, attr)
+    }
+
+    /// The entries of the directory `dir` whose names match `pattern`,
+    /// as FindFirstFileA finds them, "." and ".." among them.
+    pub fn find(cpu: &Cpu, dir: &str, pattern: &str) -> Result<Vec<FindEntry>, u32> {
+        let full = full_path(cpu, dir);
+        path::find_entries(cpu, &full, pattern)
+    }
+
+    /// Write `data` as the whole file `name`, made anew.
+    pub fn write_whole(cpu: &mut Cpu, name: &str, data: &[u8]) -> Result<(), u32> {
+        let full = full_path(cpu, name);
+        cpu.bus
+            .disk
+            .write_whole_file(&full, data, None)
+            .map_err(|e| e as u32)
+    }
+
+    /// CreateProcessA for the command line `line`, its first window
+    /// shown as `show` says: a handle of the new process, or the error.
+    pub fn run(cpu: &mut Cpu, line: &str, show: u32) -> Result<u32, u32> {
+        const STARTF_USESHOWWINDOW: u32 = 1;
+        let mut startup = vec![0u8; super::process::STARTUPINFO_SIZE as usize];
+        startup[44..48].copy_from_slice(&STARTF_USESHOWWINDOW.to_le_bytes());
+        startup[48..50].copy_from_slice(&(show as u16).to_le_bytes());
+        let [process, thread, _, _] =
+            super::process::spawn(cpu, None, Some(line), None, false, 0, startup)?;
+        crate::win32::object::close(cpu, thread);
+        Ok(process)
+    }
+
+    /// CloseHandle.
+    pub fn close(cpu: &mut Cpu, handle: u32) {
+        crate::win32::object::close(cpu, handle);
+    }
+
+    /// SearchPathA without an extension: the full path of the file
+    /// `name` in `dirs` (separated by semicolons), or where SearchPathA
+    /// looks without them.
+    pub fn search(cpu: &mut Cpu, dirs: Option<&str>, name: &str) -> Option<String> {
+        path::search(cpu, dirs, name)
+    }
+
+    /// ExpandEnvironmentStringsA.
+    pub fn expand(cpu: &mut Cpu, text: &str) -> String {
+        let (out, _) = super::env::expand(cpu, &crate::dosstr::to_bytes(text));
+        crate::dosstr::from_bytes(&out)
+    }
+
+    /// GetCurrentDirectoryA.
+    pub fn current_directory(cpu: &Cpu) -> String {
+        path::current_directory(cpu, cpu.bus.disk.get_current_drive())
+    }
+
+    /// SetCurrentDirectoryA.
+    pub fn change_directory(cpu: &mut Cpu, name: &str) -> Result<(), u32> {
+        path::change_directory(cpu, name)
+    }
+}
+
 /// A writable view of the file mapping `handle` for a DIB section whose
 /// bits are in it: the view's address and the mapping's size, or None
 /// with the error set.

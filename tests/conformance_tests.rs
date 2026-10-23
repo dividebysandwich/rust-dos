@@ -252,6 +252,8 @@ const LIBS: &[&str] = &[
 const SHARED: &[(&str, &[&str])] = &[
     ("dsound", &["capture", "ds3d", "ds3d8", "dsound", "dsound8", "propset"]),
     ("winmm", &["capture", "wave"]),
+    // shlexec.c makes its shortcuts with shelllink.c's create_lnk.
+    ("shell32", &["shelllink", "shlexec"]),
 ];
 
 /// The files built with `unit` of `dll` into one program: those
@@ -334,6 +336,19 @@ fn build(
             "-Wl,--allow-multiple-definition",
             "-DIID_IContextCallback=IID_IUnknown",
         ]);
+    }
+    if dll == "shell32" && units.iter().any(|u| u == "shellpath") {
+        // shellpath.c defines CLSID_NetworkExplorerFolder, which
+        // libuuid has too.
+        args.push("-Wl,--allow-multiple-definition");
+    }
+    let shell32 = format!("{ROOT}/runtime/shell32.h");
+    if dll == "shell32" {
+        args.extend(["-include", shell32.as_str()]);
+    }
+    let shlfileop = format!("{ROOT}/runtime/shlfileop.h");
+    if dll == "shell32" && units.iter().any(|u| u == "shlfileop") {
+        args.extend(["-include", shlfileop.as_str()]);
     }
     args.extend(sources.iter().map(String::as_str));
     // Wine builds winmm's tests into one program, and the others take

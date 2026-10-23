@@ -247,6 +247,9 @@ const SYSTEM: &[(&str, u32, &str, u32, u32, u32)] = &[
     ("SysListView32", 0, "DefWindowProcA", 4, 32512, 6),
     ("SysTreeView32", 0, "DefWindowProcA", 4, 32512, 6),
     ("SysTabControl32", 0, "DefWindowProcA", 4, 32512, 16),
+    // Explorer's folder windows, which the shell opens for Program
+    // Manager's groups (user32/ddeml.rs).
+    ("CabinetWClass", 0, "DefWindowProcA", 0, 32512, 6),
 ];
 
 /// Register the system's classes.

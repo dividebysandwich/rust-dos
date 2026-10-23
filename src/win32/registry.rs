@@ -98,6 +98,30 @@ const SEED: &str = r#"REGEDIT4
 "Programs"="C:\\WINDOWS\\Start Menu\\Programs"
 "Start Menu"="C:\\WINDOWS\\Start Menu"
 "Startup"="C:\\WINDOWS\\Start Menu\\Programs\\StartUp"
+
+[HKEY_LOCAL_MACHINE\Software\Classes\CLSID\{0BE35203-8F91-11CE-9DE3-00AA004BB851}]
+@="Standard Font"
+
+[HKEY_LOCAL_MACHINE\Software\Classes\CLSID\{0BE35203-8F91-11CE-9DE3-00AA004BB851}\ProgID]
+@="StdFont"
+
+[HKEY_LOCAL_MACHINE\Software\Classes\StdFont]
+@="Standard Font"
+
+[HKEY_LOCAL_MACHINE\Software\Classes\StdFont\CLSID]
+@="{0BE35203-8F91-11CE-9DE3-00AA004BB851}"
+
+[HKEY_LOCAL_MACHINE\Software\Classes\Interface\{00000000-0000-0000-C000-000000000046}]
+@="IUnknown"
+
+[HKEY_LOCAL_MACHINE\Software\Classes\Interface\{00000000-0000-0000-C000-000000000046}\ProxyStubClsid32]
+@="{00000320-0000-0000-C000-000000000046}"
+
+[HKEY_LOCAL_MACHINE\Software\Classes\Interface\{00000001-0000-0000-C000-000000000046}]
+@="IClassFactory"
+
+[HKEY_LOCAL_MACHINE\Software\Classes\Interface\{00000001-0000-0000-C000-000000000046}\ProxyStubClsid32]
+@="{00000320-0000-0000-C000-000000000046}"
 "#;
 
 /// A named value. The default value of a key has the empty name.
@@ -619,6 +643,29 @@ pub fn save(cpu: &mut Cpu) {
         cpu.bus
             .log_string(&format!("[W32] The registry can't be saved to {}", FILE));
     }
+}
+
+/// The string the value `name` ("" for the default) of the key `path`
+/// under the predefined key `hkey` holds, as RegQueryValueA reads it;
+/// None if the key or the value isn't there.
+pub fn string_value(cpu: &mut Cpu, hkey: u32, path: &str, name: &str) -> Option<String> {
+    let registry = get(cpu);
+    let Open::Key(root) = registry.open(hkey, 0) else {
+        return None;
+    };
+    let key = registry.find(root, path)?;
+    let data = &registry.value(key, name)?.data;
+    let end = data.iter().position(|&b| b == 0).unwrap_or(data.len());
+    Some(crate::dosstr::from_bytes(&data[..end]))
+}
+
+/// Whether the key `path` is under the predefined key `hkey`.
+pub fn key_exists(cpu: &mut Cpu, hkey: u32, path: &str) -> bool {
+    let registry = get(cpu);
+    let Open::Key(root) = registry.open(hkey, 0) else {
+        return false;
+    };
+    registry.find(root, path).is_some()
 }
 
 /// The process `id` ended: its keys close. After the last process, the

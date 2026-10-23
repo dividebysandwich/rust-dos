@@ -504,25 +504,36 @@ pub(super) fn create_directory(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(path) = path_arg(cpu, args[0])? else {
         return Some(FALSE);
     };
-    if has_wildcards(&path) {
-        set_error(cpu, ERROR_INVALID_NAME);
-        return Some(FALSE);
+    let done = make_directory(cpu, &path);
+    Some(result(cpu, done))
+}
+
+/// TRUE for `Ok`, or FALSE with the error set.
+fn result(cpu: &mut Cpu, done: Result<(), u32>) -> u32 {
+    match done {
+        Ok(()) => TRUE,
+        Err(code) => {
+            set_error(cpu, code);
+            FALSE
+        }
     }
-    let full = full_path(cpu, &path);
+}
+
+/// Make the directory `path` (as `dos_path` gives it).
+pub(super) fn make_directory(cpu: &mut Cpu, path: &str) -> Result<(), u32> {
+    if has_wildcards(path) {
+        return Err(ERROR_INVALID_NAME);
+    }
+    let full = full_path(cpu, path);
     let full = trim_slash(&full);
-    let disk = &cpu.bus.disk;
+    let disk = &mut cpu.bus.disk;
     if is_root(full) {
-        set_error(cpu, ERROR_ACCESS_DENIED);
-        return Some(FALSE);
+        return Err(ERROR_ACCESS_DENIED);
     }
     if disk.exists(full) {
-        set_error(cpu, ERROR_ALREADY_EXISTS);
-        return Some(FALSE);
+        return Err(ERROR_ALREADY_EXISTS);
     }
-    match disk.create_directory(full) {
-        Ok(()) => Some(TRUE),
-        Err(code) => Some(super::file::dos_error(cpu, code)),
-    }
+    disk.create_directory(full).map_err(u32::from)
 }
 
 /// RemoveDirectoryA(path): an empty directory, not the current one.
@@ -530,17 +541,22 @@ pub(super) fn remove_directory(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(path) = path_arg(cpu, args[0])? else {
         return Some(FALSE);
     };
-    if has_wildcards(&path) {
-        set_error(cpu, ERROR_INVALID_NAME);
-        return Some(FALSE);
+    let done = unmake_directory(cpu, &path);
+    Some(result(cpu, done))
+}
+
+/// Remove the empty directory `path` (as `dos_path` gives it).
+pub(super) fn unmake_directory(cpu: &mut Cpu, path: &str) -> Result<(), u32> {
+    if has_wildcards(path) {
+        return Err(ERROR_INVALID_NAME);
     }
-    let full = full_path(cpu, &path);
+    let full = full_path(cpu, path);
     let full = trim_slash(&full);
     match cpu.bus.disk.remove_directory(full) {
-        Ok(()) => Some(TRUE),
+        Ok(()) => Ok(()),
         // The current directory: in use.
-        Err(0x10) => Some(super::file::dos_error(cpu, 0x05)),
-        Err(code) => Some(super::file::dos_error(cpu, code)),
+        Err(0x10) => Err(ERROR_ACCESS_DENIED),
+        Err(code) => Err(code as u32),
     }
 }
 
@@ -549,24 +565,24 @@ pub(super) fn delete_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(path) = path_arg(cpu, args[0])? else {
         return Some(FALSE);
     };
+    let done = delete(cpu, &path);
+    Some(result(cpu, done))
+}
+
+/// Delete the file `path` (as `dos_path` gives it).
+pub(super) fn delete(cpu: &mut Cpu, path: &str) -> Result<(), u32> {
     let disk = &mut cpu.bus.disk;
-    if disk.is_directory(&path) {
-        set_error(cpu, ERROR_ACCESS_DENIED);
-        return Some(FALSE);
+    if disk.is_directory(path) {
+        return Err(ERROR_ACCESS_DENIED);
     }
-    if has_wildcards(&path) {
-        set_error(cpu, ERROR_INVALID_NAME);
-        return Some(FALSE);
+    if has_wildcards(path) {
+        return Err(ERROR_INVALID_NAME);
     }
     // A read-only file stays, which hosts don't all see to.
-    if disk.get_file_attribute(&path).is_ok_and(|a| a & 0x01 != 0) {
-        set_error(cpu, ERROR_ACCESS_DENIED);
-        return Some(FALSE);
+    if disk.get_file_attribute(path).is_ok_and(|a| a & 0x01 != 0) {
+        return Err(ERROR_ACCESS_DENIED);
     }
-    match disk.delete_file(&path) {
-        Ok(()) => Some(TRUE),
-        Err(code) => Some(super::file::dos_error(cpu, code)),
-    }
+    disk.delete_file(path).map_err(u32::from)
 }
 
 /// A file's bytes, its DOS time and date and its attributes.
@@ -627,25 +643,28 @@ pub(super) fn copy_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(to) = path_arg(cpu, args[1])? else {
         return Some(FALSE);
     };
-    if !cpu.bus.disk.is_file(&from) {
-        let full = full_path(cpu, &from);
-        let code = not_found(cpu, &full);
-        set_error(cpu, code);
-        return Some(FALSE);
+    let done = copy_path(cpu, &from, &to, args[2] != 0);
+    Some(result(cpu, done))
+}
+
+/// Copy the file `from` to `to` (as `dos_path` gives them) as CopyFileA
+/// does, failing if `to` is there and `fail_if_there`.
+pub(super) fn copy_path(
+    cpu: &mut Cpu,
+    from: &str,
+    to: &str,
+    fail_if_there: bool,
+) -> Result<(), u32> {
+    if !cpu.bus.disk.is_file(from) {
+        let full = full_path(cpu, from);
+        return Err(not_found(cpu, &full));
     }
     // A file copied to itself: there already.
-    let same = full_path(cpu, &from).eq_ignore_ascii_case(&full_path(cpu, &to));
-    if same || (args[2] != 0 && cpu.bus.disk.exists(&to)) {
-        set_error(cpu, ERROR_FILE_EXISTS);
-        return Some(FALSE);
+    let same = full_path(cpu, from).eq_ignore_ascii_case(&full_path(cpu, to));
+    if same || (fail_if_there && cpu.bus.disk.exists(to)) {
+        return Err(ERROR_FILE_EXISTS);
     }
-    match copy(cpu, &from, &to) {
-        Ok(()) => Some(TRUE),
-        Err(code) => {
-            set_error(cpu, code);
-            Some(FALSE)
-        }
-    }
+    copy(cpu, from, to)
 }
 
 /// The sharing that the handles CreateFileA opened of the file at `path`
@@ -676,43 +695,39 @@ pub(super) fn move_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(to) = path_arg(cpu, args[1])? else {
         return Some(FALSE);
     };
-    let (from_full, to_full) = (full_path(cpu, &from), full_path(cpu, &to));
+    let done = move_path(cpu, &from, &to);
+    Some(result(cpu, done))
+}
+
+/// Move or rename `from` to `to` (as `dos_path` gives them) as MoveFileA
+/// does.
+pub(super) fn move_path(cpu: &mut Cpu, from: &str, to: &str) -> Result<(), u32> {
+    let (from_full, to_full) = (full_path(cpu, from), full_path(cpu, to));
     let disk = &mut cpu.bus.disk;
-    if !disk.exists(&from) {
-        let code = not_found(cpu, &from_full);
-        set_error(cpu, code);
-        return Some(FALSE);
+    if !disk.exists(from) {
+        return Err(not_found(cpu, &from_full));
     }
-    if has_wildcards(&to) {
-        set_error(cpu, ERROR_INVALID_NAME);
-        return Some(FALSE);
+    if has_wildcards(to) {
+        return Err(ERROR_INVALID_NAME);
     }
     if from_full.eq_ignore_ascii_case(&to_full) {
-        return Some(TRUE);
+        return Ok(());
     }
-    if open_sharing(cpu, &from).is_some() {
-        set_error(cpu, ERROR_ACCESS_DENIED);
-        return Some(FALSE);
+    if open_sharing(cpu, from).is_some() {
+        return Err(ERROR_ACCESS_DENIED);
     }
     let disk = &mut cpu.bus.disk;
-    if disk.exists(&to) {
-        set_error(cpu, ERROR_ALREADY_EXISTS);
-        return Some(FALSE);
+    if disk.exists(to) {
+        return Err(ERROR_ALREADY_EXISTS);
     }
-    let result = if drive_of(&from_full) == drive_of(&to_full) {
-        disk.rename_file(&from_full, &to_full).map_err(|e| e as u32)
-    } else if disk.is_directory(&from) {
+    if drive_of(&from_full) == drive_of(&to_full) {
+        disk.rename_file(&from_full, &to_full)
+            .map_err(|e| e as u32)
+    } else if disk.is_directory(from) {
         Err(ERROR_NOT_SAME_DEVICE)
     } else {
         copy(cpu, &from_full, &to_full)
             .and_then(|()| cpu.bus.disk.delete_file(&from_full).map_err(|e| e as u32))
-    };
-    match result {
-        Ok(()) => Some(TRUE),
-        Err(code) => {
-            set_error(cpu, code);
-            Some(FALSE)
-        }
     }
 }
 
@@ -722,27 +737,33 @@ pub(super) fn get_file_attributes(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(path) = path_arg(cpu, args[0])? else {
         return Some(INVALID_FILE_ATTRIBUTES);
     };
-    if has_wildcards(&path) {
-        set_error(cpu, ERROR_INVALID_NAME);
-        return Some(INVALID_FILE_ATTRIBUTES);
-    }
-    let full = full_path(cpu, &path);
-    let disk = &cpu.bus.disk;
-    if is_root(&full) {
-        return Some(if disk.is_mounted(drive_of(&full)) {
-            FILE_ATTRIBUTE_DIRECTORY
-        } else {
-            set_error(cpu, ERROR_PATH_NOT_FOUND);
-            INVALID_FILE_ATTRIBUTES
-        });
-    }
-    match disk.get_file_attribute(trim_slash(&full)) {
-        Ok(attr) => Some(attr as u32),
+    match attributes(cpu, &path) {
+        Ok(attr) => Some(attr),
         Err(code) => {
-            set_error(cpu, code as u32);
+            set_error(cpu, code);
             Some(INVALID_FILE_ATTRIBUTES)
         }
     }
+}
+
+/// The attributes of `path` (as `dos_path` gives it), as
+/// GetFileAttributesA has them.
+pub(super) fn attributes(cpu: &mut Cpu, path: &str) -> Result<u32, u32> {
+    if has_wildcards(path) {
+        return Err(ERROR_INVALID_NAME);
+    }
+    let full = full_path(cpu, path);
+    let disk = &cpu.bus.disk;
+    if is_root(&full) {
+        return if disk.is_mounted(drive_of(&full)) {
+            Ok(FILE_ATTRIBUTE_DIRECTORY)
+        } else {
+            Err(ERROR_PATH_NOT_FOUND)
+        };
+    }
+    disk.get_file_attribute(trim_slash(&full))
+        .map(u32::from)
+        .map_err(u32::from)
 }
 
 /// SetFileAttributesA(path, attributes): DOS's (read-only, hidden,
@@ -756,10 +777,16 @@ pub(super) fn set_file_attributes(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     } else {
         args[1] & 0x27
     };
-    match cpu.bus.disk.set_file_attribute(&path, attr as u16) {
-        Ok(()) => Some(TRUE),
-        Err(code) => Some(super::file::dos_error(cpu, code)),
-    }
+    let done = set_attributes(cpu, &path, attr);
+    Some(result(cpu, done))
+}
+
+/// Set the DOS attributes of `path` (as `dos_path` gives it).
+pub(super) fn set_attributes(cpu: &mut Cpu, path: &str, attr: u32) -> Result<(), u32> {
+    cpu.bus
+        .disk
+        .set_file_attribute(path, attr as u16)
+        .map_err(u32::from)
 }
 
 /// Whether `name` matches the pattern `pattern` as Windows 95 matches
@@ -786,7 +813,7 @@ fn matches(name: &str, pattern: &str) -> bool {
 
 /// The entries of the directory `dir` (a full path) whose long or short
 /// names match `pattern`.
-fn find_entries(cpu: &Cpu, dir: &str, pattern: &str) -> Result<Vec<FindEntry>, u32> {
+pub(super) fn find_entries(cpu: &Cpu, dir: &str, pattern: &str) -> Result<Vec<FindEntry>, u32> {
     let disk = &cpu.bus.disk;
     let spec = format!("{}\\*.*", dir.trim_end_matches('\\'));
     let listed = disk.list_directory(&spec, 0x16).map_err(|e| e as u32)?;
