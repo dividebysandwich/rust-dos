@@ -759,12 +759,14 @@ CloseDriver call it as Wine's `winmm` does.
 What it needed besides the loader: the four UCRT functions, NTDLL's
 `_vsnprintf`, `GetPrivateProfileSectionW`, the installable drivers, the
 process heap at `fs:[30h]`, and ADVAPI32's `Reg*W` stubs returning
-ERROR_CALL_NOT_IMPLEMENTED as Windows 95's do, rather than 0, which
-MSACM32 took as success before enumerating the registry with handles it
-never got. No call failed through a guest stub on the way. The other
-stubs it met fail as on Windows 95 and MSACM32 copes: `GetModuleHandleW`
-(for `ntdll`'s debug functions), `RegOpenKeyExW` and `RegCreateKeyW`
-(its driver cache, which it fills from the drivers instead).
+ERROR_CALL_NOT_IMPLEMENTED to guest code. Windows 95's stubs return 0
+with that error set, as Wine's registry tests find, and programs keep
+getting that; MSACM32 takes 0 as ERROR_SUCCESS and would enumerate the
+registry with a key it never got. No call failed through a guest stub
+on the way. The other stubs it met fail as on Windows 95 and MSACM32
+copes: `GetModuleHandleW` (for `ntdll`'s debug functions),
+`RegOpenKeyExW` and `RegCreateKeyW` (its driver cache, which it fills
+from the drivers instead).
 
 ### What the others would take
 

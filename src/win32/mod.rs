@@ -822,6 +822,19 @@ fn peek_32(cpu: &Cpu, lin: u32) -> Option<u32> {
     Some(cpu.bus.read_32(phys as usize))
 }
 
+/// Whether the running function of a built-in DLL was called from guest
+/// code (`loader::GUEST`): its return address, at ESP, is in such a DLL.
+fn called_from_guest(cpu: &Cpu) -> bool {
+    let Some(caller) = peek_32(cpu, cpu.esp()) else {
+        return false;
+    };
+    running(cpu).is_some_and(|p| {
+        p.modules
+            .iter()
+            .any(|m| m.flags & loader::GUEST != 0 && caller.wrapping_sub(m.base) < m.size)
+    })
+}
+
 /// The program called a function a built-in DLL doesn't have yet. When
 /// guest code (`loader::GUEST`) calls it, the call fails: it returns 0
 /// with ERROR_CALL_NOT_IMPLEMENTED, and its stub pops the arguments.

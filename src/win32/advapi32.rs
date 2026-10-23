@@ -103,9 +103,15 @@ const REG_OPENED_EXISTING_KEY: u32 = 2;
 const MAX_DATA: u32 = 0x10_0000;
 
 /// A registry function of Unicode strings, which Windows 95 has only as a
-/// stub that returns ERROR_CALL_NOT_IMPLEMENTED.
-fn reg_not_implemented(_: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(ERROR_CALL_NOT_IMPLEMENTED)
+/// stub that sets ERROR_CALL_NOT_IMPLEMENTED and returns 0, as Wine's
+/// registry tests find. Guest code (`win32_dlls`) is written for Windows
+/// NT, where 0 is ERROR_SUCCESS: it gets the error as the result, or
+/// Wine's MSACM32 would go on with a key it never got.
+fn reg_not_implemented(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    if super::called_from_guest(cpu) {
+        return Some(ERROR_CALL_NOT_IMPLEMENTED);
+    }
+    not_implemented(cpu, args)
 }
 
 /// A function Windows 95 has only as a stub that fails.
