@@ -657,6 +657,7 @@ fn changed_settings() -> Settings {
             anisotropy: 8,
             fps_cap: Some(30),
             gamma: Some(1.5),
+            dither: false,
         },
         powervr: Some(crate::powervr::Chip::Pcx2),
         powervr_filter: crate::powervr::tsp::Filter::Point,
@@ -842,6 +843,19 @@ fn voodoo_texture_sampling_parsing_and_default() {
 }
 
 #[test]
+fn voodoo_dither_parsing_and_default() {
+    assert!(Settings::default().voodoo.dither);
+    for (value, expected) in [("false", false), ("true", true), ("off", false)] {
+        let config = parse(&format!("[emulator]\nvoodoo_dither={}\n", value), Path::new("."), None);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        assert_eq!(Settings::from_config(&config).voodoo.dither, expected);
+    }
+    let config = parse("[emulator]\nvoodoo_dither=sometimes\n", Path::new("."), None);
+    assert_eq!(config.warnings.len(), 1);
+    assert!(Settings::from_config(&config).voodoo.dither);
+}
+
+#[test]
 fn saved_settings_parse_back() {
     let home = Path::new("/home/u");
     let settings = changed_settings();
@@ -862,6 +876,7 @@ fn saved_settings_parse_back() {
     assert!(text.contains("#monochrome=off\nmonochrome=green\n"), "{}", text);
     assert!(text.contains("#machine=svga\nmachine=vga\n"), "{}", text);
     assert!(text.contains("#voodoo_texture_sampling=default\nvoodoo_texture_sampling=unfiltered\n"), "{}", text);
+    assert!(text.contains("#voodoo_dither=true\nvoodoo_dither=false\n"), "{}", text);
     assert!(text.contains("#capture_dir=capture\ncapture_dir=~/dos captures\n"), "{}", text);
     assert!(text.contains("#record_ui=false\nrecord_ui=true\n"), "{}", text);
     assert!(text.contains("#record_shader=false\nrecord_shader=true\n"), "{}", text);

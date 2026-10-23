@@ -187,6 +187,7 @@ impl Page {
             }
             Page::Emulator => &[
                 Cycles, AutoFps, AutoBusyOs, Core, Fpu, Cpu, Post, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, VoodooScaleShader, VoodooMsaa,
+                VoodooDither,
                 VoodooAnisotropy, VoodooTextureSampling, VoodooFpsCap, VoodooGamma, VoodooOverlay, PowerVr, PowerVrFilter,
                 VeriteRisc, VeriteMhz, VeriteRom, VeriteIrq,
                 Memsize, Ems, Umb, DosHigh, Dpmi,

@@ -165,6 +165,18 @@ being smoother and taking more of your graphics card. It adds to *3dfx
 OpenGL size*. Antialiasing forced in your graphics driver's control panel
 doesn't reach these pictures; this setting does.
 
+# 3dfx dithering {#voodoo-dither}
+
+The Voodoo stores 16-bit colour and covers the steps between its shades
+with a fine pattern of dots where a game turns dithering on. **On** (the
+default) gives the OpenGL picture the same pattern, so it looks like the
+card's, the dots growing with *3dfx OpenGL size*. **Off** keeps 8 bits a
+colour: a cleaner, smoother picture without the pattern or its banding.
+**On** costs a little of your graphics card's time and none of the
+CPU's. It applies to what the game draws next, so while the game is
+paused the picture doesn't change. Only the **OpenGL** renderer uses it;
+**Rust-DOS** always draws what the card draws.
+
 # 3dfx anisotropic filtering {#voodoo-anisotropy}
 
 Sharpens textures viewed at an angle with anisotropic filtering: **Off**,

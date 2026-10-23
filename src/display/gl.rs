@@ -351,14 +351,16 @@ impl GlScreen {
     }
 
     /// Draw what the 3dfx card recorded, at `scale` times its size with
-    /// `samples` a pixel and `anisotropy` for textures. The error says why
-    /// OpenGL can't; whether the picture may have changed.
+    /// `samples` a pixel and `anisotropy` for textures, dithering as the
+    /// card does with `dither` (`voodoo_dither`). The error says why OpenGL
+    /// can't; whether the picture may have changed.
     pub fn run_voodoo(
         &mut self,
         recording: rust_dos::voodoo::mirror::Frame,
         scale: u32,
         samples: u32,
         anisotropy: u32,
+        dither: bool,
     ) -> Result<bool, String> {
         if self.voodoo_scale().is_some_and(|now| now != (scale, samples, anisotropy)) {
             self.drop_voodoo();
@@ -387,7 +389,10 @@ impl GlScreen {
             self.drop_voodoo();
             return Err(problem);
         }
-        Ok(self.voodoo.as_mut().is_some_and(|voodoo| voodoo.run(&self.gl, recording)))
+        Ok(self.voodoo.as_mut().is_some_and(|voodoo| {
+            voodoo.set_dither(dither);
+            voodoo.run(&self.gl, recording)
+        }))
     }
 
     /// Show the 3dfx card's picture, with what `screen` has over `base`

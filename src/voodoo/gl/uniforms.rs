@@ -62,19 +62,21 @@ vector!([f32; 4], uniform_4_f32, [0, 1, 2, 3]);
 vector!([i32; 3], uniform_3_i32, [0, 1, 2]);
 vector!([i32; 4], uniform_4_i32, [0, 1, 2, 3]);
 
-// The fog tables are kept as the draw state has them, so a draw compares
-// them without converting; they become ints only when they are sent.
+// The fog tables (and a fastfill's dither pattern) are kept as the draw
+// state has them, so a draw compares them without converting; they
+// become ints only when they are sent.
 macro_rules! table {
-    ($ty:ty) => {
-        impl Value for [$ty; 64] {
+    ($ty:ty, $len:literal) => {
+        impl Value for [$ty; $len] {
             unsafe fn upload(self, gl: &glow::Context, location: Option<&glow::UniformLocation>) {
                 unsafe { gl.uniform_1_i32_slice(location, &self.map(i32::from)) };
             }
         }
     };
 }
-table!(u8);
-table!(i16);
+table!(u8, 64);
+table!(i16, 64);
+table!(u16, 16);
 
 macro_rules! locations {
     ($name:ident { $($field:ident: $ty:ty),* $(,)? }) => {
@@ -127,12 +129,19 @@ locations!(Triangle {
     u_tlod1: [i32; 3],
     u_tdetail0: [i32; 3],
     u_tdetail1: [i32; 3],
-    u_constant_depth: i32
+    u_constant_depth: i32,
+    u_dither: i32
 });
 locations!(Quad {
     u_rect: [f32; 4],
     u_size: [f32; 2],
     u_scale: f32
+});
+locations!(FillQuad {
+    u_rect: [f32; 4],
+    u_size: [f32; 2],
+    u_scale: f32,
+    u_pattern: [u16; 16]
 });
 locations!(Banshee {
     u_rect: [f32; 4],

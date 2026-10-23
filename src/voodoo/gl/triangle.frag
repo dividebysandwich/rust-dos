@@ -1,9 +1,21 @@
 // The 3dfx card's pixel pipeline for a triangle's pixel, as the software
 // rasterizer has it (src/voodoo/raster.rs) in the card's integers: the
 // texture units' lookups and combines, the colour and alpha combine,
-// chroma key, alpha mask and test, fog, and the depth value. The depth
-// test, blending and the write masks are OpenGL's own, set for each draw;
-// there is no dithering, as the buffers have 8 bits a component.
+// chroma key, alpha mask and test, fog, the depth value and, with
+// u_dither, the dithering to 5-6-5. The depth test, blending and the write
+// masks are OpenGL's own, set for each draw.
+//
+// The buffers have 8 bits a component. Where fbzMode bit 8 dithers and
+// u_dither is on, the colour is dithered to 5-6-5 with the card's matrix
+// and rounding (`tables::dither_rb`) and widened again as the card's
+// picture widens its pixels, so an unblended pixel is the one the software
+// rasterizer writes. The matrix is indexed by the card's pixel, so above
+// 1x each cell covers u_scale by u_scale buffer pixels. OpenGL blends
+// after the shader, so a blended pixel is dithered before the blend
+// instead of after it, and isn't the card's: the card dithers the blend's
+// result (and with fbzMode bit 19 takes the dither back out of the colour
+// it reads first). The texture units' LOD dither isn't here either, as
+// OpenGL picks the mipmap levels.
 
 noperspective in vec4 v_color;
 noperspective in vec2 v_zw;
@@ -32,6 +44,9 @@ uniform int u_fogdelta[64];
 uniform int u_constant_depth;
 // Buffer pixels a card pixel is across.
 uniform float u_scale;
+// Whether to dither as the card does where fbzMode says so
+// (`voodoo_dither`).
+uniform int u_dither;
 
 // Bit 0 and 1: texture unit 0 and 1 draw; bit 2: unit 0 hands out its
 // configuration (u_config) instead.
@@ -53,6 +68,39 @@ uniform ivec3 u_tdetail1;
 
 bool bit(int v, int n) {
     return ((v >> n) & 1) != 0;
+}
+
+// The card's dither matrices (`tables::DITHER_MATRIX_4X4` and `_2X2`), by
+// row and column.
+const int DITHER4[16] = int[16](0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5);
+const int DITHER2[16] = int[16](2, 10, 2, 10, 14, 6, 14, 6, 2, 10, 2, 10, 14, 6, 14, 6);
+
+// The card's pixel the fragment is in.
+ivec2 cardPixel() {
+    return ivec2(floor(gl_FragCoord.xy / u_scale));
+}
+
+// A pixel's row as the card counts rows when it iterates them, before the
+// Y origin flips them: what the stipple and dither patterns go by.
+int iteratedRow(ivec2 pixel) {
+    return bit(u_fbz, 17) ? u_yorigin - pixel.y : pixel.y;
+}
+
+// Where in the dither matrix a pixel is.
+int ditherIndex(ivec2 pixel) {
+    return ((iteratedRow(pixel) & 3) << 2) | (pixel.x & 3);
+}
+
+bool dithers() {
+    return u_dither != 0 && bit(u_fbz, 8);
+}
+
+// A colour dithered to 5-6-5 and widened back to 8 bits a component.
+ivec3 dither565(ivec3 c, int d) {
+    int r = (((c.r << 1) - (c.r >> 4) + (c.r >> 7) + d) >> 1) >> 3;
+    int g = (((c.g << 2) - (c.g >> 4) + (c.g >> 6) + d) >> 2) >> 2;
+    int b = (((c.b << 1) - (c.b >> 4) + (c.b >> 7) + d) >> 1) >> 3;
+    return ivec3((r << 3) | (r >> 2), (g << 2) | (g >> 4), (b << 3) | (b >> 2));
 }
 
 // A register's colour: red, green, blue and alpha.
@@ -324,7 +372,7 @@ bool alphaTest(int a) {
     return true;
 }
 
-ivec3 fog(ivec3 c, int itera) {
+ivec3 fog(ivec3 c, int itera, ivec2 pixel) {
     ivec3 fc = argb(u_fogcolor).rgb;
     ivec3 f;
     if (bit(u_fog, 5)) {
@@ -341,7 +389,12 @@ ivec3 fog(ivec3 c, int itera) {
             int i = w >> 10;
             // The delta comes masked and signed (`DrawState::fogdelta`).
             int deltaval = u_fogdelta[i] * ((w >> 2) & 0xFF);
-            blend = u_fogblend[i] + (deltaval >> 10);
+            int delta = deltaval >> 10;
+            // fogMode bit 6 dithers the delta with the 4x4 matrix.
+            if (dithers() && bit(u_fog, 6)) {
+                delta = ((deltaval >> 6) + DITHER4[ditherIndex(pixel)]) >> 4;
+            }
+            blend = u_fogblend[i] + delta;
         } else if (source == 1) {
             blend = itera;
         } else if (source == 2) {
@@ -380,10 +433,9 @@ void main() {
     }
 
     // Stippling with the pattern (the rotating one draws every pixel).
-    ivec2 pixel = ivec2(floor(gl_FragCoord.xy / u_scale));
+    ivec2 pixel = cardPixel();
     if (bit(u_fbz, 2) && bit(u_fbz, 12)) {
-        int y = bit(u_fbz, 17) ? u_yorigin - pixel.y : pixel.y;
-        int index = ((y & 3) << 3) | (~pixel.x & 7);
+        int index = ((iteratedRow(pixel) & 3) << 3) | (~pixel.x & 7);
         if (((u_stipple >> index) & 1) == 0) {
             discard;
         }
@@ -415,10 +467,14 @@ void main() {
     int alocal = select == 0 ? iter.a : select == 1 ? color0.a : select == 2 ? clampedZ(v_zw.x) & 0xFF : clampedW(v_zw.y) & 0xFF;
     ivec4 c = combineColor(other, ivec4(local, alocal), texel);
     if (bit(u_fog, 0)) {
-        c.rgb = fog(c.rgb, iter.a);
+        c.rgb = fog(c.rgb, iter.a, pixel);
     }
 
     int depth = u_constant_depth != 0 ? u_zacolor & 0xFFFF : depthValue();
     gl_FragDepth = float(depth) / 65535.0;
+    if (dithers()) {
+        int i = ditherIndex(pixel);
+        c.rgb = dither565(c.rgb, bit(u_fbz, 11) ? DITHER2[i] : DITHER4[i]);
+    }
     o_color = vec4(c) / 255.0;
 }

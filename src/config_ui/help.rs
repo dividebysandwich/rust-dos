@@ -335,6 +335,7 @@ impl Item {
             VoodooScale => "voodoo-scale",
             VoodooScaleShader => "voodoo-scale-shader",
             VoodooMsaa => "voodoo-msaa",
+            VoodooDither => "voodoo-dither",
             VoodooAnisotropy => "voodoo-anisotropy",
             VoodooFpsCap => "voodoo-fps-cap",
             VoodooGamma => "voodoo-gamma",

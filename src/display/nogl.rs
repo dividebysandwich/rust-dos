@@ -78,6 +78,7 @@ impl GlScreen {
         _scale: u32,
         _samples: u32,
         _anisotropy: u32,
+        _dither: bool,
     ) -> Result<bool, String> {
         match *self {}
     }

@@ -193,6 +193,13 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Some(on) => config.voodoo_scale_shader = Some(on),
                             None => warn(format!("invalid voodoo_scale_shader '{}' (true or false)", value)),
                         },
+                        "voodoo_dither" => match parse_bool(value) {
+                            Some(on) => config.voodoo_dither = Some(on),
+                            None => warn(format!(
+                                "invalid voodoo_dither '{}' (true or false)",
+                                value
+                            )),
+                        },
                         "voodoo_msaa" => match value.to_ascii_lowercase().as_str() {
                             "off" | "1" => config.voodoo_msaa = Some(1),
                             "2" | "4" | "8" => config.voodoo_msaa = value.parse().ok(),

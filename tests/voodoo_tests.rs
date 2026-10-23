@@ -1115,7 +1115,14 @@ fn the_opengl_renderer_gets_what_is_drawn() {
     };
     assert_eq!(
         *fill,
-        Fill { dest: 0, rect: [0, 640, 0, 480], color: Some(0x12_3456), aux: Some(0x1234), alpha_planes: false }
+        Fill {
+            dest: 0,
+            rect: [0, 640, 0, 480],
+            color: Some(0x12_3456),
+            aux: Some(0x1234),
+            alpha_planes: false,
+            pattern: None,
+        }
     );
     assert_eq!(draw.vertices.len(), 6, "the same state: one draw");
     assert_eq!(draw.state.clip, Some([0, 640, 0, 480]));

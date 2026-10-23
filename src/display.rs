@@ -346,7 +346,13 @@ impl<'a> Display<'a> {
                     }
                     let Some(recording) = card.take_mirror() else { return false };
                     let shown = recording.shown();
-                    match gl.run_voodoo(recording, settings.scale, settings.msaa, settings.anisotropy) {
+                    match gl.run_voodoo(
+                        recording,
+                        settings.scale,
+                        settings.msaa,
+                        settings.anisotropy,
+                        settings.dither,
+                    ) {
                         Ok(changed) => {
                             // The frame `present` gets does not change with
                             // the card's picture, which the software

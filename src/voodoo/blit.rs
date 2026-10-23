@@ -356,6 +356,7 @@ impl Voodoo {
                     color: colour.then_some(rgb),
                     aux: (!colour).then_some(color),
                     alpha_planes: false,
+                    pattern: None,
                 });
             }
         }
