@@ -181,6 +181,7 @@ static APIS: &[Api] = &[
     stdcall("CreateMRUListLazyA", 157, 4, mru::create_mru_list_lazy),
     stdcall("AddMRUData", 167, 3, mru::add_mru_data),
     stdcall("FindMRUData", 169, 4, mru::find_mru_data),
+    stdcall("TreeViewEditProc", 0, 4, treeview::edit_proc),
 ];
 
 /// COMCTL32's place in `stubs::DLLS`.
@@ -388,7 +389,7 @@ const CLASSES: &[(&str, u32, &str, u32, u32, u32)] = &[
     ),
     (
         "SysTreeView32",
-        class::CS_DBLCLKS | class::CS_VREDRAW | class::CS_HREDRAW,
+        class::CS_DBLCLKS,
         "TreeViewWndProc",
         4,
         32512,
