@@ -7,6 +7,7 @@ mod env;
 mod file;
 mod global;
 mod locale;
+pub(super) mod lz;
 mod mapping;
 mod memory;
 mod message;
@@ -526,6 +527,18 @@ static APIS: &[Api] = &[
     stdcall("GlobalAddAtomW", 489, 1, not_implemented),
     stdcall("CreateProcessW", 490, 10, not_implemented),
     stdcall("WinExec", 510, 2, process::win_exec),
+    stdcall("LZStart", 901, 0, lz::lz_start),
+    stdcall("LZDone", 902, 0, lz::lz_done),
+    stdcall("LZInit", 903, 1, lz::lz_init),
+    stdcall("LZOpenFileA", 904, 3, lz::lz_open_file_a),
+    stdcall("LZOpenFileW", 905, 3, lz::lz_open_file_w),
+    stdcall("LZRead", 906, 3, lz::lz_read),
+    stdcall("LZSeek", 907, 3, lz::lz_seek),
+    stdcall("LZCopy", 908, 2, lz::lz_copy),
+    stdcall("CopyLZFile", 909, 2, lz::lz_copy),
+    stdcall("LZClose", 910, 1, lz::lz_close),
+    stdcall("GetExpandedNameA", 911, 2, lz::get_expanded_name_a),
+    stdcall("GetExpandedNameW", 912, 2, lz::lz_open_file_w),
 ];
 
 /// The places in `APIS` of the system's own stubs.

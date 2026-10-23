@@ -99,6 +99,7 @@ pub static DLLS: &[&Dll] = &[
     &super::comctl32::DLL,
     &super::comctl32::COMDLG32,
     &super::wsock32::DLL,
+    &super::lz32::DLL,
 ];
 
 /// Bytes each function's stub takes.

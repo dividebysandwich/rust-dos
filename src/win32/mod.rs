@@ -27,6 +27,7 @@ mod glide;
 mod heap;
 mod kernel32;
 mod loader;
+mod lz32;
 mod mapping;
 mod memory;
 mod msvcrt;
@@ -211,6 +212,8 @@ pub struct Process {
     dll_tls: Vec<(u32, Vec<u8>)>,
     /// Whether ExitProcess is ending it, telling the DLLs.
     exiting: bool,
+    /// The compressed files LZInit opened (kernel32/lz.rs).
+    lz_files: Vec<kernel32::lz::LzFile>,
 }
 
 impl Process {
@@ -969,6 +972,7 @@ crate::state_fields!(Process {
 
     dll_tls,
     exiting,
+    lz_files,
 });
 crate::state_fields!(Win32 {
     pending,

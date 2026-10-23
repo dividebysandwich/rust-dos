@@ -236,6 +236,9 @@ const LIBS: &[&str] = &[
     "-lgdi32",
     "-lkernel32",
     "-ladvapi32",
+    "-lshell32",
+    "-lversion",
+    "-llz32",
     "-ldxguid",
     "-luuid",
     "-lksuser",
@@ -386,10 +389,15 @@ fn wine_conformance_tests_give_the_expected_results() {
         // (file.c makes WIN.INI) change what directory listings count.
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        // The resources the DLL's tests share (user32's resource.rc),
-        // which each of its programs is linked with.
-        let rc = format!("{ROOT}/wine/{dll}/resource.rc");
-        let resources = Path::new(&rc).exists().then(|| {
+        // The resources the DLL's tests share (user32's resource.rc,
+        // version's version.rc), which each of its programs is linked
+        // with.
+        let rc = fs::read_dir(format!("{ROOT}/wine/{dll}"))
+            .unwrap()
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .find(|name| name.ends_with(".rc"))
+            .map(|name| format!("{ROOT}/wine/{dll}/{name}"));
+        let resources = rc.map(|rc| {
             let object = format!("{OUT}/{dll}/resource.o");
             let include = format!("-I{ROOT}/wine/include");
             let args = [include.as_str(), rc.as_str(), "-O", "coff", "-o", object.as_str()];

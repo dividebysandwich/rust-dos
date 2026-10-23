@@ -43,6 +43,7 @@ change listed below:
   `dlls/winmm/tests/`. `generated.c` is left out: it checks the
   structures' sizes and fields, and MinGW's headers have some of the
   MCI structures' WORD fields as UINTs, so it doesn't build.
+- `lz32/`: `lzexpand_main.c` from `dlls/lz32/tests/`.
 
 `heap.c` has the values of the `FLG_HEAP_*` and `FLG_POOL_ENABLE_TAGGING`
 flags defined after its includes, from Wine's `winternl.h`, as MinGW's
@@ -78,9 +79,9 @@ the multimedia errors, which winmm's tests other than `wave.c` and
 Each of those is linked with it.
 
 The user32 and gdi32 tests link the built-in USER32.DLL and GDI32.DLL.
-Each user32 program is linked with `resource.rc`, compiled with
-MinGW's `i686-w64-mingw32-windres`, or the one `CONFORMANCE_WINDRES`
-names.
+Each program of a DLL whose folder has a resource script (user32's
+`resource.rc`) is linked with it, compiled with MinGW's
+`i686-w64-mingw32-windres`, or the one `CONFORMANCE_WINDRES` names.
 
 The dinput tests link the built-in DINPUT.DLL. They run with the mouse
 as a joystick on the game port, so that `joystick.c`, which tests each

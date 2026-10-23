@@ -179,6 +179,8 @@ kernel32/virtual: skipped virtual.c:609
 kernel32/virtual: skipped virtual.c:634
 kernel32/virtual: skipped virtual.c:795
 kernel32/virtual: skipped virtual.c:952
+lz32/lzexpand_main: lzexpand_main: 112 tests executed (0 marked as todo, 0 failures), 1 skipped.
+lz32/lzexpand_main: skipped lzexpand_main.c:775
 msvcrt/data: data: 7 tests executed (0 marked as todo, 0 failures), 1 skipped.
 msvcrt/data: skipped data.c:96
 msvcrt/dir: dir: 53 tests executed (0 marked as todo, 0 failures), 1 skipped.
