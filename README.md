@@ -119,6 +119,9 @@ it.
 `rust-dos --help` lists the other options, and `rust-dos run PROGRAM`
 runs a DOS tool from the host's shell without a window
 ([more](CONFIGURATION.md#running-dos-tools-from-the-hosts-shell)).
+`rust-dos unpack ARCHIVE` lists or extracts a Windows game's
+InstallShield installer archives without running its setup
+([more](CONFIGURATION.md#unpacking-installshield-installers)).
 
 On Windows (MSVC), take SDL2's Visual C++ development package,
 `SDL2-devel-<version>-VC.zip` from

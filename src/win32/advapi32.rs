@@ -1,6 +1,7 @@
 //! ADVAPI32.DLL: of what Windows 95 has, the registry's functions
 //! (registry.rs has the registry itself), GetUserNameA, and the security
-//! and service functions, which it has only as stubs that fail.
+//! and service functions, which it has only as stubs that fail (or, for
+//! a security descriptor's, succeed without doing anything).
 //!
 //! The registry's functions return an error code, which they don't make
 //! the last error. Their W forms are stubs that return 0 and make the
@@ -36,8 +37,8 @@ const fn stdcall(
 
 /// The functions. Append only (see `stubs`).
 static APIS: &[Api] = &[
-    stdcall("InitializeSecurityDescriptor", 1, 2, not_implemented),
-    stdcall("SetSecurityDescriptorDacl", 2, 4, not_implemented),
+    stdcall("InitializeSecurityDescriptor", 1, 2, succeeds_not_implemented),
+    stdcall("SetSecurityDescriptorDacl", 2, 4, succeeds_not_implemented),
     stdcall("InitializeAcl", 3, 3, not_implemented),
     stdcall("RegOpenKeyA", 4, 3, reg_open_key),
     stdcall("RegOpenKeyExA", 5, 5, reg_open_key_ex),
@@ -57,26 +58,32 @@ static APIS: &[Api] = &[
     stdcall("RegFlushKey", 19, 1, reg_flush_key),
     stdcall("RegConnectRegistryA", 20, 3, reg_connect_registry),
     stdcall("GetUserNameA", 21, 2, get_user_name),
-    stdcall("RegOpenKeyW", 22, 3, not_implemented),
-    stdcall("RegOpenKeyExW", 23, 5, not_implemented),
-    stdcall("RegCreateKeyW", 24, 3, not_implemented),
-    stdcall("RegCreateKeyExW", 25, 9, not_implemented),
-    stdcall("RegQueryValueW", 26, 4, not_implemented),
-    stdcall("RegQueryValueExW", 27, 6, not_implemented),
-    stdcall("RegSetValueW", 28, 5, not_implemented),
-    stdcall("RegSetValueExW", 29, 6, not_implemented),
-    stdcall("RegDeleteKeyW", 30, 2, not_implemented),
-    stdcall("RegDeleteValueW", 31, 2, not_implemented),
-    stdcall("RegEnumKeyW", 32, 4, not_implemented),
-    stdcall("RegEnumKeyExW", 33, 8, not_implemented),
-    stdcall("RegEnumValueW", 34, 8, not_implemented),
-    stdcall("RegQueryInfoKeyW", 35, 12, not_implemented),
-    stdcall("RegConnectRegistryW", 36, 3, not_implemented),
+    stdcall("RegOpenKeyW", 22, 3, reg_not_implemented),
+    stdcall("RegOpenKeyExW", 23, 5, reg_not_implemented),
+    stdcall("RegCreateKeyW", 24, 3, reg_not_implemented),
+    stdcall("RegCreateKeyExW", 25, 9, reg_not_implemented),
+    stdcall("RegQueryValueW", 26, 4, reg_not_implemented),
+    stdcall("RegQueryValueExW", 27, 6, reg_not_implemented),
+    stdcall("RegSetValueW", 28, 5, reg_not_implemented),
+    stdcall("RegSetValueExW", 29, 6, reg_not_implemented),
+    stdcall("RegDeleteKeyW", 30, 2, reg_not_implemented),
+    stdcall("RegDeleteValueW", 31, 2, reg_not_implemented),
+    stdcall("RegEnumKeyW", 32, 4, reg_not_implemented),
+    stdcall("RegEnumKeyExW", 33, 8, reg_not_implemented),
+    stdcall("RegEnumValueW", 34, 8, reg_not_implemented),
+    stdcall("RegQueryInfoKeyW", 35, 12, reg_not_implemented),
+    stdcall("RegConnectRegistryW", 36, 3, reg_not_implemented),
     stdcall("GetUserNameW", 37, 2, not_implemented),
     stdcall("OpenProcessToken", 38, 3, not_implemented),
     stdcall("LookupPrivilegeValueA", 39, 3, not_implemented),
     stdcall("AdjustTokenPrivileges", 40, 6, not_implemented),
     stdcall("OpenSCManagerA", 41, 3, not_implemented),
+    stdcall("SetSecurityDescriptorOwner", 42, 3, succeeds_not_implemented),
+    stdcall("AllocateAndInitializeSid", 43, 11, not_implemented),
+    stdcall("FreeSid", 44, 1, not_implemented),
+    stdcall("EqualSid", 45, 2, not_implemented),
+    stdcall("GetTokenInformation", 46, 5, not_implemented),
+    stdcall("OpenThreadToken", 47, 4, not_implemented),
 ];
 
 const FALSE: u32 = 0;
@@ -102,10 +109,34 @@ const REG_OPENED_EXISTING_KEY: u32 = 2;
 /// The most data a value takes.
 const MAX_DATA: u32 = 0x10_0000;
 
+/// A registry function of Unicode strings, which Windows 95 has only as a
+/// stub that sets ERROR_CALL_NOT_IMPLEMENTED and returns 0, as Wine's
+/// registry tests find. Guest code (`win32_dlls`) is written for Windows
+/// NT, where 0 is ERROR_SUCCESS: it gets the error as the result, or
+/// Wine's MSACM32 would go on with a key it never got.
+fn reg_not_implemented(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    if super::called_from_guest(cpu) {
+        return Some(ERROR_CALL_NOT_IMPLEMENTED);
+    }
+    not_implemented(cpu, args)
+}
+
 /// A function Windows 95 has only as a stub that fails.
 fn not_implemented(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     super::process(cpu).last_error = ERROR_CALL_NOT_IMPLEMENTED;
     Some(FALSE)
+}
+
+/// A security descriptor's function, which Windows 98 SE has as a stub
+/// that does nothing to the descriptor, sets ERROR_CALL_NOT_IMPLEMENTED
+/// and returns TRUE: InitializeSecurityDescriptor,
+/// SetSecurityDescriptorDacl and SetSecurityDescriptorOwner. Setup
+/// programs build a descriptor for RegCreateKeyExA, which ignores it,
+/// and give up on the key when the descriptor fails (InstallShield 5's
+/// engine).
+fn succeeds_not_implemented(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    super::process(cpu).last_error = ERROR_CALL_NOT_IMPLEMENTED;
+    Some(TRUE)
 }
 
 /// The string at `at`, one char per byte, or "" for NULL. None if a page

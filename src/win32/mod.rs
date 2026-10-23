@@ -17,21 +17,29 @@ mod advapi32;
 mod call;
 mod com;
 mod comctl32;
+mod comdlg32;
 mod convert;
 mod ddraw;
 mod dinput;
+mod dmusic;
 mod dplayx;
 mod dsound;
 pub mod gdi32;
 mod glide;
 mod heap;
 mod kernel32;
+mod launcher;
 mod loader;
+mod lz32;
 mod mapping;
 mod memory;
+mod mpr;
 mod msvcrt;
+mod ntdll;
 mod object;
 mod ole32;
+mod oleaut32;
+mod advpack;
 mod registry;
 mod screen;
 mod seh;
@@ -42,7 +50,10 @@ mod system;
 mod task;
 mod thread;
 pub mod user32;
+pub mod version;
+mod verdll;
 mod winmm;
+mod winspool;
 mod wsock32;
 
 pub use snapshot::snapshot;
@@ -121,6 +132,9 @@ const ID_START: u16 = 0xF300;
 
 /// The index of ESP in `Context::gpr`.
 const ESP: usize = 4;
+
+/// What a call of a function the built-in DLLs lack fails with.
+const ERROR_CALL_NOT_IMPLEMENTED: u32 = 120;
 
 /// The exit code of a program that ended because of an error.
 const FAILED: u32 = 0xFF;
@@ -211,6 +225,8 @@ pub struct Process {
     dll_tls: Vec<(u32, Vec<u8>)>,
     /// Whether ExitProcess is ending it, telling the DLLs.
     exiting: bool,
+    /// The compressed files LZInit opened (kernel32/lz.rs).
+    lz_files: Vec<kernel32::lz::LzFile>,
 }
 
 impl Process {
@@ -251,8 +267,23 @@ pub struct Win32 {
     /// Whether PE programs run (the `win32` setting); off, their DOS stub
     /// runs as on DOS.
     pub enabled: bool,
+    /// The host folder of DLLs programs may load as guest code (the
+    /// `win32_dlls` setting), and the built-in DLLs its DLLs replace
+    /// (`win32_dlls_replace`, lowercase names without ".dll").
+    pub guest_dlls: Option<std::path::PathBuf>,
+    pub guest_replace: Vec<String>,
+    /// The version of Windows it is (the `win32_version` setting), and
+    /// the version the running processes see, which is the setting's
+    /// when the first of them started (version.rs).
+    pub version: version::WindowsVersion,
+    os: version::WindowsVersion,
     /// The program DOS loaded, which starts at `START`.
     pending: Option<String>,
+    /// The arguments it starts with when they aren't its PSP's: those
+    /// InstallShield's launcher gives its engine (`launcher`). Not saved
+    /// with the state: a state saved before the engine started has it
+    /// start without them.
+    pending_arguments: Option<String>,
     /// The processes, the one DOS started first. They run in that DOS
     /// process, which waits for the last of them to end.
     processes: Vec<Process>,
@@ -309,6 +340,16 @@ pub struct Win32 {
     winmm: winmm::State,
     glide: glide::State,
     guids: u32,
+    /// DirectMusic's objects (dmusic/).
+    dmusic: dmusic::State,
+    /// The common controls' state, the system's.
+    comctl32: comctl32::State,
+    /// The common dialogs' state.
+    comdlg32: comdlg32::State,
+    /// SHELL32's: its shell links.
+    shell: shell32::State,
+    /// DDEML's instances, string and data handles and conversations.
+    dde: user32::ddeml::State,
 }
 
 impl Win32 {
@@ -316,6 +357,9 @@ impl Win32 {
     pub fn reset(&mut self) {
         *self = Win32 {
             enabled: self.enabled,
+            guest_dlls: self.guest_dlls.take(),
+            guest_replace: std::mem::take(&mut self.guest_replace),
+            version: self.version,
             ..Win32::default()
         };
     }
@@ -353,9 +397,12 @@ impl Win32 {
     }
 
     /// The scale of what the MIDI synthesizer plays (left, right): the
-    /// MIDI device's volume and the mixer's.
+    /// MIDI device's volume and the mixer's, and DirectMusic's master
+    /// volume.
     pub fn midi_gain(&self) -> (f32, f32) {
-        winmm::midi::gain(&self.winmm)
+        let (l, r) = winmm::midi::gain(&self.winmm);
+        let master = dmusic::gain(&self.dmusic);
+        (l * master, r * master)
     }
 
     /// The scale of what the CD drive plays: the mixer's CD line.
@@ -449,11 +496,25 @@ pub fn install_rom(bus: &mut crate::bus::Bus) {
 
 /// DOS loaded the program `filename` (its file is `bytes`) as an EXE: if
 /// it is a PE file and the built-in Windows is on, make it start as a
-/// Win32 program. Returns whether it does.
+/// Win32 program, or the engine it unpacks if it is InstallShield's setup
+/// launcher (`launcher`). Returns whether it does.
 pub fn prepare(cpu: &mut Cpu, filename: &str, bytes: &[u8]) -> bool {
-    if !cpu.bus.win32.enabled || !rust_dos_pe::is_pe(bytes) {
+    if !cpu.bus.win32.enabled {
         return false;
     }
+    // InstallShield's Windows 3.1 setup launcher starts its 32-bit
+    // engine, which runs in its place (`launcher`).
+    let (path, arguments) = if rust_dos_pe::is_pe(bytes) {
+        (cpu.program_path(filename), None)
+    } else if launcher::is_ne(bytes) && !cpu.pe() {
+        let launcher = cpu.program_path(filename);
+        match launcher::engine(cpu, &launcher, bytes) {
+            Some((engine, arguments)) => (engine, Some(arguments)),
+            None => return false,
+        }
+    } else {
+        return false;
+    };
     // Under a virtual-8086 monitor (EMM386, Windows' 386 enhanced mode)
     // the process can't take the processor (`accepts`): the stub runs.
     if cpu.pe() {
@@ -466,10 +527,10 @@ pub fn prepare(cpu: &mut Cpu, filename: &str, bytes: &[u8]) -> bool {
     install_rom(&mut cpu.bus);
     // Keys typed before it started aren't its to read (`take_pressed`).
     cpu.bus.kbd.take_pressed();
-    let path = cpu.program_path(filename);
     cpu.bus
         .log_string(&format!("[W32] {} is a Win32 program", path));
     cpu.bus.win32.pending = Some(path);
+    cpu.bus.win32.pending_arguments = arguments;
     cpu.set_cs(ROM_SEG);
     cpu.set_ip(START);
     true
@@ -519,8 +580,12 @@ fn start(cpu: &mut Cpu) {
     win32.rm_stack = rm_stack;
     win32.a20 = a20;
     win32.cr4 = cr4;
+    version::start(win32);
     let environment = dos_environment(cpu, cpu.current_psp);
-    let line = loader::dos_command_line(cpu, &path);
+    let line = match cpu.bus.win32.pending_arguments.take() {
+        Some(arguments) => format!("{} {}", path, arguments),
+        None => loader::dos_command_line(cpu, &path),
+    };
     match create_process(cpu, &path, &line, environment, Vec::new(), None, Vec::new(), false) {
         Ok(created) => {
             cpu.bus.win32.root = created.process.1;
@@ -758,6 +823,9 @@ fn end_process(cpu: &mut Cpu, index: usize, code: u32) {
     dinput::process_ended(cpu, process.id, &tids);
     winmm::process_ended(cpu, process.id, &tids);
     glide::process_ended(cpu, process.id, &tids);
+    dmusic::process_ended(cpu, process.id);
+    shell32::process_ended(cpu, process.id);
+    user32::ddeml::process_ended(cpu, process.id);
     let win32 = &mut cpu.bus.win32;
     if win32.running != index {
         // Another process's thread runs on.
@@ -811,7 +879,26 @@ fn peek_32(cpu: &Cpu, lin: u32) -> Option<u32> {
     Some(cpu.bus.read_32(phys as usize))
 }
 
-/// The program called a function a built-in DLL doesn't have yet.
+/// Whether the running function of a built-in DLL was called from guest
+/// code (`loader::GUEST`): its return address, at ESP, is in such a DLL.
+fn called_from_guest(cpu: &Cpu) -> bool {
+    guest_caller(cpu).is_some()
+}
+
+/// The name of the guest code module (`loader::GUEST`) the running
+/// function of a built-in DLL was called from, by its return address.
+fn guest_caller(cpu: &Cpu) -> Option<String> {
+    let caller = peek_32(cpu, cpu.esp())?;
+    running(cpu)?
+        .modules
+        .iter()
+        .find(|m| m.flags & loader::GUEST != 0 && caller.wrapping_sub(m.base) < m.size)
+        .map(|m| m.name.clone())
+}
+
+/// The program called a function a built-in DLL doesn't have yet. When
+/// guest code (`loader::GUEST`) calls it, the call fails: it returns 0
+/// with ERROR_CALL_NOT_IMPLEMENTED, and its stub pops the arguments.
 fn missing(cpu: &mut Cpu, index: u16) {
     let caller = peek_32(cpu, cpu.esp()).unwrap_or(0);
     let (dll, function) = process(cpu)
@@ -819,6 +906,18 @@ fn missing(cpu: &mut Cpu, index: u16) {
         .get(index as usize)
         .cloned()
         .unwrap_or_default();
+    if let Some(module) = guest_caller(cpu) {
+        let message = format!(
+            "[W32] {} called {}'s function {} (from {:08X}), which the built-in \
+             Windows doesn't have: it fails",
+            module, dll, function, caller
+        );
+        cpu.bus.log_string(&message);
+        process(cpu).last_error = ERROR_CALL_NOT_IMPLEMENTED;
+        cpu.set_eax(0);
+        cpu.set_eip(cpu.eip().wrapping_add(4));
+        return;
+    }
     let message = format!(
         "{} needs {}'s function {} (called from {:08X}), which the built-in Windows doesn't have yet.",
         process(cpu).name,
@@ -905,9 +1004,18 @@ pub fn process_ended(cpu: &mut Cpu, psp: u16) {
         cpu.bus.win32.dinput = dinput::State::default();
         cpu.bus.win32.winmm = winmm::State::default();
         cpu.bus.win32.glide = glide::State::default();
+        cpu.bus.win32.shell = shell32::State::default();
+        cpu.bus.win32.dde = user32::ddeml::State::default();
         cpu.bus.set_a20(a20);
     }
     cpu.bus.win32.pending = None;
+    cpu.bus.win32.pending_arguments = None;
+}
+
+/// Put the .reg file `text` into the registry, as a game profile's
+/// `<id>.reg` is when the game starts (games.rs).
+pub fn import_registry(cpu: &mut Cpu, text: &str) -> Result<(), String> {
+    registry::import_file(cpu, text)
 }
 
 /// What the trap with id `id` runs, for the disassembler.
@@ -969,6 +1077,7 @@ crate::state_fields!(Process {
 
     dll_tls,
     exiting,
+    lz_files,
 });
 crate::state_fields!(Win32 {
     pending,
@@ -1001,4 +1110,10 @@ crate::state_fields!(Win32 {
     winmm,
     glide,
     guids,
-} skip { enabled });
+    os,
+    dmusic,
+    comctl32,
+    comdlg32,
+    shell,
+    dde,
+} skip { enabled, guest_dlls, guest_replace, version, pending_arguments });

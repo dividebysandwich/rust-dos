@@ -322,6 +322,11 @@ impl DiskController {
         if !path.parent().is_some_and(hostfs::is_dir) {
             return Err(0x03);
         }
+        // A read-only file isn't replaced, even where the host would let
+        // us (root on Unix writes files without write permission).
+        if hostfs::metadata(&path).is_ok_and(|m| m.readonly) {
+            return Err(0x05);
+        }
         let written = hostfs::write(&path, data);
         self.host_dirs.changed();
         self.host_dirs.touched(&path);

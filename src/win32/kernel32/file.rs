@@ -957,7 +957,14 @@ pub(super) fn open_file_16(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         } else {
             OPEN_EXISTING
         };
-        let handle = open_hfile(cpu, &full, style, disposition);
+        // A file OF_CREATE makes is open for reading and writing,
+        // whatever access the style asks for.
+        let access = if style & OF_CREATE != 0 {
+            style & !3 | 2
+        } else {
+            style
+        };
+        let handle = open_hfile(cpu, &full, access, disposition);
         if handle == HFILE_ERROR {
             Err(crate::win32::process(cpu).last_error)
         } else if style & OF_EXIST != 0 {

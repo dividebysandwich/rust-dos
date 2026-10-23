@@ -516,4 +516,9 @@ pub static APIS: &[Api] = &[
     cdecl("_kbhit", 484, 0, io::kbhit),
     cdecl("_getch", 485, 0, stdio::getchar),
     cdecl("?terminate@@YAXXZ", 486, 0, startup::abort),
+    // UCRT's, for ucrtbase.dll's imports (the win32_dlls setting).
+    cdecl("__acrt_iob_func", 487, 1, stdio::acrt_iob_func),
+    cdecl("__stdio_common_vsprintf", 488, 7, stdio::stdio_common_vsprintf),
+    cdecl("__stdio_common_vswprintf", 489, 7, stdio::stdio_common_vswprintf),
+    cdecl("_assert", 490, 3, startup::assert),
 ];

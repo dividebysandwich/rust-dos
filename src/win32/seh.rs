@@ -10,10 +10,13 @@
 //!
 //! A page fault in the part of a thread's stack that is reserved but not
 //! committed yet commits it, and the program goes on: stacks grow as on
-//! Windows.
+//! Windows. A write to a module's resources, which are read-only, makes
+//! their page writable and goes through, as on Windows 98 (VirtualQuery
+//! says PAGE_READONLY and IsBadWritePtr TRUE, and the write still works).
+//! InstallShield's engine changes the bitmaps it loads in place.
 
 use super::call::{self, Call, SEH_FILTER, SEH_HANDLER, SEH_UNWIND};
-use super::memory::{PAGE, USER, WRITABLE};
+use super::memory::{PAGE, PAGE_READWRITE, USER, WRITABLE};
 use super::{Context, ESP, process};
 use crate::cpu::{Cpu, Seg};
 use crate::instructions::fpu::control;
@@ -166,6 +169,39 @@ fn grow_stack(cpu: &mut Cpu, address: u32) -> bool {
     grown.is_some()
 }
 
+/// A write fault at `address` in the resources of one of the running
+/// process's modules: make the page writable. Whether it was one.
+fn write_resource(cpu: &mut Cpu, address: u32) -> bool {
+    let Some(process) = super::running(cpu) else {
+        return false;
+    };
+    let in_resources = process
+        .modules
+        .iter()
+        .filter(|m| (m.base..m.base.saturating_add(m.size)).contains(&address))
+        .any(|m| {
+            let peek = |at: u32| super::loader::peek_32(&cpu.bus, &process.memory, at);
+            // The optional header's resource directory (the third).
+            let directory = peek(m.base + 0x3C).and_then(|pe| {
+                let at = m.base.wrapping_add(pe).wrapping_add(24 + 96 + 2 * 8);
+                Some((peek(at)?, peek(at + 4)?))
+            });
+            directory.is_some_and(|(rva, size)| {
+                let start = m.base.wrapping_add(rva);
+                rva != 0 && (start..start.saturating_add(size)).contains(&address)
+            })
+        });
+    let page = address & !(PAGE - 1);
+    let made = in_resources
+        && super::with_process(cpu, |p, bus| {
+            p.memory.set_protection(bus, page, PAGE_READWRITE)
+        });
+    if made {
+        cpu.tlb.flush_page(page);
+    }
+    made
+}
+
 /// The code and parameters of the exception a fault (`vector`, with the
 /// error code `error`) is, and what it says in a message.
 fn fault_exception(cpu: &Cpu, vector: u8, error: Option<u32>) -> (u32, Vec<u32>, String) {
@@ -239,6 +275,11 @@ fn fpu_exception(cpu: &Cpu) -> u32 {
 /// A fault in the program, at `ctx`: an exception for its handlers.
 pub fn fault(cpu: &mut Cpu, vector: u8, error: Option<u32>, ctx: Context) {
     if vector == 14 && process(cpu).current.is_some() && grow_stack(cpu, cpu.cr2) {
+        super::system::enter_user(cpu, &ctx);
+        return;
+    }
+    // A write (error code bit 1) to a page that is there (bit 0).
+    if vector == 14 && error.is_some_and(|e| e & 3 == 3) && write_resource(cpu, cpu.cr2) {
         super::system::enter_user(cpu, &ctx);
         return;
     }

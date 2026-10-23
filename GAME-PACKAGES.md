@@ -207,7 +207,10 @@ START
   is the [RetroAchievements](CONFIGURATION.md#retroachievements) hash;
   for a zip, Rust-DOS adds it by itself. `os=win98se` runs the game in an
   operating system, as `[rust-dos] os=` does for a DOSBox configuration
-  (see [an operating system](#an-operating-system)).
+  (see [an operating system](#an-operating-system)). `windows=builtin`
+  runs a Windows game in the built-in Windows instead, and an
+  `[install]` section unpacks its installer's archives the first time it
+  starts (see [Windows games](CONFIGURATION.md#windows-games)).
 * **Settings sections** (`[emulator]`, `[sound]`, `[joystick]` and the
   rest) are the game's settings, applied over yours while it runs. List
   only what the game needs; [CONFIGURATION.md](CONFIGURATION.md) has every

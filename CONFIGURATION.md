@@ -413,13 +413,42 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   card's VESA modes or in a window, DirectSound and wave audio in the
   `windows` mixer channel, MIDI to the MPU-401's synthesizer, CD audio
   and MIDI files through MCI, and the keyboard, mouse and joystick
-  through DirectInput. A program that calls a function they don't have
-  ends with a message naming it, and one that needs a DLL that is
-  neither among them nor beside it is refused. The registry is kept in
-  `C:\REGISTRY.REG`, which is made the first time a program uses it, so
-  a host folder mounted as C: gets that file. Off, such a program runs
-  its DOS stub, which says it needs Windows. The plan is in
+  through DirectInput; DMUSIC, DMIME, DMLOADER, DMSTYLE, DMBAND and
+  DMCOMPOS play DirectX 6.1's DirectMusic on the same synthesizer. A
+  program that calls a function they don't have ends with a message
+  naming it, and one that needs a DLL that is neither among them nor
+  beside it is refused. The registry is kept in `C:\REGISTRY.REG`, which
+  is made the first time a program uses it, so a host folder mounted as
+  C: gets that file. Off, such a program runs its DOS stub, which says
+  it needs Windows. The plan is in
   [docs/native-windows.md](docs/native-windows.md).
+* `win32_dlls` names a host folder of Win32 DLLs that programs under the
+  built-in Windows may load as their own code, such as Wine's 32-bit
+  `lib/wine/i386-windows` folder. A DLL a program needs that is neither
+  built in nor on the search path is read from there, as if it were in
+  `C:\WINDOWS\SYSTEM`. A function such a DLL imports that the built-in
+  DLLs don't have fails where it is called, returning 0, instead of
+  ending the program; the folder's import libraries (`lib<name>.a`) say
+  how many bytes of arguments each takes. Empty (the default), there is
+  no such folder. Wine's MSACM32.DLL with its ADPCM codecs runs this
+  way; see "Wine's DLLs as guest code" in
+  [docs/native-windows.md](docs/native-windows.md).
+* `win32_dlls_replace` lists the built-in DLLs that the `win32_dlls`
+  folder's DLLs of the same name replace, separated by commas, such as
+  `comctl32,comdlg32`. Empty (the default), the built-in ones are used.
+* `win32_version` is the version of Windows the built-in Windows is:
+  `95` (the default), `98` or `98se` (Windows 98 Second Edition). It is
+  what GetVersion and GetVersionEx say (4.00.950, 4.10.1998 or 4.10.2222
+  with " A " as its service pack), and what the registry's version
+  values and DirectX's version say. Under `98` and `98se` the built-in
+  DLLs have the functions Windows 98 added, such as MonitorFromWindow
+  and GetFileAttributesExA; under `95` a program that imports one of
+  those doesn't start, as on Windows 95, and its message names the
+  setting. These include USER32's GetAncestor, SendInput,
+  TrackMouseEvent and GetWindowInfo, which earlier releases of rust-dos
+  had under Windows 95 too, so a program that imports them needs `98`.
+  A change takes effect for the next program that starts when none
+  runs.
 * `dos_version` is the DOS version programs are told (INT 21h AH=30h,
   AX=3306h and the PSP's), such as `5.00` (the default), `6.22` or
   `7.10`; `7.1` is 7.10, as DOSBox's `ver` has it. From 7.00 on, DOS
@@ -1169,7 +1198,11 @@ configuration that mounts no C: gets its own folder as C:, and paths it
 doesn't find from its folder are looked for in the folders up to four
 levels above, as collections such as eXoDOS run DOSBox from their root.
 [Packages](GAME-PACKAGES.md#packages-made-for-dosbox) made for DOSBox
-are imported the same way.
+are imported the same way. A GOG install whose launcher starts a Windows
+program instead of DOSBox becomes a profile for the [built-in
+Windows](#windows-games): its folder is C:, and the commands change to
+the task's working folder and run the program by its DOS names, with
+its arguments.
 
 The settings window's **Games** page lists the profiles. Enter launches a
 game at the DOS prompt: its settings apply on top of the configuration's,
@@ -1198,6 +1231,89 @@ or sync, and **R** on the Games page deletes it, taking the game back to
 how it was installed. A drive with its own `-overlay` keeps it. In the
 libretro core, `saves` is in the core's folder in the frontend's save
 directory.
+
+### Windows games
+
+`windows=` in `[game]` says which Windows the game runs in.
+`windows=builtin` runs its program in the built-in Windows, as
+[`win32=true`](#emulator) does, while the game plays. `windows=image`
+says the game runs in a Windows disk image that its `[autoexec]` boots
+(see [an operating system](GAME-PACKAGES.md#an-operating-system)), and
+the profile gets a warning when it boots nothing.
+
+A file `<profile>.reg` beside the profile (`games/oni.reg` for
+`games/oni.conf`) holds the registry keys the game reads, as REGEDIT4 or
+REGEDIT5 has them. Each time the game starts they are put into the
+built-in Windows' registry, `C:\REGISTRY.REG`, over what is there, so
+the game finds what its setup program would have written.
+
+An `[install]` section unpacks the game from its installer's archives
+onto its drives the first time it starts, without running setup: an
+InstallShield 5 or 6 cabinet set (by its `data1.hdr`, or a `data1.cab`
+that holds the header) or an InstallShield 3 archive (`_SETUP.1`, a
+`.Z` file). Each `from=` names one by its DOS path, and the lines after
+it say where its files go:
+
+```ini
+[install]
+from=D:\SETUP\DATA1.HDR
+to=C:\ONI
+group=Files (Program)
+group=Files (Data)|GameDataFolder
+```
+
+| Key | What it does |
+|---|---|
+| `from=` | The cabinet set's header or the InstallShield 3 archive, with its drive. Each starts a step of its own |
+| `to=` | The folder the files go in, with its drive |
+| `group=NAME` | Unpack the cabinet's file group `NAME` (any case) into `to=`; `NAME\|FOLDER` into that folder under it. Without `group=` lines every file goes to its own path |
+| `compression=` | `chunks` (the default) or `markers`, for version 0 sets whose compressed data ends each chunk with `00 00 FF FF` (Unshield's `-O`) |
+
+[`rust-dos unpack --list`](#unpacking-installshield-installers) shows
+a set's file groups and its files. A file a set holds more than one of
+at one path (one per language, say) is unpacked only by a group that
+places it. A step that wrote every file leaves `RUSTDOS.INS` in its
+folder and doesn't run again while that file is there; one that didn't
+says why on the screen and runs again at the next start. With
+`overlay=true` the files go to the game's saves folder, so **R** on the
+Games page takes the install away and the next start unpacks it again.
+
+A game whose setup program runs in the built-in Windows (InstallShield
+5, InstallShield 3 with its 32-bit engine, Wise) can run it the first
+time instead: `IF NOT EXIST` in `[autoexec]` starts the setup while the
+game's program isn't there yet, and the lines after it start the game
+once the setup has ended. The setup asks its questions as it would on
+Windows, and writes its files, registry keys and shortcuts on the
+game's drives. With `overlay=true` they go to the saves folder too, and
+**R** takes the install away.
+
+```ini
+[game]
+name=Enemy Infestation
+windows=builtin
+
+[emulator]
+win32_version=98se
+
+[drives]
+C=~/dos/ei
+D=~/cd/EnemyInfestation.iso cdrom
+
+[autoexec]
+SET TEMP=C:\WINDOWS\TEMP
+D:
+IF NOT EXIST C:\PROGRA~1\ENEMYI~1\EI.EXE SETUP.EXE
+C:
+CD \PROGRA~1\ENEMYI~1
+EI.EXE
+```
+
+A `SETUP.EXE` that is InstallShield's 16-bit launcher, with
+`_INST32I.EX_` beside it, isn't run itself: the built-in Windows
+unpacks the 32-bit engine from that archive into `TEMP` (made if it
+isn't there) and starts it with the command line the launcher gives it
+on Windows 98 SE. A setup on more than one CD asks for the next, which
+Ctrl+F4 puts in when the drive's `[drives]` line lists the images.
 
 ### Keys at the start
 
@@ -3098,3 +3214,31 @@ It reads no configuration file, and the machine has the default hardware.
 | `--mem MB` | The machine's memory, 1 to 256 MB (default 16) |
 | `--screen` | Print the text screen at the end when nothing was printed through DOS, for programs that write to the screen's memory |
 | `--win32` | Run Win32 console programs with the built-in Windows, as `win32=true` does |
+
+### Unpacking InstallShield installers
+
+`rust-dos unpack ARCHIVE` lists or extracts a Windows game's installer
+archives on the host, without running its setup program: an
+InstallShield 5 or 6 cabinet set by its header (`data1.hdr`, or a
+`data1.cab` that holds the header; the other `dataN.cab` volumes are
+found beside it) or an InstallShield 3 archive (`_SETUP.1`, a `.Z`
+file). Each file is checked as it is expanded, by MD5 in version 6 sets
+and by size in the others. A file the set holds more than one of at one
+path is left out unless `--group` names a group that places it.
+
+```sh
+rust-dos unpack --list /cdrom/SETUP/DATA1.HDR
+rust-dos unpack --to ~/games/oni --group "Files (Data)" /cdrom/DATA1.HDR
+rust-dos unpack --old-compression --to out /cdrom/DATA1.CAB
+```
+
+| Option | What it does |
+|---|---|
+| `-l, --list` | List the file groups, the files with their sizes, entries and groups, and the entries that can't be read, with why |
+| `-t, --to DIR` | The folder to extract into (default: the current directory) |
+| `-g, --group NAME` | Extract only the files of this file group; it may be given more than once |
+| `-O, --old-compression` | Read compressed files as raw deflate ending each chunk with `00 00 FF FF`, as some version 0 sets have them (Unshield's `-O`) |
+
+It exits with 1 when the archive doesn't open, a group isn't in it, or a
+file fails its check. A game profile's [`[install]`](#windows-games)
+section unpacks the same archives from the game's drives.

@@ -23,6 +23,9 @@ pub struct Imported {
     pub input: Option<String>,
     /// Its gamepad mapping (`[gamepad]`), as key and value.
     pub pad: Vec<(String, String)>,
+    /// Which Windows it runs in (`[game]`'s `windows`), for a Windows
+    /// game: `builtin` for one GOG starts without DOSBox.
+    pub windows: Option<String>,
     /// What didn't come across, to tell the user.
     pub warnings: Vec<String>,
 }
@@ -42,6 +45,9 @@ impl Imported {
     /// ones it was set up with.
     pub fn profile_text(&self, home: Option<&Path>) -> String {
         let mut text = format!("[game]\nname={}\noverlay=true\n", self.name);
+        if let Some(windows) = &self.windows {
+            text.push_str(&format!("windows={}\n", windows));
+        }
         text.push_str(&self.settings_text());
         if !self.drives.is_empty() {
             text.push_str("\n[drives]\n");

@@ -133,6 +133,42 @@ impl DosVersion {
     }
 }
 
+/// The version of Windows the built-in Windows is (`win32_version`):
+/// what GetVersion says, the registry's version values, and which
+/// functions the built-in DLLs export.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum WindowsVersion {
+    #[default]
+    Win95,
+    Win98,
+    Win98Se,
+}
+
+impl WindowsVersion {
+    /// "95", "98" or "98se".
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "95" => Some(Self::Win95),
+            "98" => Some(Self::Win98),
+            "98se" => Some(Self::Win98Se),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Win95 => "95",
+            Self::Win98 => "98",
+            Self::Win98Se => "98se",
+        }
+    }
+
+    /// Windows 98 or its Second Edition.
+    pub fn is_98(self) -> bool {
+        self >= Self::Win98
+    }
+}
+
 /// A yes/no setting: true, on, yes or 1, or false, off, no or 0.
 pub(super) fn parse_bool(value: &str) -> Option<bool> {
     match value.to_ascii_lowercase().as_str() {

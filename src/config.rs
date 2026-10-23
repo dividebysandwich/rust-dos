@@ -41,7 +41,7 @@ pub use edit::{
 };
 pub use parse::{MAX_MEMSIZE, MIN_MEMSIZE, parse, parse_memsize};
 pub use settings::{Settings, parse_mouse_sensitivity};
-pub use types::{AspectRatio, DosVersion, Filter, MidiSynth, Mt32Model, SoundConfig};
+pub use types::{AspectRatio, DosVersion, Filter, MidiSynth, Mt32Model, SoundConfig, WindowsVersion};
 
 /// Written to the default location on first start.
 pub const TEMPLATE: &str = include_str!("../rust-dos.conf.example");
@@ -195,6 +195,13 @@ pub struct Config {
     pub dpmi: Option<bool>,
     /// The built-in Windows (`win32`).
     pub win32: Option<bool>,
+    /// A host folder of Win32 DLLs programs may load as guest code
+    /// (`win32_dlls`), and the built-in DLLs they replace
+    /// (`win32_dlls_replace`).
+    pub win32_dlls: Option<PathBuf>,
+    pub win32_dlls_replace: Option<Vec<String>>,
+    /// The version of Windows it is (`win32_version`).
+    pub win32_version: Option<WindowsVersion>,
     /// DOS's tables packed low, as DOS=HIGH has them (`dos_high`).
     pub dos_high: Option<bool>,
     /// The DOS version programs are told (`dos_version`).
@@ -287,6 +294,12 @@ pub struct Config {
     /// A game profile's `[gamepad]` lines, as written (padmap.rs reads
     /// them).
     pub game_pad: Vec<(String, String)>,
+    /// Which Windows a game profile runs in (`[game]`'s `windows`, see
+    /// games.rs): `builtin` or `image`.
+    pub game_windows: Option<String>,
+    /// A game profile's `[install]` lines, keys lowercased (install.rs
+    /// reads them).
+    pub game_install: Vec<(String, String)>,
     /// Problems worth telling the user about; none of them are fatal.
     pub warnings: Vec<String>,
 }
@@ -319,6 +332,8 @@ enum Section {
     Game,
     /// A game profile's gamepad mapping (padmap.rs).
     Gamepad,
+    /// A game profile's installer archives (install.rs).
+    Install,
     Unknown,
 }
 
@@ -341,6 +356,7 @@ impl Section {
             "autoexec" => Section::Autoexec,
             "game" => Section::Game,
             "gamepad" => Section::Gamepad,
+            "install" => Section::Install,
             _ => Section::Unknown,
         }
     }
@@ -363,6 +379,7 @@ impl Section {
             Section::Autoexec => "autoexec",
             Section::Game => "game",
             Section::Gamepad => "gamepad",
+            Section::Install => "install",
             Section::None | Section::Unknown => "",
         }
     }

@@ -345,6 +345,16 @@ fn dlg_item(state: &State, dlg: u32, id: u32) -> u32 {
         .unwrap_or(0)
 }
 
+/// DIALOG_IdToHwnd: the descendant with the id, a child first. A
+/// property sheet's default button can be on one of its pages.
+fn id_to_hwnd(state: &State, dlg: u32, id: u32) -> u32 {
+    let mut list = Vec::new();
+    descendants(state, dlg, &mut list);
+    list.into_iter()
+        .find(|&c| ctrl_id(state, c) == id)
+        .unwrap_or(0)
+}
+
 /// The window's descendants in the order EnumChildWindows gives them.
 fn descendants(state: &State, hwnd: u32, out: &mut Vec<u32>) {
     for c in children(state, hwnd) {
@@ -2160,7 +2170,7 @@ fn message_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             let state = user(cpu);
             if value >> 16 == DC_HASDEFID {
                 let id = value & 0xFFFF;
-                let def = dlg_item(state, dlg, id);
+                let def = id_to_hwnd(state, dlg, id);
                 let enabled = if def != 0 {
                     style(state, def) & WS_DISABLED == 0
                 } else {

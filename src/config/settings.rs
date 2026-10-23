@@ -1,6 +1,6 @@
 //! The settings in effect, and every setting as the file writes it.
 
-use super::{AspectRatio, Config, DosVersion, Filter, Section, SoundConfig};
+use super::{AspectRatio, Config, DosVersion, Filter, Section, SoundConfig, WindowsVersion};
 use crate::cpu::{CoreMode, CpuModel};
 use crate::diskio::DiskSettings;
 use crate::joystick::JoystickSettings;
@@ -71,6 +71,14 @@ pub struct Settings {
     /// The built-in Windows runs Win32 console programs (`win32`), the
     /// start of the work in docs/native-windows.md.
     pub win32: bool,
+    /// A host folder of Win32 DLLs (`win32_dlls`) that programs may load
+    /// as guest code when no built-in DLL has the name, or when the
+    /// built-in one is named in `win32_dlls_replace` (lowercase, without
+    /// ".dll").
+    pub win32_dlls: Option<PathBuf>,
+    pub win32_dlls_replace: Vec<String>,
+    /// The version of Windows the built-in Windows is.
+    pub win32_version: WindowsVersion,
     /// DOS's tables packed below the first MCB, as DOS=HIGH leaves
     /// conventional memory, rather than spread out up to 64 KB.
     pub dos_high: bool,
@@ -162,6 +170,9 @@ impl Default for Settings {
             umb: true,
             dpmi: true,
             win32: false,
+            win32_dlls: None,
+            win32_dlls_replace: Vec::new(),
+            win32_version: WindowsVersion::Win95,
             dos_high: true,
             dos_version: DosVersion::default(),
             ide_hard_disks: true,
@@ -297,6 +308,12 @@ impl Settings {
             umb: config.umb.unwrap_or(default.umb),
             dpmi: config.dpmi.unwrap_or(default.dpmi),
             win32: config.win32.unwrap_or(default.win32),
+            win32_dlls: config.win32_dlls.clone().or(default.win32_dlls),
+            win32_dlls_replace: config
+                .win32_dlls_replace
+                .clone()
+                .unwrap_or(default.win32_dlls_replace),
+            win32_version: config.win32_version.unwrap_or(default.win32_version),
             dos_high: config.dos_high.unwrap_or(default.dos_high),
             dos_version: config.dos_version.unwrap_or(default.dos_version),
             ide_hard_disks: config.ide_hard_disks.unwrap_or(default.ide_hard_disks),
@@ -409,6 +426,13 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
         (Emulator, "umb", yes_no(settings.umb)),
         (Emulator, "dpmi", yes_no(settings.dpmi)),
         (Emulator, "win32", yes_no(settings.win32)),
+        (Emulator, "win32_dlls", settings.win32_dlls.as_deref().map(|p| contract_home(p, home))),
+        (
+            Emulator,
+            "win32_dlls_replace",
+            Some(settings.win32_dlls_replace.join(",")).filter(|names| !names.is_empty()),
+        ),
+        (Emulator, "win32_version", Some(settings.win32_version.name().to_string())),
         (Emulator, "dos_high", yes_no(settings.dos_high)),
         (Emulator, "dos_version", Some(settings.dos_version.name())),
         (Emulator, "ide_hard_disks", yes_no(settings.ide_hard_disks)),
@@ -484,4 +508,15 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
     let vfx1 = settings.vfx1.entries().into_iter();
     entries.extend(vfx1.map(|(key, value)| (Section::Vfx1, key, value)));
     entries
+}
+
+/// The DLL names of a `win32_dlls_replace` list: separated by commas or
+/// spaces, lowercase, without ".dll".
+pub fn dll_names(value: &str) -> Vec<String> {
+    value
+        .split([',', ' ', '\t'])
+        .map(|name| name.trim().trim_matches('"').to_ascii_lowercase())
+        .map(|name| name.strip_suffix(".dll").map(str::to_string).unwrap_or(name))
+        .filter(|name| !name.is_empty())
+        .collect()
 }

@@ -116,6 +116,10 @@ pub(super) fn create_thread(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             (TIB_STACK_LIMIT, top - commit),
             (TIB_SELF, tib),
             (TIB_TLS_ARRAY, tib + TLS_ARRAY),
+            (
+                crate::win32::loader::TIB_PROCESS,
+                crate::win32::loader::process_block(p.command_line),
+            ),
         ] {
             memory.write_32(bus, tib + field, value)?;
         }

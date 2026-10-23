@@ -72,6 +72,9 @@ rust-dos-zip = { path = "crates/zip" }
 rust-dos-rc = { path = "crates/rc" }
 # Win32 programs' PE files, for the built-in Windows (crates/pe).
 rust-dos-pe = { path = "crates/pe" }
+# InstallShield's installer archives, unpacked by `rust-dos unpack` and
+# game profiles' installs (crates/installshield).
+rust-dos-installshield = { path = "crates/installshield" }
 # The sound cards, each a crate of its own (crates/).
 rust-dos-opl = { path = "crates/opl" }
 rust-dos-tandy = { path = "crates/tandy" }
@@ -212,6 +215,8 @@ embed-resource = "3"
 [dev-dependencies]
 # Writes the zip archives of the tests.
 rust-dos-zip = { path = "crates/zip", features = ["test-util"] }
+# Writes the InstallShield archives of the install tests.
+rust-dos-installshield = { path = "crates/installshield", features = ["test-util"] }
 # Writes the 7z archives of src/archive's tests.
 sevenz-rust2 = { version = "0.22", default-features = false, features = ["compress"] }
 # Reads the gzip-compressed SingleStepTests suite in tests/sst386.rs.
