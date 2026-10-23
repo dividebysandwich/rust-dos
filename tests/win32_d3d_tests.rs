@@ -1034,7 +1034,11 @@ fn scene_program_in(scene: &Scene, bpp: u32) -> (Vec<u8>, u32) {
     put32(&mut d, Z_DESC + 0x48, 32);
     put32(&mut d, Z_DESC + 0x4C, DDPF_ZBUFFER);
     put32(&mut d, Z_DESC + 0x54, bpp);
-    put32(&mut d, Z_DESC + 0x5C, if bpp == 32 { 0xFF_FFFF } else { 0xFFFF });
+    put32(
+        &mut d,
+        Z_DESC + 0x5C,
+        if bpp == 32 { 0xFF_FFFF } else { 0xFFFF },
+    );
     put32(&mut d, Z_DESC + 0x68, DDSCAPS_ZBUFFER | DDSCAPS_VIDEOMEMORY);
     put32(&mut d, TEX_DESC, 124);
     put32(&mut d, TEX_DESC + 0x04, flags);
@@ -1536,8 +1540,15 @@ fn a_32_bit_target_keeps_its_clear_color_exactly_and_widens_drawn_pixels() {
         assert_eq!(p[30 * 64 + 48], 0x12_3456, "{test}: cleared pixel");
         let drawn = p[30 * 64 + 16];
         let [b, g, r, _] = drawn.to_le_bytes().map(u32::from);
-        assert_eq!((r >> 5, b >> 5, g >> 6), (r & 7, b & 7, g & 3), "{test}: {drawn:06X}");
-        assert!(near([r, g, b], [0x80, 0x40, 0xC0], 8), "{test}: {drawn:06X}");
+        assert_eq!(
+            (r >> 5, b >> 5, g >> 6),
+            (r & 7, b & 7, g & 3),
+            "{test}: {drawn:06X}"
+        );
+        assert!(
+            near([r, g, b], [0x80, 0x40, 0xC0], 8),
+            "{test}: {drawn:06X}"
+        );
     }
 }
 

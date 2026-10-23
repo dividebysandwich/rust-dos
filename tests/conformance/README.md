@@ -227,7 +227,6 @@ The results that aren't clean, and why:
   `943` wants destination alpha, which a 565 shadow doesn't have.
   `2680` skips: there are no cube maps.
 
-
 - winmm `mci.c:438` skips its recording tests, as there is no wave
   input device, and `515`, `634` and `870` skip the plays of the file
   those tests would have saved.

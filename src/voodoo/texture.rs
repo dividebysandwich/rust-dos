@@ -267,8 +267,7 @@ impl Tmu {
         const COPIES: usize = 8;
         let writes = self.writes;
         // Beyond that the counts can't tell what was written since.
-        self.spares
-            .retain(|&(_, at)| writes.wrapping_sub(at) < 1 << 30);
+        self.spares.retain(|&(_, at)| writes.wrapping_sub(at) < 1 << 30);
         let mut free = None;
         for (i, (ram, at)) in self.spares.iter_mut().enumerate() {
             let newer = free.is_none_or(|(_, newest): (usize, u32)| {

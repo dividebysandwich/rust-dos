@@ -62,7 +62,12 @@ pub struct State {
     pub gu: gu::Gu,
 }
 
-crate::state_fields!(State { owner, screen, gc, gu });
+crate::state_fields!(State {
+    owner,
+    screen,
+    gc,
+    gu
+});
 
 pub fn state(cpu: &mut Cpu) -> &mut State {
     &mut cpu.bus.win32.glide

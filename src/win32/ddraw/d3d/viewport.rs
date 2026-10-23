@@ -375,7 +375,15 @@ pub fn clear2(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, count, rects, flags, color, z, _] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
     };
-    clear_with(cpu, this, count, rects, flags, Some(color), f32::from_bits(z))
+    clear_with(
+        cpu,
+        this,
+        count,
+        rects,
+        flags,
+        Some(color),
+        f32::from_bits(z),
+    )
 }
 
 /// Clear the rectangles of the viewport's device's render target

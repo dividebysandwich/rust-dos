@@ -50,7 +50,12 @@ static APIS: &[Api] = &[
     ),
     stdcall("SHGetPathFromIDListA", 1006, 2, sh_get_path_from_id_list),
     stdcall("SHGetPathFromIDList", 1007, 2, sh_get_path_from_id_list),
-    stdcall("SHGetSpecialFolderPathA", 1008, 4, sh_get_special_folder_path),
+    stdcall(
+        "SHGetSpecialFolderPathA",
+        1008,
+        4,
+        sh_get_special_folder_path,
+    ),
     stdcall("SHGetMalloc", 1009, 1, sh_get_malloc),
     stdcall("SHBrowseForFolderA", 1010, 1, null),
     stdcall("SHBrowseForFolder", 1011, 1, null),

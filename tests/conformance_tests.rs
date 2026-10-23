@@ -430,7 +430,6 @@ fn wine_conformance_tests_give_the_expected_results() {
                     // has a device on a 3dfx card.
                     let voodoo3 = dll == "ddraw" && ["d3d", "visual"].contains(&unit.as_str());
                     let (output, exit) = run(&dir, &name, &unit, model, joystick, voodoo3);
-
                     fs::write(dir.join(format!("{}.log", unit)), &output).unwrap();
                     results(&output, exit)
                 }

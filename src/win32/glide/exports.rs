@@ -193,10 +193,8 @@ fn hwconfig(cpu: &mut Cpu) -> Option<[u8; HWCONFIG_SIZE]> {
     let (kind, fbi_rev, tmu_rev) = match board.card {
         hw::Card::Voodoo1 => (0, 2, 1),
         hw::Card::Voodoo2 => {
-            let real = crate::win32::kernel32::has_environment_variable(
-                cpu,
-                "FX_GLIDE_REPORT_REAL_HW",
-            );
+            let real =
+                crate::win32::kernel32::has_environment_variable(cpu, "FX_GLIDE_REPORT_REAL_HW");
             let fbi_rev = 4 + if board.tmus > 1 { 0x100 } else { 0x80 };
             (if real { 3 } else { 0 }, fbi_rev, 2)
         }

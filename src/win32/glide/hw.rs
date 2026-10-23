@@ -451,13 +451,7 @@ fn read_init(cpu: &Cpu, reg: usize) -> u32 {
 /// so that no surface gets it while Glide has it. Glide's buffers are at
 /// its top, tiled, and the overlay shows the front one over the mode's
 /// picture; the textures have the memory below them.
-fn open_banshee(
-    cpu: &mut Cpu,
-    width: u32,
-    height: u32,
-    colors: u32,
-    auxes: u32,
-) -> bool {
+fn open_banshee(cpu: &mut Cpu, width: u32, height: u32, colors: u32, auxes: u32) -> bool {
     if width > 1600 || height > 1200 {
         return false;
     }
