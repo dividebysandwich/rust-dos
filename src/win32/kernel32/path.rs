@@ -64,7 +64,7 @@ fn letter(drive: u8) -> char {
 }
 
 /// The drive a full path ("C:\...") is on.
-fn drive_of(full: &str) -> u8 {
+pub(super) fn drive_of(full: &str) -> u8 {
     full.as_bytes()[0].to_ascii_uppercase().wrapping_sub(b'A')
 }
 
@@ -128,7 +128,7 @@ pub(crate) fn full_path(cpu: &Cpu, path: &str) -> String {
 }
 
 /// `full` without the backslash at its end, but a root's.
-fn trim_slash(full: &str) -> &str {
+pub(super) fn trim_slash(full: &str) -> &str {
     match full.strip_suffix('\\') {
         Some(trimmed) if trimmed.len() > 2 => trimmed,
         _ => full,
@@ -137,7 +137,7 @@ fn trim_slash(full: &str) -> &str {
 
 /// The error for a file that isn't there: its directory isn't either
 /// (ERROR_PATH_NOT_FOUND), or it is (ERROR_FILE_NOT_FOUND).
-fn not_found(cpu: &Cpu, full: &str) -> u32 {
+pub(super) fn not_found(cpu: &Cpu, full: &str) -> u32 {
     let full = trim_slash(full);
     let parent = match full.rfind('\\') {
         Some(i) if i <= 2 => &full[..3],
@@ -481,7 +481,7 @@ pub(super) fn search_path(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// The path at `at` as DOS takes it, or with the last error
 /// ERROR_PATH_NOT_FOUND, None inside: None if a page isn't there.
-fn path_arg(cpu: &mut Cpu, at: u32) -> Option<Option<String>> {
+pub(super) fn path_arg(cpu: &mut Cpu, at: u32) -> Option<Option<String>> {
     if at == 0 {
         set_error(cpu, ERROR_PATH_NOT_FOUND);
         return Some(None);
@@ -495,7 +495,7 @@ fn path_arg(cpu: &mut Cpu, at: u32) -> Option<Option<String>> {
 }
 
 /// Whether a full path is a drive's root ("C:\").
-fn is_root(full: &str) -> bool {
+pub(super) fn is_root(full: &str) -> bool {
     full.len() <= 3
 }
 
@@ -786,7 +786,7 @@ fn matches(name: &str, pattern: &str) -> bool {
 
 /// The entries of the directory `dir` (a full path) whose long or short
 /// names match `pattern`.
-fn find_entries(cpu: &Cpu, dir: &str, pattern: &str) -> Result<Vec<FindEntry>, u32> {
+pub(super) fn find_entries(cpu: &Cpu, dir: &str, pattern: &str) -> Result<Vec<FindEntry>, u32> {
     let disk = &cpu.bus.disk;
     let spec = format!("{}\\*.*", dir.trim_end_matches('\\'));
     let listed = disk.list_directory(&spec, 0x16).map_err(|e| e as u32)?;

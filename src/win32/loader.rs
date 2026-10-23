@@ -565,7 +565,7 @@ pub(super) fn map_builtin(
     if let Some(m) = process.modules.iter().find(|m| m.base == dll.base) {
         return Some(m.base);
     }
-    let built = stubs::image(index);
+    let built = stubs::image(index, bus.win32.os);
     let size = built.headers.size_of_image;
     memory.reserve_image(Some(dll.base), size, SHARED, SYSTEM)?;
     memory.commit(bus, dll.base, size.next_multiple_of(PAGE), USER)?;
@@ -868,7 +868,8 @@ pub(super) fn tls_blocks(bus: &mut Bus, process: &mut Process, tib: u32) -> Opti
 /// and write the addresses of the functions it imports to its import
 /// address table. The functions of the built-in DLLs that they don't have
 /// yet get stubs that say so; a DLL file without a function fails the
-/// load. The modules it took a reference on.
+/// load, as does a built-in DLL's function of Windows 98 under 95. The
+/// modules it took a reference on.
 fn bind_imports(
     l: &mut Loader,
     base: u32,
@@ -899,9 +900,18 @@ fn bind_imports(
                 pe::Import::Ordinal(ordinal) => Wanted::Ordinal(*ordinal),
             };
             let found = resolve_export(l, dep, &wanted, importer, &mut deps, 0)?;
+            // A function the built-in DLL has only under Windows 98 is
+            // missing under 95 as on Windows 95, and the program doesn't
+            // load.
+            let withheld = match (&wanted, &builtin) {
+                (Wanted::Name(name), Some(dll)) => {
+                    !super::version::exports(l.bus.win32.os, dll, name)
+                }
+                _ => false,
+            };
             let address = match (found, &builtin) {
                 (Some(address), _) => address,
-                (None, Some(builtin)) => {
+                (None, Some(builtin)) if !withheld => {
                     let what = wanted.to_string();
                     let arg_bytes = match &wanted {
                         Wanted::Name(name) if guest => {
@@ -914,7 +924,7 @@ fn bind_imports(
                     missing_stub(l.bus, l.memory, l.process, builtin, &what, arg_bytes)
                         .ok_or_else(|| out_of_memory(importer))?
                 }
-                (None, None) => {
+                (None, _) => {
                     return Err(LoadError {
                         code: ERROR_PROC_NOT_FOUND,
                         message: format!(

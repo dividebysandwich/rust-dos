@@ -517,6 +517,7 @@ impl Host for MainHost<'_, '_> {
         self.cpu.bus.win32.enabled = new.win32;
         self.cpu.bus.win32.guest_dlls = new.win32_dlls.clone();
         self.cpu.bus.win32.guest_replace = new.win32_dlls_replace.clone();
+        self.cpu.bus.win32.version = new.win32_version;
         // Glide's DOS overlay, once downloaded.
         rust_dos::voodoo::overlay::provide(&mut self.cpu.bus);
         self.cpu.bus.ide_hard_disks = new.ide_hard_disks;

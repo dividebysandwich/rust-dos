@@ -41,7 +41,7 @@ pub use edit::{
 };
 pub use parse::{MAX_MEMSIZE, MIN_MEMSIZE, parse, parse_memsize};
 pub use settings::{Settings, parse_mouse_sensitivity};
-pub use types::{AspectRatio, DosVersion, Filter, MidiSynth, Mt32Model, SoundConfig};
+pub use types::{AspectRatio, DosVersion, Filter, MidiSynth, Mt32Model, SoundConfig, WindowsVersion};
 
 /// Written to the default location on first start.
 pub const TEMPLATE: &str = include_str!("../rust-dos.conf.example");
@@ -200,6 +200,8 @@ pub struct Config {
     /// (`win32_dlls_replace`).
     pub win32_dlls: Option<PathBuf>,
     pub win32_dlls_replace: Option<Vec<String>>,
+    /// The version of Windows it is (`win32_version`).
+    pub win32_version: Option<WindowsVersion>,
     /// DOS's tables packed low, as DOS=HIGH has them (`dos_high`).
     pub dos_high: Option<bool>,
     /// The DOS version programs are told (`dos_version`).

@@ -49,6 +49,13 @@ dinput/device: device: 29 tests executed (0 marked as todo, 0 failures), 0 skipp
 dinput/joystick: joystick: 195 tests executed (0 marked as todo, 0 failures), 0 skipped.
 dinput/keyboard: keyboard: 57 tests executed (0 marked as todo, 0 failures), 0 skipped.
 dinput/mouse: mouse: 45 tests executed (0 marked as todo, 0 failures), 0 skipped.
+dmime/performance: performance: 0 tests executed (0 marked as todo, 0 failures), 1 skipped.
+dmime/performance: skipped performance.c:85
+dmloader/loader: loader: 0 tests executed (0 marked as todo, 0 failures), 1 skipped.
+dmloader/loader: skipped loader.c:42
+dmusic/dmusic: dmusic: 0 tests executed (0 marked as todo, 0 failures), 2 skipped.
+dmusic/dmusic: skipped dmusic.c:67
+dmusic/dmusic: skipped dmusic.c:154
 dsound/capture: capture: 29 tests executed (0 marked as todo, 0 failures), 0 skipped.
 dsound/ds3d: ds3d: 849 tests executed (0 marked as todo, 0 failures), 0 skipped.
 dsound/ds3d8: ds3d8: 0 tests executed (0 marked as todo, 0 failures), 1 skipped.
@@ -141,10 +148,10 @@ kernel32/module: failed module.c:259
 kernel32/module: failed module.c:270
 kernel32/module: failed module.c:282
 kernel32/module: failed module.c:374
-kernel32/path: path: 1149 tests executed (0 marked as todo, 0 failures), 11 skipped.
-kernel32/path: skipped path.c:1708
+kernel32/path: path: 1797 tests executed (0 marked as todo, 0 failures), 11 skipped.
 kernel32/path: skipped path.c:1710
 kernel32/path: skipped path.c:926 (x3)
+kernel32/path: skipped path.c:1036
 kernel32/path: skipped path.c:1224
 kernel32/path: skipped path.c:1371
 kernel32/path: skipped path.c:1398
@@ -241,7 +248,7 @@ user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
-user32/msg: msg: 11048 tests executed (0 marked as todo, 656 failures), 6 skipped.
+user32/msg: msg: 11048 tests executed (0 marked as todo, 618 failures), 6 skipped.
 user32/msg: skipped msg.c:12537
 user32/msg: failed msg.c:8462
 user32/msg: skipped msg.c:12177
@@ -454,31 +461,14 @@ user32/msg: failed msg.c:11071
 user32/msg: failed msg.c:11082 (x8)
 user32/msg: failed msg.c:11092
 user32/msg: failed msg.c:11098
-user32/msg: failed msg.c:10205
-user32/msg: failed msg.c:10215
-user32/msg: failed msg.c:10225
-user32/msg: failed msg.c:10239 (x4)
-user32/msg: failed msg.c:10240
-user32/msg: failed msg.c:10241 (x4)
-user32/msg: failed msg.c:10246
-user32/msg: failed msg.c:10253
-user32/msg: failed msg.c:10261
-user32/msg: failed msg.c:10262
+user32/msg: failed msg.c:10241 (x2)
 user32/msg: failed msg.c:10263
 user32/msg: failed msg.c:10267
-user32/msg: failed msg.c:10269 (x4)
-user32/msg: failed msg.c:10271
-user32/msg: failed msg.c:10272 (x4)
-user32/msg: failed msg.c:10278 (x4)
+user32/msg: failed msg.c:10269 (x2)
 user32/msg: failed msg.c:10281
-user32/msg: failed msg.c:10283 (x4)
-user32/msg: failed msg.c:10285
-user32/msg: failed msg.c:10286 (x4)
+user32/msg: failed msg.c:10283 (x3)
 user32/msg: failed msg.c:10289
-user32/msg: failed msg.c:10291 (x4)
-user32/msg: failed msg.c:10293
-user32/msg: failed msg.c:10294 (x4)
-user32/msg: failed msg.c:10295
+user32/msg: failed msg.c:10291 (x3)
 user32/msg: failed msg.c:10365
 user32/msg: failed msg.c:10369
 user32/msg: failed msg.c:10373
@@ -515,10 +505,8 @@ user32/text: text: 197 tests executed (0 marked as todo, 0 failures), 2 skipped.
 user32/text: skipped text.c:119
 user32/text: skipped text.c:554
 user32/uitools: uitools: 6 tests executed (0 marked as todo, 0 failures), 0 skipped.
-user32/win: win: 7975 tests executed (0 marked as todo, 64 failures), 10 skipped.
-user32/win: skipped win.c:5583
+user32/win: win: 10408 tests executed (0 marked as todo, 64 failures), 8 skipped.
 user32/win: skipped win.c:5400
-user32/win: skipped win.c:3845
 user32/win: skipped win.c:2891
 user32/win: failed win.c:4616
 user32/win: failed win.c:4620

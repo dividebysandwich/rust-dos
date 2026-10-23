@@ -20,6 +20,8 @@ mod sync;
 mod text;
 mod threads;
 mod time;
+mod win98;
+pub use win98::is_directory;
 pub(crate) mod virtual_memory;
 
 pub(super) use locale::enum_returned;
@@ -527,7 +529,13 @@ static APIS: &[Api] = &[
     stdcall("GlobalAddAtomW", 489, 1, not_implemented),
     stdcall("CreateProcessW", 490, 10, not_implemented),
     stdcall("WinExec", 510, 2, process::win_exec),
-    stdcall("GetPrivateProfileSectionW", 511, 4, profile::get_private_profile_section_w),
+    stdcall("GetDiskFreeSpaceExA", 511, 4, win98::get_disk_free_space_ex),
+    stdcall("IsDebuggerPresent", 512, 0, win98::is_debugger_present),
+    stdcall("InterlockedCompareExchange", 513, 3, win98::interlocked_compare_exchange),
+    stdcall("InterlockedExchangeAdd", 514, 2, win98::interlocked_exchange_add),
+    stdcall("GetFileAttributesExA", 515, 3, win98::get_file_attributes_ex),
+    stdcall("GetLongPathNameA", 516, 3, win98::get_long_path_name),
+    stdcall("GetPrivateProfileSectionW", 517, 4, profile::get_private_profile_section_w),
 ];
 
 /// The places in `APIS` of the system's own stubs.
@@ -844,9 +852,10 @@ fn get_command_line_w(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(super::process(cpu).command_line + super::memory::PAGE)
 }
 
-/// Windows 95: version 4.0, with bit 31 saying it isn't NT.
-fn get_version(_: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(0xC000_0004)
+/// The version in the low word (minor in the high byte), and the high
+/// bits set for Windows 9x (version.rs).
+fn get_version(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    Some(super::version::info(super::version::current(cpu)).get_version)
 }
 
 /// The module named `name` (with ".DLL" when it has no extension), or

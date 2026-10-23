@@ -683,6 +683,7 @@ fn changed_settings() -> Settings {
         win32: true,
         win32_dlls: None,
         win32_dlls_replace: Vec::new(),
+        win32_version: WindowsVersion::Win98Se,
         dos_high: false,
         dos_version: DosVersion::new(7, 10),
         ide_hard_disks: false,

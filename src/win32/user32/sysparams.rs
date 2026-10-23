@@ -57,7 +57,13 @@ pub fn metric(index: u32) -> i32 {
 }
 
 /// GetSystemMetrics(index).
-pub fn get_system_metrics(_cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+/// Windows 98 adds the virtual screen's and the monitors' (monitor.rs).
+pub fn get_system_metrics(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    if crate::win32::version::is_98(cpu)
+        && let Some(value) = super::monitor::metric(args[0])
+    {
+        return Some(value as u32);
+    }
     Some(metric(args[0]) as u32)
 }
 

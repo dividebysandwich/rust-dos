@@ -163,14 +163,15 @@ impl Registry {
         }
     }
 
-    /// The registry of a fresh installation, with `text` (a .reg file)
-    /// put over it.
-    pub fn seeded(text: Option<&str>) -> Registry {
+    /// The registry of a fresh installation of `version`, with `text` (a
+    /// .reg file) put over it, and the version's values over that.
+    pub fn seeded(text: Option<&str>, version: super::version::WindowsVersion) -> Registry {
         let mut registry = Registry::empty();
         registry.import(SEED);
         if let Some(text) = text {
             registry.import(text);
         }
+        registry.import(&super::version::registry_values(version));
         registry.dirty = false;
         registry
     }
@@ -602,7 +603,8 @@ pub fn get(cpu: &mut Cpu) -> &mut Registry {
     if !cpu.bus.win32.registry.loaded {
         let file = cpu.bus.disk.file_data(FILE).and_then(|f| f.read().ok());
         let text = file.map(|bytes| crate::dosstr::from_bytes(&bytes));
-        cpu.bus.win32.registry = Registry::seeded(text.as_deref());
+        let version = cpu.bus.win32.os;
+        cpu.bus.win32.registry = Registry::seeded(text.as_deref(), version);
     }
     &mut cpu.bus.win32.registry
 }
@@ -668,11 +670,12 @@ crate::state_fields!(Registry {
 
 #[cfg(test)]
 mod tests {
+    use super::super::version::WindowsVersion::{Win95, Win98Se};
     use super::*;
 
     #[test]
     fn the_seed_has_windows_95s_version() {
-        let registry = Registry::seeded(None);
+        let registry = Registry::seeded(None, Win95);
         let key = registry
             .find(
                 LOCAL_MACHINE,
@@ -685,8 +688,30 @@ mod tests {
     }
 
     #[test]
+    fn the_version_values_follow_the_setting_over_the_file() {
+        let file = "REGEDIT4\r\n\r\n\
+                    [HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion]\r\n\
+                    \"VersionNumber\"=\"4.00.950\"\r\n\"RegisteredOwner\"=\"Someone\"\r\n";
+        let registry = Registry::seeded(Some(file), Win98Se);
+        let path = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion";
+        let key = registry.find(LOCAL_MACHINE, path).unwrap();
+        let value = |name| registry.value(key, name).unwrap().data.clone();
+        assert_eq!(value("VersionNumber"), b"4.10.2222\0");
+        assert_eq!(value("SubVersionNumber"), b" A \0");
+        assert_eq!(value("RegisteredOwner"), b"Someone\0");
+        // The values keep their places.
+        assert_eq!(registry.key(key).values[0].name, "VersionNumber");
+        // DirectX 6.1 of Windows 98 SE, which has no InstalledVersion.
+        let dx = registry
+            .find(LOCAL_MACHINE, "SOFTWARE\\Microsoft\\DirectX")
+            .unwrap();
+        assert_eq!(registry.value(dx, "Version").unwrap().data, b"4.06.03.0518\0");
+        assert!(registry.value(dx, "InstalledVersion").is_none());
+    }
+
+    #[test]
     fn a_reg_file_survives_the_round_trip() {
-        let mut registry = Registry::seeded(None);
+        let mut registry = Registry::seeded(None, Win95);
         let (key, created) = registry.create(USERS, ".Default\\Software\\Test\\Sub");
         assert!(created);
         registry.set_value(key, "", REG_SZ, b"default\0".to_vec());
@@ -698,7 +723,7 @@ mod tests {
         let text = registry.export();
         assert!(text.contains("\"Dword\"=dword:04030201\r\n"));
         assert!(text.contains("@=\"default\"\r\n"));
-        let again = Registry::seeded(Some(&text));
+        let again = Registry::seeded(Some(&text), Win95);
         let key = again.find(USERS, ".Default\\Software\\Test\\Sub").unwrap();
         assert_eq!(again.key(key).values, registry.key(key).values);
         assert_eq!(again.export(), text);
@@ -709,19 +734,19 @@ mod tests {
         let text = "REGEDIT4\r\n\r\n[HKEY_CURRENT_USER\\A\\B]\r\n\"x\"=\"1\"\r\n\"y\"=\"2\"\r\n\
                     \r\n[HKEY_CURRENT_USER\\A]\r\n\"z\"=hex:01,\\\r\n  02\r\n\
                     [HKEY_CURRENT_USER\\A\\B]\r\n\"x\"=-\r\n";
-        let registry = Registry::seeded(Some(text));
+        let registry = Registry::seeded(Some(text), Win95);
         let a = registry.find(USERS, ".Default\\A").unwrap();
         assert_eq!(registry.value(a, "z").unwrap().data, [1, 2]);
         let b = registry.find(a, "b").unwrap();
         assert!(registry.value(b, "x").is_none());
         assert!(registry.value(b, "y").is_some());
-        let deleted = Registry::seeded(Some(&format!("{}[-HKCU\\A]\r\n", text)));
+        let deleted = Registry::seeded(Some(&format!("{}[-HKCU\\A]\r\n", text)), Win95);
         assert!(deleted.find(USERS, ".Default\\A").is_none());
     }
 
     #[test]
     fn handles_of_a_deleted_key_name_a_deleted_key() {
-        let mut registry = Registry::seeded(None);
+        let mut registry = Registry::seeded(None, Win95);
         let (key, _) = registry.create(LOCAL_MACHINE, "Software\\Doomed\\Child");
         let handle = registry.new_handle(key, 7);
         assert!(matches!(registry.open(handle, 7), Open::Key(k) if k == key));

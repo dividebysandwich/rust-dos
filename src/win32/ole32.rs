@@ -44,7 +44,7 @@ const fn stdcall(
 /// objects have ordinal 0: they aren't exported.
 static APIS: &[Api] = &[
     stdcall("CoInitialize", 1, 1, co_initialize),
-    stdcall("CoInitializeEx", 2, 2, co_initialize),
+    stdcall("CoInitializeEx", 2, 2, co_initialize_ex),
     stdcall("CoUninitialize", 3, 0, co_uninitialize),
     stdcall("OleInitialize", 4, 1, co_initialize),
     stdcall("OleUninitialize", 5, 0, co_uninitialize),
@@ -134,6 +134,8 @@ pub struct State {
     /// Each process's task allocator, once it has one: (process id,
     /// address).
     mallocs: Vec<(u32, u32)>,
+    /// The threads CoInitializeEx put in the multithreaded apartment.
+    multithreaded: Vec<u32>,
 }
 
 fn state(cpu: &mut Cpu) -> &mut State {
@@ -152,10 +154,24 @@ pub fn process_ended(cpu: &mut Cpu, pid: u32, tids: &[u32]) {
     let ole = state(cpu);
     ole.initialized.retain(|(t, _)| !tids.contains(t));
     ole.mallocs.retain(|&(p, _)| p != pid);
+    ole.multithreaded.retain(|t| !tids.contains(t));
 }
 
 fn nothing(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(S_OK)
+}
+
+/// CoInitializeEx(reserved, flags): with COINIT_APARTMENTTHREADED (2)
+/// as CoInitialize; without it the thread is in the multithreaded
+/// apartment.
+fn co_initialize_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let result = co_initialize(cpu, args)?;
+    let tid = super::user32::current_tid(cpu);
+    let ole = state(cpu);
+    if result == S_OK && args[1] & 2 == 0 && !ole.multithreaded.contains(&tid) {
+        ole.multithreaded.push(tid);
+    }
+    Some(result)
 }
 
 /// CoInitialize, CoInitializeEx, OleInitialize: S_FALSE when the thread
@@ -182,6 +198,7 @@ fn co_uninitialize(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
         ole.initialized[i].1 -= 1;
         if ole.initialized[i].1 == 0 {
             ole.initialized.remove(i);
+            ole.multithreaded.retain(|&t| t != tid);
         }
     }
     Some(0)
@@ -226,6 +243,16 @@ fn co_create_instance(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(iid) = Guid::read(cpu, iid) else {
         return Some(E_INVALIDARG);
     };
+    // DirectMusic's classes are apartment-threaded: a thread of the
+    // multithreaded apartment gets one through a proxy, which Windows 98
+    // has only for IUnknown (REGDB_E_IIDNOTREG for the others).
+    let tid = super::user32::current_tid(cpu);
+    if iid != com::IID_IUNKNOWN
+        && state(cpu).multithreaded.contains(&tid)
+        && com::class_at(index).is_some_and(|c| super::dmusic::is_apartment_class(&c.clsid))
+    {
+        return Some(0x8004_0155);
+    }
     Some(create(cpu, index, &iid, out))
 }
 
@@ -626,5 +653,6 @@ fn co_get_current_process(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 
 crate::state_fields!(State {
     initialized,
-    mallocs
+    mallocs,
+    multithreaded
 });

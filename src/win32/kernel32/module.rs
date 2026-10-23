@@ -798,20 +798,41 @@ pub(in crate::win32) fn enumerated(cpu: &mut Cpu, value: u32, call: Call) {
 /// it was when the size is wrong.
 const OSVERSIONINFOA: u32 = 148;
 
-/// Windows 95: 4.00.950, a 9x platform (VER_PLATFORM_WIN32_WINDOWS), the
-/// build number's high word the version, and no service pack.
+/// OSVERSIONINFOEXA's size, which Windows 98 takes as well.
+const OSVERSIONINFOEXA: u32 = 156;
+
+/// The version (version.rs): Windows 95 is 4.00.950, Windows 98 is
+/// 4.10.1998 and its Second Edition 4.10.2222 with " A " as its service
+/// pack; all a 9x platform (VER_PLATFORM_WIN32_WINDOWS), the build
+/// number's high word the version. Windows 95 fills the whole structure;
+/// Windows 98 writes the service pack's string up to its 0 and leaves
+/// the bytes after it as they were, and clears OSVERSIONINFOEXA's
+/// fields.
 pub(super) fn get_version_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let info = args[0];
-    if cpu.bus.guest_read_32(info) != OSVERSIONINFOA {
+    let size = cpu.bus.guest_read_32(info);
+    let os = super::super::version::current(cpu);
+    if size != OSVERSIONINFOA && !(os.is_98() && size == OSVERSIONINFOEXA) {
         return Some(FALSE);
     }
+    let v = super::super::version::info(os);
     let mut data = [0u8; OSVERSIONINFOA as usize];
-    for (i, value) in [OSVERSIONINFOA, 4, 0, 0x0400_03B6, 1]
+    for (i, value) in [size, v.major, v.minor, v.build, 1]
         .into_iter()
         .enumerate()
     {
         data[i * 4..i * 4 + 4].copy_from_slice(&value.to_le_bytes());
     }
-    cpu.bus.guest_write_bytes(info, &data);
+    data[20..20 + v.csd.len()].copy_from_slice(v.csd.as_bytes());
+    let len = if os.is_98() {
+        20 + v.csd.len() + 1
+    } else {
+        data.len()
+    };
+    cpu.bus.guest_write_bytes(info, &data[..len]);
+    if size == OSVERSIONINFOEXA {
+        // No service pack, suite or product type.
+        cpu.bus.guest_write_bytes(info + OSVERSIONINFOA, &[0; 8]);
+    }
     Some(TRUE)
 }

@@ -1,7 +1,7 @@
 //! Reading configuration text into a `Config`.
 
 use super::types::parse_bool;
-use super::{AspectRatio, Config, DosVersion, Filter, Section, Settings, parse_mouse_sensitivity};
+use super::{AspectRatio, Config, DosVersion, Filter, Section, Settings, WindowsVersion, parse_mouse_sensitivity};
 use crate::cpu::{CoreMode, CpuModel};
 use crate::disk::DRIVE_Z;
 use crate::diskio::{DiskSpeed, NoiseMode};
@@ -285,6 +285,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         "win32_dlls_replace" => {
                             config.win32_dlls_replace = Some(super::settings::dll_names(value));
                         }
+                        "win32_version" => match WindowsVersion::parse(value) {
+                            Some(version) => config.win32_version = Some(version),
+                            None => warn(format!("invalid win32_version '{}' (95, 98 or 98se)", value)),
+                        },
                         "ide_hard_disks" => match parse_bool(value) {
                             Some(on) => config.ide_hard_disks = Some(on),
                             None => warn(format!("invalid ide_hard_disks '{}' (true or false)", value)),

@@ -20,6 +20,7 @@ mod comctl32;
 mod convert;
 mod ddraw;
 mod dinput;
+mod dmusic;
 mod dplayx;
 mod dsound;
 pub mod gdi32;
@@ -43,6 +44,7 @@ mod system;
 mod task;
 mod thread;
 pub mod user32;
+pub mod version;
 mod winmm;
 mod wsock32;
 
@@ -260,6 +262,11 @@ pub struct Win32 {
     /// (`win32_dlls_replace`, lowercase names without ".dll").
     pub guest_dlls: Option<std::path::PathBuf>,
     pub guest_replace: Vec<String>,
+    /// The version of Windows it is (the `win32_version` setting), and
+    /// the version the running processes see, which is the setting's
+    /// when the first of them started (version.rs).
+    pub version: version::WindowsVersion,
+    os: version::WindowsVersion,
     /// The program DOS loaded, which starts at `START`.
     pending: Option<String>,
     /// The processes, the one DOS started first. They run in that DOS
@@ -318,6 +325,8 @@ pub struct Win32 {
     winmm: winmm::State,
     glide: glide::State,
     guids: u32,
+    /// DirectMusic's objects (dmusic/).
+    dmusic: dmusic::State,
 }
 
 impl Win32 {
@@ -327,6 +336,7 @@ impl Win32 {
             enabled: self.enabled,
             guest_dlls: self.guest_dlls.take(),
             guest_replace: std::mem::take(&mut self.guest_replace),
+            version: self.version,
             ..Win32::default()
         };
     }
@@ -364,9 +374,12 @@ impl Win32 {
     }
 
     /// The scale of what the MIDI synthesizer plays (left, right): the
-    /// MIDI device's volume and the mixer's.
+    /// MIDI device's volume and the mixer's, and DirectMusic's master
+    /// volume.
     pub fn midi_gain(&self) -> (f32, f32) {
-        winmm::midi::gain(&self.winmm)
+        let (l, r) = winmm::midi::gain(&self.winmm);
+        let master = dmusic::gain(&self.dmusic);
+        (l * master, r * master)
     }
 
     /// The scale of what the CD drive plays: the mixer's CD line.
@@ -530,6 +543,7 @@ fn start(cpu: &mut Cpu) {
     win32.rm_stack = rm_stack;
     win32.a20 = a20;
     win32.cr4 = cr4;
+    version::start(win32);
     let environment = dos_environment(cpu, cpu.current_psp);
     let line = loader::dos_command_line(cpu, &path);
     match create_process(cpu, &path, &line, environment, Vec::new(), None, Vec::new(), false) {
@@ -769,6 +783,7 @@ fn end_process(cpu: &mut Cpu, index: usize, code: u32) {
     dinput::process_ended(cpu, process.id, &tids);
     winmm::process_ended(cpu, process.id, &tids);
     glide::process_ended(cpu, process.id, &tids);
+    dmusic::process_ended(cpu, process.id);
     let win32 = &mut cpu.bus.win32;
     if win32.running != index {
         // Another process's thread runs on.
@@ -1050,4 +1065,6 @@ crate::state_fields!(Win32 {
     winmm,
     glide,
     guids,
-} skip { enabled, guest_dlls, guest_replace });
+    os,
+    dmusic,
+} skip { enabled, guest_dlls, guest_replace, version });

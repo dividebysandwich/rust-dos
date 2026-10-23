@@ -413,12 +413,14 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   card's VESA modes or in a window, DirectSound and wave audio in the
   `windows` mixer channel, MIDI to the MPU-401's synthesizer, CD audio
   and MIDI files through MCI, and the keyboard, mouse and joystick
-  through DirectInput. A program that calls a function they don't have
-  ends with a message naming it, and one that needs a DLL that is
-  neither among them nor beside it is refused. The registry is kept in
-  `C:\REGISTRY.REG`, which is made the first time a program uses it, so
-  a host folder mounted as C: gets that file. Off, such a program runs
-  its DOS stub, which says it needs Windows. The plan is in
+  through DirectInput; DMUSIC, DMIME, DMLOADER, DMSTYLE, DMBAND and
+  DMCOMPOS play DirectX 6.1's DirectMusic on the same synthesizer. A
+  program that calls a function they don't have ends with a message
+  naming it, and one that needs a DLL that is neither among them nor
+  beside it is refused. The registry is kept in `C:\REGISTRY.REG`, which
+  is made the first time a program uses it, so a host folder mounted as
+  C: gets that file. Off, such a program runs its DOS stub, which says
+  it needs Windows. The plan is in
   [docs/native-windows.md](docs/native-windows.md).
 * `win32_dlls` names a host folder of Win32 DLLs that programs under the
   built-in Windows may load as their own code, such as Wine's 32-bit
@@ -434,6 +436,15 @@ Mistakes in the file are printed as warnings; the emulator still starts.
 * `win32_dlls_replace` lists the built-in DLLs that the `win32_dlls`
   folder's DLLs of the same name replace, separated by commas, such as
   `comctl32,comdlg32`. Empty (the default), the built-in ones are used.
+* `win32_version` is the version of Windows the built-in Windows is:
+  `95` (the default), `98` or `98se` (Windows 98 Second Edition). It is
+  what GetVersion and GetVersionEx say (4.00.950, 4.10.1998 or 4.10.2222
+  with " A " as its service pack), and what the registry's version
+  values and DirectX's version say. Under `98` and `98se` the built-in
+  DLLs have the functions Windows 98 added, such as MonitorFromWindow
+  and GetFileAttributesExA; under `95` a program that imports one of
+  those doesn't start, as on Windows 95. A change takes effect for the
+  next program that starts when none runs.
 * `dos_version` is the DOS version programs are told (INT 21h AH=30h,
   AX=3306h and the PSP's), such as `5.00` (the default), `6.22` or
   `7.10`; `7.1` is 7.10, as DOSBox's `ver` has it. From 7.00 on, DOS

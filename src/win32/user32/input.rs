@@ -122,6 +122,9 @@ pub struct Input {
     /// The key that last went down with Alt held, VK_MENU for Alt itself:
     /// Alt's release is WM_SYSKEYUP only after Alt alone.
     pub sys_key: usize,
+    /// TrackMouseEvent's window, its TME_HOVER and TME_LEAVE flags and
+    /// its hover time (monitor.rs).
+    pub tracking: [u32; 3],
 }
 
 impl Input {
@@ -626,6 +629,9 @@ fn mk_flags(input: &Input) -> u32 {
 /// A mouse message (a client one) at the cursor, for the window that has
 /// the capture or the one under the cursor.
 fn mouse_event_at(cpu: &mut Cpu, message: u32, _button: u32) {
+    if message == WM_MOUSEMOVE {
+        super::monitor::mouse_moved(cpu);
+    }
     let time = message::now_ms(cpu);
     let state = user(cpu);
     let (x, y) = state.input.cursor;
@@ -2057,7 +2063,8 @@ crate::state_fields!(Input {
     releases,
     last_click,
     menu_keys,
-    sys_key
+    sys_key,
+    tracking
 });
 crate::state_fields!(Caret {
     hwnd,
