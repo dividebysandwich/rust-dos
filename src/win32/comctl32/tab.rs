@@ -412,6 +412,21 @@ fn hit_test(t: &Tab, client: Rect, x: i32, y: i32) -> i32 {
         .unwrap_or(-1)
 }
 
+/// TCM_ADJUSTRECT on the tab control `hwnd`, for property sheets,
+/// which lay their pages out with it: `r` unchanged for a window that
+/// isn't one.
+pub fn adjust(cpu: &mut Cpu, hwnd: u32, larger: bool, mut r: Rect) -> Rect {
+    if let Some(t) = state(cpu).tab.tabs.get(&hwnd) {
+        adjust_rect(t, larger, &mut r);
+    }
+    r
+}
+
+/// TCM_GETCURSEL of the tab control `hwnd`, or -1.
+pub fn cur_sel(cpu: &mut Cpu, hwnd: u32) -> i32 {
+    state(cpu).tab.tabs.get(&hwnd).map_or(-1, |t| t.selected)
+}
+
 /// TAB_AdjustRect on `r`: the display area of the window rectangle
 /// `r`, or with `larger` the window rectangle of the display area.
 fn adjust_rect(t: &Tab, larger: bool, r: &mut Rect) {
