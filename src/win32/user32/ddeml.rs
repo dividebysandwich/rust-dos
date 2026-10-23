@@ -464,6 +464,10 @@ pub fn dde_add_data(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(0);
     };
     let end = offset as usize + read.len();
+    // No larger than DdeCreateDataHandle makes data.
+    if end > 0x100_0000 {
+        return Some(0);
+    }
     if d.bytes.len() < end {
         d.bytes.resize(end, 0);
     }

@@ -19,7 +19,7 @@
 
 use crate::cpu::Cpu;
 use crate::win32::kernel32::files;
-use crate::win32::user32::string_at;
+use crate::win32::user32::{bytes_at, string_at};
 
 const FO_MOVE: u32 = 1;
 const FO_COPY: u32 = 2;
@@ -110,12 +110,14 @@ fn strings(cpu: &mut Cpu, at: u32) -> Option<Vec<String>> {
     let mut out = Vec::new();
     let mut p = at;
     loop {
-        let s = string_at(cpu, p)?;
+        // By the string's bytes: a character above 7Fh is two bytes of
+        // the String.
+        let s = bytes_at(cpu, p)?;
         if s.is_empty() {
             return Some(out);
         }
         p += s.len() as u32 + 1;
-        out.push(s);
+        out.push(crate::dosstr::from_bytes(&s));
         if out.len() > 0x1000 {
             return Some(out);
         }

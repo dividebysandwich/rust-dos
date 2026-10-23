@@ -64,6 +64,11 @@ fn metafile(cpu: &mut Cpu, handle: u32) -> Option<Vec<u8>> {
 /// header.
 pub fn set_meta_file_bits_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[size, at] = args else { unreachable!() };
+    // The bytes have to be there before a buffer of their size is made:
+    // a wrong size can't make the host allocate gigabytes.
+    if !cpu.bus.guest_probe(at, size as usize, false) {
+        return None;
+    }
     let mut data = vec![0u8; size as usize];
     cpu.bus.guest_read_bytes(at, &mut data);
     if cpu.bus.guest_faulted() {

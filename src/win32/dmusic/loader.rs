@@ -11,10 +11,10 @@
 use super::files::{self, Content};
 use super::guids::*;
 use super::{
-    DESC_MEM_DATA, DESC_MEM_LENGTH, DESC_SIZE, DESC_STREAM, DMUS_OBJ_STREAM, DMUS_OBJ_CLASS, DMUS_OBJ_FILENAME,
-    DMUS_OBJ_FULLPATH, DMUS_OBJ_LOADED, DMUS_OBJ_MEMORY, DMUS_OBJ_NAME, DMUS_OBJ_OBJECT, Desc,
-    E_INVALIDARG, E_POINTER, Kind, LOADER, S_FALSE, S_OK, add, dmus_e, drop_ref, give, give_new,
-    hold, object_of, read_u64, read_wide, state, this_of,
+    DESC_MEM_DATA, DESC_MEM_LENGTH, DESC_SIZE, DESC_STREAM, DMUS_OBJ_CLASS, DMUS_OBJ_FILENAME,
+    DMUS_OBJ_FULLPATH, DMUS_OBJ_LOADED, DMUS_OBJ_MEMORY, DMUS_OBJ_NAME, DMUS_OBJ_OBJECT,
+    DMUS_OBJ_STREAM, Desc, E_INVALIDARG, E_POINTER, Kind, LOADER, S_FALSE, S_OK, add, dmus_e,
+    drop_ref, give, give_new, hold, object_of, read_u64, read_wide, state, this_of,
 };
 use crate::cpu::Cpu;
 use crate::win32::com::{self, Guid};

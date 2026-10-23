@@ -86,7 +86,10 @@ const IMPORTS: &[(&str, &[&str])] = &[
             "PrintDlgA",
         ],
     ),
-    ("USER32.DLL", &["SetTimer", "GetActiveWindow", "PostMessageA"]),
+    (
+        "USER32.DLL",
+        &["SetTimer", "GetActiveWindow", "PostMessageA"],
+    ),
     ("KERNEL32.DLL", &["GetModuleHandleA"]),
 ];
 
@@ -440,7 +443,10 @@ fn image_lists_grow_and_shrink() {
     const ILC_COLOR16: u32 = 0x10;
     let d = data();
     let calls = [
-        call("ImageList_Create", &[I(16), I(16), I(ILC_COLOR16), I(1), I(4)]),
+        call(
+            "ImageList_Create",
+            &[I(16), I(16), I(ILC_COLOR16), I(1), I(4)],
+        ),
         call("CreateBitmap", &[I(48), I(16), I(1), I(1), I(0)]),
         call("ImageList_SetImageCount", &[Res(0), I(3)]),
         call("ImageList_GetImageCount", &[Res(0)]),
@@ -723,7 +729,11 @@ fn create_toolbar_ex_adds_the_bitmap_and_buttons() {
     let r = results(&cpu, at, calls.len());
     assert_ne!(r[2], 0, "the toolbar is made");
     assert_eq!(r[3], 3);
-    assert_eq!(r[4], 23 | (22 << 16), "16 by 16 images make 23 by 22 buttons");
+    assert_eq!(
+        r[4],
+        23 | (22 << 16),
+        "16 by 16 images make 23 by 22 buttons"
+    );
     assert_eq!(r[6], 15, "the standard bitmap has 15 images");
     assert_eq!(r[7], 7, "the id");
 }
@@ -762,7 +772,9 @@ fn a_status_bar_keeps_the_text_of_its_parts() {
     assert_ne!(r[2], 0, "the status bar is made");
     assert_eq!(r[3] & 0xFFFF, 5, "part 0 has the window's text");
     assert_eq!((r[4], r[5]), (1, 3));
-    let parts: Vec<u32> = (0..3).map(|i| peek(&cpu, at + FREE + 0x40 + 4 * i)).collect();
+    let parts: Vec<u32> = (0..3)
+        .map(|i| peek(&cpu, at + FREE + 0x40 + 4 * i))
+        .collect();
     assert_eq!(parts, [50, 100, u32::MAX]);
     assert_eq!(r[7] & 0xFFFF, 3);
     assert_eq!(peek_str(&cpu, at + FREE + 0x60), "Two");

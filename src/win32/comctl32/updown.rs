@@ -289,13 +289,21 @@ pub fn draw(cpu: &mut Cpu, hwnd: u32, hdc: u32) {
     for (arrow, kind, p, hot) in [
         (
             FLAG_INCR,
-            if horz { DFCS_SCROLLRIGHT } else { DFCS_SCROLLUP },
+            if horz {
+                DFCS_SCROLLRIGHT
+            } else {
+                DFCS_SCROLLUP
+            },
             up_pressed,
             up_hot,
         ),
         (
             FLAG_DECR,
-            if horz { DFCS_SCROLLLEFT } else { DFCS_SCROLLDOWN },
+            if horz {
+                DFCS_SCROLLLEFT
+            } else {
+                DFCS_SCROLLDOWN
+            },
             down_pressed,
             down_hot,
         ),
@@ -451,7 +459,12 @@ fn action_ops(cpu: &mut Cpu, hwnd: u32, u: &UpDown, delta: i32, action: u32) -> 
         },
         Op::Call {
             target: send,
-            args: vec![Arg::V(u.notify), Arg::V(WM_NOTIFY), Arg::V(id), Arg::S(S_NM)],
+            args: vec![
+                Arg::V(u.notify),
+                Arg::V(WM_NOTIFY),
+                Arg::V(id),
+                Arg::S(S_NM),
+            ],
         },
         Op::Then {
             id: T_DELTA,

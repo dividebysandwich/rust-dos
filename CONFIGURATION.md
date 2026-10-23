@@ -443,8 +443,12 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   values and DirectX's version say. Under `98` and `98se` the built-in
   DLLs have the functions Windows 98 added, such as MonitorFromWindow
   and GetFileAttributesExA; under `95` a program that imports one of
-  those doesn't start, as on Windows 95. A change takes effect for the
-  next program that starts when none runs.
+  those doesn't start, as on Windows 95, and its message names the
+  setting. These include USER32's GetAncestor, SendInput,
+  TrackMouseEvent and GetWindowInfo, which earlier releases of rust-dos
+  had under Windows 95 too, so a program that imports them needs `98`.
+  A change takes effect for the next program that starts when none
+  runs.
 * `dos_version` is the DOS version programs are told (INT 21h AH=30h,
   AX=3306h and the PSP's), such as `5.00` (the default), `6.22` or
   `7.10`; `7.1` is 7.10, as DOSBox's `ver` has it. From 7.00 on, DOS

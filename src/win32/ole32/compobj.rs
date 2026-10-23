@@ -635,10 +635,14 @@ const CREATE_STUB: u32 = 4;
 fn ps_factory(cpu: &mut Cpu, iid: &Guid) -> Option<u32> {
     let (tid, pid) = (current_tid(cpu), current_pid(cpu));
     let com = com_state(cpu);
-    let class = com.ps_classes.iter().find(|p| p.tid == tid && p.iid == iid.0)?;
-    let found = com.registered.iter().find(|r| {
-        r.clsid == class.clsid && r.pid == pid && r.tid == tid
-    })?;
+    let class = com
+        .ps_classes
+        .iter()
+        .find(|p| p.tid == tid && p.iid == iid.0)?;
+    let found = com
+        .registered
+        .iter()
+        .find(|r| r.clsid == class.clsid && r.pid == pid && r.tid == tid)?;
     Some(found.object)
 }
 
@@ -723,7 +727,9 @@ pub fn marshal_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         }
         6 => {
             let failed = t.var(M_RESULT) & 0x8000_0000 != 0;
-            let object = cpu.bus.guest_read_32(s + if failed { S_POINTER } else { S_STUB });
+            let object = cpu
+                .bus
+                .guest_read_32(s + if failed { S_POINTER } else { S_STUB });
             match super::method(cpu, object, RELEASE) {
                 Some(release) if object != 0 => Next::call(release, &[object], 7),
                 _ => Next::call(0, &[], 7),

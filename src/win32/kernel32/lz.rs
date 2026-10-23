@@ -124,10 +124,13 @@ fn read_all(cpu: &mut Cpu, handle: u32) -> Result<Vec<u8>, u32> {
 /// LZInit(file): an LZ handle for a compressed file; the file's own
 /// handle, its pointer back at its start, for one that isn't.
 fn lz_init_handle(cpu: &mut Cpu, file: u32) -> i32 {
-    let Ok(bytes) = read_all(cpu, file) else {
+    // The header first: a file that isn't compressed isn't read whole.
+    let head = super::seek_file(cpu, file, 0, 0)
+        .and_then(|_| super::read_file(cpu, file, HEADER as u32));
+    let Ok(head) = head else {
         return LZERROR_BADINHANDLE;
     };
-    let Some((method, _, length)) = header(&bytes) else {
+    let Some((method, _, length)) = header(&head) else {
         let _ = super::seek_file(cpu, file, 0, 0);
         return file as i32;
     };
@@ -135,6 +138,9 @@ fn lz_init_handle(cpu: &mut Cpu, file: u32) -> i32 {
         let _ = super::seek_file(cpu, file, 0, 0);
         return LZERROR_UNKNOWNALG;
     }
+    let Ok(bytes) = read_all(cpu, file) else {
+        return LZERROR_BADINHANDLE;
+    };
     let files = &mut process(cpu).lz_files;
     let Some(slot) = (0..MAX_FILES).find(|s| files.iter().all(|f| f.slot != *s)) else {
         return LZERROR_GLOBALLOC;

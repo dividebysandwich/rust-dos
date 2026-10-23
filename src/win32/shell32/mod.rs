@@ -57,7 +57,12 @@ static APIS: &[Api] = &[
         3,
         il::sh_get_special_folder_location,
     ),
-    stdcall("SHGetPathFromIDListA", 1006, 2, il::sh_get_path_from_id_list),
+    stdcall(
+        "SHGetPathFromIDListA",
+        1006,
+        2,
+        il::sh_get_path_from_id_list,
+    ),
     stdcall("SHGetPathFromIDList", 1007, 2, il::sh_get_path_from_id_list),
     stdcall(
         "SHGetSpecialFolderPathA",
@@ -104,7 +109,12 @@ static APIS: &[Api] = &[
         1,
         il::sh_simple_id_list_from_path,
     ),
-    stdcall("SHGetSpecialFolderPath", 175, 4, il::sh_get_special_folder_path),
+    stdcall(
+        "SHGetSpecialFolderPath",
+        175,
+        4,
+        il::sh_get_special_folder_path,
+    ),
     stdcall("SHFree", 195, 1, il::sh_free),
     stdcall("SHAlloc", 196, 1, il::sh_alloc),
     stdcall("DllGetClassObject", 128, 3, dll_get_class_object),

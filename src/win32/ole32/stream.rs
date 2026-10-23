@@ -359,7 +359,10 @@ pub fn write(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     let o = get(cpu, id);
     let position = o.position;
-    let end = position.wrapping_add(count);
+    // Past 4 GB the block can't grow to take it.
+    let Some(end) = position.checked_add(count) else {
+        return Some(E_OUTOFMEMORY);
+    };
     if end > o.size {
         let hr = set_size(cpu, id, end);
         if hr != S_OK {
@@ -523,7 +526,9 @@ pub fn write_at(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if count == 0 {
         return Some(S_OK);
     }
-    let end = offset.wrapping_add(count);
+    let Some(end) = offset.checked_add(count) else {
+        return Some(STG_E_READFAULT);
+    };
     if end > get(cpu, id).size {
         let hr = set_size(cpu, id, end);
         if hr != S_OK {

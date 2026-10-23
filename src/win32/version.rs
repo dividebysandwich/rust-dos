@@ -143,12 +143,7 @@ pub fn registry_values(version: WindowsVersion) -> String {
          \"Version\"=\"{}\"\r\n\
          \"ProductName\"=\"{}\"\r\n\
          \"SubVersionNumber\"=\"{}\"\r\n",
-        i.directx,
-        installed,
-        i.version_number,
-        i.version_name,
-        i.product_name,
-        i.sub_version
+        i.directx, installed, i.version_number, i.version_name, i.product_name, i.sub_version
     )
 }
 

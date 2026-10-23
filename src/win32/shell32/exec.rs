@@ -362,7 +362,9 @@ fn execute(cpu: &mut Cpu, mut request: Request) -> (u32, Option<u32>) {
         }
         if let Some((scheme, _)) = request.file.split_once(':')
             && scheme.len() > 1
-            && scheme.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
             && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
         {
             return url(cpu, scheme, &request);

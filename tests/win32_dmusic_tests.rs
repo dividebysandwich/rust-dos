@@ -617,7 +617,10 @@ fn objects_load_from_streams_on_global_memory() {
         d[at as usize..at as usize + bytes.len()].copy_from_slice(bytes);
     };
     put(G_CLSID_SEGMENT, &CLSID_SEGMENT);
-    put(G_IID_PERSIST, &guid(0x109, 0, 0, [0xC0, 0, 0, 0, 0, 0, 0, 0x46]));
+    put(
+        G_IID_PERSIST,
+        &guid(0x109, 0, 0, [0xC0, 0, 0, 0, 0, 0, 0, 0x46]),
+    );
     put(G_IID_OBJECT, &dm(0xD2AC_28B5));
     // DMUS_OBJ_CLASS | DMUS_OBJ_STREAM, pStream filled in below.
     put(DESC + 4, &0x802u32.to_le_bytes());
@@ -649,7 +652,15 @@ fn objects_load_from_streams_on_global_memory() {
         call(a, l, fail, 5, CREATE, &args, S_OK)?;
         let args = [Ptr(DESC), Ptr(G_IID_SEGMENT), Ptr(SEG)];
         method(a, l, fail, 6, (LOADER, LOADER_GET_OBJECT), &args, S_OK)?;
-        method(a, l, fail, 7, (SEG, SEGMENT_GET_LENGTH), &[Ptr(VALUE)], S_OK)?;
+        method(
+            a,
+            l,
+            fail,
+            7,
+            (SEG, SEGMENT_GET_LENGTH),
+            &[Ptr(VALUE)],
+            S_OK,
+        )?;
         a.mov(eax, dword_ptr(l.at(VALUE)))?;
         expect(a, fail, 8, 3072)?;
         // A segment of its own loads it with IPersistStream::Load.
@@ -666,7 +677,15 @@ fn objects_load_from_streams_on_global_memory() {
         seek(a, l, fail, 11)?;
         let args = [Val(STREAM)];
         method(a, l, fail, 12, (PERSIST, PERSIST_LOAD), &args, S_OK)?;
-        method(a, l, fail, 13, (SEG2, SEGMENT_GET_LENGTH), &[Ptr(VALUE)], S_OK)?;
+        method(
+            a,
+            l,
+            fail,
+            13,
+            (SEG2, SEGMENT_GET_LENGTH),
+            &[Ptr(VALUE)],
+            S_OK,
+        )?;
         a.mov(eax, dword_ptr(l.at(VALUE)))?;
         expect(a, fail, 14, 3072)?;
         // ParseDescriptor gives the class of what the stream holds.
@@ -674,7 +693,15 @@ fn objects_load_from_streams_on_global_memory() {
         method(a, l, fail, 15, (SEG2, QUERY_INTERFACE), &args, S_OK)?;
         seek(a, l, fail, 16)?;
         let args = [Val(STREAM), Ptr(DESC2)];
-        method(a, l, fail, 17, (OBJECT, OBJECT_PARSE_DESCRIPTOR), &args, S_OK)?;
+        method(
+            a,
+            l,
+            fail,
+            17,
+            (OBJECT, OBJECT_PARSE_DESCRIPTOR),
+            &args,
+            S_OK,
+        )?;
         a.mov(eax, dword_ptr(l.at(DESC2 + 4)))?;
         a.and(eax, 2)?;
         expect(a, fail, 18, 2)?;

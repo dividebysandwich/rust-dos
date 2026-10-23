@@ -282,6 +282,7 @@ fn a_program_importing_a_function_of_windows_98_needs_98() {
     assert_ne!(code, 0x2A);
     assert!(text.contains("missing export"), "{}", text);
     assert!(text.contains("GetAncestor"), "{}", text);
+    assert!(text.contains("win32_version=98"), "{}", text);
     assert_eq!(run(Win98Se, "import_98", exe()).0, 0x2A);
 }
 

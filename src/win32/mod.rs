@@ -882,14 +882,18 @@ fn peek_32(cpu: &Cpu, lin: u32) -> Option<u32> {
 /// Whether the running function of a built-in DLL was called from guest
 /// code (`loader::GUEST`): its return address, at ESP, is in such a DLL.
 fn called_from_guest(cpu: &Cpu) -> bool {
-    let Some(caller) = peek_32(cpu, cpu.esp()) else {
-        return false;
-    };
-    running(cpu).is_some_and(|p| {
-        p.modules
-            .iter()
-            .any(|m| m.flags & loader::GUEST != 0 && caller.wrapping_sub(m.base) < m.size)
-    })
+    guest_caller(cpu).is_some()
+}
+
+/// The name of the guest code module (`loader::GUEST`) the running
+/// function of a built-in DLL was called from, by its return address.
+fn guest_caller(cpu: &Cpu) -> Option<String> {
+    let caller = peek_32(cpu, cpu.esp())?;
+    running(cpu)?
+        .modules
+        .iter()
+        .find(|m| m.flags & loader::GUEST != 0 && caller.wrapping_sub(m.base) < m.size)
+        .map(|m| m.name.clone())
 }
 
 /// The program called a function a built-in DLL doesn't have yet. When
@@ -902,12 +906,7 @@ fn missing(cpu: &mut Cpu, index: u16) {
         .get(index as usize)
         .cloned()
         .unwrap_or_default();
-    let guest = process(cpu)
-        .modules
-        .iter()
-        .find(|m| m.flags & loader::GUEST != 0 && caller.wrapping_sub(m.base) < m.size)
-        .map(|m| m.name.clone());
-    if let Some(module) = guest {
+    if let Some(module) = guest_caller(cpu) {
         let message = format!(
             "[W32] {} called {}'s function {} (from {:08X}), which the built-in \
              Windows doesn't have: it fails",

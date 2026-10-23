@@ -147,8 +147,21 @@ fn usr(cpu: &mut Cpu, name: &str, args: &[u32]) -> u32 {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn blt(cpu: &mut Cpu, dst: u32, x: i32, y: i32, w: i32, h: i32, src: u32, sx: i32, sy: i32, rop: u32) -> bool {
-    let a = [dst, x as u32, y as u32, w as u32, h as u32, src, sx as u32, sy as u32, rop];
+fn blt(
+    cpu: &mut Cpu,
+    dst: u32,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    src: u32,
+    sx: i32,
+    sy: i32,
+    rop: u32,
+) -> bool {
+    let a = [
+        dst, x as u32, y as u32, w as u32, h as u32, src, sx as u32, sy as u32, rop,
+    ];
     gdi(cpu, "BitBlt", &a) != 0
 }
 
@@ -239,7 +252,15 @@ fn bitmap_dims(il: &ImageList, count: i32) -> (i32, i32) {
 
 /// Copy `count` images from `src` in `hdc_src` to `dest` in `hdc_dest`,
 /// a column of the tiles at a time.
-fn copy_images(cpu: &mut Cpu, il: &ImageList, hdc_src: u32, hdc_dest: u32, src: i32, count: i32, dest: i32) {
+fn copy_images(
+    cpu: &mut Cpu,
+    il: &ImageList,
+    hdc_src: u32,
+    hdc_dest: u32,
+    src: i32,
+    count: i32,
+    dest: i32,
+) {
     for i in 0..TILE {
         let (sx, sy) = point(il, src + i);
         let (dx, dy) = point(il, dest + i);
@@ -424,12 +445,45 @@ fn add(cpu: &mut Cpu, himl: u32, image: u32, mask: u32) -> i32 {
     };
     for i in 0..n {
         let (x, y) = point(&il, il.cur + i);
-        blt(cpu, il.hdc_image, x, y, il.cx, h, hdc, i * il.cx, 0, SRCCOPY);
+        blt(
+            cpu,
+            il.hdc_image,
+            x,
+            y,
+            il.cx,
+            h,
+            hdc,
+            i * il.cx,
+            0,
+            SRCCOPY,
+        );
         if il.hbm_mask == 0 {
             continue;
         }
-        blt(cpu, il.hdc_mask, x, y, il.cx, h, temp_dc, i * il.cx, 0, SRCCOPY);
-        blt(cpu, il.hdc_image, x, y, il.cx, h, il.hdc_mask, x, y, NOTSRCAND);
+        blt(
+            cpu,
+            il.hdc_mask,
+            x,
+            y,
+            il.cx,
+            h,
+            temp_dc,
+            i * il.cx,
+            0,
+            SRCCOPY,
+        );
+        blt(
+            cpu,
+            il.hdc_image,
+            x,
+            y,
+            il.cx,
+            h,
+            il.hdc_mask,
+            x,
+            y,
+            NOTSRCAND,
+        );
     }
     delete_dc(cpu, temp_dc);
     delete_dc(cpu, hdc);
@@ -478,7 +532,11 @@ pub fn replace_icon(cpu: &mut Cpu, himl: u32, index: i32, icon: u32) -> i32 {
         return -1;
     }
     let (cx, cy) = (il.cx as u32, il.cy as u32);
-    let mut best = usr(cpu, "CopyImage", &[icon, IMAGE_ICON, cx, cy, LR_COPYFROMRESOURCE]);
+    let mut best = usr(
+        cpu,
+        "CopyImage",
+        &[icon, IMAGE_ICON, cx, cy, LR_COPYFROMRESOURCE],
+    );
     if best == 0 {
         best = usr(cpu, "CopyImage", &[icon, IMAGE_ICON, cx, cy, 0]);
     }
@@ -567,7 +625,11 @@ pub fn draw_indirect(cpu: &mut Cpu, p: &DrawParams) -> bool {
     let mask_only = il.flags & ILC_MASK != 0 && style & ILD_MASK != 0;
     let blend = style & (ILD_BLEND25 | ILD_BLEND50) != 0 && !mask_only;
     let image_dc = gdi(cpu, "CreateCompatibleDC", &[p.hdc]);
-    let image_bm = gdi(cpu, "CreateCompatibleBitmap", &[p.hdc, cx as u32, cy as u32]);
+    let image_bm = gdi(
+        cpu,
+        "CreateCompatibleBitmap",
+        &[p.hdc, cx as u32, cy as u32],
+    );
     let blend_bm = if blend { mono_bitmap(cpu, cx, cy) } else { 0 };
     let mut ok = false;
     if il.hdc_image != 0
@@ -576,7 +638,15 @@ pub fn draw_indirect(cpu: &mut Cpu, p: &DrawParams) -> bool {
         && (!blend || blend_bm != 0)
         && (il.hbm_mask == 0 || il.hdc_mask != 0)
     {
-        ok = draw_with(cpu, p, &il, (px, py, cx, cy), transparent, mask_only, (image_dc, image_bm, blend_bm));
+        ok = draw_with(
+            cpu,
+            p,
+            &il,
+            (px, py, cx, cy),
+            transparent,
+            mask_only,
+            (image_dc, image_bm, blend_bm),
+        );
     }
     delete(cpu, blend_bm);
     delete(cpu, image_bm);
@@ -605,7 +675,11 @@ fn draw_with(
     let solid = |cpu: &mut Cpu, color: u32| {
         let brush = gdi(cpu, "CreateSolidBrush", &[color]);
         let old = select(cpu, image_dc, brush);
-        gdi(cpu, "PatBlt", &[image_dc, 0, 0, cx as u32, cy as u32, PATCOPY]);
+        gdi(
+            cpu,
+            "PatBlt",
+            &[image_dc, 0, 0, cx as u32, cy as u32, PATCOPY],
+        );
         old
     };
     if mask_only {
@@ -623,7 +697,11 @@ fn draw_with(
         } else {
             let black = gdi(cpu, "GetStockObject", &[4]);
             let old = select(cpu, image_dc, black);
-            gdi(cpu, "PatBlt", &[image_dc, 0, 0, cx as u32, cy as u32, PATCOPY]);
+            gdi(
+                cpu,
+                "PatBlt",
+                &[image_dc, 0, 0, cx as u32, cy as u32, PATCOPY],
+            );
             select(cpu, image_dc, old);
         }
     } else {
@@ -707,7 +785,19 @@ fn draw_with(
 
 /// ImageList_DrawEx's work, for the controls.
 #[allow(clippy::too_many_arguments)]
-pub fn draw_ex(cpu: &mut Cpu, himl: u32, i: i32, hdc: u32, x: i32, y: i32, cx: i32, cy: i32, bk: u32, fg: u32, style: u32) -> bool {
+pub fn draw_ex(
+    cpu: &mut Cpu,
+    himl: u32,
+    i: i32,
+    hdc: u32,
+    x: i32,
+    y: i32,
+    cx: i32,
+    cy: i32,
+    bk: u32,
+    fg: u32,
+    style: u32,
+) -> bool {
     let p = DrawParams {
         himl,
         i,
@@ -726,7 +816,19 @@ pub fn draw_ex(cpu: &mut Cpu, himl: u32, i: i32, hdc: u32, x: i32, y: i32, cx: i
 
 /// ImageList_Draw's work, for the controls.
 pub fn draw(cpu: &mut Cpu, himl: u32, i: i32, hdc: u32, x: i32, y: i32, style: u32) -> bool {
-    draw_ex(cpu, himl, i, hdc, x, y, 0, 0, CLR_DEFAULT, CLR_DEFAULT, style)
+    draw_ex(
+        cpu,
+        himl,
+        i,
+        hdc,
+        x,
+        y,
+        0,
+        0,
+        CLR_DEFAULT,
+        CLR_DEFAULT,
+        style,
+    )
 }
 
 /// The size of the images, if `himl` is an image list.
@@ -761,20 +863,68 @@ fn merge(cpu: &mut Cpu, h1: u32, i1: i32, h2: u32, i2: i32, dx: i32, dy: i32) ->
     let p2 = point(&b, i2);
     let has1 = i1 >= 0 && i1 < a.cur;
     let has2 = i2 >= 0 && i2 < b.cur;
-    blt(cpu, d.hdc_image, 0, 0, cxd, cyd, a.hdc_image, 0, 0, BLACKNESS);
+    blt(
+        cpu,
+        d.hdc_image,
+        0,
+        0,
+        cxd,
+        cyd,
+        a.hdc_image,
+        0,
+        0,
+        BLACKNESS,
+    );
     if has1 {
-        blt(cpu, d.hdc_image, xo1, yo1, a.cx, a.cy, a.hdc_image, p1.0, p1.1, SRCCOPY);
+        blt(
+            cpu,
+            d.hdc_image,
+            xo1,
+            yo1,
+            a.cx,
+            a.cy,
+            a.hdc_image,
+            p1.0,
+            p1.1,
+            SRCCOPY,
+        );
     }
     if has2 {
-        blt(cpu, d.hdc_image, xo2, yo2, b.cx, b.cy, b.hdc_mask, p2.0, p2.1, SRCAND);
-        blt(cpu, d.hdc_image, xo2, yo2, b.cx, b.cy, b.hdc_image, p2.0, p2.1, SRCPAINT);
+        blt(
+            cpu,
+            d.hdc_image,
+            xo2,
+            yo2,
+            b.cx,
+            b.cy,
+            b.hdc_mask,
+            p2.0,
+            p2.1,
+            SRCAND,
+        );
+        blt(
+            cpu,
+            d.hdc_image,
+            xo2,
+            yo2,
+            b.cx,
+            b.cy,
+            b.hdc_image,
+            p2.0,
+            p2.1,
+            SRCPAINT,
+        );
     }
     blt(cpu, d.hdc_mask, 0, 0, cxd, cyd, a.hdc_mask, 0, 0, WHITENESS);
     if has1 {
-        blt(cpu, d.hdc_mask, xo1, yo1, a.cx, a.cy, a.hdc_mask, p1.0, p1.1, SRCCOPY);
+        blt(
+            cpu, d.hdc_mask, xo1, yo1, a.cx, a.cy, a.hdc_mask, p1.0, p1.1, SRCCOPY,
+        );
     }
     if has2 {
-        blt(cpu, d.hdc_mask, xo2, yo2, b.cx, b.cy, b.hdc_mask, p2.0, p2.1, SRCAND);
+        blt(
+            cpu, d.hdc_mask, xo2, yo2, b.cx, b.cy, b.hdc_mask, p2.0, p2.1, SRCAND,
+        );
     }
     d.cur = 1;
     put(cpu, dst, d);
@@ -823,7 +973,11 @@ fn drag_show(cpu: &mut Cpu, show: bool) -> bool {
     }
     let bg_dc = gdi(cpu, "CreateCompatibleDC", &[hdc]);
     if d.bg == 0 {
-        d.bg = gdi(cpu, "CreateCompatibleBitmap", &[hdc, il.cx as u32, il.cy as u32]);
+        d.bg = gdi(
+            cpu,
+            "CreateCompatibleBitmap",
+            &[hdc, il.cx as u32, il.cy as u32],
+        );
     }
     select(cpu, bg_dc, d.bg);
     if show {
@@ -860,7 +1014,18 @@ fn bitmap_file(cpu: &mut Cpu, hbm: u32) -> Option<Vec<u8>> {
     out[0..2].copy_from_slice(b"BM");
     out[2..6].copy_from_slice(&header_len.to_le_bytes());
     out[10..14].copy_from_slice(&header_len.to_le_bytes());
-    let info: [u32; 10] = [40, w as u32, h as u32, 1 | (bits as u32) << 16, 0, size, 0, 0, 0, 0];
+    let info: [u32; 10] = [
+        40,
+        w as u32,
+        h as u32,
+        1 | (bits as u32) << 16,
+        0,
+        size,
+        0,
+        0,
+        0,
+        0,
+    ];
     for (i, v) in info.iter().enumerate() {
         out[14 + 4 * i..18 + 4 * i].copy_from_slice(&v.to_le_bytes());
     }
@@ -871,7 +1036,11 @@ fn bitmap_file(cpu: &mut Cpu, hbm: u32) -> Option<Vec<u8>> {
     }
     write_words(cpu, mem, &info);
     let screen = usr(cpu, "GetDC", &[0]);
-    let lines = gdi(cpu, "GetDIBits", &[screen, hbm, 0, h as u32, mem + 40 + 1024, mem, 0]);
+    let lines = gdi(
+        cpu,
+        "GetDIBits",
+        &[screen, hbm, 0, h as u32, mem + 40 + 1024, mem, 0],
+    );
     usr(cpu, "ReleaseDC", &[0, screen]);
     if lines != h as u32 {
         free_temp(cpu, mem);
@@ -1065,7 +1234,11 @@ fn read_bits(cpu: &mut Cpu, c: &mut Ctx) -> Vec<Op> {
     let info = c.scratch + R_FILE + 14;
     let w = cpu.bus.guest_read_32(info + 4);
     let h = cpu.bus.guest_read_32(info + 8);
-    let hdc = if which == 0 { il.hdc_image } else { il.hdc_mask };
+    let hdc = if which == 0 {
+        il.hdc_image
+    } else {
+        il.hdc_mask
+    };
     let a = [hdc, 0, 0, w, h, 0, 0, w, h, buf, info, 0, SRCCOPY];
     let drawn = gdi(cpu, "StretchDIBits", &a);
     free_temp(cpu, buf);
@@ -1257,11 +1430,25 @@ pub fn il_replace(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let hdc = new_dc(cpu);
     select(cpu, hdc, image);
     let (x, y) = point(&il, i);
-    stretch(cpu, il.hdc_image, (x, y, il.cx, il.cy), hdc, (0, 0, w, h), SRCCOPY);
+    stretch(
+        cpu,
+        il.hdc_image,
+        (x, y, il.cx, il.cy),
+        hdc,
+        (0, 0, w, h),
+        SRCCOPY,
+    );
     if il.hbm_mask != 0 {
         let t = new_dc(cpu);
         let old = select(cpu, t, mask);
-        stretch(cpu, il.hdc_mask, (x, y, il.cx, il.cy), t, (0, 0, w, h), SRCCOPY);
+        stretch(
+            cpu,
+            il.hdc_mask,
+            (x, y, il.cx, il.cy),
+            t,
+            (0, 0, w, h),
+            SRCCOPY,
+        );
         select(cpu, t, old);
         delete_dc(cpu, t);
         blt(cpu, il.hdc_image, x, y, w, h, il.hdc_mask, x, y, NOTSRCAND);
@@ -1355,7 +1542,19 @@ pub fn il_draw(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 pub fn il_draw_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let a = |i: usize| args[i] as i32;
     let (bk, fg, style) = (args[7], args[8], args[9]);
-    Some(draw_ex(cpu, args[0], a(1), args[2], a(3), a(4), a(5), a(6), bk, fg, style) as u32)
+    Some(draw_ex(
+        cpu,
+        args[0],
+        a(1),
+        args[2],
+        a(3),
+        a(4),
+        a(5),
+        a(6),
+        bk,
+        fg,
+        style,
+    ) as u32)
 }
 
 /// ImageList_DrawIndirect(params): of the structure, the fields
@@ -1404,7 +1603,11 @@ pub fn il_copy(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let from = (sx, sy, s.cx, s.cy);
     if flags & ILCF_SWAP != 0 {
         let hdc = new_dc(cpu);
-        let t_image = gdi(cpu, "CreateBitmap", &[s.cx as u32, s.cy as u32, 1, s.bpp, 0]);
+        let t_image = gdi(
+            cpu,
+            "CreateBitmap",
+            &[s.cx as u32, s.cy as u32, 1, s.bpp, 0],
+        );
         let t_mask = mono_bitmap(cpu, s.cx, s.cy);
         select(cpu, hdc, t_image);
         stretch(cpu, hdc, (0, 0, s.cx, s.cy), d.hdc_image, to, SRCCOPY);
@@ -1453,7 +1656,11 @@ pub fn il_get_icon(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(0);
     }
     let screen = usr(cpu, "GetDC", &[0]);
-    let color = gdi(cpu, "CreateCompatibleBitmap", &[screen, il.cx as u32, il.cy as u32]);
+    let color = gdi(
+        cpu,
+        "CreateCompatibleBitmap",
+        &[screen, il.cx as u32, il.cy as u32],
+    );
     usr(cpu, "ReleaseDC", &[0, screen]);
     let hdc = new_dc(cpu);
     let (x, y) = point(&il, i);
@@ -1590,8 +1797,30 @@ pub fn il_begin_drag(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(mut d) = get(cpu, new) else {
         return Some(0);
     };
-    blt(cpu, d.hdc_image, 0, 0, t.cx, t.cy, t.hdc_image, i * t.cx, 0, SRCCOPY);
-    blt(cpu, d.hdc_mask, 0, 0, t.cx, t.cy, t.hdc_mask, i * t.cx, 0, SRCCOPY);
+    blt(
+        cpu,
+        d.hdc_image,
+        0,
+        0,
+        t.cx,
+        t.cy,
+        t.hdc_image,
+        i * t.cx,
+        0,
+        SRCCOPY,
+    );
+    blt(
+        cpu,
+        d.hdc_mask,
+        0,
+        0,
+        t.cx,
+        t.cy,
+        t.hdc_mask,
+        i * t.cx,
+        0,
+        SRCCOPY,
+    );
     d.cur = 1;
     put(cpu, new, d);
     set_drag(
@@ -1661,8 +1890,30 @@ pub fn il_drag_move(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         select(cpu, off, off_bm);
         select(cpu, bg_dc, d.bg);
         blt(cpu, off, 0, 0, rw, rh, hdc, rx, ry, SRCCOPY);
-        blt(cpu, off, ox - rx, oy - ry, il.cx, il.cy, bg_dc, 0, 0, SRCCOPY);
-        blt(cpu, bg_dc, 0, 0, il.cx, il.cy, off, nx - rx, ny - ry, SRCCOPY);
+        blt(
+            cpu,
+            off,
+            ox - rx,
+            oy - ry,
+            il.cx,
+            il.cy,
+            bg_dc,
+            0,
+            0,
+            SRCCOPY,
+        );
+        blt(
+            cpu,
+            bg_dc,
+            0,
+            0,
+            il.cx,
+            il.cy,
+            off,
+            nx - rx,
+            ny - ry,
+            SRCCOPY,
+        );
         drag_draw(cpu, d.himl, off, nx - rx, ny - ry);
         blt(cpu, hdc, rx, ry, rw, rh, off, 0, 0, SRCCOPY);
         delete_dc(cpu, bg_dc);
@@ -1782,7 +2033,10 @@ pub fn il_read(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if cpu.bus.guest_faulted() {
         return None;
     }
-    s.call(f, &[Arg::V(stream), Arg::S(head), Arg::V(ILHEAD_SIZE), Arg::V(0)])
-        .then(R_HEAD, &[stream]);
+    s.call(
+        f,
+        &[Arg::V(stream), Arg::S(head), Arg::V(ILHEAD_SIZE), Arg::V(0)],
+    )
+    .then(R_HEAD, &[stream]);
     script::run(cpu, IMAGELIST, s)
 }

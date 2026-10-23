@@ -925,13 +925,21 @@ fn bind_imports(
                         .ok_or_else(|| out_of_memory(importer))?
                 }
                 (None, _) => {
+                    // Windows 95 says no more, but the setting that has
+                    // the function is worth naming.
+                    let hint = if withheld {
+                        " It is a Windows 98 function: win32_version=98 has it."
+                    } else {
+                        ""
+                    };
                     return Err(LoadError {
                         code: ERROR_PROC_NOT_FOUND,
                         message: format!(
-                            "{} is linked to missing export {}:{}.",
+                            "{} is linked to missing export {}:{}.{}",
                             importer,
                             module_file_name(&dll.name),
-                            wanted
+                            wanted,
+                            hint
                         ),
                     });
                 }
@@ -952,7 +960,7 @@ fn bind_imports(
 /// ucrtbase.dll and api-ms-win-crt-*.dll are MSVCRT.DLL and
 /// KERNELBASE.DLL is KERNEL32.DLL, which Wine's DLLs import; a DLL the
 /// setting replaces, which the folder has, isn't.
-fn builtin_for(bus: &Bus, file: &str) -> Option<usize> {
+pub(super) fn builtin_for(bus: &Bus, file: &str) -> Option<usize> {
     let index = stubs::find_dll(file);
     let win32 = &bus.win32;
     if win32.guest_dlls.is_none() {

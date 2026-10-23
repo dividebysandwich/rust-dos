@@ -27,10 +27,12 @@ const DRV_SUCCESS: u32 = 1;
 
 /// An installable driver a process opened (OpenDriver): its handle, its
 /// DLL and the DLL's DriverProc, the id its DRV_OPEN returned and the
-/// argument it got. `opening` while its DLL loads.
+/// argument it got. `opening` while its DLL loads, for the thread `tid`
+/// whose OpenDriver loads it.
 #[derive(Clone, Debug, Default)]
 pub struct Driver {
     pub pid: u32,
+    pub tid: u32,
     pub handle: u32,
     pub module: u32,
     pub proc: u32,
@@ -41,6 +43,7 @@ pub struct Driver {
 
 crate::state_fields!(Driver {
     pid,
+    tid,
     handle,
     module,
     proc,
@@ -133,12 +136,15 @@ pub fn open_driver(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(0);
     }
     let pid = crate::win32::user32::current_pid(cpu);
+    let tid = crate::win32::user32::current_tid(cpu);
     let handle = new_handle(cpu);
     let drivers = &mut cpu.bus.win32.winmm.drivers;
-    // One whose DLL's entry point failed the load.
-    drivers.retain(|d| !d.opening);
+    // One of this thread's whose DLL's entry point failed the load. Other
+    // threads' may still be loading.
+    drivers.retain(|d| !(d.opening && d.pid == pid && d.tid == tid));
     drivers.push(Driver {
         pid,
+        tid,
         handle,
         param,
         opening: true,
@@ -152,10 +158,16 @@ pub fn open_driver(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// The DLL of the driver OpenDriver opens is loaded at `base` (0: it
 /// wasn't): its DriverProc gets the messages that open it, or OpenDriver
-/// returns 0 to `resume`.
+/// returns 0 to `resume`. The driver is the one this thread's
+/// OpenDriver is opening: the DLL's entry points ran on this thread.
 pub(in crate::win32) fn loaded(cpu: &mut Cpu, resume: (u32, u32), base: u32) {
+    let pid = crate::win32::user32::current_pid(cpu);
+    let tid = crate::win32::user32::current_tid(cpu);
     let drivers = &mut cpu.bus.win32.winmm.drivers;
-    let Some(i) = drivers.iter().rposition(|d| d.opening) else {
+    let Some(i) = drivers
+        .iter()
+        .rposition(|d| d.opening && d.pid == pid && d.tid == tid)
+    else {
         call::finish(cpu, resume, 0);
         return;
     };
