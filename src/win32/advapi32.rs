@@ -1,6 +1,7 @@
 //! ADVAPI32.DLL: of what Windows 95 has, the registry's functions
 //! (registry.rs has the registry itself), GetUserNameA, and the security
-//! and service functions, which it has only as stubs that fail.
+//! and service functions, which it has only as stubs that fail (or, for
+//! a security descriptor's, succeed without doing anything).
 //!
 //! The registry's functions return an error code, which they don't make
 //! the last error. Their W forms are stubs that return 0 and make the
@@ -36,8 +37,8 @@ const fn stdcall(
 
 /// The functions. Append only (see `stubs`).
 static APIS: &[Api] = &[
-    stdcall("InitializeSecurityDescriptor", 1, 2, not_implemented),
-    stdcall("SetSecurityDescriptorDacl", 2, 4, not_implemented),
+    stdcall("InitializeSecurityDescriptor", 1, 2, succeeds_not_implemented),
+    stdcall("SetSecurityDescriptorDacl", 2, 4, succeeds_not_implemented),
     stdcall("InitializeAcl", 3, 3, not_implemented),
     stdcall("RegOpenKeyA", 4, 3, reg_open_key),
     stdcall("RegOpenKeyExA", 5, 5, reg_open_key_ex),
@@ -77,6 +78,12 @@ static APIS: &[Api] = &[
     stdcall("LookupPrivilegeValueA", 39, 3, not_implemented),
     stdcall("AdjustTokenPrivileges", 40, 6, not_implemented),
     stdcall("OpenSCManagerA", 41, 3, not_implemented),
+    stdcall("SetSecurityDescriptorOwner", 42, 3, succeeds_not_implemented),
+    stdcall("AllocateAndInitializeSid", 43, 11, not_implemented),
+    stdcall("FreeSid", 44, 1, not_implemented),
+    stdcall("EqualSid", 45, 2, not_implemented),
+    stdcall("GetTokenInformation", 46, 5, not_implemented),
+    stdcall("OpenThreadToken", 47, 4, not_implemented),
 ];
 
 const FALSE: u32 = 0;
@@ -118,6 +125,18 @@ fn reg_not_implemented(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 fn not_implemented(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     super::process(cpu).last_error = ERROR_CALL_NOT_IMPLEMENTED;
     Some(FALSE)
+}
+
+/// A security descriptor's function, which Windows 98 SE has as a stub
+/// that does nothing to the descriptor, sets ERROR_CALL_NOT_IMPLEMENTED
+/// and returns TRUE: InitializeSecurityDescriptor,
+/// SetSecurityDescriptorDacl and SetSecurityDescriptorOwner. Setup
+/// programs build a descriptor for RegCreateKeyExA, which ignores it,
+/// and give up on the key when the descriptor fails (InstallShield 5's
+/// engine).
+fn succeeds_not_implemented(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    super::process(cpu).last_error = ERROR_CALL_NOT_IMPLEMENTED;
+    Some(TRUE)
 }
 
 /// The string at `at`, one char per byte, or "" for NULL. None if a page
