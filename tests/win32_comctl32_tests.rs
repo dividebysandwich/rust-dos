@@ -448,3 +448,61 @@ fn a_dpa_keeps_its_pointers_in_order() {
     assert_eq!(&r[1..7], &[0, 0, 2, 0x222, 0x333, 0]);
     assert_eq!(r[7], 1);
 }
+
+#[test]
+fn a_tree_view_sorts_selects_and_deletes_its_items() {
+    use Arg::*;
+    const TVM_INSERTITEMA: u32 = 0x1100;
+    const TVM_DELETEITEM: u32 = 0x1101;
+    const TVM_GETCOUNT: u32 = 0x1105;
+    const TVM_GETNEXTITEM: u32 = 0x110A;
+    const TVM_SELECTITEM: u32 = 0x110B;
+    const TVI_ROOT: u32 = 0xFFFF_0000;
+    const TVI_SORT: u32 = 0xFFFF_0003;
+    const TVIF_TEXT: u32 = 1;
+    const TVGN_ROOT: u32 = 0;
+    const TVGN_NEXT: u32 = 1;
+    const TVGN_CARET: u32 = 9;
+    const S_TREE: u32 = 0x260;
+    let mut d = data();
+    strings(&mut d);
+    put(&mut d, S_TREE, b"SysTreeView32\0");
+    let calls = [
+        call("InitCommonControls", &[]),
+        parent(),
+        child(S_TREE, 0, 200, 100, 1, 1),
+        send(2, TVM_INSERTITEMA, I(0), At(FREE)),
+        send(2, TVM_INSERTITEMA, I(0), At(FREE + 0x40)),
+        send(2, TVM_GETNEXTITEM, I(TVGN_ROOT), I(0)),
+        send(2, TVM_GETCOUNT, I(0), I(0)),
+        send(2, TVM_SELECTITEM, I(TVGN_CARET), Res(3)),
+        send(2, TVM_GETNEXTITEM, I(TVGN_CARET), I(0)),
+        send(2, TVM_DELETEITEM, I(0), Res(4)),
+        send(2, TVM_GETNEXTITEM, I(TVGN_ROOT), I(0)),
+        send(2, TVM_GETNEXTITEM, I(TVGN_NEXT), Res(3)),
+        send(2, TVM_DELETEITEM, I(0), I(TVI_ROOT)),
+        send(2, TVM_GETCOUNT, I(0), I(0)),
+    ];
+    // The labels' addresses: the data is where the program has it.
+    let (_, base) = program(&d, &calls);
+    // Two TVINSERTSTRUCTs, "b" then "a", sorted in at the root.
+    for (n, label) in [b"b\0", b"a\0"].iter().enumerate() {
+        let at = FREE + 0x40 * n as u32;
+        let text = FREE + 0x100 + 0x10 * n as u32;
+        put(&mut d, text, *label);
+        put32(&mut d, at, TVI_ROOT);
+        put32(&mut d, at + 4, TVI_SORT);
+        put32(&mut d, at + 8, TVIF_TEXT);
+        put32(&mut d, at + 24, base + text);
+    }
+    let (cpu, at) = run("treeview", &d, &calls);
+    let r = results(&cpu, at, calls.len());
+    assert_ne!(r[2], 0, "the tree view is made");
+    assert!(r[3] != 0 && r[4] != 0 && r[3] != r[4]);
+    assert_eq!(r[5], r[4], "\"a\" is sorted in before \"b\"");
+    assert_eq!(r[6], 2);
+    assert_eq!((r[7], r[8]), (1, r[3]), "\"b\" is selected");
+    assert_eq!(r[9], 1);
+    assert_eq!((r[10], r[11]), (r[3], 0), "\"b\" is left alone");
+    assert_eq!((r[12], r[13]), (1, 0), "TVI_ROOT deletes them all");
+}
