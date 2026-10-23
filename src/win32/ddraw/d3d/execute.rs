@@ -310,7 +310,7 @@ impl Run {
     fn go(&mut self, cpu: &mut Cpu) {
         let mut at = self.data[2] as usize;
         for _ in 0..MAX_INSTRUCTIONS {
-            if at + 4 > self.bytes.len() {
+            if at.saturating_add(4) > self.bytes.len() {
                 return;
             }
             let current = at;
@@ -369,7 +369,7 @@ impl Run {
                         );
                         let taken = (self.data[6] & mask == value) != (negate != 0);
                         if taken && offset != 0 {
-                            at = current + offset as usize;
+                            at = current.saturating_add(offset as usize);
                             jumped = true;
                             break;
                         }
