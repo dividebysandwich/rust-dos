@@ -422,6 +422,16 @@ pub fn unregister_class(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(TRUE)
 }
 
+/// COMCTL32's classes are global classes its DLL registers, as on
+/// Windows, and say so: USER32's own system classes don't.
+fn comctl32_global(c: &Class) -> u32 {
+    if c.system && c.instance == crate::win32::comctl32::DLL.base {
+        CS_GLOBALCLASS
+    } else {
+        0
+    }
+}
+
 /// GetClassInfoA(instance, name, class): TRUE, with the WNDCLASSA.
 pub fn get_class_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     super::init(cpu);
@@ -431,7 +441,7 @@ pub fn get_class_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
     let c = user(cpu).classes[index as usize].clone().unwrap();
     let words = [
-        c.style & !CS_GLOBALCLASS,
+        c.style & !CS_GLOBALCLASS | comctl32_global(&c),
         c.proc,
         c.extra.len() as u32,
         c.wnd_extra,
@@ -456,7 +466,7 @@ pub fn get_class_info_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let c = user(cpu).classes[index as usize].clone().unwrap();
     let words = [
         48,
-        c.style & !CS_GLOBALCLASS,
+        c.style & !CS_GLOBALCLASS | comctl32_global(&c),
         c.proc,
         c.extra.len() as u32,
         c.wnd_extra,
@@ -505,7 +515,7 @@ pub fn get_class_long(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 | if c.global && !c.system {
                     CS_GLOBALCLASS
                 } else {
-                    0
+                    comctl32_global(&c)
                 }
         }
         GCW_ATOM => c.atom as u32,

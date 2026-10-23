@@ -70,6 +70,18 @@ const IMPORTS: &[(&str, &[&str])] = &[
         ],
     ),
     ("GDI32.DLL", &["CreateBitmap", "DeleteObject"]),
+    (
+        "COMDLG32.DLL",
+        &[
+            "GetOpenFileNameA",
+            "GetSaveFileNameA",
+            "GetOpenFileNameW",
+            "GetFileTitleA",
+            "CommDlgExtendedError",
+            "PrintDlgA",
+        ],
+    ),
+    ("USER32.DLL", &["SetTimer", "GetActiveWindow", "PostMessageA"]),
     ("KERNEL32.DLL", &["GetModuleHandleA"]),
 ];
 
@@ -92,6 +104,9 @@ enum Arg {
     At(u32),
     /// What the call of this index returned.
     Res(usize),
+    /// The program's timer procedure, which presses OK in the active
+    /// window: what ends a modal dialog.
+    Press,
 }
 
 /// A call a program makes: the function's name and its arguments.
@@ -126,6 +141,18 @@ fn program(data: &[u8], calls: &[Call]) -> (Vec<u8>, u32) {
         iat,
     };
     let code_rva = b.next_rva();
+    // The timer procedure, first in the code.
+    let ok = BASE + code_rva;
+    let mut a = CodeAssembler::new(32).unwrap();
+    a.call(import(&l, "GetActiveWindow")).unwrap();
+    a.push(0).unwrap();
+    a.push(1).unwrap();
+    a.push(0x111).unwrap();
+    a.push(eax).unwrap();
+    a.call(import(&l, "PostMessageA")).unwrap();
+    a.ret_1(16).unwrap();
+    let mut code = a.assemble(ok as u64).unwrap();
+    let main_rva = code_rva + code.len() as u32;
     let mut a = CodeAssembler::new(32).unwrap();
     for (i, Call(name, args)) in calls.iter().enumerate() {
         for arg in args.iter().rev() {
@@ -133,6 +160,7 @@ fn program(data: &[u8], calls: &[Call]) -> (Vec<u8>, u32) {
                 Arg::I(v) => a.push(v as i32).unwrap(),
                 Arg::At(o) => a.push(l.at(o) as i32).unwrap(),
                 Arg::Res(r) => a.push(dword_ptr(l.at(RESULTS + 4 * r as u32))).unwrap(),
+                Arg::Press => a.push(ok as i32).unwrap(),
             }
         }
         a.call(import(&l, name)).unwrap();
@@ -142,7 +170,7 @@ fn program(data: &[u8], calls: &[Call]) -> (Vec<u8>, u32) {
     let mut again = a.create_label();
     a.set_label(&mut again).unwrap();
     a.jmp(again).unwrap();
-    let code = a.assemble((BASE + code_rva) as u64).unwrap();
+    code.extend(a.assemble((BASE + main_rva) as u64).unwrap());
     assert_eq!(
         b.section(
             ".text",
@@ -151,7 +179,7 @@ fn program(data: &[u8], calls: &[Call]) -> (Vec<u8>, u32) {
         ),
         code_rva
     );
-    b.entry(code_rva);
+    b.entry(main_rva);
     (b.build(), l.data)
 }
 
@@ -447,4 +475,83 @@ fn a_dpa_keeps_its_pointers_in_order() {
     let r = results(&cpu, at, calls.len());
     assert_eq!(&r[1..7], &[0, 0, 2, 0x222, 0x333, 0]);
     assert_eq!(r[7], 1);
+}
+
+const CDERR_STRUCTSIZE: u32 = 1;
+const CDERR_INITIALIZATION: u32 = 2;
+
+#[test]
+fn comdlg32_says_what_went_wrong() {
+    use Arg::*;
+    let mut d = data();
+    put(&mut d, FREE, b"C:\\GAMES\\SAVE.DAT\0");
+    put32(&mut d, FREE + 0x100, 12);
+    let calls = [
+        call("GetOpenFileNameA", &[I(0)]),
+        call("CommDlgExtendedError", &[]),
+        call("GetSaveFileNameA", &[At(FREE + 0x100)]),
+        call("CommDlgExtendedError", &[]),
+        call("PrintDlgA", &[At(FREE + 0x100)]),
+        call("CommDlgExtendedError", &[]),
+        call("PrintDlgA", &[I(0)]),
+        call("CommDlgExtendedError", &[]),
+        call("GetOpenFileNameW", &[At(FREE + 0x100)]),
+        call("GetFileTitleA", &[At(FREE), At(FREE + 0x200), I(32)]),
+        call("GetFileTitleA", &[At(FREE), At(FREE + 0x280), I(4)]),
+    ];
+    let (cpu, at) = run("comdlg32_errors", &d, &calls);
+    let r = results(&cpu, at, calls.len());
+    assert_eq!((r[0], r[1]), (0, CDERR_INITIALIZATION));
+    assert_eq!((r[2], r[3]), (0, CDERR_STRUCTSIZE), "a structure too small");
+    assert_eq!((r[4], r[5]), (0, 0), "printing is cancelled");
+    assert_eq!((r[6], r[7]), (0, CDERR_INITIALIZATION));
+    assert_eq!(r[8], 0, "there are no wide dialogs");
+    assert_eq!(r[9], 0);
+    assert_eq!(peek_str(&cpu, at + FREE + 0x200), "SAVE.DAT");
+    assert_eq!(r[10], 9, "the size the title needs");
+}
+
+const OFN_ALLOWMULTISELECT: u32 = 0x0200;
+const OFN_EXPLORER: u32 = 0x0008_0000;
+
+/// A program opening a file with `flags`: a timer presses OK in the
+/// dialog, whose file name is T.EXE. What GetOpenFileNameA returned, and
+/// the path it gave.
+fn open_dialog(test: &str, flags: u32) -> (u32, String, u32) {
+    use Arg::*;
+    let ofn = FREE;
+    let file = FREE + 0x100;
+    let mut d = data();
+    put32(&mut d, ofn, 76);
+    put(&mut d, file, b"T.EXE\0");
+    put32(&mut d, ofn + 32, 260);
+    put32(&mut d, ofn + 52, flags);
+    let calls = [
+        call("SetTimer", &[I(0), I(0), I(100), Press]),
+        call("GetOpenFileNameA", &[At(ofn)]),
+        call("CommDlgExtendedError", &[]),
+    ];
+    // lpstrFile: the data is where it is in every program.
+    let (_, at) = program(&d, &calls);
+    put32(&mut d, ofn + 28, at + file);
+    let (cpu, at) = run(test, &d, &calls);
+    let r = results(&cpu, at, calls.len());
+    assert_eq!(r[2], 0, "no error");
+    let offset = peek(&cpu, at + ofn + 56) & 0xFFFF;
+    (r[1], peek_str(&cpu, at + file), offset)
+}
+
+#[test]
+fn the_explorer_style_open_dialog_gives_the_file_chosen() {
+    let (ok, path, offset) = open_dialog("open_explorer", OFN_EXPLORER);
+    assert_eq!(ok, 1);
+    assert_eq!(path, r"C:\T.EXE");
+    assert_eq!(offset, 3, "nFileOffset");
+}
+
+#[test]
+fn the_old_style_open_dialog_gives_the_file_chosen() {
+    let (ok, path, _) = open_dialog("open_old", OFN_ALLOWMULTISELECT);
+    assert_eq!(ok, 1);
+    assert_eq!(path.to_ascii_uppercase(), r"C:\T.EXE");
 }
