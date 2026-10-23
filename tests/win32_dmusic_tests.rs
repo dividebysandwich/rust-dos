@@ -582,3 +582,104 @@ fn the_dlls_are_there_for_programs_that_import_them() {
     // S_OK: the process has no DirectMusic objects.
     assert_eq!(run(&mut cpu, |_| {}), 0);
 }
+
+#[test]
+fn objects_load_from_streams_on_global_memory() {
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.dll", &["ExitProcess"]),
+        (
+            "OLE32.dll",
+            &["CoInitialize", "CoCreateInstance", "CreateStreamOnHGlobal"],
+        ),
+    ];
+    const CO_INIT: usize = 1;
+    const CREATE: usize = 2;
+    const CREATE_STREAM: usize = 3;
+    // IStream's and the others' methods, as vtable offsets.
+    const QUERY_INTERFACE: i32 = 0;
+    const STREAM_WRITE: i32 = 16;
+    const STREAM_SEEK: i32 = 20;
+    const PERSIST_LOAD: i32 = 20;
+    const OBJECT_PARSE_DESCRIPTOR: i32 = 20;
+    // Places of this program's data, after data()'s.
+    const STREAM: u32 = 0x128;
+    const PERSIST: u32 = 0x12C;
+    const OBJECT: u32 = 0x130;
+    const G_CLSID_SEGMENT: u32 = 0x90;
+    const G_IID_PERSIST: u32 = 0xA0;
+    const G_IID_OBJECT: u32 = 0xB0;
+    const DESC2: u32 = 0x800;
+    const MIDI: u32 = 0xC00;
+    let midi = test_mid();
+    let mut d = data();
+    d.resize(0x1000, 0);
+    let mut put = |at: u32, bytes: &[u8]| {
+        d[at as usize..at as usize + bytes.len()].copy_from_slice(bytes);
+    };
+    put(G_CLSID_SEGMENT, &CLSID_SEGMENT);
+    put(G_IID_PERSIST, &guid(0x109, 0, 0, [0xC0, 0, 0, 0, 0, 0, 0, 0x46]));
+    put(G_IID_OBJECT, &dm(0xD2AC_28B5));
+    // DMUS_OBJ_CLASS | DMUS_OBJ_STREAM, pStream filled in below.
+    put(DESC + 4, &0x802u32.to_le_bytes());
+    put(DESC2, &848u32.to_le_bytes());
+    put(MIDI, &midi);
+    let seek = |a: &mut CodeAssembler, l: &Layout, fail, step| {
+        let args = [Imm(0), Imm(0), Imm(0), Imm(0)];
+        method(a, l, fail, step, (STREAM, STREAM_SEEK), &args, S_OK)
+    };
+    let exe = program(imports, &d, |a, l| {
+        let mut fail = a.create_label();
+        call(a, l, fail, 1, CO_INIT, &[Imm(0)], S_OK)?;
+        let args = [Imm(0), Imm(1), Ptr(STREAM)];
+        call(a, l, fail, 2, CREATE_STREAM, &args, S_OK)?;
+        let args = [Ptr(MIDI), Imm(midi.len() as u32), Imm(0)];
+        method(a, l, fail, 3, (STREAM, STREAM_WRITE), &args, S_OK)?;
+        seek(a, l, fail, 4)?;
+        // The loader reads the segment from the stream (DirectX 7's
+        // DMUS_OBJ_STREAM).
+        a.mov(eax, dword_ptr(l.at(STREAM)))?;
+        a.mov(dword_ptr(l.at(DESC + 844)), eax)?;
+        let args = [
+            Ptr(G_CLSID_LOADER),
+            Imm(0),
+            Imm(1),
+            Ptr(G_IID_LOADER),
+            Ptr(LOADER),
+        ];
+        call(a, l, fail, 5, CREATE, &args, S_OK)?;
+        let args = [Ptr(DESC), Ptr(G_IID_SEGMENT), Ptr(SEG)];
+        method(a, l, fail, 6, (LOADER, LOADER_GET_OBJECT), &args, S_OK)?;
+        method(a, l, fail, 7, (SEG, SEGMENT_GET_LENGTH), &[Ptr(VALUE)], S_OK)?;
+        a.mov(eax, dword_ptr(l.at(VALUE)))?;
+        expect(a, fail, 8, 3072)?;
+        // A segment of its own loads it with IPersistStream::Load.
+        let args = [
+            Ptr(G_CLSID_SEGMENT),
+            Imm(0),
+            Imm(1),
+            Ptr(G_IID_SEGMENT),
+            Ptr(SEG2),
+        ];
+        call(a, l, fail, 9, CREATE, &args, S_OK)?;
+        let args = [Ptr(G_IID_PERSIST), Ptr(PERSIST)];
+        method(a, l, fail, 10, (SEG2, QUERY_INTERFACE), &args, S_OK)?;
+        seek(a, l, fail, 11)?;
+        let args = [Val(STREAM)];
+        method(a, l, fail, 12, (PERSIST, PERSIST_LOAD), &args, S_OK)?;
+        method(a, l, fail, 13, (SEG2, SEGMENT_GET_LENGTH), &[Ptr(VALUE)], S_OK)?;
+        a.mov(eax, dword_ptr(l.at(VALUE)))?;
+        expect(a, fail, 14, 3072)?;
+        // ParseDescriptor gives the class of what the stream holds.
+        let args = [Ptr(G_IID_OBJECT), Ptr(OBJECT)];
+        method(a, l, fail, 15, (SEG2, QUERY_INTERFACE), &args, S_OK)?;
+        seek(a, l, fail, 16)?;
+        let args = [Val(STREAM), Ptr(DESC2)];
+        method(a, l, fail, 17, (OBJECT, OBJECT_PARSE_DESCRIPTOR), &args, S_OK)?;
+        a.mov(eax, dword_ptr(l.at(DESC2 + 4)))?;
+        a.and(eax, 2)?;
+        expect(a, fail, 18, 2)?;
+        exit(a, l, &mut fail)
+    });
+    let mut cpu = machine("stream", exe, &[]);
+    assert_eq!(run(&mut cpu, |_| {}), 0);
+}

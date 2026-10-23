@@ -284,6 +284,39 @@ fn set_size(cpu: &mut Cpu, id: usize, size: u32) -> u32 {
     S_OK
 }
 
+/// The bytes of the stream `this` from its position on, for another
+/// built-in DLL (DirectMusic's IPersistStream::Load), without moving
+/// the position: None when `this` isn't a stream on global memory, or
+/// its block is gone.
+pub fn rest_of(cpu: &mut Cpu, this: u32) -> Option<Vec<u8>> {
+    let id = object(cpu, this)?;
+    let o = get(cpu, id);
+    if o.lock_bytes {
+        return None;
+    }
+    let (position, size, handle) = (o.position, o.size, o.handle);
+    let block = kernel32::global_address(cpu, handle);
+    if block == 0 {
+        return None;
+    }
+    let n = size.saturating_sub(position) as usize;
+    if !cpu.bus.guest_probe(block + position, n, false) {
+        return None;
+    }
+    let mut bytes = vec![0; n];
+    cpu.bus.guest_read_bytes(block + position, &mut bytes);
+    Some(bytes)
+}
+
+/// Move the position of the stream `this` on by `n` bytes, as reading
+/// them does.
+pub fn advance(cpu: &mut Cpu, this: u32, n: u32) {
+    if let Some(id) = object(cpu, this) {
+        let o = get(cpu, id);
+        o.position = o.position.saturating_add(n).min(o.size);
+    }
+}
+
 /// IStream::Read(this, buffer, count, read): what there is from the
 /// position on, up to `count` bytes. S_OK at the end too.
 pub fn read(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {

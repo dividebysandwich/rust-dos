@@ -308,9 +308,9 @@ ole32/propvariant: skipped propvariant.c:167 (x52)
 ole32/propvariant: skipped propvariant.c:174
 shell32/progman_dde: progman_dde: 97 tests executed (0 marked as todo, 0 failures), 1 skipped.
 shell32/progman_dde: skipped progman_dde.c:119
-shell32/shelllink: shelllink: 72 tests executed (0 marked as todo, 0 failures), 4 skipped.
+shell32/shelllink: shelllink: 276 tests executed (0 marked as todo, 1 failure), 3 skipped.
 shell32/shelllink: skipped shelllink.c:172
-shell32/shelllink: skipped shelllink.c:631
+shell32/shelllink: failed shelllink.c:702
 shell32/shelllink: skipped shelllink.c:789
 shell32/shelllink: skipped shelllink.c:854
 shell32/shellpath: shellpath: 116 tests executed (0 marked as todo, 0 failures), 1 skipped.

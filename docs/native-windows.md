@@ -307,15 +307,17 @@ All output goes through the emulated video hardware:
 - **DirectMusic** (DirectX 6.1, `src/win32/dmusic/`): DMUSIC, DMIME,
   DMLOADER, DMSTYLE, DMBAND and DMCOMPOS, their classes made through
   OLE32. The loader reads segments (.sgt), MIDI files, DLS collections,
-  bands, styles and chord maps from files or memory and caches them; a
+  bands, styles and chord maps from files, memory or OLE32's streams on
+  global memory and caches them, and the objects load themselves from such
+  streams (IPersistStream::Load); a program's own IStream isn't read. A
   performance plays segments' sequence, tempo, time signature, system
   exclusive and band tracks by the emulated clock on the process's
   multimedia thread, with notifications. Both ports it lists (the
   Microsoft Synthesizer and the MIDI mapper) are the MPU-401's
   synthesizer, which plays downloaded DLS instruments by their General
   MIDI patches. Styles' patterns, chord and command tracks and the
-  composer need the composition engine, which isn't there: they load
-  and play nothing.
+  composer need the composition engine, which isn't there: they load and
+  play nothing.
 - **Input**: from the emulated 8042 keyboard, the PS/2 mouse and the game
   port, so the frontends, the debug server's input injection and key
   remapping need no changes. DirectInput and window messages both read

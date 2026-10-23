@@ -318,7 +318,8 @@ The results that aren't clean, and why:
   class object registered for CLSCTX_LOCAL_SERVER gives the object
   itself, which doesn't answer for IMultiQI; Windows gives a proxy,
   and OLE32 has no proxies. `278`, `356` and `1073` skip: Internet
-  Explorer's classes aren't installed, as on a Windows 95 without it.
+  Explorer's classes aren't installed, as on a Windows 95 without it
+  (Windows 98 SE comes with Internet Explorer 5's).
   `1117`, `1270` and `1328` skip CoGetObjectContext,
   CoSwitchCallContext and CoGetContextToken, which came with Windows
   2000.
@@ -326,13 +327,17 @@ The results that aren't clean, and why:
   should give the system image list, and there is none (COMCTL32's
   image lists aren't SHELL32's), so it gives 0. `220`, `348` and
   `2247` skip SHGetFileInfoW and SHFileOperationW, `2046` and `2071`
-  SHCreateDirectoryExA and SHPathPrepareForWriteA, which Windows 95's
-  SHELL32 doesn't have.
+  SHCreateDirectoryExA and SHPathPrepareForWriteA, which the built-in
+  SHELL32 doesn't have, as Windows 95's didn't.
 - shell32 `shelllink.c:172` and `789` skip what needs IShellLinkW,
-  which Windows 9x's shell links don't have, `631` GetLongPathNameA,
-  which came with Windows 98, and `854` SHDefExtractIconA.
-  `shellpath.c:849` skips SHGetFolderLocation and `progman_dde.c:119`
-  ReadCabinetState, which Windows 95 doesn't have.
+  which Windows 9x's shell links don't have, and `854`
+  SHDefExtractIconA. `shellpath.c:849` skips SHGetFolderLocation and
+  `progman_dde.c:119` ReadCabinetState, which the built-in SHELL32
+  doesn't have, as Windows 95's didn't.
+- shell32 `shelllink.c:702`: the test links to `rundll32.exe` and
+  expects the path SearchPathA finds for it. There is no RUNDLL32.EXE
+  without Windows' own files, so SearchPathA finds nothing and the test
+  compares the link's path with the one its check before left.
 - shell32 `string.c` runs no checks: on Windows 9x it runs
   `test_StrRetToStringNA`, which is empty in Wine 1.2.3 (a FIXME).
 - comctl32 tests that need a later COMCTL32 than 4.70, Windows 95's,

@@ -1,7 +1,8 @@
-//! DMLOADER.DLL: the loader, which makes DirectMusic's objects of files
-//! and memory (files.rs), finds files in the search directory of their
-//! class, and keeps what it made in its cache, holding a reference on
-//! each, so that a second GetObject gives the same object.
+//! DMLOADER.DLL: the loader, which makes DirectMusic's objects of files,
+//! memory and OLE32's streams on global memory (files.rs), finds files
+//! in the search directory of their class, and keeps what it made in its
+//! cache, holding a reference on each, so that a second GetObject gives
+//! the same object.
 //!
 //! The GUID of the default collection gives the General MIDI
 //! instruments. Objects a file only refers to (a style's or a band's in
@@ -10,7 +11,7 @@
 use super::files::{self, Content};
 use super::guids::*;
 use super::{
-    DESC_MEM_DATA, DESC_MEM_LENGTH, DESC_SIZE, DMUS_OBJ_CLASS, DMUS_OBJ_FILENAME,
+    DESC_MEM_DATA, DESC_MEM_LENGTH, DESC_SIZE, DESC_STREAM, DMUS_OBJ_STREAM, DMUS_OBJ_CLASS, DMUS_OBJ_FILENAME,
     DMUS_OBJ_FULLPATH, DMUS_OBJ_LOADED, DMUS_OBJ_MEMORY, DMUS_OBJ_NAME, DMUS_OBJ_OBJECT, Desc,
     E_INVALIDARG, E_POINTER, Kind, LOADER, S_FALSE, S_OK, add, dmus_e, drop_ref, give, give_new,
     hold, object_of, read_u64, read_wide, state, this_of,
@@ -120,7 +121,7 @@ fn read_file(cpu: &mut Cpu, path: &str) -> Option<Vec<u8>> {
 }
 
 /// The object of the content `c`: its id.
-fn make(cpu: &mut Cpu, c: Content) -> u32 {
+pub(super) fn make(cpu: &mut Cpu, c: Content) -> u32 {
     match c {
         Content::Segment(data) => super::segment::new_segment(cpu, data),
         Content::Collection(list) => super::core::new_collection(cpu, list),
@@ -220,6 +221,15 @@ pub fn get_object(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 match read_file(cpu, p) {
                     Some(data) => data,
                     None => return Some(DMUS_E_LOADER_FAILEDOPEN),
+                }
+            } else if d.valid & DMUS_OBJ_STREAM != 0 {
+                let stream = cpu.bus.guest_read_32(at + DESC_STREAM);
+                if stream == 0 {
+                    return Some(E_POINTER);
+                }
+                match super::stream_data(cpu, stream) {
+                    Ok(data) => data,
+                    Err(e) => return Some(e),
                 }
             } else if d.valid & DMUS_OBJ_MEMORY != 0 {
                 let len = read_u64(cpu, at + DESC_MEM_LENGTH).min(MAX_FILE as u64) as usize;

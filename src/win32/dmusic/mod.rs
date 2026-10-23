@@ -153,7 +153,7 @@ static DMUSIC_APIS: &[Api] = &[
     method("Object_ParseDescriptor", 3, parse_descriptor),
     method("Persist_GetClassID", 2, get_class_id),
     method("Persist_IsDirty", 1, s_false),
-    method("Persist_Load", 2, e_notimpl),
+    method("Persist_Load", 2, persist_load),
     method("Persist_Save", 3, e_notimpl),
     method("Persist_GetSizeMax", 2, e_notimpl),
     method("Music_EnumPort", 3, core::enum_port),
@@ -331,7 +331,7 @@ static DMIME_APIS: &[Api] = &[
     method("Object_ParseDescriptor", 3, parse_descriptor),
     method("Persist_GetClassID", 2, get_class_id),
     method("Persist_IsDirty", 1, s_false),
-    method("Persist_Load", 2, e_notimpl),
+    method("Persist_Load", 2, persist_load),
     method("Persist_Save", 3, e_notimpl),
     method("Persist_GetSizeMax", 2, e_notimpl),
     method("Performance_Init", 4, performance::init),
@@ -705,7 +705,7 @@ static DMSTYLE_APIS: &[Api] = &[
     method("Object_ParseDescriptor", 3, parse_descriptor),
     method("Persist_GetClassID", 2, get_class_id),
     method("Persist_IsDirty", 1, s_false),
-    method("Persist_Load", 2, e_notimpl),
+    method("Persist_Load", 2, persist_load),
     method("Persist_Save", 3, e_notimpl),
     method("Persist_GetSizeMax", 2, e_notimpl),
     method("Style_GetBand", 3, content::style_get_band),
@@ -769,7 +769,7 @@ static DMBAND_APIS: &[Api] = &[
     method("Object_ParseDescriptor", 3, parse_descriptor),
     method("Persist_GetClassID", 2, get_class_id),
     method("Persist_IsDirty", 1, s_false),
-    method("Persist_Load", 2, e_notimpl),
+    method("Persist_Load", 2, persist_load),
     method("Persist_Save", 3, e_notimpl),
     method("Persist_GetSizeMax", 2, e_notimpl),
     method("Band_CreateSegment", 2, content::band_create_segment),
@@ -813,7 +813,7 @@ static DMCOMPOS_APIS: &[Api] = &[
     method("Object_ParseDescriptor", 3, parse_descriptor),
     method("Persist_GetClassID", 2, get_class_id),
     method("Persist_IsDirty", 1, s_false),
-    method("Persist_Load", 2, e_notimpl),
+    method("Persist_Load", 2, persist_load),
     method("Persist_Save", 3, e_notimpl),
     method("Persist_GetSizeMax", 2, e_notimpl),
     method("ChordMap_GetScale", 2, content::chord_map_get_scale),
@@ -1069,6 +1069,8 @@ pub const fn dmus_e(code: u32) -> u32 {
     0x8878_1000 | code
 }
 pub const DMUS_E_NOT_FOUND: u32 = dmus_e(0x161);
+pub const DMUS_E_INVALIDFILE: u32 = dmus_e(0x200);
+use loader::DMUS_E_UNSUPPORTED_STREAM;
 
 /// What IDirectMusicObject says of an object (DMUS_OBJECTDESC).
 #[derive(Clone, Debug, Default)]
@@ -1096,6 +1098,9 @@ pub const DMUS_OBJ_VERSION: u32 = 0x80;
 pub const DMUS_OBJ_DATE: u32 = 0x100;
 pub const DMUS_OBJ_LOADED: u32 = 0x200;
 pub const DMUS_OBJ_MEMORY: u32 = 0x400;
+/// DirectX 7's: the object is in the stream at pStream. Programs for
+/// DirectX 6.1 leave it clear.
+pub const DMUS_OBJ_STREAM: u32 = 0x800;
 
 /// DMUS_OBJECTDESC's places and size.
 const DESC_NAME: u32 = 56;
@@ -1103,6 +1108,8 @@ const DESC_CATEGORY: u32 = 184;
 const DESC_FILE: u32 = 312;
 pub const DESC_MEM_LENGTH: u32 = 832;
 pub const DESC_MEM_DATA: u32 = 840;
+/// pStream, DirectX 7's, in what was DirectX 6.1's padding.
+pub const DESC_STREAM: u32 = 844;
 pub const DESC_SIZE: u32 = 848;
 /// The characters of the names (with their 0).
 const NAME_CHARS: usize = 64;
@@ -1187,7 +1194,7 @@ impl Desc {
         if v & DMUS_OBJ_DATE != 0 {
             self.date = other.date;
         }
-        self.valid |= v & !(DMUS_OBJ_MEMORY | DMUS_OBJ_FULLPATH);
+        self.valid |= v & !(DMUS_OBJ_MEMORY | DMUS_OBJ_STREAM | DMUS_OBJ_FULLPATH);
     }
 }
 
@@ -1639,13 +1646,92 @@ fn set_descriptor(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(S_OK)
 }
 
-/// IDirectMusicObject::ParseDescriptor(this, stream, desc): from the
-/// program's own stream, which isn't read.
-fn parse_descriptor(_: &mut Cpu, args: &[u32]) -> Option<u32> {
-    if args[1] == 0 || args[2] == 0 {
+/// The file at the position of the stream `stream`, which it reads past:
+/// a RIFF file's chunk, or a MIDI file's rest of the stream. Streams on
+/// global memory (OLE32's CreateStreamOnHGlobal) are read; a program's
+/// own IStream isn't, and gives E_NOTIMPL.
+pub fn stream_data(cpu: &mut Cpu, stream: u32) -> Result<Vec<u8>, u32> {
+    let Some(mut data) = super::ole32::stream::rest_of(cpu, stream) else {
+        return Err(E_NOTIMPL);
+    };
+    if data.starts_with(b"RIFF") && data.len() >= 8 {
+        let size = u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;
+        data.truncate(size.saturating_add(8));
+    }
+    super::ole32::stream::advance(cpu, stream, data.len() as u32);
+    Ok(data)
+}
+
+/// IDirectMusicObject::ParseDescriptor(this, stream, desc): the
+/// description the file in the stream keeps, with its class;
+/// DMUS_E_INVALIDFILE when the stream holds no file of the object's
+/// class.
+fn parse_descriptor(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let [this, stream, at] = args[..] else {
+        return Some(E_INVALIDARG);
+    };
+    if stream == 0 || at == 0 {
         return Some(E_POINTER);
     }
-    Some(E_NOTIMPL)
+    let Some(id) = object_of(cpu, this) else {
+        return Some(E_INVALIDARG);
+    };
+    if !cpu.bus.guest_probe(at, DESC_MEM_LENGTH as usize, true) {
+        return Some(E_POINTER);
+    }
+    let class = class_of(&state(cpu).get(id)?.kind);
+    let data = match stream_data(cpu, stream) {
+        Ok(data) => data,
+        Err(e) => return Some(e),
+    };
+    if files::class_of(&data) != Some(class.0) {
+        return Some(DMUS_E_INVALIDFILE);
+    }
+    let Some((mut d, _)) = files::read(&data) else {
+        return Some(DMUS_E_INVALIDFILE);
+    };
+    d.class = class.0;
+    d.valid |= DMUS_OBJ_CLASS;
+    let size = cpu.bus.guest_read_32(at);
+    cpu.bus.guest_fill(at + 4, DESC_MEM_LENGTH as usize - 4, 0);
+    d.write(cpu, at);
+    cpu.bus.guest_write_32(at, size);
+    Some(S_OK)
+}
+
+/// IPersistStream::Load(this, stream): the object becomes what the file
+/// in the stream holds, which must be of its class.
+fn persist_load(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let [this, stream] = args[..] else {
+        return Some(E_INVALIDARG);
+    };
+    if stream == 0 {
+        return Some(E_POINTER);
+    }
+    let Some(id) = object_of(cpu, this) else {
+        return Some(E_INVALIDARG);
+    };
+    let class = class_of(&state(cpu).get(id)?.kind);
+    let data = match stream_data(cpu, stream) {
+        Ok(data) => data,
+        Err(e) => return Some(e),
+    };
+    if files::class_of(&data) != Some(class.0) {
+        return Some(DMUS_E_UNSUPPORTED_STREAM);
+    }
+    let Some((desc, content)) = files::read(&data) else {
+        return Some(DMUS_E_UNSUPPORTED_STREAM);
+    };
+    // The content is made as a new object, whose state goes into this
+    // one; the new object takes the old state with it as it goes.
+    let made = loader::make(cpu, content);
+    let s = state(cpu);
+    let mut kind = std::mem::take(&mut s.get_mut(made)?.kind);
+    std::mem::swap(&mut s.get_mut(id)?.kind, &mut kind);
+    s.get_mut(made)?.kind = kind;
+    s.get_mut(id)?.desc.merge(&desc);
+    drop_ref(cpu, made);
+    Some(S_OK)
 }
 
 /// IPersist::GetClassID(this, clsid).

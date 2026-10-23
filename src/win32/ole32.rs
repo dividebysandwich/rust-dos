@@ -22,7 +22,7 @@ use crate::cpu::Cpu;
 mod calls;
 mod compobj;
 mod propvariant;
-mod stream;
+pub mod stream;
 
 pub use calls::step;
 pub(super) use propvariant::call_all;
