@@ -842,9 +842,10 @@ fn get_command_line_w(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(super::process(cpu).command_line + super::memory::PAGE)
 }
 
-/// Windows 95: version 4.0, with bit 31 saying it isn't NT.
-fn get_version(_: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(0xC000_0004)
+/// The version in the low word (minor in the high byte), and the high
+/// bits set for Windows 9x (version.rs).
+fn get_version(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    Some(super::version::info(super::version::current(cpu)).get_version)
 }
 
 /// The module named `name` (with ".DLL" when it has no extension), or

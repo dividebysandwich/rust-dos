@@ -681,6 +681,7 @@ fn changed_settings() -> Settings {
         umb: false,
         dpmi: false,
         win32: true,
+        win32_version: WindowsVersion::Win98Se,
         dos_high: false,
         dos_version: DosVersion::new(7, 10),
         ide_hard_disks: false,

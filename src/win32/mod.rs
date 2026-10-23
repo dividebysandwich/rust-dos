@@ -42,6 +42,7 @@ mod system;
 mod task;
 mod thread;
 pub mod user32;
+pub mod version;
 mod winmm;
 mod wsock32;
 
@@ -251,6 +252,11 @@ pub struct Win32 {
     /// Whether PE programs run (the `win32` setting); off, their DOS stub
     /// runs as on DOS.
     pub enabled: bool,
+    /// The version of Windows it is (the `win32_version` setting), and
+    /// the version the running processes see, which is the setting's
+    /// when the first of them started (version.rs).
+    pub version: version::WindowsVersion,
+    os: version::WindowsVersion,
     /// The program DOS loaded, which starts at `START`.
     pending: Option<String>,
     /// The processes, the one DOS started first. They run in that DOS
@@ -316,6 +322,7 @@ impl Win32 {
     pub fn reset(&mut self) {
         *self = Win32 {
             enabled: self.enabled,
+            version: self.version,
             ..Win32::default()
         };
     }
@@ -519,6 +526,7 @@ fn start(cpu: &mut Cpu) {
     win32.rm_stack = rm_stack;
     win32.a20 = a20;
     win32.cr4 = cr4;
+    version::start(win32);
     let environment = dos_environment(cpu, cpu.current_psp);
     let line = loader::dos_command_line(cpu, &path);
     match create_process(cpu, &path, &line, environment, Vec::new(), None, Vec::new(), false) {
@@ -1001,4 +1009,5 @@ crate::state_fields!(Win32 {
     winmm,
     glide,
     guids,
-} skip { enabled });
+    os,
+} skip { enabled, version });

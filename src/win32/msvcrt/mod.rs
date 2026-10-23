@@ -749,11 +749,13 @@ fn init(bus: &mut Bus, process: &mut super::Process) -> Option<()> {
         .collect();
     w.bytes(var_at(V_MBCASEMAP), &casemap)?;
 
-    // Windows 95, by GetVersion: its build in _osver.
-    w.u32(var_at(V_OSVER), 0x4000)?;
-    w.u32(var_at(V_WINVER), 0x0400)?;
-    w.u32(var_at(V_WINMAJOR), 4)?;
-    w.u32(var_at(V_WINMINOR), 0)?;
+    // The version, from GetVersion's value as MSVCRT's startup takes
+    // it.
+    let v = super::version::info(w.bus.win32.os);
+    w.u32(var_at(V_OSVER), v.osver)?;
+    w.u32(var_at(V_WINVER), v.major << 8 | v.minor)?;
+    w.u32(var_at(V_WINMAJOR), v.major)?;
+    w.u32(var_at(V_WINMINOR), v.minor)?;
 
     // The error messages, and the time zone's names: there are no time
     // zones, local time is UTC (kernel32's time.rs).
