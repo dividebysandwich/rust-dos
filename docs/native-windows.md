@@ -583,6 +583,12 @@ without a network does, with each common dialog cancelled.
 - Game profiles that pick the layer.
 - The Wine leaf DLL experiment from above.
 
+The archive readers, `rust-dos unpack` and the profiles' `windows=`,
+`[install]` and `.reg` are in "Installing games"; the setup programs
+that ran to a finished install, and what differed from the same
+install on Windows 98 SE, in "Setup programs that ran"; the Wine DLLs
+that ran as guest code in "Wine's DLLs as guest code".
+
 COMCTL32 is Windows 95's version 4.70, its functions exported at their
 ordinals, for launchers and setup programs: image lists, DPAs and DSAs,
 MRU lists, and the progress bar, up-down control, trackbar, status bar,
@@ -607,10 +613,6 @@ they return when the user presses Cancel, so the colour, font and print
 dialogs never show. The W functions fail with
 ERROR_CALL_NOT_IMPLEMENTED, and FindTextA and ReplaceTextA make no
 window.
-
-Wine's tests cover the DLLs this phase adds, but not the installers, the
-archive readers or what Windows 98 does differently from 95, so those
-are tested in other ways (see "Testing").
 
 For setup programs, SHELL32 has shell links (CLSID_ShellLink with
 IShellLinkA and IPersistFile, reading and writing `.lnk` files as
@@ -641,6 +643,10 @@ apartment-threaded, as on Windows 98 SE, where a thread of the
 multithreaded apartment gets them only as IUnknown: Wine's DirectMusic
 tests ask for them that way or for DirectX 8's interfaces, so on the
 built-in Windows they skip, as they do on Windows 98 SE.
+
+Wine's tests cover the DLLs this phase adds, but not the installers, the
+archive readers or what Windows 98 does differently from 95, so those
+are tested in other ways (see "Testing").
 
 **Phase 6: Win16.**
 
@@ -709,11 +715,15 @@ traces call, not whole DLLs.
     phase 3 four of ddraw's, six of dsound's, four of dinput's and seven
     of winmm's (the folder's README lists them). Phase 4 adds ddraw's
     `d3d` and `visual`, which test Direct3D. Phase 5 adds the DLLs that
-    setup programs use: comctl32's, shell32's (`shelllink`,
-    `shlfileop`, `shellpath`, `shlexec`, `string`, and `progman_dde`
+    setup programs use, all from the 1.2.3 tree: sixteen of comctl32's,
+    comdlg32's `filedlg`, six of shell32's (`progman_dde` among them,
     for the program groups InstallShield 5 makes through DDE),
-    comdlg32's, version's (`info`, `install`), lz32's and ole32's
-    (`compobj`, `hglobalstream`, `propvariant`), all in the 1.2.3 tree.
+    version's `info` and `install`, lz32's `lzexpand_main`, and ole32's
+    `compobj`, `hglobalstream` and `propvariant`; and DirectMusic's
+    three, from the releases named above.
+  - Since phase 5 they run as Windows 98 SE (`win32_version=98se`), so
+    that the functions Windows 98 added are there for the tests that
+    use them.
   - `tests/conformance_tests.rs` builds them with MinGW and runs each
     under the built-in Windows: all but msvcrt's as 486 code linked with
     a small C runtime of rust-dos's own on KERNEL32, so they test the
