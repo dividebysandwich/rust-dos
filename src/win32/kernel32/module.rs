@@ -30,13 +30,15 @@ const DLL_THREAD_DETACH: u32 = 3;
 /// argument: go to the program's entry point (its address); return from
 /// LoadLibrary (the module); unmap the modules freed and return (TRUE, or
 /// 0 for a load that failed); end the thread or the process (the exit
-/// code); unmap the modules and end the thread (the exit code).
+/// code); unmap the modules and end the thread (the exit code); go on
+/// opening an installable driver (the module, winmm/driver.rs).
 const THEN_START: u32 = 0;
 const THEN_LOAD: u32 = 1;
 const THEN_FREE: u32 = 2;
 const THEN_EXIT_THREAD: u32 = 3;
 const THEN_EXIT_PROCESS: u32 = 4;
 const THEN_FREE_EXIT: u32 = 5;
+const THEN_DRIVER: u32 = 6;
 
 /// The places in a chain's data.
 const THEN: usize = 0;
@@ -143,6 +145,7 @@ fn done(cpu: &mut Cpu, resume: (u32, u32), data: Vec<u32>) {
     match data[THEN] {
         THEN_START => cpu.set_eip(arg),
         THEN_LOAD => call::finish(cpu, resume, arg),
+        THEN_DRIVER => crate::win32::winmm::driver::loaded(cpu, resume, arg),
         THEN_FREE | THEN_FREE_EXIT => {
             let bases = data[LIST..].to_vec();
             with_process(cpu, |p, bus| {
@@ -252,9 +255,35 @@ fn load(cpu: &mut Cpu, name: u32, flags: u32) -> Option<u32> {
         return Some(0);
     }
     let name = string_at(cpu, name)?;
+    load_name(cpu, &name, flags, THEN_LOAD)
+}
+
+/// Load the DLL of an installable driver, `name`, for OpenDriver, as
+/// LoadLibrary does: winmm's `driver::loaded` goes on with its base, or
+/// 0, once the DLLs' entry points have run. A DLL whose entry point fails
+/// makes OpenDriver return 0.
+pub(in crate::win32) fn load_driver(cpu: &mut Cpu, name: &str) {
+    if let Some(base) = load_name(cpu, name, 0, THEN_DRIVER) {
+        crate::win32::winmm::driver::loaded(cpu, call::here(cpu), base);
+    }
+}
+
+/// FreeLibrary for the system, from a call's continuation: the module at
+/// `module` loses a reference, and when the DLLs' entry points have run
+/// `value` returns to `resume`.
+pub(in crate::win32) fn free_then(cpu: &mut Cpu, module: u32, resume: (u32, u32), value: u32) {
+    let mut freed = Vec::new();
+    loader::release(process(cpu), module, &mut freed);
+    let data = chain(THEN_FREE, value, DLL_PROCESS_DETACH, 0, &freed);
+    run_chain(cpu, resume, data);
+}
+
+/// `load` of the name `name`, the chain doing `then` when it is done. The
+/// base, or 0, when no entry point has to run first.
+fn load_name(cpu: &mut Cpu, name: &str, flags: u32, then: u32) -> Option<u32> {
     let importer = process(cpu).name.clone();
     let altered = flags & LOAD_WITH_ALTERED_SEARCH_PATH != 0 && name.contains(['\\', '/', ':']);
-    let first_dir = match cpu.bus.disk.qualify_path(&name) {
+    let first_dir = match cpu.bus.disk.qualify_path(name) {
         Some(path) if altered => loader::directory_of(&path),
         _ => loader::directory_of(&process(cpu).path),
     };
@@ -270,7 +299,7 @@ fn load(cpu: &mut Cpu, name: u32, flags: u32) -> Option<u32> {
             mapped: Vec::new(),
             raised: Vec::new(),
         };
-        let result = loader::load_module(&mut l, &name, flags, &importer);
+        let result = loader::load_module(&mut l, name, flags, &importer);
         let (mapped, raised) = (l.mapped, l.raised);
         if result.is_err() {
             loader::roll_back(bus, &mut memory, p, &before, &raised);
@@ -297,7 +326,7 @@ fn load(cpu: &mut Cpu, name: u32, flags: u32) -> Option<u32> {
     if !attach {
         return Some(base);
     }
-    let data = chain(THEN_LOAD, base, DLL_PROCESS_ATTACH, 0, &mapped);
+    let data = chain(then, base, DLL_PROCESS_ATTACH, 0, &mapped);
     run_chain(cpu, call::here(cpu), data);
     None
 }

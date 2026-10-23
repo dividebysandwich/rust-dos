@@ -14,6 +14,7 @@ pub(super) mod module;
 mod path;
 mod process;
 mod profile;
+pub(in crate::win32) use profile::profile_value;
 mod sort;
 mod sync;
 mod text;
@@ -526,6 +527,7 @@ static APIS: &[Api] = &[
     stdcall("GlobalAddAtomW", 489, 1, not_implemented),
     stdcall("CreateProcessW", 490, 10, not_implemented),
     stdcall("WinExec", 510, 2, process::win_exec),
+    stdcall("GetPrivateProfileSectionW", 511, 4, profile::get_private_profile_section_w),
 ];
 
 /// The places in `APIS` of the system's own stubs.

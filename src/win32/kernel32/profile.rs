@@ -3,7 +3,7 @@
 //! Each call reads the file again, and a change writes it again whole,
 //! as "[section]" and "key=value" lines.
 
-use super::text::read_string;
+use super::text::{ansi_to_wide, read_string, read_wide_string, wide_to_ansi};
 use super::{ERROR_INVALID_PARAMETER, ERROR_PATH_NOT_FOUND, FALSE, TRUE, set_error};
 use crate::cpu::Cpu;
 
@@ -176,35 +176,55 @@ fn put_list(cpu: &mut Cpu, to: u32, size: u32, items: &[Vec<u8>]) -> Option<u32>
     if size < 3 {
         return put_zeros(cpu, to, size);
     }
-    let size = size as usize;
+    let (out, len) = list(size as usize, items);
+    if !cpu.bus.guest_probe(to, out.len(), true) {
+        return None;
+    }
+    cpu.bus.guest_write_bytes(to, &out);
+    Some(len)
+}
+
+/// `put_list` of UTF-16 strings, into a buffer of `size` characters.
+fn put_wide_list(cpu: &mut Cpu, to: u32, size: u32, items: &[Vec<u16>]) -> Option<u32> {
+    if size < 3 {
+        return put_zeros(cpu, to, size.saturating_mul(2));
+    }
+    let (out, len) = list(size as usize, items);
+    let out: Vec<u8> = out.iter().flat_map(|c| c.to_le_bytes()).collect();
+    if !cpu.bus.guest_probe(to, out.len(), true) {
+        return None;
+    }
+    cpu.bus.guest_write_bytes(to, &out);
+    Some(len)
+}
+
+/// The list `put_list` writes, in a buffer of `size` units (3 or more),
+/// and the length it returns.
+fn list<T: Copy + Default>(size: usize, items: &[Vec<T>]) -> (Vec<T>, u32) {
     let mut out = Vec::new();
     let mut room = size - 1;
     let mut full = false;
     for item in items {
         let take = item.len().min(room.saturating_sub(1));
         out.extend(&item[..take]);
-        out.push(0);
+        out.push(T::default());
         room -= take + 1;
         if room < 2 {
             full = true;
             break;
         }
     }
-    out.push(0);
+    out.push(T::default());
     let len = if full || room <= 1 {
         let n = out.len();
         if n >= 2 {
-            out[n - 2] = 0;
+            out[n - 2] = T::default();
         }
         size as u32 - 2
     } else {
         out.len() as u32 - 1
     };
-    if !cpu.bus.guest_probe(to, out.len(), true) {
-        return None;
-    }
-    cpu.bus.guest_write_bytes(to, &out);
-    Some(len)
+    (out, len)
 }
 
 /// A buffer too small for a list: zeros.
@@ -400,6 +420,41 @@ pub(super) fn get_private_profile_section_a(cpu: &mut Cpu, args: &[u32]) -> Opti
 
 pub(super) fn get_profile_section_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     get_section(cpu, args[0], args[1], args[2], None)
+}
+
+/// GetPrivateProfileSectionW(section, buffer, size, file): as the A
+/// function, in UTF-16, `size` in characters.
+pub(super) fn get_private_profile_section_w(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[section, to, size, file] = args else {
+        unreachable!()
+    };
+    if section == 0 || to == 0 || size == 0 {
+        set_error(cpu, ERROR_INVALID_PARAMETER);
+        return Some(0);
+    }
+    let section = wide_to_ansi(&read_wide_string(cpu, section)?);
+    let file = match file {
+        0 => None,
+        at => Some(wide_to_ansi(&read_wide_string(cpu, at)?)),
+    };
+    let sections = load(cpu, file.as_deref());
+    let lines = find(&sections, &section).map_or(Vec::new(), |s| section_lines(s, true));
+    let lines: Vec<Vec<u16>> = lines.iter().map(|line| ansi_to_wide(line)).collect();
+    put_wide_list(cpu, to, size, &lines)
+}
+
+/// The value of `key` in `section` of the profile `file`, for the
+/// system's own use: OpenDriver's aliases in SYSTEM.INI.
+pub(in crate::win32) fn profile_value(
+    cpu: &mut Cpu,
+    file: &[u8],
+    section: &[u8],
+    key: &[u8],
+) -> Option<Vec<u8>> {
+    let sections = load(cpu, Some(file));
+    find(&sections, section)
+        .and_then(|s| value_of(s, key))
+        .map(<[u8]>::to_vec)
 }
 
 /// GetPrivateProfileSectionNamesA(buffer, size, file).

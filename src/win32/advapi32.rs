@@ -57,21 +57,21 @@ static APIS: &[Api] = &[
     stdcall("RegFlushKey", 19, 1, reg_flush_key),
     stdcall("RegConnectRegistryA", 20, 3, reg_connect_registry),
     stdcall("GetUserNameA", 21, 2, get_user_name),
-    stdcall("RegOpenKeyW", 22, 3, not_implemented),
-    stdcall("RegOpenKeyExW", 23, 5, not_implemented),
-    stdcall("RegCreateKeyW", 24, 3, not_implemented),
-    stdcall("RegCreateKeyExW", 25, 9, not_implemented),
-    stdcall("RegQueryValueW", 26, 4, not_implemented),
-    stdcall("RegQueryValueExW", 27, 6, not_implemented),
-    stdcall("RegSetValueW", 28, 5, not_implemented),
-    stdcall("RegSetValueExW", 29, 6, not_implemented),
-    stdcall("RegDeleteKeyW", 30, 2, not_implemented),
-    stdcall("RegDeleteValueW", 31, 2, not_implemented),
-    stdcall("RegEnumKeyW", 32, 4, not_implemented),
-    stdcall("RegEnumKeyExW", 33, 8, not_implemented),
-    stdcall("RegEnumValueW", 34, 8, not_implemented),
-    stdcall("RegQueryInfoKeyW", 35, 12, not_implemented),
-    stdcall("RegConnectRegistryW", 36, 3, not_implemented),
+    stdcall("RegOpenKeyW", 22, 3, reg_not_implemented),
+    stdcall("RegOpenKeyExW", 23, 5, reg_not_implemented),
+    stdcall("RegCreateKeyW", 24, 3, reg_not_implemented),
+    stdcall("RegCreateKeyExW", 25, 9, reg_not_implemented),
+    stdcall("RegQueryValueW", 26, 4, reg_not_implemented),
+    stdcall("RegQueryValueExW", 27, 6, reg_not_implemented),
+    stdcall("RegSetValueW", 28, 5, reg_not_implemented),
+    stdcall("RegSetValueExW", 29, 6, reg_not_implemented),
+    stdcall("RegDeleteKeyW", 30, 2, reg_not_implemented),
+    stdcall("RegDeleteValueW", 31, 2, reg_not_implemented),
+    stdcall("RegEnumKeyW", 32, 4, reg_not_implemented),
+    stdcall("RegEnumKeyExW", 33, 8, reg_not_implemented),
+    stdcall("RegEnumValueW", 34, 8, reg_not_implemented),
+    stdcall("RegQueryInfoKeyW", 35, 12, reg_not_implemented),
+    stdcall("RegConnectRegistryW", 36, 3, reg_not_implemented),
     stdcall("GetUserNameW", 37, 2, not_implemented),
     stdcall("OpenProcessToken", 38, 3, not_implemented),
     stdcall("LookupPrivilegeValueA", 39, 3, not_implemented),
@@ -101,6 +101,12 @@ const REG_OPENED_EXISTING_KEY: u32 = 2;
 
 /// The most data a value takes.
 const MAX_DATA: u32 = 0x10_0000;
+
+/// A registry function of Unicode strings, which Windows 95 has only as a
+/// stub that returns ERROR_CALL_NOT_IMPLEMENTED.
+fn reg_not_implemented(_: &mut Cpu, _: &[u32]) -> Option<u32> {
+    Some(ERROR_CALL_NOT_IMPLEMENTED)
+}
 
 /// A function Windows 95 has only as a stub that fails.
 fn not_implemented(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {

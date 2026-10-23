@@ -274,6 +274,17 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Some(on) => config.win32 = Some(on),
                             None => warn(format!("invalid win32 '{}' (true or false)", value)),
                         },
+                        "win32_dlls" => {
+                            let value = value.trim_matches('"');
+                            let path = match (value.strip_prefix("~/"), home) {
+                                (Some(rest), Some(h)) => h.join(rest),
+                                _ => PathBuf::from(value),
+                            };
+                            config.win32_dlls = (!value.is_empty()).then_some(path);
+                        }
+                        "win32_dlls_replace" => {
+                            config.win32_dlls_replace = Some(super::settings::dll_names(value));
+                        }
                         "ide_hard_disks" => match parse_bool(value) {
                             Some(on) => config.ide_hard_disks = Some(on),
                             None => warn(format!("invalid ide_hard_disks '{}' (true or false)", value)),
