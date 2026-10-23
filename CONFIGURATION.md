@@ -1274,6 +1274,43 @@ says why on the screen and runs again at the next start. With
 `overlay=true` the files go to the game's saves folder, so **R** on the
 Games page takes the install away and the next start unpacks it again.
 
+A game whose setup program runs in the built-in Windows (InstallShield
+5, InstallShield 3 with its 32-bit engine, Wise) can run it the first
+time instead: `IF NOT EXIST` in `[autoexec]` starts the setup while the
+game's program isn't there yet, and the lines after it start the game
+once the setup has ended. The setup asks its questions as it would on
+Windows, and writes its files, registry keys and shortcuts on the
+game's drives. With `overlay=true` they go to the saves folder too, and
+**R** takes the install away.
+
+```ini
+[game]
+name=Enemy Infestation
+windows=builtin
+
+[emulator]
+win32_version=98se
+
+[drives]
+C=~/dos/ei
+D=~/cd/EnemyInfestation.iso cdrom
+
+[autoexec]
+SET TEMP=C:\WINDOWS\TEMP
+D:
+IF NOT EXIST C:\PROGRA~1\ENEMYI~1\EI.EXE SETUP.EXE
+C:
+CD \PROGRA~1\ENEMYI~1
+EI.EXE
+```
+
+A `SETUP.EXE` that is InstallShield's 16-bit launcher, with
+`_INST32I.EX_` beside it, isn't run itself: the built-in Windows
+unpacks the 32-bit engine from that archive into `TEMP` (made if it
+isn't there) and starts it with the command line the launcher gives it
+on Windows 98 SE. A setup on more than one CD asks for the next, which
+Ctrl+F4 puts in when the drive's `[drives]` line lists the images.
+
 ### Keys at the start
 
 `input=` in `[game]` presses keys once the game's program has started:

@@ -387,6 +387,89 @@ With these, a Win16 layer isn't needed to start, and it comes last, in
 phase 6, for the Windows 3.1 games and the 16-bit setup programs that 1
 to 3 don't reach.
 
+### Setup programs that ran
+
+InstallShield's 16-bit `SETUP.EXE` (InstallShield 5, and InstallShield
+3 releases that ship the 32-bit engine) only unpacks its engine and
+starts it. An NE `SETUP.EXE` with `_INST32I.EX_` beside it is taken
+for that launcher (`src/win32/launcher.rs`): the files of the archive
+(a list of PKWARE DCL members, read by the installshield crate's
+`EngineArchive`) go to `TEMP`, all but the 16-bit `BOOT16.EXE`, and
+the engine starts with the command line Windows 98 SE's launcher gives
+it, as a probe program read it from the running engine there:
+
+```
+C:\WINDOWS\TEMP\_INS0432._MP -fD:\SETUP.INS  -z1 -cx -xC:\WINDOWS\TEMP\
+```
+
+The launcher's `_ISDEL.EXE`, which deletes those files after setup, is
+16-bit and isn't run, so they stay in `TEMP`.
+
+Getting the setups to the end took these, each as Windows 98 SE does
+it, checked with a probe program there:
+
+- A write to a module's resources, which are read-only pages,
+  succeeds: Windows 98 makes the page writable and the write goes
+  through, though VirtualQuery says read-only and IsBadWritePtr says
+  the page can't be written (InstallShield's engine draws into its own
+  bitmap resource).
+- WINSPOOL.DRV with EnumPortsA (FILE:, LPT1:, COM1:, COM2:).
+- ADVAPI32's security descriptor functions return TRUE with error 120
+  (InitializeSecurityDescriptor, SetSecurityDescriptorDacl and
+  SetSecurityDescriptorOwner) or FALSE with it (InitializeAcl,
+  AllocateAndInitializeSid and the token functions). InstallShield's
+  engine writes no registry key when InitializeSecurityDescriptor
+  fails.
+- MPR.DLL with WNetGetConnectionA, which finds no drive redirected.
+- GetTempPathA makes the folder it names when it isn't there, as a
+  game's C: drive has no `C:\WINDOWS\TEMP` until something makes it.
+- GDI32 keeps metafiles (SetMetaFileBitsEx) and plays them
+  (PlayMetaFile): Wise's dialogs draw their pictures from them.
+
+Each install was compared with the same setup run on Windows 98 SE,
+file by file with hashes, registry key by key and shortcut by
+shortcut:
+
+- **Enemy Infestation** (InstallShield 5): the 9 game files are the
+  same. `Ei.cfg` differs in the CD's letter (D: here, E: on the
+  Windows 98 machine). The registry keys are the same. The uninstall
+  log `Uninst.isu` is 3729 bytes against 3680, with the names of the
+  engine's dialog variables (`ResultA`, `bOpt1A`) and `5.00.000` in
+  it. The Read Me shortcut points to `D:\NOTEPAD.EXE`, as the setup
+  finds no Notepad on C:. The game starts, plays its intro and shows
+  its menu.
+- **Wages of War** (InstallShield 3's 32-bit engine): 361 of 362 files
+  are the same, all but the uninstall log `DeIsL1.isu` (22979 bytes
+  against 22922). The registry keys are the same, and the setup also
+  makes an empty `HKLM\SharedDLLs`: the engine creates SharedDLLs
+  under the wrong key when it doesn't find it, which Windows 98, where
+  it is always there, never shows. The game says it must run in
+  256-colour mode and stops: the built-in Windows' desktop has 32 bits
+  per pixel.
+- **Grom** (Wise, two CDs, the minimum installation): 1931 of 1932
+  files are the same, all but the install log `INSTALL.LOG`, which
+  differs in the time, the CD's letter, a `Made Dir` line for
+  `C:\Program Files` and the case of names. The registry keys are the
+  same but for the time of the last update check and the case of the
+  Start menu folder's path. The setup asks for the second CD halfway
+  through, as on Windows 98. It warns that the disk is too small, as
+  DOS reports 80 MB free on a drive that is a host folder; Ignore goes
+  on. The game itself needs IMAGEHLP, AVIFIL32 and MSVFW32, which
+  aren't there.
+
+Some differences hold for every setup:
+
+- Names on a drive that is a host folder are in capitals, as DOS made
+  them: the Start menu's folder is `START MENU`.
+- The CD's Joliet names aren't read, so files the setup copies by
+  their long names from the CD get 8.3 ones (Enemy Infestation's
+  `.url` shortcuts are `PLAYON~1.URL`).
+- Shortcuts are smaller: they have no relative path and no file
+  times. Their targets, working folders and icons are the same.
+- Dialog text is laid out with other font metrics, so some lines wrap
+  or are cut where Windows 98's aren't, and characters the built-in
+  fonts lack show as `?` (Grom's "DirectX®").
+
 ### Timing
 
 `GetTickCount`, `timeGetTime`, `QueryPerformanceCounter` (at the PIT's
