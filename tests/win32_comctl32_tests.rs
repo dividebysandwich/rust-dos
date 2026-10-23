@@ -55,6 +55,7 @@ const IMPORTS: &[(&str, &[&str])] = &[
             "DPA_InsertPtr",
             "DPA_GetPtr",
             "DPA_Destroy",
+            "CreateToolbarEx",
         ],
     ),
     (
@@ -612,4 +613,113 @@ fn a_tree_view_sorts_selects_and_deletes_its_items() {
     assert_eq!(r[9], 1);
     assert_eq!((r[10], r[11]), (r[3], 0), "\"b\" is left alone");
     assert_eq!((r[12], r[13]), (1, 0), "TVI_ROOT deletes them all");
+}
+
+/// A toolbar as COMDLG32's file dialog makes one: the view bitmap of
+/// COMCTL32, buttons without text, and a string after them, which
+/// adds no text row.
+#[test]
+fn a_toolbar_without_text_rows_keeps_none() {
+    use Arg::*;
+    const TB_ADDBITMAP: u32 = 0x0413;
+    const TB_ADDBUTTONSA: u32 = 0x0414;
+    const TB_BUTTONCOUNT: u32 = 0x0418;
+    const TB_ADDSTRINGA: u32 = 0x041C;
+    const TB_BUTTONSTRUCTSIZE: u32 = 0x041E;
+    const TB_AUTOSIZE: u32 = 0x0421;
+    const TB_GETIMAGELIST: u32 = 0x0431;
+    const TB_SETMAXTEXTROWS: u32 = 0x043C;
+    const TB_GETTEXTROWS: u32 = 0x043D;
+    const TBSTYLE_FLAT: u32 = 0x0800;
+    const TBSTYLE_TOOLTIPS: u32 = 0x0100;
+    const S_TOOLBAR: u32 = 0x260;
+    let mut d = data();
+    strings(&mut d);
+    put(&mut d, S_TOOLBAR, b"ToolbarWindow32\0");
+    // TBADDBITMAP: HINST_COMMCTRL, IDB_VIEW_SMALL_COLOR.
+    put32(&mut d, FREE, 0xFFFF_FFFF);
+    put32(&mut d, FREE + 4, 4);
+    // Two TBBUTTONs: images 8 and 9, enabled, no text.
+    for (i, (image, id)) in [(8u32, 0xA001u32), (9, 0xA002)].iter().enumerate() {
+        let at = FREE + 0x20 + 20 * i as u32;
+        put32(&mut d, at, *image);
+        put32(&mut d, at + 4, *id);
+        put32(&mut d, at + 8, 0x04);
+    }
+    put(&mut d, FREE + 0x80, b"winetestwinetest\0\0");
+    let calls = [
+        call("InitCommonControls", &[]),
+        parent(),
+        child(S_TOOLBAR, TBSTYLE_FLAT | TBSTYLE_TOOLTIPS, 100, 30, 1, 1),
+        send(2, TB_BUTTONSTRUCTSIZE, I(20), I(0)),
+        send(2, TB_SETMAXTEXTROWS, I(0), I(0)),
+        send(2, TB_ADDBITMAP, I(12), At(FREE)),
+        send(2, TB_GETIMAGELIST, I(0), I(0)),
+        send(2, TB_ADDBUTTONSA, I(2), At(FREE + 0x20)),
+        send(2, TB_AUTOSIZE, I(0), I(0)),
+        send(2, TB_ADDSTRINGA, I(0), At(FREE + 0x80)),
+        send(2, TB_GETTEXTROWS, I(0), I(0)),
+        send(2, TB_BUTTONCOUNT, I(0), I(0)),
+        call("ImageList_GetImageCount", &[Res(6)]),
+    ];
+    let (cpu, at) = run("toolbar", &d, &calls);
+    let r = results(&cpu, at, calls.len());
+    assert_ne!(r[2], 0, "the toolbar is made");
+    assert_eq!(r[5], 0, "the view bitmap's images start at 0");
+    assert_ne!(r[6], 0, "TB_ADDBITMAP made an image list");
+    assert_eq!(r[9], 0, "the string is the first");
+    assert_eq!(r[10], 0, "no text rows");
+    assert_eq!(r[11], 2);
+    assert_eq!(r[12], 12, "the view bitmap has 12 images");
+}
+
+/// CreateToolbarEx makes the toolbar, adds the bitmap and the buttons.
+#[test]
+fn create_toolbar_ex_adds_the_bitmap_and_buttons() {
+    use Arg::*;
+    const TB_BUTTONCOUNT: u32 = 0x0418;
+    const TB_GETBUTTONSIZE: u32 = 0x043A;
+    const TB_GETIMAGELIST: u32 = 0x0431;
+    let mut d = data();
+    strings(&mut d);
+    for (i, id) in [0x100u32, 0x101, 0x102].iter().enumerate() {
+        let at = FREE + 20 * i as u32;
+        put32(&mut d, at, i as u32);
+        put32(&mut d, at + 4, *id);
+        put32(&mut d, at + 8, 0x04);
+    }
+    let calls = [
+        call("InitCommonControls", &[]),
+        parent(),
+        call(
+            "CreateToolbarEx",
+            &[
+                Res(1),
+                I(WS_CHILD | WS_VISIBLE),
+                I(7),
+                I(15),
+                I(0xFFFF_FFFF),
+                I(0),
+                At(FREE),
+                I(3),
+                I(0),
+                I(0),
+                I(16),
+                I(16),
+                I(20),
+            ],
+        ),
+        send(2, TB_BUTTONCOUNT, I(0), I(0)),
+        send(2, TB_GETBUTTONSIZE, I(0), I(0)),
+        send(2, TB_GETIMAGELIST, I(0), I(0)),
+        call("ImageList_GetImageCount", &[Res(5)]),
+        call("GetWindowLongA", &[Res(2), I(-12i32 as u32)]),
+    ];
+    let (cpu, at) = run("toolbarex", &d, &calls);
+    let r = results(&cpu, at, calls.len());
+    assert_ne!(r[2], 0, "the toolbar is made");
+    assert_eq!(r[3], 3);
+    assert_eq!(r[4], 23 | (22 << 16), "16 by 16 images make 23 by 22 buttons");
+    assert_eq!(r[6], 15, "the standard bitmap has 15 images");
+    assert_eq!(r[7], 7, "the id");
 }

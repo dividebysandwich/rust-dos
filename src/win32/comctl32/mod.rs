@@ -182,6 +182,7 @@ static APIS: &[Api] = &[
     stdcall("AddMRUData", 167, 3, mru::add_mru_data),
     stdcall("FindMRUData", 169, 4, mru::find_mru_data),
     stdcall("TreeViewEditProc", 0, 4, treeview::edit_proc),
+    stdcall("TooltipsSubclassProc", 0, 4, tooltips::subclass_proc),
 ];
 
 /// COMCTL32's place in `stubs::DLLS`.
