@@ -20,6 +20,7 @@
 
 pub mod dpa;
 pub mod gfx;
+pub mod imagelist;
 pub mod misc;
 pub mod progress;
 pub mod script;
@@ -93,6 +94,45 @@ static APIS: &[Api] = &[
     stdcall("DSA_DeleteAllItems", 327, 1, dpa::dsa_delete_all_items),
     stdcall("DSA_EnumCallback", 387, 3, dpa::dsa_enum_callback),
     stdcall("DSA_DestroyCallback", 388, 3, dpa::dsa_destroy_callback),
+    stdcall("ImageList_Add", 40, 3, imagelist::il_add),
+    stdcall("ImageList_AddIcon", 41, 2, imagelist::il_add_icon),
+    stdcall("ImageList_AddMasked", 42, 3, imagelist::il_add_masked),
+    stdcall("ImageList_BeginDrag", 43, 4, imagelist::il_begin_drag),
+    stdcall("ImageList_Copy", 44, 5, imagelist::il_copy),
+    stdcall("ImageList_Create", 45, 5, imagelist::il_create),
+    stdcall("ImageList_Destroy", 46, 1, imagelist::il_destroy),
+    stdcall("ImageList_DragEnter", 47, 3, imagelist::il_drag_enter),
+    stdcall("ImageList_DragLeave", 48, 1, imagelist::il_drag_leave),
+    stdcall("ImageList_DragMove", 49, 2, imagelist::il_drag_move),
+    stdcall("ImageList_DragShowNolock", 50, 1, imagelist::il_drag_show_nolock),
+    stdcall("ImageList_Draw", 51, 6, imagelist::il_draw),
+    stdcall("ImageList_DrawEx", 52, 10, imagelist::il_draw_ex),
+    stdcall("ImageList_DrawIndirect", 53, 1, imagelist::il_draw_indirect),
+    stdcall("ImageList_Duplicate", 54, 1, imagelist::il_duplicate),
+    stdcall("ImageList_EndDrag", 55, 0, imagelist::il_end_drag),
+    stdcall("ImageList_GetBkColor", 56, 1, imagelist::il_get_bk_color),
+    stdcall("ImageList_GetDragImage", 57, 2, imagelist::il_get_drag_image),
+    stdcall("ImageList_GetIcon", 58, 3, imagelist::il_get_icon),
+    stdcall("ImageList_GetIconSize", 59, 3, imagelist::il_get_icon_size),
+    stdcall("ImageList_GetImageCount", 60, 1, imagelist::il_get_image_count),
+    stdcall("ImageList_GetImageInfo", 61, 3, imagelist::il_get_image_info),
+    stdcall("ImageList_GetImageRect", 62, 3, imagelist::il_get_image_rect),
+    stdcall("ImageList_LoadImage", 63, 7, imagelist::il_load_image),
+    stdcall("ImageList_LoadImageA", 64, 7, imagelist::il_load_image),
+    stdcall("ImageList_LoadImageW", 65, 7, imagelist::il_load_image_w),
+    stdcall("ImageList_Merge", 66, 6, imagelist::il_merge),
+    stdcall("ImageList_Read", 67, 1, imagelist::il_read),
+    stdcall("ImageList_Remove", 68, 2, imagelist::il_remove),
+    stdcall("ImageList_Replace", 69, 4, imagelist::il_replace),
+    stdcall("ImageList_ReplaceIcon", 70, 3, imagelist::il_replace_icon),
+    stdcall("ImageList_SetBkColor", 75, 2, imagelist::il_set_bk_color),
+    stdcall("ImageList_SetDragCursorImage", 76, 4, imagelist::il_set_drag_cursor_image),
+    stdcall("ImageList_SetFilter", 77, 3, imagelist::il_set_filter),
+    stdcall("ImageList_SetFlags", 78, 2, imagelist::il_set_filter),
+    stdcall("ImageList_SetIconSize", 79, 3, imagelist::il_set_icon_size),
+    stdcall("ImageList_SetImageCount", 80, 2, imagelist::il_set_image_count),
+    stdcall("ImageList_SetOverlayImage", 81, 3, imagelist::il_set_overlay_image),
+    stdcall("ImageList_Write", 82, 2, imagelist::il_write),
 ];
 
 /// COMCTL32's place in `stubs::DLLS`.
@@ -138,6 +178,7 @@ pub fn kernel32(cpu: &mut Cpu, name: &str, args: &[u32]) -> Option<u32> {
 pub type Module = u32;
 pub const PROGRESS: Module = 1;
 pub const DPA: Module = 2;
+pub const IMAGELIST: Module = 3;
 
 /// The continuation that paints: the module's `draw`, with the DC
 /// BeginPaint gave.
@@ -148,6 +189,7 @@ pub fn dispatch_then(cpu: &mut Cpu, module: u32, id: u16, c: &mut Ctx) -> Vec<Op
     match module {
         PROGRESS => progress::then(cpu, id, c),
         DPA => dpa::then_step(cpu, id, c),
+        IMAGELIST => imagelist::then(cpu, id, c),
         _ => Vec::new(),
     }
 }
@@ -165,9 +207,15 @@ pub fn step(
 #[derive(Clone, Debug, Default)]
 pub struct State {
     pub progress: BTreeMap<u32, progress::Progress>,
+    pub imagelists: BTreeMap<u32, imagelist::ImageList>,
+    pub drag: imagelist::Drag,
 }
 
-crate::state_fields!(State { progress });
+crate::state_fields!(State {
+    progress,
+    imagelists,
+    drag
+});
 
 /// COMCTL32's state.
 pub fn state(cpu: &mut Cpu) -> &mut State {
@@ -202,7 +250,7 @@ const PLACEHOLDERS: &[(&str, u32)] = &[
 /// Register the common controls' classes, with USER32's own: USER32's
 /// `class::register_system` calls this.
 pub fn register_classes(cpu: &mut Cpu) {
-    let mut add = |cpu: &mut Cpu, name: &str, style: u32, proc: u32, extra, cursor, background| {
+    let add = |cpu: &mut Cpu, name: &str, style: u32, proc: u32, extra, cursor, background| {
         let atom = class::atom(user32::user(cpu), name);
         let c = class::Class {
             atom,
