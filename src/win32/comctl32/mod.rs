@@ -238,6 +238,8 @@ pub const TREEVIEW: Module = 11;
 pub const TAB: Module = 12;
 pub const PROPSHEET: Module = 13;
 pub const MRU: Module = 14;
+/// COMDLG32's file dialogs, which make their scripts with these.
+pub const FILEDLG: Module = 15;
 
 /// The continuation that paints: the module's `draw`, with the DC
 /// BeginPaint gave.
@@ -260,6 +262,7 @@ pub fn dispatch_then(cpu: &mut Cpu, module: u32, id: u16, c: &mut Ctx) -> Vec<Op
         TAB => tab::then(cpu, id, c),
         PROPSHEET => propsheet::then(cpu, id, c),
         MRU => mru::then(cpu, id, c),
+        FILEDLG => super::comdlg32::filedlg::then(cpu, id, c),
         _ => Vec::new(),
     }
 }

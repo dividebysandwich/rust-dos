@@ -766,7 +766,7 @@ pub(super) fn set_file_attributes(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// them: '*' any characters, '?' one or none at the end of a name or its
 /// extension, "*.*" anything, and a '.' at the pattern's end a name with
 /// no extension. Case doesn't count.
-fn matches(name: &str, pattern: &str) -> bool {
+pub(crate) fn matches(name: &str, pattern: &str) -> bool {
     fn glob(n: &[u8], p: &[u8]) -> bool {
         match p.split_first() {
             None => n.is_empty(),
@@ -786,7 +786,7 @@ fn matches(name: &str, pattern: &str) -> bool {
 
 /// The entries of the directory `dir` (a full path) whose long or short
 /// names match `pattern`.
-fn find_entries(cpu: &Cpu, dir: &str, pattern: &str) -> Result<Vec<FindEntry>, u32> {
+pub(crate) fn find_entries(cpu: &Cpu, dir: &str, pattern: &str) -> Result<Vec<FindEntry>, u32> {
     let disk = &cpu.bus.disk;
     let spec = format!("{}\\*.*", dir.trim_end_matches('\\'));
     let listed = disk.list_directory(&spec, 0x16).map_err(|e| e as u32)?;

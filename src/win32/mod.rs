@@ -313,6 +313,8 @@ pub struct Win32 {
 
     /// The common controls' state, the system's.
     comctl32: comctl32::State,
+    /// The common dialogs' state.
+    comdlg32: comdlg32::State,
 }
 
 impl Win32 {
@@ -1006,4 +1008,5 @@ crate::state_fields!(Win32 {
     glide,
     guids,
     comctl32,
+    comdlg32,
 } skip { enabled });
