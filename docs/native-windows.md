@@ -324,9 +324,31 @@ Most installs can do without it:
    later InstallShield setups are 32-bit already. This needs the layer to
    be broad enough for setup programs (dialogs, common controls, shell
    links), so it comes in phase 5.
-3. **Unpacking in Rust.** Read the installer's archives (InstallShield
-   CABs and `.Z` files, as unshield does) to copy files without running
-   setup at all, with the registry keys from the profile as in 1.
+3. **Unpacking in Rust.** Read the installer's archives to copy files
+   without running setup at all, with the registry keys from the profile
+   as in 1. The readers follow those of the refurbished-dinosaurs
+   toolkit (`RefurbishedDinosaurs.LegacyFormats`, MIT), which are C#, so
+   they are ported rather than reused:
+   - InstallShield 5 and 6 cabinets (`data1.hdr` and `dataN.cab`, major
+     versions 0, 5 and 6), laid out as Unshield reads them. Compressed
+     members are deflate chunks with 16-bit lengths or, in some version
+     0 sets, raw deflate ending each chunk with `00 00 FF FF` (Unshield's
+     `-O`). Nothing in the header tells the two apart, so the profile
+     names the form and the reader never guesses it. Version 6 members
+     are checked against the header's MD5, the others by size.
+   - InstallShield 3 archives (`_SETUP.1`, `.Z` files inside
+     self-extractors), whose members are compressed with PKWARE's DCL
+     implode, decoded as zlib's `contrib/blast` describes the format.
+   - The header is checked whole before any member is read: relative
+     paths, data inside the volumes, and limits on counts and sizes.
+     Entries the reader can't read (marked invalid, stored outside the
+     cabinet, two different files at one path) are listed with the
+     reason, and the rest of the set still opens; a file at a shared
+     path is read by its index.
+   - A cabinet places files by file group. The reader reports each
+     member's groups, and the profile maps groups to folders under the
+     install folder, recorded from a real install as its registry keys
+     are.
 
 With these, a Win16 layer isn't needed to start, and it comes last, in
 phase 6, for the Windows 3.1 games and the 16-bit setup programs that 1
@@ -440,9 +462,14 @@ without a network does, with each common dialog cancelled.
 
 - 32-bit installers (InstallShield 5's 32-bit engine, Wise) and
   unpacking installer archives (see "Installing games").
-- Windows 98 as a version setting, and DirectX 6.1's additions.
+- Windows 98 as a version setting, and DirectX 6.1's additions
+  (DirectMusic).
 - Game profiles that pick the layer.
 - The Wine leaf DLL experiment from above.
+
+Wine's tests cover the DLLs this phase adds, but not the installers, the
+archive readers or what Windows 98 does differently from 95, so those
+are tested in other ways (see "Testing").
 
 **Phase 6: Win16.**
 
@@ -498,14 +525,23 @@ traces call, not whole DLLs.
     one needs is listed in the folder's README.
   - The tree is Wine 1.2.3. Wine tested on Windows 9x until about 2010,
     and its tests of that time accept 9x's results (`broken()`,
-    `win_skip`); later trees expect NT's in places.
+    `win_skip`); later trees expect NT's in places. DirectMusic's tests
+    are the exception: 1.2.3 has only dmloader's `loader.c`, dmime's
+    `performance.c` came in 1.4.1 and dmusic's `dmusic.c` in 1.6.2. They
+    are copied from the release that first has them, and each check
+    that fails is compared with the booted Windows 98 image before it
+    is fixed or its result is written into `expected.txt`.
   - A test file is copied once the built-in DLL has the functions it
     calls directly, so the set grows with the DLLs: twenty of
     kernel32's files, advapi32's `registry`, ten of msvcrt's, eleven of
     user32's (`msg` and `win` among them), eight of gdi32's, and from
     phase 3 four of ddraw's, six of dsound's, four of dinput's and seven
     of winmm's (the folder's README lists them). Phase 4 adds ddraw's
-    `d3d` and `visual`, which test Direct3D.
+    `d3d` and `visual`, which test Direct3D. Phase 5 adds the DLLs that
+    setup programs use: comctl32's, shell32's (`shelllink`,
+    `shlfileop`, `shellpath`, and `progman_dde` for the program groups
+    InstallShield 5 makes through DDE), comdlg32's, version's (`info`,
+    `install`), lz32's and ole32's, all in the 1.2.3 tree.
   - `tests/conformance_tests.rs` builds them with MinGW and runs each
     under the built-in Windows: all but msvcrt's as 486 code linked with
     a small C runtime of rust-dos's own on KERNEL32, so they test the
@@ -524,7 +560,26 @@ traces call, not whole DLLs.
     which rust-dos's GPL-2.0-or-later allows.
 - The same test programs on the booted Windows 95 and 98 images give
   the expected output where Wine's tests don't say what 9x does: a test
-  passes when the built-in layer prints what Windows printed.
+  passes when the built-in layer prints what Windows printed. Wine's
+  1.2.3 tests accept 95's, 98's and ME's answers alike, so they show
+  that the Windows 98 setting breaks nothing, but not where 98 should
+  answer differently from 95. Those differences come from the booted
+  images.
+- Installer archives: unit tests build InstallShield cabinets,
+  InstallShield 3 archives and implode streams with a writer in the
+  tests, as the PE tests build programs. A writer and a reader made
+  from one reading of a format only show that the two agree, so the
+  tests also decode streams that an independent decoder expanded, as
+  the toolkit's tests do: the example in blast's format description,
+  and a coded-literal stream pwexplode expanded to the same text. A
+  game's own archive, compared entry by entry with what Unshield (or
+  idecomp, for InstallShield 3) extracts, is the acceptance check. It
+  runs outside the repository, as the game suite does.
+- Installs: a real installer, run under the built-in Windows or
+  unpacked in Rust, from media kept outside the repository as the game
+  suite's are. The check is what the install leaves behind, the files
+  written with their hashes and the registry keys set, compared with an
+  install of the same game on the booted Windows 98 image.
 
 ## Licensing
 
@@ -538,6 +593,14 @@ rust-dos is GPL-2.0-or-later.
   ideas and not its code, unless its author agrees to relicense.
 - HX has no license file, so it serves as a reference and a test, not a
   source.
+- The refurbished-dinosaurs toolkit's format readers (MIT) and Unshield
+  (MIT) may be ported. Code from idecomp or pwexplode (GPL-3.0) would
+  make the whole program GPL-3.0, which isn't ours to decide, so their
+  code is not used. The readers implement the same formats from
+  descriptions of them (the toolkit's decision records, blast's format
+  description), and the two tools are run as programs outside the
+  repository: for research into what an archive holds, and to check
+  what the readers extract.
 - Nothing from Microsoft is used or shipped: no DLLs, fonts or headers
   beyond what Wine's and MinGW's public headers document.
 
