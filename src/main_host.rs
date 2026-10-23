@@ -98,6 +98,9 @@ impl MainHost<'_, '_> {
             }
         }
         self.cpu.bus.config_dir = std::path::absolute(dir).ok();
+        for warning in games::start(self.cpu, &prepared.install, prepared.registry.as_deref()) {
+            config_warning(self.cpu, &format!("games/{}.conf: {}", id, warning));
+        }
         self.cpu.queue_batch_lines(&prepared.autoexec);
         self.cpu.bus.log_string(&format!("[CONFIG] Launching the game {} (games/{}.conf)", prepared.name, id));
         // What RetroAchievements knows the game by.

@@ -56,6 +56,7 @@ pub mod hosttime;
 pub mod ide;
 pub mod idle;
 pub mod import;
+pub mod install;
 pub use rust_dos_gus as gus;
 pub mod instr_cache;
 pub mod kbc;

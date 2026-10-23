@@ -621,6 +621,25 @@ pub fn save(cpu: &mut Cpu) {
     }
 }
 
+/// Put the .reg file `text` into the registry and save it. With no
+/// program running, the registry is read from its file for this and let
+/// go after, so the next program reads it again, as after
+/// `process_ended`.
+pub fn import_file(cpu: &mut Cpu, text: &str) -> Result<(), String> {
+    let idle = cpu.bus.win32.processes.is_empty();
+    let registry = get(cpu);
+    registry.import(text);
+    registry.dirty = false;
+    let bytes = crate::dosstr::to_bytes(&registry.export());
+    let saved = cpu.bus.disk.write_whole_file(FILE, &bytes, None);
+    if idle {
+        cpu.bus.win32.registry = Registry::default();
+    } else if saved.is_err() {
+        cpu.bus.win32.registry.dirty = true;
+    }
+    saved.map_err(|_| format!("the registry can't be saved to {}", FILE))
+}
+
 /// The process `id` ended: its keys close. After the last process, the
 /// registry is saved and read again by the next program, which sees what
 /// was changed in the file meanwhile.
