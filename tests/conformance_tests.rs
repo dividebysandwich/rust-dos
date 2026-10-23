@@ -239,6 +239,7 @@ const LIBS: &[&str] = &[
     "-lshell32",
     "-lversion",
     "-llz32",
+    "-loleaut32",
     "-ldxguid",
     "-luuid",
     "-lksuser",
@@ -322,6 +323,16 @@ fn build(
         args.extend([
             "-DSTATIC_KSDATAFORMAT_SUBTYPE_PCM",
             "-DSTATIC_KSDATAFORMAT_SUBTYPE_IEEE_FLOAT",
+        ]);
+    }
+    if dll == "ole32" && units.iter().any(|u| u == "compobj") {
+        // compobj.c defines the GUIDs of the headers it includes
+        // (initguid.h), which libuuid has too; MinGW's ctxtcall.h has
+        // no IID_IContextCallback, which only the tests of Windows
+        // 2000's CoGetObjectContext use.
+        args.extend([
+            "-Wl,--allow-multiple-definition",
+            "-DIID_IContextCallback=IID_IUnknown",
         ]);
     }
     args.extend(sources.iter().map(String::as_str));

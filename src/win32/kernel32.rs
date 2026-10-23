@@ -709,6 +709,17 @@ pub fn global_size(cpu: &mut Cpu, handle: u32) -> u32 {
     global::global_size(cpu, &[handle]).unwrap_or(0)
 }
 
+/// GlobalReAlloc(handle, size, flags) for a built-in DLL: the handle,
+/// or 0.
+pub fn global_realloc(cpu: &mut Cpu, handle: u32, size: u32, flags: u32) -> u32 {
+    global::global_realloc(cpu, &[handle, size, flags]).unwrap_or(0)
+}
+
+/// GlobalFree(handle) for a built-in DLL.
+pub fn global_free(cpu: &mut Cpu, handle: u32) {
+    global::global_free(cpu, &[handle]);
+}
+
 /// ANSI text in Unicode, by the ANSI code page.
 pub fn ansi_to_wide(bytes: &[u8]) -> Vec<u16> {
     text::ansi_to_wide(bytes)

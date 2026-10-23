@@ -47,6 +47,8 @@ change listed below:
 - `version/`: `info.c`, `install.c` and `version.rc`, the resource
   script `info.c`'s version resource is built from, from
   `dlls/version/tests/`.
+- `ole32/`: `hglobalstream.c` and `propvariant.c` from
+  `dlls/ole32/tests/`.
 
 `heap.c` has the values of the `FLG_HEAP_*` and `FLG_POOL_ENABLE_TAGGING`
 flags defined after its includes, from Wine's `winternl.h`, as MinGW's
@@ -240,6 +242,11 @@ The results that aren't clean, and why:
 - lz32 `lzexpand_main.c:775` and version `info.c:335` skip their
   Unicode halves: LZOpenFileW and GetModuleFileNameW fail with
   ERROR_CALL_NOT_IMPLEMENTED, as on Windows 95.
+- ole32 `propvariant.c:167` and `174` skip the types Windows 95's OLE32,
+  that of NT 4, doesn't take in a PROPVARIANT (VT_DECIMAL, VT_I1,
+  VT_INT, VT_UINT, VT_DISPATCH, VT_UNKNOWN, VT_RECORD, a VT_VARIANT
+  alone, arrays and references), which the test allows for versions
+  before Windows 2000.
 - version `install.c:162`: VerFindFileA of the test program with the
   temporary directory as the application's should find the program
   elsewhere. The runner sets no TEMP, so GetTempPathA gives the current

@@ -213,6 +213,10 @@ msvcrt/string: skipped string.c:1128
 msvcrt/string: skipped string.c:1201
 msvcrt/time: time: 29 tests executed (0 marked as todo, 0 failures), 1 skipped.
 msvcrt/time: skipped time.c:66
+ole32/hglobalstream: hglobalstream: 93 tests executed (0 marked as todo, 0 failures), 0 skipped.
+ole32/propvariant: propvariant: 245 tests executed (0 marked as todo, 0 failures), 53 skipped.
+ole32/propvariant: skipped propvariant.c:167 (x52)
+ole32/propvariant: skipped propvariant.c:174
 user32/class: class: 4 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/dce: dce: 136 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/dialog: dialog: 96 tests executed (0 marked as todo, 0 failures), 1 skipped.

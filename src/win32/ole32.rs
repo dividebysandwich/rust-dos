@@ -16,6 +16,14 @@ use super::com::{
 use super::stubs::{Api, Conv, Dll, Vtable};
 use crate::cpu::Cpu;
 
+mod calls;
+mod propvariant;
+mod stream;
+
+pub use calls::step;
+pub(super) use propvariant::call_all;
+pub(super) use stream::method;
+
 pub static DLL: Dll = Dll {
     name: "OLE32.DLL",
     base: 0xBF90_0000,
@@ -88,6 +96,40 @@ static APIS: &[Api] = &[
     stdcall("IMalloc_GetSize", 0, 2, malloc_get_size),
     stdcall("IMalloc_DidAlloc", 0, 2, malloc_did_alloc),
     stdcall("IMalloc_HeapMinimize", 0, 1, malloc_heap_minimize),
+    stdcall("CreateStreamOnHGlobal", 22, 3, stream::create_stream_on_hglobal),
+    stdcall("GetHGlobalFromStream", 23, 2, stream::get_hglobal_from_stream),
+    stdcall(
+        "CreateILockBytesOnHGlobal",
+        24,
+        3,
+        stream::create_ilockbytes_on_hglobal,
+    ),
+    stdcall(
+        "GetHGlobalFromILockBytes",
+        25,
+        2,
+        stream::get_hglobal_from_ilockbytes,
+    ),
+    stdcall("PropVariantClear", 26, 1, propvariant::prop_variant_clear),
+    stdcall("PropVariantCopy", 27, 2, propvariant::prop_variant_copy),
+    stdcall("IStream_QueryInterface", 0, 3, stream::query_interface),
+    stdcall("IStream_AddRef", 0, 1, stream::add_ref),
+    stdcall("IStream_Release", 0, 1, stream::release),
+    stdcall("IStream_Read", 0, 4, stream::read),
+    stdcall("IStream_Write", 0, 4, stream::write),
+    stdcall("IStream_Seek", 0, 5, stream::seek),
+    stdcall("IStream_SetSize", 0, 3, stream::stream_set_size),
+    stdcall("IStream_CopyTo", 0, 6, stream::copy_to),
+    stdcall("IStream_Commit", 0, 2, stream::nothing),
+    stdcall("IStream_Revert", 0, 1, stream::nothing),
+    stdcall("IStream_LockRegion", 0, 6, stream::lock_region),
+    stdcall("IStream_UnlockRegion", 0, 6, stream::nothing),
+    stdcall("IStream_Stat", 0, 3, stream::stat),
+    stdcall("IStream_Clone", 0, 2, stream::clone),
+    stdcall("ILockBytes_ReadAt", 0, 6, stream::read_at),
+    stdcall("ILockBytes_WriteAt", 0, 6, stream::write_at),
+    stdcall("ILockBytes_Flush", 0, 1, stream::nothing),
+    stdcall("ILockBytes_SetSize", 0, 3, stream::stream_set_size),
 ];
 
 /// The vtables, by their places in this list.
@@ -116,6 +158,40 @@ static VTABLES: &[Vtable] = &[
             "IMalloc_HeapMinimize",
         ],
     },
+    Vtable {
+        name: "IStream",
+        methods: &[
+            "IStream_QueryInterface",
+            "IStream_AddRef",
+            "IStream_Release",
+            "IStream_Read",
+            "IStream_Write",
+            "IStream_Seek",
+            "IStream_SetSize",
+            "IStream_CopyTo",
+            "IStream_Commit",
+            "IStream_Revert",
+            "IStream_LockRegion",
+            "IStream_UnlockRegion",
+            "IStream_Stat",
+            "IStream_Clone",
+        ],
+    },
+    Vtable {
+        name: "ILockBytes",
+        methods: &[
+            "IStream_QueryInterface",
+            "IStream_AddRef",
+            "IStream_Release",
+            "ILockBytes_ReadAt",
+            "ILockBytes_WriteAt",
+            "ILockBytes_Flush",
+            "ILockBytes_SetSize",
+            "IStream_LockRegion",
+            "IStream_UnlockRegion",
+            "IStream_Stat",
+        ],
+    },
 ];
 const CLASS_FACTORY: usize = 0;
 const MALLOC: usize = 1;
@@ -134,6 +210,8 @@ pub struct State {
     /// Each process's task allocator, once it has one: (process id,
     /// address).
     mallocs: Vec<(u32, u32)>,
+    /// The streams and byte arrays on global memory, by their ids.
+    globals: Vec<Option<stream::Global>>,
 }
 
 fn state(cpu: &mut Cpu) -> &mut State {
@@ -147,11 +225,20 @@ fn dll_index() -> usize {
         .expect("OLE32 is a built-in DLL")
 }
 
+/// The place of the vtable `name` in `VTABLES`.
+fn vtable(name: &str) -> usize {
+    VTABLES
+        .iter()
+        .position(|v| v.name == name)
+        .expect("a vtable of OLE32's")
+}
+
 /// A process ended: its threads' initializations and its allocator go.
 pub fn process_ended(cpu: &mut Cpu, pid: u32, tids: &[u32]) {
     let ole = state(cpu);
     ole.initialized.retain(|(t, _)| !tids.contains(t));
     ole.mallocs.retain(|&(p, _)| p != pid);
+    stream::process_ended(cpu, pid);
 }
 
 fn nothing(_: &mut Cpu, _: &[u32]) -> Option<u32> {
@@ -384,7 +471,7 @@ pub(super) fn task_alloc(cpu: &mut Cpu, size: u32) -> u32 {
     super::with_process(cpu, |p, bus| p.heap.alloc(&mut p.memory, bus, size.max(1))).unwrap_or(0)
 }
 
-fn task_free(cpu: &mut Cpu, at: u32) {
+pub(super) fn task_free(cpu: &mut Cpu, at: u32) {
     if at != 0 {
         super::with_process(cpu, |p, _| p.heap.free(at));
     }
@@ -626,5 +713,6 @@ fn co_get_current_process(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 
 crate::state_fields!(State {
     initialized,
-    mallocs
+    mallocs,
+    globals
 });

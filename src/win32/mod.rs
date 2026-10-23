@@ -33,6 +33,7 @@ mod memory;
 mod msvcrt;
 mod object;
 mod ole32;
+mod oleaut32;
 mod registry;
 mod screen;
 mod seh;

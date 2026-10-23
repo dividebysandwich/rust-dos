@@ -101,6 +101,7 @@ pub static DLLS: &[&Dll] = &[
     &super::wsock32::DLL,
     &super::lz32::DLL,
     &super::version::DLL,
+    &super::oleaut32::DLL,
 ];
 
 /// Bytes each function's stub takes.
