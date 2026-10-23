@@ -217,6 +217,12 @@ impl VgaCard {
         self.vram_graphics.len() / 4
     }
 
+    /// The registers were set from outside the ports (a DOS box's display
+    /// put back): mode 12h's rows no longer follow from the last mode set.
+    pub(crate) fn forget_layout(&mut self) {
+        self.mode12_rows = false;
+    }
+
     /// Give the card four planes of `plane_size` bytes (a power of two),
     /// cleared.
     pub fn set_memory(&mut self, plane_size: usize) {
@@ -1238,7 +1244,10 @@ impl Device for VgaCard {
                     // which the VGA doesn't have. Bit 3 is the read mode.
                     if self.graphics_index == 0x05 {
                         val &= 0x7B;
-                        self.mode12_rows = false;
+                        // The write and read modes leave the layout as it is.
+                        if (self.graphics_regs[0x05] ^ val) & 0x60 != 0 {
+                            self.mode12_rows = false;
+                        }
                         // 256 colours on or off: another kind of mode.
                         if (self.graphics_regs[0x05] ^ val) & 0x40 != 0 {
                             self.mode_switched = true;
@@ -1264,7 +1273,9 @@ impl Device for VgaCard {
                         }
                         _ => value,
                     };
-                    if index != 0x0C && index != 0x0D {
+                    // The registers that map memory to scanlines; the
+                    // cursor, retrace and the start address don't.
+                    if matches!(index, 0x01 | 0x07..=0x09 | 0x12..=0x14 | 0x17 | 0x18) {
                         self.mode12_rows = false;
                     }
                     self.crtc_regs[index] = value;
