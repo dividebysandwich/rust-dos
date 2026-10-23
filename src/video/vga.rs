@@ -78,12 +78,15 @@ pub struct VgaCard {
     /// that needs re-rendering this frame (u32::MAX: to the bottom). When
     /// `dirty_y_min >= dirty_y_max` the dirty region is empty. Sites that
     /// can't easily compute an affected row range (palette writes, mode
-    /// changes, planar VRAM writes) widen this to the full screen via
-    /// `mark_dirty_full`. The text-VRAM path in `Bus::write_8` narrows it
-    /// to the single character row that was touched, which is what makes
-    /// shell scrolling and incremental terminal output cheap.
+    /// changes, most planar VRAM writes) widen this to the full screen via
+    /// `mark_dirty_full`. Text-VRAM writes, byte writes in standard mode
+    /// 13h and standard mode 12h writes narrow it to the affected rows,
+    /// which makes incremental drawing cheap.
     pub dirty_y_min: u32,
     pub dirty_y_max: u32,
+    /// Standard VGA mode 12h address mapping, invalidated when its layout
+    /// registers change.
+    mode12_rows: bool,
 
     /// Whether the program changed the picture since the last retrace, and
     /// whether it flipped pages (the start address), for counting the
@@ -188,6 +191,7 @@ impl VgaCard {
             dirty: true,
             dirty_y_min: 0,
             dirty_y_max: u32::MAX,
+            mode12_rows: false,
             drawn: false,
             flipped: false,
             blink_on: true,
@@ -216,6 +220,7 @@ impl VgaCard {
     /// Give the card four planes of `plane_size` bytes (a power of two),
     /// cleared.
     pub fn set_memory(&mut self, plane_size: usize) {
+        self.mode12_rows = false;
         self.vram_graphics = vec![0; plane_size * 4];
     }
 
@@ -667,9 +672,24 @@ impl VgaCard {
                     self.vram_graphics[p * plane_size + at] = byte;
                 }
             }
+            self.mark_graphics_write(at);
         }
-        self.mark_dirty_full();
         true
+    }
+
+    /// Mark one changed planar byte. Standard 640x480 VGA addressing maps
+    /// each byte directly to a scanline; other layouts keep the conservative
+    /// full-screen invalidation.
+    fn mark_graphics_write(&mut self, offset: usize) {
+        if !self.mode12_rows {
+            self.mark_dirty_full();
+            return;
+        }
+        let relative = (offset & 0xFFFF).wrapping_sub(self.latched_start_addr & 0xFFFF) & 0xFFFF;
+        if relative < 80 * 480 {
+            let row = (relative / 80) as u32;
+            self.mark_dirty_rows(row, row + 1);
+        }
     }
 
     pub fn write_graphics(&mut self, offset: usize, value: u8) {
@@ -727,7 +747,7 @@ impl VgaCard {
                     self.set_plane_byte(p, plane_offset, value);
                 }
             }
-            self.mark_graphics_dirty(rows);
+            self.mark_graphics_dirty(rows, plane_offset);
             return;
         }
 
@@ -790,14 +810,17 @@ impl VgaCard {
                 self.set_plane_byte(p, plane_offset, byte);
             }
         }
-        self.mark_graphics_dirty(rows);
+        self.mark_graphics_dirty(rows, plane_offset);
     }
 
-    fn mark_graphics_dirty(&mut self, rows: Option<(u32, u32)>) {
+    /// Mark the rows a graphics write changed: those the caller worked out
+    /// (`write_graphics_with_rows`), or else those `mark_graphics_write`
+    /// finds for the planar byte at `plane_offset`.
+    fn mark_graphics_dirty(&mut self, rows: Option<(u32, u32)>, plane_offset: usize) {
         if let Some((first, end)) = rows {
             self.mark_dirty_rows(first, end);
         } else {
-            self.mark_dirty_full();
+            self.mark_graphics_write(plane_offset);
         }
     }
 
@@ -887,6 +910,7 @@ impl VgaCard {
     /// `modes.rs`), with its palette.
     pub fn set_video_mode(&mut self, mode: super::VideoMode) {
         self.mark_dirty_full();
+        self.mode12_rows = false;
         self.latched_start_addr = 0;
         match self.adapter {
             super::adapter::Adapter::Cga => return self.cga_set_mode(mode),
@@ -906,6 +930,9 @@ impl VgaCard {
         self.attribute_regs = regs.attr;
         self.fixed_timing = None;
         self.timing_cache = None;
+        self.mode12_rows = mode == super::VideoMode::Vga640x480
+            && self.adapter.supports_mode(0x12)
+            && self.plane_size() == 0x10000;
         self.dac_mask = 0xFF;
         self.dac_8bit = false;
         // The colours the mode's palette registers pick from; the rest of
@@ -1152,6 +1179,12 @@ impl Device for VgaCard {
                         self.timing_changed();
                         self.mark_dirty_full();
                     } else if (self.attribute_index as usize) < self.attribute_regs.len() {
+                        if self.attribute_index == 0x13
+                            || (self.attribute_index == 0x10
+                                && (self.attribute_regs[0x10] ^ value) & 0x60 != 0)
+                        {
+                            self.mode12_rows = false;
+                        }
                         if self.attribute_index == 0x10 && (self.attribute_regs[0x10] ^ value) & 0x01 != 0 {
                             self.mode_switched = true;
                             self.move_text_planes(value & 0x01 == 0);
@@ -1179,13 +1212,18 @@ impl Device for VgaCard {
                     // Mask Memory Mode (Index 4) to 0x0E (Chain4, O/E, Ext)
                     if self.sequencer_index == 0x04 {
                         val &= 0x0E;
+                        if val & 0x0C != 0x04 {
+                            self.mode12_rows = false;
+                        }
                     }
 
                     self.sequencer_regs[self.sequencer_index as usize] = val;
                     if self.sequencer_index == 0x01 {
                         self.timing_changed();
                     }
-                    self.mark_dirty_full();
+                    if self.sequencer_index != 0x02 {
+                        self.mark_dirty_full();
+                    }
                 }
             }
             0x3CE => self.graphics_index = value,
@@ -1200,6 +1238,7 @@ impl Device for VgaCard {
                     // which the VGA doesn't have. Bit 3 is the read mode.
                     if self.graphics_index == 0x05 {
                         val &= 0x7B;
+                        self.mode12_rows = false;
                         // 256 colours on or off: another kind of mode.
                         if (self.graphics_regs[0x05] ^ val) & 0x40 != 0 {
                             self.mode_switched = true;
@@ -1225,6 +1264,9 @@ impl Device for VgaCard {
                         }
                         _ => value,
                     };
+                    if index != 0x0C && index != 0x0D {
+                        self.mode12_rows = false;
+                    }
                     self.crtc_regs[index] = value;
                     if matches!(index, 0x00..=0x07 | 0x10..=0x12 | 0x17) {
                         self.timing_changed();
@@ -1281,6 +1323,8 @@ crate::state_fields!(VgaCard {
 } skip {
     // In a section of its own, on an ET4000 (`bus::state`).
     et4000,
+    // Derived from the mode and display layout; reset conservatively on load.
+    mode12_rows,
     // Set from the configuration, which a state carries in its header.
     adapter, composite, switches, mono_monitor,
     // Worked out again after a load (`after_load`).
@@ -1300,6 +1344,7 @@ impl VgaCard {
     /// picture anew.
     pub fn after_load(&mut self) {
         self.timing_cache = None;
+        self.mode12_rows = false;
         self.refresh_composite();
         self.mark_dirty_full();
     }
@@ -1308,6 +1353,76 @@ impl VgaCard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::video::VideoMode;
+
+    #[test]
+    fn standard_mode_12_writes_dirty_only_the_visible_row() {
+        let mut vga = VgaCard::new();
+        vga.set_video_mode(VideoMode::Vga640x480);
+        assert_eq!(vga.graphics_size(), (640, 480));
+        assert_eq!(vga.offset_words(), 40);
+        vga.clear_dirty();
+
+        vga.write_graphics(2 * 80 + 5, 0xFF);
+        assert_eq!((vga.dirty_y_min, vga.dirty_y_max), (2, 3));
+
+        vga.clear_dirty();
+        vga.write_graphics(40_000, 0xFF);
+        assert!(!vga.dirty, "a write outside the displayed page is invisible");
+
+        vga.latched_start_addr = 0x1000;
+        vga.write_graphics(0x1000 + 4 * 80, 0xFF);
+        assert_eq!((vga.dirty_y_min, vga.dirty_y_max), (4, 5));
+    }
+
+    #[test]
+    fn changing_the_map_mask_does_not_dirty_the_display() {
+        let mut vga = VgaCard::new();
+        vga.set_video_mode(VideoMode::Vga640x480);
+        vga.clear_dirty();
+
+        vga.io_write(0x3C4, 0x02);
+        vga.io_write(0x3C5, 0x01);
+
+        assert!(!vga.dirty);
+        assert!(vga.mode12_rows);
+    }
+
+    #[test]
+    fn mode_12_writes_fall_back_to_full_dirty_for_split_screens() {
+        let mut vga = VgaCard::new();
+        vga.set_video_mode(VideoMode::Vga640x480);
+        vga.io_write(0x3D4, 0x18);
+        vga.io_write(0x3D5, 0);
+        vga.clear_dirty();
+
+        vga.write_graphics(80, 0xFF);
+        assert_eq!((vga.dirty_y_min, vga.dirty_y_max), (0, u32::MAX));
+    }
+
+    #[test]
+    fn mode_12_writes_fall_back_to_full_dirty_when_panned() {
+        let mut vga = VgaCard::new();
+        vga.set_video_mode(VideoMode::Vga640x480);
+        vga.io_write(0x3C0, 0x13);
+        vga.io_write(0x3C0, 1);
+        vga.clear_dirty();
+
+        vga.write_graphics(80, 0xFF);
+        assert_eq!((vga.dirty_y_min, vga.dirty_y_max), (0, u32::MAX));
+    }
+
+    #[test]
+    fn mode_12_writes_fall_back_for_larger_vga_planes() {
+        let mut vga = VgaCard::new();
+        vga.adapter = super::super::adapter::Adapter::Et4000;
+        vga.set_memory(0x40000);
+        vga.set_video_mode(VideoMode::Vga640x480);
+        vga.clear_dirty();
+
+        vga.write_graphics(80, 0xFF);
+        assert_eq!((vga.dirty_y_min, vga.dirty_y_max), (0, u32::MAX));
+    }
 
     /// A run of plain writes leaves the planes as the writes one by one.
     #[test]

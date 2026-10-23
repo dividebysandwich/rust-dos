@@ -61,7 +61,7 @@ and confirm a large one on a quiet machine before relying on it.
 |---|---|
 | `benches/dos.rs` | The built-in DOS's file calls on a host folder: DIR's listing, FindFirst/FindNext over a whole folder, a pattern search, and opening a file three folders deep |
 | `benches/audio.rs` | One video frame of sound: the AWE32 playing 32 voices with the filter open, fixed, swept by the modulation envelope and wobbled by LFO1 |
-| `benches/video.rs` | VGA planar sprites and scrolling, a DOS program animating a box in mode 12h run frame by frame through the emulator, CGA composite, and Voodoo triangles: identical generic/variant pipelines and 64-triangle frames with 0 or 4 workers in software or GL-backlog mode |
+| `benches/video.rs` | VGA planar sprites and scrolling, a DOS mode 12h row-stress pattern and box animation, CGA composite, and Voodoo triangles: identical generic/variant pipelines and 64-triangle frames with 0 or 4 workers in software or GL-backlog mode |
 | `benches/memory.rs` | XMS block moves (function 0Bh) between extended and conventional memory and between blocks, and an EMS move (function 57h) into conventional memory |
 | `benches/cpu.rs` | A guest loop of arithmetic, memory accesses, calls and port writes on the interpreter and on the recompiler, each also with a profile running (`docs/profiling.md`) |
 | `benches/host.rs` | Host-side work on the emulation thread: capturing a frame of a GIF animation, a 256-colour 640x400 picture and a high-colour 640x480 one |
