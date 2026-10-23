@@ -47,8 +47,9 @@ enum Placement {
 }
 
 /// The paragraphs a program needs to start: its PSP, its code, and for a
-/// COM file a stack, for an EXE file the memory its header asks for.
-fn program_paras(bytes: &[u8]) -> u16 {
+/// COM file a stack, for an EXE file the memory its header asks for. An
+/// EXE file's image is cut at the end of the file, as `load_exe` cuts it.
+pub(crate) fn program_paras(bytes: &[u8]) -> u16 {
     if bytes.len() >= 0x20 && &bytes[0..2] == b"MZ" {
         let word = |at: usize| u16::from_le_bytes([bytes[at], bytes[at + 1]]) as usize;
         let (last_page, pages, header, min_alloc) = (word(2), word(4), word(8), word(10));
@@ -56,11 +57,29 @@ fn program_paras(bytes: &[u8]) -> u16 {
             (0, _) => bytes.len(),
             (p, 0) => p * 512,
             (p, l) => (p - 1) * 512 + l,
-        };
+        }
+        .min(bytes.len());
         (0x10 + module.saturating_sub(header * 16).div_ceil(16) + min_alloc).min(0xFFFF) as u16
     } else {
         (0x10 + bytes.len().div_ceil(16) + 0x20).min(0x1000) as u16
     }
+}
+
+/// The block EXEC gives a program, when it is less than the largest free
+/// one: for an EXE file its PSP, its image and MAXALLOC paragraphs, or the
+/// MINALLOC ones if there are more. `None` for a COM file and for an EXE
+/// file asking for no memory (load high), which get the whole block.
+pub(crate) fn exec_block_paras(bytes: &[u8]) -> Option<u16> {
+    if bytes.len() < 0x20 || &bytes[0..2] != b"MZ" {
+        return None;
+    }
+    let word = |at: usize| u16::from_le_bytes([bytes[at], bytes[at + 1]]);
+    let (min_alloc, max_alloc) = (word(10), word(12));
+    if min_alloc == 0 && max_alloc == 0 {
+        return None;
+    }
+    let base = program_paras(bytes).saturating_sub(min_alloc);
+    Some(base.saturating_add(max_alloc.max(min_alloc)))
 }
 
 /// FLAGS bits POPF and IRET load: CF, PF, AF, ZF, SF, TF, IF, DF, OF, IOPL
@@ -1864,6 +1883,12 @@ impl Cpu {
         self.load_program_bytes(filename, &bytes, placement)
     }
 
+    /// EXEC: load a program already read from `filename` (with
+    /// `read_program_file`) into the block allocated for it at `segment`.
+    pub(crate) fn load_child(&mut self, filename: &str, bytes: &[u8], segment: u16) -> bool {
+        self.load_program_bytes(filename, bytes, Placement::Child(segment))
+    }
+
     /// LOADHIGH: load a program from the shell into the largest free upper
     /// memory block, if it fits there, else as `load_executable` does.
     pub fn load_executable_high(&mut self, filename: &str) -> bool {
@@ -2164,12 +2189,14 @@ impl Cpu {
     }
 
     /// The top of a program's memory, for its PSP: the end of conventional
-    /// memory, or of its upper memory block.
+    /// memory, or of the block EXEC or LOADHIGH allocated for it, which
+    /// EXEC sizes to an EXE file's MAXALLOC.
     fn memory_top(&mut self, placement: Placement, load_segment: u16) -> u16 {
         match placement {
-            Placement::High(psp) => psp + crate::mcb::read_mcb(&mut self.bus, psp - 1).size,
+            Placement::High(psp) | Placement::Child(psp) => {
+                psp.saturating_add(crate::mcb::read_mcb(&mut self.bus, psp - 1).size)
+            }
             Placement::Shell => crate::mcb::low_end(&self.bus),
-            Placement::Child(_) => crate::mcb::conventional_end(&self.bus),
         }
         .max(load_segment)
     }
@@ -2223,7 +2250,7 @@ impl Cpu {
         self.bus.guest_write_bytes(psp_phys, &[0xCD, 0x20]);
 
         // Offset 0x02: Top of Memory (Segment): the end of conventional
-        // memory (640 KB), or of the upper memory block.
+        // memory (640 KB), or of the block allocated for the program.
         self.bus.guest_write_16(psp_phys + 2, top);
 
         // [0x06] Bytes in Segment (CP/M compatibility)
@@ -2421,7 +2448,7 @@ impl Cpu {
 
         // Offset 0x02: Top of Memory (Segment)
         // Programs read this to know how much RAM they have: the end of
-        // conventional memory (640KB), or of their upper memory block.
+        // conventional memory (640KB), or of the block allocated for them.
         let top = self.memory_top(placement, load_segment);
         self.bus.guest_write_16(psp_phys + 2, top);
 
