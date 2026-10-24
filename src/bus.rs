@@ -635,7 +635,7 @@ impl Bus {
             return false;
         }
         let offset = self.vga_window(dst, true);
-        self.note_video_write(len as u64);
+        self.note_video_write(dst - ADDR_VGA_GRAPHICS, len as u64);
         let ram = &self.ram[src..src + len];
         self.vga.write_plain_run(offset, len, |i| ram[i]);
         true
@@ -650,7 +650,7 @@ impl Bus {
         }
         let bytes = value.to_le_bytes();
         let offset = self.vga_window(dst, true);
-        self.note_video_write((count * size) as u64);
+        self.note_video_write(dst - ADDR_VGA_GRAPHICS, (count * size) as u64);
         self.vga.write_plain_run(offset, count * size, |i| bytes[i % size]);
         true
     }
@@ -979,7 +979,7 @@ impl Bus {
         {
             return false;
         }
-        self.note_video_write(size as u64);
+        self.note_video_write(addr - ADDR_VGA_GRAPHICS, size as u64);
         true
     }
 
@@ -1020,7 +1020,7 @@ impl Bus {
                 self.write_vram(offset, &[value]);
                 return true;
             }
-            self.note_video_write(1);
+            self.note_video_write(addr - ADDR_VGA_GRAPHICS, 1);
             // write_graphics already sets vga.dirty unconditionally. The
             // Return value only matters to callers that care whether the
             // write hit the active display plane, but rendering is gated
@@ -1053,7 +1053,7 @@ impl Bus {
         if (text..text + size).contains(&addr) {
             let text_off = (addr - text) & wrap;
             self.vga.vram_text[text_off] = value;
-            self.note_video_write(1);
+            self.note_video_write(text_off, 1);
 
             // Narrow the dirty range to just the affected character row when
             // we're in a text mode (see `text::geometry`). CGA graphics modes
@@ -1114,10 +1114,11 @@ impl Bus {
         self.activity.display_start(self.clock.icount, start);
     }
 
-    /// The CPU wrote `bytes` bytes to video memory.
+    /// The CPU wrote `bytes` bytes to video memory at `offset` (in the
+    /// window it wrote through, or the frame buffer).
     #[inline]
-    fn note_video_write(&mut self, bytes: u64) {
-        self.activity.video_write(self.clock.icount, bytes);
+    fn note_video_write(&mut self, offset: usize, bytes: u64) {
+        self.activity.video_write(self.clock.icount, offset as u64, bytes);
     }
 
     /// Log the first writes to the ROMs, which go nowhere.
@@ -1163,7 +1164,7 @@ impl Bus {
     /// the rows of the picture they show in for repainting.
     #[inline]
     fn vram_written(&mut self, offset: usize, len: usize) {
-        self.note_video_write(len as u64);
+        self.note_video_write(offset, len as u64);
         if self.video_mode == VideoMode::Vesa
             && let Some((first, last)) = self.vbe.frame_rows(offset, len)
         {
