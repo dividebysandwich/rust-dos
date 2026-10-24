@@ -12,9 +12,12 @@
 //!
 //! The frames are counted on the bus (`Activity`): page flips, or where a
 //! program draws out of sight and copies the finished picture to video
-//! memory, the bursts of writes that copy it. A program that checks for
-//! keystrokes that aren't there, calls DOS's idle interrupts or polls for
-//! the retrace in a loop is waiting, and has speed to spare.
+//! memory, the bursts of writes that copy it. A protected-mode program may
+//! copy only what changed since the frame before (Alien Legacy): a burst
+//! too small to be a frame that reaches across the screen is one too. A
+//! program that checks for keystrokes that aren't there, calls DOS's idle
+//! interrupts or polls for the retrace in a loop is waiting, and has speed
+//! to spare.
 //!
 //! Where there are no frames to go by, a real-mode program runs at the
 //! real-mode speed (3000, about a 286, DOSBox's for `cycles=auto`): the
@@ -121,6 +124,10 @@ pub struct Activity {
     /// card's buffer swaps.
     pub bursts: u64,
     pub flips: u64,
+    /// Bursts too small to be a frame that reached across at least half
+    /// the screen: frames copied as the parts of them that changed.
+    /// `AutoSpeed::update` counts them for protected-mode programs only.
+    pub copies: u64,
     /// Checks for a keystroke that found none, and calls of DOS's and
     /// Windows' idle interrupts.
     pub polls: u64,
@@ -132,8 +139,16 @@ pub struct Activity {
     /// The burst going on: its bytes, and the instruction of its last write.
     burst: u64,
     last_write: u64,
-    /// A burst's bytes to count as a frame.
+    /// The lowest and highest place in video memory it wrote, past its
+    /// last byte. (The recompiler's own writes to the VGA's planes, which
+    /// go on a burst without coming here, leave them out.)
+    low: u64,
+    high: u64,
+    /// A burst's bytes to count as a frame, and its reach and bytes to
+    /// count as a copy.
     burst_min: u64,
+    span_min: u64,
+    copy_min: u64,
     /// The display start, and the instruction it last changed at.
     start: u32,
     last_flip: u64,
@@ -147,22 +162,34 @@ pub(crate) const LAST_WRITE_AT: usize = std::mem::offset_of!(Activity, last_writ
 
 impl Activity {
     pub fn new() -> Self {
-        Self { burst_min: u64::MAX, ..Self::default() }
+        Self {
+            burst_min: u64::MAX,
+            span_min: u64::MAX,
+            copy_min: u64::MAX,
+            low: u64::MAX,
+            ..Self::default()
+        }
     }
 
-    /// The program wrote `bytes` bytes to video memory at instruction `at`.
-    /// (The recompiler counts a block's instructions as it enters it and
-    /// gives back those it didn't run, so `at` may go back a little.)
+    /// The program wrote `bytes` bytes to video memory at `offset`, at
+    /// instruction `at`. (The recompiler counts a block's instructions as
+    /// it enters it and gives back those it didn't run, so `at` may go back
+    /// a little.)
     #[inline]
-    pub fn video_write(&mut self, at: u64, bytes: u64) {
+    pub fn video_write(&mut self, at: u64, offset: u64, bytes: u64) {
         self.video_bytes += bytes;
         if at.saturating_sub(self.last_write) > BURST_GAP {
             if self.burst >= self.burst_min {
                 self.bursts += 1;
+            } else if self.burst >= self.copy_min && self.high.saturating_sub(self.low) >= self.span_min {
+                self.copies += 1;
             }
             self.burst = 0;
+            (self.low, self.high) = (u64::MAX, 0);
         }
         self.burst += bytes;
+        self.low = self.low.min(offset);
+        self.high = self.high.max(offset + bytes);
         self.last_write = at;
     }
 
@@ -187,10 +214,33 @@ impl Activity {
     }
 
     /// The bytes a burst needs to count as a frame: a quarter of what the
-    /// program writes for a screen (`screen_bytes`).
-    pub fn set_screen(&mut self, bytes: u64) {
+    /// program writes for a screen (`screen_bytes`). A smaller burst counts
+    /// as a copy when it reaches across half of that and writes at least a
+    /// 128th of it (500 bytes in mode 13h, more than a mouse pointer and a
+    /// clock). Only where the screen's rows follow each other in video
+    /// memory (`linear`): in the CGA's, Tandy's and Hercules' graphics they
+    /// are interleaved, and text pages lie 4 KB apart.
+    pub fn set_screen(&mut self, bytes: u64, linear: bool) {
         self.burst_min = (bytes / 4).max(500);
+        (self.span_min, self.copy_min) =
+            if linear { (bytes / 2, bytes / 128) } else { (u64::MAX, u64::MAX) };
     }
+}
+
+/// Whether the screen's rows lie one after the other in video memory in
+/// the mode `bus` is in: the EGA's and VGA's graphics and VESA modes.
+pub fn linear_screen(bus: &Bus) -> bool {
+    matches!(
+        bus.video_mode,
+        VideoMode::Ega320x200
+            | VideoMode::Ega640x200
+            | VideoMode::Ega640x350Mono
+            | VideoMode::Ega640x350
+            | VideoMode::Vga640x480Mono
+            | VideoMode::Vga640x480
+            | VideoMode::Graphics320x200
+            | VideoMode::Vesa
+    )
 }
 
 /// The bytes a program writes for a whole screen in the mode `bus` is in:
@@ -224,6 +274,7 @@ struct Mark {
     icount: u64,
     idle: u64,
     bursts: u64,
+    copies: u64,
     flips: u64,
     polls: u64,
     status_reads: u64,
@@ -238,6 +289,7 @@ impl Mark {
             icount: bus.clock.icount,
             idle: bus.clock.idle,
             bursts: a.bursts,
+            copies: a.copies,
             flips: a.flips,
             polls: a.polls,
             status_reads: a.status_reads,
@@ -417,7 +469,17 @@ impl AutoSpeed {
         };
         let ns = now.ns.saturating_sub(mark.ns);
         let (bursts, flips) = (now.bursts - mark.bursts, now.flips - mark.flips);
-        let frames = if flips > 0 { flips } else { bursts };
+        // Copies only of protected-mode programs: the speed-sensitive
+        // real-mode games of the 1980s draw parts of the screen as they go,
+        // and keep the real-mode speed. And only without whole frames: a
+        // game that copies its view whole and then draws its gauges at the
+        // top and the bottom of the screen draws one frame, not two.
+        let copies = if protected { now.copies - mark.copies } else { 0 };
+        let frames = match (flips, bursts) {
+            (0, 0) => copies,
+            (0, bursts) => bursts,
+            (flips, _) => flips,
+        };
         if ns < WINDOW_NS || (frames > 0 && frames < ENOUGH_FRAMES && ns < LONG_WINDOW_NS) {
             return None;
         }
@@ -787,6 +849,109 @@ mod tests {
         // The 486 keeps the 486's.
         auto.set_protected_least(crate::cpu::CpuModel::I486.auto_least());
         assert_eq!(settle(&mut auto, true, HOST), PROTECTED_LEAST);
+    }
+
+    /// Alien Legacy's frame copy where little changed: its REPE CMPSD loop
+    /// writes the last dword of each of the 200 rows it compares, ten
+    /// instructions apart.
+    fn copy_changes(bus: &mut Bus) {
+        for row in 0..200 {
+            bus.clock.icount += 10;
+            bus.write_32(0xA0000 + row * 320 + 316, 0x0101_0101);
+        }
+    }
+
+    #[test]
+    fn a_frame_copied_as_what_changed_counts() {
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        crate::interrupts::int10::set_mode(&mut cpu, 0x13);
+        let bus = &mut cpu.bus;
+        bus.activity.set_screen(screen_bytes(bus), linear_screen(bus));
+        for _ in 0..5 {
+            bus.clock.icount += 100_000;
+            copy_changes(bus);
+        }
+        // The last one ends with the next write.
+        bus.clock.icount += 100_000;
+        bus.write_8(0xA0000, 1);
+        assert_eq!((bus.activity.bursts, bus.activity.copies), (0, 5));
+        // A sprite of the same bytes in one place is no frame.
+        for _ in 0..5 {
+            bus.clock.icount += 100_000;
+            for row in 0..50 {
+                bus.clock.icount += 10;
+                for x in (160..176).step_by(4) {
+                    bus.write_32(0xA0000 + (100 + row) * 320 + x, 0x0202_0202);
+                }
+            }
+        }
+        bus.clock.icount += 100_000;
+        bus.write_8(0xA0000, 1);
+        assert_eq!((bus.activity.bursts, bus.activity.copies), (0, 5));
+        // Nor is a mouse pointer at the top and a clock at the bottom.
+        for _ in 0..5 {
+            bus.clock.icount += 100_000;
+            for row in 0..16 {
+                bus.write_32(0xA0000 + row * 320 + 100, 0x0303_0303);
+                bus.write_32(0xA0000 + (190 + row % 8) * 320 + 280, 0x0303_0303);
+            }
+        }
+        bus.clock.icount += 100_000;
+        bus.write_8(0xA0000, 1);
+        assert_eq!((bus.activity.bursts, bus.activity.copies), (0, 5));
+    }
+
+    #[test]
+    fn interleaved_rows_make_no_copies() {
+        // CGA graphics: odd rows 8 KB above the even ones, so two rows of
+        // a sprite reach across half the screen's 16,000 bytes.
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        crate::interrupts::int10::set_mode(&mut cpu, 0x04);
+        let bus = &mut cpu.bus;
+        bus.activity.set_screen(screen_bytes(bus), linear_screen(bus));
+        for _ in 0..5 {
+            bus.clock.icount += 100_000;
+            for row in 0..200 {
+                bus.write_8(0xB8000 + (row % 2) * 0x2000 + (row / 2) * 80 + 40, 0xFF);
+            }
+        }
+        bus.clock.icount += 100_000;
+        bus.write_8(0xB8000, 1);
+        assert_eq!((bus.activity.bursts, bus.activity.copies), (0, 0));
+    }
+
+    /// The speeds `auto` runs a game at that draws a frame in memory in
+    /// `per_frame` instructions, as fast as it can, and copies to the
+    /// screen only what changed, for `seconds` of emulated time.
+    fn run_copying(protected: bool, per_frame: u64, seconds: u64) -> Vec<u32> {
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        crate::interrupts::int10::set_mode(&mut cpu, 0x13);
+        let bus = &mut cpu.bus;
+        bus.set_cycles_per_ms(3000);
+        let mut auto = AutoSpeed::new(3000, None);
+        let mut speeds = Vec::new();
+        while bus.clock.now_ns() < seconds * 1_000_000_000 {
+            bus.clock.icount += per_frame;
+            copy_changes(bus);
+            bus.sync_display();
+            if let Some(speed) = auto.update(bus, protected, 2_000_000) {
+                bus.set_cycles_per_ms(speed);
+                speeds.push(speed);
+            }
+        }
+        speeds
+    }
+
+    #[test]
+    fn a_game_that_copies_what_changed_gets_the_speed_its_frames_need() {
+        // 1.2 million instructions a frame: the 70 frames a second the
+        // display shows at about 84,000 instructions per ms.
+        let speeds = run_copying(true, 1_200_000, 60);
+        let settled = *speeds.last().unwrap();
+        assert!((70_000..=100_000).contains(&settled), "{:?}", speeds);
+        assert!(speeds.iter().all(|&s| s <= 200_000), "{:?}", speeds);
+        // A real-mode program's copies don't count: the real-mode speed.
+        assert!(run_copying(false, 1_200_000, 10).iter().all(|&s| s == 3000));
     }
 
     #[test]
