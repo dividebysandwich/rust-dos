@@ -59,6 +59,13 @@ impl Addr {
         let next = full.wrapping_add(self.delta);
         cpu.set_reg(reg, (full & !self.mask) | (next & self.mask));
     }
+
+    /// Step SI/ESI or DI/EDI by `n` elements, as `n` steps do.
+    fn skip(&self, cpu: &mut Cpu, reg: Register, n: u32) {
+        let full = cpu.reg(reg);
+        let next = full.wrapping_add(self.delta.wrapping_mul(n));
+        cpu.set_reg(reg, (full & !self.mask) | (next & self.mask));
+    }
 }
 
 /// How many of `max` elements of `size` bytes an access at `seg:off` on
@@ -156,11 +163,10 @@ fn bulk(cpu: &mut Cpu, op: StrOp, size: u8, a: &Addr, count: u32) -> CpuResult<B
             }
         }
     }
-    let moved = a.delta.wrapping_mul(n);
-    for reg in if op == StrOp::Movs { &[Register::ESI, Register::EDI][..] } else { &[Register::EDI][..] } {
-        let full = cpu.reg(*reg);
-        cpu.set_reg(*reg, (full & !a.mask) | (full.wrapping_add(moved) & a.mask));
+    if op == StrOp::Movs {
+        a.skip(cpu, Register::ESI, n);
     }
+    a.skip(cpu, Register::EDI, n);
     Ok(Bulk::Done(n))
 }
 
@@ -171,8 +177,16 @@ fn bulk(cpu: &mut Cpu, op: StrOp, size: u8, a: &Addr, count: u32) -> CpuResult<B
 /// flags, which the iteration after them sets again. They are the
 /// iterations one at a time would do, with the first one's checks and
 /// page walks, as in `bulk`. The last element of the run is left for an
-/// iteration of its own, which sets the flags.
-fn scan(cpu: &mut Cpu, op: StrOp, size: u8, a: &Addr, count: u32, repe: bool) -> CpuResult<u32> {
+/// iteration of its own, which sets the flags. None where the elements
+/// aren't in plain RAM: the rest go one at a time.
+fn scan(
+    cpu: &mut Cpu,
+    op: StrOp,
+    size: u8,
+    a: &Addr,
+    count: u32,
+    repe: bool,
+) -> CpuResult<Option<u32>> {
     let backward = a.delta != size as u32;
     let bytes = size as u32;
     let cmps = op == StrOp::Cmps;
@@ -183,7 +197,7 @@ fn scan(cpu: &mut Cpu, op: StrOp, size: u8, a: &Addr, count: u32, repe: bool) ->
         n = span(cpu, a.src_seg, si, bytes, n, backward, a.mask, false);
     }
     if n < 2 {
-        return Ok(0);
+        return Ok(Some(0));
     }
     let len = (n * bytes) as usize;
     let range = |phys: u32| {
@@ -200,13 +214,14 @@ fn scan(cpu: &mut Cpu, op: StrOp, size: u8, a: &Addr, count: u32, repe: bool) ->
     let dst = cpu.mem_ref(Seg::ES, di, size, Access::Read)?;
     let plain = |phys: u32| cpu.bus.is_plain_ram(range(phys), len);
     if !plain(dst.phys) || src.is_some_and(|s| !plain(s.phys)) {
-        return Ok(0);
+        return Ok(None);
     }
-    let ram = cpu.bus.ram();
+    let bus = &cpu.bus;
+    let ram = bus.ram();
     let at = |p: usize| match size {
-        1 => ram[p] as u32,
-        2 => u16::from_le_bytes([ram[p], ram[p + 1]]) as u32,
-        _ => u32::from_le_bytes([ram[p], ram[p + 1], ram[p + 2], ram[p + 3]]),
+        1 => bus.ram_read::<1>(p),
+        2 => bus.ram_read::<2>(p),
+        _ => bus.ram_read::<4>(p),
     };
     let value = cpu.reg(accumulator(size));
     let mut k = 0;
@@ -234,17 +249,11 @@ fn scan(cpu: &mut Cpu, op: StrOp, size: u8, a: &Addr, count: u32, repe: bool) ->
         }
         k += 1;
     }
-    let moved = a.delta.wrapping_mul(k);
-    let regs: &[Register] = if cmps {
-        &[Register::ESI, Register::EDI]
-    } else {
-        &[Register::EDI]
-    };
-    for &reg in regs {
-        let full = cpu.reg(reg);
-        cpu.set_reg(reg, (full & !a.mask) | (full.wrapping_add(moved) & a.mask));
+    if cmps {
+        a.skip(cpu, Register::ESI, k);
     }
-    Ok(k)
+    a.skip(cpu, Register::EDI, k);
+    Ok(Some(k))
 }
 
 /// The iterations of a REP INSW or INSD going up from here on that read
@@ -270,10 +279,7 @@ fn ins_run(cpu: &mut Cpu, id: ChannelId, size: u8, a: &Addr, count: u32) -> CpuR
         return Ok(Bulk::One);
     }
     cpu.bus.ide_read_run(id, phys, n as usize, size);
-    let full = cpu.reg(Register::EDI);
-    let moved = a.delta.wrapping_mul(n);
-    let next = (full & !a.mask) | (full.wrapping_add(moved) & a.mask);
-    cpu.set_reg(Register::EDI, next);
+    a.skip(cpu, Register::EDI, n);
     Ok(Bulk::Done(n))
 }
 
@@ -384,7 +390,7 @@ fn repeated(cpu: &mut Cpu, instr: &Instruction, op: StrOp, size: u8) -> CpuResul
     // back to the instruction while iterations remain.
     let traced = cpu.get_cpu_flag(CpuFlags::TF);
     let bulky = !traced && cpu.string_bulk && matches!(op, StrOp::Movs | StrOp::Stos);
-    let scans = !traced && cpu.string_bulk && compares;
+    let mut scans = !traced && cpu.string_bulk && compares;
     // The IDE channel of a REP INSW or INSD going up from its data port,
     // whose blocks can go at once (DX stays put).
     let forward = addr.delta == size as u32;
@@ -415,10 +421,13 @@ fn repeated(cpu: &mut Cpu, instr: &Instruction, op: StrOp, size: u8) -> CpuResul
             }
         }
         if scans {
-            let n = scan(cpu, op, size, &addr, count, repe)?;
-            if n > 0 {
-                count -= n;
-                cpu.set_reg(counter, count);
+            match scan(cpu, op, size, &addr, count, repe)? {
+                Some(n) => {
+                    count -= n;
+                    cpu.set_reg(counter, count);
+                }
+                // Video memory, ROM: no use looking again each element.
+                None => scans = false,
             }
         }
         iteration(cpu, op, size, &addr)?;

@@ -613,3 +613,39 @@ fn a_scan_into_a_segment_limit_faults_where_it_is_reached() {
     let (vector, _) = b.recorded();
     assert_eq!(vector, GP as u32);
 }
+
+#[test]
+fn a_paged_compare_reads_the_mapped_pages_and_faults_at_a_missing_one() {
+    let (mut a, mut b) = pair(|rig| {
+        // 54000h mapped to 58000h, 55000h missing.
+        let (dir, table) = (0x80000u32, 0x81000u32);
+        rig.write32(dir, table | 3);
+        for i in 0..1024u32 {
+            rig.write32(table + 4 * i, (i << 12) | 3);
+        }
+        rig.write32(table + 0x54 * 4, 0x58000 | 3);
+        rig.write32(table + 0x55 * 4, 0);
+        rig.record(PF);
+        pattern(rig, 0x53000, 0x1000);
+        pattern(rig, 0x58000, 0x1000);
+        let code = asm32(CODE, |a| {
+            a.mov(eax, dir)?;
+            a.mov(cr3, eax)?;
+            a.mov(eax, cr0)?;
+            a.or(eax, 0x8000_0000u32)?;
+            a.mov(cr0, eax)?;
+            a.cld()?;
+            // The same bytes in both pages, then into the missing one.
+            a.mov(esi, 0x53000u32)?;
+            a.mov(edi, 0x54000u32)?;
+            a.mov(ecx, 0x500u32)?;
+            a.repe().cmpsd()?;
+            a.hlt()
+        });
+        rig.load(CODE, &code);
+    });
+    run(&mut a, &mut b);
+    let (vector, _) = b.recorded();
+    assert_eq!(vector, PF as u32);
+    assert_eq!(b.cpu.cr2, 0x55000);
+}
