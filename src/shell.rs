@@ -300,6 +300,8 @@ pub enum ShellWait {
     /// RC, Rat Commander: every key, until it ends or leaves to run a
     /// command line.
     Rc(Box<crate::rc_command::RcWait>),
+    /// DIR /P: any key, for the lines after a screenful.
+    Dir(crate::command::DirPages),
 }
 
 /// A CHOICE waiting for a key.
@@ -393,6 +395,12 @@ pub fn take_key(cpu: &mut Cpu, key: u16) -> bool {
         ShellWait::More(lines) => {
             if let Some(rest) = crate::filter_commands::more_key(cpu, lines) {
                 cpu.shell_wait = Some(ShellWait::More(rest));
+                return false;
+            }
+        }
+        ShellWait::Dir(pages) => {
+            if let Some(rest) = crate::command::dir_key(cpu, pages) {
+                cpu.shell_wait = Some(ShellWait::Dir(rest));
                 return false;
             }
         }
@@ -630,6 +638,10 @@ impl crate::savestate::State for ShellWait {
                 9u8.save(w);
                 (**rc).save(w);
             }
+            ShellWait::Dir(pages) => {
+                10u8.save(w);
+                pages.save(w);
+            }
         }
     }
     fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
@@ -676,6 +688,11 @@ impl crate::savestate::State for ShellWait {
                 let mut rc = Box::<crate::rc_command::RcWait>::default();
                 (*rc).load(r)?;
                 ShellWait::Rc(rc)
+            }
+            10 => {
+                let mut pages = crate::command::DirPages::default();
+                pages.load(r)?;
+                ShellWait::Dir(pages)
             }
             _ => return Err(crate::savestate::StateError::Invalid("a wait of the shell it doesn't know".into())),
         };

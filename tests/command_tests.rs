@@ -1,5 +1,6 @@
-use rust_dos::command::{CommandDispatcher, split_command};
+use rust_dos::command::{CommandDispatcher, DirSwitches, parse_dir_args, split_command};
 use rust_dos::cpu::Cpu;
+use rust_dos::shell::{ShellWait, take_key};
 use rust_dos::disk::{DriveKind, MountOptions};
 use std::fs;
 use std::path::PathBuf;
@@ -17,17 +18,26 @@ fn scratch(name: &str, dirs: &[&str]) -> PathBuf {
 /// the printing did: the spaces the command printed stay, so a line that
 /// wrapped at a space joins up again without the rows' line breaks.
 fn run(cpu: &mut Cpu, line: &str) -> String {
-    for b in cpu.bus.vga.vram_text.iter_mut() {
-        *b = 0;
-    }
-    cpu.bus.cursor_x = 0;
-    cpu.bus.cursor_y = 0;
+    clear_screen(cpu);
     let (command, args) = split_command(line);
     assert!(
         CommandDispatcher::new().dispatch(cpu, command, args),
         "{} is not a built-in",
         command
     );
+    screen(cpu)
+}
+
+fn clear_screen(cpu: &mut Cpu) {
+    for b in cpu.bus.vga.vram_text.iter_mut() {
+        *b = 0;
+    }
+    cpu.bus.cursor_x = 0;
+    cpu.bus.cursor_y = 0;
+}
+
+/// The text on the screen, as `run` returns it.
+fn screen(cpu: &Cpu) -> String {
     cpu.bus
         .vga
         .vram_text
@@ -213,6 +223,108 @@ fn dir_lists_any_drive() {
 
     assert_eq!(run(&mut cpu, "DIR Q:"), "Invalid drive specification");
     assert!(run(&mut cpu, "DIR D:\\SUB\\*.BAT").ends_with("File not found"));
+}
+
+#[test]
+fn dir_switches_follow_the_path_or_each_other() {
+    let (switches, path) = parse_dir_args("D:\\GAMES/W/P");
+    assert_eq!(path, "D:\\GAMES");
+    assert!(switches.wide && switches.pause && !switches.bare);
+    let (switches, path) = parse_dir_args("/p *.EXE /W /-p /b /o:n /a");
+    assert_eq!(path, "*.EXE");
+    assert_eq!(switches, DirSwitches { wide: true, pause: false, bare: true });
+}
+
+/// D: with MANY, which holds SUB and 30 files.
+fn many_files(name: &str) -> Cpu {
+    let base = scratch(name, &["c", "d/MANY/SUB"]);
+    for i in 1..=30 {
+        fs::write(base.join(format!("d/MANY/file{:02}.txt", i)), b"x").unwrap();
+    }
+    let mut cpu = Cpu::new(base.join("c"));
+    cpu.bus
+        .mount_drive(3, &base.join("d"), MountOptions::default(), false)
+        .unwrap();
+    cpu
+}
+
+#[test]
+fn dir_wide_lists_five_names_to_a_line() {
+    let mut cpu = many_files("dir_wide");
+    let out = run(&mut cpu, "DIR D:\\MANY /W");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines[1], " Directory of D:\\MANY");
+    // ".", "..", SUB and 30 files: 33 names on 7 lines.
+    let names = &lines[3..10];
+    for line in &names[..6] {
+        for column in (15..75).step_by(15) {
+            let (before, at) = line.split_at(column);
+            assert!(before.ends_with(' ') && !at.starts_with(' '), "{:?}", line);
+        }
+        assert!(line.len() > 60 && line.len() <= 74, "{:?}", line);
+    }
+    assert_eq!(names[6].split_whitespace().count(), 3, "{:?}", names[6]);
+    let all: Vec<&str> = names.iter().flat_map(|l| l.split_whitespace()).collect();
+    assert_eq!(all.len(), 33);
+    assert!(all.contains(&"[.]") && all.contains(&"[..]") && all.contains(&"[SUB]"), "{:?}", all);
+    assert!(all.contains(&"FILE07.TXT"), "{:?}", all);
+    assert_eq!(lines[10].trim(), "30 file(s)             30 bytes");
+    assert!(lines[11].ends_with(" bytes free"), "{}", lines[11]);
+    assert_eq!(lines.len(), 12);
+}
+
+#[test]
+fn dir_bare_lists_the_names_alone() {
+    let mut cpu = many_files("dir_bare");
+    let out = run(&mut cpu, "DIR D:\\MANY\\FILE0*.TXT /B");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 9, "{}", out);
+    assert!(lines.iter().all(|l| l.starts_with("FILE0") && l.ends_with(".TXT")), "{}", out);
+}
+
+#[test]
+fn dir_pauses_after_each_screenful() {
+    let mut cpu = many_files("dir_pause");
+    // 3 header lines, 33 entries and 2 totals: 23 lines on the first
+    // screen, the 25 rows' less two, then the prompt.
+    let out = run(&mut cpu, "DIR D:\\MANY /P");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 24, "{}", out);
+    assert_eq!(lines[0], " Volume in drive D is RUSTDOS");
+    assert_eq!(lines[23], "Press any key to continue . . .");
+    assert!(matches!(cpu.shell_wait, Some(ShellWait::Dir(_))));
+
+    // The rest after a key, below a line saying which directory.
+    clear_screen(&mut cpu);
+    assert!(take_key(&mut cpu, b' ' as u16));
+    assert!(cpu.shell_wait.is_none());
+    let out = screen(&cpu);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines[0], "");
+    assert_eq!(lines[1], "(continuing D:\\MANY)");
+    assert_eq!(lines.len(), 2 + 13 + 2, "{}", out);
+    assert!(lines[16].ends_with(" bytes free"), "{}", out);
+}
+
+#[test]
+fn dir_wide_pauses_by_the_text_modes_rows() {
+    let mut cpu = many_files("dir_wide_pause");
+    // A text mode of 10 rows: 8 lines a screenful.
+    cpu.bus.write_8(0x0484, 9);
+    let out = run(&mut cpu, "DIR/W/P D:\\MANY");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 9, "{}", out);
+    assert!(lines[7].starts_with("FILE"), "{}", out);
+    assert_eq!(lines[8], "Press any key to continue . . .");
+
+    clear_screen(&mut cpu);
+    assert!(take_key(&mut cpu, b'x' as u16));
+    let out = screen(&cpu);
+    let lines: Vec<&str> = out.lines().collect();
+    // The continuing line, 2 lines of names and the totals.
+    assert_eq!(lines[1], "(continuing D:\\MANY)");
+    assert_eq!(lines.len(), 6, "{}", out);
+    assert!(lines[4].ends_with(" bytes"), "{}", out);
 }
 
 #[test]
