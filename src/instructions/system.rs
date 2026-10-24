@@ -28,7 +28,7 @@ fn require_cpl0(cpu: &Cpu) -> CpuResult {
 
 /// Instructions that only exist in protected mode: #UD in real and
 /// virtual-8086 mode.
-fn require_pm(cpu: &Cpu) -> CpuResult {
+pub(crate) fn require_pm(cpu: &Cpu) -> CpuResult {
     if cpu.pm() { Ok(()) } else { Err(Fault::UD) }
 }
 
@@ -755,7 +755,8 @@ pub fn load_access(cpu: &mut Cpu, instr: &Instruction, limit: bool) -> CpuResult
 
 /// What LAR (or LSL, with `limit`) loads for `selector` into a 32-bit
 /// destination (`wide`) or a 16-bit one, or None where the selector isn't
-/// valid for it (ZF clear). The recompiler's LAR runs this too.
+/// valid for it (ZF clear). LSL's limit comes whole, for the destination's
+/// write to cut to its width. The recompiler's LAR runs this too.
 pub fn descriptor_word(
     cpu: &mut Cpu,
     selector: u16,

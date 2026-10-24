@@ -383,7 +383,8 @@ jit_fn! {
         let ix = ix as usize;
         let instr = &data.instrs[ix];
         let handler = data.handlers[ix];
-        ctx.calls.fallback[instr.mnemonic() as usize] += 1;        let start_esp = cpu.esp();
+        ctx.calls.fallback[instr.mnemonic() as usize] += 1;
+        let start_esp = cpu.esp();
         cpu.set_eip(data.eips[ix].wrapping_add(instr.len() as u32));
         let port = super::block::port_io(instr);
         // Port I/O and long string instructions take time of their own.
@@ -567,11 +568,11 @@ jit_fn! {
     fn jit_lar(cpu: *mut Cpu, ctx: *mut JitCtx, selector: u32, old: u32, wide: u32) -> u64 {
         // SAFETY: as in `jit_fallback`.
         let (cpu, ctx) = unsafe { (&mut *cpu, &mut *ctx) };
+        ctx.calls.lar += 1;
         let run = || {
-            if !cpu.pm() {
-                return Err(Fault::UD);
-            }
-            crate::instructions::system::descriptor_word(cpu, selector as u16, false, wide != 0)
+            use crate::instructions::system::{descriptor_word, require_pm};
+            require_pm(cpu)?;
+            descriptor_word(cpu, selector as u16, false, wide != 0)
         };
         match catch_unwind(AssertUnwindSafe(run)) {
             Ok(Ok(Some(value))) => value as u64 | (crate::cpu::alu::ZF as u64) << LAR_ZF_SHIFT,

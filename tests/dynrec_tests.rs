@@ -1650,6 +1650,45 @@ fn pushf_in_virtual_8086_mode_faults_below_iopl_3() {
 }
 
 #[test]
+fn stack_switches_in_virtual_8086_mode_run_in_translated_code() {
+    // MOV SS and POP SS in virtual-8086 code, which loads SS as real mode
+    // does, through `jit_load_seg`, 200 times, then INT 40h into ring 0.
+    let (mut a, mut b) = twins(|rig| {
+        rig.handler(0x40, 3, |a| record_code(a, 0x40));
+        rig.load(0x30000, &asm16(0x30000, |a| {
+            let mut top = a.create_label();
+            a.mov(cx, 200)?;
+            a.set_label(&mut top)?;
+            a.mov(ax, ss)?;
+            a.mov(bx, 0x4000)?;
+            a.mov(ss, bx)?;
+            a.mov(sp, 0x1000)?;
+            a.push(cx)?;
+            a.push(ss)?;
+            a.pop(ss)?;
+            a.pop(dx)?;
+            a.add(bp, dx)?;
+            a.mov(ss, ax)?;
+            a.mov(sp, 0xFFFE)?;
+            a.loop_(top)?;
+            a.int(0x40)
+        }));
+        rig.load(CODE, &asm32(CODE, |a| {
+            for v in [0u32, 0, 0, 0, 0x2000, 0xFFFE, 0x0002_3002, 0x3000, 0] {
+                a.push(v)?;
+            }
+            a.iretd()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    assert_eq!(b.recorded().0, 0x40);
+    assert_eq!(b.cpu.ebp() & 0xFFFF, (1..=200u32).sum::<u32>() & 0xFFFF);
+    if AVAILABLE {
+        assert_eq!(handled(&b, iced_x86::Mnemonic::Pop), 0);
+    }
+}
+
+#[test]
 fn port_io_that_lets_an_interrupt_through_stops_the_block_after_it() {
     // Blocks go on past IN, OUT and STI where they change nothing the
     // execution loop checks. Here the loop masks IRQ 0 and unmasks it in

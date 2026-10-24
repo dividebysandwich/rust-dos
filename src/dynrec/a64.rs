@@ -2041,13 +2041,14 @@ impl Gen<'_> {
             }
             Uop::SsLoaded { stack32 } => {
                 // As x86-64's: stop after the instruction where SS's B bit
-                // (bit 14 of its attributes) changed.
+                // changed.
                 let at = self.stop_after();
+                let db = crate::cpu::ATTR_DB.trailing_zeros();
                 self.field(Access::Ldr16, 0, seg_field(Seg::SS, layout::SEG_ATTR));
                 if stack32 {
-                    dynasm!(self.ops ; .arch aarch64 ; tbz w0, 14, =>at);
+                    dynasm!(self.ops ; .arch aarch64 ; tbz w0, db, =>at);
                 } else {
-                    dynasm!(self.ops ; .arch aarch64 ; tbnz w0, 14, =>at);
+                    dynasm!(self.ops ; .arch aarch64 ; tbnz w0, db, =>at);
                 }
                 if self.ix + 1 < self.data.count() {
                     dynasm!(self.ops ; .arch aarch64 ; movz w2, 0);

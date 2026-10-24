@@ -95,7 +95,7 @@ programs run them so often (a timer read, a sound driver's status, a CLI
 and STI or a PUSHF and POPF around each, a switch to a stack of its own)
 that the block goes on after them where they changed none of it. They run
 in the block (IN, OUT and STI translated on x86-64 hosts, with IN and OUT
-through `jit_port`, MOV SS and POP SS in protected mode through
+through `jit_port`, MOV SS and POP SS outside real mode through
 `jit_load_seg`; the others, and all of them elsewhere, through their
 handlers and `jit_fallback`), which stops after the instruction
 (`EXIT_AFTER`) only if:
@@ -247,9 +247,9 @@ Each instruction becomes one of two things:
     and constants, PUSHA and POPA, ENTER with nesting level 0 (but a 32-bit
     frame pointer on a 16-bit stack) and LEAVE;
   - MOV and PUSH of segment registers (reading their selectors), and CLI;
-  - on x86-64 hosts, MOV and POP into segment registers but CS (and SS
-    in real mode) through `jit_load_seg`, which runs
-    `Cpu::load_segment`, IN and OUT (through `jit_port`, see
+  - on x86-64 hosts, MOV and POP into segment registers but CS, and SS
+    in real mode (through `jit_load_seg`, which runs
+    `Cpu::load_segment`), IN and OUT (through `jit_port`, see
     [What a block holds](#what-a-block-holds)), STI, LODS without REP
     going up, and MOVS and STOS going up, with REP a loop of the
     iterations where the count is at most 16 (programs copy and fill in
