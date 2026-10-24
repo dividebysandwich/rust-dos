@@ -122,6 +122,8 @@ pub struct JitCtx {
     /// `jit_far_ret` and `jit_far_call`.
     pub far_ret: usize,
     pub far_call: usize,
+    /// `jit_lar`.
+    pub lar: usize,
     /// A far CALL's target and its code segment's descriptor, between
     /// `jit_far_call`'s checks and its load of CS.
     pub far_target: (u16, u32, u64),
@@ -234,6 +236,7 @@ pub const CTX_LOAD_SEG: i32 = offset_of!(JitCtx, load_seg) as i32;
 pub const CTX_PORT: i32 = offset_of!(JitCtx, port) as i32;
 pub const CTX_FAR_RET: i32 = offset_of!(JitCtx, far_ret) as i32;
 pub const CTX_FAR_CALL: i32 = offset_of!(JitCtx, far_call) as i32;
+pub const CTX_LAR: i32 = offset_of!(JitCtx, lar) as i32;
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub const CTX_AFTER: i32 = offset_of!(JitCtx, after) as i32;
 #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
@@ -308,6 +311,7 @@ impl JitCtx {
             port: jit_port as *const () as usize,
             far_ret: jit_far_ret as *const () as usize,
             far_call: jit_far_call as *const () as usize,
+            lar: jit_lar as *const () as usize,
             far_target: (0, 0, 0),
             after: 0,
             ram_len: 0,
@@ -379,8 +383,7 @@ jit_fn! {
         let ix = ix as usize;
         let instr = &data.instrs[ix];
         let handler = data.handlers[ix];
-        ctx.calls.fallback[instr.mnemonic() as usize] += 1;
-        let start_esp = cpu.esp();
+        ctx.calls.fallback[instr.mnemonic() as usize] += 1;        let start_esp = cpu.esp();
         cpu.set_eip(data.eips[ix].wrapping_add(instr.len() as u32));
         let port = super::block::port_io(instr);
         // Port I/O and long string instructions take time of their own.
@@ -544,6 +547,42 @@ jit_fn! {
             Err(payload) => {
                 ctx.panic = Some(payload);
                 EXIT_PANIC
+            }
+        }
+    }
+}
+
+/// Where `jit_lar`'s result has ZF (at bit 6 of these bits) and its exit
+/// code.
+pub const LAR_ZF_SHIFT: u32 = 32;
+pub const LAR_EXIT_SHIFT: u32 = 48;
+
+jit_fn! {
+    /// `Uop::Lar`: LAR of `selector` into a destination holding `old`, 32
+    /// bits wide where `wide` isn't 0, as `system::load_access` does it.
+    /// Returns the destination's value (`old` where the selector isn't
+    /// valid) in the low 32 bits, ZF from LAR_ZF_SHIFT on, and EXIT_FAULT
+    /// (with the fault in the context) or EXIT_PANIC from LAR_EXIT_SHIFT
+    /// on where it didn't run.
+    fn jit_lar(cpu: *mut Cpu, ctx: *mut JitCtx, selector: u32, old: u32, wide: u32) -> u64 {
+        // SAFETY: as in `jit_fallback`.
+        let (cpu, ctx) = unsafe { (&mut *cpu, &mut *ctx) };
+        let run = || {
+            if !cpu.pm() {
+                return Err(Fault::UD);
+            }
+            crate::instructions::system::descriptor_word(cpu, selector as u16, false, wide != 0)
+        };
+        match catch_unwind(AssertUnwindSafe(run)) {
+            Ok(Ok(Some(value))) => value as u64 | (crate::cpu::alu::ZF as u64) << LAR_ZF_SHIFT,
+            Ok(Ok(None)) => old as u64,
+            Ok(Err(fault)) => {
+                ctx.fault = fault;
+                (EXIT_FAULT as u64) << LAR_EXIT_SHIFT
+            }
+            Err(payload) => {
+                ctx.panic = Some(payload);
+                (EXIT_PANIC as u64) << LAR_EXIT_SHIFT
             }
         }
     }

@@ -44,12 +44,13 @@ pub fn translate(
     let mut u = Vec::with_capacity(8);
     let ok = match instr.mnemonic() {
         Mov if (segments || real) && instr.op0_kind() == OpKind::Register && instr.op0_register().is_segment_register() => {
-            mov_to_seg(instr, &mut u)
+            mov_to_seg(instr, stack32, real, &mut u)
         }
         Pop if (segments || real) && instr.op0_kind() == OpKind::Register && instr.op0_register().is_segment_register() => {
-            pop_seg(instr, stack32, &mut u)
+            pop_seg(instr, stack32, real, &mut u)
         }
         Les | Lds | Lfs | Lgs if segments || real => far_pointer(instr, &mut u),
+        Lar if segments && !real => lar(instr, &mut u),
         In if system => port_in(instr, &mut u),
         Out if system => port_out(instr, &mut u),
         Sti if system => {
@@ -755,15 +756,24 @@ fn mov_from_seg(instr: &Instruction, seg: Seg, u: &mut Vec<Uop>) -> bool {
     true
 }
 
-/// The segment register a MOV or POP loads, but CS and SS: CS can't be
-/// loaded so, and SS ends the block.
-fn loaded_seg(instr: &Instruction) -> Option<Seg> {
-    Seg::from_register(instr.op0_register()).filter(|&s| s != Seg::CS && s != Seg::SS)
+/// The segment register a MOV or POP loads, but CS, which can't be loaded
+/// so, and in real mode SS.
+fn loaded_seg(instr: &Instruction, real: bool) -> Option<Seg> {
+    Seg::from_register(instr.op0_register()).filter(|&s| s != Seg::CS && !(real && s == Seg::SS))
+}
+
+/// After a load of SS, as `jit_fallback` goes on after one: the block stops
+/// after the instruction where the stack's width changed, which the block
+/// was translated for (`stack32`).
+fn ss_loaded(seg: Seg, stack32: bool, u: &mut Vec<Uop>) {
+    if seg == Seg::SS {
+        u.push(Uop::SsLoaded { stack32 });
+    }
 }
 
 /// MOV Sreg, r/m16: the selector from a register's low word or memory.
-fn mov_to_seg(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
-    let Some(seg) = loaded_seg(instr) else { return false };
+fn mov_to_seg(instr: &Instruction, stack32: bool, real: bool, u: &mut Vec<Uop>) -> bool {
+    let Some(seg) = loaded_seg(instr, real) else { return false };
     match instr.op1_kind() {
         OpKind::Register => {
             let Some(r) = gpr(instr.op1_register()).filter(|r| r.size > 1) else { return false };
@@ -778,13 +788,15 @@ fn mov_to_seg(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
         _ => return false,
     }
     u.push(Uop::LoadSeg { seg, t: T0 });
+    ss_loaded(seg, stack32, u);
     true
 }
 
 /// POP Sreg, as `transfer::pop`: only the selector's word read, the
-/// segment loaded, then the stack pointer moved by the operand's size.
-fn pop_seg(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
-    let Some(seg) = loaded_seg(instr) else { return false };
+/// segment loaded, then the stack pointer moved by the operand's size (at
+/// the width of the stack popped, where POP SS switches stacks).
+fn pop_seg(instr: &Instruction, stack32: bool, real: bool, u: &mut Vec<Uop>) -> bool {
+    let Some(seg) = loaded_seg(instr, real) else { return false };
     let size = match instr.stack_pointer_increment() {
         2 => 2,
         4 => 4,
@@ -798,6 +810,28 @@ fn pop_seg(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
     u.push(Uop::LoadSeg { seg, t: T0 });
     u.push(Uop::AddConst { t: T1, v: size, size: sp.size });
     u.push(Uop::Set { r: sp, t: T1 });
+    ss_loaded(seg, stack32, u);
+    true
+}
+
+/// LAR r, r, as `system::load_access`: the access rights of the selector
+/// in the source's low word into the destination, which keeps its value
+/// where the selector isn't valid, and ZF.
+fn lar(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
+    if instr.op1_kind() != OpKind::Register {
+        return false;
+    }
+    let (Some(dst), Some(src)) = (gpr(instr.op0_register()), gpr(instr.op1_register())) else {
+        return false;
+    };
+    if dst.size < 2 || src.size < 2 {
+        return false;
+    }
+    u.push(Uop::Get { t: T0, r: Gpr::word(src.index) });
+    u.push(Uop::Get { t: T1, r: dst });
+    u.push(Uop::Lar { sel: T0, val: T1, zf: T2, wide: dst.size == 4 });
+    u.push(Uop::FlagsFrom { t: T2, mask: ZF });
+    u.push(Uop::Set { r: dst, t: T1 });
     true
 }
 

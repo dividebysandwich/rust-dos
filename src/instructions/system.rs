@@ -744,6 +744,24 @@ fn visible_descriptor(cpu: &mut Cpu, selector: u16) -> CpuResult<Option<Descript
 pub fn load_access(cpu: &mut Cpu, instr: &Instruction, limit: bool) -> CpuResult {
     require_pm(cpu)?;
     let selector = read_op(cpu, instr, 1, 2)? as u16;
+    let dest = instr.op0_register();
+    let found = descriptor_word(cpu, selector, limit, dest.size() == 4)?;
+    cpu.set_cpu_flag(CpuFlags::ZF, found.is_some());
+    if let Some(value) = found {
+        cpu.set_reg(dest, value);
+    }
+    Ok(())
+}
+
+/// What LAR (or LSL, with `limit`) loads for `selector` into a 32-bit
+/// destination (`wide`) or a 16-bit one, or None where the selector isn't
+/// valid for it (ZF clear). The recompiler's LAR runs this too.
+pub fn descriptor_word(
+    cpu: &mut Cpu,
+    selector: u16,
+    limit: bool,
+    wide: bool,
+) -> CpuResult<Option<u32>> {
     let found = visible_descriptor(cpu, selector)?.filter(|d| {
         d.is_segment()
             || match d.typ() {
@@ -752,20 +770,16 @@ pub fn load_access(cpu: &mut Cpu, instr: &Instruction, limit: bool) -> CpuResult
                 _ => false,
             }
     });
-    cpu.set_cpu_flag(CpuFlags::ZF, found.is_some());
-    if let Some(desc) = found {
-        let dest = instr.op0_register();
-        let value = if limit {
+    Ok(found.map(|desc| {
+        if limit {
             desc.limit()
         } else {
             // With the limit's bits 16-19, as the processors (and DOSBox)
             // give them: Windows 95's KRNL386 sets a huge block's first
             // selector's AVL bit by writing back what LAR read, limit and all.
-            ((desc.0 >> 32) as u32) & if dest.size() == 4 { 0x00FF_FF00 } else { 0xFF00 }
-        };
-        cpu.set_reg(dest, value);
-    }
-    Ok(())
+            ((desc.0 >> 32) as u32) & if wide { 0x00FF_FF00 } else { 0xFF00 }
+        }
+    }))
 }
 
 /// VERR and VERW: whether the segment could be read (or written) at the

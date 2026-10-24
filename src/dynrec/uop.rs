@@ -416,6 +416,16 @@ pub enum Uop {
     /// Load segment register `seg` (not CS or SS) with the selector in t,
     /// as `Cpu::load_segment` does (it may fault).
     LoadSeg { seg: Seg, t: T },
+    /// The end of a MOV or POP into SS (whose `LoadSeg` left the interrupt
+    /// shadow): the block stops after the instruction where the stack's
+    /// width is no longer `stack32`, which it was translated for; else the
+    /// shadow ends in the block, at the next instruction.
+    SsLoaded { stack32: bool },
+    /// LAR of the selector in `sel` (`helpers::jit_lar`, which may fault):
+    /// `val`, holding the destination's value, gets the access rights for
+    /// a 32-bit destination (`wide`) or a 16-bit one, or stays as it is
+    /// where the selector isn't valid; `zf` gets ZF in its place.
+    Lar { sel: T, val: T, zf: T, wide: bool },
     /// IN of `size` bytes from the port into t, or OUT of t, with the
     /// instruction count up to date: the I/O permission may fault, and the
     /// block stops after the instruction where the port access changed what

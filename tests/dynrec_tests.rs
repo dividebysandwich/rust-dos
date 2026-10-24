@@ -821,6 +821,112 @@ fn interrupts_wait_out_the_shadows_of_sti_and_mov_ss() {
     assert!(b.cpu.edi() > 10, "IRQ 0 came {} times", b.cpu.edi());
 }
 
+/// How many times the recompiler's machine ran instructions of `mnemonic`
+/// through their handler.
+fn handled(rig: &Rig, mnemonic: iced_x86::Mnemonic) -> u64 {
+    rig.cpu.dynrec.calls().map_or(0, |calls| calls.fallback[mnemonic as usize])
+}
+
+#[test]
+fn lar_runs_in_translated_code() {
+    // LAR of a code, data and system segment, of a call gate, and of
+    // selectors it finds no descriptor for (null, an interrupt gate, one a
+    // selector's RPL may not see, one past the GDT's limit), into 32-bit
+    // and 16-bit registers, with the timer interrupting: ZF and the
+    // destinations go into ESI, and CF must stay as STC set it.
+    const TABLE: u32 = DATA;
+    let selectors = [CODE32, DATA16, 0, TSS_SEL, FREE, FREE + 8, CODE32 | 3, 0x800];
+    let (mut a, mut b) = twins(|rig| {
+        rig.set_gdt(FREE, gate_desc(CODE32, CODE, INT_GATE32, 0, 0));
+        rig.set_gdt(FREE + 8, gate_desc(CODE32, CODE, CALL_GATE32, 3, 2));
+        for (i, &sel) in selectors.iter().enumerate() {
+            rig.write16(TABLE + 2 * i as u32, sel);
+        }
+        with_timer(rig, |a| {
+            a.mov(eax, ecx)?;
+            a.and(eax, 7)?;
+            a.movzx(ebx, word_ptr(TABLE + eax * 2))?;
+            a.mov(edx, 0x1234_5678u32)?;
+            a.stc()?;
+            a.lar(edx, ebx)?;
+            a.setz(al)?;
+            a.adc(esi, edx)?;
+            a.movzx(eax, al)?;
+            a.add(esi, eax)?;
+            a.rol(esi, 3)?;
+            a.mov(dx, 0x5555u32)?;
+            a.lar(dx, bx)?;
+            a.setz(al)?;
+            a.add(esi, edx)?;
+            a.add(esi, eax)
+        });
+    });
+    run_both(&mut a, &mut b);
+    assert!(b.cpu.edi() > 10, "IRQ 0 came {} times", b.cpu.edi());
+    if AVAILABLE {
+        assert_eq!(handled(&b, iced_x86::Mnemonic::Lar), 0);
+    }
+}
+
+#[test]
+fn stack_switches_run_in_translated_code() {
+    // As DOS/4GW's thunks into 16-bit code: MOV SS to a 16-bit stack and
+    // back (the block stops after each, as the stack's width changes), and
+    // POP SS of the stack it is on, with the timer interrupting on either.
+    let (mut a, mut b) = twins(|rig| {
+        with_timer(rig, |a| {
+            a.mov(ebp, esp)?;
+            a.mov(bx, ss)?;
+            a.mov(ax, DATA16 as u32)?;
+            a.mov(ss, ax)?;
+            a.mov(esp, 0x9000u32)?;
+            a.push(ecx)?;
+            a.push(ss)?;
+            a.pop(ss)?;
+            a.inc(edx)?;
+            a.pop(eax)?;
+            a.add(esi, eax)?;
+            a.mov(ss, bx)?;
+            a.mov(esp, ebp)?;
+            a.add(esi, edx)
+        });
+    });
+    run_both(&mut a, &mut b);
+    assert!(b.cpu.edi() > 10, "IRQ 0 came {} times", b.cpu.edi());
+    assert_ne!(b.cpu.esi(), 0);
+    if AVAILABLE {
+        assert_eq!(handled(&b, iced_x86::Mnemonic::Pop), 0);
+        // (But the rig's MOV from and to CR0, into protected mode.)
+        assert_eq!(handled(&b, iced_x86::Mnemonic::Mov), 2);
+    }
+}
+
+#[test]
+fn a_stack_switch_that_faults_leaves_the_instructions_before_it_done() {
+    // POP SS of a null selector: #GP(0) at the POP, after the PUSH before
+    // it.
+    let before = |a: &mut CodeAssembler| {
+        a.mov(ebx, 1u32)?;
+        a.push(0u32)
+    };
+    let faulting = CODE + 0x100 + asm32(CODE + 0x100, before).len() as u32;
+    let (mut a, mut b) = twins(|rig| {
+        rig.record(GP);
+        rig.load(CODE, &asm32(CODE, |a| a.jmp(CODE as u64 + 0x100)));
+        rig.load(CODE + 0x100, &asm32(CODE + 0x100, |a| {
+            before(a)?;
+            a.pop(ss)?;
+            a.mov(edx, 3u32)?;
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    let (vector, stack) = b.recorded();
+    assert_eq!((vector, stack[0], stack[1]), (GP as u32, 0, faulting));
+    assert_eq!(b.cpu.ebx(), 1);
+    assert_ne!(b.cpu.edx(), 3);
+}
+
 #[test]
 fn code_traced_with_tf_takes_a_single_step_trap_after_every_instruction() {
     // A loop runs translated, then traced by a #DB handler that counts

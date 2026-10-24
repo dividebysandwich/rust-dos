@@ -95,7 +95,8 @@ programs run them so often (a timer read, a sound driver's status, a CLI
 and STI or a PUSHF and POPF around each, a switch to a stack of its own)
 that the block goes on after them where they changed none of it. They run
 in the block (IN, OUT and STI translated on x86-64 hosts, with IN and OUT
-through `jit_port`; the others, and all of them elsewhere, through their
+through `jit_port`, MOV SS and POP SS in protected mode through
+`jit_load_seg`; the others, and all of them elsewhere, through their
 handlers and `jit_fallback`), which stops after the instruction
 (`EXIT_AFTER`) only if:
 
@@ -109,9 +110,10 @@ handlers and `jit_fallback`), which stops after the instruction
   the shadow ends in the block, at the next instruction;
 - after POPF (through its handler), TF is set, or IF is set with an
   interrupt waiting;
-- after a load of SS (through its handler), the stack's width changed,
-  which the block was translated for (its key's stack bit). Otherwise the
-  interrupt shadow ends in the block, at the next instruction.
+- after a load of SS, the stack's width changed, which the block was
+  translated for (its key's stack bit; `Uop::SsLoaded` checks it where
+  the load is translated). Otherwise the interrupt shadow ends in the
+  block, at the next instruction.
 
 Because of this, whether an interrupt can be delivered never changes
 inside a block, or in a chain of linked blocks: the execution loop has
@@ -245,13 +247,18 @@ Each instruction becomes one of two things:
     and constants, PUSHA and POPA, ENTER with nesting level 0 (but a 32-bit
     frame pointer on a 16-bit stack) and LEAVE;
   - MOV and PUSH of segment registers (reading their selectors), and CLI;
-  - on x86-64 hosts, MOV and POP into segment registers but CS and SS
-    (through `jit_load_seg`, which runs `Cpu::load_segment`), IN and OUT
-    (through `jit_port`, see [What a block holds](#what-a-block-holds)),
-    STI, LODS without REP going up, and MOVS and STOS going up, with REP a
-    loop of the iterations where the count is at most 16 (programs copy
-    and fill in small pieces often, and the handler does more at once, see
+  - on x86-64 hosts, MOV and POP into segment registers but CS (and SS
+    in real mode) through `jit_load_seg`, which runs
+    `Cpu::load_segment`, IN and OUT (through `jit_port`, see
+    [What a block holds](#what-a-block-holds)), STI, LODS without REP
+    going up, and MOVS and STOS going up, with REP a loop of the
+    iterations where the count is at most 16 (programs copy and fill in
+    small pieces often, and the handler does more at once, see
     `instructions::string`);
+  - LAR of a register in protected mode (through `jit_lar`, which runs
+    the handler's `system::descriptor_word`): DOS/4GW's thunks into its
+    16-bit code check the stack's width with it on every interrupt they
+    pass on;
   - near JMP and CALL (of a register or memory too), RET, Jcc, LOOPcc and
     JCXZ;
   - BT, BTS, BTR and BTC of a register, or of memory with an immediate bit
@@ -667,7 +674,7 @@ The host's time is fixed for both (`hosttime::fix`).
 | Test | Checks |
 |---|---|
 | `tests/dyndiff_tests.rs` | A protected-mode program with a fast timer interrupt |
-| `tests/dynrec_tests.rs` | Stores into the rest of a block, faults and page faults in the middle of one, interrupt shadows, an interrupt a POPF lets through, a switch to a stack of another width, timer reads, a full code memory, the auto latch, rewriting a linked block, a RET poked into an unrolled loop, immediates poked before each loop, the translated FPU instructions on singles of every kind under each rounding mode, on empty registers, without the coprocessor and past a segment's limit, returns and indirect calls to several places, a return to more places than it has links, indirect jumps, flags set in one block and read in the next, stack operations faulting after the instructions before them, REP MOVS and STOS of a few elements, faulting part of the way, over the rest of their block and into the video memory, video memory, ROMs and unmapped addresses read and written with paging off and through the TLB, PUSHAD and POPAD past the stack's limit, a smaller CS limit under a link, conditional jumps within a block and out of it (counts, cached registers, a fault after one), STI ending a full block, and plain writes into the VGA's planes as the map mask and write mode change, far calls, returns and interrupts in real and protected mode going on in translated code, segment loads in big real mode, a link to a page the TLB lost, and the translated MMX and SSE instructions on singles of every kind under each rounding mode and flush to zero, with exceptions MXCSR unmasks, misaligned operands, MMX registers the FPU left stale, and stores into video memory and a block of RAM with code |
+| `tests/dynrec_tests.rs` | Stores into the rest of a block, faults and page faults in the middle of one, interrupt shadows, an interrupt a POPF lets through, a switch to a stack of another width, timer reads, a full code memory, the auto latch, rewriting a linked block, a RET poked into an unrolled loop, immediates poked before each loop, the translated FPU instructions on singles of every kind under each rounding mode, on empty registers, without the coprocessor and past a segment's limit, returns and indirect calls to several places, a return to more places than it has links, indirect jumps, flags set in one block and read in the next, stack operations faulting after the instructions before them, REP MOVS and STOS of a few elements, faulting part of the way, over the rest of their block and into the video memory, video memory, ROMs and unmapped addresses read and written with paging off and through the TLB, PUSHAD and POPAD past the stack's limit, a smaller CS limit under a link, conditional jumps within a block and out of it (counts, cached registers, a fault after one), STI ending a full block, and plain writes into the VGA's planes as the map mask and write mode change, far calls, returns and interrupts in real and protected mode going on in translated code, segment loads in big real mode, LAR and stack switches like DOS/4GW's thunks into 16-bit code, a link to a page the TLB lost, and the translated MMX and SSE instructions on singles of every kind under each rounding mode and flush to zero, with exceptions MXCSR unmasks, misaligned operands, MMX registers the FPU left stale, and stores into video memory and a block of RAM with code |
 
 Local DOS programs run in lockstep opt-in, from the git-ignored
 `programs/` directory:

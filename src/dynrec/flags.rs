@@ -81,6 +81,8 @@ impl Uop {
             | Uop::VFloat { .. } => ARITH,
             Uop::MemRef { .. }
             | Uop::LoadSeg { .. }
+            | Uop::Lar { .. }
+            | Uop::SsLoaded { .. }
             | Uop::In { .. }
             | Uop::Out { .. }
             | Uop::Sti
