@@ -109,6 +109,20 @@ fn resize_grow_bounded_by_tail() {
     assert_eq!(err, mcb::ResizeError::Insufficient(full));
 }
 
+/// Growing into a header with no 'M' or 'Z' is the arena trashed (07h),
+/// as MS-DOS's `Coalesce` has it, and leaves the block as it was.
+#[test]
+fn resize_grow_into_trashed_header() {
+    let mut bus = fresh_bus();
+    mcb::init_empty(&mut bus);
+    let seg = mcb::alloc(&mut bus, 0x1000, 0x10).unwrap();
+    let next = seg + 0x10;
+    bus.write_8(next as usize * 16, 0);
+    let err = mcb::resize(&mut bus, seg, 0x20).expect_err("trashed");
+    assert_eq!(err, mcb::ResizeError::McbDestroyed);
+    assert_eq!(mcb::read_mcb(&mut bus, seg - 1).size, 0x10);
+}
+
 /// A segment that is not right after an arena header, like the 1248h the
 /// DOS/4GW programs on the Alien Legacy CD free: MS-DOS's `$DEALLOC` says
 /// invalid block (09h), and its `$SETBLOCK` says arena trashed (07h).

@@ -525,7 +525,8 @@ fn alloc_in(bus: &mut Bus, chain: Vec<(u16, Mcb)>, owner_psp: u16, paras: u16, f
 ///
 /// Coalesces with adjacent free blocks on both sides. A segment with no
 /// 'M' or 'Z' at `block_seg - 1` is an invalid block address (09h), as in
-/// MS-DOS's `$DEALLOC`, which checks only that signature.
+/// MS-DOS's `$DEALLOC`. A block that is already free is one too here,
+/// where `$DEALLOC` checks only the signature and frees it again.
 pub fn free(bus: &mut Bus, block_seg: u16) -> Result<(), u8> {
     let mcb_seg = block_seg.wrapping_sub(1);
     let m = read_mcb(bus, mcb_seg);
@@ -554,8 +555,9 @@ pub fn free(bus: &mut Bus, block_seg: u16) -> Result<(), u8> {
 /// Why AH=4Ah failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResizeError {
-    /// No 'M' or 'Z' at `block_seg - 1`: MS-DOS's `$SETBLOCK` reports
-    /// that as the arena trashed (07h) and leaves BX alone.
+    /// No 'M' or 'Z' at `block_seg - 1`, or, when growing, at the header
+    /// after the block: MS-DOS's `$SETBLOCK` and its `Coalesce` report
+    /// that as the arena trashed (07h) and leave BX alone.
     McbDestroyed,
     /// Not enough memory to grow (08h), with the largest size in
     /// paragraphs that would have succeeded, which DOS returns in BX.
@@ -620,7 +622,10 @@ pub fn resize(bus: &mut Bus, block_seg: u16, new_paras: u16) -> Result<(), Resiz
     }
     let next_seg = mcb_seg + 1 + m.size;
     let next = read_mcb(bus, next_seg);
-    if !next.is_free() || !next.is_valid() {
+    if !next.is_valid() {
+        return Err(ResizeError::McbDestroyed);
+    }
+    if !next.is_free() {
         return Err(Insufficient(m.size));
     }
     let combined = m.size + 1 + next.size;
