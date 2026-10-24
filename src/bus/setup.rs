@@ -204,6 +204,9 @@ impl Bus {
         self.write_16(0x0480, 0x001E);
         self.write_16(0x0482, 0x003E);
 
+        // 0x046C: the timer ticks since midnight, by the real-time clock.
+        crate::bios::set_tick_count(self);
+
         // 0x0484: Rows on Screen (minus 1). 24 = 25-row default.
         self.write_8(0x0484, 24);
         // 0x0485: Character height in scan lines. 16 = VGA 8x16 default.
