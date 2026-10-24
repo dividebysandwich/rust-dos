@@ -186,7 +186,7 @@ programs, the prompt has these commands:
 
 | Command | What it does |
 |---|---|
-| `DIR [path]`, `LS [/A] [path]` | list files, `LS` in wide columns |
+| `DIR [path] [/W] [/P] [/B]`, `LS [/A] [path]` | list files: `/W` five names a line, `/P` a screenful at a time, `/B` names only; `LS` in wide columns |
 | `CD [path]`, `D:` | change the directory, or the drive |
 | `TYPE file` | show a text file |
 | `MORE [file]` | show text a screenful at a time |
