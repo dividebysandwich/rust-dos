@@ -258,6 +258,33 @@ fn hard_disk_grows_past_what_its_folder_holds() {
     assert_eq!((dword(0), dword(1), dword(2), dword(3)), (8, 512, 25000, 40000));
 }
 
+/// Past 65,535 clusters AH=36h would count 32 KB clusters, where a 16 KB
+/// write may not show: the total stops there instead.
+#[test]
+fn a_full_folder_still_shows_each_cluster_written() {
+    let base = scratch("hd_full", &["c/GAMES"]);
+    // 300 MB, 76,800 clusters, in a folder below the root.
+    let file = fs::File::create(base.join("c/GAMES/BIG.DAT")).unwrap();
+    file.set_len(76_800 * 4096).unwrap();
+    drop(file);
+    let mut cpu = Cpu::new(base.join("c"));
+    // 100,000 clusters less 76,801 used (the file and its folder).
+    assert_eq!(disk_free(&mut cpu, 3), (8, 23199, 512, 0xFFFF));
+
+    set_dsdx_string(&mut cpu, "C:\\GAMES\\SAVE.DAT");
+    cpu.set_cx(0);
+    int21(&mut cpu, 0x3C);
+    assert!(!cf(&cpu));
+    let handle = cpu.ax();
+    cpu.set_bx(handle);
+    cpu.set_cx(0x4000);
+    int21(&mut cpu, 0x40);
+    assert_eq!((cf(&cpu), cpu.ax()), (false, 0x4000));
+    cpu.set_bx(handle);
+    int21(&mut cpu, 0x3E);
+    assert_eq!(disk_free(&mut cpu, 3), (8, 23195, 512, 0xFFFF));
+}
+
 #[test]
 fn ioctl_reports_drive_types() {
     let base = scratch("ioctl", &["c", "a", "cd"]);

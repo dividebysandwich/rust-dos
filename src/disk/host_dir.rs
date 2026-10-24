@@ -34,20 +34,23 @@ pub(super) struct HostDirCache {
     /// The most recent search last. The guest's changes drop the searches
     /// of the folders they were made in (`touched`).
     pub(super) searches: RefCell<Vec<HostSearch>>,
-    /// The clusters used under host folders, as last counted for the free
-    /// space of their drives, by (folder, cluster size, most counted).
-    /// Counting stats every file, so a count is kept until the guest
-    /// changes a host file or folder (`touched`), `forget`, or the folder's
-    /// time moves. What other programs change deeper in the folder shows
-    /// after one of those.
-    pub(super) used: RefCell<HashMap<(PathBuf, u64, u64), UsedCount>>,
+    /// What the files in host folders take, as counted for the free space
+    /// of their drives, by (folder, cluster size, most counted). Counting
+    /// stats every file, so a folder's count is kept as its entries are:
+    /// until the guest changes something in it (`touched`) or its time
+    /// moves, and not while that time is `RECENT`. A count after a write
+    /// then stats only the files of the folder written to. A file another
+    /// program resizes shows after the guest's next change in its folder.
+    pub(super) usage: RefCell<HashMap<(PathBuf, u64, u64), DirUsage>>,
 }
 
-/// The clusters used under a host folder, and the folder's modification
-/// time when they were counted.
-pub(super) struct UsedCount {
-    modified: Option<std::time::SystemTime>,
-    clusters: u64,
+/// The clusters a host folder's own files take, and its folders.
+pub(super) type Usage = (u64, Rc<[PathBuf]>);
+
+/// A folder's `Usage`, and its modification time when it was counted.
+pub(super) struct DirUsage {
+    modified: std::time::SystemTime,
+    usage: Usage,
 }
 
 /// A search of a host folder, as FindFirst listed it.
@@ -101,7 +104,7 @@ impl HostDirCache {
     pub(super) fn forget(&self) {
         self.changed();
         self.searches.borrow_mut().clear();
-        self.used.borrow_mut().clear();
+        self.usage.borrow_mut().clear();
     }
 
     /// The guest created, wrote, resized, deleted or renamed the host file
@@ -109,32 +112,43 @@ impl HostDirCache {
     /// folder, and of `path` and the folders under it, list them again.
     /// Searches of other folders are kept, so a program copying the files
     /// it finds into another folder doesn't list its source each time. The
-    /// space used on every drive is counted again.
+    /// files of its folder, and of `path`, are counted again.
     pub(super) fn touched(&self, path: &Path) {
-        self.used.borrow_mut().clear();
         let parent = path.parent();
+        self.usage
+            .borrow_mut()
+            .retain(|(dir, ..), _| Some(dir.as_path()) != parent && dir != path);
         self.searches.borrow_mut().retain(|s| Some(s.key.dir.as_path()) != parent && !s.key.dir.starts_with(path));
     }
 
-    /// The clusters used under the host folder `root`, kept or from
-    /// `count`.
-    pub(super) fn used(
+    /// What the files in the host folder `dir` take with clusters of
+    /// `cluster_bytes`, counted up to `cap`, kept or from `count`.
+    pub(super) fn usage(
         &self,
-        root: &Path,
+        dir: &Path,
         cluster_bytes: u64,
         cap: u64,
-        count: impl FnOnce() -> u64,
-    ) -> u64 {
-        let modified = hostfs::metadata(root).ok().and_then(|m| m.modified);
-        let key = (root.to_path_buf(), cluster_bytes, cap);
-        if let Some(kept) = self.used.borrow().get(&key)
-            && kept.modified == modified
+        count: impl FnOnce() -> Usage,
+    ) -> Usage {
+        let modified = Self::settled(dir);
+        let key = (dir.to_path_buf(), cluster_bytes, cap);
+        let mut kept = self.usage.borrow_mut();
+        if let Some(found) = kept.get(&key)
+            && Some(found.modified) == modified
         {
-            return kept.clusters;
+            return found.usage.clone();
         }
-        let clusters = count();
-        self.used.borrow_mut().insert(key, UsedCount { modified, clusters });
-        clusters
+        let usage = count();
+        match modified {
+            Some(modified) => {
+                let usage = usage.clone();
+                kept.insert(key, DirUsage { modified, usage });
+            }
+            None => {
+                kept.remove(&key);
+            }
+        }
+        usage
     }
 
     /// The modification time of the host folder `dir`, if what was read of
