@@ -60,48 +60,73 @@ impl DiskController {
             return Ok((layout.sectors_per_cluster as u32, free, layout.bytes_per_sector as u32, layout.clusters));
         }
         let (spc, bps, total) = d.kind.geometry();
-        let free = match d.kind {
-            // Floppies report real usage so programs can tell whether a save
-            // will fit; hard disks keep reporting an empty fake 80 MB.
-            DriveKind::Floppy => {
-                let cluster_bytes = spc as u64 * bps as u64;
-                let used = d.host_root().map_or(0, |root| Self::used_clusters(root, cluster_bytes, total as u64));
-                total - used.min(total as u64) as u16
-            }
-            DriveKind::HardDisk => total,
-            DriveKind::CdRom => 0,
-            DriveKind::Virtual => 1000,
+        let (spc, bps, total) = (spc as u32, bps as u32, total as u32);
+        let cluster_bytes = spc as u64 * bps as u64;
+        let used = |cap: u64| {
+            let count = |root: &Path| self.used_clusters(root, cluster_bytes, cap);
+            d.host_root().map_or(0, count)
         };
-        Ok((spc as u32, free as u32, bps as u32, total as u32))
+        Ok(match d.kind {
+            // What is on a floppy counts, so programs can tell whether a
+            // save will fit.
+            DriveKind::Floppy => (spc, total - used(total as u64) as u32, bps, total),
+            // A hard disk counts it too, so the free space drops as files
+            // are written: Sierra's installer takes a disk whose free space
+            // doesn't for a compressed one.
+            DriveKind::HardDisk => {
+                let used = used(u64::MAX);
+                let free = hard_disk_free(total, used);
+                // No more clusters than AH=36h holds, so that it doesn't
+                // count in larger clusters (`old_space`) and every 4 KB
+                // written shows.
+                let total = (used + free as u64).min(0xFFFF) as u32;
+                (spc, free, bps, total)
+            }
+            DriveKind::CdRom => (spc, 0, bps, total),
+            DriveKind::Virtual => (spc, 1000, bps, total),
+        })
     }
 
     /// Clusters occupied by the tree under `root` (one per directory plus
-    /// each file rounded up). Stops counting once `cap` is reached so that
+    /// each file rounded up), with folders' counts kept between calls
+    /// (`HostDirCache::usage`). Stops counting once `cap` is reached so that
     /// mounting a huge directory as a floppy stays cheap. Symlinks are not
     /// followed.
-    fn used_clusters(root: &Path, cluster_bytes: u64, cap: u64) -> u64 {
+    fn used_clusters(&self, root: &Path, cluster_bytes: u64, cap: u64) -> u64 {
         let mut used = 0u64;
         let mut pending = vec![root.to_path_buf()];
         while let Some(dir) = pending.pop() {
-            let Ok(read_dir) = hostfs::read_dir(&dir) else {
-                continue;
-            };
-            for entry in read_dir {
-                if entry.name.to_string_lossy().starts_with('.') {
-                    continue;
-                }
-                if entry.is_dir {
-                    used += 1;
-                    pending.push(entry.path);
-                } else if let Some(meta) = entry.metadata().ok().filter(|m| m.is_file()) {
-                    used += meta.len.div_ceil(cluster_bytes);
-                }
-                if used >= cap {
-                    return cap;
-                }
+            let (clusters, dirs) = self.host_dirs.usage(&dir, cluster_bytes, cap, || {
+                Self::dir_usage(&dir, cluster_bytes, cap)
+            });
+            used += clusters + dirs.len() as u64;
+            if used >= cap {
+                return cap;
             }
+            pending.extend(dirs.iter().cloned());
         }
         used
+    }
+
+    /// The clusters the files in the host folder `dir` take, up to `cap`,
+    /// and the folders in it.
+    fn dir_usage(dir: &Path, cluster_bytes: u64, cap: u64) -> Usage {
+        let mut clusters = 0u64;
+        let mut dirs = Vec::new();
+        for entry in hostfs::read_dir(dir).unwrap_or_default() {
+            if entry.name.to_string_lossy().starts_with('.') {
+                continue;
+            }
+            if entry.is_dir {
+                dirs.push(entry.path);
+            } else if let Some(meta) = entry.metadata().ok().filter(|m| m.is_file()) {
+                clusters += meta.len.div_ceil(cluster_bytes);
+            }
+            if clusters + dirs.len() as u64 >= cap {
+                break;
+            }
+        }
+        (clusters, dirs.into())
     }
 
     // INT 21h, AH=43h: Get File Attributes
@@ -577,4 +602,15 @@ impl DiskController {
 
         Ok(valid_entries)
     }
+}
+
+/// The free clusters of a hard disk made of a host folder, `used` of them
+/// in use: what is left of the fake size `step` (80 MB), or of as many
+/// times that as leaves more than half of it free. Free space then drops
+/// cluster by cluster as files are written, and a folder holding more than
+/// 80 MB still has room for a save. Free clusters stay between half a step
+/// and one and a half (10,001 to 30,000), which signed 16-bit numbers hold.
+fn hard_disk_free(step: u32, used: u64) -> u32 {
+    let step = step as u64;
+    (((used + step / 2) / step + 1) * step - used) as u32
 }

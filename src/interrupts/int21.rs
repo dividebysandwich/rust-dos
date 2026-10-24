@@ -2371,7 +2371,14 @@ fn extended_dpb(cpu: &mut Cpu, drive: u8) -> Result<(), u16> {
     let layout = cpu.bus.disk.layout(drive).ok_or(0x000Fu16)?;
     let (free, next_free) = match cpu.bus.disk.fat_volume(drive) {
         Some(volume) => (volume.free_clusters(), volume.next_free()),
-        None => (cpu.bus.disk.get_disk_free_space32(drive + 1).map_or(u32::MAX, |space| space.1), 2),
+        // A hard disk's folder may hold more than its DPB's clusters.
+        None => {
+            let space = cpu.bus.disk.get_disk_free_space32(drive + 1);
+            (
+                space.map_or(u32::MAX, |space| space.1.min(layout.clusters)),
+                2,
+            )
+        }
     };
     let mut dpb = [0u8; SIZE as usize + 2];
     dpb[..2].copy_from_slice(&SIZE.to_le_bytes());
