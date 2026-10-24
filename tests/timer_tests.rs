@@ -276,12 +276,12 @@ fn pic_ocw3_selects_the_in_service_register() {
 #[test]
 fn bios_timer_handler_sends_eoi() {
     let mut cpu = Cpu::new(std::path::PathBuf::from("."));
-    let ticks = cpu.bus.read_32(0x046C);
+    cpu.bus.write_32(0x046C, 0x0001_FFFF);
     cpu.bus.pic.raise(0);
     cpu.bus.pic_acknowledge(0);
     rust_dos::interrupts::handle_hle(&mut cpu, 0x08);
     assert_eq!(cpu.bus.pic.master.isr, 0);
-    assert_eq!(cpu.bus.read_32(0x046C), ticks + 1);
+    assert_eq!(cpu.bus.read_32(0x046C), 0x0002_0000);
 }
 
 #[test]
@@ -1106,4 +1106,20 @@ fn the_tick_count_starts_at_the_time_of_day_and_again_after_a_reboot() {
     rust_dos::boot::reboot_dos(&mut cpu);
     rust_dos::hosttime::fix(None);
     assert_eq!(cpu.bus.read_32(0x046C), (29_730 * PIT_HZ / 65536) as u32);
+}
+
+#[test]
+fn setting_the_time_moves_the_tick_count() {
+    // INT 21h AH=2Dh sets the count with the time, as DOS's clock driver
+    // does: 09:00:00 is 32,400 seconds' worth of ticks.
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    cpu.load_shell();
+    cpu.bus.write_8(0x0470, 1);
+    cpu.set_ax(0x2D00);
+    cpu.set_cx(0x0900);
+    cpu.set_dx(0);
+    rust_dos::interrupts::handle_hle(&mut cpu, 0x21);
+    assert_eq!(cpu.get_al(), 0);
+    assert_eq!(cpu.bus.read_32(0x046C), (32_400 * PIT_HZ / 65536) as u32);
+    assert_eq!(cpu.bus.read_8(0x0470), 0, "the midnight flag");
 }

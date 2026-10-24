@@ -66,7 +66,7 @@ fn slow_hard_disks_take_their_time() {
     let expected = (1024 + 61440) * 1_000_000 / (600 * 1024);
     assert!((expected..expected + 3000).contains(&took), "took {} us, expected {}", took, expected);
     // The timer went on meanwhile.
-    assert!(cpu.bus.read_32(0x046C) - ticks >= 1);
+    assert!(cpu.bus.read_32(0x046C).wrapping_sub(ticks) >= 1);
 }
 
 #[test]

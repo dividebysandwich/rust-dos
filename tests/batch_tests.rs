@@ -264,7 +264,7 @@ fn pause_waits_for_a_key_with_the_clock_running() {
     run_until(&mut cpu, 300, |_| false);
     let ticks = cpu.bus.read_16(0x046C);
     run_until(&mut cpu, 300, |_| false);
-    assert!(cpu.bus.read_16(0x046C) > ticks, "the timer ticks while PAUSE waits");
+    assert_ne!(cpu.bus.read_16(0x046C), ticks, "the timer ticks while PAUSE waits");
     let text = screen(&cpu);
     assert!(text.contains("Press any key to continue . . .") && !text.contains("after"), "{}", text);
 

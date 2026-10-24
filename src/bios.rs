@@ -267,11 +267,15 @@ pub fn install_for_boot(bus: &mut Bus, hard_disks: &[(crate::diskimage::Chs, u64
 /// AH=00h and the programs that read the count take it for the time of
 /// day.
 pub fn set_tick_count(bus: &mut Bus) {
-    let now = bus.cmos.now();
-    let seconds = chrono::Timelike::num_seconds_from_midnight(&now) as u64;
-    let ticks = seconds * crate::timer::PIT_HZ / 65536;
+    let ticks = ticks_since_midnight(bus.cmos.now());
     bus.write_16(0x046C, ticks as u16);
     bus.write_16(0x046E, (ticks >> 16) as u16);
+}
+
+/// The timer ticks from midnight to the time of day of `at`.
+pub fn ticks_since_midnight(at: chrono::NaiveDateTime) -> u32 {
+    let seconds = chrono::Timelike::num_seconds_from_midnight(&at) as u64;
+    (seconds * crate::timer::PIT_HZ / 65536) as u32
 }
 
 /// The offset in F000 of the trap of the HLE vector `vector`.
