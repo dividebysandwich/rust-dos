@@ -2039,6 +2039,44 @@ impl Gen<'_> {
                 );
                 self.loaded_segs |= 1 << seg as u8;
             }
+            Uop::SsLoaded { stack32 } => {
+                // As x86-64's: stop after the instruction where SS's B bit
+                // changed.
+                let at = self.stop_after();
+                let db = crate::cpu::ATTR_DB.trailing_zeros();
+                self.field(Access::Ldr16, 0, seg_field(Seg::SS, layout::SEG_ATTR));
+                if stack32 {
+                    dynasm!(self.ops ; .arch aarch64 ; tbz w0, db, =>at);
+                } else {
+                    dynasm!(self.ops ; .arch aarch64 ; tbnz w0, db, =>at);
+                }
+                if self.ix + 1 < self.data.count() {
+                    dynasm!(self.ops ; .arch aarch64 ; movz w2, 0);
+                    self.field(Access::Str8, 2, layout::IRQ_SHADOW);
+                }
+            }
+            Uop::Lar { sel, val, zf, wide } => {
+                // As x86-64's: `jit_lar`.
+                let fail = self.fail();
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; mov w2, W(r(sel))
+                    ; mov w3, W(r(val))
+                    ; movz w4, wide as u32
+                    ; mov x0, x19
+                    ; mov x1, x20
+                    ; ldr x16, [x20, CTX_LAR as u32]
+                    ; blr x16
+                    ; lsr x9, x0, LAR_EXIT_SHIFT
+                    ; cbz x9, >done
+                    ; mov w0, w9
+                    ; b =>fail
+                    ; done:
+                    ; mov W(r(val)), w0
+                    ; lsr x9, x0, LAR_ZF_SHIFT
+                    ; mov W(r(zf)), w9
+                );
+            }
             Uop::In { size, port, t } => self.port_io(false, size, port, t),
             Uop::Out { size, port, t } => self.port_io(true, size, port, t),
             Uop::LoadFlags { t, size } => {

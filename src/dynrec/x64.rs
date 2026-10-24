@@ -2126,6 +2126,45 @@ impl Gen<'_> {
                 // Its accesses from here on, as if it weren't flat.
                 self.loaded_segs |= 1 << seg as u8;
             }
+            Uop::SsLoaded { stack32 } => {
+                let at = self.stop_after();
+                let (attr, db) = (seg_field(Seg::SS, layout::SEG_ATTR), crate::cpu::ATTR_DB as i16);
+                dynasm!(self.ops ; .arch x64 ; test WORD [rbx + attr], db);
+                if stack32 {
+                    dynasm!(self.ops ; .arch x64 ; jz =>at);
+                } else {
+                    dynasm!(self.ops ; .arch x64 ; jnz =>at);
+                }
+                if self.ix + 1 < self.data.count() {
+                    dynasm!(self.ops ; .arch x64 ; mov BYTE [rbx + layout::IRQ_SHADOW as i32], 0);
+                }
+            }
+            Uop::Lar { sel, val, zf, wide } => {
+                let fail = self.fail();
+                self.save_for_call();
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; mov edx, Rd(r(sel))
+                    ; mov ecx, Rd(r(val))
+                    ; mov r8d, wide as i32
+                    ; mov rsi, r12
+                    ; mov rdi, rbx
+                    ; call QWORD [r12 + CTX_LAR]
+                );
+                self.restore_after_call();
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; mov rcx, rax
+                    ; shr rcx, LAR_EXIT_SHIFT as i8
+                    ; jz >done
+                    ; mov eax, ecx
+                    ; jmp =>fail
+                    ; done:
+                    ; mov Rd(r(val)), eax
+                    ; shr rax, LAR_ZF_SHIFT as i8
+                    ; mov Rd(r(zf)), eax
+                );
+            }
             Uop::In { size, port, t } => self.port_io(false, size, port, t),
             Uop::Out { size, port, t } => self.port_io(true, size, port, t),
             Uop::RepStart { t, count, max } => {

@@ -291,6 +291,7 @@ impl DebugHub {
                 "dev": c.dev,
                 "port": c.port,
                 "load_seg": c.load_seg,
+                "lar": c.lar,
                 "fpu": c.fpu,
             })
         }
