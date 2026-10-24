@@ -106,7 +106,45 @@ fn resize_grow_bounded_by_tail() {
     // The block can grow to its current size + 1 (absorbed free header) +
     // the entire remaining free block.
     let err = mcb::resize(&mut bus, seg, full + 1).expect_err("too big");
-    assert_eq!(err, full);
+    assert_eq!(err, mcb::ResizeError::Insufficient(full));
+}
+
+/// A segment that is not right after an arena header, like the 1248h the
+/// DOS/4GW programs on the Alien Legacy CD free: MS-DOS's `$DEALLOC` says
+/// invalid block (09h), and its `$SETBLOCK` says arena trashed (07h).
+#[test]
+fn free_and_resize_without_arena_header() {
+    use iced_x86::Register;
+    use rust_dos::cpu::{Cpu, CpuFlags};
+    use rust_dos::interrupts::int21;
+
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    let seg = mcb::alloc(&mut cpu.bus, 0x1234, 0x100).unwrap();
+    let inside = seg + 0x10;
+    cpu.bus.write_8(inside as usize * 16 - 16, 0);
+    let chain = |cpu: &mut Cpu| {
+        let chain = walk(&mut cpu.bus);
+        chain
+            .iter()
+            .map(|(s, m)| (*s, m.owner, m.size))
+            .collect::<Vec<_>>()
+    };
+    let before = chain(&mut cpu);
+
+    cpu.set_es(inside);
+    cpu.set_ax(0x4900);
+    int21::handle(&mut cpu);
+    assert!(cpu.get_cpu_flag(CpuFlags::CF));
+    assert_eq!(cpu.get_reg16(Register::AX), mcb::ERR_INVALID_BLOCK as u16);
+
+    cpu.set_bx(0x20);
+    cpu.set_ax(0x4A00);
+    int21::handle(&mut cpu);
+    assert!(cpu.get_cpu_flag(CpuFlags::CF));
+    assert_eq!(cpu.get_reg16(Register::AX), mcb::ERR_MCB_DESTROYED as u16);
+    assert_eq!(cpu.get_reg16(Register::BX), 0x20);
+
+    assert_eq!(chain(&mut cpu), before);
 }
 
 #[test]

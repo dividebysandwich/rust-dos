@@ -1753,19 +1753,22 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
 
         // AH = 4Ah: Resize Memory Block
         //   ES = segment to resize, BX = new size in paragraphs
-        //   On failure: AX = 0008, BX = largest size the block could be grown to.
+        //   On failure: AX = 0008, BX = largest size the block could be grown to,
+        //   or AX = 0007 with BX kept when ES-1 holds no MCB.
         0x4A => {
             let segment = cpu.es();
             let requested_size = cpu.get_reg16(Register::BX);
             match crate::mcb::resize(&mut cpu.bus, segment, requested_size) {
                 Ok(()) => cpu.set_cpu_flag(CpuFlags::CF, false),
-                Err(max) => {
-                    cpu.set_reg16(Register::BX, max);
-                    cpu.set_reg16(Register::AX, crate::mcb::ERR_INSUFFICIENT as u16);
+                Err(err) => {
+                    if let crate::mcb::ResizeError::Insufficient(max) = err {
+                        cpu.set_reg16(Register::BX, max);
+                    }
+                    cpu.set_reg16(Register::AX, err.code() as u16);
                     cpu.set_cpu_flag(CpuFlags::CF, true);
                     cpu.bus.log_string(&format!(
-                        "[DOS] Resize {:04X} to {:04X} paras failed (max {:04X})",
-                        segment, requested_size, max
+                        "[DOS] Resize {:04X} to {:04X} paras failed ({:?})",
+                        segment, requested_size, err
                     ));
                 }
             }

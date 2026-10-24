@@ -577,7 +577,10 @@ pub(super) fn dos_resize(cpu: &mut Cpu, selector: u16, paras: u16) -> std::resul
     if !can_retile(cpu, first, count, dos_selectors(paras)) {
         return Err((DESCRIPTOR_UNAVAILABLE, paras));
     }
-    crate::mcb::resize(&mut cpu.bus, segment, paras).map_err(|largest| (DOS_NO_MEMORY, largest))?;
+    crate::mcb::resize(&mut cpu.bus, segment, paras).map_err(|err| match err {
+        crate::mcb::ResizeError::Insufficient(largest) => (DOS_NO_MEMORY, largest),
+        crate::mcb::ResizeError::McbDestroyed => (err.code() as u16, paras),
+    })?;
     client(cpu).dos_blocks[i].2 = retile(cpu, first, count, (segment as u32) << 4, paras as u32 * 16) as u16;
     Ok(())
 }
