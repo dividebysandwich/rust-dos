@@ -259,7 +259,14 @@ pub fn install_for_boot(bus: &mut Bus, hard_disks: &[(crate::diskimage::Chs, u64
     bus.write_16(0x0482, 0x003E);
     // The hard disks.
     bus.write_8(0x0475, hard_disks.len().min(0xFF) as u8);
-    // The ticks since midnight, from the real-time clock.
+    set_tick_count(bus);
+}
+
+/// Set the timer tick count (0040:006C) to the ticks since midnight by
+/// the real-time clock, as the BIOS's power-on self test does. INT 1Ah
+/// AH=00h and the programs that read the count take it for the time of
+/// day.
+pub fn set_tick_count(bus: &mut Bus) {
     let now = bus.cmos.now();
     let seconds = chrono::Timelike::num_seconds_from_midnight(&now) as u64;
     let ticks = seconds * crate::timer::PIT_HZ / 65536;

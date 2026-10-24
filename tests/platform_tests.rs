@@ -207,12 +207,13 @@ fn bios_timer_calls_int_1ch() {
     cpu.bus.write_16(0x1C * 4 + 2, 0x0000);
     cpu.set_cpu_flag(CpuFlags::IF, true);
     cpu.bus.load_bytes(0x100, &[0xEB, 0xFE]); // JMP $
+    let ticks = cpu.bus.read_32(0x046C);
     cpu.bus.pic.raise(0);
     for _ in 0..20 {
         cpu.step();
     }
     assert_eq!(cpu.bus.read_16(0x0600), 1);
-    assert_eq!(cpu.bus.read_16(0x046C), 1, "BIOS tick count");
+    assert_eq!(cpu.bus.read_32(0x046C), ticks + 1, "BIOS tick count");
     assert_eq!(cpu.bus.pic.master.isr, 0, "EOI sent");
     assert_eq!(cpu.ip(), 0x100, "back in the program");
 }
