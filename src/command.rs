@@ -4,6 +4,7 @@ use crate::mount::{
     MOUNT_USAGE, MountCmd, MountSpec, PathContext, display_host_path, parse_mount_command,
 };
 use crate::video::{print_cp437, print_string};
+use std::fmt::Write;
 
 pub trait ShellCommand {
     /// `args` contains everything after the command name (e.g., "FILE.TXT" for "TYPE FILE.TXT")
@@ -147,16 +148,16 @@ pub struct DirSwitches {
     pub bare: bool,
 }
 
-/// DIR's switches and the path it lists ("" for the current directory).
-/// A switch may follow the path or another switch without a space
-/// (DIR\GAMES/W/P), and /-W, /-P and /-B turn theirs off again, as in
-/// MS-DOS 6.22. The switches it doesn't know are left out.
+/// DIR's switches and the path it lists, the first one given ("" for the
+/// current directory). A switch may follow the path or another switch
+/// without a space (DIR\GAMES/W/P), and /-W, /-P and /-B turn theirs off
+/// again, as in MS-DOS 6.22. The switches it doesn't know are left out.
 pub fn parse_dir_args(args: &str) -> (DirSwitches, &str) {
     let mut switches = DirSwitches::default();
     let mut path = "";
     for token in args.split_whitespace() {
         let mut parts = token.split('/');
-        if let Some(first) = parts.next().filter(|p| !p.is_empty()) {
+        if let Some(first) = parts.next().filter(|p| !p.is_empty() && path.is_empty()) {
             path = first;
         }
         for switch in parts {
@@ -218,6 +219,10 @@ impl ShellCommand for DirCommand {
         if switches.bare {
             let names = entries.iter().filter(|e| e.filename != "." && e.filename != "..");
             lines.extend(names.map(|e| e.filename.clone()));
+            // A directory with nothing in it but . and ..
+            if lines.is_empty() {
+                lines.push("File not found".to_string());
+            }
             show_dir(cpu, lines, switches.pause, continuing);
             return;
         }
@@ -237,7 +242,7 @@ impl ShellCommand for DirCommand {
                 } else {
                     entry.filename.clone()
                 };
-                wide_line.push_str(&format!("{:<width$}", name, width = DIR_WIDE_COLUMN));
+                let _ = write!(wide_line, "{:<width$}", name, width = DIR_WIDE_COLUMN);
                 if (i + 1) % DIR_WIDE_NAMES == 0 || i + 1 == entries.len() {
                     lines.push(wide_line.trim_end().to_string());
                     wide_line.clear();
@@ -285,13 +290,11 @@ pub struct DirPages {
     /// The directory listed, for the "(continuing ...)" line that begins
     /// each screenful after the first; None for /B.
     pub continuing: Option<String>,
-    /// Lines on the screenful being shown.
-    pub shown: usize,
 }
 
-crate::state_fields!(DirPages { lines, continuing, shown });
+crate::state_fields!(DirPages { lines, continuing });
 
-const DIR_PAUSE_PROMPT: &str = "Press any key to continue . . .";
+const PAUSE_PROMPT: &str = "Press any key to continue . . .";
 
 /// Print DIR's lines: all of them, or with /P (unless the output goes to a
 /// file) a screenful, and the shell waits for a key for the next.
@@ -302,43 +305,50 @@ fn show_dir(cpu: &mut Cpu, lines: Vec<String>, pause: bool, continuing: Option<S
         }
         return;
     }
-    let pages = DirPages { lines, continuing, shown: 0 };
-    if let Some(rest) = dir_page(cpu, pages) {
+    let pages = DirPages { lines, continuing };
+    if let Some(rest) = dir_page(cpu, pages, 0) {
         crate::shell::enter_wait(cpu, crate::shell::ShellWait::Dir(rest));
     }
 }
 
-/// Print the lines that fit on the screenful: two rows fewer than the
-/// text mode has, the second last for "Press any key to continue . . .",
-/// which is printed if lines are left. What is left to show, if anything.
-fn dir_page(cpu: &mut Cpu, mut pages: DirPages) -> Option<DirPages> {
-    let per_page = crate::filter_commands::screen_rows(cpu).saturating_sub(2).max(1);
-    let mut lines = std::mem::take(&mut pages.lines).into_iter();
-    for line in lines.by_ref() {
-        print_string(cpu, &format!("{}\r\n", line));
-        pages.shown += 1;
-        if pages.shown >= per_page {
+/// Print the lines that fit on the screenful below the `used` rows: two
+/// rows fewer than the text mode has, the second last for "Press any key
+/// to continue . . .", which is printed if lines are left. A line as long
+/// as the row wraps, as MORE counts it. What is left to show, if anything.
+fn dir_page(cpu: &mut Cpu, mut pages: DirPages, mut used: usize) -> Option<DirPages> {
+    let rows = crate::filter_commands::screen_rows(cpu)
+        .saturating_sub(2)
+        .max(1);
+    let cols = crate::filter_commands::screen_cols(cpu);
+    let mut shown = 0;
+    for line in &pages.lines {
+        let height = line.len() / cols + 1;
+        if shown > 0 && used + height > rows {
             break;
         }
+        print_string(cpu, &format!("{}\r\n", line));
+        used += height;
+        shown += 1;
     }
-    pages.lines = lines.collect();
+    pages.lines.drain(..shown);
     if pages.lines.is_empty() {
         return None;
     }
-    print_string(cpu, DIR_PAUSE_PROMPT);
-    pages.shown = 0;
+    print_string(cpu, PAUSE_PROMPT);
     Some(pages)
 }
 
 /// A key while DIR /P waits: the next screenful, after the line saying
 /// which directory it continues. What is left after it, if anything.
-pub fn dir_key(cpu: &mut Cpu, mut pages: DirPages) -> Option<DirPages> {
+pub fn dir_key(cpu: &mut Cpu, pages: DirPages) -> Option<DirPages> {
     print_string(cpu, "\r\n");
+    let mut used = 0;
     if let Some(directory) = &pages.continuing {
-        print_string(cpu, &format!("(continuing {})\r\n", directory));
-        pages.shown = 1;
+        let line = format!("(continuing {})", directory);
+        print_string(cpu, &format!("{}\r\n", line));
+        used = line.len() / crate::filter_commands::screen_cols(cpu) + 1;
     }
-    dir_page(cpu, pages)
+    dir_page(cpu, pages, used)
 }
 
 /// The drive and search spec that DIR and LS list for a path: everything
@@ -830,7 +840,7 @@ fn file_exists(cpu: &Cpu, name: &str) -> bool {
 struct PauseCommand;
 impl ShellCommand for PauseCommand {
     fn execute(&self, cpu: &mut Cpu, _args: &str) {
-        print_string(cpu, "Press any key to continue . . .");
+        print_string(cpu, PAUSE_PROMPT);
         crate::shell::enter_wait(cpu, crate::shell::ShellWait::Pause);
     }
 }

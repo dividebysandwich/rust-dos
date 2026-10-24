@@ -95,7 +95,7 @@ fn show_page(cpu: &mut Cpu, lines: Vec<Vec<u8>>) -> Option<Vec<Vec<u8>>> {
         return None;
     }
     let rows = screen_rows(cpu);
-    let cols = (cpu.bus.read_16(0x044A) as usize).max(1);
+    let cols = screen_cols(cpu);
     let mut used = 0;
     let mut shown = 0;
     for line in &lines {
@@ -119,6 +119,11 @@ fn show_page(cpu: &mut Cpu, lines: Vec<Vec<u8>>) -> Option<Vec<Vec<u8>>> {
 pub(crate) fn screen_rows(cpu: &Cpu) -> usize {
     let rows = cpu.bus.read_8(0x0484) as usize + 1;
     if rows < 2 { 25 } else { rows }
+}
+
+/// The columns of the text mode, as the BIOS keeps them.
+pub(crate) fn screen_cols(cpu: &Cpu) -> usize {
+    (cpu.bus.read_16(0x044A) as usize).max(1)
 }
 
 /// A key while MORE waits: the "-- More --" is taken off, and the next

@@ -1,6 +1,6 @@
 use rust_dos::command::{CommandDispatcher, DirSwitches, parse_dir_args, split_command};
 use rust_dos::cpu::Cpu;
-use rust_dos::shell::{ShellWait, take_key};
+use rust_dos::shell::{ShellWait, feed_wait, take_key};
 use rust_dos::disk::{DriveKind, MountOptions};
 use std::fs;
 use std::path::PathBuf;
@@ -325,6 +325,51 @@ fn dir_wide_pauses_by_the_text_modes_rows() {
     assert_eq!(lines[1], "(continuing D:\\MANY)");
     assert_eq!(lines.len(), 6, "{}", out);
     assert!(lines[4].ends_with(" bytes"), "{}", out);
+}
+
+#[test]
+fn dir_pauses_by_the_rows_its_lines_wrap_to() {
+    let mut cpu = many_files("dir_pause_40");
+    // Every line: the first screenful on 80 columns, and the rest.
+    let first = run(&mut cpu, "DIR D:\\MANY /P");
+    let Some(ShellWait::Dir(rest)) = cpu.shell_wait.take() else {
+        panic!("no wait")
+    };
+    let rest = rest.lines.iter().map(String::as_str);
+    let all: Vec<&str> = first.lines().take(23).chain(rest).collect();
+    // 40 columns: a line longer than 39 takes two rows of the 23 a
+    // screenful has.
+    cpu.bus.write_16(0x044A, 40);
+    run(&mut cpu, "DIR D:\\MANY /P");
+    let Some(ShellWait::Dir(pages)) = &cpu.shell_wait else {
+        panic!("no wait")
+    };
+    let shown = all.len() - pages.lines.len();
+    let rows = |lines: &[&str]| lines.iter().map(|l| l.len() / 40 + 1).sum::<usize>();
+    assert!(rows(&all[..shown]) <= 23, "{:?}", &all[..shown]);
+    assert!(rows(&all[..shown + 1]) > 23, "{:?}", &all[..shown]);
+    assert!(shown < 23, "{}", shown);
+}
+
+#[test]
+fn dir_pause_takes_redirected_input_to_its_end() {
+    let mut cpu = many_files("dir_pause_input");
+    run(&mut cpu, "DIR D:\\MANY /P");
+    clear_screen(&mut cpu);
+    // A key from the input, then its end: both screens after the first.
+    cpu.bus.write_8(0x0484, 9);
+    feed_wait(&mut cpu, b"x");
+    assert!(cpu.shell_wait.is_none());
+    let out = screen(&cpu);
+    assert!(out.contains("Press any key to continue . . ."), "{}", out);
+    assert!(out.trim_end().ends_with(" bytes free"), "{}", out);
+}
+
+#[test]
+fn dir_bare_of_an_empty_directory_finds_nothing() {
+    let mut cpu = many_files("dir_bare_empty");
+    let out = run(&mut cpu, "DIR D:\\MANY\\SUB /B");
+    assert_eq!(out.trim_end(), "File not found");
 }
 
 #[test]
