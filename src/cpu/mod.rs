@@ -613,9 +613,10 @@ pub struct Cpu {
     /// `pm_latched`, and into save states.
     pub os_idles: bool,
     /// REP MOVS and STOS do the iterations that stay in plain RAM at once,
-    /// and so does REP INSW or INSD of an IDE hard disk's block into it
-    /// (`instructions::string`). Off, they go one at a time, which tests
-    /// compare them with.
+    /// REPE and REPNE CMPS and SCAS skip those that go on to the next, and
+    /// REP INSW or INSD of an IDE hard disk's block into it goes at once
+    /// too (`instructions::string`). Off, they go one at a time, which
+    /// tests compare them with.
     pub string_bulk: bool,
     /// The FPU adds and subtracts doubles as the host does, not 80 bits
     /// (`fpu=fast`, not exact); set with `set_fpu_fast`.

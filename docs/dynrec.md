@@ -269,7 +269,9 @@ Each instruction becomes one of two things:
 - **A call of its interpreter handler.** Everything else runs through
   `jit_fallback`, which does what `exec::execute_at` does. Every
   instruction works in a block from the start; translating more forms only
-  makes them faster.
+  makes them faster. REPE and REPNE CMPS and SCAS are among them: their
+  handler compares the elements in plain RAM at once (see
+  `instructions::string`).
 
 ### The FPU
 
