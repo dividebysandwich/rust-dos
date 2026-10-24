@@ -159,7 +159,7 @@ fn free_space_allocation_info_and_dpb() {
     int21(&mut cpu, 0x36);
     assert_eq!((cpu.bx(), cpu.cx()), (0, 2048));
 
-    cpu.set_reg8(Register::DL, 3); // C: unchanged fake 80 MB
+    cpu.set_reg8(Register::DL, 3); // C: empty, the fake 80 MB
     int21(&mut cpu, 0x36);
     assert_eq!((cpu.ax(), cpu.bx(), cpu.cx(), cpu.dx()), (8, 20000, 512, 20000));
 
@@ -192,6 +192,70 @@ fn free_space_allocation_info_and_dpb() {
         int21(&mut cpu, 0x32);
         assert_eq!(cpu.get_reg8(Register::AL), 0xFF, "DL={}", dl);
     }
+}
+
+/// AH=36h for drive `dl`: (sectors per cluster, free clusters, bytes per
+/// sector, total clusters).
+fn disk_free(cpu: &mut Cpu, dl: u8) -> (u16, u16, u16, u16) {
+    cpu.set_reg8(Register::DL, dl);
+    int21(cpu, 0x36);
+    (cpu.ax(), cpu.bx(), cpu.cx(), cpu.dx())
+}
+
+/// Sierra's installer (Install/Setup Program 3.745) writes 16 KB to a test
+/// file on the drive it installs to and calls a drive whose free space
+/// doesn't drop compressed.
+#[test]
+fn hard_disk_free_space_drops_as_files_are_written() {
+    let base = scratch("hd_space", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    assert_eq!(disk_free(&mut cpu, 3), (8, 20000, 512, 20000));
+
+    set_dsdx_string(&mut cpu, "C:\\ISCMPRSD.$$$");
+    cpu.set_cx(0);
+    int21(&mut cpu, 0x3C);
+    assert!(!cf(&cpu));
+    let handle = cpu.ax();
+    for _ in 0..4 {
+        cpu.set_bx(handle);
+        cpu.set_cx(0x1000);
+        int21(&mut cpu, 0x40);
+        assert_eq!((cf(&cpu), cpu.ax()), (false, 0x1000));
+    }
+    cpu.set_bx(handle);
+    int21(&mut cpu, 0x3E);
+    assert!(!cf(&cpu));
+    assert_eq!(disk_free(&mut cpu, 3), (8, 19996, 512, 20000));
+
+    set_dsdx_string(&mut cpu, "C:\\ISCMPRSD.$$$");
+    int21(&mut cpu, 0x41);
+    assert!(!cf(&cpu));
+    assert_eq!(disk_free(&mut cpu, 3), (8, 20000, 512, 20000));
+}
+
+/// A folder holding more than the fake 80 MB still has room: the disk
+/// grows in steps of 80 MB, and AX=7303h tells the same.
+#[test]
+fn hard_disk_grows_past_what_its_folder_holds() {
+    let base = scratch("hd_grow", &["c"]);
+    // 60 MB, 15,000 clusters of 4 KB; sparse where the host allows.
+    let file = fs::File::create(base.join("c/BIG.DAT")).unwrap();
+    file.set_len(15_000 * 4096).unwrap();
+    drop(file);
+    let mut cpu = Cpu::new(base.join("c"));
+    assert_eq!(disk_free(&mut cpu, 3), (8, 25000, 512, 40000));
+
+    rust_dos::dos_data::set_version(&mut cpu.bus, rust_dos::config::DosVersion::new(7, 10));
+    set_dsdx_string(&mut cpu, "C:\\");
+    cpu.set_es(0x3000);
+    cpu.set_di(0);
+    cpu.set_cx(0x2C);
+    cpu.set_reg8(Register::AL, 0x03);
+    int21(&mut cpu, 0x73);
+    assert!(!cf(&cpu));
+    let dword = |i: usize| cpu.bus.read_32(0x30000 + 4 + 4 * i);
+    // Sectors per cluster, bytes per sector, free and total clusters.
+    assert_eq!((dword(0), dword(1), dword(2), dword(3)), (8, 512, 25000, 40000));
 }
 
 #[test]

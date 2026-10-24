@@ -60,19 +60,33 @@ impl DiskController {
             return Ok((layout.sectors_per_cluster as u32, free, layout.bytes_per_sector as u32, layout.clusters));
         }
         let (spc, bps, total) = d.kind.geometry();
-        let free = match d.kind {
-            // Floppies report real usage so programs can tell whether a save
-            // will fit; hard disks keep reporting an empty fake 80 MB.
-            DriveKind::Floppy => {
-                let cluster_bytes = spc as u64 * bps as u64;
-                let used = d.host_root().map_or(0, |root| Self::used_clusters(root, cluster_bytes, total as u64));
-                total - used.min(total as u64) as u16
-            }
-            DriveKind::HardDisk => total,
-            DriveKind::CdRom => 0,
-            DriveKind::Virtual => 1000,
+        let (spc, bps, total) = (spc as u32, bps as u32, total as u32);
+        let cluster_bytes = spc as u64 * bps as u64;
+        let used = |cap: u32| {
+            let count = |root: &Path| {
+                self.host_dirs.used(root, cluster_bytes, cap as u64, || {
+                    Self::used_clusters(root, cluster_bytes, cap as u64)
+                })
+            };
+            d.host_root().map_or(0, count) as u32
         };
-        Ok((spc as u32, free as u32, bps as u32, total as u32))
+        Ok(match d.kind {
+            // What is on a floppy counts, so programs can tell whether a
+            // save will fit.
+            DriveKind::Floppy => (spc, total - used(total), bps, total),
+            // A hard disk counts it too, so the free space drops as files
+            // are written: Sierra's installer takes a disk whose free space
+            // doesn't for a compressed one.
+            // Counting stops at 2 GB, past which AH=36h shows no more
+            // (`old_space`).
+            DriveKind::HardDisk => {
+                let used = used((0x7FFF_8000 / cluster_bytes) as u32);
+                let total = hard_disk_clusters(total, used);
+                (spc, total - used, bps, total)
+            }
+            DriveKind::CdRom => (spc, 0, bps, total),
+            DriveKind::Virtual => (spc, 1000, bps, total),
+        })
     }
 
     /// Clusters occupied by the tree under `root` (one per directory plus
@@ -577,4 +591,14 @@ impl DiskController {
 
         Ok(valid_entries)
     }
+}
+
+/// The clusters of a hard disk made of a host folder, `used` of them in
+/// use: the fake size `step` (80 MB), or as many times that as leaves more
+/// than half of it free. Free space then drops cluster by cluster as files
+/// are written, and a folder holding more than 80 MB still has room for a
+/// save. Free clusters stay between half a step and one and a half (10,001
+/// to 30,000), which signed 16-bit numbers hold.
+fn hard_disk_clusters(step: u32, used: u32) -> u32 {
+    ((used + step / 2) / step + 1) * step
 }
