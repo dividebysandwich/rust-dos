@@ -2765,7 +2765,7 @@ impl Bus {
                 self.vga.mark_dirty_full();
             }
             let screen = crate::autospeed::screen_bytes(self);
-            self.activity.set_screen(screen);
+            self.activity.set_screen(screen, crate::autospeed::linear_screen(self));
             self.settle_register_mode();
             self.vga.latch_start_address();
             if self.vbe.latched_start != self.vbe.start {

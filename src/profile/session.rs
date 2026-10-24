@@ -67,7 +67,15 @@ impl Totals {
             decode_misses: cpu.decode_cache.misses,
             dynrec: cpu.dynrec.counts(),
             calls: cpu.dynrec.calls().cloned(),
-            activity: [a.bursts, a.copies, a.flips, a.polls, a.status_reads, a.video_bytes, a.io_bytes],
+            activity: [
+                a.bursts,
+                a.copies,
+                a.flips,
+                a.polls,
+                a.status_reads,
+                a.video_bytes,
+                a.io_bytes,
+            ],
         }
     }
 }

@@ -1037,10 +1037,13 @@ window does (`auto`, `auto 5000`, `max` or a number); `/api/status` has
 `cycles_per_ms`, the speed now. `auto` (the default) picks the speed from
 what the program does, and `/api/status` → `activity` has its counts since
 start: `bursts` (writes to video memory the size of a frame, the frames a
-program copies there), `flips` (display start changes), `polls` (key
-checks that found nothing, idle calls) and `status_reads` (port 3DAh),
-with `emulated_ns` to make rates of them. Sample it twice and divide:
-a game's frame rate at a few fixed speeds shows where it stops growing.
+program copies there), `copies` (smaller bursts that reach across at
+least half the screen, frames copied as what changed; counted as frames
+for protected-mode programs only), `flips` (display start changes),
+`polls` (key checks that found nothing, idle calls) and `status_reads`
+(port 3DAh), with `emulated_ns` to make rates of them. Sample it twice
+and divide: a game's frame rate at a few fixed speeds shows where it
+stops growing.
 Start the emulator with `RUST_DOS_AUTO_TRACE=1` to have every measurement
 and the speed it chose printed to stderr.
 
