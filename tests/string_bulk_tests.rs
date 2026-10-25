@@ -1,6 +1,7 @@
 //! REP MOVS and REP STOS do the iterations that stay in plain RAM at once
-//! (`instructions::string`, `Cpu::string_bulk`), and so do REP INSW and
-//! INSD of an IDE hard disk's block. Each case here runs on a machine with
+//! (`instructions::string`, `Cpu::string_bulk`), REPE and REPNE CMPS and
+//! SCAS skip those that go on to the next, and REP INSW and INSD of an IDE
+//! hard disk's block go at once too. Each case here runs on a machine with
 //! that and one without, in lockstep (tests/dyndiff): they must agree
 //! after every batch, overlapping moves, the direction flag, page and
 //! segment ends, faults part of the way and video memory included.
@@ -394,4 +395,257 @@ fn rep_ins_from_an_ide_disk_is_the_iterations_one_at_a_time() {
     let io = |rig: &Rig| rig.cpu.bus.activity.io_bytes;
     assert_eq!(io(&a), io(&b));
     assert_eq!(io(&b), 16 * 512);
+}
+
+/// Where `compared` keeps what each compare or scan left.
+const OUT: u32 = 0x500000;
+
+/// After a compare or scan: ECX, ESI, EDI and the flags into the next 16
+/// bytes at EBX.
+fn compared(a: &mut CodeAssembler) -> Result<(), IcedError> {
+    a.mov(dword_ptr(ebx), ecx)?;
+    a.mov(dword_ptr(ebx + 4), esi)?;
+    a.mov(dword_ptr(ebx + 8), edi)?;
+    a.pushfd()?;
+    a.pop(eax)?;
+    a.mov(dword_ptr(ebx + 12), eax)?;
+    a.add(ebx, 16)
+}
+
+#[test]
+fn compares_and_scans_in_ram_are_the_iterations_one_at_a_time() {
+    let (mut a, mut b) = pair(|rig| {
+        pattern(rig, 0x100000, 0x3000);
+        pattern(rig, 0x200000, 0x3000);
+        // Differences: the 5th dword, a word across the first page's end,
+        // a byte in the second page and the last byte.
+        for at in [0x200010, 0x200FFF, 0x201801, 0x202FFF] {
+            let x = rig.cpu.bus.read_8(at);
+            rig.cpu.bus.write_8(at, !x);
+        }
+        let code = asm32(CODE, |a| {
+            a.mov(ebx, OUT)?;
+            a.cld()?;
+            // REPE CMPS up: stopping at a difference, going on from it
+            // across pages to the next ones, and running out where all
+            // are the same or only the last one differs.
+            for (src, count, size) in [
+                (0x100000u32, 0x20u32, 4u8),
+                (0x100014, 0x800, 4),
+                (0x101000, 0x400, 2),
+                (0x101802, 0x7FE, 1),
+                (0x100100, 0x200, 1),
+                (0x102F00, 0x80, 2),
+                (0x102F00, 0x40, 4),
+            ] {
+                a.mov(esi, src)?;
+                a.mov(edi, src + 0x100000)?;
+                a.mov(ecx, count)?;
+                match size {
+                    1 => a.repe().cmpsb()?,
+                    2 => a.repe().cmpsw()?,
+                    _ => a.repe().cmpsd()?,
+                }
+                compared(a)?;
+            }
+            // REPNE CMPSB against zeros: up to the first zero byte.
+            a.mov(esi, 0x100000u32)?;
+            a.mov(edi, 0x400000u32)?;
+            a.mov(ecx, 0x1000u32)?;
+            a.repne().cmpsb()?;
+            compared(a)?;
+            // REPE SCAS over zeros, and REPNE SCAS for a value in the
+            // pattern, of each size, up.
+            for (value, count, size, repe) in [
+                (0u32, 0x900u32, 4u8, true),
+                (0, 0x900, 2, true),
+                (0, 0x900, 1, true),
+                (0x1A, 0x2000, 1, false),
+                (0x0A03, 0x1000, 2, false),
+                (0x1234_5678, 0x800, 4, false),
+            ] {
+                a.mov(edi, if repe { 0x400F00u32 } else { 0x100003 })?;
+                a.mov(eax, value)?;
+                a.mov(ecx, count)?;
+                match (size, repe) {
+                    (1, true) => a.repe().scasb()?,
+                    (2, true) => a.repe().scasw()?,
+                    (_, true) => a.repe().scasd()?,
+                    (1, false) => a.repne().scasb()?,
+                    (2, false) => a.repne().scasw()?,
+                    _ => a.repne().scasd()?,
+                }
+                compared(a)?;
+            }
+            // Down: REPE CMPSD to the difference in the second page, and
+            // REPNE SCASB over a page's start.
+            a.std()?;
+            a.mov(esi, 0x101FFCu32)?;
+            a.mov(edi, 0x201FFCu32)?;
+            a.mov(ecx, 0x500u32)?;
+            a.repe().cmpsd()?;
+            compared(a)?;
+            a.mov(edi, 0x100F80u32)?;
+            a.mov(eax, 0xFFu32)?;
+            a.mov(ecx, 0x300u32)?;
+            a.repne().scasb()?;
+            compared(a)?;
+            a.cld()?;
+            // Into the video memory.
+            a.mov(esi, 0x9FF00u32)?;
+            a.mov(edi, 0xA0000u32)?;
+            a.mov(ecx, 0x100u32)?;
+            a.repe().cmpsd()?;
+            compared(a)?;
+            // 16-bit addressing, SI and DI wrapping around at 64 KB
+            // (ADDR16 REPE CMPSD, REPE SCASW).
+            a.mov(esi, 0x1234_FFF0u32)?;
+            a.mov(edi, 0x5678_FFF0u32)?;
+            a.mov(ecx, 0xABCD_0040u32)?;
+            a.db(&[0x67, 0xF3, 0xA7])?;
+            compared(a)?;
+            a.mov(edi, 0xFFF8u32)?;
+            a.mov(eax, 0u32)?;
+            a.mov(ecx, 0x100u32)?;
+            a.db(&[0x67, 0xF3, 0x66, 0xAF])?;
+            compared(a)?;
+            a.hlt()
+        });
+        rig.load(CODE, &code);
+    });
+    run(&mut a, &mut b);
+    // The first compare stopped after the 5th dword, with ZF clear.
+    assert_eq!((b.read32(OUT), b.read32(OUT + 4)), (0x20 - 5, 0x100014));
+    assert_eq!(b.read32(OUT + 12) & 0x40, 0);
+}
+
+#[test]
+fn a_frame_diff_loop_on_the_recompiler_is_the_iterations_one_at_a_time() {
+    // Alien Legacy's copy of what changed in a 320x200 frame: REPE CMPSD
+    // of each row of the new frame (DS) with the last one (ES), each
+    // dword that differs then copied into the last frame and the screen
+    // (FS), at the same offsets. Twice: the second pass finds nothing.
+    rust_dos::hosttime::fix(
+        NaiveDate::from_ymd_opt(1995, 4, 11)
+            .unwrap()
+            .and_hms_opt(12, 34, 56),
+    );
+    let (mut a, mut b) = (Rig::new(), Rig::new());
+    a.cpu.string_bulk = false;
+    a.cpu.core = CoreMode::Normal;
+    b.cpu.core = CoreMode::Dynamic;
+    let (last, screen) = (FREE, FREE + 8);
+    for rig in [&mut a, &mut b] {
+        rig.set_gdt(last, seg_desc(0x20000, 0xFFFFF, DATA_R0, G32));
+        rig.set_gdt(screen, seg_desc(0x40000, 0xFFFFF, DATA_R0, G32));
+        pattern(rig, 0x100000, 320 * 200);
+        pattern(rig, 0x120000, 320 * 200);
+        for i in (0..320 * 200).step_by(37 * 4 + 1) {
+            let x = rig.cpu.bus.read_8(0x120000 + i);
+            rig.cpu.bus.write_8(0x120000 + i, x ^ 0x5A);
+        }
+        let code = asm32(CODE, |a| {
+            let (mut pass, mut row, mut diff) =
+                (a.create_label(), a.create_label(), a.create_label());
+            a.mov(ax, last as u32)?;
+            a.mov(es, ax)?;
+            a.mov(ax, screen as u32)?;
+            a.mov(fs, ax)?;
+            a.cld()?;
+            a.mov(ebp, 80u32)?;
+            a.xor(ebx, ebx)?;
+            a.push(2u32)?;
+            a.set_label(&mut pass)?;
+            a.mov(esi, 0x100000u32)?;
+            a.mov(edi, esi)?;
+            a.mov(edx, 200u32)?;
+            a.set_label(&mut row)?;
+            a.mov(ecx, ebp)?;
+            a.set_label(&mut diff)?;
+            a.repe().cmpsd()?;
+            a.mov(eax, dword_ptr(esi - 4))?;
+            a.mov(dword_ptr(esi - 4).es(), eax)?;
+            a.mov(dword_ptr(esi - 4).fs(), eax)?;
+            a.cmp(ecx, 0)?;
+            a.jne(diff)?;
+            a.add(esi, ebx)?;
+            a.add(edi, ebx)?;
+            a.dec(edx)?;
+            a.jnz(row)?;
+            a.dec(dword_ptr(esp))?;
+            a.jnz(pass)?;
+            a.hlt()
+        });
+        rig.load(CODE, &code);
+        rig.enter_pm();
+    }
+    lockstep_with(&mut a.cpu, &mut b.cpu, 4000, 997, true, |_, _| {}).unwrap();
+    // The last frame is the new one, and the screen has the dwords that
+    // differed (and each row's last).
+    assert_eq!(
+        b.read32(0x120000 + 37 * 4 * 3),
+        b.read32(0x100000 + 37 * 4 * 3)
+    );
+    assert_eq!(b.read32(0x140000 + 37 * 4), b.read32(0x100000 + 37 * 4));
+    assert_eq!(b.read32(0x140000 + 316), b.read32(0x100000 + 316));
+    assert_eq!(b.read32(0x140000 + 8), 0);
+}
+
+#[test]
+fn a_scan_into_a_segment_limit_faults_where_it_is_reached() {
+    let (mut a, mut b) = pair(|rig| {
+        // ES: 8 KB of zeros at 60000h.
+        rig.set_gdt(FREE, seg_desc(0x60000, 0x1FFF, DATA_R0, 0x4));
+        rig.record(GP);
+        let code = asm32(CODE, |a| {
+            a.mov(ax, FREE as u32)?;
+            a.mov(es, ax)?;
+            a.cld()?;
+            a.mov(edi, 0x1F00u32)?;
+            a.mov(ecx, 0x100u32)?;
+            a.xor(eax, eax)?;
+            a.repe().scasd()?;
+            a.hlt()
+        });
+        rig.load(CODE, &code);
+    });
+    run(&mut a, &mut b);
+    let (vector, _) = b.recorded();
+    assert_eq!(vector, GP as u32);
+}
+
+#[test]
+fn a_paged_compare_reads_the_mapped_pages_and_faults_at_a_missing_one() {
+    let (mut a, mut b) = pair(|rig| {
+        // 54000h mapped to 58000h, 55000h missing.
+        let (dir, table) = (0x80000u32, 0x81000u32);
+        rig.write32(dir, table | 3);
+        for i in 0..1024u32 {
+            rig.write32(table + 4 * i, (i << 12) | 3);
+        }
+        rig.write32(table + 0x54 * 4, 0x58000 | 3);
+        rig.write32(table + 0x55 * 4, 0);
+        rig.record(PF);
+        pattern(rig, 0x53000, 0x1000);
+        pattern(rig, 0x58000, 0x1000);
+        let code = asm32(CODE, |a| {
+            a.mov(eax, dir)?;
+            a.mov(cr3, eax)?;
+            a.mov(eax, cr0)?;
+            a.or(eax, 0x8000_0000u32)?;
+            a.mov(cr0, eax)?;
+            a.cld()?;
+            // The same bytes in both pages, then into the missing one.
+            a.mov(esi, 0x53000u32)?;
+            a.mov(edi, 0x54000u32)?;
+            a.mov(ecx, 0x500u32)?;
+            a.repe().cmpsd()?;
+            a.hlt()
+        });
+        rig.load(CODE, &code);
+    });
+    run(&mut a, &mut b);
+    let (vector, _) = b.recorded();
+    assert_eq!(vector, PF as u32);
+    assert_eq!(b.cpu.cr2, 0x55000);
 }

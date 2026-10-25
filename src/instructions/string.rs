@@ -59,6 +59,13 @@ impl Addr {
         let next = full.wrapping_add(self.delta);
         cpu.set_reg(reg, (full & !self.mask) | (next & self.mask));
     }
+
+    /// Step SI/ESI or DI/EDI by `n` elements, as `n` steps do.
+    fn skip(&self, cpu: &mut Cpu, reg: Register, n: u32) {
+        let full = cpu.reg(reg);
+        let next = full.wrapping_add(self.delta.wrapping_mul(n));
+        cpu.set_reg(reg, (full & !self.mask) | (next & self.mask));
+    }
 }
 
 /// How many of `max` elements of `size` bytes an access at `seg:off` on
@@ -156,12 +163,97 @@ fn bulk(cpu: &mut Cpu, op: StrOp, size: u8, a: &Addr, count: u32) -> CpuResult<B
             }
         }
     }
-    let moved = a.delta.wrapping_mul(n);
-    for reg in if op == StrOp::Movs { &[Register::ESI, Register::EDI][..] } else { &[Register::EDI][..] } {
-        let full = cpu.reg(*reg);
-        cpu.set_reg(*reg, (full & !a.mask) | (full.wrapping_add(moved) & a.mask));
+    if op == StrOp::Movs {
+        a.skip(cpu, Register::ESI, n);
     }
+    a.skip(cpu, Register::EDI, n);
     Ok(Bulk::Done(n))
+}
+
+/// How many of the iterations of a REPE or REPNE CMPS or SCAS from here
+/// on, in plain RAM in the pages and segment limits their first elements
+/// are in, go on to the next (REPE: the elements equal, REPNE: not equal),
+/// skipped at once: they change only the indexes, the count and the
+/// flags, which the iteration after them sets again. They are the
+/// iterations one at a time would do, with the first one's checks and
+/// page walks, as in `bulk`. The last element of the run is left for an
+/// iteration of its own, which sets the flags. None where the elements
+/// aren't in plain RAM: the rest go one at a time.
+fn scan(
+    cpu: &mut Cpu,
+    op: StrOp,
+    size: u8,
+    a: &Addr,
+    count: u32,
+    repe: bool,
+) -> CpuResult<Option<u32>> {
+    let backward = a.delta != size as u32;
+    let bytes = size as u32;
+    let cmps = op == StrOp::Cmps;
+    let di = a.get(cpu, Register::EDI);
+    let mut n = span(cpu, Seg::ES, di, bytes, count, backward, a.mask, false);
+    let si = a.get(cpu, Register::ESI);
+    if cmps {
+        n = span(cpu, a.src_seg, si, bytes, n, backward, a.mask, false);
+    }
+    if n < 2 {
+        return Ok(Some(0));
+    }
+    let len = (n * bytes) as usize;
+    let range = |phys: u32| {
+        if backward {
+            phys as usize + bytes as usize - len
+        } else {
+            phys as usize
+        }
+    };
+    // The source's checks before the destination's, as an iteration's.
+    let src = cmps
+        .then(|| cpu.mem_ref(a.src_seg, si, size, Access::Read))
+        .transpose()?;
+    let dst = cpu.mem_ref(Seg::ES, di, size, Access::Read)?;
+    let plain = |phys: u32| cpu.bus.is_plain_ram(range(phys), len);
+    if !plain(dst.phys) || src.is_some_and(|s| !plain(s.phys)) {
+        return Ok(None);
+    }
+    let bus = &cpu.bus;
+    let ram = bus.ram();
+    let at = |p: usize| match size {
+        1 => bus.ram_read::<1>(p),
+        2 => bus.ram_read::<2>(p),
+        _ => bus.ram_read::<4>(p),
+    };
+    let value = cpu.reg(accumulator(size));
+    let mut k = 0;
+    if let (Some(s), true, false) = (src, repe, backward) {
+        // REPE CMPS going up, the common case (a frame compared with the
+        // last one): the elements before the first byte that differs.
+        let x = &ram[s.phys as usize..][..len];
+        let y = &ram[dst.phys as usize..][..len];
+        let same = if x == y {
+            len
+        } else {
+            x.iter().zip(y).position(|(p, q)| p != q).unwrap_or(len)
+        };
+        k = (same as u32 / bytes).min(n - 1);
+    }
+    while k < n - 1 {
+        let step = a.delta.wrapping_mul(k);
+        let y = at(dst.phys.wrapping_add(step) as usize);
+        let x = match src {
+            Some(s) => at(s.phys.wrapping_add(step) as usize),
+            None => value,
+        };
+        if (x == y) != repe {
+            break;
+        }
+        k += 1;
+    }
+    if cmps {
+        a.skip(cpu, Register::ESI, k);
+    }
+    a.skip(cpu, Register::EDI, k);
+    Ok(Some(k))
 }
 
 /// The iterations of a REP INSW or INSD going up from here on that read
@@ -187,10 +279,7 @@ fn ins_run(cpu: &mut Cpu, id: ChannelId, size: u8, a: &Addr, count: u32) -> CpuR
         return Ok(Bulk::One);
     }
     cpu.bus.ide_read_run(id, phys, n as usize, size);
-    let full = cpu.reg(Register::EDI);
-    let moved = a.delta.wrapping_mul(n);
-    let next = (full & !a.mask) | (full.wrapping_add(moved) & a.mask);
-    cpu.set_reg(Register::EDI, next);
+    a.skip(cpu, Register::EDI, n);
     Ok(Bulk::Done(n))
 }
 
@@ -301,6 +390,7 @@ fn repeated(cpu: &mut Cpu, instr: &Instruction, op: StrOp, size: u8) -> CpuResul
     // back to the instruction while iterations remain.
     let traced = cpu.get_cpu_flag(CpuFlags::TF);
     let bulky = !traced && cpu.string_bulk && matches!(op, StrOp::Movs | StrOp::Stos);
+    let mut scans = !traced && cpu.string_bulk && compares;
     // The IDE channel of a REP INSW or INSD going up from its data port,
     // whose blocks can go at once (DX stays put).
     let forward = addr.delta == size as u32;
@@ -308,7 +398,7 @@ fn repeated(cpu: &mut Cpu, instr: &Instruction, op: StrOp, size: u8) -> CpuResul
         .then(|| cpu.bus.ide_data_port(cpu.dx()))
         .flatten();
     loop {
-        let count = cpu.reg(counter);
+        let mut count = cpu.reg(counter);
         if count == 0 {
             return Ok(());
         }
@@ -328,6 +418,16 @@ fn repeated(cpu: &mut Cpu, instr: &Instruction, op: StrOp, size: u8) -> CpuResul
                     continue;
                 }
                 Bulk::One => {}
+            }
+        }
+        if scans {
+            match scan(cpu, op, size, &addr, count, repe)? {
+                Some(n) => {
+                    count -= n;
+                    cpu.set_reg(counter, count);
+                }
+                // Video memory, ROM: no use looking again each element.
+                None => scans = false,
             }
         }
         iteration(cpu, op, size, &addr)?;
