@@ -81,7 +81,7 @@ static APIS: &[Api16] = &[
     win32("SelectClipRgn", 44, "ww", G, "SelectClipRgn", b'w'),
     win32("SelectObject", 45, "ww", G, "SelectObject", b'w'),
     win32("CombineRgn", 47, "wwws", G, "CombineRgn", b'w'),
-    win32("CreateBitmap", 48, "wwwwp", G, "CreateBitmap", b'w'),
+    rust("CreateBitmap", 48, "wwwwp", create_bitmap),
     rust("CreateBitmapIndirect", 49, "p", create_bitmap_indirect),
     rust("CreateBrushIndirect", 50, "p", create_brush_indirect),
     win32(
@@ -666,6 +666,13 @@ fn create_poly_polygon_rgn(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 // Structures.
+
+/// CreateBitmap: the planes and the bits per pixel are bytes, which
+/// programs push with whatever the word's high byte has.
+fn create_bitmap(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let (planes, bpp) = (args[2] & 0xFF, args[3] & 0xFF);
+    go(cpu, "CreateBitmap", &[args[0], args[1], planes, bpp, args[4]])
+}
 
 fn create_bitmap_indirect(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     // BITMAP16: type, width, height, width in bytes, planes (a byte),
