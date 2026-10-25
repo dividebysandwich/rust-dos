@@ -352,24 +352,25 @@ fn char_of(vk: usize, keys: &dyn Fn(usize) -> u8) -> Option<u8> {
 /// it next asks, not only after the next interrupt.
 pub fn poll(cpu: &mut Cpu) {
     let desktop = cpu.bus.win32.user.desktop;
-    if steers_with_mouse(cpu) {
+    let taken = crate::win32::dinput::mouse_taken(cpu);
+    if steers_with_mouse(cpu, taken) {
         let now = cpu.bus.clock.now_ns();
         cpu.bus.mouse.note_steering(now);
     }
     if desktop {
-        poll_mouse(cpu);
+        poll_mouse(cpu, taken);
     }
     poll_keyboard(cpu, desktop);
 }
 
 /// Whether the program steers with the mouse's motion: DirectInput has
-/// the mouse exclusively, or it hid the cursor and has the capture, as
-/// games do that put the cursor back in the middle after each move
-/// (Unreal). The host's mouse then moves the emulated one by its motion
-/// (`MouseState::note_steering`); where the host's pointer is on the
-/// picture means nothing to such a program.
-fn steers_with_mouse(cpu: &mut Cpu) -> bool {
-    if crate::win32::dinput::mouse_taken(cpu) {
+/// the mouse exclusively (`taken`), or it hid the cursor and has the
+/// capture, as games do that put the cursor back in the middle after
+/// each move (Unreal). The host's mouse then moves the emulated one by
+/// its motion (`MouseState::note_steering`); where the host's pointer is
+/// on the picture means nothing to such a program.
+fn steers_with_mouse(cpu: &mut Cpu, taken: bool) -> bool {
+    if taken {
         return true;
     }
     let state = user(cpu);
@@ -382,14 +383,15 @@ fn poll_keyboard(cpu: &mut Cpu, desktop: bool) {
     let pressed = cpu.bus.kbd.take_pressed();
     let before = user(cpu).input.held;
     let mut events = Vec::new();
-    // It runs at each wake of the threads: most often no key changed.
-    for id in (0..512).filter(|id| held[id / 64] != before[id / 64]) {
-        let (was, is) = (
-            before[id / 64] >> (id % 64) & 1,
-            held[id / 64] >> (id % 64) & 1,
-        );
-        if was != is {
-            events.push((id, is != 0));
+    // It runs at each wake of the threads and each message the program
+    // looks for, many thousand times a second: most often no key
+    // changed, and only the bits that did are visited.
+    for (w, (&now, &was)) in held.iter().zip(&before).enumerate() {
+        let mut changed = now ^ was;
+        while changed != 0 {
+            let bit = changed.trailing_zeros() as usize;
+            changed &= changed - 1;
+            events.push((w * 64 + bit, now >> bit & 1 != 0));
         }
     }
     user(cpu).input.held = held;
@@ -400,8 +402,11 @@ fn poll_keyboard(cpu: &mut Cpu, desktop: bool) {
         // A key that went down and up again since the last read: USER
         // leaves the BIOS's keystrokes to the console, so the keyboard's
         // own record of it tells DirectInput.
-        for id in (0..512).filter(|id| pressed[id / 64] >> (id % 64) & 1 != 0) {
-            if (before[id / 64] | held[id / 64]) >> (id % 64) & 1 == 0 {
+        for (w, &went_down) in pressed.iter().enumerate() {
+            let mut tapped = went_down & !(before[w] | held[w]);
+            while tapped != 0 {
+                let id = w * 64 + tapped.trailing_zeros() as usize;
+                tapped &= tapped - 1;
                 crate::win32::dinput::key(cpu, id as u8 & 0x7F, id >= 256, true);
                 crate::win32::dinput::key(cpu, id as u8 & 0x7F, id >= 256, false);
             }
@@ -549,11 +554,12 @@ fn push_input(state: &mut State, tid: u32, msg: Msg, bit: u32) {
     q.changed |= bit;
 }
 
-fn poll_mouse(cpu: &mut Cpu) {
+/// Read the mouse; `taken` when DirectInput has it exclusively.
+fn poll_mouse(cpu: &mut Cpu, taken: bool) {
     let mouse = &cpu.bus.mouse;
     let (x, y) = (mouse.x, mouse.y);
     let (presses, releases, buttons) = (mouse.press_count, mouse.release_count, mouse.buttons);
-    if crate::win32::dinput::mouse_taken(cpu) {
+    if taken {
         // DirectInput has the mouse exclusively: the cursor stays and no
         // window gets its messages.
         let input = &mut user(cpu).input;
