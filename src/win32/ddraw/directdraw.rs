@@ -96,7 +96,7 @@ fn exclusive_of(cpu: &mut Cpu, card: bool) -> u32 {
 }
 
 /// A new DirectDraw object, of the card's device if `card`.
-fn new_ddraw(cpu: &mut Cpu, initialized: bool, card: bool) -> u32 {
+pub fn new_ddraw(cpu: &mut Cpu, initialized: bool, card: bool) -> u32 {
     super::add_object(
         cpu,
         Object {

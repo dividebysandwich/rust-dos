@@ -742,7 +742,13 @@ pub fn create_surface(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// Make the surfaces `desc` describes for the DirectDraw object `dd`:
 /// their ids, the root first.
-fn make(cpu: &mut Cpu, dd: u32, version: u32, level: u32, desc: &Desc) -> Result<Vec<u32>, u32> {
+pub fn make(
+    cpu: &mut Cpu,
+    dd: u32,
+    version: u32,
+    level: u32,
+    desc: &Desc,
+) -> Result<Vec<u32>, u32> {
     let mut caps = if desc.flags & DDSD_CAPS != 0 {
         desc.caps
     } else {

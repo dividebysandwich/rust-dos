@@ -41,12 +41,12 @@ macro_rules! hr {
 mod blt;
 mod clipper;
 pub mod d3d;
-mod directdraw;
+pub(super) mod directdraw;
 pub(super) mod display;
 pub mod enumerate;
 mod gamma;
 mod palette;
-mod surface;
+pub(super) mod surface;
 pub mod voodoo;
 
 use super::com::{self, E_INVALIDARG, E_NOINTERFACE, Guid, IID_IUNKNOWN, S_OK};

@@ -254,7 +254,7 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
 
     // Depth: the render target's depth buffer, Z or W. On an add-on card
     // it is the auxiliary buffer.
-    let z = super::device::z_buffer(cpu, d.target).and_then(|z| {
+    let z = super::device::depth_buffer(cpu, d).and_then(|z| {
         if banshee {
             let place = super::shadow::place(cpu, z);
             super::shadow::drawn(cpu, z);
@@ -1397,7 +1397,7 @@ pub fn clear(
             fill(cpu, d.target, v);
         }
     }
-    if let (Some(z), Some(zid)) = (depth, super::device::z_buffer(cpu, d.target))
+    if let (Some(z), Some(zid)) = (depth, super::device::depth_buffer(cpu, d))
         && let Some(s) = state(cpu).surface(zid).cloned()
     {
         let (exact, v) = super::shadow::depth_values(&s, z);

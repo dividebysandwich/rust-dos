@@ -164,7 +164,7 @@ pub fn setup_in(
     let view_map = view_map(cpu, &d, version, viewport);
     let s = |r: u32| d.state(r);
     let mut planes = Vec::new();
-    if version == 7 {
+    if version >= 7 {
         for (i, p) in d.planes.iter().enumerate() {
             if s(RS_CLIPPLANEENABLE) & 1 << i != 0 {
                 planes.push(*p);
@@ -173,12 +173,12 @@ pub fn setup_in(
     }
     let lit = !layout.rhw
         && match version {
-            7 => s(RS_LIGHTING) != 0,
+            7 | 8 => s(RS_LIGHTING) != 0,
             3 => s(RS_LIGHTING) != 0 && layout.normal.is_some(),
             _ => layout.normal.is_some() && flags & D3DDP_DONOTLIGHT == 0,
         };
     let lighting = if lit {
-        let (lights, material) = if version == 7 {
+        let (lights, material) = if version >= 7 {
             let lights = d
                 .lights
                 .iter()
