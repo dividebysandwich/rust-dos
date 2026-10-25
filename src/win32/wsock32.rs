@@ -87,42 +87,42 @@ fn set_error(cpu: &mut Cpu, code: u32) {
     super::process(cpu).last_error = code;
 }
 
-fn zero(_: &mut Cpu, _: &[u32]) -> Option<u32> {
+pub(super) fn zero(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(0)
 }
 
-fn null(_: &mut Cpu, _: &[u32]) -> Option<u32> {
+pub(super) fn null(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(0)
 }
 
 /// What there is no socket for: SOCKET_ERROR, WSAENOTSOCK.
-fn not_socket(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+pub(super) fn not_socket(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     set_error(cpu, WSAENOTSOCK);
     Some(SOCKET_ERROR)
 }
 
 /// socket: INVALID_SOCKET, the network down.
-fn socket(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+pub(super) fn socket(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     set_error(cpu, WSAENETDOWN);
     Some(SOCKET_ERROR)
 }
 
 /// The lookups of hosts, protocols and services: NULL.
-fn no_host(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+pub(super) fn no_host(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     set_error(cpu, WSAHOST_NOT_FOUND);
     Some(0)
 }
 
-fn swap32(_: &mut Cpu, args: &[u32]) -> Option<u32> {
+pub(super) fn swap32(_: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(args[0].swap_bytes())
 }
 
-fn swap16(_: &mut Cpu, args: &[u32]) -> Option<u32> {
+pub(super) fn swap16(_: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some((args[0] as u16).swap_bytes() as u32)
 }
 
 /// inet_addr: a dotted address in network order, or INADDR_NONE.
-fn inet_addr(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+pub(super) fn inet_addr(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if args[0] == 0 {
         return Some(u32::MAX);
     }
@@ -139,7 +139,7 @@ fn inet_addr(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// gethostname(name, len).
-fn gethostname(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+pub(super) fn gethostname(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [at, len] = args[..] else {
         return Some(SOCKET_ERROR);
     };
@@ -154,17 +154,24 @@ fn gethostname(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(0)
 }
 
-fn wsa_get_last_error(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+pub(super) fn wsa_get_last_error(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(super::process(cpu).last_error)
 }
 
-fn wsa_set_last_error(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+pub(super) fn wsa_set_last_error(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     set_error(cpu, args[0]);
     Some(0)
 }
 
 /// WSAStartup(version, data): Winsock 1.1, in WSADATA (400 bytes).
 fn wsa_startup(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    startup(cpu, args, 0x0101, b"WinSock 1.1 (no network)")
+}
+
+/// WSAStartup(version, data) of a Winsock whose highest version is
+/// `highest` (minor version in the high byte, as WSADATA has it): the
+/// version asked for, or the highest if it asks for a later one.
+pub(super) fn startup(cpu: &mut Cpu, args: &[u32], highest: u16, text: &[u8]) -> Option<u32> {
     let [version, at] = args[..] else {
         return Some(WSAEFAULT);
     };
@@ -172,6 +179,9 @@ fn wsa_startup(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if major < 1 || (major == 1 && minor < 1) {
         return Some(WSAVERNOTSUPPORTED);
     }
+    let asked = (minor << 8 | major) as u16;
+    let swap = |v: u16| v.rotate_left(8);
+    let used = if swap(asked) < swap(highest) { asked } else { highest };
     if at == 0 {
         return Some(WSAEFAULT);
     }
@@ -179,9 +189,8 @@ fn wsa_startup(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return None;
     }
     let mut data = vec![0u8; 400];
-    data[0..2].copy_from_slice(&0x0101u16.to_le_bytes());
-    data[2..4].copy_from_slice(&0x0101u16.to_le_bytes());
-    let text = b"WinSock 1.1 (no network)";
+    data[0..2].copy_from_slice(&used.to_le_bytes());
+    data[2..4].copy_from_slice(&highest.to_le_bytes());
     data[4..4 + text.len()].copy_from_slice(text);
     let status = b"Running";
     data[261..261 + status.len()].copy_from_slice(status);

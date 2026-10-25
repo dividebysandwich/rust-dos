@@ -27,6 +27,7 @@ mod dsound;
 pub mod gdi32;
 mod glide;
 pub(crate) mod heap;
+mod imagehlp;
 pub(crate) mod kernel32;
 mod launcher;
 pub(crate) mod loader;
@@ -54,6 +55,7 @@ pub mod version;
 mod verdll;
 mod winmm;
 mod winspool;
+mod ws2_32;
 mod wsock32;
 
 pub use snapshot::snapshot;
@@ -227,6 +229,8 @@ pub struct Process {
     exiting: bool,
     /// The compressed files LZInit opened (kernel32/lz.rs).
     lz_files: Vec<kernel32::lz::LzFile>,
+    /// Its IMAGEHLP options.
+    imagehlp: imagehlp::State,
 }
 
 impl Process {
@@ -1127,6 +1131,7 @@ crate::state_fields!(Process {
     dll_tls,
     exiting,
     lz_files,
+    imagehlp,
 });
 crate::state_fields!(Win32 {
     pending,
