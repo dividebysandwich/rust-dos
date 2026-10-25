@@ -46,9 +46,11 @@ const SCRIPT: &str = "SETUP.INS";
 /// The setup's languages, beside the launcher: `Default=` in its
 /// `[Languages]` is the language's number in hex.
 const LANGUAGES: &str = "SETUP.LID";
-/// The entries of a later launcher's table of arguments that give the
-/// engine the setup's folder and its language.
+/// The entry of a later launcher's table of arguments that gives the
+/// engine the setup's folder, with the zeros on either side.
 const SOURCE_ARGUMENT: &[u8] = b"\0 -x1\0";
+/// The entry of a later launcher's table of arguments that gives the
+/// engine the setup's language, with the zeros on either side.
 const LANGUAGE_ARGUMENT: &[u8] = b"\0 -q1%04x\0";
 /// The engine's name in the archive.
 const ENGINE: &str = "INSTALL.EXE";
@@ -66,25 +68,44 @@ pub fn is_ne(bytes: &[u8]) -> bool {
     bytes.starts_with(b"MZ") && bytes.get(at..at.saturating_add(2)) == Some(b"NE")
 }
 
-/// What a later launcher adds to the engine's arguments: the setup's
-/// folder, and its language when the setup names one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Source {
+/// What a later launcher (5.00.212 on) adds to the engine's arguments,
+/// each when its table of arguments has the entry. An earlier launcher's
+/// is the default, which adds nothing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LaterArguments {
+    /// `-x1`: the setup's folder.
+    pub source: bool,
+    /// `-q1`: the setup's language, when the setup names one.
     pub language: Option<u16>,
+}
+
+impl LaterArguments {
+    /// What the launcher `bytes` in `setup_dir` adds.
+    fn of(cpu: &mut Cpu, bytes: &[u8], setup_dir: &str) -> Self {
+        LaterArguments {
+            source: has_argument(bytes, SOURCE_ARGUMENT),
+            language: if has_argument(bytes, LANGUAGE_ARGUMENT) {
+                language(cpu, setup_dir)
+            } else {
+                None
+            },
+        }
+    }
 }
 
 /// The arguments the launcher gives the engine: the setup's script in
 /// `setup_dir` and the temporary folder `temp`, both full DOS paths, and
-/// from a later launcher (`source`) the setup's folder and language.
-pub fn engine_arguments(setup_dir: &str, temp: &str, source: Option<Source>) -> String {
+/// what a later launcher adds (`later`).
+pub fn engine_arguments(setup_dir: &str, temp: &str, later: LaterArguments) -> String {
+    use std::fmt::Write;
     let setup_dir = setup_dir.trim_end_matches('\\');
     let temp = temp.trim_end_matches('\\');
     let mut arguments = format!("-f{}\\{}  -z1 -cx -x{}\\", setup_dir, SCRIPT, temp);
-    if let Some(source) = source {
-        arguments.push_str(&format!(" -x1{}\\", setup_dir));
-        if let Some(language) = source.language {
-            arguments.push_str(&format!(" -q1{:04x}", language));
-        }
+    if later.source {
+        let _ = write!(arguments, " -x1{}\\", setup_dir);
+    }
+    if let Some(language) = later.language {
+        let _ = write!(arguments, " -q1{:04x}", language);
     }
     arguments
 }
@@ -94,14 +115,11 @@ fn has_argument(bytes: &[u8], entry: &[u8]) -> bool {
     bytes.windows(entry.len()).any(|w| w == entry)
 }
 
-/// The language a later launcher gives the engine: `Default=` of the
-/// `[Languages]` of `SETUP.LID` in `setup_dir`, when the launcher `bytes`
-/// has `-q1%04x` and the file names one.
-fn language(cpu: &mut Cpu, bytes: &[u8], setup_dir: &str) -> Option<u16> {
+/// The setup's language: `Default=` of the `[Languages]` of `SETUP.LID`
+/// in `setup_dir`, a number in hex. None when the file isn't there or
+/// doesn't name one.
+fn language(cpu: &mut Cpu, setup_dir: &str) -> Option<u16> {
     let file = format!("{}\\{}", setup_dir, LANGUAGES);
-    if !has_argument(bytes, LANGUAGE_ARGUMENT) || !cpu.bus.disk.is_file(&file) {
-        return None;
-    }
     let value = super::kernel32::profile_value(cpu, file.as_bytes(), b"Languages", b"Default")?;
     u16::from_str_radix(std::str::from_utf8(&value).ok()?.trim(), 16).ok()
 }
@@ -171,10 +189,8 @@ pub fn engine(cpu: &mut Cpu, path: &str, bytes: &[u8]) -> Option<(String, String
         ),
     );
     let engine = format!("{}\\{}", temp, engine.extract_as.to_ascii_uppercase());
-    let source = has_argument(bytes, SOURCE_ARGUMENT).then(|| Source {
-        language: language(cpu, bytes, &setup_dir),
-    });
-    Some((engine, engine_arguments(&setup_dir, &temp, source)))
+    let later = LaterArguments::of(cpu, bytes, &setup_dir);
+    Some((engine, engine_arguments(&setup_dir, &temp, later)))
 }
 
 /// The temporary folder, as the launcher finds it: TEMP's value, or TMP's,
@@ -271,25 +287,38 @@ mod tests {
     #[test]
     fn gives_the_engine_the_launchers_command_line() {
         assert_eq!(
-            engine_arguments("E:", "C:\\WINDOWS\\TEMP", None),
+            engine_arguments("E:", "C:\\WINDOWS\\TEMP", LaterArguments::default()),
             "-fE:\\SETUP.INS  -z1 -cx -xC:\\WINDOWS\\TEMP\\"
         );
         assert_eq!(
-            engine_arguments("D:\\SETUP\\", "C:\\TEMP\\", None),
+            engine_arguments("D:\\SETUP\\", "C:\\TEMP\\", LaterArguments::default()),
             "-fD:\\SETUP\\SETUP.INS  -z1 -cx -xC:\\TEMP\\"
         );
         // A later launcher's, as Xenocracy's gave it on Windows 98 SE.
+        let later = LaterArguments {
+            source: true,
+            language: Some(9),
+        };
         assert_eq!(
-            engine_arguments(
-                "D:",
-                "C:\\WINDOWS\\TEMP",
-                Some(Source { language: Some(9) })
-            ),
+            engine_arguments("D:", "C:\\WINDOWS\\TEMP", later),
             "-fD:\\SETUP.INS  -z1 -cx -xC:\\WINDOWS\\TEMP\\ -x1D:\\ -q10009"
         );
+        let no_language = LaterArguments {
+            language: None,
+            ..later
+        };
         assert_eq!(
-            engine_arguments("D:\\SETUP", "C:\\TEMP", Some(Source { language: None })),
+            engine_arguments("D:\\SETUP", "C:\\TEMP", no_language),
             "-fD:\\SETUP\\SETUP.INS  -z1 -cx -xC:\\TEMP\\ -x1D:\\SETUP\\"
+        );
+        // Languages past 9 are hex, as the launcher's %04x writes them.
+        let french = LaterArguments {
+            language: Some(0x0C),
+            ..later
+        };
+        assert_eq!(
+            engine_arguments("D:", "C:\\TEMP", french),
+            "-fD:\\SETUP.INS  -z1 -cx -xC:\\TEMP\\ -x1D:\\ -q1000c"
         );
     }
 
@@ -334,11 +363,25 @@ mod tests {
             arguments,
             "-fC:\\SETUP\\SETUP.INS  -z1 -cx -xC:\\WINDOWS\\TEMP\\ -x1C:\\SETUP\\ -q10009"
         );
-        // An earlier launcher gives neither, SETUP.LID or not.
-        let (_, arguments) = engine(&mut cpu, path, &launcher_with(&[" -m"])).unwrap();
+        // An earlier launcher gives neither, SETUP.LID or not, and only a
+        // whole entry counts.
+        for earlier in [&[" -m"][..], &[" -x10", " -q1%04xx"]] {
+            let (_, arguments) = engine(&mut cpu, path, &launcher_with(earlier)).unwrap();
+            assert_eq!(
+                arguments,
+                "-fC:\\SETUP\\SETUP.INS  -z1 -cx -xC:\\WINDOWS\\TEMP\\"
+            );
+        }
+        // A Default= that isn't a number in hex names no language.
+        std::fs::write(
+            setup.join("SETUP.LID"),
+            "[Languages]\r\nkey0=0009\r\nDefault=English\r\ncount=1\r\n",
+        )
+        .unwrap();
+        let (_, arguments) = engine(&mut cpu, path, &later).unwrap();
         assert_eq!(
             arguments,
-            "-fC:\\SETUP\\SETUP.INS  -z1 -cx -xC:\\WINDOWS\\TEMP\\"
+            "-fC:\\SETUP\\SETUP.INS  -z1 -cx -xC:\\WINDOWS\\TEMP\\ -x1C:\\SETUP\\"
         );
     }
 }
