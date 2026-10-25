@@ -12,6 +12,14 @@ fn from_bcd(value: u8) -> Option<u32> {
     (high < 10 && low < 10).then_some(high as u32 * 10 + low as u32)
 }
 
+/// Set the tick count at 0040:006C to `ticks` and clear the midnight
+/// flag, as INT 1Ah AH=01h does. DOS sets it so when it sets the time.
+pub fn set_tick_count(cpu: &mut Cpu, ticks: u32) {
+    cpu.bus.guest_write_16(0x046E, (ticks >> 16) as u16);
+    cpu.bus.guest_write_16(0x046C, ticks as u16);
+    cpu.bus.guest_write_8(0x0470, 0);
+}
+
 pub fn handle(cpu: &mut Cpu) {
     let ah = cpu.get_ah();
     match ah {
@@ -28,10 +36,8 @@ pub fn handle(cpu: &mut Cpu) {
         }
         0x01 => {
             // Set the tick count to CX:DX.
-            let (high, low) = (cpu.cx(), cpu.dx());
-            cpu.bus.guest_write_16(0x046E, high);
-            cpu.bus.guest_write_16(0x046C, low);
-            cpu.bus.guest_write_8(0x0470, 0);
+            let ticks = (cpu.cx() as u32) << 16 | cpu.dx() as u32;
+            set_tick_count(cpu, ticks);
         }
         0x02 => {
             // The real-time clock's time: CH hours, CL minutes, DH seconds

@@ -2017,6 +2017,12 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             match at {
                 Some(at) => {
                     cpu.bus.cmos.set_now(at);
+                    // A new time moves the tick count, which programs take
+                    // for the time of day, as DOS's clock driver does.
+                    if ah == 0x2D {
+                        let ticks = crate::bios::ticks_since_midnight(at);
+                        crate::interrupts::int1a::set_tick_count(cpu, ticks);
+                    }
                     cpu.set_reg8(Register::AL, 0);
                 }
                 None => cpu.set_reg8(Register::AL, 0xFF),

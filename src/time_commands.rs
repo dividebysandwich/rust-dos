@@ -75,8 +75,9 @@ fn set_date(cpu: &mut Cpu, text: &str) -> bool {
 
 fn set_time(cpu: &mut Cpu, text: &str) -> bool {
     let Some(time) = parse_time(text) else { return false };
-    let date = cpu.bus.cmos.now().date();
-    cpu.bus.cmos.set_now(date.and_time(time));
+    let at = cpu.bus.cmos.now().date().and_time(time);
+    cpu.bus.cmos.set_now(at);
+    crate::interrupts::int1a::set_tick_count(cpu, crate::bios::ticks_since_midnight(at));
     true
 }
 

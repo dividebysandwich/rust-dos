@@ -467,7 +467,8 @@ fn hardware_interrupts_reach_dos_while_a_program_runs_and_a_state_resumes_it() {
     assert!(run_to_exit(&mut cpu, 2000));
     assert_eq!(cpu.errorlevel, 0x2A);
     // 300 ms is about 5 ticks of 55 ms.
-    assert!(ticks(&cpu) >= start + 4, "{} ticks", ticks(&cpu) - start);
+    let elapsed = ticks(&cpu).wrapping_sub(start);
+    assert!(elapsed >= 4, "{} ticks", elapsed);
 
     rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
     assert!(cpu.bus.win32.active());
