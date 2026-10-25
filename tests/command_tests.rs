@@ -612,3 +612,24 @@ fn history_lists_and_forgets_lines() {
     assert_eq!(run(&mut cpu, "history clear"), "");
     assert!(cpu.shell_history.entries().is_empty());
 }
+
+#[test]
+fn cd_md_and_rd_take_quoted_paths() {
+    let base = scratch("quoted", &["c/Program Files/Sub"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    let cwd = |cpu: &Cpu| cpu.bus.disk.get_current_directory_of(2).unwrap();
+
+    assert_eq!(run(&mut cpu, r#"CD "\Program Files""#), "");
+    let program_files = cwd(&cpu);
+    assert_ne!(program_files, "");
+    assert_eq!(run(&mut cpu, r#"CD "\Program Files"\Sub"#), "", "quotes around a part");
+    assert!(cwd(&cpu).ends_with("SUB"), "{}", cwd(&cpu));
+    assert_eq!(run(&mut cpu, r#"CD "C:\""#), "");
+    assert_eq!(cwd(&cpu), "");
+
+    assert_eq!(run(&mut cpu, r#"MD "New Folder""#), "");
+    assert!(base.join("c/New Folder").is_dir());
+    assert_eq!(run(&mut cpu, r#"RD "C:\New Folder""#), "");
+    assert!(!base.join("c/New Folder").exists());
+    assert_eq!(run(&mut cpu, r#"MD """#), "Required parameter missing");
+}
