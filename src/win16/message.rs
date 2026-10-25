@@ -51,6 +51,8 @@ const WM_MENUCHAR: u32 = 0x0120;
 const WM_CTLCOLORMSGBOX: u32 = 0x0132;
 const WM_CTLCOLORSTATIC: u32 = 0x0138;
 const WM_PARENTNOTIFY: u32 = 0x0210;
+const WM_MDICREATE: u32 = 0x0220;
+const WS_EX_MDICHILD: u32 = 0x0040;
 const WM_DESTROY: u32 = 0x0002;
 const WM_USER: u32 = 0x0400;
 
@@ -287,6 +289,37 @@ fn to32(
             }
             data.push(FIX_NONE);
             (msg, wp, if cs16 == 0 { 0 } else { cs })
+        }
+        WM_MDICREATE => {
+            // MDICREATESTRUCT: the names flat, the owner an instance of
+            // 32-bit code, the position and size widened (CW_USEDEFAULT
+            // to Win32's).
+            let mc16 = flat(cpu, lp);
+            let mc = stack.alloc(36);
+            if mc16 != 0 {
+                let class = r32(cpu, mc16);
+                let coord = |v: u32| if v == 0x8000 { 0x8000_0000 } else { sx(v) };
+                let fields = [
+                    if hi(class) == 0 {
+                        class
+                    } else {
+                        flat(cpu, class)
+                    },
+                    flat(cpu, r32(cpu, mc16 + 4)),
+                    super::handles::instance32(cpu, r16(cpu, mc16 + 8) as u16),
+                    coord(r16(cpu, mc16 + 10)),
+                    coord(r16(cpu, mc16 + 12)),
+                    coord(r16(cpu, mc16 + 14)),
+                    coord(r16(cpu, mc16 + 16)),
+                    r32(cpu, mc16 + 18),
+                    r32(cpu, mc16 + 22),
+                ];
+                for (i, f) in fields.into_iter().enumerate() {
+                    w32(cpu, mc + 4 * i as u32, f);
+                }
+            }
+            data.push(FIX_NONE);
+            (msg, wp, if mc16 == 0 { 0 } else { mc })
         }
         WM_GETMINMAXINFO => {
             let p16 = flat(cpu, lp);
@@ -592,7 +625,11 @@ fn to16(
                     string16(cpu, stack, class)
                 };
                 let instance = super::handles::instance16(cpu, r32(cpu, lp + 4));
-                w32(cpu, cs16, r32(cpu, lp));
+                let mut params = r32(cpu, lp);
+                if r32(cpu, lp + 44) & WS_EX_MDICHILD != 0 && params != 0 {
+                    params = mdi_create16(cpu, stack, params);
+                }
+                w32(cpu, cs16, params);
                 w16(cpu, cs16 + 4, instance as u32);
                 let menu = menu16(r32(cpu, lp + 8)) as u32;
                 w16(cpu, cs16 + 6, menu);
@@ -776,6 +813,38 @@ fn string16(cpu: &mut Cpu, stack: &mut Stack16, at: u32) -> u32 {
     s.push(0);
     let (seg, lin) = stack.alloc(s.len() as u32);
     super::poke(cpu, lin, &s);
+    seg
+}
+
+/// The MDICREATESTRUCT at `mc`, which an MDI child's CREATESTRUCT
+/// points at, as a 16-bit one on `stack`: its 16:16 address. The names
+/// are copies, the owner a 16-bit instance, the position and size
+/// words (Win32's CW_USEDEFAULT the 16-bit one).
+fn mdi_create16(cpu: &mut Cpu, stack: &mut Stack16, mc: u32) -> u32 {
+    let class = r32(cpu, mc);
+    let title = r32(cpu, mc + 4);
+    let class16 = if class < 0x1_0000 {
+        class
+    } else {
+        string16(cpu, stack, class)
+    };
+    let title16 = if title == 0 {
+        0
+    } else {
+        string16(cpu, stack, title)
+    };
+    let owner = super::handles::instance16(cpu, r32(cpu, mc + 8));
+    let (seg, mc16) = stack.alloc(26);
+    w32(cpu, mc16, class16);
+    w32(cpu, mc16 + 4, title16);
+    w16(cpu, mc16 + 8, owner as u32);
+    for i in 0..4 {
+        let v = r32(cpu, mc + 12 + 4 * i);
+        let v = if v == 0x8000_0000 { 0x8000 } else { v };
+        w16(cpu, mc16 + 10 + 2 * i, v);
+    }
+    w32(cpu, mc16 + 18, r32(cpu, mc + 28));
+    w32(cpu, mc16 + 22, r32(cpu, mc + 32));
     seg
 }
 
@@ -982,8 +1051,9 @@ pub fn post_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// A MSG16 at `m16` as a MSG at `m`, the message translated as one
-/// posted (no structures).
-pub fn msg32(cpu: &mut Cpu, m16: u32, m: u32) {
+/// posted. The structures a message takes go on the 32-bit stack below
+/// `m`: the stack's top below them.
+pub fn msg32(cpu: &mut Cpu, m16: u32, m: u32) -> u32 {
     let hwnd = r16(cpu, m16);
     let msg = r16(cpu, m16 + 2);
     let wp = r16(cpu, m16 + 4);
@@ -997,6 +1067,7 @@ pub fn msg32(cpu: &mut Cpu, m16: u32, m: u32) {
     for (i, v) in [hwnd, msg, wp, lp, time, x, y].into_iter().enumerate() {
         w32(cpu, m + 4 * i as u32, v);
     }
+    stack.top
 }
 
 /// A MSG at `m` as a MSG16 at `m16`.

@@ -98,7 +98,11 @@ pub fn instance16(cpu: &Cpu, h: u32) -> u16 {
             return task.instance;
         }
     }
-    if let Some(task) = win16.tasks.iter().find(|t| t.module == module.handle) {
+    if let Some(task) = win16
+        .tasks
+        .iter()
+        .find(|t| t.module == module.handle && t.exit_code.is_none())
+    {
         return task.instance;
     }
     if module.dgroup != 0 {

@@ -136,7 +136,11 @@ pub fn interrupt(cpu: &mut Cpu, vector: u8, mut ctx: Context) {
                 return;
             }
         }
-        0x2F => int2f(cpu, &mut ctx),
+        0x2F => {
+            if !int2f(cpu, &mut ctx) {
+                return;
+            }
+        }
         0x31 => super::dpmi::int31(cpu, &mut ctx),
         0x34..=0x3D => fpu_fixup(cpu, vector, &mut ctx),
         0x10 | 0x11 | 0x12 | 0x15 | 0x16 | 0x1A => bios(cpu, vector, &mut ctx),
@@ -465,7 +469,13 @@ fn int21(cpu: &mut Cpu, ctx: &mut Context) -> bool {
             set_w(&mut regs, EDX, NAME1 as u16);
             let (out, _, _) = call_real(cpu, 0x21, &regs, tb_seg, tb_seg);
             if out.eflags & CF == 0 {
-                from_tb(cpu, NAME1, target, NAME_MAX / 2);
+                // The name and its NUL, no more: the buffer is the
+                // directory's path and 13 bytes.
+                let (_, base) = tb(cpu);
+                let len = (0..NAME_MAX)
+                    .find(|&i| cpu.bus.read_8((base + NAME1 + i) as usize) == 0)
+                    .map_or(NAME_MAX, |i| i + 1);
+                from_tb(cpu, NAME1, target, len);
             }
             *ctx = returned(out, &regs, ctx);
         }
@@ -684,14 +694,20 @@ fn exec(cpu: &mut Cpu, ctx: &mut Context, al: u8) {
 }
 
 /// INT 2Fh: what a Windows program asks of the multiplex interrupt.
-fn int2f(cpu: &mut Cpu, ctx: &mut Context) {
+/// False when the task's context doesn't go on now (it gave up its
+/// turn).
+fn int2f(cpu: &mut Cpu, ctx: &mut Context) -> bool {
     match w(ctx, EAX) {
         // Windows' enhanced mode: 4.0, as Windows 95's.
         0x1600 => set_w(ctx, EAX, 0x0004),
         // In protected mode, under DPMI.
         0x1686 => set_w(ctx, EAX, 0),
         // Release the time slice: another task goes.
-        0x1680 => set_al(ctx, 0),
+        0x1680 => {
+            set_al(ctx, 0);
+            super::task::yield_now(cpu, *ctx);
+            return false;
+        }
         // The MS-DOS extensions' entry point: none.
         0x168A => {}
         // XMS: none for protected-mode programs.
@@ -703,6 +719,7 @@ fn int2f(cpu: &mut Cpu, ctx: &mut Context) {
             *ctx = returned(out, &regs, ctx);
         }
     }
+    true
 }
 
 /// The BIOS's functions without pointers: the time, the keyboard, the
