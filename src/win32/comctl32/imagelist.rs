@@ -1005,7 +1005,7 @@ fn bitmap_file(cpu: &mut Cpu, hbm: u32) -> Option<Vec<u8>> {
     let (w, h, bpp) = bitmap_size(cpu, hbm)?;
     let bits = if bpp == 1 { 1 } else { 24 };
     let stride = ((w * bits + 31) / 32 * 4) as u32;
-    let size = stride * h.unsigned_abs();
+    let size = stride.checked_mul(h.unsigned_abs())?;
     let mut header_len: u32 = 14 + 40;
     if bits != 24 {
         header_len += 4 << (bits as u32);
@@ -1030,7 +1030,7 @@ fn bitmap_file(cpu: &mut Cpu, hbm: u32) -> Option<Vec<u8>> {
         out[14 + 4 * i..18 + 4 * i].copy_from_slice(&v.to_le_bytes());
     }
     // GetDIBits into the program's memory, then the bytes back.
-    let mem = temp(cpu, &vec![0u8; (40 + 1024 + size) as usize]);
+    let mem = temp(cpu, &vec![0u8; size.checked_add(40 + 1024)? as usize]);
     if mem == 0 {
         return None;
     }

@@ -49,6 +49,17 @@ fn wr(cpu: &mut Cpu, at: u32, v: u32) {
     cpu.bus.guest_write_32(at, v);
 }
 
+/// The most a copy within an array moves: counts and sizes come back
+/// from the program's memory, where it may have overwritten them.
+const MAX_COPY: i64 = 1 << 28;
+
+/// A buffer for `count` elements of `size` bytes, or an empty one, which
+/// copies nothing, where the two can't be an array's.
+fn buffer(count: i32, size: i32) -> Vec<u8> {
+    let bytes = count as i64 * size as i64;
+    vec![0u8; if (0..=MAX_COPY).contains(&bytes) { bytes as usize } else { 0 }]
+}
+
 /// A DPA's fields, read at once: None if its memory isn't there.
 #[derive(Clone, Copy)]
 struct Dpa {
@@ -158,7 +169,7 @@ pub fn dpa_clone(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let grow = d.grow.max(1);
     let items = grow * ((src.count - 1) / grow + 1);
     let ptrs = heap_alloc(cpu, d.heap, 4 * items.max(0) as u32);
-    let mut data = vec![0u8; 4 * src.count.max(0) as usize];
+    let mut data = buffer(src.count, 4);
     cpu.bus.guest_read_bytes(src.ptrs, &mut data);
     if ptrs != 0 {
         cpu.bus.guest_write_bytes(ptrs, &data);
@@ -244,7 +255,7 @@ pub fn dpa_insert_ptr(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let d = read_dpa(cpu, h)?;
     let n = d.count - i - 1;
     if n > 0 {
-        let mut data = vec![0u8; 4 * n as usize];
+        let mut data = buffer(n, 4);
         cpu.bus.guest_read_bytes(d.ptrs + 4 * i as u32, &mut data);
         cpu.bus
             .guest_write_bytes(d.ptrs + 4 * (i as u32 + 1), &data);
@@ -266,7 +277,7 @@ pub fn dpa_delete_ptr(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let p = rd(cpu, d.ptrs + 4 * i as u32);
     let n = d.count - i - 1;
     if n > 0 {
-        let mut data = vec![0u8; 4 * n as usize];
+        let mut data = buffer(n, 4);
         cpu.bus
             .guest_read_bytes(d.ptrs + 4 * (i as u32 + 1), &mut data);
         cpu.bus.guest_write_bytes(d.ptrs + 4 * i as u32, &data);
@@ -438,7 +449,7 @@ fn sort_step(cpu: &mut Cpu, id: u16, c: &mut Ctx) -> Vec<Op> {
         // Move the pointer at i to lo.
         if lo < i {
             let x = rd(cpu, d.ptrs + 4 * i as u32);
-            let mut data = vec![0u8; 4 * (i - lo) as usize];
+            let mut data = buffer(i - lo, 4);
             cpu.bus.guest_read_bytes(d.ptrs + 4 * lo as u32, &mut data);
             cpu.bus
                 .guest_write_bytes(d.ptrs + 4 * (lo as u32 + 1), &data);
@@ -592,7 +603,7 @@ pub fn dsa_get_item(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if i < 0 || i >= count {
         return Some(0);
     }
-    let mut item = vec![0u8; size.max(0) as usize];
+    let mut item = buffer(1, size);
     cpu.bus
         .guest_read_bytes(data as u32 + (size * i) as u32, &mut item);
     cpu.bus.guest_write_bytes(dest, &item);
@@ -642,7 +653,7 @@ pub fn dsa_set_item(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             crate::win32::user32::write_words(cpu, h, &[(i + 1) as u32, to, items as u32]);
         }
     }
-    let mut item = vec![0u8; size.max(0) as usize];
+    let mut item = buffer(1, size);
     cpu.bus.guest_read_bytes(src, &mut item);
     cpu.bus
         .guest_write_bytes(data as u32 + (size * i) as u32, &item);
@@ -669,14 +680,14 @@ pub fn dsa_insert_item(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     let base = data as u32;
     if i < count {
-        let mut moved = vec![0u8; ((count - i) * size) as usize];
+        let mut moved = buffer(count - i, size);
         cpu.bus
             .guest_read_bytes(base + (size * i) as u32, &mut moved);
         cpu.bus
             .guest_write_bytes(base + (size * (i + 1)) as u32, &moved);
     }
     wr(cpu, h + S_COUNT, (count + 1) as u32);
-    let mut item = vec![0u8; size.max(0) as usize];
+    let mut item = buffer(1, size);
     cpu.bus.guest_read_bytes(src, &mut item);
     cpu.bus.guest_write_bytes(base + (size * i) as u32, &item);
     Some(i as u32)
@@ -694,7 +705,7 @@ pub fn dsa_delete_item(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     let base = data as u32;
     if i < count - 1 {
-        let mut moved = vec![0u8; ((count - i - 1) * size) as usize];
+        let mut moved = buffer(count - i - 1, size);
         cpu.bus
             .guest_read_bytes(base + (size * (i + 1)) as u32, &mut moved);
         cpu.bus.guest_write_bytes(base + (size * i) as u32, &moved);
