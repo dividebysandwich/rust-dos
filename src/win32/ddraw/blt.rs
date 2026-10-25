@@ -64,7 +64,7 @@ struct Op {
 
 /// Whether `value` is in the key `key`: each of the format's channels
 /// between the key's low and high values of it.
-fn keyed(value: u32, key: (u32, u32), s: &Surface) -> bool {
+pub(super) fn keyed(value: u32, key: (u32, u32), s: &Surface) -> bool {
     let f = &s.format;
     let masks = [f.r, f.g, f.b];
     if f.flags & surface::DDPF_RGB == 0

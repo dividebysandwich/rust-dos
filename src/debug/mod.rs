@@ -359,6 +359,11 @@ pub enum Cmd {
     Exceptions,
     /// The built-in Windows's processes, modules, threads and handles.
     Win32,
+    /// DirectDraw's display mode and surfaces.
+    Win32Ddraw,
+    /// A DirectDraw surface's pixels; `keyed` makes those its source blit
+    /// key matches transparent.
+    Win32Surface { id: u32, keyed: bool },
     Gus,
     Sound,
     Awe32,

@@ -1,7 +1,10 @@
 //! The built-in Windows for the debugger (`/api/win32`): its processes,
-//! with their modules, threads and handles.
+//! with their modules, threads and handles, and DirectDraw's surfaces
+//! (`/api/win32/ddraw`).
 
-use rust_dos::win32::snapshot::{Field, ObjectInfo, ProcessInfo, Snapshot, ThreadInfo};
+use rust_dos::win32::snapshot::{
+    Field, ObjectInfo, ProcessInfo, Snapshot, SurfaceInfo, ThreadInfo,
+};
 use serde_json::{Map, Value, json};
 
 use crate::cpu::Cpu;
@@ -121,5 +124,50 @@ fn object_json(o: &ObjectInfo) -> Value {
         "state": state,
         "name": o.name,
         "refs": o.refs,
+    })
+}
+
+/// DirectDraw's display mode and surfaces (`/api/win32/ddraw`).
+pub fn ddraw_json(cpu: &Cpu) -> Value {
+    let d = rust_dos::win32::snapshot::ddraw(cpu);
+    json!({
+        "mode": (d.mode.0 != 0).then(|| json!({"width": d.mode.0, "height": d.mode.1, "bits": d.mode.2})),
+        "mode_owner": d.mode_owner,
+        "exclusive": d.exclusive,
+        "surfaces": d.surfaces.iter().map(surface_json).collect::<Vec<_>>(),
+    })
+}
+
+fn surface_json(s: &SurfaceInfo) -> Value {
+    let (flags, fourcc, bits, [r, g, b, a]) = s.format;
+    let keys: Map<String, Value> = s
+        .keys
+        .iter()
+        .map(|&(place, low, high)| (place.to_string(), json!([hex(low), hex(high)])))
+        .collect();
+    json!({
+        "id": s.id,
+        "pid": hex(s.pid),
+        "interfaces": s.interfaces.iter().map(|&i| hex(i)).collect::<Vec<_>>(),
+        "width": s.width,
+        "height": s.height,
+        "pitch": s.pitch,
+        "format": {
+            "flags": hex(flags),
+            "fourcc": (fourcc != 0).then(|| hex(fourcc)),
+            "bits": bits,
+            "masks": [hex(r), hex(g), hex(b), hex(a)],
+        },
+        "caps": s.caps.map(hex),
+        "memory": s.memory,
+        "address": hex(s.address),
+        "locked": s.locked,
+        "lost": s.lost,
+        "keys": keys,
+        "palette": s.palette,
+        "clipper": s.clipper,
+        "root": s.root,
+        "attached": s.attached,
+        "version": s.version,
     })
 }

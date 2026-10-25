@@ -731,3 +731,44 @@ fn a_blit_through_a_color_key_leaves_the_keyed_pixels() {
     let pixels: Vec<u32> = (0..4).map(|i| peek(&cpu, data + PIXELS + 4 * i)).collect();
     assert_eq!(pixels, [0x0012_3456, 0xAA, 0x0012_3456, 0xBB00]);
 }
+
+#[test]
+fn a_debugger_sees_the_surfaces_their_keys_and_their_pixels() {
+    use rust_dos::win32::snapshot;
+    let (program, data) = color_key_program();
+    let mut cpu = machine("debug_surfaces", program);
+    run_until_done(&mut cpu, data);
+    let dd = snapshot::ddraw(&cpu);
+    let keyed: Vec<_> = dd.surfaces.iter().filter(|s| !s.keys.is_empty()).collect();
+    assert_eq!(keyed.len(), 1, "only the source has a key");
+    let source = keyed[0];
+    assert_eq!(
+        (source.width, source.height, source.memory),
+        (4, 1, "system")
+    );
+    assert_eq!(source.keys, [("src_blt", 0x00FF_00FF, 0x00FF_00FF)]);
+    assert_eq!(source.interfaces, [peek(&cpu, data + SOURCE)]);
+    let (w, h, rgba) = snapshot::surface_image(&cpu, source.id, true).unwrap();
+    assert_eq!((w, h), (4, 1));
+    let expected = [
+        [255, 0, 255, 0],
+        [0, 0, 0xAA, 255],
+        [255, 0, 255, 0],
+        [0, 0xBB, 0, 255],
+    ];
+    assert_eq!(rgba, expected.concat(), "the keyed pixels are transparent");
+    let (_, _, plain) = snapshot::surface_image(&cpu, source.id, false).unwrap();
+    assert_eq!(plain[3], 255, "without keyed, every pixel shows");
+    let offscreen = dd
+        .surfaces
+        .iter()
+        .find(|s| s.interfaces == [peek(&cpu, data + OFFSCREEN)])
+        .unwrap();
+    let (_, _, rgba) = snapshot::surface_image(&cpu, offscreen.id, false).unwrap();
+    assert_eq!(
+        rgba[..4],
+        [0x12, 0x34, 0x56, 255],
+        "the color fill the key left"
+    );
+    assert!(snapshot::surface_image(&cpu, 999, false).is_err());
+}
