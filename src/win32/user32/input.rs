@@ -4,12 +4,13 @@
 //! clipboard.
 //!
 //! The devices are read when time passes (`poll`, from thread::wake)
-//! while the desktop is on the screen. A key that goes down or up is a
-//! WM_KEYDOWN or WM_KEYUP for the focus (WM_SYSKEYDOWN with Alt held, or
-//! for the active window when nothing has the focus); a keystroke the
-//! BIOS got for a key that was already down is a repeat. The mouse's
-//! moves and buttons are messages for the window under the cursor, or
-//! for the window that has the capture.
+//! and when the program looks at its input, while the desktop is on the
+//! screen. A key that goes down or up is a WM_KEYDOWN or WM_KEYUP for
+//! the focus (WM_SYSKEYDOWN with Alt held, or for the active window when
+//! nothing has the focus); a keystroke the BIOS got for a key that was
+//! already down is a repeat. The mouse's moves and buttons are messages
+//! for the window under the cursor, or for the window that has the
+//! capture.
 //!
 //! The focus and the active window are the system's, not each thread's:
 //! GetFocus and GetActiveWindow give them to the thread they belong to.
@@ -342,6 +343,13 @@ fn char_of(vk: usize, keys: &dyn Fn(usize) -> u8) -> Option<u8> {
 /// Read the keyboard and the mouse: what they did since they were last
 /// read goes to the queues. DirectInput gets the keys that went down and
 /// up, also while the desktop isn't on the screen, when USER takes none.
+///
+/// It runs when time passes (thread::wake) and whenever the program
+/// looks at its input: when it takes or peeks at a message, asks what
+/// its queue has or waits for it, and gets or sets the cursor or the
+/// asynchronous keys. Windows' own input thread puts the devices' input
+/// in the queues as it comes, so the program sees a move or a key before
+/// it next asks, not only after the next interrupt.
 pub fn poll(cpu: &mut Cpu) {
     let desktop = cpu.bus.win32.user.desktop;
     if steers_with_mouse(cpu) {
@@ -1291,8 +1299,10 @@ pub fn get_key_state(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(v)
 }
 
-/// GetAsyncKeyState(vk): 8000h down, 1 pressed since the last call.
+/// GetAsyncKeyState(vk): 8000h down, 1 pressed since the last call; the
+/// devices as they are now.
 pub fn get_async_key_state(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    poll(cpu);
     let vk = args[0] as usize & 0xFF;
     let input = &mut user(cpu).input;
     if input.async_keys.len() < 256 {
@@ -1668,8 +1678,9 @@ pub fn mouse_event(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 // The cursor.
 
-/// GetCursorPos(point).
+/// GetCursorPos(point): where the mouse is now.
 pub fn get_cursor_pos(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    poll(cpu);
     let (x, y) = user(cpu).input.cursor;
     write_words(cpu, args[0], &[x as u32, y as u32]);
     if cpu.bus.guest_faulted() {
@@ -1678,8 +1689,11 @@ pub fn get_cursor_pos(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(TRUE)
 }
 
-/// SetCursorPos(x, y): the mouse goes there too.
+/// SetCursorPos(x, y): the mouse goes there too. What the mouse did
+/// before is read first: a button that went down while it was elsewhere
+/// went down there, not where the cursor is put.
 pub fn set_cursor_pos(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    poll(cpu);
     let input = &mut user(cpu).input;
     let (x, y) = clipped(input, args[0] as i32, args[1] as i32);
     input.cursor = (x, y);

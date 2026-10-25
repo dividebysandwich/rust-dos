@@ -1,9 +1,10 @@
 //! Reading the emulated devices for DirectInput, where USER32 reads them
 //! for its messages, so that both see every key and every move.
 //!
-//! USER32's `input::poll`, which runs when time passes, finds the keys
-//! that went down and up on the 8042 keyboard and hands each to `key`.
-//! Then `poll` reads the mouse (all its motion, which MouseState counts
+//! USER32's `input::poll`, which runs when time passes and when the
+//! program looks at its messages, finds the keys that went down and up
+//! on the 8042 keyboard and hands each to `key`. When time passes,
+//! `poll` then reads the mouse (all its motion, which MouseState counts
 //! whatever its cursor's range, and how often each button went down and
 //! up) and the game port's joysticks. The changes become each acquired
 //! device's state and buffered data, and set its event.
