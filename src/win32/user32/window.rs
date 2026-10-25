@@ -1770,8 +1770,9 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 // WM_ERASEBKGND), after its activation and before
                 // WM_WINDOWPOSCHANGED and its WM_PAINT, unless
                 // SWP_DEFERERASE says not to: a program that draws with
-                // GetDC in WM_PAINT keeps what it drew, as on Windows. A
-                // child waits for its BeginPaint.
+                // GetDC in WM_PAINT keeps what it drew, as on Windows. Its
+                // children, and a child window shown, wait for their
+                // BeginPaint.
                 let flags = cpu.bus.guest_read_32(winpos + 24);
                 let child = user(cpu)
                     .window(hwnd)
@@ -1781,7 +1782,7 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                     && !child
                     && user(cpu).is_visible(hwnd)
                 {
-                    let erase = super::paint::RDW_ERASENOW | super::paint::RDW_ALLCHILDREN;
+                    let erase = super::paint::RDW_ERASENOW | super::paint::RDW_NOCHILDREN;
                     return Next::call(address_of("RedrawWindow"), &[hwnd, 0, 0, erase], 5);
                 }
                 t.step = 5;
