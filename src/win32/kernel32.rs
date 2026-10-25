@@ -667,6 +667,13 @@ pub fn search_file(cpu: &mut Cpu, name: &str) -> Option<String> {
     path::search(cpu, None, name)
 }
 
+/// The program the command line `line` names first, as CreateProcessA
+/// finds it with no application name: its DOS path, and the text of the
+/// line that names it, without quotes (process.rs).
+pub fn program_in_line<'a>(cpu: &mut Cpu, line: &'a str) -> Option<(String, &'a str)> {
+    process::program_in_line(cpu, line)
+}
+
 /// A file read whole: its bytes, its DOS time and date, and its
 /// attributes.
 pub type FileData = (Vec<u8>, (u16, u16), u16);

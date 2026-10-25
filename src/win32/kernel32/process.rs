@@ -25,29 +25,30 @@ const SI_CB_RESERVED2: u32 = 50;
 const SI_RESERVED2: u32 = 52;
 const SI_STD_INPUT: u32 = 56;
 
-/// The DOS path of the program a command line names first, as Windows
-/// finds it with no application name: the quoted name, or for an unquoted
-/// one, the line up to each space or tab in turn, the shortest first,
-/// until one is a program (`find_program`). "C:\Program Files\Game\Game.exe
-/// -x" tries C:\Program, C:\Program Files\Game\Game.exe and stops there.
-fn program_in_line(cpu: &mut Cpu, line: &str) -> Option<String> {
+/// The program a command line names first, as Windows finds it with no
+/// application name: its DOS path, and the text of the line that names
+/// it. That is the quoted name, or for an unquoted one, the line up to
+/// each space or tab in turn, the shortest first, until one is a program
+/// (`find_program`). "C:\Program Files\Game\Game.exe -x" tries
+/// C:\Program, C:\Program Files\Game\Game.exe and stops there.
+pub(super) fn program_in_line<'a>(cpu: &mut Cpu, line: &'a str) -> Option<(String, &'a str)> {
     let line = line.trim_start();
     if let Some(rest) = line.strip_prefix('"') {
-        return find_program(cpu, rest.split('"').next().unwrap_or(rest));
+        let name = rest.split('"').next().unwrap_or(rest);
+        return Some((find_program(cpu, name)?, name));
     }
-    let ends: Vec<usize> = line
-        .char_indices()
-        .filter(|&(i, c)| matches!(c, ' ' | '\t') && !line[..i].ends_with([' ', '\t']))
+    line.match_indices([' ', '\t'])
         .map(|(i, _)| i)
         .chain([line.len()])
-        .filter(|&i| i > 0)
-        .collect();
-    ends.into_iter().find_map(|end| find_program(cpu, &line[..end]))
+        .filter(|&i| i > 0 && !line[..i].ends_with([' ', '\t']))
+        .find_map(|end| Some((find_program(cpu, &line[..end])?, &line[..end])))
 }
 
-/// The DOS path of the program `name`: as named, with ".EXE" added if it
-/// has no extension, looked for where it says, in the directory of the
-/// running program, then in the directories of PATH.
+/// The DOS path of the program `name`, with ".EXE" added if it has no
+/// extension: there if it has a directory in it, else where SearchPathA
+/// looks (the running program's directory, the current one, the system
+/// and Windows directories, then PATH). A directory isn't a program, so
+/// a name that is one isn't found.
 fn find_program(cpu: &mut Cpu, name: &str) -> Option<String> {
     let file = name.rsplit(['\\', '/']).next().unwrap_or(name);
     let name = if file.contains('.') {
@@ -55,28 +56,8 @@ fn find_program(cpu: &mut Cpu, name: &str) -> Option<String> {
     } else {
         format!("{}.EXE", name)
     };
-    let mut candidates = vec![name.clone()];
-    if !name.contains(['\\', '/', ':']) {
-        let own = process(cpu).path.clone();
-        if let Some(i) = own.rfind('\\') {
-            candidates.push(format!("{}\\{}", &own[..i], name));
-        }
-        let path = process(cpu)
-            .environment
-            .iter()
-            .find_map(|v| {
-                let (k, value) = v.split_once('=')?;
-                k.eq_ignore_ascii_case("PATH").then(|| value.to_string())
-            })
-            .unwrap_or_default();
-        for dir in path.split(';').filter(|d| !d.is_empty()) {
-            candidates.push(format!("{}\\{}", dir.trim_end_matches('\\'), name));
-        }
-    }
-    candidates.into_iter().find_map(|c| {
-        let path = cpu.program_path(&c);
-        cpu.bus.disk.exists(&path).then_some(path)
-    })
+    let found = super::path::search(cpu, None, &name)?;
+    Some(cpu.program_path(&super::path::dos_path(&found)))
 }
 
 /// The environment block at `at`: "NAME=value" strings, each ended by a
@@ -177,7 +158,7 @@ pub(crate) fn spawn(
 ) -> Result<[u32; 4], u32> {
     let path = match (app, line) {
         (Some(app), _) => find_program(cpu, app),
-        (None, Some(line)) => program_in_line(cpu, line),
+        (None, Some(line)) => program_in_line(cpu, line).map(|(path, _)| path),
         (None, None) => return Err(ERROR_INVALID_PARAMETER),
     }
     .ok_or(ERROR_FILE_NOT_FOUND)?;
