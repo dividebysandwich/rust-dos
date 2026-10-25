@@ -54,7 +54,7 @@ fn find_program(cpu: &mut Cpu, name: &str) -> Option<String> {
             .environment
             .iter()
             .find_map(|v| {
-                let (k, value) = v.split_once('=')?;
+                let (k, value) = crate::win32::split_variable(v)?;
                 k.eq_ignore_ascii_case("PATH").then(|| value.to_string())
             })
             .unwrap_or_default();

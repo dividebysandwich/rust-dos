@@ -340,7 +340,7 @@ pub(super) fn get_short_path_name(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 fn environment(cpu: &mut Cpu, name: &str) -> Option<String> {
     let process = crate::win32::process(cpu);
     let i = super::variable(process, name)?;
-    let value = process.environment[i].split_once('=')?.1;
+    let value = crate::win32::split_variable(&process.environment[i])?.1;
     (!value.is_empty()).then(|| value.to_string())
 }
 

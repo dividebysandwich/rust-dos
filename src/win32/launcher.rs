@@ -128,7 +128,7 @@ fn temp_directory(cpu: &mut Cpu) -> Option<String> {
     let environment = super::dos_environment(cpu, cpu.current_psp);
     let variable = |name: &str| {
         environment.iter().find_map(|entry| {
-            let (key, value) = entry.split_once('=')?;
+            let (key, value) = super::split_variable(entry)?;
             key.eq_ignore_ascii_case(name)
                 .then(|| value.trim().to_string())
         })

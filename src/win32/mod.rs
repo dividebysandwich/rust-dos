@@ -766,6 +766,14 @@ fn dos_environment(cpu: &mut Cpu, psp: u16) -> Vec<String> {
     strings
 }
 
+/// The name and value of an environment string, "NAME=value", split at
+/// its first "=" after the first character: a name can start with one, as
+/// the current directory of each drive does ("=C:=C:\GAMES").
+fn split_variable(entry: &str) -> Option<(&str, &str)> {
+    let (at, _) = entry.char_indices().skip(1).find(|&(_, c)| c == '=')?;
+    Some((&entry[..at], &entry[at + 1..]))
+}
+
 /// End the running process with exit code `code`: its threads end, its
 /// handles close and its memory goes back to the pool. Another process's
 /// thread runs on; when there is none, back in real mode, the DOS process

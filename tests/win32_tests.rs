@@ -2900,3 +2900,49 @@ fn a_program_catches_its_cxx_exceptions() {
     assert_eq!(text, "f\r\n");
     assert_eq!(code, 0);
 }
+
+/// A drive's current directory as MSVCRT's _chdir keeps it, in a variable
+/// whose name starts with "=", set and read back; a name with "=" further
+/// on is refused. A bit each in the exit code.
+#[test]
+fn a_variable_name_can_start_with_an_equals_sign() {
+    let names: &[&str] = &["SetEnvironmentVariableA", "GetEnvironmentVariableA"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = vec![0u8; 0x40];
+    data[..4].copy_from_slice(b"=D:\0");
+    data[4..8].copy_from_slice(b"D:\\\0");
+    data[8..12].copy_from_slice(b"A=B\0");
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        a.xor(ebx, ebx)?;
+        // SetEnvironmentVariableA("=D:", "D:\") succeeds.
+        a.push(l.at(4) as i32)?;
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(0))?;
+        a.test(eax, eax)?;
+        a.setne(bl)?;
+        // GetEnvironmentVariableA("=D:") gives "D:\", 3 long.
+        a.push(0x20)?;
+        a.push(l.at(0x20) as i32)?;
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(1))?;
+        a.cmp(eax, 3)?;
+        a.sete(al)?;
+        a.shl(al, 1)?;
+        a.or(bl, al)?;
+        a.cmp(dword_ptr(l.at(0x20)), 0x005C_3A44)?;
+        a.sete(al)?;
+        a.shl(al, 2)?;
+        a.or(bl, al)?;
+        // SetEnvironmentVariableA("A=B", "D:\") fails.
+        a.push(l.at(4) as i32)?;
+        a.push(l.at(8) as i32)?;
+        a.call(l.import(0))?;
+        a.test(eax, eax)?;
+        a.sete(al)?;
+        a.shl(al, 3)?;
+        a.or(bl, al)?;
+        a.movzx(eax, bl)?;
+        a.ret()
+    });
+    assert_eq!(run("drive_variable", exe).0, 0b1111);
+}
