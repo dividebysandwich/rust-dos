@@ -6,17 +6,17 @@
 
 ## Introduction
 
-Rust-DOS is a DOS emulator aimed at the golden age of DOS gaming, from
-the early days to the Windows 95 and 98 years. DOS games run on its
-built-in DOS, with no copy of MS-DOS needed. Windows 95 and 98 games run
-in a real copy of Windows booted from a disk image, as
-[docs/win9x-howto.md](docs/win9x-howto.md) describes.
+Rust-DOS is an emulator for PC games, from the early DOS days to the
+Windows 95 and 98 years.
 
-Rust-DOS also has a built-in Windows that runs Windows 95 and 98 games
-without a Windows image. It is experimental and under active
-development. Some games already run well on it, and more are tested and
-fixed all the time. [Windows games](CONFIGURATION.md#windows-games) says
-how to set one up.
+* **DOS games** run on its built-in DOS. No copy of MS-DOS is needed.
+* **Windows 95 and 98 games** run one of two ways:
+  * in a real copy of Windows, booted from a disk image
+    ([docs/win9x-howto.md](docs/win9x-howto.md));
+  * on its built-in Windows, with no Windows image needed
+    ([Windows games](CONFIGURATION.md#windows-games)). This is
+    experimental and under active development: some games already run
+    well, and more are tested and fixed all the time.
 
 Rust-DOS as a whole is a work in progress, and some games and programs
 may not run yet.
