@@ -8,12 +8,18 @@
 
 Rust-DOS is a DOS emulator aimed at the golden age of DOS gaming, from
 the early days to the Windows 95 and 98 years. DOS games run on its
-built-in DOS. Windows 95 and 98 games run in a real Windows booted from
-a disk image ([Windows 95](CONFIGURATION.md#windows-95),
-[Windows 98](CONFIGURATION.md#windows-98),
-[docs/win9x-howto.md](docs/win9x-howto.md)), and some of them run on its
-[built-in Windows](CONFIGURATION.md#windows-games) without one. It is a
-work in progress and some games and programs may not run yet.
+built-in DOS, with no copy of MS-DOS needed. Windows 95 and 98 games run
+in a real copy of Windows booted from a disk image, as
+[docs/win9x-howto.md](docs/win9x-howto.md) describes.
+
+Rust-DOS also has a built-in Windows that runs Windows 95 and 98 games
+without a Windows image. It is experimental and under active
+development. Some games already run well on it, and more are tested and
+fixed all the time. [Windows games](CONFIGURATION.md#windows-games) says
+how to set one up.
+
+Rust-DOS as a whole is a work in progress, and some games and programs
+may not run yet.
 
 *Rust-DOS is looking for contributors!*
 
@@ -40,8 +46,7 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   setup programs of InstallShield 5, InstallShield 3 with its 32-bit
   engine, and Wise. It is newer than booting Windows and runs fewer
   games: a program that calls a function it doesn't have stops with a
-  message naming it. Unreal Gold, Incoming and Expendable run on it
-  ([docs/native-windows.md](docs/native-windows.md))
+  message naming it ([docs/native-windows.md](docs/native-windows.md))
 * **Graphics:** text, CGA with composite artifact colours, EGA, VGA with
   Mode X, VESA VBE 2.0 up to 1024x768, a Tseng ET4000 with HiColor, an S3
   Trio64 with its 2D accelerator, an
