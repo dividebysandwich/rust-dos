@@ -284,6 +284,7 @@ pub const TOP_BLENDTEXTUREALPHA: u32 = 13;
 pub const TA_DIFFUSE: u32 = 0;
 pub const TA_CURRENT: u32 = 1;
 pub const TA_TEXTURE: u32 = 2;
+pub const TA_TFACTOR: u32 = 3;
 
 pub const TRANSFORMS: usize = 24;
 

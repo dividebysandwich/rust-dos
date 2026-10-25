@@ -37,11 +37,11 @@
 use super::super::surface::{self, DDPF_PALETTEINDEXED8, KEY_SRC_BLT, MEM_CARD, Surface};
 use super::super::{current_pid, display, state, voodoo};
 use super::device::{
-    Device, RS_FOGENABLE, RS_FOGTABLEMODE, RS_SPECULARENABLE, RS_TEXTUREMAPBLEND, RS_ZENABLE,
-    RS_ZFUNC, RS_ZWRITEENABLE, TA_TEXTURE, TOP_ADD, TOP_BLENDTEXTUREALPHA, TOP_DISABLE,
-    TOP_SELECTARG1, TOP_SELECTARG2, TSS_ADDRESSU, TSS_ADDRESSV, TSS_ALPHAARG1, TSS_ALPHAARG2,
-    TSS_ALPHAOP, TSS_COLORARG1, TSS_COLORARG2, TSS_COLOROP, TSS_MAGFILTER, TSS_MINFILTER,
-    TSS_MIPFILTER,
+    Device, RS_FOGENABLE, RS_FOGTABLEMODE, RS_SPECULARENABLE, RS_TEXTUREFACTOR, RS_TEXTUREMAPBLEND,
+    RS_ZENABLE, RS_ZFUNC, RS_ZWRITEENABLE, TA_TEXTURE, TA_TFACTOR, TOP_ADD, TOP_BLENDTEXTUREALPHA,
+    TOP_DISABLE, TOP_MODULATE, TOP_SELECTARG1, TOP_SELECTARG2, TSS_ADDRESSU, TSS_ADDRESSV,
+    TSS_ALPHAARG1, TSS_ALPHAARG2, TSS_ALPHAOP, TSS_COLORARG1, TSS_COLORARG2, TSS_COLOROP,
+    TSS_MAGFILTER, TSS_MINFILTER, TSS_MIPFILTER,
 };
 use super::pipeline::{self, Rasterizer, ScreenVertex, Setup};
 use crate::cpu::Cpu;
@@ -507,72 +507,103 @@ fn fbi_combine(cpu: &mut Cpu, d: &Device, textured: bool, diffuse_alpha: bool) {
     let it = api::COMBINE_LOCAL_ITERATED;
     let (other_tex, other_it) = (api::COMBINE_OTHER_TEXTURE, api::COMBINE_OTHER_ITERATED);
     let arg_is_texture = |arg: u32| textured && arg & 0xF == TA_TEXTURE;
-    let pick = |op: u32, a1: u32, a2: u32| -> (u32, u32, u32) {
+    // D3DTA_TFACTOR: the texture factor, the card's constant color.
+    let arg_is_factor = |arg: u32| arg & 0xF == TA_TFACTOR;
+    let other_of = |arg: u32| {
+        if arg_is_texture(arg) {
+            other_tex
+        } else if arg_is_factor(arg) {
+            api::COMBINE_OTHER_CONSTANT
+        } else {
+            other_it
+        }
+    };
+    let local_of = |arg: u32| {
+        if arg_is_factor(arg) {
+            api::COMBINE_LOCAL_CONSTANT
+        } else {
+            it
+        }
+    };
+    // The function, its factor, the local and the other color.
+    let pick = |op: u32, a1: u32, a2: u32| -> (u32, u32, u32, u32) {
         use api::*;
         let scale = COMBINE_FUNCTION_SCALE_OTHER;
         let any_texture = arg_is_texture(a1) || arg_is_texture(a2);
-        if !any_texture {
-            // The diffuse color, which is the current one here too.
-            return (scale, COMBINE_FACTOR_ONE, other_it);
+        if matches!(op, TOP_SELECTARG1 | TOP_SELECTARG2) {
+            let arg = if op == TOP_SELECTARG1 { a1 } else { a2 };
+            return (scale, COMBINE_FACTOR_ONE, it, other_of(arg));
         }
-        match op {
-            TOP_SELECTARG1 | TOP_SELECTARG2 => {
-                let arg = if op == TOP_SELECTARG1 { a1 } else { a2 };
-                let other = if arg_is_texture(arg) {
-                    other_tex
+        if !any_texture {
+            if arg_is_factor(a1) != arg_is_factor(a2) && matches!(op, TOP_MODULATE | TOP_ADD) {
+                // The diffuse color with the texture factor.
+                let f = if op == TOP_ADD {
+                    COMBINE_FUNCTION_SCALE_OTHER_ADD_LOCAL
                 } else {
-                    other_it
+                    scale
                 };
-                (scale, COMBINE_FACTOR_ONE, other)
+                let factor = if op == TOP_ADD {
+                    COMBINE_FACTOR_ONE
+                } else {
+                    COMBINE_FACTOR_LOCAL
+                };
+                return (f, factor, it, COMBINE_OTHER_CONSTANT);
             }
+            // The diffuse color, which is the current one here too.
+            return (scale, COMBINE_FACTOR_ONE, it, other_it);
+        }
+        // The argument that isn't the texture is the local color.
+        let rest = if arg_is_texture(a1) { a2 } else { a1 };
+        match op {
             TOP_ADD => (
                 COMBINE_FUNCTION_SCALE_OTHER_ADD_LOCAL,
                 COMBINE_FACTOR_ONE,
+                local_of(rest),
                 other_tex,
             ),
             // SUBTRACT: the texture less the diffuse color.
             10 => (
                 COMBINE_FUNCTION_SCALE_OTHER_MINUS_LOCAL,
                 COMBINE_FACTOR_ONE,
+                local_of(rest),
                 other_tex,
             ),
             // BLENDDIFFUSEALPHA.
             12 => (
                 COMBINE_FUNCTION_SCALE_OTHER_MINUS_LOCAL_ADD_LOCAL,
                 COMBINE_FACTOR_LOCAL_ALPHA,
+                local_of(rest),
                 other_tex,
             ),
             TOP_BLENDTEXTUREALPHA => (
                 COMBINE_FUNCTION_SCALE_OTHER_MINUS_LOCAL_ADD_LOCAL,
                 COMBINE_FACTOR_TEXTURE_ALPHA,
+                local_of(rest),
                 other_tex,
             ),
             // MODULATE, MODULATE2X and 4X, and the rest.
-            _ => (scale, COMBINE_FACTOR_LOCAL, other_tex),
+            _ => (scale, COMBINE_FACTOR_LOCAL, local_of(rest), other_tex),
         }
     };
-    let (f, factor, other) = pick(
-        d.stage(0, TSS_COLOROP),
-        d.stage(0, TSS_COLORARG1),
-        d.stage(0, TSS_COLORARG2),
-    );
-    api::color_combine(cpu, f, factor, it, other, false);
+    let (a1, a2) = (d.stage(0, TSS_COLORARG1), d.stage(0, TSS_COLORARG2));
     let alpha_op = if diffuse_alpha {
         TOP_SELECTARG2
     } else {
         d.stage(0, TSS_ALPHAOP)
     };
-    let (f, factor, other) = pick(
-        alpha_op,
-        d.stage(0, TSS_ALPHAARG1),
-        d.stage(0, TSS_ALPHAARG2),
-    );
+    let (aa1, aa2) = (d.stage(0, TSS_ALPHAARG1), d.stage(0, TSS_ALPHAARG2));
+    if [a1, a2, aa1, aa2].into_iter().any(arg_is_factor) {
+        api::constant_color_value(cpu, d.state(RS_TEXTUREFACTOR));
+    }
+    let (f, factor, local, other) = pick(d.stage(0, TSS_COLOROP), a1, a2);
+    api::color_combine(cpu, f, factor, local, other, false);
+    let (f, factor, local, other) = pick(alpha_op, aa1, aa2);
     // The alpha unit's factor is alpha already.
     let factor = match factor {
         api::COMBINE_FACTOR_LOCAL => api::COMBINE_FACTOR_LOCAL_ALPHA,
         f => f,
     };
-    api::alpha_combine(cpu, f, factor, it, other, false);
+    api::alpha_combine(cpu, f, factor, local, other, false);
 }
 
 /// Whether the card can do a stage's operation, for ValidateDevice.
@@ -700,7 +731,7 @@ fn in_place(cpu: &mut Cpu, id: u32, key: bool) -> Option<InPlace> {
     let (_, pitch) = surface::card_memory(cpu, id)?;
     let s = state(cpu).surface(id)?.clone();
     let (w, h) = (s.width, s.height);
-    if !w.is_power_of_two() || !h.is_power_of_two() || w.max(h) > 256 {
+    if !w.is_power_of_two() || !h.is_power_of_two() || w.max(h) > 256 || w.max(h) < 2 {
         return None;
     }
     if w > 8 * h || h > 8 * w {
@@ -1026,6 +1057,12 @@ fn pow2(n: u32) -> u32 {
 fn image(cpu: &mut Cpu, id: u32, keyed: bool) -> Option<Image> {
     let s = state(cpu).surface(id)?.clone();
     let (mut w, mut h) = (pow2(s.width), pow2(s.height));
+    // A texture unit whose largest level is the 1x1 one (LODMIN 8) is
+    // off, which is how Glide turns one off, so a 1x1 texture is drawn
+    // as a 2x2 one.
+    if w.max(h) == 1 {
+        (w, h) = (2, 2);
+    }
     if w > 8 * h {
         h = w / 8;
     }
