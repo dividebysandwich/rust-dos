@@ -567,7 +567,7 @@ pub fn find_executable(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     // The program alone, as CreateProcessA finds it in the line; one that
     // isn't there is what is in the quotes, or before the first space.
     let program = match crate::win32::kernel32::program_in_line(cpu, &line) {
-        Some((_, name)) => name.to_string(),
+        Some(found) => found.name.to_string(),
         None => match line.strip_prefix('"') {
             Some(rest) => rest.split('"').next().unwrap_or(rest).to_string(),
             None => line.split(' ').next().unwrap_or(&line).to_string(),

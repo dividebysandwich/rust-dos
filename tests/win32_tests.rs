@@ -585,8 +585,7 @@ fn a_program_uses_the_heap_tls_environment_and_exports() {
 /// program started, waited for and its exit code read.
 fn start_child(test: &str, line: &str, child: &str, dirs: &[&str]) -> u8 {
     let child_program = {
-        let imports: &[(&str, &[&str])] =
-            &[("KERNEL32.DLL", &["GetCommandLineA", "ExitProcess"])];
+        let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["GetCommandLineA", "ExitProcess"])];
         program(BASE, false, imports, &[0; 4], |a, l| {
             a.call(l.import(0))?;
             a.cmp(byte_ptr(eax), b'"' as i32)?;
@@ -719,11 +718,15 @@ fn win_exec_starts_a_program_or_says_why_not() {
 /// spaces in its name: the program is found by the line up to each space
 /// in turn ("V1.0", "V1.0 GAME\C.EXE"), as Windows finds it, and starts.
 /// The folder V1.0 isn't a program, so the search goes on past it. The
-/// program gets its name in quotes, as on Windows 98, so 81h.
+/// program gets its name in quotes, as on Windows 98, so 81h, also when
+/// blanks come before it.
 #[test]
 fn an_unquoted_program_path_with_spaces_is_found() {
     let line = "V1.0 GAME\\C.EXE an argument";
     let code = start_child("unquoted_path", line, "V1.0 GAME/C.EXE", &["V1.0"]);
+    assert_eq!(code, 0x81);
+    let line = " \tV1.0 GAME\\C.EXE an argument";
+    let code = start_child("unquoted_path_blanks", line, "V1.0 GAME/C.EXE", &["V1.0"]);
     assert_eq!(code, 0x81);
 }
 
