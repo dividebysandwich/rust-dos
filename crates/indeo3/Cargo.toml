@@ -1,0 +1,10 @@
+[package]
+name = "rust-dos-indeo3"
+description = "Intel Indeo Video 3 (IV31 and IV32) decoder, ported from FFmpeg, for the built-in Windows' Video for Windows codec"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
