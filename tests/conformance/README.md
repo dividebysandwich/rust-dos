@@ -35,6 +35,10 @@ changes listed below:
   `refcount.c`, `visual.c` from `dlls/ddraw/tests/`. `d3d.c` and
   `visual.c` test Direct3D, and run with a Voodoo3 as the display
   adapter, whose HAL is Direct3D's device.
+- `d3d8/`: `buffer.c`, `d3d8_main.c`, `device.c`, `stateblock.c`,
+  `surface.c`, `texture.c`, `visual.c`, `volume.c` from
+  `dlls/d3d8/tests/`. They run with a Voodoo3 as the display adapter
+  too, whose HAL is D3D8.DLL's device.
 - `dsound/`: `capture.c`, `ds3d.c`, `ds3d8.c`, `dsound.c`, `dsound8.c`,
   `propset.c` and the header they share, `dsound_test.h`, from
   `dlls/dsound/tests/`.
@@ -294,6 +298,33 @@ The results that aren't clean, and why:
   `2911` to `2915` want colors within 1 of 0x002B7F and 0xF9E814.
   `943` wants destination alpha, which a 565 shadow doesn't have.
   `2680` skips: there are no cube maps.
+- d3d8: the device does its vertex processing in software only, as
+  3dfx's DirectX 8 driver for the Voodoo3 had it, so the tests that
+  create a device with D3DCREATE_HARDWARE_VERTEXPROCESSING skip:
+  `buffer.c:65`, `device.c:1271`, `1359` and `1869`. `device.c:1418`
+  skips as there is no stencil buffer (D3DFMT_D24S8), `532` and `541`
+  as there are no cube and volume textures, `1136` and `visual.c:1631`
+  as there are no pixel shaders, and `volume.c:146` as there are no
+  volume textures. `texture.c:116`: a cube texture in the scratch pool
+  should be made without D3DPTEXTURECAPS_CUBEMAP, and none are.
+- d3d8 `device.c:1612`, `1749` and `1764`: the focus is USER32's one
+  for all threads, where Windows keeps one for each thread's input,
+  so a window another thread activates takes it from the test's
+  thread. `1629`: a full-screen device's focus window doesn't get
+  WM_SETFOCUS, as DirectDraw's exclusive mode doesn't set the focus.
+  The test then does not end: the thread that made the dummy window
+  destroys it, USER32 activates the test's window with a message sent
+  to the main thread, and that thread is waiting for the other to
+  end. Its summary is missing for that reason; its checks before
+  the end are in the results.
+- d3d8 `visual.c`: as with ddraw's, the 3D engine draws 16-bit color.
+  `888` and `896` blend to 0xBD4100 where the test wants 0xBF4000
+  within 1, and `1411` to `1415` want colors within 1 of 0x002B7F and
+  0xF9E814. `892` wants destination alpha, which a 565 shadow doesn't
+  have. `1279`: BLENDTEXTUREALPHA with the texture factor as an
+  argument comes to 0x10AE10 where the test wants 0x14AD14 within 3.
+  `949` skips as there are no P8 textures, and `1262` skips the
+  texture operations the card's combine units don't do.
 
 - winmm `mci.c:438` skips its recording tests, as there is no wave
   input device, and `515`, `634` and `870` skip the plays of the file

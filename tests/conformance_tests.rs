@@ -472,8 +472,9 @@ fn wine_conformance_tests_give_the_expected_results() {
                     // dinput's joystick.c tests the joysticks there are.
                     let joystick = dll == "dinput";
                     // ddraw's d3d.c and visual.c test Direct3D, which
-                    // has a device on a 3dfx card.
-                    let voodoo3 = dll == "ddraw" && ["d3d", "visual"].contains(&unit.as_str());
+                    // has a device on a 3dfx card, and so do d3d8's.
+                    let voodoo3 = dll == "ddraw" && ["d3d", "visual"].contains(&unit.as_str())
+                        || dll == "d3d8";
                     let (output, exit) = run(&dir, &name, &unit, model, joystick, voodoo3);
                     fs::write(dir.join(format!("{}.log", unit)), &output).unwrap();
                     results(&output, exit)
