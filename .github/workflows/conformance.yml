@@ -1,8 +1,10 @@
 name: Conformance
 
 # Wine's conformance tests under the built-in Windows
-# (tests/conformance_tests.rs). They need MinGW, so they run in a job of
-# their own: on changes to what they test, every night, and by hand.
+# (tests/conformance_tests.rs), and those ported to Windows 3.1 programs
+# (tests/win16_conformance_tests.rs). They need MinGW and OpenWatcom, so
+# they run in jobs of their own: on changes to what they test, every
+# night, and by hand.
 on:
   push:
     paths: &paths
@@ -22,8 +24,12 @@ on:
       - "crates/mpu401/**"
       - "src/cdrom/audio.rs"
       - "src/interrupts/int21.rs"
+      - "src/win16/**"
+      - "crates/ne/**"
       - "tests/conformance/**"
       - "tests/conformance_tests.rs"
+      - "tests/conformance16/**"
+      - "tests/win16_conformance_tests.rs"
       - ".github/workflows/conformance.yml"
   pull_request:
     paths: *paths
@@ -80,3 +86,49 @@ jobs:
         with:
           name: conformance-logs
           path: target/conformance/**/*.log
+
+  win16:
+    runs-on: ubuntu-latest
+    env:
+      # OpenWatcom's snapshot of 2026-10-01, the one
+      # tests/conformance16/expected.txt was made with.
+      OW_URL: https://github.com/open-watcom/open-watcom-v2/releases/download/2026-10-01-Build/ow-snapshot.tar.xz
+      OW_SHA256: e6aa1b1e40ac8bbf97658d2c70fff8a4242d6ca4a1c60806f2baa5317083d4fe
+    steps:
+      - name: Install build environment
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends             libsdl2-dev libasound2-dev
+
+      - name: Install OpenWatcom
+        run: |
+          curl -fsSL -o ow.tar.xz "$OW_URL"
+          echo "$OW_SHA256  ow.tar.xz" | sha256sum -c -
+          mkdir "$RUNNER_TEMP/watcom"
+          tar -xJf ow.tar.xz -C "$RUNNER_TEMP/watcom"
+          rm ow.tar.xz
+          echo "WATCOM=$RUNNER_TEMP/watcom" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/watcom/binl64" >> "$GITHUB_PATH"
+          echo "$RUNNER_TEMP/watcom/binl" >> "$GITHUB_PATH"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: conformance16
+
+      - name: Run the Win16 conformance tests
+        env:
+          CONFORMANCE_REQUIRED: "1"
+        run: cargo test --locked --release --test win16_conformance_tests
+
+      - name: Keep the test programs' output
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: conformance16-logs
+          path: target/conformance16/**/*.log
