@@ -44,7 +44,20 @@ fn program(
     data: &[u8],
     f: impl FnOnce(&mut CodeAssembler, &Layout) -> Result<(), IcedError>,
 ) -> Vec<u8> {
+    program_for(pe::SUBSYSTEM_CONSOLE, base, relocatable, imports, data, f)
+}
+
+/// `program`, for the subsystem `subsystem`: a console or a GUI one.
+fn program_for(
+    subsystem: u16,
+    base: u32,
+    relocatable: bool,
+    imports: &[(&str, &[&str])],
+    data: &[u8],
+    f: impl FnOnce(&mut CodeAssembler, &Layout) -> Result<(), IcedError>,
+) -> Vec<u8> {
     let mut b = Builder::exe(base);
+    b.subsystem(subsystem);
     let lists: Vec<Vec<Imp>> = imports
         .iter()
         .map(|(_, names)| names.iter().map(|n| Imp::Name(n)).collect())
@@ -2899,4 +2912,483 @@ fn a_program_catches_its_cxx_exceptions() {
     let (code, text) = run("msvcrt_cxx", exe);
     assert_eq!(text, "f\r\n");
     assert_eq!(code, 0);
+}
+
+const GENERIC_WRITE: i32 = 0x4000_0000;
+const CREATE_ALWAYS: i32 = 2;
+const INFINITE: i32 = -1;
+const WAIT_TIMEOUT: i32 = 0x102;
+const WAIT_FAILED: i32 = -1;
+const WM_CLOSE: i32 = 0x0010;
+const WS_POPUP: i32 = 0x8000_0000u32 as i32;
+
+/// A program for `subsystem` importing `kernel32` from KERNEL32 and
+/// `user32` from USER32, with `data` and the code `f` makes, which is
+/// given the import address table slot of a function by its name.
+fn win_program(
+    subsystem: u16,
+    kernel32: &[&str],
+    user32: &[&str],
+    data: &[u8],
+    f: impl FnOnce(
+        &mut CodeAssembler,
+        &Layout,
+        &dyn Fn(&str) -> AsmMemoryOperand,
+    ) -> Result<(), IcedError>,
+) -> Vec<u8> {
+    let mut imports: Vec<(&str, &[&str])> = vec![("KERNEL32.DLL", kernel32)];
+    if !user32.is_empty() {
+        imports.push(("USER32.DLL", user32));
+    }
+    let names: Vec<&str> = kernel32.iter().chain(user32).copied().collect();
+    program_for(subsystem, BASE, false, &imports, data, |a, l| {
+        let slot = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        f(a, l, &slot)
+    })
+}
+
+/// A GUI program that works for 300 ms, writes the file `name` and only
+/// then gets messages, from a timer whose first one ends it: until then
+/// it isn't idle.
+fn works_then_waits_for_input(name: &str) -> Vec<u8> {
+    let kernel32 = ["Sleep", "CreateFileA", "CloseHandle", "ExitProcess"];
+    let user32 = ["SetTimer", "GetMessageA"];
+    // The file's name, then a MSG at 0x20.
+    let mut data = name.as_bytes().to_vec();
+    data.resize(0x40, 0);
+    win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        a.push(300)?;
+        a.call(f("Sleep"))?;
+        push_args(
+            a,
+            &[l.at(0) as i32, GENERIC_WRITE, 0, 0, CREATE_ALWAYS, 0, 0],
+        )?;
+        a.call(f("CreateFileA"))?;
+        a.push(eax)?;
+        a.call(f("CloseHandle"))?;
+        push_args(a, &[0, 0, 100, 0])?;
+        a.call(f("SetTimer"))?;
+        push_args(a, &[l.at(0x20) as i32, 0, 0, 0])?;
+        a.call(f("GetMessageA"))?;
+        a.push(0)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    })
+}
+
+/// A program for `subsystem` that never gets messages: it sleeps until
+/// it is ended.
+fn never_waits_for_input(subsystem: u16) -> Vec<u8> {
+    win_program(subsystem, &["Sleep"], &[], &[0; 4], |a, _, f| {
+        a.push(INFINITE)?;
+        a.call(f("Sleep"))?;
+        a.int3()
+    })
+}
+
+/// A console program that works for 300 ms, writes the file `name` and
+/// ends.
+fn console_writes(name: &str) -> Vec<u8> {
+    let kernel32 = ["Sleep", "CreateFileA", "CloseHandle", "ExitProcess"];
+    let mut data = name.as_bytes().to_vec();
+    data.resize(0x20, 0);
+    win_program(pe::SUBSYSTEM_CONSOLE, &kernel32, &[], &data, |a, l, f| {
+        a.push(300)?;
+        a.call(f("Sleep"))?;
+        push_args(
+            a,
+            &[l.at(0) as i32, GENERIC_WRITE, 0, 0, CREATE_ALWAYS, 0, 0],
+        )?;
+        a.call(f("CreateFileA"))?;
+        a.push(eax)?;
+        a.call(f("CloseHandle"))?;
+        a.push(0)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    })
+}
+
+/// Run T.EXE, which starts the other programs of `files`, to its end:
+/// its exit code.
+fn run_family(test: &str, files: &[(&str, Vec<u8>)]) -> u8 {
+    let mut cpu = Cpu::new(scratch(test, files));
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    assert!(run_to_exit(&mut cpu, 400), "{}", printed(&cpu));
+    cpu.errorlevel
+}
+
+/// Set bit `bit` of EBX if the condition `cc` sets AL.
+fn bit_if(
+    a: &mut CodeAssembler,
+    cc: fn(&mut CodeAssembler, AsmRegister8) -> Result<(), IcedError>,
+    bit: u32,
+) -> Result<(), IcedError> {
+    cc(a, al)?;
+    a.movzx(eax, al)?;
+    a.shl(eax, bit)?;
+    a.or(ebx, eax)
+}
+
+fn eq(a: &mut CodeAssembler, r: AsmRegister8) -> Result<(), IcedError> {
+    a.sete(r)
+}
+
+fn ne(a: &mut CodeAssembler, r: AsmRegister8) -> Result<(), IcedError> {
+    a.setne(r)
+}
+
+/// CreateProcessA of the command line at `line` of the data, with the
+/// STARTUPINFO at 0x40 and the PROCESS_INFORMATION at 0x90.
+fn start_child(
+    a: &mut CodeAssembler,
+    l: &Layout,
+    f: &dyn Fn(&str) -> AsmMemoryOperand,
+    line: u32,
+) -> Result<(), IcedError> {
+    a.push(l.at(0x90) as i32)?;
+    a.push(l.at(0x40) as i32)?;
+    for _ in 0..6 {
+        a.push(0)?;
+    }
+    a.push(l.at(line) as i32)?;
+    a.push(0)?;
+    a.call(f("CreateProcessA"))
+}
+
+/// WaitForInputIdle of the process at 0x90 for `ms`.
+fn idle(
+    a: &mut CodeAssembler,
+    l: &Layout,
+    f: &dyn Fn(&str) -> AsmMemoryOperand,
+    ms: i32,
+) -> Result<(), IcedError> {
+    a.push(ms)?;
+    a.push(dword_ptr(l.at(0x90)))?;
+    a.call(f("WaitForInputIdle"))
+}
+
+/// Data with `texts` at their offsets, a STARTUPINFO at 0x40 and room
+/// for a PROCESS_INFORMATION at 0x90 and more up to 0x100.
+fn child_data(texts: &[(usize, &str)]) -> Vec<u8> {
+    let mut data = Vec::new();
+    for &(at, text) in texts {
+        data.resize(at, 0);
+        data.extend_from_slice(text.as_bytes());
+    }
+    data.resize(0x100, 0);
+    data[0x40] = 68;
+    data
+}
+
+#[test]
+fn win_exec_returns_once_the_program_waits_for_input() {
+    // C.EXE writes C.DAT before it gets messages, so it is there when
+    // WinExec returns. D.EXE is a console program, which WinExec doesn't
+    // wait for: D.DAT isn't there yet.
+    let kernel32 = ["WinExec", "GetFileAttributesA", "Sleep", "ExitProcess"];
+    let user32 = ["WaitForInputIdle"];
+    let data = child_data(&[
+        (0, "C.EXE"),
+        (0x10, "C.DAT"),
+        (0x20, "D.EXE"),
+        (0x30, "D.DAT"),
+    ]);
+    let parent = win_program(
+        pe::SUBSYSTEM_CONSOLE,
+        &kernel32,
+        &user32,
+        &data,
+        |a, l, f| {
+            a.xor(ebx, ebx)?;
+            push_args(a, &[l.at(0) as i32, 1])?;
+            a.call(f("WinExec"))?;
+            a.cmp(eax, 33)?;
+            bit_if(a, eq, 0)?;
+            a.push(l.at(0x10) as i32)?;
+            a.call(f("GetFileAttributesA"))?;
+            a.cmp(eax, -1)?;
+            bit_if(a, ne, 1)?;
+            push_args(a, &[l.at(0x20) as i32, 1])?;
+            a.call(f("WinExec"))?;
+            a.cmp(eax, 33)?;
+            bit_if(a, eq, 2)?;
+            a.push(l.at(0x30) as i32)?;
+            a.call(f("GetFileAttributesA"))?;
+            a.cmp(eax, -1)?;
+            bit_if(a, eq, 3)?;
+            // The children end before the parent.
+            a.push(1000)?;
+            a.call(f("Sleep"))?;
+            a.push(ebx)?;
+            a.call(f("ExitProcess"))?;
+            a.int3()
+        },
+    );
+    let code = run_family(
+        "win_exec_idle",
+        &[
+            ("T.EXE", parent),
+            ("C.EXE", works_then_waits_for_input("C.DAT")),
+            ("D.EXE", console_writes("D.DAT")),
+        ],
+    );
+    assert_eq!(code, 0xF, "the checks that failed: {:04b}", !code & 0xF);
+}
+
+#[test]
+fn wait_for_input_idle_waits_for_the_program_or_times_out() {
+    let kernel32 = [
+        "CreateProcessA",
+        "TerminateProcess",
+        "WaitForSingleObject",
+        "GetFileAttributesA",
+        "GetTickCount",
+        "ExitProcess",
+    ];
+    let user32 = ["WaitForInputIdle"];
+    // The command lines and A.DAT; the time a wait started at 0xA0.
+    let texts = [
+        (0, "A.EXE"),
+        (0x10, "B.EXE"),
+        (0x20, "E.EXE"),
+        (0x30, "A.DAT"),
+    ];
+    let data = child_data(&texts);
+    let parent = win_program(
+        pe::SUBSYSTEM_CONSOLE,
+        &kernel32,
+        &user32,
+        &data,
+        |a, l, f| {
+            let started = |a: &mut CodeAssembler| {
+                a.call(f("GetTickCount"))?;
+                a.mov(dword_ptr(l.at(0xA0)), eax)
+            };
+            let elapsed = |a: &mut CodeAssembler| {
+                a.call(f("GetTickCount"))?;
+                a.sub(eax, dword_ptr(l.at(0xA0)))
+            };
+            let terminate = |a: &mut CodeAssembler| {
+                a.push(0)?;
+                a.push(dword_ptr(l.at(0x90)))?;
+                a.call(f("TerminateProcess"))
+            };
+            a.xor(ebx, ebx)?;
+            // A.EXE: 0 once it waits for input, by when it wrote
+            // A.DAT; once it ended, WAIT_FAILED.
+            start_child(a, l, f, 0)?;
+            idle(a, l, f, 5000)?;
+            a.test(eax, eax)?;
+            bit_if(a, eq, 0)?;
+            a.push(l.at(0x30) as i32)?;
+            a.call(f("GetFileAttributesA"))?;
+            a.cmp(eax, -1)?;
+            bit_if(a, ne, 1)?;
+            a.push(INFINITE)?;
+            a.push(dword_ptr(l.at(0x90)))?;
+            a.call(f("WaitForSingleObject"))?;
+            idle(a, l, f, 100)?;
+            a.cmp(eax, WAIT_FAILED)?;
+            bit_if(a, eq, 2)?;
+            // B.EXE never gets messages: WAIT_TIMEOUT once the 200 ms
+            // passed.
+            start_child(a, l, f, 0x10)?;
+            started(a)?;
+            idle(a, l, f, 200)?;
+            a.cmp(eax, WAIT_TIMEOUT)?;
+            bit_if(a, eq, 3)?;
+            elapsed(a)?;
+            a.cmp(eax, 200)?;
+            bit_if(a, |a, r| a.setae(r), 4)?;
+            terminate(a)?;
+            // E.EXE is a console program: WAIT_FAILED at once.
+            start_child(a, l, f, 0x20)?;
+            started(a)?;
+            idle(a, l, f, 5000)?;
+            a.cmp(eax, WAIT_FAILED)?;
+            bit_if(a, eq, 5)?;
+            elapsed(a)?;
+            a.cmp(eax, 100)?;
+            bit_if(a, |a, r| a.setb(r), 6)?;
+            terminate(a)?;
+            // A handle that isn't one: WAIT_FAILED.
+            push_args(a, &[0x7FF0, 100])?;
+            a.call(f("WaitForInputIdle"))?;
+            a.cmp(eax, WAIT_FAILED)?;
+            bit_if(a, eq, 7)?;
+            a.push(ebx)?;
+            a.call(f("ExitProcess"))?;
+            a.int3()
+        },
+    );
+    let code = run_family(
+        "wait_for_input_idle",
+        &[
+            ("T.EXE", parent),
+            ("A.EXE", works_then_waits_for_input("A.DAT")),
+            ("B.EXE", never_waits_for_input(pe::SUBSYSTEM_GUI)),
+            ("E.EXE", never_waits_for_input(pe::SUBSYSTEM_CONSOLE)),
+        ],
+    );
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+}
+
+#[test]
+fn wait_for_input_idle_handles_messages_sent_to_the_waiting_thread() {
+    // S.EXE sends WM_CLOSE to the parent's window before it gets
+    // messages of its own. The parent handles it while it waits, as on
+    // Windows, and the window goes; else both would wait until the
+    // time-out.
+    let child = {
+        let kernel32 = ["ExitProcess"];
+        let user32 = ["FindWindowA", "SendMessageA", "SetTimer", "GetMessageA"];
+        let data = child_data(&[(0, "Waiting")]);
+        win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+            push_args(a, &[0, l.at(0) as i32])?;
+            a.call(f("FindWindowA"))?;
+            push_args(a, &[WM_CLOSE, 0, 0])?;
+            a.push(eax)?;
+            a.call(f("SendMessageA"))?;
+            push_args(a, &[0, 0, 100, 0])?;
+            a.call(f("SetTimer"))?;
+            push_args(a, &[l.at(0x90) as i32, 0, 0, 0])?;
+            a.call(f("GetMessageA"))?;
+            a.push(0)?;
+            a.call(f("ExitProcess"))?;
+            a.int3()
+        })
+    };
+    let kernel32 = [
+        "CreateProcessA",
+        "WaitForSingleObject",
+        "GetTickCount",
+        "ExitProcess",
+    ];
+    let user32 = ["WaitForInputIdle", "CreateWindowExA", "IsWindow"];
+    // The time the wait started at 0xA0.
+    let data = child_data(&[(0, "S.EXE"), (0x10, "Static"), (0x20, "Waiting")]);
+    let parent = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let (class, title) = (l.at(0x10) as i32, l.at(0x20) as i32);
+        push_args(a, &[0, class, title, WS_POPUP, 0, 0, 10, 10, 0, 0, 0, 0])?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(esi, eax)?;
+        a.xor(ebx, ebx)?;
+        start_child(a, l, f, 0)?;
+        a.call(f("GetTickCount"))?;
+        a.mov(dword_ptr(l.at(0xA0)), eax)?;
+        idle(a, l, f, 10000)?;
+        a.test(eax, eax)?;
+        bit_if(a, eq, 0)?;
+        a.call(f("GetTickCount"))?;
+        a.sub(eax, dword_ptr(l.at(0xA0)))?;
+        a.cmp(eax, 5000)?;
+        bit_if(a, |a, r| a.setb(r), 1)?;
+        a.push(esi)?;
+        a.call(f("IsWindow"))?;
+        a.test(eax, eax)?;
+        bit_if(a, eq, 2)?;
+        a.push(INFINITE)?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(f("WaitForSingleObject"))?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let code = run_family(
+        "wait_for_input_idle_sent",
+        &[("T.EXE", parent), ("S.EXE", child)],
+    );
+    assert_eq!(code, 0x7, "the checks that failed: {:03b}", !code & 0x7);
+}
+
+#[test]
+fn a_state_saved_while_win_exec_waits_resumes_the_wait() {
+    // C.EXE writes C0.DAT, works for 300 ms, writes C.DAT and only then
+    // gets messages. The state is saved once C0.DAT is there, while the
+    // parent waits in WinExec; after a load, WinExec still returns only
+    // once C.DAT is there.
+    let kernel32 = ["Sleep", "CreateFileA", "CloseHandle", "ExitProcess"];
+    let user32 = ["SetTimer", "GetMessageA"];
+    // The files' names, then a MSG at 0x20.
+    let mut data = b"C0.DAT".to_vec();
+    data.resize(0x10, 0);
+    data.extend_from_slice(b"C.DAT");
+    data.resize(0x40, 0);
+    let child = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        for (name, ms) in [(0, 300), (0x10, 0)] {
+            push_args(
+                a,
+                &[l.at(name) as i32, GENERIC_WRITE, 0, 0, CREATE_ALWAYS, 0, 0],
+            )?;
+            a.call(f("CreateFileA"))?;
+            a.push(eax)?;
+            a.call(f("CloseHandle"))?;
+            if ms > 0 {
+                a.push(ms)?;
+                a.call(f("Sleep"))?;
+            }
+        }
+        push_args(a, &[0, 0, 100, 0])?;
+        a.call(f("SetTimer"))?;
+        push_args(a, &[l.at(0x20) as i32, 0, 0, 0])?;
+        a.call(f("GetMessageA"))?;
+        a.push(0)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let kernel32 = ["WinExec", "GetFileAttributesA", "Sleep", "ExitProcess"];
+    let user32 = ["WaitForInputIdle"];
+    let data = child_data(&[(0, "C.EXE"), (0x10, "C.DAT")]);
+    let parent = win_program(
+        pe::SUBSYSTEM_CONSOLE,
+        &kernel32,
+        &user32,
+        &data,
+        |a, l, f| {
+            a.xor(ebx, ebx)?;
+            push_args(a, &[l.at(0) as i32, 1])?;
+            a.call(f("WinExec"))?;
+            a.cmp(eax, 33)?;
+            bit_if(a, eq, 0)?;
+            a.push(l.at(0x10) as i32)?;
+            a.call(f("GetFileAttributesA"))?;
+            a.cmp(eax, -1)?;
+            bit_if(a, ne, 1)?;
+            // The child ends before the parent.
+            a.push(1000)?;
+            a.call(f("Sleep"))?;
+            a.push(ebx)?;
+            a.call(f("ExitProcess"))?;
+            a.int3()
+        },
+    );
+    let dir = scratch(
+        "win_exec_idle_state",
+        &[("T.EXE", parent), ("C.EXE", child)],
+    );
+    let mut cpu = Cpu::new(dir.clone());
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    let mut batches = 0;
+    while !dir.join("C0.DAT").exists() {
+        batches += 1;
+        assert!(batches < 400_000, "C.EXE didn't start");
+        cpu.bus.start_batch(cpu.bus.clock.icount + 1_000);
+        run_batch(&mut cpu, &mut NoHook, false);
+    }
+    assert!(!dir.join("C.DAT").exists(), "saved too late");
+    let state = rust_dos::savestate::machine::save(&cpu);
+    assert!(run_to_exit(&mut cpu, 400), "{}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 0x3, "before the load");
+
+    fs::remove_file(dir.join("C.DAT")).unwrap();
+    rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
+    cpu.errorlevel = 0;
+    assert!(run_to_exit(&mut cpu, 400), "{}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 0x3, "after the load");
 }
