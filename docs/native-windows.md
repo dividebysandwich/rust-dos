@@ -574,6 +574,19 @@ cards. Incoming and Expendable run with Direct3D. SHELL32, COMCTL32,
 COMDLG32, WSOCK32 and DPLAYX came in for them, answering as a machine
 without a network does, with each common dialog cancelled.
 
+D3D8.DLL (DirectX 8.1's interfaces) came after phase 5, on the same
+HAL: IDirect3D8 with one adapter, the display's 16- and 32-bit modes,
+and a HAL device that processes vertices in software, as 3dfx's DirectX
+8 driver for the Voodoo3 did. Hardware or mixed vertex processing, the
+REF device, stencil, cube and volume textures and pixel shaders aren't
+there, and the caps say so. Its surfaces, textures and buffers are
+DirectDraw surfaces underneath, so a 32-bit target or texture is drawn
+with 16-bit precision as Direct3D 7's are. Vertices go through the
+fixed-function pipeline of Direct3D 7's device, from an FVF or a
+vertex declaration, and vs.1.1 shaders run in an interpreter before
+the HAL draws what they give. On a Voodoo Graphics or Voodoo2 add-on
+card CreateDevice fails with D3DERR_NOTAVAILABLE.
+
 **Phase 5: breadth.**
 
 - 32-bit installers (InstallShield 5's 32-bit engine, Wise) and
@@ -757,7 +770,8 @@ traces call, not whole DLLs.
     for the program groups InstallShield 5 makes through DDE),
     version's `info` and `install`, lz32's `lzexpand_main`, and ole32's
     `compobj`, `hglobalstream` and `propvariant`; and DirectMusic's
-    three, from the releases named above.
+    three, from the releases named above. D3D8.DLL brings all eight of
+    d3d8's.
   - Since phase 5 they run as Windows 98 SE (`win32_version=98se`), so
     that the functions Windows 98 added are there for the tests that
     use them.
