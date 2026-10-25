@@ -372,11 +372,24 @@ fn reg_query_value_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if data != 0 && size == 0 {
         return Some(ERROR_INVALID_PARAMETER);
     }
-    let value = registry::get(cpu).value(key, &name).cloned();
+    let registry = registry::get(cpu);
+    let shell_folder = registry.is_shell_folders(key);
+    let value = registry.value(key, &name).cloned();
     let Some(value) = value else {
         write_32(cpu, ptype, 0);
         return Some(ERROR_FILE_NOT_FOUND);
     };
+    // On Windows, Explorer has made every folder Shell Folders names by
+    // the time a program runs. Setup programs read the Start Menu's path
+    // there and go into it without making it (Zanzarah's), so a folder is
+    // made when its path is read, as SHELL32 makes one it is asked for.
+    if shell_folder && value.kind == REG_SZ {
+        let end = value.data.iter().position(|&b| b == 0).unwrap_or(value.data.len());
+        let path = crate::dosstr::from_bytes(&value.data[..end]);
+        if path.len() > 3 && path.as_bytes()[1] == b':' {
+            super::shell32::make_directories(cpu, &path);
+        }
+    }
     give_data(cpu, &value.data, value.kind, (ptype, data, size))
 }
 

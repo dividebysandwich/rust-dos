@@ -293,6 +293,15 @@ impl Registry {
         self.dirty = true;
     }
 
+    /// Whether `key` is a user's Shell Folders key, whose values are the
+    /// paths of the special folders (shell32/folders.rs).
+    pub fn is_shell_folders(&self, key: u32) -> bool {
+        let k = self.key(key);
+        k.name.eq_ignore_ascii_case("Shell Folders")
+            && k.parent != NO_PARENT
+            && self.key(k.parent).name.eq_ignore_ascii_case("Explorer")
+    }
+
     /// The value `name` of `key`.
     pub fn value(&self, key: u32, name: &str) -> Option<&Value> {
         self.key(key)
