@@ -47,9 +47,9 @@ pub struct Totals {
     pub decode_misses: u64,
     pub dynrec: crate::dynrec::DynStats,
     pub calls: Option<crate::dynrec::Calls>,
-    /// `autospeed::Activity`: bursts, flips, polls, status reads, video
-    /// bytes and I/O bytes.
-    pub activity: [u64; 6],
+    /// `autospeed::Activity`: bursts, copies, flips, polls, status reads,
+    /// video bytes and I/O bytes.
+    pub activity: [u64; 7],
 }
 
 impl Totals {
@@ -67,7 +67,15 @@ impl Totals {
             decode_misses: cpu.decode_cache.misses,
             dynrec: cpu.dynrec.counts(),
             calls: cpu.dynrec.calls().cloned(),
-            activity: [a.bursts, a.flips, a.polls, a.status_reads, a.video_bytes, a.io_bytes],
+            activity: [
+                a.bursts,
+                a.copies,
+                a.flips,
+                a.polls,
+                a.status_reads,
+                a.video_bytes,
+                a.io_bytes,
+            ],
         }
     }
 }

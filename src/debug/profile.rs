@@ -388,7 +388,7 @@ fn window_json(a: &Totals, b: &Totals) -> Value {
     let hits = b.decode_hits.saturating_sub(a.decode_hits);
     let misses = b.decode_misses.saturating_sub(a.decode_misses);
     let rate = |n: u64| if wall_s > 0.0 { (n as f64 / wall_s * 10.0).round() / 10.0 } else { 0.0 };
-    let names = ["bursts", "flips", "polls", "status_reads", "video_bytes", "io_bytes"];
+    let names = ["bursts", "copies", "flips", "polls", "status_reads", "video_bytes", "io_bytes"];
     let activity: Map<String, Value> =
         names.iter().zip(a.activity.iter().zip(&b.activity)).map(|(n, (x, y))| (n.to_string(), json!(y.saturating_sub(*x)))).collect();
     json!({
