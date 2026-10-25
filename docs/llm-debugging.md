@@ -91,7 +91,12 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
 - **Check state with `/api/status`.** It reports `shell_idle` (true at the
   DOS prompt), `cs_ip`, the video mode and `video.adapter` (the display
   adapter `machine` gives programs), `paused`, `input_queue`, and
-  `cycles_per_ms`, the current CPU speed. `video.vga` shows the CRTC Start
+  `cycles_per_ms`, the current CPU speed. `paused` (with `stop` and
+  `stop_seq`) says whether the debugger has stopped the machine, at a
+  breakpoint or otherwise. `cpu_state` is the processor's own state:
+  `Running`, or `Halted` after HLT until an interrupt. It stays `Running`
+  while the machine is paused, so wait for a stop with `paused` or the
+  journal's `paused` entry, not with `cpu_state`. `video.vga` shows the CRTC Start
   Address the program set and the one on screen, which helps when a game
   that flips pages flickers or shows half-drawn frames. `video.crt` is the
   display timing the VGA registers describe (refresh rate, total and
