@@ -14,6 +14,20 @@
 //! C:\WINDOWS\TEMP\_INS0432._MP -fE:\SETUP.INS  -z1 -cx -xC:\WINDOWS\TEMP\
 //! ```
 //!
+//! Later launchers (5.00.212 and 5.00.221, whose engines come with
+//! `ZDATAI5.DLL` and `_WUTL50.DLL`) add the setup's folder and its
+//! language from `SETUP.LID`. Xenocracy's, with its CD in D:, gave this
+//! on Windows 98 SE (`-q1` and the language, English's 0009):
+//!
+//! ```text
+//! -fD:\SETUP.INS  -z1 -cx -xC:\WINDOWS\TEMP\ -x1D:\ -q10009
+//! ```
+//!
+//! Without `-x1` such an engine looks for the setup's `layout.bin` and
+//! cabinets in the temporary folder, and ends at once when they aren't
+//! there. A launcher's arguments are in a table of strings in it, each
+//! ending in a zero: those with `-x1` and `-q1%04x` give these too.
+//!
 //! The archive's 16-bit helper (`BOOT16.EXE`) stays in it. When the
 //! engine has ended, the launcher starts `_ISDEL.EXE` from the setup's
 //! folder to delete the files it unpacked: here they stay in the
@@ -29,6 +43,13 @@ use rust_dos_installshield::{EngineArchive, is_engine_archive};
 const ARCHIVE: &str = "_INST32I.EX_";
 /// The setup's compiled script, beside the launcher.
 const SCRIPT: &str = "SETUP.INS";
+/// The setup's languages, beside the launcher: `Default=` in its
+/// `[Languages]` is the language's number in hex.
+const LANGUAGES: &str = "SETUP.LID";
+/// The entries of a later launcher's table of arguments that give the
+/// engine the setup's folder and its language.
+const SOURCE_ARGUMENT: &[u8] = b"\0 -x1\0";
+const LANGUAGE_ARGUMENT: &[u8] = b"\0 -q1%04x\0";
 /// The engine's name in the archive.
 const ENGINE: &str = "INSTALL.EXE";
 /// The archive's Windows 3.1 helper, which Windows 95 and 98 don't
@@ -45,12 +66,44 @@ pub fn is_ne(bytes: &[u8]) -> bool {
     bytes.starts_with(b"MZ") && bytes.get(at..at.saturating_add(2)) == Some(b"NE")
 }
 
+/// What a later launcher adds to the engine's arguments: the setup's
+/// folder, and its language when the setup names one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Source {
+    pub language: Option<u16>,
+}
+
 /// The arguments the launcher gives the engine: the setup's script in
-/// `setup_dir` and the temporary folder `temp`, both full DOS paths.
-pub fn engine_arguments(setup_dir: &str, temp: &str) -> String {
+/// `setup_dir` and the temporary folder `temp`, both full DOS paths, and
+/// from a later launcher (`source`) the setup's folder and language.
+pub fn engine_arguments(setup_dir: &str, temp: &str, source: Option<Source>) -> String {
     let setup_dir = setup_dir.trim_end_matches('\\');
     let temp = temp.trim_end_matches('\\');
-    format!("-f{}\\{}  -z1 -cx -x{}\\", setup_dir, SCRIPT, temp)
+    let mut arguments = format!("-f{}\\{}  -z1 -cx -x{}\\", setup_dir, SCRIPT, temp);
+    if let Some(source) = source {
+        arguments.push_str(&format!(" -x1{}\\", setup_dir));
+        if let Some(language) = source.language {
+            arguments.push_str(&format!(" -q1{:04x}", language));
+        }
+    }
+    arguments
+}
+
+/// Whether the table of arguments in the launcher `bytes` has `entry`.
+fn has_argument(bytes: &[u8], entry: &[u8]) -> bool {
+    bytes.windows(entry.len()).any(|w| w == entry)
+}
+
+/// The language a later launcher gives the engine: `Default=` of the
+/// `[Languages]` of `SETUP.LID` in `setup_dir`, when the launcher `bytes`
+/// has `-q1%04x` and the file names one.
+fn language(cpu: &mut Cpu, bytes: &[u8], setup_dir: &str) -> Option<u16> {
+    let file = format!("{}\\{}", setup_dir, LANGUAGES);
+    if !has_argument(bytes, LANGUAGE_ARGUMENT) || !cpu.bus.disk.is_file(&file) {
+        return None;
+    }
+    let value = super::kernel32::profile_value(cpu, file.as_bytes(), b"Languages", b"Default")?;
+    u16::from_str_radix(std::str::from_utf8(&value).ok()?.trim(), 16).ok()
 }
 
 /// When the Windows 3.1 program `bytes`, at the DOS path `path`, is an
@@ -118,7 +171,10 @@ pub fn engine(cpu: &mut Cpu, path: &str, bytes: &[u8]) -> Option<(String, String
         ),
     );
     let engine = format!("{}\\{}", temp, engine.extract_as.to_ascii_uppercase());
-    Some((engine, engine_arguments(&setup_dir, &temp)))
+    let source = has_argument(bytes, SOURCE_ARGUMENT).then(|| Source {
+        language: language(cpu, bytes, &setup_dir),
+    });
+    Some((engine, engine_arguments(&setup_dir, &temp, source)))
 }
 
 /// The temporary folder, as the launcher finds it: TEMP's value, or TMP's,
@@ -215,12 +271,74 @@ mod tests {
     #[test]
     fn gives_the_engine_the_launchers_command_line() {
         assert_eq!(
-            engine_arguments("E:", "C:\\WINDOWS\\TEMP"),
+            engine_arguments("E:", "C:\\WINDOWS\\TEMP", None),
             "-fE:\\SETUP.INS  -z1 -cx -xC:\\WINDOWS\\TEMP\\"
         );
         assert_eq!(
-            engine_arguments("D:\\SETUP\\", "C:\\TEMP\\"),
+            engine_arguments("D:\\SETUP\\", "C:\\TEMP\\", None),
             "-fD:\\SETUP\\SETUP.INS  -z1 -cx -xC:\\TEMP\\"
+        );
+        // A later launcher's, as Xenocracy's gave it on Windows 98 SE.
+        assert_eq!(
+            engine_arguments(
+                "D:",
+                "C:\\WINDOWS\\TEMP",
+                Some(Source { language: Some(9) })
+            ),
+            "-fD:\\SETUP.INS  -z1 -cx -xC:\\WINDOWS\\TEMP\\ -x1D:\\ -q10009"
+        );
+        assert_eq!(
+            engine_arguments("D:\\SETUP", "C:\\TEMP", Some(Source { language: None })),
+            "-fD:\\SETUP\\SETUP.INS  -z1 -cx -xC:\\TEMP\\ -x1D:\\SETUP\\"
+        );
+    }
+
+    /// A launcher whose table of arguments has `entries`, each ending in
+    /// a zero, after the headers.
+    fn launcher_with(entries: &[&str]) -> Vec<u8> {
+        let mut bytes = ne_program();
+        for entry in [" -f", " -z1", " -cx", " -x"].iter().chain(entries) {
+            bytes.extend_from_slice(entry.as_bytes());
+            bytes.push(0);
+        }
+        bytes
+    }
+
+    #[test]
+    fn a_later_launcher_names_the_setups_folder_and_language() {
+        let root = crate::test_dir::path("is-launcher-source");
+        let setup = root.join("SETUP");
+        std::fs::create_dir_all(&setup).unwrap();
+        let archive = rust_dos_installshield::write::engine_archive(&[(
+            "INSTALL.EXE",
+            "_INS0566._MP",
+            &b"MZ engine".repeat(50),
+        )]);
+        std::fs::write(setup.join("_INST32I.EX_"), &archive).unwrap();
+        let mut cpu = Cpu::new(root.clone());
+        let later = launcher_with(&[" -x1", " -q1%04x", " -m"]);
+        let path = "C:\\SETUP\\SETUP.EXE";
+        // Without SETUP.LID there is no language to give.
+        let (_, arguments) = engine(&mut cpu, path, &later).unwrap();
+        assert_eq!(
+            arguments,
+            "-fC:\\SETUP\\SETUP.INS  -z1 -cx -xC:\\WINDOWS\\TEMP\\ -x1C:\\SETUP\\"
+        );
+        std::fs::write(
+            setup.join("SETUP.LID"),
+            "[Languages]\r\nkey0=0007\r\nkey1=0009\r\nDefault=0009\r\ncount=2\r\n",
+        )
+        .unwrap();
+        let (_, arguments) = engine(&mut cpu, path, &later).unwrap();
+        assert_eq!(
+            arguments,
+            "-fC:\\SETUP\\SETUP.INS  -z1 -cx -xC:\\WINDOWS\\TEMP\\ -x1C:\\SETUP\\ -q10009"
+        );
+        // An earlier launcher gives neither, SETUP.LID or not.
+        let (_, arguments) = engine(&mut cpu, path, &launcher_with(&[" -m"])).unwrap();
+        assert_eq!(
+            arguments,
+            "-fC:\\SETUP\\SETUP.INS  -z1 -cx -xC:\\WINDOWS\\TEMP\\"
         );
     }
 }
