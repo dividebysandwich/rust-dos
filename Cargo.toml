@@ -95,7 +95,7 @@ serde_json = "1"
 png = "0.18"
 # The virtual printer's TrueType and OpenType fonts (src/printer/font.rs).
 ab_glyph_rasterizer = "0.1"
-skrifa = { version = "0.49", default-features = false, features = ["std"] }
+skrifa = { version = "0.46", default-features = false, features = ["std"] }
 # zlib for the ZMBV video codec of the AVI recordings.
 flate2 = "1"
 # Checksums of BPS patches (src/archive/patch.rs).
@@ -224,7 +224,7 @@ flate2 = "1"
 # The assembler builds the protected-mode test programs in tests/pm_*.rs.
 iced-x86 = { version = "1.21.0", features = ["code_asm"] }
 # The WebSocket client of the debug server's tests.
-tungstenite = "0.30"
+tungstenite = "0.29"
 # The benchmarks in benches/ (docs/benchmarks.md). Without its default
 # features: no plots, no rayon.
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }

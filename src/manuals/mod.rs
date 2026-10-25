@@ -385,6 +385,9 @@ mod tests {
         let pixel = |x: usize, y: usize| &page.rgba[(y * 40 + x) * 4..][..3];
         assert_eq!(pixel(5, 10), [0, 0, 0], "the square");
         assert_eq!(pixel(35, 10), [255, 255, 255], "the paper");
+        // A size the page's times the scale rounds a pixel short of.
+        let odd = doc.render(0, 106, 53);
+        assert_eq!((odd.width, odd.height), (106, 53));
     }
 
     #[test]
