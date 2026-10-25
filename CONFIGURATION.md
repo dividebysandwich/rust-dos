@@ -1234,93 +1234,33 @@ directory.
 
 ### Windows games
 
-`windows=` in `[game]` says which Windows the game runs in.
-`windows=builtin` runs its program in the built-in Windows, as
-[`win32=true`](#emulator) does, while the game plays. `windows=image`
-says the game runs in a Windows disk image that its `[autoexec]` boots
-(see [an operating system](GAME-PACKAGES.md#an-operating-system)), and
-the profile gets a warning when it boots nothing.
+`windows=` in `[game]` says which Windows a game runs in:
 
-Most Windows 95 games on CD have to be installed before they run. For
-the built-in Windows there are three ways, best tried in this order:
+- `windows=builtin` runs it in the built-in Windows while the game
+  plays, as [`win32=true`](#emulator) does.
+- `windows=image` runs it in a Windows disk image that the profile's
+  `[autoexec]` boots (see
+  [an operating system](GAME-PACKAGES.md#an-operating-system)). The
+  profile gets a warning when its `[autoexec]` boots nothing.
 
-1. Run the game's setup program in the built-in Windows the first time
-   the game starts (below). This works for InstallShield 5,
-   InstallShield 3 setups that bring the 32-bit engine (`_INST32I.EX_`
-   beside `SETUP.EXE`) and Wise, and the setup writes the registry keys
-   itself.
-2. Unpack the installer's archives with an `[install]` section, when
-   the setup doesn't run and the CD has InstallShield cabinets
-   (`data1.hdr`, or a `data1.cab` that holds the header) or an
-   InstallShield 3 archive (`_SETUP.1`). The game's registry keys go in
-   a `.reg` file.
-3. Copy the game's folder from an installation on Windows 98, with its
-   registry keys in a `.reg` file. This works whatever the installer,
-   and is how GOG and other digital releases run.
+The rest of this section is about the built-in Windows.
 
-A file `<profile>.reg` beside the profile (`games/oni.reg` for
-`games/oni.conf`) holds the registry keys the game reads, as REGEDIT4
-text. Each time the game starts they are put into the built-in
-Windows' registry, `C:\REGISTRY.REG`, over what is there, so the game
-finds what its setup program would have written.
+#### Getting the game installed
 
-The keys come from an installation of the game. Windows 95 and 98's
-REGEDIT exports them (Registry, Export Registry File, with the game's
-key selected) in that form. The REGEDIT of Windows 2000 and later
-writes Unicode text, which is read as nothing: save as "Win9x/NT4
-Registration Files" instead. On 64-bit Windows a 32-bit game's keys are
-under `HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node`; take `WOW6432Node\`
-out of their paths. A setup that ran in the built-in Windows leaves the
-keys it wrote in `C:\REGISTRY.REG` (in the saves folder with
-`overlay=true`), and their sections can be copied from there. Paths in
-the keys (the install folder, the CD's drive) have to be those of the
-profile's `[drives]`.
+Most Windows 95 games on CD have to be installed before they run. Try
+these in order:
 
-An `[install]` section unpacks the game from its installer's archives
-onto its drives the first time it starts, without running setup: an
-InstallShield 5 or 6 cabinet set (by its `data1.hdr`, or a `data1.cab`
-that holds the header) or an InstallShield 3 archive (`_SETUP.1`, a
-`.Z` file). Each `from=` names one by its DOS path, and the lines after
-it say where its files go:
+| Way | Use it when | Registry keys |
+|---|---|---|
+| [Run the setup](#running-the-setup-on-first-start) the first time the game starts | The setup is InstallShield 5, InstallShield 3 with `_INST32I.EX_` beside `SETUP.EXE`, or Wise | The setup writes them |
+| [Unpack the installer](#unpacking-the-installer) with an `[install]` section | The setup doesn't run, and the CD has InstallShield cabinets (`data1.hdr`, or a `data1.cab` that holds the header) or an InstallShield 3 archive (`_SETUP.1`) | From a [`.reg` file](#registry-keys) |
+| [Copy an installed game](#copying-an-installed-game) | Anything else, whatever the installer. GOG and other digital releases run this way | From a [`.reg` file](#registry-keys) |
 
-```ini
-[install]
-from=D:\SETUP\DATA1.HDR
-to=C:\ONI
-group=Files (Program)
-group=Files (Data)|GameDataFolder
-```
+#### Running the setup on first start
 
-| Key | What it does |
-|---|---|
-| `from=` | The cabinet set's header or the InstallShield 3 archive, with its drive. Each starts a step of its own |
-| `to=` | The folder the files go in, with its drive |
-| `group=NAME` | Unpack the cabinet's file group `NAME` (any case) into `to=`; `NAME\|FOLDER` into that folder under it. Without `group=` lines every file goes to its own path. An InstallShield 3 archive has no file groups, and a step that names one fails |
-| `compression=` | `chunks` (the default) or `markers`, for version 0 sets whose compressed data ends each chunk with `00 00 FF FF` (Unshield's `-O`) |
-
-[`rust-dos unpack --list`](#unpacking-installshield-installers) shows a
-set's file groups, and each file with the groups that hold it. The set
-doesn't say which folder each group goes to: that is in the setup's
-script. Read it off an installation of the game instead: find a few
-files of each group there, and the folder under the install folder they
-are in is the group's `FOLDER`. A file a set holds more than one of at
-one path (one per language, say) is unpacked only by a group that places
-it. The section writes no registry keys and makes no shortcuts; the
-`.reg` file brings the keys. A step that wrote every file leaves
-`RUSTDOS.INS` in its folder and doesn't run again while that file is
-there; one that didn't says why on the screen and runs again at the next
-start. With `overlay=true` the files go to the game's saves folder, so
-**R** on the Games page takes the install away and the next start
-unpacks it again.
-
-A game whose setup program runs in the built-in Windows (InstallShield
-5, InstallShield 3 with its 32-bit engine, Wise) can run it the first
-time instead: `IF NOT EXIST` in `[autoexec]` starts the setup while the
-game's program isn't there yet, and the lines after it start the game
-once the setup has ended. The setup asks its questions as it would on
-Windows, and writes its files, registry keys and shortcuts on the
-game's drives. With `overlay=true` they go to the saves folder too, and
-**R** takes the install away.
+Put the setup in `[autoexec]` behind `IF NOT EXIST`, so it runs only
+while the game's program isn't there yet. The lines after it start the
+game once the setup has ended:
 
 ```ini
 [game]
@@ -1343,41 +1283,133 @@ CD \PROGRA~1\ENEMYI~1
 EI.EXE
 ```
 
-A `SETUP.EXE` that is InstallShield's 16-bit launcher, with
-`_INST32I.EX_` beside it, isn't run itself: the built-in Windows
-unpacks the 32-bit engine from that archive into `TEMP` (made if it
-isn't there) and starts it with the command line the launcher gives it
-on Windows 98 SE. A setup on more than one CD asks for the next, which
-Ctrl+F4 puts in when the drive's `[drives]` line lists the images.
+The setup asks its questions as it would on Windows, and writes its
+files, registry keys and shortcuts on the game's drives. With
+`overlay=true` they go to the saves folder, so **R** on the Games page
+takes the install away and the next start runs the setup again.
 
-The built-in DOS sets no `TEMP`, so `SET TEMP` names a folder on a
-writable drive. Without it the launcher still unpacks the engine into
-`C:\WINDOWS\TEMP`, but a program that asks Windows for the temporary
-folder gets the current one, which is the read-only CD when the setup
-starts from there. The commands in `[autoexec]` run in the built-in DOS,
-so the paths they name are 8.3 names (`PROGRA~1` for `Program Files`);
-`DIR` at the prompt shows them once the setup has run. `win32_version`
-applies to the setup as to the game. The example has `98se`, the version
-the setups in
-[docs/native-windows.md](docs/native-windows.md#setup-programs-that-ran)
-were compared with; under `95` a setup or game that imports a function
-Windows 98 added doesn't start, and its message names the setting.
+Things to get right in the profile:
 
-When the setup doesn't run, [the log](README.md#log-file) says what
-happened. A `SETUP.EXE` that says it needs Windows is a 16-bit program
-the built-in Windows doesn't run: a setup other than InstallShield's
-launcher, or the launcher without `_INST32I.EX_` beside it. A
-`[W32] ... is InstallShield's setup launcher: its engine runs` line
-says the engine was started; when it then ends without a window, or
-with a message naming a function the built-in DLLs don't have, an
-`[install]` section or an installed folder gets the game in instead.
+- **`SET TEMP`** to a folder on a writable drive. The built-in DOS sets
+  no `TEMP`, and without it a program that asks Windows for the
+  temporary folder gets the current folder, which is the read-only CD
+  when the setup starts from there.
+- **8.3 names in `[autoexec]`.** Its commands run in the built-in DOS,
+  so `Program Files` is `PROGRA~1`. Run `DIR` at the prompt after the
+  setup to see the names it made.
+- **`win32_version=98se`.** It applies to the setup as well as the
+  game. The setups in
+  [docs/native-windows.md](docs/native-windows.md#setup-programs-that-ran)
+  were checked against Windows 98 SE. Under `95`, a setup or game that
+  imports a function Windows 98 added doesn't start, and its message
+  names this setting.
+- **More than one CD:** list every image on the drive's `[drives]` line.
+  When the setup asks for the next disc, Ctrl+F4 puts it in.
+
+InstallShield's `SETUP.EXE` is a 16-bit launcher, which the built-in
+Windows doesn't run. When `_INST32I.EX_` is beside it, the built-in
+Windows unpacks the 32-bit engine from that archive into `TEMP` instead,
+and starts it with the command line the launcher gives it on Windows 98
+SE.
+
+If the setup doesn't run, look in [the log](README.md#log-file):
+
+- **`SETUP.EXE` says it needs Windows:** it is a 16-bit program the
+  built-in Windows doesn't run. Either it isn't InstallShield's
+  launcher, or `_INST32I.EX_` isn't beside it. Unpack the installer or
+  copy an installed game instead.
+- **A `[W32] ... is InstallShield's setup launcher: its engine runs`
+  line, and then the engine ends without a window**, or with a message
+  naming a function the built-in DLLs don't have: the engine can't run
+  yet. Unpack the installer or copy an installed game instead.
+
+#### Unpacking the installer
+
+An `[install]` section unpacks the game from its installer's archives
+onto its drives the first time it starts, without running the setup. It
+reads InstallShield 5 and 6 cabinet sets (by their `data1.hdr`, or a
+`data1.cab` that holds the header) and InstallShield 3 archives
+(`_SETUP.1`, a `.Z` file):
+
+```ini
+[install]
+from=D:\SETUP\DATA1.HDR
+to=C:\ONI
+group=Files (Program)
+group=Files (Data)|GameDataFolder
+```
+
+| Key | What it does |
+|---|---|
+| `from=` | The cabinet set's header or the InstallShield 3 archive, by its DOS path. Each `from=` starts a step of its own, and the lines after it belong to that step |
+| `to=` | The folder the files go in, with its drive |
+| `group=NAME` | Unpack the cabinet's file group `NAME` (any case) into `to=`; `NAME\|FOLDER` into that folder under it. Without `group=` lines every file goes to its own path. An InstallShield 3 archive has no file groups, and a step that names one fails |
+| `compression=` | `chunks` (the default) or `markers`, for version 0 sets whose compressed data ends each chunk with `00 00 FF FF` (Unshield's `-O`) |
+
+The cabinet set doesn't say which folder each file group goes to: the
+setup's script does. To find out:
+
+1. List the set's file groups, and each file with the groups that hold
+   it, with
+   [`rust-dos unpack --list`](#unpacking-installshield-installers).
+2. In an installation of the game, find a few files of each group. The
+   folder under the install folder they are in is that group's
+   `FOLDER`.
+
+A file the set holds more than once at one path (one per language, say)
+is unpacked only by a group that places it.
+
+The section writes no registry keys and makes no shortcuts: put the
+keys in a [`.reg` file](#registry-keys). A step that wrote every file
+leaves `RUSTDOS.INS` in its folder and doesn't run again while that file
+is there. One that didn't says why on the screen and runs again at the
+next start. With `overlay=true` the files go to the game's saves folder,
+so **R** on the Games page takes the install away and the next start
+unpacks it again.
+
+#### Copying an installed game
+
+Install the game on Windows 98 (or take a digital release's folder),
+copy its folder to the drive the profile mounts, and put its registry
+keys in a [`.reg` file](#registry-keys). This works whatever the
+installer.
+
+#### Registry keys
+
+A file `<profile>.reg` beside the profile (`games/oni.reg` for
+`games/oni.conf`) holds the registry keys the game reads, as REGEDIT4
+text. Each time the game starts, they are written into the built-in
+Windows' registry, `C:\REGISTRY.REG`, over what is there. The game then
+finds what its setup would have written. A [package](GAME-PACKAGES.md)
+can't hold the `.reg` file: it goes beside the profile the package makes
+in the `games` folder.
+
+To get the keys:
+
+- **From Windows 95 or 98:** in REGEDIT select the game's key, then
+  Registry, Export Registry File.
+- **From Windows 2000 or later:** export the same way, but save as
+  "Win9x/NT4 Registration Files". The default format is Unicode text,
+  which rust-dos reads as empty. On 64-bit Windows a 32-bit game's keys
+  are under `HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node`: take
+  `WOW6432Node\` out of their paths in the file.
+- **From a setup that ran in the built-in Windows:** copy the game's
+  sections out of `C:\REGISTRY.REG` (in the saves folder with
+  `overlay=true`).
+
+Then check the paths in the keys (the install folder, the CD's drive)
+against the profile's `[drives]`, and change them where they differ.
+
+#### The CD's drive letter and label
 
 A game finds its CD by the drive letter its setup recorded, in its
-registry keys or its own files, and often by the disc's label too. Keep
-the CD on the letter it had when the setup ran, and with keys from
-another machine change the letter in the `.reg` file to the profile's.
-A CD image is labelled with the disc's label; a folder copied from the
-CD needs it given with `-label` (`D=~/cd/ei cdrom -label EI`).
+registry keys or its own files, and often by the disc's label too.
+
+- Keep the CD on the letter it had when the setup ran. With keys from
+  another machine, change the letter in the `.reg` file to the
+  profile's.
+- A CD image carries the disc's label. A folder copied from the CD needs
+  the label given with `-label` (`D=~/cd/ei cdrom -label EI`).
 
 ### Keys at the start
 
@@ -3304,5 +3336,6 @@ rust-dos unpack --old-compression --to out /cdrom/DATA1.CAB
 | `-O, --old-compression` | Read compressed files as raw deflate ending each chunk with `00 00 FF FF`, as some version 0 sets have them (Unshield's `-O`) |
 
 It exits with 1 when the archive doesn't open, a group isn't in it, or a
-file fails its check. A game profile's [`[install]`](#windows-games)
-section unpacks the same archives from the game's drives.
+file fails its check. A game profile's
+[`[install]`](#unpacking-the-installer) section unpacks the same
+archives from the game's drives.

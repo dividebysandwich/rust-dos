@@ -37,16 +37,15 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   for DOS extenders, upper memory (`LOADHIGH`), a mouse driver, keyboard
   layouts, and a [DOS prompt](#the-dos-prompt) with batch files and a
   `COMMAND.COM` programs can shell out to
-* **Windows built in:** Windows 95 and 98 games without a Windows image
-  (`win32=true`, or `windows=builtin` in a
-  [game profile](CONFIGURATION.md#windows-games)), on Rust-DOS's own
-  Win32 layer: KERNEL32, USER32 and GDI32, DirectX 3 to 6 (DirectDraw,
-  DirectSound, DirectInput and DirectMusic, and Direct3D and Glide on an
-  emulated 3dfx card), WinMM's wave audio, MIDI and CD audio, and the
-  setup programs of InstallShield 5, InstallShield 3 with its 32-bit
-  engine, and Wise. It is newer than booting Windows and runs fewer
-  games: a program that calls a function it doesn't have stops with a
-  message naming it ([docs/native-windows.md](docs/native-windows.md))
+* **Windows built in (experimental):** Windows 95 and 98 games without
+  a Windows image (`win32=true`, or `windows=builtin` in a
+  [game profile](CONFIGURATION.md#windows-games)). Rust-DOS has its own
+  KERNEL32, USER32 and GDI32, DirectX 3 to 6 (with Direct3D and Glide
+  on an emulated 3dfx card), and WinMM's wave audio, MIDI and CD audio.
+  It runs InstallShield and Wise setups. It runs fewer games than
+  booting Windows: a program that calls a function it doesn't have yet
+  stops with a message naming it
+  ([docs/native-windows.md](docs/native-windows.md))
 * **Graphics:** text, CGA with composite artifact colours, EGA, VGA with
   Mode X, VESA VBE 2.0 up to 1024x768, a Tseng ET4000 with HiColor, an S3
   Trio64 with its 2D accelerator, an
