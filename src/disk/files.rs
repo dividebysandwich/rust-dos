@@ -23,14 +23,14 @@ impl DiskController {
     }
 
     /// The lowest unused entry of the file table.
-    fn free_handle(&self) -> Result<u16, u8> {
+    pub(super) fn free_handle(&self) -> Result<u16, u8> {
         (FIRST_FILE..FILES)
             .find(|h| !self.open_files.contains_key(h))
             .ok_or(0x04) // Too many open files
     }
 
     /// Put an open file in the table at `sft`.
-    fn insert(&mut self, sft: u16, file: OpenFile) {
+    pub(super) fn insert(&mut self, sft: u16, file: OpenFile) {
         self.open_files.insert(sft, file);
         self.mark_dirty(sft);
     }
@@ -82,6 +82,12 @@ impl DiskController {
         // DOS empties the file at the create call, so opening it again while
         // the create's handle is still unused must find it empty.
         self.settle_named(filename);
+        if let Some(data) = self.system_file(filename) {
+            if create {
+                return Err(0x05);
+            }
+            return self.open_system_file(filename, data, mode, owner);
+        }
         // Files held in memory are read-only: read/write opens are
         // downgraded as on a CD-ROM.
         if let Some((drive, d, path)) = self.locate_in_memory(filename) {
@@ -213,6 +219,10 @@ impl DiskController {
         let normalized = filename.replace('/', "\\");
         let (drive, _) = self.split_drive(&normalized).ok_or(0x03)?;
         self.check_writable(drive)?;
+        if self.system_file(filename).is_some() {
+            return Err(0x05);
+        }
+        self.make_system_dirs(filename);
         let sft = self.open_or_create(filename, 0x02, owner, true)?;
         if let Some(open) = self.open_files.get_mut(&sft) {
             open.empty_on_use = match &open.data {
@@ -306,6 +316,10 @@ impl DiskController {
     pub fn write_whole_file(&mut self, dos_path: &str, data: &[u8], stamp: Option<(u16, u16)>) -> Result<(), u8> {
         // Before the file is replaced: a FAT image's entry may move.
         self.settle_named(dos_path);
+        if self.system_file(dos_path).is_some() {
+            return Err(0x05);
+        }
+        self.make_system_dirs(dos_path);
         if let Some((drive, volume, parts)) = self.locate_fat(dos_path) {
             self.check_writable(drive)?;
             let (time, date) = stamp.unwrap_or_else(fat::dos_now);
@@ -341,6 +355,9 @@ impl DiskController {
     pub fn delete_file(&mut self, filename: &str) -> Result<(), u8> {
         // A disk image's entry must not be emptied after it is freed.
         self.settle_named(filename);
+        if self.system_file(filename).is_some() {
+            return Err(0x05);
+        }
         if let Some((drive, volume, parts)) = self.locate_fat(filename) {
             let parts = refs(&parts);
             let entry = volume.find(&parts)?;
@@ -369,6 +386,11 @@ impl DiskController {
         // A disk image's entry may move: empty the file while it is where
         // the handle has it.
         self.settle_named(from);
+        // A system file is read-only, and a system directory has them.
+        if self.is_system_entry(from) || self.is_system_entry(to) {
+            return Err(0x05);
+        }
+        self.make_system_dirs(to);
         if let Some((drive, volume, from_parts)) = self.locate_fat(from) {
             let from_parts = refs(&from_parts);
             if from_parts.is_empty() {
