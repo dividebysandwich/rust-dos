@@ -1064,6 +1064,10 @@ pub fn wait_message(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 /// Take the message the filter `f` wants from the thread `tid`'s queue,
 /// if one is there; `remove` takes it out.
 fn take_message(cpu: &mut Cpu, tid: u32, f: Filter, remove: bool) -> Option<Msg> {
+    // What the devices did since they were last read comes first: a move
+    // replaces the one SetCursorPos queued, which the program's next
+    // SetCursorPos would otherwise undo before any poll saw it.
+    super::input::poll(cpu);
     let now = cpu.bus.clock.now_micros();
     let state = user(cpu);
     // Posted messages.
@@ -1662,3 +1666,31 @@ crate::state_fields!(QueueWait {
     filter,
     reply
 });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A program that puts the cursor back in the middle after each move
+    /// (Xenocracy's dialogs in flight) gets the move the mouse made while
+    /// it drew its frame, not the one its SetCursorPos queued.
+    #[test]
+    fn a_move_between_frames_outlives_set_cursor_pos() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let hwnd = user(&mut cpu).new_window(super::super::window::Window::default());
+        let hwnd = hwnd.expect("a window");
+        user(&mut cpu).desktop = true;
+        let tid = user(&mut cpu).window(hwnd).map(|w| w.tid).unwrap_or(0);
+        user(&mut cpu).input.capture = hwnd;
+        let take = |cpu: &mut Cpu| {
+            take_message(cpu, tid, Filter::default(), true).map(|m| (m.message, m.lparam))
+        };
+        super::super::input::set_cursor_pos(&mut cpu, &[100, 100]);
+        assert_eq!(take(&mut cpu), Some((WM_MOUSEMOVE, 100 << 16 | 100)));
+        super::super::input::set_cursor_pos(&mut cpu, &[100, 100]);
+        // The frame: the mouse moves before the program asks again.
+        cpu.bus.mouse.move_by(50.0, 0.0);
+        assert_eq!(take(&mut cpu), Some((WM_MOUSEMOVE, 100 << 16 | 150)));
+        assert_eq!(take(&mut cpu), None);
+    }
+}
