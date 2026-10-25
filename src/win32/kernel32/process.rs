@@ -25,13 +25,24 @@ const SI_CB_RESERVED2: u32 = 50;
 const SI_RESERVED2: u32 = 52;
 const SI_STD_INPUT: u32 = 56;
 
-/// The first word of a command line: quoted, or up to a space.
-fn first_word(line: &str) -> &str {
+/// The DOS path of the program a command line names first, as Windows
+/// finds it with no application name: the quoted name, or for an unquoted
+/// one, the line up to each space or tab in turn, the shortest first,
+/// until one is a program (`find_program`). "C:\Program Files\Game\Game.exe
+/// -x" tries C:\Program, C:\Program Files\Game\Game.exe and stops there.
+fn program_in_line(cpu: &mut Cpu, line: &str) -> Option<String> {
     let line = line.trim_start();
-    match line.strip_prefix('"') {
-        Some(rest) => rest.split('"').next().unwrap_or(rest),
-        None => line.split([' ', '\t']).next().unwrap_or(line),
+    if let Some(rest) = line.strip_prefix('"') {
+        return find_program(cpu, rest.split('"').next().unwrap_or(rest));
     }
+    let ends: Vec<usize> = line
+        .char_indices()
+        .filter(|&(i, c)| matches!(c, ' ' | '\t') && !line[..i].ends_with([' ', '\t']))
+        .map(|(i, _)| i)
+        .chain([line.len()])
+        .filter(|&i| i > 0)
+        .collect();
+    ends.into_iter().find_map(|end| find_program(cpu, &line[..end]))
 }
 
 /// The DOS path of the program `name`: as named, with ".EXE" added if it
@@ -164,12 +175,12 @@ pub(crate) fn spawn(
     flags: u32,
     mut startup: Vec<u8>,
 ) -> Result<[u32; 4], u32> {
-    let name = match (app, line) {
-        (Some(app), _) => app,
-        (None, Some(line)) => first_word(line),
+    let path = match (app, line) {
+        (Some(app), _) => find_program(cpu, app),
+        (None, Some(line)) => program_in_line(cpu, line),
         (None, None) => return Err(ERROR_INVALID_PARAMETER),
-    };
-    let path = find_program(cpu, name).ok_or(ERROR_FILE_NOT_FOUND)?;
+    }
+    .ok_or(ERROR_FILE_NOT_FOUND)?;
     let line = line.map_or_else(|| path.clone(), str::to_string);
     let environment = environment.unwrap_or_else(|| process(cpu).environment.clone());
     let fields = startup.clone();

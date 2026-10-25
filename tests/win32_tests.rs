@@ -695,6 +695,60 @@ fn win_exec_starts_a_program_or_says_why_not() {
     assert_eq!(cpu.errorlevel, 3, "{}", printed(&cpu));
 }
 
+/// A command line naming its program without quotes, in a folder with a
+/// space in its name: the program is found by the line up to each space
+/// in turn ("SUB", then "SUB DIR\C.EXE"), as Windows finds it, and starts.
+#[test]
+fn an_unquoted_program_path_with_spaces_is_found() {
+    let child = {
+        let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["ExitProcess"])];
+        program(BASE, false, imports, &[0; 4], |a, l| {
+            a.push(7)?;
+            a.call(l.import(0))?;
+            a.int3()
+        })
+    };
+    let names: &[&str] = &["CreateProcessA", "WaitForSingleObject", "GetExitCodeProcess"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The command line, STARTUPINFO at 0x40, PROCESS_INFORMATION at 0x90,
+    // the exit code at 0xA0.
+    let mut data = b"SUB DIR\\C.EXE an argument\0".to_vec();
+    data.resize(0xB0, 0);
+    data[0x40] = 68;
+    let parent = program(BASE, false, imports, &data, |a, l| {
+        a.push(l.at(0x90) as i32)?;
+        a.push(l.at(0x40) as i32)?;
+        for _ in 0..6 {
+            a.push(0)?;
+        }
+        a.push(l.at(0) as i32)?;
+        a.push(0)?;
+        a.call(l.import(0))?;
+        a.mov(ebx, eax)?;
+        a.push(-1)?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(l.import(1))?;
+        a.push(l.at(0xA0) as i32)?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(l.import(2))?;
+        // 1 for CreateProcessA, and the child's exit code above it.
+        a.mov(eax, dword_ptr(l.at(0xA0)))?;
+        a.shl(eax, 4)?;
+        a.or(eax, ebx)?;
+        a.ret()
+    });
+    let base = scratch("unquoted_path", &[("T.EXE", parent)]);
+    fs::create_dir(base.join("SUB DIR")).unwrap();
+    fs::write(base.join("SUB DIR").join("C.EXE"), child).unwrap();
+    let mut cpu = Cpu::new(base);
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    assert!(run_to_exit(&mut cpu, 200), "{}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 0x71, "{}", printed(&cpu));
+}
+
 #[test]
 fn threads_take_turns_wait_for_each_other_and_share_a_critical_section() {
     let names: &[&str] = &[
