@@ -193,6 +193,12 @@ fn info(state: &State, hwnd: u32) -> Option<Info> {
     })
 }
 
+/// Whether `hwnd` is a dialog, of the dialog class or of a program's own
+/// class with DLGWINDOWEXTRA bytes that a dialog function created.
+pub(crate) fn is_dialog(state: &State, hwnd: u32) -> bool {
+    info(state, hwnd).is_some()
+}
+
 fn set_info(state: &mut State, hwnd: u32, i: &Info) {
     let Some(w) = state.window_mut(hwnd) else {
         return;

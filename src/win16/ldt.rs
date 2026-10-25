@@ -9,7 +9,7 @@
 //! The LDT is the system block's (system.rs), in physical memory the
 //! process holds, so its entries are written there directly.
 
-use crate::cpu::Cpu;
+use crate::cpu::{Cpu, Seg};
 use crate::dpmi::descriptor;
 
 /// The first LDT index given out: those below are the system's flat
@@ -120,12 +120,27 @@ pub fn read(cpu: &Cpu, system: u32, selector: u16) -> u64 {
     cpu.bus.read_32(at) as u64 | (cpu.bus.read_32(at + 4) as u64) << 32
 }
 
-/// Write the descriptor of `selector`.
+/// Write the descriptor of `selector`. A data or stack segment register
+/// that holds it takes the new descriptor, as the DPMI host of Windows
+/// reloads them: VBRUN300 grows its DGROUP with GlobalReAlloc and moves
+/// SP past the old limit without loading SS again.
 pub fn write(cpu: &mut Cpu, system: u32, selector: u16, desc: u64) {
     let at = entry_phys(system, selector);
     cpu.bus.write_32(at, desc as u32);
     cpu.bus.write_32(at + 4, (desc >> 32) as u32);
+    if desc & PRESENT == 0 || !cpu.pe() || cpu.v86() {
+        return;
+    }
+    for seg in [Seg::ES, Seg::SS, Seg::DS, Seg::FS, Seg::GS] {
+        let held = cpu.seg_cache(seg).selector;
+        if held | 3 == selector | 3 {
+            let _ = cpu.load_segment(seg, held);
+        }
+    }
 }
+
+/// A descriptor's present bit.
+const PRESENT: u64 = 1 << 47;
 
 /// A 16-bit segment's descriptor: `base`, `limit`, an access byte.
 pub fn segment(base: u32, limit: u32, access: u8) -> u64 {
@@ -157,11 +172,6 @@ pub fn base_of(desc: u64) -> u32 {
 /// The limit of a descriptor, in bytes.
 pub fn limit_of(desc: u64) -> u32 {
     crate::cpu::Descriptor(desc).limit()
-}
-
-/// Whether a descriptor is present.
-pub fn present(desc: u64) -> bool {
-    desc & 1 << 47 != 0
 }
 
 crate::state_fields!(Ldt { used });

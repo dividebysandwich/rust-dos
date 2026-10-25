@@ -178,7 +178,9 @@ impl Segment {
             .get(at + 2..at + 2 + 8 * count)
             .ok_or(Error::Truncated("relocation records"))?;
         records
-            .chunks_exact(8)
+            .as_chunks::<8>()
+            .0
+            .iter()
             .map(|r| {
                 let flags = r[1];
                 let offset = u16::from_le_bytes([r[2], r[3]]);

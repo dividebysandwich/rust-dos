@@ -10,6 +10,7 @@ use super::thunk::{self, KIND_DLGPROC, KIND_PLAIN, KIND_WNDPROC};
 use super::{kernel, message};
 use crate::cpu::{Cpu, Seg};
 use crate::dpmi::Context;
+use crate::win32::user32::text::ansi_case;
 
 pub static MODULE: Def = Def {
     name: "USER",
@@ -132,6 +133,15 @@ static APIS: &[Api16] = &[
     win32("DlgDirList", 100, "wpwww", U, "DlgDirListA", b'w'),
     rust("SendDlgItemMessage", 101, "wwwwl", send_dlg_item_message),
     win32("AdjustWindowRect", 102, "Rlw", U, "AdjustWindowRect", b'b'),
+    win32("IsMenu", 358, "m", U, "IsMenu", b'b'),
+    win32(
+        "AdjustWindowRectEx",
+        454,
+        "Rlwl",
+        U,
+        "AdjustWindowRectEx",
+        b'b',
+    ),
     win32("MapDialogRect", 103, "wR", U, "MapDialogRect", b'b'),
     win32("MessageBeep", 104, "w", U, "MessageBeep", b'b'),
     win32("FlashWindow", 105, "ww", U, "FlashWindow", b'b'),
@@ -230,15 +240,16 @@ static APIS: &[Api16] = &[
     win32("LoadMenu", 150, "nr", U, "LoadMenuA", b'm'),
     win32("CreateMenu", 151, "", U, "CreateMenu", b'm'),
     win32("DestroyMenu", 152, "m", U, "DestroyMenu", b'b'),
-    win32("CheckMenuItem", 154, "mww", U, "CheckMenuItem", b'w'),
-    win32("EnableMenuItem", 155, "mww", U, "EnableMenuItem", b'w'),
+    rust("ChangeMenu", 153, "wwSww", change_menu),
+    rust("CheckMenuItem", 154, "www", check_menu_item),
+    rust("EnableMenuItem", 155, "www", enable_menu_item),
     win32("GetSystemMenu", 156, "ww", U, "GetSystemMenu", b'm'),
     win32("GetMenu", 157, "w", U, "GetMenu", b'm'),
     win32("SetMenu", 158, "wm", U, "SetMenu", b'b'),
     win32("GetSubMenu", 159, "ms", U, "GetSubMenu", b'm'),
     win32("DrawMenuBar", 160, "w", U, "DrawMenuBar", b'b'),
-    win32("GetMenuString", 161, "mwpsw", U, "GetMenuStringA", b'w'),
-    win32("HiliteMenuItem", 162, "wmww", U, "HiliteMenuItem", b'b'),
+    rust("GetMenuString", 161, "wwpsw", get_menu_string),
+    rust("HiliteMenuItem", 162, "wwww", hilite_menu_item),
     win32("CreateCaret", 163, "wwss", U, "CreateCaret", b'b'),
     win32("DestroyCaret", 164, "", U, "DestroyCaret", b'b'),
     win32("SetCaretPos", 165, "ss", U, "SetCaretPos", b'b'),
@@ -293,7 +304,7 @@ static APIS: &[Api16] = &[
     rust("OpenComm", 200, "pww", minus_one),
     rust("CloseComm", 207, "w", minus_one),
     rust("DialogBoxIndirect", 218, "nwwS", dialog_box_indirect),
-    rust("CreateDialogIndirect", 219, "npwS", create_dialog_indirect),
+    rust("CreateDialogIndirect", 219, "nSwS", create_dialog_indirect),
     win32("ScrollDC", 221, "wssRRwR", U, "ScrollDC", b'b'),
     win32("GetKeyboardState", 222, "p", U, "GetKeyboardState", b'b'),
     win32("SetKeyboardState", 223, "p", U, "SetKeyboardState", b'b'),
@@ -330,14 +341,14 @@ static APIS: &[Api16] = &[
     rust(
         "CreateDialogIndirectParam",
         242,
-        "npwSl",
+        "nSwSl",
         create_dialog_indirect,
     ),
     win32("GetDialogBaseUnits", 243, "", U, "GetDialogBaseUnits", b'w'),
     win32("EqualRect", 244, "RR", U, "EqualRect", b'b'),
     win32("GetCursor", 247, "", U, "GetCursor", b'i'),
     win32("GetAsyncKeyState", 249, "w", U, "GetAsyncKeyState", b'w'),
-    win32("GetMenuState", 250, "mww", U, "GetMenuState", b'w'),
+    rust("GetMenuState", 250, "www", get_menu_state),
     rust("SendDriverMessage", 251, "wwll", zero),
     rust("OpenDriver", 252, "ppl", zero),
     rust("CloseDriver", 253, "wll", zero),
@@ -387,14 +398,14 @@ static APIS: &[Api16] = &[
     rust("DefDlgProc", 308, "wwwl", def_dlg_proc),
     rust("GetWindowPlacement", 370, "wp", get_window_placement),
     rust("SetWindowPlacement", 371, "wp", set_window_placement),
-    win32("UnregisterClass", 403, "rn", U, "UnregisterClassA", b'b'),
-    rust("GetClassInfo", 404, "nrp", get_class_info),
-    rust("CreateCursor", 406, "nsswwpp", zero),
-    rust("CreateIcon", 407, "nsswwpp", zero),
+    rust("UnregisterClass", 403, "Sn", unregister_class),
+    rust("GetClassInfo", 404, "nSp", get_class_info),
+    rust("CreateCursor", 406, "nsssspp", create_cursor),
+    rust("CreateIcon", 407, "nsswwpp", create_icon),
     rust("InsertMenu", 410, "mwwwS", insert_menu),
     rust("AppendMenu", 411, "mwwS", append_menu),
-    win32("RemoveMenu", 412, "mww", U, "RemoveMenu", b'b'),
-    win32("DeleteMenu", 413, "mww", U, "DeleteMenu", b'b'),
+    rust("RemoveMenu", 412, "www", remove_menu),
+    rust("DeleteMenu", 413, "www", delete_menu),
     rust("ModifyMenu", 414, "mwwwS", modify_menu),
     win32("CreatePopupMenu", 415, "", U, "CreatePopupMenu", b'm'),
     win32("TrackPopupMenu", 416, "mwssswR", U, "TrackPopupMenu", b'b'),
@@ -515,6 +526,15 @@ const P_ICON: u32 = 9;
 const P_RECT: u32 = 10;
 const P_PEEK: u32 = 11;
 const P_SCROLL_RANGE: u32 = 12;
+const P_MODULE: u32 = 13;
+const P_DLG_INT: u32 = 14;
+const P_CLASS_MENU: u32 = 15;
+const P_EX_STYLE: u32 = 16;
+
+/// The extended style USER32 gives captioned windows, which Windows 95
+/// doesn't show programs for Windows 3.1.
+pub(super) const WS_EX_WINDOWEDGE: u32 = 0x0100;
+const GWL_EXSTYLE: u32 = (-20i32) as u32;
 /// The kinds from here on are GDI's (gdi.rs).
 pub(super) const P_GDI: u32 = 100;
 /// And from here on misc.rs's.
@@ -558,8 +578,46 @@ pub fn post(cpu: &mut Cpu, value: u32, data: &[u32], _: &mut Context) -> Option<
         }
         P_CLASSINFO => {
             if value != 0 {
-                class16(cpu, d(1), d(2));
+                class16(cpu, d(1), d(2), d(3), d(4));
             }
+        }
+        P_EX_STYLE => return Some(value & !WS_EX_WINDOWEDGE),
+        // GetDlgItemInt: the text at d(1) taken, TRUE or FALSE at d(2).
+        P_DLG_INT => {
+            let text = super::string_bytes(cpu, d(1), DLG_INT_TEXT as usize);
+            let found = dlg_int(&text, d(3) != 0);
+            if d(2) != 0 {
+                super::write_16(cpu, d(2), found.is_some() as u16);
+            }
+            return Some(found.unwrap_or(0) as u32);
+        }
+        // A class registered (d(1) its name, d(2) its menu's name) or, with
+        // d(3), unregistered: what GetClassInfo gives as its menu's name.
+        P_CLASS_MENU => {
+            if value != 0 {
+                let key = class_key(cpu, d(1));
+                let menus = &mut cpu.bus.win32.win16.class_menus;
+                menus.retain(|(k, _)| *k != key);
+                if d(3) == 0 {
+                    menus.push((key, d(2)));
+                }
+            }
+            // RegisterClass's atom, or UnregisterClass's BOOL.
+            return Some(if d(3) == 0 {
+                value
+            } else {
+                (value != 0) as u32
+            });
+        }
+        // A class's module: its instance's, USER's for the system's own.
+        P_MODULE => {
+            let win16 = &cpu.bus.win32.win16;
+            let module = win16
+                .modules
+                .iter()
+                .find(|m| m.resources32 == value)
+                .or_else(|| win16.modules.iter().find(|m| m.name == "USER"));
+            return Some(module.map_or(0, |m| m.handle) as u32);
         }
         P_PROC16 => {
             let kind = d(1) as u8;
@@ -593,14 +651,12 @@ pub fn post(cpu: &mut Cpu, value: u32, data: &[u32], _: &mut Context) -> Option<
                 super::write_16(cpu, to, v as u16);
             }
         }
-        P_PLACEMENT => {
-            if value != 0 {
-                for i in 0..11 {
-                    let v = super::read_32(cpu, d(1) + 4 * i);
-                    super::write_16(cpu, d(2) + 2 * i, v as u16);
-                }
-                super::write_16(cpu, d(2), 22);
+        P_PLACEMENT if value != 0 => {
+            for i in 0..11 {
+                let v = super::read_32(cpu, d(1) + 4 * i);
+                super::write_16(cpu, d(2) + 2 * i, v as u16);
             }
+            super::write_16(cpu, d(2), 22);
         }
         _ => {}
     }
@@ -633,7 +689,10 @@ fn sx(v: u32) -> u32 {
 }
 
 /// A WNDCLASS at `wc` as a WNDCLASS16 at `wc16`.
-fn class16(cpu: &mut Cpu, wc: u32, wc16: u32) {
+/// The WNDCLASSA at `wc` as the 16-bit WNDCLASS at `wc16`, with the
+/// menu's name and the class's name the 16:16 pointers `menu` and
+/// `class`.
+fn class16(cpu: &mut Cpu, wc: u32, wc16: u32, menu: u32, class: u32) {
     let style = r32(cpu, wc);
     let proc = r32(cpu, wc + 4);
     let proc = proc16_of(cpu, proc, KIND_WNDPROC);
@@ -648,9 +707,8 @@ fn class16(cpu: &mut Cpu, wc: u32, wc16: u32) {
     for v in [cls as u16, wnd as u16, instance, icon, cursor, brush as u16] {
         b.extend_from_slice(&v.to_le_bytes());
     }
-    // The names stay the program's.
-    let names = super::peek(cpu, wc16 + 18, 8).unwrap_or(vec![0; 8]);
-    b.extend_from_slice(&names);
+    b.extend_from_slice(&menu.to_le_bytes());
+    b.extend_from_slice(&class.to_le_bytes());
     super::poke(cpu, wc16, &b);
 }
 
@@ -688,18 +746,63 @@ fn register_class(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     for (i, f) in fields.into_iter().enumerate() {
         cpu.bus.guest_write_32(wc + 4 * i as u32, f);
     }
-    go_at(cpu, wc, "RegisterClassA", &[wc], Vec::new())
+    go_at(
+        cpu,
+        wc,
+        "RegisterClassA",
+        &[wc],
+        vec![P_CLASS_MENU, class, menu],
+    )
+}
+
+/// UnregisterClass(name, instance): its menu's name forgotten too.
+fn unregister_class(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let name = if args[0] >> 16 == 0 {
+        args[0]
+    } else {
+        super::linear(cpu, args[0])
+    };
+    let instance = instance32(cpu, args[1] as u16);
+    go_post(
+        cpu,
+        "UnregisterClassA",
+        &[name, instance],
+        vec![P_CLASS_MENU, args[0], 0, 1],
+    )
+}
+
+/// A class's name (a 16:16 pointer, or an atom) as `class_menus` has it.
+fn class_key(cpu: &Cpu, class: u32) -> String {
+    if class >> 16 == 0 {
+        format!("#{}", class)
+    } else {
+        super::string(cpu, super::linear(cpu, class)).to_ascii_uppercase()
+    }
 }
 
 fn get_class_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let instance = instance32(cpu, args[0] as u16);
+    let name32 = if args[1] >> 16 == 0 {
+        args[1]
+    } else {
+        super::linear(cpu, args[1])
+    };
+    let key = class_key(cpu, args[1]);
+    let menu = cpu
+        .bus
+        .win32
+        .win16
+        .class_menus
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map_or(0, |&(_, m)| m);
     let wc = thunk::scratch32(cpu, 40);
     go_at(
         cpu,
         wc,
         "GetClassInfoA",
-        &[instance, args[1], wc],
-        vec![P_CLASSINFO, wc, args[2]],
+        &[instance, name32, wc],
+        vec![P_CLASSINFO, wc, args[2], menu, args[1]],
     )
 }
 
@@ -762,11 +865,7 @@ const GCW_HMODULE: u32 = (-16i32) as u32;
 
 /// Whether `hwnd` is a dialog box (its DWL_DLGPROC a dialog procedure).
 fn is_dialog(cpu: &Cpu, hwnd: u32) -> bool {
-    let user = &cpu.bus.win32.user;
-    user.window(hwnd)
-        .and_then(|w| user.classes.get(w.class as usize))
-        .and_then(|c| c.as_ref())
-        .is_some_and(|c| c.name == "#32770")
+    crate::win32::user32::dialog::is_dialog(&cpu.bus.win32.user, hwnd)
 }
 
 fn get_window_long(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -775,6 +874,7 @@ fn get_window_long(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         GWL_WNDPROC => vec![P_PROC16, KIND_WNDPROC as u32],
         DWL_DLGPROC if is_dialog(cpu, hwnd) => vec![P_PROC16, KIND_DLGPROC as u32],
         GWL_HINSTANCE => vec![P_INSTANCE],
+        GWL_EXSTYLE => vec![P_EX_STYLE],
         _ => Vec::new(),
     };
     go_post(cpu, "GetWindowLongA", &[hwnd, index], data)
@@ -862,7 +962,7 @@ fn get_class_word(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (hwnd, index) = (args[0], args[1]);
     let data = match index {
         GCW_HICON | GCW_HCURSOR => vec![P_ICON],
-        GCW_HMODULE => vec![P_INSTANCE],
+        GCW_HMODULE => vec![P_MODULE],
         _ => Vec::new(),
     };
     if index as i32 >= 0 {
@@ -903,12 +1003,34 @@ fn pt_in_rect(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some((x >= side(0) && x < side(2) && y >= side(1) && y < side(3)) as u32)
 }
 
-/// EnumWindows' callbacks: (hwnd, lParam), a BOOL back.
-const ENUM_PROC: u32 = 2 | 0b10 << 8;
+/// EnumWindows' callbacks: (hwnd, lParam), a BOOL back in AX only (bit
+/// 16).
+const ENUM_PROC: u32 = 2 | 0b10 << 8 | 0x1_0000;
 
 fn enum_windows(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let proc = thunk::proc32(cpu, args[0], KIND_PLAIN, ENUM_PROC);
     go(cpu, "EnumWindows", &[proc, args[1]])
+}
+
+/// CreateIcon(instance, width, height, planes, bits per pixel, AND
+/// mask, XOR bits): planes and bits per pixel are bytes, whose words'
+/// high bytes are whatever the caller had there.
+fn create_icon(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let mut args32 = args.to_vec();
+    args32[0] = instance32(cpu, args[0] as u16);
+    args32[3] &= 0xFF;
+    args32[4] &= 0xFF;
+    thunk::call32(cpu, api("CreateIcon"), &args32, thunk::POST_AUTO, vec![b'i' as u32]);
+    None
+}
+
+/// CreateCursor(instance, hot spot x and y, width, height, AND mask, XOR
+/// mask).
+fn create_cursor(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let mut args32 = args.to_vec();
+    args32[0] = instance32(cpu, args[0] as u16);
+    thunk::call32(cpu, api("CreateCursor"), &args32, thunk::POST_AUTO, vec![b'i' as u32]);
+    None
 }
 
 fn enum_child_windows(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -1103,11 +1225,11 @@ fn system_parameters_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     } else {
         vec![P_WORDS, s, args[2], (args[2] != 0) as u32]
     };
-    if args[2] != 0 {
-        if let Some(bytes) = super::peek(cpu, args[2], 2) {
-            let v = u16::from_le_bytes([bytes[0], bytes[1]]) as u32;
-            cpu.bus.guest_write_32(s, v);
-        }
+    if args[2] != 0
+        && let Some(bytes) = super::peek(cpu, args[2], 2)
+    {
+        let v = u16::from_le_bytes([bytes[0], bytes[1]]) as u32;
+        cpu.bus.guest_write_32(s, v);
     }
     go_at(
         cpu,
@@ -1147,7 +1269,7 @@ fn create_dialog(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// A 16-bit dialog template at `at`, as a Win32 one on the 32-bit stack:
 /// its address, which is the stack's top for the call.
 fn template32(cpu: &mut Cpu, at: u32, max: u32) -> u32 {
-    let bytes = super::peek(cpu, at, max as usize).unwrap_or_default();
+    let bytes = super::peek_upto(cpu, at, max as usize);
     let converted = super::resource::dialog32(&bytes);
     let to = thunk::scratch32(cpu, converted.len() as u32 + 4);
     let at = (to + 3) & !3;
@@ -1179,7 +1301,12 @@ fn create_dialog_indirect(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let instance = args[0] as u16;
     let proc = proc32_of(cpu, args[3], KIND_DLGPROC, instance);
     let instance32 = instance32(cpu, instance);
-    let template = template32(cpu, args[1], 0x2000);
+    // The template goes to the end of its segment at most.
+    let (at, offset) = (super::linear(cpu, args[1]), args[1] & 0xFFFF);
+    let size = super::selector_base(cpu, (args[1] >> 16) as u16)
+        .map_or(0, |(_, limit, _)| (limit + 1).saturating_sub(offset))
+        .min(0x8000);
+    let template = template32(cpu, at, size);
     let param = args.get(4).copied().unwrap_or(0);
     go_at(
         cpu,
@@ -1195,21 +1322,47 @@ fn set_dlg_item_int(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     go(cpu, "SetDlgItemInt", &[args[0], args[1], value, args[3]])
 }
 
+/// GetDlgItemInt(dialog, id, translated, signed): the control's text
+/// read with GetDlgItemTextA, then taken as Windows 3.1 does
+/// (`dlg_int`).
 fn get_dlg_item_int(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let ok = thunk::scratch32(cpu, 4);
-    let data = if args[2] != 0 {
-        vec![P_WORDS, ok, args[2], 1]
-    } else {
-        Vec::new()
-    };
-    let target = if args[2] != 0 { ok } else { 0 };
+    let buf = thunk::scratch32(cpu, DLG_INT_TEXT);
     go_at(
         cpu,
-        ok,
-        "GetDlgItemInt",
-        &[args[0], args[1], target, args[3]],
-        data,
+        buf,
+        "GetDlgItemTextA",
+        &[args[0], args[1], buf, DLG_INT_TEXT],
+        vec![P_DLG_INT, buf, args[2], args[3]],
     )
+}
+
+/// The bytes of a control's text GetDlgItemInt reads.
+const DLG_INT_TEXT: u32 = 64;
+
+/// GetDlgItemInt's number in `text`: blanks around it, a sign if
+/// `signed`, the digits, and a value that fits a 16-bit int (or word);
+/// None if the text is anything else.
+fn dlg_int(text: &[u8], signed: bool) -> Option<u16> {
+    let text = text.trim_ascii();
+    let (negative, digits) = match text.first() {
+        Some(b'-') if signed => (true, &text[1..]),
+        Some(b'+') => (false, &text[1..]),
+        _ => (false, text),
+    };
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let mut n: i64 = 0;
+    for &d in digits {
+        n = (n * 10 + (d - b'0') as i64).min(1 << 20);
+    }
+    let v = if negative { -n } else { n };
+    let fits = if signed {
+        (-0x8000..=0x7FFF).contains(&v)
+    } else {
+        (0..=0xFFFF).contains(&v)
+    };
+    fits.then_some(v as u16)
 }
 
 fn dlg_dir_select(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -1426,6 +1579,107 @@ fn modify_menu(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     )
 }
 
+/// A menu item's id or place in the menu `in_menu` for USER32, as
+/// `flags` says which it is: by command, a popup's id is its menu, whose
+/// 16-bit handle the program gives, when no item has that id itself.
+fn item32(cpu: &Cpu, in_menu: u32, item: u32, flags: u32) -> u32 {
+    use crate::win32::user32::menu::{exists, has_command};
+    const MF_BYPOSITION: u32 = 0x0400;
+    let menu = menu32(item as u16);
+    let user = &cpu.bus.win32.user;
+    if flags & MF_BYPOSITION == 0
+        && menu != item
+        && exists(user, menu)
+        && !has_command(user, in_menu, item)
+    {
+        menu
+    } else {
+        item
+    }
+}
+
+/// A USER32 function of (menu, item, flags, ...), the menu at `menu` in
+/// `args` and the item and its flags at `item` and `flags`.
+fn menu_item_call(
+    cpu: &mut Cpu,
+    name: &str,
+    args: &[u32],
+    menu: usize,
+    item: usize,
+    flags: usize,
+) -> Option<u32> {
+    let mut a = args.to_vec();
+    a[menu] = menu32(a[menu] as u16);
+    a[item] = item32(cpu, a[menu], a[item], a[flags]);
+    go(cpu, name, &a)
+}
+
+fn check_menu_item(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    menu_item_call(cpu, "CheckMenuItem", args, 0, 1, 2)
+}
+
+fn enable_menu_item(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    menu_item_call(cpu, "EnableMenuItem", args, 0, 1, 2)
+}
+
+fn get_menu_state(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    menu_item_call(cpu, "GetMenuState", args, 0, 1, 2)
+}
+
+fn remove_menu(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    menu_item_call(cpu, "RemoveMenu", args, 0, 1, 2)
+}
+
+fn delete_menu(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    menu_item_call(cpu, "DeleteMenu", args, 0, 1, 2)
+}
+
+fn get_menu_string(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    menu_item_call(cpu, "GetMenuStringA", args, 0, 1, 4)
+}
+
+/// HiliteMenuItem(hwnd, menu, item, flags): it fails without a window or
+/// a menu.
+fn hilite_menu_item(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    if args[0] == 0 || args[1] == 0 {
+        return Some(0);
+    }
+    menu_item_call(cpu, "HiliteMenuItem", args, 1, 2, 3)
+}
+
+/// ChangeMenu(menu, position, item, id, flags), Windows 2's way to add,
+/// change and remove items: the flag MF_APPEND, MF_DELETE, MF_CHANGE or
+/// MF_REMOVE picks the function, inserting when there is none of them.
+fn change_menu(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    const MF_CHANGE: u32 = 0x0080;
+    const MF_APPEND: u32 = 0x0100;
+    const MF_DELETE: u32 = 0x0200;
+    const MF_REMOVE: u32 = 0x1000;
+    const MF_BYPOSITION: u32 = 0x0400;
+    let (menu, position, data, id, flags) = (args[0], args[1], args[2], args[3], args[4]);
+    if flags & MF_APPEND != 0 {
+        append_menu(cpu, &[menu, flags & !MF_APPEND, id, data])
+    } else if flags & MF_DELETE != 0 {
+        let flags = flags & !MF_DELETE;
+        go(cpu, "DeleteMenu", &[menu32(menu as u16), position, flags])
+    } else if flags & MF_CHANGE != 0 {
+        modify_menu(cpu, &[menu, position, flags & !MF_CHANGE, id, data])
+    } else if flags & MF_REMOVE != 0 {
+        let item = if flags & MF_BYPOSITION != 0 {
+            position
+        } else {
+            id
+        };
+        go(
+            cpu,
+            "RemoveMenu",
+            &[menu32(menu as u16), item, flags & !MF_REMOVE],
+        )
+    } else {
+        insert_menu(cpu, &[menu, position, flags, id, data])
+    }
+}
+
 // Strings.
 
 /// wsprintf(buffer, format, ...): Windows 3.1's, its arguments 16-bit
@@ -1538,21 +1792,26 @@ fn format16(cpu: &mut Cpu, buffer: u32, format: u32, list: u32) -> u32 {
             other => vec![b'%', other],
         };
         let mut text = text;
+        // Zeros go after a minus sign.
+        let sign = usize::from(text.first() == Some(&b'-'));
         if matches!(kind, b'd' | b'i' | b'u' | b'x' | b'X')
             && let Some(p) = precision
         {
-            while text.len() < p {
-                text.insert(0, b'0');
+            while text.len() - sign < p {
+                text.insert(sign, b'0');
             }
         }
         if text.len() < width {
             let pad = width - text.len();
             if left {
                 text.extend(std::iter::repeat_n(b' ', pad));
-            } else {
-                let fill = if zero { b'0' } else { b' ' };
+            } else if zero {
                 for _ in 0..pad {
-                    text.insert(0, fill);
+                    text.insert(sign, b'0');
+                }
+            } else {
+                for _ in 0..pad {
+                    text.insert(0, b' ');
                 }
             }
         }
@@ -1572,18 +1831,14 @@ fn change_case(cpu: &mut Cpu, at: u32, len: usize, upper: bool) {
         s.truncate(n);
     }
     for b in s.iter_mut() {
-        *b = if upper {
-            b.to_ascii_uppercase()
-        } else {
-            b.to_ascii_lowercase()
-        };
+        *b = ansi_case(*b, upper);
     }
     super::poke(cpu, at, &s);
 }
 
 fn ansi_upper(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if args[0] >> 16 == 0 {
-        return Some((args[0] as u8).to_ascii_uppercase() as u32);
+        return Some(ansi_case(args[0] as u8, true) as u32);
     }
     let at = super::linear(cpu, args[0]);
     let len = super::string_bytes(cpu, at, 0x1_0000).len();
@@ -1593,7 +1848,7 @@ fn ansi_upper(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 fn ansi_lower(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if args[0] >> 16 == 0 {
-        return Some((args[0] as u8).to_ascii_lowercase() as u32);
+        return Some(ansi_case(args[0] as u8, false) as u32);
     }
     let at = super::linear(cpu, args[0]);
     let len = super::string_bytes(cpu, at, 0x1_0000).len();
@@ -1608,7 +1863,7 @@ fn ansi_upper_buff(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         args[1] as usize
     };
     let mut s = super::peek(cpu, args[0], len).unwrap_or_default();
-    s.iter_mut().for_each(|b| *b = b.to_ascii_uppercase());
+    s.iter_mut().for_each(|b| *b = ansi_case(*b, true));
     super::poke(cpu, args[0], &s);
     Some(args[1])
 }
@@ -1620,7 +1875,7 @@ fn ansi_lower_buff(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         args[1] as usize
     };
     let mut s = super::peek(cpu, args[0], len).unwrap_or_default();
-    s.iter_mut().for_each(|b| *b = b.to_ascii_lowercase());
+    s.iter_mut().for_each(|b| *b = ansi_case(*b, false));
     super::poke(cpu, args[0], &s);
     Some(args[1])
 }

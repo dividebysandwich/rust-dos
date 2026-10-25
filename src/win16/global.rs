@@ -15,8 +15,6 @@ use crate::cpu::Cpu;
 /// GlobalAlloc's flags.
 pub const GMEM_FIXED: u16 = 0x0000;
 pub const GMEM_MOVEABLE: u16 = 0x0002;
-pub const GMEM_NOCOMPACT: u16 = 0x0010;
-pub const GMEM_NODISCARD: u16 = 0x0020;
 pub const GMEM_ZEROINIT: u16 = 0x0040;
 pub const GMEM_MODIFY: u16 = 0x0080;
 pub const GMEM_DISCARDABLE: u16 = 0x0100;
@@ -27,7 +25,6 @@ pub const GA_MOVEABLE: u8 = 0x02;
 pub const GA_DGROUP: u8 = 0x04;
 pub const GA_DISCARDABLE: u8 = 0x08;
 pub const GA_IPCSHARE: u8 = 0x10;
-pub const GA_DOSMEM: u8 = 0x20;
 
 /// GlobalFlags' answer: discardable, discarded, and the lock count in the
 /// low byte.
@@ -61,12 +58,12 @@ pub fn handle_to_sel(handle: u16) -> u16 {
     if handle == 0 { 0 } else { handle | 1 }
 }
 
-fn arena<'a>(state: &'a State, handle: u16) -> Option<&'a Arena> {
+fn arena(state: &State, handle: u16) -> Option<&Arena> {
     let sel = handle_to_sel(handle);
     state.arena.get(&ldt::index(sel)).filter(|a| a.size != 0)
 }
 
-fn arena_mut<'a>(state: &'a mut State, handle: u16) -> Option<&'a mut Arena> {
+fn arena_mut(state: &mut State, handle: u16) -> Option<&mut Arena> {
     let sel = handle_to_sel(handle);
     state
         .arena
@@ -196,6 +193,8 @@ pub fn free(cpu: &mut Cpu, handle: u16) -> bool {
     let Some(a) = arena(&cpu.bus.win32.win16, handle).cloned() else {
         return false;
     };
+    // A local heap in it goes with it.
+    super::local::forget(cpu, sel);
     let state = &mut cpu.bus.win32.win16;
     state.arena.remove(&ldt::index(sel));
     state.ldt.free(sel, a.selectors);

@@ -3,7 +3,9 @@
 //! offsets LocalInit gave. The blocks' sizes and handles are kept here; in
 //! the segment, a moveable block's handle is the offset of an entry whose
 //! first word is the block's offset, as Windows 3.1's handle tables have
-//! them, since programs read them so. Blocks never move but for
+//! them, since programs read them so. As there, where entries follow a
+//! table's count word, a moveable handle is 2 more than a multiple of 4
+//! and a fixed one (the block's offset) a multiple of 4. Blocks never move but for
 //! LocalReAlloc, which may move a moveable one; a heap that is full grows
 //! its segment, to 64 KB.
 
@@ -14,8 +16,10 @@ pub const LMEM_MOVEABLE: u16 = 0x0002;
 pub const LMEM_ZEROINIT: u16 = 0x0040;
 pub const LMEM_MODIFY: u16 = 0x0080;
 pub const LMEM_DISCARDABLE: u16 = 0x0F00;
-/// LocalFlags' discarded bit.
+/// LocalFlags' discarded bit, kept in a block's flags.
 const LMEM_DISCARDED: u16 = 0x4000;
+/// Where a moveable block's handle is in the block of its entry.
+const ENTRY: u16 = 2;
 
 /// Blocks start at multiples of this, a header's 4 bytes before each.
 const ALIGN: u16 = 4;
@@ -173,10 +177,10 @@ pub fn alloc(cpu: &mut Cpu, sel: u16, flags: u16, size: u16) -> u16 {
     };
     let offset = if flags & LMEM_MOVEABLE != 0 {
         // The handle's entry, then the block.
-        let Some(e) = take(cpu, i, 4, 0, 0xFFFF) else {
+        let Some(e) = take(cpu, i, ENTRY + 4, 0, 0xFFFF) else {
             return 0;
         };
-        let entry = cpu.bus.win32.win16.local_heaps[i].blocks[e].offset;
+        let entry = cpu.bus.win32.win16.local_heaps[i].blocks[e].offset + ENTRY;
         cpu.bus.win32.win16.local_heaps[i].blocks[e].handle = 0;
         let Some(b) = take(cpu, i, size, entry, flags) else {
             free_entry(cpu, i, entry);
@@ -207,7 +211,7 @@ pub fn alloc(cpu: &mut Cpu, sel: u16, flags: u16, size: u16) -> u16 {
 fn free_entry(cpu: &mut Cpu, i: usize, entry: u16) {
     cpu.bus.win32.win16.local_heaps[i]
         .blocks
-        .retain(|b| !(b.handle == 0 && b.offset == entry));
+        .retain(|b| !(b.handle == 0 && b.offset + ENTRY == entry));
 }
 
 /// The place in its heap's list of the block whose handle is `handle`.
@@ -243,6 +247,9 @@ pub fn lock(cpu: &mut Cpu, sel: u16, handle: u16) -> u16 {
         return 0;
     };
     let block = &mut cpu.bus.win32.win16.local_heaps[i].blocks[b];
+    if block.flags & LMEM_DISCARDED != 0 {
+        return 0;
+    }
     if block.handle != block.offset {
         block.lock = block.lock.saturating_add(1);
     }
@@ -279,11 +286,7 @@ pub fn flags(cpu: &Cpu, sel: u16, handle: u16) -> u16 {
         return 0;
     };
     let block = &cpu.bus.win32.win16.local_heaps[i].blocks[b];
-    let mut f = block.lock as u16 | block.flags & LMEM_DISCARDABLE;
-    if block.size == 0 && block.flags & LMEM_DISCARDABLE != 0 {
-        f |= LMEM_DISCARDED;
-    }
-    f
+    block.lock as u16 | block.flags & (LMEM_DISCARDABLE | LMEM_DISCARDED)
 }
 
 /// LocalHandle: the handle of the block at `offset`.
@@ -314,6 +317,21 @@ pub fn realloc(cpu: &mut Cpu, sel: u16, handle: u16, size: u16, flags: u16) -> u
         return handle;
     }
     let block = cpu.bus.win32.win16.local_heaps[i].blocks[b].clone();
+    let moveable = block.handle != block.offset;
+    // LocalDiscard (size 0, LMEM_MOVEABLE): an unlocked moveable block is
+    // discarded, its handle kept; a locked one isn't.
+    if size == 0 && moveable && flags & LMEM_MOVEABLE != 0 {
+        if block.lock > 0 {
+            return 0;
+        }
+        let block = &mut cpu.bus.win32.win16.local_heaps[i].blocks[b];
+        block.size = 0;
+        block.flags |= LMEM_DISCARDED;
+        let base = seg_base(cpu, i);
+        super::write_16(cpu, base + handle as u32, 0);
+        return handle;
+    }
+    cpu.bus.win32.win16.local_heaps[i].blocks[b].flags &= !LMEM_DISCARDED;
     let h = &cpu.bus.win32.win16.local_heaps[i];
     let limit = h
         .blocks
@@ -327,9 +345,11 @@ pub fn realloc(cpu: &mut Cpu, sel: u16, handle: u16, size: u16, flags: u16) -> u
             super::poke(cpu, at, &vec![0; (size - block.size) as usize]);
         }
         cpu.bus.win32.win16.local_heaps[i].blocks[b].size = size;
+        if moveable {
+            super::write_16(cpu, base + handle as u32, block.offset);
+        }
         return handle;
     }
-    let moveable = block.handle != block.offset;
     if !moveable && flags & LMEM_MOVEABLE == 0 {
         return 0;
     }
@@ -338,7 +358,8 @@ pub fn realloc(cpu: &mut Cpu, sel: u16, handle: u16, size: u16, flags: u16) -> u
     let old = super::peek(cpu, base + block.offset as u32, block.size as usize).unwrap_or_default();
     cpu.bus.win32.win16.local_heaps[i].blocks.remove(b);
     let new_handle = if moveable { block.handle } else { 0 };
-    let Some(n) = take(cpu, i, size, new_handle, block.flags) else {
+    let kept = block.flags & !LMEM_DISCARDED;
+    let Some(n) = take(cpu, i, size, new_handle, kept) else {
         // Back where it was.
         let h = &mut cpu.bus.win32.win16.local_heaps[i];
         let place = h.blocks.partition_point(|x| x.offset < block.offset);

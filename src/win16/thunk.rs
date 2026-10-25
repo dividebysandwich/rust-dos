@@ -42,6 +42,9 @@ pub const KIND_DLGPROC: u8 = 1;
 /// words of, `extra` the number of arguments and its high byte which of
 /// them are long (bit n for argument n).
 pub const KIND_PLAIN: u8 = 2;
+/// A font enumeration procedure (EnumFonts, EnumFontFamilies): its
+/// LOGFONT and TEXTMETRIC given as 16-bit copies.
+pub const KIND_FONTENUM: u8 = 3;
 
 /// Bytes of a slot.
 const SLOT: u32 = 8;
@@ -85,7 +88,7 @@ pub static THENS: &[Then] = &[
     super::kernel::then_libs,
 ];
 
-pub const THEN_KEEP: u16 = 0;
+// Place 0 is then_keep, which no call names now.
 pub const THEN_PROC: u16 = 1;
 pub const THEN_TASK: u16 = 2;
 pub const THEN_MESSAGE: u16 = 3;
@@ -415,7 +418,7 @@ fn win16_thunk32_base(cpu: &Cpu) -> u32 {
 /// no memory.
 fn commit_slot(cpu: &mut Cpu, base: u32, i: u32) -> bool {
     let at = base + SLOT * i;
-    if (SLOT * i) % PAGE != 0 {
+    if !(SLOT * i).is_multiple_of(PAGE) {
         return true;
     }
     let pid = cpu.bus.win32.win16.pid;
@@ -455,7 +458,7 @@ pub fn proc16(cpu: &mut Cpu, target: u32, kind: u8, extra: u32, arg_bytes: u16) 
         .iter()
         .position(|t| t.target == target && t.kind == kind)
     {
-        return (win16.thunk16_sel as u32) << 16 | SLOT * i as u32;
+        return ((win16.thunk16_sel as u32) << 16) | (SLOT * i as u32);
     }
     let i = win16.thunks16.len() as u32;
     let base = win16.thunk16_base;
@@ -475,7 +478,7 @@ pub fn proc16(cpu: &mut Cpu, target: u32, kind: u8, extra: u32, arg_bytes: u16) 
         kind,
         extra,
     });
-    (cpu.bus.win32.win16.thunk16_sel as u32) << 16 | SLOT * i
+    ((cpu.bus.win32.win16.thunk16_sel as u32) << 16) | (SLOT * i)
 }
 
 /// The 32-bit procedure a 16-bit slot stands for, if `segptr` is one.
@@ -485,7 +488,7 @@ pub fn thunk16_of(cpu: &Cpu, segptr: u32) -> Option<Thunk> {
         return None;
     }
     let offset = segptr & 0xFFFF;
-    if offset % SLOT != 0 {
+    if !offset.is_multiple_of(SLOT) {
         return None;
     }
     win16.thunks16.get((offset / SLOT) as usize).cloned()
@@ -528,6 +531,7 @@ pub fn thunk32_trap(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     };
     match thunk.kind {
         KIND_WNDPROC | KIND_DLGPROC => super::message::call_wndproc16(cpu, &thunk),
+        KIND_FONTENUM => super::gdi::call_font_enum16(cpu, &thunk),
         _ => call_plain16(cpu, &thunk),
     }
     None
@@ -607,14 +611,14 @@ pub fn instance_thunk(cpu: &mut Cpu, function: u32, ds: u16) -> u32 {
         .iter()
         .position(|&(f, d)| f == function && d == ds)
     {
-        return sel << 16 | SLOT * i as u32;
+        return (sel << 16) | (SLOT * i as u32);
     }
     let i = win16.inst_thunks.len() as u32;
     let at = win16.inst_base + SLOT * i;
     if i >= MAX_SLOTS {
         return 0;
     }
-    if (SLOT * i) % PAGE == 0 {
+    if (SLOT * i).is_multiple_of(PAGE) {
         let pid = win16.pid;
         let made =
             super::with_win16(cpu, pid, |p, bus| p.memory.commit(bus, at, PAGE, USER)).flatten();
@@ -626,5 +630,5 @@ pub fn instance_thunk(cpu: &mut Cpu, function: u32, ds: u16) -> u32 {
     let [o_lo, o_hi, s_lo, s_hi] = function.to_le_bytes();
     super::poke(cpu, at, &[0xB8, d_lo, d_hi, 0xEA, o_lo, o_hi, s_lo, s_hi]);
     cpu.bus.win32.win16.inst_thunks.push((function, ds));
-    sel << 16 | SLOT * i
+    (sel << 16) | (SLOT * i)
 }

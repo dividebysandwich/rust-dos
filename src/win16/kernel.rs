@@ -329,8 +329,12 @@ fn fatal_exit(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// GetVersion: Windows 3.95, as Windows 95 says to Windows 3.1 programs,
 /// on DOS 7.10.
-fn get_version(_: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(0x070A_5F03)
+/// GetVersion: Windows 95's Windows version for 16-bit programs (3.95)
+/// in the low word, and in the high word the DOS version that INT 21h
+/// AH=30h gives.
+fn get_version(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    let dos = cpu.bus.dos_version;
+    Some((dos.major as u32) << 24 | (dos.minor as u32) << 16 | 0x5F03)
 }
 
 // The local heap: DS's.
@@ -508,20 +512,38 @@ fn global_fix(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(global::handle_to_sel(args[0] as u16) as u32)
 }
 
+/// GlobalDosAlloc(bytes): a fixed global block of conventional memory,
+/// its paragraph in the high word and its selector in the low one.
 fn global_dos_alloc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    Some(match dpmi::dos_alloc(cpu, args[0]) {
-        Some((seg, sel)) => (seg as u32) << 16 | sel as u32,
-        None => 0,
-    })
+    let paras = args[0].div_ceil(16).clamp(1, 0xFFFF) as u16;
+    let psp = cpu.bus.win32.psp;
+    let Ok(seg) = crate::mcb::alloc(&mut cpu.bus, psp, paras) else {
+        return Some(0);
+    };
+    let owner = current_handle(cpu);
+    let base = (seg as u32) << 4;
+    let size = paras as u32 * 16;
+    match global::create_block(cpu, global::GMEM_FIXED, base, size, owner, false, true) {
+        Some(sel) => Some((seg as u32) << 16 | sel as u32),
+        None => {
+            let _ = crate::mcb::free(&mut cpu.bus, seg);
+            Some(0)
+        }
+    }
 }
 
+/// GlobalDosFree(selector): 0, or the selector when it isn't a block
+/// GlobalDosAlloc gave.
 fn global_dos_free(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let sel = args[0] as u16;
-    Some(if dpmi::dos_free(cpu, sel) {
-        0
-    } else {
-        sel as u32
-    })
+    let dos =
+        global::get(cpu, sel).filter(|a| a.fixed_memory && a.base < 0x10_0000 && a.base & 0xF == 0);
+    let Some(a) = dos else {
+        return Some(sel as u32);
+    };
+    let _ = crate::mcb::free(&mut cpu.bus, (a.base >> 4) as u16);
+    global::free(cpu, sel);
+    Some(0)
 }
 
 fn get_heap_spaces(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
@@ -1117,7 +1139,14 @@ fn load_module(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 fn find_resource(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let name = resource::res_id(cpu, args[1]);
     let kind = resource::res_id(cpu, args[2]);
-    Some(resource::find(cpu, args[0] as u16, &name, &kind) as u32)
+    let found = resource::find(cpu, args[0] as u16, &name, &kind);
+    if found == 0 {
+        cpu.bus.log_string(&format!(
+            "[W16] FindResource: no resource {:?} of type {:?} in {:04X}",
+            name, kind, args[0]
+        ));
+    }
+    Some(found as u32)
 }
 
 fn load_resource(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -1128,8 +1157,22 @@ fn sizeof_resource(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(resource::size(cpu, args[0] as u16, args[1] as u16))
 }
 
-fn access_resource(_: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(0xFFFF)
+/// AccessResource(module, hrsrc): the module's file opened for reading,
+/// at the resource's data, or -1.
+fn access_resource(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let (module, hrsrc) = (args[0] as u16, args[1] as u16);
+    let (Some(offset), Some(index)) = (
+        resource::offset(cpu, module, hrsrc),
+        super::module_index(cpu, module),
+    ) else {
+        return Some(HFILE_ERROR);
+    };
+    let path = crate::dosstr::to_bytes(&cpu.bus.win32.win16.modules[index].path);
+    let Ok((file, _)) = dos::call21(cpu, [0x3D00, 0, 0, 0], Some(&path)) else {
+        return Some(HFILE_ERROR);
+    };
+    llseek(cpu, &[file as u32, offset, 0]);
+    Some(file as u32)
 }
 
 fn alloc_resource(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -1379,8 +1422,10 @@ pub(super) fn open_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             Ok((h, _)) => {
                 write_ofs(cpu, &full, 0);
                 if style & OF_EXIST != 0 {
+                    // The handle it had, closed already, as Windows 3.1
+                    // returns it.
                     let _ = dos::call21(cpu, [0x3E00, h, 0, 0], None);
-                    return Some(1);
+                    return Some(h as u32);
                 }
                 return Some(h as u32);
             }

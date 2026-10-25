@@ -4,10 +4,11 @@
 //! run, and the functions Windows has no need of (locking pages, the
 //! virtual interrupt flag) succeeding.
 
+use super::ldt;
 use super::thunk::{EAX, EBX, ECX, EDI, EDX, ESI};
-use super::{global, ldt};
 use crate::cpu::{Cpu, CpuFlags, Seg};
 use crate::dpmi::Context;
+use crate::win32::memory::{PAGE, PRIVATE, SHARED, USER, WRITABLE};
 
 const CF: u32 = 0x0001;
 
@@ -18,6 +19,10 @@ const NO_MEMORY: u16 = 0x8013;
 const BAD_SELECTOR: u16 = 0x8022;
 const BAD_VALUE: u16 = 0x8021;
 const BAD_HANDLE: u16 = 0x8023;
+/// DOS's errors, which the DOS memory functions give: not enough memory,
+/// a block that isn't one.
+const DOS_NO_MEMORY: u16 = 8;
+const DOS_BAD_BLOCK: u16 = 9;
 
 fn w(ctx: &Context, reg: usize) -> u16 {
     ctx.gpr[reg] as u16
@@ -251,17 +256,43 @@ fn function(cpu: &mut Cpu, ctx: &mut Context) -> Result<(), u16> {
             }
         }
         // DOS memory: a block of conventional memory and a selector.
-        0x0100 => {
-            let (seg, sel) = dos_alloc(cpu, bx as u32 * 16).ok_or(NO_MEMORY)?;
-            set_w(ctx, EAX, seg);
-            set_w(ctx, EDX, sel);
-        }
+        // A failure gives DOS's error and, for want of memory, the largest
+        // block there is in BX, as DPMI 0.9 has them.
+        0x0100 => match dos_alloc(cpu, bx as u32 * 16) {
+            Ok((seg, sel)) => {
+                set_w(ctx, EAX, seg);
+                set_w(ctx, EDX, sel);
+            }
+            Err(largest) => {
+                set_w(ctx, EBX, largest);
+                return Err(DOS_NO_MEMORY);
+            }
+        },
         0x0101 => {
             if !dos_free(cpu, w(ctx, EDX)) {
                 return Err(BAD_SELECTOR);
             }
         }
-        0x0102 => return Err(NO_MEMORY),
+        0x0102 => {
+            let sel = w(ctx, EDX);
+            let b = base(cpu, sel);
+            if b == 0 || b >= 0x10_0000 || b & 0xF != 0 {
+                return Err(DOS_BAD_BLOCK);
+            }
+            match crate::mcb::resize(&mut cpu.bus, (b >> 4) as u16, bx) {
+                Ok(()) => {
+                    let system = system(cpu);
+                    let limit = (bx.max(1) as u32) * 16 - 1;
+                    ldt::write(cpu, system, sel, ldt::segment(b, limit, ldt::ACCESS_DATA));
+                }
+                Err(e) => {
+                    if let crate::mcb::ResizeError::Insufficient(largest) = e {
+                        set_w(ctx, EBX, largest);
+                    }
+                    return Err(e.code() as u16);
+                }
+            }
+        }
         // The real-mode vectors: the IVT's.
         0x0200 => {
             let v = cpu.bus.read_32(bx as u8 as usize * 4);
@@ -292,7 +323,8 @@ fn function(cpu: &mut Cpu, ctx: &mut Context) -> Result<(), u16> {
         0x0301 | 0x0302 => return Err(UNSUPPORTED),
         0x0400 => {
             set_w(ctx, EAX, 0x005A);
-            set_w(ctx, EBX, 0x0005);
+            // 32-bit hosts, real mode in virtual 8086 mode, virtual memory.
+            set_w(ctx, EBX, 0x0007);
             set_w(ctx, ECX, 0x0004);
             set_w(ctx, EDX, 0x0870);
         }
@@ -308,17 +340,34 @@ fn function(cpu: &mut Cpu, ctx: &mut Context) -> Result<(), u16> {
             super::poke(cpu, at, &info);
         }
         // Memory blocks: of the global heap's memory, handle their base.
+        // Linear memory: whole pages, as Windows' host gives them.
         0x0501 => {
-            let size = pair(ctx, EBX, ECX);
-            let base = global::take_memory(cpu, size.max(1)).ok_or(NO_MEMORY)?;
+            let size = pair(ctx, EBX, ECX).max(1);
+            let pages = size.checked_next_multiple_of(PAGE).ok_or(NO_MEMORY)?;
+            let pid = cpu.bus.win32.win16.pid;
+            let base = super::with_win16(cpu, pid, |p, bus| {
+                let base = p.memory.reserve(None, pages, PRIVATE, SHARED)?;
+                if p.memory.commit(bus, base, pages, USER | WRITABLE).is_none() {
+                    p.memory.release_region(bus, base);
+                    return None;
+                }
+                Some(base)
+            })
+            .flatten()
+            .ok_or(NO_MEMORY)?;
+            cpu.bus.win32.win16.dpmi_blocks.push(base);
             set_pair(ctx, EBX, ECX, base);
             set_pair(ctx, ESI, EDI, base);
         }
         0x0502 => {
             let handle = pair(ctx, ESI, EDI);
-            if !global::give_memory(cpu, handle) {
+            let blocks = &mut cpu.bus.win32.win16.dpmi_blocks;
+            let Some(i) = blocks.iter().position(|&b| b == handle) else {
                 return Err(BAD_HANDLE);
-            }
+            };
+            blocks.remove(i);
+            let pid = cpu.bus.win32.win16.pid;
+            super::with_win16(cpu, pid, |p, bus| p.memory.release_region(bus, handle));
         }
         0x0503 => return Err(NO_MEMORY),
         0x0600..=0x0603 | 0x0702 | 0x0703 => {}
@@ -334,7 +383,7 @@ fn function(cpu: &mut Cpu, ctx: &mut Context) -> Result<(), u16> {
         }
         0x0801 => {}
         // The virtual interrupt flag.
-        0x0900 | 0x0901 | 0x0902 => {
+        0x0900..=0x0902 => {
             let on = ctx.eflags & 0x200 != 0;
             ctx.gpr[EAX] = ctx.gpr[EAX] & !0xFF | on as u32;
         }
@@ -351,13 +400,13 @@ fn function(cpu: &mut Cpu, ctx: &mut Context) -> Result<(), u16> {
 }
 
 /// A block of `bytes` of conventional memory, and its selector.
-pub fn dos_alloc(cpu: &mut Cpu, bytes: u32) -> Option<(u16, u16)> {
+pub fn dos_alloc(cpu: &mut Cpu, bytes: u32) -> Result<(u16, u16), u16> {
     let paras = bytes.div_ceil(16).clamp(1, 0xFFFF) as u16;
     let psp = cpu.bus.win32.psp;
-    let seg = crate::mcb::alloc(&mut cpu.bus, psp, paras).ok()?;
+    let seg = crate::mcb::alloc(&mut cpu.bus, psp, paras)?;
     let Some(sel) = cpu.bus.win32.win16.ldt.alloc(1) else {
         let _ = crate::mcb::free(&mut cpu.bus, seg);
-        return None;
+        return Err(0);
     };
     let system = system(cpu);
     ldt::write(
@@ -366,7 +415,7 @@ pub fn dos_alloc(cpu: &mut Cpu, bytes: u32) -> Option<(u16, u16)> {
         sel,
         ldt::segment((seg as u32) << 4, paras as u32 * 16 - 1, ldt::ACCESS_DATA),
     );
-    Some((seg, sel))
+    Ok((seg, sel))
 }
 
 /// Free a block of conventional memory `dos_alloc` gave, by its

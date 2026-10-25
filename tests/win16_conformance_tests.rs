@@ -85,11 +85,7 @@ fn build(
     let crate_dir = std::env::current_dir().unwrap();
     let source = crate_dir.join(format!("{ROOT}/wine/{module}/{unit}.c"));
     let runtime = crate_dir.join(format!("{ROOT}/runtime"));
-    let include = format!(
-        "{};{}",
-        watcom.join("h").display(),
-        watcom.join("h").join("win").display()
-    );
+    let include = std::env::join_paths([watcom.join("h"), watcom.join("h").join("win")]).unwrap();
     let output = Command::new(cc)
         .current_dir(dir)
         .env("WATCOM", watcom)

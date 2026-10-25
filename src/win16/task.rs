@@ -463,7 +463,7 @@ fn write_tdb(
 fn new_thread(cpu: &mut Cpu, ctx: Context) -> Option<(u32, u32)> {
     let pid = cpu.bus.win32.win16.pid;
     let index = super::win16(cpu).threads.len();
-    if index >= MAX_TASKS + 1 {
+    if index > MAX_TASKS {
         return None;
     }
     let selector = crate::win32::thread::selector_of(index);

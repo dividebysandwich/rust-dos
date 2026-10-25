@@ -17,7 +17,7 @@
 //! the function of a built-in DLL that does what it does (`Run::Win32`),
 //! translated: 16:16 pointers become flat ones, handles USER32's.
 
-use super::thunk::{self, EAX, EDX};
+use super::thunk;
 use crate::cpu::{Cpu, Seg};
 use crate::dpmi::Context;
 use rust_dos_ne as ne;
@@ -184,6 +184,10 @@ pub fn id(module: usize, api: usize) -> u16 {
 /// Bytes each function's stub takes.
 pub const STUB: u32 = 8;
 
+/// The stubs at the end of KERNEL's code segment that imports nothing
+/// has go to: one for each such import, calls of which end the program.
+pub const MISSING: usize = 64;
+
 /// The stub of `api`, whose id is `id`.
 fn stub(id: u16, api: &Api16) -> [u8; STUB as usize] {
     let [lo, hi] = id.to_le_bytes();
@@ -219,12 +223,18 @@ pub fn image(cpu: &Cpu, index: usize) -> Vec<u8> {
         ne::SINGLEDATA | ne::PROTMODE
     };
     let mut b = ne::Builder::new(def.name, flags);
-    let code: Vec<u8> = def
+    let mut code: Vec<u8> = def
         .apis
         .iter()
         .enumerate()
         .flat_map(|(i, api)| stub(id(index, i), api))
         .collect();
+    if index == 0 {
+        for k in 0..MISSING {
+            let [lo, hi] = id(0, def.apis.len() + k).to_le_bytes();
+            code.extend_from_slice(&[0xFE, crate::win32::TRAP, lo, hi, 0xCB, 0x90, 0x90, 0x90]);
+        }
+    }
     b.segment(ne::SegmentSpec {
         data: code,
         flags: ne::SEG_READONLY,
@@ -272,7 +282,27 @@ pub fn function_name(id: u16) -> Option<String> {
 pub fn stub_address(cpu: &Cpu, module: usize, name: &str) -> Option<u32> {
     let i = MODULES[module].apis.iter().position(|a| a.name == name)?;
     let sel = super::module::builtin_selector(cpu, module)?;
-    Some((sel as u32) << 16 | i as u32 * STUB)
+    Some(((sel as u32) << 16) | (i as u32 * STUB))
+}
+
+/// The 16:16 address of the stub that stands for the import `name`
+/// nothing has: 0 when there are no more of them.
+pub fn missing_address(cpu: &mut Cpu, name: String) -> u32 {
+    let missing = &mut cpu.bus.win32.win16.missing;
+    let k = match missing.iter().position(|m| *m == name) {
+        Some(k) => k,
+        None => {
+            missing.push(name);
+            missing.len() - 1
+        }
+    };
+    if k >= MISSING {
+        return 0;
+    }
+    let Some(sel) = super::module::builtin_selector(cpu, 0) else {
+        return 0;
+    };
+    ((sel as u32) << 16) | ((MODULES[0].apis.len() + k) as u32 * STUB)
 }
 
 /// Where 16-bit code 32-bit code called returns to: KERNEL's
@@ -309,7 +339,7 @@ pub fn win32_address(dll: &str, function: &str) -> Option<u32> {
 pub fn read_args(cpu: &mut Cpu, args: &str, conv: Conv16) -> Vec<u32> {
     let base = cpu.seg_cache(Seg::SS).base;
     let sp = cpu.sp() as u32;
-    let sizes: Vec<u32> = args.bytes().map(|c| arg_bytes_of(c)).collect();
+    let sizes: Vec<u32> = args.bytes().map(arg_bytes_of).collect();
     let mut values = vec![0u32; sizes.len()];
     let mut at = sp + 4;
     let order: Vec<usize> = match conv {
@@ -335,6 +365,24 @@ fn arg_bytes_of(c: u8) -> u32 {
 /// Run the function the trap with id `id` is the stub of, called by 16-bit
 /// code: its far return address on the stack, its arguments above.
 pub fn call(cpu: &mut Cpu, id: u16) {
+    let kernel = MODULES[0].apis.len();
+    if id >> 10 == 0 && (id & 0x3FF) as usize >= kernel {
+        let k = (id & 0x3FF) as usize - kernel;
+        let name = cpu
+            .bus
+            .win32
+            .win16
+            .missing
+            .get(k)
+            .cloned()
+            .unwrap_or_default();
+        let what = format!(
+            "a call of {}, which the built-in Windows doesn't have yet",
+            name
+        );
+        crate::win32::fatal(cpu, &what, None);
+        return;
+    }
     let Some((def, api)) = api(id) else {
         crate::win32::fatal(
             cpu,
@@ -478,7 +526,9 @@ fn auto_thunk(cpu: &mut Cpu, target: u32, args: &str, raw: &[u32], ret: u8) {
 /// An automatic thunk's 32-bit function returned `value`: the copies
 /// written back, the value converted as `data[0]` says.
 pub fn post_auto(cpu: &mut Cpu, value: u32, data: &[u32], _: &mut Context) -> Option<u32> {
-    for copy in data[1..].chunks_exact(3) {
+    // Last first: where an output (which comes first, as in IntersectRect)
+    // is an input too, the result is what stays.
+    for copy in data[1..].as_chunks::<3>().0.iter().rev() {
         let words = if copy[0] == COPY_RECT { 4 } else { 2 };
         for k in 0..words {
             let v = cpu.bus.guest_read_32(copy[2] + 4 * k);
@@ -493,10 +543,4 @@ pub fn post_auto(cpu: &mut Cpu, value: u32, data: &[u32], _: &mut Context) -> Op
         b'b' => (value != 0) as u32,
         _ => value,
     })
-}
-
-/// Set DX:AX of `ctx`.
-pub fn set_dx_ax(ctx: &mut Context, value: u32) {
-    ctx.gpr[EAX] = ctx.gpr[EAX] & 0xFFFF_0000 | value & 0xFFFF;
-    ctx.gpr[EDX] = ctx.gpr[EDX] & 0xFFFF_0000 | value >> 16;
 }

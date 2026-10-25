@@ -234,7 +234,7 @@ fn strings32(bytes: &[u8]) -> Vec<u8> {
 /// A 16-bit accelerator table in its 32-bit form.
 fn accelerators32(bytes: &[u8]) -> Vec<u8> {
     let mut w = Writer(Vec::new());
-    for entry in bytes.chunks_exact(5) {
+    for entry in bytes.as_chunks::<5>().0 {
         w.u16(entry[0] as u16);
         w.u16(u16::from_le_bytes([entry[1], entry[2]]));
         w.u16(u16::from_le_bytes([entry[3], entry[4]]));
@@ -408,6 +408,24 @@ fn resources_of(module: &Module16) -> Vec<(Key, Key, Vec<u8>)> {
             out.push((k.clone(), key(&res.id), convert(&k, data)));
         }
     }
+    // The names the name table gives resources, as the 32-bit functions
+    // find them.
+    for (kind, name, t, id) in name_table(&module.file, &parsed) {
+        let (number, alias) = (
+            (key(&ne::ResId::Int(t)), key(&ne::ResId::Int(id))),
+            (key(&kind), key(&name)),
+        );
+        if out.iter().any(|(k, n, _)| (k, n) == (&alias.0, &alias.1)) {
+            continue;
+        }
+        if let Some(data) = out
+            .iter()
+            .find(|(k, n, _)| (k, n) == (&number.0, &number.1))
+            .map(|r| r.2.clone())
+        {
+            out.push((alias.0, alias.1, data));
+        }
+    }
     out
 }
 
@@ -440,6 +458,13 @@ pub fn find(cpu: &Cpu, module: u16, name: &ne::ResId, kind: &ne::ResId) -> u16 {
     let Ok(parsed) = ne::Module::parse(file) else {
         return 0;
     };
+    let named = name_table(file, &parsed)
+        .into_iter()
+        .find(|(k, n, _, _)| k.matches(kind) && n.matches(name));
+    let (name, kind) = match named {
+        Some((_, _, t, id)) => (&ne::ResId::Int(id), &ne::ResId::Int(t)),
+        None => (name, kind),
+    };
     for (t, rt) in parsed.resources.iter().enumerate() {
         if !rt.type_id.matches(kind) {
             continue;
@@ -451,14 +476,74 @@ pub fn find(cpu: &Cpu, module: u16, name: &ne::ResId, kind: &ne::ResId) -> u16 {
     0
 }
 
+/// A module's name table (RT_NAMETABLE, Windows 3.0's), which gives
+/// resources names: for each name, the type and the name (numbers or
+/// names) and the numbers they stand for. Each entry is its length, the
+/// type and the id (a name's number with bit 15 set), then the type's
+/// name and the id's name.
+fn name_table(file: &[u8], parsed: &ne::Module) -> Vec<(ne::ResId, ne::ResId, u16, u16)> {
+    const RT_NAMETABLE: u16 = 15;
+    let Some(table) = parsed
+        .resources
+        .iter()
+        .find(|t| t.type_id == ne::ResId::Int(RT_NAMETABLE))
+        .and_then(|t| t.resources.first())
+    else {
+        return Vec::new();
+    };
+    let Ok(data) = parsed.resource_data(file, table) else {
+        return Vec::new();
+    };
+    let word = |at: usize| Some(u16::from_le_bytes([*data.get(at)?, *data.get(at + 1)?]));
+    let mut entries = Vec::new();
+    let mut at = 0;
+    while let (Some(len), Some(t), Some(id)) = (word(at), word(at + 2), word(at + 4)) {
+        if len < 6 {
+            break;
+        }
+        let end = (at + len as usize).min(data.len());
+        let mut strings = data[(at + 6).min(end)..end].split(|&b| b == 0);
+        let mut text = || String::from_utf8_lossy(strings.next().unwrap_or_default()).into_owned();
+        let (type_name, id_name) = (text(), text());
+        let entry = |value: u16, text: String| {
+            if value & 0x8000 != 0 {
+                ne::ResId::Name(text)
+            } else {
+                ne::ResId::Int(value)
+            }
+        };
+        entries.push((
+            entry(t, type_name),
+            entry(id, id_name),
+            t & 0x7FFF,
+            id & 0x7FFF,
+        ));
+        at += len as usize;
+    }
+    entries
+}
+
+/// The entry of the resource `hrsrc` in a module's resource table.
+fn entry(parsed: &ne::Module, hrsrc: u16) -> Option<&ne::Resource> {
+    let t = (hrsrc >> 10) as usize;
+    let rt = parsed.resources.get(t.checked_sub(1)?)?;
+    rt.resources.get((hrsrc & 0x3FF) as usize)
+}
+
 /// The data of the resource `hrsrc` of the module at `index`.
 fn data(cpu: &Cpu, index: usize, hrsrc: u16) -> Option<Vec<u8>> {
     let file = &cpu.bus.win32.win16.modules[index].file;
     let parsed = ne::Module::parse(file).ok()?;
-    let t = (hrsrc >> 10) as usize;
-    let rt = parsed.resources.get(t.checked_sub(1)?)?;
-    let res = rt.resources.get((hrsrc & 0x3FF) as usize)?;
+    let res = entry(&parsed, hrsrc)?;
     parsed.resource_data(file, res).ok().map(<[u8]>::to_vec)
+}
+
+/// Where the data of the resource `hrsrc` of `module` is in the
+/// module's file.
+pub fn offset(cpu: &Cpu, module: u16, hrsrc: u16) -> Option<u32> {
+    let index = super::module_index(cpu, module)?;
+    let parsed = ne::Module::parse(&cpu.bus.win32.win16.modules[index].file).ok()?;
+    entry(&parsed, hrsrc).map(|r| r.offset)
 }
 
 /// SizeofResource.

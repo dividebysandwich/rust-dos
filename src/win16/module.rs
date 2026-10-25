@@ -108,10 +108,10 @@ fn find_file(cpu: &mut Cpu, name: &str, dir: &str) -> Option<(String, Vec<u8>)> 
         }
     }
     for path in candidates {
-        if let Some(file) = cpu.read_program_file(&path) {
-            if ne::is_ne(&file) {
-                return Some((path, file.to_vec()));
-            }
+        if let Some(file) = cpu.read_program_file(&path)
+            && ne::is_ne(&file)
+        {
+            return Some((path, file.to_vec()));
         }
     }
     None
@@ -344,7 +344,7 @@ pub fn entry_point(cpu: &Cpu, module: u16, ordinal: u16) -> u32 {
             builtin::Run::Value(f) => (CONSTANT_SEL as u32) << 16 | f(cpu) as u32,
             _ => {
                 let sel = m.segments.first().map_or(0, |s| s.selector);
-                (sel as u32) << 16 | i as u32 * builtin::STUB
+                ((sel as u32) << 16) | (i as u32 * builtin::STUB)
             }
         };
     }
@@ -413,9 +413,10 @@ fn relocate(
                 let dep = deps.get(*module as usize - 1).copied().unwrap_or(0);
                 let a = entry_point(cpu, dep, *ordinal);
                 if a == 0 {
-                    unresolved(cpu, dep, &format!("#{}", ordinal));
+                    unresolved(cpu, dep, &format!("#{}", ordinal))
+                } else {
+                    a
                 }
-                a
             }
             ne::Target::Name {
                 module,
@@ -425,9 +426,10 @@ fn relocate(
                 let name = parsed.imported_name(*name_offset).unwrap_or_default();
                 let a = ordinal_of(cpu, dep, &name).map_or(0, |o| entry_point(cpu, dep, o));
                 if a == 0 {
-                    unresolved(cpu, dep, &name);
+                    unresolved(cpu, dep, &name)
+                } else {
+                    a
                 }
-                a
             }
             ne::Target::Internal { segment, offset } => {
                 if *segment == 0xFF {
@@ -472,10 +474,8 @@ fn relocate(
                     put(bytes, at, v);
                     put(bytes, at + 2, sel);
                 }
-                ne::ADDR_SELECTOR => {
-                    if word(bytes, at) == 0 {
-                        put(bytes, at, sel);
-                    }
+                ne::ADDR_SELECTOR if word(bytes, at) == 0 => {
+                    put(bytes, at, sel);
                 }
                 _ => {}
             }
@@ -506,7 +506,9 @@ fn relocate(
     }
 }
 
-fn unresolved(cpu: &mut Cpu, module: u16, what: &str) {
+/// An import of `what` from `module`, which it doesn't have: where a
+/// call of it goes, a stub that ends the program saying so.
+fn unresolved(cpu: &mut Cpu, module: u16, what: &str) -> u32 {
     let name = super::module_index(cpu, module).map_or("?".to_string(), |i| {
         cpu.bus.win32.win16.modules[i].name.clone()
     });
@@ -514,6 +516,7 @@ fn unresolved(cpu: &mut Cpu, module: u16, what: &str) {
         "[W16] An import of {}.{} the module doesn't have",
         name, what
     ));
+    super::builtin::missing_address(cpu, format!("{}.{}", name, what))
 }
 
 /// Patch the prologues of the exported functions of the code segment
@@ -578,7 +581,12 @@ pub fn release(cpu: &mut Cpu, handle: u16) {
         return;
     };
     let m = &mut cpu.bus.win32.win16.modules[index];
-    if m.builtin.is_some() {
+    // The system's own modules stay; the other built-in libraries go when
+    // the last user frees them, as DLLs do.
+    const SYSTEM: [&str; 7] = [
+        "KERNEL", "USER", "GDI", "KEYBOARD", "SYSTEM", "DISPLAY", "SOUND",
+    ];
+    if m.builtin.is_some() && SYSTEM.contains(&m.name.as_str()) {
         m.refs = m.refs.saturating_sub(1).max(1);
         return;
     }

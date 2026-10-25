@@ -92,6 +92,15 @@ pub struct State {
     /// address, its own 16:16 address, and its data's 16:16 and linear
     /// addresses.
     pub wave_headers: Vec<[u32; 4]>,
+    /// The blocks of linear memory DPMI function 0501h gave, by their
+    /// addresses (their handles).
+    pub dpmi_blocks: Vec<u32>,
+    /// The imports that no module has (`builtin::missing_address`), by
+    /// the place of the stub that stands for each.
+    pub missing: Vec<String>,
+    /// The menu names (16:16 pointers) classes were registered with, by
+    /// the class's name in capitals or "#atom", for GetClassInfo.
+    pub class_menus: Vec<(String, u32)>,
 }
 
 /// A loaded NE module: a program or a DLL, or one of the system's.
@@ -240,14 +249,6 @@ pub fn win16(cpu: &mut Cpu) -> &mut Process {
         .expect("the Win16 process")
 }
 
-/// The Win16 process's place in the list.
-fn win16_index(cpu: &Cpu) -> Option<usize> {
-    let pid = cpu.bus.win32.win16.pid;
-    (pid != 0)
-        .then(|| cpu.bus.win32.processes.iter().position(|p| p.id == pid))
-        .flatten()
-}
-
 /// Run `f` with the process `pid` and the bus, for work on its memory.
 /// None if there is no such process.
 pub fn with_win16<T>(
@@ -393,6 +394,23 @@ pub fn peek(cpu: &Cpu, at: u32, len: usize) -> Option<Vec<u8>> {
     crate::win32::loader::peek(&cpu.bus, &process.memory, at, len)
 }
 
+/// Up to `len` bytes at the linear address `at`: as many as there are
+/// before a page that isn't there.
+pub fn peek_upto(cpu: &Cpu, at: u32, len: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut from = at;
+    let end = at as u64 + len as u64;
+    while (from as u64) < end {
+        let next = ((from as u64 | 0xFFF) + 1).min(end);
+        match peek(cpu, from, (next - from as u64) as usize) {
+            Some(bytes) => out.extend(bytes),
+            None => break,
+        }
+        from = next as u32;
+    }
+    out
+}
+
 /// Write `data` at the linear address `at` of the Win16 process. False
 /// where a page isn't there.
 pub fn poke(cpu: &mut Cpu, at: u32, data: &[u8]) -> bool {
@@ -484,7 +502,10 @@ crate::state_fields!(State {
     atoms,
     tb,
     wing_bitmaps,
-    wave_headers
+    wave_headers,
+    dpmi_blocks,
+    missing,
+    class_menus
 });
 crate::state_fields!(Module16 {
     name,

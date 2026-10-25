@@ -1782,6 +1782,26 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 }
                 t.step = 5;
             }
+            5 => {
+                // A top-level window shown is erased now (WM_NCPAINT,
+                // WM_ERASEBKGND), before its WM_PAINT, unless SWP_DEFERERASE
+                // says not to: a program that draws with GetDC in WM_PAINT
+                // keeps what it drew, as on Windows. A child waits for its
+                // BeginPaint.
+                let flags = cpu.bus.guest_read_32(winpos + 24);
+                let child = user(cpu)
+                    .window(hwnd)
+                    .is_some_and(|w| w.style & WS_CHILD != 0);
+                if flags & SWP_SHOWWINDOW != 0
+                    && flags & SWP_DEFERERASE == 0
+                    && !child
+                    && user(cpu).is_visible(hwnd)
+                {
+                    let erase = super::paint::RDW_ERASENOW | super::paint::RDW_ALLCHILDREN;
+                    return Next::call(address_of("RedrawWindow"), &[hwnd, 0, 0, erase], 6);
+                }
+                return Next::Done(TRUE);
+            }
             _ => return Next::Done(TRUE),
         }
     }
@@ -2509,7 +2529,7 @@ pub fn enum_windows(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// EnumChildWindows(parent, proc, param): its descendants, each before
-/// its own children.
+/// its own children. FALSE, without a call, when it has none.
 pub fn enum_child_windows(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     super::init(cpu);
     let parent = if args[0] == 0 { DESKTOP } else { args[0] };
@@ -2520,6 +2540,9 @@ pub fn enum_child_windows(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     let mut list = pre_order(state, parent);
     list.remove(0);
+    if list.is_empty() {
+        return Some(FALSE);
+    }
     let mut vars = vec![ENUM_CHILDREN, args[1], args[2], 0];
     vars.extend(list);
     task::start(cpu, TASK_ENUM, vars, 0)

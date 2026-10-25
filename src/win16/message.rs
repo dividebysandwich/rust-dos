@@ -13,7 +13,7 @@
 
 use super::Thunk;
 use super::handles::{icon16, icon32, menu16, menu32};
-use super::thunk::{self, EAX, ESP, KIND_DLGPROC};
+use super::thunk::{self, ESP, KIND_DLGPROC};
 use crate::cpu::{Cpu, Seg};
 use crate::dpmi::Context;
 
@@ -253,7 +253,8 @@ fn to32(
     let msg = control_msg32(cpu, hwnd, msg16);
     let flat = |cpu: &Cpu, lp: u32| super::linear(cpu, lp);
     data.push(msg);
-    let out = match msg {
+
+    match msg {
         WM_CREATE | WM_NCCREATE => {
             let cs16 = flat(cpu, lp);
             let cs = stack.alloc(48);
@@ -481,8 +482,7 @@ fn to32(
             data.push(FIX_NONE);
             (msg, sx_wparam(msg, wp), lp)
         }
-    };
-    out
+    }
 }
 
 /// The 16-bit wParam widened: the controls' indexes are signed.
@@ -604,7 +604,7 @@ fn to16(
                 w32(cpu, cs16 + 18, style);
                 w32(cpu, cs16 + 22, name16);
                 w32(cpu, cs16 + 26, class16);
-                let ex = r32(cpu, lp + 44);
+                let ex = r32(cpu, lp + 44) & !super::user::WS_EX_WINDOWEDGE;
                 w32(cpu, cs16 + 30, ex);
             }
             data.push(FIX_NONE);
@@ -1038,9 +1038,3 @@ fn posted16(cpu: &mut Cpu, hwnd: u32, msg: u32, wp: u32, lp: u32) -> (u32, u32, 
 }
 
 const MM_WOM_DONE: u32 = 0x3BD;
-
-/// Set DX:AX of `ctx` to `value`.
-pub fn set_result(ctx: &mut Context, value: u32) {
-    ctx.gpr[EAX] = ctx.gpr[EAX] & 0xFFFF_0000 | value & 0xFFFF;
-    ctx.gpr[thunk::EDX] = ctx.gpr[thunk::EDX] & 0xFFFF_0000 | value >> 16;
-}

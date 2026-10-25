@@ -5,7 +5,7 @@
 //! functions that write it.
 
 use super::builtin::{Api16, Def, rust, win32};
-use super::thunk::{self, KIND_PLAIN};
+use super::thunk::{self, KIND_FONTENUM, KIND_PLAIN};
 use super::user::{P_GDI, P_POINTS, P_WORDS};
 use crate::cpu::Cpu;
 use crate::dpmi::Context;
@@ -186,9 +186,21 @@ static APIS: &[Api16] = &[
     rust("SetBrushOrg", 148, "wss", set_brush_org),
     rust("GetBrushOrg", 149, "w", get_brush_org),
     win32("UnrealizeObject", 150, "w", G, "UnrealizeObject", b'b'),
+    rust("CopyMetaFile", 151, "wp", zero),
     rust("CreateIC", 153, "pppp", create_ic),
     win32("GetNearestColor", 154, "wl", G, "GetNearestColor", b'w'),
     rust("QueryAbort", 155, "ww", one),
+    win32(
+        "CreateDiscardableBitmap",
+        156,
+        "www",
+        G,
+        "CreateCompatibleBitmap",
+        b'w',
+    ),
+    // Metafiles in memory aren't kept: they fail.
+    rust("GetMetaFileBits", 159, "w", zero),
+    rust("SetMetaFileBits", 160, "w", zero),
     win32(
         "CreateDiscardableBitmap",
         156,
@@ -201,12 +213,14 @@ static APIS: &[Api16] = &[
     rust("GetBitmapDimension", 162, "w", zero),
     rust("SetBitmapDimension", 163, "wss", zero),
     win32("SetRectRgn", 172, "wssss", G, "SetRectRgn", b'b'),
+    rust("EnumMetaFile", 175, "wwSl", zero),
+    rust("PlayMetaFileRecord", 176, "wppw", zero),
     win32("RectInRegionOld", 181, "wR", G, "RectInRegion", b'b'),
     win32("SetBoundsRect", 193, "wRw", G, "SetBoundsRect", b'w'),
     win32("GetBoundsRect", 194, "wRw", G, "GetBoundsRect", b'w'),
     win32("GetFontData", 311, "wllpl", G, "GetFontData", b'w'),
     win32("GetRasterizerCaps", 313, "pw", G, "GetRasterizerCaps", b'b'),
-    rust("EnumFontFamilies", 330, "wpSl", enum_fonts),
+    rust("EnumFontFamilies", 330, "wpSl", enum_font_families),
     win32("GetTextAlign", 345, "w", G, "GetTextAlign", b'w'),
     win32("SetTextAlign", 346, "ww", G, "SetTextAlign", b'w'),
     win32("Chord", 348, "wssssssss", G, "Chord", b'b'),
@@ -671,7 +685,11 @@ fn create_poly_polygon_rgn(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// programs push with whatever the word's high byte has.
 fn create_bitmap(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (planes, bpp) = (args[2] & 0xFF, args[3] & 0xFF);
-    go(cpu, "CreateBitmap", &[args[0], args[1], planes, bpp, args[4]])
+    go(
+        cpu,
+        "CreateBitmap",
+        &[args[0], args[1], planes, bpp, args[4]],
+    )
 }
 
 fn create_bitmap_indirect(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -814,13 +832,28 @@ fn get_text_metrics(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// A TEXTMETRICA at `tm` as a TEXTMETRIC16 at `tm16`: its eleven
 /// integers as words, the bytes after them as they are.
+/// TEXTMETRICA at `tm` as the 16-bit TEXTMETRIC at `tm16`, whose fields
+/// are in another order: the first eight as words, the bytes (italic,
+/// underlined, struck out, then the characters), then the overhang and
+/// the aspects.
 fn text_metric16(cpu: &mut Cpu, tm: u32, tm16: u32) {
+    let b = text_metric16_bytes(cpu, tm);
+    super::poke(cpu, tm16, &b);
+}
+
+fn text_metric16_bytes(cpu: &Cpu, tm: u32) -> Vec<u8> {
     let mut b = Vec::new();
-    for i in 0..11 {
+    for i in 0..8 {
         b.extend_from_slice(&(r32(cpu, tm + 4 * i) as u16).to_le_bytes());
     }
-    b.extend(super::peek(cpu, tm + 44, 9).unwrap_or(vec![0; 9]));
-    super::poke(cpu, tm16, &b);
+    // First, last, default and break characters, italic, underlined,
+    // struck out, pitch and family, character set.
+    let c = super::peek(cpu, tm + 44, 9).unwrap_or(vec![0; 9]);
+    b.extend_from_slice(&[c[4], c[5], c[6], c[0], c[1], c[2], c[3], c[7], c[8]]);
+    for i in 8..11 {
+        b.extend_from_slice(&(r32(cpu, tm + 4 * i) as u16).to_le_bytes());
+    }
+    b
 }
 
 fn get_char_width(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -953,10 +986,73 @@ fn enum_objects(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(0)
 }
 
-/// EnumFonts and EnumFontFamilies: the callback gets 16-bit LOGFONTs and
-/// TEXTMETRICs, which there is no conversion of yet; no fonts are
-/// listed.
-fn enum_fonts(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    cpu.bus.log_string("[W16] EnumFonts lists no fonts");
-    Some(1)
+/// EnumFonts(hdc, face, proc, data): GDI32's, the procedure called
+/// through a thunk that gives it 16-bit LOGFONTs and TEXTMETRICs.
+fn enum_fonts(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let proc = thunk::proc32(cpu, args[2], KIND_FONTENUM, 0);
+    go(cpu, "EnumFontsA", &[args[0], args[1], proc, args[3]])
+}
+
+fn enum_font_families(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let proc = thunk::proc32(cpu, args[2], KIND_FONTENUM, 0);
+    go(cpu, "EnumFontFamiliesA", &[args[0], args[1], proc, args[3]])
+}
+
+/// Bytes of a 16-bit LOGFONT, and of a NEWTEXTMETRIC.
+const LOGFONT16: u16 = 50;
+const NEWTEXTMETRIC16: u16 = 41;
+const TRUETYPE_FONTTYPE: u32 = 4;
+
+/// A font enumeration procedure's thunk was called with (LOGFONTA *,
+/// TEXTMETRICA *, type, data): the 16-bit procedure gets copies of the
+/// structures below its stack, a TrueType font's TEXTMETRIC a
+/// NEWTEXTMETRIC, and returns an int.
+pub fn call_font_enum16(cpu: &mut Cpu, t: &super::Thunk) {
+    let esp = cpu.esp();
+    let ret = r32(cpu, esp);
+    let (lf, tm, kind, data) = (
+        r32(cpu, esp + 4),
+        r32(cpu, esp + 8),
+        r32(cpu, esp + 12),
+        r32(cpu, esp + 16),
+    );
+    let mut resume = Context::of(cpu);
+    resume.eip = ret;
+    resume.gpr[thunk::ESP] = esp + 20;
+    let (ss, sp) = thunk::stack16_for(cpu, &resume);
+    let tm_at = sp.wrapping_sub(NEWTEXTMETRIC16 + 1) & !1;
+    let lf_at = tm_at.wrapping_sub(LOGFONT16);
+    let lf16 = super::lin(cpu, ss, lf_at);
+    log_font16(cpu, lf, lf16, LOGFONT16 as u32);
+    let mut b = text_metric16_bytes(cpu, tm);
+    if kind & TRUETYPE_FONTTYPE != 0 {
+        // ntmFlags, then ntmSizeEM, ntmCellHeight and ntmAvgWidth.
+        b.extend_from_slice(&r32(cpu, tm + 56).to_le_bytes());
+        for i in 0..3 {
+            b.extend_from_slice(&(r32(cpu, tm + 60 + 4 * i) as u16).to_le_bytes());
+        }
+    }
+    let tm16 = super::lin(cpu, ss, tm_at);
+    super::poke(cpu, tm16, &b);
+    let args = [
+        ss,
+        lf_at,
+        ss,
+        tm_at,
+        kind as u16,
+        (data >> 16) as u16,
+        data as u16,
+    ];
+    // An int: what it returns is sign-extended.
+    let then = vec![KIND_FONTENUM as u32, 0x1_0000];
+    thunk::call16_at(
+        cpu,
+        t.target,
+        &args,
+        0,
+        resume,
+        thunk::THEN_PROC,
+        then,
+        (ss, lf_at),
+    );
 }

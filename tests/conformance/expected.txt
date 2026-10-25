@@ -632,7 +632,6 @@ user32/win: failed win.c:120
 user32/win: skipped win.c:390
 user32/win: skipped win.c:469
 user32/win: failed win.c:496
-user32/win: failed win.c:537
 user32/win: failed win.c:573
 user32/win: skipped win.c:3390
 user32/win: failed win.c:2366
