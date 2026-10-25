@@ -555,6 +555,7 @@ static APIS: &[Api] = &[
         2,
         disk::get_logical_drive_strings,
     ),
+    stdcall("GetLogicalDriveStringsW", 914, 2, not_implemented),
 ];
 
 /// The places in `APIS` of the system's own stubs.

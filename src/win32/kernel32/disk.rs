@@ -1,8 +1,9 @@
 //! Drives: which there are, their kinds and their free space, from DOS's.
 
+use super::path::put_string;
 use super::{ERROR_INVALID_DRIVE, ERROR_PATH_NOT_FOUND, FALSE, TRUE, set_error, string_at};
 use crate::cpu::Cpu;
-use crate::disk::{DriveKind, LASTDRIVE};
+use crate::disk::{DriveKind, LASTDRIVE, drive_letter};
 
 /// GetDriveType's answers.
 const DRIVE_NO_ROOT_DIR: u32 = 1;
@@ -11,14 +12,14 @@ const DRIVE_FIXED: u32 = 3;
 const DRIVE_CDROM: u32 = 5;
 const DRIVE_RAMDISK: u32 = 6;
 
+/// The drives there are (0 for A:), in order.
+fn drives(cpu: &Cpu) -> impl Iterator<Item = u8> + '_ {
+    (0..LASTDRIVE).filter(|&d| cpu.bus.disk.is_mounted(d))
+}
+
 /// A bit for each drive there is, A: the lowest.
 pub(super) fn get_logical_drives(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    let disk = &cpu.bus.disk;
-    Some(
-        (0..LASTDRIVE)
-            .filter(|&d| disk.is_mounted(d))
-            .fold(0, |bits, d| bits | 1 << d),
-    )
+    Some(drives(cpu).fold(0, |bits, d| bits | 1 << d))
 }
 
 /// GetLogicalDriveStringsA: the root directory of each drive there is
@@ -27,19 +28,10 @@ pub(super) fn get_logical_drives(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 /// doesn't fit in `args[0]` bytes, nothing is written and the size it
 /// needs, the last NUL counted, is the answer.
 pub(super) fn get_logical_drive_strings(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let (size, at) = (args[0], args[1]);
-    let disk = &cpu.bus.disk;
-    let mut list: Vec<u8> = (0..LASTDRIVE)
-        .filter(|&d| disk.is_mounted(d))
-        .flat_map(|d| [b'A' + d, b':', b'\\', 0])
+    let list: String = drives(cpu)
+        .map(|d| format!("{}:\\\0", drive_letter(d)))
         .collect();
-    let length = list.len() as u32;
-    if length + 1 > size {
-        return Some(length + 1);
-    }
-    list.push(0);
-    cpu.bus.guest_write_bytes(at, &list);
-    Some(length)
+    put_string(cpu, args[1], args[0], &list)
 }
 
 /// The drive (0 for A:) of the root directory `at` names: "C:\", "C:" or

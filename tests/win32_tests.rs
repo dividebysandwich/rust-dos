@@ -2901,10 +2901,12 @@ fn a_program_catches_its_cxx_exceptions() {
     assert_eq!(code, 0);
 }
 
-/// GetLogicalDriveStringsA: asked with too small a buffer it writes
-/// nothing and gives the size it needs, then the list itself, which the
-/// program writes out with its last NUL. Bit 0 of the exit code: the size
-/// was the list's length and one; bit 1: the small buffer was left alone.
+/// GetLogicalDriveStringsA: asked with no buffer, and then with one a
+/// byte too small, it writes nothing and gives the size it needs; asked
+/// with exactly that size, it writes the list, which the program writes
+/// out with its last NUL. Bit 0 of the exit code: the size was the list's
+/// length and one; bit 1: the short buffer was left alone and the size
+/// given again.
 #[test]
 fn get_logical_drive_strings_lists_the_drives_roots() {
     let names: &[&str] = &["GetLogicalDriveStringsA", "GetStdHandle", "WriteFile"];
@@ -2912,17 +2914,25 @@ fn get_logical_drive_strings_lists_the_drives_roots() {
     let mut data = vec![0u8; 0x100];
     data[0x10] = 0xAA;
     let exe = program(BASE, false, imports, &data, |a, l| {
-        // The size needed, with a buffer of one byte.
-        a.push(l.at(0x10) as i32)?;
-        a.push(1)?;
+        // The size needed, with no buffer.
+        a.push(0)?;
+        a.push(0)?;
         a.call(l.import(0))?;
         a.mov(ebx, eax)?;
-        a.cmp(byte_ptr(l.at(0x10)), 0xAA)?;
-        a.sete(dl)?;
-        a.movzx(edi, dl)?;
-        // The list.
+        // A buffer one byte short of it.
+        a.lea(ecx, dword_ptr(ebx - 1))?;
         a.push(l.at(0x10) as i32)?;
-        a.push(0xC0)?;
+        a.push(ecx)?;
+        a.call(l.import(0))?;
+        a.cmp(eax, ebx)?;
+        a.sete(dl)?;
+        a.cmp(byte_ptr(l.at(0x10)), 0xAA)?;
+        a.sete(al)?;
+        a.and(dl, al)?;
+        a.movzx(edi, dl)?;
+        // The list, in a buffer of exactly that size.
+        a.push(l.at(0x10) as i32)?;
+        a.push(ebx)?;
         a.call(l.import(0))?;
         a.mov(esi, eax)?;
         a.lea(ecx, dword_ptr(eax + 1))?;
@@ -2944,7 +2954,9 @@ fn get_logical_drive_strings_lists_the_drives_roots() {
     });
     let (code, text) = run("logical_drive_strings", exe);
     assert_eq!(code, 3, "{:?}", text);
-    let list = text.strip_suffix("\0\0").expect("the list ends in two NULs");
+    let list = text
+        .strip_suffix("\0\0")
+        .expect("the list ends in two NULs");
     let roots: Vec<&str> = list.split('\0').collect();
     assert!(roots.contains(&"C:\\"), "{:?}", roots);
     assert!(
