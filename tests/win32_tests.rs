@@ -581,13 +581,20 @@ fn a_program_uses_the_heap_tls_environment_and_exports() {
 /// Run T.EXE, which starts the program the command line `line` names
 /// with CreateProcessA, waits for it and ends with what it learned, from
 /// a folder with the folders `dirs` and C.EXE at `child`. C.EXE ends with
-/// 7, so 71h is the program started, waited for and its exit code read.
+/// 7, or 8 when its command line starts with a quote, so 71h is the
+/// program started, waited for and its exit code read.
 fn start_child(test: &str, line: &str, child: &str, dirs: &[&str]) -> u8 {
     let child_program = {
-        let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["ExitProcess"])];
+        let imports: &[(&str, &[&str])] =
+            &[("KERNEL32.DLL", &["GetCommandLineA", "ExitProcess"])];
         program(BASE, false, imports, &[0; 4], |a, l| {
-            a.push(7)?;
             a.call(l.import(0))?;
+            a.cmp(byte_ptr(eax), b'"' as i32)?;
+            a.sete(al)?;
+            a.movzx(eax, al)?;
+            a.add(eax, 7)?;
+            a.push(eax)?;
+            a.call(l.import(1))?;
             a.int3()
         })
     };
@@ -711,12 +718,13 @@ fn win_exec_starts_a_program_or_says_why_not() {
 /// A command line naming its program without quotes, in a folder with
 /// spaces in its name: the program is found by the line up to each space
 /// in turn ("V1.0", "V1.0 GAME\C.EXE"), as Windows finds it, and starts.
-/// The folder V1.0 isn't a program, so the search goes on past it.
+/// The folder V1.0 isn't a program, so the search goes on past it. The
+/// program gets its name in quotes, as on Windows 98, so 81h.
 #[test]
 fn an_unquoted_program_path_with_spaces_is_found() {
     let line = "V1.0 GAME\\C.EXE an argument";
     let code = start_child("unquoted_path", line, "V1.0 GAME/C.EXE", &["V1.0"]);
-    assert_eq!(code, 0x71);
+    assert_eq!(code, 0x81);
 }
 
 #[test]

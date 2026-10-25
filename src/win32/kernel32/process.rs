@@ -44,6 +44,20 @@ pub(super) fn program_in_line<'a>(cpu: &mut Cpu, line: &'a str) -> Option<(Strin
         .find_map(|end| Some((find_program(cpu, &line[..end])?, &line[..end])))
 }
 
+/// The command line the program gets when `program_in_line` found it as
+/// `name` in `line`: with the name in quotes if it was found past a space,
+/// as Windows 98 gives it ("C:\Program Files\XENO\xeno3dfx.exe -ar3"
+/// becomes "\"C:\Program Files\XENO\xeno3dfx.exe\" -ar3"). The C runtime
+/// skips an unquoted program name up to its first space to find WinMain's
+/// command line, and would take the rest of the path for its arguments.
+fn quote_program(line: &str, name: &str) -> String {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('"') || !name.contains([' ', '\t']) {
+        return line.to_string();
+    }
+    format!("\"{}\"{}", name, &trimmed[name.len()..])
+}
+
 /// The DOS path of the program `name`, with ".EXE" added if it has no
 /// extension: there if it has a directory in it, else where SearchPathA
 /// looks (the running program's directory, the current one, the system
@@ -156,13 +170,18 @@ pub(crate) fn spawn(
     flags: u32,
     mut startup: Vec<u8>,
 ) -> Result<[u32; 4], u32> {
-    let path = match (app, line) {
-        (Some(app), _) => find_program(cpu, app),
-        (None, Some(line)) => program_in_line(cpu, line).map(|(path, _)| path),
+    let (path, line) = match (app, line) {
+        (Some(app), line) => {
+            let path = find_program(cpu, app).ok_or(ERROR_FILE_NOT_FOUND)?;
+            let line = line.map_or_else(|| path.clone(), str::to_string);
+            (path, line)
+        }
+        (None, Some(line)) => {
+            let (path, name) = program_in_line(cpu, line).ok_or(ERROR_FILE_NOT_FOUND)?;
+            (path, quote_program(line, name))
+        }
         (None, None) => return Err(ERROR_INVALID_PARAMETER),
-    }
-    .ok_or(ERROR_FILE_NOT_FOUND)?;
-    let line = line.map_or_else(|| path.clone(), str::to_string);
+    };
     let environment = environment.unwrap_or_else(|| process(cpu).environment.clone());
     let fields = startup.clone();
     let field = |i: u32| u32::from_le_bytes(fields[i as usize..][..4].try_into().unwrap());
