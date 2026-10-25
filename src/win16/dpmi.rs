@@ -117,9 +117,10 @@ pub fn set_limit(cpu: &mut Cpu, sel: u16, limit: u32) -> bool {
     })
 }
 
-/// Set the access byte (and the D bit from `extended`) of `sel`.
+/// Set the access byte (and the D bit from `extended`) of `sel`: a
+/// code or data segment's of privilege 3, as DPMI 0.9 allows.
 fn set_rights(cpu: &mut Cpu, sel: u16, access: u8, extended: u8) -> bool {
-    if access & 0x70 != 0x70 && access & 0x10 != 0 {
+    if access & 0x70 != 0x70 {
         return false;
     }
     with_desc(cpu, sel, |d| {

@@ -463,7 +463,7 @@ fn write_tdb(
 fn new_thread(cpu: &mut Cpu, ctx: Context) -> Option<(u32, u32)> {
     let pid = cpu.bus.win32.win16.pid;
     let index = super::win16(cpu).threads.len();
-    if index > MAX_TASKS {
+    if index >= MAX_TASKS {
         return None;
     }
     let selector = crate::win32::thread::selector_of(index);
@@ -592,7 +592,8 @@ pub fn init_task(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     cpu.set_bx(0x81 + blanks as u16);
     cpu.set_cx(stacktop);
     cpu.set_dx(task.show);
-    cpu.set_si(cpu.si());
+    let prev = super::read_16(cpu, super::lin(cpu, task.handle, 0x0E));
+    cpu.set_si(prev);
     cpu.set_di(task.instance);
     let psp = task.psp;
     load_es(cpu, psp);

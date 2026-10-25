@@ -233,7 +233,11 @@ pub fn realloc(cpu: &mut Cpu, handle: u16, size: u32, flags: u16) -> u16 {
         if !a.fixed_memory {
             give_memory(cpu, a.base);
         }
-        ldt::write(cpu, system, sel, ldt::segment(0, 0, access & !0x80));
+        // Every tile of a huge block, so none still reaches the memory.
+        for i in 0..a.selectors {
+            let tile = sel + i * ldt::AHINCR;
+            ldt::write(cpu, system, tile, ldt::segment(0, 0, access & !0x80));
+        }
         if let Some(a) = arena_mut(&mut cpu.bus.win32.win16, handle) {
             a.base = 0;
         }
@@ -274,12 +278,12 @@ pub fn realloc(cpu: &mut Cpu, handle: u16, size: u32, flags: u16) -> u16 {
         };
         if a.base != 0 {
             copy(cpu, a.base, base, a.size.min(size));
-            if !a.fixed_memory {
-                give_memory(cpu, a.base);
-            }
         }
         base
     };
+    // The old memory goes back to the heap once the selectors are
+    // there, so a failure below leaves the block as it was.
+    let moved = !in_place && a.base != 0 && !a.fixed_memory;
     if size > a.size && flags & GMEM_ZEROINIT != 0 {
         zero(cpu, base + a.size.min(size), size - a.size.min(size));
     }
@@ -300,6 +304,9 @@ pub fn realloc(cpu: &mut Cpu, handle: u16, size: u32, flags: u16) -> u16 {
                 .take_after(sel + (old_count - 1) * ldt::AHINCR, count - old_count);
         } else {
             let Some(s) = state.ldt.alloc(count) else {
+                if !in_place {
+                    give_memory(cpu, base);
+                }
                 return 0;
             };
             state.ldt.free(sel, old_count);
@@ -316,13 +323,17 @@ pub fn realloc(cpu: &mut Cpu, handle: u16, size: u32, flags: u16) -> u16 {
             ldt::write(cpu, system, sel + i * ldt::AHINCR, 0);
         }
     }
+    if moved {
+        give_memory(cpu, a.base);
+    }
     ldt::set_block(cpu, system, new_sel, base, size, access);
     let state = &mut cpu.bus.win32.win16;
     let mut entry = state.arena.remove(&ldt::index(sel)).expect("the block");
     entry.base = base;
     entry.size = size;
     entry.selectors = count;
-    entry.fixed_memory = entry.fixed_memory && in_place;
+    // Its memory is the heap's now, grown in place or moved.
+    entry.fixed_memory = false;
     entry.handle = if entry.flags & GA_MOVEABLE != 0 {
         new_sel - 1
     } else {

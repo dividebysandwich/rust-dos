@@ -355,7 +355,10 @@ pub fn entry_point(cpu: &Cpu, module: u16, ordinal: u16) -> u32 {
     match parsed.entry(ordinal) {
         Some(ne::Entry::Code {
             segment, offset, ..
-        }) => match m.segments.get(segment as usize - 1) {
+        }) => match (segment as usize)
+            .checked_sub(1)
+            .and_then(|i| m.segments.get(i))
+        {
             Some(s) => (s.selector as u32) << 16 | offset as u32,
             None => 0,
         },
@@ -410,7 +413,11 @@ fn relocate(
     for r in relocations {
         let address = match &r.target {
             ne::Target::Ordinal { module, ordinal } => {
-                let dep = deps.get(*module as usize - 1).copied().unwrap_or(0);
+                let dep = (*module as usize)
+                    .checked_sub(1)
+                    .and_then(|i| deps.get(i))
+                    .copied()
+                    .unwrap_or(0);
                 let a = entry_point(cpu, dep, *ordinal);
                 if a == 0 {
                     unresolved(cpu, dep, &format!("#{}", ordinal))
@@ -422,7 +429,11 @@ fn relocate(
                 module,
                 name_offset,
             } => {
-                let dep = deps.get(*module as usize - 1).copied().unwrap_or(0);
+                let dep = (*module as usize)
+                    .checked_sub(1)
+                    .and_then(|i| deps.get(i))
+                    .copied()
+                    .unwrap_or(0);
                 let name = parsed.imported_name(*name_offset).unwrap_or_default();
                 let a = ordinal_of(cpu, dep, &name).map_or(0, |o| entry_point(cpu, dep, o));
                 if a == 0 {
@@ -435,7 +446,10 @@ fn relocate(
                 if *segment == 0xFF {
                     entry_point(cpu, self_handle, *offset)
                 } else {
-                    match segments.get(*segment as usize - 1) {
+                    match (*segment as usize)
+                        .checked_sub(1)
+                        .and_then(|i| segments.get(i))
+                    {
                         Some(s) => (s.selector as u32) << 16 | *offset as u32,
                         None => 0,
                     }
@@ -620,17 +634,20 @@ fn unload(cpu: &mut Cpu, index: usize) {
 
 /// A new instance of the program module at `index`: its automatic data
 /// segment, the module's own for the first instance, a fresh copy from
-/// the file, relocated, for the others. Its handle, or 0.
+/// the file, relocated, for the others. The module's own stays with an
+/// instance that ended while others kept the module loaded, since its
+/// data is that instance's: later instances get copies. Its handle, or
+/// 0.
 pub fn new_instance(cpu: &mut Cpu, index: usize) -> u16 {
     let m = cpu.bus.win32.win16.modules[index].clone();
-    let in_use = cpu
+    let used = cpu
         .bus
         .win32
         .win16
         .tasks
         .iter()
-        .any(|t| t.exit_code.is_none() && t.instance == m.dgroup);
-    if m.dgroup == 0 || !in_use {
+        .any(|t| t.instance == m.dgroup);
+    if m.dgroup == 0 || !used {
         return m.dgroup;
     }
     let Ok(parsed) = ne::Module::parse(&m.file) else {

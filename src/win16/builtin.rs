@@ -60,9 +60,10 @@ pub enum Run {
 /// pointer, or a number when its selector is 0), i an icon or cursor
 /// handle, m a menu handle, a an accelerator table's handle, n an
 /// instance or module handle (the 32-bit functions get the image of its
-/// resources), R a pointer to a RECT and P
-/// one to a POINT, which the 32-bit functions get 32-bit copies of,
-/// written back when they return.
+/// resources), h a window to go after (HWND_TOPMOST and HWND_NOTOPMOST
+/// widened to their 32-bit values), R a pointer to a RECT and P one to
+/// a POINT, which the 32-bit functions get 32-bit copies of, written
+/// back when they return.
 pub struct Api16 {
     pub name: &'static str,
     /// Its ordinal, or 0 for the system's own stubs, which aren't
@@ -496,6 +497,7 @@ fn auto_thunk(cpu: &mut Cpu, target: u32, args: &str, raw: &[u32], ret: u8) {
             b'm' => super::handles::menu32(v as u16),
             b'a' => super::handles::accel32(v as u16),
             b'n' => super::handles::instance32(cpu, v as u16),
+            b'h' if v as u16 >= 0xFFFE => v as u16 as i16 as i32 as u32,
             b'R' | b'P' => {
                 let lin = super::linear(cpu, v);
                 if lin == 0 {

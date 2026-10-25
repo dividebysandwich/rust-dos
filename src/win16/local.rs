@@ -1,13 +1,13 @@
 //! Local heaps: LocalAlloc and its family, in a data segment (DS, a
 //! task's or a library's automatic data segment mostly), between the
-//! offsets LocalInit gave. The blocks' sizes and handles are kept here; in
-//! the segment, a moveable block's handle is the offset of an entry whose
-//! first word is the block's offset, as Windows 3.1's handle tables have
-//! them, since programs read them so. As there, where entries follow a
-//! table's count word, a moveable handle is 2 more than a multiple of 4
-//! and a fixed one (the block's offset) a multiple of 4. Blocks never move but for
-//! LocalReAlloc, which may move a moveable one; a heap that is full grows
-//! its segment, to 64 KB.
+//! offsets LocalInit gave. The blocks' sizes and handles are kept here;
+//! in the segment, a moveable block's handle is the offset of an entry
+//! whose first word is the block's offset, as Windows 3.1's handle
+//! tables have them, since programs read them so. As there, where
+//! entries follow a table's count word, a moveable handle is 2 more than
+//! a multiple of 4 and a fixed one (the block's offset) a multiple of 4.
+//! Blocks never move but for LocalReAlloc, which may move a moveable
+//! one; a heap that is full grows its segment, to 64 KB.
 
 use super::global;
 use crate::cpu::Cpu;

@@ -190,14 +190,6 @@ static APIS: &[Api16] = &[
     rust("CreateIC", 153, "pppp", create_ic),
     win32("GetNearestColor", 154, "wl", G, "GetNearestColor", b'w'),
     rust("QueryAbort", 155, "ww", one),
-    win32(
-        "CreateDiscardableBitmap",
-        156,
-        "www",
-        G,
-        "CreateCompatibleBitmap",
-        b'w',
-    ),
     // Metafiles in memory aren't kept: they fail.
     rust("GetMetaFileBits", 159, "w", zero),
     rust("SetMetaFileBits", 160, "w", zero),
@@ -830,8 +822,6 @@ fn get_text_metrics(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     )
 }
 
-/// A TEXTMETRICA at `tm` as a TEXTMETRIC16 at `tm16`: its eleven
-/// integers as words, the bytes after them as they are.
 /// TEXTMETRICA at `tm` as the 16-bit TEXTMETRIC at `tm16`, whose fields
 /// are in another order: the first eight as words, the bytes (italic,
 /// underlined, struck out, then the characters), then the overhang and
@@ -1001,6 +991,8 @@ fn enum_font_families(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// Bytes of a 16-bit LOGFONT, and of a NEWTEXTMETRIC.
 const LOGFONT16: u16 = 50;
 const NEWTEXTMETRIC16: u16 = 41;
+/// Bytes of ENUMLOGFONT's elfFullName and elfStyle.
+const ENUM_NAMES: u16 = 64 + 32;
 const TRUETYPE_FONTTYPE: u32 = 4;
 
 /// A font enumeration procedure's thunk was called with (LOGFONTA *,
@@ -1021,9 +1013,18 @@ pub fn call_font_enum16(cpu: &mut Cpu, t: &super::Thunk) {
     resume.gpr[thunk::ESP] = esp + 20;
     let (ss, sp) = thunk::stack16_for(cpu, &resume);
     let tm_at = sp.wrapping_sub(NEWTEXTMETRIC16 + 1) & !1;
-    let lf_at = tm_at.wrapping_sub(LOGFONT16);
+    // An ENUMLOGFONT16, which EnumFontFamilies' procedures read: the
+    // LOGFONT, then the full name and style that GDI32 gives after its
+    // LOGFONTA. EnumFonts' procedures read only the LOGFONT.
+    let lf_at = tm_at.wrapping_sub(LOGFONT16 + ENUM_NAMES);
     let lf16 = super::lin(cpu, ss, lf_at);
     log_font16(cpu, lf, lf16, LOGFONT16 as u32);
+    let names = super::peek(cpu, lf + 60, ENUM_NAMES as usize);
+    super::poke(
+        cpu,
+        lf16 + LOGFONT16 as u32,
+        &names.unwrap_or(vec![0; ENUM_NAMES as usize]),
+    );
     let mut b = text_metric16_bytes(cpu, tm);
     if kind & TRUETYPE_FONTTYPE != 0 {
         // ntmFlags, then ntmSizeEM, ntmCellHeight and ntmAvgWidth.

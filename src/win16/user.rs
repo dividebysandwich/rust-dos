@@ -33,7 +33,7 @@ static APIS: &[Api16] = &[
     rust("SetSystemTimer", 11, "wwwS", set_timer),
     win32("KillTimer", 12, "ww", U, "KillTimer", b'b'),
     win32("GetTickCount", 13, "", K, "GetTickCount", b'w'),
-    win32("GetTimerResolution", 14, "", K, "GetTickCount", b'w'),
+    rust("GetTimerResolution", 14, "", timer_resolution),
     win32("GetCurrentTime", 15, "", K, "GetTickCount", b'w'),
     win32("ClipCursor", 16, "R", U, "ClipCursor", b'b'),
     win32("GetCursorPos", 17, "P", U, "GetCursorPos", b'b'),
@@ -328,7 +328,7 @@ static APIS: &[Api16] = &[
     ),
     win32("GetTopWindow", 229, "w", U, "GetTopWindow", b'w'),
     win32("GetNextWindow", 230, "ww", U, "GetNextWindow", b'w'),
-    win32("SetWindowPos", 232, "wwssssw", U, "SetWindowPos", b'b'),
+    win32("SetWindowPos", 232, "whssssw", U, "SetWindowPos", b'b'),
     win32("SetParent", 233, "ww", U, "SetParent", b'w'),
     rust("UnhookWindowsHook", 234, "sS", one),
     rust("DefHookProc", 235, "swlp", zero),
@@ -363,7 +363,7 @@ static APIS: &[Api16] = &[
         "BeginDeferWindowPos",
         b'w',
     ),
-    win32("DeferWindowPos", 260, "wwwssssw", U, "DeferWindowPos", b'w'),
+    win32("DeferWindowPos", 260, "wwhssssw", U, "DeferWindowPos", b'w'),
     win32("EndDeferWindowPos", 261, "w", U, "EndDeferWindowPos", b'b'),
     win32("GetWindow", 262, "ww", U, "GetWindow", b'w'),
     win32("GetMenuItemCount", 263, "m", U, "GetMenuItemCount", b'w'),
@@ -467,6 +467,11 @@ fn one(_: &mut Cpu, _: &[u32]) -> Option<u32> {
 
 fn minus_one(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(0xFFFF)
+}
+
+/// GetTimerResolution: 1000, as Wine says.
+fn timer_resolution(_: &mut Cpu, _: &[u32]) -> Option<u32> {
+    Some(1000)
 }
 
 fn wnet_error(_: &mut Cpu, _: &[u32]) -> Option<u32> {
@@ -688,7 +693,6 @@ fn sx(v: u32) -> u32 {
     v as u16 as i16 as i32 as u32
 }
 
-/// A WNDCLASS at `wc` as a WNDCLASS16 at `wc16`.
 /// The WNDCLASSA at `wc` as the 16-bit WNDCLASS at `wc16`, with the
 /// menu's name and the class's name the 16:16 pointers `menu` and
 /// `class`.
@@ -834,8 +838,24 @@ fn create_window_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         menu32(args[9] as u16)
     };
     let instance = instance32(cpu, args[10] as u16);
-    go(
+    // An MDI client's CLIENTCREATESTRUCT, which USER32 reads flat: the
+    // window menu's handle and the first child's id, widened.
+    let top = thunk::scratch32(cpu, 8);
+    let mut params = args[11];
+    if params != 0
+        && args[1] >> 16 != 0
+        && super::string(cpu, args[1]).eq_ignore_ascii_case("MDICLIENT")
+    {
+        let ccs = super::linear(cpu, params);
+        let menu = menu32(super::read_16(cpu, ccs));
+        let first = super::read_16(cpu, ccs + 2) as u32;
+        super::write_32(cpu, top, menu);
+        super::write_32(cpu, top + 4, first);
+        params = top;
+    }
+    go_at(
         cpu,
+        top,
         "CreateWindowExA",
         &[
             args[0],
@@ -849,8 +869,9 @@ fn create_window_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             args[8],
             menu,
             instance,
-            args[11],
+            params,
         ],
+        Vec::new(),
     )
 }
 
@@ -1488,34 +1509,36 @@ fn peek_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     )
 }
 
-/// A MSG16 at `m16` as a MSG on the 32-bit stack: its address.
-fn msg_arg(cpu: &mut Cpu, m16: u32) -> u32 {
+/// A MSG16 at `m16` as a MSG on the 32-bit stack: its address, and the
+/// stack's top below the structures its message took (the top for
+/// `go_at`).
+fn msg_arg(cpu: &mut Cpu, m16: u32) -> (u32, u32) {
     let m = thunk::scratch32(cpu, 28);
-    message::msg32(cpu, m16, m);
-    m
+    let top = message::msg32(cpu, m16, m);
+    (m, top)
 }
 
 fn translate_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let m = msg_arg(cpu, args[0]);
-    go_at(cpu, m, "TranslateMessage", &[m], Vec::new())
+    let (m, top) = msg_arg(cpu, args[0]);
+    go_at(cpu, top, "TranslateMessage", &[m], Vec::new())
 }
 
 fn dispatch_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let m = msg_arg(cpu, args[0]);
-    go_at(cpu, m, "DispatchMessageA", &[m], Vec::new())
+    let (m, top) = msg_arg(cpu, args[0]);
+    go_at(cpu, top, "DispatchMessageA", &[m], Vec::new())
 }
 
 fn is_dialog_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let m = msg_arg(cpu, args[1]);
-    go_at(cpu, m, "IsDialogMessageA", &[args[0], m], Vec::new())
+    let (m, top) = msg_arg(cpu, args[1]);
+    go_at(cpu, top, "IsDialogMessageA", &[args[0], m], Vec::new())
 }
 
 fn translate_accelerator(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let m = msg_arg(cpu, args[2]);
+    let (m, top) = msg_arg(cpu, args[2]);
     let accel = accel32(args[1] as u16);
     go_at(
         cpu,
-        m,
+        top,
         "TranslateAcceleratorA",
         &[args[0], accel, m],
         Vec::new(),
@@ -1523,8 +1546,8 @@ fn translate_accelerator(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 fn translate_mdi_sys_accel(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let m = msg_arg(cpu, args[1]);
-    go_at(cpu, m, "TranslateMDISysAccel", &[args[0], m], Vec::new())
+    let (m, top) = msg_arg(cpu, args[1]);
+    go_at(cpu, top, "TranslateMDISysAccel", &[args[0], m], Vec::new())
 }
 
 // Menus.

@@ -327,8 +327,6 @@ fn fatal_exit(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     None
 }
 
-/// GetVersion: Windows 3.95, as Windows 95 says to Windows 3.1 programs,
-/// on DOS 7.10.
 /// GetVersion: Windows 95's Windows version for 16-bit programs (3.95)
 /// in the low word, and in the high word the DOS version that INT 21h
 /// AH=30h gives.
@@ -546,8 +544,20 @@ fn global_dos_free(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(0)
 }
 
-fn get_heap_spaces(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    let ds = cpu.ds();
+/// GetHeapSpaces(module): the free bytes of the local heap in the
+/// module's automatic data segment (the low word) and the heap's size.
+/// The system's modules have no heaps here, so they say 64 KB, all
+/// free, for the programs that work out USER's and GDI's free percent.
+/// A module without an automatic data segment of its own has DS's.
+fn get_heap_spaces(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let module = super::module_index(cpu, args[0] as u16).map(|i| &cpu.bus.win32.win16.modules[i]);
+    if module.is_some_and(|m| m.builtin.is_some()) {
+        return Some(0xFFFF_FFFF);
+    }
+    let ds = match module.map_or(0, |m| m.dgroup) {
+        0 => cpu.ds(),
+        dgroup => global::handle_to_sel(dgroup),
+    };
     let size = local::heap_size(cpu, ds) as u32;
     let free = local::count_free(cpu, ds) as u32;
     Some(size << 16 | free)
@@ -1493,8 +1503,8 @@ fn lstrlen(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 pub fn lstrcmp(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let a = super::string(cpu, args[0]).to_lowercase();
-    let b = super::string(cpu, args[1]).to_lowercase();
+    let a = super::string(cpu, args[0]);
+    let b = super::string(cpu, args[1]);
     Some(match a.cmp(&b) {
         std::cmp::Ordering::Less => 0xFFFF,
         std::cmp::Ordering::Equal => 0,
