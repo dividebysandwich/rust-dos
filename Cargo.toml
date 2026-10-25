@@ -116,7 +116,7 @@ chd = { version = "0.3.5", optional = true }
 # The manuals and extras of game profiles (src/manuals): JPEG pictures, and
 # PDF pages rasterized.
 jpeg-decoder = { version = "0.3", default-features = false, optional = true }
-hayro = { version = "0.7", optional = true }
+hayro = { version = "0.8", optional = true }
 # 7z archives as drives (src/archive/sevenz.rs).
 sevenz-rust2 = { version = "0.22", default-features = false, features = ["bzip2", "deflate", "ppmd"], optional = true }
 
