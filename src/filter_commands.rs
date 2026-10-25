@@ -94,9 +94,8 @@ fn show_page(cpu: &mut Cpu, lines: Vec<Vec<u8>>) -> Option<Vec<Vec<u8>>> {
         lines.iter().for_each(|line| print_line(cpu, line));
         return None;
     }
-    let rows = cpu.bus.read_8(0x0484) as usize + 1;
-    let rows = if rows < 2 { 25 } else { rows };
-    let cols = (cpu.bus.read_16(0x044A) as usize).max(1);
+    let rows = screen_rows(cpu);
+    let cols = screen_cols(cpu);
     let mut used = 0;
     let mut shown = 0;
     for line in &lines {
@@ -114,6 +113,17 @@ fn show_page(cpu: &mut Cpu, lines: Vec<Vec<u8>>) -> Option<Vec<Vec<u8>>> {
     }
     print_string(cpu, MORE_PROMPT);
     Some(lines[shown..].to_vec())
+}
+
+/// The rows of the text mode, as the BIOS keeps them (25 if it doesn't).
+pub(crate) fn screen_rows(cpu: &Cpu) -> usize {
+    let rows = cpu.bus.read_8(0x0484) as usize + 1;
+    if rows < 2 { 25 } else { rows }
+}
+
+/// The columns of the text mode, as the BIOS keeps them.
+pub(crate) fn screen_cols(cpu: &Cpu) -> usize {
+    (cpu.bus.read_16(0x044A) as usize).max(1)
 }
 
 /// A key while MORE waits: the "-- More --" is taken off, and the next

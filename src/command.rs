@@ -4,6 +4,7 @@ use crate::mount::{
     MOUNT_USAGE, MountCmd, MountSpec, PathContext, display_host_path, parse_mount_command,
 };
 use crate::video::{print_cp437, print_string};
+use std::fmt::Write;
 
 pub trait ShellCommand {
     /// `args` contains everything after the command name (e.g., "FILE.TXT" for "TYPE FILE.TXT")
@@ -136,47 +137,119 @@ impl CommandDispatcher {
 
 // --- Command Implementations ---
 
+/// What DIR's switches ask for.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct DirSwitches {
+    /// /W: the names alone, five to a line.
+    pub wide: bool,
+    /// /P: a key after each screenful.
+    pub pause: bool,
+    /// /B: the names alone, one to a line, without the header and totals.
+    pub bare: bool,
+}
+
+/// DIR's switches and the path it lists, the first one given ("" for the
+/// current directory). A switch may follow the path or another switch
+/// without a space (DIR\GAMES/W/P), and /-W, /-P and /-B turn theirs off
+/// again, as in MS-DOS 6.22. The switches it doesn't know are left out.
+pub fn parse_dir_args(args: &str) -> (DirSwitches, &str) {
+    let mut switches = DirSwitches::default();
+    let mut path = "";
+    for token in args.split_whitespace() {
+        let mut parts = token.split('/');
+        if let Some(first) = parts.next().filter(|p| !p.is_empty() && path.is_empty()) {
+            path = first;
+        }
+        for switch in parts {
+            let (on, name) = match switch.strip_prefix('-') {
+                Some(name) => (false, name),
+                None => (true, switch),
+            };
+            match name.to_ascii_uppercase().as_str() {
+                "W" => switches.wide = on,
+                "P" => switches.pause = on,
+                "B" => switches.bare = on,
+                _ => {}
+            }
+        }
+    }
+    (switches, path)
+}
+
+/// Columns DIR /W prints a name in, and names to a line.
+const DIR_WIDE_COLUMN: usize = 15;
+const DIR_WIDE_NAMES: usize = 5;
+
 struct DirCommand;
 impl ShellCommand for DirCommand {
     fn execute(&self, cpu: &mut Cpu, args: &str) {
-        // DIR [d:][path][pattern]; switches like /W or /P are ignored.
-        let arg = args
-            .split_whitespace()
-            .find(|a| !a.starts_with('/'))
-            .unwrap_or("");
+        // DIR [d:][path][pattern] [/W] [/P] [/B]
+        let (switches, arg) = parse_dir_args(args);
         let Some((drive, spec)) = search_spec(cpu, arg) else {
             print_string(cpu, "Invalid drive specification\r\n");
             return;
         };
         let letter = drive_letter(drive);
 
-        let label = cpu.bus.disk.volume_label(drive).unwrap_or_default();
-        if label.is_empty() {
-            print_string(
-                cpu,
-                &format!(" Volume in drive {} has no label\r\n", letter),
-            );
-        } else {
-            print_string(
-                cpu,
-                &format!(" Volume in drive {} is {}\r\n", letter, label),
-            );
-        }
+        let mut lines = Vec::new();
         let directory = cpu.bus.disk.qualify_directory(&spec).unwrap_or_default();
-        print_string(cpu, &format!(" Directory of {}\r\n\r\n", directory));
+        if !switches.bare {
+            let label = cpu.bus.disk.volume_label(drive).unwrap_or_default();
+            if label.is_empty() {
+                lines.push(format!(" Volume in drive {} has no label", letter));
+            } else {
+                lines.push(format!(" Volume in drive {} is {}", letter, label));
+            }
+            lines.push(format!(" Directory of {}", directory));
+            lines.push(String::new());
+        }
+        // /B leaves out the directory it continues in.
+        let continuing = (!switches.bare).then_some(directory);
 
         // Directories + hidden + system
         let entries = match cpu.bus.disk.list_directory(&spec, 0x16) {
             Ok(entries) if !entries.is_empty() => entries,
             _ => {
-                print_string(cpu, "File not found\r\n");
+                lines.push("File not found".to_string());
+                show_dir(cpu, lines, switches.pause, continuing);
                 return;
             }
         };
 
+        if switches.bare {
+            let names = entries.iter().filter(|e| e.filename != "." && e.filename != "..");
+            lines.extend(names.map(|e| e.filename.clone()));
+            // A directory with nothing in it but . and ..
+            if lines.is_empty() {
+                lines.push("File not found".to_string());
+            }
+            show_dir(cpu, lines, switches.pause, continuing);
+            return;
+        }
+
         let mut file_count = 0;
         let mut total_bytes = 0u64;
-        for entry in &entries {
+        let mut wide_line = String::new();
+        for (i, entry) in entries.iter().enumerate() {
+            if !entry.is_dir {
+                file_count += 1;
+                total_bytes += entry.size as u64;
+            }
+            if switches.wide {
+                // NAME.EXT, a directory as [NAME.EXT], in columns of 15.
+                let name = if entry.is_dir {
+                    format!("[{}]", entry.filename)
+                } else {
+                    entry.filename.clone()
+                };
+                let _ = write!(wide_line, "{:<width$}", name, width = DIR_WIDE_COLUMN);
+                if (i + 1) % DIR_WIDE_NAMES == 0 || i + 1 == entries.len() {
+                    lines.push(wide_line.trim_end().to_string());
+                    wide_line.clear();
+                }
+                continue;
+            }
+
             let (stem, ext) = match entry.filename.split_once('.') {
                 Some((s, e)) if !s.is_empty() => (s, e),
                 _ => (entry.filename.as_str(), ""),
@@ -185,8 +258,6 @@ impl ShellCommand for DirCommand {
             let size_str = if entry.is_dir {
                 format!("{:<14}", "<DIR>")
             } else {
-                file_count += 1;
-                total_bytes += entry.size as u64;
                 format_size(entry.size as u64)
             };
             let timestamp = if entry.dos_date == 0 {
@@ -195,8 +266,7 @@ impl ShellCommand for DirCommand {
                 format_dos_timestamp(entry.dos_date, entry.dos_time)
             };
             let line = format!("{:<8} {:<3} {:>14} {}", stem, ext, size_str, timestamp);
-            let line = format!("{}\r\n", line.trim_end());
-            print_string(cpu, &line);
+            lines.push(line.trim_end().to_string());
         }
 
         // Summary Footer
@@ -206,16 +276,79 @@ impl ShellCommand for DirCommand {
             .get_disk_free_space(drive + 1)
             .map(|(spc, free, bps, _)| spc as u64 * free as u64 * bps as u64)
             .unwrap_or(0);
-        print_string(
-            cpu,
-            &format!(
-                "{:>9} file(s) {:>14} bytes\r\n{:>24} bytes free\r\n",
-                file_count,
-                format_size(total_bytes),
-                format_size(free_bytes)
-            ),
-        );
+        lines.push(format!("{:>9} file(s) {:>14} bytes", file_count, format_size(total_bytes)));
+        lines.push(format!("{:>24} bytes free", format_size(free_bytes)));
+        show_dir(cpu, lines, switches.pause, continuing);
     }
+}
+
+/// DIR's lines, a screenful at a time with /P.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DirPages {
+    /// The lines not shown yet.
+    pub lines: Vec<String>,
+    /// The directory listed, for the "(continuing ...)" line that begins
+    /// each screenful after the first; None for /B.
+    pub continuing: Option<String>,
+}
+
+crate::state_fields!(DirPages { lines, continuing });
+
+const PAUSE_PROMPT: &str = "Press any key to continue . . .";
+
+/// Print DIR's lines: all of them, or with /P (unless the output goes to a
+/// file) a screenful, and the shell waits for a key for the next.
+fn show_dir(cpu: &mut Cpu, lines: Vec<String>, pause: bool, continuing: Option<String>) {
+    if !pause || cpu.stdout_capture.is_some() {
+        for line in &lines {
+            print_string(cpu, &format!("{}\r\n", line));
+        }
+        return;
+    }
+    let pages = DirPages { lines, continuing };
+    if let Some(rest) = dir_page(cpu, pages, 0) {
+        crate::shell::enter_wait(cpu, crate::shell::ShellWait::Dir(rest));
+    }
+}
+
+/// Print the lines that fit on the screenful below the `used` rows: two
+/// rows fewer than the text mode has, the second last for "Press any key
+/// to continue . . .", which is printed if lines are left. A line as long
+/// as the row wraps, as MORE counts it. What is left to show, if anything.
+fn dir_page(cpu: &mut Cpu, mut pages: DirPages, mut used: usize) -> Option<DirPages> {
+    let rows = crate::filter_commands::screen_rows(cpu)
+        .saturating_sub(2)
+        .max(1);
+    let cols = crate::filter_commands::screen_cols(cpu);
+    let mut shown = 0;
+    for line in &pages.lines {
+        let height = line.len() / cols + 1;
+        if shown > 0 && used + height > rows {
+            break;
+        }
+        print_string(cpu, &format!("{}\r\n", line));
+        used += height;
+        shown += 1;
+    }
+    pages.lines.drain(..shown);
+    if pages.lines.is_empty() {
+        return None;
+    }
+    print_string(cpu, PAUSE_PROMPT);
+    Some(pages)
+}
+
+/// A key while DIR /P waits: the next screenful, after the line saying
+/// which directory it continues. What is left after it, if anything.
+pub fn dir_key(cpu: &mut Cpu, pages: DirPages) -> Option<DirPages> {
+    print_string(cpu, "\r\n");
+    let mut used = 0;
+    if let Some(directory) = &pages.continuing {
+        let line = format!("(continuing {})", directory);
+        print_string(cpu, &format!("{}\r\n", line));
+        used = line.len() / crate::filter_commands::screen_cols(cpu) + 1;
+    }
+    dir_page(cpu, pages, used)
 }
 
 /// The drive and search spec that DIR and LS list for a path: everything
@@ -707,7 +840,7 @@ fn file_exists(cpu: &Cpu, name: &str) -> bool {
 struct PauseCommand;
 impl ShellCommand for PauseCommand {
     fn execute(&self, cpu: &mut Cpu, _args: &str) {
-        print_string(cpu, "Press any key to continue . . .");
+        print_string(cpu, PAUSE_PROMPT);
         crate::shell::enter_wait(cpu, crate::shell::ShellWait::Pause);
     }
 }

@@ -300,6 +300,8 @@ pub enum ShellWait {
     /// RC, Rat Commander: every key, until it ends or leaves to run a
     /// command line.
     Rc(Box<crate::rc_command::RcWait>),
+    /// DIR /P: any key, for the lines after a screenful.
+    Dir(crate::command::DirPages),
 }
 
 /// A CHOICE waiting for a key.
@@ -396,6 +398,12 @@ pub fn take_key(cpu: &mut Cpu, key: u16) -> bool {
                 return false;
             }
         }
+        ShellWait::Dir(pages) => {
+            if let Some(rest) = crate::command::dir_key(cpu, pages) {
+                cpu.shell_wait = Some(ShellWait::Dir(rest));
+                return false;
+            }
+        }
         ShellWait::Line(_) => {}
         ShellWait::Lan { .. } => crate::lan_command::wait_ended(cpu, key),
         ShellWait::LanList { .. } => crate::lan_command::list_ended(cpu),
@@ -422,15 +430,17 @@ pub fn take_key(cpu: &mut Cpu, key: u16) -> bool {
 }
 
 /// What a built-in whose input is redirected (`<file`, a pipe) waits for
-/// comes from `input` instead of the keyboard: PAUSE, CHOICE and MAKEIMG
-/// take its characters as keys, DATE and TIME its lines. Once it runs out
-/// they wait no longer, and the shell goes on to its prompt.
+/// comes from `input` instead of the keyboard: PAUSE, CHOICE, MAKEIMG and
+/// DIR /P take its characters as keys, DATE and TIME its lines. Once it
+/// runs out they wait no longer, and the shell goes on to its prompt.
 pub fn feed_wait(cpu: &mut Cpu, input: &[u8]) {
     let mut rest = input.split(|&b| b == 0x1A).next().unwrap_or_default();
     let mut fed = false;
     loop {
         match cpu.shell_wait.clone() {
-            Some(ShellWait::Pause | ShellWait::Choice(_) | ShellWait::MakeImg(_)) => {
+            Some(
+                ShellWait::Pause | ShellWait::Choice(_) | ShellWait::MakeImg(_) | ShellWait::Dir(_),
+            ) => {
                 let Some((&key, after)) = rest.split_first() else { break };
                 rest = after;
                 take_key(cpu, key as u16);
@@ -448,6 +458,12 @@ pub fn feed_wait(cpu: &mut Cpu, input: &[u8]) {
             }
             _ => break,
         }
+        fed = true;
+    }
+    // DIR /P goes on to its end, each pause taking the end of the input as
+    // its key.
+    while let Some(ShellWait::Dir(pages)) = cpu.shell_wait.clone() {
+        cpu.shell_wait = crate::command::dir_key(cpu, pages).map(ShellWait::Dir);
         fed = true;
     }
     if matches!(cpu.shell_wait, Some(ShellWait::Pause | ShellWait::Choice(_) | ShellWait::MakeImg(_) | ShellWait::Line(_))) {
@@ -630,6 +646,10 @@ impl crate::savestate::State for ShellWait {
                 9u8.save(w);
                 (**rc).save(w);
             }
+            ShellWait::Dir(pages) => {
+                10u8.save(w);
+                pages.save(w);
+            }
         }
     }
     fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
@@ -676,6 +696,11 @@ impl crate::savestate::State for ShellWait {
                 let mut rc = Box::<crate::rc_command::RcWait>::default();
                 (*rc).load(r)?;
                 ShellWait::Rc(rc)
+            }
+            10 => {
+                let mut pages = crate::command::DirPages::default();
+                pages.load(r)?;
+                ShellWait::Dir(pages)
             }
             _ => return Err(crate::savestate::StateError::Invalid("a wait of the shell it doesn't know".into())),
         };
