@@ -409,14 +409,20 @@ impl Image {
             // Raw data past the end of the file is cut short, as Windows'
             // loader does with a last section's padding. A section whose
             // data is at offset 0 has none in the file (Watcom's .bss): it
-            // stays zeros.
-            let len = section.raw_size.min(section.mapped_size()) as usize;
+            // stays zeros. Raw data past the virtual size is there up to
+            // the end of the section's last page, as in Windows: patches
+            // put code there (Zanzarah's Russian release).
+            let pages = section
+                .mapped_size()
+                .checked_next_multiple_of(headers.section_alignment.max(1))
+                .unwrap_or(u32::MAX);
+            let len = section.raw_size.min(pages) as usize;
             let from = section.raw_offset as usize;
-            if len == 0 || from == 0 || from >= file.len() {
+            let to = section.rva as usize;
+            if len == 0 || from == 0 || from >= file.len() || to >= data.len() {
                 continue;
             }
-            let len = len.min(file.len() - from);
-            let to = section.rva as usize;
+            let len = len.min(file.len() - from).min(data.len() - to);
             data[to..to + len].copy_from_slice(&file[from..from + len]);
         }
         Ok(Image { headers, data })

@@ -272,3 +272,26 @@ fn a_section_without_a_file_offset_is_zeros() {
     let at = bss as usize;
     assert!(image.data[at..at + 0x2000].iter().all(|&b| b == 0));
 }
+
+#[test]
+fn raw_data_past_the_virtual_size_is_mapped_to_the_page_end() {
+    // A patch can put code after the end the linker gave a section: in
+    // its raw data, in the last page. Windows' loader maps it.
+    let mut b = Builder::exe(0x40_0000);
+    let code = b.next_rva();
+    let mut text = vec![0xC3; 0x1000];
+    text[0x800] = 0x90;
+    b.section(".text", &text, SCN_CODE | SCN_EXECUTE | SCN_READ);
+    b.entry(code);
+    let mut file = b.build();
+    let pe = u32::from_le_bytes(file[0x3C..0x40].try_into().unwrap()) as usize;
+    let optional = u16::from_le_bytes([file[pe + 20], file[pe + 21]]) as usize;
+    let header = pe + 24 + optional;
+    assert_eq!(&file[header..header + 5], b".text");
+    file[header + 8..header + 12].copy_from_slice(&0x10u32.to_le_bytes());
+
+    let image = Image::load(&file).unwrap();
+    let at = code as usize;
+    assert_eq!(image.data[at + 0x800], 0x90);
+    assert_eq!(image.data[at + 0xFFF], 0xC3);
+}
