@@ -1,0 +1,10 @@
+[package]
+name = "rust-dos-ne"
+description = "New Executable (Windows 3.x EXE and DLL) files: their header, segments, relocations, entry points, names and resources, read and written"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]

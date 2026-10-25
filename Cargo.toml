@@ -72,6 +72,8 @@ rust-dos-zip = { path = "crates/zip" }
 rust-dos-rc = { path = "crates/rc" }
 # Win32 programs' PE files, for the built-in Windows (crates/pe).
 rust-dos-pe = { path = "crates/pe" }
+# Windows 3.1 programs' NE files, for Win16 (crates/ne).
+rust-dos-ne = { path = "crates/ne" }
 # InstallShield's installer archives, unpacked by `rust-dos unpack` and
 # game profiles' installs (crates/installshield).
 rust-dos-installshield = { path = "crates/installshield" }

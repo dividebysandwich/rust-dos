@@ -127,6 +127,7 @@ pub mod video;
 pub mod voodoo;
 pub mod vr;
 pub mod vr_scenes;
+pub mod win16;
 pub mod win32;
 pub mod xms;
 

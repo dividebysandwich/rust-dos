@@ -471,9 +471,38 @@ pub fn process_ended(cpu: &mut Cpu, pid: u32, tids: &[u32]) {
     if user(cpu).windows.is_empty() {
         return;
     }
+    forget_windows(cpu, |w| w.pid == pid, tids);
+    let state = user(cpu);
+    state
+        .classes
+        .retain(|c| c.as_ref().is_none_or(|c| c.pid != pid));
+    state.hooks.retain(|h| h.pid != pid);
+    for m in state.menus.iter_mut() {
+        if m.as_ref().is_some_and(|m| m.pid == pid) {
+            *m = None;
+        }
+    }
+    resource::process_ended(cpu, pid);
+    redraw_after(cpu);
+}
+
+/// A Win16 task, a thread of the Win16 process, ended: its windows go,
+/// with its timers and its queue. The process's classes and menus stay
+/// for its other tasks.
+pub fn destroy_thread_windows(cpu: &mut Cpu, tid: u32) {
+    if user(cpu).windows.is_empty() {
+        return;
+    }
+    forget_windows(cpu, |w| w.tid == tid, &[tid]);
+    redraw_after(cpu);
+}
+
+/// Drop the windows `gone` says, without the messages DestroyWindow
+/// sends, and the timers and queues of the threads `tids`.
+fn forget_windows(cpu: &mut Cpu, gone: impl Fn(&Window) -> bool, tids: &[u32]) {
     let state = user(cpu);
     let gone: Vec<u32> = (1..state.windows.len())
-        .filter(|&i| state.windows[i].as_ref().is_some_and(|w| w.pid == pid))
+        .filter(|&i| state.windows[i].as_ref().is_some_and(&gone))
         .map(handle)
         .collect();
     for &hwnd in &gone {
@@ -484,17 +513,8 @@ pub fn process_ended(cpu: &mut Cpu, pid: u32, tids: &[u32]) {
             state.windows[i] = None;
         }
     }
-    state
-        .classes
-        .retain(|c| c.as_ref().is_none_or(|c| c.pid != pid));
-    state.hooks.retain(|h| h.pid != pid);
     state.timers.retain(|t| !tids.contains(&t.tid));
     state.queues.retain(|q| !tids.contains(&q.tid));
-    for m in state.menus.iter_mut() {
-        if m.as_ref().is_some_and(|m| m.pid == pid) {
-            *m = None;
-        }
-    }
     let windows = &state.windows;
     let alive = |hwnd: u32| slot(hwnd).is_some_and(|i| windows.get(i).is_some_and(|w| w.is_some()));
     let input = &mut state.input;
@@ -514,7 +534,11 @@ pub fn process_ended(cpu: &mut Cpu, pid: u32, tids: &[u32]) {
     if state.clipboard.owner != 0 && !alive(state.clipboard.owner) {
         state.clipboard.owner = 0;
     }
-    resource::process_ended(cpu, pid);
+}
+
+/// Windows went: the desktop left when none are left, redrawn when some
+/// are.
+fn redraw_after(cpu: &mut Cpu) {
     let state = user(cpu);
     let empty = state.windows.iter().skip(1).all(|w| w.is_none());
     if state.desktop {
