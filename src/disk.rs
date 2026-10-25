@@ -22,7 +22,7 @@ mod paths;
 mod search;
 mod state;
 
-use host_dir::{HostDirCache, SearchKey};
+use host_dir::{HostDirCache, SearchKey, Usage};
 pub use layout::{DriveKind, Fat32Layout, FatLayout, old_space};
 
 /// The open files are numbered as DOS numbers the entries of its System
