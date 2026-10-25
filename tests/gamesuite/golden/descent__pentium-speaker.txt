@@ -1,7 +1,7 @@
-interplay 61933c05b3630bb5745588cd
-intro-sound 2b802a91b61929410005604f
+interplay be2e3ad0b37c3feb60861f89
+intro-sound 195f2e99b602daa2fbd019df
 menu 883997a3befcd080ce4eac9e
 briefing 7524ce36debe58befd40c2eb
-cockpit 21c591ca4e66716f2c4d37d6
-flown aa0284d30ff9df2297eddb5a
-laser f1c9901a8656aa9c5ec5450b
+cockpit 5eead86feb0ec15a9a29043a
+flown dab37a9150e4bb2100496fb9
+laser 7edacaf5929314b7f95f3c7d

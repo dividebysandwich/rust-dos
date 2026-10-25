@@ -1,6 +1,6 @@
 setup 7a4bd5d60637bf538196754e
 apogee b21399d36a67c24240cbd337
-apogee-sound 4867f96e19576afc55e7bbb4
+apogee-sound 3e971a51c167efd61192399b
 cygnus 19ee81312ea17a062bcbdf00
 intro 46b82de11487dec3c9ad3c2e
 intro-sound 75d46e72667c9331749da268
