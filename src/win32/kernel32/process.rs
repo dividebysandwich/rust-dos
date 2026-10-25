@@ -50,14 +50,9 @@ fn find_program(cpu: &mut Cpu, name: &str) -> Option<String> {
         if let Some(i) = own.rfind('\\') {
             candidates.push(format!("{}\\{}", &own[..i], name));
         }
-        let path = process(cpu)
-            .environment
-            .iter()
-            .find_map(|v| {
-                let (k, value) = crate::win32::split_variable(v)?;
-                k.eq_ignore_ascii_case("PATH").then(|| value.to_string())
-            })
-            .unwrap_or_default();
+        let path = crate::win32::variable_value(&process(cpu).environment, "PATH")
+            .unwrap_or_default()
+            .to_string();
         for dir in path.split(';').filter(|d| !d.is_empty()) {
             candidates.push(format!("{}\\{}", dir.trim_end_matches('\\'), name));
         }

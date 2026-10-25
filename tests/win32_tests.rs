@@ -2903,10 +2903,15 @@ fn a_program_catches_its_cxx_exceptions() {
 
 /// A drive's current directory as MSVCRT's _chdir keeps it, in a variable
 /// whose name starts with "=", set and read back; a name with "=" further
-/// on is refused. A bit each in the exit code.
+/// on is refused with ERROR_INVALID_PARAMETER. A bit each in the exit
+/// code.
 #[test]
 fn a_variable_name_can_start_with_an_equals_sign() {
-    let names: &[&str] = &["SetEnvironmentVariableA", "GetEnvironmentVariableA"];
+    let names: &[&str] = &[
+        "SetEnvironmentVariableA",
+        "GetEnvironmentVariableA",
+        "GetLastError",
+    ];
     let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
     let mut data = vec![0u8; 0x40];
     data[..4].copy_from_slice(b"=D:\0");
@@ -2941,8 +2946,96 @@ fn a_variable_name_can_start_with_an_equals_sign() {
         a.sete(al)?;
         a.shl(al, 3)?;
         a.or(bl, al)?;
+        a.call(l.import(2))?;
+        a.cmp(eax, 87)?;
+        a.sete(al)?;
+        a.shl(al, 4)?;
+        a.or(bl, al)?;
         a.movzx(eax, bl)?;
         a.ret()
     });
-    assert_eq!(run("drive_variable", exe).0, 0b1111);
+    assert_eq!(run("drive_variable", exe).0, 0b1_1111);
+}
+
+/// A child given the environment "=D:=D:\" and "A=1" finds only "A=1" in
+/// the C runtime's: MSVCRT leaves out the strings whose name starts with
+/// "=". Its exit code is the count, with 0x10 if the one it found is A's.
+#[test]
+fn the_c_runtime_leaves_drive_variables_out_of_its_environment() {
+    let child = {
+        let imports: &[(&str, &[&str])] = &[("MSVCRT.dll", &["__getmainargs", "exit"])];
+        // argc, argv, env and the startup info.
+        program(BASE, false, imports, &[0; 0x20], |a, l| {
+            a.push(l.at(0x10) as i32)?;
+            a.push(0)?;
+            a.push(l.at(8) as i32)?;
+            a.push(l.at(4) as i32)?;
+            a.push(l.at(0) as i32)?;
+            a.call(l.import(0))?;
+            a.add(esp, 20)?;
+            a.mov(esi, dword_ptr(l.at(8)))?;
+            a.xor(ebx, ebx)?;
+            let mut count = a.create_label();
+            let mut counted = a.create_label();
+            a.set_label(&mut count)?;
+            a.cmp(dword_ptr(esi + ebx * 4), 0)?;
+            a.je(counted)?;
+            a.inc(ebx)?;
+            a.jmp(count)?;
+            a.set_label(&mut counted)?;
+            a.mov(eax, dword_ptr(esi))?;
+            a.cmp(byte_ptr(eax), b'A' as i32)?;
+            a.sete(al)?;
+            a.shl(al, 4)?;
+            a.or(bl, al)?;
+            a.push(ebx)?;
+            a.call(l.import(1))?;
+            a.int3()
+        })
+    };
+    let names: &[&str] = &[
+        "CreateProcessA",
+        "WaitForSingleObject",
+        "GetExitCodeProcess",
+        "ExitProcess",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The command line, the environment block at 0x10, STARTUPINFO at
+    // 0x40, PROCESS_INFORMATION at 0x90, the exit code at 0xA0.
+    let mut data = b"C.EXE\0".to_vec();
+    data.resize(0xB0, 0);
+    data[0x10..0x1D].copy_from_slice(b"=D:=D:\\\0A=1\0\0");
+    data[0x40] = 68;
+    let parent = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.push(l.at(0x90) as i32)?;
+        a.push(l.at(0x40) as i32)?;
+        a.push(0)?;
+        a.push(l.at(0x10) as i32)?;
+        for _ in 0..4 {
+            a.push(0)?;
+        }
+        a.push(l.at(0) as i32)?;
+        a.push(0)?;
+        a.call(f("CreateProcessA"))?;
+        a.push(-1)?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(f("WaitForSingleObject"))?;
+        a.push(l.at(0xA0) as i32)?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(f("GetExitCodeProcess"))?;
+        a.push(dword_ptr(l.at(0xA0)))?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let mut cpu = Cpu::new(scratch(
+        "drive_variables_environ",
+        &[("T.EXE", parent), ("C.EXE", child)],
+    ));
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    assert!(run_to_exit(&mut cpu, 200), "{}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 0x11, "{}", printed(&cpu));
 }

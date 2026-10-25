@@ -802,10 +802,13 @@ fn init(bus: &mut Bus, process: &mut super::Process) -> Option<()> {
     let argv = w.array(&args)?;
     w.u32(var_at(V_ARGC), args.len() as u32)?;
     w.u32(var_at(V_ARGV), argv)?;
+    // Without the strings whose name starts with "=", each drive's current
+    // directory among them, as MSVCRT's startup leaves them out.
     let environment: Vec<Vec<u8>> = w
         .process
         .environment
         .iter()
+        .filter(|s| !s.starts_with('='))
         .map(|s| crate::dosstr::to_bytes(s))
         .collect();
     let environ = w.array(&environment)?;

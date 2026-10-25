@@ -774,6 +774,15 @@ fn split_variable(entry: &str) -> Option<(&str, &str)> {
     Some((&entry[..at], &entry[at + 1..]))
 }
 
+/// The value of the variable `name` among the environment strings
+/// `environment`, its name's case ignored.
+fn variable_value<'a>(environment: &'a [String], name: &str) -> Option<&'a str> {
+    environment.iter().find_map(|entry| {
+        let (n, value) = split_variable(entry)?;
+        n.eq_ignore_ascii_case(name).then_some(value)
+    })
+}
+
 /// End the running process with exit code `code`: its threads end, its
 /// handles close and its memory goes back to the pool. Another process's
 /// thread runs on; when there is none, back in real mode, the DOS process
