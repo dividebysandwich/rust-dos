@@ -520,9 +520,9 @@ fn memory(cpu: &mut Cpu, ctx: &mut Context, ah: u8) -> Result<(), u16> {
         0x48 => allocate_block(cpu, paras, bits32).map(|selector| ctx.set_reg16(EAX, selector)),
         0x49 => free_block(cpu, selector),
         _ if block(cpu, selector).is_none() && dos_block(cpu, selector).is_some() => {
-            return dos_resize(cpu, selector, paras as u16).map_err(|(_, largest)| {
+            return dos_resize(cpu, selector, paras as u16).map_err(|(code, largest)| {
                 ctx.set_reg16(EBX, largest);
-                NO_MEMORY
+                if code == crate::mcb::ERR_MCB_DESTROYED as u16 { code } else { NO_MEMORY }
             });
         }
         _ => resize_block(cpu, selector, paras, bits32),

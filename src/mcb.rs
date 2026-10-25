@@ -523,12 +523,15 @@ fn alloc_in(bus: &mut Bus, chain: Vec<(u16, Mcb)>, owner_psp: u16, paras: u16, f
 
 /// AH=49h: free the block that starts at `block_seg` (its MCB is at `block_seg - 1`).
 ///
-/// Coalesces with adjacent free blocks on both sides.
+/// Coalesces with adjacent free blocks on both sides. A segment with no
+/// 'M' or 'Z' at `block_seg - 1` is an invalid block address (09h), as in
+/// MS-DOS's `$DEALLOC`. A block that is already free is one too here,
+/// where `$DEALLOC` checks only the signature and frees it again.
 pub fn free(bus: &mut Bus, block_seg: u16) -> Result<(), u8> {
     let mcb_seg = block_seg.wrapping_sub(1);
     let m = read_mcb(bus, mcb_seg);
     if !m.is_valid() {
-        return Err(ERR_MCB_DESTROYED);
+        return Err(ERR_INVALID_BLOCK);
     }
     if m.is_free() {
         return Err(ERR_INVALID_BLOCK);
@@ -549,15 +552,35 @@ pub fn free(bus: &mut Bus, block_seg: u16) -> Result<(), u8> {
     Ok(())
 }
 
+/// Why AH=4Ah failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResizeError {
+    /// No 'M' or 'Z' at `block_seg - 1`, or, when growing, at the header
+    /// after the block: MS-DOS's `$SETBLOCK` and its `Coalesce` report
+    /// that as the arena trashed (07h) and leave BX alone.
+    McbDestroyed,
+    /// Not enough memory to grow (08h), with the largest size in
+    /// paragraphs that would have succeeded, which DOS returns in BX.
+    Insufficient(u16),
+}
+
+impl ResizeError {
+    /// The DOS error code for AX.
+    pub fn code(self) -> u8 {
+        match self {
+            ResizeError::McbDestroyed => ERR_MCB_DESTROYED,
+            ResizeError::Insufficient(_) => ERR_INSUFFICIENT,
+        }
+    }
+}
+
 /// AH=4Ah: resize the block at `block_seg` to `new_paras` paragraphs.
-///
-/// On failure returns the largest size (in paragraphs) that would have
-/// succeeded, which the BIOS returns in BX.
-pub fn resize(bus: &mut Bus, block_seg: u16, new_paras: u16) -> Result<(), u16> {
+pub fn resize(bus: &mut Bus, block_seg: u16, new_paras: u16) -> Result<(), ResizeError> {
+    use ResizeError::Insufficient;
     let mcb_seg = block_seg.wrapping_sub(1);
     let m = read_mcb(bus, mcb_seg);
     if !m.is_valid() {
-        return Err(0);
+        return Err(ResizeError::McbDestroyed);
     }
 
     if new_paras == m.size {
@@ -595,16 +618,19 @@ pub fn resize(bus: &mut Bus, block_seg: u16, new_paras: u16) -> Result<(), u16> 
 
     // Grow. Need to consume the following free block (if any).
     if m.is_last() {
-        return Err(m.size);
+        return Err(Insufficient(m.size));
     }
     let next_seg = mcb_seg + 1 + m.size;
     let next = read_mcb(bus, next_seg);
-    if !next.is_free() || !next.is_valid() {
-        return Err(m.size);
+    if !next.is_valid() {
+        return Err(ResizeError::McbDestroyed);
+    }
+    if !next.is_free() {
+        return Err(Insufficient(m.size));
     }
     let combined = m.size + 1 + next.size;
     if new_paras > combined {
-        return Err(combined);
+        return Err(Insufficient(combined));
     }
 
     let was_next_last = next.is_last();
