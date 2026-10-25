@@ -465,6 +465,11 @@ curl -s "$H/api/journal?after=$S&type=paused&wait=30000"   # long poll for the n
 - **Disassembly as data:** `GET /api/disasm?format=json` has, next to the
   text `lines`, `rows` of `{label, phys, bytes, asm, len, current,
   breakpoint}`.
+- **Disassembly's code size:** an address with a selector decodes as its
+  segment's code, 16 or 32-bit. A `lin:` or `phys:` address has no
+  segment, so it decodes like the code running now: 32-bit under the
+  built-in Windows or a 32-bit DOS extender, where the `[W32]` log lines
+  give linear addresses. `&bits=16` or `&bits=32` says the size instead.
 
 ### Switch to another program directory, or mount more drives
 

@@ -374,7 +374,7 @@ impl DebugHub {
                 }
                 Err(e) => Reply::bad(e),
             },
-            Cmd::Disasm { addr, count } => self.disasm(cpu, addr, count),
+            Cmd::Disasm { addr, count, bits } => self.disasm(cpu, addr, count, bits),
             Cmd::ListBreakpoints => Reply::Json(self.breakpoints_json()),
             Cmd::AddBreakpoint { addr, once } => match parse_addr(cpu, &addr).and_then(breakpoint_phys) {
                 Ok(phys) => {

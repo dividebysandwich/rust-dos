@@ -1524,10 +1524,12 @@ struct DisasmQuery {
     addr: Option<String>,
     count: Option<usize>,
     format: Option<String>,
+    /// 16 or 32: the code's size, instead of the address's segment's.
+    bits: Option<u32>,
 }
 
 async fn disasm(State(s): State<AppState>, Query(q): Query<DisasmQuery>) -> ApiResult {
-    let (Reply::Json(v), meta) = s.call(Cmd::Disasm { addr: q.addr, count: q.count.unwrap_or(20) }, DEFAULT_TIMEOUT).await?
+    let (Reply::Json(v), meta) = s.call(Cmd::Disasm { addr: q.addr, count: q.count.unwrap_or(20), bits: q.bits }, DEFAULT_TIMEOUT).await?
     else {
         return Err(unexpected());
     };
@@ -2223,6 +2225,8 @@ EXECUTION CONTROL
                              "expect":"20 07" writes only if those bytes are there (409)
   GET  /api/disasm?addr=CS:IP&count=20[&format=json]   json: "lines" and "rows"
                                            ({label, phys, bytes, asm, len, current, breakpoint})
+                  a lin: or phys: address decodes as the running code does (32-bit
+                  under the built-in Windows); &bits=16 or &bits=32 says the size
   GET/POST/DELETE /api/breakpoints   {"addr":"1234:0100"}  (DELETE without addr = all)
                   {"addr":"1234:0100","once":true}: goes once it stops the machine
                   (the stop has "breakpoint" and "once":true; the list "once")
