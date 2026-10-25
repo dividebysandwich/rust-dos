@@ -611,7 +611,7 @@ user32/text: text: 197 tests executed (0 marked as todo, 0 failures), 2 skipped.
 user32/text: skipped text.c:119
 user32/text: skipped text.c:554
 user32/uitools: uitools: 6 tests executed (0 marked as todo, 0 failures), 0 skipped.
-user32/win: win: 10408 tests executed (0 marked as todo, 64 failures), 8 skipped.
+user32/win: win: 10408 tests executed (0 marked as todo, 63 failures), 8 skipped.
 user32/win: skipped win.c:5400
 user32/win: skipped win.c:2891
 user32/win: failed win.c:4616

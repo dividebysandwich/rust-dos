@@ -1766,6 +1766,30 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 if !user(cpu).is_window(hwnd) {
                     return Next::Done(TRUE);
                 }
+                // A top-level window shown is erased now (WM_NCPAINT,
+                // WM_ERASEBKGND), after its activation and before
+                // WM_WINDOWPOSCHANGED and its WM_PAINT, unless
+                // SWP_DEFERERASE says not to: a program that draws with
+                // GetDC in WM_PAINT keeps what it drew, as on Windows. A
+                // child waits for its BeginPaint.
+                let flags = cpu.bus.guest_read_32(winpos + 24);
+                let child = user(cpu)
+                    .window(hwnd)
+                    .is_some_and(|w| w.style & WS_CHILD != 0);
+                if flags & SWP_SHOWWINDOW != 0
+                    && flags & SWP_DEFERERASE == 0
+                    && !child
+                    && user(cpu).is_visible(hwnd)
+                {
+                    let erase = super::paint::RDW_ERASENOW | super::paint::RDW_ALLCHILDREN;
+                    return Next::call(address_of("RedrawWindow"), &[hwnd, 0, 0, erase], 5);
+                }
+                t.step = 5;
+            }
+            5 => {
+                if !user(cpu).is_window(hwnd) {
+                    return Next::Done(TRUE);
+                }
                 let flags = cpu.bus.guest_read_32(winpos + 24);
                 const AGG: u32 = SWP_NOSIZE
                     | SWP_NOMOVE
@@ -1778,27 +1802,7 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 let nothing =
                     SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOCLIENTSIZE | SWP_NOCLIENTMOVE;
                 if flags & AGG != nothing && flags & SWP_NOSENDCHANGING == 0 {
-                    return send(hwnd, WM_WINDOWPOSCHANGED, 0, winpos, 5);
-                }
-                t.step = 5;
-            }
-            5 => {
-                // A top-level window shown is erased now (WM_NCPAINT,
-                // WM_ERASEBKGND), before its WM_PAINT, unless SWP_DEFERERASE
-                // says not to: a program that draws with GetDC in WM_PAINT
-                // keeps what it drew, as on Windows. A child waits for its
-                // BeginPaint.
-                let flags = cpu.bus.guest_read_32(winpos + 24);
-                let child = user(cpu)
-                    .window(hwnd)
-                    .is_some_and(|w| w.style & WS_CHILD != 0);
-                if flags & SWP_SHOWWINDOW != 0
-                    && flags & SWP_DEFERERASE == 0
-                    && !child
-                    && user(cpu).is_visible(hwnd)
-                {
-                    let erase = super::paint::RDW_ERASENOW | super::paint::RDW_ALLCHILDREN;
-                    return Next::call(address_of("RedrawWindow"), &[hwnd, 0, 0, erase], 6);
+                    return send(hwnd, WM_WINDOWPOSCHANGED, 0, winpos, 6);
                 }
                 return Next::Done(TRUE);
             }
