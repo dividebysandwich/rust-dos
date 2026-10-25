@@ -628,8 +628,8 @@ fn cd_md_and_rd_take_quoted_paths() {
     assert_eq!(cwd(&cpu), "");
 
     assert_eq!(run(&mut cpu, r#"MD "New Folder""#), "");
-    assert!(base.join("c/New Folder").is_dir());
+    assert!(base.join("c/NEW FOLDER").is_dir());
     assert_eq!(run(&mut cpu, r#"RD "C:\New Folder""#), "");
-    assert!(!base.join("c/New Folder").exists());
+    assert!(!base.join("c/NEW FOLDER").exists());
     assert_eq!(run(&mut cpu, r#"MD """#), "Required parameter missing");
 }
