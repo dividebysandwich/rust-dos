@@ -1,0 +1,19 @@
+[package]
+name = "rust-dos-installshield"
+description = "InstallShield installer archives: cabinet sets of InstallShield 5 and 6 (data1.hdr and dataN.cab) and InstallShield 3 archives (_SETUP.1), listed and read"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+# Raw deflate, which cabinet members are compressed with.
+flate2 = "1"
+# The MD5 version 6 cabinets record for each member.
+md-5 = "0.11"
+
+[features]
+# `write`, which builds cabinet sets, InstallShield 3 archives and
+# PKWARE DCL streams for other crates' tests.
+test-util = []

@@ -235,18 +235,9 @@ const SYSTEM: &[(&str, u32, &str, u32, u32, u32)] = &[
     ),
     ("#32769", CS_DBLCLKS, "DesktopWndProc", 0, 32512, 2),
     ("#32772", 0, "IconTitleWndProc", 0, 32512, 0),
-    // COMCTL32's classes, which it registers as it loads on Windows 95:
-    // here windows that draw their background and nothing else, for
-    // programs that superclass them or make one they don't depend on.
-    ("msctls_trackbar32", 0, "DefWindowProcA", 4, 32512, 16),
-    ("msctls_progress32", 0, "DefWindowProcA", 4, 32512, 16),
-    ("msctls_updown32", 0, "DefWindowProcA", 4, 32512, 16),
-    ("msctls_statusbar32", 0, "DefWindowProcA", 4, 32512, 16),
-    ("ToolbarWindow32", 0, "DefWindowProcA", 4, 32512, 16),
-    ("tooltips_class32", 0, "DefWindowProcA", 4, 32512, 0),
-    ("SysListView32", 0, "DefWindowProcA", 4, 32512, 6),
-    ("SysTreeView32", 0, "DefWindowProcA", 4, 32512, 6),
-    ("SysTabControl32", 0, "DefWindowProcA", 4, 32512, 16),
+    // Explorer's folder windows, which the shell opens for Program
+    // Manager's groups (user32/ddeml.rs).
+    ("CabinetWClass", 0, "DefWindowProcA", 0, 32512, 6),
 ];
 
 /// Register the system's classes.
@@ -271,6 +262,8 @@ pub fn register_system(cpu: &mut Cpu) {
         };
         user(cpu).classes.push(Some(class));
     }
+    // COMCTL32's, which it registers as it loads on Windows 95.
+    crate::win32::comctl32::register_classes(cpu);
 }
 
 /// RegisterClassA(class): its atom.
@@ -432,6 +425,16 @@ pub fn unregister_class(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(TRUE)
 }
 
+/// COMCTL32's classes are global classes its DLL registers, as on
+/// Windows, and say so: USER32's own system classes don't.
+fn comctl32_global(c: &Class) -> u32 {
+    if c.system && c.instance == crate::win32::comctl32::DLL.base {
+        CS_GLOBALCLASS
+    } else {
+        0
+    }
+}
+
 /// GetClassInfoA(instance, name, class): TRUE, with the WNDCLASSA.
 pub fn get_class_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     super::init(cpu);
@@ -441,7 +444,7 @@ pub fn get_class_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
     let c = user(cpu).classes[index as usize].clone().unwrap();
     let words = [
-        c.style & !CS_GLOBALCLASS,
+        c.style & !CS_GLOBALCLASS | comctl32_global(&c),
         c.proc,
         c.extra.len() as u32,
         c.wnd_extra,
@@ -466,7 +469,7 @@ pub fn get_class_info_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let c = user(cpu).classes[index as usize].clone().unwrap();
     let words = [
         48,
-        c.style & !CS_GLOBALCLASS,
+        c.style & !CS_GLOBALCLASS | comctl32_global(&c),
         c.proc,
         c.extra.len() as u32,
         c.wnd_extra,
@@ -515,7 +518,7 @@ pub fn get_class_long(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 | if c.global && !c.system {
                     CS_GLOBALCLASS
                 } else {
-                    0
+                    comctl32_global(&c)
                 }
         }
         GCW_ATOM => c.atom as u32,

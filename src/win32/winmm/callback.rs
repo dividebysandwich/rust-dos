@@ -226,6 +226,9 @@ pub fn ensure_thread(cpu: &mut Cpu) -> Option<()> {
         },
         None,
     );
+    // The thread's code is in WINMM's image, which a program that only
+    // uses DirectMusic hasn't mapped.
+    crate::win32::loader::map_builtin_named(cpu, "WINMM.DLL")?;
     let start = super::mm_thread_address();
     let Some(tid) = crate::win32::kernel32::create_system_thread(cpu, start) else {
         object::objects(cpu).release(wake);

@@ -7,6 +7,7 @@ mod env;
 mod file;
 mod global;
 mod locale;
+pub(super) mod lz;
 mod mapping;
 mod memory;
 mod message;
@@ -14,15 +15,18 @@ pub(super) mod module;
 mod path;
 mod process;
 mod profile;
+pub(in crate::win32) use profile::profile_value;
 mod sort;
 mod sync;
 mod text;
 mod threads;
 mod time;
+mod win98;
+pub use win98::is_directory;
 pub(crate) mod virtual_memory;
 
 pub(super) use locale::enum_returned;
-pub(super) use path::{change_directory, current_directory, full_path};
+pub(super) use path::{change_directory, current_directory, find_entries, full_path, matches};
 pub(super) use process::{STARTUPINFO_SIZE, spawn};
 pub(super) use file::{
     CREATE_ALWAYS, CREATE_NEW, FILE_SHARE_READ, FILE_SHARE_WRITE, GENERIC_READ, GENERIC_WRITE,
@@ -526,6 +530,25 @@ static APIS: &[Api] = &[
     stdcall("GlobalAddAtomW", 489, 1, not_implemented),
     stdcall("CreateProcessW", 490, 10, not_implemented),
     stdcall("WinExec", 510, 2, process::win_exec),
+    stdcall("GetDiskFreeSpaceExA", 511, 4, win98::get_disk_free_space_ex),
+    stdcall("IsDebuggerPresent", 512, 0, win98::is_debugger_present),
+    stdcall("InterlockedCompareExchange", 513, 3, win98::interlocked_compare_exchange),
+    stdcall("InterlockedExchangeAdd", 514, 2, win98::interlocked_exchange_add),
+    stdcall("GetFileAttributesExA", 515, 3, win98::get_file_attributes_ex),
+    stdcall("GetLongPathNameA", 516, 3, win98::get_long_path_name),
+    stdcall("GetPrivateProfileSectionW", 517, 4, profile::get_private_profile_section_w),
+    stdcall("LZStart", 901, 0, lz::lz_start),
+    stdcall("LZDone", 902, 0, lz::lz_done),
+    stdcall("LZInit", 903, 1, lz::lz_init),
+    stdcall("LZOpenFileA", 904, 3, lz::lz_open_file_a),
+    stdcall("LZOpenFileW", 905, 3, lz::lz_open_file_w),
+    stdcall("LZRead", 906, 3, lz::lz_read),
+    stdcall("LZSeek", 907, 3, lz::lz_seek),
+    stdcall("LZCopy", 908, 2, lz::lz_copy),
+    stdcall("CopyLZFile", 909, 2, lz::lz_copy),
+    stdcall("LZClose", 910, 1, lz::lz_close),
+    stdcall("GetExpandedNameA", 911, 2, lz::get_expanded_name_a),
+    stdcall("GetExpandedNameW", 912, 2, lz::lz_open_file_w),
 ];
 
 /// The places in `APIS` of the system's own stubs.
@@ -638,6 +661,167 @@ pub fn dos_path(name: &str) -> String {
     path::dos_path(name)
 }
 
+/// The full path of the file `name` where OpenFile looks for it: in the
+/// directory it names, or else in those SearchPathA looks in.
+pub fn search_file(cpu: &mut Cpu, name: &str) -> Option<String> {
+    path::search(cpu, None, name)
+}
+
+/// A file read whole: its bytes, its DOS time and date, and its
+/// attributes.
+pub type FileData = (Vec<u8>, (u16, u16), u16);
+
+/// The file at the Win32 path `name`, read whole, or the error.
+pub fn read_path(cpu: &mut Cpu, name: &str) -> Result<FileData, u32> {
+    let full = path::dos_path(&path::full_path(cpu, name));
+    path::read_whole(cpu, &full)
+}
+
+/// Whether a handle CreateFileA opened has the file at the Win32 path
+/// `name` open.
+pub fn path_in_use(cpu: &mut Cpu, name: &str) -> bool {
+    let full = path::dos_path(&path::full_path(cpu, name));
+    path::open_sharing(cpu, &full).is_some()
+}
+
+/// The DOS path of the running program, as GetModuleFileNameA(NULL)
+/// gives it.
+pub fn program_path(cpu: &mut Cpu) -> Option<String> {
+    let process = super::process(cpu);
+    let base = process.image_base;
+    process
+        .modules
+        .iter()
+        .find(|m| m.base == base)
+        .map(|m| m.path.clone())
+}
+
+/// The address of KERNEL32's function `name`, for a task to call.
+pub fn address_of(name: &str) -> u32 {
+    let index = APIS
+        .iter()
+        .position(|a| a.name == name)
+        .unwrap_or_else(|| panic!("KERNEL32 has no {}", name));
+    let dll = super::stubs::DLLS
+        .iter()
+        .position(|d| d.name == DLL.name)
+        .expect("KERNEL32 is a built-in DLL");
+    super::stubs::stub_address(dll, index)
+}
+
+/// Path operations for other DLLs (SHELL32's file operations), on Win32
+/// paths, each as the KERNEL32 function it names does it, with that
+/// function's error.
+pub mod files {
+    use super::path;
+    use crate::cpu::Cpu;
+    pub use crate::win32::object::FindEntry;
+
+    /// The full path of `name` as DOS takes it.
+    pub fn full_path(cpu: &Cpu, name: &str) -> String {
+        path::dos_path(&path::full_path(cpu, name))
+    }
+
+    /// CreateDirectoryA.
+    pub fn create_directory(cpu: &mut Cpu, name: &str) -> Result<(), u32> {
+        let full = full_path(cpu, name);
+        path::make_directory(cpu, &full)
+    }
+
+    /// RemoveDirectoryA.
+    pub fn remove_directory(cpu: &mut Cpu, name: &str) -> Result<(), u32> {
+        let full = full_path(cpu, name);
+        path::unmake_directory(cpu, &full)
+    }
+
+    /// DeleteFileA.
+    pub fn delete_file(cpu: &mut Cpu, name: &str) -> Result<(), u32> {
+        let full = full_path(cpu, name);
+        path::delete(cpu, &full)
+    }
+
+    /// CopyFileA.
+    pub fn copy_file(cpu: &mut Cpu, from: &str, to: &str, fail: bool) -> Result<(), u32> {
+        let (from, to) = (full_path(cpu, from), full_path(cpu, to));
+        path::copy_path(cpu, &from, &to, fail)
+    }
+
+    /// MoveFileA.
+    pub fn move_file(cpu: &mut Cpu, from: &str, to: &str) -> Result<(), u32> {
+        let (from, to) = (full_path(cpu, from), full_path(cpu, to));
+        path::move_path(cpu, &from, &to)
+    }
+
+    /// GetFileAttributesA.
+    pub fn attributes(cpu: &mut Cpu, name: &str) -> Result<u32, u32> {
+        let full = full_path(cpu, name);
+        path::attributes(cpu, &full)
+    }
+
+    /// SetFileAttributesA with DOS's attributes.
+    pub fn set_attributes(cpu: &mut Cpu, name: &str, attr: u32) -> Result<(), u32> {
+        let full = full_path(cpu, name);
+        path::set_attributes(cpu, &full, attr)
+    }
+
+    /// The entries of the directory `dir` whose names match `pattern`,
+    /// as FindFirstFileA finds them, "." and ".." among them.
+    pub fn find(cpu: &Cpu, dir: &str, pattern: &str) -> Result<Vec<FindEntry>, u32> {
+        let full = full_path(cpu, dir);
+        path::find_entries(cpu, &full, pattern)
+    }
+
+    /// Write `data` as the whole file `name`, made anew.
+    pub fn write_whole(cpu: &mut Cpu, name: &str, data: &[u8]) -> Result<(), u32> {
+        let full = full_path(cpu, name);
+        cpu.bus
+            .disk
+            .write_whole_file(&full, data, None)
+            .map_err(|e| e as u32)
+    }
+
+    /// CreateProcessA for the command line `line`, its first window
+    /// shown as `show` says: a handle of the new process, or the error.
+    pub fn run(cpu: &mut Cpu, line: &str, show: u32) -> Result<u32, u32> {
+        const STARTF_USESHOWWINDOW: u32 = 1;
+        let mut startup = vec![0u8; super::process::STARTUPINFO_SIZE as usize];
+        startup[44..48].copy_from_slice(&STARTF_USESHOWWINDOW.to_le_bytes());
+        startup[48..50].copy_from_slice(&(show as u16).to_le_bytes());
+        let [process, thread, _, _] =
+            super::process::spawn(cpu, None, Some(line), None, false, 0, startup)?;
+        crate::win32::object::close(cpu, thread);
+        Ok(process)
+    }
+
+    /// CloseHandle.
+    pub fn close(cpu: &mut Cpu, handle: u32) {
+        crate::win32::object::close(cpu, handle);
+    }
+
+    /// SearchPathA without an extension: the full path of the file
+    /// `name` in `dirs` (separated by semicolons), or where SearchPathA
+    /// looks without them.
+    pub fn search(cpu: &mut Cpu, dirs: Option<&str>, name: &str) -> Option<String> {
+        path::search(cpu, dirs, name)
+    }
+
+    /// ExpandEnvironmentStringsA.
+    pub fn expand(cpu: &mut Cpu, text: &str) -> String {
+        let (out, _) = super::env::expand(cpu, &crate::dosstr::to_bytes(text));
+        crate::dosstr::from_bytes(&out)
+    }
+
+    /// GetCurrentDirectoryA.
+    pub fn current_directory(cpu: &Cpu) -> String {
+        path::current_directory(cpu, cpu.bus.disk.get_current_drive())
+    }
+
+    /// SetCurrentDirectoryA.
+    pub fn change_directory(cpu: &mut Cpu, name: &str) -> Result<(), u32> {
+        path::change_directory(cpu, name)
+    }
+}
+
 /// A writable view of the file mapping `handle` for a DIB section whose
 /// bits are in it: the view's address and the mapping's size, or None
 /// with the error set.
@@ -671,6 +855,17 @@ pub fn global_alloc(cpu: &mut Cpu, flags: u32, size: u32) -> u32 {
 /// GlobalSize(handle): the size of its block, or 0.
 pub fn global_size(cpu: &mut Cpu, handle: u32) -> u32 {
     global::global_size(cpu, &[handle]).unwrap_or(0)
+}
+
+/// GlobalReAlloc(handle, size, flags) for a built-in DLL: the handle,
+/// or 0.
+pub fn global_realloc(cpu: &mut Cpu, handle: u32, size: u32, flags: u32) -> u32 {
+    global::global_realloc(cpu, &[handle, size, flags]).unwrap_or(0)
+}
+
+/// GlobalFree(handle) for a built-in DLL.
+pub fn global_free(cpu: &mut Cpu, handle: u32) {
+    global::global_free(cpu, &[handle]);
 }
 
 /// ANSI text in Unicode, by the ANSI code page.
@@ -842,9 +1037,10 @@ fn get_command_line_w(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(super::process(cpu).command_line + super::memory::PAGE)
 }
 
-/// Windows 95: version 4.0, with bit 31 saying it isn't NT.
-fn get_version(_: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(0xC000_0004)
+/// The version in the low word (minor in the high byte), and the high
+/// bits set for Windows 9x (version.rs).
+fn get_version(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    Some(super::version::info(super::version::current(cpu)).get_version)
 }
 
 /// The module named `name` (with ".DLL" when it has no extension), or

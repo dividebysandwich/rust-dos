@@ -97,8 +97,21 @@ pub static DLLS: &[&Dll] = &[
     &super::dplayx::DLL,
     &super::shell32::DLL,
     &super::comctl32::DLL,
-    &super::comctl32::COMDLG32,
+    &super::comdlg32::DLL,
     &super::wsock32::DLL,
+    &super::ntdll::DLL,
+    &super::dmusic::DMUSIC,
+    &super::dmusic::DMIME,
+    &super::dmusic::DMLOADER,
+    &super::dmusic::DMSTYLE,
+    &super::dmusic::DMBAND,
+    &super::dmusic::DMCOMPOS,
+    &super::lz32::DLL,
+    &super::verdll::DLL,
+    &super::oleaut32::DLL,
+    &super::advpack::DLL,
+    &super::winspool::DLL,
+    &super::mpr::DLL,
 ];
 
 /// Bytes each function's stub takes.
@@ -107,7 +120,8 @@ pub const STUB: u32 = 8;
 const CODE_RVA: u32 = 0x1000;
 
 /// The built-in DLL a program's import of `name` names: "KERNEL32.DLL",
-/// "kernel32.dll" and "KERNEL32" all do.
+/// "kernel32.dll" and "KERNEL32" all do, and a driver's full name,
+/// "WINSPOOL.DRV".
 pub fn find_dll(name: &str) -> Option<usize> {
     let name = name.trim();
     let split = name.len().saturating_sub(4);
@@ -115,8 +129,10 @@ pub fn find_dll(name: &str) -> Option<usize> {
         Some(ext) if ext.eq_ignore_ascii_case(".dll") => &name[..split],
         _ => name,
     };
-    DLLS.iter()
-        .position(|dll| dll.name[..dll.name.len() - 4].eq_ignore_ascii_case(base))
+    DLLS.iter().position(|dll| {
+        dll.name[..dll.name.len() - 4].eq_ignore_ascii_case(base)
+            || dll.name.eq_ignore_ascii_case(name)
+    })
 }
 
 pub fn id(dll: usize, api: usize) -> u16 {
@@ -226,8 +242,9 @@ pub fn stub(id: u16, args: u8, conv: Conv) -> [u8; STUB as usize] {
     code
 }
 
-/// The image of the built-in DLL `dll`: its stubs and export directory.
-pub fn image(index: usize) -> pe::Image {
+/// The image of the built-in DLL `dll`: its stubs and export directory,
+/// with the functions `version` of Windows has (version.rs).
+pub fn image(index: usize, version: super::version::WindowsVersion) -> pe::Image {
     let dll = DLLS[index];
     let mut b = pe::Builder::dll(dll.base, dll.name);
     let mut code: Vec<u8> = dll
@@ -246,7 +263,7 @@ pub fn image(index: usize) -> pe::Image {
     );
     debug_assert_eq!(rva, CODE_RVA);
     for (i, api) in dll.apis.iter().enumerate() {
-        if api.ordinal != 0 {
+        if api.ordinal != 0 && super::version::exports(version, dll.name, api.name) {
             b.export(Some(api.name), api.ordinal, rva + i as u32 * STUB);
         }
     }

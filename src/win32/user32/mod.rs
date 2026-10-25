@@ -11,12 +11,14 @@
 
 pub mod class;
 pub mod controls;
+pub mod ddeml;
 pub mod defwnd;
 pub mod dialog;
 pub mod hook;
 pub mod input;
 pub mod menu;
 pub mod message;
+pub mod monitor;
 pub mod paint;
 pub mod rect;
 pub mod resource;
@@ -789,7 +791,7 @@ static APIS: &[Api] = &[
     stdcall("GetKeyboardLayoutNameW", 202, 1, not_implemented),
     stdcall("VkKeyScanW", 203, 1, not_implemented),
     stdcall("SendInput", 204, 3, input::send_input),
-    stdcall("TrackMouseEvent", 205, 1, not_implemented),
+    stdcall("TrackMouseEvent", 205, 1, monitor::track_mouse_event),
     stdcall("RegisterHotKey", 206, 4, succeed),
     stdcall("UnregisterHotKey", 207, 2, succeed),
     // Painting.
@@ -1174,7 +1176,7 @@ static APIS: &[Api] = &[
     stdcall("GetUserObjectInformationA", 426, 5, not_implemented),
     stdcall("WinHelpA", 427, 4, succeed),
     stdcall("GetSystemDefaultLangID", 428, 0, nothing),
-    stdcall("EnumDisplayDevicesA", 429, 4, nothing),
+    stdcall("EnumDisplayDevicesA", 429, 4, monitor::enum_display_devices),
     // No monitor functions (430 to 433): they came with Windows 98, and
     // programs and Wine's tests look them up to tell Windows 95 apart.
     stdcall("SetWindowsHookW", 434, 2, not_implemented),
@@ -1214,15 +1216,63 @@ static APIS: &[Api] = &[
     stdcall("GetKBCodePage", 460, 0, input::get_kb_code_page),
     stdcall("DrawCaption", 461, 4, paint::draw_caption),
     stdcall("DrawAnimatedRects", 462, 4, succeed),
-    stdcall("ReuseDDElParam", 463, 5, nothing),
-    stdcall("UnpackDDElParam", 464, 4, nothing),
-    stdcall("PackDDElParam", 465, 3, nothing),
-    stdcall("FreeDDElParam", 466, 2, succeed),
+    stdcall("ReuseDDElParam", 463, 5, ddeml::reuse_dde_lparam),
+    stdcall("UnpackDDElParam", 464, 4, ddeml::unpack_dde_lparam),
+    stdcall("PackDDElParam", 465, 3, ddeml::pack_dde_lparam),
+    stdcall("FreeDDElParam", 466, 2, ddeml::free_dde_lparam),
     stdcall("ImpersonateDdeClientWindow", 467, 2, not_implemented),
     stdcall("DlgDirListA", 468, 5, nothing),
     stdcall("DlgDirSelectExA", 469, 4, nothing),
     stdcall("DlgDirListComboBoxA", 470, 5, nothing),
     stdcall("DlgDirSelectComboBoxExA", 471, 4, nothing),
+    stdcall("MonitorFromWindow", 472, 2, monitor::monitor_from_window),
+    stdcall("MonitorFromPoint", 473, 3, monitor::monitor_from_point),
+    stdcall("MonitorFromRect", 474, 2, monitor::monitor_from_rect),
+    stdcall("GetMonitorInfoA", 475, 2, monitor::get_monitor_info_a),
+    stdcall("GetMonitorInfoW", 476, 2, monitor::get_monitor_info_w),
+    stdcall("EnumDisplayMonitors", 477, 4, monitor::enum_display_monitors),
+    stdcall("AnimateWindow", 478, 3, monitor::animate_window),
+    stdcall("GetCursorInfo", 479, 1, monitor::get_cursor_info),
+    // DDEML (ddeml.rs), numbered from 600 on.
+    stdcall("DdeInitializeA", 600, 4, ddeml::dde_initialize),
+    stdcall("DdeInitializeW", 601, 4, ddeml::dde_initialize),
+    stdcall("DdeUninitialize", 602, 1, ddeml::dde_uninitialize),
+    stdcall("DdeGetLastError", 603, 1, ddeml::dde_get_last_error),
+    stdcall(
+        "DdeCreateStringHandleA",
+        604,
+        3,
+        ddeml::dde_create_string_handle,
+    ),
+    stdcall(
+        "DdeCreateStringHandleW",
+        605,
+        3,
+        ddeml::dde_create_string_handle_w,
+    ),
+    stdcall("DdeFreeStringHandle", 606, 2, ddeml::dde_free_string_handle),
+    stdcall("DdeKeepStringHandle", 607, 2, ddeml::dde_keep_string_handle),
+    stdcall("DdeQueryStringA", 608, 5, ddeml::dde_query_string),
+    stdcall("DdeCmpStringHandles", 609, 2, ddeml::dde_cmp_string_handles),
+    stdcall("DdeCreateDataHandle", 610, 7, ddeml::dde_create_data_handle),
+    stdcall("DdeAddData", 611, 4, ddeml::dde_add_data),
+    stdcall("DdeGetData", 612, 4, ddeml::dde_get_data),
+    stdcall("DdeAccessData", 613, 2, ddeml::dde_access_data),
+    stdcall("DdeUnaccessData", 614, 1, ddeml::dde_unaccess_data),
+    stdcall("DdeFreeDataHandle", 615, 1, ddeml::dde_free_data_handle),
+    stdcall("DdeNameService", 616, 4, ddeml::dde_name_service),
+    stdcall("DdeConnect", 617, 4, ddeml::dde_connect),
+    stdcall("DdeDisconnect", 618, 1, ddeml::dde_disconnect),
+    stdcall(
+        "DdeClientTransaction",
+        619,
+        8,
+        ddeml::dde_client_transaction,
+    ),
+    stdcall("DdeAbandonTransaction", 620, 3, succeed),
+    stdcall("DdeEnableCallback", 621, 3, succeed),
+    stdcall("DdePostAdvise", 622, 3, succeed),
+    stdcall("DdeSetUserHandle", 623, 3, succeed),
 ];
 
 crate::state_fields!(State {

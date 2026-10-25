@@ -210,6 +210,8 @@ int isxdigit(int c) { return isdigit(c) || ((c | 0x20) >= 'a' && (c | 0x20) <= '
 int isprint(int c) { return c >= ' ' && c < 0x7F; }
 int toupper(int c) { return islower(c) ? c - 0x20 : c; }
 int tolower(int c) { return isupper(c) ? c + 0x20 : c; }
+/* shlexec.c calls toupper through its import, as ctype.h declares it. */
+int (*imp_toupper)(int) __asm__("__imp__toupper") = toupper;
 
 unsigned long strtoul(const char *s, char **end, int base)
 {
@@ -240,6 +242,15 @@ long strtol(const char *s, char **end, int base)
 int atoi(const char *s)
 {
     return (int)strtol(s, NULL, 10);
+}
+
+/* The environment variable `name`, from the process's environment, in a
+ * buffer the next call overwrites. */
+char *getenv(const char *name)
+{
+    static char value[1024];
+    DWORD n = GetEnvironmentVariableA(name, value, sizeof(value));
+    return n && n < sizeof(value) ? value : NULL;
 }
 
 /* Formatting, to a buffer or a file. */

@@ -491,7 +491,7 @@ pub(super) fn item_height(cpu: &mut Cpu, hwnd: u32) -> i32 {
 
 /// The text of the item `index` of the list `hwnd` (None for no such
 /// item), and its data.
-pub(super) fn item(cpu: &mut Cpu, hwnd: u32, index: i32) -> Option<(Vec<u8>, u32)> {
+pub(crate) fn item(cpu: &mut Cpu, hwnd: u32, index: i32) -> Option<(Vec<u8>, u32)> {
     let l = list_of(cpu, hwnd)?;
     let i = l.items.get(usize::try_from(index).ok()?)?;
     Some((i.text.clone(), i.data))

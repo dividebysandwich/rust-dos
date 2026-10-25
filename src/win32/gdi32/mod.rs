@@ -14,6 +14,7 @@ pub mod bitmap;
 pub mod dc;
 pub mod draw;
 pub mod font;
+pub mod metafile;
 pub mod palette;
 pub mod region;
 pub mod rgn;
@@ -70,6 +71,7 @@ pub const OBJ_PAL: u32 = 5;
 pub const OBJ_FONT: u32 = 6;
 pub const OBJ_BITMAP: u32 = 7;
 pub const OBJ_REGION: u32 = 8;
+pub const OBJ_METAFILE: u32 = 9;
 pub const OBJ_MEMDC: u32 = 10;
 pub const OBJ_EXTPEN: u32 = 11;
 pub const OBJ_COLORSPACE: u32 = 14;
@@ -191,6 +193,8 @@ pub enum Kind {
     Region { region: Region },
     Dc { dc: dc::Dc },
     ColorSpace { data: Vec<u8> },
+    /// A Windows metafile's records, header first (metafile.rs).
+    MetaFile { data: Vec<u8> },
 }
 
 impl Default for Kind {
@@ -226,6 +230,7 @@ impl Object {
             Kind::Dc { dc } if dc.kind == dc::MEMORY => OBJ_MEMDC,
             Kind::Dc { .. } => OBJ_DC,
             Kind::ColorSpace { .. } => OBJ_COLORSPACE,
+            Kind::MetaFile { .. } => OBJ_METAFILE,
         }
     }
 }
@@ -748,7 +753,7 @@ fn get_object_as(cpu: &mut Cpu, args: &[u32], wide: bool) -> Option<u32> {
         }
         Kind::Palette { palette } => (palette.entries.len() as u16).to_le_bytes().to_vec(),
         Kind::ColorSpace { data } => data.clone(),
-        Kind::Region { .. } | Kind::Dc { .. } => {
+        Kind::Region { .. } | Kind::Dc { .. } | Kind::MetaFile { .. } => {
             set_error(cpu, ERROR_INVALID_HANDLE);
             return Some(0);
         }
@@ -1500,6 +1505,10 @@ static APIS: &[Api] = &[
     stdcall("WidenPath", 235, 1, draw::flatten_path),
     stdcall("PathToRegion", 236, 1, draw::path_to_region),
     stdcall("GetPath", 237, 4, draw::get_path),
+    stdcall("SetMetaFileBitsEx", 238, 2, metafile::set_meta_file_bits_ex),
+    stdcall("GetMetaFileBitsEx", 239, 3, metafile::get_meta_file_bits_ex),
+    stdcall("DeleteMetaFile", 240, 1, metafile::delete_meta_file),
+    stdcall("PlayMetaFile", 241, 2, metafile::play_meta_file),
 ];
 
 crate::state_fields!(Pen {
@@ -1568,4 +1577,5 @@ super::state_variants!(Kind {
     Region { region },
     Dc { dc },
     ColorSpace { data },
+    MetaFile { data },
 });

@@ -1202,3 +1202,71 @@ pub fn wscanf(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 pub fn p_iob(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(var_at(V_IOB))
 }
+
+/// UCRT's __acrt_iob_func(index): the address of `_iob[index]`, the
+/// stream UCRT's stdin, stdout and stderr name.
+pub fn acrt_iob_func(_: &mut Cpu, args: &[u32]) -> Option<u32> {
+    Some(iob(args[0]))
+}
+
+/// UCRT's printf options (the low half of their 64-bit first argument):
+/// a buffer too small gets no terminator and the call returns -1, or the
+/// call returns the length the whole output needs.
+const LEGACY_VSPRINTF_NULL_TERMINATION: u32 = 0x1;
+const STANDARD_SNPRINTF_BEHAVIOR: u32 = 0x2;
+
+/// `len` characters of output, `data` in units of `size` bytes, put in
+/// `buffer` of `count` characters as UCRT's __stdio_common_vsprintf and
+/// __stdio_common_vswprintf put it, and what they return, as Wine's
+/// ucrtbase has them. Without a buffer they return the length.
+fn ucrt_print_into(
+    cpu: &mut Cpu,
+    options: u32,
+    buffer: u32,
+    count: u32,
+    data: &[u8],
+    size: u32,
+) -> Option<u32> {
+    let len = data.len() as u32 / size;
+    if buffer == 0 {
+        return Some(len);
+    }
+    let kept = len.min(count);
+    put(cpu, buffer, &data[..(kept * size) as usize])?;
+    let nul = vec![0; size as usize];
+    if len < count {
+        put(cpu, buffer + len * size, &nul)?;
+    }
+    if options & LEGACY_VSPRINTF_NULL_TERMINATION != 0 {
+        return Some(if len > count { EOF } else { len });
+    }
+    if len < count {
+        return Some(len);
+    }
+    if count > 0 {
+        put(cpu, buffer + (count - 1) * size, &nul)?;
+    }
+    Some(match (options & STANDARD_SNPRINTF_BEHAVIOR != 0, count) {
+        (true, _) => len,
+        (false, 0) => EOF,
+        (false, _) => (-2i32) as u32,
+    })
+}
+
+/// __stdio_common_vsprintf(options, buffer, count, format, locale,
+/// args): UCRT's sprintf family. The locale is the C locale's.
+pub fn stdio_common_vsprintf(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let format = narrow_format(cpu, args[4])?;
+    let text = format::printf(cpu, &format, &mut Args { at: args[6] }, false)?;
+    ucrt_print_into(cpu, args[0], args[2], args[3], &to_bytes(&text), 1)
+}
+
+/// __stdio_common_vswprintf: the wide one. %s takes a wide string, as
+/// MSVCRT's has it and as Wine's DLLs, built with the legacy wide
+/// specifiers, expect.
+pub fn stdio_common_vswprintf(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let format = wstr(cpu, args[4])?;
+    let text = format::printf(cpu, &format, &mut Args { at: args[6] }, true)?;
+    let data: Vec<u8> = text.iter().flat_map(|c| c.to_le_bytes()).collect();
+    ucrt_print_into(cpu, args[0], args[2], args[3], &data, 2)
+}

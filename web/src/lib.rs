@@ -1186,6 +1186,11 @@ impl PageHost<'_> {
             self.cpu.bus.log_string(&format!("[CONFIG] Warning: {}", e));
         }
         let programs_before = self.cpu.programs_loaded;
+        let registry = prepared.registry.as_deref();
+        for warning in games::start(&mut self.cpu, &prepared.install, registry) {
+            let line = format!("[CONFIG] Warning: games/{}.conf: {}", id, warning);
+            self.cpu.bus.log_string(&line);
+        }
         self.cpu.queue_batch_lines(&prepared.autoexec);
         let message = format!("Starting {}", prepared.name);
         // The page presses no keys for a game and maps no gamepad.

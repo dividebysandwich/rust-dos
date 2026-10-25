@@ -165,6 +165,12 @@ pub struct Prepared {
     /// Whether its package has launch configurations to choose from
     /// (`variants=`).
     pub variants: bool,
+    /// The installer archives unpacked before it starts (`[install]`,
+    /// install.rs).
+    pub install: Vec<crate::install::Step>,
+    /// The .reg file put into the built-in Windows' registry as it starts
+    /// (`<id>.reg` beside the profile).
+    pub registry: Option<String>,
     /// Problems in the profile.
     pub warnings: Vec<String>,
     /// Its saves folder, held while it plays (`overlay_drives`).
@@ -206,7 +212,27 @@ pub fn prepare(id: &str, base: &Settings, text: &str, dir: &Path, home: Option<&
     // The configuration's settings as a file would have them, then the
     // profile's, which win.
     let layered = format!("{}\n{}", config::update_text("", &Settings::default(), base, &[], home), text);
-    let settings = Settings::from_config(&config::parse(&layered, dir, home));
+    let mut settings = Settings::from_config(&config::parse(&layered, dir, home));
+    let mut warnings = own.warnings;
+    let boots = own.autoexec.iter().any(|line| starts_with_word(line, "BOOT"));
+    match own.game_windows.as_deref() {
+        // Its .exe runs in the built-in Windows.
+        Some("builtin") => {
+            settings.win32 = true;
+            if boots {
+                warnings.push("windows=builtin, but [autoexec] boots a system".to_string());
+            }
+        }
+        Some("image") if !boots => {
+            let warning = "windows=image needs [autoexec] to BOOT a Windows disk image";
+            warnings.push(warning.to_string());
+        }
+        _ => {}
+    }
+    let (install, install_warnings) = crate::install::parse(&own.game_install);
+    warnings.extend(install_warnings);
+    let reg = dir.join(format!("{}.reg", id));
+    let registry = hostfs::read(reg).ok().map(|bytes| crate::dosstr::from_bytes(&bytes));
     Ok(Prepared {
         name: own.game_name.clone().unwrap_or_else(|| id.to_string()),
         settings,
@@ -217,9 +243,40 @@ pub fn prepare(id: &str, base: &Settings, text: &str, dir: &Path, home: Option<&
         input: own.game_input,
         pad: own.game_pad,
         variants: own.game_variants,
-        warnings: own.warnings,
+        install,
+        registry,
+        warnings,
         saves_lock: None,
     })
+}
+
+/// Whether the command `line` is `word` (in any case) with its arguments.
+fn starts_with_word(line: &str, word: &str) -> bool {
+    let line = line.trim_start();
+    line.get(..word.len()).is_some_and(|w| w.eq_ignore_ascii_case(word))
+        && line[word.len()..].chars().next().is_none_or(|c| c.is_whitespace())
+}
+
+/// What a prepared game needs done on the emulated machine once its
+/// drives are mounted, before its commands run: its `[install]` steps
+/// that haven't run (`Prepared::install`, install.rs), then its .reg file
+/// put into the registry (`Prepared::registry`). The steps that ran are
+/// logged; what went wrong comes back.
+pub fn start(
+    cpu: &mut Cpu,
+    install: &[crate::install::Step],
+    registry: Option<&str>,
+) -> Vec<String> {
+    let mut outcome = crate::install::run(&mut cpu.bus.disk, install);
+    for line in &outcome.installed {
+        cpu.bus.log_string(&format!("[CONFIG] {}", line));
+    }
+    if let Some(text) = registry
+        && let Err(e) = crate::win32::import_registry(cpu, text)
+    {
+        outcome.warnings.push(e);
+    }
+    outcome.warnings
 }
 
 /// The folder of the games' saves, `saves` beside the games folder
@@ -708,6 +765,9 @@ fn package_profile(package: &Path, source: &str, variant: Option<&str>, os: Opti
     }
     if let Some(os) = &os {
         text.push_str(&format!("os={}\n", os));
+    }
+    if let Some(windows) = &conf.game_windows {
+        text.push_str(&format!("windows={}\n", windows));
     }
     if let Some(input) = dosbox.as_ref().and_then(|d| d.input.as_ref()).or(conf.game_input.as_ref()) {
         text.push_str(&format!("input={}\n", input));
@@ -1323,5 +1383,84 @@ mod tests {
         assert!(!game.done(&cpu), "it ran no program: it stays at the prompt");
         cpu.programs_loaded += 1;
         assert!(game.done(&cpu));
+    }
+
+    #[test]
+    fn windows_builtin_runs_the_exe_in_the_built_in_windows() {
+        let text = "[game]\nname=Oni\nwindows=builtin\n\n[autoexec]\nC:\nONI.EXE\n";
+        let prepared = prepare("oni", &Settings::default(), text, Path::new("/"), None).unwrap();
+        assert!(prepared.warnings.is_empty(), "{:?}", prepared.warnings);
+        assert!(prepared.settings.win32);
+        let booted = "[game]\nwindows=builtin\n[autoexec]\nboot -l c\n";
+        let prepared = prepare("x", &Settings::default(), booted, Path::new("/"), None).unwrap();
+        assert_eq!(prepared.warnings, ["windows=builtin, but [autoexec] boots a system"]);
+    }
+
+    #[test]
+    fn windows_image_wants_a_boot() {
+        let text = "[game]\nwindows=image\n[autoexec]\nC:\nGAME.EXE\n";
+        let prepared = prepare("x", &Settings::default(), text, Path::new("/"), None).unwrap();
+        let warning = "windows=image needs [autoexec] to BOOT a Windows disk image";
+        assert_eq!(prepared.warnings, [warning]);
+        assert!(!prepared.settings.win32);
+        let text = "[game]\nwindows=image\n[autoexec]\nBOOT -l C\n";
+        let prepared = prepare("x", &Settings::default(), text, Path::new("/"), None).unwrap();
+        assert!(prepared.warnings.is_empty(), "{:?}", prepared.warnings);
+        let text = "[game]\nwindows=wine\n[autoexec]\nX\n";
+        let prepared = prepare("x", &Settings::default(), text, Path::new("/"), None).unwrap();
+        assert_eq!(prepared.warnings, ["line 2: invalid windows 'wine' (builtin or image)"]);
+        assert!(starts_with_word("  Boot", "BOOT"));
+        assert!(!starts_with_word("BOOTS", "BOOT"));
+    }
+
+    #[test]
+    fn a_profile_has_its_install_steps_and_reg_file() {
+        let games = crate::test_dir::path("games-reg");
+        std::fs::create_dir_all(&games).unwrap();
+        let reg = "REGEDIT4\r\n\r\n[HKEY_CURRENT_USER\\Software\\Oni]\r\n\"Lang\"=\"en\"\r\n";
+        std::fs::write(games.join("oni.reg"), reg).unwrap();
+        let text = r"[game]
+windows=builtin
+
+[install]
+from=D:\SETUP\DATA1.HDR
+to=C:\ONI
+group=Files (Data)|DATA
+
+[autoexec]
+C:
+CD \ONI
+ONI.EXE
+";
+        let prepared = prepare("oni", &Settings::default(), text, &games, None).unwrap();
+        assert!(prepared.warnings.is_empty(), "{:?}", prepared.warnings);
+        assert_eq!(prepared.install.len(), 1);
+        assert_eq!(prepared.install[0].groups, [("Files (Data)".to_string(), "DATA".to_string())]);
+        assert!(prepared.registry.as_deref().is_some_and(|r| r.contains("Software\\Oni")));
+        let other = prepare("other", &Settings::default(), text, &games, None).unwrap();
+        assert_eq!(other.registry, None);
+    }
+
+    #[test]
+    fn starting_a_game_puts_its_reg_file_in_the_registry_file() {
+        let dir = crate::test_dir::path("games-start-reg");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut cpu = Cpu::new(dir.clone());
+        let reg = r#"REGEDIT4
+
+[HKEY_LOCAL_MACHINE\Software\Myth]
+"Path"="C:\\MYTH"
+"#;
+        let warnings = start(&mut cpu, &[], Some(reg));
+        assert!(warnings.is_empty(), "{:?}", warnings);
+        let saved = std::fs::read_to_string(dir.join("REGISTRY.REG")).unwrap();
+        assert!(saved.contains("[HKEY_LOCAL_MACHINE\\Software\\Myth]"), "{}", saved);
+        assert!(saved.contains("\"Path\"=\"C:\\\\MYTH\""), "{}", saved);
+        // The next import reads the file again and adds to it.
+        let more = "REGEDIT4\r\n\r\n[HKEY_LOCAL_MACHINE\\Software\\Other]\r\n";
+        assert!(start(&mut cpu, &[], Some(more)).is_empty());
+        let saved = std::fs::read_to_string(dir.join("REGISTRY.REG")).unwrap();
+        let both = saved.contains(r"Software\Myth]") && saved.contains(r"Software\Other]");
+        assert!(both, "{}", saved);
     }
 }

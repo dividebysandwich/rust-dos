@@ -15,6 +15,7 @@
 //! results. CONFORMANCE_LOG=1 writes the emulator's log, with every call
 //! a program makes, to target/conformance/<dll>/<test>.trace.
 
+use rust_dos::config::WindowsVersion;
 use rust_dos::cpu::{Cpu, CpuModel, HostConsole};
 use rust_dos::exec::{NoHook, StopReason, run_batch};
 use rust_dos::joystick::{JoystickSettings, JoystickType};
@@ -129,6 +130,9 @@ fn run(
     let mut cpu = Cpu::new(dir.to_path_buf());
     cpu.model = model;
     cpu.bus.win32.enabled = true;
+    // Windows 98 SE, whose functions the tests use where Windows 95 has
+    // none (SendInput, GetAncestor, the monitors).
+    cpu.bus.win32.version = WindowsVersion::Win98Se;
     if joystick {
         cpu.bus.joystick.set_settings(JoystickSettings {
             kind: JoystickType::Mouse,
@@ -232,10 +236,16 @@ const LIBS: &[&str] = &[
     "-ldinput",
     "-lwinmm",
     "-lole32",
+    "-lcomctl32",
+    "-lcomdlg32",
     "-luser32",
     "-lgdi32",
     "-lkernel32",
     "-ladvapi32",
+    "-lshell32",
+    "-lversion",
+    "-llz32",
+    "-loleaut32",
     "-ldxguid",
     "-luuid",
     "-lksuser",
@@ -248,6 +258,8 @@ const LIBS: &[&str] = &[
 const SHARED: &[(&str, &[&str])] = &[
     ("dsound", &["capture", "ds3d", "ds3d8", "dsound", "dsound8", "propset"]),
     ("winmm", &["capture", "wave"]),
+    // shlexec.c makes its shortcuts with shelllink.c's create_lnk.
+    ("shell32", &["shelllink", "shlexec"]),
 ];
 
 /// The files built with `unit` of `dll` into one program: those
@@ -321,6 +333,29 @@ fn build(
             "-DSTATIC_KSDATAFORMAT_SUBTYPE_IEEE_FLOAT",
         ]);
     }
+    if dll == "ole32" && units.iter().any(|u| u == "compobj") {
+        // compobj.c defines the GUIDs of the headers it includes
+        // (initguid.h), which libuuid has too; MinGW's ctxtcall.h has
+        // no IID_IContextCallback, which only the tests of Windows
+        // 2000's CoGetObjectContext use.
+        args.extend([
+            "-Wl,--allow-multiple-definition",
+            "-DIID_IContextCallback=IID_IUnknown",
+        ]);
+    }
+    if dll == "shell32" && units.iter().any(|u| u == "shellpath") {
+        // shellpath.c defines CLSID_NetworkExplorerFolder, which
+        // libuuid has too.
+        args.push("-Wl,--allow-multiple-definition");
+    }
+    let shell32 = format!("{ROOT}/runtime/shell32.h");
+    if dll == "shell32" {
+        args.extend(["-include", shell32.as_str()]);
+    }
+    let shlfileop = format!("{ROOT}/runtime/shlfileop.h");
+    if dll == "shell32" && units.iter().any(|u| u == "shlfileop") {
+        args.extend(["-include", shlfileop.as_str()]);
+    }
     args.extend(sources.iter().map(String::as_str));
     // Wine builds winmm's tests into one program, and the others take
     // the names of the errors from wave.c; here runtime/winmm.c has them.
@@ -336,6 +371,12 @@ fn build(
         args.extend([list.as_str(), runtime]);
     }
     args.extend(resources);
+    if dll == "comctl32" {
+        // Wine builds comctl32's tests into one program, which imports
+        // COMCTL32.DLL; mru.c and subclass.c, which only find its
+        // functions by ordinal, need it loaded as well.
+        args.push("-Wl,-u,_InitCommonControls@0");
+    }
     args.extend(LIBS);
     args.extend(["-lgcc", "-o", program]);
     compile(cc, &args)
@@ -386,10 +427,14 @@ fn wine_conformance_tests_give_the_expected_results() {
         // (file.c makes WIN.INI) change what directory listings count.
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        // The resources the DLL's tests share (user32's resource.rc),
-        // which each of its programs is linked with.
-        let rc = format!("{ROOT}/wine/{dll}/resource.rc");
-        let resources = Path::new(&rc).exists().then(|| {
+        // The resources the DLL's tests share (user32's resource.rc,
+        // comctl32's rsrc.rc, version's version.rc), which each of its
+        // programs is linked with.
+        let rc = ["resource.rc", "rsrc.rc", "version.rc"]
+            .iter()
+            .map(|name| format!("{ROOT}/wine/{dll}/{name}"))
+            .find(|rc| Path::new(rc).exists());
+        let resources = rc.map(|rc| {
             let object = format!("{OUT}/{dll}/resource.o");
             let include = format!("-I{ROOT}/wine/include");
             let args = [include.as_str(), rc.as_str(), "-O", "coff", "-o", object.as_str()];

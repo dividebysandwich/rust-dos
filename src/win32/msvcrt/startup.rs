@@ -1905,3 +1905,17 @@ pub fn setmaxstdio(_: &mut Cpu, args: &[u32]) -> Option<u32> {
 pub fn getmaxstdio(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(MAX_STREAMS)
 }
+
+/// _assert(expression, file, line): an assertion failed. It is said on
+/// standard error, and the program aborts as with abort.
+pub fn assert(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let expression = cstr(cpu, args[0]).unwrap_or_default();
+    let file = cstr(cpu, args[1]).unwrap_or_default();
+    let mut message = b"Assertion failed: ".to_vec();
+    message.extend_from_slice(&expression);
+    message.extend_from_slice(b", file ");
+    message.extend_from_slice(&file);
+    message.extend_from_slice(format!(", line {}\r\n", args[2]).as_bytes());
+    super::io::write_fd(cpu, 2, &message);
+    abort(cpu, args)
+}
