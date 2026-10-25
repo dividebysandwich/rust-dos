@@ -21,6 +21,27 @@ pub(super) fn get_logical_drives(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     )
 }
 
+/// GetLogicalDriveStringsA: the root directory of each drive there is
+/// ("A:\", "C:\"), each ending in a NUL and the list in one more, at
+/// `args[1]`, and the list's length without that last NUL. If the list
+/// doesn't fit in `args[0]` bytes, nothing is written and the size it
+/// needs, the last NUL counted, is the answer.
+pub(super) fn get_logical_drive_strings(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let (size, at) = (args[0], args[1]);
+    let disk = &cpu.bus.disk;
+    let mut list: Vec<u8> = (0..LASTDRIVE)
+        .filter(|&d| disk.is_mounted(d))
+        .flat_map(|d| [b'A' + d, b':', b'\\', 0])
+        .collect();
+    let length = list.len() as u32;
+    if length + 1 > size {
+        return Some(length + 1);
+    }
+    list.push(0);
+    cpu.bus.guest_write_bytes(at, &list);
+    Some(length)
+}
+
 /// The drive (0 for A:) of the root directory `at` names: "C:\", "C:" or
 /// "C:/", or the current drive's with NULL, "\" or "/". Err(None) if it
 /// names no root directory, and None if a page isn't there.

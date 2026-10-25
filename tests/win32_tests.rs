@@ -2900,3 +2900,56 @@ fn a_program_catches_its_cxx_exceptions() {
     assert_eq!(text, "f\r\n");
     assert_eq!(code, 0);
 }
+
+/// GetLogicalDriveStringsA: asked with too small a buffer it writes
+/// nothing and gives the size it needs, then the list itself, which the
+/// program writes out with its last NUL. Bit 0 of the exit code: the size
+/// was the list's length and one; bit 1: the small buffer was left alone.
+#[test]
+fn get_logical_drive_strings_lists_the_drives_roots() {
+    let names: &[&str] = &["GetLogicalDriveStringsA", "GetStdHandle", "WriteFile"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = vec![0u8; 0x100];
+    data[0x10] = 0xAA;
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        // The size needed, with a buffer of one byte.
+        a.push(l.at(0x10) as i32)?;
+        a.push(1)?;
+        a.call(l.import(0))?;
+        a.mov(ebx, eax)?;
+        a.cmp(byte_ptr(l.at(0x10)), 0xAA)?;
+        a.sete(dl)?;
+        a.movzx(edi, dl)?;
+        // The list.
+        a.push(l.at(0x10) as i32)?;
+        a.push(0xC0)?;
+        a.call(l.import(0))?;
+        a.mov(esi, eax)?;
+        a.lea(ecx, dword_ptr(eax + 1))?;
+        a.push(0)?;
+        a.push(l.at(0) as i32)?;
+        a.push(ecx)?;
+        a.push(l.at(0x10) as i32)?;
+        a.push(-11)?;
+        a.call(l.import(1))?;
+        a.push(eax)?;
+        a.call(l.import(2))?;
+        a.lea(ecx, dword_ptr(esi + 1))?;
+        a.cmp(ebx, ecx)?;
+        a.sete(al)?;
+        a.movzx(eax, al)?;
+        a.shl(edi, 1)?;
+        a.or(eax, edi)?;
+        a.ret()
+    });
+    let (code, text) = run("logical_drive_strings", exe);
+    assert_eq!(code, 3, "{:?}", text);
+    let list = text.strip_suffix("\0\0").expect("the list ends in two NULs");
+    let roots: Vec<&str> = list.split('\0').collect();
+    assert!(roots.contains(&"C:\\"), "{:?}", roots);
+    assert!(
+        roots.iter().all(|r| r.len() == 3 && r.ends_with(":\\")),
+        "{:?}",
+        roots
+    );
+}

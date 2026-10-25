@@ -549,6 +549,12 @@ static APIS: &[Api] = &[
     stdcall("LZClose", 910, 1, lz::lz_close),
     stdcall("GetExpandedNameA", 911, 2, lz::get_expanded_name_a),
     stdcall("GetExpandedNameW", 912, 2, lz::lz_open_file_w),
+    stdcall(
+        "GetLogicalDriveStringsA",
+        913,
+        2,
+        disk::get_logical_drive_strings,
+    ),
 ];
 
 /// The places in `APIS` of the system's own stubs.
