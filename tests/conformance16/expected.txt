@@ -11,21 +11,11 @@ gdi/clipping: clipping: 89 tests executed (0 marked as todo, 0 failures), 0 skip
 gdi/dc: dc: 87 tests executed (0 marked as todo, 0 failures), 2 skipped.
 gdi/dc: skipped dc.c:276
 gdi/dc: skipped dc.c:299
-gdi/font: font: 3016 tests executed (0 marked as todo, 508 failures), 3 skipped.
-gdi/font: failed font.c:224 (x37)
-gdi/font: failed font.c:243 (x12)
-gdi/font: failed font.c:226 (x89)
-gdi/font: failed font.c:227 (x89)
-gdi/font: failed font.c:228 (x72)
-gdi/font: failed font.c:236 (x96)
-gdi/font: failed font.c:244 (x89)
-gdi/font: failed font.c:229
-gdi/font: failed font.c:230
-gdi/font: failed font.c:248
-gdi/font: failed font.c:451 (x6)
-gdi/font: failed font.c:452 (x6)
-gdi/font: failed font.c:455 (x5)
-gdi/font: failed font.c:460 (x3)
+gdi/font: font: 3016 tests executed (0 marked as todo, 14 failures), 3 skipped.
+gdi/font: failed font.c:451 (x4)
+gdi/font: failed font.c:452 (x4)
+gdi/font: failed font.c:455 (x3)
+gdi/font: failed font.c:460 (x2)
 gdi/font: failed font.c:453
 gdi/font: skipped font.c:572 (x3)
 gdi/gdiobj: gdiobj: 43 tests executed (0 marked as todo, 0 failures), 0 skipped.

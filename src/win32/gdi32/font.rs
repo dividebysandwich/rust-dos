@@ -356,32 +356,45 @@ const RASTERS: &[Raster] = &[
     },
 ];
 
-/// The raster size of the face `fi` a font gets, if the face has any: the
-/// one as high as `device_height`, or with characters as high for a
-/// negative one, and true; or else the one nearest the `cell` the font
-/// is drawn at, and false.
-fn raster_of(fi: usize, device_height: i32, cell: i32) -> Option<(usize, bool)> {
-    let sizes = || (0..RASTERS.len()).filter(|&i| RASTERS[i].face == fi);
-    let r = |i: usize| &RASTERS[i];
-    let exact = match device_height {
-        0 => sizes().find(|&i| r(i).height == FACES[fi].cell),
-        h if h < 0 => sizes().find(|&i| r(i).height - r(i).internal == -h),
-        h => sizes().find(|&i| r(i).height == h),
-    };
-    match exact {
-        Some(i) => Some((i, true)),
-        None => sizes()
-            .min_by_key(|&i| (r(i).height - cell).abs())
-            .map(|i| (i, false)),
+/// The raster size of the face `fi` a font gets, if the face has any, and
+/// how many times higher it is drawn. As on Windows, a raster font is
+/// never drawn at a height in between: the size is the highest one no
+/// higher than `device_height` (in its characters for a negative one), or
+/// else the lowest, and it is drawn a whole number of times higher when
+/// the height asked for is near enough to a multiple of it.
+fn raster_of(fi: usize, device_height: i32) -> Option<(usize, i32)> {
+    let sizes = || (0..RASTERS.len()).filter(move |&i| RASTERS[i].face == fi);
+    if device_height == 0 {
+        let i = sizes().find(|&i| RASTERS[i].height == FACES[fi].cell);
+        return i.or_else(|| sizes().next()).map(|i| (i, 1));
     }
+    let measure = |i: usize| {
+        let r = &RASTERS[i];
+        if device_height < 0 { r.height - r.internal } else { r.height }
+    };
+    let want = device_height.saturating_abs();
+    let i = sizes()
+        .filter(|&i| measure(i) <= want)
+        .max_by_key(|&i| measure(i))
+        .or_else(|| sizes().min_by_key(|&i| measure(i)))?;
+    let h = measure(i);
+    let mut scale = want / h + (want % h != 0) as i32;
+    // The next multiple only once the height asked for is within a
+    // quarter of it, and at twice the size within less (Windows 9x's
+    // rule, from Wine's test_bitmap_font).
+    let short = scale * h - want;
+    if scale > 2 && short > h / 4 || scale == 2 && short >= h / 4 {
+        scale -= 1;
+    }
+    // Cells are at most 128 pixels high, as for the other faces.
+    Some((i, scale.clamp(1, 128 / RASTERS[i].height)))
 }
 
-/// How far the byte `b` moves on in the raster size `r` drawn `cell`
-/// pixels high.
-fn raster_width(r: &Raster, b: u8, cell: i32) -> i32 {
+/// How far the byte `b` moves on in the raster size `r` drawn `x_scale`
+/// times wider.
+fn raster_width(r: &Raster, b: u8, x_scale: i32) -> i32 {
     let c = if b < 0x20 { r.default } else { b };
-    let w = r.widths[(c - 0x20) as usize] as i32;
-    ((w * cell + r.height / 2) / r.height).max(1)
+    r.widths[(c - 0x20) as usize] as i32 * x_scale
 }
 
 /// A LOGFONTA, 60 bytes.
@@ -528,7 +541,7 @@ fn raster_glyphs(key: Key, r: &Raster) -> Glyphs {
     let made_bold = key.bold && !native_bold;
     let glyphs = (0..256usize)
         .map(|b| {
-            let w = raster_width(r, b as u8, key.cell);
+            let w = raster_width(r, b as u8, key.glyph_width);
             let mut rows = rom_rows(&key, ansi_glyph(b as u8) as usize, 8);
             let all = rows.iter().fold(0u64, |a, &r| a | r);
             if all != 0 {
@@ -703,15 +716,23 @@ fn realize(log: &Log, device_height: i32, device_width: i32) -> Realized {
     };
     let mut cell = cell.clamp(4, 128);
     let mut internal = internal.min(cell - 1);
-    // A face Windows has as raster fonts gets the widths of one of its
-    // sizes, and the metrics too if it is one of them. Windows doesn't
-    // stretch those to a width asked for, so neither does this.
-    let raster = raster_of(fi, device_height, cell);
+    // A face Windows has as raster fonts gets the metrics and widths of
+    // one of its sizes, stretched as Windows stretches them: by whole
+    // numbers, higher as `raster_of` says, and wider by as many times its
+    // average width as the width asked for holds, or with no width asked
+    // for as many times as higher.
+    let raster = raster_of(fi, device_height);
     let mut ascent = None;
-    if let Some((i, true)) = raster {
+    let mut x_scale = 1;
+    if let Some((i, y_scale)) = raster {
         let r = &RASTERS[i];
-        (cell, internal) = (r.height, r.internal);
-        ascent = Some(r.ascent);
+        (cell, internal) = (r.height * y_scale, r.internal * y_scale);
+        ascent = Some(r.ascent * y_scale);
+        x_scale = if device_width > 0 {
+            (device_width / r.average).clamp(1, 8)
+        } else {
+            y_scale
+        };
     }
     let base: u8 = if cell <= 9 {
         8
@@ -734,8 +755,8 @@ fn realize(log: &Log, device_height: i32, device_width: i32) -> Realized {
     let key = Key {
         base,
         cell,
-        // The raster faces' glyphs don't depend on it: one cache entry.
-        glyph_width: if raster.is_some() { 0 } else { glyph_width },
+        // For the raster faces, how many times wider they are drawn.
+        glyph_width: if raster.is_some() { x_scale } else { glyph_width },
         bold: weight >= 600,
         fixed,
         raster: raster.map(|(i, _)| i),
@@ -745,7 +766,7 @@ fn realize(log: &Log, device_height: i32, device_width: i32) -> Realized {
         Some((i, _)) => {
             let r = &RASTERS[i];
             let made_bold = key.bold && face.weight < 600;
-            ((r.average * cell + r.height / 2) / r.height).max(1) + made_bold as i32
+            r.average * x_scale + made_bold as i32
         }
         None => glyphs.glyphs[b'x' as usize].advance,
     };
