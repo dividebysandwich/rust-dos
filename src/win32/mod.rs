@@ -376,6 +376,8 @@ pub struct Win32 {
     shell: shell32::State,
     /// DDEML's instances, string and data handles and conversations.
     dde: user32::ddeml::State,
+    /// The global atom table (GlobalAddAtomA).
+    atoms: kernel32::atom::Table,
 }
 
 impl Win32 {
@@ -1265,4 +1267,5 @@ crate::state_fields!(Win32 {
     pending_win16,
     win16,
     desktop_depth,
+    atoms,
 } skip { enabled, guest_dlls, guest_replace, version, depth, pending_arguments, dll_files });
