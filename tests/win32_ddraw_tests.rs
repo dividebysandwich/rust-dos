@@ -446,9 +446,10 @@ fn a_full_screen_program_draws_on_its_back_buffer_and_flips() {
 /// Full screen with a back buffer made on its own (DDSCAPS_BACKBUFFER
 /// with a size) and attached to a plain primary surface, as Glover makes
 /// its flip chain: a pixel written to the back buffer and a flip of the
-/// primary that shows it. The two surfaces' caps go to CAPS after the
+/// primary that shows it. The back buffer has `back_caps` besides
+/// DDSCAPS_BACKBUFFER. The two surfaces' caps go to CAPS after the
 /// attach.
-fn attached_back_buffer_program() -> (Vec<u8>, u32) {
+fn attached_back_buffer_program(back_caps: u32) -> (Vec<u8>, u32) {
     let mut d = data();
     desc(&mut d, DESC, DDSD_CAPS, DDSCAPS_PRIMARYSURFACE, 0, 0, 0);
     let back_desc = DESC + 0x70;
@@ -456,7 +457,7 @@ fn attached_back_buffer_program() -> (Vec<u8>, u32) {
         &mut d,
         back_desc,
         DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT,
-        DDSCAPS_BACKBUFFER,
+        DDSCAPS_BACKBUFFER | back_caps,
         320,
         200,
         0,
@@ -513,7 +514,7 @@ fn attached_back_buffer_program() -> (Vec<u8>, u32) {
 
 #[test]
 fn a_back_buffer_attached_to_the_primary_surface_flips_with_it() {
-    let (program, data) = attached_back_buffer_program();
+    let (program, data) = attached_back_buffer_program(0);
     let mut cpu = machine("attached_back_buffer", program);
     run_until_done(&mut cpu, data);
     assert_eq!(results(&mut cpu, data, 12)[1..], [0; 11]);
@@ -530,6 +531,23 @@ fn a_back_buffer_attached_to_the_primary_surface_flips_with_it() {
     let start = cpu.bus.vbe.start as usize;
     assert_ne!(start, 0);
     assert_eq!(cpu.bus.vbe.vram[start..start + 4], [0x11, 0x22, 0x33, 0x44]);
+}
+
+#[test]
+fn a_back_buffer_in_system_memory_doesnt_flip_with_the_primary_surface() {
+    let (program, data) = attached_back_buffer_program(DDSCAPS_SYSTEMMEMORY);
+    let mut cpu = machine("attached_system_back_buffer", program);
+    run_until_done(&mut cpu, data);
+    // The attach works, but the screen can't show system memory, so
+    // the two make no flip chain and the primary doesn't flip.
+    const DDERR_NOTFLIPPABLE: u32 = 0x8876_0246;
+    let mut expected = [0; 11];
+    expected[10] = DDERR_NOTFLIPPABLE;
+    assert_eq!(results(&mut cpu, data, 12)[1..], expected);
+    let front = peek(&cpu, data + CAPS);
+    let back = peek(&cpu, data + CAPS + 4);
+    assert_eq!(front & (DDSCAPS_FLIP | DDSCAPS_FRONTBUFFER), 0);
+    assert_eq!(back & DDSCAPS_FLIP, 0);
 }
 
 /// A primary surface that says it is a back buffer.
