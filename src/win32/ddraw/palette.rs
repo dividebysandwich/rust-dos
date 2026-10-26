@@ -44,6 +44,20 @@ impl Palette {
             4
         }
     }
+
+    /// Its entries as COLORREFs; None for one of indexes into another
+    /// palette (DDPCAPS_8BITENTRIES).
+    pub fn colorrefs(&self) -> Option<Vec<u32>> {
+        if self.entry_size() != 4 {
+            return None;
+        }
+        Some(
+            self.entries
+                .chunks(4)
+                .map(|e| e[0] as u32 | (e[1] as u32) << 8 | (e[2] as u32) << 16)
+                .collect(),
+        )
+    }
 }
 
 /// The entries of a palette with the flags `caps`, if they say one size.
@@ -253,16 +267,7 @@ pub fn colors(cpu: &mut Cpu, pal: u32) -> Option<Vec<u32>> {
         return None;
     }
     let (_, id) = super::this(cpu, pal)?;
-    let p = state(cpu).object(id)?.palette.clone()?;
-    if p.entry_size() != 4 {
-        return None;
-    }
-    Some(
-        p.entries
-            .chunks(4)
-            .map(|e| e[0] as u32 | (e[1] as u32) << 8 | (e[2] as u32) << 16)
-            .collect(),
-    )
+    state(cpu).object(id)?.palette.as_ref()?.colorrefs()
 }
 
 /// Put the palette at the interface `pal` in the DAC, if DirectDraw has

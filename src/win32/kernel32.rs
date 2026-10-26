@@ -14,6 +14,7 @@ mod message;
 pub(super) mod module;
 mod path;
 mod process;
+pub use process::ProgramInLine;
 mod profile;
 pub(in crate::win32) use profile::profile_value;
 mod sort;
@@ -672,6 +673,12 @@ pub fn dos_path(name: &str) -> String {
 /// directory it names, or else in those SearchPathA looks in.
 pub fn search_file(cpu: &mut Cpu, name: &str) -> Option<String> {
     path::search(cpu, None, name)
+}
+
+/// The program the command line `line` names first, as CreateProcessA
+/// finds it with no application name (process.rs).
+pub fn program_in_line<'a>(cpu: &mut Cpu, line: &'a str) -> Option<ProgramInLine<'a>> {
+    process::program_in_line(cpu, line)
 }
 
 /// A file read whole: its bytes, its DOS time and date, and its
