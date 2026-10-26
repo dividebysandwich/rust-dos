@@ -626,6 +626,14 @@ fn mul_div(a: i32, b: i32, c: i32) -> i32 {
     }
 }
 
+/// A dialog's place in pixels from `v` in dialog units, `base` the base
+/// unit and `div` 4 across or 8 down. Windows 98 adds half of `div` and
+/// cuts toward zero, which rounds a negative place up: -1 unit across
+/// with a base of 6 is -1 pixel, where MulDiv makes it -2.
+fn dialog_place(v: i32, base: i32, div: i32) -> i32 {
+    (v * base + div / 2) / div
+}
+
 /// GdiGetCharDimensions of the font: the average width of the letters
 /// and the height, or 0s.
 fn char_dimensions(cpu: &mut Cpu, font: u32) -> (i32, i32) {
@@ -1207,12 +1215,12 @@ fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             t.set(C_SCALE, pack(sx, sy));
             let mut style = h.style;
             let mut ex = h.ex;
-            // A child dialog has no caption, but keeps a border of its
-            // own: WS_BORDER alone is half of WS_CAPTION.
-            if style & WS_CHILD != 0 && style & WS_CAPTION == WS_CAPTION {
+            // A DS_CONTROL dialog, child or popup, loses its caption, its
+            // system menu and with them WS_BORDER and WS_DLGFRAME. Any
+            // other child dialog keeps them all and Windows 98 draws its
+            // caption.
+            if style & DS_CONTROL != 0 {
                 style &= !(WS_CAPTION | WS_SYSMENU);
-            } else if style & WS_CHILD != 0 {
-                style &= !WS_SYSMENU;
             }
             if style & DS_MODALFRAME != 0 {
                 ex |= WS_EX_DLGMODALFRAME;
@@ -1245,8 +1253,8 @@ fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 } else if style & DS_CENTERMOUSE != 0 {
                     (x, y) = state.input.cursor;
                 } else {
-                    x += mul_div(h.x as i32, sx, 4);
-                    y += mul_div(h.y as i32, sy, 8);
+                    x += dialog_place(h.x as i32, sx, 4);
+                    y += dialog_place(h.y as i32, sy, 8);
                     if style & (WS_CHILD | DS_ABSALIGN) == 0 && state.is_window(owner) {
                         let (ox, oy) = state.client_origin(owner);
                         x += ox;
@@ -1254,16 +1262,11 @@ fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     }
                 }
                 if style & WS_CHILD == 0 {
-                    // Keep it on the screen.
-                    let m = super::sysparams::metric;
-                    let dx = x + cx + m(7) - sw;
-                    if dx > 0 {
-                        x -= dx;
-                    }
-                    let dy = y + cy + m(8) - sh;
-                    if dy > 0 {
-                        y -= dy;
-                    }
+                    // Keep it on the screen: Windows 98 lets the window
+                    // reach the right edge, but keeps 4 pixels free below
+                    // it, whatever its frame.
+                    x = x.min(sw - cx);
+                    y = y.min(sh - 4 - cy);
                 }
                 // A child dialog left of or above its parent's client
                 // area starts at its edge, as on Windows 98; one past the
