@@ -1327,6 +1327,9 @@ fn system_files_show_in_a_directory_the_drive_lacks() {
     assert_eq!(disk.rename_file("DDRAW.DLL", "OTHER.DLL"), Err(0x05));
     assert_eq!(disk.create_directory("C:\\WINDOWS\\SYSTEM"), Err(0x05));
     assert!(!base.join("WINDOWS").exists());
+    // A file that isn't there is not found, its directory being there:
+    // Iron Helix's installer opens one before it makes it.
+    assert_eq!(disk.open_file("C:\\WINDOWS\\SYSTEM\\MINE.DLL", 1, PSP), Err(0x02));
     // A file made there makes the directories on the drive.
     let h = disk
         .create_file("C:\\WINDOWS\\SYSTEM\\MINE.DLL", PSP)
