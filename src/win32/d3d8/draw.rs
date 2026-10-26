@@ -164,6 +164,9 @@ fn decl_vertices(decl: &Decl, regs: &[[[f32; 4]; 16]]) -> (Layout, Vec<Vertex>) 
     (layout, vertices)
 }
 
+/// The most vertices one draw takes.
+const MAX_VERTICES: u32 = 0x10_0000;
+
 /// Draw `kind` primitives of the `count` vertices from `first` of the
 /// streams `sources`, in the order `order` (places among them) or as
 /// they are.
@@ -176,6 +179,11 @@ fn draw_vertices(
     count: u32,
     order: Option<&[u32]>,
 ) -> u32 {
+    // As many as D3D7's draws take: each is held on the host, and a
+    // stride of 0 lets a small buffer stand for any count.
+    if count > MAX_VERTICES {
+        return D3DERR_INVALIDCALL;
+    }
     let Some(d) = get(cpu, id).cloned() else {
         return D3DERR_INVALIDCALL;
     };

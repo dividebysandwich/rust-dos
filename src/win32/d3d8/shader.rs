@@ -90,7 +90,7 @@ fn read_decl(cpu: &mut Cpu, at: u32) -> Option<Vec<u32>> {
         }
         let t = cpu.bus.guest_read_32(p);
         out.push(t);
-        p += 4;
+        p = p.checked_add(4)?;
         if t == DECL_END {
             return Some(out);
         }
@@ -104,7 +104,7 @@ fn read_decl(cpu: &mut Cpu, at: u32) -> Option<Vec<u32>> {
                 return None;
             }
             out.push(cpu.bus.guest_read_32(p));
-            p += 4;
+            p = p.checked_add(4)?;
         }
     }
 }
@@ -235,14 +235,14 @@ fn read_function(cpu: &mut Cpu, at: u32) -> Option<Vec<u32>> {
         return None;
     }
     let mut out = vec![version];
-    let mut p = at + 4;
+    let mut p = at.checked_add(4)?;
     loop {
         if out.len() > 0x4_0000 || !cpu.bus.guest_probe(p, 4, false) {
             return None;
         }
         let t = cpu.bus.guest_read_32(p);
         out.push(t);
-        p += 4;
+        p = p.checked_add(4)?;
         if t == END {
             return Some(out);
         }
@@ -256,7 +256,7 @@ fn read_function(cpu: &mut Cpu, at: u32) -> Option<Vec<u32>> {
                 return None;
             }
             out.push(cpu.bus.guest_read_32(p));
-            p += 4;
+            p = p.checked_add(4)?;
         }
     }
 }
@@ -313,7 +313,7 @@ impl Machine<'_> {
             R_INPUT => self.v.get(num as usize).copied().unwrap_or_default(),
             R_CONST => {
                 let n = if relative {
-                    num as i32 + self.a0
+                    (num as i32).wrapping_add(self.a0)
                 } else {
                     num as i32
                 };

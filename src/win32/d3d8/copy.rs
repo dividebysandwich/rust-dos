@@ -167,8 +167,8 @@ pub fn copy_rects(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             && r.bottom as u32 <= s.height;
         let fits = *x >= 0
             && *y >= 0
-            && (*x + r.right - r.left) as u32 <= d.width
-            && (*y + r.bottom - r.top) as u32 <= d.height;
+            && *x as i64 + r.right as i64 - r.left as i64 <= d.width as i64
+            && *y as i64 + r.bottom as i64 - r.top as i64 <= d.height as i64;
         if !inside || !fits {
             return Some(D3DERR_INVALIDCALL);
         }
