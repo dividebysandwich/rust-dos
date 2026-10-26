@@ -402,6 +402,21 @@ it, as a probe program read it from the running engine there:
 C:\WINDOWS\TEMP\_INS0432._MP -fD:\SETUP.INS  -z1 -cx -xC:\WINDOWS\TEMP\
 ```
 
+That is Enemy Infestation's launcher, 5.00.149. Later ones (5.00.212
+and 5.00.221) add the setup's folder and its language, the `Default=`
+of `SETUP.LID`'s `[Languages]`; Xenocracy's gave this, found in the
+memory of Windows 98 SE running it:
+
+```
+-fD:\SETUP.INS  -z1 -cx -xC:\WINDOWS\TEMP\ -x1D:\ -q10009
+```
+
+Their engine looks for the setup's `layout.bin` and cabinets in the
+folder `-x1` names, or without it in `TEMP`, and ends at once when they
+aren't there. Which arguments a launcher gives is in its table of them,
+strings ending in a zero, so the built-in Windows gives `-x1` and `-q1`
+when that table has them.
+
 The launcher's `_ISDEL.EXE`, which deletes those files after setup, is
 16-bit and isn't run, so they stay in `TEMP`.
 
@@ -452,10 +467,10 @@ shortcut:
   `C:\Program Files` and the case of names. The registry keys are the
   same but for the time of the last update check and the case of the
   Start menu folder's path. The setup asks for the second CD halfway
-  through, as on Windows 98. It warns that the disk is too small, as
-  DOS reports 80 MB free on a drive that is a host folder; Ignore goes
-  on. The game itself needs IMAGEHLP, AVIFIL32 and MSVFW32, which
-  aren't there.
+  through, as on Windows 98. It warned that the disk was too small
+  while the built-in Windows reported DOS's 80 MB free on a drive that
+  is a host folder (Ignore went on); it now reports about 1 GB. The
+  game itself needs IMAGEHLP, AVIFIL32 and MSVFW32, which aren't there.
 
 Some differences hold for every setup:
 

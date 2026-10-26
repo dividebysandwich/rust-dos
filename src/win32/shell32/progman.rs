@@ -106,9 +106,15 @@ fn delete_tree(cpu: &mut Cpu, dir: &str) -> bool {
     files::remove_directory(cpu, dir).is_ok()
 }
 
-/// The program and the arguments of a command line.
-fn split_command(line: &str) -> (String, String) {
+/// The program and the arguments of a command line. The program ends
+/// where CreateProcessA finds it does, so an unquoted one can have spaces
+/// in its path; one that isn't there ends at its closing quote, or at the
+/// first space.
+fn split_command(cpu: &mut Cpu, line: &str) -> (String, String) {
     let line = line.trim();
+    if let Some(found) = kernel32::program_in_line(cpu, line) {
+        return (found.name.to_string(), found.args.trim().to_string());
+    }
     if let Some(rest) = line.strip_prefix('"') {
         let end = rest.find('"').unwrap_or(rest.len());
         let args = rest.get(end + 1..).unwrap_or("").trim().to_string();
@@ -125,7 +131,7 @@ fn add_item(cpu: &mut Cpu, dir: &str, args: &[String]) -> bool {
     let Some(line) = args.first().filter(|l| !l.is_empty()) else {
         return false;
     };
-    let (program, arguments) = split_command(line);
+    let (program, arguments) = split_command(cpu, line);
     let path = if program.contains(['\\', ':']) {
         files::full_path(cpu, &program)
     } else {

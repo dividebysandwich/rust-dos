@@ -91,7 +91,12 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
 - **Check state with `/api/status`.** It reports `shell_idle` (true at the
   DOS prompt), `cs_ip`, the video mode and `video.adapter` (the display
   adapter `machine` gives programs), `paused`, `input_queue`, and
-  `cycles_per_ms`, the current CPU speed. `video.vga` shows the CRTC Start
+  `cycles_per_ms`, the current CPU speed. `paused` (with `stop` and
+  `stop_seq`) says whether the debugger has stopped the machine, at a
+  breakpoint or otherwise. `cpu_state` is the processor's own state:
+  `Running`, or `Halted` after HLT until an interrupt. It stays `Running`
+  while the machine is paused, so wait for a stop with `paused` or the
+  journal's `paused` entry, not with `cpu_state`. `video.vga` shows the CRTC Start
   Address the program set and the one on screen, which helps when a game
   that flips pages flickers or shows half-drawn frames. `video.crt` is the
   display timing the VGA registers describe (refresh rate, total and
@@ -465,6 +470,11 @@ curl -s "$H/api/journal?after=$S&type=paused&wait=30000"   # long poll for the n
 - **Disassembly as data:** `GET /api/disasm?format=json` has, next to the
   text `lines`, `rows` of `{label, phys, bytes, asm, len, current,
   breakpoint}`.
+- **Disassembly's code size:** an address with a selector decodes as its
+  segment's code, 16 or 32-bit. A `lin:` or `phys:` address has no
+  segment, so it decodes like the code running now: 32-bit under the
+  built-in Windows or a 32-bit DOS extender, where the `[W32]` log lines
+  give linear addresses. `&bits=16` or `&bits=32` says the size instead.
 
 ### Switch to another program directory, or mount more drives
 
@@ -1162,6 +1172,28 @@ With `win32` on, a Win32 console program runs on the built-in Windows
 Ids, addresses and exit codes are 8-digit hex strings; handles and
 `last_error` are numbers. Pause the machine first for a view that
 holds still: the threads take turns as the timer's interrupts come.
+
+`GET /api/win32/ddraw` lists DirectDraw's surfaces, with the display
+`mode` DirectDraw set (null on the desktop's) and the ids of the
+DirectDraw objects that set it (`mode_owner`) and have exclusive mode
+(`exclusive`). Each surface has its `id`, the `pid` of its process, its
+`interfaces` (the addresses the program passes as `this`, which the
+log's `[W32]` lines show), `width`, `height`, `pitch`, `format` (flags,
+FourCC, bits a pixel, red, green, blue and alpha masks), `caps`,
+`memory` (`system`, `video`, `card`, the 3dfx card's, or `none`) and
+`address`, `locked`, `lost`, its color `keys` (`src_blt`, `dest_blt`
+and the overlay ones, each a low and high value), the ids of its
+`palette`, `clipper`, `root` and `attached` surfaces, and the `version`
+of the interfaces it was made through (1, 4 or 7).
+
+`GET /api/win32/ddraw/surface/{id}` shows a surface's pixels as a PNG
+(`?format=raw` for RGB24 rows). With `?keyed=true` the pixels its source
+blit key matches are transparent, which shows what a blit with
+DDBLT_KEYSRC leaves out (the PNG only: raw rows have no alpha). A
+surface in system memory is read through its own process's page tables,
+whichever process runs, and the read changes nothing in the machine. A
+surface on the 3dfx card has no picture here; `/api/screenshot` shows
+the card's.
 
 ## 5. Addresses
 

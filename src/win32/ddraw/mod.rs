@@ -45,6 +45,7 @@ pub(super) mod directdraw;
 pub(super) mod display;
 pub mod enumerate;
 mod gamma;
+pub(super) mod inspect;
 mod palette;
 pub(super) mod surface;
 pub mod voodoo;

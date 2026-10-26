@@ -1699,6 +1699,7 @@ fn if_state_seq_guards_every_request_the_emulator_carries_out() {
         ("GET", "/api/awe32".into(), None),
         ("GET", "/api/exceptions".into(), None),
         ("GET", "/api/win32".into(), None),
+        ("GET", "/api/win32/ddraw".into(), None),
     ];
     for (method, path, body) in &requests {
         if rig.get("/api/status").json()["paused"] != true {
@@ -1724,6 +1725,14 @@ fn if_state_seq_guards_every_request_the_emulator_carries_out() {
             assert_eq!(ended.status, 200, "{} {}: {}", method, path, ended.body);
         }
     }
+    // No surfaces in a DOS session: 404, but an old state still refuses
+    // it first.
+    let state = rig.get("/api/status").json()["state_seq"].as_u64().unwrap();
+    let path = "/api/win32/ddraw/surface/1";
+    let refused = http(rig.addr, "GET", path, &[("If-State-Seq", &(state - 1).to_string())], None);
+    assert_eq!(refused.status, 409, "{}", refused.body);
+    let done = http(rig.addr, "GET", path, &[("If-State-Seq", &state.to_string())], None);
+    assert_eq!(done.status, 404, "{}", done.body);
     // The server's own: no machine state to hold them against.
     let state = rig.get("/api/status").json()["state_seq"].as_u64().unwrap().to_string();
     for path in ["/", "/ui", "/api", "/api/version", "/api/journal?after=0", "/api/ops/1", "/api/log", "/api/control/wait?after=0", "/api/control/wait?op=1"] {

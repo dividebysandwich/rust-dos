@@ -564,11 +564,14 @@ pub fn find_executable(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         Ok(line) => line,
         Err(code) => return Some(code),
     };
-    // The program alone: what is in the quotes, or before the first
-    // space.
-    let program = match line.strip_prefix('"') {
-        Some(rest) => rest.split('"').next().unwrap_or(rest).to_string(),
-        None => line.split(' ').next().unwrap_or(&line).to_string(),
+    // The program alone, as CreateProcessA finds it in the line; one that
+    // isn't there is what is in the quotes, or before the first space.
+    let program = match crate::win32::kernel32::program_in_line(cpu, &line) {
+        Some(found) => found.name.to_string(),
+        None => match line.strip_prefix('"') {
+            Some(rest) => rest.split('"').next().unwrap_or(rest).to_string(),
+            None => line.split(' ').next().unwrap_or(&line).to_string(),
+        },
     };
     if result != 0 {
         let mut bytes = crate::dosstr::to_bytes(&program);

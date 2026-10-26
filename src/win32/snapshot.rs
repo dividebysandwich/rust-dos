@@ -1,7 +1,7 @@
 //! What a debugger sees of the built-in Windows: its processes, their
-//! modules, threads and handles, copied into plain structs that don't
-//! change as the machine runs on and don't depend on how the built-in
-//! Windows keeps them.
+//! modules, threads and handles, and DirectDraw's surfaces, copied into
+//! plain structs that don't change as the machine runs on and don't
+//! depend on how the built-in Windows keeps them.
 
 use super::object::{Kind, Objects};
 use super::{Context, ESP, Process, Win32, stubs};
@@ -382,4 +382,65 @@ fn describe(kind: &Kind) -> (&'static str, Vec<(&'static str, Field)>) {
         // Kinds added after this list: their state as Rust prints it.
         other => ("other", vec![("debug", Text(format!("{:?}", other)))]),
     }
+}
+
+/// DirectDraw's display and surfaces.
+#[derive(Clone, Debug, Default)]
+pub struct DirectDrawInfo {
+    /// The mode DirectDraw set: width, height and bits a pixel; all 0
+    /// while the display is the desktop's.
+    pub mode: (u32, u32, u32),
+    /// The ids of the DirectDraw objects that set the mode and that has
+    /// exclusive mode.
+    pub mode_owner: u32,
+    pub exclusive: u32,
+    pub surfaces: Vec<SurfaceInfo>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SurfaceInfo {
+    /// Its number in DirectDraw's table of objects.
+    pub id: u32,
+    pub pid: u32,
+    /// The addresses of its interfaces: what the program passes as
+    /// `this`, and what the log shows.
+    pub interfaces: Vec<u32>,
+    pub width: u32,
+    pub height: u32,
+    pub pitch: u32,
+    /// DDPIXELFORMAT's flags, FourCC, bits a pixel and red, green, blue
+    /// and alpha masks.
+    pub format: (u32, u32, u32, [u32; 4]),
+    /// DDSCAPS2's four words.
+    pub caps: [u32; 4],
+    /// Where its pixels are: "system", "video", "card" or "none", and
+    /// their address in the process (or offset in video memory or the
+    /// card's buffer).
+    pub memory: &'static str,
+    pub address: u32,
+    pub locked: bool,
+    pub lost: bool,
+    /// The color keys it has: place, low and high value.
+    pub keys: Vec<(&'static str, u32, u32)>,
+    /// The ids of its palette and clipper, or 0.
+    pub palette: u32,
+    pub clipper: u32,
+    /// The id of the complex surface's root it is part of, or 0, and
+    /// the ids of the surfaces attached to it.
+    pub root: u32,
+    pub attached: Vec<u32>,
+    /// The version of the interfaces it was made through: 1, 4 or 7.
+    pub version: u32,
+}
+
+/// DirectDraw's display and surfaces as they are.
+pub fn ddraw(cpu: &Cpu) -> DirectDrawInfo {
+    super::ddraw::inspect::info(cpu)
+}
+
+/// The pixels of DirectDraw's surface `id` as RGBA rows: its width,
+/// height and the rows. With `keyed`, the pixels its source blit key
+/// matches are transparent.
+pub fn surface_image(cpu: &Cpu, id: u32, keyed: bool) -> Result<(u32, u32, Vec<u8>), String> {
+    super::ddraw::inspect::image(cpu, id, keyed)
 }
