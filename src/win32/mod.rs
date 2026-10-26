@@ -720,7 +720,7 @@ pub(crate) fn create_process_from(
     );
     // As in Wine, every program but a console one gets an input idle
     // event.
-    let console = rust_dos_pe::Headers::parse(&file)
+    let console = rust_dos_pe::Headers::parse(file)
         .is_ok_and(|h| h.subsystem == rust_dos_pe::SUBSYSTEM_CONSOLE);
     if !console {
         let idle = object::Kind::Event {
