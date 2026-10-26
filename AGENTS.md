@@ -35,3 +35,20 @@ There is no `rustfmt.toml`: code is formatted with rustfmt's defaults
 
 Run `cargo clippy` on what you change and fix the warnings it gives for
 your code.
+
+## Building on Windows: SDL2 on LIB and PATH
+
+The `rust-dos` program links SDL2, and with MSVC the linker finds
+`SDL2.lib` only through `LIB`. Without it, `cargo build`, `cargo test`
+and `cargo clippy --all-targets` stop at the link step with
+`LNK1181: cannot open input file 'SDL2.lib'`. That error is the
+environment, not the code: don't change the code or the build to get
+around it.
+
+- Set up SDL2's Visual C++ package as the README's build section says,
+  and add its `lib\x64` to `LIB` before building.
+- A new shell, a git worktree, or a subagent's shell may not have the
+  `LIB` you set elsewhere, so set it in the same command as the build,
+  for example `LIB='C:\SDL2-2.30.0\lib\x64' cargo test` in Git Bash.
+- The tests start the built `rust-dos.exe`, which needs `SDL2.dll` from
+  the same folder on `PATH`.
