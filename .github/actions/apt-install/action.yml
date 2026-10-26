@@ -53,7 +53,7 @@ runs:
         fi
         . /etc/os-release
         dir="$RUNNER_TEMP/apt-archives"
-        # apt needs partial/ to exist, and makes it its own.
+        # apt needs partial/ to exist.
         mkdir -p "$dir/partial"
         # $PACKAGES unquoted: one line per package.
         # shellcheck disable=SC2086
@@ -65,7 +65,8 @@ runs:
           echo "prefix=$prefix"
         } >> "$GITHUB_OUTPUT"
 
-    # partial/ is left out: apt makes it readable by its _apt user only.
+    # partial/ is left out: apt makes it private to the user it downloads
+    # as.
     - name: Restore the package cache
       id: restore
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -88,10 +89,12 @@ runs:
         if [ "$UPDATED" != true ]; then
           $SUDO apt-get update
         fi
+        # apt's _apt user can't reach the runner's temporary directory, so
+        # apt downloads as root anyway; saying so spares a warning.
         # $PACKAGES unquoted: one argument per package.
         # shellcheck disable=SC2086
         $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-          -o Dir::Cache::Archives="$ARCHIVES" $PACKAGES
+          -o Dir::Cache::Archives="$ARCHIVES" -o APT::Sandbox::User=root $PACKAGES
         # Keeps the files of the packages installed now, at the version
         # installed, so the cache doesn't grow with each update.
         format='${Package} ${Version} ${Architecture}\n'
