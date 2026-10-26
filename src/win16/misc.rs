@@ -229,6 +229,27 @@ pub static MMSYSTEM: Def = Def {
         win32("timeBeginPeriod", 605, "w", MM, "timeBeginPeriod", b'w'),
         win32("timeEndPeriod", 606, "w", MM, "timeEndPeriod", b'w'),
         win32("timeGetTime", 607, "", MM, "timeGetTime", b'w'),
+        rust("mmioOpen", 1210, "pSl", mmio_open),
+        rust("mmioClose", 1211, "ww", mmio_close),
+        win32("mmioRead", 1212, "wpl", MM, "mmioRead", b'w'),
+        win32("mmioWrite", 1213, "wpl", MM, "mmioWrite", b'w'),
+        win32("mmioSeek", 1214, "wlw", MM, "mmioSeek", b'w'),
+        rust("mmioGetInfo", 1215, "wSw", mmio_get_info),
+        rust("mmioSetInfo", 1216, "wSw", mmio_set_info),
+        rust("mmioSetBuffer", 1217, "wSlw", mmio_set_buffer),
+        win32("mmioFlush", 1218, "ww", MM, "mmioFlush", b'w'),
+        rust("mmioAdvance", 1219, "wSw", mmio_advance),
+        win32(
+            "mmioStringToFOURCC",
+            1220,
+            "pw",
+            MM,
+            "mmioStringToFOURCCA",
+            b'w',
+        ),
+        win32("mmioDescend", 1223, "wppw", MM, "mmioDescend", b'w'),
+        win32("mmioAscend", 1224, "wpw", MM, "mmioAscend", b'w'),
+        win32("mmioCreateChunk", 1225, "wpw", MM, "mmioCreateChunk", b'w'),
         rust("mciSendCommand", 701, "wwll", mci_send_command),
         win32("mciSendString", 702, "ppww", MM, "mciSendStringA", b'w'),
         win32("mciGetDeviceID", 703, "p", MM, "mciGetDeviceIDA", b'w'),
@@ -899,6 +920,266 @@ fn time_set_event(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     cpu.bus
         .log_string("[W16] timeSetEvent's callbacks aren't called");
     Some(0)
+}
+
+// MMIO: WINMM's functions, called here with MMIOINFO16 translated to and
+// from MMIOINFO, which has dwords where it has words. A file's buffer is
+// the program's or a block of the global heap, so that its pointers can
+// be 16:16 ones for 16-bit code: `mmio_buffers` has each buffer's 16:16
+// and flat addresses.
+
+use crate::win32::winmm::mmio as wmmio;
+
+const MMIO_ALLOCBUF: u32 = 0x0001_0000;
+const MMIO_DEFAULTBUFFER: u32 = 8192;
+const MMIOERR_CANNOTOPEN: u32 = 259;
+const MMIOERR_OUTOFMEMORY: u32 = 258;
+const MMSYSERR_INVALHANDLE: u32 = 5;
+
+/// A block of the global heap of `size` bytes for a file's buffer: its
+/// 16:16 and flat addresses and its handle.
+fn mmio_alloc(cpu: &mut Cpu, size: u32) -> Option<[u32; 3]> {
+    let handle = super::global::alloc(cpu, 0, size.max(1), 0, false);
+    if handle == 0 {
+        return None;
+    }
+    let sel = super::global::handle_to_sel(handle);
+    let flat = super::lin(cpu, sel, 0);
+    Some([(sel as u32) << 16, flat, handle as u32])
+}
+
+/// The file `hmmio`'s buffer: [hmmio, 16:16, flat, global handle].
+fn mmio_buffer(cpu: &Cpu, hmmio: u32) -> Option<[u32; 4]> {
+    let list = &cpu.bus.win32.win16.mmio_buffers;
+    list.iter().find(|b| b[0] == hmmio).copied()
+}
+
+/// The file `hmmio` has the buffer `entry` from now on, or none; the
+/// global block it had is freed.
+fn mmio_keep_buffer(cpu: &mut Cpu, hmmio: u32, entry: Option<[u32; 4]>) {
+    if let Some(old) = mmio_buffer(cpu, hmmio) {
+        if old[3] != 0 {
+            super::global::free(cpu, old[3] as u16);
+        }
+        cpu.bus.win32.win16.mmio_buffers.retain(|b| b[0] != hmmio);
+    }
+    if let Some(e) = entry {
+        cpu.bus.win32.win16.mmio_buffers.push(e);
+    }
+}
+
+/// A flat pointer into the file's buffer as a 16:16 one.
+fn mmio_to16(buffer: Option<[u32; 4]>, flat: u32) -> u32 {
+    match buffer {
+        Some([_, segptr, base, _]) if flat >= base && flat - base <= 0xFFFF => {
+            segptr + (flat - base)
+        }
+        _ => 0,
+    }
+}
+
+/// A 16:16 pointer into the file's buffer as a flat one.
+fn mmio_to32(cpu: &Cpu, buffer: Option<[u32; 4]>, segptr: u32) -> u32 {
+    match buffer {
+        Some([_, seg, base, _]) if segptr >> 16 == seg >> 16 => {
+            base + (segptr & 0xFFFF) - (seg & 0xFFFF)
+        }
+        _ => super::linear(cpu, segptr),
+    }
+}
+
+/// Write the MMIOINFO at `at` as the MMIOINFO16 at `at16`: dwFlags,
+/// fccIOProc, pIOProc, wErrorRet, hTask, cchBuffer, the four buffer
+/// pointers, lBufOffset, lDiskOffset, adwInfo[3], two reserved dwords
+/// and hmmio, a word.
+fn mmio_info16(cpu: &mut Cpu, hmmio: u32, at: u32, at16: u32) {
+    let buffer = mmio_buffer(cpu, hmmio);
+    let f = |i: u32| r32(cpu, at + 4 * i);
+    let words = [
+        f(0),
+        f(1),
+        0,
+        f(3) & 0xFFFF,
+        f(5),
+        mmio_to16(buffer, f(6)),
+        mmio_to16(buffer, f(7)),
+        mmio_to16(buffer, f(8)),
+        mmio_to16(buffer, f(9)),
+        f(10),
+        f(11),
+        f(12),
+        f(13),
+        f(14),
+        0,
+        0,
+    ];
+    let mut bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    bytes.extend_from_slice(&(hmmio as u16).to_le_bytes());
+    super::poke(cpu, at16, &bytes);
+}
+
+/// The file's MMIOINFO in 32-bit scratch space, with the flags and the
+/// buffer pointers of the MMIOINFO16 at `at16`, for mmioSetInfo and
+/// mmioAdvance. None if `hmmio` isn't a file.
+fn mmio_info32(cpu: &mut Cpu, hmmio: u32, at16: u32) -> Option<u32> {
+    let at = thunk::scratch32(cpu, 72);
+    if wmmio::mmio_get_info(cpu, &[hmmio, at, 0])? != 0 {
+        return None;
+    }
+    let buffer = mmio_buffer(cpu, hmmio);
+    w32(cpu, at, r32(cpu, at16));
+    for (o16, o32) in [(24, 28), (28, 32), (32, 36)] {
+        let p = mmio_to32(cpu, buffer, r32(cpu, at16 + o16));
+        w32(cpu, at + o32, p);
+    }
+    Some(at)
+}
+
+/// mmioOpen(name, info, flags): with a 32-bit copy of the MMIOINFO16 if
+/// there is one, whose error and handle go back to it. A buffer that
+/// MMIO_ALLOCBUF, or a size without a buffer, asks for is a block of the
+/// global heap. A 16-bit I/O procedure isn't called: the file fails to
+/// open.
+fn mmio_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let (name, info16, mut flags) = (args[0], args[1], args[2]);
+    let at16 = super::linear(cpu, info16);
+    let r = |cpu: &Cpu, o: u32| if at16 == 0 { 0 } else { r32(cpu, at16 + o) };
+    if r(cpu, 8) != 0 {
+        super::write_16(cpu, at16 + 12, MMIOERR_CANNOTOPEN as u16);
+        return Some(0);
+    }
+    // MMIOINFO: dwFlags, fccIOProc, pIOProc, wErrorRet, htask,
+    // cchBuffer, pchBuffer, the other pointers, the offsets, adwInfo.
+    let info = thunk::scratch32(cpu, 72);
+    super::poke(cpu, info, &[0; 72]);
+    let mut cch = r(cpu, 16);
+    let mut buffer = None;
+    if at16 != 0 {
+        w32(cpu, info, r(cpu, 0));
+        w32(cpu, info + 4, r(cpu, 4));
+        for i in 0..3 {
+            w32(cpu, info + 48 + 4 * i, r(cpu, 44 + 4 * i));
+        }
+        let segptr = r(cpu, 20);
+        if segptr != 0 {
+            buffer = Some([segptr, super::linear(cpu, segptr), 0]);
+        }
+    }
+    if buffer.is_none() && (flags & MMIO_ALLOCBUF != 0 || cch != 0) {
+        if cch == 0 {
+            cch = MMIO_DEFAULTBUFFER;
+        }
+        let Some(block) = mmio_alloc(cpu, cch) else {
+            if at16 != 0 {
+                super::write_16(cpu, at16 + 12, MMIOERR_OUTOFMEMORY as u16);
+            }
+            return Some(0);
+        };
+        buffer = Some(block);
+    }
+    flags &= !MMIO_ALLOCBUF;
+    if let Some([_, flat, _]) = buffer {
+        w32(cpu, info + 20, cch);
+        w32(cpu, info + 24, flat);
+    }
+    let hmmio = wmmio::mmio_open(cpu, &[name, info, flags])?;
+    if at16 != 0 {
+        let error = r32(cpu, info + 12);
+        super::write_16(cpu, at16 + 12, error as u16);
+        super::write_16(cpu, at16 + 64, hmmio as u16);
+    }
+    match buffer {
+        Some([segptr, flat, handle]) if hmmio != 0 => {
+            mmio_keep_buffer(cpu, hmmio, Some([hmmio, segptr, flat, handle]));
+        }
+        Some([_, _, handle]) if handle != 0 => {
+            super::global::free(cpu, handle as u16);
+        }
+        _ => {}
+    }
+    Some(hmmio)
+}
+
+/// mmioClose(hmmio, flags): and the global block of its buffer is freed.
+fn mmio_close(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let result = wmmio::mmio_close(cpu, &[args[0], args[1]])?;
+    if result == 0 {
+        mmio_keep_buffer(cpu, args[0], None);
+    }
+    Some(result)
+}
+
+/// mmioGetInfo(hmmio, info, flags).
+fn mmio_get_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let at16 = super::linear(cpu, args[1]);
+    let at = if at16 == 0 {
+        0
+    } else {
+        thunk::scratch32(cpu, 72)
+    };
+    let result = wmmio::mmio_get_info(cpu, &[args[0], at, 0])?;
+    if result == 0 {
+        mmio_info16(cpu, args[0], at, at16);
+    }
+    Some(result)
+}
+
+/// mmioSetInfo(hmmio, info, flags).
+fn mmio_set_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let at16 = super::linear(cpu, args[1]);
+    if at16 == 0 {
+        return wmmio::mmio_set_info(cpu, &[args[0], 0, 0]);
+    }
+    match mmio_info32(cpu, args[0], at16) {
+        Some(at) => wmmio::mmio_set_info(cpu, &[args[0], at, 0]),
+        None => Some(MMSYSERR_INVALHANDLE),
+    }
+}
+
+/// mmioAdvance(hmmio, info, flags).
+fn mmio_advance(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let at16 = super::linear(cpu, args[1]);
+    if at16 == 0 {
+        return wmmio::mmio_advance(cpu, &[args[0], 0, args[2]]);
+    }
+    let Some(at) = mmio_info32(cpu, args[0], at16) else {
+        return Some(MMSYSERR_INVALHANDLE);
+    };
+    let result = wmmio::mmio_advance(cpu, &[args[0], at, args[2]])?;
+    if result == 0 {
+        mmio_info16(cpu, args[0], at, at16);
+    }
+    Some(result)
+}
+
+/// mmioSetBuffer(hmmio, buffer, size, flags): the program's buffer, or
+/// without one a block of the global heap of `size` bytes.
+fn mmio_set_buffer(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let (hmmio, segptr, cch) = (args[0], args[1], args[2]);
+    // With no MMIOINFO, mmioGetInfo tells a file from a handle that isn't.
+    if wmmio::mmio_get_info(cpu, &[hmmio, 0, 0])? == MMSYSERR_INVALHANDLE {
+        return Some(MMSYSERR_INVALHANDLE);
+    }
+    let entry = if segptr != 0 {
+        Some([hmmio, segptr, super::linear(cpu, segptr), 0])
+    } else if cch != 0 {
+        let Some([seg, flat, handle]) = mmio_alloc(cpu, cch) else {
+            return Some(MMIOERR_OUTOFMEMORY);
+        };
+        Some([hmmio, seg, flat, handle])
+    } else {
+        None
+    };
+    let flat = entry.map_or(0, |e| e[2]);
+    let result = wmmio::mmio_set_buffer(cpu, &[hmmio, flat, cch, 0])?;
+    if result == 0 {
+        mmio_keep_buffer(cpu, hmmio, entry);
+    } else if let Some(e) = entry
+        && e[3] != 0
+    {
+        super::global::free(cpu, e[3] as u16);
+    }
+    Some(result)
 }
 
 /// mciSendCommand: the 16-bit parameter blocks aren't converted;

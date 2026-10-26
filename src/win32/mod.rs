@@ -52,7 +52,7 @@ pub(crate) mod thread;
 pub mod user32;
 pub mod version;
 mod verdll;
-mod winmm;
+pub(crate) mod winmm;
 mod winspool;
 mod wsock32;
 
